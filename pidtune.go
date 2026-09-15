@@ -19,6 +19,7 @@ const (
 	PidtuneI    PidtuneType = "I"
 	PidtunePI   PidtuneType = "PI"
 	PidtunePD   PidtuneType = "PD"
+	PidtunePDF  PidtuneType = "PDF"
 	PidtunePID  PidtuneType = "PID"
 	PidtunePIDF PidtuneType = "PIDF"
 )
@@ -38,7 +39,7 @@ func Pidtune(plant *System, pidType PidtuneType, opts ...PidtuneOptions) (*PID, 
 
 	pidType = PidtuneType(strings.ToUpper(string(pidType)))
 	switch pidType {
-	case PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePID, PidtunePIDF:
+	case PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF:
 	default:
 		return nil, fmt.Errorf("pidtune: unsupported type %q", pidType)
 	}
@@ -152,6 +153,14 @@ func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg float64) (*PI
 	case PidtunePD:
 		computePD(pid, wc, magP, phiC)
 
+	case PidtunePDF:
+		pid.Tf = .1 / wc
+		target := cmplx.Rect(1/magP, phiC*math.Pi/180)
+		pid.Kd = imag(target) * (1 + wc*wc*pid.Tf*pid.Tf) / wc
+		pid.Kp = real(target) - imag(target)*wc*pid.Tf
+		if pid.Kp < 0 || pid.Kd < 0 {
+			return nil, fmt.Errorf("pidtune: requested phase is unattainable by a positive-gain PDF at wc=%g", wc)
+		}
 	case PidtunePID:
 		computePID(pid, wc, magP, phiC)
 
@@ -185,6 +194,8 @@ func computePI(pid *PID, wc, magP, phiC float64) {
 	pid.Ki = pid.Kp / Ti
 }
 
+// computePD preserves the legacy PD tuning seed, including its Td/10 filter.
+// Callers requesting an ideal PD must explicitly set Tf=0.
 func computePD(pid *PID, wc, magP, phiC float64) {
 	// C(jw) = Kp*(1 + Td*jw), angle = atan(Td*wc)
 	phiCRad := phiC * math.Pi / 180

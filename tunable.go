@@ -173,10 +173,11 @@ func (b *TunableGain) SampleBlock(values map[string]float64) (TunableBlock, erro
 }
 
 type TunablePID struct {
-	name       string
-	Kp, Ki, Kd *TunableReal
-	Tf         float64
-	Dt         float64
+	IFormula, DFormula PIDFormula
+	name               string
+	Kp, Ki, Kd         *TunableReal
+	Tf                 float64
+	Dt                 float64
 }
 
 func NewTunablePID(name string, kp, ki, kd *TunableReal, tf, dt float64) *TunablePID {
@@ -184,7 +185,7 @@ func NewTunablePID(name string, kp, ki, kd *TunableReal, tf, dt float64) *Tunabl
 }
 
 func (b *TunablePID) CurrentSystem() (*System, error) {
-	pid := NewPID(b.Kp.Value(), b.Ki.Value(), b.Kd.Value(), WithFilter(b.Tf), WithTs(b.Dt))
+	pid := NewPID(b.Kp.Value(), b.Ki.Value(), b.Kd.Value(), WithFilter(b.Tf), WithTs(b.Dt), WithPIDFormulas(b.IFormula, b.DFormula))
 	return pid.System()
 }
 
@@ -201,7 +202,7 @@ func (b *TunablePID) Sample(values map[string]float64) (*TunablePID, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &TunablePID{name: b.name, Kp: kp, Ki: ki, Kd: kd, Tf: b.Tf, Dt: b.Dt}, nil
+	return &TunablePID{name: b.name, Kp: kp, Ki: ki, Kd: kd, Tf: b.Tf, Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}, nil
 }
 
 func (b *TunablePID) RandomSample(rng *rand.Rand) (*TunablePID, error) {
@@ -217,7 +218,7 @@ func (b *TunablePID) RandomSample(rng *rand.Rand) (*TunablePID, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &TunablePID{name: b.name, Kp: kp, Ki: ki, Kd: kd, Tf: b.Tf, Dt: b.Dt}, nil
+	return &TunablePID{name: b.name, Kp: kp, Ki: ki, Kd: kd, Tf: b.Tf, Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}, nil
 }
 
 func (b *TunablePID) FreeParameters() []*TunableReal {
