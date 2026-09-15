@@ -1,2 +1,4 @@
 github.com/jamestjsp/gonum v0.19.0-fork h1:HoyJewH8DzHgZsgouf2uRZQcigijbXJ5B62mAb57Xgo=
 github.com/jamestjsp/gonum v0.19.0-fork/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=
+golang.org/x/tools v0.30.0 h1:BgcpHewrV5AUp2G9MebG4XPFI1E2W41zU1SaqVA9vJY=
+golang.org/x/tools v0.30.0/go.mod h1:c347cR/OJfw5TI+GfX7RUPNMdDRRbjvYTS0jPyvsVtY=

@@ -348,7 +348,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		if finitePID(bestScore) {
 			current = best
 		}
-		for axis := 0; axis < 4; axis++ {
+		for axis := range 4 {
 			if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && !filtered {
 				continue
 			}
@@ -582,7 +582,7 @@ func pidTuningCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (
 		if previous*next < 0 {
 			lo, hi := omega[k-1], omega[k]
 			lowSign := previous
-			for round := 0; round < 24; round++ {
+			for range 24 {
 				mid := math.Sqrt(lo * hi)
 				v := cmplx.Abs(p.at(mid)*pidTuningFeedback(c, mid)) - 1
 				if lowSign*v <= 0 {
