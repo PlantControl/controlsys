@@ -211,7 +211,8 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 	}
 	// P and I have one gain: its crossover fixes the phase margin, so an
 	// unspecified margin takes the plant's instead of the 60° default.
-	if free && !hasD && hasP != hasI {
+	oneGain := free && !hasD && hasP != hasI
+	if oneGain {
 		unit := c
 		if hasI {
 			unit.Ki = 1
@@ -335,9 +336,15 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		if p.stable != nil && !p.stable(&candidate) {
 			return nil
 		}
+		// A free one-gain design has no margin to hold at other crossovers:
+		// it needs only positive margins and reports its lowest.
+		floor := o.PhaseMargin - 3
+		if oneGain {
+			floor = 0
+		}
 		_, margins := pidTuningCrossings(p, candidate, omega, wc)
 		for _, margin := range margins {
-			if margin < o.PhaseMargin-3 {
+			if margin < floor || oneGain && margin <= 0 {
 				return nil
 			}
 		}

@@ -262,3 +262,24 @@ func TestTunePIDOneGainFamiliesTakeThePlantsMargin(t *testing.T) {
 		t.Fatalf("an explicit unreachable margin was not refused: %v", err)
 	}
 }
+
+func TestTunePIDOneGainAcceptsSeveralCrossovers(t *testing.T) {
+	// A zero pair (ζ 0.5) over a pole pair (ζ 0.1) at 5 rad/s lifts |L| above 1 there, so
+	// the P loop crosses 0 dB three times with margins below the one at wc.
+	p := makePlant(t, []float64{1, 5, 25}, []float64{1, 2, 26, 25})
+	result, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := result.Evidence
+	if len(e.GainCrossovers) < 3 || !e.Feasible {
+		t.Fatalf("expected several gain crossovers: %+v", e)
+	}
+	lowest := math.Inf(1)
+	for _, margin := range e.PhaseMargins {
+		lowest = math.Min(lowest, margin)
+	}
+	if lowest >= e.RequestedPhaseMargin-3 || math.Abs(e.AchievedPhaseMargin-lowest) > 1e-9 {
+		t.Fatalf("achieved margin %g should be the lowest crossover margin %g, below the local %g", e.AchievedPhaseMargin, lowest, e.RequestedPhaseMargin)
+	}
+}
