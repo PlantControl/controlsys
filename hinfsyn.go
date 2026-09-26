@@ -41,8 +41,12 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	return hinfSynD11Zero(gp, gamma)
 }
 
-// hinfBisect returns the smallest gamma above gammaLB, to relative 1e-6,
-// that feasible accepts.
+// hinfGammaFloor ends bisection when the optimum is zero, where the
+// relative stopping rule never triggers.
+const hinfGammaFloor = 1e-12
+
+// hinfBisect returns the smallest gamma above gammaLB, to relative 1e-6 or
+// below hinfGammaFloor, that feasible accepts.
 func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
 	gammaUB := gammaLB*2 + 1
 	for !feasible(gammaUB) {
@@ -51,7 +55,7 @@ func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
 			return 0, ErrGammaNotAchievable
 		}
 	}
-	for gammaUB-gammaLB > 1e-6*gammaUB {
+	for gammaUB-gammaLB > 1e-6*gammaUB && gammaUB > hinfGammaFloor {
 		mid := (gammaLB + gammaUB) / 2
 		if feasible(mid) {
 			gammaUB = mid
@@ -201,7 +205,7 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	negAhatT.Scale(-1, mat.DenseCopyOf(Ahat.T()))
 	setBlock(Hx, n, n, negAhatT)
 
-	X, err := solveHamiltonianRiccati(Hx, n, 0)
+	X, err := solveHamiltonianRiccati(Hx, n)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -238,7 +242,7 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	negAtilde.Scale(-1, Atilde)
 	setBlock(Hy, n, n, negAtilde)
 
-	Y, err := solveHamiltonianRiccati(Hy, n, 0)
+	Y, err := solveHamiltonianRiccati(Hy, n)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -261,9 +265,10 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 }
 
 // solveHamiltonianRiccati returns the stabilizing solution of the Riccati
-// equation with Hamiltonian H, rejecting H when an eigenvalue lies within
-// axisTol*max(1, |lambda|max) of the imaginary axis.
-func solveHamiltonianRiccati(H *mat.Dense, n int, axisTol float64) (*mat.Dense, error) {
+// equation with Hamiltonian H. H is rejected when an eigenvalue is on the
+// imaginary axis to within rounding, where the stable/unstable split is
+// arbitrary and yields spurious solutions.
+func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 	nn := 2 * n
 	hRaw := H.RawMatrix()
 	hData := make([]float64, nn*nn)
@@ -290,7 +295,7 @@ func solveHamiltonianRiccati(H *mat.Dense, n int, axisTol float64) (*mat.Dense, 
 	if sdim != n {
 		return nil, ErrNoStabilizing
 	}
-	if axisTol > 0 && hasImaginaryAxisEigenvalue(wr, wi, axisTol) {
+	if hasImaginaryAxisEigenvalue(wr, wi) {
 		return nil, ErrNoStabilizing
 	}
 
@@ -331,13 +336,15 @@ func solveHamiltonianRiccati(H *mat.Dense, n int, axisTol float64) (*mat.Dense, 
 	return X, nil
 }
 
-func hasImaginaryAxisEigenvalue(wr, wi []float64, tol float64) bool {
-	scale := 1.0
-	for i := range wr {
-		scale = math.Max(scale, math.Hypot(wr[i], wi[i]))
-	}
-	for _, re := range wr {
-		if math.Abs(re) <= tol*scale {
+// hamiltonianAxisTol bounds |Re(lambda)|/|lambda| for eigenvalues treated as
+// imaginary-axis ones; spurious splits seen in synthesis tests reach 6e-8.
+// The bound is relative to each eigenvalue, not to ||H||, so slow modes of a
+// stiff or badly scaled H survive.
+const hamiltonianAxisTol = 1e-6
+
+func hasImaginaryAxisEigenvalue(wr, wi []float64) bool {
+	for i, re := range wr {
+		if math.Abs(re) <= hamiltonianAxisTol*math.Hypot(re, wi[i]) {
 			return true
 		}
 	}

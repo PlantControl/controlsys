@@ -23,10 +23,6 @@ type hinfGeneralPlant struct {
 	gammaLB        float64
 }
 
-// hinfAxisTol rejects Hamiltonians with imaginary-axis eigenvalues that
-// rounding would otherwise split into a spurious stable/unstable pair.
-const hinfAxisTol = 1e-9
-
 func newHinfGeneralPlant(gp *generalizedPlantPartition) (*hinfGeneralPlant, error) {
 	n, m1, m2, p1, p2 := gp.n, gp.m1, gp.m2, gp.p1, gp.p2
 	if p1 < m2 || m1 < p2 {
@@ -173,7 +169,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	Gx.Scale(-1, Gx)
 	Qx := mulDense(mat.DenseCopyOf(hp.D1dtC1.T()), mulDense(Rinv, hp.D1dtC1))
 	Qx.Sub(hp.C1tC1, Qx)
-	X, err = solveHamiltonianRiccati(hamiltonian(Ax, Gx, Qx, n), n, hinfAxisTol)
+	X, err = solveHamiltonianRiccati(hamiltonian(Ax, Gx, Qx, n), n)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -189,7 +185,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	Gy.Scale(-1, Gy)
 	Qy := mulDense(B1Dd1tRtinv, mat.DenseCopyOf(hp.B1Dd1t.T()))
 	Qy.Sub(hp.B1B1t, Qy)
-	Y, err = solveHamiltonianRiccati(hamiltonian(mat.DenseCopyOf(Ay.T()), Gy, Qy, n), n, hinfAxisTol)
+	Y, err = solveHamiltonianRiccati(hamiltonian(mat.DenseCopyOf(Ay.T()), Gy, Qy, n), n)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

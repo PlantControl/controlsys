@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"math/rand"
 	"testing"
 
 	"gonum.org/v1/gonum/mat"
@@ -520,5 +521,172 @@ func TestHinfSyn_D11CancelledByFeedthrough(t *testing.T) {
 	}
 	if norm < res.GammaOpt*(1-1e-3) {
 		t.Fatalf("closed-loop Hinf norm %v far below gamma %v; gamma not optimal", norm, res.GammaOpt)
+	}
+}
+
+// Plant generators ported from process-lab (randomModelDesignPlant and
+// randomHinfPlant); they differ only in draw order.
+func randomModelDesignTestPlant(t testing.TB, n, m int, seed int64) *System {
+	t.Helper()
+	random := rand.New(rand.NewSource(seed))
+	A, B, C := mat.NewDense(n, n, nil), mat.NewDense(n, m, nil), mat.NewDense(m, n, nil)
+	for i := range n {
+		for j := range n {
+			if i == j {
+				A.Set(i, j, -1-float64(i)/2)
+			} else {
+				A.Set(i, j, 0.1*random.NormFloat64()/math.Sqrt(float64(n)))
+			}
+		}
+	}
+	for i := range n {
+		for j := range m {
+			B.Set(i, j, random.NormFloat64())
+		}
+	}
+	for i := range m {
+		for j := range n {
+			C.Set(i, j, random.NormFloat64())
+		}
+	}
+	G, err := New(A, B, C, mat.NewDense(m, m, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return G
+}
+
+func randomHinfTestPlant(t testing.TB, n, m int, seed int64) *System {
+	t.Helper()
+	random := rand.New(rand.NewSource(seed))
+	A, B, C := mat.NewDense(n, n, nil), mat.NewDense(n, m, nil), mat.NewDense(m, n, nil)
+	for i := range n {
+		for j := range n {
+			if i == j {
+				A.Set(i, j, -1-float64(i)/2)
+			} else {
+				A.Set(i, j, 0.1*random.NormFloat64()/math.Sqrt(float64(n)))
+			}
+		}
+		for j := range m {
+			B.Set(i, j, random.NormFloat64())
+			C.Set(j, i, random.NormFloat64())
+		}
+	}
+	G, err := New(A, B, C, mat.NewDense(m, m, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return G
+}
+
+// mixedSensitivityPlant augments the square, strictly proper G with
+// W1 = k1/(s+a1) + d1 and W2 = w2 per channel: w = r, z = [W1 e; W2 u],
+// y = e = r - G u.
+func mixedSensitivityPlant(t testing.TB, G *System, k1, a1, d1, w2 float64) *System {
+	t.Helper()
+	ng, m, _ := G.Dims()
+	n := ng + m
+	A, B := mat.NewDense(n, n, nil), mat.NewDense(n, 2*m, nil)
+	C, D := mat.NewDense(3*m, n, nil), mat.NewDense(3*m, 2*m, nil)
+	setBlock(A, 0, 0, G.A)
+	setBlock(B, 0, m, G.B)
+	for ch := range m {
+		w := ng + ch
+		A.Set(w, w, -a1)
+		B.Set(w, ch, 1)
+		C.Set(ch, w, k1)
+		D.Set(ch, ch, d1)
+		D.Set(m+ch, m+ch, w2)
+		D.Set(2*m+ch, ch, 1)
+		for j := range ng {
+			A.Set(w, j, -G.C.At(ch, j))
+			C.Set(ch, j, -d1*G.C.At(ch, j))
+			C.Set(2*m+ch, j, -G.C.At(ch, j))
+		}
+	}
+	P, err := New(A, B, C, D, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return P
+}
+
+// The order-50 case also covers HinfNorm, whose batched sweep lost the peak
+// of that closed loop (1e-3 excess). Its near-optimal controller leaves a
+// closed loop so ill-conditioned that sigma_max carries relative errors of a
+// few 1e-6 that vary with build flags (-race), hence the looser tolerance.
+func TestHinfSyn_RandomMixedSensitivityMeetsGamma(t *testing.T) {
+	cases := []struct {
+		name     string
+		G        *System
+		d1       float64
+		minGamma float64
+		tol      float64
+	}{
+		{"rank-deficient 4x4 strict W1", randomModelDesignTestPlant(t, 2, 4, 7), 0, 100, 1e-6},
+		{"rank-deficient 4x4 biproper W1", randomModelDesignTestPlant(t, 2, 4, 7), 0.5, 100, 1e-6},
+		{"order 50 strict W1", randomHinfTestPlant(t, 50, 2, 7), 0, 0, 1e-5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, m, _ := tc.G.Dims()
+			P := mixedSensitivityPlant(t, tc.G, 1, 0.01, tc.d1, 0.1)
+			res, err := HinfSyn(P, m, m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			norm, _, err := HinfNorm(closedLoop(t, P, res.K, m, m))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if norm > res.GammaOpt*(1+tc.tol) {
+				t.Fatalf("closed-loop Hinf norm %v exceeds gamma %v", norm, res.GammaOpt)
+			}
+			if res.GammaOpt < tc.minGamma*(1-1e-6) {
+				t.Fatalf("gamma %v below the lower bound %v", res.GammaOpt, tc.minGamma)
+			}
+		})
+	}
+}
+
+// Hamiltonian eigenvalues near +-1e-3 and +-1e7: the slow modes must not be
+// judged on-axis against the fast ones. The 1e10 spread limits Riccati
+// accuracy to about 1e-5, so gamma is checked against SLICOT SB10AD to 1e-4.
+func TestHinfSyn_StiffPlant(t *testing.T) {
+	for _, tc := range []struct{ d11, want float64 }{
+		{0, 0.6324554030356921},
+		{0.3, 0.7637279085111218},
+	} {
+		P := hinfD11Plant(t, 2, 3, 3,
+			[]float64{-1e-3, 1e-3, 0, -1e7},
+			[]float64{1e-3, 0, 1e-3, 0, 1e7, 1e7},
+			[]float64{1, 0, 0, 0, 1, 0},
+			[]float64{tc.d11, 0, 0, 0, 0, 1, 0, 1, 0})
+		res, err := HinfSyn(P, 1, 1)
+		if err != nil {
+			t.Fatalf("D11 = %v: %v", tc.d11, err)
+		}
+		norm, _, err := HinfNorm(closedLoop(t, P, res.K, 1, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if norm > res.GammaOpt*(1+1e-4) {
+			t.Fatalf("D11 = %v: closed-loop Hinf norm %v exceeds gamma %v", tc.d11, norm, res.GammaOpt)
+		}
+		if math.Abs(res.GammaOpt-tc.want) > 1e-4*tc.want {
+			t.Fatalf("D11 = %v: gamma %v, want optimum %v", tc.d11, res.GammaOpt, tc.want)
+		}
+	}
+}
+
+func TestHinfBisect_ZeroOptimumTerminates(t *testing.T) {
+	calls := 0
+	gamma, err := hinfBisect(0, func(float64) bool { calls++; return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gamma > hinfGammaFloor || calls > 64 {
+		t.Fatalf("gamma %v after %d feasibility calls", gamma, calls)
 	}
 }
