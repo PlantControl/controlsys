@@ -231,3 +231,102 @@ func TestHinfSyn_Stability(t *testing.T) {
 		}
 	}
 }
+
+// mixedSensitivityFeedthroughPlant weights S by 1/(s+0.1) and KS by 0.1 for G = (s+2)/(s+1), giving D22 = -1.
+func mixedSensitivityFeedthroughPlant(t *testing.T) *System {
+	t.Helper()
+	P, err := New(
+		mat.NewDense(2, 2, []float64{-1, 0, -1, -0.1}),
+		mat.NewDense(2, 2, []float64{0, 1, 1, -1}),
+		mat.NewDense(3, 2, []float64{0, 1, 0, 0, -1, 0}),
+		mat.NewDense(3, 2, []float64{0, 0, 0, 0.1, 1, -1}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return P
+}
+
+func withoutD22(t *testing.T, P *System, nmeas, ncont int) *System {
+	t.Helper()
+	_, m, p := P.Dims()
+	D := mat.DenseCopyOf(P.D)
+	for i := p - nmeas; i < p; i++ {
+		for j := m - ncont; j < m; j++ {
+			D.Set(i, j, 0)
+		}
+	}
+	P0, err := New(P.A, P.B, P.C, D, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return P0
+}
+
+func closedLoop(t *testing.T, P, K *System, nmeas, ncont int) *System {
+	t.Helper()
+	_, m, p := P.Dims()
+	cl, err := LFT(P, K, m-ncont, p-nmeas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, err := cl.IsStable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stable {
+		poles, _ := cl.Poles()
+		t.Fatalf("closed loop unstable: poles %v", poles)
+	}
+	return cl
+}
+
+func TestHinfSyn_ClosedLoopMeetsGamma(t *testing.T) {
+	plant := func(A, B, C, D []float64, n, m, p int) *System {
+		P, err := New(mat.NewDense(n, n, A), mat.NewDense(n, m, B), mat.NewDense(p, n, C), mat.NewDense(p, m, D), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return P
+	}
+	cases := []struct {
+		name string
+		P    *System
+	}{
+		{"orthogonal", plant(
+			[]float64{0, 1, -2, -3},
+			[]float64{1, 0, 0, 0, 0, 1},
+			[]float64{1, 0, 0, 0, 1, 0},
+			[]float64{0, 0, 0, 0, 0, 1, 0, 1, 0},
+			2, 3, 3)},
+		{"B1D21 cross term", plant(
+			[]float64{0, 1, -2, -3},
+			[]float64{1, 0, 0, 0, 1, 1},
+			[]float64{1, 0, 0, 0, 1, 0},
+			[]float64{0, 0, 0, 0, 0, 1, 0.1, 0.1, 0},
+			2, 3, 3)},
+		{"D12C1 cross term", plant(
+			[]float64{0, 1, -2, -3},
+			[]float64{1, 0, 0, 0, 1, 1},
+			[]float64{1, 0, 0.5, 1, 1, 0},
+			[]float64{0, 0, 0, 0, 0, 1, 0.1, 0.1, 0},
+			2, 3, 3)},
+		{"mixed sensitivity", withoutD22(t, mixedSensitivityFeedthroughPlant(t), 1, 1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := HinfSyn(tc.P, 1, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			norm, _, err := HinfNorm(closedLoop(t, tc.P, res.K, 1, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if norm > res.GammaOpt*(1+1e-6) {
+				t.Fatalf("closed-loop Hinf norm %v exceeds gamma %v", norm, res.GammaOpt)
+			}
+		})
+	}
+}
