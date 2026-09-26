@@ -227,3 +227,38 @@ func TestTunePIDIdealDerivativeRejectsHiddenUnstableMode(t *testing.T) {
 		}
 	}
 }
+
+func TestTunePIDOneGainFamiliesTakeThePlantsMargin(t *testing.T) {
+	p := makePlant(t, []float64{1}, []float64{1, 3, 3, 1})
+	for _, family := range []PidtuneType{PidtuneP, PidtuneI} {
+		for _, wc := range []float64{0.185, 0} {
+			result, err := TunePID(context.Background(), p, family, PIDTuningOptions{CrossoverFrequency: wc})
+			if err != nil {
+				t.Fatalf("%s at crossover %g: %v", family, wc, err)
+			}
+			e := result.Evidence
+			if !e.Feasible || e.RequestedPhaseMargin <= 0 || e.RequestedPhaseMargin >= 180 {
+				t.Fatalf("%s at %g: evidence %+v", family, wc, e)
+			}
+			if wc > 0 && math.Abs(e.AchievedCrossover-wc) > 1e-6*wc {
+				t.Fatalf("%s crossover %g, want %g", family, e.AchievedCrossover, wc)
+			}
+			if math.Abs(e.AchievedPhaseMargin-e.RequestedPhaseMargin) > 3 {
+				t.Fatalf("%s margin %g, want the plant's %g", family, e.AchievedPhaseMargin, e.RequestedPhaseMargin)
+			}
+			c := result.Controller
+			if family == PidtuneP && (c.Ki != 0 || c.Kp <= 0) || family == PidtuneI && (c.Kp != 0 || c.Ki <= 0) {
+				t.Fatalf("%s gains %+v", family, c)
+			}
+		}
+	}
+	h := 1 / cmplx.Pow(complex(1, 0.185), 3)
+	margin := 180 + cmplx.Phase(h)*180/math.Pi
+	result, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: 0.185})
+	if err != nil || math.Abs(result.Evidence.RequestedPhaseMargin-margin) > 1e-9 {
+		t.Fatalf("P margin %v, want %g: %v", result, margin, err)
+	}
+	if _, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: 0.185, PhaseMargin: 42}); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Fatalf("an explicit unreachable margin was not refused: %v", err)
+	}
+}

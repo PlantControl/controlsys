@@ -139,7 +139,8 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 	if wc <= p.low || wc >= p.high {
 		return nil, fmt.Errorf("TunePID: crossover needs frequency coverage on both sides")
 	}
-	if o.PhaseMargin == 0 {
+	free := o.PhaseMargin == 0
+	if free {
 		o.PhaseMargin = 60
 	}
 	if !finitePID(o.PhaseMargin) || o.PhaseMargin <= 0 || o.PhaseMargin >= 180 {
@@ -207,6 +208,21 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 	h := p.at(wc)
 	if !pidFiniteComplex(h) || cmplx.Abs(h) < 1e-15 {
 		return nil, fmt.Errorf("TunePID: invalid plant gain at crossover")
+	}
+	// P and I have one gain: its crossover fixes the phase margin, so an
+	// unspecified margin takes the plant's instead of the 60° default.
+	if free && !hasD && hasP != hasI {
+		unit := c
+		if hasI {
+			unit.Ki = 1
+		} else {
+			unit.Kp = 1
+		}
+		margin, ok := pidOneGainMargin(h * pidTuningFeedback(unit, wc))
+		if !ok {
+			return &PIDTuningResult{Evidence: PIDTuningEvidence{RequestedCrossover: wc, Stability: p.stability}}, ErrPIDTuningTargetUnattainable
+		}
+		o.PhaseMargin = margin
 	}
 	target := cmplx.Rect(1, (-180+o.PhaseMargin)*math.Pi/180) / h
 	ib, db := pidTuningBasis(c, wc)
@@ -440,6 +456,23 @@ func pidTuningReference(c PID2, w float64) complex128 {
 }
 func pidFiniteComplex(v complex128) bool { return finitePID(real(v)) && finitePID(imag(v)) }
 func pidAbsSquared(v complex128) float64 { return real(v)*real(v) + imag(v)*imag(v) }
+
+// pidOneGainMargin is the phase margin of the unit-gain loop at its
+// crossover under the gain sign that makes it positive.
+func pidOneGainMargin(loop complex128) (float64, bool) {
+	if !pidFiniteComplex(loop) || loop == 0 {
+		return 0, false
+	}
+	margin := 180 + cmplx.Phase(loop)*180/math.Pi
+	if margin >= 180 {
+		margin -= 180
+	}
+	if margin <= 0 || margin >= 180 {
+		return 0, false
+	}
+	return margin, true
+}
+
 func pidPhaseDistance(loop complex128, pm float64) float64 {
 	return math.Abs(math.Remainder(cmplx.Phase(loop)*180/math.Pi-(-180+pm), 360))
 }
