@@ -80,18 +80,41 @@ func (gp *generalizedPlantPartition) validateControllerChannels() error {
 	return nil
 }
 
-// newController builds K from the controller K0 = (Ak, Bk, Ck, 0) designed
-// for the plant with D22 = 0. A nonzero D22 is removed by the loop shift
-// K = K0 (I + D22 K0)^-1, which is (Ak - Bk D22 Ck, Bk, Ck, 0) because K0 is
-// strictly proper; the loop is always well posed and the closed loop equals
-// the D22 = 0 design.
-func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck *mat.Dense) (*System, error) {
+// newController builds K from the controller K0 = (Ak, Bk, Ck, Dk) designed
+// for the plant with D22 = 0; a nil Dk means K0 is strictly proper. A nonzero
+// D22 is removed by the loop shift K = K0 (I + D22 K0)^-1, which is
+// (Ak - Bk M D22 Ck, Bk M, Ck - Dk M D22 Ck, Dk M) with M = (I + D22 Dk)^-1,
+// so the closed loop equals the D22 = 0 design.
+func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck, Dk *mat.Dense) (*System, error) {
 	if !allZeroDense(gp.D22) {
-		shifted := mulDense(mulDense(Bk, gp.D22), Ck)
-		shifted.Sub(Ak, shifted)
-		Ak = shifted
+		if Dk == nil {
+			shifted := mulDense(mulDense(Bk, gp.D22), Ck)
+			shifted.Sub(Ak, shifted)
+			Ak = shifted
+		} else {
+			IDD := mulDense(gp.D22, Dk)
+			for i := range gp.p2 {
+				IDD.Set(i, i, IDD.At(i, i)+1)
+			}
+			M, err := invertSmall(IDD, gp.p2)
+			if err != nil {
+				return nil, ErrAlgebraicLoop
+			}
+			MD22Ck := mulDense(mulDense(M, gp.D22), Ck)
+			shifted := mulDense(Bk, MD22Ck)
+			shifted.Sub(Ak, shifted)
+			Ak = shifted
+			shiftedC := mulDense(Dk, MD22Ck)
+			shiftedC.Sub(Ck, shiftedC)
+			Ck = shiftedC
+			Bk = mulDense(Bk, M)
+			Dk = mulDense(Dk, M)
+		}
 	}
-	K, err := New(Ak, Bk, Ck, mat.NewDense(gp.m2, gp.p2, nil), 0)
+	if Dk == nil {
+		Dk = mat.NewDense(gp.m2, gp.p2, nil)
+	}
+	K, err := New(Ak, Bk, Ck, Dk, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -99,10 +122,16 @@ func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck *mat.Dense) (*Syst
 	return K, nil
 }
 
-func (gp *generalizedPlantPartition) closedLoopPoles(Ak, Bk, Ck *mat.Dense) ([]complex128, error) {
+func (gp *generalizedPlantPartition) closedLoopPoles(Ak, Bk, Ck, Dk *mat.Dense) ([]complex128, error) {
 	clN := 2 * gp.n
 	clA := mat.NewDense(clN, clN, nil)
-	setBlock(clA, 0, 0, gp.A)
+	if Dk == nil {
+		setBlock(clA, 0, 0, gp.A)
+	} else {
+		ABDC := mulDense(mulDense(gp.B2, Dk), gp.C2)
+		ABDC.Add(gp.A, ABDC)
+		setBlock(clA, 0, 0, ABDC)
+	}
 	setBlock(clA, 0, gp.n, mulDense(gp.B2, Ck))
 	setBlock(clA, gp.n, 0, mulDense(Bk, gp.C2))
 	setBlock(clA, gp.n, gp.n, Ak)
