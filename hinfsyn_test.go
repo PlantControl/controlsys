@@ -282,6 +282,73 @@ func closedLoop(t *testing.T, P, K *System, nmeas, ncont int) *System {
 	return cl
 }
 
+func assertHinfSynD22(t *testing.T, P *System, nmeas, ncont int) {
+	t.Helper()
+	res, err := HinfSyn(P, nmeas, ncont)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := closedLoop(t, P, res.K, nmeas, ncont)
+	norm, _, err := HinfNorm(cl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if norm > res.GammaOpt*(1+1e-6) {
+		t.Fatalf("closed-loop Hinf norm %v exceeds gamma %v", norm, res.GammaOpt)
+	}
+
+	ref, err := HinfSyn(withoutD22(t, P, nmeas, ncont), nmeas, ncont)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.GammaOpt != ref.GammaOpt {
+		t.Fatalf("gamma %v, want D22-free gamma %v", res.GammaOpt, ref.GammaOpt)
+	}
+	refNorm, _, err := HinfNorm(closedLoop(t, withoutD22(t, P, nmeas, ncont), ref.K, nmeas, ncont))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(norm-refNorm) > 1e-8*refNorm {
+		t.Fatalf("closed-loop Hinf norm %v, want D22-free norm %v", norm, refNorm)
+	}
+}
+
+func TestHinfSyn_D22LoopShiftMixedSensitivity(t *testing.T) {
+	assertHinfSynD22(t, mixedSensitivityFeedthroughPlant(t), 1, 1)
+}
+
+func TestHinfSyn_D22LoopShiftMIMO(t *testing.T) {
+	P, err := New(
+		mat.NewDense(3, 3, []float64{
+			-1, 0.5, 0,
+			0, -2, 1,
+			0.3, 0, -0.5,
+		}),
+		mat.NewDense(3, 4, []float64{
+			1, 0, 0, 1,
+			0, 1, 0, 0.5,
+			0, 0, 1, -1,
+		}),
+		mat.NewDense(4, 3, []float64{
+			1, 0, 0,
+			0, 0, 0,
+			0, 1, 0,
+			0, 0, 1,
+		}),
+		mat.NewDense(4, 4, []float64{
+			0, 0, 0, 0,
+			0, 0, 0, 1,
+			0.2, 0.1, 0, 0.7,
+			0, 0.1, 0.3, -0.4,
+		}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHinfSynD22(t, P, 2, 1)
+}
+
 func TestHinfSyn_ClosedLoopMeetsGamma(t *testing.T) {
 	plant := func(A, B, C, D []float64, n, m, p int) *System {
 		P, err := New(mat.NewDense(n, n, A), mat.NewDense(n, m, B), mat.NewDense(p, n, C), mat.NewDense(p, m, D), 0)
