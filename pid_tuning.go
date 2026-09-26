@@ -337,14 +337,17 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 			return nil
 		}
 		// A free one-gain design has no margin to hold at other crossovers:
-		// it needs only positive margins and reports its lowest.
+		// with a model-based stability certificate it needs only positive
+		// margins and reports its lowest. Sampled responses keep the floor,
+		// since their wrapped phase can hide a negative margin.
+		relaxed := oneGain && p.stable != nil
 		floor := o.PhaseMargin - 3
-		if oneGain {
+		if relaxed {
 			floor = 0
 		}
 		_, margins := pidTuningCrossings(p, candidate, omega, wc)
 		for _, margin := range margins {
-			if margin < floor || oneGain && margin <= 0 {
+			if margin < floor || relaxed && margin <= 0 {
 				return nil
 			}
 		}

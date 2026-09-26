@@ -282,4 +282,16 @@ func TestTunePIDOneGainAcceptsSeveralCrossovers(t *testing.T) {
 	if lowest >= e.RequestedPhaseMargin-3 || math.Abs(e.AchievedPhaseMargin-lowest) > 1e-9 {
 		t.Fatalf("achieved margin %g should be the lowest crossover margin %g, below the local %g", e.AchievedPhaseMargin, lowest, e.RequestedPhaseMargin)
 	}
+	// Sampled data has no stability certificate: the requested-margin floor stays.
+	omega := make([]float64, 400)
+	for k := range omega {
+		omega[k] = math.Pow(10, -2+4*float64(k)/float64(len(omega)-1))
+	}
+	frd, err := p.FRD(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TunePIDFRD(context.Background(), frd, PidtuneP, PIDTuningOptions{CrossoverFrequency: 1}); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Fatalf("sampled one-gain design accepted below its local margin without a stability certificate: %v", err)
+	}
 }
