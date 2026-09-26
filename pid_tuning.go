@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/cmplx"
 	"strings"
+	"sync"
 )
 
 // ErrPIDTuningTargetUnattainable means no controller passed the requested target
@@ -97,13 +98,14 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	if !plant.HasDelay() {
 		p.stability = "closed-loop-poles"
+		hiddenStable := sync.OnceValue(func() bool { return pidTuningHiddenModesStable(plant) })
 		p.stable = func(c *PID2) bool {
 			controller := NewPID(c.Kp, c.Ki, c.Kd, WithFilter(c.Tf), WithPIDFormulas(c.IFormula, c.DFormula))
 			controller.Dt = c.Dt
 			cs, err := controller.System()
 			if err != nil {
 				if c.Kd != 0 && c.Tf == 0 {
-					return pidTuningIdealStable(plant, c)
+					return hiddenStable() && pidTuningIdealStable(plant, c)
 				}
 				return false
 			}
@@ -508,6 +510,17 @@ func pidTuningSolveWeights(c *PID2, o *PIDTuningWeights, omega []float64, plant 
 		accept(v, clamp((by-ab*v)/math.Max(bb, 1e-30)))
 		accept(clamp((ay-ab*v)/math.Max(aa, 1e-30)), v)
 	}
+}
+
+// Feedback cannot move uncontrollable or unobservable modes, and the transfer
+// function used by pidTuningIdealStable omits them.
+func pidTuningHiddenModesStable(plant *System) bool {
+	stabilizable, err := IsStabilizable(plant.A, plant.B, plant.Dt == 0)
+	if err != nil || !stabilizable {
+		return false
+	}
+	detectable, err := IsDetectable(plant.A, plant.C, plant.Dt == 0)
+	return err == nil && detectable
 }
 
 // Ideal derivative controllers may be improper on their own while their
