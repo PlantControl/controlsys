@@ -6,6 +6,8 @@ import (
 	"math"
 	"math/cmplx"
 	"testing"
+
+	"gonum.org/v1/gonum/mat"
 )
 
 func TestTunePIDAnalyticTargetsAndFixedWeights(t *testing.T) {
@@ -193,6 +195,35 @@ func TestTunePIDProportionalAndIntegralFamilies(t *testing.T) {
 		}
 		if test.family == PidtuneP && r.Controller.Ki != 0 || test.family == PidtuneI && r.Controller.Kp != 0 || r.Controller.Kd != 0 {
 			t.Fatal("introduced absent controller term")
+		}
+	}
+}
+
+func TestTunePIDIdealDerivativeRejectsHiddenUnstableMode(t *testing.T) {
+	visible := makePlant(t, []float64{1}, []float64{1, 3, 3, 1})
+	n, _, _ := visible.Dims()
+	for _, hidden := range []string{"uncontrollable", "unobservable"} {
+		A := mat.NewDense(n+1, n+1, nil)
+		A.Slice(0, n, 0, n).(*mat.Dense).Copy(visible.A)
+		A.Set(n, n, .5)
+		B := mat.NewDense(n+1, 1, nil)
+		B.Slice(0, n, 0, 1).(*mat.Dense).Copy(visible.B)
+		C := mat.NewDense(1, n+1, nil)
+		C.Slice(0, 1, 0, n).(*mat.Dense).Copy(visible.C)
+		if hidden == "uncontrollable" {
+			C.Set(0, n, 1)
+		} else {
+			B.Set(n, 0, 1)
+		}
+		p, err := New(A, B, C, mat.NewDense(1, 1, nil), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, family := range []PidtuneType{PidtunePD, PidtunePID} {
+			r, err := TunePID(context.Background(), p, family, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) || r == nil || r.Evidence.Feasible {
+				t.Fatalf("%s %s: hidden unstable mode certified: %v", hidden, family, err)
+			}
 		}
 	}
 }
