@@ -100,7 +100,7 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 		return nil, ErrGammaNotAchievable
 	}
 
-	// Ak = A + ginv2*B1*B1'*X + B2*F + Zp*L*C2
+	// Ak = A + ginv2*B1*B1'*X + B2*F + Zp*L*(C2 + ginv2*D21*B1'*X); the D21 term feeds the worst-case disturbance into the observer.
 	Ak := denseCopy(A)
 
 	tmp1 := mulDense(B1, mat.DenseCopyOf(B1.T()))
@@ -111,7 +111,13 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	Ak.Add(Ak, mulDense(B2, F))
 
 	ZpL := mulDense(Zp, L)
-	Ak.Add(Ak, mulDense(ZpL, C2))
+	C2w := C2
+	if !allZeroDense(S2) {
+		C2w = mulDense(mat.DenseCopyOf(S2.T()), X)
+		C2w.Scale(ginv2, C2w)
+		C2w.Add(C2w, C2)
+	}
+	Ak.Add(Ak, mulDense(ZpL, C2w))
 
 	Bk := mulDense(Zp, L)
 	Bk.Scale(-1, Bk)
