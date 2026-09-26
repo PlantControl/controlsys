@@ -80,7 +80,17 @@ func (gp *generalizedPlantPartition) validateControllerChannels() error {
 	return nil
 }
 
+// newController builds K from the controller K0 = (Ak, Bk, Ck, 0) designed
+// for the plant with D22 = 0. A nonzero D22 is removed by the loop shift
+// K = K0 (I + D22 K0)^-1, which is (Ak - Bk D22 Ck, Bk, Ck, 0) because K0 is
+// strictly proper; the loop is always well posed and the closed loop equals
+// the D22 = 0 design.
 func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck *mat.Dense) (*System, error) {
+	if !allZeroDense(gp.D22) {
+		shifted := mulDense(mulDense(Bk, gp.D22), Ck)
+		shifted.Sub(Ak, shifted)
+		Ak = shifted
+	}
 	K, err := New(Ak, Bk, Ck, mat.NewDense(gp.m2, gp.p2, nil), 0)
 	if err != nil {
 		return nil, err

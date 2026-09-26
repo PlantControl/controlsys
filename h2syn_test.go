@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"gonum.org/v1/gonum/mat"
@@ -194,10 +195,11 @@ func TestH2Syn_D22NonZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = H2Syn(P, 1, 1)
-	if !errors.Is(err, ErrH2DirectFeedthrough) {
-		t.Errorf("got %v, want ErrH2DirectFeedthrough", err)
+	res, err := H2Syn(P, 1, 1)
+	if err != nil {
+		t.Fatal(err)
 	}
+	closedLoop(t, P, res.K, 1, 1)
 }
 
 func TestH2Syn_Unstabilizable(t *testing.T) {
@@ -256,4 +258,29 @@ func TestH2Syn_SecondOrder(t *testing.T) {
 		}
 	}
 
+}
+
+func TestH2Syn_D22LoopShiftMixedSensitivity(t *testing.T) {
+	P := mixedSensitivityFeedthroughPlant(t)
+	res, err := H2Syn(P, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	norm, err := H2Norm(closedLoop(t, P, res.K, 1, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	P0 := withoutD22(t, P, 1, 1)
+	ref, err := H2Syn(P0, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refNorm, err := H2Norm(closedLoop(t, P0, ref.K, 1, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(norm-refNorm) > 1e-8*refNorm {
+		t.Fatalf("closed-loop H2 norm %v, want D22-free optimum %v", norm, refNorm)
+	}
 }

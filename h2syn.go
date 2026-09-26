@@ -13,6 +13,11 @@ type H2SynResult struct {
 	CLPoles []complex128
 }
 
+// H2Syn computes the H2-optimal output-feedback controller for the
+// continuous generalized plant P whose last nmeas outputs are measurements
+// and last ncont inputs are controls. D11 must be zero. A nonzero D22 is
+// handled by a loop shift: K is designed for D22 = 0 and returned as
+// K0 (I + D22 K0)^-1, giving the same closed loop and H2 norm.
 func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	gp, err := partitionGeneralizedPlant(P, nmeas, ncont)
 	if err != nil {
@@ -22,7 +27,7 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	A := gp.A
 	B1, B2 := gp.B1, gp.B2
 	C1, C2 := gp.C1, gp.C2
-	D11, D12, D21, D22 := gp.D11, gp.D12, gp.D21, gp.D22
+	D11, D12, D21 := gp.D11, gp.D12, gp.D21
 
 	tol := 1e-10
 	d11Raw := D11.RawMatrix()
@@ -30,15 +35,6 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 		for j := range gp.m1 {
 			if math.Abs(d11Raw.Data[i*d11Raw.Stride+j]) > tol {
 				return nil, ErrNoFiniteH2Norm
-			}
-		}
-	}
-
-	d22Raw := D22.RawMatrix()
-	for i := range gp.p2 {
-		for j := range gp.m2 {
-			if math.Abs(d22Raw.Data[i*d22Raw.Stride+j]) > tol {
-				return nil, ErrH2DirectFeedthrough
 			}
 		}
 	}

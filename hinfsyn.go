@@ -16,6 +16,11 @@ type HinfSynResult struct {
 	CLPoles  []complex128
 }
 
+// HinfSyn computes a suboptimal H-infinity output-feedback controller for the
+// continuous generalized plant P whose last nmeas outputs are measurements
+// and last ncont inputs are controls, bisecting to the smallest achievable
+// gamma. A nonzero D22 is handled by a loop shift: K is designed for D22 = 0
+// and returned as K0 (I + D22 K0)^-1, giving the same closed loop and gamma.
 func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	gp, err := partitionGeneralizedPlant(P, nmeas, ncont)
 	if err != nil {

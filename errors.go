@@ -43,10 +43,11 @@ var (
 	ErrInvalidExpression = errors.New("controlsys: invalid sumblk expression")
 	ErrSignalNotFound    = errors.New("controlsys: signal name not found")
 
-	ErrNotStabilizable       = errors.New("controlsys: system is not stabilizable")
-	ErrNotDetectable         = errors.New("controlsys: system is not detectable")
-	ErrInvalidPartition      = errors.New("controlsys: invalid generalized plant partition dimensions")
-	ErrNoFiniteH2Norm        = errors.New("controlsys: H2 synthesis requires D11 = 0")
+	ErrNotStabilizable  = errors.New("controlsys: system is not stabilizable")
+	ErrNotDetectable    = errors.New("controlsys: system is not detectable")
+	ErrInvalidPartition = errors.New("controlsys: invalid generalized plant partition dimensions")
+	ErrNoFiniteH2Norm   = errors.New("controlsys: H2 synthesis requires D11 = 0")
+	// Deprecated: H2Syn handles D22 != 0 by loop shifting and no longer returns this error.
 	ErrH2DirectFeedthrough   = errors.New("controlsys: H2 synthesis requires D22 = 0")
 	ErrGammaNotAchievable    = errors.New("controlsys: no stabilizing controller exists for given gamma")
 	ErrDescriptorSingular    = errors.New("controlsys: descriptor matrix E is singular")
