@@ -84,12 +84,12 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	Bk = denseCopy(L)
 	Ck = denseCopy(F)
 
-	K, err := gp.newController(Ak, Bk, Ck)
+	K, err := gp.newController(Ak, Bk, Ck, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	clPoles, err := gp.closedLoopPoles(Ak, Bk, Ck)
+	clPoles, err := gp.closedLoopPoles(Ak, Bk, Ck, nil)
 	if err != nil {
 		return nil, err
 	}

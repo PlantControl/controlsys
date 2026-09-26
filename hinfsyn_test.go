@@ -397,3 +397,128 @@ func TestHinfSyn_ClosedLoopMeetsGamma(t *testing.T) {
 		})
 	}
 }
+
+func hinfD11Plant(t testing.TB, n, m, p int, A, B, C, D []float64) *System {
+	t.Helper()
+	P, err := New(mat.NewDense(n, n, A), mat.NewDense(n, m, B), mat.NewDense(p, n, C), mat.NewDense(p, m, D), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return P
+}
+
+// sisoBiproperMixedSensitivityPlant weights S = 1/(1+G) for G = 1/(s+1) by
+// the biproper W1 = (0.5s+0.5)/(s+0.005) and KS by 0.1, so D11 = [0.5; 0].
+func sisoBiproperMixedSensitivityPlant(t testing.TB) *System {
+	return hinfD11Plant(t, 2, 2, 3,
+		[]float64{-1, 0, -1, -0.005},
+		[]float64{0, 1, 1, 0},
+		[]float64{-0.5, 0.4975, 0, 0, -1, 0},
+		[]float64{0.5, 0, 0, 0.1, 1, 0})
+}
+
+func mimoBiproperMixedSensitivityPlant(t testing.TB) *System {
+	return hinfD11Plant(t, 4, 4, 6,
+		[]float64{
+			-1, 0.5, 0, 0,
+			-0.3, -2, 0, 0,
+			-1, 0, -0.005, 0,
+			-0.4, -1, 0, -0.01,
+		},
+		[]float64{
+			0, 0, 1, 0.2,
+			0, 0, 0, 1,
+			1, 0, 0, 0,
+			0, 1, 0, 0,
+		},
+		[]float64{
+			-0.5, 0, 0.4975, 0,
+			-0.16, -0.4, 0, 0.2,
+			0, 0, 0, 0,
+			0, 0, 0, 0,
+			-1, 0, 0, 0,
+			-0.4, -1, 0, 0,
+		},
+		[]float64{
+			0.5, 0, 0, 0,
+			0, 0.4, 0, 0,
+			0, 0, 0.1, 0,
+			0, 0, 0, 0.1,
+			1, 0, 0, 0,
+			0, 1, 0, 0,
+		})
+}
+
+func genericD11Plant(t testing.TB, d22 float64) *System {
+	return hinfD11Plant(t, 3, 3, 3,
+		[]float64{0.5, 1, 0, -1, -0.3, 0.4, 0.2, 0, -1.2},
+		[]float64{1, 0, 0, 0, 0.5, 1, 0.3, 1, 0.5},
+		[]float64{1, 0, 0.5, 0, 1, -0.2, 0.7, 0, 1},
+		[]float64{0.2, -0.1, 0.3, 0.4, 0.3, 1, 0.5, 1, d22})
+}
+
+// Reference gammas are SLICOT SB10AD optima (bisection, gtol 1e-10) whose
+// controllers were verified to attain them.
+func TestHinfSyn_D11ClosedLoopMeetsOptimalGamma(t *testing.T) {
+	cases := []struct {
+		name         string
+		P            *System
+		nmeas, ncont int
+		want         float64
+	}{
+		{"siso biproper W1", sisoBiproperMixedSensitivityPlant(t), 1, 1, 0.5098041291076711},
+		{"mimo biproper W1", mimoBiproperMixedSensitivityPlant(t), 2, 2, 0.5109338104884777},
+		{"generic", genericD11Plant(t, 0), 1, 1, 3.5096256649205544},
+		{"generic D22", genericD11Plant(t, 0.6), 1, 1, 3.5096256649205544},
+		{"square D12", hinfD11Plant(t, 2, 3, 2,
+			[]float64{-0.5, 1, -2, -1},
+			[]float64{1, 0, 0, 0, 1, 1},
+			[]float64{1, 0.3, 1, 1},
+			[]float64{0.4, 0.2, 1, 0, 1, 0}), 1, 1, 0.7531813936485063},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := HinfSyn(tc.P, tc.nmeas, tc.ncont)
+			if err != nil {
+				t.Fatal(err)
+			}
+			norm, _, err := HinfNorm(closedLoop(t, tc.P, res.K, tc.nmeas, tc.ncont))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if norm > res.GammaOpt*(1+1e-6) {
+				t.Fatalf("closed-loop Hinf norm %v exceeds gamma %v", norm, res.GammaOpt)
+			}
+			if math.Abs(res.GammaOpt-tc.want) > 1e-5*tc.want {
+				t.Fatalf("gamma %v, want optimum %v", res.GammaOpt, tc.want)
+			}
+		})
+	}
+}
+
+// D11 lives only in the block reachable by both u and y, so a controller
+// feedthrough cancels it and the optimum lies below sigma_max(D11) = 2.
+func TestHinfSyn_D11CancelledByFeedthrough(t *testing.T) {
+	P := hinfD11Plant(t, 2, 3, 3,
+		[]float64{-0.5, 1, -2, -1},
+		[]float64{1, 0, 0, 0, 1, 1},
+		[]float64{1, 0, 0, 0.5, 1, 1},
+		[]float64{0, 0, 0, 0, 2, 1, 0, 1, 0})
+	res, err := HinfSyn(P, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.GammaOpt >= 1 {
+		t.Fatalf("gamma %v, want below 1", res.GammaOpt)
+	}
+	norm, _, err := HinfNorm(closedLoop(t, P, res.K, 1, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if norm > res.GammaOpt*(1+1e-6) {
+		t.Fatalf("closed-loop Hinf norm %v exceeds gamma %v", norm, res.GammaOpt)
+	}
+	if norm < res.GammaOpt*(1-1e-3) {
+		t.Fatalf("closed-loop Hinf norm %v far below gamma %v; gamma not optimal", norm, res.GammaOpt)
+	}
+}

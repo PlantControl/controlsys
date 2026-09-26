@@ -19,42 +19,55 @@ type HinfSynResult struct {
 // HinfSyn computes a suboptimal H-infinity output-feedback controller for the
 // continuous generalized plant P whose last nmeas outputs are measurements
 // and last ncont inputs are controls, bisecting to the smallest achievable
-// gamma. A nonzero D22 is handled by a loop shift: K is designed for D22 = 0
-// and returned as K0 (I + D22 K0)^-1, giving the same closed loop and gamma.
+// gamma. A nonzero D11 uses the Glover-Doyle general formulas, whose central
+// controller may have feedthrough. A nonzero D22 is handled by a loop shift:
+// K is designed for D22 = 0 and returned as K0 (I + D22 K0)^-1, giving the
+// same closed loop and gamma.
 func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	gp, err := partitionGeneralizedPlant(P, nmeas, ncont)
 	if err != nil {
 		return nil, err
 	}
-	n := gp.n
-	A := gp.A
-	B1, B2 := gp.B1, gp.B2
-	C1, C2 := gp.C1, gp.C2
-	D11, D12, D21 := gp.D11, gp.D12, gp.D21
 	if err := gp.validateControllerChannels(); err != nil {
 		return nil, err
 	}
+	if !allZeroDense(gp.D11) {
+		return hinfSynGeneral(gp)
+	}
+	gamma, err := hinfBisect(0, func(g float64) bool { return hinfFeasible(gp, g) })
+	if err != nil {
+		return nil, err
+	}
+	return hinfSynD11Zero(gp, gamma)
+}
 
-	gammaLB := maxSVD(D11)
+// hinfBisect returns the smallest gamma above gammaLB, to relative 1e-6,
+// that feasible accepts.
+func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
 	gammaUB := gammaLB*2 + 1
-
-	for !hinfFeasible(gp, gammaUB) {
+	for !feasible(gammaUB) {
 		gammaUB *= 2
 		if gammaUB > 1e12 {
-			return nil, ErrGammaNotAchievable
+			return 0, ErrGammaNotAchievable
 		}
 	}
-
 	for gammaUB-gammaLB > 1e-6*gammaUB {
 		mid := (gammaLB + gammaUB) / 2
-		if hinfFeasible(gp, mid) {
+		if feasible(mid) {
 			gammaUB = mid
 		} else {
 			gammaLB = mid
 		}
 	}
+	return gammaUB, nil
+}
 
-	gamma := gammaUB
+func hinfSynD11Zero(gp *generalizedPlantPartition, gamma float64) (*HinfSynResult, error) {
+	n := gp.n
+	A := gp.A
+	B1, B2 := gp.B1, gp.B2
+	C1, C2 := gp.C1, gp.C2
+	D12, D21 := gp.D12, gp.D21
 	X, Y, err := hinfSolveRiccatis(gp, gamma)
 	if err != nil {
 		return nil, err
@@ -128,12 +141,12 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	Bk.Scale(-1, Bk)
 	Ck := denseCopy(F)
 
-	K, err := gp.newController(Ak, Bk, Ck)
+	K, err := gp.newController(Ak, Bk, Ck, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	clPoles, err := gp.closedLoopPoles(Ak, Bk, Ck)
+	clPoles, err := gp.closedLoopPoles(Ak, Bk, Ck, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +201,7 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	negAhatT.Scale(-1, mat.DenseCopyOf(Ahat.T()))
 	setBlock(Hx, n, n, negAhatT)
 
-	X, err := solveHamiltonianRiccati(Hx, n)
+	X, err := solveHamiltonianRiccati(Hx, n, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -225,7 +238,7 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	negAtilde.Scale(-1, Atilde)
 	setBlock(Hy, n, n, negAtilde)
 
-	Y, err := solveHamiltonianRiccati(Hy, n)
+	Y, err := solveHamiltonianRiccati(Hy, n, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -247,7 +260,10 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	return X, Y, nil
 }
 
-func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
+// solveHamiltonianRiccati returns the stabilizing solution of the Riccati
+// equation with Hamiltonian H, rejecting H when an eigenvalue lies within
+// axisTol*max(1, |lambda|max) of the imaginary axis.
+func solveHamiltonianRiccati(H *mat.Dense, n int, axisTol float64) (*mat.Dense, error) {
 	nn := 2 * n
 	hRaw := H.RawMatrix()
 	hData := make([]float64, nn*nn)
@@ -272,6 +288,9 @@ func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 		return nil, ErrSchurFailed
 	}
 	if sdim != n {
+		return nil, ErrNoStabilizing
+	}
+	if axisTol > 0 && hasImaginaryAxisEigenvalue(wr, wi, axisTol) {
 		return nil, ErrNoStabilizing
 	}
 
@@ -310,6 +329,19 @@ func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 	}
 
 	return X, nil
+}
+
+func hasImaginaryAxisEigenvalue(wr, wi []float64, tol float64) bool {
+	scale := 1.0
+	for i := range wr {
+		scale = math.Max(scale, math.Hypot(wr[i], wi[i]))
+	}
+	for _, re := range wr {
+		if math.Abs(re) <= tol*scale {
+			return true
+		}
+	}
+	return false
 }
 
 func maxSVD(M *mat.Dense) float64 {

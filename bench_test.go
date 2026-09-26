@@ -1027,6 +1027,25 @@ func BenchmarkHinfSyn_Simple(b *testing.B) {
 	}
 }
 
+func BenchmarkHinfSyn_D11(b *testing.B) {
+	for _, bc := range []struct {
+		name         string
+		P            *System
+		nmeas, ncont int
+	}{
+		{"siso", sisoBiproperMixedSensitivityPlant(b), 1, 1},
+		{"mimo", mimoBiproperMixedSensitivityPlant(b), 2, 2},
+	} {
+		b.Run(bc.name, func(b *testing.B) {
+			for b.Loop() {
+				if _, err := HinfSyn(bc.P, bc.nmeas, bc.ncont); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkBalreal(b *testing.B) {
 	sys := benchSys(10, 2, 3)
 	b.ResetTimer()
