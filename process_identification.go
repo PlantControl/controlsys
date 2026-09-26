@@ -571,19 +571,38 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 		baseline[i] = d.Output[validationStart+i] - mean
 	}
 	result.ValidationMeanNRMSE = processNRMSE(d.Output[validationStart:], baseline)
-	var cross, power float64
-	for i := validationStart + 1; i < len(result.Residuals); i++ {
-		cross += result.Residuals[i] * result.Residuals[i-1]
-		power += result.Residuals[i] * result.Residuals[i]
-	}
-	if power > 0 {
-		result.ResidualLagOne = cross / power
-	}
+	result.ResidualLagOne = processResidualLagOne(result.Residuals[validationStart:])
 	result.System, err = p.System(o.Structure)
 	if err != nil {
 		return nil, 0, err
 	}
 	return result, value, nil
+}
+
+// processResidualLagOne is the Pearson correlation of (r[i], r[i-1]) pairs.
+func processResidualLagOne(r []float64) float64 {
+	pairs := len(r) - 1
+	if pairs < 2 {
+		return 0
+	}
+	var current, lagged float64
+	for i := 1; i < len(r); i++ {
+		current += r[i]
+		lagged += r[i-1]
+	}
+	current /= float64(pairs)
+	lagged /= float64(pairs)
+	var cross, currentPower, laggedPower float64
+	for i := 1; i < len(r); i++ {
+		a, b := r[i]-current, r[i-1]-lagged
+		cross += a * b
+		currentPower += a * a
+		laggedPower += b * b
+	}
+	if currentPower == 0 || laggedPower == 0 {
+		return 0
+	}
+	return math.Max(-1, math.Min(1, cross/math.Sqrt(currentPower*laggedPower)))
 }
 
 func processNRMSE(values, residuals []float64) float64 {

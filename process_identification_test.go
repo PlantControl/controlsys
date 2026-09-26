@@ -274,3 +274,39 @@ func TestProcessFitRetainsBestOnCancellation(t *testing.T) {
 		t.Fatalf("canceled fit did not retain valid best: result=%v error=%v", result != nil, err)
 	}
 }
+
+func TestProcessResidualLagOneIsPearsonCorrelation(t *testing.T) {
+	pearson := func(r []float64) float64 {
+		x, y := r[1:], r[:len(r)-1]
+		mx, my := 0.0, 0.0
+		for i := range x {
+			mx += x[i]
+			my += y[i]
+		}
+		mx /= float64(len(x))
+		my /= float64(len(y))
+		var sxy, sxx, syy float64
+		for i := range x {
+			sxy += (x[i] - mx) * (y[i] - my)
+			sxx += (x[i] - mx) * (x[i] - mx)
+			syy += (y[i] - my) * (y[i] - my)
+		}
+		return sxy / math.Sqrt(sxx*syy)
+	}
+	for _, r := range [][]float64{
+		{10, 1, .1, .01, .001},
+		{10, 1, .1},
+		{1, -1, 1, -1, 1, -1.5},
+		{3, 2.9, 3.1, 3.3, 2.7, 3},
+	} {
+		got := processResidualLagOne(r)
+		if math.Abs(got) > 1+1e-12 || math.Abs(got-pearson(r)) > 1e-12 {
+			t.Fatalf("%v: lag-one %g want %g", r, got, pearson(r))
+		}
+	}
+	for _, r := range [][]float64{nil, {1}, {1, 2}, {2, 2, 2, 2}} {
+		if got := processResidualLagOne(r); got != 0 {
+			t.Fatalf("%v: degenerate lag-one %g", r, got)
+		}
+	}
+}
