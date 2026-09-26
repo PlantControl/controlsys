@@ -680,6 +680,29 @@ func TestHinfSyn_StiffPlant(t *testing.T) {
 	}
 }
 
+// Hamiltonian modes -5e-7 +- j are lightly damped but well conditioned, so
+// they must not be taken for imaginary-axis eigenvalues. The optimum is 0.
+func TestHinfSyn_LightlyDampedModes(t *testing.T) {
+	for _, d11 := range []float64{0, 0.3} {
+		P := hinfD11Plant(t, 2, 2, 2,
+			[]float64{-5e-7, -1, 1, -5e-7},
+			[]float64{0, 0, 0, 0},
+			[]float64{0, 0, 0, 0},
+			[]float64{d11, 1, 1, 0})
+		res, err := HinfSyn(P, 1, 1)
+		if err != nil {
+			t.Fatalf("D11 = %v: %v", d11, err)
+		}
+		norm, _, err := HinfNorm(closedLoop(t, P, res.K, 1, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if norm > max(res.GammaOpt*(1+1e-6), 1e-12) {
+			t.Fatalf("D11 = %v: closed-loop Hinf norm %v exceeds gamma %v", d11, norm, res.GammaOpt)
+		}
+	}
+}
+
 func TestHinfBisect_ZeroOptimumTerminates(t *testing.T) {
 	calls := 0
 	gamma, err := hinfBisect(0, func(float64) bool { calls++; return true })

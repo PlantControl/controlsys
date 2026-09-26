@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"slices"
 
 	"gonum.org/v1/gonum/blas"
 	"gonum.org/v1/gonum/lapack"
@@ -295,7 +296,7 @@ func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 	if sdim != n {
 		return nil, ErrNoStabilizing
 	}
-	if hasImaginaryAxisEigenvalue(wr, wi) {
+	if hasImaginaryAxisEigenvalue(hData, nn, wr, wi) {
 		return nil, ErrNoStabilizing
 	}
 
@@ -336,15 +337,49 @@ func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 	return X, nil
 }
 
-// hamiltonianAxisTol bounds |Re(lambda)|/|lambda| for eigenvalues treated as
-// imaginary-axis ones; spurious splits seen in synthesis tests reach 6e-8.
-// The bound is relative to each eigenvalue, not to ||H||, so slow modes of a
-// stiff or badly scaled H survive.
-const hamiltonianAxisTol = 1e-6
+// An eigenvalue with |Re| <= hamiltonianAxisCandidate*|lambda| is on the
+// imaginary axis when |Re| is also within hamiltonianAxisErr times its
+// perturbation bound eps*||T||_F/s, s being its reciprocal condition number.
+// Rounding splits an axis pair into a near-Jordan block with tiny s, while
+// lightly damped normal modes keep s near 1 and slow modes of a stiff H are
+// not candidates. A mode both lightly damped and ill-conditioned is treated
+// conservatively.
+const (
+	hamiltonianAxisCandidate = 1e-4
+	hamiltonianAxisErr       = 10
+)
 
-func hasImaginaryAxisEigenvalue(wr, wi []float64) bool {
-	for i, re := range wr {
-		if math.Abs(re) <= hamiltonianAxisTol*math.Hypot(re, wi[i]) {
+// hasImaginaryAxisEigenvalue reports whether the real Schur form t (n x n,
+// eigenvalues wr + i wi) has an eigenvalue on the imaginary axis to within
+// rounding.
+func hasImaginaryAxisEigenvalue(t []float64, n int, wr, wi []float64) bool {
+	const c2 = hamiltonianAxisCandidate * hamiltonianAxisCandidate
+	var tNorm float64
+	var tc, work []float64
+	var selected []bool
+	var iwork [1]int
+	for i := range n {
+		re := math.Abs(wr[i])
+		if wi[i] < 0 || re*re > c2*(wr[i]*wr[i]+wi[i]*wi[i]) {
+			continue
+		}
+		if tc == nil {
+			for r := range n {
+				for _, v := range t[r*n+r-min(r, 1) : (r+1)*n] {
+					tNorm += v * v
+				}
+			}
+			tNorm = math.Sqrt(tNorm)
+			tc = make([]float64, n*n)
+			selected = make([]bool, n)
+			work = make([]float64, max(1, 2*n))
+		}
+		copy(tc, t)
+		wrc, wic := slices.Clone(wr), slices.Clone(wi)
+		clear(selected)
+		selected[i] = true
+		_, s, _, ok := impl.Dtrsen(1, false, selected, n, tc, n, nil, 1, wrc, wic, work, len(work), iwork[:], 1)
+		if !ok || re <= hamiltonianAxisErr*eps()*tNorm/s {
 			return true
 		}
 	}
