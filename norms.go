@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"sort"
 
 	"gonum.org/v1/gonum/blas"
@@ -239,11 +240,20 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 			break
 		}
 		mid := (gammaLow + gammaHigh) / 2
-		if ws.hasImagEigs(mid) {
-			gammaLow = mid
-		} else {
+		if !ws.hasImagEigs(mid) {
 			gammaHigh = mid
+			continue
 		}
+		peak, w, err := ws.candidatePeak(sys)
+		if err != nil {
+			gammaLow = mid
+			continue
+		}
+		if peak < mid {
+			gammaHigh = mid
+			continue
+		}
+		gammaLow, omegaPeak = peak, w
 	}
 
 	return gammaHigh, omegaPeak, nil
@@ -268,11 +278,12 @@ type hamiltonianWS struct {
 	bbt []float64
 	ctc []float64
 
-	h    []float64
-	wr   []float64
-	wi   []float64
-	vs   []float64
-	work []float64
+	h     []float64
+	cands []float64
+	wr    []float64
+	wi    []float64
+	vs    []float64
+	work  []float64
 
 	r       []float64
 	dtc     []float64
@@ -345,6 +356,7 @@ func (ws *hamiltonianWS) hasImagEigs(gamma float64) bool {
 	n, m, p := ws.n, ws.m, ws.p
 	nn := ws.nn
 	g2 := gamma * gamma
+	ws.cands = ws.cands[:0]
 
 	h := ws.h
 	for i := range len(h) {
@@ -452,11 +464,57 @@ func (ws *hamiltonianWS) hasImagEigs(gamma float64) bool {
 	threshold := math.Sqrt(eps()) * gamma
 	for i := range nn {
 		absLam := math.Sqrt(ws.wr[i]*ws.wr[i] + ws.wi[i]*ws.wi[i])
-		if absLam > 0 && math.Abs(ws.wr[i]) < threshold*math.Max(1, absLam/gamma) {
-			return true
+		if absLam > 0 && math.Abs(ws.wr[i]) < threshold*math.Max(1, absLam/gamma) && ws.wi[i] >= 0 {
+			ws.cands = append(ws.cands, ws.wi[i])
 		}
 	}
-	return false
+	return len(ws.cands) > 0
+}
+
+// candidatePeak evaluates sigma_max at the near-axis eigenvalue frequencies
+// found by hasImagEigs and at their midpoints (Bruinsma and Steinbuch). The
+// Hamiltonian of a badly scaled system can show near-axis eigenvalues where
+// no singular value reaches gamma, so only these evaluations certify a
+// crossing.
+func (ws *hamiltonianWS) candidatePeak(sys *System) (peak, omega float64, err error) {
+	if len(ws.cands) == 0 {
+		return 0, 0, ErrSchurFailed
+	}
+	slices.Sort(ws.cands)
+	freqs := slices.Compact(ws.cands)
+	for i := range len(freqs) - 1 {
+		freqs = append(freqs, (freqs[i]+freqs[i+1])/2)
+	}
+	return sigmaMaxPointwise(sys, freqs)
+}
+
+// sigmaMaxPointwise returns the largest sigma_max over freqs and where it
+// occurs. It solves the state space at each frequency: the batched sweep
+// converts long, high-order sweeps to polynomials, which loses the peak.
+func sigmaMaxPointwise(sys *System, freqs []float64) (peak, omega float64, err error) {
+	_, m, p := sys.Dims()
+	resp, err := sys.FreqResponsePointwise(freqs)
+	if err != nil {
+		return 0, 0, err
+	}
+	nSV := min(p, m)
+	response := newSampledComplexResponse(resp.Data, freqs, p, m)
+	var ws *complexSVDWorkspace
+	if p != 1 || m != 1 {
+		ws = newComplexSVDWorkspace(p, m)
+	}
+	sv := make([]float64, nSV)
+	peak = math.Inf(-1)
+	for k, w := range freqs {
+		response.singularValues(sv, ws, k)
+		if sv[0] > peak || math.IsNaN(sv[0]) {
+			peak, omega = sv[0], w
+		}
+	}
+	if math.IsNaN(peak) {
+		return 0, 0, ErrSingularEquation
+	}
+	return peak, omega, nil
 }
 
 func hinfLowerBound(sys *System, m, p int) (gammaLow, omegaPeak float64) {
@@ -491,15 +549,8 @@ func hinfLowerBound(sys *System, m, p int) (gammaLow, omegaPeak float64) {
 		freqs = append(freqs, w)
 	}
 
-	sigma, err := sys.Sigma(freqs, 0)
-	if err == nil && sigma != nil && sigma.NSV() > 0 {
-		for i, w := range freqs {
-			sv := sigma.At(i, 0)
-			if sv > gammaLow {
-				gammaLow = sv
-				omegaPeak = w
-			}
-		}
+	if peak, w, err := sigmaMaxPointwise(sys, freqs); err == nil {
+		gammaLow, omegaPeak = peak, w
 	}
 
 	return gammaLow, omegaPeak
