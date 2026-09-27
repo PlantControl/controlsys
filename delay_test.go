@@ -7,7 +7,7 @@ import (
 	"math/cmplx"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestNewWithDelay(t *testing.T) {

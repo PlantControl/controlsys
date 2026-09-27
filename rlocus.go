@@ -6,7 +6,7 @@ import (
 	"math/cmplx"
 	"sort"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 type RootLocusResult struct {

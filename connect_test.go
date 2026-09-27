@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func evalTF(sys *System, s complex128) [][]complex128 {

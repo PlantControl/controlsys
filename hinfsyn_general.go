@@ -3,7 +3,7 @@ package controlsys
 import (
 	"math"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // hinfGeneralPlant is the D11 != 0 H-infinity problem scaled so that

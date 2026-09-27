@@ -3,8 +3,8 @@ package controlsys
 import (
 	"math"
 
-	"gonum.org/v1/gonum/lapack"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/lapack"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 type PrescaleResult struct {

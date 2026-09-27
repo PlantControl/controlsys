@@ -5,8 +5,8 @@ import (
 	"math"
 	"slices"
 
-	"gonum.org/v1/gonum/blas/blas64"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func NewWithDelay(A, B, C, D, delay *mat.Dense, dt float64) (*System, error) {

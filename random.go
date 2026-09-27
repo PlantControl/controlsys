@@ -5,7 +5,7 @@ import (
 	"math"
 	"math/rand"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func Rss(n, p, m int) (*System, error) {

@@ -1,6 +1,6 @@
 package controlsys
 
-import "gonum.org/v1/gonum/mat"
+import "plantcontrol.org/v1/gonum/mat"
 
 func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
 	savedPlantInput := copySliceOrNil(plant.InputDelay)

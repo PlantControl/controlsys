@@ -6,7 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 type MarginResult struct {

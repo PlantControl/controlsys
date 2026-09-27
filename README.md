@@ -10,16 +10,13 @@ The state-space model is the fundamental representation. Transfer-function, zero
 go get github.com/jamestjsp/controlsys
 ```
 
-> **Note:** This package depends on a [gonum fork](https://github.com/jamestjsp/gonum) for additional LAPACK routines. Because `replace` directives do not propagate to downstream modules, applications that import `controlsys` must add this to their own `go.mod`:
-> ```
-> replace gonum.org/v1/gonum => github.com/jamestjsp/gonum v0.19.0-fork
-> ```
+Linear algebra uses [`plantcontrol.org/v1/gonum`](https://github.com/PlantControl/gonum), PlantControl's Gonum fork with additional LAPACK routines. It is an ordinary module dependency; no `replace` directive is needed.
 
 ## Production Readiness
 
 This package is intended to be usable in production control and estimation code, with the usual caveat that numerical software still needs application-specific validation.
 
-- Pin both `controlsys` and the required gonum fork to explicit versions.
+- Pin `controlsys` and `plantcontrol.org/v1/gonum` to explicit versions.
 - Validate mission-critical models against an external reference, especially for ill-conditioned realizations and delay-heavy systems.
 - `System` values are mutable. Use `Copy` before sharing a model across goroutines that may mutate names, delays, notes, or other receiver state. Use `Validate` after direct field edits.
 - The repository CI runs `go fix ./...`, `go vet ./...`, `go test -v -count=1 -race ./...`, and a downstream consumer import check; those are the recommended baseline checks for downstream integrations.
@@ -54,7 +51,7 @@ import (
 	"fmt"
 
 	"github.com/jamestjsp/controlsys"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func main() {

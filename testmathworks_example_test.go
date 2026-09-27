@@ -3,7 +3,7 @@ package controlsys
 import (
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestMathWorksFeedbackExample(t *testing.T) {

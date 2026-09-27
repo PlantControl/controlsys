@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 const nameTol = 1e-10

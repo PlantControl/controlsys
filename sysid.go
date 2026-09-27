@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // ERAResult holds the identified state-space model and the Hankel

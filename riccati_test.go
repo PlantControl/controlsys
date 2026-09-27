@@ -6,7 +6,7 @@ import (
 	"math/cmplx"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func careResidual(A, B, Q, R, X *mat.Dense) float64 {

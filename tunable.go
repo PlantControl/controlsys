@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 type TunableBounds struct {

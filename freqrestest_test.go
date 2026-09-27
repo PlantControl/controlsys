@@ -7,8 +7,8 @@ import (
 	"math/rand"
 	"testing"
 
-	"gonum.org/v1/gonum/dsp/window"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/dsp/window"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestFreqRespEst_KnownSISO(t *testing.T) {

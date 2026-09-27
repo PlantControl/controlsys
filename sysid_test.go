@@ -7,7 +7,7 @@ import (
 	"sort"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func impulseMarkov(t *testing.T, sys *System, steps int) []*mat.Dense {

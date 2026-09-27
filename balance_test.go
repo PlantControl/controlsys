@@ -7,7 +7,7 @@ import (
 	"sort"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestBalreal_1x1(t *testing.T) {

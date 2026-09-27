@@ -5,7 +5,7 @@ name = "controlsys"
 script = '''
 cd "${CODEX_WORKTREE_PATH:-.}"
 go mod download
-go list -m -f '{{if .Replace}}{{.Path}} => {{.Replace.Path}} {{.Replace.Version}}{{else}}{{.Path}} {{.Version}}{{end}}' gonum.org/v1/gonum
+go list -m -f '{{if .Replace}}{{.Path}} => {{.Replace.Path}} {{.Replace.Version}}{{else}}{{.Path}} {{.Version}}{{end}}' plantcontrol.org/v1/gonum
 '''
 
 [setup.darwin]
@@ -14,7 +14,7 @@ GO_MACOS_PATH="/opt/homebrew/bin:/usr/local/go/bin:/usr/local/bin"
 export PATH="$GO_MACOS_PATH:$PATH"
 cd "${CODEX_WORKTREE_PATH:-.}"
 go mod download
-go list -m -f '{{if .Replace}}{{.Path}} => {{.Replace.Path}} {{.Replace.Version}}{{else}}{{.Path}} {{.Version}}{{end}}' gonum.org/v1/gonum
+go list -m -f '{{if .Replace}}{{.Path}} => {{.Replace.Path}} {{.Replace.Version}}{{else}}{{.Path}} {{.Version}}{{end}}' plantcontrol.org/v1/gonum
 '''
 
 [cleanup]
@@ -86,7 +86,6 @@ cd "$tmp"
 go mod init example.com/controlsys-consumer
 go mod edit -require=github.com/jamestjsp/controlsys@v0.0.0
 go mod edit -replace=github.com/jamestjsp/controlsys="$repo_path"
-go mod edit -replace=gonum.org/v1/gonum=github.com/jamestjsp/gonum@v0.19.0-fork
 cat > controlsys_consumer_test.go <<'EOF'
 package controlsysconsumer
 
@@ -94,7 +93,7 @@ import (
 	"testing"
 
 	"github.com/jamestjsp/controlsys"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestConsumerCanConstructModel(t *testing.T) {

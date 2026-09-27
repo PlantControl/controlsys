@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestFRDCopyIsIndependent(t *testing.T) {

@@ -3,7 +3,7 @@ package controlsys
 import (
 	"fmt"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // EKFModel defines the nonlinear model for an Extended Kalman Filter.

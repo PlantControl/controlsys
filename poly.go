@@ -4,7 +4,7 @@ import (
 	"errors"
 	"math"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // Poly represents a polynomial in descending power:

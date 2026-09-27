@@ -3,8 +3,8 @@ package controlsys
 import (
 	"math"
 
-	"gonum.org/v1/gonum/blas"
-	"gonum.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/blas"
+	"plantcontrol.org/v1/gonum/blas/blas64"
 )
 
 func rowPivotRQ(m, n int, a []float64, lda int, rcond, svlmax float64) (rank int, sval [3]float64, jpvt []int, tau []float64) {

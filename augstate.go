@@ -1,6 +1,6 @@
 package controlsys
 
-import "gonum.org/v1/gonum/mat"
+import "plantcontrol.org/v1/gonum/mat"
 
 func Augstate(sys *System) (*System, error) {
 	n, m, p := sys.Dims()

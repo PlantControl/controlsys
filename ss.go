@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"slices"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // LFTDelay holds the internal delay representation using a linear

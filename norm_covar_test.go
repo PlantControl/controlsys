@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestNorm_H2_Continuous(t *testing.T) {

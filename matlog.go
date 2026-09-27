@@ -5,7 +5,7 @@ import (
 	"math"
 	"math/cmplx"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // matLog computes the principal matrix logarithm of a real square matrix via

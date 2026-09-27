@@ -6,7 +6,7 @@ import (
 	"math"
 	"strings"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // AlgebraicLoopError describes a singular or numerically singular direct-feedthrough loop.

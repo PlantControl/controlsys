@@ -5,10 +5,10 @@ import (
 	"math"
 	"math/cmplx"
 
-	"gonum.org/v1/gonum/blas"
-	"gonum.org/v1/gonum/blas/blas64"
-	gonumLapack "gonum.org/v1/gonum/lapack/gonum"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/blas"
+	"plantcontrol.org/v1/gonum/blas/blas64"
+	gonumLapack "plantcontrol.org/v1/gonum/lapack/gonum"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 var impl gonumLapack.Implementation

@@ -1,6 +1,6 @@
 package controlsys
 
-import "gonum.org/v1/gonum/mat"
+import "plantcontrol.org/v1/gonum/mat"
 
 func validateSampledIO(context string, input, output *mat.Dense, dt float64) (m, p, n int, err error) {
 	in, out, err := validateSampledSignalPair(context, input, output, dt)

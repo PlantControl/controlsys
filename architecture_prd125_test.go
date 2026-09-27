@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestPRD125SampledTimeDomainWorkflowsPreserveOrientation(t *testing.T) {
