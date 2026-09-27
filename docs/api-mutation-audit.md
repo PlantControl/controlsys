@@ -1,7 +1,7 @@
 # API and Mutation Audit
 
 This audit records the public API ownership and mutation contract for
-`github.com/jamestjsp/controlsys` after the release-finding fixes. It is intentionally
+`plantcontrol.org/v1/controlsys` after the release-finding fixes. It is intentionally
 API-by-API: every exported function or method discovered from the current source
 is named below. Public data types are grouped separately because most result and
 model types expose mutable fields directly.
@@ -402,7 +402,7 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 Before tagging a production release:
 
 - CI must run `go fix ./...`, `go vet ./...`, and `go test -v -count=1 -race ./...`.
-- CI must build a downstream module that imports `github.com/jamestjsp/controlsys`
+- CI must build a downstream module that imports `plantcontrol.org/v1/controlsys`
   and resolves `plantcontrol.org/v1/gonum` without `replace` directives.
 - Public API changes should update `README.md`, `doc.go`, examples, or this audit
   when behavior or ownership expectations change.

@@ -1,4 +1,4 @@
-module github.com/jamestjsp/controlsys
+module plantcontrol.org/v1/controlsys
 
 go 1.27.1
 

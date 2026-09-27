@@ -7,8 +7,10 @@ The state-space model is the fundamental representation. Transfer-function, zero
 ## Install
 
 ```bash
-go get github.com/jamestjsp/controlsys
+go get plantcontrol.org/v1/controlsys
 ```
+
+Formerly `github.com/jamestjsp/controlsys` (releases up to v1.8.0). From v1.9.0 the module path is `plantcontrol.org/v1/controlsys`.
 
 Linear algebra uses [`plantcontrol.org/v1/gonum`](https://github.com/PlantControl/gonum), PlantControl's Gonum fork with additional LAPACK routines. It is an ordinary module dependency; no `replace` directive is needed.
 
@@ -50,7 +52,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/jamestjsp/controlsys"
+	"plantcontrol.org/v1/controlsys"
 	"plantcontrol.org/v1/gonum/mat"
 )
 

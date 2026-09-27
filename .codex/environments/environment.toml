@@ -84,15 +84,15 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 go mod init example.com/controlsys-consumer
-go mod edit -require=github.com/jamestjsp/controlsys@v0.0.0
-go mod edit -replace=github.com/jamestjsp/controlsys="$repo_path"
+go mod edit -require=plantcontrol.org/v1/controlsys@v0.0.0
+go mod edit -replace=plantcontrol.org/v1/controlsys="$repo_path"
 cat > controlsys_consumer_test.go <<'EOF'
 package controlsysconsumer
 
 import (
 	"testing"
 
-	"github.com/jamestjsp/controlsys"
+	"plantcontrol.org/v1/controlsys"
 	"plantcontrol.org/v1/gonum/mat"
 )
 

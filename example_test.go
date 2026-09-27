@@ -5,7 +5,7 @@ import (
 	"math"
 	"math/cmplx"
 
-	"github.com/jamestjsp/controlsys"
+	"plantcontrol.org/v1/controlsys"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
