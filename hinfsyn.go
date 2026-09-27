@@ -10,7 +10,9 @@ import (
 )
 
 type HinfSynResult struct {
-	K        *System
+	K *System
+	// GammaOpt is the gamma K is built for: ||T_zw||inf < GammaOpt, within
+	// hinfControllerBackoff (relative) of the smallest achievable gamma.
 	GammaOpt float64
 	X        *mat.Dense
 	Y        *mat.Dense
@@ -35,7 +37,7 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	if !allZeroDense(gp.D11) {
 		return hinfSynGeneral(gp)
 	}
-	gamma, err := hinfBisect(0, func(g float64) bool { return hinfFeasible(gp, g) })
+	gamma, err := hinfControllerGamma(0, func(g float64) bool { return hinfFeasible(gp, g) })
 	if err != nil {
 		return nil, err
 	}
@@ -45,6 +47,20 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 // hinfGammaFloor ends bisection when the optimum is zero, where the
 // relative stopping rule never triggers.
 const hinfGammaFloor = 1e-12
+
+// hinfControllerBackoff is the relative gamma margin above the bisection
+// edge. At the edge X or Y grows without bound, so the central controller is
+// ill-conditioned and overshoots gamma; 1e-4 restores a genuine margin.
+const hinfControllerBackoff = 1e-4
+
+// hinfControllerGamma returns the gamma to build the central controller at.
+func hinfControllerGamma(gammaLB float64, feasible func(float64) bool) (float64, error) {
+	gamma, err := hinfBisect(gammaLB, feasible)
+	if err != nil {
+		return 0, err
+	}
+	return gamma * (1 + hinfControllerBackoff), nil
+}
 
 // hinfBisect returns the smallest gamma above gammaLB, to relative 1e-6 or
 // below hinfGammaFloor, that feasible accepts.

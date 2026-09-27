@@ -249,7 +249,7 @@ func hinfSynGeneral(gp *generalizedPlantPartition) (*HinfSynResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	gamma, err := hinfBisect(hp.gammaLB, func(g float64) bool {
+	gamma, err := hinfControllerGamma(hp.gammaLB, func(g float64) bool {
 		_, _, _, _, err := hp.riccatis(g)
 		return err == nil
 	})

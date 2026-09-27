@@ -490,7 +490,7 @@ func TestHinfSyn_D11ClosedLoopMeetsOptimalGamma(t *testing.T) {
 			if norm > res.GammaOpt*(1+1e-6) {
 				t.Fatalf("closed-loop Hinf norm %v exceeds gamma %v", norm, res.GammaOpt)
 			}
-			if math.Abs(res.GammaOpt-tc.want) > 1e-5*tc.want {
+			if math.Abs(res.GammaOpt-tc.want) > (1e-5+hinfControllerBackoff)*tc.want {
 				t.Fatalf("gamma %v, want optimum %v", res.GammaOpt, tc.want)
 			}
 		})
@@ -674,7 +674,7 @@ func TestHinfSyn_StiffPlant(t *testing.T) {
 		if norm > res.GammaOpt*(1+1e-4) {
 			t.Fatalf("D11 = %v: closed-loop Hinf norm %v exceeds gamma %v", tc.d11, norm, res.GammaOpt)
 		}
-		if math.Abs(res.GammaOpt-tc.want) > 1e-4*tc.want {
+		if math.Abs(res.GammaOpt-tc.want) > (1e-4+hinfControllerBackoff)*tc.want {
 			t.Fatalf("D11 = %v: gamma %v, want optimum %v", tc.d11, res.GammaOpt, tc.want)
 		}
 	}
@@ -711,5 +711,33 @@ func TestHinfBisect_ZeroOptimumTerminates(t *testing.T) {
 	}
 	if gamma > hinfGammaFloor || calls > 64 {
 		t.Fatalf("gamma %v after %d feasibility calls", gamma, calls)
+	}
+}
+
+// Mixed sensitivity of 0.01/(s+0.01) with default weights (process-lab
+// 3FFQZL): X grows without bound as gamma nears the optimum, so a central
+// controller built at the bisection edge overshot its gamma on every arch.
+func TestHinfSyn_ControllerMeetsGammaNearSingularEdge(t *testing.T) {
+	P, err := New(
+		mat.NewDense(2, 2, []float64{-0.01, 0, -0.01, -0.00004320073460981398}),
+		mat.NewDense(2, 2, []float64{0, 1, 1, 0}),
+		mat.NewDense(3, 2, []float64{-0.005, 0.004298473093676491, 0, 0, -0.01, 0}),
+		mat.NewDense(3, 2, []float64{0.5, 0, 0, 0.1, 1, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := HinfSyn(P, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	norm, _, err := HinfNorm(closedLoop(t, P, res.K, 1, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if norm > res.GammaOpt {
+		t.Fatalf("closed-loop Hinf norm %v exceeds gamma %v by %.3g", norm, res.GammaOpt, norm/res.GammaOpt-1)
+	}
+	if math.Abs(res.GammaOpt-0.5074089765548706) > 2*hinfControllerBackoff*0.5074089765548706 {
+		t.Fatalf("gamma %v, want near optimum 0.50741", res.GammaOpt)
 	}
 }
