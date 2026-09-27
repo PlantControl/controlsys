@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"math"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // IOStateSpaceOptions identifies SISO models from arbitrary sampled input/output.

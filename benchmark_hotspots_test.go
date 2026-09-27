@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // benchSysNonSym builds a stable system with non-symmetric A for benchmark workloads.

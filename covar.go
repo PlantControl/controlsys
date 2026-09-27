@@ -1,6 +1,6 @@
 package controlsys
 
-import "gonum.org/v1/gonum/mat"
+import "plantcontrol.org/v1/gonum/mat"
 
 func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	n, m, p := sys.Dims()

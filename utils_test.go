@@ -7,7 +7,7 @@ import (
 	"sort"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func matClose(a, b *mat.Dense, tol float64) bool {

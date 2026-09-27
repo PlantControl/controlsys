@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // ThiranDelay returns a discrete-time allpass state-space system approximating

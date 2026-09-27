@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestLyap_Continuous_2x2(t *testing.T) {

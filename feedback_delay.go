@@ -3,7 +3,7 @@ package controlsys
 import (
 	"fmt"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // FeedbackOption configures how Feedback treats delays when closing the loop.

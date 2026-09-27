@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func (sys *System) Pade(order int) (*System, error) {

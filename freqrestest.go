@@ -5,9 +5,9 @@ import (
 	"math"
 	"math/cmplx"
 
-	"gonum.org/v1/gonum/dsp/fourier"
-	"gonum.org/v1/gonum/dsp/window"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/dsp/fourier"
+	"plantcontrol.org/v1/gonum/dsp/window"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 type FreqRespEstOpts struct {

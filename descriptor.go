@@ -3,8 +3,8 @@ package controlsys
 import (
 	"fmt"
 
-	"gonum.org/v1/gonum/lapack"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/lapack"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func copyDescriptorE(E *mat.Dense) *mat.Dense {

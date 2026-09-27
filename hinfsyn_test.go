@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestHinfSyn_Simple(t *testing.T) {

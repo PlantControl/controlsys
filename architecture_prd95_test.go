@@ -6,7 +6,7 @@ import (
 	"math/cmplx"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func prd95MIMOModel(t *testing.T, dt float64) *System {

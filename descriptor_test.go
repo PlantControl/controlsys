@@ -6,7 +6,7 @@ import (
 	"math/cmplx"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func TestGeneralizedPoles_Standard(t *testing.T) {

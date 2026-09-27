@@ -7,8 +7,8 @@ import (
 	"math"
 	"sort"
 
-	"gonum.org/v1/gonum/mat"
-	"gonum.org/v1/gonum/optimize"
+	"plantcontrol.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/optimize"
 )
 
 var ErrProcessData = errors.New("invalid process identification data")

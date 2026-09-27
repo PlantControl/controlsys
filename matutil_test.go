@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func assertMatClose(t *testing.T, name string, got, want *mat.Dense, tol float64) {

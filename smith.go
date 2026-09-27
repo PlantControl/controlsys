@@ -3,7 +3,7 @@ package controlsys
 import (
 	"fmt"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func negateSys(sys *System) *System {

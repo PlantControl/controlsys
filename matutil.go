@@ -3,8 +3,8 @@ package controlsys
 import (
 	"math"
 
-	"gonum.org/v1/gonum/blas"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/blas"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func denseCopyTo(dst, src *mat.Dense) {

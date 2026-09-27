@@ -403,7 +403,7 @@ Before tagging a production release:
 
 - CI must run `go fix ./...`, `go vet ./...`, and `go test -v -count=1 -race ./...`.
 - CI must build a downstream module that imports `github.com/jamestjsp/controlsys`
-  and applies the documented Gonum fork replacement.
+  and resolves `plantcontrol.org/v1/gonum` without `replace` directives.
 - Public API changes should update `README.md`, `doc.go`, examples, or this audit
   when behavior or ownership expectations change.
 - Numerically sensitive changes should include external-reference tests using
@@ -411,5 +411,5 @@ Before tagging a production release:
 
 ## Current Follow-Up Items
 
-- Track required routines from the Gonum fork and upstream them or document why
-  each remains fork-only.
+- Add required LAPACK routines to `plantcontrol.org/v1/gonum`; upstream Gonum
+  does not accept AI-generated code.

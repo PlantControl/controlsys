@@ -3,7 +3,7 @@ package controlsys
 import (
 	"math"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 const delayTopologyTol = 1e-12

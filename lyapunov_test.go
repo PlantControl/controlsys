@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func lyapResidual(A, X, Q *mat.Dense) float64 {

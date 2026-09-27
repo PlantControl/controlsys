@@ -5,8 +5,8 @@ import (
 	"math"
 	"math/cmplx"
 
-	"gonum.org/v1/gonum/blas/blas64"
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func (sys *System) Discretize(dt float64) (*System, error) {

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func runtimeArchitectureMIMO(t *testing.T) *System {

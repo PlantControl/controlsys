@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"gonum.org/v1/gonum/mat"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func solveIdentityMinusProduct(left, right *mat.Dense, size int, context string, singular error) (*mat.Dense, error) {
