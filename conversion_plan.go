@@ -3,6 +3,8 @@ package controlsys
 import (
 	"fmt"
 	"math"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 type c2dPlan struct {
@@ -13,6 +15,7 @@ type c2dPlan struct {
 	delayModeling   C2DDelayModeling
 	contInputDelay  []float64
 	contOutputDelay []float64
+	pathDelay       *mat.Dense
 	workSys         *System
 }
 
@@ -57,6 +60,8 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 			if err != nil {
 				return c2dPlan{}, err
 			}
+		} else if conversionHasFractionalPathDelay(plan.workSys.Delay, dt) {
+			plan.pathDelay, plan.workSys.Delay = plan.workSys.Delay, nil
 		}
 	}
 
@@ -110,6 +115,12 @@ func (p c2dPlan) discretizeMethod() (*System, error) {
 }
 
 func (p c2dPlan) applyExternalDelays(disc *System) (*System, error) {
+	if p.pathDelay != nil {
+		var err error
+		if disc, err = conversionPathThiran(disc, p.pathDelay, p.dt, p.opts); err != nil {
+			return nil, err
+		}
+	}
 	return applyConversionExternalDelays(p.workSys, disc, p.contInputDelay, p.contOutputDelay, p.dt, p.opts)
 }
 

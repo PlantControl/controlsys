@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"reflect"
 	"testing"
 
@@ -196,4 +197,87 @@ func thiranMIMOFixtureBenchmark() *System {
 	sys, _ := New(mat.NewDense(2, 2, []float64{-1, .3, -.2, -2}), mat.NewDense(2, 2, []float64{1, .2, -.1, .8}), mat.NewDense(2, 2, []float64{1, .5, -.4, .9}), mat.NewDense(2, 2, nil), 0)
 	_ = sys.SetInternalDelay([]float64{.024, .54}, mat.NewDense(2, 2, []float64{.2, .5, -.3, .1}), mat.NewDense(2, 2, []float64{.4, .2, -.1, .3}), mat.NewDense(2, 2, []float64{.1, .2, .3, -.2}), mat.NewDense(2, 2, []float64{.3, .5, .1, -.1}), mat.NewDense(2, 2, []float64{.01, .04, .02, .03}))
 	return sys
+}
+
+func TestConversionSeriesMatchesGenericSeries(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 11))
+	random := func(r, c int) *mat.Dense {
+		if r == 0 || c == 0 {
+			return &mat.Dense{}
+		}
+		data := make([]float64, r*c)
+		for i := range data {
+			data[i] = rng.Float64()*0.6 - 0.3
+		}
+		return mat.NewDense(r, c, data)
+	}
+	plant := func(n, m, p int, internal bool) *System {
+		sys, err := New(random(n, n), random(n, m), random(p, n), random(p, m), 0.1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if internal {
+			if err := sys.SetInternalDelay([]float64{2, 1}, random(n, 2), random(2, n), random(p, 2), random(2, m), random(2, 2)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return sys
+	}
+	omega := []float64{0.3, 4, 17, 29}
+	for _, internal := range []bool{false, true} {
+		for _, modeling := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
+			for _, input := range []bool{true, false} {
+				disc := plant(3, 2, 3, internal)
+				delays := []float64{0.37, 0.12, 0.2}
+				if input {
+					delays = delays[:2]
+					disc.OutputDelay = []float64{1, 0, 2}
+				} else {
+					disc.InputDelay = []float64{0, 3}
+				}
+				bank, err := conversionThiranBank(delays, 0.1, 3, modeling)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var got, want *System
+				if input {
+					got = conversionSeries(bank, disc)
+					want, err = Series(bank, disc)
+				} else {
+					bank.OutputDelay, bank.InputDelay = bank.InputDelay, nil
+					got = conversionSeries(disc, bank)
+					want, err = Series(disc, bank)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.HasInternalDelay() != want.HasInternalDelay() || got.internalDelayCount() != want.internalDelayCount() {
+					t.Fatalf("internal=%v modeling=%s input=%v: internal delays %d, want %d", internal, modeling, input, got.internalDelayCount(), want.internalDelayCount())
+				}
+				gn, _, _ := got.Dims()
+				wn, _, _ := want.Dims()
+				if gn != wn || !reflect.DeepEqual(got.InputDelay, want.InputDelay) || !reflect.DeepEqual(got.OutputDelay, want.OutputDelay) {
+					t.Fatalf("internal=%v modeling=%s input=%v: states %d/%d delays %v %v, want %v %v", internal, modeling, input, gn, wn, got.InputDelay, got.OutputDelay, want.InputDelay, want.OutputDelay)
+				}
+				gr, err := got.FreqResponse(omega)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wr, err := want.FreqResponse(omega)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, m, p := want.Dims()
+				for k := range omega {
+					for i := range p {
+						for j := range m {
+							if d := cmplx.Abs(gr.At(k, i, j) - wr.At(k, i, j)); d > 1e-12 {
+								t.Fatalf("internal=%v modeling=%s input=%v H[%d](%d,%d) differs by %g", internal, modeling, input, k, i, j, d)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 }

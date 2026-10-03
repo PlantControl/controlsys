@@ -8,14 +8,19 @@ import (
 )
 
 // ThiranDelay returns a discrete-time allpass state-space system approximating
-// a fractional delay of tau seconds at sample time dt.
-// The order parameter controls the filter order (1-10).
-// The delay must satisfy tau/dt >= order-0.5 for stability.
+// a fractional delay of tau seconds at sample time dt with a fixed filter order
+// N (1-10). The system is SISO.
+//
+// A delay of D = tau/dt samples is stable only for D > N-1; smaller delays
+// return ErrFractionalDelay. Near that bound the poles approach -1 and the
+// filter is poorly conditioned. Integer D returns the exact delay z^-D with D
+// states for any N. For D > N+0.5 the excess whole samples are realized as a
+// leading shift register, so the system has round(D) states.
 func ThiranDelay(tau float64, order int, dt float64) (*System, error) {
-	if tau < 0 {
+	if tau < 0 || math.IsNaN(tau) || math.IsInf(tau, 0) {
 		return nil, ErrNegativeDelay
 	}
-	if dt <= 0 {
+	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
 		return nil, ErrInvalidSampleTime
 	}
 	if order < 1 || order > 10 {
@@ -25,15 +30,12 @@ func ThiranDelay(tau float64, order int, dt float64) (*System, error) {
 	D := tau / dt
 	N := order
 
-	if D < float64(N)-0.5 {
-		return nil, fmt.Errorf("ThiranDelay: delay %.4f samples < order-0.5 = %.1f (unstable): %w",
-			D, float64(N)-0.5, ErrFractionalDelay)
+	if isIntegerSampleDelay(D) {
+		return integerDelaySS(int(math.Round(D)), dt)
 	}
-
-	// Integer delay handled separately
-	if math.Abs(D-math.Round(D)) < 1e-12 {
-		intD := int(math.Round(D))
-		return integerDelaySS(intD, dt)
+	if D <= float64(N-1) {
+		return nil, fmt.Errorf("ThiranDelay: delay %.4f samples <= order-1 = %d (unstable): %w",
+			D, N-1, ErrFractionalDelay)
 	}
 
 	// Split into integer shift + fractional Thiran when D >> N

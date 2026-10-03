@@ -151,7 +151,7 @@ func TestThiranIntegerDelayExact(t *testing.T) {
 }
 
 // Julia: thiran(pi, 1) uses order=ceil(pi)=4 internally with different stability bounds.
-// We use order=3 since our stability condition is D >= N-0.5 (π≈3.14 >= 2.5).
+// We use order=3; stability requires D > N-1.
 // Verify allpass + group delay properties match the fractional delay.
 func TestThiranPiDelay(t *testing.T) {
 	D := math.Pi
@@ -227,10 +227,117 @@ func TestIntegerDelaySSFreqResponse(t *testing.T) {
 	}
 }
 
-func TestThiranDelayTooSmall(t *testing.T) {
-	_, err := ThiranDelay(0.01, 3, 1.0)
-	if err == nil {
-		t.Error("delay 0.01 samples with order 3 should fail (D < N-0.5)")
+func TestThiranDelayRejectsBelowStabilityBound(t *testing.T) {
+	for _, tc := range []struct {
+		samples float64
+		order   int
+	}{{0.01, 3}, {2 - 1e-6, 3}, {0.9, 2}, {1.5, 3}} {
+		_, err := ThiranDelay(tc.samples*0.1, tc.order, 0.1)
+		if !errors.Is(err, ErrFractionalDelay) {
+			t.Errorf("D=%g N=%d: err = %v, want ErrFractionalDelay", tc.samples, tc.order, err)
+		}
+	}
+}
+
+func TestThiranDelayShortStableDelays(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tau     float64
+		order   int
+		wantDen []float64
+		tol     float64
+	}{
+		{"matlab-thiran-2.4", 0.24, 3, []float64{1, 0.5294, -0.04813, 0.004159}, 5e-4},
+		{"first-order-0.2", 0.02, 1, []float64{1, 2.0 / 3}, 1e-14},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dt := 0.1
+			sys, err := ThiranDelay(tc.tau, tc.order, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, m, p := sys.Dims(); n != tc.order || m != 1 || p != 1 {
+				t.Fatalf("dims = %d,%d,%d, want %d,1,1", n, m, p, tc.order)
+			}
+			den := thiranCoeffs(tc.tau/dt, tc.order)
+			for k, want := range tc.wantDen {
+				if math.Abs(den[k]-want) > tc.tol*math.Max(1, math.Abs(want)) {
+					t.Errorf("den[%d] = %.6g, want %.6g", k, den[k], want)
+				}
+			}
+			assertThiranStableAllpass(t, sys, tc.tau/dt)
+		})
+	}
+	sys, err := ThiranDelay(0.02, 1, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poles, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(poles) != 1 || cmplx.Abs(poles[0]-complex(-2.0/3, 0)) > 1e-14 {
+		t.Fatalf("first-order poles = %v, want -2/3", poles)
+	}
+}
+
+func TestThiranDelayNearStabilityBound(t *testing.T) {
+	for _, order := range []int{1, 2, 3, 5} {
+		samples := float64(order-1) + 1e-3
+		sys, err := ThiranDelay(samples*0.1, order, 0.1)
+		if err != nil {
+			t.Fatalf("N=%d D=%g: %v", order, samples, err)
+		}
+		assertThiranStableAllpass(t, sys, samples)
+	}
+}
+
+func TestThiranDelayIntegerIgnoresOrderBound(t *testing.T) {
+	for _, tc := range []struct{ samples, order int }{{0, 1}, {0, 3}, {2, 3}, {1, 4}} {
+		sys, err := ThiranDelay(float64(tc.samples)*0.1, tc.order, 0.1)
+		if err != nil {
+			t.Fatalf("D=%d N=%d: %v", tc.samples, tc.order, err)
+		}
+		if n, _, _ := sys.Dims(); n != tc.samples {
+			t.Fatalf("D=%d N=%d: states = %d, want %d", tc.samples, tc.order, n, tc.samples)
+		}
+		resp, err := sys.FreqResponse([]float64{0.7, 9})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, w := range []float64{0.7, 9} {
+			want := cmplx.Exp(complex(0, -w*0.1*float64(tc.samples)))
+			if got := resp.At(k, 0, 0); cmplx.Abs(got-want) > 1e-12 {
+				t.Fatalf("D=%d N=%d w=%g: H = %v, want %v", tc.samples, tc.order, w, got, want)
+			}
+		}
+	}
+}
+
+func assertThiranStableAllpass(t *testing.T, sys *System, samples float64) {
+	t.Helper()
+	poles, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pole := range poles {
+		if cmplx.Abs(pole) >= 1 {
+			t.Fatalf("D=%g: pole %v outside unit circle", samples, pole)
+		}
+	}
+	omega := []float64{0.01, 0.5, 2, 5, 9}
+	resp, err := sys.FreqResponse(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range omega {
+		if mag := cmplx.Abs(resp.At(k, 0, 0)); math.Abs(mag-1) > 1e-9 {
+			t.Fatalf("D=%g w=%g: |H| = %.12g, want 1", samples, omega[k], mag)
+		}
+	}
+	gd := -cmplx.Phase(resp.At(0, 0, 0)) / (omega[0] * sys.Dt)
+	if math.Abs(gd-samples) > 1e-3 {
+		t.Fatalf("D=%g: low-frequency group delay = %g samples", samples, gd)
 	}
 }
 
