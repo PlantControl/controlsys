@@ -52,6 +52,16 @@ Tustin because ZOH+Thiran is now rejected per MATLAB; the old benchmark timed
 that error path): 2.52us to 4.09us, 3.46KiB to 8.19KiB, 74 to 160 allocs,
 eight interleaved samples, p<.001. This accompanies the MATLAB maximum-order
 split and LFT delay modeling; outputs differ from the baseline by design.
-Generic `Series`/`Copy` composition dominates (follow-up WODGAC). No-delay
+Generic `Series`/`Copy` composition dominated. No-delay
 paths: Bilinear +0.99%, C2D ZOH +1.28% (p<.05), D2C ZOH memory -2.8 to -4.1%,
 allocations unchanged. See `docs/benchmarks/conversion-thiran`.
+
+Composing the Thiran bank directly into the discretized matrices instead of
+through `BlkDiag`/`Series` (v1.11.0 baseline, twelve interleaved samples,
+p<.001): `DiscretizeWithOpts_Thiran` 4.09us to 2.84us (-31%), 8.19KiB to
+4.73KiB, 160 to 100 allocs; `IODelayThiran` 4.13us to 2.98us (-28%), 169 to 109
+allocs. Responses, state counts, and delay metadata match generic `Series`
+(`TestConversionSeriesMatchesGenericSeries`). No-delay, ZOH, D2C, and standalone
+`ThiranDelay` benchmarks are unchanged (p>.05). Nondecomposable Thiran path
+delays, previously rejected, cost 5.4-6.0us for n=4/2x2 and 14-15us for n=8/4x4
+(`DiscretizeWithOpts_PathThiran`). See `docs/benchmarks/conversion-thiran-bank`.

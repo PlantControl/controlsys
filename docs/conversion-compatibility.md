@@ -44,8 +44,9 @@ FOH use per-path realizations; their state count and cost can grow with the
 number of input/output paths. Discrete delay histories always use integer sample
 counts. Internal Tustin transforms every LFT port and feedthrough matrix.
 Fractional internal feedback delays under ZOH/FOH absorb the fractional part
-into the augmented model (approximate). Tustin/matched with Thiran reject
-nondecomposable fractional MIMO path delays (L3TY7D).
+into the augmented model (approximate). Tustin/matched with Thiran realize
+nondecomposable fractional MIMO path delays by copying the model per fractional
+row or column (see [conversion-delay-methods.md](conversion-delay-methods.md)).
 
 `DiscretizeWithResult`, `D2CWithResult`, and `D2DWithResult` return the converted
 model, method, approximation flag, added-state warnings, and initial-state map.
@@ -89,9 +90,12 @@ numerical-integration, SciPy/NumPy oracle, or published MathWorks numbers).
 | D2D | ZOH | yes | yes | integer metadata retained | composed map | `TestD2DZOHAnalyticRecurrence`, `TestD2D_MIMO`, `TestD2DInitialStateOutput` |
 | D2D | Tustin (+prewarp) | yes | yes | integer metadata retained | composed map | `TestD2DTustinIndependentFrequency`, `TestD2DValidatesSameRateOptions` |
 
-Known gaps: nondecomposable fractional MIMO path delays with Thiran (L3TY7D);
-standalone explicit-order `ThiranDelay` short-delay stability bound (42JXRY);
-least-squares exact MATLAB coefficients (gated). Performance:
+Nondecomposable Thiran path delays: `TestTustinThiranNondecomposablePathDelays`,
+`TestTustinThiranPathDelaysWithInternalFeedback`. Explicit-order `ThiranDelay`
+accepts any stable delay `D > N-1`: `TestThiranDelayShortStableDelays`,
+`TestThiranDelayRejectsBelowStabilityBound`.
+
+Known gaps: least-squares exact MATLAB coefficients (gated). Performance:
 [conversion-performance.md](conversion-performance.md).
 
 References: [c2d](https://www.mathworks.com/help/control/ref/dynamicsystem.c2d.html),

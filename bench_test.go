@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -540,6 +541,27 @@ func BenchmarkDiscretizeWithOpts_IODelayThiran(b *testing.B) {
 	for b.Loop() {
 		if _, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkDiscretizeWithOpts_PathThiran(b *testing.B) {
+	for _, size := range []struct{ n, io int }{{4, 2}, {8, 4}} {
+		sys := benchSys(size.n, size.io, size.io)
+		sys.Delay = mat.NewDense(size.io, size.io, nil)
+		for i := range size.io {
+			sys.Delay.Set(i, i, 0.035+0.02*float64(i))
+		}
+		for _, modeling := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
+			b.Run(fmt.Sprintf("n=%d/io=%d/%s", size.n, size.io, modeling), func(b *testing.B) {
+				opts := C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: modeling}
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, err := sys.DiscretizeWithOpts(0.1, opts); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
 		}
 	}
 }

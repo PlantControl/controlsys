@@ -22,13 +22,21 @@ using internal unit delays, and `"state"` uses ordinary state variables.
 `ThiranOrder` is a maximum: order `N = min(ceil(D), ThiranOrder)` with integer
 remainder `ceil(D) - N` kept exact. Internal feedback delays receive the same
 filters; singular instantaneous loops are rejected. Nondecomposable fractional
-MIMO path delays with Thiran are still rejected (tracked: L3TY7D).
+MIMO path delays are first split into common input/output delays plus a residual
+path matrix. Each residual row (or column, whichever needs fewer copies) with a
+fractional entry gets its own copy of the discretized model and a Thiran bank;
+integer remainders become discrete path delays. A channel's filter is therefore
+the product of its input, residual, and output Thiran filters, not one filter
+for the channel's total delay as MATLAB applies to a delayed transfer function;
+both have the same low-frequency delay but different higher-frequency phase.
 
 Fractional external ZOH conversion preserves the original rational state order
 when delays decompose into input and output delays. It splits input kernels and
 uses one- or two-sample histories. Fractional FOH and residual MIMO path delays
 use independent channel realizations; their rational order can reach the
-original order times the input count times the output count. These fallbacks
+original order times the input count times the output count. Tustin/matched
+Thiran path delays copy the model once per fractional row or column, plus one
+shared copy for the rest. These fallbacks
 trade memory and conversion work for exact sampled response. Delay-free
 conversion retains its direct numerical fast path.
 
