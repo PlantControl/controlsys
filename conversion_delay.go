@@ -315,14 +315,11 @@ func applyConversionThiran(disc *System, input, output []float64, dt float64, op
 		}
 		if side.input {
 			disc.InputDelay = nil
-			disc, err = Series(bank, disc)
+			disc = conversionSeries(bank, disc)
 		} else {
 			bank.OutputDelay, bank.InputDelay = bank.InputDelay, nil
 			disc.OutputDelay = nil
-			disc, err = Series(disc, bank)
-		}
-		if err != nil {
-			return nil, err
+			disc = conversionSeries(disc, bank)
 		}
 	}
 	metadata.applyIO(disc)
