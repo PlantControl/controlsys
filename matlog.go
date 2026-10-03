@@ -3,129 +3,133 @@ package controlsys
 import (
 	"fmt"
 	"math"
-	"math/cmplx"
-
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// matLog computes the principal matrix logarithm of a real square matrix via
-// eigendecomposition: A = V·Λ·V⁻¹ ⇒ log(A) = V·log(Λ)·V⁻¹.
-//
-// Returns ErrSingularTransform if A has an eigenvalue on the branch cut
-// (real, ≤ 0) or if the eigenvector matrix is singular/ill-conditioned
-// (defective / near-defective A).
-//
-// Implementation: skips explicit V⁻¹ by solving V^T·L^T = (V·D)^T in the
-// 2n×2n real-augmented representation of the complex system, then transposes.
-// One LU factorization + one back-solve with n complex RHS.
-func matLog(A *mat.Dense) (*mat.Dense, error) {
-	n, c := A.Dims()
+// matLog computes the real principal logarithm by inverse scaling and squaring.
+// Eigenvalues on the non-positive real axis are outside its real branch.
+func matLog(a *mat.Dense) (*mat.Dense, error) {
+	n, c := a.Dims()
 	if n != c {
 		return nil, fmt.Errorf("matLog: non-square %dx%d", n, c)
 	}
 	if n == 0 {
-		return mat.NewDense(0, 0, nil), nil
+		return newDense(0, 0), nil
 	}
-
-	var eig mat.Eigen
-	if !eig.Factorize(A, mat.EigenRight) {
-		return nil, fmt.Errorf("matLog: eigendecomposition failed: %w", ErrSchurFailed)
+	if logarithm, err := matLogSpectral(a); err == nil {
+		return logarithm, nil
 	}
-	vals := eig.Values(nil)
-
-	logVals := make([]complex128, n)
-	for i, v := range vals {
-		if imag(v) == 0 && real(v) <= 0 {
-			return nil, fmt.Errorf("matLog: eigenvalue[%d]=%v on non-positive real axis (branch cut): %w",
-				i, v, ErrSingularTransform)
+	if !matrixRightHalfPlane(a) {
+		var eig mat.Eigen
+		if !eig.Factorize(a, mat.EigenNone) {
+			return nil, fmt.Errorf("matLog: eigendecomposition failed: %w", ErrSchurFailed)
 		}
-		if cmplx.Abs(v) == 0 {
-			return nil, fmt.Errorf("matLog: eigenvalue[%d]=0: %w", i, ErrSingularTransform)
+		for _, v := range eig.Values(nil) {
+			if imag(v) == 0 && real(v) <= 0 {
+				return nil, fmt.Errorf("matLog: eigenvalue %v on non-positive real axis: %w", v, ErrSingularTransform)
+			}
 		}
-		logVals[i] = cmplx.Log(v)
 	}
 
-	var vecC mat.CDense
-	eig.VectorsTo(&vecC)
-	vRaw := vecC.RawCMatrix()
+	return matrixLogISS(a)
+}
 
-	// Build V^T_aug = [[Re(V)^T, -Im(V)^T], [Im(V)^T, Re(V)^T]]  (2n × 2n).
-	// Build Y^T_aug where Y = V·D (D=diag(logVals)); (Y^T)_{i,j} = d_i · V_{j,i}.
-	vTaug := mat.NewDense(2*n, 2*n, nil)
-	yTaug := mat.NewDense(2*n, n, nil)
-	vaRaw := vTaug.RawMatrix()
-	yaRaw := yTaug.RawMatrix()
+func matrixLogISS(a *mat.Dense) (*mat.Dense, error) {
+	n, _ := a.Dims()
+	eye := mat.NewDense(n, n, nil)
 	for i := range n {
-		vRow := vRaw.Data[i*vRaw.Stride : i*vRaw.Stride+n]
-		for j := range n {
-			v := vRow[j]
-			a := real(v)
-			b := imag(v)
-			// V^T_aug = [[Re(V)^T, -Im(V)^T], [Im(V)^T, Re(V)^T]]; V_{i,j} lands at (j,i).
-			vaRaw.Data[j*vaRaw.Stride+i] = a
-			vaRaw.Data[j*vaRaw.Stride+(i+n)] = -b
-			vaRaw.Data[(j+n)*vaRaw.Stride+i] = b
-			vaRaw.Data[(j+n)*vaRaw.Stride+(i+n)] = a
-		}
+		eye.Set(i, i, 1)
 	}
-	// Y^T_aug: for row i of Y^T (complex), value at col j is d_i · V_{j,i}.
-	for i := range n {
-		d := logVals[i]
-		dr, di := real(d), imag(d)
-		reRow := yaRaw.Data[i*yaRaw.Stride : i*yaRaw.Stride+n]
-		imRow := yaRaw.Data[(i+n)*yaRaw.Stride : (i+n)*yaRaw.Stride+n]
-		for j := range n {
-			v := vRaw.Data[j*vRaw.Stride+i]
-			a := real(v)
-			b := imag(v)
-			reRow[j] = dr*a - di*b
-			imRow[j] = di*a + dr*b
+	x := denseCopy(a)
+	var diff mat.Dense
+	roots := 0
+	for {
+		diff.Sub(x, eye)
+		if mat.Norm(&diff, 1) <= 0.5 {
+			break
 		}
+		if roots == 32 {
+			return nil, fmt.Errorf("matLog: square-root scaling did not converge: %w", ErrSingularTransform)
+		}
+		var err error
+		x, err = matrixPrincipalSqrt(x, eye)
+		if err != nil {
+			return nil, err
+		}
+		roots++
 	}
-
+	var plus, minus mat.Dense
+	plus.Add(x, eye)
+	minus.Sub(x, eye)
 	var lu mat.LU
-	lu.Factorize(vTaug)
-	if luNearSingular(&lu) {
-		return nil, fmt.Errorf("matLog: eigenvector matrix singular (defective A): %w", ErrSingularTransform)
+	lu.Factorize(&plus)
+	var z mat.Dense
+	if err := lu.SolveTo(&z, false, &minus); err != nil {
+		return nil, fmt.Errorf("matLog: logarithm solve failed: %w", ErrSingularTransform)
 	}
-
-	xAug := mat.NewDense(2*n, n, nil)
-	if err := lu.SolveTo(xAug, false, yTaug); err != nil {
-		return nil, fmt.Errorf("matLog: LU solve failed: %w", ErrSingularTransform)
-	}
-
-	// xAug represents L^T in complex form: top half = Re(L^T), bottom half = Im(L^T).
-	// Take the real part of L = (Re(L^T))^T and bound the residual imaginary part.
-	xRaw := xAug.RawMatrix()
-	result := mat.NewDense(n, n, nil)
-	resRaw := result.RawMatrix()
-	maxIm, maxRe := 0.0, 0.0
-	for i := range n {
-		reRow := xRaw.Data[i*xRaw.Stride : i*xRaw.Stride+n]
-		imRow := xRaw.Data[(i+n)*xRaw.Stride : (i+n)*xRaw.Stride+n]
-		for j := range n {
-			re := reRow[j]
-			im := imRow[j]
-			// (L^T)_{i,j} = X_{i,j}  ⇒  L_{j,i} = X_{i,j}; set result[j,i].
-			resRaw.Data[j*resRaw.Stride+i] = re
-			if im < 0 {
-				im = -im
+	var z2 mat.Dense
+	z2.Mul(&z, &z)
+	term := denseCopy(&z)
+	sum := denseCopy(&z)
+	next, contribution := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+	for k := 1; k <= 100; k++ {
+		next.Mul(term, &z2)
+		term, next = next, term
+		contribution.Scale(1/float64(2*k+1), term)
+		sum.Add(sum, contribution)
+		if mat.Norm(contribution, 1) <= 2e-16*math.Max(1, mat.Norm(sum, 1)) {
+			sum.Scale(math.Ldexp(2, roots), sum)
+			if norm := mat.Norm(sum, 1); math.IsInf(norm, 0) || math.IsNaN(norm) {
+				return nil, fmt.Errorf("matLog: result overflow: %w", ErrOverflow)
 			}
-			if re > maxRe {
-				maxRe = re
-			} else if -re > maxRe {
-				maxRe = -re
-			}
-			if im > maxIm {
-				maxIm = im
-			}
+			return sum, nil
 		}
 	}
 
-	tol := 1e-8 * math.Max(1, maxRe)
-	if maxIm > tol {
-		return nil, fmt.Errorf("matLog: residual imaginary part %.3e exceeds tolerance %.3e (defective or near-defective A): %w",
-			maxIm, tol, ErrSingularTransform)
+	return nil, fmt.Errorf("matLog: logarithm series did not converge: %w", ErrSingularTransform)
+}
+
+func matrixPrincipalSqrt(a, eye *mat.Dense) (*mat.Dense, error) {
+	y, z := denseCopy(a), denseCopy(eye)
+	for range 100 {
+		var ly, lz mat.LU
+		ly.Factorize(y)
+		lz.Factorize(z)
+		var iy, iz mat.Dense
+		if err := ly.SolveTo(&iy, false, eye); err != nil {
+			return nil, fmt.Errorf("matLog: square-root inverse failed: %w", ErrSingularTransform)
+		}
+		if err := lz.SolveTo(&iz, false, eye); err != nil {
+			return nil, fmt.Errorf("matLog: square-root inverse failed: %w", ErrSingularTransform)
+		}
+		var yn, zn, change mat.Dense
+		yn.Add(y, &iz)
+		yn.Scale(0.5, &yn)
+		zn.Add(z, &iy)
+		zn.Scale(0.5, &zn)
+		change.Sub(&yn, y)
+		y, z = denseCopy(&yn), denseCopy(&zn)
+		if mat.Norm(&change, 1) <= 4e-15*math.Max(1, mat.Norm(y, 1)) {
+			return y, nil
+		}
 	}
-	return result, nil
+	return nil, fmt.Errorf("matLog: principal square root did not converge: %w", ErrSingularTransform)
+}
+
+func matrixRightHalfPlane(a *mat.Dense) bool {
+	n, _ := a.Dims()
+	raw := a.RawMatrix()
+	for i := range n {
+		row := raw.Data[i*raw.Stride : i*raw.Stride+n]
+		radius := 0.0
+		for j, v := range row {
+			if j != i {
+				radius += math.Abs(v)
+			}
+		}
+		if !(row[i] > radius) {
+			return false
+		}
+	}
+	return true
 }

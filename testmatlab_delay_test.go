@@ -272,7 +272,7 @@ func TestC2D_MATLAB_ZOH_FractionalDelay(t *testing.T) {
 	sys.InputDelay = []float64{0.25}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}

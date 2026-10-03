@@ -255,11 +255,8 @@ func TestRemainingArchitectureSignalMetadataMappings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(foh.StateName) != 5 {
-		t.Fatalf("FOH state names = %v, want 5 names", foh.StateName)
-	}
-	if foh.StateName[3] != "u-fast_prev" || foh.StateName[4] != "u-slow_prev" {
-		t.Fatalf("FOH augmented state names = %v", foh.StateName)
+	if !stringSlicesEqual(foh.StateName, sys.StateName) {
+		t.Fatalf("FOH state names = %v, want %v", foh.StateName, sys.StateName)
 	}
 
 	series, err := Series(sys, sys)

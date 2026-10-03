@@ -1,0 +1,21 @@
+goos: darwin
+goarch: arm64
+pkg: plantcontrol.org/v1/controlsys
+cpu: Apple M1 Pro
+                                           │ docs/benchmarks/conversion-negative-zoh/baseline.txt │ docs/benchmarks/conversion-negative-zoh/compressed.txt │
+                                           │                        sec/op                        │             sec/op               vs base               │
+NegativeZOHCompressedExtension/n2negative1                                           111.09µ ± 4%                       98.62µ ± 2%  -11.23% (p=0.002 n=6)
+NegativeZOHCompressedExtension/n4negative2                                            250.3µ ± 0%                       225.7µ ± 2%   -9.85% (p=0.002 n=6)
+geomean                                                                               166.8µ                            149.2µ       -10.54%
+
+                                           │ docs/benchmarks/conversion-negative-zoh/baseline.txt │ docs/benchmarks/conversion-negative-zoh/compressed.txt │
+                                           │                         B/op                         │              B/op                vs base               │
+NegativeZOHCompressedExtension/n2negative1                                           90.45Ki ± 0%                      80.97Ki ± 0%  -10.49% (p=0.002 n=6)
+NegativeZOHCompressedExtension/n4negative2                                           275.9Ki ± 0%                      250.8Ki ± 0%   -9.12% (p=0.002 n=6)
+geomean                                                                              158.0Ki                           142.5Ki        -9.80%
+
+                                           │ docs/benchmarks/conversion-negative-zoh/baseline.txt │ docs/benchmarks/conversion-negative-zoh/compressed.txt │
+                                           │                      allocs/op                       │            allocs/op              vs base              │
+NegativeZOHCompressedExtension/n2negative1                                             893.0 ± 0%                         823.0 ± 0%  -7.84% (p=0.002 n=6)
+NegativeZOHCompressedExtension/n4negative2                                            1066.0 ± 0%                         998.0 ± 0%  -6.38% (p=0.002 n=6)
+geomean                                                                                975.7                              906.3       -7.11%

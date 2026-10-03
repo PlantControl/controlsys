@@ -254,8 +254,7 @@ func TestCrossval_Tustin_Reference(t *testing.T) {
 		}
 	}
 
-	sinPi4 := math.Sin(math.Pi / 4)
-	bdTruth := (1.0 / 3.0) / sinPi4
+	bdTruth := 1.0 / 3.0
 	for i := range 2 {
 		if math.Abs(hd.B.At(i, 0)-bdTruth) > 1e-10 {
 			t.Errorf("Bd[%d,0] = %g, want %g", i, hd.B.At(i, 0), bdTruth)
@@ -267,12 +266,6 @@ func TestCrossval_Tustin_Reference(t *testing.T) {
 		{4.0 / 3.0, 4.0 / 3.0},
 		{4.0 / 3.0, 1.0 / 3.0},
 	})
-	cr, cc := cdTruth.Dims()
-	for i := range cr {
-		for j := range cc {
-			cdTruth.Set(i, j, cdTruth.At(i, j)*sinPi4)
-		}
-	}
 	assertMatNear(t, "Cd", hd.C, cdTruth, 1e-10)
 
 	ddTruth := denseFromRows([][]float64{
@@ -1609,17 +1602,16 @@ func TestCrossval_Tustin_Reference_Rate2(t *testing.T) {
 	})
 	assertMatNear(t, "Ad", hd.A, adTruth, 1e-10)
 
-	sqrt1over3 := math.Sqrt(1.0 / 3.0)
 	bdTruth := denseFromRows([][]float64{
-		{0.2 / sqrt1over3},
-		{0.2 / sqrt1over3},
+		{0.2},
+		{0.2},
 	})
 	assertMatNear(t, "Bd", hd.B, bdTruth, 1e-10)
 
 	cdTruth := denseFromRows([][]float64{
-		{0.9 * sqrt1over3, 1.2 * sqrt1over3},
-		{1.2 * sqrt1over3, 1.2 * sqrt1over3},
-		{1.2 * sqrt1over3, 0.3 * sqrt1over3},
+		{0.9, 1.2},
+		{1.2, 1.2},
+		{1.2, 0.3},
 	})
 	assertMatNear(t, "Cd", hd.C, cdTruth, 1e-10)
 
