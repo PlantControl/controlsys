@@ -637,19 +637,22 @@ func TestDiscretizeConvertsDelay(t *testing.T) {
 	}
 }
 
-func TestDiscretizeDelayFractionalError(t *testing.T) {
+func TestDiscretizeDelayFractionalRounds(t *testing.T) {
 	A := mat.NewDense(1, 1, []float64{-1})
 	B := mat.NewDense(1, 1, []float64{1})
 	C := mat.NewDense(1, 1, []float64{1})
 	D := mat.NewDense(1, 1, []float64{0})
-	delay := mat.NewDense(1, 1, []float64{0.35})
+	delay := mat.NewDense(1, 1, []float64{0.37})
 
 	sys, _ := New(A, B, C, D, 0)
 	sys.Delay = delay
 
-	_, err := sys.Discretize(0.1)
-	if !errors.Is(err, ErrFractionalDelay) {
-		t.Errorf("expected ErrFractionalDelay, got %v", err)
+	disc, err := sys.Discretize(0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disc.Delay.At(0, 0) != 4 {
+		t.Fatalf("rounded path delay=%v, want4", disc.Delay)
 	}
 }
 

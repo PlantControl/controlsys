@@ -519,9 +519,11 @@ func BenchmarkDiscretizeWithOpts_Thiran(b *testing.B) {
 		0,
 	)
 	sys.InputDelay = []float64{0.35}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -534,9 +536,11 @@ func BenchmarkDiscretizeWithOpts_IODelayThiran(b *testing.B) {
 		0,
 	)
 	sys.Delay = mat.NewDense(1, 1, []float64{0.35})
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

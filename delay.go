@@ -94,6 +94,9 @@ func validateLFTDims(n, m, p, N int, B2, C2, D12, D21, D22 *mat.Dense) error {
 			return fmt.Errorf("%s required when InternalDelay is set: %w", name, ErrDimensionMismatch)
 		}
 		r, c := mat.Dims()
+		if (wantR == 0 || wantC == 0) && r == 0 && c == 0 {
+			return nil
+		}
 		if r != wantR || c != wantC {
 			return fmt.Errorf("%s %d×%d != %d×%d: %w", name, r, c, wantR, wantC, ErrDimensionMismatch)
 		}
@@ -324,7 +327,11 @@ func absorbInternalDelay(sys *System) (*System, error) {
 }
 
 func absorbInternalDiscreteDelay(sys *System) (*System, error) {
-	H, tau := sys.GetDelayModel()
+	internal := *sys
+	internal.Delay = nil
+	internal.InputDelay = nil
+	internal.OutputDelay = nil
+	H, tau := internal.GetDelayModel()
 	n, mN, pN := H.Dims()
 	N := len(tau)
 	m := mN - N
@@ -333,7 +340,7 @@ func absorbInternalDiscreteDelay(sys *System) (*System, error) {
 	delays := make([]int, N)
 	totalShift := 0
 	for j := range N {
-		delays[j] = int(math.Round(tau[j] / sys.Dt))
+		delays[j] = int(math.Round(tau[j]))
 		totalShift += delays[j]
 	}
 
@@ -1521,6 +1528,10 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 		switch e.kind {
 		case 'i':
 			j := e.col
+			for k := range N0 {
+				d22Raw.Data[k*d22Raw.Stride+idx] = d21Raw.Data[k*d21Raw.Stride+j]
+				d21Raw.Data[k*d21Raw.Stride+j] = 0
+			}
 			if n > 0 {
 				for i := range n {
 					b2Raw.Data[i*b2Raw.Stride+idx] = curBRaw.Data[i*curBRaw.Stride+j]
@@ -1538,6 +1549,10 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 
 		case 'o':
 			i := e.row
+			for k := range N0 {
+				d22Raw.Data[idx*d22Raw.Stride+k] = d12Raw.Data[i*d12Raw.Stride+k]
+				d12Raw.Data[i*d12Raw.Stride+k] = 0
+			}
 			if n > 0 {
 				for j := range n {
 					c2Raw.Data[idx*c2Raw.Stride+j] = curCRaw.Data[i*curCRaw.Stride+j]

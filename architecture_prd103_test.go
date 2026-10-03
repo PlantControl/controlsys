@@ -108,7 +108,7 @@ func TestPRD103DelayConversionPolicyPublicWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	disc, err := cont.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := cont.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -324,7 +325,7 @@ func TestDiscretizeWithOpts_Tustin_IntegerOutputDelay(t *testing.T) {
 	}
 }
 
-func TestDiscretizeWithOpts_FractionalInputDelay_NoThiran_Error(t *testing.T) {
+func TestDiscretizeWithOpts_FractionalInputDelay_ExactZOH(t *testing.T) {
 	sys, _ := New(
 		mat.NewDense(1, 1, []float64{-1}),
 		mat.NewDense(1, 1, []float64{1}),
@@ -334,9 +335,12 @@ func TestDiscretizeWithOpts_FractionalInputDelay_NoThiran_Error(t *testing.T) {
 	)
 	sys.InputDelay = []float64{0.35}
 
-	_, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH})
-	if err == nil {
-		t.Fatal("expected error for fractional delay without Thiran")
+	disc, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disc.LFT == nil || disc.LFT.Tau[0] != 1 || disc.InputDelay[0] != 3 {
+		t.Fatalf("exact delayed ZOH metadata: %+v", disc)
 	}
 }
 
@@ -351,19 +355,19 @@ func TestDiscretizeWithOpts_FractionalInputDelay_WithThiran(t *testing.T) {
 	sys.InputDelay = []float64{0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !disc.IsDiscrete() {
 		t.Fatal("expected discrete")
 	}
-	if disc.InputDelay != nil {
-		t.Errorf("InputDelay should be nil after Thiran absorption, got %v", disc.InputDelay)
+	if len(disc.InputDelay) != 1 || disc.InputDelay[0] != 1 {
+		t.Errorf("InputDelay = %v, want integer remainder [1]", disc.InputDelay)
 	}
 	n, _, _ := disc.Dims()
-	if n <= 1 {
-		t.Errorf("state dim = %d, expected > 1 (plant + Thiran)", n)
+	if n != 4 {
+		t.Errorf("state dim = %d, want 4 (plant + order3 filter)", n)
 	}
 }
 
@@ -378,16 +382,16 @@ func TestDiscretizeWithOpts_FractionalOutputDelay_WithThiran(t *testing.T) {
 	sys.OutputDelay = []float64{0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if disc.OutputDelay != nil {
-		t.Errorf("OutputDelay should be nil after Thiran absorption, got %v", disc.OutputDelay)
+	if len(disc.OutputDelay) != 1 || disc.OutputDelay[0] != 1 {
+		t.Errorf("OutputDelay = %v, want integer remainder [1]", disc.OutputDelay)
 	}
 	n, _, _ := disc.Dims()
-	if n <= 1 {
-		t.Errorf("state dim = %d, expected > 1 (plant + Thiran)", n)
+	if n != 4 {
+		t.Errorf("state dim = %d, want 4 (plant + order3 filter)", n)
 	}
 }
 
@@ -402,12 +406,12 @@ func TestDiscretizeWithOpts_MIMO_FractionalInputDelay_WithThiran(t *testing.T) {
 	sys.InputDelay = []float64{0.35, 0.2}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if disc.InputDelay != nil {
-		t.Errorf("InputDelay should be nil after Thiran absorption, got %v", disc.InputDelay)
+	if len(disc.InputDelay) != 2 || disc.InputDelay[0] != 1 || disc.InputDelay[1] != 2 {
+		t.Errorf("InputDelay = %v, want integer remainders [1 2]", disc.InputDelay)
 	}
 	_, m, p := disc.Dims()
 	if m != 2 || p != 2 {
@@ -426,7 +430,7 @@ func TestDiscretizeWithOpts_MixedIntegerFractionalInputDelay(t *testing.T) {
 	sys.InputDelay = []float64{0.3, 0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +483,7 @@ func TestDiscretizeWithOpts_FreqResponseWithThiran(t *testing.T) {
 	sys.InputDelay = []float64{0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +547,7 @@ func TestDiscretizeWithOpts_SISO_FractionalIODelay_Thiran(t *testing.T) {
 	sys.Delay = mat.NewDense(1, 1, []float64{0.35})
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +578,7 @@ func TestDiscretizeWithOpts_MIMO_DecomposableIODelay_Thiran(t *testing.T) {
 	sys.Delay = mat.NewDense(2, 2, []float64{0.3, 0.5, 0.3, 0.5})
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +624,7 @@ func TestDiscretizeWithOpts_MixedIODelay_InputDelay_Thiran(t *testing.T) {
 	sys.InputDelay = []float64{0.15}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,11 +706,15 @@ func TestUndiscretizeInternalDelay(t *testing.T) {
 	if len(ct.LFT.Tau) != 1 || math.Abs(ct.LFT.Tau[0]-0.5) > 1e-12 {
 		t.Errorf("InternalDelay = %v, want [0.5]", ct.LFT.Tau)
 	}
-	assertMatClose(t, "B2", ct.LFT.B2, sys.LFT.B2, 1e-15)
-	assertMatClose(t, "C2", ct.LFT.C2, sys.LFT.C2, 1e-15)
-	assertMatClose(t, "D12", ct.LFT.D12, sys.LFT.D12, 1e-15)
-	assertMatClose(t, "D21", ct.LFT.D21, sys.LFT.D21, 1e-15)
-	assertMatClose(t, "D22", ct.LFT.D22, sys.LFT.D22, 1e-15)
+	for _, w := range []float64{.2, 1, 5} {
+		point := complex(0, w)
+		z := (20 + point) / (20 - point)
+		want, err := conversionAugmentedRational(sys).EvalFr(z)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertPrewarpResponse(t, conversionAugmentedRational(ct), point, want)
+	}
 }
 
 func TestUndiscretizeAllDelays(t *testing.T) {
@@ -831,7 +839,7 @@ func TestDiscretizeTustinWithInputDelay(t *testing.T) {
 	}
 }
 
-func TestDiscretizeTustinFractionalDelayError(t *testing.T) {
+func TestDiscretizeTustinFractionalDelayRounds(t *testing.T) {
 	sys, _ := New(
 		mat.NewDense(1, 1, []float64{-1}),
 		mat.NewDense(1, 1, []float64{1}),
@@ -839,11 +847,14 @@ func TestDiscretizeTustinFractionalDelayError(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
-	sys.InputDelay = []float64{0.35}
+	sys.InputDelay = []float64{0.37}
 
-	_, err := sys.Discretize(0.1)
-	if err == nil {
-		t.Fatal("expected error for fractional delay")
+	disc, err := sys.Discretize(0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disc.InputDelay[0] != 4 {
+		t.Fatalf("rounded InputDelay=%v, want [4]", disc.InputDelay)
 	}
 }
 
@@ -947,10 +958,11 @@ func TestDiscretizeZOHInternalDelayD22General(t *testing.T) {
 		D22: mat.NewDense(2, 2, []float64{0.1, 0.5, 0.3, 0}),
 	}
 
-	_, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH})
-	if err == nil {
-		t.Fatal("expected error for non-upper-triangular D22")
+	disc, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH})
+	if err != nil {
+		t.Fatal(err)
 	}
+	assertMatClose(t, "positive-delay D22", disc.LFT.D22, sys.LFT.D22, 1e-12)
 }
 
 func TestDiscretizeZOHInternalDelayFreqResp(t *testing.T) {
@@ -1015,8 +1027,8 @@ func TestC2DDelayModelingInternal(t *testing.T) {
 	if len(disc.LFT.Tau) != 1 {
 		t.Fatalf("InternalDelay len = %d, want 1", len(disc.LFT.Tau))
 	}
-	if math.Abs(disc.LFT.Tau[0]-0.5) > 1e-9 {
-		t.Errorf("InternalDelay[0] = %v, want 0.5", disc.LFT.Tau[0])
+	if math.Abs(disc.LFT.Tau[0]-1) > 1e-9 {
+		t.Errorf("InternalDelay[0] = %v, want 1", disc.LFT.Tau[0])
 	}
 	if len(disc.InputDelay) != 1 || disc.InputDelay[0] != 3 {
 		t.Errorf("InputDelay = %v, want [3]", disc.InputDelay)
@@ -1038,7 +1050,7 @@ func TestC2DDelayModelingInternalFreqResp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	discState, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 3})
+	discState, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1132,8 +1144,8 @@ func TestC2DDelayModelingInternalOutputDelay(t *testing.T) {
 	if len(disc.LFT.Tau) != 1 {
 		t.Fatalf("InternalDelay len = %d, want 1", len(disc.LFT.Tau))
 	}
-	if math.Abs(disc.LFT.Tau[0]-0.5) > 1e-9 {
-		t.Errorf("InternalDelay[0] = %v, want 0.5", disc.LFT.Tau[0])
+	if math.Abs(disc.LFT.Tau[0]-1) > 1e-9 {
+		t.Errorf("InternalDelay[0] = %v, want 1", disc.LFT.Tau[0])
 	}
 	if len(disc.OutputDelay) != 1 || disc.OutputDelay[0] != 3 {
 		t.Errorf("OutputDelay = %v, want [3]", disc.OutputDelay)
@@ -1166,8 +1178,8 @@ func TestC2DDelayModelingInternalMIMO(t *testing.T) {
 	if len(disc.LFT.Tau) != 1 {
 		t.Fatalf("InternalDelay len = %d, want 1 (only ch0 has fractional)", len(disc.LFT.Tau))
 	}
-	if math.Abs(disc.LFT.Tau[0]-0.5) > 1e-9 {
-		t.Errorf("InternalDelay[0] = %v, want 0.5", disc.LFT.Tau[0])
+	if math.Abs(disc.LFT.Tau[0]-1) > 1e-9 {
+		t.Errorf("InternalDelay[0] = %v, want 1", disc.LFT.Tau[0])
 	}
 	if disc.InputDelay[0] != 3 {
 		t.Errorf("InputDelay[0] = %v, want 3", disc.InputDelay[0])
@@ -1216,7 +1228,7 @@ func TestImpulse_PureGain(t *testing.T) {
 	if n != 0 || m != 3 || p != 2 {
 		t.Fatalf("dims = %d,%d,%d, want 0,3,2", n, m, p)
 	}
-	assertMatClose(t, "D", disc.D, D, 1e-14)
+	assertMatClose(t, "D", disc.D, newDense(2, 3), 1e-14)
 }
 
 func TestImpulse_Scalar(t *testing.T) {
@@ -1246,8 +1258,8 @@ func TestImpulse_Scalar(t *testing.T) {
 	if disc.C.At(0, 0) != c {
 		t.Errorf("Cd = %v, want %v", disc.C.At(0, 0), c)
 	}
-	if disc.D.At(0, 0) != 0 {
-		t.Errorf("Dd = %v, want 0", disc.D.At(0, 0))
+	if math.Abs(disc.D.At(0, 0)-dt*c*b) > 1e-12 {
+		t.Errorf("Dd = %v, want %v", disc.D.At(0, 0), dt*c*b)
 	}
 }
 
@@ -1374,80 +1386,33 @@ func TestFOH_InvalidDt(t *testing.T) {
 }
 
 func TestFOH_PureGain(t *testing.T) {
-	D := mat.NewDense(2, 3, []float64{1, 2, 3, 4, 5, 6})
-	sys, _ := NewGain(D, 0)
+	d := mat.NewDense(2, 3, []float64{1, 2, 3, 4, 5, 6})
+	sys, _ := NewGain(d, 0)
 	disc, err := sys.DiscretizeFOH(0.1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	n, m, p := disc.Dims()
-	if n != 3 || m != 3 || p != 2 {
-		t.Fatalf("dims = %d,%d,%d, want 3,3,2", n, m, p)
+	if n != 0 || m != 3 || p != 2 {
+		t.Fatalf("dims = %d,%d,%d, want 0,3,2", n, m, p)
 	}
-	for i := range n {
-		for j := range n {
-			if disc.A.At(i, j) != 0 {
-				t.Errorf("A[%d,%d] = %v, want 0", i, j, disc.A.At(i, j))
-			}
-		}
-	}
-	for j := range m {
-		if disc.B.At(j, j) != 1 {
-			t.Errorf("B[%d,%d] = %v, want 1", j, j, disc.B.At(j, j))
-		}
-	}
-	assertMatClose(t, "C", disc.C, D, 1e-14)
-	for i := range p {
-		for j := range m {
-			if disc.D.At(i, j) != 0 {
-				t.Errorf("D[%d,%d] = %v, want 0", i, j, disc.D.At(i, j))
-			}
-		}
-	}
+	assertMatClose(t, "D", disc.D, d, 1e-14)
 }
 
 func TestFOH_Scalar(t *testing.T) {
-	a, b, c := -2.0, 3.0, 1.0
-	dt := 0.1
-	sys, _ := New(
-		mat.NewDense(1, 1, []float64{a}),
-		mat.NewDense(1, 1, []float64{b}),
-		mat.NewDense(1, 1, []float64{c}),
-		mat.NewDense(1, 1, []float64{0}),
-		0,
-	)
+	a, b, c, dt := -2.0, 3.0, 1.0, 0.1
+	sys, _ := New(mat.NewDense(1, 1, []float64{a}), mat.NewDense(1, 1, []float64{b}), mat.NewDense(1, 1, []float64{c}), mat.NewDense(1, 1, []float64{0}), 0)
 	disc, err := sys.DiscretizeFOH(dt)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	n, m, p := disc.Dims()
-	if n != 2 || m != 1 || p != 1 {
-		t.Fatalf("dims = %d,%d,%d, want 2,1,1", n, m, p)
-	}
-
 	ad := math.Exp(a * dt)
-	g0 := (ad - 1) / a * b
-	g1Integral := -b/a + (ad-1)/(a*a*dt)*b
-	b0 := g0 - g1Integral
-	b1 := g1Integral
-
-	tol := 1e-10
-	if diff := math.Abs(disc.A.At(0, 0) - ad); diff > tol {
-		t.Errorf("A[0,0] = %v, want %v", disc.A.At(0, 0), ad)
-	}
-	if diff := math.Abs(disc.A.At(0, 1) - b0); diff > tol {
-		t.Errorf("A[0,1] = %v, want %v (B0)", disc.A.At(0, 1), b0)
-	}
-	if diff := math.Abs(disc.B.At(0, 0) - b1); diff > tol {
-		t.Errorf("B[0,0] = %v, want %v (B1)", disc.B.At(0, 0), b1)
-	}
-	if disc.B.At(1, 0) != 1 {
-		t.Errorf("B[1,0] = %v, want 1", disc.B.At(1, 0))
-	}
-	if diff := math.Abs(disc.C.At(0, 0) - c); diff > tol {
-		t.Errorf("C[0,0] = %v, want %v", disc.C.At(0, 0), c)
-	}
+	gamma0 := math.Expm1(a*dt) / a * b
+	gamma1 := (math.Expm1(a*dt) - a*dt) / (a * a * dt) * b
+	assertMatClose(t, "A", disc.A, mat.NewDense(1, 1, []float64{ad}), 1e-12)
+	assertMatClose(t, "B", disc.B, mat.NewDense(1, 1, []float64{gamma0 + (ad-1)*gamma1}), 1e-12)
+	assertMatClose(t, "C", disc.C, sys.C, 1e-12)
+	assertMatClose(t, "D", disc.D, mat.NewDense(1, 1, []float64{c * gamma1}), 1e-12)
 }
 
 func TestFOH_DoubleIntegrator(t *testing.T) {
@@ -1463,8 +1428,8 @@ func TestFOH_DoubleIntegrator(t *testing.T) {
 	}
 
 	n, m, p := disc.Dims()
-	if n != 3 || m != 1 || p != 1 {
-		t.Fatalf("dims = %d,%d,%d, want 3,1,1", n, m, p)
+	if n != 2 || m != 1 || p != 1 {
+		t.Fatalf("dims = %d,%d,%d, want 2,1,1", n, m, p)
 	}
 
 	tol := 1e-10
@@ -1490,8 +1455,8 @@ func TestFOH_SingularA(t *testing.T) {
 		t.Fatal(err)
 	}
 	n, m, p := disc.Dims()
-	if n != 3 || m != 1 || p != 1 {
-		t.Fatalf("dims = %d,%d,%d, want 3,1,1", n, m, p)
+	if n != 2 || m != 1 || p != 1 {
+		t.Fatalf("dims = %d,%d,%d, want 2,1,1", n, m, p)
 	}
 }
 
@@ -1506,8 +1471,8 @@ func TestFOH_MIMO(t *testing.T) {
 		t.Fatal(err)
 	}
 	n, m, p := disc.Dims()
-	if n != 4 || m != 2 || p != 2 {
-		t.Fatalf("dims = %d,%d,%d, want 4,2,2", n, m, p)
+	if n != 2 || m != 2 || p != 2 {
+		t.Fatalf("dims = %d,%d,%d, want 2,2,2", n, m, p)
 	}
 }
 
@@ -2008,17 +1973,9 @@ func TestDiscretizeFOHWithInternalDelay(t *testing.T) {
 func TestDiscretizeImpulseWithInternalDelay(t *testing.T) {
 	lft := makeLFTSystem(t)
 
-	dt := 0.1
-	disc, err := lft.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodImpulse})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !disc.IsDiscrete() {
-		t.Fatal("expected discrete")
-	}
-	if disc.LFT == nil || len(disc.LFT.Tau) == 0 {
-		t.Fatal("expected InternalDelay")
+	_, err := lft.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodImpulse})
+	if !errors.Is(err, ErrFeedbackDelay) {
+		t.Fatalf("internal impulse: %v", err)
 	}
 }
 
@@ -2101,16 +2058,9 @@ func TestDiscretizeImpulseAugmented_SISO(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	disc, err := lft.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodImpulse})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !disc.IsDiscrete() {
-		t.Fatal("expected discrete")
-	}
-	if disc.LFT == nil || len(disc.LFT.Tau) == 0 {
-		t.Fatal("expected InternalDelay")
+	_, err = lft.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodImpulse})
+	if !errors.Is(err, ErrFeedbackDelay) {
+		t.Fatalf("internal impulse: %v", err)
 	}
 }
 
@@ -2198,29 +2148,24 @@ func TestD2C_ZOH_DefaultMethod(t *testing.T) {
 }
 
 func TestD2C_ZOH_NegativeEigenvalue(t *testing.T) {
-	A := mat.NewDense(1, 1, []float64{-0.5})
-	B := mat.NewDense(1, 1, []float64{1})
-	C := mat.NewDense(1, 1, []float64{1})
-	D := mat.NewDense(1, 1, []float64{0})
-	sys, _ := New(A, B, C, D, 0.1)
-
-	_, err := sys.D2C(C2DMethodZOH)
-	if err == nil {
-		t.Fatal("expected ErrSingularTransform for negative-real eigenvalue")
+	sys, _ := New(mat.NewDense(1, 1, []float64{-0.5}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0.1)
+	out, err := sys.D2C(C2DMethodZOH)
+	if err != nil {
+		t.Fatal(err)
 	}
+	alpha, omega := math.Log(0.5)/0.1, math.Pi/0.1
+	assertMatClose(t, "A", out.A, mat.NewDense(2, 2, []float64{alpha, -omega, omega, alpha}), 1e-10)
+	assertMatClose(t, "B", out.B, mat.NewDense(2, 1, []float64{alpha / (-1.5), omega / (-1.5)}), 1e-10)
 }
 
 func TestD2C_ZOH_EigenvalueAtOne(t *testing.T) {
-	A := mat.NewDense(1, 1, []float64{1.0})
-	B := mat.NewDense(1, 1, []float64{0.1})
-	C := mat.NewDense(1, 1, []float64{1})
-	D := mat.NewDense(1, 1, []float64{0})
-	sys, _ := New(A, B, C, D, 0.1)
-
-	_, err := sys.D2C(C2DMethodZOH)
-	if err == nil {
-		t.Fatal("expected ErrSingularTransform for eigenvalue at 1 (A_d-I singular)")
+	sys, _ := New(mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0.1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0.1)
+	out, err := sys.D2C(C2DMethodZOH)
+	if err != nil {
+		t.Fatal(err)
 	}
+	assertMatClose(t, "A", out.A, mat.NewDense(1, 1, []float64{0}), 1e-14)
+	assertMatClose(t, "B", out.B, mat.NewDense(1, 1, []float64{1}), 1e-14)
 }
 
 func TestD2C_ZOH_MIMO_Roundtrip(t *testing.T) {

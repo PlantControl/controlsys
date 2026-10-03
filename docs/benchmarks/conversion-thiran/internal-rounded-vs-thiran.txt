@@ -1,0 +1,21 @@
+goos: darwin
+goarch: arm64
+pkg: plantcontrol.org/v1/controlsys
+cpu: Apple M1 Pro
+BenchmarkConversionThiran/rounded-8         	   51374	      4451 ns/op	    7985 B/op	     150 allocs/op
+BenchmarkConversionThiran/rounded-8         	   54552	      4429 ns/op	    7985 B/op	     150 allocs/op
+BenchmarkConversionThiran/rounded-8         	   54500	      4408 ns/op	    7985 B/op	     150 allocs/op
+BenchmarkConversionThiran/rounded-8         	   51967	      4506 ns/op	    7985 B/op	     150 allocs/op
+BenchmarkConversionThiran/rounded-8         	   53979	      4458 ns/op	    7985 B/op	     150 allocs/op
+BenchmarkConversionThiran/delay-8           	   22615	     10524 ns/op	   21838 B/op	     331 allocs/op
+BenchmarkConversionThiran/delay-8           	   23054	     10372 ns/op	   21839 B/op	     331 allocs/op
+BenchmarkConversionThiran/delay-8           	   22610	     10765 ns/op	   21839 B/op	     331 allocs/op
+BenchmarkConversionThiran/delay-8           	   19100	     12702 ns/op	   21840 B/op	     331 allocs/op
+BenchmarkConversionThiran/delay-8           	   19771	     12318 ns/op	   21839 B/op	     331 allocs/op
+BenchmarkConversionThiran/state-8           	   19066	     12733 ns/op	   19705 B/op	     335 allocs/op
+BenchmarkConversionThiran/state-8           	   19140	     11739 ns/op	   19706 B/op	     335 allocs/op
+BenchmarkConversionThiran/state-8           	   18057	     12454 ns/op	   19706 B/op	     335 allocs/op
+BenchmarkConversionThiran/state-8           	   20408	     12392 ns/op	   19706 B/op	     335 allocs/op
+BenchmarkConversionThiran/state-8           	   22159	     12687 ns/op	   19706 B/op	     335 allocs/op
+PASS
+ok  	plantcontrol.org/v1/controlsys	3.921s

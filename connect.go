@@ -782,6 +782,9 @@ func seriesLFT(sys1, sys2 *System) (*System, error) {
 	B = resizeDense(B, n, m)
 	C = resizeDense(C, p, n)
 	D = resizeDense(D, p, m)
+	if n == 0 {
+		A, B, C = nil, nil, nil
+	}
 
 	if N == 0 {
 		sys, err := newNoCopy(A, B, C, D, s1.Dt)
@@ -814,6 +817,7 @@ func seriesLFT(sys1, sys2 *System) (*System, error) {
 		}
 		setBlock(d12, 0, 0, mulDense(s2.D, s1.LFT.D12))
 		setBlock(d21, 0, 0, s1.LFT.D21)
+		setBlock(d22, 0, 0, s1.LFT.D22)
 		if N2 > 0 {
 			setBlock(d22, N1, 0, mulDense(s2.LFT.D21, s1.LFT.D12))
 		}
@@ -823,10 +827,10 @@ func seriesLFT(sys1, sys2 *System) (*System, error) {
 		if n2 > 0 {
 			setBlock(b2, n1, N1, s2.LFT.B2)
 		}
-		if n1 > 0 {
+		if n2 > 0 {
 			setBlock(c2, N1, n1, s2.LFT.C2)
 		}
-		if n2 > 0 {
+		if n1 > 0 {
 			c2sub := mulDense(s2.LFT.D21, s1.C)
 			r, c := c2sub.Dims()
 			for i := range r {

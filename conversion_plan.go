@@ -20,30 +20,12 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 	if sys.IsDiscrete() {
 		return c2dPlan{}, fmt.Errorf("DiscretizeWithOpts: system already discrete: %w", ErrWrongDomain)
 	}
-	if dt <= 0 {
-		return c2dPlan{}, ErrInvalidSampleTime
+	opts, err := normalizeC2DOptions(dt, opts)
+	if err != nil {
+		return c2dPlan{}, err
 	}
-
 	method := opts.Method
-	if method == "" {
-		method = C2DMethodZOH
-	}
-	switch method {
-	case C2DMethodZOH, C2DMethodTustin, C2DMethodFOH, C2DMethodImpulse, C2DMethodMatched:
-	default:
-		return c2dPlan{}, fmt.Errorf("DiscretizeWithOpts: unknown method %q", method)
-	}
-	opts.Method = method
-
 	delayModeling := opts.DelayModeling
-	if delayModeling == "" {
-		delayModeling = C2DDelayModelingState
-	}
-	switch delayModeling {
-	case C2DDelayModelingState, C2DDelayModelingInternal:
-	default:
-		return c2dPlan{}, fmt.Errorf("DiscretizeWithOpts: unknown DelayModeling %q", delayModeling)
-	}
 
 	cp := sys.Copy()
 	plan := c2dPlan{
@@ -58,7 +40,7 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 	}
 	plan.workSys.InputDelay = nil
 	plan.workSys.OutputDelay = nil
-	if sys.Delay != nil && (opts.ThiranOrder > 0 || delayModeling == C2DDelayModelingInternal) {
+	if sys.Delay != nil && (opts.ThiranOrder > 0 || ((method == C2DMethodZOH || method == C2DMethodFOH) && conversionHasFractionalPathDelay(sys.Delay, dt))) {
 		decomp := decomposedDelayMatrix(sys.Delay)
 		if decomp.hasResidual() {
 			plan.workSys.Delay = decomp.residual
@@ -69,26 +51,38 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 		plan.contOutputDelay = mergeDelays(sys.OutputDelay, decomp.outputDelay)
 	}
 
+	if method == C2DMethodTustin || method == C2DMethodMatched {
+		if opts.ThiranOrder == 0 {
+			plan.workSys.Delay, err = roundConversionPathDelays(plan.workSys.Delay, dt)
+			if err != nil {
+				return c2dPlan{}, err
+			}
+		}
+	}
+
 	return plan, nil
 }
 
 func (p c2dPlan) run() (*System, error) {
+	if !p.sys.HasInternalDelay() && (p.method == C2DMethodZOH || p.method == C2DMethodFOH || p.method == C2DMethodImpulse) {
+		if conversionHasFractionalPathDelay(p.workSys.Delay, p.dt) || ((p.method == C2DMethodFOH || p.method == C2DMethodImpulse) && conversionHasFractionalExternalDelay(p.sys, p.dt)) {
+			return discretizeDelayedChannels(p.sys, p.dt, p.opts)
+		}
+	}
 	if p.workSys.HasInternalDelay() {
 		return p.discretizeInternalDelay()
 	}
-
 	disc, err := p.discretizeMethod()
 	if err != nil {
 		return nil, err
-	}
-
-	if p.delayModeling == C2DDelayModelingInternal {
-		return discretizeDelaysAsInternal(disc, p.contInputDelay, p.contOutputDelay, p.dt)
 	}
 	return p.applyExternalDelays(disc)
 }
 
 func (p c2dPlan) discretizeInternalDelay() (*System, error) {
+	if (p.method == C2DMethodZOH || p.method == C2DMethodFOH) && conversionHoldFeedbackNeedsAbsorption(p.workSys, p.contInputDelay, p.contOutputDelay, p.dt) {
+		return discretizeHoldFeedback(p.workSys, p.contInputDelay, p.contOutputDelay, p.dt, p.opts)
+	}
 	disc, err := discretizeWithInternalDelay(p.workSys, p.dt, p.opts)
 	if err != nil {
 		return nil, err
@@ -99,43 +93,51 @@ func (p c2dPlan) discretizeInternalDelay() (*System, error) {
 func (p c2dPlan) discretizeMethod() (*System, error) {
 	switch p.method {
 	case "zoh":
-		return p.workSys.DiscretizeZOH(p.dt)
+		return p.workSys.discretizeZOH(p.dt)
 	case "tustin":
-		return p.workSys.Discretize(p.dt)
+		return p.workSys.discretizeTustin(p.dt, p.opts.PrewarpFrequency)
 	case "foh":
-		return p.workSys.DiscretizeFOH(p.dt)
+		return p.workSys.discretizeModifiedFOH(p.dt)
+	case C2DMethodLeastSquares:
+		return p.workSys.discretizeLeastSquares(p.dt, p.opts.FitOrder)
 	case "impulse":
-		return p.workSys.DiscretizeImpulse(p.dt)
+		return p.workSys.discretizeImpulseParity(p.dt)
 	case "matched":
-		return p.workSys.DiscretizeMatched(p.dt)
+		return p.workSys.discretizeMatched(p.dt)
 	default:
 		panic("unvalidated C2D method")
 	}
 }
 
 func (p c2dPlan) applyExternalDelays(disc *System) (*System, error) {
-	policy := newDelayConversionPolicy(p.dt, p.opts.ThiranOrder, 0)
-	return policy.applyDiscreteExternal(disc, p.contInputDelay, p.contOutputDelay)
+	return applyConversionExternalDelays(p.workSys, disc, p.contInputDelay, p.contOutputDelay, p.dt, p.opts)
 }
 
 type d2cPlan struct {
 	sys    *System
 	method C2DMethod
+	opts   D2COptions
 }
 
-func newD2CPlan(sys *System, method C2DMethod) (d2cPlan, error) {
+func newD2CPlan(sys *System, opts D2COptions) (d2cPlan, error) {
 	if sys.IsContinuous() {
 		return d2cPlan{}, fmt.Errorf("D2C: system already continuous: %w", ErrWrongDomain)
 	}
-	if method == "" {
-		method = C2DMethodZOH
+	if err := validateConversionSampleTime(sys.Dt); err != nil {
+		return d2cPlan{}, err
 	}
-	switch method {
-	case C2DMethodZOH, C2DMethodTustin:
-		return d2cPlan{sys: sys, method: method}, nil
+	if opts.Method == "" {
+		opts.Method = C2DMethodZOH
+	}
+	switch opts.Method {
+	case C2DMethodZOH, C2DMethodTustin, C2DMethodFOH, C2DMethodMatched:
 	default:
-		return d2cPlan{}, fmt.Errorf("D2C: unknown method %q (supported: \"tustin\", \"zoh\")", method)
+		return d2cPlan{}, fmt.Errorf("D2C: unsupported method %q: %w", opts.Method, ErrInvalidConversionOptions)
 	}
+	if err := validatePrewarp(sys.Dt, opts.Method, opts.PrewarpFrequency); err != nil {
+		return d2cPlan{}, err
+	}
+	return d2cPlan{sys: sys, method: opts.Method, opts: opts}, nil
 }
 
 func (p d2cPlan) run() (*System, error) {
@@ -143,7 +145,11 @@ func (p d2cPlan) run() (*System, error) {
 	case C2DMethodZOH:
 		return p.sys.d2cZOH()
 	case C2DMethodTustin:
-		return p.sys.Undiscretize()
+		return p.sys.undiscretizeTustin(p.opts.PrewarpFrequency)
+	case C2DMethodFOH:
+		return p.sys.d2cFOH()
+	case C2DMethodMatched:
+		return p.sys.d2cMatched()
 	default:
 		panic("unvalidated D2C method")
 	}
@@ -159,8 +165,20 @@ func newD2DPlan(sys *System, newDt float64, opts C2DOptions) (d2dPlan, error) {
 	if sys.IsContinuous() {
 		return d2dPlan{}, fmt.Errorf("D2D: system is continuous: %w", ErrWrongDomain)
 	}
-	if newDt <= 0 {
-		return d2dPlan{}, ErrInvalidSampleTime
+	if err := validateConversionSampleTime(sys.Dt); err != nil {
+		return d2dPlan{}, err
+	}
+	opts, err := normalizeC2DOptions(newDt, opts)
+	if err != nil {
+		return d2dPlan{}, err
+	}
+	switch opts.Method {
+	case C2DMethodZOH, C2DMethodTustin:
+	default:
+		return d2dPlan{}, fmt.Errorf("D2D: unsupported method %q: %w", opts.Method, ErrInvalidConversionOptions)
+	}
+	if err := validatePrewarp(sys.Dt, opts.Method, opts.PrewarpFrequency); err != nil {
+		return d2dPlan{}, err
 	}
 	return d2dPlan{sys: sys, newDt: newDt, opts: opts}, nil
 }
@@ -170,7 +188,7 @@ func (p d2dPlan) run() (*System, error) {
 		return p.sys.Copy(), nil
 	}
 
-	contSys, err := p.sys.Undiscretize()
+	contSys, err := p.sys.D2CWithOpts(D2COptions{Method: p.opts.Method, PrewarpFrequency: p.opts.PrewarpFrequency})
 	if err != nil {
 		return nil, fmt.Errorf("D2D: %w", err)
 	}
