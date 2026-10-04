@@ -45,10 +45,12 @@ func residualDelayGroups(total *mat.Dense, byRow bool, n int) ([]residualDelayGr
 	}
 
 	keys := make([]float64, lines*width)
+	scale := 0.0
 	for l := range lines {
 		mn := math.Inf(1)
 		for k := range width {
 			mn = min(mn, at(l, k))
+			scale = max(scale, math.Abs(at(l, k)))
 		}
 		for k := range width {
 			keys[l*width+k] = at(l, k) - mn
@@ -61,7 +63,7 @@ func residualDelayGroups(total *mat.Dense, byRow bool, n int) ([]residualDelayGr
 		placed := false
 		for g := range groups {
 			ref := groups[g].members[0]
-			if delayKeysEqual(key, keys[ref*width:ref*width+width]) {
+			if delayKeysEqual(key, keys[ref*width:ref*width+width], scale) {
 				groups[g].members = append(groups[g].members, l)
 				placed = true
 				break
@@ -87,9 +89,9 @@ func residualDelayGroups(total *mat.Dense, byRow bool, n int) ([]residualDelayGr
 	return groups, cost
 }
 
-func delayKeysEqual(a, b []float64) bool {
+func delayKeysEqual(a, b []float64, scale float64) bool {
 	for k := range a {
-		if math.Abs(a[k]-b[k]) > delayTopologyTol {
+		if !delaysEqual(a[k], b[k], scale) {
 			return false
 		}
 	}

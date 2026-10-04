@@ -65,7 +65,7 @@ func newDescriptorFixture(t *testing.T, dt float64, delays string) descriptorFix
 	}
 	scale := 1.0
 	if dt == 0 {
-		scale = 0.125
+		scale = 0.1
 	}
 	switch delays {
 	case "io", "internal":
