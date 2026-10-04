@@ -386,8 +386,9 @@ func sliceOrZeros(s []float64, n int) []float64 {
 
 // Feedback returns the closed-loop model of plant with controller in the
 // feedback path. sign is -1 for negative feedback, +1 for positive; a nil
-// controller closes unit feedback. The result is exact by default: delays
-// are carried as internal delays when the loop topology supports them.
+// controller closes unit feedback. The result is exact by default: every
+// plant and controller delay lies inside the loop and becomes an internal
+// delay, matching MATLAB feedback.
 // Pass WithApproximatedDelays, WithPadeOrder, or WithThiranOrder to receive
 // a delay-free rational model instead.
 func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (*System, error) {
@@ -1169,7 +1170,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 
 	var delay *mat.Dense
 	hasIODelay := false
-	for _, s := range systems {
+	for _, s := range srcs {
 		if s.Delay != nil {
 			hasIODelay = true
 			break
@@ -1178,7 +1179,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 	if hasIODelay {
 		delay = mat.NewDense(pTotal, mTotal, nil)
 		pOff, mOff = 0, 0
-		for i, s := range systems {
+		for i, s := range srcs {
 			if s.Delay != nil {
 				setBlock(delay, pOff, mOff, s.Delay)
 			}
@@ -1189,7 +1190,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 
 	var inDel []float64
 	hasIn := false
-	for _, s := range systems {
+	for _, s := range srcs {
 		if s.InputDelay != nil {
 			hasIn = true
 			break
@@ -1198,7 +1199,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 	if hasIn {
 		inDel = make([]float64, mTotal)
 		off := 0
-		for i, s := range systems {
+		for i, s := range srcs {
 			if s.InputDelay != nil {
 				copy(inDel[off:], s.InputDelay)
 			}
@@ -1208,7 +1209,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 
 	var outDel []float64
 	hasOut := false
-	for _, s := range systems {
+	for _, s := range srcs {
 		if s.OutputDelay != nil {
 			hasOut = true
 			break
@@ -1217,7 +1218,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 	if hasOut {
 		outDel = make([]float64, pTotal)
 		off := 0
-		for i, s := range systems {
+		for i, s := range srcs {
 			if s.OutputDelay != nil {
 				copy(outDel[off:], s.OutputDelay)
 			}
@@ -1369,12 +1370,29 @@ func Connect(sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) 
 func connectWithDelay(sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) {
 	_, m, p := sys.Dims()
 
-	savedInputDelay := selectVisibleDelays(sys.InputDelay, inputs)
-	savedOutputDelay := selectVisibleDelays(sys.OutputDelay, outputs)
+	qRaw := Q.RawMatrix()
+	openInput := func(j int) bool {
+		for _, v := range qRaw.Data[j*qRaw.Stride : j*qRaw.Stride+p] {
+			if v != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	openOutput := func(i int) bool {
+		for k := range m {
+			if qRaw.Data[k*qRaw.Stride+i] != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	savedInputDelay, hoistInputs := selectHoistableDelays(sys.InputDelay, inputs, openInput)
+	savedOutputDelay, hoistOutputs := selectHoistableDelays(sys.OutputDelay, outputs, openOutput)
 
 	sCopy := sys.Copy()
-	sCopy.InputDelay = clearDelayIndexes(sCopy.InputDelay, inputs)
-	sCopy.OutputDelay = clearDelayIndexes(sCopy.OutputDelay, outputs)
+	sCopy.InputDelay = clearDelayIndexes(sCopy.InputDelay, hoistInputs)
+	sCopy.OutputDelay = clearDelayIndexes(sCopy.OutputDelay, hoistOutputs)
 
 	sLFT, err := sCopy.PullDelaysToLFT()
 	if err != nil {
