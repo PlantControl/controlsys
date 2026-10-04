@@ -30,7 +30,7 @@ type LeastSquaresResult struct {
 // Integrators retain their multiplicity and leading low-frequency residue;
 // they require sufficient fit order and use an open midpoint frequency grid.
 // Integer external delays are preserved; fractional and internal delays and
-// descriptor models are rejected. A finite grid cannot certify intersample error
+// singular descriptor models are rejected. A finite grid cannot certify intersample error
 // or capture arbitrarily narrow resonances. No exact inverse is promised.
 func (sys *System) DiscretizeLeastSquares(dt float64, fitOrder int) (*LeastSquaresResult, error) {
 	if sys.IsDiscrete() {
@@ -43,8 +43,9 @@ func (sys *System) DiscretizeLeastSquares(dt float64, fitOrder int) (*LeastSquar
 	if m != 1 || p != 1 {
 		return nil, ErrNotSISO
 	}
-	if sys.IsDescriptor() {
-		return nil, ErrDescriptorUnsupported
+	sys, err := conversionStandardForm(sys, "DiscretizeLeastSquares")
+	if err != nil {
+		return nil, err
 	}
 	if sys.HasInternalDelay() {
 		return nil, fmt.Errorf("DiscretizeLeastSquares: internal delays: %w", ErrFeedbackDelay)

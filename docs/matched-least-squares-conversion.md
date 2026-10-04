@@ -9,8 +9,8 @@ as artificial zeros, and rejects other nonpositive real roots and non-real
 reconstruction. This convention cannot distinguish a genuine Nyquist zero from
 an artificial matched zero. The source model remains unchanged. Input/output
 names and external delays are preserved; state names are cleared because the
-new realization has different coordinates. Descriptor and internal-delay
-models are rejected.
+new realization has different coordinates. Nonsingular descriptor models use
+their explicit form; singular descriptor and internal-delay models are rejected.
 
 These conventions follow the [MathWorks conversion methods](https://www.mathworks.com/help/control/ug/continuous-discrete-conversion-methods.html).
 The [MathWorks PID reference](https://www.mathworks.com/help/control/ref/pid2.html)
@@ -37,7 +37,8 @@ low-frequency residue. These models use an open midpoint grid to avoid
 sampling the singular DC response, and the fit order must accommodate the
 integrators. Singular responses at other sampled frequencies are rejected.
 Exact integer external delays are preserved; the direct fitting API rejects
-fractional external delays, internal delays, MIMO, and descriptor models.
+fractional external delays, internal delays, MIMO, and singular descriptor
+models.
 Option-based conversion applies its common external-delay policy separately.
 
 Fit quality uses a distinct midpoint validation grid. RMS relative error is

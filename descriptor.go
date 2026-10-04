@@ -125,3 +125,17 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	}
 	return poles, nil
 }
+
+// conversionStandardForm returns sys with E folded into the state equation.
+// Sampling conversions are defined on explicit models; singular E has no
+// explicit form and is rejected.
+func conversionStandardForm(sys *System, context string) (*System, error) {
+	if !sys.IsDescriptor() {
+		return sys, nil
+	}
+	explicit, err := sys.ToExplicit()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
+	}
+	return explicit, nil
+}

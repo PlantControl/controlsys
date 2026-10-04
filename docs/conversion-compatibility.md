@@ -58,8 +58,11 @@ nonzero initial conditions are refused where unsupported. Delay history still
 requires separate initialization. Reverse conversion cannot recover aliased
 frequencies.
 
-Descriptor, sparse/TRBDF2, identified/stochastic model families, and arbitrary
-absorbed-delay continuous inverses are outside this ordinary proper LTI API.
+Descriptor models with nonsingular E are converted in explicit form (E\A,
+E\B and internal-delay E\B2; state coordinates unchanged); singular E is
+rejected with ErrDescriptorSingular and ErrDescriptorUnsupported. Sparse/TRBDF2,
+identified/stochastic model families, and arbitrary absorbed-delay continuous
+inverses are outside this ordinary proper LTI API.
 Exact full MATLAB parity remains gated by the documented unverified cases.
 
 Validation uses analytic scalar and nonsymmetric MIMO sampled responses,

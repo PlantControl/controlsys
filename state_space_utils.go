@@ -49,31 +49,27 @@ func (sys *System) ToExplicit() (*System, error) {
 		cp.E = nil
 		return cp, nil
 	}
-	n, _, _ := sys.Dims()
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	if luNearSingular(&lu) {
 		return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 	}
 
-	Aexp := mat.NewDense(n, n, nil)
-	if err := lu.SolveTo(Aexp, false, sys.A); err != nil {
+	result := sys.Copy()
+	result.E = nil
+	if err := lu.SolveTo(result.A, false, sys.A); err != nil {
 		return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 	}
-	var Bexp *mat.Dense
-	if _, m, _ := sys.Dims(); m > 0 {
-		Bexp = mat.NewDense(n, m, nil)
-		if err := lu.SolveTo(Bexp, false, sys.B); err != nil {
+	if !sys.B.IsEmpty() {
+		if err := lu.SolveTo(result.B, false, sys.B); err != nil {
 			return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 		}
-	} else {
-		Bexp = &mat.Dense{}
 	}
-
-	result := sys.Copy()
-	result.A = Aexp
-	result.B = Bexp
-	result.E = nil
+	if result.LFT != nil && result.LFT.B2 != nil {
+		if err := lu.SolveTo(result.LFT.B2, false, sys.LFT.B2); err != nil {
+			return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
+		}
+	}
 	return result, nil
 }
 
