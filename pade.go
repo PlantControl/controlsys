@@ -19,19 +19,29 @@ func (sys *System) Pade(order int) (*System, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Pade: %w", err)
 	}
-
-	N := lft.internalDelayCount()
-	if N == 0 {
+	if lft.internalDelayCount() == 0 {
 		return sys.Copy(), nil
 	}
+	result, err := padeCloseInternalDelay(lft, order)
+	if err != nil {
+		return nil, fmt.Errorf("Pade: %w", err)
+	}
+	propagateIONames(result, sys)
+	return result, nil
+}
 
+// padeCloseInternalDelay closes every internal delay of lft with an
+// order-order Padé approximant. External delays of lft are ignored; callers
+// own them.
+func padeCloseInternalDelay(lft *System, order int) (*System, error) {
+	N := lft.internalDelayCount()
 	n, m, p := lft.Dims()
 
 	var delayBank *System
 	for j := range N {
 		pd, err := PadeDelay(lft.LFT.Tau[j], order)
 		if err != nil {
-			return nil, fmt.Errorf("Pade: delay %d (tau=%v): %w", j, lft.LFT.Tau[j], err)
+			return nil, fmt.Errorf("delay %d (tau=%v): %w", j, lft.LFT.Tau[j], err)
 		}
 		if delayBank == nil {
 			delayBank = pd
@@ -53,7 +63,7 @@ func (sys *System) Pade(order int) (*System, error) {
 	D22 := lft.LFT.D22
 
 	Dd := delayBank.D
-	Einv, err := solveIdentityMinusProduct(D22, Dd, N, "Pade", ErrSingularTransform)
+	Einv, err := solveIdentityMinusProduct(D22, Dd, N, "delay loop", ErrSingularTransform)
 	if err != nil {
 		return nil, err
 	}
@@ -143,12 +153,11 @@ func (sys *System) Pade(order int) (*System, error) {
 	Dcl.Mul(D12, DdED21)
 	Dcl.Add(Dcl, lft.D)
 
-	result, err := newNoCopy(Acl, Bcl, Ccl, Dcl, 0)
+	result, err := newNoCopy(Acl, Bcl, Ccl, Dcl, lft.Dt)
 	if err != nil {
 		return nil, err
 	}
 	result.E = augmentDescriptorE(lft.E, n, nTotal)
-	propagateIONames(result, sys)
 	return result, nil
 }
 

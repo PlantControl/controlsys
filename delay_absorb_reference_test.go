@@ -330,6 +330,60 @@ func assertScopeStructure(t *testing.T, label string, scope AbsorbScope, src, go
 	}
 }
 
+func TestAbsorbDelayEveryScopeMatchesReference(t *testing.T) {
+	scopes := []AbsorbScope{AbsorbInput, AbsorbOutput, AbsorbIO, AbsorbInternal, AbsorbAll}
+	for _, dt := range []float64{0, 1} {
+		for _, descriptor := range []bool{false, true} {
+			for _, c := range absorbScopeCases {
+				for _, scope := range scopes {
+					if dt == 0 && c.resid && (scope == AbsorbIO || scope == AbsorbAll) {
+						continue
+					}
+					label := c.name + "/" + string(scope)
+					if dt == 0 {
+						label = "continuous/" + label
+					}
+					if descriptor {
+						label = "descriptor/" + label
+					}
+					scale := 1.0
+					if dt == 0 {
+						scale = 0.1
+					}
+					sys := absorbScopePlant(t, dt, true, descriptor)
+					c.apply(t, sys, scale)
+					got, err := sys.AbsorbDelay(scope)
+					if err != nil {
+						t.Fatalf("%s: %v", label, err)
+					}
+					assertScopeStructure(t, label, scope, sys, got)
+					ref := sys
+					if dt == 0 && (scope == AbsorbIO || scope == AbsorbAll) {
+						ref = combinedPadeSystem(sys, []float64{0.1, 0.2}, []float64{0, 0.2})
+					}
+					assertScopeMatchesReference(t, label, scope, ref, got)
+				}
+			}
+		}
+	}
+}
+
+func TestAbsorbInternalContinuousKeepsIODelaysOnce(t *testing.T) {
+	sys := absorbScopePlant(t, 0, true, false)
+	if err := sys.SetInputDelay([]float64{0.25, 0}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sys.AbsorbDelay(AbsorbInternal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, _ := got.Dims(); n != 3+2*DefaultPadeOrder {
+		t.Fatalf("%d states, want %d", n, 3+2*DefaultPadeOrder)
+	}
+	assertScopeStructure(t, "input", AbsorbInternal, sys, got)
+	assertScopeMatchesReference(t, "input", AbsorbInternal, sys, got)
+}
+
 func TestDecomposeIODelaySnapsDecimalRoundoff(t *testing.T) {
 	vals := []float64{0, 0.1, 0.3, 0.7}
 	for _, i0 := range vals {

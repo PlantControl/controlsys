@@ -511,6 +511,26 @@ func BenchmarkAbsorbInternalDelay(b *testing.B) {
 	}
 }
 
+func BenchmarkAbsorbInternalDelayContinuous(b *testing.B) {
+	A := mat.NewDense(5, 5, nil)
+	for i := range 5 {
+		A.Set(i, i, -1-float64(i)*0.2)
+		if i > 0 {
+			A.Set(i, i-1, 0.1)
+		}
+	}
+	B := mat.NewDense(5, 2, []float64{1, 0, 0, 1, 0.2, 0, 0, 0.1, 0.3, 0})
+	C := mat.NewDense(2, 5, []float64{1, 0, 0.2, 0, 0, 0, 0, 0.1, 0, 1})
+	sys, _ := New(A, B, C, mat.NewDense(2, 2, nil), 0)
+	B2 := mat.NewDense(5, 2, []float64{0.5, 0, 0, 0.3, 0.1, 0, 0, 0.2, 0, 0.1})
+	C2 := mat.NewDense(2, 5, []float64{0.2, 0.4, 0, 0, 0, 0, 0, 0.3, 0.1, 0})
+	sys.SetInternalDelay([]float64{0.3, 0.7}, B2, C2, mat.NewDense(2, 2, nil), mat.NewDense(2, 2, nil), mat.NewDense(2, 2, []float64{0, 0.1, 0.2, 0}))
+	b.ReportAllocs()
+	for b.Loop() {
+		sys.AbsorbDelay(AbsorbInternal)
+	}
+}
+
 func BenchmarkDiscretizeWithOpts_Thiran(b *testing.B) {
 	sys, _ := New(
 		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
