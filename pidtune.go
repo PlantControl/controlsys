@@ -306,10 +306,11 @@ func computePIDF(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 		phiCRad = -math.Pi/2 + 0.05
 	}
 
-	Kp, Ki, Kd := pidFromPhase(terms, magP, phiCRad, 5.0)
 	i := terms.integral()
-
-	for range 20 {
+	phiAdj := phiCRad
+	var Kp, Ki, Kd float64
+	for range 100 {
+		Kp, Ki, Kd = pidFromPhase(terms, magP, phiAdj, 5.0)
 		Td := 0.0
 		if Kp > 0 {
 			Td = Kd / Kp
@@ -321,8 +322,6 @@ func computePIDF(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 
 		C := complex(Kp, 0) + complex(Ki, 0)*i + complex(Kd, 0)*terms.derivative(Tf)
 		cMag := cmplx.Abs(C)
-		cPhase := cmplx.Phase(C)
-
 		if cMag == 0 {
 			break
 		}
@@ -331,19 +330,17 @@ func computePIDF(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 		Ki *= scale
 		Kd *= scale
 
-		pErr := phiCRad - cPhase
-		if math.Abs(pErr) < 0.001 {
+		pErr := phiCRad - cmplx.Phase(C)
+		if math.Abs(pErr) < 1e-12 {
 			break
 		}
-
-		phiAdj := phiCRad + pErr
+		phiAdj += pErr
 		if phiAdj >= math.Pi/2 {
 			phiAdj = math.Pi/2 - 0.05
 		}
 		if phiAdj <= -math.Pi/2 {
 			phiAdj = -math.Pi/2 + 0.05
 		}
-		Kp, Ki, Kd = pidFromPhase(terms, magP, phiAdj, 5.0)
 	}
 
 	pid.Kp = Kp

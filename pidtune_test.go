@@ -292,11 +292,9 @@ func TestPidtuneMeetsTargetForContinuousAndDiscretePlants(t *testing.T) {
 	cases := []struct {
 		types  []PidtuneType
 		wc, pm float64
-		tol    float64
 	}{
-		{[]PidtuneType{PidtunePI, PidtunePID}, 0.8, 60, 1e-9},
-		{[]PidtuneType{PidtunePDF, PidtunePID}, 2.5, 60, 1e-9},
-		{[]PidtuneType{PidtunePIDF}, 2.5, 60, 0.1},
+		{[]PidtuneType{PidtunePI, PidtunePID}, 0.8, 60},
+		{[]PidtuneType{PidtunePDF, PidtunePID, PidtunePIDF}, 2.5, 60},
 	}
 	for _, plant := range []*System{cont, disc} {
 		for _, tc := range cases {
@@ -321,7 +319,7 @@ func TestPidtuneMeetsTargetForContinuousAndDiscretePlants(t *testing.T) {
 				}
 				l := c * evalSS(plant, s)
 				pm := 180 + cmplx.Phase(l)*180/math.Pi
-				if math.Abs(cmplx.Abs(l)-1) > tc.tol || math.Abs(pm-tc.pm) > tc.tol*180/math.Pi {
+				if math.Abs(cmplx.Abs(l)-1) > 1e-9 || math.Abs(pm-tc.pm) > 1e-7 {
 					t.Errorf("dt=%g %s: |L(jwc)|=%.12g PM=%.12g, want 1 and %g", plant.Dt, typ, cmplx.Abs(l), pm, tc.pm)
 				}
 				if typ == PidtunePID && tc.wc == 2.5 && pid.Kd <= 0 {
