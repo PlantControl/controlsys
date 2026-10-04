@@ -171,9 +171,6 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 		return nil, nil
 	}
 	if e.sys.HasInternalDelay() {
-		if e.sys.IsDescriptor() {
-			return nil, fmt.Errorf("FreqResponse: descriptor models with internal delays are not supported: %w", ErrDescriptorUnsupported)
-		}
 		resp, err := freqResponseLFT(e.sys, omega, e.p, e.m)
 		if err != nil {
 			return nil, err
@@ -268,9 +265,6 @@ func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
 	pm := e.p * e.m
 
 	if e.sys.HasInternalDelay() {
-		if e.sys.IsDescriptor() {
-			return nil, fmt.Errorf("EvalFr: descriptor models with internal delays are not supported: %w", ErrDescriptorUnsupported)
-		}
 		g, err := evalFrLFT(e.sys, s, e.p, e.m)
 		if err != nil {
 			return nil, err
@@ -705,8 +699,15 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, n, N, p, m int) 
 		d22Data, d22Stride = r.Data, r.Stride
 	}
 
-	if err := cResolventInto(ws.resolvent, ws.sIA, ws.invBuf, aRaw.Data, aRaw.Stride, s, n); err != nil {
-		return err
+	if sys.E == nil {
+		if err := cResolventInto(ws.resolvent, ws.sIA, ws.invBuf, aRaw.Data, aRaw.Stride, s, n); err != nil {
+			return err
+		}
+	} else {
+		eRaw := sys.E.RawMatrix()
+		if err := cDescriptorResolventInto(ws.resolvent, ws.sIA, ws.invBuf, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride, s, n); err != nil {
+			return err
+		}
 	}
 
 	cComputeHInto(ws.H11, ws.hTemp, ws.resolvent, cRaw.Data, cRaw.Stride, bRaw.Data, bRaw.Stride, dData, dStride, n, p, m)
