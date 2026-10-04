@@ -7,7 +7,7 @@ type StabsepResult struct {
 
 func Stabsep(sys *System) (*StabsepResult, error) {
 	isStable := func(ev complex128) bool {
-		return poleInsideStabilityBoundary(ev, sys.IsContinuous(), 0)
+		return poleInsideStabilityBoundary(ev, sys.IsContinuous(), poleStabilityTolerance(ev))
 	}
 
 	stable, unstable, err := decomposeByEigenvalues(sys, isStable)

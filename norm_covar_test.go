@@ -117,9 +117,8 @@ func TestCovar_SISO_Continuous_WithD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := 0.75
-	if math.Abs(P.At(0, 0)-want) > 1e-10 {
-		t.Errorf("Covar = %g, want %g", P.At(0, 0), want)
+	if !math.IsInf(P.At(0, 0), 1) {
+		t.Errorf("Covar = %g, want +Inf (white noise through D)", P.At(0, 0))
 	}
 }
 
@@ -282,5 +281,82 @@ func TestLsim_BadDims(t *testing.T) {
 	_, err := Lsim(sys, mat.NewDense(5, 2, nil), []float64{0, 1, 2, 3, 4}, nil)
 	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("got %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestCovar_ContinuousFeedthroughEntries(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-1, 2, -0.5, -3})
+	B := mat.NewDense(2, 2, []float64{1, 0.3, 0, 1})
+	C := mat.NewDense(3, 2, []float64{1, 0, 0.4, 1, -0.2, 0.7})
+	D := mat.NewDense(3, 2, []float64{0.5, 0, 0, 0, 0, -0.3})
+	W := mat.NewDense(2, 2, []float64{1, 0, 0, 2})
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	P, err := Covar(sys, W)
+	if err != nil {
+		t.Fatal(err)
+	}
+	X, err := Lyap(A, mat.NewDense(2, 2, []float64{1.18, 0.6, 0.6, 2}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var CX, want mat.Dense
+	CX.Mul(C, X)
+	want.Mul(&CX, C.T())
+	for i := range 3 {
+		for j := range 3 {
+			got := P.At(i, j)
+			switch {
+			case (i == 0 && j == 0) || (i == 2 && j == 2):
+				if !math.IsInf(got, 1) {
+					t.Errorf("P[%d,%d] = %g, want +Inf", i, j, got)
+				}
+			case math.Abs(got-want.At(i, j)) > 1e-12:
+				t.Errorf("P[%d,%d] = %g, want %g", i, j, got, want.At(i, j))
+			}
+		}
+	}
+}
+
+func TestCovar_StaticGain(t *testing.T) {
+	D := mat.NewDense(2, 2, []float64{1, 0.5, 0, 0})
+	W := mat.NewDense(2, 2, []float64{2, 0, 0, 1})
+	for _, dt := range []float64{0, 0.1} {
+		g, err := NewGain(D, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		P, err := Covar(g, W)
+		if err != nil {
+			t.Fatalf("dt=%v: %v", dt, err)
+		}
+		want := mat.NewDense(2, 2, []float64{2.25, 0, 0, 0})
+		if dt == 0 {
+			want.Set(0, 0, math.Inf(1))
+		}
+		if !mat.Equal(P, want) {
+			t.Errorf("dt=%v: Covar =\n%v\nwant\n%v", dt, mat.Formatted(P), mat.Formatted(want))
+		}
+	}
+}
+
+func TestCovar_DiscreteInternalDelay(t *testing.T) {
+	sys := internalDelayFixture(t, 0.1, mat.NewDense(2, 1, []float64{0.2, 0}))
+	W := mat.NewDense(2, 2, []float64{1, 0.2, 0.2, 0.5})
+	want := mat.NewDense(2, 2, nil)
+	for _, hk := range discreteImpulseLFT(sys, 4000) {
+		var hw, hwh mat.Dense
+		hw.Mul(hk, W)
+		hwh.Mul(&hw, hk.T())
+		want.Add(want, &hwh)
+	}
+	P, err := Covar(sys, W)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matEqual(P, want, 1e-9) {
+		t.Errorf("Covar =\n%v\nwant (impulse sum)\n%v", mat.Formatted(P), mat.Formatted(want))
 	}
 }

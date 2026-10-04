@@ -127,7 +127,7 @@ func (sys *System) IsStable() (bool, error) {
 		return false, err
 	}
 	for _, p := range poles {
-		if poleOnOrOutsideStabilityBoundary(p, sys.IsContinuous(), 0) {
+		if poleOnOrOutsideStabilityBoundary(p, sys.IsContinuous(), poleStabilityTolerance(p)) {
 			return false, nil
 		}
 	}

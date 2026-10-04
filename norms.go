@@ -28,16 +28,27 @@ func Norm(sys *System, normType float64) (float64, error) {
 
 // H2Norm computes the H2 norm of a stable LTI system.
 //
-// For continuous systems with D ≠ 0, the H2 norm is infinite.
+// For continuous systems with D ≠ 0, or with a delayed direct feedthrough
+// through internal delays, the H2 norm is infinite. Input, output and I/O
+// delays do not change the H2 norm. Discrete internal delays are absorbed
+// exactly; continuous strictly proper internal-delay models are rejected.
 func H2Norm(sys *System) (float64, error) {
-	policy := newEnergyAnalysisPolicy(sys)
-	if err := policy.requireStandard("H2Norm"); err != nil {
+	if err := newDescriptorPolicy(sys).requireStandard("H2Norm"); err != nil {
 		return 0, err
 	}
+	if sys.HasInternalDelay() && sys.IsContinuous() &&
+		(!allZeroDense(sys.D) || lftHasDirectFeedthrough(sys.LFT)) {
+		return math.Inf(1), nil
+	}
+	sys, err := absorbEnergyInternalDelay(sys, "H2Norm")
+	if err != nil {
+		return 0, err
+	}
+	policy := newEnergyAnalysisPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 {
-		if sys.IsContinuous() {
+		if sys.IsContinuous() && !allZeroDense(sys.D) {
 			return math.Inf(1), nil
 		}
 		return frobNormD(sys.D, p, m), nil

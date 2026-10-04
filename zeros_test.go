@@ -432,3 +432,120 @@ func assertZerosMatch(t *testing.T, got, want []complex128, tol float64) {
 		}
 	}
 }
+
+func pencilMinSingularValue(t *testing.T, sys *System, z complex128) float64 {
+	t.Helper()
+	n, m, p := sys.Dims()
+	R := mat.NewDense(2*(n+p), 2*(n+m), nil)
+	set := func(i, j int, v complex128) {
+		R.Set(i, j, real(v))
+		R.Set(i, j+n+m, -imag(v))
+		R.Set(i+n+p, j, imag(v))
+		R.Set(i+n+p, j+n+m, real(v))
+	}
+	for i := range n {
+		for j := range n {
+			e := 0.0
+			if sys.E != nil {
+				e = sys.E.At(i, j)
+			} else if i == j {
+				e = 1
+			}
+			set(i, j, complex(sys.A.At(i, j), 0)-z*complex(e, 0))
+		}
+		for j := range m {
+			set(i, n+j, complex(sys.B.At(i, j), 0))
+		}
+	}
+	for i := range p {
+		for j := range n {
+			set(n+i, j, complex(sys.C.At(i, j), 0))
+		}
+		for j := range m {
+			set(n+i, n+j, complex(sys.D.At(i, j), 0))
+		}
+	}
+	var svd mat.SVD
+	if !svd.Factorize(R, mat.SVDNone) {
+		t.Fatal("svd failed")
+	}
+	sv := svd.Values(nil)
+	return sv[len(sv)-1] / sv[0]
+}
+
+func TestZeros_DescriptorPencil(t *testing.T) {
+	E := mat.NewDense(3, 3, []float64{2, 1, 0, 0.5, 3, 0.2, 0, 0.4, 1.5})
+	A0 := mat.NewDense(3, 3, []float64{-1, 2, 0.5, -0.5, -3, 1, 0.3, 0.7, -2})
+	B0 := mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, -1})
+	C := mat.NewDense(2, 3, []float64{1, 0.5, 0, 0, 1, -1})
+	for _, tc := range []struct {
+		name string
+		D    *mat.Dense
+	}{
+		{"D=0", mat.NewDense(2, 2, nil)},
+		{"D invertible", mat.NewDense(2, 2, []float64{1, 0.2, 0.3, 2})},
+	} {
+		for _, dt := range []float64{0, 0.1} {
+			var EA, EB mat.Dense
+			EA.Mul(E, A0)
+			EB.Mul(E, B0)
+			desc, err := NewDescriptor(&EA, &EB, C, tc.D, E, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expl, err := New(A0, B0, C, tc.D, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := expl.Zeros()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(want) == 0 {
+				t.Fatalf("%s: fixture has no zeros", tc.name)
+			}
+			got, err := desc.Zeros()
+			if err != nil {
+				t.Fatalf("%s dt=%v: %v", tc.name, dt, err)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("%s dt=%v: got %d zeros %v, want %v", tc.name, dt, len(got), got, want)
+			}
+			for _, z := range got {
+				if r := pencilMinSingularValue(t, desc, z); r > 1e-12 {
+					t.Errorf("%s dt=%v: zero %v not a rank drop of (A-zE,B;C,D): sigma_min/sigma_max=%.3g", tc.name, dt, z, r)
+				}
+			}
+			pz, err := Pzmap(desc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pz.Zeros) != len(want) {
+				t.Errorf("%s dt=%v: Pzmap zeros %v, want %v", tc.name, dt, pz.Zeros, want)
+			}
+		}
+	}
+}
+
+func TestZeros_DescriptorSISO(t *testing.T) {
+	E := mat.NewDense(2, 2, []float64{2, 1, 0.5, 3})
+	A := mat.NewDense(2, 2, []float64{-1, 2, -0.5, -3})
+	B := mat.NewDense(2, 1, []float64{1, 0.4})
+	C := mat.NewDense(1, 2, []float64{1, -0.7})
+	desc, err := NewDescriptor(A, B, C, mat.NewDense(1, 1, []float64{0.5}), E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := desc.Zeros()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got zeros %v, want 2", got)
+	}
+	for _, z := range got {
+		if r := pencilMinSingularValue(t, desc, z); r > 1e-12 {
+			t.Errorf("zero %v not a rank drop: %.3g", z, r)
+		}
+	}
+}

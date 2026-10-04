@@ -86,10 +86,10 @@ func TestH2Norm_Discrete_WithD(t *testing.T) {
 		t.Fatal(err)
 	}
 	gotNoD, _ := H2Norm(&System{
-		A: mat.NewDense(1, 1, []float64{0.5}),
-		B: mat.NewDense(1, 1, []float64{1}),
-		C: mat.NewDense(1, 1, []float64{1}),
-		D: mat.NewDense(1, 1, []float64{0}),
+		A:  mat.NewDense(1, 1, []float64{0.5}),
+		B:  mat.NewDense(1, 1, []float64{1}),
+		C:  mat.NewDense(1, 1, []float64{1}),
+		D:  mat.NewDense(1, 1, []float64{0}),
 		Dt: 0.1,
 	})
 	if got <= gotNoD {
@@ -650,5 +650,153 @@ func TestH2_HSV_Relationship(t *testing.T) {
 
 	if hinf < hsv[0]*0.99 {
 		t.Errorf("Hinf(%g) < hsv[0](%g), Hinf >= largest HSV expected", hinf, hsv[0])
+	}
+}
+
+func internalDelayFixture(t *testing.T, dt float64, D12 *mat.Dense) *System {
+	t.Helper()
+	return internalDelayFixtureB2(t, dt, D12, mat.NewDense(2, 1, []float64{0.3, 0.1}))
+}
+
+func internalDelayFixtureB2(t *testing.T, dt float64, D12, B2 *mat.Dense) *System {
+	t.Helper()
+	A := []float64{-1, 2, 0.5, -3}
+	tau := 0.7
+	if dt > 0 {
+		A = []float64{0.5, 0.2, -0.1, 0.7}
+		tau = 3
+	}
+	sys, err := New(mat.NewDense(2, 2, A), mat.NewDense(2, 2, []float64{1, 0.3, 0, 1}),
+		mat.NewDense(2, 2, []float64{1, 0, 0.4, 1}), mat.NewDense(2, 2, []float64{0, 0.1, 0, 0}), dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInternalDelay([]float64{tau}, B2, mat.NewDense(1, 2, []float64{0.3, 1}),
+		D12, mat.NewDense(1, 2, []float64{0, 0.1}), mat.NewDense(1, 1, []float64{0.1})); err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// discreteImpulseLFT simulates the impulse response of a discrete model with
+// integer internal delays directly from its LFT equations.
+func discreteImpulseLFT(sys *System, steps int) []*mat.Dense {
+	n, m, p := sys.Dims()
+	N := len(sys.LFT.Tau)
+	h := make([]*mat.Dense, steps)
+	for k := range h {
+		h[k] = mat.NewDense(p, m, nil)
+	}
+	for j := range m {
+		x := make([]float64, n)
+		zHist := make([][]float64, 0, steps)
+		for k := range steps {
+			u := make([]float64, m)
+			if k == 0 {
+				u[j] = 1
+			}
+			w := make([]float64, N)
+			for l := range N {
+				if d := k - int(sys.LFT.Tau[l]); d >= 0 {
+					w[l] = zHist[d][l]
+				}
+			}
+			z := make([]float64, N)
+			for l := range N {
+				for c := range n {
+					z[l] += sys.LFT.C2.At(l, c) * x[c]
+				}
+				for c := range m {
+					z[l] += sys.LFT.D21.At(l, c) * u[c]
+				}
+				for c := range N {
+					z[l] += sys.LFT.D22.At(l, c) * w[c]
+				}
+			}
+			zHist = append(zHist, z)
+			for i := range p {
+				v := 0.0
+				for c := range n {
+					v += sys.C.At(i, c) * x[c]
+				}
+				for c := range m {
+					v += sys.D.At(i, c) * u[c]
+				}
+				for c := range N {
+					v += sys.LFT.D12.At(i, c) * w[c]
+				}
+				h[k].Set(i, j, v)
+			}
+			xn := make([]float64, n)
+			for i := range n {
+				for c := range n {
+					xn[i] += sys.A.At(i, c) * x[c]
+				}
+				for c := range m {
+					xn[i] += sys.B.At(i, c) * u[c]
+				}
+				for c := range N {
+					xn[i] += sys.LFT.B2.At(i, c) * w[c]
+				}
+			}
+			x = xn
+		}
+	}
+	return h
+}
+
+func TestH2Norm_DiscreteInternalDelay(t *testing.T) {
+	sys := internalDelayFixture(t, 0.1, mat.NewDense(2, 1, []float64{0.2, 0}))
+	want := 0.0
+	for _, hk := range discreteImpulseLFT(sys, 4000) {
+		f := mat.Norm(hk, 2)
+		want += f * f
+	}
+	want = math.Sqrt(want)
+	got, err := H2Norm(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got-want) > 1e-9*want {
+		t.Errorf("H2Norm = %.15g, want %.15g (impulse energy)", got, want)
+	}
+
+	unstable := internalDelayFixtureB2(t, 0.1, mat.NewDense(2, 1, []float64{0.2, 0}), mat.NewDense(2, 1, []float64{1, 0.5}))
+	if got, err := H2Norm(unstable); !errors.Is(err, ErrUnstable) {
+		t.Errorf("H2Norm = %g, %v; want ErrUnstable (delay loop has pole 1.12)", got, err)
+	}
+}
+
+func TestH2Norm_ContinuousInternalDelay(t *testing.T) {
+	sys := internalDelayFixture(t, 0, mat.NewDense(2, 1, []float64{0.2, 0}))
+	sys.D.Zero()
+	got, err := H2Norm(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsInf(got, 1) {
+		t.Errorf("H2Norm = %g, want +Inf for delayed feedthrough D12*D21 != 0", got)
+	}
+
+	strict := internalDelayFixture(t, 0, mat.NewDense(2, 1, nil))
+	strict.D.Zero()
+	if got, err := H2Norm(strict); err == nil {
+		t.Errorf("H2Norm = %g, want error for continuous internal delays", got)
+	}
+}
+
+func TestH2Norm_ZeroStaticGain(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		g, err := NewGain(mat.NewDense(2, 3, nil), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := H2Norm(g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != 0 {
+			t.Errorf("dt=%v: H2Norm(0) = %g, want 0", dt, got)
+		}
 	}
 }

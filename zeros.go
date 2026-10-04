@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"sort"
@@ -27,6 +28,13 @@ func (sys *System) ZerosDetail() (*ZerosResult, error) {
 	n, m, p := sys.Dims()
 	if n == 0 || m == 0 || p == 0 {
 		return &ZerosResult{}, nil
+	}
+	if sys.IsDescriptor() {
+		explicit, err := sys.ToExplicit()
+		if err != nil {
+			return nil, fmt.Errorf("Zeros: %w: %w", ErrDescriptorUnsupported, err)
+		}
+		sys = explicit
 	}
 
 	if m == 1 && p == 1 {
