@@ -975,3 +975,223 @@ func TestNorms_ContinuousInternalDelayRejected(t *testing.T) {
 		t.Fatalf("Norm(Inf) err = %v, want ErrContinuousInternalDelay", err)
 	}
 }
+
+// ssFreqOracle2x2 evaluates C (sI-A)^-1 B + D of a 2x2 model at s = jω or
+// z = e^{jωT} by Gaussian elimination.
+func ssFreqOracle2x2(sys *System, w float64) [2][2]complex128 {
+	n, _, _ := sys.Dims()
+	s := complex(0, w)
+	if sys.IsDiscrete() {
+		s = cmplx.Exp(complex(0, w*sys.Dt))
+	}
+	var g [2][2]complex128
+	for j := range 2 {
+		m := make([][]complex128, n)
+		for r := range n {
+			m[r] = make([]complex128, n+1)
+			for c := range n {
+				m[r][c] = complex(-sys.A.At(r, c), 0)
+			}
+			m[r][r] += s
+			m[r][n] = complex(sys.B.At(r, j), 0)
+		}
+		for k := range n {
+			p := k
+			for r := k + 1; r < n; r++ {
+				if cmplx.Abs(m[r][k]) > cmplx.Abs(m[p][k]) {
+					p = r
+				}
+			}
+			m[k], m[p] = m[p], m[k]
+			for r := k + 1; r < n; r++ {
+				f := m[r][k] / m[k][k]
+				for c := k; c <= n; c++ {
+					m[r][c] -= f * m[k][c]
+				}
+			}
+		}
+		x := make([]complex128, n)
+		for k := n - 1; k >= 0; k-- {
+			v := m[k][n]
+			for c := k + 1; c < n; c++ {
+				v -= m[k][c] * x[c]
+			}
+			x[k] = v / m[k][k]
+		}
+		for i := range 2 {
+			g[i][j] = complex(sys.D.At(i, j), 0)
+			for c := range n {
+				g[i][j] += complex(sys.C.At(i, c), 0) * x[c]
+			}
+		}
+	}
+	return g
+}
+
+func TestNormInf_UnstableFirstOrder(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		a := 1.0
+		if dt > 0 {
+			a = 2
+		}
+		sys, _ := New(
+			mat.NewDense(1, 1, []float64{a}),
+			mat.NewDense(1, 1, []float64{1}),
+			mat.NewDense(1, 1, []float64{1}),
+			mat.NewDense(1, 1, []float64{0}), dt)
+		got, err := Norm(sys, math.Inf(1))
+		if err != nil {
+			t.Fatalf("dt=%v: %v", dt, err)
+		}
+		if math.Abs(got-1) > 1e-9 {
+			t.Errorf("dt=%v: Norm(Inf) = %.15g, want 1", dt, got)
+		}
+		if _, _, err := HinfNorm(sys); !errors.Is(err, ErrUnstable) {
+			t.Errorf("dt=%v: HinfNorm err = %v, want ErrUnstable", dt, err)
+		}
+	}
+}
+
+func TestNormInf_UnstableLightlyDampedPair(t *testing.T) {
+	wn, zeta := 10.0, 0.05
+	sys, _ := New(
+		mat.NewDense(2, 2, []float64{0, 1, -wn * wn, 2 * zeta * wn}),
+		mat.NewDense(2, 1, []float64{0, wn * wn}),
+		mat.NewDense(1, 2, []float64{1, 0}),
+		mat.NewDense(1, 1, []float64{0}), 0)
+	got, w, err := linfNorm(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 1 / (2 * zeta * math.Sqrt(1-zeta*zeta))
+	wantW := wn * math.Sqrt(1-2*zeta*zeta)
+	if math.Abs(got-want) > 1e-9*want {
+		t.Errorf("L∞ = %.15g, want %.15g", got, want)
+	}
+	if math.Abs(w-wantW) > 1e-3*wantW {
+		t.Errorf("peak ω = %g, want %g", w, wantW)
+	}
+	if n, err := Norm(sys, math.Inf(1)); err != nil || n != got {
+		t.Errorf("Norm(Inf) = %g, %v; want %g", n, err, got)
+	}
+}
+
+func TestNormInf_UnstableMIMOGridOracle(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{
+		0.4, 2, -0.3,
+		-3, 0.2, 1,
+		0.5, -1, -2,
+	})
+	B := mat.NewDense(3, 2, []float64{1, 0.3, -0.5, 1, 0.2, -0.7})
+	C := mat.NewDense(2, 3, []float64{1, -0.4, 0.6, 0.2, 1, -1})
+	D := mat.NewDense(2, 2, []float64{0.3, -0.1, 0.2, 0.5})
+	for _, dt := range []float64{0, 0.05} {
+		Ad := A
+		if dt > 0 {
+			Ad = mat.NewDense(3, 3, nil)
+			Ad.Scale(dt, A)
+			Ad.Exp(Ad)
+		}
+		sys, err := New(Ad, B, C, D, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stable, _ := sys.IsStable(); stable {
+			t.Fatalf("dt=%v: fixture must be unstable", dt)
+		}
+		got, w, err := linfNorm(sys)
+		if err != nil {
+			t.Fatalf("dt=%v: %v", dt, err)
+		}
+		if at := maxSV2x2(ssFreqOracle2x2(sys, w)); math.Abs(at-got) > 1e-8*got {
+			t.Errorf("dt=%v: σmax at returned ω=%g is %.12g, L∞ %.12g", dt, w, at, got)
+		}
+		if peak := gridPeak2x2(sys); got < peak*(1-1e-9) {
+			t.Errorf("dt=%v: L∞ %.12g below grid peak %.12g", dt, got, peak)
+		}
+		if n, err := Norm(sys, math.Inf(1)); err != nil || n != got {
+			t.Errorf("dt=%v: Norm(Inf) = %g, %v; want %g", dt, n, err, got)
+		}
+	}
+}
+
+// gridPeak2x2 returns the largest σmax over a dense grid refined around the
+// coarse maximum.
+func gridPeak2x2(sys *System) float64 {
+	wmax := 1e3
+	if sys.IsDiscrete() {
+		wmax = math.Pi / sys.Dt
+	}
+	const nGrid = 100000
+	peak, kPeak := 0.0, 0
+	for k := range nGrid + 1 {
+		if v := maxSV2x2(ssFreqOracle2x2(sys, float64(k)/nGrid*wmax)); v > peak {
+			peak, kPeak = v, k
+		}
+	}
+	lo := float64(max(kPeak-1, 0)) / nGrid * wmax
+	hi := float64(min(kPeak+1, nGrid)) / nGrid * wmax
+	for k := range nGrid + 1 {
+		peak = math.Max(peak, maxSV2x2(ssFreqOracle2x2(sys, lo+float64(k)/nGrid*(hi-lo))))
+	}
+	return peak
+}
+
+func TestHinfNorm_DiscretePeakFrequency(t *testing.T) {
+	sys, _ := New(
+		mat.NewDense(3, 3, []float64{
+			0.5, 0.6, -0.1,
+			-0.7, 0.4, 0.2,
+			0.1, -0.3, 0.3,
+		}),
+		mat.NewDense(3, 2, []float64{1, 0.3, -0.5, 1, 0.2, -0.7}),
+		mat.NewDense(2, 3, []float64{1, -0.4, 0.6, 0.2, 1, -1}),
+		mat.NewDense(2, 2, []float64{0.3, -0.1, 0.2, 0.5}), 0.05)
+	got, w, err := HinfNorm(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at := maxSV2x2(ssFreqOracle2x2(sys, w)); math.Abs(at-got) > 1e-8*got {
+		t.Errorf("σmax at returned ω=%g is %.12g, HinfNorm %.12g", w, at, got)
+	}
+	if peak := gridPeak2x2(sys); math.Abs(got-peak) > 1e-9*peak {
+		t.Errorf("HinfNorm %.12g, grid peak %.12g", got, peak)
+	}
+}
+
+func TestNormInf_BoundaryPolesInfinite(t *testing.T) {
+	cases := []struct {
+		name  string
+		A     []float64
+		dt    float64
+		wantW float64
+	}{
+		{"integrator", []float64{0, 0, 0, -1}, 0, 0},
+		{"undamped pair", []float64{0, 5, -5, 0}, 0, 5},
+		{"discrete z=1", []float64{1, 0, 0, 0.5}, 0.1, 0},
+		{"discrete z=-1", []float64{-1, 0, 0, 0.5}, 0.1, math.Pi / 0.1},
+	}
+	for _, tc := range cases {
+		sys, _ := New(
+			mat.NewDense(2, 2, tc.A),
+			mat.NewDense(2, 1, []float64{1, 1}),
+			mat.NewDense(1, 2, []float64{1, 1}),
+			mat.NewDense(1, 1, []float64{0}), tc.dt)
+		got, w, err := linfNorm(sys)
+		if err != nil || !math.IsInf(got, 1) || math.Abs(w-tc.wantW) > 1e-9*max(1, tc.wantW) {
+			t.Errorf("%s: L∞ = %g at ω=%g, %v; want +Inf at %g", tc.name, got, w, err, tc.wantW)
+		}
+	}
+}
+
+func TestNorm2_UnstableIsInf(t *testing.T) {
+	sys, _ := New(
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0}), 0)
+	got, err := Norm(sys, 2)
+	if err != nil || !math.IsInf(got, 1) {
+		t.Errorf("Norm(2) = %g, %v; want +Inf", got, err)
+	}
+}

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -15,12 +16,24 @@ import (
 
 const NormH2 = 2
 
+// Norm returns the H2 norm (normType 2) or the L∞ norm (normType +Inf) of
+// sys, following MATLAB norm
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.norm.html).
+//
+// The H2 norm of an unstable model is +Inf. The L∞ norm is the peak gain
+// over frequency without regard to stability; it equals the H∞ norm for
+// stable models and is +Inf when a pole lies on the stability boundary
+// (imaginary axis or unit circle).
 func Norm(sys *System, normType float64) (float64, error) {
 	if normType == 2 {
-		return H2Norm(sys)
+		norm, err := H2Norm(sys)
+		if errors.Is(err, ErrUnstable) {
+			return math.Inf(1), nil
+		}
+		return norm, err
 	}
 	if math.IsInf(normType, 1) {
-		norm, _, err := HinfNorm(sys)
+		norm, _, err := linfNorm(sys)
 		return norm, err
 	}
 	return 0, fmt.Errorf("controlsys: normType must be 2 or Inf, got %g", normType)
@@ -218,6 +231,12 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
 // HinfNorm computes the H∞ norm (peak gain) of a stable LTI system
 // and the frequency at which it occurs.
 //
+// Unstable models, including poles on the stability boundary, return
+// ErrUnstable. MATLAB hinfnorm
+// (https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfnorm.html)
+// returns ninf = fpeak = Inf instead. Use Norm(sys, math.Inf(1)) for the
+// L∞ peak gain of an unstable model.
+//
 // Input, output and I/O delays do not change the norm. Discrete internal
 // delays are absorbed exactly; continuous internal-delay models return
 // ErrContinuousInternalDelay because their stability cannot be decided from
@@ -241,14 +260,53 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 	if err := policy.requireStable(ErrUnstable); err != nil {
 		return 0, 0, err
 	}
+	return peakGain(sys)
+}
 
+// linfNorm returns the L∞ norm (peak gain regardless of stability) and the
+// frequency at which it occurs. Poles on the stability boundary give +Inf at
+// the frequency of that pole.
+func linfNorm(sys *System) (norm float64, omega float64, err error) {
+	if err := newDescriptorPolicy(sys).requireStandard("Norm"); err != nil {
+		return 0, 0, err
+	}
+	sys, err = finiteDimensionalModel(sys, "Norm")
+	if err != nil {
+		return 0, 0, err
+	}
+	n, m, p := sys.Dims()
+	if n == 0 {
+		return maxSVDense(sys.D, p, m), 0, nil
+	}
+	poles, err := sys.Poles()
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, pole := range poles {
+		if !poleOnStabilityBoundary(pole, sys.IsContinuous(), poleStabilityTolerance(pole)) {
+			continue
+		}
+		if sys.IsContinuous() {
+			return math.Inf(1), math.Abs(imag(pole)), nil
+		}
+		return math.Inf(1), math.Abs(cmplx.Phase(pole)) / sys.Dt, nil
+	}
+	return peakGain(sys)
+}
+
+// peakGain computes sup_ω σ_max(G(jω)) of a model with no poles on the
+// stability boundary by Hamiltonian bisection; stability is not required.
+// Discrete models are mapped by Tustin, and the peak frequency is unwarped
+// back to the discrete axis.
+func peakGain(sys *System) (norm float64, omega float64, err error) {
+	n, m, p := sys.Dims()
 	if sys.IsDiscrete() {
 		csys, err := sys.Undiscretize()
 		if err != nil {
 			return 0, 0, err
 		}
-		norm, omega, err = HinfNorm(csys)
-		return norm, omega, err
+		norm, omega, err = peakGain(csys)
+		return norm, 2 * math.Atan(omega*sys.Dt/2) / sys.Dt, err
 	}
 
 	gammaLow, omegaPeak := hinfLowerBound(sys, m, p)
