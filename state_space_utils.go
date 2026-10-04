@@ -60,7 +60,7 @@ func (sys *System) ToExplicit() (*System, error) {
 	if err := lu.SolveTo(result.A, false, sys.A); err != nil {
 		return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 	}
-	if !sys.B.IsEmpty() {
+	if _, m, _ := sys.Dims(); m > 0 {
 		if err := lu.SolveTo(result.B, false, sys.B); err != nil {
 			return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 		}

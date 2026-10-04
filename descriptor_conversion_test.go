@@ -106,9 +106,33 @@ func TestToExplicitDescriptorInternalDelay(t *testing.T) {
 		if dt > 0 {
 			assertSimulateClose(t, label, want, got)
 		}
+		for _, pair := range [][3]any{{"A", sys.A, got.A}, {"B", sys.B, got.B}, {"B2", sys.LFT.B2, got.LFT.B2}} {
+			var back mat.Dense
+			back.Mul(sys.E, pair[2].(*mat.Dense))
+			if !mat.EqualApprox(&back, pair[1].(*mat.Dense), descriptorConversionTol) {
+				t.Fatalf("%s: E*%s does not reproduce descriptor matrix", label, pair[0])
+			}
+		}
 		if sys.LFT.B2 == got.LFT.B2 {
 			t.Fatalf("%s: B2 aliases source", label)
 		}
+	}
+}
+
+func TestToExplicitDescriptorNoInputs(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-1, 0.3, -0.2, -2})
+	E := mat.NewDense(2, 2, []float64{2, 0.5, 0, 1})
+	sys, err := NewDescriptor(A, nil, mat.NewDense(1, 2, []float64{1, -1}), nil, E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := sys.ToExplicit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := mat.NewDense(2, 2, []float64{-0.45, 0.65, -0.2, -2})
+	if !mat.EqualApprox(got.A, want, descriptorConversionTol) || got.E != nil {
+		t.Fatalf("A = %v, want %v", mat.Formatted(got.A), mat.Formatted(want))
 	}
 }
 
