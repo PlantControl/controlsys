@@ -400,6 +400,11 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	return w, nil
 }
 
+// DiskMargin computes the symmetric disk margin of the SISO loop sys from the
+// peak of the sensitivity 1/(1+L). Discrete loop delays are absorbed exactly;
+// continuous loops whose sensitivity carries internal delays return
+// ErrContinuousInternalDelay since closed-loop stability cannot be decided
+// from a finite pole set.
 func DiskMargin(sys *System) (*DiskMarginResult, error) {
 	if _, err := newSISOLoopModel(sys, "DiskMargin"); err != nil {
 		return nil, err

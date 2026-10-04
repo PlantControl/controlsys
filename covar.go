@@ -17,7 +17,7 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	if err := validateCovarianceRole("Covar", covarianceInputNoise, W, m); err != nil {
 		return nil, err
 	}
-	sys, err := absorbEnergyInternalDelay(sys, "Covar")
+	sys, err := finiteDimensionalModel(sys, "Covar")
 	if err != nil {
 		return nil, err
 	}

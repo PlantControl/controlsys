@@ -87,15 +87,16 @@ func transposeSquareData(data []float64, stride, n int) []float64 {
 	return out
 }
 
-// absorbEnergyInternalDelay returns sys with discrete internal delays folded
-// into the state exactly. Continuous internal delays have no finite-order
-// Lyapunov form and are rejected.
-func absorbEnergyInternalDelay(sys *System, context string) (*System, error) {
+// finiteDimensionalModel returns sys with discrete internal delays folded
+// into the state exactly. Continuous internal delays give infinitely many
+// poles and no finite-order Lyapunov form, so they are rejected with
+// ErrContinuousInternalDelay.
+func finiteDimensionalModel(sys *System, context string) (*System, error) {
 	if !sys.HasInternalDelay() {
 		return sys, nil
 	}
 	if sys.IsContinuous() {
-		return nil, fmt.Errorf("controlsys: %s of continuous model with internal delays requires Pade/AbsorbDelay first", context)
+		return nil, fmt.Errorf("%s: %w", context, ErrContinuousInternalDelay)
 	}
 	return absorbInternalDelay(sys)
 }

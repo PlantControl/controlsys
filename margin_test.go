@@ -1,7 +1,9 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
+	"math/cmplx"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -951,12 +953,8 @@ func TestDiskMargin_LFTSystem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dm, err := DiskMargin(lft)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dm.Alpha <= 0 {
-		t.Errorf("Alpha = %v, want > 0", dm.Alpha)
+	if _, err := DiskMargin(lft); !errors.Is(err, ErrContinuousInternalDelay) {
+		t.Fatalf("err = %v, want ErrContinuousInternalDelay", err)
 	}
 }
 
@@ -1135,5 +1133,33 @@ func BenchmarkDiskMargin_SISO(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		DiskMargin(sys)
+	}
+}
+
+func TestDiskMargin_DiscreteLoopDelay(t *testing.T) {
+	sys, err := New(mat.NewDense(1, 1, []float64{0.6}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0.3}), mat.NewDense(1, 1, []float64{0}), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInputDelay([]float64{2}); err != nil {
+		t.Fatal(err)
+	}
+	lft, err := sys.PullDelaysToLFT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm, err := DiskMargin(lft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := 0.0
+	for k := range 200001 {
+		z := cmplx.Exp(complex(0, float64(k)/200000*math.Pi))
+		l := 0.3 / (z - 0.6) / (z * z)
+		ms = math.Max(ms, cmplx.Abs(1/(1+l)))
+	}
+	if math.Abs(dm.PeakSensitivity-ms) > 1e-6*ms || math.Abs(dm.Alpha-1/ms) > 1e-6/ms {
+		t.Fatalf("Ms = %.12g alpha = %.12g, want Ms %.12g alpha %.12g", dm.PeakSensitivity, dm.Alpha, ms, 1/ms)
 	}
 }
