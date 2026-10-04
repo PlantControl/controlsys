@@ -306,6 +306,28 @@ func TestPullDelaysToLFTResidualContinuous(t *testing.T) {
 		}
 	}
 
+	viaIO, err := sys.AbsorbDelay(AbsorbIO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaAll, err := sys.AbsorbDelay(AbsorbAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ioResp, err := viaIO.FreqResponsePointwise(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allResp, err := viaAll.FreqResponsePointwise(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range ioResp.Data {
+		if d := cmplx.Abs(ioResp.Data[k] - allResp.Data[k]); d > 1e-12 {
+			t.Fatalf("AbsorbIO vs AbsorbAll freq index %d: %v vs %v", k, ioResp.Data[k], allResp.Data[k])
+		}
+	}
+
 	if _, err := absorbInputDelay(sys); !errors.Is(err, ErrWrongDomain) {
 		t.Fatalf("continuous absorbInputDelay: %v", err)
 	}

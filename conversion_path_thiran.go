@@ -63,18 +63,18 @@ func conversionPathThiran(disc *System, delay *mat.Dense, dt float64, opts C2DOp
 		line := []int{k}
 		part := pathPart{lines: line}
 		if byRow {
-			part.sys = conversionSeries(bank, conversionRows(disc, line))
+			part.sys = conversionSeries(bank, pathRows(disc, line))
 		} else {
-			part.sys = conversionSeries(conversionCols(disc, line), bank)
+			part.sys = conversionSeries(pathCols(disc, line), bank)
 		}
 		parts = append(parts, part)
 	}
 	if len(plain) > 0 {
 		part := pathPart{lines: plain}
 		if byRow {
-			part.sys = conversionRows(disc, plain)
+			part.sys = pathRows(disc, plain)
 		} else {
-			part.sys = conversionCols(disc, plain)
+			part.sys = pathCols(disc, plain)
 		}
 		parts = append(parts, part)
 	}
@@ -107,7 +107,7 @@ func pathIndex(byRow bool, line, other int) (int, int) {
 	return other, line
 }
 
-func conversionRows(sys *System, rows []int) *System {
+func pathRows(sys *System, rows []int) *System {
 	n, m, _ := sys.Dims()
 	out := &System{A: sys.A, B: sys.B, C: newDense(len(rows), n), D: newDense(len(rows), m), Dt: sys.Dt}
 	for r, i := range rows {
@@ -129,7 +129,7 @@ func conversionRows(sys *System, rows []int) *System {
 	return out
 }
 
-func conversionCols(sys *System, cols []int) *System {
+func pathCols(sys *System, cols []int) *System {
 	n, _, p := sys.Dims()
 	out := &System{A: sys.A, B: newDense(n, len(cols)), C: sys.C, D: newDense(p, len(cols)), Dt: sys.Dt}
 	for c, j := range cols {
