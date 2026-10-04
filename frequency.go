@@ -110,20 +110,28 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 }
 
 func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
-	return newFrequencyEvaluator(sys).response(omega)
+	e, err := validFrequencyEvaluator(sys, "FreqResponse")
+	if err != nil {
+		return nil, err
+	}
+	return e.response(omega)
 }
 
 // FreqResponsePointwise evaluates the frequency response with guaranteed
 // per-frequency single-point arithmetic: the value at each omega[k] is
 // bit-identical to FreqResponse([]float64{omega[k]}), regardless of
-// len(omega). FreqResponse may switch long sweeps of delay-free
-// state-space models to a transfer-function conversion whose values are
-// close but not bit-identical to the single-point path;
+// len(omega). FreqResponse may evaluate long sweeps of delay-free
+// state-space models through one Hessenberg reduction of A, whose values
+// agree with the single-point path to rounding but are not bit-identical;
 // FreqResponsePointwise never does, at the cost of one dense solve per
 // frequency. Use it when downstream comparisons require sweep results to
 // reproduce single-point evaluations exactly.
 func (sys *System) FreqResponsePointwise(omega []float64) (*FreqResponseMatrix, error) {
-	return newFrequencyEvaluator(sys).responsePointwise(omega)
+	e, err := validFrequencyEvaluator(sys, "FreqResponsePointwise")
+	if err != nil {
+		return nil, err
+	}
+	return e.responsePointwise(omega)
 }
 
 func (sys *System) Bode(omega []float64, nPoints int) (*BodeResult, error) {
@@ -147,7 +155,11 @@ func (sys *System) Bode(omega []float64, nPoints int) (*BodeResult, error) {
 }
 
 func (sys *System) EvalFr(s complex128) ([][]complex128, error) {
-	return newFrequencyEvaluator(sys).eval(s)
+	e, err := validFrequencyEvaluator(sys, "EvalFr")
+	if err != nil {
+		return nil, err
+	}
+	return e.eval(s)
 }
 
 type frequencyEvaluator struct {
@@ -157,7 +169,18 @@ type frequencyEvaluator struct {
 	p   int
 }
 
-const directFrequencySweepWorkLimit = 80
+// denseFrequencySweepLimit is the sweep length up to which per-point dense
+// solves beat one Hessenberg reduction (BenchmarkFrequencySweepKernels).
+const denseFrequencySweepLimit = 2
+
+// validFrequencyEvaluator rejects hand-built systems whose exported fields
+// disagree in shape; the kernels index them unchecked.
+func validFrequencyEvaluator(sys *System, op string) (frequencyEvaluator, error) {
+	if err := sys.Validate(); err != nil {
+		return frequencyEvaluator{}, fmt.Errorf("%s: %w", op, err)
+	}
+	return newFrequencyEvaluator(sys), nil
+}
 
 func newFrequencyEvaluator(sys *System) frequencyEvaluator {
 	n, m, p := sys.Dims()
@@ -169,9 +192,6 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 		return nil, nil
 	}
 	if e.sys.HasInternalDelay() {
-		if e.sys.IsDescriptor() {
-			return nil, fmt.Errorf("FreqResponse: descriptor models with internal delays are not supported: %w", ErrDescriptorUnsupported)
-		}
 		resp, err := freqResponseLFT(e.sys, omega, e.p, e.m)
 		if err != nil {
 			return nil, err
@@ -182,9 +202,7 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 		return resp, nil
 	}
 
-	nw := len(omega)
-	pm := e.p * e.m
-	data := make([]complex128, nw*pm)
+	data := make([]complex128, len(omega)*e.p*e.m)
 	if e.sys.IsDescriptor() {
 		if err := e.evalStateSpaceSweepInto(omega, data); err != nil {
 			return nil, err
@@ -192,16 +210,15 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 		applyIODelayPhase(e.sys, omega, data, e.p, e.m, true)
 		return e.matrix(data, omega), nil
 	}
-	if e.useStateSpaceSweep(nw) {
-		if err := e.evalStateSpaceSweepInto(omega, data); err == nil {
-			applyIODelayPhase(e.sys, omega, data, e.p, e.m, true)
-			return e.matrix(data, omega), nil
-		}
+	var solver frequencyPointSolver
+	if e.useDenseSweep(len(omega)) {
+		solver = newSSEvalWorkspace(e.n, e.p, e.m).bind(e.sys)
+	} else {
+		solver = newHessenbergSweep(e.sys, e.n, e.m, e.p)
 	}
-	if err := e.evalTransferFunctionSweepInto(omega, data); err != nil {
+	if err := e.sweepInto(omega, data, solver); err != nil {
 		return nil, err
 	}
-	applyIODelayPhase(e.sys, omega, data, e.p, e.m, false)
 	return e.matrix(data, omega), nil
 }
 
@@ -219,21 +236,31 @@ func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMat
 		return e.response(omega)
 	}
 
+	data := make([]complex128, len(omega)*e.p*e.m)
+	if err := e.sweepInto(omega, data, newSSEvalWorkspace(e.n, e.p, e.m).bind(e.sys)); err != nil {
+		return nil, err
+	}
+	return e.matrix(data, omega), nil
+}
+
+// frequencyPointSolver evaluates the delay-free explicit response at one
+// complex frequency, failing when the frequency is numerically a pole.
+type frequencyPointSolver interface {
+	evalInto(s complex128, dst []complex128) error
+}
+
+// sweepInto evaluates each frequency with solver, falling back per point to
+// the transfer-function form where the pencil is singular, and applies the
+// I/O delay phase matching whichever path produced the value.
+func (e frequencyEvaluator) sweepInto(omega []float64, data []complex128, solver frequencyPointSolver) error {
 	pm := e.p * e.m
-	data := make([]complex128, len(omega)*pm)
-	ws := newSSEvalWorkspace(e.n, e.p, e.m)
-	// The effective delay matrices are pure functions of sys, which is
-	// not mutated across the sweep, so hoisting them out of the loop
-	// keeps every per-point value bit-identical while dropping the
-	// per-omega allocations applyIODelayAtS would repeat.
 	delaySS := effectiveIODelayMatrix(e.sys, e.p, e.m, true)
 	var delayTF *mat.Dense
 	var tf *TransferFunc
 	for k, w := range omega {
 		s := e.sAt(w)
 		dst := data[k*pm : (k+1)*pm]
-		if err := evalFrSSInto(ws, e.sys, s, e.n, e.p, e.m); err == nil {
-			copy(dst, ws.g[:pm])
+		if err := solver.evalInto(s, dst); err == nil {
 			if delaySS != nil {
 				applyIODelayMatrixAtS(e.sys, s, dst, e.p, e.m, delaySS)
 			}
@@ -242,7 +269,7 @@ func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMat
 		if tf == nil {
 			res, err := e.sys.TransferFunction(nil)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			tf = res.TF
 			delayTF = effectiveIODelayMatrix(e.sys, e.p, e.m, false)
@@ -252,16 +279,13 @@ func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMat
 			applyIODelayMatrixAtS(e.sys, s, dst, e.p, e.m, delayTF)
 		}
 	}
-	return e.matrix(data, omega), nil
+	return nil
 }
 
 func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
 	pm := e.p * e.m
 
 	if e.sys.HasInternalDelay() {
-		if e.sys.IsDescriptor() {
-			return nil, fmt.Errorf("EvalFr: descriptor models with internal delays are not supported: %w", ErrDescriptorUnsupported)
-		}
 		g, err := evalFrLFT(e.sys, s, e.p, e.m)
 		if err != nil {
 			return nil, err
@@ -291,11 +315,8 @@ func (e frequencyEvaluator) evalStateSpaceInto(s complex128, dst []complex128) e
 	return nil
 }
 
-func (e frequencyEvaluator) useStateSpaceSweep(nw int) bool {
-	if nw <= 1 || e.n == 0 {
-		return true
-	}
-	return nw <= directFrequencySweepWorkLimit/e.n
+func (e frequencyEvaluator) useDenseSweep(nw int) bool {
+	return nw <= denseFrequencySweepLimit
 }
 
 func (e frequencyEvaluator) evalStateSpaceSweepInto(omega []float64, dst []complex128) error {
@@ -306,18 +327,6 @@ func (e frequencyEvaluator) evalStateSpaceSweepInto(omega []float64, dst []compl
 			return err
 		}
 		copy(dst[k*pm:(k+1)*pm], ws.g[:pm])
-	}
-	return nil
-}
-
-func (e frequencyEvaluator) evalTransferFunctionSweepInto(omega []float64, dst []complex128) error {
-	res, err := e.sys.TransferFunction(nil)
-	if err != nil {
-		return err
-	}
-	pm := e.p * e.m
-	for k, w := range omega {
-		res.TF.evalInto(e.sAt(w), dst[k*pm:(k+1)*pm])
 	}
 	return nil
 }
@@ -450,6 +459,22 @@ func newSSEvalWorkspace(n, p, m int) *ssEvalWorkspace {
 		rhs:    make([]complex128, n*m),
 		g:      make([]complex128, p*m),
 	}
+}
+
+type boundSSEval struct {
+	ws  *ssEvalWorkspace
+	sys *System
+}
+
+func (ws *ssEvalWorkspace) bind(sys *System) boundSSEval { return boundSSEval{ws: ws, sys: sys} }
+
+func (b boundSSEval) evalInto(s complex128, dst []complex128) error {
+	n, m, p := b.sys.Dims()
+	if err := evalFrSSInto(b.ws, b.sys, s, n, p, m); err != nil {
+		return err
+	}
+	copy(dst, b.ws.g[:p*m])
+	return nil
 }
 
 func evalFrSSInto(ws *ssEvalWorkspace, sys *System, s complex128, n, p, m int) error {
@@ -695,8 +720,15 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, n, N, p, m int) 
 		d22Data, d22Stride = r.Data, r.Stride
 	}
 
-	if err := cResolventInto(ws.resolvent, ws.sIA, ws.invBuf, aRaw.Data, aRaw.Stride, s, n); err != nil {
-		return err
+	if sys.E == nil {
+		if err := cResolventInto(ws.resolvent, ws.sIA, ws.invBuf, aRaw.Data, aRaw.Stride, s, n); err != nil {
+			return err
+		}
+	} else {
+		eRaw := sys.E.RawMatrix()
+		if err := cDescriptorResolventInto(ws.resolvent, ws.sIA, ws.invBuf, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride, s, n); err != nil {
+			return err
+		}
 	}
 
 	cComputeHInto(ws.H11, ws.hTemp, ws.resolvent, cRaw.Data, cRaw.Stride, bRaw.Data, bRaw.Stride, dData, dStride, n, p, m)

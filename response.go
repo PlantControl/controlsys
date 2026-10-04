@@ -362,8 +362,11 @@ func transposeSamplesToChannels(u *mat.Dense, steps, inputs int) *mat.Dense {
 func (sys *System) DCGain() (*mat.Dense, error) {
 	n, m, p := sys.Dims()
 
-	if n == 0 {
+	if n == 0 && !sys.HasInternalDelay() {
 		return denseCopy(sys.D), nil
+	}
+	if sys.HasInternalDelay() || sys.IsDescriptor() {
+		return sys.dcGainByEvaluation()
 	}
 
 	if sys.IsContinuous() {
@@ -401,6 +404,31 @@ func (sys *System) DCGain() (*mat.Dense, error) {
 	gain.Mul(sys.C, &X)
 	if sys.D != nil {
 		gain.Add(gain, sys.D)
+	}
+	return gain, nil
+}
+
+// dcGainByEvaluation closes internal delays (unity at DC) and honours E,
+// which the explicit fast paths below ignore.
+func (sys *System) dcGainByEvaluation() (*mat.Dense, error) {
+	s0 := complex(0, 0)
+	if !sys.IsContinuous() {
+		s0 = 1
+	}
+	e, err := validFrequencyEvaluator(sys, "DCGain")
+	if err != nil {
+		return nil, err
+	}
+	g, err := e.eval(s0)
+	if err != nil {
+		return nil, fmt.Errorf("DCGain: %w", err)
+	}
+	_, m, p := sys.Dims()
+	gain := mat.NewDense(p, m, nil)
+	for i := range p {
+		for j := range m {
+			gain.Set(i, j, real(g[i][j]))
+		}
 	}
 	return gain, nil
 }

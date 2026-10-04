@@ -310,10 +310,10 @@ func BenchmarkFrequencySweepKernels(b *testing.B) {
 				}
 			}
 		})
-		b.Run(test.name+"/TransferFunction", func(b *testing.B) {
+		b.Run(test.name+"/Hessenberg", func(b *testing.B) {
 			for b.Loop() {
 				data := make([]complex128, size)
-				if err := evaluator.evalTransferFunctionSweepInto(omega, data); err != nil {
+				if err := evaluator.sweepInto(omega, data, newHessenbergSweep(sys, test.n, test.m, test.p)); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -1563,5 +1563,14 @@ func BenchmarkAugstateDelayed(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkEvalFr_N4(b *testing.B) {
+	sys := benchSys(4, 2, 2)
+	for b.Loop() {
+		if _, err := sys.EvalFr(1i); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

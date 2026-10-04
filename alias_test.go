@@ -311,6 +311,9 @@ func TestSystemOpsDoNotAlias(t *testing.T) {
 				if err := r.Validate(); err != nil {
 					t.Fatalf("result %d invalid: %v", i, err)
 				}
+				if _, err := r.FreqResponse(absorbScopeOmega); err != nil {
+					t.Fatalf("result %d FreqResponse: %v", i, err)
+				}
 			}
 			outSnaps := make([]*System, len(out))
 			for i, r := range out {

@@ -296,20 +296,20 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 	discrete.OutputDelay = []float64{1, 3}
 
 	tests := []struct {
-		name           string
-		system         *System
-		omega          []float64
-		wantStateSpace bool
+		name      string
+		system    *System
+		omega     []float64
+		wantDense bool
 	}{
-		{name: "StateSpace", system: sys, omega: logspace(-2, 2, 8), wantStateSpace: true},
-		{name: "TransferFunction", system: sys, omega: logspace(-2, 2, 100), wantStateSpace: false},
-		{name: "DiscreteTransferFunction", system: discrete, omega: logspace(-2, 1, 100), wantStateSpace: false},
+		{name: "Dense", system: sys, omega: logspace(-2, 2, 2), wantDense: true},
+		{name: "Hessenberg", system: sys, omega: logspace(-2, 2, 100), wantDense: false},
+		{name: "DiscreteHessenberg", system: discrete, omega: logspace(-2, 1, 100), wantDense: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			evaluator := newFrequencyEvaluator(test.system)
-			if got := evaluator.useStateSpaceSweep(len(test.omega)); got != test.wantStateSpace {
-				t.Fatalf("useStateSpaceSweep = %t, want %t", got, test.wantStateSpace)
+			if got := evaluator.useDenseSweep(len(test.omega)); got != test.wantDense {
+				t.Fatalf("useDenseSweep = %t, want %t", got, test.wantDense)
 			}
 			response, err := test.system.FreqResponse(test.omega)
 			if err != nil {
@@ -322,7 +322,7 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 				}
 				for i := range response.P {
 					for j := range response.M {
-						if diff := cmplx.Abs(response.At(k, i, j) - want[i][j]); diff > 2e-9 {
+						if diff := cmplx.Abs(response.At(k, i, j) - want[i][j]); diff > 1e-12*cmplx.Abs(want[i][j]) {
 							t.Fatalf("w=%g output=%d input=%d diff=%g", w, i, j, diff)
 						}
 					}

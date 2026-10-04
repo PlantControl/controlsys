@@ -29,9 +29,6 @@ func TestAugstateDelayedMatchesStateOracle(t *testing.T) {
 				if err := aug.Validate(); err != nil {
 					t.Fatalf("%s: Augstate result invalid: %v", label, err)
 				}
-				if descriptor && delays == "internal" {
-					continue
-				}
 				assertAugstateResponse(t, label, sys, aug)
 			}
 		}
