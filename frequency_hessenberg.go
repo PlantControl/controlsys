@@ -60,18 +60,31 @@ func newRealizationCopy(sys *System, n, m, p int) balancedRealization {
 // costs O(n³) and beats the Hessenberg sweep for small n.
 type balancedDense struct {
 	balancedRealization
+	lastA  []int // last structural nonzero column in each row of sÊ-Â
+	last   []int
 	pencil []complex128
 	inv    []complex128
-	rhs    []complex128 // column-major n×m
+	x      []complex128 // row-major n×m
 }
 
 func newBalancedDense(sys *System, n, m, p int) *balancedDense {
-	return &balancedDense{
+	c := make([]complex128, n*n+n+n*m)
+	bd := &balancedDense{
 		balancedRealization: newBalancedRealization(sys, n, m, p),
-		pencil:              make([]complex128, n*n),
-		inv:                 make([]complex128, n),
-		rhs:                 make([]complex128, n*m),
+		pencil:              c[: n*n : n*n],
+		inv:                 c[n*n : n*n+n : n*n+n],
+		x:                   c[n*n+n:],
 	}
+	idx := make([]int, 2*n)
+	bd.lastA, bd.last = idx[:n:n], idx[n:]
+	for i := range n {
+		last := n - 1
+		for last > i && bd.a[i*n+last] == 0 && (bd.e == nil || bd.e[i*n+last] == 0) {
+			last--
+		}
+		bd.lastA[i] = last
+	}
+	return bd
 }
 
 func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
@@ -80,34 +93,38 @@ func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
 		copyRealMatrixToComplex(dst, bd.d, bd.dStride, p, m)
 		return nil
 	}
-	a, x, inv := bd.pencil, bd.rhs, bd.inv
+	a, x, inv := bd.pencil, bd.x, bd.inv
 	maxAbs, sScale := 0.0, cabs1(s)
-	for i, v := range bd.a {
-		a[i] = complex(-v, 0)
-		maxAbs = max(maxAbs, math.Abs(v))
-	}
 	if bd.e == nil {
+		for i, v := range bd.a {
+			a[i] = complex(-v, 0)
+			maxAbs = max(maxAbs, math.Abs(v))
+		}
 		for i := range n {
 			a[i*n+i] += s
 		}
 	} else {
 		maxE := 0.0
-		for i, v := range bd.e {
-			a[i] += s * complex(v, 0)
-			maxE = max(maxE, math.Abs(v))
+		for i, v := range bd.a {
+			e := bd.e[i]
+			a[i] = s*complex(e, 0) - complex(v, 0)
+			maxAbs = max(maxAbs, math.Abs(v))
+			maxE = max(maxE, math.Abs(e))
 		}
 		sScale *= maxE
 	}
-	for i := range n {
-		for j := range m {
-			x[j*n+i] = complex(bd.b[i*m+j], 0)
-		}
+	for i, v := range bd.b {
+		x[i] = complex(v, 0)
 	}
 	tol := float64(n) * (maxAbs + sScale) * eps()
 	if tol == 0 {
 		tol = 1e-15
 	}
 
+	// last[i] bounds the nonzeros of row i, so banded and block-triangular
+	// models skip their structural zeros in elimination and substitution.
+	last := bd.last
+	copy(last, bd.lastA)
 	for k := range n {
 		piv, best := k, cabs1(a[k*n+k])
 		for i := k + 1; i < n; i++ {
@@ -123,41 +140,55 @@ func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
 			for j := range rk {
 				rk[j], rp[j] = rp[j], rk[j]
 			}
-			for j := range m {
-				x[j*n+k], x[j*n+piv] = x[j*n+piv], x[j*n+k]
+			xk, xp := x[k*m:(k+1)*m], x[piv*m:(piv+1)*m]
+			for j := range xk {
+				xk[j], xp[j] = xp[j], xk[j]
 			}
+			last[k], last[piv] = last[piv], last[k]
 		}
 		ik := crecip(a[k*n+k])
 		inv[k] = ik
-		rk := a[k*n+k+1 : (k+1)*n]
+		lk := last[k]
+		rk := a[k*n+k+1 : k*n+lk+1]
 		for i := k + 1; i < n; i++ {
 			f := a[i*n+k] * ik
 			if f == 0 {
 				continue
 			}
-			ri := a[i*n+k+1 : (i+1)*n]
+			ri := a[i*n+k+1 : i*n+lk+1]
 			ri = ri[:len(rk)]
 			for j, v := range rk {
 				ri[j] -= f * v
 			}
 			for j := range m {
-				x[j*n+i] -= f * x[j*n+k]
+				x[i*m+j] -= f * x[k*m+j]
 			}
+			last[i] = max(last[i], lk)
 		}
 	}
-	for j := range m {
-		backSubstitute(x[j*n:(j+1)*n], a, inv, n)
+	for i := n - 1; i >= 0; i-- {
+		ui := a[i*n+i+1 : i*n+last[i]+1]
+		for j := range m {
+			xs := x[i*m+j:]
+			var re, im float64
+			for k, u := range ui {
+				w := xs[(k+1)*m]
+				re += real(u)*real(w) - imag(u)*imag(w)
+				im += real(u)*imag(w) + imag(u)*real(w)
+			}
+			x[i*m+j] = (x[i*m+j] - complex(re, im)) * inv[i]
+		}
 	}
 
 	for row := range p {
 		cr := bd.c[row*n : (row+1)*n]
 		out := dst[row*m : (row+1)*m]
 		for j := range out {
-			xj := x[j*n : (j+1)*n]
 			var re, im float64
 			for k, c := range cr {
-				re += c * real(xj[k])
-				im += c * imag(xj[k])
+				v := x[k*m+j]
+				re += c * real(v)
+				im += c * imag(v)
 			}
 			if bd.d != nil {
 				re += bd.d[row*bd.dStride+j]
@@ -387,6 +418,11 @@ func qTMulCols(dst, src []complex128, q []float64, n, m int) {
 // roughly ε‖Â‖‖(sI-Â)⁻¹‖, so well-conditioned points stop after one.
 const maxRefineSteps = 3
 
+// refineStop is the relative correction below which refinement stops. The
+// correction δ estimates the error it removes and the contraction is about
+// ‖δ‖/‖x‖, so the error left after applying δ is near ‖δ‖²/‖x‖ ≤ ε‖x‖.
+var refineStop = math.Sqrt(eps())
+
 // residual sets r = B̂ - (sI-Â)x̂. The diagonal enters as s-âᵢᵢ, as GEPP
 // forms it, and stays out of the off-diagonal sum, so a slow pole near s
 // keeps its relative accuracy instead of cancelling against sx̂ᵢ. A
@@ -448,7 +484,7 @@ func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
 			dMax = max(dMax, cabs1(v))
 			xMax = max(xMax, cabs1(x[i]))
 		}
-		if dMax <= 4*eps()*xMax {
+		if dMax <= refineStop*xMax {
 			break
 		}
 	}

@@ -121,10 +121,11 @@ func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 // per-frequency single-point arithmetic: the value at each omega[k] is
 // bit-identical to FreqResponse([]float64{omega[k]}), regardless of
 // len(omega). FreqResponse may evaluate long sweeps of large delay-free
-// state-space models (n > 20m) through one Hessenberg reduction of A, whose
-// values agree with the single-point path to componentwise rounding but are
-// not bit-identical; FreqResponsePointwise never does, at the cost of one
-// dense solve per frequency. Use it when downstream comparisons require sweep results to
+// state-space models (n > 8m+8, A not upper Hessenberg) through one
+// Hessenberg reduction of A, whose values agree with the single-point path
+// to componentwise rounding but are not bit-identical;
+// FreqResponsePointwise never does, at the cost of one dense solve per
+// frequency. Use it when downstream comparisons require sweep results to
 // reproduce single-point evaluations exactly.
 func (sys *System) FreqResponsePointwise(omega []float64) (*FreqResponseMatrix, error) {
 	e, err := validFrequencyEvaluator(sys, "FreqResponsePointwise")
@@ -310,12 +311,26 @@ func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
 }
 
 // useDenseSweep reports whether per-point GEPP (n³/3 per point) beats the
-// refined Hessenberg sweep (two O(n²m) solves plus refinement per point).
-// On fully coupled models (BenchmarkFrequencySweepKernels, M1 Pro) the
-// crossover is near n = 20m: 18 states for SISO, 40-48 for m=2, above 64
-// for m=4.
+// refined Hessenberg sweep (O(n²m) solves, products with Q and one
+// refinement step per point). On fully coupled models
+// (BenchmarkFrequencySweepKernels, M1 Pro) the crossover is near
+// n = 8m+8: 16 states for SISO, 24 for m=2, 40 for m=4. When A is already
+// upper Hessenberg, GEPP skips the zero multipliers, costs O(n²) per point
+// like the sweep, and needs no orthogonal reduction or refinement.
 func (e frequencyEvaluator) useDenseSweep(nw int) bool {
-	return nw <= 2 || e.n <= 20*max(e.m, 1)
+	return nw <= 2 || e.n <= 8*max(e.m, 1)+8 || isUpperHessenberg(e.sys.A)
+}
+
+func isUpperHessenberg(a *mat.Dense) bool {
+	raw := a.RawMatrix()
+	for i := 2; i < raw.Rows; i++ {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+i-1] {
+			if v != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // descriptorSweepInto fails on a singular pencil rather than falling back to
@@ -553,11 +568,11 @@ func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 	return nil
 }
 
+// complexFlatToGrid returns the rows of the row-major p×m data, aliasing it.
 func complexFlatToGrid(data []complex128, p, m int) [][]complex128 {
 	result := make([][]complex128, p)
 	for i := range p {
-		result[i] = make([]complex128, m)
-		copy(result[i], data[i*m:(i+1)*m])
+		result[i] = data[i*m : (i+1)*m : (i+1)*m]
 	}
 	return result
 }
