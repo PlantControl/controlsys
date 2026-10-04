@@ -358,3 +358,29 @@ func TestStructuralOpsPreserveDelayedResponse(t *testing.T) {
 		}
 	}
 }
+
+type failingPointSolver struct{}
+
+func (failingPointSolver) evalInto(complex128, []complex128) error { return ErrSingularTransform }
+
+func TestFrequencySweepTFFallbackAppliesExternalDelaysOnce(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys := fieldIODelay(t, dt)
+		e := newFrequencyEvaluator(sys)
+		omega := []float64{0.4, 1.3, 2.2}
+		data := make([]complex128, len(omega)*e.p*e.m)
+		if err := e.sweepInto(omega, data, failingPointSolver{}); err != nil {
+			t.Fatal(err)
+		}
+		for k, w := range omega {
+			want := fieldOracle(sys, e.sAt(w))
+			got := make([][]complex128, e.p)
+			for i := range e.p {
+				got[i] = data[(k*e.p+i)*e.m : (k*e.p+i+1)*e.m]
+			}
+			if d := fieldMaxDiff(got, want); d > fieldTol {
+				t.Errorf("dt=%v w=%v: fallback response off by %.3g", dt, w, d)
+			}
+		}
+	}
+}
