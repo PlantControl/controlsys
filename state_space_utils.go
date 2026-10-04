@@ -155,6 +155,9 @@ func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string)
 	return result, nil
 }
 
+// AugmentInternalDelayOutputs appends the internal-delay input signals
+// z = C2·x + D21·u + D22·w to the outputs. Appended rows inherit InputDelay
+// and carry no OutputDelay or IODelay.
 func (sys *System) AugmentInternalDelayOutputs(prefix string) (*System, error) {
 	if sys == nil {
 		return nil, fmt.Errorf("AugmentInternalDelayOutputs: nil system: %w", ErrDimensionMismatch)
@@ -171,9 +174,19 @@ func (sys *System) AugmentInternalDelayOutputs(prefix string) (*System, error) {
 	setBlock(C, p, 0, sys.LFT.C2)
 	setBlock(D, p, 0, sys.LFT.D21)
 
+	D12 := mat.NewDense(p+N, N, nil)
+	setBlock(D12, 0, 0, sys.LFT.D12)
+	setBlock(D12, p, 0, sys.LFT.D22)
+
 	result := sys.Copy()
 	result.C = C
 	result.D = D
+	result.LFT.D12 = D12
+	result.Delay = padZeroRows(sys.Delay, p+N)
+	if sys.OutputDelay != nil {
+		result.OutputDelay = make([]float64, p+N)
+		copy(result.OutputDelay, sys.OutputDelay)
+	}
 	result.OutputName = append(copyStringSlice(sys.OutputName), autoLabel(prefix, N)...)
 	return result, nil
 }
