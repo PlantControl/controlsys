@@ -401,13 +401,23 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 }
 
 // DiskMargin computes the symmetric disk margin of the SISO loop sys from the
-// peak of the sensitivity 1/(1+L). Discrete loop delays are absorbed exactly;
-// continuous loops whose sensitivity carries internal delays return
-// ErrContinuousInternalDelay since closed-loop stability cannot be decided
-// from a finite pole set.
+// peak of the sensitivity 1/(1+L). An unstable closed loop gives Alpha 0,
+// GainMargin [1 1] and PhaseMargin 0, as MATLAB diskmargin does.
+//
+// Discrete loop delays are absorbed exactly. For continuous loops with delays
+// closed-loop stability comes from a Nyquist encirclement count of 1+L on a
+// delay-aware adaptive frequency grid, and Ms from the exact frequency
+// response; see delayLoop.nyquist for the resolution limits. Loops whose
+// internal delays form a feedback cycle, whose high-frequency gain may reach
+// 1 (neutral type), or whose delay grid would exceed 2^21 points return
+// ErrContinuousInternalDelay. Descriptor loops return
+// ErrDescriptorUnsupported, as HinfNorm does.
 func DiskMargin(sys *System) (*DiskMarginResult, error) {
 	if _, err := newSISOLoopModel(sys, "DiskMargin"); err != nil {
 		return nil, err
+	}
+	if sys.IsContinuous() && sys.HasDelay() {
+		return diskMarginDelayed(sys)
 	}
 
 	eye, err := NewGain(mat.NewDense(1, 1, []float64{1}), sys.Dt)
@@ -423,18 +433,47 @@ func DiskMargin(sys *System) (*DiskMarginResult, error) {
 	Ms, wPeak, err := HinfNorm(S)
 	if err != nil {
 		if errors.Is(err, ErrUnstable) {
-			return &DiskMarginResult{
-				Alpha:           0,
-				GainMargin:      [2]float64{1, 1},
-				GainMarginDB:    [2]float64{0, 0},
-				PhaseMargin:     0,
-				PeakSensitivity: math.Inf(1),
-				PeakFreq:        0,
-			}, nil
+			return unstableDiskMargin(), nil
 		}
 		return nil, err
 	}
+	return diskMarginFromPeak(Ms, wPeak), nil
+}
 
+func unstableDiskMargin() *DiskMarginResult {
+	return &DiskMarginResult{
+		Alpha:           0,
+		GainMargin:      [2]float64{1, 1},
+		GainMarginDB:    [2]float64{0, 0},
+		PhaseMargin:     0,
+		PeakSensitivity: math.Inf(1),
+		PeakFreq:        0,
+	}
+}
+
+func diskMarginDelayed(sys *System) (*DiskMarginResult, error) {
+	loop, err := delayLoopFromSystem(sys, "DiskMargin")
+	if err != nil {
+		return nil, diskMarginDelayError(err)
+	}
+	stable, Ms, wPeak, err := loop.peakSensitivity()
+	if err != nil {
+		return nil, diskMarginDelayError(err)
+	}
+	if !stable {
+		return unstableDiskMargin(), nil
+	}
+	return diskMarginFromPeak(Ms, wPeak), nil
+}
+
+func diskMarginDelayError(err error) error {
+	if errors.Is(err, errDelayLoopUnsupported) {
+		return fmt.Errorf("DiskMargin: %v: %w", err, ErrContinuousInternalDelay)
+	}
+	return err
+}
+
+func diskMarginFromPeak(Ms, wPeak float64) *DiskMarginResult {
 	if Ms <= 0 {
 		return &DiskMarginResult{
 			Alpha:           1,
@@ -443,7 +482,7 @@ func DiskMargin(sys *System) (*DiskMarginResult, error) {
 			PhaseMargin:     180,
 			PeakSensitivity: Ms,
 			PeakFreq:        wPeak,
-		}, nil
+		}
 	}
 
 	alpha := 1.0 / Ms
@@ -470,5 +509,5 @@ func DiskMargin(sys *System) (*DiskMarginResult, error) {
 		PhaseMargin:     pm,
 		PeakSensitivity: Ms,
 		PeakFreq:        wPeak,
-	}, nil
+	}
 }
