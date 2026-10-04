@@ -109,7 +109,7 @@ func pathIndex(byRow bool, line, other int) (int, int) {
 
 func pathRows(sys *System, rows []int) *System {
 	n, m, _ := sys.Dims()
-	out := &System{A: sys.A, B: sys.B, C: newDense(len(rows), n), D: newDense(len(rows), m), Dt: sys.Dt}
+	out := &System{A: sys.A, B: sys.B, C: newDense(len(rows), n), D: newDense(len(rows), m), E: sys.E, Dt: sys.Dt}
 	for r, i := range rows {
 		for k := range n {
 			out.C.Set(r, k, sys.C.At(i, k))
@@ -131,7 +131,7 @@ func pathRows(sys *System, rows []int) *System {
 
 func pathCols(sys *System, cols []int) *System {
 	n, _, p := sys.Dims()
-	out := &System{A: sys.A, B: newDense(n, len(cols)), C: sys.C, D: newDense(p, len(cols)), Dt: sys.Dt}
+	out := &System{A: sys.A, B: newDense(n, len(cols)), C: sys.C, D: newDense(p, len(cols)), E: sys.E, Dt: sys.Dt}
 	for c, j := range cols {
 		for k := range n {
 			out.B.Set(k, c, sys.B.At(k, j))
@@ -155,12 +155,17 @@ func pathCols(sys *System, cols []int) *System {
 // system with block-diagonal dynamics, routing each part to its lines.
 func stackPathParts(parts []pathPart, byRow bool, m, p int, dt float64) *System {
 	n, q := 0, 0
+	descriptor := false
 	for _, part := range parts {
 		pn, _, _ := part.sys.Dims()
 		n += pn
 		q += part.sys.internalDelayCount()
+		descriptor = descriptor || part.sys.E != nil
 	}
 	out := &System{A: newDense(n, n), B: newDense(n, m), C: newDense(p, n), D: newDense(p, m), Dt: dt}
+	if descriptor {
+		out.E = newDense(n, n)
+	}
 	var lft *LFTDelay
 	if q > 0 {
 		lft = &LFTDelay{Tau: make([]float64, 0, q), B2: newDense(n, q), C2: newDense(q, n), D12: newDense(p, q), D21: newDense(q, m), D22: newDense(q, q)}
@@ -171,6 +176,9 @@ func stackPathParts(parts []pathPart, byRow bool, m, p int, dt float64) *System 
 		pn, _, _ := sys.Dims()
 		pq := sys.internalDelayCount()
 		setBlock(out.A, ns, ns, sys.A)
+		if out.E != nil {
+			setBlockOrIdentity(out.E, ns, sys.E, pn)
+		}
 		if byRow {
 			setBlock(out.B, ns, 0, sys.B)
 			placeRows(out.C, part.lines, ns, sys.C)
@@ -221,5 +229,15 @@ func placeCols(dst *mat.Dense, r0 int, cols []int, src *mat.Dense) {
 		for i := range r {
 			dst.Set(r0+i, j, src.At(i, k))
 		}
+	}
+}
+
+func setBlockOrIdentity(dst *mat.Dense, at int, src *mat.Dense, n int) {
+	if src != nil {
+		setBlock(dst, at, at, src)
+		return
+	}
+	for i := range n {
+		dst.Set(at+i, at+i, 1)
 	}
 }
