@@ -1507,3 +1507,41 @@ func BenchmarkMatLog_N50(b *testing.B) {
 		matLog(sys.A)
 	}
 }
+
+func BenchmarkLFTExtract(b *testing.B) {
+	for _, n := range []int{10, 50} {
+		M := benchSys(n, 6, 6)
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := LFT(M, nil, 3, 3); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkAugstateDelayed(b *testing.B) {
+	for _, n := range []int{10, 50} {
+		sys := benchSys(n, 4, 4)
+		delay := mat.NewDense(4, 4, nil)
+		for i := range 4 {
+			delay.Set(i, (i+1)%4, 0.1*float64(i+1))
+		}
+		if err := sys.SetDelay(delay); err != nil {
+			b.Fatal(err)
+		}
+		if err := sys.SetOutputDelay([]float64{0.1, 0, 0.2, 0}); err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := Augstate(sys); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

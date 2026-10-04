@@ -61,7 +61,7 @@ func lftExtract(M *System, nu, ny int) (*System, error) {
 
 	B1 := extractBlock(M.B, 0, 0, nM, nu)
 	C1 := extractBlock(M.C, 0, 0, ny, nM)
-	result, err := newNoCopy(M.A, B1, C1, D11, M.Dt)
+	result, err := newNoCopy(denseCopy(M.A), B1, C1, D11, M.Dt)
 	if err != nil {
 		return nil, err
 	}
