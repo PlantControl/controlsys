@@ -229,15 +229,20 @@ func (sys *System) AbsorbDelay(scopes ...AbsorbScope) (*System, error) {
 		scope = scopes[0]
 	}
 
+	pending := sys.HasDelay()
 	if scope == AbsorbInternal {
-		if !sys.HasInternalDelay() {
-			return sys.Copy(), nil
-		}
-		return absorbInternalDelay(sys)
+		pending = sys.HasInternalDelay()
 	}
-
-	if !sys.HasDelay() {
+	if !pending {
 		return sys.Copy(), nil
+	}
+	if sys.IsContinuous() {
+		if err := newDescriptorPolicy(sys).requireStandard("AbsorbDelay"); err != nil {
+			return nil, err
+		}
+	}
+	if scope == AbsorbInternal {
+		return absorbInternalDelay(sys)
 	}
 
 	if sys.IsContinuous() {
@@ -490,6 +495,7 @@ func absorbInternalDiscreteDelay(sys *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = augmentDescriptorE(sys.E, n, nAug)
 	result.Delay = copyDelayOrNil(sys.Delay)
 	if sys.InputDelay != nil {
 		result.InputDelay = make([]float64, len(sys.InputDelay))
@@ -929,9 +935,11 @@ func absorbInputDelay(sys *System) (*System, error) {
 	bRaw := sys.B.RawMatrix()
 	dRaw := sys.D.RawMatrix()
 
+	lastShift := make([]int, m)
 	offset := n
 	for j := range m {
 		dj := delays[j]
+		lastShift[j] = -1
 		if dj == 0 {
 			if n > 0 {
 				for i := range n {
@@ -950,14 +958,15 @@ func absorbInputDelay(sys *System) (*System, error) {
 			aAug[(offset+t)*nAug+(offset+t-1)] = 1
 		}
 
-		lastShift := offset + dj - 1
+		last := offset + dj - 1
+		lastShift[j] = last
 		if n > 0 {
 			for i := range n {
-				aAug[i*nAug+lastShift] = bRaw.Data[i*bRaw.Stride+j]
+				aAug[i*nAug+last] = bRaw.Data[i*bRaw.Stride+j]
 			}
 		}
 		for i := range p {
-			cAug[i*nAug+lastShift] += dRaw.Data[i*dRaw.Stride+j]
+			cAug[i*nAug+last] += dRaw.Data[i*dRaw.Stride+j]
 		}
 
 		offset += dj
@@ -972,6 +981,8 @@ func absorbInputDelay(sys *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	augSys.E = augmentDescriptorE(sys.E, n, nAug)
+	augSys.LFT = inputShiftLFT(sys.LFT, n, nAug, lastShift)
 	augSys.Delay = copyDelayOrNil(sys.Delay)
 	if sys.OutputDelay != nil {
 		augSys.OutputDelay = make([]float64, len(sys.OutputDelay))
@@ -1025,9 +1036,11 @@ func absorbOutputDelay(sys *System) (*System, error) {
 	cRaw := sys.C.RawMatrix()
 	dRaw := sys.D.RawMatrix()
 
+	firstShift := make([]int, p)
 	offset := n
 	for i := range p {
 		di := delays[i]
+		firstShift[i] = -1
 		if di == 0 {
 			if n > 0 {
 				copy(cAug[i*nAug:i*nAug+n], cRaw.Data[i*cRaw.Stride:i*cRaw.Stride+n])
@@ -1036,6 +1049,7 @@ func absorbOutputDelay(sys *System) (*System, error) {
 			continue
 		}
 
+		firstShift[i] = offset
 		// w_1[k+1] = C[i,:]*x[k] + D[i,:]*u[k]
 		if n > 0 {
 			copy(aAug[offset*nAug:offset*nAug+n], cRaw.Data[i*cRaw.Stride:i*cRaw.Stride+n])
@@ -1062,6 +1076,8 @@ func absorbOutputDelay(sys *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	augSys.E = augmentDescriptorE(sys.E, n, nAug)
+	augSys.LFT = outputShiftLFT(sys.LFT, n, nAug, firstShift)
 	augSys.Delay = copyDelayOrNil(sys.Delay)
 	if sys.InputDelay != nil {
 		augSys.InputDelay = make([]float64, len(sys.InputDelay))
@@ -1069,6 +1085,82 @@ func absorbOutputDelay(sys *System) (*System, error) {
 	}
 	propagateIONames(augSys, sys)
 	return augSys, nil
+}
+
+// augmentDescriptorE extends E with identity rows for the shift-register
+// states appended after the first n states.
+func augmentDescriptorE(E *mat.Dense, n, nAug int) *mat.Dense {
+	if E == nil {
+		return nil
+	}
+	out := mat.NewDense(nAug, nAug, nil)
+	setBlock(out, 0, 0, E)
+	raw := out.RawMatrix()
+	for i := n; i < nAug; i++ {
+		raw.Data[i*raw.Stride+i] = 1
+	}
+	return out
+}
+
+func copyLFTWithStates(lft *LFTDelay, n, nAug, m, p int) *LFTDelay {
+	q := len(lft.Tau)
+	out := &LFTDelay{
+		Tau: append([]float64(nil), lft.Tau...),
+		B2:  newDense(nAug, q),
+		C2:  newDense(q, nAug),
+		D12: denseCopySafe(lft.D12, p, q),
+		D21: denseCopySafe(lft.D21, q, m),
+		D22: denseCopySafe(lft.D22, q, q),
+	}
+	if n > 0 {
+		setBlock(out.B2, 0, 0, lft.B2)
+		setBlock(out.C2, 0, 0, lft.C2)
+	}
+	return out
+}
+
+// inputShiftLFT moves each delayed input's D21 column onto the C2 column of
+// its register's last state, so internal delays see the delayed input.
+func inputShiftLFT(lft *LFTDelay, n, nAug int, lastShift []int) *LFTDelay {
+	if lft == nil || len(lft.Tau) == 0 {
+		return nil
+	}
+	m := len(lastShift)
+	p, _ := lft.D12.Dims()
+	out := copyLFTWithStates(lft, n, nAug, m, p)
+	c2 := out.C2.RawMatrix()
+	d21 := out.D21.RawMatrix()
+	for j, last := range lastShift {
+		if last < 0 {
+			continue
+		}
+		for k := range len(lft.Tau) {
+			c2.Data[k*c2.Stride+last] = d21.Data[k*d21.Stride+j]
+			d21.Data[k*d21.Stride+j] = 0
+		}
+	}
+	return out
+}
+
+// outputShiftLFT moves each delayed output's D12 row onto the B2 row of its
+// register's first state, so the register captures the full undelayed output.
+func outputShiftLFT(lft *LFTDelay, n, nAug int, firstShift []int) *LFTDelay {
+	if lft == nil || len(lft.Tau) == 0 {
+		return nil
+	}
+	_, m := lft.D21.Dims()
+	out := copyLFTWithStates(lft, n, nAug, m, len(firstShift))
+	q := len(lft.Tau)
+	b2 := out.B2.RawMatrix()
+	d12 := out.D12.RawMatrix()
+	for i, first := range firstShift {
+		if first < 0 {
+			continue
+		}
+		copy(b2.Data[first*b2.Stride:first*b2.Stride+q], d12.Data[i*d12.Stride:i*d12.Stride+q])
+		clear(d12.Data[i*d12.Stride : i*d12.Stride+q])
+	}
+	return out
 }
 
 func buildPadeBank(delays []float64, order int) (*System, error) {
