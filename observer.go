@@ -83,7 +83,12 @@ func Kalman(sys *System, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, 
 // using Van Loan's method for noise covariance discretization.
 //
 // sys must be continuous. Qn is m×m, Rn is p×p, dt > 0.
+// opts.S is rejected with ErrOptionUnsupported; opts.Workspace is used for the
+// discrete Riccati solve and must be sized NewRiccatiWorkspace(n, p).
 func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
+	if opts != nil && opts.S != nil {
+		return nil, fmt.Errorf("Kalmd: cross-term S: %w", ErrOptionUnsupported)
+	}
 	if sys.IsDiscrete() {
 		return nil, fmt.Errorf("Kalmd: %w", ErrWrongDomain)
 	}
@@ -168,7 +173,7 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 	}
 	Ct := mat.NewDense(n, p, ctData)
 
-	res, err := Dare(Adt, Ct, Qd, Rd, nil)
+	res, err := Dare(Adt, Ct, Qd, Rd, opts)
 	if err != nil {
 		return nil, fmt.Errorf("Kalmd: %w", err)
 	}
@@ -182,10 +187,16 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 // The estimator takes [u; y] as input and produces [y_hat; x_hat] as output.
 //
 // L is n×p. Returns system with n states, (m+p) inputs, (p+n) outputs.
+// A descriptor E is carried over (E x̂' = A x̂ + ...). Plant input delays are
+// applied to the u inputs; output, I/O-matrix and internal delays are rejected
+// with ErrDelayUnsupported.
 func Estim(sys *System, L *mat.Dense) (*System, error) {
 	n, m, p := sys.Dims()
 	if n == 0 {
 		return nil, fmt.Errorf("Estim: system has no states: %w", ErrDimensionMismatch)
+	}
+	if delaySliceHasNonzero(sys.OutputDelay) || delayMatrixHasNonzero(sys.Delay) || sys.HasInternalDelay() {
+		return nil, fmt.Errorf("Estim: %w", ErrDelayUnsupported)
 	}
 	lr, lc := L.Dims()
 	if lr != n || lc != p {
@@ -224,6 +235,11 @@ func Estim(sys *System, L *mat.Dense) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = copyDescriptorE(sys.E)
+	if delaySliceHasNonzero(sys.InputDelay) {
+		result.InputDelay = make([]float64, mp)
+		copy(result.InputDelay, sys.InputDelay)
+	}
 	result.InputName = concatStringSlices([][]string{sys.InputName, sys.OutputName}, []int{m, p})
 	result.OutputName = concatStringSlices([][]string{sys.OutputName, sys.StateName}, []int{p, n})
 	return result, nil
@@ -234,10 +250,15 @@ func Estim(sys *System, L *mat.Dense) (*System, error) {
 // The controller takes y (p) as input and produces u (m) as output.
 //
 // K is m×n, L is n×p. Returns system with n states, p inputs, m outputs.
+// A descriptor E is carried over. Plants with delays are rejected with
+// ErrDelayUnsupported.
 func Reg(sys *System, K, L *mat.Dense) (*System, error) {
 	n, m, p, err := validateRegulatorGains("Reg", sys, K, L)
 	if err != nil {
 		return nil, err
+	}
+	if sys.HasDelay() {
+		return nil, fmt.Errorf("Reg: %w", ErrDelayUnsupported)
 	}
 
 	// Ar = A - B*K - L*C + L*D*K
@@ -262,6 +283,7 @@ func Reg(sys *System, K, L *mat.Dense) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = copyDescriptorE(sys.E)
 	result.InputName = copyStringSlice(sys.OutputName)
 	result.OutputName = copyStringSlice(sys.InputName)
 	return result, nil

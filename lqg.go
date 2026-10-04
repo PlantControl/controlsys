@@ -16,11 +16,17 @@ type LqgResult struct {
 
 // Lqg computes the linear-quadratic-Gaussian regulator for a state-space system.
 // Q, R are state/input weights for LQR; Qn, Rn are process/measurement noise covariances.
+// opts applies only to the regulator Riccati equation; the Kalman filter is
+// solved with default options. When opts.Workspace is set, K and Xc may share
+// its storage. Plants with delays are rejected with ErrDelayUnsupported.
 // Returns the observer-based controller and all intermediate gains and Riccati solutions.
 func Lqg(sys *System, Q, R, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*LqgResult, error) {
 	policy, err := newControllerObserverPolicy(sys, "Lqg")
 	if err != nil {
 		return nil, err
+	}
+	if sys.HasDelay() {
+		return nil, fmt.Errorf("Lqg: %w", ErrDelayUnsupported)
 	}
 
 	kRes, err := policy.regulator(Q, R, opts)
@@ -28,7 +34,7 @@ func Lqg(sys *System, Q, R, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*LqgResult, e
 		return nil, fmt.Errorf("Lqg: %w", err)
 	}
 
-	lRes, err := policy.estimator(Qn, Rn, opts)
+	lRes, err := policy.estimator(Qn, Rn, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Lqg: %w", err)
 	}
