@@ -816,7 +816,7 @@ func absorbIODelay(sys *System) (*System, error) {
 	}
 
 	inDel, outDel, residual := DecomposeIODelay(sys.Delay)
-	if delayMatrixHasNonzeroTol(residual, delayTopologyTol) {
+	if delayMatrixHasNonzero(residual) {
 		return newResidualDelaySplit(sys).apply(sys, absorbDecomposedDelay)
 	}
 
@@ -1255,7 +1255,7 @@ func absorbIODelayContinuous(sys *System, order int) (*System, error) {
 	}
 
 	inDel, outDel, residual := DecomposeIODelay(sys.Delay)
-	if delayMatrixHasNonzeroTol(residual, delayTopologyTol) {
+	if delayMatrixHasNonzero(residual) {
 		return newResidualDelaySplit(sys).apply(sys, func(piece *System) (*System, error) {
 			cur, err := absorbInputDelayContinuous(piece, order)
 			if err != nil {
@@ -1330,12 +1330,26 @@ func absorbIODelayContinuous(sys *System, order int) (*System, error) {
 	return cur, nil
 }
 
+// DecomposeIODelay splits ioDelay into input delays, output delays and a
+// nonnegative residual with ioDelay[i][j] = out[i] + in[j] + residual[i][j].
+// Derived values within roundoff of zero relative to the largest delay are
+// returned as exact zeros.
 func DecomposeIODelay(ioDelay *mat.Dense) (inputDelay, outputDelay []float64, residual *mat.Dense) {
 	raw := ioDelay.RawMatrix()
 	p, m := raw.Rows, raw.Cols
 
+	scale := 0.0
+	for i := range p {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+m] {
+			scale = max(scale, math.Abs(v))
+		}
+	}
 	inI, outI, resI := decomposeInputFirst(raw.Data, raw.Stride, p, m)
 	inO, outO, resO := decomposeOutputFirst(raw.Data, raw.Stride, p, m)
+	snapDelayRoundoff(outI, scale)
+	snapDelayRoundoff(resI, scale)
+	snapDelayRoundoff(inO, scale)
+	snapDelayRoundoff(resO, scale)
 
 	sumI, sumO := 0.0, 0.0
 	for _, v := range resI {
@@ -1467,27 +1481,13 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 			cur.OutputDelay[i] += outDel[i]
 		}
 
-		hasResidual := false
-		if residual != nil {
-			raw := residual.RawMatrix()
-			for i := 0; i < raw.Rows; i++ {
-				for j := 0; j < raw.Cols; j++ {
-					if raw.Data[i*raw.Stride+j] != 0 {
-						hasResidual = true
-						break
-					}
-				}
-				if hasResidual {
-					break
-				}
-			}
-		}
-		if (n > 0 || sys.internalDelayCount() > 0) && delayMatrixHasNonzeroTol(residual, delayTopologyTol) {
+		hasResidual := delayMatrixHasNonzero(residual)
+		if (n > 0 || sys.internalDelayCount() > 0) && hasResidual {
 			return newResidualDelaySplit(sys).apply(sys, (*System).PullDelaysToLFT)
 		}
 		if hasResidual {
-			// Only static systems without internal delays, or residuals within
-			// delayTopologyTol, reach here: merge InputDelay/OutputDelay into the residual for overlapping channels
+			// Only static systems without internal delays reach here: merge
+			// InputDelay/OutputDelay into the residual for overlapping channels
 			// to avoid parallel double-counting of feedthrough gains.
 			resRaw := residual.RawMatrix()
 			if n == 0 && cur.InputDelay != nil {

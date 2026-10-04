@@ -41,8 +41,10 @@ func (t interconnectionTopology) seriesDelayPlan() interconnectionDelayPlan {
 		inDel, outDel, ioDelay := seriesInputOutputDelay(plan.sys1, plan.sys2, plan.p2, plan.m1, ioCheck)
 		return interconnectionDelayPlan{inputDelay: inDel, outputDelay: outDel, ioDelay: ioDelay}
 	}
+	first := t.seriesIntermediateDelay(0)
 	for k := 1; k < plan.p1; k++ {
-		if math.Abs(t.seriesIntermediateDelay(k)-t.seriesIntermediateDelay(0)) > delayTopologyTol {
+		d := t.seriesIntermediateDelay(k)
+		if !delaysEqual(d, first, max(math.Abs(d), math.Abs(first))) {
 			return interconnectionDelayPlan{requiresLFT: true}
 		}
 	}
