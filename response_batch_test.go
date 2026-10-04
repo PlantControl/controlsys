@@ -91,7 +91,7 @@ func independentInputResponse(t *testing.T, sys *System, tFinal float64, kind st
 		}
 		return plan.response(Y)
 	}
-	amplitude := kind.amplitude(plan)
+	amplitude := 1.0
 	for input := range inputs {
 		u := mat.NewDense(inputs, plan.steps, nil)
 		if kind == stepResponse {
