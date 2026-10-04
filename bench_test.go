@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -285,32 +286,30 @@ func BenchmarkFreqResponse_ShortSweep(b *testing.B) {
 
 func BenchmarkFrequencySweepKernels(b *testing.B) {
 	tests := []struct {
-		name        string
 		n, m, p, nw int
 	}{
-		{name: "N4_W2", n: 4, m: 2, p: 2, nw: 2},
-		{name: "N4_W8", n: 4, m: 2, p: 2, nw: 8},
-		{name: "N4_W32", n: 4, m: 2, p: 2, nw: 32},
-		{name: "N4_W100", n: 4, m: 2, p: 2, nw: 100},
-		{name: "N10_W2", n: 10, m: 2, p: 3, nw: 2},
-		{name: "N10_W8", n: 10, m: 2, p: 3, nw: 8},
-		{name: "N10_W32", n: 10, m: 2, p: 3, nw: 32},
-		{name: "N10_W100", n: 10, m: 2, p: 3, nw: 100},
+		{4, 2, 2, 8}, {4, 2, 2, 100},
+		{8, 1, 1, 100}, {8, 2, 2, 100},
+		{12, 1, 1, 100}, {12, 2, 3, 100}, {12, 4, 4, 100},
+		{18, 1, 1, 100}, {18, 2, 2, 100}, {18, 4, 4, 100},
+		{30, 1, 1, 100}, {30, 5, 5, 100},
+		{48, 1, 1, 100}, {48, 2, 2, 100}, {64, 1, 1, 100}, {64, 4, 4, 100}, {100, 2, 2, 100},
 	}
 	for _, test := range tests {
-		sys := benchSys(test.n, test.m, test.p)
+		sys := benchDenseSys(test.n, test.m, test.p)
 		evaluator := newFrequencyEvaluator(sys)
 		omega := logspace(-2, 2, test.nw)
 		size := test.nw * test.p * test.m
-		b.Run(test.name+"/StateSpace", func(b *testing.B) {
+		name := fmt.Sprintf("N%d_M%d_W%d", test.n, test.m, test.nw)
+		b.Run(name+"/Dense", func(b *testing.B) {
 			for b.Loop() {
 				data := make([]complex128, size)
-				if err := evaluator.evalStateSpaceSweepInto(omega, data); err != nil {
+				if err := evaluator.sweepInto(omega, data, newBalancedDense(sys, test.n, test.m, test.p)); err != nil {
 					b.Fatal(err)
 				}
 			}
 		})
-		b.Run(test.name+"/Hessenberg", func(b *testing.B) {
+		b.Run(name+"/Hessenberg", func(b *testing.B) {
 			for b.Loop() {
 				data := make([]complex128, size)
 				if err := evaluator.sweepInto(omega, data, newHessenbergSweep(sys, test.n, test.m, test.p)); err != nil {
@@ -319,6 +318,27 @@ func BenchmarkFrequencySweepKernels(b *testing.B) {
 			}
 		})
 	}
+}
+
+// benchDenseSys is a fully coupled stable model; banded benchSys lets GEPP
+// skip zero multipliers and understates the dense per-point cost.
+func benchDenseSys(n, m, p int) *System {
+	rng := rand.New(rand.NewPCG(uint64(n), uint64(m*16+p)))
+	fill := func(r, c int, scale float64) *mat.Dense {
+		out := mat.NewDense(r, c, nil)
+		for i := range r {
+			for j := range c {
+				out.Set(i, j, rng.NormFloat64()*scale)
+			}
+		}
+		return out
+	}
+	A := fill(n, n, 1/math.Sqrt(float64(n)))
+	for i := range n {
+		A.Set(i, i, A.At(i, i)-2)
+	}
+	sys, _ := New(A, fill(n, m, 1), fill(p, n, 1), mat.NewDense(p, m, nil), 0)
+	return sys
 }
 
 func BenchmarkBode(b *testing.B) {

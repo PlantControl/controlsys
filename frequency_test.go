@@ -295,15 +295,25 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 	discrete.InputDelay = []float64{2, 1}
 	discrete.OutputDelay = []float64{1, 3}
 
+	siso := benchDenseSys(24, 1, 1)
+	siso.InputDelay = []float64{0.05}
+	siso.OutputDelay = []float64{0.02}
+	discreteSISO := siso.Copy()
+	discreteSISO.Dt = 0.1
+	discreteSISO.InputDelay = []float64{2}
+	discreteSISO.OutputDelay = []float64{1}
+
 	tests := []struct {
 		name      string
 		system    *System
 		omega     []float64
 		wantDense bool
 	}{
-		{name: "Dense", system: sys, omega: logspace(-2, 2, 2), wantDense: true},
-		{name: "Hessenberg", system: sys, omega: logspace(-2, 2, 100), wantDense: false},
-		{name: "DiscreteHessenberg", system: discrete, omega: logspace(-2, 1, 100), wantDense: false},
+		{name: "ShortSweep", system: siso, omega: logspace(-2, 2, 2), wantDense: true},
+		{name: "SmallModel", system: sys, omega: logspace(-2, 2, 100), wantDense: true},
+		{name: "DiscreteSmallModel", system: discrete, omega: logspace(-2, 1, 100), wantDense: true},
+		{name: "Hessenberg", system: siso, omega: logspace(-2, 2, 100), wantDense: false},
+		{name: "DiscreteHessenberg", system: discreteSISO, omega: logspace(-2, 1, 100), wantDense: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
