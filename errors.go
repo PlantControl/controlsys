@@ -15,6 +15,8 @@ var (
 	ErrFractionalDelay      = errors.New("controlsys: discrete delay must be non-negative integer")
 	ErrNonUniformInputDelay = errors.New("controlsys: AbsorbDelay requires uniform delay per input column")
 
+	ErrFixedInputDelayMismatch = errors.New("controlsys: nonzero fixed inputs must share input and I/O delays")
+
 	ErrZeroInternalDelay = errors.New("controlsys: internal delay must be positive (tau=0 creates algebraic loop)")
 
 	ErrAlgebraicLoop = errors.New("controlsys: algebraic loop: (I-D22) singular")
