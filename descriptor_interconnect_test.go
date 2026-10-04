@@ -10,29 +10,14 @@ import (
 
 const descriptorInterconnectTol = 1e-12
 
-// descriptorTwin eliminates an invertible E from A, B and the internal-delay
-// input matrix B2, keeping state coordinates, so every interconnection of
-// twins must match the interconnection of the descriptor models.
+// descriptorTwin eliminates an invertible E, keeping state coordinates, so
+// every interconnection of twins must match the interconnection of the
+// descriptor models.
 func descriptorTwin(t *testing.T, sys *System) *System {
 	t.Helper()
-	out := sys.Copy()
-	if sys.E == nil {
-		return out
-	}
-	out.E = nil
-	var lu mat.LU
-	lu.Factorize(sys.E)
-	pairs := [][2]*mat.Dense{{out.A, sys.A}}
-	if _, m, _ := sys.Dims(); m > 0 {
-		pairs = append(pairs, [2]*mat.Dense{out.B, sys.B})
-	}
-	if sys.LFT != nil && len(sys.LFT.Tau) > 0 {
-		pairs = append(pairs, [2]*mat.Dense{out.LFT.B2, sys.LFT.B2})
-	}
-	for _, pair := range pairs {
-		if err := lu.SolveTo(pair[0], false, pair[1]); err != nil {
-			t.Fatal(err)
-		}
+	out, err := sys.ToExplicit()
+	if err != nil {
+		t.Fatal(err)
 	}
 	return out
 }

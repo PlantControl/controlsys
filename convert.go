@@ -8,7 +8,7 @@ import (
 )
 
 func (sys *System) Discretize(dt float64) (*System, error) {
-	if !sys.HasDelay() {
+	if !sys.HasDelay() && !sys.IsDescriptor() {
 		return sys.discretizeTustin(dt, 0)
 	}
 	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin})
@@ -39,6 +39,9 @@ func (sys *System) discretizeTustin(dt, prewarp float64) (*System, error) {
 }
 
 func (sys *System) Undiscretize() (*System, error) {
+	if sys.IsDescriptor() {
+		return sys.D2CWithOpts(D2COptions{Method: C2DMethodTustin})
+	}
 	return sys.undiscretizeTustin(0)
 }
 
@@ -282,7 +285,7 @@ func absorbFractionalDelays(disc *System, contInputDelay, contOutputDelay []floa
 }
 
 func (sys *System) DiscretizeZOH(dt float64) (*System, error) {
-	if !sys.HasDelay() {
+	if !sys.HasDelay() && !sys.IsDescriptor() {
 		return sys.discretizeZOH(dt)
 	}
 	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
@@ -397,21 +400,21 @@ func (sys *System) DiscretizeImpulse(dt float64) (*System, error) {
 	if err := validateConversionSampleTime(dt); err != nil {
 		return nil, err
 	}
-	if !sys.HasDelay() {
+	if !sys.HasDelay() && !sys.IsDescriptor() {
 		return sys.discretizeImpulseParity(dt)
 	}
 	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodImpulse})
 }
 
 func (sys *System) DiscretizeFOH(dt float64) (*System, error) {
-	if !sys.HasDelay() {
+	if !sys.HasDelay() && !sys.IsDescriptor() {
 		return sys.discretizeModifiedFOH(dt)
 	}
 	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodFOH})
 }
 
 func (sys *System) DiscretizeMatched(dt float64) (*System, error) {
-	if !sys.HasDelay() {
+	if !sys.HasDelay() && !sys.IsDescriptor() {
 		return sys.discretizeMatched(dt)
 	}
 	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodMatched})

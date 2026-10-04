@@ -77,6 +77,10 @@ func (sys *System) DiscretizeWithResult(dt float64, opts C2DOptions) (*Conversio
 	if err != nil {
 		return nil, err
 	}
+	sys, err = conversionStandardForm(sys, "DiscretizeWithResult")
+	if err != nil {
+		return nil, err
+	}
 	out, err := sys.DiscretizeWithOpts(dt, opts)
 	if err != nil {
 		return nil, err
@@ -110,6 +114,10 @@ func (sys *System) DiscretizeWithResult(dt float64, opts C2DOptions) (*Conversio
 func (sys *System) D2CWithResult(opts D2COptions) (*ConversionResult, error) {
 	if opts.Method == "" {
 		opts.Method = C2DMethodZOH
+	}
+	sys, err := conversionStandardForm(sys, "D2CWithResult")
+	if err != nil {
+		return nil, err
 	}
 	out, err := sys.D2CWithOpts(opts)
 	if err != nil {
