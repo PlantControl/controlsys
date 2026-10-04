@@ -415,7 +415,11 @@ func (sys *System) dcGainByEvaluation() (*mat.Dense, error) {
 	if !sys.IsContinuous() {
 		s0 = 1
 	}
-	g, err := newFrequencyEvaluator(sys).eval(s0)
+	e, err := validFrequencyEvaluator(sys, "DCGain")
+	if err != nil {
+		return nil, err
+	}
+	g, err := e.eval(s0)
 	if err != nil {
 		return nil, fmt.Errorf("DCGain: %w", err)
 	}

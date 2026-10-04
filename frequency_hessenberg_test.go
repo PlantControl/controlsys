@@ -160,6 +160,14 @@ func TestFreqResponseRejectsInvalidSystem(t *testing.T) {
 			t.Errorf("%s: EvalFr err = %v", name, err)
 		}
 	}
+	static, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	static.LFT = &LFTDelay{Tau: []float64{0.5}, D12: mat.NewDense(1, 1, nil), D21: mat.NewDense(1, 1, nil), D22: mat.NewDense(1, 1, nil)}
+	if _, err := static.DCGain(); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("static LFT without B2: DCGain err = %v", err)
+	}
 	var nilSys *System
 	if _, err := nilSys.FreqResponse(absorbScopeOmega); !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("nil: FreqResponse err = %v", err)
