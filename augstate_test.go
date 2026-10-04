@@ -60,7 +60,7 @@ func assertAugstateResponse(t *testing.T, label string, sys, aug *System) {
 				}
 			}
 		}
-		x := augstateStateOracle(sys, w)
+		x, _ := lftSignalOracle(sys, w)
 		for r := range n {
 			for j := range m {
 				if d := cmplx.Abs(got.At(k, p+r, j) - x[r][j]); d > absorbScopeTol {
@@ -71,9 +71,9 @@ func assertAugstateResponse(t *testing.T, label string, sys, aug *System) {
 	}
 }
 
-// augstateStateOracle solves (λE−A)x = Bũ + B2·w, w = Θ(C2x + D21ũ + D22w),
-// ũ = diag(delay(InputDelay))u, by dense complex elimination.
-func augstateStateOracle(sys *System, w float64) [][]complex128 {
+// lftSignalOracle solves (λE−A)x = Bũ + B2·w, w = Θz, z = C2x + D21ũ + D22w,
+// ũ = diag(delay(InputDelay))u, by dense complex elimination; returns x/u, z/u.
+func lftSignalOracle(sys *System, w float64) (x, z [][]complex128) {
 	n, m, _ := sys.Dims()
 	lambda := complex(0, w)
 	delayFactor := func(tau float64) complex128 { return cmplx.Exp(complex(0, -w*tau)) }
@@ -147,17 +147,22 @@ func augstateStateOracle(sys *System, w float64) [][]complex128 {
 			rhs[r][j] = s / M[r][r]
 		}
 	}
-	x := rhs[:n]
 	for j := range m {
 		if sys.InputDelay == nil || sys.InputDelay[j] == 0 {
 			continue
 		}
 		f := delayFactor(sys.InputDelay[j])
-		for r := range n {
-			x[r][j] *= f
+		for r := range sz {
+			rhs[r][j] *= f
 		}
 	}
-	return x
+	for k := range N {
+		th := delayFactor(sys.LFT.Tau[k])
+		for j := range m {
+			rhs[n+k][j] /= th
+		}
+	}
+	return rhs[:n], rhs[n:]
 }
 
 func TestAugstatePadsOutputSideDelays(t *testing.T) {
@@ -186,6 +191,56 @@ func TestAugstatePadsOutputSideDelays(t *testing.T) {
 	for j := range m {
 		if aug.InputDelay[j] != sys.InputDelay[j] {
 			t.Fatalf("InputDelay[%d] = %g, want %g", j, aug.InputDelay[j], sys.InputDelay[j])
+		}
+	}
+}
+
+func TestAugmentInternalDelayOutputsMatchesOracle(t *testing.T) {
+	for _, dt := range []float64{0, 1} {
+		for _, delays := range []string{"none", "io", "residual"} {
+			label := fmt.Sprintf("dt=%g/%s", dt, delays)
+			sys := absorbScopePlant(t, dt, true, false)
+			scale := 1.0
+			if dt == 0 {
+				scale = 0.125
+			}
+			switch delays {
+			case "io":
+				absorbScopeCases[0].apply(t, sys, scale)
+			case "residual":
+				absorbScopeCases[1].apply(t, sys, scale)
+			}
+			aug, err := sys.AugmentInternalDelayOutputs("z")
+			if err != nil {
+				t.Fatalf("%s: %v", label, err)
+			}
+			if err := aug.Validate(); err != nil {
+				t.Fatalf("%s: result invalid: %v", label, err)
+			}
+			_, m, p := sys.Dims()
+			want, err := sys.FreqResponsePointwise(absorbScopeOmega)
+			if err != nil {
+				t.Fatalf("%s: reference FreqResponse: %v", label, err)
+			}
+			got, err := aug.FreqResponsePointwise(absorbScopeOmega)
+			if err != nil {
+				t.Fatalf("%s: FreqResponse: %v", label, err)
+			}
+			for k, w := range absorbScopeOmega {
+				_, z := lftSignalOracle(sys, w)
+				for j := range m {
+					for i := range p {
+						if d := cmplx.Abs(got.At(k, i, j) - want.At(k, i, j)); d > absorbScopeTol {
+							t.Fatalf("%s: ω=%g y(%d,%d) differs by %g", label, w, i, j, d)
+						}
+					}
+					for r := range z {
+						if d := cmplx.Abs(got.At(k, p+r, j) - z[r][j]); d > absorbScopeTol {
+							t.Fatalf("%s: ω=%g z(%d,%d) = %v, want %v", label, w, r, j, got.At(k, p+r, j), z[r][j])
+						}
+					}
+				}
+			}
 		}
 	}
 }

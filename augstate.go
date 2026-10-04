@@ -78,11 +78,14 @@ func padZeroRows(src *mat.Dense, rows int) *mat.Dense {
 	if src == nil {
 		return nil
 	}
-	r, c := src.Dims()
+	_, c := src.Dims()
 	dst := newDense(rows, c)
-	if r == 0 || c == 0 {
+	if c == 0 {
 		return dst
 	}
-	dst.Slice(0, r, 0, c).(*mat.Dense).Copy(src)
+	s, d := src.RawMatrix(), dst.RawMatrix()
+	for i := range s.Rows {
+		copy(d.Data[i*d.Stride:i*d.Stride+c], s.Data[i*s.Stride:i*s.Stride+c])
+	}
 	return dst
 }
