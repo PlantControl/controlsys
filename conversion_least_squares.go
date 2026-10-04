@@ -22,7 +22,8 @@ type LeastSquaresResult struct {
 }
 
 // DiscretizeLeastSquares fits an ordinary proper SISO model up to Nyquist.
-// fitOrder=0 selects the source state order; positive orders are accepted.
+// fitOrder=0 selects the source state order (after eliminating the algebraic
+// states of a singular-E descriptor model); positive orders are accepted.
 // The fit uses an equally weighted uniform grid with max(513,32*order+1) points
 // and up to 12 denominator-reweighted real least-squares iterations followed
 // by up to 8 response-error Gauss-Newton refinements. It selects
@@ -30,7 +31,7 @@ type LeastSquaresResult struct {
 // Integrators retain their multiplicity and leading low-frequency residue;
 // they require sufficient fit order and use an open midpoint frequency grid.
 // Integer external delays are preserved; fractional and internal delays and
-// singular descriptor models are rejected. A finite grid cannot certify intersample error
+// improper descriptor models are rejected. A finite grid cannot certify intersample error
 // or capture arbitrarily narrow resonances. No exact inverse is promised.
 func (sys *System) DiscretizeLeastSquares(dt float64, fitOrder int) (*LeastSquaresResult, error) {
 	if sys.IsDiscrete() {
@@ -39,14 +40,14 @@ func (sys *System) DiscretizeLeastSquares(dt float64, fitOrder int) (*LeastSquar
 	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
 		return nil, ErrInvalidSampleTime
 	}
-	n, m, p := sys.Dims()
-	if m != 1 || p != 1 {
+	if _, m, p := sys.Dims(); m != 1 || p != 1 {
 		return nil, ErrNotSISO
 	}
-	sys, err := conversionStandardForm(sys, "DiscretizeLeastSquares")
+	sys, _, err := conversionStandardForm(sys, "DiscretizeLeastSquares")
 	if err != nil {
 		return nil, err
 	}
+	n, _, _ := sys.Dims()
 	if sys.HasInternalDelay() {
 		return nil, fmt.Errorf("DiscretizeLeastSquares: internal delays: %w", ErrFeedbackDelay)
 	}
