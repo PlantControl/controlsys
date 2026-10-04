@@ -23,13 +23,18 @@ type AllMarginResult struct {
 	PhaseCrossFreqs []float64 // omega where angle(G)=-180deg
 }
 
+// DiskMarginResult holds a SISO disk margin, mirroring the fields of MATLAB
+// diskmargin. Alpha, GainMargin, PhaseMargin and Frequency follow the skew
+// Skew; PeakSensitivity and PeakFreq always describe ‖S‖∞.
 type DiskMarginResult struct {
-	Alpha           float64    // disk margin = 1/Ms
+	Alpha           float64    // disk margin αmax = 1/‖S+(σ−1)/2‖∞
+	Skew            float64    // σ of the gain-variation disk
+	Frequency       float64    // ω where the disk margin is attained
 	GainMargin      [2]float64 // [low, high] linear gain factors
 	GainMarginDB    [2]float64 // [low, high] in dB
 	PhaseMargin     float64    // +/- degrees
-	PeakSensitivity float64    // Ms = ||S||_inf
-	PeakFreq        float64    // omega where sensitivity peaks
+	PeakSensitivity float64    // Ms = ‖S‖∞
+	PeakFreq        float64    // ω where |S| peaks
 }
 
 type crossing struct {
@@ -400,70 +405,102 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	return w, nil
 }
 
-// DiskMargin computes the symmetric disk margin of the SISO loop sys from the
-// peak of the sensitivity 1/(1+L). An unstable closed loop gives Alpha 0,
-// GainMargin [1 1] and PhaseMargin 0, as MATLAB diskmargin does.
+// DiskMargin computes the balanced (skew σ = 0) disk margin of the SISO loop
+// sys, the default of MATLAB diskmargin
+// (https://www.mathworks.com/help/robust/ref/dynamicsystem.diskmargin.html).
+// It is DiskMarginSkew(sys, 0): αmax = 1/‖S − 1/2‖∞, GainMargin
+// [(2−α)/(2+α), (2+α)/(2−α)] and PhaseMargin 2·atan(α/2).
+func DiskMargin(sys *System) (*DiskMarginResult, error) {
+	return DiskMarginSkew(sys, 0)
+}
+
+// DiskMarginSkew computes the disk margin of the SISO loop sys for the skew
+// sigma, as MATLAB diskmargin(L, sigma). The loop tolerates every
+// multiplicative gain and phase variation F = (1 + α(1−σ)/2·δ)/(1 − α(1+σ)/2·δ)
+// with |δ| < 1 and α < αmax = 1/‖S + (σ−1)/2‖∞, S = 1/(1+L). σ = 0 balances
+// gain increase and decrease, σ > 0 favours increase, and σ = 1 gives the
+// sensitivity-based margin αmax = 1/‖S‖∞. GainMargin and PhaseMargin are the
+// real-axis intercepts and the unit-circle extent of the F disk, as MATLAB
+// dm2gm; a negative lower intercept is reported as 0. An unstable closed
+// loop gives Alpha 0, GainMargin [1 1] and PhaseMargin 0, as MATLAB
+// diskmargin does.
 //
 // Discrete loop delays are absorbed exactly. For continuous loops with delays
 // closed-loop stability comes from a Nyquist encirclement count of 1+L on a
-// delay-aware adaptive frequency grid, and Ms from the exact frequency
+// delay-aware adaptive frequency grid, and the peaks from the exact frequency
 // response; see delayLoop.nyquist for the resolution limits. Loops whose
 // internal delays form a feedback cycle, whose high-frequency gain may reach
 // 1 (neutral type), or whose delay grid would exceed 2^21 points return
 // ErrContinuousInternalDelay. Descriptor loops return
 // ErrDescriptorUnsupported, as HinfNorm does.
-func DiskMargin(sys *System) (*DiskMarginResult, error) {
+func DiskMarginSkew(sys *System, sigma float64) (*DiskMarginResult, error) {
+	if math.IsNaN(sigma) || math.IsInf(sigma, 0) {
+		return nil, fmt.Errorf("DiskMargin: skew must be finite, got %g", sigma)
+	}
 	if _, err := newSISOLoopModel(sys, "DiskMargin"); err != nil {
 		return nil, err
 	}
+	shift := (sigma - 1) / 2
 	if sys.IsContinuous() && sys.HasDelay() {
-		return diskMarginDelayed(sys)
+		return diskMarginDelayed(sys, sigma, shift)
 	}
 
 	eye, err := NewGain(mat.NewDense(1, 1, []float64{1}), sys.Dt)
 	if err != nil {
 		return nil, err
 	}
-
 	S, err := Feedback(eye, sys, -1)
 	if err != nil {
 		return nil, fmt.Errorf("DiskMargin: cannot form sensitivity: %w", err)
 	}
-
-	Ms, wPeak, err := HinfNorm(S)
+	Ms, wMs, err := HinfNorm(S)
 	if err != nil {
-		if errors.Is(err, ErrUnstable) {
-			return unstableDiskMargin(), nil
-		}
 		return nil, err
 	}
-	return diskMarginFromPeak(Ms, wPeak), nil
+	if math.IsInf(Ms, 1) {
+		return unstableDiskMargin(sigma), nil
+	}
+	peak, wPeak := Ms, wMs
+	if shift != 0 {
+		c, err := NewGain(mat.NewDense(1, 1, []float64{shift}), sys.Dt)
+		if err != nil {
+			return nil, err
+		}
+		Sc, err := Parallel(S, c)
+		if err != nil {
+			return nil, fmt.Errorf("DiskMargin: cannot form shifted sensitivity: %w", err)
+		}
+		if peak, wPeak, err = HinfNorm(Sc); err != nil {
+			return nil, err
+		}
+	}
+	return diskMarginFromPeak(sigma, peak, wPeak, Ms, wMs), nil
 }
 
-func unstableDiskMargin() *DiskMarginResult {
+func unstableDiskMargin(sigma float64) *DiskMarginResult {
 	return &DiskMarginResult{
 		Alpha:           0,
+		Skew:            sigma,
 		GainMargin:      [2]float64{1, 1},
 		GainMarginDB:    [2]float64{0, 0},
 		PhaseMargin:     0,
 		PeakSensitivity: math.Inf(1),
-		PeakFreq:        0,
 	}
 }
 
-func diskMarginDelayed(sys *System) (*DiskMarginResult, error) {
+func diskMarginDelayed(sys *System, sigma, shift float64) (*DiskMarginResult, error) {
 	loop, err := delayLoopFromSystem(sys, "DiskMargin")
 	if err != nil {
 		return nil, diskMarginDelayError(err)
 	}
-	stable, Ms, wPeak, err := loop.peakSensitivity()
+	stable, peaks, err := loop.sensitivityPeaks(0, shift)
 	if err != nil {
 		return nil, diskMarginDelayError(err)
 	}
 	if !stable {
-		return unstableDiskMargin(), nil
+		return unstableDiskMargin(sigma), nil
 	}
-	return diskMarginFromPeak(Ms, wPeak), nil
+	return diskMarginFromPeak(sigma, peaks[1].peak, peaks[1].w, peaks[0].peak, peaks[0].w), nil
 }
 
 func diskMarginDelayError(err error) error {
@@ -473,41 +510,42 @@ func diskMarginDelayError(err error) error {
 	return err
 }
 
-func diskMarginFromPeak(Ms, wPeak float64) *DiskMarginResult {
-	if Ms <= 0 {
-		return &DiskMarginResult{
-			Alpha:           1,
-			GainMargin:      [2]float64{0.5, math.Inf(1)},
-			GainMarginDB:    [2]float64{-20 * math.Log10(2), math.Inf(1)},
-			PhaseMargin:     180,
-			PeakSensitivity: Ms,
-			PeakFreq:        wPeak,
-		}
-	}
-
-	alpha := 1.0 / Ms
-
-	gmLow := 1.0 / (1.0 + alpha)
-	var gmHigh float64
-	if alpha >= 1 {
-		gmHigh = math.Inf(1)
-	} else {
-		gmHigh = 1.0 / (1.0 - alpha)
-	}
-
-	var pm float64
-	if alpha >= 2 {
-		pm = 180
-	} else {
-		pm = 2 * math.Asin(alpha/2) * 180 / math.Pi
-	}
-
+func diskMarginFromPeak(sigma, peak, wPeak, Ms, wMs float64) *DiskMarginResult {
+	alpha := 1 / peak
+	gm, pm := diskGainPhaseMargin(alpha, sigma)
 	return &DiskMarginResult{
 		Alpha:           alpha,
-		GainMargin:      [2]float64{gmLow, gmHigh},
-		GainMarginDB:    [2]float64{20 * math.Log10(gmLow), 20 * math.Log10(gmHigh)},
+		Skew:            sigma,
+		Frequency:       wPeak,
+		GainMargin:      gm,
+		GainMarginDB:    [2]float64{20 * math.Log10(gm[0]), 20 * math.Log10(gm[1])},
 		PhaseMargin:     pm,
 		PeakSensitivity: Ms,
-		PeakFreq:        wPeak,
+		PeakFreq:        wMs,
 	}
+}
+
+// diskGainPhaseMargin returns the gain interval and phase arc around 1
+// covered by the image of the unit disk under
+// F(δ) = (1 + aδ)/(1 − bδ), a = α(1−σ)/2, b = α(1+σ)/2, as MATLAB dm2gm.
+// F is increasing on real δ, so the interval runs from F(−1) to F(1) unless
+// the pole δ = 1/b lies in [−1, 1]. e^{jθ} is in the image when
+// |e^{jθ}−1| ≤ |a + b·e^{jθ}|, i.e. 2(1+ab)·cosθ ≥ 2 − a² − b².
+func diskGainPhaseMargin(alpha, sigma float64) (gm [2]float64, pm float64) {
+	if math.IsInf(alpha, 1) {
+		return [2]float64{0, math.Inf(1)}, 180
+	}
+	a, b := alpha*(1-sigma)/2, alpha*(1+sigma)/2
+	gm = [2]float64{0, math.Inf(1)}
+	if b > -1 {
+		gm[0] = max((1-a)/(1+b), 0)
+	}
+	if b < 1 {
+		gm[1] = (1 + a) / (1 - b)
+	}
+	pm = 180
+	if 1+a*b > 0 {
+		pm = math.Acos(max(-1, min(1, (2-a*a-b*b)/(2*(1+a*b))))) * 180 / math.Pi
+	}
+	return gm, pm
 }

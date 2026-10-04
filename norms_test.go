@@ -363,9 +363,30 @@ func TestHinfNorm_Unstable(t *testing.T) {
 		mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{0}), 0)
 
-	_, _, err := HinfNorm(sys)
-	if !errors.Is(err, ErrUnstable) {
-		t.Errorf("got %v, want ErrUnstable", err)
+	norm, w, err := HinfNorm(sys)
+	if err != nil || !math.IsInf(norm, 1) || !math.IsInf(w, 1) {
+		t.Errorf("got %g at %g, %v; want Inf at Inf (MATLAB hinfnorm)", norm, w, err)
+	}
+
+	for _, dt := range []float64{0, 0.1} {
+		mimo, err := NewFromSlices(2, 2, 2,
+			[]float64{0.8, 1.5, -0.4, -0.9},
+			[]float64{1, 0, 0.5, 2},
+			[]float64{1, -1, 0, 3},
+			[]float64{0.1, 0, 0.2, -0.3}, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dt > 0 {
+			mimo.A.Set(0, 0, 1.6)
+		}
+		if stable, _ := mimo.IsStable(); stable {
+			t.Fatalf("dt=%g: fixture is stable", dt)
+		}
+		norm, w, err := HinfNorm(mimo)
+		if err != nil || !math.IsInf(norm, 1) || !math.IsInf(w, 1) {
+			t.Errorf("MIMO dt=%g: got %g at %g, %v; want Inf at Inf", dt, norm, w, err)
+		}
 	}
 }
 
@@ -489,7 +510,7 @@ func TestNorms_FirstOrder_MATLABVerified(t *testing.T) {
 	}
 }
 
-// python-control: 1/(1-s) unstable => Hinf = 1.0, H2 = inf
+// 1/(1-s) unstable: MATLAB hinfnorm and H2 norm are Inf.
 func TestNorms_UnstableNonMinPhase(t *testing.T) {
 	sys, _ := New(
 		mat.NewDense(1, 1, []float64{1}),
@@ -501,9 +522,9 @@ func TestNorms_UnstableNonMinPhase(t *testing.T) {
 	if !errors.Is(err, ErrUnstable) {
 		t.Errorf("H2: got %v, want ErrUnstable", err)
 	}
-	_, _, err = HinfNorm(sys)
-	if !errors.Is(err, ErrUnstable) {
-		t.Errorf("Hinf: got %v, want ErrUnstable", err)
+	norm, w, err := HinfNorm(sys)
+	if err != nil || !math.IsInf(norm, 1) || !math.IsInf(w, 1) {
+		t.Errorf("Hinf: got %g at %g, %v; want Inf at Inf", norm, w, err)
 	}
 }
 
@@ -869,8 +890,8 @@ func maxSV2x2(g [2][2]complex128) float64 {
 
 func TestHinfNorm_DiscreteInternalDelay(t *testing.T) {
 	unstable, _ := discreteLFTDelayFixture(t, []float64{1, 0.5})
-	if _, _, err := HinfNorm(unstable); !errors.Is(err, ErrUnstable) {
-		t.Fatalf("unstable delay loop: err = %v, want ErrUnstable", err)
+	if norm, w, err := HinfNorm(unstable); err != nil || !math.IsInf(norm, 1) || !math.IsInf(w, 1) {
+		t.Fatalf("unstable delay loop: %g at %g, %v; want Inf at Inf", norm, w, err)
 	}
 
 	lft, _ := discreteLFTDelayFixture(t, []float64{0.1, 0.05})
@@ -1046,8 +1067,8 @@ func TestNormInf_UnstableFirstOrder(t *testing.T) {
 		if math.Abs(got-1) > 1e-9 {
 			t.Errorf("dt=%v: Norm(Inf) = %.15g, want 1", dt, got)
 		}
-		if _, _, err := HinfNorm(sys); !errors.Is(err, ErrUnstable) {
-			t.Errorf("dt=%v: HinfNorm err = %v, want ErrUnstable", dt, err)
+		if norm, w, err := HinfNorm(sys); err != nil || !math.IsInf(norm, 1) || !math.IsInf(w, 1) {
+			t.Errorf("dt=%v: HinfNorm = %g at %g, %v; want Inf at Inf", dt, norm, w, err)
 		}
 	}
 }

@@ -37,7 +37,20 @@ func bisectRoot(f func(float64) float64, lo, hi float64) float64 {
 
 // oraclePeakS returns sup |1/(1+L(jω))| by a dense grid and golden section.
 func oraclePeakS(l func(w float64) complex128, wmax float64) (float64, float64) {
-	f := func(w float64) float64 { return cmplx.Abs(1 / (1 + l(w))) }
+	return oraclePeakShifted(l, wmax, 0)
+}
+
+// oracleDiskAlpha returns 1/sup |1/(1+L(jω)) − 1/2|, the balanced disk
+// margin, given the high-frequency limit |L(j∞)| = tail of a delayed loop.
+func oracleDiskAlpha(l func(w float64) complex128, wmax, tail float64) float64 {
+	peak, _ := oraclePeakShifted(l, wmax, -0.5)
+	return 1 / math.Max(peak, (1+tail)/(2*(1-tail)))
+}
+
+// oraclePeakShifted returns sup |1/(1+L(jω)) + c| by a dense grid and
+// ternary search.
+func oraclePeakShifted(l func(w float64) complex128, wmax, c float64) (float64, float64) {
+	f := func(w float64) float64 { return cmplx.Abs(1/(1+l(w)) + complex(c, 0)) }
 	const n = 400000
 	best, bw := 0.0, 0.0
 	for i := range n + 1 {
@@ -86,8 +99,9 @@ func TestDiskMarginDelayedFirstOrderBoundary(t *testing.T) {
 			return complex(tc.k, 0) * cmplx.Exp(-s*complex(tau, 0)) / (s + complex(a, 0))
 		}
 		ms, wp := oraclePeakS(L, 200)
-		if math.Abs(dm.PeakSensitivity-ms) > 1e-7*ms || math.Abs(dm.Alpha-1/ms) > 1e-7 {
-			t.Fatalf("k=%g: Ms=%.12g alpha=%g, oracle Ms=%.12g", tc.k, dm.PeakSensitivity, dm.Alpha, ms)
+		alpha := oracleDiskAlpha(L, 200, 0)
+		if math.Abs(dm.PeakSensitivity-ms) > 1e-7*ms || math.Abs(dm.Alpha-alpha) > 1e-7*alpha {
+			t.Fatalf("k=%g: Ms=%.12g alpha=%.12g, oracle Ms=%.12g alpha=%.12g", tc.k, dm.PeakSensitivity, dm.Alpha, ms, alpha)
 		}
 		if ms > 1+1e-6 && math.Abs(dm.PeakFreq-wp) > 1e-4*max(1, wp) {
 			t.Fatalf("k=%g: wPeak=%g, oracle %g", tc.k, dm.PeakFreq, wp)
@@ -114,9 +128,13 @@ func TestDiskMarginDelayedIntegrator(t *testing.T) {
 				s := complex(0, w)
 				return complex(tc.k, 0) * cmplx.Exp(-s*complex(tau, 0)) / s
 			}
-			ms, _ := oraclePeakS(func(w float64) complex128 { return L(math.Max(w, 1e-9)) }, 100)
+			Lp := func(w float64) complex128 { return L(math.Max(w, 1e-9)) }
+			ms, _ := oraclePeakS(Lp, 100)
 			if math.Abs(dm.PeakSensitivity-ms) > 1e-7*ms {
 				t.Fatalf("k=%g: Ms=%.12g, oracle %.12g", tc.k, dm.PeakSensitivity, ms)
+			}
+			if alpha := oracleDiskAlpha(Lp, 100, 0); math.Abs(dm.Alpha-alpha) > 1e-7*alpha {
+				t.Fatalf("k=%g: alpha=%.12g, oracle %.12g", tc.k, dm.Alpha, alpha)
 			}
 		}
 	}
@@ -165,9 +183,24 @@ func TestDiskMarginDelayedSecondOrderNonSymmetric(t *testing.T) {
 			t.Fatalf("k=%g (kc=%g): alpha=%g, want stable=%v", tc.k, kc, dm.Alpha, tc.stable)
 		}
 		if tc.stable {
-			ms, _ := oraclePeakS(func(w float64) complex128 { return complex(tc.k, 0) * G(w) }, 100)
+			L := func(w float64) complex128 { return complex(tc.k, 0) * G(w) }
+			ms, _ := oraclePeakS(L, 100)
 			if math.Abs(dm.PeakSensitivity-ms) > 1e-7*ms {
 				t.Fatalf("Ms=%.12g, oracle %.12g", dm.PeakSensitivity, ms)
+			}
+			if alpha := oracleDiskAlpha(L, 100, 0); math.Abs(dm.Alpha-alpha) > 1e-7*alpha {
+				t.Fatalf("alpha=%.12g, oracle %.12g", dm.Alpha, alpha)
+			}
+			for _, sigma := range []float64{-1.5, 1, 2.5} {
+				got, err := DiskMarginSkew(sys, sigma)
+				if err != nil {
+					t.Fatal(err)
+				}
+				peak, wp := oraclePeakShifted(L, 100, (sigma-1)/2)
+				peak = math.Max(peak, math.Abs((sigma+1)/2))
+				if math.Abs(got.Alpha-1/peak) > 1e-7/peak || (peak > math.Abs((sigma+1)/2)+1e-6 && math.Abs(got.Frequency-wp) > 1e-4*max(1, wp)) {
+					t.Fatalf("sigma=%g: alpha=%.12g at %g, oracle %.12g at %g", sigma, got.Alpha, got.Frequency, 1/peak, wp)
+				}
 			}
 		}
 	}
@@ -183,6 +216,9 @@ func TestDiskMarginDelayedFeedthroughLimit(t *testing.T) {
 	}
 	if math.Abs(dm.PeakSensitivity-2) > 1e-12 || !math.IsInf(dm.PeakFreq, 1) {
 		t.Fatalf("Ms=%g at %g, want 2 at +Inf", dm.PeakSensitivity, dm.PeakFreq)
+	}
+	if math.Abs(dm.Alpha-2.0/3) > 1e-12 || !math.IsInf(dm.Frequency, 1) {
+		t.Fatalf("alpha=%g at %g, want 2/3 = 1/sup|(1-L)/(2(1+L))| at +Inf", dm.Alpha, dm.Frequency)
 	}
 }
 
@@ -201,6 +237,9 @@ func TestDiskMarginDelayedFeedthroughPeak(t *testing.T) {
 	ms, _ := oraclePeakS(L, 2000)
 	if math.Abs(dm.PeakSensitivity-ms) > 1e-9*ms || ms <= 2 {
 		t.Fatalf("Ms=%.12g, oracle %.12g", dm.PeakSensitivity, ms)
+	}
+	if alpha := oracleDiskAlpha(L, 2000, 0.5); math.Abs(dm.Alpha-alpha) > 1e-9*alpha || 1/alpha <= 1.5 {
+		t.Fatalf("alpha=%.12g, oracle %.12g", dm.Alpha, alpha)
 	}
 }
 
