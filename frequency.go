@@ -110,7 +110,11 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 }
 
 func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
-	return newFrequencyEvaluator(sys).response(omega)
+	e, err := validFrequencyEvaluator(sys, "FreqResponse")
+	if err != nil {
+		return nil, err
+	}
+	return e.response(omega)
 }
 
 // FreqResponsePointwise evaluates the frequency response with guaranteed
@@ -123,7 +127,11 @@ func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 // frequency. Use it when downstream comparisons require sweep results to
 // reproduce single-point evaluations exactly.
 func (sys *System) FreqResponsePointwise(omega []float64) (*FreqResponseMatrix, error) {
-	return newFrequencyEvaluator(sys).responsePointwise(omega)
+	e, err := validFrequencyEvaluator(sys, "FreqResponsePointwise")
+	if err != nil {
+		return nil, err
+	}
+	return e.responsePointwise(omega)
 }
 
 func (sys *System) Bode(omega []float64, nPoints int) (*BodeResult, error) {
@@ -147,7 +155,11 @@ func (sys *System) Bode(omega []float64, nPoints int) (*BodeResult, error) {
 }
 
 func (sys *System) EvalFr(s complex128) ([][]complex128, error) {
-	return newFrequencyEvaluator(sys).eval(s)
+	e, err := validFrequencyEvaluator(sys, "EvalFr")
+	if err != nil {
+		return nil, err
+	}
+	return e.eval(s)
 }
 
 type frequencyEvaluator struct {
@@ -160,6 +172,15 @@ type frequencyEvaluator struct {
 // denseFrequencySweepLimit is the sweep length up to which per-point dense
 // solves beat one Hessenberg reduction (BenchmarkFrequencySweepKernels).
 const denseFrequencySweepLimit = 2
+
+// validFrequencyEvaluator rejects hand-built systems whose exported fields
+// disagree in shape; the kernels index them unchecked.
+func validFrequencyEvaluator(sys *System, op string) (frequencyEvaluator, error) {
+	if err := sys.Validate(); err != nil {
+		return frequencyEvaluator{}, fmt.Errorf("%s: %w", op, err)
+	}
+	return newFrequencyEvaluator(sys), nil
+}
 
 func newFrequencyEvaluator(sys *System) frequencyEvaluator {
 	n, m, p := sys.Dims()

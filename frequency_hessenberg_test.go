@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -135,4 +136,32 @@ func TestFreqResponseSweepResonanceAndEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSweepMatchesPointwise(t, "pole at w=0", integ, append([]float64{0}, logspace(-2, 2, 20)...), 1e-12)
+}
+
+func TestFreqResponseRejectsInvalidSystem(t *testing.T) {
+	cases := map[string]func(*System){
+		"Delay":       func(s *System) { s.Delay = mat.NewDense(3, 3, nil) },
+		"InputDelay":  func(s *System) { s.InputDelay = []float64{1} },
+		"OutputDelay": func(s *System) { s.OutputDelay = []float64{1, 2, 3} },
+		"E":           func(s *System) { s.E = mat.NewDense(2, 2, []float64{1, 0, 0, 1}) },
+		"LFT.B2":      func(s *System) { s.LFT.B2 = mat.NewDense(2, 2, nil) },
+		"C":           func(s *System) { s.C = mat.NewDense(2, 4, nil) },
+	}
+	for name, corrupt := range cases {
+		sys := absorbScopePlant(t, 0, true, false)
+		corrupt(sys)
+		if _, err := sys.FreqResponse(absorbScopeOmega); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("%s: FreqResponse err = %v", name, err)
+		}
+		if _, err := sys.FreqResponsePointwise(absorbScopeOmega); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("%s: FreqResponsePointwise err = %v", name, err)
+		}
+		if _, err := sys.EvalFr(1i); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("%s: EvalFr err = %v", name, err)
+		}
+	}
+	var nilSys *System
+	if _, err := nilSys.FreqResponse(absorbScopeOmega); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("nil: FreqResponse err = %v", err)
+	}
 }

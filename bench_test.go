@@ -1565,3 +1565,12 @@ func BenchmarkAugstateDelayed(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkEvalFr_N4(b *testing.B) {
+	sys := benchSys(4, 2, 2)
+	for b.Loop() {
+		if _, err := sys.EvalFr(1i); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
