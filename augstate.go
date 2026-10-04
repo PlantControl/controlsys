@@ -2,6 +2,10 @@ package controlsys
 
 import "plantcontrol.org/v1/gonum/mat"
 
+// Augstate appends the states to the outputs: y_aug = [y; x].
+// State outputs are the undelayed x(t) of the state equations: they inherit
+// InputDelay and internal delays through x, but carry no OutputDelay, IODelay
+// matrix, or direct internal-delay feedthrough.
 func Augstate(sys *System) (*System, error) {
 	n, m, p := sys.Dims()
 	if n == 0 {
@@ -36,15 +40,12 @@ func Augstate(sys *System) (*System, error) {
 		Dt: sys.Dt,
 	}
 
-	if sys.Delay != nil {
-		result.Delay = copyDelayOrNil(sys.Delay)
-	}
+	result.Delay = padZeroRows(sys.Delay, pNew)
 	if sys.InputDelay != nil {
-		result.InputDelay = make([]float64, len(sys.InputDelay))
-		copy(result.InputDelay, sys.InputDelay)
+		result.InputDelay = append([]float64(nil), sys.InputDelay...)
 	}
 	if sys.OutputDelay != nil {
-		result.OutputDelay = make([]float64, len(sys.OutputDelay))
+		result.OutputDelay = make([]float64, pNew)
 		copy(result.OutputDelay, sys.OutputDelay)
 	}
 	if sys.LFT != nil {
@@ -52,7 +53,7 @@ func Augstate(sys *System) (*System, error) {
 			Tau: append([]float64(nil), sys.LFT.Tau...),
 			B2:  copyDelayOrNil(sys.LFT.B2),
 			C2:  copyDelayOrNil(sys.LFT.C2),
-			D12: copyDelayOrNil(sys.LFT.D12),
+			D12: padZeroRows(sys.LFT.D12, pNew),
 			D21: copyDelayOrNil(sys.LFT.D21),
 			D22: copyDelayOrNil(sys.LFT.D22),
 		}
@@ -71,4 +72,17 @@ func Augstate(sys *System) (*System, error) {
 	result.StateName = copyStringSlice(sys.StateName)
 
 	return result, nil
+}
+
+func padZeroRows(src *mat.Dense, rows int) *mat.Dense {
+	if src == nil {
+		return nil
+	}
+	r, c := src.Dims()
+	dst := newDense(rows, c)
+	if r == 0 || c == 0 {
+		return dst
+	}
+	dst.Slice(0, r, 0, c).(*mat.Dense).Copy(src)
+	return dst
 }
