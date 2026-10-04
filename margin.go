@@ -82,10 +82,16 @@ func (e *sisoEval) at(w float64) complex128 {
 	return e.dst[0]
 }
 
+// marginFreqs pads the Bode grid by a decade on each side: a crossover
+// placed exactly at its edge (e.g. Pidtune's target) would otherwise hinge
+// on the rounding of the last sample.
 func marginFreqs(sys *System, nPoints int) ([]float64, error) {
 	omega, err := autoBodeFreqs(sys, nPoints)
 	if err != nil {
 		return nil, err
+	}
+	if len(omega) > 1 {
+		omega = logspace(math.Log10(omega[0])-1, math.Log10(omega[len(omega)-1])+1, len(omega))
 	}
 	if sys.IsDiscrete() && sys.Dt > 0 {
 		nyq := math.Pi / sys.Dt

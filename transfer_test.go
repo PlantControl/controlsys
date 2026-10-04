@@ -720,3 +720,99 @@ func TestIsproperDescriptor(t *testing.T) {
 		}
 	}
 }
+
+func transferFunctionEvalError(t *testing.T, sys *System, omega []float64) float64 {
+	t.Helper()
+	res, err := sys.TransferFunction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worst := 0.0
+	for _, w := range omega {
+		s := complex(0, w)
+		if sys.Dt != 0 {
+			s = cmplx.Exp(complex(0, w*sys.Dt))
+		}
+		want, err := sys.EvalFr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := res.TF.Eval(s)
+		for i := range want {
+			for j := range want[i] {
+				worst = max(worst, cmplx.Abs(got[i][j]-want[i][j])/cmplx.Abs(want[i][j]))
+			}
+		}
+	}
+	return worst
+}
+
+// Regression for BLYSOP: staircase + row Hessenberg on unbalanced A lost
+// 9e-5 on this 18-state Padé cascade (3e-7 discretized) and 0.36 on the
+// 20-state stiff chain.
+func TestTransferFunctionBalancesBadlyScaledA(t *testing.T) {
+	sys := absorbScopePlant(t, 0, false, false)
+	absorbScopeCases[0].apply(t, sys, 0.125)
+	pade, err := replaceContinuousDelays(sys, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, _ := pade.Dims(); n != 18 {
+		t.Fatalf("n = %d, want 18", n)
+	}
+	padeZ, err := pade.DiscretizeZOH(0.2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		sys   *System
+		omega []float64
+		tol   float64
+	}{
+		{"pade", pade, logspace(-2, 3, 60), 1e-11},
+		{"padeZOH", padeZ, logspace(-2, math.Log10(math.Pi/0.2), 60), 1e-9},
+		{"stiffChain", stiffChain(t, 20, 1e-3, 1e3, 0), logspace(-4, 4, 60), 5e-4},
+	}
+	for _, tc := range cases {
+		if e := transferFunctionEvalError(t, tc.sys, tc.omega); e > tc.tol {
+			t.Errorf("%s: TF eval rel err %g > %g", tc.name, e, tc.tol)
+		}
+	}
+	res, err := pade.TransferFunction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d0, d1 := res.TF.Den[0], res.TF.Den[1]
+	if len(d0) != len(d1) {
+		t.Fatalf("den degrees %d, %d differ", len(d0)-1, len(d1)-1)
+	}
+	for k := range d0 {
+		if d := math.Abs(d0[k] - d1[k]); d > 1e-11*math.Abs(d0[k]) {
+			t.Fatalf("den[%d]: %g vs %g", k, d0[k], d1[k])
+		}
+	}
+}
+
+func BenchmarkTransferFunction(b *testing.B) {
+	t := &testing.T{}
+	sys := absorbScopePlant(t, 0, false, false)
+	absorbScopeCases[0].apply(t, sys, 0.125)
+	pade, err := replaceContinuousDelays(sys, 5)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, bc := range []struct {
+		name string
+		sys  *System
+	}{{"pade18", pade}, {"stiff40", stiffChain(t, 40, 1e-2, 1e2, 0)}} {
+		b.Run(bc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := bc.sys.TransferFunction(nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

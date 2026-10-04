@@ -1137,3 +1137,26 @@ func BenchmarkDiskMargin_SISO(b *testing.B) {
 		DiskMargin(sys)
 	}
 }
+
+// The auto Bode grid for K/(s(s+1)) ends at 10 rad/s; crossovers at and
+// beyond that edge must still be found.
+func TestAllMargin_CrossoverAtGridEdge(t *testing.T) {
+	for _, wc := range []float64{10, 12} {
+		k := wc * math.Hypot(wc, 1)
+		ol := makePlant(t, []float64{k}, []float64{1, 1, 0})
+		mr, err := AllMargin(ol)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(mr.GainCrossFreqs) != 1 {
+			t.Fatalf("wc=%g: gain crossovers %v, want one", wc, mr.GainCrossFreqs)
+		}
+		if got := mr.GainCrossFreqs[0]; math.Abs(got-wc) > 1e-6*wc {
+			t.Errorf("wc=%g: got %g", wc, got)
+		}
+		wantPM := 90 - math.Atan(wc)*180/math.Pi
+		if got := mr.PhaseMargins[0]; math.Abs(got-wantPM) > 1e-6 {
+			t.Errorf("wc=%g: PM %g, want %g", wc, got, wantPM)
+		}
+	}
+}
