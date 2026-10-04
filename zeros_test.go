@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math/cmplx"
 	"testing"
 
@@ -546,6 +547,310 @@ func TestZeros_DescriptorSISO(t *testing.T) {
 	for _, z := range got {
 		if r := pencilMinSingularValue(t, desc, z); r > 1e-12 {
 			t.Errorf("zero %v not a rank drop: %.3g", z, r)
+		}
+	}
+}
+
+func pencilFiniteEigOracle(t *testing.T, sys *System) []complex128 {
+	t.Helper()
+	n, m, p := sys.Dims()
+	if m != p {
+		t.Fatal("oracle needs a square system")
+	}
+	k := n + m
+	M := mat.NewDense(k, k, nil)
+	N := mat.NewDense(k, k, nil)
+	M.Slice(0, n, 0, n).(*mat.Dense).Copy(sys.A)
+	M.Slice(0, n, n, k).(*mat.Dense).Copy(sys.B)
+	M.Slice(n, k, 0, n).(*mat.Dense).Copy(sys.C)
+	M.Slice(n, k, n, k).(*mat.Dense).Copy(sys.D)
+	N.Slice(0, n, 0, n).(*mat.Dense).Copy(sys.E)
+	ev, err := generalizedPoles(M, N, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []complex128
+	for _, v := range ev {
+		if cmplx.Abs(v) < 1e6 {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func TestZeros_SingularDescriptor(t *testing.T) {
+	E := mat.NewDense(3, 3, []float64{1, 2, 0, 0, 1, 1, 1, 3, 1})
+	A := mat.NewDense(3, 3, []float64{-1, 2, 0.5, -0.5, -3, 1, 0.3, 0.7, -2})
+	B := mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, -1})
+	C := mat.NewDense(2, 3, []float64{1, 0.5, 0, 0, 1, -1})
+	for _, D := range []*mat.Dense{mat.NewDense(2, 2, nil), mat.NewDense(2, 2, []float64{1, 0.2, 0.3, 2})} {
+		for _, dt := range []float64{0, 0.1} {
+			sys, err := NewDescriptor(A, B, C, D, E, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := sys.ZerosDetail()
+			if err != nil {
+				t.Fatalf("dt=%v: %v", dt, err)
+			}
+			want := pencilFiniteEigOracle(t, sys)
+			if len(want) == 0 {
+				t.Fatal("fixture has no finite zeros")
+			}
+			assertZerosMatch(t, res.Zeros, want, 1e-9)
+			for _, z := range res.Zeros {
+				if r := pencilMinSingularValue(t, sys, z); r > 1e-12 {
+					t.Errorf("dt=%v: zero %v not a rank drop: %.3g", dt, z, r)
+				}
+			}
+			if res.Rank != 2 {
+				t.Errorf("dt=%v: normal rank %d, want 2", dt, res.Rank)
+			}
+			pz, err := Pzmap(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertZerosMatch(t, pz.Zeros, want, 1e-9)
+		}
+	}
+}
+
+// algebraicDescriptorFixture embeds x2 = K x1 + L u as algebraic states and
+// mixes the coordinates, so the explicit equivalent is known in closed form.
+func algebraicDescriptorFixture(t *testing.T, dt float64) (desc, expl *System) {
+	t.Helper()
+	A11 := mat.NewDense(3, 3, []float64{-1, 2, 0, -0.5, -3, 1, 0.3, 0, -2})
+	A12 := mat.NewDense(3, 2, []float64{0.4, -1, 1, 0.2, -0.3, 0.5})
+	B1 := mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, -1})
+	K := mat.NewDense(2, 3, []float64{0.5, -1, 0.2, 1, 0.3, -0.7})
+	L := mat.NewDense(2, 2, []float64{0.2, 1, -0.5, 0.1})
+	C1 := mat.NewDense(2, 3, []float64{1, 0.5, 0, 0, 1, -1})
+	C2 := mat.NewDense(2, 2, []float64{0.3, -1, 2, 0.4})
+	D := mat.NewDense(2, 2, []float64{0.1, 0, -0.2, 0.3})
+
+	var Ae, Be, Ce, De, t1 mat.Dense
+	t1.Mul(A12, K)
+	Ae.Add(A11, &t1)
+	t1.Reset()
+	t1.Mul(A12, L)
+	Be.Add(B1, &t1)
+	t1.Reset()
+	t1.Mul(C2, K)
+	Ce.Add(C1, &t1)
+	t1.Reset()
+	t1.Mul(C2, L)
+	De.Add(D, &t1)
+	expl, err := New(&Ae, &Be, &Ce, &De, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	A := mat.NewDense(5, 5, nil)
+	A.Slice(0, 3, 0, 3).(*mat.Dense).Copy(A11)
+	A.Slice(0, 3, 3, 5).(*mat.Dense).Copy(A12)
+	A.Slice(3, 5, 0, 3).(*mat.Dense).Copy(K)
+	A.Slice(3, 5, 3, 5).(*mat.Dense).Copy(mat.NewDense(2, 2, []float64{-1, 0, 0, -1}))
+	B := mat.NewDense(5, 2, nil)
+	B.Slice(0, 3, 0, 2).(*mat.Dense).Copy(B1)
+	B.Slice(3, 5, 0, 2).(*mat.Dense).Copy(L)
+	C := mat.NewDense(2, 5, nil)
+	C.Slice(0, 2, 0, 3).(*mat.Dense).Copy(C1)
+	C.Slice(0, 2, 3, 5).(*mat.Dense).Copy(C2)
+	E := mat.NewDense(5, 5, nil)
+	for i := range 3 {
+		E.Set(i, i, 1)
+	}
+	P := mat.NewDense(5, 5, []float64{1, 0.3, 0, 0.2, -0.1, 0, 1.2, 0.4, 0, 0.3, 0.5, 0, 0.9, 0.1, 0, -0.2, 0.1, 0, 1.1, 0.4, 0, 0.6, -0.3, 0, 1.3})
+	Q := mat.NewDense(5, 5, []float64{0.8, 0, 0.1, -0.4, 0.2, 0.3, 1.1, 0, 0.2, 0, 0, 0.5, 1, 0, -0.3, 0.2, 0, -0.1, 0.9, 0.4, 0, 0.3, 0, 0.1, 1.2})
+	var PA, PE, PB, CQ, PAQ, PEQ mat.Dense
+	PA.Mul(P, A)
+	PAQ.Mul(&PA, Q)
+	PE.Mul(P, E)
+	PEQ.Mul(&PE, Q)
+	PB.Mul(P, B)
+	CQ.Mul(C, Q)
+	desc, err = NewDescriptor(&PAQ, &PB, &CQ, D, &PEQ, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return desc, expl
+}
+
+func TestZeros_AlgebraicStatesMatchExplicit(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		desc, expl := algebraicDescriptorFixture(t, dt)
+		want := pencilFiniteEigOracle(t, &System{A: expl.A, B: expl.B, C: expl.C, D: expl.D, E: eyeDense(3)})
+		if len(want) == 0 {
+			t.Fatal("fixture has no zeros")
+		}
+		res, err := desc.ZerosDetail()
+		if err != nil {
+			t.Fatalf("dt=%v: %v", dt, err)
+		}
+		assertZerosMatch(t, res.Zeros, want, 1e-9)
+		if res.Rank != 2 {
+			t.Errorf("dt=%v: rank %d, want 2", dt, res.Rank)
+		}
+	}
+}
+
+func TestZeros_ImproperDescriptor(t *testing.T) {
+	E := mat.NewDense(2, 2, []float64{0, 1, 0, 0})
+	A := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
+	B := mat.NewDense(2, 1, []float64{0, 1})
+	C := mat.NewDense(1, 2, []float64{1, 0})
+	for _, tc := range []struct {
+		d    float64
+		want []complex128
+	}{
+		{0, []complex128{0}},
+		{2, []complex128{2}},
+	} {
+		for _, dt := range []float64{0, 0.1} {
+			sys, err := NewDescriptor(A, B, C, mat.NewDense(1, 1, []float64{tc.d}), E, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := sys.ZerosDetail()
+			if err != nil {
+				t.Fatalf("D=%v dt=%v: %v", tc.d, dt, err)
+			}
+			assertZerosMatch(t, res.Zeros, tc.want, 1e-12)
+			if res.Rank != 1 {
+				t.Errorf("D=%v dt=%v: rank %d, want 1", tc.d, dt, res.Rank)
+			}
+		}
+	}
+}
+
+func TestZeros_NormalRank(t *testing.T) {
+	mimo, err := New(
+		mat.NewDense(3, 3, []float64{-1, 2, 0, -0.5, -3, 1, 0.3, 0, -2}),
+		mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, -1}),
+		mat.NewDense(2, 3, []float64{1, 0.5, 0, 0, 1, -1}),
+		mat.NewDense(2, 2, []float64{1, 0.2, 0.3, 2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := mimo.ZerosDetail()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Rank != 2 || len(res.Zeros) != 3 {
+		t.Errorf("MIMO invertible D: rank %d zeros %d, want 2 and 3", res.Rank, len(res.Zeros))
+	}
+	siso, err := New(
+		mat.NewDense(2, 2, []float64{-1, 1, 0, -2}),
+		mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 3}),
+		mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err = siso.ZerosDetail(); err != nil {
+		t.Fatal(err)
+	}
+	if res.Rank != 1 || len(res.Zeros) != 1 {
+		t.Errorf("SISO: rank %d zeros %v, want 1 and one zero", res.Rank, res.Zeros)
+	}
+}
+
+func internalDelayZerosFixture(t *testing.T, dt float64, m int, D22 *mat.Dense) (sys, closed *System) {
+	t.Helper()
+	A := mat.NewDense(3, 3, []float64{-1, 2, 0, -0.5, -3, 1, 0.3, 0, -2})
+	if dt > 0 {
+		A = mat.NewDense(3, 3, []float64{0.5, 0.2, 0, -0.1, 0.3, 0.4, 0.2, 0, -0.6})
+	}
+	B := mat.NewDense(3, m, []float64{1, 0, 0, 1, 1, -1}[:3*m])
+	C := mat.NewDense(m, 3, []float64{1, 0.5, 0, 0, 1, -1}[:3*m])
+	D := mat.NewDense(m, m, []float64{0.1, 0, -0.2, 0.3}[:m*m])
+	if m == 1 {
+		D = mat.NewDense(1, 1, []float64{0.1})
+	}
+	B2 := mat.NewDense(3, 1, []float64{0.7, -0.4, 1})
+	C2 := mat.NewDense(1, 3, []float64{0.3, 1, -0.5})
+	D12 := mat.NewDense(m, 1, []float64{0.6, -0.2}[:m])
+	D21 := mat.NewDense(1, m, []float64{0.4, 0.9}[:m])
+	var err error
+	sys, err = New(A, B, C, D, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tau := 0.3
+	if dt > 0 {
+		tau = 2
+	}
+	if err := sys.SetInternalDelay([]float64{tau}, B2, C2, D12, D21, D22); err != nil {
+		t.Fatal(err)
+	}
+	g := 1 / (1 - D22.At(0, 0))
+	var Ac, Bc, Cc, Dc, t1 mat.Dense
+	t1.Mul(B2, C2)
+	t1.Scale(g, &t1)
+	Ac.Add(A, &t1)
+	t1.Reset()
+	t1.Mul(B2, D21)
+	t1.Scale(g, &t1)
+	Bc.Add(B, &t1)
+	t1.Reset()
+	t1.Mul(D12, C2)
+	t1.Scale(g, &t1)
+	Cc.Add(C, &t1)
+	t1.Reset()
+	t1.Mul(D12, D21)
+	t1.Scale(g, &t1)
+	Dc.Add(D, &t1)
+	closed, err = NewDescriptor(&Ac, &Bc, &Cc, &Dc, eyeDense(3), dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys, closed
+}
+
+func TestZeros_InternalDelaySetToZero(t *testing.T) {
+	singularE := mat.NewDense(3, 3, []float64{1, 2, 0, 0, 1, 1, 1, 3, 1})
+	for _, E := range []*mat.Dense{nil, singularE} {
+		for _, m := range []int{1, 2} {
+			for _, dt := range []float64{0, 0.1} {
+				sys, closed := internalDelayZerosFixture(t, dt, m, mat.NewDense(1, 1, []float64{0.25}))
+				if E != nil {
+					sys.E, closed.E = mat.DenseCopyOf(E), mat.DenseCopyOf(E)
+				}
+				want := pencilFiniteEigOracle(t, closed)
+				got, err := sys.Zeros()
+				if err != nil {
+					t.Fatalf("E=%v m=%d dt=%v: %v", E != nil, m, dt, err)
+				}
+				assertZerosMatch(t, got, want, 1e-9)
+			}
+		}
+	}
+}
+
+func TestZeros_InternalDelayAlgebraicLoop(t *testing.T) {
+	for _, m := range []int{1, 2} {
+		sys, _ := internalDelayZerosFixture(t, 0, m, mat.NewDense(1, 1, []float64{1}))
+		if _, err := sys.Zeros(); !errors.Is(err, ErrAlgebraicLoop) {
+			t.Errorf("m=%d: err %v, want ErrAlgebraicLoop", m, err)
+		}
+	}
+}
+
+func TestZeros_ZeroE(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-1, 2, 0.5, -3})
+	B := mat.NewDense(2, 2, []float64{1, 0, 0.3, 1})
+	C := mat.NewDense(2, 2, []float64{1, 0.5, 0, 1})
+	for _, dt := range []float64{0, 0.1} {
+		sys, err := NewDescriptor(A, B, C, mat.NewDense(2, 2, []float64{0.2, 0, 0, 0.1}), mat.NewDense(2, 2, nil), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := sys.ZerosDetail()
+		if err != nil {
+			t.Fatalf("dt=%v: %v", dt, err)
+		}
+		if len(res.Zeros) != 0 || res.Rank != 2 {
+			t.Errorf("dt=%v: zeros %v rank %d, want none and rank 2", dt, res.Zeros, res.Rank)
 		}
 	}
 }
