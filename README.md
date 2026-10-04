@@ -1,4 +1,14 @@
-# Controlsys
+<p align="center">
+  <img src="assets/controlsys-gopher.png"
+       alt="controlsys"
+       width="280">
+</p>
+
+<h1 align="center">controlsys</h1>
+
+<p align="center">
+  A control-systems toolbox for Go
+</p>
 
 Go control-system toolbox for modeling, analyzing, transforming, and designing continuous-time and discrete-time linear time-invariant models.
 
