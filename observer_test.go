@@ -728,6 +728,7 @@ func TestReg_RejectsDelays(t *testing.T) {
 
 func TestKalmd_Opts(t *testing.T) {
 	sys := obsTestPlant(t, 0, false)
+	sys.D.Zero()
 	Qn := mat.NewDense(2, 2, []float64{1, 0.2, 0.2, 0.5})
 	Rn := mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2})
 	if _, err := Kalmd(sys, Qn, Rn, 0.1, &RiccatiOpts{S: mat.NewDense(3, 2, nil)}); !errors.Is(err, ErrOptionUnsupported) {
@@ -747,5 +748,189 @@ func TestKalmd_Opts(t *testing.T) {
 	}
 	if !mat.EqualApprox(got.K, ref.K, 1e-12) || !mat.EqualApprox(got.X, ref.X, 1e-12) {
 		t.Errorf("Workspace result differs: K=%v want %v", mat.Formatted(got.K), mat.Formatted(ref.K))
+	}
+}
+
+func estMul(ms ...mat.Matrix) *mat.Dense {
+	out := mat.DenseCopyOf(ms[0])
+	for _, m := range ms[1:] {
+		var t mat.Dense
+		t.Mul(out, m)
+		out = &t
+	}
+	return out
+}
+
+func estInv(t *testing.T, m mat.Matrix) *mat.Dense {
+	t.Helper()
+	var inv mat.Dense
+	if err := inv.Inverse(m); err != nil {
+		t.Fatal(err)
+	}
+	return &inv
+}
+
+// estMATLABNoise forms Qbar = G Qn G', Rbar = Rn + H N + N'H' + H Qn H', Nbar = G (Qn H' + N)
+// per MATLAB kalman with G = B, H = D.
+func estMATLABNoise(sys *System, Qn, Rn, Nn *mat.Dense) (Qbar, Rbar, Nbar *mat.Dense) {
+	G, H := sys.B, sys.D
+	_, m := G.Dims()
+	p, _ := H.Dims()
+	if Nn == nil {
+		Nn = mat.NewDense(m, p, nil)
+	}
+	Qbar = estMul(G, Qn, G.T())
+	Rbar = mat.DenseCopyOf(Rn)
+	Rbar.Add(Rbar, estMul(H, Nn))
+	Rbar.Add(Rbar, estMul(Nn.T(), H.T()))
+	Rbar.Add(Rbar, estMul(H, Qn, H.T()))
+	QHt := estMul(Qn, H.T())
+	QHt.Add(QHt, Nn)
+	Nbar = estMul(G, QHt)
+	return
+}
+
+func TestKalman_NoiseFeedthroughMATLAB(t *testing.T) {
+	Qn := mat.NewDense(2, 2, []float64{1, 0.2, 0.2, 0.7})
+	Rn := mat.NewDense(2, 2, []float64{0.5, 0.05, 0.05, 0.3})
+	Nn := mat.NewDense(2, 2, []float64{0.1, -0.05, 0.04, 0.08})
+	for _, dt := range []float64{0, 0.1} {
+		for _, N := range []*mat.Dense{nil, Nn} {
+			sys := obsTestPlant(t, dt, false)
+			var opts *RiccatiOpts
+			if N != nil {
+				opts = &RiccatiOpts{S: N}
+			}
+			res, err := Kalman(sys, Qn, Rn, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			A, C := sys.A, sys.C
+			Qbar, Rbar, Nbar := estMATLABNoise(sys, Qn, Rn, N)
+			var Lwant, Pwant *mat.Dense
+			if dt > 0 {
+				P := mat.DenseCopyOf(Qbar)
+				for range 5000 {
+					APCt := estMul(A, P, C.T())
+					APCt.Add(APCt, Nbar)
+					S := estMul(C, P, C.T())
+					S.Add(S, Rbar)
+					L := estMul(APCt, estInv(t, S))
+					next := estMul(A, P, A.T())
+					next.Add(next, Qbar)
+					next.Sub(next, estMul(L, S, L.T()))
+					P, Lwant = next, L
+				}
+				Pwant = P
+			} else {
+				P := res.X
+				L := estMul(P, C.T())
+				L.Add(L, Nbar)
+				Lwant = estMul(L, estInv(t, Rbar))
+				resid := estMul(A, P)
+				resid.Add(resid, estMul(P, A.T()))
+				resid.Add(resid, Qbar)
+				resid.Sub(resid, estMul(Lwant, Rbar, Lwant.T()))
+				if mat.Norm(resid, 1) > 1e-9 {
+					t.Errorf("dt=%v N=%v: filter CARE residual %.3g", dt, N != nil, mat.Norm(resid, 1))
+				}
+				var Acl mat.Dense
+				Acl.Sub(A, estMul(Lwant, C))
+				var eig mat.Eigen
+				eig.Factorize(&Acl, mat.EigenNone)
+				for _, e := range eig.Values(nil) {
+					if real(e) >= 0 {
+						t.Errorf("dt=%v N=%v: A-LC not Hurwitz: %v", dt, N != nil, e)
+					}
+				}
+				Pwant = P
+			}
+			if !mat.EqualApprox(res.K, Lwant, 1e-9) {
+				t.Errorf("dt=%v N=%v: L=%v want %v", dt, N != nil, mat.Formatted(res.K), mat.Formatted(Lwant))
+			}
+			if !mat.EqualApprox(res.X, Pwant, 1e-9) {
+				t.Errorf("dt=%v N=%v: P=%v want %v", dt, N != nil, mat.Formatted(res.X), mat.Formatted(Pwant))
+			}
+		}
+	}
+}
+
+func TestKalman_CrossCovarianceDims(t *testing.T) {
+	sys := obsTestPlant(t, 0, false)
+	_, err := Kalman(sys, eye(2), eye(2), &RiccatiOpts{S: mat.NewDense(3, 2, nil)})
+	if !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("err=%v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestLqe_CrossCovarianceMapsThroughG(t *testing.T) {
+	sys := obsTestPlant(t, 0, false)
+	A, C := sys.A, sys.C
+	G := mat.NewDense(3, 1, []float64{0.4, -1, 0.6})
+	Qn := mat.NewDense(1, 1, []float64{0.8})
+	Rn := mat.NewDense(2, 2, []float64{0.5, 0.05, 0.05, 0.3})
+	N := mat.NewDense(1, 2, []float64{0.2, -0.1})
+	res, err := Lqe(A, G, C, Qn, Rn, &RiccatiOpts{S: N})
+	if err != nil {
+		t.Fatal(err)
+	}
+	P := res.X
+	Nbar := estMul(G, N)
+	L := estMul(P, C.T())
+	L.Add(L, Nbar)
+	L = estMul(L, estInv(t, Rn))
+	resid := estMul(A, P)
+	resid.Add(resid, estMul(P, A.T()))
+	resid.Add(resid, estMul(G, Qn, G.T()))
+	resid.Sub(resid, estMul(L, Rn, L.T()))
+	if mat.Norm(resid, 1) > 1e-9 {
+		t.Errorf("filter CARE residual %.3g", mat.Norm(resid, 1))
+	}
+	if !mat.EqualApprox(res.K, L, 1e-9) {
+		t.Errorf("L=%v want %v", mat.Formatted(res.K), mat.Formatted(L))
+	}
+}
+
+func TestKalmd_RejectsNoiseFeedthrough(t *testing.T) {
+	sys := obsTestPlant(t, 0, false)
+	_, err := Kalmd(sys, eye(2), eye(2), 0.1, nil)
+	if !errors.Is(err, ErrNoiseFeedthrough) {
+		t.Errorf("err=%v, want ErrNoiseFeedthrough", err)
+	}
+}
+
+func TestEstimatorDesignRejectsDelays(t *testing.T) {
+	setters := map[string]func(*System) error{
+		"input":  func(s *System) error { return s.SetInputDelay([]float64{0.2, 0}) },
+		"output": func(s *System) error { return s.SetOutputDelay([]float64{0, 0.3}) },
+		"io":     func(s *System) error { return s.SetDelay(mat.NewDense(2, 2, []float64{0, 0.1, 0, 0})) },
+		"internal": func(s *System) error {
+			return s.SetInternalDelay([]float64{0.4},
+				mat.NewDense(3, 1, []float64{0.1, 0, 0.2}), mat.NewDense(1, 3, []float64{0.3, 0, -0.1}),
+				mat.NewDense(2, 1, nil), mat.NewDense(1, 2, nil), mat.NewDense(1, 1, nil))
+		},
+	}
+	for name, set := range setters {
+		designs := map[string]func(*System) error{
+			"Kalman": func(s *System) error { _, err := Kalman(s, eye(2), eye(2), nil); return err },
+			"Kalmd": func(s *System) error {
+				s.D.Zero()
+				_, err := Kalmd(s, eye(2), eye(2), 0.1, nil)
+				return err
+			},
+			"Lqg": func(s *System) error { _, err := Lqg(s, eye(3), eye(2), eye(2), eye(2), nil); return err },
+		}
+		for dname, design := range designs {
+			sys := obsTestPlant(t, 0, false)
+			if err := set(sys); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if !sys.HasDelay() {
+				t.Fatalf("%s: setter produced no delay", name)
+			}
+			if err := design(sys); !errors.Is(err, ErrDelayUnsupported) {
+				t.Errorf("%s/%s: err=%v, want ErrDelayUnsupported", dname, name, err)
+			}
+		}
 	}
 }

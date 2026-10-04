@@ -72,11 +72,21 @@ func Lqi(A, B, C, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	return Lqr(Aaug, Baug, Q, R, opts)
 }
 
-// Lqrd computes the discrete-time LQR gain from a continuous-time plant.
-// It discretizes (A, B) using zero-order hold with sample time dt,
-// then solves the discrete LQR problem.
+// Lqrd computes the discrete-time LQR gain from a continuous-time plant,
+// matching MATLAB lqrd. It discretizes (A, B) using zero-order hold with
+// sample time dt and discretizes the continuous cost
 //
-// A is n×n, B is n×m, Q is n×n, R is m×m, dt > 0.
+//	J = integral(x'Qx + u'Ru + 2x'Nu)
+//
+// for piecewise-constant u into the equivalent sampled-data weights
+//
+//	[Qd Nd; Nd' Rd] = integral_0^dt [Φ(τ) Γ(τ); 0 I]' [Q N; N' R] [Φ(τ) Γ(τ); 0 I] dτ
+//
+// (Van Loan's method), then solves the discrete LQR problem with cross term Nd.
+//
+// A is n×n, B is n×m, Q is n×n, R is m×m, dt > 0. opts.S, when set, is the
+// continuous cross weight N (n×m); opts.Workspace is used for the discrete
+// Riccati solve.
 func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if dt <= 0 {
 		return nil, ErrInvalidSampleTime
@@ -90,40 +100,89 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 		return nil, ErrDimensionMismatch
 	}
 	n := na
+	if qr, qc := Q.Dims(); qr != n || qc != n {
+		return nil, ErrDimensionMismatch
+	}
+	if rr, rc := R.Dims(); rr != m || rc != m {
+		return nil, ErrDimensionMismatch
+	}
+	var N *mat.Dense
+	if opts != nil && opts.S != nil {
+		N = opts.S
+		if sr, sc := N.Dims(); sr != n || sc != m {
+			return nil, ErrDimensionMismatch
+		}
+	}
 
 	if n == 0 {
 		return Dlqr(A, B, Q, R, opts)
 	}
 
 	nm := n + m
-	M := mat.NewDense(nm, nm, nil)
-	mRaw := M.RawMatrix()
+	h := 2 * nm
+	H := mat.NewDense(h, h, nil)
+	hRaw := H.RawMatrix()
 	aRaw := A.RawMatrix()
 	bRaw := B.RawMatrix()
+	qRaw := Q.RawMatrix()
+	rRaw := R.RawMatrix()
 	for i := range n {
-		mRow := mRaw.Data[i*mRaw.Stride:]
-		aRow := aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+n]
-		for j, v := range aRow {
-			mRow[j] = v * dt
+		for j := range n {
+			hRaw.Data[j*hRaw.Stride+i] = -aRaw.Data[i*aRaw.Stride+j] * dt
+			hRaw.Data[(nm+i)*hRaw.Stride+nm+j] = aRaw.Data[i*aRaw.Stride+j] * dt
+			hRaw.Data[i*hRaw.Stride+nm+j] = qRaw.Data[i*qRaw.Stride+j] * dt
 		}
-		bRow := bRaw.Data[i*bRaw.Stride : i*bRaw.Stride+m]
-		for j, v := range bRow {
-			mRow[n+j] = v * dt
+		for j := range m {
+			hRaw.Data[(n+j)*hRaw.Stride+i] = -bRaw.Data[i*bRaw.Stride+j] * dt
+			hRaw.Data[(nm+i)*hRaw.Stride+nm+n+j] = bRaw.Data[i*bRaw.Stride+j] * dt
+		}
+	}
+	for i := range m {
+		for j := range m {
+			hRaw.Data[(n+i)*hRaw.Stride+nm+n+j] = rRaw.Data[i*rRaw.Stride+j] * dt
+		}
+	}
+	if N != nil {
+		sRaw := N.RawMatrix()
+		for i := range n {
+			for j := range m {
+				v := sRaw.Data[i*sRaw.Stride+j] * dt
+				hRaw.Data[i*hRaw.Stride+nm+n+j] = v
+				hRaw.Data[(n+j)*hRaw.Stride+nm+i] = v
+			}
 		}
 	}
 
-	var eM mat.Dense
-	eM.Exp(M)
-	emRaw := eM.RawMatrix()
+	var eH mat.Dense
+	eH.Exp(H)
+	ehRaw := eH.RawMatrix()
+
+	phiData := make([]float64, nm*nm)
+	f12Data := make([]float64, nm*nm)
+	copyBlock(phiData, nm, 0, 0, ehRaw.Data, ehRaw.Stride, nm, nm, nm, nm)
+	copyBlock(f12Data, nm, 0, 0, ehRaw.Data, ehRaw.Stride, 0, nm, nm, nm)
+	Phi := mat.NewDense(nm, nm, phiData)
+	W := mat.NewDense(nm, nm, nil)
+	W.Mul(Phi.T(), mat.NewDense(nm, nm, f12Data))
+	wRaw := W.RawMatrix()
+	symmetrize(wRaw.Data, nm, wRaw.Stride)
 
 	adData := make([]float64, n*n)
 	bdData := make([]float64, n*m)
-	copyStrided(adData, n, emRaw.Data, emRaw.Stride, n, n)
-	copyBlock(bdData, m, 0, 0, emRaw.Data, emRaw.Stride, 0, n, n, m)
-	Ad := mat.NewDense(n, n, adData)
-	Bd := mat.NewDense(n, m, bdData)
+	qdData := make([]float64, n*n)
+	ndData := make([]float64, n*m)
+	rdData := make([]float64, m*m)
+	copyBlock(adData, n, 0, 0, phiData, nm, 0, 0, n, n)
+	copyBlock(bdData, m, 0, 0, phiData, nm, 0, n, n, m)
+	copyBlock(qdData, n, 0, 0, wRaw.Data, wRaw.Stride, 0, 0, n, n)
+	copyBlock(ndData, m, 0, 0, wRaw.Data, wRaw.Stride, 0, n, n, m)
+	copyBlock(rdData, m, 0, 0, wRaw.Data, wRaw.Stride, n, n, m, m)
 
-	return Dlqr(Ad, Bd, Q, R, opts)
+	dopts := &RiccatiOpts{S: mat.NewDense(n, m, ndData)}
+	if opts != nil {
+		dopts.Workspace = opts.Workspace
+	}
+	return Dlqr(mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData), mat.NewDense(n, n, qdData), mat.NewDense(m, m, rdData), dopts)
 }
 
 // Acker computes SISO pole placement using Ackermann's formula.
