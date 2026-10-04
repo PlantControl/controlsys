@@ -302,6 +302,7 @@ func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = copyDescriptorE(sys.E)
 	metadataFromSystem(sys).selectIO(inputs, outputs).applyAllOwned(result)
 
 	if sys.InputDelay != nil {

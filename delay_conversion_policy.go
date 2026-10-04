@@ -118,7 +118,7 @@ func (p delayConversionPolicy) replaceDiscreteExternal(sys *System, context stri
 		return cur, nil
 	}
 
-	result := &System{A: cur.A, B: cur.B, C: cur.C, D: cur.D, Dt: cur.Dt}
+	result := &System{A: cur.A, B: cur.B, C: cur.C, D: cur.D, E: cur.E, Dt: cur.Dt}
 	if delaySliceHasNonzero(inputDelay) {
 		bank, err := buildDiscreteSampleDelayBank(inputDelay, len(inputDelay), cur.Dt, p.thiranOrder)
 		if err != nil {
@@ -162,7 +162,7 @@ func (p delayConversionPolicy) replaceContinuousExternal(sys *System, context st
 		cur.OutputDelay = mergeDelays(cur.OutputDelay, decomp.outputDelay)
 	}
 
-	result := &System{A: cur.A, B: cur.B, C: cur.C, D: cur.D, Dt: cur.Dt}
+	result := &System{A: cur.A, B: cur.B, C: cur.C, D: cur.D, E: cur.E, Dt: cur.Dt}
 	if delaySliceHasNonzero(cur.InputDelay) {
 		bank, err := buildContinuousPadeDelayBank(cur.InputDelay, p.padeOrder)
 		if err != nil {

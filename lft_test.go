@@ -578,3 +578,52 @@ func TestLFT_BothDynamic(t *testing.T) {
 		}
 	}
 }
+
+func TestLFT_DelayedMWithDynamicDeltaMatchesFrequencyLFT(t *testing.T) {
+	M, err := New(
+		mat.NewDense(2, 2, []float64{-1, 0.4, -0.3, -2}),
+		mat.NewDense(2, 2, []float64{1, 0.2, -0.5, 0.8}),
+		mat.NewDense(2, 2, []float64{0.6, -0.1, 0.2, 1}),
+		mat.NewDense(2, 2, []float64{0.1, 0.05, -0.2, 0.15}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := M.SetInputDelay([]float64{0.3, 0.1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := M.SetOutputDelay([]float64{0, 0.2}); err != nil {
+		t.Fatal(err)
+	}
+	Delta, err := New(
+		mat.NewDense(1, 1, []float64{-3}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0.7}),
+		mat.NewDense(1, 1, []float64{0.2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := LFT(M, Delta, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	omega := []float64{0.1, 0.7, 2.5}
+	fm, err := M.FreqResponse(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd, err := Delta.FreqResponse(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fg, err := got.FreqResponse(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range omega {
+		d := fd.At(k, 0, 0)
+		want := fm.At(k, 0, 0) + fm.At(k, 0, 1)*d*fm.At(k, 1, 0)/(1-fm.At(k, 1, 1)*d)
+		if diff := cmplx.Abs(want - fg.At(k, 0, 0)); diff > 1e-12 {
+			t.Fatalf("w=%g: differs by %g", omega[k], diff)
+		}
+	}
+}

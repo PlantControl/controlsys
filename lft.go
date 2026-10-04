@@ -65,6 +65,7 @@ func lftExtract(M *System, nu, ny int) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = copyDescriptorE(M.E)
 	lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
 	return result, nil
 }
@@ -156,6 +157,7 @@ func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = blkDiagDescriptorE(M, Delta)
 	lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
 	return result, nil
 }
@@ -288,6 +290,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 		if err != nil {
 			return nil, err
 		}
+		sys.E = blkDiagDescriptorE(mH, dH)
 		if savedInputDelay.hasNonzero {
 			sys.InputDelay = savedInputDelay.values
 		}
@@ -300,24 +303,22 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 
 	var D12iMu, D12iMw *mat.Dense
 	var D21iMext, D21iMz *mat.Dense
-	var PhiD12iMw *mat.Dense
+	var PhiD12iMw, FD12iMw *mat.Dense
 	if NM > 0 {
 		D12iMu = extractBlock(mH.D, 0, nu+z, ny, NM)
 		D12iMw = extractBlock(mH.D, ny, nu+z, w, NM)
 		D21iMext = extractBlock(mH.D, ny+w, 0, NM, nu)
 		D21iMz = extractBlock(mH.D, ny+w, nu, NM, z)
 		PhiD12iMw = mulDense(Phi, D12iMw)
+		FD12iMw = mulDense(F, D12iMw)
 	}
 
 	var D12iD, D21iD *mat.Dense
-	var GD12iD, FD12iMw, FD22pD12iD *mat.Dense
+	var GD12iD, FD22pD12iD *mat.Dense
 	if ND > 0 {
 		D12iD = extractBlock(dH.D, 0, w, z, ND)
 		D21iD = extractBlock(dH.D, z, 0, ND, w)
 		GD12iD = mulDense(G, D12iD)
-		if NM > 0 {
-			FD12iMw = mulDense(F, D12iMw)
-		}
 		FD22pD12iD = mulDense(F, mulDense(D22p, D12iD))
 	}
 
@@ -428,7 +429,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	setBlock(Dcl, ny, 0, d21)
 	setBlock(Dcl, ny, nu, d22)
 
-	H := &System{A: Acl, B: Bcl, C: Ccl, D: Dcl, Dt: M.Dt}
+	H := &System{A: Acl, B: Bcl, C: Ccl, D: Dcl, E: blkDiagDescriptorE(mH, dH), Dt: M.Dt}
 
 	tau := make([]float64, N)
 	if mLFT.LFT != nil {

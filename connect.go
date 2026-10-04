@@ -74,6 +74,7 @@ func seriesSimple(sys1, sys2 *System, delayPlan interconnectionDelayPlan) (*Syst
 		if err != nil {
 			return nil, err
 		}
+		sys.E = blkDiagDescriptorE(sys1, sys2)
 		sys.InputDelay = inDel
 		sys.OutputDelay = outDel
 		seriesMetadata(sys1, sys2, n1, n2).applyAllOwned(sys)
@@ -249,6 +250,7 @@ func parallelSimple(sys1, sys2 *System, delayPlan interconnectionDelayPlan) (*Sy
 		if err != nil {
 			return nil, err
 		}
+		sys.E = blkDiagDescriptorE(sys1, sys2)
 		sys.InputDelay = inDel
 		sys.OutputDelay = outDel
 		parallelMetadata(sys1, sys2, n1, n2).applyAllOwned(sys)
@@ -534,6 +536,7 @@ func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (
 	if err != nil {
 		return nil, err
 	}
+	sys.E = blkDiagDescriptorE(plant, controller)
 	sys.InputName = copyStringSlice(plant.InputName)
 	sys.OutputName = copyStringSlice(plant.OutputName)
 	sys.StateName = concatStringSlices([][]string{plant.StateName, controller.StateName}, []int{n1, n2})
@@ -598,6 +601,7 @@ func Append(sys1, sys2 *System) (*System, error) {
 		}
 		setBlock(res.D, 0, 0, s1.D)
 		setBlock(res.D, p1, m1, s2.D)
+		res.E = blkDiagDescriptorE(s1, s2)
 		appendInternalDelay(res, s1, s2, n1, n2, m1, m2, p1, p2)
 		res.InputName = concatStringSlices([][]string{sys1.InputName, sys2.InputName}, []int{m1, m2})
 		res.OutputName = concatStringSlices([][]string{sys1.OutputName, sys2.OutputName}, []int{p1, p2})
@@ -648,6 +652,7 @@ func Append(sys1, sys2 *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	sys.E = blkDiagDescriptorE(sys1, sys2)
 	sys.InputDelay = inDel
 	sys.OutputDelay = outDel
 	appendInternalDelay(sys, sys1, sys2, n1, n2, m1, m2, p1, p2)
@@ -791,6 +796,7 @@ func seriesLFT(sys1, sys2 *System) (*System, error) {
 		if err != nil {
 			return nil, err
 		}
+		sys.E = blkDiagDescriptorE(s1, s2)
 		sys.InputDelay = savedInput1
 		sys.OutputDelay = savedOutput2
 		sys.InputName = copyStringSlice(sys1.InputName)
@@ -865,6 +871,7 @@ func seriesLFT(sys1, sys2 *System) (*System, error) {
 		D21: d21,
 		D22: d22,
 	}
+	sys.E = blkDiagDescriptorE(s1, s2)
 	sys.InputDelay = savedInput1
 	sys.OutputDelay = savedOutput2
 	sys.InputName = copyStringSlice(sys1.InputName)
@@ -958,6 +965,7 @@ func parallelLFT(sys1, sys2 *System) (*System, error) {
 		if err != nil {
 			return nil, err
 		}
+		sys.E = blkDiagDescriptorE(s1, s2)
 		sys.InputDelay = commonIn
 		sys.OutputDelay = commonOut
 		sys.InputName = copyStringSlice(sys1.InputName)
@@ -1013,6 +1021,7 @@ func parallelLFT(sys1, sys2 *System) (*System, error) {
 		D21: d21,
 		D22: d22,
 	}
+	sys.E = blkDiagDescriptorE(s1, s2)
 	sys.InputDelay = commonIn
 	sys.OutputDelay = commonOut
 	sys.InputName = copyStringSlice(sys1.InputName)
@@ -1239,6 +1248,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	sys.E = blkDiagDescriptorE(srcs...)
 	sys.Delay = delay
 	sys.InputDelay = inDel
 	sys.OutputDelay = outDel
@@ -1508,7 +1518,7 @@ func connectWithDelay(sys *System, Q *mat.Dense, inputs, outputs []int) (*System
 		Acl = &mat.Dense{}
 	}
 
-	Hresult := &System{A: Acl, B: Bcl, C: Ccl, D: Dcl, Dt: sys.Dt}
+	Hresult := &System{A: Acl, B: Bcl, C: Ccl, D: Dcl, E: sLFT.E, Dt: sys.Dt}
 	result, err := SetDelayModel(Hresult, tau)
 	if err != nil {
 		return nil, err
@@ -1612,6 +1622,7 @@ func connectSimple(sys *System, Q *mat.Dense, inputs, outputs []int, n, m, p int
 	if err != nil {
 		return nil, err
 	}
+	result.E = copyDescriptorE(sys.E)
 	result.InputName = selectStringSlice(sys.InputName, inputs)
 	result.OutputName = selectStringSlice(sys.OutputName, outputs)
 	result.StateName = copyStringSlice(sys.StateName)

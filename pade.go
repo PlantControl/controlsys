@@ -147,6 +147,7 @@ func (sys *System) Pade(order int) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = augmentDescriptorE(lft.E, n, nTotal)
 	propagateIONames(result, sys)
 	return result, nil
 }
