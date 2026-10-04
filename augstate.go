@@ -32,6 +32,7 @@ func Augstate(sys *System) (*System, error) {
 		B:  denseCopy(sys.B),
 		C:  cNew,
 		D:  dNew,
+		E:  copyDescriptorE(sys.E),
 		Dt: sys.Dt,
 	}
 

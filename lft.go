@@ -65,6 +65,7 @@ func lftExtract(M *System, nu, ny int) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = copyDescriptorE(M.E)
 	lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
 	return result, nil
 }
@@ -156,6 +157,7 @@ func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = blkDiagDescriptorE(M, Delta)
 	lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
 	return result, nil
 }
@@ -288,6 +290,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 		if err != nil {
 			return nil, err
 		}
+		sys.E = blkDiagDescriptorE(mH, dH)
 		if savedInputDelay.hasNonzero {
 			sys.InputDelay = savedInputDelay.values
 		}
@@ -426,7 +429,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	setBlock(Dcl, ny, 0, d21)
 	setBlock(Dcl, ny, nu, d22)
 
-	H := &System{A: Acl, B: Bcl, C: Ccl, D: Dcl, Dt: M.Dt}
+	H := &System{A: Acl, B: Bcl, C: Ccl, D: Dcl, E: blkDiagDescriptorE(mH, dH), Dt: M.Dt}
 
 	tau := make([]float64, N)
 	if mLFT.LFT != nil {

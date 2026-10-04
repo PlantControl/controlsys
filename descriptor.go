@@ -125,3 +125,37 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	}
 	return poles, nil
 }
+
+// blkDiagDescriptorE returns the descriptor matrix of parts whose states are
+// stacked in argument order: blkdiag(E_i), with identity for standard parts.
+// It returns nil when every part is standard.
+func blkDiagDescriptorE(parts ...*System) *mat.Dense {
+	descriptor := false
+	for _, s := range parts {
+		if s.E != nil {
+			descriptor = true
+			break
+		}
+	}
+	if !descriptor {
+		return nil
+	}
+	n := 0
+	for _, s := range parts {
+		ni, _, _ := s.Dims()
+		n += ni
+	}
+	if n == 0 {
+		return nil
+	}
+	out := mat.NewDense(n, n, nil)
+	off := 0
+	for _, s := range parts {
+		ni, _, _ := s.Dims()
+		if ni > 0 {
+			setBlockOrIdentity(out, off, s.E, ni)
+		}
+		off += ni
+	}
+	return out
+}

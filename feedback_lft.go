@@ -304,7 +304,7 @@ func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
 	C = resizeDense(C, pTotal, nTotal)
 	D = resizeDense(D, pTotal, mTotal)
 
-	H := &System{A: A, B: B, C: C, D: D, Dt: plant.Dt}
+	H := &System{A: A, B: B, C: C, D: D, E: blkDiagDescriptorE(pH, cH), Dt: plant.Dt}
 
 	taus := make([]float64, Nd)
 	copy(taus, plantTau)

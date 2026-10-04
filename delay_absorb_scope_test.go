@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -357,19 +356,7 @@ func TestAbsorbDelayContinuousResidualKeepsInternalDelay(t *testing.T) {
 	assertAbsorbedScope(t, "residual", AbsorbIO, sys, got)
 }
 
-func TestAbsorbDelayContinuousDescriptorRejected(t *testing.T) {
-	for _, internal := range []bool{false, true} {
-		for _, scope := range []AbsorbScope{AbsorbInput, AbsorbOutput, AbsorbIO, AbsorbInternal, AbsorbAll} {
-			if scope == AbsorbInternal && !internal {
-				continue
-			}
-			sys := absorbScopePlant(t, 0, internal, true)
-			absorbScopeCases[0].apply(t, sys, 0.1)
-			if _, err := sys.AbsorbDelay(scope); !errors.Is(err, ErrDescriptorUnsupported) {
-				t.Fatalf("internal=%v %s: err = %v, want ErrDescriptorUnsupported", internal, scope, err)
-			}
-		}
-	}
+func TestAbsorbDelayContinuousDescriptorDelayFreeKeepsE(t *testing.T) {
 	sys := absorbScopePlant(t, 0, false, true)
 	got, err := sys.AbsorbDelay(AbsorbIO)
 	if err != nil || !got.IsDescriptor() {

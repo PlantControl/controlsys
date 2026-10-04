@@ -236,11 +236,6 @@ func (sys *System) AbsorbDelay(scopes ...AbsorbScope) (*System, error) {
 	if !pending {
 		return sys.Copy(), nil
 	}
-	if sys.IsContinuous() {
-		if err := newDescriptorPolicy(sys).requireStandard("AbsorbDelay"); err != nil {
-			return nil, err
-		}
-	}
 	if scope == AbsorbInternal {
 		return absorbInternalDelay(sys)
 	}
@@ -760,6 +755,7 @@ func absorbInternalContinuousDelay(sys *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = augmentDescriptorE(H.E, nh, nTotal)
 	result.Delay = copyDelayOrNil(sys.Delay)
 	if sys.InputDelay != nil {
 		result.InputDelay = make([]float64, len(sys.InputDelay))
@@ -1700,6 +1696,7 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 		B:  newB,
 		C:  newC,
 		D:  newD,
+		E:  cur.E,
 		Dt: cur.Dt,
 		LFT: &LFTDelay{
 			Tau: taus,
@@ -1739,6 +1736,7 @@ func (sys *System) GetDelayModel() (H *System, tau []float64) {
 			B:  newDense(n, m+N),
 			C:  newDense(p+N, n),
 			D:  newDense(p+N, m+N),
+			E:  copyDescriptorE(sys.E),
 			Dt: sys.Dt,
 		}
 		setBlock(H.B, 0, 0, sys.B)
@@ -1763,6 +1761,7 @@ func (sys *System) GetDelayModel() (H *System, tau []float64) {
 		B:  newDense(n, m+N),
 		C:  newDense(p+N, n),
 		D:  newDense(p+N, m+N),
+		E:  lft.E,
 		Dt: lft.Dt,
 	}
 	if n > 0 {
@@ -1873,6 +1872,7 @@ func SetDelayModel(H *System, tau []float64) (*System, error) {
 		B:  bMat,
 		C:  cMat,
 		D:  dMat,
+		E:  copyDescriptorE(H.E),
 		Dt: H.Dt,
 		LFT: &LFTDelay{
 			Tau: tauCopy,
