@@ -350,6 +350,32 @@ func TestMargin_WithDelay(t *testing.T) {
 
 // === Phase 3: Bandwidth tests ===
 
+func TestBandwidth_ScaledAndZeroPole(t *testing.T) {
+	z1 := mat.NewDense(1, 1, nil)
+	for _, k := range []float64{1e-5, 1, 1e5} {
+		sys, _ := New(mat.NewDense(1, 1, []float64{-k}), mat.NewDense(1, 1, []float64{k}), mat.NewDense(1, 1, []float64{1}), z1, 0)
+		bw, err := Bandwidth(sys, -3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := k * math.Sqrt(math.Pow(10, 0.3)-1)
+		if math.Abs(bw-want) > 1e-6*want {
+			t.Errorf("k=%g: BW = %g, want %g", k, bw, want)
+		}
+	}
+	// H(z) = 0.5/(z(z-0.5)): pole at z=0, DC gain 1
+	sys, _ := New(mat.NewDense(2, 2, []float64{0.5, 1, 0, 0}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{0.5, 0}), z1, 0.1)
+	bw, err := Bandwidth(sys, -3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := math.Acos(1.25-0.25*math.Pow(10, 0.3)) / 0.1
+	if math.Abs(bw-want) > 1e-6*want {
+		t.Errorf("z=0 pole: BW = %g, want %g", bw, want)
+	}
+}
+
 // G(s) = 1/(s+1): BW = 1 rad/s at -3dB
 func TestBandwidth_FirstOrder(t *testing.T) {
 	sys, err := New(

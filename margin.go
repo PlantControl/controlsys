@@ -12,16 +12,16 @@ import (
 
 type MarginResult struct {
 	GainMargin  float64 // dB; +Inf if no phase crossover
-	PhaseMargin float64 // degrees; +Inf if no gain crossover
+	PhaseMargin float64 // degrees in (-180,180]; +Inf if no gain crossover
 	WgFreq      float64 // gain crossover freq (0dB); NaN if none
-	WpFreq      float64 // phase crossover freq (-180deg); NaN if none
+	WpFreq      float64 // phase crossover freq (-180deg mod 360); NaN if none
 }
 
 type AllMarginResult struct {
 	GainMargins     []float64 // dB at each phase crossover
-	PhaseMargins    []float64 // degrees at each gain crossover
+	PhaseMargins    []float64 // degrees in (-180,180] at each gain crossover
 	GainCrossFreqs  []float64 // omega where |G|=0dB
-	PhaseCrossFreqs []float64 // omega where angle(G)=-180deg
+	PhaseCrossFreqs []float64 // omega where angle(G)=-180deg mod 360
 }
 
 type DiskMarginResult struct {
