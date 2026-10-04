@@ -82,7 +82,7 @@ func (c absorbScopeDelays) apply(t *testing.T, sys *System, scale float64) {
 		t.Fatal(err)
 	}
 	_, _, residual := DecomposeIODelay(sys.Delay)
-	if got := delayMatrixHasNonzeroTol(residual, delayTopologyTol); got != c.resid {
+	if got := delayMatrixHasNonzero(residual); got != c.resid {
 		t.Fatalf("residual split = %v, want %v", got, c.resid)
 	}
 }

@@ -6,7 +6,31 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// delayTopologyTol is the relative size, against the largest delay involved,
+// below which a delay derived by arithmetic on other delays is roundoff.
+// Cancelling sums of delays bounded by M carry rounding and decimal
+// representation error of a few eps*M (0.1*3 - 0.1 - 0.2 ~ 5.6e-17); 1e-12
+// leaves a margin of >1000x while staying far below any meaningful delay
+// ratio. Left unsnapped, such residues become Padé banks with ~tau^-order
+// coefficients.
 const delayTopologyTol = 1e-12
+
+func delayRoundoffBound(scale float64) float64 {
+	return delayTopologyTol * scale
+}
+
+func snapDelayRoundoff(delays []float64, scale float64) {
+	bound := delayRoundoffBound(scale)
+	for i, v := range delays {
+		if math.Abs(v) <= bound {
+			delays[i] = 0
+		}
+	}
+}
+
+func delaysEqual(a, b, scale float64) bool {
+	return math.Abs(a-b) <= delayRoundoffBound(scale)
+}
 
 type delayTopology struct {
 	sys *System
@@ -59,7 +83,7 @@ func (d delayTopologyDecomposition) hasDelay() bool {
 }
 
 func (d delayTopologyDecomposition) hasResidual() bool {
-	return delayMatrixHasNonzeroTol(d.residual, delayTopologyTol)
+	return delayMatrixHasNonzero(d.residual)
 }
 
 type delayTopologyResidualError struct {
@@ -75,17 +99,13 @@ func (e *delayTopologyResidualError) Unwrap() error {
 }
 
 func delayMatrixHasNonzero(m *mat.Dense) bool {
-	return delayMatrixHasNonzeroTol(m, 0)
-}
-
-func delayMatrixHasNonzeroTol(m *mat.Dense, tol float64) bool {
 	if m == nil {
 		return false
 	}
 	raw := m.RawMatrix()
 	for i := 0; i < raw.Rows; i++ {
-		for j := 0; j < raw.Cols; j++ {
-			if math.Abs(raw.Data[i*raw.Stride+j]) > tol {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols] {
+			if v != 0 {
 				return true
 			}
 		}

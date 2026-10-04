@@ -511,6 +511,26 @@ func BenchmarkAbsorbInternalDelay(b *testing.B) {
 	}
 }
 
+func BenchmarkAbsorbInternalDelayContinuous(b *testing.B) {
+	A := mat.NewDense(5, 5, nil)
+	for i := range 5 {
+		A.Set(i, i, -1-float64(i)*0.2)
+		if i > 0 {
+			A.Set(i, i-1, 0.1)
+		}
+	}
+	B := mat.NewDense(5, 2, []float64{1, 0, 0, 1, 0.2, 0, 0, 0.1, 0.3, 0})
+	C := mat.NewDense(2, 5, []float64{1, 0, 0.2, 0, 0, 0, 0, 0.1, 0, 1})
+	sys, _ := New(A, B, C, mat.NewDense(2, 2, nil), 0)
+	B2 := mat.NewDense(5, 2, []float64{0.5, 0, 0, 0.3, 0.1, 0, 0, 0.2, 0, 0.1})
+	C2 := mat.NewDense(2, 5, []float64{0.2, 0.4, 0, 0, 0, 0, 0, 0.3, 0.1, 0})
+	sys.SetInternalDelay([]float64{0.3, 0.7}, B2, C2, mat.NewDense(2, 2, nil), mat.NewDense(2, 2, nil), mat.NewDense(2, 2, []float64{0, 0.1, 0.2, 0}))
+	b.ReportAllocs()
+	for b.Loop() {
+		sys.AbsorbDelay(AbsorbInternal)
+	}
+}
+
 func BenchmarkDiscretizeWithOpts_Thiran(b *testing.B) {
 	sys, _ := New(
 		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
@@ -1505,5 +1525,43 @@ func BenchmarkMatLog_N50(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		matLog(sys.A)
+	}
+}
+
+func BenchmarkLFTExtract(b *testing.B) {
+	for _, n := range []int{10, 50} {
+		M := benchSys(n, 6, 6)
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := LFT(M, nil, 3, 3); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkAugstateDelayed(b *testing.B) {
+	for _, n := range []int{10, 50} {
+		sys := benchSys(n, 4, 4)
+		delay := mat.NewDense(4, 4, nil)
+		for i := range 4 {
+			delay.Set(i, (i+1)%4, 0.1*float64(i+1))
+		}
+		if err := sys.SetDelay(delay); err != nil {
+			b.Fatal(err)
+		}
+		if err := sys.SetOutputDelay([]float64{0.1, 0, 0.2, 0}); err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := Augstate(sys); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

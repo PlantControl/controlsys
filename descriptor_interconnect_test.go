@@ -65,7 +65,7 @@ func newDescriptorFixture(t *testing.T, dt float64, delays string) descriptorFix
 	}
 	scale := 1.0
 	if dt == 0 {
-		scale = 0.125
+		scale = 0.1
 	}
 	switch delays {
 	case "io", "internal":
@@ -89,7 +89,6 @@ func (f descriptorFixture) twin(t *testing.T) descriptorFixture {
 type descriptorOp struct {
 	name       string
 	continuous bool
-	delayFree  bool
 	run        func(f descriptorFixture) (*System, error)
 }
 
@@ -121,7 +120,7 @@ func descriptorOps() []descriptorOp {
 		{name: "LFT(P,Delta)", run: func(f descriptorFixture) (*System, error) { return LFT(f.P, f.Delta, 1, 1) }},
 		{name: "LFT(P,nil)", run: func(f descriptorFixture) (*System, error) { return LFT(f.P, nil, 1, 1) }},
 		{name: "SelectByIndex", run: func(f descriptorFixture) (*System, error) { return f.P.SelectByIndex([]int{1}, []int{0, 1}) }},
-		{name: "Augstate", delayFree: true, run: func(f descriptorFixture) (*System, error) { return Augstate(f.P) }},
+		{name: "Augstate", run: func(f descriptorFixture) (*System, error) { return Augstate(f.P) }},
 		{name: "DelayModel", run: func(f descriptorFixture) (*System, error) {
 			H, tau := f.P.GetDelayModel()
 			return SetDelayModel(H, tau)
@@ -179,7 +178,7 @@ func TestDescriptorInterconnectionsMatchExplicitTwin(t *testing.T) {
 	for _, dt := range []float64{0, 1} {
 		for _, delays := range []string{"none", "io", "residual", "internal"} {
 			for _, op := range descriptorOps() {
-				if (op.continuous && dt != 0) || (op.delayFree && delays != "none") {
+				if op.continuous && dt != 0 {
 					continue
 				}
 				label := fmt.Sprintf("dt=%g/%s/%s", dt, delays, op.name)

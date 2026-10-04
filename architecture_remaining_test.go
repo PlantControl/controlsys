@@ -101,7 +101,7 @@ func replaceExplicitIODelaysWithPade(sys *System, padeOrder int) (*System, error
 	cur := sys.Copy()
 	if cur.Delay != nil {
 		inDel, outDel, residual := DecomposeIODelay(cur.Delay)
-		if delayMatrixHasNonzeroTol(residual, delayTopologyTol) {
+		if delayMatrixHasNonzero(residual) {
 			return nil, ErrFeedbackDelay
 		}
 		cur.Delay = nil
