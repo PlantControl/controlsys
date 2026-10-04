@@ -71,21 +71,21 @@ type aliasCase struct {
 	run  func(in []*System) ([]*System, error)
 }
 
-func one(op func(*System) (*System, error)) func([]*System) ([]*System, error) {
+func aliasOne(op func(*System) (*System, error)) func([]*System) ([]*System, error) {
 	return func(in []*System) ([]*System, error) {
 		s, err := op(in[0])
 		return []*System{s}, err
 	}
 }
 
-func two(op func(a, b *System) (*System, error)) func([]*System) ([]*System, error) {
+func aliasTwo(op func(a, b *System) (*System, error)) func([]*System) ([]*System, error) {
 	return func(in []*System) ([]*System, error) {
 		s, err := op(in[0], in[1])
 		return []*System{s}, err
 	}
 }
 
-func pick(sel ...func(f aliasFixture) *System) func(f aliasFixture) []*System {
+func aliasPick(sel ...func(f aliasFixture) *System) func(f aliasFixture) []*System {
 	return func(f aliasFixture) []*System {
 		out := make([]*System, len(sel))
 		for i, s := range sel {
@@ -110,137 +110,137 @@ var (
 
 func aliasCases() []aliasCase {
 	cases := []aliasCase{
-		{"Copy", pick(fxInternal), one(func(s *System) (*System, error) { return s.Copy(), nil })},
-		{"Augstate/delayed", pick(fxDelayed), one(Augstate)},
-		{"Augstate/internal", pick(fxInternal), one(Augstate)},
-		{"Augstate/gain", pick(fxGain), one(Augstate)},
-		{"AbsorbDelay/none", pick(fxPlant), one(func(s *System) (*System, error) { return s.AbsorbDelay() })},
-		{"AbsorbDelay/disc", pick(fxDiscDelayed), one(func(s *System) (*System, error) { return s.AbsorbDelay() })},
-		{"Pade/none", pick(fxPlant), one(func(s *System) (*System, error) { return s.Pade(2) })},
-		{"Pade/delayed", pick(fxDelayed), one(func(s *System) (*System, error) { return s.Pade(2) })},
-		{"Pade/internal", pick(fxInternal), one(func(s *System) (*System, error) { return s.Pade(2) })},
-		{"PullDelaysToLFT/none", pick(fxPlant), one((*System).PullDelaysToLFT)},
-		{"PullDelaysToLFT", pick(fxDelayed), one((*System).PullDelaysToLFT)},
-		{"PullDelaysToLFT/residual", pick(fxResidual), one((*System).PullDelaysToLFT)},
-		{"Pade/residual", pick(fxResidual), one(func(s *System) (*System, error) { return s.Pade(2) })},
-		{"Discretize/residual", pick(fxResidual), one(func(s *System) (*System, error) { return s.Discretize(0.1) })},
-		{"Discretize/thiran", pick(fxDelayed), one(func(s *System) (*System, error) {
+		{"Copy", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.Copy(), nil })},
+		{"Augstate/delayed", aliasPick(fxDelayed), aliasOne(Augstate)},
+		{"Augstate/internal", aliasPick(fxInternal), aliasOne(Augstate)},
+		{"Augstate/gain", aliasPick(fxGain), aliasOne(Augstate)},
+		{"AbsorbDelay/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.AbsorbDelay() })},
+		{"AbsorbDelay/disc", aliasPick(fxDiscDelayed), aliasOne(func(s *System) (*System, error) { return s.AbsorbDelay() })},
+		{"Pade/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.Pade(2) })},
+		{"Pade/delayed", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return s.Pade(2) })},
+		{"Pade/internal", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.Pade(2) })},
+		{"PullDelaysToLFT/none", aliasPick(fxPlant), aliasOne((*System).PullDelaysToLFT)},
+		{"PullDelaysToLFT", aliasPick(fxDelayed), aliasOne((*System).PullDelaysToLFT)},
+		{"PullDelaysToLFT/residual", aliasPick(fxResidual), aliasOne((*System).PullDelaysToLFT)},
+		{"Pade/residual", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) { return s.Pade(2) })},
+		{"Discretize/residual", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) { return s.Discretize(0.1) })},
+		{"Discretize/thiran", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) {
 			return s.DiscretizeWithOpts(0.05, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 2})
 		})},
-		{"Discretize/thiran/residual", pick(fxResidual), one(func(s *System) (*System, error) {
+		{"Discretize/thiran/residual", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) {
 			return s.DiscretizeWithOpts(0.05, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 2})
 		})},
-		{"Discretize/internalModel", pick(fxResidual), one(func(s *System) (*System, error) {
+		{"Discretize/internalModel", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) {
 			return s.DiscretizeWithOpts(0.05, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
 		})},
-		{"Discretize/internal", pick(fxInternal), one(func(s *System) (*System, error) { return s.Discretize(0.1) })},
-		{"Series/residual", pick(fxResidual, fxPlant), two(Series)},
-		{"Feedback/residual", pick(fxResidual, fxGain), two(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
-		{"ZeroDelayApprox", pick(fxInternal), one((*System).ZeroDelayApprox)},
-		{"ZeroDelayApprox/none", pick(fxPlant), one((*System).ZeroDelayApprox)},
-		{"MinimalLFT", pick(fxInternal), one((*System).MinimalLFT)},
-		{"MinimalLFT/none", pick(fxPlant), one((*System).MinimalLFT)},
-		{"AugmentInternalDelayOutputs", pick(fxInternal), one(func(s *System) (*System, error) { return s.AugmentInternalDelayOutputs("d") })},
-		{"GetDelayModel", pick(fxInternal), one(func(s *System) (*System, error) { H, _ := s.GetDelayModel(); return H, nil })},
-		{"GetDelayModel/none", pick(fxPlant), one(func(s *System) (*System, error) { H, _ := s.GetDelayModel(); return H, nil })},
-		{"SetDelayModel", pick(fxPlant), one(func(s *System) (*System, error) {
+		{"Discretize/internal", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.Discretize(0.1) })},
+		{"Series/residual", aliasPick(fxResidual, fxPlant), aliasTwo(Series)},
+		{"Feedback/residual", aliasPick(fxResidual, fxGain), aliasTwo(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
+		{"ZeroDelayApprox", aliasPick(fxInternal), aliasOne((*System).ZeroDelayApprox)},
+		{"ZeroDelayApprox/none", aliasPick(fxPlant), aliasOne((*System).ZeroDelayApprox)},
+		{"MinimalLFT", aliasPick(fxInternal), aliasOne((*System).MinimalLFT)},
+		{"MinimalLFT/none", aliasPick(fxPlant), aliasOne((*System).MinimalLFT)},
+		{"AugmentInternalDelayOutputs", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.AugmentInternalDelayOutputs("d") })},
+		{"GetDelayModel", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { H, _ := s.GetDelayModel(); return H, nil })},
+		{"GetDelayModel/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { H, _ := s.GetDelayModel(); return H, nil })},
+		{"SetDelayModel", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return SetDelayModel(s, nil)
 		})},
-		{"Discretize", pick(fxDelayed), one(func(s *System) (*System, error) { return s.Discretize(0.1) })},
-		{"DiscretizeZOH", pick(fxPlant), one(func(s *System) (*System, error) { return s.DiscretizeZOH(0.1) })},
-		{"DiscretizeFOH", pick(fxPlant), one(func(s *System) (*System, error) { return s.DiscretizeFOH(0.1) })},
-		{"DiscretizeImpulse", pick(fxPlant), one(func(s *System) (*System, error) { return s.DiscretizeImpulse(0.1) })},
-		{"DiscretizeMatched", pick(fxSISO), one(func(s *System) (*System, error) { return s.DiscretizeMatched(0.1) })},
-		{"DiscretizeTustin", pick(fxPlant), one(func(s *System) (*System, error) {
+		{"Discretize", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return s.Discretize(0.1) })},
+		{"DiscretizeZOH", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.DiscretizeZOH(0.1) })},
+		{"DiscretizeFOH", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.DiscretizeFOH(0.1) })},
+		{"DiscretizeImpulse", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.DiscretizeImpulse(0.1) })},
+		{"DiscretizeMatched", aliasPick(fxSISO), aliasOne(func(s *System) (*System, error) { return s.DiscretizeMatched(0.1) })},
+		{"DiscretizeTustin", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return s.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin})
 		})},
-		{"D2C", pick(fxDisc), one(func(s *System) (*System, error) { return s.D2C(C2DMethodZOH) })},
-		{"D2C/delayed", pick(fxDiscDelayed), one(func(s *System) (*System, error) { return s.D2C(C2DMethodZOH) })},
-		{"D2D/same", pick(fxDisc), one(func(s *System) (*System, error) { return s.D2D(1, C2DOptions{}) })},
-		{"D2D", pick(fxDisc), one(func(s *System) (*System, error) { return s.D2D(0.5, C2DOptions{}) })},
-		{"Undiscretize", pick(fxDisc), one((*System).Undiscretize)},
-		{"ToExplicit/desc", pick(fxDesc), one((*System).ToExplicit)},
-		{"ToExplicit/plain", pick(fxPlant), one((*System).ToExplicit)},
-		{"SelectByIndex/all", pick(fxDelayed), one(func(s *System) (*System, error) { return s.SelectByIndex([]int{0, 1}, []int{0, 1}) })},
-		{"SelectByIndex", pick(fxInternal), one(func(s *System) (*System, error) { return s.SelectByIndex([]int{1}, []int{0}) })},
-		{"SelectByName", pick(fxDelayed), one(func(s *System) (*System, error) { return s.SelectByName([]string{"u1"}, []string{"y0", "y1"}) })},
-		{"Xperm/identity", pick(fxPlant), one(func(s *System) (*System, error) { return Xperm(s, []int{0, 1, 2}) })},
-		{"Xperm", pick(fxPlant), one(func(s *System) (*System, error) { return Xperm(s, []int{2, 0, 1}) })},
-		{"SS2SS", pick(fxInternal), one(func(s *System) (*System, error) {
+		{"D2C", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2C(C2DMethodZOH) })},
+		{"D2C/delayed", aliasPick(fxDiscDelayed), aliasOne(func(s *System) (*System, error) { return s.D2C(C2DMethodZOH) })},
+		{"D2D/same", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2D(1, C2DOptions{}) })},
+		{"D2D", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2D(0.5, C2DOptions{}) })},
+		{"Undiscretize", aliasPick(fxDisc), aliasOne((*System).Undiscretize)},
+		{"ToExplicit/desc", aliasPick(fxDesc), aliasOne((*System).ToExplicit)},
+		{"ToExplicit/plain", aliasPick(fxPlant), aliasOne((*System).ToExplicit)},
+		{"SelectByIndex/all", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return s.SelectByIndex([]int{0, 1}, []int{0, 1}) })},
+		{"SelectByIndex", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.SelectByIndex([]int{1}, []int{0}) })},
+		{"SelectByName", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return s.SelectByName([]string{"u1"}, []string{"y0", "y1"}) })},
+		{"Xperm/identity", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Xperm(s, []int{0, 1, 2}) })},
+		{"Xperm", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Xperm(s, []int{2, 0, 1}) })},
+		{"SS2SS", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) {
 			return SS2SS(s, mat.NewDense(3, 3, []float64{1, 0.2, 0, 0, 1, 0.1, 0.3, 0, 1}))
 		})},
-		{"FixedInputReduction", pick(fxPlant), one(func(s *System) (*System, error) {
+		{"FixedInputReduction", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return s.FixedInputReduction(map[int]float64{1: 0.5}, "off")
 		})},
-		{"FixedInputReduction/none", pick(fxPlant), one(func(s *System) (*System, error) { return s.FixedInputReduction(nil, "off") })},
-		{"Modred", pick(fxPlant), one(func(s *System) (*System, error) { return Modred(s, []int{2}, SingularPerturbation) })},
-		{"Modred/none", pick(fxPlant), one(func(s *System) (*System, error) { return Modred(s, nil, Truncate) })},
-		{"Balred", pick(fxPlant), one(func(s *System) (*System, error) { r, _, err := Balred(s, 2, Truncate); return r, err })},
-		{"Balreal", pick(fxPlant), one(func(s *System) (*System, error) { return resultSys(Balreal(s)) })},
-		{"Canon", pick(fxPlant), one(func(s *System) (*System, error) { return resultSys(Canon(s, CanonModal)) })},
-		{"Prescale", pick(fxPlant), one(func(s *System) (*System, error) { return resultSys(Prescale(s)) })},
-		{"Ssbal", pick(fxPlant), one(func(s *System) (*System, error) { return resultSys(Ssbal(s)) })},
-		{"Reduce", pick(fxPlant), one(func(s *System) (*System, error) { return resultSys(s.Reduce(nil)) })},
-		{"MinimalRealization", pick(fxPlant), one(func(s *System) (*System, error) { return resultSys(s.MinimalRealization()) })},
-		{"ModalTruncate", pick(fxPlant), one(func(s *System) (*System, error) {
+		{"FixedInputReduction/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.FixedInputReduction(nil, "off") })},
+		{"Modred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Modred(s, []int{2}, SingularPerturbation) })},
+		{"Modred/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Modred(s, nil, Truncate) })},
+		{"Balred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { r, _, err := Balred(s, 2, Truncate); return r, err })},
+		{"Balreal", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Balreal(s)) })},
+		{"Canon", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Canon(s, CanonModal)) })},
+		{"Prescale", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Prescale(s)) })},
+		{"Ssbal", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Ssbal(s)) })},
+		{"Reduce", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(s.Reduce(nil)) })},
+		{"MinimalRealization", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(s.MinimalRealization()) })},
+		{"ModalTruncate", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return resultSys(ModalTruncate(s, &ModalTruncateOptions{Order: 2}))
 		})},
-		{"Sminreal", pick(fxPlant), one(Sminreal)},
-		{"Sminreal/gain", pick(fxGain), one(Sminreal)},
-		{"Stabsep", pick(fxPlant), func(in []*System) ([]*System, error) {
+		{"Sminreal", aliasPick(fxPlant), aliasOne(Sminreal)},
+		{"Sminreal/gain", aliasPick(fxGain), aliasOne(Sminreal)},
+		{"Stabsep", aliasPick(fxPlant), func(in []*System) ([]*System, error) {
 			r, err := Stabsep(in[0])
 			if err != nil {
 				return nil, err
 			}
 			return []*System{r.Stable, r.Unstable}, nil
 		}},
-		{"Modsep", pick(fxPlant), func(in []*System) ([]*System, error) {
+		{"Modsep", aliasPick(fxPlant), func(in []*System) ([]*System, error) {
 			r, err := Modsep(in[0], 1)
 			if err != nil {
 				return nil, err
 			}
 			return []*System{r.Slow, r.Fast}, nil
 		}},
-		{"Inv", pick(fxPlant), one(Inv)},
-		{"Inv/gain", pick(fxGain), one(Inv)},
-		{"Estim", pick(fxPlant), one(func(s *System) (*System, error) {
+		{"Inv", aliasPick(fxPlant), aliasOne(Inv)},
+		{"Inv/gain", aliasPick(fxGain), aliasOne(Inv)},
+		{"Estim", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return Estim(s, mat.NewDense(3, 2, []float64{0.1, 0, 0, 0.2, 0.1, 0.1}))
 		})},
-		{"Reg", pick(fxPlant), one(func(s *System) (*System, error) {
+		{"Reg", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return Reg(s, mat.NewDense(2, 3, []float64{0.1, 0, 0.2, 0, 0.3, 0}), mat.NewDense(3, 2, []float64{0.1, 0, 0, 0.2, 0.1, 0.1}))
 		})},
-		{"Series", pick(fxDelayed, fxGain), two(Series)},
-		{"Series/internal", pick(fxInternal, fxPlant), two(Series)},
-		{"Series/desc", pick(fxDesc, fxPlant), two(Series)},
-		{"Parallel", pick(fxDelayed, fxPlant), two(Parallel)},
-		{"Parallel/gain", pick(fxGain, fxGain), two(Parallel)},
-		{"Append", pick(fxInternal, fxGain), two(Append)},
-		{"Append/gain", pick(fxGain, fxGain), two(Append)},
-		{"BlkDiag/one", pick(fxDelayed), one(func(s *System) (*System, error) { return BlkDiag(s) })},
-		{"BlkDiag", pick(fxDelayed, fxDesc), two(func(a, b *System) (*System, error) { return BlkDiag(a, b) })},
-		{"Feedback", pick(fxPlant, fxGain), two(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
-		{"Feedback/nil", pick(fxPlant), one(func(s *System) (*System, error) { return Feedback(s, nil, -1) })},
-		{"Feedback/delayed", pick(fxDelayed, fxGain), two(func(a, b *System) (*System, error) {
+		{"Series", aliasPick(fxDelayed, fxGain), aliasTwo(Series)},
+		{"Series/internal", aliasPick(fxInternal, fxPlant), aliasTwo(Series)},
+		{"Series/desc", aliasPick(fxDesc, fxPlant), aliasTwo(Series)},
+		{"Parallel", aliasPick(fxDelayed, fxPlant), aliasTwo(Parallel)},
+		{"Parallel/gain", aliasPick(fxGain, fxGain), aliasTwo(Parallel)},
+		{"Append", aliasPick(fxInternal, fxGain), aliasTwo(Append)},
+		{"Append/gain", aliasPick(fxGain, fxGain), aliasTwo(Append)},
+		{"BlkDiag/one", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return BlkDiag(s) })},
+		{"BlkDiag", aliasPick(fxDelayed, fxDesc), aliasTwo(func(a, b *System) (*System, error) { return BlkDiag(a, b) })},
+		{"Feedback", aliasPick(fxPlant, fxGain), aliasTwo(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
+		{"Feedback/nil", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Feedback(s, nil, -1) })},
+		{"Feedback/delayed", aliasPick(fxDelayed, fxGain), aliasTwo(func(a, b *System) (*System, error) {
 			return Feedback(a, b, -1, WithApproximatedDelays())
 		})},
-		{"Feedback/internal", pick(fxInternal, fxGain), two(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
-		{"LFT/nil", pick(fxPlant), one(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
-		{"LFT/nil/delayed", pick(fxDelayed), one(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
-		{"LFT/nil/internal", pick(fxInternal), one(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
-		{"LFT/nil/full", pick(fxPlant), one(func(s *System) (*System, error) { return LFT(s, nil, 2, 2) })},
-		{"LFT", pick(fxPlant, fxSISOK), two(func(a, b *System) (*System, error) { return LFT(a, b, 1, 1) })},
-		{"LFT/delayed", pick(fxDelayed, fxSISOK), two(func(a, b *System) (*System, error) { return LFT(a, b, 1, 1) })},
-		{"Connect", pick(fxPlant), one(func(s *System) (*System, error) {
+		{"Feedback/internal", aliasPick(fxInternal, fxGain), aliasTwo(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
+		{"LFT/nil", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
+		{"LFT/nil/delayed", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
+		{"LFT/nil/internal", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
+		{"LFT/nil/full", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return LFT(s, nil, 2, 2) })},
+		{"LFT", aliasPick(fxPlant, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b, 1, 1) })},
+		{"LFT/delayed", aliasPick(fxDelayed, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b, 1, 1) })},
+		{"Connect", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return Connect(s, mat.NewDense(2, 2, []float64{0, 0.5, 0, 0}), []int{0, 1}, []int{0, 1})
 		})},
-		{"Connect/delayed", pick(fxDelayed), one(func(s *System) (*System, error) {
+		{"Connect/delayed", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) {
 			return Connect(s, mat.NewDense(2, 2, nil), []int{0, 1}, []int{0, 1})
 		})},
-		{"ConnectByName", pick(fxPlant), one(func(s *System) (*System, error) {
+		{"ConnectByName", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return ConnectByName([]*System{s}, nil, []string{"u0", "u1"}, []string{"y0", "y1"})
 		})},
-		{"SmithPredictor", pick(fxSISOK, fxSISO), two(func(c, m *System) (*System, error) { return SmithPredictor(c, m, 0.3, 2) })},
-		{"Loopsens", pick(fxSISO, fxSISOK), func(in []*System) ([]*System, error) {
+		{"SmithPredictor", aliasPick(fxSISOK, fxSISO), aliasTwo(func(c, m *System) (*System, error) { return SmithPredictor(c, m, 0.3, 2) })},
+		{"Loopsens", aliasPick(fxSISO, fxSISOK), func(in []*System) ([]*System, error) {
 			r, err := Loopsens(in[0], in[1])
 			if err != nil {
 				return nil, err
@@ -253,8 +253,8 @@ func aliasCases() []aliasCase {
 			name string
 			sel  func(aliasFixture) *System
 		}{{"delayed", fxDelayed}, {"residual", fxResidual}, {"internal", fxInternal}, {"plain", fxPlant}} {
-			cases = append(cases, aliasCase{"AbsorbDelay(" + string(scope) + ")/" + fx.name, pick(fx.sel),
-				one(func(s *System) (*System, error) { return s.AbsorbDelay(scope) })})
+			cases = append(cases, aliasCase{"AbsorbDelay(" + string(scope) + ")/" + fx.name, aliasPick(fx.sel),
+				aliasOne(func(s *System) (*System, error) { return s.AbsorbDelay(scope) })})
 		}
 	}
 	return cases
