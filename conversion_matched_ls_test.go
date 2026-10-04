@@ -392,8 +392,8 @@ func TestLeastSquaresOptionsDispatch(t *testing.T) {
 
 func TestLeastSquaresRejectUnsupportedModelClasses(t *testing.T) {
 	source := conversionSISO(t, []float64{1}, []float64{1, 1}, 0)
-	source.E = mat.NewDense(1, 1, []float64{2})
-	if _, err := source.DiscretizeLeastSquares(.2, 1); !errors.Is(err, ErrDescriptorUnsupported) {
+	source.E = mat.NewDense(1, 1, []float64{0})
+	if _, err := source.DiscretizeLeastSquares(.2, 1); !errors.Is(err, ErrDescriptorUnsupported) || !errors.Is(err, ErrDescriptorSingular) {
 		t.Fatalf("descriptor err=%v", err)
 	}
 	source.E = nil
