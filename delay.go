@@ -2068,6 +2068,7 @@ func (sys *System) ZeroDelayApprox() (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	result.E = copyDescriptorE(sys.E)
 	result.Delay = copyDelayOrNil(sys.Delay)
 	if sys.InputDelay != nil {
 		result.InputDelay = make([]float64, len(sys.InputDelay))

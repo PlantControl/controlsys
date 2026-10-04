@@ -444,3 +444,68 @@ func TestIsStable_ConsistentWithIsStabilizable(t *testing.T) {
 		t.Errorf("IsStable=%v but IsStabilizable(B=0)=%v for pole -1e-12", st, stz)
 	}
 }
+
+func TestPoles_InternalDelaySetToZero(t *testing.T) {
+	singularE := mat.NewDense(3, 3, []float64{1, 2, 0, 0, 1, 1, 1, 3, 1})
+	for _, E := range []*mat.Dense{nil, singularE} {
+		for _, m := range []int{1, 2} {
+			for _, dt := range []float64{0, 0.1} {
+				sys, closed := internalDelayZerosFixture(t, dt, m, mat.NewDense(1, 1, []float64{0.25}))
+				var want []complex128
+				if E != nil {
+					sys.E = mat.DenseCopyOf(E)
+					ev, err := generalizedPoles(closed.A, E, 3)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, v := range ev {
+						if cmplx.Abs(v) < 1e6 {
+							want = append(want, v)
+						}
+					}
+				} else {
+					var eig mat.Eigen
+					if !eig.Factorize(closed.A, mat.EigenNone) {
+						t.Fatal("eigen failed")
+					}
+					want = eig.Values(nil)
+				}
+				got, err := sys.Poles()
+				if err != nil {
+					t.Fatalf("E=%v m=%d dt=%v: %v", E != nil, m, dt, err)
+				}
+				var finite []complex128
+				for _, p := range got {
+					if !cmplx.IsInf(p) && !cmplx.IsNaN(p) && cmplx.Abs(p) < 1e6 {
+						finite = append(finite, p)
+					}
+				}
+				assertZerosMatch(t, finite, want, 1e-9)
+
+				damp, err := Damp(sys)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pz, err := Pzmap(sys)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(damp) != len(got) || len(pz.Poles) != len(got) {
+					t.Fatalf("Damp %d / Pzmap %d poles, want %d", len(damp), len(pz.Poles), len(got))
+				}
+				for i := range got {
+					if damp[i].Pole != got[i] && !(cmplx.IsNaN(got[i]) || cmplx.IsInf(got[i])) {
+						t.Errorf("Damp pole %v != Poles %v", damp[i].Pole, got[i])
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestPoles_InternalDelayAlgebraicLoop(t *testing.T) {
+	sys, _ := internalDelayZerosFixture(t, 0, 2, mat.NewDense(1, 1, []float64{1}))
+	if _, err := sys.Poles(); !errors.Is(err, ErrAlgebraicLoop) {
+		t.Errorf("err %v, want ErrAlgebraicLoop", err)
+	}
+}

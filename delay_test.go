@@ -4092,3 +4092,19 @@ func TestSimulateDelay_BoundaryDelay(t *testing.T) {
 		t.Errorf("Y[0,%d] = %f, want %f", steps-1, got, want)
 	}
 }
+
+func TestZeroDelayApproxKeepsDescriptorE(t *testing.T) {
+	sys, closed := internalDelayZerosFixture(t, 0, 2, mat.NewDense(1, 1, []float64{0.25}))
+	E := mat.NewDense(3, 3, []float64{1, 2, 0, 0, 1, 1, 1, 3, 1})
+	sys.E = mat.DenseCopyOf(E)
+	approx, err := sys.ZeroDelayApprox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approx.E == nil || !mat.Equal(approx.E, E) || approx.E == sys.E {
+		t.Fatalf("E not preserved as a copy: %v", approx.E)
+	}
+	if !mat.EqualApprox(approx.A, closed.A, 1e-14) {
+		t.Errorf("A mismatch")
+	}
+}
