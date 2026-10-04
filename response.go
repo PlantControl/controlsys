@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -45,127 +46,145 @@ type DampInfo struct {
 	Tau  float64
 }
 
-func autoTimeParams(sys *System) (dt, tFinal float64, err error) {
-	n, _, _ := sys.Dims()
-	if n == 0 {
-		if sys.IsDiscrete() {
-			return sys.Dt, 100 * sys.Dt, nil
-		}
-		return 0.01, 1.0, nil
-	}
+const (
+	autoHorizonTimeConstants = 7.0
+	autoMaxHorizon           = 1e4
+	autoMaxSamples           = 100001
+	autoMinDiscreteSamples   = 10
+	gridTol                  = 1e-9
+)
 
-	poles, err := sys.Poles()
+func autoTimeParams(sys *System) (dt, tFinal float64, err error) {
+	tFinal, maxWn, err := autoTimeScales(sys)
 	if err != nil {
 		return 0, 0, err
 	}
-
-	var wns []float64
-	for _, p := range poles {
-		var wn float64
-		if sys.IsContinuous() {
-			wn = cmplx.Abs(p)
-		} else {
-			lp := cmplx.Log(p)
-			wn = cmplx.Abs(lp) / sys.Dt
-		}
-		if wn > 1e-10 {
-			wns = append(wns, wn)
-		}
-	}
-
-	if len(wns) == 0 {
-		if sys.IsDiscrete() {
-			return sys.Dt, 100 * sys.Dt, nil
-		}
-		return 0.01, 1.0, nil
-	}
-
-	minWn, maxWn := wns[0], wns[0]
-	for _, w := range wns[1:] {
-		if w < minWn {
-			minWn = w
-		}
-		if w > maxWn {
-			maxWn = w
-		}
-	}
-
-	tFinal = 7.0 / minWn
-	if tFinal > 1e4 {
-		tFinal = 1e4
-	}
-
 	if sys.IsDiscrete() {
-		dt = sys.Dt
-	} else {
-		dt = 1.0 / (20 * maxWn)
-		if maxDt := tFinal / 100; dt > maxDt {
-			dt = maxDt
-		}
+		return sys.Dt, tFinal, nil
 	}
-
-	return dt, tFinal, nil
+	return autoContinuousDt(tFinal, maxWn), tFinal, nil
 }
 
-func prepareDiscrete(sys *System, tFinal, dt float64) (dsys *System, actualDt float64, steps int, wasContinuous bool, err error) {
-	plan, err := prepareAutoTimeResponse(sys, tFinal, dt)
-	if err != nil {
-		return nil, 0, 0, false, err
+func autoTimeScales(sys *System) (tFinal, maxWn float64, err error) {
+	n, _, _ := sys.Dims()
+	var poles []complex128
+	if n > 0 {
+		if poles, err = sys.Poles(); err != nil {
+			return 0, 0, err
+		}
 	}
-	return plan.sim, plan.dt, plan.steps, plan.wasContinuous, nil
+
+	for _, p := range poles {
+		s := p
+		if sys.IsDiscrete() {
+			s = cmplx.Log(p) / complex(sys.Dt, 0)
+		}
+		wn := cmplx.Abs(s)
+		if math.IsInf(wn, 0) || math.IsNaN(wn) || wn <= 1e-10 {
+			continue
+		}
+		maxWn = math.Max(maxWn, wn)
+		horizon := autoHorizonTimeConstants / wn
+		if sigma := -real(s); sigma > 1e-10*wn {
+			horizon = autoHorizonTimeConstants / sigma
+		}
+		tFinal = math.Max(tFinal, horizon)
+	}
+
+	if tFinal == 0 {
+		tFinal = 1
+		if sys.IsDiscrete() {
+			tFinal = 100 * sys.Dt
+		}
+	}
+	tFinal = math.Min(tFinal+responseDelaySpan(sys), autoMaxHorizon)
+	if sys.IsDiscrete() {
+		minSamples := float64(max(autoMinDiscreteSamples, n+1))
+		tFinal = math.Min(math.Max(tFinal, minSamples*sys.Dt), float64(autoMaxSamples-1)*sys.Dt)
+	}
+	return tFinal, maxWn, nil
+}
+
+func responseDelaySpan(sys *System) float64 {
+	span := 0.0
+	if total := sys.TotalDelay(); total != nil {
+		span = mat.Max(total)
+	}
+	if sys.LFT != nil {
+		for _, tau := range sys.LFT.Tau {
+			span += tau
+		}
+	}
+	if sys.IsDiscrete() {
+		span *= sys.Dt
+	}
+	return span
+}
+
+func autoContinuousDt(tFinal, maxWn float64) float64 {
+	dt := tFinal / 100
+	if maxWn > 0 {
+		dt = math.Min(dt, 1/(20*maxWn))
+	}
+	return math.Max(dt, tFinal/float64(autoMaxSamples-1))
+}
+
+func gridSampleCount(span, dt float64) int {
+	return int(math.Floor(span/dt+gridTol)) + 1
+}
+
+func validateTimeHorizon(context string, tFinal float64) error {
+	if math.IsNaN(tFinal) || math.IsInf(tFinal, 0) {
+		return fmt.Errorf("%s: final time must be finite, got %g", context, tFinal)
+	}
+	return nil
 }
 
 func prepareAutoTimeResponse(sys *System, tFinal, dt float64) (timeResponsePlan, error) {
 	return newTimeResponsePlanner(sys).auto(tFinal, dt)
 }
 
-func (p timeResponsePlanner) auto(tFinal, dt float64) (timeResponsePlan, error) {
-	if p.sys.IsDiscrete() {
-		actualDt := p.sys.Dt
-		if tFinal <= 0 {
-			var err error
-			_, tFinal, err = autoTimeParams(p.sys)
-			if err != nil {
-				return timeResponsePlan{}, err
-			}
-		}
-		steps := int(tFinal/actualDt) + 1
-		return timeResponsePlan{
-			original: p.sys,
-			sim:      p.sys,
-			t:        makeTimeVector(steps, actualDt),
-			dt:       actualDt,
-			steps:    steps,
-		}, nil
+func (p timeResponsePlanner) grid(tFinal, dt float64) (t []float64, actualDt float64, err error) {
+	if err := validateTimeHorizon("time response", tFinal); err != nil {
+		return nil, 0, err
 	}
-
-	if tFinal <= 0 || dt <= 0 {
-		autoDt, autoTf, err2 := autoTimeParams(p.sys)
-		if err2 != nil {
-			return timeResponsePlan{}, err2
+	continuous := p.sys.IsContinuous()
+	if tFinal <= 0 || (continuous && dt <= 0) {
+		autoTf, maxWn, err := autoTimeScales(p.sys)
+		if err != nil {
+			return nil, 0, err
 		}
 		if tFinal <= 0 {
 			tFinal = autoTf
 		}
-		if dt <= 0 {
-			dt = autoDt
+		if continuous && dt <= 0 {
+			dt = autoContinuousDt(tFinal, maxWn)
 		}
 	}
+	if !continuous {
+		return makeTimeVector(gridSampleCount(tFinal, p.sys.Dt), p.sys.Dt), p.sys.Dt, nil
+	}
+	intervals := max(int(math.Ceil(tFinal/dt-gridTol)), 1)
+	actualDt = tFinal / float64(intervals)
+	t = makeTimeVector(intervals+1, actualDt)
+	t[intervals] = tFinal
+	return t, actualDt, nil
+}
 
-	dsys, err := p.sys.DiscretizeZOH(dt)
+func (p timeResponsePlanner) auto(tFinal, dt float64) (timeResponsePlan, error) {
+	t, dt, err := p.grid(tFinal, dt)
 	if err != nil {
+		return timeResponsePlan{}, err
+	}
+	plan := timeResponsePlan{original: p.sys, sim: p.sys, t: t, dt: dt, steps: len(t)}
+	if p.sys.IsDiscrete() {
+		return plan, nil
+	}
+	if plan.sim, err = p.sys.DiscretizeZOH(dt); err != nil {
 		return timeResponsePlan{}, fmt.Errorf("auto-discretize: %w", err)
 	}
-	actualDt := dt
-	steps := int(tFinal/dt) + 1
-	return timeResponsePlan{
-		original:      p.sys,
-		sim:           dsys,
-		t:             makeTimeVector(steps, actualDt),
-		dt:            actualDt,
-		steps:         steps,
-		wasContinuous: true,
-	}, nil
+	plan.wasContinuous = true
+	return plan, nil
 }
 
 func makeTimeVector(steps int, dt float64) []float64 {
@@ -366,7 +385,11 @@ func (sys *System) DCGain() (*mat.Dense, error) {
 		return denseCopy(sys.D), nil
 	}
 	if sys.HasInternalDelay() || sys.IsDescriptor() {
-		return sys.dcGainByEvaluation()
+		gain, err := sys.dcGainByEvaluation()
+		if err == nil || !errors.Is(err, ErrSingularTransform) {
+			return gain, err
+		}
+		return sys.dcGainOfDelayFreeExplicit(err)
 	}
 
 	if sys.IsContinuous() {
@@ -431,6 +454,22 @@ func (sys *System) dcGainByEvaluation() (*mat.Dense, error) {
 		}
 	}
 	return gain, nil
+}
+
+// dcGainOfDelayFreeExplicit handles a pole at DC, where the pencil solve fails:
+// internal delays are unity at DC, so closing them (Δ=I) and removing E leaves
+// an explicit model whose fast path resolves singular A.
+func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) {
+	reduced, err := sys.ToExplicit()
+	if err != nil {
+		return nil, evalErr
+	}
+	if reduced.HasInternalDelay() {
+		if reduced, err = reduced.ZeroDelayApprox(); err != nil {
+			return nil, evalErr
+		}
+	}
+	return reduced.DCGain()
 }
 
 func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
@@ -667,7 +706,10 @@ func Damp(sys *System) ([]DampInfo, error) {
 		if sys.IsDiscrete() {
 			sc := cmplx.Log(p) / complex(sys.Dt, 0)
 			wn = cmplx.Abs(sc)
-			if wn > 0 {
+			switch {
+			case math.IsInf(wn, 1):
+				zeta = 1
+			case wn > 0:
 				zeta = -real(sc) / wn
 			}
 		} else {
@@ -678,7 +720,9 @@ func Damp(sys *System) ([]DampInfo, error) {
 		}
 
 		tau := math.Inf(1)
-		if sigma := zeta * wn; sigma > 0 {
+		if math.IsInf(wn, 1) && zeta > 0 {
+			tau = 0
+		} else if sigma := zeta * wn; sigma > 0 {
 			tau = 1.0 / sigma
 		}
 
@@ -700,24 +744,71 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 }
 
 func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
+	kind := impulseResponse
+	if derived, ok := impulseAsStepModel(sys); ok {
+		sys, kind = derived, stepResponse
+	}
 	plan, err := prepareAutoTimeResponse(sys, tFinal, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := plan.allInputResponse(impulseResponse)
+	resp, err := plan.allInputResponse(kind)
 	if err != nil {
 		return nil, fmt.Errorf("Impulse: %w", err)
 	}
 	return resp, nil
 }
 
+// impulseAsStepModel returns a model whose step response equals the
+// continuous impulse response C·e^{At}·B sampled exactly: (A, A·B, C, C·B)
+// with the same delays. The Dirac part D·δ(t) is dropped, as in MATLAB.
+// Internal delays fed directly by u (D21 ≠ 0) would propagate Diracs and are
+// left to the pulse approximation.
+func impulseAsStepModel(sys *System) (*System, bool) {
+	if !sys.IsContinuous() {
+		return nil, false
+	}
+	n, m, p := sys.Dims()
+	if m == 0 || p == 0 {
+		return nil, false
+	}
+	src := sys
+	if sys.IsDescriptor() {
+		explicit, err := sys.ToExplicit()
+		if err != nil {
+			return nil, false
+		}
+		src = explicit
+	}
+	if src.LFT != nil && !allZeroDense(src.LFT.D21) {
+		return nil, false
+	}
+	derived := src.Copy()
+	derived.D = mat.NewDense(p, m, nil)
+	if n > 0 {
+		derived.B.Mul(src.A, src.B)
+		derived.D.Mul(src.C, src.B)
+		if derived.LFT != nil && derived.LFT.D21 != nil {
+			derived.LFT.D21.Mul(src.LFT.C2, src.B)
+		}
+	}
+	return derived, true
+}
+
 func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
 	if x0 == nil {
 		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrDimensionMismatch)
 	}
+	free := sys.Copy()
+	free.InputDelay = nil
+	free.Delay = nil
 
-	plan, err := prepareAutoTimeResponse(sys, tFinal, 0)
+	if free.IsContinuous() && !free.HasInternalDelay() && !free.IsDescriptor() {
+		return free.continuousFreeResponse(x0, tFinal)
+	}
+
+	plan, err := prepareAutoTimeResponse(free, tFinal, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -732,14 +823,99 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	return plan.response(resp.Y), nil
 }
 
+func (sys *System) continuousFreeResponse(x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
+	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
+	if err != nil {
+		return nil, err
+	}
+	Y, err := sys.continuousFreeSamples(x0, len(t), dt)
+	if err != nil {
+		return nil, fmt.Errorf("Initial: %w", err)
+	}
+	return &TimeResponse{T: t, Y: Y, OutputName: copyStringSlice(sys.OutputName)}, nil
+}
+
+// continuousFreeSamples samples y_i(t) = C_i·e^{A(t−τ_i)}·x0 for t ≥ τ_i
+// (zero before), τ_i the output delay, exactly at t = k·dt. Input and I/O
+// delays do not act on the free response.
+func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64) (*mat.Dense, error) {
+	n, _, p := sys.Dims()
+	if x0.Len() != n {
+		return nil, fmt.Errorf("x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
+	}
+	if p == 0 || steps == 0 {
+		return nil, nil
+	}
+	Y := mat.NewDense(p, steps, nil)
+	if n == 0 {
+		return Y, nil
+	}
+
+	var scaled, ad mat.Dense
+	scaled.Scale(dt, sys.A)
+	ad.Exp(&scaled)
+
+	byDelay := make(map[float64][]int)
+	var delays []float64
+	for i := range p {
+		tau := 0.0
+		if sys.OutputDelay != nil {
+			tau = sys.OutputDelay[i]
+		}
+		if _, ok := byDelay[tau]; !ok {
+			delays = append(delays, tau)
+		}
+		byDelay[tau] = append(byDelay[tau], i)
+	}
+
+	x := mat.NewVecDense(n, nil)
+	next := mat.NewVecDense(n, nil)
+	yRaw := Y.RawMatrix()
+	for _, tau := range delays {
+		k0 := max(int(math.Ceil(tau/dt-gridTol)), 0)
+		if k0 >= steps {
+			continue
+		}
+		x.CopyVec(x0)
+		if lead := float64(k0)*dt - tau; lead > 0 {
+			var lag mat.Dense
+			scaled.Scale(lead, sys.A)
+			lag.Exp(&scaled)
+			next.MulVec(&lag, x0)
+			x, next = next, x
+		}
+		outputs := byDelay[tau]
+		for k := k0; k < steps; k++ {
+			for _, i := range outputs {
+				yRaw.Data[i*yRaw.Stride+k] = mat.Dot(sys.C.RowView(i), x)
+			}
+			next.MulVec(&ad, x)
+			x, next = next, x
+		}
+	}
+	return Y, nil
+}
+
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
 	plan, uSim, err := prepareLsimResponse(sys, u, t)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := plan.sim.Simulate(uSim, x0, nil)
+	exactFree := x0 != nil && plan.wasContinuous && sys.HasDelay() && !sys.HasInternalDelay() && !sys.IsDescriptor()
+	simX0 := x0
+	if exactFree {
+		simX0 = nil
+	}
+	resp, err := plan.sim.Simulate(uSim, simX0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Lsim: %w", err)
+	}
+	if exactFree && resp.Y != nil {
+		free, err := sys.continuousFreeSamples(x0, plan.steps, plan.dt)
+		if err != nil {
+			return nil, fmt.Errorf("Lsim: %w", err)
+		}
+		resp.Y.Add(resp.Y, free)
 	}
 
 	return plan.response(resp.Y), nil

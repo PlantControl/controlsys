@@ -218,8 +218,8 @@ func TestPRD103TimeResponsePlanningPublicWorkflows(t *testing.T) {
 	if !stringSlicesEqual(step.OutputName, gain.OutputName) {
 		t.Fatalf("Step OutputName = %v, want %v", step.OutputName, gain.OutputName)
 	}
-	if r, c := step.Y.Dims(); r != 4 || c != 3 {
-		t.Fatalf("Step dims = %dx%d, want 4x3", r, c)
+	if r, c := step.Y.Dims(); r != 4 || c != 4 {
+		t.Fatalf("Step dims = %dx%d, want 4x4", r, c)
 	}
 
 	cont := prd103Model(t, 0)

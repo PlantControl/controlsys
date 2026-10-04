@@ -187,3 +187,72 @@ func TestStepInfoForSystemRejectsUnstableModel(t *testing.T) {
 		t.Fatal("expected unstable model error")
 	}
 }
+
+func TestStepInfoPeakTimeIsFirstMaximum(t *testing.T) {
+	resp := &TimeResponse{T: []float64{0, 1, 2, 3, 4}, Y: mat.NewDense(1, 5, []float64{0, 1, 1, 1, 1})}
+	info, err := StepInfo(resp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := info.Metrics[0]; m.PeakTime != 1 || m.Peak != 1 {
+		t.Fatalf("Peak=%g PeakTime=%g, want 1 at t=1", m.Peak, m.PeakTime)
+	}
+}
+
+func TestStepInfoForSystemUsesDCGainAsSteadyState(t *testing.T) {
+	slow, _ := New(mat.NewDense(1, 1, []float64{-0.1}), mat.NewDense(1, 1, []float64{0.1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	info, err := StepInfoForSystem(slow, 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := info.Metrics[0]
+	if m.Settled || !math.IsNaN(m.SettlingTime) || m.SteadyStateValue != 1 {
+		t.Fatalf("tau=10 at t=5: Settled=%v SettlingTime=%g SteadyState=%g, want unsettled toward DC gain 1", m.Settled, m.SettlingTime, m.SteadyStateValue)
+	}
+
+	a := mat.NewDense(2, 2, []float64{-1, 0.4, -0.3, -2})
+	b := mat.NewDense(2, 3, []float64{1, 0, 0.5, 0, 1, -1})
+	c := mat.NewDense(2, 2, []float64{1, 0.2, 0, 1})
+	d := mat.NewDense(2, 3, []float64{0, 0.1, 0, 0.3, 0, 0})
+	sys, _ := New(a, b, c, d, 0)
+	info, err = StepInfoForSystem(sys, 20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aInv, ca, cab mat.Dense
+	if err := aInv.Inverse(a); err != nil {
+		t.Fatal(err)
+	}
+	ca.Mul(c, &aInv)
+	cab.Mul(&ca, b)
+	for input := range 3 {
+		for output := range 2 {
+			want := d.At(output, input) - cab.At(output, input)
+			if got := info.Metrics[input*2+output].SteadyStateValue; math.Abs(got-want) > 1e-12 {
+				t.Errorf("row u%d->y%d: steady state %g, want %g", input, output, got, want)
+			}
+		}
+	}
+}
+
+func TestStepInfoRejectsInvalidOptions(t *testing.T) {
+	resp := &TimeResponse{T: []float64{0, 1, 2, 3}, Y: mat.NewDense(1, 4, []float64{0, 0.5, 0.9, 1})}
+	for _, opts := range []*StepInfoOptions{
+		{RiseTimeLimits: [2]float64{0.9, 0.1}},
+		{RiseTimeLimits: [2]float64{0.1, 0}},
+		{RiseTimeLimits: [2]float64{-1, 2}},
+		{RiseTimeLimits: [2]float64{math.NaN(), 0.9}},
+		{SettlingThreshold: -0.02},
+		{SettlingThreshold: math.NaN()},
+		{SettlingThreshold: 1},
+		{SteadyStateValue: []float64{math.NaN()}},
+		{SteadyStateValue: []float64{math.Inf(1)}},
+	} {
+		if _, err := StepInfo(resp, opts); err == nil {
+			t.Errorf("opts %+v: want error", *opts)
+		}
+	}
+	if _, err := StepInfo(resp, &StepInfoOptions{RiseTimeLimits: [2]float64{0, 0.5}, SettlingThreshold: 0.05}); err != nil {
+		t.Errorf("valid options rejected: %v", err)
+	}
+}

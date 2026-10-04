@@ -240,10 +240,18 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 		yk := mat.NewVecDense(p, nil)
 		yAutoRaw := Y.RawMatrix()
 		ykRaw := yk.RawVector()
+		outputLag := make([]int, p)
+		if sys.OutputDelay != nil {
+			for i := range p {
+				outputLag[i] = int(math.Round(sys.OutputDelay[i]))
+			}
+		}
 		for k := range steps {
 			yk.MulVec(sys.C, x)
 			for i := range p {
-				yAutoRaw.Data[i*yAutoRaw.Stride+k] = ykRaw.Data[i*ykRaw.Inc]
+				if k+outputLag[i] < steps {
+					yAutoRaw.Data[i*yAutoRaw.Stride+k+outputLag[i]] = ykRaw.Data[i*ykRaw.Inc]
+				}
 			}
 			tmp.MulVec(sys.A, x)
 			x, tmp = tmp, x

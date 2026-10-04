@@ -72,6 +72,25 @@ func independentInputResponse(t *testing.T, sys *System, tFinal float64, kind st
 	}
 	_, inputs, outputs := plan.sim.Dims()
 	Y := mat.NewDense(outputs*inputs, plan.steps, nil)
+	if kind == impulseResponse && sys.IsContinuous() {
+		n, _, _ := sys.Dims()
+		for sample, tk := range plan.t {
+			if n == 0 {
+				break
+			}
+			var scaled, expAt, cExp, h mat.Dense
+			scaled.Scale(tk, sys.A)
+			expAt.Exp(&scaled)
+			cExp.Mul(sys.C, &expAt)
+			h.Mul(&cExp, sys.B)
+			for input := range inputs {
+				for output := range outputs {
+					Y.Set(input*outputs+output, sample, h.At(output, input))
+				}
+			}
+		}
+		return plan.response(Y)
+	}
 	amplitude := kind.amplitude(plan)
 	for input := range inputs {
 		u := mat.NewDense(inputs, plan.steps, nil)
