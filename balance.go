@@ -243,7 +243,7 @@ func Balred(sys *System, order int, method BalredMethod) (*System, []float64, er
 		return nil, nil, ErrInvalidOrder
 	}
 	if r == n {
-		return br.Sys, hsv, nil
+		return policy.zeroOrderCopy(), hsv, nil
 	}
 
 	Ab := br.Sys.A
