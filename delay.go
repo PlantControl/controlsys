@@ -814,6 +814,9 @@ func absorbIODelay(sys *System) (*System, error) {
 	}
 
 	inDel, outDel, residual := DecomposeIODelay(sys.Delay)
+	if delayMatrixHasNonzeroTol(residual, delayTopologyTol) {
+		return newResidualDelaySplit(sys).apply(sys, absorbDecomposedDelay)
+	}
 
 	cp := sys.Copy()
 
@@ -1164,6 +1167,15 @@ func absorbIODelayContinuous(sys *System, order int) (*System, error) {
 	}
 
 	inDel, outDel, residual := DecomposeIODelay(sys.Delay)
+	if delayMatrixHasNonzeroTol(residual, delayTopologyTol) {
+		return newResidualDelaySplit(sys).apply(sys, func(piece *System) (*System, error) {
+			cur, err := absorbInputDelayContinuous(piece, order)
+			if err != nil {
+				return nil, err
+			}
+			return absorbOutputDelayContinuous(cur, order)
+		})
+	}
 
 	cp := sys.Copy()
 
@@ -1382,12 +1394,13 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 				}
 			}
 		}
+		if (n > 0 || sys.internalDelayCount() > 0) && delayMatrixHasNonzeroTol(residual, delayTopologyTol) {
+			return newResidualDelaySplit(sys).apply(sys, (*System).PullDelaysToLFT)
+		}
 		if hasResidual {
-			// For n=0: merge InputDelay/OutputDelay into residual for overlapping
-			// channels to avoid parallel double-counting of feedthrough gains.
-			// For n>0: per-channel IODelay residuals approximate feedthrough-only
-			// delay (state path uses InputDelay/OutputDelay). Use newD in 'd'
-			// handler below to avoid double-counting feedthrough.
+			// Only static systems without internal delays, or residuals within
+			// delayTopologyTol, reach here: merge InputDelay/OutputDelay into the residual for overlapping channels
+			// to avoid parallel double-counting of feedthrough gains.
 			resRaw := residual.RawMatrix()
 			if n == 0 && cur.InputDelay != nil {
 				for j := range m {
