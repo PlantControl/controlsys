@@ -200,7 +200,7 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 
 	data := make([]complex128, len(omega)*e.p*e.m)
 	if e.sys.IsDescriptor() {
-		if err := e.evalStateSpaceSweepInto(omega, data); err != nil {
+		if err := e.descriptorSweepInto(omega, data); err != nil {
 			return nil, err
 		}
 		applyIODelayPhase(e.sys, omega, data, e.p, e.m, true)
@@ -285,13 +285,7 @@ func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
 	}
 
 	data := make([]complex128, pm)
-	var err error
-	if e.sys.IsDescriptor() {
-		err = e.evalStateSpaceInto(s, data)
-	} else {
-		err = e.pointSolver(1).evalInto(s, data)
-	}
-	if err != nil {
+	if err := e.pointSolver(1).evalInto(s, data); err != nil {
 		return nil, err
 	}
 	applyIODelayAtS(e.sys, s, data, e.p, e.m, true)
@@ -302,22 +296,14 @@ func (e frequencyEvaluator) sAt(w float64) complex128 {
 	return newTimeDomain(e.sys.Dt).frequencyVariable(w)
 }
 
-func (e frequencyEvaluator) evalStateSpaceInto(s complex128, dst []complex128) error {
-	ws := newSSEvalWorkspace(e.n, e.p, e.m)
-	if err := evalFrSSInto(ws, e.sys, s, e.n, e.p, e.m); err != nil {
-		return err
-	}
-	copy(dst, ws.g[:e.p*e.m])
-	return nil
-}
-
-// pointSolver picks the explicit-model solver for an nw-point sweep. Both
-// solve the balanced realization with componentwise-stable arithmetic; the
-// Hessenberg sweep pays an O(n³) reduction once to make each point O(n²m).
+// pointSolver picks the delay-free solver for an nw-point sweep. Both solve
+// the balanced realization with componentwise-stable arithmetic; the
+// Hessenberg sweep pays an O(n³) reduction once to make each point O(n²m)
+// and handles only explicit models.
 // FreqResponsePointwise and EvalFr use the nw=1 choice so single points stay
 // bit-identical across entry points.
 func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
-	if e.useDenseSweep(nw) {
+	if e.sys.IsDescriptor() || e.useDenseSweep(nw) {
 		return newBalancedDense(e.sys, e.n, e.m, e.p)
 	}
 	return newHessenbergSweep(e.sys, e.n, e.m, e.p)
@@ -332,14 +318,15 @@ func (e frequencyEvaluator) useDenseSweep(nw int) bool {
 	return nw <= 2 || e.n <= 20*max(e.m, 1)
 }
 
-func (e frequencyEvaluator) evalStateSpaceSweepInto(omega []float64, dst []complex128) error {
+// descriptorSweepInto fails on a singular pencil rather than falling back to
+// the transfer-function form.
+func (e frequencyEvaluator) descriptorSweepInto(omega []float64, dst []complex128) error {
 	pm := e.p * e.m
-	ws := newSSEvalWorkspace(e.n, e.p, e.m)
+	solver := e.pointSolver(len(omega))
 	for k, w := range omega {
-		if err := evalFrSSInto(ws, e.sys, e.sAt(w), e.n, e.p, e.m); err != nil {
+		if err := solver.evalInto(e.sAt(w), dst[k*pm:(k+1)*pm]); err != nil {
 			return err
 		}
-		copy(dst[k*pm:(k+1)*pm], ws.g[:pm])
 	}
 	return nil
 }
@@ -460,49 +447,6 @@ func applyIODelayMatrixAtS(sys *System, s complex128, data []complex128, p, m in
 	}
 }
 
-type ssEvalWorkspace struct {
-	pencil []complex128
-	rhs    []complex128
-	g      []complex128
-}
-
-func newSSEvalWorkspace(n, p, m int) *ssEvalWorkspace {
-	return &ssEvalWorkspace{
-		pencil: make([]complex128, n*n),
-		rhs:    make([]complex128, n*m),
-		g:      make([]complex128, p*m),
-	}
-}
-
-func evalFrSSInto(ws *ssEvalWorkspace, sys *System, s complex128, n, p, m int) error {
-	var dData []float64
-	var dStride int
-	if sys.D != nil {
-		dRaw := sys.D.RawMatrix()
-		dData, dStride = dRaw.Data, dRaw.Stride
-	}
-	if n == 0 {
-		copyRealMatrixToComplex(ws.g, dData, dStride, p, m)
-		return nil
-	}
-
-	aRaw := sys.A.RawMatrix()
-	if sys.E == nil {
-		fillComplexPencil(ws.pencil, aRaw.Data, aRaw.Stride, nil, 0, s, n)
-	} else {
-		eRaw := sys.E.RawMatrix()
-		fillComplexPencil(ws.pencil, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride, s, n)
-	}
-	bRaw := sys.B.RawMatrix()
-	copyRealMatrixToComplex(ws.rhs, bRaw.Data, bRaw.Stride, n, m)
-	if err := cSolveInPlace(ws.pencil, ws.rhs, n, m); err != nil {
-		return err
-	}
-	cRaw := sys.C.RawMatrix()
-	cRealMulComplexInto(ws.g, cRaw.Data, cRaw.Stride, ws.rhs, dData, dStride, n, p, m)
-	return nil
-}
-
 func fillComplexPencil(dst []complex128, a []float64, aStride int, e []float64, eStride int, s complex128, n int) {
 	for i := range n {
 		row := i * n
@@ -529,21 +473,6 @@ func copyRealMatrixToComplex(dst []complex128, src []float64, stride, rows, cols
 	for i := range rows {
 		for j := range cols {
 			dst[i*cols+j] = complex(src[i*stride+j], 0)
-		}
-	}
-}
-
-func cRealMulComplexInto(dst []complex128, a []float64, aStride int, b []complex128, d []float64, dStride, inner, rows, cols int) {
-	for i := range rows {
-		for j := range cols {
-			var sum complex128
-			for k := range inner {
-				sum += complex(a[i*aStride+k], 0) * b[k*cols+j]
-			}
-			if d != nil {
-				sum += complex(d[i*dStride+j], 0)
-			}
-			dst[i*cols+j] = sum
 		}
 	}
 }

@@ -60,7 +60,10 @@ func (k sweepModelKind) String() string {
 // randomSweepModel draws a stable model whose realisation stresses the sweep:
 // reducible structure, wide diagonal similarity scaling, and near-zero
 // couplings like those Series leaves behind.
-func randomSweepModel(rng *rand.Rand, kind sweepModelKind, dt float64) (stressed, twin *System) {
+// With descriptor set, the same model is realised as (E, EA, EB, C) for a
+// random well-conditioned E, and the scaling is applied to E as well. E is
+// diagonal for weakrows so that EA keeps the near-empty rows.
+func randomSweepModel(rng *rand.Rand, kind sweepModelKind, dt float64, descriptor bool) (stressed, twin *System) {
 	n := 1 + rng.IntN(40)
 	m, p := 1+rng.IntN(4), 1+rng.IntN(4)
 	A := mat.NewDense(n, n, nil)
@@ -125,10 +128,38 @@ func randomSweepModel(rng *rand.Rand, kind sweepModelKind, dt float64) (stressed
 			D.Set(i, j, rng.NormFloat64()*float64(rng.IntN(2)))
 		}
 	}
-	twin, err := New(mat.DenseCopyOf(A), mat.DenseCopyOf(B), mat.DenseCopyOf(C), mat.DenseCopyOf(D), dt)
-	if err != nil {
-		panic(err)
+	var E *mat.Dense
+	if descriptor {
+		E = mat.NewDense(n, n, nil)
+		for i := range n {
+			if kind != sweepWeakRows {
+				for j := range n {
+					E.Set(i, j, 0.3*rng.NormFloat64()/math.Sqrt(float64(n)))
+				}
+			}
+			E.Set(i, i, E.At(i, i)+math.Pow(2, 2*rng.Float64()-1))
+		}
+		A.Mul(E, mat.DenseCopyOf(A))
+		B.Mul(E, mat.DenseCopyOf(B))
 	}
+	build := func(A, B, C, D, E *mat.Dense) *System {
+		var sys *System
+		var err error
+		if E == nil {
+			sys, err = New(A, B, C, D, dt)
+		} else {
+			sys, err = NewDescriptor(A, B, C, D, E, dt)
+		}
+		if err != nil {
+			panic(err)
+		}
+		return sys
+	}
+	var twinE *mat.Dense
+	if E != nil {
+		twinE = mat.DenseCopyOf(E)
+	}
+	twin = build(mat.DenseCopyOf(A), mat.DenseCopyOf(B), mat.DenseCopyOf(C), mat.DenseCopyOf(D), twinE)
 	if kind == sweepBadlyScaled || kind == sweepCascade {
 		decades := float64(1 + rng.IntN(6))
 		for i := range n {
@@ -136,6 +167,10 @@ func randomSweepModel(rng *rand.Rand, kind sweepModelKind, dt float64) (stressed
 			for j := range n {
 				A.Set(i, j, A.At(i, j)*s)
 				A.Set(j, i, A.At(j, i)/s)
+				if E != nil {
+					E.Set(i, j, E.At(i, j)*s)
+					E.Set(j, i, E.At(j, i)/s)
+				}
 			}
 			for j := range m {
 				B.Set(i, j, B.At(i, j)*s)
@@ -145,11 +180,7 @@ func randomSweepModel(rng *rand.Rand, kind sweepModelKind, dt float64) (stressed
 			}
 		}
 	}
-	stressed, err = New(A, B, C, D, dt)
-	if err != nil {
-		panic(err)
-	}
-	return stressed, twin
+	return build(A, B, C, D, E), twin
 }
 
 // stabilise shifts A so every eigenvalue sits at least a fixed margin inside
@@ -219,7 +250,7 @@ func TestFreqResponseSweepMatchesPointwiseRandomized(t *testing.T) {
 		for _, dt := range []float64{0, 0.05} {
 			kind := sweepModelKind(seed % int(sweepModelKinds))
 			rng := rand.New(rand.NewPCG(uint64(seed), uint64(kind)))
-			sys, twin := randomSweepModel(rng, kind, dt)
+			sys, twin := randomSweepModel(rng, kind, dt, false)
 			n, m, p := sys.Dims()
 			omega := logspace(-3, 3, 60)
 			if dt > 0 {
@@ -233,6 +264,65 @@ func TestFreqResponseSweepMatchesPointwiseRandomized(t *testing.T) {
 			}
 			t.Errorf("seed=%d kind=%v dt=%g n=%d m=%d p=%d: hessenberg %g at ω=%g, dense %g at ω=%g, sweep vs pointwise %g at ω=%g",
 				seed, kind, dt, n, m, p, errHess, wHess, errDense, wDense, errPoint, wPoint)
+			if failures++; failures >= 10 {
+				t.FailNow()
+			}
+		}
+	}
+}
+
+// Descriptor sweeps are held to the refined oracle on the well-scaled
+// descriptor twin; EvalFr must agree with the sweep bit for bit.
+func TestFreqResponseDescriptorSweepRandomized(t *testing.T) {
+	const tol = 1e-12
+	seeds := 240
+	if testing.Short() {
+		seeds = 36
+	}
+	failures := 0
+	for seed := range seeds {
+		for _, dt := range []float64{0, 0.05} {
+			kind := sweepModelKind(seed % int(sweepModelKinds))
+			rng := rand.New(rand.NewPCG(uint64(seed), uint64(kind)))
+			sys, twin := randomSweepModel(rng, kind, dt, true)
+			n, m, p := sys.Dims()
+			omega := logspace(-3, 3, 60)
+			if dt > 0 {
+				omega = logspace(-3, math.Log10(math.Pi/dt), 60)
+			}
+			got, err := sys.FreqResponse(omega)
+			if err != nil {
+				t.Errorf("seed=%d kind=%v dt=%g n=%d: %v", seed, kind, dt, n, err)
+				if failures++; failures >= 10 {
+					t.FailNow()
+				}
+				continue
+			}
+			td := newTimeDomain(dt)
+			worst, at := 0.0, 0.0
+			for k := 0; k < len(omega); k += 5 {
+				s := td.frequencyVariable(omega[k])
+				want := oracleResponse(t, twin, s, n, m, p)
+				g, err := sys.EvalFr(s)
+				if err != nil {
+					t.Fatalf("seed=%d EvalFr: %v", seed, err)
+				}
+				norm, diff := 0.0, 0.0
+				for i, v := range want {
+					norm = max(norm, cmplx.Abs(v))
+					diff = max(diff, cmplx.Abs(got.Data[k*p*m+i]-v))
+					if g[i/m][i%m] != got.Data[k*p*m+i] {
+						t.Fatalf("seed=%d ω=%g: EvalFr %v != sweep %v", seed, omega[k], g[i/m][i%m], got.Data[k*p*m+i])
+					}
+				}
+				if e := diff / norm; !(e <= worst) {
+					worst, at = e, omega[k]
+				}
+			}
+			if worst <= tol {
+				continue
+			}
+			t.Errorf("seed=%d kind=%v dt=%g n=%d m=%d p=%d: descriptor sweep %g at ω=%g", seed, kind, dt, n, m, p, worst, at)
 			if failures++; failures >= 10 {
 				t.FailNow()
 			}
@@ -319,10 +409,16 @@ func oracleResponse(t *testing.T, sys *System, s complex128, n, m, p int) []comp
 	t.Helper()
 	a := sys.A.RawMatrix()
 	b := sys.B.RawMatrix()
+	var e []float64
+	var eStride int
+	if sys.E != nil {
+		raw := sys.E.RawMatrix()
+		e, eStride = raw.Data, raw.Stride
+	}
 	pencil := make([]complex128, n*n)
 	x := make([]complex128, n*m)
 	d := make([]complex128, n*m)
-	fillComplexPencil(pencil, a.Data, a.Stride, nil, 0, s, n)
+	fillComplexPencil(pencil, a.Data, a.Stride, e, eStride, s, n)
 	copyRealMatrixToComplex(x, b.Data, b.Stride, n, m)
 	if err := cSolveInPlace(pencil, x, n, m); err != nil {
 		t.Fatal(err)
@@ -332,6 +428,11 @@ func oracleResponse(t *testing.T, sys *System, s complex128, n, m, p int) []comp
 			for j := range m {
 				var re, im dot2
 				re.add(b.Data[i*b.Stride+j])
+				if e != nil {
+					descriptorResidualRow(&re, &im, a.Data[i*a.Stride:i*a.Stride+n], e[i*eStride:i*eStride+n], x, j, m, s)
+					d[i*m+j] = complex(re.value(), im.value())
+					continue
+				}
 				for k := range n {
 					v := -a.Data[i*a.Stride+k]
 					if k == i {
@@ -348,7 +449,7 @@ func oracleResponse(t *testing.T, sys *System, s complex128, n, m, p int) []comp
 				d[i*m+j] = complex(re.value(), im.value())
 			}
 		}
-		fillComplexPencil(pencil, a.Data, a.Stride, nil, 0, s, n)
+		fillComplexPencil(pencil, a.Data, a.Stride, e, eStride, s, n)
 		if err := cSolveInPlace(pencil, d, n, m); err != nil {
 			t.Fatal(err)
 		}
@@ -372,6 +473,28 @@ func oracleResponse(t *testing.T, sys *System, s complex128, n, m, p int) []comp
 		}
 	}
 	return out
+}
+
+// descriptorResidualRow adds -(sE-A)ᵢx[:,j] to (re, im). (Ex)ᵢ is formed
+// in double-double before the product with s so that sE-A is never rounded.
+func descriptorResidualRow(re, im *dot2, aRow, eRow []float64, x []complex128, j, m int, s complex128) {
+	var exRe, exIm dot2
+	for k, ek := range eRow {
+		xk := x[k*m+j]
+		exRe.addProd(ek, real(xk))
+		exIm.addProd(ek, imag(xk))
+		re.addProd(aRow[k], real(xk))
+		im.addProd(aRow[k], imag(xk))
+	}
+	sr, si := real(s), imag(s)
+	for _, v := range [2]float64{exRe.hi, exRe.lo} {
+		re.addProd(-sr, v)
+		im.addProd(-si, v)
+	}
+	for _, v := range [2]float64{exIm.hi, exIm.lo} {
+		re.addProd(si, v)
+		im.addProd(-sr, v)
+	}
 }
 
 // dot2 accumulates a sum of products in twice the working precision

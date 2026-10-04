@@ -1,16 +1,20 @@
 package controlsys
 
-import (
-	"math"
-
-	"plantcontrol.org/v1/gonum/mat"
-)
+import "plantcontrol.org/v1/gonum/mat"
 
 type SsbalResult struct {
 	Sys *System
 	T   *mat.Dense
 }
 
+// Ssbal balances a delay-free explicit model by a diagonal similarity
+// transformation T, returning (T·A/T, T·B, C/T, D) so that the rows and
+// columns of [T·A/T, T·B; C/T, 0] have approximately equal 1-norms, as
+// MATLAB ssbal.
+// The entries of T are powers of two, so the scaling is exact. Diagonal
+// entries of A are excluded from the norms and the Osborne iteration follows
+// SLICOT TB01ID; unlike MATLAB, T is never permuted and there is no condT
+// bound.
 func Ssbal(sys *System) (*SsbalResult, error) {
 	policy := newRealizationTransformPolicy(sys)
 	if err := policy.requireStandard("Ssbal"); err != nil {
@@ -25,91 +29,21 @@ func Ssbal(sys *System) (*SsbalResult, error) {
 		return &SsbalResult{Sys: policy.zeroOrderCopy(), T: eye}, nil
 	}
 
-	aRaw := sys.A.RawMatrix()
-	bRaw := sys.B.RawMatrix()
-	cRaw := sys.C.RawMatrix()
-
-	d := make([]float64, n)
-	for i := range d {
-		d[i] = 1.0
+	br := newRealizationCopy(sys, n, m, p)
+	t := make([]float64, n)
+	for i := range t {
+		t[i] = 1
 	}
+	br.balance(t)
 
-	// Iterative diagonal balancing
-	const maxIter = 20
-	const beta = 2.0
-	for range maxIter {
-		changed := false
-		for i := range n {
-			rowNorm := 0.0
-			colNorm := 0.0
-
-			for j := range n {
-				rowNorm += math.Abs(aRaw.Data[i*aRaw.Stride+j]) * d[j]
-				colNorm += math.Abs(aRaw.Data[j*aRaw.Stride+i]) * d[j]
-			}
-
-			for j := range m {
-				rowNorm += math.Abs(bRaw.Data[i*bRaw.Stride+j])
-			}
-
-			for j := range p {
-				colNorm += math.Abs(cRaw.Data[j*cRaw.Stride+i])
-			}
-
-			if rowNorm == 0 || colNorm == 0 {
-				continue
-			}
-
-			f := 1.0
-			s := rowNorm + colNorm
-			// Scale by powers of beta to find best balance
-			for rowNorm < colNorm/beta {
-				rowNorm *= beta
-				colNorm /= beta
-				f *= beta
-			}
-			for rowNorm > colNorm*beta {
-				rowNorm /= beta
-				colNorm *= beta
-				f /= beta
-			}
-
-			if rowNorm+colNorm < 0.95*s {
-				changed = true
-				d[i] *= f
-			}
-		}
-		if !changed {
-			break
-		}
-	}
-
-	Anew := mat.NewDense(n, n, nil)
-	for i := range n {
-		for j := range n {
-			Anew.Set(i, j, (d[i]/d[j])*aRaw.Data[i*aRaw.Stride+j])
-		}
-	}
-
-	Bnew := mat.NewDense(n, m, nil)
-	for i := range n {
-		for j := range m {
-			Bnew.Set(i, j, d[i]*bRaw.Data[i*bRaw.Stride+j])
-		}
-	}
-
-	Cnew := mat.NewDense(p, n, nil)
-	for i := range p {
-		for j := range n {
-			Cnew.Set(i, j, cRaw.Data[i*cRaw.Stride+j]/d[j])
-		}
-	}
-
+	Anew := mat.NewDense(n, n, br.a)
+	Bnew := mat.NewDense(n, m, br.b)
+	Cnew := mat.NewDense(p, n, br.c)
 	Dnew := denseCopy(sys.D)
 
 	T := mat.NewDense(n, n, nil)
-	for i := range n {
-		T.Set(i, i, d[i])
+	for i, v := range t {
+		T.Set(i, i, v)
 	}
 
 	newSys, err := policy.result(Anew, Bnew, Cnew, Dnew)
