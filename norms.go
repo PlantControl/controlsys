@@ -31,7 +31,8 @@ func Norm(sys *System, normType float64) (float64, error) {
 // For continuous systems with D ≠ 0, or with a delayed direct feedthrough
 // through internal delays, the H2 norm is infinite. Input, output and I/O
 // delays do not change the H2 norm. Discrete internal delays are absorbed
-// exactly; continuous strictly proper internal-delay models are rejected.
+// exactly; continuous strictly proper internal-delay models return
+// ErrContinuousInternalDelay.
 func H2Norm(sys *System) (float64, error) {
 	if err := newDescriptorPolicy(sys).requireStandard("H2Norm"); err != nil {
 		return 0, err

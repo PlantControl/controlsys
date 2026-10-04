@@ -8,7 +8,8 @@ import (
 
 // Covar computes the steady-state output covariance of sys driven by white
 // noise with intensity W. For continuous models, entries fed by white noise
-// through D are infinite.
+// through D are infinite. Discrete internal delays are absorbed exactly;
+// continuous internal-delay models return ErrContinuousInternalDelay.
 func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	if err := requireStandardCovarianceSystem(sys, "Covar"); err != nil {
 		return nil, err
