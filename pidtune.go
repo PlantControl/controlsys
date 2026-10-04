@@ -24,6 +24,9 @@ const (
 	PidtunePIDF PidtuneType = "PIDF"
 )
 
+// Pidtune places the loop crossover and phase margin using the realized
+// controller response: discrete plants use the discrete PID terms, and a
+// discrete PID without filter uses a backward-Euler derivative to stay causal.
 func Pidtune(plant *System, pidType PidtuneType, opts ...PidtuneOptions) (*PID, error) {
 	if _, err := newSISOLoopModel(plant, "pidtune"); err != nil {
 		return nil, err
@@ -120,7 +123,31 @@ func evalPlantAt(plant *System, w float64) complex128 {
 	return resp.At(0, 0, 0)
 }
 
+// pidtuneTerms evaluates the realized controller terms at the crossover so
+// discrete designs match pidDiscrete rather than the continuous prototype.
+type pidtuneTerms struct {
+	wc, dt   float64
+	dFormula PIDFormula
+}
+
+func pidtuneIntegrator(f PIDFormula, w, dt float64) complex128 {
+	if dt == 0 {
+		return complex(0, -1/w)
+	}
+	z := cmplx.Exp(complex(0, w*dt))
+	return complex(dt, 0) * (1/(z-1) + complex(pidFormulaWeight(f), 0))
+}
+
+func (t pidtuneTerms) integral() complex128 { return pidtuneIntegrator(ForwardEuler, t.wc, t.dt) }
+
+func (t pidtuneTerms) derivative(tf float64) complex128 {
+	return 1 / (complex(tf, 0) + pidtuneIntegrator(t.dFormula, t.wc, t.dt))
+}
+
 func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg float64) (*PID, error) {
+	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
+		return nil, fmt.Errorf("pidtune: crossover %g must be below the Nyquist frequency %g", wc, math.Pi/plant.Dt)
+	}
 	h := evalPlantAt(plant, wc)
 	magP := cmplx.Abs(h)
 	phaseP := cmplx.Phase(h) * 180 / math.Pi
@@ -139,65 +166,64 @@ func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg float64) (*PI
 	}
 
 	pid := &PID{}
+	if plant.Dt > 0 && pidType == PidtunePID {
+		pid.DFormula = BackwardEuler
+	}
+	terms := pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: pid.DFormula}
 
 	switch pidType {
 	case PidtuneP:
 		pid.Kp = 1.0 / magP
 
 	case PidtuneI:
-		pid.Ki = wc / magP
+		pid.Ki = 1 / (magP * cmplx.Abs(terms.integral()))
 
 	case PidtunePI:
-		computePI(pid, wc, magP, phiC)
+		computePI(pid, terms, magP, phiC)
 
 	case PidtunePD:
-		computePD(pid, wc, magP, phiC)
+		computePD(pid, terms, magP, phiC)
 
 	case PidtunePDF:
 		pid.Tf = .1 / wc
 		target := cmplx.Rect(1/magP, phiC*math.Pi/180)
-		pid.Kd = imag(target) * (1 + wc*wc*pid.Tf*pid.Tf) / wc
-		pid.Kp = real(target) - imag(target)*wc*pid.Tf
+		d := terms.derivative(pid.Tf)
+		pid.Kd = imag(target) / imag(d)
+		pid.Kp = real(target) - pid.Kd*real(d)
 		if pid.Kp < 0 || pid.Kd < 0 {
 			return nil, fmt.Errorf("pidtune: requested phase is unattainable by a positive-gain PDF at wc=%g", wc)
 		}
 	case PidtunePID:
-		computePID(pid, wc, magP, phiC)
+		computePID(pid, terms, magP, phiC)
 
 	case PidtunePIDF:
-		computePIDF(pid, wc, magP, phiC)
+		computePIDF(pid, terms, magP, phiC)
 	}
 
 	return pid, nil
 }
 
-func computePI(pid *PID, wc, magP, phiC float64) {
-	// C(jw) = Kp*(1 + 1/(Ti*jw)), angle = -atan(1/(Ti*wc))
-	// Ti = -1/(wc*tan(phiC_rad))
+func computePI(pid *PID, terms pidtuneTerms, magP, phiC float64) {
+	i := terms.integral()
 	phiCRad := phiC * math.Pi / 180
 
-	// PI phase range: (-90, 0)
+	// PI phase range: (arg I, 0)
 	if phiCRad >= 0 {
 		phiCRad = -0.05
 	}
-	if phiCRad <= -math.Pi/2 {
-		phiCRad = -math.Pi/2 + 0.05
+	if lower := cmplx.Phase(i); phiCRad <= lower {
+		phiCRad = lower + 0.05
 	}
 
-	Ti := -1.0 / (wc * math.Tan(phiCRad))
-	if Ti <= 0 {
-		Ti = 10.0 / wc
-	}
-
-	magC := math.Sqrt(1 + 1.0/(Ti*Ti*wc*wc))
-	pid.Kp = 1.0 / (magP * magC)
-	pid.Ki = pid.Kp / Ti
+	target := cmplx.Rect(1/magP, phiCRad)
+	pid.Ki = imag(target) / imag(i)
+	pid.Kp = real(target) - pid.Ki*real(i)
 }
 
 // computePD preserves the legacy PD tuning seed, including its Td/10 filter.
 // Callers requesting an ideal PD must explicitly set Tf=0.
-func computePD(pid *PID, wc, magP, phiC float64) {
-	// C(jw) = Kp*(1 + Td*jw), angle = atan(Td*wc)
+func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
+	// C = Kp*(1 + Td*D), angle = arg(1 + Td*D)
 	phiCRad := phiC * math.Pi / 180
 
 	// PD phase range: (0, 90)
@@ -208,42 +234,56 @@ func computePD(pid *PID, wc, magP, phiC float64) {
 		phiCRad = math.Pi/2 - 0.05
 	}
 
-	Td := math.Tan(phiCRad) / wc
+	d := terms.derivative(0)
+	tan := math.Tan(phiCRad)
+	Td := tan / (imag(d) - real(d)*tan)
 	if Td <= 0 {
-		Td = 0.1 / wc
+		Td = 0.1 / terms.wc
 	}
 
-	magC := math.Sqrt(1 + Td*Td*wc*wc)
-	pid.Kp = 1.0 / (magP * magC)
+	pid.Kp = 1.0 / (magP * cmplx.Abs(1+complex(Td, 0)*d))
 	pid.Kd = pid.Kp * Td
 	pid.Tf = Td / 10
 	if pid.Tf <= 0 {
-		pid.Tf = 1.0 / (10 * wc)
+		pid.Tf = 1.0 / (10 * terms.wc)
 	}
 }
 
-func pidFromPhase(wc, magP, phiCRad, b float64) (Kp, Ki, Kd float64) {
-	Kp = math.Cos(phiCRad) / magP
-	imPart := math.Sin(phiCRad) / magP
-
-	Ki = Kp * wc / b
-	Kd = (imPart + Ki/wc) / wc
-
-	if Kd < 0 {
-		Ki = Kp * wc / (b * 2)
-		Kd = (imPart + Ki/wc) / wc
+// pidFromPhase solves Kp + Ki*I + Kd*D = target with Ki = Kp*wc/b, relaxing
+// the integral ratio and finally dropping Kd when the derivative turns negative.
+func pidFromPhase(terms pidtuneTerms, magP, phiCRad, b float64) (Kp, Ki, Kd float64) {
+	target := cmplx.Rect(1/magP, phiCRad)
+	i, d := terms.integral(), terms.derivative(0)
+	solve := func(ratio float64) (kp, kd float64) {
+		a11, a12 := 1+ratio*real(i), real(d)
+		a21, a22 := ratio*imag(i), imag(d)
+		det := a11*a22 - a12*a21
+		kp = (real(target)*a22 - a12*imag(target)) / det
+		kd = (a11*imag(target) - a21*real(target)) / det
+		return
 	}
+
+	ratio := terms.wc / b
+	Kp, Kd = solve(ratio)
 	if Kd < 0 {
-		Kd = 0
-		Ki = -imPart * wc
-		if Ki < 0 {
-			Ki = Kp * wc / (b * 4)
-		}
+		ratio = terms.wc / (b * 2)
+		Kp, Kd = solve(ratio)
+	}
+	if Kd >= 0 {
+		return Kp, Kp * ratio, Kd
+	}
+	Kd = 0
+	Ki = imag(target) / imag(i)
+	Kp = real(target) - Ki*real(i)
+	if Ki < 0 {
+		ratio = terms.wc / (b * 4)
+		Kp = real(target) / (1 + ratio*real(i))
+		Ki = Kp * ratio
 	}
 	return
 }
 
-func computePID(pid *PID, wc, magP, phiC float64) {
+func computePID(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	phiCRad := phiC * math.Pi / 180
 	if phiCRad >= math.Pi/2 {
 		phiCRad = math.Pi/2 - 0.05
@@ -252,11 +292,12 @@ func computePID(pid *PID, wc, magP, phiC float64) {
 		phiCRad = -math.Pi/2 + 0.05
 	}
 
-	pid.Kp, pid.Ki, pid.Kd = pidFromPhase(wc, magP, phiCRad, 5.0)
+	pid.Kp, pid.Ki, pid.Kd = pidFromPhase(terms, magP, phiCRad, 5.0)
 }
 
-func computePIDF(pid *PID, wc, magP, phiC float64) {
+func computePIDF(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	// Iteratively design PID then compensate for filter (Tf=Td/10) phase loss.
+	wc := terms.wc
 	phiCRad := phiC * math.Pi / 180
 	if phiCRad >= math.Pi/2 {
 		phiCRad = math.Pi/2 - 0.05
@@ -265,7 +306,8 @@ func computePIDF(pid *PID, wc, magP, phiC float64) {
 		phiCRad = -math.Pi/2 + 0.05
 	}
 
-	Kp, Ki, Kd := pidFromPhase(wc, magP, phiCRad, 5.0)
+	Kp, Ki, Kd := pidFromPhase(terms, magP, phiCRad, 5.0)
+	i := terms.integral()
 
 	for range 20 {
 		Td := 0.0
@@ -277,8 +319,7 @@ func computePIDF(pid *PID, wc, magP, phiC float64) {
 			Tf = 1.0 / (10 * wc)
 		}
 
-		jw := complex(0, wc)
-		C := complex(Kp, 0) + complex(Ki, 0)/jw + complex(Kd, 0)*jw/(complex(Tf, 0)*jw+1)
+		C := complex(Kp, 0) + complex(Ki, 0)*i + complex(Kd, 0)*terms.derivative(Tf)
 		cMag := cmplx.Abs(C)
 		cPhase := cmplx.Phase(C)
 
@@ -302,7 +343,7 @@ func computePIDF(pid *PID, wc, magP, phiC float64) {
 		if phiAdj <= -math.Pi/2 {
 			phiAdj = -math.Pi/2 + 0.05
 		}
-		Kp, Ki, Kd = pidFromPhase(wc, magP, phiAdj, 5.0)
+		Kp, Ki, Kd = pidFromPhase(terms, magP, phiAdj, 5.0)
 	}
 
 	pid.Kp = Kp
