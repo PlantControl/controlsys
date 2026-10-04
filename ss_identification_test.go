@@ -151,3 +151,49 @@ func TestIdentifyIOStateSpaceBoundsExcitationAndCancellation(t *testing.T) {
 		t.Fatal("unexcited input accepted")
 	}
 }
+
+func TestIdentifyIOStateSpaceDelayedExcerptEstimatesPreRecordInputs(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		for _, delay := range []int{0, 2} {
+			u, y := ioIdentificationFixture(0, direct, delay, []float64{.4, .3})
+			const cut = 100
+			for _, mode := range []string{"continuation", "estimate"} {
+				options := IOStateSpaceOptions{Order: 2, InputDelay: delay, DirectFeedthrough: direct, ValidationInitialCondition: mode}
+				vu, vy := u[600:], y[600:]
+				if mode == "estimate" {
+					options.InitializationSamples = 20
+					vu, vy = u[650:850], y[650:850]
+				}
+				result, err := IdentifyIOStateSpace(context.Background(), u[cut:600], y[cut:600], vu, vy, .2, options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := result.Candidates[0]
+				if c.TrainingNRMSE > 1e-9 || c.ValidationNRMSE > 1e-8 {
+					t.Fatalf("direct=%v delay=%d %s: training NRMSE %g validation NRMSE %g", direct, delay, mode, c.TrainingNRMSE, c.ValidationNRMSE)
+				}
+				num := []float64{.4, .1}
+				if direct {
+					num = append(num, 0)
+				}
+				den := make([]float64, 3+delay)
+				den[0], den[1], den[2] = 1, -1.2, .32
+				for i, v := range append(append([]float64(nil), num...), den...) {
+					got := append(append([]float64(nil), c.Numerator...), c.Denominator...)
+					if len(got) != len(num)+len(den) || math.Abs(got[i]-v) > 1e-8 {
+						t.Fatalf("direct=%v delay=%d: num=%v den=%v, want %v %v", direct, delay, c.Numerator, c.Denominator, num, den)
+					}
+				}
+				if len(c.InitialHistory) != 2+delay {
+					t.Fatalf("direct=%v delay=%d: initial history %v, want %d values", direct, delay, c.InitialHistory, 2+delay)
+				}
+				// The true trailing feedthrough coefficient is zero, so direct fits cannot pin u[-delay].
+				for i := 1; i <= delay && !direct; i++ {
+					if got := c.InitialHistory[1+i]; math.Abs(got-u[cut-i]) > 1e-8 {
+						t.Fatalf("direct=%v delay=%d: pre-record input u[-%d]=%g, want %g", direct, delay, i, got, u[cut-i])
+					}
+				}
+			}
+		}
+	}
+}
