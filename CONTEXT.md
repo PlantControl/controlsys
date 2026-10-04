@@ -1081,6 +1081,8 @@ _Avoid_: reciprocal when referring to MIMO models
 - A **state-space model** is the **fundamental representation**.
 - A **transfer-function model** is a human-friendly specification of a **model**.
 - A **state-space model** is always a **proper model** in this toolbox.
+- A **descriptor system** with a singular descriptor matrix may be an **improper model**.
+- A **zero-pole-gain model** carries no delays; converting a delayed **model** to one is an error, not a silent drop.
 - A **strictly proper model** is a **proper model**.
 - A **biproper model** is a **proper model**.
 - An **improper model** cannot be realized as a **state-space model** by this toolbox.

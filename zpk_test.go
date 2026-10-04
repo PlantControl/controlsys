@@ -793,3 +793,25 @@ func matchRoots(t *testing.T, got, want []complex128, tol float64) {
 		}
 	}
 }
+
+func TestZPKRejectsDelays(t *testing.T) {
+	tf := &TransferFunc{
+		Num:   [][][]float64{{{2}}},
+		Den:   [][]float64{{1, 1}},
+		Delay: [][]float64{{0.5}},
+	}
+	if _, err := tf.ZPK(); !errors.Is(err, ErrDelayNotRepresentable) {
+		t.Errorf("TF.ZPK err = %v, want ErrDelayNotRepresentable", err)
+	}
+	for _, dt := range []float64{0, 0.1} {
+		for name, mk := range map[string]func(*testing.T, float64) *System{"io": fieldIODelay, "lft": fieldLFT} {
+			if _, err := mk(t, dt).ZPKModel(nil); !errors.Is(err, ErrDelayNotRepresentable) {
+				t.Errorf("%s/dt=%g: ZPKModel err = %v, want ErrDelayNotRepresentable", name, dt, err)
+			}
+		}
+	}
+	tf.Delay = [][]float64{{0}}
+	if _, err := tf.ZPK(); err != nil {
+		t.Errorf("zero delay: %v", err)
+	}
+}

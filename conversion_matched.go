@@ -27,7 +27,7 @@ func (sys *System) d2cMatched() (*System, error) {
 	if sys.HasInternalDelay() {
 		return nil, fmt.Errorf("D2C matched: internal delays: %w", ErrFeedbackDelay)
 	}
-	result, err := sys.TransferFunction(nil)
+	result, err := sys.rationalTransferFunction(nil)
 	if err != nil {
 		return nil, fmt.Errorf("D2C matched: %w", err)
 	}
@@ -158,11 +158,14 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	if sys.HasInternalDelay() {
 		return nil, fmt.Errorf("DiscretizeMatched: internal delays: %w", ErrFeedbackDelay)
 	}
-	model, err := sys.ZPKModel(nil)
+	rational, err := sys.rationalTransferFunction(nil)
 	if err != nil {
 		return nil, err
 	}
-	source := model.ZPK
+	source, err := rational.TF.ZPK()
+	if err != nil {
+		return nil, err
+	}
 	cz, cp := source.Zeros[0][0], source.Poles[0][0]
 	dz := make([]complex128, len(cz), max(len(cz), len(cp)-1))
 	dp := make([]complex128, len(cp))

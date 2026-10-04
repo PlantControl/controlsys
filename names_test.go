@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"reflect"
@@ -919,5 +920,88 @@ func TestFreqResponse_Names(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fr.OutputName, []string{"y"}) {
 		t.Errorf("OutputName = %v, want [y]", fr.OutputName)
+	}
+}
+
+func TestSelectByIndexKeepsDelayFields(t *testing.T) {
+	ins, outs := []int{1, 0}, []int{2, 0}
+	for _, dt := range []float64{0, 0.1} {
+		for name, mk := range map[string]func(*testing.T, float64) *System{"io": fieldIODelay, "lft": fieldLFT, "descriptor": fieldDescriptor} {
+			orig := mk(t, dt)
+			sub, err := orig.SelectByIndex(ins, outs)
+			if err != nil {
+				t.Fatalf("%s/dt=%g: %v", name, dt, err)
+			}
+			assertFieldResponse(t, fmt.Sprintf("%s/dt=%g", name, dt), sub, func(s complex128) [][]complex128 {
+				return fieldSub(fieldOracle(orig, s), outs, ins)
+			})
+		}
+	}
+}
+
+func TestSelectByIndexStaticKeepsDelays(t *testing.T) {
+	for _, dt := range []float64{0, 1} {
+		g, err := NewGain(mat.NewDense(2, 3, []float64{1, 2, 3, 4, 5, 6}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k := 0.25
+		if dt > 0 {
+			k = 1
+		}
+		if err := g.SetDelay(mat.NewDense(2, 3, []float64{k, 0, 2 * k, 0, 3 * k, k})); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetInputDelay([]float64{2 * k, 0, k}); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetOutputDelay([]float64{k, 4 * k}); err != nil {
+			t.Fatal(err)
+		}
+		ins, outs := []int{2, 1}, []int{1}
+		sub, err := g.SelectByIndex(ins, outs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := fieldPoints(dt)[0]
+		want := []complex128{6 * fieldDelay(dt, s, 6*k), 5 * fieldDelay(dt, s, 7*k)}
+		got := fieldOracle(sub, s)
+		for j := range want {
+			if d := cmplx.Abs(got[0][j] - want[j]); d > fieldTol {
+				t.Errorf("dt=%g: G[0][%d] differs by %.3g", dt, j, d)
+			}
+		}
+	}
+}
+
+func TestSelectByIndexEmptySelection(t *testing.T) {
+	sys := fieldIODelay(t, 0)
+	sys.InputName = []string{"u1", "u2"}
+	sys.OutputName = []string{"y1", "y2", "y3"}
+	cases := []struct {
+		name         string
+		sel          func() (*System, error)
+		wantM, wantP int
+	}{
+		{"none", func() (*System, error) { return sys.SelectByIndex(nil, nil) }, 0, 0},
+		{"no inputs", func() (*System, error) { return sys.SelectByIndex([]int{}, []int{1}) }, 0, 1},
+		{"no outputs", func() (*System, error) { return sys.SelectByIndex([]int{0}, nil) }, 1, 0},
+		{"by name none", func() (*System, error) { return sys.SelectByName(nil, nil) }, 0, 0},
+		{"static none", func() (*System, error) {
+			g, _ := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+			return g.SelectByIndex(nil, nil)
+		}, 0, 0},
+	}
+	for _, tc := range cases {
+		got, err := tc.sel()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if err := got.Validate(); err != nil {
+			t.Fatalf("%s: Validate: %v", tc.name, err)
+		}
+		if _, m, p := got.Dims(); m != tc.wantM || p != tc.wantP {
+			t.Errorf("%s: dims m=%d p=%d, want m=%d p=%d", tc.name, m, p, tc.wantM, tc.wantP)
+		}
 	}
 }

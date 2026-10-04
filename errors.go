@@ -23,6 +23,8 @@ var (
 	ErrFeedbackDelay   = errors.New("controlsys: feedback with delays not supported")
 	ErrMixedDelayTypes = errors.New("controlsys: InternalDelay and IODelay cannot coexist")
 
+	ErrDelayNotRepresentable = errors.New("controlsys: target model cannot represent the time delays")
+
 	ErrNotSymmetric     = errors.New("controlsys: matrix must be symmetric")
 	ErrNotPSD           = errors.New("controlsys: Q matrix must be positive semi-definite")
 	ErrSchurFailed      = errors.New("controlsys: Schur decomposition failed to converge")

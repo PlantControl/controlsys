@@ -990,10 +990,16 @@ func TestDiscretizeZOHInternalDelayFreqResp(t *testing.T) {
 		t.Fatal("expected InternalDelay on discretized LFT system")
 	}
 
-	discTF, _ := disc.TransferFunction(nil)
+	if _, err := disc.TransferFunction(nil); !errors.Is(err, ErrDelayNotRepresentable) {
+		t.Fatalf("TransferFunction of internal-delay model err = %v, want ErrDelayNotRepresentable", err)
+	}
 	for _, w := range []float64{0.1, 0.5, 1.0, 2.0} {
 		z := cmplx.Exp(complex(0, w*dt))
-		h := discTF.TF.Eval(z)[0][0]
+		H, err := disc.EvalFr(z)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := H[0][0]
 		mag := cmplx.Abs(h)
 		if mag > 2.0 || mag < 0 {
 			t.Errorf("w=%v: |H(z)| = %v out of range", w, mag)

@@ -36,7 +36,12 @@ func (sys *System) ZerosDetail() (*ZerosResult, error) {
 }
 
 func sisoZeros(sys *System) (*ZerosResult, error) {
-	tfr, err := sys.TransferFunction(nil)
+	delayFree := sys
+	if sys.LFT != nil {
+		delayFree = sys.Copy()
+		delayFree.LFT = nil
+	}
+	tfr, err := delayFree.rationalTransferFunction(nil)
 	if err != nil {
 		return nil, err
 	}

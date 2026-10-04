@@ -45,7 +45,6 @@ type sisoEval struct {
 	lft  bool
 	cont bool
 	dt   float64
-	tau  float64 // combined InputDelay[0] + OutputDelay[0]
 	dst  []complex128
 }
 
@@ -56,7 +55,7 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 		dt:   sys.Dt,
 		dst:  make([]complex128, 1),
 	}
-	if sys.HasInternalDelay() {
+	if sys.internalDelayCount() > 0 {
 		e.lft = true
 	} else {
 		res, err := sys.TransferFunction(nil)
@@ -64,12 +63,6 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 			return nil, err
 		}
 		e.tf = res.TF
-	}
-	if sys.InputDelay != nil {
-		e.tau += sys.InputDelay[0]
-	}
-	if sys.OutputDelay != nil {
-		e.tau += sys.OutputDelay[0]
 	}
 	return e, nil
 }
@@ -86,18 +79,7 @@ func (e *sisoEval) at(w float64) complex128 {
 		s = cmplx.Exp(complex(0, w*e.dt))
 	}
 	e.tf.evalInto(s, e.dst)
-	h := e.dst[0]
-	if e.tau != 0 {
-		if e.cont {
-			h *= cmplx.Exp(-s * complex(e.tau, 0))
-		} else {
-			d := int(math.Round(e.tau))
-			for range d {
-				h /= s
-			}
-		}
-	}
-	return h
+	return e.dst[0]
 }
 
 func marginFreqs(sys *System, nPoints int) ([]float64, error) {

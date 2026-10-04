@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math/cmplx"
 	"sort"
 )
@@ -175,6 +176,9 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 	p, m, err := tf.validateShape()
 	if err != nil {
 		return nil, err
+	}
+	if tf.HasDelay() {
+		return nil, fmt.Errorf("ZPK: %w", ErrDelayNotRepresentable)
 	}
 	z := &ZPK{
 		Zeros: make([][][]complex128, p),

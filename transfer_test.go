@@ -591,3 +591,132 @@ func complexSolve(A []complex128, b []complex128, n int) []complex128 {
 
 	return x
 }
+
+func TestTransferFunctionFoldsExternalDelays(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		orig := fieldIODelay(t, dt)
+		res, err := orig.TransferFunction(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range fieldPoints(dt) {
+			if d := fieldMaxDiff(res.TF.Eval(s), fieldOracle(orig, s)); d > fieldTol {
+				t.Errorf("dt=%g: TF.Eval(%v) differs by %.3g (Delay=%v)", dt, s, d, res.TF.Delay)
+			}
+		}
+	}
+}
+
+func TestTransferFunctionRejectsInternalDelay(t *testing.T) {
+	if _, err := fieldLFT(t, 0).TransferFunction(nil); !errors.Is(err, ErrDelayNotRepresentable) {
+		t.Fatalf("err = %v, want ErrDelayNotRepresentable", err)
+	}
+}
+
+func TestTFStateSpaceStaticKeepsDelay(t *testing.T) {
+	for _, dt := range []float64{0, 1} {
+		tf := &TransferFunc{
+			Num:   [][][]float64{{{2}, {3}}, {{-1}, {0.5}}},
+			Den:   [][]float64{{2}, {1}},
+			Delay: [][]float64{{1, 3}, {0, 2}},
+			Dt:    dt,
+		}
+		res, err := tf.StateSpace(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range fieldPoints(dt) {
+			if d := fieldMaxDiff(fieldOracle(res.Sys, s), tf.Eval(s)); d > fieldTol {
+				t.Errorf("dt=%g: response at %v differs by %.3g (Delay=%v)", dt, s, d, res.Sys.Delay)
+			}
+		}
+	}
+}
+
+// isproperByGrowth checks properness independently: an improper G grows
+// without bound as |s| → ∞, a proper one converges.
+func isproperByGrowth(sys *System) bool {
+	_, m, p := sys.Dims()
+	g := func(w float64) float64 {
+		h := fieldBlock(sys, complex(0.1*w, w), sys.B, m, sys.C, p, sys.D)
+		peak := 0.0
+		for _, row := range h {
+			for _, v := range row {
+				peak = math.Max(peak, cmplx.Abs(v))
+			}
+		}
+		return peak
+	}
+	return g(1e6) < 10*(1+g(1e4))
+}
+
+func TestIsproperDescriptor(t *testing.T) {
+	P := mat.NewDense(3, 3, []float64{1, 0.4, -0.2, 0.3, 1.2, 0.5, -0.1, 0.6, 0.9})
+	Q := mat.NewDense(3, 3, []float64{0.8, -0.3, 0.1, 0.2, 1, 0.4, 0.5, 0.1, 1.1})
+	transform := func(M *mat.Dense) *mat.Dense {
+		var tmp, out mat.Dense
+		tmp.Mul(P, M)
+		out.Mul(&tmp, Q)
+		return &out
+	}
+	// blkdiag(N, 1) with N a 2×2 nilpotent chain: x1 = -b2·s·u - b1·u.
+	E := transform(mat.NewDense(3, 3, []float64{0, 1, 0, 0, 0, 0, 0, 0, 1}))
+	A := transform(mat.NewDense(3, 3, []float64{1, 0, 0, 0, 1, 0, 0, 0, -2}))
+	var CQ mat.Dense
+	CQ.Mul(mat.NewDense(2, 3, []float64{1, 0, 0.5, 0.3, 0, 1}), Q)
+	build := func(b2 float64, lftB2 float64) *System {
+		var PB mat.Dense
+		PB.Mul(P, mat.NewDense(3, 2, []float64{1, 0.4, b2, 0, 0.7, -1}))
+		sys, err := NewDescriptor(A, &PB, &CQ, mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2}), E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lftB2 != 0 {
+			var PB2 mat.Dense
+			PB2.Mul(P, mat.NewDense(3, 1, []float64{0, lftB2, 0}))
+			if err := sys.SetInternalDelay([]float64{0.4}, &PB2, mat.NewDense(1, 3, []float64{0.2, -0.1, 0.3}),
+				mat.NewDense(2, 1, []float64{0.1, 0}), mat.NewDense(1, 2, []float64{0, 0.2}), mat.NewDense(1, 1, []float64{0.1})); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return sys
+	}
+	nondynamic, err := NewDescriptor(
+		mat.NewDense(3, 3, []float64{-1, 2, 0.5, -0.5, -3, 1, 0.3, 0.7, -2}),
+		mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, -1}),
+		mat.NewDense(2, 3, []float64{1, 0.5, 0, 0, 1, -1}),
+		mat.NewDense(2, 2, nil),
+		mat.NewDense(3, 3, []float64{1, 2, 0, 0, 1, 1, 1, 3, 1}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siso, err := NewDescriptor(mat.NewDense(2, 2, []float64{1, 0, 0, 1}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), mat.NewDense(2, 2, []float64{0, 1, 0, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		sys  *System
+		want bool
+	}{
+		{"siso y=-s·u", siso, false},
+		{"index-2 driven", build(0.6, 0), false},
+		{"index-2 impulsive mode uncontrollable", build(0, 0), true},
+		{"index-2 driven only by internal delay channel", build(0, 0.5), false},
+		{"singular E nondynamic mode", nondynamic, true},
+		{"nonsingular E", fieldDescriptor(t, 0), true},
+	}
+	for _, tc := range cases {
+		if tc.sys.internalDelayCount() == 0 {
+			if oracle := isproperByGrowth(tc.sys); oracle != tc.want {
+				t.Fatalf("%s: fixture growth oracle says proper=%v, want %v", tc.name, oracle, tc.want)
+			}
+		}
+		if got := tc.sys.Isproper(); got != tc.want {
+			t.Errorf("%s: Isproper() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

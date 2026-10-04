@@ -47,6 +47,10 @@ func SS2SS(sys *System, T *mat.Dense) (*System, error) {
 	result.A = mat.DenseCopyOf(&A2)
 	result.B = mat.DenseCopyOf(&B2)
 	result.C = mat.DenseCopyOf(&C2)
+	if sys.internalDelayCount() > 0 {
+		result.LFT.B2.Mul(T, sys.LFT.B2)
+		result.LFT.C2.Mul(sys.LFT.C2, &Tinv)
+	}
 	return result, nil
 }
 
@@ -79,5 +83,14 @@ func Xperm(sys *System, perm []int) (*System, error) {
 		P.Set(i, j, 1)
 	}
 
-	return SS2SS(sys, P)
+	result, err := SS2SS(sys, P)
+	if err != nil {
+		return nil, err
+	}
+	if len(sys.StateName) == n {
+		for i, j := range perm {
+			result.StateName[i] = sys.StateName[j]
+		}
+	}
+	return result, nil
 }
