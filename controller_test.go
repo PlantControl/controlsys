@@ -914,3 +914,36 @@ func TestValidatePoles(t *testing.T) {
 		t.Error("unpaired complex poles should fail")
 	}
 }
+
+func TestPlaceScaledComplexBlockMultiInput(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{
+		-30, 2, -1,
+		0, -10, 1,
+		0, -1, -10,
+	})
+	B := mat.NewDense(3, 2, []float64{1, 0, 0.5, 1, -1, 2})
+	want := []complex128{-20, complex(-15, 1), complex(-15, -1)}
+	F, err := Place(A, B, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bf, cl mat.Dense
+	bf.Mul(B, F)
+	cl.Sub(A, &bf)
+	var eig mat.Eigen
+	if !eig.Factorize(&cl, mat.EigenNone) {
+		t.Fatal("eigen failed")
+	}
+	got := eig.Values(nil)
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if cmplx.Abs(g-w) < 1e-9 {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("closed-loop poles = %v, want %v", got, want)
+		}
+	}
+}

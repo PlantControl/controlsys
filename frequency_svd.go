@@ -158,10 +158,12 @@ func maximumComplex2x2SingularValue(data []complex128) float64 {
 	a01 := data[1] / complex(scale, 0)
 	a10 := data[2] / complex(scale, 0)
 	a11 := data[3] / complex(scale, 0)
-	frobeniusSquared := complexMagnitudeSquared(a00) + complexMagnitudeSquared(a01) + complexMagnitudeSquared(a10) + complexMagnitudeSquared(a11)
-	determinantSquared := complexMagnitudeSquared(a00*a11 - a01*a10)
-	discriminant := math.Max(0, frobeniusSquared*frobeniusSquared-4*determinantSquared)
-	return scale * math.Sqrt((frobeniusSquared+math.Sqrt(discriminant))/2)
+	p := complexMagnitudeSquared(a00) + complexMagnitudeSquared(a01)
+	r := complexMagnitudeSquared(a10) + complexMagnitudeSquared(a11)
+	q := a00*cmplx.Conj(a10) + a01*cmplx.Conj(a11)
+	halfDiff := (p - r) / 2
+	radius := math.Sqrt(halfDiff*halfDiff + complexMagnitudeSquared(q))
+	return scale * math.Sqrt((p+r)/2+radius)
 }
 
 func complexMagnitudeSquared(value complex128) float64 {

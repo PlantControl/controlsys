@@ -600,3 +600,26 @@ func TestStabsep_SingularDescriptor(t *testing.T) {
 		assertSplitSum(t, "Stabsep singular E", sys, res.Stable, res.Unstable)
 	}
 }
+
+func TestStabsep_BadlyScaledPair(t *testing.T) {
+	tests := []struct {
+		name              string
+		re, im, other, dt float64
+		tol               float64
+	}{
+		{"continuous", -1e8, 1, 2e8, 0, 1e-6},
+		{"discrete", 0.5, 1e-9, 2, 0.1, 1e-14},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := badlyScaledPairSystem(t, tc.re, tc.im, tc.other, tc.dt)
+			res, err := Stabsep(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertPolesMatch(t, "stable", res.Stable, []complex128{complex(tc.re, tc.im), complex(tc.re, -tc.im)}, tc.tol)
+			assertPolesMatch(t, "unstable", res.Unstable, []complex128{complex(tc.other, 0)}, tc.tol*math.Abs(tc.other))
+			assertSplitSum(t, tc.name, sys, res.Stable, res.Unstable)
+		})
+	}
+}

@@ -252,3 +252,19 @@ func TestCanonModal_FrequencyPreserved(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonModal_BadlyScaledPairOrderedByMagnitude(t *testing.T) {
+	sys := badlyScaledPairSystem(t, -1e8, 1, -2e8, 0)
+	res, err := Canon(sys, CanonModal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	A := res.Sys.A
+	if math.Abs(A.At(0, 0)+1e8) > 1e-6 || math.Abs(A.At(1, 1)+1e8) > 1e-6 || math.Abs(A.At(2, 2)+2e8) > 1e-6 {
+		t.Fatalf("modal A not ordered by magnitude:\n%v", mat.Formatted(A))
+	}
+	if prod := A.At(0, 1) * A.At(1, 0); math.Abs(prod+1) > 1e-6 {
+		t.Fatalf("pair block off-diagonal product = %g, want -1 (imag ±1)", prod)
+	}
+	assertPolesMatch(t, "modal", res.Sys, []complex128{complex(-1e8, 1), complex(-1e8, -1), -2e8}, 1e-6)
+}
