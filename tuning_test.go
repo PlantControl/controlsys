@@ -12,7 +12,7 @@ import (
 func TestSystuneTunesSISOTunableGain(t *testing.T) {
 	plant := makeSISO(-2, 1, 1, 0)
 	k, _ := newBoundedReal("K", 0.1, 0.1, 5)
-	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
+	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	closed, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +40,7 @@ func TestGridTuneLimitsCartesianSearch(t *testing.T) {
 	plant := benchSysNonSym(2, 2, 2)
 	k1, _ := newBoundedReal("K1", 0.1, 0.1, 2)
 	k2, _ := newBoundedReal("K2", 0.1, 0.1, 2)
-	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k1, fixedReal(t, "z12_limit", 0)}, {fixedReal(t, "z21_limit", 0), k2}}, 0))
+	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k1, fixedReal(t, "z12_limit", 0)}, {fixedReal(t, "z21_limit", 0), k2}}))
 	closed, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestSystuneTunesSmallMIMOTunableGain(t *testing.T) {
 	plant := benchSysNonSym(2, 2, 2)
 	k1, _ := newBoundedReal("K1", 0.1, 0.1, 2)
 	k2, _ := newBoundedReal("K2", 0.1, 0.1, 2)
-	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k1, fixedReal(t, "z12", 0)}, {fixedReal(t, "z21", 0), k2}}, 0))
+	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k1, fixedReal(t, "z12", 0)}, {fixedReal(t, "z21", 0), k2}}))
 	closed, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestSystuneTunesSmallMIMOTunableGain(t *testing.T) {
 func TestSystuneUsesTunableBlockInterface(t *testing.T) {
 	plant := makeSISO(-2, 1, 1, 0)
 	k, _ := newBoundedReal("K", 0.1, 0.1, 5)
-	controller := wrappedTunableGain{gain: mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))}
+	controller := wrappedTunableGain{gain: mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))}
 	closed, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +126,7 @@ func (w wrappedTunableGain) SampleBlock(values map[string]float64) (TunableBlock
 func tuningGain(t *testing.T, lo, hi float64) *TunableGain {
 	t.Helper()
 	k := mustOK(newBoundedReal("K", lo, lo, hi))
-	return mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
+	return mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 }
 
 func TestGridTuneContextAndBounds(t *testing.T) {
@@ -141,7 +141,7 @@ func TestGridTuneContextAndBounds(t *testing.T) {
 		t.Errorf("negative GridPoints: err = %v, want ErrInvalidArgument", err)
 	}
 	free := mustOK(NewTunableReal("K", 1))
-	unbounded := mustOK(NewGeneralizedClosedLoop("loop", makeSISO(-2, 1, 1, 0), mustOK(NewTunableGain("Kblock", [][]*TunableReal{{free}}, 0)), "u"))
+	unbounded := mustOK(NewGeneralizedClosedLoop("loop", makeSISO(-2, 1, 1, 0), mustOK(tunableGainWith("Kblock", [][]*TunableReal{{free}})), "u"))
 	if _, err := GridTune(context.Background(), unbounded, goals, nil); !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("unbounded free parameter: err = %v, want ErrInvalidArgument", err)
 	}

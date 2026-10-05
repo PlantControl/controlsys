@@ -53,6 +53,40 @@ func (ch rationalChannel) eval(s complex128) complex128 {
 	return h
 }
 
+// evalAt is eval at pt with each factor s − v formed as pt.pencilAt(v)/c,
+// c = −q, so a discrete frequency point stays on the unit circle next to a
+// lightly damped pole.
+func (ch rationalChannel) evalAt(pt frequencyPoint) complex128 {
+	if pt.isPlain() {
+		return ch.eval(pt.p)
+	}
+	if ch.gain == 0 {
+		return 0
+	}
+	nz := len(ch.zeros)
+	np := len(ch.poles)
+	h := complex(ch.gain, 0)
+
+	shared := min(nz, np)
+	for k := range shared {
+		h *= pt.pencilAt(ch.zeros[k]) / pt.pencilAt(ch.poles[k])
+	}
+	for k := shared; k < nz; k++ {
+		h *= pt.pencilAt(ch.zeros[k])
+	}
+	for k := shared; k < np; k++ {
+		h /= pt.pencilAt(ch.poles[k])
+	}
+	c := pt.scale()
+	for range nz - np {
+		h /= c
+	}
+	for range np - nz {
+		h *= c
+	}
+	return h
+}
+
 func (ch rationalChannel) numeratorForCommonPoles(commonPoles []complex128) []float64 {
 	if ch.gain == 0 {
 		return []float64{0}

@@ -353,3 +353,28 @@ func TestDelayLoopNyquistBudgetIsErrorNotUnstable(t *testing.T) {
 		t.Fatalf("exhausted budget: stable=%v err=%v, want ErrDelayUnsupported", stable, err)
 	}
 }
+
+func TestDelayLoopEvaluationFailureIsError(t *testing.T) {
+	sys := delayedLoop(t, []float64{-1, 2, 0, -3}, []float64{0, 1}, []float64{1, 0.5}, []float64{0.2}, 2, 0.5)
+	for _, peaks := range []bool{false, true} {
+		l, err := delayLoopFromSystem(sys, "delay loop")
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := l.at
+		l.at = func(w float64) complex128 {
+			if w > 1 {
+				return l.eval.fail(w, ErrSingularTransform)
+			}
+			return at(w)
+		}
+		if peaks {
+			_, _, err = l.sensitivityPeaks(0, -0.5)
+		} else {
+			_, err = l.stableClosedLoop()
+		}
+		if !errors.Is(err, ErrSingularTransform) {
+			t.Errorf("peaks=%v: err = %v, want ErrSingularTransform", peaks, err)
+		}
+	}
+}

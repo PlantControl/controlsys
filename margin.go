@@ -357,6 +357,14 @@ func AllMargin(sys *System) (*AllMarginResult, error) {
 	if _, err := newSISOLoopModel(sys, "AllMargin"); err != nil {
 		return nil, err
 	}
+	res, err := allMargin(sys)
+	if err != nil {
+		return nil, fmt.Errorf("AllMargin: %w", err)
+	}
+	return res, nil
+}
+
+func allMargin(sys *System) (*AllMarginResult, error) {
 	loop, err := newRationalLoop(sys)
 	if errors.Is(err, ErrContinuousInternalDelay) {
 		loop = nil
@@ -395,7 +403,7 @@ func AllMargin(sys *System) (*AllMarginResult, error) {
 		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(eval.at(w))))
 	}
 	if eval.err != nil {
-		return nil, fmt.Errorf("AllMargin: %w", eval.err)
+		return nil, eval.err
 	}
 	return res, nil
 }
@@ -440,7 +448,10 @@ func gridMarginCrossings(sys *System, eval *sisoEval, withGain bool) (gain, phas
 // crossover search. Where MATLAB reports NaN for a missing crossover
 // frequency, GainCrossover and PhaseCrossover report ok = false.
 func Margin(sys *System) (*MarginResult, error) {
-	all, err := AllMargin(sys)
+	if _, err := newSISOLoopModel(sys, "Margin"); err != nil {
+		return nil, err
+	}
+	all, err := allMargin(sys)
 	if err != nil {
 		return nil, fmt.Errorf("Margin: %w", err)
 	}
@@ -882,7 +893,7 @@ func (r *rationalLoop) boundaryRoots(m, k []float64, N int) ([]float64, error) {
 	alphar, alphai, beta := make([]float64, N), make([]float64, N), make([]float64, N)
 	work := make([]float64, 8*N)
 	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, N, m, N, k, N, alphar, alphai, beta, nil, 1, nil, 1, work, len(work)) {
-		return nil, fmt.Errorf("margin: QZ: %w", ErrSchurFailed)
+		return nil, fmt.Errorf("QZ: %w", ErrSchurFailed)
 	}
 	tol := 100 * float64(N) * eps()
 	var ws []float64

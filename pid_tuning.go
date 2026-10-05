@@ -208,7 +208,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 		}
 	}
-	return tunePID(ctx, "TunePID", p, family, opts)
+	res, err := tunePID(ctx, "TunePID", p, family, opts)
+	if eval.err != nil {
+		return nil, fmt.Errorf("TunePID: %w", eval.err)
+	}
+	return res, err
 }
 
 func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
@@ -537,19 +541,8 @@ func pidTuningBasis(c PID2, w float64) (integral, derivative complex128) {
 		s := complex(0, w)
 		return 1 / s, s / (1 + complex(c.Tf, 0)*s)
 	}
-	z := cmplx.Exp(complex(0, w*c.Dt))
-	basis := func(f PIDFormula) complex128 {
-		switch f {
-		case BackwardEuler:
-			return complex(c.Dt, 0) * z / (z - 1)
-		case Trapezoidal:
-			return complex(c.Dt/2, 0) * (z + 1) / (z - 1)
-		default:
-			return complex(c.Dt, 0) / (z - 1)
-		}
-	}
-	integral = basis(c.IFormula)
-	d := 1 / basis(c.DFormula)
+	integral = pidtuneIntegrator(c.IFormula, w, c.Dt)
+	d := 1 / pidtuneIntegrator(c.DFormula, w, c.Dt)
 	return integral, d / (1 + complex(c.Tf, 0)*d)
 }
 func pidTuningFeedback(c PID2, w float64) complex128 {
@@ -778,7 +771,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 	if !plant.IsContinuous() {
 		return nil, false, nil
 	}
-	base, err := delayLoopFromSystem(plant, "TunePID")
+	base, err := delayLoopFromSystem(plant, "delay loop")
 	if errors.Is(err, errDelayLoopUnsupported) {
 		return nil, false, nil
 	}
@@ -820,6 +813,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 		}
 		kp, ki, kd := math.Abs(c.Kp), math.Abs(c.Ki), math.Abs(c.Kd)
 		cand := *c
+		l.eval = eval
 		l.at = func(w float64) complex128 {
 			s := complex(0, w)
 			c := complex(cand.Kp, 0)

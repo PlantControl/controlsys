@@ -43,7 +43,7 @@ func TestTuningGoalsKnownFailuresAndGeneralizedCurrentValue(t *testing.T) {
 	}
 
 	k, _ := newBoundedReal("K", 0.25, 0, 1)
-	gm, err := NewGeneralizedModel("gain", mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0)))
+	gm, err := NewGeneralizedModel("gain", mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}})))
 	if err != nil {
 		t.Fatal(err)
 	}

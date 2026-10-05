@@ -131,8 +131,8 @@ func main() {
 | `(*GeneralizedClosedLoop).InsertAnalysisPoint` | Bind another named break to the plant input or output |
 | `TunableReal` | Bounded scalar parameter used by tunable blocks |
 | `TunableGain` | Tunable static-gain block |
-| `TunablePID` | Tunable PID controller block |
-| `TunableTF` | Tunable transfer-function block |
+| `TunablePID` / `TunablePID2` | Tunable 1-DOF / 2-DOF PID controller blocks |
+| `TunableTF` | Tunable SISO transfer-function block |
 | `TunableSS` | Tunable state-space block |
 | `NewTrackingGoal` / `NewRejectionGoal` | Tuning-goal constructors for tracking and disturbance rejection |
 | `NewSensitivityGoal` / `NewWeightedGainGoal` | Tuning-goal constructors for gain and sensitivity limits |
@@ -372,7 +372,6 @@ func main() {
 | `SetOutputDelay` | Set per-output delays |
 | `SetDelayModel` | Attach a custom internal delay model |
 | `GetDelayModel` | Read the internal delay model and delay times |
-| `DecomposeIODelay` | Split a full I/O delay matrix into input/output/residual pieces |
 | `PullDelaysToLFT` | Move external delays into the internal LFT delay representation |
 | `MinimalLFT` | Reduce redundant internal delay blocks |
 | `ZeroDelayApprox` | Replace internal delay blocks with zero-delay behavior |

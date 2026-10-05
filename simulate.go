@@ -476,7 +476,7 @@ func (sys *System) stateInputLags() (lags []int, ok bool) {
 	_, m, _ := sys.Dims()
 	lags = make([]int, m)
 	if sys.Delay != nil {
-		in, _, residual := DecomposeIODelay(sys.Delay)
+		in, _, residual := decomposeIODelay(sys.Delay)
 		if delayMatrixHasNonzero(residual) {
 			return nil, false
 		}

@@ -468,7 +468,7 @@ func BenchmarkDecomposeIODelay(b *testing.B) {
 	})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		DecomposeIODelay(delay)
+		decomposeIODelay(delay)
 	}
 }
 
@@ -1320,6 +1320,18 @@ func BenchmarkZPKFreqResponse_SISO_100(b *testing.B) {
 	}
 }
 
+func BenchmarkZPKFreqResponseDiscrete_SISO_100(b *testing.B) {
+	z, _ := NewZPK([]complex128{0.5, -0.2}, []complex128{0.9, 0.6 + 0.3i, 0.6 - 0.3i}, 2.0, 0.1)
+	omega := make([]float64, 100)
+	for i := range omega {
+		omega[i] = 0.01 * math.Pow(10, 3.4*float64(i)/99)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		z.FreqResponse(omega)
+	}
+}
+
 func BenchmarkZPKToTF_SISO_N10(b *testing.B) {
 	zeros := make([]complex128, 9)
 	poles := make([]complex128, 10)
@@ -1496,7 +1508,7 @@ func BenchmarkConnect(b *testing.B) {
 	outputs := []int{4, 5, 6}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Connect(aug, Q, inputs, outputs)
+		connectGain("Connect", aug, Q, inputs, outputs)
 	}
 }
 
@@ -1505,7 +1517,7 @@ func BenchmarkLFT(b *testing.B) {
 	Delta := benchSys(5, 3, 3)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		LFT(M, Delta, 3, 3)
+		LFT(M, Delta, LFTFeedback{Nu: 3, Ny: 3})
 	}
 }
 
@@ -1514,7 +1526,7 @@ func BenchmarkLFT_Large(b *testing.B) {
 	Delta := benchSys(10, 6, 6)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		LFT(M, Delta, 6, 6)
+		LFT(M, Delta, LFTFeedback{Nu: 6, Ny: 6})
 	}
 }
 
@@ -1600,7 +1612,7 @@ func BenchmarkLFTExtract(b *testing.B) {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := LFT(M, nil, 3, 3); err != nil {
+				if _, err := lftCloseExternal(M, nil, 3, 3); err != nil {
 					b.Fatal(err)
 				}
 			}

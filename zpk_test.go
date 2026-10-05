@@ -858,3 +858,46 @@ func TestZPKNilModelIsInvalidArgument(t *testing.T) {
 		t.Errorf("nil ZPK FreqResponse: err = %v, want single ZPK.FreqResponse: prefix and ErrInvalidArgument", err)
 	}
 }
+
+// A discrete ZPK with pole pairs 1e-9 inside the unit circle, evaluated a
+// few ulps around each resonance: a rounded e^{jωT} is up to ε off the
+// circle and moves G by about ε/1e-9 relative; FreqResponse must match a
+// 200-bit evaluation at the exact on-circle point.
+func TestZPKFreqResponseDiscreteLightlyDamped(t *testing.T) {
+	const dt, gap, gain = 0.1, 1e-9, 1.7
+	thetas := []float64{0.003, 0.03, 1.4, 3.11}
+	var poles []complex128
+	for _, th := range thetas {
+		poles = append(poles, cmplx.Rect(1-gap, th), cmplx.Rect(1-gap, -th))
+	}
+	poles = append(poles, 0.4)
+	zeros := []complex128{0.5 + 0.2i, 0.5 - 0.2i, -0.3}
+	z, err := NewZPK(zeros, poles, gain, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var omega []float64
+	for _, th := range thetas {
+		for k := -3; k <= 3; k++ {
+			omega = append(omega, th/dt*(1+float64(k)*0x1p-52))
+		}
+	}
+	resp, err := z.FreqResponse(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, w := range omega {
+		pt := frExactPoint(w, dt)
+		acc := frBigC(gain)
+		for _, v := range zeros {
+			acc = acc.mul(pt.sub(frBigC(v)))
+		}
+		for _, v := range poles {
+			acc = acc.quo(pt.sub(frBigC(v)))
+		}
+		want := acc.complex()
+		if e := cmplx.Abs(resp.Data[k]-want) / cmplx.Abs(want); !(e <= 1e-13) {
+			t.Errorf("ω=%v (ωT=%.4g): G = %v, exact %v, rel err %.3g", w, w*dt, resp.Data[k], want, e)
+		}
+	}
+}

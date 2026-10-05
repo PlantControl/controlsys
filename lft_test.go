@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -24,7 +25,7 @@ func evalMIMOTF(sys *System, s complex128) [][]complex128 {
 
 func TestLFT_NilM(t *testing.T) {
 	delta, _ := NewGain(mat.NewDense(1, 1, []float64{1}), 0)
-	_, err := LFT(nil, delta, 1, 1)
+	_, err := LFT(nil, delta)
 	if err == nil {
 		t.Fatal("expected error for nil M")
 	}
@@ -42,8 +43,7 @@ func TestLFT_DimMismatch(t *testing.T) {
 
 	delta, _ := NewGain(mat.NewDense(1, 1, []float64{1}), 0)
 
-	// pM-ny=3-1=2 != mD=1
-	_, err := LFT(M, delta, 1, 1)
+	_, err := LFT(M, delta, LFTFeedback{Nu: 2, Ny: 2})
 	if err == nil {
 		t.Fatal("expected error for dimension mismatch")
 	}
@@ -56,7 +56,7 @@ func TestLFT_InvalidPartition(t *testing.T) {
 	M, _ := NewGain(mat.NewDense(2, 2, []float64{1, 2, 3, 4}), 0)
 
 	t.Run("nu>mM", func(t *testing.T) {
-		_, err := LFT(M, nil, 3, 1)
+		_, err := LFT(M, M, LFTFeedback{Nu: 3, Ny: 1})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -66,7 +66,7 @@ func TestLFT_InvalidPartition(t *testing.T) {
 	})
 
 	t.Run("ny>pM", func(t *testing.T) {
-		_, err := LFT(M, nil, 1, 3)
+		_, err := LFT(M, M, LFTFeedback{Nu: 1, Ny: 3})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -80,7 +80,7 @@ func TestLFT_DomainMismatch(t *testing.T) {
 	M, _ := NewGain(mat.NewDense(2, 2, []float64{1, 2, 3, 4}), 0)
 	delta, _ := NewGain(mat.NewDense(1, 1, []float64{0.5}), 0.01)
 
-	_, err := LFT(M, delta, 1, 1)
+	_, err := LFT(M, delta)
 	if err == nil {
 		t.Fatal("expected error for domain mismatch")
 	}
@@ -102,7 +102,7 @@ func TestLFT_Lower_SISO(t *testing.T) {
 		0,
 	)
 
-	result, err := LFT(M, Delta, 1, 1)
+	result, err := LFT(M, Delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestLFT_Lower_PureGainDelta(t *testing.T) {
 	k := 0.4
 	Delta, _ := NewGain(mat.NewDense(1, 1, []float64{k}), 0)
 
-	result, err := LFT(M, Delta, 1, 1)
+	result, err := LFT(M, Delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestLFT_BothPureGain(t *testing.T) {
 	M, _ := NewGain(mat.NewDense(2, 2, []float64{1, 2, 3, 4}), 0)
 	Delta, _ := NewGain(mat.NewDense(1, 1, []float64{0.5}), 0)
 
-	result, err := LFT(M, Delta, 1, 1)
+	result, err := LFT(M, Delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,43 +179,6 @@ func TestLFT_BothPureGain(t *testing.T) {
 	got := result.D.At(0, 0)
 	if got != -2 {
 		t.Errorf("D = %v, want -2", got)
-	}
-}
-
-func TestLFT_DeltaNil(t *testing.T) {
-	// 3x3 system, nu=2, ny=1 -> extract 1x2 top-left channel
-	// Non-symmetric A
-	M, _ := New(
-		mat.NewDense(2, 2, []float64{-1, 3, 0, -2}),
-		mat.NewDense(2, 3, []float64{1, 0, 0, 0, 1, 0}),
-		mat.NewDense(3, 2, []float64{1, 0, 0, 1, 0, 0}),
-		mat.NewDense(3, 3, []float64{
-			1, 2, 3,
-			4, 5, 6,
-			7, 8, 9,
-		}),
-		0,
-	)
-
-	result, err := LFT(M, nil, 2, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	n, m, p := result.Dims()
-	if n != 2 || m != 2 || p != 1 {
-		t.Fatalf("dims = (%d,%d,%d), want (2,2,1)", n, m, p)
-	}
-
-	for _, omega := range []float64{0.1, 1.0, 10.0} {
-		s := complex(0, omega)
-		hM := evalMIMOTF(M, s)
-		hR := evalMIMOTF(result, s)
-		for j := range 2 {
-			if cmplx.Abs(hR[0][j]-hM[0][j]) > 1e-10 {
-				t.Errorf("s=%v col %d: got %v, want %v", s, j, hR[0][j], hM[0][j])
-			}
-		}
 	}
 }
 
@@ -334,7 +297,7 @@ func TestLFT_RecoversFeedback(t *testing.T) {
 	_ = eye1
 	_ = zero1
 
-	lftResult, err := LFT(M_sys, K, 1, 1)
+	lftResult, err := LFT(M_sys, K)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +317,7 @@ func TestLFT_AlgebraicLoop(t *testing.T) {
 	M, _ := NewGain(mat.NewDense(2, 2, []float64{0, 1, 1, 2}), 0)
 	Delta, _ := NewGain(mat.NewDense(1, 1, []float64{0.5}), 0)
 
-	_, err := LFT(M, Delta, 1, 1)
+	_, err := LFT(M, Delta)
 	if err == nil {
 		t.Fatal("expected algebraic loop error")
 	}
@@ -380,7 +343,7 @@ func TestLFT_NonSymmetricA(t *testing.T) {
 		0,
 	)
 
-	result, err := LFT(M, Delta, 1, 1)
+	result, err := LFT(M, Delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +393,7 @@ func TestLFT_MIMO_2x2(t *testing.T) {
 		0,
 	)
 
-	result, err := LFT(M, Delta, 2, 2)
+	result, err := LFT(M, Delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,33 +485,6 @@ func TestLFT_MIMO_2x2(t *testing.T) {
 	}
 }
 
-func TestLFT_DeltaNil_GainOnly(t *testing.T) {
-	M, _ := NewGain(mat.NewDense(3, 3, []float64{
-		1, 2, 3,
-		4, 5, 6,
-		7, 8, 9,
-	}), 0)
-
-	result, err := LFT(M, nil, 2, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	n, m, p := result.Dims()
-	if n != 0 || m != 2 || p != 2 {
-		t.Fatalf("dims = (%d,%d,%d), want (0,2,2)", n, m, p)
-	}
-	for i := range 2 {
-		for j := range 2 {
-			got := result.D.At(i, j)
-			want := M.D.At(i, j)
-			if got != want {
-				t.Errorf("D[%d][%d] = %v, want %v", i, j, got, want)
-			}
-		}
-	}
-}
-
 func TestLFT_BothDynamic(t *testing.T) {
 	// Both M and Delta have dynamics, non-symmetric A
 	M, _ := New(
@@ -566,7 +502,7 @@ func TestLFT_BothDynamic(t *testing.T) {
 		0,
 	)
 
-	result, err := LFT(M, Delta, 1, 1)
+	result, err := LFT(M, Delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +544,7 @@ func TestLFT_DelayedMWithDynamicDeltaMatchesFrequencyLFT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := LFT(M, Delta, 1, 1)
+	got, err := LFT(M, Delta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +579,7 @@ func TestLFTEmptyLoopKeepsUpperChannels(t *testing.T) {
 		}
 		autonomous := emptyIOFixture(t, 1, 0, 0, dt)
 		for name, delta := range map[string]*System{"gain": empty, "states": autonomous} {
-			got, err := LFT(M, delta, 2, 3)
+			got, err := LFT(M, delta)
 			if err != nil {
 				t.Fatalf("dt=%g %s: %v", dt, name, err)
 			}
@@ -812,7 +748,7 @@ func TestLFTZeroWidthPartitionsMatchLoopOracle(t *testing.T) {
 			nu, ny := part[0], part[1]
 			M, Delta := lftZeroWidthPlants(t, dt, nu, ny)
 			tag := fmt.Sprintf("dt=%g nu=%d ny=%d", dt, nu, ny)
-			got, err := LFT(M, Delta, nu, ny)
+			got, err := LFT(M, Delta, LFTFeedback{Nu: 2, Ny: 2})
 			if err != nil {
 				t.Fatalf("%s: %v", tag, err)
 			}
@@ -847,7 +783,7 @@ func TestLFTZeroWidthLoopChannelsMatchLoopOracle(t *testing.T) {
 			z, w := zw[0], zw[1]
 			M, Delta := lftPartitionPlants(t, dt, 2, 2, z, w)
 			tag := fmt.Sprintf("dt=%g z=%d w=%d", dt, z, w)
-			got, err := LFT(M, Delta, 2, 2)
+			got, err := LFT(M, Delta, LFTFeedback{Nu: z, Ny: w})
 			if err != nil {
 				t.Fatalf("%s: %v", tag, err)
 			}
@@ -876,7 +812,7 @@ func TestLFTZeroWidthLoopChannelsMatchLoopOracle(t *testing.T) {
 func TestLFTZeroWidthUpperChannelsSimulate(t *testing.T) {
 	const steps = 6
 	M, Delta := lftZeroWidthPlants(t, 0.1, 0, 2)
-	got, err := LFT(M, Delta, 0, 2)
+	got, err := LFT(M, Delta, LFTFeedback{Nu: 2, Ny: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -913,17 +849,14 @@ func TestLFTZeroWidthStaticGain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LFT(M, Delta, 0, 1); !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("LFT gain nu=0 ny=1: err = %v, want ErrDimensionMismatch", err)
-	}
-	if _, err := LFT(M, nil, 0, 2); !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("LFT gain nil Delta nu=0 ny=2: err = %v, want ErrDimensionMismatch", err)
+	if _, err := LFT(M, Delta, LFTFeedback{Nu: 2, Ny: 2}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("LFT gain to 1x0: err = %v, want ErrDimensionMismatch", err)
 	}
 	M2, err := NewGain(mat.NewDense(2, 2, []float64{1, 2, 3, 4}), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := LFT(M2, Delta, 0, 0)
+	got, err := LFT(M2, Delta, LFTFeedback{Nu: 2, Ny: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -933,14 +866,14 @@ func TestLFTZeroWidthStaticGain(t *testing.T) {
 }
 
 // TestLFTZeroWidthDelayedDeltaMatchesFullPartition checks the internal-delay
-// LFT path: closing the loop with nu=0 (ny=0) must reproduce the full
+// LFT path: closing the loop with no external inputs (outputs) must reproduce the full
 // partition's free response (state trajectory) with the upper inputs zeroed
 // (outputs dropped).
 func TestLFTZeroWidthDelayedDeltaMatchesFullPartition(t *testing.T) {
 	const steps = 8
 	full, Delta := lftZeroWidthPlants(t, 0.1, 2, 2)
 	Delta.InputDelay = []float64{1, 2}
-	fullLFT, err := LFT(full, Delta, 2, 2)
+	fullLFT, err := LFT(full, Delta, LFTFeedback{Nu: 2, Ny: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +892,7 @@ func TestLFTZeroWidthDelayedDeltaMatchesFullPartition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := LFT(noInputs, Delta, 0, 2)
+	got, err := LFT(noInputs, Delta, LFTFeedback{Nu: 2, Ny: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -979,7 +912,7 @@ func TestLFTZeroWidthDelayedDeltaMatchesFullPartition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = LFT(noOutputs, Delta, 2, 0)
+	got, err = LFT(noOutputs, Delta, LFTFeedback{Nu: 2, Ny: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -996,5 +929,340 @@ func TestLFTZeroWidthDelayedDeltaMatchesFullPartition(t *testing.T) {
 	}
 	if !vecEqual(gotR.XFinal, wantR.XFinal, 1e-10) {
 		t.Errorf("ny=0 XFinal = %v, want %v", mat.Formatted(gotR.XFinal.T()), mat.Formatted(wantR.XFinal.T()))
+	}
+}
+
+// lftOracleFR evaluates D + C(sE-A)^{-1}B with input and output delays at s
+// (z for discrete) by complex Gaussian elimination, independently of the
+// library's frequency-response code.
+func lftOracleFR(t *testing.T, sys *System, s complex128) [][]complex128 {
+	t.Helper()
+	if sys.HasInternalDelay() || sys.Delay != nil {
+		t.Fatal("lftOracleFR: only input/output delays supported")
+	}
+	n, m, p := sys.Dims()
+	G := make([][]complex128, p)
+	for i := range G {
+		G[i] = make([]complex128, m)
+		for j := range m {
+			G[i][j] = complex(sys.D.At(i, j), 0)
+		}
+	}
+	if n > 0 {
+		lhs := make([][]complex128, n)
+		for i := range lhs {
+			lhs[i] = make([]complex128, n)
+			for j := range n {
+				e := 0.0
+				if i == j {
+					e = 1
+				}
+				if sys.E != nil {
+					e = sys.E.At(i, j)
+				}
+				lhs[i][j] = s*complex(e, 0) - complex(sys.A.At(i, j), 0)
+			}
+		}
+		rhs := make([][]complex128, n)
+		for i := range rhs {
+			rhs[i] = make([]complex128, m)
+			for j := range m {
+				rhs[i][j] = complex(sys.B.At(i, j), 0)
+			}
+		}
+		X := lftComplexSolve(t, lhs, rhs)
+		for i := range p {
+			for j := range m {
+				for k := range n {
+					G[i][j] += complex(sys.C.At(i, k), 0) * X[k][j]
+				}
+			}
+		}
+	}
+	delay := func(tau float64) complex128 {
+		if sys.Dt > 0 {
+			return cmplx.Pow(s, complex(-tau, 0))
+		}
+		return cmplx.Exp(-s * complex(tau, 0))
+	}
+	for i := range p {
+		for j := range m {
+			if sys.InputDelay != nil {
+				G[i][j] *= delay(sys.InputDelay[j])
+			}
+			if sys.OutputDelay != nil {
+				G[i][j] *= delay(sys.OutputDelay[i])
+			}
+		}
+	}
+	return G
+}
+
+func lftComplexSolve(t *testing.T, A, B [][]complex128) [][]complex128 {
+	t.Helper()
+	n := len(A)
+	m := 0
+	if n > 0 {
+		m = len(B[0])
+	}
+	a := make([][]complex128, n)
+	b := make([][]complex128, n)
+	for i := range n {
+		a[i] = append([]complex128(nil), A[i]...)
+		b[i] = append([]complex128(nil), B[i]...)
+	}
+	for k := range n {
+		piv := k
+		for i := k + 1; i < n; i++ {
+			if cmplx.Abs(a[i][k]) > cmplx.Abs(a[piv][k]) {
+				piv = i
+			}
+		}
+		if cmplx.Abs(a[piv][k]) < 1e-14 {
+			t.Fatal("lftComplexSolve: singular")
+		}
+		a[k], a[piv] = a[piv], a[k]
+		b[k], b[piv] = b[piv], b[k]
+		for i := k + 1; i < n; i++ {
+			f := a[i][k] / a[k][k]
+			for j := k; j < n; j++ {
+				a[i][j] -= f * a[k][j]
+			}
+			for j := range m {
+				b[i][j] -= f * b[k][j]
+			}
+		}
+	}
+	for k := n - 1; k >= 0; k-- {
+		for j := range m {
+			for i := k + 1; i < n; i++ {
+				b[k][j] -= a[k][i] * b[i][j]
+			}
+			b[k][j] /= a[k][k]
+		}
+	}
+	return b
+}
+
+// lftStarOracle closes MATLAB lft(G1,G2,nu,ny) on frequency-response
+// matrices: u = G2[:nu, :ny] y + G2[:nu, ny:] w2 and y = G1[p1-ny:, :m1-nu] w1
+// + G1[p1-ny:, m1-nu:] u, returning [z1; z2] against [w1; w2].
+func lftStarOracle(t *testing.T, G1, G2 [][]complex128, m1, m2, nu, ny int) [][]complex128 {
+	t.Helper()
+	p1, p2 := len(G1), len(G2)
+	w1, w2 := m1-nu, m2-ny
+	k := ny + nu
+	lhs := make([][]complex128, k)
+	for i := range lhs {
+		lhs[i] = make([]complex128, k)
+		lhs[i][i] = 1
+	}
+	for i := range ny {
+		for j := range nu {
+			lhs[i][ny+j] = -G1[p1-ny+i][w1+j]
+		}
+	}
+	for i := range nu {
+		for j := range ny {
+			lhs[ny+i][j] = -G2[i][j]
+		}
+	}
+	rhs := make([][]complex128, k)
+	for i := range rhs {
+		rhs[i] = make([]complex128, w1+w2)
+	}
+	for i := range ny {
+		for j := range w1 {
+			rhs[i][j] = G1[p1-ny+i][j]
+		}
+	}
+	for i := range nu {
+		for j := range w2 {
+			rhs[ny+i][w1+j] = G2[i][ny+j]
+		}
+	}
+	yu := rhs
+	if k > 0 {
+		yu = lftComplexSolve(t, lhs, rhs)
+	}
+	out := make([][]complex128, (p1-ny)+(p2-nu))
+	for i := range p1 - ny {
+		out[i] = make([]complex128, w1+w2)
+		for j := range w1 {
+			out[i][j] = G1[i][j]
+		}
+		for j := range w1 + w2 {
+			for l := range nu {
+				out[i][j] += G1[i][w1+l] * yu[ny+l][j]
+			}
+		}
+	}
+	for i := range p2 - nu {
+		r := p1 - ny + i
+		out[r] = make([]complex128, w1+w2)
+		for j := range w2 {
+			out[r][w1+j] = G2[nu+i][ny+j]
+		}
+		for j := range w1 + w2 {
+			for l := range ny {
+				out[r][j] += G2[nu+i][l] * yu[l][j]
+			}
+		}
+	}
+	return out
+}
+
+func lftOracleSystem(t *testing.T, n, m, p int, seed float64, dt float64) *System {
+	t.Helper()
+	A := mat.NewDense(n, n, nil)
+	for i := range n {
+		for j := range n {
+			A.Set(i, j, 0.3*math.Sin(seed+float64(3*i+7*j)))
+		}
+		A.Set(i, i, -1.5-0.4*float64(i))
+	}
+	if dt > 0 {
+		A.Scale(0.3, A)
+	}
+	fill := func(r, c int, off float64) *mat.Dense {
+		d := mat.NewDense(r, c, nil)
+		for i := range r {
+			for j := range c {
+				d.Set(i, j, math.Cos(seed+off+float64(5*i+2*j)))
+			}
+		}
+		return d
+	}
+	D := fill(p, m, 2)
+	D.Scale(0.2, D)
+	sys, err := New(A, fill(n, m, 0), fill(p, n, 1), D, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func lftCheckOracle(t *testing.T, tag string, got, sys1, sys2 *System, nu, ny int) {
+	t.Helper()
+	_, m1, p1 := sys1.Dims()
+	_, m2, p2 := sys2.Dims()
+	if _, m, p := got.Dims(); m != m1-nu+m2-ny || p != p1-ny+p2-nu {
+		t.Fatalf("%s: dims %dx%d, want %dx%d", tag, p, m, p1-ny+p2-nu, m1-nu+m2-ny)
+	}
+	for _, w := range []float64{0.05, 0.7, 3.1} {
+		s := complex(0, w)
+		if sys1.Dt > 0 {
+			s = cmplx.Exp(complex(0, w*sys1.Dt))
+		}
+		want := lftStarOracle(t, lftOracleFR(t, sys1, s), lftOracleFR(t, sys2, s), m1, m2, nu, ny)
+		have, err := got.EvalFr(s)
+		if err != nil {
+			t.Fatalf("%s: EvalFr: %v", tag, err)
+		}
+		for i := range want {
+			for j := range want[i] {
+				if d := cmplx.Abs(have[i][j] - want[i][j]); d > 1e-9*(1+cmplx.Abs(want[i][j])) {
+					t.Errorf("%s w=%g G[%d][%d] = %v, want %v", tag, w, i, j, have[i][j], want[i][j])
+				}
+			}
+		}
+	}
+}
+
+func TestLFTMatchesMATLABStarProduct(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys1 := lftOracleSystem(t, 3, 3, 3, 0.4, dt)
+		sys2 := lftOracleSystem(t, 2, 3, 2, 1.9, dt)
+		got, err := LFT(sys1, sys2, LFTFeedback{Nu: 1, Ny: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, _, _ := got.Dims(); n != 5 {
+			t.Fatalf("dt=%g: n = %d, want 5", dt, n)
+		}
+		lftCheckOracle(t, fmt.Sprintf("star dt=%g", dt), got, sys1, sys2, 1, 2)
+	}
+}
+
+func TestLFTFeedbackCountsFeedbackChannels(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys1 := lftOracleSystem(t, 3, 4, 4, 0.8, dt)
+		sys2 := lftOracleSystem(t, 2, 3, 1, 2.6, dt)
+		explicit, err := LFT(sys1, sys2, LFTFeedback{Nu: 1, Ny: 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lftCheckOracle(t, fmt.Sprintf("lower dt=%g", dt), explicit, sys1, sys2, 1, 3)
+		inferred, err := LFT(sys1, sys2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lftCheckOracle(t, fmt.Sprintf("lower 2-arg dt=%g", dt), inferred, sys1, sys2, 1, 3)
+	}
+}
+
+func TestLFTUpperTwoArgKeepsStateOrder(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys1 := lftOracleSystem(t, 2, 1, 2, 3.3, dt)
+		sys2 := lftOracleSystem(t, 3, 4, 3, 0.2, dt)
+		sys1.StateName = []string{"a1", "a2"}
+		sys2.StateName = []string{"b1", "b2", "b3"}
+		got, err := LFT(sys1, sys2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lftCheckOracle(t, fmt.Sprintf("upper dt=%g", dt), got, sys1, sys2, 1, 2)
+		if want := []string{"a1", "a2", "b1", "b2", "b3"}; fmt.Sprint(got.StateName) != fmt.Sprint(want) {
+			t.Errorf("dt=%g StateName = %v, want %v", dt, got.StateName, want)
+		}
+	}
+}
+
+func TestLFTStarProductWithDelays(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys1 := lftOracleSystem(t, 3, 3, 3, 0.4, dt)
+		sys2 := lftOracleSystem(t, 2, 3, 2, 1.9, dt)
+		sys1.InputDelay = []float64{0.3, 0, 0.2}
+		sys2.InputDelay = []float64{0, 0.4, 0.5}
+		sys2.OutputDelay = []float64{0.1, 0}
+		if dt > 0 {
+			sys1.InputDelay = []float64{3, 0, 2}
+			sys2.InputDelay = []float64{0, 4, 5}
+			sys2.OutputDelay = []float64{1, 0}
+		}
+		got, err := LFT(sys1, sys2, LFTFeedback{Nu: 1, Ny: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lftCheckOracle(t, fmt.Sprintf("delayed star dt=%g", dt), got, sys1, sys2, 1, 2)
+	}
+}
+
+func TestLFTArgumentErrors(t *testing.T) {
+	sys1 := lftOracleSystem(t, 2, 2, 2, 0.1, 0)
+	sys2 := lftOracleSystem(t, 1, 2, 2, 0.5, 0)
+	siso := lftOracleSystem(t, 1, 1, 1, 0.9, 0)
+	for _, tc := range []struct {
+		name string
+		run  func() error
+		want error
+	}{
+		{"nil sys2", func() error { _, err := LFT(sys1, nil); return err }, ErrInvalidArgument},
+		{"two specs", func() error {
+			_, err := LFT(sys1, siso, LFTFeedback{Nu: 1, Ny: 1}, LFTFeedback{Nu: 1, Ny: 1})
+			return err
+		}, ErrInvalidArgument},
+		{"negative ny", func() error { _, err := LFT(sys1, siso, LFTFeedback{Nu: 1, Ny: -1}); return err }, ErrInvalidArgument},
+		{"nu exceeds sys2 outputs", func() error { _, err := LFT(sys1, siso, LFTFeedback{Nu: 2, Ny: 1}); return err }, ErrDimensionMismatch},
+		{"ny exceeds sys2 inputs", func() error { _, err := LFT(sys1, siso, LFTFeedback{Nu: 1, Ny: 2}); return err }, ErrDimensionMismatch},
+		{"2-arg equal sizes", func() error { _, err := LFT(sys1, sys2); return err }, ErrDimensionMismatch},
+	} {
+		err := tc.run()
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.want)
+		}
+		if err != nil && !strings.HasPrefix(err.Error(), "LFT: ") {
+			t.Errorf("%s: err = %q, want LFT: prefix", tc.name, err)
+		}
 	}
 }

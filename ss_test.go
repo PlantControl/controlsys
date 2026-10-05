@@ -746,8 +746,7 @@ func emptyIOOps() []emptyIOOp {
 		}},
 		{"Loopsens", func(s *System) (any, error) { return Loopsens(s, s.Copy()) }},
 		{"Connect", func(s *System) (any, error) {
-			_, m, _ := s.Dims()
-			return Connect(s, newDense(m, 2), nil, nil)
+			return Connect(s, nil, nil, nil)
 		}},
 		{"Margin", func(s *System) (any, error) { return Margin(s) }},
 		{"AllMargin", func(s *System) (any, error) { return AllMargin(s) }},
@@ -874,7 +873,7 @@ func emptyIOOps() []emptyIOOp {
 		{"PullDelaysToLFT", func(s *System) (any, error) { return s.PullDelaysToLFT() }},
 		{"TotalDelay", func(s *System) (any, error) { return s.TotalDelay() }},
 		{"Pidtune", func(s *System) (any, error) { return Pidtune(s, PidtunePI, 0, nil) }},
-		{"LFT", func(s *System) (any, error) { return LFT(s, s.Copy(), 0, 0) }},
+		{"LFT", func(s *System) (any, error) { _, m, p := s.Dims(); return LFT(s, s.Copy(), LFTFeedback{Nu: m, Ny: p}) }},
 		{"ModelArray", func(s *System) (any, error) { return NewModelArray([]int{1}, []*System{s}) }},
 		{"Kalman", func(s *System) (any, error) {
 			_, m, p := s.Dims()
@@ -959,7 +958,7 @@ func TestEmptyIOModelsNeverPanic(t *testing.T) {
 
 // TestEmptyIOInternalDelayModelsNeverPanic repeats the empty-I/O sweep on
 // internal-delay models with no inputs or no outputs, built by closing an LFT
-// around a delayed Delta with nu=0 or ny=0.
+// around a delayed Delta with no external inputs or outputs.
 func TestEmptyIOInternalDelayModelsNeverPanic(t *testing.T) {
 	for _, dt := range []float64{0, 0.1} {
 		for _, part := range [][2]int{{0, 2}, {2, 0}} {
@@ -968,7 +967,7 @@ func TestEmptyIOInternalDelayModelsNeverPanic(t *testing.T) {
 			if dt == 0 {
 				Delta.InputDelay = []float64{0.1, 0.2}
 			}
-			sys, err := LFT(M, Delta, part[0], part[1])
+			sys, err := LFT(M, Delta, LFTFeedback{Nu: 2, Ny: 2})
 			if err != nil {
 				t.Fatalf("dt=%g nu,ny=%v: LFT: %v", dt, part, err)
 			}
@@ -1514,7 +1513,7 @@ func TestValidateNamesAndNil(t *testing.T) {
 				t.Errorf("LFT with short InputName panicked: %v", r)
 			}
 		}()
-		_, _ = LFT(m, delta, 1, 1)
+		_, _ = LFT(m, delta)
 	}()
 }
 

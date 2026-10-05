@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"sort"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -296,6 +297,9 @@ func computeBreakaway(sys *System, poles, zeros []complex128) ([]complex128, err
 	denD := den.Derivative()
 
 	poly := numD.Mul(den).Sub(num.Mul(denD))
+	if !slices.ContainsFunc(poly, func(c float64) bool { return c != 0 }) {
+		return []complex128{}, nil
+	}
 
 	roots, err := poly.Roots()
 	if err != nil {

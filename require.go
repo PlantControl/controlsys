@@ -21,6 +21,20 @@ func requireSystem(op string, sys *System) error {
 	return nil
 }
 
+// requireSystems is requireSystem for the several models of an
+// interconnection, naming the offending one by its 1-based position.
+func requireSystems(op string, systems ...*System) error {
+	for i, sys := range systems {
+		if sys == nil {
+			return fmt.Errorf("%s: system %d is nil: %w", op, i+1, ErrInvalidArgument)
+		}
+		if err := sys.validate(); err != nil {
+			return fmt.Errorf("%s: system %d: %w", op, i+1, err)
+		}
+	}
+	return nil
+}
+
 // requireFiniteSystem is requireSystem plus a finiteness check of every
 // state-space and internal-delay matrix, for operations that hand the model
 // to eigen/LAPACK routines.

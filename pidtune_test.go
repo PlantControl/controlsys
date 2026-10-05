@@ -384,3 +384,21 @@ func TestPidtuneValidatesAndRejectsUnreachableMargin(t *testing.T) {
 		t.Fatalf("static gain auto wc err = %v, want ErrInvalidArgument (no crossover to infer)", err)
 	}
 }
+
+// At small ωT, z − 1 of a rounded e^{jωT} keeps only ε/(ωT) relative
+// accuracy in its real part; the discrete integrator terms must match a
+// 200-bit dt·(1/(z−1) + w) at the exact on-circle point.
+func TestPidtuneIntegratorSmallOmegaT(t *testing.T) {
+	const dt = 0.1
+	for _, f := range []PIDFormula{ForwardEuler, BackwardEuler, Trapezoidal} {
+		for _, wT := range []float64{1e-7, 1e-4, 0.3, 3} {
+			w := wT / dt
+			z := frExactPoint(w, dt)
+			want := frBigC(dt).mul(frBigC(1).quo(z.sub(frBigC(1))).add(frBigC(complex(pidFormulaWeight(f), 0)))).complex()
+			got := pidtuneIntegrator(f, w, dt)
+			if e := cmplx.Abs(got-want) / cmplx.Abs(want); !(e <= 1e-14) {
+				t.Errorf("formula %v ωT=%g: %v, exact %v, rel err %.3g", f, wT, got, want, e)
+			}
+		}
+	}
+}

@@ -512,3 +512,35 @@ func TestTunePIDStabilityCheckFailureAborts(t *testing.T) {
 		t.Fatalf("r=%v err=%v, want aborted with the stability error", r, err)
 	}
 }
+
+// pidTuningBasis must match a 200-bit evaluation of the discrete integrator
+// and filtered derivative at the exact on-circle point, including small ωT
+// where a rounded e^{jωT} − 1 loses ε/(ωT) relative accuracy.
+func TestPidTuningBasisDiscreteSmallOmegaT(t *testing.T) {
+	const dt, tf = 0.1, 0.05
+	formulas := []PIDFormula{ForwardEuler, BackwardEuler, Trapezoidal}
+	for _, fi := range formulas {
+		for _, fd := range formulas {
+			c := PID2{Dt: dt, Tf: tf, IFormula: fi, DFormula: fd}
+			for _, wT := range []float64{1e-7, 1e-4, 0.3, 3} {
+				w := wT / dt
+				z := frExactPoint(w, dt)
+				basis := func(f PIDFormula) frBig {
+					return frBigC(dt).mul(frBigC(1).quo(z.sub(frBigC(1))).add(frBigC(complex(pidFormulaWeight(f), 0))))
+				}
+				d := frBigC(1).quo(basis(fd))
+				wantI := basis(fi).complex()
+				wantD := d.quo(frBigC(1).add(frBigC(tf).mul(d))).complex()
+				gotI, gotD := pidTuningBasis(c, w)
+				for _, r := range []struct {
+					name      string
+					got, want complex128
+				}{{"integral", gotI, wantI}, {"derivative", gotD, wantD}} {
+					if e := cmplx.Abs(r.got-r.want) / cmplx.Abs(r.want); !(e <= 1e-14) {
+						t.Errorf("I=%v D=%v ωT=%g %s: %v, exact %v, rel err %.3g", fi, fd, wT, r.name, r.got, r.want, e)
+					}
+				}
+			}
+		}
+	}
+}

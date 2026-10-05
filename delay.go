@@ -685,7 +685,7 @@ func absorbIODelay(sys *System) (*System, error) {
 		return cp, nil
 	}
 
-	inDel, outDel, residual := DecomposeIODelay(sys.Delay)
+	inDel, outDel, residual := decomposeIODelay(sys.Delay)
 	if delayMatrixHasNonzero(residual) {
 		return newResidualDelaySplit(sys).apply(sys, absorbDecomposedDelay)
 	}
@@ -1124,7 +1124,7 @@ func absorbIODelayContinuous(sys *System, order int) (*System, error) {
 		return cp, nil
 	}
 
-	inDel, outDel, residual := DecomposeIODelay(sys.Delay)
+	inDel, outDel, residual := decomposeIODelay(sys.Delay)
 	if delayMatrixHasNonzero(residual) {
 		return newResidualDelaySplit(sys).apply(sys, func(piece *System) (*System, error) {
 			cur, err := absorbInputDelayContinuous(piece, order)
@@ -1200,11 +1200,11 @@ func absorbIODelayContinuous(sys *System, order int) (*System, error) {
 	return cur, nil
 }
 
-// DecomposeIODelay splits ioDelay into input delays, output delays and a
+// decomposeIODelay splits ioDelay into input delays, output delays and a
 // nonnegative residual with ioDelay[i][j] = out[i] + in[j] + residual[i][j].
 // Derived values within roundoff of zero relative to the largest delay are
-// returned as exact zeros. ioDelay must not be nil.
-func DecomposeIODelay(ioDelay *mat.Dense) (inputDelay, outputDelay []float64, residual *mat.Dense) {
+// returned as exact zeros.
+func decomposeIODelay(ioDelay *mat.Dense) (inputDelay, outputDelay []float64, residual *mat.Dense) {
 	raw := ioDelay.RawMatrix()
 	p, m := raw.Rows, raw.Cols
 
@@ -1316,7 +1316,7 @@ func decomposeOutputFirst(data []float64, stride, p, m int) (inputDelay, outputD
 }
 
 // splitIODelayForInitialState moves Delay into InputDelay and OutputDelay,
-// split as DecomposeIODelay (and PullDelaysToLFT) does, when x0 is nonzero.
+// split as decomposeIODelay (and PullDelaysToLFT) does, when x0 is nonzero.
 // MATLAB ss has no I/O delay matrix: ss(tf) distributes it over input and
 // output delays, and an output delay τ_i delays the whole output, so the free
 // response y_i = C_i·x(t−τ_i) is zero before τ_i while delay lines start
@@ -1327,7 +1327,7 @@ func (sys *System) splitIODelayForInitialState(x0 *mat.VecDense) (*System, error
 	if sys.Delay == nil || x0 == nil || allZeroVec(x0) {
 		return sys, nil
 	}
-	in, out, residual := DecomposeIODelay(sys.Delay)
+	in, out, residual := decomposeIODelay(sys.Delay)
 	if delayMatrixHasNonzero(residual) {
 		return nil, fmt.Errorf("nonzero x0 with an I/O delay matrix that has no input+output split: %w", ErrDelayUnsupported)
 	}
@@ -1371,7 +1371,7 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 	cur := sys.Copy()
 
 	if cur.Delay != nil {
-		inDel, outDel, residual := DecomposeIODelay(cur.Delay)
+		inDel, outDel, residual := decomposeIODelay(cur.Delay)
 		if cur.InputDelay == nil {
 			cur.InputDelay = make([]float64, m)
 		}

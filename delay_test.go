@@ -1533,7 +1533,7 @@ func TestDecomposeIODelay(t *testing.T) {
 			}
 			ioMat := mat.NewDense(p, m, ioData)
 
-			gotInput, gotOutput, gotResid := DecomposeIODelay(ioMat)
+			gotInput, gotOutput, gotResid := decomposeIODelay(ioMat)
 
 			for j := range m {
 				if math.Abs(gotInput[j]-tt.wantInput[j]) > 1e-14 {

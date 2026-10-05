@@ -455,3 +455,30 @@ func TestRootLocus_BranchContinuity(t *testing.T) {
 		}
 	}
 }
+
+func TestRootLocus_ConstantLoopNoBreakaway(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
+		mat.NewDense(2, 1, []float64{1, 1}),
+		mat.NewDense(1, 2, []float64{0, 0}),
+		mat.NewDense(1, 1, []float64{1}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := RootLocus(sys, []float64{0, 0.5, 2, 10})
+	if err != nil {
+		t.Fatalf("RootLocus: %v", err)
+	}
+	if len(res.Breakaway) != 0 {
+		t.Errorf("Breakaway = %v, want none for L(s) = 1", res.Breakaway)
+	}
+	for b, branch := range res.Branches {
+		for k, p := range branch {
+			if cmplx.Abs(p-res.Branches[b][0]) > 1e-12 || (cmplx.Abs(p+1) > 1e-12 && cmplx.Abs(p+3) > 1e-12) {
+				t.Errorf("Branches[%d][%d] = %v, want fixed pole -1 or -3", b, k, p)
+			}
+		}
+	}
+}

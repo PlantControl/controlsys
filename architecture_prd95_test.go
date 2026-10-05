@@ -84,15 +84,10 @@ func TestPRD95DelayBankPublicWorkflowsShareRules(t *testing.T) {
 		4.5, 8.0,
 	})
 
-	if _, err := Feedback(discPlant, controller, -1, WithApproximatedDelays()); !errors.Is(err, ErrFractionalDelay) {
-		t.Fatalf("Feedback without Thiran err = %v, want ErrFractionalDelay", err)
-	}
-	closed, err := Feedback(discPlant, controller, -1, WithThiranOrder(3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if closed.HasDelay() {
-		t.Fatalf("Feedback kept external delay: input=%v output=%v io=%v", closed.InputDelay, closed.OutputDelay, closed.Delay)
+	for _, opt := range []FeedbackOption{WithApproximatedDelays(), WithThiranOrder(3)} {
+		if _, err := Feedback(discPlant, controller, -1, opt); !errors.Is(err, ErrFractionalDelay) {
+			t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
+		}
 	}
 }
 
@@ -150,7 +145,7 @@ func TestPRD95LFTDelayWorkflowPreservesExternalDelayAndMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := LFT(M, delta, 1, 1)
+	result, err := LFT(M, delta)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -392,6 +392,10 @@ _Avoid_: exact delay
 An interconnection form where a main model is closed around a lower block through selected internal inputs and outputs.
 _Avoid_: feedback interconnection when the partitioned block structure matters
 
+**Star product**:
+The general linear fractional transformation of MATLAB lft(sys1,sys2,nu,ny): the first nu outputs of sys2 drive the last nu inputs of sys1, the last ny outputs of sys1 drive the first ny inputs of sys2, and both models may keep external channels. nu and ny count the **feedback channels**, never the external ones. The lower LFT (sys2 fully in the loop) and upper LFT (sys1 fully in the loop) are special cases.
+_Avoid_: Redheffer product without saying which channels close
+
 **Uncertainty block**:
 The lower block in a linear fractional transformation, representing dynamics or variation connected to the main model.
 _Avoid_: plant or controller unless the block has that design role
@@ -429,7 +433,7 @@ A delay converted from metadata into additional state-space dynamics.
 _Avoid_: exact delay when the delay has become states
 
 **Fractional delay**:
-A discrete-time delay with a non-integer number of sample intervals.
+A discrete-time delay with a non-integer number of sample intervals. It is never a valid delay field of a discrete-time model (InputDelay, OutputDelay, IODelay or internal delay), as in MATLAB; Validate and every operation that validates its input return ErrFractionalDelay. A fractional sample delay exists only as an argument (ThiranDelay, or a continuous delay discretized by C2D), which realizes it as a **Thiran allpass delay** or extra states.
 _Avoid_: integer delay
 
 **Integer delay**:
@@ -1298,7 +1302,7 @@ An exported operation returns a fully formed value with a nil error, or a non-ni
 - ErrSchurFailed: any eigenvalue, Schur or QZ iteration that did not converge.
 
 **Guards** (require.go):
-- `requireSystem(op, sys)`: nil model → ErrInvalidArgument; otherwise Validate, wrapped `op: %w`. Does not check finiteness, since plain model arithmetic propagates NaN/Inf as MATLAB does.
+- `requireSystem(op, sys)`: nil model → ErrInvalidArgument; otherwise Validate, wrapped `op: %w`. Does not check finiteness, since plain model arithmetic propagates NaN/Inf as MATLAB does. `requireSystems(op, sys...)` is the same for the several models of an interconnection, naming the offending one. Interconnections (Series, Parallel, Append, BlkDiag, Feedback, Connect, Augstate) validate like every other operation; a **fractional delay** on a discrete-time model is invalid everywhere.
 - `requireFiniteSystem(op, sys)`: requireSystem plus every A, B, C, D, E and internal-delay block finite. Use before eigen, Schur, QZ, balancing or other LAPACK work: gonum Dgebal never terminates on NaN, so non-finite input must be rejected with ErrInvalidArgument before it reaches LAPACK.
 - `requireFiniteDense(op, name, m)`: nil or non-finite matrix → ErrInvalidArgument; check nil yourself first when the matrix is optional.
 - `requireFinite(op, name, v...)`: non-finite scalar or slice element → ErrInvalidArgument.
@@ -1307,7 +1311,7 @@ An exported operation returns a fully formed value with a nil error, or a non-ni
 A result quantity that may not exist is exposed through a comma-ok accessor method `(value, ok bool)` named for the quantity, with no Get/Has prefix; the backing field is unexported. For example a margin result with no gain crossover reports `wcg, ok := r.GainCrossover()` with ok false, rather than a NaN WgFreq field. Inf is returned only where it is mathematically true (the gain margin of a loop that never crosses -180°), never as a "none" marker.
 
 **MATLAB-shaped arguments**:
-Arguments, their order and their defaults follow the MATLAB Control System Toolbox function the operation mirrors; cite its doc page in the doc comment. A MATLAB optional output (lsim's x, balreal's T) becomes an opt-in request; when requested but unavailable the operation returns an error, never a nil field with a nil error.
+Arguments, their order and their defaults follow the MATLAB Control System Toolbox function the operation mirrors; cite its doc page in the doc comment. A MATLAB optional output (lsim's x, balreal's T) becomes an opt-in request; when requested but unavailable the operation returns an error, never a nil field with a nil error. Index arguments are 0-based (Go), except where MATLAB's encoding needs 1-based: Connect's connection rows use sign and zero padding, so every Connect index (connections, inputs, outputs) is 1-based.
 
 **Zero-dimension models**:
 - A state-space model with states but no inputs or no outputs (m = 0 or p = 0, n > 0) is valid; its empty blocks may be nil or empty `*mat.Dense` and both validate (see **Autonomous model**).

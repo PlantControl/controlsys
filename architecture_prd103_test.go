@@ -83,7 +83,7 @@ func TestPRD103InterconnectionTopologyPublicDelayWorkflows(t *testing.T) {
 		-1, 0, 0, 0,
 		0, -1, 0, 0,
 	})
-	connected, err := Connect(M, Q, []int{0, 1}, []int{0, 1})
+	connected, err := connectGain("Connect", M, Q, []int{0, 1}, []int{0, 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,15 +135,11 @@ func TestPRD103DelayConversionPolicyPublicWorkflows(t *testing.T) {
 	discPlant.InputDelay = []float64{2.5, 0}
 	discPlant.OutputDelay = []float64{0, 3.5}
 	discPlant.Delay = mat.NewDense(2, 2, []float64{0, 2.5, 3.5, 6.0})
-	if _, err := Feedback(discPlant, controller, -1, WithApproximatedDelays()); !errors.Is(err, ErrFractionalDelay) {
-		t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
-	}
-	closed, err := Feedback(discPlant, controller, -1, WithThiranOrder(3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if closed.HasDelay() {
-		t.Fatalf("Feedback kept external delay: input=%v output=%v io=%v", closed.InputDelay, closed.OutputDelay, closed.Delay)
+
+	for _, opt := range []FeedbackOption{WithApproximatedDelays(), WithThiranOrder(3)} {
+		if _, err := Feedback(discPlant, controller, -1, opt); !errors.Is(err, ErrFractionalDelay) {
+			t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
+		}
 	}
 }
 

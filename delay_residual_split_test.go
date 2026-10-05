@@ -261,7 +261,7 @@ func TestPullDelaysToLFTResidualWithInternalDelay(t *testing.T) {
 
 func TestPullDelaysToLFTResidualContinuous(t *testing.T) {
 	sys := withDelays(t, residualPlant(t, 3, 2, 2, 0), []float64{0.2, 0}, nil, mat.NewDense(2, 2, []float64{0.7, 0, 0, 0.3}))
-	if _, _, res := DecomposeIODelay(mustTotalDelay(t, sys)); !delayMatrixHasNonzero(res) {
+	if _, _, res := decomposeIODelay(mustTotalDelay(t, sys)); !delayMatrixHasNonzero(res) {
 		t.Fatal("case must be non-decomposable")
 	}
 	lft, err := sys.PullDelaysToLFT()

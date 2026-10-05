@@ -43,7 +43,7 @@ func pathThiranOracle(t *testing.T, sys *System, dt float64, maxOrder int, omega
 	if err != nil {
 		t.Fatal(err)
 	}
-	input, output, residual := DecomposeIODelay(sys.Delay)
+	input, output, residual := decomposeIODelay(sys.Delay)
 	_, m, p := sys.Dims()
 	out := make([][][]complex128, len(omega))
 	for k, w := range omega {
@@ -217,7 +217,7 @@ func TestTustinThiranPathDelaysWithInternalFeedback(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		input, output, residual := DecomposeIODelay(sys.Delay)
+		input, output, residual := decomposeIODelay(sys.Delay)
 		for k, w := range omega {
 			z := cmplx.Exp(complex(0, w*dt))
 			for i := range tc.p {
