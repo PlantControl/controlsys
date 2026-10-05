@@ -914,7 +914,7 @@ func TestDiskMargin_Discrete(t *testing.T) {
 	}
 }
 
-// Margin on LFT system (exercises evalSISOFreqResponse path in sisoEval.at)
+// Margin on LFT system (exercises the LFT workspace path in sisoEval.at)
 func TestMargin_LFTSystem(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(1, 1, []float64{-1}),
@@ -2415,5 +2415,103 @@ func TestBandwidthFirstOrderOracle(t *testing.T) {
 	}
 	if want := math.Sqrt(math.Pow(10, 0.3) - 1); math.Abs(bw-want) > 1e-10 {
 		t.Errorf("bandwidth = %.12g, want %.12g", bw, want)
+	}
+}
+
+// sisoEval reuses one point evaluator across frequencies; each value must
+// stay bit-identical to a fresh FreqResponse, including at the integrator
+// pole ω = 0 and after it.
+func TestSISOEval_MatchesFreqResponse(t *testing.T) {
+	for _, internal := range []bool{false, true} {
+		l := benchPIDDelayLoop(t, internal)
+		l.D.Set(0, 0, 0.25)
+		e, err := newSISOEval(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, w := range []float64{0, 1e-9, 0.3, 0.7085, 1, 3.7, 20, 1e3, 0, 2.5e4, 0.3} {
+			got := e.at(w)
+			resp, err := l.FreqResponse([]float64{w})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := resp.At(0, 0, 0); got != want && !(cmplx.IsInf(got) && cmplx.IsInf(want)) {
+				t.Errorf("internal=%v ω=%g: at = %v, FreqResponse = %v", internal, w, got, want)
+			}
+		}
+		if e.err != nil {
+			t.Fatal(e.err)
+		}
+	}
+}
+
+// benchPIDDelayLoop is the PID loop 0.8 + 0.3/s + 0.2s/(0.05s+1) around
+// 1/(s+1)³ with an exact 0.5 s output delay, as an I/O delay or, as
+// process-lab builds it from a block diagram, an internal delay.
+func benchPIDDelayLoop(b testing.TB, internal bool) *System {
+	b.Helper()
+	pid, err := NewPID(0.8, 0.3, 0.2, 0.05, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	c, err := pid.System()
+	if err != nil {
+		b.Fatal(err)
+	}
+	res, err := (&TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{1, 3, 3, 1}}}).StateSpace()
+	if err != nil {
+		b.Fatal(err)
+	}
+	plant := res.Sys
+	if internal {
+		n, _, _ := plant.Dims()
+		c2 := mat.DenseCopyOf(plant.C)
+		plant.C = mat.NewDense(1, n, nil)
+		err = plant.SetInternalDelay([]float64{0.5}, mat.NewDense(n, 1, nil), c2,
+			mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, nil))
+	} else {
+		err = plant.SetOutputDelay([]float64{0.5})
+	}
+	if err != nil {
+		b.Fatal(err)
+	}
+	l, err := Series(c, plant)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return l
+}
+
+func BenchmarkDiskMargin_PIDExactDelay(b *testing.B) {
+	for _, internal := range []bool{false, true} {
+		l := benchPIDDelayLoop(b, internal)
+		name := "io"
+		if internal {
+			name = "internal"
+		}
+		b.Run(name+"/DiskMargin", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := DiskMargin(l); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(name+"/DiskMarginSkew", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := DiskMarginSkew(l, 1); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(name+"/Margin", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := Margin(l); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
