@@ -458,7 +458,7 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 		}
 	}
 
-	omega, err := autoBodeFreqs(sys, 1000)
+	omega, err := sys.DefaultFrequencyGrid(1000)
 	if err != nil {
 		return 0, err
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/controlsys"
 	"plantcontrol.org/v1/gonum/mat"
@@ -152,4 +153,21 @@ func ExampleSystem_Simulate() {
 	// y[2] = 3
 	// y[3] = 4
 	// y[4] = 5
+}
+
+func ExampleSystem_DefaultFrequencyGrid() {
+	// H(s) = 1/(s+1): grid spans one decade either side of the pole at 1 rad/s
+	sys, _ := controlsys.New(
+		mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0,
+	)
+
+	omega, _ := sys.DefaultFrequencyGrid(5)
+	bode, _ := sys.Bode(nil, 5)
+	fmt.Printf("%.4g\n", omega)
+	fmt.Println(slices.Equal(omega, bode.Omega))
+
+	// Output:
+	// [0.1 0.3162 1 3.162 10]
+	// true
 }
