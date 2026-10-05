@@ -227,12 +227,8 @@ func aliasCases() []aliasCase {
 			return Feedback(a, b, -1, WithApproximatedDelays())
 		})},
 		{"Feedback/internal", aliasPick(fxInternal, fxGain), aliasTwo(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
-		{"LFT/nil", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
-		{"LFT/nil/delayed", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
-		{"LFT/nil/internal", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return LFT(s, nil, 1, 1) })},
-		{"LFT/nil/full", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return LFT(s, nil, 2, 2) })},
-		{"LFT", aliasPick(fxPlant, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b, 1, 1) })},
-		{"LFT/delayed", aliasPick(fxDelayed, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b, 1, 1) })},
+		{"LFT", aliasPick(fxPlant, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b) })},
+		{"LFT/delayed", aliasPick(fxDelayed, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b) })},
 		{"Connect", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return Connect(s, mat.NewDense(2, 2, []float64{0, 0.5, 0, 0}), []int{0, 1}, []int{0, 1})
 		})},

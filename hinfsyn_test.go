@@ -267,8 +267,7 @@ func withoutD22(t *testing.T, P *System, nmeas, ncont int) *System {
 
 func closedLoop(t *testing.T, P, K *System, nmeas, ncont int) *System {
 	t.Helper()
-	_, m, p := P.Dims()
-	cl, err := LFT(P, K, m-ncont, p-nmeas)
+	cl, err := LFT(P, K, LFTFeedback{Nu: ncont, Ny: nmeas})
 	if err != nil {
 		t.Fatal(err)
 	}

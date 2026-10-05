@@ -145,7 +145,7 @@ func TestPRD95LFTDelayWorkflowPreservesExternalDelayAndMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := LFT(M, delta, 1, 1)
+	result, err := LFT(M, delta)
 	if err != nil {
 		t.Fatal(err)
 	}

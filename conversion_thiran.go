@@ -168,7 +168,7 @@ func discretizeInternalThiran(sys *System, dt float64, opts C2DOptions) (*System
 	if err != nil {
 		return nil, err
 	}
-	out, err := LFT(rational, bank, m, p)
+	out, err := lftCloseExternal(rational, bank, m, p)
 	if err != nil {
 		return nil, err
 	}

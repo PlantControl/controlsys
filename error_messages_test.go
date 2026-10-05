@@ -34,7 +34,7 @@ func TestGroup3ErrorsWrapSentinelWithOpPrefix(t *testing.T) {
 	}{
 		{"Norm type", "Norm: ", ErrInvalidArgument, func() error { _, err := Norm(siso, 3); return err }},
 		{"Loopsens dims", "Loopsens: ", ErrDimensionMismatch, func() error { _, err := Loopsens(siso, mimo); return err }},
-		{"LFT negative", "LFT: ", ErrInvalidArgument, func() error { _, err := LFT(siso, nil, -1, 0); return err }},
+		{"LFT negative", "LFT: ", ErrInvalidArgument, func() error { _, err := LFT(siso, siso, LFTFeedback{Nu: -1}); return err }},
 		{"Linearize nil x0", "Linearize: ", ErrInvalidArgument, func() error { _, err := Linearize(model, nil, mat.NewVecDense(1, nil)); return err }},
 		{"SelectByIndex range", "SelectByIndex: ", ErrInvalidArgument, func() error { _, err := siso.SelectByIndex([]int{1}, []int{0}); return err }},
 		{"SelectByName missing", "SelectByName: ", ErrSignalNotFound, func() error { _, err := named.SelectByName([]string{"v"}, []string{"y"}); return err }},

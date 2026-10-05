@@ -199,7 +199,7 @@ func TestDirectFeedthroughLoopBehaviorAcrossPublicInterconnections(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LFT(lftPlant, controller, 1, 1); !errors.Is(err, ErrAlgebraicLoop) {
+		if _, err := LFT(lftPlant, controller); !errors.Is(err, ErrAlgebraicLoop) {
 			t.Fatalf("LFT err = %v, want ErrAlgebraicLoop", err)
 		}
 	})
@@ -225,7 +225,7 @@ func TestDirectFeedthroughLoopBehaviorAcrossPublicInterconnections(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		lftClosed, err := LFT(lftPlant, controller, 1, 1)
+		lftClosed, err := LFT(lftPlant, controller)
 		if err != nil {
 			t.Fatal(err)
 		}
