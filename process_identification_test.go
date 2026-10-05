@@ -310,3 +310,44 @@ func TestProcessResidualLagOneIsPearsonCorrelation(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessFitDelayedSteadyStateStartWithNonzeroInput(t *testing.T) {
+	const dt, offset = .5, 3.
+	for _, tc := range []struct {
+		s ProcessStructure
+		p ProcessParameters
+	}{
+		{ProcessStructure{Poles: 1, Delay: true}, ProcessParameters{Gain: 2, TimeConstants: []float64{5}, Delay: 1.3}},
+		{ProcessStructure{Poles: 2, Delay: true}, ProcessParameters{Gain: -1.4, TimeConstants: []float64{4, 1.5}, Delay: 2.2}},
+	} {
+		u := processOracleInput(240)
+		for i := range u {
+			u[i] += 2
+		}
+		u0 := u[0]
+		shifted := make([]float64, len(u))
+		for i, v := range u {
+			shifted[i] = v - u0
+		}
+		y := processOracle(tc.s, tc.p, shifted, dt)
+		for i := range y {
+			y[i] += tc.p.Gain*u0 + offset
+		}
+		data := ProcessFitData{Input: u, Output: y, SampleTime: dt, TrainingSamples: 180}
+		options := ProcessFitOptions{Structure: tc.s, EstimateOffset: true, EstimateInitialState: true}
+		exact, err := EvaluateProcess(context.Background(), data, options, tc.p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exact.TrainingNRMSE > 1e-9 || exact.ValidationNRMSE > 1e-9 || math.Abs(exact.Offset-offset) > 1e-8 {
+			t.Fatalf("poles=%d true parameters: training NRMSE %g validation NRMSE %g offset %g", tc.s.Poles, exact.TrainingNRMSE, exact.ValidationNRMSE, exact.Offset)
+		}
+		fit, err := FitProcess(context.Background(), data, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(fit.Parameters.Gain-tc.p.Gain) > 1e-4*math.Abs(tc.p.Gain) || math.Abs(fit.Parameters.Delay-tc.p.Delay) > 1e-4 || fit.TrainingNRMSE > 1e-5 {
+			t.Fatalf("poles=%d fit: %+v training NRMSE %g", tc.s.Poles, fit.Parameters, fit.TrainingNRMSE)
+		}
+	}
+}

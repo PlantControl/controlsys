@@ -25,7 +25,7 @@ func ERA(markov []*mat.Dense, order int, dt float64) (*ERAResult, error) {
 		return nil, err
 	}
 
-	r := len(markov) / 2
+	r := (len(markov) - 1) / 2
 
 	h0Rows, h0Cols := r*p, r*m
 	h0Data := make([]float64, h0Rows*h0Cols)
@@ -41,13 +41,11 @@ func ERA(markov []*mat.Dense, order int, dt float64) (*ERAResult, error) {
 				dstOff := (i*p+bi)*h0Cols + j*m
 				copy(h0Data[dstOff:dstOff+m], mk0.Data[srcOff:srcOff+m])
 			}
-			if idx1 < len(markov) {
-				mk1 := markov[idx1].RawMatrix()
-				for bi := range p {
-					srcOff := bi * mk1.Stride
-					dstOff := (i*p+bi)*h0Cols + j*m
-					copy(h1Data[dstOff:dstOff+m], mk1.Data[srcOff:srcOff+m])
-				}
+			mk1 := markov[idx1].RawMatrix()
+			for bi := range p {
+				srcOff := bi * mk1.Stride
+				dstOff := (i*p+bi)*h0Cols + j*m
+				copy(h1Data[dstOff:dstOff+m], mk1.Data[srcOff:srcOff+m])
 			}
 		}
 	}
