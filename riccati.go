@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
@@ -9,7 +10,16 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// RiccatiWorkspace is reusable scratch storage for Care and Dare, sized by
+// NewRiccatiWorkspace for a state dimension n and m columns of B. It serves
+// any problem with at most n states and m inputs; a smaller one returns
+// ErrDimensionMismatch. Kalman, Kalmd and Lqe solve the dual problem, so
+// their workspace needs m = number of measured outputs.
+//
+// A workspace is not safe for concurrent use, and results computed with it
+// share its storage until the next call that reuses it.
 type RiccatiWorkspace struct {
+	n, m        int
 	rChol       []float64
 	aWork       []float64
 	qWork       []float64
@@ -39,9 +49,13 @@ type RiccatiWorkspace struct {
 	iwork       []int
 }
 
+// NewRiccatiWorkspace returns a workspace for problems with up to n states
+// and m inputs.
 func NewRiccatiWorkspace(n, m int) *RiccatiWorkspace {
 	nn := 2 * n
 	return &RiccatiWorkspace{
+		n:           n,
+		m:           m,
 		rChol:       make([]float64, m*m),
 		aWork:       make([]float64, n*n),
 		qWork:       make([]float64, n*n),
@@ -72,6 +86,7 @@ func NewRiccatiWorkspace(n, m int) *RiccatiWorkspace {
 	}
 }
 
+// RiccatiOpts holds the optional arguments of Care and Dare; nil means none.
 type RiccatiOpts struct {
 	// S is the optional cross-term matrix. It is read during the call.
 	S *mat.Dense
@@ -80,16 +95,57 @@ type RiccatiOpts struct {
 	// It is read during the call.
 	E *mat.Dense
 	// Workspace supplies reusable scratch storage. Results may share its storage
-	// until the next call that reuses the same workspace.
+	// until the next call that reuses the same workspace, and it must not be
+	// shared across goroutines.
 	Workspace *RiccatiWorkspace
 }
 
+// RiccatiResult is the stabilizing solution of Care or Dare.
 type RiccatiResult struct {
-	// X, K, and Eig are caller-owned unless a workspace was supplied.
-	X    *mat.Dense
-	K    *mat.Dense
-	Eig  []complex128
+	// X is the stabilizing solution, K the state-feedback gain and Eig the
+	// closed-loop eigenvalues. They are caller-owned unless a workspace was
+	// supplied.
+	X   *mat.Dense
+	K   *mat.Dense
+	Eig []complex128
+	// Rcnd is the reciprocal 1-norm condition estimate of U11, where
+	// [U11; U21] spans the stable invariant subspace and X = U21·U11⁻¹. A
+	// tiny Rcnd means X may be inaccurate.
 	Rcnd float64
+}
+
+// riccatiArgs rejects nil or non-finite Riccati data before it reaches
+// LAPACK.
+func riccatiArgs(op string, A, B, Q, R *mat.Dense, opts *RiccatiOpts) error {
+	for _, a := range []struct {
+		name string
+		m    *mat.Dense
+	}{{"A", A}, {"B", B}, {"Q", Q}, {"R", R}} {
+		if err := requireFiniteDense(op, a.name, a.m); err != nil {
+			return err
+		}
+	}
+	if opts == nil {
+		return nil
+	}
+	if opts.S != nil {
+		if err := requireFiniteDense(op, "S", opts.S); err != nil {
+			return err
+		}
+	}
+	if opts.E != nil {
+		if err := requireFiniteDense(op, "E", opts.E); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ws *RiccatiWorkspace) fits(n, m int) error {
+	if ws.n < n || ws.m < m {
+		return fmt.Errorf("workspace sized for n=%d m=%d, need n=%d m=%d: %w", ws.n, ws.m, n, m, ErrDimensionMismatch)
+	}
+	return nil
 }
 
 // Care solves the continuous algebraic Riccati equation:
@@ -110,13 +166,28 @@ type RiccatiResult struct {
 // from the stable deflating subspace of the extended pencil, and Eig holds
 // the generalized eigenvalues of (A-BK, E). X is the generalized solution;
 // E'XE solves the Care of the explicit model (E⁻¹A, E⁻¹B). A singular E
-// returns ErrDescriptorSingular.
+// returns ErrDescriptorSingular. Nil or NaN/Inf arguments return
+// ErrInvalidArgument.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
+		return nil, err
+	}
+	res, err := care(A, B, Q, R, opts)
+	if err != nil {
+		return nil, fmt.Errorf("Care: %w", err)
+	}
+	return res, nil
+}
+
+func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	problem, err := newRiccatiProblem(A, B, Q, R, opts)
 	if err != nil {
 		return nil, err
 	}
 	n, m := problem.n, problem.m
+	if err := problem.ws.fits(n, m); err != nil {
+		return nil, err
+	}
 	S, ws := problem.S, problem.ws
 
 	// Cholesky factor R
@@ -221,33 +292,10 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, ErrNoStabilizing
 	}
 
-	// Extract U11 = vs[0:n, 0:n], U21 = vs[n:2n, 0:n]
-	u11 := ws.u11[:n*n]
-	u21 := ws.u21[:n*n]
-	copyStrided(u11, n, vs, nn, n, n)
-	copyBlock(u21, n, 0, 0, vs, nn, n, 0, n, n)
-
-	// X = U21 * U11⁻¹; since X is symmetric: X = (U11')⁻¹ * U21'
-	// Solve via DGETRS(Trans) instead of explicit inverse
-	ipiv := ws.ipiv[:n]
-	if !impl.Dgetrf(n, n, u11, n, ipiv) {
-		return nil, ErrNoStabilizing
+	X, xData, rcnd, err := problem.stabilizingSolution(vs)
+	if err != nil {
+		return nil, err
 	}
-
-	anorm := impl.Dlange(lapack.MaxColumnSum, n, n, u11, n, work[:n])
-	iwork := ws.iwork[:n]
-	rcnd := impl.Dgecon(lapack.MaxColumnSum, n, u11, n, anorm, work[:4*n], iwork)
-
-	xData := ws.xData[:n*n]
-	for i := range n {
-		for j := range n {
-			xData[i*n+j] = u21[j*n+i]
-		}
-	}
-	impl.Dgetrs(blas.Trans, n, n, u11, n, ipiv, xData, n)
-
-	symmetrize(xData, n, n)
-	X := mat.NewDense(n, n, xData)
 
 	// Closed-loop eigenvalues
 	eig := ws.eig[:n]
@@ -294,13 +342,28 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 //
 // with the same K formula, and Eig holds the generalized eigenvalues of
 // (A-BK, E). E'XE solves the Dare of the explicit model (E⁻¹A, E⁻¹B). A
-// singular E returns ErrDescriptorSingular.
+// singular E returns ErrDescriptorSingular. Nil or NaN/Inf arguments return
+// ErrInvalidArgument.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
+		return nil, err
+	}
+	res, err := dare(A, B, Q, R, opts)
+	if err != nil {
+		return nil, fmt.Errorf("Dare: %w", err)
+	}
+	return res, nil
+}
+
+func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	problem, err := newRiccatiProblem(A, B, Q, R, opts)
 	if err != nil {
 		return nil, err
 	}
 	n, m := problem.n, problem.m
+	if err := problem.ws.fits(n, m); err != nil {
+		return nil, err
+	}
 	S, ws := problem.S, problem.ws
 
 	// Cholesky factor R
