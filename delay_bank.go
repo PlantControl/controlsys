@@ -107,7 +107,7 @@ func buildSampleDelayChannel(samples, dt float64, thiranOrder int) (*System, err
 	if isIntegerSampleDelay(samples) {
 		return integerDelaySS(int(math.Round(samples)), dt)
 	}
-	return ThiranDelay(samples*dt, thiranOrder, dt)
+	return thiranDelay(samples*dt, thiranOrder, dt)
 }
 
 func buildPadeDelayChannel(tau float64, order int) (*System, error) {

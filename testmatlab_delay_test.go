@@ -143,7 +143,7 @@ func TestPade_PythonControl_CoeffTable(t *testing.T) {
 // --- 2. Thiran Approximation Tests ---
 
 func TestThiran_MATLAB_Fractional(t *testing.T) {
-	sys, err := ThiranDelay(2.4, 2, 1.0)
+	sys, err := thiranDelay(2.4, 2, 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestThiran_MATLAB_Fractional(t *testing.T) {
 }
 
 func TestThiran_MATLAB_Integer(t *testing.T) {
-	sys, err := ThiranDelay(2.5, 5, 0.5)
+	sys, err := thiranDelay(2.5, 5, 0.5)
 	if err != nil {
 		t.Fatal(err)
 	}

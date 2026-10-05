@@ -4,13 +4,14 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 )
 
 func TestThiranDelayOrder1(t *testing.T) {
 	dt := 0.1
 	tau := 0.15 // 1.5 samples
-	sys, err := ThiranDelay(tau, 1, dt)
+	sys, err := thiranDelay(tau, 1, dt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +27,7 @@ func TestThiranDelayOrder1(t *testing.T) {
 func TestThiranDelayAllpass(t *testing.T) {
 	dt := 1.0
 	D := 3.4 // 3.4 samples
-	sys, err := ThiranDelay(D*dt, 3, dt)
+	sys, err := thiranDelay(D*dt, 3, dt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +48,7 @@ func TestThiranDelayGroupDelay(t *testing.T) {
 	dt := 1.0
 	D := 2.7
 	order := 3
-	sys, err := ThiranDelay(D*dt, order, dt)
+	sys, err := thiranDelay(D*dt, order, dt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +73,7 @@ func TestThiranDelayGroupDelay(t *testing.T) {
 func TestThiranDelayIntegerFallback(t *testing.T) {
 	dt := 0.1
 	tau := 0.5 // exactly 5 samples
-	sys, err := ThiranDelay(tau, 1, dt)
+	sys, err := thiranDelay(tau, 1, dt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,20 +93,20 @@ func TestThiranDelayIntegerFallback(t *testing.T) {
 }
 
 func TestThiranDelayNegative(t *testing.T) {
-	_, err := ThiranDelay(-1, 1, 0.1)
+	_, err := thiranDelay(-1, 1, 0.1)
 	if !errors.Is(err, ErrNegativeDelay) {
 		t.Errorf("expected ErrNegativeDelay, got %v", err)
 	}
 }
 
 func TestThiranDelayInvalidOrder(t *testing.T) {
-	_, err := ThiranDelay(0.5, 0, 0.1)
-	if err == nil {
-		t.Error("order 0 should error")
+	_, err := thiranDelay(0.5, 0, 0.1)
+	if !errors.Is(err, ErrInvalidOrder) {
+		t.Errorf("order 0: err = %v, want ErrInvalidOrder", err)
 	}
-	_, err = ThiranDelay(0.5, 11, 0.1)
-	if err == nil {
-		t.Error("order 11 should error")
+	_, err = thiranDelay(0.5, 11, 0.1)
+	if !errors.Is(err, ErrInvalidOrder) {
+		t.Errorf("order 11: err = %v, want ErrInvalidOrder", err)
 	}
 }
 
@@ -113,7 +114,7 @@ func TestThiranDelayStability(t *testing.T) {
 	dt := 1.0
 	for _, D := range []float64{0.6, 1.5, 2.7, 3.7, 5.1} {
 		order := min(max(int(math.Floor(D)), 1), 10)
-		sys, err := ThiranDelay(D*dt, order, dt)
+		sys, err := thiranDelay(D*dt, order, dt)
 		if err != nil {
 			t.Fatalf("D=%v order=%d: %v", D, order, err)
 		}
@@ -132,7 +133,7 @@ func TestThiranIntegerDelayExact(t *testing.T) {
 	for _, nSamples := range []int{1, 2, 3, 5} {
 		for _, dt := range []float64{1.0, 0.5, 1.1} {
 			tau := float64(nSamples) * dt
-			sys, err := ThiranDelay(tau, 1, dt)
+			sys, err := thiranDelay(tau, 1, dt)
 			if err != nil {
 				t.Fatalf("D=%d dt=%v: %v", nSamples, dt, err)
 			}
@@ -156,7 +157,7 @@ func TestThiranIntegerDelayExact(t *testing.T) {
 func TestThiranPiDelay(t *testing.T) {
 	D := math.Pi
 	dt := 1.0
-	sys, err := ThiranDelay(D*dt, 3, dt)
+	sys, err := thiranDelay(D*dt, 3, dt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +233,7 @@ func TestThiranDelayRejectsBelowStabilityBound(t *testing.T) {
 		samples float64
 		order   int
 	}{{0.01, 3}, {2 - 1e-6, 3}, {0.9, 2}, {1.5, 3}} {
-		_, err := ThiranDelay(tc.samples*0.1, tc.order, 0.1)
+		_, err := thiranDelay(tc.samples*0.1, tc.order, 0.1)
 		if !errors.Is(err, ErrFractionalDelay) {
 			t.Errorf("D=%g N=%d: err = %v, want ErrFractionalDelay", tc.samples, tc.order, err)
 		}
@@ -252,7 +253,7 @@ func TestThiranDelayShortStableDelays(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dt := 0.1
-			sys, err := ThiranDelay(tc.tau, tc.order, dt)
+			sys, err := thiranDelay(tc.tau, tc.order, dt)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -268,7 +269,7 @@ func TestThiranDelayShortStableDelays(t *testing.T) {
 			assertThiranStableAllpass(t, sys, tc.tau/dt)
 		})
 	}
-	sys, err := ThiranDelay(0.02, 1, 0.1)
+	sys, err := thiranDelay(0.02, 1, 0.1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +285,7 @@ func TestThiranDelayShortStableDelays(t *testing.T) {
 func TestThiranDelayNearStabilityBound(t *testing.T) {
 	for _, order := range []int{1, 2, 3, 5} {
 		samples := float64(order-1) + 1e-3
-		sys, err := ThiranDelay(samples*0.1, order, 0.1)
+		sys, err := thiranDelay(samples*0.1, order, 0.1)
 		if err != nil {
 			t.Fatalf("N=%d D=%g: %v", order, samples, err)
 		}
@@ -294,7 +295,7 @@ func TestThiranDelayNearStabilityBound(t *testing.T) {
 
 func TestThiranDelayIntegerIgnoresOrderBound(t *testing.T) {
 	for _, tc := range []struct{ samples, order int }{{0, 1}, {0, 3}, {2, 3}, {1, 4}} {
-		sys, err := ThiranDelay(float64(tc.samples)*0.1, tc.order, 0.1)
+		sys, err := thiranDelay(float64(tc.samples)*0.1, tc.order, 0.1)
 		if err != nil {
 			t.Fatalf("D=%d N=%d: %v", tc.samples, tc.order, err)
 		}
@@ -342,12 +343,72 @@ func assertThiranStableAllpass(t *testing.T, sys *System, samples float64) {
 }
 
 func TestThiranDelayInvalidDt(t *testing.T) {
-	_, err := ThiranDelay(1.0, 1, 0)
+	_, err := thiranDelay(1.0, 1, 0)
 	if !errors.Is(err, ErrInvalidSampleTime) {
 		t.Errorf("expected ErrInvalidSampleTime, got %v", err)
 	}
-	_, err = ThiranDelay(1.0, 1, -1)
+	_, err = thiranDelay(1.0, 1, -1)
 	if !errors.Is(err, ErrInvalidSampleTime) {
 		t.Errorf("expected ErrInvalidSampleTime, got %v", err)
+	}
+}
+
+func TestThiranDelayAutomaticOrder(t *testing.T) {
+	for _, tc := range []struct {
+		tau, dt float64
+		states  int
+	}{
+		{0.24, 0.1, 3},
+		{0.05, 0.1, 1},
+		{1.37, 0.25, 6},
+		{0.3, 0.1, 3},
+		{0, 0.1, 0},
+	} {
+		sys, err := ThiranDelay(tc.tau, tc.dt)
+		if err != nil {
+			t.Fatalf("tau=%g dt=%g: %v", tc.tau, tc.dt, err)
+		}
+		n, m, p := sys.Dims()
+		if n != tc.states || m != 1 || p != 1 || sys.Dt != tc.dt {
+			t.Errorf("tau=%g: dims (%d,%d,%d) Dt=%g, want (%d,1,1) Dt=%g", tc.tau, n, m, p, sys.Dt, tc.states, tc.dt)
+		}
+		D := tc.tau / tc.dt
+		// Allpass with phase delay D at low frequency (maximally flat group delay).
+		for _, w := range []float64{1e-4, 0.3, 1.2} {
+			h, err := sys.EvalFr(cmplx.Exp(complex(0, w)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a := cmplx.Abs(h[0][0]); math.Abs(a-1) > 1e-9 {
+				t.Errorf("tau=%g w=%g |H| = %g, want 1", tc.tau, w, a)
+			}
+			if w == 1e-4 {
+				if pd := -cmplx.Phase(h[0][0]) / w; math.Abs(pd-D) > 1e-6 {
+					t.Errorf("tau=%g phase delay %g, want %g", tc.tau, pd, D)
+				}
+			}
+		}
+		if stable, err := sys.IsStable(); err != nil || !stable {
+			t.Errorf("tau=%g: stable=%v err=%v", tc.tau, stable, err)
+		}
+	}
+}
+
+func TestThiranDelayRejectsInvalidArgs(t *testing.T) {
+	for _, tc := range []struct {
+		tau, dt float64
+		want    error
+	}{
+		{-0.1, 0.1, ErrNegativeDelay},
+		{math.NaN(), 0.1, ErrNegativeDelay},
+		{math.Inf(1), 0.1, ErrNegativeDelay},
+		{0.1, 0, ErrInvalidSampleTime},
+		{0.1, math.NaN(), ErrInvalidSampleTime},
+		{0.1, math.Inf(1), ErrInvalidSampleTime},
+	} {
+		_, err := ThiranDelay(tc.tau, tc.dt)
+		if !errors.Is(err, tc.want) || !strings.HasPrefix(err.Error(), "ThiranDelay: ") {
+			t.Errorf("tau=%g dt=%g: err = %v, want ThiranDelay: ... %v", tc.tau, tc.dt, err, tc.want)
+		}
 	}
 }
