@@ -10,7 +10,7 @@ import (
 
 func TestGeneralizedModelCurrentValueAndAnalysisPoint(t *testing.T) {
 	k, _ := newBoundedReal("K", 2, 0, 10)
-	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
+	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	gm, err := NewGeneralizedModel("loop", controller)
 	if err != nil {
 		t.Fatalf("NewGeneralizedModel: %v", err)
@@ -51,7 +51,7 @@ func TestGeneralizedClosedLoopAnalysisHelpers(t *testing.T) {
 		t.Fatal(err)
 	}
 	k, _ := newBoundedReal("K", 1.5, 0.1, 5)
-	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
+	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	loop, err := NewGeneralizedClosedLoop("cl", plant, controller, "u")
 	if err != nil {
 		t.Fatalf("NewGeneralizedClosedLoop: %v", err)

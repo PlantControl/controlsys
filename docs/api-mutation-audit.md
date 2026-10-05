@@ -303,25 +303,36 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `(*TunableReal).SetValue` | `mutates` | Mutates receiver after bounds check. |
 | `(*TunableReal).Sample` | `copy-out`, `returns-mutable` | Returns sampled copy. |
 | `(*TunableReal).RandomSample` | `copy-out`, `returns-mutable` | Returns sampled copy. |
-| `NewTunableGain` | `copy-in`, `returns-mutable` | Copies tunable matrix structure. |
+| `NewTunableGain` | `returns-mutable` | MATLAB `tunableGain(name,Ny,Nu)`; creates zero, free entries. |
+| `NewTunableGainFrom` | `copy-in`, `returns-mutable` | MATLAB `tunableGain(name,G)`; copies values from `G`. |
 | `(*TunableGain).CurrentSystem` | `returns-mutable` | Builds gain model from current values. |
 | `(*TunableGain).Sample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
 | `(*TunableGain).RandomSample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
 | `(*TunableGain).FreeParameters` | `alias-risk` | Returns pointers to internal free parameters. |
 | `(*TunableGain).SampleBlock` | `copy-out`, `returns-mutable` | Interface wrapper around `Sample`. |
-| `NewTunablePID` | `copy-in`, `returns-mutable` | Copies parameter values. |
+| `NewTunablePID` | `returns-mutable` | MATLAB `tunablePID(name,type,Ts)`; creates the family's parameters. |
+| `NewTunablePIDFrom` | `copy-in`, `returns-mutable` | MATLAB `tunablePID(name,sys)`; copies values from the PID. |
 | `(*TunablePID).CurrentSystem` | `returns-mutable` | Builds controller model. |
 | `(*TunablePID).Sample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
 | `(*TunablePID).RandomSample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
 | `(*TunablePID).FreeParameters` | `alias-risk` | Returns pointers to internal free parameters. |
 | `(*TunablePID).SampleBlock` | `copy-out`, `returns-mutable` | Interface wrapper around `Sample`. |
-| `NewTunableTF` | `copy-in`, `returns-mutable` | Copies tunable numerator structure. |
+| `NewTunablePID2` | `returns-mutable` | MATLAB `tunablePID2(name,type,Ts)`. |
+| `NewTunablePID2From` | `copy-in`, `returns-mutable` | MATLAB `tunablePID2(name,sys)`; copies values from the PID2. |
+| `(*TunablePID2).CurrentSystem` | `returns-mutable` | Builds 2-DOF controller model. |
+| `(*TunablePID2).Sample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
+| `(*TunablePID2).RandomSample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
+| `(*TunablePID2).FreeParameters` | `alias-risk` | Returns pointers to internal free parameters. |
+| `(*TunablePID2).SampleBlock` | `copy-out`, `returns-mutable` | Interface wrapper around `Sample`. |
+| `NewTunableTF` | `returns-mutable` | MATLAB `tunableTF(name,Nz,Np,Ts)`; SISO. |
+| `NewTunableTFFrom` | `copy-in`, `returns-mutable` | MATLAB `tunableTF(name,sys)`; copies normalized SISO coefficients. |
 | `(*TunableTF).CurrentSystem` | `returns-mutable` | Builds transfer-function current model. |
 | `(*TunableTF).Sample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
 | `(*TunableTF).RandomSample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
 | `(*TunableTF).FreeParameters` | `alias-risk` | Returns pointers to internal free parameters. |
 | `(*TunableTF).SampleBlock` | `copy-out`, `returns-mutable` | Interface wrapper around `Sample`. |
-| `NewTunableSS` | `copy-in`, `returns-mutable` | Copies tunable state-space matrices. |
+| `NewTunableSS` | `returns-mutable` | MATLAB `tunableSS(name,Nx,Ny,Nu,Ts,Astruct)`. |
+| `NewTunableSSFrom` | `copy-in`, `returns-mutable` | MATLAB `tunableSS(name,sys,Astruct)`; copies a structured realization. |
 | `(*TunableSS).CurrentSystem` | `returns-mutable` | Builds current state-space model. |
 | `(*TunableSS).Sample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |
 | `(*TunableSS).RandomSample` | `copy-out`, `returns-mutable` | Returns sampled block copy. |

@@ -71,15 +71,11 @@ func TestInvertSmallSingularIsSingularTransform(t *testing.T) {
 
 func TestGeneralizedClosedLoopErrorsUseCallerOp(t *testing.T) {
 	plant := makeSISO(-1, 1, 1, 0)
-	k, err := NewTunableReal("K", 1)
+	gain, err := NewTunableGainFrom("K", mat.NewDense(1, 1, []float64{1}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.SetBounds(0, 2); err != nil {
-		t.Fatal(err)
-	}
-	gain, err := NewTunableGain("K", [][]*TunableReal{{k}}, 0)
-	if err != nil {
+	if err := gain.Gain[0][0].SetBounds(0, 2); err != nil {
 		t.Fatal(err)
 	}
 	loop, err := NewGeneralizedClosedLoop("cl", plant, gain, "y")
