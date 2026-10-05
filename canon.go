@@ -25,6 +25,9 @@ type CanonResult struct {
 }
 
 func Canon(sys *System, form CanonForm) (*CanonResult, error) {
+	if err := requireFiniteSystem("Canon", sys); err != nil {
+		return nil, err
+	}
 	policy := newRealizationTransformPolicy(sys)
 	if err := policy.requireStandard("Canon"); err != nil {
 		return nil, err
@@ -202,8 +205,9 @@ func canonModalSchur(sys *System, policy realizationTransformPolicy) (*CanonResu
 		return nil, fmt.Errorf("controlsys: Schur decomposition failed: %w", ErrSchurFailed)
 	}
 
-	// Sort Schur blocks by eigenvalue magnitude (ascending)
-	schurSortByMagnitude(t, z, n)
+	if err := schurSortByMagnitude(t, z, n); err != nil {
+		return nil, err
+	}
 
 	bRaw := sys.B.RawMatrix()
 	cRaw := sys.C.RawMatrix()
@@ -236,7 +240,7 @@ func canonModalSchur(sys *System, policy realizationTransformPolicy) (*CanonResu
 }
 
 // schurSortByMagnitude reorders Schur blocks by eigenvalue magnitude (ascending).
-func schurSortByMagnitude(t, z []float64, n int) {
+func schurSortByMagnitude(t, z []float64, n int) error {
 	trexcWork := make([]float64, n)
 	nPlaced := 0
 	for nPlaced < n {
@@ -261,7 +265,7 @@ func schurSortByMagnitude(t, z []float64, n int) {
 		if bestIdx != nPlaced {
 			_, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, bestIdx, nPlaced, trexcWork)
 			if !ok {
-				break
+				return fmt.Errorf("Canon: Schur block reordering failed: %w", ErrSchurFailed)
 			}
 		}
 
@@ -271,6 +275,7 @@ func schurSortByMagnitude(t, z []float64, n int) {
 			nPlaced++
 		}
 	}
+	return nil
 }
 
 func canonCompanion(sys *System) (*CanonResult, error) {
@@ -286,7 +291,10 @@ func canonCompanion(sys *System) (*CanonResult, error) {
 	// Observable companion form via similarity: T = Oc^{-1} * Ocomp
 	// where Oc = obsv(A,C) and Ocomp = obsv(Ac, Cc) with Cc = e1'
 
-	charPoly := characteristicPoly(sys.A, n)
+	charPoly, err := characteristicPoly(sys.A, n)
+	if err != nil {
+		return nil, err
+	}
 	lead := charPoly[n]
 	for i := range charPoly {
 		charPoly[i] /= lead
@@ -351,17 +359,14 @@ func canonCompanion(sys *System) (*CanonResult, error) {
 	return &CanonResult{Sys: newSys, T: T}, nil
 }
 
-func characteristicPoly(A *mat.Dense, n int) []float64 {
+func characteristicPoly(A *mat.Dense, n int) ([]float64, error) {
 	if n == 0 {
-		return []float64{1}
+		return []float64{1}, nil
 	}
 
 	var eig mat.Eigen
-	ok := eig.Factorize(A, mat.EigenNone)
-	if !ok {
-		coeffs := make([]float64, n+1)
-		coeffs[n] = 1
-		return coeffs
+	if !eig.Factorize(A, mat.EigenNone) {
+		return nil, fmt.Errorf("Canon: eigenvalues of A did not converge: %w", ErrSchurFailed)
 	}
 	vals := eig.Values(nil)
 
@@ -397,7 +402,7 @@ func characteristicPoly(A *mat.Dense, n int) []float64 {
 	for i := range result {
 		result[i] = coeffs[n-i]
 	}
-	return result
+	return result, nil
 }
 
 func buildObsvMatrix(A, C *mat.Dense, n, p int) *mat.Dense {

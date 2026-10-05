@@ -1544,3 +1544,33 @@ func TestLqi_DescriptorMatchesExplicitTwin(t *testing.T) {
 		assertEigSetNear(t, fmt.Sprintf("dt=%v Eig", dt), got.Eig, want.Eig, 1e-9)
 	}
 }
+
+func TestPlaceAckerLqrdRejectInvalidArgs(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0, 1, -2, -3})
+	B := mat.NewDense(2, 1, []float64{0, 1})
+	nanA := mat.NewDense(2, 2, []float64{0, 1, math.NaN(), -3})
+	Q := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
+	R := mat.NewDense(1, 1, []float64{1})
+	poles := []complex128{-1, -2}
+	for name, call := range map[string]func() error{
+		"Place nil A":    func() error { _, err := Place(nil, B, poles); return err },
+		"Place nil B":    func() error { _, err := Place(A, nil, poles); return err },
+		"Place NaN A":    func() error { _, err := Place(nanA, B, poles); return err },
+		"Place NaN pole": func() error { _, err := Place(A, B, []complex128{complex(math.NaN(), 0), -1}); return err },
+		"Place Inf pole": func() error {
+			_, err := Place(A, B, []complex128{complex(-1, math.Inf(1)), complex(-1, math.Inf(-1))})
+			return err
+		},
+		"Acker nil A": func() error { _, err := Acker(nil, B, poles); return err },
+		"Acker nil B": func() error { _, err := Acker(A, nil, poles); return err },
+		"Acker -Inf":  func() error { _, err := Acker(A, B, []complex128{complex(math.Inf(-1), 0), -1}); return err },
+		"Lqrd nil Q":  func() error { _, err := Lqrd(A, B, nil, R, 0.1, nil); return err },
+		"Lqrd nil R":  func() error { _, err := Lqrd(A, B, Q, nil, 0.1, nil); return err },
+		"Lqrd nil A":  func() error { _, err := Lqrd(nil, B, Q, R, 0.1, nil); return err },
+		"Lqrd NaN A":  func() error { _, err := Lqrd(nanA, B, Q, R, 0.1, nil); return err },
+	} {
+		if err := call(); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}

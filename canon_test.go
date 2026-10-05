@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"sort"
@@ -267,4 +268,19 @@ func TestCanonModal_BadlyScaledPairOrderedByMagnitude(t *testing.T) {
 		t.Fatalf("pair block off-diagonal product = %g, want -1 (imag ±1)", prod)
 	}
 	assertPolesMatch(t, "modal", res.Sys, []complex128{complex(-1e8, 1), complex(-1e8, -1), -2e8}, 1e-6)
+}
+
+func TestCanonRejectsInvalidSystem(t *testing.T) {
+	if _, err := Canon(nil, CanonModal); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil: err = %v, want ErrInvalidArgument", err)
+	}
+	sys, err := New(mat.NewDense(2, 2, []float64{-1, math.Inf(1), 0, -3}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, form := range []CanonForm{CanonModal, CanonCompanion} {
+		if _, err := Canon(sys, form); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s Inf: err = %v, want ErrInvalidArgument", form, err)
+		}
+	}
 }

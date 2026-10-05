@@ -7,6 +7,18 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// requireSystems rejects nil models. Interconnections skip Validate because
+// they accept fractional discrete delays, which the Thiran feedback path
+// approximates and Validate rejects.
+func requireSystems(op string, systems ...*System) error {
+	for i, sys := range systems {
+		if sys == nil {
+			return fmt.Errorf("%s: system %d is nil: %w", op, i+1, ErrInvalidArgument)
+		}
+	}
+	return nil
+}
+
 func domainMatch(sys1, sys2 *System) error {
 	return newTimeDomain(sys1.Dt).ensureCompatible(newTimeDomain(sys2.Dt))
 }
@@ -43,6 +55,9 @@ func newInterconnectionPlan(sys1, sys2 *System) interconnectionPlan {
 }
 
 func Series(sys1, sys2 *System) (*System, error) {
+	if err := requireSystems("Series", sys1, sys2); err != nil {
+		return nil, err
+	}
 	if err := domainMatch(sys1, sys2); err != nil {
 		return nil, err
 	}
@@ -198,6 +213,9 @@ func ioDelayOrZero(delay *mat.Dense, p, m int) *mat.Dense {
 }
 
 func Parallel(sys1, sys2 *System) (*System, error) {
+	if err := requireSystems("Parallel", sys1, sys2); err != nil {
+		return nil, err
+	}
 	if err := domainMatch(sys1, sys2); err != nil {
 		return nil, err
 	}
@@ -361,7 +379,10 @@ func sliceOrZeros(s []float64, n int) []float64 {
 // a delay-free rational model instead.
 func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (*System, error) {
 	if plant == nil {
-		return nil, fmt.Errorf("feedback: plant cannot be nil")
+		return nil, fmt.Errorf("Feedback: plant is nil: %w", ErrInvalidArgument)
+	}
+	if sign != 1 && sign != -1 {
+		return nil, fmt.Errorf("Feedback: sign %g must be -1 or +1: %w", sign, ErrInvalidArgument)
 	}
 	if controller == nil {
 		_, p, m := plant.Dims()
@@ -502,6 +523,9 @@ func subBlock(dst *mat.Dense, r0, c0 int, src *mat.Dense) {
 }
 
 func Append(sys1, sys2 *System) (*System, error) {
+	if err := requireSystems("Append", sys1, sys2); err != nil {
+		return nil, err
+	}
 	if err := domainMatch(sys1, sys2); err != nil {
 		return nil, err
 	}
@@ -539,7 +563,10 @@ func Append(sys1, sys2 *System) (*System, error) {
 	outDel := concatDelay(sys1.OutputDelay, p1, sys2.OutputDelay, p2)
 
 	if n == 0 {
-		sys, _ := NewGain(resizeDense(D, p, m), sys1.Dt)
+		sys, err := NewGain(resizeDense(D, p, m), sys1.Dt)
+		if err != nil {
+			return nil, err
+		}
 		sys.Delay = delay
 		sys.InputDelay = inDel
 		sys.OutputDelay = outDel
@@ -667,8 +694,6 @@ func seriesLFT(sys1, sys2 *System) (*System, error) {
 	A := mat.NewDense(max(n, 1), max(n, 1), nil)
 	B := mat.NewDense(max(n, 1), max(m, 1), nil)
 	C := mat.NewDense(max(p, 1), max(n, 1), nil)
-	D := mat.NewDense(max(p, 1), max(m, 1), nil)
-
 	if n1 > 0 {
 		setBlock(A, 0, 0, s1.A)
 		setBlock(B, 0, 0, s1.B)
@@ -688,7 +713,7 @@ func seriesLFT(sys1, sys2 *System) (*System, error) {
 	if n2 > 0 {
 		setBlock(C, 0, n1, s2.C)
 	}
-	D.Mul(s2.D, s1.D)
+	D := mulDims(p, m, s2.D, s1.D)
 
 	A = resizeDense(A, n, n)
 	B = resizeDense(B, n, m)
@@ -1009,6 +1034,9 @@ func BlkDiag(systems ...*System) (*System, error) {
 	if len(systems) == 0 {
 		return nil, fmt.Errorf("blkdiag: no systems provided: %w", ErrDimensionMismatch)
 	}
+	if err := requireSystems("BlkDiag", systems...); err != nil {
+		return nil, err
+	}
 	if len(systems) == 1 {
 		return systems[0].Copy(), nil
 	}
@@ -1141,7 +1169,10 @@ func BlkDiag(systems ...*System) (*System, error) {
 	}
 
 	if nTotal == 0 {
-		sys, _ := NewGain(D, dt)
+		sys, err := NewGain(D, dt)
+		if err != nil {
+			return nil, err
+		}
 		sys.Delay = delay
 		sys.InputDelay = inDel
 		sys.OutputDelay = outDel
@@ -1230,8 +1261,11 @@ func blkDiagInternalDelay(sys *System, srcs []*System, ns, ms, ps []int, nTotal,
 }
 
 func Connect(sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) {
-	if sys == nil {
-		return nil, fmt.Errorf("connect: system cannot be nil")
+	if err := requireSystems("Connect", sys); err != nil {
+		return nil, err
+	}
+	if Q == nil {
+		return nil, fmt.Errorf("Connect: Q is nil: %w", ErrInvalidArgument)
 	}
 	n, m, p := sys.Dims()
 

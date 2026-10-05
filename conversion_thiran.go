@@ -16,10 +16,13 @@ func conversionThiranChannel(samples, dt float64, maxOrder int) (*System, error)
 	}
 	if isIntegerSampleDelay(samples) {
 		gain, err := NewGain(mat.NewDense(1, 1, []float64{1}), dt)
+		if err != nil {
+			return nil, err
+		}
 		if samples > 0 {
 			gain.InputDelay = []float64{math.Round(samples)}
 		}
-		return gain, err
+		return gain, nil
 	}
 	ceiling := math.Ceil(samples)
 	if ceiling >= float64(int(^uint(0)>>1)) {
