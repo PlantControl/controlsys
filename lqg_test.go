@@ -557,6 +557,10 @@ func TestLqg_DiscreteEstimatorForms(t *testing.T) {
 			Mw.Mul(Nn, &Sinv)
 			assertMatEqual(t, "Mx", res.Mx, &Mx, 1e-10)
 			assertMatEqual(t, "Mw", res.Mw, &Mw, 1e-10)
+			var AMx mat.Dense
+			AMx.Mul(sys.A, res.Mx)
+			AMx.Add(&AMx, res.Mw)
+			assertMatEqual(t, "L = A*Mx + Mw", res.L, &AMx, 1e-10)
 
 			Ba := sys.B
 			if res.Ki != nil {
