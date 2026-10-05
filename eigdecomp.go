@@ -231,23 +231,7 @@ func schurEigenvaluesRaw(t []float64, n int) []complex128 {
 	i := 0
 	for i < n {
 		if i+1 < n && t[(i+1)*n+i] != 0 {
-			a := t[i*n+i]
-			b := t[i*n+i+1]
-			c := t[(i+1)*n+i]
-			d := t[(i+1)*n+i+1]
-			tr := a + d
-			det := a*d - b*c
-			disc := tr*tr - 4*det
-			if disc < 0 {
-				re := tr / 2
-				im := math.Sqrt(-disc) / 2
-				evals[i] = complex(re, im)
-				evals[i+1] = complex(re, -im)
-			} else {
-				sq := math.Sqrt(disc)
-				evals[i] = complex((tr+sq)/2, 0)
-				evals[i+1] = complex((tr-sq)/2, 0)
-			}
+			evals[i], evals[i+1] = schur2x2Eigenvalues(t[i*n+i], t[i*n+i+1], t[(i+1)*n+i], t[(i+1)*n+i+1])
 			i += 2
 		} else {
 			evals[i] = complex(t[i*n+i], 0)
@@ -255,6 +239,17 @@ func schurEigenvaluesRaw(t []float64, n int) []complex128 {
 		}
 	}
 	return evals
+}
+
+// schur2x2Eigenvalues returns the eigenvalues of [a b; c d] via Dlanv2, which
+// avoids the trace/determinant cancellation of the quadratic formula. Complex
+// pairs come positive imaginary part first, real pairs in descending order.
+func schur2x2Eigenvalues(a, b, c, d float64) (complex128, complex128) {
+	_, _, _, _, rt1r, rt1i, rt2r, rt2i, _, _ := impl.Dlanv2(a, b, c, d)
+	if rt1i == 0 && rt1r < rt2r {
+		rt1r, rt2r = rt2r, rt1r
+	}
+	return complex(rt1r, rt1i), complex(rt2r, rt2i)
 }
 
 func isConjugate(a, b complex128) bool {

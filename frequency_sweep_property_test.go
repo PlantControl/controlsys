@@ -339,9 +339,7 @@ func TestFreqResponseDescriptorSweepRandomized(t *testing.T) {
 // [B B2; C C2]. The delay inputs are scaled by a power of two g so that the
 // closure is well conditioned, ‖gH22‖∞ ≤ 1/2 and ‖gH12‖∞‖H21‖∞ ≤ ‖H11‖∞/2,
 // and G cannot cancel far below the terms GEPP computes it from. EvalFr must
-// agree with the sweep bit for bit. weakrows is skipped: it is unscaled, so it
-// does not exercise balancing, and its discrete descriptor draws reach the
-// delay-free dense tier's GEPP limit (1.01e-12 on H11 alone, ergo YDFVMC).
+// agree with the sweep bit for bit.
 func TestFreqResponseInternalDelaySweepRandomized(t *testing.T) {
 	const tol = 1e-12
 	seeds := 240
@@ -353,9 +351,6 @@ func TestFreqResponseInternalDelaySweepRandomized(t *testing.T) {
 		for _, descriptor := range []bool{false, true} {
 			for _, dt := range []float64{0, 0.05} {
 				kind := sweepModelKind(seed % int(sweepModelKinds))
-				if kind == sweepWeakRows {
-					continue
-				}
 				rng := rand.New(rand.NewPCG(uint64(seed), uint64(kind)))
 				n := 1 + rng.IntN(40)
 				m, p, N := 1+rng.IntN(4), 1+rng.IntN(4), 1+rng.IntN(3)

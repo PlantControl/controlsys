@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/lapack"
@@ -96,7 +97,16 @@ func (ws *complexSVDWorkspace) fillBlock(at func(i, j int) complex128, p, m int)
 	}
 }
 
+// singularValues reports a block with an infinite entry, a response at a
+// pole, as σ₁ = +Inf with the remaining values undetermined (NaN).
 func (ws *complexSVDWorkspace) singularValues(dst []float64) {
+	if math.IsInf(ws.scale, 1) {
+		for i := range dst {
+			dst[i] = math.NaN()
+		}
+		dst[0] = math.Inf(1)
+		return
+	}
 	if !ws.factorize() {
 		for i := range dst {
 			dst[i] = math.NaN()
@@ -118,6 +128,9 @@ func (ws *complexSVDWorkspace) maximumFromFlat(data []complex128, base, p, m int
 		return 0, true
 	}
 	values := data[base : base+p*m]
+	if slices.ContainsFunc(values, cmplx.IsInf) {
+		return math.Inf(1), true
+	}
 	if p == 1 || m == 1 {
 		var norm float64
 		for _, value := range values {
@@ -158,10 +171,12 @@ func maximumComplex2x2SingularValue(data []complex128) float64 {
 	a01 := data[1] / complex(scale, 0)
 	a10 := data[2] / complex(scale, 0)
 	a11 := data[3] / complex(scale, 0)
-	frobeniusSquared := complexMagnitudeSquared(a00) + complexMagnitudeSquared(a01) + complexMagnitudeSquared(a10) + complexMagnitudeSquared(a11)
-	determinantSquared := complexMagnitudeSquared(a00*a11 - a01*a10)
-	discriminant := math.Max(0, frobeniusSquared*frobeniusSquared-4*determinantSquared)
-	return scale * math.Sqrt((frobeniusSquared+math.Sqrt(discriminant))/2)
+	p := complexMagnitudeSquared(a00) + complexMagnitudeSquared(a01)
+	r := complexMagnitudeSquared(a10) + complexMagnitudeSquared(a11)
+	q := a00*cmplx.Conj(a10) + a01*cmplx.Conj(a11)
+	halfDiff := (p - r) / 2
+	radius := math.Sqrt(halfDiff*halfDiff + complexMagnitudeSquared(q))
+	return scale * math.Sqrt((p+r)/2+radius)
 }
 
 func complexMagnitudeSquared(value complex128) float64 {

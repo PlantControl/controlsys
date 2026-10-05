@@ -109,6 +109,20 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 	}
 }
 
+// FreqResponse evaluates the response at each omega (rad/s; z = e^{jωDt} for
+// discrete models).
+//
+// As MATLAB freqresp and evalfr return Inf rather than failing at a pole, a
+// frequency at a pole of the model is not an error, for explicit, descriptor
+// and internal-delay realizations alike: entries the pole reaches are
+// infinite (cmplx.IsInf reports true; their phase is meaningless), and the
+// other entries keep their finite values, extrapolated from nearby points to
+// about 1e-12 relative accuracy (1e-9 at a repeated pole). A pole of the delay-free plant that an
+// internal delay loop moves, such as an integrator inside the loop, is not a
+// pole of the model and evaluates to its finite value. A pole is recognised
+// when the pencil is singular to working precision; a frequency merely near a
+// pole gives large finite values. ErrSingularTransform remains for models
+// singular at every frequency near omega, such as det(sE-A) ≡ 0.
 func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 	e, err := validFrequencyEvaluator(sys, "FreqResponse")
 	if err != nil {
@@ -155,6 +169,8 @@ func (sys *System) Bode(omega []float64, nPoints int) (*BodeResult, error) {
 	), nil
 }
 
+// EvalFr evaluates the response at the complex point s (z for discrete
+// models). At a pole it follows the FreqResponse contract.
 func (sys *System) EvalFr(s complex128) ([][]complex128, error) {
 	e, err := validFrequencyEvaluator(sys, "EvalFr")
 	if err != nil {
@@ -214,9 +230,8 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 }
 
 // responsePointwise evaluates each frequency exactly as response would for
-// a one-element sweep: balanced dense solve first, per-point
-// transfer-function fallback on solve failure, with the delay phase applied
-// per point using the flag of whichever path produced the value.
+// a one-element sweep: balanced dense solve, the pole limit where it is
+// singular, then the I/O delay phase.
 func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMatrix, error) {
 	if len(omega) == 0 {
 		return nil, nil
@@ -240,52 +255,61 @@ type frequencyPointSolver interface {
 	evalInto(s complex128, dst []complex128) error
 }
 
-// sweepInto evaluates each frequency with solver, falling back per point to
-// the transfer-function form where the pencil is singular, and applies the
-// I/O delay phase matching whichever path produced the value.
+// sweepInto evaluates each frequency with solver, taking the pole limit
+// where the pencil is singular, and applies the I/O delay phase.
 func (e frequencyEvaluator) sweepInto(omega []float64, data []complex128, solver frequencyPointSolver) error {
 	pm := e.p * e.m
 	delaySS := effectiveIODelayMatrix(e.sys, e.p, e.m, true)
-	var tf *TransferFunc
+	eval := solver.evalInto
 	for k, w := range omega {
 		s := e.sAt(w)
 		dst := data[k*pm : (k+1)*pm]
-		if err := solver.evalInto(s, dst); err == nil {
-			if delaySS != nil {
-				applyIODelayMatrixAtS(e.sys, s, dst, e.p, e.m, delaySS)
-			}
-			continue
+		if err := evalWithPoleLimit(eval, e.sys, s, dst); err != nil {
+			return err
 		}
-		if tf == nil {
-			res, err := e.sys.TransferFunction(nil)
-			if err != nil {
-				return err
-			}
-			tf = res.TF
+		if delaySS != nil {
+			applyIODelayMatrixAtS(e.sys, s, dst, e.p, e.m, delaySS)
 		}
-		tf.evalInto(s, dst)
 	}
 	return nil
 }
 
 func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
-	pm := e.p * e.m
+	return e.evalPoint(s, true)
+}
 
-	if e.sys.HasInternalDelay() {
-		g, err := evalFrLFT(e.sys, s, e.p, e.m)
-		if err != nil {
+// evalPoint evaluates one complex frequency. At a pole of the model it
+// returns the pole limit (see FreqResponse), or with poleLimit false the
+// solver's ErrSingularTransform.
+func (e frequencyEvaluator) evalPoint(s complex128, poleLimit bool) ([][]complex128, error) {
+	data := make([]complex128, e.p*e.m)
+	eval := e.pointEval()
+	if !poleLimit {
+		if err := eval(s, data); err != nil {
 			return nil, err
 		}
-		applyIODelayAtS(e.sys, s, g, e.p, e.m, true)
-		return complexFlatToGrid(g, e.p, e.m), nil
-	}
-
-	data := make([]complex128, pm)
-	if err := e.pointSolver(1).evalInto(s, data); err != nil {
+	} else if err := evalWithPoleLimit(eval, e.sys, s, data); err != nil {
 		return nil, err
 	}
 	applyIODelayAtS(e.sys, s, data, e.p, e.m, true)
 	return complexFlatToGrid(data, e.p, e.m), nil
+}
+
+// pointEval returns a single-point evaluator of the response without I/O
+// delays; it fails at a pole.
+func (e frequencyEvaluator) pointEval() func(complex128, []complex128) error {
+	if !e.sys.HasInternalDelay() {
+		return e.pointSolver(1).evalInto
+	}
+	N := e.sys.internalDelayCount()
+	ws := newLFTWorkspace(e.sys, e.n, N, e.p, e.m)
+	return func(s complex128, dst []complex128) error {
+		if err := evalFrLFTInto(ws, e.sys, s, N, e.p, e.m); err != nil {
+			return err
+		}
+		copy(dst, ws.g[:e.p*e.m])
+		return nil
+	}
 }
 
 func (e frequencyEvaluator) sAt(w float64) complex128 {
@@ -328,13 +352,11 @@ func isUpperHessenberg(a *mat.Dense) bool {
 	return true
 }
 
-// descriptorSweepInto fails on a singular pencil rather than falling back to
-// the transfer-function form.
 func (e frequencyEvaluator) descriptorSweepInto(omega []float64, dst []complex128) error {
 	pm := e.p * e.m
-	solver := e.pointSolver(len(omega))
+	eval := e.pointSolver(len(omega)).evalInto
 	for k, w := range omega {
-		if err := solver.evalInto(e.sAt(w), dst[k*pm:(k+1)*pm]); err != nil {
+		if err := evalWithPoleLimit(eval, e.sys, e.sAt(w), dst[k*pm:(k+1)*pm]); err != nil {
 			return err
 		}
 	}
@@ -345,46 +367,86 @@ func (e frequencyEvaluator) matrix(data []complex128, omega []float64) *FreqResp
 	return newFreqResponseMatrix(data, omega, e.p, e.m, e.sys.InputName, e.sys.OutputName)
 }
 
+// autoBodeFreqs returns the default grid of Bode, Sigma, Nichols, Bandwidth
+// and TunePID: nPoints log-spaced frequencies over the range spanned by the
+// poles, zeros and delays of sys (see autoFreqRange), ending exactly at the
+// Nyquist frequency π/Dt for discrete models. Like MATLAB bode, the range
+// follows the system dynamics and stops at the Nyquist frequency; see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.bode.html.
 func autoBodeFreqs(sys *System, nPoints int) ([]float64, error) {
 	if nPoints <= 0 {
 		nPoints = 200
 	}
-
 	poles, err := sys.Poles()
 	if err != nil {
 		return nil, err
 	}
-	var natFreqs []float64
-	for _, p := range poles {
-		var wn float64
-		wn = newTimeDomain(sys.Dt).naturalFrequency(p)
-		if wn > 0 {
-			natFreqs = append(natFreqs, wn)
+	zeros, err := sys.Zeros()
+	if err != nil {
+		return nil, err
+	}
+	roots := make([]complex128, 0, len(poles)+len(zeros))
+	roots = append(append(roots, poles...), zeros...)
+	wMin, wMax := autoFreqRange(sys, roots, systemDelays(sys))
+	omega := logspace(math.Log10(wMin), math.Log10(wMax), nPoints)
+	if nPoints > 1 {
+		omega[nPoints-1] = wMax
+	}
+	return omega, nil
+}
+
+// autoFreqRange spans one decade below and above the natural frequencies of
+// roots and the corners 1/τ of delays (seconds). Roots at s=0, z=1 and z=0
+// (a pure delay) carry no feature. Without features the range is [0.01, 100].
+// Discrete ranges end at π/Dt and start at least two decades below it.
+func autoFreqRange(sys *System, roots []complex128, delays []float64) (wMin, wMax float64) {
+	td := newTimeDomain(sys.Dt)
+	lo, hi := math.Inf(1), 0.0
+	add := func(wn float64) {
+		if wn > 0 && !math.IsInf(wn, 0) {
+			lo = min(lo, wn)
+			hi = max(hi, wn)
 		}
 	}
-
-	wMin, wMax := 0.01, 100.0
-	if len(natFreqs) > 0 {
-		lo, hi := natFreqs[0], natFreqs[0]
-		for _, w := range natFreqs[1:] {
-			if w < lo {
-				lo = w
-			}
-			if w > hi {
-				hi = w
-			}
-		}
-		wMin = lo / 10
-		wMax = hi * 10
-		if wMin < 1e-4 {
-			wMin = 1e-4
-		}
-		if wMax > 1e4 {
-			wMax = 1e4
+	for _, r := range roots {
+		add(td.naturalFrequency(r))
+	}
+	for _, tau := range delays {
+		if tau > 0 {
+			add(1 / tau)
 		}
 	}
+	wMin, wMax = 0.01, 100.0
+	if hi > 0 {
+		wMin, wMax = lo/10, hi*10
+	}
+	if sys.IsDiscrete() && sys.Dt > 0 {
+		wMax = math.Pi / sys.Dt
+		wMin = min(wMin, wMax/100)
+	}
+	return wMin, wMax
+}
 
-	return logspace(math.Log10(wMin), math.Log10(wMax), nPoints), nil
+// systemDelays lists the total I/O delay of each channel and each internal
+// delay of sys, in seconds.
+func systemDelays(sys *System) []float64 {
+	scale := 1.0
+	if sys.IsDiscrete() && sys.Dt > 0 {
+		scale = sys.Dt
+	}
+	_, m, p := sys.Dims()
+	var taus []float64
+	for i := range p {
+		for j := range m {
+			taus = append(taus, ioDelayTotal(sys, i, j)*scale)
+		}
+	}
+	if sys.LFT != nil {
+		for _, tau := range sys.LFT.Tau {
+			taus = append(taus, tau*scale)
+		}
+	}
+	return taus
 }
 
 func logspace(start, stop float64, n int) []float64 {
@@ -573,19 +635,14 @@ func complexFlatToGrid(data []complex128, p, m int) [][]complex128 {
 }
 
 func freqResponseLFT(sys *System, omega []float64, p, m int) (*FreqResponseMatrix, error) {
-	nw := len(omega)
-	data := make([]complex128, nw*p*m)
-	n, _, _ := sys.Dims()
-	N := sys.internalDelayCount()
-	ws := newLFTWorkspace(sys, n, N, p, m)
+	data := make([]complex128, len(omega)*p*m)
+	eval := newFrequencyEvaluator(sys).pointEval()
 	td := newTimeDomain(sys.Dt)
 	for k, w := range omega {
-		if err := evalFrLFTInto(ws, sys, td.frequencyVariable(w), N, p, m); err != nil {
+		if err := evalWithPoleLimit(eval, sys, td.frequencyVariable(w), data[k*p*m:(k+1)*p*m]); err != nil {
 			return nil, err
 		}
-		copy(data[k*p*m:], ws.g[:p*m])
 	}
-
 	return newFreqResponseMatrix(data, omega, p, m, nil, nil), nil
 }
 
@@ -641,13 +698,9 @@ func newLFTWorkspace(sys *System, n, N, p, m int) *lftWorkspace {
 	}
 }
 
-// evalFrLFTInto sets ws.g to G = H11 + H12·Δ·(I - H22·Δ)⁻¹·H21.
+// evalFrLFTInto sets ws.g to G = H11 + H12·Δ·(I - H22·Δ)⁻¹·H21, or, where H
+// or I - H22·Δ is singular, to the frozen-delay closed loop at s.
 func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, N, p, m int) error {
-	h := ws.h
-	if err := ws.bd.evalInto(s, h); err != nil {
-		return err
-	}
-	mN := m + N
 	cont := sys.IsContinuous()
 	for j, tau := range sys.LFT.Tau {
 		if cont {
@@ -660,6 +713,11 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, N, p, m int) err
 			}
 		}
 	}
+	h := ws.h
+	if err := ws.bd.evalInto(s, h); err != nil {
+		return evalFrLFTFrozenInto(ws, s, N, p, m)
+	}
+	mN := m + N
 	for i := range N {
 		hRow := h[(p+i)*mN:]
 		for j := range N {
@@ -669,7 +727,7 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, N, p, m int) err
 		copy(ws.x[i*m:(i+1)*m], hRow[:m])
 	}
 	if err := cSolveInPlace(ws.lhs, ws.x, N, m); err != nil {
-		return err
+		return evalFrLFTFrozenInto(ws, s, N, p, m)
 	}
 	for i := range p {
 		hRow := h[i*mN:]
@@ -682,20 +740,6 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, N, p, m int) err
 		}
 	}
 	return nil
-}
-
-// evalFrLFT computes G(s) via LFT: G = H11 + H12 * Delta * (I - H22*Delta)^{-1} * H21
-// Returns flat p*m complex slice (row-major).
-func evalFrLFT(sys *System, s complex128, p, m int) ([]complex128, error) {
-	n, _, _ := sys.Dims()
-	N := sys.internalDelayCount()
-	ws := newLFTWorkspace(sys, n, N, p, m)
-	if err := evalFrLFTInto(ws, sys, s, N, p, m); err != nil {
-		return nil, err
-	}
-	result := make([]complex128, p*m)
-	copy(result, ws.g[:p*m])
-	return result, nil
 }
 
 func cMulInto(dst, a, b []complex128, ar, ac, bc int) {

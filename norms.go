@@ -301,7 +301,8 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 // peakGain computes sup_ω σ_max(G(jω)) of a model with no poles on the
 // stability boundary from the Hamiltonian eigenvalue test; stability is not
 // required. A sampled peak is first certified by one probe just above it;
-// bisection runs only when the probe is inconclusive.
+// when the probe is inconclusive, the upper-bound search may still certify a
+// raised peak, and bisection runs only if it does not.
 // Discrete models are mapped by Tustin, and the peak frequency is unwarped
 // back to the discrete axis.
 func peakGain(sys *System) (norm float64, omega float64, err error) {
@@ -325,12 +326,9 @@ func peakGain(sys *System) (norm float64, omega float64, err error) {
 		return gammaLow * (1 + tol/2), omegaPeak, nil
 	}
 
-	gammaHigh := math.Max(gammaLow*2, 1e-10)
-	for range 50 {
-		if !ws.hasImagEigs(gammaHigh) {
-			break
-		}
-		gammaHigh *= 2
+	gammaLow, gammaHigh, omegaPeak, certified := ws.upperBound(sys, gammaLow, omegaPeak, tol)
+	if certified {
+		return gammaLow * (1 + tol/2), omegaPeak, nil
 	}
 
 	for range 100 {
@@ -387,6 +385,35 @@ func (ws *hamiltonianWS) certifyPeak(sys *System, gammaLow, omegaPeak, tol float
 		gammaLow, omegaPeak = peak, w
 	}
 	return gammaLow, omegaPeak, false
+}
+
+// upperBound doubles gammaHigh from 2·gammaLow until the Hamiltonian test
+// shows no crossing there, under the candidate rule of certifyPeak and the
+// bisection: near-axis eigenvalues whose candidate gains stay below gammaHigh
+// do not count. The near-axis threshold grows with gamma, so without that
+// rule a lightly damped mode is flagged at every level. A candidate gain at
+// or above gammaHigh raises gammaLow through certifyPeak, which may settle
+// the peak outright.
+func (ws *hamiltonianWS) upperBound(sys *System, gammaLow, omegaPeak, tol float64) (float64, float64, float64, bool) {
+	gammaHigh := math.Max(gammaLow*2, 1e-10)
+	for range 50 {
+		if !ws.hasImagEigs(gammaHigh) {
+			break
+		}
+		peak, w, err := ws.candidatePeak(sys)
+		if err == nil && peak < gammaHigh {
+			break
+		}
+		if err == nil {
+			var certified bool
+			gammaLow, omegaPeak, certified = ws.certifyPeak(sys, peak, w, tol)
+			if certified {
+				return gammaLow, gammaLow * (1 + tol/2), omegaPeak, true
+			}
+		}
+		gammaHigh = 2 * math.Max(gammaHigh, gammaLow)
+	}
+	return gammaLow, gammaHigh, omegaPeak, false
 }
 
 // hamiltonianWS holds pre-allocated buffers for the Hamiltonian eigenvalue test

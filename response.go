@@ -371,8 +371,12 @@ func transposeSamplesToChannels(u *mat.Dense, steps, inputs int) *mat.Dense {
 	return newSampledSignal("Lsim", u, inputs, steps, sampledSamplesByChannels).channelsBySamplesDense()
 }
 
-// DCGain returns the p×m steady-state gain. Like MATLAB dcgain, a model with
-// no inputs or no outputs has an empty gain, returned as an empty matrix.
+// DCGain returns the steady-state gain G(0) (G(1) for discrete models). Like
+// MATLAB dcgain, entries reached by an integrator (a pole at s = 0 or z = 1)
+// are infinite rather than an error, for every realization; internal delays are
+// unity at DC.
+// A model with no inputs or no outputs has an empty gain, returned as an
+// empty matrix.
 func (sys *System) DCGain() (*mat.Dense, error) {
 	n, m, p := sys.Dims()
 	if m == 0 || p == 0 {
@@ -439,7 +443,7 @@ func (sys *System) dcGainByEvaluation() (*mat.Dense, error) {
 	if err != nil {
 		return nil, err
 	}
-	g, err := e.eval(s0)
+	g, err := e.evalPoint(s0, false)
 	if err != nil {
 		return nil, fmt.Errorf("DCGain: %w", err)
 	}

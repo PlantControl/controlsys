@@ -524,103 +524,19 @@ func FRDMargin(f *FRD) (*MarginResult, error) {
 	}
 
 	bode := f.Bode()
-	magDB := bode.magDB
-	phase := bode.phase
-	omega := bode.Omega
+	magDB, phase, omega := bode.magDB, bode.phase, bode.Omega
+	lerp := func(v []float64, c crossing) float64 { return v[c.idx] + c.frac*(v[c.idx+1]-v[c.idx]) }
 
-	var allGM []float64
-	var allGMFreq []float64
-	var allPM []float64
-	var allPMFreq []float64
-
-	b := frdWrapDeg(phase[0] + 180)
-	for k := 1; k < nw; k++ {
-		a := b
-		b = frdWrapDeg(phase[k] + 180)
-		if !frdCrosses(a, b, k) || math.Abs(a-b) >= 180 {
-			continue
-		}
-		frac := frdCrossFrac(a, b)
-		allGM = append(allGM, -(magDB[k-1] + frac*(magDB[k]-magDB[k-1])))
-		allGMFreq = append(allGMFreq, frdInterpOmega(omega[k-1], omega[k], frac))
+	all := &AllMarginResult{}
+	for _, c := range phaseCrossings(omega, phase, -180) {
+		all.GainMargins = append(all.GainMargins, -lerp(magDB, c))
+		all.PhaseCrossFreqs = append(all.PhaseCrossFreqs, c.w)
 	}
-
-	for k := 1; k < nw; k++ {
-		m0, m1 := magDB[k-1], magDB[k]
-		if math.IsInf(m0, 0) || math.IsInf(m1, 0) || !frdCrosses(m0, m1, k) {
-			continue
-		}
-		frac := frdCrossFrac(m0, m1)
-		allPM = append(allPM, frdWrapDeg(180+phase[k-1]+frac*(phase[k]-phase[k-1])))
-		allPMFreq = append(allPMFreq, frdInterpOmega(omega[k-1], omega[k], frac))
+	for _, c := range findCrossings(omega, magDB, 0) {
+		all.PhaseMargins = append(all.PhaseMargins, wrapDegrees(180+lerp(phase, c)))
+		all.GainCrossFreqs = append(all.GainCrossFreqs, c.w)
 	}
-
-	result := &MarginResult{
-		GainMargin:  math.Inf(1),
-		PhaseMargin: math.Inf(1),
-		WgFreq:      math.NaN(),
-		WpFreq:      math.NaN(),
-	}
-
-	for i, gm := range allGM {
-		if gm > 0 && gm < result.GainMargin {
-			result.GainMargin = gm
-			result.WpFreq = allGMFreq[i]
-		}
-	}
-	if math.IsInf(result.GainMargin, 1) {
-		for i, gm := range allGM {
-			if gm > result.GainMargin || math.IsInf(result.GainMargin, 1) {
-				result.GainMargin = gm
-				result.WpFreq = allGMFreq[i]
-			}
-		}
-	}
-
-	for i, pm := range allPM {
-		if pm > 0 && pm < result.PhaseMargin {
-			result.PhaseMargin = pm
-			result.WgFreq = allPMFreq[i]
-		}
-	}
-	if math.IsInf(result.PhaseMargin, 1) {
-		for i, pm := range allPM {
-			if pm > result.PhaseMargin || math.IsInf(result.PhaseMargin, 1) {
-				result.PhaseMargin = pm
-				result.WgFreq = allPMFreq[i]
-			}
-		}
-	}
-
-	return result, nil
-}
-
-// frdWrapDeg wraps degrees to (-180,180].
-func frdWrapDeg(x float64) float64 {
-	return x - 360*math.Ceil((x-180)/360)
-}
-
-// frdCrosses reports a sign change of a->b on segment k; an exact zero
-// counts once, at the segment where it is the right endpoint (or k==1).
-func frdCrosses(a, b float64, k int) bool {
-	if math.IsNaN(a) || math.IsNaN(b) {
-		return false
-	}
-	return a*b < 0 || (b == 0 && a != 0) || (a == 0 && k == 1)
-}
-
-func frdCrossFrac(a, b float64) float64 {
-	if a == b {
-		return 0
-	}
-	return a / (a - b)
-}
-
-func frdInterpOmega(w0, w1, frac float64) float64 {
-	if w0 <= 0 {
-		return w0 + frac*(w1-w0)
-	}
-	return math.Exp(math.Log(w0) + frac*(math.Log(w1)-math.Log(w0)))
+	return pickMargins(all), nil
 }
 
 func frdGridsMatch(f1, f2 *FRD) error {

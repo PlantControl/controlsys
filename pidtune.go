@@ -66,31 +66,12 @@ func findCrossoverFreq(plant *System, wcTarget float64) (float64, error) {
 		return wcTarget, nil
 	}
 
-	omega, err := marginFreqs(plant, 500)
+	all, err := AllMargin(plant)
 	if err != nil {
 		return 0, err
 	}
-	if len(omega) == 0 {
-		return 1.0, nil
-	}
-
-	eval, err := newSISOEval(plant)
-	if err != nil {
-		return 0, err
-	}
-
-	nw := len(omega)
-	magDB := make([]float64, nw)
-	for k, w := range omega {
-		magDB[k] = 20 * math.Log10(cmplx.Abs(eval.at(w)))
-	}
-
-	crossings := findCrossings(omega, magDB, 0.0)
-	if len(crossings) > 0 {
-		c := crossings[0]
-		return refineCrossing(omega[c.idx], omega[c.idx+1], func(w float64) float64 {
-			return 20 * math.Log10(cmplx.Abs(eval.at(w)))
-		}), nil
+	if len(all.GainCrossFreqs) > 0 {
+		return all.GainCrossFreqs[0], nil
 	}
 
 	bw, err := Bandwidth(plant, -3)

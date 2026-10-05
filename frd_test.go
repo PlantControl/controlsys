@@ -1101,18 +1101,12 @@ func frdMarginOracle(c frdMarginCase) (gms, wps, pms, wgs []float64) {
 	return
 }
 
+// pickMargin is MATLAB margin's rule: the margin closest to 0.
 func pickMargin(vals, freqs []float64) (float64, float64) {
 	best, bw := math.Inf(1), math.NaN()
 	for i, v := range vals {
-		if v > 0 && v < best {
+		if math.Abs(v) < math.Abs(best) {
 			best, bw = v, freqs[i]
-		}
-	}
-	if math.IsInf(best, 1) {
-		for i, v := range vals {
-			if math.IsInf(best, 1) || v > best {
-				best, bw = v, freqs[i]
-			}
 		}
 	}
 	return best, bw

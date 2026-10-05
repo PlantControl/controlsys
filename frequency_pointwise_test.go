@@ -14,7 +14,7 @@ import (
 // where FreqResponse itself changes evaluation strategy (the direct
 // state-space work limit) and across the structurally distinct paths:
 // delay-free, I/O delay, discrete, MIMO, internal delay (LFT), and the
-// per-point transfer-function fallback when the state-space solve fails.
+// per-point pole limit when the state-space solve fails.
 
 func pointwiseTestGrid(wMin, wMax float64, n int) []float64 {
 	return logspace(math.Log10(wMin), math.Log10(wMax), n)

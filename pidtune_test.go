@@ -339,3 +339,14 @@ func TestPidtuneRejectsDiscreteCrossoverAboveNyquist(t *testing.T) {
 		t.Fatal("expected error for crossover at Nyquist")
 	}
 }
+
+func TestFindCrossoverFreq_NarrowResonance(t *testing.T) {
+	plant, want := narrowResonance(t)
+	wc, err := findCrossoverFreq(plant, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(wc-want[0]) > 1e-12 {
+		t.Errorf("crossover %.15g, want %.15g", wc, want[0])
+	}
+}

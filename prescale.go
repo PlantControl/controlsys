@@ -9,13 +9,15 @@ import (
 
 // PrescaleResult holds the output of [Prescale].
 //
-// StateScale is the diagonal of MATLAB's info.SR (TR = diag(StateScale),
-// TL = TR⁻¹ for explicit models). InputScale and OutputScale are suggested
-// normalizations (reciprocal of the largest magnitude in each column of
-// [Bs; D] and each row of [Cs D]); they are not applied to Sys.
+// LeftScale and StateScale are the diagonals of MATLAB's info.SL and info.SR:
+// TL = diag(LeftScale), TR = diag(StateScale), and TL = TR⁻¹ for explicit
+// models. InputScale and OutputScale are suggested normalizations
+// (reciprocal of the largest magnitude in each column of [Bs; D] and each row
+// of [Cs D]); they are not applied to Sys.
 type PrescaleResult struct {
 	Sys  *System
 	Info struct {
+		LeftScale   []float64
 		StateScale  []float64
 		InputScale  []float64
 		OutputScale []float64
@@ -23,21 +25,19 @@ type PrescaleResult struct {
 }
 
 // Prescale scales the state vector of sys to improve the accuracy of
-// frequency-domain computations, matching MATLAB prescale for explicit
-// state-space models: with T = diag(Info.StateScale),
+// frequency-domain computations, as MATLAB prescale: with
+// TL = diag(Info.LeftScale) and TR = diag(Info.StateScale),
 //
-//	As = T⁻¹AT, Bs = T⁻¹B, Cs = CT, Ds = D.
+//	As = TL·A·TR, Bs = TL·B, Cs = C·TR, Ds = D, Es = TL·E·TR.
 //
+// Explicit models use TL = TR⁻¹ from LAPACK balancing of A (Dgebal);
+// descriptor models use the left and right scalings of the pencil (A, E)
+// from Dggbal. Unlike MATLAB, the scaling is not tuned to a frequency band.
 // The state order is preserved, so Sys has the same response, state names,
-// and metadata as sys. Descriptor and delayed models are rejected.
+// and metadata as sys. I/O delays carry over and internal-delay channels
+// scale like B and C (B2s = TL·B2, C2s = C2·TR).
 func Prescale(sys *System) (*PrescaleResult, error) {
 	policy := newRealizationTransformPolicy(sys)
-	if err := policy.requireStandard("Prescale"); err != nil {
-		return nil, err
-	}
-	if err := policy.requireDelayFree("Prescale"); err != nil {
-		return nil, err
-	}
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 {
@@ -51,25 +51,38 @@ func Prescale(sys *System) (*PrescaleResult, error) {
 	aData := make([]float64, n*n)
 	copyStrided(aData, n, aRaw.Data, aRaw.Stride, n, n)
 
-	scale := make([]float64, n)
-	impl.Dgebal(lapack.Scale, n, aData, n, scale)
-
-	stateScale := make([]float64, n)
-	copy(stateScale, scale)
-
-	dsData := make([]float64, n)
-	dsInvData := make([]float64, n)
-	for i := range n {
-		dsData[i] = scale[i]
-		dsInvData[i] = 1.0 / scale[i]
+	left := make([]float64, n)
+	right := make([]float64, n)
+	var Es *mat.Dense
+	if sys.IsDescriptor() {
+		eRaw := sys.E.RawMatrix()
+		eData := make([]float64, n*n)
+		copyStrided(eData, n, eRaw.Data, eRaw.Stride, n, n)
+		impl.Dggbal(lapack.Scale, n, aData, n, eData, n, left, right, make([]float64, 6*n))
+		Es = mat.NewDense(n, n, eData)
+	} else {
+		impl.Dgebal(lapack.Scale, n, aData, n, right)
+		for i, v := range right {
+			left[i] = 1 / v
+		}
+		if sys.E != nil {
+			Es = mat.DenseCopyOf(sys.E)
+		}
 	}
-	Ds := mat.NewDiagDense(n, dsData)
-	DsInv := mat.NewDiagDense(n, dsInvData)
+	TL := mat.NewDiagDense(n, left)
+	TR := mat.NewDiagDense(n, right)
 
 	Ab := mat.NewDense(n, n, aData)
 
-	Bb := mulDims(n, m, DsInv, sys.B)
-	Cb := mulDims(p, n, sys.C, Ds)
+	Bb := newDense(n, m)
+	if m > 0 {
+		Bb.Mul(TL, sys.B)
+	}
+
+	Cb := newDense(p, n)
+	if p > 0 {
+		Cb.Mul(sys.C, TR)
+	}
 
 	Db := denseCopy(sys.D)
 
@@ -113,15 +126,27 @@ func Prescale(sys *System) (*PrescaleResult, error) {
 		}
 	}
 
-	scaled, err := policy.result(Ab, Bb, Cb, Db)
+	var scaled *System
+	var err error
+	if nd := sys.internalDelayCount(); nd > 0 {
+		B2 := mat.NewDense(n, nd, nil)
+		B2.Mul(TL, sys.LFT.B2)
+		C2 := mat.NewDense(nd, n, nil)
+		C2.Mul(sys.LFT.C2, TR)
+		scaled, err = policy.resultWithInternalDelay(Ab, Bb, Cb, Db, B2, C2)
+	} else {
+		scaled, err = policy.result(Ab, Bb, Cb, Db)
+	}
 	if err != nil {
 		return nil, err
 	}
+	scaled.E = Es
 
 	propagateNames(scaled, sys)
 
 	result := &PrescaleResult{Sys: scaled}
-	result.Info.StateScale = stateScale
+	result.Info.LeftScale = left
+	result.Info.StateScale = right
 	result.Info.InputScale = inputScale
 	result.Info.OutputScale = outputScale
 	return result, nil
