@@ -160,3 +160,29 @@ func sameComplexApprox(a, b []complex128, tolerance float64) bool {
 	}
 	return true
 }
+
+func TestModalTruncateKeptPolesBadlyScaledPair(t *testing.T) {
+	tests := []struct {
+		name              string
+		re, im, other, dt float64
+		tol               float64
+	}{
+		{"continuous tiny imag", -1e8, 1, -2e8, 0, 1e-6},
+		{"continuous partial cancellation", -1e8, 3.3, -2e8, 0, 1e-6},
+		{"discrete near repeated", 0.5, 1e-9, 0.1, 0.1, 1e-14},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := badlyScaledPairSystem(t, tc.re, tc.im, tc.other, tc.dt)
+			result, err := ModalTruncate(sys, &ModalTruncateOptions{Order: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []complex128{complex(tc.re, tc.im), complex(tc.re, -tc.im)}
+			if !sameComplexApprox(result.KeptPoles, want, tc.tol) {
+				t.Fatalf("kept poles = %v, want %v", result.KeptPoles, want)
+			}
+			assertPolesMatch(t, "reduced", result.Sys, want, tc.tol)
+		})
+	}
+}

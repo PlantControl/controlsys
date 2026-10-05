@@ -642,15 +642,6 @@ func removePoolEntry(pool []complex128, idx int) []complex128 {
 }
 
 func schurBlock2x2Eig(t []float64, n, k int) complex128 {
-	a := t[k*n+k]
-	b := t[k*n+k+1]
-	c := t[(k+1)*n+k]
-	d := t[(k+1)*n+k+1]
-	tr := (a + d) / 2
-	det := a*d - b*c
-	disc := tr*tr - det
-	if disc < 0 {
-		return complex(tr, math.Sqrt(-disc))
-	}
-	return complex(tr+math.Sqrt(disc), 0)
+	ev, _ := schur2x2Eigenvalues(t[k*n+k], t[k*n+k+1], t[(k+1)*n+k], t[(k+1)*n+k+1])
+	return ev
 }

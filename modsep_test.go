@@ -234,3 +234,14 @@ func TestModsep_SingularDescriptor(t *testing.T) {
 		assertSplitSum(t, "Modsep singular E", sys, res.Slow, res.Fast)
 	}
 }
+
+func TestModsep_BadlyScaledPair(t *testing.T) {
+	sys := badlyScaledPairSystem(t, -1e8, 1, -2e8, 0)
+	res, err := Modsep(sys, 1.5e8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPolesMatch(t, "slow", res.Slow, []complex128{complex(-1e8, 1), complex(-1e8, -1)}, 1e-6)
+	assertPolesMatch(t, "fast", res.Fast, []complex128{-2e8}, 1e-6)
+	assertSplitSum(t, "modsep", sys, res.Slow, res.Fast)
+}
