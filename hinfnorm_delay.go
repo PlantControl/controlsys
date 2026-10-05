@@ -412,25 +412,52 @@ func internalDelayStable(sys *System) (bool, error) {
 // hinfNormDelayed returns the H∞ norm of a continuous model with internal
 // delays, or +Inf for an unstable one, and whether the model is stable.
 func hinfNormDelayed(sys *System) (norm, omega float64, stable bool, err error) {
-	e, err := newDelayLFT(sys)
-	if err != nil {
-		return 0, 0, false, err
-	}
-	l, res, err := e.stability()
+	e, l, res, err := delayPeakSetup(sys)
 	if err != nil {
 		return 0, 0, false, err
 	}
 	if !res.stable {
 		return math.Inf(1), math.Inf(1), false, nil
 	}
-	if e.m == 0 || e.p == 0 {
-		return 0, 0, true, nil
-	}
-	norm, omega, err = e.peak(l, res.w)
+	norm, omega, err = e.peakOrZero(l, res)
 	if err != nil {
 		return 0, 0, false, err
 	}
 	return norm, omega, true, nil
+}
+
+// linfNormDelayed returns the L∞ norm of a continuous model with internal
+// delays, sup_ω σ_max(G(jω)) regardless of stability: +Inf at ω = axisW when χ
+// has a root on the imaginary axis, else the peak over the Nyquist grid, which
+// is complete whenever the RHP roots are counted.
+func linfNormDelayed(sys *System) (norm, omega float64, err error) {
+	e, l, res, err := delayPeakSetup(sys)
+	if err != nil {
+		return 0, 0, err
+	}
+	if res.axisRoot {
+		return math.Inf(1), res.axisW, nil
+	}
+	return e.peakOrZero(l, res)
+}
+
+func delayPeakSetup(sys *System) (*delayLFT, *delayLoop, delayNyquist, error) {
+	e, err := newDelayLFT(sys)
+	if err != nil {
+		return nil, nil, delayNyquist{}, err
+	}
+	l, res, err := e.stability()
+	if err != nil {
+		return nil, nil, delayNyquist{}, err
+	}
+	return e, l, res, nil
+}
+
+func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64, error) {
+	if e.m == 0 || e.p == 0 {
+		return 0, 0, nil
+	}
+	return e.peak(l, res.w)
 }
 
 // peak searches sup_ω σ_max(G(jω)) on the Nyquist grid, which bisects

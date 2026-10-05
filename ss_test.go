@@ -565,7 +565,7 @@ func spectralRadius(t *testing.T, a *mat.Dense) float64 {
 }
 
 // scalarDDE returns x' = -x + b·x(t-tau) + u, y = x as an internal-delay LFT.
-func scalarDDE(t *testing.T, b, tau float64) *System {
+func scalarDDE(t testing.TB, b, tau float64) *System {
 	t.Helper()
 	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0)

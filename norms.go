@@ -25,9 +25,10 @@ const NormH2 = 2
 // The H2 norm of an unstable model is +Inf. The L∞ norm is the peak gain
 // over frequency without regard to stability; it equals the H∞ norm for
 // stable models and is +Inf when a pole lies on the stability boundary
-// (imaginary axis or unit circle). For continuous internal-delay models it is
-// computed as HinfNorm describes when the model is stable; an unstable one
-// returns ErrDelayUnsupported.
+// (imaginary axis or unit circle). For continuous internal-delay models the
+// peak is computed as HinfNorm describes, stable or not; it is +Inf when the
+// characteristic function det(sI−A)·det(I − H22(s)Δ(s)) has a root on the
+// imaginary axis, which like the rational case counts hidden modes.
 func Norm(sys *System, normType float64) (float64, error) {
 	if err := requireSystem("Norm", sys); err != nil {
 		return 0, err
@@ -333,12 +334,9 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 		return 0, 0, err
 	}
 	if sys.IsContinuous() && sys.HasInternalDelay() {
-		norm, omega, stable, err := hinfNormDelayed(sys)
+		norm, omega, err := linfNormDelayed(sys)
 		if err != nil {
 			return 0, 0, fmt.Errorf("Norm: %w", err)
-		}
-		if !stable {
-			return 0, 0, fmt.Errorf("Norm: L∞ norm of an unstable continuous internal-delay model: %w", ErrDelayUnsupported)
 		}
 		return norm, omega, nil
 	}
