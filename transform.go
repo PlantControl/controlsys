@@ -6,11 +6,13 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// SS2SS applies the state coordinate transformation x̄ = T·x, as MATLAB
+// ss2ss (R2021b and later). An explicit model becomes
+// (T·A·T⁻¹, T·B, C·T⁻¹, D); a descriptor model keeps its equations and
+// becomes (E·T⁻¹, A·T⁻¹, B, C·T⁻¹, D). Internal-delay channels transform
+// like B and C, and I/O delays carry over unchanged.
 func SS2SS(sys *System, T *mat.Dense) (*System, error) {
 	policy := newRealizationTransformPolicy(sys)
-	if err := policy.requireStandard("SS2SS"); err != nil {
-		return nil, err
-	}
 	n := policy.n
 	if n == 0 {
 		return policy.zeroOrderCopy(), nil
@@ -37,28 +39,36 @@ func SS2SS(sys *System, T *mat.Dense) (*System, error) {
 		return nil, fmt.Errorf("SS2SS: %w", ErrSingularTransform)
 	}
 
-	var tmp, A2, B2, C2 mat.Dense
-	tmp.Mul(sys.A, &Tinv)
-	A2.Mul(T, &tmp)
-	B2.Mul(T, sys.B)
-	C2.Mul(sys.C, &Tinv)
-
 	result := sys.Copy()
-	result.A = mat.DenseCopyOf(&A2)
-	result.B = mat.DenseCopyOf(&B2)
-	result.C = mat.DenseCopyOf(&C2)
+	if policy.p > 0 {
+		result.C.Mul(sys.C, &Tinv)
+	}
+	if sys.internalDelayCount() > 0 {
+		result.LFT.C2.Mul(sys.LFT.C2, &Tinv)
+	}
+	if sys.IsDescriptor() {
+		result.A.Mul(sys.A, &Tinv)
+		result.E.Mul(sys.E, &Tinv)
+		return result, nil
+	}
+	var tmp mat.Dense
+	tmp.Mul(sys.A, &Tinv)
+	result.A.Mul(T, &tmp)
+	if policy.m > 0 {
+		result.B.Mul(T, sys.B)
+	}
 	if sys.internalDelayCount() > 0 {
 		result.LFT.B2.Mul(T, sys.LFT.B2)
-		result.LFT.C2.Mul(sys.LFT.C2, &Tinv)
 	}
 	return result, nil
 }
 
+// Xperm reorders the states so that new state i is old state perm[i], as
+// MATLAB xperm: A and E become A[perm,perm] and E[perm,perm], B (and the
+// internal-delay B2) take rows perm, C (and C2) take columns perm, and
+// StateName is permuted. Delays carry over unchanged.
 func Xperm(sys *System, perm []int) (*System, error) {
 	policy := newRealizationTransformPolicy(sys)
-	if err := policy.requireStandard("Xperm"); err != nil {
-		return nil, err
-	}
 	n := policy.n
 	if len(perm) != n {
 		return nil, fmt.Errorf("Xperm: perm length %d != state dim %d: %w", len(perm), n, ErrDimensionMismatch)
@@ -78,14 +88,20 @@ func Xperm(sys *System, perm []int) (*System, error) {
 		seen[v] = true
 	}
 
-	P := mat.NewDense(n, n, nil)
-	for i, j := range perm {
-		P.Set(i, j, 1)
+	result := sys.Copy()
+	permuteSquare(result.A, sys.A, perm)
+	if sys.E != nil {
+		permuteSquare(result.E, sys.E, perm)
 	}
-
-	result, err := SS2SS(sys, P)
-	if err != nil {
-		return nil, err
+	if policy.m > 0 {
+		permuteRows(result.B, sys.B, perm)
+	}
+	if policy.p > 0 {
+		permuteCols(result.C, sys.C, perm)
+	}
+	if sys.internalDelayCount() > 0 {
+		permuteRows(result.LFT.B2, sys.LFT.B2, perm)
+		permuteCols(result.LFT.C2, sys.LFT.C2, perm)
 	}
 	if len(sys.StateName) == n {
 		for i, j := range perm {
@@ -93,4 +109,27 @@ func Xperm(sys *System, perm []int) (*System, error) {
 		}
 	}
 	return result, nil
+}
+
+func permuteSquare(dst, src *mat.Dense, perm []int) {
+	for i, pi := range perm {
+		for j, pj := range perm {
+			dst.Set(i, j, src.At(pi, pj))
+		}
+	}
+}
+
+func permuteRows(dst, src *mat.Dense, perm []int) {
+	for i, pi := range perm {
+		dst.SetRow(i, src.RawRowView(pi))
+	}
+}
+
+func permuteCols(dst, src *mat.Dense, perm []int) {
+	r, _ := src.Dims()
+	for i := range r {
+		for j, pj := range perm {
+			dst.Set(i, j, src.At(i, pj))
+		}
+	}
 }

@@ -27,11 +27,13 @@ func WithCondT(condT float64) SsbalOption {
 	}
 }
 
-// Ssbal balances a delay-free model by a diagonal similarity transformation T,
+// Ssbal balances a model by a diagonal similarity transformation T,
 // returning (T·E/T, T·A/T, T·B, C/T, D) so that the rows and columns of
 // [T·(|A|+|E|)/T, T·B; C/T, 0] have approximately equal 1-norms, as MATLAB
 // ssbal. Descriptor models are supported; E is scaled like A and an explicit
-// model keeps E nil.
+// model keeps E nil. I/O delays carry over unchanged. Internal-delay channels
+// are balanced with the I/O channels, as MATLAB balances the augmented
+// [B B2; C D; C2 0], and transform like B and C.
 //
 // The entries of T are powers of two, so the scaling is exact. As in MATLAB
 // ssbal, the states are never permuted. Diagonal entries of A and E are
@@ -46,16 +48,18 @@ func Ssbal(sys *System, opts ...SsbalOption) (*SsbalResult, error) {
 		o(&cfg)
 	}
 	policy := newRealizationTransformPolicy(sys)
-	if err := policy.requireDelayFree("Ssbal"); err != nil {
-		return nil, err
-	}
 	n, m, p := policy.n, policy.m, policy.p
 	if n == 0 {
 		eye := &mat.Dense{}
 		return &SsbalResult{Sys: policy.zeroOrderCopy(), T: eye}, nil
 	}
 
-	br := newRealizationCopy(sys, n, m, p)
+	aug, ma, pa := sys, m, p
+	if nd := sys.internalDelayCount(); nd > 0 {
+		aug = &System{A: sys.A, E: sys.E, B: augmentCols(sys.B, sys.LFT.B2, m), C: augmentRows(sys.C, sys.LFT.C2, p)}
+		ma, pa = m+nd, p+nd
+	}
+	br := newRealizationCopy(aug, n, ma, pa)
 	t := make([]float64, n)
 	for i := range t {
 		t[i] = 1
@@ -66,12 +70,21 @@ func Ssbal(sys *System, opts ...SsbalOption) (*SsbalResult, error) {
 		condT = 1
 	}
 	if boundSsbalCond(t, condT) {
-		br = newRealizationCopy(sys, n, m, p)
+		br = newRealizationCopy(aug, n, ma, pa)
 		scaleRealization(&br, t)
 	}
 
-	newSys, err := policy.result(
-		mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c), denseCopy(sys.D))
+	A := mat.NewDense(n, n, br.a)
+	Ba, Ca := denseFrom(n, ma, br.b), denseFrom(pa, n, br.c)
+	B, C := subDense(Ba, 0, 0, n, m), subDense(Ca, 0, 0, p, n)
+	var newSys *System
+	var err error
+	if ma > m {
+		newSys, err = policy.resultWithInternalDelay(A, B, C, denseCopy(sys.D),
+			subDense(Ba, 0, m, n, ma-m), subDense(Ca, p, 0, pa-p, n))
+	} else {
+		newSys, err = policy.result(A, B, C, denseCopy(sys.D))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -126,4 +139,29 @@ func scaleRealization(br *balancedRealization, t []float64) {
 			br.c[k*n+i] /= t[i]
 		}
 	}
+}
+
+func augmentCols(a, b *mat.Dense, ac int) *mat.Dense {
+	if ac == 0 {
+		return b
+	}
+	var r mat.Dense
+	r.Augment(a, b)
+	return &r
+}
+
+func augmentRows(a, b *mat.Dense, ar int) *mat.Dense {
+	if ar == 0 {
+		return b
+	}
+	var r mat.Dense
+	r.Stack(a, b)
+	return &r
+}
+
+func denseFrom(r, c int, data []float64) *mat.Dense {
+	if r == 0 || c == 0 {
+		return &mat.Dense{}
+	}
+	return mat.NewDense(r, c, data)
 }

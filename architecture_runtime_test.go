@@ -122,20 +122,11 @@ func TestRuntimeArchitectureTransformationsRejectDescriptorWorkflows(t *testing.
 		t.Fatal(err)
 	}
 	sys.E = mat.NewDense(2, 2, []float64{2, 0, 0, 1})
-	T := mat.NewDiagDense(2, []float64{1, 2})
 
 	checks := []struct {
 		name string
 		run  func() error
 	}{
-		{name: "SS2SS", run: func() error {
-			_, err := SS2SS(sys, mat.DenseCopyOf(T))
-			return err
-		}},
-		{name: "Xperm", run: func() error {
-			_, err := Xperm(sys, []int{1, 0})
-			return err
-		}},
 		{name: "Reduce", run: func() error {
 			_, err := sys.Reduce(nil)
 			return err
@@ -146,10 +137,6 @@ func TestRuntimeArchitectureTransformationsRejectDescriptorWorkflows(t *testing.
 		}},
 		{name: "Balreal", run: func() error {
 			_, err := Balreal(sys)
-			return err
-		}},
-		{name: "Prescale", run: func() error {
-			_, err := Prescale(sys)
 			return err
 		}},
 		{name: "Canon", run: func() error {
