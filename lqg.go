@@ -175,6 +175,19 @@ func lqgIntegratorStep(sys *System) float64 {
 
 func lqgServoProblem(sys *System, Q, N, QI *mat.Dense) (Aa, Ba, Qa, Na *mat.Dense) {
 	n, m, p := sys.Dims()
+	Aa, Ba = lqiAugmentation(sys)
+	Qa = mat.NewDense(n+p, n+p, nil)
+	setBlock(Qa, 0, 0, Q)
+	setBlock(Qa, n, n, QI)
+	Na = mat.NewDense(n+p, m, nil)
+	setBlock(Na, 0, 0, N)
+	return Aa, Ba, Qa, Na
+}
+
+// lqiAugmentation returns the MATLAB lqi plant augmented with the integral
+// of r - y: forward Euler with step Ts in discrete time.
+func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
+	n, m, p := sys.Dims()
 	h := lqgIntegratorStep(sys)
 	na := n + p
 	Aa = mat.NewDense(na, na, nil)
@@ -192,12 +205,7 @@ func lqgServoProblem(sys *System, Q, N, QI *mat.Dense) (Aa, Ba, Qa, Na *mat.Dens
 	var hd mat.Dense
 	hd.Scale(-h, sys.D)
 	setBlock(Ba, n, 0, &hd)
-	Qa = mat.NewDense(na, na, nil)
-	setBlock(Qa, 0, 0, Q)
-	setBlock(Qa, n, n, QI)
-	Na = mat.NewDense(na, m, nil)
-	setBlock(Na, 0, 0, N)
-	return Aa, Ba, Qa, Na
+	return Aa, Ba
 }
 
 func (res *LqgResult) currentGains(sys *System, Ba, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {

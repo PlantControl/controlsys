@@ -170,74 +170,158 @@ func TestDlqr_NonSymmetricA(t *testing.T) {
 
 // --- Lqi Tests ---
 
-func TestLqi_SISO(t *testing.T) {
-	A := mat.NewDense(2, 2, []float64{0, 1, -2, -3})
-	B := mat.NewDense(2, 1, []float64{0, 1})
-	C := mat.NewDense(1, 2, []float64{1, 0})
-	n, _ := A.Dims()
-	p, _ := C.Dims()
-	aug := n + p
-	Q := mat.NewDense(aug, aug, nil)
-	for i := range aug {
-		Q.Set(i, i, 1)
+func lqiTestWeights(n, m, p int) (Q, R, N *mat.Dense) {
+	Q = mat.NewDense(n+p, n+p, nil)
+	for i := range n + p {
+		Q.Set(i, i, 1+0.2*float64(i))
 	}
-	R := mat.NewDense(1, 1, []float64{1})
-
-	res, err := Lqi(A, B, C, Q, R, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kr, kc := res.K.Dims()
-	if kr != 1 || kc != aug {
-		t.Errorf("K dims = %dx%d, want 1x%d", kr, kc, aug)
-	}
-	for _, e := range res.Eig {
-		if real(e) >= 0 {
-			t.Errorf("non-stable eigenvalue: %v", e)
-		}
-	}
-}
-
-func TestLqi_MIMO(t *testing.T) {
-	A := mat.NewDense(3, 3, []float64{
-		-1, 1, 0,
-		0, -2, 1,
-		0, 0, -3,
-	})
-	B := mat.NewDense(3, 2, []float64{1, 0, 0, 1, 0, 0})
-	C := mat.NewDense(2, 3, []float64{1, 0, 0, 0, 1, 0})
-	n, _ := A.Dims()
-	p, _ := C.Dims()
-	_, m := B.Dims()
-	aug := n + p
-	Q := mat.NewDense(aug, aug, nil)
-	for i := range aug {
-		Q.Set(i, i, 1)
-	}
-	R := mat.NewDense(m, m, nil)
+	Q.Set(0, n, 0.1)
+	Q.Set(n, 0, 0.1)
+	Q.Set(1, 2, -0.15)
+	Q.Set(2, 1, -0.15)
+	R = mat.NewDense(m, m, nil)
 	for i := range m {
-		R.Set(i, i, 1)
+		R.Set(i, i, 1.5+0.5*float64(i))
 	}
+	R.Set(0, m-1, 0.2)
+	R.Set(m-1, 0, 0.2)
+	N = mat.NewDense(n+p, m, nil)
+	N.Set(0, 0, 0.1)
+	N.Set(n+p-1, m-1, -0.05)
+	return Q, R, N
+}
 
-	res, err := Lqi(A, B, C, Q, R, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kr, kc := res.K.Dims()
-	if kr != m || kc != aug {
-		t.Errorf("K dims = %dx%d, want %dx%d", kr, kc, m, aug)
+func TestLqi_AugmentedRiccatiOracle(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys := obsTestPlant(t, dt, false)
+		n, m, p := sys.Dims()
+		Q, R, N := lqiTestWeights(n, m, p)
+		res, err := Lqi(sys, Q, R, &RiccatiOpts{S: N})
+		if err != nil {
+			t.Fatal(err)
+		}
+		Aa, Ba, _, _, _ := lqgServoAugmented(sys, mat.NewDense(n+m, n+m, nil), eye(p))
+		lqrResidual(t, fmt.Sprintf("dt=%v", dt), dt > 0, Aa, Ba, Q, N, R, res.X, res.K)
+
+		var Acl mat.Dense
+		Acl.Mul(Ba, res.K)
+		Acl.Sub(Aa, &Acl)
+		if !complexSetsApprox(res.Eig, eigValues(t, &Acl), 1e-9) {
+			t.Errorf("dt=%v: Eig %v, want eig(Aa-Ba*K)", dt, res.Eig)
+		}
+		for _, e := range res.Eig {
+			if (dt == 0 && real(e) >= 0) || (dt > 0 && cmplx.Abs(e) >= 1) {
+				t.Errorf("dt=%v: unstable closed-loop eigenvalue %v", dt, e)
+			}
+		}
+
+		h := 1.0
+		if dt > 0 {
+			h = dt
+		}
+		Bcl := mat.NewDense(n+p, p, nil)
+		for i := range p {
+			Bcl.Set(n+i, i, h)
+		}
+		Ccl := mat.NewDense(p, n+p, nil)
+		setBlock(Ccl, 0, 0, sys.C)
+		var DK mat.Dense
+		DK.Mul(sys.D, res.K)
+		Ccl.Sub(Ccl, &DK)
+		var M, X, dc mat.Dense
+		if dt > 0 {
+			M.Sub(eye(n+p), &Acl)
+		} else {
+			M.Scale(-1, &Acl)
+		}
+		if err := X.Solve(&M, Bcl); err != nil {
+			t.Fatal(err)
+		}
+		dc.Mul(Ccl, &X)
+		dc.Sub(&dc, eye(p))
+		assertSmall(t, fmt.Sprintf("dt=%v servo DC gain - I", dt), &dc, 1e-9)
 	}
 }
 
-func TestLqi_DimError(t *testing.T) {
-	A := mat.NewDense(2, 2, nil)
-	B := mat.NewDense(2, 1, nil)
-	C := mat.NewDense(1, 3, nil) // wrong cols
-	Q := mat.NewDense(3, 3, nil)
-	R := mat.NewDense(1, 1, []float64{1})
-	_, err := Lqi(A, B, C, Q, R, nil)
-	if !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("expected ErrDimensionMismatch, got %v", err)
+func TestLqi_MatchesLqgServo(t *testing.T) {
+	QI := mat.NewDense(2, 2, []float64{2, 0.3, 0.3, 1})
+	for _, dt := range []float64{0, 0.1} {
+		sys := obsTestPlant(t, dt, false)
+		n, m, p := sys.Dims()
+		QXU, QWV := lqgCrossWeights(n, m, p)
+		lqg, err := Lqg(sys, QXU, QWV, &LqgOpts{QI: QI})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, Qa, Na, R := lqgServoAugmented(sys, QXU, QI)
+		res, err := Lqi(sys, Qa, R, &RiccatiOpts{S: Na})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertMatEqual(t, "Kx", subDense(res.K, 0, 0, m, n), lqg.K, 1e-10)
+		assertMatEqual(t, "Ki", subDense(res.K, 0, n, m, p), lqg.Ki, 1e-10)
+		assertMatEqual(t, "X", res.X, lqg.Xc, 1e-10)
+	}
+}
+
+// TestLqi_MatlabLqgDocExample checks [Kx Ki] against the servo controller of
+// the MATLAB lqg doc example, whose output matrix is -[Kx Ki].
+func TestLqi_MatlabLqgDocExample(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(3, 3, []float64{0, 1, 0, 0, 0, 1, 1, 0, 0}),
+		mat.NewDense(3, 2, []float64{0.3, 1, 0, 1, -0.3, 0.9}),
+		mat.NewDense(1, 3, []float64{1.9, 1.3, 1}),
+		mat.NewDense(1, 2, []float64{0.53, -0.61}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	Q := eye(4)
+	for i := range 3 {
+		Q.Set(i, i, 0.1)
+	}
+	res, err := Lqi(sys, Q, mat.NewDense(2, 2, []float64{1, 0, 0, 2}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLqgNear(t, "K", res.K, mat.NewDense(2, 4, []float64{
+		0.5388, 0.4173, 0.2481, -0.5578,
+		1.492, 1.388, 1.131, -0.5869}), 1e-3)
+}
+
+func TestLqi_Errors(t *testing.T) {
+	csys := obsTestPlant(t, 0, false)
+	desc := obsTestPlant(t, 0, true)
+	delayed := obsTestPlant(t, 0, false)
+	if err := delayed.SetInputDelay([]float64{0.2, 0}); err != nil {
+		t.Fatal(err)
+	}
+	asym := eye(5)
+	asym.Set(0, 4, 0.1)
+	gain, _ := NewGain(mat.NewDense(1, 1, []float64{1}), 0)
+	noOut, err := NewFromSlices(2, 2, 0, []float64{-1, 0.5, 0, -2}, []float64{1, 0, 0, 1}, nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		sys  *System
+		q, r *mat.Dense
+		want error
+	}{
+		{"Q dims", csys, eye(3), eye(2), ErrDimensionMismatch},
+		{"R dims", csys, eye(5), eye(3), ErrDimensionMismatch},
+		{"nil R", csys, eye(5), nil, ErrDimensionMismatch},
+		{"Q asymmetric", csys, asym, eye(2), ErrNotSymmetric},
+		{"R asymmetric", csys, eye(5), mat.NewDense(2, 2, []float64{1, 0.1, 0, 1}), ErrNotSymmetric},
+		{"no states", gain, eye(1), eye(1), ErrDimensionMismatch},
+		{"no outputs", noOut, eye(2), eye(2), ErrDimensionMismatch},
+		{"descriptor", desc, eye(5), eye(2), ErrDescriptorRiccati},
+		{"delay", delayed, eye(5), eye(2), ErrDelayUnsupported},
+	}
+	for _, tc := range cases {
+		if _, err := Lqi(tc.sys, tc.q, tc.r, nil); !errors.Is(err, tc.want) {
+			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.want)
+		}
 	}
 }
 
