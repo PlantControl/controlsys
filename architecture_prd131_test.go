@@ -122,11 +122,11 @@ func TestPRD131StabsepUsesConsistentDecompositionResultAssembly(t *testing.T) {
 	if sep.Unstable.InputName[0] != "u" || sep.Unstable.OutputName[0] != "y" {
 		t.Fatalf("unstable metadata = %v/%v", sep.Unstable.InputName, sep.Unstable.OutputName)
 	}
-	if math.Abs(sep.Stable.D.At(0, 0)) > 1e-12 {
-		t.Fatalf("stable feedthrough = %g, want 0", sep.Stable.D.At(0, 0))
+	if math.Abs(sep.Stable.D.At(0, 0)-2) > 1e-12 {
+		t.Fatalf("stable feedthrough = %g, want 2", sep.Stable.D.At(0, 0))
 	}
-	if math.Abs(sep.Unstable.D.At(0, 0)-2) > 1e-12 {
-		t.Fatalf("unstable feedthrough = %g, want 2", sep.Unstable.D.At(0, 0))
+	if math.Abs(sep.Unstable.D.At(0, 0)) > 1e-12 {
+		t.Fatalf("unstable feedthrough = %g, want 0", sep.Unstable.D.At(0, 0))
 	}
 	sum, err := Parallel(sep.Stable, sep.Unstable)
 	if err != nil {

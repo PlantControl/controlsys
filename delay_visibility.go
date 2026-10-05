@@ -19,6 +19,25 @@ func selectVisibleDelays(delay []float64, indexes []int) visibleDelaySelection {
 	return out
 }
 
+// selectHoistableDelays returns the delays of the selected channels that may
+// stay external because open reports them outside every feedback path, plus
+// the indexes of those channels.
+func selectHoistableDelays(delay []float64, indexes []int, open func(int) bool) (visibleDelaySelection, []int) {
+	out := visibleDelaySelection{values: make([]float64, len(indexes))}
+	var hoist []int
+	for k, idx := range indexes {
+		if !open(idx) {
+			continue
+		}
+		hoist = append(hoist, idx)
+		if delay != nil && delay[idx] != 0 {
+			out.values[k] = delay[idx]
+			out.hasNonzero = true
+		}
+	}
+	return out, hoist
+}
+
 func selectLeadingVisibleDelays(delay []float64, n int) visibleDelaySelection {
 	out := visibleDelaySelection{values: make([]float64, n)}
 	if delay == nil {

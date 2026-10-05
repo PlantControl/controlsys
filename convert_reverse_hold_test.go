@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"math/cmplx"
 	"os"
 	"plantcontrol.org/v1/gonum/mat"
 	"reflect"
@@ -325,5 +326,202 @@ func BenchmarkModifiedFOHReverseN20(b *testing.B) {
 		if _, err := sys.D2C(C2DMethodFOH); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func internalDelayDiscretePlant(t *testing.T, a []float64) *System {
+	t.Helper()
+	sys, err := New(mat.NewDense(3, 3, a),
+		mat.NewDense(3, 2, []float64{1, 0.3, -0.2, 1, 0.5, -0.4}),
+		mat.NewDense(2, 3, []float64{1, -0.3, 0.7, 0.4, 1, -0.2}),
+		mat.NewDense(2, 2, []float64{0.2, 0.1, -0.05, -0.3}), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sys.SetInternalDelay([]float64{2, 3},
+		mat.NewDense(3, 2, []float64{0.3, 0, -0.2, 0.4, 0.6, 0.1}),
+		mat.NewDense(2, 3, []float64{0.2, -0.4, 0.5, 0, 0.3, -0.1}),
+		mat.NewDense(2, 2, []float64{0.1, 0, -0.2, 0.15}),
+		mat.NewDense(2, 2, []float64{0.25, 0, 0.1, -0.2}),
+		mat.NewDense(2, 2, []float64{0.05, 0.1, 0, -0.08}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func assertDelayResponseClose(t *testing.T, label string, got, want *System, points []complex128, tol float64) {
+	t.Helper()
+	for _, s := range points {
+		g := evalDelaySystem(t, got, s, exactDelayFactor(got.Dt))
+		w := evalDelaySystem(t, want, s, exactDelayFactor(want.Dt))
+		for i := range w {
+			for j := range w[i] {
+				if cmplx.Abs(g[i][j]-w[i][j]) > tol*math.Max(1, cmplx.Abs(w[i][j])) {
+					t.Fatalf("%s: G(%v)[%d][%d] = %v, want %v", label, s, i, j, g[i][j], w[i][j])
+				}
+			}
+		}
+		lib, err := got.EvalFr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range g {
+			for j := range g[i] {
+				if cmplx.Abs(lib[i][j]-g[i][j]) > tol*math.Max(1, cmplx.Abs(g[i][j])) {
+					t.Fatalf("%s: EvalFr(%v)[%d][%d] = %v, closure %v", label, s, i, j, lib[i][j], g[i][j])
+				}
+			}
+		}
+	}
+}
+
+func unitCirclePoints(dt float64) []complex128 {
+	var out []complex128
+	for _, w := range []float64{0.3, 2, 9, 25} {
+		out = append(out, cmplx.Exp(complex(0, w*dt)))
+	}
+	return out
+}
+
+func TestD2CHoldInternalDelayRoundTrip(t *testing.T) {
+	sys := internalDelayDiscretePlant(t, []float64{0.6, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
+	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
+		cont, err := sys.D2C(method)
+		if err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+		if math.Abs(cont.LFT.Tau[0]-0.2) > 1e-15 || math.Abs(cont.LFT.Tau[1]-0.3) > 1e-15 {
+			t.Fatalf("%s: tau = %v, want [0.2 0.3]", method, cont.LFT.Tau)
+		}
+		back, err := cont.DiscretizeWithOpts(sys.Dt, C2DOptions{Method: method})
+		if err != nil {
+			t.Fatalf("%s c2d: %v", method, err)
+		}
+		if !reflect.DeepEqual(back.LFT.Tau, sys.LFT.Tau) {
+			t.Fatalf("%s: tau back = %v", method, back.LFT.Tau)
+		}
+		for name, pair := range map[string][2]*mat.Dense{
+			"A": {back.A, sys.A}, "B": {back.B, sys.B}, "C": {back.C, sys.C}, "D": {back.D, sys.D},
+			"B2": {back.LFT.B2, sys.LFT.B2}, "C2": {back.LFT.C2, sys.LFT.C2},
+			"D12": {back.LFT.D12, sys.LFT.D12}, "D21": {back.LFT.D21, sys.LFT.D21}, "D22": {back.LFT.D22, sys.LFT.D22},
+		} {
+			assertMatClose(t, string(method)+" "+name, pair[0], pair[1], 1e-12)
+		}
+		assertDelayResponseClose(t, string(method)+" round trip", back, sys, unitCirclePoints(sys.Dt), 1e-11)
+	}
+}
+
+func TestD2CZOHInternalDelayMatchesHoldExponential(t *testing.T) {
+	sys := internalDelayDiscretePlant(t, []float64{0.6, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
+	cont, err := sys.D2C(C2DMethodZOH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n, q = 3, 4
+	m := mat.NewDense(n+q, n+q, nil)
+	m.Slice(0, n, 0, n).(*mat.Dense).Scale(sys.Dt, cont.A)
+	m.Slice(0, n, n, n+2).(*mat.Dense).Scale(sys.Dt, cont.B)
+	m.Slice(0, n, n+2, n+q).(*mat.Dense).Scale(sys.Dt, cont.LFT.B2)
+	var e mat.Dense
+	e.Exp(m)
+	assertMatClose(t, "exp A", mat.DenseCopyOf(e.Slice(0, n, 0, n)), sys.A, 1e-13)
+	assertMatClose(t, "exp B", mat.DenseCopyOf(e.Slice(0, n, n, n+2)), sys.B, 1e-13)
+	assertMatClose(t, "exp B2", mat.DenseCopyOf(e.Slice(0, n, n+2, n+q)), sys.LFT.B2, 1e-13)
+	for name, pair := range map[string][2]*mat.Dense{
+		"C": {cont.C, sys.C}, "D": {cont.D, sys.D}, "C2": {cont.LFT.C2, sys.LFT.C2},
+		"D12": {cont.LFT.D12, sys.LFT.D12}, "D21": {cont.LFT.D21, sys.LFT.D21}, "D22": {cont.LFT.D22, sys.LFT.D22},
+	} {
+		assertMatClose(t, name, pair[0], pair[1], 0)
+	}
+	assertDelayResponseClose(t, "continuous closure", cont, cont, []complex128{0.4i, 3i, 0.5 + 12i}, 1e-11)
+}
+
+func TestD2CZOHInternalDelayNegativePole(t *testing.T) {
+	sys := internalDelayDiscretePlant(t, []float64{-0.4, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
+	cont, err := sys.D2C(C2DMethodZOH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, _ := cont.Dims(); n <= 3 {
+		t.Fatalf("negative real pole should add extension states, got n=%d", n)
+	}
+	back, err := cont.DiscretizeZOH(sys.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDelayResponseClose(t, "negative pole round trip", back, sys, unitCirclePoints(sys.Dt), 1e-10)
+}
+
+func TestD2DInternalDelay(t *testing.T) {
+	sys := internalDelayDiscretePlant(t, []float64{0.6, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
+	fast, err := sys.D2D(0.05, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fast.LFT.Tau, []float64{4, 6}) {
+		t.Fatalf("tau = %v, want [4 6]", fast.LFT.Tau)
+	}
+	back, err := fast.D2D(0.1, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDelayResponseClose(t, "D2D 0.1→0.05→0.1", back, sys, unitCirclePoints(sys.Dt), 1e-10)
+}
+
+func TestD2CInternalDelayDescriptor(t *testing.T) {
+	desc, oracle := index1Descriptor(t, 0.1, true)
+	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
+		got, err := desc.D2C(method)
+		if err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+		want, err := oracle.D2C(method)
+		if err != nil {
+			t.Fatalf("%s oracle: %v", method, err)
+		}
+		assertDelayResponseClose(t, "descriptor "+string(method), got, want, []complex128{0.4i, 3i, 0.5 + 12i}, 1e-10)
+		back, err := got.DiscretizeWithOpts(0.1, C2DOptions{Method: method})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertDelayResponseClose(t, "descriptor round trip "+string(method), back, oracle, unitCirclePoints(0.1), 1e-10)
+	}
+	got, err := desc.D2D(0.05, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := oracle.D2D(0.05, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDelayResponseClose(t, "descriptor D2D", got, want, unitCirclePoints(0.05), 1e-10)
+}
+
+func TestD2CWithResultInternalDelayHold(t *testing.T) {
+	sys := internalDelayDiscretePlant(t, []float64{0.6, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
+	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
+		inverse, err := sys.D2CWithResult(D2COptions{Method: method})
+		if err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+		if !inverse.Approximate {
+			t.Errorf("%s: internal-delay hold inverse must be flagged approximate", method)
+		}
+		want := mat.NewDense(3, 7, nil)
+		for i := range 3 {
+			want.Set(i, i, 1)
+		}
+		if method == C2DMethodFOH {
+			want.Slice(0, 3, 3, 7).(*mat.Dense).Copy(holdTestGamma1(conversionAugmentedRational(inverse.System), sys.Dt))
+		}
+		assertMatClose(t, string(method)+" inverse state map", inverse.InitialStateMap, want, 1e-9)
+		forward, err := inverse.System.DiscretizeWithResult(sys.Dt, C2DOptions{Method: method})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sum mat.Dense
+		sum.Add(forward.InitialStateMap.Slice(0, 3, 3, 7), inverse.InitialStateMap.Slice(0, 3, 3, 7))
+		assertMatClose(t, string(method)+" forward∘inverse input columns", &sum, mat.NewDense(3, 4, nil), 1e-12)
 	}
 }

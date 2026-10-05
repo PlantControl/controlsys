@@ -7,6 +7,12 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// PrescaleResult holds the output of [Prescale].
+//
+// StateScale is the diagonal of MATLAB's info.SR (TR = diag(StateScale),
+// TL = TR⁻¹ for explicit models). InputScale and OutputScale are suggested
+// normalizations (reciprocal of the largest magnitude in each column of
+// [Bs; D] and each row of [Cs D]); they are not applied to Sys.
 type PrescaleResult struct {
 	Sys  *System
 	Info struct {
@@ -16,6 +22,14 @@ type PrescaleResult struct {
 	}
 }
 
+// Prescale scales the state vector of sys to improve the accuracy of
+// frequency-domain computations, matching MATLAB prescale for explicit
+// state-space models: with T = diag(Info.StateScale),
+//
+//	As = T⁻¹AT, Bs = T⁻¹B, Cs = CT, Ds = D.
+//
+// The state order is preserved, so Sys has the same response, state names,
+// and metadata as sys. Descriptor and delayed models are rejected.
 func Prescale(sys *System) (*PrescaleResult, error) {
 	policy := newRealizationTransformPolicy(sys)
 	if err := policy.requireStandard("Prescale"); err != nil {
@@ -38,7 +52,7 @@ func Prescale(sys *System) (*PrescaleResult, error) {
 	copyStrided(aData, n, aRaw.Data, aRaw.Stride, n, n)
 
 	scale := make([]float64, n)
-	impl.Dgebal(lapack.PermuteScale, n, aData, n, scale)
+	impl.Dgebal(lapack.Scale, n, aData, n, scale)
 
 	stateScale := make([]float64, n)
 	copy(stateScale, scale)
@@ -106,6 +120,8 @@ func Prescale(sys *System) (*PrescaleResult, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	propagateNames(scaled, sys)
 
 	result := &PrescaleResult{Sys: scaled}
 	result.Info.StateScale = stateScale

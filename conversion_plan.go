@@ -23,7 +23,7 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 	if sys.IsDiscrete() {
 		return c2dPlan{}, fmt.Errorf("DiscretizeWithOpts: system already discrete: %w", ErrWrongDomain)
 	}
-	sys, err := conversionStandardForm(sys, "DiscretizeWithOpts")
+	sys, _, err := conversionStandardForm(sys, "DiscretizeWithOpts")
 	if err != nil {
 		return c2dPlan{}, err
 	}
@@ -152,7 +152,7 @@ func newD2CPlan(sys *System, opts D2COptions) (d2cPlan, error) {
 	if err := validatePrewarp(sys.Dt, opts.Method, opts.PrewarpFrequency); err != nil {
 		return d2cPlan{}, err
 	}
-	sys, err := conversionStandardForm(sys, "D2C")
+	sys, _, err := conversionStandardForm(sys, "D2C")
 	if err != nil {
 		return d2cPlan{}, err
 	}
@@ -216,5 +216,8 @@ func (p d2dPlan) run() (*System, error) {
 		return nil, fmt.Errorf("D2D: %w", err)
 	}
 	propagateNames(result, p.sys)
+	if n, _, _ := result.Dims(); len(result.StateName) != n {
+		result.StateName = nil
+	}
 	return result, nil
 }

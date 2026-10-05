@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -127,6 +128,51 @@ func TestLoopsens_MIMO_SiNotEqualSo(t *testing.T) {
 			if cmplx.Abs(sumI-eye) > 1e-6 {
 				t.Errorf("(Si+Ti)[%d][%d] = %v, want %v", i, j, sumI, eye)
 			}
+		}
+	}
+}
+
+func TestLoopsensDelayedLoopOracle(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, kk := range []string{"in", "out", "iod"} {
+			P := feedbackDelayPlant(t, dt, "in")
+			C := feedbackDelayController(t, dt, kk)
+			ls, err := Loopsens(P, C)
+			if err != nil {
+				t.Fatalf("dt=%v K=%s: %v", dt, kk, err)
+			}
+			f := exactDelayFactor(dt)
+			sens := func(L [][]complex128, comp bool) [][]complex128 {
+				n := len(L)
+				ImL := make([][]complex128, n)
+				for i := range n {
+					ImL[i] = make([]complex128, n)
+					for j := range n {
+						ImL[i][j] = L[i][j]
+					}
+					ImL[i][i] += 1
+				}
+				rhs := cmatOf(nil, n, n)
+				for i := range n {
+					rhs[i][i] = 1
+				}
+				S := csolve(t, ImL, rhs)
+				if comp {
+					return cmul(L, S)
+				}
+				return S
+			}
+			Lo := func(s complex128) [][]complex128 {
+				return cmul(evalDelaySystem(t, P, s, f), evalDelaySystem(t, C, s, f))
+			}
+			Li := func(s complex128) [][]complex128 {
+				return cmul(evalDelaySystem(t, C, s, f), evalDelaySystem(t, P, s, f))
+			}
+			lbl := fmt.Sprintf("dt=%v K=%s", dt, kk)
+			assertResponseOracle(t, lbl+" So", ls.So, func(s complex128) [][]complex128 { return sens(Lo(s), false) })
+			assertResponseOracle(t, lbl+" To", ls.To, func(s complex128) [][]complex128 { return sens(Lo(s), true) })
+			assertResponseOracle(t, lbl+" Si", ls.Si, func(s complex128) [][]complex128 { return sens(Li(s), false) })
+			assertResponseOracle(t, lbl+" Ti", ls.Ti, func(s complex128) [][]complex128 { return sens(Li(s), true) })
 		}
 	}
 }

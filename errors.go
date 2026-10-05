@@ -15,6 +15,8 @@ var (
 	ErrFractionalDelay      = errors.New("controlsys: discrete delay must be non-negative integer")
 	ErrNonUniformInputDelay = errors.New("controlsys: AbsorbDelay requires uniform delay per input column")
 
+	ErrFixedInputDelayMismatch = errors.New("controlsys: nonzero fixed inputs must share input and I/O delays")
+
 	ErrZeroInternalDelay = errors.New("controlsys: internal delay must be positive (tau=0 creates algebraic loop)")
 
 	ErrInternalDelayUnsupported = errors.New("controlsys: operation does not support internal delays; use AbsorbDelay or Pade first")
@@ -25,6 +27,8 @@ var (
 	ErrDomainMismatch  = errors.New("controlsys: systems must share the same time domain")
 	ErrFeedbackDelay   = errors.New("controlsys: feedback with delays not supported")
 	ErrMixedDelayTypes = errors.New("controlsys: InternalDelay and IODelay cannot coexist")
+
+	ErrInternalDelayImpulse = errors.New("controlsys: continuous impulse response undefined: input feeds an internal delay directly (D21 != 0)")
 
 	ErrNotSymmetric     = errors.New("controlsys: matrix must be symmetric")
 	ErrNotPSD           = errors.New("controlsys: Q matrix must be positive semi-definite")
@@ -51,9 +55,14 @@ var (
 	ErrInvalidPartition = errors.New("controlsys: invalid generalized plant partition dimensions")
 	ErrNoFiniteH2Norm   = errors.New("controlsys: H2 synthesis requires D11 = 0")
 	// Deprecated: H2Syn handles D22 != 0 by loop shifting and no longer returns this error.
-	ErrH2DirectFeedthrough   = errors.New("controlsys: H2 synthesis requires D22 = 0")
-	ErrGammaNotAchievable    = errors.New("controlsys: no stabilizing controller exists for given gamma")
-	ErrDescriptorSingular    = errors.New("controlsys: descriptor matrix E is singular")
-	ErrDescriptorRiccati     = errors.New("controlsys: standard Riccati solvers do not support descriptor systems (E != I)")
-	ErrDescriptorUnsupported = errors.New("controlsys: operation does not support descriptor systems (E != I)")
+	ErrH2DirectFeedthrough    = errors.New("controlsys: H2 synthesis requires D22 = 0")
+	ErrGammaNotAchievable     = errors.New("controlsys: no stabilizing controller exists for given gamma")
+	ErrDescriptorSingular     = errors.New("controlsys: descriptor matrix E is singular")
+	ErrDescriptorRiccati      = errors.New("controlsys: standard Riccati solvers do not support descriptor systems (E != I)")
+	ErrDescriptorUnsupported  = errors.New("controlsys: operation does not support descriptor systems (E != I)")
+	ErrImproperModel          = errors.New("controlsys: cannot simulate the time response of improper models")
+	ErrDescriptorInitialState = errors.New("controlsys: cannot simulate state trajectory for models with singular E matrix")
+	ErrDelayUnsupported       = errors.New("controlsys: operation does not support this delay structure")
+	ErrOptionUnsupported      = errors.New("controlsys: option not supported by this operation")
+	ErrNoiseFeedthrough       = errors.New("controlsys: noise inputs must not feed through to outputs (D != 0)")
 )

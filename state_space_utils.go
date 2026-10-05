@@ -81,15 +81,20 @@ func (sys *System) StateTransform(T *mat.Dense) (*System, error) {
 	return SS2SS(sys, T)
 }
 
+// FixedInputReduction holds the inputs in fixed at constant values and returns
+// a model whose inputs are the remaining inputs, in order, followed by one
+// offset input. Driving the offset input with 1 reproduces the original
+// response; its channel is Σ fixed[j]·H(:,j). Descriptor E, internal delays,
+// output delays and names carry over. Nonzero fixed inputs must share the same
+// InputDelay and IODelay column, which the offset input inherits; otherwise
+// ErrFixedInputDelayMismatch is returned. An empty fixed map returns a copy
+// without an offset input.
 func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string) (*System, error) {
 	if sys == nil {
 		return nil, fmt.Errorf("FixedInputReduction: nil system: %w", ErrDimensionMismatch)
 	}
 	if len(fixed) == 0 {
 		return sys.Copy(), nil
-	}
-	if err := newDescriptorPolicy(sys).requireStandard("FixedInputReduction"); err != nil {
-		return nil, err
 	}
 	n, m, p := sys.Dims()
 	keep := make([]int, 0, m-len(fixed))
@@ -100,59 +105,114 @@ func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string)
 		}
 		fixedSeen[idx] = true
 	}
+	ref := -1
 	for j := range m {
 		if !fixedSeen[j] {
 			keep = append(keep, j)
+			continue
+		}
+		if fixed[j] == 0 {
+			continue
+		}
+		if ref < 0 {
+			ref = j
+		} else if !sameInputDelays(sys, ref, j) {
+			return nil, fmt.Errorf("FixedInputReduction: inputs %d and %d: %w", ref, j, ErrFixedInputDelayMismatch)
 		}
 	}
 
 	mNew := len(keep) + 1
-	B := mat.NewDense(n, mNew, nil)
-	D := mat.NewDense(p, mNew, nil)
-	bRaw := B.RawMatrix()
-	dRaw := D.RawMatrix()
-	srcBRaw := sys.B.RawMatrix()
-	srcDRaw := sys.D.RawMatrix()
-	for outCol, inCol := range keep {
-		for i := range n {
-			bRaw.Data[i*bRaw.Stride+outCol] = srcBRaw.Data[i*srcBRaw.Stride+inCol]
-		}
-		for i := range p {
-			dRaw.Data[i*dRaw.Stride+outCol] = srcDRaw.Data[i*srcDRaw.Stride+inCol]
-		}
-	}
-	offsetCol := len(keep)
-	for inCol, value := range fixed {
-		for i := range n {
-			bRaw.Data[i*bRaw.Stride+offsetCol] += srcBRaw.Data[i*srcBRaw.Stride+inCol] * value
-		}
-		for i := range p {
-			dRaw.Data[i*dRaw.Stride+offsetCol] += srcDRaw.Data[i*srcDRaw.Stride+inCol] * value
-		}
-	}
-
-	result, err := newNoCopy(denseCopy(sys.A), B, denseCopy(sys.C), D, sys.Dt)
+	result, err := newNoCopy(denseCopy(sys.A), selectColumnsWithOffset(sys.B, n, keep, fixed), denseCopy(sys.C), selectColumnsWithOffset(sys.D, p, keep, fixed), sys.Dt)
 	if err != nil {
 		return nil, err
 	}
 	result.E = copyDescriptorE(sys.E)
-	result.Delay = selectInputDelayWithOffset(sys.Delay, keep, p, mNew)
-	result.InputDelay = selectDelaySliceWithOffset(sys.InputDelay, keep)
+	if sys.Delay != nil {
+		result.Delay = mat.NewDense(p, mNew, nil)
+		for i := range p {
+			for c, j := range keep {
+				result.Delay.Set(i, c, sys.Delay.At(i, j))
+			}
+			if ref >= 0 {
+				result.Delay.Set(i, len(keep), sys.Delay.At(i, ref))
+			}
+		}
+	}
+	if sys.InputDelay != nil {
+		result.InputDelay = selectDelaySlice(sys.InputDelay, keep)
+		offsetDelay := 0.0
+		if ref >= 0 {
+			offsetDelay = sys.InputDelay[ref]
+		}
+		result.InputDelay = append(result.InputDelay, offsetDelay)
+	}
 	result.OutputDelay = copySliceOrNil(sys.OutputDelay)
 	if sys.LFT != nil {
+		N := len(sys.LFT.Tau)
 		result.LFT = &LFTDelay{
 			Tau: append([]float64(nil), sys.LFT.Tau...),
 			B2:  copyDelayOrNil(sys.LFT.B2),
 			C2:  copyDelayOrNil(sys.LFT.C2),
-			D12: selectLFTD12Columns(sys.LFT.D12, keep),
-			D21: copyDelayOrNil(sys.LFT.D21),
+			D12: copyDelayOrNil(sys.LFT.D12),
+			D21: selectColumnsWithOffset(sys.LFT.D21, N, keep, fixed),
 			D22: copyDelayOrNil(sys.LFT.D22),
 		}
 	}
-	result.InputName = append(selectStringSlice(sys.InputName, keep), offsetName)
+	if sys.InputName != nil || offsetName != "" {
+		names := selectStringSlice(sys.InputName, keep)
+		if names == nil {
+			names = make([]string, len(keep), mNew)
+		}
+		result.InputName = append(names, offsetName)
+	}
 	result.OutputName = copyStringSlice(sys.OutputName)
 	result.StateName = copyStringSlice(sys.StateName)
 	return result, nil
+}
+
+func sameInputDelays(sys *System, a, b int) bool {
+	if sys.InputDelay != nil && sys.InputDelay[a] != sys.InputDelay[b] {
+		return false
+	}
+	if sys.Delay != nil {
+		p, _ := sys.Delay.Dims()
+		for i := range p {
+			if sys.Delay.At(i, a) != sys.Delay.At(i, b) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// selectColumnsWithOffset returns [src(:,keep) Σ fixed[j]·src(:,j)].
+func selectColumnsWithOffset(src *mat.Dense, rows int, keep []int, fixed map[int]float64) *mat.Dense {
+	if src == nil {
+		return nil
+	}
+	cols := len(keep) + 1
+	if rows == 0 {
+		return &mat.Dense{}
+	}
+	out := mat.NewDense(rows, cols, nil)
+	outRaw := out.RawMatrix()
+	srcRaw := src.RawMatrix()
+	for c, j := range keep {
+		for i := range rows {
+			outRaw.Data[i*outRaw.Stride+c] = srcRaw.Data[i*srcRaw.Stride+j]
+		}
+	}
+	_, m := src.Dims()
+	for j := range m {
+		v, ok := fixed[j]
+		if !ok || v == 0 {
+			continue
+		}
+		for i := range rows {
+			outRaw.Data[i*outRaw.Stride+len(keep)] += srcRaw.Data[i*srcRaw.Stride+j] * v
+		}
+	}
+	return out
 }
 
 // AugmentInternalDelayOutputs appends the internal-delay input signals
@@ -198,40 +258,6 @@ func selectDelaySlice(values []float64, indices []int) []float64 {
 	out := make([]float64, len(indices))
 	for i, idx := range indices {
 		out[i] = values[idx]
-	}
-	return out
-}
-
-func selectDelaySliceWithOffset(values []float64, indices []int) []float64 {
-	if values == nil {
-		return nil
-	}
-	return append(selectDelaySlice(values, indices), 0)
-}
-
-func selectInputDelayWithOffset(delay *mat.Dense, inputs []int, p, mNew int) *mat.Dense {
-	if delay == nil {
-		return nil
-	}
-	out := mat.NewDense(p, mNew, nil)
-	for i := range p {
-		for j, idx := range inputs {
-			out.Set(i, j, delay.At(i, idx))
-		}
-	}
-	return out
-}
-
-func selectLFTD12Columns(D12 *mat.Dense, inputs []int) *mat.Dense {
-	if D12 == nil {
-		return nil
-	}
-	r, _ := D12.Dims()
-	out := mat.NewDense(r, len(inputs)+1, nil)
-	for i := range r {
-		for j, idx := range inputs {
-			out.Set(i, j, D12.At(i, idx))
-		}
 	}
 	return out
 }

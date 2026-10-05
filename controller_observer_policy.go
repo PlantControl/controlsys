@@ -22,6 +22,9 @@ func newControllerObserverPolicy(sys *System, context string) (controllerObserve
 	if err := requireStandardEstimatorSystem(sys, context); err != nil {
 		return controllerObserverPolicy{}, err
 	}
+	if sys.HasDelay() {
+		return controllerObserverPolicy{}, fmt.Errorf("%s: %w", context, ErrDelayUnsupported)
+	}
 	return controllerObserverPolicy{sys: sys, context: context, n: n, m: m, p: p}, nil
 }
 

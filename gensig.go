@@ -6,14 +6,14 @@ import (
 )
 
 func GenSig(sigType string, period, dt float64) (t, u []float64, err error) {
-	if period <= 0 {
-		return nil, nil, fmt.Errorf("GenSig: period must be positive")
+	if !(period > 0) || math.IsInf(period, 1) {
+		return nil, nil, fmt.Errorf("GenSig: period must be positive and finite")
 	}
-	if dt <= 0 {
-		return nil, nil, fmt.Errorf("GenSig: dt must be positive")
+	if !(dt > 0) || math.IsInf(dt, 1) {
+		return nil, nil, fmt.Errorf("GenSig: dt must be positive and finite")
 	}
 
-	steps := int(period/dt) + 1
+	steps := gridSampleCount(period, dt)
 	t = make([]float64, steps)
 	u = make([]float64, steps)
 
@@ -32,8 +32,9 @@ func GenSig(sigType string, period, dt float64) (t, u []float64, err error) {
 		}
 	case "square":
 		for k := range u {
-			v := math.Sin(2 * math.Pi * t[k] / period)
-			if v >= 0 {
+			phase := t[k] / period
+			phase -= math.Floor(phase + gridTol)
+			if phase < 0.5-gridTol {
 				u[k] = 1
 			} else {
 				u[k] = -1

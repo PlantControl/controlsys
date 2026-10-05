@@ -495,3 +495,108 @@ func TestStabsep_ComplexPairNonNormalSumExact(t *testing.T) {
 		assertSplitSum(t, "Modsep", sys, mres.Slow, mres.Fast)
 	}
 }
+
+// singularSplitFixture builds E x' = A x + B u from a modal form with one
+// finite eigenvalue lambdaIn, one lambdaOut and an index-2 nilpotent block,
+// mixed by nonsymmetric P, Q. modalPart(s, k) returns the closed-form
+// response of finite mode k; polyPart(s) the improper part.
+func singularSplitFixture(t *testing.T, lambdaIn, lambdaOut, dt float64) (sys *System, modalPart func(complex128, int) [][]complex128, polyPart func(complex128) [][]complex128) {
+	t.Helper()
+	A0 := mat.NewDense(4, 4, nil)
+	A0.Set(0, 0, lambdaIn)
+	A0.Set(1, 1, lambdaOut)
+	A0.Set(2, 2, 1)
+	A0.Set(3, 3, 1)
+	E0 := mat.NewDense(4, 4, nil)
+	E0.Set(0, 0, 1)
+	E0.Set(1, 1, 1)
+	E0.Set(2, 3, 1)
+	B0 := mat.NewDense(4, 2, []float64{1, -0.5, 0.3, 1.2, 0.8, -0.4, 0.6, 0.9})
+	C0 := mat.NewDense(2, 4, []float64{1, 0.4, -0.7, 0.2, -0.3, 1.1, 0.5, 1.4})
+	D := mat.NewDense(2, 2, []float64{0.1, 0, -0.2, 0.3})
+	P := mat.NewDense(4, 4, []float64{1, 0.3, 0, 0.2, 0, 1.2, 0.4, 0, 0.5, 0, 0.9, 0.1, -0.2, 0.1, 0, 1.1})
+	Q := mat.NewDense(4, 4, []float64{0.8, 0, 0.1, -0.4, 0.3, 1.1, 0, 0.2, 0, 0.5, 1, 0, 0.2, 0, -0.1, 0.9})
+	var Qi mat.Dense
+	if err := Qi.Inverse(Q); err != nil {
+		t.Fatal(err)
+	}
+	var PA, A, PE, E, B, C mat.Dense
+	PA.Mul(P, A0)
+	A.Mul(&PA, &Qi)
+	PE.Mul(P, E0)
+	E.Mul(&PE, &Qi)
+	B.Mul(P, B0)
+	C.Mul(C0, &Qi)
+	sys, err := NewDescriptor(&A, &B, &C, D, &E, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lambda := []float64{lambdaIn, lambdaOut}
+	modalPart = func(s complex128, k int) [][]complex128 {
+		g := make([][]complex128, 2)
+		for i := range 2 {
+			g[i] = make([]complex128, 2)
+			for j := range 2 {
+				g[i][j] = complex(C0.At(i, k)*B0.At(k, j), 0) / (s - complex(lambda[k], 0))
+			}
+		}
+		return g
+	}
+	polyPart = func(s complex128) [][]complex128 {
+		g := make([][]complex128, 2)
+		for i := range 2 {
+			g[i] = make([]complex128, 2)
+			for j := range 2 {
+				g[i][j] = -complex(C0.At(i, 2), 0)*(s*complex(B0.At(3, j), 0)+complex(B0.At(2, j), 0)) - complex(C0.At(i, 3)*B0.At(3, j), 0)
+			}
+		}
+		return g
+	}
+	return sys, modalPart, polyPart
+}
+
+func assertResponseParts(t *testing.T, label string, got *System, d *mat.Dense, parts ...func(complex128) [][]complex128) {
+	t.Helper()
+	for _, s := range []complex128{complex(0.3, 0.7), complex(-0.2, 2.5), complex(1.7, -0.4)} {
+		g := pencilResponse(t, got, s)
+		for i := range g {
+			for j := range g[i] {
+				want := complex(0, 0)
+				if d != nil {
+					want = complex(d.At(i, j), 0)
+				}
+				for _, part := range parts {
+					want += part(s)[i][j]
+				}
+				if diff := cmplx.Abs(g[i][j] - want); diff > 1e-9*(1+cmplx.Abs(want)) {
+					t.Fatalf("%s: response mismatch at s=%v [%d,%d]: got %v want %v", label, s, i, j, g[i][j], want)
+				}
+			}
+		}
+	}
+}
+
+func TestStabsep_SingularDescriptor(t *testing.T) {
+	for _, tc := range []struct {
+		dt, stable, unstable float64
+	}{
+		{0, -1.3, 0.6},
+		{0.1, 0.4, 1.7},
+	} {
+		sys, modal, poly := singularSplitFixture(t, tc.stable, tc.unstable, tc.dt)
+		res, err := Stabsep(sys)
+		if err != nil {
+			t.Fatalf("dt=%v: %v", tc.dt, err)
+		}
+		if ns, _, _ := res.Stable.Dims(); ns != 1 || res.Stable.IsDescriptor() {
+			t.Fatalf("dt=%v: stable part order %d descriptor=%v, want explicit order 1", tc.dt, ns, res.Stable.IsDescriptor())
+		}
+		poles, err := res.Stable.Poles()
+		if err != nil || len(poles) != 1 || cmplx.Abs(poles[0]-complex(tc.stable, 0)) > 1e-10 {
+			t.Fatalf("dt=%v: stable poles %v err %v, want %v", tc.dt, poles, err, tc.stable)
+		}
+		assertResponseParts(t, "stable part", res.Stable, sys.D, func(s complex128) [][]complex128 { return modal(s, 0) })
+		assertResponseParts(t, "unstable part", res.Unstable, nil, func(s complex128) [][]complex128 { return modal(s, 1) }, poly)
+		assertSplitSum(t, "Stabsep singular E", sys, res.Stable, res.Unstable)
+	}
+}

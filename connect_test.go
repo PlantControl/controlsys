@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"slices"
@@ -1721,17 +1722,16 @@ func TestFeedback_LFT_InputDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cl.HasInternalDelay() {
-		t.Error("plant InputDelay should stay external, not become internal")
+	if cl.InputDelay != nil || !cl.HasInternalDelay() || len(cl.LFT.Tau) != 1 || cl.LFT.Tau[0] != 3 {
+		t.Errorf("plant InputDelay must become internal: InputDelay=%v internal=%v", cl.InputDelay, cl.LFT)
 	}
-	if cl.InputDelay == nil || len(cl.InputDelay) != 1 || cl.InputDelay[0] != 3 {
-		t.Errorf("InputDelay = %v, want [3]", cl.InputDelay)
-	}
-	n, m, p := cl.Dims()
+	_, m, p := cl.Dims()
 	if m != 1 || p != 1 {
 		t.Errorf("dims m=%d p=%d, want 1,1", m, p)
 	}
-	_ = n
+	assertResponseOracle(t, "feedback", cl, func(s complex128) [][]complex128 {
+		return closedLoopOracle(t, plant, controller, -1, s)
+	})
 }
 
 func TestFeedback_LFT_OutputDelay(t *testing.T) {
@@ -1779,15 +1779,15 @@ func TestFeedback_LFT_BothDelayed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cl.HasInternalDelay() {
-		t.Error("controller OutputDelay should become internal")
+	if !cl.HasInternalDelay() || len(cl.LFT.Tau) != 2 {
+		t.Fatalf("plant InputDelay and controller OutputDelay must both become internal: %v", cl.LFT)
 	}
-	if len(cl.LFT.Tau) != 1 {
-		t.Errorf("expected 1 internal delay (controller OutputDelay), got %d", len(cl.LFT.Tau))
+	if cl.InputDelay != nil {
+		t.Errorf("plant InputDelay left external: %v", cl.InputDelay)
 	}
-	if cl.InputDelay == nil || cl.InputDelay[0] != 2 {
-		t.Errorf("plant InputDelay should stay external: got %v, want [2]", cl.InputDelay)
-	}
+	assertResponseOracle(t, "feedback", cl, func(s complex128) [][]complex128 {
+		return closedLoopOracle(t, plant, controller, -1, s)
+	})
 }
 
 func TestFeedback_LFT_NoDelay_Unchanged(t *testing.T) {
@@ -1855,15 +1855,15 @@ func TestFeedback_LFT_PositiveFeedback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cl.HasInternalDelay() {
-		t.Error("plant InputDelay should stay external, not become internal")
+	if cl.InputDelay != nil || !cl.HasInternalDelay() {
+		t.Errorf("plant InputDelay must become internal: InputDelay=%v internal=%v", cl.InputDelay, cl.LFT)
 	}
-	if cl.InputDelay == nil || cl.InputDelay[0] != 2 {
-		t.Errorf("plant InputDelay should stay external: got %v, want [2]", cl.InputDelay)
-	}
+	assertResponseOracle(t, "positive feedback", cl, func(s complex128) [][]complex128 {
+		return closedLoopOracle(t, plant, controller, 1, s)
+	})
 }
 
-func TestFeedbackKeepsInputDelay(t *testing.T) {
+func TestFeedbackMovesInputDelayInsideLoop(t *testing.T) {
 	plant, _ := New(
 		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
 		mat.NewDense(2, 1, []float64{0, 1}),
@@ -1879,16 +1879,15 @@ func TestFeedbackKeepsInputDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cl.InputDelay == nil || cl.InputDelay[0] != 5 {
-		t.Errorf("plant InputDelay should stay external: got %v, want [5]", cl.InputDelay)
+	if cl.InputDelay != nil || cl.OutputDelay != nil {
+		t.Errorf("plant delays left external: in=%v out=%v", cl.InputDelay, cl.OutputDelay)
 	}
-	if !cl.HasInternalDelay() {
-		t.Fatal("plant OutputDelay should become internal delay")
+	if !cl.HasInternalDelay() || !slices.Contains(cl.LFT.Tau, 5) || !slices.Contains(cl.LFT.Tau, 2) {
+		t.Fatalf("internal delays should contain 5 and 2, got %v", cl.LFT)
 	}
-	found := slices.Contains(cl.LFT.Tau, 2)
-	if !found {
-		t.Errorf("InternalDelay should contain 2 (from OutputDelay), got %v", cl.LFT.Tau)
-	}
+	assertResponseOracle(t, "feedback", cl, func(s complex128) [][]complex128 {
+		return closedLoopOracle(t, plant, controller, -1, s)
+	})
 }
 
 func TestSeriesKeepsExternalDelays(t *testing.T) {
@@ -2688,5 +2687,122 @@ func TestAppend_MixedLFTAndPlain(t *testing.T) {
 	n, m, p := result.Dims()
 	if n != 2 || m != 2 || p != 2 {
 		t.Errorf("dims = (%d,%d,%d), want (2,2,2)", n, m, p)
+	}
+}
+
+func blockDiagOracle(t *testing.T, s complex128, parts ...*System) [][]complex128 {
+	t.Helper()
+	var p, m int
+	for _, s := range parts {
+		_, mi, pi := s.Dims()
+		p += pi
+		m += mi
+	}
+	out := cmatOf(nil, p, m)
+	r0, c0 := 0, 0
+	for _, sys := range parts {
+		G := evalDelaySystem(t, sys, s, exactDelayFactor(sys.Dt))
+		for i := range G {
+			copy(out[r0+i][c0:], G[i])
+		}
+		r0 += len(G)
+		c0 += len(G[0])
+	}
+	return out
+}
+
+func TestBlkDiagWithInternalDelayKeepsExternalDelaysOnce(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		mk := map[string]func() *System{
+			"lft":      func() *System { return feedbackDelayPlant(t, dt, "lft") },
+			"mixed":    func() *System { return feedbackDelayPlant(t, dt, "mixed") },
+			"k-in":     func() *System { return feedbackDelayController(t, dt, "in") },
+			"k-out":    func() *System { return feedbackDelayController(t, dt, "out") },
+			"k-iod":    func() *System { return feedbackDelayController(t, dt, "iod") },
+			"gain-iod": func() *System { return feedbackDelayController(t, dt, "gain-iod") },
+		}
+		for _, pair := range [][2]string{{"lft", "k-in"}, {"k-out", "lft"}, {"mixed", "lft"}, {"lft", "k-iod"}, {"gain-iod", "lft"}, {"lft", "lft"}} {
+			a, b := mk[pair[0]](), mk[pair[1]]()
+			r, err := BlkDiag(a, b)
+			if err != nil {
+				t.Fatalf("dt=%v %v: %v", dt, pair, err)
+			}
+			assertResponseOracle(t, fmt.Sprintf("dt=%v BlkDiag%v", dt, pair), r, func(s complex128) [][]complex128 {
+				return blockDiagOracle(t, s, a, b)
+			})
+		}
+	}
+}
+
+// connectOracle evaluates outputs of y = G*u with u = Q*y + r on the
+// selected input channels.
+func connectOracle(t *testing.T, sys *System, Q *mat.Dense, inputs, outputs []int, s complex128) [][]complex128 {
+	t.Helper()
+	G := evalDelaySystem(t, sys, s, exactDelayFactor(sys.Dt))
+	p := len(G)
+	GQ := cmul(G, cmatOf(Q, len(G[0]), p))
+	loop := make([][]complex128, p)
+	for i := range p {
+		loop[i] = make([]complex128, p)
+		for j := range p {
+			loop[i][j] = -GQ[i][j]
+		}
+		loop[i][i] += 1
+	}
+	T := csolve(t, loop, G)
+	out := make([][]complex128, len(outputs))
+	for a, i := range outputs {
+		out[a] = make([]complex128, len(inputs))
+		for b, j := range inputs {
+			out[a][b] = T[i][j]
+		}
+	}
+	return out
+}
+
+func TestConnectKeepsLoopDelaysInsideLoop(t *testing.T) {
+	full := mat.NewDense(4, 4, []float64{
+		0, 0, -1, 0,
+		0, 0, 0, -1,
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+	})
+	partial := mat.NewDense(4, 4, []float64{
+		0, 0, -1, 0,
+		0, 0, 0, 0,
+		1, 0, 0, 0,
+		0, 0, 0, 0,
+	})
+	for _, dt := range []float64{0, 0.1} {
+		sc := 1.0
+		if dt > 0 {
+			sc = 10
+		}
+		for _, pk := range []string{"in", "out", "iod", "mixed", "lft"} {
+			for _, kk := range []string{"none", "in", "out"} {
+				for qName, Q := range map[string]*mat.Dense{"full": full, "partial": partial} {
+					P := feedbackDelayPlant(t, dt, pk)
+					K := feedbackDelayController(t, dt, kk)
+					aug, err := BlkDiag(P, K)
+					if err != nil {
+						t.Fatal(err)
+					}
+					inputs, outputs := []int{0, 1}, []int{0, 1}
+					label := fmt.Sprintf("dt=%v P=%s K=%s Q=%s", dt, pk, kk, qName)
+					res, err := Connect(aug, Q, inputs, outputs)
+					if err != nil {
+						t.Fatalf("%s: %v", label, err)
+					}
+					assertResponseOracle(t, label, res, func(s complex128) [][]complex128 {
+						return connectOracle(t, aug, Q, inputs, outputs, s)
+					})
+					if qName == "partial" && pk == "in" {
+						if res.InputDelay == nil || res.InputDelay[0] != 0 || res.InputDelay[1] != 0.2*sc {
+							t.Errorf("%s: open-loop input delay should stay external, got %v", label, res.InputDelay)
+						}
+					}
+				}
+			}
+		}
 	}
 }
