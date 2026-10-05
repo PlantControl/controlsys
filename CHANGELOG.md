@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.3.0
+
+- Breaking: the module path is now `plantcontrol.org/v2/controlsys/v2` (site namespace v2; Go still requires the trailing `/v2` for v2.x tags). The API is unchanged from v2.2.0. Migrate with:
+
+```diff
+- import "plantcontrol.org/v1/controlsys/v2"
++ import "plantcontrol.org/v2/controlsys/v2"
+```
+
+```sh
+go get plantcontrol.org/v2/controlsys/v2@v2.3.0
+```
+
+  v2.0.0–v2.2.0 still resolve under `plantcontrol.org/v1/controlsys/v2` and receive no further releases there.
+
 ## v2.2.0
 
 - Dependency: `plantcontrol.org/v1/gonum` v0.20.4. SVD (Dgesvd/Dbdsqr/Dlasq1) no longer panics or loops forever on NaN/Inf input (Go `math.Max`/`Min` propagate NaN where gfortran's MAX/MIN ignore it); `mat.SVD.Factorize` returns false for non-finite input (PlantControl/gonum#28).
