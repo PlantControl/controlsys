@@ -421,7 +421,7 @@ func BenchmarkControllabilityStaircase(b *testing.B) {
 	C.Set(1, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ControllabilityStaircase(A, B, C, 0)
+		mustStaircase(b, A, B, C)
 	}
 }
 
