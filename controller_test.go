@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"sort"
@@ -912,5 +913,204 @@ func TestValidatePoles(t *testing.T) {
 	}
 	if err := validatePoles([]complex128{-1 + 2i, -1 + 3i}); err == nil {
 		t.Error("unpaired complex poles should fail")
+	}
+}
+
+// assertPlacedEig checks eig(A-BK) against poles within a backward-error
+// bound scaled by the eigenvector condition number, and that the condition
+// number does not exceed maxKappa (0 disables).
+func assertPlacedEig(t *testing.T, label string, A, B, K *mat.Dense, poles []complex128, maxKappa float64) {
+	t.Helper()
+	n, _ := A.Dims()
+	acl := mat.NewDense(n, n, nil)
+	acl.Mul(B, K)
+	acl.Sub(A, acl)
+	var eig mat.Eigen
+	if !eig.Factorize(acl, mat.EigenRight) {
+		t.Fatalf("%s: eig failed", label)
+	}
+	var v mat.CDense
+	eig.VectorsTo(&v)
+	re := mat.NewDense(2*n, 2*n, nil)
+	for i := range n {
+		for j := range n {
+			c := v.At(i, j)
+			re.Set(i, j, real(c))
+			re.Set(i+n, j+n, real(c))
+			re.Set(i, j+n, -imag(c))
+			re.Set(i+n, j, imag(c))
+		}
+	}
+	kappa := mat.Cond(re, 2)
+	scale := mat.Norm(A, 2) + mat.Norm(B, 2)*mat.Norm(K, 2)
+	tol := 100 * eps() * kappa * scale
+	if maxKappa > 0 && !(kappa <= maxKappa) {
+		t.Errorf("%s: eigenvector condition %.3g > %.3g", label, kappa, maxKappa)
+	}
+	got := eig.Values(nil)
+	if d := matchEigenvalues(got, poles, 0); !(d <= tol) {
+		t.Errorf("%s: max eig error %.3g > tol %.3g (kappa=%.3g)\n got %v\nwant %v", label, d, tol, kappa, got, poles)
+	}
+}
+
+func placeScaledSystem(s, aim float64) *mat.Dense {
+	return mat.NewDense(3, 3, []float64{
+		-3 * s, 2, -1,
+		0, -s, aim,
+		0, -aim, -s,
+	})
+}
+
+func TestPlace_ScaledComplexPairAccuracy(t *testing.T) {
+	inputs := map[string]*mat.Dense{
+		"MIMO": mat.NewDense(3, 2, []float64{1, 0, 0.5, 1, -1, 2}),
+		"SISO": mat.NewDense(3, 1, []float64{1, 0.5, -1}),
+	}
+	for name, B := range inputs {
+		for _, s := range []float64{1e-4, 1e-2, 1, 1e2, 1e3, 1e4, 1e6} {
+			A := placeScaledSystem(s, 1)
+			p := []complex128{complex(-2*s, 0), complex(-1.5*s, 1), complex(-1.5*s, -1)}
+			K, err := Place(A, B, p)
+			if err != nil {
+				t.Errorf("%s s=%g: %v", name, s, err)
+				continue
+			}
+			maxKappa := 0.0
+			if name == "MIMO" {
+				maxKappa = 100
+			}
+			assertPlacedEig(t, fmt.Sprintf("%s s=%g", name, s), A, B, K, p, maxKappa)
+		}
+	}
+}
+
+func TestPlace_NearScalarBlockMIMO(t *testing.T) {
+	B := mat.NewDense(3, 2, []float64{1, 0.3, 0.5, 1, -1, 2})
+	for _, s := range []float64{1e-4, 1e-2, 1, 1e2, 1e4, 1e6} {
+		for _, aim := range []float64{0, 1e-6} {
+			A := placeScaledSystem(s, aim)
+			for _, p := range [][]complex128{
+				{complex(-2*s, 0), complex(-1.5*s, s), complex(-1.5*s, -s)},
+				{complex(-2*s, 0), complex(-1.5*s, 1), complex(-1.5*s, -1)},
+				{complex(-2*s, 0), complex(-0.5*s, 0), complex(-4*s, 0)},
+			} {
+				K, err := Place(A, B, p)
+				if err != nil {
+					t.Errorf("s=%g aim=%g %v: %v", s, aim, p, err)
+					continue
+				}
+				assertPlacedEig(t, fmt.Sprintf("s=%g aim=%g %v", s, aim, p), A, B, K, p, 0)
+			}
+		}
+	}
+}
+
+func TestPlace_FullRankBlockNormalClosedLoop(t *testing.T) {
+	B := mat.NewDense(2, 2, []float64{1, 0.3, -0.7, 2})
+	for _, s := range []float64{1e-4, 1e-2, 1, 1e2, 1e4, 1e6} {
+		systems := map[string]*mat.Dense{
+			"scalar":       mat.NewDense(2, 2, []float64{-s, 0, 0, -s}),
+			"near-scalar":  mat.NewDense(2, 2, []float64{-s, 1e-6, -1e-6, -s}),
+			"oscillator":   mat.NewDense(2, 2, []float64{-s, 1, -1, -s}),
+			"nonsymmetric": mat.NewDense(2, 2, []float64{0.3 * s, s, -1.1 * s, -0.2 * s}),
+		}
+		for name, A := range systems {
+			for _, p := range [][]complex128{
+				{complex(-1.5*s, 1), complex(-1.5*s, -1)},
+				{complex(-1.5*s, s), complex(-1.5*s, -s)},
+				{complex(-0.5*s, 0), complex(-4*s, 0)},
+			} {
+				K, err := Place(A, B, p)
+				if err != nil {
+					t.Errorf("%s s=%g %v: %v", name, s, p, err)
+					continue
+				}
+				assertPlacedEig(t, fmt.Sprintf("%s s=%g %v", name, s, p), A, B, K, p, 10)
+			}
+			K, err := Place(A, B, []complex128{complex(-2*s, 0), complex(-2*s, 0)})
+			if err != nil {
+				t.Errorf("%s s=%g double pole: %v", name, s, err)
+				continue
+			}
+			acl := mat.NewDense(2, 2, nil)
+			acl.Mul(B, K)
+			acl.Sub(A, acl)
+			acl.Sub(acl, mat.NewDense(2, 2, []float64{-2 * s, 0, 0, -2 * s}))
+			if r := mat.Norm(acl, 2); r > 100*eps()*(mat.Norm(A, 2)+mat.Norm(B, 2)*mat.Norm(K, 2)) {
+				t.Errorf("%s s=%g double pole: A-BK not -2s·I (rank(B)=2), residual %.3g", name, s, r)
+			}
+		}
+	}
+}
+
+func TestPlace_ScaledNonSymmetric(t *testing.T) {
+	A0 := []float64{
+		0.3, 1.0, -0.4, 0.2,
+		-1.1, -0.2, 0.5, 0.0,
+		0.7, 0.1, -1.5, 0.9,
+		0.0, -0.6, 0.3, 0.4,
+	}
+	inputs := map[string]*mat.Dense{
+		"MIMO": mat.NewDense(4, 2, []float64{1, 0, 0.2, 0.5, 0, 1, 0.3, 0}),
+		"SISO": mat.NewDense(4, 1, []float64{0, 0, 0, 1}),
+	}
+	for name, B := range inputs {
+		for _, s := range []float64{1e-4, 1e-2, 1, 1e2, 1e4, 1e6} {
+			a := make([]float64, len(A0))
+			for i, v := range A0 {
+				a[i] = s * v
+			}
+			A := mat.NewDense(4, 4, a)
+			p := []complex128{complex(-2*s, 0), complex(-3*s, 0), complex(-s, 1e-3*s), complex(-s, -1e-3*s)}
+			K, err := Place(A, B, p)
+			if err != nil {
+				t.Errorf("%s s=%g: %v", name, s, err)
+				continue
+			}
+			assertPlacedEig(t, name, A, B, K, p, 0)
+		}
+	}
+}
+
+func TestPlace_UncontrollableModeMIMO(t *testing.T) {
+	A := placeScaledSystem(1, 0)
+	B := mat.NewDense(3, 2, []float64{1, 0, 0.5, 1, -1, 2})
+	_, err := Place(A, B, []complex128{-2, -1.5 + 1i, -1.5 - 1i})
+	if !errors.Is(err, ErrUncontrollable) {
+		t.Fatalf("err = %v, want ErrUncontrollable", err)
+	}
+}
+
+func TestPlace_UncontrollableBlockSISO(t *testing.T) {
+	for _, th := range []float64{0, 0.3, 1.1, 2.5} {
+		c, s := math.Cos(th), math.Sin(th)
+		R := mat.NewDense(2, 2, []float64{c, -s, s, c})
+		// A = R·[-1 2; 0 -3]·Rᵀ, b = R·e1: eigenvalue -3 is uncontrollable.
+		var A mat.Dense
+		A.Product(R, mat.NewDense(2, 2, []float64{-1, 2, 0, -3}), R.T())
+		B := mat.NewDense(2, 1, []float64{c, s})
+		for _, p := range [][]complex128{{-1 + 1i, -1 - 1i}, {-2, -4}} {
+			K, err := Place(&A, B, p)
+			if !errors.Is(err, ErrUncontrollable) {
+				t.Errorf("th=%g %v: err = %v, want ErrUncontrollable (K=%v)", th, p, err, K)
+			}
+		}
+	}
+}
+
+func TestPlace_IllConditionedInputsNoSilentError(t *testing.T) {
+	B := mat.NewDense(2, 2, []float64{1, 1, 1, 1 + 1e-10})
+	for _, aim := range []float64{0, 1e-6, 1e-2} {
+		A := mat.NewDense(2, 2, []float64{-1, aim, -aim, -1})
+		for _, p := range [][]complex128{{-1.5 + 1i, -1.5 - 1i}, {-2, -3}} {
+			K, err := Place(A, B, p)
+			if err != nil {
+				if !errors.Is(err, ErrUncontrollable) {
+					t.Errorf("aim=%g %v: err = %v", aim, p, err)
+				}
+				continue
+			}
+			assertPlacedEig(t, fmt.Sprintf("aim=%g %v", aim, p), A, B, K, p, 0)
+		}
 	}
 }
