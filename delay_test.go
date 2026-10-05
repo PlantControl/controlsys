@@ -3717,8 +3717,6 @@ func TestSimulateWithDelay_MIMOManualReference(t *testing.T) {
 	}
 
 	wantY := mat.DenseCopyOf(autoResp.Y)
-	wantX := mat.NewVecDense(4, nil)
-	wantX.CopyVec(autoResp.XFinal)
 
 	for j := range 3 {
 		Bj := mat.NewDense(4, 1, nil)
@@ -3749,16 +3747,14 @@ func TestSimulateWithDelay_MIMOManualReference(t *testing.T) {
 				wantY.Set(i, k, wantY.At(i, k)+simoResp.Y.At(i, k-d))
 			}
 		}
-		wantX.AddVec(wantX, simoResp.XFinal)
 	}
 
 	if !matEqual(got.Y, wantY, 1e-10) {
 		t.Errorf("delayed MIMO response mismatch\n got: %v\nwant: %v",
 			mat.Formatted(got.Y), mat.Formatted(wantY))
 	}
-	if !vecEqual(got.XFinal, wantX, 1e-10) {
-		t.Errorf("delayed MIMO final state mismatch\n got: %v\nwant: %v",
-			mat.Formatted(got.XFinal), mat.Formatted(wantX))
+	if got.XFinal != nil {
+		t.Errorf("XFinal = %v, want nil: Delay has no input+output split", mat.Formatted(got.XFinal))
 	}
 }
 

@@ -33,6 +33,13 @@ type SimulateOpts struct {
 // feedthrough, as MATLAB does: non-causal (improper) models return
 // ErrImproperModel, a nonzero x0 returns ErrDescriptorInitialState, and
 // XFinal is nil because the algebraic states depend on future inputs.
+//
+// With delays, XFinal is the state of the delay-free model at the final time,
+// as MATLAB lsim's x: inputs reach it delayed by InputDelay plus the input
+// share of Delay (the split PullDelaysToLFT uses); output delays do not
+// affect it. Delay-line contents are not part of it, so continuing past the
+// horizon needs the input history. When Delay has no input+output split no
+// single state sees the delayed inputs and XFinal is nil.
 func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
 	if sys.IsContinuous() {
 		return nil, ErrWrongDomain
@@ -81,11 +88,19 @@ func (d simulationDispatcher) run(u *mat.Dense, x0 *mat.VecDense, opts *Simulate
 	if d.sys.HasInternalDelay() {
 		hasIODelay := d.sys.Delay != nil || d.sys.InputDelay != nil || d.sys.OutputDelay != nil
 		if hasIODelay {
+			n, _, _ := d.sys.Dims()
 			merged, err := d.sys.PullDelaysToLFT()
 			if err != nil {
 				return nil, err
 			}
-			return merged.simulateWithInternalDelay(u, x0, opts)
+			resp, err := merged.simulateWithInternalDelay(u, x0, opts)
+			if err != nil {
+				return nil, err
+			}
+			if mn, _, _ := merged.Dims(); mn != n {
+				resp.XFinal = nil
+			}
+			return resp, nil
 		}
 		return d.sys.simulateWithInternalDelay(u, x0, opts)
 	}
@@ -284,6 +299,10 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	}
 
 	xFinal := problem.newXFinal()
+	stateLag, ok := sys.stateInputLags()
+	if !ok {
+		xFinal = nil
+	}
 
 	if p == 0 || steps == 0 {
 		return &Response{Y: nil, XFinal: xFinal}, nil
@@ -314,7 +333,9 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 			tmp.MulVec(sys.A, x)
 			x, tmp = tmp, x
 		}
-		xFinal.CopyVec(x)
+		if xFinal != nil {
+			xFinal.CopyVec(x)
+		}
 	}
 
 	if m == 0 {
@@ -349,6 +370,9 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	}
 
 	for k := range steps {
+		if xFinal != nil {
+			addLaggedStates(xFinal, xCols, stateLag, steps-k)
+		}
 		var nextRaw blas64.General
 		if n > 0 {
 			yForced.Mul(sys.C, xCols)
@@ -382,18 +406,48 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	}
 
 	if xFinal != nil {
-		xRaw := xCols.RawMatrix()
-		xFinalRaw := xFinal.RawVector()
-		for i := range n {
-			sum := xFinalRaw.Data[i*xFinalRaw.Inc]
-			for j := range m {
-				sum += xRaw.Data[i*xRaw.Stride+j]
-			}
-			xFinalRaw.Data[i*xFinalRaw.Inc] = sum
-		}
+		addLaggedStates(xFinal, xCols, stateLag, 0)
 	}
 
 	return &Response{Y: Y, XFinal: xFinal}, nil
+}
+
+// stateInputLags returns the delay each input reaches the states with:
+// InputDelay plus the input share of Delay, split as PullDelaysToLFT does.
+// ok is false when Delay has no input+output split, so no single state of
+// (A, B) sees the delayed inputs.
+func (sys *System) stateInputLags() (lags []int, ok bool) {
+	_, m, _ := sys.Dims()
+	lags = make([]int, m)
+	if sys.Delay != nil {
+		in, _, residual := DecomposeIODelay(sys.Delay)
+		if delayMatrixHasNonzero(residual) {
+			return nil, false
+		}
+		for j, d := range in {
+			lags[j] = int(math.Round(d))
+		}
+	}
+	for j, d := range sys.InputDelay {
+		lags[j] += int(math.Round(d))
+	}
+	return lags, true
+}
+
+// addLaggedStates adds column j of xCols, the state driven by undelayed u_j,
+// to x for each input whose lag equals remaining: x_N driven by u_j delayed
+// by lag is the undelayed state at N-lag.
+func addLaggedStates(x *mat.VecDense, xCols *mat.Dense, lags []int, remaining int) {
+	xRaw := xCols.RawMatrix()
+	n := x.Len()
+	for j, lag := range lags {
+		if lag != remaining {
+			continue
+		}
+		for i := range n {
+			x.SetVec(i, x.AtVec(i)+xRaw.Data[i*xRaw.Stride+j])
+		}
+	}
 }
 
 func (sys *System) simulateWithInternalDelay(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
