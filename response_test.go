@@ -1,6 +1,8 @@
 package controlsys
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -834,4 +836,889 @@ func TestStep_AutoTFinal(t *testing.T) {
 	if math.Abs(last-1.0) > 0.01 {
 		t.Errorf("final value %f not near steady-state 1.0", last)
 	}
+}
+
+func trMIMO(t *testing.T, dt float64) *System {
+	t.Helper()
+	a := []float64{-1, 2, 0.5, -3}
+	if dt > 0 {
+		a = []float64{0.5, 0.2, -0.1, 0.7}
+	}
+	sys, err := New(
+		mat.NewDense(2, 2, a),
+		mat.NewDense(2, 2, []float64{1, 0.3, 0, 1}),
+		mat.NewDense(2, 2, []float64{1, 0, 0.4, 1}),
+		mat.NewDense(2, 2, []float64{0.2, 0.1, 0, -0.3}),
+		dt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func trExp(a *mat.Dense, t float64) *mat.Dense {
+	var scaled, e mat.Dense
+	scaled.Scale(t, a)
+	e.Exp(&scaled)
+	return &e
+}
+
+// trImpulse is C·e^{A(t−τ)}·B for t ≥ τ, else 0.
+func trImpulse(a, b, c *mat.Dense, i, j int, t, tau float64) float64 {
+	if t < tau {
+		return 0
+	}
+	var cb, h mat.Dense
+	cb.Mul(c, trExp(a, t-tau))
+	h.Mul(&cb, b)
+	return h.At(i, j)
+}
+
+func trIODelay(sys *System, i, j int) float64 {
+	tau := 0.0
+	if sys.Delay != nil {
+		tau += sys.Delay.At(i, j)
+	}
+	if sys.InputDelay != nil {
+		tau += sys.InputDelay[j]
+	}
+	if sys.OutputDelay != nil {
+		tau += sys.OutputDelay[i]
+	}
+	return tau
+}
+
+func TestTimeResponseGridIncludesFinalSample(t *testing.T) {
+	disc := trMIMO(t, 0.1)
+	resp, err := Step(disc, 0.3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.T) != 4 || math.Abs(resp.T[3]-0.3) > 1e-12 {
+		t.Fatalf("discrete T = %v, want 4 samples ending at 0.3", resp.T)
+	}
+
+	cont := trMIMO(t, 0)
+	for _, tFinal := range []float64{0.3, 0.7, 2.3, 4.6} {
+		resp, err := Step(cont, tFinal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if last := resp.T[len(resp.T)-1]; last != tFinal {
+			t.Errorf("tFinal=%g: last sample %g", tFinal, last)
+		}
+	}
+}
+
+func TestTimeResponseAutoDtFollowsUserFinalTime(t *testing.T) {
+	sys, _ := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	resp, err := Step(sys, 0.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.T) < 101 {
+		t.Fatalf("Step(0.5) has %d samples; dt must resolve the requested horizon", len(resp.T))
+	}
+	for k, tk := range resp.T {
+		if want := 1 - math.Exp(-tk); math.Abs(resp.Y.At(0, k)-want) > 1e-12 {
+			t.Fatalf("y(%g) = %g, want %g", tk, resp.Y.At(0, k), want)
+		}
+	}
+}
+
+func TestTimeResponseRejectsNonFiniteFinalTime(t *testing.T) {
+	x0 := mat.NewVecDense(2, []float64{1, -1})
+	for _, dt := range []float64{0, 0.1} {
+		sys := trMIMO(t, dt)
+		for _, tFinal := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+			if _, err := Step(sys, tFinal); err == nil {
+				t.Errorf("dt=%g Step(%g): want error", dt, tFinal)
+			}
+			if _, err := Impulse(sys, tFinal); err == nil {
+				t.Errorf("dt=%g Impulse(%g): want error", dt, tFinal)
+			}
+			if _, err := Initial(sys, x0, tFinal); err == nil {
+				t.Errorf("dt=%g Initial(%g): want error", dt, tFinal)
+			}
+		}
+	}
+}
+
+func TestTimeResponseAutoHorizonCoversSettling(t *testing.T) {
+	disc, _ := New(mat.NewDense(2, 2, []float64{1.6, -0.81, 1, 0}), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{0.1, 0.11}), mat.NewDense(1, 1, nil), 0.1)
+	zeta, wn := 0.05, 2.0
+	cont, _ := New(mat.NewDense(2, 2, []float64{0, 1, -wn * wn, -2 * zeta * wn}), mat.NewDense(2, 1, []float64{0, wn * wn}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), 0)
+	delayed, _ := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	delayed.InputDelay = []float64{20}
+
+	for name, sys := range map[string]*System{"discrete": disc, "lightly damped": cont, "long delay": delayed} {
+		resp, err := Step(sys, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gain, _ := sys.DCGain()
+		last := resp.Y.At(0, len(resp.T)-1)
+		if math.Abs(last-gain.At(0, 0)) > 0.02*math.Abs(gain.At(0, 0)) {
+			t.Errorf("%s: auto horizon ends at t=%g with y=%g, DC gain %g", name, resp.T[len(resp.T)-1], last, gain.At(0, 0))
+		}
+	}
+}
+
+func TestTimeResponseAutoHorizonDeadbeat(t *testing.T) {
+	sys, _ := New(mat.NewDense(1, 1, []float64{0}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0.1)
+	resp, err := Step(sys, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.T) < 2 {
+		t.Fatalf("deadbeat auto Step has %d samples", len(resp.T))
+	}
+	for k := range resp.T {
+		want := 1.0
+		if k == 0 {
+			want = 0
+		}
+		if resp.Y.At(0, k) != want {
+			t.Fatalf("y[%d] = %g, want %g", k, resp.Y.At(0, k), want)
+		}
+	}
+}
+
+func TestTimeResponseAutoHorizonStiffBounded(t *testing.T) {
+	a := mat.NewDense(2, 2, []float64{-1e-3, 1, 0, -1e6})
+	b := mat.NewDense(2, 1, []float64{0, 1})
+	c := mat.NewDense(1, 2, []float64{1, 0})
+	sys, _ := New(a, b, c, mat.NewDense(1, 1, nil), 0)
+	resp, err := Step(sys, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.T) > autoMaxSamples {
+		t.Fatalf("stiff auto Step has %d samples, cap %d", len(resp.T), autoMaxSamples)
+	}
+	var aInv mat.Dense
+	if err := aInv.Inverse(a); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []int{1, len(resp.T) / 2, len(resp.T) - 1} {
+		var e, m, y mat.Dense
+		e.Sub(trExp(a, resp.T[k]), eye(2))
+		m.Mul(&aInv, &e)
+		y.Mul(c, &m)
+		var want mat.Dense
+		want.Mul(&y, b)
+		if math.Abs(resp.Y.At(0, k)-want.At(0, 0)) > 1e-7*math.Abs(want.At(0, 0)) {
+			t.Errorf("y(%g) = %g, want %g", resp.T[k], resp.Y.At(0, k), want.At(0, 0))
+		}
+	}
+}
+
+func TestImpulseContinuousIsExactlySampled(t *testing.T) {
+	plain := trMIMO(t, 0)
+	delayed := trMIMO(t, 0)
+	delayed.InputDelay = []float64{0.137, 0}
+	delayed.OutputDelay = []float64{0, 0.291}
+	iod := trMIMO(t, 0)
+	iod.Delay = mat.NewDense(2, 2, []float64{0.413, 0, 0, 0})
+
+	for name, sys := range map[string]*System{"plain": plain, "input+output delay": delayed, "iodelay": iod} {
+		resp, err := Impulse(sys, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		worst := 0.0
+		for k, tk := range resp.T {
+			for j := range 2 {
+				for i := range 2 {
+					want := trImpulse(sys.A, sys.B, sys.C, i, j, tk, trIODelay(sys, i, j))
+					worst = math.Max(worst, math.Abs(resp.Y.At(j*2+i, k)-want))
+				}
+			}
+		}
+		if worst > 1e-9 {
+			t.Errorf("%s: worst impulse error %g", name, worst)
+		}
+	}
+
+	resp, _ := Impulse(plain, 1)
+	var cb mat.Dense
+	cb.Mul(plain.C, plain.B)
+	for j := range 2 {
+		for i := range 2 {
+			if math.Abs(resp.Y.At(j*2+i, 0)-cb.At(i, j)) > 1e-14 {
+				t.Errorf("y_%d%d(0) = %g, want C·B = %g", i, j, resp.Y.At(j*2+i, 0), cb.At(i, j))
+			}
+		}
+	}
+}
+
+func TestImpulseContinuousDescriptor(t *testing.T) {
+	e := mat.NewDense(2, 2, []float64{2, 0.5, -0.3, 1.5})
+	explicit := trMIMO(t, 0)
+	var a, b mat.Dense
+	a.Mul(e, explicit.A)
+	b.Mul(e, explicit.B)
+	desc, err := NewDescriptor(&a, &b, explicit.C, explicit.D, e, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := Impulse(desc, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, tk := range resp.T {
+		for j := range 2 {
+			for i := range 2 {
+				want := trImpulse(explicit.A, explicit.B, explicit.C, i, j, tk, 0)
+				if math.Abs(resp.Y.At(j*2+i, k)-want) > 1e-9 {
+					t.Fatalf("h_%d%d(%g) = %g, want %g", i, j, tk, resp.Y.At(j*2+i, k), want)
+				}
+			}
+		}
+	}
+}
+
+func TestImpulseContinuousInternalDelayOutputPath(t *testing.T) {
+	sys := trMIMO(t, 0)
+	grid, err := Impulse(sys, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tau := 25 * grid.T[1]
+	d12 := mat.NewDense(2, 1, []float64{0.7, -0.4})
+	c2 := mat.NewDense(1, 2, []float64{0.3, 1})
+	if err := sys.SetInternalDelay([]float64{tau}, mat.NewDense(2, 1, nil), c2, d12, mat.NewDense(1, 2, nil), mat.NewDense(1, 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := Impulse(sys, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d12c2 mat.Dense
+	d12c2.Mul(d12, c2)
+	if resp.T[1] != grid.T[1] {
+		t.Fatalf("grid changed: dt %g vs %g", resp.T[1], grid.T[1])
+	}
+	for k, tk := range resp.T {
+		for j := range 2 {
+			for i := range 2 {
+				want := trImpulse(sys.A, sys.B, sys.C, i, j, tk, 0) + trImpulse(sys.A, sys.B, &d12c2, i, j, tk, tau-1e-12)
+				if math.Abs(resp.Y.At(j*2+i, k)-want) > 1e-9 {
+					t.Fatalf("h_%d%d(%g) = %g, want %g", i, j, tk, resp.Y.At(j*2+i, k), want)
+				}
+			}
+		}
+	}
+}
+
+func TestDamp_DiscretePoleAtOrigin(t *testing.T) {
+	sys, _ := New(mat.NewDense(2, 2, []float64{0, 0.3, 0, -0.5}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 1}), mat.NewDense(1, 1, nil), 0.1)
+	info, err := Damp(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range info {
+		if d.Pole != 0 {
+			continue
+		}
+		found = true
+		if !math.IsInf(d.Wn, 1) || d.Zeta != 1 || d.Tau != 0 {
+			t.Errorf("z=0: Wn=%g Zeta=%g Tau=%g, want +Inf 1 0", d.Wn, d.Zeta, d.Tau)
+		}
+	}
+	if !found {
+		t.Fatal("pole at origin not reported")
+	}
+}
+
+func TestDCGain_DescriptorSingularAFallsBackToLimit(t *testing.T) {
+	e := mat.NewDense(3, 3, []float64{2, 1, 0, 0.5, 3, -1, 0, 0.4, 1.5})
+	b := mat.NewDense(3, 1, []float64{1, 0, 0})
+	c := mat.NewDense(1, 3, []float64{0, 1, 0})
+	for _, tc := range []struct {
+		dt float64
+		a  []float64
+	}{
+		{0, []float64{0, 0, 0, 0, -1, 0.5, 0, 0.3, -2}},
+		{0.1, []float64{1, 0, 0, 0, 0.5, 0.1, 0, 0.2, -0.3}},
+	} {
+		sys, err := NewDescriptor(mat.NewDense(3, 3, tc.a), b, c, mat.NewDense(1, 1, nil), e, tc.dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gain, err := sys.DCGain()
+		if err != nil {
+			t.Fatalf("dt=%g: %v", tc.dt, err)
+		}
+		point := complex(0, 1e-9)
+		if tc.dt > 0 {
+			point = cmplx.Exp(point)
+		}
+		near, err := sys.EvalFr(point)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(gain.At(0, 0)-real(near[0][0])) > 1e-6 {
+			t.Errorf("dt=%g: DCGain %g, G near DC %v", tc.dt, gain.At(0, 0), near[0][0])
+		}
+	}
+}
+
+func TestDCGain_InternalDelayWithIntegrator(t *testing.T) {
+	sys, _ := New(mat.NewDense(2, 2, []float64{0, 0, 0, -2}), mat.NewDense(2, 1, []float64{1, 1}), eye(2), mat.NewDense(2, 1, nil), 0)
+	if err := sys.SetInternalDelay([]float64{0.5}, mat.NewDense(2, 1, []float64{0, 1}), mat.NewDense(1, 2, []float64{0, 1}), mat.NewDense(2, 1, nil), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	gain, err := sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsInf(gain.At(0, 0), 1) || math.Abs(gain.At(1, 0)-1) > 1e-12 {
+		t.Fatalf("DCGain = %v, want [+Inf; 1] for [1/s; 1/(s+2-e^{-s/2})]", mat.Formatted(gain))
+	}
+}
+
+func trFreeOracle(sys *System, x0 *mat.VecDense, i int, t float64) float64 {
+	if sys.OutputDelay != nil {
+		t -= sys.OutputDelay[i]
+	}
+	if t < 0 {
+		return 0
+	}
+	var x mat.VecDense
+	x.MulVec(trExp(sys.A, t), x0)
+	return mat.Dot(sys.C.RowView(i), &x)
+}
+
+func TestInitialContinuousDelaysExact(t *testing.T) {
+	x0 := mat.NewVecDense(2, []float64{1, -0.5})
+	for _, tc := range []struct {
+		name    string
+		in, out []float64
+		iod     *mat.Dense
+	}{
+		{"fractional input", []float64{0.013, 0.2}, nil, nil},
+		{"output", nil, []float64{0, 0.5}, nil},
+		{"fractional output", nil, []float64{0.013, 0.5}, nil},
+		{"nondecomposable iodelay", nil, nil, mat.NewDense(2, 2, []float64{0.4, 0, 0, 0})},
+		{"mixed", []float64{0.1, 0.2}, []float64{0, 0.3}, mat.NewDense(2, 2, []float64{0.4, 0, 0, 0})},
+	} {
+		sys := trMIMO(t, 0)
+		sys.InputDelay, sys.OutputDelay, sys.Delay = tc.in, tc.out, tc.iod
+		resp, err := Initial(sys, x0, 2)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		for k, tk := range resp.T {
+			for i := range 2 {
+				if want := trFreeOracle(sys, x0, i, tk); math.Abs(resp.Y.At(i, k)-want) > 1e-9 {
+					t.Fatalf("%s: y_%d(%g) = %g, want %g", tc.name, i, tk, resp.Y.At(i, k), want)
+				}
+			}
+		}
+	}
+}
+
+func TestLsimContinuousX0WithFractionalOutputDelay(t *testing.T) {
+	sys := trMIMO(t, 0)
+	sys.OutputDelay = []float64{0.013, 0.5}
+	sys.Delay = mat.NewDense(2, 2, []float64{0.4, 0, 0, 0})
+	x0 := mat.NewVecDense(2, []float64{1, -0.5})
+	steps := 61
+	tv := make([]float64, steps)
+	u := mat.NewDense(steps, 2, nil)
+	for k := range tv {
+		tv[k] = 0.03 * float64(k)
+		u.Set(k, 1, 1)
+	}
+	resp, err := Lsim(sys, u, tv, x0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aInv mat.Dense
+	if err := aInv.Inverse(sys.A); err != nil {
+		t.Fatal(err)
+	}
+	for k, tk := range tv {
+		for i := range 2 {
+			want := trFreeOracle(sys, x0, i, tk)
+			if s := tk - trIODelay(sys, i, 1); s >= -1e-12 {
+				var e, m, y mat.Dense
+				e.Sub(trExp(sys.A, math.Max(s, 0)), eye(2))
+				m.Mul(&aInv, &e)
+				y.Mul(sys.C, &m)
+				var g mat.Dense
+				g.Mul(&y, sys.B)
+				want += g.At(i, 1) + sys.D.At(i, 1)
+			}
+			if math.Abs(resp.Y.At(i, k)-want) > 1e-9 {
+				t.Fatalf("y_%d(%g) = %g, want %g", i, tk, resp.Y.At(i, k), want)
+			}
+		}
+	}
+}
+
+// trDDE integrates x' = Ax + Bu + B2·w, w(t) = z(t−τ), z = C2x + D21u + D22w
+// with zero history by RK4 on a grid h (τ = lag·h) using cubic Hermite dense
+// output for delayed values; global error O(h⁴).
+type trDDE struct {
+	sys      *System
+	h        float64
+	lag      int
+	u        func(i int) []float64
+	x, z     [][]float64
+	fp, fm   [][]float64
+	n, m, q  int
+	uZero    []float64
+	zeroHist []float64
+}
+
+func newTrDDE(sys *System, h float64, lag, steps int, x0 []float64, u func(i int) []float64) *trDDE {
+	n, m, _ := sys.Dims()
+	q := len(sys.LFT.Tau)
+	d := &trDDE{sys: sys, h: h, lag: lag, u: u, n: n, m: m, q: q, uZero: make([]float64, m), zeroHist: make([]float64, q)}
+	if d.u == nil {
+		d.u = func(int) []float64 { return d.uZero }
+	}
+	d.x = make([][]float64, steps+1)
+	d.z = make([][]float64, steps+1)
+	d.fp = make([][]float64, steps+1)
+	d.fm = make([][]float64, steps+1)
+	d.x[0] = append([]float64(nil), x0...)
+	d.z[0] = d.zOf(d.x[0], d.u(0), d.zeroHist)
+	for i := range steps {
+		wp, wmid, wm := d.zRight(i-lag), d.zAt(i-lag, 0.5), d.zAt(i-lag, 1)
+		ui := d.u(i)
+		k1 := d.f(d.x[i], ui, wp)
+		k2 := d.f(trAxpy(d.x[i], h/2, k1), ui, wmid)
+		k3 := d.f(trAxpy(d.x[i], h/2, k2), ui, wmid)
+		k4 := d.f(trAxpy(d.x[i], h, k3), ui, wm)
+		next := make([]float64, n)
+		for s := range n {
+			next[s] = d.x[i][s] + h/6*(k1[s]+2*k2[s]+2*k3[s]+k4[s])
+		}
+		d.x[i+1] = next
+		d.fp[i] = k1
+		d.fm[i+1] = d.f(next, ui, wm)
+		d.z[i+1] = d.zOf(next, d.u(i+1), d.zRight(i+1-lag))
+	}
+	return d
+}
+
+func trAxpy(x []float64, a float64, y []float64) []float64 {
+	out := make([]float64, len(x))
+	for i := range x {
+		out[i] = x[i] + a*y[i]
+	}
+	return out
+}
+
+func trMulVec(a *mat.Dense, x []float64) []float64 {
+	r, _ := a.Dims()
+	out := make([]float64, r)
+	for i := range r {
+		for j, v := range x {
+			out[i] += a.At(i, j) * v
+		}
+	}
+	return out
+}
+
+func trAdd(vs ...[]float64) []float64 {
+	out := make([]float64, len(vs[0]))
+	for _, v := range vs {
+		for i := range v {
+			out[i] += v[i]
+		}
+	}
+	return out
+}
+
+func (d *trDDE) f(x, u, w []float64) []float64 {
+	return trAdd(trMulVec(d.sys.A, x), trMulVec(d.sys.B, u), trMulVec(d.sys.LFT.B2, w))
+}
+
+func (d *trDDE) zOf(x, u, w []float64) []float64 {
+	return trAdd(trMulVec(d.sys.LFT.C2, x), trMulVec(d.sys.LFT.D21, u), trMulVec(d.sys.LFT.D22, w))
+}
+
+func (d *trDDE) zRight(i int) []float64 {
+	if i < 0 {
+		return d.zeroHist
+	}
+	return d.z[i]
+}
+
+func (d *trDDE) zAt(i int, theta float64) []float64 {
+	if i < 0 {
+		return d.zeroHist
+	}
+	if theta == 0 {
+		return d.z[i]
+	}
+	h00 := 2*theta*theta*theta - 3*theta*theta + 1
+	h10 := theta*theta*theta - 2*theta*theta + theta
+	h01 := -2*theta*theta*theta + 3*theta*theta
+	h11 := theta*theta*theta - theta*theta
+	x := make([]float64, d.n)
+	for s := range d.n {
+		x[s] = h00*d.x[i][s] + h10*d.h*d.fp[i][s] + h01*d.x[i+1][s] + h11*d.h*d.fm[i+1][s]
+	}
+	return d.zOf(x, d.u(i), d.zAt(i-d.lag, theta))
+}
+
+func (d *trDDE) y(i int) []float64 {
+	if i < 0 {
+		_, _, p := d.sys.Dims()
+		return make([]float64, p)
+	}
+	return trAdd(trMulVec(d.sys.C, d.x[i]), trMulVec(d.sys.D, d.u(i)), trMulVec(d.sys.LFT.D12, d.zRight(i-d.lag)))
+}
+
+// trDelayFeedback is trMIMO with two internal delays of equal length τ fed
+// back through B2 and D22, and fed by u through D21.
+func trDelayFeedback(t *testing.T, tau float64, d21 bool) *System {
+	t.Helper()
+	sys := trMIMO(t, 0)
+	D21 := mat.NewDense(2, 2, []float64{1, 0, 0.2, -0.6})
+	if !d21 {
+		D21 = mat.NewDense(2, 2, nil)
+	}
+	if err := sys.SetInternalDelay([]float64{tau, tau},
+		mat.NewDense(2, 2, []float64{0.4, -0.2, 0.1, 0.3}),
+		mat.NewDense(2, 2, []float64{0.3, 1, -0.5, 0.2}),
+		mat.NewDense(2, 2, []float64{0.7, 0.1, -0.4, 0.5}),
+		D21,
+		mat.NewDense(2, 2, []float64{0.3, 0.1, 0, -0.2}),
+	); err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+const trSub = 100
+
+// trChainGrid returns the auto step of Step(·, 2) for trMIMO and a delay
+// τ = 23.37·dt that is a whole number of oracle substeps but not of dt.
+func trChainGrid(t *testing.T) (dt, tau float64, lag int) {
+	t.Helper()
+	resp, err := Step(trMIMO(t, 0), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dt = resp.T[1]
+	lag = 2337
+	return dt, float64(lag) * dt / trSub, lag
+}
+
+func TestStepContinuousInternalDelayExact(t *testing.T) {
+	dt, tau, lag := trChainGrid(t)
+	sys := trDelayFeedback(t, tau, true)
+	resp, err := Step(sys, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.T[1] != dt {
+		t.Fatalf("dt = %g, want %g", resp.T[1], dt)
+	}
+	steps := len(resp.T)
+	for in := range 2 {
+		u := make([]float64, 2)
+		u[in] = 1
+		dde := newTrDDE(sys, dt/trSub, lag, (steps-1)*trSub, []float64{0, 0}, func(int) []float64 { return u })
+		for k := range steps {
+			want := dde.y(k * trSub)
+			for out := range 2 {
+				if got := resp.Y.At(in*2+out, k); math.Abs(got-want[out]) > 1e-9 {
+					t.Fatalf("u%d→y%d t=%g: got %.12g, want %.12g", in, out, resp.T[k], got, want[out])
+				}
+			}
+		}
+	}
+}
+
+func TestInitialContinuousInternalDelayFeedbackExact(t *testing.T) {
+	dt, tau, lag := trChainGrid(t)
+	sys := trDelayFeedback(t, tau, true)
+	x0 := []float64{1, -0.5}
+	resp, err := Initial(sys, mat.NewVecDense(2, x0), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := len(resp.T)
+	dde := newTrDDE(sys, dt/trSub, lag, (steps-1)*trSub, x0, nil)
+	for k := range steps {
+		want := dde.y(k * trSub)
+		for out := range 2 {
+			if got := resp.Y.At(out, k); math.Abs(got-want[out]) > 1e-9 {
+				t.Fatalf("y%d t=%g: got %.12g, want %.12g", out, resp.T[k], got, want[out])
+			}
+		}
+	}
+}
+
+func TestImpulseContinuousInternalDelayFeedbackExact(t *testing.T) {
+	dt, tau, lag := trChainGrid(t)
+	sys := trDelayFeedback(t, tau, false)
+	resp, err := Impulse(sys, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := len(resp.T)
+	for in := range 2 {
+		x0 := []float64{sys.B.At(0, in), sys.B.At(1, in)}
+		dde := newTrDDE(sys, dt/trSub, lag, (steps-1)*trSub, x0, nil)
+		for k := range steps {
+			want := trMulVec(sys.C, dde.x[k*trSub])
+			want = trAdd(want, trMulVec(sys.LFT.D12, dde.zRight(k*trSub-lag)))
+			for out := range 2 {
+				if got := resp.Y.At(in*2+out, k); math.Abs(got-want[out]) > 1e-9 {
+					t.Fatalf("u%d→y%d t=%g: got %.12g, want %.12g", in, out, resp.T[k], got, want[out])
+				}
+			}
+		}
+	}
+}
+
+func TestLsimContinuousInternalDelayExact(t *testing.T) {
+	dt := 0.0125
+	lag := 2337
+	tau := float64(lag) * dt / trSub
+	sys := trDelayFeedback(t, tau, true)
+	inLag, outLag := 731, 350
+	sys.InputDelay = []float64{0, float64(inLag) * dt / trSub}
+	sys.OutputDelay = []float64{float64(outLag) * dt / trSub, 0}
+	steps := 161
+	tm := make([]float64, steps)
+	u := mat.NewDense(steps, 2, nil)
+	for k := range steps {
+		tm[k] = float64(k) * dt
+		u.Set(k, 0, math.Sin(3*tm[k]))
+		u.Set(k, 1, 1-0.5*math.Floor(tm[k]))
+	}
+	x0 := []float64{1, -0.5}
+	resp, err := Lsim(sys, u, tm, mat.NewVecDense(2, x0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputAt := func(i int) []float64 {
+		v := make([]float64, 2)
+		for c, l := range []int{0, inLag} {
+			if j := i - l; j >= 0 {
+				v[c] = u.At(min(j/trSub, steps-1), c)
+			}
+		}
+		return v
+	}
+	base := sys.Copy()
+	base.InputDelay, base.OutputDelay = nil, nil
+	dde := newTrDDE(base, dt/trSub, lag, (steps-1)*trSub, x0, inputAt)
+	for k := range steps {
+		for out, l := range []int{outLag, 0} {
+			want := 0.0
+			if i := k*trSub - l; i >= 0 {
+				want = dde.y(i)[out]
+			}
+			if got := resp.Y.At(out, k); math.Abs(got-want) > 1e-9 {
+				t.Fatalf("y%d t=%g: got %.12g, want %.12g", out, tm[k], got, want)
+			}
+		}
+	}
+}
+
+func trFreeDelayModel(t *testing.T) *System {
+	t.Helper()
+	sys := trMIMO(t, 0)
+	if err := sys.SetInternalDelay([]float64{0.5013}, mat.NewDense(2, 1, nil), mat.NewDense(1, 2, []float64{0.3, 1}), mat.NewDense(2, 1, []float64{0.7, -0.4}), mat.NewDense(1, 2, nil), mat.NewDense(1, 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// trFreeDelayOracle is C·e^{At}·x0 + D12·C2·e^{A(t−τ)}·x0 (t ≥ τ) for B2 = 0.
+func trFreeDelayOracle(sys *System, x0 *mat.VecDense, out int, tm float64) float64 {
+	var x mat.VecDense
+	x.MulVec(trExp(sys.A, tm), x0)
+	y := mat.Dot(sys.C.RowView(out), &x)
+	if tau := sys.LFT.Tau[0]; tm >= tau {
+		x.MulVec(trExp(sys.A, tm-tau), x0)
+		y += sys.LFT.D12.At(out, 0) * mat.Dot(sys.LFT.C2.RowView(0), &x)
+	}
+	return y
+}
+
+func TestInitialContinuousFractionalInternalDelayExact(t *testing.T) {
+	sys := trFreeDelayModel(t)
+	x0 := mat.NewVecDense(2, []float64{1, -0.5})
+	resp, err := Initial(sys, x0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, tm := range resp.T {
+		for out := range 2 {
+			if got, want := resp.Y.At(out, k), trFreeDelayOracle(sys, x0, out, tm); math.Abs(got-want) > 1e-9 {
+				t.Fatalf("y%d t=%g: got %.12g, want %.12g", out, tm, got, want)
+			}
+		}
+	}
+
+	steps := 147
+	tm := make([]float64, steps)
+	for k := range tm {
+		tm[k] = float64(k) * 0.0137
+	}
+	lsim, err := Lsim(sys, mat.NewDense(steps, 2, nil), tm, x0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range tm {
+		for out := range 2 {
+			if got, want := lsim.Y.At(out, k), trFreeDelayOracle(sys, x0, out, tm[k]); math.Abs(got-want) > 1e-9 {
+				t.Fatalf("Lsim y%d t=%g: got %.12g, want %.12g", out, tm[k], got, want)
+			}
+		}
+	}
+}
+
+func TestImpulseContinuousInternalDelayFedByInputErrors(t *testing.T) {
+	sys := trMIMO(t, 0)
+	if err := sys.SetInternalDelay([]float64{0.5013}, mat.NewDense(2, 1, nil), mat.NewDense(1, 2, []float64{0.3, 1}), mat.NewDense(2, 1, []float64{0.7, -0.4}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Impulse(sys, 2); !errors.Is(err, ErrInternalDelayImpulse) {
+		t.Fatalf("err = %v, want ErrInternalDelayImpulse", err)
+	}
+}
+
+func TestTimeResponseSingularDescriptorRejectsInitialState(t *testing.T) {
+	sys := trMIMO(t, 0)
+	sys.E = mat.NewDense(2, 2, []float64{1, 0, 0, 0})
+	x0 := mat.NewVecDense(2, []float64{1, 1})
+	tGrid := makeTimeVector(11, 0.1)
+	u := mat.NewDense(11, 2, nil)
+	for name, run := range map[string]func() error{
+		"Initial": func() error { _, err := Initial(sys, x0, 2); return err },
+		"Lsim":    func() error { _, err := Lsim(sys, u, tGrid, x0); return err },
+	} {
+		err := run()
+		if !errors.Is(err, ErrDescriptorInitialState) || !errors.Is(err, ErrDescriptorSingular) {
+			t.Errorf("%s err = %v, want ErrDescriptorInitialState", name, err)
+		}
+	}
+	resp, err := Initial(sys, mat.NewVecDense(2, nil), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mat.Norm(resp.Y, 1) != 0 {
+		t.Fatalf("zero-state Initial = %v, want zeros", mat.Formatted(resp.Y))
+	}
+}
+
+func TestTimeResponseSingularDescriptorMatchesHandReduction(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, delays := range []bool{false, true} {
+			desc, oracle := index1Descriptor(t, dt, delays)
+			name := fmt.Sprintf("dt=%g delays=%v", dt, delays)
+
+			got, err := Step(desc, 2)
+			if err != nil {
+				t.Fatalf("%s Step: %v", name, err)
+			}
+			want, err := Step(oracle, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compareTimeResponses(t, got, want, 1e-10)
+
+			got, err = Impulse(desc, 2)
+			if dt == 0 && delays {
+				if !errors.Is(err, ErrInternalDelayImpulse) {
+					t.Fatalf("%s Impulse err = %v, want ErrInternalDelayImpulse", name, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("%s Impulse: %v", name, err)
+				}
+				want, err := Impulse(oracle, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				compareTimeResponses(t, got, want, 1e-10)
+			}
+
+			step := 0.05
+			if dt > 0 {
+				step = dt
+			}
+			tGrid := makeTimeVector(31, step)
+			u := mat.NewDense(31, 2, nil)
+			for k := range 31 {
+				u.Set(k, 0, math.Sin(0.7*float64(k)))
+				u.Set(k, 1, 1-0.03*float64(k))
+			}
+			got, err = Lsim(desc, u, tGrid, mat.NewVecDense(3, nil))
+			if err != nil {
+				t.Fatalf("%s Lsim: %v", name, err)
+			}
+			want, err = Lsim(oracle, u, tGrid, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compareTimeResponses(t, got, want, 1e-10)
+		}
+	}
+}
+
+func TestTimeResponseIndex2Descriptor(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		desc, oracle := index2Descriptor(t, dt, false)
+		for name, run := range map[string]func(*System, float64) (*TimeResponse, error){"Step": Step, "Impulse": Impulse} {
+			got, err := run(desc, 2)
+			if err != nil {
+				t.Fatalf("dt=%g %s: %v", dt, name, err)
+			}
+			want, err := run(oracle, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compareTimeResponses(t, got, want, 1e-9)
+		}
+
+		improper, _ := index2Descriptor(t, dt, true)
+		for name, run := range map[string]func() error{
+			"Step":    func() error { _, err := Step(improper, 2); return err },
+			"Impulse": func() error { _, err := Impulse(improper, 2); return err },
+			"Lsim": func() error {
+				_, err := Lsim(improper, mat.NewDense(3, 2, nil), makeTimeVector(3, 0.1), nil)
+				return err
+			},
+		} {
+			if err := run(); !errors.Is(err, ErrImproperModel) {
+				t.Errorf("dt=%g %s err = %v, want ErrImproperModel", dt, name, err)
+			}
+		}
+	}
+}
+
+func TestStepContinuousInternalDelayDescriptorMatchesExplicit(t *testing.T) {
+	_, tau, _ := trChainGrid(t)
+	sys := trDelayFeedback(t, tau, true)
+	desc := sys.Copy()
+	E := mat.NewDense(2, 2, []float64{2, 0.5, -0.3, 1.5})
+	var ea, eb, eb2 mat.Dense
+	ea.Mul(E, sys.A)
+	eb.Mul(E, sys.B)
+	eb2.Mul(E, sys.LFT.B2)
+	desc.E, desc.A, desc.B, desc.LFT.B2 = E, &ea, &eb, &eb2
+	got, err := Step(desc, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Step(sys, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTimeResponses(t, got, want, 1e-10)
 }

@@ -2,7 +2,10 @@ package controlsys
 
 import (
 	"math"
+	"math/cmplx"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func pidOpenLoop(t *testing.T, plant *System, pid *PID) *System {
@@ -252,4 +255,87 @@ func TestPidtune_CustomPM(t *testing.T) {
 	assertStable(t, cl, "PI/pm45")
 	ol := pidOpenLoop(t, plant, pid)
 	assertPhaseMargin(t, ol, 45, 5, "PI/pm45")
+}
+
+func pidtuneControllerOracle(pid *PID, w float64) complex128 {
+	if pid.Dt == 0 {
+		s := complex(0, w)
+		return complex(pid.Kp, 0) + complex(pid.Ki, 0)/s + complex(pid.Kd, 0)*s/(complex(pid.Tf, 0)*s+1)
+	}
+	z := cmplx.Exp(complex(0, w*pid.Dt))
+	integ := func(f PIDFormula) complex128 {
+		ts := complex(pid.Dt, 0)
+		switch f {
+		case BackwardEuler:
+			return ts * z / (z - 1)
+		case Trapezoidal:
+			return ts / 2 * (z + 1) / (z - 1)
+		}
+		return ts / (z - 1)
+	}
+	return complex(pid.Kp, 0) + complex(pid.Ki, 0)*integ(pid.IFormula) + complex(pid.Kd, 0)/(complex(pid.Tf, 0)+integ(pid.DFormula))
+}
+
+func TestPidtuneMeetsTargetForContinuousAndDiscretePlants(t *testing.T) {
+	cont, err := New(
+		mat.NewDense(3, 3, []float64{-1, 0.5, 0, 0, -2, 1, 0.3, 0, -3}),
+		mat.NewDense(3, 1, []float64{0, 0.4, 1}),
+		mat.NewDense(1, 3, []float64{6, -1, 0.5}),
+		mat.NewDense(1, 1, []float64{0.05}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disc, err := cont.DiscretizeZOH(0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		types  []PidtuneType
+		wc, pm float64
+	}{
+		{[]PidtuneType{PidtunePI, PidtunePID}, 0.8, 60},
+		{[]PidtuneType{PidtunePDF, PidtunePID, PidtunePIDF}, 2.5, 60},
+	}
+	for _, plant := range []*System{cont, disc} {
+		for _, tc := range cases {
+			for _, typ := range tc.types {
+				pid, err := Pidtune(plant, typ, PidtuneOptions{CrossoverFrequency: tc.wc, PhaseMargin: tc.pm})
+				if err != nil {
+					t.Fatalf("dt=%g %s: %v", plant.Dt, typ, err)
+				}
+				s := complex(0, tc.wc)
+				if plant.Dt > 0 {
+					s = cmplx.Exp(complex(0, tc.wc*plant.Dt))
+				}
+				c := pidtuneControllerOracle(pid, tc.wc)
+				if plant.Dt > 0 || pid.Tf > 0 || pid.Kd == 0 {
+					csys, err := pid.System()
+					if err != nil {
+						t.Fatalf("dt=%g %s: System: %v", plant.Dt, typ, err)
+					}
+					if got := evalSS(csys, s); cmplx.Abs(got-c) > 1e-9*cmplx.Abs(c) {
+						t.Fatalf("dt=%g %s: realized C=%v, oracle %v", plant.Dt, typ, got, c)
+					}
+				}
+				l := c * evalSS(plant, s)
+				pm := 180 + cmplx.Phase(l)*180/math.Pi
+				if math.Abs(cmplx.Abs(l)-1) > 1e-9 || math.Abs(pm-tc.pm) > 1e-7 {
+					t.Errorf("dt=%g %s: |L(jwc)|=%.12g PM=%.12g, want 1 and %g", plant.Dt, typ, cmplx.Abs(l), pm, tc.pm)
+				}
+				if typ == PidtunePID && tc.wc == 2.5 && pid.Kd <= 0 {
+					t.Errorf("dt=%g PID lead case: Kd=%g, want derivative action", plant.Dt, pid.Kd)
+				}
+			}
+		}
+	}
+}
+
+func TestPidtuneRejectsDiscreteCrossoverAboveNyquist(t *testing.T) {
+	plant, err := New(mat.NewDense(1, 1, []float64{0.9}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Pidtune(plant, PidtunePI, PidtuneOptions{CrossoverFrequency: math.Pi / 0.1}); err == nil {
+		t.Fatal("expected error for crossover at Nyquist")
+	}
 }

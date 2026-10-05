@@ -393,6 +393,9 @@ func isStrictlyUpperTriangular(m *mat.Dense) bool {
 	return true
 }
 
+// DiscretizeImpulse discretizes sys by impulse-invariant mapping. As in MATLAB
+// c2d(sys,Ts,'impulse'), models with internal delays are rejected with
+// ErrFeedbackDelay; input, output, and path delays are discretized exactly.
 func (sys *System) DiscretizeImpulse(dt float64) (*System, error) {
 	if sys.IsDiscrete() {
 		return nil, ErrWrongDomain
@@ -423,6 +426,9 @@ func (sys *System) DiscretizeMatched(dt float64) (*System, error) {
 // D2C converts a discrete-time model using ZOH, Tustin, modified FOH, or
 // matched pole-zero assumptions. An empty method selects ZOH.
 // Delay fields are converted to seconds using the original sample time.
+// Internal delays of k samples become internal delays of k·Ts seconds around
+// the converted delay-free model, inverting c2d; matched rejects them, as
+// MATLAB c2d 'matched' does.
 func (sys *System) D2C(method C2DMethod) (*System, error) {
 	return sys.D2CWithOpts(D2COptions{Method: method})
 }

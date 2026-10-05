@@ -242,8 +242,11 @@ func Balred(sys *System, order int, method BalredMethod) (*System, []float64, er
 	if r == 0 {
 		r = autoSelectOrder(hsv)
 	}
-	if r < 1 || r >= n {
+	if r < 1 || r > n {
 		return nil, nil, ErrInvalidOrder
+	}
+	if r == n {
+		return policy.zeroOrderCopy(), hsv, nil
 	}
 
 	Ab := br.Sys.A
@@ -380,7 +383,8 @@ func Modred(sys *System, elim []int, method BalredMethod) (*System, error) {
 }
 
 // singularPerturbation computes the reduced system via residualization.
-// Ar = A11 - A12*inv(A22)*A21, etc. Uses Gemm beta=-1 to fuse multiply-subtract.
+// Ar = A11 - A12*inv(M)*A21, etc., with M = A22 (continuous) or A22-I
+// (discrete, x2[k+1] = x2[k]). Uses Gemm beta=-1 to fuse multiply-subtract.
 func singularPerturbation(
 	Ab, Bb, Cb, Db *mat.Dense,
 	A11, B1, C1 *mat.Dense,
@@ -401,6 +405,12 @@ func singularPerturbation(
 	a22Data := take(n2 * n2)
 	a22Raw := A22.RawMatrix()
 	copyStrided(a22Data, n2, a22Raw.Data, a22Raw.Stride, n2, n2)
+
+	if dt > 0 {
+		for i := range n2 {
+			a22Data[i*n2+i]--
+		}
+	}
 
 	ipiv := make([]int, n2)
 	if !impl.Dgetrf(n2, n2, a22Data, n2, ipiv) {

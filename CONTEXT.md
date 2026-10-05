@@ -973,7 +973,7 @@ A numerical scaling transformation that balances state magnitudes for conditioni
 _Avoid_: balanced realization when Gramian balancing is meant
 
 **Prescaling**:
-A numerical conditioning transformation that scales states, inputs, and outputs before computation.
+A response-preserving diagonal state-coordinate scaling (MATLAB `prescale`) applied before computation; input and output scales are only suggested, not applied.
 _Avoid_: model reduction
 
 **Similarity transform**:

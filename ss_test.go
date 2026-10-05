@@ -410,3 +410,37 @@ func TestIsStableMarginal(t *testing.T) {
 func approxEqual(a, b, tol float64) bool {
 	return math.Abs(a-b) < tol
 }
+
+func TestIsStable_BoundaryPolesFromNonNormalA(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for k := range 200 {
+			w := 0.37 + 0.01*float64(k)
+			st, err := boundaryOscillator(t, w, dt).IsStable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st {
+				t.Fatalf("dt=%v w=%g: IsStable=true for poles on the stability boundary", dt, w)
+			}
+		}
+	}
+}
+
+func TestIsStable_ConsistentWithIsStabilizable(t *testing.T) {
+	A := mat.NewDense(1, 1, []float64{-1e-12})
+	sys, err := New(A, mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := sys.IsStable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stz, err := IsStabilizable(A, mat.NewDense(1, 1, nil), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != stz {
+		t.Errorf("IsStable=%v but IsStabilizable(B=0)=%v for pole -1e-12", st, stz)
+	}
+}

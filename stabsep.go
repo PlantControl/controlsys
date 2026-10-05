@@ -5,12 +5,17 @@ type StabsepResult struct {
 	Unstable *System
 }
 
+// Stabsep splits sys = Stable + Unstable (MATLAB stabsep). Stable holds the
+// modes strictly inside the stability boundary, is always proper and carries
+// the feedthrough D; Unstable holds the remaining finite modes and, for
+// singular-E descriptors, the infinite (nondynamic/improper) modes.
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.stabsep.html.
 func Stabsep(sys *System) (*StabsepResult, error) {
 	isStable := func(ev complex128) bool {
-		return poleInsideStabilityBoundary(ev, sys.IsContinuous(), 0)
+		return poleInsideStabilityBoundary(ev, sys.IsContinuous(), poleStabilityTolerance(ev))
 	}
 
-	stable, unstable, err := decomposeByEigenvalues(sys, isStable)
+	stable, unstable, err := decomposeByEigenvalues(sys, isStable, true)
 	if err != nil {
 		return nil, err
 	}
