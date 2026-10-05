@@ -642,7 +642,7 @@ func processResponseBasis(system *System, input []float64, dt, delay float64, es
 		if err != nil {
 			return nil, nil, err
 		}
-		last, err = system.C2D(dt - fraction, C2DOptions{})
+		last, err = system.C2D(dt-fraction, C2DOptions{})
 		if err != nil {
 			return nil, nil, err
 		}
