@@ -735,3 +735,34 @@ func BenchmarkMixsyn(b *testing.B) {
 		})
 	}
 }
+
+func TestAugwNonsingularDescriptorWeight(t *testing.T) {
+	W1d, err := NewDescriptor(
+		mat.NewDense(1, 1, []float64{-0.2}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0.1}),
+		mat.NewDense(1, 1, []float64{2}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	W1, err := W1d.ToExplicit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	G := mimoMixsynPlant(t, 0.5)
+	W2 := mixsynWeight(t, 0.1, []float64{10}, 2)
+	P, err := Augw(G, W1d, W2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if P.IsDescriptor() {
+		t.Fatal("P is a descriptor model")
+	}
+	for _, w := range []float64{0, 0.3, 5} {
+		s := complex(0, w)
+		assertFRClose(t, fmt.Sprintf("P(j%g)", w), mixsynFR(P, s), augwOracle(G, W1, W2, nil, s, 1), 1e-9)
+	}
+}
