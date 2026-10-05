@@ -2907,6 +2907,7 @@ func TestZeroStateInternalDelayInterconnectionsHaveNoPhantomStates(t *testing.T)
 			{"gain,z0", gain, z0, 0},
 			{"z0,dyn", z0, dyn, nDyn},
 			{"dyn,z1", dyn, z1, nDyn},
+			{"gain-iod,z0", feedbackDelayController(t, dt, "gain-iod"), z0, 0},
 		} {
 			a, b := pr.a, pr.b
 			r, err := Append(a, b)
