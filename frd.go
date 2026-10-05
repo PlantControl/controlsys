@@ -536,6 +536,9 @@ func (f *FRD) Bode() *BodeResult {
 // frequency data, so the result carries no pole counts: Encirclements is the
 // closed-loop unstable pole count under unit negative feedback only for a
 // stable open loop, and a caller who knows the open-loop count P adds it.
+// When the sampled contour passes through -1 (a sample at -1, or a segment
+// between neighbouring samples crossing it) the count is undefined and
+// Nyquist returns ErrSingularTransform, as (*System).Nyquist does.
 func (f *FRD) Nyquist() (*FRDNyquistResult, error) {
 	if err := f.validate(); err != nil {
 		return nil, fmt.Errorf("FRD.Nyquist: %w", err)
@@ -559,6 +562,9 @@ func (f *FRD) Nyquist() (*FRDNyquistResult, error) {
 	full = append(full, contourN...)
 	full = append(full, frdLowFreqClosure(f.Omega, contour)...)
 	full = append(full, contour...)
+	if contourHits(full, -1) {
+		return nil, fmt.Errorf("FRD.Nyquist: sampled contour passes through -1 (1+L = 0, closed-loop poles on the stability boundary): %w", ErrSingularTransform)
+	}
 	enc := -windingNumber(full, -1)
 	return &FRDNyquistResult{Omega: copyFloatSlice(f.Omega), Contour: contour, ContourN: contourN, Encirclements: enc}, nil
 }
@@ -571,6 +577,25 @@ type FRDNyquistResult struct {
 	Contour       []complex128
 	ContourN      []complex128
 	Encirclements int
+}
+
+// contourHits reports whether the closed polyline through contour passes
+// within nyquistOnContourTol (relative to the segment's magnitude) of point.
+func contourHits(contour []complex128, point complex128) bool {
+	n := len(contour)
+	for k := range n {
+		a, b := contour[k]-point, contour[(k+1)%n]-point
+		d := b - a
+		t := 0.0
+		if dd := real(d)*real(d) + imag(d)*imag(d); dd > 0 {
+			t = min(max(-(real(a)*real(d)+imag(a)*imag(d))/dd, 0), 1)
+		}
+		scale := max(1, cmplx.Abs(contour[k]), cmplx.Abs(contour[(k+1)%n]))
+		if cmplx.Abs(a+complex(t, 0)*d) <= nyquistOnContourTol*scale {
+			return true
+		}
+	}
+	return false
 }
 
 // frdLowFreqClosure returns the interior points of the arc from conj(h0) to

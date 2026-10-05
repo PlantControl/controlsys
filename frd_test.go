@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/cmplx"
 	"reflect"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -1466,5 +1467,53 @@ func TestFRDErrorSentinels(t *testing.T) {
 	}
 	if _, err := FRDParallel(g, other); !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("FRDParallel grid mismatch: err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestFRD_NyquistContourThroughMinusOne(t *testing.T) {
+	sampled := func(k float64, omega []float64) [][][]complex128 {
+		r := make([][][]complex128, len(omega))
+		for i, w := range omega {
+			s := complex(1, w)
+			r[i] = [][]complex128{{complex(k, 0) / (s * s * s)}}
+		}
+		return r
+	}
+	onGrid := []float64{0.1, 0.5, 1, math.Sqrt(3), 3, 10, 100}
+	tests := []struct {
+		name     string
+		response [][][]complex128
+		omega    []float64
+	}{
+		{"sample at -1", sampled(8, onGrid), onGrid},
+		{"segment through -1", [][][]complex128{{{0.5}}, {{-1 + 0.5i}}, {{-1 - 0.5i}}, {{0.01}}}, []float64{0.1, 1, 2, 100}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := NewFRD(tc.response, tc.omega, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := f.Nyquist()
+			if !errors.Is(err, ErrSingularTransform) || res != nil {
+				t.Fatalf("Nyquist = %+v, %v, want nil, ErrSingularTransform", res, err)
+			}
+			if !strings.HasPrefix(err.Error(), "FRD.Nyquist: ") || strings.Count(err.Error(), "controlsys:") != 1 {
+				t.Errorf("err = %q, want single FRD.Nyquist: prefix and sentinel", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		k    float64
+		want int
+	}{{6, 0}, {10, 2}} {
+		f, err := NewFRD(sampled(tc.k, onGrid), onGrid, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := f.Nyquist()
+		if err != nil || res.Encirclements != tc.want {
+			t.Errorf("K=%g: Nyquist = %+v, %v, want %d encirclements", tc.k, res, err, tc.want)
+		}
 	}
 }
