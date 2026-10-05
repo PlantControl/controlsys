@@ -268,18 +268,22 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	return mat.NewDense(1, n, kData), nil
 }
 
-// Place computes state feedback gain F (m×n) via Schur-based pole placement
-// such that eig(A - B*F) equals the desired poles.
+// Place computes the state-feedback gain K (m×n) such that eig(A − B·K)
+// equals the desired poles, following MATLAB place.
 //
-// Uses Varga's method: Schur decomposition with deflating assignment of
-// 1×1 blocks (minimum-norm gain) and 2×2 blocks (closed form; with two
-// independent input directions the block is made normal, so a repeated
-// pole on it is non-defective). Works for both SISO and MIMO systems. A
-// 2×2 block that no input direction can move returns ErrUncontrollable.
+// When rank(B) ≥ 2 it uses the Kautsky–Nichols–Van Dooren robust assignment
+// (method 0; MATLAB place cites the same paper): each closed-loop eigenvector is
+// chosen within its admissible subspace to keep the eigenvector matrix well
+// conditioned, so the poles are insensitive to perturbations in A and B and a
+// repeated pole is non-defective. When rank(B) = 1 the gain is unique and is
+// computed by Varga's Schur method, which is also the fallback when the robust
+// eigenvector matrix has 1-norm condition number above 1/√ε (an
+// uncontrollable mode makes it singular). A mode that no input can move
+// returns ErrUncontrollable.
 //
-// Poles must come in conjugate pairs. len(poles) must equal n. Unlike
-// MATLAB place, pole multiplicity may exceed rank(B); the closed loop is then
-// defective and its repeated eigenvalues are correspondingly sensitive.
+// Poles must come in conjugate pairs and len(poles) must equal n. As in MATLAB,
+// a pole repeated (exactly) more than rank(B) times returns
+// ErrPoleMultiplicity; use Acker for repeated single-input poles.
 func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	na, nac := A.Dims()
 	if na != nac {
@@ -299,6 +303,37 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	if err := validatePoles(poles); err != nil {
 		return nil, err
 	}
+
+	var svd mat.SVD
+	if !svd.Factorize(B, mat.SVDFull) {
+		return nil, ErrSchurFailed
+	}
+	sv := svd.Values(nil)
+	r := 0
+	for _, s := range sv {
+		if s > float64(max(n, m))*eps()*sv[0] {
+			r++
+		}
+	}
+	if r == 0 {
+		return nil, fmt.Errorf("Place: %w", ErrUncontrollable)
+	}
+	if maxPoleMultiplicity(poles) > r {
+		return nil, ErrPoleMultiplicity
+	}
+	if r >= 2 {
+		if K := placeKNV(A, &svd, sv[:r], poles); K != nil {
+			return K, nil
+		}
+	}
+	return placeSchur(A, B, poles)
+}
+
+// placeSchur is Varga's Schur-based pole placement: deflating assignment of
+// 1×1 blocks (minimum-norm gain) and 2×2 blocks (closed form; with two
+// independent input directions the block is made normal).
+func placeSchur(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
+	n, m := B.Dims()
 
 	t := make([]float64, n*n)
 	aRaw := A.RawMatrix()
@@ -729,4 +764,509 @@ func placeMultiInput2x2(f, b0, b1 []float64, t11, t12, t21, t22 float64, p1, p2 
 		f[j*2+1] = q0*y01 + q1*y11
 	}
 	return true
+}
+
+const placeKNVMaxSweeps = 5
+
+func maxPoleMultiplicity(poles []complex128) int {
+	counts := make(map[complex128]int, len(poles))
+	best := 0
+	for _, p := range poles {
+		counts[p]++
+		best = max(best, counts[p])
+	}
+	return best
+}
+
+// placeKNV is the Kautsky–Nichols–Van Dooren method 0 for B = U·Σ·Vᵀ of
+// rank r = len(sv) ≥ 2. In an orthogonal basis W where Wᵀ·B = [Σ_r·V_rᵀ; 0]
+// and T = Wᵀ·A·W has T[p][q] = 0 for q < p−r, the admissible eigenvectors
+// for λ span null(T[r:,:] − λ·[0 I]). X starts from fixed pseudo-random
+// admissible vectors (distinct ones for a repeated pole); each sweep then
+// replaces every eigenvector, or conjugate pair jointly, by the admissible
+// unit vector maximizing |det X| with the others fixed, read off the rows of
+// X⁻¹. X is kept in real form (Re x, Im x for a pair). It returns nil when
+// κ₁(X) ≥ 1/√ε.
+func placeKNV(A *mat.Dense, svd *mat.SVD, sv []float64, poles []complex128) *mat.Dense {
+	n, _ := A.Dims()
+	r := len(sv)
+	var uMat, vMat mat.Dense
+	svd.UTo(&uMat)
+	svd.VTo(&vMat)
+	m, _ := vMat.Dims()
+
+	w := make([]float64, n*n)
+	uRaw := uMat.RawMatrix()
+	copyStrided(w, n, uRaw.Data, uRaw.Stride, n, n)
+	aRaw := A.RawMatrix()
+	tmp := make([]float64, n*n)
+	at := make([]float64, n*n)
+	wGen := blas64.General{Rows: n, Cols: n, Data: w, Stride: n}
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
+		blas64.General{Rows: n, Cols: n, Data: aRaw.Data, Stride: aRaw.Stride}, wGen,
+		0, blas64.General{Rows: n, Cols: n, Data: tmp, Stride: n})
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, wGen,
+		blas64.General{Rows: n, Cols: n, Data: tmp, Stride: n},
+		0, blas64.General{Rows: n, Cols: n, Data: at, Stride: n})
+	placeBandReduce(at, w, n, r)
+
+	lam := make([]complex128, 0, n)
+	for _, p := range poles {
+		if imag(p) == 0 {
+			lam = append(lam, p)
+		}
+	}
+	for _, p := range poles {
+		if imag(p) > 0 {
+			lam = append(lam, p, cmplx.Conj(p))
+		}
+	}
+
+	basisOf := make(map[complex128][]complex128)
+	basis := make([][]complex128, n)
+	occ := make([]int, n)
+	seen := make(map[complex128]int)
+	for _, p := range lam {
+		if imag(p) >= 0 {
+			seen[p]++
+		}
+	}
+	slab := make([]complex128, len(seen)*n*r)
+	clear(seen)
+	nb := newPlaceNullBasis(n, r)
+	for j := range n {
+		p := lam[j]
+		if imag(p) < 0 {
+			continue
+		}
+		s, ok := basisOf[p]
+		if !ok {
+			s, slab = slab[:n*r:n*r], slab[n*r:]
+			nb.compute(s, at, p)
+			basisOf[p] = s
+		}
+		basis[j] = s
+		occ[j] = seen[p]
+		seen[p]++
+	}
+
+	x := make([]float64, n*n)
+	col := make([]complex128, n)
+	c := make([]complex128, r)
+	h := make([]complex128, r)
+	seed := uint64(0x9e3779b97f4a7c15)
+	next := func() float64 {
+		seed ^= seed << 13
+		seed ^= seed >> 7
+		seed ^= seed << 17
+		return float64(seed>>11)/(1<<53) - 0.5
+	}
+	for j := range n {
+		if basis[j] == nil {
+			continue
+		}
+		for k := range c {
+			c[k] = complex(next(), 0)
+			if imag(lam[j]) != 0 {
+				c[k] += complex(0, next())
+			}
+		}
+		c[occ[j]%r] += 2
+		placeKNVCombine(col, basis[j], c, n, r)
+		placeKNVSetCols(x, col, n, j, imag(lam[j]) != 0)
+	}
+
+	ws := newPlaceKNVWork(n)
+	xinv := ws.inverse(x, eps())
+	if xinv == nil {
+		return nil
+	}
+	for range placeKNVMaxSweeps {
+		gain := 0.0
+		for j := range n {
+			s := basis[j]
+			if s == nil {
+				continue
+			}
+			y1 := xinv[j*n : (j+1)*n]
+			if imag(lam[j]) == 0 {
+				for k := range r {
+					var acc float64
+					for i := range n {
+						acc += real(s[i*r+k]) * y1[i]
+					}
+					c[k] = complex(acc, 0)
+				}
+				if placeKNVCombine(col, s, c, n, r) {
+					gain += ws.replace(x, xinv, col, j, false)
+				}
+				continue
+			}
+			y2 := xinv[(j+1)*n : (j+2)*n]
+			for k := range r {
+				var acc complex128
+				for i := range n {
+					acc += cmplx.Conj(s[i*r+k]) * complex(y1[i], y2[i])
+				}
+				c[k] = acc
+				acc = 0
+				for i := range n {
+					acc += cmplx.Conj(s[i*r+k]) * complex(y1[i], -y2[i])
+				}
+				h[k] = acc
+			}
+			if placeKNVPairCoeffs(c, h) && placeKNVCombine(col, s, c, n, r) {
+				gain += ws.replace(x, xinv, col, j, true)
+			}
+		}
+		if gain < 1e-3 {
+			break
+		}
+	}
+
+	xinv = ws.inverse(x, math.Sqrt(eps()))
+	if xinv == nil {
+		return nil
+	}
+
+	y := make([]float64, r*n)
+	for i := range r {
+		for j := 0; j < n; j++ {
+			re, im := real(lam[j]), imag(lam[j])
+			if im == 0 {
+				y[i*n+j] = x[i*n+j] * re
+				continue
+			}
+			xr, xi := x[i*n+j], x[i*n+j+1]
+			y[i*n+j] = re*xr - im*xi
+			y[i*n+j+1] = im*xr + re*xi
+			j++
+		}
+	}
+	d := make([]float64, r*n)
+	for i := range r {
+		copy(d[i*n:(i+1)*n], at[i*n:(i+1)*n])
+	}
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, -1,
+		blas64.General{Rows: r, Cols: n, Data: y, Stride: n},
+		blas64.General{Rows: n, Cols: n, Data: xinv, Stride: n},
+		1, blas64.General{Rows: r, Cols: n, Data: d, Stride: n})
+	for i := range r {
+		blas64.Scal(1/sv[i], blas64.Vector{N: n, Data: d[i*n:], Inc: 1})
+	}
+	vRaw := vMat.RawMatrix()
+	kz := make([]float64, m*n)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
+		blas64.General{Rows: m, Cols: r, Data: vRaw.Data, Stride: vRaw.Stride},
+		blas64.General{Rows: r, Cols: n, Data: d, Stride: n},
+		0, blas64.General{Rows: m, Cols: n, Data: kz, Stride: n})
+	k := make([]float64, m*n)
+	blas64.Gemm(blas.NoTrans, blas.Trans, 1,
+		blas64.General{Rows: m, Cols: n, Data: kz, Stride: n}, wGen,
+		0, blas64.General{Rows: m, Cols: n, Data: k, Stride: n})
+	return mat.NewDense(m, n, k)
+}
+
+// placeBandReduce applies Householder similarities on coordinates r..n−1 so
+// that t[p][q] = 0 for q < p−r, accumulating them into the columns of w.
+func placeBandReduce(t, w []float64, n, r int) {
+	v := make([]float64, n)
+	work := make([]float64, n)
+	for q := 0; q+r+1 < n; q++ {
+		p := q + r
+		l := n - p
+		beta, tau := impl.Dlarfg(l, t[p*n+q], t[(p+1)*n+q:], n)
+		v[0] = 1
+		for i := 1; i < l; i++ {
+			v[i] = t[(p+i)*n+q]
+			t[(p+i)*n+q] = 0
+		}
+		t[p*n+q] = beta
+		impl.Dlarf(blas.Left, l, n-q-1, v[:l], 1, tau, t[p*n+q+1:], n, work)
+		impl.Dlarf(blas.Right, n, l, v[:l], 1, tau, t[p:], n, work)
+		impl.Dlarf(blas.Right, n, l, v[:l], 1, tau, w[p:], n, work)
+	}
+}
+
+type placeGivens struct {
+	c, d   int
+	ga, gb complex128
+}
+
+type placeGivensReal struct {
+	c, d   int
+	ga, gb float64
+}
+
+type placeNullBasis struct {
+	n, r  int
+	mw    []complex128
+	mwr   []float64
+	sr    []float64
+	rots  []placeGivens
+	rotsR []placeGivensReal
+}
+
+func newPlaceNullBasis(n, r int) *placeNullBasis {
+	return &placeNullBasis{n: n, r: r}
+}
+
+// compute writes into s an orthonormal basis (n×r, row-major) of
+// null(t[r:,:] − λ·[0 I]). Column rotations reduce the banded pencil row by
+// row from the bottom to [0 R]; the first r columns of their product span
+// the null space.
+func (b *placeNullBasis) compute(s []complex128, t []float64, lam complex128) {
+	if imag(lam) == 0 {
+		b.computeReal(s, t, real(lam))
+		return
+	}
+	n, r := b.n, b.r
+	if b.mw == nil {
+		b.mw = make([]complex128, (n-r)*n)
+		b.rots = make([]placeGivens, 0, (n-r)*r)
+	}
+	mw := b.mw
+	for i := range n - r {
+		for j := range n {
+			mw[i*n+j] = complex(t[(r+i)*n+j], 0)
+		}
+		mw[i*n+r+i] -= lam
+	}
+	b.rots = b.rots[:0]
+	for i := n - r - 1; i >= 0; i-- {
+		d := r + i
+		for c := i; c < d; c++ {
+			a, bb := mw[i*n+c], mw[i*n+d]
+			h := math.Hypot(cmplx.Abs(a), cmplx.Abs(bb))
+			if h == 0 {
+				continue
+			}
+			ga, gb := a/complex(h, 0), bb/complex(h, 0)
+			cga, cgb := cmplx.Conj(ga), cmplx.Conj(gb)
+			for row := 0; row <= i; row++ {
+				xc, xd := mw[row*n+c], mw[row*n+d]
+				mw[row*n+c] = xc*gb - xd*ga
+				mw[row*n+d] = xc*cga + xd*cgb
+			}
+			b.rots = append(b.rots, placeGivens{c, d, ga, gb})
+		}
+	}
+	clear(s)
+	for k := range r {
+		s[k*r+k] = 1
+	}
+	for _, g := range slices.Backward(b.rots) {
+
+		cga, cgb := cmplx.Conj(g.ga), cmplx.Conj(g.gb)
+		for k := range r {
+			vc, vd := s[g.c*r+k], s[g.d*r+k]
+			s[g.c*r+k] = g.gb*vc + cga*vd
+			s[g.d*r+k] = -g.ga*vc + cgb*vd
+		}
+	}
+}
+
+func (b *placeNullBasis) computeReal(s []complex128, t []float64, lam float64) {
+	n, r := b.n, b.r
+	if b.mwr == nil {
+		b.mwr = make([]float64, (n-r)*n)
+		b.sr = make([]float64, n*r)
+		b.rotsR = make([]placeGivensReal, 0, (n-r)*r)
+	}
+	mw := b.mwr
+	copy(mw, t[r*n:])
+	for i := range n - r {
+		mw[i*n+r+i] -= lam
+	}
+	b.rotsR = b.rotsR[:0]
+	for i := n - r - 1; i >= 0; i-- {
+		d := r + i
+		for c := i; c < d; c++ {
+			a, bb := mw[i*n+c], mw[i*n+d]
+			if a == 0 {
+				continue
+			}
+			h := math.Hypot(a, bb)
+			ga, gb := a/h, bb/h
+			for row := 0; row <= i; row++ {
+				xc, xd := mw[row*n+c], mw[row*n+d]
+				mw[row*n+c] = xc*gb - xd*ga
+				mw[row*n+d] = xc*ga + xd*gb
+			}
+			b.rotsR = append(b.rotsR, placeGivensReal{c, d, ga, gb})
+		}
+	}
+	sr := b.sr
+	clear(sr)
+	for k := range r {
+		sr[k*r+k] = 1
+	}
+	for _, g := range slices.Backward(b.rotsR) {
+
+		vc, vd := sr[g.c*r:g.c*r+r], sr[g.d*r:g.d*r+r]
+		for k := range r {
+			vc[k], vd[k] = g.gb*vc[k]+g.ga*vd[k], -g.ga*vc[k]+g.gb*vd[k]
+		}
+	}
+	for i, v := range sr {
+		s[i] = complex(v, 0)
+	}
+}
+
+// placeKNVCombine writes the unit vector S·c into col, reporting false when
+// S·c vanishes.
+func placeKNVCombine(col, s, c []complex128, n, r int) bool {
+	var nrm float64
+	for i := range n {
+		var acc complex128
+		for k := range r {
+			acc += s[i*r+k] * c[k]
+		}
+		col[i] = acc
+		nrm += real(acc)*real(acc) + imag(acc)*imag(acc)
+	}
+	if nrm == 0 {
+		return false
+	}
+	inv := complex(1/math.Sqrt(nrm), 0)
+	for i := range col {
+		col[i] *= inv
+	}
+	return true
+}
+
+// placeKNVSetCols stores the eigenvector col in real form: column j for a
+// real pole, or Re col, Im col in columns j, j+1 for a conjugate pair.
+func placeKNVSetCols(x []float64, col []complex128, n, j int, pair bool) {
+	for i := range n {
+		x[i*n+j] = real(col[i])
+		if pair {
+			x[i*n+j+1] = imag(col[i])
+		}
+	}
+}
+
+// placeKNVPairCoeffs turns g = Sᴴv, h = Sᴴv̄ (v ⟂ all columns but the pair)
+// into c maximizing |det X| for the pair [S·c, conj(S·c)]: the top
+// eigenvector of g·gᴴ − h·hᴴ, written as c = α·g + β·h. It reports false
+// when g and h vanish.
+func placeKNVPairCoeffs(g, h []complex128) bool {
+	var gg, hh float64
+	var gh complex128
+	for k := range g {
+		gg += real(g[k])*real(g[k]) + imag(g[k])*imag(g[k])
+		hh += real(h[k])*real(h[k]) + imag(h[k])*imag(h[k])
+		gh += cmplx.Conj(g[k]) * h[k]
+	}
+	d := gg - hh
+	mu := (d + math.Copysign(math.Sqrt(d*d+4*math.Max(gg*hh-real(gh*cmplx.Conj(gh)), 0)), d)) / 2
+	if mu == 0 {
+		return false
+	}
+	a1, b1 := gh, complex(mu-gg, 0)
+	a2, b2 := complex(hh+mu, 0), -cmplx.Conj(gh)
+	alpha, beta := a1, b1
+	if cmplx.Abs(a2)+cmplx.Abs(b2) > cmplx.Abs(a1)+cmplx.Abs(b1) {
+		alpha, beta = a2, b2
+	}
+	for k := range g {
+		g[k] = alpha*g[k] + beta*h[k]
+	}
+	return true
+}
+
+type placeKNVWork struct {
+	n    int
+	ipiv []int
+	iw   []int
+	work []float64
+	lu   []float64
+	inv  []float64
+	xc   []float64
+	u    []float64
+	rows []float64
+}
+
+func newPlaceKNVWork(n int) *placeKNVWork {
+	return &placeKNVWork{
+		n:    n,
+		ipiv: make([]int, n),
+		iw:   make([]int, n),
+		work: make([]float64, 4*n),
+		lu:   make([]float64, n*n),
+		inv:  make([]float64, n*n),
+		xc:   make([]float64, 2*n),
+		u:    make([]float64, 2*n),
+		rows: make([]float64, 2*n),
+	}
+}
+
+// inverse returns x⁻¹ in reused storage, or nil when κ₁(x) ≥ 1/√ε.
+func (w *placeKNVWork) inverse(x []float64, minRcond float64) []float64 {
+	n := w.n
+	copy(w.lu, x)
+	anorm := impl.Dlange(lapack.MaxColumnSum, n, n, w.lu, n, w.work)
+	if !impl.Dgetrf(n, n, w.lu, n, w.ipiv) {
+		return nil
+	}
+	if rcond := impl.Dgecon(lapack.MaxColumnSum, n, w.lu, n, anorm, w.work, w.iw); !(rcond > minRcond) {
+		return nil
+	}
+	clear(w.inv)
+	for i := range n {
+		w.inv[i*n+i] = 1
+	}
+	impl.Dgetrs(blas.NoTrans, n, n, w.lu, n, w.ipiv, w.inv, n)
+	return w.inv
+}
+
+// replace stores the eigenvector col at column j (and j+1 for a pair) of
+// the real-form x and updates xinv by the Sherman–Morrison–Woodbury formula,
+// returning log|det X_new / det X_old|. It leaves x unchanged and returns 0
+// when the update would make x numerically singular.
+func (w *placeKNVWork) replace(x, xinv []float64, col []complex128, j int, pair bool) float64 {
+	n := w.n
+	p := 1
+	if pair {
+		p = 2
+	}
+	xr, xi := w.xc[:n], w.xc[n:]
+	u0, u1 := w.u[:n], w.u[n:]
+	for i := range n {
+		xr[i], xi[i] = real(col[i]), imag(col[i])
+	}
+	xinvGen := blas64.General{Rows: n, Cols: n, Data: xinv, Stride: n}
+	blas64.Gemv(blas.NoTrans, 1, xinvGen, blas64.Vector{N: n, Data: xr, Inc: 1}, 0, blas64.Vector{N: n, Data: u0, Inc: 1})
+	un := math.Abs(u0[blas64.Iamax(blas64.Vector{N: n, Data: u0, Inc: 1})])
+	var i00, i01, i10, i11, det float64
+	if pair {
+		blas64.Gemv(blas.NoTrans, 1, xinvGen, blas64.Vector{N: n, Data: xi, Inc: 1}, 0, blas64.Vector{N: n, Data: u1, Inc: 1})
+		un = max(un, math.Abs(u1[blas64.Iamax(blas64.Vector{N: n, Data: u1, Inc: 1})]))
+		d00, d01, d10, d11 := u0[j], u1[j], u0[j+1], u1[j+1]
+		det = d00*d11 - d01*d10
+		i00, i01, i10, i11 = d11/det, -d01/det, -d10/det, d00/det
+	} else {
+		det = u0[j]
+		i00 = 1 / det
+	}
+	if !(math.Abs(det) > math.Sqrt(eps())*math.Pow(un, float64(p))) {
+		return 0
+	}
+	r0, r1 := w.rows[:n], w.rows[n:]
+	copy(r0, xinv[j*n:(j+1)*n])
+	u0[j]--
+	if pair {
+		copy(r1, xinv[(j+1)*n:(j+2)*n])
+		u1[j+1]--
+		for i := range n {
+			a, b := u0[i], u1[i]
+			u0[i], u1[i] = a*i00+b*i10, a*i01+b*i11
+		}
+		blas64.Ger(-1, blas64.Vector{N: n, Data: u1, Inc: 1}, blas64.Vector{N: n, Data: r1, Inc: 1}, xinvGen)
+	} else {
+		blas64.Scal(i00, blas64.Vector{N: n, Data: u0, Inc: 1})
+	}
+	blas64.Ger(-1, blas64.Vector{N: n, Data: u0, Inc: 1}, blas64.Vector{N: n, Data: r0, Inc: 1}, xinvGen)
+	placeKNVSetCols(x, col, n, j, pair)
+	return math.Log(math.Abs(det))
 }

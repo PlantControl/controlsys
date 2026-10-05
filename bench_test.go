@@ -1162,6 +1162,34 @@ func BenchmarkPlace_N10_M2(b *testing.B)  { benchPlace(b, 10, 2) }
 func BenchmarkPlace_N50_M5(b *testing.B)  { benchPlace(b, 50, 5) }
 func BenchmarkPlace_N100_M5(b *testing.B) { benchPlace(b, 100, 5) }
 
+func benchPlaceRandom(b *testing.B, n, m int) {
+	rng := newPlaceRNG(3)
+	a := make([]float64, n*n)
+	for i := range a {
+		a[i] = rng()
+	}
+	bd := make([]float64, n*m)
+	for i := range bd {
+		bd[i] = rng()
+	}
+	A, B := mat.NewDense(n, n, a), mat.NewDense(n, m, bd)
+	poles := make([]complex128, 0, n)
+	for len(poles)+2 <= n {
+		re := -0.5 - float64(len(poles))*0.1
+		poles = append(poles, complex(re, 0.5), complex(re, -0.5))
+	}
+	if len(poles) < n {
+		poles = append(poles, -1)
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		Place(A, B, poles)
+	}
+}
+
+func BenchmarkPlace_Random_N10_M3(b *testing.B) { benchPlaceRandom(b, 10, 3) }
+func BenchmarkPlace_Random_N30_M4(b *testing.B) { benchPlaceRandom(b, 30, 4) }
+
 func benchAcker(b *testing.B, n int) {
 	A := benchStableA(n)
 	bCol := mat.NewDense(n, 1, nil)
