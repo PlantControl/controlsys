@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
+	"time"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -1392,5 +1394,70 @@ func TestSelectStaticGainRejectsOneSidedEmpty(t *testing.T) {
 	}
 	if n, m, p := r.Dims(); n+m+p != 0 {
 		t.Errorf("SelectByIndex(nil,nil) dims = (%d,%d,%d), want empty", n, m, p)
+	}
+}
+
+func TestPolesRejectNonFiniteWithoutHanging(t *testing.T) {
+	newSys := func(a01, e01 float64, descriptor bool) *System {
+		A := mat.NewDense(3, 3, []float64{-1, a01, 0, 0.5, -3, 1, 0, 2, -4})
+		B := mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, 1})
+		C := mat.NewDense(2, 3, []float64{1, 0, 1, 0, 1, 0})
+		D := mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2})
+		var E *mat.Dense
+		if descriptor {
+			E = mat.NewDense(3, 3, []float64{1, e01, 0, 0, 2, 0, 0, 0, 1})
+		}
+		sys, err := NewDescriptor(A, B, C, D, E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sys
+	}
+	cases := []struct {
+		name string
+		sys  *System
+	}{
+		{"A NaN", newSys(math.NaN(), 0, false)},
+		{"A +Inf", newSys(math.Inf(1), 0, false)},
+		{"descriptor A NaN", newSys(math.NaN(), 0.5, true)},
+		{"descriptor E Inf", newSys(2, math.Inf(-1), true)},
+	}
+	for _, tc := range cases {
+		for _, dt := range []float64{0, 0.1} {
+			t.Run(fmt.Sprintf("%s dt=%g", tc.name, dt), func(t *testing.T) {
+				sys := tc.sys.Copy()
+				sys.Dt = dt
+				var poleErr, stableErr error
+				finishesWithin(t, 5*time.Second, func() {
+					_, poleErr = sys.Poles()
+					_, stableErr = sys.IsStable()
+				})
+				if !errors.Is(poleErr, ErrInvalidArgument) || !strings.HasPrefix(poleErr.Error(), "Poles: ") {
+					t.Fatalf("Poles: %v", poleErr)
+				}
+				if !errors.Is(stableErr, ErrInvalidArgument) {
+					t.Fatalf("IsStable: %v", stableErr)
+				}
+			})
+		}
+	}
+}
+
+func TestPolesFiniteUnchanged(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-1, 2, 0, -3})
+	sys, err := New(A, mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, []float64{0.5}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poles, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[float64]bool{}
+	for _, p := range poles {
+		got[math.Round(real(p)*1e9)/1e9] = imag(p) == 0
+	}
+	if len(poles) != 2 || !got[-1] || !got[-3] {
+		t.Fatalf("poles %v, want {-1,-3}", poles)
 	}
 }

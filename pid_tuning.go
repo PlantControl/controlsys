@@ -2,7 +2,6 @@ package controlsys
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -12,10 +11,6 @@ import (
 
 	"plantcontrol.org/v1/gonum/mat"
 )
-
-// ErrPIDTuningTargetUnattainable means no controller passed the requested target
-// and stability checks within the bounded search. It is not proof of impossibility.
-var ErrPIDTuningTargetUnattainable = errors.New("PID tuning target unattainable within search bounds")
 
 type PIDDesignFocus string
 

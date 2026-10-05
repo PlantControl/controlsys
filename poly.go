@@ -151,7 +151,12 @@ func (p Poly) ScaleTo(dst Poly, s float64) Poly {
 	return dst
 }
 
+// Roots returns the roots of p, as MATLAB roots. NaN or Inf coefficients
+// return ErrInvalidArgument.
 func (p Poly) Roots() ([]complex128, error) {
+	if err := requireFinite("Poly.Roots", "coefficient", p...); err != nil {
+		return nil, err
+	}
 	start := 0
 	for start < len(p) && p[start] == 0 {
 		start++
