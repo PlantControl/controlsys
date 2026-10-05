@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -174,5 +175,37 @@ func TestSmithPredictor_Stability(t *testing.T) {
 	}
 	if !stableSmith {
 		t.Error("Smith predictor should stabilize the closed-loop with delay-free plant")
+	}
+}
+
+func TestSmithPredictorInvalidArgs(t *testing.T) {
+	mk := func() *System {
+		s, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+			mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	delayed := mk()
+	delayed.InputDelay = []float64{0.5}
+	cases := []struct {
+		name  string
+		c, g  *System
+		delay float64
+		order int
+		want  error
+	}{
+		{"nil controller", nil, mk(), 1, 2, ErrInvalidArgument},
+		{"nil model", mk(), nil, 1, 2, ErrInvalidArgument},
+		{"pade order 0", mk(), mk(), 1, 0, ErrInvalidArgument},
+		{"NaN delay", mk(), mk(), math.NaN(), 2, ErrNegativeDelay},
+		{"Inf delay", mk(), mk(), math.Inf(1), 2, ErrNegativeDelay},
+		{"delayed model", mk(), delayed, 1, 2, ErrDelayUnsupported},
+	}
+	for _, tc := range cases {
+		if _, err := SmithPredictor(tc.c, tc.g, tc.delay, tc.order); !errors.Is(err, tc.want) {
+			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.want)
+		}
 	}
 }
