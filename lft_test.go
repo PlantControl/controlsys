@@ -877,7 +877,7 @@ func TestLFTZeroWidthUpperChannelsSimulate(t *testing.T) {
 		t.Fatal(err)
 	}
 	x := []float64{0.7, -1.2, 0.4, 0.9, -0.6}
-	resp, err := got.Simulate(nil, mat.NewVecDense(5, append([]float64(nil), x...)), &SimulateOpts{Steps: steps})
+	resp, err := got.Simulate(nil, mat.NewVecDense(5, append([]float64(nil), x...)), &SimulateOpts{Steps: steps, FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -979,11 +979,11 @@ func TestLFTZeroWidthDelayedDeltaMatchesFullPartition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotR, err = got.Simulate(u, x0, nil)
+	gotR, err = got.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantR, err = fullLFT.Simulate(u, x0, nil)
+	wantR, err = fullLFT.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -223,6 +223,10 @@ func (sys *System) timeResponseForm(x0 *mat.VecDense) (*System, *mat.VecDense, b
 	if x0 != nil && x0.Len() != n {
 		return nil, nil, false, fmt.Errorf("x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
 	}
+	sys, err := sys.splitIODelayForInitialState(x0)
+	if err != nil {
+		return nil, nil, false, err
+	}
 	if !sys.IsDescriptor() {
 		return sys, x0, false, nil
 	}

@@ -10,12 +10,18 @@ import (
 )
 
 type Response struct {
-	Y      *mat.Dense
+	Y *mat.Dense
+	// XFinal is the state after the last sample, set only when
+	// SimulateOpts.FinalState requests it.
 	XFinal *mat.VecDense
 }
 
 type SimulateOpts struct {
 	Workspace *mat.VecDense
+	// FinalState requests Response.XFinal, as MATLAB lsim's optional x output
+	// requests the state. Simulate returns an error when the final state is
+	// not representable rather than leaving XFinal nil.
+	FinalState bool
 	// Steps is the number of samples, MATLAB's length(t). It is how a model
 	// without inputs (whose n×0 input matrix gonum cannot hold) sets the
 	// horizon; with u given it must be 0 or equal u's column count.
@@ -28,11 +34,25 @@ type SimulateOpts struct {
 // Simulate propagates a discrete model from x0 under u (one column per
 // sample). A nil u means zero samples unless opts.Steps is set; a model
 // without inputs takes nil u and opts.Steps, as MATLAB's lsim takes a
-// length(t)×0 u. Descriptor models with invertible E are simulated in their own
-// state coordinates. Singular E is reduced to its slow subsystem plus
+// length(t)×0 u. With a nonzero x0, Delay is split into input and output
+// delays as PullDelaysToLFT does, so its output share delays the free
+// response like OutputDelay; a Delay with no such split returns
+// ErrDelayUnsupported. Descriptor models with invertible E are simulated in
+// their own state coordinates. Singular E is reduced to its slow subsystem plus
 // feedthrough, as MATLAB does: non-causal (improper) models return
-// ErrImproperModel, a nonzero x0 returns ErrDescriptorInitialState, and
-// XFinal is nil because the algebraic states depend on future inputs.
+// ErrImproperModel, and a nonzero x0 or a FinalState request returns
+// ErrDescriptorInitialState because the algebraic states depend on future
+// inputs.
+//
+// XFinal is computed only when opts.FinalState is set. With delays it is the
+// state of the delay-free model at the final time, as MATLAB lsim's x: inputs
+// reach it delayed by InputDelay plus the input share of Delay (the split
+// PullDelaysToLFT uses); output delays do not affect it. Delay-line contents
+// are not part of it, so continuing past the horizon needs the input history.
+// When Delay has no input+output split no single state sees the delayed
+// inputs, and a FinalState request returns ErrDelayUnsupported. A model
+// without states has no final state to return, and a FinalState request
+// returns ErrDimensionMismatch.
 func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
 	if sys.IsContinuous() {
 		return nil, ErrWrongDomain
@@ -44,18 +64,26 @@ func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) 
 	if err != nil {
 		return nil, fmt.Errorf("Simulate: %w", err)
 	}
+	finalState := opts != nil && opts.FinalState
+	if finalState && reduced {
+		return nil, fmt.Errorf("Simulate: final state: %w", ErrDescriptorInitialState)
+	}
 	n, m, p := sim.Dims()
+	if finalState && n == 0 {
+		return nil, fmt.Errorf("Simulate: final state of a model without states: %w", ErrDimensionMismatch)
+	}
 	if m == 0 && opts != nil && opts.Steps > 0 {
 		sim, u = zeroInputModel(sim), mat.NewDense(1, opts.Steps, nil)
 	}
 	if !reduced {
 		if p > 0 || n == 0 || u == nil {
-			return simulationDispatcher{sys: sim}.run(u, simX0, opts)
+			return simulationDispatcher{sys: sim, finalState: finalState}.run(u, simX0, opts)
 		}
-		if opts != nil {
-			opts = &SimulateOpts{Workspace: opts.Workspace}
+		if !finalState {
+			return &Response{}, nil
 		}
-		resp, err := simulationDispatcher{sys: zeroOutputModel(sim)}.run(u, simX0, opts)
+		opts = &SimulateOpts{Workspace: opts.Workspace}
+		resp, err := simulationDispatcher{sys: zeroOutputModel(sim), finalState: true}.run(u, simX0, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -65,19 +93,26 @@ func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) 
 	if opts != nil {
 		opts = &SimulateOpts{yBuf: opts.yBuf, duBuf: opts.duBuf}
 	}
-	resp, err := simulationDispatcher{sys: sim}.run(u, nil, opts)
-	if err != nil {
-		return nil, err
-	}
-	resp.XFinal = nil
-	return resp, nil
+	return simulationDispatcher{sys: sim}.run(u, nil, opts)
 }
 
 type simulationDispatcher struct {
-	sys *System
+	sys        *System
+	finalState bool
 }
 
 func (d simulationDispatcher) run(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
+	resp, err := d.simulate(u, x0, opts)
+	if err != nil {
+		return nil, err
+	}
+	if !d.finalState {
+		resp.XFinal = nil
+	}
+	return resp, nil
+}
+
+func (d simulationDispatcher) simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
 	if d.sys.HasInternalDelay() {
 		hasIODelay := d.sys.Delay != nil || d.sys.InputDelay != nil || d.sys.OutputDelay != nil
 		if hasIODelay {
@@ -85,13 +120,17 @@ func (d simulationDispatcher) run(u *mat.Dense, x0 *mat.VecDense, opts *Simulate
 			if err != nil {
 				return nil, err
 			}
+			n, _, _ := d.sys.Dims()
+			if mn, _, _ := merged.Dims(); d.finalState && mn != n {
+				return nil, fmt.Errorf("Simulate: final state with Delay lacking an input+output split: %w", ErrDelayUnsupported)
+			}
 			return merged.simulateWithInternalDelay(u, x0, opts)
 		}
 		return d.sys.simulateWithInternalDelay(u, x0, opts)
 	}
 
 	if d.sys.HasDelay() {
-		return d.sys.simulateWithDelay(u, x0, opts)
+		return d.sys.simulateWithDelay(u, x0, opts, d.finalState)
 	}
 
 	return d.sys.simulateNoDelay(u, x0, opts)
@@ -274,7 +313,7 @@ func (sys *System) simulateNoDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simulat
 	}, nil
 }
 
-func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
+func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts, finalState bool) (*Response, error) {
 	problem := newSimulationProblem(sys, u, x0, opts)
 	n, m, p, steps := problem.n, problem.m, problem.p, problem.steps
 
@@ -283,7 +322,15 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 		totalDelay = mat.NewDense(p, m, nil)
 	}
 
-	xFinal := problem.newXFinal()
+	var xFinal *mat.VecDense
+	var stateLag []int
+	if finalState {
+		var ok bool
+		if stateLag, ok = sys.stateInputLags(); !ok {
+			return nil, fmt.Errorf("Simulate: final state with Delay lacking an input+output split: %w", ErrDelayUnsupported)
+		}
+		xFinal = problem.newXFinal()
+	}
 
 	if p == 0 || steps == 0 {
 		return &Response{Y: nil, XFinal: xFinal}, nil
@@ -314,7 +361,9 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 			tmp.MulVec(sys.A, x)
 			x, tmp = tmp, x
 		}
-		xFinal.CopyVec(x)
+		if xFinal != nil {
+			xFinal.CopyVec(x)
+		}
 	}
 
 	if m == 0 {
@@ -349,6 +398,9 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	}
 
 	for k := range steps {
+		if xFinal != nil {
+			addLaggedStates(xFinal, xCols, stateLag, steps-k)
+		}
 		var nextRaw blas64.General
 		if n > 0 {
 			yForced.Mul(sys.C, xCols)
@@ -382,18 +434,48 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	}
 
 	if xFinal != nil {
-		xRaw := xCols.RawMatrix()
-		xFinalRaw := xFinal.RawVector()
-		for i := range n {
-			sum := xFinalRaw.Data[i*xFinalRaw.Inc]
-			for j := range m {
-				sum += xRaw.Data[i*xRaw.Stride+j]
-			}
-			xFinalRaw.Data[i*xFinalRaw.Inc] = sum
-		}
+		addLaggedStates(xFinal, xCols, stateLag, 0)
 	}
 
 	return &Response{Y: Y, XFinal: xFinal}, nil
+}
+
+// stateInputLags returns the delay each input reaches the states with:
+// InputDelay plus the input share of Delay, split as PullDelaysToLFT does.
+// ok is false when Delay has no input+output split, so no single state of
+// (A, B) sees the delayed inputs.
+func (sys *System) stateInputLags() (lags []int, ok bool) {
+	_, m, _ := sys.Dims()
+	lags = make([]int, m)
+	if sys.Delay != nil {
+		in, _, residual := DecomposeIODelay(sys.Delay)
+		if delayMatrixHasNonzero(residual) {
+			return nil, false
+		}
+		for j, d := range in {
+			lags[j] = int(math.Round(d))
+		}
+	}
+	for j, d := range sys.InputDelay {
+		lags[j] += int(math.Round(d))
+	}
+	return lags, true
+}
+
+// addLaggedStates adds column j of xCols, the state driven by undelayed u_j,
+// to x for each input whose lag equals remaining: x_N driven by u_j delayed
+// by lag is the undelayed state at N-lag.
+func addLaggedStates(x *mat.VecDense, xCols *mat.Dense, lags []int, remaining int) {
+	xRaw := xCols.RawMatrix()
+	n := x.Len()
+	for j, lag := range lags {
+		if lag != remaining {
+			continue
+		}
+		for i := range n {
+			x.SetVec(i, x.AtVec(i)+xRaw.Data[i*xRaw.Stride+j])
+		}
+	}
 }
 
 func (sys *System) simulateWithInternalDelay(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {

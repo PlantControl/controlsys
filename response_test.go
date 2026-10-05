@@ -1194,16 +1194,18 @@ func trFreeOracle(sys *System, x0 *mat.VecDense, i int, t float64) float64 {
 
 func TestInitialContinuousDelaysExact(t *testing.T) {
 	x0 := mat.NewVecDense(2, []float64{1, -0.5})
+	decomposable := mat.NewDense(2, 2, []float64{0.1, 0.35, 0.4, 0.65})
 	for _, tc := range []struct {
 		name    string
 		in, out []float64
 		iod     *mat.Dense
+		share   []float64
 	}{
-		{"fractional input", []float64{0.013, 0.2}, nil, nil},
-		{"output", nil, []float64{0, 0.5}, nil},
-		{"fractional output", nil, []float64{0.013, 0.5}, nil},
-		{"nondecomposable iodelay", nil, nil, mat.NewDense(2, 2, []float64{0.4, 0, 0, 0})},
-		{"mixed", []float64{0.1, 0.2}, []float64{0, 0.3}, mat.NewDense(2, 2, []float64{0.4, 0, 0, 0})},
+		{"fractional input", []float64{0.013, 0.2}, nil, nil, nil},
+		{"output", nil, []float64{0, 0.5}, nil, nil},
+		{"fractional output", nil, []float64{0.013, 0.5}, nil, nil},
+		{"decomposable iodelay", nil, nil, decomposable, []float64{0, 0.3}},
+		{"mixed", []float64{0.1, 0.2}, []float64{0, 0.3}, decomposable, []float64{0, 0.3}},
 	} {
 		sys := trMIMO(t, 0)
 		sys.InputDelay, sys.OutputDelay, sys.Delay = tc.in, tc.out, tc.iod
@@ -1213,18 +1215,33 @@ func TestInitialContinuousDelaysExact(t *testing.T) {
 		}
 		for k, tk := range resp.T {
 			for i := range 2 {
-				if want := trFreeOracle(sys, x0, i, tk); math.Abs(resp.Y.At(i, k)-want) > 1e-9 {
+				ti := tk
+				if tc.share != nil {
+					ti -= tc.share[i]
+				}
+				if want := trFreeOracle(sys, x0, i, ti); math.Abs(resp.Y.At(i, k)-want) > 1e-9 {
 					t.Fatalf("%s: y_%d(%g) = %g, want %g", tc.name, i, tk, resp.Y.At(i, k), want)
 				}
 			}
 		}
+	}
+
+	sys := trMIMO(t, 0)
+	sys.InputDelay, sys.OutputDelay = []float64{0.1, 0.2}, []float64{0, 0.3}
+	sys.Delay = mat.NewDense(2, 2, []float64{0.4, 0, 0, 0})
+	if _, err := Initial(sys, x0, 2); !errors.Is(err, ErrDelayUnsupported) {
+		t.Errorf("nondecomposable iodelay: err = %v, want ErrDelayUnsupported", err)
+	}
+	if _, err := Lsim(sys, mat.NewDense(3, 2, nil), []float64{0, 0.1, 0.2}, x0); !errors.Is(err, ErrDelayUnsupported) {
+		t.Errorf("nondecomposable iodelay Lsim: err = %v, want ErrDelayUnsupported", err)
 	}
 }
 
 func TestLsimContinuousX0WithFractionalOutputDelay(t *testing.T) {
 	sys := trMIMO(t, 0)
 	sys.OutputDelay = []float64{0.013, 0.5}
-	sys.Delay = mat.NewDense(2, 2, []float64{0.4, 0, 0, 0})
+	sys.Delay = mat.NewDense(2, 2, []float64{0.1, 0.35, 0.4, 0.65})
+	share := []float64{0, 0.3}
 	x0 := mat.NewVecDense(2, []float64{1, -0.5})
 	steps := 61
 	tv := make([]float64, steps)
@@ -1243,7 +1260,7 @@ func TestLsimContinuousX0WithFractionalOutputDelay(t *testing.T) {
 	}
 	for k, tk := range tv {
 		for i := range 2 {
-			want := trFreeOracle(sys, x0, i, tk)
+			want := trFreeOracle(sys, x0, i, tk-share[i])
 			if s := tk - trIODelay(sys, i, 1); s >= -1e-12 {
 				var e, m, y mat.Dense
 				e.Sub(trExp(sys.A, math.Max(s, 0)), eye(2))

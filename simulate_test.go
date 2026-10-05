@@ -43,7 +43,7 @@ func TestSimulateManualPropagation(t *testing.T) {
 	u := mat.NewDense(1, 3, []float64{1, 2, 3})
 	x0 := mat.NewVecDense(2, []float64{0.5, -0.3})
 
-	r, err := sys.Simulate(u, x0, nil)
+	r, err := sys.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,17 +90,17 @@ func TestSimulateChaining(t *testing.T) {
 	u1 := mat.NewDense(1, 3, []float64{1, 2, 3})
 	u2 := mat.NewDense(1, 2, []float64{4, 5})
 
-	r1, err := sys.Simulate(u1, nil, nil)
+	r1, err := sys.Simulate(u1, nil, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, err := sys.Simulate(u2, r1.XFinal, nil)
+	r2, err := sys.Simulate(u2, r1.XFinal, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	uAll := mat.NewDense(1, 5, []float64{1, 2, 3, 4, 5})
-	rAll, err := sys.Simulate(uAll, nil, nil)
+	rAll, err := sys.Simulate(uAll, nil, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,10 @@ func TestSimulatePureFeedthrough(t *testing.T) {
 		t.Errorf("feedthrough Y mismatch\ngot:  %v\nwant: %v", mat.Formatted(r.Y), mat.Formatted(wantY))
 	}
 	if r.XFinal != nil {
-		t.Errorf("expected nil XFinal for n=0, got %v", r.XFinal)
+		t.Errorf("expected nil XFinal when not requested, got %v", r.XFinal)
+	}
+	if _, err := sys.Simulate(u, nil, &SimulateOpts{FinalState: true}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("n=0 FinalState err = %v, want ErrDimensionMismatch", err)
 	}
 }
 
@@ -158,7 +161,7 @@ func TestSimulateNoInputs(t *testing.T) {
 
 	x0 := mat.NewVecDense(2, []float64{4, 8})
 
-	r, err := sys.Simulate(nil, x0, nil)
+	r, err := sys.Simulate(nil, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +187,7 @@ func TestSimulateAutonomousPropagation(t *testing.T) {
 	x0 := mat.NewVecDense(2, []float64{4, 8})
 	u := mat.NewDense(1, 4, nil)
 
-	r, err := sys.Simulate(u, x0, nil)
+	r, err := sys.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +222,7 @@ func TestSimulateStepsZero(t *testing.T) {
 	x0 := mat.NewVecDense(2, []float64{5, 3})
 
 	// u with 0 columns → steps=0
-	r, err := sys.Simulate(nil, x0, nil)
+	r, err := sys.Simulate(nil, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +317,7 @@ func TestSimulateNilX0(t *testing.T) {
 	}
 
 	u := mat.NewDense(1, 2, []float64{1, 0})
-	r, err := sys.Simulate(u, nil, nil)
+	r, err := sys.Simulate(u, nil, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,11 +951,11 @@ func TestSimulateInvertibleDescriptorWithInternalDelays(t *testing.T) {
 		u.Set(1, k, 0.5-0.1*float64(k))
 	}
 	x0 := mat.NewVecDense(3, []float64{0.3, -1, 0.7})
-	got, err := desc.Simulate(u, x0, nil)
+	got, err := desc.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := explicit.Simulate(u, x0, nil)
+	want, err := explicit.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,7 +984,10 @@ func TestSimulateSingularDescriptor(t *testing.T) {
 			t.Fatalf("delays=%v Y = %v\nwant %v", delays, mat.Formatted(got.Y), mat.Formatted(want.Y))
 		}
 		if got.XFinal != nil {
-			t.Fatalf("XFinal = %v, want nil for singular E", got.XFinal)
+			t.Fatalf("XFinal = %v, want nil when not requested", got.XFinal)
+		}
+		if _, err := desc.Simulate(u, nil, &SimulateOpts{FinalState: true}); !errors.Is(err, ErrDescriptorInitialState) {
+			t.Fatalf("delays=%v FinalState err = %v, want ErrDescriptorInitialState", delays, err)
 		}
 		if _, err := desc.Simulate(u, mat.NewVecDense(3, []float64{1, 0, 0}), nil); !errors.Is(err, ErrDescriptorInitialState) {
 			t.Fatalf("x0 err = %v, want ErrDescriptorInitialState", err)
@@ -1007,7 +1013,7 @@ func TestSimulateAutonomousSteps(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, err := sys.Simulate(nil, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{Steps: steps})
+		r, err := sys.Simulate(nil, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{Steps: steps, FinalState: true})
 		if err != nil {
 			t.Fatalf("p=%d: %v", p, err)
 		}
@@ -1069,7 +1075,7 @@ func TestSimulateNoOutputsPropagatesState(t *testing.T) {
 	}
 	u := mat.NewDense(1, 5, []float64{1, -1, 0.5, 2, 0})
 	x0 := mat.NewVecDense(2, []float64{0.3, -0.8})
-	r, err := sys.Simulate(u, x0, nil)
+	r, err := sys.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1085,5 +1091,534 @@ func TestSimulateNoOutputsPropagatesState(t *testing.T) {
 	}
 	if !vecEqual(r.XFinal, x, 1e-12) {
 		t.Errorf("XFinal = %v, want %v", mat.Formatted(r.XFinal.T()), mat.Formatted(x.T()))
+	}
+}
+
+type delaySimOracle struct {
+	A, B, C, D            *mat.Dense
+	B2, C2, D12, D21, D22 *mat.Dense
+	tau, inLag, outLag    []int
+}
+
+// run propagates x_{k+1} = A x + B ud + B2 w with explicit shift registers:
+// ud_j(k) = u_j(k-inLag_j), w_l(k) = z_l(k-tau_l), y_i(k) = v_i(k-outLag_i).
+func (o delaySimOracle) run(u *mat.Dense, x0 []float64) (*mat.Dense, []float64) {
+	n, _ := o.A.Dims()
+	m, steps := u.Dims()
+	p, _ := o.C.Dims()
+	N := len(o.tau)
+	inReg := make([][]float64, m)
+	for j := range m {
+		inReg[j] = make([]float64, o.inLag[j]+1)
+	}
+	outReg := make([][]float64, p)
+	for i := range p {
+		outReg[i] = make([]float64, o.outLag[i]+1)
+	}
+	zReg := make([][]float64, N)
+	for l := range N {
+		zReg[l] = make([]float64, o.tau[l]+1)
+	}
+	shift := func(reg []float64, v float64) float64 {
+		copy(reg[1:], reg[:len(reg)-1])
+		reg[0] = v
+		return reg[len(reg)-1]
+	}
+	x := append([]float64(nil), x0...)
+	if x == nil {
+		x = make([]float64, n)
+	}
+	Y := mat.NewDense(p, steps, nil)
+	for k := range steps {
+		ud := make([]float64, m)
+		for j := range m {
+			ud[j] = shift(inReg[j], u.At(j, k))
+		}
+		w := make([]float64, N)
+		for l := range N {
+			w[l] = zReg[l][len(zReg[l])-1]
+		}
+		for i := range p {
+			v := 0.0
+			for a := range n {
+				v += o.C.At(i, a) * x[a]
+			}
+			for j := range m {
+				v += o.D.At(i, j) * ud[j]
+			}
+			for l := range N {
+				v += o.D12.At(i, l) * w[l]
+			}
+			Y.Set(i, k, shift(outReg[i], v))
+		}
+		z := make([]float64, N)
+		for l := range N {
+			for a := range n {
+				z[l] += o.C2.At(l, a) * x[a]
+			}
+			for j := range m {
+				z[l] += o.D21.At(l, j) * ud[j]
+			}
+			for r := range N {
+				z[l] += o.D22.At(l, r) * w[r]
+			}
+		}
+		next := make([]float64, n)
+		for a := range n {
+			for b := range n {
+				next[a] += o.A.At(a, b) * x[b]
+			}
+			for j := range m {
+				next[a] += o.B.At(a, j) * ud[j]
+			}
+			for l := range N {
+				next[a] += o.B2.At(a, l) * w[l]
+			}
+		}
+		x = next
+		for l := range N {
+			shift(zReg[l], 0)
+			zReg[l][1] = z[l]
+		}
+	}
+	return Y, x
+}
+
+func delayXFinalPlant() (A, B, C, D *mat.Dense, u *mat.Dense, x0 []float64) {
+	A = mat.NewDense(3, 3, []float64{
+		0.5, 0.2, -0.1,
+		-0.3, 0.4, 0.25,
+		0.1, -0.2, 0.6,
+	})
+	B = mat.NewDense(3, 2, []float64{1, 0.3, -0.5, 0.8, 0.2, -1})
+	C = mat.NewDense(2, 3, []float64{1, 1, 0, 0.4, -0.7, 1.2})
+	D = mat.NewDense(2, 2, []float64{0.3, -0.1, 0.2, 0.5})
+	u = mat.NewDense(2, 8, []float64{
+		1, -1, 0.5, 2, 0, -0.7, 1.3, 0.4,
+		0.2, 0.9, -1.1, 0.3, 1.5, -0.4, 0, 0.6,
+	})
+	return A, B, C, D, u, []float64{0.3, -0.8, 0.5}
+}
+
+func TestSimulateXFinalInputDelayRepro(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.5, 0.2, -0.3, 0.4})
+	B := mat.NewDense(2, 1, []float64{1, -0.5})
+	C := mat.NewDense(1, 2, []float64{1, 1})
+	D := mat.NewDense(1, 1, nil)
+	sys, err := New(A, B, C, D, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInputDelay([]float64{2}); err != nil {
+		t.Fatal(err)
+	}
+	u := mat.NewDense(1, 5, []float64{1, -1, 0.5, 2, 0})
+	r, err := sys.Simulate(u, mat.NewVecDense(2, []float64{0.3, -0.8}), &SimulateOpts{FinalState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantY := mat.NewDense(1, 5, []float64{-0.5, -0.42, -0.248, 0.386, -0.63812})
+	if !matEqual(r.Y, wantY, 1e-12) {
+		t.Errorf("Y = %v, want %v", mat.Formatted(r.Y), mat.Formatted(wantY))
+	}
+	wantX := mat.NewVecDense(2, []float64{0.178723, -0.053391})
+	if !vecEqual(r.XFinal, wantX, 1e-12) {
+		t.Errorf("XFinal = %v, want %v", mat.Formatted(r.XFinal.T()), mat.Formatted(wantX.T()))
+	}
+}
+
+func TestSimulateXFinalDelayedInputsMatchShiftRegisters(t *testing.T) {
+	A, B, C, D, u, x0 := delayXFinalPlant()
+	cases := []struct {
+		name          string
+		in, out       []float64
+		delay         *mat.Dense
+		inLag, outLag []int
+	}{
+		{name: "input", in: []float64{1, 3}, inLag: []int{1, 3}, outLag: []int{0, 0}},
+		{name: "output", out: []float64{2, 0}, inLag: []int{0, 0}, outLag: []int{2, 0}},
+		{name: "input+output", in: []float64{0, 2}, out: []float64{1, 3}, inLag: []int{0, 2}, outLag: []int{1, 3}},
+		{name: "lag beyond horizon", in: []float64{9, 8}, inLag: []int{9, 8}, outLag: []int{0, 0}},
+		{name: "decomposable Delay", delay: mat.NewDense(2, 2, []float64{1, 2, 4, 5}), inLag: []int{1, 2}, outLag: []int{0, 3}},
+		{name: "Delay+InputDelay", in: []float64{2, 0}, delay: mat.NewDense(2, 2, []float64{0, 1, 2, 3}), inLag: []int{2, 1}, outLag: []int{0, 2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sys, err := NewWithDelay(A, B, C, D, tc.delay, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.in != nil {
+				if err := sys.SetInputDelay(tc.in); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.out != nil {
+				if err := sys.SetOutputDelay(tc.out); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, withX0 := range []bool{false, true} {
+				var x0v *mat.VecDense
+				var ox0 []float64
+				if withX0 {
+					x0v, ox0 = mat.NewVecDense(3, append([]float64(nil), x0...)), x0
+				}
+				r, err := sys.Simulate(u, x0v, &SimulateOpts{FinalState: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantY, wantX := delaySimOracle{A: A, B: B, C: C, D: D, inLag: tc.inLag, outLag: tc.outLag}.run(u, nil)
+				if withX0 {
+					freeY, freeX := delaySimOracle{A: A, B: B, C: C, D: D, inLag: []int{0, 0}, outLag: tc.outLag}.run(mat.NewDense(2, 8, nil), ox0)
+					wantY.Add(wantY, freeY)
+					for i := range wantX {
+						wantX[i] += freeX[i]
+					}
+				}
+				if !matEqual(r.Y, wantY, 1e-12) {
+					t.Errorf("x0=%v Y = %v, want %v", withX0, mat.Formatted(r.Y), mat.Formatted(wantY))
+				}
+				if !vecEqual(r.XFinal, mat.NewVecDense(3, wantX), 1e-12) {
+					t.Errorf("x0=%v XFinal = %v, want %v", withX0, r.XFinal, wantX)
+				}
+				plain, err := sys.Simulate(u, x0v, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if plain.XFinal != nil || !matEqual(plain.Y, r.Y, 0) {
+					t.Errorf("x0=%v unrequested: XFinal = %v, want nil; Y must match", withX0, plain.XFinal)
+				}
+
+				lft, err := sys.PullDelaysToLFT()
+				if err != nil {
+					t.Fatal(err)
+				}
+				rl, err := lft.Simulate(u, x0v, &SimulateOpts{FinalState: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !vecEqual(rl.XFinal, r.XFinal, 1e-12) {
+					t.Errorf("x0=%v PullDelaysToLFT XFinal = %v, want %v", withX0, rl.XFinal, r.XFinal)
+				}
+				if !matEqual(rl.Y, r.Y, 1e-12) {
+					t.Errorf("PullDelaysToLFT Y = %v, want %v", mat.Formatted(rl.Y), mat.Formatted(r.Y))
+				}
+			}
+		})
+	}
+}
+
+func TestSimulateXFinalNondecomposableDelayErrors(t *testing.T) {
+	A, B, C, D, u, x0 := delayXFinalPlant()
+	for _, internal := range []bool{false, true} {
+		sys, err := NewWithDelay(A, B, C, D, mat.NewDense(2, 2, []float64{0, 2, 1, 0}), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if internal {
+			if err := sys.SetInternalDelay([]float64{2},
+				mat.NewDense(3, 1, []float64{0.4, -0.2, 0.1}),
+				mat.NewDense(1, 3, []float64{0.3, 0.5, -0.6}),
+				mat.NewDense(2, 1, []float64{0.2, -0.1}),
+				mat.NewDense(1, 2, []float64{0.7, 0.1}),
+				mat.NewDense(1, 1, nil)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := sys.Simulate(u, mat.NewVecDense(3, x0), nil); !errors.Is(err, ErrDelayUnsupported) {
+			t.Errorf("internal=%v: nonzero x0 err = %v, want ErrDelayUnsupported", internal, err)
+		}
+		r, err := sys.Simulate(u, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Y == nil {
+			t.Fatalf("internal=%v: Y = nil", internal)
+		}
+		if r.XFinal != nil {
+			t.Errorf("internal=%v: XFinal = %v, want nil when not requested", internal, r.XFinal)
+		}
+		_, err = sys.Simulate(u, nil, &SimulateOpts{FinalState: true})
+		if !errors.Is(err, ErrDelayUnsupported) {
+			t.Errorf("internal=%v: FinalState err = %v, want ErrDelayUnsupported: no input+output split of Delay", internal, err)
+		}
+	}
+}
+
+func TestSimulateXFinalInternalAndIODelaysMatchShiftRegisters(t *testing.T) {
+	A, B, C, D, u, x0 := delayXFinalPlant()
+	B2 := mat.NewDense(3, 1, []float64{0.4, -0.2, 0.1})
+	C2 := mat.NewDense(1, 3, []float64{0.3, 0.5, -0.6})
+	D12 := mat.NewDense(2, 1, []float64{0.2, -0.1})
+	D21 := mat.NewDense(1, 2, []float64{0.7, 0.1})
+	D22 := mat.NewDense(1, 1, []float64{0.25})
+	sys, err := New(A, B, C, D, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInternalDelay([]float64{2}, B2, C2, D12, D21, D22); err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInputDelay([]float64{1, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetOutputDelay([]float64{2, 0}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := sys.Simulate(u, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{FinalState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := delaySimOracle{A: A, B: B, C: C, D: D, B2: B2, C2: C2, D12: D12, D21: D21, D22: D22,
+		tau: []int{2}, inLag: []int{1, 3}, outLag: []int{2, 0}}
+	wantY, wantX := o.run(u, x0)
+	if !matEqual(r.Y, wantY, 1e-12) {
+		t.Errorf("Y = %v, want %v", mat.Formatted(r.Y), mat.Formatted(wantY))
+	}
+	if !vecEqual(r.XFinal, mat.NewVecDense(3, wantX), 1e-12) {
+		t.Errorf("XFinal = %v, want %v", r.XFinal, wantX)
+	}
+}
+
+func TestSimulateXFinalDelayedNoOutputAndNoInput(t *testing.T) {
+	A, B, C, _, u, x0 := delayXFinalPlant()
+	noOut, err := New(A, B, nil, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := noOut.SetInputDelay([]float64{2, 1}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := noOut.Simulate(u, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{FinalState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := delaySimOracle{A: A, B: B, C: mat.NewDense(1, 3, nil), D: mat.NewDense(1, 2, nil), inLag: []int{2, 1}, outLag: []int{0}}
+	_, wantX := o.run(u, x0)
+	if !vecEqual(r.XFinal, mat.NewVecDense(3, wantX), 1e-12) {
+		t.Errorf("p=0 XFinal = %v, want %v", r.XFinal, wantX)
+	}
+
+	noIn, err := New(A, nil, C, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := noIn.SetOutputDelay([]float64{2, 1}); err != nil {
+		t.Fatal(err)
+	}
+	const steps = 6
+	r, err = noIn.Simulate(nil, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{Steps: steps, FinalState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o = delaySimOracle{A: A, B: mat.NewDense(3, 1, nil), C: C, D: mat.NewDense(2, 1, nil), inLag: []int{0}, outLag: []int{2, 1}}
+	wantY, wantX := o.run(mat.NewDense(1, steps, nil), x0)
+	if !matEqual(r.Y, wantY, 1e-12) {
+		t.Errorf("m=0 Y = %v, want %v", mat.Formatted(r.Y), mat.Formatted(wantY))
+	}
+	if !vecEqual(r.XFinal, mat.NewVecDense(3, wantX), 1e-12) {
+		t.Errorf("m=0 XFinal = %v, want %v", r.XFinal, wantX)
+	}
+}
+
+// x0DelayLFTRun is a shift-register recurrence for x+ = Ax + Bu + B2w,
+// y = Cx + Du + D12w, z = C2x + D21u + D22w, w(k) = z(k-tau), with no I/O
+// delays and zero delay-line history.
+func x0DelayLFTRun(A, B, C, D, B2, C2, D12, D21, D22 *mat.Dense, tau []int, u *mat.Dense, x0 []float64) *mat.Dense {
+	n, _ := A.Dims()
+	m, steps := u.Dims()
+	p, _ := C.Dims()
+	N := len(tau)
+	reg := make([][]float64, N)
+	for l := range N {
+		reg[l] = make([]float64, tau[l])
+	}
+	x := make([]float64, n)
+	copy(x, x0)
+	Y := mat.NewDense(p, steps, nil)
+	for k := range steps {
+		w := make([]float64, N)
+		for l := range N {
+			w[l] = reg[l][tau[l]-1]
+		}
+		for i := range p {
+			v := 0.0
+			for a := range n {
+				v += C.At(i, a) * x[a]
+			}
+			for j := range m {
+				v += D.At(i, j) * u.At(j, k)
+			}
+			for l := range N {
+				v += D12.At(i, l) * w[l]
+			}
+			Y.Set(i, k, v)
+		}
+		z := make([]float64, N)
+		for l := range N {
+			for a := range n {
+				z[l] += C2.At(l, a) * x[a]
+			}
+			for j := range m {
+				z[l] += D21.At(l, j) * u.At(j, k)
+			}
+			for r := range N {
+				z[l] += D22.At(l, r) * w[r]
+			}
+		}
+		next := make([]float64, n)
+		for a := range n {
+			for b := range n {
+				next[a] += A.At(a, b) * x[b]
+			}
+			for j := range m {
+				next[a] += B.At(a, j) * u.At(j, k)
+			}
+			for l := range N {
+				next[a] += B2.At(a, l) * w[l]
+			}
+		}
+		x = next
+		for l := range N {
+			copy(reg[l][1:], reg[l][:tau[l]-1])
+			reg[l][0] = z[l]
+		}
+	}
+	return Y
+}
+
+// x0DelayOracle superposes the free response, delayed by the output share
+// outLag of Delay, and each input's forced response, delayed per channel by
+// Delay(i,j).
+func x0DelayOracle(lft func(u *mat.Dense, x0 []float64) *mat.Dense, delay *mat.Dense, outLag []int, u *mat.Dense, x0 []float64) *mat.Dense {
+	m, steps := u.Dims()
+	p, _ := delay.Dims()
+	Y := mat.NewDense(p, steps, nil)
+	free := lft(mat.NewDense(m, steps, nil), x0)
+	for i := range p {
+		for k := outLag[i]; k < steps; k++ {
+			Y.Set(i, k, free.At(i, k-outLag[i]))
+		}
+	}
+	for j := range m {
+		uj := mat.NewDense(m, steps, nil)
+		for k := range steps {
+			uj.Set(j, k, u.At(j, k))
+		}
+		forced := lft(uj, nil)
+		for i := range p {
+			d := int(delay.At(i, j))
+			for k := d; k < steps; k++ {
+				Y.Set(i, k, Y.At(i, k)+forced.At(i, k-d))
+			}
+		}
+	}
+	return Y
+}
+
+func TestSimulateX0IODelayOutputShare(t *testing.T) {
+	A, B, C, D, u, x0s := delayXFinalPlant()
+	x0 := mat.NewVecDense(3, x0s)
+	delay := mat.NewDense(2, 2, []float64{1, 2, 4, 5})
+	outLag := []int{0, 3}
+	B2 := mat.NewDense(3, 1, []float64{0.4, -0.2, 0.3})
+	C2 := mat.NewDense(1, 3, []float64{0.5, 0.1, -0.6})
+	D12 := mat.NewDense(2, 1, []float64{0.2, -0.3})
+	D21 := mat.NewDense(1, 2, []float64{0.1, 0.7})
+	D22 := mat.NewDense(1, 1, []float64{0.25})
+
+	for _, internal := range []bool{false, true} {
+		sys, err := NewWithDelay(A, B, C, D, delay, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b2, c2, d12, d21, d22 := mat.NewDense(3, 1, nil), mat.NewDense(1, 3, nil), mat.NewDense(2, 1, nil), mat.NewDense(1, 2, nil), mat.NewDense(1, 1, nil)
+		if internal {
+			b2, c2, d12, d21, d22 = B2, C2, D12, D21, D22
+			if err := sys.SetInternalDelay([]float64{2}, B2, C2, D12, D21, D22); err != nil {
+				t.Fatal(err)
+			}
+		}
+		lft := func(u *mat.Dense, x0 []float64) *mat.Dense {
+			return x0DelayLFTRun(A, B, C, D, b2, c2, d12, d21, d22, []int{2}, u, x0)
+		}
+		want := x0DelayOracle(lft, delay, outLag, u, x0.RawVector().Data)
+
+		got, err := sys.Simulate(u, x0, nil)
+		if err != nil {
+			t.Fatalf("internal=%v: %v", internal, err)
+		}
+		if !matEqual(got.Y, want, 1e-12) {
+			t.Errorf("internal=%v: Simulate Y =\n%v\nwant\n%v", internal, mat.Formatted(got.Y), mat.Formatted(want))
+		}
+		merged, err := sys.PullDelaysToLFT()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mn, _, _ := merged.Dims(); mn != 3 {
+			t.Fatalf("internal=%v: PullDelaysToLFT states %d, want 3", internal, mn)
+		}
+		viaLFT, err := merged.Simulate(u, x0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matEqual(viaLFT.Y, want, 1e-12) {
+			t.Errorf("internal=%v: PullDelaysToLFT Y =\n%v\nwant\n%v", internal, mat.Formatted(viaLFT.Y), mat.Formatted(want))
+		}
+
+		tv := make([]float64, 8)
+		for k := range tv {
+			tv[k] = float64(k)
+		}
+		lr, err := Lsim(sys, mat.DenseCopyOf(u.T()), tv, x0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matEqual(lr.Y, want, 1e-12) {
+			t.Errorf("internal=%v: Lsim Y =\n%v\nwant\n%v", internal, mat.Formatted(lr.Y), mat.Formatted(want))
+		}
+		ir, err := Initial(sys, x0, 7)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantFree := x0DelayOracle(lft, delay, outLag, mat.NewDense(2, 8, nil), x0.RawVector().Data)
+		if !matEqual(ir.Y, wantFree, 1e-12) {
+			t.Errorf("internal=%v: Initial Y =\n%v\nwant\n%v", internal, mat.Formatted(ir.Y), mat.Formatted(wantFree))
+		}
+	}
+}
+
+func TestSimulateX0NondecomposableIODelay(t *testing.T) {
+	A, B, C, D, u, x0s := delayXFinalPlant()
+	x0 := mat.NewVecDense(3, x0s)
+	sys, err := NewWithDelay(A, B, C, D, mat.NewDense(2, 2, []float64{1, 0, 0, 1}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tv := make([]float64, 8)
+	for k := range tv {
+		tv[k] = float64(k)
+	}
+	if _, err := sys.Simulate(u, x0, nil); !errors.Is(err, ErrDelayUnsupported) {
+		t.Errorf("Simulate err = %v, want ErrDelayUnsupported", err)
+	}
+	if _, err := Initial(sys, x0, 7); !errors.Is(err, ErrDelayUnsupported) {
+		t.Errorf("Initial err = %v, want ErrDelayUnsupported", err)
+	}
+	if _, err := Lsim(sys, mat.DenseCopyOf(u.T()), tv, x0); !errors.Is(err, ErrDelayUnsupported) {
+		t.Errorf("Lsim err = %v, want ErrDelayUnsupported", err)
+	}
+	zero := mat.NewVecDense(3, nil)
+	got, err := sys.Simulate(u, zero, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := sys.Simulate(u, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matEqual(got.Y, want.Y, 0) {
+		t.Errorf("zero x0 Y = %v, want %v", mat.Formatted(got.Y), mat.Formatted(want.Y))
 	}
 }
