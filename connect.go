@@ -1293,7 +1293,16 @@ func Connect(blksys *System, junctions []Junction, inputs, outputs []int) (*Syst
 	if err := requireSystem("Connect", blksys); err != nil {
 		return nil, err
 	}
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("Connect: inputs must be non-empty: %w", ErrInvalidArgument)
+	}
+	if len(outputs) == 0 {
+		return nil, fmt.Errorf("Connect: outputs must be non-empty: %w", ErrInvalidArgument)
+	}
 	_, m, p := blksys.Dims()
+	if m == 0 || p == 0 {
+		return nil, fmt.Errorf("Connect: model with %d inputs and %d outputs has nothing to keep: %w", m, p, ErrInvalidArgument)
+	}
 	Q := mat.NewDense(m, p, nil)
 	for r, c := range junctions {
 		if c.Input < 0 || c.Input >= m {
