@@ -41,13 +41,13 @@ func TestEquivalentDelayFormsAgreeThroughPublicOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	total := split.TotalDelay()
+	total := mustTotalDelay(t, split)
 	collapsed := base.Copy()
 	if err := collapsed.SetDelay(total); err != nil {
 		t.Fatal(err)
 	}
 
-	assertDenseApprox(t, split.TotalDelay(), collapsed.TotalDelay(), 0)
+	assertDenseApprox(t, mustTotalDelay(t, split), mustTotalDelay(t, collapsed), 0)
 
 	omega := []float64{0.2, 1.7, 6.0}
 	assertFreqResponseApprox(t, split, collapsed, omega, 1e-10)
