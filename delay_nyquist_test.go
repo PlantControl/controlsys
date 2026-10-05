@@ -653,3 +653,24 @@ func TestDelayLoopSensitivityTailStopsLinearGrid(t *testing.T) {
 		}
 	}
 }
+
+// Scale points can land one ulp apart; a grid maximum at the upper copy must
+// not be bracketed by the lower copy, which would leave the resonance top at
+// 39.9995 outside [w[k-1], w[k+1]] (seen on amd64, not arm64).
+func TestRefinePeaksSkipsNearDuplicateNeighbour(t *testing.T) {
+	q := resonantQuasiLoop("resonance", 0.8, (math.Pi/2+2*math.Pi)/40)
+	f := func(w float64) complex128 { return 1 + q.L(w) }
+	g := func(v complex128) float64 { return cmplx.Abs(1 / v) }
+	ws := []float64{39.96, 39.998, math.Nextafter(40, 0), 40, 40.038}
+	res := delayNyquist{w: ws, f: make([]complex128, len(ws))}
+	for i, w := range ws {
+		res.f[i] = f(w)
+	}
+	want, _ := oraclePeakShifted(q.L, 80, 0)
+	for _, best := range []int{2, 3} {
+		_, peak := refinePeaks(res, g, best, func(w float64) float64 { return g(f(w)) })
+		if math.Abs(peak-want) > 1e-9*want {
+			t.Errorf("best=%d: peak=%.12g, oracle %.12g", best, peak, want)
+		}
+	}
+}

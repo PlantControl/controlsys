@@ -657,9 +657,7 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 	peaks = make([]sensitivityPeak, len(shifts))
 	t := l.tailLimit
 	for i, c := range shifts {
-		g, b := gs[i], best[i]
-		wPeak, peak := goldenMax(res.w[max(b-1, 0)], res.w[min(b+1, len(res.w)-1)],
-			res.w[b], g(res.f[b]), func(w float64) float64 { return g(1 + l.at(w)) })
+		wPeak, peak := refinePeaks(res, gs[i], best[i], func(w float64) float64 { return gs[i](1 + l.at(w)) })
 		if inf := diskBound(t, c); inf > peak {
 			peak, wPeak = inf, math.Inf(1)
 		}
@@ -669,6 +667,44 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 		return false, nil, err
 	}
 	return true, peaks, nil
+}
+
+// nearPeakFraction selects the grid local maxima refined besides the grid
+// maximum, so that a peak whose top falls between samples is not lost to a
+// neighbour that rounding ranks higher.
+const nearPeakFraction = 0.9
+
+// refinePeaks refines by golden section every grid local maximum of g within
+// nearPeakFraction of the grid maximum at best, and returns the largest. A
+// local maximum is bracketed by its nearest neighbours of distinct frequency:
+// the grid can hold points that differ only by rounding, which would leave a
+// degenerate bracket on one side of the true peak.
+func refinePeaks(res delayNyquist, g func(complex128) float64, best int, at func(float64) float64) (wPeak, peak float64) {
+	wPeak, peak = res.w[best], g(res.f[best])
+	floor := nearPeakFraction * peak
+	n := len(res.w)
+	for k := range n {
+		gk := g(res.f[k])
+		if gk < floor {
+			continue
+		}
+		tol := 1e-9 * max(1, res.w[k])
+		a := k
+		for a > 0 && res.w[a] > res.w[k]-tol {
+			a--
+		}
+		b := k
+		for b < n-1 && res.w[b] < res.w[k]+tol {
+			b++
+		}
+		if (a < k && g(res.f[a]) > gk) || (b > k && g(res.f[b]) > gk) {
+			continue
+		}
+		if w, v := goldenMax(res.w[a], res.w[b], res.w[k], gk, at); v > peak {
+			wPeak, peak = w, v
+		}
+	}
+	return wPeak, peak
 }
 
 // diskBound bounds |S + c| over |L| <= t.
