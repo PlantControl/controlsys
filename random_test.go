@@ -1,8 +1,10 @@
 package controlsys
 
 import (
+	"errors"
 	"math/cmplx"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -152,5 +154,19 @@ func TestRss_InvalidDims(t *testing.T) {
 	_, err = Rss(1, 1, 0)
 	if err == nil {
 		t.Error("expected error for m=0")
+	}
+}
+
+func TestRssDrssErrorSentinels(t *testing.T) {
+	for _, d := range [][3]int{{-1, 1, 1}, {2, 0, 1}, {2, 1, 0}} {
+		if _, err := Rss(d[0], d[1], d[2]); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Rss: ") {
+			t.Errorf("Rss%v err = %v", d, err)
+		}
+		if _, err := Drss(d[0], d[1], d[2], 0.1); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Drss: ") {
+			t.Errorf("Drss%v err = %v", d, err)
+		}
+	}
+	if _, err := Drss(2, 1, 1, 0); !errors.Is(err, ErrInvalidSampleTime) || !strings.HasPrefix(err.Error(), "Drss: ") {
+		t.Errorf("Drss dt=0 err = %v", err)
 	}
 }

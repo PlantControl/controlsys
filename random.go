@@ -8,19 +8,26 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// Rss returns a random stable continuous model with n states, p outputs and
+// m inputs, as MATLAB rss(n,p,m). n < 0, p < 1 or m < 1 returns
+// ErrInvalidArgument.
 func Rss(n, p, m int) (*System, error) {
 	if n < 0 || p < 1 || m < 1 {
-		return nil, fmt.Errorf("controlsys: invalid dimensions n=%d p=%d m=%d", n, p, m)
+		return nil, fmt.Errorf("Rss: invalid dimensions n=%d p=%d m=%d: %w", n, p, m, ErrInvalidArgument)
 	}
 	return randomSS(randomStableModelSpec{states: n, outputs: p, inputs: m, dt: 0, continuous: true})
 }
 
+// Drss returns a random stable discrete model with n states, p outputs, m
+// inputs and sample time dt. MATLAB drss(n,p,m) leaves Ts unspecified; this
+// library requires a positive dt (else ErrInvalidSampleTime). Invalid
+// dimensions return ErrInvalidArgument.
 func Drss(n, p, m int, dt float64) (*System, error) {
 	if n < 0 || p < 1 || m < 1 {
-		return nil, fmt.Errorf("controlsys: invalid dimensions n=%d p=%d m=%d", n, p, m)
+		return nil, fmt.Errorf("Drss: invalid dimensions n=%d p=%d m=%d: %w", n, p, m, ErrInvalidArgument)
 	}
 	if dt <= 0 || newTimeDomain(dt).validateSampleTime() != nil {
-		return nil, ErrInvalidSampleTime
+		return nil, fmt.Errorf("Drss: dt %g: %w", dt, ErrInvalidSampleTime)
 	}
 	return randomSS(randomStableModelSpec{states: n, outputs: p, inputs: m, dt: dt, continuous: false})
 }
@@ -75,10 +82,6 @@ func randomSSWithSource(spec randomStableModelSpec, rng randomSource) (*System, 
 	return newNoCopy(A, B, C, D, spec.dt)
 }
 
-func randomStableA(n int, continuous bool) *mat.Dense {
-	return randomStableAWithSource(n, continuous, packageRandomSource{})
-}
-
 func randomStableAWithSource(n int, continuous bool, rng randomSource) *mat.Dense {
 	diagData := make([]float64, n*n)
 	i := 0
@@ -119,10 +122,6 @@ func randomStableAWithSource(n int, continuous bool, rng randomSource) *mat.Dens
 	A := mat.NewDense(n, n, nil)
 	A.Mul(tmp, Q.T())
 	return A
-}
-
-func randomOrthogonal(n int) *mat.Dense {
-	return randomOrthogonalWithSource(n, packageRandomSource{})
 }
 
 func randomOrthogonalWithSource(n int, rng randomSource) *mat.Dense {

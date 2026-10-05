@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 	"slices"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -397,5 +398,18 @@ func TestFrequencySweepPoleLimitAppliesExternalDelaysOnce(t *testing.T) {
 				t.Errorf("dt=%v w=%v: pole-limit response off by %.3g", dt, w, d)
 			}
 		}
+	}
+}
+
+func TestRequireDelayFreeWrapsSentinel(t *testing.T) {
+	sys, err := New(mat.NewDense(2, 2, []float64{-1, 2, -0.5, -3}), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 1}), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInputDelay([]float64{0.3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Balreal(sys); !errors.Is(err, ErrDelayUnsupported) || !strings.HasPrefix(err.Error(), "Balreal: ") {
+		t.Fatalf("Balreal delayed err = %v, want Balreal: ... ErrDelayUnsupported", err)
 	}
 }

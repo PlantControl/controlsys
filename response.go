@@ -64,17 +64,6 @@ const (
 	gridTol                  = 1e-9
 )
 
-func autoTimeParams(sys *System) (dt, tFinal float64, err error) {
-	tFinal, maxWn, err := autoTimeScales(sys)
-	if err != nil {
-		return 0, 0, err
-	}
-	if sys.IsDiscrete() {
-		return sys.Dt, tFinal, nil
-	}
-	return autoContinuousDt(tFinal, maxWn), tFinal, nil
-}
-
 func autoTimeScales(sys *System) (tFinal, maxWn float64, err error) {
 	n, _, _ := sys.Dims()
 	var poles []complex128
@@ -402,10 +391,6 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 		}
 	}
 	return dt, nil
-}
-
-func transposeSamplesToChannels(u *mat.Dense, steps, inputs int) *mat.Dense {
-	return newSampledSignal("Lsim", u, inputs, steps, sampledSamplesByChannels).channelsBySamplesDense()
 }
 
 // DCGain returns the steady-state gain G(0) (G(1) for discrete models). Like
@@ -770,7 +755,8 @@ func Damp(sys *System) ([]DampInfo, error) {
 // follow MATLAB: proper singular-E models are reduced to an explicit model
 // plus feedthrough, improper ones return ErrImproperModel. Continuous models
 // with internal delays of one common length are sampled exactly (method of
-// steps); other internal-delay models are simulated through the approximate
+// steps) while the chain fits its size and work budget; past it, and for
+// other internal-delay models, they are simulated through the approximate
 // ZOH discretization of the delay channels, as MATLAB does, with O(dt) error.
 //
 // tFinal = 0 selects the horizon automatically from the poles and delays, as
@@ -808,7 +794,8 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 // directly (LFT.D21 ≠ 0) carries delayed Diracs and returns
 // ErrInternalDelayImpulse; MATLAB's impulse rejects every continuous
 // internal-delay model, while this library samples the D21 = 0 case (exactly
-// for one common delay length, else by the approximate ZOH discretization).
+// for one common delay length within the chain budget, else by the
+// approximate ZOH discretization).
 // tFinal and models without inputs or outputs are handled as in Step.
 func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Impulse", sys, tFinal); err != nil {
@@ -872,7 +859,8 @@ func impulseAsStepModel(sys *System) (*System, error) {
 }
 
 // delayChainAuto samples a standard response on the automatic grid with the
-// exact internal-delay chain; ok is false when the model is outside its class.
+// exact internal-delay chain. ok false with a nil error means the model is
+// outside the chain's class or budget; a non-nil error is a failure.
 func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*TimeResponse, bool, error) {
 	if _, _, ok := delayChainModel(sys); !ok {
 		return nil, false, nil
@@ -893,8 +881,9 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // As in MATLAB, a descriptor model with singular E rejects a nonzero x0 with
 // ErrDescriptorInitialState.
 // Continuous models without internal delays, or whose internal delays share
-// one length, are sampled exactly; other internal-delay models use the
-// approximate ZOH discretization of the delay channels, as MATLAB does.
+// one length (within the chain budget, see Step), are sampled exactly; other
+// internal-delay models use the approximate ZOH discretization of the delay
+// channels, as MATLAB does.
 //
 // tFinal is handled as in Step. A model without outputs returns
 // ErrDimensionMismatch; one without inputs is valid.
@@ -1070,8 +1059,8 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 // returns ErrDescriptorInitialState, as in MATLAB. x0 with Delay follows
 // Simulate.
 // Continuous models with internal delays of one common length are sampled
-// exactly; other internal-delay models use the approximate ZOH
-// discretization of the delay channels, as MATLAB does.
+// exactly within the chain budget (see Step); other internal-delay models use
+// the approximate ZOH discretization of the delay channels, as MATLAB does.
 //
 // t must be a finite, uniform, increasing grid of at least 2 samples (with
 // spacing Dt for discrete models) and u is len(t)×m; a model without outputs

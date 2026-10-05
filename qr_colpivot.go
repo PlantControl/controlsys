@@ -72,9 +72,6 @@ func colPivotQR(m, n int, a []float64, lda int, rcond, svlmax float64) (rank int
 
 		if rank == 0 {
 			smax = math.Abs(a[0])
-			if smax <= rcond {
-				sval = [3]float64{0, 0, 0}
-			}
 			smin = smax
 			smaxpr = smax
 			sminpr = smin
@@ -149,5 +146,5 @@ func colPivotQR(m, n int, a []float64, lda int, rcond, svlmax float64) (rank int
 	}
 	sval = [3]float64{smax, smin, sminpr}
 
-	return
+	return rank, sval, jpvt, tau
 }
