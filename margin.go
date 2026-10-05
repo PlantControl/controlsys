@@ -38,33 +38,33 @@ type DiskMarginResult struct {
 	PeakFreq        float64    // ω where |S| peaks
 }
 
-// sisoEval caches the TF and reuses a single-element buffer for evalInto,
-// eliminating repeated TransferFunction calls in refinement loops.
+// sisoEval evaluates a SISO loop on the boundary of the stability region.
+// Delay-free realizations reuse one state-space solver, so refinement loops
+// pay its setup once and high-order loops keep state-space accuracy.
 type sisoEval struct {
-	sys  *System
-	tf   *TransferFunc
-	lft  bool
-	cont bool
-	dt   float64
-	dst  []complex128
+	sys    *System
+	solver frequencyPointSolver
+	delay  *mat.Dense
+	lft    bool
+	td     timeDomain
+	dst    []complex128
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
 	e := &sisoEval{
-		sys:  sys,
-		cont: sys.IsContinuous(),
-		dt:   sys.Dt,
-		dst:  make([]complex128, 1),
+		sys: sys,
+		td:  newTimeDomain(sys.Dt),
+		dst: make([]complex128, 1),
 	}
 	if sys.internalDelayCount() > 0 {
 		e.lft = true
-	} else {
-		res, err := sys.TransferFunction(nil)
-		if err != nil {
-			return nil, err
-		}
-		e.tf = res.TF
+		return e, nil
 	}
+	if err := sys.Validate(); err != nil {
+		return nil, err
+	}
+	e.solver = newFrequencyEvaluator(sys).pointSolver(math.MaxInt)
+	e.delay = effectiveIODelayMatrix(sys, 1, 1, true)
 	return e, nil
 }
 
@@ -73,13 +73,13 @@ func (e *sisoEval) at(w float64) complex128 {
 		h, _ := evalSISOFreqResponse(e.sys, w)
 		return h
 	}
-	var s complex128
-	if e.cont {
-		s = complex(0, w)
-	} else {
-		s = cmplx.Exp(complex(0, w*e.dt))
+	s := e.td.frequencyVariable(w)
+	if err := evalWithPoleLimit(e.solver.evalInto, e.sys, s, e.dst); err != nil {
+		return complex(math.NaN(), math.NaN())
 	}
-	e.tf.evalInto(s, e.dst)
+	if e.delay != nil {
+		applyIODelayMatrixAtS(e.sys, s, e.dst, 1, 1, e.delay)
+	}
 	return e.dst[0]
 }
 

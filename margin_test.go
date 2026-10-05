@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -1989,5 +1990,43 @@ func TestMargin_ClosestToZeroSelection(t *testing.T) {
 	}
 	if got, _ := selectMargin([]float64{-30, 20, -5, 5}, []float64{1, 2, 3, 4}); got != -5 {
 		t.Errorf("selectMargin=%g, want -5 (closest to 0, lower frequency on a tie)", got)
+	}
+}
+
+// The loop evaluator behind Margin, AllMargin, Bandwidth, TunePID and the
+// delay Nyquist test is held to the refined-dense oracle on high-order loops,
+// where evaluating the converted transfer-function polynomials lost 6%.
+func TestSISOEvalHighOrderMatchesOracle(t *testing.T) {
+	for _, n := range []int{60, 100} {
+		for _, dt := range []float64{0, 0.05} {
+			for _, delay := range []float64{0, 2} {
+				for kind := range sweepModelKinds {
+					rng := rand.New(rand.NewPCG(uint64(n), uint64(kind)))
+					sys, twin := randomSweepRealization(rng, kind, dt, false, n, 1, 1)
+					sys.InputDelay = []float64{delay}
+					eval, err := newSISOEval(sys)
+					if err != nil {
+						t.Fatal(err)
+					}
+					td := newTimeDomain(dt)
+					omega := logspace(-2, 2, 9)
+					if dt > 0 {
+						omega = logspace(-2, math.Log10(math.Pi/dt), 9)
+					}
+					for _, w := range omega {
+						s := td.frequencyVariable(w)
+						want := oracleResponse(t, twin, s, n, 1, 1)[0]
+						if dt == 0 {
+							want *= cmplx.Exp(-s * complex(delay, 0))
+						} else {
+							want /= cmplx.Pow(s, complex(delay, 0))
+						}
+						if e := cmplx.Abs(eval.at(w)-want) / cmplx.Abs(want); !(e <= 1e-12) {
+							t.Errorf("n=%d dt=%g delay=%g kind=%v ω=%g: rel err %g", n, dt, delay, kind, w, e)
+						}
+					}
+				}
+			}
+		}
 	}
 }
