@@ -384,6 +384,31 @@ func (e *delayLFT) tailGain(lim, w float64) float64 {
 	return lim + (h11 - e.d11) + h12*h21/(1-h22) - e.d12*e.d21/(1-e.d22)
 }
 
+// stability counts the closed-loop right-half-plane roots of χ with the
+// Nyquist test of the delay loop.
+func (e *delayLFT) stability() (*delayLoop, delayNyquist, error) {
+	l := e.loop()
+	res, err := l.nyquist(0.5)
+	if err == nil && e.err != nil {
+		err = e.err
+	}
+	return l, res, err
+}
+
+// internalDelayStable reports whether every root of χ of a continuous model
+// with internal delays lies in the open left half-plane.
+func internalDelayStable(sys *System) (bool, error) {
+	e, err := newDelayLFT(sys)
+	if err != nil {
+		return false, err
+	}
+	_, res, err := e.stability()
+	if err != nil {
+		return false, err
+	}
+	return res.stable, nil
+}
+
 // hinfNormDelayed returns the H∞ norm of a continuous model with internal
 // delays, or +Inf for an unstable one, and whether the model is stable.
 func hinfNormDelayed(sys *System) (norm, omega float64, stable bool, err error) {
@@ -391,11 +416,7 @@ func hinfNormDelayed(sys *System) (norm, omega float64, stable bool, err error) 
 	if err != nil {
 		return 0, 0, false, err
 	}
-	l := e.loop()
-	res, err := l.nyquist(0.5)
-	if err == nil && e.err != nil {
-		err = e.err
-	}
+	l, res, err := e.stability()
 	if err != nil {
 		return 0, 0, false, err
 	}

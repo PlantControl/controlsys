@@ -81,17 +81,18 @@ func StepInfo(resp *TimeResponse, opts *StepInfoOptions) (*StepInfoResult, error
 }
 
 // StepInfoForSystem simulates the step response of a stable sys and returns
-// its step metrics. Unstable models return ErrUnstable. Continuous models with
-// internal delays have no finite pole test, so the stability gate is skipped
-// and the metrics come from the simulated response, as MATLAB recommends
-// assessing such models with step.
+// its step metrics. Unstable models, including continuous models with
+// internal delays that IsStable decides are unstable, return ErrUnstable.
+// When IsStable cannot decide a delay model (ErrDelayUnsupported), the
+// stability gate is skipped and the metrics come from the simulated
+// response, as MATLAB recommends assessing such models with step.
 func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*StepInfoResult, error) {
 	if err := requireSystem("StepInfoForSystem", sys); err != nil {
 		return nil, err
 	}
 	stable, err := sys.IsStable()
 	switch {
-	case errors.Is(err, ErrContinuousInternalDelay):
+	case errors.Is(err, ErrDelayUnsupported):
 	case err != nil:
 		return nil, fmt.Errorf("StepInfoForSystem: %w", err)
 	case !stable:

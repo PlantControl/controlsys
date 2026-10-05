@@ -3,7 +3,9 @@
 ## Unreleased
 
 - `HinfNorm` and `Norm(sys, Inf)` accept continuous internal-delay models instead of returning `ErrContinuousInternalDelay`. Stability is decided exactly by the Nyquist count of det(I − H22·Δ) (unstable returns `(+Inf, +Inf, nil)`); the peak uses the exact delay factors e^{−jωτ}. Neutral-type or uncertifiable cases return `ErrDelayUnsupported`, as does `Norm(sys, Inf)` of an unstable one.
-- `DiskMargin`/`DiskMarginSkew` on continuous delayed loops stop the dense π/(8τ) frequency grid where a rigorous tail bound certifies |L| ≤ 0.3 and the sensitivity disk bound cannot exceed the grid peak (≈33k → ≈1k evaluations for a PID + e^{−0.5s} loop). Results are unchanged; loops whose delay grid previously exceeded the point budget may now return a margin instead of `ErrDelayUnsupported`.
+- `DiskMargin`/`DiskMarginSkew` on continuous delayed loops stop the dense π/(8τ) frequency grid where a rigorous tail bound certifies |L| ≤ 0.3 and the sensitivity disk bound cannot exceed the grid peak (≈33k → ≈1k evaluations for a PID + e^{−0.5s} loop). Sensitivity and disk-margin peaks bracket each grid maximum by neighbours of distinct frequency and refine every grid local maximum within 10% of the top, fixing a missed resonance top (2e-5 relative) when two scale points coincide up to rounding (seen on amd64). Loops whose delay grid previously exceeded the point budget may now return a margin instead of `ErrDelayUnsupported`.
+- Behaviour change: `(*System).IsStable` no longer returns `ErrContinuousInternalDelay` for continuous internal-delay models; it decides stability exactly with the same Nyquist count of χ(s) = det(sI−A)·det(I − H22·Δ) as `HinfNorm` (roots on the imaginary axis are not stable, as MATLAB `isstable`). Neutral-type or undecidable loops return `ErrDelayUnsupported`, descriptor ones `ErrDescriptorUnsupported`. `StepInfoForSystem` now returns `ErrUnstable` for such models when they are unstable, and skips the gate only on `ErrDelayUnsupported`.
+- `HinfNorm` and `IsStable` no longer panic on a continuous internal-delay model with no inputs or no outputs.
 
 ## v2.0.0
 
