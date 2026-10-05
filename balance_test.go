@@ -339,8 +339,8 @@ func checkGramiansEqual(t *testing.T, sys *System, hsv []float64, tol float64) {
 			if i == j {
 				want = hsv[i]
 			}
-			wcVal := wcRes.X.At(i, j)
-			woVal := woRes.X.At(i, j)
+			wcVal := wcRes.At(i, j)
+			woVal := woRes.At(i, j)
 			if math.Abs(wcVal-want) > tol {
 				t.Errorf("Wc[%d,%d] = %g, want %g", i, j, wcVal, want)
 			}

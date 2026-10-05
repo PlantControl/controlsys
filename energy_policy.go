@@ -44,7 +44,7 @@ func (p energyAnalysisPolicy) gramianInputs(typ GramType) (Aarg, Q *mat.Dense, e
 	case GramObservability:
 		return mat.NewDense(p.n, p.n, transposeSquareData(aRaw.Data, aRaw.Stride, p.n)), p.observabilityEnergy(), nil
 	default:
-		return nil, nil, ErrDimensionMismatch
+		return nil, nil, fmt.Errorf("unknown gramian type %d: %w", typ, ErrInvalidArgument)
 	}
 }
 

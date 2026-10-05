@@ -23,14 +23,14 @@ func TestGram_Continuous_MATLABValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantWc := mat.NewDense(2, 2, []float64{18.5, 24.5, 24.5, 32.5})
-	assertMatNearT(t, "Wc", wcRes.X, wantWc, 1e-4)
+	assertMatNearT(t, "Wc", wcRes, wantWc, 1e-4)
 
 	woRes, err := Gram(sys, GramObservability)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantWo := mat.NewDense(2, 2, []float64{257.5, -94.5, -94.5, 56.5})
-	assertMatNearT(t, "Wo", woRes.X, wantWo, 1e-4)
+	assertMatNearT(t, "Wo", woRes, wantWo, 1e-4)
 }
 
 func TestGram_Discrete_MATLABValidated(t *testing.T) {
@@ -57,12 +57,12 @@ func TestGram_Discrete_MATLABValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, res := range []*GramResult{wcRes, woRes} {
-		if !isSymmetric(res.X, 1e-10) {
+	for _, res := range []*mat.Dense{wcRes, woRes} {
+		if !isSymmetric(res, 1e-10) {
 			t.Error("gramian not symmetric")
 		}
 		var eig mat.Eigen
-		ok := eig.Factorize(res.X, mat.EigenNone)
+		ok := eig.Factorize(res, mat.EigenNone)
 		if !ok {
 			t.Fatal("eigendecomposition failed")
 		}
@@ -76,7 +76,7 @@ func TestGram_Discrete_MATLABValidated(t *testing.T) {
 
 	cwcRes, _ := Gram(csys, GramControllability)
 	diff := mat.NewDense(2, 2, nil)
-	diff.Sub(wcRes.X, cwcRes.X)
+	diff.Sub(wcRes, cwcRes)
 	if mat.Norm(diff, 1) < 1e-10 {
 		t.Error("discrete and continuous gramians should differ")
 	}
@@ -322,8 +322,8 @@ func TestGram_Symmetry(t *testing.T) {
 		name string
 		g    *mat.Dense
 	}{
-		{"Wc", wcRes.X},
-		{"Wo", woRes.X},
+		{"Wc", wcRes},
+		{"Wo", woRes},
 	} {
 		n, _ := tc.g.Dims()
 		nrm := mat.Norm(tc.g, 1)

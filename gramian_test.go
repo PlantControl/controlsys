@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/blas"
@@ -69,7 +70,7 @@ func TestGram_Controllability_1x1_Continuous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := res.X.RawMatrix().Data[0]
+	got := res.RawMatrix().Data[0]
 	want := 0.5
 	if math.Abs(got-want) > 1e-12 {
 		t.Errorf("Wc = %g, want %g", got, want)
@@ -87,7 +88,7 @@ func TestGram_Observability_1x1_Continuous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := res.X.RawMatrix().Data[0]
+	got := res.RawMatrix().Data[0]
 	want := 9.0 / 4.0
 	if math.Abs(got-want) > 1e-12 {
 		t.Errorf("Wo = %g, want %g", got, want)
@@ -108,11 +109,11 @@ func TestGram_Controllability_2x2_NonSymA(t *testing.T) {
 
 	BBt := mat.NewDense(2, 2, nil)
 	BBt.Mul(B, B.T())
-	r := gramResidualCont(A, res.X, BBt)
+	r := gramResidualCont(A, res, BBt)
 	if r > 1e-10 {
 		t.Errorf("residual = %e", r)
 	}
-	if !isSymmetric(res.X, 1e-10) {
+	if !isSymmetric(res, 1e-10) {
 		t.Error("gramian not symmetric")
 	}
 }
@@ -133,7 +134,7 @@ func TestGram_Observability_2x2_NonSymA(t *testing.T) {
 	CtC.Mul(C.T(), C)
 
 	At := mat.DenseCopyOf(A.T())
-	r := gramResidualCont(At, res.X, CtC)
+	r := gramResidualCont(At, res, CtC)
 	if r > 1e-10 {
 		t.Errorf("residual = %e", r)
 	}
@@ -153,7 +154,7 @@ func TestGram_Controllability_Discrete(t *testing.T) {
 
 	BBt := mat.NewDense(2, 2, nil)
 	BBt.Mul(B, B.T())
-	r := gramResidualDisc(A, res.X, BBt)
+	r := gramResidualDisc(A, res, BBt)
 	if r > 1e-10 {
 		t.Errorf("residual = %e", r)
 	}
@@ -174,7 +175,7 @@ func TestGram_Observability_Discrete(t *testing.T) {
 	CtC := mat.NewDense(2, 2, nil)
 	CtC.Mul(C.T(), C)
 	At := mat.DenseCopyOf(A.T())
-	r := gramResidualDisc(At, res.X, CtC)
+	r := gramResidualDisc(At, res, CtC)
 	if r > 1e-10 {
 		t.Errorf("residual = %e", r)
 	}
@@ -203,7 +204,7 @@ func TestGram_MIMO(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !isSymmetric(res.X, 1e-10) {
+		if !isSymmetric(res, 1e-10) {
 			t.Errorf("type=%d: gramian not symmetric", typ)
 		}
 	}
@@ -247,7 +248,7 @@ func TestGram_ZeroB(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	raw := res.X.RawMatrix()
+	raw := res.RawMatrix()
 	for i := range raw.Rows {
 		for j := range raw.Cols {
 			if math.Abs(raw.Data[i*raw.Stride+j]) > 1e-14 {
@@ -255,29 +256,62 @@ func TestGram_ZeroB(t *testing.T) {
 			}
 		}
 	}
-	if res.L != nil {
-		t.Error("Cholesky factor should be nil for zero gramian")
-	}
 }
 
 func TestGram_CholeskyFactor(t *testing.T) {
-	sys, _ := New(
+	cases := map[string]*System{}
+	cases["minimal"], _ = New(
 		mat.NewDense(2, 2, []float64{-1, 0.5, 0, -2}),
 		mat.NewDense(2, 1, []float64{1, 1}),
 		mat.NewDense(1, 2, []float64{1, 0}),
 		mat.NewDense(1, 1, []float64{0}), 0)
-
-	res, err := Gram(sys, GramControllability)
-	if err != nil {
-		t.Fatal(err)
+	cases["uncontrollable"], _ = New(
+		mat.NewDense(2, 2, []float64{-1, 0, 0, -2}),
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0}), 0)
+	cases["discrete MIMO"], _ = New(
+		mat.NewDense(3, 3, []float64{0.5, 0.2, 0, -0.1, 0.3, 0.4, 0, 0.1, -0.2}),
+		mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, 1}),
+		mat.NewDense(2, 3, []float64{1, 0, 1, 0, 1, 0}),
+		mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2}), 0.1)
+	pairs := [][2]GramType{{GramControllability, GramControllabilityFactor}, {GramObservability, GramObservabilityFactor}}
+	for name, sys := range cases {
+		for _, pair := range pairs {
+			W, err := Gram(sys, pair[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			R, err := Gram(sys, pair[1])
+			if err != nil {
+				t.Fatalf("%s type %d: %v", name, pair[1], err)
+			}
+			n, _ := R.Dims()
+			for i := range n {
+				for j := range i {
+					if R.At(i, j) != 0 {
+						t.Fatalf("%s type %d: R[%d,%d] = %g, want upper triangular", name, pair[1], i, j, R.At(i, j))
+					}
+				}
+			}
+			var RtR mat.Dense
+			RtR.Mul(R.T(), R)
+			assertMatNearT(t, name+" RᵀR=W", &RtR, W, 1e-10)
+		}
 	}
-	if res.L == nil {
-		t.Fatal("Cholesky factor is nil")
-	}
+}
 
-	LtL := mat.NewDense(2, 2, nil)
-	LtL.Mul(res.L.T(), res.L)
-	assertMatNearT(t, "L'L=X", LtL, res.X, 1e-10)
+func TestGram_Rejects(t *testing.T) {
+	static, _ := New(nil, nil, nil, mat.NewDense(1, 1, []float64{1}), 0)
+	if _, err := Gram(static, GramControllability); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("no states: err = %v, want ErrDimensionMismatch", err)
+	}
+	sys := makeSISO(-1, 1, 1, 0)
+	for _, typ := range []GramType{-1, 4} {
+		if _, err := Gram(sys, typ); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Gram: ") {
+			t.Errorf("type %d: err = %v, want Gram: ...ErrInvalidArgument", typ, err)
+		}
+	}
 }
 
 func TestGram_PythonControl_Wc(t *testing.T) {
@@ -292,7 +326,7 @@ func TestGram_PythonControl_Wc(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := mat.NewDense(2, 2, []float64{18.5, 24.5, 24.5, 32.5})
-	assertMatNearT(t, "Wc", res.X, want, 1e-3)
+	assertMatNearT(t, "Wc", res, want, 1e-3)
 }
 
 func TestGram_PythonControl_Wo(t *testing.T) {
@@ -307,7 +341,7 @@ func TestGram_PythonControl_Wo(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := mat.NewDense(2, 2, []float64{257.5, -94.5, -94.5, 56.5})
-	assertMatNearT(t, "Wo", res.X, want, 1e-2)
+	assertMatNearT(t, "Wo", res, want, 1e-2)
 }
 
 func TestGram_PythonControl_Wc2(t *testing.T) {
@@ -322,7 +356,7 @@ func TestGram_PythonControl_Wc2(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := mat.NewDense(2, 2, []float64{7.166667, 9.833333, 9.833333, 13.5})
-	assertMatNearT(t, "Wc2", res.X, want, 1e-3)
+	assertMatNearT(t, "Wc2", res, want, 1e-3)
 }
 
 func TestGram_PythonControl_Wo2(t *testing.T) {
@@ -337,19 +371,7 @@ func TestGram_PythonControl_Wo2(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := mat.NewDense(2, 2, []float64{198., -72., -72., 44.})
-	assertMatNearT(t, "Wo2", res.X, want, 1e-2)
-}
-
-func TestGram_Empty(t *testing.T) {
-	sys, _ := New(nil, nil, nil, mat.NewDense(1, 1, []float64{1}), 0)
-	res, err := Gram(sys, GramControllability)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := res.X.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("dims = (%d,%d), want (0,0)", r, c)
-	}
+	assertMatNearT(t, "Wo2", res, want, 1e-2)
 }
 
 func TestGram_InternalDelayRejected(t *testing.T) {

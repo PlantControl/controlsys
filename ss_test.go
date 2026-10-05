@@ -1092,7 +1092,7 @@ func TestEmptyIOAnalysisMatchesMATLAB(t *testing.T) {
 		}
 
 		wc, err := Gram(auto, GramControllability)
-		if err != nil || mat.Norm(wc.X, 1) != 0 {
+		if err != nil || mat.Norm(wc, 1) != 0 {
 			t.Errorf("dt=%g Gram(c) of no-input model = %v, %v; want zeros", dt, wc, err)
 		}
 		wo, err := Gram(auto, GramObservability)
@@ -1102,13 +1102,13 @@ func TestEmptyIOAnalysisMatchesMATLAB(t *testing.T) {
 		var res, ata, ctc mat.Dense
 		ctc.Mul(auto.C.T(), auto.C)
 		if dt == 0 {
-			ata.Mul(auto.A.T(), wo.X)
-			res.Mul(wo.X, auto.A)
+			ata.Mul(auto.A.T(), wo)
+			res.Mul(wo, auto.A)
 			res.Add(&res, &ata)
 		} else {
-			ata.Mul(auto.A.T(), wo.X)
+			ata.Mul(auto.A.T(), wo)
 			res.Mul(&ata, auto.A)
-			res.Sub(&res, wo.X)
+			res.Sub(&res, wo)
 		}
 		res.Add(&res, &ctc)
 		if r := mat.Norm(&res, math.Inf(1)); r > 1e-12 {
