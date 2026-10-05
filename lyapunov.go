@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
@@ -87,7 +88,7 @@ func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	}
 	n := problem.n
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("Lyap: A has no rows: %w", ErrDimensionMismatch)
 	}
 	ws := problem.ws
 
@@ -172,7 +173,7 @@ func DLyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	}
 	n := problem.n
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("DLyap: A has no rows: %w", ErrDimensionMismatch)
 	}
 	ws := problem.ws
 
