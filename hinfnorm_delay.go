@@ -199,10 +199,14 @@ type highFrequencyGain struct {
 	d21     []complex128
 	d22     []complex128
 	lu, x   []complex128
+	phase   []complex128
 	piv     []int
 	g       []complex128
 	lip     float64
 	samples int
+
+	grid  []float64 // torusGrid cell centres, nd per cell
+	gridR float64
 }
 
 func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
@@ -225,7 +229,7 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		d11: toC(e.sys.D, p, m), d12: toC(lft.D12, p, nd),
 		d21: toC(lft.D21, nd, m), d22: toC(lft.D22, nd, nd),
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
-		piv: make([]int, nd), g: make([]complex128, p*m),
+		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
 		lip: e.d12 * e.d21 / ((1 - e.d22) * (1 - e.d22)),
 	}
 }
@@ -233,9 +237,12 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 func (h *highFrequencyGain) at(theta []float64) float64 {
 	h.samples++
 	nd, p, m := h.e.nd, h.e.p, h.e.m
+	for k := range nd {
+		h.phase[k] = cmplx.Exp(complex(0, -theta[k]))
+	}
 	for i := range nd {
 		for j := range nd {
-			h.lu[i*nd+j] = -h.d22[i*nd+j] * cmplx.Exp(complex(0, -theta[j]))
+			h.lu[i*nd+j] = -h.d22[i*nd+j] * h.phase[j]
 		}
 		h.lu[i*nd+i]++
 	}
@@ -247,7 +254,7 @@ func (h *highFrequencyGain) at(theta []float64) float64 {
 	copy(h.g, h.d11)
 	for i := range p {
 		for k := range nd {
-			c := h.d12[i*nd+k] * cmplx.Exp(complex(0, -theta[k]))
+			c := h.d12[i*nd+k] * h.phase[k]
 			if c == 0 {
 				continue
 			}
@@ -291,19 +298,24 @@ func (h *highFrequencyGain) oneDelaySup() float64 {
 }
 
 // torusGrid returns the centres of a uniform grid of about 4096 cells on
-// the torus of phases and their half-width.
-func (h *highFrequencyGain) torusGrid() ([][]float64, float64) {
+// the torus of phases, nd consecutive values per cell, and their half-width.
+func (h *highFrequencyGain) torusGrid() ([]float64, float64) {
+	if h.grid != nil {
+		return h.grid, h.gridR
+	}
 	nd := h.e.nd
 	n0 := max(2, int(math.Pow(4096, 1/float64(nd))))
 	r := math.Pi / float64(n0)
-	var cells [][]float64
+	total := nd
+	for range nd {
+		total *= n0
+	}
+	cells := make([]float64, 0, total)
 	idx := make([]int, nd)
 	for {
-		c := make([]float64, nd)
-		for i, k := range idx {
-			c[i] = (2*float64(k) + 1) * r
+		for _, k := range idx {
+			cells = append(cells, (2*float64(k)+1)*r)
 		}
-		cells = append(cells, c)
 		i := 0
 		for ; i < nd; i++ {
 			idx[i]++
@@ -313,6 +325,7 @@ func (h *highFrequencyGain) torusGrid() ([][]float64, float64) {
 			idx[i] = 0
 		}
 		if i == nd {
+			h.grid, h.gridR = cells, r
 			return cells, r
 		}
 	}
@@ -326,7 +339,7 @@ func (h *highFrequencyGain) estimate() float64 {
 	}
 	cells, _ := h.torusGrid()
 	best := math.Inf(-1)
-	for _, c := range cells {
+	for c := range slices.Chunk(cells, h.e.nd) {
 		best = max(best, h.at(c))
 	}
 	return best
@@ -342,9 +355,10 @@ func (h *highFrequencyGain) estimate() float64 {
 func (h *highFrequencyGain) below(level float64, budget int) bool {
 	nd := h.e.nd
 	cells, r := h.torusGrid()
-	for len(cells) > 0 {
-		var next [][]float64
-		for _, c := range cells {
+	var bufs [2][]float64
+	for gen := 0; len(cells) > 0; gen++ {
+		next := bufs[gen%2][:0]
+		for c := range slices.Chunk(cells, nd) {
 			v := h.at(c)
 			if !(v <= level) {
 				return false
@@ -353,19 +367,19 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 				continue
 			}
 			for mask := range 1 << nd {
-				child := make([]float64, nd)
 				for i := range nd {
-					child[i] = c[i] - r/2
+					x := c[i] - r/2
 					if mask&(1<<i) != 0 {
-						child[i] = c[i] + r/2
+						x = c[i] + r/2
 					}
+					next = append(next, x)
 				}
-				next = append(next, child)
 			}
 		}
-		if h.samples+len(next) > budget {
+		if h.samples+len(next)/nd > budget {
 			return false
 		}
+		bufs[gen%2] = next
 		cells, r = next, r/2
 	}
 	return true

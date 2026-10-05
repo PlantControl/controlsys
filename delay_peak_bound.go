@@ -39,7 +39,12 @@ type descriptorResponse struct {
 	maxWeight    float64
 	piv          []int
 	evals        int
+
+	pool  []*descriptorSample
+	stack []descriptorSpan
 }
+
+type descriptorSpan struct{ a, b *descriptorSample }
 
 // newDescriptorResponse builds the descriptor form of sys with its I/O
 // delays pulled into the delay channels.
@@ -198,9 +203,25 @@ type descriptorSample struct {
 }
 
 func (r *descriptorResponse) sample(w float64) *descriptorSample {
-	r.evals++
+	return r.sampleInto(r.newSample(), w)
+}
+
+func (r *descriptorResponse) newSample() *descriptorSample {
 	gs := make([]complex128, 2*r.p*r.m)
-	s := &descriptorSample{w: w, g: gs[:r.p*r.m], g1: gs[r.p*r.m:]}
+	return &descriptorSample{g: gs[:r.p*r.m], g1: gs[r.p*r.m:]}
+}
+
+// pooled returns pool[k], allocating it on first use.
+func (r *descriptorResponse) pooled(k int) *descriptorSample {
+	if k == len(r.pool) {
+		r.pool = append(r.pool, r.newSample())
+	}
+	return r.pool[k]
+}
+
+func (r *descriptorResponse) sampleInto(s *descriptorSample, w float64) *descriptorSample {
+	r.evals++
+	*s = descriptorSample{w: w, g: s.g, g1: s.g1}
 	n, size := r.n, r.size
 	copy(r.lu, r.m0)
 	unit := r.unit
@@ -389,14 +410,17 @@ func (r *descriptorResponse) bound(s *descriptorSample, h, c float64) float64 {
 // intervals start on ws, skipping points while the half-width h keeps
 // h·max(ζ, ζL) <= 1/2, so the Neumann factors stay below 2. More than
 // budget samples, or an interval that cannot be split, return
-// errUnsupported.
+// errUnsupported. Samples come from r.pool, which is recycled per interval
+// of ws: pool[0] holds its left end and pool[1] its right end.
 func (r *descriptorResponse) certify(ws, shifts, peaks, wPeaks []float64, budget int, errUnsupported error) error {
 	start := r.evals
+	used := 0
 	sample := func(w float64) (*descriptorSample, error) {
 		if r.evals-start >= budget {
 			return nil, fmt.Errorf("peak certification exceeds %d samples: %w", budget, errUnsupported)
 		}
-		s := r.sample(w)
+		s := r.sampleInto(r.pooled(used), w)
+		used++
 		if !s.regular {
 			return nil, fmt.Errorf("singular descriptor at ω=%g: %w", w, errUnsupported)
 		}
@@ -407,8 +431,8 @@ func (r *descriptorResponse) certify(ws, shifts, peaks, wPeaks []float64, budget
 		}
 		return s, nil
 	}
-	type span struct{ a, b *descriptorSample }
-	var stack []span
+	stack := r.stack[:0]
+	defer func() { r.stack = stack[:0] }()
 	a, err := sample(ws[0])
 	if err != nil {
 		return err
@@ -423,7 +447,7 @@ func (r *descriptorResponse) certify(ws, shifts, peaks, wPeaks []float64, budget
 		if err != nil {
 			return err
 		}
-		stack = append(stack[:0], span{a, b})
+		stack = append(stack[:0], descriptorSpan{a, b})
 		for len(stack) > 0 {
 			sp := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
@@ -445,9 +469,10 @@ func (r *descriptorResponse) certify(ws, shifts, peaks, wPeaks []float64, budget
 			if err != nil {
 				return err
 			}
-			stack = append(stack, span{sm, sp.b}, span{sp.a, sm})
+			stack = append(stack, descriptorSpan{sm, sp.b}, descriptorSpan{sp.a, sm})
 		}
-		a, i = b, j
+		r.pool[0], r.pool[1] = r.pool[1], r.pool[0]
+		a, i, used = b, j, 1
 	}
 	return nil
 }
