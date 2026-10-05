@@ -25,9 +25,8 @@ func newFeedbackConfig(opts []FeedbackOption) feedbackConfig {
 
 // WithApproximatedDelays makes Feedback return a delay-free rational model
 // instead of an exact model with internal delays. Continuous-time delays are
-// replaced by Pade approximations (default order 5); exact integer discrete
-// delays are absorbed into states; fractional discrete delays require
-// WithThiranOrder.
+// replaced by Pade approximations (default order 5); discrete delays, always
+// whole samples, are absorbed into states.
 func WithApproximatedDelays() FeedbackOption {
 	return func(c *feedbackConfig) {
 		c.approximateDelays = true
@@ -43,9 +42,10 @@ func WithPadeOrder(n int) FeedbackOption {
 	}
 }
 
-// WithThiranOrder implies WithApproximatedDelays and enables Thiran allpass
-// modeling for fractional discrete delays. Exact integer discrete delays
-// remain state-space delays; continuous-time delays use Pade approximation.
+// WithThiranOrder implies WithApproximatedDelays and routes discrete delays
+// through the Thiran delay bank. Discrete model delays are whole samples, which
+// the bank realizes exactly as state-space delays; continuous-time delays use
+// Pade approximation.
 func WithThiranOrder(n int) FeedbackOption {
 	return func(c *feedbackConfig) {
 		c.approximateDelays = true
@@ -102,9 +102,6 @@ func (s feedbackDelayStrategy) prepare(plant, controller *System, sign float64) 
 
 func (s feedbackDelayStrategy) replaceDiscreteDelays(sys *System, role string) (*System, error) {
 	if s.cfg.thiranOrder == 0 {
-		if err := sys.validate(); err != nil {
-			return nil, fmt.Errorf("Feedback: validate %s: %w", role, err)
-		}
 		out, err := sys.AbsorbDelay()
 		if err != nil {
 			return nil, fmt.Errorf("Feedback: absorb %s: %w", role, err)

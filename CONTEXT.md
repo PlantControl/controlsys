@@ -429,7 +429,7 @@ A delay converted from metadata into additional state-space dynamics.
 _Avoid_: exact delay when the delay has become states
 
 **Fractional delay**:
-A discrete-time delay with a non-integer number of sample intervals.
+A discrete-time delay with a non-integer number of sample intervals. It is never a valid delay field of a discrete-time model (InputDelay, OutputDelay, IODelay or internal delay), as in MATLAB; Validate and every operation that validates its input return ErrFractionalDelay. A fractional sample delay exists only as an argument (ThiranDelay, or a continuous delay discretized by C2D), which realizes it as a **Thiran allpass delay** or extra states.
 _Avoid_: integer delay
 
 **Integer delay**:
@@ -1298,7 +1298,7 @@ An exported operation returns a fully formed value with a nil error, or a non-ni
 - ErrSchurFailed: any eigenvalue, Schur or QZ iteration that did not converge.
 
 **Guards** (require.go):
-- `requireSystem(op, sys)`: nil model → ErrInvalidArgument; otherwise Validate, wrapped `op: %w`. Does not check finiteness, since plain model arithmetic propagates NaN/Inf as MATLAB does.
+- `requireSystem(op, sys)`: nil model → ErrInvalidArgument; otherwise Validate, wrapped `op: %w`. Does not check finiteness, since plain model arithmetic propagates NaN/Inf as MATLAB does. `requireSystems(op, sys...)` is the same for the several models of an interconnection, naming the offending one. Interconnections (Series, Parallel, Append, BlkDiag, Feedback, Connect, Augstate) validate like every other operation; a **fractional delay** on a discrete-time model is invalid everywhere.
 - `requireFiniteSystem(op, sys)`: requireSystem plus every A, B, C, D, E and internal-delay block finite. Use before eigen, Schur, QZ, balancing or other LAPACK work: gonum Dgebal never terminates on NaN, so non-finite input must be rejected with ErrInvalidArgument before it reaches LAPACK.
 - `requireFiniteDense(op, name, m)`: nil or non-finite matrix → ErrInvalidArgument; check nil yourself first when the matrix is optional.
 - `requireFinite(op, name, v...)`: non-finite scalar or slice element → ErrInvalidArgument.

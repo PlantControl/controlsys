@@ -84,7 +84,7 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `Inv` | `pure`, `returns-mutable` | Returns inverse model. |
 | `LFT` | `pure`, `returns-mutable` | Builds LFT model or visible extraction. |
 | `WithPadeOrder` | `mutates` | Option closure configures `Feedback` delay approximation order. |
-| `WithThiranOrder` | `mutates` | Option closure configures `Feedback` fractional-delay policy. |
+| `WithThiranOrder` | `mutates` | Option closure configures `Feedback` discrete-delay policy. |
 | `Loopsens` | `pure`, `returns-mutable` | Returns four new loop-sensitivity models. |
 | `SS2SS` | `view-in`, `returns-mutable` | Uses transform matrix and returns transformed copy. |
 | `Xperm` | `view-in`, `returns-mutable` | Returns permuted copy. |

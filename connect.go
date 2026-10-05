@@ -7,18 +7,6 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// requireSystems rejects nil models. Interconnections skip Validate because
-// they accept fractional discrete delays, which the Thiran feedback path
-// approximates and Validate rejects.
-func requireSystems(op string, systems ...*System) error {
-	for i, sys := range systems {
-		if sys == nil {
-			return fmt.Errorf("%s: system %d is nil: %w", op, i+1, ErrInvalidArgument)
-		}
-	}
-	return nil
-}
-
 func domainMatch(sys1, sys2 *System) error {
 	return newTimeDomain(sys1.Dt).ensureCompatible(newTimeDomain(sys2.Dt))
 }
@@ -385,8 +373,13 @@ func sliceOrZeros(s []float64, n int) []float64 {
 // Pass WithApproximatedDelays, WithPadeOrder, or WithThiranOrder to receive
 // a delay-free rational model instead.
 func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (*System, error) {
-	if plant == nil {
-		return nil, fmt.Errorf("Feedback: plant is nil: %w", ErrInvalidArgument)
+	if err := requireSystem("Feedback", plant); err != nil {
+		return nil, err
+	}
+	if controller != nil {
+		if err := requireSystem("Feedback", controller); err != nil {
+			return nil, err
+		}
 	}
 	if sign != 1 && sign != -1 {
 		return nil, fmt.Errorf("Feedback: sign %g must be -1 or +1: %w", sign, ErrInvalidArgument)
@@ -1289,7 +1282,7 @@ func blkDiagInternalDelay(sys *System, srcs []*System, ns, ms, ps []int, nTotal,
 // be non-empty, in range and unique (ErrInvalidArgument). Q of the wrong size
 // returns ErrDimensionMismatch and a singular I - Q·D ErrAlgebraicLoop.
 func Connect(sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) {
-	if err := requireSystems("Connect", sys); err != nil {
+	if err := requireSystem("Connect", sys); err != nil {
 		return nil, err
 	}
 	if Q == nil {
