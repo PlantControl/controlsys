@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -197,6 +198,13 @@ func TestStepInfoForSystem_ContinuousInternalDelaySimulates(t *testing.T) {
 	// x' = -x - 2x(t-τ) + u settles at 1/3.
 	if m := info.Metrics[0]; !m.settled || math.Abs(m.SteadyStateValue-1.0/3) > 1e-3 {
 		t.Fatalf("metrics = %+v, want settled at 1/3", m)
+	}
+}
+
+func TestStepInfoForSystem_ContinuousInternalDelayUnstable(t *testing.T) {
+	_, err := StepInfoForSystem(scalarDDE(t, -2, 2), 40, nil)
+	if !errors.Is(err, ErrUnstable) {
+		t.Fatalf("err = %v, want ErrUnstable", err)
 	}
 }
 

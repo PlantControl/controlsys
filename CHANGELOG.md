@@ -3,6 +3,8 @@
 ## Unreleased
 
 - `HinfNorm` and `Norm(sys, Inf)` accept continuous internal-delay models instead of returning `ErrContinuousInternalDelay`. Stability is decided exactly by the Nyquist count of det(I − H22·Δ) (unstable returns `(+Inf, +Inf, nil)`); the peak uses the exact delay factors e^{−jωτ}. Neutral-type or uncertifiable cases return `ErrDelayUnsupported`, as does `Norm(sys, Inf)` of an unstable one.
+- Behaviour change: `(*System).IsStable` no longer returns `ErrContinuousInternalDelay` for continuous internal-delay models; it decides stability exactly with the same Nyquist count of χ(s) = det(sI−A)·det(I − H22·Δ) as `HinfNorm` (roots on the imaginary axis are not stable, as MATLAB `isstable`). Neutral-type or undecidable loops return `ErrDelayUnsupported`, descriptor ones `ErrDescriptorUnsupported`. `StepInfoForSystem` now returns `ErrUnstable` for such models when they are unstable, and skips the gate only on `ErrDelayUnsupported`.
+- `HinfNorm` and `IsStable` no longer panic on a continuous internal-delay model with no inputs or no outputs.
 
 ## v2.0.0
 
