@@ -83,7 +83,7 @@ func TestPRD103InterconnectionTopologyPublicDelayWorkflows(t *testing.T) {
 		-1, 0, 0, 0,
 		0, -1, 0, 0,
 	})
-	connected, err := Connect(M, Q, []int{0, 1}, []int{0, 1})
+	connected, err := connectGain("Connect", M, Q, []int{0, 1}, []int{0, 1})
 	if err != nil {
 		t.Fatal(err)
 	}

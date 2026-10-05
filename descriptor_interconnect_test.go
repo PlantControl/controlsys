@@ -115,7 +115,7 @@ func descriptorOps() []descriptorOp {
 			Q := mat.NewDense(4, 4, nil)
 			Q.Set(1, 2, 0.5)
 			Q.Set(2, 0, -0.3)
-			return Connect(aug, Q, []int{0, 3}, []int{1, 2})
+			return connectGain("Connect", aug, Q, []int{0, 3}, []int{1, 2})
 		}},
 		{name: "LFT(P,Delta)", run: func(f descriptorFixture) (*System, error) { return LFT(f.P, f.Delta, 1, 1) }},
 		{name: "LFT(P,nil)", run: func(f descriptorFixture) (*System, error) { return LFT(f.P, nil, 1, 1) }},

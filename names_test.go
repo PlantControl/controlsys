@@ -297,7 +297,7 @@ func TestConnect_Names(t *testing.T) {
 		0, 0,
 		1, 0,
 	})
-	result, err := Connect(aug, Q, []int{0}, []int{1})
+	result, err := connectGain("Connect", aug, Q, []int{0}, []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}

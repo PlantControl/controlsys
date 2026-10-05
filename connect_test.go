@@ -2228,7 +2228,7 @@ func TestConnect_SeriesEquivalence(t *testing.T) {
 	Q := mat.NewDense(2, 2, nil)
 	Q.Set(1, 0, 1)
 
-	conn, err := Connect(aug, Q, []int{0}, []int{1})
+	conn, err := connectGain("Connect", aug, Q, []int{0}, []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2272,7 +2272,7 @@ func TestConnect_FeedbackEquivalence(t *testing.T) {
 	Q.Set(0, 1, -1)
 	Q.Set(1, 0, 1)
 
-	conn, err := Connect(aug, Q, []int{0}, []int{0})
+	conn, err := connectGain("Connect", aug, Q, []int{0}, []int{0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2304,7 +2304,7 @@ func TestConnect_AlgebraicLoop(t *testing.T) {
 
 	Q := mat.NewDense(1, 1, []float64{1})
 
-	_, err := Connect(aug, Q, []int{0}, []int{0})
+	_, err := connectGain("Connect", aug, Q, []int{0}, []int{0})
 	if err == nil {
 		t.Fatal("expected algebraic loop error")
 	}
@@ -2334,7 +2334,7 @@ func TestConnect_ZeroQ(t *testing.T) {
 
 	Q := mat.NewDense(2, 2, nil)
 
-	conn, err := Connect(G, Q, []int{0}, []int{1})
+	conn, err := connectGain("Connect", G, Q, []int{0}, []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2353,69 +2353,40 @@ func TestConnect_ZeroQ(t *testing.T) {
 	}
 }
 
-func TestConnect_QDimMismatch(t *testing.T) {
-	G, _ := New(
-		mat.NewDense(1, 1, []float64{-1}),
-		mat.NewDense(1, 2, []float64{1, 0}),
-		mat.NewDense(1, 1, []float64{1}),
-		mat.NewDense(1, 2, []float64{0, 0}),
-		0,
-	)
-
-	Q := mat.NewDense(3, 3, nil)
-	_, err := Connect(G, Q, []int{0}, []int{0})
-	if err == nil {
-		t.Fatal("expected error for Q dim mismatch")
-	}
-	if !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("got %v, want ErrDimensionMismatch", err)
-	}
-}
-
-func TestConnect_IndexOutOfRange(t *testing.T) {
-	G, _ := New(
-		mat.NewDense(1, 1, []float64{-1}),
-		mat.NewDense(1, 1, []float64{1}),
-		mat.NewDense(1, 1, []float64{1}),
-		mat.NewDense(1, 1, []float64{0}),
-		0,
-	)
-	Q := mat.NewDense(1, 1, nil)
-
-	_, err := Connect(G, Q, []int{5}, []int{0})
-	if err == nil {
-		t.Fatal("expected error for input index out of range")
-	}
-
-	_, err = Connect(G, Q, []int{0}, []int{5})
-	if err == nil {
-		t.Fatal("expected error for output index out of range")
-	}
-
-	_, err = Connect(G, Q, []int{-1}, []int{0})
-	if err == nil {
-		t.Fatal("expected error for negative input index")
-	}
-}
-
-func TestConnect_DuplicateIndex(t *testing.T) {
-	G, _ := New(
+func TestConnect_InvalidIndices(t *testing.T) {
+	G, err := New(
 		mat.NewDense(2, 2, []float64{-1, 0.3, -0.5, -2}),
 		mat.NewDense(2, 2, []float64{1, 0, 0, 1}),
 		mat.NewDense(2, 2, []float64{1, 0, 0, 1}),
 		mat.NewDense(2, 2, []float64{0, 0, 0, 0}),
 		0,
 	)
-	Q := mat.NewDense(2, 2, nil)
-
-	_, err := Connect(G, Q, []int{0, 0}, []int{0})
-	if err == nil {
-		t.Fatal("expected error for duplicate input index")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	_, err = Connect(G, Q, []int{0}, []int{1, 1})
-	if err == nil {
-		t.Fatal("expected error for duplicate output index")
+	for name, tc := range map[string]struct {
+		conn            [][]int
+		inputs, outputs []int
+	}{
+		"input 0":           {nil, []int{0}, []int{1}},
+		"input 3":           {nil, []int{3}, []int{1}},
+		"output 3":          {nil, []int{1}, []int{3}},
+		"output -1":         {nil, []int{1}, []int{-1}},
+		"no inputs":         {nil, nil, []int{1}},
+		"no outputs":        {nil, []int{1}, []int{}},
+		"duplicate input":   {nil, []int{1, 1}, []int{1}},
+		"duplicate output":  {nil, []int{1}, []int{2, 2}},
+		"empty row":         {[][]int{{}}, []int{1}, []int{1}},
+		"row input 0":       {[][]int{{0, 1}}, []int{1}, []int{1}},
+		"row input 3":       {[][]int{{3, 1}}, []int{1}, []int{1}},
+		"row input -1":      {[][]int{{-1, 1}}, []int{1}, []int{1}},
+		"row output 3":      {[][]int{{1, 3}}, []int{1}, []int{1}},
+		"row output -3":     {[][]int{{1, -3}}, []int{1}, []int{1}},
+		"second row output": {[][]int{{1, 2}, {2, 0, 7}}, []int{1}, []int{1}},
+	} {
+		if _, err := Connect(G, tc.conn, tc.inputs, tc.outputs); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
+		}
 	}
 }
 
@@ -2427,7 +2398,7 @@ func TestConnect_AllGain(t *testing.T) {
 	Q := mat.NewDense(2, 2, nil)
 	Q.Set(1, 0, 1)
 
-	conn, err := Connect(aug, Q, []int{0}, []int{1})
+	conn, err := connectGain("Connect", aug, Q, []int{0}, []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2456,7 +2427,7 @@ func TestConnect_WithDelay(t *testing.T) {
 	_ = G.SetDelay(mat.NewDense(1, 1, []float64{0.5}))
 
 	Q := mat.NewDense(1, 1, nil)
-	result, err := Connect(G, Q, []int{0}, []int{0})
+	result, err := connectGain("Connect", G, Q, []int{0}, []int{0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2489,7 +2460,7 @@ func TestConnect_WithDelay_Feedback(t *testing.T) {
 	Q.Set(0, 1, -1)
 	Q.Set(1, 0, 1)
 
-	result, err := Connect(aug, Q, []int{0}, []int{0})
+	result, err := connectGain("Connect", aug, Q, []int{0}, []int{0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2518,7 +2489,7 @@ func TestConnect_NonSymmetricA(t *testing.T) {
 	aug, _ := BlkDiag(G1, G2)
 	Q := mat.NewDense(2, 2, nil)
 	Q.Set(1, 0, 1)
-	conn, err := Connect(aug, Q, []int{0}, []int{1})
+	conn, err := connectGain("Connect", aug, Q, []int{0}, []int{1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2571,7 +2542,7 @@ func TestConnect_MIMOThreeBlocks(t *testing.T) {
 	Q.Set(1, 0, 0)
 	Q.Set(2, 0, 1)
 
-	conn, err := Connect(aug, Q, []int{0, 1}, []int{0})
+	conn, err := connectGain("Connect", aug, Q, []int{0, 1}, []int{0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2789,7 +2760,7 @@ func TestConnectKeepsLoopDelaysInsideLoop(t *testing.T) {
 					}
 					inputs, outputs := []int{0, 1}, []int{0, 1}
 					label := fmt.Sprintf("dt=%v P=%s K=%s Q=%s", dt, pk, kk, qName)
-					res, err := Connect(aug, Q, inputs, outputs)
+					res, err := connectGain("Connect", aug, Q, inputs, outputs)
 					if err != nil {
 						t.Fatalf("%s: %v", label, err)
 					}
@@ -2969,7 +2940,7 @@ func TestZeroStateInternalDelayInterconnectionsHaveNoPhantomStates(t *testing.T)
 			0, 0.2, 0, 0,
 		})
 		in, out := []int{0, 1, 3}, []int{0, 2}
-		r, err = Connect(aug, Q, in, out)
+		r, err = connectGain("Connect", aug, Q, in, out)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3021,7 +2992,6 @@ func TestInterconnectNilArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := mat.NewDense(1, 1, nil)
 	for name, call := range map[string]func() error{
 		"Series(sys,nil)":   func() error { _, err := Series(sys, nil); return err },
 		"Series(nil,sys)":   func() error { _, err := Series(nil, sys); return err },
@@ -3032,8 +3002,7 @@ func TestInterconnectNilArgs(t *testing.T) {
 		"BlkDiag(nil)":      func() error { _, err := BlkDiag(nil); return err },
 		"BlkDiag(sys,nil)":  func() error { _, err := BlkDiag(sys, nil); return err },
 		"Feedback(nil)":     func() error { _, err := Feedback(nil, sys, -1); return err },
-		"Connect(nil)":      func() error { _, err := Connect(nil, q, []int{0}, []int{0}); return err },
-		"Connect(sys,nilQ)": func() error { _, err := Connect(sys, nil, []int{0}, []int{0}); return err },
+		"Connect(nil)":      func() error { _, err := Connect(nil, nil, []int{1}, []int{1}); return err },
 		"Augstate(nil)":     func() error { _, err := Augstate(nil); return err },
 	} {
 		if err := call(); !errors.Is(err, ErrInvalidArgument) {
@@ -3157,14 +3126,13 @@ func TestInterconnectionsRejectInvalidModels(t *testing.T) {
 	frac.InputDelay = []float64{1.5}
 	misnamed := good.Copy()
 	misnamed.InputName = []string{"a", "b"}
-	q := mat.NewDense(1, 1, nil)
 
 	ops := map[string]func(bad *System) error{
 		"Series":   func(bad *System) error { _, err := Series(good, bad); return err },
 		"Parallel": func(bad *System) error { _, err := Parallel(bad, good); return err },
 		"Append":   func(bad *System) error { _, err := Append(good, bad); return err },
 		"BlkDiag":  func(bad *System) error { _, err := BlkDiag(good, bad); return err },
-		"Connect":  func(bad *System) error { _, err := Connect(bad, q, []int{0}, []int{0}); return err },
+		"Connect":  func(bad *System) error { _, err := Connect(bad, [][]int{{1, 1}}, []int{1}, []int{1}); return err },
 		"Augstate": func(bad *System) error { _, err := Augstate(bad); return err },
 		"Feedback": func(bad *System) error { _, err := Feedback(bad, good, -1); return err },
 		"Feedback controller": func(bad *System) error {
@@ -3185,5 +3153,65 @@ func TestInterconnectionsRejectInvalidModels(t *testing.T) {
 		if err := op(nil); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s nil: err = %v, want ErrInvalidArgument", name, err)
 		}
+	}
+}
+
+func TestConnect_MATLABConnectionRows(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		P := feedbackDelayPlant(t, dt, "in")
+		K := feedbackDelayController(t, dt, "out")
+		aug, err := BlkDiag(P, K)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			name            string
+			rows            [][]int
+			Q               []float64
+			inputs, outputs []int
+		}{
+			{
+				name:    "negative feedback padded",
+				rows:    [][]int{{1, -3}, {2, -4, 0}, {3, 1, 0, 0}, {4, 2, 2, -2}},
+				Q:       []float64{0, 0, -1, 0, 0, 0, 0, -1, 1, 0, 0, 0, 0, 1, 0, 0},
+				inputs:  []int{1, 2},
+				outputs: []int{1, 2},
+			},
+			{
+				name:    "multi-term sum",
+				rows:    [][]int{{1, 2, -3, 4}, {3, -1}},
+				Q:       []float64{0, 1, -1, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0},
+				inputs:  []int{4, 1, 3},
+				outputs: []int{2, 4},
+			},
+		} {
+			got, err := Connect(aug, tc.rows, tc.inputs, tc.outputs)
+			if err != nil {
+				t.Fatalf("dt=%v %s: %v", dt, tc.name, err)
+			}
+			Q := mat.NewDense(4, 4, tc.Q)
+			in0, out0 := make([]int, len(tc.inputs)), make([]int, len(tc.outputs))
+			for i, v := range tc.inputs {
+				in0[i] = v - 1
+			}
+			for i, v := range tc.outputs {
+				out0[i] = v - 1
+			}
+			assertResponseOracle(t, fmt.Sprintf("dt=%v %s", dt, tc.name), got, func(s complex128) [][]complex128 {
+				return connectOracle(t, aug, Q, in0, out0, s)
+			})
+		}
+
+		cl, err := Connect(aug, [][]int{{1, -3}, {2, -4}, {3, 1}, {4, 2}}, []int{1, 2}, []int{1, 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fb, err := Feedback(P, K, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertResponseOracle(t, fmt.Sprintf("dt=%v Connect vs Feedback", dt), cl, func(s complex128) [][]complex128 {
+			return evalDelaySystem(t, fb, s, exactDelayFactor(dt))
+		})
 	}
 }

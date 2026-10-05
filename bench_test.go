@@ -1496,7 +1496,7 @@ func BenchmarkConnect(b *testing.B) {
 	outputs := []int{4, 5, 6}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Connect(aug, Q, inputs, outputs)
+		connectGain("Connect", aug, Q, inputs, outputs)
 	}
 }
 
