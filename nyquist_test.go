@@ -1,9 +1,11 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -453,7 +455,8 @@ func TestWindingNumber(t *testing.T) {
 }
 
 func TestNyquist_DiscretePoleAtOrigin(t *testing.T) {
-	d, _ := New(mat.NewDense(1, 1, []float64{0}), mat.NewDense(1, 1, []float64{1}),
+	// L = 0.5/z; L = 1/z would put the closed-loop pole at z = -1 on the contour.
+	d, _ := New(mat.NewDense(1, 1, []float64{0}), mat.NewDense(1, 1, []float64{0.5}),
 		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0.1)
 	ny, err := d.Nyquist(nil, 50)
 	if err != nil {
@@ -468,7 +471,7 @@ func TestNyquist_DiscretePoleAtOrigin(t *testing.T) {
 			t.Fatalf("omega[%d] = %g not finite increasing", k, v)
 		}
 		z := cmplx.Exp(complex(0, v*0.1))
-		if got, want := ny.Contour[k], 1/z; cmplx.Abs(got-want) > 1e-12 {
+		if got, want := ny.Contour[k], 0.5/z; cmplx.Abs(got-want) > 1e-12 {
 			t.Fatalf("H(%g) = %v, want %v", v, got, want)
 		}
 	}
@@ -793,5 +796,78 @@ func TestNyquist_RandomLoopsMatchClosedLoop(t *testing.T) {
 	}
 	if checked < 400 {
 		t.Fatalf("only %d loops checked", checked)
+	}
+}
+
+func TestNyquistClosedLoopPoleOnBoundaryErrors(t *testing.T) {
+	// L = 8/(s+1)^3: 1+L = 0 at s = ±j√3, a marginally stable closed loop.
+	cont, err := New(
+		mat.NewDense(3, 3, []float64{-1, 1, 0, 0, -1, 1, 0, 0, -1}),
+		mat.NewDense(3, 1, []float64{0, 0, 8}),
+		mat.NewDense(1, 3, []float64{1, 0, 0}),
+		mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// L = 1.5/(z-0.5): 1+L = 0 at z = -1.
+	disc, err := New(mat.NewDense(1, 1, []float64{0.5}), mat.NewDense(1, 1, []float64{1.5}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, sys := range map[string]*System{"continuous": cont, "discrete": disc} {
+		_, err := sys.Nyquist(nil, 0)
+		if !errors.Is(err, ErrSingularTransform) || !strings.HasPrefix(err.Error(), "Nyquist: ") {
+			t.Errorf("%s: err = %v, want Nyquist: ... ErrSingularTransform", name, err)
+		}
+	}
+
+	for _, k := range []float64{7.9, 8.1} {
+		near := cont.Copy()
+		near.B.Set(2, 0, k)
+		res, err := near.Nyquist(nil, 0)
+		if err != nil {
+			t.Fatalf("k=%g: %v", k, err)
+		}
+		want := 0
+		if k > 8 {
+			want = 2
+		}
+		if res.RHPZerosCL != want {
+			t.Errorf("k=%g: RHPZerosCL = %d, want %d", k, res.RHPZerosCL, want)
+		}
+	}
+}
+
+func TestNyquistValidatesArguments(t *testing.T) {
+	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disc, err := New(mat.NewDense(1, 1, []float64{0.5}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		sys    *System
+		omega  []float64
+		points int
+	}{
+		{"empty", sys, []float64{}, 0},
+		{"negative", sys, []float64{-1, 1}, 0},
+		{"NaN", sys, []float64{1, math.NaN()}, 0},
+		{"Inf", sys, []float64{math.Inf(1)}, 0},
+		{"above Nyquist", disc, []float64{1, 40}, 0},
+		{"nPoints", sys, nil, -3},
+		{"nil", nil, nil, 0},
+	}
+	for _, c := range cases {
+		_, err := c.sys.Nyquist(c.omega, c.points)
+		if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Nyquist: ") {
+			t.Errorf("%s: err = %v, want Nyquist: ... ErrInvalidArgument", c.name, err)
+		}
+	}
+	if _, err := disc.Nyquist([]float64{0, math.Pi / 0.1}, 0); err != nil {
+		t.Errorf("omega up to π/dt: %v", err)
 	}
 }
