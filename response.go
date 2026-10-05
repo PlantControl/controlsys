@@ -213,17 +213,15 @@ func (p timeResponsePlan) allInputResponse(kind standardInputResponse) (*TimeRes
 func (p timeResponsePlan) simulatedInputResponse(kind standardInputResponse) (*TimeResponse, error) {
 	_, m, outputs := p.sim.Dims()
 	Y := mat.NewDense(outputs*m, p.steps, nil)
-	amplitude := kind.amplitude(p)
-
 	for input := range m {
 		u := mat.NewDense(m, p.steps, nil)
 		if kind == stepResponse {
 			uRaw := u.RawMatrix()
 			for sample := range p.steps {
-				uRaw.Data[input*uRaw.Stride+sample] = amplitude
+				uRaw.Data[input*uRaw.Stride+sample] = 1
 			}
 		} else {
-			u.Set(input, 0, amplitude)
+			u.Set(input, 0, 1)
 		}
 		resp, err := p.sim.Simulate(u, nil, nil)
 		if err != nil {
@@ -249,7 +247,6 @@ func (p timeResponsePlan) batchedInputResponse(kind standardInputResponse) *Time
 	Y := mat.NewDense(outputs*inputs, p.steps, nil)
 	yRaw := Y.RawMatrix()
 	dRaw := p.sim.D.RawMatrix()
-	amplitude := kind.amplitude(p)
 
 	if states == 0 {
 		for sample := range p.steps {
@@ -258,7 +255,7 @@ func (p timeResponsePlan) batchedInputResponse(kind standardInputResponse) *Time
 			}
 			for input := range inputs {
 				for output := range outputs {
-					yRaw.Data[(input*outputs+output)*yRaw.Stride+sample] = amplitude * dRaw.Data[output*dRaw.Stride+input]
+					yRaw.Data[(input*outputs+output)*yRaw.Stride+sample] = dRaw.Data[output*dRaw.Stride+input]
 				}
 			}
 		}
@@ -279,7 +276,7 @@ func (p timeResponsePlan) batchedInputResponse(kind standardInputResponse) *Time
 			for output := range outputs {
 				value := 0.0
 				if inputActive {
-					value = amplitude * dRaw.Data[output*dRaw.Stride+input]
+					value = dRaw.Data[output*dRaw.Stride+input]
 				}
 				cRow := cRaw.Data[output*cRaw.Stride : output*cRaw.Stride+states]
 				for state, coefficient := range cRow {
@@ -290,7 +287,7 @@ func (p timeResponsePlan) batchedInputResponse(kind standardInputResponse) *Time
 			for state := range states {
 				value := 0.0
 				if inputActive {
-					value = amplitude * bRaw.Data[state*bRaw.Stride+input]
+					value = bRaw.Data[state*bRaw.Stride+input]
 				}
 				aRow := aRaw.Data[state*aRaw.Stride : state*aRaw.Stride+states]
 				for column, coefficient := range aRow {
@@ -303,13 +300,6 @@ func (p timeResponsePlan) batchedInputResponse(kind standardInputResponse) *Time
 	}
 
 	return p.response(Y)
-}
-
-func (kind standardInputResponse) amplitude(p timeResponsePlan) float64 {
-	if kind == impulseResponse && p.wasContinuous {
-		return 1 / p.dt
-	}
-	return 1
 }
 
 func prepareLsimResponse(sys *System, u *mat.Dense, t []float64) (timeResponsePlan, *mat.Dense, error) {
@@ -731,7 +721,14 @@ func Damp(sys *System) ([]DampInfo, error) {
 	return result, nil
 }
 
+// Step returns the step response of each input channel. Continuous models
+// with internal delays of one common length are sampled exactly (method of
+// steps); other internal-delay models are simulated through the approximate
+// ZOH discretization of the delay channels, as MATLAB does, with O(dt) error.
 func Step(sys *System, tFinal float64) (*TimeResponse, error) {
+	if resp, ok, err := delayChainAuto(sys, tFinal, stepResponse); ok || err != nil {
+		return resp, err
+	}
 	plan, err := prepareAutoTimeResponse(sys, tFinal, 0)
 	if err != nil {
 		return nil, err
@@ -743,10 +740,29 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	return resp, nil
 }
 
+// Impulse returns the impulse response of each input channel. For
+// continuous models the Dirac feedthrough D·δ(t) is dropped and y(0) = C·B,
+// as in MATLAB. A continuous model whose input feeds an internal delay
+// directly (LFT.D21 ≠ 0) carries delayed Diracs and returns
+// ErrInternalDelayImpulse; MATLAB's impulse rejects every continuous
+// internal-delay model, while this library samples the D21 = 0 case (exactly
+// for one common delay length, else by the approximate ZOH discretization).
 func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 	kind := impulseResponse
-	if derived, ok := impulseAsStepModel(sys); ok {
-		sys, kind = derived, stepResponse
+	if sys.IsContinuous() {
+		if sys.LFT != nil && sys.HasInternalDelay() && !allZeroDense(sys.LFT.D21) {
+			return nil, fmt.Errorf("Impulse: %w", ErrInternalDelayImpulse)
+		}
+		if resp, ok, err := delayChainAuto(sys, tFinal, impulseResponse); ok || err != nil {
+			return resp, err
+		}
+		derived, err := impulseAsStepModel(sys)
+		if err != nil {
+			return nil, fmt.Errorf("Impulse: %w", err)
+		}
+		if derived != nil {
+			sys, kind = derived, stepResponse
+		}
 	}
 	plan, err := prepareAutoTimeResponse(sys, tFinal, 0)
 	if err != nil {
@@ -762,27 +778,16 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 
 // impulseAsStepModel returns a model whose step response equals the
 // continuous impulse response C·e^{At}·B sampled exactly: (A, A·B, C, C·B)
-// with the same delays. The Dirac part D·δ(t) is dropped, as in MATLAB.
-// Internal delays fed directly by u (D21 ≠ 0) would propagate Diracs and are
-// left to the pulse approximation.
-func impulseAsStepModel(sys *System) (*System, bool) {
-	if !sys.IsContinuous() {
-		return nil, false
-	}
+// with the same delays. The Dirac part D·δ(t) is dropped, as in MATLAB. It
+// returns nil for models without inputs or outputs and requires D21 = 0.
+func impulseAsStepModel(sys *System) (*System, error) {
 	n, m, p := sys.Dims()
 	if m == 0 || p == 0 {
-		return nil, false
+		return nil, nil
 	}
-	src := sys
-	if sys.IsDescriptor() {
-		explicit, err := sys.ToExplicit()
-		if err != nil {
-			return nil, false
-		}
-		src = explicit
-	}
-	if src.LFT != nil && !allZeroDense(src.LFT.D21) {
-		return nil, false
+	src, err := sys.ToExplicit()
+	if err != nil {
+		return nil, err
 	}
 	derived := src.Copy()
 	derived.D = mat.NewDense(p, m, nil)
@@ -793,9 +798,30 @@ func impulseAsStepModel(sys *System) (*System, bool) {
 			derived.LFT.D21.Mul(src.LFT.C2, src.B)
 		}
 	}
-	return derived, true
+	return derived, nil
 }
 
+// delayChainAuto samples a standard response on the automatic grid with the
+// exact internal-delay chain; ok is false when the model is outside its class.
+func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*TimeResponse, bool, error) {
+	if _, _, ok := delayChainModel(sys); !ok {
+		return nil, false, nil
+	}
+	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	Y, ok := delayChainStandardResponse(sys, t, dt, kind)
+	if !ok {
+		return nil, false, nil
+	}
+	return &TimeResponse{T: t, Y: Y, OutputName: copyStringSlice(sys.OutputName)}, true, nil
+}
+
+// Initial returns the free response from x0 with zero delay-line history.
+// Continuous models without internal delays, or whose internal delays share
+// one length, are sampled exactly; other internal-delay models use the
+// approximate ZOH discretization of the delay channels, as MATLAB does.
 func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
 	if x0 == nil {
 		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrDimensionMismatch)
@@ -806,6 +832,19 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 
 	if free.IsContinuous() && !free.HasInternalDelay() && !free.IsDescriptor() {
 		return free.continuousFreeResponse(x0, tFinal)
+	}
+	if _, _, ok := delayChainModel(free); ok {
+		t, dt, err := newTimeResponsePlanner(free).grid(tFinal, 0)
+		if err != nil {
+			return nil, err
+		}
+		Y, ok, err := delayChainForcedResponse(free, x0, nil, dt, len(t))
+		if err != nil {
+			return nil, fmt.Errorf("Initial: %w", err)
+		}
+		if ok {
+			return &TimeResponse{T: t, Y: Y, OutputName: copyStringSlice(free.OutputName)}, nil
+		}
 	}
 
 	plan, err := prepareAutoTimeResponse(free, tFinal, 0)
@@ -896,10 +935,23 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 	return Y, nil
 }
 
+// Lsim simulates the response to u held constant between samples (ZOH).
+// Continuous models with internal delays of one common length are sampled
+// exactly; other internal-delay models use the approximate ZOH
+// discretization of the delay channels, as MATLAB does.
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
 	plan, uSim, err := prepareLsimResponse(sys, u, t)
 	if err != nil {
 		return nil, err
+	}
+	if plan.wasContinuous {
+		Y, ok, err := delayChainForcedResponse(sys, x0, uSim, plan.dt, plan.steps)
+		if err != nil {
+			return nil, fmt.Errorf("Lsim: %w", err)
+		}
+		if ok {
+			return plan.response(Y), nil
+		}
 	}
 	exactFree := x0 != nil && plan.wasContinuous && sys.HasDelay() && !sys.HasInternalDelay() && !sys.IsDescriptor()
 	simX0 := x0
