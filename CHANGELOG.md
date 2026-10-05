@@ -9,6 +9,12 @@
 - Behaviour change: `Norm(sys, Inf)` of an unstable continuous internal-delay model returns its L∞ peak gain instead of `ErrDelayUnsupported`, as MATLAB `norm(sys, Inf)` does regardless of stability. It is +Inf, at that frequency, when the characteristic function χ has a root on the imaginary axis (hidden modes included, as for rational models).
 - `HinfNorm`/`Norm(sys, Inf)` of continuous internal-delay models and `DiskMargin`/`DiskMarginSkew` of continuous delayed loops certify their peak between grid samples to 1e-9 relative: a Taylor bound (second and third order) from the descriptor form of the delay LFT, with Neumann-series resolvent bounds valid for non-normal A, is bisected until no interval can exceed the reported peak. Resonances narrower than the grid spacing (ζ down to 1e-4 in tests) are no longer missed. A peak that cannot be certified within the point budget returns `ErrDelayUnsupported`. Costs ≈1.2–1.4× on a PID + e^{−0.5s} loop.
 
+### Added
+
+- `Makeweight(dcgain, freqMag, hfgain, Ts, N)`, MATLAB `makeweight`: monotonic loop-shaping weight through `dcgain`, `mag` at `freq` (or `[wc]` for `|W| = 1`) and `hfgain`; order `N` with Butterworth-pattern poles and zeros; discrete (`Ts > 0`) by Tustin prewarped at `freq`.
+- `Augw(G, W1, W2, W3)`, MATLAB `augw`: mixed-sensitivity generalized plant `[W1 −W1·G; 0 W2; 0 W3·G; I −G]` with nil weights omitted, SISO weights expanded as `W·I`, and improper `W3` accepted when `W3·G` is proper; channels named `w`, `u`, `z1`, `z2`, `z3`, `e`.
+- `Mixsyn(G, W1, W2, W3)`, MATLAB `mixsyn`: `HinfSyn` on `Augw`, returning `MixsynResult{K, CL, Gamma, Info}` with `Gamma = ‖CL‖∞`; rank-deficient D12 (e.g. `W2` nil with strictly proper `G`) returns `ErrInvalidPartition`.
+
 ## v2.0.0
 
 v2 is a breaking release. It applies one set of rules to the whole API:
