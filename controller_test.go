@@ -710,6 +710,124 @@ func TestPlace_CompanionForm(t *testing.T) {
 	}
 }
 
+func monicPolyFromRoots(roots []complex128) []complex128 {
+	c := []complex128{1}
+	for _, r := range roots {
+		next := make([]complex128, len(c)+1)
+		for i, v := range c {
+			next[i] += v
+			next[i+1] -= r * v
+		}
+		c = next
+	}
+	return c
+}
+
+// assertCharPoly compares det(sI-(A-BK)) with prod(s-p_i); coefficients stay
+// well-conditioned for repeated poles where eigenvalues split by eps^(1/k).
+func assertCharPoly(t *testing.T, label string, A, B, K *mat.Dense, poles []complex128) {
+	t.Helper()
+	eigs := closedLoopEig(A, B, K)
+	if eigs == nil {
+		t.Fatalf("%s: eig failed", label)
+	}
+	got := monicPolyFromRoots(eigs)
+	want := monicPolyFromRoots(poles)
+	for i := range want {
+		if cmplx.Abs(got[i]-want[i]) > 1e-9*(1+cmplx.Abs(want[i])) {
+			t.Errorf("%s: coef %d = %v, want %v (eig=%v)", label, i, got[i], want[i], eigs)
+		}
+	}
+}
+
+func TestPlace_OscillatorDistinctRealPoles(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0, 1, -1, 0})
+	B := mat.NewDense(2, 1, []float64{0, 1})
+	K, err := Place(A, B, []complex128{-1, -2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// s^2 + k2 s + 1 + k1 = (s+1)(s+2)
+	want := []float64{1, 3}
+	for j, w := range want {
+		if math.Abs(K.At(0, j)-w) > 1e-12 {
+			t.Errorf("K[%d] = %v, want %v", j, K.At(0, j), w)
+		}
+	}
+}
+
+func TestPlace_ComplexOpenLoopContract(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{
+		0.3, 1.0, -0.4, 0.2,
+		-1.1, -0.2, 0.5, 0.0,
+		0.7, 0.1, -1.5, 0.9,
+		0.0, -0.6, 0.3, 0.4,
+	})
+	inputs := map[string]*mat.Dense{
+		"MIMO": mat.NewDense(4, 2, []float64{1, 0, 0.2, 0.5, 0, 1, 0.3, 0}),
+		"SISO": mat.NewDense(4, 1, []float64{0, 0, 0, 1}),
+	}
+	sets := [][]complex128{
+		{-1, -2, -3, -4},
+		{-1, -2, -1 + 2i, -1 - 2i},
+		{-1 + 2i, -1, -1 - 2i, -2},
+		{-1, -1, -2, -3},
+		{-1, -1, -2 + 1i, -2 - 1i},
+		{-2, -2, -2, -3},
+		{-1 + 1i, -1 - 1i, -1 + 1i, -1 - 1i},
+		{-2 + 1i, -2 - 1i, -3 + 0.5i, -3 - 0.5i},
+		{0.5, -0.3, 0.2 + 0.4i, 0.2 - 0.4i},
+		{0.1, 0.2, 0.3, 0.4},
+	}
+	for name, B := range inputs {
+		for _, p := range sets {
+			K, err := Place(A, B, p)
+			if err != nil {
+				t.Errorf("%s %v: %v", name, p, err)
+				continue
+			}
+			assertCharPoly(t, name, A, B, K, p)
+		}
+	}
+}
+
+func TestPlace_RepeatedPolesComplexOpenLoop(t *testing.T) {
+	A3 := mat.NewDense(3, 3, []float64{0.3, 1.0, -0.4, -1.1, -0.2, 0.5, 0.7, 0.1, -1.5})
+	B3 := mat.NewDense(3, 2, []float64{1, 0, 0.2, 0.5, 0, 1})
+	for _, p := range [][]complex128{{-1, -1, -3}, {-3, -1, -1}, {-1, -3, -1}, {-1, -2, -3}} {
+		K, err := Place(A3, B3, p)
+		if err != nil {
+			t.Fatalf("%v: %v", p, err)
+		}
+		assertCharPoly(t, "3x3", A3, B3, K, p)
+	}
+	A2 := mat.NewDense(2, 2, []float64{0.3, 1.0, -1.1, -0.2})
+	B2 := mat.NewDense(2, 2, []float64{1, 0, 0.2, 0.5})
+	for _, p := range [][]complex128{{-1, -1}, {-1, -2}} {
+		K, err := Place(A2, B2, p)
+		if err != nil {
+			t.Fatalf("%v: %v", p, err)
+		}
+		assertCharPoly(t, "2x2", A2, B2, K, p)
+	}
+}
+
+func TestAcker_NonAdjacentConjugates(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{
+		0.3, 1.0, -0.4, 0.2,
+		-1.1, -0.2, 0.5, 0.0,
+		0.7, 0.1, -1.5, 0.9,
+		0.0, -0.6, 0.3, 0.4,
+	})
+	B := mat.NewDense(4, 1, []float64{0, 0, 0, 1})
+	p := []complex128{-1 + 1i, -2, -1 - 1i, -3}
+	K, err := Acker(A, B, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCharPoly(t, "Acker", A, B, K, p)
+}
+
 func TestValidatePoles(t *testing.T) {
 	if err := validatePoles([]complex128{-1, -2}); err != nil {
 		t.Errorf("real poles should be valid: %v", err)
