@@ -120,11 +120,11 @@ func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 // FreqResponsePointwise evaluates the frequency response with guaranteed
 // per-frequency single-point arithmetic: the value at each omega[k] is
 // bit-identical to FreqResponse([]float64{omega[k]}), regardless of
-// len(omega). FreqResponse may evaluate long sweeps of delay-free
-// state-space models through one Hessenberg reduction of A, whose values
-// agree with the single-point path to rounding but are not bit-identical;
-// FreqResponsePointwise never does, at the cost of one dense solve per
-// frequency. Use it when downstream comparisons require sweep results to
+// len(omega). FreqResponse may evaluate long sweeps of large delay-free
+// state-space models (n > 20m) through one Hessenberg reduction of A, whose
+// values agree with the single-point path to componentwise rounding but are
+// not bit-identical; FreqResponsePointwise never does, at the cost of one
+// dense solve per frequency. Use it when downstream comparisons require sweep results to
 // reproduce single-point evaluations exactly.
 func (sys *System) FreqResponsePointwise(omega []float64) (*FreqResponseMatrix, error) {
 	e, err := validFrequencyEvaluator(sys, "FreqResponsePointwise")
@@ -169,10 +169,6 @@ type frequencyEvaluator struct {
 	p   int
 }
 
-// denseFrequencySweepLimit is the sweep length up to which per-point dense
-// solves beat one Hessenberg reduction (BenchmarkFrequencySweepKernels).
-const denseFrequencySweepLimit = 2
-
 // validFrequencyEvaluator rejects hand-built systems whose exported fields
 // disagree in shape; the kernels index them unchecked.
 func validFrequencyEvaluator(sys *System, op string) (frequencyEvaluator, error) {
@@ -210,20 +206,14 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 		applyIODelayPhase(e.sys, omega, data, e.p, e.m, true)
 		return e.matrix(data, omega), nil
 	}
-	var solver frequencyPointSolver
-	if e.useDenseSweep(len(omega)) {
-		solver = newSSEvalWorkspace(e.n, e.p, e.m).bind(e.sys)
-	} else {
-		solver = newHessenbergSweep(e.sys, e.n, e.m, e.p)
-	}
-	if err := e.sweepInto(omega, data, solver); err != nil {
+	if err := e.sweepInto(omega, data, e.pointSolver(len(omega))); err != nil {
 		return nil, err
 	}
 	return e.matrix(data, omega), nil
 }
 
 // responsePointwise evaluates each frequency exactly as response would for
-// a one-element sweep: direct state-space solve first, per-point
+// a one-element sweep: balanced dense solve first, per-point
 // transfer-function fallback on solve failure, with the delay phase applied
 // per point using the flag of whichever path produced the value.
 func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMatrix, error) {
@@ -237,7 +227,7 @@ func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMat
 	}
 
 	data := make([]complex128, len(omega)*e.p*e.m)
-	if err := e.sweepInto(omega, data, newSSEvalWorkspace(e.n, e.p, e.m).bind(e.sys)); err != nil {
+	if err := e.sweepInto(omega, data, e.pointSolver(1)); err != nil {
 		return nil, err
 	}
 	return e.matrix(data, omega), nil
@@ -295,7 +285,13 @@ func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
 	}
 
 	data := make([]complex128, pm)
-	if err := e.evalStateSpaceInto(s, data); err != nil {
+	var err error
+	if e.sys.IsDescriptor() {
+		err = e.evalStateSpaceInto(s, data)
+	} else {
+		err = e.pointSolver(1).evalInto(s, data)
+	}
+	if err != nil {
 		return nil, err
 	}
 	applyIODelayAtS(e.sys, s, data, e.p, e.m, true)
@@ -315,8 +311,25 @@ func (e frequencyEvaluator) evalStateSpaceInto(s complex128, dst []complex128) e
 	return nil
 }
 
+// pointSolver picks the explicit-model solver for an nw-point sweep. Both
+// solve the balanced realization with componentwise-stable arithmetic; the
+// Hessenberg sweep pays an O(n³) reduction once to make each point O(n²m).
+// FreqResponsePointwise and EvalFr use the nw=1 choice so single points stay
+// bit-identical across entry points.
+func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
+	if e.useDenseSweep(nw) {
+		return newBalancedDense(e.sys, e.n, e.m, e.p)
+	}
+	return newHessenbergSweep(e.sys, e.n, e.m, e.p)
+}
+
+// useDenseSweep reports whether per-point GEPP (n³/3 per point) beats the
+// refined Hessenberg sweep (two O(n²m) solves plus refinement per point).
+// On fully coupled models (BenchmarkFrequencySweepKernels, M1 Pro) the
+// crossover is near n = 20m: 18 states for SISO, 40-48 for m=2, above 64
+// for m=4.
 func (e frequencyEvaluator) useDenseSweep(nw int) bool {
-	return nw <= denseFrequencySweepLimit
+	return nw <= 2 || e.n <= 20*max(e.m, 1)
 }
 
 func (e frequencyEvaluator) evalStateSpaceSweepInto(omega []float64, dst []complex128) error {
@@ -459,22 +472,6 @@ func newSSEvalWorkspace(n, p, m int) *ssEvalWorkspace {
 		rhs:    make([]complex128, n*m),
 		g:      make([]complex128, p*m),
 	}
-}
-
-type boundSSEval struct {
-	ws  *ssEvalWorkspace
-	sys *System
-}
-
-func (ws *ssEvalWorkspace) bind(sys *System) boundSSEval { return boundSSEval{ws: ws, sys: sys} }
-
-func (b boundSSEval) evalInto(s complex128, dst []complex128) error {
-	n, m, p := b.sys.Dims()
-	if err := evalFrSSInto(b.ws, b.sys, s, n, p, m); err != nil {
-		return err
-	}
-	copy(dst, b.ws.g[:p*m])
-	return nil
 }
 
 func evalFrSSInto(ws *ssEvalWorkspace, sys *System, s complex128, n, p, m int) error {

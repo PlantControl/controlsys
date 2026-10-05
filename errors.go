@@ -15,6 +15,8 @@ var (
 	ErrFractionalDelay      = errors.New("controlsys: discrete delay must be non-negative integer")
 	ErrNonUniformInputDelay = errors.New("controlsys: AbsorbDelay requires uniform delay per input column")
 
+	ErrFixedInputDelayMismatch = errors.New("controlsys: nonzero fixed inputs must share input and I/O delays")
+
 	ErrZeroInternalDelay = errors.New("controlsys: internal delay must be positive (tau=0 creates algebraic loop)")
 
 	ErrAlgebraicLoop = errors.New("controlsys: algebraic loop: (I-D22) singular")
@@ -57,4 +59,7 @@ var (
 	ErrDescriptorUnsupported  = errors.New("controlsys: operation does not support descriptor systems (E != I)")
 	ErrImproperModel          = errors.New("controlsys: cannot simulate the time response of improper models")
 	ErrDescriptorInitialState = errors.New("controlsys: cannot simulate state trajectory for models with singular E matrix")
+	ErrDelayUnsupported       = errors.New("controlsys: operation does not support this delay structure")
+	ErrOptionUnsupported      = errors.New("controlsys: option not supported by this operation")
+	ErrNoiseFeedthrough       = errors.New("controlsys: noise inputs must not feed through to outputs (D != 0)")
 )

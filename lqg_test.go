@@ -256,3 +256,77 @@ func eye(n int) *mat.Dense {
 	}
 	return mat.NewDense(n, n, d)
 }
+
+func TestLqg_OptsApplyToRegulatorOnly(t *testing.T) {
+	Q := eye(3)
+	R := eye(2)
+	Qn := mat.NewDense(2, 2, []float64{1, 0.2, 0.2, 0.7})
+	Rn := mat.NewDense(2, 2, []float64{0.5, 0, 0, 0.3})
+	S := mat.NewDense(3, 2, []float64{0.3, 0.1, -0.2, 0.2, 0.1, -0.1})
+	for _, dt := range []float64{0, 0.1} {
+		sys := obsTestPlant(t, dt, false)
+		lqr := Lqr
+		if dt > 0 {
+			lqr = Dlqr
+		}
+		kal, err := Kalman(sys, Qn, Rn, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		regS, err := lqr(sys.A, sys.B, Q, R, &RiccatiOpts{S: S})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reg0, err := lqr(sys.A, sys.B, Q, R, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := Lqg(sys, Q, R, Qn, Rn, &RiccatiOpts{S: S})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertMatEqual(t, "K with S", res.K, regS.K, 1e-9)
+		assertMatEqual(t, "L with S", res.L, kal.K, 1e-9)
+		assertMatEqual(t, "Xf with S", res.Xf, kal.X, 1e-9)
+
+		res, err = Lqg(sys, Q, R, Qn, Rn, &RiccatiOpts{Workspace: NewRiccatiWorkspace(3, 2)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertMatEqual(t, "K with workspace", res.K, reg0.K, 1e-9)
+		assertMatEqual(t, "Xc with workspace", res.Xc, reg0.X, 1e-9)
+		assertMatEqual(t, "L with workspace", res.L, kal.K, 1e-9)
+
+		ctrl := res.Controller
+		Acl := mat.NewDense(6, 6, nil)
+		setBlock(Acl, 0, 0, sys.A)
+		setBlock(Acl, 0, 3, mulDense(sys.B, ctrl.C))
+		setBlock(Acl, 3, 0, mulDense(ctrl.B, sys.C))
+		var a22 mat.Dense
+		a22.Add(ctrl.A, mulDense(ctrl.B, mulDense(sys.D, ctrl.C)))
+		setBlock(Acl, 3, 3, &a22)
+		var got, e1, e2 mat.Eigen
+		got.Factorize(Acl, mat.EigenNone)
+		var ABK, ALC mat.Dense
+		ABK.Sub(sys.A, mulDense(sys.B, reg0.K))
+		ALC.Sub(sys.A, mulDense(kal.K, sys.C))
+		e1.Factorize(&ABK, mat.EigenNone)
+		e2.Factorize(&ALC, mat.EigenNone)
+		want := append(e1.Values(nil), e2.Values(nil)...)
+		if g := got.Values(nil); !complexSetsApprox(g, want, 1e-8) {
+			t.Errorf("dt=%v: closed-loop eig %v, want %v", dt, g, want)
+		}
+	}
+}
+
+func TestLqg_RejectsDelay(t *testing.T) {
+	sys := obsTestPlant(t, 0, false)
+	if err := sys.SetInputDelay([]float64{0.2, 0}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Lqg(sys, eye(3), eye(2), eye(2), eye(2), nil)
+	if !errors.Is(err, ErrDelayUnsupported) {
+		t.Errorf("err=%v, want ErrDelayUnsupported", err)
+	}
+}
