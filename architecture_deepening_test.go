@@ -257,12 +257,7 @@ func TestArchitectureControllerObserverAssemblyPreservesDiscreteMIMOBehavior(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	Q := eye(3)
-	R := eye(2)
-	Qn := eye(2)
-	Rn := eye(2)
-
-	res, err := Lqg(sys, Q, R, Qn, Rn, nil)
+	res, err := Lqg(sys, eye(5), eye(5), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +302,7 @@ func TestArchitectureControllerObserverAssemblyRejectsDescriptorModel(t *testing
 		t.Fatal(err)
 	}
 	sys.E = mat.NewDense(2, 2, []float64{2, 0, 0, 1})
-	_, err = Lqg(sys, eye(2), eye(1), eye(1), eye(1), nil)
+	_, err = Lqg(sys, eye(3), eye(3), nil)
 	if !errors.Is(err, ErrDescriptorRiccati) {
 		t.Fatalf("Lqg descriptor error = %v, want ErrDescriptorRiccati", err)
 	}

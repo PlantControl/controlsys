@@ -209,7 +209,7 @@ func main() {
 | `Estim` | Observer model assembled from a plant and observer gain |
 | `Reg` | Observer-based regulator assembled from plant, state-feedback gain, and observer gain |
 | `Lqi` | LQR with integral action |
-| `Lqg` | LQG controller (combined LQR + Kalman filter) |
+| `Lqg` | LQG regulator or servo controller (MATLAB `lqg`: QXU/QWV weights, G = I noise model, optional QI, 1-DOF, current estimator) |
 | `H2Syn` | H2 optimal controller synthesis from generalized plant |
 | `HinfSyn` | H-infinity controller synthesis from generalized plant |
 | `Place` | Pole placement |

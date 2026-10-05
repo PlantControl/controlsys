@@ -143,7 +143,7 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `Kalmd` | `view-in`, `workspace`, `returns-mutable` | Reads model and returns sampled estimator result. |
 | `Estim` | `view-in`, `returns-mutable` | Builds observer model. |
 | `Reg` | `view-in`, `returns-mutable` | Builds observer-regulator model. |
-| `Lqg` | `view-in`, `workspace`, `returns-mutable` | Returns LQG result with mutable model fields. |
+| `Lqg` | `view-in`, `returns-mutable` | Returns LQG result with mutable model fields. |
 | `H2Syn` | `view-in`, `returns-mutable` | Returns synthesis result with mutable controller fields. |
 | `HinfSyn` | `view-in`, `returns-mutable` | Returns synthesis result with mutable controller fields. |
 | `Care` | `view-in`, `workspace`, `returns-mutable` | Riccati result ownership should be documented with workspace use. |

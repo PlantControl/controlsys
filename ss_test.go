@@ -849,7 +849,7 @@ func emptyIOOps() []emptyIOOp {
 		}},
 		{"Lqg", func(s *System) (any, error) {
 			n, m, p := s.Dims()
-			return Lqg(s, eyeOrEmptyDense(n), eyeOrEmptyDense(m), eyeOrEmptyDense(m), eyeOrEmptyDense(p), nil)
+			return Lqg(s, eyeOrEmptyDense(n+m), eyeOrEmptyDense(n+p), nil)
 		}},
 		{"Ctrb", func(s *System) (any, error) { return Ctrb(s.A, s.B) }},
 		{"Obsv", func(s *System) (any, error) { return Obsv(s.A, s.C) }},
