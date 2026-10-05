@@ -100,7 +100,6 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 
 | API | Classification | Audit note |
 | --- | --- | --- |
-| `DecomposeIODelay` | `view-in`, `returns-mutable` | Returns new delay slices/matrix. |
 | `SetDelayModel` | `view-in`, `returns-mutable` | Builds model from delay model and delay vector. |
 | `PadeDelay` | `returns-mutable` | Constructs delay approximation model. |
 | `ThiranDelay` | `returns-mutable` | Constructs discrete allpass delay model. |

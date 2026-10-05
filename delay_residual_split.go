@@ -76,7 +76,7 @@ func residualDelayGroups(total *mat.Dense, byRow bool, n int) ([]residualDelayGr
 
 	cost := 0.0
 	for g := range groups {
-		in, out, _ := DecomposeIODelay(splitDelayBlock(total, byRow, groups[g].members))
+		in, out, _ := decomposeIODelay(splitDelayBlock(total, byRow, groups[g].members))
 		groups[g].inputDelay, groups[g].outputDelay = in, out
 		cost += float64(n)
 		for _, v := range in {

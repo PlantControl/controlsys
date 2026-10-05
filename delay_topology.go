@@ -62,7 +62,7 @@ func decomposedDelayMatrix(delay *mat.Dense) delayTopologyDecomposition {
 	if delay == nil {
 		return delayTopologyDecomposition{}
 	}
-	inputDelay, outputDelay, residual := DecomposeIODelay(delay)
+	inputDelay, outputDelay, residual := decomposeIODelay(delay)
 	return delayTopologyDecomposition{
 		inputDelay:  inputDelay,
 		outputDelay: outputDelay,

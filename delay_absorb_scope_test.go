@@ -81,7 +81,7 @@ func (c absorbScopeDelays) apply(t *testing.T, sys *System, scale float64) {
 	if err := sys.SetDelay(mat.NewDense(2, 2, sc(c.io))); err != nil {
 		t.Fatal(err)
 	}
-	_, _, residual := DecomposeIODelay(sys.Delay)
+	_, _, residual := decomposeIODelay(sys.Delay)
 	if got := delayMatrixHasNonzero(residual); got != c.resid {
 		t.Fatalf("residual split = %v, want %v", got, c.resid)
 	}
@@ -316,7 +316,7 @@ func TestAbsorbDelayScopedContinuousPreservesInternalDelay(t *testing.T) {
 		case AbsorbOutput:
 			outPade, rest.OutputDelay = out, nil
 		case AbsorbIO:
-			di, do, _ := DecomposeIODelay(sys.Delay)
+			di, do, _ := decomposeIODelay(sys.Delay)
 			for j := range 2 {
 				inPade[j] = in[j] + di[j]
 				outPade[j] = out[j] + do[j]

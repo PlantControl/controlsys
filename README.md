@@ -372,7 +372,6 @@ func main() {
 | `SetOutputDelay` | Set per-output delays |
 | `SetDelayModel` | Attach a custom internal delay model |
 | `GetDelayModel` | Read the internal delay model and delay times |
-| `DecomposeIODelay` | Split a full I/O delay matrix into input/output/residual pieces |
 | `PullDelaysToLFT` | Move external delays into the internal LFT delay representation |
 | `MinimalLFT` | Reduce redundant internal delay blocks |
 | `ZeroDelayApprox` | Replace internal delay blocks with zero-delay behavior |
