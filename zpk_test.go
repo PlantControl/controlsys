@@ -84,16 +84,6 @@ func TestPolyRootsConstant(t *testing.T) {
 	}
 }
 
-func TestPolyRootsEmpty(t *testing.T) {
-	roots, err := Poly{}.Roots()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if roots != nil {
-		t.Errorf("empty poly roots = %v, want nil", roots)
-	}
-}
-
 func TestPolyRootsHighOrder(t *testing.T) {
 	// (s-1)(s-2)(s-3)(s-4)(s-5)
 	p := Poly{1, -1}

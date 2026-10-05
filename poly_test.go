@@ -64,7 +64,7 @@ func TestPolyMulEmpty(t *testing.T) {
 
 func TestPolyAdd(t *testing.T) {
 	p := Poly{1, 0, 0} // s²
-	q := Poly{3, 2}     // 3s+2
+	q := Poly{3, 2}    // 3s+2
 	got := p.Add(q)
 	want := Poly{1, 3, 2}
 	if !got.Equal(want, 1e-14) {
@@ -180,5 +180,77 @@ func TestPolyRootsRejectsNonFiniteWithoutHanging(t *testing.T) {
 		if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Poly.Roots: ") {
 			t.Fatalf("%v.Roots(): %v", p, err)
 		}
+	}
+}
+
+func TestPolyRootsZeroPolynomialErrors(t *testing.T) {
+	for _, p := range []Poly{{}, {0}, {0, 0, 0}} {
+		roots, err := p.Roots()
+		if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Poly.Roots: ") || roots != nil {
+			t.Fatalf("%v.Roots() = %v, %v; want ErrInvalidArgument", p, roots, err)
+		}
+	}
+	roots, err := Poly{0, 3}.Roots()
+	if err != nil || len(roots) != 0 {
+		t.Fatalf("constant.Roots() = %v, %v; want empty, nil", roots, err)
+	}
+}
+
+func TestPolyMonicErrorSentinel(t *testing.T) {
+	for _, p := range []Poly{{}, {0, 1}} {
+		_, err := p.Monic()
+		if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Poly.Monic: ") {
+			t.Fatalf("%v.Monic(): %v", p, err)
+		}
+	}
+}
+
+func TestPolyMulToAliased(t *testing.T) {
+	q := Poly{1, 3}
+	want := Poly{1, 5, 6}
+	p := make(Poly, 2, 10)
+	p[0], p[1] = 1, 2
+	if got := p.MulTo(p, q); !got.Equal(want, 0) {
+		t.Fatalf("p.MulTo(p, q) = %v, want %v", got, want)
+	}
+	p = make(Poly, 2, 10)
+	p[0], p[1] = 1, 2
+	if got := q.MulTo(p[:0], p); !got.Equal(want, 0) {
+		t.Fatalf("q.MulTo(p, p) = %v, want %v", got, want)
+	}
+	buf := make(Poly, 10)
+	copy(buf[3:], Poly{1, 2})
+	if got := buf[3:5].MulTo(buf[1:1], q); !got.Equal(want, 0) {
+		t.Fatalf("overlapping MulTo = %v, want %v", got, want)
+	}
+}
+
+func TestPolyAddToAliased(t *testing.T) {
+	want := Poly{1, 2, 8}
+	a := make(Poly, 1, 10)
+	a[0] = 5
+	if got := a.AddTo(a, Poly{1, 2, 3}); !got.Equal(want, 0) {
+		t.Fatalf("a.AddTo(a, q) = %v, want %v", got, want)
+	}
+	b := make(Poly, 3, 10)
+	copy(b, Poly{1, 2, 3})
+	if got := (Poly{5}).AddTo(b, b); !got.Equal(want, 0) {
+		t.Fatalf("p.AddTo(q, q) = %v, want %v", got, want)
+	}
+	c := Poly{1, 2, 3}
+	if got := c.ScaleTo(c, 2); !got.Equal(Poly{2, 4, 6}, 0) {
+		t.Fatalf("ScaleTo in place = %v", got)
+	}
+}
+
+func TestPolyMulToAddToNoAllocWhenDistinct(t *testing.T) {
+	p, q := Poly{1, 2}, Poly{1, 3}
+	dst := make(Poly, 0, 8)
+	allocs := testing.AllocsPerRun(100, func() {
+		dst = p.MulTo(dst, q)
+		dst = p.AddTo(dst[:0], q)
+	})
+	if allocs != 0 {
+		t.Fatalf("allocs = %v, want 0", allocs)
 	}
 }
