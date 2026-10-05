@@ -34,15 +34,15 @@ jobs:
           tmp="$(mktemp -d)"
           cd "$tmp"
           go mod init example.com/controlsys-consumer
-          go mod edit -require=plantcontrol.org/v1/controlsys@v0.0.0
-          go mod edit -replace=plantcontrol.org/v1/controlsys="$GITHUB_WORKSPACE"
+          go mod edit -require=plantcontrol.org/v1/controlsys/v2@v2.0.0
+          go mod edit -replace=plantcontrol.org/v1/controlsys/v2="$GITHUB_WORKSPACE"
           cat > controlsys_consumer_test.go <<'EOF'
           package controlsysconsumer
 
           import (
             "testing"
 
-            "plantcontrol.org/v1/controlsys"
+            "plantcontrol.org/v1/controlsys/v2"
             "plantcontrol.org/v1/gonum/mat"
           )
 

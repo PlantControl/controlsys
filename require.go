@@ -22,14 +22,14 @@ func requireSystem(op string, sys *System) error {
 }
 
 // requireSystems is requireSystem for the several models of an
-// interconnection, naming the offending one by its 1-based position.
+// interconnection, naming the offending one by its 0-based position.
 func requireSystems(op string, systems ...*System) error {
 	for i, sys := range systems {
 		if sys == nil {
-			return fmt.Errorf("%s: system %d is nil: %w", op, i+1, ErrInvalidArgument)
+			return fmt.Errorf("%s: system %d is nil: %w", op, i, ErrInvalidArgument)
 		}
 		if err := sys.validate(); err != nil {
-			return fmt.Errorf("%s: system %d: %w", op, i+1, err)
+			return fmt.Errorf("%s: system %d: %w", op, i, err)
 		}
 	}
 	return nil

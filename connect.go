@@ -1267,80 +1267,60 @@ func blkDiagInternalDelay(sys *System, srcs []*System, ns, ms, ps []int, nTotal,
 	}
 }
 
+// Junction is one summing junction of Connect: input Input of the
+// block-diagonal model receives the sum of outputs Plus minus the sum of
+// outputs Minus. Indices are 0-based; repeated terms add.
+type Junction struct {
+	Input       int
+	Plus, Minus []int
+}
+
 // Connect closes internal connections of the block-diagonal model blksys, as
-// the index-based MATLAB form sysc = connect(blksys,connections,inputs,outputs);
-// see https://www.mathworks.com/help/control/ref/dynamicsystem.connect.html.
+// the index-based MATLAB form sysc = connect(blksys,connections,inputs,outputs)
+// with each connections row given as a Junction; see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.connect.html.
 // For name-based connections use ConnectByName.
 //
-// Every index is 1-based, as in MATLAB, so the sign encoding and zero padding
-// of connections carry over verbatim. Each row of connections is one summing
-// junction: its first entry i selects input u(i) of blksys and each further
-// entry ±j adds ±w(j), output j of blksys, to it. Zero entries are padding,
-// so rows may be ragged or zero-padded; repeated terms add. For example
-// {{3, 2}, {7, 2, -15, 6}} feeds w(2) into u(3) and w(2) - w(15) + w(6) into
-// u(7). inputs and outputs select the inputs and outputs of blksys kept as the
-// external inputs and outputs of sysc, in that order.
+// Every index is 0-based. MATLAB's row {7, 2, -15, 6} (1-based, sign-encoded)
+// is Junction{Input: 6, Plus: []int{1, 5}, Minus: []int{14}}. inputs and
+// outputs select the inputs and outputs of blksys kept as the external inputs
+// and outputs of sysc, in that order.
 //
-// An empty row, an index out of range, empty inputs or outputs, or a
-// duplicate in inputs or outputs returns ErrInvalidArgument; a singular
-// algebraic loop returns ErrAlgebraicLoop.
-func Connect(blksys *System, connections [][]int, inputs, outputs []int) (*System, error) {
+// An index out of range, empty inputs or outputs, or a duplicate in inputs or
+// outputs returns ErrInvalidArgument; a singular algebraic loop returns
+// ErrAlgebraicLoop.
+func Connect(blksys *System, junctions []Junction, inputs, outputs []int) (*System, error) {
 	if err := requireSystem("Connect", blksys); err != nil {
 		return nil, err
 	}
-	_, m, p := blksys.Dims()
-	in, err := oneBasedIndices("Connect", "inputs", inputs, m)
-	if err != nil {
-		return nil, err
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("Connect: inputs must be non-empty: %w", ErrInvalidArgument)
 	}
-	out, err := oneBasedIndices("Connect", "outputs", outputs, p)
-	if err != nil {
-		return nil, err
+	if len(outputs) == 0 {
+		return nil, fmt.Errorf("Connect: outputs must be non-empty: %w", ErrInvalidArgument)
+	}
+	_, m, p := blksys.Dims()
+	if m == 0 || p == 0 {
+		return nil, fmt.Errorf("Connect: model with %d inputs and %d outputs has nothing to keep: %w", m, p, ErrInvalidArgument)
 	}
 	Q := mat.NewDense(m, p, nil)
-	for r, row := range connections {
-		if len(row) == 0 {
-			return nil, fmt.Errorf("Connect: connections row %d is empty: %w", r+1, ErrInvalidArgument)
+	for r, c := range junctions {
+		if c.Input < 0 || c.Input >= m {
+			return nil, fmt.Errorf("Connect: junction %d input %d outside [0,%d): %w", r, c.Input, m, ErrInvalidArgument)
 		}
-		if row[0] < 1 || row[0] > m {
-			return nil, fmt.Errorf("Connect: connections row %d input %d outside [1,%d]: %w", r+1, row[0], m, ErrInvalidArgument)
-		}
-		for _, k := range row[1:] {
-			j, sign := k, 1.0
-			if k < 0 {
-				j, sign = -k, -1
+		for _, term := range []struct {
+			outs []int
+			sign float64
+		}{{c.Plus, 1}, {c.Minus, -1}} {
+			for _, j := range term.outs {
+				if j < 0 || j >= p {
+					return nil, fmt.Errorf("Connect: junction %d output %d outside [0,%d): %w", r, j, p, ErrInvalidArgument)
+				}
+				Q.Set(c.Input, j, Q.At(c.Input, j)+term.sign)
 			}
-			if j == 0 {
-				continue
-			}
-			if j > p {
-				return nil, fmt.Errorf("Connect: connections row %d output %d outside [1,%d]: %w", r+1, k, p, ErrInvalidArgument)
-			}
-			Q.Set(row[0]-1, j-1, Q.At(row[0]-1, j-1)+sign)
 		}
 	}
-	return connectGain("Connect", blksys, Q, in, out)
-}
-
-// oneBasedIndices converts the 1-based MATLAB index vector idx over n
-// channels to 0-based, requiring it non-empty, in range and duplicate-free.
-func oneBasedIndices(op, name string, idx []int, n int) ([]int, error) {
-	if len(idx) == 0 {
-		return nil, fmt.Errorf("%s: %s must be non-empty: %w", op, name, ErrInvalidArgument)
-	}
-	out := make([]int, len(idx))
-	seen := make(map[int]bool, len(idx))
-	for k, v := range idx {
-		if v < 1 || v > n {
-			return nil, fmt.Errorf("%s: %s index %d outside [1,%d]: %w", op, name, v, n, ErrInvalidArgument)
-		}
-		if seen[v] {
-			return nil, fmt.Errorf("%s: duplicate %s index %d: %w", op, name, v, ErrInvalidArgument)
-		}
-		seen[v] = true
-		out[k] = v - 1
-	}
-	return out, nil
+	return connectGain("Connect", blksys, Q, inputs, outputs)
 }
 
 // connectGain closes u = Q·y + v on the validated model sys, keeping the

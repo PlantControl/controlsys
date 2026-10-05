@@ -1953,24 +1953,22 @@ func TestConnect_InvalidIndices(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, tc := range map[string]struct {
-		conn            [][]int
+		conn            []Junction
 		inputs, outputs []int
 	}{
-		"input 0":           {nil, []int{0}, []int{1}},
-		"input 3":           {nil, []int{3}, []int{1}},
-		"output 3":          {nil, []int{1}, []int{3}},
-		"output -1":         {nil, []int{1}, []int{-1}},
-		"no inputs":         {nil, nil, []int{1}},
-		"no outputs":        {nil, []int{1}, []int{}},
-		"duplicate input":   {nil, []int{1, 1}, []int{1}},
-		"duplicate output":  {nil, []int{1}, []int{2, 2}},
-		"empty row":         {[][]int{{}}, []int{1}, []int{1}},
-		"row input 0":       {[][]int{{0, 1}}, []int{1}, []int{1}},
-		"row input 3":       {[][]int{{3, 1}}, []int{1}, []int{1}},
-		"row input -1":      {[][]int{{-1, 1}}, []int{1}, []int{1}},
-		"row output 3":      {[][]int{{1, 3}}, []int{1}, []int{1}},
-		"row output -3":     {[][]int{{1, -3}}, []int{1}, []int{1}},
-		"second row output": {[][]int{{1, 2}, {2, 0, 7}}, []int{1}, []int{1}},
+		"input -1":              {nil, []int{-1}, []int{0}},
+		"input 2":               {nil, []int{2}, []int{0}},
+		"output 2":              {nil, []int{0}, []int{2}},
+		"output -1":             {nil, []int{0}, []int{-1}},
+		"no inputs":             {nil, nil, []int{0}},
+		"no outputs":            {nil, []int{0}, []int{}},
+		"duplicate input":       {nil, []int{0, 0}, []int{0}},
+		"duplicate output":      {nil, []int{0}, []int{1, 1}},
+		"junction input -1":     {[]Junction{{Input: -1, Plus: []int{0}}}, []int{0}, []int{0}},
+		"junction input 2":      {[]Junction{{Input: 2, Plus: []int{0}}}, []int{0}, []int{0}},
+		"junction plus 2":       {[]Junction{{Input: 0, Plus: []int{2}}}, []int{0}, []int{0}},
+		"junction minus -1":     {[]Junction{{Input: 0, Minus: []int{-1}}}, []int{0}, []int{0}},
+		"second junction minus": {[]Junction{{Input: 0, Plus: []int{1}}, {Input: 1, Minus: []int{6}}}, []int{0}, []int{0}},
 	} {
 		if _, err := Connect(G, tc.conn, tc.inputs, tc.outputs); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
@@ -2590,7 +2588,7 @@ func TestInterconnectNilArgs(t *testing.T) {
 		"BlkDiag(nil)":      func() error { _, err := BlkDiag(nil); return err },
 		"BlkDiag(sys,nil)":  func() error { _, err := BlkDiag(sys, nil); return err },
 		"Feedback(nil)":     func() error { _, err := Feedback(nil, sys, -1); return err },
-		"Connect(nil)":      func() error { _, err := Connect(nil, nil, []int{1}, []int{1}); return err },
+		"Connect(nil)":      func() error { _, err := Connect(nil, nil, []int{0}, []int{0}); return err },
 		"Augstate(nil)":     func() error { _, err := Augstate(nil); return err },
 	} {
 		if err := call(); !errors.Is(err, ErrInvalidArgument) {
@@ -2720,7 +2718,10 @@ func TestInterconnectionsRejectInvalidModels(t *testing.T) {
 		"Parallel": func(bad *System) error { _, err := Parallel(bad, good); return err },
 		"Append":   func(bad *System) error { _, err := Append(good, bad); return err },
 		"BlkDiag":  func(bad *System) error { _, err := BlkDiag(good, bad); return err },
-		"Connect":  func(bad *System) error { _, err := Connect(bad, [][]int{{1, 1}}, []int{1}, []int{1}); return err },
+		"Connect": func(bad *System) error {
+			_, err := Connect(bad, []Junction{{Input: 0, Plus: []int{0}}}, []int{0}, []int{0})
+			return err
+		},
 		"Augstate": func(bad *System) error { _, err := Augstate(bad); return err },
 		"Feedback": func(bad *System) error { _, err := Feedback(bad, good, -1); return err },
 		"Feedback controller": func(bad *System) error {
@@ -2744,7 +2745,7 @@ func TestInterconnectionsRejectInvalidModels(t *testing.T) {
 	}
 }
 
-func TestConnect_MATLABConnectionRows(t *testing.T) {
+func TestConnect_Connections(t *testing.T) {
 	for _, dt := range []float64{0, 0.1} {
 		P := feedbackDelayPlant(t, dt, "in")
 		K := feedbackDelayController(t, dt, "out")
@@ -2754,43 +2755,49 @@ func TestConnect_MATLABConnectionRows(t *testing.T) {
 		}
 		for _, tc := range []struct {
 			name            string
-			rows            [][]int
+			conns           []Junction
 			Q               []float64
 			inputs, outputs []int
 		}{
 			{
-				name:    "negative feedback padded",
-				rows:    [][]int{{1, -3}, {2, -4, 0}, {3, 1, 0, 0}, {4, 2, 2, -2}},
+				name: "negative feedback, repeated terms",
+				conns: []Junction{
+					{Input: 0, Minus: []int{2}},
+					{Input: 1, Minus: []int{3}},
+					{Input: 2, Plus: []int{0}},
+					{Input: 3, Plus: []int{1, 1}, Minus: []int{1}},
+				},
 				Q:       []float64{0, 0, -1, 0, 0, 0, 0, -1, 1, 0, 0, 0, 0, 1, 0, 0},
-				inputs:  []int{1, 2},
-				outputs: []int{1, 2},
+				inputs:  []int{0, 1},
+				outputs: []int{0, 1},
 			},
 			{
-				name:    "multi-term sum",
-				rows:    [][]int{{1, 2, -3, 4}, {3, -1}},
+				name: "multi-term sum",
+				conns: []Junction{
+					{Input: 0, Plus: []int{1, 3}, Minus: []int{2}},
+					{Input: 2, Minus: []int{0}},
+				},
 				Q:       []float64{0, 1, -1, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0},
-				inputs:  []int{4, 1, 3},
-				outputs: []int{2, 4},
+				inputs:  []int{3, 0, 2},
+				outputs: []int{1, 3},
 			},
 		} {
-			got, err := Connect(aug, tc.rows, tc.inputs, tc.outputs)
+			got, err := Connect(aug, tc.conns, tc.inputs, tc.outputs)
 			if err != nil {
 				t.Fatalf("dt=%v %s: %v", dt, tc.name, err)
 			}
 			Q := mat.NewDense(4, 4, tc.Q)
-			in0, out0 := make([]int, len(tc.inputs)), make([]int, len(tc.outputs))
-			for i, v := range tc.inputs {
-				in0[i] = v - 1
-			}
-			for i, v := range tc.outputs {
-				out0[i] = v - 1
-			}
 			assertResponseOracle(t, fmt.Sprintf("dt=%v %s", dt, tc.name), got, func(s complex128) [][]complex128 {
-				return connectOracle(t, aug, Q, in0, out0, s)
+				return connectOracle(t, aug, Q, tc.inputs, tc.outputs, s)
 			})
 		}
 
-		cl, err := Connect(aug, [][]int{{1, -3}, {2, -4}, {3, 1}, {4, 2}}, []int{1, 2}, []int{1, 2})
+		cl, err := Connect(aug, []Junction{
+			{Input: 0, Minus: []int{2}},
+			{Input: 1, Minus: []int{3}},
+			{Input: 2, Plus: []int{0}},
+			{Input: 3, Plus: []int{1}},
+		}, []int{0, 1}, []int{0, 1})
 		if err != nil {
 			t.Fatal(err)
 		}

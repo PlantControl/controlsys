@@ -6,7 +6,7 @@ import (
 	"math/cmplx"
 	"slices"
 
-	"plantcontrol.org/v1/controlsys"
+	"plantcontrol.org/v1/controlsys/v2"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
