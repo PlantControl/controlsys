@@ -20,6 +20,7 @@ var errDelayLoopUnsupported = fmt.Errorf("delay loop outside Nyquist test scope:
 // along the jω axis indented to the right of the imaginary-axis eigenvalues.
 type delayLoop struct {
 	at        func(w float64) complex128
+	eval      *sisoEval // records the first failure of at
 	rhp       int
 	axis      []axisPole
 	tail      func(w float64) float64 // bound on |L(s)| for Re s >= 0, |s| >= w
@@ -62,7 +63,7 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &delayLoop{at: eval.at, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
+	l := &delayLoop{at: eval.at, eval: eval, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
 	l.addPoles(poles)
 	return l, nil
 }
@@ -308,6 +309,21 @@ func lftDelayLoopAcyclic(sys *System, n int) bool {
 // point budget or a winding number that does not resolve to an integer
 // returns errDelayLoopUnsupported rather than a verdict.
 func (l *delayLoop) nyquist(frac float64) (delayNyquist, error) {
+	res, err := l.nyquistGrid(frac)
+	if err := l.evalErr(); err != nil {
+		return delayNyquist{}, err
+	}
+	return res, err
+}
+
+func (l *delayLoop) evalErr() error {
+	if l.eval == nil {
+		return nil
+	}
+	return l.eval.err
+}
+
+func (l *delayLoop) nyquistGrid(frac float64) (delayNyquist, error) {
 	if !(l.tailLimit < 1) {
 		return delayNyquist{}, fmt.Errorf("neutral delay loop, |L(j∞)| may reach 1: %w", errDelayLoopUnsupported)
 	}
@@ -584,6 +600,9 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 			peak, wPeak = inf, math.Inf(1)
 		}
 		peaks[i] = sensitivityPeak{peak, wPeak}
+	}
+	if err := l.evalErr(); err != nil {
+		return false, nil, err
 	}
 	return true, peaks, nil
 }
