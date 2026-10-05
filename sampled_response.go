@@ -69,15 +69,6 @@ func (r sampledComplexResponse) singularValues(dst []float64, ws *complexSVDWork
 	return nil
 }
 
-func (r sampledComplexResponse) copyToGrid(dst [][][]complex128) {
-	for k := range r.layout.omega {
-		base := r.blockOffset(k)
-		for i := 0; i < r.layout.p; i++ {
-			copy(dst[k][i], r.data[base+i*r.layout.m:base+(i+1)*r.layout.m])
-		}
-	}
-}
-
 func (r sampledScalarResponse) at(freq, output, input int) float64 {
 	return r.data[r.layout.offset(freq, output, input)]
 }
@@ -88,10 +79,6 @@ func (r sampledScalarResponse) set(freq, output, input int, value float64) {
 
 func newSampledComplexGridResponse(response [][][]complex128, omega []float64, p, m int) sampledComplexGridResponse {
 	return sampledComplexGridResponse{response: response, omega: omega, p: p, m: m}
-}
-
-func (r sampledComplexGridResponse) at(freq, output, input int) complex128 {
-	return r.response[freq][output][input]
 }
 
 func (r sampledComplexGridResponse) singularValues(dst []float64, ws *complexSVDWorkspace, freq int) error {

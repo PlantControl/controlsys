@@ -941,7 +941,7 @@ func TestCrossval_Staircase_ChemicalReactor(t *testing.T) {
 		{-3.146, 0},
 	})
 
-	stair := ControllabilityStaircase(A, B, nil, 0)
+	stair := mustStaircase(t, A, B, nil)
 
 	if stair.NCont != 4 {
 		t.Errorf("NCont = %d, want 4 (fully controllable)", stair.NCont)
@@ -1168,7 +1168,7 @@ func TestCrossval_Staircase_DistillationColumn(t *testing.T) {
 		{0.0063, -0.0128},
 	})
 
-	stair := ControllabilityStaircase(A, B, nil, 0)
+	stair := mustStaircase(t, A, B, nil)
 
 	if stair.NCont != 5 {
 		t.Errorf("NCont = %d, want 5 (fully controllable)", stair.NCont)
