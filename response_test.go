@@ -1404,7 +1404,11 @@ const trSub = 100
 // τ = 23.37·dt that is a whole number of oracle substeps but not of dt.
 func trChainGrid(t *testing.T) (dt, tau float64, lag int) {
 	t.Helper()
-	resp, err := Step(trMIMO(t, 0), 2)
+	zero, err := trDelayFeedback(t, 1, true).ZeroDelayApprox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := Step(zero, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
