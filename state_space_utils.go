@@ -6,15 +6,18 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// NewDescriptor returns the descriptor model E·dx/dt = A·x + B·u,
+// y = C·x + D·u, as MATLAB dss(A, B, C, D, E, Ts). A nil E means E = I.
+// Matrices are copied.
 func NewDescriptor(A, B, C, D, E *mat.Dense, dt float64) (*System, error) {
-	sys, err := New(A, B, C, D, dt)
+	sys, err := newCopy(A, B, C, D, dt)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewDescriptor: %w", err)
 	}
 	n, _, _ := sys.Dims()
 	policy := descriptorPolicy{E: E}
 	if err := policy.validate(n); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewDescriptor: %w", err)
 	}
 	sys.E = copyDescriptorE(E)
 	return sys, nil
@@ -33,16 +36,26 @@ func newDescriptorOwned(A, B, C, D, E *mat.Dense, dt float64) (*System, error) {
 	return sys, nil
 }
 
+// DescriptorE returns a copy of the descriptor matrix E, or the n×n identity
+// for an explicit model, as MATLAB dssdata. A model with no states returns an
+// empty matrix.
 func (sys *System) DescriptorE() *mat.Dense {
-	if sys == nil {
-		return nil
+	if sys.E != nil {
+		return mat.DenseCopyOf(sys.E)
 	}
-	return copyDescriptorE(sys.E)
+	n, _, _ := sys.Dims()
+	if n == 0 {
+		return &mat.Dense{}
+	}
+	return eyeDense(n)
 }
 
+// ToExplicit returns the equivalent explicit model (E⁻¹A, E⁻¹B, C, D) of a
+// descriptor model, or a copy of an explicit one. A numerically singular E
+// returns ErrDescriptorSingular.
 func (sys *System) ToExplicit() (*System, error) {
-	if sys == nil {
-		return nil, fmt.Errorf("ToExplicit: nil system: %w", ErrDimensionMismatch)
+	if err := requireSystem("ToExplicit", sys); err != nil {
+		return nil, err
 	}
 	if !sys.IsDescriptor() {
 		cp := sys.Copy()
@@ -73,10 +86,12 @@ func (sys *System) ToExplicit() (*System, error) {
 	return result, nil
 }
 
+// EliminateStates removes the states elim with Modred using method.
 func (sys *System) EliminateStates(elim []int, method StateProjection) (*System, error) {
 	return Modred(sys, elim, method)
 }
 
+// StateTransform applies the state transformation x̄ = T·x with SS2SS.
 func (sys *System) StateTransform(T *mat.Dense) (*System, error) {
 	return SS2SS(sys, T)
 }
@@ -90,21 +105,21 @@ func (sys *System) StateTransform(T *mat.Dense) (*System, error) {
 // ErrFixedInputDelayMismatch is returned. An empty fixed map returns a copy
 // without an offset input.
 func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string) (*System, error) {
-	if sys == nil {
-		return nil, fmt.Errorf("FixedInputReduction: nil system: %w", ErrDimensionMismatch)
+	if err := requireSystem("FixedInputReduction", sys); err != nil {
+		return nil, err
 	}
 	if len(fixed) == 0 {
 		return sys.Copy(), nil
 	}
 	n, m, p := sys.Dims()
-	keep := make([]int, 0, m-len(fixed))
 	fixedSeen := make([]bool, m)
 	for idx := range fixed {
 		if idx < 0 || idx >= m {
-			return nil, fmt.Errorf("FixedInputReduction: input index %d out of range: %w", idx, ErrDimensionMismatch)
+			return nil, fmt.Errorf("FixedInputReduction: input index %d out of range [0,%d): %w", idx, m, ErrInvalidArgument)
 		}
 		fixedSeen[idx] = true
 	}
+	keep := make([]int, 0, m-len(fixed))
 	ref := -1
 	for j := range m {
 		if !fixedSeen[j] {
@@ -124,7 +139,7 @@ func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string)
 	mNew := len(keep) + 1
 	result, err := newNoCopy(denseCopy(sys.A), selectColumnsWithOffset(sys.B, n, keep, fixed), denseCopy(sys.C), selectColumnsWithOffset(sys.D, p, keep, fixed), sys.Dt)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("FixedInputReduction: %w", err)
 	}
 	result.E = copyDescriptorE(sys.E)
 	if sys.Delay != nil {
@@ -219,8 +234,8 @@ func selectColumnsWithOffset(src *mat.Dense, rows int, keep []int, fixed map[int
 // z = C2·x + D21·u + D22·w to the outputs. Appended rows inherit InputDelay
 // and carry no OutputDelay or IODelay.
 func (sys *System) AugmentInternalDelayOutputs(prefix string) (*System, error) {
-	if sys == nil {
-		return nil, fmt.Errorf("AugmentInternalDelayOutputs: nil system: %w", ErrDimensionMismatch)
+	if err := requireSystem("AugmentInternalDelayOutputs", sys); err != nil {
+		return nil, err
 	}
 	if !sys.HasInternalDelay() {
 		return sys.Copy(), nil
@@ -247,7 +262,9 @@ func (sys *System) AugmentInternalDelayOutputs(prefix string) (*System, error) {
 		result.OutputDelay = make([]float64, p+N)
 		copy(result.OutputDelay, sys.OutputDelay)
 	}
-	result.OutputName = append(copyStringSlice(sys.OutputName), autoLabel(prefix, N)...)
+	names := make([]string, p, p+N)
+	copy(names, sys.OutputName)
+	result.OutputName = append(names, autoLabel(prefix, N)...)
 	return result, nil
 }
 

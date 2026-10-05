@@ -102,7 +102,7 @@ func (s feedbackDelayStrategy) prepare(plant, controller *System, sign float64) 
 
 func (s feedbackDelayStrategy) replaceDiscreteDelays(sys *System, role string) (*System, error) {
 	if s.cfg.thiranOrder == 0 {
-		if err := sys.Validate(); err != nil {
+		if err := sys.validate(); err != nil {
 			return nil, fmt.Errorf("Feedback: validate %s: %w", role, err)
 		}
 		out, err := sys.AbsorbDelay()

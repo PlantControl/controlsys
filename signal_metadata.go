@@ -79,29 +79,13 @@ func parallelMetadata(left, right *System, n1, n2 int) signalMetadata {
 
 func lftVisibleMetadata(sys *System, inputs, outputs int) signalMetadata {
 	md := signalMetadata{notes: sys.Notes}
-	if sys.InputName != nil {
+	if len(sys.InputName) >= inputs {
 		md.input = copyStringSlice(sys.InputName[:inputs])
 	}
-	if sys.OutputName != nil {
+	if len(sys.OutputName) >= outputs {
 		md.output = copyStringSlice(sys.OutputName[:outputs])
 	}
 	return md
-}
-
-func fohStateMetadata(src *System, n, m int) []string {
-	if src.StateName == nil && src.InputName == nil {
-		return nil
-	}
-	names := make([]string, n+m)
-	if src.StateName != nil {
-		copy(names, src.StateName)
-	}
-	for j := range m {
-		if src.InputName != nil && j < len(src.InputName) {
-			names[n+j] = src.InputName[j] + "_prev"
-		}
-	}
-	return names
 }
 
 func frdSeriesMetadata(left, right *FRD) frdMetadata {

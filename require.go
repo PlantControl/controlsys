@@ -15,7 +15,7 @@ func requireSystem(op string, sys *System) error {
 	if sys == nil {
 		return fmt.Errorf("%s: system is nil: %w", op, ErrInvalidArgument)
 	}
-	if err := sys.Validate(); err != nil {
+	if err := sys.validate(); err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
 	return nil

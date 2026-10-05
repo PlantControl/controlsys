@@ -1465,3 +1465,80 @@ func TestPolesFiniteUnchanged(t *testing.T) {
 		t.Fatalf("poles %v, want {-1,-3}", poles)
 	}
 }
+
+func TestValidateNamesAndNil(t *testing.T) {
+	var nilSys *System
+	if err := nilSys.Validate(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil Validate = %v, want ErrInvalidArgument", err)
+	}
+	mk := func() *System {
+		s, err := New(
+			mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
+			mat.NewDense(2, 1, []float64{1, 0}),
+			mat.NewDense(1, 2, []float64{1, 1}),
+			mat.NewDense(1, 1, []float64{0.5}),
+			0,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	if err := mk().Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		set  func(*System)
+	}{
+		{"InputName empty", func(s *System) { s.InputName = []string{} }},
+		{"OutputName long", func(s *System) { s.OutputName = []string{"a", "b"} }},
+		{"StateName short", func(s *System) { s.StateName = []string{"x"} }},
+	} {
+		s := mk()
+		tc.set(s)
+		if err := s.Validate(); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("%s: Validate = %v, want ErrDimensionMismatch", tc.name, err)
+		}
+	}
+
+	m := mk()
+	m.InputName = []string{}
+	delta, err := NewGain(mat.NewDense(1, 1, []float64{0.5}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Errorf("LFT with short InputName panicked: %v", r)
+			}
+		}()
+		_, _ = LFT(m, delta, 1, 1)
+	}()
+}
+
+func TestConstructorsRejectInvalidArguments(t *testing.T) {
+	if _, err := NewFromSlices(-1, 1, 1, nil, nil, nil, []float64{3}, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("NewFromSlices negative n = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewFromSlices(1, -2, 1, []float64{1}, nil, []float64{1}, nil, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("NewFromSlices negative m = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewGain(nil, 0); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "NewGain: ") {
+		t.Errorf("NewGain(nil) = %v, want NewGain: ... ErrInvalidArgument", err)
+	}
+	_, err := New(mat.NewDense(2, 3, nil), nil, nil, nil, 0)
+	if !errors.Is(err, ErrDimensionMismatch) || !strings.HasPrefix(err.Error(), "New: ") {
+		t.Errorf("New non-square A = %v, want New: ... ErrDimensionMismatch", err)
+	}
+	d := []float64{1, 2}
+	g, err := NewFromSlices(0, 2, 1, nil, nil, nil, d, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d[0] = 99
+	if g.D.At(0, 0) != 1 {
+		t.Error("NewFromSlices static gain aliases d")
+	}
+}

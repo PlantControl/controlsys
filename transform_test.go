@@ -1,7 +1,9 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"testing"
 
@@ -121,5 +123,52 @@ func TestXpermDescriptorPermutesE(t *testing.T) {
 			}
 			assertFieldResponse(t, "Xperm/"+label, got, func(s complex128) [][]complex128 { return fieldOracle(orig, s) })
 		}
+	}
+}
+
+func TestSS2SSAndXpermRejectInvalidArguments(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gain, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		run  func() error
+		want error
+	}{
+		{"SS2SS nil T", func() error { _, err := SS2SS(sys, nil); return err }, ErrInvalidArgument},
+		{"SS2SS nil sys", func() error { _, err := SS2SS(nil, mat.NewDense(2, 2, nil)); return err }, ErrInvalidArgument},
+		{"SS2SS n=0 nonempty T", func() error { _, err := SS2SS(gain, mat.NewDense(3, 3, nil)); return err }, ErrDimensionMismatch},
+		{"SS2SS empty T", func() error { _, err := SS2SS(sys, &mat.Dense{}); return err }, ErrDimensionMismatch},
+		{"SS2SS NaN T", func() error {
+			_, err := SS2SS(sys, mat.NewDense(2, 2, []float64{1, 0, 0, math.NaN()}))
+			return err
+		}, ErrInvalidArgument},
+		{"Xperm nil", func() error { _, err := Xperm(nil, nil); return err }, ErrInvalidArgument},
+		{"Xperm out of range", func() error { _, err := Xperm(sys, []int{0, 2}); return err }, ErrInvalidArgument},
+		{"Xperm duplicate", func() error { _, err := Xperm(sys, []int{1, 1}); return err }, ErrInvalidArgument},
+	}
+	for _, tc := range cases {
+		if err := tc.run(); !errors.Is(err, tc.want) {
+			t.Errorf("%s: error = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+	if _, err := SS2SS(gain, &mat.Dense{}); err != nil {
+		t.Errorf("SS2SS static gain with empty T: %v", err)
+	}
+	bad := sys.Copy()
+	bad.StateName = []string{"a", "b", "c"}
+	if _, err := Xperm(bad, []int{1, 0}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Xperm mismatched StateName = %v, want ErrDimensionMismatch", err)
 	}
 }

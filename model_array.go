@@ -92,7 +92,7 @@ func NewModelArray(shape []int, models []*System) (*ModelArray, error) {
 		if sys == nil {
 			continue
 		}
-		if err := sys.Validate(); err != nil {
+		if err := sys.validate(); err != nil {
 			return nil, fmt.Errorf("NewModelArray: %w", err)
 		}
 		if ref == nil {

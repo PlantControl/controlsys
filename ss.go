@@ -9,8 +9,16 @@ import (
 
 // LFTDelay holds the internal delay representation using a linear
 // fractional transformation (LFT) structure.
+//
+// With N internal delays, w(t) = z(t-Tau) closes the loop
+//
+//	dx/dt = A x + B u + B2 w
+//	y     = C x + D u + D12 w
+//	z     = C2 x + D21 u + D22 w
 type LFTDelay struct {
-	Tau                   []float64
+	// Tau holds the N positive internal delays (whole samples when discrete).
+	Tau []float64
+	// B2 is n×N, C2 is N×n, D12 is p×N, D21 is N×m and D22 is N×N.
 	B2, C2, D12, D21, D22 *mat.Dense
 }
 
@@ -42,6 +50,8 @@ type System struct {
 	Notes      string
 }
 
+// IsDescriptor reports whether sys has a descriptor matrix E other than the
+// identity.
 func (sys *System) IsDescriptor() bool { return newDescriptorPolicy(sys).isDescriptor() }
 
 func (sys *System) internalDelayCount() int {
@@ -51,6 +61,7 @@ func (sys *System) internalDelayCount() int {
 	return len(sys.LFT.Tau)
 }
 
+// Dims returns the number of states n, inputs m and outputs p.
 func (sys *System) Dims() (n, m, p int) {
 	if sys.A != nil {
 		n, _ = sys.A.Dims()
@@ -68,16 +79,39 @@ func (sys *System) Dims() (n, m, p int) {
 	return
 }
 
+// IsContinuous reports whether sys is a continuous-time model (Dt = 0).
 func (sys *System) IsContinuous() bool { return newTimeDomain(sys.Dt).isContinuous() }
-func (sys *System) IsDiscrete() bool   { return newTimeDomain(sys.Dt).isDiscrete() }
 
+// IsDiscrete reports whether sys is a discrete-time model (Dt > 0).
+func (sys *System) IsDiscrete() bool { return newTimeDomain(sys.Dt).isDiscrete() }
+
+// Validate checks that the matrices, sample time, descriptor E, delays,
+// internal-delay blocks and signal names of sys are mutually consistent. A
+// nil sys returns ErrInvalidArgument; a non-nil InputName, OutputName or
+// StateName must have length m, p or n (ErrDimensionMismatch).
 func (sys *System) Validate() error {
+	if err := sys.validate(); err != nil {
+		return fmt.Errorf("Validate: %w", err)
+	}
+	return nil
+}
+
+func (sys *System) validate() error {
 	if sys == nil {
-		return fmt.Errorf("system is nil: %w", ErrDimensionMismatch)
+		return fmt.Errorf("system is nil: %w", ErrInvalidArgument)
 	}
 	n, m, p, err := validateDims(sys.A, sys.B, sys.C, sys.D, sys.Dt)
 	if err != nil {
 		return err
+	}
+	for _, nm := range []struct {
+		field string
+		names []string
+		want  int
+	}{{"InputName", sys.InputName, m}, {"OutputName", sys.OutputName, p}, {"StateName", sys.StateName, n}} {
+		if nm.names != nil && len(nm.names) != nm.want {
+			return fmt.Errorf("%s has %d names, want %d: %w", nm.field, len(nm.names), nm.want, ErrDimensionMismatch)
+		}
 	}
 	if err := newDescriptorPolicy(sys).validate(n); err != nil {
 		return err
@@ -97,7 +131,7 @@ func (sys *System) Validate() error {
 			return err
 		}
 		if slices.Contains(sys.LFT.Tau, 0) {
-			return ErrZeroInternalDelay
+			return fmt.Errorf("internal delay Tau contains 0: %w", ErrZeroInternalDelay)
 		}
 		if err := validateLFTDims(n, m, p, N, sys.LFT.B2, sys.LFT.C2, sys.LFT.D12, sys.LFT.D21, sys.LFT.D22); err != nil {
 			return err
@@ -214,14 +248,14 @@ func validateDims(A, B, C, D *mat.Dense, dt float64) (n, m, p int, err error) {
 	if A != nil {
 		r, c := A.Dims()
 		if r != c {
-			return 0, 0, 0, fmt.Errorf("A must be square (%d×%d): %w", r, c, ErrDimensionMismatch)
+			return 0, 0, 0, fmt.Errorf("matrix A must be square (%d×%d): %w", r, c, ErrDimensionMismatch)
 		}
 		n = r
 	}
 	if B != nil {
 		br, bc := B.Dims()
 		if A != nil && br != n {
-			return 0, 0, 0, fmt.Errorf("B rows %d != A rows %d: %w", br, n, ErrDimensionMismatch)
+			return 0, 0, 0, fmt.Errorf("rows of B (%d) != rows of A (%d): %w", br, n, ErrDimensionMismatch)
 		}
 		if A == nil {
 			n = br
@@ -232,19 +266,19 @@ func validateDims(A, B, C, D *mat.Dense, dt float64) (n, m, p int, err error) {
 		cr, cc := C.Dims()
 		p = cr
 		if A != nil && cc != n {
-			return 0, 0, 0, fmt.Errorf("C cols %d != A cols %d: %w", cc, n, ErrDimensionMismatch)
+			return 0, 0, 0, fmt.Errorf("columns of C (%d) != columns of A (%d): %w", cc, n, ErrDimensionMismatch)
 		}
 		if A == nil && B != nil && cc != n {
-			return 0, 0, 0, fmt.Errorf("C cols %d != state dim %d: %w", cc, n, ErrDimensionMismatch)
+			return 0, 0, 0, fmt.Errorf("columns of C (%d) != state dimension %d: %w", cc, n, ErrDimensionMismatch)
 		}
 	}
 	if D != nil {
 		dr, dc := D.Dims()
 		if C != nil && dr != p {
-			return 0, 0, 0, fmt.Errorf("D rows %d != C rows %d: %w", dr, p, ErrDimensionMismatch)
+			return 0, 0, 0, fmt.Errorf("rows of D (%d) != rows of C (%d): %w", dr, p, ErrDimensionMismatch)
 		}
 		if B != nil && dc != m {
-			return 0, 0, 0, fmt.Errorf("D cols %d != B cols %d: %w", dc, m, ErrDimensionMismatch)
+			return 0, 0, 0, fmt.Errorf("columns of D (%d) != columns of B (%d): %w", dc, m, ErrDimensionMismatch)
 		}
 		if C == nil {
 			p = dr
@@ -256,9 +290,18 @@ func validateDims(A, B, C, D *mat.Dense, dt float64) (n, m, p int, err error) {
 	return n, m, p, nil
 }
 
-// New validates dimension compatibility and returns a System.
-// Matrices are copied to prevent aliasing bugs.
+// New validates dimension compatibility and returns a System, as MATLAB
+// ss(A, B, C, D, Ts) with dt = Ts (0 for continuous). Matrices are copied to
+// prevent aliasing bugs.
 func New(A, B, C, D *mat.Dense, dt float64) (*System, error) {
+	sys, err := newCopy(A, B, C, D, dt)
+	if err != nil {
+		return nil, fmt.Errorf("New: %w", err)
+	}
+	return sys, nil
+}
+
+func newCopy(A, B, C, D *mat.Dense, dt float64) (*System, error) {
 	n, m, p, err := validateDims(A, B, C, D, dt)
 	if err != nil {
 		return nil, err
@@ -292,12 +335,22 @@ func newNoCopy(A, B, C, D *mat.Dense, dt float64) (*System, error) {
 	return &System{A: A, B: B, C: C, D: D, Dt: dt}, nil
 }
 
+// NewGain returns the static gain y = D·u with no states, as MATLAB ss(D, Ts).
+// A nil D returns ErrInvalidArgument.
 func NewGain(D *mat.Dense, dt float64) (*System, error) {
+	sys, err := newGain(D, dt)
+	if err != nil {
+		return nil, fmt.Errorf("NewGain: %w", err)
+	}
+	return sys, nil
+}
+
+func newGain(D *mat.Dense, dt float64) (*System, error) {
 	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
 		return nil, err
 	}
 	if D == nil {
-		return nil, fmt.Errorf("D matrix required for gain system: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("D is nil: %w", ErrInvalidArgument)
 	}
 	p, m := D.Dims()
 	return &System{
@@ -309,7 +362,22 @@ func NewGain(D *mat.Dense, dt float64) (*System, error) {
 	}, nil
 }
 
+// NewFromSlices builds an n-state, m-input, p-output model from row-major
+// slices a (n×n), b (n×m), c (p×n) and d (p×m); a nil d means D = 0. The
+// slices are copied. Negative dimensions return ErrInvalidArgument and slice
+// lengths that disagree with them ErrDimensionMismatch.
 func NewFromSlices(n, m, p int, a, b, c, d []float64, dt float64) (*System, error) {
+	sys, err := newFromSlices(n, m, p, a, b, c, d, dt)
+	if err != nil {
+		return nil, fmt.Errorf("NewFromSlices: %w", err)
+	}
+	return sys, nil
+}
+
+func newFromSlices(n, m, p int, a, b, c, d []float64, dt float64) (*System, error) {
+	if n < 0 || m < 0 || p < 0 {
+		return nil, fmt.Errorf("negative dimension n=%d, m=%d, p=%d: %w", n, m, p, ErrInvalidArgument)
+	}
 	var A, B, C, D *mat.Dense
 	if n > 0 {
 		if len(a) != n*n {
@@ -345,19 +413,20 @@ func NewFromSlices(n, m, p int, a, b, c, d []float64, dt float64) (*System, erro
 		var Dm *mat.Dense
 		if p > 0 && m > 0 {
 			if d != nil {
-				Dm = mat.NewDense(p, m, d)
+				Dm = mat.NewDense(p, m, append([]float64(nil), d...))
 			} else {
 				Dm = mat.NewDense(p, m, nil)
 			}
 		} else {
 			Dm = &mat.Dense{}
 		}
-		return NewGain(Dm, dt)
+		return newGain(Dm, dt)
 	}
 
 	return newNoCopy(A, B, C, D, dt)
 }
 
+// Copy returns a deep copy of sys.
 func (sys *System) Copy() *System {
 	cp := &System{
 		A:     denseCopy(sys.A),
