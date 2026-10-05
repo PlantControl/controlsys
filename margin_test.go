@@ -1803,3 +1803,178 @@ func TestBandwidth_ZeroBeyondPoles(t *testing.T) {
 		t.Errorf("BW = %g, want %g", bw, lo)
 	}
 }
+
+// narrowResonance returns k/(s²+2ζs+1) with ζ = 1e-4 scaled so the peak gain
+// is 1+1e-6, and its two gain crossovers from
+// x² − 2(1−2ζ²)x + 1 − k² = 0, x = ω², whose discriminant is written
+// without the cancellation in (1−2ζ²)² − 1 + k².
+func narrowResonance(t *testing.T) (*System, [2]float64) {
+	t.Helper()
+	const zeta = 1e-4
+	k := (1 + 1e-6) * 2 * zeta * math.Sqrt(1-zeta*zeta)
+	sys := makePlant(t, []float64{k}, []float64{1, 2 * zeta, 1})
+	b := 1 - 2*zeta*zeta
+	d := 2 * zeta * math.Sqrt((1-zeta*zeta)*((1+1e-6)*(1+1e-6)-1))
+	return sys, [2]float64{math.Sqrt(b - d), math.Sqrt(b + d)}
+}
+
+func TestAllMargin_NarrowResonanceCrossings(t *testing.T) {
+	sys, want := narrowResonance(t)
+	all, err := AllMargin(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.GainCrossFreqs) != 2 {
+		t.Fatalf("gain crossovers %v, want %v", all.GainCrossFreqs, want)
+	}
+	for i, w := range all.GainCrossFreqs {
+		if math.Abs(w-want[i]) > 1e-12 {
+			t.Errorf("crossover %d: %.15g, want %.15g", i, w, want[i])
+		}
+		h := marginOracle(sys, w)
+		if pm := phaseMarginDeg(h); math.Abs(all.PhaseMargins[i]-pm) > 1e-6 {
+			t.Errorf("PM %d: %g, want %g", i, all.PhaseMargins[i], pm)
+		}
+	}
+	if len(all.PhaseCrossFreqs) != 0 {
+		t.Errorf("phase crossovers %v, want none", all.PhaseCrossFreqs)
+	}
+}
+
+// A lightly damped pole/zero pair at ω0 = 10 dips the phase of 0.01/(s+1)²
+// (−168.6° there, never −180° alone) below −180° over a band ~5e-3 wide.
+func TestAllMargin_NarrowPhaseDip(t *testing.T) {
+	const w0 = 10.0
+	num := Poly{0.01}.Mul(Poly{1, 2 * 1e-4 * w0, w0 * w0})
+	den := Poly{1, 2, 1}.Mul(Poly{1, 2 * 1e-6 * w0, w0 * w0})
+	sys := makePlant(t, num, den)
+	all, err := AllMargin(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pc := marginBruteForce(sys, w0*(1-1e-2), w0*(1+1e-2), 400000)
+	if len(pc) != 2 {
+		t.Fatalf("oracle found %d phase crossings near ω0, want 2", len(pc))
+	}
+	marginMatch(t, "phase crossovers", marginCountIn(all.PhaseCrossFreqs, w0*(1-1e-2), w0*(1+1e-2)), pc)
+	for i, w := range all.PhaseCrossFreqs {
+		h := marginOracle(sys, w)
+		if d := marginWrapDeg(cmplx.Phase(h)*180/math.Pi + 180); math.Abs(d) > 1e-6 {
+			t.Errorf("w=%g: angle(L)=%g, want -180", w, cmplx.Phase(h)*180/math.Pi)
+		}
+		if gm := -20 * math.Log10(cmplx.Abs(h)); math.Abs(gm-all.GainMargins[i]) > 1e-8 {
+			t.Errorf("GM at %g: %g, want %g", w, all.GainMargins[i], gm)
+		}
+	}
+	m, err := Margin(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(m.WpFreq-w0) > 1e-2*w0 {
+		t.Errorf("Margin WpFreq=%g, want the dip near %g", m.WpFreq, w0)
+	}
+}
+
+// Discrete resonance at θ = 2.5 rad (Dt = 0.1) with r = 0.9999, D ≠ 0 and a
+// z^-3 input delay, scaled to peak just above 0 dB.
+func TestAllMargin_DiscreteNarrowResonance(t *testing.T) {
+	const dt, theta, r = 0.1, 2.5, 0.9999
+	num := []float64{1, 0.3, 0.1}
+	den := []float64{1, -2 * r * math.Cos(theta), r * r}
+	z := cmplx.Exp(complex(0, theta))
+	g := cmplx.Abs(Poly(num).Eval(z) / Poly(den).Eval(z))
+	k := (1 + 1e-5) / g
+	tf := &TransferFunc{Num: [][][]float64{{{k * num[0], k * num[1], k * num[2]}}}, Den: [][]float64{den}, Dt: dt}
+	res, err := tf.StateSpace(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := res.Sys
+	sys.InputDelay = []float64{3}
+	all, err := AllMargin(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lo, hi := (theta-1e-3)/dt, (theta+1e-3)/dt
+	gc, pc := marginBruteForce(sys, lo, hi, 400000)
+	if len(gc) != 2 {
+		t.Fatalf("oracle found %d gain crossings near θ, want 2", len(gc))
+	}
+	marginMatch(t, "gain crossovers", marginCountIn(all.GainCrossFreqs, lo, hi), gc)
+	marginMatch(t, "phase crossovers", marginCountIn(all.PhaseCrossFreqs, lo, hi), pc)
+	for _, w := range all.GainCrossFreqs {
+		if h := marginOracle(sys, w); math.Abs(cmplx.Abs(h)-1) > 1e-8 {
+			t.Errorf("w=%g: |L|=%.12g, want 1", w, cmplx.Abs(h))
+		}
+	}
+	gcAll, pcAll := marginBruteForce(sys, 1e-3, math.Pi/dt, 400000)
+	if len(all.GainCrossFreqs) < len(gcAll) || len(all.PhaseCrossFreqs) < len(pcAll) {
+		t.Errorf("found %d/%d crossings, dense grid %d/%d", len(all.GainCrossFreqs), len(all.PhaseCrossFreqs), len(gcAll), len(pcAll))
+	}
+}
+
+// K/(s(s+1)) with K = wc·hypot(wc,1) crosses 0 dB exactly at wc, far above
+// the poles.
+func TestAllMargin_FarCrossover(t *testing.T) {
+	for _, wc := range []float64{12, 1e4, 1e7} {
+		sys := makePlant(t, []float64{wc * math.Hypot(wc, 1)}, []float64{1, 1, 0})
+		m, err := Margin(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(m.WgFreq-wc) > 1e-9*wc {
+			t.Errorf("wc=%g: WgFreq=%.15g", wc, m.WgFreq)
+		}
+		if pm := 90 - math.Atan(wc)*180/math.Pi; math.Abs(m.PhaseMargin-pm) > 1e-7 {
+			t.Errorf("wc=%g: PM=%.12g, want %.12g", wc, m.PhaseMargin, pm)
+		}
+	}
+}
+
+// The notch (s²+2ζz·s+1)/(s²+2ζp·s+1) with ζz/ζp = 0.7 dips to −3.1 dB over a
+// band ~1e-4 wide; the −3 dB bandwidth is the lower root of
+// (1−g²)x² + (4(ζz²−g²ζp²) − 2(1−g²))x + 1 − g² = 0, x = ω².
+func TestBandwidth_NarrowNotch(t *testing.T) {
+	const zp = 1e-4
+	zz := 0.7 * zp
+	sys := makePlant(t, []float64{1, 2 * zz, 1}, []float64{1, 2 * zp, 1})
+	bw, err := Bandwidth(sys, -3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g2 := math.Pow(10, -3.0/10)
+	a, b := 1-g2, 4*(zz*zz-g2*zp*zp)-2*(1-g2)
+	x := (-b - math.Sqrt(b*b-4*a*a)) / (2 * a)
+	if want := math.Sqrt(x); math.Abs(bw-want) > 1e-12 {
+		t.Errorf("Bandwidth=%.15g, want %.15g", bw, want)
+	}
+}
+
+// 10/(s+1)^7 passes −180° at tan(π/7) (GM −13.7 dB) and −540° at tan(3π/7)
+// (GM +71.4 dB); MATLAB margin returns the one closest to 0 dB.
+func TestMargin_ClosestToZeroSelection(t *testing.T) {
+	den := Poly{1}
+	for range 7 {
+		den = den.Mul(Poly{1, 1})
+	}
+	sys := makePlant(t, []float64{10}, den)
+	gm := func(w float64) float64 { return -20 * math.Log10(10/math.Pow(1+w*w, 3.5)) }
+	w1, w3 := math.Tan(math.Pi/7), math.Tan(3*math.Pi/7)
+	all, err := AllMargin(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.GainMargins) != 2 || math.Abs(all.GainMargins[0]-gm(w1)) > 1e-9 || math.Abs(all.GainMargins[1]-gm(w3)) > 1e-9 {
+		t.Fatalf("GMs %v @ %v, want [%g %g]", all.GainMargins, all.PhaseCrossFreqs, gm(w1), gm(w3))
+	}
+	m, err := Margin(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(m.GainMargin-gm(w1)) > 1e-9 || math.Abs(m.WpFreq-w1) > 1e-12 {
+		t.Errorf("GM=%g@%g, want %g@%g", m.GainMargin, m.WpFreq, gm(w1), w1)
+	}
+	if got, _ := selectMargin([]float64{-30, 20, -5, 5}, []float64{1, 2, 3, 4}); got != -5 {
+		t.Errorf("selectMargin=%g, want -5 (closest to 0, lower frequency on a tie)", got)
+	}
+}
