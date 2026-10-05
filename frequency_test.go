@@ -378,11 +378,8 @@ func TestFreqResponse_Empty(t *testing.T) {
 	}
 
 	resp, err := sys.FreqResponse([]float64{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp != nil {
-		t.Fatalf("expected nil, got %v", resp)
+	if !errors.Is(err, ErrInvalidArgument) || resp != nil {
+		t.Fatalf("FreqResponse(empty) = %v, %v; want nil, ErrInvalidArgument", resp, err)
 	}
 }
 
@@ -1574,10 +1571,124 @@ func TestDefaultFrequencyGrid(t *testing.T) {
 
 func TestDefaultFrequencyGridInvalid(t *testing.T) {
 	var nilSys *System
-	if _, err := nilSys.DefaultFrequencyGrid(10); !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("nil system: err = %v, want ErrDimensionMismatch", err)
+	if _, err := nilSys.DefaultFrequencyGrid(10); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil system: err = %v, want ErrInvalidArgument", err)
 	}
-	if _, err := nilSys.Bode(nil, 10); !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("nil system Bode: err = %v, want ErrDimensionMismatch", err)
+	if _, err := nilSys.Bode(nil, 10); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil system Bode: err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func idiomMIMO(t *testing.T, dt float64) *System {
+	t.Helper()
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-0.5, 0.3, -0.2, -0.4}),
+		mat.NewDense(2, 2, []float64{1, 0.5, 0, 1}),
+		mat.NewDense(2, 2, []float64{1, 0, 0.2, 1}),
+		mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2}),
+		dt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func TestFrequencyOpsRejectEmptyOmega(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys := idiomMIMO(t, dt)
+		empty := []float64{}
+		ops := map[string]func() (any, error){
+			"FreqResponse":          func() (any, error) { return sys.FreqResponse(empty) },
+			"FreqResponsePointwise": func() (any, error) { return sys.FreqResponsePointwise(empty) },
+			"Bode":                  func() (any, error) { return sys.Bode(empty, 0) },
+			"Nichols":               func() (any, error) { return sys.Nichols(empty, 0) },
+			"Sigma":                 func() (any, error) { return sys.Sigma(empty, 0) },
+			"FRD":                   func() (any, error) { return sys.FRD(empty) },
+		}
+		for name, op := range ops {
+			_, err := op()
+			if !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("dt=%g %s(empty): err = %v, want ErrInvalidArgument", dt, name, err)
+			}
+		}
+		if b, err := sys.Bode(nil, 7); err != nil || len(b.Omega) != 7 {
+			t.Errorf("dt=%g Bode(nil): err=%v", dt, err)
+		}
+		if r, err := sys.Nichols(nil, 7); err != nil || len(r.Omega) != 7 {
+			t.Errorf("dt=%g Nichols(nil): err=%v", dt, err)
+		}
+		if r, err := sys.Sigma(nil, 7); err != nil || len(r.Omega) != 7 {
+			t.Errorf("dt=%g Sigma(nil): err=%v", dt, err)
+		}
+	}
+}
+
+func TestSigmaRejectsModelWithoutSingularValues(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(1, 1, []float64{-1}),
+		mat.NewDense(1, 1, []float64{1}),
+		nil, nil, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sys.Sigma([]float64{1}, 0); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Sigma on 0x1 model: err = %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestFrequencyResultsOwnOmega(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys := idiomMIMO(t, dt)
+		w := []float64{1, 2}
+		resp, err := sys.FreqResponse(w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pw, err := sys.FreqResponsePointwise(w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := sys.Bode(w, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nic, err := sys.Nichols(w, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sg, err := sys.Sigma(w, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w[0] = 99
+		for name, got := range map[string][]float64{
+			"FreqResponse": resp.Omega, "FreqResponsePointwise": pw.Omega,
+			"Bode": b.Omega, "Nichols": nic.Omega, "Sigma": sg.Omega,
+		} {
+			if got[0] != 1 {
+				t.Errorf("dt=%g %s.Omega aliases input: %v", dt, name, got)
+			}
+		}
+	}
+}
+
+func TestFreqResponseInternalDelayOwnsOmega(t *testing.T) {
+	sys := idiomMIMO(t, 0)
+	if err := sys.SetInternalDelay([]float64{0.3},
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{0, 1}),
+		mat.NewDense(2, 1, nil), mat.NewDense(1, 2, nil), mat.NewDense(1, 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	w := []float64{1, 2}
+	resp, err := sys.FreqResponse(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w[0] = 99
+	if resp.Omega[0] != 1 {
+		t.Errorf("internal-delay FreqResponse.Omega aliases input: %v", resp.Omega)
 	}
 }

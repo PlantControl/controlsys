@@ -509,11 +509,8 @@ func TestFRD_EmptyOmega(t *testing.T) {
 	}
 
 	frd, err := sys.FRD(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if frd.NumFrequencies() != 0 {
-		t.Errorf("expected 0 frequencies, got %d", frd.NumFrequencies())
+	if !errors.Is(err, ErrInvalidArgument) || frd != nil {
+		t.Fatalf("FRD(nil) = %v, %v; want nil, ErrInvalidArgument", frd, err)
 	}
 }
 

@@ -246,7 +246,7 @@ func welchSISO(fft *fourier.FFT, seg []float64, _ []complex128, win []float64,
 	}
 
 	return &FreqRespEstResult{
-		H:         newFreqResponseMatrix(H, omega, 1, 1, nil, nil),
+		H:         newFreqResponseMatrixOwned(H, omega, 1, 1, nil, nil),
 		Omega:     omega,
 		Dt:        dt,
 		Coherence: coh,
@@ -369,7 +369,7 @@ func welchMIMO(fft *fourier.FFT, seg []float64, _ []complex128, win []float64,
 	}
 
 	return &FreqRespEstResult{
-		H:         newFreqResponseMatrix(H, omega, p, m, nil, nil),
+		H:         newFreqResponseMatrixOwned(H, omega, p, m, nil, nil),
 		Omega:     omega,
 		Dt:        dt,
 		Coherence: coh,
@@ -421,7 +421,7 @@ func freqRespEstFFT(input, output *mat.Dense, dt float64, m, p, _, nfft int,
 	}
 
 	return &FreqRespEstResult{
-		H:     newFreqResponseMatrix(H, omega, p, m, nil, nil),
+		H:     newFreqResponseMatrixOwned(H, omega, p, m, nil, nil),
 		Omega: omega,
 		Dt:    dt,
 	}, nil

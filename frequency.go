@@ -123,12 +123,17 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 // when the pencil is singular to working precision; a frequency merely near a
 // pole gives large finite values. ErrSingularTransform remains for models
 // singular at every frequency near omega, such as det(sE-A) ≡ 0.
+//
+// An empty omega returns ErrInvalidArgument. The result owns a copy of omega.
 func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 	e, err := validFrequencyEvaluator(sys, "FreqResponse")
 	if err != nil {
 		return nil, err
 	}
-	return e.response(omega)
+	if len(omega) == 0 {
+		return nil, fmt.Errorf("FreqResponse: empty frequency vector: %w", ErrInvalidArgument)
+	}
+	return e.response(copyFloatSlice(omega))
 }
 
 // FreqResponsePointwise evaluates the frequency response with guaranteed
@@ -140,32 +145,29 @@ func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 // to componentwise rounding but are not bit-identical;
 // FreqResponsePointwise never does, at the cost of one dense solve per
 // frequency. Use it when downstream comparisons require sweep results to
-// reproduce single-point evaluations exactly.
+// reproduce single-point evaluations exactly. An empty omega returns
+// ErrInvalidArgument. The result owns a copy of omega.
 func (sys *System) FreqResponsePointwise(omega []float64) (*FreqResponseMatrix, error) {
 	e, err := validFrequencyEvaluator(sys, "FreqResponsePointwise")
 	if err != nil {
 		return nil, err
 	}
-	return e.responsePointwise(omega)
+	if len(omega) == 0 {
+		return nil, fmt.Errorf("FreqResponsePointwise: empty frequency vector: %w", ErrInvalidArgument)
+	}
+	return e.responsePointwise(copyFloatSlice(omega))
 }
 
 // Bode returns the magnitude (dB) and phase (deg) of sys at omega. A nil
-// omega evaluates on DefaultFrequencyGrid(nPoints).
+// omega evaluates on DefaultFrequencyGrid(nPoints); a non-nil empty omega
+// returns ErrInvalidArgument. The result owns a copy of omega.
 func (sys *System) Bode(omega []float64, nPoints int) (*BodeResult, error) {
-	if omega == nil {
-		var err2 error
-		omega, err2 = sys.DefaultFrequencyGrid(nPoints)
-		if err2 != nil {
-			return nil, err2
-		}
-	}
-
-	resp, err := sys.FreqResponse(omega)
+	resp, err := sys.freqResponseOnGrid("Bode", omega, nPoints)
 	if err != nil {
 		return nil, err
 	}
 
-	return bodeResultFromResponse(omega, resp.Data, resp.P, resp.M,
+	return bodeResultFromResponse(resp.Omega, resp.Data, resp.P, resp.M,
 		copyStringSlice(sys.InputName),
 		copyStringSlice(sys.OutputName),
 	), nil
@@ -191,8 +193,8 @@ type frequencyEvaluator struct {
 // validFrequencyEvaluator rejects hand-built systems whose exported fields
 // disagree in shape; the kernels index them unchecked.
 func validFrequencyEvaluator(sys *System, op string) (frequencyEvaluator, error) {
-	if err := sys.Validate(); err != nil {
-		return frequencyEvaluator{}, fmt.Errorf("%s: %w", op, err)
+	if err := requireSystem(op, sys); err != nil {
+		return frequencyEvaluator{}, err
 	}
 	return newFrequencyEvaluator(sys), nil
 }
@@ -202,10 +204,30 @@ func newFrequencyEvaluator(sys *System) frequencyEvaluator {
 	return frequencyEvaluator{sys: sys, n: n, m: m, p: p}
 }
 
-func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, error) {
-	if len(omega) == 0 {
-		return nil, nil
+// freqResponseOnGrid evaluates sys at omega, or at DefaultFrequencyGrid(nPoints)
+// when omega is nil, for the plotting operation op.
+func (sys *System) freqResponseOnGrid(op string, omega []float64, nPoints int) (*FreqResponseMatrix, error) {
+	if omega == nil {
+		if err := requireSystem(op, sys); err != nil {
+			return nil, err
+		}
+		var err error
+		omega, err = sys.DefaultFrequencyGrid(nPoints)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
 	}
+	if len(omega) == 0 {
+		return nil, fmt.Errorf("%s: empty frequency vector: %w", op, ErrInvalidArgument)
+	}
+	resp, err := sys.FreqResponse(omega)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	return resp, nil
+}
+
+func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, error) {
 	if e.sys.HasInternalDelay() {
 		resp, err := freqResponseLFT(e.sys, omega, e.p, e.m)
 		if err != nil {
@@ -235,9 +257,6 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 // a one-element sweep: balanced dense solve, the pole limit where it is
 // singular, then the I/O delay phase.
 func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMatrix, error) {
-	if len(omega) == 0 {
-		return nil, nil
-	}
 	if e.sys.HasInternalDelay() || e.sys.IsDescriptor() {
 		// These paths already evaluate one frequency at a time with
 		// batch-size-independent arithmetic.
@@ -385,8 +404,8 @@ func (e frequencyEvaluator) matrix(data []complex128, omega []float64) *FreqResp
 // system dynamics and stops at the Nyquist frequency; see
 // https://www.mathworks.com/help/control/ref/dynamicsystem.bode.html.
 func (sys *System) DefaultFrequencyGrid(nPoints int) ([]float64, error) {
-	if err := sys.Validate(); err != nil {
-		return nil, fmt.Errorf("DefaultFrequencyGrid: %w", err)
+	if err := requireSystem("DefaultFrequencyGrid", sys); err != nil {
+		return nil, err
 	}
 	if nPoints <= 0 {
 		nPoints = 200
@@ -787,15 +806,15 @@ func (r *NicholsResult) PhaseAt(freq, output, input int) float64 {
 }
 
 // Nichols returns the open-loop gain (dB) and phase (deg) of sys at omega.
-// A nil omega evaluates on DefaultFrequencyGrid(nPoints).
+// A nil omega evaluates on DefaultFrequencyGrid(nPoints); a non-nil empty
+// omega returns ErrInvalidArgument. The result owns a copy of omega.
 func (sys *System) Nichols(omega []float64, nPoints int) (*NicholsResult, error) {
-	bode, err := sys.Bode(omega, nPoints)
+	resp, err := sys.freqResponseOnGrid("Nichols", omega, nPoints)
 	if err != nil {
 		return nil, err
 	}
-	if bode == nil {
-		return nil, nil
-	}
+	bode := bodeResultFromResponse(resp.Omega, resp.Data, resp.P, resp.M,
+		copyStringSlice(sys.InputName), copyStringSlice(sys.OutputName))
 
 	phase := bode.phase
 	p, m := bode.p, bode.m
@@ -841,31 +860,27 @@ func (r *SigmaResult) NSV() int {
 }
 
 // Sigma returns the singular values of the frequency response of sys at
-// omega. A nil omega evaluates on DefaultFrequencyGrid(nPoints).
+// omega. A nil omega evaluates on DefaultFrequencyGrid(nPoints); a non-nil
+// empty omega returns ErrInvalidArgument. A model with no inputs or no outputs
+// has no singular values and returns ErrDimensionMismatch. The result owns a
+// copy of omega.
 func (sys *System) Sigma(omega []float64, nPoints int) (*SigmaResult, error) {
-	if omega == nil {
-		var err error
-		omega, err = sys.DefaultFrequencyGrid(nPoints)
-		if err != nil {
-			return nil, err
-		}
+	if err := requireSystem("Sigma", sys); err != nil {
+		return nil, err
 	}
-
 	_, m, p := sys.Dims()
 	nSV := min(p, m)
 	if nSV == 0 {
-		return &SigmaResult{Omega: omega, nSV: 0, InputName: copyStringSlice(sys.InputName), OutputName: copyStringSlice(sys.OutputName)}, nil
+		return nil, fmt.Errorf("Sigma: model is %d×%d, has no singular values: %w", p, m, ErrDimensionMismatch)
 	}
 
-	resp, err := sys.FreqResponse(omega)
+	resp, err := sys.freqResponseOnGrid("Sigma", omega, nPoints)
 	if err != nil {
 		return nil, err
 	}
-	if resp == nil {
-		return &SigmaResult{Omega: omega, nSV: nSV, InputName: copyStringSlice(sys.InputName), OutputName: copyStringSlice(sys.OutputName)}, nil
-	}
 
 	data := resp.Data
+	omega = resp.Omega
 
 	nw := len(omega)
 	response := newSampledComplexResponse(data, omega, p, m)
