@@ -91,7 +91,7 @@ func TestDelayedZOHIndependentSampledMIMO(t *testing.T) {
 				sys := prewarpModel(t)
 				sys.InputDelay = input
 				sys.OutputDelay = output
-				disc, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodZOH, DelayModeling: format})
+				disc, err := sys.C2D(.1, C2DOptions{Method: C2DMethodZOH, DelayModeling: format})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -133,7 +133,7 @@ func TestDelayedFOHAndPathZOHIndependentSamples(t *testing.T) {
 			sys.InputDelay = []float64{.035, .045}
 			sys.OutputDelay = []float64{.02, .04}
 			sys.Delay = mat.NewDense(2, 2, []float64{.11, .065, .015, .23})
-			disc, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: method, DelayModeling: format})
+			disc, err := sys.C2D(.1, C2DOptions{Method: method, DelayModeling: format})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -161,7 +161,7 @@ func TestConversionDelayRoundingAndThiran(t *testing.T) {
 		sys.InputDelay = []float64{.26}
 		sys.OutputDelay = []float64{.14}
 		sys.Delay = mat.NewDense(1, 1, []float64{.17})
-		disc, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: method})
+		disc, err := sys.C2D(.1, C2DOptions{Method: method})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -171,11 +171,11 @@ func TestConversionDelayRoundingAndThiran(t *testing.T) {
 	}
 	sys := makeTestSystem()
 	sys.InputDelay = []float64{.35}
-	delay, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3})
+	delay, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	state, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestInternalTustinAllPortsIndependentResponse(t *testing.T) {
 	sys := makeTestSystem()
 	sys.LFT = &LFTDelay{Tau: []float64{.23, .31}, B2: mat.NewDense(2, 2, []float64{.2, .5, -.3, .1}), C2: mat.NewDense(2, 2, []float64{.4, .2, -.1, .3}), D12: mat.NewDense(1, 2, []float64{.1, .2}), D21: mat.NewDense(2, 1, []float64{.3, .5}), D22: mat.NewDense(2, 2, []float64{.01, .04, .02, .03})}
 	dt, w := .1, 4.
-	out, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w})
+	out, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestInternalTustinAllPortsIndependentResponse(t *testing.T) {
 		want := rational[0][0] + rational[0][1]*d0*q0 + rational[0][2]*d1*q1
 		assertPrewarpResponse(t, out, z, [][]complex128{{want}})
 	}
-	restored, err := out.D2CWithOpts(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: w})
+	restored, err := out.D2C(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: w})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestInternalTustinAllPortsIndependentResponse(t *testing.T) {
 func TestInternalTustinEliminatesRoundedZeroDelay(t *testing.T) {
 	sys := makeTestSystem()
 	sys.LFT = &LFTDelay{Tau: []float64{.01}, B2: mat.NewDense(2, 1, []float64{.2, .3}), C2: mat.NewDense(1, 2, []float64{.1, .2}), D12: mat.NewDense(1, 1, []float64{.5}), D21: mat.NewDense(1, 1, []float64{.3}), D22: mat.NewDense(1, 1, []float64{.2})}
-	out, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin})
+	out, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestInternalTustinEliminatesRoundedZeroDelay(t *testing.T) {
 func TestConversionDelayUnsupportedExplicit(t *testing.T) {
 	sys := makeTestSystem()
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodImpulse, C2DMethodLeastSquares} {
-		if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: method, ThiranOrder: 1}); !errors.Is(err, ErrInvalidConversionOptions) {
+		if _, err := sys.C2D(.1, C2DOptions{Method: method, ThiranOrder: 1}); !errors.Is(err, ErrInvalidConversionOptions) {
 			t.Fatalf("method=%s error=%v", method, err)
 		}
 	}
@@ -275,7 +275,7 @@ func BenchmarkConversionExternalDelay(b *testing.B) {
 			}
 			b.ReportAllocs()
 			for range b.N {
-				if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodZOH}); err != nil {
+				if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodZOH}); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -289,7 +289,7 @@ func TestImpulseFractionalPathDelayIndependentSamples(t *testing.T) {
 	sys.OutputDelay = []float64{.02, .04}
 	sys.Delay = mat.NewDense(2, 2, []float64{.11, .065, .015, .23})
 	for _, format := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
-		disc, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodImpulse, DelayModeling: format})
+		disc, err := sys.C2D(.1, C2DOptions{Method: C2DMethodImpulse, DelayModeling: format})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -324,7 +324,7 @@ func TestFractionalGainZOHIndependentStep(t *testing.T) {
 	}
 	sys.InputDelay = []float64{.35}
 	for _, format := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
-		disc, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodZOH, DelayModeling: format})
+		disc, err := sys.C2D(.1, C2DOptions{Method: C2DMethodZOH, DelayModeling: format})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -347,7 +347,7 @@ func TestFractionalGainZOHIndependentStep(t *testing.T) {
 func TestImpulseIntegerPathDelayRetained(t *testing.T) {
 	sys := prewarpModel(t)
 	sys.Delay = mat.NewDense(2, 2, []float64{.2, .3, .1, .4})
-	disc, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodImpulse})
+	disc, err := sys.C2D(.1, C2DOptions{Method: C2DMethodImpulse})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +355,7 @@ func TestImpulseIntegerPathDelayRetained(t *testing.T) {
 		z := cmplx.Exp(complex(0, theta))
 		raw := sys.Copy()
 		raw.Delay = nil
-		plain, err := raw.DiscretizeImpulse(.1)
+		plain, err := raw.C2D(.1, C2DOptions{Method: C2DMethodImpulse})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -374,12 +374,12 @@ func TestImpulseIntegerPathDelayRetained(t *testing.T) {
 
 func TestInternalTustinRetainsExternalPathDelay(t *testing.T) {
 	source := conversionDynamicLFT(t)
-	cont, err := source.Undiscretize()
+	cont, err := source.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cont.Delay = mat.NewDense(1, 1, []float64{.3})
-	out, err := cont.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin})
+	out, err := cont.C2D(.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

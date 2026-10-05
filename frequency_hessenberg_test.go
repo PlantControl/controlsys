@@ -46,7 +46,7 @@ func assertHessenbergMatchesPointwise(t *testing.T, label string, sys *System, o
 	td := newTimeDomain(sys.Dt)
 	got := make([]complex128, p*m)
 	for k, w := range omega {
-		if err := hs.evalInto(td.frequencyVariable(w), got); err != nil {
+		if err := hs.evalInto(td.frequencyPoint(w), got); err != nil {
 			t.Fatalf("%s: w=%g: %v", label, w, err)
 		}
 		for i, g := range got {
@@ -80,7 +80,7 @@ func stiffChain(t *testing.T, n int, lo, hi, dt float64) *System {
 	if dt == 0 {
 		return sys
 	}
-	d, err := sys.DiscretizeZOH(dt)
+	d, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,11 +239,10 @@ func TestBalancedDenseDescriptorNearPole(t *testing.T) {
 		bd := newBalancedDense(sys, 3, 2, 2)
 		got := make([]complex128, 4)
 		for _, w := range []float64{1e-6, 2e-5, 1e-2} {
-			s := td.frequencyVariable(w)
-			if err := bd.evalInto(s, got); err != nil {
+			if err := bd.evalInto(td.frequencyPoint(w), got); err != nil {
 				t.Fatal(err)
 			}
-			want := oracleResponse(t, sys, s, 3, 2, 2)
+			want := frExactResponse(sys, frExactPoint(w, dt))
 			norm, diff := 0.0, 0.0
 			for i, v := range want {
 				norm = max(norm, cmplx.Abs(v))

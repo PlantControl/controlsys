@@ -14,8 +14,14 @@ func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	pH, plantTau := plantLFT.GetDelayModel()
-	cH, ctrlTau := ctrlLFT.GetDelayModel()
+	pH, plantTau, err := plantLFT.GetDelayModel()
+	if err != nil {
+		return nil, err
+	}
+	cH, ctrlTau, err := ctrlLFT.GetDelayModel()
+	if err != nil {
+		return nil, err
+	}
 
 	_, m1, p1 := plant.Dims()
 	n1, _, _ := pH.Dims()

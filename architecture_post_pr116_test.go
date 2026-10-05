@@ -25,7 +25,7 @@ func TestPostPR116CrossSeamConversionMetadataRationalAndFRD(t *testing.T) {
 	cont.OutputName = []string{"y"}
 	cont.StateName = []string{"x1", "x2"}
 
-	disc, err := cont.DiscretizeZOH(0.1)
+	disc, err := cont.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestPostPR116CrossSeamConversionMetadataRationalAndFRD(t *testing.T) {
 		t.Fatalf("discrete metadata InputName=%v OutputName=%v", disc.InputName, disc.OutputName)
 	}
 
-	back, err := disc.D2C(C2DMethodZOH)
+	back, err := disc.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,11 +16,15 @@ type EKFModel struct {
 	R    *mat.Dense                             // measurement noise covariance (p×p)
 }
 
-// EKF implements an Extended Kalman Filter for nonlinear systems.
+// EKF implements an Extended Kalman Filter for nonlinear systems, like
+// MATLAB extendedKalmanFilter with Predict and Update for predict and correct
+// (https://www.mathworks.com/help/control/ref/extendedkalmanfilter.html). The
+// state estimate and its covariance are read with State and StateCovariance
+// and replaced with SetState and SetStateCovariance, which validate them.
 type EKF struct {
 	model *EKFModel
-	X     *mat.VecDense // state estimate
-	P     *mat.Dense    // error covariance
+	x     *mat.VecDense // state estimate
+	cov   *mat.Dense    // error covariance
 	n     int           // state dimension
 	p     int           // measurement dimension
 
@@ -35,13 +39,13 @@ type EKF struct {
 // initial state x0, and initial covariance P0.
 func NewEKF(model *EKFModel, x0 *mat.VecDense, P0 *mat.Dense) (*EKF, error) {
 	if model == nil {
-		return nil, fmt.Errorf("NewEKF: nil model: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("NewEKF: nil model: %w", ErrInvalidArgument)
 	}
 	if model.F == nil || model.H == nil || model.FJac == nil || model.HJac == nil {
-		return nil, fmt.Errorf("NewEKF: nil function in model: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("NewEKF: nil function in model: %w", ErrInvalidArgument)
 	}
 	if x0 == nil || P0 == nil || model.Q == nil || model.R == nil {
-		return nil, fmt.Errorf("NewEKF: nil matrix argument: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("NewEKF: nil matrix argument: %w", ErrInvalidArgument)
 	}
 
 	n := x0.Len()
@@ -75,8 +79,8 @@ func NewEKF(model *EKFModel, x0 *mat.VecDense, P0 *mat.Dense) (*EKF, error) {
 
 	return &EKF{
 		model:  &modelCopy,
-		X:      xCopy,
-		P:      pCopy,
+		x:      xCopy,
+		cov:    pCopy,
 		n:      n,
 		p:      p,
 		ap:     mat.NewDense(n, n, nil),
@@ -94,6 +98,7 @@ func NewEKF(model *EKFModel, x0 *mat.VecDense, P0 *mat.Dense) (*EKF, error) {
 }
 
 // Copy returns a deep copy of the filter state, covariance, and work buffers.
+// The copy of a nil *EKF is nil.
 func (e *EKF) Copy() *EKF {
 	if e == nil {
 		return nil
@@ -103,8 +108,8 @@ func (e *EKF) Copy() *EKF {
 	modelCopy.R = mat.DenseCopyOf(e.model.R)
 	return &EKF{
 		model:  &modelCopy,
-		X:      mat.VecDenseCopyOf(e.X),
-		P:      mat.DenseCopyOf(e.P),
+		x:      mat.VecDenseCopyOf(e.x),
+		cov:    mat.DenseCopyOf(e.cov),
 		n:      e.n,
 		p:      e.p,
 		ap:     mat.DenseCopyOf(e.ap),
@@ -121,47 +126,92 @@ func (e *EKF) Copy() *EKF {
 	}
 }
 
-// Predict performs the EKF prediction step using control input u.
+// State returns a copy of the state estimate.
+func (e *EKF) State() *mat.VecDense {
+	return mat.VecDenseCopyOf(e.x)
+}
+
+// StateCovariance returns a copy of the state estimation error covariance.
+func (e *EKF) StateCovariance() *mat.Dense {
+	return mat.DenseCopyOf(e.cov)
+}
+
+// SetState replaces the state estimate with a copy of x, which must have the
+// filter's state dimension and finite entries.
+func (e *EKF) SetState(x *mat.VecDense) error {
+	if x == nil {
+		return fmt.Errorf("EKF.SetState: x is nil: %w", ErrInvalidArgument)
+	}
+	if x.Len() != e.n {
+		return fmt.Errorf("EKF.SetState: x length %d, want %d: %w", x.Len(), e.n, ErrDimensionMismatch)
+	}
+	xCopy := mat.VecDenseCopyOf(x)
+	if err := requireFinite("EKF.SetState", "x", xCopy.RawVector().Data...); err != nil {
+		return err
+	}
+	e.x = xCopy
+	return nil
+}
+
+// SetStateCovariance replaces the state estimation error covariance with a
+// copy of P, which must be n×n, symmetric and positive semidefinite.
+func (e *EKF) SetStateCovariance(P *mat.Dense) error {
+	if P == nil {
+		return fmt.Errorf("EKF.SetStateCovariance: P is nil: %w", ErrInvalidArgument)
+	}
+	if err := validateCovarianceRole("EKF.SetStateCovariance", covarianceStateEstimate, P, e.n); err != nil {
+		return err
+	}
+	e.cov.Copy(P)
+	return nil
+}
+
+// Predict performs the EKF prediction step using control input u, which is
+// passed unchanged to F and FJac (nil when the model has no inputs). The
+// filter keeps its own copy of the vector F returns.
 func (e *EKF) Predict(u *mat.VecDense) error {
 	contract := newLocalApproximationContract("EKF.Predict", e.n, 0, e.p)
-	xPred := e.model.F(e.X, u)
+	xPred := e.model.F(e.x, u)
 	if err := contract.validateStateResult("F", xPred); err != nil {
 		return err
 	}
 
-	A := e.model.FJac(e.X, u)
+	A := e.model.FJac(e.x, u)
 	if err := contract.validateStateJacobian("FJac", A); err != nil {
 		return err
 	}
 
 	// P = A * P * A' + Q
-	e.ap.Mul(A, e.P)
-	e.P.Mul(e.ap, A.T())
-	e.P.Add(e.P, e.model.Q)
+	e.ap.Mul(A, e.cov)
+	e.cov.Mul(e.ap, A.T())
+	e.cov.Add(e.cov, e.model.Q)
 
-	e.X = xPred
+	e.x.CopyVec(xPred)
 	return nil
 }
 
 // Update performs the EKF measurement update step using observation z.
 func (e *EKF) Update(z *mat.VecDense) error {
+	if z == nil {
+		return fmt.Errorf("EKF.Update: z is nil: %w", ErrInvalidArgument)
+	}
 	if z.Len() != e.p {
 		return fmt.Errorf("EKF.Update: z length %d, want %d: %w", z.Len(), e.p, ErrDimensionMismatch)
 	}
 	contract := newLocalApproximationContract("EKF.Update", e.n, 0, e.p)
 
-	yPred := e.model.H(e.X)
+	yPred := e.model.H(e.x)
 	if err := contract.validateMeasurementResult("H", yPred); err != nil {
 		return err
 	}
 
-	C := e.model.HJac(e.X)
+	C := e.model.HJac(e.x)
 	if err := contract.validateMeasurementJacobian("HJac", C); err != nil {
 		return err
 	}
 
 	// S = C * P * C' + R  (p×p)
-	e.cp.Mul(C, e.P)
+	e.cp.Mul(C, e.cov)
 	e.s.Mul(e.cp, C.T())
 	e.s.Add(e.s, e.model.R)
 
@@ -176,7 +226,7 @@ func (e *EKF) Update(z *mat.VecDense) error {
 	e.innov.SubVec(z, yPred)
 
 	e.kInnov.MulVec(e.k, e.innov)
-	e.X.AddVec(e.X, e.kInnov)
+	e.x.AddVec(e.x, e.kInnov)
 
 	// Joseph form: P = (I - K*C) * P * (I - K*C)' + K * R * K'
 	e.ikc.Mul(e.k, C)
@@ -190,12 +240,12 @@ func (e *EKF) Update(z *mat.VecDense) error {
 		}
 	}
 
-	e.ikcP.Mul(e.ikc, e.P)
-	e.P.Mul(e.ikcP, e.ikc.T())
+	e.ikcP.Mul(e.ikc, e.cov)
+	e.cov.Mul(e.ikcP, e.ikc.T())
 
 	e.kR.Mul(e.k, e.model.R)
 	e.kRKt.Mul(e.kR, e.k.T())
-	e.P.Add(e.P, e.kRKt)
+	e.cov.Add(e.cov, e.kRKt)
 
 	return nil
 }

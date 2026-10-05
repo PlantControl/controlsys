@@ -175,7 +175,7 @@ func hsvFromGramians(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 	copyStrided(lc, n, wcRaw.Data, wcRaw.Stride, n, n)
 
 	if !impl.Dpotrf(blas.Lower, n, lc, n) {
-		return eigenvalueHSV(Wc, Wo, n), nil
+		return eigenvalueHSV(Wc, Wo, n)
 	}
 	for i := range n {
 		for j := i + 1; j < n; j++ {
@@ -188,7 +188,7 @@ func hsvFromGramians(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 	copyStrided(lo, n, woRaw.Data, woRaw.Stride, n, n)
 
 	if !impl.Dpotrf(blas.Lower, n, lo, n) {
-		return eigenvalueHSV(Wc, Wo, n), nil
+		return eigenvalueHSV(Wc, Wo, n)
 	}
 	for i := range n {
 		for j := i + 1; j < n; j++ {
@@ -206,12 +206,13 @@ func hsvFromGramians(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 	wq := make([]float64, 1)
 	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, n, n, mData, n, s, nil, 1, nil, 1, wq, -1)
 	work := make([]float64, int(wq[0]))
-	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, n, n, mData, n, s, nil, 1, nil, 1, work, len(work))
-
+	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, n, n, mData, n, s, nil, 1, nil, 1, work, len(work)) {
+		return nil, fmt.Errorf("HSV: singular value iteration did not converge: %w", ErrSchurFailed)
+	}
 	return s, nil
 }
 
-func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
+func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 	wcRaw := Wc.RawMatrix()
 	woRaw := Wo.RawMatrix()
 	prod := make([]float64, n*n)
@@ -223,7 +224,7 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
 	var eig mat.Eigen
 	ok := eig.Factorize(mat.NewDense(n, n, prod), mat.EigenNone)
 	if !ok {
-		return make([]float64, n)
+		return nil, fmt.Errorf("HSV: eigenvalue iteration did not converge: %w", ErrSchurFailed)
 	}
 	vals := eig.Values(nil)
 	hsv := make([]float64, n)
@@ -235,7 +236,7 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
 		hsv[i] = math.Sqrt(r)
 	}
 	sort.Sort(sort.Reverse(sort.Float64Slice(hsv)))
-	return hsv
+	return hsv, nil
 }
 
 // HinfNorm computes the H∞ norm (peak gain) of an LTI system and the
@@ -271,7 +272,10 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 || m == 0 || p == 0 {
-		sv := maxSVDense(sys.D, p, m)
+		sv, err := maxSingularValue(sys.D)
+		if err != nil {
+			return 0, 0, fmt.Errorf("HinfNorm: %w", err)
+		}
 		return sv, 0, nil
 	}
 
@@ -300,7 +304,11 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 	}
 	n, m, p := sys.Dims()
 	if n == 0 || m == 0 || p == 0 {
-		return maxSVDense(sys.D, p, m), 0, nil
+		sv, err := maxSingularValue(sys.D)
+		if err != nil {
+			return 0, 0, fmt.Errorf("Norm: %w", err)
+		}
+		return sv, 0, nil
 	}
 	poles, err := sys.Poles()
 	if err != nil {
@@ -331,7 +339,11 @@ func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err
 
 	gammaLow, omegaPeak := ws.lowerBound(poles)
 	if sys.IsContinuous() {
-		if sd := maxSVDense(sys.D, p, m); sd > gammaLow {
+		sd, err := maxSingularValue(sys.D)
+		if err != nil {
+			return 0, 0, err
+		}
+		if sd > gammaLow {
 			gammaLow, omegaPeak = sd, math.Inf(1)
 		}
 	}
@@ -714,6 +726,8 @@ func (ws *hamiltonianWS) climb(peak, w float64) (float64, float64) {
 // lowerBound samples σ_max at ω = 0 and 50 log-spaced frequencies spanning
 // the magnitudes of poles; discrete models use the magnitudes of their Tustin
 // equivalents, warped back to the unit circle, and add the Nyquist frequency.
+// It is only a seed: when a sample hits a singular resolvent it returns the
+// trivial bound 0, and the Hamiltonian search still finds the peak.
 func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak float64) {
 	sys := ws.sys
 	dt := sys.Dt
@@ -869,11 +883,7 @@ func (e *sigmaEvaluator) sigma(w float64, refine bool) (float64, error) {
 		e.outputPlain(sc)
 	}
 	applyIODelayAtS(e.sys, newTimeDomain(e.sys.Dt).frequencyVariable(w), e.g, p, m, true)
-	sv, ok := e.svd.maximumFromFlat(e.g, 0, p, m)
-	if !ok {
-		return math.NaN(), nil
-	}
-	return sv, nil
+	return e.svd.maximumFromFlat(e.g, 0, p, m)
 }
 
 // factor computes the GEPP factorization of pI + qA.
@@ -1080,6 +1090,25 @@ func frobNormD(D *mat.Dense, p, m int) float64 {
 		return 0
 	}
 	return denseNorm(D)
+}
+
+// maxSingularValue returns σ_max(M), 0 for a nil or empty matrix.
+func maxSingularValue(M *mat.Dense) (float64, error) {
+	if M == nil || M.IsEmpty() {
+		return 0, nil
+	}
+	r, c := M.Dims()
+	raw := M.RawMatrix()
+	data := make([]float64, r*c)
+	copyStrided(data, c, raw.Data, raw.Stride, r, c)
+	sv := make([]float64, min(r, c))
+	wq := make([]float64, 1)
+	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, data, c, sv, nil, 1, nil, 1, wq, -1)
+	work := make([]float64, int(wq[0]))
+	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, data, c, sv, nil, 1, nil, 1, work, len(work)) {
+		return 0, fmt.Errorf("singular value iteration did not converge: %w", ErrSchurFailed)
+	}
+	return sv[0], nil
 }
 
 func maxSVDense(D *mat.Dense, p, m int) float64 {

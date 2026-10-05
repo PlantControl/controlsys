@@ -125,15 +125,8 @@ func TestLyap_10x10(t *testing.T) {
 }
 
 func TestLyap_Empty(t *testing.T) {
-	A := &mat.Dense{}
-	Q := &mat.Dense{}
-	X, err := Lyap(A, Q, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := X.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %d×%d", r, c)
+	if _, err := Lyap(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("err = %v, want ErrDimensionMismatch", err)
 	}
 }
 
@@ -268,13 +261,8 @@ func TestDLyap_10x10(t *testing.T) {
 }
 
 func TestDLyap_Empty(t *testing.T) {
-	X, err := DLyap(&mat.Dense{}, &mat.Dense{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := X.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %d×%d", r, c)
+	if _, err := DLyap(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("err = %v, want ErrDimensionMismatch", err)
 	}
 }
 
@@ -391,5 +379,14 @@ func checkSymmetric(t *testing.T, X *mat.Dense, tol float64) {
 				t.Errorf("X[%d,%d]-X[%d,%d] = %e", i, j, j, i, d)
 			}
 		}
+	}
+}
+
+func TestDLyapUnitCircleComplexPairIsSingular(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.6, -1.28, 0.5, 0.6})
+	Q := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
+	X, err := DLyap(A, Q, nil)
+	if !errors.Is(err, ErrSingularEquation) {
+		t.Fatalf("X=%v err=%v, want ErrSingularEquation (λ=0.6±0.8i on the unit circle)", X, err)
 	}
 }

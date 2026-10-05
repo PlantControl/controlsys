@@ -427,9 +427,9 @@ func frequencyGainRange(sys *System, omega []float64, outputWeight, inputWeight 
 				return 0, 0, fmt.Errorf("input weight: %w", err)
 			}
 		}
-		sigma, ok := singularValues.maximumFromFlat(gain.data, 0, gain.rows, gain.cols)
-		if !ok {
-			return 0, 0, fmt.Errorf("maximum singular value: decomposition failed: %w", ErrSingularTransform)
+		sigma, err := singularValues.maximumFromFlat(gain.data, 0, gain.rows, gain.cols)
+		if err != nil {
+			return 0, 0, err
 		}
 		if sigma > maxGain {
 			maxGain = sigma

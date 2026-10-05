@@ -7,6 +7,7 @@ import (
 	"math/cmplx"
 	"slices"
 
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -73,12 +74,12 @@ func (e *sisoEval) at(w float64) complex128 {
 		h, _ := evalSISOFreqResponse(e.sys, w)
 		return h
 	}
-	s := e.td.frequencyVariable(w)
-	if err := evalWithPoleLimit(e.solver.evalInto, e.sys, s, e.dst); err != nil {
+	pt := e.td.frequencyPoint(w)
+	if err := evalWithPoleLimit(e.solver.evalInto, e.sys, pt, e.dst); err != nil {
 		return complex(math.NaN(), math.NaN())
 	}
 	if e.delay != nil {
-		applyIODelayMatrixAtS(e.sys, s, e.dst, 1, 1, e.delay)
+		applyIODelayMatrixAtS(e.sys, pt.value(), e.dst, 1, 1, e.delay)
 	}
 	return e.dst[0]
 }
@@ -298,8 +299,11 @@ func phaseMarginDeg(h complex128) float64 {
 // AllMargin computes every gain and phase crossover of the SISO loop sys, as
 // MATLAB allmargin (https://www.mathworks.com/help/control/ref/dynamicsystem.allmargin.html).
 // For delay-free loops, and for discrete loops whose delays are powers of z,
-// the crossovers are the boundary roots of |N|² − |D|² and Im(N·conj(D)),
-// refined on the exact response, so no frequency grid can miss them.
+// the crossovers are boundary eigenvalues of pencils built from the
+// realization (the Hamiltonian pencil of |L| = 1, as in the H∞ norm, and the
+// system pencil of L − L~), refined on the exact state-space response, so no
+// frequency grid can miss them and high-order loops lose none to
+// transfer-function round-off. Descriptor loops are supported.
 // Continuous delays keep |L(jω)| rational, so gain crossovers stay exact;
 // phase crossovers of continuous delayed loops, and both kinds for continuous
 // internal delays, come from a delay-aware adaptive frequency search. A loop
@@ -310,16 +314,22 @@ func AllMargin(sys *System) (*AllMarginResult, error) {
 		return nil, err
 	}
 	loop, err := newRationalLoop(sys)
-	if err != nil {
+	if errors.Is(err, ErrContinuousInternalDelay) {
+		loop = nil
+	} else if err != nil {
 		return nil, err
 	}
 	res := &AllMarginResult{}
 	var eval *sisoEval
 	if loop != nil {
 		eval = loop.eval
-		res.GainCrossFreqs = loop.gainCrossings(1)
+		if res.GainCrossFreqs, err = loop.gainCrossings(1); err != nil {
+			return nil, err
+		}
 		if !loop.delayed {
-			res.PhaseCrossFreqs = loop.phaseCrossings()
+			if res.PhaseCrossFreqs, err = loop.phaseCrossings(); err != nil {
+				return nil, err
+			}
 		}
 	} else if eval, err = newSISOEval(sys); err != nil {
 		return nil, err
@@ -410,8 +420,9 @@ func selectMargin(margins, freqs []float64) (float64, float64) {
 // (default −3) below its DC value, as MATLAB bandwidth
 // (https://www.mathworks.com/help/control/ref/dynamicsystem.bandwidth.html).
 // For SISO models without continuous internal delays it is the smallest
-// boundary root of |N|² − g²|D|², refined on the exact response; MIMO models,
-// which MATLAB rejects, use σmax on a frequency grid. It returns +Inf when
+// boundary eigenvalue of the Hamiltonian pencil of |L| = g, refined on the
+// exact response; MIMO models, which MATLAB rejects, use σmax on a frequency
+// grid. It returns +Inf when
 // the gain never drops that far and 0 when the DC gain is 0 or not finite.
 // dbDrop must be 0 (default) or a finite negative scalar, and a model with
 // no inputs or no outputs is rejected.
@@ -446,11 +457,14 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	siso := p == 1 && m == 1
 	if siso {
 		loop, err := newRationalLoop(sys)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrContinuousInternalDelay) {
 			return 0, err
 		}
-		if loop != nil {
-			ws := loop.gainCrossings(math.Pow(10, threshold/20))
+		if err == nil {
+			ws, err := loop.gainCrossings(math.Pow(10, threshold/20))
+			if err != nil {
+				return 0, err
+			}
 			if len(ws) == 0 {
 				return math.Inf(1), nil
 			}
@@ -542,9 +556,10 @@ func DiskMargin(sys *System) (*DiskMarginResult, error) {
 // closed-loop stability comes from a Nyquist encirclement count of 1+L on a
 // delay-aware adaptive frequency grid, and the peaks from the exact frequency
 // response; see delayLoop.nyquist for the resolution limits. Loops whose
-// internal delays form a feedback cycle, whose high-frequency gain may reach
-// 1 (neutral type), or whose delay grid would exceed 2^21 points return
-// ErrContinuousInternalDelay. Descriptor loops return
+// internal delays form a feedback cycle return ErrContinuousInternalDelay;
+// loops whose high-frequency gain may reach 1 (neutral type), whose delay grid
+// would exceed 2^21 points, or whose encirclement count does not resolve
+// return ErrDelayUnsupported. Descriptor loops return
 // ErrDescriptorUnsupported, as HinfNorm does.
 func DiskMarginSkew(sys *System, sigma float64) (*DiskMarginResult, error) {
 	if math.IsNaN(sigma) || math.IsInf(sigma, 0) {
@@ -617,8 +632,8 @@ func diskMarginDelayed(sys *System, sigma, shift float64) (*DiskMarginResult, er
 }
 
 func diskMarginDelayError(err error) error {
-	if errors.Is(err, errDelayLoopUnsupported) {
-		return fmt.Errorf("DiskMargin: %v: %w", err, ErrContinuousInternalDelay)
+	if errors.Is(err, errDelayLoopUnsupported) || errors.Is(err, ErrContinuousInternalDelay) {
+		return fmt.Errorf("DiskMargin: %w", err)
 	}
 	return err
 }
@@ -663,48 +678,50 @@ func diskGainPhaseMargin(alpha, sigma float64) (gm [2]float64, pm float64) {
 	return gm, pm
 }
 
-// rationalLoop is the rational part N/D of a SISO loop, whose unit-gain and
-// real-axis crossings are roots of polynomials, as for MATLAB allmargin on
-// LTI models. Discrete delays are folded into D as powers of z. A continuous
-// loop delay leaves |L(jω)| rational but not angle(L), so delayed reports
-// that only gain crossings are exact.
+// rationalLoop is the finite-dimensional part of a SISO loop, whose
+// unit-gain and real-axis crossings are boundary eigenvalues of pencils built
+// from its realization, as for MATLAB allmargin on LTI models. Discrete
+// delays are absorbed as states. A continuous loop delay leaves |L(jω)|
+// rational but not angle(L), so delayed reports that only gain crossings are
+// exact.
 type rationalLoop struct {
-	num, den Poly
-	dt       float64
-	delayed  bool
-	eval     *sisoEval
+	n          int
+	a, b, c, e []float64
+	d          float64
+	dt         float64
+	delayed    bool
+	eval       *sisoEval
 }
 
-// newRationalLoop returns nil when sys has continuous internal delays, for
-// which no rational form exists.
+// newRationalLoop fails with ErrContinuousInternalDelay when sys has
+// continuous internal delays, for which no finite-dimensional form exists.
 func newRationalLoop(sys *System) (*rationalLoop, error) {
-	if sys.IsContinuous() && sys.HasInternalDelay() {
-		return nil, nil
-	}
 	fsys, err := finiteDimensionalModel(sys, "margin")
 	if err != nil {
 		return nil, err
 	}
-	res, err := fsys.TransferFunction(nil)
-	if err != nil {
-		return nil, err
-	}
-	tf := res.TF
-	r := &rationalLoop{
-		num: slices.Clone(Poly(tf.Num[0][0])),
-		den: slices.Clone(Poly(tf.Den[0])),
-		dt:  fsys.Dt,
-	}
-	if tf.Delay != nil && tf.Delay[0][0] != 0 {
-		if r.dt == 0 {
-			r.delayed = true
-		} else {
-			r.den = append(r.den, make(Poly, int(math.Round(tf.Delay[0][0])))...)
-		}
-	}
+	r := &rationalLoop{dt: fsys.Dt}
 	if r.eval, err = newSISOEval(fsys); err != nil {
 		return nil, err
 	}
+	fd := fsys
+	if fsys.IsDiscrete() {
+		if fd, err = fsys.AbsorbDelay(); err != nil {
+			return nil, err
+		}
+	} else {
+		r.delayed = ioDelayTotal(fsys, 0, 0) != 0
+	}
+	r.n, _, _ = fd.Dims()
+	br := newBalancedRealization(fd, r.n, 1, 1)
+	r.a, r.b, r.c, r.e = br.a, br.b, br.c, br.e
+	if r.e == nil {
+		r.e = make([]float64, r.n*r.n)
+		for i := range r.n {
+			r.e[i*r.n+i] = 1
+		}
+	}
+	r.d = fd.D.At(0, 0)
 	return r, nil
 }
 
@@ -712,62 +729,127 @@ func (r *rationalLoop) discrete() bool { return r.dt > 0 }
 
 func (r *rationalLoop) nyquist() float64 { return math.Pi / r.dt }
 
-// mirror returns P(-s) for a continuous loop and z^n·P(1/z) for a discrete
-// one, with n the common degree of N and D, so that on the boundary
-// mirror(P) is conj(P) (times z^n).
-func (r *rationalLoop) mirror(p Poly) Poly {
-	if r.discrete() {
-		q := r.pad(p)
-		slices.Reverse(q)
-		return q
+// gainCandidates returns approximate ω > 0 where |L| = gamma: boundary
+// eigenvalues of the system pencil of L~·L/γ² − 1, with L~(s) = L(−s)ᵀ, or
+// L(1/z)ᵀ when discrete. Over [x; p; u] it is, continuous,
+//
+//	s·diag(E, Eᵀ, 0) − [A 0 B; −cᵀc −Aᵀ −cᵀd; d·c Bᵀ d²−1]
+//
+// and discrete
+//
+//	z·[E 0 0; 0 Aᵀ 0; 0 −Bᵀ 0] − [A 0 B; −cᵀc Eᵀ −cᵀd; d·c 0 d²−1]
+//
+// with c = C/γ and d = D/γ. For γ = 1 the continuous pencil is the
+// Hamiltonian pencil of the H∞ norm test.
+func (r *rationalLoop) gainCandidates(gamma float64) ([]float64, error) {
+	n := r.n
+	N := 2*n + 1
+	m, k := make([]float64, N*N), make([]float64, N*N)
+	u := 2 * n
+	d := r.d / gamma
+	for i := range n {
+		ci := r.c[i] / gamma
+		for j := range n {
+			m[i*N+j] = r.a[i*n+j]
+			m[(n+i)*N+j] = -ci * r.c[j] / gamma
+			k[i*N+j] = r.e[i*n+j]
+			if r.discrete() {
+				m[(n+i)*N+n+j] = r.e[j*n+i]
+				k[(n+i)*N+n+j] = r.a[j*n+i]
+			} else {
+				m[(n+i)*N+n+j] = -r.a[j*n+i]
+				k[(n+i)*N+n+j] = r.e[j*n+i]
+			}
+		}
+		m[i*N+u] = r.b[i]
+		m[(n+i)*N+u] = -ci * d
+		m[u*N+i] = d * ci
+		if r.discrete() {
+			k[u*N+n+i] = -r.b[i]
+		} else {
+			m[u*N+n+i] = r.b[i]
+		}
 	}
-	q := slices.Clone(p)
-	for i := len(q) - 2; i >= 0; i -= 2 {
-		q[i] = -q[i]
+	m[u*N+u] = d*d - 1
+	return r.boundaryRoots(m, k, N)
+}
+
+// realCandidates returns approximate ω > 0 where L is real: boundary
+// eigenvalues of the system pencil of L − L~. Over [x₁; x₂; u] it is,
+// continuous,
+//
+//	s·diag(E, E, 0) − [A 0 B; 0 −A B; C C 0]
+//
+// and discrete
+//
+//	z·[E 0 0; 0 A 0; 0 C 0] − [A 0 B; 0 E −B; C 0 0].
+func (r *rationalLoop) realCandidates() ([]float64, error) {
+	n := r.n
+	N := 2*n + 1
+	m, k := make([]float64, N*N), make([]float64, N*N)
+	u := 2 * n
+	for i := range n {
+		for j := range n {
+			m[i*N+j] = r.a[i*n+j]
+			k[i*N+j] = r.e[i*n+j]
+			if r.discrete() {
+				m[(n+i)*N+n+j] = r.e[i*n+j]
+				k[(n+i)*N+n+j] = r.a[i*n+j]
+			} else {
+				m[(n+i)*N+n+j] = -r.a[i*n+j]
+				k[(n+i)*N+n+j] = r.e[i*n+j]
+			}
+		}
+		m[i*N+u] = r.b[i]
+		m[u*N+i] = r.c[i]
+		if r.discrete() {
+			m[(n+i)*N+u] = -r.b[i]
+			k[u*N+n+i] = r.c[i]
+		} else {
+			m[(n+i)*N+u] = r.b[i]
+			m[u*N+n+i] = r.c[i]
+		}
 	}
-	return q
+	return r.boundaryRoots(m, k, N)
 }
 
-func (r *rationalLoop) pad(p Poly) Poly {
-	n := max(len(r.num), len(r.den))
-	return append(make(Poly, n-len(p)), p...)
-}
+// marginBoundaryBand is the relative distance from the imaginary axis, or
+// from the unit circle, within which a pencil eigenvalue is a candidate. QZ
+// does not preserve the pencils' symmetry, so boundary eigenvalues leave the
+// boundary by their rounding error; polish verifies every candidate.
+const marginBoundaryBand = 1e-2
 
-// gainCandidates returns approximate ω > 0 where |L| = gamma: boundary roots
-// of N·N~ − γ²·D·D~.
-func (r *rationalLoop) gainCandidates(gamma float64) []float64 {
-	num, den := r.pad(r.num), r.pad(r.den)
-	p := num.Mul(r.mirror(r.num)).Sub(den.Mul(r.mirror(r.den)).Scale(gamma * gamma))
-	return r.boundaryRoots(p)
-}
-
-// realCandidates returns approximate ω > 0 where L is real: boundary roots of
-// N·D~ − N~·D.
-func (r *rationalLoop) realCandidates() []float64 {
-	num, den := r.pad(r.num), r.pad(r.den)
-	return r.boundaryRoots(num.Mul(r.mirror(r.den)).Sub(r.mirror(r.num).Mul(den)))
-}
-
-// boundaryRoots maps roots of p near the imaginary axis (continuous) or the
-// unit circle (discrete) to frequencies in (0, ∞) or (0, π/Dt]. Tangential
-// and repeated roots move off the boundary by about eps^(1/multiplicity),
-// so the acceptance band is loose; callers verify every candidate.
-func (r *rationalLoop) boundaryRoots(p Poly) []float64 {
-	roots, err := p.Roots()
-	if err != nil {
-		return nil
+// boundaryRoots maps the finite eigenvalues of the N×N pencil (m, k) near
+// the imaginary axis (continuous) or the unit circle (discrete) to
+// frequencies in (0, ∞) or (0, π/Dt], merging those that agree to rounding.
+func (r *rationalLoop) boundaryRoots(m, k []float64, N int) ([]float64, error) {
+	kNorm := frobenius(k)
+	alphar, alphai, beta := make([]float64, N), make([]float64, N), make([]float64, N)
+	work := make([]float64, 8*N)
+	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, N, m, N, k, N, alphar, alphai, beta, nil, 1, nil, 1, work, len(work)) {
+		return nil, fmt.Errorf("margin: QZ: %w", ErrSchurFailed)
 	}
-	tol := max(1e-6, math.Pow(eps(), 1/float64(max(1, len(p)-1))))
+	tol := 100 * float64(N) * eps()
 	var ws []float64
-	for _, z := range roots {
+	for j := range N {
+		if math.Abs(beta[j]) <= tol*kNorm {
+			continue
+		}
+		z := complex(alphar[j]/beta[j], alphai[j]/beta[j])
 		var w float64
 		if r.discrete() {
-			if math.Abs(cmplx.Abs(z)-1) > tol {
+			if math.Abs(cmplx.Abs(z)-1) > marginBoundaryBand {
 				continue
 			}
 			w = math.Abs(cmplx.Phase(z)) / r.dt
+			if math.Abs(imag(z)) <= tol {
+				w = 0
+				if real(z) < 0 {
+					w = r.nyquist()
+				}
+			}
 		} else {
-			if math.Abs(real(z)) > tol*cmplx.Abs(z) {
+			if math.Abs(real(z)) > marginBoundaryBand*cmplx.Abs(z) {
 				continue
 			}
 			w = math.Abs(imag(z))
@@ -777,37 +859,57 @@ func (r *rationalLoop) boundaryRoots(p Poly) []float64 {
 		}
 	}
 	slices.Sort(ws)
-	return slices.Compact(ws)
+	return slices.CompactFunc(ws, func(a, b float64) bool { return math.Abs(b-a) <= 1e-9*max(a, b) }), nil
+}
+
+func frobenius(a []float64) float64 {
+	var s float64
+	for _, v := range a {
+		s += v * v
+	}
+	return math.Sqrt(s)
 }
 
 // gainCrossings returns the verified ω > 0 where |L(jω)| = gamma, ascending.
-func (r *rationalLoop) gainCrossings(gamma float64) []float64 {
+func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
+	cands, err := r.gainCandidates(gamma)
+	if err != nil {
+		return nil, err
+	}
 	lg := math.Log(gamma)
 	f := func(w float64) float64 { return math.Log(cmplx.Abs(r.eval.at(w))) - lg }
-	return r.polish(r.gainCandidates(gamma), f, 1e-9)
+	return r.polish(cands, f, 1e-9), nil
 }
 
 // phaseCrossings returns the verified ω > 0 where L(jω) is real and negative,
 // ascending.
-func (r *rationalLoop) phaseCrossings() []float64 {
+func (r *rationalLoop) phaseCrossings() ([]float64, error) {
+	reals, err := r.realCandidates()
+	if err != nil {
+		return nil, err
+	}
 	var cands []float64
-	for _, w := range r.realCandidates() {
+	for _, w := range reals {
 		if math.Abs(phaseOffsetDeg(r.eval.at(w))) < 90 {
 			cands = append(cands, w)
 		}
 	}
-	return r.polish(cands, func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }, 1e-7)
+	return r.polish(cands, func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }, 1e-7), nil
 }
 
 // polish refines each candidate to a sign change of f within half the gap to
 // its neighbours, so close crossing pairs stay apart, and keeps those where
 // |f| ≤ tol. A candidate without a sign change, a tangency or the discrete
-// Nyquist frequency, is kept only if |f| ≤ tol there.
+// Nyquist frequency, is kept only if |f| ≤ tol there. When ω = 0 itself
+// satisfies |f| ≤ tol, as for the root L − L~ always has there, a candidate
+// whose |f| stays within tol down to half its frequency is that root moved
+// off 0 by rounding, and is dropped.
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
 	}
+	zeroRoot := math.Abs(f(0)) <= tol
 	var out []float64
 	for i, w := range cands {
 		lo, hi := w/2, (wTop-w)/2
@@ -826,10 +928,35 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 			best = refineCrossing(a, b, f)
 			break
 		}
-		v := f(best)
-		if math.Abs(v) <= tol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
+		v := math.Abs(f(best))
+		if zeroRoot && math.Abs(f(best/2)) <= tol {
+			continue
+		}
+		if v <= tol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
 			out = append(out, best)
 		}
 	}
+	if len(out) > 0 && r.flat(out, f, tol, wTop) {
+		return nil
+	}
 	return out
+}
+
+// flat reports whether |f| ≤ tol also between and beyond the crossings ws,
+// as when the pencil is singular because |L| ≡ γ or L is real on the whole
+// boundary; such a loop has no isolated crossings.
+func (r *rationalLoop) flat(ws []float64, f func(float64) float64, tol, wTop float64) bool {
+	probes := []float64{ws[0] / 2}
+	for i := 1; i < len(ws); i++ {
+		probes = append(probes, math.Sqrt(ws[i-1]*ws[i]))
+	}
+	if last := ws[len(ws)-1]; last < wTop {
+		probes = append(probes, min(2*last, (last+wTop)/2))
+	}
+	for _, w := range probes {
+		if !(math.Abs(f(w)) <= tol) {
+			return false
+		}
+	}
+	return true
 }

@@ -73,7 +73,7 @@ func (sys *System) ToExplicit() (*System, error) {
 	return result, nil
 }
 
-func (sys *System) EliminateStates(elim []int, method BalredMethod) (*System, error) {
+func (sys *System) EliminateStates(elim []int, method StateProjection) (*System, error) {
 	return Modred(sys, elim, method)
 }
 

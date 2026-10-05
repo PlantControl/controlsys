@@ -4,7 +4,9 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
+	"time"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -464,7 +466,7 @@ func TestCare_Dare_Consistency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dsys, err := sys.DiscretizeZOH(dt)
+	dsys, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,6 +688,107 @@ func TestRiccati_DescriptorValidation(t *testing.T) {
 		}
 		if !mat.Equal(got.X, want.X) || !mat.Equal(got.K, want.K) {
 			t.Errorf("%s E = I differs from E = nil", name)
+		}
+	}
+}
+
+func riccatiTestProblem() (A, B, Q, R *mat.Dense) {
+	A = mat.NewDense(3, 3, []float64{
+		0.3, 2, -1,
+		-4, -0.5, 7,
+		0.2, -3, 1.5,
+	})
+	B = mat.NewDense(3, 2, []float64{
+		1, 0.5,
+		0, 2,
+		-1, 0.3,
+	})
+	L := mat.NewDense(3, 3, []float64{
+		20, 0, 0,
+		0.15, 1, 0,
+		0.05, 0.2, 0.1,
+	})
+	Q = new(mat.Dense)
+	Q.Mul(L, L.T())
+	R = mat.NewDense(2, 2, []float64{2, 0.5, 0.5, 1})
+	return
+}
+
+func TestRiccati_UndersizedWorkspace(t *testing.T) {
+	A, B, Q, R := riccatiTestProblem()
+	for _, ws := range []*RiccatiWorkspace{NewRiccatiWorkspace(1, 1), NewRiccatiWorkspace(3, 1), NewRiccatiWorkspace(2, 2), {}} {
+		for name, solve := range map[string]func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error){"Care": Care, "Dare": Dare} {
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("%s panicked: %v", name, r)
+					}
+				}()
+				_, err = solve(A, B, Q, R, &RiccatiOpts{Workspace: ws})
+			}()
+			if !errors.Is(err, ErrDimensionMismatch) || !strings.HasPrefix(err.Error(), name+": ") {
+				t.Fatalf("%s undersized workspace: %v", name, err)
+			}
+		}
+	}
+	ws := NewRiccatiWorkspace(4, 3)
+	got, err := Care(A, B, Q, R, &RiccatiOpts{Workspace: ws})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := careResidual(A, B, Q, R, got.X); res > 1e-9 {
+		t.Fatalf("oversized workspace residual %g", res)
+	}
+}
+
+func TestCare_RcondOfU11(t *testing.T) {
+	A, B, Q, R := riccatiTestProblem()
+	Q.Scale(1e8, Q)
+	res, err := Care(A, B, Q, R, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var es mat.EigenSym
+	if !es.Factorize(mat.NewSymDense(3, res.X.RawMatrix().Data), false) {
+		t.Fatal("eigsym")
+	}
+	vals := es.Values(nil)
+	lo, hi := math.Inf(1), 0.0
+	for _, v := range vals {
+		lo = math.Min(lo, 1+v*v)
+		hi = math.Max(hi, 1+v*v)
+	}
+	// The stable-subspace basis is [U11; U21] = [I; X](I+X²)^(-1/2)·Q with Q
+	// orthogonal, so cond2(U11) is basis independent; cond1 is within n of it.
+	cond2 := math.Sqrt(hi / lo)
+	n := 3.0
+	if res.Rcnd < 1/(n*cond2) || res.Rcnd > n/cond2 {
+		t.Fatalf("Rcnd = %g, want within [%g, %g] (cond2(U11)=%g)", res.Rcnd, 1/(n*cond2), n/cond2, cond2)
+	}
+}
+
+func TestRiccati_ErrorPrefixes(t *testing.T) {
+	A, B, Q, R := riccatiTestProblem()
+	bad := mat.NewDense(2, 2, []float64{1, 0, 0, -1})
+	for name, solve := range map[string]func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error){"Care": Care, "Dare": Dare} {
+		_, err := solve(A, B, Q, bad, nil)
+		if !errors.Is(err, ErrSingularR) || !strings.HasPrefix(err.Error(), name+": ") {
+			t.Fatalf("%s indefinite R: %v", name, err)
+		}
+		_, err = solve(A, B, Q, mat.NewDense(3, 3, nil), nil)
+		if !errors.Is(err, ErrDimensionMismatch) || !strings.HasPrefix(err.Error(), name+": ") {
+			t.Fatalf("%s R size: %v", name, err)
+		}
+		An := mat.DenseCopyOf(A)
+		An.Set(1, 2, math.NaN())
+		finishesWithin(t, 5*time.Second, func() { _, err = solve(An, B, Q, R, nil) })
+		if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), name+": ") {
+			t.Fatalf("%s NaN A: %v", name, err)
+		}
+		_, err = solve(nil, B, Q, R, nil)
+		if !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("%s nil A: %v", name, err)
 		}
 	}
 }

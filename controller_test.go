@@ -259,7 +259,7 @@ func TestLqi_MatchesLqgServo(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertMatEqual(t, "Kx", subDense(res.K, 0, 0, m, n), lqg.K, 1e-10)
-		assertMatEqual(t, "Ki", subDense(res.K, 0, n, m, p), lqg.Ki, 1e-10)
+		assertMatEqual(t, "Ki", subDense(res.K, 0, n, m, p), lqg.ki, 1e-10)
 		assertMatEqual(t, "X", res.X, lqg.Xc, 1e-10)
 	}
 }
@@ -700,17 +700,6 @@ func TestPlace_ConjugatePairError(t *testing.T) {
 	_, err := Place(A, B, []complex128{-1 + 2i, -1 + 3i})
 	if !errors.Is(err, ErrConjugatePairs) {
 		t.Errorf("expected ErrConjugatePairs, got %v", err)
-	}
-}
-
-func TestPlace_Empty(t *testing.T) {
-	F, err := Place(&mat.Dense{}, &mat.Dense{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := F.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %dx%d", r, c)
 	}
 }
 
@@ -1572,5 +1561,14 @@ func TestPlaceAckerLqrdRejectInvalidArgs(t *testing.T) {
 		if err := call(); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
 		}
+	}
+}
+
+func TestPlaceAckerNoStates(t *testing.T) {
+	if _, err := Place(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Place: err = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := Acker(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Acker: err = %v, want ErrDimensionMismatch", err)
 	}
 }

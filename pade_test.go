@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -510,4 +511,25 @@ func TestPadeDelayRejectsNonFiniteDelay(t *testing.T) {
 	if _, err := PadeDelay(-1, 2); !errors.Is(err, ErrNegativeDelay) {
 		t.Errorf("PadeDelay(-1) err = %v, want ErrNegativeDelay", err)
 	}
+}
+
+func TestPadeValidatesOrder(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-1, 2, -0.5, -3}),
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, 0.5}),
+		mat.NewDense(1, 1, []float64{0.2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, order := range []int{-5, 0, 11} {
+		_, err := sys.Pade(order)
+		wantErr(t, fmt.Sprintf("Pade(%d) delay-free", order), err, ErrInvalidArgument, "Pade")
+		_, err = PadeDelay(1, order)
+		wantErr(t, fmt.Sprintf("PadeDelay(1,%d)", order), err, ErrInvalidArgument, "PadeDelay")
+	}
+	_, err = PadeDelay(-1, 2)
+	wantErr(t, "PadeDelay negative", err, ErrNegativeDelay, "PadeDelay")
+	_, err = PadeDelay(math.NaN(), 2)
+	wantErr(t, "PadeDelay NaN", err, ErrInvalidArgument, "PadeDelay")
 }

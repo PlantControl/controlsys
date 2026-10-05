@@ -143,7 +143,7 @@ func matchedContinuousGain(dz, dp, cz, cp []complex128, gain, dt float64) (float
 
 func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("DiscretizeMatched: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("C2D: %w", ErrWrongDomain)
 	}
 	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
 		return nil, ErrInvalidSampleTime
@@ -156,7 +156,7 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 		return nil, ErrDescriptorUnsupported
 	}
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("DiscretizeMatched: internal delays: %w", ErrFeedbackDelay)
+		return nil, fmt.Errorf("C2D: internal delays: %w", ErrFeedbackDelay)
 	}
 	rational, err := sys.rationalTransferFunction(nil)
 	if err != nil {

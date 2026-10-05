@@ -76,7 +76,7 @@ func TestDiscretizeAndSimulate(t *testing.T) {
 	}
 
 	dt := 0.01
-	dsys, err := sys.DiscretizeZOH(dt)
+	dsys, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,11 +154,11 @@ func TestDiscretizeTustinRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := sys.Discretize(0.1)
+	dsys, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	csys, err := dsys.Undiscretize()
+	csys, err := dsys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

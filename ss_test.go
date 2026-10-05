@@ -709,10 +709,16 @@ func emptyIOOps() []emptyIOOp {
 		{"GramC", func(s *System) (any, error) { return Gram(s, GramControllability) }},
 		{"GramO", func(s *System) (any, error) { return Gram(s, GramObservability) }},
 		{"Balreal", func(s *System) (any, error) { return Balreal(s) }},
-		{"Balred", func(s *System) (any, error) { r, _, err := Balred(s, 1, Truncate); return r, err }},
-		{"BalredSP", func(s *System) (any, error) { r, _, err := Balred(s, 1, SingularPerturbation); return r, err }},
+		{"Balred", func(s *System) (any, error) {
+			r, _, err := Balred(s, 1, BalredOptions{StateProjection: Truncate})
+			return r, err
+		}},
+		{"BalredSP", func(s *System) (any, error) {
+			r, _, err := Balred(s, 1, BalredOptions{StateProjection: MatchDC})
+			return r, err
+		}},
 		{"Modred", func(s *System) (any, error) { return Modred(s, []int{0}, Truncate) }},
-		{"ModredMatchDC", func(s *System) (any, error) { return Modred(s, []int{0}, SingularPerturbation) }},
+		{"ModredMatchDC", func(s *System) (any, error) { return Modred(s, []int{0}, MatchDC) }},
 		{"CanonModal", func(s *System) (any, error) { return Canon(s, CanonModal) }},
 		{"CanonCompanion", func(s *System) (any, error) { return Canon(s, CanonCompanion) }},
 		{"Ssbal", func(s *System) (any, error) { return Ssbal(s) }},
@@ -777,33 +783,33 @@ func emptyIOOps() []emptyIOOp {
 		{"SpectralFactor", func(s *System) (any, error) { return SpectralFactor(s) }},
 		{"Discretize", func(s *System) (any, error) {
 			if s.IsDiscrete() {
-				return s.Undiscretize()
+				return s.D2C(D2COptions{Method: C2DMethodTustin})
 			}
-			return s.Discretize(0.1)
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 		}},
 		{"DiscretizeFOH", func(s *System) (any, error) {
 			if s.IsDiscrete() {
-				return s.D2D(0.2, C2DOptions{})
+				return s.D2D(0.2, D2DOptions{})
 			}
-			return s.DiscretizeFOH(0.1)
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodFOH})
 		}},
 		{"DiscretizeTustin", func(s *System) (any, error) {
 			if s.IsDiscrete() {
-				return s.D2C(C2DMethodTustin)
+				return s.D2C(D2COptions{Method: C2DMethodTustin})
 			}
-			return s.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin})
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 		}},
 		{"DiscretizeImpulse", func(s *System) (any, error) {
 			if s.IsDiscrete() {
 				return nil, nil
 			}
-			return s.DiscretizeImpulse(0.1)
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodImpulse})
 		}},
 		{"DiscretizeMatched", func(s *System) (any, error) {
 			if s.IsDiscrete() {
 				return nil, nil
 			}
-			return s.DiscretizeMatched(0.1)
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
 		}},
 		{"String", func(s *System) (any, error) { return s.String(), nil }},
 		{"IsProper", func(s *System) (any, error) { return s.IsProper() }},
@@ -866,7 +872,7 @@ func emptyIOOps() []emptyIOOp {
 		{"MinimalLFT", func(s *System) (any, error) { return s.MinimalLFT() }},
 		{"ZeroDelayApprox", func(s *System) (any, error) { return s.ZeroDelayApprox() }},
 		{"PullDelaysToLFT", func(s *System) (any, error) { return s.PullDelaysToLFT() }},
-		{"TotalDelay", func(s *System) (any, error) { return s.TotalDelay(), nil }},
+		{"TotalDelay", func(s *System) (any, error) { return s.TotalDelay() }},
 		{"Pidtune", func(s *System) (any, error) { return Pidtune(s, PidtunePI) }},
 		{"LFT", func(s *System) (any, error) { return LFT(s, s.Copy(), 0, 0) }},
 		{"ModelArray", func(s *System) (any, error) { return NewModelArray([]int{1}, []*System{s}) }},
@@ -1063,9 +1069,8 @@ func TestEmptyIOAnalysisMatchesMATLAB(t *testing.T) {
 		}
 		for name, sys := range map[string]*System{"m=0": auto, "p=0": noOut} {
 			tag := fmt.Sprintf("dt=%g %s", dt, name)
-			g, err := sys.DCGain()
-			if err != nil || !g.IsEmpty() {
-				t.Errorf("%s DCGain = %v, %v; want empty", tag, g, err)
+			if _, err := sys.DCGain(); !errors.Is(err, ErrDimensionMismatch) {
+				t.Errorf("%s DCGain err = %v, want ErrDimensionMismatch", tag, err)
 			}
 			h2, err := H2Norm(sys)
 			if err != nil || h2 != 0 {
@@ -1085,14 +1090,13 @@ func TestEmptyIOAnalysisMatchesMATLAB(t *testing.T) {
 			if _, err := Bandwidth(sys, -3); !errors.Is(err, ErrDimensionMismatch) {
 				t.Errorf("%s Bandwidth err = %v, want ErrDimensionMismatch", tag, err)
 			}
-			step, err := Step(sys, 1)
-			if err != nil || len(step.T) == 0 || !step.Y.IsEmpty() {
-				t.Errorf("%s Step = %+v, %v; want time grid and empty Y", tag, step, err)
+			if _, err := Step(sys, 1); !errors.Is(err, ErrDimensionMismatch) {
+				t.Errorf("%s Step err = %v, want ErrDimensionMismatch", tag, err)
 			}
 		}
 
 		wc, err := Gram(auto, GramControllability)
-		if err != nil || mat.Norm(wc.X, 1) != 0 {
+		if err != nil || mat.Norm(wc, 1) != 0 {
 			t.Errorf("dt=%g Gram(c) of no-input model = %v, %v; want zeros", dt, wc, err)
 		}
 		wo, err := Gram(auto, GramObservability)
@@ -1102,13 +1106,13 @@ func TestEmptyIOAnalysisMatchesMATLAB(t *testing.T) {
 		var res, ata, ctc mat.Dense
 		ctc.Mul(auto.C.T(), auto.C)
 		if dt == 0 {
-			ata.Mul(auto.A.T(), wo.X)
-			res.Mul(wo.X, auto.A)
+			ata.Mul(auto.A.T(), wo)
+			res.Mul(wo, auto.A)
 			res.Add(&res, &ata)
 		} else {
-			ata.Mul(auto.A.T(), wo.X)
+			ata.Mul(auto.A.T(), wo)
 			res.Mul(&ata, auto.A)
-			res.Sub(&res, wo.X)
+			res.Sub(&res, wo)
 		}
 		res.Add(&res, &ctc)
 		if r := mat.Norm(&res, math.Inf(1)); r > 1e-12 {
@@ -1179,7 +1183,7 @@ func TestEmptyIOStateTransforms(t *testing.T) {
 			t.Errorf("dt=%g SS2SS Dims = (%d,%d,%d)", dt, n, m, p)
 		}
 
-		red, err := Modred(auto, []int{1}, SingularPerturbation)
+		red, err := Modred(auto, []int{1}, MatchDC)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1278,7 +1282,7 @@ func TestEmptyIOStatelessResults(t *testing.T) {
 	}{
 		{"ModredTruncate", func(s *System) ([]*System, error) { return sysOut(Modred(s, []int{0, 1, 2}, Truncate)) }},
 		{"ModredMatchDC", func(s *System) ([]*System, error) {
-			return sysOut(Modred(s, []int{2, 0, 1}, SingularPerturbation))
+			return sysOut(Modred(s, []int{2, 0, 1}, MatchDC))
 		}},
 		{"MinimalRealization", func(s *System) ([]*System, error) { return reduceOut(s.MinimalRealization()) }},
 		{"ReduceUncontrollable", func(s *System) ([]*System, error) {
@@ -1357,9 +1361,9 @@ func TestDescriptorWithoutDynamicStatesKeepsIODims(t *testing.T) {
 				t.Fatal(err)
 			}
 			tag := fmt.Sprintf("dt=%g m=%d p=%d", dt, m, p)
-			convert := func() (*System, error) { return sys.Undiscretize() }
+			convert := func() (*System, error) { return sys.D2C(D2COptions{Method: C2DMethodTustin}) }
 			if dt == 0 {
-				convert = func() (*System, error) { return sys.Discretize(0.1) }
+				convert = func() (*System, error) { return sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin}) }
 			}
 			if _, err := convert(); !errors.Is(err, ErrDimensionMismatch) {
 				t.Errorf("%s convert: err = %v, want ErrDimensionMismatch", tag, err)

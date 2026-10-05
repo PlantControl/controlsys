@@ -52,7 +52,7 @@ func TestPRD95DelayBankPublicWorkflowsShareRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	disc, err := plant.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := plant.C2D(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestPRD95TimeDomainResponsePreparationPublicContracts(t *testing.T) {
 		t.Fatalf("Initial OutputName = %v, want %v", initResp.OutputName, cont.OutputName)
 	}
 
-	disc, err := cont.DiscretizeZOH(0.1)
+	disc, err := cont.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,13 +233,13 @@ func TestPRD95TimeDomainResponsePreparationPublicContracts(t *testing.T) {
 	}
 	assertDenseApprox(t, lsim.Y, sim.Y, 1e-12)
 
-	if _, err := Lsim(disc, uLsim, []float64{0, 0.1, 0.25, 0.3, 0.4}, nil); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("non-uniform Lsim err = %v, want ErrDimensionMismatch", err)
+	if _, err := Lsim(disc, uLsim, []float64{0, 0.1, 0.25, 0.3, 0.4}, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("non-uniform Lsim err = %v, want ErrInvalidArgument", err)
 	}
 	otherDt := disc.Copy()
 	otherDt.Dt = 0.2
-	if _, err := Lsim(otherDt, uLsim, tvec, nil); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("Dt mismatch Lsim err = %v, want ErrDimensionMismatch", err)
+	if _, err := Lsim(otherDt, uLsim, tvec, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("Dt mismatch Lsim err = %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -279,7 +279,7 @@ func TestPRD95FrequencyResponseLayoutPublicWorkflowsAgree(t *testing.T) {
 		u.Set(0, k, math.Sin(0.17*float64(k)))
 		u.Set(1, k, math.Cos(0.11*float64(k)))
 	}
-	disc, err := sys.D2D(dt, C2DOptions{Method: C2DMethodTustin})
+	disc, err := sys.D2D(dt, D2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

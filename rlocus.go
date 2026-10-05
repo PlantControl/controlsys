@@ -9,34 +9,97 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// RootLocusResult holds the closed-loop pole trajectories of a SISO loop
+// under negative feedback u = -K·y, together with the open-loop locus
+// construction data.
 type RootLocusResult struct {
-	Gains             []float64
-	Branches          [][]complex128
-	Breakaway         []complex128
-	AsymptoteAngles   []float64
-	AsymptoteCentroid float64
-	DepartureAngles   []float64
-	ArrivalAngles     []float64
+	// Gains are the feedback gains K in ascending order.
+	Gains []float64
+	// Branches[b][k] is the b-th closed-loop pole at Gains[k]; branches are
+	// ordered for continuity between consecutive gains.
+	Branches [][]complex128
+	// Breakaway lists real break-away/break-in points on the locus; empty
+	// when the locus has none.
+	Breakaway []complex128
+	// AsymptoteAngles are the angles in radians of the asymptotes along
+	// which branches leave to infinity; empty when the number of poles
+	// equals the number of zeros.
+	AsymptoteAngles []float64
+	// DepartureAngles[i] is the departure angle in radians from the i-th
+	// open-loop pole.
+	DepartureAngles []float64
+	// ArrivalAngles[k] is the arrival angle in radians at the k-th open-loop
+	// zero.
+	ArrivalAngles []float64
+
+	centroid float64
 }
 
+// AsymptoteCentroid returns the real-axis point where the asymptotes meet.
+// ok is false when the locus has no asymptotes.
+func (r *RootLocusResult) AsymptoteCentroid() (centroid float64, ok bool) {
+	if len(r.AsymptoteAngles) == 0 {
+		return 0, false
+	}
+	return r.centroid, true
+}
+
+// RootLocus computes the closed-loop poles of the SISO model sys under
+// negative feedback u = -K·y for each gain K, as MATLAB rlocus(sys, k). The
+// closed-loop state matrix is A - B·K/(1+K·D)·C. A nil gains slice selects a
+// default logarithmic grid from 1e-6 to 1e6 plus K = 0; an explicitly empty
+// slice or a non-finite gain is ErrInvalidArgument. Descriptor models are
+// converted with ToExplicit (singular E returns its error). Discrete delays
+// are absorbed as extra states; continuous delays return ErrDelayUnsupported,
+// as MATLAB requires a Pade approximation first. A model with no states
+// returns ErrDimensionMismatch, and a gain with 1+K·D = 0 returns
+// ErrAlgebraicLoop.
+//
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.rlocus.html.
 func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
-	if _, err := newSISOLoopModel(sys, "RootLocus"); err != nil {
+	const op = "RootLocus"
+	if err := requireFiniteSystem(op, sys); err != nil {
 		return nil, err
 	}
-	n, _, _ := sys.Dims()
-
-	dRaw := sys.D.RawMatrix()
-	if dRaw.Data[0] != 0 {
-		return nil, fmt.Errorf("controlsys: RootLocus requires D=0: %w", ErrDimensionMismatch)
+	if _, err := newSISOLoopModel(sys, op); err != nil {
+		return nil, err
 	}
+	if gains != nil && len(gains) == 0 {
+		return nil, fmt.Errorf("%s: gains is empty: %w", op, ErrInvalidArgument)
+	}
+	if err := requireFinite(op, "gains", gains...); err != nil {
+		return nil, err
+	}
+	if sys.HasDelay() {
+		if sys.IsContinuous() {
+			return nil, fmt.Errorf("%s: continuous model has time delays; use Pade first: %w", op, ErrDelayUnsupported)
+		}
+		abs, err := sys.AbsorbDelay()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+		sys = abs
+	}
+	if sys.IsDescriptor() {
+		exp, err := sys.ToExplicit()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+		sys = exp
+	}
+	n, _, _ := sys.Dims()
+	if n == 0 {
+		return nil, fmt.Errorf("%s: system has no states: %w", op, ErrDimensionMismatch)
+	}
+	d := sys.D.At(0, 0)
 
 	poles, err := sys.Poles()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	zeros, err := sys.Zeros()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
 	if gains == nil {
@@ -67,13 +130,18 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 	work := make([]float64, n*n)
 
 	for gi, K := range gains {
+		den := 1 + K*d
+		if den == 0 {
+			return nil, fmt.Errorf("%s: 1+K·D = 0 at K=%g: %w", op, K, ErrAlgebraicLoop)
+		}
+		kEff := K / den
 		for i := 0; i < n*n; i++ {
-			work[i] = aFlat[i] - K*bc[i]
+			work[i] = aFlat[i] - kEff*bc[i]
 		}
 		M := mat.NewDense(n, n, work)
 		var eig mat.Eigen
 		if !eig.Factorize(M, mat.EigenNone) {
-			return nil, ErrSchurFailed
+			return nil, fmt.Errorf("%s: eigenvalues of A-BKC at K=%g: %w", op, K, ErrSchurFailed)
 		}
 		vals := eig.Values(nil)
 		allEigs[gi] = vals
@@ -81,7 +149,10 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 
 	branches := makeBranches(allEigs, n, len(gains))
 
-	breakaway := computeBreakaway(sys, poles, zeros)
+	breakaway, err := computeBreakaway(sys, poles, zeros)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
 
 	nPoles := len(poles)
 	nZeros := len(zeros)
@@ -136,13 +207,13 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 	}
 
 	return &RootLocusResult{
-		Gains:             gains,
-		Branches:          branches,
-		Breakaway:         breakaway,
-		AsymptoteAngles:   asymAngles,
-		AsymptoteCentroid: asymCentroid,
-		DepartureAngles:   departAngles,
-		ArrivalAngles:     arrivalAngles,
+		Gains:           gains,
+		Branches:        branches,
+		Breakaway:       breakaway,
+		AsymptoteAngles: asymAngles,
+		DepartureAngles: departAngles,
+		ArrivalAngles:   arrivalAngles,
+		centroid:        asymCentroid,
 	}, nil
 }
 
@@ -209,27 +280,26 @@ func makeBranches(allEigs [][]complex128, nStates, nGains int) [][]complex128 {
 	return branches
 }
 
-func computeBreakaway(sys *System, poles, zeros []complex128) []complex128 {
+func computeBreakaway(sys *System, poles, zeros []complex128) ([]complex128, error) {
 	tfr, err := sys.rationalTransferFunction(nil)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	num := Poly(tfr.TF.Num[0][0])
 	den := Poly(tfr.TF.Den[0])
 
 	if len(num) == 0 || len(den) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	numD := num.Derivative()
 	denD := den.Derivative()
 
-	// breakaway: num'*den - num*den' = 0
 	poly := numD.Mul(den).Sub(num.Mul(denD))
 
 	roots, err := poly.Roots()
-	if err != nil || len(roots) == 0 {
-		return nil
+	if err != nil {
+		return nil, err
 	}
 
 	var result []complex128
@@ -242,7 +312,7 @@ func computeBreakaway(sys *System, poles, zeros []complex128) []complex128 {
 			result = append(result, complex(s, 0))
 		}
 	}
-	return result
+	return result, nil
 }
 
 func isOnRealAxisSegment(s float64, poles, zeros []complex128) bool {

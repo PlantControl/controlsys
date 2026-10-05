@@ -143,7 +143,7 @@ func TestPade_PythonControl_CoeffTable(t *testing.T) {
 // --- 2. Thiran Approximation Tests ---
 
 func TestThiran_MATLAB_Fractional(t *testing.T) {
-	sys, err := ThiranDelay(2.4, 2, 1.0)
+	sys, err := thiranDelay(2.4, 2, 1.0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestThiran_MATLAB_Fractional(t *testing.T) {
 }
 
 func TestThiran_MATLAB_Integer(t *testing.T) {
-	sys, err := ThiranDelay(2.5, 5, 0.5)
+	sys, err := thiranDelay(2.5, 5, 0.5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestC2D_MATLAB_ZOH_IntegerDelay(t *testing.T) {
 	sys.InputDelay = []float64{1.0}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestC2D_MATLAB_ZOH_FractionalDelay(t *testing.T) {
 	sys.InputDelay = []float64{0.25}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestC2D_MATLAB_Tustin_Thiran(t *testing.T) {
 	sys.InputDelay = []float64{2.7}
 
 	dt := 1.0
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3})
 	if err != nil {
 		t.Fatal(err)
 	}

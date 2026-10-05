@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -161,15 +162,8 @@ func TestSimulateNoInputs(t *testing.T) {
 
 	x0 := mat.NewVecDense(2, []float64{4, 8})
 
-	r, err := sys.Simulate(nil, x0, &SimulateOpts{FinalState: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Y != nil {
-		t.Errorf("expected nil Y for 0 steps")
-	}
-	if !vecEqual(r.XFinal, x0, 1e-12) {
-		t.Errorf("XFinal should equal x0 when steps=0")
+	if _, err := sys.Simulate(nil, x0, &SimulateOpts{FinalState: true}); !errors.Is(err, ErrInsufficientData) {
+		t.Errorf("zero samples error = %v, want ErrInsufficientData", err)
 	}
 }
 
@@ -221,16 +215,11 @@ func TestSimulateStepsZero(t *testing.T) {
 
 	x0 := mat.NewVecDense(2, []float64{5, 3})
 
-	// u with 0 columns → steps=0
-	r, err := sys.Simulate(nil, x0, &SimulateOpts{FinalState: true})
-	if err != nil {
-		t.Fatal(err)
+	if _, err := sys.Simulate(nil, x0, &SimulateOpts{FinalState: true}); !errors.Is(err, ErrInsufficientData) {
+		t.Errorf("zero samples error = %v, want ErrInsufficientData", err)
 	}
-	if r.Y != nil {
-		t.Errorf("expected nil Y for steps=0")
-	}
-	if !vecEqual(r.XFinal, x0, 1e-12) {
-		t.Errorf("XFinal should equal x0 for steps=0")
+	if _, err := sys.Simulate(nil, x0, nil); !errors.Is(err, ErrInsufficientData) {
+		t.Errorf("nil u, nil opts error = %v, want ErrInsufficientData", err)
 	}
 }
 
@@ -1053,8 +1042,8 @@ func TestSimulateStepsOptionValidation(t *testing.T) {
 	if _, err := sys.Simulate(mat.NewDense(1, 4, nil), nil, &SimulateOpts{Steps: 3}); !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("Steps != u columns: err = %v, want ErrDimensionMismatch", err)
 	}
-	if _, err := sys.Simulate(mat.NewDense(1, 3, nil), nil, &SimulateOpts{Steps: -1}); !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("negative Steps: err = %v, want ErrDimensionMismatch", err)
+	if _, err := sys.Simulate(mat.NewDense(1, 3, nil), nil, &SimulateOpts{Steps: -1}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("negative Steps: err = %v, want ErrInvalidArgument", err)
 	}
 	r, err := sys.Simulate(mat.NewDense(1, 3, []float64{1, 0, 0}), nil, &SimulateOpts{Steps: 3})
 	if err != nil {
@@ -1620,5 +1609,69 @@ func TestSimulateX0NondecomposableIODelay(t *testing.T) {
 	}
 	if !matEqual(got.Y, want.Y, 0) {
 		t.Errorf("zero x0 Y = %v, want %v", mat.Formatted(got.Y), mat.Formatted(want.Y))
+	}
+}
+
+func TestSimulateNoOutputs(t *testing.T) {
+	sys, err := New(mat.NewDense(2, 2, []float64{0.5, 0.2, -0.1, 0.3}), mat.NewDense(2, 1, []float64{1, 0.5}), nil, nil, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := mat.NewDense(1, 3, []float64{1, -1, 2})
+	if _, err := sys.Simulate(u, nil, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("p=0 without FinalState error = %v, want ErrDimensionMismatch", err)
+	}
+	r, err := sys.Simulate(u, nil, &SimulateOpts{FinalState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := mat.NewVecDense(2, nil)
+	for k := range 3 {
+		var next mat.VecDense
+		next.MulVec(sys.A, x)
+		next.AddScaledVec(&next, u.At(0, k), sys.B.ColView(0))
+		x = &next
+	}
+	if r.Y != nil || !vecEqual(r.XFinal, x, 1e-14) {
+		t.Errorf("p=0 FinalState: Y=%v XFinal=%v, want nil, %v", r.Y, r.XFinal, x)
+	}
+}
+
+func TestSimulateXFinalDoesNotAliasWorkspace(t *testing.T) {
+	sys, err := New(mat.NewDense(1, 1, []float64{0.5}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := mat.NewVecDense(1, nil)
+	opts := &SimulateOpts{Workspace: ws, FinalState: true}
+	r1, err := sys.Simulate(mat.NewDense(1, 1, []float64{1}), nil, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.XFinal == ws {
+		t.Fatal("XFinal is the caller's Workspace")
+	}
+	if _, err := sys.Simulate(mat.NewDense(1, 1, []float64{7}), nil, opts); err != nil {
+		t.Fatal(err)
+	}
+	if got := r1.XFinal.AtVec(0); got != 1 {
+		t.Errorf("first XFinal changed to %g by second call, want 1", got)
+	}
+}
+
+func TestSimulateRejectsInvalidModel(t *testing.T) {
+	var nilSys *System
+	if _, err := nilSys.Simulate(nil, nil, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil Simulate = %v, want ErrInvalidArgument", err)
+	}
+	cont, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cont.Simulate(mat.NewDense(1, 2, nil), nil, nil)
+	if !errors.Is(err, ErrWrongDomain) || !strings.HasPrefix(err.Error(), "Simulate: ") {
+		t.Errorf("continuous Simulate = %v, want Simulate: ... ErrWrongDomain", err)
 	}
 }

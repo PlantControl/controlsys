@@ -66,7 +66,7 @@ func TestArchitectureLocalApproximationJacobiansDriveLinearizeAndEKF(t *testing.
 	ap.Mul(lin.A, P0)
 	want.Mul(&ap, lin.A.T())
 	want.Add(&want, Q)
-	assertDenseApprox(t, ekf.P, &want, 1e-7)
+	assertDenseApprox(t, ekf.cov, &want, 1e-7)
 }
 
 func TestArchitectureLocalApproximationRejectsBadCallbackShapes(t *testing.T) {

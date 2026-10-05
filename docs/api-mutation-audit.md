@@ -111,13 +111,13 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `(*System).MinimalLFT` | `pure`, `returns-mutable` | Returns reduced LFT delay representation. |
 | `(*System).ZeroDelayApprox` | `pure`, `returns-mutable` | Returns zero-delay approximation. |
 | `(*System).Pade` | `pure`, `returns-mutable` | Returns delay approximation of receiver. |
-| `(*System).Discretize` | `pure`, `returns-mutable` | Default discretization wrapper. |
-| `(*System).DiscretizeWithOpts` | `pure`, `returns-mutable` | Option strings remain compatibility risk. |
-| `(*System).DiscretizeZOH` | `pure`, `returns-mutable` | Zero-order hold conversion. |
-| `(*System).DiscretizeImpulse` | `pure`, `returns-mutable` | Impulse-invariant conversion. |
-| `(*System).DiscretizeFOH` | `pure`, `returns-mutable` | First-order hold conversion. |
-| `(*System).DiscretizeMatched` | `pure`, `returns-mutable` | Matched pole-zero conversion. |
-| `(*System).Undiscretize` | `pure`, `returns-mutable` | Inverse bilinear conversion. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Default discretization wrapper. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Option strings remain compatibility risk. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Zero-order hold conversion. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Impulse-invariant conversion. |
+| `(*System).C2D` | `pure`, `returns-mutable` | First-order hold conversion. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Matched pole-zero conversion. |
+| `(*System).D2C` | `pure`, `returns-mutable` | Inverse bilinear conversion. |
 | `(*System).D2C` | `pure`, `returns-mutable` | Uses typed `C2DMethod` selector. |
 | `(*System).D2D` | `pure`, `returns-mutable` | Resamples through conversion policy. |
 
@@ -396,7 +396,7 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | Model containers | `ModelArray`, `GeneralizedModel`, `GeneralizedClosedLoop`, `TunableReal`, `TunableGain`, `TunablePID`, `TunableTF`, `TunableSS` | Mostly private fields with mutating methods; `FreeParameters` exposes parameter pointers. |
 | Options/workspaces | `C2DOptions`, `TransferFuncOpts`, `StateSpaceOpts`, `FreqRespEstOpts`, `StepInfoOptions`, `SimulateOpts`, `RiccatiOpts`, `RiccatiWorkspace`, `LyapunovOpts`, `LyapunovWorkspace`, `PidtuneOptions`, `SystuneOptions`, `PassivityOptions`, `ReduceOpts`, `ModalTruncateOptions` | Options are caller-owned; workspaces and simulation buffers are mutable and should not be shared concurrently. |
 | Result structs | `BalrealResult`, `CanonResult`, `GramResult`, `H2SynResult`, `HinfSynResult`, `LqgResult`, `LoopsensResult`, `MarginResult`, `AllMarginResult`, `DiskMarginResult`, `ReduceResult`, `ModalReductionResult`, `ModsepResult`, `PrescaleResult`, `PzmapResult`, `TimeResponse`, `StepInfoResult`, `RiccatiResult`, `RootLocusResult`, `Response`, `SsbalResult`, `StabsepResult`, `StaircaseResult`, `StateSpaceResult`, `TransferFuncResult`, `SystuneResult`, `TuningGoalResult`, `ZerosResult`, `ZPKResult`, `ERAResult`, `FRDPeakGainResult`, `FreqRespEstResult`, `ModelArrayFreqResponse`, `ModelArrayTimeResponse` | Results are mutable data containers; callers should treat them as owned outputs unless workspace-backed docs say otherwise. |
-| Value and enum types | `BalredMethod`, `CanonForm`, `AbsorbScope`, `GramType`, `PhysicalPortKind`, `PIDForm`, `PidtuneType`, `C2DMethod`, `C2DDelayModeling`, `FreqRespEstMethod`, `ReduceMode`, `TuningGoalType`, `TuningGoalSpec`, `TuningGoal`, `TunableBounds`, `AnalysisPointLocation`, `AnalysisPoint`, `PhysicalPort`, `PhysicalConnection`, `Connection`, `DampInfo`, `StepMetric`, `NonlinearModel`, `EKFModel`, `NumericBlock`, `TunableBlock`, `FRDResponseMapper`, `PIDOption`, `FeedbackOption` | Mostly value types; callback and option function types may retain references through user code. |
+| Value and enum types | `StateProjection`, `BalredOptions`, `CanonForm`, `AbsorbScope`, `GramType`, `PhysicalPortKind`, `PIDForm`, `PidtuneType`, `C2DMethod`, `C2DDelayModeling`, `FreqRespEstMethod`, `ReduceMode`, `TuningGoalType`, `TuningGoalSpec`, `TuningGoal`, `TunableBounds`, `AnalysisPointLocation`, `AnalysisPoint`, `PhysicalPort`, `PhysicalConnection`, `Connection`, `DampInfo`, `StepMetric`, `NonlinearModel`, `EKFModel`, `NumericBlock`, `TunableBlock`, `FRDResponseMapper`, `PIDOption`, `FeedbackOption` | Mostly value types; callback and option function types may retain references through user code. |
 
 ## Release Gates
 

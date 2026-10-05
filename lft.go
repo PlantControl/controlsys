@@ -218,8 +218,14 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	ND := dLFT.internalDelayCount()
 	N := NM + ND
 
-	mH, _ := mLFT.GetDelayModel()
-	dH, _ := dLFT.GetDelayModel()
+	mH, _, err := mLFT.GetDelayModel()
+	if err != nil {
+		return nil, err
+	}
+	dH, _, err := dLFT.GetDelayModel()
+	if err != nil {
+		return nil, err
+	}
 
 	nM, _, _ := mH.Dims()
 	nD, _, _ := dH.Dims()

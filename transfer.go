@@ -165,7 +165,7 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 	if err != nil {
 		return nil, err
 	}
-	if total := sys.TotalDelay(); total != nil {
+	if total := newDelayTopology(sys).totalExternal(true); total != nil {
 		res.TF.Delay = denseToSlice2D(total)
 	}
 	return res, nil
@@ -228,7 +228,10 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	}
 
 	a, b, cm := c.balancedABC()
-	stair := ControllabilityStaircase(a, b, cm, c.opts.ControllabilityTol)
+	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+	if err != nil {
+		return nil, err
+	}
 	ncont := stair.NCont
 
 	if ncont == 0 {

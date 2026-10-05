@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -306,7 +307,7 @@ func TestMargin_Discrete(t *testing.T) {
 	}
 
 	dt := 0.01
-	dsys, err := sys.DiscretizeZOH(dt)
+	dsys, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +490,7 @@ func TestBandwidth_Discrete(t *testing.T) {
 	}
 
 	dt := 0.01
-	dsys, err := sys.DiscretizeZOH(dt)
+	dsys, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +688,7 @@ func TestAllMargin_Discrete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := sys.DiscretizeZOH(0.01)
+	dsys, err := sys.C2D(0.01, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -898,7 +899,7 @@ func TestDiskMargin_Discrete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := sys.DiscretizeZOH(0.01)
+	dsys, err := sys.C2D(0.01, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1128,7 +1129,7 @@ func TestMargin_Discrete_PythonControl_SecondCase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := sys.DiscretizeZOH(0.1)
+	dsys, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1295,7 +1296,7 @@ func TestDiskMarginSkew_DenseGridOracle(t *testing.T) {
 		t.Fatal(err)
 	}
 	const dt = 0.2
-	dsys, err := csys.DiscretizeZOH(dt)
+	dsys, err := csys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2028,5 +2029,264 @@ func TestSISOEvalHighOrderMatchesOracle(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// marginDenseGrid samples the state-space response on an adaptive log grid,
+// split until phase moves < 2° and |L| < 2% per step.
+type marginDenseGrid struct {
+	eval *sisoEval
+	w    []float64
+	h    []complex128
+}
+
+func newMarginDenseGrid(eval *sisoEval, wlo, whi float64) *marginDenseGrid {
+	g := &marginDenseGrid{eval: eval}
+	var split func(w0, w1 float64, h0, h1 complex128, depth int)
+	split = func(w0, w1 float64, h0, h1 complex128, depth int) {
+		dp := math.Abs(wrapDegrees((cmplx.Phase(h1) - cmplx.Phase(h0)) * 180 / math.Pi))
+		dm := math.Abs(math.Log(cmplx.Abs(h1) / cmplx.Abs(h0)))
+		if depth < 20 && (dp > 2 || dm > 0.02) {
+			wm := math.Sqrt(w0 * w1)
+			hm := eval.at(wm)
+			split(w0, wm, h0, hm, depth+1)
+			split(wm, w1, hm, h1, depth+1)
+			return
+		}
+		g.w = append(g.w, w1)
+		g.h = append(g.h, h1)
+	}
+	base := logspace(math.Log10(wlo), math.Log10(whi), 2000)
+	g.w, g.h = []float64{base[0]}, []complex128{eval.at(base[0])}
+	for _, w := range base[1:] {
+		split(g.w[len(g.w)-1], w, g.h[len(g.h)-1], eval.at(w), 0)
+	}
+	return g
+}
+
+// crossings is the brute-force crossing oracle: bisection at each sign
+// change of log|L|−log γ and of the −180° phase offset on the grid.
+func (g *marginDenseGrid) crossings(gamma float64) (gc, pc []float64) {
+	lg := math.Log(gamma)
+	logMag := func(w float64) float64 { return math.Log(cmplx.Abs(g.eval.at(w))) - lg }
+	offset := func(w float64) float64 { return phaseOffsetDeg(g.eval.at(w)) }
+	for k := 1; k < len(g.w); k++ {
+		a, b := g.h[k-1], g.h[k]
+		if m0, m1 := math.Log(cmplx.Abs(a))-lg, math.Log(cmplx.Abs(b))-lg; m0*m1 < 0 {
+			gc = append(gc, refineCrossing(g.w[k-1], g.w[k], logMag))
+		}
+		s0, s1 := phaseOffsetDeg(a), phaseOffsetDeg(b)
+		if s0*s1 < 0 && math.Abs(s0-s1) < 180 {
+			if w := refineCrossing(g.w[k-1], g.w[k], offset); math.Abs(offset(w)) <= 1e-6 {
+				pc = append(pc, w)
+			}
+		}
+	}
+	return gc, pc
+}
+
+func marginExactMatch(t *testing.T, label string, got, want []float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("%s: got %d crossings %v, dense grid %d %v", label, len(got), got, len(want), want)
+		return
+	}
+	for i := range want {
+		if math.Abs(got[i]-want[i]) > 1e-7*want[i] {
+			t.Errorf("%s[%d]: got w=%.12g, dense grid %.12g", label, i, got[i], want[i])
+		}
+	}
+}
+
+// marginRandomLoop draws a stable SISO loop with D ≠ 0 and |L(jω0)| = 3. With
+// mimo set it is channel (1,0) of a 2×2 realization, so it carries modes
+// that are uncontrollable or unobservable from that channel.
+func marginRandomLoop(n int, kind sweepModelKind, dt float64, descriptor, mimo bool) *System {
+	seed := uint64(n)<<8 | uint64(kind)<<1
+	if dt > 0 {
+		seed |= 1 << 20
+	}
+	if descriptor {
+		seed |= 1 << 21
+	}
+	if mimo {
+		seed |= 1 << 22
+	}
+	rng := rand.New(rand.NewPCG(seed, 7))
+	io := 1
+	if mimo {
+		io = 2
+	}
+	sys, _ := randomSweepRealization(rng, kind, dt, descriptor, n, io, io)
+	if mimo {
+		sys, _ = sys.SelectByIndex([]int{0}, []int{1})
+	}
+	sys.D.Set(0, 0, 0.5+rng.Float64())
+	eval, _ := newSISOEval(sys)
+	k := 3 / cmplx.Abs(eval.at(1))
+	sys.C.Scale(k, sys.C)
+	sys.D.Scale(k, sys.D)
+	return sys
+}
+
+// AllMargin and Bandwidth find every crossing of high-order loops, where
+// polynomial candidates from the transfer function missed some from about
+// order 60 (ergo MY3SAU). Phase crossovers of continuous delayed loops come
+// from a grid search and are not checked here; their gain crossings and
+// bandwidth are checked against the delay-free twin, which has the same |L|
+// without a phase that winds 0.2·ω rad.
+func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
+	orders := []int{20, 60, 100, 150}
+	if testing.Short() || raceEnabled {
+		orders = orders[:2]
+	}
+	for _, n := range orders {
+		for _, dt := range []float64{0, 0.05} {
+			for _, variant := range []string{"siso", "mimo", "descriptor", "delay"} {
+				if (variant == "descriptor" || variant == "delay") && n > 60 ||
+					raceEnabled && (variant == "mimo" || variant == "descriptor") && n > 20 {
+					continue
+				}
+				for kind := range sweepModelKinds {
+					t.Run(fmt.Sprintf("n=%d/dt=%g/%s/%v", n, dt, variant, kind), func(t *testing.T) {
+						t.Parallel()
+						sys := marginRandomLoop(n, kind, dt, variant == "descriptor", variant == "mimo")
+						if variant == "delay" {
+							sys.InputDelay = []float64{0.2}
+							if dt > 0 {
+								sys.InputDelay[0] = 3
+							}
+						}
+						all, err := AllMargin(sys)
+						if err != nil {
+							t.Fatal(err)
+						}
+						bw, err := Bandwidth(sys, 0)
+						if err != nil {
+							t.Fatal(err)
+						}
+						oracleSys := sys
+						if variant == "delay" && dt == 0 {
+							oracleSys = sys.Copy()
+							oracleSys.InputDelay = nil
+						}
+						eval, err := newSISOEval(oracleSys)
+						if err != nil {
+							t.Fatal(err)
+						}
+						wlo, whi := 1e-5, 1e5
+						if dt > 0 {
+							whi = math.Pi / dt
+						}
+						grid := newMarginDenseGrid(eval, wlo, whi)
+						gc, pc := grid.crossings(1)
+						marginExactMatch(t, "gain", marginCountIn(all.GainCrossFreqs, wlo, whi), gc)
+						if variant != "delay" || dt > 0 {
+							marginExactMatch(t, "phase", marginCountIn(all.PhaseCrossFreqs, wlo, whi), pc)
+						}
+
+						dc, err := sys.DCGain()
+						if err != nil {
+							t.Fatal(err)
+						}
+						bgc, _ := grid.crossings(math.Abs(dc.At(0, 0)) * math.Pow(10, -3.0/20))
+						want := math.Inf(1)
+						if len(bgc) > 0 {
+							want = bgc[0]
+						}
+						if !(bw == want || math.Abs(bw-want) <= 1e-7*want) {
+							t.Errorf("bandwidth: got %.12g, dense grid %.12g", bw, want)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// Loops with |L| ≡ 1 or L real on the whole boundary make the crossing
+// pencils singular; they have no isolated crossings of that kind, while the
+// other kind is still found exactly.
+func TestAllMargin_SingularPencils(t *testing.T) {
+	tf := func(num, den []float64, dt float64) *System {
+		res, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Sys
+	}
+	cases := []struct {
+		name   string
+		sys    *System
+		gc, pc []float64
+	}{
+		{"allpass (s²-3s+2.5)/(s²+3s+2.5)", tf([]float64{1, -3, 2.5}, []float64{1, 3, 2.5}, 0), nil, []float64{math.Sqrt(2.5)}},
+		{"allpass (1-s)/(1+s)", tf([]float64{-1, 1}, []float64{1, 1}, 0), nil, nil},
+		{"-2/(1-s²) real negative", tf([]float64{-2}, []float64{-1, 0, 1}, 0), []float64{1}, nil},
+		{"discrete allpass (1-0.5z)/(z-0.5)", tf([]float64{-0.5, 1}, []float64{1, -0.5}, 0.1), nil, []float64{math.Pi / 0.1}},
+		{"static -3", tf([]float64{-3}, []float64{1}, 0), nil, nil},
+		{"1/(s+1)^3 touches 0 dB at DC", tf([]float64{1}, []float64{1, 3, 3, 1}, 0), nil, []float64{math.Sqrt(3)}},
+	}
+	for _, c := range cases {
+		all, err := AllMargin(c.sys)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		marginExactMatch(t, c.name+" gain", all.GainCrossFreqs, c.gc)
+		marginExactMatch(t, c.name+" phase", all.PhaseCrossFreqs, c.pc)
+	}
+}
+
+func BenchmarkMarginOrder(b *testing.B) {
+	for _, n := range []int{10, 100} {
+		sys := marginRandomLoop(n, sweepDense, 0, false, false)
+		b.Run(fmt.Sprintf("Margin/n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				Margin(sys)
+			}
+		})
+		b.Run(fmt.Sprintf("AllMargin/n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				AllMargin(sys)
+			}
+		})
+		b.Run(fmt.Sprintf("Bandwidth/n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				Bandwidth(sys, 0)
+			}
+		})
+		b.Run(fmt.Sprintf("Pidtune/n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				Pidtune(sys, PidtunePID)
+			}
+		})
+	}
+}
+
+// A descriptor loop with an algebraic state (singular E) adds infinite
+// eigenvalues to the crossing pencils; the finite crossings still match the
+// dense grid.
+func TestAllMargin_SingularE(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys, err := NewDescriptor(mat.NewDense(2, 2, []float64{-1, 0.3, 0, 1}), mat.NewDense(2, 1, []float64{4, 1}),
+			mat.NewDense(1, 2, []float64{1, -0.5}), mat.NewDense(1, 1, []float64{0.2}), mat.NewDense(2, 2, []float64{1, 0, 0, 0}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all, err := AllMargin(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eval, err := newSISOEval(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		whi := 1e5
+		if dt > 0 {
+			whi = math.Pi / dt
+		}
+		gc, pc := newMarginDenseGrid(eval, 1e-5, whi).crossings(1)
+		marginExactMatch(t, fmt.Sprintf("dt=%g gain", dt), all.GainCrossFreqs, gc)
+		marginExactMatch(t, fmt.Sprintf("dt=%g phase", dt), all.PhaseCrossFreqs, pc)
 	}
 }

@@ -54,7 +54,7 @@ func discretizeHoldFeedback(sys *System, input, output []float64, dt float64, op
 	if opts.Method == C2DMethodFOH && !conversionHasNonzeroDelay(rational.OutputDelay) && rational.Delay == nil {
 		disc, err = discretizeFOHInputFractions(rational, dt)
 	} else {
-		disc, err = rational.DiscretizeWithOpts(dt, openOpts)
+		disc, err = rational.C2D(dt, openOpts)
 	}
 	if err != nil {
 		return nil, err

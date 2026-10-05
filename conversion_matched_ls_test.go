@@ -35,7 +35,7 @@ func TestMatchedForwardIndependentCoefficients(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			source := conversionSISO(t, tc.num, tc.den, 0)
-			disc, err := source.DiscretizeMatched(.1)
+			disc, err := source.C2D(.1, C2DOptions{Method: C2DMethodMatched})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +83,7 @@ func TestMatchedReverseIndependentResponse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			source := conversionSISO(t, tc.num, tc.den, dt)
 			copy := source.Copy()
-			cont, err := source.D2C(C2DMethodMatched)
+			cont, err := source.D2C(D2COptions{Method: C2DMethodMatched})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -116,7 +116,7 @@ func TestMatchedReverseComplexPolesAndMetadata(t *testing.T) {
 	disc.InputName = []string{"u"}
 	disc.OutputName = []string{"y"}
 	disc.StateName = []string{"old1", "old2"}
-	cont, err := disc.D2C(C2DMethodMatched)
+	cont, err := disc.D2C(D2COptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,12 +137,12 @@ func TestMatchedReverseComplexPolesAndMetadata(t *testing.T) {
 func TestMatchedRejectUnsupportedRoots(t *testing.T) {
 	for _, den := range [][]float64{{1, 0}, {1, .5}, {1, 1}} {
 		sys := conversionSISO(t, []float64{1}, den, .1)
-		if _, err := sys.D2C(C2DMethodMatched); !errors.Is(err, ErrSingularTransform) {
+		if _, err := sys.D2C(D2COptions{Method: C2DMethodMatched}); !errors.Is(err, ErrSingularTransform) {
 			t.Fatalf("den=%v err=%v", den, err)
 		}
 	}
 	sys, _ := New(mat.NewDense(1, 1, []float64{.5}), mat.NewDense(1, 2, []float64{1, 1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 2, nil), .1)
-	if _, err := sys.D2C(C2DMethodMatched); !errors.Is(err, ErrNotSISO) {
+	if _, err := sys.D2C(D2COptions{Method: C2DMethodMatched}); !errors.Is(err, ErrNotSISO) {
 		t.Fatalf("MIMO err=%v", err)
 	}
 }
@@ -163,11 +163,11 @@ func TestLeastSquaresIndependentFrequencyResponse(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			source := conversionSISO(t, tc.num, tc.den, 0)
 			before := source.Copy()
-			result, err := source.DiscretizeLeastSquares(tc.dt, tc.order)
+			resultSys, result, err := source.C2DFit(tc.dt, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: tc.order})
 			if err != nil {
 				t.Fatal(err)
 			}
-			tf, err := result.Sys.TransferFunction(nil)
+			tf, err := resultSys.TransferFunction(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -197,7 +197,7 @@ func TestLeastSquaresIndependentFrequencyResponse(t *testing.T) {
 			if result.FitOrder != expected {
 				t.Fatal("fit order ignored")
 			}
-			poles, err := result.Sys.Poles()
+			poles, err := resultSys.Poles()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -217,27 +217,27 @@ func TestLeastSquaresGainAndInvalidInputs(t *testing.T) {
 	gain.InputDelay = []float64{.4}
 	gain.InputName = []string{"u"}
 	gain.OutputName = []string{"y"}
-	result, err := gain.DiscretizeLeastSquares(.2, 0)
+	resultSys, result, err := gain.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.FitOrder != 0 || result.RMSRelativeError != 0 || !result.Stable || result.Sys.D.At(0, 0) != 3 || result.Sys.InputDelay[0] != 2 || result.Sys.InputName[0] != "u" {
+	if result.FitOrder != 0 || result.RMSRelativeError != 0 || !result.Stable || resultSys.D.At(0, 0) != 3 || resultSys.InputDelay[0] != 2 || resultSys.InputName[0] != "u" {
 		t.Fatalf("gain result %+v", result)
 	}
 	for _, dt := range []float64{0, -1, math.NaN(), math.Inf(1)} {
-		if _, err := gain.DiscretizeLeastSquares(dt, 1); !errors.Is(err, ErrInvalidSampleTime) {
+		if _, _, err := gain.C2DFit(dt, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1}); !errors.Is(err, ErrInvalidSampleTime) {
 			t.Fatalf("dt=%g err=%v", dt, err)
 		}
 	}
-	if _, err := gain.DiscretizeLeastSquares(.2, -1); !errors.Is(err, ErrInvalidOrder) {
+	if _, _, err := gain.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: -1}); !errors.Is(err, ErrInvalidConversionOptions) {
 		t.Fatalf("negative order err=%v", err)
 	}
 	gain.InputDelay = []float64{.3}
-	if _, err := gain.DiscretizeLeastSquares(.2, 1); !errors.Is(err, ErrFractionalDelay) {
+	if _, _, err := gain.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1}); !errors.Is(err, ErrFractionalDelay) {
 		t.Fatalf("fractional delay err=%v", err)
 	}
 	integrator := conversionSISO(t, []float64{1}, []float64{1, 0, 0}, 0)
-	if _, err := integrator.DiscretizeLeastSquares(.2, 1); !errors.Is(err, ErrInvalidOrder) {
+	if _, _, err := integrator.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1}); !errors.Is(err, ErrInvalidOrder) {
 		t.Fatalf("integrator order err=%v", err)
 	}
 }
@@ -247,7 +247,7 @@ func BenchmarkMatchedConversion(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		if _, err := sys.DiscretizeMatched(.1); err != nil {
+		if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodMatched}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -258,7 +258,7 @@ func BenchmarkLeastSquaresConversion(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		if _, err := sys.DiscretizeLeastSquares(.1, 0); err != nil {
+		if _, _, err := sys.C2DFit(.1, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 0}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -267,11 +267,11 @@ func BenchmarkLeastSquaresConversion(b *testing.B) {
 func TestLeastSquaresIntegratorConstraints(t *testing.T) {
 	for _, den := range [][]float64{{1, 0}, {1, 0, 0}, {1, 2, 0}} {
 		source := conversionSISO(t, []float64{1}, den, 0)
-		result, err := source.DiscretizeLeastSquares(.2, 0)
+		resultSys, result, err := source.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 0})
 		if err != nil {
 			t.Fatal(err)
 		}
-		model, err := result.Sys.TransferFunction(nil)
+		model, err := resultSys.TransferFunction(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -302,11 +302,11 @@ func TestLeastSquaresOfflineVariableProjectionReference(t *testing.T) {
 	}
 	for _, f := range fixtures {
 		source := conversionSISO(t, f.num, f.den, 0)
-		result, err := source.DiscretizeLeastSquares(.2, 1)
+		resultSys, result, err := source.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
-		tf, err := result.Sys.TransferFunction(nil)
+		tf, err := resultSys.TransferFunction(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -360,7 +360,7 @@ func BenchmarkLeastSquaresOrders(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				if _, err := sys.DiscretizeLeastSquares(.1, tc.order); err != nil {
+				if _, _, err := sys.C2DFit(.1, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: tc.order}); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -370,11 +370,11 @@ func BenchmarkLeastSquaresOrders(b *testing.B) {
 
 func TestLeastSquaresOptionsDispatch(t *testing.T) {
 	source := conversionSISO(t, []float64{2}, []float64{1, 3, 2}, 0)
-	direct, err := source.DiscretizeLeastSquares(.2, 1)
+	directSys, _, err := source.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatch, err := source.DiscretizeWithOpts(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
+	dispatch, err := source.C2D(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestLeastSquaresOptionsDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := direct.Sys.TransferFunction(nil)
+	want, err := directSys.TransferFunction(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,18 +393,18 @@ func TestLeastSquaresOptionsDispatch(t *testing.T) {
 func TestLeastSquaresRejectUnsupportedModelClasses(t *testing.T) {
 	source := conversionSISO(t, []float64{1}, []float64{1, 1}, 0)
 	improper, _ := index2Descriptor(t, 0, true)
-	if _, err := siso00(t, improper).DiscretizeLeastSquares(.2, 2); !errors.Is(err, ErrDescriptorUnsupported) || !errors.Is(err, ErrImproperModel) {
+	if _, _, err := siso00(t, improper).C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 2}); !errors.Is(err, ErrDescriptorUnsupported) || !errors.Is(err, ErrImproperModel) {
 		t.Fatalf("improper descriptor err=%v", err)
 	}
 	source.LFT = &LFTDelay{Tau: []float64{.3}, B2: mat.NewDense(1, 1, []float64{1}), C2: mat.NewDense(1, 1, []float64{1}), D12: mat.NewDense(1, 1, nil), D21: mat.NewDense(1, 1, nil), D22: mat.NewDense(1, 1, nil)}
-	if _, err := source.DiscretizeLeastSquares(.2, 1); !errors.Is(err, ErrFeedbackDelay) {
+	if _, _, err := source.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1}); !errors.Is(err, ErrFeedbackDelay) {
 		t.Fatalf("internal delay err=%v", err)
 	}
 	mimo, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 2, []float64{1, 1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 2, nil), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mimo.DiscretizeLeastSquares(.2, 1); !errors.Is(err, ErrNotSISO) {
+	if _, _, err := mimo.C2DFit(.2, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1}); !errors.Is(err, ErrNotSISO) {
 		t.Fatalf("MIMO err=%v", err)
 	}
 }

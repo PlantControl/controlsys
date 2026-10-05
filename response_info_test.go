@@ -35,11 +35,11 @@ func TestStepInfoFirstOrderResponse(t *testing.T) {
 	if math.Abs(got.SteadyStateValue-1) > 1e-3 {
 		t.Fatalf("steady-state value = %g, want near 1", got.SteadyStateValue)
 	}
-	if math.Abs(got.RiseTime-2.2) > 0.08 {
-		t.Errorf("rise time = %g, want near 2.2", got.RiseTime)
+	if rise, ok := got.RiseTime(); !ok || math.Abs(rise-2.2) > 0.08 {
+		t.Errorf("rise time = %g, %v, want near 2.2", rise, ok)
 	}
-	if math.Abs(got.SettlingTime-3.9) > 0.15 {
-		t.Errorf("settling time = %g, want near 3.9", got.SettlingTime)
+	if settling, ok := got.SettlingTime(); !ok || math.Abs(settling-3.9) > 0.15 {
+		t.Errorf("settling time = %g, %v, want near 3.9", settling, ok)
 	}
 	if math.Abs(got.Peak-1) > 1e-3 {
 		t.Errorf("peak = %g, want near 1", got.Peak)
@@ -100,11 +100,11 @@ func TestStepInfoUnsettledResponseWithKnownSteadyState(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := info.Metrics[0]
-	if got.Settled {
-		t.Fatal("response reported settled, want unsettled")
+	if settling, ok := got.SettlingTime(); ok {
+		t.Fatalf("settling time = %g, want not settled", settling)
 	}
-	if !math.IsNaN(got.SettlingTime) {
-		t.Errorf("settling time = %g, want NaN", got.SettlingTime)
+	if rise, ok := got.RiseTime(); !ok || math.Abs(rise-(1+0.1/0.6-0.125)) > 1e-12 {
+		t.Errorf("rise time = %g, %v, want interpolated 0.1→0.9 crossing", rise, ok)
 	}
 }
 
@@ -132,10 +132,10 @@ func TestStepInfoDiscreteNonzeroFinalValue(t *testing.T) {
 	if math.Abs(got.SteadyStateValue-4) > 1e-12 {
 		t.Fatalf("steady-state value = %g, want 4", got.SteadyStateValue)
 	}
-	if got.RiseTime <= 0 {
-		t.Errorf("rise time = %g, want positive", got.RiseTime)
+	if rise, ok := got.RiseTime(); !ok || rise <= 0 {
+		t.Errorf("rise time = %g, %v, want positive", rise, ok)
 	}
-	if !got.Settled {
+	if _, ok := got.SettlingTime(); !ok {
 		t.Error("discrete response did not settle")
 	}
 }
@@ -164,8 +164,8 @@ func TestStepInfoMIMONonSymmetricRows(t *testing.T) {
 		t.Fatalf("got %d metrics, want 4", len(info.Metrics))
 	}
 	for i, metric := range info.Metrics {
-		if math.IsNaN(metric.SettlingTime) {
-			t.Fatalf("metric %d settling time is NaN", i)
+		if _, ok := metric.SettlingTime(); !ok {
+			t.Fatalf("metric %d did not settle", i)
 		}
 	}
 }
@@ -195,7 +195,7 @@ func TestStepInfoForSystem_ContinuousInternalDelaySimulates(t *testing.T) {
 		t.Fatal(err)
 	}
 	// x' = -x - 2x(t-τ) + u settles at 1/3.
-	if m := info.Metrics[0]; !m.Settled || math.Abs(m.SteadyStateValue-1.0/3) > 1e-3 {
+	if m := info.Metrics[0]; !m.settled || math.Abs(m.SteadyStateValue-1.0/3) > 1e-3 {
 		t.Fatalf("metrics = %+v, want settled at 1/3", m)
 	}
 }
@@ -218,8 +218,8 @@ func TestStepInfoForSystemUsesDCGainAsSteadyState(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := info.Metrics[0]
-	if m.Settled || !math.IsNaN(m.SettlingTime) || m.SteadyStateValue != 1 {
-		t.Fatalf("tau=10 at t=5: Settled=%v SettlingTime=%g SteadyState=%g, want unsettled toward DC gain 1", m.Settled, m.SettlingTime, m.SteadyStateValue)
+	if settling, ok := m.SettlingTime(); ok || m.SteadyStateValue != 1 {
+		t.Fatalf("tau=10 at t=5: SettlingTime=%g, %v SteadyState=%g, want unsettled toward DC gain 1", settling, ok, m.SteadyStateValue)
 	}
 
 	a := mat.NewDense(2, 2, []float64{-1, 0.4, -0.3, -2})
@@ -267,4 +267,42 @@ func TestStepInfoRejectsInvalidOptions(t *testing.T) {
 	if _, err := StepInfo(resp, &StepInfoOptions{RiseTimeLimits: [2]float64{0, 0.5}, SettlingThreshold: 0.05}); err != nil {
 		t.Errorf("valid options rejected: %v", err)
 	}
+}
+
+func TestStepInfoUndefinedRiseAndSentinels(t *testing.T) {
+	resp := &TimeResponse{T: []float64{0, 1, 2}, Y: mat.NewDense(2, 3, []float64{1, 1, 1, 0, 0.05, 0.08})}
+	info, err := StepInfo(resp, &StepInfoOptions{SteadyStateValue: []float64{1, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rise, ok := info.Metrics[0].RiseTime(); ok {
+		t.Errorf("zero step rise = %g, want undefined", rise)
+	}
+	if rise, ok := info.Metrics[1].RiseTime(); ok {
+		t.Errorf("uncrossed rise = %g, want undefined", rise)
+	}
+	if _, ok := info.Metrics[1].SettlingTime(); ok {
+		t.Error("unsettled row reported settled")
+	}
+
+	for name, call := range map[string]func() error{
+		"nil response": func() error { _, err := StepInfo(nil, nil); return err },
+		"limits": func() error {
+			_, err := StepInfo(resp, &StepInfoOptions{RiseTimeLimits: [2]float64{0.9, 0.1}})
+			return err
+		},
+		"threshold": func() error { _, err := StepInfo(resp, &StepInfoOptions{SettlingThreshold: 2}); return err },
+		"NaN ss": func() error {
+			_, err := StepInfo(resp, &StepInfoOptions{SteadyStateValue: []float64{math.NaN(), 1}})
+			return err
+		},
+		"time order": func() error {
+			_, err := StepInfo(&TimeResponse{T: []float64{0, 0, 1}, Y: resp.Y}, nil)
+			return err
+		},
+	} {
+		wantErr(t, name, call(), ErrInvalidArgument, "StepInfo")
+	}
+	_, err = StepInfoForSystem(nil, 1, nil)
+	wantErr(t, "StepInfoForSystem nil", err, ErrInvalidArgument, "StepInfoForSystem")
 }

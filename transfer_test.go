@@ -760,7 +760,7 @@ func TestTransferFunctionBalancesBadlyScaledA(t *testing.T) {
 	if n, _, _ := pade.Dims(); n != 18 {
 		t.Fatalf("n = %d, want 18", n)
 	}
-	padeZ, err := pade.DiscretizeZOH(0.2)
+	padeZ, err := pade.C2D(0.2, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

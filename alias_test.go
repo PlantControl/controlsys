@@ -123,17 +123,17 @@ func aliasCases() []aliasCase {
 		{"PullDelaysToLFT", aliasPick(fxDelayed), aliasOne((*System).PullDelaysToLFT)},
 		{"PullDelaysToLFT/residual", aliasPick(fxResidual), aliasOne((*System).PullDelaysToLFT)},
 		{"Pade/residual", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) { return s.Pade(2) })},
-		{"Discretize/residual", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) { return s.Discretize(0.1) })},
+		{"Discretize/residual", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) { return s.C2D(0.1, C2DOptions{Method: C2DMethodTustin}) })},
 		{"Discretize/thiran", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) {
-			return s.DiscretizeWithOpts(0.05, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 2})
+			return s.C2D(0.05, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 2})
 		})},
 		{"Discretize/thiran/residual", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) {
-			return s.DiscretizeWithOpts(0.05, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 2})
+			return s.C2D(0.05, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 2})
 		})},
 		{"Discretize/internalModel", aliasPick(fxResidual), aliasOne(func(s *System) (*System, error) {
-			return s.DiscretizeWithOpts(0.05, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
+			return s.C2D(0.05, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
 		})},
-		{"Discretize/internal", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.Discretize(0.1) })},
+		{"Discretize/internal", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.C2D(0.1, C2DOptions{Method: C2DMethodTustin}) })},
 		{"Series/residual", aliasPick(fxResidual, fxPlant), aliasTwo(Series)},
 		{"Feedback/residual", aliasPick(fxResidual, fxGain), aliasTwo(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
 		{"ZeroDelayApprox", aliasPick(fxInternal), aliasOne((*System).ZeroDelayApprox)},
@@ -141,24 +141,24 @@ func aliasCases() []aliasCase {
 		{"MinimalLFT", aliasPick(fxInternal), aliasOne((*System).MinimalLFT)},
 		{"MinimalLFT/none", aliasPick(fxPlant), aliasOne((*System).MinimalLFT)},
 		{"AugmentInternalDelayOutputs", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.AugmentInternalDelayOutputs("d") })},
-		{"GetDelayModel", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { H, _ := s.GetDelayModel(); return H, nil })},
-		{"GetDelayModel/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { H, _ := s.GetDelayModel(); return H, nil })},
+		{"GetDelayModel", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { H, _, err := s.GetDelayModel(); return H, err })},
+		{"GetDelayModel/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { H, _, err := s.GetDelayModel(); return H, err })},
 		{"SetDelayModel", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return SetDelayModel(s, nil)
 		})},
-		{"Discretize", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return s.Discretize(0.1) })},
-		{"DiscretizeZOH", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.DiscretizeZOH(0.1) })},
-		{"DiscretizeFOH", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.DiscretizeFOH(0.1) })},
-		{"DiscretizeImpulse", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.DiscretizeImpulse(0.1) })},
-		{"DiscretizeMatched", aliasPick(fxSISO), aliasOne(func(s *System) (*System, error) { return s.DiscretizeMatched(0.1) })},
+		{"Discretize", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return s.C2D(0.1, C2DOptions{Method: C2DMethodTustin}) })},
+		{"DiscretizeZOH", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.C2D(0.1, C2DOptions{}) })},
+		{"DiscretizeFOH", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.C2D(0.1, C2DOptions{Method: C2DMethodFOH}) })},
+		{"DiscretizeImpulse", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.C2D(0.1, C2DOptions{Method: C2DMethodImpulse}) })},
+		{"DiscretizeMatched", aliasPick(fxSISO), aliasOne(func(s *System) (*System, error) { return s.C2D(0.1, C2DOptions{Method: C2DMethodMatched}) })},
 		{"DiscretizeTustin", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
-			return s.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin})
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 		})},
-		{"D2C", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2C(C2DMethodZOH) })},
-		{"D2C/delayed", aliasPick(fxDiscDelayed), aliasOne(func(s *System) (*System, error) { return s.D2C(C2DMethodZOH) })},
-		{"D2D/same", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2D(1, C2DOptions{}) })},
-		{"D2D", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2D(0.5, C2DOptions{}) })},
-		{"Undiscretize", aliasPick(fxDisc), aliasOne((*System).Undiscretize)},
+		{"D2C", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2C(D2COptions{Method: C2DMethodZOH}) })},
+		{"D2C/delayed", aliasPick(fxDiscDelayed), aliasOne(func(s *System) (*System, error) { return s.D2C(D2COptions{Method: C2DMethodZOH}) })},
+		{"D2D/same", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2D(1, D2DOptions{}) })},
+		{"D2D", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2D(0.5, D2DOptions{}) })},
+		{"Undiscretize", aliasPick(fxDisc), aliasOne(func(s *System) (*System, error) { return s.D2C(D2COptions{Method: C2DMethodTustin}) })},
 		{"ToExplicit/desc", aliasPick(fxDesc), aliasOne((*System).ToExplicit)},
 		{"ToExplicit/plain", aliasPick(fxPlant), aliasOne((*System).ToExplicit)},
 		{"SelectByIndex/all", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) { return s.SelectByIndex([]int{0, 1}, []int{0, 1}) })},
@@ -173,9 +173,12 @@ func aliasCases() []aliasCase {
 			return s.FixedInputReduction(map[int]float64{1: 0.5}, "off")
 		})},
 		{"FixedInputReduction/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.FixedInputReduction(nil, "off") })},
-		{"Modred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Modred(s, []int{2}, SingularPerturbation) })},
+		{"Modred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Modred(s, []int{2}, MatchDC) })},
 		{"Modred/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Modred(s, nil, Truncate) })},
-		{"Balred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { r, _, err := Balred(s, 2, Truncate); return r, err })},
+		{"Balred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
+			r, _, err := Balred(s, 2, BalredOptions{StateProjection: Truncate})
+			return r, err
+		})},
 		{"Balreal", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Balreal(s)) })},
 		{"Canon", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Canon(s, CanonModal)) })},
 		{"Prescale", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Prescale(s)) })},

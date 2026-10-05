@@ -193,22 +193,22 @@ func TestLeastSquaresHighOrderSources(t *testing.T) {
 				t.Fatalf("integrators=%d residue=%g, want %d %g", k, residue, tc.chain, want)
 			}
 			if tc.chain > 1 {
-				_, err := source.DiscretizeLeastSquares(dt, tc.chain-1)
+				_, _, err := source.C2DFit(dt, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: tc.chain - 1})
 				if !errors.Is(err, ErrInvalidOrder) || !strings.Contains(err.Error(), fmt.Sprintf("retain %d integrators", tc.chain)) {
 					t.Fatalf("order %d err=%v", tc.chain-1, err)
 				}
 			}
-			result, err := source.DiscretizeLeastSquares(dt, order)
+			resultSys, result, err := source.C2DFit(dt, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: order})
 			if err != nil {
 				t.Fatal(err)
 			}
-			nd, _, _ := result.Sys.Dims()
+			nd, _, _ := resultSys.Dims()
 			samples := max(513, 32*order+1)
 			residual, magnitude, maxError, maxMagnitude := 0.0, 0.0, 0.0, 0.0
 			for q := 0; q <= samples; q++ {
 				theta := math.Pi * (float64(q) + .5) / float64(samples+1)
 				want := src.eval(complex(0, theta/dt), tc.row, tc.col)
-				got := oracleResponse(t, result.Sys, cmplx.Exp(complex(0, theta)), nd, 1, 1)[0]
+				got := oracleResponse(t, resultSys, cmplx.Exp(complex(0, theta)), nd, 1, 1)[0]
 				delta := cmplx.Abs(got - want)
 				residual, magnitude = math.Hypot(residual, delta), math.Hypot(magnitude, cmplx.Abs(want))
 				maxError, maxMagnitude = math.Max(maxError, delta), math.Max(maxMagnitude, cmplx.Abs(want))
@@ -221,7 +221,7 @@ func TestLeastSquaresHighOrderSources(t *testing.T) {
 			if rms > .01 {
 				t.Fatalf("oracle rms=%g", rms)
 			}
-			poles, err := result.Sys.Poles()
+			poles, err := resultSys.Poles()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -237,7 +237,7 @@ func TestLeastSquaresHighOrderSources(t *testing.T) {
 			if tc.chain > 0 {
 				for _, w := range []float64{1e-4, 1e-3, 1e-2} {
 					want := src.eval(complex(0, w), tc.row, tc.col)
-					got := bigSISOResponse(result.Sys, cmplx.Exp(complex(0, w*dt)))
+					got := bigSISOResponse(resultSys, cmplx.Exp(complex(0, w*dt)))
 					if cmplx.Abs(got-want) > 3e-3*cmplx.Abs(want) {
 						t.Fatalf("w=%g fitted=%v want=%v", w, got, want)
 					}
@@ -346,7 +346,7 @@ func TestLeastSquaresIntegratorCount(t *testing.T) {
 func TestLeastSquaresDenseSweepSourceN100(t *testing.T) {
 	rng := rand.New(rand.NewPCG(100, uint64(sweepDense)))
 	source, _ := randomSweepRealization(rng, sweepDense, 0, false, 100, 1, 1)
-	result, err := source.DiscretizeLeastSquares(.05, 8)
+	_, result, err := source.C2DFit(.05, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 8})
 	if err != nil {
 		t.Fatal(err)
 	}

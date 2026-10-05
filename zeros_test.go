@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"math"
 	"math/cmplx"
 	"testing"
 
@@ -898,5 +899,55 @@ func TestZeros_SISOKeepsCancelledInvariantZeros(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestZerosDetail_StaticGainRank(t *testing.T) {
+	cases := []struct {
+		d    *mat.Dense
+		rank int
+	}{
+		{mat.NewDense(2, 2, []float64{1, 0, 0, 1}), 2},
+		{mat.NewDense(2, 3, []float64{1, 2, 3, 2, 4, 6}), 1},
+		{mat.NewDense(2, 2, []float64{0, 0, 0, 0}), 0},
+	}
+	for _, tc := range cases {
+		for _, dt := range []float64{0, 0.1} {
+			sys, err := NewGain(tc.d, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := sys.ZerosDetail()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Rank != tc.rank || len(res.Zeros) != 0 {
+				t.Errorf("dt=%g D=%v: rank %d zeros %v, want rank %d, no zeros", dt, mat.Formatted(tc.d), res.Rank, res.Zeros, tc.rank)
+			}
+		}
+	}
+}
+
+func TestZerosDetail_InvalidInput(t *testing.T) {
+	var nilSys *System
+	if _, err := nilSys.ZerosDetail(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil ZerosDetail error = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := nilSys.Zeros(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil Zeros error = %v, want ErrInvalidArgument", err)
+	}
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
+		mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys.B.Set(1, 0, math.Inf(1))
+	if _, err := sys.Zeros(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Inf B error = %v, want ErrInvalidArgument", err)
 	}
 }

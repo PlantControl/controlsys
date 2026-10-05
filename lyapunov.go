@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
@@ -87,7 +88,7 @@ func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	}
 	n := problem.n
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("Lyap: A has no rows: %w", ErrDimensionMismatch)
 	}
 	ws := problem.ws
 
@@ -172,7 +173,7 @@ func DLyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	}
 	n := problem.n
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("DLyap: A has no rows: %w", ErrDimensionMismatch)
 	}
 	ws := problem.ws
 
@@ -430,8 +431,9 @@ func solveDiscrLyap2(t11, t12, t21, t22 float64, c []float64, r, ldc int) (float
 	rhs := [3]float64{c11, c12, c22}
 
 	var ipiv, jpiv [3]int
-	k := impl.Dgetc2(3, m[:], 3, ipiv[:], jpiv[:])
-	_ = k
+	if impl.Dgetc2(3, m[:], 3, ipiv[:], jpiv[:]) >= 0 {
+		return 1, ErrSingularEquation
+	}
 	scale := impl.Dgesc2(3, m[:], 3, rhs[:], ipiv[:], jpiv[:])
 
 	c[r*ldc+r] = rhs[0]
@@ -504,8 +506,9 @@ func solveDiscrKron(da, db int, at []float64, aRow, ldat int, bt []float64, bRow
 	}
 
 	var ipiv, jpiv [4]int
-	k := impl.Dgetc2(nn, kron[:nn*nn], nn, ipiv[:nn], jpiv[:nn])
-	_ = k
+	if impl.Dgetc2(nn, kron[:nn*nn], nn, ipiv[:nn], jpiv[:nn]) >= 0 {
+		return 1, ErrSingularEquation
+	}
 	scale := impl.Dgesc2(nn, kron[:nn*nn], nn, rhs[:nn], ipiv[:nn], jpiv[:nn])
 
 	for i := range da {

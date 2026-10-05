@@ -19,10 +19,7 @@ type H2SynResult struct {
 // handled by a loop shift: K is designed for D22 = 0 and returned as
 // K0 (I + D22 K0)^-1, giving the same closed loop and H2 norm.
 func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
-	if err := requireSystem("H2Syn", P); err != nil {
-		return nil, err
-	}
-	gp, err := partitionGeneralizedPlant(P, nmeas, ncont)
+	gp, err := partitionGeneralizedPlant("H2Syn", P, nmeas, ncont)
 	if err != nil {
 		return nil, err
 	}

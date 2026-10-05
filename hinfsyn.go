@@ -27,10 +27,7 @@ type HinfSynResult struct {
 // K is designed for D22 = 0 and returned as K0 (I + D22 K0)^-1, giving the
 // same closed loop and gamma.
 func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
-	if err := requireSystem("HinfSyn", P); err != nil {
-		return nil, err
-	}
-	gp, err := partitionGeneralizedPlant(P, nmeas, ncont)
+	gp, err := partitionGeneralizedPlant("HinfSyn", P, nmeas, ncont)
 	if err != nil {
 		return nil, err
 	}
@@ -403,52 +400,4 @@ func hasImaginaryAxisEigenvalue(t []float64, n int, wr, wi []float64) bool {
 		}
 	}
 	return false
-}
-
-func maxSVD(M *mat.Dense) float64 {
-	r, c := M.Dims()
-	if r == 0 || c == 0 {
-		return 0
-	}
-	raw := M.RawMatrix()
-	allZero := true
-	for i := range r {
-		for j := range c {
-			if raw.Data[i*raw.Stride+j] != 0 {
-				allZero = false
-				break
-			}
-		}
-		if !allZero {
-			break
-		}
-	}
-	if allZero {
-		return 0
-	}
-
-	mCopy := make([]float64, r*c)
-	copyStrided(mCopy, c, raw.Data, raw.Stride, r, c)
-
-	minDim := min(c, r)
-	s := make([]float64, minDim)
-	ldu := max(1, r)
-	ldvt := max(1, c)
-
-	var wkQuery [1]float64
-	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, mCopy, c, s, nil, ldu, nil, ldvt, wkQuery[:], -1)
-	lwork := int(wkQuery[0])
-	work := make([]float64, lwork)
-	ok := impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, mCopy, c, s, nil, ldu, nil, ldvt, work, lwork)
-	if !ok {
-		return 0
-	}
-
-	maxS := 0.0
-	for _, sv := range s {
-		if sv > maxS {
-			maxS = sv
-		}
-	}
-	return maxS
 }

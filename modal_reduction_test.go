@@ -20,7 +20,7 @@ func TestModalTruncateRetainsDominantModesAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ModalTruncate: %v", err)
 	}
-	if result.Method != "real-schur-modal-truncate" || result.Order != 2 {
+	if result.Order != 2 {
 		t.Fatalf("metadata = %#v", result)
 	}
 	if n, _, _ := result.Sys.Dims(); n != 2 {
@@ -120,7 +120,7 @@ func TestModalTruncatePreservesUnstableModesAndAutoSelects(t *testing.T) {
 	if _, err := ModalTruncate(sys, &ModalTruncateOptions{Order: 1}); !errors.Is(err, ErrInvalidOrder) {
 		t.Fatalf("unstable-discard order err = %v, want ErrInvalidOrder", err)
 	}
-	result, err := ModalTruncate(sys, &ModalTruncateOptions{MaxRealPart: -0.5})
+	result, err := ModalTruncate(sys, &ModalTruncateOptions{MaxRealPart: new(-0.5)})
 	if err != nil {
 		t.Fatalf("ModalTruncate auto: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestModalTruncatePreservesUnstableModesAndAutoSelects(t *testing.T) {
 	if _, err := ModalTruncate(sys, &ModalTruncateOptions{Order: 5}); !errors.Is(err, ErrInvalidOrder) {
 		t.Fatalf("invalid order err = %v, want ErrInvalidOrder", err)
 	}
-	if _, err := ModalTruncate(modalTestSystem(t), &ModalTruncateOptions{MaxRealPart: 5}); !errors.Is(err, ErrInvalidOrder) {
+	if _, err := ModalTruncate(modalTestSystem(t), &ModalTruncateOptions{MaxRealPart: new(5.0)}); !errors.Is(err, ErrInvalidOrder) {
 		t.Fatalf("empty threshold selection err = %v, want ErrInvalidOrder", err)
 	}
 }
@@ -208,5 +208,35 @@ func TestModalTruncateRejectsOrderOutOfRange(t *testing.T) {
 		if !errors.Is(err, ErrInvalidOrder) || !strings.HasPrefix(err.Error(), "ModalTruncate: ") {
 			t.Errorf("order %d: err = %v, want ModalTruncate: ...ErrInvalidOrder", tc.order, err)
 		}
+	}
+}
+
+func TestModalTruncateMaxRealPartZeroAndConflicts(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(4, 4, []float64{0, 0.3, 0, 0, 0, -1, 0.2, 0, 0, 0, -5, 1, 0, 0, 0, -10}),
+		mat.NewDense(4, 2, []float64{1, 0, 1, 1, 0, 1, 1, 0}),
+		mat.NewDense(2, 4, []float64{1, 0, 1, 0, 0, 1, 0, 1}),
+		mat.NewDense(2, 2, []float64{0.1, 0, 0, 0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ModalTruncate(sys, &ModalTruncateOptions{MaxRealPart: new(0.0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Order != 1 || !sameComplexApprox(res.KeptPoles, []complex128{0}, 1e-12) {
+		t.Fatalf("MaxRealPart 0: order %d poles %v, want the pole at 0 only", res.Order, res.KeptPoles)
+	}
+	if _, err := ModalTruncate(sys, &ModalTruncateOptions{Order: 2, MaxRealPart: new(-2.0)}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("both selections err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := ModalTruncate(sys, &ModalTruncateOptions{MaxRealPart: new(math.NaN())}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("NaN threshold err = %v, want ErrInvalidArgument", err)
+	}
+	static, _ := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if _, err := ModalTruncate(static, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("no states err = %v, want ErrDimensionMismatch", err)
 	}
 }
