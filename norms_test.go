@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand"
@@ -1585,6 +1586,103 @@ func TestPeakGain_FallbackWhenSampledBoundMissesPeak(t *testing.T) {
 	}
 }
 
+// highPassResonanceSys is a 2×2 high-pass d_i·s/(s+a_i) with coupling,
+// plus a ζ ∈ [1e-6, 1e-4] resonance at ω0 ∈ [0.3, 3]: the sampled bound
+// stays below σ(D) while the resonance peak lies far above it.
+func highPassResonanceSys(t testing.TB, rng *rand.Rand, dt float64) *System {
+	t.Helper()
+	zeta := math.Pow(10, -4-2*rng.Float64())
+	w0 := 0.3 + 2.7*rng.Float64()
+	a := []float64{0.5 + rng.Float64(), 1 + 2*rng.Float64()}
+	d := []float64{50 + 150*rng.Float64(), 20 + 50*rng.Float64()}
+	A := mat.NewDense(4, 4, []float64{
+		-a[0], 0.3, 0, 0,
+		0, -a[1], 0, 0,
+		0, 0, -zeta * w0, w0,
+		0, 0, -w0, -zeta * w0,
+	})
+	B := mat.NewDense(4, 2, []float64{
+		1, 0,
+		0, 1,
+		0, 0,
+		rng.NormFloat64(), rng.NormFloat64(),
+	})
+	C := mat.NewDense(2, 4, []float64{
+		-d[0] * a[0], 0, rng.NormFloat64(), 0,
+		0, -d[1] * a[1], rng.NormFloat64(), 0,
+	})
+	D := mat.NewDense(2, 2, []float64{d[0], 0.1 * d[1], 0, d[1]})
+	sys, err := New(A, B, C, D, 0)
+	if err == nil && dt > 0 {
+		sys, err = sys.Discretize(dt)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func TestPeakGain_ResonanceAboveFeedthroughBoundedEvals(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	var belowSigmaD, total int
+	for trial := range 60 {
+		dt := 0.0
+		if trial%2 == 1 {
+			dt = 0.1
+		}
+		sys := highPassResonanceSys(t, rng, dt)
+		csys := sys
+		if dt > 0 {
+			csys, _ = sys.Undiscretize()
+		}
+		low, _ := hinfLowerBound(csys, 2, 2)
+		if low < maxSVDense(csys.D, 2, 2) {
+			belowSigmaD++
+		}
+		total++
+		if evals := assertPeakMatchesBisection(t, fmt.Sprintf("trial %d dt=%g", trial, dt), sys); evals > 10 {
+			t.Errorf("trial %d dt=%g: %d Hamiltonian evaluations, want ≤ 10", trial, dt, evals)
+		}
+	}
+	if belowSigmaD < total/2 {
+		t.Fatalf("sampled bound below sigma(D) in %d of %d models", belowSigmaD, total)
+	}
+}
+
+func TestHamiltonianUpperBound_LightlyDamped(t *testing.T) {
+	rng := rand.New(rand.NewSource(20261005))
+	for trial := range 40 {
+		zeta := math.Pow(10, -4-2*rng.Float64())
+		sys := randomStableNormSys(t, rng, 2+rng.Intn(7), 1+rng.Intn(3), 1+rng.Intn(3), 0, trial%2 == 1, zeta)
+		peak, _, err := bisectionPeakGain(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, m, p := sys.Dims()
+		ws := newHamiltonianWS(sys, n, m, p)
+
+		var high float64
+		var certified bool
+		evals := countHamiltonianEvals(func() { _, high, _, certified = ws.upperBound(sys, peak, 0, 1e-10) })
+		if certified || evals != 1 || high != 2*peak {
+			t.Errorf("trial %d from the peak: high = %g (peak %g), certified %v, %d evals; want 2·peak, 1 eval",
+				trial, high, peak, certified, evals)
+		}
+
+		var low float64
+		evals = countHamiltonianEvals(func() { low, high, _, certified = ws.upperBound(sys, peak/4, 0, 1e-10) })
+		if evals > 8 {
+			t.Errorf("trial %d from peak/4: %d Hamiltonian evaluations, want ≤ 8", trial, evals)
+		}
+		if low > peak*(1+1e-10) || high < peak*(1-1e-10) {
+			t.Errorf("trial %d from peak/4: [%g, %g] does not bracket peak %g", trial, low, high, peak)
+		}
+		if certified && math.Abs(low*(1+1e-10/2)-peak) > 1e-10*peak {
+			t.Errorf("trial %d: certified %.15g, peak %.15g", trial, low, peak)
+		}
+	}
+}
+
 func TestPeakGain_BisectionFallbackWhenProbeInconclusive(t *testing.T) {
 	highPass, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), 0)
@@ -1598,5 +1696,15 @@ func TestPeakGain_BisectionFallbackWhenProbeInconclusive(t *testing.T) {
 	evals := assertPeakMatchesBisection(t, "high-pass D=1", highPass)
 	if evals < 20 {
 		t.Errorf("%d Hamiltonian evaluations; probe below sigma(D) must fall back to bisection", evals)
+	}
+}
+
+func BenchmarkHinfNorm_ResonanceAboveFeedthrough(b *testing.B) {
+	sys := highPassResonanceSys(b, rand.New(rand.NewSource(1)), 0)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, _, err := HinfNorm(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
