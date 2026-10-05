@@ -582,12 +582,10 @@ func freqResponseLFT(sys *System, omega []float64, p, m int) (*FreqResponseMatri
 	data := make([]complex128, nw*p*m)
 	n, _, _ := sys.Dims()
 	N := sys.internalDelayCount()
-	ws := newLFTWorkspace(n, N, p, m)
-
+	ws := newLFTWorkspace(sys, n, N, p, m)
+	td := newTimeDomain(sys.Dt)
 	for k, w := range omega {
-		var s complex128
-		s = newTimeDomain(sys.Dt).frequencyVariable(w)
-		if err := evalFrLFTInto(ws, sys, s, n, N, p, m); err != nil {
+		if err := evalFrLFTInto(ws, sys, td.frequencyVariable(w), N, p, m); err != nil {
 			return nil, err
 		}
 		copy(data[k*p*m:], ws.g[:p*m])
@@ -597,89 +595,66 @@ func freqResponseLFT(sys *System, omega []float64, p, m int) (*FreqResponseMatri
 }
 
 type lftWorkspace struct {
-	sIA       []complex128
-	resolvent []complex128
-	hTemp     []complex128
-	H11       []complex128
-	H12       []complex128
-	H21       []complex128
-	H22       []complex128
-	delta     []complex128
-	H22D      []complex128
-	ImH22D    []complex128
-	invBuf    []complex128
-	invResult []complex128
-	temp      []complex128
-	g         []complex128
+	bd    *balancedDense
+	h     []complex128 // (p+N)×(m+N) [H11 H12; H21 H22]
+	delta []complex128
+	lhs   []complex128 // I - H22·Δ
+	x     []complex128 // N×m
+	g     []complex128
 }
 
-func newLFTWorkspace(n, N, p, m int) *lftWorkspace {
-	maxInv := max(n, N)
+// newLFTWorkspace balances the augmented plant [|A|+|E| B B2; C C2 ·] so
+// the delay channels are solved on the same well-scaled realization as the
+// I/O channels.
+func newLFTWorkspace(sys *System, n, N, p, m int) *lftWorkspace {
+	br := newRealizationCopy(sys, n, m, p)
+	lft := sys.LFT
+	mN, pN := m+N, p+N
+	b := make([]float64, n*mN)
+	c := make([]float64, pN*n)
+	for i := range n {
+		copy(b[i*mN:i*mN+m], br.b[i*m:(i+1)*m])
+	}
+	copy(c, br.c)
+	if n > 0 {
+		b2 := lft.B2.RawMatrix()
+		copyStrided(b[m:], mN, b2.Data, b2.Stride, n, N)
+		c2 := lft.C2.RawMatrix()
+		copyStrided(c[p*n:], n, c2.Data, c2.Stride, N, n)
+	}
+	d := make([]float64, pN*mN)
+	for _, blk := range []struct {
+		src  *mat.Dense
+		r, c int
+	}{{sys.D, 0, 0}, {lft.D12, 0, m}, {lft.D21, p, 0}, {lft.D22, p, m}} {
+		if blk.src == nil || blk.src.IsEmpty() {
+			continue
+		}
+		raw := blk.src.RawMatrix()
+		copyStrided(d[blk.r*mN+blk.c:], mN, raw.Data, raw.Stride, raw.Rows, raw.Cols)
+	}
+	br.m, br.p, br.b, br.c, br.d, br.dStride = mN, pN, b, c, d, mN
+	br.balance(nil)
+	cs := make([]complex128, pN*mN+N+N*N+N*m+p*m)
 	return &lftWorkspace{
-		sIA:       make([]complex128, n*n),
-		resolvent: make([]complex128, n*n),
-		hTemp:     make([]complex128, n*max(m, N, p)),
-		H11:       make([]complex128, p*m),
-		H12:       make([]complex128, p*N),
-		H21:       make([]complex128, N*m),
-		H22:       make([]complex128, N*N),
-		delta:     make([]complex128, N),
-		H22D:      make([]complex128, N*N),
-		ImH22D:    make([]complex128, N*N),
-		invBuf:    make([]complex128, maxInv*2*maxInv),
-		invResult: make([]complex128, N*N),
-		temp:      make([]complex128, N*m),
-		g:         make([]complex128, p*m),
+		bd:    newBalancedDenseOf(br),
+		h:     cs[: pN*mN : pN*mN],
+		delta: cs[pN*mN : pN*mN+N : pN*mN+N],
+		lhs:   cs[pN*mN+N : pN*mN+N+N*N : pN*mN+N+N*N],
+		x:     cs[pN*mN+N+N*N : pN*mN+N+N*N+N*m : pN*mN+N+N*N+N*m],
+		g:     cs[pN*mN+N+N*N+N*m:],
 	}
 }
 
-func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, n, N, p, m int) error {
-	aRaw := sys.A.RawMatrix()
-	bRaw := sys.B.RawMatrix()
-	cRaw := sys.C.RawMatrix()
-	var dData []float64
-	var dStride int
-	if sys.D != nil {
-		dR := sys.D.RawMatrix()
-		dData, dStride = dR.Data, dR.Stride
+// evalFrLFTInto sets ws.g to G = H11 + H12·Δ·(I - H22·Δ)⁻¹·H21.
+func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, N, p, m int) error {
+	h := ws.h
+	if err := ws.bd.evalInto(s, h); err != nil {
+		return err
 	}
-
-	b2Raw := sys.LFT.B2.RawMatrix()
-	c2Raw := sys.LFT.C2.RawMatrix()
-	var d12Data, d21Data, d22Data []float64
-	var d12Stride, d21Stride, d22Stride int
-	if sys.LFT.D12 != nil {
-		r := sys.LFT.D12.RawMatrix()
-		d12Data, d12Stride = r.Data, r.Stride
-	}
-	if sys.LFT.D21 != nil {
-		r := sys.LFT.D21.RawMatrix()
-		d21Data, d21Stride = r.Data, r.Stride
-	}
-	if sys.LFT.D22 != nil {
-		r := sys.LFT.D22.RawMatrix()
-		d22Data, d22Stride = r.Data, r.Stride
-	}
-
-	if sys.E == nil {
-		if err := cResolventInto(ws.resolvent, ws.sIA, ws.invBuf, aRaw.Data, aRaw.Stride, s, n); err != nil {
-			return err
-		}
-	} else {
-		eRaw := sys.E.RawMatrix()
-		if err := cDescriptorResolventInto(ws.resolvent, ws.sIA, ws.invBuf, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride, s, n); err != nil {
-			return err
-		}
-	}
-
-	cComputeHInto(ws.H11, ws.hTemp, ws.resolvent, cRaw.Data, cRaw.Stride, bRaw.Data, bRaw.Stride, dData, dStride, n, p, m)
-	cComputeHInto(ws.H12, ws.hTemp, ws.resolvent, cRaw.Data, cRaw.Stride, b2Raw.Data, b2Raw.Stride, d12Data, d12Stride, n, p, N)
-	cComputeHInto(ws.H21, ws.hTemp, ws.resolvent, c2Raw.Data, c2Raw.Stride, bRaw.Data, bRaw.Stride, d21Data, d21Stride, n, N, m)
-	cComputeHInto(ws.H22, ws.hTemp, ws.resolvent, c2Raw.Data, c2Raw.Stride, b2Raw.Data, b2Raw.Stride, d22Data, d22Stride, n, N, N)
-
+	mN := m + N
 	cont := sys.IsContinuous()
-	for j := range N {
-		tau := sys.LFT.Tau[j]
+	for j, tau := range sys.LFT.Tau {
 		if cont {
 			ws.delta[j] = cmplx.Exp(-s * complex(tau, 0))
 		} else {
@@ -690,26 +665,27 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, n, N, p, m int) 
 			}
 		}
 	}
-
-	cMulDiagRightInto(ws.H22D, ws.H22, ws.delta, N, N)
-
-	for i := 0; i < N*N; i++ {
-		ws.ImH22D[i] = -ws.H22D[i]
-	}
 	for i := range N {
-		ws.ImH22D[i*N+i] += 1
+		hRow := h[(p+i)*mN:]
+		for j := range N {
+			ws.lhs[i*N+j] = -hRow[m+j] * ws.delta[j]
+		}
+		ws.lhs[i*N+i] += 1
+		copy(ws.x[i*m:(i+1)*m], hRow[:m])
 	}
-
-	if err := cInvertInto(ws.invResult, ws.invBuf, ws.ImH22D, N); err != nil {
+	if err := cSolveInPlace(ws.lhs, ws.x, N, m); err != nil {
 		return err
 	}
-
-	cMulInto(ws.temp, ws.invResult, ws.H21, N, N, m)
-	cMulDiagLeftInto(ws.temp, ws.delta, ws.temp, N, m)
-
-	copy(ws.g[:p*m], ws.H11[:p*m])
-	cAddMul(ws.g, ws.H12, ws.temp, p, N, m)
-
+	for i := range p {
+		hRow := h[i*mN:]
+		for j := range m {
+			v := hRow[j]
+			for k := range N {
+				v += hRow[m+k] * ws.delta[k] * ws.x[k*m+j]
+			}
+			ws.g[i*m+j] = v
+		}
+	}
 	return nil
 }
 
@@ -718,76 +694,13 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, s complex128, n, N, p, m int) 
 func evalFrLFT(sys *System, s complex128, p, m int) ([]complex128, error) {
 	n, _, _ := sys.Dims()
 	N := sys.internalDelayCount()
-	ws := newLFTWorkspace(n, N, p, m)
-	if err := evalFrLFTInto(ws, sys, s, n, N, p, m); err != nil {
+	ws := newLFTWorkspace(sys, n, N, p, m)
+	if err := evalFrLFTInto(ws, sys, s, N, p, m); err != nil {
 		return nil, err
 	}
 	result := make([]complex128, p*m)
 	copy(result, ws.g[:p*m])
 	return result, nil
-}
-
-func cResolventInto(dst, sIA, invBuf []complex128, aData []float64, aStride int, s complex128, n int) error {
-	if n == 0 {
-		return nil
-	}
-	for i := range n {
-		row := i * n
-		aRow := i * aStride
-		for j := range n {
-			sIA[row+j] = -complex(aData[aRow+j], 0)
-		}
-		sIA[row+i] += s
-	}
-	return cInvertInto(dst, invBuf, sIA, n)
-}
-
-func cDescriptorResolventInto(dst, sEA, invBuf []complex128, aData []float64, aStride int, eData []float64, eStride int, s complex128, n int) error {
-	if n == 0 {
-		return nil
-	}
-	for i := range n {
-		row := i * n
-		aRow := i * aStride
-		eRow := i * eStride
-		for j := range n {
-			sEA[row+j] = s*complex(eData[eRow+j], 0) - complex(aData[aRow+j], 0)
-		}
-	}
-	return cInvertInto(dst, invBuf, sEA, n)
-}
-
-func cComputeHInto(dst, temp, resolvent []complex128, cData []float64, cStride int, bData []float64, bStride int, dData []float64, dStride, n, rows, cols int) {
-	for i := range dst[:rows*cols] {
-		dst[i] = 0
-	}
-	if n > 0 {
-		for i := range n {
-			for j := range cols {
-				var sum complex128
-				for k := range n {
-					sum += resolvent[i*n+k] * complex(bData[k*bStride+j], 0)
-				}
-				temp[i*cols+j] = sum
-			}
-		}
-		for i := range rows {
-			for j := range cols {
-				var sum complex128
-				for k := range n {
-					sum += complex(cData[i*cStride+k], 0) * temp[k*cols+j]
-				}
-				dst[i*cols+j] = sum
-			}
-		}
-	}
-	if dData != nil {
-		for i := range rows {
-			for j := range cols {
-				dst[i*cols+j] += complex(dData[i*dStride+j], 0)
-			}
-		}
-	}
 }
 
 func cMulInto(dst, a, b []complex128, ar, ac, bc int) {
@@ -798,34 +711,6 @@ func cMulInto(dst, a, b []complex128, ar, ac, bc int) {
 				sum += a[i*ac+k] * b[k*bc+j]
 			}
 			dst[i*bc+j] = sum
-		}
-	}
-}
-
-func cAddMul(dst, a, b []complex128, ar, ac, bc int) {
-	for i := range ar {
-		for j := range bc {
-			var sum complex128
-			for k := range ac {
-				sum += a[i*ac+k] * b[k*bc+j]
-			}
-			dst[i*bc+j] += sum
-		}
-	}
-}
-
-func cMulDiagRightInto(dst, a, diag []complex128, rows, cols int) {
-	for i := range rows {
-		for j := range cols {
-			dst[i*cols+j] = a[i*cols+j] * diag[j]
-		}
-	}
-}
-
-func cMulDiagLeftInto(dst, diag, a []complex128, rows, cols int) {
-	for i := range rows {
-		for j := range cols {
-			dst[i*cols+j] = diag[i] * a[i*cols+j]
 		}
 	}
 }
