@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"strings"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -138,64 +139,100 @@ func (p *TunableReal) copy() *TunableReal {
 }
 
 // TunableGain is a static gain whose entries are tunable parameters, as
-// MATLAB tunableGain. Unlike tunableGain(name, ny, nu), which creates
-// zero-initialized parameters, the constructor takes the parameter matrix.
+// MATLAB tunableGain; see
+// https://www.mathworks.com/help/control/ref/tunablegain.html.
 type TunableGain struct {
 	name string
-	dt   float64
-	D    [][]*TunableReal
+	// Gain holds the entries, as MATLAB blk.Gain; entry (i, j) is named
+	// "<name>.Gain(i+1,j+1)". Set values, bounds and Free through the
+	// entries; replacing an entry with a shared TunableReal ties blocks.
+	Gain [][]*TunableReal
+	// Dt is the sample time, MATLAB blk.Ts; set it to the plant's.
+	Dt                    float64
+	InputName, OutputName []string
 }
 
-// NewTunableGain returns the gain block name with entries D (copied), see
-// https://www.mathworks.com/help/control/ref/tunablegain.html. An empty name,
-// a nil or empty D or nil entry returns ErrInvalidArgument, a ragged D
-// ErrDimensionMismatch and an invalid dt ErrInvalidSampleTime.
-func NewTunableGain(name string, D [][]*TunableReal, dt float64) (*TunableGain, error) {
-	if err := requireTunableBlock("NewTunableGain", name, dt, D); err != nil {
+// NewTunableGain returns the ny×nu gain block name, as MATLAB
+// tunableGain(name, ny, nu): every entry free, zero and unbounded, Dt = 0.
+// An empty name or negative size returns ErrInvalidArgument and a zero size
+// ErrDimensionMismatch, as a static gain without inputs or outputs cannot be
+// stored.
+func NewTunableGain(name string, ny, nu int) (*TunableGain, error) {
+	const op = "NewTunableGain"
+	if err := requireTunableName(op, name); err != nil {
 		return nil, err
 	}
-	b := &TunableGain{name: name, D: copyTunableMatrix(D), dt: dt}
+	if err := requireTunableIO(op, ny, nu); err != nil {
+		return nil, err
+	}
+	return newTunableGain(op, name, mat.NewDense(ny, nu, nil))
+}
+
+// NewTunableGainFrom returns the gain block name initialized to G, as MATLAB
+// tunableGain(name, G). A nil or non-finite G or an empty name returns
+// ErrInvalidArgument.
+func NewTunableGainFrom(name string, G *mat.Dense) (*TunableGain, error) {
+	const op = "NewTunableGainFrom"
+	if err := requireTunableName(op, name); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense(op, "G", G); err != nil {
+		return nil, err
+	}
+	return newTunableGain(op, name, G)
+}
+
+func newTunableGain(op, name string, G *mat.Dense) (*TunableGain, error) {
+	b := &TunableGain{name: name, Gain: newTunableMatrix(name+".Gain", G, nil)}
 	if _, err := b.CurrentSystem(); err != nil {
-		return nil, fmt.Errorf("NewTunableGain: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	return b, nil
 }
 
+// Name returns the block name.
+func (b *TunableGain) Name() string { return b.name }
+
 // CurrentSystem returns the gain at the current parameter values.
 func (b *TunableGain) CurrentSystem() (*System, error) {
-	D, err := tunableMatrixValues(b.D, "D")
+	const op = "TunableGain.CurrentSystem"
+	D, err := tunableMatrixValues(b.Gain, "Gain")
 	if err != nil {
-		return nil, fmt.Errorf("TunableGain.CurrentSystem: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	if D.IsEmpty() {
-		return nil, fmt.Errorf("TunableGain.CurrentSystem: D is empty: %w", ErrInvalidArgument)
+		return nil, fmt.Errorf("%s: Gain is empty: %w", op, ErrDimensionMismatch)
 	}
-	return NewGain(D, b.dt)
+	sys, err := NewGain(D, b.Dt)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	return applyBlockNames(op, sys, b.InputName, b.OutputName)
 }
 
 // Sample returns a copy with free parameters set from values.
 func (b *TunableGain) Sample(values map[string]float64) (*TunableGain, error) {
-	D, err := sampleTunableMatrix(b.D, values)
-	if err != nil {
-		return nil, err
-	}
-	return &TunableGain{name: b.name, D: D, dt: b.dt}, nil
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.Sample(values) })
 }
 
 // RandomSample returns a copy with free parameters drawn uniformly from their
 // bounds; see TunableReal.RandomSample.
 func (b *TunableGain) RandomSample(rng *rand.Rand) (*TunableGain, error) {
-	D, err := randomSampleTunableMatrix(b.D, rng)
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.RandomSample(rng) })
+}
+
+func (b *TunableGain) mapParams(f func(*TunableReal) (*TunableReal, error)) (*TunableGain, error) {
+	G, err := mapTunableMatrix(b.Gain, f)
 	if err != nil {
 		return nil, err
 	}
-	return &TunableGain{name: b.name, D: D, dt: b.dt}, nil
+	return &TunableGain{name: b.name, Gain: G, Dt: b.Dt, InputName: copyStringSlice(b.InputName), OutputName: copyStringSlice(b.OutputName)}, nil
 }
 
 // FreeParameters returns the distinct free parameters by name. They are the
 // block's own parameters, so SetValue or SetFixed on them changes the block.
 func (b *TunableGain) FreeParameters() []*TunableReal {
-	return uniqueFreeTunableMatrices(b.D)
+	return uniqueFreeTunableMatrices(b.Gain)
 }
 
 // SampleBlock is Sample as a TunableBlock.
@@ -203,84 +240,118 @@ func (b *TunableGain) SampleBlock(values map[string]float64) (TunableBlock, erro
 	return b.Sample(values)
 }
 
-// TunablePID is a PID controller with tunable gains Kp, Ki, Kd and a fixed
-// derivative filter time constant Tf, as MATLAB tunablePID. Unlike
-// tunablePID(name, type), the constructor takes the gain parameters; hold a
-// term at zero with a fixed TunableReal of value 0.
+// TunablePID is a parallel-form PID controller
+//
+//	C = Kp + Ki·I(s) + Kd·s/(Tf·s+1)
+//
+// with tunable Kp, Ki, Kd and Tf, as MATLAB tunablePID; see
+// https://www.mathworks.com/help/control/ref/tunablepid.html. The
+// parameters are named "<name>.Kp", "<name>.Ki", "<name>.Kd" and
+// "<name>.Tf".
 type TunablePID struct {
-	IFormula, DFormula PIDFormula
-	name               string
-	Kp, Ki, Kd         *TunableReal
-	Tf                 float64
-	Dt                 float64
+	name                  string
+	Kp, Ki, Kd, Tf        *TunableReal
+	IFormula, DFormula    PIDFormula
+	Dt                    float64
+	InputName, OutputName []string
 }
 
-// NewTunablePID returns the PID block name with gains kp, ki, kd (copied),
-// filter time constant tf and sample time dt; see
-// https://www.mathworks.com/help/control/ref/tunablepid.html. A nil gain, an
-// empty name or a negative or non-finite tf returns ErrInvalidArgument.
-func NewTunablePID(name string, kp, ki, kd *TunableReal, tf, dt float64) (*TunablePID, error) {
-	if err := requireTunableBlock("NewTunablePID", name, dt, [][]*TunableReal{{kp, ki, kd}}); err != nil {
+// NewTunablePID returns the PID block name of family typ with sample time ts
+// (0 for continuous), as MATLAB tunablePID(name, type, Ts). typ is P, PI, PD
+// or PID (case ignored), the families MATLAB accepts: P fixes Ki = Kd = 0 and
+// Tf = 1, PI fixes Kd = 0 and Tf = 1, PD fixes Ki = 0, and every other
+// parameter is free and unbounded except Tf ≥ 0. MATLAB leaves the initial
+// values undocumented; here the free gains start at 0 and Tf at 1. An empty
+// name or another family returns ErrInvalidArgument and an invalid ts
+// ErrInvalidSampleTime.
+func NewTunablePID(name string, typ PidtuneType, ts float64) (*TunablePID, error) {
+	const op = "NewTunablePID"
+	hasI, hasD, err := tunablePIDFamily(op, name, typ, ts)
+	if err != nil {
 		return nil, err
 	}
-	if !(tf >= 0) || math.IsInf(tf, 0) {
-		return nil, fmt.Errorf("NewTunablePID: tf is %g: %w", tf, ErrInvalidArgument)
+	b := &TunablePID{name: name, Dt: ts}
+	b.Kp, b.Ki, b.Kd, b.Tf = newTunablePIDGains(name, 0, 0, 0, 1, hasI, hasD)
+	return b, b.check(op)
+}
+
+// NewTunablePIDFrom returns the PID block name initialized from sys, as
+// MATLAB tunablePID(name, sys): gains, Tf, sample time and discrete formulas
+// are copied, a zero Ki or Kd is fixed at zero (Kd = 0 also fixes Tf at 1),
+// and the rest are free and unbounded except Tf ≥ 0. A nil or invalid sys or
+// an empty name returns ErrInvalidArgument.
+func NewTunablePIDFrom(name string, sys *PID) (*TunablePID, error) {
+	const op = "NewTunablePIDFrom"
+	if err := requireTunableName(op, name); err != nil {
+		return nil, err
 	}
-	b := &TunablePID{name: name, Kp: kp.copy(), Ki: ki.copy(), Kd: kd.copy(), Tf: tf, Dt: dt}
+	if sys == nil {
+		return nil, fmt.Errorf("%s: sys is nil: %w", op, ErrInvalidArgument)
+	}
+	if err := validatePID(sys.Kp, sys.Ki, sys.Kd, sys.Tf, sys.Dt, sys.IFormula, sys.DFormula); err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	hasD := sys.Kd != 0
+	tf := 1.0
+	if hasD {
+		tf = sys.Tf
+	}
+	b := &TunablePID{name: name, Dt: sys.Dt, IFormula: sys.IFormula, DFormula: sys.DFormula}
+	b.Kp, b.Ki, b.Kd, b.Tf = newTunablePIDGains(name, sys.Kp, sys.Ki, sys.Kd, tf, sys.Ki != 0, hasD)
+	return b, b.check(op)
+}
+
+func (b *TunablePID) check(op string) error {
 	if _, err := b.CurrentSystem(); err != nil {
-		return nil, fmt.Errorf("NewTunablePID: %w", err)
+		return fmt.Errorf("%s: %w", op, err)
 	}
-	return b, nil
+	return nil
 }
 
-// CurrentSystem returns the PID controller at the current gains.
+// Name returns the block name.
+func (b *TunablePID) Name() string { return b.name }
+
+// CurrentSystem returns the PID controller at the current parameter values.
 func (b *TunablePID) CurrentSystem() (*System, error) {
-	if b.Kp == nil || b.Ki == nil || b.Kd == nil {
-		return nil, fmt.Errorf("TunablePID.CurrentSystem: nil gain parameter: %w", ErrInvalidArgument)
+	const op = "TunablePID.CurrentSystem"
+	v, err := tunableScalarValues(b.Kp, b.Ki, b.Kd, b.Tf)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	pid := &PID{Kp: b.Kp.Value(), Ki: b.Ki.Value(), Kd: b.Kd.Value(), Tf: b.Tf, Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}
-	return pid.System()
+	pid := &PID{Kp: v[0], Ki: v[1], Kd: v[2], Tf: v[3], Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}
+	sys, err := pid.System()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	return applyBlockNames(op, sys, b.InputName, b.OutputName)
 }
 
-// Sample returns a copy with free gains set from values.
+// Sample returns a copy with free parameters set from values.
 func (b *TunablePID) Sample(values map[string]float64) (*TunablePID, error) {
-	kp, err := b.Kp.Sample(values)
-	if err != nil {
-		return nil, err
-	}
-	ki, err := b.Ki.Sample(values)
-	if err != nil {
-		return nil, err
-	}
-	kd, err := b.Kd.Sample(values)
-	if err != nil {
-		return nil, err
-	}
-	return &TunablePID{name: b.name, Kp: kp, Ki: ki, Kd: kd, Tf: b.Tf, Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}, nil
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.Sample(values) })
 }
 
-// RandomSample returns a copy with free gains drawn uniformly from their
+// RandomSample returns a copy with free parameters drawn uniformly from their
 // bounds; see TunableReal.RandomSample.
 func (b *TunablePID) RandomSample(rng *rand.Rand) (*TunablePID, error) {
-	kp, err := b.Kp.RandomSample(rng)
-	if err != nil {
-		return nil, err
-	}
-	ki, err := b.Ki.RandomSample(rng)
-	if err != nil {
-		return nil, err
-	}
-	kd, err := b.Kd.RandomSample(rng)
-	if err != nil {
-		return nil, err
-	}
-	return &TunablePID{name: b.name, Kp: kp, Ki: ki, Kd: kd, Tf: b.Tf, Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}, nil
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.RandomSample(rng) })
 }
 
-// FreeParameters returns the distinct free gains by name; they are the
+func (b *TunablePID) mapParams(f func(*TunableReal) (*TunableReal, error)) (*TunablePID, error) {
+	v, err := mapTunableVector([]*TunableReal{b.Kp, b.Ki, b.Kd, b.Tf}, f)
+	if err != nil {
+		return nil, err
+	}
+	cp := *b
+	cp.Kp, cp.Ki, cp.Kd, cp.Tf = v[0], v[1], v[2], v[3]
+	cp.InputName, cp.OutputName = copyStringSlice(b.InputName), copyStringSlice(b.OutputName)
+	return &cp, nil
+}
+
+// FreeParameters returns the distinct free parameters by name; they are the
 // block's own parameters.
 func (b *TunablePID) FreeParameters() []*TunableReal {
-	return uniqueFreeTunableMatrices([][]*TunableReal{{b.Kp, b.Ki, b.Kd}})
+	return uniqueFreeTunableMatrices([][]*TunableReal{{b.Kp, b.Ki, b.Kd, b.Tf}})
 }
 
 // SampleBlock is Sample as a TunableBlock.
@@ -288,81 +359,346 @@ func (b *TunablePID) SampleBlock(values map[string]float64) (TunableBlock, error
 	return b.Sample(values)
 }
 
-// TunableTF is a transfer function with tunable numerator coefficients and a
-// fixed denominator per output row, as MATLAB tunableTF (which also tunes the
-// denominator; here Den is fixed).
-type TunableTF struct {
-	name string
-	Num  [][][]*TunableReal
-	Den  [][]float64
-	Dt   float64
+// TunablePID2 is a 2-DOF PID controller with inputs (r, y) and output
+//
+//	u = Kp·(b·r − y) + Ki·I(s)·(r − y) + Kd·s/(Tf·s+1)·(c·r − y)
+//
+// whose Kp, Ki, Kd, Tf, b and c are tunable, as MATLAB tunablePID2; see
+// https://www.mathworks.com/help/control/ref/tunablepid2.html. The
+// parameters are named "<name>.Kp", ..., "<name>.b" and "<name>.c".
+type TunablePID2 struct {
+	name                  string
+	Kp, Ki, Kd, Tf, B, C  *TunableReal
+	IFormula, DFormula    PIDFormula
+	Dt                    float64
+	InputName, OutputName []string
 }
 
-// NewTunableTF returns the block name with numerator parameters num[i][j]
-// (descending powers, copied) and row denominators den; see
-// https://www.mathworks.com/help/control/ref/tunabletf.html. The model must
-// be proper and well formed.
-func NewTunableTF(name string, num [][][]*TunableReal, den [][]float64, dt float64) (*TunableTF, error) {
-	if err := requireTunableBlock("NewTunableTF", name, dt, num...); err != nil {
+// NewTunablePID2 returns the 2-DOF PID block name of family typ with sample
+// time ts, as MATLAB tunablePID2(name, type, Ts). Kp, Ki, Kd and Tf follow
+// NewTunablePID; b is free, and c is free when the family has a derivative
+// term and fixed otherwise. MATLAB leaves the initial values undocumented;
+// here the free gains start at 0, Tf, b and c at 1. Errors follow
+// NewTunablePID.
+func NewTunablePID2(name string, typ PidtuneType, ts float64) (*TunablePID2, error) {
+	const op = "NewTunablePID2"
+	hasI, hasD, err := tunablePIDFamily(op, name, typ, ts)
+	if err != nil {
 		return nil, err
 	}
-	if len(num) == 0 || len(den) == 0 {
-		return nil, fmt.Errorf("NewTunableTF: num or den is empty: %w", ErrInvalidArgument)
-	}
-	b := &TunableTF{name: name, Num: copyTunableTensor(num), Den: copyFloatRows(den), Dt: dt}
-	if _, err := b.CurrentSystem(); err != nil {
-		return nil, fmt.Errorf("NewTunableTF: %w", err)
-	}
-	return b, nil
+	b := &TunablePID2{name: name, Dt: ts}
+	b.Kp, b.Ki, b.Kd, b.Tf = newTunablePIDGains(name, 0, 0, 0, 1, hasI, hasD)
+	b.B, b.C = newTunablePID2Weights(name, 1, 1, hasD)
+	return b, b.check(op)
 }
+
+// NewTunablePID2From returns the 2-DOF PID block name initialized from sys,
+// as MATLAB tunablePID2(name, sys); the free parameters are chosen as in
+// NewTunablePIDFrom, with b free and c free when Kd ≠ 0. A nil or invalid sys
+// or an empty name returns ErrInvalidArgument.
+func NewTunablePID2From(name string, sys *PID2) (*TunablePID2, error) {
+	const op = "NewTunablePID2From"
+	if err := requireTunableName(op, name); err != nil {
+		return nil, err
+	}
+	if sys == nil {
+		return nil, fmt.Errorf("%s: sys is nil: %w", op, ErrInvalidArgument)
+	}
+	if err := validatePID(sys.Kp, sys.Ki, sys.Kd, sys.Tf, sys.Dt, sys.IFormula, sys.DFormula); err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	if err := requireFinite(op, "setpoint weights", sys.B, sys.C); err != nil {
+		return nil, err
+	}
+	hasD := sys.Kd != 0
+	tf := 1.0
+	if hasD {
+		tf = sys.Tf
+	}
+	b := &TunablePID2{name: name, Dt: sys.Dt, IFormula: sys.IFormula, DFormula: sys.DFormula}
+	b.Kp, b.Ki, b.Kd, b.Tf = newTunablePIDGains(name, sys.Kp, sys.Ki, sys.Kd, tf, sys.Ki != 0, hasD)
+	b.B, b.C = newTunablePID2Weights(name, sys.B, sys.C, hasD)
+	return b, b.check(op)
+}
+
+func (b *TunablePID2) check(op string) error {
+	if _, err := b.CurrentSystem(); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return nil
+}
+
+// Name returns the block name.
+func (b *TunablePID2) Name() string { return b.name }
+
+// CurrentSystem returns the 2-input (r, y), 1-output controller at the
+// current parameter values.
+func (b *TunablePID2) CurrentSystem() (*System, error) {
+	const op = "TunablePID2.CurrentSystem"
+	v, err := tunableScalarValues(b.Kp, b.Ki, b.Kd, b.Tf, b.B, b.C)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	pid := &PID2{Kp: v[0], Ki: v[1], Kd: v[2], Tf: v[3], B: v[4], C: v[5], Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}
+	sys, err := pid.system()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	return applyBlockNames(op, sys, b.InputName, b.OutputName)
+}
+
+// Sample returns a copy with free parameters set from values.
+func (b *TunablePID2) Sample(values map[string]float64) (*TunablePID2, error) {
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.Sample(values) })
+}
+
+// RandomSample returns a copy with free parameters drawn uniformly from their
+// bounds; see TunableReal.RandomSample.
+func (b *TunablePID2) RandomSample(rng *rand.Rand) (*TunablePID2, error) {
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.RandomSample(rng) })
+}
+
+func (b *TunablePID2) mapParams(f func(*TunableReal) (*TunableReal, error)) (*TunablePID2, error) {
+	v, err := mapTunableVector([]*TunableReal{b.Kp, b.Ki, b.Kd, b.Tf, b.B, b.C}, f)
+	if err != nil {
+		return nil, err
+	}
+	cp := *b
+	cp.Kp, cp.Ki, cp.Kd, cp.Tf, cp.B, cp.C = v[0], v[1], v[2], v[3], v[4], v[5]
+	cp.InputName, cp.OutputName = copyStringSlice(b.InputName), copyStringSlice(b.OutputName)
+	return &cp, nil
+}
+
+// FreeParameters returns the distinct free parameters by name; they are the
+// block's own parameters.
+func (b *TunablePID2) FreeParameters() []*TunableReal {
+	return uniqueFreeTunableMatrices([][]*TunableReal{{b.Kp, b.Ki, b.Kd, b.Tf, b.B, b.C}})
+}
+
+// SampleBlock is Sample as a TunableBlock.
+func (b *TunablePID2) SampleBlock(values map[string]float64) (TunableBlock, error) {
+	return b.Sample(values)
+}
+
+func tunablePIDFamily(op, name string, typ PidtuneType, ts float64) (hasI, hasD bool, err error) {
+	if err := requireTunableName(op, name); err != nil {
+		return false, false, err
+	}
+	switch PidtuneType(strings.ToUpper(string(typ))) {
+	case PidtuneP:
+	case PidtunePI:
+		hasI = true
+	case PidtunePD:
+		hasD = true
+	case PidtunePID:
+		hasI, hasD = true, true
+	default:
+		return false, false, fmt.Errorf("%s: type %q, want P, PI, PD or PID: %w", op, typ, ErrInvalidArgument)
+	}
+	if err := requireTunableSampleTime(op, ts); err != nil {
+		return false, false, err
+	}
+	return hasI, hasD, nil
+}
+
+func newTunablePIDGains(name string, kp, ki, kd, tf float64, hasI, hasD bool) (Kp, Ki, Kd, Tf *TunableReal) {
+	if !hasI {
+		ki = 0
+	}
+	if !hasD {
+		kd = 0
+	}
+	Tf = newTunableParam(name+".Tf", tf, hasD)
+	Tf.bounds.Lower = 0
+	return newTunableParam(name+".Kp", kp, true), newTunableParam(name+".Ki", ki, hasI), newTunableParam(name+".Kd", kd, hasD), Tf
+}
+
+func newTunablePID2Weights(name string, b, c float64, hasD bool) (*TunableReal, *TunableReal) {
+	return newTunableParam(name+".b", b, true), newTunableParam(name+".c", c, hasD)
+}
+
+// TunableTF is a SISO transfer function
+//
+//	(a_m·s^m + ... + a_0) / (s^n + b_(n-1)·s^(n-1) + ... + b_0)
+//
+// with tunable coefficients, as MATLAB tunableTF; see
+// https://www.mathworks.com/help/control/ref/tunabletf.html.
+type TunableTF struct {
+	name string
+	// Numerator holds a_m, ..., a_0 named "<name>.Numerator(k)", k from 1.
+	Numerator []*TunableReal
+	// Denominator holds 1, b_(n-1), ..., b_0 named "<name>.Denominator(k)";
+	// the leading coefficient is fixed at 1.
+	Denominator           []*TunableReal
+	Dt                    float64
+	InputName, OutputName []string
+}
+
+// NewTunableTF returns the SISO block name with nz zeros, np poles and
+// sample time ts (0 for continuous), as MATLAB tunableTF(name, Nz, Np, Ts).
+// Every coefficient but the leading denominator one is free and unbounded.
+// MATLAB initializes to an undocumented stable, strictly proper model; here
+// it is 1/(s+1)^np, or 1/(z−0.5)^np in discrete time. A negative count or an
+// empty name returns ErrInvalidArgument, nz > np ErrImproperTF and an invalid
+// ts ErrInvalidSampleTime.
+func NewTunableTF(name string, nz, np int, ts float64) (*TunableTF, error) {
+	const op = "NewTunableTF"
+	if err := requireTunableName(op, name); err != nil {
+		return nil, err
+	}
+	if nz < 0 || np < 0 {
+		return nil, fmt.Errorf("%s: Nz %d and Np %d must be nonnegative: %w", op, nz, np, ErrInvalidArgument)
+	}
+	if nz > np {
+		return nil, fmt.Errorf("%s: Nz %d exceeds Np %d: %w", op, nz, np, ErrImproperTF)
+	}
+	if err := requireTunableSampleTime(op, ts); err != nil {
+		return nil, err
+	}
+	root := -1.0
+	if ts > 0 {
+		root = 0.5
+	}
+	den := []float64{1}
+	for range np {
+		den = append(den, 0)
+		for k := len(den) - 1; k > 0; k-- {
+			den[k] -= root * den[k-1]
+		}
+	}
+	num := make([]float64, nz+1)
+	num[nz] = 1
+	return newTunableTF(op, name, num, den, ts)
+}
+
+// NewTunableTFFrom returns the block name initialized from the SISO model
+// sys, as MATLAB tunableTF(name, sys): Nz and Np are the numerator and
+// denominator degrees, the coefficients are normalized to a monic
+// denominator, and Dt and signal names are copied. A nil sys or empty name
+// returns ErrInvalidArgument, a MIMO sys ErrNotSISO (tunableTF is SISO only),
+// a delay ErrDelayUnsupported, a zero leading denominator coefficient
+// ErrSingularDenom and an improper sys ErrImproperTF.
+func NewTunableTFFrom(name string, sys *TransferFunc) (*TunableTF, error) {
+	const op = "NewTunableTFFrom"
+	if err := requireTunableName(op, name); err != nil {
+		return nil, err
+	}
+	if sys == nil {
+		return nil, fmt.Errorf("%s: sys is nil: %w", op, ErrInvalidArgument)
+	}
+	p, m, err := sys.validateShape()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	if p != 1 || m != 1 {
+		return nil, fmt.Errorf("%s: sys is %d×%d: %w", op, p, m, ErrNotSISO)
+	}
+	if sys.Delay != nil && sys.Delay[0][0] != 0 {
+		return nil, fmt.Errorf("%s: sys has a delay: %w", op, ErrDelayUnsupported)
+	}
+	num, den := trimLeadingZeros(sys.Num[0][0]), sys.Den[0]
+	if err := requireFinite(op, "coefficients", append(copyFloatSlice(num), den...)...); err != nil {
+		return nil, err
+	}
+	if len(den) == 0 || den[0] == 0 {
+		return nil, fmt.Errorf("%s: leading denominator coefficient is zero: %w", op, ErrSingularDenom)
+	}
+	if len(num) > len(den) {
+		return nil, fmt.Errorf("%s: numerator degree %d exceeds denominator degree %d: %w", op, len(num)-1, len(den)-1, ErrImproperTF)
+	}
+	lead := den[0]
+	num, den = copyFloatSlice(num), copyFloatSlice(den)
+	for i := range num {
+		num[i] /= lead
+	}
+	for i := range den {
+		den[i] /= lead
+	}
+	b, err := newTunableTF(op, name, num, den, sys.Dt)
+	if err != nil {
+		return nil, err
+	}
+	b.InputName, b.OutputName = copyStringSlice(sys.InputName), copyStringSlice(sys.OutputName)
+	return b, b.check(op)
+}
+
+func newTunableTF(op, name string, num, den []float64, ts float64) (*TunableTF, error) {
+	b := &TunableTF{
+		name:        name,
+		Numerator:   newTunableVector(name+".Numerator", num),
+		Denominator: newTunableVector(name+".Denominator", den),
+		Dt:          ts,
+	}
+	b.Denominator[0].fixed = true
+	return b, b.check(op)
+}
+
+func trimLeadingZeros(c []float64) []float64 {
+	for len(c) > 1 && c[0] == 0 {
+		c = c[1:]
+	}
+	if len(c) == 0 {
+		return []float64{0}
+	}
+	return c
+}
+
+func (b *TunableTF) check(op string) error {
+	if _, err := b.CurrentSystem(); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return nil
+}
+
+// Name returns the block name.
+func (b *TunableTF) Name() string { return b.name }
 
 // CurrentSystem realizes the transfer function at the current coefficients.
 func (b *TunableTF) CurrentSystem() (*System, error) {
-	p := len(b.Num)
-	num := make([][][]float64, p)
-	for i := range b.Num {
-		num[i] = make([][]float64, len(b.Num[i]))
-		for j := range b.Num[i] {
-			num[i][j] = make([]float64, len(b.Num[i][j]))
-			for k, param := range b.Num[i][j] {
-				if param == nil {
-					return nil, fmt.Errorf("TunableTF.CurrentSystem: nil numerator parameter: %w", ErrInvalidArgument)
-				}
-				num[i][j][k] = param.Value()
-			}
-		}
+	const op = "TunableTF.CurrentSystem"
+	num, err := tunableScalarValues(b.Numerator...)
+	if err != nil {
+		return nil, fmt.Errorf("%s: Numerator: %w", op, err)
 	}
-	tf := &TransferFunc{Num: num, Den: copyFloatRows(b.Den), Dt: b.Dt}
+	den, err := tunableScalarValues(b.Denominator...)
+	if err != nil {
+		return nil, fmt.Errorf("%s: Denominator: %w", op, err)
+	}
+	tf := &TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: b.Dt}
 	result, err := tf.stateSpace()
 	if err != nil {
-		return nil, fmt.Errorf("TunableTF.CurrentSystem: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	return result.Sys, nil
+	return applyBlockNames(op, result.Sys, b.InputName, b.OutputName)
 }
 
 // Sample returns a copy with free coefficients set from values.
 func (b *TunableTF) Sample(values map[string]float64) (*TunableTF, error) {
-	num, err := sampleTunableTensor(b.Num, values)
-	if err != nil {
-		return nil, err
-	}
-	return &TunableTF{name: b.name, Num: num, Den: copyFloatRows(b.Den), Dt: b.Dt}, nil
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.Sample(values) })
 }
 
 // RandomSample returns a copy with free coefficients drawn uniformly from
 // their bounds; see TunableReal.RandomSample.
 func (b *TunableTF) RandomSample(rng *rand.Rand) (*TunableTF, error) {
-	num, err := randomSampleTunableTensor(b.Num, rng)
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.RandomSample(rng) })
+}
+
+func (b *TunableTF) mapParams(f func(*TunableReal) (*TunableReal, error)) (*TunableTF, error) {
+	num, err := mapTunableVector(b.Numerator, f)
 	if err != nil {
 		return nil, err
 	}
-	return &TunableTF{name: b.name, Num: num, Den: copyFloatRows(b.Den), Dt: b.Dt}, nil
+	den, err := mapTunableVector(b.Denominator, f)
+	if err != nil {
+		return nil, err
+	}
+	return &TunableTF{name: b.name, Numerator: num, Denominator: den, Dt: b.Dt, InputName: copyStringSlice(b.InputName), OutputName: copyStringSlice(b.OutputName)}, nil
 }
 
 // FreeParameters returns the distinct free coefficients by name; they are
 // the block's own parameters.
 func (b *TunableTF) FreeParameters() []*TunableReal {
-	return uniqueFreeTunableMatrices(b.Num...)
+	return uniqueFreeTunableMatrices([][]*TunableReal{b.Numerator, b.Denominator})
 }
 
 // SampleBlock is Sample as a TunableBlock.
@@ -370,39 +706,202 @@ func (b *TunableTF) SampleBlock(values map[string]float64) (TunableBlock, error)
 	return b.Sample(values)
 }
 
-// TunableSS is a state-space model with tunable A, B, C, D entries, as
-// MATLAB tunableSS. Unlike tunableSS(name, nx, ny, nu), the constructor takes
-// the parameter matrices.
+// TunableSSStructure constrains the A matrix of a TunableSS, as the MATLAB
+// tunableSS Astruct argument. The zero value selects TunableSSTridiag, the
+// MATLAB default.
+type TunableSSStructure string
+
+const (
+	// TunableSSTridiag frees the main, first super- and first subdiagonal of
+	// A and fixes the other entries at zero.
+	TunableSSTridiag TunableSSStructure = "tridiag"
+	// TunableSSFull frees every entry of A, as the MATLAB Astruct table
+	// states (its Free-defaults paragraph says the opposite).
+	TunableSSFull TunableSSStructure = "full"
+	// TunableSSCompanion is the Canon companion form: the subdiagonal and
+	// the last column, which holds the characteristic polynomial, are free
+	// and the other entries fixed at zero. MATLAB's Free-defaults paragraph
+	// lists the first row instead, which contradicts its own description of
+	// the form.
+	TunableSSCompanion TunableSSStructure = "companion"
+)
+
+// TunableSS is a state-space model with tunable A, B, C and D entries, as
+// MATLAB tunableSS; see https://www.mathworks.com/help/control/ref/tunabless.html.
+// Entry (i, j) of A is named "<name>.A(i+1,j+1)", and likewise for B, C, D.
 type TunableSS struct {
-	name       string
-	A, B, C, D [][]*TunableReal
-	Dt         float64
+	name                  string
+	A, B, C, D            [][]*TunableReal
+	Dt                    float64
+	InputName, OutputName []string
 }
 
-// NewTunableSS returns the block name with parameter matrices A, B, C, D
-// (copied); see https://www.mathworks.com/help/control/ref/tunabless.html.
-// Nil entries return ErrInvalidArgument and inconsistent sizes
-// ErrDimensionMismatch.
-func NewTunableSS(name string, A, B, C, D [][]*TunableReal, dt float64) (*TunableSS, error) {
-	if err := requireTunableBlock("NewTunableSS", name, dt, A, B, C, D); err != nil {
+// NewTunableSS returns the block name with nx states, ny outputs, nu inputs
+// and sample time ts, A constrained by astruct, as MATLAB
+// tunableSS(name, Nx, Ny, Nu, Ts, Astruct). B, C and D are free. MATLAB
+// leaves the initial values undocumented; here B, C and D are zero and A has
+// characteristic polynomial (s+1)^nx (A = −I unless companion), or z^nx in
+// discrete time. An empty name, a negative size or an unknown astruct
+// returns ErrInvalidArgument, ny or nu zero ErrDimensionMismatch and an
+// invalid ts ErrInvalidSampleTime.
+func NewTunableSS(name string, nx, ny, nu int, ts float64, astruct TunableSSStructure) (*TunableSS, error) {
+	const op = "NewTunableSS"
+	if err := requireTunableName(op, name); err != nil {
 		return nil, err
 	}
+	if nx < 0 {
+		return nil, fmt.Errorf("%s: Nx %d is negative: %w", op, nx, ErrInvalidArgument)
+	}
+	if err := requireTunableIO(op, ny, nu); err != nil {
+		return nil, err
+	}
+	free, err := tunableSSFreeA(op, astruct, nx)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireTunableSampleTime(op, ts); err != nil {
+		return nil, err
+	}
+	var A *mat.Dense
+	if nx > 0 {
+		A = mat.NewDense(nx, nx, nil)
+		pole := -1.0
+		if ts > 0 {
+			pole = 0
+		}
+		if astruct == TunableSSCompanion {
+			coeffs := []float64{1}
+			for range nx {
+				coeffs = append(coeffs, 0)
+				for k := len(coeffs) - 1; k > 0; k-- {
+					coeffs[k] -= pole * coeffs[k-1]
+				}
+			}
+			for i := range nx {
+				if i > 0 {
+					A.Set(i, i-1, 1)
+				}
+				A.Set(i, nx-1, -coeffs[nx-i])
+			}
+		} else {
+			for i := range nx {
+				A.Set(i, i, pole)
+			}
+		}
+	}
+	var B, C *mat.Dense
+	if nx > 0 {
+		B, C = mat.NewDense(nx, nu, nil), mat.NewDense(ny, nx, nil)
+	}
+	return newTunableSS(op, name, A, B, C, mat.NewDense(ny, nu, nil), ts, free)
+}
+
+// NewTunableSSFrom returns the block name initialized from sys realized in
+// the astruct form, as MATLAB tunableSS(name, sys, Astruct): tridiag uses the
+// Canon modal form, companion the Canon companion form and full sys itself.
+// Dt and signal names are copied. A nil or non-finite sys, an empty name or
+// an unknown astruct returns ErrInvalidArgument, a descriptor or delayed sys
+// ErrDescriptorUnsupported or ErrDelayUnsupported, sys without inputs or
+// outputs ErrDimensionMismatch, and a modal form that is not tridiagonal
+// (ill-conditioned eigenvectors) or a companion form of a model not
+// controllable from its first input ErrSingularTransform.
+func NewTunableSSFrom(name string, sys *System, astruct TunableSSStructure) (*TunableSS, error) {
+	const op = "NewTunableSSFrom"
+	if err := requireTunableName(op, name); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteSystem(op, sys); err != nil {
+		return nil, err
+	}
+	policy := newRealizationTransformPolicy(sys)
+	if err := policy.requireStandard(op); err != nil {
+		return nil, err
+	}
+	if err := policy.requireDelayFree(op); err != nil {
+		return nil, err
+	}
+	n, m, p := sys.Dims()
+	if err := requireTunableIO(op, p, m); err != nil {
+		return nil, err
+	}
+	free, err := tunableSSFreeA(op, astruct, n)
+	if err != nil {
+		return nil, err
+	}
+	realized := sys
+	if n > 0 && astruct != TunableSSFull {
+		form := CanonModal
+		if astruct == TunableSSCompanion {
+			form = CanonCompanion
+		}
+		c, err := Canon(sys, form)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+		realized = c.Sys
+		tol := 1e-10 * mat.Norm(realized.A, math.Inf(1))
+		for i := range n {
+			for j := range n {
+				if free(i, j) {
+					continue
+				}
+				if math.Abs(realized.A.At(i, j)) > tol {
+					return nil, fmt.Errorf("%s: %s form has A(%d,%d) = %g outside its structure: %w", op, form, i+1, j+1, realized.A.At(i, j), ErrSingularTransform)
+				}
+				realized.A.Set(i, j, 0)
+			}
+		}
+	}
+	var A, B, C *mat.Dense
+	if n > 0 {
+		A, B, C = realized.A, realized.B, realized.C
+	}
+	b, err := newTunableSS(op, name, A, B, C, realized.D, sys.Dt, free)
+	if err != nil {
+		return nil, err
+	}
+	b.InputName, b.OutputName = copyStringSlice(sys.InputName), copyStringSlice(sys.OutputName)
+	return b, b.check(op)
+}
+
+func tunableSSFreeA(op string, astruct TunableSSStructure, n int) (func(i, j int) bool, error) {
+	switch astruct {
+	case TunableSSTridiag, "":
+		return func(i, j int) bool { return i-j <= 1 && j-i <= 1 }, nil
+	case TunableSSFull:
+		return func(int, int) bool { return true }, nil
+	case TunableSSCompanion:
+		return func(i, j int) bool { return j == n-1 || i == j+1 }, nil
+	default:
+		return nil, fmt.Errorf("%s: Astruct %q, want tridiag, full or companion: %w", op, astruct, ErrInvalidArgument)
+	}
+}
+
+func newTunableSS(op, name string, A, B, C, D *mat.Dense, ts float64, freeA func(i, j int) bool) (*TunableSS, error) {
 	b := &TunableSS{
 		name: name,
-		A:    copyTunableMatrix(A),
-		B:    copyTunableMatrix(B),
-		C:    copyTunableMatrix(C),
-		D:    copyTunableMatrix(D),
-		Dt:   dt,
+		A:    newTunableMatrix(name+".A", A, freeA),
+		B:    newTunableMatrix(name+".B", B, nil),
+		C:    newTunableMatrix(name+".C", C, nil),
+		D:    newTunableMatrix(name+".D", D, nil),
+		Dt:   ts,
 	}
-	if _, err := b.CurrentSystem(); err != nil {
-		return nil, fmt.Errorf("NewTunableSS: %w", err)
-	}
-	return b, nil
+	return b, b.check(op)
 }
+
+func (b *TunableSS) check(op string) error {
+	if _, err := b.CurrentSystem(); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return nil
+}
+
+// Name returns the block name.
+func (b *TunableSS) Name() string { return b.name }
 
 // CurrentSystem returns the model at the current parameter values.
 func (b *TunableSS) CurrentSystem() (*System, error) {
+	const op = "TunableSS.CurrentSystem"
 	var ms [4]*mat.Dense
 	for i, nm := range []struct {
 		name string
@@ -410,58 +909,38 @@ func (b *TunableSS) CurrentSystem() (*System, error) {
 	}{{"A", b.A}, {"B", b.B}, {"C", b.C}, {"D", b.D}} {
 		m, err := tunableMatrixValues(nm.p, nm.name)
 		if err != nil {
-			return nil, fmt.Errorf("TunableSS.CurrentSystem: %w", err)
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 		ms[i] = m
 	}
 	sys, err := New(ms[0], ms[1], ms[2], ms[3], b.Dt)
 	if err != nil {
-		return nil, fmt.Errorf("TunableSS.CurrentSystem: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	return sys, nil
+	return applyBlockNames(op, sys, b.InputName, b.OutputName)
 }
 
 // Sample returns a copy with free parameters set from values.
 func (b *TunableSS) Sample(values map[string]float64) (*TunableSS, error) {
-	A, err := sampleTunableMatrix(b.A, values)
-	if err != nil {
-		return nil, err
-	}
-	B, err := sampleTunableMatrix(b.B, values)
-	if err != nil {
-		return nil, err
-	}
-	C, err := sampleTunableMatrix(b.C, values)
-	if err != nil {
-		return nil, err
-	}
-	D, err := sampleTunableMatrix(b.D, values)
-	if err != nil {
-		return nil, err
-	}
-	return &TunableSS{name: b.name, A: A, B: B, C: C, D: D, Dt: b.Dt}, nil
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.Sample(values) })
 }
 
 // RandomSample returns a copy with free parameters drawn uniformly from their
 // bounds; see TunableReal.RandomSample.
 func (b *TunableSS) RandomSample(rng *rand.Rand) (*TunableSS, error) {
-	A, err := randomSampleTunableMatrix(b.A, rng)
-	if err != nil {
-		return nil, err
+	return b.mapParams(func(p *TunableReal) (*TunableReal, error) { return p.RandomSample(rng) })
+}
+
+func (b *TunableSS) mapParams(f func(*TunableReal) (*TunableReal, error)) (*TunableSS, error) {
+	var out [4][][]*TunableReal
+	for i, m := range [][][]*TunableReal{b.A, b.B, b.C, b.D} {
+		mapped, err := mapTunableMatrix(m, f)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = mapped
 	}
-	B, err := randomSampleTunableMatrix(b.B, rng)
-	if err != nil {
-		return nil, err
-	}
-	C, err := randomSampleTunableMatrix(b.C, rng)
-	if err != nil {
-		return nil, err
-	}
-	D, err := randomSampleTunableMatrix(b.D, rng)
-	if err != nil {
-		return nil, err
-	}
-	return &TunableSS{name: b.name, A: A, B: B, C: C, D: D, Dt: b.Dt}, nil
+	return &TunableSS{name: b.name, A: out[0], B: out[1], C: out[2], D: out[3], Dt: b.Dt, InputName: copyStringSlice(b.InputName), OutputName: copyStringSlice(b.OutputName)}, nil
 }
 
 // FreeParameters returns the distinct free parameters by name; they are the
@@ -475,29 +954,86 @@ func (b *TunableSS) SampleBlock(values map[string]float64) (TunableBlock, error)
 	return b.Sample(values)
 }
 
-// requireTunableBlock validates a block constructor's name, sample time and
-// parameter matrices (nil entries rejected).
-func requireTunableBlock(op, name string, dt float64, matrices ...[][]*TunableReal) error {
+func requireTunableName(op, name string) error {
 	if name == "" {
 		return fmt.Errorf("%s: name is empty: %w", op, ErrInvalidArgument)
-	}
-	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
-		return fmt.Errorf("%s: %w", op, err)
-	}
-	for _, m := range matrices {
-		for i, row := range m {
-			for j, param := range row {
-				if param == nil {
-					return fmt.Errorf("%s: parameter (%d,%d) is nil: %w", op, i, j, ErrInvalidArgument)
-				}
-			}
-		}
 	}
 	return nil
 }
 
+func requireTunableIO(op string, ny, nu int) error {
+	if ny < 0 || nu < 0 {
+		return fmt.Errorf("%s: Ny %d and Nu %d must be nonnegative: %w", op, ny, nu, ErrInvalidArgument)
+	}
+	if ny == 0 || nu == 0 {
+		return fmt.Errorf("%s: block is %d×%d; inputs and outputs required: %w", op, ny, nu, ErrDimensionMismatch)
+	}
+	return nil
+}
+
+func requireTunableSampleTime(op string, ts float64) error {
+	if err := newTimeDomain(ts).validateSampleTime(); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return nil
+}
+
+func applyBlockNames(op string, sys *System, inputName, outputName []string) (*System, error) {
+	if inputName != nil {
+		if err := sys.SetInputName(inputName...); err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+	}
+	if outputName != nil {
+		if err := sys.SetOutputName(outputName...); err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+	}
+	return sys, nil
+}
+
+func newTunableParam(name string, value float64, free bool) *TunableReal {
+	return &TunableReal{name: name, value: value, bounds: TunableBounds{Lower: math.Inf(-1), Upper: math.Inf(1)}, fixed: !free}
+}
+
+func newTunableVector(prefix string, values []float64) []*TunableReal {
+	out := make([]*TunableReal, len(values))
+	for k, v := range values {
+		out[k] = newTunableParam(fmt.Sprintf("%s(%d)", prefix, k+1), v, true)
+	}
+	return out
+}
+
+// newTunableMatrix returns parameters "<prefix>(i,j)" holding m, free where
+// free reports true (all when free is nil); a nil m yields no rows.
+func newTunableMatrix(prefix string, m *mat.Dense, free func(i, j int) bool) [][]*TunableReal {
+	if m == nil || m.IsEmpty() {
+		return nil
+	}
+	r, c := m.Dims()
+	out := make([][]*TunableReal, r)
+	for i := range r {
+		out[i] = make([]*TunableReal, c)
+		for j := range c {
+			out[i][j] = newTunableParam(fmt.Sprintf("%s(%d,%d)", prefix, i+1, j+1), m.At(i, j), free == nil || free(i, j))
+		}
+	}
+	return out
+}
+
+func tunableScalarValues(params ...*TunableReal) ([]float64, error) {
+	out := make([]float64, len(params))
+	for k, p := range params {
+		if p == nil {
+			return nil, fmt.Errorf("parameter %d is nil: %w", k, ErrInvalidArgument)
+		}
+		out[k] = p.Value()
+	}
+	return out, nil
+}
+
 func tunableMatrixValues(params [][]*TunableReal, context string) (*mat.Dense, error) {
-	if len(params) == 0 {
+	if len(params) == 0 || len(params[0]) == 0 {
 		return &mat.Dense{}, nil
 	}
 	cols := len(params[0])
@@ -516,81 +1052,29 @@ func tunableMatrixValues(params [][]*TunableReal, context string) (*mat.Dense, e
 	return mat.NewDense(len(params), cols, data), nil
 }
 
-func copyTunableMatrix(params [][]*TunableReal) [][]*TunableReal {
-	if params == nil {
-		return nil
-	}
-	out := make([][]*TunableReal, len(params))
-	for i := range params {
-		out[i] = make([]*TunableReal, len(params[i]))
-		for j := range params[i] {
-			out[i][j] = params[i][j].copy()
-		}
-	}
-	return out
-}
-
-func sampleTunableMatrix(params [][]*TunableReal, values map[string]float64) ([][]*TunableReal, error) {
-	out := make([][]*TunableReal, len(params))
-	for i := range params {
-		out[i] = make([]*TunableReal, len(params[i]))
-		for j, param := range params[i] {
-			sampled, err := param.Sample(values)
-			if err != nil {
-				return nil, err
-			}
-			out[i][j] = sampled
-		}
-	}
-	return out, nil
-}
-
-func randomSampleTunableMatrix(params [][]*TunableReal, rng *rand.Rand) ([][]*TunableReal, error) {
-	out := make([][]*TunableReal, len(params))
-	for i := range params {
-		out[i] = make([]*TunableReal, len(params[i]))
-		for j, param := range params[i] {
-			sampled, err := param.RandomSample(rng)
-			if err != nil {
-				return nil, err
-			}
-			out[i][j] = sampled
-		}
-	}
-	return out, nil
-}
-
-func copyTunableTensor(params [][][]*TunableReal) [][][]*TunableReal {
-	if params == nil {
-		return nil
-	}
-	out := make([][][]*TunableReal, len(params))
-	for i := range params {
-		out[i] = copyTunableMatrix(params[i])
-	}
-	return out
-}
-
-func sampleTunableTensor(params [][][]*TunableReal, values map[string]float64) ([][][]*TunableReal, error) {
-	out := make([][][]*TunableReal, len(params))
-	for i := range params {
-		sampled, err := sampleTunableMatrix(params[i], values)
+func mapTunableVector(params []*TunableReal, f func(*TunableReal) (*TunableReal, error)) ([]*TunableReal, error) {
+	out := make([]*TunableReal, len(params))
+	for k, p := range params {
+		mapped, err := f(p)
 		if err != nil {
 			return nil, err
 		}
-		out[i] = sampled
+		out[k] = mapped
 	}
 	return out, nil
 }
 
-func randomSampleTunableTensor(params [][][]*TunableReal, rng *rand.Rand) ([][][]*TunableReal, error) {
-	out := make([][][]*TunableReal, len(params))
+func mapTunableMatrix(params [][]*TunableReal, f func(*TunableReal) (*TunableReal, error)) ([][]*TunableReal, error) {
+	if params == nil {
+		return nil, nil
+	}
+	out := make([][]*TunableReal, len(params))
 	for i := range params {
-		sampled, err := randomSampleTunableMatrix(params[i], rng)
+		row, err := mapTunableVector(params[i], f)
 		if err != nil {
 			return nil, err
 		}
-		out[i] = sampled
+		out[i] = row
 	}
 	return out, nil
 }

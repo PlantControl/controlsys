@@ -518,7 +518,7 @@ func BenchmarkTunableGainSampleCurrentSystem_4x4(b *testing.B) {
 
 func BenchmarkGeneralizedCurrentSystem_SISO(b *testing.B) {
 	k, _ := newBoundedReal("K", 2, 0, 10)
-	block := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
+	block := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	gm, err := NewGeneralizedModel("loop", block)
 	if err != nil {
 		b.Fatal(err)
@@ -534,7 +534,7 @@ func BenchmarkGeneralizedCurrentSystem_SISO(b *testing.B) {
 func BenchmarkGeneralizedClosedLoop_SISO(b *testing.B) {
 	plant := benchSysNonSym(4, 1, 1)
 	k, _ := newBoundedReal("K", 2, 0, 10)
-	block := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
+	block := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	gm, err := NewGeneralizedClosedLoop("loop", plant, block, "u")
 	if err != nil {
 		b.Fatal(err)
@@ -592,7 +592,7 @@ func BenchmarkTuningGoalDynamicWeightedGain_MIMO(b *testing.B) {
 func BenchmarkSystune_SISO(b *testing.B) {
 	plant := benchSysNonSym(2, 1, 1)
 	k, _ := newBoundedReal("K", 0.5, 0.1, 3)
-	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
+	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	model, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		b.Fatal(err)
@@ -611,7 +611,7 @@ func BenchmarkSystune_MIMO(b *testing.B) {
 	plant := benchSysNonSym(2, 2, 2)
 	k1, _ := newBoundedReal("K1", 0.5, 0.1, 2)
 	k2, _ := newBoundedReal("K2", 0.5, 0.1, 2)
-	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k1, fixedBenchReal("z12", 0)}, {fixedBenchReal("z21", 0), k2}}, 0))
+	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k1, fixedBenchReal("z12", 0)}, {fixedBenchReal("z21", 0), k2}}))
 	model, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		b.Fatal(err)
@@ -726,7 +726,7 @@ func benchTunableGain(b *testing.B, p, m int) *TunableGain {
 			params[i][j] = param
 		}
 	}
-	return mustOK(NewTunableGain("gain", params, 0))
+	return mustOK(tunableGainWith("gain", params))
 }
 
 func BenchmarkStabsep_N2(b *testing.B)   { benchStabsep(b, 2) }
