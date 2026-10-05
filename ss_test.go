@@ -611,12 +611,20 @@ func TestIsStable_DiscreteInternalDelayUsesAbsorbedPoles(t *testing.T) {
 // x' = -x + b·x(t-tau) with b < -1 is stable iff tau < arccos(-1/b)/sqrt(b²-1);
 // for b = -2 the critical delay is 1.2092. Neither eig(A) nor the zero-delay
 // model (pole -3) decides it, so IsStable must not answer.
-func TestIsStable_ContinuousInternalDelayRejected(t *testing.T) {
-	for _, tau := range []float64{0.5, 2} {
-		sys := scalarDDE(t, -2, tau)
-		if _, err := sys.IsStable(); !errors.Is(err, ErrContinuousInternalDelay) {
-			t.Fatalf("tau=%g: err = %v, want ErrContinuousInternalDelay", tau, err)
+func TestIsStable_ContinuousInternalDelayDecided(t *testing.T) {
+	for _, c := range []struct {
+		tau  float64
+		want bool
+	}{{0.5, true}, {1, true}, {2, false}} {
+		sys := scalarDDE(t, -2, c.tau)
+		if stable, err := sys.IsStable(); err != nil || stable != c.want {
+			t.Fatalf("tau=%g: stable=%v err=%v, want %v", c.tau, stable, err, c.want)
 		}
+	}
+	desc := scalarDDE(t, -2, 1)
+	desc.E = mat.NewDense(1, 1, []float64{2})
+	if _, err := desc.IsStable(); !errors.Is(err, ErrDescriptorUnsupported) {
+		t.Fatalf("descriptor: err = %v, want ErrDescriptorUnsupported", err)
 	}
 	sys := scalarDDE(t, -2, 2)
 	sys.LFT = nil
@@ -1539,5 +1547,249 @@ func TestConstructorsRejectInvalidArguments(t *testing.T) {
 	d[0] = 99
 	if g.D.At(0, 0) != 1 {
 		t.Error("NewFromSlices static gain aliases d")
+	}
+}
+
+// internalDelayModel builds x' = A x + B u + B2 w, y = C x + D u + D12 w,
+// z = C2 x + D22 w, w = z(t − τ), with B = B2, C = C2 and D21 = 0.
+func internalDelayModel(t *testing.T, n int, a, b2, c2, d22 []float64, tau []float64) *System {
+	t.Helper()
+	nd := len(tau)
+	sys, err := New(mat.NewDense(n, n, a), mat.NewDense(n, nd, b2), mat.NewDense(nd, n, c2), mat.NewDense(nd, nd, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d22 == nil {
+		d22 = make([]float64, nd*nd)
+	}
+	d12 := make([]float64, nd*nd)
+	d12[0] = 0.5
+	if err := sys.SetInternalDelay(tau, mat.NewDense(n, nd, b2), mat.NewDense(nd, n, c2),
+		mat.NewDense(nd, nd, d12), mat.NewDense(nd, nd, nil), mat.NewDense(nd, nd, d22)); err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// assertDelayStability checks IsStable against want and that HinfNorm is
+// finite exactly when the model is stable.
+func assertDelayStability(t *testing.T, sys *System, want bool) {
+	t.Helper()
+	got, err := sys.IsStable()
+	if err != nil {
+		t.Fatalf("IsStable: %v", err)
+	}
+	if got != want {
+		t.Fatalf("IsStable = %v, want %v", got, want)
+	}
+	norm, _, err := HinfNorm(sys)
+	if err != nil {
+		t.Fatalf("HinfNorm: %v", err)
+	}
+	if finite := !math.IsInf(norm, 1); finite != want {
+		t.Fatalf("HinfNorm = %g disagrees with IsStable = %v", norm, want)
+	}
+}
+
+// x' = −a·x − b·x(t−τ) is stable for every τ when a > |b| or a = b > 0, and
+// never when a + b <= 0. For b > |a| it is stable iff
+// τ < arccos(−a/b)/√(b² − a²) (Hayes 1950).
+func TestIsStable_ContinuousInternalDelayScalarDDE(t *testing.T) {
+	critical := func(a, b float64) float64 { return math.Acos(-a/b) / math.Sqrt(b*b-a*a) }
+	type tc struct {
+		a, b, tau float64
+		want      bool
+	}
+	var cases []tc
+	for _, ab := range [][2]float64{{1, 2}, {-0.5, 2}, {0, 1}, {2, 5}} {
+		tc0 := critical(ab[0], ab[1])
+		cases = append(cases, tc{ab[0], ab[1], 0.95 * tc0, true}, tc{ab[0], ab[1], 1.05 * tc0, false})
+	}
+	for _, tau := range []float64{0.1, 3, 40} {
+		cases = append(cases,
+			tc{3, 2, tau, true}, tc{3, -2, tau, true}, tc{2, 2, tau, true},
+			tc{1, -2, tau, false}, tc{-1, 0.5, tau, false}, tc{1, -1, tau, false})
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("a=%g,b=%g,tau=%.4g", c.a, c.b, c.tau), func(t *testing.T) {
+			sys := internalDelayModel(t, 1, []float64{-c.a}, []float64{-c.b}, []float64{1}, nil, []float64{c.tau})
+			assertDelayStability(t, sys, c.want)
+		})
+	}
+}
+
+// pidCriticalGain returns the gain g* below which g·L₁ is closed-loop stable
+// for an open-loop L₁ with one integrator and otherwise stable poles, from
+// the largest |L₁| at a crossing of the negative real axis, and checks that
+// the first crossing is that largest one so the gain margin is unambiguous.
+func pidCriticalGain(t *testing.T, l1 func(float64) complex128) float64 {
+	t.Helper()
+	phase := func(w float64) float64 { return cmplx.Phase(l1(w)) }
+	var mags []float64
+	prev := 1e-4
+	unwrapped := phase(prev)
+	for w := prev * 1.001; w < 1e3; w *= 1.001 {
+		next := unwrapped + math.Remainder(phase(w)-phase(prev), 2*math.Pi)
+		if k := math.Floor((unwrapped + math.Pi) / (2 * math.Pi)); next < 2*math.Pi*k-math.Pi {
+			lo, hi := prev, w
+			for range 200 {
+				mid := (lo + hi) / 2
+				if imag(l1(mid))*imag(l1(lo)) > 0 {
+					lo = mid
+				} else {
+					hi = mid
+				}
+			}
+			mags = append(mags, cmplx.Abs(l1((lo+hi)/2)))
+		}
+		prev, unwrapped = w, next
+	}
+	if len(mags) == 0 || mags[0] < 1.2*slicesMax(mags[1:]) {
+		t.Fatalf("crossing magnitudes %v do not give a single gain margin", mags)
+	}
+	return 1 / mags[0]
+}
+
+func slicesMax(v []float64) float64 {
+	m := 0.0
+	for _, x := range v {
+		m = max(m, x)
+	}
+	return m
+}
+
+func TestIsStable_ContinuousInternalDelayPIDCriticalGain(t *testing.T) {
+	const k, T, theta = 2.0, 1.5, 0.8
+	plantAt := func(w float64) complex128 {
+		s := complex(0, w)
+		return complex(k, 0) * cmplx.Exp(-s*complex(theta, 0)) / (complex(T, 0)*s + 1)
+	}
+	for _, pid := range []PID{{Kp: 1, Ki: 1.4}, {Kp: 1, Ki: 0.8, Kd: 0.3, Tf: 0.05}} {
+		t.Run(fmt.Sprintf("Kd=%g", pid.Kd), func(t *testing.T) {
+			ctrlAt := func(w float64) complex128 {
+				s := complex(0, w)
+				return complex(pid.Kp, 0) + complex(pid.Ki, 0)/s + complex(pid.Kd, 0)*s/(complex(pid.Tf, 0)*s+1)
+			}
+			gStar := pidCriticalGain(t, func(w float64) complex128 { return ctrlAt(w) * plantAt(w) })
+			for _, f := range []float64{0.9, 1.1} {
+				g := f * gStar
+				plant, err := New(mat.NewDense(1, 1, []float64{-1 / T}), mat.NewDense(1, 1, []float64{k / T}),
+					mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := plant.SetInputDelay([]float64{theta}); err != nil {
+					t.Fatal(err)
+				}
+				c := PID{Kp: g * pid.Kp, Ki: g * pid.Ki, Kd: g * pid.Kd, Tf: pid.Tf}
+				cs, err := c.System()
+				if err != nil {
+					t.Fatal(err)
+				}
+				loop, err := Feedback(plant, cs, -1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !loop.HasInternalDelay() {
+					t.Fatal("closed loop has no internal delay")
+				}
+				t.Run(fmt.Sprintf("g=%.2fg*", f), func(t *testing.T) { assertDelayStability(t, loop, f < 1) })
+			}
+		})
+	}
+}
+
+// Two delay channels: a triangular A with distinct delays, whose χ is the
+// product of two scalar DDEs, and x' = −A0·x − B0·x(t−τ) with A0, B0
+// simultaneously diagonalized by a non-orthogonal P, whose χ is
+// ∏(s + αᵢ + βᵢe^{−sτ}).
+func TestIsStable_ContinuousInternalDelayMIMO(t *testing.T) {
+	critical := func(a, b float64) float64 { return math.Acos(-a/b) / math.Sqrt(b*b-a*a) }
+	t.Run("triangular", func(t *testing.T) {
+		t2 := critical(0.5, 3)
+		for _, c := range []struct {
+			tau2 float64
+			want bool
+		}{{0.9 * t2, true}, {1.1 * t2, false}} {
+			sys := internalDelayModel(t, 2, []float64{-1, 0.7, 0, -0.5}, []float64{-0.8, 0, 0, -3},
+				[]float64{1, 0, 0, 1}, nil, []float64{2.5, c.tau2})
+			t.Run(fmt.Sprintf("tau2=%.4g", c.tau2), func(t *testing.T) { assertDelayStability(t, sys, c.want) })
+		}
+	})
+	t.Run("coupled", func(t *testing.T) {
+		alpha, beta := []float64{1, 0.2}, []float64{2, 1.5}
+		tc := min(critical(alpha[0], beta[0]), critical(alpha[1], beta[1]))
+		p := mat.NewDense(2, 2, []float64{1, 2, 0.5, -1})
+		var pinv mat.Dense
+		if err := pinv.Inverse(p); err != nil {
+			t.Fatal(err)
+		}
+		conj := func(d []float64) []float64 {
+			var m mat.Dense
+			m.Mul(p, mat.NewDiagDense(2, d))
+			m.Mul(&m, &pinv)
+			return []float64{-m.At(0, 0), -m.At(0, 1), -m.At(1, 0), -m.At(1, 1)}
+		}
+		for _, c := range []struct {
+			tau  float64
+			want bool
+		}{{0.9 * tc, true}, {1.1 * tc, false}} {
+			sys := internalDelayModel(t, 2, conj(alpha), conj(beta), []float64{1, 0, 0, 1}, nil, []float64{c.tau, c.tau})
+			t.Run(fmt.Sprintf("tau=%.4g", c.tau), func(t *testing.T) { assertDelayStability(t, sys, c.want) })
+		}
+	})
+}
+
+// Roots of χ on the imaginary axis are not in the open left half-plane, so
+// marginal models are not stable, as for MATLAB isstable.
+func TestIsStable_ContinuousInternalDelayMarginal(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		n         int
+		a, b2, c2 []float64
+		tau       float64
+		want      bool
+	}{
+		{"hidden integrator", 2, []float64{0, 1, 0, -1}, []float64{0, -0.5}, []float64{0, 1}, 1, false},
+		{"hidden oscillator", 3, []float64{0, 1, 0, -1, 0, 1, 0, 0, -1}, []float64{0, 0, -0.5}, []float64{0, 0, 1}, 1, false},
+		{"root at s=0", 1, []float64{-1}, []float64{1}, []float64{1}, 1, false},
+		{"integrator in loop stable", 1, []float64{0}, []float64{-1}, []float64{1}, 1.5, true},
+		{"integrator in loop unstable", 1, []float64{0}, []float64{-1}, []float64{1}, 1.7, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			assertDelayStability(t, internalDelayModel(t, c.n, c.a, c.b2, c.c2, nil, []float64{c.tau}), c.want)
+		})
+	}
+}
+
+// Neutral-type models whose difference operator is not provably stable are
+// left undecided rather than guessed.
+func TestIsStable_ContinuousInternalDelayNeutralUnsupported(t *testing.T) {
+	for _, d22 := range []float64{1, -1.5} {
+		sys := internalDelayModel(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{d22}, []float64{0.5})
+		if _, err := sys.IsStable(); !errors.Is(err, ErrDelayUnsupported) {
+			t.Fatalf("d22=%g: IsStable err = %v, want ErrDelayUnsupported", d22, err)
+		}
+		if _, _, err := HinfNorm(sys); !errors.Is(err, ErrDelayUnsupported) {
+			t.Fatalf("d22=%g: HinfNorm err = %v, want ErrDelayUnsupported", d22, err)
+		}
+	}
+}
+
+// x' = −x − 2·x(t−τ) with no inputs or outputs, stable iff τ < 2π/(3√3).
+func TestIsStable_ContinuousInternalDelayAutonomous(t *testing.T) {
+	for _, c := range []struct {
+		tau  float64
+		want bool
+	}{{1, true}, {2, false}} {
+		sys, err := New(mat.NewDense(1, 1, []float64{-1}), nil, nil, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sys.SetInternalDelay([]float64{c.tau}, mat.NewDense(1, 1, []float64{-2}), mat.NewDense(1, 1, []float64{1}),
+			nil, nil, mat.NewDense(1, 1, nil)); err != nil {
+			t.Fatal(err)
+		}
+		t.Run(fmt.Sprintf("tau=%g", c.tau), func(t *testing.T) { assertDelayStability(t, sys, c.want) })
 	}
 }

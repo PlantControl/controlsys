@@ -110,7 +110,7 @@ func finiteDimensionalModel(sys *System, context string) (*System, error) {
 // lftHasDirectFeedthrough reports whether some D12·D22^k·D21 is nonzero, i.e.
 // the internal delays carry a non-decaying u→y path.
 func lftHasDirectFeedthrough(lft *LFTDelay) bool {
-	if lft == nil || lft.D12 == nil || lft.D21 == nil {
+	if lft == nil || nonEmptyDense(lft.D12) == nil || nonEmptyDense(lft.D21) == nil {
 		return false
 	}
 	path := mat.DenseCopyOf(lft.D21)

@@ -215,14 +215,32 @@ func (sys *System) Poles() ([]complex128, error) {
 }
 
 // IsStable reports whether every pole lies in the open left half-plane
-// (continuous) or the open unit disk (discrete). Input, output and I/O delays
-// do not affect stability. Discrete internal delays are absorbed exactly into
-// shift-register states before the pole test. Continuous internal delays give
-// infinitely many poles; like MATLAB isstable, which supports only models with
-// a finite number of poles, they return ErrContinuousInternalDelay.
+// (continuous) or the open unit disk (discrete), as MATLAB isstable
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.isstable.html);
+// poles on the boundary are not stable. Input, output and I/O delays do not
+// affect stability. Discrete internal delays are absorbed exactly into
+// shift-register states before the pole test. A continuous model with
+// internal delays has the infinitely many roots of
+// χ(s) = det(sI−A)·det(I − H22(s)·diag(e^{−sτ})) as poles; they are counted
+// exactly by the Nyquist test of HinfNorm, where MATLAB pole sets the
+// internal delays to zero
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html). Neutral-type models whose
+// difference operator is not provably stable, and loops the test cannot
+// resolve, return ErrDelayUnsupported; descriptor ones
+// ErrDescriptorUnsupported.
 func (sys *System) IsStable() (bool, error) {
 	if err := requireSystem("IsStable", sys); err != nil {
 		return false, err
+	}
+	if sys.IsContinuous() && sys.HasInternalDelay() {
+		if err := newDescriptorPolicy(sys).requireStandard("IsStable"); err != nil {
+			return false, err
+		}
+		stable, err := internalDelayStable(sys)
+		if err != nil {
+			return false, fmt.Errorf("IsStable: %w", err)
+		}
+		return stable, nil
 	}
 	sys, err := finiteDimensionalModel(sys, "IsStable")
 	if err != nil {
