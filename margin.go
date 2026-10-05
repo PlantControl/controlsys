@@ -413,11 +413,19 @@ func selectMargin(margins, freqs []float64) (float64, float64) {
 // boundary root of |N|² − g²|D|², refined on the exact response; MIMO models,
 // which MATLAB rejects, use σmax on a frequency grid. It returns +Inf when
 // the gain never drops that far and 0 when the DC gain is 0 or not finite.
+// dbDrop must be 0 (default) or a finite negative scalar, and a model with
+// no inputs or no outputs is rejected.
 func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if dbDrop == 0 {
 		dbDrop = -3
 	}
+	if !(dbDrop < 0) || math.IsInf(dbDrop, -1) {
+		return 0, fmt.Errorf("Bandwidth: dbDrop must be a finite negative scalar, got %g: %w", dbDrop, ErrInvalidArgument)
+	}
 	_, m, p := sys.Dims()
+	if m == 0 || p == 0 {
+		return 0, fmt.Errorf("Bandwidth: model has no inputs or no outputs: %w", ErrDimensionMismatch)
+	}
 
 	dcGain, err := sys.DCGain()
 	if err != nil {
@@ -431,9 +439,6 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 		dcMag = maxSVDense(dcGain, p, m)
 	}
 	if dcMag == 0 || math.IsNaN(dcMag) || math.IsInf(dcMag, 0) {
-		return 0, nil
-	}
-	if dbDrop > 0 {
 		return 0, nil
 	}
 

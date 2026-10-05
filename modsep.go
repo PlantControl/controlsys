@@ -15,8 +15,8 @@ type ModsepResult struct {
 // feedthrough D and, for singular-E descriptors, the infinite modes.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.freqsep.html.
 func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
-	if cutoff <= 0 {
-		return nil, fmt.Errorf("controlsys: cutoff must be positive")
+	if !(cutoff > 0) {
+		return nil, fmt.Errorf("Modsep: cutoff must be positive, got %g: %w", cutoff, ErrInvalidArgument)
 	}
 
 	isSlow := func(ev complex128) bool {

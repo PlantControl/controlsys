@@ -75,7 +75,7 @@ func Ssbal(sys *System, opts ...SsbalOption) (*SsbalResult, error) {
 	}
 
 	A := mat.NewDense(n, n, br.a)
-	Ba, Ca := denseFrom(n, ma, br.b), denseFrom(pa, n, br.c)
+	Ba, Ca := denseFromData(n, ma, br.b), denseFromData(pa, n, br.c)
 	B, C := subDense(Ba, 0, 0, n, m), subDense(Ca, 0, 0, p, n)
 	var newSys *System
 	var err error

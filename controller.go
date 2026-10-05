@@ -89,7 +89,7 @@ func Lqi(A, B, C, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // continuous cross weight N (n×m); opts.Workspace is used for the discrete
 // Riccati solve.
 func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
-	if dt <= 0 {
+	if dt <= 0 || newTimeDomain(dt).validateSampleTime() != nil {
 		return nil, ErrInvalidSampleTime
 	}
 	na, nac := A.Dims()

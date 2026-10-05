@@ -18,6 +18,11 @@ type LFTDelay struct {
 //
 //	Continuous: dx/dt = Ax + Bu,  y = Cx + Du
 //	Discrete:   x[k+1] = Ax[k] + Bu[k],  y[k] = Cx[k] + Du[k]
+//
+// As in MATLAB, a model may have no inputs (an autonomous model for Initial)
+// or no outputs. gonum cannot hold n×0 matrices, so empty B, C and D blocks
+// are stored as empty matrices and Dims derives m and p from the non-empty
+// ones. Dt is 0 for continuous models or a finite positive sample time.
 type System struct {
 	A           *mat.Dense
 	B           *mat.Dense
@@ -70,8 +75,7 @@ func (sys *System) Validate() error {
 	if sys == nil {
 		return fmt.Errorf("system is nil: %w", ErrDimensionMismatch)
 	}
-	A, B, C, D := nonEmptyDense(sys.A), nonEmptyDense(sys.B), nonEmptyDense(sys.C), nonEmptyDense(sys.D)
-	n, m, p, err := validateDims(A, B, C, D, sys.Dt)
+	n, m, p, err := validateDims(sys.A, sys.B, sys.C, sys.D, sys.Dt)
 	if err != nil {
 		return err
 	}
@@ -100,6 +104,32 @@ func (sys *System) Validate() error {
 		}
 	}
 	return nil
+}
+
+// withZeroIOPadding runs op on a delay-free sys whose missing inputs or
+// outputs are replaced by one zero channel, then drops that channel from the
+// result. gonum cannot store n×0 blocks, and zero channels leave the state
+// dynamics unchanged.
+func withZeroIOPadding(sys *System, op func(*System) (*System, error)) (*System, error) {
+	n, m, p := sys.Dims()
+	pad := sys.Copy()
+	pad.B = denseCopySafe(sys.B, n, max(m, 1))
+	pad.C = denseCopySafe(sys.C, max(p, 1), n)
+	pad.D = denseCopySafe(sys.D, max(p, 1), max(m, 1))
+	res, err := op(pad)
+	if err != nil {
+		return nil, err
+	}
+	if m == 0 {
+		res.B = &mat.Dense{}
+		res.InputName = nil
+	}
+	if p == 0 {
+		res.C = &mat.Dense{}
+		res.OutputName = nil
+	}
+	res.D = &mat.Dense{}
+	return res, nil
 }
 
 func nonEmptyDense(m *mat.Dense) *mat.Dense {
@@ -158,6 +188,7 @@ func (sys *System) IsStable() (bool, error) {
 }
 
 func validateDims(A, B, C, D *mat.Dense, dt float64) (n, m, p int, err error) {
+	A, B, C, D = nonEmptyDense(A), nonEmptyDense(B), nonEmptyDense(C), nonEmptyDense(D)
 	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
 		return 0, 0, 0, err
 	}
@@ -243,8 +274,8 @@ func newNoCopy(A, B, C, D *mat.Dense, dt float64) (*System, error) {
 }
 
 func NewGain(D *mat.Dense, dt float64) (*System, error) {
-	if dt < 0 {
-		return nil, ErrInvalidSampleTime
+	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
+		return nil, err
 	}
 	if D == nil {
 		return nil, fmt.Errorf("D matrix required for gain system: %w", ErrDimensionMismatch)
@@ -289,8 +320,8 @@ func NewFromSlices(n, m, p int, a, b, c, d []float64, dt float64) (*System, erro
 	}
 
 	if n == 0 {
-		if dt < 0 {
-			return nil, ErrInvalidSampleTime
+		if (m == 0) != (p == 0) {
+			return nil, fmt.Errorf("static gain with %d outputs and %d inputs has an empty D and cannot be represented: %w", p, m, ErrDimensionMismatch)
 		}
 		var Dm *mat.Dense
 		if p > 0 && m > 0 {

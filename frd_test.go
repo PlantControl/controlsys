@@ -1206,3 +1206,17 @@ func TestFRDMargin_DelayRepro(t *testing.T) {
 		t.Errorf("PM = %g @ %g, want %g @ %g", mr.PhaseMargin, mr.WgFreq, wantPM, wg)
 	}
 }
+
+func TestNewFRDRejectsNonFiniteData(t *testing.T) {
+	resp := [][][]complex128{{{1}}, {{2}}}
+	for _, w := range []float64{math.NaN(), math.Inf(1)} {
+		if _, err := NewFRD(resp, []float64{1, w}, 0); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("NewFRD omega=%v err = %v", w, err)
+		}
+	}
+	for _, dt := range []float64{math.NaN(), math.Inf(1)} {
+		if _, err := NewFRD(resp, []float64{1, 2}, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("NewFRD dt=%v err = %v", dt, err)
+		}
+	}
+}

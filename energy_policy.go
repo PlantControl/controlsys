@@ -49,6 +49,9 @@ func (p energyAnalysisPolicy) gramianInputs(typ GramType) (Aarg, Q *mat.Dense, e
 }
 
 func (p energyAnalysisPolicy) controllabilityEnergy() *mat.Dense {
+	if p.m == 0 {
+		return mat.NewDense(p.n, p.n, nil)
+	}
 	bRaw := p.sys.B.RawMatrix()
 	q := make([]float64, p.n*p.n)
 	blas64.Gemm(blas.NoTrans, blas.Trans, 1,
@@ -60,6 +63,9 @@ func (p energyAnalysisPolicy) controllabilityEnergy() *mat.Dense {
 }
 
 func (p energyAnalysisPolicy) observabilityEnergy() *mat.Dense {
+	if p.p == 0 {
+		return mat.NewDense(p.n, p.n, nil)
+	}
 	cRaw := p.sys.C.RawMatrix()
 	q := make([]float64, p.n*p.n)
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1,

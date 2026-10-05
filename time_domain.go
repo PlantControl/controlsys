@@ -24,9 +24,11 @@ func (td timeDomain) isDiscrete() bool {
 	return td.dt > 0
 }
 
+// validateSampleTime accepts dt = 0 (continuous) or a finite positive dt
+// (discrete). MATLAB's unspecified Ts = -1 is not supported.
 func (td timeDomain) validateSampleTime() error {
-	if td.dt < 0 {
-		return ErrInvalidSampleTime
+	if !(td.dt >= 0) || math.IsInf(td.dt, 1) {
+		return fmt.Errorf("sample time %g: %w", td.dt, ErrInvalidSampleTime)
 	}
 	return nil
 }

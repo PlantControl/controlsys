@@ -627,3 +627,45 @@ func TestLFT_DelayedMWithDynamicDeltaMatchesFrequencyLFT(t *testing.T) {
 		}
 	}
 }
+
+func TestLFTEmptyLoopKeepsUpperChannels(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		M := emptyIOFixture(t, 2, 2, 3, dt)
+		empty, err := NewGain(&mat.Dense{}, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		autonomous := emptyIOFixture(t, 1, 0, 0, dt)
+		for name, delta := range map[string]*System{"gain": empty, "states": autonomous} {
+			got, err := LFT(M, delta, 2, 3)
+			if err != nil {
+				t.Fatalf("dt=%g %s: %v", dt, name, err)
+			}
+			nD, _, _ := delta.Dims()
+			if n, m, p := got.Dims(); n != 2+nD || m != 2 || p != 3 {
+				t.Fatalf("dt=%g %s Dims = (%d,%d,%d)", dt, name, n, m, p)
+			}
+			for _, w := range []float64{0.3, 2} {
+				s := complex(0, w)
+				if dt > 0 {
+					s = cmplx.Exp(complex(0, w*dt))
+				}
+				want, err := M.EvalFr(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				have, err := got.EvalFr(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i := range 3 {
+					for j := range 2 {
+						if cmplx.Abs(have[i][j]-want[i][j]) > 1e-12 {
+							t.Errorf("dt=%g %s w=%g G[%d][%d] = %v, want %v", dt, name, w, i, j, have[i][j], want[i][j])
+						}
+					}
+				}
+			}
+		}
+	}
+}

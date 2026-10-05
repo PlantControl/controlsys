@@ -82,29 +82,15 @@ func seriesSimple(sys1, sys2 *System, delayPlan interconnectionDelayPlan) (*Syst
 	}
 
 	if n1 == 0 && n2 == 0 {
-		D := mat.NewDense(p, m, nil)
-		D.Mul(sys2.D, sys1.D)
-		return buildSeries(nil, nil, nil, D)
+		return buildSeries(nil, nil, nil, mulDims(p, m, sys2.D, sys1.D))
 	}
 
 	if n1 == 0 {
-		A := denseCopy(sys2.A)
-		B := mat.NewDense(n2, m, nil)
-		B.Mul(sys2.B, sys1.D)
-		C := denseCopy(sys2.C)
-		D := mat.NewDense(p, m, nil)
-		D.Mul(sys2.D, sys1.D)
-		return buildSeries(A, B, C, D)
+		return buildSeries(denseCopy(sys2.A), mulDims(n2, m, sys2.B, sys1.D), denseCopy(sys2.C), mulDims(p, m, sys2.D, sys1.D))
 	}
 
 	if n2 == 0 {
-		A := denseCopy(sys1.A)
-		B := denseCopy(sys1.B)
-		C := mat.NewDense(p, n1, nil)
-		C.Mul(sys2.D, sys1.C)
-		D := mat.NewDense(p, m, nil)
-		D.Mul(sys2.D, sys1.D)
-		return buildSeries(A, B, C, D)
+		return buildSeries(denseCopy(sys1.A), denseCopy(sys1.B), mulDims(p, n1, sys2.D, sys1.C), mulDims(p, m, sys2.D, sys1.D))
 	}
 
 	A := mat.NewDense(n, n, nil)
@@ -112,18 +98,15 @@ func seriesSimple(sys1, sys2 *System, delayPlan interconnectionDelayPlan) (*Syst
 	setBlock(A, n1, 0, mulDense(sys2.B, sys1.C))
 	setBlock(A, n1, n1, sys2.A)
 
-	B := mat.NewDense(n, m, nil)
+	B := newDense(n, m)
 	setBlock(B, 0, 0, sys1.B)
 	setBlock(B, n1, 0, mulDense(sys2.B, sys1.D))
 
-	C := mat.NewDense(p, n, nil)
+	C := newDense(p, n)
 	setBlock(C, 0, 0, mulDense(sys2.D, sys1.C))
 	setBlock(C, 0, n1, sys2.C)
 
-	D := mat.NewDense(p, m, nil)
-	D.Mul(sys2.D, sys1.D)
-
-	return buildSeries(A, B, C, D)
+	return buildSeries(A, B, C, mulDims(p, m, sys2.D, sys1.D))
 }
 
 func seriesDelay(sys1, sys2 *System) *mat.Dense {
@@ -258,45 +241,30 @@ func parallelSimple(sys1, sys2 *System, delayPlan interconnectionDelayPlan) (*Sy
 	}
 
 	if n1 == 0 && n2 == 0 {
-		D := mat.NewDense(p, m, nil)
-		D.Add(sys1.D, sys2.D)
-		return buildParallel(nil, nil, nil, D)
+		return buildParallel(nil, nil, nil, addDims(p, m, sys1.D, sys2.D))
 	}
 
 	if n1 == 0 {
-		A := denseCopy(sys2.A)
-		B := denseCopy(sys2.B)
-		C := denseCopy(sys2.C)
-		D := mat.NewDense(p, m, nil)
-		D.Add(sys1.D, sys2.D)
-		return buildParallel(A, B, C, D)
+		return buildParallel(denseCopy(sys2.A), denseCopy(sys2.B), denseCopy(sys2.C), addDims(p, m, sys1.D, sys2.D))
 	}
 
 	if n2 == 0 {
-		A := denseCopy(sys1.A)
-		B := denseCopy(sys1.B)
-		C := denseCopy(sys1.C)
-		D := mat.NewDense(p, m, nil)
-		D.Add(sys1.D, sys2.D)
-		return buildParallel(A, B, C, D)
+		return buildParallel(denseCopy(sys1.A), denseCopy(sys1.B), denseCopy(sys1.C), addDims(p, m, sys1.D, sys2.D))
 	}
 
 	A := mat.NewDense(n, n, nil)
 	setBlock(A, 0, 0, sys1.A)
 	setBlock(A, n1, n1, sys2.A)
 
-	B := mat.NewDense(n, m, nil)
+	B := newDense(n, m)
 	setBlock(B, 0, 0, sys1.B)
 	setBlock(B, n1, 0, sys2.B)
 
-	C := mat.NewDense(p, n, nil)
+	C := newDense(p, n)
 	setBlock(C, 0, 0, sys1.C)
 	setBlock(C, 0, n1, sys2.C)
 
-	D := mat.NewDense(p, m, nil)
-	D.Add(sys1.D, sys2.D)
-
-	return buildParallel(A, B, C, D)
+	return buildParallel(A, B, C, addDims(p, m, sys1.D, sys2.D))
 }
 
 func parallelDelay(sys1, sys2 *System) *mat.Dense {
@@ -442,21 +410,15 @@ func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (
 		return nil, err
 	}
 
-	e12Data := make([]float64, m1*m1)
-	for i := range m1 {
-		e12Data[i*(m1+1)] = 1
+	E12 := eyeOrEmptyDense(m1)
+	if m1 > 0 {
+		tmp2 := mulDims(m1, m1, mulDims(m1, p1, controller.D, E21), plant.D)
+		tmp2.Scale(sign, tmp2)
+		E12.Sub(E12, tmp2)
 	}
-	E12 := mat.NewDense(m1, m1, e12Data)
-	tmp := mat.NewDense(m1, p1, nil)
-	tmp.Mul(controller.D, E21)
-	tmp2 := mat.NewDense(m1, m1, nil)
-	tmp2.Mul(tmp, plant.D)
-	tmp2.Scale(sign, tmp2)
-	E12.Sub(E12, tmp2)
+	D := mulDims(p, m, E21, plant.D)
 
 	if n1 == 0 && n2 == 0 {
-		D := mat.NewDense(p, m, nil)
-		D.Mul(E21, plant.D)
 		sys, err := buildSystem(nil, nil, nil, D, plant.Dt, nil)
 		if err != nil {
 			return nil, err
@@ -468,25 +430,18 @@ func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (
 	}
 
 	A := mat.NewDense(n, n, nil)
-	Bres := mat.NewDense(n, m, nil)
-	C := mat.NewDense(p, n, nil)
-	D := mat.NewDense(p, m, nil)
+	Bres := newDense(n, m)
+	C := newDense(p, n)
 
 	if n1 > 0 {
-		B1E12 := mat.NewDense(n1, m1, nil)
-		B1E12.Mul(plant.B, E12)
-
-		sB1E12D2 := mat.NewDense(n1, p1, nil)
-		sB1E12D2.Mul(B1E12, controller.D)
-		sB1E12D2.Scale(sign, sB1E12D2)
-		block := mat.NewDense(n1, n1, nil)
-		block.Mul(sB1E12D2, plant.C)
+		B1E12 := mulDims(n1, m1, plant.B, E12)
+		block := mulDims(n1, n1, mulDims(n1, p1, B1E12, controller.D), plant.C)
+		block.Scale(sign, block)
 		setBlock(A, 0, 0, plant.A)
 		subBlock(A, 0, 0, block)
 
 		if n2 > 0 {
-			block2 := mat.NewDense(n1, n2, nil)
-			block2.Mul(B1E12, controller.C)
+			block2 := mulDims(n1, n2, B1E12, controller.C)
 			block2.Scale(-sign, block2)
 			setBlock(A, 0, n1, block2)
 		}
@@ -495,43 +450,29 @@ func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (
 	}
 
 	if n2 > 0 {
-		B2E21 := mat.NewDense(n2, p1, nil)
-		B2E21.Mul(controller.B, E21)
+		B2E21 := mulDims(n2, p1, controller.B, E21)
 
 		if n1 > 0 {
-			block := mat.NewDense(n2, n1, nil)
-			block.Mul(B2E21, plant.C)
-			setBlock(A, n1, 0, block)
+			setBlock(A, n1, 0, mulDims(n2, n1, B2E21, plant.C))
 		}
 
 		setBlock(A, n1, n1, controller.A)
-		B2E21D1 := mat.NewDense(n2, m1, nil)
-		B2E21D1.Mul(B2E21, plant.D)
-
-		sB2E21D1 := mat.NewDense(n2, m1, nil)
-		sB2E21D1.Scale(sign, B2E21D1)
-		block3 := mat.NewDense(n2, n2, nil)
-		block3.Mul(sB2E21D1, controller.C)
+		B2E21D1 := mulDims(n2, m1, B2E21, plant.D)
+		block3 := mulDims(n2, n2, B2E21D1, controller.C)
+		block3.Scale(sign, block3)
 		subBlock(A, n1, n1, block3)
 
 		setBlock(Bres, n1, 0, B2E21D1)
 	}
 
 	if n1 > 0 {
-		E21C1 := mat.NewDense(p1, n1, nil)
-		E21C1.Mul(E21, plant.C)
-		setBlock(C, 0, 0, E21C1)
+		setBlock(C, 0, 0, mulDims(p1, n1, E21, plant.C))
 	}
-	if n2 > 0 {
-		E21D1 := mat.NewDense(p1, m1, nil)
-		E21D1.Mul(E21, plant.D)
-		E21D1C2 := mat.NewDense(p1, n2, nil)
-		E21D1C2.Mul(E21D1, controller.C)
+	if n2 > 0 && p1 > 0 {
+		E21D1C2 := mulDims(p1, n2, mulDims(p1, m1, E21, plant.D), controller.C)
 		E21D1C2.Scale(-sign, E21D1C2)
 		setBlock(C, 0, n1, E21D1C2)
 	}
-
-	D.Mul(E21, plant.D)
 
 	sys, err := buildSystem(A, Bres, C, D, plant.Dt, nil)
 	if err != nil {

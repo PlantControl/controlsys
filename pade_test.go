@@ -500,3 +500,14 @@ func TestPadeAllpass(t *testing.T) {
 		}
 	}
 }
+
+func TestPadeDelayRejectsNonFiniteDelay(t *testing.T) {
+	for _, tau := range []float64{math.NaN(), math.Inf(1)} {
+		if _, err := PadeDelay(tau, 2); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("PadeDelay(%v) err = %v, want ErrInvalidArgument", tau, err)
+		}
+	}
+	if _, err := PadeDelay(-1, 2); !errors.Is(err, ErrNegativeDelay) {
+		t.Errorf("PadeDelay(-1) err = %v, want ErrNegativeDelay", err)
+	}
+}

@@ -212,6 +212,9 @@ func (p timeResponsePlan) allInputResponse(kind standardInputResponse) (*TimeRes
 
 func (p timeResponsePlan) simulatedInputResponse(kind standardInputResponse) (*TimeResponse, error) {
 	_, m, outputs := p.sim.Dims()
+	if outputs*m == 0 {
+		return p.response(&mat.Dense{}), nil
+	}
 	Y := mat.NewDense(outputs*m, p.steps, nil)
 	for input := range m {
 		u := mat.NewDense(m, p.steps, nil)
@@ -372,9 +375,13 @@ func transposeSamplesToChannels(u *mat.Dense, steps, inputs int) *mat.Dense {
 // MATLAB dcgain, entries reached by an integrator (a pole at s = 0 or z = 1)
 // are infinite rather than an error, for every realization; internal delays are
 // unity at DC.
+// A model with no inputs or no outputs has an empty gain, returned as an
+// empty matrix.
 func (sys *System) DCGain() (*mat.Dense, error) {
 	n, m, p := sys.Dims()
-
+	if m == 0 || p == 0 {
+		return &mat.Dense{}, nil
+	}
 	if n == 0 && !sys.HasInternalDelay() {
 		return denseCopy(sys.D), nil
 	}
@@ -880,14 +887,35 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 		return nil, err
 	}
 
-	_, m, _ := plan.sim.Dims()
-	u := mat.NewDense(m, plan.steps, nil)
-	resp, err := plan.sim.Simulate(u, x0, nil)
+	ds := plan.sim
+	_, m, p := ds.Dims()
+	if p == 0 {
+		return plan.response(&mat.Dense{}), nil
+	}
+	if m == 0 {
+		ds = zeroInputModel(ds)
+	}
+	resp, err := ds.Simulate(mat.NewDense(max(m, 1), plan.steps, nil), x0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Initial: %w", err)
 	}
 
 	return plan.response(resp.Y), nil
+}
+
+// zeroInputModel returns sys with one zero input standing in for m = 0, since
+// gonum cannot hold the n×0 and p×0 blocks of a model without inputs.
+func zeroInputModel(sys *System) *System {
+	n, _, p := sys.Dims()
+	pad := sys.Copy()
+	pad.B = newDense(n, 1)
+	pad.D = newDense(p, 1)
+	pad.InputDelay = nil
+	pad.Delay = nil
+	if pad.LFT != nil {
+		pad.LFT.D21 = newDense(len(pad.LFT.Tau), 1)
+	}
+	return pad
 }
 
 func (sys *System) continuousFreeResponse(x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
@@ -973,6 +1001,12 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	sys, x0, _, err := sys.timeResponseForm(x0)
 	if err != nil {
 		return nil, fmt.Errorf("Lsim: %w", err)
+	}
+	if _, m, p := sys.Dims(); m == 0 && (u == nil || u.IsEmpty()) {
+		if p == 0 {
+			return nil, fmt.Errorf("Lsim: model has no inputs and no outputs: %w", ErrDimensionMismatch)
+		}
+		sys, u = zeroInputModel(sys), mat.NewDense(max(len(t), 1), 1, nil)
 	}
 	plan, uSim, err := prepareLsimResponse(sys, u, t)
 	if err != nil {

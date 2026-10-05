@@ -62,7 +62,7 @@ func H2Norm(sys *System) (float64, error) {
 	policy := newEnergyAnalysisPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
 
-	if n == 0 {
+	if n == 0 || m == 0 || p == 0 {
 		if sys.IsContinuous() && !allZeroDense(sys.D) {
 			return math.Inf(1), nil
 		}
@@ -253,7 +253,7 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 	policy := newEnergyAnalysisPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
 
-	if n == 0 {
+	if n == 0 || m == 0 || p == 0 {
 		sv := maxSVDense(sys.D, p, m)
 		return sv, 0, nil
 	}
@@ -279,7 +279,7 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 		return 0, 0, err
 	}
 	n, m, p := sys.Dims()
-	if n == 0 {
+	if n == 0 || m == 0 || p == 0 {
 		return maxSVDense(sys.D, p, m), 0, nil
 	}
 	poles, err := sys.Poles()

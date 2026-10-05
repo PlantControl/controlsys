@@ -208,6 +208,10 @@ _Avoid_: steady-state value when model stability or step-response convergence is
 A model with direct input-to-output gain and no dynamic state.
 _Avoid_: gain system unless matching established API names, zero-state system
 
+**Autonomous model**:
+A state-space model with states but no inputs, driven only by its initial state; a state-space model may likewise have no outputs. Its empty input or output blocks are stored as empty matrices and its dimensions come from the state matrices. A static-gain model with no inputs or no outputs but not both cannot be stored, since its empty gain carries no dimensions.
+_Avoid_: unforced system, zero-input model
+
 **Continuous-time model**:
 A model whose dynamics evolve over continuous time.
 _Avoid_: analog system, continuous-time system before the modeling context is clear
@@ -1090,6 +1094,7 @@ _Avoid_: reciprocal when referring to MIMO models
 - A **SOPDT model** is a **transfer-function model**.
 - A **state-space model**, **transfer function**, and **zero-pole-gain model** each belong to either the **continuous-time model** domain or the **discrete-time model** domain.
 - A **discrete-time model** has exactly one **sample time**.
+- A **sample time** is finite and positive; zero marks a **continuous-time model**.
 - A **MIMO model** has one or more **input channels** and one or more **output channels**.
 - A **SISO model** is the most minimal **MIMO model**.
 - A **SISO model** has exactly one **input channel** and exactly one **output channel**.

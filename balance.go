@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
@@ -46,6 +47,9 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	}
 	if !stable {
 		return nil, ErrUnstable
+	}
+	if m == 0 || p == 0 {
+		return nil, fmt.Errorf("Balreal: model has no inputs or no outputs, so all Hankel singular values are zero: %w", ErrNotMinimal)
 	}
 
 	aRaw := sys.A.RawMatrix()
@@ -289,6 +293,11 @@ func Modred(sys *System, elim []int, method BalredMethod) (*System, error) {
 	n, m, p := policy.n, policy.m, policy.p
 	if n == 0 || len(elim) == 0 {
 		return policy.zeroOrderCopy(), nil
+	}
+	if m == 0 || p == 0 {
+		return withZeroIOPadding(sys, func(padded *System) (*System, error) {
+			return Modred(padded, elim, method)
+		})
 	}
 
 	elimSet := make(map[int]bool, len(elim))

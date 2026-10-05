@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -1773,6 +1774,18 @@ func TestMargin_ClosedForms(t *testing.T) {
 		if !math.IsNaN(c.pm) && (math.Abs(r.PhaseMargin-c.pm) > 1e-6 || (!math.IsNaN(c.wg) && math.Abs(r.WgFreq-c.wg) > 1e-6*c.wg)) {
 			t.Errorf("%s: PM=%g@%g, want %g@%g", c.name, r.PhaseMargin, r.WgFreq, c.pm, c.wg)
 		}
+	}
+}
+
+func TestBandwidthRejectsInvalidDrop(t *testing.T) {
+	sys := emptyIOFixture(t, 2, 1, 1, 0)
+	for _, drop := range []float64{3, math.NaN(), math.Inf(-1), math.Inf(1)} {
+		if _, err := Bandwidth(sys, drop); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("Bandwidth dbDrop=%v err = %v, want ErrInvalidArgument", drop, err)
+		}
+	}
+	if _, err := Bandwidth(sys, -3); err != nil {
+		t.Errorf("Bandwidth dbDrop=-3: %v", err)
 	}
 }
 

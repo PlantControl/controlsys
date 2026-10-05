@@ -12,8 +12,10 @@ func solveIdentityMinusProduct(left, right *mat.Dense, size int, context string,
 }
 
 func solveIdentityMinusScaledProduct(left, right *mat.Dense, scale float64, size int, context string, singular error) (*mat.Dense, error) {
-	loop := mat.NewDense(size, size, nil)
-	loop.Mul(left, right)
+	if size == 0 {
+		return &mat.Dense{}, nil
+	}
+	loop := mulDims(size, size, left, right)
 	if scale != 1 {
 		loop.Scale(scale, loop)
 	}

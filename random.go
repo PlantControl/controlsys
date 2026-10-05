@@ -19,7 +19,7 @@ func Drss(n, p, m int, dt float64) (*System, error) {
 	if n < 0 || p < 1 || m < 1 {
 		return nil, fmt.Errorf("controlsys: invalid dimensions n=%d p=%d m=%d", n, p, m)
 	}
-	if dt <= 0 {
+	if dt <= 0 || newTimeDomain(dt).validateSampleTime() != nil {
 		return nil, ErrInvalidSampleTime
 	}
 	return randomSS(randomStableModelSpec{states: n, outputs: p, inputs: m, dt: dt, continuous: false})

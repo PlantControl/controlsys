@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -622,5 +623,599 @@ func TestIsStable_ContinuousInternalDelayRejected(t *testing.T) {
 	}
 	if stable, err := sys.IsStable(); err != nil || !stable {
 		t.Fatalf("input delay only: stable=%v err=%v, want true", stable, err)
+	}
+}
+
+func emptyIOFixture(t *testing.T, n, m, p int, dt float64) *System {
+	t.Helper()
+	a := make([]float64, n*n)
+	for i := range n {
+		a[i*n+i] = -1 - float64(i)
+		if i+1 < n {
+			a[i*n+i+1] = 0.7
+			a[(i+1)*n+i] = -0.2
+		}
+	}
+	if dt > 0 {
+		for i := range a {
+			a[i] *= 0.2
+		}
+		for i := range n {
+			a[i*n+i] += 1
+		}
+	}
+	b := make([]float64, n*m)
+	for i := range b {
+		b[i] = float64(i%3) + 0.5
+	}
+	c := make([]float64, p*n)
+	for i := range c {
+		c[i] = 1 - 0.3*float64(i%4)
+	}
+	d := make([]float64, p*m)
+	for i := range d {
+		d[i] = 0.1 * float64(i+1)
+	}
+	sys, err := NewFromSlices(n, m, p, a, b, c, d, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+type emptyIOOp struct {
+	name string
+	fn   func(sys *System) (any, error)
+}
+
+func emptyIOOps() []emptyIOOp {
+	w := []float64{0.1, 1, 3}
+	tGrid := func(sys *System) []float64 {
+		if sys.IsDiscrete() {
+			return []float64{0, sys.Dt, 2 * sys.Dt, 3 * sys.Dt}
+		}
+		return []float64{0, 0.1, 0.2, 0.3}
+	}
+	x0Of := func(sys *System) *mat.VecDense {
+		n, _, _ := sys.Dims()
+		if n == 0 {
+			return nil
+		}
+		x0 := mat.NewVecDense(n, nil)
+		x0.SetVec(0, 1)
+		return x0
+	}
+	return []emptyIOOp{
+		{"Poles", func(s *System) (any, error) { return s.Poles() }},
+		{"IsStable", func(s *System) (any, error) { return s.IsStable() }},
+		{"Zeros", func(s *System) (any, error) { return s.Zeros() }},
+		{"ZerosDetail", func(s *System) (any, error) { return s.ZerosDetail() }},
+		{"DCGain", func(s *System) (any, error) { return s.DCGain() }},
+		{"FreqResponse", func(s *System) (any, error) { return s.FreqResponse(w) }},
+		{"FreqResponsePointwise", func(s *System) (any, error) { return s.FreqResponsePointwise(w) }},
+		{"Bode", func(s *System) (any, error) { return s.Bode(w, 0) }},
+		{"BodeAuto", func(s *System) (any, error) { return s.Bode(nil, 20) }},
+		{"Sigma", func(s *System) (any, error) { return s.Sigma(nil, 20) }},
+		{"Nyquist", func(s *System) (any, error) { return s.Nyquist(nil, 20) }},
+		{"Nichols", func(s *System) (any, error) { return s.Nichols(nil, 20) }},
+		{"EvalFr", func(s *System) (any, error) { return s.EvalFr(1i) }},
+		{"FRD", func(s *System) (any, error) { return s.FRD(w) }},
+		{"H2Norm", func(s *System) (any, error) { return H2Norm(s) }},
+		{"HinfNorm", func(s *System) (any, error) { g, _, err := HinfNorm(s); return g, err }},
+		{"NormInf", func(s *System) (any, error) { return Norm(s, math.Inf(1)) }},
+		{"HSV", func(s *System) (any, error) { return HSV(s) }},
+		{"GramC", func(s *System) (any, error) { return Gram(s, GramControllability) }},
+		{"GramO", func(s *System) (any, error) { return Gram(s, GramObservability) }},
+		{"Balreal", func(s *System) (any, error) { return Balreal(s) }},
+		{"Balred", func(s *System) (any, error) { r, _, err := Balred(s, 1, Truncate); return r, err }},
+		{"BalredSP", func(s *System) (any, error) { r, _, err := Balred(s, 1, SingularPerturbation); return r, err }},
+		{"Modred", func(s *System) (any, error) { return Modred(s, []int{0}, Truncate) }},
+		{"ModredMatchDC", func(s *System) (any, error) { return Modred(s, []int{0}, SingularPerturbation) }},
+		{"CanonModal", func(s *System) (any, error) { return Canon(s, CanonModal) }},
+		{"CanonCompanion", func(s *System) (any, error) { return Canon(s, CanonCompanion) }},
+		{"Ssbal", func(s *System) (any, error) { return Ssbal(s) }},
+		{"Prescale", func(s *System) (any, error) { return Prescale(s) }},
+		{"Stabsep", func(s *System) (any, error) { return Stabsep(s) }},
+		{"Modsep", func(s *System) (any, error) { return Modsep(s, 1.5) }},
+		{"Sminreal", func(s *System) (any, error) { return Sminreal(s) }},
+		{"MinimalRealization", func(s *System) (any, error) { return s.MinimalRealization() }},
+		{"Reduce", func(s *System) (any, error) { return s.Reduce(nil) }},
+		{"ModalTruncate", func(s *System) (any, error) { return ModalTruncate(s, &ModalTruncateOptions{Order: 1}) }},
+		{"Augstate", func(s *System) (any, error) { return Augstate(s) }},
+		{"Inv", func(s *System) (any, error) { return Inv(s) }},
+		{"Series", func(s *System) (any, error) { return Series(s, s.Copy()) }},
+		{"Parallel", func(s *System) (any, error) { return Parallel(s, s.Copy()) }},
+		{"Append", func(s *System) (any, error) { return Append(s, s.Copy()) }},
+		{"BlkDiag", func(s *System) (any, error) { return BlkDiag(s, s.Copy()) }},
+		{"Feedback", func(s *System) (any, error) { return Feedback(s, s.Copy(), -1) }},
+		{"FeedbackGain", func(s *System) (any, error) {
+			_, m, p := s.Dims()
+			k, err := NewGain(newDense(m, p), s.Dt)
+			if err != nil {
+				return nil, err
+			}
+			return Feedback(s, k, -1)
+		}},
+		{"Loopsens", func(s *System) (any, error) { return Loopsens(s, s.Copy()) }},
+		{"Connect", func(s *System) (any, error) {
+			_, m, _ := s.Dims()
+			return Connect(s, newDense(m, 2), nil, nil)
+		}},
+		{"Margin", func(s *System) (any, error) { return Margin(s) }},
+		{"AllMargin", func(s *System) (any, error) { return AllMargin(s) }},
+		{"DiskMargin", func(s *System) (any, error) { return DiskMargin(s) }},
+		{"Bandwidth", func(s *System) (any, error) { return Bandwidth(s, -3) }},
+		{"Damp", func(s *System) (any, error) { return Damp(s) }},
+		{"Pzmap", func(s *System) (any, error) { return Pzmap(s) }},
+		{"Step", func(s *System) (any, error) { return Step(s, 0) }},
+		{"Impulse", func(s *System) (any, error) { return Impulse(s, 0) }},
+		{"Initial", func(s *System) (any, error) { return Initial(s, x0Of(s), 0) }},
+		{"Lsim", func(s *System) (any, error) {
+			_, m, _ := s.Dims()
+			var u *mat.Dense
+			if m > 0 {
+				u = mat.NewDense(4, m, nil)
+				u.Set(1, 0, 1)
+			}
+			return Lsim(s, u, tGrid(s), x0Of(s))
+		}},
+		{"Simulate", func(s *System) (any, error) {
+			_, m, _ := s.Dims()
+			var u *mat.Dense
+			if m > 0 {
+				u = mat.NewDense(m, 4, nil)
+			}
+			return s.Simulate(u, x0Of(s), nil)
+		}},
+		{"StepInfoForSystem", func(s *System) (any, error) { return StepInfoForSystem(s, 0, nil) }},
+		{"TransferFunction", func(s *System) (any, error) { return s.TransferFunction(nil) }},
+		{"ZPKModel", func(s *System) (any, error) { return s.ZPKModel(nil) }},
+		{"RootLocus", func(s *System) (any, error) { return RootLocus(s, nil) }},
+		{"Passive", func(s *System) (any, error) { return Passive(s, nil) }},
+		{"SpectralFactor", func(s *System) (any, error) { return SpectralFactor(s) }},
+		{"Discretize", func(s *System) (any, error) {
+			if s.IsDiscrete() {
+				return s.Undiscretize()
+			}
+			return s.Discretize(0.1)
+		}},
+		{"DiscretizeFOH", func(s *System) (any, error) {
+			if s.IsDiscrete() {
+				return s.D2D(0.2, C2DOptions{})
+			}
+			return s.DiscretizeFOH(0.1)
+		}},
+		{"DiscretizeTustin", func(s *System) (any, error) {
+			if s.IsDiscrete() {
+				return s.D2C(C2DMethodTustin)
+			}
+			return s.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin})
+		}},
+		{"DiscretizeImpulse", func(s *System) (any, error) {
+			if s.IsDiscrete() {
+				return nil, nil
+			}
+			return s.DiscretizeImpulse(0.1)
+		}},
+		{"DiscretizeMatched", func(s *System) (any, error) {
+			if s.IsDiscrete() {
+				return nil, nil
+			}
+			return s.DiscretizeMatched(0.1)
+		}},
+		{"String", func(s *System) (any, error) { return s.String(), nil }},
+		{"Isproper", func(s *System) (any, error) { return s.Isproper(), nil }},
+		{"Covar", func(s *System) (any, error) {
+			_, m, _ := s.Dims()
+			return Covar(s, eyeOrEmptyDense(m))
+		}},
+		{"SS2SS", func(s *System) (any, error) {
+			n, _, _ := s.Dims()
+			T := eyeOrEmptyDense(n)
+			for i := range n {
+				T.Set(i, i, 2)
+				if i+1 < n {
+					T.Set(i, i+1, 1)
+				}
+			}
+			return SS2SS(s, T)
+		}},
+		{"Xperm", func(s *System) (any, error) {
+			n, _, _ := s.Dims()
+			perm := make([]int, n)
+			for i := range n {
+				perm[i] = n - 1 - i
+			}
+			return Xperm(s, perm)
+		}},
+		{"SelectByIndex", func(s *System) (any, error) { return s.SelectByIndex(nil, nil) }},
+		{"Pade", func(s *System) (any, error) { return s.Pade(2) }},
+		{"AbsorbDelay", func(s *System) (any, error) { return s.AbsorbDelay() }},
+		{"ToExplicit", func(s *System) (any, error) { return s.ToExplicit() }},
+		{"Estim", func(s *System) (any, error) {
+			n, _, p := s.Dims()
+			return Estim(s, newDense(n, p))
+		}},
+		{"Kalmd", func(s *System) (any, error) {
+			if s.IsDiscrete() {
+				return nil, nil
+			}
+			_, m, p := s.Dims()
+			return Kalmd(s, eyeOrEmptyDense(m), eyeOrEmptyDense(p), 0.1, nil)
+		}},
+		{"Reg", func(s *System) (any, error) {
+			n, m, p := s.Dims()
+			return Reg(s, newDense(m, n), newDense(n, p))
+		}},
+		{"Lqg", func(s *System) (any, error) {
+			n, m, p := s.Dims()
+			return Lqg(s, eyeOrEmptyDense(n), eyeOrEmptyDense(m), eyeOrEmptyDense(m), eyeOrEmptyDense(p), nil)
+		}},
+		{"Ctrb", func(s *System) (any, error) { return Ctrb(s.A, s.B) }},
+		{"Obsv", func(s *System) (any, error) { return Obsv(s.A, s.C) }},
+		{"CtrbF", func(s *System) (any, error) { return CtrbF(s.A, s.B, s.C) }},
+		{"ObsvF", func(s *System) (any, error) { return ObsvF(s.A, s.B, s.C) }},
+		{"Lqr", func(s *System) (any, error) {
+			n, m, _ := s.Dims()
+			return Lqr(s.A, s.B, eyeOrEmptyDense(n), eyeOrEmptyDense(m), nil)
+		}},
+		{"DiskMarginSkew", func(s *System) (any, error) { return DiskMarginSkew(s, 0.5) }},
+		{"SampledPassive", func(s *System) (any, error) { return SampledPassive(s, nil) }},
+		{"MinimalLFT", func(s *System) (any, error) { return s.MinimalLFT() }},
+		{"ZeroDelayApprox", func(s *System) (any, error) { return s.ZeroDelayApprox() }},
+		{"PullDelaysToLFT", func(s *System) (any, error) { return s.PullDelaysToLFT() }},
+		{"TotalDelay", func(s *System) (any, error) { return s.TotalDelay(), nil }},
+		{"Pidtune", func(s *System) (any, error) { return Pidtune(s, PidtunePI) }},
+		{"LFT", func(s *System) (any, error) { return LFT(s, s.Copy(), 0, 0) }},
+		{"ModelArray", func(s *System) (any, error) { return NewModelArray([]int{1}, []*System{s}) }},
+		{"Kalman", func(s *System) (any, error) {
+			_, m, p := s.Dims()
+			return Kalman(s, eyeOrEmptyDense(m), eyeOrEmptyDense(p), nil)
+		}},
+	}
+}
+
+func emptyIOCheckOutput(out any) error {
+	var syss []*System
+	switch v := out.(type) {
+	case *System:
+		syss = append(syss, v)
+	case *BalrealResult:
+		syss = append(syss, v.Sys)
+	case *CanonResult:
+		syss = append(syss, v.Sys)
+	case *SsbalResult:
+		syss = append(syss, v.Sys)
+	case *StabsepResult:
+		syss = append(syss, v.Stable, v.Unstable)
+	case *ModsepResult:
+		syss = append(syss, v.Slow, v.Fast)
+	case *PrescaleResult:
+		syss = append(syss, v.Sys)
+	case *ReduceResult:
+		syss = append(syss, v.Sys)
+	case *ModalReductionResult:
+		syss = append(syss, v.Sys)
+	case *LoopsensResult:
+		syss = append(syss, v.So, v.To, v.Si, v.Ti)
+	}
+	for _, s := range syss {
+		if s == nil {
+			return errors.New("nil system in successful result")
+		}
+		if err := s.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TestEmptyIOModelsNeverPanic covers MATLAB-valid models with no inputs,
+// no outputs or no states: every public op must work or return an error.
+func TestEmptyIOModelsNeverPanic(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, n := range []int{0, 1, 3} {
+			for _, m := range []int{0, 1, 2} {
+				for _, p := range []int{0, 1, 3} {
+					if (m > 0 && p > 0) || (n == 0 && m+p > 0) {
+						continue
+					}
+					sys := emptyIOFixture(t, n, m, p, dt)
+					if err := sys.Validate(); err != nil {
+						t.Fatalf("dt=%g n=%d m=%d p=%d: Validate: %v", dt, n, m, p, err)
+					}
+					if gn, gm, gp := sys.Dims(); gn != n || gm != m || gp != p {
+						t.Fatalf("Dims=(%d,%d,%d), want (%d,%d,%d)", gn, gm, gp, n, m, p)
+					}
+					for _, op := range emptyIOOps() {
+						tag := fmt.Sprintf("dt=%g n=%d m=%d p=%d %s", dt, n, m, p, op.name)
+						func() {
+							defer func() {
+								if r := recover(); r != nil {
+									t.Errorf("%s: panic: %v", tag, r)
+								}
+							}()
+							out, err := op.fn(sys.Copy())
+							if err == nil {
+								if verr := emptyIOCheckOutput(out); verr != nil {
+									t.Errorf("%s: invalid output: %v", tag, verr)
+								}
+							}
+						}()
+					}
+				}
+			}
+		}
+	}
+}
+
+func autonomousFixture(t *testing.T, dt float64) *System {
+	t.Helper()
+	A := mat.NewDense(2, 2, []float64{-1, 2, -0.5, -3})
+	if dt > 0 {
+		A = mat.NewDense(2, 2, []float64{0.6, 0.3, -0.2, 0.4})
+	}
+	sys, err := New(A, nil, mat.NewDense(2, 2, []float64{1, 0.5, -0.3, 2}), nil, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func TestNewAcceptsEmptyInputOutputBlocks(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-1, 2, -0.5, -3})
+	C := mat.NewDense(1, 2, []float64{1, 0.5})
+	sys, err := New(A, &mat.Dense{}, C, &mat.Dense{}, 0)
+	if err != nil {
+		t.Fatalf("New with empty B, D: %v", err)
+	}
+	if n, m, p := sys.Dims(); n != 2 || m != 0 || p != 1 {
+		t.Fatalf("Dims = (%d,%d,%d), want (2,0,1)", n, m, p)
+	}
+	sys, err = New(A, mat.NewDense(2, 1, []float64{1, 1}), &mat.Dense{}, nil, 0.1)
+	if err != nil {
+		t.Fatalf("New with empty C: %v", err)
+	}
+	if n, m, p := sys.Dims(); n != 2 || m != 1 || p != 0 {
+		t.Fatalf("Dims = (%d,%d,%d), want (2,1,0)", n, m, p)
+	}
+}
+
+func TestNewFromSlicesRejectsUnrepresentableEmptyGain(t *testing.T) {
+	for _, d := range [][2]int{{0, 2}, {3, 0}} {
+		if _, err := NewFromSlices(0, d[0], d[1], nil, nil, nil, nil, 0); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("NewFromSlices(0,%d,%d) err = %v, want ErrDimensionMismatch", d[0], d[1], err)
+		}
+	}
+	if _, err := NewFromSlices(0, 0, 0, nil, nil, nil, nil, 0); err != nil {
+		t.Errorf("empty 0x0 gain: %v", err)
+	}
+}
+
+func TestConstructorsRejectNonFiniteSampleTime(t *testing.T) {
+	A := mat.NewDense(1, 1, []float64{-1})
+	B := mat.NewDense(1, 1, []float64{1})
+	for _, dt := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.1} {
+		if _, err := New(A, B, B, B, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("New dt=%v err = %v", dt, err)
+		}
+		if _, err := NewGain(B, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("NewGain dt=%v err = %v", dt, err)
+		}
+		if _, err := NewFromSlices(0, 1, 1, nil, nil, nil, []float64{1}, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("NewFromSlices gain dt=%v err = %v", dt, err)
+		}
+		if _, err := NewDescriptor(A, B, B, B, B, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("NewDescriptor dt=%v err = %v", dt, err)
+		}
+		if _, err := Drss(2, 1, 1, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("Drss dt=%v err = %v", dt, err)
+		}
+	}
+}
+
+func TestEmptyIOAnalysisMatchesMATLAB(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		auto := autonomousFixture(t, dt)
+		noOut, err := New(auto.A, mat.NewDense(2, 1, []float64{1, -1}), nil, nil, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, sys := range map[string]*System{"m=0": auto, "p=0": noOut} {
+			tag := fmt.Sprintf("dt=%g %s", dt, name)
+			g, err := sys.DCGain()
+			if err != nil || !g.IsEmpty() {
+				t.Errorf("%s DCGain = %v, %v; want empty", tag, g, err)
+			}
+			h2, err := H2Norm(sys)
+			if err != nil || h2 != 0 {
+				t.Errorf("%s H2Norm = %v, %v; want 0", tag, h2, err)
+			}
+			hinf, _, err := HinfNorm(sys)
+			if err != nil || hinf != 0 {
+				t.Errorf("%s HinfNorm = %v, %v; want 0", tag, hinf, err)
+			}
+			hsv, err := HSV(sys)
+			if err != nil || len(hsv) != 2 || hsv[0] != 0 || hsv[1] != 0 {
+				t.Errorf("%s HSV = %v, %v; want [0 0]", tag, hsv, err)
+			}
+			if _, err := Balreal(sys); !errors.Is(err, ErrNotMinimal) {
+				t.Errorf("%s Balreal err = %v, want ErrNotMinimal", tag, err)
+			}
+			if _, err := Bandwidth(sys, -3); !errors.Is(err, ErrDimensionMismatch) {
+				t.Errorf("%s Bandwidth err = %v, want ErrDimensionMismatch", tag, err)
+			}
+			step, err := Step(sys, 1)
+			if err != nil || len(step.T) == 0 || !step.Y.IsEmpty() {
+				t.Errorf("%s Step = %+v, %v; want time grid and empty Y", tag, step, err)
+			}
+		}
+
+		wc, err := Gram(auto, GramControllability)
+		if err != nil || mat.Norm(wc.X, 1) != 0 {
+			t.Errorf("dt=%g Gram(c) of no-input model = %v, %v; want zeros", dt, wc, err)
+		}
+		wo, err := Gram(auto, GramObservability)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var res, ata, ctc mat.Dense
+		ctc.Mul(auto.C.T(), auto.C)
+		if dt == 0 {
+			ata.Mul(auto.A.T(), wo.X)
+			res.Mul(wo.X, auto.A)
+			res.Add(&res, &ata)
+		} else {
+			ata.Mul(auto.A.T(), wo.X)
+			res.Mul(&ata, auto.A)
+			res.Sub(&res, wo.X)
+		}
+		res.Add(&res, &ctc)
+		if r := mat.Norm(&res, math.Inf(1)); r > 1e-12 {
+			t.Errorf("dt=%g Gram(o) Lyapunov residual %g", dt, r)
+		}
+
+		P, err := Covar(auto, &mat.Dense{})
+		if err != nil || !mat.Equal(P, mat.NewDense(2, 2, nil)) {
+			t.Errorf("dt=%g Covar(no inputs) = %v, %v; want 2x2 zeros", dt, P, err)
+		}
+	}
+}
+
+func TestInitialAutonomousModel(t *testing.T) {
+	x0 := mat.NewVecDense(2, []float64{1, -0.5})
+	for _, dt := range []float64{0, 0.1} {
+		sys := autonomousFixture(t, dt)
+		initial, err := Initial(sys, x0, 2)
+		if err != nil {
+			t.Fatalf("dt=%g Initial: %v", dt, err)
+		}
+		lsim, err := Lsim(sys, nil, []float64{0, 0.1, 0.2, 0.3, 0.4}, x0)
+		if err != nil {
+			t.Fatalf("dt=%g Lsim: %v", dt, err)
+		}
+		for _, resp := range []*TimeResponse{initial, lsim} {
+			for k, tk := range resp.T {
+				var Phi mat.Dense
+				if dt == 0 {
+					var At mat.Dense
+					At.Scale(tk, sys.A)
+					Phi.Exp(&At)
+				} else {
+					Phi.Pow(sys.A, int(math.Round(tk/dt)))
+				}
+				var x, y mat.VecDense
+				x.MulVec(&Phi, x0)
+				y.MulVec(sys.C, &x)
+				for i := range 2 {
+					if d := math.Abs(resp.Y.At(i, k) - y.AtVec(i)); d > 1e-9 {
+						t.Fatalf("dt=%g t=%g y%d = %g, want %g", dt, tk, i, resp.Y.At(i, k), y.AtVec(i))
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestEmptyIOStateTransforms(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		auto := autonomousFixture(t, dt)
+		T := mat.NewDense(2, 2, []float64{2, 1, 0.5, 3})
+		got, err := SS2SS(auto, T)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var Ti, wantA, wantC, tmp mat.Dense
+		if err := Ti.Inverse(T); err != nil {
+			t.Fatal(err)
+		}
+		tmp.Mul(auto.A, &Ti)
+		wantA.Mul(T, &tmp)
+		wantC.Mul(auto.C, &Ti)
+		if !mat.EqualApprox(got.A, &wantA, 1e-12) || !mat.EqualApprox(got.C, &wantC, 1e-12) {
+			t.Errorf("dt=%g SS2SS A=%v C=%v, want %v %v", dt, mat.Formatted(got.A), mat.Formatted(got.C), mat.Formatted(&wantA), mat.Formatted(&wantC))
+		}
+		if n, m, p := got.Dims(); n != 2 || m != 0 || p != 2 {
+			t.Errorf("dt=%g SS2SS Dims = (%d,%d,%d)", dt, n, m, p)
+		}
+
+		red, err := Modred(auto, []int{1}, SingularPerturbation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := auto.A
+		shift := 0.0
+		if dt > 0 {
+			shift = 1
+		}
+		a22 := a.At(1, 1) - shift
+		wantAr := a.At(0, 0) - a.At(0, 1)*a.At(1, 0)/a22
+		if math.Abs(red.A.At(0, 0)-wantAr) > 1e-12 {
+			t.Errorf("dt=%g Modred Ar = %g, want %g", dt, red.A.At(0, 0), wantAr)
+		}
+		for i := range 2 {
+			wantCr := auto.C.At(i, 0) - auto.C.At(i, 1)*a.At(1, 0)/a22
+			if math.Abs(red.C.At(i, 0)-wantCr) > 1e-12 {
+				t.Errorf("dt=%g Modred Cr[%d] = %g, want %g", dt, i, red.C.At(i, 0), wantCr)
+			}
+		}
+		if n, m, p := red.Dims(); n != 1 || m != 0 || p != 2 {
+			t.Errorf("dt=%g Modred Dims = (%d,%d,%d)", dt, n, m, p)
+		}
+
+		aug, err := Augstate(auto)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, m, p := aug.Dims(); n != 2 || m != 0 || p != 4 {
+			t.Errorf("dt=%g Augstate Dims = (%d,%d,%d)", dt, n, m, p)
+		}
+	}
+}
+
+func TestEmptyIOInterconnections(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		plant := autonomousFixture(t, dt)
+		ctrl, err := New(mat.NewDense(1, 1, []float64{-0.25}), mat.NewDense(1, 2, []float64{1, -2}), nil, nil, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl, err := Feedback(plant, ctrl, -1)
+		if err != nil {
+			t.Fatalf("dt=%g Feedback: %v", dt, err)
+		}
+		wantA := mat.NewDense(3, 3, nil)
+		setBlock(wantA, 0, 0, plant.A)
+		setBlock(wantA, 2, 0, mulDense(ctrl.B, plant.C))
+		setBlock(wantA, 2, 2, ctrl.A)
+		wantC := mat.NewDense(2, 3, nil)
+		setBlock(wantC, 0, 0, plant.C)
+		if !mat.EqualApprox(cl.A, wantA, 1e-12) || !mat.EqualApprox(cl.C, wantC, 1e-12) {
+			t.Errorf("dt=%g Feedback A=%v C=%v", dt, mat.Formatted(cl.A), mat.Formatted(cl.C))
+		}
+		if n, m, p := cl.Dims(); n != 3 || m != 0 || p != 2 {
+			t.Errorf("dt=%g Feedback Dims = (%d,%d,%d)", dt, n, m, p)
+		}
+
+		ser, err := Series(plant, ctrl)
+		if err != nil {
+			t.Fatalf("dt=%g Series: %v", dt, err)
+		}
+		if n, m, p := ser.Dims(); n != 3 || m != 0 || p != 0 {
+			t.Errorf("dt=%g Series Dims = (%d,%d,%d)", dt, n, m, p)
+		}
+		if !mat.EqualApprox(ser.A, wantA, 1e-12) {
+			t.Errorf("dt=%g Series A=%v", dt, mat.Formatted(ser.A))
+		}
+
+		par, err := Parallel(plant, plant.Copy())
+		if err != nil {
+			t.Fatalf("dt=%g Parallel: %v", dt, err)
+		}
+		var sumC mat.Dense
+		sumC.Augment(plant.C, plant.C)
+		if !mat.EqualApprox(par.C, &sumC, 1e-12) {
+			t.Errorf("dt=%g Parallel C=%v", dt, mat.Formatted(par.C))
+		}
 	}
 }

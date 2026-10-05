@@ -4176,3 +4176,26 @@ func TestZeroDelayApproxKeepsDescriptorAndZeroState(t *testing.T) {
 		}
 	}
 }
+
+func TestDelaySettersRejectNonFiniteDelays(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, v := range []float64{math.NaN(), math.Inf(1)} {
+			sys := emptyIOFixture(t, 2, 2, 1, dt)
+			if err := sys.SetInputDelay([]float64{0, v}); !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("dt=%g SetInputDelay(%v) err = %v", dt, v, err)
+			}
+			if err := sys.SetOutputDelay([]float64{v}); !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("dt=%g SetOutputDelay(%v) err = %v", dt, v, err)
+			}
+			if err := sys.SetDelay(mat.NewDense(1, 2, []float64{v, 0})); !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("dt=%g SetDelay(%v) err = %v", dt, v, err)
+			}
+			if _, err := NewWithDelay(sys.A, sys.B, sys.C, sys.D, mat.NewDense(1, 2, []float64{0, v}), dt); !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("dt=%g NewWithDelay(%v) err = %v", dt, v, err)
+			}
+			if sys.HasDelay() {
+				t.Errorf("dt=%g rejected delay %v was stored", dt, v)
+			}
+		}
+	}
+}

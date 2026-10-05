@@ -62,6 +62,46 @@ func newDense(r, c int) *mat.Dense {
 	return mat.NewDense(r, c, nil)
 }
 
+func denseFromData(r, c int, data []float64) *mat.Dense {
+	if r == 0 || c == 0 {
+		return &mat.Dense{}
+	}
+	return mat.NewDense(r, c, data)
+}
+
+// mulDims returns the r×c product a·b. Empty operands stand for zero-width
+// blocks (gonum cannot hold n×0 matrices), so the product is then zero.
+func mulDims(r, c int, a, b mat.Matrix) *mat.Dense {
+	out := newDense(r, c)
+	if out.IsEmpty() || isEmptyMatrix(a) || isEmptyMatrix(b) {
+		return out
+	}
+	out.Mul(a, b)
+	return out
+}
+
+func eyeOrEmptyDense(n int) *mat.Dense {
+	if n == 0 {
+		return &mat.Dense{}
+	}
+	return eyeDense(n)
+}
+
+func isEmptyMatrix(a mat.Matrix) bool {
+	r, c := a.Dims()
+	return r == 0 || c == 0
+}
+
+// addDims returns the r×c sum a+b, or an empty matrix when r or c is zero.
+func addDims(r, c int, a, b *mat.Dense) *mat.Dense {
+	out := newDense(r, c)
+	if out.IsEmpty() {
+		return out
+	}
+	out.Add(a, b)
+	return out
+}
+
 func denseNorm(m *mat.Dense) float64 {
 	raw := m.RawMatrix()
 	sum := 0.0

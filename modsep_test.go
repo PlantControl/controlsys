@@ -1,6 +1,8 @@
 package controlsys
 
 import (
+	"errors"
+	"math"
 	"math/cmplx"
 	"testing"
 
@@ -232,6 +234,15 @@ func TestModsep_SingularDescriptor(t *testing.T) {
 		assertResponseParts(t, "slow part", res.Slow, nil, func(s complex128) [][]complex128 { return modal(s, 0) })
 		assertResponseParts(t, "fast part", res.Fast, sys.D, func(s complex128) [][]complex128 { return modal(s, 1) }, poly)
 		assertSplitSum(t, "Modsep singular E", sys, res.Slow, res.Fast)
+	}
+}
+
+func TestModsepRejectsInvalidCutoff(t *testing.T) {
+	sys := emptyIOFixture(t, 2, 1, 1, 0)
+	for _, c := range []float64{math.NaN(), 0, -1} {
+		if _, err := Modsep(sys, c); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("Modsep cutoff=%v err = %v, want ErrInvalidArgument", c, err)
+		}
 	}
 }
 

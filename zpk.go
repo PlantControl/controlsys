@@ -31,8 +31,8 @@ func (z *ZPK) Copy() *ZPK {
 }
 
 func NewZPK(zeros, poles []complex128, gain, dt float64) (*ZPK, error) {
-	if dt < 0 {
-		return nil, ErrInvalidSampleTime
+	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
+		return nil, err
 	}
 	if err := validatePoles(zeros); err != nil {
 		return nil, err
@@ -49,8 +49,8 @@ func NewZPK(zeros, poles []complex128, gain, dt float64) (*ZPK, error) {
 }
 
 func NewZPKMIMO(zeros, poles [][][]complex128, gain [][]float64, dt float64) (*ZPK, error) {
-	if dt < 0 {
-		return nil, ErrInvalidSampleTime
+	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
+		return nil, err
 	}
 	p := len(gain)
 	if p == 0 {
