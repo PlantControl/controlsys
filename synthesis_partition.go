@@ -13,6 +13,7 @@ type generalizedPlantPartition struct {
 	C1, C2                         *mat.Dense
 	D11, D12, D21, D22             *mat.Dense
 	n, m, p, m1, m2, p1, p2        int
+	dt                             float64
 	measurementNames, controlNames []string
 }
 
@@ -22,9 +23,6 @@ type generalizedPlantPartition struct {
 func partitionGeneralizedPlant(op string, P *System, nmeas, ncont int) (*generalizedPlantPartition, error) {
 	if err := requireFiniteSystem(op, P); err != nil {
 		return nil, err
-	}
-	if !P.IsContinuous() {
-		return nil, fmt.Errorf("%s: plant must be continuous: %w", op, ErrWrongDomain)
 	}
 	if P.HasDelay() {
 		return nil, fmt.Errorf("%s: plant has time delays: %w", op, ErrDelayUnsupported)
@@ -67,6 +65,7 @@ func partitionGeneralizedPlant(op string, P *System, nmeas, ncont int) (*general
 		m2:               m2,
 		p1:               p1,
 		p2:               p2,
+		dt:               P.Dt,
 		measurementNames: selectTrailingNames(P.OutputName, p1, p2),
 		controlNames:     selectTrailingNames(P.InputName, m1, m2),
 	}, nil
@@ -76,8 +75,22 @@ func (gp *generalizedPlantPartition) applyControllerNames(K *System) {
 	controllerMetadata(gp.measurementNames, gp.controlNames).applyIO(K)
 }
 
+// requireRegularFeedthrough rejects a D12 without full column rank or a D21
+// without full row rank, named d12 and d21 in the error, which the Riccati
+// synthesis needs; MATLAB regularizes such plants instead.
+func (gp *generalizedPlantPartition) requireRegularFeedthrough(d12, d21 string) error {
+	if !fullColumnRank(gp.D12) {
+		return fmt.Errorf("%s: %s does not have full column rank %d: %w", gp.op, d12, gp.m2, ErrInvalidPartition)
+	}
+	if !fullColumnRank(mat.DenseCopyOf(gp.D21.T())) {
+		return fmt.Errorf("%s: %s does not have full row rank %d: %w", gp.op, d21, gp.p2, ErrInvalidPartition)
+	}
+	return nil
+}
+
 func (gp *generalizedPlantPartition) validateControllerChannels() error {
-	stab, err := IsStabilizable(gp.A, gp.B2, true)
+	continuous := gp.dt == 0
+	stab, err := IsStabilizable(gp.A, gp.B2, continuous)
 	if err != nil {
 		return fmt.Errorf("%s: %w", gp.op, err)
 	}
@@ -85,7 +98,7 @@ func (gp *generalizedPlantPartition) validateControllerChannels() error {
 		return fmt.Errorf("%s: (A, B2) not stabilizable: %w", gp.op, ErrNotStabilizable)
 	}
 
-	det, err := IsDetectable(gp.A, gp.C2, true)
+	det, err := IsDetectable(gp.A, gp.C2, continuous)
 	if err != nil {
 		return fmt.Errorf("%s: %w", gp.op, err)
 	}
@@ -129,7 +142,7 @@ func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck, Dk *mat.Dense) (*
 	if Dk == nil {
 		Dk = mat.NewDense(gp.m2, gp.p2, nil)
 	}
-	K, err := New(Ak, Bk, Ck, Dk, 0)
+	K, err := New(Ak, Bk, Ck, Dk, gp.dt)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}

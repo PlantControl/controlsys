@@ -1,4 +1,4 @@
 golang.org/x/tools v0.30.0 h1:BgcpHewrV5AUp2G9MebG4XPFI1E2W41zU1SaqVA9vJY=
 golang.org/x/tools v0.30.0/go.mod h1:c347cR/OJfw5TI+GfX7RUPNMdDRRbjvYTS0jPyvsVtY=
-plantcontrol.org/v1/gonum v0.20.2 h1:OgfU/oEUiXut9SqSF11mb4C1RNPkuuRNv+uYscLVG7Y=
-plantcontrol.org/v1/gonum v0.20.2/go.mod h1:o0pkKLcGQJB+qOCNpnz91g1WmRN0rbJfpuewX5BpJmE=
+plantcontrol.org/v1/gonum v0.20.3 h1:e48o8ro+BkPRTm/wqlgDg0sGzJTPUiNfrtys5yIM0QI=
+plantcontrol.org/v1/gonum v0.20.3/go.mod h1:o0pkKLcGQJB+qOCNpnz91g1WmRN0rbJfpuewX5BpJmE=
