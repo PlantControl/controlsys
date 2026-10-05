@@ -34,8 +34,11 @@ type SimulateOpts struct {
 // Simulate propagates a discrete model from x0 under u (one column per
 // sample). A nil u means zero samples unless opts.Steps is set; a model
 // without inputs takes nil u and opts.Steps, as MATLAB's lsim takes a
-// length(t)×0 u. Descriptor models with invertible E are simulated in their own
-// state coordinates. Singular E is reduced to its slow subsystem plus
+// length(t)×0 u. With a nonzero x0, Delay is split into input and output
+// delays as PullDelaysToLFT does, so its output share delays the free
+// response like OutputDelay; a Delay with no such split returns
+// ErrDelayUnsupported. Descriptor models with invertible E are simulated in
+// their own state coordinates. Singular E is reduced to its slow subsystem plus
 // feedthrough, as MATLAB does: non-causal (improper) models return
 // ErrImproperModel, and a nonzero x0 or a FinalState request returns
 // ErrDescriptorInitialState because the algebraic states depend on future

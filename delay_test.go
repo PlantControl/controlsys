@@ -1095,10 +1095,14 @@ func TestSimulateSIMOWithDelay(t *testing.T) {
 		simoSys, _ := New(A, B, C, D, 1.0)
 		forcedResp, _ := simoSys.Simulate(u, nil, nil)
 
+		outShare := []int{0, 2}
 		for i := range 2 {
 			d := int(delay.At(i, 0))
 			for k := range steps {
-				want := autoResp.Y.At(i, k)
+				want := 0.0
+				if k >= outShare[i] {
+					want = autoResp.Y.At(i, k-outShare[i])
+				}
 				if k >= d {
 					want += forcedResp.Y.At(i, k-d)
 				}
@@ -3701,6 +3705,10 @@ func TestSimulateWithDelay_MIMOManualReference(t *testing.T) {
 		u.Set(2, k, 0.05*float64(k)-0.3)
 	}
 	x0 := mat.NewVecDense(4, []float64{0.5, -0.3, 0.2, -0.1})
+	if _, err := sys.Simulate(u, x0, nil); !errors.Is(err, ErrDelayUnsupported) {
+		t.Fatalf("nonzero x0 with nondecomposable Delay: err = %v, want ErrDelayUnsupported", err)
+	}
+	x0.Zero()
 
 	got, err := sys.Simulate(u, x0, nil)
 	if err != nil {

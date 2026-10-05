@@ -1212,6 +1212,40 @@ func decomposeOutputFirst(data []float64, stride, p, m int) (inputDelay, outputD
 	return
 }
 
+// splitIODelayForInitialState moves Delay into InputDelay and OutputDelay,
+// split as DecomposeIODelay (and PullDelaysToLFT) does, when x0 is nonzero.
+// MATLAB ss has no I/O delay matrix: ss(tf) distributes it over input and
+// output delays, and an output delay τ_i delays the whole output, so the free
+// response y_i = C_i·x(t−τ_i) is zero before τ_i while delay lines start
+// empty (https://www.mathworks.com/help/control/ug/specifying-time-delays.html).
+// A Delay with no exact input+output split needs extra states that x0 cannot
+// seed, so a nonzero x0 then returns ErrDelayUnsupported.
+func (sys *System) splitIODelayForInitialState(x0 *mat.VecDense) (*System, error) {
+	if sys.Delay == nil || x0 == nil || allZeroVec(x0) {
+		return sys, nil
+	}
+	in, out, residual := DecomposeIODelay(sys.Delay)
+	if delayMatrixHasNonzero(residual) {
+		return nil, fmt.Errorf("nonzero x0 with an I/O delay matrix that has no input+output split: %w", ErrDelayUnsupported)
+	}
+	_, m, p := sys.Dims()
+	cp := sys.Copy()
+	if cp.InputDelay == nil {
+		cp.InputDelay = make([]float64, m)
+	}
+	for j, d := range in {
+		cp.InputDelay[j] += d
+	}
+	if cp.OutputDelay == nil {
+		cp.OutputDelay = make([]float64, p)
+	}
+	for i, d := range out {
+		cp.OutputDelay[i] += d
+	}
+	cp.Delay = nil
+	return cp, nil
+}
+
 type delayEntry struct {
 	row, col int
 	tau      float64

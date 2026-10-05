@@ -841,6 +841,7 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 }
 
 // Initial returns the free response from x0 with zero delay-line history.
+// Output delays, including the output share of Delay, delay it; see Simulate.
 // As in MATLAB, a descriptor model with singular E rejects a nonzero x0 with
 // ErrDescriptorInitialState.
 // Continuous models without internal delays, or whose internal delays share
@@ -946,8 +947,9 @@ func (sys *System) continuousFreeResponse(x0 *mat.VecDense, tFinal float64) (*Ti
 }
 
 // continuousFreeSamples samples y_i(t) = C_i·e^{A(t−τ_i)}·x0 for t ≥ τ_i
-// (zero before), τ_i the output delay, exactly at t = k·dt. Input and I/O
-// delays do not act on the free response.
+// (zero before), τ_i the output delay, exactly at t = k·dt. Input delays do
+// not act on the free response; timeResponseForm has already moved the
+// output share of Delay into OutputDelay for a nonzero x0.
 func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64) (*mat.Dense, error) {
 	n, _, p := sys.Dims()
 	if x0.Len() != n {
@@ -1008,7 +1010,8 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 
 // Lsim simulates the response to u held constant between samples (ZOH).
 // Descriptor models are handled as in Step; with singular E a nonzero x0
-// returns ErrDescriptorInitialState, as in MATLAB.
+// returns ErrDescriptorInitialState, as in MATLAB. x0 with Delay follows
+// Simulate.
 // Continuous models with internal delays of one common length are sampled
 // exactly; other internal-delay models use the approximate ZOH
 // discretization of the delay channels, as MATLAB does.
