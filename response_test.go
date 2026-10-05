@@ -1845,3 +1845,74 @@ func TestLsimTimeGridErrors(t *testing.T) {
 	_, err = Lsim(dsys, mat.NewDense(2, 1, nil), []float64{0, 0.1, 0.2}, nil)
 	wantErr(t, "u size", err, ErrDimensionMismatch, "Lsim")
 }
+
+func TestDampMatchesMATLABDefinitions(t *testing.T) {
+	cont, err := New(mat.NewDense(3, 3, []float64{0, 0, 0, 0, 2, 0.3, 0, 0, -1}), mat.NewDense(3, 1, []float64{1, 1, 1}), mat.NewDense(1, 3, []float64{1, 1, 1}), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := Damp(cont)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range info {
+		p := real(d.Pole)
+		var zeta, tau float64
+		switch p {
+		case 0:
+			zeta, tau = -1, math.Inf(1)
+		case 2:
+			zeta, tau = -1, -0.5
+		case -1:
+			zeta, tau = 1, 1
+		default:
+			t.Fatalf("unexpected pole %v", d.Pole)
+		}
+		if d.Wn != math.Abs(p) || d.Zeta != zeta || d.Tau != tau {
+			t.Errorf("pole %v: Wn=%g Zeta=%g Tau=%g, want %g %g %g", d.Pole, d.Wn, d.Zeta, d.Tau, math.Abs(p), zeta, tau)
+		}
+	}
+
+	osc, err := New(mat.NewDense(2, 2, []float64{0, 3, -3, 0}), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 0}), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err = Damp(osc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range info {
+		if math.Abs(d.Wn-3) > 1e-12 || d.Zeta != 0 || !math.IsInf(d.Tau, 1) {
+			t.Errorf("±3j: %+v, want Wn 3 Zeta 0 Tau +Inf", d)
+		}
+	}
+
+	dt := 0.5
+	disc, err := New(mat.NewDense(2, 2, []float64{1, 0.2, 0, 1.5}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0}), nil, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err = Damp(disc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range info {
+		switch real(d.Pole) {
+		case 1:
+			if d.Wn != 0 || d.Zeta != -1 || !math.IsInf(d.Tau, 1) {
+				t.Errorf("z=1: %+v, want Wn 0 Zeta -1 Tau +Inf", d)
+			}
+		case 1.5:
+			s := math.Log(1.5) / dt
+			if math.Abs(d.Wn-s) > 1e-12 || d.Zeta != -1 || math.Abs(d.Tau+1/s) > 1e-12 {
+				t.Errorf("z=1.5: %+v, want Wn %g Zeta -1 Tau %g", d, s, -1/s)
+			}
+		}
+	}
+
+	gain, _ := NewGain(mat.NewDense(1, 1, []float64{5}), 0)
+	info, err = Damp(gain)
+	if err != nil || info == nil || len(info) != 0 {
+		t.Errorf("Damp(gain) = %v, %v; want empty non-nil", info, err)
+	}
+}
