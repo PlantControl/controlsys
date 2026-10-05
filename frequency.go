@@ -345,46 +345,86 @@ func (e frequencyEvaluator) matrix(data []complex128, omega []float64) *FreqResp
 	return newFreqResponseMatrix(data, omega, e.p, e.m, e.sys.InputName, e.sys.OutputName)
 }
 
+// autoBodeFreqs returns the default grid of Bode, Sigma, Nichols, Bandwidth
+// and TunePID: nPoints log-spaced frequencies over the range spanned by the
+// poles, zeros and delays of sys (see autoFreqRange), ending exactly at the
+// Nyquist frequency π/Dt for discrete models. Like MATLAB bode, the range
+// follows the system dynamics and stops at the Nyquist frequency; see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.bode.html.
 func autoBodeFreqs(sys *System, nPoints int) ([]float64, error) {
 	if nPoints <= 0 {
 		nPoints = 200
 	}
-
 	poles, err := sys.Poles()
 	if err != nil {
 		return nil, err
 	}
-	var natFreqs []float64
-	for _, p := range poles {
-		var wn float64
-		wn = newTimeDomain(sys.Dt).naturalFrequency(p)
-		if wn > 0 {
-			natFreqs = append(natFreqs, wn)
+	zeros, err := sys.Zeros()
+	if err != nil {
+		return nil, err
+	}
+	roots := make([]complex128, 0, len(poles)+len(zeros))
+	roots = append(append(roots, poles...), zeros...)
+	wMin, wMax := autoFreqRange(sys, roots, systemDelays(sys))
+	omega := logspace(math.Log10(wMin), math.Log10(wMax), nPoints)
+	if nPoints > 1 {
+		omega[nPoints-1] = wMax
+	}
+	return omega, nil
+}
+
+// autoFreqRange spans one decade below and above the natural frequencies of
+// roots and the corners 1/τ of delays (seconds). Roots at s=0, z=1 and z=0
+// (a pure delay) carry no feature. Without features the range is [0.01, 100].
+// Discrete ranges end at π/Dt and start at least two decades below it.
+func autoFreqRange(sys *System, roots []complex128, delays []float64) (wMin, wMax float64) {
+	td := newTimeDomain(sys.Dt)
+	lo, hi := math.Inf(1), 0.0
+	add := func(wn float64) {
+		if wn > 0 && !math.IsInf(wn, 0) {
+			lo = min(lo, wn)
+			hi = max(hi, wn)
 		}
 	}
-
-	wMin, wMax := 0.01, 100.0
-	if len(natFreqs) > 0 {
-		lo, hi := natFreqs[0], natFreqs[0]
-		for _, w := range natFreqs[1:] {
-			if w < lo {
-				lo = w
-			}
-			if w > hi {
-				hi = w
-			}
-		}
-		wMin = lo / 10
-		wMax = hi * 10
-		if wMin < 1e-4 {
-			wMin = 1e-4
-		}
-		if wMax > 1e4 {
-			wMax = 1e4
+	for _, r := range roots {
+		add(td.naturalFrequency(r))
+	}
+	for _, tau := range delays {
+		if tau > 0 {
+			add(1 / tau)
 		}
 	}
+	wMin, wMax = 0.01, 100.0
+	if hi > 0 {
+		wMin, wMax = lo/10, hi*10
+	}
+	if sys.IsDiscrete() && sys.Dt > 0 {
+		wMax = math.Pi / sys.Dt
+		wMin = min(wMin, wMax/100)
+	}
+	return wMin, wMax
+}
 
-	return logspace(math.Log10(wMin), math.Log10(wMax), nPoints), nil
+// systemDelays lists the total I/O delay of each channel and each internal
+// delay of sys, in seconds.
+func systemDelays(sys *System) []float64 {
+	scale := 1.0
+	if sys.IsDiscrete() && sys.Dt > 0 {
+		scale = sys.Dt
+	}
+	_, m, p := sys.Dims()
+	var taus []float64
+	for i := range p {
+		for j := range m {
+			taus = append(taus, ioDelayTotal(sys, i, j)*scale)
+		}
+	}
+	if sys.LFT != nil {
+		for _, tau := range sys.LFT.Tau {
+			taus = append(taus, tau*scale)
+		}
+	}
+	return taus
 }
 
 func logspace(start, stop float64, n int) []float64 {

@@ -94,41 +94,6 @@ const (
 	marginMaxExtendDecades = 10
 )
 
-func marginRange(sys *System) (wMin, wMax float64, err error) {
-	poles, err := sys.Poles()
-	if err != nil {
-		return 0, 0, err
-	}
-	td := newTimeDomain(sys.Dt)
-	lo, hi := math.Inf(1), 0.0
-	for _, p := range poles {
-		wn := td.naturalFrequency(p)
-		if wn > 0 && !math.IsInf(wn, 0) {
-			lo = min(lo, wn)
-			hi = max(hi, wn)
-		}
-	}
-	wMin, wMax = 0.01, 100.0
-	if hi > 0 {
-		wMin, wMax = lo/10, hi*10
-	}
-	if sys.IsDiscrete() && sys.Dt > 0 {
-		wMax = math.Pi / sys.Dt
-		wMin = min(wMin, wMax/100)
-	}
-	return wMin, wMax, nil
-}
-
-func marginFreqs(sys *System, nPoints int) ([]float64, error) {
-	wMin, wMax, err := marginRange(sys)
-	if err != nil {
-		return nil, err
-	}
-	omega := logspace(math.Log10(wMin), math.Log10(wMax), nPoints)
-	omega[len(omega)-1] = wMax
-	return omega, nil
-}
-
 func marginLoopDelay(sys *System) float64 {
 	tau := ioDelayTotal(sys, 0, 0)
 	if sys.LFT != nil {
@@ -162,10 +127,11 @@ func extendMarginRange(w, factor float64, logMag func(float64) float64) float64 
 }
 
 func marginGrid(sys *System, eval *sisoEval) ([]float64, []complex128, error) {
-	wMin, wMax, err := marginRange(sys)
+	poles, err := sys.Poles()
 	if err != nil {
 		return nil, nil, err
 	}
+	wMin, wMax := autoFreqRange(sys, poles, nil)
 	discrete := sys.IsDiscrete() && sys.Dt > 0
 	tau := marginLoopDelay(sys)
 	if tau > 0 {
@@ -446,7 +412,7 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 
 	threshold := 20*math.Log10(dcMag) + dbDrop
 
-	omega, err := marginFreqs(sys, 1000)
+	omega, err := autoBodeFreqs(sys, 1000)
 	if err != nil {
 		return 0, err
 	}

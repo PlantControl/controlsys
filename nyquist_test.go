@@ -460,3 +460,28 @@ func TestWindingNumber(t *testing.T) {
 		})
 	}
 }
+
+func TestNyquist_DiscretePoleAtOrigin(t *testing.T) {
+	d, _ := New(mat.NewDense(1, 1, []float64{0}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0.1)
+	ny, err := d.Nyquist(nil, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := ny.Omega
+	if len(w) < 10 {
+		t.Fatalf("len(omega) = %d", len(w))
+	}
+	for k, v := range w {
+		if math.IsNaN(v) || math.IsInf(v, 0) || (k > 0 && v <= w[k-1]) {
+			t.Fatalf("omega[%d] = %g not finite increasing", k, v)
+		}
+		z := cmplx.Exp(complex(0, v*0.1))
+		if got, want := ny.Contour[k], 1/z; cmplx.Abs(got-want) > 1e-12 {
+			t.Fatalf("H(%g) = %v, want %v", v, got, want)
+		}
+	}
+	if math.Abs(w[len(w)-1]-math.Pi/0.1) > 1e-12 {
+		t.Errorf("last omega = %g, want π/dt", w[len(w)-1])
+	}
+}

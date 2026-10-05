@@ -1775,3 +1775,31 @@ func TestMargin_ClosedForms(t *testing.T) {
 		}
 	}
 }
+
+// G(s) = (s+0.1)(s+30)/((s+1)(s+2)): |G| rises from 1.5 and falls to 1 only
+// past the zero at 30, beyond a decade above the poles.
+func TestBandwidth_ZeroBeyondPoles(t *testing.T) {
+	sys, _ := New(mat.NewDense(2, 2, []float64{0, 1, -2, -3}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 27.1}), mat.NewDense(1, 1, []float64{1}), 0)
+	bw, err := Bandwidth(sys, -3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mag := func(w float64) float64 {
+		s := complex(0, w)
+		return cmplx.Abs((s + 0.1) * (s + 30) / ((s + 1) * (s + 2)))
+	}
+	thr := 1.5 * math.Pow(10, -3.0/20)
+	lo, hi := 10.0, 1e4
+	for range 200 {
+		mid := math.Sqrt(lo * hi)
+		if mag(mid) > thr {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	if math.Abs(bw-lo) > 1e-6*lo {
+		t.Errorf("BW = %g, want %g", bw, lo)
+	}
+}

@@ -66,7 +66,7 @@ func findCrossoverFreq(plant *System, wcTarget float64) (float64, error) {
 		return wcTarget, nil
 	}
 
-	omega, err := marginFreqs(plant, 500)
+	omega, err := autoBodeFreqs(plant, 500)
 	if err != nil {
 		return 0, err
 	}
