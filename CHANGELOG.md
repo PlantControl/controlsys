@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.1.0
 
 - Dependency: `plantcontrol.org/v1/gonum` v0.20.3. Dhseqr's Dlaqr04 fallback (reached by Dgees/Dgeev when Dlahqr fails, always for NaN input) passed wrong bounds, eigenvalue slices and an undersized Z; fixed, and non-finite input no longer panics (PlantControl/gonum#24).
 - `HinfNorm` and `Norm(sys, Inf)` accept continuous internal-delay models instead of returning `ErrContinuousInternalDelay`. Stability is decided exactly by the Nyquist count of det(I − H22·Δ) (unstable returns `(+Inf, +Inf, nil)`); the peak uses the exact delay factors e^{−jωτ}. Neutral-type or uncertifiable cases return `ErrDelayUnsupported`.
@@ -20,6 +20,12 @@
 - `Makeweight(dcgain, freqMag, hfgain, Ts, N)`, MATLAB `makeweight`: monotonic loop-shaping weight through `dcgain`, `mag` at `freq` (or `[wc]` for `|W| = 1`) and `hfgain`; order `N` with Butterworth-pattern poles and zeros; discrete (`Ts > 0`) by Tustin prewarped at `freq`.
 - `Augw(G, W1, W2, W3)`, MATLAB `augw`: mixed-sensitivity generalized plant `[W1 −W1·G; 0 W2; 0 W3·G; I −G]` with nil weights omitted, SISO weights expanded as `W·I`, and improper `W3` accepted when `W3·G` is proper; channels named `w`, `u`, `z1`, `z2`, `z3`, `e`.
 - `Mixsyn(G, W1, W2, W3)`, MATLAB `mixsyn`: `HinfSyn` on `Augw`, returning `MixsynResult{K, CL, Gamma, Info}` with `Gamma = ‖CL‖∞`; rank-deficient D12 (e.g. `W2` nil with strictly proper continuous `G`) returns `ErrInvalidPartition`; discrete `G` supported.
+
+### Performance
+
+- Delayed-loop `DiskMargin`/`DiskMarginSkew`/`Margin`: one reusable point evaluator per loop instead of fresh LFT/balancing/realization workspaces per frequency point, plus the tail-bound grid cut above: the PID + e^{−0.5s} case goes from 54 ms / 81 MiB (v2.0.0) to about 0.5 ms / 45 KB (#305, #308, #313).
+- `DefaultFrequencyGrid`/`Zeros`: minimum Dggev workspace for pencils below the blocking threshold; grid unchanged bit-for-bit, about 90% less memory (#306).
+- MIMO internal-delay `HinfNorm`: flat cached torus grid and pooled certification samples, 8514 → 172 allocations per call, bit-identical results (#315).
 
 ## v2.0.0
 
