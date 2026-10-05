@@ -321,3 +321,177 @@ func TestStabsep_AdditiveDecompositionDCGain(t *testing.T) {
 		t.Errorf("stable DC gain has inf/nan")
 	}
 }
+
+func pencilResponse(t *testing.T, sys *System, s complex128) [][]complex128 {
+	t.Helper()
+	n, m, p := sys.Dims()
+	G := cmatOf(sys.D, p, m)
+	if n == 0 {
+		return G
+	}
+	M := make([][]complex128, n)
+	for i := range n {
+		M[i] = make([]complex128, n)
+		for j := range n {
+			e := 0.0
+			if sys.E != nil {
+				e = sys.E.At(i, j)
+			} else if i == j {
+				e = 1
+			}
+			M[i][j] = s*complex(e, 0) - complex(sys.A.At(i, j), 0)
+		}
+	}
+	CX := cmul(cmatOf(sys.C, p, n), csolve(t, M, cmatOf(sys.B, n, m)))
+	for i := range p {
+		for j := range m {
+			G[i][j] += CX[i][j]
+		}
+	}
+	return G
+}
+
+func assertSplitSum(t *testing.T, label string, orig, a, b *System) {
+	t.Helper()
+	pts := []complex128{complex(0.3, 0.7), complex(-0.2, 2.5), complex(1.7, -0.4)}
+	for _, s := range pts {
+		want := pencilResponse(t, orig, s)
+		ga := pencilResponse(t, a, s)
+		gb := pencilResponse(t, b, s)
+		for i := range want {
+			for j := range want[i] {
+				if d := cmplx.Abs(ga[i][j] + gb[i][j] - want[i][j]); d > 1e-9*(1+cmplx.Abs(want[i][j])) {
+					t.Fatalf("%s: parts sum mismatch at s=%v [%d,%d]: |diff|=%.3g", label, s, i, j, d)
+				}
+			}
+		}
+	}
+}
+
+func generalizedEigOracle(t *testing.T, A, E *mat.Dense) []complex128 {
+	t.Helper()
+	var lu mat.LU
+	lu.Factorize(E)
+	var F mat.Dense
+	if err := lu.SolveTo(&F, false, A); err != nil {
+		t.Fatal(err)
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(&F, mat.EigenNone) {
+		t.Fatal("eig failed")
+	}
+	return eig.Values(nil)
+}
+
+func descriptorSplitFixture(t *testing.T, dt float64) *System {
+	t.Helper()
+	E := mat.NewDense(3, 3, []float64{2, 1, 0, 0.5, 3, 0.2, 0, 0.4, 1.5})
+	A := mat.NewDense(3, 3, []float64{1.5, 0.7, 0.1, -0.3, -2.1, 0.4, 0.25, -0.15, -3.3})
+	if dt > 0 {
+		A = mat.NewDense(3, 3, []float64{2.9, 1.2, 0.4, 0.3, 1.1, -0.8, 0.1, 0.6, -0.9})
+	}
+	B := mat.NewDense(3, 2, []float64{1, 0.2, -0.4, 1.3, 0.6, -0.8})
+	C := mat.NewDense(2, 3, []float64{1, 0.5, -0.2, 0, 1.1, 0.3})
+	D := mat.NewDense(2, 2, []float64{0.1, 0, -0.2, 0.3})
+	sys, err := NewDescriptor(A, B, C, D, E, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func TestStabsep_Descriptor(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys := descriptorSplitFixture(t, dt)
+		wantStable := 0
+		for _, ev := range generalizedEigOracle(t, sys.A, sys.E) {
+			if (dt == 0 && real(ev) < 0) || (dt > 0 && cmplx.Abs(ev) < 1) {
+				wantStable++
+			}
+		}
+		if wantStable == 0 || wantStable == 3 {
+			t.Fatalf("dt=%v: fixture not mixed (%d stable)", dt, wantStable)
+		}
+		res, err := Stabsep(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ns, _, _ := res.Stable.Dims(); ns != wantStable {
+			t.Errorf("dt=%v: stable order %d, want %d", dt, ns, wantStable)
+		}
+		if st, _ := res.Stable.IsStable(); !st {
+			t.Errorf("dt=%v: stable part not stable", dt)
+		}
+		assertSplitSum(t, "Stabsep descriptor", sys, res.Stable, res.Unstable)
+	}
+}
+
+func boundaryOscillator(t *testing.T, w, dt float64) *System {
+	t.Helper()
+	T := mat.NewDense(3, 3, []float64{1, 0.3, 0.7, 0.2, 1.1, -0.4, 0.5, 0.1, 0.9})
+	var Ti, A, tmp mat.Dense
+	if err := Ti.Inverse(T); err != nil {
+		t.Fatal(err)
+	}
+	J := mat.NewDense(3, 3, []float64{0, w, 0, -w, 0, 0, 0, 0, -1})
+	if dt > 0 {
+		J = mat.NewDense(3, 3, []float64{math.Cos(w), math.Sin(w), 0, -math.Sin(w), math.Cos(w), 0, 0, 0, 0.5})
+	}
+	tmp.Mul(T, J)
+	A.Mul(&tmp, &Ti)
+	sys, err := New(&A, mat.NewDense(3, 1, []float64{1, 0, 1}), mat.NewDense(1, 3, []float64{1, 1, 0}), mat.NewDense(1, 1, []float64{0.2}), dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func TestStabsep_BoundaryPolesUnstable(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for k := range 200 {
+			w := 0.37 + 0.01*float64(k)
+			sys := boundaryOscillator(t, w, dt)
+			res, err := Stabsep(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ns, _, _ := res.Stable.Dims()
+			nu, _, _ := res.Unstable.Dims()
+			if ns != 1 || nu != 2 {
+				t.Fatalf("dt=%v w=%g: stable/unstable orders %d/%d, want 1/2", dt, w, ns, nu)
+			}
+		}
+	}
+}
+
+func TestStabsep_ComplexPairNonNormalSumExact(t *testing.T) {
+	for _, tc := range []struct {
+		dt float64
+		A  []float64
+	}{
+		{0, []float64{0.5, 2, 0, -0.5, -3, 1, 0.3, 0, -2}},
+		{0.1, []float64{1.4, 0.2, 0, -0.1, 0.3, 0.4, 0.2, 0, -0.6}},
+		{0.1, []float64{0.2, -0.9, 0.1, 0.8, 0.3, 0.5, 0, 0.4, 1.3}},
+	} {
+		sys, err := New(mat.NewDense(3, 3, tc.A), mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, -1}),
+			mat.NewDense(2, 3, []float64{1, 0.5, 0, 0, 1, -1}), mat.NewDense(2, 2, []float64{0.3, 0, -0.1, 0.2}), tc.dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := Stabsep(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ns, _, _ := res.Stable.Dims()
+		nu, _, _ := res.Unstable.Dims()
+		if ns == 0 || nu == 0 {
+			t.Fatalf("dt=%v: fixture not mixed (%d/%d)", tc.dt, ns, nu)
+		}
+		assertSplitSum(t, "Stabsep", sys, res.Stable, res.Unstable)
+		mres, err := Modsep(sys, 1.2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSplitSum(t, "Modsep", sys, mres.Slow, mres.Fast)
+	}
+}
