@@ -391,7 +391,7 @@ func TestDecomposeIODelaySnapsDecimalRoundoff(t *testing.T) {
 			for _, o0 := range vals {
 				for _, o1 := range vals {
 					io := mat.NewDense(2, 2, []float64{o0 + i0, o0 + i1, o1 + i0, o1 + i1})
-					in, out, residual := DecomposeIODelay(io)
+					in, out, residual := decomposeIODelay(io)
 					if delayMatrixHasNonzero(residual) {
 						t.Fatalf("in=[%g %g] out=[%g %g]: residual %v", i0, i1, o0, o1, mat.Formatted(residual))
 					}
@@ -406,11 +406,11 @@ func TestDecomposeIODelaySnapsDecimalRoundoff(t *testing.T) {
 			}
 		}
 	}
-	_, out, residual := DecomposeIODelay(mat.NewDense(2, 2, []float64{0.1, 0.2, 0.1 * 3, 0.4}))
+	_, out, residual := decomposeIODelay(mat.NewDense(2, 2, []float64{0.1, 0.2, 0.1 * 3, 0.4}))
 	if delayMatrixHasNonzero(residual) || out[0] != 0 {
 		t.Fatalf("0.1*[1 2;3 4]: out=%v residual=%v", out, mat.Formatted(residual))
 	}
-	_, _, residual = DecomposeIODelay(mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.3}))
+	_, _, residual = decomposeIODelay(mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.3}))
 	if !delayMatrixHasNonzero(residual) {
 		t.Fatal("genuine residual snapped")
 	}
