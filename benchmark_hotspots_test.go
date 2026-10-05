@@ -632,11 +632,15 @@ func BenchmarkPhysicalAssembly_8Components(b *testing.B) {
 		sys.InputName = []string{"force"}
 		sys.OutputName = []string{"position"}
 		sys.StateName = autoLabel("x", 4)
-		components[i] = NewPhysicalComponent(
+		c, err := NewPhysicalComponent(
 			fmt.Sprintf("c%d", i),
 			sys,
 			[]PhysicalPort{{Name: "mount", Kind: PhysicalPortDisplacement, Dimension: 1}},
 		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		components[i] = c
 	}
 	connections := make([]PhysicalConnection, 0, len(components)-1)
 	for i := 0; i < len(components)-1; i++ {
