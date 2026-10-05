@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -12,6 +13,8 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// PIDDesignFocus weights reference tracking against disturbance rejection,
+// as MATLAB pidtuneOptions DesignFocus.
 type PIDDesignFocus string
 
 const (
@@ -20,22 +23,75 @@ const (
 	PIDFocusRejection PIDDesignFocus = "rejection"
 )
 
+// PIDStabilityEvidence names how a TunePID design's closed-loop stability was
+// checked.
+type PIDStabilityEvidence string
+
+const (
+	// PIDStabilityClosedLoopPoles checks the closed-loop poles of a
+	// delay-free (or delay-absorbed discrete) plant.
+	PIDStabilityClosedLoopPoles PIDStabilityEvidence = "closed-loop-poles"
+	// PIDStabilityNyquist counts Nyquist encirclements of a continuous delayed
+	// plant on a delay-aware adaptive grid.
+	PIDStabilityNyquist PIDStabilityEvidence = "nyquist-encirclement"
+	// PIDStabilitySampledOnly checks only sampled frequencies; it is not a
+	// global stability certificate.
+	PIDStabilitySampledOnly PIDStabilityEvidence = "sampled-frequency-only"
+)
+
+// PIDTuningTermination names why the TunePID search stopped.
+type PIDTuningTermination string
+
+const (
+	PIDTerminationConverged       PIDTuningTermination = "converged"
+	PIDTerminationRoundLimit      PIDTuningTermination = "round-limit"
+	PIDTerminationEvaluationLimit PIDTuningTermination = "evaluation-limit"
+)
+
+// PIDTuningError reports a TunePID or TunePIDFRD search that met no
+// candidate satisfying the target and stability checks. It unwraps to
+// ErrPIDTuningTargetUnattainable and carries the search evidence.
+type PIDTuningError struct {
+	Op       string
+	Evidence PIDTuningEvidence
+}
+
+func (e *PIDTuningError) Error() string {
+	return e.Op + ": " + ErrPIDTuningTargetUnattainable.Error()
+}
+
+func (e *PIDTuningError) Unwrap() error { return ErrPIDTuningTargetUnattainable }
+
 // PIDTuningWeights enables two-degree-of-freedom tuning. A nil field is free in
 // [0,1]; a nonnil field is fixed exactly. Nil options.Weights means b=c=1.
 type PIDTuningWeights struct{ FixedB, FixedC *float64 }
 
+// PIDTuningOptions holds the TunePID targets; zero values select defaults.
 type PIDTuningOptions struct {
+	// CrossoverFrequency is the target gain crossover in rad/s; 0 picks it
+	// from the plant (TunePID) or the geometric band centre (TunePIDFRD).
 	CrossoverFrequency float64
+	// PhaseMargin in degrees, in (0, 180); 0 means 60, or the plant's own
+	// margin for the one-gain P and I families.
 	PhaseMargin        float64
 	Focus              PIDDesignFocus
 	IFormula, DFormula PIDFormula
 	Weights            *PIDTuningWeights
-	MaxEvaluations     int
-	// UnstablePoles is optional user knowledge for FRD; nil means unknown.
+	// MaxEvaluations bounds candidate evaluations, 1..4096; 0 means 4096.
+	MaxEvaluations int
+	// UnstablePoles is optional user knowledge for TunePIDFRD; nil means
+	// unknown. TunePID rejects it with ErrOptionUnsupported.
 	UnstablePoles *int
 }
 
+// PIDTuningObjective holds the frequency-averaged tracking, rejection and
+// effort terms of the tuning objective.
 type PIDTuningObjective struct{ Tracking, Rejection, Effort float64 }
+
+// PIDTuningEvidence records the targets, achieved margins and search of a
+// TunePID design. AchievedCrossover equals RequestedCrossover because every
+// candidate is gain-normalized at it. SeedObjective is +Inf in a
+// PIDTuningError when no seed was feasible.
 type PIDTuningEvidence struct {
 	RequestedCrossover, RequestedPhaseMargin float64
 	AchievedCrossover, AchievedPhaseMargin   float64
@@ -44,17 +100,18 @@ type PIDTuningEvidence struct {
 	Objective, SeedObjective                 float64
 	Components, Normalizers                  PIDTuningObjective
 	Evaluations                              int
-	Termination                              string
-	// Stability is "closed-loop-poles", "nyquist-encirclement" or
-	// "sampled-frequency-only". Discrete delays are absorbed into the
-	// closed-loop poles. Continuous delayed plants use a Nyquist encirclement
-	// count on a delay-aware adaptive grid when the plant is standard with an
-	// acyclic delay network; otherwise only sampled frequencies are checked,
-	// which is deliberately not a global stability certificate.
-	Stability string
+	Termination                              PIDTuningTermination
+	// Stability names the check applied to every accepted candidate.
+	// Discrete delays are absorbed into the closed-loop poles. Continuous
+	// delayed plants use a Nyquist encirclement count on a delay-aware
+	// adaptive grid when the plant is standard with an acyclic delay network;
+	// otherwise only sampled frequencies are checked, which is deliberately
+	// not a global stability certificate.
+	Stability PIDStabilityEvidence
 	Warnings  []string
-	Feasible  bool
 }
+
+// PIDTuningResult is a feasible TunePID design and its evidence.
 type PIDTuningResult struct {
 	Controller *PID2
 	Evidence   PIDTuningEvidence
@@ -63,99 +120,123 @@ type PIDTuningResult struct {
 type pidTuningPlant struct {
 	dt, low, high float64
 	at            func(float64) complex128
-	stable        func(*PID2) bool
-	stability     string
+	stable        func(*PID2) (bool, error)
+	stability     PIDStabilityEvidence
 	warnings      []string
 }
 
 // TunePID designs a SISO negative-feedback controller. The original Pidtune API
 // retains its historical behavior. This operation enforces finite targets,
 // bounded computation and explicit achieved-target/stability evidence.
+//
+// An unattainable target returns a *PIDTuningError (wrapping
+// ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
+// options return ErrInvalidArgument; a numerical failure of a stability
+// check aborts the search with its error.
 func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTuningOptions) (*PIDTuningResult, error) {
 	if ctx == nil {
-		return nil, fmt.Errorf("TunePID: nil context")
+		return nil, fmt.Errorf("TunePID: nil context: %w", ErrInvalidArgument)
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("TunePID: %w", err)
+	}
+	if err := requireFiniteSystem("TunePID", plant); err != nil {
 		return nil, err
 	}
 	if _, err := newSISOLoopModel(plant, "TunePID"); err != nil {
 		return nil, err
+	}
+	if opts.UnstablePoles != nil {
+		return nil, fmt.Errorf("TunePID: UnstablePoles applies only to TunePIDFRD: %w", ErrOptionUnsupported)
 	}
 	wc := opts.CrossoverFrequency
 	if wc == 0 {
 		var err error
 		wc, err = findCrossoverFreq(plant, 0)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("TunePID: %w", err)
 		}
 		opts.CrossoverFrequency = wc
 	}
 	eval, err := newSISOEval(plant)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: "sampled-frequency-only"}
+	p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly}
 	if plant.Dt > 0 {
 		p.high = math.Min(p.high, .99*math.Pi/plant.Dt)
 	}
 	model := plant
 	if plant.Dt > 0 && plant.HasDelay() {
-		if absorbed, err := plant.AbsorbDelay(AbsorbAll); err == nil {
-			model = absorbed
+		if model, err = plant.AbsorbDelay(AbsorbAll); err != nil {
+			return nil, fmt.Errorf("TunePID: %w", err)
 		}
 	}
 	if !model.HasDelay() {
-		p.stability = "closed-loop-poles"
-		hiddenStable := sync.OnceValue(func() bool { return pidTuningHiddenModesStable(model) })
-		p.stable = func(c *PID2) bool {
-			controller := NewPID(c.Kp, c.Ki, c.Kd, WithFilter(c.Tf), WithPIDFormulas(c.IFormula, c.DFormula))
-			controller.Dt = c.Dt
+		p.stability = PIDStabilityClosedLoopPoles
+		hiddenStable := sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) })
+		p.stable = func(c *PID2) (bool, error) {
+			controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
 			cs, err := controller.System()
 			if err != nil {
 				if c.Kd != 0 && c.Tf == 0 {
-					return hiddenStable() && pidTuningIdealStable(model, c)
+					if ok, err := hiddenStable(); !ok || err != nil {
+						return false, err
+					}
+					return pidTuningIdealStable(model, c)
 				}
-				return false
+				return false, err
 			}
 			loop, err := Feedback(model, cs, -1)
-			if err != nil {
-				return false
+			if errors.Is(err, ErrAlgebraicLoop) {
+				return false, nil
 			}
-			stable, err := loop.IsStable()
-			return err == nil && stable
+			if err != nil {
+				return false, err
+			}
+			return loop.IsStable()
 		}
-	} else if stable, ok := pidTuningDelayStability(plant, eval, wc, pidTuningIdealDerivative(family)); ok {
-		p.stability = "nyquist-encirclement"
-		p.stable = stable
 	} else {
-		p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
+		stable, ok, err := pidTuningDelayStability(plant, eval, wc, pidTuningIdealDerivative(family))
+		if err != nil {
+			return nil, fmt.Errorf("TunePID: %w", err)
+		}
+		if ok {
+			p.stability = PIDStabilityNyquist
+			p.stable = stable
+		} else {
+			p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
+		}
 	}
-	return tunePID(ctx, p, family, opts)
+	return tunePID(ctx, "TunePID", p, family, opts)
 }
 
-func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
+func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	invalid := func(format string, args ...any) error {
+		return fmt.Errorf("%s: %s: %w", op, fmt.Sprintf(format, args...), ErrInvalidArgument)
 	}
 	if !finitePID(o.CrossoverFrequency) || o.CrossoverFrequency <= 0 {
-		return nil, fmt.Errorf("TunePID: crossover must be positive and finite")
+		return nil, invalid("crossover %g must be positive and finite", o.CrossoverFrequency)
 	}
 	if !finitePID(p.dt) || p.dt < 0 {
-		return nil, fmt.Errorf("TunePID: sample time must be finite and nonnegative")
+		return nil, invalid("sample time %g must be finite and nonnegative", p.dt)
 	}
 	wc := o.CrossoverFrequency
 	if p.dt > 0 && wc >= math.Pi/p.dt {
-		return nil, fmt.Errorf("TunePID: crossover must be below Nyquist")
+		return nil, invalid("crossover %g must be below Nyquist %g", wc, math.Pi/p.dt)
 	}
 	if wc <= p.low || wc >= p.high {
-		return nil, fmt.Errorf("TunePID: crossover needs frequency coverage on both sides")
+		return nil, invalid("crossover %g needs frequency coverage on both sides of [%g, %g]", wc, p.low, p.high)
 	}
 	free := o.PhaseMargin == 0
 	if free {
 		o.PhaseMargin = 60
 	}
 	if !finitePID(o.PhaseMargin) || o.PhaseMargin <= 0 || o.PhaseMargin >= 180 {
-		return nil, fmt.Errorf("TunePID: phase margin must be between 0 and 180 degrees")
+		return nil, invalid("phase margin %g must be between 0 and 180 degrees", o.PhaseMargin)
 	}
 	if o.Focus == "" {
 		o.Focus = PIDFocusBalanced
@@ -168,15 +249,15 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		tracking = .05
 	case PIDFocusBalanced:
 	default:
-		return nil, fmt.Errorf("TunePID: unknown focus %q", o.Focus)
+		return nil, invalid("unknown focus %q", o.Focus)
 	}
 	if o.IFormula < ForwardEuler || o.IFormula > Trapezoidal || o.DFormula < ForwardEuler || o.DFormula > Trapezoidal {
-		return nil, fmt.Errorf("TunePID: unknown discrete formula")
+		return nil, invalid("unknown discrete formula")
 	}
 	if o.Weights != nil {
 		for _, v := range []*float64{o.Weights.FixedB, o.Weights.FixedC} {
 			if v != nil && !finitePID(*v) {
-				return nil, fmt.Errorf("TunePID: fixed weights must be finite")
+				return nil, invalid("fixed weights must be finite")
 			}
 		}
 	}
@@ -184,7 +265,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		o.MaxEvaluations = 4096
 	}
 	if o.MaxEvaluations < 1 || o.MaxEvaluations > 4096 {
-		return nil, fmt.Errorf("TunePID: evaluation bound must be 1..4096")
+		return nil, invalid("evaluation bound %d must be 1..4096", o.MaxEvaluations)
 	}
 	family = PidtuneType(strings.ToUpper(string(family)))
 	hasP, hasI, hasD, filtered := true, false, false, false
@@ -208,7 +289,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		hasD = true
 		filtered = true
 	default:
-		return nil, fmt.Errorf("TunePID: unsupported family %q", family)
+		return nil, invalid("unsupported family %q", family)
 	}
 	// Only explicitly filtered families introduce a derivative filter.
 	tf := 0.
@@ -218,7 +299,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 	c := PID2{Tf: tf, Dt: p.dt, IFormula: o.IFormula, DFormula: o.DFormula, B: 1, C: 1}
 	h := p.at(wc)
 	if !pidFiniteComplex(h) || cmplx.Abs(h) < 1e-15 {
-		return nil, fmt.Errorf("TunePID: invalid plant gain at crossover")
+		return nil, invalid("plant gain %v at crossover is zero or not finite", h)
 	}
 	// P and I have one gain: its crossover fixes the phase margin, so an
 	// unspecified margin takes the plant's instead of the 60° default.
@@ -232,7 +313,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		}
 		margin, ok := pidOneGainMargin(h * pidTuningFeedback(unit, wc))
 		if !ok {
-			return &PIDTuningResult{Evidence: PIDTuningEvidence{RequestedCrossover: wc, Stability: p.stability}}, ErrPIDTuningTargetUnattainable
+			return nil, &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: wc, Stability: p.stability}}
 		}
 		o.PhaseMargin = margin
 	}
@@ -262,7 +343,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		}
 	}
 	if !finitePID(c.Kp) || !finitePID(c.Ki) || !finitePID(c.Kd) {
-		return nil, fmt.Errorf("TunePID: singular controller basis at requested crossover")
+		return nil, fmt.Errorf("%s: singular controller basis at crossover %g: %w", op, wc, ErrSingularTransform)
 	}
 	const points = 241
 	omega, plant := make([]float64, points), make([]complex128, points)
@@ -270,7 +351,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		omega[k] = math.Exp(math.Log(p.low) + float64(k)*math.Log(p.high/p.low)/float64(points-1))
 		plant[k] = p.at(omega[k])
 		if !pidFiniteComplex(plant[k]) {
-			return nil, fmt.Errorf("TunePID: nonfinite plant response at %g", omega[k])
+			return nil, invalid("nonfinite plant response at %g", omega[k])
 		}
 	}
 	// Include wc exactly so target evidence never depends on a nearby grid sample.
@@ -304,7 +385,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 	pidTuningSolveWeights(&c, o.Weights, omega, plant, wc)
 	norms := components(c)
 	if !finitePID(norms.Tracking) || !finitePID(norms.Rejection) || !finitePID(norms.Effort) {
-		return nil, fmt.Errorf("TunePID: objective overflows; rescale plant units")
+		return nil, fmt.Errorf("%s: objective overflows; rescale plant units: %w", op, ErrOverflow)
 	}
 	norms.Tracking = math.Max(norms.Tracking, 1e-3)
 	norms.Rejection = math.Max(norms.Rejection, 1e-3)
@@ -312,7 +393,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 	score := func(v PIDTuningObjective) float64 {
 		return tracking*v.Tracking/norms.Tracking + (1-tracking)*v.Rejection/norms.Rejection + .001*v.Effort/norms.Effort
 	}
-	evidence := PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: o.PhaseMargin, Stability: p.stability, Warnings: append([]string(nil), p.warnings...), Normalizers: norms, Termination: "converged"}
+	evidence := PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: o.PhaseMargin, Stability: p.stability, Warnings: append([]string(nil), p.warnings...), Normalizers: norms, Termination: PIDTerminationConverged}
 
 	bestScore := math.Inf(1)
 	var best PID2
@@ -344,8 +425,14 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		if !finitePID(j) || j >= bestScore {
 			return nil
 		}
-		if p.stable != nil && !p.stable(&candidate) {
-			return nil
+		if p.stable != nil {
+			stable, err := p.stable(&candidate)
+			if err != nil {
+				return fmt.Errorf("stability check: %w", err)
+			}
+			if !stable {
+				return nil
+			}
 		}
 		// A free one-gain design has no margin to hold at other crossovers:
 		// with a model-based stability certificate it needs only positive
@@ -366,7 +453,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		return nil
 	}
 	if err := evaluate(c); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	if hasP && hasI && hasD {
 		seed := c
@@ -374,7 +461,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 		seed.Ki = imag(target) / imag(ib)
 		seed.Kp = real(target) - seed.Ki*real(ib)
 		if err := evaluate(seed); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 	}
 	evidence.SeedObjective = bestScore
@@ -405,7 +492,7 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 					candidate.Tf *= math.Exp(sign * step)
 				}
 				if err := evaluate(candidate); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("%s: %w", op, err)
 				}
 			}
 		}
@@ -416,15 +503,14 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 			break
 		}
 		if round == 63 {
-			evidence.Termination = "round-limit"
+			evidence.Termination = PIDTerminationRoundLimit
 		}
 	}
 	if evidence.Evaluations >= o.MaxEvaluations {
-		evidence.Termination = "evaluation-limit"
+		evidence.Termination = PIDTerminationEvaluationLimit
 	}
 	if !finitePID(bestScore) {
-		evidence.SeedObjective = 0
-		return &PIDTuningResult{Evidence: evidence}, ErrPIDTuningTargetUnattainable
+		return nil, &PIDTuningError{Op: op, Evidence: evidence}
 	}
 	if !finitePID(evidence.SeedObjective) {
 		evidence.SeedObjective = bestScore
@@ -443,7 +529,6 @@ func tunePID(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTun
 	}
 	evidence.FrequencyBand = [2]float64{p.low, p.high}
 	evidence.Warnings = append(evidence.Warnings, "Margins describe the recorded finite analysis band; unresolved crossings outside that band are not excluded.")
-	evidence.Feasible = true
 	return &PIDTuningResult{Controller: &best, Evidence: evidence}, nil
 }
 
@@ -568,21 +653,23 @@ func pidTuningSolveWeights(c *PID2, o *PIDTuningWeights, omega []float64, plant 
 
 // Feedback cannot move uncontrollable or unobservable modes, and the transfer
 // function used by pidTuningIdealStable omits them.
-func pidTuningHiddenModesStable(plant *System) bool {
+func pidTuningHiddenModesStable(plant *System) (bool, error) {
+	if n, _, _ := plant.Dims(); n == 0 {
+		return true, nil
+	}
 	stabilizable, err := IsStabilizable(plant.A, plant.B, plant.Dt == 0)
 	if err != nil || !stabilizable {
-		return false
+		return false, err
 	}
-	detectable, err := IsDetectable(plant.A, plant.C, plant.Dt == 0)
-	return err == nil && detectable
+	return IsDetectable(plant.A, plant.C, plant.Dt == 0)
 }
 
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic directly.
-func pidTuningIdealStable(plant *System, c *PID2) bool {
+func pidTuningIdealStable(plant *System, c *PID2) (bool, error) {
 	transfer, err := plant.rationalTransferFunction(nil)
 	if err != nil {
-		return false
+		return false, err
 	}
 	var ip, id, dn, dd Poly
 	if c.Ki == 0 {
@@ -625,18 +712,18 @@ func pidTuningIdealStable(plant *System, c *PID2) bool {
 		characteristic = characteristic[1:]
 	}
 	if len(characteristic) == 0 || characteristic[0] == 0 {
-		return false
+		return false, nil
 	}
 	poles, err := characteristic.Roots()
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, pole := range poles {
 		if !pidFiniteComplex(pole) || c.Dt == 0 && real(pole) >= 0 || c.Dt > 0 && cmplx.Abs(pole) >= 1 {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // Report all located gain crossings, retaining the exactly normalized target.
@@ -684,14 +771,19 @@ func pidTuningIdealDerivative(family PidtuneType) bool {
 // pidTuningDelayStability returns a Nyquist stability test for loops
 // C(s)·P(s) with a continuous delayed plant, or false when the plant is
 // outside the test's scope. Ideal derivative controllers need D = 0 and no
-// internal delays so that |Kd·s·P(s)| has a finite high-frequency bound.
-func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool) (func(*PID2) bool, bool) {
+// internal delays so that |Kd·s·P(s)| has a finite high-frequency bound. A
+// candidate loop outside the Nyquist test's scope is rejected; other
+// failures are errors.
+func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool) (func(*PID2) (bool, error), bool, error) {
 	if !plant.IsContinuous() {
-		return nil, false
+		return nil, false, nil
 	}
 	base, err := delayLoopFromSystem(plant, "TunePID")
+	if errors.Is(err, errDelayLoopUnsupported) {
+		return nil, false, nil
+	}
 	if err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	plantTail, plantLimit := base.tail, base.tailLimit
 	var derivTail func(float64) float64
@@ -717,9 +809,9 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 		}
 	}
 	if idealDerivative && derivTail == nil {
-		return nil, false
+		return nil, false, nil
 	}
-	return func(c *PID2) bool {
+	return func(c *PID2) (bool, error) {
 		l := *base
 		l.axis = slices.Clone(base.axis)
 		l.scales = append(slices.Clone(base.scales), wc)
@@ -752,9 +844,12 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 			l.tail = func(w float64) float64 { return (kp+ki/w)*plantTail(w) + kd*derivTail(w) }
 			l.tailLimit = kp*plantLimit + kd*derivTail(math.Inf(1))
 		default:
-			return false
+			return false, nil
 		}
 		stable, err := l.stableClosedLoop()
-		return err == nil && stable
-	}, true
+		if errors.Is(err, errDelayLoopUnsupported) {
+			return false, nil
+		}
+		return stable, err
+	}, true, nil
 }
