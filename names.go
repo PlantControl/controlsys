@@ -32,13 +32,11 @@ func concatStringSlices(slices [][]string, lengths []int) []string {
 	for _, l := range lengths {
 		total += l
 	}
-	out := make([]string, 0, total)
+	out := make([]string, total)
+	at := 0
 	for i, s := range slices {
-		if s != nil {
-			out = append(out, s...)
-		} else {
-			out = append(out, make([]string, lengths[i])...)
-		}
+		copy(out[at:at+lengths[i]], s)
+		at += lengths[i]
 	}
 	return out
 }
@@ -77,8 +75,13 @@ func lookupSignalIndices(names []string, targets []string) ([]int, error) {
 	return indices, nil
 }
 
+// propagateNames copies all names from src; state names are dropped when the
+// result's state count differs from src's.
 func propagateNames(result, src *System) {
 	metadataFromSystem(src).applyAll(result)
+	if n, _, _ := result.Dims(); len(result.StateName) != n {
+		result.StateName = nil
+	}
 }
 
 func propagateIONames(result, src *System) {

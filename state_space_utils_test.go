@@ -440,3 +440,57 @@ func TestFixedInputReductionInputNames(t *testing.T) {
 		t.Fatalf("offset only: InputName = %q", red.InputName)
 	}
 }
+
+func TestDescriptorEExplicitIsIdentity(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	E := sys.DescriptorE()
+	if E == nil || !mat.Equal(E, mat.NewDense(2, 2, []float64{1, 0, 0, 1})) {
+		t.Errorf("DescriptorE = %v, want I2", E)
+	}
+	E.Set(0, 0, 5)
+	if sys.E != nil {
+		t.Error("DescriptorE result aliases the model")
+	}
+	gain, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if E := gain.DescriptorE(); E == nil || !E.IsEmpty() {
+		t.Errorf("static gain DescriptorE = %v, want empty", E)
+	}
+}
+
+func TestFixedInputReductionInvalidIndices(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(1, 1, []float64{-1}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sys.FixedInputReduction(map[int]float64{0: 1, 5: 2}, "o"); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("index beyond m error = %v, want ErrInvalidArgument", err)
+	}
+	var nilSys *System
+	if _, err := nilSys.FixedInputReduction(map[int]float64{0: 1}, "o"); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil error = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := nilSys.AugmentInternalDelayOutputs("z"); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil AugmentInternalDelayOutputs error = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := nilSys.ToExplicit(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil ToExplicit error = %v, want ErrInvalidArgument", err)
+	}
+}

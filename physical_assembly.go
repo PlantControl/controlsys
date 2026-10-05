@@ -139,7 +139,7 @@ func newPhysicalAssemblyPlan(name string, components []PhysicalComponent, connec
 		if _, exists := byComponent[component.Name]; exists {
 			return nil, fmt.Errorf("duplicate component %q: %w", component.Name, ErrInvalidArgument)
 		}
-		if err := component.System.Validate(); err != nil {
+		if err := component.System.validate(); err != nil {
 			return nil, fmt.Errorf("component %q: %w", component.Name, err)
 		}
 		if i > 0 && component.System.Dt != components[0].System.Dt {

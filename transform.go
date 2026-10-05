@@ -10,17 +10,34 @@ import (
 // ss2ss (R2021b and later). An explicit model becomes
 // (T·A·T⁻¹, T·B, C·T⁻¹, D); a descriptor model keeps its equations and
 // becomes (E·T⁻¹, A·T⁻¹, B, C·T⁻¹, D). Internal-delay channels transform
-// like B and C, and I/O delays carry over unchanged.
+// like B and C, and I/O delays carry over unchanged. A nil T returns
+// ErrInvalidArgument; a model with no states accepts only an empty T.
 func SS2SS(sys *System, T *mat.Dense) (*System, error) {
+	if err := requireSystem("SS2SS", sys); err != nil {
+		return nil, err
+	}
+	if T == nil {
+		return nil, fmt.Errorf("SS2SS: T is nil: %w", ErrInvalidArgument)
+	}
 	policy := newRealizationTransformPolicy(sys)
 	n := policy.n
 	if n == 0 {
+		if !T.IsEmpty() {
+			tr, tc := T.Dims()
+			return nil, fmt.Errorf("SS2SS: T must be empty for a model with no states, got %d×%d: %w", tr, tc, ErrDimensionMismatch)
+		}
 		return policy.zeroOrderCopy(), nil
+	}
+	if T.IsEmpty() {
+		return nil, fmt.Errorf("SS2SS: T must be %d×%d, got empty: %w", n, n, ErrDimensionMismatch)
 	}
 
 	tr, tc := T.Dims()
 	if tr != n || tc != n {
 		return nil, fmt.Errorf("SS2SS: T must be %d×%d, got %d×%d: %w", n, n, tr, tc, ErrDimensionMismatch)
+	}
+	if err := requireFiniteDense("SS2SS", "T", T); err != nil {
+		return nil, err
 	}
 
 	var lu mat.LU
@@ -68,6 +85,9 @@ func SS2SS(sys *System, T *mat.Dense) (*System, error) {
 // internal-delay B2) take rows perm, C (and C2) take columns perm, and
 // StateName is permuted. Delays carry over unchanged.
 func Xperm(sys *System, perm []int) (*System, error) {
+	if err := requireSystem("Xperm", sys); err != nil {
+		return nil, err
+	}
 	policy := newRealizationTransformPolicy(sys)
 	n := policy.n
 	if len(perm) != n {
@@ -80,10 +100,10 @@ func Xperm(sys *System, perm []int) (*System, error) {
 	seen := make([]bool, n)
 	for _, v := range perm {
 		if v < 0 || v >= n {
-			return nil, fmt.Errorf("Xperm: index %d out of range [0,%d): %w", v, n, ErrDimensionMismatch)
+			return nil, fmt.Errorf("Xperm: index %d out of range [0,%d): %w", v, n, ErrInvalidArgument)
 		}
 		if seen[v] {
-			return nil, fmt.Errorf("Xperm: duplicate index %d: %w", v, ErrDimensionMismatch)
+			return nil, fmt.Errorf("Xperm: duplicate index %d: %w", v, ErrInvalidArgument)
 		}
 		seen[v] = true
 	}
@@ -103,7 +123,7 @@ func Xperm(sys *System, perm []int) (*System, error) {
 		permuteRows(result.LFT.B2, sys.LFT.B2, perm)
 		permuteCols(result.LFT.C2, sys.LFT.C2, perm)
 	}
-	if len(sys.StateName) == n {
+	if sys.StateName != nil {
 		for i, j := range perm {
 			result.StateName[i] = sys.StateName[j]
 		}

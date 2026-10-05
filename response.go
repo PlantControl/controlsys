@@ -235,7 +235,7 @@ func (p timeResponsePlan) allInputResponse(kind standardInputResponse) (*TimeRes
 	if m <= 1 || outputs == 0 || p.sim.HasDelay() || p.sim.IsDescriptor() {
 		return p.simulatedInputResponse(kind)
 	}
-	if err := p.sim.Validate(); err != nil {
+	if err := p.sim.validate(); err != nil {
 		return nil, fmt.Errorf("input 0: %w", err)
 	}
 	return p.batchedInputResponse(kind), nil
