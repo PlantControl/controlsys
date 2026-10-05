@@ -181,7 +181,7 @@ The reverse also happened: several calls that used to error now succeed. These i
 | `D2D(dt, C2DOptions)` | `D2D(dt, D2DOptions{Method, PrewarpFrequency})`. ThiranOrder, DelayModeling and FitOrder are not accepted (MATLAB `d2dOptions`). |
 | `DiscretizeWithResult`, `D2CWithResult`, `D2DWithResult`, `ConversionResult`, `MapInitialState` | `C2DMap` / `D2CMap` return `(sys, G, err)`, and G is never nil. For d2d, compose `D2CMap` then `C2DMap`. `Warnings` and `Approximate` are dropped. |
 | `C2DDelayModelingDelay` | `C2DDelayModelingInternal` |
-| `ThiranDelay(tau, order, dt)` | `ThiranDelay(tau, dt)` with the MATLAB automatic order `ceil(tau/dt)`. For a fixed order, use `C2D` with `ThiranOrder`. |
+| `ThiranDelay(tau, order, dt)` | `ThiranDelay(tau, dt)` with the MATLAB automatic order `ceil(tau/dt)`. A fixed order is no longer available (MATLAB has none); `C2DOptions.ThiranOrder` is a maximum order, as in MATLAB `c2dOptions`. |
 | `(*TransferFunc).StateSpace(opts)` / `(*ZPK).StateSpace(opts)`, `StateSpaceOpts` | `StateSpace()` (MATLAB `ss(tf)`, non-minimal; follow with `MinimalRealization`) |
 | `DecomposeIODelay` | unexported. Test `D[i][j] − D[i][0] − D[0][j] + D[0][0] == 0` locally. `AbsorbDelay`/`PullDelaysToLFT`/`Pade` still split. |
 
