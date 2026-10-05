@@ -127,12 +127,15 @@ func NewPIDStd(Kp, Ti, Td, N, Ts float64, opts ...PIDOption) (*PID, error) {
 	if math.IsNaN(N) || N <= 0 {
 		return nil, fmt.Errorf("%s: N %g must be positive (+Inf means no filter): %w", op, N, ErrInvalidArgument)
 	}
-	p, err := NewPID(Kp, Kp/Ti, Kp*Td, Td/N, Ts, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
+	Ki, Kd, Tf := Kp/Ti, Kp*Td, Td/N
+	if err := validatePIDGains(op, Kp, Ki, Kd, Tf, Ts); err != nil {
+		return nil, err
 	}
-	p.Form = PIDStandard
-	return p, nil
+	f, err := newPIDFormulas(op, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &PID{Kp: Kp, Ki: Ki, Kd: Kd, Tf: Tf, Dt: Ts, IFormula: f.i, DFormula: f.d, Form: PIDStandard}, nil
 }
 
 // Parallel returns a copy in parallel form (Kp, Ki, Kd).

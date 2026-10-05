@@ -528,6 +528,14 @@ func TestPIDConstructorsMatchMATLABShapes(t *testing.T) {
 			t.Fatalf("NewPIDStd%v err = %v, want ErrInvalidArgument", a, err)
 		}
 	}
+	for _, call := range []func() error{
+		func() error { _, err := NewPIDStd(1, 1, 0, 1, -1); return err },
+		func() error { _, err := NewPIDStd(1, 1, 0, 1, 0, WithPIDFormulas(9, 0)); return err },
+	} {
+		if err := call(); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "NewPIDStd: ") || strings.Contains(err.Error(), "NewPID:") {
+			t.Fatalf("NewPIDStd delegated err = %v, want one NewPIDStd prefix", err)
+		}
+	}
 }
 
 func TestPIDStandardTimesCommaOk(t *testing.T) {

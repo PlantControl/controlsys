@@ -2257,7 +2257,7 @@ func BenchmarkMarginOrder(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("Pidtune/n=%d", n), func(b *testing.B) {
 			for b.Loop() {
-				Pidtune(sys, PidtunePID)
+				Pidtune(sys, PidtunePID, 0, nil)
 			}
 		})
 	}
