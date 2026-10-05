@@ -264,18 +264,25 @@ type hinfYoula struct {
 	D11, D12hat, D21hat *mat.Dense
 }
 
-func hinfSynGeneral(gp *generalizedPlantPartition) (*HinfSynResult, error) {
+func hinfSynGeneral(gp *generalizedPlantPartition) (hinfDesign, error) {
 	hp, err := newHinfGeneralPlant(gp)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", gp.op, err)
+		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
-	gamma, err := hinfControllerGamma(hp.gammaLB, func(g float64) bool {
+	gamma, err := hinfBisect(hp.gammaLB, func(g float64) bool {
 		_, _, _, _, err := hp.riccatis(g)
 		return err == nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", gp.op, err)
+		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
+	return hinfDesign{gammaEdge: gamma, build: hp.synthesize}, nil
+}
+
+// synthesize returns the controller at gamma: the central one, or the
+// non-central one of wellPosedQ when the D22 loop shift is ill-posed.
+func (hp *hinfGeneralPlant) synthesize(gamma float64) (*HinfSynResult, error) {
+	gp := hp.gp
 	X, Y, Rinv, Rtinv, err := hp.riccatis(gamma)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", gp.op, err)

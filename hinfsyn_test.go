@@ -693,8 +693,50 @@ func TestHinfBisect_ZeroOptimumTerminates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gamma > hinfGammaFloor || calls > 64 {
+	if gamma > hinfGammaAbsTol || calls > 64 {
 		t.Fatalf("gamma %v after %d feasibility calls", gamma, calls)
+	}
+}
+
+// The verified back-off (6WORAF) must leave problems with a positive optimum
+// within 2e-4 of it, continuous and Tustin-discretized (which keeps the
+// optimum), with ‖T_zw‖∞ ≤ GammaOpt exactly. Optima are SLICOT SB10AD's.
+func TestHinfSyn_PositiveOptimumGammaNearOptimal(t *testing.T) {
+	cases := []struct {
+		name         string
+		P            *System
+		nmeas, ncont int
+		want         float64
+	}{
+		{"siso biproper W1", sisoBiproperMixedSensitivityPlant(t), 1, 1, 0.5098041291076711},
+		{"mimo biproper W1", mimoBiproperMixedSensitivityPlant(t), 2, 2, 0.5109338104884777},
+		{"generic D22", genericD11Plant(t, 0.6), 1, 1, 3.5096256649205544},
+	}
+	for _, tc := range cases {
+		Pd, err := tc.P.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, P := range []*System{tc.P, Pd} {
+			res, err := HinfSyn(P, tc.nmeas, tc.ncont)
+			if err != nil {
+				t.Fatalf("%s Ts=%g: %v", tc.name, P.Dt, err)
+			}
+			if res.GammaOpt < tc.want*(1-1e-6) || res.GammaOpt > tc.want*(1+2e-4) {
+				t.Errorf("%s Ts=%g: gamma %.12g, want within 2e-4 above optimum %.12g", tc.name, P.Dt, res.GammaOpt, tc.want)
+			}
+			cl, err := LFT(P, res.K, LFTFeedback{Nu: tc.ncont, Ny: tc.nmeas})
+			if err != nil {
+				t.Fatal(err)
+			}
+			norm, _, err := HinfNorm(cl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if norm > res.GammaOpt {
+				t.Errorf("%s Ts=%g: ‖T_zw‖∞ = %.12g exceeds gamma %.12g", tc.name, P.Dt, norm, res.GammaOpt)
+			}
+		}
 	}
 }
 

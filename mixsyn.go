@@ -255,11 +255,7 @@ func Mixsyn(G, W1, W2, W3 *System) (*MixsynResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	gamma, _, err := HinfNorm(CL)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
-	}
-	return &MixsynResult{K: info.K, CL: CL, Gamma: gamma, Info: info}, nil
+	return &MixsynResult{K: info.K, CL: CL, Gamma: info.clNorm, Info: info}, nil
 }
 
 // fullColumnRank reports whether the tall matrix M has full column rank,
