@@ -294,7 +294,7 @@ func TestPRD95FrequencyResponseLayoutPublicWorkflowsAgree(t *testing.T) {
 	for f := range est.Omega {
 		for i := 0; i < est.H.P; i++ {
 			for j := 0; j < est.H.M; j++ {
-				coh := est.CoherenceAt(f, i, j)
+				coh, _ := est.CoherenceAt(f, i, j)
 				if coh < 0 || coh > 1+1e-9 {
 					t.Fatalf("coherence[%d,%d,%d] = %v, want [0,1]", f, i, j, coh)
 				}
