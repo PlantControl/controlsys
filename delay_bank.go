@@ -15,28 +15,22 @@ const (
 )
 
 type delayBankSpec struct {
-	sampleDelay             []float64
-	continuousDelay         []float64
-	channels                int
-	dt                      float64
-	thiranOrder             int
-	padeOrder               int
-	requiresFractionalModel bool
-	kind                    delayBankKind
+	sampleDelay     []float64
+	continuousDelay []float64
+	channels        int
+	dt              float64
+	thiranOrder     int
+	padeOrder       int
+	kind            delayBankKind
 }
 
-func buildContinuousDelayBank(contDelay []float64, channels int, dt float64, thiranOrder int) (*System, error) {
-	sampleDelay := make([]float64, channels)
-	for i := range channels {
-		sampleDelay[i] = contDelay[i] / dt
+// continuousToSampleDelay converts continuous delays to sample counts at dt.
+func continuousToSampleDelay(contDelay []float64, dt float64) []float64 {
+	samples := make([]float64, len(contDelay))
+	for i, d := range contDelay {
+		samples[i] = d / dt
 	}
-	return buildDelayBank(delayBankSpec{
-		sampleDelay:             sampleDelay,
-		channels:                channels,
-		dt:                      dt,
-		thiranOrder:             thiranOrder,
-		requiresFractionalModel: true,
-	})
+	return samples
 }
 
 func buildDiscreteSampleDelayBank(sampleDelay []float64, channels int, dt float64, thiranOrder int) (*System, error) {
@@ -58,13 +52,13 @@ func buildContinuousPadeDelayBank(contDelay []float64, order int) (*System, erro
 	})
 }
 
+// buildDelayBank returns the block-diagonal bank of per-channel delay models.
 func buildDelayBank(spec delayBankSpec) (*System, error) {
-	if spec.requiresFractionalModel && !hasFractionalSampleDelay(spec.sampleDelay) {
-		return nil, nil
+	if spec.channels == 0 {
+		return nil, fmt.Errorf("delay bank has no channels: %w", ErrDimensionMismatch)
 	}
-
 	var bank *System
-	for i := 0; i < spec.channels; i++ {
+	for i := range spec.channels {
 		ch, err := buildDelayChannel(spec, i)
 		if err != nil {
 			return nil, err

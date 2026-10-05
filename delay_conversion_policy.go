@@ -168,11 +168,9 @@ func (p delayConversionPolicy) replaceContinuousExternal(sys *System, context st
 		if err != nil {
 			return nil, err
 		}
-		if bank != nil {
-			result, err = Series(bank, result)
-			if err != nil {
-				return nil, err
-			}
+		result, err = Series(bank, result)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -181,11 +179,9 @@ func (p delayConversionPolicy) replaceContinuousExternal(sys *System, context st
 		if err != nil {
 			return nil, err
 		}
-		if bank != nil {
-			result, err = Series(result, bank)
-			if err != nil {
-				return nil, err
-			}
+		result, err = Series(result, bank)
+		if err != nil {
+			return nil, err
 		}
 	}
 

@@ -2147,7 +2147,10 @@ func TestGetDelayModel_NoInternalDelay(t *testing.T) {
 	sys, _ := NewFromSlices(2, 1, 1,
 		[]float64{0, 1, -2, -3}, []float64{0, 1}, []float64{1, 0}, []float64{0}, 0.1)
 
-	H, tau := sys.GetDelayModel()
+	H, tau, err := sys.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(tau) != 0 {
 		t.Errorf("expected empty tau, got %v", tau)
 	}
@@ -2174,7 +2177,10 @@ func TestGetDelayModel_SingleDelay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	H, tau := sys.GetDelayModel()
+	H, tau, err := sys.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(tau) != 1 || tau[0] != 1.5 {
 		t.Errorf("tau = %v, want [1.5]", tau)
 	}
@@ -2227,7 +2233,10 @@ func TestGetDelayModel_MultipleDelays(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	H, gotTau := sys.GetDelayModel()
+	H, gotTau, err := sys.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(gotTau) != 3 {
 		t.Fatalf("tau len = %d, want 3", len(gotTau))
 	}
@@ -2250,7 +2259,7 @@ func TestSetDelayModel_Basic(t *testing.T) {
 		[]float64{1, 0, 0, 1, 0.2, 0.4},
 		[]float64{0.1, 0, 0.1, 0, 0.2, 0, 0.6, 0, 0}, 0.1)
 
-	tau := []float64{1.5}
+	tau := []float64{2}
 	sys, err := SetDelayModel(H, tau)
 	if err != nil {
 		t.Fatal(err)
@@ -2260,8 +2269,8 @@ func TestSetDelayModel_Basic(t *testing.T) {
 	if n != 2 || m != 2 || p != 2 {
 		t.Errorf("dims = (%d, %d, %d), want (2, 2, 2)", n, m, p)
 	}
-	if len(sys.LFT.Tau) != 1 || sys.LFT.Tau[0] != 1.5 {
-		t.Errorf("InternalDelay = %v, want [1.5]", sys.LFT.Tau)
+	if len(sys.LFT.Tau) != 1 || sys.LFT.Tau[0] != 2 {
+		t.Errorf("InternalDelay = %v, want [2]", sys.LFT.Tau)
 	}
 	if sys.Dt != 0.1 {
 		t.Errorf("Dt = %v, want 0.1", sys.Dt)
@@ -2309,7 +2318,10 @@ func TestGetSetDelayModel_Roundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	H, gotTau := sys.GetDelayModel()
+	H, gotTau, err := sys.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	rebuilt, err := SetDelayModel(H, gotTau)
 	if err != nil {
 		t.Fatal(err)
@@ -2402,7 +2414,10 @@ func TestGetDelayModel_DeepCopy(t *testing.T) {
 	D22 := mat.NewDense(1, 1, []float64{0})
 	_ = sys.SetInternalDelay([]float64{1.5}, B2, C2, D12, D21, D22)
 
-	H, tau := sys.GetDelayModel()
+	H, tau, err := sys.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tau[0] = 999
 	if sys.LFT.Tau[0] == 999 {
@@ -2422,8 +2437,11 @@ func TestSetDelayModel_DeepCopy(t *testing.T) {
 		[]float64{1, 0, 0, 1, 0.2, 0.4},
 		[]float64{0.1, 0, 0.1, 0, 0.2, 0, 0.6, 0, 0}, 0.1)
 
-	tau := []float64{1.5}
-	sys, _ := SetDelayModel(H, tau)
+	tau := []float64{2}
+	sys, err := SetDelayModel(H, tau)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	tau[0] = 999
 	if sys.LFT.Tau[0] == 999 {
@@ -3135,7 +3153,10 @@ func TestPullDelaysToLFT_D22Roundtrip(t *testing.T) {
 	sys.SetInputDelay([]float64{0.3})
 	sys.SetOutputDelay([]float64{0.5})
 
-	H, tau := sys.GetDelayModel()
+	H, tau, err := sys.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	rebuilt, err := SetDelayModel(H, tau)
 	if err != nil {
 		t.Fatal(err)
@@ -3205,19 +3226,75 @@ func TestSetInternalDelay_RejectsZeroTau(t *testing.T) {
 	}
 }
 
-func TestSetDelayModel_AcceptsPositiveTau(t *testing.T) {
-	H, _ := NewFromSlices(2, 3, 3,
+func TestSetDelayModel_ValidatesTau(t *testing.T) {
+	discrete, _ := NewFromSlices(2, 3, 3,
 		[]float64{0.8, 0.1, 0, 0.9},
 		[]float64{1, 0.5, 0.3, 0, 1, 0.4},
 		[]float64{1, 0, 0, 1, 0.2, 0.4},
 		[]float64{0.1, 0, 0.1, 0, 0.2, 0, 0.6, 0, 0}, 0.1)
-
-	sys, err := SetDelayModel(H, []float64{1.5})
+	continuous := discrete.Copy()
+	continuous.Dt = 0
+	cases := []struct {
+		name string
+		H    *System
+		tau  float64
+		want error
+	}{
+		{"discrete fractional", discrete, 1.5, ErrFractionalDelay},
+		{"discrete NaN", discrete, math.NaN(), ErrInvalidArgument},
+		{"continuous Inf", continuous, math.Inf(1), ErrInvalidArgument},
+		{"continuous negative", continuous, -0.2, ErrNegativeDelay},
+		{"continuous zero", continuous, 0, ErrZeroInternalDelay},
+	}
+	for _, c := range cases {
+		if _, err := SetDelayModel(c.H, []float64{c.tau}); !errors.Is(err, c.want) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.want)
+		}
+	}
+	sys, err := SetDelayModel(continuous, []float64{1.5})
 	if err != nil {
-		t.Fatalf("positive tau should succeed, got %v", err)
+		t.Fatal(err)
 	}
 	if sys.LFT.Tau[0] != 1.5 {
-		t.Errorf("InternalDelay[0] = %v, want 1.5", sys.LFT.Tau[0])
+		t.Errorf("continuous tau = %v, want 1.5", sys.LFT.Tau[0])
+	}
+	if _, err := SetDelayModel(nil, []float64{1}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil H: err = %v", err)
+	}
+}
+
+func TestSetInternalDelayEmptyTauClears(t *testing.T) {
+	sys, _ := NewFromSlices(2, 1, 1,
+		[]float64{0, 1, -2, -3}, []float64{0, 1}, []float64{1, 0}, []float64{0.5}, 0.1)
+	if err := sys.SetInternalDelay([]float64{2},
+		mat.NewDense(2, 1, []float64{0.5, 0.3}), mat.NewDense(1, 2, []float64{0.1, 0.2}),
+		mat.NewDense(1, 1, []float64{0.4}), mat.NewDense(1, 1, []float64{0.6}),
+		mat.NewDense(1, 1, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInternalDelay([]float64{}, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if sys.LFT != nil {
+		t.Fatalf("empty tau stored LFT %+v", sys.LFT)
+	}
+	got, err := sys.ZeroDelayApprox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got.D.At(0, 0); v != 0.5 {
+		t.Errorf("D = %v, want 0.5", v)
+	}
+	if err := sys.SetInternalDelay([]float64{1.5}, nil, nil, nil, nil, nil); !errors.Is(err, ErrFractionalDelay) {
+		t.Errorf("fractional discrete tau: err = %v", err)
+	}
+}
+
+func TestZeroDelayApproxEmptyLFTDoesNotPanic(t *testing.T) {
+	sys, _ := NewFromSlices(1, 1, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0)
+	sys.LFT = &LFTDelay{Tau: []float64{}}
+	if _, err := sys.ZeroDelayApprox(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -4246,5 +4323,96 @@ func TestSetInternalDelayStaticGainAcceptsNilEmptyBlocks(t *testing.T) {
 	}
 	if err := g.SetInternalDelay([]float64{1}, nil, nil, nil, one(1), one(0.2)); !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("nil 1x1 D12: err = %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestAbsorbDelayScopeValidationAndUnion(t *testing.T) {
+	sys, err := NewFromSlices(2, 2, 2,
+		[]float64{0.5, 0.2, -0.1, 0.3},
+		[]float64{1, 0.4, 0, 1},
+		[]float64{1, 0, 0.3, 1},
+		[]float64{0.1, 0, 0, 0.2}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInputDelay([]float64{2, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetOutputDelay([]float64{0, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sys.AbsorbDelay("bogus"); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("unknown scope: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := sys.AbsorbDelay(AbsorbInput, "bogus"); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("unknown second scope: err = %v, want ErrInvalidArgument", err)
+	}
+	var nilSys *System
+	if _, err := nilSys.AbsorbDelay(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil: err = %v", err)
+	}
+
+	got, err := sys.AbsorbDelay(AbsorbOutput, AbsorbInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HasDelay() {
+		t.Fatalf("input+output union left delays: in=%v out=%v", got.InputDelay, got.OutputDelay)
+	}
+	if n, _, _ := got.Dims(); n != 2+3+3 {
+		t.Errorf("n = %d, want 8", n)
+	}
+	omega := []float64{0.3, 1.7, 5}
+	want, err := sys.FreqResponse(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have, err := got.FreqResponse(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k := range want.Data {
+		if cmplx.Abs(have.Data[k]-want.Data[k]) > 1e-12 {
+			t.Errorf("H[%d] = %v, want %v", k, have.Data[k], want.Data[k])
+		}
+	}
+
+	onlyIn, err := sys.AbsorbDelay(AbsorbInput, AbsorbInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onlyIn.InputDelay != nil || onlyIn.OutputDelay[1] != 3 {
+		t.Errorf("repeated input scope: in=%v out=%v", onlyIn.InputDelay, onlyIn.OutputDelay)
+	}
+}
+
+func TestGetDelayModelContract(t *testing.T) {
+	var nilSys *System
+	if _, _, err := nilSys.GetDelayModel(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil: err = %v", err)
+	}
+	sys, err := NewDescriptor(
+		mat.NewDense(2, 2, []float64{-1, 0.4, -0.3, -2}),
+		mat.NewDense(2, 1, []float64{1, 0.5}),
+		mat.NewDense(1, 2, []float64{1, -0.2}),
+		mat.NewDense(1, 1, []float64{0.1}),
+		mat.NewDense(2, 2, []float64{2, 0.1, 0, 1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	H, tau, err := sys.GetDelayModel()
+	if err != nil || tau == nil || len(tau) != 0 {
+		t.Fatalf("delay-free: tau=%v err=%v, want empty non-nil", tau, err)
+	}
+	if err := sys.SetInputDelay([]float64{0.4}); err != nil {
+		t.Fatal(err)
+	}
+	H, tau, err = sys.GetDelayModel()
+	if err != nil || len(tau) != 1 || tau[0] != 0.4 {
+		t.Fatalf("tau=%v err=%v", tau, err)
+	}
+	H.E.Set(0, 0, 99)
+	if sys.E.At(0, 0) != 2 {
+		t.Error("GetDelayModel H.E aliases sys.E")
 	}
 }

@@ -1590,7 +1590,10 @@ func TestSeriesLFT_Roundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	H, tau := result.GetDelayModel()
+	H, tau, err := result.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(tau) != 2 {
 		t.Fatalf("tau length = %d, want 2", len(tau))
 	}
@@ -1632,7 +1635,10 @@ func TestSeriesLFT_IncompatibleMIMOIODelay(t *testing.T) {
 		t.Errorf("dims m=%d p=%d, want m=1 p=1", m, p)
 	}
 
-	H, tau := result.GetDelayModel()
+	H, tau, err := result.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(tau) == 0 {
 		t.Fatal("should have non-empty tau")
 	}
@@ -2811,7 +2817,7 @@ func zeroStateDelayBlock(t *testing.T, dt float64, kind int) *System {
 	t.Helper()
 	sc := 1.0
 	if dt > 0 {
-		sc = 10 * dt
+		sc = 10
 	}
 	var H *System
 	var tau []float64
