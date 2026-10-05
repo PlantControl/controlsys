@@ -606,11 +606,12 @@ func DiskMargin(sys *System) (*DiskMarginResult, error) {
 // Discrete loop delays are absorbed exactly. For continuous loops with delays
 // closed-loop stability comes from a Nyquist encirclement count of 1+L on a
 // delay-aware adaptive frequency grid, and the peaks from the exact frequency
-// response; see delayLoop.nyquist for the resolution limits. Loops whose
-// internal delays form a feedback cycle return ErrContinuousInternalDelay;
-// loops whose high-frequency gain may reach 1 (neutral type), whose delay grid
-// would exceed 2^21 points, or whose encirclement count does not resolve
-// return ErrDelayUnsupported. Descriptor loops return
+// response, certified between grid samples to 1e-9 relative; see
+// delayLoop.nyquist for the resolution limits. Loops whose internal delays
+// form a feedback cycle return ErrContinuousInternalDelay; loops whose
+// high-frequency gain may reach 1 (neutral type), whose delay grid or peak
+// certification would exceed 2^21 points, or whose encirclement count does
+// not resolve return ErrDelayUnsupported. Descriptor loops return
 // ErrDescriptorUnsupported, as HinfNorm does.
 func DiskMarginSkew(sys *System, sigma float64) (*DiskMarginResult, error) {
 	if err := requireFinite("DiskMarginSkew", "skew", sigma); err != nil {

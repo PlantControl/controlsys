@@ -336,3 +336,39 @@ func TestDescriptorSampleDerivatives(t *testing.T) {
 		}
 	}
 }
+
+// A non-decomposable I/O delay matrix on a MIMO internal-delay model goes
+// through the residual split of PullDelaysToLFT; the descriptor must still
+// evaluate G ∘ e^{−jωτ_ij}.
+func TestDescriptorResidualIODelayMIMO(t *testing.T) {
+	S, resp := mimoDelayedSensitivity(t, 1)
+	tau := []float64{0.1, 0.2, 0.3, 0.1}
+	if err := S.SetDelay(mat.NewDense(2, 2, tau)); err != nil {
+		t.Fatal(err)
+	}
+	delayed := func(w float64) [2][2]complex128 {
+		g := resp(w)
+		for i := range 2 {
+			for j := range 2 {
+				g[i][j] *= cmplx.Exp(complex(0, -w*tau[i*2+j]))
+			}
+		}
+		return g
+	}
+	r, err := newDescriptorResponse(S)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []float64{0, 0.4, 3.1, 17} {
+		got, want := r.sample(w).g, delayed(w)
+		for i := range 2 {
+			for j := range 2 {
+				if d := cmplx.Abs(got[i*2+j] - want[i][j]); d > 1e-12*max(1, cmplx.Abs(want[i][j])) {
+					t.Errorf("ω=%g: G[%d][%d] = %v, oracle %v", w, i, j, got[i*2+j], want[i][j])
+				}
+			}
+		}
+	}
+	want, wantW := oraclePeak(func(w float64) float64 { return oracleSigmaMax2(delayed(w)) }, 300, 1e-3)
+	assertPeak(t, "residual io delay", S, want, wantW, 1e-9)
+}

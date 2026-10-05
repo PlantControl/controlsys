@@ -511,4 +511,3 @@ func cInvert(a []complex128, piv []int, n int) bool {
 	}
 	return true
 }
-

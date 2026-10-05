@@ -689,6 +689,9 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 // certifyPeaks raises each sensitivity peak to within peakCertTol of
 // sup |S + c| on [0, res.tailFrom], beyond which the disk bound holds.
 func (l *delayLoop) certifyPeaks(res delayNyquist, shifts []float64, peaks []sensitivityPeak) error {
+	if l.sys == nil {
+		return fmt.Errorf("sensitivity peaks need the loop model: %w", errDelayLoopUnsupported)
+	}
 	r, err := newDescriptorResponse(l.sys)
 	if err != nil {
 		return err
