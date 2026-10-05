@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -1742,4 +1743,105 @@ func TestStepContinuousInternalDelayDescriptorMatchesExplicit(t *testing.T) {
 		t.Fatal(err)
 	}
 	compareTimeResponses(t, got, want, 1e-10)
+}
+
+func wantErr(t *testing.T, tag string, err, sentinel error, prefix string) {
+	t.Helper()
+	if !errors.Is(err, sentinel) || !strings.HasPrefix(err.Error(), prefix+": ") {
+		t.Errorf("%s: err = %v, want %q prefix wrapping %v", tag, err, prefix, sentinel)
+	}
+}
+
+func TestResponsesRejectModelsWithoutInputsOrOutputs(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		auto := autonomousFixture(t, dt)
+		noOut, err := New(auto.A, mat.NewDense(2, 1, []float64{1, -1}), nil, nil, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, sys := range map[string]*System{"m=0": auto, "p=0": noOut} {
+			tag := fmt.Sprintf("dt=%g %s", dt, name)
+			_, err := sys.DCGain()
+			wantErr(t, tag+" DCGain", err, ErrDimensionMismatch, "DCGain")
+			_, err = Step(sys, 1)
+			wantErr(t, tag+" Step", err, ErrDimensionMismatch, "Step")
+			_, err = Impulse(sys, 1)
+			wantErr(t, tag+" Impulse", err, ErrDimensionMismatch, "Impulse")
+		}
+		_, err = Initial(noOut, mat.NewVecDense(2, []float64{1, 2}), 1)
+		wantErr(t, fmt.Sprintf("dt=%g Initial p=0", dt), err, ErrDimensionMismatch, "Initial")
+		tg := []float64{0, 0.1, 0.2}
+		_, err = Lsim(noOut, mat.NewDense(3, 1, nil), tg, nil)
+		wantErr(t, fmt.Sprintf("dt=%g Lsim p=0", dt), err, ErrDimensionMismatch, "Lsim")
+
+		resp, err := Initial(auto, mat.NewVecDense(2, []float64{1, 2}), 1)
+		if err != nil || resp.Y == nil || resp.Y.IsEmpty() {
+			t.Fatalf("dt=%g Initial m=0 = %v, %v; want samples", dt, resp, err)
+		}
+	}
+}
+
+func TestResponsesRejectInvalidFinalTime(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-1, 2, -0.5, -3}),
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, 0.5}),
+		mat.NewDense(1, 1, []float64{0.2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x0 := mat.NewVecDense(2, []float64{1, -1})
+	for _, tf := range []float64{-5, math.NaN(), math.Inf(1)} {
+		_, err := Step(sys, tf)
+		wantErr(t, fmt.Sprintf("Step(%g)", tf), err, ErrInvalidArgument, "Step")
+		_, err = Impulse(sys, tf)
+		wantErr(t, fmt.Sprintf("Impulse(%g)", tf), err, ErrInvalidArgument, "Impulse")
+		_, err = Initial(sys, x0, tf)
+		wantErr(t, fmt.Sprintf("Initial(%g)", tf), err, ErrInvalidArgument, "Initial")
+	}
+	resp, err := Step(sys, 0)
+	if err != nil || len(resp.T) < 2 {
+		t.Fatalf("Step(0) auto = %v, %v", resp, err)
+	}
+}
+
+func TestResponsesRejectNilSystem(t *testing.T) {
+	var sys *System
+	_, err := Step(sys, 1)
+	wantErr(t, "Step", err, ErrInvalidArgument, "Step")
+	_, err = Impulse(sys, 1)
+	wantErr(t, "Impulse", err, ErrInvalidArgument, "Impulse")
+	_, err = Initial(sys, mat.NewVecDense(1, nil), 1)
+	wantErr(t, "Initial", err, ErrInvalidArgument, "Initial")
+	_, err = Lsim(sys, mat.NewDense(2, 1, nil), []float64{0, 1}, nil)
+	wantErr(t, "Lsim", err, ErrInvalidArgument, "Lsim")
+	_, err = sys.DCGain()
+	wantErr(t, "DCGain", err, ErrInvalidArgument, "DCGain")
+	_, err = Damp(sys)
+	wantErr(t, "Damp", err, ErrInvalidArgument, "Damp")
+	_, err = sys.Pade(2)
+	wantErr(t, "Pade", err, ErrInvalidArgument, "Pade")
+}
+
+func TestLsimTimeGridErrors(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.6, 0.3, -0.2, 0.4})
+	B := mat.NewDense(2, 1, []float64{1, 0})
+	C := mat.NewDense(1, 2, []float64{1, 0.5})
+	dsys, err := New(A, B, C, mat.NewDense(1, 1, []float64{0.1}), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := mat.NewDense(3, 1, []float64{1, 1, 1})
+	_, err = Lsim(dsys, u, []float64{0, 0.2, 0.4}, nil)
+	wantErr(t, "Dt mismatch", err, ErrInvalidArgument, "Lsim")
+	_, err = Lsim(dsys, u, []float64{0, 0.1, 0.3}, nil)
+	wantErr(t, "non-uniform", err, ErrInvalidArgument, "Lsim")
+	_, err = Lsim(dsys, u, []float64{0.2, 0.1, 0}, nil)
+	wantErr(t, "decreasing", err, ErrInvalidArgument, "Lsim")
+	_, err = Lsim(dsys, u, []float64{0, math.NaN(), 0.2}, nil)
+	wantErr(t, "NaN", err, ErrInvalidArgument, "Lsim")
+	_, err = Lsim(dsys, nil, []float64{0, 0.1, 0.2}, nil)
+	wantErr(t, "nil u", err, ErrInvalidArgument, "Lsim")
+	_, err = Lsim(dsys, mat.NewDense(2, 1, nil), []float64{0, 0.1, 0.2}, nil)
+	wantErr(t, "u size", err, ErrDimensionMismatch, "Lsim")
 }

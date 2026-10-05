@@ -9,6 +9,10 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// TimeResponse is a sampled time response. T holds the sample times and Y
+// one row per output channel and one column per sample. For Step and
+// Impulse the rows are input-major: row input*p+output is the response of
+// output to input, p the number of outputs.
 type TimeResponse struct {
 	T          []float64
 	Y          *mat.Dense
@@ -133,9 +137,30 @@ func gridSampleCount(span, dt float64) int {
 	return int(math.Floor(span/dt+gridTol)) + 1
 }
 
-func validateTimeHorizon(context string, tFinal float64) error {
-	if math.IsNaN(tFinal) || math.IsInf(tFinal, 0) {
-		return fmt.Errorf("%s: final time must be finite, got %g", context, tFinal)
+// validateTimeHorizon accepts a finite tFinal >= 0; 0 selects the automatic
+// horizon.
+func validateTimeHorizon(tFinal float64) error {
+	if !isFinite(tFinal) || tFinal < 0 {
+		return fmt.Errorf("final time %g must be finite and non-negative (0 = automatic): %w", tFinal, ErrInvalidArgument)
+	}
+	return nil
+}
+
+// requireTimeResponse validates the model and final time of the standard
+// response op, which needs at least one input and one output.
+func requireTimeResponse(op string, sys *System, tFinal float64) error {
+	if err := requireSystem(op, sys); err != nil {
+		return err
+	}
+	if err := validateTimeHorizon(tFinal); err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	return requireInputsOutputs(op, sys)
+}
+
+func requireInputsOutputs(op string, sys *System) error {
+	if _, m, p := sys.Dims(); m == 0 || p == 0 {
+		return fmt.Errorf("%s: model has %d inputs and %d outputs, need at least one of each: %w", op, m, p, ErrDimensionMismatch)
 	}
 	return nil
 }
@@ -145,7 +170,7 @@ func prepareAutoTimeResponse(sys *System, tFinal, dt float64) (timeResponsePlan,
 }
 
 func (p timeResponsePlanner) grid(tFinal, dt float64) (t []float64, actualDt float64, err error) {
-	if err := validateTimeHorizon("time response", tFinal); err != nil {
+	if err := validateTimeHorizon(tFinal); err != nil {
 		return nil, 0, err
 	}
 	continuous := p.sys.IsContinuous()
@@ -213,7 +238,7 @@ func (p timeResponsePlan) allInputResponse(kind standardInputResponse) (*TimeRes
 func (p timeResponsePlan) simulatedInputResponse(kind standardInputResponse) (*TimeResponse, error) {
 	_, m, outputs := p.sim.Dims()
 	if outputs*m == 0 {
-		return p.response(&mat.Dense{}), nil
+		return nil, fmt.Errorf("model has %d inputs and %d outputs: %w", m, outputs, ErrDimensionMismatch)
 	}
 	Y := mat.NewDense(outputs*m, p.steps, nil)
 	for input := range m {
@@ -314,7 +339,13 @@ func (p timeResponsePlanner) lsim(u *mat.Dense, t []float64) (timeResponsePlan, 
 		return timeResponsePlan{}, nil, fmt.Errorf("Lsim: need at least 2 time points: %w", ErrDimensionMismatch)
 	}
 
+	if err := requireFinite("Lsim", "t", t...); err != nil {
+		return timeResponsePlan{}, nil, err
+	}
 	_, m, _ := p.sys.Dims()
+	if u == nil {
+		return timeResponsePlan{}, nil, fmt.Errorf("Lsim: u is nil: %w", ErrInvalidArgument)
+	}
 	sig, err := validateLsimInputSignal("Lsim", u, len(t), m)
 	if err != nil {
 		ur, uc := 0, 0
@@ -337,7 +368,7 @@ func (p timeResponsePlanner) lsim(u *mat.Dense, t []float64) (timeResponsePlan, 
 		}
 	} else {
 		if math.Abs(p.sys.Dt-dt)/p.sys.Dt > 1e-6 {
-			return timeResponsePlan{}, nil, fmt.Errorf("Lsim: time grid spacing %g does not match system Dt %g: %w", dt, p.sys.Dt, ErrDimensionMismatch)
+			return timeResponsePlan{}, nil, fmt.Errorf("Lsim: time grid spacing %g does not match system Dt %g: %w", dt, p.sys.Dt, ErrInvalidArgument)
 		}
 		dsys = p.sys
 	}
@@ -356,12 +387,12 @@ func (p timeResponsePlanner) lsim(u *mat.Dense, t []float64) (timeResponsePlan, 
 func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 	dt := t[1] - t[0]
 	if dt <= 0 {
-		return 0, fmt.Errorf("%s: time step must be positive, got %g: %w", context, dt, ErrDimensionMismatch)
+		return 0, fmt.Errorf("%s: time step must be positive, got %g: %w", context, dt, ErrInvalidArgument)
 	}
 	for k := 2; k < len(t); k++ {
 		dk := t[k] - t[k-1]
 		if math.Abs(dk-dt)/dt > 1e-6 {
-			return 0, fmt.Errorf("%s: non-uniform time grid at index %d (dt=%g, expected %g); uniform grid required: %w", context, k, dk, dt, ErrDimensionMismatch)
+			return 0, fmt.Errorf("%s: non-uniform time grid at index %d (dt=%g, expected %g); uniform grid required: %w", context, k, dk, dt, ErrInvalidArgument)
 		}
 	}
 	return dt, nil
@@ -375,13 +406,16 @@ func transposeSamplesToChannels(u *mat.Dense, steps, inputs int) *mat.Dense {
 // MATLAB dcgain, entries reached by an integrator (a pole at s = 0 or z = 1)
 // are infinite rather than an error, for every realization; internal delays are
 // unity at DC.
-// A model with no inputs or no outputs has an empty gain, returned as an
-// empty matrix.
+// A model with no inputs or no outputs has an empty gain, which a
+// *mat.Dense cannot hold, so it returns ErrDimensionMismatch.
 func (sys *System) DCGain() (*mat.Dense, error) {
-	n, m, p := sys.Dims()
-	if m == 0 || p == 0 {
-		return &mat.Dense{}, nil
+	if err := requireSystem("DCGain", sys); err != nil {
+		return nil, err
 	}
+	if err := requireInputsOutputs("DCGain", sys); err != nil {
+		return nil, err
+	}
+	n, m, p := sys.Dims()
 	if n == 0 && !sys.HasInternalDelay() {
 		return denseCopy(sys.D), nil
 	}
@@ -692,9 +726,12 @@ func signInt(v float64) int {
 }
 
 func Damp(sys *System) ([]DampInfo, error) {
+	if err := requireSystem("Damp", sys); err != nil {
+		return nil, err
+	}
 	poles, err := sys.Poles()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Damp: %w", err)
 	}
 	if len(poles) == 0 {
 		return nil, nil
@@ -738,17 +775,27 @@ func Damp(sys *System) ([]DampInfo, error) {
 // with internal delays of one common length are sampled exactly (method of
 // steps); other internal-delay models are simulated through the approximate
 // ZOH discretization of the delay channels, as MATLAB does, with O(dt) error.
+//
+// tFinal = 0 selects the horizon automatically from the poles and delays, as
+// MATLAB step(sys); a negative or non-finite tFinal returns
+// ErrInvalidArgument. A model without inputs or outputs returns
+// ErrDimensionMismatch.
 func Step(sys *System, tFinal float64) (*TimeResponse, error) {
+	if err := requireTimeResponse("Step", sys, tFinal); err != nil {
+		return nil, err
+	}
 	sys, _, _, err := sys.timeResponseForm(nil)
 	if err != nil {
 		return nil, fmt.Errorf("Step: %w", err)
 	}
-	if resp, ok, err := delayChainAuto(sys, tFinal, stepResponse); ok || err != nil {
-		return resp, err
+	if resp, ok, err := delayChainAuto(sys, tFinal, stepResponse); err != nil {
+		return nil, fmt.Errorf("Step: %w", err)
+	} else if ok {
+		return resp, nil
 	}
 	plan, err := prepareAutoTimeResponse(sys, tFinal, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Step: %w", err)
 	}
 	resp, err := plan.allInputResponse(stepResponse)
 	if err != nil {
@@ -765,7 +812,11 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 // ErrInternalDelayImpulse; MATLAB's impulse rejects every continuous
 // internal-delay model, while this library samples the D21 = 0 case (exactly
 // for one common delay length, else by the approximate ZOH discretization).
+// tFinal and models without inputs or outputs are handled as in Step.
 func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
+	if err := requireTimeResponse("Impulse", sys, tFinal); err != nil {
+		return nil, err
+	}
 	sys, _, _, err := sys.timeResponseForm(nil)
 	if err != nil {
 		return nil, fmt.Errorf("Impulse: %w", err)
@@ -775,20 +826,20 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 		if sys.LFT != nil && sys.HasInternalDelay() && !allZeroDense(sys.LFT.D21) {
 			return nil, fmt.Errorf("Impulse: %w", ErrInternalDelayImpulse)
 		}
-		if resp, ok, err := delayChainAuto(sys, tFinal, impulseResponse); ok || err != nil {
-			return resp, err
+		if resp, ok, err := delayChainAuto(sys, tFinal, impulseResponse); err != nil {
+			return nil, fmt.Errorf("Impulse: %w", err)
+		} else if ok {
+			return resp, nil
 		}
 		derived, err := impulseAsStepModel(sys)
 		if err != nil {
 			return nil, fmt.Errorf("Impulse: %w", err)
 		}
-		if derived != nil {
-			sys, kind = derived, stepResponse
-		}
+		sys, kind = derived, stepResponse
 	}
 	plan, err := prepareAutoTimeResponse(sys, tFinal, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Impulse: %w", err)
 	}
 
 	resp, err := plan.allInputResponse(kind)
@@ -801,11 +852,11 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 // impulseAsStepModel returns a model whose step response equals the
 // continuous impulse response C·e^{At}·B sampled exactly: (A, A·B, C, C·B)
 // with the same delays. The Dirac part D·δ(t) is dropped, as in MATLAB. It
-// returns nil for models without inputs or outputs and requires D21 = 0.
+// requires inputs, outputs and D21 = 0.
 func impulseAsStepModel(sys *System) (*System, error) {
 	n, m, p := sys.Dims()
 	if m == 0 || p == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("model has %d inputs and %d outputs: %w", m, p, ErrDimensionMismatch)
 	}
 	src, err := sys.ToExplicit()
 	if err != nil {
@@ -847,7 +898,19 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // Continuous models without internal delays, or whose internal delays share
 // one length, are sampled exactly; other internal-delay models use the
 // approximate ZOH discretization of the delay channels, as MATLAB does.
+//
+// tFinal is handled as in Step. A model without outputs returns
+// ErrDimensionMismatch; one without inputs is valid.
 func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
+	if err := requireSystem("Initial", sys); err != nil {
+		return nil, err
+	}
+	if err := validateTimeHorizon(tFinal); err != nil {
+		return nil, fmt.Errorf("Initial: %w", err)
+	}
+	if _, _, p := sys.Dims(); p == 0 {
+		return nil, fmt.Errorf("Initial: model has no outputs: %w", ErrDimensionMismatch)
+	}
 	if x0 == nil {
 		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrDimensionMismatch)
 	}
@@ -872,7 +935,7 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	if _, _, ok := delayChainModel(free); ok {
 		t, dt, err := newTimeResponsePlanner(free).grid(tFinal, 0)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Initial: %w", err)
 		}
 		Y, ok, err := delayChainForcedResponse(free, x0, nil, dt, len(t))
 		if err != nil {
@@ -885,18 +948,15 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 
 	plan, err := prepareAutoTimeResponse(free, tFinal, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Initial: %w", err)
 	}
 
 	ds := plan.sim
-	_, m, p := ds.Dims()
-	if p == 0 {
-		return plan.response(&mat.Dense{}), nil
-	}
-	if m == 0 {
+	if _, m, _ := ds.Dims(); m == 0 {
 		ds = zeroInputModel(ds)
 	}
-	resp, err := ds.Simulate(mat.NewDense(max(m, 1), plan.steps, nil), x0, nil)
+	_, m, _ := ds.Dims()
+	resp, err := ds.Simulate(mat.NewDense(m, plan.steps, nil), x0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Initial: %w", err)
 	}
@@ -937,7 +997,7 @@ func zeroOutputModel(sys *System) *System {
 func (sys *System) continuousFreeResponse(x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
 	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Initial: %w", err)
 	}
 	Y, err := sys.continuousFreeSamples(x0, len(t), dt)
 	if err != nil {
@@ -956,7 +1016,7 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 		return nil, fmt.Errorf("x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
 	}
 	if p == 0 || steps == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("free response needs outputs and samples, got p=%d steps=%d: %w", p, steps, ErrDimensionMismatch)
 	}
 	Y := mat.NewDense(p, steps, nil)
 	if n == 0 {
@@ -1015,15 +1075,22 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 // Continuous models with internal delays of one common length are sampled
 // exactly; other internal-delay models use the approximate ZOH
 // discretization of the delay channels, as MATLAB does.
+//
+// t must be a finite, uniform, increasing grid of at least 2 samples (with
+// spacing Dt for discrete models) and u is len(t)×m; a model without outputs
+// returns ErrDimensionMismatch.
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
+	if err := requireSystem("Lsim", sys); err != nil {
+		return nil, err
+	}
+	if _, _, p := sys.Dims(); p == 0 {
+		return nil, fmt.Errorf("Lsim: model has no outputs: %w", ErrDimensionMismatch)
+	}
 	sys, x0, _, err := sys.timeResponseForm(x0)
 	if err != nil {
 		return nil, fmt.Errorf("Lsim: %w", err)
 	}
-	if _, m, p := sys.Dims(); m == 0 && (u == nil || u.IsEmpty()) {
-		if p == 0 {
-			return nil, fmt.Errorf("Lsim: model has no inputs and no outputs: %w", ErrDimensionMismatch)
-		}
+	if _, m, _ := sys.Dims(); m == 0 && (u == nil || u.IsEmpty()) {
 		sys, u = zeroInputModel(sys), mat.NewDense(max(len(t), 1), 1, nil)
 	}
 	plan, uSim, err := prepareLsimResponse(sys, u, t)

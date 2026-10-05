@@ -253,7 +253,7 @@ func TestPRD103TimeResponsePlanningPublicWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertDenseApprox(t, lsim.Y, sim.Y, 1e-12)
-	if _, err := Lsim(disc, uLsim, []float64{0, 0.1, 0.25, 0.3}, nil); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("non-uniform time grid error = %v, want ErrDimensionMismatch", err)
+	if _, err := Lsim(disc, uLsim, []float64{0, 0.1, 0.25, 0.3}, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("non-uniform time grid error = %v, want ErrInvalidArgument", err)
 	}
 }
