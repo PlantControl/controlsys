@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -252,5 +253,133 @@ func TestBalancedDenseDescriptorNearPole(t *testing.T) {
 				t.Errorf("dt=%g ω=%g: relative error %g", dt, w, e)
 			}
 		}
+	}
+}
+
+// lightlyDampedContinuousSys is a 3×2 continuous model with D ≠ 0, a pole
+// pair at −ζω ± jω (ζ = 1e-9) for each omega, a stable real pole, the first
+// state feeding the last so A is not upper Hessenberg, and, for extra > 0,
+// extra well-damped pairs.
+func lightlyDampedContinuousSys(t *testing.T, rng *rand.Rand, omegas []float64, extra int) *System {
+	t.Helper()
+	n := 2*(len(omegas)+extra) + 1
+	m, p := 2, 3
+	A := mat.NewDense(n, n, nil)
+	for k := range len(omegas) + extra {
+		w, sigma := 0.0, 0.0
+		if k < len(omegas) {
+			w = omegas[k]
+			sigma = -1e-9 * w
+		} else {
+			w = 10 * rng.Float64()
+			sigma = -0.3 * w
+		}
+		A.Set(2*k, 2*k, sigma)
+		A.Set(2*k, 2*k+1, w*1.5)
+		A.Set(2*k+1, 2*k, -w/1.5)
+		A.Set(2*k+1, 2*k+1, sigma)
+	}
+	A.Set(n-1, n-1, -2)
+	A.Set(n-1, 0, 0.7)
+	for i := range n - 1 {
+		for j := i + 2; j < n-1; j++ {
+			A.Set(i, j, 0.3*rng.NormFloat64())
+		}
+	}
+	B := mat.NewDense(n, m, nil)
+	C := mat.NewDense(p, n, nil)
+	D := mat.NewDense(p, m, nil)
+	for i := range n {
+		for j := range m {
+			B.Set(i, j, rng.NormFloat64())
+		}
+		for j := range p {
+			C.Set(j, i, rng.NormFloat64())
+		}
+	}
+	for i := range p {
+		for j := range m {
+			D.Set(i, j, 0.5+rng.Float64())
+		}
+	}
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// The continuous analog of TestFreqResponseDiscreteLightlyDampedPeaks: at
+// a pole pair with ζ = 1e-9 the pencil jωI − A is exact, but GEPP pivots
+// the coupling row into the resonant rows and the Hessenberg reduction mixes
+// them, which leaves about ε/ζ relative error unless refined against the
+// exact pencil. Both kernels and both entry points must match a 200-bit
+// evaluation.
+func TestFreqResponseContinuousLightlyDampedPeaks(t *testing.T) {
+	rng := rand.New(rand.NewPCG(3, 5))
+	omegas := []float64{0.02, 1.3, 40}
+	frob := func(g []complex128) float64 {
+		v := 0.0
+		for _, x := range g {
+			v += real(x)*real(x) + imag(x)*imag(x)
+		}
+		return math.Sqrt(v)
+	}
+	var omega []float64
+	for _, w0 := range omegas {
+		for k := -4; k <= 4; k++ {
+			omega = append(omega, w0*(1+float64(k)*0x1p-52))
+		}
+	}
+	for _, extra := range []int{0, 12} {
+		sys := lightlyDampedContinuousSys(t, rng, omegas, extra)
+		n, _, _ := sys.Dims()
+		resps := map[string]*FreqResponseMatrix{}
+		var err error
+		if resps["FreqResponse"], err = sys.FreqResponse(omega); err != nil {
+			t.Fatal(err)
+		}
+		if resps["FreqResponsePointwise"], err = sys.FreqResponsePointwise(omega); err != nil {
+			t.Fatal(err)
+		}
+		for k, w := range omega {
+			want := frob(frExactResponse(sys, frExactPoint(w, 0)))
+			for name, resp := range resps {
+				got := frob(resp.Data[k*6 : (k+1)*6])
+				if e := math.Abs(got-want) / want; !(e <= 1e-13) {
+					t.Errorf("n=%d %s ω=%v: |G| = %.17g, exact %.17g, rel err %.3g", n, name, w, got, want, e)
+				}
+			}
+		}
+	}
+}
+
+// A small pivot that GEPP resolves exactly, as at an integrator's pole-limit
+// sample point, must not be refined: refine's working-precision check
+// leaves x bit-identical.
+func TestBalancedDenseRefineLeavesAccurateSolution(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(3, 3, []float64{0, 1, 0, 0, 0, 1, 0, -2, -3}),
+		mat.NewDense(3, 1, []float64{0, 0, 1}),
+		mat.NewDense(1, 3, []float64{1, 0, 0}),
+		mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bd := newBalancedDense(sys, 3, 1, 1)
+	got := make([]complex128, 1)
+	if err := bd.evalInto(pointAt(1e-5), got); err != nil {
+		t.Fatal(err)
+	}
+	x := append([]complex128(nil), bd.x...)
+	bd.refine()
+	for i := range x {
+		if bd.x[i] != x[i] {
+			t.Fatalf("refine changed x[%d] from %v to %v", i, x[i], bd.x[i])
+		}
+	}
+	want := frExactResponse(sys, frBigC(1e-5))[0]
+	if e := cmplx.Abs(got[0]-want) / cmplx.Abs(want); e > 1e-15 {
+		t.Errorf("G(1e-5) = %v, exact %v, rel err %.3g", got[0], want, e)
 	}
 }

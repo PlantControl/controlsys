@@ -1887,20 +1887,19 @@ func lightlyDampedDiscreteSys(t *testing.T, rng *rand.Rand, thetas []float64, ga
 // peak, to a 200-bit evaluation exactly on the circle. |G| (Frobenius) is
 // the measure: a frequency perturbation of one ulp moves the phase of G by
 // ε/1e-9 as well, but leaves |G| flat at the peak. The exact point removes
-// the radial error; what remains is the solvers' componentwise rounding,
-// which near the pole is relative to entries of size ωT (or π − ωT), so the
-// peaks sit at small ωT and near Nyquist. GEPP keeps that rounding local
-// when A is upper Hessenberg (n = 8, both entry points); a long sweep of the
-// non-Hessenberg n = 32 model takes the refined Hessenberg kernel, whose
-// working-precision residual leaves a larger share. GEPP on that model
-// pivots the coupling row into the resonant rows and is not held here.
+// the radial error; the rounded pencil entries and GEPP's rounding, relative
+// to O(1) pivoted rows, would still leave ε/1e-9, which refinement against
+// the exact pencil removes: for the upper Hessenberg n = 8 model, the
+// coupled n = 10 model whose coupling row GEPP pivots into the resonant
+// rows, and the n = 32 model a long sweep evaluates by the Hessenberg
+// kernel, at small ωT, mid-band and near Nyquist.
 func TestFreqResponseDiscreteLightlyDampedPeaks(t *testing.T) {
 	const (
 		dt  = 0.1
 		gap = 1e-9
 	)
 	rng := rand.New(rand.NewPCG(7, 9))
-	thetas := []float64{0.003, 0.03, 3.11}
+	thetas := []float64{0.003, 0.03, 1.4, 3.11}
 	frob := func(g []complex128) float64 {
 		v := 0.0
 		for _, x := range g {
@@ -1922,7 +1921,7 @@ func TestFreqResponseDiscreteLightlyDampedPeaks(t *testing.T) {
 			extra     int
 			tol       float64
 			pointwise bool
-		}{{0, 1e-9, true}, {12, 1e-8, false}} {
+		}{{0, 1e-13, true}, {1, 1e-13, true}, {12, 1e-13, true}} {
 			sys := lightlyDampedDiscreteSys(t, rng, thetas, gap, tc.extra, descriptor)
 			n, _, _ := sys.Dims()
 			resps := map[string]*FreqResponseMatrix{}

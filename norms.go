@@ -889,96 +889,22 @@ func (e *sigmaEvaluator) factor(sp, sq complex128) error {
 		}
 		lu[i*n+i] += sp
 	}
-	for k := range n {
-		piv, best := k, cabs1(lu[k*n+k])
-		for i := k + 1; i < n; i++ {
-			if v := cabs1(lu[i*n+k]); v > best {
-				piv, best = i, v
-			}
-		}
-		if best == 0 {
-			return ErrSingularEquation
-		}
-		e.piv[k] = piv
-		if piv != k {
-			rk, rp := lu[k*n:(k+1)*n], lu[piv*n:(piv+1)*n]
-			for j := range rk {
-				rk[j], rp[j] = rp[j], rk[j]
-			}
-		}
-		ik := crecip(lu[k*n+k])
-		for i := k + 1; i < n; i++ {
-			f := lu[i*n+k] * ik
-			lu[i*n+k] = f
-			if f == 0 {
-				continue
-			}
-			for j := k + 1; j < n; j++ {
-				lu[i*n+j] -= f * lu[k*n+j]
-			}
-		}
+	if !cLUFactor(lu, e.piv, n) {
+		return ErrSingularEquation
 	}
 	return nil
 }
 
 // solve overwrites the n×m right-hand side x with (pI + qA)⁻¹x.
 func (e *sigmaEvaluator) solve(x []complex128) {
-	n, m, lu := e.n, e.m, e.lu
-	for k, pk := range e.piv {
-		if pk != k {
-			for j := range m {
-				x[k*m+j], x[pk*m+j] = x[pk*m+j], x[k*m+j]
-			}
-		}
-	}
-	for k := range n {
-		for i := k + 1; i < n; i++ {
-			if f := lu[i*n+k]; f != 0 {
-				for j := range m {
-					x[i*m+j] -= f * x[k*m+j]
-				}
-			}
-		}
-	}
-	for i := n - 1; i >= 0; i-- {
-		inv := crecip(lu[i*n+i])
-		for j := range m {
-			v := x[i*m+j]
-			for k := i + 1; k < n; k++ {
-				v -= lu[i*n+k] * x[k*m+j]
-			}
-			x[i*m+j] = v * inv
-		}
-	}
+	cLUSolve(e.lu, e.piv, x, e.n, e.m)
 }
 
 // residual sets dx = B − (p·x + q·A·x) in compensated arithmetic.
 func (e *sigmaEvaluator) residual(sp, sq complex128) {
-	n, m := e.n, e.m
 	a, b := e.sys.A.RawMatrix(), e.sys.B.RawMatrix()
-	pr, pi, qr, qi := real(sp), imag(sp), real(sq), imag(sq)
-	for i := range n {
-		arow := a.Data[i*a.Stride : i*a.Stride+n]
-		for j := range m {
-			var axr, axi compensatedSum
-			for k, av := range arow {
-				v := e.x[k*m+j]
-				axr.addProd(av, real(v))
-				axi.addProd(av, imag(v))
-			}
-			xr, xi := real(e.x[i*m+j]), imag(e.x[i*m+j])
-			var re, im compensatedSum
-			re.add(b.Data[i*b.Stride+j])
-			re.addProd(-pr, xr)
-			re.addProd(pi, xi)
-			re.addScaled(-qr, axr)
-			re.addScaled(qi, axi)
-			im.addProd(-pr, xi)
-			im.addProd(-pi, xr)
-			im.addScaled(-qr, axi)
-			im.addScaled(-qi, axr)
-			e.dx[i*m+j] = complex(re.value(), im.value())
-		}
+	for j := range e.m {
+		pencilResidual(e.dx[j:], e.x[j:], e.m, a.Data, nil, a.Stride, b.Data[j:], b.Stride, e.n, sp, sq, 1)
 	}
 }
 
