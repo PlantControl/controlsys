@@ -27,6 +27,9 @@ type ModalReductionResult struct {
 }
 
 func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResult, error) {
+	if err := requireSystem("ModalTruncate", sys); err != nil {
+		return nil, err
+	}
 	if opts == nil {
 		opts = &ModalTruncateOptions{}
 	}
@@ -38,11 +41,11 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 		return nil, err
 	}
 	n, m, p := sys.Dims()
+	if opts.Order < 0 || opts.Order > n {
+		return nil, fmt.Errorf("ModalTruncate: order %d outside [0,%d]: %w", opts.Order, n, ErrInvalidOrder)
+	}
 	if n == 0 {
 		return &ModalReductionResult{Sys: sys.Copy(), Order: 0, Method: "real-schur-modal-truncate", Basis: &mat.Dense{}, Projection: &mat.Dense{}}, nil
-	}
-	if opts.Order < 0 || opts.Order > n {
-		return nil, ErrInvalidOrder
 	}
 
 	t, z, err := modalSchur(sys)
@@ -59,7 +62,7 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 		return nil, err
 	}
 	if order < 1 || order > n {
-		return nil, ErrInvalidOrder
+		return nil, fmt.Errorf("ModalTruncate: order %d outside [1,%d]: %w", order, n, ErrInvalidOrder)
 	}
 	if splitsSchurBlock(t, n, order) {
 		return nil, fmt.Errorf("ModalTruncate: order %d splits a complex-conjugate mode pair: %w", order, ErrInvalidOrder)

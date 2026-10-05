@@ -16,10 +16,10 @@ type NonlinearModel struct {
 
 func Linearize(model *NonlinearModel, x0, u0 *mat.VecDense) (*System, error) {
 	if model == nil {
-		return nil, fmt.Errorf("controlsys: nil model: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("Linearize: model is nil: %w", ErrInvalidArgument)
 	}
 	if model.F == nil || model.H == nil {
-		return nil, fmt.Errorf("controlsys: nil F or H function: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("Linearize: F or H is nil: %w", ErrInvalidArgument)
 	}
 	contract := newLocalApproximationContract("Linearize", model.N, model.M, model.P)
 	if err := contract.validateOperatingPoint(x0, u0); err != nil {

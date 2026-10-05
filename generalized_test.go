@@ -17,7 +17,9 @@ func TestGeneralizedModelCurrentValueAndAnalysisPoint(t *testing.T) {
 	}
 	gm.SetInputName("error")
 	gm.SetOutputName("actuator")
-	gm.InsertAnalysisPoint("plant_input")
+	if err := gm.InsertAnalysisPoint("plant_input"); err != nil {
+		t.Fatal(err)
+	}
 
 	sys, err := gm.CurrentSystem()
 	if err != nil {
@@ -150,5 +152,76 @@ func TestGeneralizedClosedLoopRejectsInvalidAnalysisPointLocation(t *testing.T) 
 	}
 	if err := loop.InsertAnalysisPoint("bad", AnalysisPointUnspecified); !errors.Is(err, ErrDimensionMismatch) {
 		t.Fatalf("InsertAnalysisPoint error = %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestGeneralizedModelCurrentSystemRejectsNameCountMismatch(t *testing.T) {
+	gm, err := NewGeneralizedModel("g", makeSISO(-1, 1, 1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gm.SetInputName("a", "b", "c")
+	if _, err := gm.CurrentSystem(); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("input names err = %v, want ErrDimensionMismatch", err)
+	}
+	gm.SetInputName("a")
+	gm.SetOutputName("y1", "y2")
+	if _, err := gm.CurrentSystem(); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("output names err = %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestGeneralizedModelInsertAnalysisPointRejects(t *testing.T) {
+	var nilModel *GeneralizedModel
+	if err := nilModel.InsertAnalysisPoint("u"); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil receiver err = %v, want ErrInvalidArgument", err)
+	}
+	gm, err := NewGeneralizedModel("g", makeSISO(-1, 1, 1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gm.InsertAnalysisPoint(""); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("empty name err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestGeneralizedBlocksDoNotAliasCallerSystem(t *testing.T) {
+	plant := makeSISO(-1, 1, 1, 0)
+	ctrl := makeSISO(-2, 1, 1, 0)
+	cl, err := NewGeneralizedClosedLoop("cl", plant, ctrl, "y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gm, err := NewGeneralizedModel("g", ctrl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctrl.A.Set(0, 0, -50)
+	ol, err := cl.OpenLoop("y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ol.A.At(0, 0); got != -2 {
+		t.Fatalf("open-loop controller pole = %g, want -2 (caller mutation leaked)", got)
+	}
+	cs, err := gm.CurrentSystem()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cs.A.At(0, 0); got != -2 {
+		t.Fatalf("model A = %g, want -2 (caller mutation leaked)", got)
+	}
+}
+
+func TestGeneralizedConstructorsRejectNilSystem(t *testing.T) {
+	var nilSys *System
+	if _, err := NewGeneralizedModel("g", nilSys); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("NewGeneralizedModel err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewGeneralizedClosedLoop("cl", makeSISO(-1, 1, 1, 0), nilSys, "y"); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("NewGeneralizedClosedLoop err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewGeneralizedClosedLoop("cl", nilSys, makeSISO(-1, 1, 1, 0), "y"); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("NewGeneralizedClosedLoop nil plant err = %v, want ErrInvalidArgument", err)
 	}
 }

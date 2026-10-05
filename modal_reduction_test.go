@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -184,5 +185,28 @@ func TestModalTruncateKeptPolesBadlyScaledPair(t *testing.T) {
 			}
 			assertPolesMatch(t, "reduced", result.Sys, want, tc.tol)
 		})
+	}
+}
+
+func TestModalTruncateRejectsOrderOutOfRange(t *testing.T) {
+	static, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dyn := makeSISO(-1, 1, 1, 0)
+	tests := []struct {
+		sys   *System
+		order int
+	}{
+		{static, 5},
+		{static, -1},
+		{dyn, 2},
+		{dyn, -1},
+	}
+	for _, tc := range tests {
+		_, err := ModalTruncate(tc.sys, &ModalTruncateOptions{Order: tc.order})
+		if !errors.Is(err, ErrInvalidOrder) || !strings.HasPrefix(err.Error(), "ModalTruncate: ") {
+			t.Errorf("order %d: err = %v, want ModalTruncate: ...ErrInvalidOrder", tc.order, err)
+		}
 	}
 }

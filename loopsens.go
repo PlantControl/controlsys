@@ -12,8 +12,11 @@ type LoopsensResult struct {
 }
 
 func Loopsens(P, C *System) (*LoopsensResult, error) {
-	if P == nil || C == nil {
-		return nil, fmt.Errorf("controlsys: loopsens: P and C must not be nil")
+	if err := requireSystem("Loopsens", P); err != nil {
+		return nil, err
+	}
+	if err := requireSystem("Loopsens", C); err != nil {
+		return nil, err
 	}
 
 	_, pm, pp := P.Dims()

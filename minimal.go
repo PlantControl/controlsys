@@ -21,15 +21,26 @@ type ReduceOpts struct {
 	Equalize bool
 }
 
+// ReduceResult is a reduced realization and its state count.
 type ReduceResult struct {
-	Sys        *System
-	Order      int
-	BlockSizes []int
+	Sys   *System
+	Order int
 }
 
 func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
+	if err := requireSystem("Reduce", sys); err != nil {
+		return nil, err
+	}
 	if opts == nil {
 		opts = &ReduceOpts{}
+	}
+	switch opts.Mode {
+	case ReduceAll, ReduceUncontrollable, ReduceUnobservable:
+	default:
+		return nil, fmt.Errorf("Reduce: unknown mode %d: %w", opts.Mode, ErrInvalidArgument)
+	}
+	if !(opts.Tol >= 0) || math.IsInf(opts.Tol, 1) {
+		return nil, fmt.Errorf("Reduce: Tol is %g, want finite and non-negative: %w", opts.Tol, ErrInvalidArgument)
 	}
 
 	policy := newRealizationTransformPolicy(sys)
@@ -61,7 +72,6 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	}
 
 	ncont := n
-	var blockSizes []int
 
 	if opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable {
 		res := ControllabilityStaircase(A, B, C, opts.Tol)
@@ -69,7 +79,6 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 		B = res.B
 		C = res.C
 		ncont = res.NCont
-		blockSizes = res.BlockSizes
 	}
 
 	nr := ncont
@@ -114,12 +123,7 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	}
 
 	if nr == 0 {
-		res, err := zeroOrderResult(sys)
-		if err != nil {
-			return nil, err
-		}
-		res.BlockSizes = blockSizes
-		return res, nil
+		return zeroOrderResult(sys)
 	}
 
 	ar := extractSubmatrix(A, 0, nr, 0, nr)
@@ -132,11 +136,7 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 		return nil, err
 	}
 
-	return &ReduceResult{
-		Sys:        reduced,
-		Order:      nr,
-		BlockSizes: blockSizes,
-	}, nil
+	return &ReduceResult{Sys: reduced, Order: nr}, nil
 }
 
 // reduceInternalDelay reduces the delay-free augmented model
@@ -177,7 +177,7 @@ func reduceInternalDelay(sys *System, policy realizationTransformPolicy, opts *R
 	if err != nil {
 		return nil, err
 	}
-	return &ReduceResult{Sys: reduced, Order: nr, BlockSizes: red.BlockSizes}, nil
+	return &ReduceResult{Sys: reduced, Order: nr}, nil
 }
 
 func (sys *System) MinimalRealization() (*ReduceResult, error) {

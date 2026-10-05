@@ -17,6 +17,9 @@ type ModsepResult struct {
 // p×0 or 0×m static gain, which cannot be stored: ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.freqsep.html.
 func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
+	if err := requireSystem("Modsep", sys); err != nil {
+		return nil, err
+	}
 	if !(cutoff > 0) {
 		return nil, fmt.Errorf("Modsep: cutoff must be positive, got %g: %w", cutoff, ErrInvalidArgument)
 	}

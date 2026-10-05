@@ -1005,3 +1005,13 @@ func TestSelectByIndexEmptySelection(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectByNameRejectsDuplicateConnection(t *testing.T) {
+	P := makeSISO(-1, 1, 1, 0)
+	P.InputName = []string{"u"}
+	P.OutputName = []string{"y"}
+	_, err := ConnectByName([]*System{P}, []Connection{{From: "y", To: "u"}, {From: "y", To: "u"}}, []string{"u"}, []string{"y"})
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument", err)
+	}
+}

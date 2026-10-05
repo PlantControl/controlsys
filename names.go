@@ -105,6 +105,9 @@ func autoLabel(prefix string, count int) []string {
 }
 
 func (sys *System) SetInputName(names ...string) error {
+	if sys == nil {
+		return fmt.Errorf("SetInputName: system is nil: %w", ErrInvalidArgument)
+	}
 	_, m, _ := sys.Dims()
 	if len(names) == 1 && m > 1 {
 		sys.InputName = expandName(names[0], m)
@@ -118,6 +121,9 @@ func (sys *System) SetInputName(names ...string) error {
 }
 
 func (sys *System) SetOutputName(names ...string) error {
+	if sys == nil {
+		return fmt.Errorf("SetOutputName: system is nil: %w", ErrInvalidArgument)
+	}
 	_, _, p := sys.Dims()
 	if len(names) == 1 && p > 1 {
 		sys.OutputName = expandName(names[0], p)
@@ -131,6 +137,9 @@ func (sys *System) SetOutputName(names ...string) error {
 }
 
 func (sys *System) SetStateName(names ...string) error {
+	if sys == nil {
+		return fmt.Errorf("SetStateName: system is nil: %w", ErrInvalidArgument)
+	}
 	n, _, _ := sys.Dims()
 	if len(names) == 1 && n > 1 {
 		sys.StateName = expandName(names[0], n)
@@ -245,6 +254,9 @@ func (sys *System) String() string {
 }
 
 func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
+	if sys == nil {
+		return nil, fmt.Errorf("SelectByIndex: system is nil: %w", ErrInvalidArgument)
+	}
 	n, m, p := sys.Dims()
 	for _, idx := range inputs {
 		if idx < 0 || idx >= m {
@@ -328,6 +340,9 @@ func selectDense(src *mat.Dense, rows, cols []int) *mat.Dense {
 }
 
 func (sys *System) SelectByName(inputs, outputs []string) (*System, error) {
+	if sys == nil {
+		return nil, fmt.Errorf("SelectByName: system is nil: %w", ErrInvalidArgument)
+	}
 	inIdx, err := lookupSignalIndices(sys.InputName, inputs)
 	if err != nil {
 		return nil, fmt.Errorf("select inputs: %w", err)
@@ -339,13 +354,27 @@ func (sys *System) SelectByName(inputs, outputs []string) (*System, error) {
 	return sys.SelectByIndex(inIdx, outIdx)
 }
 
+// Connection is a unity-gain link from the output signal named From to the
+// input signal named To, as MATLAB connect joins signals that share a name.
+// Signs and gains belong in the models, typically a SumBlk.
 type Connection struct {
 	From string
 	To   string
-	Gain float64
 }
 
+// ConnectByName appends systems block-diagonally, closes the named
+// connections and keeps the external inputs and outputs, like MATLAB
+// connect(sys1,...,sysN,inputs,outputs) with the internal links listed
+// explicitly. A nil model or a connection listed twice returns
+// ErrInvalidArgument, an unknown signal name ErrSignalNotFound and an
+// ill-posed loop ErrAlgebraicLoop.
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.connect.html.
 func ConnectByName(systems []*System, connections []Connection, inputs, outputs []string) (*System, error) {
+	for i, sys := range systems {
+		if sys == nil {
+			return nil, fmt.Errorf("ConnectByName: systems[%d] is nil: %w", i, ErrInvalidArgument)
+		}
+	}
 	aug, err := BlkDiag(systems...)
 	if err != nil {
 		return nil, fmt.Errorf("connectbyname: %w", err)
@@ -372,11 +401,10 @@ func ConnectByName(systems []*System, connections []Connection, inputs, outputs 
 		if err != nil {
 			return nil, fmt.Errorf("connectbyname connection to: %w", err)
 		}
-		gain := c.Gain
-		if gain == 0 {
-			gain = 1
+		if Q.At(toIdx, fromIdx) != 0 {
+			return nil, fmt.Errorf("ConnectByName: connection %s -> %s listed twice: %w", c.From, c.To, ErrInvalidArgument)
 		}
-		Q.Set(toIdx, fromIdx, gain)
+		Q.Set(toIdx, fromIdx, 1)
 	}
 
 	result, err := Connect(aug, Q, inIdx, outIdx)

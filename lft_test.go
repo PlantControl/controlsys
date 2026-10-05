@@ -24,8 +24,8 @@ func TestLFT_NilM(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nil M")
 	}
-	if !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("got %v, want ErrDimensionMismatch", err)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("got %v, want ErrInvalidArgument", err)
 	}
 }
 

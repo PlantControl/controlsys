@@ -83,6 +83,9 @@ type LqgResult struct {
 // ErrDimensionMismatch, singular E with ErrDescriptorSingular and plants
 // with delays with ErrDelayUnsupported.
 func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
+	if err := requireSystem("Lqg", sys); err != nil {
+		return nil, err
+	}
 	policy, err := newControllerObserverPolicy(sys, "Lqg")
 	if err != nil {
 		return nil, err

@@ -26,6 +26,9 @@ const NormH2 = 2
 // stable models and is +Inf when a pole lies on the stability boundary
 // (imaginary axis or unit circle).
 func Norm(sys *System, normType float64) (float64, error) {
+	if err := requireSystem("Norm", sys); err != nil {
+		return 0, err
+	}
 	if normType == 2 {
 		norm, err := H2Norm(sys)
 		if errors.Is(err, ErrUnstable) {
@@ -48,6 +51,9 @@ func Norm(sys *System, normType float64) (float64, error) {
 // exactly; continuous strictly proper internal-delay models return
 // ErrContinuousInternalDelay.
 func H2Norm(sys *System) (float64, error) {
+	if err := requireSystem("H2Norm", sys); err != nil {
+		return 0, err
+	}
 	if err := newDescriptorPolicy(sys).requireStandard("H2Norm"); err != nil {
 		return 0, err
 	}
@@ -123,6 +129,9 @@ func H2Norm(sys *System) (float64, error) {
 // per original state plus one per delay sample. Continuous internal-delay
 // models return ErrContinuousInternalDelay.
 func HSV(sys *System) ([]float64, error) {
+	if err := requireSystem("HSV", sys); err != nil {
+		return nil, err
+	}
 	if err := newDescriptorPolicy(sys).requireStandard("HSV"); err != nil {
 		return nil, err
 	}
@@ -248,6 +257,9 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
 // ErrContinuousInternalDelay because their stability cannot be decided from
 // a finite pole set.
 func HinfNorm(sys *System) (norm float64, omega float64, err error) {
+	if err := requireSystem("HinfNorm", sys); err != nil {
+		return 0, 0, err
+	}
 	if err := newDescriptorPolicy(sys).requireStandard("HinfNorm"); err != nil {
 		return 0, 0, err
 	}
