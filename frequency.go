@@ -591,7 +591,7 @@ func copyRealMatrixToComplex(dst []complex128, src []float64, stride, rows, cols
 func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 	if n == 1 {
 		if a[0] == 0 {
-			return fmt.Errorf("controlsys: singular complex matrix: %w", ErrSingularTransform)
+			return fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 		}
 		for j := range nrhs {
 			b[j] /= a[0]
@@ -620,7 +620,7 @@ func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 			}
 		}
 		if best < tol {
-			return fmt.Errorf("controlsys: singular complex matrix: %w", ErrSingularTransform)
+			return fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 		}
 		if pivot != k {
 			for j := range n {
@@ -912,7 +912,7 @@ func cInvertInto(dst, aug, src []complex128, n int) error {
 	}
 	if n == 1 {
 		if src[0] == 0 {
-			return fmt.Errorf("controlsys: singular complex matrix: %w", ErrSingularTransform)
+			return fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 		}
 		dst[0] = 1 / src[0]
 		return nil
@@ -950,7 +950,7 @@ func cInvertInto(dst, aug, src []complex128, n int) error {
 			}
 		}
 		if best < tol {
-			return fmt.Errorf("controlsys: singular complex matrix: %w", ErrSingularTransform)
+			return fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 		}
 		if pivot != col {
 			for j := range w {

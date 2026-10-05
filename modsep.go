@@ -28,7 +28,7 @@ func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
 		return cmplx.Abs(ev) < cutoff
 	}
 
-	slow, fast, err := decomposeByEigenvalues(sys, isSlow, false)
+	slow, fast, err := decomposeByEigenvalues("Modsep", sys, isSlow, false)
 	if err != nil {
 		return nil, err
 	}

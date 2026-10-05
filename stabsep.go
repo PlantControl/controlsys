@@ -17,7 +17,7 @@ func Stabsep(sys *System) (*StabsepResult, error) {
 		return poleInsideStabilityBoundary(ev, sys.IsContinuous(), poleStabilityTolerance(ev))
 	}
 
-	stable, unstable, err := decomposeByEigenvalues(sys, isStable, true)
+	stable, unstable, err := decomposeByEigenvalues("Stabsep", sys, isStable, true)
 	if err != nil {
 		return nil, err
 	}

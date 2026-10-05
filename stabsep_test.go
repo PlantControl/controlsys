@@ -1,8 +1,10 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -621,5 +623,34 @@ func TestStabsep_BadlyScaledPair(t *testing.T) {
 			assertPolesMatch(t, "unstable", res.Unstable, []complex128{complex(tc.other, 0)}, tc.tol*math.Abs(tc.other))
 			assertSplitSum(t, tc.name, sys, res.Stable, res.Unstable)
 		})
+	}
+}
+
+func TestStabsepModsepGuardsAndSentinels(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-1, 0.5, -0.2, 2}),
+		mat.NewDense(2, 1, []float64{1, 1}),
+		mat.NewDense(1, 2, []float64{1, 0.3}),
+		mat.NewDense(1, 1, []float64{0.1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayed := sys.Copy()
+	if err := delayed.SetInputDelay([]float64{0.2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Stabsep(delayed); !errors.Is(err, ErrDelayUnsupported) || !strings.HasPrefix(err.Error(), "Stabsep: ") {
+		t.Errorf("Stabsep delayed: err = %v, want Stabsep: ... ErrDelayUnsupported", err)
+	}
+	if _, err := Modsep(delayed, 1); !errors.Is(err, ErrDelayUnsupported) || !strings.HasPrefix(err.Error(), "Modsep: ") {
+		t.Errorf("Modsep delayed: err = %v, want Modsep: ... ErrDelayUnsupported", err)
+	}
+	bad := sys.Copy()
+	bad.A.Set(1, 0, math.Inf(1))
+	if _, err := Stabsep(bad); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Stabsep Inf A: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := Stabsep(nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Stabsep nil: err = %v, want ErrInvalidArgument", err)
 	}
 }

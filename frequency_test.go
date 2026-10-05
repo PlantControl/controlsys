@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -1945,5 +1946,12 @@ func TestFreqResponseDiscreteLightlyDampedPeaks(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestComplexSolveErrorsHaveNoDoublePrefix(t *testing.T) {
+	err := cInvertInto(make([]complex128, 4), make([]complex128, 8), []complex128{1, 2, 2, 4}, 2)
+	if !errors.Is(err, ErrSingularTransform) || strings.Count(err.Error(), "controlsys:") != 1 {
+		t.Errorf("cInvertInto singular: err = %v", err)
 	}
 }
