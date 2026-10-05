@@ -1,9 +1,11 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -61,7 +63,7 @@ func assertComplexSlice(t *testing.T, name string, got, want []complex128) {
 }
 
 func TestPIDCopyIsIndependent(t *testing.T) {
-	pid := NewPID(1, 2, 3, WithFilter(4), WithTs(0.1))
+	pid := mustPID(t, 1, 2, 3, 4, 0.1)
 
 	cp := pid.Copy()
 	pid.Kp = 99
@@ -72,7 +74,7 @@ func TestPIDCopyIsIndependent(t *testing.T) {
 }
 
 func TestPID2CopyIsIndependent(t *testing.T) {
-	pid := NewPID2(1, 2, 3, 4, 5, 6, WithTs(0.1))
+	pid := mustPID2(t, 1, 2, 3, 4, 5, 6, 0.1)
 
 	cp := pid.Copy()
 	pid.Kp = 99
@@ -83,7 +85,7 @@ func TestPID2CopyIsIndependent(t *testing.T) {
 }
 
 func TestPID_PureP(t *testing.T) {
-	c := NewPID(2, 0, 0)
+	c := mustPID(t, 2, 0, 0, 0, 0)
 	sys, err := c.System()
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +100,7 @@ func TestPID_PureP(t *testing.T) {
 }
 
 func TestPID_PI(t *testing.T) {
-	c := NewPID(1, 2, 0)
+	c := mustPID(t, 1, 2, 0, 0, 0)
 	sys, err := c.System()
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +126,7 @@ func TestPID_PI(t *testing.T) {
 }
 
 func TestPID_PDFiltered(t *testing.T) {
-	c := NewPID(1, 0, 3, WithFilter(0.5))
+	c := mustPID(t, 1, 0, 3, 0.5, 0)
 	sys, err := c.System()
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +156,7 @@ func TestPID_PDFiltered(t *testing.T) {
 }
 
 func TestPID_PIDFiltered(t *testing.T) {
-	c := NewPID(1, 2, 3, WithFilter(0.5))
+	c := mustPID(t, 1, 2, 3, 0.5, 0)
 	sys, err := c.System()
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +208,7 @@ func TestPID_PIDFiltered(t *testing.T) {
 }
 
 func TestPID_PDNoFilter_Error(t *testing.T) {
-	c := NewPID(1, 0, 3)
+	c := mustPID(t, 1, 0, 3, 0, 0)
 	_, err := c.System()
 	if err == nil {
 		t.Fatal("expected error for PD without filter")
@@ -214,7 +216,7 @@ func TestPID_PDNoFilter_Error(t *testing.T) {
 }
 
 func TestPID_UnfilteredDerivativeWithIntegral_Error(t *testing.T) {
-	c := NewPID(1, 2, 3)
+	c := mustPID(t, 1, 2, 3, 0, 0)
 	_, err := c.System()
 	if err == nil {
 		t.Fatal("expected error for unfiltered derivative term")
@@ -222,7 +224,7 @@ func TestPID_UnfilteredDerivativeWithIntegral_Error(t *testing.T) {
 }
 
 func TestPID_DiscretePI(t *testing.T) {
-	c := NewPID(1, 2, 0, WithTs(0.1))
+	c := mustPID(t, 1, 2, 0, 0, 0.1)
 	sys, err := c.System()
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +256,7 @@ func TestPID_DiscretePI(t *testing.T) {
 }
 
 func TestPID_DiscretePIDFiltered(t *testing.T) {
-	c := NewPID(1, 2, 3, WithFilter(0.5), WithTs(0.1))
+	c := mustPID(t, 1, 2, 3, 0.5, 0.1)
 	sys, err := c.System()
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +286,7 @@ func TestPID_DiscretePIDFiltered(t *testing.T) {
 }
 
 func TestPID_PIDFilteredTransferFunction(t *testing.T) {
-	c := NewPID(2, 5, 0.5, WithFilter(0.1))
+	c := mustPID(t, 2, 5, 0.5, 0.1, 0)
 	sys, err := c.System()
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +308,7 @@ func TestPID_PIDFilteredTransferFunction(t *testing.T) {
 }
 
 func TestPID_StandardForm(t *testing.T) {
-	c := NewPID(4, 0, 0)
+	c := mustPID(t, 4, 0, 0, 0, 0)
 	c.Form = PIDStandard
 	sys, err := c.System()
 	if err != nil {
@@ -322,7 +324,7 @@ func TestPID_StandardForm(t *testing.T) {
 }
 
 func TestPID_WithFilterAndTs(t *testing.T) {
-	c := NewPID(1, 0, 0, WithFilter(0.5), WithTs(0.01))
+	c := mustPID(t, 1, 0, 0, 0.5, 0.01)
 	if c.Tf != 0.5 {
 		t.Errorf("Tf = %v, want 0.5", c.Tf)
 	}
@@ -332,7 +334,7 @@ func TestPID_WithFilterAndTs(t *testing.T) {
 }
 
 func TestPID_KdWithIButNoFilter_Works(t *testing.T) {
-	c := NewPID(1, 2, 3, WithFilter(0.5))
+	c := mustPID(t, 1, 2, 3, 0.5, 0)
 	_, err := c.System()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -340,7 +342,7 @@ func TestPID_KdWithIButNoFilter_Works(t *testing.T) {
 }
 
 func TestPIDStd_PI(t *testing.T) {
-	c, err := NewPIDStd(2, 5, 0)
+	c, err := NewPIDStd(2, 5, 0, math.Inf(1), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +364,7 @@ func TestPIDStd_PI(t *testing.T) {
 }
 
 func TestPIDStd_PIDFiltered(t *testing.T) {
-	c, err := NewPIDStd(1, 2, 0.5, WithFilter(0.1))
+	c, err := NewPIDStd(1, 2, 0.5, (0.5)/(0.1), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,23 +383,23 @@ func TestPIDStd_PIDFiltered(t *testing.T) {
 }
 
 func TestPIDStd_ZeroTi_Error(t *testing.T) {
-	_, err := NewPIDStd(1, 0, 0.5)
+	_, err := NewPIDStd(1, 0, 0.5, math.Inf(1), 0)
 	if err == nil {
 		t.Fatal("expected error for Ti=0")
 	}
 }
 
 func TestPIDStd_ConvertRoundTrip(t *testing.T) {
-	orig := NewPID(3, 1.5, 3, WithFilter(0.2))
+	orig := mustPID(t, 3, 1.5, 3, 0.2, 0)
 	std, err := orig.Standard()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(std.Ti()-2) > pidTol {
-		t.Errorf("Ti = %v, want 2", std.Ti())
+	if ti, ok := std.Ti(); !ok || math.Abs(ti-2) > pidTol {
+		t.Errorf("Ti = %v, %v, want 2", ti, ok)
 	}
-	if math.Abs(std.Td()-1) > pidTol {
-		t.Errorf("Td = %v, want 1", std.Td())
+	if td, ok := std.Td(); !ok || math.Abs(td-1) > pidTol {
+		t.Errorf("Td = %v, %v, want 1", td, ok)
 	}
 	par := std.Parallel()
 	if math.Abs(par.Kp-3) > pidTol || math.Abs(par.Ki-1.5) > pidTol || math.Abs(par.Kd-3) > pidTol {
@@ -406,13 +408,13 @@ func TestPIDStd_ConvertRoundTrip(t *testing.T) {
 }
 
 func TestPID2_MatchesPID1DOF(t *testing.T) {
-	c1 := NewPID(1, 2, 3, WithFilter(0.5))
+	c1 := mustPID(t, 1, 2, 3, 0.5, 0)
 	sys1, err := c1.System()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c2 := NewPID2(1, 2, 3, 0.5, 1, 1)
+	c2 := mustPID2(t, 1, 2, 3, 0.5, 1, 1, 0)
 	sys2, err := c2.System()
 	if err != nil {
 		t.Fatal(err)
@@ -440,7 +442,7 @@ func TestPID2_MatchesPID1DOF(t *testing.T) {
 }
 
 func TestPID2_SetpointWeight(t *testing.T) {
-	c := NewPID2(2, 1, 0, 0, 0.5, 0)
+	c := mustPID2(t, 2, 1, 0, 0, 0.5, 0, 0)
 	sys, err := c.System()
 	if err != nil {
 		t.Fatal(err)
@@ -465,4 +467,100 @@ func TestPID2_SetpointWeight(t *testing.T) {
 func pidEvalSS(sys *System, s complex128) [][]complex128 {
 	h, _ := sys.EvalFr(s)
 	return h
+}
+
+func mustPID(tb testing.TB, kp, ki, kd, tf, ts float64, opts ...PIDOption) *PID {
+	tb.Helper()
+	p, err := NewPID(kp, ki, kd, tf, ts, opts...)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return p
+}
+
+func mustPID2(tb testing.TB, kp, ki, kd, tf, b, c, ts float64, opts ...PIDOption) *PID2 {
+	tb.Helper()
+	p, err := NewPID2(kp, ki, kd, tf, b, c, ts, opts...)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return p
+}
+
+func TestPIDConstructorsMatchMATLABShapes(t *testing.T) {
+	p2, err := NewPID2(1, 2, 0.5, 0.1, 0.7, 0.3, 0.05, WithPIDFormulas(Trapezoidal, BackwardEuler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (PID2{Kp: 1, Ki: 2, Kd: 0.5, Tf: 0.1, B: 0.7, C: 0.3, Dt: 0.05, IFormula: Trapezoidal, DFormula: BackwardEuler}); *p2 != want {
+		t.Fatalf("NewPID2 = %+v, want %+v", *p2, want)
+	}
+	if _, err := NewPID2(1, 0, 0, 0, math.NaN(), 1, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("NaN b err = %v", err)
+	}
+
+	kp, ti, td, n := 2.0, 0.5, 0.25, 8.0
+	std, err := NewPIDStd(kp, ti, td, n, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := std.System()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []float64{0.3, 2, 40} {
+		s := complex(0, w)
+		want := complex(kp, 0) * (1 + 1/(complex(ti, 0)*s) + complex(td, 0)*s/(complex(td/n, 0)*s+1))
+		resp, err := sys.FreqResponse([]float64{w})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resp.At(0, 0, 0); cmplx.Abs(got-want) > 1e-10*cmplx.Abs(want) {
+			t.Fatalf("pidstd C(j%g) = %v, want %v", w, got, want)
+		}
+	}
+	noI, err := NewPIDStd(2, math.Inf(1), 0, math.Inf(1), 0)
+	if err != nil || noI.Ki != 0 || noI.Kd != 0 || noI.Tf != 0 {
+		t.Fatalf("pidstd(2, Inf, 0, Inf) = %+v, %v", noI, err)
+	}
+	for _, a := range [][4]float64{{1, 0, 0, 1}, {1, -1, 0, 1}, {1, math.NaN(), 0, 1}, {1, 1, -1, 1}, {1, 1, 1, 0}, {1, 1, 1, -2}, {math.Inf(1), 1, 0, 1}} {
+		if _, err := NewPIDStd(a[0], a[1], a[2], a[3], 0); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "NewPIDStd: ") {
+			t.Fatalf("NewPIDStd%v err = %v, want ErrInvalidArgument", a, err)
+		}
+	}
+}
+
+func TestPIDStandardTimesCommaOk(t *testing.T) {
+	cases := []struct {
+		kp, ki, kd float64
+		ti, td     float64
+		tiOK, tdOK bool
+	}{
+		{0, 1, 1, 0, 0, false, false},
+		{0, 0, 1, math.Inf(1), 0, false, false},
+		{0, 0, 0, math.Inf(1), 0, true, true},
+		{2, 0, 0, math.Inf(1), 0, true, true},
+		{2, 4, 1, 0.5, 0.5, true, true},
+	}
+	for _, c := range cases {
+		p := mustPID(t, c.kp, c.ki, c.kd, 0.1, 0)
+		ti, okI := p.Ti()
+		td, okD := p.Td()
+		if okI != c.tiOK || okD != c.tdOK || (okI && ti != c.ti) || (okD && td != c.td) {
+			t.Errorf("%+v: Ti=%g,%v Td=%g,%v", c, ti, okI, td, okD)
+		}
+	}
+	var nilPID *PID
+	if nilPID.Parallel() != nil {
+		t.Fatal("nil Parallel")
+	}
+	if _, err := mustPID(t, 0, 1, 0, 0, 0).Standard(); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("Standard err = %v", err)
+	}
+	if _, err := mustPID(t, 1, 0, 1, 0, 0).System(); !errors.Is(err, ErrImproperModel) || !strings.HasPrefix(err.Error(), "PID.System: ") {
+		t.Fatalf("ideal derivative err = %v, want ErrImproperModel", err)
+	}
+	if _, err := (&PID2{Kp: 1, Kd: 1, B: 1, C: 1}).System(); !errors.Is(err, ErrImproperModel) || !strings.HasPrefix(err.Error(), "PID2.System: ") {
+		t.Fatalf("PID2 ideal derivative err = %v", err)
+	}
 }

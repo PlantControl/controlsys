@@ -7,6 +7,8 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// PIDForm records the parameterization a PID was built in; the gains are
+// always stored in parallel form.
 type PIDForm int
 
 const (
@@ -14,8 +16,8 @@ const (
 	PIDStandard
 )
 
-// PIDFormula selects the discrete approximation of an integral or derivative.
-// The zero value preserves the historical forward Euler realization.
+// PIDFormula selects the discrete approximation of an integral or derivative,
+// as MATLAB IFormula/DFormula. The zero value is forward Euler.
 type PIDFormula int
 
 const (
@@ -24,10 +26,23 @@ const (
 	Trapezoidal
 )
 
+// PIDOption sets an optional MATLAB name-value property of a PID or PID2.
+type PIDOption func(*pidFormulas)
+
+type pidFormulas struct{ i, d PIDFormula }
+
+// WithPIDFormulas sets the discrete integral and derivative formulas, as the
+// MATLAB 'IFormula' and 'DFormula' properties.
 func WithPIDFormulas(integral, derivative PIDFormula) PIDOption {
-	return func(p *PID) { p.IFormula, p.DFormula = integral, derivative }
+	return func(f *pidFormulas) { f.i, f.d = integral, derivative }
 }
 
+// PID is a 1-DOF controller in parallel form,
+//
+//	C = Kp + Ki·I(s) + Kd·s/(Tf·s+1),
+//
+// continuous when Dt = 0 and discrete with the IFormula/DFormula
+// approximations otherwise.
 type PID struct {
 	IFormula PIDFormula
 	DFormula PIDFormula
@@ -48,80 +63,120 @@ func (p *PID) Copy() *PID {
 	return &cp
 }
 
-type PIDOption func(*PID)
-
-func WithFilter(Tf float64) PIDOption {
-	return func(p *PID) { p.Tf = Tf }
-}
-
-func WithTs(dt float64) PIDOption {
-	return func(p *PID) { p.Dt = dt }
-}
-
-func NewPID(Kp, Ki, Kd float64, opts ...PIDOption) *PID {
-	p := &PID{Kp: Kp, Ki: Ki, Kd: Kd, Form: PIDParallel}
+func newPIDFormulas(op string, opts []PIDOption) (pidFormulas, error) {
+	var f pidFormulas
 	for _, o := range opts {
-		o(p)
+		o(&f)
 	}
-	return p
+	if !validPIDFormula(f.i) || !validPIDFormula(f.d) {
+		return f, fmt.Errorf("%s: unknown discrete formula (%d, %d): %w", op, f.i, f.d, ErrInvalidArgument)
+	}
+	return f, nil
 }
 
-// NewPIDStd creates a PID in standard (ISA) form:
+func validPIDFormula(f PIDFormula) bool { return f >= ForwardEuler && f <= Trapezoidal }
+
+func validatePIDGains(op string, kp, ki, kd, tf, ts float64) error {
+	if err := requireFinite(op, "gains", kp, ki, kd); err != nil {
+		return err
+	}
+	if !finitePID(tf) || tf < 0 {
+		return fmt.Errorf("%s: Tf %g must be finite and nonnegative: %w", op, tf, ErrInvalidArgument)
+	}
+	if !finitePID(ts) || ts < 0 {
+		return fmt.Errorf("%s: Ts %g must be 0 (continuous) or positive: %w", op, ts, ErrInvalidArgument)
+	}
+	return nil
+}
+
+// NewPID creates a parallel-form PID, as MATLAB pid(Kp,Ki,Kd,Tf,Ts)
+// (https://www.mathworks.com/help/control/ref/pid.html). Tf = 0 means no
+// derivative filter and Ts = 0 a continuous controller. Non-finite gains, a
+// negative Tf or Ts, or an unknown formula return ErrInvalidArgument.
+func NewPID(Kp, Ki, Kd, Tf, Ts float64, opts ...PIDOption) (*PID, error) {
+	if err := validatePIDGains("NewPID", Kp, Ki, Kd, Tf, Ts); err != nil {
+		return nil, err
+	}
+	f, err := newPIDFormulas("NewPID", opts)
+	if err != nil {
+		return nil, err
+	}
+	return &PID{Kp: Kp, Ki: Ki, Kd: Kd, Tf: Tf, Dt: Ts, IFormula: f.i, DFormula: f.d, Form: PIDParallel}, nil
+}
+
+// NewPIDStd creates a PID in standard (ISA) form, as MATLAB
+// pidstd(Kp,Ti,Td,N,Ts) (https://www.mathworks.com/help/control/ref/pidstd.html):
 //
-//	C(s) = Kp * (1 + 1/(Ti*s) + Td*s/(Tf*s + 1))
+//	C(s) = Kp * (1 + 1/(Ti*s) + Td*s/((Td/N)*s + 1))
 //
-// Relation to parallel: Ki = Kp/Ti, Kd = Kp*Td.
-func NewPIDStd(Kp, Ti, Td float64, opts ...PIDOption) (*PID, error) {
-	if math.IsNaN(Ti) || math.IsInf(Ti, -1) || math.IsNaN(Td) || math.IsInf(Td, 0) || math.IsNaN(Kp) || math.IsInf(Kp, 0) {
-		return nil, fmt.Errorf("controlsys: invalid standard PID parameters")
+// Ti is positive (+Inf disables integral action), Td finite and nonnegative,
+// N positive (+Inf means no derivative filter) and Ts 0 or positive; other
+// values return ErrInvalidArgument. The gains are stored in parallel form:
+// Ki = Kp/Ti, Kd = Kp*Td, Tf = Td/N.
+func NewPIDStd(Kp, Ti, Td, N, Ts float64, opts ...PIDOption) (*PID, error) {
+	const op = "NewPIDStd"
+	if err := requireFinite(op, "Kp", Kp); err != nil {
+		return nil, err
 	}
-	if Ti == 0 && Kp != 0 {
-		return nil, fmt.Errorf("controlsys: Ti must be nonzero in standard form")
+	if math.IsNaN(Ti) || Ti <= 0 {
+		return nil, fmt.Errorf("%s: Ti %g must be positive (+Inf disables integral action): %w", op, Ti, ErrInvalidArgument)
 	}
-	var Ki, Kd float64
-	if Ti != 0 {
-		Ki = Kp / Ti
+	if !finitePID(Td) || Td < 0 {
+		return nil, fmt.Errorf("%s: Td %g must be finite and nonnegative: %w", op, Td, ErrInvalidArgument)
 	}
-	Kd = Kp * Td
-	p := &PID{Kp: Kp, Ki: Ki, Kd: Kd, Form: PIDStandard}
-	for _, o := range opts {
-		o(p)
+	if math.IsNaN(N) || N <= 0 {
+		return nil, fmt.Errorf("%s: N %g must be positive (+Inf means no filter): %w", op, N, ErrInvalidArgument)
 	}
+	p, err := NewPID(Kp, Kp/Ti, Kp*Td, Td/N, Ts, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	p.Form = PIDStandard
 	return p, nil
 }
 
 // Parallel returns a copy in parallel form (Kp, Ki, Kd).
 func (p *PID) Parallel() *PID {
+	if p == nil {
+		return nil
+	}
 	cp := *p
 	cp.Form = PIDParallel
 	return &cp
 }
 
 // Standard returns an equivalent standard parameterization. A nonzero integral
-// or derivative with zero proportional gain cannot be represented in this form.
+// or derivative with zero proportional gain cannot be represented in this form
+// and returns ErrInvalidArgument.
 func (p *PID) Standard() (*PID, error) {
 	if p.Kp == 0 && (p.Ki != 0 || p.Kd != 0) {
-		return nil, fmt.Errorf("controlsys: nonzero I or D with zero Kp has no standard form")
+		return nil, fmt.Errorf("PID.Standard: nonzero I or D with zero Kp has no standard form: %w", ErrInvalidArgument)
 	}
 	cp := *p
 	cp.Form = PIDStandard
 	return &cp, nil
 }
 
-// Ti returns the integral time constant; +Inf denotes disabled integral action.
-func (p *PID) Ti() float64 {
+// Ti returns the standard-form integral time Kp/Ki; +Inf when integral
+// action is disabled (Ki = 0). ok is false when the controller has no
+// standard form (Kp = 0 with Ki or Kd nonzero).
+func (p *PID) Ti() (ti float64, ok bool) {
 	if p.Ki == 0 {
-		return math.Inf(1)
+		return math.Inf(1), p.Kp != 0 || p.Kd == 0
 	}
-	return p.Kp / p.Ki
+	if p.Kp == 0 {
+		return 0, false
+	}
+	return p.Kp / p.Ki, true
 }
 
-// Td returns the derivative time constant (standard form). Returns 0 if Kp=0.
-func (p *PID) Td() float64 {
+// Td returns the standard-form derivative time Kd/Kp; 0 when derivative
+// action is disabled. ok is false when the controller has no standard form.
+func (p *PID) Td() (td float64, ok bool) {
 	if p.Kp == 0 {
-		return 0
+		return 0, p.Ki == 0 && p.Kd == 0
 	}
-	return p.Kd / p.Kp
+	return p.Kd / p.Kp, true
 }
 
 // PID2 represents a 2-DOF PID controller.
@@ -150,15 +205,21 @@ func (p *PID2) Copy() *PID2 {
 	return &cp
 }
 
-func NewPID2(Kp, Ki, Kd, Tf, b, c float64, opts ...PIDOption) *PID2 {
-	p2 := &PID2{Kp: Kp, Ki: Ki, Kd: Kd, Tf: Tf, B: b, C: c}
-	tmp := &PID{Dt: p2.Dt}
-	for _, o := range opts {
-		o(tmp)
+// NewPID2 creates a 2-DOF PID, as MATLAB pid2(Kp,Ki,Kd,Tf,b,c,Ts)
+// (https://www.mathworks.com/help/control/ref/pid2.html). Arguments are
+// validated as in NewPID, and b and c must be finite.
+func NewPID2(Kp, Ki, Kd, Tf, b, c, Ts float64, opts ...PIDOption) (*PID2, error) {
+	if err := validatePIDGains("NewPID2", Kp, Ki, Kd, Tf, Ts); err != nil {
+		return nil, err
 	}
-	p2.Dt = tmp.Dt
-	p2.IFormula, p2.DFormula = tmp.IFormula, tmp.DFormula
-	return p2
+	if err := requireFinite("NewPID2", "setpoint weights", b, c); err != nil {
+		return nil, err
+	}
+	f, err := newPIDFormulas("NewPID2", opts)
+	if err != nil {
+		return nil, err
+	}
+	return &PID2{Kp: Kp, Ki: Ki, Kd: Kd, Tf: Tf, B: b, C: c, Dt: Ts, IFormula: f.i, DFormula: f.d}, nil
 }
 
 type pidRealizationSpec struct {
@@ -168,7 +229,7 @@ type pidRealizationSpec struct {
 
 func newPIDRealizationSpec(Ki, Kd, Tf float64, context string) (pidRealizationSpec, error) {
 	if Kd != 0 && Tf == 0 {
-		return pidRealizationSpec{}, fmt.Errorf("controlsys: %s without filter (Tf=0) is improper; set Tf > 0", context)
+		return pidRealizationSpec{}, fmt.Errorf("%s without filter (Tf=0) is improper; set Tf > 0: %w", context, ErrImproperModel)
 	}
 	return pidRealizationSpec{
 		hasI: Ki != 0,
@@ -176,13 +237,23 @@ func newPIDRealizationSpec(Ki, Kd, Tf float64, context string) (pidRealizationSp
 	}, nil
 }
 
-// System converts the 2-DOF PID to a 2-input (r,y) 1-output (u) state-space.
+// System converts the 2-DOF PID to a 2-input (r,y) 1-output (u) state-space
+// model. A continuous ideal derivative (Kd ≠ 0, Tf = 0) or a noncausal
+// discrete one returns ErrImproperModel.
 func (p *PID2) System() (*System, error) {
+	sys, err := p.system()
+	if err != nil {
+		return nil, fmt.Errorf("PID2.System: %w", err)
+	}
+	return sys, nil
+}
+
+func (p *PID2) system() (*System, error) {
 	if err := validatePID(p.Kp, p.Ki, p.Kd, p.Tf, p.Dt, p.IFormula, p.DFormula); err != nil {
 		return nil, err
 	}
 	if !finitePID(p.B) || !finitePID(p.C) {
-		return nil, fmt.Errorf("controlsys: PID weights must be finite")
+		return nil, fmt.Errorf("setpoint weights must be finite: %w", ErrInvalidArgument)
 	}
 	if p.Dt > 0 {
 		return pidDiscrete(p.Kp, p.Ki, p.Kd, p.Tf, p.Dt, p.IFormula, p.DFormula, []float64{p.B, -1}, []float64{1, -1}, []float64{p.C, -1})
@@ -240,7 +311,18 @@ func (p *PID2) System() (*System, error) {
 	return New(A, Bmat, Cmat, Dmat, 0)
 }
 
+// System returns the controller as a SISO state-space model. A continuous
+// ideal derivative (Kd ≠ 0, Tf = 0) or a noncausal discrete one returns
+// ErrImproperModel; invalid parameters return ErrInvalidArgument.
 func (p *PID) System() (*System, error) {
+	sys, err := p.system()
+	if err != nil {
+		return nil, fmt.Errorf("PID.System: %w", err)
+	}
+	return sys, nil
+}
+
+func (p *PID) system() (*System, error) {
 	if err := validatePID(p.Kp, p.Ki, p.Kd, p.Tf, p.Dt, p.IFormula, p.DFormula); err != nil {
 		return nil, err
 	}
@@ -297,14 +379,14 @@ func finitePID(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 func validatePID(kp, ki, kd, tf, dt float64, i, d PIDFormula) error {
 	for _, v := range []float64{kp, ki, kd, tf, dt} {
 		if !finitePID(v) {
-			return fmt.Errorf("controlsys: PID parameters must be finite")
+			return fmt.Errorf("PID parameters must be finite: %w", ErrInvalidArgument)
 		}
 	}
 	if tf < 0 || dt < 0 {
-		return fmt.Errorf("controlsys: PID filter and sample time must be nonnegative")
+		return fmt.Errorf("PID filter and sample time must be nonnegative: %w", ErrInvalidArgument)
 	}
-	if i < ForwardEuler || i > Trapezoidal || d < ForwardEuler || d > Trapezoidal {
-		return fmt.Errorf("controlsys: invalid PID discrete formula")
+	if !validPIDFormula(i) || !validPIDFormula(d) {
+		return fmt.Errorf("invalid PID discrete formula: %w", ErrInvalidArgument)
 	}
 	return nil
 }
@@ -351,7 +433,7 @@ func pidDiscrete(kp, ki, kd, tf, dt float64, integral, derivative PIDFormula, pw
 	if kd != 0 {
 		denominator := tf + pidFormulaWeight(derivative)*dt
 		if denominator == 0 {
-			return nil, fmt.Errorf("controlsys: forward Euler ideal derivative is noncausal; choose a derivative filter or another formula")
+			return nil, fmt.Errorf("forward Euler ideal derivative is noncausal; choose a derivative filter or another formula: %w", ErrImproperModel)
 		}
 		a.Set(row, row, 1-dt/denominator)
 		c.Set(0, row, -kd/denominator)
