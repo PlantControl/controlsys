@@ -104,6 +104,9 @@ func autoLabel(prefix string, count int) []string {
 	return out
 }
 
+// SetInputName sets the input names, like sys.InputName = names in MATLAB.
+// A single name for a multi-input model expands to name(1), name(2), …;
+// otherwise the count must equal the number of inputs (ErrDimensionMismatch).
 func (sys *System) SetInputName(names ...string) error {
 	if sys == nil {
 		return fmt.Errorf("SetInputName: system is nil: %w", ErrInvalidArgument)
@@ -120,6 +123,8 @@ func (sys *System) SetInputName(names ...string) error {
 	return nil
 }
 
+// SetOutputName sets the output names; a single name expands as in
+// SetInputName.
 func (sys *System) SetOutputName(names ...string) error {
 	if sys == nil {
 		return fmt.Errorf("SetOutputName: system is nil: %w", ErrInvalidArgument)
@@ -136,6 +141,8 @@ func (sys *System) SetOutputName(names ...string) error {
 	return nil
 }
 
+// SetStateName sets the state names; a single name expands as in
+// SetInputName.
 func (sys *System) SetStateName(names ...string) error {
 	if sys == nil {
 		return fmt.Errorf("SetStateName: system is nil: %w", ErrInvalidArgument)
@@ -176,6 +183,8 @@ func (sys *System) stateLabels() []string {
 	return autoLabel("x", n)
 }
 
+// String formats the A, B, C, D matrices with state, input and output labels
+// and the time domain, like MATLAB's display of an ss model.
 func (sys *System) String() string {
 	n, m, p := sys.Dims()
 	if n == 0 && m == 0 && p == 0 {
@@ -253,6 +262,11 @@ func (sys *System) String() string {
 	return b.String()
 }
 
+// SelectByIndex returns the subsystem from the listed inputs to the listed
+// outputs (0-based), like MATLAB sys(outputs, inputs); states, delays and
+// names are kept. An index out of range returns ErrInvalidArgument, and a
+// static gain with exactly one of inputs and outputs empty
+// ErrDimensionMismatch.
 func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
 	if sys == nil {
 		return nil, fmt.Errorf("SelectByIndex: system is nil: %w", ErrInvalidArgument)
@@ -339,6 +353,9 @@ func selectDense(src *mat.Dense, rows, cols []int) *mat.Dense {
 	return dst
 }
 
+// SelectByName is SelectByIndex with channels named by InputName and
+// OutputName, like MATLAB sys(outputNames, inputNames); an unknown name
+// returns ErrSignalNotFound.
 func (sys *System) SelectByName(inputs, outputs []string) (*System, error) {
 	if sys == nil {
 		return nil, fmt.Errorf("SelectByName: system is nil: %w", ErrInvalidArgument)

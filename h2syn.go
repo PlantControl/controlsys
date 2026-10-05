@@ -7,6 +7,9 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// H2SynResult is an H2-optimal controller, as MATLAB h2syn returns K and
+// info: X and Y are the state-feedback and filter Riccati solutions and
+// CLPoles the closed-loop poles.
 type H2SynResult struct {
 	K       *System
 	X       *mat.Dense

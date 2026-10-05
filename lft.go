@@ -6,6 +6,16 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// LFT closes the lower loop of M with Delta: M's first nu inputs and first
+// ny outputs stay external, and its remaining inputs and outputs connect to
+// Delta's outputs and inputs. Unlike MATLAB lft(sys1,sys2,nu,ny), whose nu
+// and ny count the feedback channels, nu and ny here count the external
+// channels. A nil Delta returns the upper block (the first ny outputs
+// against the first nu inputs). Delays are kept through an internal-delay
+// realization. Negative nu or ny returns ErrInvalidArgument, channel counts
+// that do not fit ErrDimensionMismatch and an ill-posed loop
+// ErrAlgebraicLoop.
+// See https://www.mathworks.com/help/control/ref/inputoutputmodel.lft.html.
 func LFT(M, Delta *System, nu, ny int) (*System, error) {
 	if err := requireSystem("LFT", M); err != nil {
 		return nil, err
