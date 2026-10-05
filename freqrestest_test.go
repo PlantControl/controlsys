@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/dsp/window"
@@ -362,5 +363,28 @@ func TestFreqRespEstResultOmegaNotShared(t *testing.T) {
 		if est.H.Omega[1] == -7 {
 			t.Errorf("%s: Omega and H.Omega share a backing array", method)
 		}
+	}
+}
+
+func TestFreqRespEstRejectsNonFiniteDt(t *testing.T) {
+	u := mat.NewDense(1, 64, nil)
+	y := mat.NewDense(1, 64, nil)
+	for k := range 64 {
+		u.Set(0, k, math.Sin(0.3*float64(k)))
+		y.Set(0, k, math.Cos(0.3*float64(k)))
+	}
+	for _, dt := range []float64{math.NaN(), math.Inf(1), 0, -0.1} {
+		_, err := FreqRespEst(u, y, dt, nil)
+		if !errors.Is(err, ErrInvalidSampleTime) || !strings.HasPrefix(err.Error(), "FreqRespEst: ") {
+			t.Errorf("dt=%g: err = %v, want FreqRespEst: ... ErrInvalidSampleTime", dt, err)
+		}
+	}
+	if _, err := FreqRespEst(nil, y, 0.1, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil input: err = %v, want ErrInvalidArgument", err)
+	}
+	bad := mat.DenseCopyOf(y)
+	bad.Set(0, 3, math.Inf(-1))
+	if _, err := FreqRespEst(u, bad, 0.1, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Inf output: err = %v, want ErrInvalidArgument", err)
 	}
 }

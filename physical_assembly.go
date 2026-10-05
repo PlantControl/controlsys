@@ -2,18 +2,29 @@ package controlsys
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// PhysicalPortKind is the physical domain of a port; only ports of the same
+// kind and dimension can be connected.
 type PhysicalPortKind int
 
 const (
+	// PhysicalPortDisplacement is a mechanical port whose across variable is
+	// a displacement and whose through variable a force.
 	PhysicalPortDisplacement PhysicalPortKind = iota
+	// PhysicalPortEffort is a port whose across variable is an effort (for
+	// example a voltage or pressure) and whose through variable a flow.
 	PhysicalPortEffort
 )
 
+// PhysicalPort binds Dimension input channels (through variables) and
+// Dimension output channels (across variables) of a component to a named
+// port. Input and Output are 0-based channel indices; leaving both empty
+// claims the lowest unused channels in order.
 type PhysicalPort struct {
 	Name      string
 	Kind      PhysicalPortKind
@@ -22,12 +33,16 @@ type PhysicalPort struct {
 	Output    []int
 }
 
+// PhysicalComponent is a named model with physical ports; build it with
+// NewPhysicalComponent.
 type PhysicalComponent struct {
 	Name   string
 	System *System
 	Ports  []PhysicalPort
 }
 
+// PhysicalConnection joins port FromComponent.FromPort to ToComponent.ToPort,
+// or, with Grounded, grounds the From port (To* are then ignored).
 type PhysicalConnection struct {
 	FromComponent string
 	FromPort      string
@@ -36,20 +51,39 @@ type PhysicalConnection struct {
 	Grounded      bool
 }
 
-func NewPhysicalComponent(name string, sys *System, ports []PhysicalPort) PhysicalComponent {
-	component := PhysicalComponent{Name: name, Ports: copyPhysicalPorts(ports)}
-	if sys != nil {
-		component.System = sys.Copy()
+// NewPhysicalComponent returns a component holding copies of sys and ports.
+// An empty name, a nil or invalid sys, and invalid ports (empty or duplicate
+// name, non-positive dimension, unknown kind, out-of-range or reused
+// channels) return ErrInvalidArgument; channel-count mismatches return
+// ErrDimensionMismatch.
+func NewPhysicalComponent(name string, sys *System, ports []PhysicalPort) (PhysicalComponent, error) {
+	if err := requireSystem("NewPhysicalComponent", sys); err != nil {
+		return PhysicalComponent{}, err
 	}
-	return component
+	component := PhysicalComponent{Name: name, System: sys.Copy(), Ports: copyPhysicalPorts(ports)}
+	if _, err := newPhysicalAssemblyPlan(name, []PhysicalComponent{component}, nil); err != nil {
+		return PhysicalComponent{}, fmt.Errorf("NewPhysicalComponent: %w", err)
+	}
+	return component, nil
 }
 
+// AssemblePhysical connects components into one descriptor model named name,
+// imposing equal across variables and zero net through variable at every
+// node. Unconnected channels remain external inputs and outputs; without
+// connections the components are appended. Invalid names, components,
+// ports or topologies return ErrInvalidArgument, incompatible channel counts
+// ErrDimensionMismatch, and connected delayed components
+// ErrDelayUnsupported.
 func AssemblePhysical(name string, components []PhysicalComponent, connections []PhysicalConnection) (*System, error) {
 	plan, err := newPhysicalAssemblyPlan(name, components, connections)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("AssemblePhysical: %w", err)
 	}
-	return plan.assemble()
+	sys, err := plan.assemble()
+	if err != nil {
+		return nil, fmt.Errorf("AssemblePhysical: %w", err)
+	}
+	return sys, nil
 }
 
 type physicalAssemblyPlan struct {
@@ -85,10 +119,10 @@ type physicalPortGroup struct {
 
 func newPhysicalAssemblyPlan(name string, components []PhysicalComponent, connections []PhysicalConnection) (*physicalAssemblyPlan, error) {
 	if name == "" {
-		return nil, fmt.Errorf("AssemblePhysical: empty assembly name: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("empty name: %w", ErrInvalidArgument)
 	}
 	if len(components) == 0 {
-		return nil, fmt.Errorf("AssemblePhysical: no components: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("no components: %w", ErrInvalidArgument)
 	}
 	plan := &physicalAssemblyPlan{
 		name:          name,
@@ -100,16 +134,16 @@ func newPhysicalAssemblyPlan(name string, components []PhysicalComponent, connec
 	byComponent := make(map[string]int, len(components))
 	for i, component := range components {
 		if component.Name == "" || component.System == nil {
-			return nil, fmt.Errorf("AssemblePhysical: invalid component at index %d: %w", i, ErrDimensionMismatch)
+			return nil, fmt.Errorf("component %d has an empty name or nil system: %w", i, ErrInvalidArgument)
 		}
 		if _, exists := byComponent[component.Name]; exists {
-			return nil, fmt.Errorf("AssemblePhysical: duplicate component %q: %w", component.Name, ErrDimensionMismatch)
+			return nil, fmt.Errorf("duplicate component %q: %w", component.Name, ErrInvalidArgument)
 		}
 		if err := component.System.Validate(); err != nil {
-			return nil, fmt.Errorf("AssemblePhysical: component %q: %w", component.Name, err)
+			return nil, fmt.Errorf("component %q: %w", component.Name, err)
 		}
 		if i > 0 && component.System.Dt != components[0].System.Dt {
-			return nil, fmt.Errorf("AssemblePhysical: component %q has sample time %g, want %g: %w", component.Name, component.System.Dt, components[0].System.Dt, ErrDomainMismatch)
+			return nil, fmt.Errorf("component %q has sample time %g, want %g: %w", component.Name, component.System.Dt, components[0].System.Dt, ErrDomainMismatch)
 		}
 		plan.stateOffsets[i] = plan.totalStates
 		plan.inputOffsets[i] = plan.totalInputs
@@ -139,21 +173,21 @@ func (p *physicalAssemblyPlan) bindPorts() (map[string]int, error) {
 		seenPorts := make(map[string]struct{}, len(component.Ports))
 		for _, port := range component.Ports {
 			if port.Name == "" || port.Dimension <= 0 {
-				return nil, fmt.Errorf("AssemblePhysical: invalid port on %q: %w", component.Name, ErrDimensionMismatch)
+				return nil, fmt.Errorf("port %q on %q needs a name and positive dimension: %w", port.Name, component.Name, ErrInvalidArgument)
 			}
 			if port.Kind != PhysicalPortDisplacement && port.Kind != PhysicalPortEffort {
-				return nil, fmt.Errorf("AssemblePhysical: invalid port kind on %s.%s: %w", component.Name, port.Name, ErrDimensionMismatch)
+				return nil, fmt.Errorf("invalid port kind %d on %s.%s: %w", port.Kind, component.Name, port.Name, ErrInvalidArgument)
 			}
 			key := component.Name + "." + port.Name
 			if _, exists := seenPorts[key]; exists {
-				return nil, fmt.Errorf("AssemblePhysical: duplicate port %q: %w", key, ErrDimensionMismatch)
+				return nil, fmt.Errorf("duplicate port %q: %w", key, ErrInvalidArgument)
 			}
 			seenPorts[key] = struct{}{}
 			if len(port.Input) == 0 && len(port.Output) == 0 {
 				continue
 			}
 			if len(port.Input) != port.Dimension || len(port.Output) != port.Dimension {
-				return nil, fmt.Errorf("AssemblePhysical: port %q must bind %d input and output channels: %w", key, port.Dimension, ErrDimensionMismatch)
+				return nil, fmt.Errorf("port %q must bind %d input and output channels: %w", key, port.Dimension, ErrDimensionMismatch)
 			}
 			if err := reservePhysicalChannels(usedInputs, port.Input, "input", key); err != nil {
 				return nil, err
@@ -164,16 +198,16 @@ func (p *physicalAssemblyPlan) bindPorts() (map[string]int, error) {
 		}
 		for _, port := range component.Ports {
 			key := component.Name + "." + port.Name
-			inputs := copyIntSlice(port.Input)
-			outputsForPort := copyIntSlice(port.Output)
+			inputs := slices.Clone(port.Input)
+			outputsForPort := slices.Clone(port.Output)
 			if len(inputs) == 0 && len(outputsForPort) == 0 {
 				inputs = claimUnusedPhysicalChannels(usedInputs, port.Dimension)
 				if len(inputs) != port.Dimension {
-					return nil, fmt.Errorf("AssemblePhysical: not enough unused input channels for %q: %w", key, ErrDimensionMismatch)
+					return nil, fmt.Errorf("not enough unused input channels for %q: %w", key, ErrDimensionMismatch)
 				}
 				outputsForPort = claimUnusedPhysicalChannels(usedOutputs, port.Dimension)
 				if len(outputsForPort) != port.Dimension {
-					return nil, fmt.Errorf("AssemblePhysical: not enough unused output channels for %q: %w", key, ErrDimensionMismatch)
+					return nil, fmt.Errorf("not enough unused output channels for %q: %w", key, ErrDimensionMismatch)
 				}
 			}
 			binding := physicalPortBinding{key: key, component: componentIndex, port: port, inputs: make([]int, port.Dimension), outputs: make([]int, port.Dimension)}
@@ -205,7 +239,7 @@ func (p *physicalAssemblyPlan) bindConnections(connections []PhysicalConnection,
 		if connection.Grounded {
 			key := "ground:" + p.ports[from].key
 			if seen[key] {
-				return fmt.Errorf("AssemblePhysical: duplicate grounding of %s: %w", p.ports[from].key, ErrDimensionMismatch)
+				return fmt.Errorf("duplicate grounding of %s: %w", p.ports[from].key, ErrInvalidArgument)
 			}
 			seen[key] = true
 			grounded[from] = true
@@ -216,15 +250,15 @@ func (p *physicalAssemblyPlan) bindConnections(connections []PhysicalConnection,
 			return err
 		}
 		if from == to {
-			return fmt.Errorf("AssemblePhysical: port %s cannot connect to itself: %w", p.ports[from].key, ErrDimensionMismatch)
+			return fmt.Errorf("port %s cannot connect to itself: %w", p.ports[from].key, ErrInvalidArgument)
 		}
 		fromPort, toPort := p.ports[from].port, p.ports[to].port
 		if fromPort.Kind != toPort.Kind || fromPort.Dimension != toPort.Dimension {
-			return fmt.Errorf("AssemblePhysical: incompatible ports %s and %s: %w", p.ports[from].key, p.ports[to].key, ErrDimensionMismatch)
+			return fmt.Errorf("incompatible ports %s and %s: %w", p.ports[from].key, p.ports[to].key, ErrDimensionMismatch)
 		}
 		edge := normalizedPhysicalEdge(p.ports[from].key, p.ports[to].key)
 		if seen[edge] {
-			return fmt.Errorf("AssemblePhysical: duplicate connection %s: %w", edge, ErrDimensionMismatch)
+			return fmt.Errorf("duplicate connection %s: %w", edge, ErrInvalidArgument)
 		}
 		seen[edge] = true
 		active[to] = true
@@ -252,7 +286,7 @@ func (p *physicalAssemblyPlan) bindConnections(connections []PhysicalConnection,
 	for _, root := range roots {
 		group := groups[root]
 		if !group.grounded && len(group.ports) < 2 {
-			return fmt.Errorf("AssemblePhysical: ungrounded node has fewer than two ports: %w", ErrDimensionMismatch)
+			return fmt.Errorf("ungrounded node has fewer than two ports: %w", ErrInvalidArgument)
 		}
 		p.groups = append(p.groups, *group)
 		for _, portIndex := range group.ports {
@@ -275,7 +309,7 @@ func (p *physicalAssemblyPlan) assemble() (*System, error) {
 	}
 	for _, component := range p.components {
 		if component.System.HasDelay() {
-			return nil, fmt.Errorf("AssemblePhysical: connected delayed components are not supported: %w", ErrDescriptorUnsupported)
+			return nil, fmt.Errorf("connected delayed components are not supported: %w", ErrDelayUnsupported)
 		}
 	}
 	a, b, c, d, e := p.aggregateMatrices()
@@ -330,7 +364,7 @@ func (p *physicalAssemblyPlan) assemble() (*System, error) {
 		}
 	}
 	if constraint != q {
-		return nil, fmt.Errorf("AssemblePhysical: generated %d constraints for %d internal variables: %w", constraint, q, ErrDimensionMismatch)
+		return nil, fmt.Errorf("generated %d constraints for %d internal variables: %w", constraint, q, ErrDimensionMismatch)
 	}
 	cAugmented := newDense(len(p.externalOutputs), nAugmented)
 	dAugmented := newDense(len(p.externalOutputs), len(p.externalInputs))
@@ -475,8 +509,8 @@ func copyPhysicalPorts(ports []PhysicalPort) []PhysicalPort {
 	out := make([]PhysicalPort, len(ports))
 	for i, port := range ports {
 		out[i] = port
-		out[i].Input = copyIntSlice(port.Input)
-		out[i].Output = copyIntSlice(port.Output)
+		out[i].Input = slices.Clone(port.Input)
+		out[i].Output = slices.Clone(port.Output)
 	}
 	return out
 }
@@ -485,7 +519,7 @@ func physicalPortIndex(index map[string]int, component, port string) (int, error
 	key := component + "." + port
 	value, ok := index[key]
 	if !ok {
-		return 0, fmt.Errorf("AssemblePhysical: port %q not found: %w", key, ErrSignalNotFound)
+		return 0, fmt.Errorf("port %q not found: %w", key, ErrSignalNotFound)
 	}
 	return value, nil
 }
@@ -553,7 +587,7 @@ func physicalSignalNames(names []string, count int, prefix, kind string) []strin
 func reservePhysicalChannels(used []bool, channels []int, signal, key string) error {
 	for _, channel := range channels {
 		if channel < 0 || channel >= len(used) || used[channel] {
-			return fmt.Errorf("AssemblePhysical: invalid or reused %s channel %d on %q: %w", signal, channel, key, ErrDimensionMismatch)
+			return fmt.Errorf("invalid or reused %s channel %d on %q: %w", signal, channel, key, ErrInvalidArgument)
 		}
 		used[channel] = true
 	}

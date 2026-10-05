@@ -107,7 +107,11 @@ func CtrbF(A, B, C *mat.Dense) (*StaircaseResult, error) {
 			return nil, ErrDimensionMismatch
 		}
 	}
-	return ControllabilityStaircase(A, B, C, 0), nil
+	res, err := controllabilityStaircase(A, B, C, 0, true)
+	if err != nil {
+		return nil, fmt.Errorf("CtrbF: %w", err)
+	}
+	return res, nil
 }
 
 // ObsvF computes the observability staircase form via duality.
@@ -135,10 +139,14 @@ func ObsvF(A, B, C *mat.Dense) (*StaircaseResult, error) {
 		bcT = mat.DenseCopyOf(B.T())
 	}
 
-	dual := ControllabilityStaircase(acT, ccT, bcT, 0)
+	dual, err := controllabilityStaircase(acT, ccT, bcT, 0, true)
+	if err != nil {
+		return nil, fmt.Errorf("ObsvF: %w", err)
+	}
 
 	nobs := dual.NCont
 	res := &StaircaseResult{
+		T:          dual.T,
 		NCont:      nobs,
 		BlockSizes: dual.BlockSizes,
 	}

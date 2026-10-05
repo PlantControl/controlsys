@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"fmt"
+	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -24,12 +25,32 @@ func negateSys(sys *System) *System {
 	return cp
 }
 
+// SmithPredictor returns the continuous Smith-predictor controller for a
+// plant G·e^{-s·delay} with delay-free model G and primary controller C:
+//
+//	K = C / (1 + C·(G - G·P))
+//
+// where P is the padeOrder Padé approximation of e^{-s·delay}; K is formed
+// by feedback of C around G - G·P. MATLAB has no counterpart function. model
+// must be delay-free (its dead time is passed as delay); a delayed model
+// returns ErrDelayUnsupported. A nil controller or model, or padeOrder < 1,
+// returns ErrInvalidArgument; a non-positive or non-finite delay returns
+// ErrNegativeDelay.
 func SmithPredictor(controller, model *System, delay float64, padeOrder int) (*System, error) {
 	if controller == nil {
-		return nil, fmt.Errorf("SmithPredictor: controller cannot be nil")
+		return nil, fmt.Errorf("SmithPredictor: controller is nil: %w", ErrInvalidArgument)
 	}
 	if model == nil {
-		return nil, fmt.Errorf("SmithPredictor: model cannot be nil")
+		return nil, fmt.Errorf("SmithPredictor: model is nil: %w", ErrInvalidArgument)
+	}
+	if err := requireSystem("SmithPredictor", controller); err != nil {
+		return nil, err
+	}
+	if err := requireSystem("SmithPredictor", model); err != nil {
+		return nil, err
+	}
+	if model.HasDelay() {
+		return nil, fmt.Errorf("SmithPredictor: model must be delay-free; pass its dead time as delay: %w", ErrDelayUnsupported)
 	}
 	if !controller.IsContinuous() {
 		return nil, fmt.Errorf("SmithPredictor: controller must be continuous: %w", ErrWrongDomain)
@@ -37,11 +58,11 @@ func SmithPredictor(controller, model *System, delay float64, padeOrder int) (*S
 	if !model.IsContinuous() {
 		return nil, fmt.Errorf("SmithPredictor: model must be continuous: %w", ErrWrongDomain)
 	}
-	if delay <= 0 {
-		return nil, fmt.Errorf("SmithPredictor: delay must be positive, got %v: %w", delay, ErrNegativeDelay)
+	if !(delay > 0) || math.IsInf(delay, 0) {
+		return nil, fmt.Errorf("SmithPredictor: delay must be positive and finite, got %v: %w", delay, ErrNegativeDelay)
 	}
 	if padeOrder < 1 {
-		return nil, fmt.Errorf("SmithPredictor: padeOrder must be positive, got %d: %w", padeOrder, ErrDimensionMismatch)
+		return nil, fmt.Errorf("SmithPredictor: padeOrder must be positive, got %d: %w", padeOrder, ErrInvalidArgument)
 	}
 
 	_, mCtrl, pCtrl := controller.Dims()

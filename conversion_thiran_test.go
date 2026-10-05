@@ -22,7 +22,7 @@ func TestConversionThiranPublishedCoefficientsAndMaximumOrder(t *testing.T) {
 				sys, _ := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
 				sys.InputDelay = []float64{tau}
 				original := sys.Copy()
-				disc, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: method, ThiranOrder: 3, DelayModeling: modeling})
+				disc, err := sys.C2D(.1, C2DOptions{Method: method, ThiranOrder: 3, DelayModeling: modeling})
 				if err != nil {
 					t.Fatalf("%s delay%g %s: %v", method, tau, modeling, err)
 				}
@@ -111,7 +111,7 @@ func TestInternalThiranIndependentMIMOResponseAndRepresentations(t *testing.T) {
 	for _, modeling := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
 		sys := thiranMIMOFixture(t)
 		original := sys.Copy()
-		disc, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, PrewarpFrequency: 4, DelayModeling: modeling})
+		disc, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, PrewarpFrequency: 4, DelayModeling: modeling})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,7 +158,7 @@ func TestInternalThiranTinyDelayAndSingularInstantaneousLoop(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, mode := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
-			if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: mode}); err != nil {
+			if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: mode}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -167,7 +167,7 @@ func TestInternalThiranTinyDelayAndSingularInstantaneousLoop(t *testing.T) {
 	if err := sys.SetInternalDelay([]float64{.02}, scalar(0), scalar(0), scalar(0), scalar(0), scalar(1.5)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err == nil {
+	if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err == nil {
 		t.Fatal("accepted singular instantaneous feedback")
 	}
 }
@@ -177,7 +177,7 @@ func BenchmarkConversionThiran(b *testing.B) {
 		sys := thiranMIMOFixtureBenchmark()
 		b.ReportAllocs()
 		for b.Loop() {
-			if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin}); err != nil {
+			if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin}); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -187,7 +187,7 @@ func BenchmarkConversionThiran(b *testing.B) {
 			sys := thiranMIMOFixtureBenchmark()
 			b.ReportAllocs()
 			for b.Loop() {
-				if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: mode}); err != nil {
+				if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: mode}); err != nil {
 					b.Fatal(err)
 				}
 			}

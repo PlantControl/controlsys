@@ -10,8 +10,8 @@ func validateSampledIO(context string, input, output *mat.Dense, dt float64) (m,
 	return in.channels, out.channels, in.samples, nil
 }
 
-func validateMarkovSequence(markov []*mat.Dense, order int, dt float64) (p, m int, err error) {
-	seq, err := validateMarkovSignalSequence(markov, order, dt)
+func validateMarkovSequence(context string, markov []*mat.Dense, order int, dt float64) (p, m int, err error) {
+	seq, err := validateMarkovSignalSequence(context, markov, order, dt)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -223,11 +223,11 @@ func kernelErr(t *testing.T, sys, ref *System, solver frequencyPointSolver, omeg
 	got := make([]complex128, p*m)
 	worst, at := 0.0, 0.0
 	for k := 0; k < len(omega); k += stride {
-		s := td.frequencyVariable(omega[k])
-		if err := solver.evalInto(s, got); err != nil {
+		pt := td.frequencyPoint(omega[k])
+		if err := solver.evalInto(pt, got); err != nil {
 			t.Fatalf("ω=%g: %v", omega[k], err)
 		}
-		want := oracleResponse(t, ref, s, n, m, p)
+		want := oracleAt(t, ref, pt, n, m, p)
 		norm, diff := 0.0, 0.0
 		for i, v := range want {
 			norm = max(norm, cmplx.Abs(v))
@@ -275,6 +275,16 @@ func TestFreqResponseSweepMatchesPointwiseRandomized(t *testing.T) {
 	}
 }
 
+// evalFrAtPoint is EvalFr at pt: the public EvalFr for a continuous jω, and
+// its single-point path at the exact unit-circle point of a discrete ω, which
+// no complex128 z represents.
+func evalFrAtPoint(sys *System, pt frequencyPoint) ([][]complex128, error) {
+	if pt.isPlain() {
+		return sys.EvalFr(pt.value())
+	}
+	return newFrequencyEvaluator(sys).evalPoint(pt, true)
+}
+
 // Descriptor sweeps are held to the refined oracle on the well-scaled
 // descriptor twin; EvalFr must agree with the sweep bit for bit.
 func TestFreqResponseDescriptorSweepRandomized(t *testing.T) {
@@ -305,9 +315,9 @@ func TestFreqResponseDescriptorSweepRandomized(t *testing.T) {
 			td := newTimeDomain(dt)
 			worst, at := 0.0, 0.0
 			for k := 0; k < len(omega); k += 5 {
-				s := td.frequencyVariable(omega[k])
-				want := oracleResponse(t, twin, s, n, m, p)
-				g, err := sys.EvalFr(s)
+				pt := td.frequencyPoint(omega[k])
+				want := oracleAt(t, twin, pt, n, m, p)
+				g, err := evalFrAtPoint(sys, pt)
 				if err != nil {
 					t.Fatalf("seed=%d EvalFr: %v", seed, err)
 				}
@@ -371,7 +381,7 @@ func TestFreqResponseInternalDelaySweepRandomized(t *testing.T) {
 				var hs [][]complex128
 				gMax := math.Inf(1)
 				for k := 0; k < len(omega); k += 5 {
-					h := oracleResponse(t, twin, td.frequencyVariable(omega[k]), n, m+N, p+N)
+					h := oracleAt(t, twin, td.frequencyPoint(omega[k]), n, m+N, p+N)
 					hs = append(hs, h)
 					norm := func(r0, r1, c0, c1 int) float64 {
 						v := 0.0
@@ -402,9 +412,9 @@ func TestFreqResponseInternalDelaySweepRandomized(t *testing.T) {
 				}
 				worst, at := 0.0, 0.0
 				for k := 0; k < len(omega); k += 5 {
-					s := td.frequencyVariable(omega[k])
-					want := lftClosure(hs[k/5], s, tau, dt, m, p, g)
-					ge, err := sys.EvalFr(s)
+					pt := td.frequencyPoint(omega[k])
+					want := lftClosure(hs[k/5], pt.value(), tau, dt, m, p, g)
+					ge, err := evalFrAtPoint(sys, pt)
 					if err != nil {
 						t.Fatalf("seed=%d EvalFr: %v", seed, err)
 					}
@@ -668,6 +678,99 @@ func descriptorResidualRow(re, im *dot2, aRow, eRow []float64, x []complex128, j
 	}
 }
 
+// oracleAt is oracleResponse at the point pt: for a discrete point exactly
+// on the unit circle it refines X in (pE + qA)X = B against a residual
+// accumulated in twice the working precision, so it is not limited by the
+// rounded z, and returns G = −q·CX + D.
+func oracleAt(t *testing.T, sys *System, pt frequencyPoint, n, m, p int) []complex128 {
+	t.Helper()
+	if pt.isPlain() {
+		return oracleResponse(t, sys, pt.value(), n, m, p)
+	}
+	a := sys.A.RawMatrix()
+	b := sys.B.RawMatrix()
+	eAt := func(i, k int) float64 {
+		if sys.E != nil {
+			return sys.E.At(i, k)
+		}
+		if i == k {
+			return 1
+		}
+		return 0
+	}
+	pr, pi, qr, qi := real(pt.p), imag(pt.p), real(pt.q), imag(pt.q)
+	fill := func(pencil []complex128) {
+		for i := range n {
+			for k := range n {
+				e, v := eAt(i, k), a.Data[i*a.Stride+k]
+				pencil[i*n+k] = complex(pr*(e-v), pi*(e+v))
+			}
+		}
+	}
+	pencil := make([]complex128, n*n)
+	x := make([]complex128, n*m)
+	d := make([]complex128, n*m)
+	fill(pencil)
+	copyRealMatrixToComplex(x, b.Data, b.Stride, n, m)
+	if err := cSolveInPlace(pencil, x, n, m); err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		for i := range n {
+			for j := range m {
+				var exRe, exIm, axRe, axIm dot2
+				for k := range n {
+					xk := x[k*m+j]
+					e, v := eAt(i, k), a.Data[i*a.Stride+k]
+					exRe.addProd(e, real(xk))
+					exIm.addProd(e, imag(xk))
+					axRe.addProd(v, real(xk))
+					axIm.addProd(v, imag(xk))
+				}
+				var re, im dot2
+				re.add(b.Data[i*b.Stride+j])
+				for _, h := range [2]int{0, 1} {
+					er, ei := [2]float64{exRe.hi, exRe.lo}[h], [2]float64{exIm.hi, exIm.lo}[h]
+					ar, ai := [2]float64{axRe.hi, axRe.lo}[h], [2]float64{axIm.hi, axIm.lo}[h]
+					re.addProd(-pr, er)
+					re.addProd(pi, ei)
+					re.addProd(-qr, ar)
+					re.addProd(qi, ai)
+					im.addProd(-pr, ei)
+					im.addProd(-pi, er)
+					im.addProd(-qr, ai)
+					im.addProd(-qi, ar)
+				}
+				d[i*m+j] = complex(re.value(), im.value())
+			}
+		}
+		fill(pencil)
+		if err := cSolveInPlace(pencil, d, n, m); err != nil {
+			t.Fatal(err)
+		}
+		for i := range x {
+			x[i] += d[i]
+		}
+	}
+	c := sys.C.RawMatrix()
+	out := make([]complex128, p*m)
+	for i := range p {
+		for j := range m {
+			var re, im dot2
+			for k := range n {
+				re.addProd(c.Data[i*c.Stride+k], real(x[k*m+j]))
+				im.addProd(c.Data[i*c.Stride+k], imag(x[k*m+j]))
+			}
+			v := complex(re.value(), im.value()) * pt.scale()
+			if sys.D != nil {
+				v += complex(sys.D.At(i, j), 0)
+			}
+			out[i*m+j] = v
+		}
+	}
+	return out
+}
+
 // dot2 accumulates a sum of products in twice the working precision
 // (Ogita, Rump & Oishi 2005).
 type dot2 struct{ hi, lo float64 }
@@ -748,7 +851,7 @@ func TestFreqResponseSweepHighOrder(t *testing.T) {
 				}
 				td := newTimeDomain(dt)
 				for k := 0; k < points; k += stride {
-					want := oracleResponse(t, twin, td.frequencyVariable(omega[k]), n, m, p)
+					want := oracleAt(t, twin, td.frequencyPoint(omega[k]), n, m, p)
 					norm, diff := 0.0, 0.0
 					for i, v := range want {
 						norm = max(norm, cmplx.Abs(v))

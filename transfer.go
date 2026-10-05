@@ -209,7 +209,10 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	}
 
 	a, b, cm := c.balancedABC()
-	stair := ControllabilityStaircase(a, b, cm, c.opts.ControllabilityTol)
+	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+	if err != nil {
+		return nil, err
+	}
 	ncont := stair.NCont
 
 	if ncont == 0 {

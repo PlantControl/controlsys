@@ -226,6 +226,8 @@ func main() {
 | `(*EKF).Predict(u)` | Propagate state and covariance one step |
 | `(*EKF).Update(y)` | Correct state with a measurement |
 | `(*EKF).Step(u, z)` | Run a predict-then-update cycle |
+| `(*EKF).State()`, `StateCovariance()` | Copies of the estimate and its covariance |
+| `(*EKF).SetState(x)`, `SetStateCovariance(P)` | Replace the estimate or covariance (validated) |
 | `type EKFModel` | Nonlinear model: F, H, Jacobians FJac/HJac, noise Q/R |
 
 ### System Identification
@@ -307,15 +309,12 @@ func main() {
 
 | Method | Description |
 |--------|-------------|
-| `Discretize` | Bilinear (Tustin) c2d |
-| `DiscretizeWithOpts` | Option-driven c2d with method and delay-modeling controls |
-| `DiscretizeZOH` | Zero-order hold c2d |
-| `DiscretizeFOH` | First-order hold c2d |
-| `DiscretizeImpulse` | Impulse-invariant c2d |
-| `DiscretizeMatched` | Matched pole-zero c2d |
-| `D2D` | Discrete-to-discrete resampling |
-| `Undiscretize` | Bilinear d2c |
-| `D2C` | Discrete-to-continuous conversion by Tustin or ZOH assumptions |
+| `C2D` | MATLAB `c2d(sys,Ts,opts)`: zoh (default), foh, tustin, impulse, matched, least-squares |
+| `C2DMap` | MATLAB `[sysd,G] = c2d(...)`: also returns the initial-condition map G |
+| `C2DFit` | Least-squares `C2D` plus fit-quality diagnostics |
+| `D2C` | MATLAB `d2c(sys,opts)`: zoh (default), foh, tustin, matched |
+| `D2CMap` | MATLAB `[sysc,G] = d2c(...)` |
+| `D2D` | MATLAB `d2d(sys,Ts,opts)`: zoh (default) or tustin resampling |
 
 ### Interconnection
 

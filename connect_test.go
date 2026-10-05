@@ -1960,11 +1960,11 @@ func TestFeedback_DelayInFeedbackPath(t *testing.T) {
 		u.Set(0, j, 1.0)
 	}
 
-	Sd, _ := S.DiscretizeZOH(dt)
+	Sd, _ := S.C2D(dt, C2DOptions{})
 	sResp, _ := Sd.Simulate(u, nil, nil)
 	sFinal := sResp.Y.At(0, nSteps-1)
 
-	Td, _ := T.DiscretizeZOH(dt)
+	Td, _ := T.C2D(dt, C2DOptions{})
 	tResp, _ := Td.Simulate(u, nil, nil)
 	tFinal := tResp.Y.At(0, nSteps-1)
 

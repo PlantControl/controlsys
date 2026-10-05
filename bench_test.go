@@ -96,7 +96,7 @@ func BenchmarkBilinearDiscretize(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Discretize(0.01)
+		sys.C2D(0.01, C2DOptions{Method: C2DMethodTustin})
 	}
 }
 
@@ -202,7 +202,7 @@ func BenchmarkDiscretizeZOH(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.DiscretizeZOH(0.01)
+		sys.C2D(0.01, C2DOptions{})
 	}
 }
 
@@ -421,7 +421,7 @@ func BenchmarkControllabilityStaircase(b *testing.B) {
 	C.Set(1, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ControllabilityStaircase(A, B, C, 0)
+		mustStaircase(b, A, B, C)
 	}
 }
 
@@ -448,7 +448,7 @@ func BenchmarkSimulateNoDelay(b *testing.B) {
 func BenchmarkThiranDelay(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ThiranDelay(0.35, 3, 0.1)
+		thiranDelay(0.35, 3, 0.1)
 	}
 }
 
@@ -565,7 +565,7 @@ func BenchmarkDiscretizeWithOpts_Thiran(b *testing.B) {
 	sys.InputDelay = []float64{0.35}
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err != nil {
+		if _, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -582,7 +582,7 @@ func BenchmarkDiscretizeWithOpts_IODelayThiran(b *testing.B) {
 	sys.Delay = mat.NewDense(1, 1, []float64{0.35})
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err != nil {
+		if _, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -600,7 +600,7 @@ func BenchmarkDiscretizeWithOpts_PathThiran(b *testing.B) {
 				opts := C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: modeling}
 				b.ReportAllocs()
 				for b.Loop() {
-					if _, err := sys.DiscretizeWithOpts(0.1, opts); err != nil {
+					if _, err := sys.C2D(0.1, opts); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -722,7 +722,7 @@ func BenchmarkSimulate_DCMotor(b *testing.B) {
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
-	disc, _ := sys.DiscretizeZOH(0.001)
+	disc, _ := sys.C2D(0.001, C2DOptions{})
 	steps := 1000
 	u := mat.NewDense(1, steps, nil)
 	for k := range steps {
@@ -781,7 +781,7 @@ func BenchmarkSimulate_MassSpringDamper(b *testing.B) {
 		mat.NewDense(1, 1, nil),
 		0,
 	)
-	disc, _ := sys.DiscretizeZOH(0.01)
+	disc, _ := sys.C2D(0.01, C2DOptions{})
 	steps := 500
 	u := mat.NewDense(1, steps, nil)
 	for k := range steps {
@@ -813,7 +813,7 @@ func BenchmarkDiscretizeAndSimulate_B747Longitudinal(b *testing.B) {
 		mat.NewDense(2, 2, nil),
 		0,
 	)
-	disc, _ := sys.DiscretizeZOH(0.05)
+	disc, _ := sys.C2D(0.05, C2DOptions{})
 	steps := 200
 	u := mat.NewDense(2, steps, nil)
 	for k := range steps {
@@ -875,7 +875,7 @@ func BenchmarkFeedbackAndSimulate(b *testing.B) {
 		0,
 	)
 	cl, _ := Feedback(plant, ctrl, -1)
-	disc, _ := cl.DiscretizeZOH(0.05)
+	disc, _ := cl.C2D(0.05, C2DOptions{})
 	steps := 200
 	u := mat.NewDense(2, steps, nil)
 	for k := range 50 {
@@ -1534,7 +1534,7 @@ func benchD2CSystem(n, m int, dt float64) *System {
 	C.Set(0, 0, 1)
 	D := mat.NewDense(1, m, nil)
 	cont, _ := New(A, B, C, D, 0)
-	disc, _ := cont.DiscretizeZOH(dt)
+	disc, _ := cont.C2D(dt, C2DOptions{})
 	return disc
 }
 
@@ -1542,7 +1542,7 @@ func BenchmarkD2C_ZOH_N2(b *testing.B) {
 	sys := benchD2CSystem(2, 1, 0.05)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(C2DMethodZOH)
+		sys.D2C(D2COptions{Method: C2DMethodZOH})
 	}
 }
 
@@ -1550,7 +1550,7 @@ func BenchmarkD2C_ZOH_N5(b *testing.B) {
 	sys := benchD2CSystem(5, 2, 0.05)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(C2DMethodZOH)
+		sys.D2C(D2COptions{Method: C2DMethodZOH})
 	}
 }
 
@@ -1558,7 +1558,7 @@ func BenchmarkD2C_ZOH_N20(b *testing.B) {
 	sys := benchD2CSystem(20, 5, 0.01)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(C2DMethodZOH)
+		sys.D2C(D2COptions{Method: C2DMethodZOH})
 	}
 }
 
@@ -1566,7 +1566,7 @@ func BenchmarkD2C_ZOH_N50(b *testing.B) {
 	sys := benchD2CSystem(50, 10, 0.01)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(C2DMethodZOH)
+		sys.D2C(D2COptions{Method: C2DMethodZOH})
 	}
 }
 
@@ -1574,7 +1574,7 @@ func BenchmarkD2C_Tustin_N20(b *testing.B) {
 	sys := benchD2CSystem(20, 5, 0.01)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(C2DMethodTustin)
+		sys.D2C(D2COptions{Method: C2DMethodTustin})
 	}
 }
 

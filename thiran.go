@@ -7,24 +7,55 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// ThiranDelay returns a discrete-time allpass state-space system approximating
-// a fractional delay of tau seconds at sample time dt with a fixed filter order
-// N (1-10). The system is SISO.
-//
-// A delay of D = tau/dt samples is stable only for D > N-1; smaller delays
-// return ErrFractionalDelay. Near that bound the poles approach -1 and the
-// filter is poorly conditioned. Integer D returns the exact delay z^-D with D
-// states for any N. For D > N+0.5 the excess whole samples are realized as a
-// leading shift register, so the system has round(D) states.
-func ThiranDelay(tau float64, order int, dt float64) (*System, error) {
-	if tau < 0 || math.IsNaN(tau) || math.IsInf(tau, 0) {
-		return nil, ErrNegativeDelay
+// ThiranDelay returns the discrete-time allpass Thiran filter approximating
+// a delay of tau seconds at sample time dt, as MATLAB thiran(tau, Ts). With
+// D = tau/dt samples, an integer D gives the exact delay z^-D (a unit gain
+// for D = 0); otherwise the filter order is N = ceil(D), which keeps the
+// filter stable. The system is SISO. A negative or non-finite tau returns
+// ErrNegativeDelay and a non-positive or non-finite dt ErrInvalidSampleTime.
+// See https://www.mathworks.com/help/control/ref/thiran.html.
+func ThiranDelay(tau, dt float64) (*System, error) {
+	if err := validateThiranArgs(tau, dt); err != nil {
+		return nil, fmt.Errorf("ThiranDelay: %w", err)
 	}
-	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
-		return nil, ErrInvalidSampleTime
+	D := tau / dt
+	if isIntegerSampleDelay(D) {
+		sys, err := integerDelaySS(int(math.Round(D)), dt)
+		if err != nil {
+			return nil, fmt.Errorf("ThiranDelay: %w", err)
+		}
+		return sys, nil
+	}
+	sys, err := thiranFilter(D, int(math.Ceil(D)), dt)
+	if err != nil {
+		return nil, fmt.Errorf("ThiranDelay: %w", err)
+	}
+	return sys, nil
+}
+
+func validateThiranArgs(tau, dt float64) error {
+	if tau < 0 || math.IsNaN(tau) || math.IsInf(tau, 0) {
+		return fmt.Errorf("tau is %g: %w", tau, ErrNegativeDelay)
+	}
+	if !(dt > 0) || math.IsInf(dt, 0) {
+		return fmt.Errorf("dt is %g: %w", dt, ErrInvalidSampleTime)
+	}
+	return nil
+}
+
+// thiranDelay is ThiranDelay with a fixed filter order N (1-10), used by C2D
+// Thiran delay banks. A delay of D = tau/dt samples is stable only for
+// D > N-1; smaller delays return ErrFractionalDelay. Near that bound the
+// poles approach -1 and the filter is poorly conditioned. Integer D returns
+// the exact delay z^-D with D states for any N. For D > N+0.5 the excess
+// whole samples are realized as a leading shift register, so the system has
+// round(D) states.
+func thiranDelay(tau float64, order int, dt float64) (*System, error) {
+	if err := validateThiranArgs(tau, dt); err != nil {
+		return nil, err
 	}
 	if order < 1 || order > 10 {
-		return nil, fmt.Errorf("ThiranDelay: order must be 1-10: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("Thiran order %d outside 1-10: %w", order, ErrInvalidOrder)
 	}
 
 	D := tau / dt
@@ -34,7 +65,7 @@ func ThiranDelay(tau float64, order int, dt float64) (*System, error) {
 		return integerDelaySS(int(math.Round(D)), dt)
 	}
 	if D <= float64(N-1) {
-		return nil, fmt.Errorf("ThiranDelay: delay %.4f samples <= order-1 = %d (unstable): %w",
+		return nil, fmt.Errorf("delay %.4f samples <= order-1 = %d (unstable): %w",
 			D, N-1, ErrFractionalDelay)
 	}
 
@@ -46,7 +77,23 @@ func ThiranDelay(tau float64, order int, dt float64) (*System, error) {
 		Deff = D - float64(intPart)
 	}
 
-	a := thiranCoeffs(Deff, N)
+	result, err := thiranFilter(Deff, N, dt)
+	if err != nil {
+		return nil, err
+	}
+	if intPart > 0 {
+		intSys, err := integerDelaySS(intPart, dt)
+		if err != nil {
+			return nil, err
+		}
+		return Series(intSys, result)
+	}
+	return result, nil
+}
+
+// thiranFilter realizes the order-N Thiran allpass filter for D samples.
+func thiranFilter(D float64, N int, dt float64) (*System, error) {
+	a := thiranCoeffs(D, N)
 
 	// Transfer function in descending powers of z:
 	// den = [1, a_1, a_2, ..., a_N]
@@ -66,17 +113,8 @@ func ThiranDelay(tau float64, order int, dt float64) (*System, error) {
 
 	result, err := tf.StateSpace(nil)
 	if err != nil {
-		return nil, fmt.Errorf("ThiranDelay: %w", err)
+		return nil, err
 	}
-
-	if intPart > 0 {
-		intSys, err := integerDelaySS(intPart, dt)
-		if err != nil {
-			return nil, err
-		}
-		return Series(intSys, result.Sys)
-	}
-
 	return result.Sys, nil
 }
 

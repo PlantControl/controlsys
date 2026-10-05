@@ -3,7 +3,9 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"math/big"
 	"math/cmplx"
+	"math/rand/v2"
 	"strings"
 	"testing"
 
@@ -97,7 +99,7 @@ func TestFreqResponse_Discrete(t *testing.T) {
 	}
 
 	dt := 0.001
-	sysd, err := sysc.Discretize(dt)
+	sysd, err := sysc.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +332,7 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 				t.Fatal(err)
 			}
 			for k, w := range test.omega {
-				want, err := test.system.EvalFr(evaluator.sAt(w))
+				want, err := evalFrAtPoint(test.system, evaluator.pointAt(w))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1066,7 +1068,7 @@ func TestNichols_Discrete(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
-	sysd, _ := sysc.Discretize(0.01)
+	sysd, _ := sysc.C2D(0.01, C2DOptions{Method: C2DMethodTustin})
 
 	r, err := sysd.Nichols([]float64{0.1, 1.0, 10.0}, 0)
 	if err != nil {
@@ -1691,6 +1693,259 @@ func TestFreqResponseInternalDelayOwnsOmega(t *testing.T) {
 	w[0] = 99
 	if resp.Omega[0] != 1 {
 		t.Errorf("internal-delay FreqResponse.Omega aliases input: %v", resp.Omega)
+	}
+}
+
+// frBig is a complex number in frBigPrec-bit floating point.
+type frBig struct{ re, im *big.Float }
+
+const frBigPrec = 200
+
+func frBigF(v float64) *big.Float { return new(big.Float).SetPrec(frBigPrec).SetFloat64(v) }
+
+func frBigC(v complex128) frBig { return frBig{frBigF(real(v)), frBigF(imag(v))} }
+
+func (a frBig) add(b frBig) frBig {
+	return frBig{frBigF(0).Add(a.re, b.re), frBigF(0).Add(a.im, b.im)}
+}
+
+func (a frBig) sub(b frBig) frBig {
+	return frBig{frBigF(0).Sub(a.re, b.re), frBigF(0).Sub(a.im, b.im)}
+}
+
+func (a frBig) mul(b frBig) frBig {
+	rr, ii := frBigF(0).Mul(a.re, b.re), frBigF(0).Mul(a.im, b.im)
+	ri, ir := frBigF(0).Mul(a.re, b.im), frBigF(0).Mul(a.im, b.re)
+	return frBig{rr.Sub(rr, ii), ri.Add(ri, ir)}
+}
+
+func (a frBig) quo(b frBig) frBig {
+	den := frBigF(0).Mul(b.re, b.re)
+	den.Add(den, frBigF(0).Mul(b.im, b.im))
+	q := a.mul(frBig{b.re, frBigF(0).Neg(b.im)})
+	return frBig{q.re.Quo(q.re, den), q.im.Quo(q.im, den)}
+}
+
+func (a frBig) abs2() *big.Float {
+	r := frBigF(0).Mul(a.re, a.re)
+	return r.Add(r, frBigF(0).Mul(a.im, a.im))
+}
+
+func (a frBig) complex() complex128 {
+	re, _ := a.re.Float64()
+	im, _ := a.im.Float64()
+	return complex(re, im)
+}
+
+// frExactPoint is the evaluation point at w in frBigPrec bits: jω, or for
+// discrete models z = h/conj(h) with h = cos(ωT/2) + j·sin(ωT/2) rounded to
+// float64 as timeDomain.frequencyPoint rounds it, which lies on the unit
+// circle.
+func frExactPoint(w, dt float64) frBig {
+	if dt == 0 {
+		return frBigC(complex(0, w))
+	}
+	sn, cs := math.Sincos(w * dt / 2)
+	return frBigC(complex(cs, sn)).quo(frBigC(complex(cs, -sn)))
+}
+
+// frExactResponse is G(z) = C(zE − A)⁻¹B + D of the stored realization with
+// only the final G rounded: Gaussian elimination in frBigPrec bits.
+func frExactResponse(sys *System, z frBig) []complex128 {
+	n, m, p := sys.Dims()
+	M := make([][]frBig, n)
+	for i := range n {
+		M[i] = make([]frBig, n+m)
+		for j := range n {
+			e := 0.0
+			if sys.E != nil {
+				e = sys.E.At(i, j)
+			} else if i == j {
+				e = 1
+			}
+			M[i][j] = z.mul(frBigC(complex(e, 0))).sub(frBigC(complex(sys.A.At(i, j), 0)))
+		}
+		for j := range m {
+			M[i][n+j] = frBigC(complex(sys.B.At(i, j), 0))
+		}
+	}
+	for k := range n {
+		piv := k
+		for i := k + 1; i < n; i++ {
+			if M[i][k].abs2().Cmp(M[piv][k].abs2()) > 0 {
+				piv = i
+			}
+		}
+		M[k], M[piv] = M[piv], M[k]
+		for i := k + 1; i < n; i++ {
+			f := M[i][k].quo(M[k][k])
+			for j := k; j < n+m; j++ {
+				M[i][j] = M[i][j].sub(f.mul(M[k][j]))
+			}
+		}
+	}
+	X := make([][]frBig, n)
+	for i := n - 1; i >= 0; i-- {
+		X[i] = make([]frBig, m)
+		for j := range m {
+			acc := M[i][n+j]
+			for k := i + 1; k < n; k++ {
+				acc = acc.sub(M[i][k].mul(X[k][j]))
+			}
+			X[i][j] = acc.quo(M[i][i])
+		}
+	}
+	G := make([]complex128, p*m)
+	for i := range p {
+		for j := range m {
+			acc := frBigC(complex(sys.D.At(i, j), 0))
+			for k := range n {
+				acc = acc.add(frBigC(complex(sys.C.At(i, k), 0)).mul(X[k][j]))
+			}
+			G[i*m+j] = acc.complex()
+		}
+	}
+	return G
+}
+
+// lightlyDampedDiscreteSys is a 3×2 discrete model (Dt = 0.1) with D ≠ 0, a
+// pole pair at radius 1−gap and angle θ for each theta, extra well-damped
+// pairs, a real pole at −(1−gap) and a stable real pole, coupled upper
+// triangularly so A is non-symmetric and upper Hessenberg. With extra > 0
+// the first state also feeds the last, stable one, so A is not upper
+// Hessenberg while its poles stay those of the diagonal blocks. With
+// descriptor set, the model is (E, EA, EB, C) for a power-of-two diagonal E,
+// which keeps the poles exact.
+func lightlyDampedDiscreteSys(t *testing.T, rng *rand.Rand, thetas []float64, gap float64, extra int, descriptor bool) *System {
+	t.Helper()
+	n := 2*(len(thetas)+extra) + 2
+	m, p := 2, 3
+	A := mat.NewDense(n, n, nil)
+	for k := range len(thetas) + extra {
+		r, th := 1-gap, 0.0
+		if k < len(thetas) {
+			th = thetas[k]
+		} else {
+			r, th = 0.8, 3*rng.Float64()
+		}
+		c, s := r*math.Cos(th), r*math.Sin(th)
+		A.Set(2*k, 2*k, c)
+		A.Set(2*k, 2*k+1, s*1.5)
+		A.Set(2*k+1, 2*k, -s/1.5)
+		A.Set(2*k+1, 2*k+1, c)
+	}
+	A.Set(n-2, n-2, -(1 - gap))
+	A.Set(n-1, n-1, 0.4)
+	if extra > 0 {
+		A.Set(n-1, 0, 0.7)
+	}
+	for i := range n {
+		for j := i + 1; j < n-1; j++ {
+			if j > i+1 || i%2 == 1 {
+				A.Set(i, j, 0.3*rng.NormFloat64())
+			}
+		}
+	}
+	B := mat.NewDense(n, m, nil)
+	C := mat.NewDense(p, n, nil)
+	D := mat.NewDense(p, m, nil)
+	for i := range n {
+		for j := range m {
+			B.Set(i, j, rng.NormFloat64())
+		}
+		for j := range p {
+			C.Set(j, i, rng.NormFloat64())
+		}
+	}
+	for i := range p {
+		for j := range m {
+			D.Set(i, j, 0.5+rng.Float64())
+		}
+	}
+	var sys *System
+	var err error
+	if descriptor {
+		E := mat.NewDense(n, n, nil)
+		for i := range n {
+			E.Set(i, i, math.Pow(2, float64(rng.IntN(5)-2)))
+		}
+		A.Mul(E, mat.DenseCopyOf(A))
+		B.Mul(E, mat.DenseCopyOf(B))
+		sys, err = NewDescriptor(A, B, C, D, E, 0.1)
+	} else {
+		sys, err = New(A, B, C, D, 0.1)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// Next to a pole at distance 1e-9 from the unit circle, a z = e^{jωT}
+// rounded up to ε off the circle moves |G| by about ε/1e-9 ≈ 1e-7 relative.
+// The response is held, over frequencies a few ulps apart around each
+// peak, to a 200-bit evaluation exactly on the circle. |G| (Frobenius) is
+// the measure: a frequency perturbation of one ulp moves the phase of G by
+// ε/1e-9 as well, but leaves |G| flat at the peak. The exact point removes
+// the radial error; what remains is the solvers' componentwise rounding,
+// which near the pole is relative to entries of size ωT (or π − ωT), so the
+// peaks sit at small ωT and near Nyquist. GEPP keeps that rounding local
+// when A is upper Hessenberg (n = 8, both entry points); a long sweep of the
+// non-Hessenberg n = 32 model takes the refined Hessenberg kernel, whose
+// working-precision residual leaves a larger share. GEPP on that model
+// pivots the coupling row into the resonant rows and is not held here.
+func TestFreqResponseDiscreteLightlyDampedPeaks(t *testing.T) {
+	const (
+		dt  = 0.1
+		gap = 1e-9
+	)
+	rng := rand.New(rand.NewPCG(7, 9))
+	thetas := []float64{0.003, 0.03, 3.11}
+	frob := func(g []complex128) float64 {
+		v := 0.0
+		for _, x := range g {
+			v += real(x)*real(x) + imag(x)*imag(x)
+		}
+		return math.Sqrt(v)
+	}
+	var omega []float64
+	for _, th := range append(thetas, math.Pi) {
+		w0 := th / dt
+		for k := -6; k <= 6; k++ {
+			if w := w0 * (1 + float64(k)*0x1p-52); w <= math.Pi/dt {
+				omega = append(omega, w)
+			}
+		}
+	}
+	for _, descriptor := range []bool{false, true} {
+		for _, tc := range []struct {
+			extra     int
+			tol       float64
+			pointwise bool
+		}{{0, 1e-9, true}, {12, 1e-8, false}} {
+			sys := lightlyDampedDiscreteSys(t, rng, thetas, gap, tc.extra, descriptor)
+			n, _, _ := sys.Dims()
+			resps := map[string]*FreqResponseMatrix{}
+			var err error
+			if resps["FreqResponse"], err = sys.FreqResponse(omega); err != nil {
+				t.Fatal(err)
+			}
+			if tc.pointwise {
+				if resps["FreqResponsePointwise"], err = sys.FreqResponsePointwise(omega); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for k, w := range omega {
+				want := frob(frExactResponse(sys, frExactPoint(w, dt)))
+				for name, resp := range resps {
+					got := frob(resp.Data[k*6 : (k+1)*6])
+					if e := math.Abs(got-want) / want; !(e <= tc.tol) {
+						t.Errorf("descriptor=%v n=%d %s ω=%v (ωT=%.4g): |G| = %.17g, exact %.17g, rel err %.3g",
+							descriptor, n, name, w, w*dt, got, want, e)
+					}
+				}
+			}
+		}
 	}
 }
 

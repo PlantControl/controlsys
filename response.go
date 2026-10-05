@@ -211,7 +211,7 @@ func (p timeResponsePlanner) auto(tFinal, dt float64) (timeResponsePlan, error) 
 	if p.sys.IsDiscrete() {
 		return plan, nil
 	}
-	if plan.sim, err = p.sys.DiscretizeZOH(dt); err != nil {
+	if plan.sim, err = p.sys.C2D(dt, C2DOptions{}); err != nil {
 		return timeResponsePlan{}, fmt.Errorf("auto-discretize: %w", err)
 	}
 	plan.wasContinuous = true
@@ -368,7 +368,7 @@ func (p timeResponsePlanner) lsim(u *mat.Dense, t []float64) (timeResponsePlan, 
 
 	var dsys *System
 	if p.sys.IsContinuous() {
-		dsys, err = p.sys.DiscretizeZOH(dt)
+		dsys, err = p.sys.C2D(dt, C2DOptions{})
 		if err != nil {
 			return timeResponsePlan{}, nil, fmt.Errorf("Lsim: %w", err)
 		}
@@ -483,7 +483,7 @@ func (sys *System) dcGainByEvaluation() (*mat.Dense, error) {
 	if err != nil {
 		return nil, err
 	}
-	g, err := e.evalPoint(s0, false)
+	g, err := e.evalPoint(pointAt(s0), false)
 	if err != nil {
 		return nil, fmt.Errorf("DCGain: %w", err)
 	}

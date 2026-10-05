@@ -90,7 +90,7 @@ func TestSystuneUsesTunableBlockInterface(t *testing.T) {
 func TestSystuneUnsupportedControllerFailsClearly(t *testing.T) {
 	plant := makeSISO(-1, 1, 1, 0)
 	fixed := makeSISO(-2, 1, 1, 0)
-	closed, err := NewGeneralizedClosedLoop("loop", plant, fixed, "u")
+	closed, err := NewGeneralizedClosedLoop("loop", plant, fixedBlockT(t, fixed), "u")
 	if err != nil {
 		t.Fatal(err)
 	}
