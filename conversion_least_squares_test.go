@@ -247,25 +247,25 @@ func TestLeastSquaresHighOrderSources(t *testing.T) {
 	}
 }
 
-type bigComplex struct{ re, im *big.Float }
+type lsqBigComplex struct{ re, im *big.Float }
 
 func bigReal(x float64) *big.Float { return new(big.Float).SetPrec(400).SetFloat64(x) }
-func bigMul(a, b bigComplex) bigComplex {
+func bigMul(a, b lsqBigComplex) lsqBigComplex {
 	r1 := new(big.Float).SetPrec(400).Mul(a.re, b.re)
 	r2 := new(big.Float).SetPrec(400).Mul(a.im, b.im)
 	i1 := new(big.Float).SetPrec(400).Mul(a.re, b.im)
 	i2 := new(big.Float).SetPrec(400).Mul(a.im, b.re)
-	return bigComplex{r1.Sub(r1, r2), i1.Add(i1, i2)}
+	return lsqBigComplex{r1.Sub(r1, r2), i1.Add(i1, i2)}
 }
-func bigSub(a, b bigComplex) bigComplex {
-	return bigComplex{new(big.Float).SetPrec(400).Sub(a.re, b.re), new(big.Float).SetPrec(400).Sub(a.im, b.im)}
+func bigSub(a, b lsqBigComplex) lsqBigComplex {
+	return lsqBigComplex{new(big.Float).SetPrec(400).Sub(a.re, b.re), new(big.Float).SetPrec(400).Sub(a.im, b.im)}
 }
-func bigDiv(a, b bigComplex) bigComplex {
+func bigDiv(a, b lsqBigComplex) lsqBigComplex {
 	d := new(big.Float).SetPrec(400).Mul(b.re, b.re)
 	d.Add(d, new(big.Float).SetPrec(400).Mul(b.im, b.im))
-	conj := bigComplex{b.re, new(big.Float).SetPrec(400).Neg(b.im)}
+	conj := lsqBigComplex{b.re, new(big.Float).SetPrec(400).Neg(b.im)}
 	n := bigMul(a, conj)
-	return bigComplex{n.re.Quo(n.re, d), n.im.Quo(n.im, d)}
+	return lsqBigComplex{n.re.Quo(n.re, d), n.im.Quo(n.im, d)}
 }
 
 // bigSISOResponse evaluates C(zI-A)⁻¹B+D exactly enough by 400-bit Gaussian
@@ -273,15 +273,15 @@ func bigDiv(a, b bigComplex) bigComplex {
 // realization lose accuracy next to its poles at z = 1.
 func bigSISOResponse(sys *System, z complex128) complex128 {
 	n, _, _ := sys.Dims()
-	M := make([][]bigComplex, n)
-	x := make([]bigComplex, n)
+	M := make([][]lsqBigComplex, n)
+	x := make([]lsqBigComplex, n)
 	for i := range n {
-		M[i] = make([]bigComplex, n)
+		M[i] = make([]lsqBigComplex, n)
 		for j := range n {
-			M[i][j] = bigComplex{bigReal(-sys.A.At(i, j)), bigReal(0)}
+			M[i][j] = lsqBigComplex{bigReal(-sys.A.At(i, j)), bigReal(0)}
 		}
-		M[i][i] = bigComplex{new(big.Float).SetPrec(400).Add(M[i][i].re, bigReal(real(z))), bigReal(imag(z))}
-		x[i] = bigComplex{bigReal(sys.B.At(i, 0)), bigReal(0)}
+		M[i][i] = lsqBigComplex{new(big.Float).SetPrec(400).Add(M[i][i].re, bigReal(real(z))), bigReal(imag(z))}
+		x[i] = lsqBigComplex{bigReal(sys.B.At(i, 0)), bigReal(0)}
 	}
 	for k := range n {
 		p := k
@@ -309,7 +309,7 @@ func bigSISOResponse(sys *System, z complex128) complex128 {
 	}
 	re, im := bigReal(sys.D.At(0, 0)), bigReal(0)
 	for k := range n {
-		t := bigMul(bigComplex{bigReal(sys.C.At(0, k)), bigReal(0)}, x[k])
+		t := bigMul(lsqBigComplex{bigReal(sys.C.At(0, k)), bigReal(0)}, x[k])
 		re.Add(re, t.re)
 		im.Add(im, t.im)
 	}
