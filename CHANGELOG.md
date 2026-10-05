@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `HinfNorm` and `Norm(sys, Inf)` accept continuous internal-delay models instead of returning `ErrContinuousInternalDelay`. Stability is decided exactly by the Nyquist count of det(I − H22·Δ) (unstable returns `(+Inf, +Inf, nil)`); the peak uses the exact delay factors e^{−jωτ}. Neutral-type or uncertifiable cases return `ErrDelayUnsupported`, as does `Norm(sys, Inf)` of an unstable one.
+- `DiskMargin`/`DiskMarginSkew` on continuous delayed loops stop the dense π/(8τ) frequency grid where a rigorous tail bound certifies |L| ≤ 0.3 and the sensitivity disk bound cannot exceed the grid peak (≈33k → ≈1k evaluations for a PID + e^{−0.5s} loop). Results are unchanged; loops whose delay grid previously exceeded the point budget may now return a margin instead of `ErrDelayUnsupported`.
 
 ## v2.0.0
 

@@ -2,8 +2,10 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -375,6 +377,279 @@ func TestDelayLoopEvaluationFailureIsError(t *testing.T) {
 		}
 		if !errors.Is(err, ErrSingularTransform) {
 			t.Errorf("peaks=%v: err = %v, want ErrSingularTransform", peaks, err)
+		}
+	}
+}
+
+func polyEval(p []float64, s complex128) complex128 {
+	var v complex128
+	for _, c := range p {
+		v = v*s + complex(c, 0)
+	}
+	return v
+}
+
+func polyMul(a, b []float64) []float64 {
+	out := make([]float64, len(a)+len(b)-1)
+	for i, x := range a {
+		for j, y := range b {
+			out[i+j] += x * y
+		}
+	}
+	return out
+}
+
+func polyAdd(a, b []float64) []float64 {
+	if len(a) < len(b) {
+		a, b = b, a
+	}
+	out := slices.Clone(a)
+	for i, y := range b {
+		out[len(a)-len(b)+i] += y
+	}
+	return out
+}
+
+func polyScale(a []float64, k float64) []float64 {
+	out := slices.Clone(a)
+	for i := range out {
+		out[i] *= k
+	}
+	return out
+}
+
+// quasiLoop is L(s) = num(s)/den(s)·e^{-τs}, deg num <= deg den, with
+// characteristic quasi-polynomial χ(s) = den(s) + num(s)e^{-τs}.
+type quasiLoop struct {
+	name     string
+	num, den []float64
+	tau      float64
+	box      float64 // |L(s)| < 1 on Re s >= 0, |s| >= box
+	wmax     float64 // sensitivity oracle sweep end
+	analytic int     // known verdict: 0 none, 1 stable, 2 unstable
+}
+
+func (q quasiLoop) L(w float64) complex128 {
+	s := complex(0, w)
+	return polyEval(q.num, s) / polyEval(q.den, s) * cmplx.Exp(-s*complex(q.tau, 0))
+}
+
+func (q quasiLoop) chi(s complex128) complex128 {
+	return polyEval(q.den, s) + polyEval(q.num, s)*cmplx.Exp(-s*complex(q.tau, 0))
+}
+
+// system returns a controllable-canonical realization with input delay τ.
+func (q quasiLoop) system(t *testing.T) *System {
+	t.Helper()
+	lead := q.den[0]
+	den := polyScale(q.den, 1/lead)
+	num := polyScale(q.num, 1/lead)
+	n := len(den) - 1
+	num = append(make([]float64, len(den)-len(num)), num...)
+	d := num[0]
+	a := make([]float64, n*n)
+	for i := range n - 1 {
+		a[i*n+i+1] = 1
+	}
+	b := make([]float64, n)
+	b[n-1] = 1
+	c := make([]float64, n)
+	for j := range n {
+		a[(n-1)*n+j] = -den[n-j]
+		c[j] = num[n-j] - d*den[n-j]
+	}
+	return delayedLoop(t, a, b, c, []float64{d}, n, q.tau)
+}
+
+// oracleRHPRoots counts the roots of χ in the open right half-plane by the
+// argument principle on the rectangle [0, box]×[-box, box], sampled densely
+// and bisected wherever arg χ moves by more than 0.2 between samples.
+func oracleRHPRoots(t *testing.T, chi func(complex128) complex128, box float64) int {
+	t.Helper()
+	corners := []complex128{complex(0, -box), complex(box, -box), complex(box, box), complex(0, box), complex(0, -box)}
+	total := 0.0
+	var walk func(a, b complex128, fa, fb complex128, depth int)
+	walk = func(a, b complex128, fa, fb complex128, depth int) {
+		d := cmplx.Phase(fb / fa)
+		if math.Abs(d) <= 0.2 || depth > 50 {
+			if depth > 50 {
+				t.Fatalf("oracle contour passes through a root near %v", a)
+			}
+			total += d
+			return
+		}
+		m := (a + b) / 2
+		fm := chi(m)
+		walk(a, m, fa, fm, depth+1)
+		walk(m, b, fm, fb, depth+1)
+	}
+	const n = 20000
+	for e := range 4 {
+		a, b := corners[e], corners[e+1]
+		prev, fprev := a, chi(a)
+		for i := 1; i <= n; i++ {
+			z := a + (b-a)*complex(float64(i)/n, 0)
+			fz := chi(z)
+			walk(prev, z, fprev, fz, 0)
+			prev, fprev = z, fz
+		}
+	}
+	turns := total / (2 * math.Pi)
+	if math.Abs(turns-math.Round(turns)) > 1e-6 {
+		t.Fatalf("oracle winding %g not an integer", turns)
+	}
+	return int(math.Round(turns))
+}
+
+func pidDelayQuasiLoop(name string, k float64) quasiLoop {
+	const kp, ki, kd, tf = 0.8, 0.3, 0.2, 0.05
+	num := polyScale([]float64{kp*tf + kd, kp + ki*tf, ki}, k)
+	den := polyMul([]float64{tf, 1, 0}, polyMul([]float64{1, 2, 1}, []float64{1, 1}))
+	return quasiLoop{name: name, num: num, den: den, tau: 0.5, box: 60, wmax: 60}
+}
+
+// resonantQuasiLoop adds a lightly damped mode at 40 rad/s with |L| ≈ peak;
+// tau = (π/2 + 2π)/40 points the resonance circle at -1.
+func resonantQuasiLoop(name string, peak, tau float64) quasiLoop {
+	const k0, wr, zeta = 0.5, 40.0, 0.01
+	kr := 2 * zeta * peak
+	res := []float64{1, 2 * zeta * wr, wr * wr}
+	num := polyAdd(polyScale(res, k0), polyScale([]float64{wr * wr, wr * wr}, kr))
+	return quasiLoop{name: name, num: num, den: polyMul([]float64{1, 1}, res), tau: tau, box: 200, wmax: 200}
+}
+
+func delayStabilityCases() []quasiLoop {
+	var cases []quasiLoop
+	const a, tau = 1.0, 0.5
+	wc := bisectRoot(func(w float64) float64 { return w*tau + math.Atan(w/a) - math.Pi }, 1e-9, math.Pi/tau)
+	kc := math.Hypot(a, wc)
+	for _, b := range []float64{-1.2, -0.5, 0.5 * kc, 0.97 * kc, 1.03 * kc, 3 * kc, 9 * kc} {
+		v := 2
+		if -a < b && b < kc {
+			v = 1
+		}
+		cases = append(cases, quasiLoop{name: fmt.Sprintf("hayes/a=1/b=%.4g", b), num: []float64{b}, den: []float64{1, a}, tau: tau, box: 4 * math.Abs(b), wmax: 100, analytic: v})
+	}
+	for _, b := range []float64{0.3, 0.8, 1.2, 2, 6} {
+		cases = append(cases, quasiLoop{name: fmt.Sprintf("hayes/a=-0.5/b=%.4g", b), num: []float64{b}, den: []float64{1, -0.5}, tau: 0.3, box: 4 * b, wmax: 100})
+	}
+	for _, k := range []float64{0.5, 1, 2, 4, 8, 20} {
+		cases = append(cases, pidDelayQuasiLoop(fmt.Sprintf("pid/k=%g", k), k))
+	}
+	aligned := (math.Pi/2 + 2*math.Pi) / 40
+	for _, p := range []float64{0.8, 0.97, 1.03, 1.5, 4} {
+		cases = append(cases, resonantQuasiLoop(fmt.Sprintf("resonance/peak=%g", p), p, aligned))
+	}
+	cases = append(cases, resonantQuasiLoop("resonance/misaligned", 4, 0.3))
+	cases = append(cases,
+		quasiLoop{name: "neutral/0.9", num: []float64{0.9, 0.95}, den: []float64{1, 1}, tau: 1, box: 20, wmax: 300},
+		quasiLoop{name: "neutral/-0.9", num: []float64{-0.9, -0.95}, den: []float64{1, 1}, tau: 1, box: 20, wmax: 300},
+		quasiLoop{name: "neutral/0.36", num: []float64{0.36, 1.02}, den: []float64{1, 2}, tau: 1, box: 20, wmax: 300},
+		quasiLoop{name: "neutral/0.36-unstable", num: []float64{0.36, 3.72}, den: []float64{1, 2}, tau: 1, box: 20, wmax: 300},
+		quasiLoop{name: "neutral/0.3-near1", num: []float64{0.3, 0.6, 0.95 * 41}, den: []float64{1, 2, 41}, tau: 0.2, box: 60, wmax: 300},
+		quasiLoop{name: "axis/integrator-oscillator", num: []float64{0.05, 0.02}, den: []float64{1, 0, 1, 0}, tau: 0.1, box: 10, wmax: 50},
+		quasiLoop{name: "axis/integrator-two-oscillators", num: []float64{-0.3, -0.15}, den: polyMul([]float64{1, 0, 1, 0}, []float64{1, 0, 9}), tau: 0.1, box: 10, wmax: 50},
+		quasiLoop{name: "axis/oscillator-stable", num: []float64{-0.5}, den: []float64{1, 0, 1}, tau: 0.1, box: 10, wmax: 50},
+		quasiLoop{name: "axis/oscillator-unstable", num: []float64{0.5}, den: []float64{1, 0, 1}, tau: 0.1, box: 10, wmax: 50},
+		quasiLoop{name: "axis/double-integrator", num: []float64{0.2, 0.1}, den: []float64{1, 0, 0}, tau: 0.2, box: 10, wmax: 50},
+		quasiLoop{name: "axis/double-integrator-unstable", num: []float64{2, 1}, den: []float64{1, 0, 0}, tau: 0.8, box: 10, wmax: 50},
+	)
+	return cases
+}
+
+// TestDelayLoopEncirclementsMatchRootOracle pins the closed-loop RHP root
+// count rhp − W of the delay Nyquist test against an independent count of the
+// roots of χ(s) = den(s) + num(s)e^{-τs}, and the sensitivity peaks against a
+// dense sweep, for loops with |L| near 1 in the tail, high-frequency
+// resonances and several imaginary-axis poles.
+func TestDelayLoopEncirclementsMatchRootOracle(t *testing.T) {
+	for _, q := range delayStabilityCases() {
+		t.Run(q.name, func(t *testing.T) {
+			want := oracleRHPRoots(t, q.chi, max(q.box, 1))
+			if q.analytic != 0 && (want == 0) != (q.analytic == 1) {
+				t.Fatalf("oracle roots %d contradict the analytic verdict", want)
+			}
+			sys := q.system(t)
+			for _, frac := range []float64{0.5, 1e-3} {
+				l, err := delayLoopFromSystem(sys, "delay loop")
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := l.nyquist(frac)
+				if err != nil {
+					t.Fatalf("frac=%g: %v", frac, err)
+				}
+				if res.roots != want || res.stable != (want == 0) {
+					t.Fatalf("frac=%g: roots=%d stable=%v, oracle %d", frac, res.roots, res.stable, want)
+				}
+			}
+			for _, lin := range []float64{0.1, 0.3, 0.38} {
+				l, err := delayLoopFromSystem(sys, "delay loop")
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := l.nyquistLinearTo(1e-3, lin)
+				if err != nil {
+					t.Fatalf("lin=%g: %v", lin, err)
+				}
+				if res.roots != want {
+					t.Fatalf("lin=%g: roots=%d, oracle %d", lin, res.roots, want)
+				}
+			}
+			l, err := delayLoopFromSystem(sys, "delay loop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			shifts := []float64{0, -0.5, 0.75, -1.75}
+			stable, peaks, err := l.sensitivityPeaks(shifts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stable != (want == 0) {
+				t.Fatalf("sensitivityPeaks stable=%v, oracle roots %d", stable, want)
+			}
+			if !stable {
+				return
+			}
+			d := math.Abs(q.num[0] / q.den[0])
+			if len(q.num) < len(q.den) {
+				d = 0
+			}
+			Lp := func(w float64) complex128 { return q.L(math.Max(w, 1e-9)) }
+			for i, c := range shifts {
+				peak, _ := oraclePeakShifted(Lp, q.wmax, c)
+				peak = math.Max(peak, diskBound(d, c))
+				if math.Abs(peaks[i].peak-peak) > 1e-7*peak {
+					t.Errorf("shift %g: peak=%.12g at %g, oracle %.12g", c, peaks[i].peak, peaks[i].w, peak)
+				}
+			}
+		})
+	}
+}
+
+// The PID loop of BenchmarkDiskMargin_PIDExactDelay needs R = 25600 for the
+// 0.1% sensitivity tail, ~33k points at linear spacing π/(8τ); the tail bound
+// certifies |L| <= 0.3 far earlier, so the linear grid stops there.
+func TestDelayLoopSensitivityTailStopsLinearGrid(t *testing.T) {
+	q := pidDelayQuasiLoop("pid", 1)
+	l, err := delayLoopFromSystem(q.system(t), "delay loop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	at := l.at
+	l.at = func(w float64) complex128 { n++; return at(w) }
+	stable, peaks, err := l.sensitivityPeaks(0, -0.5)
+	if err != nil || !stable {
+		t.Fatalf("stable=%v err=%v", stable, err)
+	}
+	if n > 3000 {
+		t.Fatalf("%d evaluations, want <= 3000", n)
+	}
+	for i, c := range []float64{0, -0.5} {
+		peak, _ := oraclePeakShifted(func(w float64) complex128 { return q.L(math.Max(w, 1e-9)) }, q.wmax, c)
+		if math.Abs(peaks[i].peak-peak) > 1e-7*peak {
+			t.Errorf("shift %g: peak=%.12g, oracle %.12g", c, peaks[i].peak, peak)
 		}
 	}
 }

@@ -37,6 +37,7 @@ type axisPole struct {
 
 type delayNyquist struct {
 	stable bool
+	roots  int // closed-loop RHP roots of χ when the winding resolved
 	w      []float64
 	f      []complex128 // 1+L(jω) on the refined grid
 }
@@ -309,7 +310,17 @@ func lftDelayLoopAcyclic(sys *System, n int) bool {
 // point budget or a winding number that does not resolve to an integer
 // returns errDelayLoopUnsupported rather than a verdict.
 func (l *delayLoop) nyquist(frac float64) (delayNyquist, error) {
-	res, err := l.nyquistGrid(frac)
+	return l.nyquistLinearTo(frac, 0)
+}
+
+// nyquistLinearTo is nyquist with the linear delay spacing ended at the
+// frequency w1 beyond which the tail bound certifies |L| <= lin, when lin
+// exceeds the grid-end level. On [w1, R] 1+L stays in the disk of radius
+// lin < 1 around 1, so its phase cannot wind and, for lin < sin(π/8), moves by
+// less than π/4 between any two points; the count is unchanged and the grid
+// is a subset of the full one.
+func (l *delayLoop) nyquistLinearTo(frac, lin float64) (delayNyquist, error) {
+	res, err := l.nyquistGrid(frac, lin)
 	if err := l.evalErr(); err != nil {
 		return delayNyquist{}, err
 	}
@@ -323,7 +334,7 @@ func (l *delayLoop) evalErr() error {
 	return l.eval.err
 }
 
-func (l *delayLoop) nyquistGrid(frac float64) (delayNyquist, error) {
+func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 	if !(l.tailLimit < 1) {
 		return delayNyquist{}, fmt.Errorf("neutral delay loop, |L(j∞)| may reach 1: %w", errDelayLoopUnsupported)
 	}
@@ -345,14 +356,26 @@ func (l *delayLoop) nyquistGrid(frac float64) (delayNyquist, error) {
 	if !(l.tail(R) <= target) || math.IsInf(R, 1) {
 		return delayNyquist{}, fmt.Errorf("no finite frequency bound for |L|: %w", errDelayLoopUnsupported)
 	}
-	if l.tau > 0 && R*8*l.tau/math.Pi > float64(l.pointBudget()) {
+	w1 := R
+	if l.tau > 0 && lin > target {
+		lo := 0.0
+		for range 100 {
+			mid := (lo + w1) / 2
+			if l.tail(mid) <= lin {
+				w1 = mid
+			} else {
+				lo = mid
+			}
+		}
+	}
+	if l.tau > 0 && w1*8*l.tau/math.Pi > float64(l.pointBudget()) {
 		return delayNyquist{}, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 	}
 
 	if !l.axisOrdersMatch() {
 		return delayNyquist{}, nil
 	}
-	grid := l.grid(R)
+	grid := l.grid(R, w1)
 	segments := l.segments(grid, R)
 	size := len(grid) + 2*len(segments)
 	out := delayNyquist{w: make([]float64, 0, size), f: make([]complex128, 0, size)}
@@ -395,7 +418,8 @@ func (l *delayLoop) nyquistGrid(frac float64) (delayNyquist, error) {
 	if math.Abs(turns-w) > 0.25 {
 		return delayNyquist{}, fmt.Errorf("winding %.3g turns is not resolved to an integer: %w", turns, errDelayLoopUnsupported)
 	}
-	out.stable = l.rhp-int(w) == 0
+	out.roots = l.rhp - int(w)
+	out.stable = out.roots == 0
 	return out, nil
 }
 
@@ -405,7 +429,7 @@ func wrapPi(a float64) float64 {
 
 func (l *delayLoop) axisGap(w float64) float64 { return 1e-7 * max(1, w) }
 
-func (l *delayLoop) grid(R float64) []float64 {
+func (l *delayLoop) grid(R, w1 float64) []float64 {
 	lo := 1.0
 	for _, s := range l.scales {
 		if s > 0 {
@@ -423,14 +447,14 @@ func (l *delayLoop) grid(R float64) []float64 {
 	step, nlin := 0.0, 0
 	if l.tau > 0 {
 		step = math.Pi / (8 * l.tau)
-		nlin = int(R/step) + 1
+		nlin = int(w1/step) + 2
 	}
 	pts := make([]float64, 0, nlog+nlin+9*len(l.scales)+1)
 	for i := range nlog {
 		pts = append(pts, lo*math.Pow(R/lo, float64(i)/float64(nlog-1)))
 	}
 	if l.tau > 0 {
-		for w := step; w < R; w += step {
+		for w, prev := step, 0.0; w < R && prev < w1; prev, w = w, w+step {
 			pts = append(pts, w)
 		}
 	}
@@ -581,31 +605,62 @@ func (l *delayLoop) stableClosedLoop() (bool, error) {
 
 type sensitivityPeak struct{ peak, w float64 }
 
+// sensitivityTailLevel is the |L| level that ends the linear delay grid on
+// the first sensitivity pass; it stays below sin(π/8) so the sparse tail
+// needs no bisection.
+const sensitivityTailLevel = 0.3
+
 // sensitivityPeaks returns the closed-loop stability of S = 1/(1+L) and,
 // when stable, sup_ω |S(jω) + c| with its frequency for each shift c. The
-// grid peak is refined by golden section. Beyond the grid |L| <= t with t
-// within 0.1% of tailLimit, and S maps |L| <= t into the disk of centre
-// 1/(1−t²) and radius t/(1−t²), so |S + c| <= |1/(1−t²) + c| + t/(1−t²);
-// that limit at t = tailLimit is reported with frequency +Inf when it
-// exceeds the grid peak.
+// grid peak is refined by golden section. Where |L| <= t, S lies in the disk
+// of centre 1/(1−t²) and radius t/(1−t²), so |S + c| <= diskBound(t, c).
+// The linear delay spacing ends where the tail bound certifies |L| <= t and
+// diskBound(t, c) does not exceed the grid peak for any c, so the sparse
+// tail cannot hold a larger sample; otherwise the grid is rebuilt with t
+// lowered until it does, or with the full linear spacing. Beyond the grid
+// |L| <= t with t within 0.1% of tailLimit, and diskBound at t = tailLimit is
+// reported with frequency +Inf when it exceeds the grid peak.
 func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []sensitivityPeak, err error) {
-	res, err := l.nyquist(1e-3)
-	if err != nil || !res.stable {
-		return false, nil, err
+	gs := make([]func(complex128) float64, len(shifts))
+	for i, c := range shifts {
+		gs[i] = func(f complex128) float64 { return cmplx.Abs(1/f + complex(c, 0)) }
+	}
+	best := make([]int, len(shifts))
+	lin := 0.0
+	if l.tau > 0 && l.tailLimit < sensitivityTailLevel {
+		lin = sensitivityTailLevel
+	}
+	var res delayNyquist
+	for {
+		res, err = l.nyquistLinearTo(1e-3, lin)
+		if err != nil || !res.stable {
+			return false, nil, err
+		}
+		need := lin
+		for i, g := range gs {
+			best[i] = 0
+			for k, v := range res.f {
+				if g(v) > g(res.f[best[i]]) {
+					best[i] = k
+				}
+			}
+			need = min(need, diskBoundLevel(shifts[i], g(res.f[best[i]]), lin))
+		}
+		if need == lin {
+			break
+		}
+		lin = 0
+		if need > l.tailLimit {
+			lin = need
+		}
 	}
 	peaks = make([]sensitivityPeak, len(shifts))
 	t := l.tailLimit
 	for i, c := range shifts {
-		g := func(f complex128) float64 { return cmplx.Abs(1/f + complex(c, 0)) }
-		best := 0
-		for k, v := range res.f {
-			if g(v) > g(res.f[best]) {
-				best = k
-			}
-		}
-		wPeak, peak := goldenMax(res.w[max(best-1, 0)], res.w[min(best+1, len(res.w)-1)],
-			res.w[best], g(res.f[best]), func(w float64) float64 { return g(1 + l.at(w)) })
-		if inf := math.Abs(1/(1-t*t)+c) + t/(1-t*t); inf > peak {
+		g, b := gs[i], best[i]
+		wPeak, peak := goldenMax(res.w[max(b-1, 0)], res.w[min(b+1, len(res.w)-1)],
+			res.w[b], g(res.f[b]), func(w float64) float64 { return g(1 + l.at(w)) })
+		if inf := diskBound(t, c); inf > peak {
 			peak, wPeak = inf, math.Inf(1)
 		}
 		peaks[i] = sensitivityPeak{peak, wPeak}
@@ -614,6 +669,33 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 		return false, nil, err
 	}
 	return true, peaks, nil
+}
+
+// diskBound bounds |S + c| over |L| <= t.
+func diskBound(t, c float64) float64 {
+	return math.Abs(1/(1-t*t)+c) + t/(1-t*t)
+}
+
+// diskBoundLevel returns the largest level in [0, t] at which
+// diskBound(level, c) <= peak, or t when diskBound(t, c) <= peak already;
+// diskBound grows with the level because the disks are nested.
+func diskBoundLevel(c, peak, t float64) float64 {
+	if diskBound(t, c) <= peak {
+		return t
+	}
+	lo, hi := 0.0, t
+	if !(diskBound(lo, c) <= peak) {
+		return 0
+	}
+	for range 60 {
+		mid := (lo + hi) / 2
+		if diskBound(mid, c) <= peak {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return lo
 }
 
 // goldenMax refines a maximum of g bracketed by [a, b], starting from the

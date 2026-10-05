@@ -462,7 +462,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)
 	}
 	ext := []float64{rGrid}
-	for _, w := range l.grid(R) {
+	for _, w := range l.grid(R, R) {
 		if w > rGrid {
 			ext = append(ext, w)
 		}
