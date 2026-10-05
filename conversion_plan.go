@@ -21,9 +21,9 @@ type c2dPlan struct {
 
 func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 	if sys.IsDiscrete() {
-		return c2dPlan{}, fmt.Errorf("C2D: system already discrete: %w", ErrWrongDomain)
+		return c2dPlan{}, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
-	sys, _, err := conversionStandardForm(sys, "C2D")
+	sys, _, err := conversionStandardForm(sys, "descriptor reduction")
 	if err != nil {
 		return c2dPlan{}, err
 	}
@@ -101,17 +101,17 @@ func (p c2dPlan) discretizeInternalDelay() (*System, error) {
 
 func (p c2dPlan) discretizeMethod() (*System, error) {
 	switch p.method {
-	case "zoh":
+	case C2DMethodZOH:
 		return p.workSys.discretizeZOH(p.dt)
-	case "tustin":
+	case C2DMethodTustin:
 		return p.workSys.discretizeTustin(p.dt, p.opts.PrewarpFrequency)
-	case "foh":
+	case C2DMethodFOH:
 		return p.workSys.discretizeModifiedFOH(p.dt)
 	case C2DMethodLeastSquares:
 		return p.workSys.discretizeLeastSquares(p.dt, p.opts.FitOrder)
-	case "impulse":
+	case C2DMethodImpulse:
 		return p.workSys.discretizeImpulseParity(p.dt)
-	case "matched":
+	case C2DMethodMatched:
 		return p.workSys.discretizeMatched(p.dt)
 	default:
 		panic("unvalidated C2D method")
@@ -136,7 +136,7 @@ type d2cPlan struct {
 
 func newD2CPlan(sys *System, opts D2COptions) (d2cPlan, error) {
 	if sys.IsContinuous() {
-		return d2cPlan{}, fmt.Errorf("D2C: system already continuous: %w", ErrWrongDomain)
+		return d2cPlan{}, fmt.Errorf("system already continuous: %w", ErrWrongDomain)
 	}
 	if err := validateConversionSampleTime(sys.Dt); err != nil {
 		return d2cPlan{}, err
@@ -147,12 +147,12 @@ func newD2CPlan(sys *System, opts D2COptions) (d2cPlan, error) {
 	switch opts.Method {
 	case C2DMethodZOH, C2DMethodTustin, C2DMethodFOH, C2DMethodMatched:
 	default:
-		return d2cPlan{}, fmt.Errorf("D2C: unsupported method %q: %w", opts.Method, ErrInvalidConversionOptions)
+		return d2cPlan{}, fmt.Errorf("unsupported method %q: %w", opts.Method, ErrInvalidConversionOptions)
 	}
 	if err := validatePrewarp(sys.Dt, opts.Method, opts.PrewarpFrequency); err != nil {
 		return d2cPlan{}, err
 	}
-	sys, _, err := conversionStandardForm(sys, "D2C")
+	sys, _, err := conversionStandardForm(sys, "descriptor reduction")
 	if err != nil {
 		return d2cPlan{}, err
 	}
@@ -182,7 +182,7 @@ type d2dPlan struct {
 
 func newD2DPlan(sys *System, newDt float64, opts C2DOptions) (d2dPlan, error) {
 	if sys.IsContinuous() {
-		return d2dPlan{}, fmt.Errorf("D2D: system is continuous: %w", ErrWrongDomain)
+		return d2dPlan{}, fmt.Errorf("system is continuous: %w", ErrWrongDomain)
 	}
 	if err := validateConversionSampleTime(sys.Dt); err != nil {
 		return d2dPlan{}, err
@@ -194,7 +194,7 @@ func newD2DPlan(sys *System, newDt float64, opts C2DOptions) (d2dPlan, error) {
 	switch opts.Method {
 	case C2DMethodZOH, C2DMethodTustin:
 	default:
-		return d2dPlan{}, fmt.Errorf("D2D: unsupported method %q: %w", opts.Method, ErrInvalidConversionOptions)
+		return d2dPlan{}, fmt.Errorf("unsupported method %q: %w", opts.Method, ErrInvalidConversionOptions)
 	}
 	if err := validatePrewarp(sys.Dt, opts.Method, opts.PrewarpFrequency); err != nil {
 		return d2dPlan{}, err
@@ -207,13 +207,13 @@ func (p d2dPlan) run() (*System, error) {
 		return p.sys.Copy(), nil
 	}
 
-	contSys, err := p.sys.D2C(D2COptions{Method: p.opts.Method, PrewarpFrequency: p.opts.PrewarpFrequency})
+	contSys, err := p.sys.d2c(D2COptions{Method: p.opts.Method, PrewarpFrequency: p.opts.PrewarpFrequency})
 	if err != nil {
-		return nil, fmt.Errorf("D2D: %w", err)
+		return nil, err
 	}
-	result, err := contSys.C2D(p.newDt, p.opts)
+	result, err := contSys.c2d(p.newDt, p.opts)
 	if err != nil {
-		return nil, fmt.Errorf("D2D: %w", err)
+		return nil, err
 	}
 	propagateNames(result, p.sys)
 	if n, _, _ := result.Dims(); len(result.StateName) != n {

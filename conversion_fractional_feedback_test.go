@@ -222,11 +222,11 @@ func TestFractionalFeedbackHoldPureGain(t *testing.T) {
 }
 
 func TestFractionalFeedbackHoldInvalidDelay(t *testing.T) {
-	for _, value := range []float64{0, -1, math.NaN(), math.Inf(1)} {
+	for value, want := range map[float64]error{0: ErrZeroInternalDelay, -1: ErrNegativeDelay, math.NaN(): ErrInvalidArgument, math.Inf(1): ErrInvalidArgument} {
 		sys := fractionalFeedbackFixture(t, []float64{.15, .24})
 		sys.LFT.Tau[0] = value
-		if _, err := sys.C2D(.1, C2DOptions{}); !errors.Is(err, ErrZeroInternalDelay) {
-			t.Fatalf("tau%g err%v", value, err)
+		if _, err := sys.C2D(.1, C2DOptions{}); !errors.Is(err, want) {
+			t.Fatalf("tau%g err %v, want %v", value, err, want)
 		}
 	}
 }

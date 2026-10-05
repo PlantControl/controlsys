@@ -15,6 +15,9 @@ type controllerObserverPolicy struct {
 }
 
 func newControllerObserverPolicy(sys *System, context string) (controllerObserverPolicy, error) {
+	if sys == nil {
+		return controllerObserverPolicy{}, fmt.Errorf("%s: system is nil: %w", context, ErrInvalidArgument)
+	}
 	n, m, p := sys.Dims()
 	if n == 0 {
 		return controllerObserverPolicy{}, fmt.Errorf("%s: system has no states: %w", context, ErrDimensionMismatch)
@@ -48,17 +51,20 @@ func (p controllerObserverPolicy) rejectOptsE(opts *RiccatiOpts) error {
 }
 
 func validateRegulatorGains(context string, sys *System, K, L *mat.Dense) (n, m, p int, err error) {
+	if sys == nil || K == nil || L == nil {
+		return 0, 0, 0, fmt.Errorf("%s: system, K or L is nil: %w", context, ErrInvalidArgument)
+	}
 	n, m, p = sys.Dims()
 	if n == 0 {
 		return 0, 0, 0, fmt.Errorf("%s: system has no states: %w", context, ErrDimensionMismatch)
 	}
 	kr, kc := K.Dims()
 	if kr != m || kc != n {
-		return 0, 0, 0, ErrDimensionMismatch
+		return 0, 0, 0, fmt.Errorf("%s: K is %d×%d, want %d×%d: %w", context, kr, kc, m, n, ErrDimensionMismatch)
 	}
 	lr, lc := L.Dims()
 	if lr != n || lc != p {
-		return 0, 0, 0, ErrDimensionMismatch
+		return 0, 0, 0, fmt.Errorf("%s: L is %d×%d, want %d×%d: %w", context, lr, lc, n, p, ErrDimensionMismatch)
 	}
 	return n, m, p, nil
 }

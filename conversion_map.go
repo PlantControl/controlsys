@@ -18,8 +18,8 @@ import (
 // ErrOptionUnsupported; C2D still converts. A singular-E descriptor model,
 // whose algebraic states are eliminated, returns ErrDescriptorInitialState.
 func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, error) {
-	if sys == nil {
-		return nil, nil, fmt.Errorf("C2DMap: system is nil: %w", ErrInvalidArgument)
+	if err := requireFiniteSystem("C2DMap", sys); err != nil {
+		return nil, nil, err
 	}
 	opts, err := normalizeC2DOptions(dt, opts)
 	if err != nil {
@@ -32,9 +32,9 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	if reduced {
 		return nil, nil, fmt.Errorf("C2DMap: algebraic descriptor states are eliminated: %w", ErrDescriptorInitialState)
 	}
-	out, err := std.C2D(dt, opts)
+	out, err := std.c2d(dt, opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("C2DMap: %w", err)
 	}
 	if !conversionCanMapState(std, out, opts.Method, dt) || (opts.ThiranOrder > 0 && conversionInitialMapHasFraction(std, dt)) {
 		return nil, nil, fmt.Errorf("C2DMap: no exact initial-condition map for this delay structure: %w", ErrOptionUnsupported)
@@ -50,8 +50,8 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 // [sysc,G] = d2c(sysd,opts): xc(k·Ts) = G·[xd[k]; u[k]; w[k]]. Its
 // availability follows C2DMap.
 func (sys *System) D2CMap(opts D2COptions) (*System, *mat.Dense, error) {
-	if sys == nil {
-		return nil, nil, fmt.Errorf("D2CMap: system is nil: %w", ErrInvalidArgument)
+	if err := requireFiniteSystem("D2CMap", sys); err != nil {
+		return nil, nil, err
 	}
 	if opts.Method == "" {
 		opts.Method = C2DMethodZOH
@@ -63,9 +63,9 @@ func (sys *System) D2CMap(opts D2COptions) (*System, *mat.Dense, error) {
 	if reduced {
 		return nil, nil, fmt.Errorf("D2CMap: algebraic descriptor states are eliminated: %w", ErrDescriptorInitialState)
 	}
-	out, err := std.D2C(opts)
+	out, err := std.d2c(opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("D2CMap: %w", err)
 	}
 	if !conversionCanMapState(std, out, opts.Method, std.Dt) {
 		return nil, nil, fmt.Errorf("D2CMap: no exact initial-condition map for this delay structure: %w", ErrOptionUnsupported)

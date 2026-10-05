@@ -54,6 +54,12 @@ func newInterconnectionPlan(sys1, sys2 *System) interconnectionPlan {
 	}
 }
 
+// Series connects sys1 and sys2 in cascade, the output of sys1 driving the
+// input of sys2 (y = sys2·sys1·u), as MATLAB series(sys1,sys2); see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.series.html.
+// Delays are kept exactly, as internal delays when they no longer sit at the
+// boundary. Mismatched sizes return ErrDimensionMismatch, different sample
+// times ErrDomainMismatch and nil models ErrInvalidArgument.
 func Series(sys1, sys2 *System) (*System, error) {
 	if err := requireSystems("Series", sys1, sys2); err != nil {
 		return nil, err
@@ -64,7 +70,7 @@ func Series(sys1, sys2 *System) (*System, error) {
 	topology := newInterconnectionTopology(sys1, sys2)
 	plan := topology.plan
 	if plan.p1 != plan.m2 {
-		return nil, fmt.Errorf("series: sys1 outputs %d != sys2 inputs %d: %w", plan.p1, plan.m2, ErrDimensionMismatch)
+		return nil, fmt.Errorf("Series: sys1 outputs %d != sys2 inputs %d: %w", plan.p1, plan.m2, ErrDimensionMismatch)
 	}
 
 	if topology.seriesRequiresLFT() {
@@ -212,6 +218,11 @@ func ioDelayOrZero(delay *mat.Dense, p, m int) *mat.Dense {
 	return mat.NewDense(p, m, nil)
 }
 
+// Parallel sums sys1 and sys2 driven by the same input (y = (sys1+sys2)·u),
+// as MATLAB parallel(sys1,sys2); see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.parallel.html.
+// Delays common to both are kept at the boundary and the rest become
+// internal delays. Errors follow Series.
 func Parallel(sys1, sys2 *System) (*System, error) {
 	if err := requireSystems("Parallel", sys1, sys2); err != nil {
 		return nil, err
@@ -222,7 +233,7 @@ func Parallel(sys1, sys2 *System) (*System, error) {
 	topology := newInterconnectionTopology(sys1, sys2)
 	plan := topology.plan
 	if plan.m1 != plan.m2 || plan.p1 != plan.p2 {
-		return nil, fmt.Errorf("parallel: dims (%d,%d) vs (%d,%d): %w", plan.p1, plan.m1, plan.p2, plan.m2, ErrDimensionMismatch)
+		return nil, fmt.Errorf("Parallel: dims (%d,%d) vs (%d,%d): %w", plan.p1, plan.m1, plan.p2, plan.m2, ErrDimensionMismatch)
 	}
 
 	if topology.parallelRequiresLFT() {
@@ -230,10 +241,6 @@ func Parallel(sys1, sys2 *System) (*System, error) {
 	}
 
 	return parallelSimple(sys1, sys2, topology.parallelDelayPlan())
-}
-
-func totalDelayMatrix(sys *System) *mat.Dense {
-	return newDelayTopology(sys).totalExternal(true)
 }
 
 func parallelSimple(sys1, sys2 *System, delayPlan interconnectionDelayPlan) (*System, error) {
@@ -387,7 +394,7 @@ func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (
 	if controller == nil {
 		_, p, m := plant.Dims()
 		if p != m {
-			return nil, fmt.Errorf("feedback: plant must be square (m=p) when controller is nil, got %dx%d", m, p)
+			return nil, fmt.Errorf("Feedback: plant must be square when controller is nil, got %d outputs × %d inputs: %w", p, m, ErrDimensionMismatch)
 		}
 		eyeData := make([]float64, m*m)
 		for i := range m {
@@ -408,10 +415,10 @@ func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (
 	n1, m1, p1 := plant.Dims()
 	n2, m2, p2 := controller.Dims()
 	if p1 != m2 {
-		return nil, fmt.Errorf("feedback: plant outputs %d != controller inputs %d: %w", p1, m2, ErrDimensionMismatch)
+		return nil, fmt.Errorf("Feedback: plant outputs %d != controller inputs %d: %w", p1, m2, ErrDimensionMismatch)
 	}
 	if m1 != p2 {
-		return nil, fmt.Errorf("feedback: plant inputs %d != controller outputs %d: %w", m1, p2, ErrDimensionMismatch)
+		return nil, fmt.Errorf("Feedback: plant inputs %d != controller outputs %d: %w", m1, p2, ErrDimensionMismatch)
 	}
 	if plant.HasDelay() || controller.HasDelay() {
 		return feedbackWithLFT(plant, controller, sign)
@@ -426,7 +433,7 @@ func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (
 	m := m1
 	p := p1
 
-	E21, err := solveFeedbackFeedthrough(plant.D, controller.D, feedbackSign, p1, "feedback", ErrSingularTransform)
+	E21, err := solveFeedbackFeedthrough(plant.D, controller.D, feedbackSign, p1, "Feedback", ErrSingularTransform)
 	if err != nil {
 		return nil, err
 	}
@@ -522,6 +529,10 @@ func subBlock(dst *mat.Dense, r0, c0 int, src *mat.Dense) {
 	}
 }
 
+// Append stacks the inputs and outputs of sys1 and sys2 into a block-diagonal
+// model, as MATLAB append(sys1,sys2); see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.append.html. It
+// equals BlkDiag(sys1, sys2). Errors follow Series.
 func Append(sys1, sys2 *System) (*System, error) {
 	if err := requireSystems("Append", sys1, sys2); err != nil {
 		return nil, err
@@ -1030,9 +1041,14 @@ func appendInternalDelay(sys, sys1, sys2 *System, n1, n2, m1, m2, p1, p2 int) {
 	}
 }
 
+// BlkDiag returns the block-diagonal model of systems, as MATLAB
+// blkdiag(sys1,...,sysN); see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.blkdiag.html.
+// One system returns a copy. No systems or a nil system return
+// ErrInvalidArgument; different sample times return ErrDomainMismatch.
 func BlkDiag(systems ...*System) (*System, error) {
 	if len(systems) == 0 {
-		return nil, fmt.Errorf("blkdiag: no systems provided: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("BlkDiag: no systems provided: %w", ErrInvalidArgument)
 	}
 	if err := requireSystems("BlkDiag", systems...); err != nil {
 		return nil, err
@@ -1044,7 +1060,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 	dt := systems[0].Dt
 	for i := 1; i < len(systems); i++ {
 		if systems[i].Dt != dt {
-			return nil, fmt.Errorf("blkdiag: system %d Dt=%v != Dt=%v: %w", i, systems[i].Dt, dt, ErrDomainMismatch)
+			return nil, fmt.Errorf("BlkDiag: system %d Dt=%v != Dt=%v: %w", i, systems[i].Dt, dt, ErrDomainMismatch)
 		}
 	}
 
@@ -1260,6 +1276,18 @@ func blkDiagInternalDelay(sys *System, srcs []*System, ns, ms, ps []int, nTotal,
 	}
 }
 
+// Connect closes internal connections of the block-diagonal model sys, as
+// the index-based MATLAB form sysc = connect(blksys,connections,inputs,outputs);
+// see https://www.mathworks.com/help/control/ref/dynamicsystem.connect.html.
+// For name-based connections use ConnectByName.
+//
+// The MATLAB connections list maps to the m×p gain matrix Q: the row
+// [i, j, -k] (u(i) is driven by w(j) - w(k), 1-based) is Q[i-1][j-1] = 1 and
+// Q[i-1][k-1] = -1, so u = Q·y + v with v the external input. Q may hold any
+// real gains. inputs and outputs are 0-based indices of the inputs of sys
+// kept as external inputs and the outputs kept as external outputs; they must
+// be non-empty, in range and unique (ErrInvalidArgument). Q of the wrong size
+// returns ErrDimensionMismatch and a singular I - Q·D ErrAlgebraicLoop.
 func Connect(sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) {
 	if err := requireSystems("Connect", sys); err != nil {
 		return nil, err
@@ -1271,32 +1299,32 @@ func Connect(sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) 
 
 	qr, qc := Q.Dims()
 	if qr != m || qc != p {
-		return nil, fmt.Errorf("connect: Q size %dx%d != %dx%d: %w", qr, qc, m, p, ErrDimensionMismatch)
+		return nil, fmt.Errorf("Connect: Q size %dx%d != %dx%d: %w", qr, qc, m, p, ErrDimensionMismatch)
 	}
 	if len(inputs) == 0 {
-		return nil, fmt.Errorf("connect: inputs must be non-empty: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("Connect: inputs must be non-empty: %w", ErrInvalidArgument)
 	}
 	if len(outputs) == 0 {
-		return nil, fmt.Errorf("connect: outputs must be non-empty: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("Connect: outputs must be non-empty: %w", ErrInvalidArgument)
 	}
 
 	inSeen := make(map[int]bool, len(inputs))
 	for _, idx := range inputs {
 		if idx < 0 || idx >= m {
-			return nil, fmt.Errorf("connect: input index %d out of range [0,%d): %w", idx, m, ErrDimensionMismatch)
+			return nil, fmt.Errorf("Connect: input index %d outside [0,%d): %w", idx, m, ErrInvalidArgument)
 		}
 		if inSeen[idx] {
-			return nil, fmt.Errorf("connect: duplicate input index %d: %w", idx, ErrDimensionMismatch)
+			return nil, fmt.Errorf("Connect: duplicate input index %d: %w", idx, ErrInvalidArgument)
 		}
 		inSeen[idx] = true
 	}
 	outSeen := make(map[int]bool, len(outputs))
 	for _, idx := range outputs {
 		if idx < 0 || idx >= p {
-			return nil, fmt.Errorf("connect: output index %d out of range [0,%d): %w", idx, p, ErrDimensionMismatch)
+			return nil, fmt.Errorf("Connect: output index %d outside [0,%d): %w", idx, p, ErrInvalidArgument)
 		}
 		if outSeen[idx] {
-			return nil, fmt.Errorf("connect: duplicate output index %d: %w", idx, ErrDimensionMismatch)
+			return nil, fmt.Errorf("Connect: duplicate output index %d: %w", idx, ErrInvalidArgument)
 		}
 		outSeen[idx] = true
 	}
@@ -1346,7 +1374,7 @@ func connectWithDelay(sys *System, Q *mat.Dense, inputs, outputs []int) (*System
 	nH, _, _ := H.Dims()
 
 	Dcore := extractBlock(H.D, 0, 0, p, m)
-	E, err := solveIdentityMinusProduct(Q, Dcore, m, "connect", ErrAlgebraicLoop)
+	E, err := solveIdentityMinusProduct(Q, Dcore, m, "Connect", ErrAlgebraicLoop)
 	if err != nil {
 		return nil, err
 	}
@@ -1500,7 +1528,7 @@ func connectSimple(sys *System, Q *mat.Dense, inputs, outputs []int, n, m, p int
 	mExt := len(inputs)
 	pExt := len(outputs)
 
-	E, err := solveIdentityMinusProduct(Q, sys.D, m, "connect", ErrAlgebraicLoop)
+	E, err := solveIdentityMinusProduct(Q, sys.D, m, "Connect", ErrAlgebraicLoop)
 	if err != nil {
 		return nil, err
 	}

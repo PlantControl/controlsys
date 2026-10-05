@@ -17,13 +17,21 @@ import (
 // MATLAB dss2ss does. An already discrete model returns ErrWrongDomain;
 // invalid options return ErrInvalidConversionOptions.
 func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
-	if sys == nil {
-		return nil, fmt.Errorf("C2D: system is nil: %w", ErrInvalidArgument)
+	if err := requireFiniteSystem("C2D", sys); err != nil {
+		return nil, err
 	}
+	out, err := sys.c2d(dt, opts)
+	if err != nil {
+		return nil, fmt.Errorf("C2D: %w", err)
+	}
+	return out, nil
+}
+
+func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
 	if !sys.HasDelay() && !sys.IsDescriptor() && opts.Method != C2DMethodLeastSquares {
 		normalized, err := normalizeC2DOptions(dt, opts)
 		if err != nil {
-			return nil, fmt.Errorf("C2D: %w", err)
+			return nil, err
 		}
 		switch normalized.Method {
 		case C2DMethodZOH:
@@ -34,7 +42,7 @@ func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 			return sys.discretizeModifiedFOH(dt)
 		case C2DMethodImpulse:
 			if sys.IsDiscrete() {
-				return nil, fmt.Errorf("C2D: system already discrete: %w", ErrWrongDomain)
+				return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 			}
 			return sys.discretizeImpulseParity(dt)
 		case C2DMethodMatched:
@@ -50,7 +58,7 @@ func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 
 func (sys *System) discretizeTustin(dt, prewarp float64) (*System, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("C2D: system already discrete: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
 	beta, err := tustinBeta(dt, prewarp)
 	if err != nil {
@@ -74,7 +82,7 @@ func (sys *System) discretizeTustin(dt, prewarp float64) (*System, error) {
 
 func (sys *System) undiscretizeTustin(prewarp float64) (*System, error) {
 	if sys.IsContinuous() {
-		return nil, fmt.Errorf("D2C: system already continuous: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("system already continuous: %w", ErrWrongDomain)
 	}
 	beta, err := tustinBeta(sys.Dt, prewarp)
 	if err != nil {
@@ -325,7 +333,7 @@ func absorbFractionalDelays(disc *System, contInputDelay, contOutputDelay []floa
 
 func (sys *System) discretizeZOH(dt float64) (*System, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("C2D: system already discrete: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
 	if err := validateConversionSampleTime(dt); err != nil {
 		return nil, err
@@ -441,9 +449,17 @@ type D2COptions struct {
 // internal, inverting C2D, except that matched rejects them as MATLAB does.
 // An already continuous model returns ErrWrongDomain.
 func (sys *System) D2C(opts D2COptions) (*System, error) {
-	if sys == nil {
-		return nil, fmt.Errorf("D2C: system is nil: %w", ErrInvalidArgument)
+	if err := requireFiniteSystem("D2C", sys); err != nil {
+		return nil, err
 	}
+	out, err := sys.d2c(opts)
+	if err != nil {
+		return nil, fmt.Errorf("D2C: %w", err)
+	}
+	return out, nil
+}
+
+func (sys *System) d2c(opts D2COptions) (*System, error) {
 	plan, err := newD2CPlan(sys, opts)
 	if err != nil {
 		return nil, err
@@ -474,12 +490,15 @@ type D2DOptions struct {
 // converts with D2C and back with C2D using opts.Method, which must be zoh
 // (the zero-value default) or tustin; a same-rate request returns a copy.
 func (sys *System) D2D(dt float64, opts D2DOptions) (*System, error) {
-	if sys == nil {
-		return nil, fmt.Errorf("D2D: system is nil: %w", ErrInvalidArgument)
-	}
-	plan, err := newD2DPlan(sys, dt, C2DOptions{Method: opts.Method, PrewarpFrequency: opts.PrewarpFrequency})
-	if err != nil {
+	if err := requireFiniteSystem("D2D", sys); err != nil {
 		return nil, err
 	}
-	return plan.run()
+	plan, err := newD2DPlan(sys, dt, C2DOptions{Method: opts.Method, PrewarpFrequency: opts.PrewarpFrequency})
+	if err == nil {
+		var out *System
+		if out, err = plan.run(); err == nil {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("D2D: %w", err)
 }
