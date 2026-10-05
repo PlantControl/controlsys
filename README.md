@@ -47,7 +47,7 @@ This package is intended to be usable in production control and estimation code,
 - **Model arrays and physical assembly:** compatible model grids for parameter sweeps and descriptor assembly of connected physical ports
 - **Model reduction & decomposition:** controllability/observability staircase, balanced realization, balanced truncation, stable/unstable and modal separation, modal truncation
 - **System norms & covariance:** H2/H-infinity norms, Hankel singular values, state covariance
-- **Interconnection:** series, parallel, feedback, safe feedback, append, block diagonal, named/indexed connect, FRD interconnections, sum blocks, and LFT
+- **Interconnection:** series, parallel, feedback (with feedin/feedout channel selection), append, block diagonal, named/indexed connect, FRD interconnections, sum blocks, and LFT
 - **Time-domain:** step, impulse, initial condition, arbitrary input (lsim), discrete simulation
 - **Discretization:** ZOH, FOH, Tustin (bilinear), matched pole-zero, discrete-to-discrete resampling
 - **Transport delays:** input/output/internal delays, Pade and Thiran approximations, LFT representation
@@ -322,7 +322,7 @@ func main() {
 | `Series` | Cascade connection |
 | `Parallel` | Sum connection |
 | `Feedback` | Closed-loop with feedback |
-| `WithApproximatedDelays` / `WithPadeOrder` / `WithThiranOrder` | Feedback options for a delay-free rational closed loop |
+| `FeedbackChannels` | Feedback feedin/feedout channel selection |
 | `Append` | Block diagonal concatenation |
 | `SumBlk` | Sum block from string expression |
 | `Connect` / `ConnectByName` | General interconnection by indices or signal names |

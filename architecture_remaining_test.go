@@ -81,7 +81,11 @@ func TestRemainingArchitectureDelayTopologyPublicOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	safeSplit, err := Feedback(split, controller, -1, WithPadeOrder(2))
+	closedSplit, err := Feedback(split, controller, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	safeSplit, err := closedSplit.Pade(2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,4 +282,41 @@ func floatSlicesEqual(a, b []float64) bool {
 		}
 	}
 	return true
+}
+
+func buildDiagWithPade(channel, size int, pade *System) (*System, error) {
+	if size == 1 {
+		return pade, nil
+	}
+
+	np, _, _ := pade.Dims()
+
+	n := np
+	A := mat.NewDense(n, n, nil)
+	B := mat.NewDense(n, size, nil)
+	C := mat.NewDense(size, n, nil)
+	dData := make([]float64, size*size)
+	for i := range size {
+		dData[i*size+i] = 1
+	}
+	D := mat.NewDense(size, size, dData)
+
+	if np > 0 {
+		setBlock(A, 0, 0, pade.A)
+
+		padeB := pade.B.RawMatrix()
+		for i := range np {
+			B.Set(i, channel, padeB.Data[i*padeB.Stride])
+		}
+
+		padeC := pade.C.RawMatrix()
+		for j := range np {
+			C.Set(channel, j, padeC.Data[j])
+		}
+	}
+
+	padeD := pade.D.At(0, 0)
+	D.Set(channel, channel, padeD)
+
+	return newNoCopy(A, B, C, D, pade.Dt)
 }

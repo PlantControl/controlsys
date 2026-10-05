@@ -92,7 +92,7 @@ func stiffChain(t *testing.T, n int, lo, hi, dt float64) *System {
 func TestFreqResponseSweepPadeCascade(t *testing.T) {
 	sys := absorbScopePlant(t, 0, false, false)
 	absorbScopeCases[0].apply(t, sys, 0.125)
-	pade, err := replaceContinuousDelays(sys, 5)
+	pade, err := sys.Pade(5)
 	if err != nil {
 		t.Fatal(err)
 	}

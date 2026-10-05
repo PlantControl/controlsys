@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -203,6 +204,19 @@ func TestFeedbackDelayedStaticGain(t *testing.T) {
 			assertResponseOracle(t, fmt.Sprintf("dt=%v static K=%v", dt, K != nil), cl, func(s complex128) [][]complex128 {
 				return closedLoopOracle(t, g, ref, -1, s)
 			})
+		}
+	}
+}
+
+func TestFeedbackDelayedKeepsStateNames(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		P := feedbackChannelPlant(t, dt, true)
+		cl, err := Feedback(P, nil, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"p1", "p2", "p3"}; !slices.Equal(cl.StateName, want) {
+			t.Errorf("dt=%v: StateName = %v, want %v", dt, cl.StateName, want)
 		}
 	}
 }

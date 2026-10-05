@@ -136,10 +136,8 @@ func TestPRD103DelayConversionPolicyPublicWorkflows(t *testing.T) {
 	discPlant.OutputDelay = []float64{0, 3.5}
 	discPlant.Delay = mat.NewDense(2, 2, []float64{0, 2.5, 3.5, 6.0})
 
-	for _, opt := range []FeedbackOption{WithApproximatedDelays(), WithThiranOrder(3)} {
-		if _, err := Feedback(discPlant, controller, -1, opt); !errors.Is(err, ErrFractionalDelay) {
-			t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
-		}
+	if _, err := Feedback(discPlant, controller, -1); !errors.Is(err, ErrFractionalDelay) {
+		t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
 	}
 }
 

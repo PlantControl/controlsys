@@ -224,7 +224,11 @@ func aliasCases() []aliasCase {
 		{"Feedback", aliasPick(fxPlant, fxGain), aliasTwo(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
 		{"Feedback/nil", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Feedback(s, nil, -1) })},
 		{"Feedback/delayed", aliasPick(fxDelayed, fxGain), aliasTwo(func(a, b *System) (*System, error) {
-			return Feedback(a, b, -1, WithApproximatedDelays())
+			cl, err := Feedback(a, b, -1)
+			if err != nil {
+				return nil, err
+			}
+			return cl.AbsorbDelay()
 		})},
 		{"Feedback/internal", aliasPick(fxInternal, fxGain), aliasTwo(func(a, b *System) (*System, error) { return Feedback(a, b, -1) })},
 		{"LFT", aliasPick(fxPlant, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b) })},

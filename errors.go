@@ -85,8 +85,8 @@ var (
 	// singular.
 	ErrAlgebraicLoop = errors.New("controlsys: algebraic loop: (I-D22) singular")
 
-	// ErrFeedbackDelay reports a feedback interconnection whose delays are not
-	// supported.
+	// ErrFeedbackDelay reports internal (feedback-loop) delays an operation
+	// cannot handle, such as a C2D method without internal-delay support.
 	ErrFeedbackDelay = errors.New("controlsys: feedback with delays not supported")
 
 	// ErrMixedDelayTypes reports a model carrying both internal and I/O

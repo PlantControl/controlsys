@@ -754,7 +754,7 @@ func transferFunctionEvalError(t *testing.T, sys *System, omega []float64) float
 func TestTransferFunctionBalancesBadlyScaledA(t *testing.T) {
 	sys := absorbScopePlant(t, 0, false, false)
 	absorbScopeCases[0].apply(t, sys, 0.125)
-	pade, err := replaceContinuousDelays(sys, 5)
+	pade, err := sys.Pade(5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +799,7 @@ func BenchmarkTransferFunction(b *testing.B) {
 	t := &testing.T{}
 	sys := absorbScopePlant(t, 0, false, false)
 	absorbScopeCases[0].apply(t, sys, 0.125)
-	pade, err := replaceContinuousDelays(sys, 5)
+	pade, err := sys.Pade(5)
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -103,7 +103,11 @@ func descriptorOps() []descriptorOp {
 		{name: "Feedback(S,K)", run: func(f descriptorFixture) (*System, error) { return Feedback(f.S, f.K, 1) }},
 		{name: "Feedback(P,nil)", run: func(f descriptorFixture) (*System, error) { return Feedback(f.P, nil, -1) }},
 		{name: "FeedbackApprox(P,K)", run: func(f descriptorFixture) (*System, error) {
-			return Feedback(f.P, f.K, -1, WithApproximatedDelays())
+			cl, err := Feedback(f.P, f.K, -1)
+			if err != nil {
+				return nil, err
+			}
+			return cl.AbsorbDelay()
 		}},
 		{name: "Append(P,K)", run: func(f descriptorFixture) (*System, error) { return Append(f.P, f.K) }},
 		{name: "BlkDiag(P,S,K)", run: func(f descriptorFixture) (*System, error) { return BlkDiag(f.P, f.S, f.K) }},
@@ -267,7 +271,11 @@ func TestSingularDescriptorInterconnectionsMatchReducedReference(t *testing.T) {
 				return s.AbsorbDelay()
 			}},
 			{"FeedbackApprox", func(x, y *System) (*System, error) {
-				return Feedback(x, y, -1, WithApproximatedDelays())
+				cl, err := Feedback(x, y, -1)
+				if err != nil {
+					return nil, err
+				}
+				return cl.AbsorbDelay()
 			}},
 		}
 		for _, op := range ops {
