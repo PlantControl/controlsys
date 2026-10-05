@@ -27,10 +27,7 @@ type HinfSynResult struct {
 // K is designed for D22 = 0 and returned as K0 (I + D22 K0)^-1, giving the
 // same closed loop and gamma.
 func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
-	if err := requireSystem("HinfSyn", P); err != nil {
-		return nil, err
-	}
-	gp, err := partitionGeneralizedPlant(P, nmeas, ncont)
+	gp, err := partitionGeneralizedPlant("HinfSyn", P, nmeas, ncont)
 	if err != nil {
 		return nil, err
 	}

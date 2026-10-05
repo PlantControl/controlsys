@@ -14,8 +14,12 @@ import (
 // ZerosResult holds the invariant zeros and the normal rank of the transfer
 // matrix.
 type ZerosResult struct {
+	// Zeros are the finite invariant zeros; empty when there are none.
 	Zeros []complex128
-	Rank  int
+	// Rank is the normal rank of the system pencil [A-sE B; C D] minus n,
+	// which equals the normal rank of the transfer matrix (rank(D) for a
+	// static gain).
+	Rank int
 }
 
 // Zeros returns the finite invariant zeros: the points s where the system
@@ -29,26 +33,48 @@ type ZerosResult struct {
 // https://www.mathworks.com/help/control/ref/dynamicsystem.zero.html and
 // https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
 func (sys *System) Zeros() ([]complex128, error) {
-	res, err := sys.ZerosDetail()
+	res, err := sys.zerosDetail("Zeros")
 	if err != nil {
 		return nil, err
 	}
 	return res.Zeros, nil
 }
 
+// ZerosDetail returns the invariant zeros together with the normal rank of
+// the transfer matrix, as MATLAB [z, nrank] = tzero(sys). A static gain has no
+// zeros and rank rank(D); a model with no inputs or outputs has rank 0.
+// Non-finite model data returns ErrInvalidArgument. See
+// https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
 func (sys *System) ZerosDetail() (*ZerosResult, error) {
-	n, m, p := sys.Dims()
-	if n == 0 || m == 0 || p == 0 {
-		return &ZerosResult{}, nil
+	return sys.zerosDetail("ZerosDetail")
+}
+
+func (sys *System) zerosDetail(op string) (*ZerosResult, error) {
+	if err := requireFiniteSystem(op, sys); err != nil {
+		return nil, err
 	}
 	sys, err := zeroInternalDelays(sys)
 	if err != nil {
-		return nil, fmt.Errorf("Zeros: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	if sys.IsDescriptor() {
-		return descriptorZeros(sys)
+	n, m, p := sys.Dims()
+	var res *ZerosResult
+	switch {
+	case m == 0 || p == 0:
+		return &ZerosResult{}, nil
+	case n == 0:
+		e := &mat.Dense{}
+		_, _, _, rank := zerosStaircase(e, e, e, sys.D, 0, m, p)
+		return &ZerosResult{Rank: rank}, nil
+	case sys.IsDescriptor():
+		res, err = descriptorZeros(sys)
+	default:
+		res, err = mimoZeros(sys)
 	}
-	return mimoZeros(sys)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	return res, nil
 }
 
 // zeroInternalDelays closes the internal-delay loop of sys with every delay
@@ -74,7 +100,7 @@ func descriptorZeros(sys *System) (*ZerosResult, error) {
 	n, m, p := sys.Dims()
 	var svd mat.SVD
 	if !svd.Factorize(sys.E, mat.SVDFull) {
-		return nil, fmt.Errorf("Zeros: SVD of E failed: %w", ErrSingularTransform)
+		return nil, fmt.Errorf("SVD of E failed: %w", ErrSingularTransform)
 	}
 	sv := svd.Values(nil)
 	tol := float64(n) * eps() * sv[0]
@@ -113,10 +139,7 @@ func descriptorZeros(sys *System) (*ZerosResult, error) {
 	Dh := mat.NewDense(ph, mh, dh)
 
 	if r == 0 {
-		_, _, _, rank, err := zerosStaircase(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, Dh, 0, mh, ph)
-		if err != nil {
-			return nil, err
-		}
+		_, _, _, rank := zerosStaircase(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, Dh, 0, mh, ph)
 		return &ZerosResult{Rank: rank - q}, nil
 	}
 	ah := make([]float64, r*r)
@@ -151,7 +174,7 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 				M.Sub(sys.A, &BDinvC)
 				var eig mat.Eigen
 				if !eig.Factorize(&M, mat.EigenNone) {
-					return nil, ErrSingularTransform
+					return nil, fmt.Errorf("eigenvalues of A-BD⁻¹C did not converge: %w", ErrSchurFailed)
 				}
 				zeros := eig.Values(nil)
 				sortZeros(zeros)
@@ -160,10 +183,7 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 		}
 	}
 
-	afData, bfData, nu, rank, err := zerosStaircase(sys.A, sys.B, sys.C, sys.D, n, m, p)
-	if err != nil {
-		return nil, err
-	}
+	afData, bfData, nu, rank := zerosStaircase(sys.A, sys.B, sys.C, sys.D, n, m, p)
 	if nu == 0 {
 		return &ZerosResult{Rank: rank}, nil
 	}
@@ -187,7 +207,7 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 		nil, 1, nil, 1,
 		work, lwork)
 	if !ok {
-		return nil, ErrSingularTransform
+		return nil, fmt.Errorf("QZ of the reduced pencil did not converge: %w", ErrSchurFailed)
 	}
 
 	betaTol := float64(nu) * eps()
@@ -207,9 +227,9 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 	return &ZerosResult{Zeros: zeros, Rank: rank}, nil
 }
 
-func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64, nu, rank int, err error) {
+func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64, nu, rank int) {
 	if n == 0 && min(m, p) == 0 {
-		return nil, nil, 0, 0, nil
+		return nil, nil, 0, 0
 	}
 
 	np := n + p
@@ -260,7 +280,7 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 
 	numu := nu + mu
 	if numu == 0 {
-		return nil, nil, 0, rank, nil
+		return nil, nil, 0, rank
 	}
 	mnu := m + nu
 
@@ -289,7 +309,7 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 	}
 
 	if nu == 0 {
-		return nil, nil, 0, rank, nil
+		return nil, nil, 0, rank
 	}
 
 	// Pencil extraction
@@ -324,7 +344,7 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 	copyBlock(afOut, nu, 0, 0, af, afStride, 0, mu, nu, nu)
 	copyBlock(bfOut, nu, 0, 0, bfPencil, i1, 0, mu, nu, nu)
 
-	return afOut, bfOut, nu, rank, nil
+	return afOut, bfOut, nu, rank
 }
 
 func zerosStaircasePass(n, m, p, ro, sigma int, svlmax float64, abcd []float64, stride int,
