@@ -46,7 +46,7 @@ func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // are the augmented Riccati solution and closed-loop eigenvalues.
 //
 // Plants without states, inputs or outputs return ErrDimensionMismatch,
-// descriptor plants ErrDescriptorRiccati and plants with delays
+// asymmetric Q or R ErrNotSymmetric, descriptor plants ErrDescriptorRiccati and plants with delays
 // ErrDelayUnsupported.
 func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	policy, err := newControllerObserverPolicy(sys, "Lqi")
@@ -65,6 +65,9 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	}
 	if rr, rc := R.Dims(); rr != m || rc != m {
 		return nil, fmt.Errorf("Lqi: R is %dx%d, want %dx%d: %w", rr, rc, m, m, ErrDimensionMismatch)
+	}
+	if !isSymmetric(Q, eps()*denseNorm(Q)) || !isSymmetric(R, eps()*denseNorm(R)) {
+		return nil, fmt.Errorf("Lqi: %w", ErrNotSymmetric)
 	}
 	Aa, Ba := lqiAugmentation(sys)
 	if sys.IsContinuous() {

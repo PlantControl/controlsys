@@ -295,6 +295,8 @@ func TestLqi_Errors(t *testing.T) {
 	if err := delayed.SetInputDelay([]float64{0.2, 0}); err != nil {
 		t.Fatal(err)
 	}
+	asym := eye(5)
+	asym.Set(0, 4, 0.1)
 	gain, _ := NewGain(mat.NewDense(1, 1, []float64{1}), 0)
 	noOut, err := NewFromSlices(2, 2, 0, []float64{-1, 0.5, 0, -2}, []float64{1, 0, 0, 1}, nil, nil, 0)
 	if err != nil {
@@ -309,6 +311,8 @@ func TestLqi_Errors(t *testing.T) {
 		{"Q dims", csys, eye(3), eye(2), ErrDimensionMismatch},
 		{"R dims", csys, eye(5), eye(3), ErrDimensionMismatch},
 		{"nil R", csys, eye(5), nil, ErrDimensionMismatch},
+		{"Q asymmetric", csys, asym, eye(2), ErrNotSymmetric},
+		{"R asymmetric", csys, eye(5), mat.NewDense(2, 2, []float64{1, 0.1, 0, 1}), ErrNotSymmetric},
 		{"no states", gain, eye(1), eye(1), ErrDimensionMismatch},
 		{"no outputs", noOut, eye(2), eye(2), ErrDimensionMismatch},
 		{"descriptor", desc, eye(5), eye(2), ErrDescriptorRiccati},
