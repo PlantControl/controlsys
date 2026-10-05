@@ -2806,3 +2806,181 @@ func TestConnectKeepsLoopDelaysInsideLoop(t *testing.T) {
 		}
 	}
 }
+
+func zeroStateDelayBlock(t *testing.T, dt float64, kind int) *System {
+	t.Helper()
+	sc := 1.0
+	if dt > 0 {
+		sc = 10 * dt
+	}
+	var H *System
+	var tau []float64
+	var err error
+	switch kind {
+	case 0:
+		H, err = NewGain(mat.NewDense(3, 3, []float64{
+			0.7, -0.2, 1,
+			0.4, 1.1, 0.3,
+			0.5, -0.6, 0.25,
+		}), dt)
+		tau = []float64{0.3 * sc}
+	default:
+		H, err = NewGain(mat.NewDense(4, 4, []float64{
+			-0.4, 0.8, 0, 0.5,
+			0.2, 0.1, 0.9, 0,
+			1.3, 0, -0.35, 0.1,
+			0.6, -0.15, 0.2, 0.3,
+		}), dt)
+		tau = []float64{0.2 * sc, 0.5 * sc}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := SetDelayModel(H, tau)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, _ := sys.Dims(); n != 0 || !sys.HasInternalDelay() {
+		t.Fatalf("fixture kind %d: n=%d internal=%v", kind, n, sys.HasInternalDelay())
+	}
+	return sys
+}
+
+func assertLFTShape(t *testing.T, label string, sys *System) {
+	t.Helper()
+	n, m, p := sys.Dims()
+	if sys.LFT == nil {
+		return
+	}
+	N := len(sys.LFT.Tau)
+	chk := func(name string, d *mat.Dense, r, c int) {
+		var gr, gc int
+		if d != nil {
+			gr, gc = d.Dims()
+		}
+		if r == 0 || c == 0 {
+			r, c = 0, 0
+		}
+		if gr != r || gc != c {
+			t.Errorf("%s: %s %dx%d, want %dx%d", label, name, gr, gc, r, c)
+		}
+	}
+	chk("B2", sys.LFT.B2, n, N)
+	chk("C2", sys.LFT.C2, N, n)
+	chk("D12", sys.LFT.D12, p, N)
+	chk("D21", sys.LFT.D21, N, m)
+	chk("D22", sys.LFT.D22, N, N)
+}
+
+func TestZeroStateInternalDelayInterconnectionsHaveNoPhantomStates(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		z0 := zeroStateDelayBlock(t, dt, 0)
+		z1 := zeroStateDelayBlock(t, dt, 1)
+		gain, err := NewGain(mat.NewDense(2, 2, []float64{0.3, -1.2, 0.7, 0.45}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dyn := feedbackDelayPlant(t, dt, "lft")
+		nDyn, _, _ := dyn.Dims()
+		z0Src, z1Src := z0.Copy(), z1.Copy()
+
+		check := func(label string, got *System, wantN int, ref func(s complex128) [][]complex128) {
+			t.Helper()
+			label = fmt.Sprintf("dt=%v %s", dt, label)
+			if n, _, _ := got.Dims(); n != wantN {
+				t.Errorf("%s: n=%d, want %d", label, n, wantN)
+			}
+			assertLFTShape(t, label, got)
+			assertResponseOracle(t, label, got, ref)
+		}
+		eval := func(sys *System, s complex128) [][]complex128 {
+			return evalDelaySystem(t, sys, s, exactDelayFactor(dt))
+		}
+
+		for _, pr := range []struct {
+			name string
+			a, b *System
+			n    int
+		}{
+			{"z0,z1", z0, z1, 0},
+			{"z1,gain", z1, gain, 0},
+			{"gain,z0", gain, z0, 0},
+			{"z0,dyn", z0, dyn, nDyn},
+			{"dyn,z1", dyn, z1, nDyn},
+			{"gain-iod,z0", feedbackDelayController(t, dt, "gain-iod"), z0, 0},
+		} {
+			a, b := pr.a, pr.b
+			r, err := Append(a, b)
+			if err != nil {
+				t.Fatalf("Append %s: %v", pr.name, err)
+			}
+			check("Append "+pr.name, r, pr.n, func(s complex128) [][]complex128 { return blockDiagOracle(t, s, a, b) })
+			r, err = BlkDiag(a, b)
+			if err != nil {
+				t.Fatalf("BlkDiag %s: %v", pr.name, err)
+			}
+			check("BlkDiag "+pr.name, r, pr.n, func(s complex128) [][]complex128 { return blockDiagOracle(t, s, a, b) })
+			r, err = Series(a, b)
+			if err != nil {
+				t.Fatalf("Series %s: %v", pr.name, err)
+			}
+			check("Series "+pr.name, r, pr.n, func(s complex128) [][]complex128 { return cmul(eval(b, s), eval(a, s)) })
+			r, err = Parallel(a, b)
+			if err != nil {
+				t.Fatalf("Parallel %s: %v", pr.name, err)
+			}
+			check("Parallel "+pr.name, r, pr.n, func(s complex128) [][]complex128 {
+				g1, g2 := eval(a, s), eval(b, s)
+				for i := range g1 {
+					for j := range g1[i] {
+						g1[i][j] += g2[i][j]
+					}
+				}
+				return g1
+			})
+			r, err = Feedback(a, b, -1)
+			if err != nil {
+				t.Fatalf("Feedback %s: %v", pr.name, err)
+			}
+			check("Feedback "+pr.name, r, pr.n, func(s complex128) [][]complex128 { return closedLoopOracle(t, a, b, -1, s) })
+		}
+
+		r, err := Append(z0, z1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err = Append(r, z0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("Append chain", r, 0, func(s complex128) [][]complex128 { return blockDiagOracle(t, s, z0, z1, z0) })
+		if len(r.LFT.Tau) != 4 {
+			t.Errorf("dt=%v Append chain: %d internal delays, want 4", dt, len(r.LFT.Tau))
+		}
+
+		aug, err := Append(z0, z1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		Q := mat.NewDense(4, 4, []float64{
+			0, 0, 0.3, 0,
+			0, 0, 0, -0.5,
+			0.4, 0, 0, 0,
+			0, 0.2, 0, 0,
+		})
+		in, out := []int{0, 1, 3}, []int{0, 2}
+		r, err = Connect(aug, Q, in, out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("Connect", r, 0, func(s complex128) [][]complex128 { return connectOracle(t, aug, Q, in, out, s) })
+
+		same := func(a, b *System) bool {
+			return mat.Equal(a.D, b.D) && slices.Equal(a.LFT.Tau, b.LFT.Tau) && mat.Equal(a.LFT.D12, b.LFT.D12) &&
+				mat.Equal(a.LFT.D21, b.LFT.D21) && mat.Equal(a.LFT.D22, b.LFT.D22)
+		}
+		if !same(z0, z0Src) || !same(z1, z1Src) {
+			t.Errorf("dt=%v: sources mutated", dt)
+		}
+	}
+}
