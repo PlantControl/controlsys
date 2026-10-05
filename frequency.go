@@ -117,7 +117,7 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 // and internal-delay realizations alike: entries the pole reaches are
 // infinite (cmplx.IsInf reports true; their phase is meaningless), and the
 // other entries keep their finite values, extrapolated from nearby points to
-// about 1e-12 relative accuracy. A pole of the delay-free plant that an
+// about 1e-12 relative accuracy (1e-9 at a repeated pole). A pole of the delay-free plant that an
 // internal delay loop moves, such as an integrator inside the loop, is not a
 // pole of the model and evaluates to its finite value. A pole is recognised
 // when the pencil is singular to working precision; a frequency merely near a
@@ -230,9 +230,8 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 }
 
 // responsePointwise evaluates each frequency exactly as response would for
-// a one-element sweep: balanced dense solve first, per-point
-// transfer-function fallback on solve failure, with the delay phase applied
-// per point using the flag of whichever path produced the value.
+// a one-element sweep: balanced dense solve, the pole limit where it is
+// singular, then the I/O delay phase.
 func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMatrix, error) {
 	if len(omega) == 0 {
 		return nil, nil

@@ -30,20 +30,28 @@ func evalWithPoleLimit(eval func(complex128, []complex128) error, sys *System, s
 // realization at which eval fails. Each entry is the quadratic extrapolation
 // to s of eval at s+kδ, k = 1, 2, 3, unless kδ·G(s+kδ) extrapolates to a
 // nonzero residue, in which case the entry is poleResponse. A residue below
-// poleResidueFloor times the largest one is rounding from the solve's
-// O(1/δ) state and marks a channel the pole does not reach. δ is a fixed
-// fraction of rho, the distance from s to the nearest other singularity, so
-// finite entries carry a relative extrapolation error of order (δ/rho)³.
-// When eval also fails off s the model is singular everywhere and
+// poleResidueFloor times the largest one is rounding from the solve's large
+// state and marks a channel the pole does not reach. δ is a fraction of rho,
+// the distance from s to the nearest other singularity, so finite entries
+// carry an extrapolation error of order (δ/rho)³ plus rounding of order
+// eps·(rho/δ)^q from a pole of order q; for q > 1 they are instead quartic
+// extrapolations from five points with δ = rho·eps^{1/(q+5)}, which balances
+// the two. When eval also fails off s the model is singular everywhere and
 // singularErr is returned.
 func poleLimitInto(eval func(complex128, []complex128) error, s complex128, rho float64, dst []complex128, singularErr error) error {
-	delta := poleStepFraction * rho
 	k := len(dst)
-	g := make([]complex128, 3*k)
-	for i := range 3 {
-		if err := eval(s+complex(float64(i+1)*delta, 0), g[i*k:(i+1)*k]); err != nil {
-			return singularErr
+	g := make([]complex128, 5*k)
+	sample := func(points int, delta float64) error {
+		for i := range points {
+			if err := eval(s+complex(float64(i+1)*delta, 0), g[i*k:(i+1)*k]); err != nil {
+				return singularErr
+			}
 		}
+		return nil
+	}
+	delta := poleStepFraction * rho
+	if err := sample(3, delta); err != nil {
+		return err
 	}
 	d := complex(delta, 0)
 	residue := make([]float64, k)
@@ -52,14 +60,32 @@ func poleLimitInto(eval func(complex128, []complex128) error, s complex128, rho 
 		residue[j] = cmplx.Abs(3 * d * (g[j] - 2*g[k+j] + g[2*k+j]))
 		maxResidue = max(maxResidue, residue[j])
 	}
+	pole := make([]bool, k)
+	order := 1
 	for j := range dst {
-		g1, g2, g3 := g[j], g[k+j], g[2*k+j]
-		scale := max(cmplx.Abs(d*g1), cmplx.Abs(2*d*g2), cmplx.Abs(3*d*g3))
+		scale := max(cmplx.Abs(d*g[j]), cmplx.Abs(2*d*g[k+j]), cmplx.Abs(3*d*g[2*k+j]))
 		if residue[j] > poleResidueTol*scale && residue[j] > poleResidueFloor*maxResidue {
+			pole[j] = true
+			order = max(order, int(math.Round(math.Log2(cmplx.Abs(g[j])/cmplx.Abs(g[k+j])))))
+		}
+	}
+	weights := []complex128{3, -3, 1}
+	if order > 1 {
+		weights = []complex128{5, -10, 10, -5, 1}
+		if err := sample(len(weights), rho*math.Pow(eps(), 1/float64(order+5))); err != nil {
+			return err
+		}
+	}
+	for j := range dst {
+		if pole[j] {
 			dst[j] = poleResponse
 			continue
 		}
-		dst[j] = 3*g1 - 3*g2 + g3
+		var v complex128
+		for i, w := range weights {
+			v += w * g[i*k+j]
+		}
+		dst[j] = v
 	}
 	return nil
 }

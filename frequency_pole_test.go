@@ -124,6 +124,24 @@ func TestFreqResponseAtPoleExplicitAndDescriptor(t *testing.T) {
 	checkPoleResponse(t, "explicit continuous", cont, contW, contOracle)
 	checkPoleResponse(t, "descriptor continuous", poleDescriptorTwin(t, cont), contW, contOracle)
 	checkPoleResponse(t, "explicit discrete", disc, discW, discOracle)
+	arr, err := NewModelArray([]int{2}, []*System{cont, poleDescriptorTwin(t, cont)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, err := arr.FreqResponse(contW)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range ar.Responses {
+		for k, w := range contW {
+			want := contOracle(complex(0, w))
+			for i := range want {
+				for j := range want[i] {
+					checkPoleEntry(t, "ModelArray", r.At(k, i, j), want[i][j])
+				}
+			}
+		}
+	}
 	checkPoleResponse(t, "descriptor discrete", poleDescriptorTwin(t, disc), discW, discOracle)
 }
 
@@ -289,6 +307,31 @@ func TestFreqResponseAtPoleDiscreteInternalDelay(t *testing.T) {
 	}
 	if dc, err := outside.DCGain(); err != nil || !math.IsInf(dc.At(0, 0), 1) {
 		t.Errorf("DCGain = %v, %v; want +Inf", dc, err)
+	}
+}
+
+// TestFreqResponseAtPoleDoubleIntegrator covers a defective (Jordan) pole:
+// [1/s² 1/(s+2); 0 1/(s+2)] and its z = 1 discrete analogue.
+func TestFreqResponseAtPoleDoubleIntegrator(t *testing.T) {
+	for _, dt := range []float64{0, 0.2} {
+		a := []float64{0, 1, 0, 0, 0, 0, 0, 0, -2}
+		pole, fastPole := complex(0, 0), complex(-2, 0)
+		if dt != 0 {
+			a = []float64{1, 1, 0, 0, 1, 0, 0, 0, 0.4}
+			pole, fastPole = 1, 0.4
+		}
+		sys := poleSys(t, 3, 2, 2, a, []float64{0, 0, 1, 0, 0, 1}, []float64{1, 0, 1, 0, 0, 1}, []float64{0, 0, 0, 0.1}, dt)
+		oracle := func(s complex128) [][]complex128 {
+			g11 := poleInf
+			if !isPole(s, pole) {
+				g11 = 1 / ((s - pole) * (s - pole))
+			}
+			fast := 1 / (s - fastPole)
+			return [][]complex128{{g11, fast}, {0, fast + 0.1}}
+		}
+		w := []float64{0, 0.7}
+		checkPoleResponse(t, "double integrator", sys, w, oracle)
+		checkPoleResponse(t, "double integrator descriptor", poleDescriptorTwin(t, sys), w, oracle)
 	}
 }
 
