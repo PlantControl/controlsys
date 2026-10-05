@@ -794,6 +794,12 @@ func (g TuningGoal) evaluatePoles(sys *System) (TuningGoalResult, error) {
 	}
 	minDecay, minDamping, maxFreq := math.Inf(1), math.Inf(1), 0.0
 	for _, p := range poles {
+		if sys.IsDiscrete() && p == 0 {
+			// z = 0 is s = −∞: infinitely fast decay, damping 1, unbounded frequency.
+			maxFreq = math.Inf(1)
+			minDamping = math.Min(minDamping, 1)
+			continue
+		}
 		s := p
 		if sys.IsDiscrete() {
 			s = cmplx.Log(p) / complex(sys.Dt, 0)

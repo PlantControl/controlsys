@@ -334,6 +334,11 @@ func TestPolesGoalRegion(t *testing.T) {
 	s := cmplx.Log(z) / complex(ts, 0)
 	decay, damping := -real(s), -real(s)/cmplx.Abs(s)
 	assertGoalValue(t, "discrete", mustOK(mustOK(NewPolesGoal("", 1, 0.5, 3)).Evaluate(disc)), math.Max(math.Max(1/decay, 0.5/damping), cmplx.Abs(s)/3))
+	deadbeat := mustOK(New(mat.NewDense(2, 2, nil), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), ts))
+	assertGoalValue(t, "z = 0", mustOK(mustOK(NewPolesGoal("", 1, 0.5, math.Inf(1))).Evaluate(deadbeat)), 0.5)
+	if res := mustOK(mustOK(NewPolesGoal("", 1, 0.5, 100)).Evaluate(deadbeat)); !math.IsInf(res.Value, 1) {
+		t.Errorf("z = 0 with maxfreq: f = %g, want +Inf", res.Value)
+	}
 	if res := mustOK(mustOK(NewPolesGoal("", 0, 0, math.Inf(1))).Evaluate(makeSISO(0.5, 1, 1, 0))); !math.IsInf(res.Value, 1) || res.Pass {
 		t.Errorf("unstable pole: %+v, want +Inf failing", res)
 	}
@@ -411,4 +416,18 @@ func TestTuningGoalOnGeneralizedModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertGoalValue(t, "generalized", mustOK(mustOK(NewGainGoal("r", "y", 0.5)).Evaluate(gm)), 0.5)
+}
+
+func TestTuningGoalDefaultGridOnDelayedLoop(t *testing.T) {
+	plant := makeSISO(-1, 1, 1, 0)
+	plant.InputDelay = []float64{0.3}
+	loop := mustOK(NewGeneralizedClosedLoop("cl", plant, fixedBlockT(t, mustOK(NewGain(mat.NewDense(1, 1, []float64{0.5}), 0))), "y"))
+	res, err := mustOK(NewGainGoal("y", "y", 2)).Evaluate(loop)
+	if err != nil {
+		t.Fatalf("delayed loop without focus: %v", err)
+	}
+	// T = 0.5e^{-0.3s}/(s+1+0.5e^{-0.3s}) peaks at 1/3 near DC.
+	if res.Value < 0.16 || res.Value > 1.0/6+1e-9 || !res.Pass {
+		t.Errorf("f = %g, want just under 1/6", res.Value)
+	}
 }
