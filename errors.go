@@ -47,6 +47,7 @@ var (
 	ErrConjugatePairs    = errors.New("controlsys: complex poles must appear in conjugate pairs")
 	ErrPoleCount         = errors.New("controlsys: number of poles must equal state dimension")
 	ErrUncontrollable    = errors.New("controlsys: uncontrollable mode cannot be assigned")
+	ErrPoleMultiplicity  = errors.New("controlsys: pole multiplicity exceeds rank(B)")
 	ErrInsufficientData  = errors.New("controlsys: insufficient data for estimation")
 	ErrInvalidExpression = errors.New("controlsys: invalid sumblk expression")
 	ErrSignalNotFound    = errors.New("controlsys: signal name not found")

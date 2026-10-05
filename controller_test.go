@@ -856,8 +856,18 @@ func TestPlace_ComplexOpenLoopContract(t *testing.T) {
 		{0.1, 0.2, 0.3, 0.4},
 	}
 	for name, B := range inputs {
+		rankB := 2
+		if name == "SISO" {
+			rankB = 1
+		}
 		for _, p := range sets {
 			K, err := Place(A, B, p)
+			if maxPoleMultiplicity(p) > rankB {
+				if !errors.Is(err, ErrPoleMultiplicity) {
+					t.Errorf("%s %v: err = %v, want ErrPoleMultiplicity (MATLAB place)", name, p, err)
+				}
+				continue
+			}
 			if err != nil {
 				t.Errorf("%s %v: %v", name, p, err)
 				continue
@@ -1145,5 +1155,253 @@ func TestPlaceScaledComplexBlockMultiInput(t *testing.T) {
 		if !found {
 			t.Fatalf("closed-loop poles = %v, want %v", got, want)
 		}
+	}
+}
+
+// placeKappa returns the 2-norm condition number of the unit-column
+// eigenvector matrix of A−BK.
+func placeKappa(t *testing.T, A, B, K *mat.Dense) float64 {
+	t.Helper()
+	n, _ := A.Dims()
+	acl := mat.NewDense(n, n, nil)
+	acl.Mul(B, K)
+	acl.Sub(A, acl)
+	var eig mat.Eigen
+	if !eig.Factorize(acl, mat.EigenRight) {
+		t.Fatal("eig failed")
+	}
+	var v mat.CDense
+	eig.VectorsTo(&v)
+	re := mat.NewDense(2*n, 2*n, nil)
+	for j := range n {
+		var nrm float64
+		for i := range n {
+			nrm += real(v.At(i, j))*real(v.At(i, j)) + imag(v.At(i, j))*imag(v.At(i, j))
+		}
+		nrm = math.Sqrt(nrm)
+		for i := range n {
+			c := v.At(i, j) / complex(nrm, 0)
+			re.Set(i, j, real(c))
+			re.Set(i+n, j+n, real(c))
+			re.Set(i, j+n, -imag(c))
+			re.Set(i+n, j, imag(c))
+		}
+	}
+	return mat.Cond(re, 2)
+}
+
+// eigenspaceDim returns dim null(A−BK−λI) from the singular values of its
+// real embedding, counting those below tol·‖A−BK‖.
+func eigenspaceDim(A, B, K *mat.Dense, lam complex128, tol float64) int {
+	n, _ := A.Dims()
+	acl := mat.NewDense(n, n, nil)
+	acl.Mul(B, K)
+	acl.Sub(A, acl)
+	scale := mat.Norm(acl, 2) + cmplx.Abs(lam)
+	re := mat.NewDense(2*n, 2*n, nil)
+	for i := range n {
+		for j := range n {
+			a := acl.At(i, j)
+			re.Set(i, j, a)
+			re.Set(i+n, j+n, a)
+		}
+		re.Set(i, i, re.At(i, i)-real(lam))
+		re.Set(i+n, i+n, re.At(i+n, i+n)-real(lam))
+		re.Set(i, i+n, imag(lam))
+		re.Set(i+n, i, -imag(lam))
+	}
+	var svd mat.SVD
+	svd.Factorize(re, mat.SVDNone)
+	cnt := 0
+	for _, s := range svd.Values(nil) {
+		if s <= tol*scale {
+			cnt++
+		}
+	}
+	return cnt / 2
+}
+
+func TestPlace_RepeatedPolesNonDefective(t *testing.T) {
+	A3 := mat.NewDense(3, 3, []float64{0.3, 1.0, -0.4, -1.1, -0.2, 0.5, 0.7, 0.1, -1.5})
+	B3 := mat.NewDense(3, 2, []float64{1, 0, 0.2, 0.5, 0, 1})
+	A4 := mat.NewDense(4, 4, []float64{
+		0.3, 1.0, -0.4, 0.2,
+		-1.1, -0.2, 0.5, 0.0,
+		0.7, 0.1, -1.5, 0.9,
+		0.0, -0.6, 0.3, 0.4,
+	})
+	B42 := mat.NewDense(4, 2, []float64{1, 0, 0.2, 0.5, 0, 1, 0.3, 0})
+	B43 := mat.NewDense(4, 3, []float64{1, 0, 0.4, 0.2, 0.5, 0, 0, 1, -0.7, 0.3, 0, 1})
+	cases := []struct {
+		name  string
+		A, B  *mat.Dense
+		poles []complex128
+	}{
+		{"3x2", A3, B3, []complex128{-1, -1, -3}},
+		{"3x2 perm", A3, B3, []complex128{-1, -3, -1}},
+		{"4x2 two doubles", A4, B42, []complex128{-1, -1, -2, -2}},
+		{"4x2 double pair", A4, B42, []complex128{-1 + 1i, -1 - 1i, -1 + 1i, -1 - 1i}},
+		{"4x3 triple", A4, B43, []complex128{-2, -2, -2, -5}},
+		{"4x3 double+pair", A4, B43, []complex128{-2, -2, -1 + 3i, -1 - 3i}},
+	}
+	for _, c := range cases {
+		K, err := Place(c.A, c.B, c.poles)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		assertPlacedEig(t, c.name, c.A, c.B, K, c.poles, 1e3)
+		mult := map[complex128]int{}
+		for _, p := range c.poles {
+			mult[p]++
+		}
+		for p, k := range mult {
+			if d := eigenspaceDim(c.A, c.B, K, p, 1e-10); d != k {
+				t.Errorf("%s: dim null(A-BK-(%v)I) = %d, want %d (non-defective)", c.name, p, d, k)
+			}
+		}
+	}
+}
+
+func TestPlace_MultiplicityExceedsRankB(t *testing.T) {
+	A4 := mat.NewDense(4, 4, []float64{
+		0.3, 1.0, -0.4, 0.2,
+		-1.1, -0.2, 0.5, 0.0,
+		0.7, 0.1, -1.5, 0.9,
+		0.0, -0.6, 0.3, 0.4,
+	})
+	cases := []struct {
+		name  string
+		B     *mat.Dense
+		poles []complex128
+	}{
+		{"MIMO triple", mat.NewDense(4, 2, []float64{1, 0, 0.2, 0.5, 0, 1, 0.3, 0}), []complex128{-2, -2, -2, -3}},
+		{"rank-1 B double", mat.NewDense(4, 2, []float64{1, 2, 0.5, 1, 0, 0, -1, -2}), []complex128{-1, -1, -2, -3}},
+		{"SISO double", mat.NewDense(4, 1, []float64{0, 0, 0, 1}), []complex128{-1, -1, -2, -3}},
+		{"SISO double pair", mat.NewDense(4, 1, []float64{0, 0, 0, 1}), []complex128{-1 + 1i, -1 - 1i, -1 + 1i, -1 - 1i}},
+	}
+	for _, c := range cases {
+		if _, err := Place(A4, c.B, c.poles); !errors.Is(err, ErrPoleMultiplicity) {
+			t.Errorf("%s: err = %v, want ErrPoleMultiplicity", c.name, err)
+		}
+	}
+	// python-control statefbk_test: triple pole with rank(B) = 2.
+	Ap := mat.NewDense(4, 4, []float64{
+		1.380, -0.2077, 6.715, -5.676,
+		-0.5814, -4.290, 0, 0.6750,
+		1.067, 4.273, -6.654, 5.893,
+		0.0480, 4.273, 1.343, -2.104,
+	})
+	Bp := mat.NewDense(4, 2, []float64{0, 5.679, 1.136, 1.136, 0, 0, -3.146, 0})
+	if _, err := Place(Ap, Bp, []complex128{-0.5, -0.5, -0.5, -8.6659}); !errors.Is(err, ErrPoleMultiplicity) {
+		t.Errorf("python-control triple: err = %v, want ErrPoleMultiplicity", err)
+	}
+	if _, err := Place(Ap, Bp, []complex128{-0.5, -0.5, -2, -8.6659}); err != nil {
+		t.Errorf("python-control double: %v", err)
+	}
+}
+
+// TestPlace_RobustEigenvectorConditioning checks κ(V) of A−BK against
+// scipy.signal.place_poles (method="YT", an independent robust assignment);
+// a random search over admissible eigenvectors finds no lower κ.
+func TestPlace_RobustEigenvectorConditioning(t *testing.T) {
+	cases := []struct {
+		b       []float64
+		s, im   float64
+		imScale bool
+		scipy   float64
+	}{
+		{[]float64{1, 0.3, 0.5, 1, -1, 2}, 1e-4, 1, true, 22074.64},
+		{[]float64{1, 0.3, 0.5, 1, -1, 2}, 1e-2, 1, true, 221.068},
+		{[]float64{1, 0.3, 0.5, 1, -1, 2}, 1, 1, true, 3.6004},
+		{[]float64{1, 0, 0.5, 1, -1, 2}, 1e-4, 1, false, 2.6661},
+		{[]float64{1, 0, 0.5, 1, -1, 2}, 1e-2, 1, false, 2.6783},
+		{[]float64{1, 0, 0.5, 1, -1, 2}, 1, 1, false, 4.5716},
+		{[]float64{1, 0, 0.5, 1, -1, 2}, 1e2, 1, false, 4.0201},
+		{[]float64{1, 0, 0.5, 1, -1, 2}, 1e4, 1, false, 4.0481},
+	}
+	for _, c := range cases {
+		A := placeScaledSystem(c.s, 1)
+		B := mat.NewDense(3, 2, c.b)
+		im := c.im
+		if c.imScale {
+			im *= c.s
+		}
+		p := []complex128{complex(-2*c.s, 0), complex(-1.5*c.s, im), complex(-1.5*c.s, -im)}
+		label := fmt.Sprintf("B=%v s=%g", c.b, c.s)
+		K, err := Place(A, B, p)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		assertPlacedEig(t, label, A, B, K, p, 1.01*c.scipy)
+		Kold, err := placeSchur(A, B, p)
+		if err != nil {
+			t.Fatalf("%s schur: %v", label, err)
+		}
+		if kNew, kOld := placeKappa(t, A, B, K), placeKappa(t, A, B, Kold); !(kNew < kOld) {
+			t.Errorf("%s: kappa %.4g not below Schur %.4g", label, kNew, kOld)
+		}
+	}
+}
+
+func TestPlace_RobustBeatsSchurConditioning(t *testing.T) {
+	rng := newPlaceRNG(7)
+	var sumNew, sumOld float64
+	cnt := 0
+	for _, dim := range [][2]int{{4, 2}, {6, 2}, {6, 3}, {8, 3}, {10, 4}} {
+		n, m := dim[0], dim[1]
+		for trial := range 8 {
+			a := make([]float64, n*n)
+			for i := range a {
+				a[i] = rng()
+			}
+			b := make([]float64, n*m)
+			for i := range b {
+				b[i] = rng()
+			}
+			A, B := mat.NewDense(n, n, a), mat.NewDense(n, m, b)
+			p := make([]complex128, 0, n)
+			for len(p) < n {
+				if len(p)+2 <= n && trial%2 == 0 {
+					re, im := -0.5-2*math.Abs(rng()), 0.2+math.Abs(rng())
+					p = append(p, complex(re, im), complex(re, -im))
+				} else {
+					p = append(p, complex(-0.5-2*math.Abs(rng()), 0))
+				}
+			}
+			label := fmt.Sprintf("n=%d m=%d trial=%d", n, m, trial)
+			K, err := Place(A, B, p)
+			if err != nil {
+				t.Fatalf("%s: %v", label, err)
+			}
+			Kold, err := placeSchur(A, B, p)
+			if err != nil {
+				t.Fatalf("%s schur: %v", label, err)
+			}
+			kNew, kOld := placeKappa(t, A, B, K), placeKappa(t, A, B, Kold)
+			assertPlacedEig(t, label, A, B, K, p, 0)
+			if kNew > 2*kOld {
+				t.Errorf("%s: kappa %.3g worse than Schur %.3g", label, kNew, kOld)
+			}
+			if testing.Verbose() {
+				t.Logf("%s: kappa robust %.3g, Schur %.3g", label, kNew, kOld)
+			}
+			sumNew += math.Log10(kNew)
+			sumOld += math.Log10(kOld)
+			cnt++
+		}
+	}
+	if gm := sumNew / float64(cnt); gm > sumOld/float64(cnt)-1 {
+		t.Errorf("geometric-mean log10 kappa: robust %.2f, Schur %.2f; want ≥1 decade improvement", gm, sumOld/float64(cnt))
+	}
+}
+
+func newPlaceRNG(seed uint64) func() float64 {
+	s := seed
+	return func() float64 {
+		s ^= s << 13
+		s ^= s >> 7
+		s ^= s << 17
+		return float64(s>>11)/float64(1<<53)*2 - 1
 	}
 }
