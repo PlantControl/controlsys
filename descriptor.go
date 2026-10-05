@@ -162,18 +162,25 @@ func blkDiagDescriptorE(parts ...*System) *mat.Dense {
 	return out
 }
 
-// conversionStandardForm returns sys with E folded into the state equation.
-// Sampling conversions are defined on explicit models; singular E has no
-// explicit form and is rejected.
-func conversionStandardForm(sys *System, context string) (*System, error) {
+// conversionStandardForm returns sys without E, as MATLAB c2d and d2c do for
+// dss models. Invertible E is folded into the state equation and keeps the
+// state coordinates. Singular E is reduced by properExplicitForm (MATLAB
+// dss2ss): the algebraic states are eliminated, the state coordinates change
+// and state names are dropped, so reduced reports true. Improper models and
+// singular pencils are rejected with ErrDescriptorUnsupported wrapping
+// ErrImproperModel or ErrDescriptorSingular.
+func conversionStandardForm(sys *System, context string) (out *System, reduced bool, err error) {
 	if !sys.IsDescriptor() {
-		return sys, nil
+		return sys, false, nil
 	}
-	explicit, err := sys.ToExplicit()
+	if explicit, err := sys.ToExplicit(); err == nil {
+		return explicit, false, nil
+	}
+	out, err = sys.properExplicitForm()
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
+		return nil, false, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
 	}
-	return explicit, nil
+	return out, true, nil
 }
 
 // timeResponseForm returns sys without E for time-domain simulation, as

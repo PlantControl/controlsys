@@ -548,3 +548,235 @@ func TestProperExplicitFormIndex1TwoAlgebraicStates(t *testing.T) {
 		}
 	}
 }
+
+func siso00(t *testing.T, sys *System) *System {
+	t.Helper()
+	out := sys.Copy()
+	n, _, _ := sys.Dims()
+	out.B = mat.DenseCopyOf(sys.B.Slice(0, n, 0, 1))
+	out.C = mat.DenseCopyOf(sys.C.Slice(0, 1, 0, n))
+	out.D = mat.NewDense(1, 1, []float64{sys.D.At(0, 0)})
+	return out
+}
+
+func assertConvertedTwin(t *testing.T, label string, got, want *System) {
+	t.Helper()
+	if got.IsDescriptor() || got.StateName != nil {
+		t.Fatalf("%s: E=%v StateName=%v, want explicit model without state names", label, got.E, got.StateName)
+	}
+	if got.Dt != want.Dt {
+		t.Fatalf("%s: Dt = %g, want %g", label, got.Dt, want.Dt)
+	}
+	points := []complex128{0.3 + 0.7i, -0.2 + 2i, 1.7}
+	if got.IsDiscrete() {
+		points = []complex128{cmplx.Rect(1, 0.3), cmplx.Rect(1, 2.1), cmplx.Rect(1.3, 0.8), 0.4i}
+	}
+	for _, s := range points {
+		assertFreqEqual(t, got, want, s, 1e-12)
+	}
+	if !got.IsDiscrete() {
+		return
+	}
+	_, m, _ := got.Dims()
+	const steps = 30
+	u := mat.NewDense(m, steps, nil)
+	for i := range m {
+		for k := range steps {
+			u.Set(i, k, math.Sin(0.3*float64(k*(i+1)))+0.5*float64(i))
+		}
+	}
+	rw, err := want.Simulate(u, nil, nil)
+	if err != nil {
+		t.Fatalf("%s: oracle Simulate: %v", label, err)
+	}
+	rg, err := got.Simulate(u, nil, nil)
+	if err != nil {
+		t.Fatalf("%s: Simulate: %v", label, err)
+	}
+	if !mat.EqualApprox(rw.Y, rg.Y, 1e-12) {
+		t.Fatalf("%s: simulated outputs differ\nwant %v\ngot  %v", label, mat.Formatted(rw.Y), mat.Formatted(rg.Y))
+	}
+}
+
+func TestConversionsOfSingularDescriptorMatchReducedTwin(t *testing.T) {
+	type conv func(*System) (*System, error)
+	for _, delays := range []bool{false, true} {
+		cases := map[string]conv{
+			"ZOH":     func(s *System) (*System, error) { return s.DiscretizeZOH(0.1) },
+			"FOH":     func(s *System) (*System, error) { return s.DiscretizeFOH(0.1) },
+			"Impulse": func(s *System) (*System, error) { return s.DiscretizeImpulse(0.1) },
+			"Tustin":  func(s *System) (*System, error) { return s.Discretize(0.1) },
+			"TustinWarp": func(s *System) (*System, error) {
+				return s.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: 3})
+			},
+		}
+		desc, twin := index1Descriptor(t, 0, delays)
+		desc.StateName = []string{"x1", "x2", "x3"}
+		for name, f := range cases {
+			label := name
+			if delays {
+				label += "/internal"
+			}
+			want, err := f(twin)
+			if err != nil {
+				if _, derr := f(desc); derr == nil {
+					t.Fatalf("%s: descriptor converted where twin errs: %v", label, err)
+				}
+				t.Logf("%s: unsupported for both: %v", label, err)
+				continue
+			}
+			got, err := f(desc)
+			if err != nil {
+				t.Fatalf("%s: %v", label, err)
+			}
+			assertConvertedTwin(t, label, got, want)
+		}
+
+		ddesc, dtwin := index1Descriptor(t, 0.1, delays)
+		ddesc.StateName = []string{"x1", "x2", "x3"}
+		dcases := map[string]conv{
+			"D2C/ZOH":      func(s *System) (*System, error) { return s.D2C(C2DMethodZOH) },
+			"D2C/Tustin":   func(s *System) (*System, error) { return s.D2C(C2DMethodTustin) },
+			"D2C/FOH":      func(s *System) (*System, error) { return s.D2C(C2DMethodFOH) },
+			"Undiscretize": func(s *System) (*System, error) { return s.Undiscretize() },
+			"D2D/ZOH":      func(s *System) (*System, error) { return s.D2D(0.05, C2DOptions{}) },
+			"D2D/Tustin":   func(s *System) (*System, error) { return s.D2D(0.05, C2DOptions{Method: C2DMethodTustin}) },
+		}
+		for name, f := range dcases {
+			label := name
+			if delays {
+				label += "/internal"
+			}
+			want, err := f(dtwin)
+			if err != nil {
+				if _, derr := f(ddesc); derr == nil {
+					t.Fatalf("%s: descriptor converted where twin errs: %v", label, err)
+				}
+				t.Logf("%s: unsupported for both: %v", label, err)
+				continue
+			}
+			got, err := f(ddesc)
+			if err != nil {
+				t.Fatalf("%s: %v", label, err)
+			}
+			assertConvertedTwin(t, label, got, want)
+		}
+	}
+}
+
+func TestSISOConversionsOfSingularDescriptorMatchReducedTwin(t *testing.T) {
+	cdesc, ctwin := index1Descriptor(t, 0, false)
+	cdesc, ctwin = siso00(t, cdesc), siso00(t, ctwin)
+	ddesc, dtwin := index1Descriptor(t, 0.1, false)
+	ddesc, dtwin = siso00(t, ddesc), siso00(t, dtwin)
+	type conv func(*System) (*System, error)
+	cases := []struct {
+		name       string
+		desc, twin *System
+		f          conv
+	}{
+		{"Matched", cdesc, ctwin, func(s *System) (*System, error) { return s.DiscretizeMatched(0.1) }},
+		{"D2C/Matched", ddesc, dtwin, func(s *System) (*System, error) { return s.D2C(C2DMethodMatched) }},
+		{"LeastSquares", cdesc, ctwin, func(s *System) (*System, error) {
+			r, err := s.DiscretizeLeastSquares(0.1, 0)
+			if err != nil {
+				return nil, err
+			}
+			if r.FitOrder != 2 {
+				return nil, errors.New("fit order is not the reduced order")
+			}
+			return r.Sys, nil
+		}},
+	}
+	for _, c := range cases {
+		want, err := c.f(c.twin)
+		if err != nil {
+			t.Fatalf("%s: twin: %v", c.name, err)
+		}
+		got, err := c.f(c.desc)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		assertConvertedTwin(t, c.name, got, want)
+	}
+}
+
+func TestConversionResultOfSingularDescriptor(t *testing.T) {
+	desc, twin := index1Descriptor(t, 0, true)
+	want, err := twin.DiscretizeZOH(0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := desc.DiscretizeWithResult(0.1, C2DOptions{Method: C2DMethodZOH})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertConvertedTwin(t, "DiscretizeWithResult", r.System, want)
+	if r.InitialStateMap != nil || r.SourceStates != 3 || r.Inputs != 2 || r.DelaySignals != 1 {
+		t.Fatalf("map=%v SourceStates=%d Inputs=%d DelaySignals=%d", r.InitialStateMap, r.SourceStates, r.Inputs, r.DelaySignals)
+	}
+	if x, err := r.MapInitialState(make([]float64, 3), []float64{1, 2}, nil); err != nil || len(x) != 2 {
+		t.Fatalf("zero state: x=%v err=%v", x, err)
+	}
+	if _, err := r.MapInitialState([]float64{1, 0, 0}, nil, nil); !errors.Is(err, ErrDescriptorInitialState) || !errors.Is(err, ErrDescriptorSingular) {
+		t.Fatalf("nonzero state err = %v, want ErrDescriptorInitialState", err)
+	}
+
+	ddesc, dtwin := index1Descriptor(t, 0.1, false)
+	for name, f := range map[string]func(*System) (*ConversionResult, error){
+		"D2CWithResult": func(s *System) (*ConversionResult, error) {
+			return s.D2CWithResult(D2COptions{Method: C2DMethodTustin})
+		},
+		"D2DWithResult": func(s *System) (*ConversionResult, error) { return s.D2DWithResult(0.05, C2DOptions{}) },
+	} {
+		want, err := f(dtwin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := f(ddesc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		assertConvertedTwin(t, name, got.System, want.System)
+		if got.InitialStateMap != nil || got.SourceStates != 3 {
+			t.Fatalf("%s: map=%v SourceStates=%d", name, got.InitialStateMap, got.SourceStates)
+		}
+		if _, err := got.MapInitialState([]float64{0, 1, 0}, nil, nil); !errors.Is(err, ErrDescriptorInitialState) {
+			t.Fatalf("%s: nonzero state err = %v, want ErrDescriptorInitialState", name, err)
+		}
+	}
+}
+
+func TestConversionsOfImproperDescriptorRejected(t *testing.T) {
+	cont, _ := index2Descriptor(t, 0, true)
+	disc, _ := index2Descriptor(t, 0.1, true)
+	calls := map[string]func() (*System, error){
+		"DiscretizeZOH": func() (*System, error) { return cont.DiscretizeZOH(0.1) },
+		"DiscretizeFOH": func() (*System, error) { return cont.DiscretizeFOH(0.1) },
+		"Discretize":    func() (*System, error) { return cont.Discretize(0.1) },
+		"D2C":           func() (*System, error) { return disc.D2C(C2DMethodZOH) },
+		"D2D":           func() (*System, error) { return disc.D2D(0.05, C2DOptions{}) },
+		"WithResult": func() (*System, error) {
+			r, err := cont.DiscretizeWithResult(0.1, C2DOptions{})
+			if err != nil {
+				return nil, err
+			}
+			return r.System, nil
+		},
+	}
+	for name, call := range calls {
+		if _, err := call(); !errors.Is(err, ErrImproperModel) || !errors.Is(err, ErrDescriptorUnsupported) {
+			t.Fatalf("%s: err = %v, want ErrImproperModel and ErrDescriptorUnsupported", name, err)
+		}
+	}
+	proper, twin := index2Descriptor(t, 0, false)
+	want, err := twin.DiscretizeZOH(0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := proper.DiscretizeZOH(0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertConvertedTwin(t, "index2 ZOH", got, want)
+}
