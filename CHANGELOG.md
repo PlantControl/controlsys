@@ -7,6 +7,12 @@
 - Behaviour change: `(*System).IsStable` no longer returns `ErrContinuousInternalDelay` for continuous internal-delay models; it decides stability exactly with the same Nyquist count of χ(s) = det(sI−A)·det(I − H22·Δ) as `HinfNorm` (roots on the imaginary axis are not stable, as MATLAB `isstable`). Neutral-type or undecidable loops return `ErrDelayUnsupported`, descriptor ones `ErrDescriptorUnsupported`. `StepInfoForSystem` now returns `ErrUnstable` for such models when they are unstable, and skips the gate only on `ErrDelayUnsupported`.
 - `HinfNorm` and `IsStable` no longer panic on a continuous internal-delay model with no inputs or no outputs.
 
+### Added
+
+- `Makeweight(dcgain, freqMag, hfgain, Ts, N)`, MATLAB `makeweight`: monotonic loop-shaping weight through `dcgain`, `mag` at `freq` (or `[wc]` for `|W| = 1`) and `hfgain`; order `N` with Butterworth-pattern poles and zeros; discrete (`Ts > 0`) by Tustin prewarped at `freq`.
+- `Augw(G, W1, W2, W3)`, MATLAB `augw`: mixed-sensitivity generalized plant `[W1 −W1·G; 0 W2; 0 W3·G; I −G]` with nil weights omitted, SISO weights expanded as `W·I`, and improper `W3` accepted when `W3·G` is proper; channels named `w`, `u`, `z1`, `z2`, `z3`, `e`.
+- `Mixsyn(G, W1, W2, W3)`, MATLAB `mixsyn`: `HinfSyn` on `Augw`, returning `MixsynResult{K, CL, Gamma, Info}` with `Gamma = ‖CL‖∞`; rank-deficient D12 (e.g. `W2` nil with strictly proper `G`) returns `ErrInvalidPartition`.
+
 ## v2.0.0
 
 v2 is a breaking release. It applies one set of rules to the whole API:
