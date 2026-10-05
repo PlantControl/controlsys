@@ -7,7 +7,18 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// Pade replaces every time delay of a continuous model with its order-th
+// order Padé approximant, as MATLAB pade(sys, N)
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.pade.html). A
+// delay-free model is returned unchanged. order must be in 1..10 (else
+// ErrInvalidArgument); discrete models return ErrWrongDomain.
 func (sys *System) Pade(order int) (*System, error) {
+	if err := requireSystem("Pade", sys); err != nil {
+		return nil, err
+	}
+	if err := validatePadeOrder(order); err != nil {
+		return nil, fmt.Errorf("Pade: %w", err)
+	}
 	if sys.IsDiscrete() {
 		return nil, fmt.Errorf("Pade: continuous only, use AbsorbDelay for discrete: %w", ErrWrongDomain)
 	}
@@ -104,12 +115,23 @@ func padeCloseInternalDelay(lft *System, order int) (*System, error) {
 	return result, nil
 }
 
+func validatePadeOrder(order int) error {
+	if order < 1 || order > 10 {
+		return fmt.Errorf("order %d must be in 1..10: %w", order, ErrInvalidArgument)
+	}
+	return nil
+}
+
+// PadeDelay returns the order-th order Padé approximant of e^{-tau·s} as a
+// SISO continuous model, as MATLAB [num,den] = pade(tau, N)
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.pade.html).
+// tau must be finite and non-negative; order must be in 1..10.
 func PadeDelay(tau float64, order int) (*System, error) {
 	if err := validateDelayValue(tau, 0); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("PadeDelay: %w", err)
 	}
-	if order < 1 || order > 10 {
-		return nil, fmt.Errorf("PadeDelay: order must be 1-10: %w", ErrDimensionMismatch)
+	if err := validatePadeOrder(order); err != nil {
+		return nil, fmt.Errorf("PadeDelay: %w", err)
 	}
 	if tau == 0 {
 		return NewGain(mat.NewDense(1, 1, []float64{1}), 0)

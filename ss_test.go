@@ -1063,9 +1063,8 @@ func TestEmptyIOAnalysisMatchesMATLAB(t *testing.T) {
 		}
 		for name, sys := range map[string]*System{"m=0": auto, "p=0": noOut} {
 			tag := fmt.Sprintf("dt=%g %s", dt, name)
-			g, err := sys.DCGain()
-			if err != nil || !g.IsEmpty() {
-				t.Errorf("%s DCGain = %v, %v; want empty", tag, g, err)
+			if _, err := sys.DCGain(); !errors.Is(err, ErrDimensionMismatch) {
+				t.Errorf("%s DCGain err = %v, want ErrDimensionMismatch", tag, err)
 			}
 			h2, err := H2Norm(sys)
 			if err != nil || h2 != 0 {
@@ -1085,9 +1084,8 @@ func TestEmptyIOAnalysisMatchesMATLAB(t *testing.T) {
 			if _, err := Bandwidth(sys, -3); !errors.Is(err, ErrDimensionMismatch) {
 				t.Errorf("%s Bandwidth err = %v, want ErrDimensionMismatch", tag, err)
 			}
-			step, err := Step(sys, 1)
-			if err != nil || len(step.T) == 0 || !step.Y.IsEmpty() {
-				t.Errorf("%s Step = %+v, %v; want time grid and empty Y", tag, step, err)
+			if _, err := Step(sys, 1); !errors.Is(err, ErrDimensionMismatch) {
+				t.Errorf("%s Step err = %v, want ErrDimensionMismatch", tag, err)
 			}
 		}
 
