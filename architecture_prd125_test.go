@@ -113,7 +113,7 @@ func TestPRD125FreqRespEstUsesStridedSampledSignals(t *testing.T) {
 	if est.H.P != 2 || est.H.M != 2 {
 		t.Fatalf("estimated response dims = %dx%d, want 2x2", est.H.P, est.H.M)
 	}
-	if coh := est.CoherenceAt(1, 0, 0); math.IsNaN(coh) || coh <= 0 {
+	if coh, ok := est.CoherenceAt(1, 0, 0); !ok || math.IsNaN(coh) || coh <= 0 {
 		t.Fatalf("coherence from strided sampled signal = %g, want positive finite", coh)
 	}
 }
