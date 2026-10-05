@@ -98,7 +98,7 @@ func poleSpacing(sys *System, s complex128) float64 {
 	n, _, _ := sys.Dims()
 	var poles []complex128
 	if n > 0 {
-		poles, _ = newDescriptorPolicy(sys).poles(sys.A, n)
+		poles, _ = newDescriptorPolicy(sys).poles("poleSpacing", sys.A, n)
 	}
 	scale := cmplx.Abs(s)
 	for _, p := range poles {

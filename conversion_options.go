@@ -1,12 +1,9 @@
 package controlsys
 
 import (
-	"errors"
 	"fmt"
 	"math"
 )
-
-var ErrInvalidConversionOptions = errors.New("controlsys: invalid conversion options")
 
 // D2COptions selects the inverse discretization method. Zero values select ZOH.
 // PrewarpFrequency is in rad/s, applies only to Tustin, and must be below Nyquist.

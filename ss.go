@@ -163,7 +163,8 @@ func nonEmptyDense(m *mat.Dense) *mat.Dense {
 // discrete, are set to zero (zero-order Padé) so the model has finitely many
 // poles; an ill-posed zero-delay loop returns ErrAlgebraicLoop. Discrete delay
 // poles at z = 0 appear only after AbsorbDelay. Input/output delays add no
-// poles. See https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html.
+// poles. NaN or Inf entries in A or E return ErrInvalidArgument. See
+// https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html.
 func (sys *System) Poles() ([]complex128, error) {
 	n, _, _ := sys.Dims()
 	if n == 0 {
@@ -176,7 +177,7 @@ func (sys *System) Poles() ([]complex128, error) {
 		}
 		sys = zd
 	}
-	return newDescriptorPolicy(sys).poles(sys.A, n)
+	return newDescriptorPolicy(sys).poles("Poles", sys.A, n)
 }
 
 // IsStable reports whether every pole lies in the open left half-plane

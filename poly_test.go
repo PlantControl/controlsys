@@ -1,9 +1,12 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestPolyDegree(t *testing.T) {
@@ -160,5 +163,22 @@ func TestPolyHornerAccuracy(t *testing.T) {
 	want := -120.0
 	if math.Abs(got-want) > 1e-10 {
 		t.Errorf("p(0) = %v, want %v", got, want)
+	}
+}
+
+func TestPolyRootsRejectsNonFiniteWithoutHanging(t *testing.T) {
+	cases := []Poly{
+		{1, math.NaN(), 2},
+		{1, 2, 3, math.Inf(1)},
+		{math.NaN(), 1, 2},
+		{0, math.Inf(-1), 1, 2},
+		{1, math.NaN()},
+	}
+	for _, p := range cases {
+		var err error
+		finishesWithin(t, 5*time.Second, func() { _, err = p.Roots() })
+		if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Poly.Roots: ") {
+			t.Fatalf("%v.Roots(): %v", p, err)
+		}
 	}
 }

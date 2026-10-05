@@ -42,14 +42,26 @@ func (p descriptorPolicy) validate(n int) error {
 	return nil
 }
 
-func (p descriptorPolicy) poles(A *mat.Dense, n int) ([]complex128, error) {
+// poles returns the eigenvalues of A or of the pencil (A, E). Non-finite
+// entries are rejected first: LAPACK balancing (Dgebal) never terminates on
+// NaN.
+func (p descriptorPolicy) poles(op string, A *mat.Dense, n int) ([]complex128, error) {
+	if err := requireFiniteDense(op, "A", A); err != nil {
+		return nil, err
+	}
 	if p.E != nil && !isIdentityDescriptor(p.E) {
-		return generalizedPoles(A, p.E, n)
+		if err := requireFiniteDense(op, "E", p.E); err != nil {
+			return nil, err
+		}
+		poles, err := generalizedPoles(A, p.E, n)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+		return poles, nil
 	}
 	var eig mat.Eigen
-	ok := eig.Factorize(A, mat.EigenNone)
-	if !ok {
-		return nil, fmt.Errorf("controlsys: eigenvalue decomposition failed to converge")
+	if !eig.Factorize(A, mat.EigenNone) {
+		return nil, fmt.Errorf("%s: eigenvalue decomposition failed to converge: %w", op, ErrSchurFailed)
 	}
 	return eig.Values(nil), nil
 }
@@ -144,7 +156,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	_, ok := impl.Dgges(lapack.SchurNone, lapack.SchurNone, lapack.SortNone, nil,
 		n, aData, n, eData, n, alphar, alphai, beta, vsl, n, vsr, n, work, lwork, nil)
 	if !ok {
-		return nil, fmt.Errorf("controlsys: generalized eigenvalue decomposition failed")
+		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
 	}
 
 	poles := make([]complex128, 0, n)

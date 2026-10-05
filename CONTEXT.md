@@ -1280,6 +1280,41 @@ _Avoid_: reciprocal when referring to MIMO models
 - A **staircase decomposition** supports controllability, observability, zero, and reduction workflows.
 - A **system inverse** inverts input-output behavior for supported square models.
 
+## Error conventions
+
+Every exported operation follows Go's error pattern strictly and keeps MATLAB's argument shapes. Sentinels live in errors.go with a doc comment each; shared guards live in require.go.
+
+**Result or error**:
+An exported operation returns a fully formed value with a nil error, or a non-nil error. It never returns a nil, empty or placeholder value (nil `*System`, 0×0 `&mat.Dense{}`, NaN, 0 or -1 standing for "none") with a nil error, even where MATLAB returns an empty model; it returns a sentinel error instead. It never panics on well-typed input, including nil pointers.
+
+**Message format**:
+`fmt.Errorf("OpName: detail: %w", ..., ErrX)`. OpName is the exported Go identifier the caller invoked: the function name (`Lyap:`), the bare method name for `*System` methods (`Poles:`), and `Type.Method:` for methods of other types (`FRD.Nyquist:`, `EKF.Update:`); detail is lowercase, names the offending argument and value (`Lyap: Q is 3×3, want 2×2: ...`), and never repeats the `controlsys:` prefix the sentinel already carries. Wrap exactly one sentinel with `%w`; never return a bare sentinel or an error without one from an exported operation. Unexported helpers return unprefixed detail (the exported caller adds `OpName: %w`) or take an `op string` and prefix it themselves, never both.
+
+**Choosing the sentinel**:
+- ErrInvalidArgument: nil model, function or required matrix; NaN/Inf scalar, slice or matrix entry; value out of its documented range (negative time, sign not ±1, order < 0); unknown enum, method or option string; out-of-range or non-increasing indices.
+- ErrDimensionMismatch: sizes that disagree, and results that cannot be stored (see zero-dimension models).
+- ErrOptionUnsupported: a valid option this operation does not implement for the given model.
+- A specific sentinel (ErrWrongDomain, ErrDelayUnsupported, ErrDescriptorUnsupported, ErrSchurFailed, ...) whenever one names the condition more precisely. Add a new sentinel only when callers need to branch on it and several operations share it.
+- ErrSchurFailed: any eigenvalue, Schur or QZ iteration that did not converge.
+
+**Guards** (require.go):
+- `requireSystem(op, sys)`: nil model → ErrInvalidArgument; otherwise Validate, wrapped `op: %w`. Does not check finiteness, since plain model arithmetic propagates NaN/Inf as MATLAB does.
+- `requireFiniteSystem(op, sys)`: requireSystem plus every A, B, C, D, E and internal-delay block finite. Use before eigen, Schur, QZ, balancing or other LAPACK work: gonum Dgebal never terminates on NaN, so non-finite input must be rejected with ErrInvalidArgument before it reaches LAPACK.
+- `requireFiniteDense(op, name, m)`: nil or non-finite matrix → ErrInvalidArgument; check nil yourself first when the matrix is optional.
+- `requireFinite(op, name, v...)`: non-finite scalar or slice element → ErrInvalidArgument.
+
+**Undefined quantities**:
+A result quantity that may not exist is exposed through a comma-ok accessor method `(value, ok bool)` named for the quantity, with no Get/Has prefix; the backing field is unexported. For example a margin result with no gain crossover reports `wcg, ok := r.GainCrossover()` with ok false, rather than a NaN WgFreq field. Inf is returned only where it is mathematically true (the gain margin of a loop that never crosses -180°), never as a "none" marker.
+
+**MATLAB-shaped arguments**:
+Arguments, their order and their defaults follow the MATLAB Control System Toolbox function the operation mirrors; cite its doc page in the doc comment. A MATLAB optional output (lsim's x, balreal's T) becomes an opt-in request; when requested but unavailable the operation returns an error, never a nil field with a nil error.
+
+**Zero-dimension models**:
+- A state-space model with states but no inputs or no outputs (m = 0 or p = 0, n > 0) is valid; its empty blocks may be nil or empty `*mat.Dense` and both validate (see **Autonomous model**).
+- A static gain with exactly one of m, p zero cannot be stored, so an operation whose result would be one returns ErrDimensionMismatch. A model with no states, inputs or outputs is a valid 0×0 gain.
+- An operation whose matrix result cannot be formed for n = 0 (gramian, Lyapunov solution, transformation, gain) returns `OpName: system has no states: ErrDimensionMismatch`; gonum cannot use a 0×0 `*mat.Dense`.
+- A zero-length slice is a valid value when the count is legitimately zero (the poles or Hankel singular values of a model with no states).
+
 ## Example dialogue
 
 > **Dev:** "When a **controller** is connected to a **plant** with feedback, should the result still be called a controller?"

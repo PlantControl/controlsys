@@ -2,7 +2,6 @@ package controlsys
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -10,10 +9,6 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 	"plantcontrol.org/v1/gonum/optimize"
 )
-
-var ErrProcessData = errors.New("invalid process identification data")
-var ErrProcessExcitation = errors.New("insufficient process identification excitation")
-var ErrProcessFit = errors.New("no valid process fit")
 
 type ProcessStructure struct {
 	Poles           int  `json:"poles"`
