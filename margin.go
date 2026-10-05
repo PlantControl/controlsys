@@ -73,12 +73,12 @@ func (e *sisoEval) at(w float64) complex128 {
 		h, _ := evalSISOFreqResponse(e.sys, w)
 		return h
 	}
-	s := e.td.frequencyVariable(w)
-	if err := evalWithPoleLimit(e.solver.evalInto, e.sys, s, e.dst); err != nil {
+	pt := e.td.frequencyPoint(w)
+	if err := evalWithPoleLimit(e.solver.evalInto, e.sys, pt, e.dst); err != nil {
 		return complex(math.NaN(), math.NaN())
 	}
 	if e.delay != nil {
-		applyIODelayMatrixAtS(e.sys, s, e.dst, 1, 1, e.delay)
+		applyIODelayMatrixAtS(e.sys, pt.value(), e.dst, 1, 1, e.delay)
 	}
 	return e.dst[0]
 }

@@ -359,7 +359,7 @@ const (
 // nyquistMaxPhaseStep between neighbours so the winding count is not aliased.
 type nyquistPath struct {
 	sys   *System
-	eval  func(complex128, []complex128) error
+	eval  func(frequencyPoint, []complex128) error
 	buf   []complex128
 	vals  []complex128
 	seeds []float64
@@ -402,7 +402,7 @@ func (p *nyquistPath) withSeeds(ts []float64, a, b float64, toT func(float64) fl
 }
 
 func (p *nyquistPath) at(s complex128) (complex128, error) {
-	if err := p.eval(s, p.buf); err != nil {
+	if err := p.eval(pointAt(s), p.buf); err != nil {
 		return 0, err
 	}
 	applyIODelayAtS(p.sys, s, p.buf, 1, 1, true)

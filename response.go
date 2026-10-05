@@ -443,7 +443,7 @@ func (sys *System) dcGainByEvaluation() (*mat.Dense, error) {
 	if err != nil {
 		return nil, err
 	}
-	g, err := e.evalPoint(s0, false)
+	g, err := e.evalPoint(pointAt(s0), false)
 	if err != nil {
 		return nil, fmt.Errorf("DCGain: %w", err)
 	}
