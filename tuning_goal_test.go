@@ -163,7 +163,7 @@ func TestLoopShapeChecksBothSampledEnvelopeBounds(t *testing.T) {
 func TestTuningGoalRoutesGeneralizedLoopResponses(t *testing.T) {
 	plant, _ := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
 	controller, _ := NewGain(mat.NewDense(1, 1, []float64{1}), 0)
-	loop, err := NewGeneralizedClosedLoop("loop", plant, controller, "output")
+	loop, err := NewGeneralizedClosedLoop("loop", plant, fixedBlockT(t, controller), "output")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestTuningGoalRoutesGeneralizedLoopResponses(t *testing.T) {
 func TestTuningGoalTargetsNamedRectangularLoopBreak(t *testing.T) {
 	plant, _ := NewGain(mat.NewDense(1, 2, []float64{1, 2}), 0)
 	controller, _ := NewGain(mat.NewDense(2, 1, []float64{3, 4}), 0)
-	loop, err := NewGeneralizedClosedLoop("loop", plant, controller, "plant_output")
+	loop, err := NewGeneralizedClosedLoop("loop", plant, fixedBlockT(t, controller), "plant_output")
 	if err != nil {
 		t.Fatal(err)
 	}
