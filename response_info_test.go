@@ -188,6 +188,18 @@ func TestStepInfoForSystemRejectsUnstableModel(t *testing.T) {
 	}
 }
 
+func TestStepInfoForSystem_ContinuousInternalDelaySimulates(t *testing.T) {
+	sys := scalarDDE(t, -2, 0.5)
+	info, err := StepInfoForSystem(sys, 40, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// x' = -x - 2x(t-τ) + u settles at 1/3.
+	if m := info.Metrics[0]; !m.Settled || math.Abs(m.SteadyStateValue-1.0/3) > 1e-3 {
+		t.Fatalf("metrics = %+v, want settled at 1/3", m)
+	}
+}
+
 func TestStepInfoPeakTimeIsFirstMaximum(t *testing.T) {
 	resp := &TimeResponse{T: []float64{0, 1, 2, 3, 4}, Y: mat.NewDense(1, 5, []float64{0, 1, 1, 1, 1})}
 	info, err := StepInfo(resp, nil)

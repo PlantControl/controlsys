@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 )
@@ -53,15 +54,21 @@ func StepInfo(resp *TimeResponse, opts *StepInfoOptions) (*StepInfoResult, error
 	return &StepInfoResult{Metrics: metrics, OutputName: copyStringSlice(resp.OutputName)}, nil
 }
 
+// StepInfoForSystem simulates the step response of a stable sys and returns
+// its step metrics. Unstable models return ErrUnstable. Continuous models with
+// internal delays have no finite pole test, so the stability gate is skipped
+// and the metrics come from the simulated response, as MATLAB recommends
+// assessing such models with step.
 func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*StepInfoResult, error) {
 	if sys == nil {
 		return nil, fmt.Errorf("StepInfoForSystem: system must not be nil: %w", ErrDimensionMismatch)
 	}
 	stable, err := sys.IsStable()
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrContinuousInternalDelay):
+	case err != nil:
 		return nil, fmt.Errorf("StepInfoForSystem: %w", err)
-	}
-	if !stable {
+	case !stable:
 		return nil, fmt.Errorf("StepInfoForSystem: model is unstable: %w", ErrUnstable)
 	}
 	resp, err := Step(sys, tFinal)

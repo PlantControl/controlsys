@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"sort"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -798,5 +799,179 @@ func TestH2Norm_ZeroStaticGain(t *testing.T) {
 		if got != 0 {
 			t.Errorf("dt=%v: H2Norm(0) = %g, want 0", dt, got)
 		}
+	}
+}
+
+// lftDelayFreqOracle evaluates the 2x2 single-delay discrete LFT at z = e^{jωT}
+// by solving (zI-A)x - B2 w = B1 u, -d C2 x + (1-d D22) w = d D21 u, d = z^-τ.
+func lftDelayFreqOracle(sys *System, w float64) [2][2]complex128 {
+	z := cmplx.Exp(complex(0, w*sys.Dt))
+	d := cmplx.Pow(z, complex(-sys.LFT.Tau[0], 0))
+	var g [2][2]complex128
+	for j := range 2 {
+		m := [3][4]complex128{}
+		for r := range 2 {
+			for c := range 2 {
+				m[r][c] = complex(-sys.A.At(r, c), 0)
+			}
+			m[r][r] += z
+			m[r][2] = complex(-sys.LFT.B2.At(r, 0), 0)
+			m[r][3] = complex(sys.B.At(r, j), 0)
+		}
+		for c := range 2 {
+			m[2][c] = -d * complex(sys.LFT.C2.At(0, c), 0)
+		}
+		m[2][2] = 1 - d*complex(sys.LFT.D22.At(0, 0), 0)
+		m[2][3] = d * complex(sys.LFT.D21.At(0, j), 0)
+		for k := range 3 {
+			p := k
+			for r := k + 1; r < 3; r++ {
+				if cmplx.Abs(m[r][k]) > cmplx.Abs(m[p][k]) {
+					p = r
+				}
+			}
+			m[k], m[p] = m[p], m[k]
+			for r := k + 1; r < 3; r++ {
+				f := m[r][k] / m[k][k]
+				for c := k; c < 4; c++ {
+					m[r][c] -= f * m[k][c]
+				}
+			}
+		}
+		var v [3]complex128
+		for k := 2; k >= 0; k-- {
+			s := m[k][3]
+			for c := k + 1; c < 3; c++ {
+				s -= m[k][c] * v[c]
+			}
+			v[k] = s / m[k][k]
+		}
+		for i := range 2 {
+			g[i][j] = complex(sys.D.At(i, j), 0) + complex(sys.LFT.D12.At(i, 0), 0)*v[2]
+			for c := range 2 {
+				g[i][j] += complex(sys.C.At(i, c), 0) * v[c]
+			}
+		}
+	}
+	return g
+}
+
+func maxSV2x2(g [2][2]complex128) float64 {
+	var h [2][2]complex128
+	for i := range 2 {
+		for j := range 2 {
+			h[i][j] = cmplx.Conj(g[0][i])*g[0][j] + cmplx.Conj(g[1][i])*g[1][j]
+		}
+	}
+	a, b := real(h[0][0]), real(h[1][1])
+	return math.Sqrt((a+b)/2 + math.Hypot((a-b)/2, cmplx.Abs(h[0][1])))
+}
+
+func TestHinfNorm_DiscreteInternalDelay(t *testing.T) {
+	unstable, _ := discreteLFTDelayFixture(t, []float64{1, 0.5})
+	if _, _, err := HinfNorm(unstable); !errors.Is(err, ErrUnstable) {
+		t.Fatalf("unstable delay loop: err = %v, want ErrUnstable", err)
+	}
+
+	lft, _ := discreteLFTDelayFixture(t, []float64{0.1, 0.05})
+	norm, w, err := HinfNorm(lft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at := maxSV2x2(lftDelayFreqOracle(lft, w)); math.Abs(at-norm) > 1e-8*norm {
+		t.Fatalf("σmax at returned ω=%g is %.12g, HinfNorm %.12g", w, at, norm)
+	}
+	peak := 0.0
+	for k := range 20001 {
+		peak = math.Max(peak, maxSV2x2(lftDelayFreqOracle(lft, float64(k)/20000*math.Pi/lft.Dt)))
+	}
+	if norm < peak*(1-1e-9) || norm > peak*(1+1e-4) {
+		t.Fatalf("HinfNorm %.12g, grid peak %.12g", norm, peak)
+	}
+	free := lft.Copy()
+	free.LFT = nil
+	freeNorm, _, err := HinfNorm(free)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(freeNorm-norm) < 1e-3*norm {
+		t.Fatalf("HinfNorm %.12g matches delay-free model; internal delay ignored", norm)
+	}
+}
+
+func TestHinfNorm_StatelessDiscreteDelayLoop(t *testing.T) {
+	sys, err := NewGain(mat.NewDense(1, 1, []float64{0}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInternalDelay([]float64{1}, &mat.Dense{}, &mat.Dense{},
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0.5})); err != nil {
+		t.Fatal(err)
+	}
+	// y = w, w = z⁻¹(u + 0.5w) ⇒ G = 1/(z-0.5), peak 2 at ω = 0.
+	norm, _, err := HinfNorm(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(norm-2) > 1e-9 {
+		t.Fatalf("HinfNorm = %.12g, want 2", norm)
+	}
+}
+
+func TestHSV_DiscreteInternalDelay(t *testing.T) {
+	unstable, _ := discreteLFTDelayFixture(t, []float64{1, 0.5})
+	if _, err := HSV(unstable); !errors.Is(err, ErrUnstable) {
+		t.Fatalf("unstable delay loop: err = %v, want ErrUnstable", err)
+	}
+
+	lft, hand := discreteLFTDelayFixture(t, []float64{0.1, 0.05})
+	got, err := HSV(lft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wc, wo := mat.NewDense(5, 5, nil), mat.NewDense(5, 5, nil)
+	ak := mat.NewDense(5, 5, nil)
+	ak.Copy(eye(5))
+	for range 2000 {
+		var t1, t2, q mat.Dense
+		t1.Mul(ak, hand.B)
+		q.Mul(&t1, t1.T())
+		wc.Add(wc, &q)
+		t2.Mul(hand.C, ak)
+		q.Mul(t2.T(), &t2)
+		wo.Add(wo, &q)
+		ak.Mul(ak, hand.A)
+	}
+	var prod mat.Dense
+	prod.Mul(wc, wo)
+	var eig mat.Eigen
+	if !eig.Factorize(&prod, mat.EigenNone) {
+		t.Fatal("eigen failed")
+	}
+	want := make([]float64, 0, 5)
+	for _, v := range eig.Values(nil) {
+		want = append(want, math.Sqrt(math.Max(real(v), 0)))
+	}
+	sort.Sort(sort.Reverse(sort.Float64Slice(want)))
+	if len(got) != len(want) {
+		t.Fatalf("len(HSV) = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if math.Abs(got[i]-want[i]) > 1e-9*want[0] {
+			t.Fatalf("HSV[%d] = %.12g, want %.12g", i, got[i], want[i])
+		}
+	}
+}
+
+func TestNorms_ContinuousInternalDelayRejected(t *testing.T) {
+	sys := scalarDDE(t, -2, 2)
+	if _, _, err := HinfNorm(sys); !errors.Is(err, ErrContinuousInternalDelay) {
+		t.Fatalf("HinfNorm err = %v, want ErrContinuousInternalDelay", err)
+	}
+	if _, err := HSV(sys); !errors.Is(err, ErrContinuousInternalDelay) {
+		t.Fatalf("HSV err = %v, want ErrContinuousInternalDelay", err)
+	}
+	if _, err := Norm(sys, math.Inf(1)); !errors.Is(err, ErrContinuousInternalDelay) {
+		t.Fatalf("Norm(Inf) err = %v, want ErrContinuousInternalDelay", err)
 	}
 }

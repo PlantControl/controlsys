@@ -16,7 +16,8 @@ import (
 // response, so P_ij = Σ_kl W_kl ∫ g_ik(t) g_jl(t) dt with
 // g_ik(t) = D_ik δ(t-τ_ik) + c_i e^{A(t-τ_ik)} b_k for t > τ_ik; a D-path entry
 // is infinite only when two feedthrough paths share the same total delay.
-// Continuous internal delays have no finite-order form and are rejected.
+// Continuous internal delays have no finite-order form and return
+// ErrContinuousInternalDelay.
 func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	if err := requireStandardCovarianceSystem(sys, "Covar"); err != nil {
 		return nil, err
@@ -29,7 +30,7 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	if sys.IsDiscrete() && sys.HasDelay() {
 		sys, err = sys.AbsorbDelay()
 	} else {
-		sys, err = absorbEnergyInternalDelay(sys, "Covar")
+		sys, err = finiteDimensionalModel(sys, "Covar")
 	}
 	if err != nil {
 		return nil, err
