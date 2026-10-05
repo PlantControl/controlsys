@@ -60,7 +60,7 @@ func TestRemainingArchitectureDelayTopologyPublicOperations(t *testing.T) {
 	}
 
 	collapsed := base.Copy()
-	if err := collapsed.SetDelay(split.TotalDelay()); err != nil {
+	if err := collapsed.SetDelay(mustTotalDelay(t, split)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -226,7 +226,7 @@ func TestRemainingArchitectureTimeDomainPolicyPublicConsumers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	delay := contAgain.TotalDelay()
+	delay := mustTotalDelay(t, contAgain)
 	if delay == nil {
 		t.Fatal("continuous delay is nil")
 	}

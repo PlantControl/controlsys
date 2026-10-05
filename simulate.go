@@ -317,7 +317,7 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	problem := newSimulationProblem(sys, u, x0, opts)
 	n, m, p, steps := problem.n, problem.m, problem.p, problem.steps
 
-	totalDelay := sys.TotalDelay()
+	totalDelay := newDelayTopology(sys).totalExternal(true)
 	if totalDelay == nil {
 		totalDelay = mat.NewDense(p, m, nil)
 	}

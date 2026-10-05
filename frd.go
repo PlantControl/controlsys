@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
-	"sort"
 )
 
 // FRD represents a Frequency Response Data model — measured or computed
@@ -32,71 +31,92 @@ func (f *FRD) Copy() *FRD {
 	}
 }
 
-// NewFRD creates an FRD model from response data and frequency vector.
-// response[k] is the p*m complex response matrix at frequency omega[k].
+// NewFRD creates an FRD model from response data and frequency vector, as
+// MATLAB frd(response,omega,dt). response[k] is the p×m complex response
+// matrix at frequency omega[k]. The data must satisfy Validate.
 func NewFRD(response [][][]complex128, omega []float64, dt float64) (*FRD, error) {
-	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
-		return nil, fmt.Errorf("FRD: %w", err)
-	}
 	if len(response) != len(omega) {
-		return nil, fmt.Errorf("FRD: len(response)=%d != len(omega)=%d: %w",
+		return nil, fmt.Errorf("NewFRD: len(response)=%d != len(omega)=%d: %w",
 			len(response), len(omega), ErrDimensionMismatch)
 	}
-	if len(omega) == 0 {
-		return &FRD{Dt: dt}, nil
+	f := &FRD{Response: response, Omega: omega, Dt: dt}
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("NewFRD: %w", err)
 	}
-
-	for i := range omega {
-		if !(omega[i] >= 0) || math.IsInf(omega[i], 1) {
-			return nil, fmt.Errorf("FRD: omega[%d]=%v must be finite and non-negative: %w", i, omega[i], ErrDimensionMismatch)
-		}
-	}
-	if !sort.Float64sAreSorted(omega) {
-		return nil, fmt.Errorf("FRD: omega must be sorted ascending: %w", ErrDimensionMismatch)
-	}
-
-	if dt > 0 {
-		nyquist := math.Pi / dt
-		for i, w := range omega {
-			if w > nyquist*(1+1e-10) {
-				return nil, fmt.Errorf("FRD: omega[%d]=%v exceeds Nyquist frequency %v: %w",
-					i, w, nyquist, ErrDimensionMismatch)
-			}
-		}
-	}
-
-	p := len(response[0])
-	if p == 0 {
-		return nil, fmt.Errorf("FRD: response matrix has zero rows: %w", ErrDimensionMismatch)
-	}
-	m := len(response[0][0])
-	if m == 0 {
-		return nil, fmt.Errorf("FRD: response matrix has zero columns: %w", ErrDimensionMismatch)
-	}
-
-	for k := range response {
-		if len(response[k]) != p {
-			return nil, fmt.Errorf("FRD: response[%d] has %d rows, want %d: %w",
-				k, len(response[k]), p, ErrDimensionMismatch)
-		}
-		for i := range response[k] {
-			if len(response[k][i]) != m {
-				return nil, fmt.Errorf("FRD: response[%d][%d] has %d cols, want %d: %w",
-					k, i, len(response[k][i]), m, ErrDimensionMismatch)
-			}
-		}
-	}
-
+	p, m := f.Dims()
 	resp, data := newFRDResponseStorage(len(response), p, m)
 	copyComplexGridInto(data, response, p, m)
-	om := make([]float64, len(omega))
-	copy(om, omega)
-
 	return &FRD{
 		Response: resp,
-		Omega:    om,
+		Omega:    copyFloatSlice(omega),
 		Dt:       dt,
 	}, nil
+}
+
+// Validate reports whether f is a well-formed FRD: a valid sample time, at
+// least one frequency, finite non-negative strictly increasing frequencies
+// (at most π/Dt for discrete models), one p×m response matrix per frequency
+// with p, m > 0, and no NaN response entries. Infinite entries are allowed;
+// they mark a pole on the frequency grid. Call Validate after editing the
+// fields directly; FRD methods that return an error validate first.
+func (f *FRD) Validate() error {
+	if err := f.validate(); err != nil {
+		return fmt.Errorf("FRD.Validate: %w", err)
+	}
+	return nil
+}
+
+func (f *FRD) validate() error {
+	if f == nil {
+		return fmt.Errorf("FRD is nil: %w", ErrInvalidArgument)
+	}
+	if err := newTimeDomain(f.Dt).validateSampleTime(); err != nil {
+		return err
+	}
+	if len(f.Omega) == 0 {
+		return fmt.Errorf("no frequencies: %w", ErrInvalidArgument)
+	}
+	if len(f.Response) != len(f.Omega) {
+		return fmt.Errorf("%d responses for %d frequencies: %w", len(f.Response), len(f.Omega), ErrDimensionMismatch)
+	}
+	for i, w := range f.Omega {
+		if !(w >= 0) || math.IsInf(w, 1) {
+			return fmt.Errorf("omega[%d]=%v must be finite and non-negative: %w", i, w, ErrInvalidArgument)
+		}
+		if i > 0 && w <= f.Omega[i-1] {
+			return fmt.Errorf("omega must be strictly increasing, omega[%d]=%v <= omega[%d]=%v: %w", i, w, i-1, f.Omega[i-1], ErrInvalidArgument)
+		}
+	}
+	if f.Dt > 0 {
+		nyquist := math.Pi / f.Dt
+		if w := f.Omega[len(f.Omega)-1]; w > nyquist*(1+1e-10) {
+			return fmt.Errorf("omega %v exceeds Nyquist frequency %v: %w", w, nyquist, ErrInvalidArgument)
+		}
+	}
+	p := len(f.Response[0])
+	if p == 0 {
+		return fmt.Errorf("response matrix has zero rows: %w", ErrDimensionMismatch)
+	}
+	m := len(f.Response[0][0])
+	if m == 0 {
+		return fmt.Errorf("response matrix has zero columns: %w", ErrDimensionMismatch)
+	}
+	for k := range f.Response {
+		if len(f.Response[k]) != p {
+			return fmt.Errorf("response[%d] has %d rows, want %d: %w", k, len(f.Response[k]), p, ErrDimensionMismatch)
+		}
+		for i, row := range f.Response[k] {
+			if len(row) != m {
+				return fmt.Errorf("response[%d][%d] has %d cols, want %d: %w", k, i, len(row), m, ErrDimensionMismatch)
+			}
+			for j, h := range row {
+				if cmplx.IsNaN(h) {
+					return fmt.Errorf("response[%d][%d][%d] is NaN: %w", k, i, j, ErrInvalidArgument)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // FRD computes the frequency response data model at the given frequencies.
@@ -131,7 +151,7 @@ func (sys *System) FRD(omega []float64) (*FRD, error) {
 
 func newFRDFromFreqResponse(resp *FreqResponseMatrix, dt float64) (*FRD, error) {
 	if resp == nil {
-		return nil, ErrInsufficientData
+		return nil, fmt.Errorf("frequency response is nil: %w", ErrInvalidArgument)
 	}
 	response, data := newFRDResponseStorage(resp.NFreq, resp.P, resp.M)
 	copy(data, resp.Data)
@@ -200,8 +220,10 @@ func cAddNestedInto(dst []complex128, a, b [][]complex128, rows, cols int) {
 	}
 }
 
+// Dims returns the number of outputs p and inputs m; 0, 0 for an FRD without
+// response data.
 func (f *FRD) Dims() (p, m int) {
-	if len(f.Response) == 0 {
+	if len(f.Response) == 0 || len(f.Response[0]) == 0 {
 		return 0, 0
 	}
 	return len(f.Response[0]), len(f.Response[0][0])
@@ -247,7 +269,16 @@ func (f *FRD) Abs() *FRD {
 	return f.withResponse(response)
 }
 
+// SelectFrequencies returns the FRD restricted to the strictly increasing
+// frequency indices. Out-of-range or non-increasing indices, or no indices,
+// return ErrInvalidArgument.
 func (f *FRD) SelectFrequencies(indices []int) (*FRD, error) {
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("FRD.SelectFrequencies: %w", err)
+	}
+	if len(indices) == 0 {
+		return nil, fmt.Errorf("FRD.SelectFrequencies: no frequencies selected: %w", ErrInvalidArgument)
+	}
 	p, m := f.Dims()
 	response, data := newFRDResponseStorage(len(indices), p, m)
 	omega := make([]float64, len(indices))
@@ -255,10 +286,10 @@ func (f *FRD) SelectFrequencies(indices []int) (*FRD, error) {
 	pm := p * m
 	for out, idx := range indices {
 		if idx < 0 || idx >= len(f.Omega) {
-			return nil, fmt.Errorf("FRD SelectFrequencies: index %d out of range: %w", idx, ErrDimensionMismatch)
+			return nil, fmt.Errorf("FRD.SelectFrequencies: index %d out of range [0,%d): %w", idx, len(f.Omega), ErrInvalidArgument)
 		}
 		if idx <= prev {
-			return nil, fmt.Errorf("FRD SelectFrequencies: indices must be strictly increasing: %w", ErrDimensionMismatch)
+			return nil, fmt.Errorf("FRD.SelectFrequencies: indices must be strictly increasing: %w", ErrInvalidArgument)
 		}
 		prev = idx
 		omega[out] = f.Omega[idx]
@@ -267,9 +298,15 @@ func (f *FRD) SelectFrequencies(indices []int) (*FRD, error) {
 	return f.withResponseAndOmega(response, omega), nil
 }
 
+// SelectFrequencyRange returns the FRD restricted to frequencies in
+// [minOmega, maxOmega]. minOmega > maxOmega, or a range containing no
+// frequency, returns ErrInvalidArgument.
 func (f *FRD) SelectFrequencyRange(minOmega, maxOmega float64) (*FRD, error) {
-	if minOmega > maxOmega {
-		return nil, fmt.Errorf("FRD SelectFrequencyRange: min frequency exceeds max frequency: %w", ErrDimensionMismatch)
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("FRD.SelectFrequencyRange: %w", err)
+	}
+	if !(minOmega <= maxOmega) {
+		return nil, fmt.Errorf("FRD.SelectFrequencyRange: min %g exceeds max %g: %w", minOmega, maxOmega, ErrInvalidArgument)
 	}
 	var indices []int
 	for k, w := range f.Omega {
@@ -277,12 +314,20 @@ func (f *FRD) SelectFrequencyRange(minOmega, maxOmega float64) (*FRD, error) {
 			indices = append(indices, k)
 		}
 	}
+	if len(indices) == 0 {
+		return nil, fmt.Errorf("FRD.SelectFrequencyRange: no frequency in [%g, %g]: %w", minOmega, maxOmega, ErrInvalidArgument)
+	}
 	return f.SelectFrequencies(indices)
 }
 
+// MapResponse returns the FRD whose response at each frequency is mapper's
+// result, which must keep the p×m shape.
 func (f *FRD) MapResponse(mapper FRDResponseMapper) (*FRD, error) {
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("FRD.MapResponse: %w", err)
+	}
 	if mapper == nil {
-		return nil, fmt.Errorf("FRD MapResponse: mapper must not be nil: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("FRD.MapResponse: mapper is nil: %w", ErrInvalidArgument)
 	}
 	p, m := f.Dims()
 	response, data := newFRDResponseStorage(len(f.Omega), p, m)
@@ -290,14 +335,14 @@ func (f *FRD) MapResponse(mapper FRDResponseMapper) (*FRD, error) {
 	for k, w := range f.Omega {
 		mapped, err := mapper(k, w, f.EvalFr(k))
 		if err != nil {
-			return nil, fmt.Errorf("FRD MapResponse: frequency index %d: %w", k, err)
+			return nil, fmt.Errorf("FRD.MapResponse: frequency index %d: %w", k, err)
 		}
 		if len(mapped) != p {
-			return nil, fmt.Errorf("FRD MapResponse: frequency index %d has %d rows, want %d: %w", k, len(mapped), p, ErrDimensionMismatch)
+			return nil, fmt.Errorf("FRD.MapResponse: frequency index %d has %d rows, want %d: %w", k, len(mapped), p, ErrDimensionMismatch)
 		}
 		for i := range mapped {
 			if len(mapped[i]) != m {
-				return nil, fmt.Errorf("FRD MapResponse: frequency index %d row %d has %d cols, want %d: %w", k, i, len(mapped[i]), m, ErrDimensionMismatch)
+				return nil, fmt.Errorf("FRD.MapResponse: frequency index %d row %d has %d cols, want %d: %w", k, i, len(mapped[i]), m, ErrDimensionMismatch)
 			}
 		}
 		copyComplexMatrixInto(data[k*pm:(k+1)*pm], mapped, p, m)
@@ -305,12 +350,15 @@ func (f *FRD) MapResponse(mapper FRDResponseMapper) (*FRD, error) {
 	return f.withResponse(response), nil
 }
 
+// PeakGain returns the largest gain (largest singular value for MIMO data)
+// over the frequency grid and where it occurs, as MATLAB getPeakGain on frd
+// data.
 func (f *FRD) PeakGain() (*FRDPeakGainResult, error) {
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("FRD.PeakGain: %w", err)
+	}
 	p, m := f.Dims()
 	nw := len(f.Omega)
-	if nw == 0 || p == 0 || m == 0 {
-		return nil, fmt.Errorf("FRD PeakGain: no frequency response data: %w", ErrInsufficientData)
-	}
 	result := &FRDPeakGainResult{Gain: math.Inf(-1), Index: -1}
 	if p == 1 && m == 1 {
 		for k := range nw {
@@ -335,18 +383,23 @@ func (f *FRD) PeakGain() (*FRDPeakGainResult, error) {
 			result.Index = k
 		}
 	}
+	if result.Index < 0 {
+		return nil, fmt.Errorf("FRD.PeakGain: no finite singular value: %w", ErrSingularTransform)
+	}
 	return result, nil
 }
 
+// FRDConcat joins FRD models of equal size and sample time along the
+// frequency axis; the combined frequencies must be strictly increasing.
 func FRDConcat(first *FRD, rest ...*FRD) (*FRD, error) {
-	if first == nil {
-		return nil, fmt.Errorf("FRDConcat: first model must not be nil: %w", ErrDimensionMismatch)
+	if err := first.validate(); err != nil {
+		return nil, fmt.Errorf("FRDConcat: model 0: %w", err)
 	}
 	p, m := first.Dims()
 	total := len(first.Omega)
 	for idx, f := range rest {
-		if f == nil {
-			return nil, fmt.Errorf("FRDConcat: model %d must not be nil: %w", idx+1, ErrDimensionMismatch)
+		if err := f.validate(); err != nil {
+			return nil, fmt.Errorf("FRDConcat: model %d: %w", idx+1, err)
 		}
 		fp, fm := f.Dims()
 		if fp != p || fm != m {
@@ -364,7 +417,7 @@ func FRDConcat(first *FRD, rest ...*FRD) (*FRD, error) {
 	appendModel := func(f *FRD) error {
 		for k, w := range f.Omega {
 			if len(omega) > 0 && w <= omega[len(omega)-1] {
-				return fmt.Errorf("FRDConcat: frequencies must be strictly increasing across models: %w", ErrDimensionMismatch)
+				return fmt.Errorf("FRDConcat: frequencies must be strictly increasing across models: %w", ErrInvalidArgument)
 			}
 			omega = append(omega, w)
 			copyComplexMatrixInto(data[pos*pm:(pos+1)*pm], f.Response[k], p, m)
@@ -469,13 +522,16 @@ func (f *FRD) Bode() *BodeResult {
 // indented from data and must lie outside the grid.
 //
 // Open-loop poles outside the stability boundary cannot be known from
-// frequency data, so RHPPoles is 0 and RHPZerosCL = Encirclements is the
+// frequency data, so the result carries no pole counts: Encirclements is the
 // closed-loop unstable pole count under unit negative feedback only for a
-// stable open loop; a caller who knows P adds it to both.
-func (f *FRD) Nyquist() (*NyquistResult, error) {
+// stable open loop, and a caller who knows the open-loop count P adds it.
+func (f *FRD) Nyquist() (*FRDNyquistResult, error) {
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("FRD.Nyquist: %w", err)
+	}
 	p, m := f.Dims()
 	if p != 1 || m != 1 {
-		return nil, fmt.Errorf("FRD Nyquist: SISO only, got %dx%d", p, m)
+		return nil, fmt.Errorf("FRD.Nyquist: model is %d×%d: %w", p, m, ErrNotSISO)
 	}
 	nw := len(f.Omega)
 	contour := make([]complex128, nw)
@@ -483,21 +539,27 @@ func (f *FRD) Nyquist() (*NyquistResult, error) {
 	for k := range nw {
 		h := f.Response[k][0][0]
 		if cmplx.IsNaN(h) || cmplx.IsInf(h) {
-			return nil, fmt.Errorf("FRD Nyquist: non-finite response at omega[%d]=%v", k, f.Omega[k])
+			return nil, fmt.Errorf("FRD.Nyquist: non-finite response at omega[%d]=%v: %w", k, f.Omega[k], ErrInvalidArgument)
 		}
 		contour[k] = h
 		contourN[nw-1-k] = cmplx.Conj(h)
 	}
 	full := make([]complex128, 0, 2*nw)
 	full = append(full, contourN...)
-	if nw > 0 {
-		full = append(full, frdLowFreqClosure(f.Omega, contour)...)
-	}
+	full = append(full, frdLowFreqClosure(f.Omega, contour)...)
 	full = append(full, contour...)
 	enc := -windingNumber(full, -1)
-	omega := make([]float64, nw)
-	copy(omega, f.Omega)
-	return &NyquistResult{Omega: omega, Contour: contour, ContourN: contourN, Encirclements: enc, RHPZerosCL: enc}, nil
+	return &FRDNyquistResult{Omega: copyFloatSlice(f.Omega), Contour: contour, ContourN: contourN, Encirclements: enc}, nil
+}
+
+// FRDNyquistResult holds the Nyquist response of SISO frequency response
+// data; see (*FRD).Nyquist. Unlike NyquistResult it has no open-loop or
+// closed-loop pole counts, which frequency data cannot determine.
+type FRDNyquistResult struct {
+	Omega         []float64
+	Contour       []complex128
+	ContourN      []complex128
+	Encirclements int
 }
 
 // frdLowFreqClosure returns the interior points of the arc from conj(h0) to
@@ -527,15 +589,15 @@ func frdLowFreqClosure(omega []float64, h []complex128) []complex128 {
 	return arc
 }
 
+// Sigma returns the singular values of the response at each frequency, as
+// MATLAB sigma on frd data.
 func (f *FRD) Sigma() (*SigmaResult, error) {
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("FRD.Sigma: %w", err)
+	}
 	p, m := f.Dims()
 	nw := len(f.Omega)
 	nsv := min(p, m)
-	if nsv == 0 {
-		omega := make([]float64, nw)
-		copy(omega, f.Omega)
-		return &SigmaResult{Omega: omega, nSV: 0}, nil
-	}
 	sv := make([]float64, nw*nsv)
 	if p == 1 && m == 1 {
 		for k := range nw {
@@ -546,8 +608,7 @@ func (f *FRD) Sigma() (*SigmaResult, error) {
 		return &SigmaResult{Omega: omega, sv: sv, nSV: nsv}, nil
 	}
 	response := newSampledComplexGridResponse(f.Response, f.Omega, p, m)
-	var ws *complexSVDWorkspace
-	ws = newComplexSVDWorkspace(p, m)
+	ws := newComplexSVDWorkspace(p, m)
 	for k := range nw {
 		if err := response.singularValues(sv[k*nsv:(k+1)*nsv], ws, k); err != nil {
 			return nil, fmt.Errorf("FRD.Sigma: %w", err)
@@ -564,13 +625,16 @@ func (f *FRD) Sigma() (*SigmaResult, error) {
 // -180 deg mod 360 (so -540, -900, ... count); phase margins are wrapped to
 // (-180,180]. Selection among multiple crossings matches Margin.
 func FRDMargin(f *FRD) (*MarginResult, error) {
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("FRDMargin: %w", err)
+	}
 	p, m := f.Dims()
 	if p != 1 || m != 1 {
-		return nil, fmt.Errorf("FRDMargin: SISO only, got %dx%d", p, m)
+		return nil, fmt.Errorf("FRDMargin: model is %d×%d: %w", p, m, ErrNotSISO)
 	}
 	nw := len(f.Omega)
 	if nw < 2 {
-		return nil, fmt.Errorf("FRDMargin: need at least 2 frequency points")
+		return nil, fmt.Errorf("FRDMargin: %d frequency points, need at least 2: %w", nw, ErrInsufficientData)
 	}
 
 	bode := f.Bode()
@@ -590,15 +654,21 @@ func FRDMargin(f *FRD) (*MarginResult, error) {
 }
 
 func frdGridsMatch(f1, f2 *FRD) error {
+	if err := f1.validate(); err != nil {
+		return fmt.Errorf("first model: %w", err)
+	}
+	if err := f2.validate(); err != nil {
+		return fmt.Errorf("second model: %w", err)
+	}
 	if f1.Dt != f2.Dt {
-		return fmt.Errorf("frd: sample times %g != %g: %w", f1.Dt, f2.Dt, ErrDomainMismatch)
+		return fmt.Errorf("sample times %g != %g: %w", f1.Dt, f2.Dt, ErrDomainMismatch)
 	}
 	if len(f1.Omega) != len(f2.Omega) {
-		return fmt.Errorf("frd: frequency grid lengths %d != %d", len(f1.Omega), len(f2.Omega))
+		return fmt.Errorf("frequency grid lengths %d != %d: %w", len(f1.Omega), len(f2.Omega), ErrDimensionMismatch)
 	}
 	for i := range f1.Omega {
 		if math.Abs(f1.Omega[i]-f2.Omega[i]) > 1e-12*math.Max(1, math.Abs(f1.Omega[i])) {
-			return fmt.Errorf("frd: frequency mismatch at index %d: %g != %g", i, f1.Omega[i], f2.Omega[i])
+			return fmt.Errorf("frequency mismatch at index %d: %g != %g: %w", i, f1.Omega[i], f2.Omega[i], ErrInvalidArgument)
 		}
 	}
 	return nil
@@ -635,15 +705,17 @@ func (ic frdInterconnection) newResult(p, m int, inputName, outputName []string)
 	}, data
 }
 
+// FRDSeries returns the series connection f2·f1 (f1 feeds f2) on a common
+// frequency grid.
 func FRDSeries(f1, f2 *FRD) (*FRD, error) {
 	ic, err := newFRDInterconnection(f1, f2)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("FRDSeries: %w", err)
 	}
 	p1, m1 := f1.Dims()
 	p2, m2 := f2.Dims()
 	if p1 != m2 {
-		return nil, fmt.Errorf("frd series: f1 outputs %d != f2 inputs %d", p1, m2)
+		return nil, fmt.Errorf("FRDSeries: f1 outputs %d != f2 inputs %d: %w", p1, m2, ErrDimensionMismatch)
 	}
 
 	md := frdSeriesMetadata(f1, f2)
@@ -654,15 +726,17 @@ func FRDSeries(f1, f2 *FRD) (*FRD, error) {
 	return result, nil
 }
 
+// FRDParallel returns the parallel connection f1+f2 on a common frequency
+// grid.
 func FRDParallel(f1, f2 *FRD) (*FRD, error) {
 	ic, err := newFRDInterconnection(f1, f2)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("FRDParallel: %w", err)
 	}
 	p1, m1 := f1.Dims()
 	p2, m2 := f2.Dims()
 	if p1 != p2 || m1 != m2 {
-		return nil, fmt.Errorf("frd parallel: dims (%d,%d) != (%d,%d)", p1, m1, p2, m2)
+		return nil, fmt.Errorf("FRDParallel: dims %d×%d != %d×%d: %w", p1, m1, p2, m2, ErrDimensionMismatch)
 	}
 
 	md := frdParallelMetadata(f1)
@@ -673,18 +747,25 @@ func FRDParallel(f1, f2 *FRD) (*FRD, error) {
 	return result, nil
 }
 
+// FRDFeedback returns the closed loop (I - sign·G·K)⁻¹·G of plant G with
+// controller K in the feedback path, on a common frequency grid. sign = -1
+// is negative feedback, as MATLAB feedback(G,K); sign must be ±1. A
+// frequency where I - sign·K·G is singular returns ErrAlgebraicLoop.
 func FRDFeedback(plant, controller *FRD, sign float64) (*FRD, error) {
+	if sign != 1 && sign != -1 {
+		return nil, fmt.Errorf("FRDFeedback: sign %g must be ±1: %w", sign, ErrInvalidArgument)
+	}
 	ic, err := newFRDInterconnection(plant, controller)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("FRDFeedback: %w", err)
 	}
 	pp, pm := plant.Dims()
 	cp, cm := controller.Dims()
 	if pp != cm {
-		return nil, fmt.Errorf("frd feedback: plant outputs %d != controller inputs %d", pp, cm)
+		return nil, fmt.Errorf("FRDFeedback: plant outputs %d != controller inputs %d: %w", pp, cm, ErrDimensionMismatch)
 	}
 	if pm != cp {
-		return nil, fmt.Errorf("frd feedback: plant inputs %d != controller outputs %d", pm, cp)
+		return nil, fmt.Errorf("FRDFeedback: plant inputs %d != controller outputs %d: %w", pm, cp, ErrDimensionMismatch)
 	}
 
 	md := frdFeedbackMetadata(plant)
@@ -710,7 +791,7 @@ func FRDFeedback(plant, controller *FRD, sign float64) (*FRD, error) {
 			}
 		}
 		if err := cSolveInPlace(ws.ipkg, ws.rhs, ws.n, pp); err != nil {
-			return nil, fmt.Errorf("frd feedback: singular at freq index %d", w)
+			return nil, fmt.Errorf("FRDFeedback: I-K·G singular at omega[%d]=%g: %v: %w", w, ic.omega[w], err, ErrAlgebraicLoop)
 		}
 		dst := data[w*pp*pm : (w+1)*pp*pm]
 		for i := range pp {

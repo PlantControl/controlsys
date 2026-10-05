@@ -169,8 +169,22 @@ func validateDelayValue(v, dt float64) error {
 	return nil
 }
 
-func (sys *System) TotalDelay() *mat.Dense {
-	return newDelayTopology(sys).totalExternal(true)
+// TotalDelay returns the p×m matrix of total I/O delays, input plus output
+// plus I/O delay of each channel, as MATLAB totaldelay(sys)
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.totaldelay.html);
+// entries are zero for channels without delay. Internal delays are not
+// included. Units are time units for continuous models and samples for
+// discrete ones. A model with no inputs or no outputs has no delay matrix and
+// returns ErrDimensionMismatch.
+func (sys *System) TotalDelay() (*mat.Dense, error) {
+	if err := requireSystem("TotalDelay", sys); err != nil {
+		return nil, err
+	}
+	_, m, p := sys.Dims()
+	if p == 0 || m == 0 {
+		return nil, fmt.Errorf("TotalDelay: model is %d×%d, has no delay matrix: %w", p, m, ErrDimensionMismatch)
+	}
+	return mat.NewDense(p, m, effectiveIODelayData(sys, p, m, true)), nil
 }
 
 func effectiveIODelayMatrix(sys *System, p, m int, includeDelayMatrix bool) *mat.Dense {

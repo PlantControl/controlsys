@@ -1374,16 +1374,24 @@ func TestTotalDelay(t *testing.T) {
 
 	t.Run("all_nil", func(t *testing.T) {
 		s := makeSys()
-		td := s.TotalDelay()
-		if td != nil {
-			t.Error("expected nil when all delays nil")
+		td := mustTotalDelay(t, s)
+		if r, c := td.Dims(); r != 2 || c != 3 || mat.Max(td) != 0 || mat.Min(td) != 0 {
+			t.Errorf("delay-free TotalDelay = %v, want 2×3 zeros", mat.Formatted(td))
+		}
+		empty, _ := NewFromSlices(1, 0, 1, []float64{-1}, nil, []float64{1}, nil, 0)
+		if _, err := empty.TotalDelay(); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("no inputs: err = %v, want ErrDimensionMismatch", err)
+		}
+		var nilSys *System
+		if _, err := nilSys.TotalDelay(); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("nil: err = %v", err)
 		}
 	})
 
 	t.Run("only_input_delay", func(t *testing.T) {
 		s := makeSys()
 		_ = s.SetInputDelay([]float64{1, 0, 2})
-		td := s.TotalDelay()
+		td := mustTotalDelay(t, s)
 		if td == nil {
 			t.Fatal("expected non-nil")
 		}
@@ -1404,7 +1412,7 @@ func TestTotalDelay(t *testing.T) {
 	t.Run("only_output_delay", func(t *testing.T) {
 		s := makeSys()
 		_ = s.SetOutputDelay([]float64{0, 3})
-		td := s.TotalDelay()
+		td := mustTotalDelay(t, s)
 		if td == nil {
 			t.Fatal("expected non-nil")
 		}
@@ -1422,7 +1430,7 @@ func TestTotalDelay(t *testing.T) {
 		s := makeSys()
 		ioDelay := mat.NewDense(2, 3, []float64{1, 2, 3, 4, 5, 6})
 		_ = s.SetDelay(ioDelay)
-		td := s.TotalDelay()
+		td := mustTotalDelay(t, s)
 		if td == nil {
 			t.Fatal("expected non-nil")
 		}
@@ -1441,7 +1449,7 @@ func TestTotalDelay(t *testing.T) {
 		_ = s.SetOutputDelay([]float64{0, 3})
 		_ = s.SetDelay(mat.NewDense(2, 3, []float64{0, 1, 0, 2, 0, 1}))
 
-		td := s.TotalDelay()
+		td := mustTotalDelay(t, s)
 		if td == nil {
 			t.Fatal("expected non-nil")
 		}
@@ -3540,7 +3548,7 @@ func TestMixedDelayTotalDelay(t *testing.T) {
 	_ = sys.SetInputDelay([]float64{2})
 	_ = sys.SetOutputDelay([]float64{1})
 
-	td := sys.TotalDelay()
+	td := mustTotalDelay(t, sys)
 	if td == nil {
 		t.Fatal("expected non-nil TotalDelay")
 	}
@@ -4415,4 +4423,13 @@ func TestGetDelayModelContract(t *testing.T) {
 	if sys.E.At(0, 0) != 2 {
 		t.Error("GetDelayModel H.E aliases sys.E")
 	}
+}
+
+func mustTotalDelay(t *testing.T, sys *System) *mat.Dense {
+	t.Helper()
+	td, err := sys.TotalDelay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return td
 }

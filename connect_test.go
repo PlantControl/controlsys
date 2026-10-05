@@ -572,7 +572,7 @@ func TestSeries_WithInputOutputDelay(t *testing.T) {
 	if len(result.OutputDelay) != 1 || result.OutputDelay[0] != 4 {
 		t.Errorf("OutputDelay = %v, want [4]", result.OutputDelay)
 	}
-	td := result.TotalDelay()
+	td := mustTotalDelay(t, result)
 	if td == nil {
 		t.Fatal("TotalDelay should not be nil")
 	}
@@ -664,7 +664,7 @@ func TestSeries_IntermediateDelayUniform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td := result.TotalDelay()
+	td := mustTotalDelay(t, result)
 	if td == nil {
 		t.Fatal("TotalDelay should not be nil")
 	}

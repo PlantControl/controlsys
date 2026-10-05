@@ -146,7 +146,7 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 	if err != nil {
 		return nil, err
 	}
-	if total := sys.TotalDelay(); total != nil {
+	if total := newDelayTopology(sys).totalExternal(true); total != nil {
 		res.TF.Delay = denseToSlice2D(total)
 	}
 	return res, nil
