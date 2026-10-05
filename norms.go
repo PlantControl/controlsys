@@ -7,6 +7,7 @@ import (
 	"math/cmplx"
 	"slices"
 	"sort"
+	"sync/atomic"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -298,7 +299,9 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 }
 
 // peakGain computes sup_ω σ_max(G(jω)) of a model with no poles on the
-// stability boundary by Hamiltonian bisection; stability is not required.
+// stability boundary from the Hamiltonian eigenvalue test; stability is not
+// required. A sampled peak is first certified by one probe just above it;
+// bisection runs only when the probe is inconclusive.
 // Discrete models are mapped by Tustin, and the peak frequency is unwarped
 // back to the discrete axis.
 func peakGain(sys *System) (norm float64, omega float64, err error) {
@@ -316,6 +319,12 @@ func peakGain(sys *System) (norm float64, omega float64, err error) {
 
 	ws := newHamiltonianWS(sys, n, m, p)
 
+	const tol = 1e-10
+	gammaLow, omegaPeak, certified := ws.certifyPeak(sys, gammaLow, omegaPeak, tol)
+	if certified {
+		return gammaLow * (1 + tol/2), omegaPeak, nil
+	}
+
 	gammaHigh := math.Max(gammaLow*2, 1e-10)
 	for range 50 {
 		if !ws.hasImagEigs(gammaHigh) {
@@ -324,7 +333,6 @@ func peakGain(sys *System) (norm float64, omega float64, err error) {
 		gammaHigh *= 2
 	}
 
-	tol := 1e-10
 	for range 100 {
 		if gammaHigh-gammaLow < tol*gammaHigh {
 			break
@@ -343,10 +351,42 @@ func peakGain(sys *System) (norm float64, omega float64, err error) {
 			gammaHigh = mid
 			continue
 		}
-		gammaLow, omegaPeak = peak, w
+		gammaLow, omegaPeak, certified = ws.certifyPeak(sys, peak, w, tol)
+		if certified {
+			return gammaLow * (1 + tol/2), omegaPeak, nil
+		}
 	}
 
 	return gammaHigh, omegaPeak, nil
+}
+
+// certifyPeak tries to prove that the attained gain gammaLow is within tol
+// of the peak: no imaginary-axis Hamiltonian eigenvalue at
+// gammaLow·(1+tol/2) makes that level an upper bound. Crossings found there
+// raise gammaLow through their interval midpoints (Boyd–Balakrishnan,
+// Bruinsma–Steinbuch), which converges quadratically. Near-axis eigenvalues
+// whose candidate frequencies stay below the probe count as no crossing, the
+// rule the bisection applies at every level. It reports false when the
+// candidates cannot be evaluated, leaving the bisection to settle the peak.
+func (ws *hamiltonianWS) certifyPeak(sys *System, gammaLow, omegaPeak, tol float64) (float64, float64, bool) {
+	for range 20 {
+		if !(gammaLow > 0) || math.IsInf(gammaLow, 1) {
+			return gammaLow, omegaPeak, false
+		}
+		probe := gammaLow * (1 + tol/2)
+		if !ws.hasImagEigs(probe) {
+			return gammaLow, omegaPeak, true
+		}
+		peak, w, err := ws.candidatePeak(sys)
+		if err != nil {
+			return gammaLow, omegaPeak, false
+		}
+		if peak < probe {
+			return gammaLow, omegaPeak, true
+		}
+		gammaLow, omegaPeak = peak, w
+	}
+	return gammaLow, omegaPeak, false
 }
 
 // hamiltonianWS holds pre-allocated buffers for the Hamiltonian eigenvalue test
@@ -442,7 +482,11 @@ func newHamiltonianWS(sys *System, n, m, p int) *hamiltonianWS {
 	return ws
 }
 
+// hamiltonianEvals counts hasImagEigs calls, one Schur decomposition each.
+var hamiltonianEvals atomic.Int64
+
 func (ws *hamiltonianWS) hasImagEigs(gamma float64) bool {
+	hamiltonianEvals.Add(1)
 	n, m, p := ws.n, ws.m, ws.p
 	nn := ws.nn
 	g2 := gamma * gamma
