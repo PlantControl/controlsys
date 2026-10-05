@@ -541,19 +541,8 @@ func pidTuningBasis(c PID2, w float64) (integral, derivative complex128) {
 		s := complex(0, w)
 		return 1 / s, s / (1 + complex(c.Tf, 0)*s)
 	}
-	z := cmplx.Exp(complex(0, w*c.Dt))
-	basis := func(f PIDFormula) complex128 {
-		switch f {
-		case BackwardEuler:
-			return complex(c.Dt, 0) * z / (z - 1)
-		case Trapezoidal:
-			return complex(c.Dt/2, 0) * (z + 1) / (z - 1)
-		default:
-			return complex(c.Dt, 0) / (z - 1)
-		}
-	}
-	integral = basis(c.IFormula)
-	d := 1 / basis(c.DFormula)
+	integral = pidtuneIntegrator(c.IFormula, w, c.Dt)
+	d := 1 / pidtuneIntegrator(c.DFormula, w, c.Dt)
 	return integral, d / (1 + complex(c.Tf, 0)*d)
 }
 func pidTuningFeedback(c PID2, w float64) complex128 {

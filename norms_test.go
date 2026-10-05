@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"math/big"
 	"math/cmplx"
 	"math/rand"
 	"slices"
@@ -1731,102 +1730,13 @@ func BenchmarkHinfNorm_ResonanceAboveFeedthrough(b *testing.B) {
 	}
 }
 
-// bigComplex is a complex number in exactPrec-bit floating point.
-type bigComplex struct{ re, im *big.Float }
-
-const exactPrec = 200
-
-func newBig(v float64) *big.Float { return new(big.Float).SetPrec(exactPrec).SetFloat64(v) }
-
-func (a bigComplex) add(b bigComplex) bigComplex {
-	return bigComplex{newBig(0).Add(a.re, b.re), newBig(0).Add(a.im, b.im)}
-}
-
-func (a bigComplex) sub(b bigComplex) bigComplex {
-	return bigComplex{newBig(0).Sub(a.re, b.re), newBig(0).Sub(a.im, b.im)}
-}
-
-func (a bigComplex) mul(b bigComplex) bigComplex {
-	rr, ii := newBig(0).Mul(a.re, b.re), newBig(0).Mul(a.im, b.im)
-	ri, ir := newBig(0).Mul(a.re, b.im), newBig(0).Mul(a.im, b.re)
-	return bigComplex{rr.Sub(rr, ii), ri.Add(ri, ir)}
-}
-
-func (a bigComplex) quo(b bigComplex) bigComplex {
-	den := newBig(0).Mul(b.re, b.re)
-	den.Add(den, newBig(0).Mul(b.im, b.im))
-	q := a.mul(bigComplex{b.re, newBig(0).Neg(b.im)})
-	return bigComplex{q.re.Quo(q.re, den), q.im.Quo(q.im, den)}
-}
-
-func (a bigComplex) abs2() *big.Float {
-	r := newBig(0).Mul(a.re, a.re)
-	return r.Add(r, newBig(0).Mul(a.im, a.im))
-}
-
 // exactSigmaMax is σ_max(G) of the stored realization at frequency w with
-// only the final G rounded: Gaussian elimination in exactPrec bits on sI − A
-// at s = jω, or at z = (1+jν)/(1−jν), ν = tan(ωT/2), which lies exactly on
-// the unit circle. The singular value comes from the Hermitian Gram matrix.
+// only the final G rounded: frExactResponse at frExactPoint, the point
+// sigmaEvaluator solves at. The singular value comes from the Hermitian Gram
+// matrix.
 func exactSigmaMax(sys *System, w float64) float64 {
-	n, m, p := sys.Dims()
-	s := bigComplex{newBig(0), newBig(w)}
-	if sys.IsDiscrete() {
-		nu := newBig(math.Tan(w * sys.Dt / 2))
-		nu2 := newBig(0).Mul(nu, nu)
-		one := newBig(1)
-		s = bigComplex{newBig(0).Sub(one, nu2), newBig(0).Mul(newBig(2), nu)}.quo(bigComplex{newBig(0).Add(one, nu2), newBig(0)})
-	}
-	M := make([][]bigComplex, n)
-	for i := range n {
-		M[i] = make([]bigComplex, n+m)
-		for j := range n {
-			M[i][j] = bigComplex{newBig(-sys.A.At(i, j)), newBig(0)}
-		}
-		M[i][i] = M[i][i].add(s)
-		for j := range m {
-			M[i][n+j] = bigComplex{newBig(sys.B.At(i, j)), newBig(0)}
-		}
-	}
-	for k := range n {
-		piv := k
-		for i := k + 1; i < n; i++ {
-			if M[i][k].abs2().Cmp(M[piv][k].abs2()) > 0 {
-				piv = i
-			}
-		}
-		M[k], M[piv] = M[piv], M[k]
-		for i := k + 1; i < n; i++ {
-			f := M[i][k].quo(M[k][k])
-			for j := k; j < n+m; j++ {
-				M[i][j] = M[i][j].sub(f.mul(M[k][j]))
-			}
-		}
-	}
-	X := make([][]bigComplex, n)
-	for i := n - 1; i >= 0; i-- {
-		X[i] = make([]bigComplex, m)
-		for j := range m {
-			acc := M[i][n+j]
-			for k := i + 1; k < n; k++ {
-				acc = acc.sub(M[i][k].mul(X[k][j]))
-			}
-			X[i][j] = acc.quo(M[i][i])
-		}
-	}
-	G := make([]complex128, p*m)
-	for i := range p {
-		for j := range m {
-			acc := bigComplex{newBig(sys.D.At(i, j)), newBig(0)}
-			for k := range n {
-				acc = acc.add(bigComplex{newBig(sys.C.At(i, k)), newBig(0)}.mul(X[k][j]))
-			}
-			re, _ := acc.re.Float64()
-			im, _ := acc.im.Float64()
-			G[i*m+j] = complex(re, im)
-		}
-	}
-	return gramSigmaMax(G, p, m)
+	_, m, p := sys.Dims()
+	return gramSigmaMax(frExactResponse(sys, frExactPoint(w, sys.Dt)), p, m)
 }
 
 // gramSigmaMax is σ_max of the row-major p×m G from the real symmetric

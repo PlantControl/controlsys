@@ -779,7 +779,9 @@ func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak flo
 // precision. GEPP alone loses accuracy in proportion to the condition number
 // of the resolvent, about 1/(ζω₀) next to a lightly damped pole; two
 // refinement steps with the residual, and C·X + D, accumulated in
-// compensated (FMA) arithmetic recover it.
+// compensated (FMA) arithmetic recover it. Each frequency is solved at
+// timeDomain.frequencyPoint as (sI − A)⁻¹ = −q·(pI + qA)⁻¹, exactly on the
+// unit circle for discrete models.
 type sigmaEvaluator struct {
 	sys     *System
 	n, m, p int
@@ -843,30 +845,12 @@ func (e *sigmaEvaluator) peak(freqs []float64, band float64) (peak, omega float6
 	return peak, omega, nil
 }
 
-// resolventScalars returns p, q and c with (sI − A)⁻¹ = c·(pI + qA)⁻¹ at
-// frequency w, each with exact real and imaginary parts. Discrete models
-// use z = (1+jν)/(1−jν), ν = tan(ωT/2) (or its reciprocal form past
-// ωT = π/2), which lies on the unit circle for every floating-point ν: a
-// rounded e^{jωT} sits up to ε off the circle, which moves σ_max by ε/(ζω₀T)
-// next to a lightly damped pole.
-func (e *sigmaEvaluator) resolventScalars(w float64) (p, q, c complex128) {
-	if e.sys.IsContinuous() {
-		return complex(0, w), -1, 1
-	}
-	half := w * e.sys.Dt / 2
-	if half <= math.Pi/4 {
-		nu := math.Tan(half)
-		return complex(1, nu), complex(-1, nu), complex(1, -nu)
-	}
-	mu := 1 / math.Tan(half)
-	return complex(1, -mu), complex(1, mu), complex(-1, -mu)
-}
-
 // sigma evaluates σ_max(G) at w, refined as the type comment describes or by
 // GEPP alone.
 func (e *sigmaEvaluator) sigma(w float64, refine bool) (float64, error) {
 	n, m, p := e.n, e.m, e.p
-	sp, sq, sc := e.resolventScalars(w)
+	pt := newTimeDomain(e.sys.Dt).frequencyPoint(w)
+	sp, sq, sc := pt.p, pt.q, pt.scale()
 	if err := e.factor(sp, sq); err != nil {
 		return 0, err
 	}
@@ -891,7 +875,7 @@ func (e *sigmaEvaluator) sigma(w float64, refine bool) (float64, error) {
 	} else {
 		e.outputPlain(sc)
 	}
-	applyIODelayAtS(e.sys, newTimeDomain(e.sys.Dt).frequencyVariable(w), e.g, p, m, true)
+	applyIODelayAtS(e.sys, pt.value(), e.g, p, m, true)
 	return e.svd.maximumFromFlat(e.g, 0, p, m)
 }
 
