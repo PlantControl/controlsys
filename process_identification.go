@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -10,6 +11,9 @@ import (
 	"plantcontrol.org/v1/gonum/optimize"
 )
 
+// ProcessStructure selects a low-order process model, as the MATLAB procest
+// type string ('P1D', 'P2DUZI', ...): one to three real or paired poles, an
+// optional zero, integrator and transport delay.
 type ProcessStructure struct {
 	Poles           int  `json:"poles"`
 	UnderdampedPair bool `json:"underdampedPair"`
@@ -18,6 +22,9 @@ type ProcessStructure struct {
 	Delay           bool `json:"delay"`
 }
 
+// ProcessParameters are the physical parameters of a ProcessStructure:
+// static gain, real time constants, an underdamped pair (NaturalFrequency,
+// Damping), zero time and delay, in the data's time unit.
 type ProcessParameters struct {
 	Gain             float64   `json:"gain"`
 	TimeConstants    []float64 `json:"timeConstants"`
@@ -27,6 +34,9 @@ type ProcessParameters struct {
 	Delay            float64   `json:"delay,omitempty"`
 }
 
+// ProcessFitData is a uniformly sampled SISO record. The first
+// TrainingSamples (at least 20) are fitted; the rest (at least 3, after any
+// ValidationInitializationSamples) are held out for validation.
 type ProcessFitData struct {
 	Input           []float64
 	Output          []float64
@@ -34,6 +44,8 @@ type ProcessFitData struct {
 	TrainingSamples int
 }
 
+// ProcessBounds limits each parameter. A Min/Max pair left at 0/0 selects
+// a default derived from the sample time and record length.
 type ProcessBounds struct {
 	MinTimeConstant float64 `json:"minTimeConstant"`
 	MaxTimeConstant float64 `json:"maxTimeConstant"`
@@ -49,9 +61,33 @@ type ProcessBounds struct {
 	MaxDamping      float64 `json:"maxDamping"`
 }
 
+// ProcessValidationInit selects how the held-out validation run starts.
+type ProcessValidationInit string
+
+const (
+	// ProcessValidationContinuation continues the free run from the end of
+	// training (the zero value "" means this).
+	ProcessValidationContinuation ProcessValidationInit = "continuation"
+	// ProcessValidationZero restarts validation from rest.
+	ProcessValidationZero ProcessValidationInit = "zero"
+)
+
+// ProcessFitTermination names why a process fit stopped.
+type ProcessFitTermination string
+
+const (
+	ProcessFitConverged       ProcessFitTermination = "converged"
+	ProcessFitEvaluationLimit ProcessFitTermination = "evaluation-limit"
+	ProcessFitCanceled        ProcessFitTermination = "canceled"
+	ProcessFitManual          ProcessFitTermination = "manual-evaluation"
+)
+
+// ProcessFitOptions configures FitProcess and EvaluateProcess. Zero values
+// select defaults: 2000 evaluations, 4 starts, default bounds and
+// continuation validation.
 type ProcessFitOptions struct {
-	ValidationInitialCondition      string `json:"validationInitialCondition"`
-	ValidationInitializationSamples int    `json:"validationInitializationSamples,omitempty"`
+	ValidationInitialCondition      ProcessValidationInit `json:"validationInitialCondition"`
+	ValidationInitializationSamples int                   `json:"validationInitializationSamples,omitempty"`
 
 	Structure            ProcessStructure   `json:"structure"`
 	Bounds               ProcessBounds      `json:"bounds"`
@@ -62,25 +98,79 @@ type ProcessFitOptions struct {
 	Starts               int                `json:"starts"`
 }
 
+// ProcessFitResult is a fitted or evaluated process model with its training
+// and validation diagnostics. InitialState is in unit-gain model
+// coordinates.
 type ProcessFitResult struct {
-	Parameters          ProcessParameters `json:"parameters"`
-	Structure           ProcessStructure  `json:"structure"`
-	Bounds              ProcessBounds     `json:"bounds"`
-	InitialState        []float64         `json:"initialState,omitempty"`
-	Offset              float64           `json:"offset"`
-	Predicted           []float64         `json:"predicted"`
-	Residuals           []float64         `json:"residuals"`
-	TrainingNRMSE       float64           `json:"trainingNrmse"`
-	ValidationNRMSE     float64           `json:"validationNrmse"`
-	ValidationMeanNRMSE float64           `json:"validationMeanNrmse"`
-	ResidualLagOne      float64           `json:"residualLagOne"`
-	Condition           float64           `json:"condition"`
-	Evaluations         int               `json:"evaluations"`
-	Termination         string            `json:"termination"`
-	ActiveBounds        []string          `json:"activeBounds,omitempty"`
-	Diagnostics         []string          `json:"diagnostics,omitempty"`
-	System              *System           `json:"-"`
+	Parameters          ProcessParameters     `json:"parameters"`
+	Structure           ProcessStructure      `json:"structure"`
+	Bounds              ProcessBounds         `json:"bounds"`
+	InitialState        []float64             `json:"initialState,omitempty"`
+	Offset              float64               `json:"offset"`
+	Predicted           []float64             `json:"predicted"`
+	Residuals           []float64             `json:"residuals"`
+	TrainingNRMSE       float64               `json:"trainingNrmse"`
+	ValidationNRMSE     float64               `json:"validationNrmse"`
+	ValidationMeanNRMSE float64               `json:"validationMeanNrmse"`
+	Condition           float64               `json:"condition"`
+	Evaluations         int                   `json:"evaluations"`
+	Termination         ProcessFitTermination `json:"termination"`
+	ActiveBounds        []string              `json:"activeBounds,omitempty"`
+	Diagnostics         []string              `json:"diagnostics,omitempty"`
+	System              *System               `json:"-"`
+
+	residualLagOne float64
+	residualLagOK  bool
 }
+
+// ResidualLagOne returns the lag-one Pearson correlation of the validation
+// residuals. ok is false when it is undefined: constant (for example zero)
+// residuals have no variance.
+func (r *ProcessFitResult) ResidualLagOne() (rho float64, ok bool) {
+	return r.residualLagOne, r.residualLagOK
+}
+
+type processFitResultJSON ProcessFitResult
+
+type processFitResultWire struct {
+	*processFitResultJSON
+	ResidualLagOne *float64 `json:"residualLagOne,omitempty"`
+}
+
+// MarshalJSON encodes ResidualLagOne as "residualLagOne", omitted when
+// undefined.
+func (r ProcessFitResult) MarshalJSON() ([]byte, error) {
+	w := processFitResultWire{processFitResultJSON: (*processFitResultJSON)(&r)}
+	if r.residualLagOK {
+		w.ResidualLagOne = &r.residualLagOne
+	}
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON decodes the encoding of MarshalJSON.
+func (r *ProcessFitResult) UnmarshalJSON(b []byte) error {
+	w := processFitResultWire{processFitResultJSON: (*processFitResultJSON)(r)}
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	r.residualLagOne, r.residualLagOK = 0, w.ResidualLagOne != nil
+	if r.residualLagOK {
+		r.residualLagOne = *w.ResidualLagOne
+	}
+	return nil
+}
+
+// ProcessFitCanceledError reports a FitProcess run stopped by its context.
+// Best is the best valid fit found before cancellation (Termination
+// ProcessFitCanceled); Err is the context error it unwraps to.
+type ProcessFitCanceledError struct {
+	Best *ProcessFitResult
+	Err  error
+}
+
+func (e *ProcessFitCanceledError) Error() string { return "FitProcess: " + e.Err.Error() }
+
+func (e *ProcessFitCanceledError) Unwrap() error { return e.Err }
 
 // System realizes the physical process definition, retaining transport delay
 // exactly. TimeConstants are stable real poles; a damped pair consumes two of
@@ -88,13 +178,13 @@ type ProcessFitResult struct {
 func (p ProcessParameters) System(s ProcessStructure) (*System, error) {
 	unit, err := processSystem(s, p)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ProcessParameters.System: %w", err)
 	}
 	unit.C.Scale(p.Gain, unit.C)
 	unit.D.Scale(p.Gain, unit.D)
 	if p.Delay > 0 {
 		if err = unit.SetInputDelay([]float64{p.Delay}); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("ProcessParameters.System: %w", err)
 		}
 	}
 	return unit, nil
@@ -106,7 +196,7 @@ func processSystem(s ProcessStructure, p ProcessParameters) (*System, error) {
 		realPoles -= 2
 	}
 	if s.Poles < 1 || s.Poles > 3 || realPoles < 0 || len(p.TimeConstants) != realPoles || !processFinite(p.Gain) {
-		return nil, fmt.Errorf("%w: invalid process structure", ErrProcessData)
+		return nil, fmt.Errorf("invalid process structure: %w", ErrProcessData)
 	}
 	den := []float64{1}
 	multiply := func(a, b []float64) []float64 {
@@ -120,13 +210,13 @@ func processSystem(s ProcessStructure, p ProcessParameters) (*System, error) {
 	}
 	for _, tau := range p.TimeConstants {
 		if !processFinite(tau) || tau <= 0 {
-			return nil, fmt.Errorf("%w: time constants must be positive", ErrProcessData)
+			return nil, fmt.Errorf("time constants must be positive: %w", ErrProcessData)
 		}
 		den = multiply(den, []float64{tau, 1})
 	}
 	if s.UnderdampedPair {
 		if !processFinite(p.NaturalFrequency) || p.NaturalFrequency <= 0 || !processFinite(p.Damping) || p.Damping <= 0 || p.Damping >= 1 {
-			return nil, fmt.Errorf("%w: pair requires positive frequency and damping in (0,1)", ErrProcessData)
+			return nil, fmt.Errorf("pair requires positive frequency and damping in (0,1): %w", ErrProcessData)
 		}
 		den = multiply(den, []float64{1 / (p.NaturalFrequency * p.NaturalFrequency), 2 * p.Damping / p.NaturalFrequency, 1})
 	}
@@ -134,7 +224,7 @@ func processSystem(s ProcessStructure, p ProcessParameters) (*System, error) {
 		den = append(den, 0)
 	}
 	if !processFinite(p.Delay) || p.Delay < 0 || (!s.Delay && p.Delay != 0) || !processFinite(p.ZeroTime) || (!s.Zero && p.ZeroTime != 0) {
-		return nil, fmt.Errorf("%w: inactive or invalid zero/delay", ErrProcessData)
+		return nil, fmt.Errorf("inactive or invalid zero/delay: %w", ErrProcessData)
 	}
 	num := []float64{1}
 	if s.Zero {
@@ -164,21 +254,30 @@ func processSystem(s ProcessStructure, p ProcessParameters) (*System, error) {
 	return New(a, b, c, d, 0)
 }
 
-// FitProcess estimates only against training outputs. Validation is a free run
-// continued from training with measured inputs and no output-based correction.
-// A canceled/exhausted run returns its best valid result with explicit status.
-// EstimateInitialState also assumes the input was held at its first sample
-// before the record, which fills the delay line of a delayed model.
+// FitProcess estimates a process model from a SISO record, the analogue of
+// MATLAB procest (System Identification Toolbox). It fits only training
+// outputs. Validation is a free run continued from training with measured
+// inputs and no output-based correction. An exhausted evaluation budget
+// returns the best valid result with Termination ProcessFitEvaluationLimit;
+// cancellation returns a *ProcessFitCanceledError carrying it (or the bare
+// context error when no valid candidate was found yet). No valid candidate
+// returns ErrProcessFit with the last candidate's failure. EstimateInitialState
+// also assumes the input was held at its first sample before the record,
+// which fills the delay line of a delayed model.
 func FitProcess(ctx context.Context, data ProcessFitData, options ProcessFitOptions) (*ProcessFitResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("FitProcess: nil context: %w", ErrInvalidArgument)
+	}
 	options, err := validateProcessFit(data, options)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("FitProcess: %w", err)
 	}
 	coordinates := processCoordinates(options.Structure, options.Bounds)
 	bestValue := math.Inf(1)
 	var best *ProcessFitResult
 	evals := 0
-	termination := "evaluation-limit"
+	termination := ProcessFitEvaluationLimit
+	var lastErr error
 	objective := func(x []float64) float64 {
 		if ctx.Err() != nil || evals >= options.MaxEvaluations {
 			return math.Inf(1)
@@ -191,7 +290,11 @@ func FitProcess(ctx context.Context, data ProcessFitData, options ProcessFitOpti
 		}
 		p := decodeProcessPoint(x, coordinates, options.Structure)
 		result, value, err := evaluateProcessFit(data, options, p, nil)
-		if err != nil || !processFinite(value) {
+		if err != nil {
+			lastErr = err
+			return 1e100
+		}
+		if !processFinite(value) {
 			return 1e100
 		}
 		if value < bestValue {
@@ -202,7 +305,7 @@ func FitProcess(ctx context.Context, data ProcessFitData, options ProcessFitOpti
 	}
 	for start := 0; start < options.Starts && evals < options.MaxEvaluations; start++ {
 		if ctx.Err() != nil {
-			termination = "canceled"
+			termination = ProcessFitCanceled
 			break
 		}
 		x := make([]float64, len(coordinates))
@@ -227,29 +330,32 @@ func FitProcess(ctx context.Context, data ProcessFitData, options ProcessFitOpti
 			return optimize.NotTerminated, nil
 		}}, x, &optimize.Settings{FuncEvaluations: budget, Converger: &optimize.FunctionConverge{Absolute: 1e-14, Relative: 1e-9, Iterations: 40}}, &optimize.NelderMead{SimplexSize: .06})
 		if ctx.Err() != nil {
-			termination = "canceled"
+			termination = ProcessFitCanceled
 			break
 		}
 		if bestValue < previousBest {
-			termination = "evaluation-limit"
+			termination = ProcessFitEvaluationLimit
 		}
 		if fitErr == nil && result != nil && !result.Status.Early() && result.F <= bestValue+1e-12*math.Max(1, bestValue) {
-			termination = "converged"
+			termination = ProcessFitConverged
 		}
 		if bestValue < 1e-20 {
-			termination = "converged"
+			termination = ProcessFitConverged
 			break
 		}
 	}
 	if best == nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("FitProcess: %w", err)
 		}
-		return nil, ErrProcessFit
+		if lastErr != nil {
+			return nil, fmt.Errorf("FitProcess: no valid candidate (last: %v): %w", lastErr, ErrProcessFit)
+		}
+		return nil, fmt.Errorf("FitProcess: no valid candidate: %w", ErrProcessFit)
 	}
 	best.Evaluations = evals
 	best.Termination = termination
-	if termination != "converged" {
+	if termination != ProcessFitConverged {
 		best.Diagnostics = append(best.Diagnostics, "Best valid approximate fit retained; convergence was not established.")
 	}
 	best.Diagnostics = append(best.Diagnostics, "Fit quality does not establish stability robustness or parameter uncertainty.")
@@ -268,8 +374,9 @@ func FitProcess(ctx context.Context, data ProcessFitData, options ProcessFitOpti
 			best.ActiveBounds = append(best.ActiveBounds, coordinates[i].name)
 		}
 	}
-	if ctx.Err() != nil {
-		return best, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		best.Termination = ProcessFitCanceled
+		return nil, &ProcessFitCanceledError{Best: best, Err: err}
 	}
 	return best, nil
 }
@@ -369,22 +476,22 @@ func defaultProcessParameters(d ProcessFitData, o ProcessFitOptions) ProcessPara
 }
 func validateProcessFit(d ProcessFitData, o ProcessFitOptions) (ProcessFitOptions, error) {
 	n := len(d.Input)
-	if n != len(d.Output) || n > 10000 || d.TrainingSamples < 20 || n-d.TrainingSamples < 2 || !processFinite(d.SampleTime) || d.SampleTime <= 0 {
-		return o, fmt.Errorf("%w: require aligned data, 20 training samples, held-out samples and positive sample time (10000 maximum)", ErrProcessData)
+	if n != len(d.Output) || n > 10000 || d.TrainingSamples < 20 || n-d.TrainingSamples < processMinHeldOut || !processFinite(d.SampleTime) || d.SampleTime <= 0 {
+		return o, fmt.Errorf("require aligned data, 20 training samples, %d held-out samples and positive sample time (10000 maximum): %w", processMinHeldOut, ErrProcessData)
 	}
 	if o.ValidationInitialCondition == "" {
-		o.ValidationInitialCondition = "continuation"
+		o.ValidationInitialCondition = ProcessValidationContinuation
 	}
-	if o.ValidationInitialCondition != "continuation" && o.ValidationInitialCondition != "zero" {
-		return o, fmt.Errorf("%w: validation initialization must be continuation or zero", ErrProcessData)
+	if o.ValidationInitialCondition != ProcessValidationContinuation && o.ValidationInitialCondition != ProcessValidationZero {
+		return o, fmt.Errorf("validation initialization %q must be continuation or zero: %w", o.ValidationInitialCondition, ErrProcessData)
 	}
-	if o.ValidationInitializationSamples < 0 || n-d.TrainingSamples-o.ValidationInitializationSamples < 2 {
-		return o, fmt.Errorf("%w: validation initialization prefix leaves insufficient held-out samples", ErrProcessData)
+	if o.ValidationInitializationSamples < 0 || n-d.TrainingSamples-o.ValidationInitializationSamples < processMinHeldOut {
+		return o, fmt.Errorf("validation initialization prefix leaves fewer than %d held-out samples: %w", processMinHeldOut, ErrProcessData)
 	}
 	lo, hi := d.Input[0], d.Input[0]
 	for i := range d.Input {
 		if !processFinite(d.Input[i]) || !processFinite(d.Output[i]) {
-			return o, fmt.Errorf("%w: nonfinite sample", ErrProcessData)
+			return o, fmt.Errorf("nonfinite sample %d: %w", i, ErrProcessData)
 		}
 		if i < d.TrainingSamples {
 			lo = math.Min(lo, d.Input[i])
@@ -392,10 +499,10 @@ func validateProcessFit(d ProcessFitData, o ProcessFitOptions) (ProcessFitOption
 		}
 	}
 	if hi-lo <= 1e-12*math.Max(1, math.Max(math.Abs(lo), math.Abs(hi))) {
-		return o, ErrProcessExcitation
+		return o, fmt.Errorf("training input is constant: %w", ErrProcessExcitation)
 	}
 	if o.Structure.Poles < 1 || o.Structure.Poles > 3 || (o.Structure.UnderdampedPair && o.Structure.Poles < 2) {
-		return o, fmt.Errorf("%w: choose one to three poles and a valid pair structure", ErrProcessData)
+		return o, fmt.Errorf("choose one to three poles and a valid pair structure: %w", ErrProcessData)
 	}
 	if o.MaxEvaluations == 0 {
 		o.MaxEvaluations = 2000
@@ -404,7 +511,7 @@ func validateProcessFit(d ProcessFitData, o ProcessFitOptions) (ProcessFitOption
 		o.Starts = 4
 	}
 	if o.MaxEvaluations < 20 || o.MaxEvaluations > 2000 || o.Starts < 1 || o.Starts > 8 {
-		return o, fmt.Errorf("%w: budget requires 20..2000 evaluations and 1..8 starts", ErrProcessData)
+		return o, fmt.Errorf("budget requires 20..2000 evaluations and 1..8 starts: %w", ErrProcessData)
 	}
 	duration := float64(d.TrainingSamples-1) * d.SampleTime
 	b := &o.Bounds
@@ -433,19 +540,19 @@ func validateProcessFit(d ProcessFitData, o ProcessFitOptions) (ProcessFitOption
 	}
 	for _, value := range []float64{b.MinTimeConstant, b.MaxTimeConstant, b.MinDelay, b.MaxDelay, b.MinZero, b.MaxZero, b.MinGain, b.MaxGain, b.MinFrequency, b.MaxFrequency, b.MinDamping, b.MaxDamping} {
 		if !processFinite(value) {
-			return o, fmt.Errorf("%w: all bounds must be finite", ErrProcessData)
+			return o, fmt.Errorf("all bounds must be finite: %w", ErrProcessData)
 		}
 	}
 	if !processFinite(b.MinGain) || !processFinite(b.MaxGain) || b.MinGain >= b.MaxGain {
-		return o, fmt.Errorf("%w: invalid gain bounds", ErrProcessData)
+		return o, fmt.Errorf("invalid gain bounds: %w", ErrProcessData)
 	}
 	for _, c := range processCoordinates(o.Structure, *b) {
 		if !processFinite(c.min) || !processFinite(c.max) || c.min >= c.max || (c.log && c.min <= 0) {
-			return o, fmt.Errorf("%w: invalid %s bounds", ErrProcessData, c.name)
+			return o, fmt.Errorf("invalid %s bounds: %w", c.name, ErrProcessData)
 		}
 	}
 	if b.MinDelay < 0 || b.MinDamping <= 0 || b.MaxDamping >= 1 {
-		return o, fmt.Errorf("%w: invalid delay/damping bounds", ErrProcessData)
+		return o, fmt.Errorf("invalid delay/damping bounds: %w", ErrProcessData)
 	}
 	if o.Initial != nil {
 		if _, err := processSystem(o.Structure, *o.Initial); err != nil {
@@ -453,13 +560,17 @@ func validateProcessFit(d ProcessFitData, o ProcessFitOptions) (ProcessFitOption
 		}
 		for _, v := range encodeProcessPoint(*o.Initial, processCoordinates(o.Structure, *b)) {
 			if !processFinite(v) || v < 0 || v > 1 {
-				return o, fmt.Errorf("%w: initial parameters outside bounds", ErrProcessData)
+				return o, fmt.Errorf("initial parameters outside bounds: %w", ErrProcessData)
 			}
 		}
 	}
 	return o, nil
 }
 func processFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// processMinHeldOut keeps at least two lag-one residual pairs for
+// ResidualLagOne.
+const processMinHeldOut = 3
 
 func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParameters, fixedGain *float64) (*ProcessFitResult, float64, error) {
 	system, err := processSystem(o.Structure, p)
@@ -470,7 +581,7 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 	if err != nil {
 		return nil, 0, err
 	}
-	if o.ValidationInitialCondition == "zero" {
+	if o.ValidationInitialCondition == ProcessValidationZero {
 		separate, _, err := processResponseBasis(system, d.Input[d.TrainingSamples:], d.SampleTime, p.Delay, false)
 		if err != nil {
 			return nil, 0, err
@@ -489,7 +600,7 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 		columns++
 	}
 	if d.TrainingSamples < 10*max(1, columns) {
-		return nil, 0, ErrProcessExcitation
+		return nil, 0, fmt.Errorf("%d training samples for %d profiled coefficients: %w", d.TrainingSamples, columns, ErrProcessExcitation)
 	}
 	coefficients := mat.NewDense(max(1, columns), 1, nil)
 	condition := 1.0
@@ -513,7 +624,7 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 		qr.Factorize(design)
 		condition = qr.Cond()
 		if !processFinite(condition) || condition > 1e12 {
-			return nil, 0, ErrProcessExcitation
+			return nil, 0, fmt.Errorf("profiling design condition %g: %w", condition, ErrProcessExcitation)
 		}
 		if err = qr.SolveTo(coefficients, false, target); err != nil {
 			return nil, 0, err
@@ -525,7 +636,10 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 		p.Gain = *fixedGain
 	}
 	if p.Gain < o.Bounds.MinGain || p.Gain > o.Bounds.MaxGain {
-		return nil, 0, ErrProcessFit
+		return nil, 0, fmt.Errorf("gain %g outside bounds [%g, %g]: %w", p.Gain, o.Bounds.MinGain, o.Bounds.MaxGain, ErrProcessFit)
+	}
+	if p.Gain == 0 && len(initial) > 0 {
+		return nil, 0, fmt.Errorf("zero gain makes the initial state unidentifiable: %w", ErrProcessFit)
 	}
 
 	result := &ProcessFitResult{Parameters: p, Structure: o.Structure, Bounds: o.Bounds, Condition: condition, Predicted: make([]float64, len(d.Input)), Residuals: make([]float64, len(d.Input))}
@@ -533,11 +647,7 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 		result.Offset = coefficients.At(columns-1, 0)
 	}
 	for j := range initial {
-		value := coefficients.At(j+startColumn, 0)
-		if p.Gain != 0 {
-			value /= p.Gain
-		}
-		result.InitialState = append(result.InitialState, value)
+		result.InitialState = append(result.InitialState, coefficients.At(j+startColumn, 0)/p.Gain)
 	}
 	for i := range d.Input {
 		v := p.Gain*forced[i] + result.Offset
@@ -547,7 +657,7 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 		result.Predicted[i] = v
 		result.Residuals[i] = d.Output[i] - v
 		if !processFinite(v) {
-			return nil, 0, ErrProcessFit
+			return nil, 0, fmt.Errorf("nonfinite prediction at sample %d: %w", i, ErrProcessFit)
 		}
 	}
 	var sse float64
@@ -568,7 +678,7 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 		baseline[i] = d.Output[validationStart+i] - mean
 	}
 	result.ValidationMeanNRMSE = processNRMSE(d.Output[validationStart:], baseline)
-	result.ResidualLagOne = processResidualLagOne(result.Residuals[validationStart:])
+	result.residualLagOne, result.residualLagOK = processResidualLagOne(result.Residuals[validationStart:])
 	result.System, err = p.System(o.Structure)
 	if err != nil {
 		return nil, 0, err
@@ -576,11 +686,12 @@ func evaluateProcessFit(d ProcessFitData, o ProcessFitOptions, p ProcessParamete
 	return result, value, nil
 }
 
-// processResidualLagOne is the Pearson correlation of (r[i], r[i-1]) pairs.
-func processResidualLagOne(r []float64) float64 {
+// processResidualLagOne is the Pearson correlation of (r[i], r[i-1]) pairs;
+// ok is false with fewer than two pairs or zero variance.
+func processResidualLagOne(r []float64) (float64, bool) {
 	pairs := len(r) - 1
 	if pairs < 2 {
-		return 0
+		return 0, false
 	}
 	var current, lagged float64
 	for i := 1; i < len(r); i++ {
@@ -597,9 +708,9 @@ func processResidualLagOne(r []float64) float64 {
 		laggedPower += b * b
 	}
 	if currentPower == 0 || laggedPower == 0 {
-		return 0
+		return 0, false
 	}
-	return math.Max(-1, math.Min(1, cross/math.Sqrt(currentPower*laggedPower)))
+	return math.Max(-1, math.Min(1, cross/math.Sqrt(currentPower*laggedPower))), true
 }
 
 func processNRMSE(values, residuals []float64) float64 {
@@ -625,7 +736,7 @@ func processNRMSE(values, residuals []float64) float64 {
 func processResponseBasis(system *System, input []float64, dt, delay float64, estimateInitial bool) ([]float64, [][]float64, error) {
 	n, _, _ := system.Dims()
 	if delay/dt >= float64(len(input)) {
-		return nil, nil, ErrProcessExcitation
+		return nil, nil, fmt.Errorf("delay %g spans the whole record: %w", delay, ErrProcessExcitation)
 	}
 	whole := int(math.Floor(delay / dt))
 	fraction := delay - float64(whole)*dt
@@ -710,23 +821,27 @@ func processResponseBasis(system *System, input []float64, dt, delay float64, es
 
 // EvaluateProcess evaluates manually edited physical parameters without
 // optimizing them. Optional initial-state/offset profiling remains training-only.
+// Errors follow FitProcess.
 func EvaluateProcess(ctx context.Context, data ProcessFitData, options ProcessFitOptions, parameters ProcessParameters) (*ProcessFitResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("EvaluateProcess: nil context: %w", ErrInvalidArgument)
+	}
 	options.Initial = &parameters
 	options, err := validateProcessFit(data, options)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("EvaluateProcess: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("EvaluateProcess: %w", err)
 	}
 	if parameters.Gain < options.Bounds.MinGain || parameters.Gain > options.Bounds.MaxGain {
-		return nil, fmt.Errorf("%w: edited gain is outside bounds", ErrProcessData)
+		return nil, fmt.Errorf("EvaluateProcess: edited gain %g is outside bounds: %w", parameters.Gain, ErrProcessData)
 	}
 	result, _, err := evaluateProcessFit(data, options, parameters, &parameters.Gain)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("EvaluateProcess: %w", err)
 	}
-	result.Termination = "manual-evaluation"
+	result.Termination = ProcessFitManual
 	result.Evaluations = 1
 	return result, nil
 }
