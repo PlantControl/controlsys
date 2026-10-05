@@ -4092,3 +4092,87 @@ func TestSimulateDelay_BoundaryDelay(t *testing.T) {
 		t.Errorf("Y[0,%d] = %f, want %f", steps-1, got, want)
 	}
 }
+
+func TestZeroDelayApproxKeepsDescriptorE(t *testing.T) {
+	sys, closed := internalDelayZerosFixture(t, 0, 2, mat.NewDense(1, 1, []float64{0.25}))
+	E := mat.NewDense(3, 3, []float64{1, 2, 0, 0, 1, 1, 1, 3, 1})
+	sys.E = mat.DenseCopyOf(E)
+	approx, err := sys.ZeroDelayApprox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approx.E == nil || !mat.Equal(approx.E, E) || approx.E == sys.E {
+		t.Fatalf("E not preserved as a copy: %v", approx.E)
+	}
+	if !mat.EqualApprox(approx.A, closed.A, 1e-14) {
+		t.Errorf("A mismatch")
+	}
+}
+
+func TestSetDelayModelZeroState(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		H, err := NewGain(mat.NewDense(2, 2, []float64{1, 0.5, 0.2, 0.1}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sys, err := SetDelayModel(H, []float64{3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, m, p := sys.Dims()
+		if n != 0 || m != 1 || p != 1 || len(sys.LFT.Tau) != 1 {
+			t.Fatalf("dims n=%d m=%d p=%d tau=%v", n, m, p, sys.LFT.Tau)
+		}
+		assertResponseOracle(t, "zero-state SetDelayModel", sys, func(s complex128) [][]complex128 {
+			d := exactDelayFactor(dt)(delayInternal, 3, s)
+			return [][]complex128{{1 + 0.5*d*0.2/(1-0.1*d)}}
+		})
+	}
+}
+
+func TestZeroDelayApproxKeepsDescriptorAndZeroState(t *testing.T) {
+	noInternal := func(dt float64) delayFactorFunc {
+		exact := exactDelayFactor(dt)
+		return func(c delayClass, tau float64, s complex128) complex128 {
+			if c == delayInternal {
+				return 1
+			}
+			return exact(c, tau, s)
+		}
+	}
+	for _, dt := range []float64{0, 0.1} {
+		A := mat.NewDense(2, 2, []float64{-1, 2, 0.5, -3})
+		if dt > 0 {
+			A = mat.NewDense(2, 2, []float64{0.5, 0.2, -0.1, 0.7})
+		}
+		desc, err := NewDescriptor(A, mat.NewDense(2, 2, []float64{1, 0.3, 0, 1}),
+			mat.NewDense(2, 2, []float64{1, 0, 0.4, 1}), mat.NewDense(2, 2, []float64{0.2, 0.1, 0, 0.3}),
+			mat.NewDense(2, 2, []float64{2, 0.5, 0.1, 1.5}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		desc.InputDelay = []float64{0, 2 * (1 + 9*dt*10)}
+		if err := desc.SetInternalDelay([]float64{0.7 * (1 + 9*dt*10)}, mat.NewDense(2, 1, []float64{1, 0.5}), mat.NewDense(1, 2, []float64{0.3, 1}),
+			mat.NewDense(2, 1, []float64{0.2, 0}), mat.NewDense(1, 2, []float64{0, 0.1}), mat.NewDense(1, 1, []float64{0.1})); err != nil {
+			t.Fatal(err)
+		}
+		gain, _ := NewGain(mat.NewDense(2, 2, []float64{1, 2, 3, 4}), dt)
+		gain.Delay = mat.NewDense(2, 2, []float64{4 * (1 + 9*dt*10) / 10, 0, 0, 0})
+		staticLFT, err := gain.PullDelaysToLFT()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, sys := range map[string]*System{"descriptor": desc, "zero-state": staticLFT} {
+			z, err := sys.ZeroDelayApprox()
+			if err != nil {
+				t.Fatalf("dt=%v %s: %v", dt, name, err)
+			}
+			if z.HasInternalDelay() {
+				t.Fatalf("dt=%v %s: internal delays remain", dt, name)
+			}
+			assertResponseOracle(t, fmt.Sprintf("dt=%v %s ZeroDelayApprox", dt, name), z, func(s complex128) [][]complex128 {
+				return evalDelaySystem(t, sys, s, noInternal(dt))
+			})
+		}
+	}
+}

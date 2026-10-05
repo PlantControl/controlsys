@@ -68,8 +68,20 @@ func TestPhaseCrossings_MultipleRevolutions(t *testing.T) {
 	omega := []float64{1, 2, 3, 4, 5, 6}
 	phase := []float64{-170, -190, -350, -370, -530, -550}
 	cs := phaseCrossings(omega, phase, -180)
-	if len(cs) != 3 {
-		t.Fatalf("got %d crossings, want 3", len(cs))
+	if len(cs) != 2 {
+		t.Fatalf("got %d crossings, want 2 (-360 is not a -180 crossing)", len(cs))
+	}
+	if cs[0].idx != 0 || cs[1].idx != 4 {
+		t.Errorf("idx = %d,%d, want 0,4", cs[0].idx, cs[1].idx)
+	}
+}
+
+func TestPhaseCrossings_ZeroWrapIgnored(t *testing.T) {
+	omega := []float64{1, 2, 3, 4}
+	phase := []float64{-10, 10, 170, -170}
+	cs := phaseCrossings(omega, phase, -180)
+	if len(cs) != 1 || cs[0].idx != 2 {
+		t.Fatalf("got %+v, want single crossing at idx 2", cs)
 	}
 }
 
@@ -337,6 +349,32 @@ func TestMargin_WithDelay(t *testing.T) {
 }
 
 // === Phase 3: Bandwidth tests ===
+
+func TestBandwidth_ScaledAndZeroPole(t *testing.T) {
+	z1 := mat.NewDense(1, 1, nil)
+	for _, k := range []float64{1e-5, 1, 1e5} {
+		sys, _ := New(mat.NewDense(1, 1, []float64{-k}), mat.NewDense(1, 1, []float64{k}), mat.NewDense(1, 1, []float64{1}), z1, 0)
+		bw, err := Bandwidth(sys, -3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := k * math.Sqrt(math.Pow(10, 0.3)-1)
+		if math.Abs(bw-want) > 1e-6*want {
+			t.Errorf("k=%g: BW = %g, want %g", k, bw, want)
+		}
+	}
+	// H(z) = 0.5/(z(z-0.5)): pole at z=0, DC gain 1
+	sys, _ := New(mat.NewDense(2, 2, []float64{0.5, 1, 0, 0}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{0.5, 0}), z1, 0.1)
+	bw, err := Bandwidth(sys, -3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := math.Acos(1.25-0.25*math.Pow(10, 0.3)) / 0.1
+	if math.Abs(bw-want) > 1e-6*want {
+		t.Errorf("z=0 pole: BW = %g, want %g", bw, want)
+	}
+}
 
 // G(s) = 1/(s+1): BW = 1 rad/s at -3dB
 func TestBandwidth_FirstOrder(t *testing.T) {
@@ -1374,5 +1412,343 @@ func TestDiskMarginSkew_Unstable(t *testing.T) {
 	}
 	if _, err := DiskMarginSkew(nil, math.NaN()); err == nil {
 		t.Error("NaN skew accepted")
+	}
+}
+
+func marginOracleSolve(a [][]complex128, b [][]complex128) [][]complex128 {
+	n := len(a)
+	if n == 0 {
+		return b
+	}
+	m := len(b[0])
+	aug := make([][]complex128, n)
+	for i := range n {
+		aug[i] = append(append([]complex128{}, a[i]...), b[i]...)
+	}
+	for c := range n {
+		piv := c
+		for r := c + 1; r < n; r++ {
+			if cmplx.Abs(aug[r][c]) > cmplx.Abs(aug[piv][c]) {
+				piv = r
+			}
+		}
+		aug[c], aug[piv] = aug[piv], aug[c]
+		for r := range n {
+			if r == c {
+				continue
+			}
+			f := aug[r][c] / aug[c][c]
+			for k := c; k < n+m; k++ {
+				aug[r][k] -= f * aug[c][k]
+			}
+		}
+	}
+	x := make([][]complex128, n)
+	for i := range n {
+		x[i] = make([]complex128, m)
+		for j := range m {
+			x[i][j] = aug[i][n+j] / aug[i][i]
+		}
+	}
+	return x
+}
+
+func marginOracleAt(m *mat.Dense, i, j int) float64 {
+	if m == nil {
+		return 0
+	}
+	r, c := m.Dims()
+	if r == 0 || c == 0 {
+		return 0
+	}
+	return m.At(i, j)
+}
+
+func marginOracleBlock(A, B, C, D *mat.Dense, n, cols, rows int, s complex128) [][]complex128 {
+	M := make([][]complex128, n)
+	Bc := make([][]complex128, n)
+	for i := range n {
+		M[i] = make([]complex128, n)
+		for j := range n {
+			M[i][j] = complex(-marginOracleAt(A, i, j), 0)
+		}
+		M[i][i] += s
+		Bc[i] = make([]complex128, cols)
+		for j := range cols {
+			Bc[i][j] = complex(marginOracleAt(B, i, j), 0)
+		}
+	}
+	X := marginOracleSolve(M, Bc)
+	G := make([][]complex128, rows)
+	for i := range rows {
+		G[i] = make([]complex128, cols)
+		for j := range cols {
+			v := complex(marginOracleAt(D, i, j), 0)
+			for k := range n {
+				v += complex(marginOracleAt(C, i, k), 0) * X[k][j]
+			}
+			G[i][j] = v
+		}
+	}
+	return G
+}
+
+// marginOracle evaluates a SISO loop from its state-space resolvent, internal
+// LFT delays and external delays, independently of TransferFunction.
+func marginOracle(sys *System, w float64) complex128 {
+	n, _, _ := sys.Dims()
+	s := complex(0, w)
+	if sys.Dt != 0 {
+		s = cmplx.Exp(complex(0, w*sys.Dt))
+	}
+	delay := func(tau float64) complex128 {
+		if sys.Dt == 0 {
+			return cmplx.Exp(-s * complex(tau, 0))
+		}
+		return cmplx.Pow(s, complex(-tau, 0))
+	}
+	h := marginOracleBlock(sys.A, sys.B, sys.C, sys.D, n, 1, 1, s)[0][0]
+	if sys.LFT != nil && len(sys.LFT.Tau) > 0 {
+		N := len(sys.LFT.Tau)
+		H12 := marginOracleBlock(sys.A, sys.LFT.B2, sys.C, sys.LFT.D12, n, N, 1, s)
+		H21 := marginOracleBlock(sys.A, sys.B, sys.LFT.C2, sys.LFT.D21, n, 1, N, s)
+		H22 := marginOracleBlock(sys.A, sys.LFT.B2, sys.LFT.C2, sys.LFT.D22, n, N, N, s)
+		dl := make([]complex128, N)
+		for k := range N {
+			dl[k] = delay(sys.LFT.Tau[k])
+		}
+		IM := make([][]complex128, N)
+		for i := range N {
+			IM[i] = make([]complex128, N)
+			for j := range N {
+				IM[i][j] = -H22[i][j] * dl[j]
+			}
+			IM[i][i] += 1
+		}
+		X := marginOracleSolve(IM, H21)
+		for k := range N {
+			h += H12[0][k] * dl[k] * X[k][0]
+		}
+	}
+	tau := marginOracleAt(sys.Delay, 0, 0)
+	if sys.InputDelay != nil {
+		tau += sys.InputDelay[0]
+	}
+	if sys.OutputDelay != nil {
+		tau += sys.OutputDelay[0]
+	}
+	if tau != 0 {
+		h *= delay(tau)
+	}
+	return h
+}
+
+func marginWrapDeg(x float64) float64 {
+	x = math.Mod(x+180, 360)
+	if x < 0 {
+		x += 360
+	}
+	return x - 180
+}
+
+// marginBruteForce scans a dense log grid for |L|=1 and angle(L)=-180 (mod 360).
+func marginBruteForce(sys *System, wlo, whi float64, n int) (gc, pc []float64) {
+	var prevW, prevMag, prevS float64
+	for k := 0; k <= n; k++ {
+		w := wlo * math.Pow(whi/wlo, float64(k)/float64(n))
+		h := marginOracle(sys, w)
+		mag := math.Log(cmplx.Abs(h))
+		sh := marginWrapDeg(cmplx.Phase(h)*180/math.Pi + 180)
+		if k > 0 {
+			if prevMag*mag < 0 {
+				gc = append(gc, math.Sqrt(prevW*w))
+			}
+			if prevS*sh < 0 && math.Abs(prevS-sh) < 180 {
+				pc = append(pc, math.Sqrt(prevW*w))
+			}
+		}
+		prevW, prevMag, prevS = w, mag, sh
+	}
+	if sys.Dt > 0 && whi == math.Pi/sys.Dt && math.Abs(prevS) < 1e-6 {
+		pc = append(pc, whi)
+	}
+	return gc, pc
+}
+
+func marginCountIn(ws []float64, lo, hi float64) []float64 {
+	var out []float64
+	for _, w := range ws {
+		if w >= lo && w <= hi {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+func marginMatch(t *testing.T, label string, got, want []float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("%s: got %d crossings %v, brute force %d %v", label, len(got), got, len(want), want)
+		return
+	}
+	for i := range want {
+		if math.Abs(got[i]-want[i]) > 1e-3*want[i] {
+			t.Errorf("%s[%d]: got w=%g, brute force %g", label, i, got[i], want[i])
+		}
+	}
+}
+
+func marginTimeScale(sys *System, k float64) *System {
+	c := sys.Copy()
+	c.A.Scale(k, c.A)
+	c.B.Scale(k, c.B)
+	return c
+}
+
+func TestAllMargin_CrossoverContract(t *testing.T) {
+	chain5 := func(k float64) *System {
+		A := mat.NewDense(5, 5, nil)
+		for i := range 5 {
+			A.Set(i, i, -1)
+			if i > 0 {
+				A.Set(i, i-1, 1)
+			}
+		}
+		B := mat.NewDense(5, 1, []float64{k, 0, 0, 0, 0})
+		C := mat.NewDense(1, 5, []float64{0, 0, 0, 0, 1})
+		s, _ := New(A, B, C, mat.NewDense(1, 1, nil), 0)
+		return s
+	}
+	first := func() *System {
+		s, _ := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+			mat.NewDense(1, 1, []float64{2}), mat.NewDense(1, 1, nil), 0)
+		return s
+	}
+	withIn := func(tau float64) *System {
+		s := first()
+		s.InputDelay = []float64{tau}
+		return s
+	}
+	disc := func() *System {
+		s, _ := New(mat.NewDense(2, 2, []float64{1.5, -0.7, 1, 0}), mat.NewDense(2, 1, []float64{1, 0}),
+			mat.NewDense(1, 2, []float64{0.3, 0.25}), mat.NewDense(1, 1, []float64{0.05}), 0.1)
+		return s
+	}
+	typeOne := func() *System {
+		s, _ := New(mat.NewDense(3, 3, []float64{0, 1, 0, 0, -1, 2, 0, -0.5, -3}),
+			mat.NewDense(3, 1, []float64{0, 0, 4}), mat.NewDense(1, 3, []float64{1, 0.2, 0}),
+			mat.NewDense(1, 1, nil), 0)
+		return s
+	}
+
+	type tc struct {
+		name     string
+		sys      func() *System
+		wlo, whi float64
+	}
+	cases := []tc{
+		{"10/(s+1)^5", func() *System { return chain5(10) }, 1e-3, 1e3},
+		{"0.5/(s+1)^5", func() *System { return chain5(0.5) }, 1e-3, 1e3},
+		{"input 0.5", func() *System { return withIn(0.5) }, 1e-2, 15},
+		{"output 0.5", func() *System { s := first(); s.OutputDelay = []float64{0.5}; return s }, 1e-2, 15},
+		{"iodelay 0.5", func() *System { s := first(); s.Delay = mat.NewDense(1, 1, []float64{0.5}); return s }, 1e-2, 15},
+		{"input 0.05", func() *System { return withIn(0.05) }, 1e-2, 150},
+		{"iodelay 0.02", func() *System { s := first(); s.Delay = mat.NewDense(1, 1, []float64{0.02}); return s }, 1e-2, 400},
+		{"lft 0.05", func() *System { s, _ := withIn(0.05).PullDelaysToLFT(); return s }, 1e-2, 150},
+		{"input 30", func() *System { return withIn(30) }, 1e-2, 5},
+		{"discrete D", disc, 1e-3, math.Pi / 0.1},
+		{"discrete z^-3", func() *System { s := disc(); s.InputDelay = []float64{3}; return s }, 1e-3, math.Pi / 0.1},
+		{"0.3/(z(z-1))", func() *System {
+			s, _ := New(mat.NewDense(2, 2, []float64{1, 1, 0, 0}), mat.NewDense(2, 1, []float64{0, 1}),
+				mat.NewDense(1, 2, []float64{0.3, 0}), mat.NewDense(1, 1, nil), 0.1)
+			return s
+		}, 1e-3, math.Pi / 0.1},
+		{"type1", typeOne, 1e-3, 1e3},
+		{"type1 x1e-5", func() *System { return marginTimeScale(typeOne(), 1e-5) }, 1e-8, 1e-2},
+		{"type1 x1e5", func() *System { return marginTimeScale(typeOne(), 1e5) }, 1e2, 1e8},
+		{"10/(s+1)^5 x1e5", func() *System { return marginTimeScale(chain5(10), 1e5) }, 1e2, 1e8},
+		{"10/(s+1)^5 x1e-5", func() *System { return marginTimeScale(chain5(10), 1e-5) }, 1e-8, 1e-2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sys := c.sys()
+			all, err := AllMargin(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, w := range all.PhaseCrossFreqs {
+				h := marginOracle(sys, w)
+				if d := marginWrapDeg(cmplx.Phase(h)*180/math.Pi + 180); math.Abs(d) > 1e-6 {
+					t.Errorf("phase crossover w=%g: angle(L)=%g deg, want -180 mod 360", w, cmplx.Phase(h)*180/math.Pi)
+				}
+				if gm := -20 * math.Log10(cmplx.Abs(h)); math.Abs(gm-all.GainMargins[i]) > 1e-8 {
+					t.Errorf("GM at w=%g: %g, want %g", w, all.GainMargins[i], gm)
+				}
+			}
+			for i, w := range all.GainCrossFreqs {
+				h := marginOracle(sys, w)
+				if math.Abs(cmplx.Abs(h)-1) > 1e-8 {
+					t.Errorf("gain crossover w=%g: |L|=%.12g, want 1", w, cmplx.Abs(h))
+				}
+				pm := all.PhaseMargins[i]
+				if pm <= -180 || pm > 180 {
+					t.Errorf("PM=%g at w=%g outside (-180,180]", pm, w)
+				}
+				if d := marginWrapDeg(pm - 180 - cmplx.Phase(h)*180/math.Pi); math.Abs(d) > 1e-6 {
+					t.Errorf("PM at w=%g: %g, angle(L)=%g", w, pm, cmplx.Phase(h)*180/math.Pi)
+				}
+			}
+			gc, pc := marginBruteForce(sys, c.wlo, c.whi, 200000)
+			marginMatch(t, "gain crossovers", marginCountIn(all.GainCrossFreqs, c.wlo, c.whi), gc)
+			marginMatch(t, "phase crossovers", marginCountIn(all.PhaseCrossFreqs, c.wlo, c.whi), pc)
+		})
+	}
+}
+
+func TestMargin_ClosedForms(t *testing.T) {
+	wpc := math.Tan(math.Pi / 5)
+	z1 := mat.NewDense(1, 1, nil)
+	chainA := mat.NewDense(5, 5, nil)
+	for i := range 5 {
+		chainA.Set(i, i, -1)
+		if i > 0 {
+			chainA.Set(i, i-1, 1)
+		}
+	}
+	unstable, _ := New(chainA, mat.NewDense(5, 1, []float64{10, 0, 0, 0, 0}), mat.NewDense(1, 5, []float64{0, 0, 0, 0, 1}), z1, 0)
+	zpole, _ := New(mat.NewDense(2, 2, []float64{1, 1, 0, 0}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{0.3, 0}), z1, 0.1)
+	nyq := func(k float64) *System {
+		s, _ := New(mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{k}), mat.NewDense(1, 1, []float64{1}), z1, 0.1)
+		return s
+	}
+	delayed, _ := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{2}), z1, 0)
+	delayed.InputDelay = []float64{30}
+	thz := 2 * math.Asin(0.15)
+	wg := math.Sqrt(3)
+	pm30 := marginWrapDeg(180 - math.Atan(wg)*180/math.Pi - 30*wg*180/math.Pi)
+
+	cases := []struct {
+		name           string
+		sys            *System
+		gm, wp, pm, wg float64
+	}{
+		{"10/(s+1)^5", unstable, -20 * math.Log10(10/math.Pow(1+wpc*wpc, 2.5)), wpc, math.NaN(), math.NaN()},
+		{"0.3/(z(z-1))", zpole, -20 * math.Log10(0.3), math.Pi / 3 / 0.1, 90 - 1.5*thz*180/math.Pi, thz / 0.1},
+		{"0.5/(z-1)", nyq(0.5), -20 * math.Log10(0.25), math.Pi / 0.1, math.NaN(), math.NaN()},
+		{"1.5/(z-1)", nyq(1.5), -20 * math.Log10(0.75), math.Pi / 0.1, math.NaN(), math.NaN()},
+		{"2e^-30s/(s+1)", delayed, math.NaN(), math.NaN(), pm30, wg},
+	}
+	for _, c := range cases {
+		r, err := Margin(c.sys)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if !math.IsNaN(c.gm) && (math.Abs(r.GainMargin-c.gm) > 1e-6 || math.Abs(r.WpFreq-c.wp) > 1e-6*c.wp) {
+			t.Errorf("%s: GM=%g@%g, want %g@%g", c.name, r.GainMargin, r.WpFreq, c.gm, c.wp)
+		}
+		if !math.IsNaN(c.pm) && (math.Abs(r.PhaseMargin-c.pm) > 1e-6 || (!math.IsNaN(c.wg) && math.Abs(r.WgFreq-c.wg) > 1e-6*c.wg)) {
+			t.Errorf("%s: PM=%g@%g, want %g@%g", c.name, r.PhaseMargin, r.WgFreq, c.pm, c.wg)
+		}
 	}
 }

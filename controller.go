@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -72,11 +73,21 @@ func Lqi(A, B, C, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	return Lqr(Aaug, Baug, Q, R, opts)
 }
 
-// Lqrd computes the discrete-time LQR gain from a continuous-time plant.
-// It discretizes (A, B) using zero-order hold with sample time dt,
-// then solves the discrete LQR problem.
+// Lqrd computes the discrete-time LQR gain from a continuous-time plant,
+// matching MATLAB lqrd. It discretizes (A, B) using zero-order hold with
+// sample time dt and discretizes the continuous cost
 //
-// A is n×n, B is n×m, Q is n×n, R is m×m, dt > 0.
+//	J = integral(x'Qx + u'Ru + 2x'Nu)
+//
+// for piecewise-constant u into the equivalent sampled-data weights
+//
+//	[Qd Nd; Nd' Rd] = integral_0^dt [Φ(τ) Γ(τ); 0 I]' [Q N; N' R] [Φ(τ) Γ(τ); 0 I] dτ
+//
+// (Van Loan's method), then solves the discrete LQR problem with cross term Nd.
+//
+// A is n×n, B is n×m, Q is n×n, R is m×m, dt > 0. opts.S, when set, is the
+// continuous cross weight N (n×m); opts.Workspace is used for the discrete
+// Riccati solve.
 func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if dt <= 0 {
 		return nil, ErrInvalidSampleTime
@@ -90,40 +101,89 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 		return nil, ErrDimensionMismatch
 	}
 	n := na
+	if qr, qc := Q.Dims(); qr != n || qc != n {
+		return nil, ErrDimensionMismatch
+	}
+	if rr, rc := R.Dims(); rr != m || rc != m {
+		return nil, ErrDimensionMismatch
+	}
+	var N *mat.Dense
+	if opts != nil && opts.S != nil {
+		N = opts.S
+		if sr, sc := N.Dims(); sr != n || sc != m {
+			return nil, ErrDimensionMismatch
+		}
+	}
 
 	if n == 0 {
 		return Dlqr(A, B, Q, R, opts)
 	}
 
 	nm := n + m
-	M := mat.NewDense(nm, nm, nil)
-	mRaw := M.RawMatrix()
+	h := 2 * nm
+	H := mat.NewDense(h, h, nil)
+	hRaw := H.RawMatrix()
 	aRaw := A.RawMatrix()
 	bRaw := B.RawMatrix()
+	qRaw := Q.RawMatrix()
+	rRaw := R.RawMatrix()
 	for i := range n {
-		mRow := mRaw.Data[i*mRaw.Stride:]
-		aRow := aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+n]
-		for j, v := range aRow {
-			mRow[j] = v * dt
+		for j := range n {
+			hRaw.Data[j*hRaw.Stride+i] = -aRaw.Data[i*aRaw.Stride+j] * dt
+			hRaw.Data[(nm+i)*hRaw.Stride+nm+j] = aRaw.Data[i*aRaw.Stride+j] * dt
+			hRaw.Data[i*hRaw.Stride+nm+j] = qRaw.Data[i*qRaw.Stride+j] * dt
 		}
-		bRow := bRaw.Data[i*bRaw.Stride : i*bRaw.Stride+m]
-		for j, v := range bRow {
-			mRow[n+j] = v * dt
+		for j := range m {
+			hRaw.Data[(n+j)*hRaw.Stride+i] = -bRaw.Data[i*bRaw.Stride+j] * dt
+			hRaw.Data[(nm+i)*hRaw.Stride+nm+n+j] = bRaw.Data[i*bRaw.Stride+j] * dt
+		}
+	}
+	for i := range m {
+		for j := range m {
+			hRaw.Data[(n+i)*hRaw.Stride+nm+n+j] = rRaw.Data[i*rRaw.Stride+j] * dt
+		}
+	}
+	if N != nil {
+		sRaw := N.RawMatrix()
+		for i := range n {
+			for j := range m {
+				v := sRaw.Data[i*sRaw.Stride+j] * dt
+				hRaw.Data[i*hRaw.Stride+nm+n+j] = v
+				hRaw.Data[(n+j)*hRaw.Stride+nm+i] = v
+			}
 		}
 	}
 
-	var eM mat.Dense
-	eM.Exp(M)
-	emRaw := eM.RawMatrix()
+	var eH mat.Dense
+	eH.Exp(H)
+	ehRaw := eH.RawMatrix()
+
+	phiData := make([]float64, nm*nm)
+	f12Data := make([]float64, nm*nm)
+	copyBlock(phiData, nm, 0, 0, ehRaw.Data, ehRaw.Stride, nm, nm, nm, nm)
+	copyBlock(f12Data, nm, 0, 0, ehRaw.Data, ehRaw.Stride, 0, nm, nm, nm)
+	Phi := mat.NewDense(nm, nm, phiData)
+	W := mat.NewDense(nm, nm, nil)
+	W.Mul(Phi.T(), mat.NewDense(nm, nm, f12Data))
+	wRaw := W.RawMatrix()
+	symmetrize(wRaw.Data, nm, wRaw.Stride)
 
 	adData := make([]float64, n*n)
 	bdData := make([]float64, n*m)
-	copyStrided(adData, n, emRaw.Data, emRaw.Stride, n, n)
-	copyBlock(bdData, m, 0, 0, emRaw.Data, emRaw.Stride, 0, n, n, m)
-	Ad := mat.NewDense(n, n, adData)
-	Bd := mat.NewDense(n, m, bdData)
+	qdData := make([]float64, n*n)
+	ndData := make([]float64, n*m)
+	rdData := make([]float64, m*m)
+	copyBlock(adData, n, 0, 0, phiData, nm, 0, 0, n, n)
+	copyBlock(bdData, m, 0, 0, phiData, nm, 0, n, n, m)
+	copyBlock(qdData, n, 0, 0, wRaw.Data, wRaw.Stride, 0, 0, n, n)
+	copyBlock(ndData, m, 0, 0, wRaw.Data, wRaw.Stride, 0, n, n, m)
+	copyBlock(rdData, m, 0, 0, wRaw.Data, wRaw.Stride, n, n, m, m)
 
-	return Dlqr(Ad, Bd, Q, R, opts)
+	dopts := &RiccatiOpts{S: mat.NewDense(n, m, ndData)}
+	if opts != nil {
+		dopts.Workspace = opts.Workspace
+	}
+	return Dlqr(mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData), mat.NewDense(n, n, qdData), mat.NewDense(m, m, rdData), dopts)
 }
 
 // Acker computes SISO pole placement using Ackermann's formula.
@@ -154,7 +214,7 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 		return nil, err
 	}
 
-	p := polyFromComplexRoots(poles)
+	p := polyFromComplexRoots(sortConjugatePairs(poles))
 
 	Cm, err := Ctrb(A, B)
 	if err != nil {
@@ -214,7 +274,9 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 // Uses Varga's method: Schur decomposition with iterative minimum-norm
 // eigenvalue assignment. Works for both SISO and MIMO systems.
 //
-// Poles must come in conjugate pairs. len(poles) must equal n.
+// Poles must come in conjugate pairs. len(poles) must equal n. Unlike
+// MATLAB place, pole multiplicity may exceed rank(B); the closed loop is then
+// defective and its repeated eigenvalues are correspondingly sensitive.
 func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	na, nac := A.Dims()
 	if na != nac {
@@ -270,71 +332,97 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 
 	trexcWork := make([]float64, n)
 	fBuf := make([]float64, m*2)
+	bGen := blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride}
+	zGen := blas64.General{Rows: n, Cols: n, Data: z, Stride: n}
+	bhatGen := blas64.General{Rows: n, Cols: m, Data: bhat, Stride: m}
+	updateBhat := func() {
+		blas64.Gemm(blas.Trans, blas.NoTrans, 1, zGen, bGen, 0, bhatGen)
+	}
+	moveBlock := func(from, to int) error {
+		if from == to {
+			return nil
+		}
+		if _, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, from, to, trexcWork); !ok {
+			return ErrSchurFailed
+		}
+		updateBhat()
+		return nil
+	}
+
 	nDone := 0
-
 	for nDone < n {
-		blockStart := n - 1
-		blockSize := 1
-		if blockStart > nDone && math.Abs(t[blockStart*n+blockStart-1]) > eps()*
-			(math.Abs(t[(blockStart-1)*n+blockStart-1])+math.Abs(t[blockStart*n+blockStart])) {
-			blockStart--
-			blockSize = 2
+		k := n - 1
+		if k > nDone && t[k*n+k-1] != 0 {
+			k--
 		}
 
-		if blockSize == 1 {
-			curEig := complex(t[blockStart*n+blockStart], 0)
-			pidx := selectClosestPole(pool, curEig, true)
-
-			if imag(pool[pidx]) != 0 && blockStart > nDone {
-				blockStart--
-				blockSize = 2
-			}
-		}
-
-		if blockSize == 1 {
-			if err := placeAssign1x1(t, z, bhat, fData, fBuf, pool, n, m, blockStart); err != nil {
-				return nil, err
-			}
-			pidx := selectClosestPole(pool, complex(t[blockStart*n+blockStart], 0), true)
-			pool = removePoolEntry(pool, pidx)
-		} else {
-			if err := placeAssign2x2(t, z, bhat, fData, fBuf, pool, n, m, blockStart); err != nil {
-				return nil, err
-			}
-			curEig := schurBlock2x2Eig(t, n, blockStart)
-			pidx := selectClosestPole(pool, curEig, false)
-			conj := cmplx.Conj(pool[pidx])
-			pool = removePoolEntry(pool, pidx)
-			for i, v := range pool {
-				if v == conj {
-					pool = removePoolEntry(pool, i)
-					break
+		if k == n-1 {
+			if pidx := closestPlacePole(pool, complex(t[k*n+k], 0), false); pidx >= 0 {
+				if err := placeAssign1x1(t, z, bhat, fData, fBuf, real(pool[pidx]), n, m, k); err != nil {
+					return nil, err
 				}
+				pool = removePoolEntry(pool, pidx)
+				if err := moveBlock(k, nDone); err != nil {
+					return nil, err
+				}
+				nDone++
+				continue
 			}
-		}
-
-		if blockStart != nDone {
-			_, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, blockStart, nDone, trexcWork)
-			if !ok {
+			j := nDone
+			for j < n-1 && t[(j+1)*n+j] != 0 {
+				j += 2
+			}
+			if j >= n-1 {
 				return nil, ErrSchurFailed
 			}
-
-			blas64.Gemm(blas.Trans, blas.NoTrans,
-				1, blas64.General{Rows: n, Cols: n, Data: z, Stride: n},
-				blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
-				0, blas64.General{Rows: n, Cols: m, Data: bhat, Stride: m})
+			if err := moveBlock(j, n-1); err != nil {
+				return nil, err
+			}
+			k = n - 2
 		}
 
-		nDone += blockSize
+		var tr, det float64
+		if pidx := closestPlacePole(pool, schurBlock2x2Eig(t, n, k), true); pidx >= 0 {
+			p := pool[pidx]
+			tr, det = 2*real(p), real(p)*real(p)+imag(p)*imag(p)
+			conj := cmplx.Conj(p)
+			pool = removePoolEntry(pool, pidx)
+			pool = removePoolEntry(pool, slices.Index(pool, conj))
+		} else {
+			cur := schurBlock2x2Eig(t, n, k)
+			i1 := closestPlacePole(pool, cur, false)
+			r1 := real(pool[i1])
+			pool = removePoolEntry(pool, i1)
+			i2 := closestPlacePole(pool, cur, false)
+			r2 := real(pool[i2])
+			pool = removePoolEntry(pool, i2)
+			tr, det = r1+r2, r1*r2
+		}
+		if err := placeAssign2x2(t, z, bhat, fData, fBuf, tr, det, n, m, k); err != nil {
+			return nil, err
+		}
+		standardizeSchur2x2(t, z, n, k)
+		updateBhat()
+		if t[(k+1)*n+k] != 0 {
+			if err := moveBlock(k, nDone); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := moveBlock(k, nDone); err != nil {
+				return nil, err
+			}
+			if err := moveBlock(k+1, nDone+1); err != nil {
+				return nil, err
+			}
+		}
+		nDone += 2
 	}
 
 	return mat.NewDense(m, n, fData), nil
 }
 
-func placeAssign1x1(t, z, bhat, fData, fBuf []float64, pool []complex128, n, m, k int) error {
+func placeAssign1x1(t, z, bhat, fData, fBuf []float64, desired float64, n, m, k int) error {
 	curEig := t[k*n+k]
-	pidx := selectClosestPole(pool, complex(curEig, 0), true)
-	desired := real(pool[pidx])
 
 	bkNorm2 := blas64.Dot(
 		blas64.Vector{N: m, Data: bhat[k*m:], Inc: 1},
@@ -372,14 +460,7 @@ func placeAssign1x1(t, z, bhat, fData, fBuf []float64, pool []complex128, n, m, 
 	return nil
 }
 
-func placeAssign2x2(t, z, bhat, fData, fBuf []float64, pool []complex128, n, m, k int) error {
-	curEig := schurBlock2x2Eig(t, n, k)
-	pidx := selectClosestPole(pool, curEig, false)
-	desA := real(pool[pidx])
-	desB := math.Abs(imag(pool[pidx]))
-	desiredTrace := 2 * desA
-	desiredDet := desA*desA + desB*desB
-
+func placeAssign2x2(t, z, bhat, fData, fBuf []float64, desiredTrace, desiredDet float64, n, m, k int) error {
 	for iter := range 10 {
 		t11 := t[k*n+k]
 		t12 := t[k*n+k+1]
@@ -441,7 +522,30 @@ func placeAssign2x2(t, z, bhat, fData, fBuf []float64, pool []complex128, n, m, 
 			}
 		}
 	}
+	t11, t12, t21, t22 := t[k*n+k], t[k*n+k+1], t[(k+1)*n+k], t[(k+1)*n+k+1]
+	scale := 1 + math.Abs(desiredTrace) + math.Abs(desiredDet)
+	if math.Abs(t11+t22-desiredTrace) > 1e-8*scale || math.Abs(t11*t22-t12*t21-desiredDet) > 1e-8*scale {
+		return fmt.Errorf("Place: mode %d: assignment did not converge: %w", k, ErrUncontrollable)
+	}
 	return nil
+}
+
+// standardizeSchur2x2 rotates the 2×2 block at k into standard Schur form,
+// splitting it into two 1×1 blocks when its eigenvalues are real.
+func standardizeSchur2x2(t, z []float64, n, k int) {
+	k1 := k + 1
+	var cs, sn float64
+	t[k*n+k], t[k*n+k1], t[k1*n+k], t[k1*n+k1], _, _, _, _, cs, sn = impl.Dlanv2(t[k*n+k], t[k*n+k1], t[k1*n+k], t[k1*n+k1])
+	if n-k-2 > 0 {
+		blas64.Rot(blas64.Vector{N: n - k - 2, Data: t[k*n+k+2:], Inc: 1},
+			blas64.Vector{N: n - k - 2, Data: t[k1*n+k+2:], Inc: 1}, cs, sn)
+	}
+	if k > 0 {
+		blas64.Rot(blas64.Vector{N: k, Data: t[k:], Inc: n},
+			blas64.Vector{N: k, Data: t[k1:], Inc: n}, cs, sn)
+	}
+	blas64.Rot(blas64.Vector{N: n, Data: z[k:], Inc: n},
+		blas64.Vector{N: n, Data: z[k1:], Inc: n}, cs, sn)
 }
 
 func validatePoles(poles []complex128) error {
@@ -516,15 +620,16 @@ func polyFromComplexRoots(roots []complex128) Poly {
 	return result
 }
 
-func selectClosestPole(pool []complex128, target complex128, preferReal bool) int {
-	best := 0
+// closestPlacePole returns the index of the pool entry nearest target among
+// complex (wantComplex) or real entries, or -1 if there is none.
+func closestPlacePole(pool []complex128, target complex128, wantComplex bool) int {
+	best := -1
 	bestDist := math.Inf(1)
 	for i, p := range pool {
-		d := cmplx.Abs(p - target)
-		if preferReal && imag(p) != 0 {
-			d += 1e10
+		if (imag(p) != 0) != wantComplex {
+			continue
 		}
-		if d < bestDist {
+		if d := cmplx.Abs(p - target); d < bestDist {
 			bestDist = d
 			best = i
 		}

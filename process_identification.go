@@ -172,6 +172,8 @@ func processSystem(s ProcessStructure, p ProcessParameters) (*System, error) {
 // FitProcess estimates only against training outputs. Validation is a free run
 // continued from training with measured inputs and no output-based correction.
 // A canceled/exhausted run returns its best valid result with explicit status.
+// EstimateInitialState also assumes the input was held at its first sample
+// before the record, which fills the delay line of a delayed model.
 func FitProcess(ctx context.Context, data ProcessFitData, options ProcessFitOptions) (*ProcessFitResult, error) {
 	options, err := validateProcessFit(data, options)
 	if err != nil {
@@ -622,6 +624,9 @@ func processNRMSE(values, residuals []float64) float64 {
 
 // processResponseBasis splits each sample interval at the delayed hold switch.
 // Fractional delay therefore stays exact for piecewise-constant measured input.
+// With an estimated initial state the input is held at its first sample before
+// the record, so the delay line starts consistent with that state; otherwise
+// the model starts at rest with zero input.
 func processResponseBasis(system *System, input []float64, dt, delay float64, estimateInitial bool) ([]float64, [][]float64, error) {
 	n, _, _ := system.Dims()
 	if delay/dt >= float64(len(input)) {
@@ -662,8 +667,11 @@ func processResponseBasis(system *System, input []float64, dt, delay float64, es
 		}
 	}
 	at := func(i int) float64 {
-		if i < 0 || i >= len(input) {
+		switch {
+		case i >= len(input), i < 0 && !estimateInitial:
 			return 0
+		case i < 0:
+			return input[0]
 		}
 		return input[i]
 	}
