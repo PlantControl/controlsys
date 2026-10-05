@@ -6,6 +6,8 @@ import (
 	"sort"
 )
 
+// ZPK is a p×m zero-pole-gain model, as MATLAB zpk: channel (i, j) is
+// Gain[i][j]·Π(s-Zeros[i][j])/Π(s-Poles[i][j]).
 type ZPK struct {
 	Zeros      [][][]complex128
 	Poles      [][][]complex128
@@ -30,15 +32,17 @@ func (z *ZPK) Copy() *ZPK {
 	}
 }
 
+// NewZPK returns the SISO model gain·Π(s-zeros)/Π(s-poles), as MATLAB
+// zpk(z, p, k, Ts). Complex zeros and poles must come in conjugate pairs.
 func NewZPK(zeros, poles []complex128, gain, dt float64) (*ZPK, error) {
 	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewZPK: %w", err)
 	}
 	if err := validatePoles(zeros); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewZPK: zeros: %w", err)
 	}
 	if err := validatePoles(poles); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewZPK: poles: %w", err)
 	}
 	return &ZPK{
 		Zeros: [][][]complex128{{copyComplex(zeros)}},
@@ -48,24 +52,26 @@ func NewZPK(zeros, poles []complex128, gain, dt float64) (*ZPK, error) {
 	}, nil
 }
 
+// NewZPKMIMO returns the p×m model with channel (i, j) given by zeros[i][j],
+// poles[i][j] and gain[i][j], as MATLAB zpk(Z, P, K, Ts) with cell arrays.
 func NewZPKMIMO(zeros, poles [][][]complex128, gain [][]float64, dt float64) (*ZPK, error) {
 	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewZPKMIMO: %w", err)
 	}
 	p := len(gain)
 	if p == 0 {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("NewZPKMIMO: gain has no rows: %w", ErrDimensionMismatch)
 	}
 	m := len(gain[0])
 	if m == 0 {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("NewZPKMIMO: gain has no columns: %w", ErrDimensionMismatch)
 	}
 	if len(zeros) != p || len(poles) != p {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("NewZPKMIMO: zeros has %d rows and poles %d, want %d: %w", len(zeros), len(poles), p, ErrDimensionMismatch)
 	}
 	for i := range p {
 		if len(gain[i]) != m || len(zeros[i]) != m || len(poles[i]) != m {
-			return nil, ErrDimensionMismatch
+			return nil, fmt.Errorf("NewZPKMIMO: row %d has %d gains, %d zero sets and %d pole sets, want %d: %w", i, len(gain[i]), len(zeros[i]), len(poles[i]), m, ErrDimensionMismatch)
 		}
 	}
 
@@ -79,10 +85,10 @@ func NewZPKMIMO(zeros, poles [][][]complex128, gain [][]float64, dt float64) (*Z
 		copy(gCopy[i], gain[i])
 		for j := range m {
 			if err := validatePoles(zeros[i][j]); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("NewZPKMIMO: zeros (%d,%d): %w", i, j, err)
 			}
 			if err := validatePoles(poles[i][j]); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("NewZPKMIMO: poles (%d,%d): %w", i, j, err)
 			}
 			zCopy[i][j] = copyComplex(zeros[i][j])
 			pCopy[i][j] = copyComplex(poles[i][j])
@@ -91,6 +97,7 @@ func NewZPKMIMO(zeros, poles [][][]complex128, gain [][]float64, dt float64) (*Z
 	return &ZPK{Zeros: zCopy, Poles: pCopy, Gain: gCopy, Dt: dt}, nil
 }
 
+// Dims returns the number of outputs p and inputs m.
 func (z *ZPK) Dims() (p, m int) {
 	p = len(z.Gain)
 	if p > 0 {
@@ -100,14 +107,29 @@ func (z *ZPK) Dims() (p, m int) {
 }
 
 func (z *ZPK) validateShape() (p, m int, err error) {
-	return validateZPKChannelShape(z)
+	p, m, err = validateZPKChannelShape(z)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := newTimeDomain(z.Dt).validateSampleTime(); err != nil {
+		return 0, 0, err
+	}
+	return p, m, nil
 }
 
+// IsContinuous reports whether z is a continuous-time model (Dt = 0).
 func (z *ZPK) IsContinuous() bool { return z.Dt == 0 }
-func (z *ZPK) IsDiscrete() bool   { return z.Dt > 0 }
 
-func (z *ZPK) Eval(s complex128) [][]complex128 {
-	p, m := z.Dims()
+// IsDiscrete reports whether z is a discrete-time model (Dt > 0).
+func (z *ZPK) IsDiscrete() bool { return z.Dt > 0 }
+
+// Eval evaluates the frequency response H(s) at the complex point s, as
+// MATLAB evalfr(sys, s). A malformed model returns an error.
+func (z *ZPK) Eval(s complex128) ([][]complex128, error) {
+	p, m, err := z.validateShape()
+	if err != nil {
+		return nil, fmt.Errorf("ZPK.Eval: %w", err)
+	}
 	result := make([][]complex128, p)
 	for i := range p {
 		result[i] = make([]complex128, m)
@@ -115,18 +137,27 @@ func (z *ZPK) Eval(s complex128) [][]complex128 {
 			result[i][j] = zpkEvalChannel(s, z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j])
 		}
 	}
-	return result
+	return result, nil
 }
 
 func zpkEvalChannel(s complex128, zeros, poles []complex128, gain float64) complex128 {
 	return newRationalChannel(zeros, poles, gain).eval(s)
 }
 
+// FreqResponse evaluates the frequency response at the real frequencies
+// omega (rad/s), as MATLAB freqresp. An empty or non-finite omega returns
+// ErrInvalidArgument.
 func (z *ZPK) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
-	if len(omega) == 0 {
-		return nil, ErrDimensionMismatch
+	p, m, err := z.validateShape()
+	if err != nil {
+		return nil, fmt.Errorf("ZPK.FreqResponse: %w", err)
 	}
-	p, m := z.Dims()
+	if len(omega) == 0 {
+		return nil, fmt.Errorf("ZPK.FreqResponse: omega is empty: %w", ErrInvalidArgument)
+	}
+	if err := requireFinite("ZPK.FreqResponse", "omega", omega...); err != nil {
+		return nil, err
+	}
 	data := make([]complex128, len(omega)*p*m)
 	continuous := z.IsContinuous()
 	dt := z.Dt
@@ -147,7 +178,16 @@ func (z *ZPK) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 	return newFreqResponseMatrix(data, omega, p, m, z.InputName, z.OutputName), nil
 }
 
+// TransferFunction converts z to transfer-function form, as MATLAB tf(zpk).
 func (z *ZPK) TransferFunction() (*TransferFunc, error) {
+	tf, err := z.transferFunction()
+	if err != nil {
+		return nil, fmt.Errorf("ZPK.TransferFunction: %w", err)
+	}
+	return tf, nil
+}
+
+func (z *ZPK) transferFunction() (*TransferFunc, error) {
 	p, m, err := z.validateShape()
 	if err != nil {
 		return nil, err
@@ -172,13 +212,15 @@ func (z *ZPK) TransferFunction() (*TransferFunc, error) {
 	return tf, nil
 }
 
+// ZPK converts tf to zero-pole-gain form, as MATLAB zpk(tf). Delays cannot
+// be represented and return ErrDelayNotRepresentable.
 func (tf *TransferFunc) ZPK() (*ZPK, error) {
 	p, m, err := tf.validateShape()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("TransferFunc.ZPK: %w", err)
 	}
 	if tf.HasDelay() {
-		return nil, fmt.Errorf("ZPK: %w", ErrDelayNotRepresentable)
+		return nil, fmt.Errorf("TransferFunc.ZPK: %w", ErrDelayNotRepresentable)
 	}
 	z := &ZPK{
 		Zeros: make([][][]complex128, p),
@@ -194,7 +236,7 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 		for j := range m {
 			ch, err := rationalChannelFromPolynomials(tf.Num[i][j], tf.Den[i])
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("TransferFunc.ZPK: channel (%d,%d): %w", i, j, err)
 			}
 			z.Zeros[i][j] = ch.zeros
 			z.Poles[i][j] = copyComplex(ch.poles)
@@ -206,14 +248,16 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 	return z, nil
 }
 
+// ZPKModel returns the zero-pole-gain form of sys via TransferFunction, as
+// MATLAB zpk(ss).
 func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	tfResult, err := sys.TransferFunction(opts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ZPKModel: %w", err)
 	}
 	zpk, err := tfResult.TF.ZPK()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ZPKModel: %w", err)
 	}
 	zpk.InputName = copyStringSlice(sys.InputName)
 	zpk.OutputName = copyStringSlice(sys.OutputName)
@@ -224,18 +268,25 @@ func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	}, nil
 }
 
+// ZPKResult is the result of (*System).ZPKModel.
 type ZPKResult struct {
 	ZPK          *ZPK
 	MinimalOrder int
 	RowDegrees   []int
 }
 
-func (z *ZPK) StateSpace(opts *StateSpaceOpts) (*StateSpaceResult, error) {
-	tf, err := z.TransferFunction()
+// StateSpace realizes z via its transfer function, as MATLAB ss(zpk); see
+// (*TransferFunc).StateSpace.
+func (z *ZPK) StateSpace() (*StateSpaceResult, error) {
+	tf, err := z.transferFunction()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ZPK.StateSpace: %w", err)
 	}
-	return tf.StateSpace(opts)
+	res, err := tf.stateSpace()
+	if err != nil {
+		return nil, fmt.Errorf("ZPK.StateSpace: %w", err)
+	}
+	return res, nil
 }
 
 func copyComplex(src []complex128) []complex128 {

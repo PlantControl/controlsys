@@ -27,7 +27,7 @@ func TestPadeDelayOrder1(t *testing.T) {
 	// H(s) = (1 - tau*s/2) / (1 + tau*s/2)
 	// At s=0: H(0)=1
 	tfRes, _ := sys.TransferFunction(nil)
-	h0 := tfRes.TF.Eval(0)
+	h0 := mustEval(t, tfRes.TF, 0)
 	if math.Abs(real(h0[0][0])-1) > 1e-12 {
 		t.Errorf("H(0) = %v, want 1", h0[0][0])
 	}
@@ -50,7 +50,7 @@ func TestPadeDelayOrder2FreqResponse(t *testing.T) {
 	freqs := []float64{0.1, 0.5, 1.0}
 	for _, w := range freqs {
 		s := complex(0, w)
-		hPade := tfRes.TF.Eval(s)[0][0]
+		hPade := mustEval(t, tfRes.TF, s)[0][0]
 		hExact := cmplx.Exp(-s * complex(tau, 0))
 
 		// Magnitude should be ~1 (allpass property)
@@ -81,7 +81,7 @@ func TestPadeDelayHighOrder(t *testing.T) {
 		}
 
 		tfRes, _ := sys.TransferFunction(nil)
-		h0 := tfRes.TF.Eval(0)[0][0]
+		h0 := mustEval(t, tfRes.TF, 0)[0][0]
 		if math.Abs(real(h0)-1) > 1e-8 || math.Abs(imag(h0)) > 1e-8 {
 			t.Errorf("order %d: H(0) = %v, want 1", order, h0)
 		}
@@ -95,7 +95,7 @@ func TestPadeDelayAllpass(t *testing.T) {
 
 	for _, w := range []float64{0.01, 0.1, 1, 5, 10, 50} {
 		s := complex(0, w)
-		h := tfRes.TF.Eval(s)[0][0]
+		h := mustEval(t, tfRes.TF, s)[0][0]
 		mag := cmplx.Abs(h)
 		if math.Abs(mag-1) > 1e-8 {
 			t.Errorf("w=%v: |H| = %v, want 1", w, mag)
@@ -113,7 +113,7 @@ func TestPadeDelayConvergence(t *testing.T) {
 	for order := 1; order <= 6; order++ {
 		sys, _ := PadeDelay(tau, order)
 		tfRes, _ := sys.TransferFunction(nil)
-		h := tfRes.TF.Eval(s)[0][0]
+		h := mustEval(t, tfRes.TF, s)[0][0]
 		curErr := cmplx.Abs(h - exact)
 		if curErr >= prevErr {
 			t.Errorf("order %d error %v >= order %d error %v (should converge)", order, curErr, order-1, prevErr)
@@ -174,7 +174,7 @@ func TestPadeDelayOrder1ExactCoeffs(t *testing.T) {
 	// Exact TF: (-s/2 + 1)/(s/2 + 1)
 	for _, w := range []float64{0, 0.5, 1, 2, 5} {
 		s := complex(0, w)
-		got := tfRes.TF.Eval(s)[0][0]
+		got := mustEval(t, tfRes.TF, s)[0][0]
 		want := (-s/2 + 1) / (s/2 + 1)
 		if cmplx.Abs(got-want) > 1e-12 {
 			t.Errorf("w=%v: got %v, want %v", w, got, want)
@@ -193,7 +193,7 @@ func TestPadeDelayOrder2ExactCoeffs(t *testing.T) {
 
 	for _, freq := range []float64{0, 0.5, 1, 2, 5} {
 		s := complex(0, freq)
-		got := tfRes.TF.Eval(s)[0][0]
+		got := mustEval(t, tfRes.TF, s)[0][0]
 
 		// Horner: evaluate descending-order polynomials
 		sn := complex(0, 0)
@@ -229,17 +229,17 @@ func TestPadeDelayAccuracyByOrder(t *testing.T) {
 		}
 
 		tfRes, _ := sys.TransferFunction(nil)
-		h0 := tfRes.TF.Eval(0)[0][0]
+		h0 := mustEval(t, tfRes.TF, 0)[0][0]
 		if math.Abs(real(h0)-1) > 1e-8 {
 			t.Errorf("order %d: H(0) = %v, want 1", n, h0)
 		}
 
-		hAt2i := tfRes.TF.Eval(complex(0, 2))[0][0]
+		hAt2i := mustEval(t, tfRes.TF, complex(0, 2))[0][0]
 		if math.Abs(cmplx.Abs(hAt2i)-1) > 1e-8 {
 			t.Errorf("order %d: |H(2i)| = %v, want 1", n, cmplx.Abs(hAt2i))
 		}
 
-		h1i := tfRes.TF.Eval(s)[0][0]
+		h1i := mustEval(t, tfRes.TF, s)[0][0]
 		if cmplx.Abs(h1i-exact) > tols[n-1] {
 			t.Errorf("order %d: H(i) error = %v, tol = %v", n, cmplx.Abs(h1i-exact), tols[n-1])
 		}
@@ -263,7 +263,7 @@ func TestPadeSeriesFreqResponse(t *testing.T) {
 		exact := plantFR * cmplx.Exp(-s*complex(tau, 0))
 
 		tfRes, _ := series.TransferFunction(nil)
-		got := tfRes.TF.Eval(s)[0][0]
+		got := mustEval(t, tfRes.TF, s)[0][0]
 		if cmplx.Abs(got-exact) > 0.01 {
 			t.Errorf("w=%v: got %v, want %v (err=%v)", w, got, exact, cmplx.Abs(got-exact))
 		}
@@ -290,7 +290,7 @@ func TestPadeFeedbackFreqResponse(t *testing.T) {
 		exact := P1fr * delayFR / (1 + P1fr*delayFR)
 
 		tfRes, _ := cl.TransferFunction(nil)
-		got := tfRes.TF.Eval(s)[0][0]
+		got := mustEval(t, tfRes.TF, s)[0][0]
 		if cmplx.Abs(got-exact) > 0.02 {
 			t.Errorf("w=%v: got %v, want %v (err=%v)", w, got, exact, cmplx.Abs(got-exact))
 		}
@@ -344,7 +344,7 @@ func TestPadeSISO(t *testing.T) {
 	tfRes, _ := result.TransferFunction(nil)
 	for _, w := range []float64{0.1, 0.5, 1.0} {
 		s := complex(0, w)
-		got := tfRes.TF.Eval(s)[0][0]
+		got := mustEval(t, tfRes.TF, s)[0][0]
 		plantFR := complex(3, 0) / (s + 2)
 		exact := plantFR * cmplx.Exp(-s*complex(0.5, 0))
 		if cmplx.Abs(got-exact) > 0.02 {
@@ -398,7 +398,7 @@ func TestPadeOutputDelay(t *testing.T) {
 	tfRes, _ := result.TransferFunction(nil)
 	for _, w := range []float64{0.1, 0.5, 1.0} {
 		s := complex(0, w)
-		got := tfRes.TF.Eval(s)[0][0]
+		got := mustEval(t, tfRes.TF, s)[0][0]
 		exact := cmplx.Exp(-s*complex(0.3, 0)) / (s + 1)
 		if cmplx.Abs(got-exact) > 0.01 {
 			t.Errorf("w=%v: err=%v", w, cmplx.Abs(got-exact))
@@ -494,7 +494,7 @@ func TestPadeAllpass(t *testing.T) {
 	tfRes, _ := result.TransferFunction(nil)
 	for _, w := range []float64{0.01, 0.1, 1, 5, 10} {
 		s := complex(0, w)
-		h := tfRes.TF.Eval(s)[0][0]
+		h := mustEval(t, tfRes.TF, s)[0][0]
 		mag := cmplx.Abs(h)
 		if math.Abs(mag-1) > 1e-6 {
 			t.Errorf("w=%v: |H| = %v, want 1", w, mag)

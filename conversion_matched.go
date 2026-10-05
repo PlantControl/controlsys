@@ -57,7 +57,7 @@ func (sys *System) d2cMatched() (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	ss, err := model.StateSpace(nil)
+	ss, err := model.StateSpace()
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	realized, err := discrete.StateSpace(nil)
+	realized, err := discrete.StateSpace()
 	if err != nil {
 		return nil, err
 	}

@@ -1897,7 +1897,7 @@ func TestAllMargin_DiscreteNarrowResonance(t *testing.T) {
 	g := cmplx.Abs(Poly(num).Eval(z) / Poly(den).Eval(z))
 	k := (1 + 1e-5) / g
 	tf := &TransferFunc{Num: [][][]float64{{{k * num[0], k * num[1], k * num[2]}}}, Den: [][]float64{den}, Dt: dt}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2213,7 +2213,7 @@ func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
 // other kind is still found exactly.
 func TestAllMargin_SingularPencils(t *testing.T) {
 	tf := func(num, den []float64, dt float64) *System {
-		res, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: dt}).StateSpace(nil)
+		res, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
 		if err != nil {
 			t.Fatal(err)
 		}

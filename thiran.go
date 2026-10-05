@@ -111,7 +111,7 @@ func thiranFilter(D float64, N int, dt float64) (*System, error) {
 		Dt:  dt,
 	}
 
-	result, err := tf.StateSpace(nil)
+	result, err := tf.stateSpace()
 	if err != nil {
 		return nil, err
 	}

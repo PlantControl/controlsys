@@ -264,7 +264,7 @@ func TestSS2TF_StrictlyProper(t *testing.T) {
 		t.Errorf("den = %v, want [1 1]", den)
 	}
 
-	ssRes, err := tfRes.TF.StateSpace(nil)
+	ssRes, err := tfRes.TF.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestSS2TF_WithFeedthrough(t *testing.T) {
 	}
 
 	s := complex(0, 1.0)
-	tfVal := tfRes.TF.Eval(s)[0][0]
+	tfVal := mustEval(t, tfRes.TF, s)[0][0]
 	want := (complex(1, 0)*s + 5) / (s + 2)
 	if cmplx.Abs(tfVal-want) > 1e-8 {
 		t.Errorf("TF(j) = %v, want %v", tfVal, want)
@@ -358,7 +358,7 @@ func TestTF2SS_StaticGain(t *testing.T) {
 		Den: [][]float64{{46}},
 	}
 
-	ssRes, err := tf.StateSpace(nil)
+	ssRes, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,11 @@ func evalTF(sys *System, s complex128) [][]complex128 {
 	if err != nil {
 		panic(err)
 	}
-	return tf.TF.Eval(s)
+	h, err := tf.TF.Eval(s)
+	if err != nil {
+		panic(err)
+	}
+	return h
 }
 
 func assertTFClose(t *testing.T, sys *System, s complex128, want complex128, tol float64) {

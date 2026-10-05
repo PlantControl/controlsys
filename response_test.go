@@ -584,7 +584,7 @@ func TestStep_Discrete_PythonControl(t *testing.T) {
 		Dt:    1.0,
 		Delay: nil,
 	}
-	ssr, err := tf.StateSpace(nil)
+	ssr, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}

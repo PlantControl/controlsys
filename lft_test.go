@@ -15,7 +15,11 @@ func evalMIMOTF(sys *System, s complex128) [][]complex128 {
 	if err != nil {
 		panic(err)
 	}
-	return tf.TF.Eval(s)
+	h, err := tf.TF.Eval(s)
+	if err != nil {
+		panic(err)
+	}
+	return h
 }
 
 func TestLFT_NilM(t *testing.T) {

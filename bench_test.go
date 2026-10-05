@@ -1365,7 +1365,7 @@ func BenchmarkZPKToSS_SISO(b *testing.B) {
 	z, _ := NewZPK([]complex128{-1, -2}, []complex128{-3, -4, -5}, 2.0, 0)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		z.StateSpace(nil)
+		z.StateSpace()
 	}
 }
 

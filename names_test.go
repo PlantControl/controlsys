@@ -846,7 +846,7 @@ func TestTransferFunc_Names(t *testing.T) {
 		t.Errorf("TF OutputName = %v, want [position]", tfResult.TF.OutputName)
 	}
 
-	ssResult, err := tfResult.TF.StateSpace(nil)
+	ssResult, err := tfResult.TF.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}

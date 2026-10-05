@@ -36,7 +36,7 @@ func TestThiranDelayAllpass(t *testing.T) {
 
 	for _, w := range []float64{0.01, 0.1, 0.5, 1.0, 2.0} {
 		z := cmplx.Exp(complex(0, w*dt))
-		h := tfRes.TF.Eval(z)[0][0]
+		h := mustEval(t, tfRes.TF, z)[0][0]
 		mag := cmplx.Abs(h)
 		if math.Abs(mag-1) > 1e-8 {
 			t.Errorf("w=%v: |H| = %v, want 1 (allpass)", w, mag)
@@ -59,8 +59,8 @@ func TestThiranDelayGroupDelay(t *testing.T) {
 	dw := 1e-6
 	z1 := cmplx.Exp(complex(0, dw))
 	z2 := cmplx.Exp(complex(0, 2*dw))
-	h1 := tfRes.TF.Eval(z1)[0][0]
-	h2 := tfRes.TF.Eval(z2)[0][0]
+	h1 := mustEval(t, tfRes.TF, z1)[0][0]
+	h2 := mustEval(t, tfRes.TF, z2)[0][0]
 	phase1 := cmplx.Phase(h1)
 	phase2 := cmplx.Phase(h2)
 	groupDelay := -(phase2 - phase1) / dw
@@ -85,7 +85,7 @@ func TestThiranDelayIntegerFallback(t *testing.T) {
 	// Should act as pure z^{-5}
 	tfRes, _ := sys.TransferFunction(nil)
 	z := cmplx.Exp(complex(0, 0.3))
-	h := tfRes.TF.Eval(z)[0][0]
+	h := mustEval(t, tfRes.TF, z)[0][0]
 	expected := cmplx.Pow(z, -5)
 	if cmplx.Abs(h-expected) > 1e-10 {
 		t.Errorf("integer delay: H(z)=%v, want z^{-5}=%v", h, expected)
@@ -141,7 +141,7 @@ func TestThiranIntegerDelayExact(t *testing.T) {
 
 			for _, w := range []float64{0.1, 0.5, 1.0, 2.0} {
 				z := cmplx.Exp(complex(0, w*dt))
-				got := tfRes.TF.Eval(z)[0][0]
+				got := mustEval(t, tfRes.TF, z)[0][0]
 				want := cmplx.Pow(z, complex(float64(-nSamples), 0))
 				if cmplx.Abs(got-want) > 1e-10 {
 					t.Errorf("D=%d dt=%v w=%v: got %v, want z^{-%d}=%v", nSamples, dt, w, got, nSamples, want)
@@ -166,7 +166,7 @@ func TestThiranPiDelay(t *testing.T) {
 
 	for _, w := range []float64{0.01, 0.1, 0.5, 1.0} {
 		z := cmplx.Exp(complex(0, w*dt))
-		h := tfRes.TF.Eval(z)[0][0]
+		h := mustEval(t, tfRes.TF, z)[0][0]
 
 		// Allpass: |H(z)| = 1
 		mag := cmplx.Abs(h)
@@ -179,8 +179,8 @@ func TestThiranPiDelay(t *testing.T) {
 	dw := 1e-6
 	z1 := cmplx.Exp(complex(0, dw))
 	z2 := cmplx.Exp(complex(0, 2*dw))
-	h1 := tfRes.TF.Eval(z1)[0][0]
-	h2 := tfRes.TF.Eval(z2)[0][0]
+	h1 := mustEval(t, tfRes.TF, z1)[0][0]
+	h2 := mustEval(t, tfRes.TF, z2)[0][0]
 	gd := -(cmplx.Phase(h2) - cmplx.Phase(h1)) / dw
 	if math.Abs(gd-D) > 0.01 {
 		t.Errorf("group delay = %v, want π ≈ %v", gd, D)
@@ -219,7 +219,7 @@ func TestIntegerDelaySSFreqResponse(t *testing.T) {
 
 		for _, w := range []float64{0.5, 1.0, 5.0} {
 			z := cmplx.Exp(complex(0, w*dt))
-			got := tfRes.TF.Eval(z)[0][0]
+			got := mustEval(t, tfRes.TF, z)[0][0]
 			want := cmplx.Exp(complex(0, -w*float64(d)*dt))
 			if cmplx.Abs(got-want) > 1e-12 {
 				t.Errorf("d=%d w=%v: got %v, want %v", d, w, got, want)

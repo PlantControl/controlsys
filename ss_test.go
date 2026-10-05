@@ -812,7 +812,7 @@ func emptyIOOps() []emptyIOOp {
 			return s.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
 		}},
 		{"String", func(s *System) (any, error) { return s.String(), nil }},
-		{"Isproper", func(s *System) (any, error) { return s.Isproper(), nil }},
+		{"IsProper", func(s *System) (any, error) { return s.IsProper() }},
 		{"Covar", func(s *System) (any, error) {
 			_, m, _ := s.Dims()
 			return Covar(s, eyeOrEmptyDense(m))

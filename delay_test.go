@@ -501,7 +501,7 @@ func TestTFEvalContinuousDelay(t *testing.T) {
 	}
 
 	s := complex(0, 2*math.Pi)
-	result := tf.Eval(s)
+	result := mustEval(t, tf, s)
 
 	// H(s) = 1/(s+1) * exp(-0.5*s)
 	h0 := complex(1, 0) / (s + 1)
@@ -521,7 +521,7 @@ func TestTFEvalDiscreteDelay(t *testing.T) {
 	}
 
 	z := complex(0, 0) + cmplx.Exp(complex(0, math.Pi/4))
-	result := tf.Eval(z)
+	result := mustEval(t, tf, z)
 
 	// H(z) = 1/(z-0.5) * z^{-3}
 	h0 := complex(1, 0) / (z - 0.5)
@@ -583,7 +583,7 @@ func TestStateSpacePreservesDelay(t *testing.T) {
 		Dt:    0,
 	}
 
-	ssRes, err := tf.StateSpace(nil)
+	ssRes, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +605,7 @@ func TestSSTFSSRoundtripPreservesDelay(t *testing.T) {
 	sys.Delay = mat.NewDense(1, 1, []float64{1.5})
 
 	tfRes, _ := sys.TransferFunction(nil)
-	ssRes, _ := tfRes.TF.StateSpace(nil)
+	ssRes, _ := tfRes.TF.StateSpace()
 
 	if ssRes.Sys.Delay == nil {
 		t.Fatal("roundtrip should preserve delay")
@@ -916,7 +916,7 @@ func TestMATLABTFWithDelay(t *testing.T) {
 	freqs := []float64{0.1, 1.0, 10.0}
 	for _, w := range freqs {
 		s := complex(0, w)
-		H := tf.Eval(s)
+		H := mustEval(t, tf, s)
 		hNoDelay := complex(1, 0) / (s + 1)
 		expected := hNoDelay * cmplx.Exp(-s*2)
 

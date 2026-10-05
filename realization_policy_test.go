@@ -321,7 +321,7 @@ func TestStructuralOpsPreserveDelayedResponse(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			ss, err := r.TF.StateSpace(nil)
+			ss, err := r.TF.StateSpace()
 			if err != nil {
 				return nil, err
 			}

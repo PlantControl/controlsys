@@ -200,7 +200,7 @@ func TestPID_PIDFiltered(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := complex(0, 1.0)
-	h := tfr.TF.Eval(s)[0][0]
+	h := mustEval(t, tfr.TF, s)[0][0]
 	want := complex(1, 0) + complex(2, 0)/s + complex(3, 0)*s/(complex(0.5, 0)*s+1)
 	if cmplx.Abs(h-want) > 1e-8 {
 		t.Errorf("TF at s=j = %v, want %v", h, want)
@@ -299,7 +299,7 @@ func TestPID_PIDFilteredTransferFunction(t *testing.T) {
 	freqs := []float64{0.01, 0.1, 1, 10, 100}
 	for _, w := range freqs {
 		s := complex(0, w)
-		got := tfr.TF.Eval(s)[0][0]
+		got := mustEval(t, tfr.TF, s)[0][0]
 		want := complex(2, 0) + complex(5, 0)/s + 0.5*s/(0.1*s+1)
 		if cmplx.Abs(got-want) > 1e-6*cmplx.Abs(want) {
 			t.Errorf("w=%g: got %v, want %v", w, got, want)

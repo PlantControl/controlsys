@@ -134,7 +134,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 			return nil, none, err
 		}
 		fitted := &TransferFunc{Num: [][][]float64{{numerator}}, Den: [][]float64{denominator}, Dt: dt}
-		result, err := fitted.StateSpace(nil)
+		result, err := fitted.stateSpace()
 		if err != nil {
 			return nil, none, err
 		}
