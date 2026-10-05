@@ -338,3 +338,29 @@ func TestFreqRespEst_ShortData(t *testing.T) {
 		t.Error("expected non-empty result for short data")
 	}
 }
+
+func TestFreqRespEstResultOmegaNotShared(t *testing.T) {
+	rng := rand.New(rand.NewSource(3))
+	N := 512
+	u := mat.NewDense(2, N, nil)
+	y := mat.NewDense(1, N, nil)
+	for k := range N {
+		u.Set(0, k, rng.NormFloat64())
+		u.Set(1, k, rng.NormFloat64())
+		y.Set(0, k, u.At(0, k)+0.5*u.At(1, k))
+	}
+	for _, method := range []FreqRespEstMethod{FreqRespEstH1, FreqRespEstFFT} {
+		in, out := u, y
+		if method == FreqRespEstFFT {
+			in, out = u.Slice(0, 1, 0, N).(*mat.Dense), y
+		}
+		est, err := FreqRespEst(in, out, 0.1, &FreqRespEstOpts{NFFT: 64, Method: method})
+		if err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+		est.Omega[1] = -7
+		if est.H.Omega[1] == -7 {
+			t.Errorf("%s: Omega and H.Omega share a backing array", method)
+		}
+	}
+}

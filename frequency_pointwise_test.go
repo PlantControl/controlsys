@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"testing"
@@ -224,10 +225,7 @@ func TestFreqResponsePointwise_EmptyOmega(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp, err := sys.FreqResponsePointwise(nil)
-	if err != nil {
-		t.Fatalf("FreqResponsePointwise(nil): %v", err)
-	}
-	if resp != nil {
-		t.Fatalf("FreqResponsePointwise(nil) = %v, want nil (matching FreqResponse)", resp)
+	if !errors.Is(err, ErrInvalidArgument) || resp != nil {
+		t.Fatalf("FreqResponsePointwise(nil) = %v, %v; want nil, ErrInvalidArgument", resp, err)
 	}
 }

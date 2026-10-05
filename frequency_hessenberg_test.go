@@ -195,7 +195,7 @@ func TestFreqResponseRejectsInvalidSystem(t *testing.T) {
 		t.Errorf("static LFT with 1x1 B2: DCGain err = %v", err)
 	}
 	var nilSys *System
-	if _, err := nilSys.FreqResponse(absorbScopeOmega); !errors.Is(err, ErrDimensionMismatch) {
+	if _, err := nilSys.FreqResponse(absorbScopeOmega); !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("nil: FreqResponse err = %v", err)
 	}
 }

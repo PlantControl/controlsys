@@ -100,14 +100,15 @@ func NewFRD(response [][][]complex128, omega []float64, dt float64) (*FRD, error
 }
 
 // FRD computes the frequency response data model at the given frequencies.
+// An empty omega returns ErrInvalidArgument.
 func (sys *System) FRD(omega []float64) (*FRD, error) {
 	if len(omega) == 0 {
-		return &FRD{Dt: sys.Dt}, nil
+		return nil, fmt.Errorf("FRD: empty frequency vector: %w", ErrInvalidArgument)
 	}
 
 	resp, err := sys.FreqResponse(omega)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("FRD: %w", err)
 	}
 
 	_, m, p := sys.Dims()
