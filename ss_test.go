@@ -806,7 +806,7 @@ func emptyIOOps() []emptyIOOp {
 			return s.DiscretizeMatched(0.1)
 		}},
 		{"String", func(s *System) (any, error) { return s.String(), nil }},
-		{"Isproper", func(s *System) (any, error) { return s.Isproper(), nil }},
+		{"IsProper", func(s *System) (any, error) { return s.IsProper() }},
 		{"Covar", func(s *System) (any, error) {
 			_, m, _ := s.Dims()
 			return Covar(s, eyeOrEmptyDense(m))

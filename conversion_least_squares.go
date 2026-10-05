@@ -111,7 +111,7 @@ func (sys *System) DiscretizeLeastSquares(dt float64, fitOrder int) (*LeastSquar
 			return nil, err
 		}
 		fitted := &TransferFunc{Num: [][][]float64{{numerator}}, Den: [][]float64{denominator}, Dt: dt}
-		result, err := fitted.StateSpace(nil)
+		result, err := fitted.stateSpace()
 		if err != nil {
 			return nil, err
 		}

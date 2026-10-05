@@ -145,7 +145,7 @@ func PadeDelay(tau float64, order int) (*System, error) {
 		Dt:  0,
 	}
 
-	result, err := tf.StateSpace(nil)
+	result, err := tf.stateSpace()
 	if err != nil {
 		return nil, fmt.Errorf("PadeDelay: %w", err)
 	}

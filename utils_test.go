@@ -524,9 +524,9 @@ func TestPzmap_NoZeros(t *testing.T) {
 	}
 }
 
-// --- Isproper tests ---
+// --- IsProper tests ---
 
-func TestIsproper_StateSpace(t *testing.T) {
+func TestIsProper_StateSpace(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
 		mat.NewDense(2, 1, []float64{0, 1}),
@@ -537,37 +537,37 @@ func TestIsproper_StateSpace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !sys.Isproper() {
+	if !mustIsProper(t, sys) {
 		t.Error("state-space should always be proper")
 	}
 }
 
-func TestIsproper_TFProper(t *testing.T) {
+func TestIsProper_TFProper(t *testing.T) {
 	tf := &TransferFunc{
 		Num: [][][]float64{{{1}}},
 		Den: [][]float64{{1, 1}},
 	}
-	if !tf.Isproper() {
+	if !mustIsProper(t, tf) {
 		t.Error("tf(1, [1 1]) should be proper")
 	}
 }
 
-func TestIsproper_TFImproper(t *testing.T) {
+func TestIsProper_TFImproper(t *testing.T) {
 	tf := &TransferFunc{
 		Num: [][][]float64{{{1, 0}}},
 		Den: [][]float64{{1}},
 	}
-	if tf.Isproper() {
+	if mustIsProper(t, tf) {
 		t.Error("tf([1 0], [1]) should be improper")
 	}
 }
 
-func TestIsproper_TFEqualDegree(t *testing.T) {
+func TestIsProper_TFEqualDegree(t *testing.T) {
 	tf := &TransferFunc{
 		Num: [][][]float64{{{1, 1}}},
 		Den: [][]float64{{1, 2}},
 	}
-	if !tf.Isproper() {
+	if !mustIsProper(t, tf) {
 		t.Error("tf([1 1], [1 2]) should be proper (equal degree)")
 	}
 }

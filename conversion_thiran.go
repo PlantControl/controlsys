@@ -39,7 +39,7 @@ func conversionThiranChannel(samples, dt float64, maxOrder int) (*System, error)
 		numerator[order-i] = value
 	}
 	transfer := &TransferFunc{Num: [][][]float64{{numerator}}, Den: [][]float64{coefficients}, Dt: dt}
-	result, err := transfer.StateSpace(nil)
+	result, err := transfer.stateSpace()
 	if err != nil {
 		return nil, err
 	}

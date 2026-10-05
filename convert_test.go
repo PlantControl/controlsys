@@ -492,7 +492,7 @@ func TestDiscretizeWithOpts_FreqResponseWithThiran(t *testing.T) {
 
 	for _, w := range []float64{0.1, 0.5, 1.0} {
 		z := cmplx.Exp(complex(0, w*dt))
-		h := tfDisc.TF.Eval(z)[0][0]
+		h := mustEval(t, tfDisc.TF, z)[0][0]
 		mag := cmplx.Abs(h)
 		if mag > 2.0 || mag < 0 {
 			t.Errorf("w=%v: |H(z)| = %v out of reasonable range", w, mag)
@@ -559,7 +559,7 @@ func TestDiscretizeWithOpts_SISO_FractionalIODelay_Thiran(t *testing.T) {
 	tfDisc, _ := disc.TransferFunction(nil)
 	for _, w := range []float64{0.1, 0.5, 1.0} {
 		z := cmplx.Exp(complex(0, w*dt))
-		h := tfDisc.TF.Eval(z)[0][0]
+		h := mustEval(t, tfDisc.TF, z)[0][0]
 		mag := cmplx.Abs(h)
 		if mag > 2.0 || mag < 0 {
 			t.Errorf("w=%v: |H(z)| = %v out of reasonable range", w, mag)
@@ -635,7 +635,7 @@ func TestDiscretizeWithOpts_MixedIODelay_InputDelay_Thiran(t *testing.T) {
 
 	tfDisc, _ := disc.TransferFunction(nil)
 	z := cmplx.Exp(complex(0, 0.5*dt))
-	h := tfDisc.TF.Eval(z)[0][0]
+	h := mustEval(t, tfDisc.TF, z)[0][0]
 	mag := cmplx.Abs(h)
 	if mag > 2.0 || mag < 0 {
 		t.Errorf("w=0.5: |H(z)| = %v out of reasonable range", mag)

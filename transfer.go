@@ -14,6 +14,9 @@ import (
 
 var impl gonumLapack.Implementation
 
+// TransferFunc is a p×m transfer-function model, as MATLAB tf. Each output
+// row i shares the denominator Den[i]; Num[i][j] is the numerator of channel
+// (i, j). Coefficients are in descending powers of s (or z).
 type TransferFunc struct {
 	Num        [][][]float64
 	Den        [][]float64
@@ -38,6 +41,7 @@ func (tf *TransferFunc) Copy() *TransferFunc {
 	}
 }
 
+// Dims returns the number of outputs p and inputs m.
 func (tf *TransferFunc) Dims() (p, m int) {
 	p = len(tf.Den)
 	if p > 0 && len(tf.Num) > 0 && len(tf.Num[0]) > 0 {
@@ -47,25 +51,57 @@ func (tf *TransferFunc) Dims() (p, m int) {
 }
 
 func (tf *TransferFunc) validateShape() (p, m int, err error) {
-	return validateTransferChannelShape(tf)
+	p, m, err = validateTransferChannelShape(tf)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := newTimeDomain(tf.Dt).validateSampleTime(); err != nil {
+		return 0, 0, err
+	}
+	return p, m, nil
 }
 
-func (tf *TransferFunc) Eval(s complex128) [][]complex128 {
+// Eval evaluates the frequency response H(s) at the complex point s, as
+// MATLAB evalfr(sys, s). Delays contribute exp(-s·tau) (continuous) or
+// s^-tau (discrete, tau whole samples). A malformed model returns an error.
+func (tf *TransferFunc) Eval(s complex128) ([][]complex128, error) {
+	if err := tf.validateEval(); err != nil {
+		return nil, fmt.Errorf("TransferFunc.Eval: %w", err)
+	}
+	return tf.eval(s), nil
+}
+
+func (tf *TransferFunc) validateEval() error {
+	if _, _, err := tf.validateShape(); err != nil {
+		return err
+	}
+	for i, row := range tf.Delay {
+		for j, tau := range row {
+			if tau < 0 || math.IsNaN(tau) || math.IsInf(tau, 0) {
+				return fmt.Errorf("delay (%d,%d) is %g: %w", i, j, tau, ErrNegativeDelay)
+			}
+			if tf.Dt > 0 && tau != math.Trunc(tau) {
+				return fmt.Errorf("delay (%d,%d) is %g samples: %w", i, j, tau, ErrFractionalDelay)
+			}
+		}
+	}
+	return nil
+}
+
+func (tf *TransferFunc) eval(s complex128) [][]complex128 {
 	p, m := tf.Dims()
 	result := make([][]complex128, p)
 	for i := range p {
 		result[i] = make([]complex128, m)
 		dv := Poly(tf.Den[i]).Eval(s)
 		for j := range m {
-			nv := Poly(tf.Num[i][j]).Eval(s)
-			h := nv / dv
+			h := Poly(tf.Num[i][j]).Eval(s) / dv
 			if tf.Delay != nil && tf.Delay[i][j] != 0 {
 				tau := tf.Delay[i][j]
 				if tf.Dt == 0 {
 					h *= cmplx.Exp(-s * complex(tau, 0))
 				} else {
-					d := int(math.Round(tau))
-					for range d {
+					for range int(tau) {
 						h /= s
 					}
 				}
@@ -76,34 +112,16 @@ func (tf *TransferFunc) Eval(s complex128) [][]complex128 {
 	return result
 }
 
-func (tf *TransferFunc) evalInto(s complex128, dst []complex128) {
-	p, m := tf.Dims()
-	for i := range p {
-		dv := Poly(tf.Den[i]).Eval(s)
-		for j := range m {
-			h := Poly(tf.Num[i][j]).Eval(s) / dv
-			if tf.Delay != nil && tf.Delay[i][j] != 0 {
-				tau := tf.Delay[i][j]
-				if tf.Dt == 0 {
-					h *= cmplx.Exp(-s * complex(tau, 0))
-				} else {
-					d := int(math.Round(tau))
-					for range d {
-						h /= s
-					}
-				}
-			}
-			dst[i*m+j] = h
-		}
+// EvalMulti evaluates Eval at each point of freqs.
+func (tf *TransferFunc) EvalMulti(freqs []complex128) ([][][]complex128, error) {
+	if err := tf.validateEval(); err != nil {
+		return nil, fmt.Errorf("TransferFunc.EvalMulti: %w", err)
 	}
-}
-
-func (tf *TransferFunc) EvalMulti(freqs []complex128) [][][]complex128 {
 	result := make([][][]complex128, len(freqs))
 	for k, s := range freqs {
-		result[k] = tf.Eval(s)
+		result[k] = tf.eval(s)
 	}
-	return result
+	return result, nil
 }
 
 // TransferFuncOpts tolerances are absolute and apply to the balanced
@@ -113,6 +131,7 @@ type TransferFuncOpts struct {
 	ObservabilityTol   float64
 }
 
+// TransferFuncResult is the result of (*System).TransferFunction.
 type TransferFuncResult struct {
 	TF           *TransferFunc
 	MinimalOrder int
@@ -581,36 +600,52 @@ func ssToTFRow(Ac, Bc, Cc *mat.Dense, row, ncont, m int, obsTol float64, ws *tfW
 	return nobs, den, nums
 }
 
-type StateSpaceOpts struct {
-	MinimalTol float64
-}
-
+// StateSpaceResult is the result of (*TransferFunc).StateSpace.
 type StateSpaceResult struct {
-	Sys          *System
+	// Sys is the realization; delays and I/O names carry over.
+	Sys *System
+	// MinimalOrder is the realization order, the sum of the row denominator
+	// degrees (not necessarily minimal; use MinimalRealization).
 	MinimalOrder int
-	BlockSizes   []int
+	// BlockSizes[i] is the denominator degree of output row i, the size of
+	// its observable-companion block in Sys.A (0 for static rows).
+	BlockSizes []int
 }
 
-func (tf *TransferFunc) StateSpace(opts *StateSpaceOpts) (*StateSpaceResult, error) {
+// StateSpace returns an observable-companion realization with one block per
+// output row, as MATLAB ss(tf) (SLICOT TD04AD); like MATLAB it is not
+// reduced to minimal order. A malformed or empty model returns
+// ErrDimensionMismatch, an improper one ErrImproperTF and a zero leading
+// denominator coefficient ErrSingularDenom.
+func (tf *TransferFunc) StateSpace() (*StateSpaceResult, error) {
+	res, err := tf.stateSpace()
+	if err != nil {
+		return nil, fmt.Errorf("TransferFunc.StateSpace: %w", err)
+	}
+	return res, nil
+}
+
+func (tf *TransferFunc) stateSpace() (*StateSpaceResult, error) {
 	p, m, err := tf.validateShape()
 	if err != nil {
 		return nil, err
 	}
-
 	if p == 0 || m == 0 {
-		sys, _ := NewGain(&mat.Dense{}, tf.Dt)
-		sys.InputName = copyStringSlice(tf.InputName)
-		sys.OutputName = copyStringSlice(tf.OutputName)
-		return &StateSpaceResult{Sys: sys, MinimalOrder: 0}, nil
+		return nil, fmt.Errorf("model has %d outputs and %d inputs: %w", p, m, ErrDimensionMismatch)
 	}
-
-	if !tf.Isproper() {
+	if !tf.isProper() {
 		return nil, ErrImproperTF
 	}
+
+	smlnum := math.SmallestNonzeroFloat64 / eps()
+	bignum := 1.0 / smlnum
 
 	degrees := make([]int, p)
 	totalN := 0
 	for i := range p {
+		if math.Abs(tf.Den[i][0]) < smlnum {
+			return nil, fmt.Errorf("row %d: %w", i, ErrSingularDenom)
+		}
 		degrees[i] = len(tf.Den[i]) - 1
 		totalN += degrees[i]
 	}
@@ -624,7 +659,10 @@ func (tf *TransferFunc) StateSpace(opts *StateSpaceOpts) (*StateSpaceResult, err
 				dRaw.Data[i*dRaw.Stride+j] = scale * tf.Num[i][j][0]
 			}
 		}
-		sys, _ := NewGain(D, tf.Dt)
+		sys, err := NewGain(D, tf.Dt)
+		if err != nil {
+			return nil, err
+		}
 		if tf.Delay != nil {
 			sys.Delay = slice2DToDense(tf.Delay)
 		}
@@ -632,9 +670,6 @@ func (tf *TransferFunc) StateSpace(opts *StateSpaceOpts) (*StateSpaceResult, err
 		sys.OutputName = copyStringSlice(tf.OutputName)
 		return &StateSpaceResult{Sys: sys, MinimalOrder: 0, BlockSizes: degrees}, nil
 	}
-
-	smlnum := math.SmallestNonzeroFloat64 / eps()
-	bignum := 1.0 / smlnum
 
 	A := mat.NewDense(totalN, totalN, nil)
 	B := mat.NewDense(totalN, m, nil)
@@ -658,10 +693,6 @@ func (tf *TransferFunc) StateSpace(opts *StateSpaceOpts) (*StateSpaceResult, err
 		}
 
 		leading := tf.Den[i][0]
-
-		if math.Abs(leading) < smlnum {
-			return nil, fmt.Errorf("row %d: %w", i, ErrSingularDenom)
-		}
 
 		umax := 0.0
 		for j := range m {
@@ -752,26 +783,41 @@ func (tf *TransferFunc) StateSpace(opts *StateSpaceOpts) (*StateSpaceResult, err
 	}, nil
 }
 
-// Isproper reports whether the delay-free part of sys, including internal
-// delay channels, is proper. Explicit models always are; a descriptor model
-// is proper iff its infinite eigenvalues are all nondynamic.
-func (sys *System) Isproper() bool {
+// IsProper reports whether the delay-free part of sys, including internal
+// delay channels, is proper, as MATLAB isproper. Explicit models always are;
+// a descriptor model is proper iff its infinite eigenvalues are all
+// nondynamic. A singular pencil (A, E), for which properness is undefined,
+// returns ErrDescriptorSingular, and a numerical failure deciding it returns
+// an error rather than false. See
+// https://www.mathworks.com/help/control/ref/dynamicsystem.isproper.html.
+func (sys *System) IsProper() (bool, error) {
+	if err := requireFiniteSystem("IsProper", sys); err != nil {
+		return false, err
+	}
+	ok, err := sys.isProper()
+	if err != nil {
+		return false, fmt.Errorf("IsProper: %w", err)
+	}
+	return ok, nil
+}
+
+func (sys *System) isProper() (bool, error) {
 	if !sys.IsDescriptor() {
-		return true
+		return true, nil
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	if !luNearSingular(&lu) {
-		return true
+		return true, nil
 	}
 	n, m, p := sys.Dims()
 	N := sys.internalDelayCount()
 	if m+N == 0 || p+N == 0 {
-		return true
+		return true, nil
 	}
 	F, ok := regularDescriptorShift(sys.A, sys.E, n)
 	if !ok {
-		return false
+		return false, fmt.Errorf("pencil (A, E) is singular: %w", ErrDescriptorSingular)
 	}
 	B := newDense(n, m+N)
 	C := newDense(p+N, n)
@@ -783,7 +829,7 @@ func (sys *System) Isproper() bool {
 	}
 	var K, Fb mat.Dense
 	if F.SolveTo(&K, false, sys.E) != nil || F.SolveTo(&Fb, false, B) != nil {
-		return false
+		return false, fmt.Errorf("shifted pencil A-σE is singular: %w", ErrSingularTransform)
 	}
 	// With F = A-σE, K = F⁻¹E and ν = 1/(s-σ):
 	// G(s) = D - ν·C(νI-K)⁻¹F⁻¹B, so G is proper iff that transfer has at
@@ -791,19 +837,27 @@ func (sys *System) Isproper() bool {
 	// in a minimal realization.
 	aux, err := New(&K, &Fb, C, newDense(p+N, m+N), 0)
 	if err != nil {
-		return false
+		return false, err
 	}
 	red, err := aux.Reduce(nil)
 	if err != nil {
-		return false
+		return false, err
 	}
 	if red.Order == 0 {
-		return true
+		return true, nil
 	}
 	Kr := red.Sys.A
 	var K2 mat.Dense
 	K2.Mul(Kr, Kr)
-	return numericRank(Kr) == numericRank(&K2)
+	r1, err := numericRank(Kr)
+	if err != nil {
+		return false, err
+	}
+	r2, err := numericRank(&K2)
+	if err != nil {
+		return false, err
+	}
+	return r1 == r2, nil
 }
 
 func regularDescriptorShift(A, E *mat.Dense, n int) (*mat.LU, bool) {
@@ -825,14 +879,14 @@ func regularDescriptorShift(A, E *mat.Dense, n int) (*mat.LU, bool) {
 	return best, true
 }
 
-func numericRank(M *mat.Dense) int {
+func numericRank(M *mat.Dense) (int, error) {
 	var svd mat.SVD
 	if !svd.Factorize(M, mat.SVDNone) {
-		return 0
+		return 0, fmt.Errorf("SVD did not converge: %w", ErrSchurFailed)
 	}
 	sv := svd.Values(nil)
 	if len(sv) == 0 || sv[0] == 0 {
-		return 0
+		return 0, nil
 	}
 	r, c := M.Dims()
 	tol := float64(max(r, c)) * 1e3 * eps() * sv[0]
@@ -842,10 +896,20 @@ func numericRank(M *mat.Dense) int {
 			rank++
 		}
 	}
-	return rank
+	return rank, nil
 }
 
-func (tf *TransferFunc) Isproper() bool {
+// IsProper reports whether every channel's numerator degree is at most its
+// row denominator degree, as MATLAB isproper. A malformed model returns an
+// error.
+func (tf *TransferFunc) IsProper() (bool, error) {
+	if _, _, err := tf.validateShape(); err != nil {
+		return false, fmt.Errorf("TransferFunc.IsProper: %w", err)
+	}
+	return tf.isProper(), nil
+}
+
+func (tf *TransferFunc) isProper() bool {
 	p, m := tf.Dims()
 	for i := range p {
 		denDeg := len(tf.Den[i]) - 1

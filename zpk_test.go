@@ -166,14 +166,14 @@ func TestNewZPK_Discrete(t *testing.T) {
 
 func TestNewZPK_RejectUnpairedPole(t *testing.T) {
 	_, err := NewZPK(nil, []complex128{complex(0, 1)}, 1.0, 0)
-	if err != ErrConjugatePairs {
+	if !errors.Is(err, ErrConjugatePairs) {
 		t.Errorf("got err = %v, want ErrConjugatePairs", err)
 	}
 }
 
 func TestNewZPK_RejectUnpairedZero(t *testing.T) {
 	_, err := NewZPK([]complex128{complex(0, 1)}, nil, 1.0, 0)
-	if err != ErrConjugatePairs {
+	if !errors.Is(err, ErrConjugatePairs) {
 		t.Errorf("got err = %v, want ErrConjugatePairs", err)
 	}
 }
@@ -220,7 +220,7 @@ func TestNewZPKMIMO_DimensionMismatch(t *testing.T) {
 	poles := [][][]complex128{{{-2}}, {{-3}}}
 	gain := [][]float64{{1}}
 	_, err := NewZPKMIMO(zeros, poles, gain, 0)
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("got err = %v, want ErrDimensionMismatch", err)
 	}
 }
@@ -256,7 +256,7 @@ func TestZPKEval_SISO(t *testing.T) {
 
 	freqs := []complex128{1i, 2i, complex(0.5, 1)}
 	for _, s := range freqs {
-		got := z.Eval(s)[0][0]
+		got := mustEval(t, z, s)[0][0]
 		num := 2.0 * (s + 1)
 		den := (s + 2) * (s + 3)
 		want := num / den
@@ -268,7 +268,7 @@ func TestZPKEval_SISO(t *testing.T) {
 
 func TestZPKEval_PureGain(t *testing.T) {
 	z, _ := NewZPK(nil, nil, 5.0, 0)
-	got := z.Eval(1i)[0][0]
+	got := mustEval(t, z, 1i)[0][0]
 	if cmplx.Abs(got-5) > 1e-14 {
 		t.Errorf("Eval(i) = %v, want 5", got)
 	}
@@ -276,7 +276,7 @@ func TestZPKEval_PureGain(t *testing.T) {
 
 func TestZPKEval_Integrator(t *testing.T) {
 	z, _ := NewZPK(nil, []complex128{0}, 1.0, 0)
-	got := z.Eval(1i)[0][0]
+	got := mustEval(t, z, 1i)[0][0]
 	want := 1.0 / 1i
 	if cmplx.Abs(got-want) > 1e-14 {
 		t.Errorf("Eval(i) = %v, want %v", got, want)
@@ -285,7 +285,7 @@ func TestZPKEval_Integrator(t *testing.T) {
 
 func TestZPKEval_ZeroGain(t *testing.T) {
 	z, _ := NewZPK(nil, []complex128{-1}, 0.0, 0)
-	got := z.Eval(1i)[0][0]
+	got := mustEval(t, z, 1i)[0][0]
 	if got != 0 {
 		t.Errorf("Eval(i) = %v, want 0", got)
 	}
@@ -385,8 +385,8 @@ func TestZPKToTF_FrequencyEquivalence(t *testing.T) {
 	}
 	freqs := []complex128{0.1i, 1i, 5i, complex(0.5, 1)}
 	for _, s := range freqs {
-		zpkVal := z.Eval(s)[0][0]
-		tfVal := tf.Eval(s)[0][0]
+		zpkVal := mustEval(t, z, s)[0][0]
+		tfVal := mustEval(t, tf, s)[0][0]
 		if cmplx.Abs(zpkVal-tfVal) > 1e-10 {
 			t.Errorf("at s=%v: ZPK=%v, TF=%v", s, zpkVal, tfVal)
 		}
@@ -515,8 +515,8 @@ func TestTFToZPK_FrequencyRoundtrip(t *testing.T) {
 	}
 	freqs := []complex128{0.1i, 1i, 5i, complex(0.5, 1)}
 	for _, s := range freqs {
-		tfVal := tf.Eval(s)[0][0]
-		zpkVal := z.Eval(s)[0][0]
+		tfVal := mustEval(t, tf, s)[0][0]
+		zpkVal := mustEval(t, z, s)[0][0]
 		if cmplx.Abs(tfVal-zpkVal) > 1e-10 {
 			t.Errorf("at s=%v: TF=%v, ZPK=%v", s, tfVal, zpkVal)
 		}
@@ -670,7 +670,7 @@ func TestSystemZPK_FrequencyMatch(t *testing.T) {
 
 func TestZPKToSS_FrequencyRoundtrip(t *testing.T) {
 	z, _ := NewZPK([]complex128{-1}, []complex128{-2, -3}, 2.0, 0)
-	ssRes, err := z.StateSpace(nil)
+	ssRes, err := z.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,7 +694,7 @@ func TestZPKToSS_FrequencyRoundtrip(t *testing.T) {
 
 func TestZPKToSS_PureGain(t *testing.T) {
 	z, _ := NewZPK(nil, nil, 5.0, 0)
-	ssRes, err := z.StateSpace(nil)
+	ssRes, err := z.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +706,7 @@ func TestZPKToSS_PureGain(t *testing.T) {
 
 func TestZPKToSS_RoundtripZPK(t *testing.T) {
 	z, _ := NewZPK([]complex128{-1}, []complex128{-2, -3}, 2.0, 0)
-	ssRes, err := z.StateSpace(nil)
+	ssRes, err := z.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,14 +738,14 @@ func TestZPK_FullRoundtrip_SS_TF_ZPK(t *testing.T) {
 	tfRes, _ := sys.TransferFunction(nil)
 	zpk1, _ := tfRes.TF.ZPK()
 	tf2, _ := zpk1.TransferFunction()
-	ssRes, _ := tf2.StateSpace(nil)
+	ssRes, _ := tf2.StateSpace()
 	zpk2, _ := ssRes.Sys.ZPKModel(nil)
 
 	for _, s := range freqs {
-		v1 := tfRes.TF.Eval(s)[0][0]
-		v2 := zpk1.Eval(s)[0][0]
-		v3 := tf2.Eval(s)[0][0]
-		v4 := zpk2.ZPK.Eval(s)[0][0]
+		v1 := mustEval(t, tfRes.TF, s)[0][0]
+		v2 := mustEval(t, zpk1, s)[0][0]
+		v3 := mustEval(t, tf2, s)[0][0]
+		v4 := mustEval(t, zpk2.ZPK, s)[0][0]
 
 		if cmplx.Abs(v1-v2) > 1e-8 {
 			t.Errorf("TF→ZPK mismatch at s=%v: %v vs %v", s, v1, v2)
@@ -814,5 +814,38 @@ func TestNewZPKRejectsNonFiniteSampleTime(t *testing.T) {
 		if _, err := NewZPKMIMO([][][]complex128{{nil}}, [][][]complex128{{{-1}}}, [][]float64{{1}}, dt); !errors.Is(err, ErrInvalidSampleTime) {
 			t.Errorf("NewZPKMIMO dt=%v err = %v", dt, err)
 		}
+	}
+}
+
+func TestZPKEvalFreqResponseValidate(t *testing.T) {
+	bad := &ZPK{Gain: [][]float64{{1}}}
+	if _, err := bad.Eval(1i); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Eval malformed = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := bad.FreqResponse([]float64{1}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("FreqResponse malformed = %v, want ErrDimensionMismatch", err)
+	}
+	z, err := NewZPK([]complex128{-1}, []complex128{-2, -3}, 4, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := z.FreqResponse(nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("FreqResponse empty omega = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := z.FreqResponse([]float64{1, math.NaN()}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("FreqResponse NaN omega = %v, want ErrInvalidArgument", err)
+	}
+	z.Dt = -1
+	if _, err := z.Eval(1i); !errors.Is(err, ErrInvalidSampleTime) {
+		t.Errorf("Eval Dt=-1 = %v, want ErrInvalidSampleTime", err)
+	}
+	z.Dt = 0
+	s := complex(0.5, 2)
+	h, err := z.Eval(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 4 * (s + 1) / ((s + 2) * (s + 3)); cmplx.Abs(h[0][0]-want) > 1e-12 {
+		t.Errorf("Eval = %v, want %v", h[0][0], want)
 	}
 }

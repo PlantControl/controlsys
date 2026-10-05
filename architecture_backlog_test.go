@@ -172,7 +172,7 @@ func TestTransferFunctionPreservesRowRealizationBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 	for k, w := range omega {
-		tfEval := res.TF.Eval(complex(0, w))
+		tfEval := mustEval(t, res.TF, complex(0, w))
 		for i := range 2 {
 			for j := range 2 {
 				assertComplexApprox(t, tfEval[i][j], resp.At(k, i, j), 1e-8)

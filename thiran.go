@@ -64,7 +64,7 @@ func ThiranDelay(tau float64, order int, dt float64) (*System, error) {
 		Dt:  dt,
 	}
 
-	result, err := tf.StateSpace(nil)
+	result, err := tf.stateSpace()
 	if err != nil {
 		return nil, fmt.Errorf("ThiranDelay: %w", err)
 	}

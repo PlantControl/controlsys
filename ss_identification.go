@@ -282,7 +282,7 @@ func ioFitOrder(ctx context.Context, u, y, vu, vy []float64, dt float64, order i
 	}
 	num := append([]float64(nil), theta[order:columns]...)
 	tf := &TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: dt}
-	realized, e := tf.StateSpace(nil)
+	realized, e := tf.stateSpace()
 	if e != nil {
 		return fail("state-space realization: " + e.Error())
 	}

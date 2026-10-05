@@ -83,7 +83,7 @@ func makePlant(t *testing.T, num, den []float64) *System {
 		Num: [][][]float64{{num}},
 		Den: [][]float64{den},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatalf("StateSpace: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestPidtune_MIMO_Rejected(t *testing.T) {
 		Num: [][][]float64{{{1}, {0}}, {{0}, {1}}},
 		Den: [][]float64{{1, 1}, {1, 1}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}

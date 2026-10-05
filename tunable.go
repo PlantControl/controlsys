@@ -259,7 +259,7 @@ func (b *TunableTF) CurrentSystem() (*System, error) {
 		}
 	}
 	tf := &TransferFunc{Num: num, Den: copyFloatRows(b.Den), Dt: b.Dt}
-	result, err := tf.StateSpace(nil)
+	result, err := tf.stateSpace()
 	if err != nil {
 		return nil, err
 	}

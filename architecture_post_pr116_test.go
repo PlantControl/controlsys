@@ -64,8 +64,8 @@ func TestPostPR116CrossSeamConversionMetadataRationalAndFRD(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := complex(0.3, 1.1)
-	if cmplx.Abs(tf.TF.Eval(s)[0][0]-roundtripTF.Eval(s)[0][0]) > 1e-8 {
-		t.Fatalf("TF/ZPK roundtrip mismatch: %v vs %v", tf.TF.Eval(s)[0][0], roundtripTF.Eval(s)[0][0])
+	if cmplx.Abs(mustEval(t, tf.TF, s)[0][0]-mustEval(t, roundtripTF, s)[0][0]) > 1e-8 {
+		t.Fatalf("TF/ZPK roundtrip mismatch: %v vs %v", mustEval(t, tf.TF, s)[0][0], mustEval(t, roundtripTF, s)[0][0])
 	}
 
 	omega := []float64{0.1, 0.5, 1.0}

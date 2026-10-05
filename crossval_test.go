@@ -386,7 +386,7 @@ func TestCrossval_Zeros_NoZeros(t *testing.T) {
 		Num: [][][]float64{{{1}}},
 		Den: [][]float64{{1, 2, 1}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,7 +981,7 @@ func TestCrossval_C2D_DCGainMatch(t *testing.T) {
 					Num: [][][]float64{{tc.num}},
 					Den: [][]float64{tc.den},
 				}
-				ssRes, err := tf.StateSpace(nil)
+				ssRes, err := tf.StateSpace()
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1033,7 +1033,7 @@ func TestCrossval_ZOH_PoleMapping(t *testing.T) {
 					Num: [][][]float64{{tc.num}},
 					Den: [][]float64{tc.den},
 				}
-				ssRes, err := tf.StateSpace(nil)
+				ssRes, err := tf.StateSpace()
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1083,7 +1083,7 @@ func TestCrossval_HinfNorm(t *testing.T) {
 		Num: [][][]float64{{{100}}},
 		Den: [][]float64{{1, 10, 100}},
 	}
-	ssRes, err := tf.StateSpace(nil)
+	ssRes, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1209,7 +1209,7 @@ func TestCrossval_TF_Roundtrip_NonSymmetric(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ssRes, err := tfRes.TF.StateSpace(nil)
+	ssRes, err := tfRes.TF.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1639,8 +1639,8 @@ func TestCrossval_SeriesThenZeros(t *testing.T) {
 		Num: [][][]float64{{{1, 2}}},
 		Den: [][]float64{{1, 4}},
 	}
-	ss1, _ := tf1.StateSpace(nil)
-	ss2, _ := tf2.StateSpace(nil)
+	ss1, _ := tf1.StateSpace()
+	ss2, _ := tf2.StateSpace()
 
 	ser, err := Series(ss1.Sys, ss2.Sys)
 	if err != nil {

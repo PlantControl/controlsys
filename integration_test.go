@@ -35,7 +35,7 @@ func TestSSToTFToSSRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ssRes, err := tfRes.TF.StateSpace(nil)
+	ssRes, err := tfRes.TF.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +51,8 @@ func TestSSToTFToSSRoundtrip(t *testing.T) {
 	}
 
 	for _, s := range freqs {
-		m1 := tfRes.TF.Eval(s)
-		m2 := tfRes2.TF.Eval(s)
+		m1 := mustEval(t, tfRes.TF, s)
+		m2 := mustEval(t, tfRes2.TF, s)
 		for i := range 2 {
 			for j := range 2 {
 				if cmplx.Abs(m1[i][j]-m2[i][j]) > 1e-6 {
@@ -134,8 +134,8 @@ func TestReduceThenTransferFunction(t *testing.T) {
 
 	freqs := []complex128{0.1i, 1i, 5i, 10i, complex(0.5, 1)}
 	for _, s := range freqs {
-		v1 := directTF.TF.Eval(s)[0][0]
-		v2 := reducedTF.TF.Eval(s)[0][0]
+		v1 := mustEval(t, directTF.TF, s)[0][0]
+		v2 := mustEval(t, reducedTF.TF, s)[0][0]
 		if cmplx.Abs(v1-v2) > 1e-6 {
 			t.Errorf("at s=%v: direct=%v reduced=%v", s, v1, v2)
 		}
@@ -197,7 +197,7 @@ func TestMIMOTransferFunctionFreqResponse(t *testing.T) {
 	}
 
 	for _, s := range freqs {
-		tfMat := tfRes.TF.Eval(s)
+		tfMat := mustEval(t, tfRes.TF, s)
 		for i := range 2 {
 			for j := range 2 {
 				ssVal := evalSSij(sys, s, i, j)

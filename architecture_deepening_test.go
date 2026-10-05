@@ -174,8 +174,8 @@ func TestArchitecturePolynomialChannelAlgebraCoversLeadingZerosAndZeroGain(t *te
 		t.Fatal(err)
 	}
 	for _, s := range []complex128{1i, 2 + 0.5i} {
-		want := tf.Eval(s)
-		got := roundtrip.Eval(s)
+		want := mustEval(t, tf, s)
+		got := mustEval(t, roundtrip, s)
 		for j := range want[0] {
 			if cmplx.Abs(got[0][j]-want[0][j]) > 1e-10 {
 				t.Fatalf("channel %d at %v = %v, want %v", j, s, got[0][j], want[0][j])

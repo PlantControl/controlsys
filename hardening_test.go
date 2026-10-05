@@ -14,7 +14,7 @@ func TestStateSpace_RejectsImproperTF(t *testing.T) {
 		Num: [][][]float64{{{1, 0}}}, // s (degree 1)
 		Den: [][]float64{{1}},        // 1 (degree 0)
 	}
-	_, err := tf.StateSpace(nil)
+	_, err := tf.StateSpace()
 	if !errors.Is(err, ErrImproperTF) {
 		t.Errorf("expected ErrImproperTF, got %v", err)
 	}
@@ -25,7 +25,7 @@ func TestStateSpace_AcceptsProperTF(t *testing.T) {
 		Num: [][][]float64{{{1}}},
 		Den: [][]float64{{1, 1}},
 	}
-	_, err := tf.StateSpace(nil)
+	_, err := tf.StateSpace()
 	if err != nil {
 		t.Errorf("proper TF should be accepted, got %v", err)
 	}
@@ -36,7 +36,7 @@ func TestStateSpace_AcceptsBiproperTF(t *testing.T) {
 		Num: [][][]float64{{{1, 1}}},
 		Den: [][]float64{{1, 2}},
 	}
-	_, err := tf.StateSpace(nil)
+	_, err := tf.StateSpace()
 	if err != nil {
 		t.Errorf("biproper TF (equal degree) should be accepted, got %v", err)
 	}

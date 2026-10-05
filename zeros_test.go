@@ -14,7 +14,7 @@ func TestZeros_SISO_Known(t *testing.T) {
 		Num: [][][]float64{{{1, 3, 2}}},
 		Den: [][]float64{{1, 7, 12}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestZeros_SISO_Integrator(t *testing.T) {
 		Num: [][][]float64{{{1}}},
 		Den: [][]float64{{1, 0}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestZeros_SISO_RepeatedZeros(t *testing.T) {
 		Num: [][][]float64{{{1, 2, 1}}},
 		Den: [][]float64{{1, 6, 12, 8}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestZeros_Discrete(t *testing.T) {
 		Den: [][]float64{{1, -0.9}},
 		Dt:  0.1,
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,8 +150,8 @@ func TestZeros_SeriesRoundtrip(t *testing.T) {
 		Num: [][][]float64{{{1, 2}}},
 		Den: [][]float64{{1, 4}},
 	}
-	r1, _ := tf1.StateSpace(nil)
-	r2, _ := tf2.StateSpace(nil)
+	r1, _ := tf1.StateSpace()
+	r2, _ := tf2.StateSpace()
 
 	z1, err := r1.Sys.Zeros()
 	if err != nil {
@@ -178,7 +178,7 @@ func TestZeros_SISO_ComplexZeros(t *testing.T) {
 		Num: [][][]float64{{{1, 0, 1}}},
 		Den: [][]float64{{1, 3, 2}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestZeros_SISO_HighOrder(t *testing.T) {
 		Num: [][][]float64{{[]float64(num)}},
 		Den: [][]float64{[]float64(den)},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}

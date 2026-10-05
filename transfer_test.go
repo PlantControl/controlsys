@@ -70,7 +70,7 @@ func TestTransferFuncStateSpaceRejectsMalformedRawModel(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := tc.tf.StateSpace(nil); !errors.Is(err, ErrDimensionMismatch) {
+			if _, err := tc.tf.StateSpace(); !errors.Is(err, ErrDimensionMismatch) {
 				t.Fatalf("got %v, want ErrDimensionMismatch", err)
 			}
 		})
@@ -84,7 +84,7 @@ func TestTransferFuncEval(t *testing.T) {
 		Den: [][]float64{{1, 3, 2}},
 	}
 	s := 1i
-	got := tf.Eval(s)
+	got := mustEval(t, tf, s)
 	num := complex(0, 1)
 	den := complex(-1, 0) + complex(0, 3) + complex(2, 0)
 	want := num / den
@@ -99,9 +99,9 @@ func TestEvalMultiConsistency(t *testing.T) {
 		Den: [][]float64{{1, 3, 2}},
 	}
 	freqs := []complex128{1i, 2i, complex(1, 1)}
-	multi := tf.EvalMulti(freqs)
+	multi := mustEvalMulti(t, tf, freqs)
 	for k, s := range freqs {
-		single := tf.Eval(s)
+		single := mustEval(t, tf, s)
 		if cmplx.Abs(multi[k][0][0]-single[0][0]) > 1e-15 {
 			t.Fatalf("EvalMulti[%d] != Eval at s=%v", k, s)
 		}
@@ -133,7 +133,7 @@ func TestTransferFunctionSISOKnown(t *testing.T) {
 
 	freqs := []complex128{1i, 2i, complex(0.5, 1), complex(-0.3, 2.7)}
 	for _, s := range freqs {
-		tfVal := res.TF.Eval(s)[0][0]
+		tfVal := mustEval(t, res.TF, s)[0][0]
 		ssVal := evalSS(sys, s)
 		if cmplx.Abs(tfVal-ssVal) > 1e-8 {
 			t.Errorf("at s=%v: TF=%v, SS=%v", s, tfVal, ssVal)
@@ -173,7 +173,7 @@ func TestTransferFunctionRoundtrip(t *testing.T) {
 
 	freqs := []complex128{1i, 0.5i, complex(1, 2)}
 	for _, s := range freqs {
-		tfMat := res.TF.Eval(s)
+		tfMat := mustEval(t, res.TF, s)
 		for i := range 2 {
 			for j := range 2 {
 				ssVal := evalSSij(sys, s, i, j)
@@ -217,7 +217,7 @@ func TestStateSpaceSISOCompanion(t *testing.T) {
 		Num: [][][]float64{{{1, 0}}},
 		Den: [][]float64{{1, 3, 2}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestStateSpaceSISOCompanion(t *testing.T) {
 	freqs := []complex128{1i, 2i, complex(0.5, 1)}
 	for _, s := range freqs {
 		ssVal := evalSS(res.Sys, s)
-		tfVal := tf.Eval(s)[0][0]
+		tfVal := mustEval(t, tf, s)[0][0]
 		if cmplx.Abs(ssVal-tfVal) > 1e-10 {
 			t.Errorf("at s=%v: SS=%v, TF=%v", s, ssVal, tfVal)
 		}
@@ -242,7 +242,7 @@ func TestStateSpacePureGain(t *testing.T) {
 		Num: [][][]float64{{{5}}, {{3}}},
 		Den: [][]float64{{1}, {1}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestStateSpaceNonMonic(t *testing.T) {
 		Num: [][][]float64{{{2, 0}}},
 		Den: [][]float64{{2, 6, 4}},
 	}
-	res, err := tf.StateSpace(nil)
+	res, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestStateSpaceNonMonic(t *testing.T) {
 	freqs := []complex128{1i, 2i}
 	for _, s := range freqs {
 		ssVal := evalSS(res.Sys, s)
-		tfVal := tf.Eval(s)[0][0]
+		tfVal := mustEval(t, tf, s)[0][0]
 		if cmplx.Abs(ssVal-tfVal) > 1e-10 {
 			t.Errorf("at s=%v: SS=%v, TF=%v", s, ssVal, tfVal)
 		}
@@ -284,7 +284,7 @@ func TestStateSpaceSingularDenom(t *testing.T) {
 		Num: [][][]float64{{{1}}},
 		Den: [][]float64{{0, 1}},
 	}
-	_, err := tf.StateSpace(nil)
+	_, err := tf.StateSpace()
 	if err == nil {
 		t.Fatal("expected error for near-zero leading coeff")
 	}
@@ -296,7 +296,7 @@ func TestTFSSRoundtripFrequency(t *testing.T) {
 		Num: [][][]float64{{{1, 1}}},
 		Den: [][]float64{{1, 2, 1}},
 	}
-	ssRes, err := tf.StateSpace(nil)
+	ssRes, err := tf.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,8 +307,8 @@ func TestTFSSRoundtripFrequency(t *testing.T) {
 
 	freqs := []complex128{1i, 0.1i, 10i, complex(0.5, 1)}
 	for _, s := range freqs {
-		orig := tf.Eval(s)[0][0]
-		rt := tfRes.TF.Eval(s)[0][0]
+		orig := mustEval(t, tf, s)[0][0]
+		rt := mustEval(t, tfRes.TF, s)[0][0]
 		if cmplx.Abs(orig-rt) > 1e-6 {
 			t.Errorf("at s=%v: orig=%v, roundtrip=%v", s, orig, rt)
 		}
@@ -334,7 +334,7 @@ func TestTransferFunctionWithFeedthrough(t *testing.T) {
 
 	freqs := []complex128{1i, 2i, complex(1, 1)}
 	for _, s := range freqs {
-		tfVal := res.TF.Eval(s)[0][0]
+		tfVal := mustEval(t, res.TF, s)[0][0]
 		ssVal := evalSS(sys, s)
 		if cmplx.Abs(tfVal-ssVal) > 1e-10 {
 			t.Errorf("at s=%v: TF=%v, SS=%v", s, tfVal, ssVal)
@@ -364,7 +364,7 @@ func TestTransferFunctionNonSymmetricA(t *testing.T) {
 
 	freqs := []complex128{1i, 2i, complex(0.5, 1), complex(-0.3, 2.7)}
 	for _, s := range freqs {
-		tfVal := res.TF.Eval(s)[0][0]
+		tfVal := mustEval(t, res.TF, s)[0][0]
 		ssVal := evalSS(sys, s)
 		if cmplx.Abs(tfVal-ssVal) > 1e-8 {
 			t.Errorf("at s=%v: TF=%v, SS=%v", s, tfVal, ssVal)
@@ -397,7 +397,7 @@ func TestTransferFunctionNonSymmetricSIMO(t *testing.T) {
 
 	freqs := []complex128{1i, 2i, complex(0.5, 1)}
 	for _, s := range freqs {
-		tfMat := res.TF.Eval(s)
+		tfMat := mustEval(t, res.TF, s)
 		for i := range 2 {
 			ssVal := evalSSij(sys, s, i, 0)
 			if cmplx.Abs(tfMat[i][0]-ssVal) > 1e-8 {
@@ -433,7 +433,7 @@ func TestTransferFunctionNonSymmetricMISO(t *testing.T) {
 
 	freqs := []complex128{1i, 2i, complex(0.5, 1)}
 	for _, s := range freqs {
-		tfMat := res.TF.Eval(s)
+		tfMat := mustEval(t, res.TF, s)
 		for j := range 2 {
 			ssVal := evalSSij(sys, s, 0, j)
 			if cmplx.Abs(tfMat[0][j]-ssVal) > 1e-8 {
@@ -475,7 +475,7 @@ func TestTransferFunctionNonSymmetricMIMO(t *testing.T) {
 
 	freqs := []complex128{1i, 2i, complex(0.5, 1)}
 	for _, s := range freqs {
-		tfMat := res.TF.Eval(s)
+		tfMat := mustEval(t, res.TF, s)
 		for i := range 2 {
 			for j := range 2 {
 				ssVal := evalSSij(sys, s, i, j)
@@ -600,7 +600,7 @@ func TestTransferFunctionFoldsExternalDelays(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, s := range fieldPoints(dt) {
-			if d := fieldMaxDiff(res.TF.Eval(s), fieldOracle(orig, s)); d > fieldTol {
+			if d := fieldMaxDiff(mustEval(t, res.TF, s), fieldOracle(orig, s)); d > fieldTol {
 				t.Errorf("dt=%g: TF.Eval(%v) differs by %.3g (Delay=%v)", dt, s, d, res.TF.Delay)
 			}
 		}
@@ -621,12 +621,12 @@ func TestTFStateSpaceStaticKeepsDelay(t *testing.T) {
 			Delay: [][]float64{{1, 3}, {0, 2}},
 			Dt:    dt,
 		}
-		res, err := tf.StateSpace(nil)
+		res, err := tf.StateSpace()
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, s := range fieldPoints(dt) {
-			if d := fieldMaxDiff(fieldOracle(res.Sys, s), tf.Eval(s)); d > fieldTol {
+			if d := fieldMaxDiff(fieldOracle(res.Sys, s), mustEval(t, tf, s)); d > fieldTol {
 				t.Errorf("dt=%g: response at %v differs by %.3g (Delay=%v)", dt, s, d, res.Sys.Delay)
 			}
 		}
@@ -650,7 +650,7 @@ func isproperByGrowth(sys *System) bool {
 	return g(1e6) < 10*(1+g(1e4))
 }
 
-func TestIsproperDescriptor(t *testing.T) {
+func TestIsProperDescriptor(t *testing.T) {
 	P := mat.NewDense(3, 3, []float64{1, 0.4, -0.2, 0.3, 1.2, 0.5, -0.1, 0.6, 0.9})
 	Q := mat.NewDense(3, 3, []float64{0.8, -0.3, 0.1, 0.2, 1, 0.4, 0.5, 0.1, 1.1})
 	transform := func(M *mat.Dense) *mat.Dense {
@@ -715,8 +715,8 @@ func TestIsproperDescriptor(t *testing.T) {
 				t.Fatalf("%s: fixture growth oracle says proper=%v, want %v", tc.name, oracle, tc.want)
 			}
 		}
-		if got := tc.sys.Isproper(); got != tc.want {
-			t.Errorf("%s: Isproper() = %v, want %v", tc.name, got, tc.want)
+		if got := mustIsProper(t, tc.sys); got != tc.want {
+			t.Errorf("%s: IsProper() = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }
@@ -737,7 +737,7 @@ func transferFunctionEvalError(t *testing.T, sys *System, omega []float64) float
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := res.TF.Eval(s)
+		got := mustEval(t, res.TF, s)
 		for i := range want {
 			for j := range want[i] {
 				worst = max(worst, cmplx.Abs(got[i][j]-want[i][j])/cmplx.Abs(want[i][j]))
@@ -814,5 +814,138 @@ func BenchmarkTransferFunction(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+type evaluator interface {
+	Eval(complex128) ([][]complex128, error)
+}
+
+func mustEval(tb testing.TB, m evaluator, s complex128) [][]complex128 {
+	tb.Helper()
+	h, err := m.Eval(s)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return h
+}
+
+func mustEvalMulti(tb testing.TB, tf *TransferFunc, freqs []complex128) [][][]complex128 {
+	tb.Helper()
+	h, err := tf.EvalMulti(freqs)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return h
+}
+
+type properChecker interface {
+	IsProper() (bool, error)
+}
+
+func mustIsProper(tb testing.TB, m properChecker) bool {
+	tb.Helper()
+	ok, err := m.IsProper()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return ok
+}
+
+func TestTransferFuncStateSpaceInvalidModels(t *testing.T) {
+	cases := []struct {
+		name string
+		tf   *TransferFunc
+		want error
+	}{
+		{"negative Dt", &TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{1}}, Dt: -1}, ErrInvalidSampleTime},
+		{"NaN Dt", &TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{1, 1}}, Dt: math.NaN()}, ErrInvalidSampleTime},
+		{"static zero den", &TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{0}}}, ErrSingularDenom},
+		{"mixed zero static row", &TransferFunc{Num: [][][]float64{{{1}}, {{1}}}, Den: [][]float64{{1, 2}, {0}}}, ErrSingularDenom},
+		{"empty", &TransferFunc{}, ErrDimensionMismatch},
+		{"ragged", &TransferFunc{Num: [][][]float64{{{1}, {1}}}, Den: [][]float64{{1, 1}, {1, 2}}}, ErrDimensionMismatch},
+		{"nil", nil, ErrDimensionMismatch},
+	}
+	for _, tc := range cases {
+		if _, err := tc.tf.StateSpace(); !errors.Is(err, tc.want) {
+			t.Errorf("%s: StateSpace error = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestTransferFuncEvalValidates(t *testing.T) {
+	ragged := &TransferFunc{Num: [][][]float64{{{1}, {1}}}, Den: [][]float64{{1, 1}, {1, 2}}}
+	if _, err := ragged.Eval(1i); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Eval ragged = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := ragged.EvalMulti([]complex128{1i}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("EvalMulti ragged = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := ragged.IsProper(); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("IsProper ragged = %v, want ErrDimensionMismatch", err)
+	}
+
+	frac := &TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{1, -0.5}}, Delay: [][]float64{{1.5}}, Dt: 0.1}
+	if _, err := frac.Eval(1i); !errors.Is(err, ErrFractionalDelay) {
+		t.Errorf("Eval fractional discrete delay = %v, want ErrFractionalDelay", err)
+	}
+
+	disc := &TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{1, -0.5}}, Delay: [][]float64{{2}}, Dt: 0.1}
+	z := complex(0.3, 1.2)
+	h, err := disc.Eval(z)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 1 / ((z - 0.5) * z * z); cmplx.Abs(h[0][0]-want) > 1e-12 {
+		t.Errorf("discrete delayed Eval = %v, want %v", h[0][0], want)
+	}
+}
+
+func TestSystemIsProper(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := sys.IsProper(); err != nil || !ok {
+		t.Errorf("explicit IsProper = %v, %v, want true", ok, err)
+	}
+	// E = [0 1; 0 0], A = I: x2 = -u, x1 = -dx2/dt, y = x1 -> G(s) = s.
+	improper, err := NewDescriptor(
+		mat.NewDense(2, 2, []float64{1, 0, 0, 1}),
+		mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 0}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(2, 2, []float64{0, 1, 0, 0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := improper.IsProper(); err != nil || ok {
+		t.Errorf("improper descriptor IsProper = %v, %v, want false", ok, err)
+	}
+	singular, err := NewDescriptor(
+		mat.NewDense(2, 2, []float64{1, 0, 0, 0}),
+		mat.NewDense(2, 1, []float64{1, 1}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(2, 2, []float64{1, 0, 0, 0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := singular.IsProper(); !errors.Is(err, ErrDescriptorSingular) {
+		t.Errorf("singular pencil IsProper error = %v, want ErrDescriptorSingular", err)
+	}
+	var nilSys *System
+	if _, err := nilSys.IsProper(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil IsProper error = %v, want ErrInvalidArgument", err)
 	}
 }

@@ -13,7 +13,7 @@ import (
 func conversionSISO(t testing.TB, num, den []float64, dt float64) *System {
 	t.Helper()
 	model := &TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: dt}
-	result, err := model.StateSpace(nil)
+	result, err := model.StateSpace()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestMatchedReverseIndependentResponse(t *testing.T) {
 			for _, w := range []float64{.03, .4, 1.7, 4.3, 13} {
 				s := complex(0, w)
 				want := Poly(tc.continuousNum).Eval(s) / Poly(tc.continuousDen).Eval(s)
-				got := tf.TF.Eval(s)[0][0]
+				got := mustEval(t, tf.TF, s)[0][0]
 				if cmplx.Abs(got-want) > 2e-6*math.Max(1, cmplx.Abs(want)) {
 					t.Fatalf("w=%g got=%v want=%v", w, got, want)
 				}
@@ -175,7 +175,7 @@ func TestLeastSquaresIndependentFrequencyResponse(t *testing.T) {
 			for k := range 827 {
 				w := math.Pi * (float64(k) + .371) / (827 * tc.dt)
 				want := Poly(tc.num).Eval(complex(0, w)) / Poly(tc.den).Eval(complex(0, w))
-				got := tf.TF.Eval(cmplx.Exp(complex(0, w*tc.dt)))[0][0]
+				got := mustEval(t, tf.TF, cmplx.Exp(complex(0, w*tc.dt)))[0][0]
 				residual = math.Hypot(residual, cmplx.Abs(got-want))
 				energy = math.Hypot(energy, cmplx.Abs(want))
 			}
@@ -280,7 +280,7 @@ func TestLeastSquaresIntegratorConstraints(t *testing.T) {
 			compareConversionCoefficients(t, model.TF.Den[0], []float64{1, -1}, 1e-8)
 		}
 		for _, w := range []float64{.0001, .001, .01} {
-			got := model.TF.Eval(cmplx.Exp(complex(0, w*.2)))[0][0]
+			got := mustEval(t, model.TF, cmplx.Exp(complex(0, w*.2)))[0][0]
 			want := 1 / Poly(den).Eval(complex(0, w))
 			if cmplx.Abs(got-want)/cmplx.Abs(want) > .003 {
 				t.Fatalf("den=%v w=%g fitted=%v want=%v", den, w, got, want)
