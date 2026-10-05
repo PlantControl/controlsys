@@ -93,10 +93,18 @@ func newHinfGeneralPlant(gp *generalizedPlantPartition) (*hinfGeneralPlant, erro
 
 	var gammaLB float64
 	if p1 > m2 {
-		gammaLB = maxSVD(extractBlock(D11, 0, 0, p1-m2, m1))
+		sv, err := maxSingularValue(extractBlock(D11, 0, 0, p1-m2, m1))
+		if err != nil {
+			return nil, err
+		}
+		gammaLB = sv
 	}
 	if m1 > p2 {
-		gammaLB = math.Max(gammaLB, maxSVD(extractBlock(D11, 0, 0, p1, m1-p2)))
+		sv, err := maxSingularValue(extractBlock(D11, 0, 0, p1, m1-p2))
+		if err != nil {
+			return nil, err
+		}
+		gammaLB = math.Max(gammaLB, sv)
 	}
 
 	D1dT := mat.DenseCopyOf(D1d.T())

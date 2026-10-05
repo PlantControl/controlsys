@@ -324,9 +324,11 @@ func (f *FRD) PeakGain() (*FRDPeakGainResult, error) {
 		return result, nil
 	}
 	ws := newComplexSVDWorkspace(p, m)
-	sv := make([]float64, min(p, m))
+	sv := make([]float64, 1)
 	for k := range nw {
-		ws.singularValuesFromNested(sv, f.Response[k], p, m)
+		if err := ws.singularValuesFromNested(sv, f.Response[k], p, m); err != nil {
+			return nil, fmt.Errorf("FRD.PeakGain: omega=%g: %w", f.Omega[k], err)
+		}
 		if sv[0] > result.Gain {
 			result.Gain = sv[0]
 			result.Frequency = f.Omega[k]
@@ -547,7 +549,9 @@ func (f *FRD) Sigma() (*SigmaResult, error) {
 	var ws *complexSVDWorkspace
 	ws = newComplexSVDWorkspace(p, m)
 	for k := range nw {
-		response.singularValues(sv[k*nsv:(k+1)*nsv], ws, k)
+		if err := response.singularValues(sv[k*nsv:(k+1)*nsv], ws, k); err != nil {
+			return nil, fmt.Errorf("FRD.Sigma: %w", err)
+		}
 	}
 	omega := make([]float64, nw)
 	copy(omega, f.Omega)

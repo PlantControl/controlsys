@@ -39,8 +39,14 @@ func Loopsens(P, C *System) (*LoopsensResult, error) {
 		return nil, fmt.Errorf("controlsys: loopsens: cannot form input loop C*P: %w", err)
 	}
 
-	eyeO := makeIdentityGain(pp, Lo.Dt)
-	eyeI := makeIdentityGain(pm, Li.Dt)
+	eyeO, err := makeIdentityGain(pp, Lo.Dt)
+	if err != nil {
+		return nil, fmt.Errorf("Loopsens: %w", err)
+	}
+	eyeI, err := makeIdentityGain(pm, Li.Dt)
+	if err != nil {
+		return nil, fmt.Errorf("Loopsens: %w", err)
+	}
 
 	So, err := Feedback(eyeO, Lo, -1)
 	if err != nil {
@@ -65,7 +71,6 @@ func Loopsens(P, C *System) (*LoopsensResult, error) {
 	return &LoopsensResult{So: So, To: To, Si: Si, Ti: Ti}, nil
 }
 
-func makeIdentityGain(n int, dt float64) *System {
-	sys, _ := NewGain(eyeOrEmptyDense(n), dt)
-	return sys
+func makeIdentityGain(n int, dt float64) (*System, error) {
+	return NewGain(eyeOrEmptyDense(n), dt)
 }

@@ -1,7 +1,9 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
+	"math/cmplx"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -49,9 +51,9 @@ func TestComplexSVDWorkspaceMaximumMatchesGonum(t *testing.T) {
 			if test.p > 1 && test.m > 1 && (test.p != 2 || test.m != 2) {
 				workspace = newComplexSVDWorkspace(test.p, test.m)
 			}
-			got, ok := workspace.maximumFromFlat(test.data, 0, test.p, test.m)
-			if !ok {
-				t.Fatal("maximum singular-value decomposition failed")
+			got, err := workspace.maximumFromFlat(test.data, 0, test.p, test.m)
+			if err != nil {
+				t.Fatal(err)
 			}
 			want := gonumComplexSingularValues(t, test.data, test.p, test.m)[0]
 			if !sameRelative(got, want, 2e-12) {
@@ -72,7 +74,9 @@ func TestComplexSVDWorkspaceScaledSingularValues(t *testing.T) {
 	want := gonumComplexSingularValues(t, data, p, m)
 	got := make([]float64, min(p, m))
 	workspace := newComplexSVDWorkspace(p, m)
-	workspace.singularValuesFromFlat(got, data, 0, p, m)
+	if err := workspace.singularValuesFromFlat(got, data, 0, p, m); err != nil {
+		t.Fatal(err)
+	}
 	for i := range got {
 		if !sameRelative(got[i], want[i], 3e-12) {
 			t.Fatalf("singular value %d = %.17g, want %.17g", i, got[i], want[i])
@@ -119,5 +123,50 @@ func TestMaximumComplex2x2SingularValueNearlyEqual(t *testing.T) {
 				t.Fatalf("e=%g data=%v: sigma max = %.17g, want %.17g", e, data, got, want)
 			}
 		}
+	}
+}
+
+func TestSigmaAtPoleNoNaN(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{0, 1, -1, 0}),
+		mat.NewDense(2, 2, []float64{1, 0, 0, 1}),
+		mat.NewDense(2, 2, []float64{1, 0, 0, 1}),
+		mat.NewDense(2, 2, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := sys.Sigma([]float64{1}, 0)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("MIMO Sigma at pole: res=%v err=%v, want ErrInvalidArgument", res, err)
+	}
+
+	siso := makeSISO(0, 1, 1, 0)
+	r, err := siso.Sigma([]float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsInf(r.At(0, 0), 1) {
+		t.Fatalf("SISO sigma at pole = %g, want +Inf", r.At(0, 0))
+	}
+}
+
+func TestFRDPeakGainAtPoleIsInf(t *testing.T) {
+	inf := cmplx.Inf()
+	f, err := NewFRD([][][]complex128{
+		{{1, 0}, {0, 1}},
+		{{inf, 0}, {0, 1}},
+	}, []float64{1, 2}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, err := f.PeakGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsInf(pk.Gain, 1) || pk.Index != 1 {
+		t.Fatalf("peak = %+v, want +Inf at index 1", pk)
+	}
+	if _, err := f.Sigma(); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("FRD Sigma at pole err = %v, want ErrInvalidArgument", err)
 	}
 }

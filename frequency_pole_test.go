@@ -368,12 +368,8 @@ func TestFreqResponseSingularEverywhereErrors(t *testing.T) {
 
 func TestSigmaAndGainGoalsAtPole(t *testing.T) {
 	sys, _ := poleOscLag2x2(t, 0)
-	sg, err := sys.Sigma([]float64{1}, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !math.IsInf(sg.At(0, 0), 1) {
-		t.Errorf("Sigma at pole = %v, want +Inf", sg.At(0, 0))
+	if _, err := sys.Sigma([]float64{1}, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("MIMO Sigma at pole err = %v, want ErrInvalidArgument (σ₂ undetermined)", err)
 	}
 	three, err := Append(sys, poleSys(t, 1, 1, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0))
 	if err != nil {
