@@ -632,17 +632,17 @@ func processResponseBasis(system *System, input []float64, dt, delay float64, es
 	if fraction < dt*1e-12 {
 		fraction = 0
 	}
-	full, err := system.DiscretizeZOH(dt)
+	full, err := system.C2D(dt, C2DOptions{})
 	if err != nil {
 		return nil, nil, err
 	}
 	first, last := full, full
 	if fraction > 0 {
-		first, err = system.DiscretizeZOH(fraction)
+		first, err = system.C2D(fraction, C2DOptions{})
 		if err != nil {
 			return nil, nil, err
 		}
-		last, err = system.DiscretizeZOH(dt - fraction)
+		last, err = system.C2D(dt - fraction, C2DOptions{})
 		if err != nil {
 			return nil, nil, err
 		}

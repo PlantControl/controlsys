@@ -18,7 +18,7 @@ func TestD2CZOHDefectiveAndNearUnit(t *testing.T) {
 		sys, _ := New(ad, bd, mat.NewDense(2, 3, []float64{1, 0, 0, 0, 1, 1}), mat.NewDense(2, 2, []float64{0.2, 0, 0, -0.1}), 0.25)
 		before := sys.Copy()
 		sys.StateName = []string{"x", "y", "z"}
-		out, err := sys.D2C(C2DMethodZOH)
+		out, err := sys.D2C(D2COptions{Method: C2DMethodZOH})
 		if err != nil {
 			t.Fatalf("pole=%g: %v", pole, err)
 		}
@@ -34,7 +34,7 @@ func TestD2CZOHDefectiveAndNearUnit(t *testing.T) {
 		}
 		expected.Scale(4, expected)
 		assertMatClose(t, "analytic Jordan logarithm", out.A, expected, 2e-11)
-		back, err := out.DiscretizeZOH(sys.Dt)
+		back, err := out.C2D(sys.Dt, C2DOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -58,7 +58,7 @@ func TestD2CZOHNegativeMixedDefectiveResponses(t *testing.T) {
 	sys.OutputName = []string{"y1", "y2"}
 	sys.StateName = []string{"x1", "x2", "x3", "x4"}
 	sys.InputDelay = []float64{2, 0}
-	out, err := sys.D2C(C2DMethodZOH)
+	out, err := sys.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestD2CZOHNegativeMixedDefectiveResponses(t *testing.T) {
 	if out.InputDelay[0] != 0.4 {
 		t.Fatalf("delay=%v", out.InputDelay)
 	}
-	disc, err := out.DiscretizeZOH(0.2)
+	disc, err := out.C2D(0.2, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestD2CZOHNegativeMixedDefectiveResponses(t *testing.T) {
 func TestD2CZeroPoleRejected(t *testing.T) {
 	sys, _ := New(mat.NewDense(1, 1, []float64{0}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0.1)
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
-		if _, err := sys.D2C(method); !errors.Is(err, ErrSingularTransform) {
+		if _, err := sys.D2C(D2COptions{Method: method}); !errors.Is(err, ErrSingularTransform) {
 			t.Fatalf("%s error=%v", method, err)
 		}
 	}
@@ -116,11 +116,11 @@ func TestModifiedFOHPiecewiseLinearMIMO(t *testing.T) {
 	sys.OutputName = []string{"position", "rate"}
 	before := sys.Copy()
 	dt := 0.15
-	disc, err := sys.DiscretizeFOH(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := disc.D2C(C2DMethodFOH)
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestModifiedFOHSciPyReference(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := sys.DiscretizeFOH(tc.Dt)
+			got, err := sys.C2D(tc.Dt, C2DOptions{Method: C2DMethodFOH})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -275,7 +275,7 @@ func TestModifiedFOHSciPyReference(t *testing.T) {
 			assertMatClose(t, "Cd", got.C, mat.NewDense(tc.P, tc.N, tc.Cd), 2e-12)
 			assertMatClose(t, "Dd", got.D, mat.NewDense(tc.P, tc.M, tc.Dd), 2e-12)
 			fixture, _ := New(mat.NewDense(tc.N, tc.N, tc.Ad), mat.NewDense(tc.N, tc.M, tc.Bd), mat.NewDense(tc.P, tc.N, tc.Cd), mat.NewDense(tc.P, tc.M, tc.Dd), tc.Dt)
-			restored, err := fixture.D2C(C2DMethodFOH)
+			restored, err := fixture.D2C(D2COptions{Method: C2DMethodFOH})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -289,21 +289,21 @@ func TestModifiedFOHSciPyReference(t *testing.T) {
 
 func TestFOHIntegratorFeedthroughAndReverseLimitations(t *testing.T) {
 	sys, _ := New(mat.NewDense(1, 1, []float64{0}), mat.NewDense(1, 1, []float64{2}), mat.NewDense(1, 1, []float64{3}), mat.NewDense(1, 1, []float64{4}), 0)
-	disc, err := sys.DiscretizeFOH(0.2)
+	disc, err := sys.C2D(0.2, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertMatClose(t, "integrator A", disc.A, mat.NewDense(1, 1, []float64{1}), 1e-14)
 	assertMatClose(t, "integrator B", disc.B, mat.NewDense(1, 1, []float64{0.4}), 1e-14)
 	assertMatClose(t, "integrator D", disc.D, mat.NewDense(1, 1, []float64{4.6}), 1e-14)
-	rec, err := disc.D2C(C2DMethodFOH)
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertMatClose(t, "integrator Bc", rec.B, sys.B, 1e-13)
 	assertMatClose(t, "integrator Dc", rec.D, sys.D, 1e-13)
 	disc.A.Set(0, 0, -0.5)
-	if _, err := disc.D2C(C2DMethodFOH); !errors.Is(err, ErrSingularTransform) {
+	if _, err := disc.D2C(D2COptions{Method: C2DMethodFOH}); !errors.Is(err, ErrSingularTransform) {
 		t.Fatalf("negative pole error=%v", err)
 	}
 }
@@ -313,7 +313,7 @@ func BenchmarkModifiedFOHForwardN20(b *testing.B) {
 	sys.Dt = 0
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := sys.DiscretizeFOH(0.01); err != nil {
+		if _, err := sys.C2D(0.01, C2DOptions{Method: C2DMethodFOH}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -323,7 +323,7 @@ func BenchmarkModifiedFOHReverseN20(b *testing.B) {
 	sys := benchD2CSystem(20, 5, 0.01)
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := sys.D2C(C2DMethodFOH); err != nil {
+		if _, err := sys.D2C(D2COptions{Method: C2DMethodFOH}); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -387,14 +387,14 @@ func unitCirclePoints(dt float64) []complex128 {
 func TestD2CHoldInternalDelayRoundTrip(t *testing.T) {
 	sys := internalDelayDiscretePlant(t, []float64{0.6, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
-		cont, err := sys.D2C(method)
+		cont, err := sys.D2C(D2COptions{Method: method})
 		if err != nil {
 			t.Fatalf("%s: %v", method, err)
 		}
 		if math.Abs(cont.LFT.Tau[0]-0.2) > 1e-15 || math.Abs(cont.LFT.Tau[1]-0.3) > 1e-15 {
 			t.Fatalf("%s: tau = %v, want [0.2 0.3]", method, cont.LFT.Tau)
 		}
-		back, err := cont.DiscretizeWithOpts(sys.Dt, C2DOptions{Method: method})
+		back, err := cont.C2D(sys.Dt, C2DOptions{Method: method})
 		if err != nil {
 			t.Fatalf("%s c2d: %v", method, err)
 		}
@@ -414,7 +414,7 @@ func TestD2CHoldInternalDelayRoundTrip(t *testing.T) {
 
 func TestD2CZOHInternalDelayMatchesHoldExponential(t *testing.T) {
 	sys := internalDelayDiscretePlant(t, []float64{0.6, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
-	cont, err := sys.D2C(C2DMethodZOH)
+	cont, err := sys.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,14 +439,14 @@ func TestD2CZOHInternalDelayMatchesHoldExponential(t *testing.T) {
 
 func TestD2CZOHInternalDelayNegativePole(t *testing.T) {
 	sys := internalDelayDiscretePlant(t, []float64{-0.4, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
-	cont, err := sys.D2C(C2DMethodZOH)
+	cont, err := sys.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n, _, _ := cont.Dims(); n <= 3 {
 		t.Fatalf("negative real pole should add extension states, got n=%d", n)
 	}
-	back, err := cont.DiscretizeZOH(sys.Dt)
+	back, err := cont.C2D(sys.Dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,14 +455,14 @@ func TestD2CZOHInternalDelayNegativePole(t *testing.T) {
 
 func TestD2DInternalDelay(t *testing.T) {
 	sys := internalDelayDiscretePlant(t, []float64{0.6, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
-	fast, err := sys.D2D(0.05, C2DOptions{})
+	fast, err := sys.D2D(0.05, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(fast.LFT.Tau, []float64{4, 6}) {
 		t.Fatalf("tau = %v, want [4 6]", fast.LFT.Tau)
 	}
-	back, err := fast.D2D(0.1, C2DOptions{})
+	back, err := fast.D2D(0.1, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,56 +472,53 @@ func TestD2DInternalDelay(t *testing.T) {
 func TestD2CInternalDelayDescriptor(t *testing.T) {
 	desc, oracle := index1Descriptor(t, 0.1, true)
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
-		got, err := desc.D2C(method)
+		got, err := desc.D2C(D2COptions{Method: method})
 		if err != nil {
 			t.Fatalf("%s: %v", method, err)
 		}
-		want, err := oracle.D2C(method)
+		want, err := oracle.D2C(D2COptions{Method: method})
 		if err != nil {
 			t.Fatalf("%s oracle: %v", method, err)
 		}
 		assertDelayResponseClose(t, "descriptor "+string(method), got, want, []complex128{0.4i, 3i, 0.5 + 12i}, 1e-10)
-		back, err := got.DiscretizeWithOpts(0.1, C2DOptions{Method: method})
+		back, err := got.C2D(0.1, C2DOptions{Method: method})
 		if err != nil {
 			t.Fatal(err)
 		}
 		assertDelayResponseClose(t, "descriptor round trip "+string(method), back, oracle, unitCirclePoints(0.1), 1e-10)
 	}
-	got, err := desc.D2D(0.05, C2DOptions{})
+	got, err := desc.D2D(0.05, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := oracle.D2D(0.05, C2DOptions{})
+	want, err := oracle.D2D(0.05, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertDelayResponseClose(t, "descriptor D2D", got, want, unitCirclePoints(0.05), 1e-10)
 }
 
-func TestD2CWithResultInternalDelayHold(t *testing.T) {
+func TestD2CMapInternalDelayHold(t *testing.T) {
 	sys := internalDelayDiscretePlant(t, []float64{0.6, 0.2, -0.1, 0.05, 0.8, 0.3, 0, -0.1, 0.5})
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
-		inverse, err := sys.D2CWithResult(D2COptions{Method: method})
+		inverseSys, inverseMap, err := sys.D2CMap(D2COptions{Method: method})
 		if err != nil {
 			t.Fatalf("%s: %v", method, err)
-		}
-		if !inverse.Approximate {
-			t.Errorf("%s: internal-delay hold inverse must be flagged approximate", method)
 		}
 		want := mat.NewDense(3, 7, nil)
 		for i := range 3 {
 			want.Set(i, i, 1)
 		}
 		if method == C2DMethodFOH {
-			want.Slice(0, 3, 3, 7).(*mat.Dense).Copy(holdTestGamma1(conversionAugmentedRational(inverse.System), sys.Dt))
+			want.Slice(0, 3, 3, 7).(*mat.Dense).Copy(holdTestGamma1(conversionAugmentedRational(inverseSys), sys.Dt))
 		}
-		assertMatClose(t, string(method)+" inverse state map", inverse.InitialStateMap, want, 1e-9)
-		forward, err := inverse.System.DiscretizeWithResult(sys.Dt, C2DOptions{Method: method})
+		assertMatClose(t, string(method)+" inverse state map", inverseMap, want, 1e-9)
+		_, forwardMap, err := inverseSys.C2DMap(sys.Dt, C2DOptions{Method: method})
 		if err != nil {
 			t.Fatal(err)
 		}
 		var sum mat.Dense
-		sum.Add(forward.InitialStateMap.Slice(0, 3, 3, 7), inverse.InitialStateMap.Slice(0, 3, 3, 7))
+		sum.Add(forwardMap.Slice(0, 3, 3, 7), inverseMap.Slice(0, 3, 3, 7))
 		assertMatClose(t, string(method)+" forward∘inverse input columns", &sum, mat.NewDense(3, 4, nil), 1e-12)
 	}
 }

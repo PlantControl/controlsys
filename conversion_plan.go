@@ -21,9 +21,9 @@ type c2dPlan struct {
 
 func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 	if sys.IsDiscrete() {
-		return c2dPlan{}, fmt.Errorf("DiscretizeWithOpts: system already discrete: %w", ErrWrongDomain)
+		return c2dPlan{}, fmt.Errorf("C2D: system already discrete: %w", ErrWrongDomain)
 	}
-	sys, _, err := conversionStandardForm(sys, "DiscretizeWithOpts")
+	sys, _, err := conversionStandardForm(sys, "C2D")
 	if err != nil {
 		return c2dPlan{}, err
 	}
@@ -207,11 +207,11 @@ func (p d2dPlan) run() (*System, error) {
 		return p.sys.Copy(), nil
 	}
 
-	contSys, err := p.sys.D2CWithOpts(D2COptions{Method: p.opts.Method, PrewarpFrequency: p.opts.PrewarpFrequency})
+	contSys, err := p.sys.D2C(D2COptions{Method: p.opts.Method, PrewarpFrequency: p.opts.PrewarpFrequency})
 	if err != nil {
 		return nil, fmt.Errorf("D2D: %w", err)
 	}
-	result, err := contSys.DiscretizeWithOpts(p.newDt, p.opts)
+	result, err := contSys.C2D(p.newDt, p.opts)
 	if err != nil {
 		return nil, fmt.Errorf("D2D: %w", err)
 	}

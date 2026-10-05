@@ -968,7 +968,7 @@ func TestFRD_NyquistEncirclements(t *testing.T) {
 				t.Fatalf("oracle Z-P = %d, want %d", got, tc.want)
 			}
 			dt := 0.05
-			dsys, err := ct.DiscretizeZOH(dt)
+			dsys, err := ct.C2D(dt, C2DOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}

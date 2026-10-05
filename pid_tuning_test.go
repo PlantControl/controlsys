@@ -63,7 +63,7 @@ func TestTunePIDFocusChangesDesign(t *testing.T) {
 
 func TestTunePIDDiscreteBasisMatchesRealization(t *testing.T) {
 	p := makePlant(t, []float64{1}, []float64{1, 1})
-	sampled, err := p.DiscretizeZOH(.1)
+	sampled, err := p.C2D(.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

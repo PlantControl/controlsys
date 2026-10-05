@@ -625,7 +625,7 @@ func TestDiscretizeConvertsDelay(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 	sys.Delay = delay
 
-	disc, err := sys.Discretize(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +647,7 @@ func TestDiscretizeDelayFractionalRounds(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 	sys.Delay = delay
 
-	disc, err := sys.Discretize(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +666,7 @@ func TestUndiscretizeConvertsDelay(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0.1)
 	sys.Delay = delay
 
-	cont, err := sys.Undiscretize()
+	cont, err := sys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestDiscretizeZOHConvertsDelay(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 	sys.Delay = delay
 
-	disc, err := sys.DiscretizeZOH(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -947,7 +947,7 @@ func TestMATLABC2DD2CDelayRoundtrip(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 	sys.Delay = delay
 
-	disc, err := sys.Discretize(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -955,7 +955,7 @@ func TestMATLABC2DD2CDelayRoundtrip(t *testing.T) {
 		t.Fatalf("c2d delay = %v, want 3", disc.Delay.At(0, 0))
 	}
 
-	cont, err := disc.Undiscretize()
+	cont, err := disc.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

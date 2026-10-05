@@ -616,7 +616,7 @@ func TestH2Norm_Discrete_MATLABVerified(t *testing.T) {
 		}),
 		mat.NewDense(2, 2, nil), 0)
 
-	dsys, err := sys.DiscretizeZOH(0.1)
+	dsys, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +638,7 @@ func TestH2Norm_Discrete_FirstOrder_MATLABVerified(t *testing.T) {
 		mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{0}), 0)
 
-	dsys, err := sys.DiscretizeZOH(0.1)
+	dsys, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1338,7 +1338,7 @@ func randomStableNormSys(t testing.TB, rng *rand.Rand, n, m, p int, dt float64, 
 	}
 	sys, err := New(A, B, C, D, 0)
 	if err == nil && dt > 0 {
-		sys, err = sys.Discretize(dt)
+		sys, err = sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -1576,7 +1576,7 @@ func TestPeakGain_FallbackWhenSampledBoundMissesPeak(t *testing.T) {
 			t.Fatal(err)
 		}
 		if dt > 0 {
-			if sys, err = sys.Discretize(dt); err != nil {
+			if sys, err = sys.C2D(dt, C2DOptions{Method: C2DMethodTustin}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -1620,7 +1620,7 @@ func highPassResonanceSys(t testing.TB, rng *rand.Rand, dt float64) *System {
 	D := mat.NewDense(2, 2, []float64{d[0], 0.1 * d[1], 0, d[1]})
 	sys, err := New(A, B, C, D, 0)
 	if err == nil && dt > 0 {
-		sys, err = sys.Discretize(dt)
+		sys, err = sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -1708,7 +1708,7 @@ func TestPeakGain_FeedthroughPeakAtInfinity(t *testing.T) {
 		t.Errorf("HinfNorm = %.15g at %g in %d evaluations, want 1 at +Inf in 1", got, w, evals)
 	}
 
-	disc, err := highPass.Discretize(0.1)
+	disc, err := highPass.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

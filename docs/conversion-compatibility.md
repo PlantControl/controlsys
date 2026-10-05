@@ -48,9 +48,9 @@ into the augmented model (approximate). Tustin/matched with Thiran realize
 nondecomposable fractional MIMO path delays by copying the model per fractional
 row or column (see [conversion-delay-methods.md](conversion-delay-methods.md)).
 
-`DiscretizeWithResult`, `D2CWithResult`, and `D2DWithResult` return the converted
+`C2DMap`, `D2CMap`, and `D2D` return the converted
 model, method, approximation flag, added-state warnings, and initial-state map.
-`MapInitialState` validates dimensions and finite values and accepts source state,
+`C2DMap G` validates dimensions and finite values and accepts source state,
 initial input, and internal delay output. Ordinary ZOH/FOH/Tustin and retained
 Tustin internal ports have mappings. Integer ZOH histories append zero states.
 Fractional delay histories and matched/fitted coordinates can lack a mapping;

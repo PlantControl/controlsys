@@ -96,7 +96,7 @@ func TestFreqResponse_Discrete(t *testing.T) {
 	}
 
 	dt := 0.001
-	sysd, err := sysc.Discretize(dt)
+	sysd, err := sysc.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1065,7 +1065,7 @@ func TestNichols_Discrete(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
-	sysd, _ := sysc.Discretize(0.01)
+	sysd, _ := sysc.C2D(0.01, C2DOptions{Method: C2DMethodTustin})
 
 	r, err := sysd.Nichols([]float64{0.1, 1.0, 10.0}, 0)
 	if err != nil {

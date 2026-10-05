@@ -134,13 +134,13 @@ func (sys *System) d2cZOHRealExtension(augmented *mat.Dense, values []complex128
 // The discrete state is x_d[k] = x_c(k*dt) - Gamma1*u[k].
 func (sys *System) discretizeModifiedFOH(dt float64) (*System, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("DiscretizeFOH: model already discrete: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("C2D: model already discrete: %w", ErrWrongDomain)
 	}
 	if dt <= 0 || math.IsInf(dt, 0) || math.IsNaN(dt) {
 		return nil, ErrInvalidSampleTime
 	}
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("DiscretizeFOH: modified FOH with internal delays not supported: %w", ErrFeedbackDelay)
+		return nil, fmt.Errorf("C2D: modified FOH with internal delays not supported: %w", ErrFeedbackDelay)
 	}
 	n, m, p := sys.Dims()
 	out := sys.Copy()
