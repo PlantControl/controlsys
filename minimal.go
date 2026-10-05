@@ -28,7 +28,7 @@ type ReduceResult struct {
 }
 
 func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
-	if err := requireSystem("Reduce", sys); err != nil {
+	if err := requireFiniteSystem("Reduce", sys); err != nil {
 		return nil, err
 	}
 	if opts == nil {

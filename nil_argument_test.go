@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -58,5 +59,37 @@ func TestNilArgumentsReturnInvalidArgument(t *testing.T) {
 				t.Fatalf("err = %v, want ErrInvalidArgument", err)
 			}
 		})
+	}
+}
+
+func TestNonFiniteModelsRejectedBeforeLAPACK(t *testing.T) {
+	for _, bad := range []float64{math.NaN(), math.Inf(1)} {
+		sys, err := New(
+			mat.NewDense(2, 2, []float64{-1, bad, 0.5, -2}),
+			mat.NewDense(2, 2, []float64{1, 0, 0.3, 1}),
+			mat.NewDense(2, 2, []float64{1, 0.2, 0, 1}),
+			mat.NewDense(2, 2, []float64{0.1, 0, 0, 0}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eye4 := eyeDense(4)
+		tests := map[string]func() error{
+			"Gram":           func() error { _, err := Gram(sys, GramControllability); return err },
+			"Reduce":         func() error { _, err := sys.Reduce(nil); return err },
+			"Modsep":         func() error { _, err := Modsep(sys, 1); return err },
+			"ModalTruncate":  func() error { _, err := ModalTruncate(sys, nil); return err },
+			"Norm":           func() error { _, err := Norm(sys, math.Inf(1)); return err },
+			"H2Norm":         func() error { _, err := H2Norm(sys); return err },
+			"HSV":            func() error { _, err := HSV(sys); return err },
+			"HinfNorm":       func() error { _, _, err := HinfNorm(sys); return err },
+			"Lqg":            func() error { _, err := Lqg(sys, eye4, eye4, nil); return err },
+			"matLog":         func() error { _, err := matLog(sys.A); return err },
+			"matLogSpectral": func() error { _, err := matLogSpectral(sys.A); return err },
+		}
+		for name, call := range tests {
+			if err := call(); !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("%s with A[0,1] = %g: err = %v, want ErrInvalidArgument", name, bad, err)
+			}
+		}
 	}
 }

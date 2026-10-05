@@ -16,6 +16,9 @@ func matLog(a *mat.Dense) (*mat.Dense, error) {
 	if n == 0 {
 		return newDense(0, 0), nil
 	}
+	if err := requireFiniteDense("matLog", "A", a); err != nil {
+		return nil, err
+	}
 	if logarithm, err := matLogSpectral(a); err == nil {
 		return logarithm, nil
 	}

@@ -24,7 +24,10 @@ func matLogSpectral(A *mat.Dense) (*mat.Dense, error) {
 		return nil, fmt.Errorf("matLog: non-square %dx%d: %w", n, c, ErrDimensionMismatch)
 	}
 	if n == 0 {
-		return mat.NewDense(0, 0, nil), nil
+		return newDense(0, 0), nil
+	}
+	if err := requireFiniteDense("matLog", "A", A); err != nil {
+		return nil, err
 	}
 
 	var eig mat.Eigen
