@@ -513,42 +513,7 @@ func Append(sys1, sys2 *System) (*System, error) {
 	p := p1 + p2
 
 	if sys1.HasInternalDelay() || sys2.HasInternalDelay() {
-		s1, err := sys1.PullDelaysToLFT()
-		if err != nil {
-			return nil, err
-		}
-		s2, err := sys2.PullDelaysToLFT()
-		if err != nil {
-			return nil, err
-		}
-		n1, m1, p1 = s1.Dims()
-		n2, m2, p2 = s2.Dims()
-		n, m, p = n1+n2, m1+m2, p1+p2
-		res := &System{
-			A:  mat.NewDense(max(n, 1), max(n, 1), nil),
-			B:  mat.NewDense(max(n, 1), max(m, 1), nil),
-			C:  mat.NewDense(max(p, 1), max(n, 1), nil),
-			D:  mat.NewDense(max(p, 1), max(m, 1), nil),
-			Dt: s1.Dt,
-		}
-		if n1 > 0 {
-			setBlock(res.A, 0, 0, s1.A)
-			setBlock(res.B, 0, 0, s1.B)
-			setBlock(res.C, 0, 0, s1.C)
-		}
-		if n2 > 0 {
-			setBlock(res.A, n1, n1, s2.A)
-			setBlock(res.B, n1, m1, s2.B)
-			setBlock(res.C, p1, n1, s2.C)
-		}
-		setBlock(res.D, 0, 0, s1.D)
-		setBlock(res.D, p1, m1, s2.D)
-		res.E = blkDiagDescriptorE(s1, s2)
-		appendInternalDelay(res, s1, s2, n1, n2, m1, m2, p1, p2)
-		res.InputName = concatStringSlices([][]string{sys1.InputName, sys2.InputName}, []int{m1, m2})
-		res.OutputName = concatStringSlices([][]string{sys1.OutputName, sys2.OutputName}, []int{p1, p2})
-		res.StateName = concatStringSlices([][]string{sys1.StateName, sys2.StateName}, []int{n1, n2})
-		return res, nil
+		return BlkDiag(sys1, sys2)
 	}
 
 	A := mat.NewDense(max(n, 1), max(n, 1), nil)
