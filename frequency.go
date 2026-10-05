@@ -122,7 +122,11 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 // discrete models). A discrete z is taken exactly on the unit circle, as
 // z = (1+jν)/(1−jν) with ν = tan(ωDt/2), rather than as e^{jωDt} rounded to
 // complex128, which lies up to ε off the circle and would move the response
-// by about ε/d relative at distance d from a lightly damped pole.
+// by about ε/d relative at distance d from a lightly damped pole. Near such a
+// pole the solve is refined against the exact pencil; a discrete internal
+// delay loop near one is evaluated with its delays absorbed as states, up to
+// 256 states in all. Beyond that, Δ = z^{-k} formed in complex128 leaves
+// about kε/d relative error.
 //
 // As MATLAB freqresp and evalfr return Inf rather than failing at a pole, a
 // frequency at a pole of the model is not an error, for explicit, descriptor
@@ -701,6 +705,9 @@ type lftWorkspace struct {
 	lhs   []complex128 // I - H22·Δ
 	x     []complex128 // N×m
 	g     []complex128
+
+	absorbed    *balancedDense // discrete delays as states, built on first use
+	absorbedErr error
 }
 
 // newLFTWorkspace balances the augmented plant [|A|+|E| B B2; C C2 ·] so
@@ -747,7 +754,8 @@ func newLFTWorkspace(sys *System, n, N, p, m int) *lftWorkspace {
 }
 
 // evalFrLFTInto sets ws.g to G = H11 + H12·Δ·(I - H22·Δ)⁻¹·H21, or, where H
-// or I - H22·Δ is singular, to the frozen-delay closed loop at s.
+// or I - H22·Δ is singular, to the frozen-delay closed loop at s. Where a
+// discrete I - H22·Δ is ill-conditioned it evaluates ws.absorbedSolver.
 func evalFrLFTInto(ws *lftWorkspace, sys *System, pt frequencyPoint, N, p, m int) error {
 	s := pt.value()
 	cont := sys.IsContinuous()
@@ -767,16 +775,35 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, pt frequencyPoint, N, p, m int
 		return evalFrLFTFrozenInto(ws, pt, N, p, m)
 	}
 	mN := m + N
+	var loopMax, rhsMax float64
 	for i := range N {
 		hRow := h[(p+i)*mN:]
 		for j := range N {
 			ws.lhs[i*N+j] = -hRow[m+j] * ws.delta[j]
+			loopMax = max(loopMax, cabs1(hRow[m+j]))
 		}
 		ws.lhs[i*N+i] += 1
 		copy(ws.x[i*m:(i+1)*m], hRow[:m])
+		for _, v := range hRow[:m] {
+			rhsMax = max(rhsMax, cabs1(v))
+		}
 	}
 	if err := cSolveInPlace(ws.lhs, ws.x, N, m); err != nil {
 		return evalFrLFTFrozenInto(ws, pt, N, p, m)
+	}
+	if !cont {
+		xMax := 0.0
+		for _, v := range ws.x {
+			xMax = max(xMax, cabs1(v))
+		}
+		if xMax*(1+loopMax) > refineCondition*rhsMax {
+			if bd := ws.absorbedSolver(sys); bd != nil {
+				if err := bd.evalInto(pt, ws.g); err != nil {
+					return evalFrLFTFrozenInto(ws, pt, N, p, m)
+				}
+				return nil
+			}
+		}
 	}
 	for i := range p {
 		hRow := h[i*mN:]
@@ -789,6 +816,39 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, pt frequencyPoint, N, p, m int
 		}
 	}
 	return nil
+}
+
+// maxAbsorbedStates bounds the states of the absorbed realization, whose
+// dense solve costs O(n³) per point.
+const maxAbsorbedStates = 256
+
+// absorbedSolver returns the solver of sys with its discrete internal delays
+// absorbed as shift states, or nil when they cannot be or would need more
+// than maxAbsorbedStates states. Near a lightly
+// damped pole of the delay loop, I − H22·Δ is nearly singular and the
+// rounding of H and of Δ = z^{-k}, which no complex128 holds on the unit
+// circle, costs about kε/d relative accuracy at distance d; the absorbed
+// pencil holds the delays exactly and its solver refines to the exact
+// response.
+func (ws *lftWorkspace) absorbedSolver(sys *System) *balancedDense {
+	if ws.absorbed == nil && ws.absorbedErr == nil {
+		n, _, _ := sys.Dims()
+		for _, tau := range sys.LFT.Tau {
+			n += int(math.Round(tau))
+		}
+		if n > maxAbsorbedStates {
+			ws.absorbedErr = fmt.Errorf("%d absorbed states: %w", n, ErrInvalidArgument)
+			return nil
+		}
+		abs, err := absorbInternalDiscreteDelay(sys)
+		if err != nil {
+			ws.absorbedErr = err
+			return nil
+		}
+		n, m, p := abs.Dims()
+		ws.absorbed = newBalancedDense(abs, n, m, p)
+	}
+	return ws.absorbed
 }
 
 func cMulInto(dst, a, b []complex128, ar, ac, bc int) {

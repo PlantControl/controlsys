@@ -1752,6 +1752,16 @@ func frExactPoint(w, dt float64) frBig {
 // frExactResponse is G(z) = C(zE − A)⁻¹B + D of the stored realization with
 // only the final G rounded: Gaussian elimination in frBigPrec bits.
 func frExactResponse(sys *System, z frBig) []complex128 {
+	gb := frExactResponseBig(sys, z)
+	g := make([]complex128, len(gb))
+	for i, v := range gb {
+		g[i] = v.complex()
+	}
+	return g
+}
+
+// frExactResponseBig is frExactResponse unrounded, row-major p×m.
+func frExactResponseBig(sys *System, z frBig) []frBig {
 	n, m, p := sys.Dims()
 	M := make([][]frBig, n)
 	for i := range n {
@@ -1795,14 +1805,14 @@ func frExactResponse(sys *System, z frBig) []complex128 {
 			X[i][j] = acc.quo(M[i][i])
 		}
 	}
-	G := make([]complex128, p*m)
+	G := make([]frBig, p*m)
 	for i := range p {
 		for j := range m {
 			acc := frBigC(complex(sys.D.At(i, j), 0))
 			for k := range n {
 				acc = acc.add(frBigC(complex(sys.C.At(i, k), 0)).mul(X[k][j]))
 			}
-			G[i*m+j] = acc.complex()
+			G[i*m+j] = acc
 		}
 	}
 	return G
@@ -1887,20 +1897,19 @@ func lightlyDampedDiscreteSys(t *testing.T, rng *rand.Rand, thetas []float64, ga
 // peak, to a 200-bit evaluation exactly on the circle. |G| (Frobenius) is
 // the measure: a frequency perturbation of one ulp moves the phase of G by
 // ε/1e-9 as well, but leaves |G| flat at the peak. The exact point removes
-// the radial error; what remains is the solvers' componentwise rounding,
-// which near the pole is relative to entries of size ωT (or π − ωT), so the
-// peaks sit at small ωT and near Nyquist. GEPP keeps that rounding local
-// when A is upper Hessenberg (n = 8, both entry points); a long sweep of the
-// non-Hessenberg n = 32 model takes the refined Hessenberg kernel, whose
-// working-precision residual leaves a larger share. GEPP on that model
-// pivots the coupling row into the resonant rows and is not held here.
+// the radial error; the rounded pencil entries and GEPP's rounding, relative
+// to O(1) pivoted rows, would still leave ε/1e-9, which refinement against
+// the exact pencil removes: for the upper Hessenberg n = 8 model, the
+// coupled n = 10 model whose coupling row GEPP pivots into the resonant
+// rows, and the n = 32 model a long sweep evaluates by the Hessenberg
+// kernel, at small ωT, mid-band and near Nyquist.
 func TestFreqResponseDiscreteLightlyDampedPeaks(t *testing.T) {
 	const (
 		dt  = 0.1
 		gap = 1e-9
 	)
 	rng := rand.New(rand.NewPCG(7, 9))
-	thetas := []float64{0.003, 0.03, 3.11}
+	thetas := []float64{0.003, 0.03, 1.4, 3.11}
 	frob := func(g []complex128) float64 {
 		v := 0.0
 		for _, x := range g {
@@ -1922,7 +1931,7 @@ func TestFreqResponseDiscreteLightlyDampedPeaks(t *testing.T) {
 			extra     int
 			tol       float64
 			pointwise bool
-		}{{0, 1e-9, true}, {12, 1e-8, false}} {
+		}{{0, 1e-13, true}, {1, 1e-13, true}, {12, 1e-13, true}} {
 			sys := lightlyDampedDiscreteSys(t, rng, thetas, gap, tc.extra, descriptor)
 			n, _, _ := sys.Dims()
 			resps := map[string]*FreqResponseMatrix{}
@@ -1953,5 +1962,104 @@ func TestComplexSolveErrorsHaveNoDoublePrefix(t *testing.T) {
 	err := cInvertInto(make([]complex128, 4), make([]complex128, 8), []complex128{1, 2, 2, 4}, 2)
 	if !errors.Is(err, ErrSingularTransform) || strings.Count(err.Error(), "controlsys:") != 1 {
 		t.Errorf("cInvertInto singular: err = %v", err)
+	}
+}
+
+// Next to a pole of a discrete delay loop within 1e-9 of the unit circle,
+// I − H22·Δ is nearly singular, and a rounded Δ = z^{-k} (k-fold rounding,
+// and no complex128 lies on the circle) moves G by about kε/1e-9. The
+// response must match a 200-bit closed loop of the exact H(z) and Δ =
+// z^{-k} at the exact on-circle point. Delay 1 (3 samples) closes a static
+// loop with gain 1 − 1e-9, delay 2 (5 samples) a dynamic one through a
+// non-symmetric 3-state plant; H22 is lower triangular so the poles of the
+// first loop are exact. The descriptor variant is (E, EA, EB, EB2) for a
+// power-of-two diagonal E.
+func TestFreqResponseDiscreteInternalDelayLightlyDamped(t *testing.T) {
+	const dt, a = 0.1, 1 - 1e-9
+	var omega []float64
+	for _, th := range []float64{1e-7, 2 * math.Pi / 3, 4 * math.Pi / 3, 3} {
+		for k := -3; k <= 3; k++ {
+			omega = append(omega, th/dt*(1+float64(k)*0x1p-52))
+		}
+	}
+	for _, descriptor := range []bool{false, true} {
+		A := mat.NewDense(3, 3, []float64{0.5, 0.2, -0.1, -0.3, 0.4, 0.25, 0.1, -0.2, -0.6})
+		B := mat.NewDense(3, 4, []float64{1, 0.3, 0, 0.3, -0.4, 0.8, 0, -0.2, 0.2, -0.5, 0, 0.4})
+		C := mat.NewDense(4, 3, []float64{0.7, -0.2, 0.4, 0.1, 0.9, -0.3, 0, 0, 0, 0.5, 0.1, -0.3})
+		D := mat.NewDense(4, 4, []float64{0.6, 0.1, 0.8, -0.3, -0.2, 0.9, 0.2, 0.5, 0.4, -0.6, a, 0, 0.3, 0.2, 0.35, 0.3})
+		var E *mat.Dense
+		if descriptor {
+			E = mat.NewDense(3, 3, []float64{4, 0, 0, 0, 0.5, 0, 0, 0, 2})
+			A.Mul(E, mat.DenseCopyOf(A))
+			B.Mul(E, mat.DenseCopyOf(B))
+		}
+		plant, err := NewDescriptor(A, B, C, D, E, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sys, err := NewDescriptor(A, B.Slice(0, 3, 0, 2).(*mat.Dense), C.Slice(0, 2, 0, 3).(*mat.Dense), D.Slice(0, 2, 0, 2).(*mat.Dense), E, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sys.LFT = &LFTDelay{
+			Tau: []float64{3, 5},
+			B2:  mat.DenseCopyOf(B.Slice(0, 3, 2, 4)),
+			C2:  mat.DenseCopyOf(C.Slice(2, 4, 0, 3)),
+			D12: mat.DenseCopyOf(D.Slice(0, 2, 2, 4)),
+			D21: mat.DenseCopyOf(D.Slice(2, 4, 0, 2)),
+			D22: mat.DenseCopyOf(D.Slice(2, 4, 2, 4)),
+		}
+		resps := map[string]*FreqResponseMatrix{}
+		if resps["FreqResponse"], err = sys.FreqResponse(omega); err != nil {
+			t.Fatal(err)
+		}
+		if resps["FreqResponsePointwise"], err = sys.FreqResponsePointwise(omega); err != nil {
+			t.Fatal(err)
+		}
+		for k, w := range omega {
+			z := frExactPoint(w, dt)
+			h := frExactResponseBig(plant, z)
+			d := []frBig{frBigC(1), frBigC(1)}
+			for j, tau := range []int{3, 5} {
+				for range tau {
+					d[j] = d[j].quo(z)
+				}
+			}
+			// I − H22·Δ is lower triangular: x = (I − H22Δ)⁻¹H21 by substitution.
+			l00 := frBigC(1).sub(h[2*4+2].mul(d[0]))
+			l10 := frBigC(0).sub(h[3*4+2].mul(d[0]))
+			l11 := frBigC(1).sub(h[3*4+3].mul(d[1]))
+			var norm, diff float64
+			for j := range 2 {
+				x0 := h[2*4+j].quo(l00)
+				x1 := h[3*4+j].sub(l10.mul(x0)).quo(l11)
+				for i := range 2 {
+					g := h[i*4+j].add(h[i*4+2].mul(d[0]).mul(x0)).add(h[i*4+3].mul(d[1]).mul(x1)).complex()
+					norm = max(norm, cmplx.Abs(g))
+					for _, resp := range resps {
+						diff = max(diff, cmplx.Abs(resp.Data[k*4+i*2+j]-g))
+					}
+				}
+			}
+			if e := diff / norm; !(e <= 1e-13) {
+				t.Errorf("descriptor=%v ω=%v (ωT=%.4g): max entry error %.3g relative to max |G|", descriptor, w, w*dt, e)
+			}
+		}
+	}
+}
+
+// The absorbed fallback is bounded: a long delay is not absorbed.
+func TestLFTAbsorbedSolverStateCap(t *testing.T) {
+	sys := makeSISO(0.5, 1, 1, 0)
+	sys.Dt = 0.1
+	sys.LFT = &LFTDelay{Tau: []float64{maxAbsorbedStates},
+		B2: mat.NewDense(1, 1, []float64{0}), C2: mat.NewDense(1, 1, []float64{0}),
+		D12: mat.NewDense(1, 1, []float64{1}), D21: mat.NewDense(1, 1, []float64{1}), D22: mat.NewDense(1, 1, []float64{0.5})}
+	if newLFTWorkspace(sys, 1, 1, 1, 1).absorbedSolver(sys) != nil {
+		t.Errorf("absorbed %d+1 states, cap %d", maxAbsorbedStates, maxAbsorbedStates)
+	}
+	sys.LFT.Tau[0] = maxAbsorbedStates - 1
+	if newLFTWorkspace(sys, 1, 1, 1, 1).absorbedSolver(sys) == nil {
+		t.Errorf("did not absorb %d states", maxAbsorbedStates)
 	}
 }

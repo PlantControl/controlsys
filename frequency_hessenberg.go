@@ -55,9 +55,15 @@ func newRealizationCopy(sys *System, n, m, p int) balancedRealization {
 	return br
 }
 
-// balancedDense evaluates each frequency by GEPP on sÊ-Â. GEPP is
-// componentwise backward stable, so it needs no refinement; per point it
-// costs O(n³) and beats the Hessenberg sweep for small n.
+// balancedDense evaluates each frequency by GEPP on sÊ-Â; per point it
+// costs O(n³) and beats the Hessenberg sweep for small n. GEPP is
+// componentwise backward stable relative to the pivoted rows, and the
+// pencil entries are rounded: next to a lightly damped pole at distance d
+// the slow mode keeps only about ε/d relative accuracy. A pivot below
+// 1/refineCondition of the pencil scale flags such a point; refine
+// refactors it and, unless a working-precision correction shows the
+// solution already accurate, refines against the exact pencil with
+// pencilResidual.
 type balancedDense struct {
 	balancedRealization
 	lastA  []int // last structural nonzero column in each row of sÊ-Â
@@ -65,7 +71,18 @@ type balancedDense struct {
 	pencil []complex128
 	inv    []complex128
 	x      []complex128 // row-major n×m
+	piv    []int        // refine's factorization, allocated on first use
+	r      []complex128 // row-major n×m, refine's residual
+	pt     frequencyPoint // the point evalInto last factored, for refine
+	tol    float64
 }
+
+// refineCondition is the error amplification, relative to ε, above which
+// the frequency solvers refine against the exact pencil: balancedDense
+// checks points whose smallest GEPP pivot is below 1/refineCondition of the
+// pencil scale, and both solvers refine when a working-precision correction
+// exceeds refineCondition·ε relative.
+const refineCondition = 1e3
 
 func newBalancedDense(sys *System, n, m, p int) *balancedDense {
 	return newBalancedDenseOf(newBalancedRealization(sys, n, m, p))
@@ -169,6 +186,8 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 	if tol == 0 {
 		tol = 1e-15
 	}
+	bd.pt, bd.tol = pt, tol
+	refineBelow, refine := max(scale/refineCondition, tol), false
 
 	// last[i] bounds the nonzeros of row i, so banded and block-triangular
 	// models skip their structural zeros in elimination and substitution.
@@ -181,8 +200,11 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 				piv, best = i, v
 			}
 		}
-		if best < tol {
-			return errSingularPencil
+		if best < refineBelow {
+			if best < bd.tol {
+				return errSingularPencil
+			}
+			refine = true
 		}
 		if piv != k {
 			rk, rp := a[k*n:(k+1)*n], a[piv*n:(piv+1)*n]
@@ -228,6 +250,9 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			x[i*m+j] = (x[i*m+j] - complex(re, im)) * inv[i]
 		}
 	}
+	if refine {
+		bd.refine()
+	}
 
 	for row := range p {
 		cr := bd.c[row*n : (row+1)*n]
@@ -250,6 +275,77 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 		}
 	}
 	return nil
+}
+
+// refine improves bd.x against the exact pencil at pt, M = (pÊ + qÂ)/κ with
+// κ = −q for the explicit sI − Â of a non-plain point and 1 otherwise. It
+// refactors the pencil keeping L, which the elimination in evalInto
+// discards to stay lean on the common well-conditioned point.
+func (bd *balancedDense) refine() {
+	pt := bd.pt
+	n, m := bd.n, bd.m
+	if bd.r == nil {
+		bd.r, bd.piv = make([]complex128, n*m), make([]int, n)
+	}
+	x, r := bd.x, bd.r
+	kappa := complex(1, 0)
+	if pt.isPlain() {
+		bd.fillPencil(pt.value())
+	} else {
+		bd.fillPencilAt(pt)
+		if bd.e == nil {
+			kappa = pt.scale()
+		}
+	}
+	if !cLUFactor(bd.pencil, bd.piv, n) {
+		return
+	}
+	ik := crecip(kappa)
+	for j := range m {
+		pencilResidualPlain(r[j:], x[j:], m, bd.a, bd.e, n, bd.b[j:], m, n, pt.p, pt.q, kappa)
+	}
+	if bd.correctionBelow(r, ik, refineCondition*eps()) {
+		return
+	}
+	for range maxRefineSteps {
+		for j := range m {
+			pencilResidual(r[j:], x[j:], m, bd.a, bd.e, n, bd.b[j:], m, n, pt.p, pt.q, kappa)
+		}
+		if kappa != 1 {
+			for i := range r {
+				r[i] *= ik
+			}
+		}
+		cLUSolve(bd.pencil, bd.piv, r, n, m)
+		var dMax, xMax float64
+		for i, v := range r {
+			x[i] += v
+			dMax = max(dMax, cabs1(v))
+			xMax = max(xMax, cabs1(x[i]))
+		}
+		if dMax <= refineStop*xMax {
+			return
+		}
+	}
+}
+
+// correctionBelow solves for the correction r/κ with refine's factors,
+// in place, and reports whether it is below tol relative to bd.x
+// componentwise in the max norm: GEPP's solution is then accurate and
+// refinement would not change it.
+func (bd *balancedDense) correctionBelow(r []complex128, ik complex128, tol float64) bool {
+	if ik != 1 {
+		for i := range r {
+			r[i] *= ik
+		}
+	}
+	cLUSolve(bd.pencil, bd.piv, r, bd.n, bd.m)
+	var dMax, xMax float64
+	for i, v := range r {
+		dMax = max(dMax, cabs1(v))
+		xMax = max(xMax, cabs1(bd.x[i]))
+	}
+	return dMax <= tol*xMax
 }
 
 // hessenbergSweep evaluates C(sI-A)^{-1}B + D over many frequencies after one
@@ -509,6 +605,25 @@ func (hs *hessenbergSweep) residual() {
 	}
 }
 
+// exactResidual sets r = B̂ - (sI-Â)x̂ against the exact point with
+// pencilResidual. It replaces residual after the first step, when the
+// correction shows a point near a pole: the rounded hs.shift and the
+// working-precision sum would otherwise stop refinement at about ε/d
+// relative accuracy at distance d from a lightly damped pole.
+func (hs *hessenbergSweep) exactResidual(pt frequencyPoint) {
+	n, m, r := hs.n, hs.m, hs.r
+	kappa := pt.scale()
+	for j := range m {
+		pencilResidual(r[j*n:], hs.x[j*n:], 1, hs.a, nil, n, hs.b[j:], m, n, pt.p, pt.q, kappa)
+	}
+	if kappa != 1 {
+		ik := crecip(kappa)
+		for i := range r {
+			r[i] *= ik
+		}
+	}
+}
+
 func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 	n, m, p := hs.n, hs.m, hs.p
 	if n == 0 {
@@ -539,7 +654,11 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 				x[i] += v
 			}
 		}
-		hs.residual()
+		if step == 0 {
+			hs.residual()
+		} else {
+			hs.exactResidual(pt)
+		}
 		qTMulCols(y, r, hs.q, n, m)
 		hs.solve(y)
 		var dMax, xMax float64
@@ -547,7 +666,7 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			dMax = max(dMax, cabs1(v))
 			xMax = max(xMax, cabs1(x[i]))
 		}
-		if dMax <= refineStop*xMax {
+		if dMax <= refineStop*xMax && (step > 0 || dMax <= refineCondition*eps()*xMax) {
 			break
 		}
 	}
@@ -572,6 +691,139 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 		}
 	}
 	return nil
+}
+
+// pencilResidual sets r = κ·b − p·E·x − q·A·x for one right-hand side in
+// compensated arithmetic, as if in twice the working precision, with E = I
+// when e is nil. p, q and the real A, E and b enter exactly, so refining
+// against r converges to the solution of the exact pencil, not of its
+// rounded entries. x and r have element stride inc, b stride bInc, and a, e
+// row stride ld.
+func pencilResidual(r, x []complex128, inc int, a, e []float64, ld int, b []float64, bInc, n int, p, q, kappa complex128) {
+	pr, pi, qr, qi := real(p), imag(p), real(q), imag(q)
+	for i := range n {
+		var axr, axi compensatedSum
+		for k, av := range a[i*ld : i*ld+n] {
+			v := x[k*inc]
+			axr.addProd(av, real(v))
+			axi.addProd(av, imag(v))
+		}
+		var re, im compensatedSum
+		if kappa == 1 {
+			re.add(b[i*bInc])
+		} else {
+			re.addProd(real(kappa), b[i*bInc])
+			im.addProd(imag(kappa), b[i*bInc])
+		}
+		if e == nil {
+			xr, xi := real(x[i*inc]), imag(x[i*inc])
+			re.addProd(-pr, xr)
+			re.addProd(pi, xi)
+			im.addProd(-pr, xi)
+			im.addProd(-pi, xr)
+		} else {
+			var exr, exi compensatedSum
+			for k, ev := range e[i*ld : i*ld+n] {
+				v := x[k*inc]
+				exr.addProd(ev, real(v))
+				exi.addProd(ev, imag(v))
+			}
+			re.addScaled(-pr, exr)
+			re.addScaled(pi, exi)
+			im.addScaled(-pr, exi)
+			im.addScaled(-pi, exr)
+		}
+		re.addScaled(-qr, axr)
+		re.addScaled(qi, axi)
+		im.addScaled(-qr, axi)
+		im.addScaled(-qi, axr)
+		r[i*inc] = complex(re.value(), im.value())
+	}
+}
+
+// pencilResidualPlain is pencilResidual in working precision.
+func pencilResidualPlain(r, x []complex128, inc int, a, e []float64, ld int, b []float64, bInc, n int, p, q, kappa complex128) {
+	for i := range n {
+		var ax complex128
+		for k, av := range a[i*ld : i*ld+n] {
+			ax += complex(av, 0) * x[k*inc]
+		}
+		ex := x[i*inc]
+		if e != nil {
+			ex = 0
+			for k, ev := range e[i*ld : i*ld+n] {
+				ex += complex(ev, 0) * x[k*inc]
+			}
+		}
+		r[i*inc] = kappa*complex(b[i*bInc], 0) - p*ex - q*ax
+	}
+}
+
+// cLUFactor overwrites the row-major n×n lu with its GEPP factors, unit L
+// below the diagonal, recording the row interchanges in piv. It reports
+// false at an exactly zero pivot.
+func cLUFactor(lu []complex128, piv []int, n int) bool {
+	for k := range n {
+		p, best := k, cabs1(lu[k*n+k])
+		for i := k + 1; i < n; i++ {
+			if v := cabs1(lu[i*n+k]); v > best {
+				p, best = i, v
+			}
+		}
+		if best == 0 {
+			return false
+		}
+		piv[k] = p
+		if p != k {
+			rk, rp := lu[k*n:(k+1)*n], lu[p*n:(p+1)*n]
+			for j := range rk {
+				rk[j], rp[j] = rp[j], rk[j]
+			}
+		}
+		ik := crecip(lu[k*n+k])
+		for i := k + 1; i < n; i++ {
+			f := lu[i*n+k] * ik
+			lu[i*n+k] = f
+			if f == 0 {
+				continue
+			}
+			for j := k + 1; j < n; j++ {
+				lu[i*n+j] -= f * lu[k*n+j]
+			}
+		}
+	}
+	return true
+}
+
+// cLUSolve overwrites the row-major n×m x with the solution for the factors
+// from cLUFactor.
+func cLUSolve(lu []complex128, piv []int, x []complex128, n, m int) {
+	for k, pk := range piv {
+		if pk != k {
+			for j := range m {
+				x[k*m+j], x[pk*m+j] = x[pk*m+j], x[k*m+j]
+			}
+		}
+	}
+	for k := range n {
+		for i := k + 1; i < n; i++ {
+			if f := lu[i*n+k]; f != 0 {
+				for j := range m {
+					x[i*m+j] -= f * x[k*m+j]
+				}
+			}
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		inv := crecip(lu[i*n+i])
+		for j := range m {
+			v := x[i*m+j]
+			for k := i + 1; k < n; k++ {
+				v -= lu[i*n+k] * x[k*m+j]
+			}
+			x[i*m+j] = v * inv
+		}
+	}
 }
 
 var errSingularPencil = fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
