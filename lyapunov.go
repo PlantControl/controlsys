@@ -75,6 +75,12 @@ func NewLyapunovWorkspace(n int) *LyapunovWorkspace {
 //
 // A is n×n, Q is n×n symmetric. Returns X (n×n symmetric).
 func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
+	if err := requireFiniteDense("Lyap", "A", A); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Lyap", "Q", Q); err != nil {
+		return nil, err
+	}
 	problem, err := newLyapunovProblem(A, Q, opts)
 	if err != nil {
 		return nil, err
@@ -154,6 +160,12 @@ func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 //
 // A is n×n, Q is n×n symmetric. Returns X (n×n symmetric).
 func DLyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
+	if err := requireFiniteDense("DLyap", "A", A); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("DLyap", "Q", Q); err != nil {
+		return nil, err
+	}
 	problem, err := newLyapunovProblem(A, Q, opts)
 	if err != nil {
 		return nil, err

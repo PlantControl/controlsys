@@ -6,12 +6,22 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// Inv returns the inverse model of a square system, like MATLAB inv(sys):
+// for D nonsingular the realization (A - B D⁻¹ C, B D⁻¹, -D⁻¹ C, D⁻¹), with
+// input and output names swapped. A non-square model returns
+// ErrDimensionMismatch, a singular D ErrSingularTransform, a delayed model
+// ErrDelayUnsupported (use Pade or AbsorbDelay first) and a descriptor model
+// ErrDescriptorUnsupported.
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.inv.html.
 func Inv(sys *System) (*System, error) {
+	if err := requireSystem("Inv", sys); err != nil {
+		return nil, err
+	}
 	if err := newDescriptorPolicy(sys).requireStandard("Inv"); err != nil {
 		return nil, err
 	}
 	if sys.HasDelay() {
-		return nil, fmt.Errorf("Inv: system with delays not supported; use Pade/AbsorbDelay first")
+		return nil, fmt.Errorf("Inv: use Pade or AbsorbDelay first: %w", ErrDelayUnsupported)
 	}
 	n, m, p := sys.Dims()
 	if m != p {
@@ -43,7 +53,8 @@ func Inv(sys *System) (*System, error) {
 		if err != nil {
 			return nil, err
 		}
-		propagateIONames(result, sys)
+		result.InputName = copyStringSlice(sys.OutputName)
+		result.OutputName = copyStringSlice(sys.InputName)
 		return result, nil
 	}
 

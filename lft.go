@@ -7,8 +7,8 @@ import (
 )
 
 func LFT(M, Delta *System, nu, ny int) (*System, error) {
-	if M == nil {
-		return nil, fmt.Errorf("lft: M cannot be nil: %w", ErrDimensionMismatch)
+	if err := requireSystem("LFT", M); err != nil {
+		return nil, err
 	}
 	_, mM, pM := M.Dims()
 	if nu < 0 || ny < 0 {

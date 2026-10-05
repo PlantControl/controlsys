@@ -55,7 +55,7 @@ func NewGeneralizedModel(name string, block any) (*GeneralizedModel, error) {
 	}
 	numeric, err := numericBlockFromAny(block)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewGeneralizedModel: %w", err)
 	}
 	return &GeneralizedModel{name: name, block: numeric, analysisPoints: make(map[string]AnalysisPoint)}, nil
 }
@@ -65,7 +65,10 @@ func numericBlockFromAny(block any) (NumericBlock, error) {
 	case NumericBlock:
 		return b, nil
 	case *System:
-		return fixedSystemBlock{sys: b}, nil
+		if b == nil {
+			return nil, fmt.Errorf("system block is nil: %w", ErrInvalidArgument)
+		}
+		return fixedSystemBlock{sys: b.Copy()}, nil
 	default:
 		return nil, fmt.Errorf("unsupported generalized block %T: %w", block, ErrDimensionMismatch)
 	}
@@ -79,11 +82,18 @@ func (g *GeneralizedModel) SetOutputName(names ...string) {
 	g.outputName = copyStringSlice(names)
 }
 
-func (g *GeneralizedModel) InsertAnalysisPoint(name string) {
+func (g *GeneralizedModel) InsertAnalysisPoint(name string) error {
+	if g == nil {
+		return fmt.Errorf("GeneralizedModel.InsertAnalysisPoint: nil model: %w", ErrInvalidArgument)
+	}
+	if name == "" {
+		return fmt.Errorf("GeneralizedModel.InsertAnalysisPoint: name is empty: %w", ErrInvalidArgument)
+	}
 	if g.analysisPoints == nil {
 		g.analysisPoints = make(map[string]AnalysisPoint)
 	}
 	g.analysisPoints[name] = AnalysisPoint{Name: name}
+	return nil
 }
 
 func (g *GeneralizedModel) HasAnalysisPoint(name string) bool {
@@ -114,10 +124,14 @@ func (g *GeneralizedModel) CurrentSystem() (*System, error) {
 		return nil, err
 	}
 	if g.inputName != nil {
-		sys.InputName = copyStringSlice(g.inputName)
+		if err := sys.SetInputName(g.inputName...); err != nil {
+			return nil, fmt.Errorf("GeneralizedModel.CurrentSystem: %w", err)
+		}
 	}
 	if g.outputName != nil {
-		sys.OutputName = copyStringSlice(g.outputName)
+		if err := sys.SetOutputName(g.outputName...); err != nil {
+			return nil, fmt.Errorf("GeneralizedModel.CurrentSystem: %w", err)
+		}
 	}
 	return sys, nil
 }
@@ -134,10 +148,10 @@ type GeneralizedClosedLoop struct {
 func NewGeneralizedClosedLoop(name string, plant *System, controller any, analysisPoint string) (*GeneralizedClosedLoop, error) {
 	ctrl, err := numericBlockFromAny(controller)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NewGeneralizedClosedLoop: controller: %w", err)
 	}
-	if plant == nil {
-		return nil, fmt.Errorf("NewGeneralizedClosedLoop: nil plant: %w", ErrDimensionMismatch)
+	if err := requireSystem("NewGeneralizedClosedLoop", plant); err != nil {
+		return nil, err
 	}
 	if analysisPoint == "" {
 		return nil, fmt.Errorf("NewGeneralizedClosedLoop: analysis point is empty: %w", ErrDimensionMismatch)

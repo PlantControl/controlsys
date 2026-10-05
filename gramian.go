@@ -34,6 +34,9 @@ type GramResult struct {
 // Like MATLAB gram, models with internal delays (either domain) return
 // ErrInternalDelayUnsupported; absorb or approximate the delays first.
 func Gram(sys *System, typ GramType) (*GramResult, error) {
+	if err := requireSystem("Gram", sys); err != nil {
+		return nil, err
+	}
 	policy := newEnergyAnalysisPolicy(sys)
 	if err := policy.requireStandard("Gram"); err != nil {
 		return nil, err

@@ -639,3 +639,25 @@ func TestReduceInternalDelayToZeroOrder(t *testing.T) {
 		assertFieldResponse(t, fmt.Sprintf("dt=%g", dt), res.Sys, func(s complex128) [][]complex128 { return fieldOracle(orig, s) })
 	}
 }
+
+func TestReduceRejectsInvalidOptions(t *testing.T) {
+	dyn := makeSISO(-1, 1, 1, 0)
+	static, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sys := range []*System{dyn, static} {
+		for _, opts := range []*ReduceOpts{
+			{Mode: ReduceMode(7)},
+			{Mode: ReduceMode(-1)},
+			{Tol: -1},
+			{Tol: math.NaN()},
+			{Tol: math.Inf(1)},
+		} {
+			if _, err := sys.Reduce(opts); !errors.Is(err, ErrInvalidArgument) {
+				n, _, _ := sys.Dims()
+				t.Errorf("n=%d opts=%+v: err = %v, want ErrInvalidArgument", n, *opts, err)
+			}
+		}
+	}
+}
