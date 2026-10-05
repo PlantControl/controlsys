@@ -1257,3 +1257,140 @@ func TestEmptyIOInterconnections(t *testing.T) {
 		}
 	}
 }
+
+// TestEmptyIOStatelessResults covers ops that remove every state from a model
+// with no inputs or no outputs. MATLAB returns a p×0 or 0×m static gain, which
+// cannot be stored, so the op must fail with ErrDimensionMismatch instead of
+// returning a 0×0 gain. Models with neither inputs nor outputs still reduce.
+func TestEmptyIOStatelessResults(t *testing.T) {
+	sysOut := func(s *System, err error) ([]*System, error) { return []*System{s}, err }
+	reduceOut := func(r *ReduceResult, err error) ([]*System, error) {
+		if err != nil {
+			return nil, err
+		}
+		return []*System{r.Sys}, nil
+	}
+	ops := []struct {
+		name string
+		fn   func(s *System) ([]*System, error)
+	}{
+		{"ModredTruncate", func(s *System) ([]*System, error) { return sysOut(Modred(s, []int{0, 1, 2}, Truncate)) }},
+		{"ModredMatchDC", func(s *System) ([]*System, error) {
+			return sysOut(Modred(s, []int{2, 0, 1}, SingularPerturbation))
+		}},
+		{"MinimalRealization", func(s *System) ([]*System, error) { return reduceOut(s.MinimalRealization()) }},
+		{"ReduceUncontrollable", func(s *System) ([]*System, error) {
+			_, m, _ := s.Dims()
+			mode := ReduceUncontrollable
+			if m > 0 {
+				mode = ReduceUnobservable
+			}
+			return reduceOut(s.Reduce(&ReduceOpts{Mode: mode}))
+		}},
+		{"Sminreal", func(s *System) ([]*System, error) { return sysOut(Sminreal(s)) }},
+		{"Stabsep", func(s *System) ([]*System, error) {
+			r, err := Stabsep(s)
+			if err != nil {
+				return nil, err
+			}
+			return []*System{r.Stable, r.Unstable}, nil
+		}},
+		{"ModsepAllFast", func(s *System) ([]*System, error) {
+			r, err := Modsep(s, 1e-6)
+			if err != nil {
+				return nil, err
+			}
+			return []*System{r.Slow, r.Fast}, nil
+		}},
+		{"ModsepAllSlow", func(s *System) ([]*System, error) {
+			r, err := Modsep(s, 1e6)
+			if err != nil {
+				return nil, err
+			}
+			return []*System{r.Slow, r.Fast}, nil
+		}},
+	}
+	for _, dt := range []float64{0, 0.1} {
+		for _, mp := range [][2]int{{0, 2}, {2, 0}, {0, 0}} {
+			m, p := mp[0], mp[1]
+			sys := emptyIOFixture(t, 3, m, p, dt)
+			for _, op := range ops {
+				tag := fmt.Sprintf("dt=%g m=%d p=%d %s", dt, m, p, op.name)
+				out, err := op.fn(sys.Copy())
+				if m == 0 && p == 0 {
+					if err != nil {
+						t.Errorf("%s: %v", tag, err)
+					}
+				} else if !errors.Is(err, ErrDimensionMismatch) {
+					t.Errorf("%s: err = %v, want ErrDimensionMismatch", tag, err)
+				}
+				if err != nil {
+					continue
+				}
+				for _, o := range out {
+					if _, om, op := o.Dims(); om != m || op != p {
+						t.Errorf("%s: result is %dx%d, want %dx%d", tag, op, om, p, m)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestDescriptorWithoutDynamicStatesKeepsIODims(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{1, 2, 3, 5})
+	E := mat.NewDense(2, 2, nil)
+	for _, dt := range []float64{0, 0.1} {
+		for _, mp := range [][2]int{{0, 2}, {2, 0}} {
+			m, p := mp[0], mp[1]
+			var B, C *mat.Dense
+			if m > 0 {
+				B = mat.NewDense(2, m, []float64{1, -0.5, 0.3, 2})
+			}
+			if p > 0 {
+				C = mat.NewDense(p, 2, []float64{1, 0.4, -0.7, 1})
+			}
+			sys, err := NewDescriptor(A, B, C, nil, E, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tag := fmt.Sprintf("dt=%g m=%d p=%d", dt, m, p)
+			convert := func() (*System, error) { return sys.Undiscretize() }
+			if dt == 0 {
+				convert = func() (*System, error) { return sys.Discretize(0.1) }
+			}
+			if _, err := convert(); !errors.Is(err, ErrDimensionMismatch) {
+				t.Errorf("%s convert: err = %v, want ErrDimensionMismatch", tag, err)
+			}
+			if _, err := Stabsep(sys); !errors.Is(err, ErrDimensionMismatch) {
+				t.Errorf("%s Stabsep: err = %v, want ErrDimensionMismatch", tag, err)
+			}
+		}
+	}
+}
+
+func TestSelectStaticGainRejectsOneSidedEmpty(t *testing.T) {
+	g, err := NewGain(mat.NewDense(2, 3, []float64{1, 2, 3, 4, 5, 6}), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sel := range [][2][]int{{{}, {1}}, {{0, 2}, {}}} {
+		if _, err := g.SelectByIndex(sel[0], sel[1]); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("SelectByIndex(%v,%v): err = %v, want ErrDimensionMismatch", sel[0], sel[1], err)
+		}
+	}
+	r, err := g.SelectByIndex([]int{2}, []int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, m, p := r.Dims(); m != 1 || p != 1 || r.D.At(0, 0) != 6 {
+		t.Errorf("SelectByIndex([2],[1]) = %dx%d D=%v, want 1x1 [6]", p, m, r.D)
+	}
+	r, err = g.SelectByIndex([]int{}, []int{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, m, p := r.Dims(); n+m+p != 0 {
+		t.Errorf("SelectByIndex(nil,nil) dims = (%d,%d,%d), want empty", n, m, p)
+	}
+}

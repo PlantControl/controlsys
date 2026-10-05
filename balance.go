@@ -295,7 +295,7 @@ func Modred(sys *System, elim []int, method BalredMethod) (*System, error) {
 		return policy.zeroOrderCopy(), nil
 	}
 	if m == 0 || p == 0 {
-		return withZeroIOPadding(sys, func(padded *System) (*System, error) {
+		return withZeroIOPadding("Modred", sys, func(padded *System) (*System, error) {
 			return Modred(padded, elim, method)
 		})
 	}

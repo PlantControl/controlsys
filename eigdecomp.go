@@ -29,6 +29,22 @@ func decomposeByEigenvalues(sys *System, isGroup1 func(complex128) bool, feedthr
 	return group1, group2, nil
 }
 
+func modesAllInGroup2(policy realizationTransformPolicy, sys *System) (group1, group2 *System, err error) {
+	group1, err = policy.zeroOrderZeroFeedthrough()
+	if err != nil {
+		return nil, nil, err
+	}
+	return group1, sys.Copy(), nil
+}
+
+func modesAllInGroup1(policy realizationTransformPolicy, group1 *System) (*System, *System, error) {
+	group2, err := policy.zeroOrderOriginalFeedthrough()
+	if err != nil {
+		return nil, nil, err
+	}
+	return group1, group2, nil
+}
+
 func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	if sys.HasDelay() {
 		return nil, nil, fmt.Errorf("controlsys: decomposition does not support delayed systems; use Pade/AbsorbDelay first")
@@ -44,7 +60,7 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 	policy := newRealizationTransformPolicy(sys)
 	n, m, p := sys.Dims()
 	if n == 0 {
-		return policy.zeroOrderZeroFeedthrough(), sys.Copy(), nil
+		return modesAllInGroup2(policy, sys)
 	}
 
 	t, z, err := modalSchur(sys)
@@ -56,10 +72,10 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 		return nil, nil, err
 	}
 	if n1 == 0 {
-		return policy.zeroOrderZeroFeedthrough(), sys.Copy(), nil
+		return modesAllInGroup2(policy, sys)
 	}
 	if n1 == n {
-		return policy.copyWithZeroFeedthrough(), policy.zeroOrderOriginalFeedthrough(), nil
+		return modesAllInGroup1(policy, policy.copyWithZeroFeedthrough())
 	}
 
 	x, err := separateSchurBlocks(t, n, n1, "decomposition")
@@ -130,7 +146,7 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 		}
 	}
 	if n1 == 0 {
-		return policy.zeroOrderZeroFeedthrough(), sys.Copy(), nil
+		return modesAllInGroup2(policy, sys)
 	}
 	n2 := n - n1
 
@@ -192,7 +208,7 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 		return nil, nil, err
 	}
 	if n2 == 0 {
-		return group1, policy.zeroOrderOriginalFeedthrough(), nil
+		return modesAllInGroup1(policy, group1)
 	}
 	group2, err = policy.resultWithOriginalFeedthrough(
 		extractModalBlock(s, n, n1, n, n1, n), extractModalBlock(bq, m, n1, n, 0, m), extractModalBlock(cz, n, 0, p, n1, n))

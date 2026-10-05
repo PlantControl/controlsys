@@ -209,7 +209,7 @@ A model with direct input-to-output gain and no dynamic state.
 _Avoid_: gain system unless matching established API names, zero-state system
 
 **Autonomous model**:
-A state-space model with states but no inputs, driven only by its initial state; a state-space model may likewise have no outputs. Its empty input or output blocks are stored as empty matrices and its dimensions come from the state matrices. A static-gain model with no inputs or no outputs but not both cannot be stored, since its empty gain carries no dimensions.
+A state-space model with states but no inputs, driven only by its initial state; a state-space model may likewise have no outputs. Its empty input or output blocks are stored as empty matrices and its dimensions come from the state matrices. A static-gain model with no inputs or no outputs but not both cannot be stored, since its empty gain carries no dimensions. An operation whose result would be such a gain, such as removing every state of a model with no inputs, returns ErrDimensionMismatch instead.
 _Avoid_: unforced system, zero-input model
 
 **Continuous-time model**:

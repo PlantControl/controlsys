@@ -87,6 +87,9 @@ func Sminreal(sys *System) (*System, error) {
 
 	r := len(keep)
 	if r == 0 {
+		if err := storableStaticGain("Sminreal", p, m); err != nil {
+			return nil, err
+		}
 		g, err := NewGain(denseCopy(sys.D), sys.Dt)
 		if err != nil {
 			return nil, err

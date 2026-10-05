@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -45,10 +46,10 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	}
 
 	if m == 0 && (opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable) {
-		return zeroOrderResult(sys, m, p), nil
+		return zeroOrderResult(sys)
 	}
 	if p == 0 && (opts.Mode == ReduceAll || opts.Mode == ReduceUnobservable) {
-		return zeroOrderResult(sys, m, p), nil
+		return zeroOrderResult(sys)
 	}
 
 	A := mat.DenseCopyOf(sys.A)
@@ -113,7 +114,10 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	}
 
 	if nr == 0 {
-		res := zeroOrderResult(sys, m, p)
+		res, err := zeroOrderResult(sys)
+		if err != nil {
+			return nil, err
+		}
 		res.BlockSizes = blockSizes
 		return res, nil
 	}
@@ -180,11 +184,12 @@ func (sys *System) MinimalRealization() (*ReduceResult, error) {
 	return sys.Reduce(nil)
 }
 
-func zeroOrderResult(sys *System, m, p int) *ReduceResult {
-	return &ReduceResult{
-		Sys:   newRealizationTransformPolicy(sys).zeroOrderOriginalFeedthrough(),
-		Order: 0,
+func zeroOrderResult(sys *System) (*ReduceResult, error) {
+	g, err := newRealizationTransformPolicy(sys).zeroOrderOriginalFeedthrough()
+	if err != nil {
+		return nil, fmt.Errorf("Reduce: %w", err)
 	}
+	return &ReduceResult{Sys: g, Order: 0}, nil
 }
 
 func extractSubmatrix(m *mat.Dense, r0, r1, c0, c1 int) *mat.Dense {

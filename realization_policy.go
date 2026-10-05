@@ -28,6 +28,15 @@ func (p realizationTransformPolicy) requireDelayFree(context string) error {
 	return nil
 }
 
+// requireStatesOrStorableGain rejects a result without states whose p×m
+// gain cannot be stored. MATLAB returns a p×0 or 0×m static gain here.
+func (p realizationTransformPolicy) requireStatesOrStorableGain(A *mat.Dense) error {
+	if A != nil && !A.IsEmpty() {
+		return nil
+	}
+	return storableStaticGain("controlsys: result has no states", p.p, p.m)
+}
+
 func (p realizationTransformPolicy) zeroOrderCopy() *System {
 	return p.sys.Copy()
 }
@@ -39,6 +48,9 @@ func (p realizationTransformPolicy) result(A, B, C, D *mat.Dense) (*System, erro
 	if p.sys.internalDelayCount() > 0 {
 		return nil, fmt.Errorf("realization transform cannot carry internal delays: %w", ErrDelayNotRepresentable)
 	}
+	if err := p.requireStatesOrStorableGain(A); err != nil {
+		return nil, err
+	}
 	result, err := newNoCopy(A, B, C, D, p.sys.Dt)
 	if err != nil {
 		return nil, err
@@ -48,6 +60,9 @@ func (p realizationTransformPolicy) result(A, B, C, D *mat.Dense) (*System, erro
 }
 
 func (p realizationTransformPolicy) resultWithInternalDelay(A, B, C, D, B2, C2 *mat.Dense) (*System, error) {
+	if err := p.requireStatesOrStorableGain(A); err != nil {
+		return nil, err
+	}
 	result, err := newNoCopy(A, B, C, D, p.sys.Dt)
 	if err != nil {
 		return nil, err
@@ -80,7 +95,10 @@ func (p realizationTransformPolicy) resultWithZeroFeedthrough(A, B, C *mat.Dense
 	return p.result(A, B, C, denseCopySafe(nil, p.p, p.m))
 }
 
-func (p realizationTransformPolicy) zeroOrderOriginalFeedthrough() *System {
+func (p realizationTransformPolicy) zeroOrderOriginalFeedthrough() (*System, error) {
+	if err := p.requireStatesOrStorableGain(nil); err != nil {
+		return nil, err
+	}
 	sys := &System{
 		A:  &mat.Dense{},
 		B:  &mat.Dense{},
@@ -89,10 +107,13 @@ func (p realizationTransformPolicy) zeroOrderOriginalFeedthrough() *System {
 		Dt: p.sys.Dt,
 	}
 	p.carryExternal(sys)
-	return sys
+	return sys, nil
 }
 
-func (p realizationTransformPolicy) zeroOrderZeroFeedthrough() *System {
+func (p realizationTransformPolicy) zeroOrderZeroFeedthrough() (*System, error) {
+	if err := p.requireStatesOrStorableGain(nil); err != nil {
+		return nil, err
+	}
 	sys := &System{
 		A:  &mat.Dense{},
 		B:  &mat.Dense{},
@@ -101,7 +122,7 @@ func (p realizationTransformPolicy) zeroOrderZeroFeedthrough() *System {
 		Dt: p.sys.Dt,
 	}
 	p.carryExternal(sys)
-	return sys
+	return sys, nil
 }
 
 func (p realizationTransformPolicy) copyWithZeroFeedthrough() *System {

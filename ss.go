@@ -110,7 +110,7 @@ func (sys *System) Validate() error {
 // outputs are replaced by one zero channel, then drops that channel from the
 // result. gonum cannot store n×0 blocks, and zero channels leave the state
 // dynamics unchanged.
-func withZeroIOPadding(sys *System, op func(*System) (*System, error)) (*System, error) {
+func withZeroIOPadding(context string, sys *System, op func(*System) (*System, error)) (*System, error) {
 	n, m, p := sys.Dims()
 	pad := sys.Copy()
 	pad.B = denseCopySafe(sys.B, n, max(m, 1))
@@ -119,6 +119,11 @@ func withZeroIOPadding(sys *System, op func(*System) (*System, error)) (*System,
 	res, err := op(pad)
 	if err != nil {
 		return nil, err
+	}
+	if rn, _, _ := res.Dims(); rn == 0 {
+		if err := storableStaticGain(context, p, m); err != nil {
+			return nil, err
+		}
 	}
 	if m == 0 {
 		res.B = &mat.Dense{}
@@ -130,6 +135,16 @@ func withZeroIOPadding(sys *System, op func(*System) (*System, error)) (*System,
 	}
 	res.D = &mat.Dense{}
 	return res, nil
+}
+
+// storableStaticGain rejects a p×m static gain with no inputs or no outputs
+// but not both: a model without states takes its dimensions from D, and an
+// empty D carries none.
+func storableStaticGain(context string, p, m int) error {
+	if (p == 0) != (m == 0) {
+		return fmt.Errorf("%s: %dx%d static gain cannot be stored: %w", context, p, m, ErrDimensionMismatch)
+	}
+	return nil
 }
 
 func nonEmptyDense(m *mat.Dense) *mat.Dense {

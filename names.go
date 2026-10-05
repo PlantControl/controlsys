@@ -265,6 +265,9 @@ func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
 	var err error
 	Dsel := selectDense(sys.D, outputs, inputs)
 	if n == 0 {
+		if err := storableStaticGain("select", pSel, mSel); err != nil {
+			return nil, err
+		}
 		result, err = NewGain(Dsel, sys.Dt)
 	} else {
 		result, err = newNoCopy(denseCopy(sys.A), nonEmptyDense(selectDense(sys.B, allStates, inputs)), nonEmptyDense(selectDense(sys.C, outputs, allStates)), nonEmptyDense(Dsel), sys.Dt)
