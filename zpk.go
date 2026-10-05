@@ -145,8 +145,9 @@ func zpkEvalChannel(s complex128, zeros, poles []complex128, gain float64) compl
 }
 
 // FreqResponse evaluates the frequency response at the real frequencies
-// omega (rad/s), as MATLAB freqresp. An empty or non-finite omega returns
-// ErrInvalidArgument.
+// omega (rad/s), as MATLAB freqresp. A discrete z = e^{jωDt} is taken
+// exactly on the unit circle, as in System.FreqResponse. An empty or
+// non-finite omega returns ErrInvalidArgument.
 func (z *ZPK) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 	p, m, err := z.validateShape()
 	if err != nil {
@@ -159,19 +160,25 @@ func (z *ZPK) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 		return nil, err
 	}
 	data := make([]complex128, len(omega)*p*m)
-	continuous := z.IsContinuous()
-	dt := z.Dt
-	for k, w := range omega {
-		var s complex128
-		if continuous {
-			s = complex(0, w)
-		} else {
-			s = cmplx.Exp(complex(0, w*dt))
+	if z.IsContinuous() {
+		for k, w := range omega {
+			s := complex(0, w)
+			off := k * p * m
+			for i := range p {
+				for j := range m {
+					data[off+i*m+j] = zpkEvalChannel(s, z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j])
+				}
+			}
 		}
+		return newFreqResponseMatrix(data, omega, p, m, z.InputName, z.OutputName), nil
+	}
+	td := newTimeDomain(z.Dt)
+	for k, w := range omega {
+		pt := td.frequencyPoint(w)
 		off := k * p * m
 		for i := range p {
 			for j := range m {
-				data[off+i*m+j] = zpkEvalChannel(s, z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j])
+				data[off+i*m+j] = newRationalChannel(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j]).evalAt(pt)
 			}
 		}
 	}

@@ -169,8 +169,8 @@ func pidtuneIntegrator(f PIDFormula, w, dt float64) complex128 {
 	if dt == 0 {
 		return complex(0, -1/w)
 	}
-	z := cmplx.Exp(complex(0, w*dt))
-	return complex(dt, 0) * (1/(z-1) + complex(pidFormulaWeight(f), 0))
+	z1 := newTimeDomain(dt).frequencyPoint(w).shift(1)
+	return complex(dt, 0) * (1/z1 + complex(pidFormulaWeight(f), 0))
 }
 
 func (t pidtuneTerms) integral() complex128 { return pidtuneIntegrator(ForwardEuler, t.wc, t.dt) }

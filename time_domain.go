@@ -90,6 +90,29 @@ func (pt frequencyPoint) shift(v float64) complex128 {
 	return complex(math.FMA(real(pt.q), v, real(pt.p)), math.FMA(imag(pt.q), v, imag(pt.p))) * pt.p
 }
 
+// pencilAt is p + q·v = −q·(s − v) for complex v, such as a pole or zero,
+// a few ε relative to the exact value even where it is small, next to a
+// lightly damped pole. Each part sums three terms; rounded with FMAs its
+// absolute error is about ε(1 + |v|), and |p + q·v| ≥ |v| − 1, so a result
+// below 1/4 is summed again exactly.
+func (pt frequencyPoint) pencilAt(v complex128) complex128 {
+	re := math.FMA(real(pt.q), real(v), math.FMA(-imag(pt.q), imag(v), real(pt.p)))
+	im := math.FMA(real(pt.q), imag(v), math.FMA(imag(pt.q), real(v), imag(pt.p)))
+	if math.Abs(re)+math.Abs(im) < 0.25 {
+		return pt.pencilAtExact(v)
+	}
+	return complex(re, im)
+}
+
+func (pt frequencyPoint) pencilAtExact(v complex128) complex128 {
+	re, im := compensatedSum{s: real(pt.p)}, compensatedSum{s: imag(pt.p)}
+	re.addProd(real(pt.q), real(v))
+	re.addProd(-imag(pt.q), imag(v))
+	im.addProd(real(pt.q), imag(v))
+	im.addProd(imag(pt.q), real(v))
+	return complex(re.value(), im.value())
+}
+
 // frequencyPoint is the point at frequency w. A discrete z = e^{jωT} rounded
 // to complex128 lies up to ε off the unit circle, which moves the response by
 // about ε/d relative at distance d from a lightly damped pole. Instead, with

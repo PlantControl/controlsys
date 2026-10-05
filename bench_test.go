@@ -1320,6 +1320,18 @@ func BenchmarkZPKFreqResponse_SISO_100(b *testing.B) {
 	}
 }
 
+func BenchmarkZPKFreqResponseDiscrete_SISO_100(b *testing.B) {
+	z, _ := NewZPK([]complex128{0.5, -0.2}, []complex128{0.9, 0.6 + 0.3i, 0.6 - 0.3i}, 2.0, 0.1)
+	omega := make([]float64, 100)
+	for i := range omega {
+		omega[i] = 0.01 * math.Pow(10, 3.4*float64(i)/99)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		z.FreqResponse(omega)
+	}
+}
+
 func BenchmarkZPKToTF_SISO_N10(b *testing.B) {
 	zeros := make([]complex128, 9)
 	poles := make([]complex128, 10)
