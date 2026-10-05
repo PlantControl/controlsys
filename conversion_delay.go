@@ -430,11 +430,20 @@ func discretizeInternalModel(sys *System, dt float64, opts C2DOptions) (*System,
 }
 
 func undiscretizeInternalTustin(sys *System, beta float64) (*System, error) {
+	return undiscretizeInternal(sys, func(rational *System) (*System, error) {
+		return bilinear(rational, 1, beta, 1, beta)
+	})
+}
+
+// undiscretizeInternal converts the delay-free augmented rational H(z) and maps
+// each internal delay z^-k to exp(-s·k·Ts), the inverse of the c2d mapping.
+func undiscretizeInternal(sys *System, convert func(*System) (*System, error)) (*System, error) {
 	_, m, p := sys.Dims()
-	cont, err := bilinear(conversionAugmentedRational(sys), 1, beta, 1, beta)
+	cont, err := convert(conversionAugmentedRational(sys))
 	if err != nil {
 		return nil, err
 	}
+	cont.Dt = 0
 	tau := make([]float64, len(sys.LFT.Tau))
 	for i, value := range sys.LFT.Tau {
 		tau[i] = value * sys.Dt

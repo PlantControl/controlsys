@@ -179,6 +179,7 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `AllMargin` | `returns-mutable` | Returns crossover slices. |
 | `Bandwidth` | `pure` | Scalar result. |
 | `DiskMargin` | `pure` | Scalar result struct. |
+| `DiskMarginSkew` | `pure` | Scalar result struct. |
 | `Passive` | `view-in`, `returns-mutable` | Returns passivity result. |
 | `FRDPassive` | `view-in`, `returns-mutable` | Reads FRD, returns passivity result. |
 | `SpectralFactor` | `pure`, `returns-mutable` | Currently static-gain limited. |

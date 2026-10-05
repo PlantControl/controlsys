@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -258,53 +259,29 @@ func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
 
 	mSel := len(inputs)
 	pSel := len(outputs)
+	allStates := rangeInts(n)
 
-	Bsel := mat.NewDense(max(n, 1), max(mSel, 1), nil)
-	if n > 0 {
-		bRaw := sys.B.RawMatrix()
-		bsRaw := Bsel.RawMatrix()
-		for k, j := range inputs {
-			for i := range n {
-				bsRaw.Data[i*bsRaw.Stride+k] = bRaw.Data[i*bRaw.Stride+j]
-			}
-		}
-	}
-
-	Csel := mat.NewDense(max(pSel, 1), max(n, 1), nil)
-	if n > 0 {
-		cRaw := sys.C.RawMatrix()
-		csRaw := Csel.RawMatrix()
-		for k, i := range outputs {
-			copy(csRaw.Data[k*csRaw.Stride:k*csRaw.Stride+n], cRaw.Data[i*cRaw.Stride:i*cRaw.Stride+n])
-		}
-	}
-
-	Dsel := mat.NewDense(pSel, mSel, nil)
-	for ki, oi := range outputs {
-		for kj, ij := range inputs {
-			Dsel.Set(ki, kj, sys.D.At(oi, ij))
-		}
-	}
-
+	var result *System
+	var err error
+	Dsel := selectDense(sys.D, outputs, inputs)
 	if n == 0 {
-		result, err := NewGain(Dsel, sys.Dt)
-		if err != nil {
-			return nil, err
-		}
-		metadataFromSystem(sys).selectIO(inputs, outputs).applyIOOwned(result)
-		return result, nil
+		result, err = NewGain(Dsel, sys.Dt)
+	} else {
+		result, err = newNoCopy(denseCopy(sys.A), nonEmptyDense(selectDense(sys.B, allStates, inputs)), nonEmptyDense(selectDense(sys.C, outputs, allStates)), nonEmptyDense(Dsel), sys.Dt)
 	}
-
-	Bsel = resizeDense(Bsel, n, mSel)
-	Csel = resizeDense(Csel, pSel, n)
-
-	result, err := newNoCopy(denseCopy(sys.A), Bsel, Csel, Dsel, sys.Dt)
 	if err != nil {
 		return nil, err
 	}
 	result.E = copyDescriptorE(sys.E)
-	metadataFromSystem(sys).selectIO(inputs, outputs).applyAllOwned(result)
+	if n == 0 {
+		metadataFromSystem(sys).selectIO(inputs, outputs).applyIOOwned(result)
+	} else {
+		metadataFromSystem(sys).selectIO(inputs, outputs).applyAllOwned(result)
+	}
 
+	if sys.Delay != nil {
+		result.Delay = copyDelayOrNil(selectDense(sys.Delay, outputs, inputs))
+	}
 	if sys.InputDelay != nil {
 		result.InputDelay = make([]float64, mSel)
 		for k, j := range inputs {
@@ -317,8 +294,34 @@ func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
 			result.OutputDelay[k] = sys.OutputDelay[i]
 		}
 	}
+	if N := sys.internalDelayCount(); N > 0 {
+		allDelays := rangeInts(N)
+		result.LFT = &LFTDelay{
+			Tau: slices.Clone(sys.LFT.Tau),
+			B2:  denseCopy(sys.LFT.B2),
+			C2:  denseCopy(sys.LFT.C2),
+			D12: selectDense(sys.LFT.D12, outputs, allDelays),
+			D21: selectDense(sys.LFT.D21, allDelays, inputs),
+			D22: denseCopy(sys.LFT.D22),
+		}
+	}
 
 	return result, nil
+}
+
+func selectDense(src *mat.Dense, rows, cols []int) *mat.Dense {
+	dst := newDense(len(rows), len(cols))
+	if len(rows) == 0 || len(cols) == 0 {
+		return dst
+	}
+	sRaw := src.RawMatrix()
+	dRaw := dst.RawMatrix()
+	for k, i := range rows {
+		for l, j := range cols {
+			dRaw.Data[k*dRaw.Stride+l] = sRaw.Data[i*sRaw.Stride+j]
+		}
+	}
+	return dst
 }
 
 func (sys *System) SelectByName(inputs, outputs []string) (*System, error) {

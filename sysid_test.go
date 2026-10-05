@@ -331,3 +331,37 @@ func TestERA_StableSystem(t *testing.T) {
 		t.Errorf("ERA system should be stable, poles: %v", poles)
 	}
 }
+
+func TestERA_EvenLengthMIMOReproducesMarkov(t *testing.T) {
+	a := []float64{0.7, 0.25, -0.15, 0.6}
+	b := []float64{1, 0.4, -0.5, 0.8}
+	c := []float64{1, -0.3, 0.2, 0.9}
+	d := []float64{0.1, -0.2, 0.3, 0.05}
+	truthMarkov := func(n int) []*mat.Dense {
+		out := []*mat.Dense{mat.NewDense(2, 2, d)}
+		ak := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
+		for len(out) < n {
+			var cb, cab mat.Dense
+			cb.Mul(mat.NewDense(2, 2, c), ak)
+			cab.Mul(&cb, mat.NewDense(2, 2, b))
+			out = append(out, &cab)
+			var next mat.Dense
+			next.Mul(mat.NewDense(2, 2, a), ak)
+			ak = &next
+		}
+		return out
+	}
+	want := truthMarkov(20)
+	for _, L := range []int{6, 7, 8} {
+		res, err := ERA(truthMarkov(L), 2, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := impulseMarkov(t, res.Sys, 20)
+		for k := range want {
+			if !mat.EqualApprox(got[k], want[k], 1e-9) {
+				t.Fatalf("L=%d: Markov %d = %v, want %v", L, k, mat.Formatted(got[k]), mat.Formatted(want[k]))
+			}
+		}
+	}
+}

@@ -81,7 +81,7 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 		}, nil
 	}
 
-	x, err := separateSchurBlocks(t, n, order)
+	x, err := separateSchurBlocks(t, n, order, "ModalTruncate")
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +206,7 @@ func modalReductionOrder(t []float64, poles []complex128, n int, dt float64, opt
 	return order, nil
 }
 
-func separateSchurBlocks(t []float64, n, order int) ([]float64, error) {
+func separateSchurBlocks(t []float64, n, order int, context string) ([]float64, error) {
 	discarded := n - order
 	x := make([]float64, order*discarded)
 	for i := range order {
@@ -216,7 +216,7 @@ func separateSchurBlocks(t []float64, n, order int) ([]float64, error) {
 	}
 	scale, ok := impl.Dtrsyl(blas.NoTrans, blas.NoTrans, -1, order, discarded, t, n, t[order*n+order:], n, x, discarded)
 	if !ok || scale == 0 || scale < 1e-12 {
-		return nil, fmt.Errorf("ModalTruncate: retained and discarded modes cannot be separated reliably: %w", ErrSchurFailed)
+		return nil, fmt.Errorf("%s: retained and discarded modes cannot be separated reliably: %w", context, ErrSchurFailed)
 	}
 	if scale != 1 {
 		for i := range x {

@@ -1,11 +1,13 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
 	"slices"
 	"sort"
+	"sync/atomic"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -15,12 +17,24 @@ import (
 
 const NormH2 = 2
 
+// Norm returns the H2 norm (normType 2) or the L∞ norm (normType +Inf) of
+// sys, following MATLAB norm
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.norm.html).
+//
+// The H2 norm of an unstable model is +Inf. The L∞ norm is the peak gain
+// over frequency without regard to stability; it equals the H∞ norm for
+// stable models and is +Inf when a pole lies on the stability boundary
+// (imaginary axis or unit circle).
 func Norm(sys *System, normType float64) (float64, error) {
 	if normType == 2 {
-		return H2Norm(sys)
+		norm, err := H2Norm(sys)
+		if errors.Is(err, ErrUnstable) {
+			return math.Inf(1), nil
+		}
+		return norm, err
 	}
 	if math.IsInf(normType, 1) {
-		norm, _, err := HinfNorm(sys)
+		norm, _, err := linfNorm(sys)
 		return norm, err
 	}
 	return 0, fmt.Errorf("controlsys: normType must be 2 or Inf, got %g", normType)
@@ -28,16 +42,28 @@ func Norm(sys *System, normType float64) (float64, error) {
 
 // H2Norm computes the H2 norm of a stable LTI system.
 //
-// For continuous systems with D ≠ 0, the H2 norm is infinite.
+// For continuous systems with D ≠ 0, or with a delayed direct feedthrough
+// through internal delays, the H2 norm is infinite. Input, output and I/O
+// delays do not change the H2 norm. Discrete internal delays are absorbed
+// exactly; continuous strictly proper internal-delay models return
+// ErrContinuousInternalDelay.
 func H2Norm(sys *System) (float64, error) {
-	policy := newEnergyAnalysisPolicy(sys)
-	if err := policy.requireStandard("H2Norm"); err != nil {
+	if err := newDescriptorPolicy(sys).requireStandard("H2Norm"); err != nil {
 		return 0, err
 	}
+	if sys.HasInternalDelay() && sys.IsContinuous() &&
+		(!allZeroDense(sys.D) || lftHasDirectFeedthrough(sys.LFT)) {
+		return math.Inf(1), nil
+	}
+	sys, err := finiteDimensionalModel(sys, "H2Norm")
+	if err != nil {
+		return 0, err
+	}
+	policy := newEnergyAnalysisPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 {
-		if sys.IsContinuous() {
+		if sys.IsContinuous() && !allZeroDense(sys.D) {
 			return math.Inf(1), nil
 		}
 		return frobNormD(sys.D, p, m), nil
@@ -92,11 +118,19 @@ func H2Norm(sys *System) (float64, error) {
 }
 
 // HSV computes the Hankel singular values of a stable LTI system in descending order.
+//
+// Discrete internal delays are absorbed exactly, so the result has one value
+// per original state plus one per delay sample. Continuous internal-delay
+// models return ErrContinuousInternalDelay.
 func HSV(sys *System) ([]float64, error) {
-	policy := newEnergyAnalysisPolicy(sys)
-	if err := policy.requireStandard("HSV"); err != nil {
+	if err := newDescriptorPolicy(sys).requireStandard("HSV"); err != nil {
 		return nil, err
 	}
+	sys, err := finiteDimensionalModel(sys, "HSV")
+	if err != nil {
+		return nil, err
+	}
+	policy := newEnergyAnalysisPolicy(sys)
 	n := policy.n
 	if n == 0 {
 		return nil, nil
@@ -195,13 +229,28 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
 	return hsv
 }
 
-// HinfNorm computes the H∞ norm (peak gain) of a stable LTI system
-// and the frequency at which it occurs.
+// HinfNorm computes the H∞ norm (peak gain) of an LTI system and the
+// frequency at which it occurs.
+//
+// Unstable models, including poles on the stability boundary, return
+// norm = omega = +Inf and a nil error, as MATLAB hinfnorm
+// (https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfnorm.html)
+// does. Use Norm(sys, math.Inf(1)) for the L∞ peak gain of an unstable
+// model.
+//
+// Input, output and I/O delays do not change the norm. Discrete internal
+// delays are absorbed exactly; continuous internal-delay models return
+// ErrContinuousInternalDelay because their stability cannot be decided from
+// a finite pole set.
 func HinfNorm(sys *System) (norm float64, omega float64, err error) {
-	policy := newEnergyAnalysisPolicy(sys)
-	if err := policy.requireStandard("HinfNorm"); err != nil {
+	if err := newDescriptorPolicy(sys).requireStandard("HinfNorm"); err != nil {
 		return 0, 0, err
 	}
+	sys, err = finiteDimensionalModel(sys, "HinfNorm")
+	if err != nil {
+		return 0, 0, err
+	}
+	policy := newEnergyAnalysisPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 {
@@ -210,21 +259,71 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 	}
 
 	if err := policy.requireStable(ErrUnstable); err != nil {
+		if errors.Is(err, ErrUnstable) {
+			return math.Inf(1), math.Inf(1), nil
+		}
 		return 0, 0, err
 	}
+	return peakGain(sys)
+}
 
+// linfNorm returns the L∞ norm (peak gain regardless of stability) and the
+// frequency at which it occurs. Poles on the stability boundary give +Inf at
+// the frequency of that pole.
+func linfNorm(sys *System) (norm float64, omega float64, err error) {
+	if err := newDescriptorPolicy(sys).requireStandard("Norm"); err != nil {
+		return 0, 0, err
+	}
+	sys, err = finiteDimensionalModel(sys, "Norm")
+	if err != nil {
+		return 0, 0, err
+	}
+	n, m, p := sys.Dims()
+	if n == 0 {
+		return maxSVDense(sys.D, p, m), 0, nil
+	}
+	poles, err := sys.Poles()
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, pole := range poles {
+		if !poleOnStabilityBoundary(pole, sys.IsContinuous(), poleStabilityTolerance(pole)) {
+			continue
+		}
+		if sys.IsContinuous() {
+			return math.Inf(1), math.Abs(imag(pole)), nil
+		}
+		return math.Inf(1), math.Abs(cmplx.Phase(pole)) / sys.Dt, nil
+	}
+	return peakGain(sys)
+}
+
+// peakGain computes sup_ω σ_max(G(jω)) of a model with no poles on the
+// stability boundary from the Hamiltonian eigenvalue test; stability is not
+// required. A sampled peak is first certified by one probe just above it;
+// bisection runs only when the probe is inconclusive.
+// Discrete models are mapped by Tustin, and the peak frequency is unwarped
+// back to the discrete axis.
+func peakGain(sys *System) (norm float64, omega float64, err error) {
+	n, m, p := sys.Dims()
 	if sys.IsDiscrete() {
 		csys, err := sys.Undiscretize()
 		if err != nil {
 			return 0, 0, err
 		}
-		norm, omega, err = HinfNorm(csys)
-		return norm, omega, err
+		norm, omega, err = peakGain(csys)
+		return norm, 2 * math.Atan(omega*sys.Dt/2) / sys.Dt, err
 	}
 
 	gammaLow, omegaPeak := hinfLowerBound(sys, m, p)
 
 	ws := newHamiltonianWS(sys, n, m, p)
+
+	const tol = 1e-10
+	gammaLow, omegaPeak, certified := ws.certifyPeak(sys, gammaLow, omegaPeak, tol)
+	if certified {
+		return gammaLow * (1 + tol/2), omegaPeak, nil
+	}
 
 	gammaHigh := math.Max(gammaLow*2, 1e-10)
 	for range 50 {
@@ -234,7 +333,6 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 		gammaHigh *= 2
 	}
 
-	tol := 1e-10
 	for range 100 {
 		if gammaHigh-gammaLow < tol*gammaHigh {
 			break
@@ -253,10 +351,42 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 			gammaHigh = mid
 			continue
 		}
-		gammaLow, omegaPeak = peak, w
+		gammaLow, omegaPeak, certified = ws.certifyPeak(sys, peak, w, tol)
+		if certified {
+			return gammaLow * (1 + tol/2), omegaPeak, nil
+		}
 	}
 
 	return gammaHigh, omegaPeak, nil
+}
+
+// certifyPeak tries to prove that the attained gain gammaLow is within tol
+// of the peak: no imaginary-axis Hamiltonian eigenvalue at
+// gammaLow·(1+tol/2) makes that level an upper bound. Crossings found there
+// raise gammaLow through their interval midpoints (Boyd–Balakrishnan,
+// Bruinsma–Steinbuch), which converges quadratically. Near-axis eigenvalues
+// whose candidate frequencies stay below the probe count as no crossing, the
+// rule the bisection applies at every level. It reports false when the
+// candidates cannot be evaluated, leaving the bisection to settle the peak.
+func (ws *hamiltonianWS) certifyPeak(sys *System, gammaLow, omegaPeak, tol float64) (float64, float64, bool) {
+	for range 20 {
+		if !(gammaLow > 0) || math.IsInf(gammaLow, 1) {
+			return gammaLow, omegaPeak, false
+		}
+		probe := gammaLow * (1 + tol/2)
+		if !ws.hasImagEigs(probe) {
+			return gammaLow, omegaPeak, true
+		}
+		peak, w, err := ws.candidatePeak(sys)
+		if err != nil {
+			return gammaLow, omegaPeak, false
+		}
+		if peak < probe {
+			return gammaLow, omegaPeak, true
+		}
+		gammaLow, omegaPeak = peak, w
+	}
+	return gammaLow, omegaPeak, false
 }
 
 // hamiltonianWS holds pre-allocated buffers for the Hamiltonian eigenvalue test
@@ -352,7 +482,11 @@ func newHamiltonianWS(sys *System, n, m, p int) *hamiltonianWS {
 	return ws
 }
 
+// hamiltonianEvals counts hasImagEigs calls, one Schur decomposition each.
+var hamiltonianEvals atomic.Int64
+
 func (ws *hamiltonianWS) hasImagEigs(gamma float64) bool {
+	hamiltonianEvals.Add(1)
 	n, m, p := ws.n, ws.m, ws.p
 	nn := ws.nn
 	g2 := gamma * gamma

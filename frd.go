@@ -508,6 +508,11 @@ func (f *FRD) Sigma() (*SigmaResult, error) {
 	return &SigmaResult{Omega: omega, sv: sv, nSV: nsv}, nil
 }
 
+// FRDMargin computes gain and phase margins of a SISO FRD loop by
+// interpolating between frequency points (linear in log omega), like MATLAB
+// margin/allmargin on frd. Phase crossovers are where the phase passes
+// -180 deg mod 360 (so -540, -900, ... count); phase margins are wrapped to
+// (-180,180]. Selection among multiple crossings matches Margin.
 func FRDMargin(f *FRD) (*MarginResult, error) {
 	p, m := f.Dims()
 	if p != 1 || m != 1 {
@@ -521,36 +526,33 @@ func FRDMargin(f *FRD) (*MarginResult, error) {
 	bode := f.Bode()
 	magDB := bode.magDB
 	phase := bode.phase
+	omega := bode.Omega
 
 	var allGM []float64
 	var allGMFreq []float64
 	var allPM []float64
 	var allPMFreq []float64
 
+	b := frdWrapDeg(phase[0] + 180)
 	for k := 1; k < nw; k++ {
-		ph0, ph1 := phase[k-1], phase[k]
-
-		if (ph0+180)*(ph1+180) <= 0 && math.Abs(ph0-ph1) < 180 {
-			frac := math.Abs(ph0+180) / (math.Abs(ph0+180) + math.Abs(ph1+180) + 1e-30)
-			magAtCross := magDB[k-1] + frac*(magDB[k]-magDB[k-1])
-			gm := -magAtCross
-			wCross := bode.Omega[k-1] + frac*(bode.Omega[k]-bode.Omega[k-1])
-			allGM = append(allGM, gm)
-			allGMFreq = append(allGMFreq, wCross)
+		a := b
+		b = frdWrapDeg(phase[k] + 180)
+		if !frdCrosses(a, b, k) || math.Abs(a-b) >= 180 {
+			continue
 		}
+		frac := frdCrossFrac(a, b)
+		allGM = append(allGM, -(magDB[k-1] + frac*(magDB[k]-magDB[k-1])))
+		allGMFreq = append(allGMFreq, frdInterpOmega(omega[k-1], omega[k], frac))
 	}
 
 	for k := 1; k < nw; k++ {
 		m0, m1 := magDB[k-1], magDB[k]
-
-		if m0*m1 <= 0 && math.Abs(m0-m1) < 40 {
-			frac := math.Abs(m0) / (math.Abs(m0) + math.Abs(m1) + 1e-30)
-			phAtCross := phase[k-1] + frac*(phase[k]-phase[k-1])
-			pm := 180 + phAtCross
-			wCross := bode.Omega[k-1] + frac*(bode.Omega[k]-bode.Omega[k-1])
-			allPM = append(allPM, pm)
-			allPMFreq = append(allPMFreq, wCross)
+		if math.IsInf(m0, 0) || math.IsInf(m1, 0) || !frdCrosses(m0, m1, k) {
+			continue
 		}
+		frac := frdCrossFrac(m0, m1)
+		allPM = append(allPM, frdWrapDeg(180+phase[k-1]+frac*(phase[k]-phase[k-1])))
+		allPMFreq = append(allPMFreq, frdInterpOmega(omega[k-1], omega[k], frac))
 	}
 
 	result := &MarginResult{
@@ -591,6 +593,34 @@ func FRDMargin(f *FRD) (*MarginResult, error) {
 	}
 
 	return result, nil
+}
+
+// frdWrapDeg wraps degrees to (-180,180].
+func frdWrapDeg(x float64) float64 {
+	return x - 360*math.Ceil((x-180)/360)
+}
+
+// frdCrosses reports a sign change of a->b on segment k; an exact zero
+// counts once, at the segment where it is the right endpoint (or k==1).
+func frdCrosses(a, b float64, k int) bool {
+	if math.IsNaN(a) || math.IsNaN(b) {
+		return false
+	}
+	return a*b < 0 || (b == 0 && a != 0) || (a == 0 && k == 1)
+}
+
+func frdCrossFrac(a, b float64) float64 {
+	if a == b {
+		return 0
+	}
+	return a / (a - b)
+}
+
+func frdInterpOmega(w0, w1, frac float64) float64 {
+	if w0 <= 0 {
+		return w0 + frac*(w1-w0)
+	}
+	return math.Exp(math.Log(w0) + frac*(math.Log(w1)-math.Log(w0)))
 }
 
 func frdGridsMatch(f1, f2 *FRD) error {

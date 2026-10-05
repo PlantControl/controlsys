@@ -21,18 +21,35 @@ type SimulateOpts struct {
 	duBuf *mat.Dense
 }
 
+// Simulate propagates a discrete model from x0 under u (one column per
+// sample). Descriptor models with invertible E are simulated in their own
+// state coordinates. Singular E is reduced to its slow subsystem plus
+// feedthrough, as MATLAB does: non-causal (improper) models return
+// ErrImproperModel, a nonzero x0 returns ErrDescriptorInitialState, and
+// XFinal is nil because the algebraic states depend on future inputs.
 func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
 	if sys.IsContinuous() {
 		return nil, ErrWrongDomain
 	}
-	if err := newDescriptorPolicy(sys).requireStandard("Simulate"); err != nil {
-		return nil, err
-	}
 	if err := sys.validateSimulateInputs(u, x0, opts); err != nil {
 		return nil, err
 	}
-
-	return simulationDispatcher{sys: sys}.run(u, x0, opts)
+	sim, simX0, reduced, err := sys.timeResponseForm(x0)
+	if err != nil {
+		return nil, fmt.Errorf("Simulate: %w", err)
+	}
+	if !reduced {
+		return simulationDispatcher{sys: sim}.run(u, simX0, opts)
+	}
+	if opts != nil {
+		opts = &SimulateOpts{yBuf: opts.yBuf, duBuf: opts.duBuf}
+	}
+	resp, err := simulationDispatcher{sys: sim}.run(u, nil, opts)
+	if err != nil {
+		return nil, err
+	}
+	resp.XFinal = nil
+	return resp, nil
 }
 
 type simulationDispatcher struct {
@@ -240,10 +257,18 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 		yk := mat.NewVecDense(p, nil)
 		yAutoRaw := Y.RawMatrix()
 		ykRaw := yk.RawVector()
+		outputLag := make([]int, p)
+		if sys.OutputDelay != nil {
+			for i := range p {
+				outputLag[i] = int(math.Round(sys.OutputDelay[i]))
+			}
+		}
 		for k := range steps {
 			yk.MulVec(sys.C, x)
 			for i := range p {
-				yAutoRaw.Data[i*yAutoRaw.Stride+k] = ykRaw.Data[i*ykRaw.Inc]
+				if k+outputLag[i] < steps {
+					yAutoRaw.Data[i*yAutoRaw.Stride+k+outputLag[i]] = ykRaw.Data[i*ykRaw.Inc]
+				}
 			}
 			tmp.MulVec(sys.A, x)
 			x, tmp = tmp, x

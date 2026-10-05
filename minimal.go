@@ -40,6 +40,9 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	if n == 0 {
 		return &ReduceResult{Sys: policy.zeroOrderCopy(), Order: 0}, nil
 	}
+	if sys.internalDelayCount() > 0 {
+		return reduceInternalDelay(sys, policy, opts)
+	}
 
 	if m == 0 && (opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable) {
 		return zeroOrderResult(sys, m, p), nil
@@ -132,21 +135,49 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	}, nil
 }
 
-func (sys *System) MinimalRealization() (*ReduceResult, error) {
-	return sys.Reduce(nil)
+// reduceInternalDelay reduces the delay-free augmented model
+// [A, [B B2]; [C; C2], 0]: the delays close around its I/O channels, so any
+// state it does not need is not needed by the delayed system either.
+func reduceInternalDelay(sys *System, policy realizationTransformPolicy, opts *ReduceOpts) (*ReduceResult, error) {
+	n, m, p := policy.n, policy.m, policy.p
+	N := sys.internalDelayCount()
+	B := newDense(n, m+N)
+	C := newDense(p+N, n)
+	setBlock(B, 0, 0, sys.B)
+	setBlock(B, 0, m, sys.LFT.B2)
+	setBlock(C, 0, 0, sys.C)
+	setBlock(C, p, 0, sys.LFT.C2)
+	aug, err := newNoCopy(denseCopy(sys.A), B, C, newDense(p+N, m+N), sys.Dt)
+	if err != nil {
+		return nil, err
+	}
+	red, err := aug.Reduce(opts)
+	if err != nil {
+		return nil, err
+	}
+	nr := red.Order
+	block := func(src *mat.Dense, r0, r1, c0, c1 int) *mat.Dense {
+		if r1 == r0 || c1 == c0 {
+			return &mat.Dense{}
+		}
+		return extractSubmatrix(src, r0, r1, c0, c1)
+	}
+	reduced, err := policy.resultWithInternalDelay(
+		denseCopy(red.Sys.A),
+		nonEmptyDense(block(red.Sys.B, 0, nr, 0, m)),
+		nonEmptyDense(block(red.Sys.C, 0, p, 0, nr)),
+		denseCopySafe(sys.D, p, m),
+		block(red.Sys.B, 0, nr, m, m+N),
+		block(red.Sys.C, p, p+N, 0, nr),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &ReduceResult{Sys: reduced, Order: nr, BlockSizes: red.BlockSizes}, nil
 }
 
-func copySys(sys *System, n, m, p int) *System {
-	cp := &System{
-		A:     denseCopySafe(sys.A, n, n),
-		B:     denseCopySafe(sys.B, n, m),
-		C:     denseCopySafe(sys.C, p, n),
-		D:     denseCopySafe(sys.D, p, m),
-		Delay: copyDelayOrNil(sys.Delay),
-		Dt:    sys.Dt,
-	}
-	propagateIONames(cp, sys)
-	return cp
+func (sys *System) MinimalRealization() (*ReduceResult, error) {
+	return sys.Reduce(nil)
 }
 
 func zeroOrderResult(sys *System, m, p int) *ReduceResult {

@@ -509,8 +509,6 @@ func (d *dot2) add(v float64) {
 }
 
 func (d *dot2) addProd(a, b float64) {
-	// The conversion forbids fusing a*b into the following add, which would
-	// break the error-free transformation.
 	// The conversion forbids fusing a*b into the following add, which
 	// would break the error-free transformation (Go fuses on arm64).
 	p := float64(a * b)
@@ -538,5 +536,18 @@ func TestHessenbergSweepExtraRefinementSteps(t *testing.T) {
 		if e, w := kernelErr(t, sys, twin, newHessenbergSweep(sys, n, m, p), logspace(-3, 3, 60), 1); e > 1e-12 {
 			t.Errorf("seed=%d kind=%v: vs oracle %g at ω=%g", seed, kind, e, w)
 		}
+	}
+}
+
+// A package variable defeats constant folding, which would hide fusion.
+var dot2FusionProbe = []float64{1 + 0x1p-27, -(1 + 0x1p-26)}
+
+func TestDot2AddProdErrorFree(t *testing.T) {
+	a, s := dot2FusionProbe[0], dot2FusionProbe[1]
+	var d dot2
+	d.add(s)
+	d.addProd(a, a)
+	if got := d.value(); got != 0x1p-54 {
+		t.Fatalf("dot2 value = %g, want %g; a*b fused into the TwoSum add", got, 0x1p-54)
 	}
 }

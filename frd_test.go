@@ -1040,3 +1040,175 @@ func TestInv_DelayRejected(t *testing.T) {
 		t.Error("Inv should reject delayed system")
 	}
 }
+
+type frdMarginCase struct {
+	name  string
+	dt    float64
+	omega []float64
+	resp  func(w float64) complex128
+	phase func(w float64) float64 // continuous phase in degrees
+}
+
+func bisectFRDOracle(lo, hi float64, f func(float64) float64) float64 {
+	flo := f(lo)
+	for range 200 {
+		mid := 0.5 * (lo + hi)
+		fm := f(mid)
+		if flo*fm <= 0 {
+			hi = mid
+		} else {
+			lo, flo = mid, fm
+		}
+	}
+	return 0.5 * (lo + hi)
+}
+
+func frdMarginOracle(c frdMarginCase) (gms, wps, pms, wgs []float64) {
+	w0, w1 := c.omega[0], c.omega[len(c.omega)-1]
+	n := 100000
+	ws := make([]float64, n)
+	for i := range ws {
+		ws[i] = w0 * math.Pow(w1/w0, float64(i)/float64(n-1))
+	}
+	ph0, ph1 := c.phase(w0), c.phase(w1)
+	kLo := math.Ceil((math.Min(ph0, ph1) + 180) / 360)
+	kHi := math.Floor((math.Max(ph0, ph1) + 180) / 360)
+	for k := kLo; k <= kHi; k++ {
+		target := -180 + 360*k
+		g := func(w float64) float64 { return c.phase(w) - target }
+		for i := 1; i < n; i++ {
+			if g(ws[i-1])*g(ws[i]) < 0 {
+				w := bisectFRDOracle(ws[i-1], ws[i], g)
+				wps = append(wps, w)
+				gms = append(gms, -20*math.Log10(cmplx.Abs(c.resp(w))))
+			}
+		}
+	}
+	m := func(w float64) float64 { return math.Log(cmplx.Abs(c.resp(w))) }
+	for i := 1; i < n; i++ {
+		if m(ws[i-1])*m(ws[i]) < 0 {
+			w := bisectFRDOracle(ws[i-1], ws[i], m)
+			pm := math.Mod(180+c.phase(w), 360)
+			if pm <= -180 {
+				pm += 360
+			} else if pm > 180 {
+				pm -= 360
+			}
+			wgs = append(wgs, w)
+			pms = append(pms, pm)
+		}
+	}
+	return
+}
+
+func pickMargin(vals, freqs []float64) (float64, float64) {
+	best, bw := math.Inf(1), math.NaN()
+	for i, v := range vals {
+		if v > 0 && v < best {
+			best, bw = v, freqs[i]
+		}
+	}
+	if math.IsInf(best, 1) {
+		for i, v := range vals {
+			if math.IsInf(best, 1) || v > best {
+				best, bw = v, freqs[i]
+			}
+		}
+	}
+	return best, bw
+}
+
+func TestFRDMargin_WrappedCrossings(t *testing.T) {
+	cases := []frdMarginCase{
+		{
+			name:  "delay30",
+			omega: logspace(-2, math.Log10(5), 20000),
+			resp: func(w float64) complex128 {
+				return 2 * cmplx.Exp(complex(0, -30*w)) / complex(1, w)
+			},
+			phase: func(w float64) float64 { return (-math.Atan(w) - 30*w) * 180 / math.Pi },
+		},
+		{
+			name:  "lag7_unstable_minus540",
+			omega: logspace(-2, 2, 20000),
+			resp: func(w float64) complex128 {
+				return 10 / cmplx.Pow(complex(1, w), 7)
+			},
+			phase: func(w float64) float64 { return -7 * math.Atan(w) * 180 / math.Pi },
+		},
+		{
+			name:  "discrete_delay12",
+			dt:    0.1,
+			omega: logspace(-2, math.Log10(math.Pi/0.1*0.999), 20000),
+			resp: func(w float64) complex128 {
+				z := cmplx.Exp(complex(0, w*0.1))
+				return 1.5 * cmplx.Pow(z, -12) * 0.4 / (z - 0.6)
+			},
+			phase: func(w float64) float64 {
+				th := w * 0.1
+				return (-13*th - math.Atan2(0.6*math.Sin(th), 1-0.6*math.Cos(th))) * 180 / math.Pi
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := make([][][]complex128, len(c.omega))
+			for k, w := range c.omega {
+				resp[k] = [][]complex128{{c.resp(w)}}
+			}
+			f, err := NewFRD(resp, c.omega, c.dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mr, err := FRDMargin(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gms, wps, pms, wgs := frdMarginOracle(c)
+			wantGM, wantWp := pickMargin(gms, wps)
+			wantPM, wantWg := pickMargin(pms, wgs)
+
+			if math.Abs(mr.GainMargin-wantGM) > 1e-3 || math.Abs(mr.WpFreq-wantWp) > 1e-4*wantWp {
+				t.Errorf("GM = %g @ %g, want %g @ %g", mr.GainMargin, mr.WpFreq, wantGM, wantWp)
+			}
+			if math.Abs(mr.PhaseMargin-wantPM) > 1e-3 || math.Abs(mr.WgFreq-wantWg) > 1e-4*wantWg {
+				t.Errorf("PM = %g @ %g, want %g @ %g", mr.PhaseMargin, mr.WgFreq, wantPM, wantWg)
+			}
+			if mr.PhaseMargin <= -180 || mr.PhaseMargin > 180 {
+				t.Errorf("PM = %g outside (-180,180]", mr.PhaseMargin)
+			}
+			off := math.Mod(c.phase(mr.WpFreq)+180, 360)
+			if math.Min(math.Abs(off), 360-math.Abs(off)) > 1e-2 {
+				t.Errorf("angle at WpFreq = %g, not -180 mod 360", c.phase(mr.WpFreq))
+			}
+			if gm := -20 * math.Log10(cmplx.Abs(c.resp(mr.WpFreq))); math.Abs(gm-mr.GainMargin) > 1e-3 {
+				t.Errorf("GM = %g, -20log|L(WpFreq)| = %g", mr.GainMargin, gm)
+			}
+		})
+	}
+}
+
+func TestFRDMargin_DelayRepro(t *testing.T) {
+	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{2}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys.InputDelay = []float64{30}
+	f, err := sys.FRD(logspace(-2, math.Log10(5), 20000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr, err := FRDMargin(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg := math.Sqrt(3)
+	wantPM := math.Mod(180+(-math.Atan(wg)-30*wg)*180/math.Pi, 360)
+	if wantPM <= -180 {
+		wantPM += 360
+	}
+	if math.Abs(mr.PhaseMargin-wantPM) > 1e-3 || math.Abs(mr.WgFreq-wg) > 1e-4 {
+		t.Errorf("PM = %g @ %g, want %g @ %g", mr.PhaseMargin, mr.WgFreq, wantPM, wg)
+	}
+}

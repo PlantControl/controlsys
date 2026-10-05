@@ -1,6 +1,8 @@
 package controlsys
 
 import (
+	"fmt"
+
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
@@ -83,4 +85,41 @@ func transposeSquareData(data []float64, stride, n int) []float64 {
 		}
 	}
 	return out
+}
+
+// finiteDimensionalModel returns sys with discrete internal delays folded
+// into the state exactly. Continuous internal delays give infinitely many
+// poles and no finite-order Lyapunov form, so they are rejected with
+// ErrContinuousInternalDelay.
+func finiteDimensionalModel(sys *System, context string) (*System, error) {
+	if !sys.HasInternalDelay() {
+		return sys, nil
+	}
+	if sys.IsContinuous() {
+		return nil, fmt.Errorf("%s: %w", context, ErrContinuousInternalDelay)
+	}
+	return absorbInternalDelay(sys)
+}
+
+// lftHasDirectFeedthrough reports whether some D12·D22^k·D21 is nonzero, i.e.
+// the internal delays carry a non-decaying u→y path.
+func lftHasDirectFeedthrough(lft *LFTDelay) bool {
+	if lft == nil || lft.D12 == nil || lft.D21 == nil {
+		return false
+	}
+	path := mat.DenseCopyOf(lft.D21)
+	for range lft.Tau {
+		var g mat.Dense
+		g.Mul(lft.D12, path)
+		if !allZeroDense(&g) {
+			return true
+		}
+		if lft.D22 == nil {
+			return false
+		}
+		var next mat.Dense
+		next.Mul(lft.D22, path)
+		path = &next
+	}
+	return false
 }

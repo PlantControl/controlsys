@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"sort"
@@ -10,11 +11,23 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// ZerosResult holds the invariant zeros and the normal rank of the transfer
+// matrix.
 type ZerosResult struct {
 	Zeros []complex128
 	Rank  int
 }
 
+// Zeros returns the finite invariant zeros: the points s where the system
+// pencil [A-sE B; C D] loses rank below its normal rank (MATLAB tzero). This
+// holds for SISO models too, so zeros cancelled by uncontrollable or
+// unobservable poles are kept, matching MATLAB zero on ss models; they coincide
+// with the transfer function numerator roots only for minimal realizations. As
+// in MATLAB zero, internal delays are set to zero (zero-order Padé) and an
+// ill-posed zero-delay loop returns ErrAlgebraicLoop; input/output delays
+// contribute no finite zeros and are ignored. See
+// https://www.mathworks.com/help/control/ref/dynamicsystem.zero.html and
+// https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
 func (sys *System) Zeros() ([]complex128, error) {
 	res, err := sys.ZerosDetail()
 	if err != nil {
@@ -28,23 +41,99 @@ func (sys *System) ZerosDetail() (*ZerosResult, error) {
 	if n == 0 || m == 0 || p == 0 {
 		return &ZerosResult{}, nil
 	}
-
-	if m == 1 && p == 1 {
-		return sisoZeros(sys)
+	sys, err := zeroInternalDelays(sys)
+	if err != nil {
+		return nil, fmt.Errorf("Zeros: %w", err)
+	}
+	if sys.IsDescriptor() {
+		return descriptorZeros(sys)
 	}
 	return mimoZeros(sys)
 }
 
-func sisoZeros(sys *System) (*ZerosResult, error) {
-	tfr, err := sys.TransferFunction(nil)
+// zeroInternalDelays closes the internal-delay loop of sys with every delay
+// set to zero, w = z, and drops external delays.
+func zeroInternalDelays(sys *System) (*System, error) {
+	if !sys.HasDelay() && sys.LFT == nil {
+		return sys, nil
+	}
+	out, err := sys.ZeroDelayApprox()
 	if err != nil {
 		return nil, err
 	}
-	zeros, err := Poly(tfr.TF.Num[0][0]).Roots()
+	out.Delay, out.InputDelay, out.OutputDelay = nil, nil, nil
+	return out, nil
+}
+
+// descriptorZeros compresses E = U diag(Σ_r, 0) Vᵀ and treats the n-r
+// algebraic states as extra inputs and the n-r algebraic equations as extra
+// outputs. The resulting order-r explicit system has the same system pencil up
+// to row/column permutation, so its invariant zeros are those of sys, and its
+// normal rank exceeds that of sys by n-r.
+func descriptorZeros(sys *System) (*ZerosResult, error) {
+	n, m, p := sys.Dims()
+	var svd mat.SVD
+	if !svd.Factorize(sys.E, mat.SVDFull) {
+		return nil, fmt.Errorf("Zeros: SVD of E failed: %w", ErrSingularTransform)
+	}
+	sv := svd.Values(nil)
+	tol := float64(n) * eps() * sv[0]
+	r := 0
+	for r < n && sv[r] > tol {
+		r++
+	}
+	var U, V mat.Dense
+	svd.UTo(&U)
+	svd.VTo(&V)
+
+	var At, tmp, Bt, Ct mat.Dense
+	tmp.Mul(U.T(), sys.A)
+	At.Mul(&tmp, &V)
+	Bt.Mul(U.T(), sys.B)
+	Ct.Mul(sys.C, &V)
+	for i := range r {
+		s := 1 / sv[i]
+		for j := range n {
+			At.Set(i, j, At.At(i, j)*s)
+		}
+		for j := range m {
+			Bt.Set(i, j, Bt.At(i, j)*s)
+		}
+	}
+
+	q := n - r
+	mh, ph := m+q, p+q
+	at, bt, ct := At.RawMatrix(), Bt.RawMatrix(), Ct.RawMatrix()
+	dh := make([]float64, ph*mh)
+	copyBlock(dh, mh, 0, 0, at.Data, at.Stride, r, r, q, q)
+	copyBlock(dh, mh, 0, q, bt.Data, bt.Stride, r, 0, q, m)
+	copyBlock(dh, mh, q, 0, ct.Data, ct.Stride, 0, r, p, q)
+	dRaw := sys.D.RawMatrix()
+	copyBlock(dh, mh, q, q, dRaw.Data, dRaw.Stride, 0, 0, p, m)
+	Dh := mat.NewDense(ph, mh, dh)
+
+	if r == 0 {
+		_, _, _, rank, err := zerosStaircase(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, Dh, 0, mh, ph)
+		if err != nil {
+			return nil, err
+		}
+		return &ZerosResult{Rank: rank - q}, nil
+	}
+	ah := make([]float64, r*r)
+	bh := make([]float64, r*mh)
+	ch := make([]float64, ph*r)
+	copyBlock(ah, r, 0, 0, at.Data, at.Stride, 0, 0, r, r)
+	copyBlock(bh, mh, 0, 0, at.Data, at.Stride, 0, r, r, q)
+	copyBlock(bh, mh, 0, q, bt.Data, bt.Stride, 0, 0, r, m)
+	copyBlock(ch, r, 0, 0, at.Data, at.Stride, r, 0, q, r)
+	copyBlock(ch, r, q, 0, ct.Data, ct.Stride, 0, 0, p, r)
+	aug := &System{A: mat.NewDense(r, r, ah), B: mat.NewDense(r, mh, bh), C: mat.NewDense(ph, r, ch), D: Dh, Dt: sys.Dt}
+	res, err := mimoZeros(aug)
 	if err != nil {
 		return nil, err
 	}
-	return &ZerosResult{Zeros: zeros, Rank: len(zeros)}, nil
+	res.Rank -= q
+	return res, nil
 }
 
 func mimoZeros(sys *System) (*ZerosResult, error) {
@@ -66,7 +155,7 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 				}
 				zeros := eig.Values(nil)
 				sortZeros(zeros)
-				return &ZerosResult{Zeros: zeros, Rank: n}, nil
+				return &ZerosResult{Zeros: zeros, Rank: m}, nil
 			}
 		}
 	}

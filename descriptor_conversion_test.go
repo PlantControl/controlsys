@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"math/cmplx"
 	"testing"
 
@@ -325,7 +324,7 @@ func TestD2CDescriptorMatchesExplicit(t *testing.T) {
 	}
 }
 
-func TestConversionSingularDescriptorRejected(t *testing.T) {
+func TestConversionSingularDescriptorReduced(t *testing.T) {
 	cont := singularDescriptorPlant(t, 0)
 	disc := singularDescriptorPlant(t, 0.1)
 	calls := map[string]func() (*System, error){
@@ -333,7 +332,7 @@ func TestConversionSingularDescriptorRejected(t *testing.T) {
 		"DiscretizeZOH":     func() (*System, error) { return cont.DiscretizeZOH(0.01) },
 		"DiscretizeFOH":     func() (*System, error) { return cont.DiscretizeFOH(0.01) },
 		"DiscretizeImpulse": func() (*System, error) { return cont.DiscretizeImpulse(0.01) },
-		"DiscretizeMatched": func() (*System, error) { return cont.DiscretizeMatched(0.01) },
+		"DiscretizeMatched": func() (*System, error) { return descriptorSingular(descriptorSISOPlant(t, 0)).DiscretizeMatched(0.01) },
 		"DiscretizeWithOpts": func() (*System, error) {
 			return cont.DiscretizeWithOpts(0.01, C2DOptions{Method: C2DMethodTustin})
 		},
@@ -343,9 +342,12 @@ func TestConversionSingularDescriptorRejected(t *testing.T) {
 		"D2D":          func() (*System, error) { return disc.D2D(0.05, C2DOptions{}) },
 	}
 	for name, call := range calls {
-		_, err := call()
-		if !errors.Is(err, ErrDescriptorSingular) || !errors.Is(err, ErrDescriptorUnsupported) {
-			t.Fatalf("%s: err = %v, want ErrDescriptorSingular and ErrDescriptorUnsupported", name, err)
+		got, err := call()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if n, _, _ := got.Dims(); n != 2 || got.IsDescriptor() {
+			t.Fatalf("%s: order %d descriptor=%v, want explicit order 2", name, n, got.IsDescriptor())
 		}
 	}
 }

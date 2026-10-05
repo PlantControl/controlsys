@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"sort"
@@ -583,5 +584,67 @@ func TestReduceZeroObservableReturnsEmpty(t *testing.T) {
 	}
 	if v := mr.Sys.D.At(0, 0); v != 9 {
 		t.Errorf("D preserved? got %g, want 9", v)
+	}
+}
+
+func TestReduceKeepsExternalDelays(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		orig := fieldIODelay(t, dt)
+		res, err := orig.MinimalRealization()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Order != 2 {
+			t.Errorf("dt=%g: order %d, want 2", dt, res.Order)
+		}
+		assertFieldResponse(t, fmt.Sprintf("dt=%g", dt), res.Sys, func(s complex128) [][]complex128 { return fieldOracle(orig, s) })
+	}
+}
+
+func TestReduceInternalDelayUsesAugmentedChannels(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		orig := fieldLFT(t, dt)
+		res, err := orig.MinimalRealization()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Order != 2 {
+			t.Errorf("dt=%g: order %d, want 2", dt, res.Order)
+		}
+		if res.Sys.internalDelayCount() != 1 {
+			t.Fatalf("dt=%g: internal delay dropped", dt)
+		}
+		assertFieldResponse(t, fmt.Sprintf("dt=%g", dt), res.Sys, func(s complex128) [][]complex128 { return fieldOracle(orig, s) })
+
+		// State 3 is reachable only through the internal-delay channel B2.
+		viaB2 := fieldLFT(t, dt)
+		viaB2.LFT.B2.Set(2, 0, 0.8)
+		res, err = viaB2.MinimalRealization()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Order != 3 {
+			t.Errorf("dt=%g: B2-reachable state removed, order %d, want 3", dt, res.Order)
+		}
+		assertFieldResponse(t, fmt.Sprintf("viaB2/dt=%g", dt), res.Sys, func(s complex128) [][]complex128 { return fieldOracle(viaB2, s) })
+	}
+}
+
+func TestReduceInternalDelayToZeroOrder(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		orig := fieldLFT(t, dt)
+		orig.C.Zero()
+		orig.LFT.C2.Zero()
+		res, err := orig.MinimalRealization()
+		if err != nil {
+			t.Fatalf("dt=%g: %v", dt, err)
+		}
+		if res.Order != 0 || res.Sys.internalDelayCount() != 1 {
+			t.Errorf("dt=%g: order %d internal delays %d, want 0 and 1", dt, res.Order, res.Sys.internalDelayCount())
+		}
+		if err := res.Sys.Validate(); err != nil {
+			t.Fatalf("dt=%g: Validate: %v", dt, err)
+		}
+		assertFieldResponse(t, fmt.Sprintf("dt=%g", dt), res.Sys, func(s complex128) [][]complex128 { return fieldOracle(orig, s) })
 	}
 }
