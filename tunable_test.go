@@ -52,7 +52,6 @@ func TestTunableRealRejectsInvalidBounds(t *testing.T) {
 	}
 }
 
-
 func TestTunableBlockDeterministicAndRandomSampling(t *testing.T) {
 	k, _ := newBoundedReal("K", 2, 1, 4)
 	block := mustOK(tunableGainWith("gain", [][]*TunableReal{{k}}))
@@ -161,7 +160,6 @@ func TestTunableRandomSampleUsesOneStream(t *testing.T) {
 		t.Errorf("both parameters drew %g", s.Gain[0][0].Value())
 	}
 }
-
 
 func second[T any](_ T, err error) error { return err }
 
