@@ -2,7 +2,9 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"math/cmplx"
 	"math/rand"
 	"testing"
 
@@ -69,23 +71,6 @@ func TestHinfSyn_Simple(t *testing.T) {
 	}
 	if !stringSlicesEqual(res.K.OutputName, []string{"control"}) {
 		t.Fatalf("controller output names = %v, want [control]", res.K.OutputName)
-	}
-}
-
-func TestHinfSyn_DiscreteError(t *testing.T) {
-	A := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
-	B := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
-	C := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
-	D := mat.NewDense(2, 2, nil)
-
-	P, err := New(A, B, C, D, 0.01)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = HinfSyn(P, 1, 1)
-	if !errors.Is(err, ErrWrongDomain) {
-		t.Errorf("got %v, want ErrWrongDomain", err)
 	}
 }
 
@@ -738,5 +723,342 @@ func TestHinfSyn_ControllerMeetsGammaNearSingularEdge(t *testing.T) {
 	}
 	if math.Abs(res.GammaOpt-0.5074089765548706) > 2*hinfControllerBackoff*0.5074089765548706 {
 		t.Fatalf("gamma %v, want near optimum 0.50741", res.GammaOpt)
+	}
+}
+
+// MCOU37: D11 = 0 with D12 = 0 must be rejected up front, not bisected to 1e12.
+func TestHinfSyn_RankDeficientD12D11Zero(t *testing.T) {
+	G := mixsynTF(t, []float64{200}, []float64{0.025, 1.0025, 10.1, 1}, 0)
+	W1 := mixsynTF(t, []float64{1}, []float64{1, 1}, 0)
+	P, err := Augw(G, W1, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = HinfSyn(P, 1, 1)
+	if !errors.Is(err, ErrInvalidPartition) || errors.Is(err, ErrGammaNotAchievable) {
+		t.Fatalf("HinfSyn err = %v, want ErrInvalidPartition", err)
+	}
+}
+
+func TestHinfSyn_RankDeficientD21(t *testing.T) {
+	P, err := New(
+		mat.NewDense(2, 2, []float64{-1, 0.5, 0.2, -2}),
+		mat.NewDense(2, 2, []float64{1, 0, 0.3, 1}),
+		mat.NewDense(2, 2, []float64{1, 0, 0.4, 1}),
+		mat.NewDense(2, 2, []float64{0, 1, 0, 0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, syn := range map[string]func() error{
+		"HinfSyn": func() error { _, err := HinfSyn(P, 1, 1); return err },
+		"H2Syn":   func() error { _, err := H2Syn(P, 1, 1); return err },
+	} {
+		if err := syn(); !errors.Is(err, ErrInvalidPartition) || errors.Is(err, ErrGammaNotAchievable) {
+			t.Errorf("%s err = %v, want ErrInvalidPartition", name, err)
+		}
+	}
+}
+
+// discreteHinfNormSweep is the peak of σ_max(G(e^{jθ})) over θ ∈ [0, π], from
+// a dense uniform and logarithmic grid refined by golden-section search
+// around the largest local maxima; independent of the library's evaluators.
+func discreteHinfNormSweep(sys *System) float64 {
+	gain := func(th float64) float64 { return frSigmaMax(mixsynFR(sys, cmplx.Exp(complex(0, th)))) }
+	var ths []float64
+	for k := -80; k < 0; k++ {
+		ths = append(ths, math.Pi*math.Pow(10, float64(k)/10))
+	}
+	const N = 4000
+	for i := range N + 1 {
+		ths = append(ths, math.Pi*float64(i)/N)
+	}
+	g := make([]float64, len(ths))
+	for i, th := range ths {
+		g[i] = gain(th)
+	}
+	best := math.Max(g[0], g[len(g)-1])
+	for i := 1; i+1 < len(ths); i++ {
+		if g[i] < g[i-1] || g[i] < g[i+1] || g[i] < 0.5*best {
+			continue
+		}
+		lo, hi := math.Min(ths[i-1], ths[i+1]), math.Max(ths[i-1], ths[i+1])
+		const r = 0.6180339887498949
+		a, b := hi-r*(hi-lo), lo+r*(hi-lo)
+		ga, gb := gain(a), gain(b)
+		for hi-lo > 1e-13 {
+			if ga > gb {
+				hi, b, gb = b, a, ga
+				a = hi - r*(hi-lo)
+				ga = gain(a)
+			} else {
+				lo, a, ga = a, b, gb
+				b = lo + r*(hi-lo)
+				gb = gain(b)
+			}
+		}
+		best = math.Max(best, math.Max(g[i], math.Max(ga, gb)))
+	}
+	return best
+}
+
+// handLFT closes P with K (u = K·y) from the block formulas, independent of
+// LFT, including D22 through (I − Dk·D22)⁻¹.
+func handLFT(t *testing.T, P, K *System, nmeas, ncont int) *System {
+	t.Helper()
+	n, m, p := P.Dims()
+	nk, _, _ := K.Dims()
+	m1, p1 := m-ncont, p-nmeas
+	blk := func(M *mat.Dense, r0, r1, c0, c1 int) *mat.Dense { return mat.DenseCopyOf(M.Slice(r0, r1, c0, c1)) }
+	B1, B2 := blk(P.B, 0, n, 0, m1), blk(P.B, 0, n, m1, m)
+	C1, C2 := blk(P.C, 0, p1, 0, n), blk(P.C, p1, p, 0, n)
+	D11, D12 := blk(P.D, 0, p1, 0, m1), blk(P.D, 0, p1, m1, m)
+	D21, D22 := blk(P.D, p1, p, 0, m1), blk(P.D, p1, p, m1, m)
+	var IDD, Delta mat.Dense
+	IDD.Mul(K.D, D22)
+	IDD.Scale(-1, &IDD)
+	for i := range ncont {
+		IDD.Set(i, i, IDD.At(i, i)+1)
+	}
+	if err := Delta.Inverse(&IDD); err != nil {
+		t.Fatal(err)
+	}
+	N := n + nk
+	Cu := mat.NewDense(ncont, N, nil)
+	var DkC2, DkD21, Du mat.Dense
+	DkC2.Mul(K.D, C2)
+	Cu.Slice(0, ncont, 0, n).(*mat.Dense).Copy(&DkC2)
+	if nk > 0 {
+		Cu.Slice(0, ncont, n, N).(*mat.Dense).Copy(K.C)
+	}
+	Cu.Mul(&Delta, mat.DenseCopyOf(Cu))
+	DkD21.Mul(K.D, D21)
+	Du.Mul(&Delta, &DkD21)
+	Cy := mat.NewDense(nmeas, N, nil)
+	Cy.Slice(0, nmeas, 0, n).(*mat.Dense).Copy(C2)
+	var tmp mat.Dense
+	tmp.Mul(D22, Cu)
+	Cy.Add(Cy, &tmp)
+	var Dy mat.Dense
+	Dy.Mul(D22, &Du)
+	Dy.Add(&Dy, D21)
+
+	A := mat.NewDense(N, N, nil)
+	B := mat.NewDense(N, m1, nil)
+	var t1 mat.Dense
+	t1.Mul(B2, Cu)
+	A.Slice(0, n, 0, N).(*mat.Dense).Copy(&t1)
+	a := A.Slice(0, n, 0, n).(*mat.Dense)
+	a.Add(a, P.A)
+	var t2 mat.Dense
+	t2.Mul(B2, &Du)
+	t2.Add(&t2, B1)
+	B.Slice(0, n, 0, m1).(*mat.Dense).Copy(&t2)
+	if nk > 0 {
+		var t3, t4 mat.Dense
+		t3.Mul(K.B, Cy)
+		A.Slice(n, N, 0, N).(*mat.Dense).Copy(&t3)
+		ak := A.Slice(n, N, n, N).(*mat.Dense)
+		ak.Add(ak, K.A)
+		t4.Mul(K.B, &Dy)
+		B.Slice(n, N, 0, m1).(*mat.Dense).Copy(&t4)
+	}
+	var C, D mat.Dense
+	C.Mul(D12, Cu)
+	c := C.Slice(0, p1, 0, n).(*mat.Dense)
+	c.Add(c, C1)
+	D.Mul(D12, &Du)
+	D.Add(&D, D11)
+	cl, err := New(A, B, &C, &D, P.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cl
+}
+
+func assertSchurStable(t *testing.T, A *mat.Dense) {
+	t.Helper()
+	var eig mat.Eigen
+	if !eig.Factorize(A, mat.EigenNone) {
+		t.Fatal("closed-loop eigenvalues failed")
+	}
+	for _, ev := range eig.Values(nil) {
+		if cmplx.Abs(ev) >= 1-1e-9 {
+			t.Fatalf("closed loop not Schur stable: pole %v", ev)
+		}
+	}
+}
+
+// discreteHinfTestPlant is a MIMO plant (3 states, w ∈ R³, u ∈ R, z ∈ R²,
+// y ∈ R²) with non-symmetric A and nonzero D11 and D22, discretized by ZOH.
+func discreteHinfTestPlant(t *testing.T, d11 float64) *System {
+	t.Helper()
+	Pc, err := New(
+		mat.NewDense(3, 3, []float64{-1, 0.5, 0, 0, -2, 1, 0.3, 0, 0.5}),
+		mat.NewDense(3, 4, []float64{1, 0, 0, 1, 0, 1, 0, 0.5, 0, 0, 1, -1}),
+		mat.NewDense(4, 3, []float64{1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1}),
+		mat.NewDense(4, 4, []float64{
+			d11, 0, -0.5 * d11, 0,
+			0, 0.5 * d11, 0, 1,
+			0.2, 0.1, 0, 0.7,
+			0, 0.1, 0.3, -0.4,
+		}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	P, err := Pc.C2D(0.1, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return P
+}
+
+// assertDiscreteHinfSyn checks the discrete design against an independent
+// unit-circle norm of the hand-built closed loop, Schur stability, and the
+// continuous design on the Tustin d2c plant (the same γ, and K its Tustin
+// c2d).
+func assertDiscreteHinfSyn(t *testing.T, P *System, nmeas, ncont int) *HinfSynResult {
+	t.Helper()
+	res, err := HinfSyn(P, nmeas, ncont)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.K.Dt != P.Dt {
+		t.Fatalf("K.Dt = %g, want %g", res.K.Dt, P.Dt)
+	}
+	cl := handLFT(t, P, res.K, nmeas, ncont)
+	assertSchurStable(t, cl.A)
+	for _, p := range res.CLPoles {
+		if cmplx.Abs(p) >= 1 {
+			t.Fatalf("CLPoles %v not inside the unit circle", res.CLPoles)
+		}
+	}
+	norm := discreteHinfNormSweep(cl)
+	if norm > res.GammaOpt*(1+1e-9) {
+		t.Fatalf("‖CL‖∞ = %.12g exceeds γ = %.12g", norm, res.GammaOpt)
+	}
+	if res.GammaOpt > norm*(1+2e-4) {
+		t.Fatalf("γ = %.12g not near achieved ‖CL‖∞ = %.12g", res.GammaOpt, norm)
+	}
+
+	return res
+}
+
+func assertTustinAgreement(t *testing.T, P *System, res *HinfSynResult, nmeas, ncont int) {
+	t.Helper()
+	Pc, err := P.D2C(D2COptions{Method: C2DMethodTustin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := HinfSyn(Pc, nmeas, ncont)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(res.GammaOpt-ref.GammaOpt) > 1e-8*ref.GammaOpt {
+		t.Fatalf("γ = %.15g, continuous Tustin-equivalent γ = %.15g", res.GammaOpt, ref.GammaOpt)
+	}
+	Kd, err := ref.K.C2D(P.Dt, C2DOptions{Method: C2DMethodTustin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, th := range []float64{0, 0.3, 1.2, 2.9} {
+		z := cmplx.Exp(complex(0, th))
+		assertFRClose(t, fmt.Sprintf("K(e^j%g)", th), mixsynFR(res.K, z), mixsynFR(Kd, z), 1e-8)
+	}
+}
+
+func TestHinfSyn_DiscreteMIMO(t *testing.T) {
+	for _, d11 := range []float64{0, 0.4} {
+		t.Run(fmt.Sprintf("D11=%g", d11), func(t *testing.T) {
+			P := discreteHinfTestPlant(t, d11)
+			res := assertDiscreteHinfSyn(t, P, 2, 1)
+			assertTustinAgreement(t, P, res, 2, 1)
+		})
+	}
+}
+
+// twoDisturbancePlant has w ∈ R², u ∈ R, z ∈ R², y ∈ R with the given A and
+// sample time.
+func twoDisturbancePlant(t *testing.T, A []float64, dt float64) *System {
+	t.Helper()
+	P, err := New(
+		mat.NewDense(2, 2, A),
+		mat.NewDense(2, 3, []float64{0.1, 0, 0.5, 0, 0.2, 1}),
+		mat.NewDense(3, 2, []float64{1, 0, 0, 0.4, 1, 0.5}),
+		mat.NewDense(3, 3, []float64{0, 0, 0, 0, 0, 0.2, 0.3, 0.1, 0}),
+		dt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return P
+}
+
+// An integrator at z = 1 keeps the standard Tustin map.
+func TestHinfSyn_DiscreteIntegrator(t *testing.T) {
+	P := twoDisturbancePlant(t, []float64{1, 0.1, 0, 0.6}, 0.5)
+	res := assertDiscreteHinfSyn(t, P, 1, 1)
+	assertTustinAgreement(t, P, res, 1, 1)
+}
+
+// A mode at z = −1 has no Tustin equivalent, so the design runs on the
+// reflected plant P(−z) and reflects K back.
+func TestHinfSyn_DiscretePoleAtMinusOne(t *testing.T) {
+	P := twoDisturbancePlant(t, []float64{-1, 0.3, 0, 0.5}, 0.2)
+	if _, err := P.D2C(D2COptions{Method: C2DMethodTustin}); err == nil {
+		t.Fatal("expected the plain Tustin map to fail at z = −1")
+	}
+	res := assertDiscreteHinfSyn(t, P, 1, 1)
+
+	Pr := P.Copy()
+	Pr.A.Scale(-1, Pr.A)
+	Pr.B.Scale(-1, Pr.B)
+	ref := assertDiscreteHinfSyn(t, Pr, 1, 1)
+	assertTustinAgreement(t, Pr, ref, 1, 1)
+	if res.GammaOpt != ref.GammaOpt {
+		t.Fatalf("γ = %.15g, reflected-plant γ = %.15g", res.GammaOpt, ref.GammaOpt)
+	}
+}
+
+func TestHinfSyn_DiscreteModesAtBothPlusMinusOne(t *testing.T) {
+	P := twoDisturbancePlant(t, []float64{1, 0.3, 0, -1}, 0.2)
+	if _, err := HinfSyn(P, 1, 1); !errors.Is(err, ErrOptionUnsupported) {
+		t.Fatalf("HinfSyn err = %v, want ErrOptionUnsupported", err)
+	}
+}
+
+// In discrete time the rank condition is on P12 and P21 at z = −1, the
+// boundary point Tustin sends to s = ∞: D12 = 0 is fine, while
+// P12(−1) = 0 is rejected.
+func TestHinfSyn_DiscreteRankAtMinusOne(t *testing.T) {
+	A := []float64{0.5, 0.2, -0.1, 0.3}
+	mk := func(c1 float64) *System {
+		P, err := New(
+			mat.NewDense(2, 2, A),
+			mat.NewDense(2, 3, []float64{1, 0, 1, 0.2, 0.5, 0}),
+			mat.NewDense(3, 2, []float64{c1, 1, 0, 0, 0.5, 1}),
+			mat.NewDense(3, 3, []float64{0, 0, 0, 0.5, 0, 0, 1, 0.2, 0}),
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return P
+	}
+	P := mk(0.4)
+	res := assertDiscreteHinfSyn(t, P, 1, 1)
+	assertTustinAgreement(t, P, res, 1, 1)
+
+	// P12(−1) = C1(−I − A)⁻¹B2 with B2 = e1 vanishes for c1 = −v1/v0, v the
+	// first column of (−I − A)⁻¹.
+	var M mat.Dense
+	if err := M.Inverse(mat.NewDense(2, 2, []float64{-1 - A[0], -A[1], -A[2], -1 - A[3]})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := HinfSyn(mk(-M.At(1, 0)/M.At(0, 0)), 1, 1); !errors.Is(err, ErrInvalidPartition) {
+		t.Fatalf("HinfSyn err = %v, want ErrInvalidPartition", err)
 	}
 }

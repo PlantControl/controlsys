@@ -283,9 +283,6 @@ func TestAugwDiscrete(t *testing.T) {
 		z := cmplx.Exp(complex(0, th))
 		assertFRClose(t, fmt.Sprintf("P(e^j%g)", th), mixsynFR(P, z), augwOracle(G, W1, W2, nil, z, 1), 1e-9)
 	}
-	if _, err := Mixsyn(G, W1, W2, nil); !errors.Is(err, ErrWrongDomain) {
-		t.Fatalf("Mixsyn discrete err = %v, want ErrWrongDomain", err)
-	}
 }
 
 func TestAugwInputDelay(t *testing.T) {
@@ -765,4 +762,78 @@ func TestAugwNonsingularDescriptorWeight(t *testing.T) {
 		s := complex(0, w)
 		assertFRClose(t, fmt.Sprintf("P(j%g)", w), mixsynFR(P, s), augwOracle(G, W1, W2, nil, s, 1), 1e-9)
 	}
+}
+
+// assertDiscreteMixsyn checks a discrete Mixsyn design against the hand-built
+// weighted loop: Schur stable, CL equal to the hand loop on the unit circle,
+// and Gamma equal to its independent unit-circle peak.
+func assertDiscreteMixsyn(t *testing.T, G, W1, W2, W3 *System) *MixsynResult {
+	t.Helper()
+	r, err := Mixsyn(G, W1, W2, W3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.K.Dt != G.Dt || r.CL.Dt != G.Dt {
+		t.Fatalf("K.Dt = %g, CL.Dt = %g, want %g", r.K.Dt, r.CL.Dt, G.Dt)
+	}
+	A, B, C, D := mixsynHandLoop(t, G, r.K, W1, W2, W3)
+	assertSchurStable(t, A)
+	hand, err := New(A, B, C, D, G.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, th := range []float64{0, 0.05, 0.4, 1.5, 3} {
+		z := cmplx.Exp(complex(0, th))
+		assertFRClose(t, fmt.Sprintf("CL(e^j%g)", th), mixsynFR(r.CL, z), mixsynFR(hand, z), 1e-7)
+	}
+	norm := discreteHinfNormSweep(hand)
+	if math.Abs(r.Gamma-norm) > 1e-6*norm {
+		t.Fatalf("Gamma = %.12g, unit-circle ‖CL‖∞ = %.12g", r.Gamma, norm)
+	}
+	if r.Gamma > r.Info.GammaOpt*(1+1e-9) || r.Info.GammaOpt > r.Gamma*(1+2e-4) {
+		t.Fatalf("Gamma %.12g, HinfSyn bound %.12g", r.Gamma, r.Info.GammaOpt)
+	}
+	return r
+}
+
+func TestMixsynDiscrete(t *testing.T) {
+	const dt = 0.1
+	G := mixsynTF(t, []float64{0.5, -0.2}, []float64{1, -1.2, 0.5}, dt)
+	W1, err := Makeweight(10, []float64{1, 0.5}, 0.1, dt, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	W2, err := Makeweight(0.1, []float64{5}, 3, dt, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiscreteMixsyn(t, G, W1, W2, nil)
+
+	// D12 = 0 here, but P12(−1) = [−W1(−1)·G(−1); W3(−1)·G(−1)] ≠ 0 satisfies
+	// the discrete rank condition, so W2 may be nil for a strictly proper G.
+	W3, err := Makeweight(0.1, []float64{5}, 2, dt, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiscreteMixsyn(t, G, W1, nil, W3)
+}
+
+func TestMixsynDiscreteMIMO(t *testing.T) {
+	const dt = 0.05
+	Gc := mimoMixsynPlant(t, 0.5)
+	G, err := Gc.C2D(dt, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dw := func(dc float64, fm []float64, hf float64) *System {
+		W, err := Makeweight(dc, fm, hf, dt, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return W
+	}
+	W1 := diagWeight(t, dw(20, []float64{0.5}, 0.2), dw(10, []float64{1}, 0.3))
+	W2 := diagWeight(t, dw(0.1, []float64{20, 0.5}, 2), dw(0.2, []float64{10, 0.5}, 1))
+	W3 := diagWeight(t, dw(0.05, []float64{8}, 5), dw(0.05, []float64{8}, 5))
+	assertDiscreteMixsyn(t, G, W1, W2, W3)
 }
