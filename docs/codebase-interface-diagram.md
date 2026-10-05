@@ -49,8 +49,8 @@ flowchart LR
         convertToTF["System.TransferFunction"]
         convertToZPK["System.ZPKModel"]
         convertToFRD["System.FRD"]
-        convertToDiscrete["System.Discretize / DiscretizeWithOpts<br/>DiscretizeZOH / FOH / Impulse / Matched / D2D"]
-        convertToContinuous["System.Undiscretize / System.D2C"]
+        convertToDiscrete["System.C2D / C2D<br/>C2D / FOH / Impulse / Matched / D2D"]
+        convertToContinuous["System.D2C / System.D2C"]
         stateSpaceUtilities["StateTransform / EliminateStates<br/>FixedInputReduction / SelectByName / SelectByIndex"]
     end
 

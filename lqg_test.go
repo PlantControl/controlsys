@@ -269,8 +269,10 @@ func TestLqg_RegulatorRiccatiOracle(t *testing.T) {
 			subDense(QXU, 0, 0, n, n), subDense(QXU, 0, n, n, m), subDense(QXU, n, n, m, m), res.Xc, res.K)
 		kalmanResidual(t, "estimator", disc, sys.A, sys.C,
 			subDense(QWV, 0, 0, n, n), subDense(QWV, 0, n, n, p), subDense(QWV, n, n, p, p), res.Xf, res.L)
-		if res.Ki != nil || res.Kw != nil || res.Mx != nil || res.Mw != nil {
-			t.Errorf("dt=%v: regulator must not set Ki/Kw/Mx/Mw", dt)
+		for name, get := range map[string]func() (*mat.Dense, bool){"Ki": res.Ki, "Kw": res.Kw, "Mx": res.Mx, "Mw": res.Mw} {
+			if g, ok := get(); ok || g != nil {
+				t.Errorf("dt=%v: regulator %s() = %v, %v; want nil, false", dt, name, g, ok)
+			}
 		}
 
 		ctrl := res.Controller
@@ -366,7 +368,7 @@ func TestLqg_ServoRiccatiOracle(t *testing.T) {
 		Aa, Ba, Qa, Na, R := lqgServoAugmented(sys, QXU, QI)
 		Kfull := mat.NewDense(m, n+p, nil)
 		setBlock(Kfull, 0, 0, two.K)
-		setBlock(Kfull, 0, n, two.Ki)
+		setBlock(Kfull, 0, n, two.ki)
 		lqrResidual(t, "servo", dt > 0, Aa, Ba, Qa, Na, R, two.Xc, Kfull)
 		kalmanResidual(t, "servo estimator", dt > 0, sys.A, sys.C,
 			subDense(QWV, 0, 0, n, n), subDense(QWV, 0, n, n, p), subDense(QWV, n, n, p, p), two.Xf, two.L)
@@ -437,7 +439,7 @@ func lqgStepCheck(t *testing.T, sys *System, res *LqgResult, current bool) {
 	t.Helper()
 	n, m, p := sys.Dims()
 	q := 0
-	if res.Ki != nil {
+	if res.ki != nil {
 		q = p
 	}
 	xp := mat.NewVecDense(n, []float64{0.3, -0.7, 1.1})
@@ -477,14 +479,14 @@ func lqgStepCheck(t *testing.T, sys *System, res *LqgResult, current bool) {
 
 	xhat := mat.VecDenseCopyOf(xp)
 	if current {
-		xhat.AddVec(xhat, mv(res.Mx, inn))
+		xhat.AddVec(xhat, mv(res.mx, inn))
 	}
 	wantU := mv(res.K, xhat)
 	if current {
-		wantU.AddVec(wantU, mv(res.Kw, mv(res.Mw, inn)))
+		wantU.AddVec(wantU, mv(res.kw, mv(res.mw, inn)))
 	}
 	if q > 0 {
-		wantU.AddVec(wantU, mv(res.Ki, xi))
+		wantU.AddVec(wantU, mv(res.ki, xi))
 	}
 	wantU.ScaleVec(-1, wantU)
 	for i := range m {
@@ -537,11 +539,16 @@ func TestLqg_DiscreteEstimatorForms(t *testing.T) {
 				t.Fatal(err)
 			}
 			kalmanResidual(t, "estimator", true, sys.A, sys.C, Qn, Nn, Rn, res.Xf, res.L)
-			if !tc.current {
-				if res.Mx != nil || res.Kw != nil {
-					t.Error("delayed estimator must not set Mx/Kw")
+			if _, ok := res.Ki(); ok != (tc.opts != nil && tc.opts.QI != nil) {
+				t.Errorf("Ki() ok = %v, want %v", ok, !ok)
+			}
+			for name, get := range map[string]func() (*mat.Dense, bool){"Kw": res.Kw, "Mx": res.Mx, "Mw": res.Mw} {
+				if g, ok := get(); ok != tc.current || ok != (g != nil) {
+					t.Errorf("%s() ok = %v with value %v, want ok = %v", name, ok, g != nil, tc.current)
 				}
-				assertMatEqual(t, "D", res.Controller.D, mat.NewDense(m, p*(1+btoi(res.Ki != nil)), nil), 0)
+			}
+			if !tc.current {
+				assertMatEqual(t, "D", res.Controller.D, mat.NewDense(m, p*(1+btoi(res.ki != nil)), nil), 0)
 				lqgStepCheck(t, sys, res, false)
 				return
 			}
@@ -555,15 +562,15 @@ func TestLqg_DiscreteEstimatorForms(t *testing.T) {
 			}
 			Mx.Mul(&PCt, &Sinv)
 			Mw.Mul(Nn, &Sinv)
-			assertMatEqual(t, "Mx", res.Mx, &Mx, 1e-10)
-			assertMatEqual(t, "Mw", res.Mw, &Mw, 1e-10)
+			assertMatEqual(t, "Mx", res.mx, &Mx, 1e-10)
+			assertMatEqual(t, "Mw", res.mw, &Mw, 1e-10)
 			var AMx mat.Dense
-			AMx.Mul(sys.A, res.Mx)
-			AMx.Add(&AMx, res.Mw)
+			AMx.Mul(sys.A, res.mx)
+			AMx.Add(&AMx, res.mw)
 			assertMatEqual(t, "L = A*Mx + Mw", res.L, &AMx, 1e-10)
 
 			Ba := sys.B
-			if res.Ki != nil {
+			if res.ki != nil {
 				_, Ba, _, _, _ = lqgServoAugmented(sys, QXU, QI)
 			}
 			var BtX, G, Kw mat.Dense
@@ -573,7 +580,7 @@ func TestLqg_DiscreteEstimatorForms(t *testing.T) {
 			if err := Kw.Solve(&G, subDense(&BtX, 0, 0, m, n)); err != nil {
 				t.Fatal(err)
 			}
-			assertMatEqual(t, "Kw", res.Kw, &Kw, 1e-10)
+			assertMatEqual(t, "Kw", res.kw, &Kw, 1e-10)
 			if mat.Norm(res.Controller.D, 1) == 0 {
 				t.Error("current controller must have feedthrough")
 			}
@@ -583,17 +590,17 @@ func TestLqg_DiscreteEstimatorForms(t *testing.T) {
 			nc, _ := ctrl.A.Dims()
 			By := subDense(ctrl.B, 0, 0, nc, p)
 			Dy := subDense(ctrl.D, 0, 0, m, p)
-			if res.Ki != nil {
+			if res.ki != nil {
 				By = subDense(ctrl.B, 0, p, nc, p)
 				Dy = subDense(ctrl.D, 0, p, m, p)
 			}
 			Acl, _ := lqgPositiveFeedback(t, sys, ctrl.A, By, ctrl.C, Dy)
 			Aa, Ba2, K := sys.A, sys.B, res.K
-			if res.Ki != nil {
+			if res.ki != nil {
 				Aa, Ba2, _, _, _ = lqgServoAugmented(sys, QXU, QI)
 				K = mat.NewDense(m, n+p, nil)
 				setBlock(K, 0, 0, res.K)
-				setBlock(K, 0, n, res.Ki)
+				setBlock(K, 0, n, res.ki)
 			}
 			var ABK, ALC mat.Dense
 			ABK.Mul(Ba2, K)
@@ -764,13 +771,13 @@ func TestLqg_DescriptorMatchesExplicitTwin(t *testing.T) {
 		assertLqgNear(t, tc.name+" Xc", got.Xc, want.Xc, 1e-9)
 		assertLqgNear(t, tc.name+" Xf", got.Xf, want.Xf, 1e-9)
 		assertLqgNear(t, tc.name+" L = E*Lbar", got.L, mulDense(E, want.L), 1e-9)
-		if want.Ki != nil {
-			assertLqgNear(t, tc.name+" Ki", got.Ki, want.Ki, 1e-9)
+		if want.ki != nil {
+			assertLqgNear(t, tc.name+" Ki", got.ki, want.ki, 1e-9)
 		}
-		if want.Kw != nil {
-			assertLqgNear(t, tc.name+" Mx", got.Mx, want.Mx, 1e-9)
-			assertLqgNear(t, tc.name+" Mw = E*Mwbar", got.Mw, mulDense(E, want.Mw), 1e-9)
-			assertLqgNear(t, tc.name+" Kw*E = Kwbar", mulDense(got.Kw, E), want.Kw, 1e-9)
+		if want.kw != nil {
+			assertLqgNear(t, tc.name+" Mx", got.mx, want.mx, 1e-9)
+			assertLqgNear(t, tc.name+" Mw = E*Mwbar", got.mw, mulDense(E, want.mw), 1e-9)
+			assertLqgNear(t, tc.name+" Kw*E = Kwbar", mulDense(got.kw, E), want.kw, 1e-9)
 		}
 		assertSameFrequencyResponse(t, tc.name+" controller", got.Controller, want.Controller, 1e-9)
 	}

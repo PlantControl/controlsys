@@ -7,16 +7,50 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-func (sys *System) Discretize(dt float64) (*System, error) {
-	if !sys.HasDelay() && !sys.IsDescriptor() {
-		return sys.discretizeTustin(dt, 0)
+// C2D converts a continuous-time model to discrete time with sample time
+// dt, as MATLAB sysd = c2d(sysc,Ts,opts); see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.c2d.html. The zero
+// C2DOptions selects zero-order hold, the MATLAB default; MATLAB
+// c2d(sysc,Ts,method) is C2D(dt, C2DOptions{Method: method}). Input, output
+// and I/O delays become sample delays (fractional ones per opts), internal
+// delays stay internal, and a singular-E descriptor model is first reduced as
+// MATLAB dss2ss does. An already discrete model returns ErrWrongDomain;
+// invalid options return ErrInvalidConversionOptions.
+func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
+	if sys == nil {
+		return nil, fmt.Errorf("C2D: system is nil: %w", ErrInvalidArgument)
 	}
-	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin})
+	if !sys.HasDelay() && !sys.IsDescriptor() && opts.Method != C2DMethodLeastSquares {
+		normalized, err := normalizeC2DOptions(dt, opts)
+		if err != nil {
+			return nil, fmt.Errorf("C2D: %w", err)
+		}
+		switch normalized.Method {
+		case C2DMethodZOH:
+			return sys.discretizeZOH(dt)
+		case C2DMethodTustin:
+			return sys.discretizeTustin(dt, normalized.PrewarpFrequency)
+		case C2DMethodFOH:
+			return sys.discretizeModifiedFOH(dt)
+		case C2DMethodImpulse:
+			if sys.IsDiscrete() {
+				return nil, fmt.Errorf("C2D: system already discrete: %w", ErrWrongDomain)
+			}
+			return sys.discretizeImpulseParity(dt)
+		case C2DMethodMatched:
+			return sys.discretizeMatched(dt)
+		}
+	}
+	plan, err := newC2DPlan(sys, dt, opts)
+	if err != nil {
+		return nil, err
+	}
+	return plan.run()
 }
 
 func (sys *System) discretizeTustin(dt, prewarp float64) (*System, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("Discretize: system already discrete: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("C2D: system already discrete: %w", ErrWrongDomain)
 	}
 	beta, err := tustinBeta(dt, prewarp)
 	if err != nil {
@@ -38,16 +72,9 @@ func (sys *System) discretizeTustin(dt, prewarp float64) (*System, error) {
 	return out, nil
 }
 
-func (sys *System) Undiscretize() (*System, error) {
-	if sys.IsDescriptor() {
-		return sys.D2CWithOpts(D2COptions{Method: C2DMethodTustin})
-	}
-	return sys.undiscretizeTustin(0)
-}
-
 func (sys *System) undiscretizeTustin(prewarp float64) (*System, error) {
 	if sys.IsContinuous() {
-		return nil, fmt.Errorf("Undiscretize: system already continuous: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("D2C: system already continuous: %w", ErrWrongDomain)
 	}
 	beta, err := tustinBeta(sys.Dt, prewarp)
 	if err != nil {
@@ -156,6 +183,13 @@ func bilinear(sys *System, palpha, pbeta, alpha, beta float64) (*System, error) 
 	return out, nil
 }
 
+// C2DOptions mirrors MATLAB c2dOptions; see
+// https://www.mathworks.com/help/control/ref/c2doptions.html. Zero values
+// select the MATLAB defaults: Method "" is zero-order hold, ThiranOrder 0
+// rounds fractional delays to the nearest sample (tustin and matched only),
+// DelayModeling "" models extra delays as internal delays, PrewarpFrequency 0
+// (rad/s, tustin only, below Nyquist) disables prewarping, and FitOrder 0
+// ("auto") fits least-squares models of the source order.
 type C2DOptions struct {
 	Method           C2DMethod
 	ThiranOrder      int
@@ -164,32 +198,37 @@ type C2DOptions struct {
 	FitOrder         int
 }
 
+// C2DMethod names a continuous/discrete conversion method, as the MATLAB
+// c2d, d2c and d2d method strings. The empty method selects C2DMethodZOH.
 type C2DMethod string
 
 const (
-	C2DMethodZOH          C2DMethod = "zoh"
-	C2DMethodTustin       C2DMethod = "tustin"
-	C2DMethodFOH          C2DMethod = "foh"
-	C2DMethodImpulse      C2DMethod = "impulse"
-	C2DMethodMatched      C2DMethod = "matched"
+	// C2DMethodZOH assumes piecewise-constant inputs (zero-order hold).
+	C2DMethodZOH C2DMethod = "zoh"
+	// C2DMethodTustin is the bilinear approximation, optionally prewarped.
+	C2DMethodTustin C2DMethod = "tustin"
+	// C2DMethodFOH assumes piecewise-linear inputs (triangle approximation).
+	C2DMethodFOH C2DMethod = "foh"
+	// C2DMethodImpulse is impulse-invariant discretization (c2d only).
+	C2DMethodImpulse C2DMethod = "impulse"
+	// C2DMethodMatched is zero-pole matching (SISO only).
+	C2DMethodMatched C2DMethod = "matched"
+	// C2DMethodLeastSquares fits the frequency response up to Nyquist (c2d,
+	// SISO only).
 	C2DMethodLeastSquares C2DMethod = "least-squares"
 )
 
+// C2DDelayModeling selects how C2D models delays that become extra
+// discrete delays, as the MATLAB c2dOptions DelayModeling option. The empty
+// value selects C2DDelayModelingInternal, the MATLAB default.
 type C2DDelayModeling string
 
 const (
-	C2DDelayModelingState    C2DDelayModeling = "state"
+	// C2DDelayModelingState models extra delays as additional states.
+	C2DDelayModelingState C2DDelayModeling = "state"
+	// C2DDelayModelingInternal models extra delays as internal delays.
 	C2DDelayModelingInternal C2DDelayModeling = "delay"
-	C2DDelayModelingDelay    C2DDelayModeling = C2DDelayModelingInternal
 )
-
-func (sys *System) DiscretizeWithOpts(dt float64, opts C2DOptions) (*System, error) {
-	plan, err := newC2DPlan(sys, dt, opts)
-	if err != nil {
-		return nil, err
-	}
-	return plan.run()
-}
 
 func mergeDelays(existing, decomposed []float64) []float64 {
 	if decomposed == nil {
@@ -280,16 +319,9 @@ func absorbFractionalDelays(disc *System, contInputDelay, contOutputDelay []floa
 	return disc, nil
 }
 
-func (sys *System) DiscretizeZOH(dt float64) (*System, error) {
-	if !sys.HasDelay() && !sys.IsDescriptor() {
-		return sys.discretizeZOH(dt)
-	}
-	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
-}
-
 func (sys *System) discretizeZOH(dt float64) (*System, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("DiscretizeZOH: system already discrete: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("C2D: system already discrete: %w", ErrWrongDomain)
 	}
 	if err := validateConversionSampleTime(dt); err != nil {
 		return nil, err
@@ -389,48 +421,25 @@ func isStrictlyUpperTriangular(m *mat.Dense) bool {
 	return true
 }
 
-// DiscretizeImpulse discretizes sys by impulse-invariant mapping. As in MATLAB
-// c2d(sys,Ts,'impulse'), models with internal delays are rejected with
-// ErrFeedbackDelay; input, output, and path delays are discretized exactly.
-func (sys *System) DiscretizeImpulse(dt float64) (*System, error) {
-	if sys.IsDiscrete() {
-		return nil, ErrWrongDomain
-	}
-	if err := validateConversionSampleTime(dt); err != nil {
-		return nil, err
-	}
-	if !sys.HasDelay() && !sys.IsDescriptor() {
-		return sys.discretizeImpulseParity(dt)
-	}
-	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodImpulse})
+// D2COptions mirrors MATLAB d2cOptions. The zero Method selects zero-order
+// hold, the MATLAB default; PrewarpFrequency is in rad/s, applies only to
+// Tustin, and must be below Nyquist.
+type D2COptions struct {
+	Method           C2DMethod
+	PrewarpFrequency float64
 }
 
-func (sys *System) DiscretizeFOH(dt float64) (*System, error) {
-	if !sys.HasDelay() && !sys.IsDescriptor() {
-		return sys.discretizeModifiedFOH(dt)
+// D2C converts a discrete-time model to continuous time, as MATLAB
+// sysc = d2c(sysd,opts); see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.d2c.html.
+// Methods are zoh (the zero-value default), tustin, foh and matched.
+// Delays of k samples become delays of k·Ts seconds; internal delays stay
+// internal, inverting C2D, except that matched rejects them as MATLAB does.
+// An already continuous model returns ErrWrongDomain.
+func (sys *System) D2C(opts D2COptions) (*System, error) {
+	if sys == nil {
+		return nil, fmt.Errorf("D2C: system is nil: %w", ErrInvalidArgument)
 	}
-	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodFOH})
-}
-
-func (sys *System) DiscretizeMatched(dt float64) (*System, error) {
-	if !sys.HasDelay() && !sys.IsDescriptor() {
-		return sys.discretizeMatched(dt)
-	}
-	return sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodMatched})
-}
-
-// D2C converts a discrete-time model using ZOH, Tustin, modified FOH, or
-// matched pole-zero assumptions. An empty method selects ZOH.
-// Delay fields are converted to seconds using the original sample time.
-// Internal delays of k samples become internal delays of k·Ts seconds around
-// the converted delay-free model, inverting c2d; matched rejects them, as
-// MATLAB c2d 'matched' does.
-func (sys *System) D2C(method C2DMethod) (*System, error) {
-	return sys.D2CWithOpts(D2COptions{Method: method})
-}
-
-// D2CWithOpts converts a discrete-time model with optional Tustin prewarping.
-func (sys *System) D2CWithOpts(opts D2COptions) (*System, error) {
 	plan, err := newD2CPlan(sys, opts)
 	if err != nil {
 		return nil, err
@@ -447,10 +456,24 @@ func d2cPropagateDelays(out, sys *System, dt float64) {
 	policy.applyContinuousDelayFields(out, sys)
 }
 
-// D2D resamples a discrete-time model using ZOH (the default) or Tustin.
-// Other methods are rejected, including on same-rate requests.
-func (sys *System) D2D(newDt float64, opts C2DOptions) (*System, error) {
-	plan, err := newD2DPlan(sys, newDt, opts)
+// D2DOptions mirrors MATLAB d2dOptions. The zero Method selects zero-order
+// hold, the MATLAB default; PrewarpFrequency is in rad/s and applies only to
+// Tustin.
+type D2DOptions struct {
+	Method           C2DMethod
+	PrewarpFrequency float64
+}
+
+// D2D resamples a discrete-time model to sample time dt, as MATLAB
+// sys1 = d2d(sys,Ts,opts); see
+// https://www.mathworks.com/help/control/ref/dynamicsystem.d2d.html. It
+// converts with D2C and back with C2D using opts.Method, which must be zoh
+// (the zero-value default) or tustin; a same-rate request returns a copy.
+func (sys *System) D2D(dt float64, opts D2DOptions) (*System, error) {
+	if sys == nil {
+		return nil, fmt.Errorf("D2D: system is nil: %w", ErrInvalidArgument)
+	}
+	plan, err := newD2DPlan(sys, dt, C2DOptions{Method: opts.Method, PrewarpFrequency: opts.PrewarpFrequency})
 	if err != nil {
 		return nil, err
 	}

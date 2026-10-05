@@ -9,27 +9,31 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// LeastSquaresResult describes an approximate frequency-response fit. Errors are
+// LeastSquaresFit describes an approximate frequency-response fit. Errors are
 // measured on a validation grid distinct from the fitting grid. RMSRelativeError
 // divides RMS absolute error by RMS source magnitude; MaxRelativeError divides
 // maximum absolute error by maximum source magnitude. Both compare the
-// returned Sys with the source, each evaluated on its state-space realization.
-// Zero-source errors are zero.
-// Stable reports the fitted poles; unstable poles are never silently reflected.
-type LeastSquaresResult struct {
-	Sys              *System
+// fitted model with the source, each evaluated on its state-space realization.
+// Zero-source errors are zero. FitOrder is the order used. Stable reports the
+// fitted poles; unstable poles are never silently reflected.
+type LeastSquaresFit struct {
 	FitOrder         int
 	RMSRelativeError float64
 	MaxRelativeError float64
 	Stable           bool
 }
 
-// DiscretizeLeastSquares fits an ordinary proper SISO model up to Nyquist
+// C2DFit converts sys like C2D with opts.Method C2DMethodLeastSquares and
+// also reports the fit quality, which MATLAB c2d does not return. Any other
+// method returns ErrOptionUnsupported.
+//
+// The least-squares method fits an ordinary proper SISO model up to Nyquist
 // (MATLAB c2d 'least-squares'; see
 // https://www.mathworks.com/help/control/ug/continuous-discrete-conversion-methods.html).
 // The source is sampled through its state-space realization.
-// fitOrder=0 selects the source state order (after eliminating the algebraic
-// states of a singular-E descriptor model); positive orders are accepted.
+// opts.FitOrder 0 ("auto", the MATLAB default) selects the source state order
+// (after eliminating the algebraic states of a singular-E descriptor model);
+// positive orders are accepted.
 // The fit uses an equally weighted uniform grid with max(513,32*order+1) points
 // and up to 12 denominator-reweighted real least-squares iterations followed
 // by up to 8 response-error Gauss-Newton refinements. It selects
@@ -41,26 +45,45 @@ type LeastSquaresResult struct {
 // Integer external delays are preserved; fractional and internal delays and
 // improper descriptor models are rejected. A finite grid cannot certify intersample error
 // or capture arbitrarily narrow resonances. No exact inverse is promised.
-func (sys *System) DiscretizeLeastSquares(dt float64, fitOrder int) (*LeastSquaresResult, error) {
+func (sys *System) C2DFit(dt float64, opts C2DOptions) (*System, LeastSquaresFit, error) {
+	if sys == nil {
+		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: system is nil: %w", ErrInvalidArgument)
+	}
+	if opts.Method != C2DMethodLeastSquares {
+		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: method %q is not least-squares: %w", opts.Method, ErrOptionUnsupported)
+	}
+	opts, err := normalizeC2DOptions(dt, opts)
+	if err != nil {
+		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: %w", err)
+	}
+	out, fit, err := sys.leastSquaresFit(dt, opts.FitOrder)
+	if err != nil {
+		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: %w", err)
+	}
+	return out, fit, nil
+}
+
+func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSquaresFit, error) {
+	var none LeastSquaresFit
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("DiscretizeLeastSquares: %w", ErrWrongDomain)
+		return nil, none, ErrWrongDomain
 	}
 	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
-		return nil, ErrInvalidSampleTime
+		return nil, none, ErrInvalidSampleTime
 	}
 	if _, m, p := sys.Dims(); m != 1 || p != 1 {
-		return nil, ErrNotSISO
+		return nil, none, ErrNotSISO
 	}
-	sys, _, err := conversionStandardForm(sys, "DiscretizeLeastSquares")
+	sys, _, err := conversionStandardForm(sys, "C2D")
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
 	n, _, _ := sys.Dims()
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("DiscretizeLeastSquares: internal delays: %w", ErrFeedbackDelay)
+		return nil, none, fmt.Errorf("internal delays: %w", ErrFeedbackDelay)
 	}
 	if fitOrder < 0 {
-		return nil, ErrInvalidOrder
+		return nil, none, ErrInvalidOrder
 	}
 	if fitOrder == 0 {
 		fitOrder = n
@@ -70,18 +93,18 @@ func (sys *System) DiscretizeLeastSquares(dt float64, fitOrder int) (*LeastSquar
 	work.InputDelay, work.OutputDelay, work.Delay = nil, nil, nil
 	maxInt := int(^uint(0) >> 1)
 	if fitOrder > (maxInt-1)/32 {
-		return nil, ErrInvalidOrder
+		return nil, none, ErrInvalidOrder
 	}
 	integrators, residue, err := leastSquaresIntegratorLimit(work)
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
 	if integrators > fitOrder {
-		return nil, fmt.Errorf("fit order must retain %d integrators: %w", integrators, ErrInvalidOrder)
+		return nil, none, fmt.Errorf("fit order must retain %d integrators: %w", integrators, ErrInvalidOrder)
 	}
 	samples := max(513, 32*fitOrder+1)
 	if samples > maxInt/2 || 2*fitOrder+1 > maxInt/(2*samples) {
-		return nil, ErrInvalidOrder
+		return nil, none, ErrInvalidOrder
 	}
 	omega := make([]float64, samples)
 	for k := range samples {
@@ -93,53 +116,50 @@ func (sys *System) DiscretizeLeastSquares(dt float64, fitOrder int) (*LeastSquar
 	}
 	target, err := leastSquaresSourceResponse(work, omega)
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
 	var realized *System
 	if integrators > 0 {
 		numerator, denominator, err := fitDiscreteIntegrators(target, fitOrder, integrators, residue*math.Pow(dt, float64(integrators)))
 		if err != nil {
-			return nil, err
+			return nil, none, err
 		}
 		realized, err = realizeDiscreteIntegrators(numerator, denominator, integrators, dt)
 		if err != nil {
-			return nil, err
+			return nil, none, err
 		}
 	} else {
 		numerator, denominator, err := fitDiscreteResponse(target, fitOrder)
 		if err != nil {
-			return nil, err
+			return nil, none, err
 		}
 		fitted := &TransferFunc{Num: [][][]float64{{numerator}}, Den: [][]float64{denominator}, Dt: dt}
 		result, err := fitted.StateSpace(nil)
 		if err != nil {
-			return nil, err
+			return nil, none, err
 		}
 		realized = result.Sys
 	}
 	rms, worst, err := leastSquaresFitQuality(work, realized, dt, samples)
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
 	out, err := newDelayConversionPolicy(dt, 0, 0).applyDiscreteDelayFields(realized, sys)
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
 	propagateNames(out, sys)
 	out.StateName = nil
 	stable, err := out.IsStable()
 	if err != nil {
-		return nil, err
+		return nil, none, err
 	}
-	return &LeastSquaresResult{Sys: out, FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: stable}, nil
+	return out, LeastSquaresFit{FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: stable}, nil
 }
 
 func (sys *System) discretizeLeastSquares(dt float64, fitOrder int) (*System, error) {
-	result, err := sys.DiscretizeLeastSquares(dt, fitOrder)
-	if err != nil {
-		return nil, err
-	}
-	return result.Sys, nil
+	out, _, err := sys.leastSquaresFit(dt, fitOrder)
+	return out, err
 }
 
 func fitDiscreteResponse(target []complex128, order int) ([]float64, []float64, error) {
@@ -213,7 +233,7 @@ func leastSquaresSourceResponse(source *System, omega []float64) ([]complex128, 
 	}
 	for _, h := range response.Data {
 		if cmplx.IsInf(h) || cmplx.IsNaN(h) {
-			return nil, fmt.Errorf("DiscretizeLeastSquares: singular or nonfinite source frequency response: %w", ErrSingularTransform)
+			return nil, fmt.Errorf("C2D: singular or nonfinite source frequency response: %w", ErrSingularTransform)
 		}
 	}
 	return response.Data, nil

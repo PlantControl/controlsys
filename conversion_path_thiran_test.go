@@ -113,7 +113,7 @@ func TestTustinThiranNondecomposablePathDelays(t *testing.T) {
 			t.Run(tc.name+"/"+string(modeling), func(t *testing.T) {
 				sys := nondecomposablePathSystem(t, tc.p, tc.m, tc.delay)
 				source := sys.Copy()
-				out, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: tc.order, DelayModeling: modeling})
+				out, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: tc.order, DelayModeling: modeling})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -161,7 +161,7 @@ func TestTustinThiranNondecomposablePathDelays(t *testing.T) {
 
 func TestTustinThiranPathDelayIntegerRemainderStaysDelay(t *testing.T) {
 	sys := nondecomposablePathSystem(t, 2, 2, []float64{0, 0, 0, .37})
-	out, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 2, DelayModeling: C2DDelayModelingState})
+	out, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 2, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestTustinThiranPathDelayIntegerRemainderStaysDelay(t *testing.T) {
 
 func TestTustinThiranDecomposablePathDelayUnchanged(t *testing.T) {
 	sys := nondecomposablePathSystem(t, 2, 2, []float64{.01, .03, .02, .04})
-	out, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	out, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,13 +199,13 @@ func TestTustinThiranPathDelaysWithInternalFeedback(t *testing.T) {
 			t.Fatal(err)
 		}
 		opts := C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}
-		out, err := sys.DiscretizeWithOpts(dt, opts)
+		out, err := sys.C2D(dt, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
 		plain := sys.Copy()
 		plain.Delay = nil
-		reference, err := plain.DiscretizeWithOpts(dt, opts)
+		reference, err := plain.C2D(dt, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,18 +237,12 @@ func TestTustinThiranPathDelaysWithInternalFeedback(t *testing.T) {
 
 func TestTustinThiranPathDelayResultIsApproximate(t *testing.T) {
 	sys := nondecomposablePathSystem(t, 2, 2, []float64{.01, .02, .03, .07})
-	result, err := sys.DiscretizeWithResult(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3})
-	if err != nil {
+	opts := C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3}
+	if _, err := sys.C2D(0.1, opts); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Approximate || !slices.Contains(result.Warnings, "Thiran filters approximate fractional delays.") {
-		t.Fatalf("approximate=%v warnings=%v", result.Approximate, result.Warnings)
-	}
-	if result.InitialStateMap != nil {
-		t.Fatal("duplicated path states must not claim an initial-state map")
-	}
-	if _, err := result.MapInitialState([]float64{1, 0}, nil, nil); !errors.Is(err, ErrSingularTransform) {
-		t.Fatalf("nonzero initial state err = %v, want ErrSingularTransform", err)
+	if _, _, err := sys.C2DMap(0.1, opts); !errors.Is(err, ErrOptionUnsupported) {
+		t.Fatalf("duplicated path states: C2DMap err = %v, want ErrOptionUnsupported", err)
 	}
 }
 
@@ -260,7 +254,7 @@ func TestTustinThiranPathDelayStaticGain(t *testing.T) {
 	sys.Delay = mat.NewDense(2, 3, []float64{0, 0, 0, .03, 0, .15})
 	omega := []float64{0.2, 7, 21}
 	for _, modeling := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
-		out, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: modeling})
+		out, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: modeling})
 		if err != nil {
 			t.Fatal(err)
 		}

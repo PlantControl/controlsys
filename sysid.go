@@ -18,9 +18,14 @@ type ERAResult struct {
 // discrete-time state-space model from Markov parameters (impulse
 // response matrices). Each markov[k] is a p×m matrix representing
 // Y(k). The order parameter specifies the desired state dimension
-// and dt is the sample time.
+// and dt is the sample time. An order above the numerical rank of the Hankel
+// matrix (singular values above max(dims)·eps·σ₁) returns ErrInvalidOrder,
+// since the realization would divide by a zero singular value.
+//
+// MATLAB's counterpart is era(data, nx) in System Identification Toolbox; here
+// the impulse response is passed directly as Markov parameters.
 func ERA(markov []*mat.Dense, order int, dt float64) (*ERAResult, error) {
-	p, m, err := validateMarkovSequence(markov, order, dt)
+	p, m, err := validateMarkovSequence("ERA", markov, order, dt)
 	if err != nil {
 		return nil, err
 	}
@@ -55,16 +60,25 @@ func ERA(markov []*mat.Dense, order int, dt float64) (*ERAResult, error) {
 
 	var svd mat.SVD
 	if !svd.Factorize(h0, mat.SVDFull) {
-		return nil, fmt.Errorf("ERA: SVD failed to converge")
+		return nil, fmt.Errorf("ERA: SVD of the Hankel matrix did not converge: %w", ErrSchurFailed)
 	}
 
 	allSigma := svd.Values(nil)
 	hsv := make([]float64, len(allSigma))
 	copy(hsv, allSigma)
 
-	if order > len(allSigma) {
-		return nil, fmt.Errorf("ERA: order %d exceeds rank %d: %w",
-			order, len(allSigma), ErrInvalidOrder)
+	rank := 0
+	if len(allSigma) > 0 {
+		tol := float64(max(h0Rows, h0Cols)) * eps() * allSigma[0]
+		for _, s := range allSigma {
+			if s > tol {
+				rank++
+			}
+		}
+	}
+	if order > rank {
+		return nil, fmt.Errorf("ERA: order %d exceeds Hankel rank %d: %w",
+			order, rank, ErrInvalidOrder)
 	}
 
 	var uFull, vFull mat.Dense

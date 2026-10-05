@@ -198,7 +198,7 @@ func TestDiscretize_ZOH_PreservesDCGain(t *testing.T) {
 		t.Fatalf("continuous DC gain = %f, want 1.5", wantDC)
 	}
 
-	dsys, err := sys.DiscretizeZOH(0.1)
+	dsys, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestDiscretize_Tustin_PreservesDCGain(t *testing.T) {
 	}
 	wantDC := dcCont.At(0, 0)
 
-	dsys, err := sys.Discretize(0.1)
+	dsys, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

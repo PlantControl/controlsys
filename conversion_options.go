@@ -5,13 +5,6 @@ import (
 	"math"
 )
 
-// D2COptions selects the inverse discretization method. Zero values select ZOH.
-// PrewarpFrequency is in rad/s, applies only to Tustin, and must be below Nyquist.
-type D2COptions struct {
-	Method           C2DMethod
-	PrewarpFrequency float64
-}
-
 func validateConversionSampleTime(dt float64) error {
 	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
 		return ErrInvalidSampleTime

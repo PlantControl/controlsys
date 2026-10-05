@@ -118,7 +118,11 @@ func CtrbF(A, B, C *mat.Dense, tol float64) (*StaircaseForm, error) {
 	if err != nil {
 		return nil, err
 	}
-	return controllabilityForm(A, B, C, n, tol), nil
+	res, err := controllabilityForm(A, B, C, n, tol)
+	if err != nil {
+		return nil, fmt.Errorf("CtrbF: %w", err)
+	}
+	return res, nil
 }
 
 // ObsvF computes the observability staircase form of (A, B, C), as MATLAB
@@ -134,7 +138,10 @@ func ObsvF(A, B, C *mat.Dense, tol float64) (*StaircaseForm, error) {
 	if err != nil {
 		return nil, err
 	}
-	dual := controllabilityForm(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), mat.DenseCopyOf(B.T()), n, tol)
+	dual, err := controllabilityForm(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), mat.DenseCopyOf(B.T()), n, tol)
+	if err != nil {
+		return nil, fmt.Errorf("ObsvF: %w", err)
+	}
 	return &StaircaseForm{
 		A: mat.DenseCopyOf(dual.A.T()),
 		B: mat.DenseCopyOf(dual.C.T()),
@@ -172,17 +179,15 @@ func requireStaircaseArgs(op string, A, B, C *mat.Dense, tol float64) (int, erro
 	return n, nil
 }
 
-// controllabilityForm runs the staircase with the controllable states first,
-// recovering its orthogonal Q by transforming [C; I], then reverses the state
-// order to MATLAB's layout with the controllable states last.
-func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) *StaircaseForm {
-	p, _ := C.Dims()
-	cAug := mat.NewDense(p+n, n, nil)
-	cAug.Slice(0, p, 0, n).(*mat.Dense).Copy(C)
-	for i := range n {
-		cAug.Set(p+i, i, 1)
+// controllabilityForm runs the staircase with the controllable states first
+// and reverses the state order to MATLAB's layout with the controllable
+// states last.
+func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) (*StaircaseForm, error) {
+	st, err := controllabilityStaircase(A, B, C, tol, true)
+	if err != nil {
+		return nil, err
 	}
-	st := ControllabilityStaircase(A, B, cAug, tol)
+	p, _ := C.Dims()
 	_, m := B.Dims()
 	rev := func(i int) int { return n - 1 - i }
 	res := &StaircaseForm{
@@ -195,7 +200,7 @@ func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) *StaircaseForm 
 	for i := range n {
 		for j := range n {
 			res.A.Set(rev(i), rev(j), st.A.At(i, j))
-			res.T.Set(rev(i), j, st.C.At(p+j, i))
+			res.T.Set(rev(i), j, st.T.At(i, j))
 		}
 		for j := range m {
 			res.B.Set(rev(i), j, st.B.At(i, j))
@@ -206,7 +211,7 @@ func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) *StaircaseForm 
 			res.C.Set(i, rev(j), st.C.At(i, j))
 		}
 	}
-	return res
+	return res, nil
 }
 
 // IsStabilizable reports whether every uncontrollable mode of (A, B) is
@@ -235,7 +240,10 @@ func isStabilizable(op string, A, B *mat.Dense, continuous bool) (bool, error) {
 		return true, nil
 	}
 
-	res := ControllabilityStaircase(A, B, nil, 0)
+	res, err := controllabilityStaircase(A, B, nil, 0, false)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", op, err)
+	}
 	if res.NCont == n {
 		return true, nil
 	}

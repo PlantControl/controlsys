@@ -22,7 +22,7 @@ func TestD2DZOHAnalyticRecurrence(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, method := range []C2DMethod{"", C2DMethodZOH} {
-				out, err := disc.D2D(period, C2DOptions{Method: method})
+				out, err := disc.D2D(period, D2DOptions{Method: method})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -49,12 +49,12 @@ func TestD2DTustinIndependentFrequency(t *testing.T) {
 		if w != 0 {
 			beta = w / math.Tan(w*oldDt/2)
 		}
-		disc, err := sys.DiscretizeWithOpts(oldDt, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w})
+		disc, err := sys.C2D(oldDt, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w})
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, dt := range []float64{.3, .04, .17} {
-			out, err := disc.D2D(dt, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w})
+			out, err := disc.D2D(dt, D2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -79,26 +79,26 @@ func TestD2DTustinIndependentFrequency(t *testing.T) {
 
 func TestD2DValidatesSameRateOptions(t *testing.T) {
 	sys := makeTestSystem()
-	disc, err := sys.DiscretizeZOH(.1)
+	disc, err := sys.C2D(.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := []C2DOptions{{Method: "invalid"}, {Method: C2DMethodFOH}, {Method: C2DMethodMatched}, {Method: C2DMethodImpulse}, {Method: C2DMethodLeastSquares}, {ThiranOrder: -1}, {DelayModeling: "bad"}, {FitOrder: 2}, {Method: C2DMethodTustin, PrewarpFrequency: -1}, {Method: C2DMethodTustin, PrewarpFrequency: math.NaN()}, {Method: C2DMethodTustin, PrewarpFrequency: 40}, {PrewarpFrequency: 1}}
+	options := []D2DOptions{{Method: "invalid"}, {Method: C2DMethodFOH}, {Method: C2DMethodMatched}, {Method: C2DMethodImpulse}, {Method: C2DMethodLeastSquares}, {Method: C2DMethodTustin, PrewarpFrequency: -1}, {Method: C2DMethodTustin, PrewarpFrequency: math.NaN()}, {Method: C2DMethodTustin, PrewarpFrequency: 40}, {PrewarpFrequency: 1}}
 	for _, opts := range options {
 		if _, err := disc.D2D(.1, opts); !errors.Is(err, ErrInvalidConversionOptions) {
 			t.Fatalf("options %+v: %v", opts, err)
 		}
 	}
 	for _, dt := range []float64{0, -1, math.NaN(), math.Inf(1)} {
-		if _, err := disc.D2D(dt, C2DOptions{}); !errors.Is(err, ErrInvalidSampleTime) {
+		if _, err := disc.D2D(dt, D2DOptions{}); !errors.Is(err, ErrInvalidSampleTime) {
 			t.Fatalf("dt %g: %v", dt, err)
 		}
 	}
-	if _, err := disc.D2D(.4, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: 10}); !errors.Is(err, ErrInvalidConversionOptions) {
+	if _, err := disc.D2D(.4, D2DOptions{Method: C2DMethodTustin, PrewarpFrequency: 10}); !errors.Is(err, ErrInvalidConversionOptions) {
 		t.Fatalf("new Nyquist: %v", err)
 	}
 	disc.Dt = .4
-	if _, err := disc.D2D(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: 10}); !errors.Is(err, ErrInvalidConversionOptions) {
+	if _, err := disc.D2D(.1, D2DOptions{Method: C2DMethodTustin, PrewarpFrequency: 10}); !errors.Is(err, ErrInvalidConversionOptions) {
 		t.Fatalf("old Nyquist: %v", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestD2DValidatesSameRateOptions(t *testing.T) {
 func TestD2DCopiesGainNamesAndDelays(t *testing.T) {
 	disc := &System{A: newDense(0, 0), B: newDense(0, 1), C: newDense(1, 0), D: mat.NewDense(1, 1, []float64{3}), Dt: .1, InputDelay: []float64{4}, OutputDelay: []float64{2}, InputName: []string{"u"}, OutputName: []string{"y"}}
 	for _, dt := range []float64{.1, .2} {
-		out, err := disc.D2D(dt, C2DOptions{})
+		out, err := disc.D2D(dt, D2DOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

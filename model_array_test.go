@@ -34,15 +34,21 @@ func TestModelArrayPreservesShapeMetadataAndVoidEntries(t *testing.T) {
 	if got := arr.Len(); got != 4 {
 		t.Fatalf("Len() = %d, want 4", got)
 	}
-	if _, m, p := arr.Dims(); m != 1 || p != 1 {
-		t.Fatalf("Dims() = (_, %d, %d), want (_, 1, 1)", m, p)
+	if p, m := arr.IOSize(); m != 1 || p != 1 {
+		t.Fatalf("IOSize() = (%d, %d), want (1, 1)", p, m)
 	}
-	if got, ok, err := arr.Model(0, 1); err != nil || ok || got != nil {
-		t.Fatalf("void Model(0,1) = (%v, %v, %v), want nil,false,nil", got, ok, err)
+	if _, err := arr.Model(0, 1); !errors.Is(err, ErrVoidModel) {
+		t.Fatalf("void Model(0,1) err = %v, want ErrVoidModel", err)
 	}
-	got, ok, err := arr.Model(1, 0)
-	if err != nil || !ok {
-		t.Fatalf("Model(1,0) ok=%v err=%v, want ok", ok, err)
+	if void, err := arr.IsVoid(0, 1); err != nil || !void {
+		t.Fatalf("IsVoid(0,1) = %v, %v; want true", void, err)
+	}
+	if void, err := arr.IsVoid(1, 0); err != nil || void {
+		t.Fatalf("IsVoid(1,0) = %v, %v; want false", void, err)
+	}
+	got, err := arr.Model(1, 0)
+	if err != nil {
+		t.Fatalf("Model(1,0): %v", err)
 	}
 	got.A.Set(0, 0, 99)
 	if sys2.A.At(0, 0) == 99 {
@@ -73,11 +79,14 @@ func TestModelArraySelectAndStack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SelectFlat: %v", err)
 	}
-	if got, ok, err := selected.ModelFlat(0); err != nil || ok || got != nil {
-		t.Fatalf("selected void = (%v, %v, %v), want nil,false,nil", got, ok, err)
+	if _, err := selected.ModelFlat(0); !errors.Is(err, ErrVoidModel) {
+		t.Fatalf("selected void err = %v, want ErrVoidModel", err)
 	}
-	if _, ok, err := selected.ModelFlat(1); err != nil || !ok {
-		t.Fatalf("selected model ok=%v err=%v, want ok", ok, err)
+	if _, err := selected.ModelFlat(1); err != nil {
+		t.Fatalf("selected model: %v", err)
+	}
+	if _, err := left.SelectFlat(1); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("all-void selection err = %v, want ErrInvalidArgument", err)
 	}
 
 	stacked, err := StackModelArrays(left, right)
@@ -87,11 +96,11 @@ func TestModelArraySelectAndStack(t *testing.T) {
 	if got, want := stacked.Shape(), []int{2, 2}; !sameInts(got, want) {
 		t.Fatalf("stacked Shape() = %v, want %v", got, want)
 	}
-	if got, ok, err := stacked.Model(0, 1); err != nil || ok || got != nil {
-		t.Fatalf("stacked void = (%v, %v, %v), want nil,false,nil", got, ok, err)
+	if _, err := stacked.Model(0, 1); !errors.Is(err, ErrVoidModel) {
+		t.Fatalf("stacked void err = %v, want ErrVoidModel", err)
 	}
-	if got, ok, err := stacked.Model(1, 0); err != nil || !ok || got.A.At(0, 0) != b.A.At(0, 0) {
-		t.Fatalf("stacked Model(1,0) = (%v, %v, %v), want copied b", got, ok, err)
+	if got, err := stacked.Model(1, 0); err != nil || got.A.At(0, 0) != b.A.At(0, 0) {
+		t.Fatalf("stacked Model(1,0) = (%v, %v), want copied b", got, err)
 	}
 
 	incompatible, err := NewModelArray([]int{1}, []*System{c})
@@ -106,15 +115,15 @@ func TestModelArraySelectAndStack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	incompatible.models[0].Dt = 0.2
-	if _, err := StackModelArrays(left, incompatible); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("StackModelArrays header mismatch err = %v, want ErrDimensionMismatch", err)
+	incompatible.dt = 0.2
+	if _, err := StackModelArrays(left, incompatible); !errors.Is(err, ErrDomainMismatch) {
+		t.Fatalf("StackModelArrays sample-time mismatch err = %v, want ErrDomainMismatch", err)
 	}
-	if _, err := StackModelArrays(); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("StackModelArrays empty err = %v, want ErrDimensionMismatch", err)
+	if _, err := StackModelArrays(); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("StackModelArrays empty err = %v, want ErrInvalidArgument", err)
 	}
-	if _, err := StackModelArrays(left, nil); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("StackModelArrays nil err = %v, want ErrDimensionMismatch", err)
+	if _, err := StackModelArrays(left, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("StackModelArrays nil err = %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -137,8 +146,8 @@ func TestConcatModelArraysFlattensCompatibleArrays(t *testing.T) {
 	if got, want := concatenated.Shape(), []int{3}; !sameInts(got, want) {
 		t.Fatalf("concatenated Shape() = %v, want %v", got, want)
 	}
-	if _, ok, err := concatenated.ModelFlat(2); err != nil || !ok {
-		t.Fatalf("concatenated final model ok=%v err=%v, want ok", ok, err)
+	if _, err := concatenated.ModelFlat(2); err != nil {
+		t.Fatalf("concatenated final model: %v", err)
 	}
 }
 
@@ -150,8 +159,18 @@ func TestModelArrayRejectsInvalidCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := NewModelArray([]int{2}, []*System{sys, badDt}); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("mixed sample time err = %v, want ErrDimensionMismatch", err)
+	if _, err := NewModelArray([]int{2}, []*System{sys, badDt}); !errors.Is(err, ErrDomainMismatch) {
+		t.Fatalf("mixed sample time err = %v, want ErrDomainMismatch", err)
+	}
+	if _, err := NewModelArray([]int{2}, []*System{nil, nil}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("all-void err = %v, want ErrInvalidArgument", err)
+	}
+	renamed := sys.Copy()
+	renamed.InputName = []string{"other"}
+	named := sys.Copy()
+	named.InputName = []string{"u"}
+	if _, err := NewModelArray([]int{2}, []*System{named, renamed}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("signal-name mismatch err = %v, want ErrInvalidArgument", err)
 	}
 	if _, err := NewModelArray([]int{2}, []*System{sys, badDims}); !errors.Is(err, ErrDimensionMismatch) {
 		t.Fatalf("mixed dimensions err = %v, want ErrDimensionMismatch", err)
@@ -176,14 +195,22 @@ func TestModelArrayBatchResponsesPreserveResultShape(t *testing.T) {
 	if got, want := fresp.Shape, []int{3}; !sameInts(got, want) {
 		t.Fatalf("freq shape = %v, want %v", got, want)
 	}
-	if got := len(fresp.Responses); got != 3 {
-		t.Fatalf("len(freq responses) = %d, want 3", got)
+	if _, err := fresp.ResponseFlat(1); !errors.Is(err, ErrVoidModel) {
+		t.Fatalf("void freq response err = %v, want ErrVoidModel", err)
 	}
-	if fresp.Responses[1] != nil || !fresp.Void[1] {
-		t.Fatalf("void freq response = (%v, %v), want nil,true", fresp.Responses[1], fresp.Void[1])
+	if _, err := fresp.ResponseFlat(3); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("out-of-range freq response err = %v, want ErrInvalidArgument", err)
 	}
-	if got := fresp.Responses[0].At(0, 0, 0); got == 0 {
-		t.Fatal("first frequency response is zero; expected evaluated model")
+	first, err := fresp.ResponseFlat(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := sys1.FreqResponse([]float64{0.5, 1.0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := first.At(0, 0, 0); got != want.At(0, 0, 0) {
+		t.Fatalf("first frequency response = %v, want %v", got, want.At(0, 0, 0))
 	}
 
 	step, err := arr.Step(0.2)
@@ -193,11 +220,12 @@ func TestModelArrayBatchResponsesPreserveResultShape(t *testing.T) {
 	if got, want := step.Shape, []int{3}; !sameInts(got, want) {
 		t.Fatalf("step shape = %v, want %v", got, want)
 	}
-	if step.Responses[1] != nil || !step.Void[1] {
-		t.Fatalf("void step response = (%v, %v), want nil,true", step.Responses[1], step.Void[1])
+	if _, err := step.ResponseFlat(1); !errors.Is(err, ErrVoidModel) {
+		t.Fatalf("void step response err = %v, want ErrVoidModel", err)
 	}
-	if got := len(step.Responses[0].T); got == 0 {
-		t.Fatal("first step response has no time samples")
+	stepFirst, err := step.ResponseFlat(0)
+	if err != nil || len(stepFirst.T) == 0 {
+		t.Fatalf("first step response = %v, %v; want samples", stepFirst, err)
 	}
 }
 

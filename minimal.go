@@ -74,7 +74,10 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	ncont := n
 
 	if opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable {
-		res := ControllabilityStaircase(A, B, C, opts.Tol)
+		res, err := controllabilityStaircase(A, B, C, opts.Tol, false)
+		if err != nil {
+			return nil, fmt.Errorf("Reduce: %w", err)
+		}
 		A = res.A
 		B = res.B
 		C = res.C
@@ -96,7 +99,10 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 			ccT := transposeDenseInto(slab1[ncont*ncont:ncont*ncont+ncont*p], cc)
 			bcT := transposeDenseInto(slab1[ncont*ncont+ncont*p:], bc)
 
-			dualRes := ControllabilityStaircase(acT, ccT, bcT, opts.Tol)
+			dualRes, err := controllabilityStaircase(acT, ccT, bcT, opts.Tol, false)
+			if err != nil {
+				return nil, fmt.Errorf("Reduce: %w", err)
+			}
 			nobs := dualRes.NCont
 
 			if nobs == 0 {
