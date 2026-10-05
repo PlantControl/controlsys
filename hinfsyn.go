@@ -11,17 +11,29 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// HinfSynResult is an H∞ controller, as MATLAB hinfsyn returns K, gamma and
-// info: X and Y are the state-feedback and filter Riccati solutions at
-// GammaOpt and CLPoles the closed-loop poles. For a discrete plant X and Y
+// HinfSynResult is an H∞ controller, as MATLAB [K,CL,gamma,info] =
+// hinfsyn(P,nmeas,ncont) returns it (see
+// https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfsyn.html):
+// X and Y are the state-feedback and filter Riccati solutions at GammaOpt
+// and CLPoles the closed-loop poles. For a discrete plant X and Y
 // solve the Riccati equations of its Tustin-equivalent continuous plant (in
 // the same state coordinates), not discrete Riccati equations; when HinfSyn
 // first shifts modes away from z = ±1 (see HinfSyn), that of the shifted
 // plant.
 type HinfSynResult struct {
 	K *System
+	// CL is the closed loop of P with K from w to z, LFT(P, K), as MATLAB CL.
+	CL *System
+	// Gamma is ‖CL‖∞ ≤ GammaOpt, the achieved norm (MATLAB gamma).
+	Gamma float64
+	// PeakFrequency is where ‖CL‖∞ is attained, in rad/s, as HinfNorm
+	// returns it: σ_max(CL) there is within HinfNorm's 1e-10 relative
+	// accuracy below Gamma. It is +Inf when a continuous CL only approaches
+	// its peak σ_max(D) as ω → ∞, the Nyquist frequency π/Ts playing that
+	// role when discrete.
+	PeakFrequency float64
 	// GammaOpt is the gamma K is built for, verified on the returned K:
-	// ||T_zw||inf <= GammaOpt. It is within hinfControllerBackoff (relative)
+	// Gamma ≤ GammaOpt. It is within hinfControllerBackoff (relative)
 	// of the smallest achievable gamma unless the Riccati solutions are
 	// ill-conditioned there, as when the infimum is 0 and unattained; then it
 	// is the smallest backed-off gamma whose controller meets it.
@@ -29,8 +41,6 @@ type HinfSynResult struct {
 	X        *mat.Dense
 	Y        *mat.Dense
 	CLPoles  []complex128
-	// clNorm is ||T_zw||inf of P with K, as verified.
-	clNorm float64
 }
 
 // HinfSyn computes a suboptimal H-infinity output-feedback controller for the
@@ -128,20 +138,20 @@ func (d hinfDesign) verified(op string, P *System, nmeas, ncont int) (*HinfSynRe
 }
 
 // meets checks ||T_zw||inf <= GammaOpt for the closed loop of P with K and
-// records that norm.
+// records that loop, its norm and peak frequency.
 func (res *HinfSynResult) meets(op string, P *System, nmeas, ncont int) error {
 	cl, err := LFT(P, res.K, LFTFeedback{Nu: ncont, Ny: nmeas})
 	if err != nil {
 		return fmt.Errorf("%s: closing the loop: %w", op, err)
 	}
-	norm, _, err := HinfNorm(cl)
+	norm, omega, err := HinfNorm(cl)
 	if err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
 	if !(norm <= res.GammaOpt) {
 		return fmt.Errorf("%s: controller for γ = %g gives ‖T_zw‖∞ = %g: %w", op, res.GammaOpt, norm, ErrGammaNotAchievable)
 	}
-	res.clNorm = norm
+	res.CL, res.Gamma, res.PeakFrequency = cl, norm, omega
 	return nil
 }
 

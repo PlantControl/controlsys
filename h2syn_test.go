@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/cmplx"
 	"math/rand"
 	"testing"
 
@@ -379,4 +380,103 @@ func TestH2Syn_DiscreteUnstablePlant(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertDiscreteH2Optimal(t, P, 1, 1)
+}
+
+// continuousH2NormKron is the H2 norm of a Hurwitz, strictly proper
+// continuous model from the controllability Gramian solved as the Kronecker
+// system (I⊗A + A⊗I)·vec(W) = −vec(BBᵀ): ‖G‖₂² = tr(CWCᵀ).
+func continuousH2NormKron(t *testing.T, sys *System) float64 {
+	t.Helper()
+	n, _, _ := sys.Dims()
+	M := mat.NewDense(n*n, n*n, nil)
+	for i := range n {
+		for j := range n {
+			for k := range n {
+				M.Set(i*n+j, k*n+j, M.At(i*n+j, k*n+j)+sys.A.At(i, k))
+				M.Set(i*n+j, i*n+k, M.At(i*n+j, i*n+k)+sys.A.At(j, k))
+			}
+		}
+	}
+	var BBt mat.Dense
+	BBt.Mul(sys.B, sys.B.T())
+	rhs := mat.NewVecDense(n*n, nil)
+	for i := range n {
+		for j := range n {
+			rhs.SetVec(i*n+j, -BBt.At(i, j))
+		}
+	}
+	var w mat.VecDense
+	if err := w.SolveVec(M, rhs); err != nil {
+		t.Fatal(err)
+	}
+	var CW, CWCt mat.Dense
+	CW.Mul(sys.C, mat.NewDense(n, n, w.RawVector().Data))
+	CWCt.Mul(&CW, sys.C.T())
+	return math.Sqrt(mat.Trace(&CWCt))
+}
+
+// H2Syn returns MATLAB h2syn's CL and gamma = ‖CL‖₂.
+func TestH2Syn_ClosedLoopGamma(t *testing.T) {
+	continuous := func(d22 float64) func(*testing.T) *System {
+		return func(t *testing.T) *System {
+			P, err := New(
+				mat.NewDense(2, 2, []float64{0, 1, -2, -1}),
+				mat.NewDense(2, 2, []float64{0, 0, 1, 1}),
+				mat.NewDense(3, 2, []float64{1, 0, 0, 0, 1, 0}),
+				mat.NewDense(3, 2, []float64{0, 0, 0, 1, 0.1, d22}),
+				0,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return P
+		}
+	}
+	for _, tc := range []struct {
+		name         string
+		plant        func(*testing.T) *System
+		nmeas, ncont int
+	}{
+		{"continuous", continuous(0), 1, 1},
+		{"continuous D22", continuous(0.25), 1, 1},
+		{"discrete D11 D22", func(t *testing.T) *System { return discreteHinfTestPlant(t, 0.4) }, 2, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			P := tc.plant(t)
+			res, err := H2Syn(P, tc.nmeas, tc.ncont)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cl, err := LFT(P, res.K, LFTFeedback{Nu: tc.ncont, Ny: tc.nmeas})
+			if err != nil {
+				t.Fatal(err)
+			}
+			norm, err := H2Norm(cl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Gamma != norm {
+				t.Fatalf("Gamma = %v, H2Norm(LFT(P, K)) = %v", res.Gamma, norm)
+			}
+			var want float64
+			if P.IsDiscrete() {
+				want = discreteH2NormSmith(t, res.CL)
+			} else {
+				want = continuousH2NormKron(t, res.CL)
+			}
+			if math.Abs(res.Gamma-want) > 1e-9*want {
+				t.Fatalf("Gamma = %.15g, Gramian oracle %.15g", res.Gamma, want)
+			}
+			for _, w := range []float64{0.001, 0.3, 1, 2.7, 10, 31} {
+				s := complex(0, w)
+				if P.IsDiscrete() {
+					if w*P.Dt > math.Pi {
+						continue
+					}
+					s = cmplx.Exp(complex(0, w*P.Dt))
+				}
+				assertFRClose(t, fmt.Sprintf("CL(%v)", s), mixsynFR(res.CL, s), lowerLFTOracle(P, res.K, tc.nmeas, tc.ncont, s), 1e-9)
+			}
+		})
+	}
 }

@@ -7,11 +7,17 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// H2SynResult is an H2-optimal controller, as MATLAB h2syn returns K and
-// info: X and Y are the state-feedback and filter Riccati solutions and
-// CLPoles the closed-loop poles.
+// H2SynResult is an H2-optimal controller, as MATLAB [K,CL,gamma,info] =
+// h2syn(P,nmeas,ncont) returns it (see
+// https://www.mathworks.com/help/robust/ref/dynamicsystem.h2syn.html):
+// X and Y are the state-feedback and filter Riccati solutions and CLPoles
+// the closed-loop poles.
 type H2SynResult struct {
-	K       *System
+	K *System
+	// CL is the closed loop of P with K from w to z, LFT(P, K), as MATLAB CL.
+	CL *System
+	// Gamma is ‖CL‖₂, the achieved H2 norm (MATLAB gamma).
+	Gamma   float64
 	X       *mat.Dense
 	Y       *mat.Dense
 	CLPoles []complex128
@@ -31,7 +37,24 @@ type H2SynResult struct {
 // any D11 and gets the discrete-Riccati (current-estimator) controller,
 // which has feedthrough, with X and Y the stabilizing solutions of the
 // control and filter DAREs.
+//
+// CL and Gamma cost one LFT and the Lyapunov solve of H2Norm on the
+// closed loop, of twice P's order.
 func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
+	res, err := h2Syn(P, nmeas, ncont)
+	if err != nil {
+		return nil, err
+	}
+	if res.CL, err = LFT(P, res.K, LFTFeedback{Nu: ncont, Ny: nmeas}); err != nil {
+		return nil, fmt.Errorf("H2Syn: closing the loop: %w", err)
+	}
+	if res.Gamma, err = H2Norm(res.CL); err != nil {
+		return nil, fmt.Errorf("H2Syn: %w", err)
+	}
+	return res, nil
+}
+
+func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	gp, err := partitionGeneralizedPlant("H2Syn", P, nmeas, ncont)
 	if err != nil {
 		return nil, err

@@ -207,9 +207,10 @@ func augwInterconnect(G, W1, W2, W3 *System, ny, nu int) (*System, error) {
 type MixsynResult struct {
 	// K is the controller, driven by e = r − y and producing u.
 	K *System
-	// CL is [W1·S; W2·K·S; W3·T] from w to the present z channels.
+	// CL is [W1·S; W2·K·S; W3·T] from w to the present z channels; it is
+	// Info.CL.
 	CL *System
-	// Gamma is the achieved H∞ norm of CL.
+	// Gamma is the achieved H∞ norm of CL, Info.Gamma.
 	Gamma float64
 	// Info is the underlying HinfSyn design on Augw(G, W1, W2, W3).
 	Info *HinfSynResult
@@ -251,11 +252,7 @@ func Mixsyn(G, W1, W2, W3 *System) (*MixsynResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	CL, err := LFT(P, info.K, LFTFeedback{Nu: nu, Ny: ny})
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
-	}
-	return &MixsynResult{K: info.K, CL: CL, Gamma: info.clNorm, Info: info}, nil
+	return &MixsynResult{K: info.K, CL: info.CL, Gamma: info.Gamma, Info: info}, nil
 }
 
 // fullColumnRank reports whether the tall matrix M has full column rank,
