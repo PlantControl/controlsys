@@ -1752,6 +1752,16 @@ func frExactPoint(w, dt float64) frBig {
 // frExactResponse is G(z) = C(zE − A)⁻¹B + D of the stored realization with
 // only the final G rounded: Gaussian elimination in frBigPrec bits.
 func frExactResponse(sys *System, z frBig) []complex128 {
+	gb := frExactResponseBig(sys, z)
+	g := make([]complex128, len(gb))
+	for i, v := range gb {
+		g[i] = v.complex()
+	}
+	return g
+}
+
+// frExactResponseBig is frExactResponse unrounded, row-major p×m.
+func frExactResponseBig(sys *System, z frBig) []frBig {
 	n, m, p := sys.Dims()
 	M := make([][]frBig, n)
 	for i := range n {
@@ -1795,14 +1805,14 @@ func frExactResponse(sys *System, z frBig) []complex128 {
 			X[i][j] = acc.quo(M[i][i])
 		}
 	}
-	G := make([]complex128, p*m)
+	G := make([]frBig, p*m)
 	for i := range p {
 		for j := range m {
 			acc := frBigC(complex(sys.D.At(i, j), 0))
 			for k := range n {
 				acc = acc.add(frBigC(complex(sys.C.At(i, k), 0)).mul(X[k][j]))
 			}
-			G[i*m+j] = acc.complex()
+			G[i*m+j] = acc
 		}
 	}
 	return G
@@ -1952,5 +1962,82 @@ func TestComplexSolveErrorsHaveNoDoublePrefix(t *testing.T) {
 	err := cInvertInto(make([]complex128, 4), make([]complex128, 8), []complex128{1, 2, 2, 4}, 2)
 	if !errors.Is(err, ErrSingularTransform) || strings.Count(err.Error(), "controlsys:") != 1 {
 		t.Errorf("cInvertInto singular: err = %v", err)
+	}
+}
+
+// Next to a pole of a discrete delay loop within 1e-9 of the unit circle,
+// I − H22·Δ is nearly singular, and a rounded Δ = z^{-k} (k-fold rounding,
+// and no complex128 lies on the circle) moves G by about kε/1e-9. The
+// response must match a 200-bit closed loop of the exact H(z) and Δ =
+// z^{-k} at the exact on-circle point. Delay 1 (3 samples) closes a static
+// loop with gain 1 − 1e-9, delay 2 (5 samples) a dynamic one through a
+// non-symmetric 3-state plant; H22 is lower triangular so the poles of the
+// first loop are exact.
+func TestFreqResponseDiscreteInternalDelayLightlyDamped(t *testing.T) {
+	const dt, a = 0.1, 1 - 1e-9
+	A := mat.NewDense(3, 3, []float64{0.5, 0.2, -0.1, -0.3, 0.4, 0.25, 0.1, -0.2, -0.6})
+	B := mat.NewDense(3, 2, []float64{1, 0.3, -0.4, 0.8, 0.2, -0.5})
+	C := mat.NewDense(2, 3, []float64{0.7, -0.2, 0.4, 0.1, 0.9, -0.3})
+	D := mat.NewDense(2, 2, []float64{0.6, 0.1, -0.2, 0.9})
+	sys, err := New(A, B, C, D, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys.LFT = &LFTDelay{
+		Tau: []float64{3, 5},
+		B2:  mat.NewDense(3, 2, []float64{0, 0.3, 0, -0.2, 0, 0.4}),
+		C2:  mat.NewDense(2, 3, []float64{0, 0, 0, 0.5, 0.1, -0.3}),
+		D12: mat.NewDense(2, 2, []float64{0.8, -0.3, 0.2, 0.5}),
+		D21: mat.NewDense(2, 2, []float64{0.4, -0.6, 0.3, 0.2}),
+		D22: mat.NewDense(2, 2, []float64{a, 0, 0.35, 0.3}),
+	}
+	plant, err := New(A,
+		mat.NewDense(3, 4, []float64{1, 0.3, 0, 0.3, -0.4, 0.8, 0, -0.2, 0.2, -0.5, 0, 0.4}),
+		mat.NewDense(4, 3, []float64{0.7, -0.2, 0.4, 0.1, 0.9, -0.3, 0, 0, 0, 0.5, 0.1, -0.3}),
+		mat.NewDense(4, 4, []float64{0.6, 0.1, 0.8, -0.3, -0.2, 0.9, 0.2, 0.5, 0.4, -0.6, a, 0, 0.3, 0.2, 0.35, 0.3}), dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var omega []float64
+	for _, th := range []float64{1e-7, 2 * math.Pi / 3, 4 * math.Pi / 3, 3} {
+		for k := -3; k <= 3; k++ {
+			omega = append(omega, th/dt*(1+float64(k)*0x1p-52))
+		}
+	}
+	resps := map[string]*FreqResponseMatrix{}
+	if resps["FreqResponse"], err = sys.FreqResponse(omega); err != nil {
+		t.Fatal(err)
+	}
+	if resps["FreqResponsePointwise"], err = sys.FreqResponsePointwise(omega); err != nil {
+		t.Fatal(err)
+	}
+	for k, w := range omega {
+		z := frExactPoint(w, dt)
+		h := frExactResponseBig(plant, z)
+		d := []frBig{frBigC(1), frBigC(1)}
+		for j, tau := range []int{3, 5} {
+			for range tau {
+				d[j] = d[j].quo(z)
+			}
+		}
+		// I − H22·Δ is lower triangular: x = (I − H22Δ)⁻¹H21 by substitution.
+		l00 := frBigC(1).sub(h[2*4+2].mul(d[0]))
+		l10 := frBigC(0).sub(h[3*4+2].mul(d[0]))
+		l11 := frBigC(1).sub(h[3*4+3].mul(d[1]))
+		var norm, diff float64
+		for j := range 2 {
+			x0 := h[2*4+j].quo(l00)
+			x1 := h[3*4+j].sub(l10.mul(x0)).quo(l11)
+			for i := range 2 {
+				g := h[i*4+j].add(h[i*4+2].mul(d[0]).mul(x0)).add(h[i*4+3].mul(d[1]).mul(x1)).complex()
+				norm = max(norm, cmplx.Abs(g))
+				for _, resp := range resps {
+					diff = max(diff, cmplx.Abs(resp.Data[k*4+i*2+j]-g))
+				}
+			}
+		}
+		if e := diff / norm; !(e <= 1e-13) {
+			t.Errorf("ω=%v (ωT=%.4g): max entry error %.3g relative to max |G|", w, w*dt, e)
+		}
 	}
 }
