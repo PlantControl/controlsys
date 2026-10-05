@@ -268,13 +268,13 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	if nb != na {
 		return nil, ErrDimensionMismatch
 	}
+	if na == 0 {
+		return nil, fmt.Errorf("Acker: system has no states: %w", ErrDimensionMismatch)
+	}
 	if m != 1 {
 		return nil, ErrNotSISO
 	}
 	n := na
-	if n == 0 {
-		return mat.NewDense(1, 0, nil), nil
-	}
 	if len(poles) != n {
 		return nil, ErrPoleCount
 	}
@@ -372,7 +372,7 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	}
 	n := na
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("Place: system has no states: %w", ErrDimensionMismatch)
 	}
 	if len(poles) != n {
 		return nil, ErrPoleCount

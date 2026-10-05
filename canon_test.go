@@ -153,15 +153,10 @@ func TestCanonModal_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	res, err := Canon(sys, CanonModal)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	dc, _ := res.Sys.DCGain()
-	if dc.At(0, 0) != 5 {
-		t.Errorf("dcgain = %g, want 5", dc.At(0, 0))
+	for _, form := range []CanonForm{CanonModal, CanonCompanion} {
+		if _, err := Canon(sys, form); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("%s: err = %v, want ErrDimensionMismatch", form, err)
+		}
 	}
 }
 
@@ -191,19 +186,76 @@ func TestCanonCompanion_SISO(t *testing.T) {
 	}
 }
 
-func TestCanonCompanion_MIMOError(t *testing.T) {
-	sys, err := New(
-		mat.NewDense(2, 2, []float64{0, 1, -6, -5}),
-		mat.NewDense(2, 2, []float64{0, 1, 1, 0}),
-		mat.NewDense(1, 2, []float64{1, 0}),
-		mat.NewDense(1, 2, []float64{0, 0}), 0)
+func TestCanonCompanion_MIMO(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{-1, 2, 0, 0.5, -3, 1, 0, 1, -2})
+	B := mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, 1})
+	C := mat.NewDense(2, 3, []float64{1, 0, 1, 0, 1, 0})
+	D := mat.NewDense(2, 2, []float64{0.5, 0, 0, 0})
+	sys, err := New(A, B, C, D, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	res, err := Canon(sys, CanonCompanion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkCanonT(t, sys, res, 1e-9)
+	// det(sI-A) = s^3 + 6s^2 + 9s + 3
+	want := mat.NewDense(3, 3, []float64{0, 0, -3, 1, 0, -9, 0, 1, -6})
+	if !mat.EqualApprox(res.Sys.A, want, 1e-9) {
+		t.Errorf("A = %v, want %v", mat.Formatted(res.Sys.A), mat.Formatted(want))
+	}
+	if got := mat.Col(nil, 0, res.Sys.B); math.Abs(got[0]-1) > 1e-12 || math.Abs(got[1]) > 1e-12 || math.Abs(got[2]) > 1e-12 {
+		t.Errorf("B(:,1) = %v, want e1", got)
+	}
 
-	_, err = Canon(sys, CanonCompanion)
-	if err == nil {
-		t.Error("expected error for MIMO system")
+	unctrl, err := New(mat.NewDense(2, 2, []float64{-1, 0, 0, -2}), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Canon(unctrl, CanonCompanion); !errors.Is(err, ErrSingularTransform) {
+		t.Errorf("uncontrollable: err = %v, want ErrSingularTransform", err)
+	}
+}
+
+func TestCanonDefaultIsModal(t *testing.T) {
+	sys, err := New(mat.NewDense(2, 2, []float64{-1, 2, 0, -3}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Canon(sys, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkCanonT(t, sys, res, 1e-9)
+	if _, err := Canon(sys, "jordan"); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("unknown form: err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// checkCanonT verifies the MATLAB convention xc = T·x: Ac = T·A·T⁻¹,
+// Bc = T·B, Cc = C·T⁻¹.
+func checkCanonT(t *testing.T, sys *System, res *CanonResult, tol float64) {
+	t.Helper()
+	n, m, p := sys.Dims()
+	var lu mat.LU
+	lu.Factorize(res.T)
+	TA := mat.NewDense(n, n, nil)
+	TA.Mul(res.T, sys.A)
+	var ac mat.Dense
+	ac.Solve(res.T.T(), TA.T())
+	if !mat.EqualApprox(ac.T(), res.Sys.A, tol) {
+		t.Errorf("T·A·T⁻¹ = %v, want %v", mat.Formatted(ac.T()), mat.Formatted(res.Sys.A))
+	}
+	bc := mat.NewDense(n, m, nil)
+	bc.Mul(res.T, sys.B)
+	if !mat.EqualApprox(bc, res.Sys.B, tol) {
+		t.Errorf("T·B = %v, want %v", mat.Formatted(bc), mat.Formatted(res.Sys.B))
+	}
+	var cc mat.Dense
+	cc.Solve(res.T.T(), sys.C.T())
+	if r, c := cc.Dims(); r != n || c != p || !mat.EqualApprox(cc.T(), res.Sys.C, tol) {
+		t.Errorf("C·T⁻¹ = %v, want %v", mat.Formatted(cc.T()), mat.Formatted(res.Sys.C))
 	}
 }
 
@@ -281,6 +333,29 @@ func TestCanonRejectsInvalidSystem(t *testing.T) {
 	for _, form := range []CanonForm{CanonModal, CanonCompanion} {
 		if _, err := Canon(sys, form); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s Inf: err = %v, want ErrInvalidArgument", form, err)
+		}
+	}
+}
+
+func TestCanonModalTransformConvention(t *testing.T) {
+	for name, A := range map[string]*mat.Dense{
+		"eig":   mat.NewDense(3, 3, []float64{-1, 4, 0, -2, -1, 1, 0, 0.5, -3}),
+		"schur": mat.NewDense(3, 3, []float64{-1, 1, 0, 0, -1, 1, 0, 0, -1}),
+	} {
+		for _, dt := range []float64{0, 0.1} {
+			if dt > 0 {
+				A = mat.DenseCopyOf(A)
+				A.Scale(0.2, A)
+			}
+			sys, err := New(A, mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, 1}), mat.NewDense(2, 3, []float64{1, 0, 1, 0, 1, 0}), mat.NewDense(2, 2, []float64{0.5, 0, 0, 0}), dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := Canon(sys, CanonModal)
+			if err != nil {
+				t.Fatalf("%s dt=%g: %v", name, dt, err)
+			}
+			checkCanonT(t, sys, res, 1e-8)
 		}
 	}
 }

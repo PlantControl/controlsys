@@ -41,7 +41,7 @@ func TestBalreal_2x2_NonSymA(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	checkTinvT(t, br.T, br.Tinv, 2, 1e-8)
+	checkTinvT(t, br.TR, br.TL, 2, 1e-8)
 	checkEigsPreserved(t, sys, br.Sys, 1e-8)
 	checkFreqPreserved(t, sys, br.Sys, 1e-8)
 	checkGramiansEqual(t, br.Sys, br.HSV, 1e-6)
@@ -58,7 +58,7 @@ func TestBalreal_Discrete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkTinvT(t, br.T, br.Tinv, 2, 1e-8)
+	checkTinvT(t, br.TR, br.TL, 2, 1e-8)
 	checkEigsPreserved(t, sys, br.Sys, 1e-8)
 }
 
@@ -77,20 +77,15 @@ func TestBalreal_Unstable(t *testing.T) {
 
 func TestBalreal_Empty(t *testing.T) {
 	sys, _ := New(nil, nil, nil, mat.NewDense(1, 1, []float64{1}), 0)
-	br, err := Balreal(sys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, _, _ := br.Sys.Dims()
-	if n != 0 {
-		t.Errorf("n = %d, want 0", n)
+	if _, err := Balreal(sys); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("err = %v, want ErrDimensionMismatch", err)
 	}
 }
 
 func TestBalred_Truncation(t *testing.T) {
 	sys := make4thOrderSystem()
 
-	red, hsv, err := Balred(sys, 2, Truncate)
+	red, hsv, err := Balred(sys, 2, BalredOptions{StateProjection: Truncate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +103,7 @@ func TestBalred_Truncation(t *testing.T) {
 func TestBalred_SingularPerturbation(t *testing.T) {
 	sys := make4thOrderSystem()
 
-	red, _, err := Balred(sys, 2, SingularPerturbation)
+	red, _, err := Balred(sys, 2, BalredOptions{StateProjection: MatchDC})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,28 +117,50 @@ func TestBalred_SingularPerturbation(t *testing.T) {
 	assertMatNearT(t, "DCGain", redDC, origDC, 1e-6)
 }
 
-func TestBalred_AutoOrder(t *testing.T) {
+func TestBalred_OrderRange(t *testing.T) {
 	sys := make4thOrderSystem()
-
-	red, hsv, err := Balred(sys, 0, Truncate)
+	n, _, _ := sys.Dims()
+	dc, err := sys.DCGain()
 	if err != nil {
 		t.Fatal(err)
 	}
-	nr, _, _ := red.Dims()
-	if nr < 1 || nr > 3 {
-		t.Errorf("auto order = %d, want 1-3", nr)
+	red, _, err := Balred(sys, 0, BalredOptions{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	_ = hsv
+	if nr, _, _ := red.Dims(); nr != 0 {
+		t.Fatalf("order 0 MatchDC: n = %d", nr)
+	}
+	if !mat.EqualApprox(red.D, dc, 1e-10) {
+		t.Errorf("order 0 MatchDC gain = %v, want DC gain %v", mat.Formatted(red.D), mat.Formatted(dc))
+	}
+	red, _, err = Balred(sys, 0, BalredOptions{StateProjection: Truncate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mat.EqualApprox(red.D, sys.D, 0) {
+		t.Errorf("order 0 Truncate gain = %v, want D", mat.Formatted(red.D))
+	}
+	for _, order := range []int{-1, n + 1} {
+		if _, hsv, err := Balred(sys, order, BalredOptions{}); !errors.Is(err, ErrInvalidOrder) || hsv != nil {
+			t.Errorf("order %d: hsv=%v err=%v, want nil, ErrInvalidOrder", order, hsv, err)
+		}
+	}
+	full, hsv, err := Balred(sys, n, BalredOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGramiansEqual(t, full, hsv, 1e-6)
 }
 
 func TestBalred_InvalidOrder(t *testing.T) {
 	sys := make4thOrderSystem()
 
-	_, _, err := Balred(sys, 5, Truncate)
+	_, _, err := Balred(sys, 5, BalredOptions{StateProjection: Truncate})
 	if !errors.Is(err, ErrInvalidOrder) {
 		t.Errorf("got %v, want ErrInvalidOrder", err)
 	}
-	_, _, err = Balred(sys, -1, Truncate)
+	_, _, err = Balred(sys, -1, BalredOptions{StateProjection: Truncate})
 	if !errors.Is(err, ErrInvalidOrder) {
 		t.Errorf("got %v, want ErrInvalidOrder", err)
 	}
@@ -181,7 +198,7 @@ func TestModred_SingularPerturbation(t *testing.T) {
 		mat.NewDense(1, 3, []float64{1, 1, 0}),
 		mat.NewDense(1, 1, []float64{0}), 0)
 
-	red, err := Modred(sys, []int{2}, SingularPerturbation)
+	red, err := Modred(sys, []int{2}, MatchDC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +403,7 @@ func makePythonControlSystem() *System {
 func TestBalred_PythonControl_Truncate(t *testing.T) {
 	sys := makePythonControlSystem()
 
-	red, hsv, err := Balred(sys, 2, Truncate)
+	red, hsv, err := Balred(sys, 2, BalredOptions{StateProjection: Truncate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +448,7 @@ func TestBalred_PythonControl_Truncate(t *testing.T) {
 func TestBalred_PythonControl_MatchDC(t *testing.T) {
 	sys := makePythonControlSystem()
 
-	red, _, err := Balred(sys, 2, SingularPerturbation)
+	red, _, err := Balred(sys, 2, BalredOptions{StateProjection: MatchDC})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,14 +524,14 @@ func TestSingularPerturbation_DCGainMatches(t *testing.T) {
 	for _, dt := range []float64{0, 0.1} {
 		sys := spReductionPlant(t, dt)
 		want := dcGainOracle(t, sys)
-		red, err := Modred(sys, []int{2}, SingularPerturbation)
+		red, err := Modred(sys, []int{2}, MatchDC)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got := dcGainOracle(t, red); !matEqual(got, want, 1e-12) {
 			t.Errorf("dt=%v Modred SP DC gain =\n%v\nwant\n%v", dt, mat.Formatted(got), mat.Formatted(want))
 		}
-		bred, _, err := Balred(sys, 2, SingularPerturbation)
+		bred, _, err := Balred(sys, 2, BalredOptions{StateProjection: MatchDC})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -527,8 +544,8 @@ func TestSingularPerturbation_DCGainMatches(t *testing.T) {
 func TestBalred_FullOrderIsNoOp(t *testing.T) {
 	for _, dt := range []float64{0, 0.1} {
 		sys := spReductionPlant(t, dt)
-		for _, method := range []BalredMethod{Truncate, SingularPerturbation} {
-			red, hsv, err := Balred(sys, 3, method)
+		for _, method := range []StateProjection{Truncate, MatchDC} {
+			red, hsv, err := Balred(sys, 3, BalredOptions{StateProjection: method})
 			if err != nil {
 				t.Fatalf("dt=%v: %v", dt, err)
 			}
@@ -557,16 +574,91 @@ func TestBalredModredRejectInvalidArgs(t *testing.T) {
 	nanSys := sys.Copy()
 	nanSys.A.Set(0, 1, math.NaN())
 	for name, call := range map[string]func() error{
-		"Balred unknown method": func() error { _, _, err := Balred(sys, 1, BalredMethod(42)); return err },
-		"Modred unknown method": func() error { _, err := Modred(sys, []int{1}, BalredMethod(-1)); return err },
+		"Balred unknown method": func() error {
+			_, _, err := Balred(sys, 1, BalredOptions{StateProjection: StateProjection(42)})
+			return err
+		},
+		"Modred unknown method": func() error { _, err := Modred(sys, []int{1}, StateProjection(-1)); return err },
 		"Balreal nil":           func() error { _, err := Balreal(nil); return err },
-		"Balred nil":            func() error { _, _, err := Balred(nil, 1, Truncate); return err },
+		"Balred nil":            func() error { _, _, err := Balred(nil, 1, BalredOptions{StateProjection: Truncate}); return err },
 		"Modred nil":            func() error { _, err := Modred(nil, []int{1}, Truncate); return err },
 		"Balreal NaN":           func() error { _, err := Balreal(nanSys); return err },
-		"Balred NaN":            func() error { _, _, err := Balred(nanSys, 1, Truncate); return err },
+		"Balred NaN":            func() error { _, _, err := Balred(nanSys, 1, BalredOptions{StateProjection: Truncate}); return err },
 	} {
 		if err := call(); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}
+
+func TestBalrealTransformConvention(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(3, 3, []float64{-1, 2, 0, -0.5, -3, 1, 0, 0.4, -2}),
+		mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, 1}),
+		mat.NewDense(2, 3, []float64{1, 0, 1, 0, 1, 0}),
+		mat.NewDense(2, 2, []float64{0.5, 0, 0, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	br, err := Balreal(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tla, ab, bb, cb, eye mat.Dense
+	tla.Mul(br.TL, sys.A)
+	ab.Mul(&tla, br.TR)
+	bb.Mul(br.TL, sys.B)
+	cb.Mul(sys.C, br.TR)
+	eye.Mul(br.TL, br.TR)
+	if !mat.EqualApprox(&ab, br.Sys.A, 1e-9) || !mat.EqualApprox(&bb, br.Sys.B, 1e-9) || !mat.EqualApprox(&cb, br.Sys.C, 1e-9) {
+		t.Errorf("Sys != (TL·A·TR, TL·B, C·TR)")
+	}
+	if !mat.EqualApprox(&eye, eyeDense(3), 1e-9) {
+		t.Errorf("TL·TR = %v, want I", mat.Formatted(&eye))
+	}
+	tl := mat.DenseCopyOf(br.TL)
+	tr := mat.DenseCopyOf(br.TR)
+	_ = append(br.HSV, make([]float64, 64)...)
+	if !mat.Equal(tl, br.TL) || !mat.Equal(tr, br.TR) {
+		t.Error("appending to HSV overwrote TL/TR")
+	}
+	if cap(br.HSV) != len(br.HSV) {
+		t.Errorf("HSV cap %d exceeds len %d", cap(br.HSV), len(br.HSV))
+	}
+}
+
+func TestModredEliminateAll(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		A := mat.NewDense(2, 2, []float64{-1, 2, 0, -3})
+		if dt > 0 {
+			A = mat.NewDense(2, 2, []float64{0.5, 0.2, 0, 0.3})
+		}
+		sys, err := New(A, mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0.5}), mat.NewDense(1, 1, []float64{0.25}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dc, err := sys.DCGain()
+		if err != nil {
+			t.Fatal(err)
+		}
+		red, err := Modred(sys, []int{0, 1}, MatchDC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !mat.EqualApprox(red.D, dc, 1e-12) {
+			t.Errorf("dt=%g MatchDC gain = %v, want %v", dt, mat.Formatted(red.D), mat.Formatted(dc))
+		}
+		red, err = Modred(sys, []int{1, 0}, Truncate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if red.D.At(0, 0) != 0.25 {
+			t.Errorf("dt=%g Truncate gain = %g, want D", dt, red.D.At(0, 0))
+		}
+		for _, elim := range [][]int{{2}, {-1}, {0, 0}} {
+			if _, err := Modred(sys, elim, MatchDC); !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("elim %v: err = %v, want ErrInvalidArgument", elim, err)
+			}
 		}
 	}
 }

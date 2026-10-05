@@ -1139,7 +1139,7 @@ func BenchmarkBalred(b *testing.B) {
 	sys := benchSys(10, 2, 3)
 	b.ResetTimer()
 	for b.Loop() {
-		Balred(sys, 5, Truncate)
+		Balred(sys, 5, BalredOptions{StateProjection: Truncate})
 	}
 }
 

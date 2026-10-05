@@ -238,7 +238,7 @@ func TestBalred_MATLABValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	red, _, err := Balred(sys, 2, Truncate)
+	red, _, err := Balred(sys, 2, BalredOptions{StateProjection: Truncate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestBalred_MarginallyStable(t *testing.T) {
 		}
 	}()
 
-	_, _, err = Balred(sys, 1, Truncate)
+	_, _, err = Balred(sys, 1, BalredOptions{StateProjection: Truncate})
 	if err != nil {
 		return
 	}

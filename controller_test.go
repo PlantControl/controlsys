@@ -703,17 +703,6 @@ func TestPlace_ConjugatePairError(t *testing.T) {
 	}
 }
 
-func TestPlace_Empty(t *testing.T) {
-	F, err := Place(&mat.Dense{}, &mat.Dense{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := F.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %dx%d", r, c)
-	}
-}
-
 func TestPlace_AckerConsistency(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{0, 1, 0, 0})
 	B := mat.NewDense(2, 1, []float64{0, 1})
@@ -1572,5 +1561,14 @@ func TestPlaceAckerLqrdRejectInvalidArgs(t *testing.T) {
 		if err := call(); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
 		}
+	}
+}
+
+func TestPlaceAckerNoStates(t *testing.T) {
+	if _, err := Place(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Place: err = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := Acker(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Acker: err = %v, want ErrDimensionMismatch", err)
 	}
 }
