@@ -8,18 +8,23 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// Ctrb returns the n×(n·m) controllability matrix [B, AB, A²B, …, Aⁿ⁻¹B].
+// Ctrb returns the n×(n·m) controllability matrix [B, AB, A²B, …, Aⁿ⁻¹B], as
+// MATLAB ctrb(A,B). Nil A or B returns ErrInvalidArgument; A with no states
+// returns ErrDimensionMismatch.
 func Ctrb(A, B *mat.Dense) (*mat.Dense, error) {
+	if A == nil || B == nil {
+		return nil, fmt.Errorf("Ctrb: A and B are required: %w", ErrInvalidArgument)
+	}
 	n, nc := A.Dims()
 	if n != nc {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Ctrb: A is %d×%d, must be square: %w", n, nc, ErrDimensionMismatch)
 	}
 	br, m := B.Dims()
 	if br != n {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Ctrb: B has %d rows, want %d: %w", br, n, ErrDimensionMismatch)
 	}
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("Ctrb: system has no states: %w", ErrDimensionMismatch)
 	}
 
 	cols := n * m
@@ -38,18 +43,23 @@ func Ctrb(A, B *mat.Dense) (*mat.Dense, error) {
 	return mat.NewDense(n, cols, data), nil
 }
 
-// Obsv returns the (n·p)×n observability matrix [C; CA; CA²; …; CAⁿ⁻¹].
+// Obsv returns the (n·p)×n observability matrix [C; CA; CA²; …; CAⁿ⁻¹], as
+// MATLAB obsv(A,C). Nil A or C returns ErrInvalidArgument; A with no states
+// returns ErrDimensionMismatch.
 func Obsv(A, C *mat.Dense) (*mat.Dense, error) {
+	if A == nil || C == nil {
+		return nil, fmt.Errorf("Obsv: A and C are required: %w", ErrInvalidArgument)
+	}
 	n, nc := A.Dims()
 	if n != nc {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Obsv: A is %d×%d, must be square: %w", n, nc, ErrDimensionMismatch)
 	}
 	p, cc := C.Dims()
 	if cc != n {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Obsv: C has %d columns, want %d: %w", cc, n, ErrDimensionMismatch)
 	}
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("Obsv: system has no states: %w", ErrDimensionMismatch)
 	}
 
 	rows := n * p

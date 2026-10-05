@@ -117,7 +117,7 @@ func autoTimeScales(sys *System) (tFinal, maxWn float64, err error) {
 
 func responseDelaySpan(sys *System) float64 {
 	span := 0.0
-	if total := sys.TotalDelay(); total != nil {
+	if total := newDelayTopology(sys).totalExternal(true); total != nil {
 		span = mat.Max(total)
 	}
 	if sys.LFT != nil {

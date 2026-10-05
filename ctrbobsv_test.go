@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -57,25 +58,21 @@ func TestCtrb_3x3(t *testing.T) {
 
 func TestCtrb_DimMismatch(t *testing.T) {
 	_, err := Ctrb(mat.NewDense(2, 3, nil), mat.NewDense(2, 1, nil))
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("non-square A: got %v, want ErrDimensionMismatch", err)
 	}
 	_, err = Ctrb(mat.NewDense(2, 2, nil), mat.NewDense(3, 1, nil))
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("B rows mismatch: got %v, want ErrDimensionMismatch", err)
 	}
 }
 
 func TestCtrb_Empty(t *testing.T) {
-	A := &mat.Dense{}
-	B := &mat.Dense{}
-	got, err := Ctrb(A, B)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := Ctrb(&mat.Dense{}, &mat.Dense{}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("no states: err = %v, want ErrDimensionMismatch", err)
 	}
-	r, c := got.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("dims = (%d,%d), want (0,0)", r, c)
+	if _, err := Ctrb(nil, mat.NewDense(1, 1, nil)); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil A: err = %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -110,23 +107,21 @@ func TestObsv_MIMO(t *testing.T) {
 
 func TestObsv_DimMismatch(t *testing.T) {
 	_, err := Obsv(mat.NewDense(2, 3, nil), mat.NewDense(1, 2, nil))
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("non-square A: got %v, want ErrDimensionMismatch", err)
 	}
 	_, err = Obsv(mat.NewDense(2, 2, nil), mat.NewDense(1, 3, nil))
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("C cols mismatch: got %v, want ErrDimensionMismatch", err)
 	}
 }
 
 func TestObsv_Empty(t *testing.T) {
-	got, err := Obsv(&mat.Dense{}, &mat.Dense{})
-	if err != nil {
-		t.Fatal(err)
+	if _, err := Obsv(&mat.Dense{}, &mat.Dense{}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("no states: err = %v, want ErrDimensionMismatch", err)
 	}
-	r, c := got.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("dims = (%d,%d), want (0,0)", r, c)
+	if _, err := Obsv(nil, mat.NewDense(1, 1, nil)); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil A: err = %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -158,7 +153,7 @@ func TestCtrbF_PartialRank(t *testing.T) {
 
 func TestCtrbF_DimMismatch(t *testing.T) {
 	_, err := CtrbF(mat.NewDense(2, 3, nil), mat.NewDense(2, 1, nil), nil)
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("got %v, want ErrDimensionMismatch", err)
 	}
 }
@@ -209,7 +204,7 @@ func TestObsvF_Duality(t *testing.T) {
 
 func TestObsvF_DimMismatch(t *testing.T) {
 	_, err := ObsvF(mat.NewDense(2, 3, nil), nil, mat.NewDense(1, 2, nil))
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("got %v, want ErrDimensionMismatch", err)
 	}
 }
@@ -399,11 +394,11 @@ func TestIsDetectable_Undetectable(t *testing.T) {
 
 func TestIsStabilizable_DimError(t *testing.T) {
 	_, err := IsStabilizable(mat.NewDense(2, 3, nil), mat.NewDense(2, 1, nil), true)
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("non-square A: got %v, want ErrDimensionMismatch", err)
 	}
 	_, err = IsStabilizable(mat.NewDense(2, 2, nil), mat.NewDense(3, 1, nil), true)
-	if err != ErrDimensionMismatch {
+	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("B rows mismatch: got %v, want ErrDimensionMismatch", err)
 	}
 }

@@ -872,7 +872,7 @@ func emptyIOOps() []emptyIOOp {
 		{"MinimalLFT", func(s *System) (any, error) { return s.MinimalLFT() }},
 		{"ZeroDelayApprox", func(s *System) (any, error) { return s.ZeroDelayApprox() }},
 		{"PullDelaysToLFT", func(s *System) (any, error) { return s.PullDelaysToLFT() }},
-		{"TotalDelay", func(s *System) (any, error) { return s.TotalDelay(), nil }},
+		{"TotalDelay", func(s *System) (any, error) { return s.TotalDelay() }},
 		{"Pidtune", func(s *System) (any, error) { return Pidtune(s, PidtunePI) }},
 		{"LFT", func(s *System) (any, error) { return LFT(s, s.Copy(), 0, 0) }},
 		{"ModelArray", func(s *System) (any, error) { return NewModelArray([]int{1}, []*System{s}) }},
