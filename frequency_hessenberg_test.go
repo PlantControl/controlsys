@@ -199,3 +199,59 @@ func TestFreqResponseRejectsInvalidSystem(t *testing.T) {
 		t.Errorf("nil: FreqResponse err = %v", err)
 	}
 }
+
+// A descriptor mode at 1-10⁻⁶ (or -10⁻⁶) leaves zÊ-Â entries far smaller
+// than zÊ near the pole. Forming them as round(round(zÊ)-Â) loses
+// ε|zÊ|/|zÊ-Â| ≈ 10⁻¹⁰ of the dominant response; a fused multiply-add keeps
+// one rounding.
+func TestBalancedDenseDescriptorNearPole(t *testing.T) {
+	for _, dt := range []float64{0, 0.05} {
+		slow := 1e-6
+		pole := -slow
+		if dt > 0 {
+			pole = 1 - slow
+		}
+		a0 := mat.NewDense(3, 3, []float64{
+			pole, 0, 0,
+			0.3, 0.5, -0.2,
+			-0.7, 0.1, 0.4,
+		})
+		if dt == 0 {
+			a0.Set(1, 1, -0.5)
+			a0.Set(2, 2, -0.4)
+		}
+		E := mat.NewDense(3, 3, []float64{
+			0.7, 0, 0,
+			0.11, 1.3, -0.23,
+			0.05, 0.17, 0.9,
+		})
+		b0 := mat.NewDense(3, 2, []float64{1, -0.4, 0.6, 0.8, -0.3, 1.1})
+		var A, B mat.Dense
+		A.Mul(E, a0)
+		B.Mul(E, b0)
+		C := mat.NewDense(2, 3, []float64{1.2, -0.5, 0.3, 0.4, 0.9, -1})
+		D := mat.NewDense(2, 2, []float64{0.1, 0, -0.2, 0.3})
+		sys, err := NewDescriptor(&A, &B, C, D, E, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		td := newTimeDomain(dt)
+		bd := newBalancedDense(sys, 3, 2, 2)
+		got := make([]complex128, 4)
+		for _, w := range []float64{1e-6, 2e-5, 1e-2} {
+			s := td.frequencyVariable(w)
+			if err := bd.evalInto(s, got); err != nil {
+				t.Fatal(err)
+			}
+			want := oracleResponse(t, sys, s, 3, 2, 2)
+			norm, diff := 0.0, 0.0
+			for i, v := range want {
+				norm = max(norm, cmplx.Abs(v))
+				diff = max(diff, cmplx.Abs(got[i]-v))
+			}
+			if e := diff / norm; e > 1e-12 {
+				t.Errorf("dt=%g ω=%g: relative error %g", dt, w, e)
+			}
+		}
+	}
+}

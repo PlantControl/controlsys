@@ -113,7 +113,9 @@ func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
 		maxE := 0.0
 		for i, v := range bd.a {
 			e := bd.e[i]
-			a[i] = s*complex(e, 0) - complex(v, 0)
+			// Fused: near a pole zÊ-Â is far smaller than zÊ, and a
+			// rounded product would cost ε|zÊ|/|zÊ-Â| relative accuracy.
+			a[i] = complex(math.FMA(real(s), e, -v), imag(s)*e)
 			maxAbs = max(maxAbs, math.Abs(v))
 			maxE = max(maxE, math.Abs(e))
 		}
