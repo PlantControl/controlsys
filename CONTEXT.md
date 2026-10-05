@@ -392,6 +392,10 @@ _Avoid_: exact delay
 An interconnection form where a main model is closed around a lower block through selected internal inputs and outputs.
 _Avoid_: feedback interconnection when the partitioned block structure matters
 
+**Star product**:
+The general linear fractional transformation of MATLAB lft(sys1,sys2,nu,ny): the first nu outputs of sys2 drive the last nu inputs of sys1, the last ny outputs of sys1 drive the first ny inputs of sys2, and both models may keep external channels. nu and ny count the **feedback channels**, never the external ones. The lower LFT (sys2 fully in the loop) and upper LFT (sys1 fully in the loop) are special cases.
+_Avoid_: Redheffer product without saying which channels close
+
 **Uncertainty block**:
 The lower block in a linear fractional transformation, representing dynamics or variation connected to the main model.
 _Avoid_: plant or controller unless the block has that design role

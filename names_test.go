@@ -322,7 +322,7 @@ func TestLFT_Names(t *testing.T) {
 
 	Delta := makeSISO(-5, 1, 1, 0)
 
-	result, err := LFT(M, Delta, 1, 1)
+	result, err := LFT(M, Delta)
 	if err != nil {
 		t.Fatal(err)
 	}

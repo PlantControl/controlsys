@@ -1399,7 +1399,7 @@ func hinfMixedSensitivityLoop(t testing.TB, order int, seed int64) *System {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cl, err := LFT(P, res.K, 2, 4)
+	cl, err := LFT(P, res.K, LFTFeedback{Nu: 2, Ny: 2})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,72 +6,157 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// LFT closes the lower loop of M with Delta: M's first nu inputs and first
-// ny outputs stay external, and its remaining inputs and outputs connect to
-// Delta's outputs and inputs. Unlike MATLAB lft(sys1,sys2,nu,ny), whose nu
-// and ny count the feedback channels, nu and ny here count the external
-// channels. A nil Delta returns the upper block (the first ny outputs
-// against the first nu inputs). Delays are kept through an internal-delay
-// realization. Negative nu or ny returns ErrInvalidArgument, channel counts
-// that do not fit ErrDimensionMismatch and an ill-posed loop
-// ErrAlgebraicLoop.
+// LFTFeedback gives the feedback channel counts of MATLAB
+// lft(sys1,sys2,nu,ny).
+type LFTFeedback struct {
+	// Nu counts the first outputs of sys2 that drive the last inputs of sys1.
+	Nu int
+	// Ny counts the last outputs of sys1 that drive the first inputs of sys2.
+	Ny int
+}
+
+// LFT forms the Redheffer star product of sys1 and sys2, as MATLAB
+// lft(sys1,sys2,nu,ny) with fb = LFTFeedback{Nu: nu, Ny: ny}: the first Nu
+// outputs of sys2 drive the last Nu inputs of sys1, and the last Ny outputs
+// of sys1 drive the first Ny inputs of sys2. The result maps [w1; w2] to
+// [z1; z2], where w1, z1 are the remaining inputs and outputs of sys1 and
+// w2, z2 those of sys2; its states and StateName are sys1's followed by
+// sys2's.
+//
+// Without fb, LFT follows MATLAB lft(sys1,sys2): when sys2 has fewer inputs
+// and fewer outputs than sys1 it is the lower LFT (Nu = sys2 outputs, Ny =
+// sys2 inputs); when sys1 has fewer inputs and fewer outputs than sys2 it is
+// the upper LFT (Nu = sys1 inputs, Ny = sys1 outputs); otherwise
+// ErrDimensionMismatch.
+//
+// Delays are kept through an internal-delay realization. A nil model, a
+// negative count or more than one fb returns ErrInvalidArgument, counts that
+// do not fit either model ErrDimensionMismatch, mixed domains
+// ErrDomainMismatch and an ill-posed loop ErrAlgebraicLoop.
 // See https://www.mathworks.com/help/control/ref/inputoutputmodel.lft.html.
-func LFT(M, Delta *System, nu, ny int) (*System, error) {
-	if err := requireSystem("LFT", M); err != nil {
+func LFT(sys1, sys2 *System, fb ...LFTFeedback) (*System, error) {
+	if err := requireSystems("LFT", sys1, sys2); err != nil {
 		return nil, err
 	}
-	_, mM, pM := M.Dims()
+	n1, m1, p1 := sys1.Dims()
+	n2, m2, p2 := sys2.Dims()
+	var nu, ny int
+	switch {
+	case len(fb) > 1:
+		return nil, fmt.Errorf("LFT: %d feedback specs, want at most 1: %w", len(fb), ErrInvalidArgument)
+	case len(fb) == 1:
+		nu, ny = fb[0].Nu, fb[0].Ny
+	case m2 < m1 && p2 < p1:
+		nu, ny = p2, m2
+	case m1 < m2 && p1 < p2:
+		nu, ny = m1, p1
+	default:
+		return nil, fmt.Errorf("LFT: sys1 is %dx%d and sys2 is %dx%d, want one strictly smaller in both inputs and outputs: %w", p1, m1, p2, m2, ErrDimensionMismatch)
+	}
 	if nu < 0 || ny < 0 {
 		return nil, fmt.Errorf("LFT: nu=%d, ny=%d, want non-negative: %w", nu, ny, ErrInvalidArgument)
 	}
-	if nu > mM {
-		return nil, fmt.Errorf("LFT: nu=%d > M inputs=%d: %w", nu, mM, ErrDimensionMismatch)
+	if nu > m1 || nu > p2 {
+		return nil, fmt.Errorf("LFT: nu=%d exceeds sys1 inputs %d or sys2 outputs %d: %w", nu, m1, p2, ErrDimensionMismatch)
 	}
-	if ny > pM {
-		return nil, fmt.Errorf("LFT: ny=%d > M outputs=%d: %w", ny, pM, ErrDimensionMismatch)
+	if ny > p1 || ny > m2 {
+		return nil, fmt.Errorf("LFT: ny=%d exceeds sys1 outputs %d or sys2 inputs %d: %w", ny, p1, m2, ErrDimensionMismatch)
 	}
-
-	if Delta != nil {
-		_, mD, pD := Delta.Dims()
-		if pM-ny != mD {
-			return nil, fmt.Errorf("LFT: M lower outputs %d != Delta inputs %d: %w", pM-ny, mD, ErrDimensionMismatch)
-		}
-		if mM-nu != pD {
-			return nil, fmt.Errorf("LFT: M lower inputs %d != Delta outputs %d: %w", mM-nu, pD, ErrDimensionMismatch)
-		}
-		if err := domainMatch(M, Delta); err != nil {
-			return nil, fmt.Errorf("LFT: %w", err)
-		}
+	if err := domainMatch(sys1, sys2); err != nil {
+		return nil, fmt.Errorf("LFT: %w", err)
 	}
 
-	res, err := lftClose(M, Delta, nu, ny)
+	var res *System
+	var err error
+	if m2 == ny && p2 == nu {
+		res, err = lftCloseExternal(sys1, sys2, m1-nu, p1-ny)
+	} else {
+		res, err = lftStar(sys1, sys2, nu, ny)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("LFT: %w", err)
+	}
+	if n, _, _ := res.Dims(); n == n1+n2 {
+		res.StateName = concatStringSlices([][]string{sys1.StateName, sys2.StateName}, []int{n1, n2})
 	}
 	return res, nil
 }
 
-func lftClose(M, Delta *System, nu, ny int) (*System, error) {
+// lftStar closes the star product as a lower LFT of append(sys1, sys2),
+// reordered to [w1; w2 | u; v] inputs and [z1; z2 | y; u'] outputs, with the
+// static swap u = u', v = y.
+func lftStar(sys1, sys2 *System, nu, ny int) (*System, error) {
+	_, m1, p1 := sys1.Dims()
+	_, m2, p2 := sys2.Dims()
+	app, err := Append(sys1, sys2)
+	if err != nil {
+		return nil, err
+	}
+	inputs := make([]int, 0, m1+m2)
+	inputs = append(inputs, rangeInts(m1-nu)...)
+	inputs = append(inputs, offsetInts(m1+ny, m2-ny)...)
+	inputs = append(inputs, offsetInts(m1-nu, nu)...)
+	inputs = append(inputs, offsetInts(m1, ny)...)
+	outputs := make([]int, 0, p1+p2)
+	outputs = append(outputs, rangeInts(p1-ny)...)
+	outputs = append(outputs, offsetInts(p1+nu, p2-nu)...)
+	outputs = append(outputs, offsetInts(p1-ny, ny)...)
+	outputs = append(outputs, offsetInts(p1, nu)...)
+	k := nu + ny
+	if k == 0 {
+		return app, nil
+	}
+	M, err := app.SelectByIndex(inputs, outputs)
+	if err != nil {
+		return nil, err
+	}
+	swap := mat.NewDense(k, k, nil)
+	for i := range nu {
+		swap.Set(i, ny+i, 1)
+	}
+	for i := range ny {
+		swap.Set(nu+i, i, 1)
+	}
+	Delta, err := NewGain(swap, sys1.Dt)
+	if err != nil {
+		return nil, err
+	}
+	return lftCloseExternal(M, Delta, m1+m2-k, p1+p2-k)
+}
+
+func offsetInts(start, n int) []int {
+	s := make([]int, n)
+	for i := range s {
+		s[i] = start + i
+	}
+	return s
+}
+
+// lftCloseExternal closes the lower loop of M with Delta, keeping M's first
+// nw inputs and first nz outputs external. nw and nz count the EXTERNAL
+// channels (the complement of MATLAB lft's nu, ny); a nil Delta returns the
+// external block. Callers must have checked the partition sizes and domains.
+func lftCloseExternal(M, Delta *System, nw, nz int) (*System, error) {
 	_, mM, pM := M.Dims()
 	if Delta == nil {
-		return lftExtract(M, nu, ny)
+		return lftExtract(M, nw, nz)
 	}
 
 	needsLFT := M.HasDelay() || M.HasInternalDelay() || Delta.HasDelay() || Delta.HasInternalDelay()
 	if needsLFT {
-		return lftWithDelay(M, Delta, nu, ny)
+		return lftWithDelay(M, Delta, nw, nz)
 	}
 
-	if mM == nu && pM == ny {
-		return lftEmptyLoop(M, Delta, nu, ny)
+	if mM == nw && pM == nz {
+		return lftEmptyLoop(M, Delta, nw, nz)
 	}
-	return lftSimple(M, Delta, nu, ny)
+	return lftSimple(M, Delta, nw, nz)
 }
 
 // lftEmptyLoop closes an LFT whose loop carries no signals: the result is M's
 // upper channels with Delta's states appended, unreachable and unobservable.
-func lftEmptyLoop(M, Delta *System, nu, ny int) (*System, error) {
-	upper, err := lftExtract(M, nu, ny)
+func lftEmptyLoop(M, Delta *System, nw, nz int) (*System, error) {
+	upper, err := lftExtract(M, nw, nz)
 	if err != nil {
 		return nil, err
 	}
@@ -81,46 +166,46 @@ func lftEmptyLoop(M, Delta *System, nu, ny int) (*System, error) {
 	return Append(upper, Delta)
 }
 
-func lftExtract(M *System, nu, ny int) (*System, error) {
+func lftExtract(M *System, nw, nz int) (*System, error) {
 	nM, _, _ := M.Dims()
-	D11 := extractBlock(M.D, 0, 0, ny, nu)
+	D11 := extractBlock(M.D, 0, 0, nz, nw)
 
 	if nM == 0 {
-		result, err := lftGain(D11, ny, nu, M.Dt)
+		result, err := lftGain(D11, nz, nw, M.Dt)
 		if err != nil {
 			return nil, err
 		}
-		lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
+		lftVisibleMetadata(M, nw, nz).applyIOOwned(result)
 		return result, nil
 	}
 
-	B1 := extractBlock(M.B, 0, 0, nM, nu)
-	C1 := extractBlock(M.C, 0, 0, ny, nM)
+	B1 := extractBlock(M.B, 0, 0, nM, nw)
+	C1 := extractBlock(M.C, 0, 0, nz, nM)
 	result, err := newNoCopy(denseCopy(M.A), B1, C1, D11, M.Dt)
 	if err != nil {
 		return nil, err
 	}
 	result.E = copyDescriptorE(M.E)
-	lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
+	lftVisibleMetadata(M, nw, nz).applyIOOwned(result)
 	return result, nil
 }
 
-func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
+func lftSimple(M, Delta *System, nw, nz int) (*System, error) {
 	nM, mM, pM := M.Dims()
 	nD, _, _ := Delta.Dims()
 
-	w := pM - ny
-	z := mM - nu
+	w := pM - nz
+	z := mM - nw
 
-	D11 := extractBlock(M.D, 0, 0, ny, nu)
-	D12 := extractBlock(M.D, 0, nu, ny, z)
-	D21 := extractBlock(M.D, ny, 0, w, nu)
-	D22 := extractBlock(M.D, ny, nu, w, z)
+	D11 := extractBlock(M.D, 0, 0, nz, nw)
+	D12 := extractBlock(M.D, 0, nw, nz, z)
+	D21 := extractBlock(M.D, nz, 0, w, nw)
+	D22 := extractBlock(M.D, nz, nw, w, z)
 
-	B1 := extractBlock(M.B, 0, 0, nM, nu)
-	B2 := extractBlock(M.B, 0, nu, nM, z)
-	C1 := extractBlock(M.C, 0, 0, ny, nM)
-	C2 := extractBlock(M.C, ny, 0, w, nM)
+	B1 := extractBlock(M.B, 0, 0, nM, nw)
+	B2 := extractBlock(M.B, 0, nw, nM, z)
+	C1 := extractBlock(M.C, 0, 0, nz, nM)
+	C2 := extractBlock(M.C, nz, 0, w, nM)
 
 	F, err := solveLFTLoop(D22, Delta.D, w)
 	if err != nil {
@@ -135,19 +220,19 @@ func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
 
 	n := nM + nD
 
-	Dcl := addMulDims(ny, nu, D11, D12, PhiD21)
+	Dcl := addMulDims(nz, nw, D11, D12, PhiD21)
 	if n == 0 {
-		result, err := lftGain(Dcl, ny, nu, M.Dt)
+		result, err := lftGain(Dcl, nz, nw, M.Dt)
 		if err != nil {
 			return nil, err
 		}
-		lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
+		lftVisibleMetadata(M, nw, nz).applyIOOwned(result)
 		return result, nil
 	}
 
 	Acl := mat.NewDense(n, n, nil)
-	Bcl := newDense(n, nu)
-	Ccl := newDense(ny, n)
+	Bcl := newDense(n, nw)
+	Ccl := newDense(nz, n)
 
 	var FC2, FD21, FD22Cd, GCd *mat.Dense
 	if nD > 0 {
@@ -183,22 +268,22 @@ func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
 		return nil, err
 	}
 	result.E = blkDiagDescriptorE(M, Delta)
-	lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
+	lftVisibleMetadata(M, nw, nz).applyIOOwned(result)
 	return result, nil
 }
 
 // lftGain builds a static LFT result. A gain with no inputs or no outputs but
 // not both carries no dimensions, so it is rejected as in NewFromSlices.
-func lftGain(D *mat.Dense, ny, nu int, dt float64) (*System, error) {
-	if err := lftGainDims(ny, nu); err != nil {
+func lftGain(D *mat.Dense, nz, nw int, dt float64) (*System, error) {
+	if err := lftGainDims(nz, nw); err != nil {
 		return nil, err
 	}
 	return buildSystem(nil, nil, nil, D, dt, nil)
 }
 
-func lftGainDims(ny, nu int) error {
-	if (ny == 0) != (nu == 0) {
-		return fmt.Errorf("%dx%d static gain cannot be stored: %w", ny, nu, ErrDimensionMismatch)
+func lftGainDims(nz, nw int) error {
+	if (nz == 0) != (nw == 0) {
+		return fmt.Errorf("%dx%d static gain cannot be stored: %w", nz, nw, ErrDimensionMismatch)
 	}
 	return nil
 }
@@ -217,15 +302,15 @@ func solveLFTLoop(D22M, DDelta *mat.Dense, w int) (*mat.Dense, error) {
 	return solveIdentityMinusProduct(D22M, DDelta, w, "lft", ErrAlgebraicLoop)
 }
 
-func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
+func lftWithDelay(M, Delta *System, nw, nz int) (*System, error) {
 	_, mM, pM := M.Dims()
 
-	savedInputDelay := selectLeadingVisibleDelays(M.InputDelay, nu)
-	savedOutputDelay := selectLeadingVisibleDelays(M.OutputDelay, ny)
+	savedInputDelay := selectLeadingVisibleDelays(M.InputDelay, nw)
+	savedOutputDelay := selectLeadingVisibleDelays(M.OutputDelay, nz)
 
 	mCopy := M.Copy()
-	mCopy.InputDelay = clearLeadingDelays(mCopy.InputDelay, nu)
-	mCopy.OutputDelay = clearLeadingDelays(mCopy.OutputDelay, ny)
+	mCopy.InputDelay = clearLeadingDelays(mCopy.InputDelay, nw)
+	mCopy.OutputDelay = clearLeadingDelays(mCopy.OutputDelay, nz)
 
 	mLFT, err := mCopy.PullDelaysToLFT()
 	if err != nil {
@@ -252,16 +337,16 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	nM, _, _ := mH.Dims()
 	nD, _, _ := dH.Dims()
 
-	w := pM - ny
-	z := mM - nu
+	w := pM - nz
+	z := mM - nw
 	n := nM + nD
-	mTotal := nu + N
-	pTotal := ny + N
+	mTotal := nw + N
+	pTotal := nz + N
 
-	D11 := extractBlock(mH.D, 0, 0, ny, nu)
-	D12p := extractBlock(mH.D, 0, nu, ny, z)
-	D21p := extractBlock(mH.D, ny, 0, w, nu)
-	D22p := extractBlock(mH.D, ny, nu, w, z)
+	D11 := extractBlock(mH.D, 0, 0, nz, nw)
+	D12p := extractBlock(mH.D, 0, nw, nz, z)
+	D21p := extractBlock(mH.D, nz, 0, w, nw)
+	D22p := extractBlock(mH.D, nz, nw, w, z)
 
 	DDe := extractBlock(dH.D, 0, 0, z, w)
 
@@ -273,10 +358,10 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	Phi := mulDense(DDe, F)
 	G := lftLoopGain(Phi, D22p, z)
 
-	B1 := extractBlock(mH.B, 0, 0, nM, nu)
-	B2p := extractBlock(mH.B, 0, nu, nM, z)
-	C1 := extractBlock(mH.C, 0, 0, ny, nM)
-	C2p := extractBlock(mH.C, ny, 0, w, nM)
+	B1 := extractBlock(mH.B, 0, 0, nM, nw)
+	B2p := extractBlock(mH.B, 0, nw, nM, z)
+	C1 := extractBlock(mH.C, 0, 0, nz, nM)
+	C2p := extractBlock(mH.C, nz, 0, w, nM)
 
 	BDe := extractBlock(dH.B, 0, 0, nD, w)
 	CDe := extractBlock(dH.C, 0, 0, z, nD)
@@ -330,16 +415,16 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 
 	if N == 0 {
 		if n == 0 {
-			if err := lftGainDims(ny, nu); err != nil {
+			if err := lftGainDims(nz, nw); err != nil {
 				return nil, err
 			}
 			Acl = &mat.Dense{}
 		} else {
 			Acl = resizeDense(Acl, n, n)
 		}
-		Bcl = resizeDense(Bcl, n, nu)
-		Ccl = resizeDense(Ccl, ny, n)
-		Dcl = resizeDense(Dcl, ny, nu)
+		Bcl = resizeDense(Bcl, n, nw)
+		Ccl = resizeDense(Ccl, nz, n)
+		Dcl = resizeDense(Dcl, nz, nw)
 
 		sys, err := newNoCopy(Acl, Bcl, Ccl, Dcl, M.Dt)
 		if err != nil {
@@ -352,7 +437,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 		if savedOutputDelay.hasNonzero {
 			sys.OutputDelay = savedOutputDelay.values
 		}
-		lftVisibleMetadata(M, nu, ny).applyIOOwned(sys)
+		lftVisibleMetadata(M, nw, nz).applyIOOwned(sys)
 		return sys, nil
 	}
 
@@ -360,10 +445,10 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	var D21iMext, D21iMz *mat.Dense
 	var PhiD12iMw, FD12iMw *mat.Dense
 	if NM > 0 {
-		D12iMu = extractBlock(mH.D, 0, nu+z, ny, NM)
-		D12iMw = extractBlock(mH.D, ny, nu+z, w, NM)
-		D21iMext = extractBlock(mH.D, ny+w, 0, NM, nu)
-		D21iMz = extractBlock(mH.D, ny+w, nu, NM, z)
+		D12iMu = extractBlock(mH.D, 0, nw+z, nz, NM)
+		D12iMw = extractBlock(mH.D, nz, nw+z, w, NM)
+		D21iMext = extractBlock(mH.D, nz+w, 0, NM, nw)
+		D21iMz = extractBlock(mH.D, nz+w, nw, NM, z)
 		PhiD12iMw = mulDense(Phi, D12iMw)
 		FD12iMw = mulDense(F, D12iMw)
 	}
@@ -379,14 +464,14 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 
 	b2 := mat.NewDense(max(n, 1), N, nil)
 	c2 := mat.NewDense(N, max(n, 1), nil)
-	d12 := mat.NewDense(max(ny, 1), N, nil)
-	d21 := mat.NewDense(N, max(nu, 1), nil)
+	d12 := mat.NewDense(max(nz, 1), N, nil)
+	d21 := mat.NewDense(N, max(nw, 1), nil)
 	d22 := mat.NewDense(N, N, nil)
 
 	if NM > 0 {
-		B2iM := extractBlock(mH.B, 0, nu+z, nM, NM)
-		C2iM := extractBlock(mH.C, ny+w, 0, NM, nM)
-		D22iM := extractBlock(mH.D, ny+w, nu+z, NM, NM)
+		B2iM := extractBlock(mH.B, 0, nw+z, nM, NM)
+		C2iM := extractBlock(mH.C, nz+w, 0, NM, nM)
+		D22iM := extractBlock(mH.D, nz+w, nw+z, NM, NM)
 
 		if nM > 0 {
 			t := addMulDims(nM, NM, B2iM, B2p, PhiD12iMw)
@@ -405,12 +490,12 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 		}
 
 		{
-			t := addMulDims(ny, NM, D12iMu, D12p, PhiD12iMw)
+			t := addMulDims(nz, NM, D12iMu, D12p, PhiD12iMw)
 			setBlock(d12, 0, 0, t)
 		}
 
 		{
-			t := addMulDims(NM, nu, D21iMext, D21iMz, PhiD21p)
+			t := addMulDims(NM, nw, D21iMext, D21iMz, PhiD21p)
 			setBlock(d21, 0, 0, t)
 		}
 
@@ -467,14 +552,14 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 
 	b2 = resizeDense(b2, n, N)
 	c2 = resizeDense(c2, N, n)
-	d12 = resizeDense(d12, ny, N)
-	d21 = resizeDense(d21, N, nu)
+	d12 = resizeDense(d12, nz, N)
+	d21 = resizeDense(d21, N, nw)
 
-	setBlock(Bcl, 0, nu, b2)
-	setBlock(Ccl, ny, 0, c2)
-	setBlock(Dcl, 0, nu, d12)
-	setBlock(Dcl, ny, 0, d21)
-	setBlock(Dcl, ny, nu, d22)
+	setBlock(Bcl, 0, nw, b2)
+	setBlock(Ccl, nz, 0, c2)
+	setBlock(Dcl, 0, nw, d12)
+	setBlock(Dcl, nz, 0, d21)
+	setBlock(Dcl, nz, nw, d22)
 
 	H := &System{A: Acl, B: Bcl, C: Ccl, D: Dcl, E: blkDiagDescriptorE(mH, dH), Dt: M.Dt}
 
@@ -496,6 +581,6 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	if savedOutputDelay.hasNonzero {
 		result.OutputDelay = savedOutputDelay.values
 	}
-	lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
+	lftVisibleMetadata(M, nw, nz).applyIOOwned(result)
 	return result, nil
 }
