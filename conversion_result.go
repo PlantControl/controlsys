@@ -143,6 +143,10 @@ func (sys *System) D2CWithResult(opts D2COptions) (*ConversionResult, error) {
 	result := newConversionResult(source, out, opts.Method)
 	result.statesEliminated = reduced
 	result.Approximate = opts.Method == C2DMethodTustin || opts.Method == C2DMethodMatched
+	if sys.HasInternalDelay() && (opts.Method == C2DMethodZOH || opts.Method == C2DMethodFOH) {
+		result.Approximate = true
+		result.Warnings = append(result.Warnings, "Hold conversion approximates intersample internal feedback.")
+	}
 	if !reduced && conversionCanMapState(sys, out, opts.Method, sys.Dt) {
 		result.InitialStateMap, err = conversionStateMap(sys, out, opts.Method, opts.PrewarpFrequency, true)
 		if err != nil {
