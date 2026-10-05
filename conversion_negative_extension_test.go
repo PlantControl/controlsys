@@ -35,11 +35,10 @@ func negativeOrderFixture(t *testing.T, a *mat.Dense, dt float64) *System {
 func verifyNegativeOrderSamples(t *testing.T, source *System, added int) {
 	t.Helper()
 	before := source.Copy()
-	result, err := source.D2CWithResult(D2COptions{Method: C2DMethodZOH})
+	out, G, err := source.D2CMap(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := result.System
 	n, m, p := source.Dims()
 	total, _, _ := out.Dims()
 	if total != n+added {
@@ -52,10 +51,7 @@ func verifyNegativeOrderSamples(t *testing.T, source *System, added int) {
 	for i := range n {
 		xd[i] = float64(i+1) / 7
 	}
-	xc, err := result.MapInitialState(xd, []float64{.3, -.2}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	xc := applyInitialMap(t, G, xd, []float64{.3, -.2})
 	for i := range n {
 		if xc[i] != xd[i] {
 			t.Fatal("original states not retained first")
@@ -146,7 +142,7 @@ func fmtNegativeGap(gap float64) string {
 func TestNegativeZOHRejectsUnresolvedBranchCut(t *testing.T) {
 	source := nearCutNegativeFixture(t, 1e-14)
 	before := source.Copy()
-	if _, err := source.D2C(C2DMethodZOH); !errors.Is(err, ErrSingularTransform) {
+	if _, err := source.D2C(D2COptions{Method: C2DMethodZOH}); !errors.Is(err, ErrSingularTransform) {
 		t.Fatalf("nearbranch error=%v", err)
 	}
 	assertMatClose(t, "immutableA", source.A, before.A, 0)
@@ -168,7 +164,7 @@ func BenchmarkNegativeZOHCompressedExtension(b *testing.B) {
 			sys, _ := New(a, mat.NewDense(n, 1, input), mat.NewDense(1, n, output), mat.NewDense(1, 1, nil), .2)
 			b.ReportAllocs()
 			for range b.N {
-				if _, err := sys.D2C(C2DMethodZOH); err != nil {
+				if _, err := sys.D2C(D2COptions{Method: C2DMethodZOH}); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -192,7 +188,7 @@ func TestNegativeZOHNonorthogonalDenseCoordinates(t *testing.T) {
 
 func TestNegativeZOHRejectsOverflowBeforeSubspaceSolve(t *testing.T) {
 	source := negativeOrderFixture(t, mat.NewDense(2, 2, []float64{.8, .2, 0, -.8}), math.SmallestNonzeroFloat64)
-	if _, err := source.D2C(C2DMethodZOH); !errors.Is(err, ErrOverflow) {
+	if _, err := source.D2C(D2COptions{Method: C2DMethodZOH}); !errors.Is(err, ErrOverflow) {
 		t.Fatalf("error=%v", err)
 	}
 }

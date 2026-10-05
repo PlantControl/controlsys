@@ -16,13 +16,14 @@ const (
 	poleResidueFloor = 1e-10
 )
 
-// evalWithPoleLimit sets dst to eval(s), or to its pole limit when s is a
+// evalWithPoleLimit sets dst to eval(pt), or to its pole limit when pt is a
 // numerical pole of the realization.
-func evalWithPoleLimit(eval func(complex128, []complex128) error, sys *System, s complex128, dst []complex128) error {
-	err := eval(s, dst)
+func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
+	err := eval(pt, dst)
 	if err == nil {
 		return nil
 	}
+	s := pt.value()
 	rho, perr := poleSpacing(sys, s)
 	if perr != nil {
 		return perr
@@ -42,12 +43,12 @@ func evalWithPoleLimit(eval func(complex128, []complex128) error, sys *System, s
 // extrapolations from five points with δ = rho·eps^{1/(q+5)}, which balances
 // the two. When eval also fails off s the model is singular everywhere and
 // singularErr is returned.
-func poleLimitInto(eval func(complex128, []complex128) error, s complex128, rho float64, dst []complex128, singularErr error) error {
+func poleLimitInto(eval func(frequencyPoint, []complex128) error, s complex128, rho float64, dst []complex128, singularErr error) error {
 	k := len(dst)
 	g := make([]complex128, 5*k)
 	sample := func(points int, delta float64) error {
 		for i := range points {
-			if err := eval(s+complex(float64(i+1)*delta, 0), g[i*k:(i+1)*k]); err != nil {
+			if err := eval(pointAt(s+complex(float64(i+1)*delta, 0)), g[i*k:(i+1)*k]); err != nil {
 				return singularErr
 			}
 		}
@@ -135,9 +136,11 @@ func poleSpacing(sys *System, s complex128) (float64, error) {
 // evalFrLFTFrozenInto sets ws.g to G(s) by closing the delay channels with
 // their values at s, K = Δ(I-D22Δ)⁻¹ = (I-ΔD22)⁻¹Δ, and solving the complex
 // realization (sE - A - B2·K·C2, B1 + B2·K·D21, C1 + D12·K·C2, D11 + D12·K·D21)
-// once. Unlike the H-then-LFT form it stays regular at poles of the
-// delay-free plant that the delay loop moves, such as an integrator inside it.
-func evalFrLFTFrozenInto(ws *lftWorkspace, s complex128, N, p, m int) error {
+// once; descriptor models off the plain point solve it as
+// c·(pE + qA − c·B2·K·C2)⁻¹, c = −q, with the point's exact p and q. Unlike
+// the H-then-LFT form it stays regular at poles of the delay-free plant that
+// the delay loop moves, such as an integrator inside it.
+func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error {
 	br := &ws.bd.balancedRealization
 	n, mN := br.n, m+N
 	K := make([]complex128, N*N)
@@ -169,15 +172,26 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, s complex128, N, p, m int) error {
 			}
 		}
 	}
+	scaled := !pt.isPlain() && br.e != nil
 	pencil := make([]complex128, n*n)
 	x := make([]complex128, n*m)
 	for i := range n {
 		for j := range n {
-			v := -complex(br.a[i*n+j], 0)
-			if br.e != nil {
-				v += s * complex(br.e[i*n+j], 0)
-			} else if i == j {
-				v += s
+			a := br.a[i*n+j]
+			var v complex128
+			switch {
+			case scaled:
+				e := br.e[i*n+j]
+				v = complex(real(pt.p)*(e-a), imag(pt.p)*(e+a))
+			case br.e != nil:
+				v = -complex(a, 0) + pt.value()*complex(br.e[i*n+j], 0)
+			case i == j && !pt.isPlain():
+				v = pt.shift(a)
+			default:
+				v = -complex(a, 0)
+				if i == j {
+					v += pt.value()
+				}
 			}
 			pencil[i*n+j] = v
 		}
@@ -189,8 +203,12 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, s complex128, N, p, m int) error {
 			if b2 == 0 {
 				continue
 			}
+			b2c := b2
+			if scaled {
+				b2c *= pt.scale()
+			}
 			for j := range n {
-				pencil[i*n+j] -= b2 * T[k*nm+j]
+				pencil[i*n+j] -= b2c * T[k*nm+j]
 			}
 			for j := range m {
 				x[i*m+j] += b2 * T[k*nm+n+j]
@@ -200,6 +218,11 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, s complex128, N, p, m int) error {
 	if n > 0 {
 		if err := cSolveInPlace(pencil, x, n, m); err != nil {
 			return err
+		}
+		if scaled {
+			for i := range x {
+				x[i] *= pt.scale()
+			}
 		}
 	}
 	for i := range p {

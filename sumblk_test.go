@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -95,15 +96,40 @@ func TestSumBlk_ScalarWidth(t *testing.T) {
 }
 
 func TestSumBlk_PerSignalWidth(t *testing.T) {
-	sys, err := SumBlk("e = r - y", 2, 3, 1)
+	sys, err := SumBlk("e = r - y; f = 3*d", 2, 1, 2, 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkDims(t, sys, 0, 4, 2)
+	checkDims(t, sys, 0, 5, 3)
 	checkD(t, sys, [][]float64{
-		{1, 0, 0, -1},
-		{0, 1, 0, 0},
+		{1, 0, -1, 0, 0},
+		{0, 1, 0, -1, 0},
+		{0, 0, 0, 0, 3},
 	})
+	// MATLAB sumblk requires every signal in a sum to have the same size;
+	// main silently dropped r(3) and fed y only into e(1).
+	if _, err := SumBlk("e = r - y", 2, 3, 1); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("mixed widths in one sum: err = %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestSumBlk_NonPositiveWidth(t *testing.T) {
+	for _, w := range []int{0, -1} {
+		_, err := SumBlk("e = r - y", w)
+		if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "SumBlk: ") {
+			t.Errorf("width %d: err = %v, want SumBlk: ... ErrInvalidArgument", w, err)
+		}
+	}
+	if _, err := SumBlk("e = r - y", 1, 0, 1); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("per-signal width 0: err = %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestSumBlk_ParserMessages(t *testing.T) {
+	_, err := SumBlk("e = 2 r")
+	if !errors.Is(err, ErrInvalidExpression) || !strings.Contains(err.Error(), "expected '*'") {
+		t.Errorf("err = %v, want readable expected '*' message", err)
+	}
 }
 
 func TestSumBlk_Empty(t *testing.T) {
@@ -145,7 +171,7 @@ func TestSumBlk_FloatCoeff(t *testing.T) {
 
 func TestSumBlk_WidthMismatch(t *testing.T) {
 	_, err := SumBlk("e = r - y", 1, 2)
-	if !errors.Is(err, ErrInvalidExpression) {
-		t.Fatalf("err = %v, want ErrInvalidExpression", err)
+	if !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("err = %v, want ErrDimensionMismatch", err)
 	}
 }

@@ -209,7 +209,10 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	}
 
 	a, b, cm := c.balancedABC()
-	stair := ControllabilityStaircase(a, b, cm, c.opts.ControllabilityTol)
+	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+	if err != nil {
+		return nil, err
+	}
 	ncont := stair.NCont
 
 	if ncont == 0 {
@@ -253,7 +256,7 @@ func (c rowRealizationConverter) balancedABC() (a, b, cm *mat.Dense) {
 	return mat.NewDense(n, n, aData), b, cm
 }
 
-func (c rowRealizationConverter) convertDynamicRows(stair *StaircaseResult, ncont int) int {
+func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int) int {
 	Ac := extractSubmatrix(stair.A, 0, ncont, 0, ncont)
 	Bc := extractSubmatrix(stair.B, 0, ncont, 0, c.m)
 	Cc := extractSubmatrix(stair.C, 0, c.p, 0, ncont)

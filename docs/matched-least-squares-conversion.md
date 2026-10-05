@@ -1,6 +1,6 @@
 # Matched and least-squares conversion
 
-`DiscretizeMatched` and `D2C(C2DMethodMatched)` support ordinary proper SISO
+`C2D` and `D2C(C2DMethodMatched)` support ordinary proper SISO
 models. Forward conversion maps finite poles/zeros through `exp(s*Dt)` and adds
 `max(relativeDegree-1,0)` zeros at -1. Both directions match the leading
 low-frequency response coefficient, including integrators and zeros at DC.
@@ -21,9 +21,9 @@ reports `11/(s*(s+1))`, sample time .1, as approximately
 our tests also derive the exact coefficients independently from root mapping
 and the low-frequency limit. No local MATLAB execution is claimed.
 
-`DiscretizeLeastSquares(Dt, fitOrder)` returns the fitted model, selected order,
+`C2DFit(Dt, fitOrder)` returns the fitted model, selected order,
 RMS relative response error, maximum normalized response error, and fitted
-stability. `DiscretizeWithOpts` selects it with `C2DMethodLeastSquares` and
+stability. `C2D` selects it with `C2DMethodLeastSquares` and
 `C2DOptions.FitOrder`. Zero order selects the source state order; positive values
 choose a different fit order. Fits use equally weighted frequency samples from
 DC through Nyquist, up to twelve denominator-reweighted least-squares iterations,

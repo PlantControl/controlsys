@@ -256,14 +256,66 @@ func TestERA_Validation(t *testing.T) {
 	}
 }
 
-func TestERA_RejectsNilMarkovEntryWithInsufficientData(t *testing.T) {
+func TestERA_RejectsNilMarkovEntry(t *testing.T) {
 	_, err := ERA([]*mat.Dense{
 		mat.NewDense(1, 1, nil),
 		nil,
 		mat.NewDense(1, 1, nil),
 	}, 1, 1)
-	if !errors.Is(err, ErrInsufficientData) {
-		t.Fatalf("got %v, want ErrInsufficientData", err)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestERA_OrderAboveHankelRank(t *testing.T) {
+	markov := []*mat.Dense{
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(1, 1, []float64{0}),
+	}
+	if _, err := ERA(markov, 1, 1); !errors.Is(err, ErrInvalidOrder) {
+		t.Errorf("zero Hankel: err = %v, want ErrInvalidOrder", err)
+	}
+	// h[k] = 0.5^(k-1), k >= 1: rank-1 Hankel, exact model 1/(z-0.5).
+	geo := make([]*mat.Dense, 7)
+	geo[0] = mat.NewDense(1, 1, []float64{0.25})
+	for k := 1; k < len(geo); k++ {
+		geo[k] = mat.NewDense(1, 1, []float64{math.Pow(0.5, float64(k-1))})
+	}
+	if _, err := ERA(geo, 2, 1); !errors.Is(err, ErrInvalidOrder) {
+		t.Errorf("order 2 on rank-1 Hankel: err = %v, want ErrInvalidOrder", err)
+	}
+	res, err := ERA(geo, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := res.Sys.A.At(0, 0); math.Abs(a-0.5) > 1e-12 {
+		t.Errorf("A = %g, want 0.5", a)
+	}
+	if cb := res.Sys.C.At(0, 0) * res.Sys.B.At(0, 0); math.Abs(cb-1) > 1e-12 {
+		t.Errorf("CB = %g, want 1", cb)
+	}
+	if d := res.Sys.D.At(0, 0); d != 0.25 {
+		t.Errorf("D = %g, want 0.25", d)
+	}
+}
+
+func TestERA_RejectsNonFiniteInput(t *testing.T) {
+	ok := []*mat.Dense{
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0.5}),
+	}
+	for _, dt := range []float64{math.NaN(), math.Inf(1), 0, -1} {
+		if _, err := ERA(ok, 1, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("dt=%g: err = %v, want ErrInvalidSampleTime", dt, err)
+		}
+	}
+	bad := []*mat.Dense{ok[0], mat.NewDense(1, 1, []float64{math.NaN()}), ok[2]}
+	if _, err := ERA(bad, 1, 1); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("NaN markov: err = %v, want ErrInvalidArgument", err)
 	}
 }
 

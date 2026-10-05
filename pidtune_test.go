@@ -285,7 +285,7 @@ func TestPidtuneMeetsTargetForContinuousAndDiscretePlants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	disc, err := cont.DiscretizeZOH(0.1)
+	disc, err := cont.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

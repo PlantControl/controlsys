@@ -19,10 +19,17 @@ type fixedSystemBlock struct {
 	sys *System
 }
 
-func (b fixedSystemBlock) CurrentSystem() (*System, error) {
-	if b.sys == nil {
-		return nil, fmt.Errorf("fixed system block is nil: %w", ErrDimensionMismatch)
+// FixedBlock wraps a fixed model as a NumericBlock. The model is copied, so
+// later changes to sys do not affect the block. A nil or invalid sys returns
+// ErrInvalidArgument.
+func FixedBlock(sys *System) (NumericBlock, error) {
+	if err := requireSystem("FixedBlock", sys); err != nil {
+		return nil, err
 	}
+	return fixedSystemBlock{sys: sys.Copy()}, nil
+}
+
+func (b fixedSystemBlock) CurrentSystem() (*System, error) {
 	return b.sys.Copy(), nil
 }
 
@@ -49,30 +56,16 @@ type AnalysisPoint struct {
 	Location AnalysisPointLocation
 }
 
-func NewGeneralizedModel(name string, block any) (*GeneralizedModel, error) {
+func NewGeneralizedModel(name string, block NumericBlock) (*GeneralizedModel, error) {
 	if name == "" {
-		return nil, fmt.Errorf("NewGeneralizedModel: name is empty: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("NewGeneralizedModel: name is empty: %w", ErrInvalidArgument)
 	}
-	numeric, err := numericBlockFromAny(block)
-	if err != nil {
-		return nil, fmt.Errorf("NewGeneralizedModel: %w", err)
+	if block == nil {
+		return nil, fmt.Errorf("NewGeneralizedModel: block is nil: %w", ErrInvalidArgument)
 	}
-	return &GeneralizedModel{name: name, block: numeric, analysisPoints: make(map[string]AnalysisPoint)}, nil
+	return &GeneralizedModel{name: name, block: block, analysisPoints: make(map[string]AnalysisPoint)}, nil
 }
 
-func numericBlockFromAny(block any) (NumericBlock, error) {
-	switch b := block.(type) {
-	case NumericBlock:
-		return b, nil
-	case *System:
-		if b == nil {
-			return nil, fmt.Errorf("system block is nil: %w", ErrInvalidArgument)
-		}
-		return fixedSystemBlock{sys: b.Copy()}, nil
-	default:
-		return nil, fmt.Errorf("unsupported generalized block %T: %w", block, ErrDimensionMismatch)
-	}
-}
 
 func (g *GeneralizedModel) SetInputName(names ...string) {
 	g.inputName = copyStringSlice(names)
@@ -145,10 +138,9 @@ type GeneralizedClosedLoop struct {
 	primaryAnalysisPoint string
 }
 
-func NewGeneralizedClosedLoop(name string, plant *System, controller any, analysisPoint string) (*GeneralizedClosedLoop, error) {
-	ctrl, err := numericBlockFromAny(controller)
-	if err != nil {
-		return nil, fmt.Errorf("NewGeneralizedClosedLoop: controller: %w", err)
+func NewGeneralizedClosedLoop(name string, plant *System, controller NumericBlock, analysisPoint string) (*GeneralizedClosedLoop, error) {
+	if controller == nil {
+		return nil, fmt.Errorf("NewGeneralizedClosedLoop: controller is nil: %w", ErrInvalidArgument)
 	}
 	if err := requireSystem("NewGeneralizedClosedLoop", plant); err != nil {
 		return nil, err
@@ -159,7 +151,7 @@ func NewGeneralizedClosedLoop(name string, plant *System, controller any, analys
 	g := &GeneralizedClosedLoop{
 		name:                 name,
 		plant:                plant.Copy(),
-		controller:           ctrl,
+		controller:           controller,
 		analysisPoints:       make(map[string]AnalysisPoint),
 		primaryAnalysisPoint: analysisPoint,
 	}

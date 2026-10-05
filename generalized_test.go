@@ -102,7 +102,7 @@ func TestGeneralizedClosedLoopAnalysisPointsBindDistinctMIMOBreaks(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loop, err := NewGeneralizedClosedLoop("mimo", plant, controller, "plant_output")
+	loop, err := NewGeneralizedClosedLoop("mimo", plant, fixedBlockT(t, controller), "plant_output")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestGeneralizedClosedLoopAnalysisPointsBindDistinctMIMOBreaks(t *testing.T)
 
 func TestGeneralizedClosedLoopRejectsInvalidAnalysisPointLocation(t *testing.T) {
 	plant := makeSISO(-1, 1, 1, 0)
-	loop, err := NewGeneralizedClosedLoop("loop", plant, plant, "output")
+	loop, err := NewGeneralizedClosedLoop("loop", plant, fixedBlockT(t, plant), "output")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestGeneralizedClosedLoopRejectsInvalidAnalysisPointLocation(t *testing.T) 
 }
 
 func TestGeneralizedModelCurrentSystemRejectsNameCountMismatch(t *testing.T) {
-	gm, err := NewGeneralizedModel("g", makeSISO(-1, 1, 1, 0))
+	gm, err := NewGeneralizedModel("g", fixedBlockT(t, makeSISO(-1, 1, 1, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestGeneralizedModelInsertAnalysisPointRejects(t *testing.T) {
 	if err := nilModel.InsertAnalysisPoint("u"); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("nil receiver err = %v, want ErrInvalidArgument", err)
 	}
-	gm, err := NewGeneralizedModel("g", makeSISO(-1, 1, 1, 0))
+	gm, err := NewGeneralizedModel("g", fixedBlockT(t, makeSISO(-1, 1, 1, 0)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,11 +188,11 @@ func TestGeneralizedModelInsertAnalysisPointRejects(t *testing.T) {
 func TestGeneralizedBlocksDoNotAliasCallerSystem(t *testing.T) {
 	plant := makeSISO(-1, 1, 1, 0)
 	ctrl := makeSISO(-2, 1, 1, 0)
-	cl, err := NewGeneralizedClosedLoop("cl", plant, ctrl, "y")
+	cl, err := NewGeneralizedClosedLoop("cl", plant, fixedBlockT(t, ctrl), "y")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gm, err := NewGeneralizedModel("g", ctrl)
+	gm, err := NewGeneralizedModel("g", fixedBlockT(t, ctrl))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,15 +213,27 @@ func TestGeneralizedBlocksDoNotAliasCallerSystem(t *testing.T) {
 	}
 }
 
-func TestGeneralizedConstructorsRejectNilSystem(t *testing.T) {
+func TestGeneralizedConstructorsRejectNil(t *testing.T) {
 	var nilSys *System
-	if _, err := NewGeneralizedModel("g", nilSys); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := FixedBlock(nilSys); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("FixedBlock err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewGeneralizedModel("g", nil); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("NewGeneralizedModel err = %v, want ErrInvalidArgument", err)
 	}
-	if _, err := NewGeneralizedClosedLoop("cl", makeSISO(-1, 1, 1, 0), nilSys, "y"); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := NewGeneralizedClosedLoop("cl", makeSISO(-1, 1, 1, 0), nil, "y"); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("NewGeneralizedClosedLoop err = %v, want ErrInvalidArgument", err)
 	}
-	if _, err := NewGeneralizedClosedLoop("cl", nilSys, makeSISO(-1, 1, 1, 0), "y"); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := NewGeneralizedClosedLoop("cl", nilSys, fixedBlockT(t, makeSISO(-1, 1, 1, 0)), "y"); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("NewGeneralizedClosedLoop nil plant err = %v, want ErrInvalidArgument", err)
 	}
+}
+
+func fixedBlockT(t testing.TB, sys *System) NumericBlock {
+	t.Helper()
+	b, err := FixedBlock(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

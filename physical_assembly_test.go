@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -176,16 +177,37 @@ func TestPhysicalAssemblyRejectsInvalidTopologies(t *testing.T) {
 		t.Fatalf("incompatible port err = %v, want ErrDimensionMismatch", err)
 	}
 	right.Ports[0].Kind = PhysicalPortDisplacement
-	if _, err := AssemblePhysical("duplicate", []PhysicalComponent{left, right}, []PhysicalConnection{connection, connection}); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("duplicate connection err = %v, want ErrDimensionMismatch", err)
+	if _, err := AssemblePhysical("duplicate", []PhysicalComponent{left, right}, []PhysicalConnection{connection, connection}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("duplicate connection err = %v, want ErrInvalidArgument", err)
 	}
 	badMapping := left
+	badMapping.Ports = copyPhysicalPorts(left.Ports)
 	badMapping.Ports[0].Input = []int{4}
-	if _, err := AssemblePhysical("mapping", []PhysicalComponent{badMapping}, []PhysicalConnection{{FromComponent: "left", FromPort: "mount", Grounded: true}}); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("bad channel mapping err = %v, want ErrDimensionMismatch", err)
+	if _, err := AssemblePhysical("mapping", []PhysicalComponent{badMapping}, []PhysicalConnection{{FromComponent: "left", FromPort: "mount", Grounded: true}}); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "AssemblePhysical: ") {
+		t.Fatalf("bad channel mapping err = %v, want ErrInvalidArgument", err)
 	}
-	if component := NewPhysicalComponent("nil", nil, nil); component.System != nil {
-		t.Fatal("nil-system constructor should retain a nil system for assembly validation")
+	if _, err := NewPhysicalComponent("left", left.System, badMapping.Ports); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "NewPhysicalComponent: ") {
+		t.Fatalf("constructor bad mapping err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewPhysicalComponent("nil", nil, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil system err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewPhysicalComponent("", left.System, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("empty name err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewPhysicalComponent("dup", left.System, []PhysicalPort{{Name: "a", Dimension: 1}, {Name: "a", Dimension: 1}}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("duplicate port err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewPhysicalComponent("short", left.System, []PhysicalPort{{Name: "a", Dimension: 3}}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("too few channels err = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := AssemblePhysical("", []PhysicalComponent{left}, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("empty assembly name err = %v, want ErrInvalidArgument", err)
+	}
+	delayed := physicalCoupledComponent(t, "delayed", 1)
+	delayed.System.InputDelay = []float64{0.5, 0}
+	if _, err := AssemblePhysical("delay", []PhysicalComponent{left, delayed}, []PhysicalConnection{{FromComponent: "left", FromPort: "mount", ToComponent: "delayed", ToPort: "mount"}}); !errors.Is(err, ErrDelayUnsupported) {
+		t.Fatalf("delayed err = %v, want ErrDelayUnsupported", err)
 	}
 }
 
@@ -204,9 +226,18 @@ func physicalCoupledComponent(t *testing.T, name string, decay float64) Physical
 	sys.InputName = []string{"force", "mount.force"}
 	sys.OutputName = []string{"position", "mount.position"}
 	sys.StateName = []string{"position"}
-	return NewPhysicalComponent(name, sys, []PhysicalPort{{
+	return mustPhysicalComponent(t, name, sys, []PhysicalPort{{
 		Name: "mount", Kind: PhysicalPortDisplacement, Dimension: 1, Input: []int{1}, Output: []int{1},
 	}})
+}
+
+func mustPhysicalComponent(t *testing.T, name string, sys *System, ports []PhysicalPort) PhysicalComponent {
+	t.Helper()
+	c, err := NewPhysicalComponent(name, sys, ports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func physicalDescriptorComponent(t *testing.T, name string) PhysicalComponent {
@@ -225,7 +256,7 @@ func physicalDescriptorComponent(t *testing.T, name string) PhysicalComponent {
 	sys.InputName = []string{"force"}
 	sys.OutputName = []string{"position"}
 	sys.StateName = []string{"x1", "x2"}
-	return NewPhysicalComponent(name, sys, []PhysicalPort{{Name: "mount", Kind: PhysicalPortDisplacement, Dimension: 1}})
+	return mustPhysicalComponent(t, name, sys, []PhysicalPort{{Name: "mount", Kind: PhysicalPortDisplacement, Dimension: 1}})
 }
 
 func physicalMixedBindingComponent(t *testing.T, name string, ports []PhysicalPort) PhysicalComponent {
@@ -242,5 +273,5 @@ func physicalMixedBindingComponent(t *testing.T, name string, ports []PhysicalPo
 	}
 	sys.InputName = []string{"external.force", "mount.force[0]", "mount.force[1]"}
 	sys.OutputName = []string{"external.position", "mount.position[0]", "mount.position[1]"}
-	return NewPhysicalComponent(name, sys, ports)
+	return mustPhysicalComponent(t, name, sys, ports)
 }

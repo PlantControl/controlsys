@@ -1,11 +1,11 @@
 # Conversion delay methods
 
-`DiscretizeWithOpts` defaults to ZOH and `DelayModeling: "delay"`.
-`C2DDelayModelingInternal` and `C2DDelayModelingDelay` name that format;
+`C2D` defaults to ZOH and `DelayModeling: "delay"`.
+`C2DDelayModelingInternal` and `C2DDelayModelingInternal` name that format;
 `C2DDelayModelingState` turns approximation memory (fractional-hold histories,
 Thiran filters) into states; integer sample delays stay delay metadata, as in MATLAB.
-`Discretize` remains the explicit plain-Tustin convenience operation;
-`DiscretizeZOH` and `DiscretizeFOH` select their named hold methods.
+`C2D` remains the explicit plain-Tustin convenience operation;
+`C2D` and `C2D` select their named hold methods.
 
 | Method | External input/output/path delays | Internal feedback delays |
 | --- | --- | --- |
