@@ -19,6 +19,7 @@ var errDelayLoopUnsupported = fmt.Errorf("delay loop outside Nyquist test scope:
 // RHP root count is rhp - W, where W is the winding of 1+L around the origin
 // along the jω axis indented to the right of the imaginary-axis eigenvalues.
 type delayLoop struct {
+	sys       *System // the loop model, for certified sensitivity peaks
 	at        func(w float64) complex128
 	eval      *sisoEval // records the first failure of at
 	rhp       int
@@ -44,6 +45,7 @@ type delayNyquist struct {
 	roots    int
 	axisRoot bool
 	axisW    float64
+	tailFrom float64 // the tail bound certifies |L| <= lin from here on
 	w        []float64
 	f        []complex128 // 1+L(jω) on the refined grid
 }
@@ -70,7 +72,7 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &delayLoop{at: eval.at, eval: eval, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
+	l := &delayLoop{sys: sys, at: eval.at, eval: eval, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
 	l.addPoles(poles)
 	return l, nil
 }
@@ -384,7 +386,7 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 	grid := l.grid(R, w1)
 	segments := l.segments(grid, R)
 	size := len(grid) + 2*len(segments)
-	out := delayNyquist{w: make([]float64, 0, size), f: make([]complex128, 0, size)}
+	out := delayNyquist{tailFrom: w1, w: make([]float64, 0, size), f: make([]complex128, 0, size)}
 	var phi, phiStart float64
 	for si, seg := range segments {
 		base := len(out.w)
@@ -620,7 +622,10 @@ const sensitivityTailLevel = 0.3
 
 // sensitivityPeaks returns the closed-loop stability of S = 1/(1+L) and,
 // when stable, sup_ω |S(jω) + c| with its frequency for each shift c. The
-// grid peak is refined by golden section. Where |L| <= t, S lies in the disk
+// grid peak is refined by golden section and then certified to peakCertTol
+// on [0, tailFrom] by descriptorResponse.certify on the closed-loop
+// descriptor, which bisects wherever a narrow peak could hide between
+// samples. Where |L| <= t, S lies in the disk
 // of centre 1/(1−t²) and radius t/(1−t²), so |S + c| <= diskBound(t, c).
 // The linear delay spacing ends where the tail bound certifies |L| <= t and
 // diskBound(t, c) does not exceed the grid peak for any c, so the sparse
@@ -663,18 +668,57 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 		}
 	}
 	peaks = make([]sensitivityPeak, len(shifts))
-	t := l.tailLimit
-	for i, c := range shifts {
+	for i := range shifts {
 		wPeak, peak := refinePeaks(res, gs[i], best[i], func(w float64) float64 { return gs[i](1 + l.at(w)) })
-		if inf := diskBound(t, c); inf > peak {
-			peak, wPeak = inf, math.Inf(1)
-		}
 		peaks[i] = sensitivityPeak{peak, wPeak}
 	}
 	if err := l.evalErr(); err != nil {
 		return false, nil, err
 	}
+	if err := l.certifyPeaks(res, shifts, peaks); err != nil {
+		return false, nil, err
+	}
+	for i, c := range shifts {
+		if inf := diskBound(l.tailLimit, c); inf > peaks[i].peak {
+			peaks[i] = sensitivityPeak{inf, math.Inf(1)}
+		}
+	}
 	return true, peaks, nil
+}
+
+// certifyPeaks raises each sensitivity peak to within peakCertTol of
+// sup |S + c| on [0, res.tailFrom], beyond which the disk bound holds.
+func (l *delayLoop) certifyPeaks(res delayNyquist, shifts []float64, peaks []sensitivityPeak) error {
+	r, err := newDescriptorResponse(l.sys)
+	if err != nil {
+		return err
+	}
+	if err := r.sensitivity(); err != nil {
+		return err
+	}
+	ws := []float64{0}
+	for _, w := range res.w {
+		if w > res.tailFrom {
+			break
+		}
+		if w > ws[len(ws)-1] {
+			ws = append(ws, w)
+		}
+	}
+	if ws[len(ws)-1] < res.tailFrom {
+		ws = append(ws, res.tailFrom)
+	}
+	ps, wps := make([]float64, len(shifts)), make([]float64, len(shifts))
+	for i, p := range peaks {
+		ps[i], wps[i] = p.peak, p.w
+	}
+	if err := r.certify(ws, shifts, ps, wps, l.pointBudget(), errDelayLoopUnsupported); err != nil {
+		return err
+	}
+	for i := range peaks {
+		peaks[i] = sensitivityPeak{ps[i], wps[i]}
+	}
+	return nil
 }
 
 // nearPeakFraction selects the grid local maxima refined besides the grid
