@@ -291,7 +291,7 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 }
 
 // Modred eliminates the states with 0-based indices elim, as MATLAB
-// modred(sys,elim,method) with 1-based indices; see
+// modred(sys,elim,method); see
 // https://www.mathworks.com/help/control/ref/ss.modred.html. method MatchDC
 // (the zero value, MATLAB default) residualizes them and keeps the DC gain;
 // Truncate discards them. Indices out of range or repeated return

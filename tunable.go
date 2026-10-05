@@ -846,7 +846,7 @@ func NewTunableSSFrom(name string, sys *System, astruct TunableSSStructure) (*Tu
 					continue
 				}
 				if math.Abs(realized.A.At(i, j)) > tol {
-					return nil, fmt.Errorf("%s: %s form has A(%d,%d) = %g outside its structure: %w", op, form, i+1, j+1, realized.A.At(i, j), ErrSingularTransform)
+					return nil, fmt.Errorf("%s: %s form has A[%d,%d] = %g outside its structure: %w", op, form, i, j, realized.A.At(i, j), ErrSingularTransform)
 				}
 				realized.A.Set(i, j, 0)
 			}
