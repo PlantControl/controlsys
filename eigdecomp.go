@@ -18,10 +18,15 @@ import (
 // G1 + G2 is exact. Singular-E descriptors are split with the ordered
 // generalized Schur form instead; infinite eigenvalues are never selected, so
 // the improper/nondynamic part always stays in G2.
-func decomposeByEigenvalues(sys *System, isGroup1 func(complex128) bool, feedthroughInGroup1 bool) (group1, group2 *System, err error) {
+// op names the exported caller for errors; non-finite models are rejected
+// before the Schur work.
+func decomposeByEigenvalues(op string, sys *System, isGroup1 func(complex128) bool, feedthroughInGroup1 bool) (group1, group2 *System, err error) {
+	if err := requireFiniteSystem(op, sys); err != nil {
+		return nil, nil, err
+	}
 	group1, group2, err = decomposeModes(sys, isGroup1)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%s: %w", op, err)
 	}
 	if feedthroughInGroup1 {
 		group1.D, group2.D = group2.D, group1.D
@@ -47,14 +52,14 @@ func modesAllInGroup1(policy realizationTransformPolicy, group1 *System) (*Syste
 
 func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	if sys.HasDelay() {
-		return nil, nil, fmt.Errorf("controlsys: decomposition does not support delayed systems; use Pade/AbsorbDelay first")
+		return nil, nil, fmt.Errorf("delayed model; use Pade or AbsorbDelay first: %w", ErrDelayUnsupported)
 	}
 	explicit, err := sys.ToExplicit()
 	if errors.Is(err, ErrDescriptorSingular) {
 		return decomposeGeneralized(sys, isGroup1)
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("controlsys: decomposition: %w", err)
+		return nil, nil, err
 	}
 	sys = explicit
 	policy := newRealizationTransformPolicy(sys)
@@ -138,11 +143,11 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	n1, ok := impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, selct, n, s, n, t, n,
 		alphar, alphai, beta, q, n, z, n, work, len(work), bwork)
 	if !ok {
-		return nil, nil, fmt.Errorf("controlsys: decomposition: ordered generalized Schur failed: %w", ErrSchurFailed)
+		return nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 	}
 	for i := range n {
 		if beta[i] == 0 && alphar[i] == 0 && alphai[i] == 0 {
-			return nil, nil, fmt.Errorf("controlsys: decomposition: singular pencil (A, E): %w", ErrDescriptorSingular)
+			return nil, nil, fmt.Errorf("singular pencil (A, E): %w", ErrDescriptorSingular)
 		}
 	}
 	if n1 == 0 {
@@ -178,7 +183,7 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 		syl := make([]float64, max(1, int(query[0])))
 		scale, _, ok := impl.Dtgsyl(blas.NoTrans, 0, n1, n2, s, n, s[n1*n+n1:], n, r, n2, t, n, t[n1*n+n1:], n, l, n2, syl, len(syl), iwork)
 		if !ok || scale < 1e-12 {
-			return nil, nil, fmt.Errorf("controlsys: decomposition: retained and discarded modes cannot be separated reliably: %w", ErrSchurFailed)
+			return nil, nil, fmt.Errorf("retained and discarded modes cannot be separated reliably: %w", ErrSchurFailed)
 		}
 		for i := range r {
 			r[i] /= scale
@@ -232,7 +237,7 @@ func orderSchurGroupFirst(t, z []float64, n int, inGroup func(complex128) bool) 
 		}
 		if i != placed {
 			if _, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, i, placed, work); !ok {
-				return 0, ErrSchurFailed
+				return 0, fmt.Errorf("reordering the Schur form: %w", ErrSchurFailed)
 			}
 		}
 		size = schurBlockSize(t, n, placed)

@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -578,5 +579,31 @@ func TestCovar_ContinuousExternalDelays(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCovarErrorsAreGuardedAndPrefixed(t *testing.T) {
+	unstable, err := New(mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	W := mat.NewDense(1, 1, []float64{1})
+	if _, err := Covar(unstable, W); !errors.Is(err, ErrUnstable) || !strings.HasPrefix(err.Error(), "Covar: ") {
+		t.Errorf("unstable: err = %v, want Covar: ... ErrUnstable", err)
+	}
+	stable, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Covar(stable, mat.NewDense(1, 1, []float64{math.NaN()})); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("NaN W: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := Covar(stable, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil W: err = %v, want ErrInvalidArgument", err)
+	}
+	bad := stable.Copy()
+	bad.A.Set(0, 0, math.NaN())
+	if _, err := Covar(bad, W); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("NaN A: err = %v, want ErrInvalidArgument", err)
 	}
 }

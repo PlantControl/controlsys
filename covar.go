@@ -21,6 +21,9 @@ import (
 // ErrContinuousInternalDelay. A model with no outputs has no covariance and
 // returns ErrDimensionMismatch; with no inputs P is the p×p zero matrix.
 func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
+	if err := requireFiniteSystem("Covar", sys); err != nil {
+		return nil, err
+	}
 	if err := requireStandardCovarianceSystem(sys, "Covar"); err != nil {
 		return nil, err
 	}
@@ -44,7 +47,7 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		return nil, err
 	}
 	if !stable {
-		return nil, ErrUnstable
+		return nil, fmt.Errorf("Covar: system is unstable: %w", ErrUnstable)
 	}
 	if p == 0 {
 		return nil, fmt.Errorf("Covar: model has no outputs: %w", ErrDimensionMismatch)

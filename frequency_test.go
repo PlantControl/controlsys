@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -1690,5 +1691,12 @@ func TestFreqResponseInternalDelayOwnsOmega(t *testing.T) {
 	w[0] = 99
 	if resp.Omega[0] != 1 {
 		t.Errorf("internal-delay FreqResponse.Omega aliases input: %v", resp.Omega)
+	}
+}
+
+func TestComplexSolveErrorsHaveNoDoublePrefix(t *testing.T) {
+	err := cInvertInto(make([]complex128, 4), make([]complex128, 8), []complex128{1, 2, 2, 4}, 2)
+	if !errors.Is(err, ErrSingularTransform) || strings.Count(err.Error(), "controlsys:") != 1 {
+		t.Errorf("cInvertInto singular: err = %v", err)
 	}
 }

@@ -37,7 +37,7 @@ func (p descriptorPolicy) validate(n int) error {
 	}
 	er, ec := p.E.Dims()
 	if er != n || ec != n {
-		return fmt.Errorf("E %dx%d != %dx%d: %w", er, ec, n, n, ErrDimensionMismatch)
+		return fmt.Errorf("descriptor matrix E is %d×%d, want %d×%d: %w", er, ec, n, n, ErrDimensionMismatch)
 	}
 	return nil
 }
@@ -323,11 +323,11 @@ func (sys *System) properExplicitForm() (*System, error) {
 	nf, ok := impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, finite,
 		n, s, n, t, n, alphar, alphai, beta, vsl, n, vsr, n, work, len(work), bwork)
 	if !ok {
-		return nil, fmt.Errorf("controlsys: generalized Schur decomposition failed: %w", ErrDescriptorSingular)
+		return nil, fmt.Errorf("generalized Schur decomposition failed: %w", ErrDescriptorSingular)
 	}
 	ni := n - nf
 	if nf == 0 {
-		if err := storableStaticGain("controlsys: descriptor has no dynamic states", p, m); err != nil {
+		if err := storableStaticGain("descriptor has no dynamic states", p, m); err != nil {
 			return nil, err
 		}
 	}
@@ -355,7 +355,7 @@ func (sys *System) properExplicitForm() (*System, error) {
 		scale, _, ok := impl.Dtgsyl(blas.NoTrans, 0, nf, ni, s, n, s[nf*n+nf:], n, rRaw.Data, rRaw.Stride,
 			t, n, t[nf*n+nf:], n, lRaw.Data, lRaw.Stride, work, len(work), iwork)
 		if !ok || scale == 0 {
-			return nil, fmt.Errorf("controlsys: Weierstrass decoupling failed: %w", ErrDescriptorSingular)
+			return nil, fmt.Errorf("Weierstrass decoupling failed: %w", ErrDescriptorSingular)
 		}
 		r.Scale(1/scale, r)
 		l.Scale(1/scale, l)
@@ -371,11 +371,11 @@ func (sys *System) properExplicitForm() (*System, error) {
 		var lu mat.LU
 		lu.Factorize(extractBlock(S, nf, nf, ni, ni))
 		if luNearSingular(&lu) {
-			return nil, fmt.Errorf("controlsys: singular pencil sE-A: %w", ErrDescriptorSingular)
+			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
 		var b, nilpotent mat.Dense
 		if err := lu.SolveTo(&b, false, extractBlock(&bq, nf, 0, ni, mi)); err != nil {
-			return nil, fmt.Errorf("controlsys: singular pencil sE-A: %w", ErrDescriptorSingular)
+			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
 		e22 := extractBlock(T, nf, nf, ni, ni)
 		e22.Apply(func(_, _ int, v float64) float64 {
@@ -385,10 +385,10 @@ func (sys *System) properExplicitForm() (*System, error) {
 			return v
 		}, e22)
 		if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
-			return nil, fmt.Errorf("controlsys: singular pencil sE-A: %w", ErrDescriptorSingular)
+			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
 		if !algebraicPartStatic(c2, &nilpotent, &b) {
-			return nil, ErrImproperModel
+			return nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 		}
 		var cb mat.Dense
 		cb.Mul(c2, &b)
@@ -406,10 +406,10 @@ func (sys *System) properExplicitForm() (*System, error) {
 		aRed := mat.NewDense(nf, nf, nil)
 		lu.Factorize(extractBlock(T, 0, 0, nf, nf))
 		if err := lu.SolveTo(aRed, false, extractBlock(S, 0, 0, nf, nf)); err != nil {
-			return nil, fmt.Errorf("controlsys: slow subsystem: %w", ErrDescriptorSingular)
+			return nil, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
 		}
 		if err := lu.SolveTo(&bRed, false, b1); err != nil {
-			return nil, fmt.Errorf("controlsys: slow subsystem: %w", ErrDescriptorSingular)
+			return nil, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
 		}
 		out.A = aRed
 		out.B = subDense(&bRed, 0, 0, nf, m)

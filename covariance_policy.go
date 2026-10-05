@@ -19,13 +19,13 @@ const (
 
 func validateCovarianceRole(context string, role covarianceRole, cov *mat.Dense, dim int) error {
 	if cov == nil {
-		return fmt.Errorf("%s: nil %s: %w", context, role, ErrDimensionMismatch)
+		return fmt.Errorf("%s: nil %s: %w", context, role, ErrInvalidArgument)
 	}
 	r, c := cov.Dims()
 	if r != dim || c != dim {
 		return fmt.Errorf("%s: %s is %dx%d, want %dx%d: %w", context, role, r, c, dim, dim, ErrDimensionMismatch)
 	}
-	return nil
+	return requireFiniteDense(context, string(role), cov)
 }
 
 func requireStandardCovarianceSystem(sys *System, context string) error {

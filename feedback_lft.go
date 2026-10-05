@@ -35,7 +35,7 @@ func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
 
 	D1ee := extractBlock(pH.D, 0, 0, p1, m1)
 	D2ee := extractBlock(cH.D, 0, 0, m1, p1)
-	E12, err := solveFeedbackFeedthrough(D2ee, D1ee, sign, m1, "feedback", ErrSingularTransform)
+	E12, err := solveFeedbackFeedthrough(D2ee, D1ee, sign, m1, "Feedback", ErrSingularTransform)
 	if err != nil {
 		return nil, err
 	}
