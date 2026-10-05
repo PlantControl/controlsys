@@ -49,7 +49,7 @@ func TestRuntimeArchitectureSISOLoopAnalysisRejectsMIMOConsistently(t *testing.T
 			return err
 		}},
 		{name: "Pidtune", run: func() error {
-			_, err := Pidtune(sys, PidtunePI)
+			_, err := Pidtune(sys, PidtunePI, 0, nil)
 			return err
 		}},
 	}

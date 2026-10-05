@@ -20,7 +20,7 @@ func newLocalApproximationContract(context string, n, m, p int) localApproximati
 
 func (c localApproximationContract) validateOperatingPoint(x0, u0 *mat.VecDense) error {
 	if x0 == nil || u0 == nil {
-		return fmt.Errorf("%s: nil x0 or u0: %w", c.context, ErrDimensionMismatch)
+		return fmt.Errorf("%s: x0 or u0 is nil: %w", c.context, ErrInvalidArgument)
 	}
 	if x0.Len() != c.n {
 		return fmt.Errorf("%s: x0 length %d != N %d: %w", c.context, x0.Len(), c.n, ErrDimensionMismatch)

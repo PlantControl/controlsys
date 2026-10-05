@@ -23,7 +23,7 @@ func (p realizationTransformPolicy) requireStandard(context string) error {
 
 func (p realizationTransformPolicy) requireDelayFree(context string) error {
 	if p.sys.HasDelay() {
-		return fmt.Errorf("%s: delayed systems are not supported; use Pade/AbsorbDelay first: %w", context, ErrDelayUnsupported)
+		return fmt.Errorf("%s: delayed systems unsupported; use Pade or AbsorbDelay first: %w", context, ErrDelayUnsupported)
 	}
 	return nil
 }

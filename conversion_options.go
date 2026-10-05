@@ -7,7 +7,7 @@ import (
 
 func validateConversionSampleTime(dt float64) error {
 	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
-		return ErrInvalidSampleTime
+		return fmt.Errorf("sample time %g: %w", dt, ErrInvalidSampleTime)
 	}
 	return nil
 }
@@ -20,7 +20,7 @@ func validatePrewarp(dt float64, method C2DMethod, frequency float64) error {
 		return nil
 	}
 	if method != C2DMethodTustin {
-		return fmt.Errorf("prewarp frequency requires Tustin: %w", ErrInvalidConversionOptions)
+		return fmt.Errorf("prewarp frequency requires tustin: %w", ErrInvalidConversionOptions)
 	}
 	if frequency*dt >= math.Pi {
 		return fmt.Errorf("prewarp frequency must be below Nyquist: %w", ErrInvalidConversionOptions)
@@ -40,7 +40,7 @@ func tustinBeta(dt, prewarp float64) (float64, error) {
 		beta = prewarp / math.Tan(x)
 	}
 	if beta <= 0 || math.IsInf(beta, 0) || math.IsNaN(beta) || math.IsInf(2*beta, 0) {
-		return 0, fmt.Errorf("Tustin scaling overflows: %w", ErrOverflow)
+		return 0, fmt.Errorf("tustin scaling overflows: %w", ErrOverflow)
 	}
 	return beta, nil
 }
@@ -64,7 +64,7 @@ func normalizeC2DOptions(dt float64, opts C2DOptions) (C2DOptions, error) {
 		return opts, fmt.Errorf("negative Thiran order: %w", ErrInvalidConversionOptions)
 	}
 	if opts.ThiranOrder > 0 && opts.Method != C2DMethodTustin && opts.Method != C2DMethodMatched {
-		return opts, fmt.Errorf("Thiran order requires Tustin or matched: %w", ErrInvalidConversionOptions)
+		return opts, fmt.Errorf("thiran order requires tustin or matched: %w", ErrInvalidConversionOptions)
 	}
 	if opts.FitOrder < 0 || (opts.FitOrder != 0 && opts.Method != C2DMethodLeastSquares) {
 		return opts, fmt.Errorf("fit order requires least-squares and must be nonnegative: %w", ErrInvalidConversionOptions)

@@ -1,8 +1,10 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -92,7 +94,7 @@ func makePlant(t *testing.T, num, den []float64) *System {
 
 func TestPidtune_PI_FirstOrder(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 1})
-	pid, err := Pidtune(plant, PidtunePI)
+	pid, err := Pidtune(plant, PidtunePI, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +107,7 @@ func TestPidtune_PI_FirstOrder(t *testing.T) {
 
 func TestPidtune_PID_SecondOrder(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 2, 1})
-	pid, err := Pidtune(plant, PidtunePID)
+	pid, err := Pidtune(plant, PidtunePID, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +120,7 @@ func TestPidtune_PID_SecondOrder(t *testing.T) {
 
 func TestPidtune_PI_Integrator(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 0})
-	pid, err := Pidtune(plant, PidtunePI)
+	pid, err := Pidtune(plant, PidtunePI, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +131,7 @@ func TestPidtune_PI_Integrator(t *testing.T) {
 
 func TestPidtune_PI_Unstable(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, -1})
-	pid, err := Pidtune(plant, PidtunePI)
+	pid, err := Pidtune(plant, PidtunePI, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +142,7 @@ func TestPidtune_PI_Unstable(t *testing.T) {
 
 func TestPidtune_PI_CustomCrossover(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 1})
-	pid, err := Pidtune(plant, PidtunePI, PidtuneOptions{CrossoverFrequency: 10})
+	pid, err := Pidtune(plant, PidtunePI, 10, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +164,7 @@ func TestPidtune_PI_CustomCrossover(t *testing.T) {
 
 func TestPidtune_P(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 1})
-	pid, err := Pidtune(plant, PidtuneP)
+	pid, err := Pidtune(plant, PidtuneP, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +180,7 @@ func TestPidtune_P(t *testing.T) {
 
 func TestPidtune_I(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 1})
-	pid, err := Pidtune(plant, PidtuneI)
+	pid, err := Pidtune(plant, PidtuneI, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +196,7 @@ func TestPidtune_I(t *testing.T) {
 
 func TestPidtune_PD(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 2, 1})
-	pid, err := Pidtune(plant, PidtunePD)
+	pid, err := Pidtune(plant, PidtunePD, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +210,7 @@ func TestPidtune_PD(t *testing.T) {
 
 func TestPidtune_PIDF(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 2, 1})
-	pid, err := Pidtune(plant, PidtunePIDF)
+	pid, err := Pidtune(plant, PidtunePIDF, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +226,7 @@ func TestPidtune_PIDF(t *testing.T) {
 
 func TestPidtune_InvalidType(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 1})
-	_, err := Pidtune(plant, PidtuneType("FOO"))
+	_, err := Pidtune(plant, PidtuneType("FOO"), 0, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid type")
 	}
@@ -239,7 +241,7 @@ func TestPidtune_MIMO_Rejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = Pidtune(res.Sys, PidtunePI)
+	_, err = Pidtune(res.Sys, PidtunePI, 0, nil)
 	if err == nil {
 		t.Fatal("expected error for MIMO plant")
 	}
@@ -247,14 +249,14 @@ func TestPidtune_MIMO_Rejected(t *testing.T) {
 
 func TestPidtune_CustomPM(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 1})
-	pid, err := Pidtune(plant, PidtunePI, PidtuneOptions{PhaseMargin: 45})
+	pid, err := Pidtune(plant, PidtunePI, 0, &PidtuneOptions{PhaseMargin: 50})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cl := pidClosedLoop(t, plant, pid)
-	assertStable(t, cl, "PI/pm45")
+	assertStable(t, cl, "PI/pm50")
 	ol := pidOpenLoop(t, plant, pid)
-	assertPhaseMargin(t, ol, 45, 5, "PI/pm45")
+	assertPhaseMargin(t, ol, 50, 1, "PI/pm50")
 }
 
 func pidtuneControllerOracle(pid *PID, w float64) complex128 {
@@ -299,7 +301,7 @@ func TestPidtuneMeetsTargetForContinuousAndDiscretePlants(t *testing.T) {
 	for _, plant := range []*System{cont, disc} {
 		for _, tc := range cases {
 			for _, typ := range tc.types {
-				pid, err := Pidtune(plant, typ, PidtuneOptions{CrossoverFrequency: tc.wc, PhaseMargin: tc.pm})
+				pid, err := Pidtune(plant, typ, tc.wc, &PidtuneOptions{PhaseMargin: tc.pm})
 				if err != nil {
 					t.Fatalf("dt=%g %s: %v", plant.Dt, typ, err)
 				}
@@ -335,7 +337,7 @@ func TestPidtuneRejectsDiscreteCrossoverAboveNyquist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Pidtune(plant, PidtunePI, PidtuneOptions{CrossoverFrequency: math.Pi / 0.1}); err == nil {
+	if _, err := Pidtune(plant, PidtunePI, math.Pi/0.1, nil); err == nil {
 		t.Fatal("expected error for crossover at Nyquist")
 	}
 }
@@ -348,5 +350,37 @@ func TestFindCrossoverFreq_NarrowResonance(t *testing.T) {
 	}
 	if math.Abs(wc-want[0]) > 1e-12 {
 		t.Errorf("crossover %.15g, want %.15g", wc, want[0])
+	}
+}
+
+func TestPidtuneValidatesAndRejectsUnreachableMargin(t *testing.T) {
+	plant := makePlant(t, []float64{1}, []float64{1, 1})
+	for _, wc := range []float64{-3, math.NaN(), math.Inf(1)} {
+		if _, err := Pidtune(plant, PidtunePI, wc, nil); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Pidtune: ") {
+			t.Fatalf("wc=%g err = %v, want ErrInvalidArgument", wc, err)
+		}
+	}
+	for _, pm := range []float64{math.NaN(), -10, 180, 200} {
+		if _, err := Pidtune(plant, PidtunePI, 1, &PidtuneOptions{PhaseMargin: pm}); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("pm=%g err = %v, want ErrInvalidArgument", pm, err)
+		}
+	}
+	// PI phase lies in (-90°, 0°); PM 179° at wc=1 needs +44°.
+	if _, err := Pidtune(plant, PidtunePI, 1, &PidtuneOptions{PhaseMargin: 179}); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Fatalf("unreachable PI margin err = %v", err)
+	}
+	// PD phase lies in (0°, 90°); PM 30° at wc=1 needs -105°.
+	if _, err := Pidtune(plant, PidtunePD, 1, &PidtuneOptions{PhaseMargin: 30}); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Fatalf("unreachable PD margin err = %v", err)
+	}
+	if _, err := Pidtune(plant, "FOO", 1, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("unknown type err = %v", err)
+	}
+	if _, err := Pidtune(nil, PidtunePI, 1, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil plant err = %v", err)
+	}
+	gain, _ := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if _, err := Pidtune(gain, PidtunePI, 0, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("static gain auto wc err = %v, want ErrInvalidArgument (no crossover to infer)", err)
 	}
 }

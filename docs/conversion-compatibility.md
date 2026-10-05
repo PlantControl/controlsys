@@ -48,15 +48,15 @@ into the augmented model (approximate). Tustin/matched with Thiran realize
 nondecomposable fractional MIMO path delays by copying the model per fractional
 row or column (see [conversion-delay-methods.md](conversion-delay-methods.md)).
 
-`C2DMap`, `D2CMap`, and `D2D` return the converted
-model, method, approximation flag, added-state warnings, and initial-state map.
-`C2DMap G` validates dimensions and finite values and accepts source state,
-initial input, and internal delay output. Ordinary ZOH/FOH/Tustin and retained
-Tustin internal ports have mappings. Integer ZOH histories append zero states.
-Fractional delay histories and matched/fitted coordinates can lack a mapping;
-nonzero initial conditions are refused where unsupported. Delay history still
-requires separate initialization. Reverse conversion cannot recover aliased
-frequencies.
+`C2DMap` and `D2CMap` return the converted model and the initial-condition
+map G of MATLAB `[sysd,G] = c2d(...)` / `[sysc,G] = d2c(...)`, applied to
+source state, initial input and internal delay output. Ordinary ZOH/FOH/Tustin
+and retained Tustin internal ports have maps. Integer ZOH histories append zero
+states. Fractional delay histories and matched/fitted coordinates have no exact
+map, so `C2DMap`/`D2CMap` return ErrOptionUnsupported (use `C2D`/`D2C` with zero
+initial conditions). Delay history still requires separate initialization.
+Reverse conversion cannot recover aliased frequencies. `D2D` has no map, as in
+MATLAB; compose `D2CMap` and `C2DMap` when one is needed.
 
 Descriptor models with nonsingular E are converted in explicit form (E\A,
 E\B and internal-delay E\B2; state coordinates unchanged); singular E is

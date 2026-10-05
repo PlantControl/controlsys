@@ -169,7 +169,7 @@ func isDelayWarning(w string) bool { return strings.Contains(w, "delay") }
 
 func pidTuningOpenLoop(t *testing.T, plant *System, c *PID2) *System {
 	t.Helper()
-	cs, err := NewPID(c.Kp, c.Ki, c.Kd, WithFilter(c.Tf)).System()
+	cs, err := mustPID(t, c.Kp, c.Ki, c.Kd, c.Tf, 0).System()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestTunePIDGainCrossingEvidenceIndependentMargin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	controller := NewPID(r.Controller.Kp, r.Controller.Ki, 0)
+	controller := mustPID(t, r.Controller.Kp, r.Controller.Ki, 0, 0, 0)
 	loop := pidOpenLoop(t, p, controller)
 	margin, err := Margin(loop)
 	if err != nil {

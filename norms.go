@@ -40,7 +40,7 @@ func Norm(sys *System, normType float64) (float64, error) {
 		norm, _, err := linfNorm(sys)
 		return norm, err
 	}
-	return 0, fmt.Errorf("controlsys: normType must be 2 or Inf, got %g", normType)
+	return 0, fmt.Errorf("Norm: normType is %g, want 2 or Inf: %w", normType, ErrInvalidArgument)
 }
 
 // H2Norm computes the H2 norm of a stable LTI system.
@@ -281,14 +281,18 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 
 	poles, err := sys.Poles()
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("HinfNorm: %w", err)
 	}
 	for _, pole := range poles {
 		if poleOnOrOutsideStabilityBoundary(pole, sys.IsContinuous(), poleStabilityTolerance(pole)) {
 			return math.Inf(1), math.Inf(1), nil
 		}
 	}
-	return peakGain(sys, poles)
+	norm, omega, err = peakGain(sys, poles)
+	if err != nil {
+		return 0, 0, fmt.Errorf("HinfNorm: %w", err)
+	}
+	return norm, omega, nil
 }
 
 // linfNorm returns the L∞ norm (peak gain regardless of stability) and the
@@ -312,7 +316,7 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 	}
 	poles, err := sys.Poles()
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("Norm: %w", err)
 	}
 	for _, pole := range poles {
 		if !poleOnStabilityBoundary(pole, sys.IsContinuous(), poleStabilityTolerance(pole)) {
@@ -323,7 +327,11 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 		}
 		return math.Inf(1), math.Abs(cmplx.Phase(pole)) / sys.Dt, nil
 	}
-	return peakGain(sys, poles)
+	norm, omega, err = peakGain(sys, poles)
+	if err != nil {
+		return 0, 0, fmt.Errorf("Norm: %w", err)
+	}
+	return norm, omega, nil
 }
 
 // peakGain computes sup_ω σ_max(G(jω)) (G(e^{jωT}) for discrete models) of a

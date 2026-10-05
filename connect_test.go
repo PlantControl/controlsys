@@ -1981,8 +1981,8 @@ func TestBlkDiag_Empty(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 0 args")
 	}
-	if !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("got %v, want ErrDimensionMismatch", err)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("got %v, want ErrInvalidArgument", err)
 	}
 }
 

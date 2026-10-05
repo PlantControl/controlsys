@@ -203,7 +203,7 @@ func TestPRD103FrequencyAnalysisSampledResponseParity(t *testing.T) {
 	if _, err := Margin(delayed); err != nil {
 		t.Fatalf("delayed SISO Margin failed: %v", err)
 	}
-	if _, err := Pidtune(delayed, PidtunePI); err != nil {
+	if _, err := Pidtune(delayed, PidtunePI, 0, nil); err != nil {
 		t.Fatalf("delayed SISO Pidtune failed: %v", err)
 	}
 }

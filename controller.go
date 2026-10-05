@@ -73,7 +73,8 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 // MATLAB: the augmented descriptor is blkdiag(E, I), K is the gain of the
 // explicit model (E⁻¹A, E⁻¹B, C, D) and X solves its Riccati equation.
 //
-// Plants without states, inputs or outputs return ErrDimensionMismatch,
+// Nil Q or R returns ErrInvalidArgument; plants without states, inputs or
+// outputs return ErrDimensionMismatch,
 // asymmetric Q or R ErrNotSymmetric, singular E ErrDescriptorSingular,
 // opts.E ErrOptionUnsupported and plants with delays ErrDelayUnsupported.
 func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -89,7 +90,7 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		return nil, err
 	}
 	if Q == nil || R == nil {
-		return nil, fmt.Errorf("Lqi: nil weight: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("Lqi: Q or R is nil: %w", ErrInvalidArgument)
 	}
 	if qr, qc := Q.Dims(); qr != n+p || qc != n+p {
 		return nil, fmt.Errorf("Lqi: Q is %dx%d, want %dx%d: %w", qr, qc, n+p, n+p, ErrDimensionMismatch)
@@ -134,7 +135,7 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 		return nil, fmt.Errorf("Lqrd: opts.E: %w", ErrOptionUnsupported)
 	}
 	if dt <= 0 || newTimeDomain(dt).validateSampleTime() != nil {
-		return nil, ErrInvalidSampleTime
+		return nil, fmt.Errorf("Lqrd: sample time %g: %w", dt, ErrInvalidSampleTime)
 	}
 	if err := requireFiniteDense("Lqrd", "A", A); err != nil {
 		return nil, err
@@ -150,18 +151,18 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 	}
 	na, nac := A.Dims()
 	if na != nac {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Lqrd: A is %d×%d, want square: %w", na, nac, ErrDimensionMismatch)
 	}
 	nb, m := B.Dims()
 	if nb != na {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Lqrd: B has %d rows, want %d: %w", nb, na, ErrDimensionMismatch)
 	}
 	n := na
 	if qr, qc := Q.Dims(); qr != n || qc != n {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Lqrd: Q is %d×%d, want %d×%d: %w", qr, qc, n, n, ErrDimensionMismatch)
 	}
 	if rr, rc := R.Dims(); rr != m || rc != m {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Lqrd: R is %d×%d, want %d×%d: %w", rr, rc, m, m, ErrDimensionMismatch)
 	}
 	var N *mat.Dense
 	if opts != nil && opts.S != nil {
@@ -170,12 +171,12 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 			return nil, err
 		}
 		if sr, sc := N.Dims(); sr != n || sc != m {
-			return nil, ErrDimensionMismatch
+			return nil, fmt.Errorf("Lqrd: opts.S is %d×%d, want %d×%d: %w", sr, sc, n, m, ErrDimensionMismatch)
 		}
 	}
 
 	if n == 0 {
-		return nil, fmt.Errorf("Lqrd: no states: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("Lqrd: system has no states: %w", ErrDimensionMismatch)
 	}
 
 	nm := n + m
@@ -262,24 +263,24 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	}
 	na, nac := A.Dims()
 	if na != nac {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Acker: A is %d×%d, want square: %w", na, nac, ErrDimensionMismatch)
 	}
 	nb, m := B.Dims()
 	if nb != na {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Acker: B has %d rows, want %d: %w", nb, na, ErrDimensionMismatch)
 	}
 	if na == 0 {
 		return nil, fmt.Errorf("Acker: system has no states: %w", ErrDimensionMismatch)
 	}
 	if m != 1 {
-		return nil, ErrNotSISO
+		return nil, fmt.Errorf("Acker: B has %d columns, want 1: %w", m, ErrNotSISO)
 	}
 	n := na
 	if len(poles) != n {
-		return nil, ErrPoleCount
+		return nil, fmt.Errorf("Acker: %d poles for %d states: %w", len(poles), n, ErrPoleCount)
 	}
 	if err := validatePoles(poles); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Acker: %w", err)
 	}
 
 	p := polyFromComplexRoots(sortConjugatePairs(poles))
@@ -364,26 +365,26 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	}
 	na, nac := A.Dims()
 	if na != nac {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Place: A is %d×%d, want square: %w", na, nac, ErrDimensionMismatch)
 	}
 	nb, m := B.Dims()
 	if nb != na {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Place: B has %d rows, want %d: %w", nb, na, ErrDimensionMismatch)
 	}
 	n := na
 	if n == 0 {
 		return nil, fmt.Errorf("Place: system has no states: %w", ErrDimensionMismatch)
 	}
 	if len(poles) != n {
-		return nil, ErrPoleCount
+		return nil, fmt.Errorf("Place: %d poles for %d states: %w", len(poles), n, ErrPoleCount)
 	}
 	if err := validatePoles(poles); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Place: %w", err)
 	}
 
 	var svd mat.SVD
 	if !svd.Factorize(B, mat.SVDFull) {
-		return nil, ErrSchurFailed
+		return nil, fmt.Errorf("Place: SVD of B did not converge: %w", ErrSchurFailed)
 	}
 	sv := svd.Values(nil)
 	r := 0
@@ -396,14 +397,18 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 		return nil, fmt.Errorf("Place: %w", ErrUncontrollable)
 	}
 	if maxPoleMultiplicity(poles) > r {
-		return nil, ErrPoleMultiplicity
+		return nil, fmt.Errorf("Place: pole multiplicity %d exceeds rank(B) = %d: %w", maxPoleMultiplicity(poles), r, ErrPoleMultiplicity)
 	}
 	if r >= 2 {
 		if K := placeKNV(A, &svd, sv[:r], poles); K != nil {
 			return K, nil
 		}
 	}
-	return placeSchur(A, B, poles)
+	K, err := placeSchur(A, B, poles)
+	if err != nil {
+		return nil, fmt.Errorf("Place: %w", err)
+	}
+	return K, nil
 }
 
 // placeSchur is Varga's Schur-based pole placement: deflating assignment of
@@ -430,7 +435,7 @@ func placeSchur(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
 		n, t, n, wr, wi, z, n, work, lwork, bwork)
 	if !ok {
-		return nil, ErrSchurFailed
+		return nil, fmt.Errorf("real Schur decomposition of A did not converge: %w", ErrSchurFailed)
 	}
 
 	bRaw := B.RawMatrix()
@@ -458,7 +463,7 @@ func placeSchur(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 			return nil
 		}
 		if _, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, from, to, trexcWork); !ok {
-			return ErrSchurFailed
+			return fmt.Errorf("Schur block reordering failed: %w", ErrSchurFailed)
 		}
 		updateBhat()
 		return nil
@@ -488,7 +493,7 @@ func placeSchur(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 				j += 2
 			}
 			if j >= n-1 {
-				return nil, ErrSchurFailed
+				return nil, fmt.Errorf("no 2×2 Schur block left for a complex pole pair: %w", ErrConjugatePairs)
 			}
 			if err := moveBlock(j, n-1); err != nil {
 				return nil, err
@@ -541,7 +546,7 @@ func placeAssign1x1(t, z, bhat, fData, fBuf []float64, desired float64, n, m, k 
 		blas64.Vector{N: m, Data: bhat[k*m:], Inc: 1},
 		blas64.Vector{N: m, Data: bhat[k*m:], Inc: 1})
 	if bkNorm2 < eps()*eps() {
-		return fmt.Errorf("Place: mode %d: %w", k, ErrUncontrollable)
+		return fmt.Errorf("mode %d: %w", k, ErrUncontrollable)
 	}
 
 	delta := curEig - desired
@@ -591,7 +596,7 @@ func placeAssign2x2(t, z, bhat, fData, fBuf []float64, p1, p2 complex128, n, m, 
 	fBlock := fBuf[:2*m]
 	if !placeMultiInput2x2(fBlock, b0, b1, t11, t12, t21, t22, p1, p2, m) &&
 		!placeSingleInput2x2(fBlock, b0, b1, t11, t12, t21, t22, tNorm, p1, p2, m) {
-		return fmt.Errorf("Place: mode %d: %w", k, ErrUncontrollable)
+		return fmt.Errorf("mode %d: %w", k, ErrUncontrollable)
 	}
 
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, -1,

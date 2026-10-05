@@ -46,8 +46,8 @@ type LeastSquaresFit struct {
 // improper descriptor models are rejected. A finite grid cannot certify intersample error
 // or capture arbitrarily narrow resonances. No exact inverse is promised.
 func (sys *System) C2DFit(dt float64, opts C2DOptions) (*System, LeastSquaresFit, error) {
-	if sys == nil {
-		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: system is nil: %w", ErrInvalidArgument)
+	if err := requireFiniteSystem("C2DFit", sys); err != nil {
+		return nil, LeastSquaresFit{}, err
 	}
 	if opts.Method != C2DMethodLeastSquares {
 		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: method %q is not least-squares: %w", opts.Method, ErrOptionUnsupported)
@@ -74,7 +74,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 	if _, m, p := sys.Dims(); m != 1 || p != 1 {
 		return nil, none, ErrNotSISO
 	}
-	sys, _, err := conversionStandardForm(sys, "C2D")
+	sys, _, err := conversionStandardForm(sys, "descriptor reduction")
 	if err != nil {
 		return nil, none, err
 	}
@@ -233,7 +233,7 @@ func leastSquaresSourceResponse(source *System, omega []float64) ([]complex128, 
 	}
 	for _, h := range response.Data {
 		if cmplx.IsInf(h) || cmplx.IsNaN(h) {
-			return nil, fmt.Errorf("C2D: singular or nonfinite source frequency response: %w", ErrSingularTransform)
+			return nil, fmt.Errorf("least-squares: singular or nonfinite source frequency response: %w", ErrSingularTransform)
 		}
 	}
 	return response.Data, nil

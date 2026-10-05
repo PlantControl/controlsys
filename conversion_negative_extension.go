@@ -24,12 +24,12 @@ func (sys *System) compressZOHRealExtension(re, im, rb, ib *mat.Dense, aliases i
 	}
 	var svd mat.SVD
 	if !svd.Factorize(im, mat.SVDThinU) {
-		return nil, fmt.Errorf("D2C zoh: negative-subspace factorization failed: %w", ErrSingularTransform)
+		return nil, fmt.Errorf("zoh: negative-subspace factorization failed: %w", ErrSingularTransform)
 	}
 	values := svd.Values(nil)
 	tolerance := 1e-9 * values[0]
 	if values[aliases-1] <= tolerance || (aliases < n && values[aliases] > tolerance) {
-		return nil, fmt.Errorf("D2C zoh: unresolved negative spectral subspace: %w", ErrSingularTransform)
+		return nil, fmt.Errorf("zoh: unresolved negative spectral subspace: %w", ErrSingularTransform)
 	}
 	var u mat.Dense
 	svd.UTo(&u)
@@ -45,7 +45,7 @@ func (sys *System) compressZOHRealExtension(re, im, rb, ib *mat.Dense, aliases i
 	reCoordinates.Mul(basis.T(), &reBasis)
 	reReconstructed.Mul(basis, &reCoordinates)
 	if !zohExtensionResidual(im, &imReconstructed) || !zohExtensionResidual(&reBasis, &reReconstructed) {
-		return nil, fmt.Errorf("D2C zoh: negative subspace is not invariant within numerical precision: %w", ErrSingularTransform)
+		return nil, fmt.Errorf("zoh: negative subspace is not invariant within numerical precision: %w", ErrSingularTransform)
 	}
 	var ibCoordinates mat.Dense
 	if m > 0 {
@@ -53,7 +53,7 @@ func (sys *System) compressZOHRealExtension(re, im, rb, ib *mat.Dense, aliases i
 		ibCoordinates.Mul(basis.T(), ib)
 		reconstructed.Mul(basis, &ibCoordinates)
 		if !zohExtensionResidual(ib, &reconstructed) {
-			return nil, fmt.Errorf("D2C zoh: input lies outside the negative spectral subspace: %w", ErrSingularTransform)
+			return nil, fmt.Errorf("zoh: input lies outside the negative spectral subspace: %w", ErrSingularTransform)
 		}
 	}
 	var imBasis mat.Dense

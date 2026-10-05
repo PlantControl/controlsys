@@ -448,7 +448,7 @@ func BenchmarkSimulateNoDelay(b *testing.B) {
 func BenchmarkThiranDelay(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ThiranDelay(0.35, 3, 0.1)
+		thiranDelay(0.35, 3, 0.1)
 	}
 }
 

@@ -7,11 +7,17 @@ import (
 	"strings"
 )
 
+// PidtuneOptions holds the optional settings of Pidtune, as MATLAB
+// pidtuneOptions; nil or zero fields select the defaults.
 type PidtuneOptions struct {
-	CrossoverFrequency float64
-	PhaseMargin        float64
+	// PhaseMargin is the target phase margin in degrees, in (0, 180). 0
+	// means a best-effort 60°; an explicit margin the controller family
+	// cannot reach at wc returns ErrPIDTuningTargetUnattainable.
+	PhaseMargin float64
 }
 
+// PidtuneType names a PID controller family, as the MATLAB pidtune type
+// argument; case is ignored.
 type PidtuneType string
 
 const (
@@ -24,41 +30,83 @@ const (
 	PidtunePIDF PidtuneType = "PIDF"
 )
 
-// Pidtune places the loop crossover and phase margin using the realized
-// controller response: discrete plants use the discrete PID terms, and a
-// discrete PID without filter uses a backward-Euler derivative to stay causal.
-func Pidtune(plant *System, pidType PidtuneType, opts ...PidtuneOptions) (*PID, error) {
-	if _, err := newSISOLoopModel(plant, "pidtune"); err != nil {
+// Pidtune tunes a PID of family pidType for the SISO plant at crossover wc,
+// as MATLAB pidtune(sys,type,wc,opts)
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.pidtune.html).
+// wc = 0 picks the crossover from the plant; a negative or non-finite wc, or
+// a phase margin outside (0, 180), returns ErrInvalidArgument. The loop
+// crossover and phase margin are placed using the realized controller
+// response: discrete plants use the discrete PID terms, and a discrete PID
+// without filter uses a backward-Euler derivative to stay causal. An
+// explicitly requested phase margin the family cannot reach at wc returns
+// ErrPIDTuningTargetUnattainable instead of a controller with a different
+// margin. TunePID offers bounded search with achieved-target evidence.
+func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
+	if err := requireFiniteSystem("Pidtune", plant); err != nil {
 		return nil, err
 	}
-
-	var opt PidtuneOptions
-	if len(opts) > 0 {
-		opt = opts[0]
+	if _, err := newSISOLoopModel(plant, "Pidtune"); err != nil {
+		return nil, err
 	}
-	if opt.PhaseMargin == 0 {
-		opt.PhaseMargin = 60
+	if !finitePID(wc) || wc < 0 {
+		return nil, fmt.Errorf("Pidtune: wc %g must be finite and nonnegative (0 = automatic): %w", wc, ErrInvalidArgument)
+	}
+	pm, explicit := 60.0, false
+	if opts != nil && opts.PhaseMargin != 0 {
+		pm, explicit = opts.PhaseMargin, true
+	}
+	if !finitePID(pm) || pm <= 0 || pm >= 180 {
+		return nil, fmt.Errorf("Pidtune: phase margin %g must be in (0, 180) degrees: %w", pm, ErrInvalidArgument)
 	}
 
 	pidType = PidtuneType(strings.ToUpper(string(pidType)))
 	switch pidType {
 	case PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF:
 	default:
-		return nil, fmt.Errorf("pidtune: unsupported type %q", pidType)
+		return nil, fmt.Errorf("Pidtune: unsupported type %q: %w", pidType, ErrInvalidArgument)
 	}
 
-	wc, err := findCrossoverFreq(plant, opt.CrossoverFrequency)
+	wc, err := findCrossoverFreq(plant, wc)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
 
-	pid, err := computePIDGains(plant, pidType, wc, opt.PhaseMargin)
+	pid, err := computePIDGains(plant, pidType, wc, pm)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
 	pid.Dt = plant.Dt
-
+	if explicit {
+		if err := checkPidtuneMargin(plant, pid, wc, pm); err != nil {
+			return nil, fmt.Errorf("Pidtune: %w", err)
+		}
+	}
 	return pid, nil
+}
+
+const pidtuneMarginTol = 0.5
+
+// checkPidtuneMargin rejects a design whose phase margin at wc differs from
+// the requested one, which happens when the family's phase range had to be
+// clamped.
+func checkPidtuneMargin(plant *System, pid *PID, wc, pm float64) error {
+	h, err := evalPlantAt(plant, wc)
+	if err != nil {
+		return err
+	}
+	terms := pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: pid.DFormula}
+	c := complex(pid.Kp, 0) + complex(pid.Ki, 0)*terms.integral()
+	if pid.Kd != 0 {
+		c += complex(pid.Kd, 0) * terms.derivative(pid.Tf)
+	}
+	achieved := 180 + cmplx.Phase(h*c)*180/math.Pi
+	if achieved > 180 {
+		achieved -= 360
+	}
+	if math.Abs(achieved-pm) > pidtuneMarginTol {
+		return fmt.Errorf("phase margin %g° unreachable by this family at wc=%g (achievable %.3g°): %w", pm, wc, achieved, ErrPIDTuningTargetUnattainable)
+	}
+	return nil
 }
 
 func findCrossoverFreq(plant *System, wcTarget float64) (float64, error) {
@@ -75,11 +123,17 @@ func findCrossoverFreq(plant *System, wcTarget float64) (float64, error) {
 	}
 
 	bw, err := Bandwidth(plant, -3)
-	if err == nil && bw > 0 && !math.IsInf(bw, 0) {
+	if err != nil {
+		return 0, err
+	}
+	if bw > 0 && !math.IsInf(bw, 0) {
 		return bw, nil
 	}
 
-	poles, _ := plant.Poles()
+	poles, err := plant.Poles()
+	if err != nil {
+		return 0, err
+	}
 	if len(poles) > 0 {
 		minW := math.Inf(1)
 		for _, pole := range poles {
@@ -93,15 +147,15 @@ func findCrossoverFreq(plant *System, wcTarget float64) (float64, error) {
 		}
 	}
 
-	return 1.0, nil
+	return 0, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
 }
 
-func evalPlantAt(plant *System, w float64) complex128 {
+func evalPlantAt(plant *System, w float64) (complex128, error) {
 	resp, err := plant.FreqResponse([]float64{w})
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return resp.At(0, 0, 0)
+	return resp.At(0, 0, 0), nil
 }
 
 // pidtuneTerms evaluates the realized controller terms at the crossover so
@@ -127,14 +181,17 @@ func (t pidtuneTerms) derivative(tf float64) complex128 {
 
 func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg float64) (*PID, error) {
 	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
-		return nil, fmt.Errorf("pidtune: crossover %g must be below the Nyquist frequency %g", wc, math.Pi/plant.Dt)
+		return nil, fmt.Errorf("crossover %g must be below the Nyquist frequency %g: %w", wc, math.Pi/plant.Dt, ErrInvalidArgument)
 	}
-	h := evalPlantAt(plant, wc)
+	h, err := evalPlantAt(plant, wc)
+	if err != nil {
+		return nil, err
+	}
 	magP := cmplx.Abs(h)
 	phaseP := cmplx.Phase(h) * 180 / math.Pi
 
 	if magP == 0 || math.IsNaN(magP) || math.IsInf(magP, 0) {
-		return nil, fmt.Errorf("pidtune: plant has zero or infinite gain at wc=%g", wc)
+		return nil, fmt.Errorf("plant has zero or infinite gain at wc=%g: %w", wc, ErrPIDTuningTargetUnattainable)
 	}
 
 	phiC := -180 + pmDeg - phaseP
@@ -172,7 +229,7 @@ func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg float64) (*PI
 		pid.Kd = imag(target) / imag(d)
 		pid.Kp = real(target) - pid.Kd*real(d)
 		if pid.Kp < 0 || pid.Kd < 0 {
-			return nil, fmt.Errorf("pidtune: requested phase is unattainable by a positive-gain PDF at wc=%g", wc)
+			return nil, fmt.Errorf("requested phase is unattainable by a positive-gain PDF at wc=%g: %w", wc, ErrPIDTuningTargetUnattainable)
 		}
 	case PidtunePID:
 		computePID(pid, terms, magP, phiC)
@@ -241,7 +298,7 @@ func pidFromPhase(terms pidtuneTerms, magP, phiCRad, b float64) (Kp, Ki, Kd floa
 		det := a11*a22 - a12*a21
 		kp = (real(target)*a22 - a12*imag(target)) / det
 		kd = (a11*imag(target) - a21*real(target)) / det
-		return
+		return kp, kd
 	}
 
 	ratio := terms.wc / b
@@ -261,7 +318,7 @@ func pidFromPhase(terms pidtuneTerms, magP, phiCRad, b float64) (Kp, Ki, Kd floa
 		Kp = real(target) / (1 + ratio*real(i))
 		Ki = Kp * ratio
 	}
-	return
+	return Kp, Ki, Kd
 }
 
 func computePID(pid *PID, terms pidtuneTerms, magP, phiC float64) {

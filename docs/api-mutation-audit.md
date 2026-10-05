@@ -335,8 +335,6 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 
 | API | Classification | Audit note |
 | --- | --- | --- |
-| `WithFilter` | `mutates` | Option closure mutates `PID` during construction. |
-| `WithTs` | `mutates` | Option closure mutates `PID` during construction. |
 | `NewPID` | `returns-mutable` | Returns public mutable `PID`. |
 | `NewPIDStd` | `returns-mutable` | Returns public mutable `PID`. |
 | `NewPID2` | `returns-mutable` | Returns public mutable `PID2`. |

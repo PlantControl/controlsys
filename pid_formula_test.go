@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -9,7 +10,7 @@ import (
 func TestPIDIndependentDiscreteFormulas(t *testing.T) {
 	for _, fi := range []PIDFormula{ForwardEuler, BackwardEuler, Trapezoidal} {
 		for _, fd := range []PIDFormula{ForwardEuler, BackwardEuler, Trapezoidal} {
-			p := NewPID2(2, 3, .4, .7, .6, .2, WithTs(.1), WithPIDFormulas(fi, fd))
+			p := mustPID2(t, 2, 3, .4, .7, .6, .2, .1, WithPIDFormulas(fi, fd))
 			sys, err := p.System()
 			if err != nil {
 				t.Fatal(err)
@@ -65,7 +66,7 @@ func TestPIDIndependentDiscreteFormulas(t *testing.T) {
 
 func TestPIDIdealDerivativeAndValidation(t *testing.T) {
 	for _, f := range []PIDFormula{ForwardEuler, BackwardEuler, Trapezoidal} {
-		p := NewPID(1, 0, 2, WithTs(.1), WithPIDFormulas(f, f))
+		p := mustPID(t, 1, 0, 2, 0, .1, WithPIDFormulas(f, f))
 		sys, err := p.System()
 		if f == ForwardEuler {
 			if err == nil {
@@ -90,32 +91,53 @@ func TestPIDIdealDerivativeAndValidation(t *testing.T) {
 			t.Fatalf("ideal derivative %v != %v", h.At(0, 0, 0), want)
 		}
 	}
-	if _, err := NewPID(1, 0, 1).System(); err == nil {
+	if _, err := mustPID(t, 1, 0, 1, 0, 0).System(); err == nil {
 		t.Fatal("continuous ideal derivative must be explicit improper error")
 	}
-	for _, p := range []*PID{NewPID(math.NaN(), 0, 0), NewPID(1, 0, 0, WithTs(-1)), NewPID(1, 0, 0, WithFilter(-1)), NewPID(1, 0, 0, WithPIDFormulas(7, 0))} {
-		if _, err := p.System(); err == nil {
-			t.Fatalf("invalid parameters accepted: %+v", p)
+	for _, p := range []*PID{{Kp: math.NaN()}, {Kp: 1, Dt: -1}, {Kp: 1, Tf: -1}, {Kp: 1, IFormula: 7}} {
+		if _, err := p.System(); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("invalid parameters accepted: %+v: %v", p, err)
 		}
+	}
+	for _, args := range [][5]float64{{math.NaN(), 0, 0, 0, 0}, {1, math.Inf(1), 0, 0, 0}, {1, 0, 0, 0, -1}, {1, 0, 0, -1, 0}, {1, 0, 0, math.NaN(), 0}} {
+		if _, err := NewPID(args[0], args[1], args[2], args[3], args[4]); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("NewPID%v err = %v, want ErrInvalidArgument", args, err)
+		}
+	}
+	if _, err := NewPID(1, 0, 0, 0, 0, WithPIDFormulas(7, 0)); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("unknown formula err = %v", err)
 	}
 }
 
 func TestPIDStandardZeroTermsPreserveFormulas(t *testing.T) {
 	for _, g := range [][3]float64{{0, 0, 0}, {2, 0, 0}, {2, 0, 3}, {2, 4, 0}} {
-		p := NewPID(g[0], g[1], g[2], WithFilter(.2), WithTs(.1), WithPIDFormulas(BackwardEuler, Trapezoidal))
+		p := mustPID(t, g[0], g[1], g[2], .2, .1, WithPIDFormulas(BackwardEuler, Trapezoidal))
 		standard, err := p.Standard()
 		if err != nil {
 			t.Fatal(err)
 		}
-		roundtrip, err := NewPIDStd(standard.Kp, standard.Ti(), standard.Td(), WithFilter(standard.Tf), WithTs(standard.Dt), WithPIDFormulas(standard.IFormula, standard.DFormula))
+		ti, okI := standard.Ti()
+		td, okD := standard.Td()
+		if !okI || !okD {
+			t.Fatalf("%v: standard form undefined", g)
+		}
+		N := math.Inf(1)
+		if td != 0 {
+			N = td / standard.Tf
+		}
+		roundtrip, err := NewPIDStd(standard.Kp, ti, td, N, standard.Dt, WithPIDFormulas(standard.IFormula, standard.DFormula))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if *p != *roundtrip.Parallel() {
-			t.Fatalf("lost form conversion: %+v -> %+v", p, roundtrip)
+		want := *p
+		if want.Kd == 0 {
+			want.Tf = 0
+		}
+		if want != *roundtrip.Parallel() {
+			t.Fatalf("lost form conversion: %+v -> %+v", want, roundtrip)
 		}
 	}
-	for _, p := range []*PID{NewPID(0, 1, 0), NewPID(0, 0, 1)} {
+	for _, p := range []*PID{mustPID(t, 0, 1, 0, 0, 0), mustPID(t, 0, 0, 1, 0, 0)} {
 		if _, err := p.Standard(); err == nil {
 			t.Fatal("singular conversion accepted")
 		}
@@ -124,7 +146,7 @@ func TestPIDStandardZeroTermsPreserveFormulas(t *testing.T) {
 
 func TestPidtunePDFIndependentTarget(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, 3, 3, 1})
-	p, err := Pidtune(plant, PidtunePDF, PidtuneOptions{CrossoverFrequency: 1, PhaseMargin: 60})
+	p, err := Pidtune(plant, PidtunePDF, 1, &PidtuneOptions{PhaseMargin: 60})
 	if err != nil {
 		t.Fatal(err)
 	}
