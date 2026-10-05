@@ -3754,7 +3754,10 @@ func TestSimulateWithDelay_MIMOManualReference(t *testing.T) {
 			mat.Formatted(got.Y), mat.Formatted(wantY))
 	}
 	if got.XFinal != nil {
-		t.Errorf("XFinal = %v, want nil: Delay has no input+output split", mat.Formatted(got.XFinal))
+		t.Errorf("XFinal = %v, want nil when not requested", mat.Formatted(got.XFinal))
+	}
+	if _, err := sys.Simulate(u, x0, &SimulateOpts{FinalState: true}); !errors.Is(err, ErrDelayUnsupported) {
+		t.Errorf("FinalState err = %v, want ErrDelayUnsupported: Delay has no input+output split", err)
 	}
 }
 

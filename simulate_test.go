@@ -43,7 +43,7 @@ func TestSimulateManualPropagation(t *testing.T) {
 	u := mat.NewDense(1, 3, []float64{1, 2, 3})
 	x0 := mat.NewVecDense(2, []float64{0.5, -0.3})
 
-	r, err := sys.Simulate(u, x0, nil)
+	r, err := sys.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,17 +90,17 @@ func TestSimulateChaining(t *testing.T) {
 	u1 := mat.NewDense(1, 3, []float64{1, 2, 3})
 	u2 := mat.NewDense(1, 2, []float64{4, 5})
 
-	r1, err := sys.Simulate(u1, nil, nil)
+	r1, err := sys.Simulate(u1, nil, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, err := sys.Simulate(u2, r1.XFinal, nil)
+	r2, err := sys.Simulate(u2, r1.XFinal, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	uAll := mat.NewDense(1, 5, []float64{1, 2, 3, 4, 5})
-	rAll, err := sys.Simulate(uAll, nil, nil)
+	rAll, err := sys.Simulate(uAll, nil, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,10 @@ func TestSimulatePureFeedthrough(t *testing.T) {
 		t.Errorf("feedthrough Y mismatch\ngot:  %v\nwant: %v", mat.Formatted(r.Y), mat.Formatted(wantY))
 	}
 	if r.XFinal != nil {
-		t.Errorf("expected nil XFinal for n=0, got %v", r.XFinal)
+		t.Errorf("expected nil XFinal when not requested, got %v", r.XFinal)
+	}
+	if _, err := sys.Simulate(u, nil, &SimulateOpts{FinalState: true}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("n=0 FinalState err = %v, want ErrDimensionMismatch", err)
 	}
 }
 
@@ -158,7 +161,7 @@ func TestSimulateNoInputs(t *testing.T) {
 
 	x0 := mat.NewVecDense(2, []float64{4, 8})
 
-	r, err := sys.Simulate(nil, x0, nil)
+	r, err := sys.Simulate(nil, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +187,7 @@ func TestSimulateAutonomousPropagation(t *testing.T) {
 	x0 := mat.NewVecDense(2, []float64{4, 8})
 	u := mat.NewDense(1, 4, nil)
 
-	r, err := sys.Simulate(u, x0, nil)
+	r, err := sys.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +222,7 @@ func TestSimulateStepsZero(t *testing.T) {
 	x0 := mat.NewVecDense(2, []float64{5, 3})
 
 	// u with 0 columns → steps=0
-	r, err := sys.Simulate(nil, x0, nil)
+	r, err := sys.Simulate(nil, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +317,7 @@ func TestSimulateNilX0(t *testing.T) {
 	}
 
 	u := mat.NewDense(1, 2, []float64{1, 0})
-	r, err := sys.Simulate(u, nil, nil)
+	r, err := sys.Simulate(u, nil, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,11 +951,11 @@ func TestSimulateInvertibleDescriptorWithInternalDelays(t *testing.T) {
 		u.Set(1, k, 0.5-0.1*float64(k))
 	}
 	x0 := mat.NewVecDense(3, []float64{0.3, -1, 0.7})
-	got, err := desc.Simulate(u, x0, nil)
+	got, err := desc.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := explicit.Simulate(u, x0, nil)
+	want, err := explicit.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,7 +984,10 @@ func TestSimulateSingularDescriptor(t *testing.T) {
 			t.Fatalf("delays=%v Y = %v\nwant %v", delays, mat.Formatted(got.Y), mat.Formatted(want.Y))
 		}
 		if got.XFinal != nil {
-			t.Fatalf("XFinal = %v, want nil for singular E", got.XFinal)
+			t.Fatalf("XFinal = %v, want nil when not requested", got.XFinal)
+		}
+		if _, err := desc.Simulate(u, nil, &SimulateOpts{FinalState: true}); !errors.Is(err, ErrDescriptorInitialState) {
+			t.Fatalf("delays=%v FinalState err = %v, want ErrDescriptorInitialState", delays, err)
 		}
 		if _, err := desc.Simulate(u, mat.NewVecDense(3, []float64{1, 0, 0}), nil); !errors.Is(err, ErrDescriptorInitialState) {
 			t.Fatalf("x0 err = %v, want ErrDescriptorInitialState", err)
@@ -1007,7 +1013,7 @@ func TestSimulateAutonomousSteps(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, err := sys.Simulate(nil, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{Steps: steps})
+		r, err := sys.Simulate(nil, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{Steps: steps, FinalState: true})
 		if err != nil {
 			t.Fatalf("p=%d: %v", p, err)
 		}
@@ -1069,7 +1075,7 @@ func TestSimulateNoOutputsPropagatesState(t *testing.T) {
 	}
 	u := mat.NewDense(1, 5, []float64{1, -1, 0.5, 2, 0})
 	x0 := mat.NewVecDense(2, []float64{0.3, -0.8})
-	r, err := sys.Simulate(u, x0, nil)
+	r, err := sys.Simulate(u, x0, &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1207,7 +1213,7 @@ func TestSimulateXFinalInputDelayRepro(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := mat.NewDense(1, 5, []float64{1, -1, 0.5, 2, 0})
-	r, err := sys.Simulate(u, mat.NewVecDense(2, []float64{0.3, -0.8}), nil)
+	r, err := sys.Simulate(u, mat.NewVecDense(2, []float64{0.3, -0.8}), &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1258,7 +1264,7 @@ func TestSimulateXFinalDelayedInputsMatchShiftRegisters(t *testing.T) {
 				if withX0 {
 					x0v, ox0 = mat.NewVecDense(3, append([]float64(nil), x0...)), x0
 				}
-				r, err := sys.Simulate(u, x0v, nil)
+				r, err := sys.Simulate(u, x0v, &SimulateOpts{FinalState: true})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1280,12 +1286,19 @@ func TestSimulateXFinalDelayedInputsMatchShiftRegisters(t *testing.T) {
 				if !vecEqual(r.XFinal, mat.NewVecDense(3, wantX), 1e-12) {
 					t.Errorf("x0=%v XFinal = %v, want %v", withX0, r.XFinal, wantX)
 				}
+				plain, err := sys.Simulate(u, x0v, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if plain.XFinal != nil || !matEqual(plain.Y, r.Y, 0) {
+					t.Errorf("x0=%v unrequested: XFinal = %v, want nil; Y must match", withX0, plain.XFinal)
+				}
 
 				lft, err := sys.PullDelaysToLFT()
 				if err != nil {
 					t.Fatal(err)
 				}
-				rl, err := lft.Simulate(u, x0v, nil)
+				rl, err := lft.Simulate(u, x0v, &SimulateOpts{FinalState: true})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1300,7 +1313,7 @@ func TestSimulateXFinalDelayedInputsMatchShiftRegisters(t *testing.T) {
 	}
 }
 
-func TestSimulateXFinalNondecomposableDelayIsNil(t *testing.T) {
+func TestSimulateXFinalNondecomposableDelayErrors(t *testing.T) {
 	A, B, C, D, u, x0 := delayXFinalPlant()
 	for _, internal := range []bool{false, true} {
 		sys, err := NewWithDelay(A, B, C, D, mat.NewDense(2, 2, []float64{0, 2, 1, 0}), 1)
@@ -1325,7 +1338,11 @@ func TestSimulateXFinalNondecomposableDelayIsNil(t *testing.T) {
 			t.Fatalf("internal=%v: Y = nil", internal)
 		}
 		if r.XFinal != nil {
-			t.Errorf("internal=%v: XFinal = %v, want nil: no input+output split of Delay", internal, r.XFinal)
+			t.Errorf("internal=%v: XFinal = %v, want nil when not requested", internal, r.XFinal)
+		}
+		_, err = sys.Simulate(u, mat.NewVecDense(3, x0), &SimulateOpts{FinalState: true})
+		if !errors.Is(err, ErrDelayUnsupported) {
+			t.Errorf("internal=%v: FinalState err = %v, want ErrDelayUnsupported: no input+output split of Delay", internal, err)
 		}
 	}
 }
@@ -1350,7 +1367,7 @@ func TestSimulateXFinalInternalAndIODelaysMatchShiftRegisters(t *testing.T) {
 	if err := sys.SetOutputDelay([]float64{2, 0}); err != nil {
 		t.Fatal(err)
 	}
-	r, err := sys.Simulate(u, mat.NewVecDense(3, append([]float64(nil), x0...)), nil)
+	r, err := sys.Simulate(u, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1374,7 +1391,7 @@ func TestSimulateXFinalDelayedNoOutputAndNoInput(t *testing.T) {
 	if err := noOut.SetInputDelay([]float64{2, 1}); err != nil {
 		t.Fatal(err)
 	}
-	r, err := noOut.Simulate(u, mat.NewVecDense(3, append([]float64(nil), x0...)), nil)
+	r, err := noOut.Simulate(u, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1392,7 +1409,7 @@ func TestSimulateXFinalDelayedNoOutputAndNoInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	const steps = 6
-	r, err = noIn.Simulate(nil, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{Steps: steps})
+	r, err = noIn.Simulate(nil, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{Steps: steps, FinalState: true})
 	if err != nil {
 		t.Fatal(err)
 	}
