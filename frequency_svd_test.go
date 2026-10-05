@@ -110,3 +110,14 @@ func sameRelative(got, want, tolerance float64) bool {
 	}
 	return math.Abs(got-want) <= tolerance*math.Max(math.Abs(got), math.Abs(want))
 }
+
+func TestMaximumComplex2x2SingularValueNearlyEqual(t *testing.T) {
+	for _, e := range []float64{1e-8, 3e-9, 1e-12} {
+		want := (math.Sqrt(4+e*e) + e) / 2
+		for _, data := range [][]complex128{{1, complex(e, 0), 0, 1}, {1i, complex(0, e), 0, -1}} {
+			if got := maximumComplex2x2SingularValue(data); !sameRelative(got, want, 2*eps()) {
+				t.Fatalf("e=%g data=%v: sigma max = %.17g, want %.17g", e, data, got, want)
+			}
+		}
+	}
+}
