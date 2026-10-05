@@ -36,8 +36,8 @@ func TestMargin_ThirdOrderContinuous(t *testing.T) {
 	if math.Abs(r.GainMargin-wantGmDB)/wantGmDB > 0.05 {
 		t.Errorf("GM = %v dB, want ~%v dB", r.GainMargin, wantGmDB)
 	}
-	if math.Abs(r.WpFreq-wantWpc)/wantWpc > 0.05 {
-		t.Errorf("WpFreq = %v, want ~%v", r.WpFreq, wantWpc)
+	if math.Abs(wpFreq(r)-wantWpc)/wantWpc > 0.05 {
+		t.Errorf("WpFreq = %v, want ~%v", wpFreq(r), wantWpc)
 	}
 	if !math.IsInf(r.PhaseMargin, 1) {
 		t.Errorf("PM = %v, want +Inf (no gain crossover)", r.PhaseMargin)
@@ -75,14 +75,14 @@ func TestMargin_ThirdOrderWithGain(t *testing.T) {
 	if math.Abs(r.GainMargin-wantGmDB)/wantGmDB > 0.05 {
 		t.Errorf("GM = %v dB, want ~%v dB", r.GainMargin, wantGmDB)
 	}
-	if math.Abs(r.WpFreq-wantWpc)/wantWpc > 0.05 {
-		t.Errorf("WpFreq = %v, want ~%v", r.WpFreq, wantWpc)
+	if math.Abs(wpFreq(r)-wantWpc)/wantWpc > 0.05 {
+		t.Errorf("WpFreq = %v, want ~%v", wpFreq(r), wantWpc)
 	}
 	if math.Abs(r.PhaseMargin-wantPm) > 2 {
 		t.Errorf("PM = %v deg, want ~%v deg", r.PhaseMargin, wantPm)
 	}
-	if math.Abs(r.WgFreq-wantWgc)/wantWgc > 0.05 {
-		t.Errorf("WgFreq = %v, want ~%v", r.WgFreq, wantWgc)
+	if math.Abs(wgFreq(r)-wantWgc)/wantWgc > 0.05 {
+		t.Errorf("WgFreq = %v, want ~%v", wgFreq(r), wantWgc)
 	}
 }
 
@@ -116,8 +116,8 @@ func TestMargin_IntegratorSystem(t *testing.T) {
 	if math.Abs(r.PhaseMargin-wantPm) > 3 {
 		t.Errorf("PM = %v deg, want ~%v deg", r.PhaseMargin, wantPm)
 	}
-	if r.WgFreq < 0.5 || r.WgFreq > 1.0 {
-		t.Errorf("WgFreq = %v, want ~0.786", r.WgFreq)
+	if wgFreq(r) < 0.5 || wgFreq(r) > 1.0 {
+		t.Errorf("WgFreq = %v, want ~0.786", wgFreq(r))
 	}
 }
 
@@ -270,8 +270,8 @@ func TestMargin_StableHighGain(t *testing.T) {
 	if r.PhaseMargin <= 0 || r.PhaseMargin > 90 {
 		t.Errorf("PM = %v deg, want small positive", r.PhaseMargin)
 	}
-	if math.IsNaN(r.WgFreq) || math.IsNaN(r.WpFreq) {
-		t.Errorf("crossover freqs should be finite: WgFreq=%v, WpFreq=%v", r.WgFreq, r.WpFreq)
+	if math.IsNaN(wgFreq(r)) || math.IsNaN(wpFreq(r)) {
+		t.Errorf("crossover freqs should be finite: WgFreq=%v, WpFreq=%v", wgFreq(r), wpFreq(r))
 	}
 }
 

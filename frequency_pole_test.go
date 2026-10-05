@@ -411,7 +411,7 @@ func TestSigmaAndGainGoalsAtPole(t *testing.T) {
 	if err != nil || !math.IsInf(res.Value, 1) {
 		t.Errorf("tracking of integrating delayed model = %+v, %v; want +Inf", res, err)
 	}
-	if bw, err := Bandwidth(integrating, 0); err != nil || bw != 0 {
-		t.Errorf("Bandwidth of integrating delayed model = %v, %v; want 0 (infinite DC gain)", bw, err)
+	if bw, err := Bandwidth(integrating, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Bandwidth of integrating delayed model = %v, %v; want ErrInvalidArgument (infinite DC gain)", bw, err)
 	}
 }

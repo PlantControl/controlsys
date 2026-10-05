@@ -11,13 +11,32 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// MarginResult holds the classical margins MATLAB margin reports. The
+// margins are always defined (+Inf when the loop never reaches the
+// corresponding crossover); the crossover frequencies exist only when the
+// loop crosses, so they are comma-ok methods.
 type MarginResult struct {
 	GainMargin  float64 // dB; +Inf if no phase crossover
 	PhaseMargin float64 // degrees in (-180,180]; +Inf if no gain crossover
-	WgFreq      float64 // gain crossover freq (0dB); NaN if none
-	WpFreq      float64 // phase crossover freq (-180deg mod 360); NaN if none
+
+	gainCrossover, phaseCrossover float64
+	hasGainCross, hasPhaseCross   bool
 }
 
+// GainCrossover returns the 0 dB crossover frequency where PhaseMargin is
+// measured (MATLAB Wcp); ok is false when |L| never crosses 1.
+func (r *MarginResult) GainCrossover() (w float64, ok bool) {
+	return r.gainCrossover, r.hasGainCross
+}
+
+// PhaseCrossover returns the −180° crossover frequency where GainMargin is
+// measured (MATLAB Wcg); ok is false when the phase never crosses −180°.
+func (r *MarginResult) PhaseCrossover() (w float64, ok bool) {
+	return r.phaseCrossover, r.hasPhaseCross
+}
+
+// AllMarginResult lists every crossover, as MATLAB allmargin; empty slices
+// mean the loop has no crossover of that kind.
 type AllMarginResult struct {
 	GainMargins     []float64 // dB at each phase crossover
 	PhaseMargins    []float64 // degrees in (-180,180] at each gain crossover
@@ -27,21 +46,35 @@ type AllMarginResult struct {
 
 // DiskMarginResult holds a SISO disk margin, mirroring the fields of MATLAB
 // diskmargin. Alpha, GainMargin, PhaseMargin and Frequency follow the skew
-// Skew; PeakSensitivity and PeakFreq always describe ‖S‖∞.
+// Skew; PeakSensitivity and PeakFreq always describe ‖S‖∞. An unstable
+// closed loop has no peak frequencies, so those are comma-ok methods.
 type DiskMarginResult struct {
 	Alpha           float64    // disk margin αmax = 1/‖S+(σ−1)/2‖∞
 	Skew            float64    // σ of the gain-variation disk
-	Frequency       float64    // ω where the disk margin is attained
 	GainMargin      [2]float64 // [low, high] linear gain factors
 	GainMarginDB    [2]float64 // [low, high] in dB
 	PhaseMargin     float64    // +/- degrees
-	PeakSensitivity float64    // Ms = ‖S‖∞
-	PeakFreq        float64    // ω where |S| peaks
+	PeakSensitivity float64    // Ms = ‖S‖∞; +Inf for an unstable closed loop
+
+	frequency, peakFreq float64
+	stable              bool
 }
+
+// Frequency returns the ω where the disk margin is attained; ok is false
+// for an unstable closed loop.
+func (r *DiskMarginResult) Frequency() (w float64, ok bool) { return r.frequency, r.stable }
+
+// PeakFreq returns the ω where |S| peaks; ok is false for an unstable
+// closed loop.
+func (r *DiskMarginResult) PeakFreq() (w float64, ok bool) { return r.peakFreq, r.stable }
 
 // sisoEval evaluates a SISO loop on the boundary of the stability region.
 // Delay-free realizations reuse one state-space solver, so refinement loops
 // pay its setup once and high-order loops keep state-space accuracy.
+//
+// at keeps the signature func(float64) complex128 so it can be passed as a
+// response function; a failed evaluation returns NaN and is kept in err,
+// which callers check once their search is done.
 type sisoEval struct {
 	sys    *System
 	solver frequencyPointSolver
@@ -49,6 +82,7 @@ type sisoEval struct {
 	lft    bool
 	td     timeDomain
 	dst    []complex128
+	err    error
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -71,17 +105,27 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 
 func (e *sisoEval) at(w float64) complex128 {
 	if e.lft {
-		h, _ := evalSISOFreqResponse(e.sys, w)
+		h, err := evalSISOFreqResponse(e.sys, w)
+		if err != nil {
+			return e.fail(w, err)
+		}
 		return h
 	}
 	pt := e.td.frequencyPoint(w)
 	if err := evalWithPoleLimit(e.solver.evalInto, e.sys, pt, e.dst); err != nil {
-		return complex(math.NaN(), math.NaN())
+		return e.fail(w, err)
 	}
 	if e.delay != nil {
 		applyIODelayMatrixAtS(e.sys, pt.value(), e.dst, 1, 1, e.delay)
 	}
 	return e.dst[0]
+}
+
+func (e *sisoEval) fail(w float64, err error) complex128 {
+	if e.err == nil {
+		e.err = fmt.Errorf("loop response at ω=%g: %w", w, err)
+	}
+	return complex(math.NaN(), math.NaN())
 }
 
 const (
@@ -350,6 +394,9 @@ func AllMargin(sys *System) (*AllMarginResult, error) {
 	for _, w := range res.PhaseCrossFreqs {
 		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(eval.at(w))))
 	}
+	if eval.err != nil {
+		return nil, fmt.Errorf("AllMargin: %w", eval.err)
+	}
 	return res, nil
 }
 
@@ -387,10 +434,15 @@ func gridMarginCrossings(sys *System, eval *sisoEval, withGain bool) (gain, phas
 	return gain, phase, nil
 }
 
+// Margin returns the gain margin closest to 0 dB and the phase margin
+// closest to 0° of the SISO loop sys with their crossover frequencies, like
+// MATLAB [Gm,Pm,Wcg,Wcp] = margin(sys) with Gm in dB; see AllMargin for the
+// crossover search. Where MATLAB reports NaN for a missing crossover
+// frequency, GainCrossover and PhaseCrossover report ok = false.
 func Margin(sys *System) (*MarginResult, error) {
 	all, err := AllMargin(sys)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Margin: %w", err)
 	}
 	return pickMargins(all), nil
 }
@@ -401,31 +453,32 @@ func Margin(sys *System) (*MarginResult, error) {
 // with its frequency; the lower frequency wins a tie.
 func pickMargins(all *AllMarginResult) *MarginResult {
 	result := &MarginResult{}
-	result.GainMargin, result.WpFreq = selectMargin(all.GainMargins, all.PhaseCrossFreqs)
-	result.PhaseMargin, result.WgFreq = selectMargin(all.PhaseMargins, all.GainCrossFreqs)
+	result.GainMargin, result.phaseCrossover, result.hasPhaseCross = selectMargin(all.GainMargins, all.PhaseCrossFreqs)
+	result.PhaseMargin, result.gainCrossover, result.hasGainCross = selectMargin(all.PhaseMargins, all.GainCrossFreqs)
 	return result
 }
 
-func selectMargin(margins, freqs []float64) (float64, float64) {
-	m, w := math.Inf(1), math.NaN()
+func selectMargin(margins, freqs []float64) (m, w float64, ok bool) {
+	m = math.Inf(1)
 	for i, v := range margins {
-		if math.Abs(v) < math.Abs(m) {
-			m, w = v, freqs[i]
+		if !ok || math.Abs(v) < math.Abs(m) {
+			m, w, ok = v, freqs[i], true
 		}
 	}
-	return m, w
+	return m, w, ok
 }
 
-// Bandwidth returns the first frequency where the gain of sys drops dbDrop dB
-// (default −3) below its DC value, as MATLAB bandwidth
-// (https://www.mathworks.com/help/control/ref/dynamicsystem.bandwidth.html).
-// For SISO models without continuous internal delays it is the smallest
-// boundary eigenvalue of the Hamiltonian pencil of |L| = g, refined on the
-// exact response; MIMO models, which MATLAB rejects, use σmax on a frequency
-// grid. It returns +Inf when
-// the gain never drops that far and 0 when the DC gain is 0 or not finite.
-// dbDrop must be 0 (default) or a finite negative scalar, and a model with
-// no inputs or no outputs is rejected.
+// Bandwidth returns the first frequency where the gain of the SISO model sys
+// drops dbDrop dB below its DC value, as MATLAB bandwidth(sys,dbdrop)
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.bandwidth.html);
+// dbDrop = 0 selects MATLAB's default −3. Without continuous internal delays
+// it is the smallest boundary eigenvalue of the Hamiltonian pencil of
+// |L| = g, refined on the exact response; with them, the first crossing on
+// an adaptive frequency grid. It returns +Inf when the gain never drops that
+// far. A DC gain that is 0 or infinite (an integrator) leaves the bandwidth
+// undefined and returns ErrInvalidArgument, as does a dbDrop that is not a
+// finite negative scalar; a model without inputs or outputs returns
+// ErrDimensionMismatch and a MIMO model ErrNotSISO, as MATLAB rejects it.
 func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if dbDrop == 0 {
 		dbDrop = -3
@@ -433,43 +486,49 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if !(dbDrop < 0) || math.IsInf(dbDrop, -1) {
 		return 0, fmt.Errorf("Bandwidth: dbDrop must be a finite negative scalar, got %g: %w", dbDrop, ErrInvalidArgument)
 	}
-	_, m, p := sys.Dims()
-	if m == 0 || p == 0 {
+	if err := requireSystem("Bandwidth", sys); err != nil {
+		return 0, err
+	}
+	if _, m, p := sys.Dims(); m == 0 || p == 0 {
 		return 0, fmt.Errorf("Bandwidth: model has no inputs or no outputs: %w", ErrDimensionMismatch)
 	}
-
-	dcGain, err := sys.DCGain()
+	if _, err := newSISOLoopModel(sys, "Bandwidth"); err != nil {
+		return 0, err
+	}
+	bw, err := bandwidth(sys, dbDrop)
 	if err != nil {
 		return 0, fmt.Errorf("Bandwidth: %w", err)
 	}
+	return bw, nil
+}
 
-	var dcMag float64
-	if p == 1 && m == 1 {
-		dcMag = math.Abs(dcGain.At(0, 0))
-	} else {
-		dcMag = maxSVDense(dcGain, p, m)
+func bandwidth(sys *System, dbDrop float64) (float64, error) {
+	dcGain, err := sys.DCGain()
+	if err != nil {
+		return 0, err
 	}
+	dcMag := math.Abs(dcGain.At(0, 0))
 	if dcMag == 0 || math.IsNaN(dcMag) || math.IsInf(dcMag, 0) {
-		return 0, nil
+		return 0, fmt.Errorf("DC gain is %g, bandwidth undefined: %w", dcGain.At(0, 0), ErrInvalidArgument)
 	}
-
 	threshold := 20*math.Log10(dcMag) + dbDrop
-	siso := p == 1 && m == 1
-	if siso {
-		loop, err := newRationalLoop(sys)
-		if err != nil && !errors.Is(err, ErrContinuousInternalDelay) {
+
+	loop, err := newRationalLoop(sys)
+	if err != nil && !errors.Is(err, ErrContinuousInternalDelay) {
+		return 0, err
+	}
+	if err == nil {
+		ws, err := loop.gainCrossings(math.Pow(10, threshold/20))
+		if err != nil {
 			return 0, err
 		}
-		if err == nil {
-			ws, err := loop.gainCrossings(math.Pow(10, threshold/20))
-			if err != nil {
-				return 0, err
-			}
-			if len(ws) == 0 {
-				return math.Inf(1), nil
-			}
-			return ws[0], nil
+		if loop.eval.err != nil {
+			return 0, loop.eval.err
 		}
+		if len(ws) == 0 {
+			return math.Inf(1), nil
+		}
+		return ws[0], nil
 	}
 
 	omega, err := sys.DefaultFrequencyGrid(1000)
@@ -479,56 +538,43 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if len(omega) == 0 {
 		return math.Inf(1), nil
 	}
-
-	nw := len(omega)
-	magDB := make([]float64, nw)
-	gainDB := func(g float64) float64 {
-		if g > 0 {
+	eval, err := newSISOEval(sys)
+	if err != nil {
+		return 0, err
+	}
+	gainDB := func(w float64) float64 {
+		if g := cmplx.Abs(eval.at(w)); g > 0 {
 			return 20 * math.Log10(g)
 		}
 		return -1000
 	}
-
-	var eval *sisoEval
-	if siso {
-		eval, err = newSISOEval(sys)
-		if err != nil {
-			return 0, err
+	for range 12 {
+		if gainDB(omega[0]) >= threshold {
+			break
 		}
-		for k, w := range omega {
-			magDB[k] = gainDB(cmplx.Abs(eval.at(w)))
-		}
-	} else {
-		sigma, err := sys.Sigma(omega, 0)
-		if err != nil {
-			return 0, err
-		}
-		for k := range nw {
-			magDB[k] = gainDB(sigma.At(k, 0))
-		}
+		omega = append([]float64{omega[0] / 10}, omega...)
 	}
-
+	magDB := make([]float64, len(omega))
+	for k, w := range omega {
+		magDB[k] = gainDB(w)
+	}
+	if eval.err != nil {
+		return 0, eval.err
+	}
 	if magDB[0] < threshold {
-		return 0, nil
+		return 0, fmt.Errorf("gain stays %g dB below DC down to ω=%g: %w", magDB[0]-threshold-dbDrop, omega[0], ErrInvalidArgument)
 	}
-
 	crossings := findCrossings(omega, magDB, threshold)
 	if len(crossings) == 0 {
 		return math.Inf(1), nil
 	}
-
 	c := crossings[0]
 	w := refineCrossing(omega[c.idx], omega[c.idx+1], func(w float64) float64 {
-		if siso {
-			return gainDB(cmplx.Abs(eval.at(w))) - threshold
-		}
-		sig, err := sys.Sigma([]float64{w}, 0)
-		if err != nil {
-			return 0
-		}
-		return gainDB(sig.At(0, 0)) - threshold
+		return gainDB(w) - threshold
 	})
-
+	if eval.err != nil {
+		return 0, eval.err
+	}
 	return w, nil
 }
 
@@ -538,7 +584,14 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 // It is DiskMarginSkew(sys, 0): αmax = 1/‖S − 1/2‖∞, GainMargin
 // [(2−α)/(2+α), (2+α)/(2−α)] and PhaseMargin 2·atan(α/2).
 func DiskMargin(sys *System) (*DiskMarginResult, error) {
-	return DiskMarginSkew(sys, 0)
+	if _, err := newSISOLoopModel(sys, "DiskMargin"); err != nil {
+		return nil, err
+	}
+	res, err := diskMargin(sys, 0)
+	if err != nil {
+		return nil, fmt.Errorf("DiskMargin: %w", err)
+	}
+	return res, nil
 }
 
 // DiskMarginSkew computes the disk margin of the SISO loop sys for the skew
@@ -562,12 +615,20 @@ func DiskMargin(sys *System) (*DiskMarginResult, error) {
 // return ErrDelayUnsupported. Descriptor loops return
 // ErrDescriptorUnsupported, as HinfNorm does.
 func DiskMarginSkew(sys *System, sigma float64) (*DiskMarginResult, error) {
-	if math.IsNaN(sigma) || math.IsInf(sigma, 0) {
-		return nil, fmt.Errorf("DiskMargin: skew must be finite, got %g", sigma)
-	}
-	if _, err := newSISOLoopModel(sys, "DiskMargin"); err != nil {
+	if err := requireFinite("DiskMarginSkew", "skew", sigma); err != nil {
 		return nil, err
 	}
+	if _, err := newSISOLoopModel(sys, "DiskMarginSkew"); err != nil {
+		return nil, err
+	}
+	res, err := diskMargin(sys, sigma)
+	if err != nil {
+		return nil, fmt.Errorf("DiskMarginSkew: %w", err)
+	}
+	return res, nil
+}
+
+func diskMargin(sys *System, sigma float64) (*DiskMarginResult, error) {
 	shift := (sigma - 1) / 2
 	if sys.IsContinuous() && sys.HasDelay() {
 		return diskMarginDelayed(sys, sigma, shift)
@@ -579,7 +640,7 @@ func DiskMarginSkew(sys *System, sigma float64) (*DiskMarginResult, error) {
 	}
 	S, err := Feedback(eye, sys, -1)
 	if err != nil {
-		return nil, fmt.Errorf("DiskMargin: cannot form sensitivity: %w", err)
+		return nil, fmt.Errorf("cannot form sensitivity: %w", err)
 	}
 	Ms, wMs, err := HinfNorm(S)
 	if err != nil {
@@ -596,7 +657,7 @@ func DiskMarginSkew(sys *System, sigma float64) (*DiskMarginResult, error) {
 		}
 		Sc, err := Parallel(S, c)
 		if err != nil {
-			return nil, fmt.Errorf("DiskMargin: cannot form shifted sensitivity: %w", err)
+			return nil, fmt.Errorf("cannot form shifted sensitivity: %w", err)
 		}
 		if peak, wPeak, err = HinfNorm(Sc); err != nil {
 			return nil, err
@@ -617,25 +678,18 @@ func unstableDiskMargin(sigma float64) *DiskMarginResult {
 }
 
 func diskMarginDelayed(sys *System, sigma, shift float64) (*DiskMarginResult, error) {
-	loop, err := delayLoopFromSystem(sys, "DiskMargin")
+	loop, err := delayLoopFromSystem(sys, "delay loop")
 	if err != nil {
-		return nil, diskMarginDelayError(err)
+		return nil, err
 	}
 	stable, peaks, err := loop.sensitivityPeaks(0, shift)
 	if err != nil {
-		return nil, diskMarginDelayError(err)
+		return nil, err
 	}
 	if !stable {
 		return unstableDiskMargin(sigma), nil
 	}
 	return diskMarginFromPeak(sigma, peaks[1].peak, peaks[1].w, peaks[0].peak, peaks[0].w), nil
-}
-
-func diskMarginDelayError(err error) error {
-	if errors.Is(err, errDelayLoopUnsupported) || errors.Is(err, ErrContinuousInternalDelay) {
-		return fmt.Errorf("DiskMargin: %w", err)
-	}
-	return err
 }
 
 func diskMarginFromPeak(sigma, peak, wPeak, Ms, wMs float64) *DiskMarginResult {
@@ -644,12 +698,13 @@ func diskMarginFromPeak(sigma, peak, wPeak, Ms, wMs float64) *DiskMarginResult {
 	return &DiskMarginResult{
 		Alpha:           alpha,
 		Skew:            sigma,
-		Frequency:       wPeak,
 		GainMargin:      gm,
 		GainMarginDB:    [2]float64{20 * math.Log10(gm[0]), 20 * math.Log10(gm[1])},
 		PhaseMargin:     pm,
 		PeakSensitivity: Ms,
-		PeakFreq:        wMs,
+		frequency:       wPeak,
+		peakFreq:        wMs,
+		stable:          true,
 	}
 }
 
