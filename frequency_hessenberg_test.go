@@ -80,7 +80,7 @@ func stiffChain(t *testing.T, n int, lo, hi, dt float64) *System {
 	if dt == 0 {
 		return sys
 	}
-	d, err := sys.DiscretizeZOH(dt)
+	d, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

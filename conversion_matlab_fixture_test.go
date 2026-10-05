@@ -72,18 +72,18 @@ func TestMATLABLeastSquaresReference(t *testing.T) {
 				t.Fatal("invalid response fixture")
 			}
 			source := conversionSISO(t, fixture.SourceNumerator, fixture.SourceDenominator, 0)
-			result, err := source.DiscretizeLeastSquares(fixture.SampleTime, fixture.FitOrder)
+			resultSys, _, err := source.C2DFit(fixture.SampleTime, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: fixture.FitOrder})
 			if err != nil {
 				t.Fatal(err)
 			}
-			transfer, err := result.Sys.TransferFunction(nil)
+			transfer, err := resultSys.TransferFunction(nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			compareConversionCoefficients(t, transfer.TF.Num[0][0], fixture.Numerator, reference.CoefficientTolerance)
 			compareConversionCoefficients(t, transfer.TF.Den[0], fixture.Denominator, reference.CoefficientTolerance)
 			for i, w := range fixture.Frequencies {
-				got, err := result.Sys.EvalFr(cmplx.Exp(complex(0, w*fixture.SampleTime)))
+				got, err := resultSys.EvalFr(cmplx.Exp(complex(0, w*fixture.SampleTime)))
 				if err != nil {
 					t.Fatal(err)
 				}

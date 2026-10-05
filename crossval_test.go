@@ -117,7 +117,7 @@ func TestCrossval_ZOH_Reference(t *testing.T) {
 	}
 
 	dt := 0.5
-	hd, err := sys.DiscretizeZOH(dt)
+	hd, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestCrossval_ZOH_DoubleIntegrator(t *testing.T) {
 				AB2.Scale(0.5*h*h, AB)
 				Bd.Add(Bd, AB2)
 
-				sysd, err := sys.DiscretizeZOH(h)
+				sysd, err := sys.C2D(h, C2DOptions{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -236,7 +236,7 @@ func TestCrossval_Tustin_Reference(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 	dt := 0.5
 
-	hd, err := sys.Discretize(dt)
+	hd, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -815,11 +815,11 @@ func TestCrossval_DiscretizeRoundtrip(t *testing.T) {
 	sys, _ := New(ac, bc, cc, dc, 0)
 	dt := 0.5
 
-	disc, err := sys.Discretize(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, err := disc.Undiscretize()
+	back, err := disc.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -986,7 +986,7 @@ func TestCrossval_C2D_DCGainMatch(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				sysd, err := ssRes.Sys.DiscretizeZOH(dt)
+				sysd, err := ssRes.Sys.C2D(dt, C2DOptions{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1039,7 +1039,7 @@ func TestCrossval_ZOH_PoleMapping(t *testing.T) {
 				}
 				sysc := ssRes.Sys
 
-				sysd, err := sysc.DiscretizeZOH(dt)
+				sysd, err := sysc.C2D(dt, C2DOptions{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1119,7 +1119,7 @@ func TestCrossval_Bilinear_FreqResponseMatch(t *testing.T) {
 
 	dt := 0.01
 
-	disc, err := sys.Discretize(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1361,7 +1361,7 @@ func TestCrossval_ZOH_StepResponse(t *testing.T) {
 	)
 
 	dt := 0.01
-	sysd, err := sys.DiscretizeZOH(dt)
+	sysd, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1591,7 +1591,7 @@ func TestCrossval_Tustin_Reference_Rate2(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 	dt := 1.0 / 3.0
 
-	hd, err := sys.Discretize(dt)
+	hd, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

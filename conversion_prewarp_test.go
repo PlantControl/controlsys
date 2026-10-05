@@ -54,7 +54,7 @@ func TestPrewarpMIMOIndependentFrequency(t *testing.T) {
 	snapshot := orig.Copy()
 	dt, w := .15, 7.
 	opts := C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w}
-	disc, err := orig.DiscretizeWithOpts(dt, opts)
+	disc, err := orig.C2D(dt, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestPrewarpMIMOIndependentFrequency(t *testing.T) {
 		s := complex(beta, 0) * (z - 1) / (z + 1)
 		assertPrewarpResponse(t, disc, z, prewarpAnalytic(s))
 	}
-	restored, err := disc.D2CWithOpts(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: w})
+	restored, err := disc.D2C(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: w})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestPrewarpSISOIndependentInverse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cont, err := disc.D2CWithOpts(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: w})
+	cont, err := disc.D2C(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: w})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,12 +106,12 @@ func TestPrewarpZeroLimitAndDelayUnits(t *testing.T) {
 	sys.OutputName = []string{"y"}
 	sys.InputDelay = []float64{.4}
 	sys.OutputDelay = []float64{.2}
-	plain, err := sys.Discretize(.1)
+	plain, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, w := range []float64{0, 1e-12, math.SmallestNonzeroFloat64} {
-		out, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w})
+		out, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -120,14 +120,14 @@ func TestPrewarpZeroLimitAndDelayUnits(t *testing.T) {
 		assertMatClose(t, "C", out.C, plain.C, 1e-12)
 		assertMatClose(t, "D", out.D, plain.D, 1e-12)
 	}
-	out, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: 8})
+	out, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out.InputDelay[0] != 4 || out.OutputDelay[0] != 2 {
 		t.Fatalf("delay units: %v/%v", out.InputDelay, out.OutputDelay)
 	}
-	cont, err := out.D2CWithOpts(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: 8})
+	cont, err := out.D2C(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: 8})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,41 +143,41 @@ func TestPrewarpZeroLimitAndDelayUnits(t *testing.T) {
 
 func TestPrewarpInvalidOptions(t *testing.T) {
 	sys := makeTestSystem()
-	disc, err := sys.Discretize(.1)
+	disc, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, w := range []float64{-1, math.NaN(), math.Inf(1), math.Pi / .1, 40} {
-		if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w}); !errors.Is(err, ErrInvalidConversionOptions) {
+		if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w}); !errors.Is(err, ErrInvalidConversionOptions) {
 			t.Fatalf("C2D frequency %g: %v", w, err)
 		}
-		if _, err := disc.D2CWithOpts(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: w}); !errors.Is(err, ErrInvalidConversionOptions) {
+		if _, err := disc.D2C(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: w}); !errors.Is(err, ErrInvalidConversionOptions) {
 			t.Fatalf("D2C frequency %g: %v", w, err)
 		}
 	}
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodMatched} {
-		if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: method, PrewarpFrequency: 1}); !errors.Is(err, ErrInvalidConversionOptions) {
+		if _, err := sys.C2D(.1, C2DOptions{Method: method, PrewarpFrequency: 1}); !errors.Is(err, ErrInvalidConversionOptions) {
 			t.Fatalf("C2D method %s: %v", method, err)
 		}
-		if _, err := disc.D2CWithOpts(D2COptions{Method: method, PrewarpFrequency: 1}); !errors.Is(err, ErrInvalidConversionOptions) {
+		if _, err := disc.D2C(D2COptions{Method: method, PrewarpFrequency: 1}); !errors.Is(err, ErrInvalidConversionOptions) {
 			t.Fatalf("D2C method %s: %v", method, err)
 		}
 	}
 	for _, dt := range []float64{0, -1, math.NaN(), math.Inf(1)} {
-		if _, err := sys.Discretize(dt); !errors.Is(err, ErrInvalidSampleTime) {
+		if _, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin}); !errors.Is(err, ErrInvalidSampleTime) {
 			t.Fatalf("Discretize dt %g: %v", dt, err)
 		}
 		bad := disc.Copy()
 		bad.Dt = dt
 		if dt != 0 {
-			if _, err := bad.D2CWithOpts(D2COptions{Method: C2DMethodTustin}); !errors.Is(err, ErrInvalidSampleTime) {
+			if _, err := bad.D2C(D2COptions{Method: C2DMethodTustin}); !errors.Is(err, ErrInvalidSampleTime) {
 				t.Fatalf("D2C dt %g: %v", dt, err)
 			}
 		}
 	}
 	bad := disc.Copy()
 	bad.A = mat.NewDense(2, 2, []float64{-1, 1, 0, .5})
-	if _, err := bad.D2CWithOpts(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: 1}); !errors.Is(err, ErrSingularTransform) {
+	if _, err := bad.D2C(D2COptions{Method: C2DMethodTustin, PrewarpFrequency: 1}); !errors.Is(err, ErrSingularTransform) {
 		t.Fatalf("z=-1: %v", err)
 	}
 }
@@ -188,7 +188,7 @@ func BenchmarkPrewarpMIMO(b *testing.B) {
 		b.Run(fmtPrewarpName(w), func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
-				if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w}); err != nil {
+				if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, PrewarpFrequency: w}); err != nil {
 					b.Fatal(err)
 				}
 			}

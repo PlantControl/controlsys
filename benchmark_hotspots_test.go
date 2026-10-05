@@ -383,7 +383,7 @@ func BenchmarkLsim_MIMO_1e4(b *testing.B) { benchLsimB(b, 10, 4, 4, 10000) }
 
 func BenchmarkLsim_Discrete_SISO(b *testing.B) {
 	sys := benchSysNonSym(4, 1, 1)
-	dsys, _ := sys.DiscretizeZOH(0.01)
+	dsys, _ := sys.C2D(0.01, C2DOptions{})
 	steps := 1000
 	t := make([]float64, steps)
 	for k := range t {
