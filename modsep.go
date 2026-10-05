@@ -10,6 +10,10 @@ type ModsepResult struct {
 	Fast *System
 }
 
+// Modsep splits sys = Slow + Fast around cutoff (MATLAB freqsep). Slow holds
+// the modes with natural frequency below cutoff; Fast holds the rest, the
+// feedthrough D and, for singular-E descriptors, the infinite modes.
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.freqsep.html.
 func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
 	if cutoff <= 0 {
 		return nil, fmt.Errorf("controlsys: cutoff must be positive")
@@ -19,7 +23,7 @@ func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
 		return cmplx.Abs(ev) < cutoff
 	}
 
-	slow, fast, err := decomposeByEigenvalues(sys, isSlow)
+	slow, fast, err := decomposeByEigenvalues(sys, isSlow, false)
 	if err != nil {
 		return nil, err
 	}

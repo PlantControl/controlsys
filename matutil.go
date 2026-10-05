@@ -138,6 +138,9 @@ func copyStrided(dst []float64, dstStride int, src []float64, srcStride int, row
 }
 
 func copyBlock(dst []float64, dstStride, dstR0, dstC0 int, src []float64, srcStride, srcR0, srcC0 int, rows, cols int) {
+	if rows == 0 || cols == 0 {
+		return
+	}
 	copyStrided(dst[dstR0*dstStride+dstC0:], dstStride, src[srcR0*srcStride+srcC0:], srcStride, rows, cols)
 }
 
