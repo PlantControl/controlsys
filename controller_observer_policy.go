@@ -19,7 +19,11 @@ func newControllerObserverPolicy(sys *System, context string) (controllerObserve
 	if n == 0 {
 		return controllerObserverPolicy{}, fmt.Errorf("%s: system has no states: %w", context, ErrDimensionMismatch)
 	}
-	if err := requireStandardEstimatorSystem(sys, context); err != nil {
+	descriptor := newDescriptorPolicy(sys)
+	if err := descriptor.validate(n); err != nil {
+		return controllerObserverPolicy{}, fmt.Errorf("%s: %w", context, err)
+	}
+	if err := descriptor.requireNonsingular(context); err != nil {
 		return controllerObserverPolicy{}, err
 	}
 	if sys.HasDelay() {
@@ -35,15 +39,12 @@ func (p controllerObserverPolicy) validateNoise(Qn, Rn *mat.Dense) error {
 	return validateCovarianceRole(p.context, covarianceMeasurementNoise, Rn, p.p)
 }
 
-func (p controllerObserverPolicy) regulator(Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	if p.sys.IsContinuous() {
-		return Lqr(p.sys.A, p.sys.B, Q, R, opts)
+// rejectOptsE rejects opts.E for model-based designs, whose E is sys.E.
+func (p controllerObserverPolicy) rejectOptsE(opts *RiccatiOpts) error {
+	if opts != nil && opts.E != nil {
+		return fmt.Errorf("%s: opts.E (use the model's E): %w", p.context, ErrOptionUnsupported)
 	}
-	return Dlqr(p.sys.A, p.sys.B, Q, R, opts)
-}
-
-func (p controllerObserverPolicy) estimator(Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	return Kalman(p.sys, Qn, Rn, opts)
+	return nil
 }
 
 func validateRegulatorGains(context string, sys *System, K, L *mat.Dense) (n, m, p int, err error) {

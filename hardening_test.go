@@ -102,33 +102,33 @@ func TestCare_RejectsNonPDR(t *testing.T) {
 	}
 }
 
-func TestKalman_RejectsDescriptor(t *testing.T) {
+func TestKalman_RejectsSingularDescriptor(t *testing.T) {
 	sys, _ := New(
 		mat.NewDense(2, 2, []float64{-1, 0, 0, -2}),
 		mat.NewDense(2, 1, []float64{1, 0}),
 		mat.NewDense(1, 2, []float64{1, 1}),
 		mat.NewDense(1, 1, []float64{0}), 0)
-	sys.E = mat.NewDense(2, 2, []float64{1, 0, 0, 2})
+	sys.E = mat.NewDense(2, 2, []float64{1, 0, 0, 0})
 
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 	_, err := Kalman(sys, Qn, Rn, nil)
-	if !errors.Is(err, ErrDescriptorRiccati) {
-		t.Errorf("expected ErrDescriptorRiccati, got %v", err)
+	if !errors.Is(err, ErrDescriptorSingular) {
+		t.Errorf("expected ErrDescriptorSingular, got %v", err)
 	}
 }
 
-func TestLqg_RejectsDescriptor(t *testing.T) {
+func TestLqg_RejectsSingularDescriptor(t *testing.T) {
 	sys, _ := New(
 		mat.NewDense(2, 2, []float64{-1, 0, 0, -2}),
 		mat.NewDense(2, 1, []float64{1, 0}),
 		mat.NewDense(1, 2, []float64{1, 1}),
 		mat.NewDense(1, 1, []float64{0}), 0)
-	sys.E = mat.NewDense(2, 2, []float64{1, 0, 0, 2})
+	sys.E = mat.NewDense(2, 2, []float64{1, 0, 0, 0})
 
 	_, err := Lqg(sys, eye(3), eye(3), nil)
-	if !errors.Is(err, ErrDescriptorRiccati) {
-		t.Errorf("expected ErrDescriptorRiccati, got %v", err)
+	if !errors.Is(err, ErrDescriptorSingular) {
+		t.Errorf("expected ErrDescriptorSingular, got %v", err)
 	}
 }
 

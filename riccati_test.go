@@ -500,3 +500,200 @@ func TestCare_Dare_Consistency(t *testing.T) {
 		}
 	}
 }
+
+func descriptorRiccatiData(discrete bool) (A, B, Q, R, S, E *mat.Dense) {
+	A = mat.NewDense(4, 4, []float64{
+		-0.8, 0.6, 0.1, 0.3,
+		-0.4, 0.2, 0.9, -0.5,
+		0.2, -0.7, -1.1, 0.4,
+		0.5, 0.1, -0.3, 0.6,
+	})
+	if discrete {
+		A.Scale(0.7, A)
+	}
+	B = mat.NewDense(4, 2, []float64{1, 0.2, 0.3, -0.5, -0.1, 0.8, 0.4, 0.1})
+	Q = mat.NewDense(4, 4, []float64{
+		2, 0.3, -0.2, 0.1,
+		0.3, 1.5, 0.4, 0,
+		-0.2, 0.4, 1.2, 0.2,
+		0.1, 0, 0.2, 1,
+	})
+	R = mat.NewDense(2, 2, []float64{1.5, 0.2, 0.2, 0.8})
+	S = mat.NewDense(4, 2, []float64{0.1, -0.05, 0.02, 0.1, -0.08, 0.03, 0.05, 0.04})
+	E = mat.NewDense(4, 4, []float64{
+		2, 0.3, -0.1, 0.2,
+		0.4, 1.5, 0.2, -0.3,
+		-0.3, 0.1, 1.2, 0.5,
+		0.2, -0.4, 0.1, 1.8,
+	})
+	return
+}
+
+func explicitTwin(t *testing.T, E, A, B *mat.Dense) (Ab, Bb *mat.Dense) {
+	t.Helper()
+	var lu mat.LU
+	lu.Factorize(E)
+	Ab, Bb = new(mat.Dense), new(mat.Dense)
+	if err := lu.SolveTo(Ab, false, A); err != nil {
+		t.Fatal(err)
+	}
+	if err := lu.SolveTo(Bb, false, B); err != nil {
+		t.Fatal(err)
+	}
+	return Ab, Bb
+}
+
+func assertEigSetNear(t *testing.T, label string, got, want []complex128, tol float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: %d eigenvalues, want %d", label, len(got), len(want))
+	}
+	used := make([]bool, len(want))
+	for _, g := range got {
+		best, bestDist := -1, math.Inf(1)
+		for j, w := range want {
+			if d := cmplx.Abs(g - w); !used[j] && d < bestDist {
+				best, bestDist = j, d
+			}
+		}
+		if bestDist > tol*(1+cmplx.Abs(g)) {
+			t.Errorf("%s: eigenvalue %v has no match in %v", label, g, want)
+			continue
+		}
+		used[best] = true
+	}
+}
+
+func TestCare_Descriptor(t *testing.T) {
+	A, B, Q, R, S, E := descriptorRiccatiData(false)
+	res, err := Care(A, B, Q, R, &RiccatiOpts{S: S, E: E})
+	if err != nil {
+		t.Fatal(err)
+	}
+	X := res.X
+
+	var atxe, etxa, etxb, gain, cross, resid mat.Dense
+	atxe.Mul(A.T(), mulDense(X, E))
+	etxa.Mul(E.T(), mulDense(X, A))
+	etxb.Mul(E.T(), mulDense(X, B))
+	etxb.Add(&etxb, S)
+	var lu mat.LU
+	lu.Factorize(R)
+	if err := lu.SolveTo(&gain, false, etxb.T()); err != nil {
+		t.Fatal(err)
+	}
+	cross.Mul(&etxb, &gain)
+	resid.Add(&atxe, &etxa)
+	resid.Sub(&resid, &cross)
+	resid.Add(&resid, Q)
+	scale := denseNorm(&atxe) + denseNorm(&cross) + denseNorm(Q)
+	if r := denseNorm(&resid); r > 1e-10*scale {
+		t.Errorf("generalized CARE residual %g > 1e-10*%g", r, scale)
+	}
+	assertMatNear(t, "K = R⁻¹(B'XE+S')", res.K, &gain, 1e-10)
+
+	Ab, Bb := explicitTwin(t, E, A, B)
+	std, err := Care(Ab, Bb, Q, R, &RiccatiOpts{S: S})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var etxeStd mat.Dense
+	etxeStd.Mul(E.T(), mulDense(X, E))
+	assertMatNear(t, "E'XE vs explicit X", &etxeStd, std.X, 1e-9)
+	assertMatNear(t, "K vs explicit K", res.K, std.K, 1e-9)
+
+	var acl mat.Dense
+	acl.Mul(B, res.K)
+	acl.Sub(A, &acl)
+	poles, err := generalizedPoles(&acl, E, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range poles {
+		if real(p) >= 0 {
+			t.Errorf("closed-loop generalized eigenvalue %v not stable", p)
+		}
+	}
+	assertEigSetNear(t, "Eig", res.Eig, poles, 1e-9)
+	assertEigSetNear(t, "Eig vs explicit", res.Eig, std.Eig, 1e-9)
+}
+
+func TestDare_Descriptor(t *testing.T) {
+	A, B, Q, R, S, E := descriptorRiccatiData(true)
+	res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, E: E})
+	if err != nil {
+		t.Fatal(err)
+	}
+	X := res.X
+
+	var atxa, etxe, atxbS, rbar, gain, cross, resid mat.Dense
+	atxa.Mul(A.T(), mulDense(X, A))
+	etxe.Mul(E.T(), mulDense(X, E))
+	atxbS.Mul(A.T(), mulDense(X, B))
+	atxbS.Add(&atxbS, S)
+	rbar.Mul(B.T(), mulDense(X, B))
+	rbar.Add(&rbar, R)
+	var lu mat.LU
+	lu.Factorize(&rbar)
+	if err := lu.SolveTo(&gain, false, atxbS.T()); err != nil {
+		t.Fatal(err)
+	}
+	cross.Mul(&atxbS, &gain)
+	resid.Sub(&atxa, &etxe)
+	resid.Sub(&resid, &cross)
+	resid.Add(&resid, Q)
+	scale := denseNorm(&atxa) + denseNorm(&etxe) + denseNorm(&cross) + denseNorm(Q)
+	if r := denseNorm(&resid); r > 1e-10*scale {
+		t.Errorf("generalized DARE residual %g > 1e-10*%g", r, scale)
+	}
+	assertMatNear(t, "K = (R+B'XB)⁻¹(B'XA+S')", res.K, &gain, 1e-10)
+
+	Ab, Bb := explicitTwin(t, E, A, B)
+	std, err := Dare(Ab, Bb, Q, R, &RiccatiOpts{S: S})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMatNear(t, "E'XE vs explicit X", &etxe, std.X, 1e-9)
+	assertMatNear(t, "K vs explicit K", res.K, std.K, 1e-9)
+
+	var acl mat.Dense
+	acl.Mul(B, res.K)
+	acl.Sub(A, &acl)
+	poles, err := generalizedPoles(&acl, E, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range poles {
+		if cmplx.Abs(p) >= 1 {
+			t.Errorf("closed-loop generalized eigenvalue %v not inside unit circle", p)
+		}
+	}
+	assertEigSetNear(t, "Eig", res.Eig, poles, 1e-9)
+	assertEigSetNear(t, "Eig vs explicit", res.Eig, std.Eig, 1e-9)
+}
+
+func TestRiccati_DescriptorValidation(t *testing.T) {
+	A, B, Q, R, _, _ := descriptorRiccatiData(false)
+	singular := mat.NewDense(4, 4, []float64{1, 2, 0, 0, 2, 4, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1})
+	for name, solve := range map[string]func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error){"Care": Care, "Dare": Dare} {
+		if _, err := solve(A, B, Q, R, &RiccatiOpts{E: singular}); !errors.Is(err, ErrDescriptorSingular) {
+			t.Errorf("%s singular E: err = %v, want ErrDescriptorSingular", name, err)
+		}
+		if _, err := solve(A, B, Q, R, &RiccatiOpts{E: eye(3)}); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("%s 3x3 E: err = %v, want ErrDimensionMismatch", name, err)
+		}
+		Ad := mat.DenseCopyOf(A)
+		Ad.Scale(0.5, Ad)
+		want, err := solve(Ad, B, Q, R, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := solve(Ad, B, Q, R, &RiccatiOpts{E: eye(4)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !mat.Equal(got.X, want.X) || !mat.Equal(got.K, want.K) {
+			t.Errorf("%s E = I differs from E = nil", name)
+		}
+	}
+}

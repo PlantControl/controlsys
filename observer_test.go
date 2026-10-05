@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -933,4 +934,80 @@ func TestEstimatorDesignRejectsDelays(t *testing.T) {
 			}
 		}
 	}
+}
+
+func assertSameFrequencyResponse(t *testing.T, label string, got, want *System, tol float64) {
+	t.Helper()
+	for _, w := range []float64{0.05, 0.7, 2.3} {
+		s := complex(0.1, w)
+		if want.IsDiscrete() {
+			s = cmplx.Exp(complex(0, w*want.Dt))
+		}
+		g, err := got.EvalFr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := want.EvalFr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range h {
+			for j := range h[i] {
+				if cmplx.Abs(g[i][j]-h[i][j]) > tol*(1+cmplx.Abs(h[i][j])) {
+					t.Errorf("%s: H(%v)[%d,%d] = %v, want %v", label, s, i, j, g[i][j], h[i][j])
+				}
+			}
+		}
+	}
+}
+
+func TestKalman_DescriptorMatchesExplicitTwin(t *testing.T) {
+	Qn := mat.NewDense(2, 2, []float64{1.2, 0.3, 0.3, 0.8})
+	Rn := mat.NewDense(2, 2, []float64{0.9, -0.1, -0.1, 1.1})
+	Nn := mat.NewDense(2, 2, []float64{0.1, 0.05, -0.02, 0.08})
+	for _, dt := range []float64{0, 0.1} {
+		sys := obsTestPlant(t, dt, true)
+		twin := descriptorTwin(t, sys)
+		got, err := Kalman(sys, Qn, Rn, &RiccatiOpts{S: Nn})
+		if err != nil {
+			t.Fatalf("dt=%v: %v", dt, err)
+		}
+		want, err := Kalman(twin, Qn, Rn, &RiccatiOpts{S: Nn})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertMatNear(t, fmt.Sprintf("dt=%v P", dt), got.X, want.X, 1e-9)
+		assertMatNear(t, fmt.Sprintf("dt=%v L = E*Lbar", dt), got.K, mulDense(sys.E, want.K), 1e-9)
+		assertEigSetNear(t, fmt.Sprintf("dt=%v Eig", dt), got.Eig, want.Eig, 1e-9)
+
+		est, err := Estim(sys, got.K)
+		if err != nil {
+			t.Fatal(err)
+		}
+		estTwin, err := Estim(twin, want.K)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSameFrequencyResponse(t, fmt.Sprintf("dt=%v Estim", dt), est, estTwin, 1e-9)
+	}
+	if _, err := Kalman(obsTestPlant(t, 0, false), Qn, Rn, &RiccatiOpts{E: eye(3)}); !errors.Is(err, ErrOptionUnsupported) {
+		t.Errorf("opts.E: err = %v, want ErrOptionUnsupported", err)
+	}
+}
+
+func TestKalmd_DescriptorMatchesExplicitTwin(t *testing.T) {
+	sys := obsTestPlant(t, 0, true)
+	sys.D = mat.NewDense(2, 2, nil)
+	Qn := mat.NewDense(2, 2, []float64{1.2, 0.3, 0.3, 0.8})
+	Rn := mat.NewDense(2, 2, []float64{0.9, -0.1, -0.1, 1.1})
+	got, err := Kalmd(sys, Qn, Rn, 0.1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Kalmd(descriptorTwin(t, sys), Qn, Rn, 0.1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMatNear(t, "P", got.X, want.X, 1e-12)
+	assertMatNear(t, "L", got.K, want.K, 1e-12)
 }

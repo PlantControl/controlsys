@@ -32,10 +32,6 @@ func requireStandardCovarianceSystem(sys *System, context string) error {
 	return newDescriptorPolicy(sys).requireStandard(context)
 }
 
-func requireStandardEstimatorSystem(sys *System, context string) error {
-	return newDescriptorPolicy(sys).requireRiccatiStandard(context)
-}
-
 func inputNoiseIntensity(B, W *mat.Dense, n, m int) *mat.Dense {
 	if m == 0 {
 		return mat.NewDense(n, n, nil)

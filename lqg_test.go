@@ -705,3 +705,73 @@ func eye(n int) *mat.Dense {
 	}
 	return mat.NewDense(n, n, d)
 }
+
+func TestLqg_DescriptorMatchesExplicitTwin(t *testing.T) {
+	QXU := mat.NewDense(5, 5, []float64{
+		2, 0.3, -0.1, 0.05, 0,
+		0.3, 1.5, 0.2, 0, 0.04,
+		-0.1, 0.2, 1.2, 0.02, -0.03,
+		0.05, 0, 0.02, 1.1, 0.1,
+		0, 0.04, -0.03, 0.1, 0.9,
+	})
+	QWV := mat.NewDense(5, 5, []float64{
+		1.2, 0.2, -0.1, 0.05, 0.02,
+		0.2, 0.9, 0.1, -0.03, 0.04,
+		-0.1, 0.1, 1.1, 0.01, -0.02,
+		0.05, -0.03, 0.01, 0.8, -0.1,
+		0.02, 0.04, -0.02, -0.1, 1.0,
+	})
+	QI := mat.NewDense(2, 2, []float64{0.5, 0.1, 0.1, 0.7})
+	cases := []struct {
+		name string
+		dt   float64
+		opts *LqgOpts
+	}{
+		{"continuous regulator", 0, nil},
+		{"continuous servo", 0, &LqgOpts{QI: QI}},
+		{"continuous 1dof", 0, &LqgOpts{QI: QI, OneDOF: true}},
+		{"discrete regulator", 0.1, nil},
+		{"discrete servo", 0.1, &LqgOpts{QI: QI}},
+		{"discrete current", 0.1, &LqgOpts{Current: true}},
+		{"discrete current servo", 0.1, &LqgOpts{QI: QI, Current: true}},
+	}
+	for _, tc := range cases {
+		sys := obsTestPlant(t, tc.dt, true)
+		E := sys.E
+		var Einv mat.Dense
+		if err := Einv.Inverse(E); err != nil {
+			t.Fatal(err)
+		}
+		Qn := subDense(QWV, 0, 0, 3, 3)
+		var qnBar, nnBar mat.Dense
+		qnBar.Mul(&Einv, mulDense(Qn, mat.DenseCopyOf(Einv.T())))
+		nnBar.Mul(&Einv, subDense(QWV, 0, 3, 3, 2))
+		QWVBar := mat.DenseCopyOf(QWV)
+		setBlock(QWVBar, 0, 0, &qnBar)
+		setBlock(QWVBar, 0, 3, &nnBar)
+		setBlock(QWVBar, 3, 0, mat.DenseCopyOf(nnBar.T()))
+		symmetrize(QWVBar.RawMatrix().Data, 5, 5)
+
+		got, err := Lqg(sys, QXU, QWV, tc.opts)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		want, err := Lqg(descriptorTwin(t, sys), QXU, QWVBar, tc.opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertLqgNear(t, tc.name+" K", got.K, want.K, 1e-9)
+		assertLqgNear(t, tc.name+" Xc", got.Xc, want.Xc, 1e-9)
+		assertLqgNear(t, tc.name+" Xf", got.Xf, want.Xf, 1e-9)
+		assertLqgNear(t, tc.name+" L = E*Lbar", got.L, mulDense(E, want.L), 1e-9)
+		if want.Ki != nil {
+			assertLqgNear(t, tc.name+" Ki", got.Ki, want.Ki, 1e-9)
+		}
+		if want.Kw != nil {
+			assertLqgNear(t, tc.name+" Mx", got.Mx, want.Mx, 1e-9)
+			assertLqgNear(t, tc.name+" Mw = E*Mwbar", got.Mw, mulDense(E, want.Mw), 1e-9)
+			assertLqgNear(t, tc.name+" Kw*E = Kwbar", mulDense(got.Kw, E), want.Kw, 1e-9)
+		}
+		assertSameFrequencyResponse(t, tc.name+" controller", got.Controller, want.Controller, 1e-9)
+	}
+}

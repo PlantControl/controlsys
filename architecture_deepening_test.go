@@ -290,7 +290,7 @@ func TestArchitectureControllerObserverAssemblyPreservesDiscreteMIMOBehavior(t *
 	}
 }
 
-func TestArchitectureControllerObserverAssemblyRejectsDescriptorModel(t *testing.T) {
+func TestArchitectureControllerObserverAssemblyRejectsSingularDescriptor(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{-1, 0.5, 0, -2}),
 		mat.NewDense(2, 1, []float64{1, 0}),
@@ -301,9 +301,9 @@ func TestArchitectureControllerObserverAssemblyRejectsDescriptorModel(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	sys.E = mat.NewDense(2, 2, []float64{2, 0, 0, 1})
+	sys.E = mat.NewDense(2, 2, []float64{2, 0, 0, 0})
 	_, err = Lqg(sys, eye(3), eye(3), nil)
-	if !errors.Is(err, ErrDescriptorRiccati) {
-		t.Fatalf("Lqg descriptor error = %v, want ErrDescriptorRiccati", err)
+	if !errors.Is(err, ErrDescriptorSingular) {
+		t.Fatalf("Lqg singular descriptor error = %v, want ErrDescriptorSingular", err)
 	}
 }
