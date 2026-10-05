@@ -52,11 +52,9 @@ func TestGenSig_Square(t *testing.T) {
 	if len(tt) != 5 {
 		t.Fatalf("len = %d, want 5", len(tt))
 	}
-	// t=0: sin(0)=0 → u=1 (>= 0 case)
-	// t=0.25: sin(pi/2)=1 → u=1
-	// t=0.5: sin(pi)≈0 → u=1
-	// t=0.75: sin(3pi/2)=-1 → u=-1
-	want := []float64{1, 1, 1, -1, -1}
+	// Half-period boundary belongs to the second half;
+	// and t = period starts a new period.
+	want := []float64{1, 1, -1, -1, 1}
 	for k := range u {
 		if u[k] != want[k] {
 			t.Errorf("u[%d] = %f, want %f", k, u[k], want[k])
@@ -95,5 +93,23 @@ func TestGenSig_InvalidParams(t *testing.T) {
 	_, _, err = GenSig("step", 1.0, 0)
 	if err == nil {
 		t.Fatal("expected error for zero dt")
+	}
+}
+
+func TestGenSig_IncludesFinalSample(t *testing.T) {
+	tt, u, err := GenSig("sine", 0.3, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tt) != 4 || math.Abs(tt[3]-0.3) > 1e-12 {
+		t.Fatalf("t = %v, want 4 samples ending at 0.3", tt)
+	}
+	if math.Abs(u[3]) > 1e-12 {
+		t.Errorf("u(period) = %g, want 0", u[3])
+	}
+	for _, bad := range [][2]float64{{math.NaN(), 0.1}, {math.Inf(1), 0.1}, {1, math.NaN()}, {1, math.Inf(1)}} {
+		if _, _, err := GenSig("sine", bad[0], bad[1]); err == nil {
+			t.Errorf("GenSig(%g, %g): want error", bad[0], bad[1])
+		}
 	}
 }

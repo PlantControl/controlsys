@@ -43,8 +43,8 @@ func StepInfo(resp *TimeResponse, opts *StepInfoOptions) (*StepInfoResult, error
 	}
 
 	cfg := defaultStepInfoOptions(opts)
-	if cfg.SteadyStateValue != nil && len(cfg.SteadyStateValue) != rows {
-		return nil, fmt.Errorf("StepInfo: steady-state values length %d does not match response rows %d: %w", len(cfg.SteadyStateValue), rows, ErrDimensionMismatch)
+	if err := cfg.validate(rows); err != nil {
+		return nil, err
 	}
 	metrics := make([]StepMetric, rows)
 	for row := range rows {
@@ -68,6 +68,24 @@ func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*Ste
 	if err != nil {
 		return nil, err
 	}
+	if opts == nil || opts.SteadyStateValue == nil {
+		gain, err := sys.DCGain()
+		if err != nil {
+			return nil, fmt.Errorf("StepInfoForSystem: %w", err)
+		}
+		cfg := StepInfoOptions{}
+		if opts != nil {
+			cfg = *opts
+		}
+		_, m, p := sys.Dims()
+		cfg.SteadyStateValue = make([]float64, m*p)
+		for input := range m {
+			for output := range p {
+				cfg.SteadyStateValue[input*p+output] = gain.At(output, input)
+			}
+		}
+		opts = &cfg
+	}
 	return StepInfo(resp, opts)
 }
 
@@ -86,6 +104,28 @@ func defaultStepInfoOptions(opts *StepInfoOptions) StepInfoOptions {
 		cfg.SettlingThreshold = 0.02
 	}
 	return cfg
+}
+
+func (cfg StepInfoOptions) validate(rows int) error {
+	lo, hi := cfg.RiseTimeLimits[0], cfg.RiseTimeLimits[1]
+	if !(lo >= 0 && lo < hi && hi <= 1) {
+		return fmt.Errorf("StepInfo: rise-time limits must satisfy 0 <= lo < hi <= 1, got [%g %g]", lo, hi)
+	}
+	if !(cfg.SettlingThreshold > 0 && cfg.SettlingThreshold < 1) {
+		return fmt.Errorf("StepInfo: settling threshold must be in (0, 1), got %g", cfg.SettlingThreshold)
+	}
+	if cfg.SteadyStateValue == nil {
+		return nil
+	}
+	if len(cfg.SteadyStateValue) != rows {
+		return fmt.Errorf("StepInfo: steady-state values length %d does not match response rows %d: %w", len(cfg.SteadyStateValue), rows, ErrDimensionMismatch)
+	}
+	for row, v := range cfg.SteadyStateValue {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("StepInfo: steady-state value %d must be finite, got %g", row, v)
+		}
+	}
+	return nil
 }
 
 func validateStepInfoTime(t []float64) error {
@@ -153,7 +193,7 @@ func directionalPeak(resp *TimeResponse, row int, direction float64) (float64, f
 	for k := 1; k < cols; k++ {
 		y := resp.Y.At(row, k)
 		score := direction * y
-		if score >= best {
+		if score > best {
 			best = score
 			peak = y
 			peakTime = resp.T[k]
