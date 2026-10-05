@@ -603,6 +603,11 @@ func TestNyquist_KnownLoops(t *testing.T) {
 		{"-0.5/(z^2+1)", []float64{-0.5}, []float64{1, 0, 1}, 1, 0, 0, 0},
 		{"0.5/(z^2+1)", []float64{0.5}, []float64{1, 0, 1}, 1, 0, 2, 0},
 		{"2/(z-2)", []float64{2}, []float64{1, -2}, 0.1, 0, -1, 1},
+		{"-10/(s(s+1000))", []float64{-10}, []float64{1, 1000, 0}, 0, 0, 1, 0},
+		{"1/((s-0.005)(s+1000))", []float64{1}, []float64{1, 999.995, -5}, 0, 0, 0, 1},
+		{"0.5/(z-0.999)", []float64{0.5}, []float64{1, -0.999}, 0.001, 0, 0, 0},
+		{"2.5/(z-0.999)", []float64{2.5}, []float64{1, -0.999}, 0.001, 0, 1, 0},
+		{"-0.01/((z-1)(z-0.01))", []float64{-0.01}, []float64{1, -1.01, 0.01}, 0.1, 0, 1, 0},
 		{"(2z+1)/(z-1.5)", []float64{2, 1}, []float64{1, -1.5}, 0.1, 0, -1, 1},
 	}
 	for _, tc := range tests {
@@ -710,13 +715,13 @@ func nyquistPolyMul(a, b []float64) []float64 {
 	return r
 }
 
-// Random loops (integrators, z=1 poles, lightly damped pairs, unstable
+// Random loops (integrators, z=1 poles, lightly damped pairs, stiff and unstable
 // poles, D != 0) against the closed-loop pole count; loops with a
 // closed-loop pole within 1e-3 of the stability boundary are skipped.
 func TestNyquist_RandomLoopsMatchClosedLoop(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	checked := 0
-	for trial := range 600 {
+	for trial := range 1000 {
 		dt := 0.0
 		if trial%2 == 1 {
 			dt = 0.1
@@ -724,7 +729,7 @@ func TestNyquist_RandomLoopsMatchClosedLoop(t *testing.T) {
 		den := []float64{1}
 		nInt := rng.IntN(3)
 		for i := range 1 + rng.IntN(4) {
-			r := rng.NormFloat64() * 2
+			r := rng.NormFloat64() * 2 * math.Pow(10, float64(rng.IntN(5)-2))
 			if dt > 0 {
 				r = rng.Float64()*2.4 - 1.2
 			}

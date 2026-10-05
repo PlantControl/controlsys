@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"slices"
@@ -30,10 +31,11 @@ type NyquistResult struct {
 // around poles on the stability boundary so that those poles count as stable.
 // RHPPoles counts open-loop poles strictly outside the stability boundary and
 // RHPZerosCL = Encirclements + RHPPoles is the number of unstable closed-loop
-// poles under unit negative feedback. Poles within cbrt(eps) of the boundary,
-// relative to the largest pole magnitude, count as on it, so closed-loop poles
-// that close to a boundary pole are not resolved. The counts never depend on
-// omega.
+// poles under unit negative feedback. Relative to the largest pole magnitude,
+// a pole is on the boundary within sqrt(eps), or within 10*cbrt(eps) for a group
+// of two or more poles (a computed repeated boundary pole); closed-loop poles
+// inside the indentation around a boundary pole are not resolved. The counts
+// never depend on omega.
 func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error) {
 	if _, err := newSISOLoopModel(sys, "Nyquist"); err != nil {
 		return nil, err
@@ -44,19 +46,16 @@ func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error)
 		return nil, err
 	}
 
-	maxAbs := 0.0
-	for _, pole := range poles {
-		if a := cmplx.Abs(pole); a > maxAbs {
-			maxAbs = a
+	bd := classifyNyquistBoundary(poles, sys.IsContinuous(), sys.Dt)
+	rhpPoles := 0
+	for i, pole := range poles {
+		if bd.cluster[i] < 0 && poleOutsideStabilityBoundary(pole, sys.IsContinuous(), 0) {
+			rhpPoles++
 		}
 	}
-	tol := math.Cbrt(eps()) * math.Max(maxAbs, 1)
-
-	rhpPoles := countRHPPoles(poles, sys.IsContinuous(), tol)
-	boundary := findBoundaryPoleFreqs(poles, sys.IsContinuous(), sys.Dt, tol)
 
 	if omega == nil {
-		omega = autoNyquistFreqs(sys, poles, boundary, nPoints, tol)
+		omega = autoNyquistFreqs(sys, poles, bd, nPoints)
 	}
 
 	contour := make([]complex128, len(omega))
@@ -75,7 +74,7 @@ func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error)
 		contourN[k] = cmplx.Conj(contour[len(contour)-1-k])
 	}
 
-	enc, err := nyquistEncirclements(sys, poles, boundary, tol)
+	enc, err := nyquistEncirclements(sys, poles, bd)
 	if err != nil {
 		return nil, err
 	}
@@ -90,75 +89,198 @@ func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error)
 	}, nil
 }
 
-func countRHPPoles(poles []complex128, continuous bool, tol float64) int {
-	count := 0
+// nyquistBoundary groups the open-loop poles on the stability boundary into
+// clusters sharing one indentation of the Nyquist contour.
+type nyquistBoundary struct {
+	continuous bool
+	dt         float64
+	clusters   []boundaryCluster
+	cluster    []int // per pole: index into clusters, or -1
+}
+
+type boundaryCluster struct {
+	w0     float64
+	spread float64 // max distance from center of a member pole folded to Im >= 0
+}
+
+// classifyNyquistBoundary puts on the boundary every pole within
+// sqrt(eps)*max(1, max|p|) of it, and every group of two or more poles within
+// cbrt(eps)*max(1, max|p|) of the boundary and of each other: computed
+// boundary poles carry eigenvalue error, repeated ones split by about
+// eps^(1/m), and evaluating the response that close to a pole is singular.
+// A cluster whose indentation would reach the real axis is centred on it.
+func classifyNyquistBoundary(poles []complex128, continuous bool, dt float64) nyquistBoundary {
+	bd := nyquistBoundary{continuous: continuous, dt: dt, cluster: make([]int, len(poles))}
+	maxAbs := 1.0
 	for _, pole := range poles {
-		if poleOutsideStabilityBoundary(pole, continuous, tol) {
-			count++
+		maxAbs = max(maxAbs, cmplx.Abs(pole))
+	}
+	single := math.Sqrt(eps()) * maxAbs
+	loose := math.Cbrt(eps()) * maxAbs
+	dist := func(p complex128) float64 {
+		if continuous {
+			return math.Abs(real(p))
+		}
+		return math.Abs(cmplx.Abs(p) - 1)
+	}
+
+	on := make([]bool, len(poles))
+	for i, p := range poles {
+		on[i] = dist(p) < single
+		if on[i] || dist(p) >= loose {
+			continue
+		}
+		for j, q := range poles {
+			if j != i && dist(q) < loose && cmplx.Abs(foldUpper(p)-foldUpper(q)) < 2*loose {
+				on[i] = true
+				break
+			}
 		}
 	}
-	return count
-}
 
-// boundaryPoleFreq reports whether pole lies on the stability boundary and
-// its non-negative frequency there. tol is cbrt(eps)-sized relative to the
-// largest pole because computed repeated boundary poles (double and triple
-// integrators) split by about eps^(1/m); evaluating the response between the
-// split poles would be singular.
-func boundaryPoleFreq(pole complex128, continuous bool, dt, tol float64) (float64, bool) {
-	if !poleOnStabilityBoundary(pole, continuous, tol) {
-		return 0, false
-	}
-	w0 := math.Abs(imag(pole))
-	if !continuous {
-		w0 = math.Abs(cmplx.Phase(pole))
-	}
-	if w0 < tol {
-		return 0, true
-	}
-	if !continuous {
-		w0 /= dt
-	}
-	return w0, true
-}
-
-// findBoundaryPoleFreqs returns the distinct frequencies of poles on the
-// stability boundary, sorted ascending.
-func findBoundaryPoleFreqs(poles []complex128, continuous bool, dt, tol float64) []float64 {
 	scale := 1.0
 	if !continuous {
 		scale = dt
 	}
-	var freqs []float64
-	for _, pole := range poles {
-		w0, ok := boundaryPoleFreq(pole, continuous, dt, tol)
-		if !ok {
+	snap := max(loose, nyquistIndentBase)
+	angles := make([]float64, len(poles))
+	for i, p := range poles {
+		bd.cluster[i] = -1
+		if !on[i] {
 			continue
 		}
-		merged := false
-		for _, f := range freqs {
-			if math.Abs(f-w0)*scale < tol*10*math.Max(1, w0*scale) {
-				merged = true
-				break
-			}
+		angle := imag(foldUpper(p))
+		if !continuous {
+			angle = cmplx.Phase(foldUpper(p))
 		}
-		if !merged {
-			freqs = append(freqs, w0)
+		switch {
+		case angle < snap:
+			angle = 0
+		case !continuous && math.Pi-angle < snap:
+			angle = math.Pi
+		}
+		angles[i] = angle
+		bd.assign(i, angle/scale, 10*loose)
+	}
+	bd.updateSpreads(poles)
+
+	snapped := false
+	for i, k := range bd.cluster {
+		if k < 0 {
+			continue
+		}
+		c := bd.clusters[k]
+		reach := 4 * c.spread
+		switch {
+		case angles[i] > 0 && angles[i] <= reach:
+			angles[i], snapped = 0, true
+		case !continuous && angles[i] < math.Pi && math.Pi-angles[i] <= reach:
+			angles[i], snapped = math.Pi, true
 		}
 	}
-	sort.Float64s(freqs)
-	return freqs
+	if snapped {
+		bd.clusters = bd.clusters[:0]
+		for i, k := range bd.cluster {
+			if k >= 0 {
+				bd.assign(i, angles[i]/scale, 10*loose)
+			}
+		}
+		bd.updateSpreads(poles)
+	}
+
+	order := make([]int, len(bd.clusters))
+	for k := range order {
+		order[k] = k
+	}
+	sort.Slice(order, func(a, b int) bool { return bd.clusters[order[a]].w0 < bd.clusters[order[b]].w0 })
+	rank := make([]int, len(order))
+	sorted := make([]boundaryCluster, len(order))
+	for r, k := range order {
+		rank[k] = r
+		sorted[r] = bd.clusters[k]
+	}
+	bd.clusters = sorted
+	for i, k := range bd.cluster {
+		if k >= 0 {
+			bd.cluster[i] = rank[k]
+		}
+	}
+	return bd
 }
 
-func autoNyquistFreqs(sys *System, poles []complex128, boundary []float64, nPoints int, tol float64) []float64 {
+// assign puts pole i in the cluster at w0, merging within tol (in angle).
+func (bd *nyquistBoundary) assign(i int, w0, tol float64) {
+	scale := 1.0
+	if !bd.continuous {
+		scale = bd.dt
+	}
+	k := slices.IndexFunc(bd.clusters, func(c boundaryCluster) bool {
+		return math.Abs(c.w0-w0)*scale < tol
+	})
+	if k < 0 {
+		k = len(bd.clusters)
+		bd.clusters = append(bd.clusters, boundaryCluster{w0: w0})
+	}
+	bd.cluster[i] = k
+}
+
+func (bd *nyquistBoundary) updateSpreads(poles []complex128) {
+	for k := range bd.clusters {
+		bd.clusters[k].spread = 0
+	}
+	for i, p := range poles {
+		if k := bd.cluster[i]; k >= 0 {
+			c := &bd.clusters[k]
+			c.spread = max(c.spread, cmplx.Abs(foldUpper(p)-bd.center(c.w0)))
+		}
+	}
+}
+
+func foldUpper(p complex128) complex128 {
+	if imag(p) < 0 {
+		return cmplx.Conj(p)
+	}
+	return p
+}
+
+// center is the boundary point at frequency w0.
+func (bd nyquistBoundary) center(w0 float64) complex128 {
+	if bd.continuous {
+		return complex(0, w0)
+	}
+	switch theta := w0 * bd.dt; {
+	case theta == 0:
+		return 1
+	case theta >= math.Pi*(1-1e-12):
+		return -1
+	default:
+		return cmplx.Exp(complex(0, theta))
+	}
+}
+
+// indentRadius sizes the detour around cluster k so it covers the cluster's
+// split poles and no other open-loop pole.
+func (bd nyquistBoundary) indentRadius(k int, base float64, poles []complex128) float64 {
+	c := bd.clusters[k]
+	center := bd.center(c.w0)
+	r := max(base, 4*c.spread)
+	for i, pole := range poles {
+		if bd.cluster[i] != k {
+			r = min(r, cmplx.Abs(pole-center)/4)
+		}
+	}
+	return r
+}
+
+func autoNyquistFreqs(sys *System, poles []complex128, bd nyquistBoundary, nPoints int) []float64 {
 	if nPoints <= 0 {
 		nPoints = 500
 	}
 
 	td := newTimeDomain(sys.Dt)
 	natFreqs := make([]float64, 0, len(poles))
-	for _, p := range poles {
-		if w0, ok := boundaryPoleFreq(p, sys.IsContinuous(), sys.Dt, tol); ok && w0 == 0 {
+	for i, p := range poles {
+		if k := bd.cluster[i]; k >= 0 && bd.clusters[k].w0 == 0 {
 			continue
 		}
 		wn := td.naturalFrequency(p)
@@ -186,7 +308,8 @@ func autoNyquistFreqs(sys *System, poles []complex128, boundary []float64, nPoin
 	baseN := max(nPoints*7/10, 50)
 	omega := logspace(math.Log10(wMin), math.Log10(wMax), baseN)
 
-	for _, w0 := range boundary {
+	for _, c := range bd.clusters {
+		w0 := c.w0
 		if w0 == 0 {
 			continue
 		}
@@ -208,8 +331,8 @@ func autoNyquistFreqs(sys *System, poles []complex128, boundary []float64, nPoin
 	filtered := deduped[:0]
 	for _, w := range deduped {
 		tooClose := false
-		for _, w0 := range boundary {
-			if w0 > 0 && math.Abs(w-w0) < 1e-4*w0 {
+		for _, c := range bd.clusters {
+			if c.w0 > 0 && math.Abs(w-c.w0) < 1e-4*c.w0 {
 				tooClose = true
 				break
 			}
@@ -221,7 +344,10 @@ func autoNyquistFreqs(sys *System, poles []complex128, boundary []float64, nPoin
 	return filtered
 }
 
+var errNyquistIndent = fmt.Errorf("Nyquist: boundary poles too close to indent separately: %w", ErrSingularTransform)
+
 const (
+	nyquistIndentBase   = 1e-4
 	nyquistMaxPhaseStep = math.Pi / 4
 	nyquistMaxDepth     = 30
 	nyquistTailRatio    = 0.1
@@ -240,15 +366,15 @@ type nyquistPath struct {
 }
 
 // seedResonances adds contour parameters (ω, or θ = ωdt for discrete models)
-// around lightly damped poles, where the response varies on the scale of the
-// pole's distance to the boundary rather than of the base grid spacing.
+// around each pole, where the response varies on the scale of the pole's
+// distance to the boundary rather than of the base grid spacing.
 func (p *nyquistPath) seedResonances(poles []complex128, continuous bool) {
 	for _, pole := range poles {
 		at, d := imag(pole), math.Abs(real(pole))
 		if !continuous {
 			at, d = cmplx.Phase(pole), math.Abs(1-cmplx.Abs(pole))
 		}
-		if at < 0 || d == 0 || d > 0.1*math.Max(at, 1e-300) {
+		if at < 0 || d == 0 {
 			continue
 		}
 		for _, k := range []float64{-16, -8, -4, -2, -1, -0.5, -0.25, 0, 0.25, 0.5, 1, 2, 4, 8, 16} {
@@ -306,7 +432,7 @@ func (p *nyquistPath) piece(f func(float64) complex128, ts []float64) error {
 }
 
 func (p *nyquistPath) refine(f func(float64) complex128, ta float64, va complex128, tb float64, vb complex128, depth int) error {
-	if depth >= nyquistMaxDepth || phaseStep(1+va, 1+vb) <= nyquistMaxPhaseStep {
+	if depth >= nyquistMaxDepth || !(phaseStep(1+va, 1+vb) > nyquistMaxPhaseStep) {
 		return nil
 	}
 	tm := (ta + tb) / 2
@@ -350,20 +476,7 @@ func (p *nyquistPath) arc(center complex128, eps, phi0, phi1 float64, discrete b
 	}, linspace(phi0, phi1, 33))
 }
 
-// indentRadius sizes the detour around the boundary poles clustered within
-// 10*tol of center so it encloses the cluster and no other open-loop pole.
-func indentRadius(center complex128, base, tol float64, poles []complex128) float64 {
-	r := max(base, 20*tol)
-	cluster := 10 * tol
-	for _, pole := range poles {
-		if d := cmplx.Abs(pole - center); d > cluster {
-			r = min(r, d/4)
-		}
-	}
-	return r
-}
-
-func nyquistEncirclements(sys *System, poles []complex128, boundary []float64, tol float64) (int, error) {
+func nyquistEncirclements(sys *System, poles []complex128, bd nyquistBoundary) (int, error) {
 	e, err := validFrequencyEvaluator(sys, "Nyquist")
 	if err != nil {
 		return 0, err
@@ -374,9 +487,9 @@ func nyquistEncirclements(sys *System, poles []complex128, boundary []float64, t
 	var closure complex128
 	if sys.IsContinuous() {
 		closure = complex(sys.D.At(0, 0), 0)
-		err = path.continuousHalf(poles, boundary, closure, tol)
+		err = path.continuousHalf(poles, bd, closure)
 	} else {
-		err = path.discreteHalf(poles, boundary, tol)
+		err = path.discreteHalf(poles, bd)
 	}
 	if err != nil {
 		return 0, err
@@ -394,7 +507,7 @@ func nyquistEncirclements(sys *System, poles []complex128, boundary []float64, t
 	return -windingNumber(full, -1), nil
 }
 
-func (p *nyquistPath) continuousHalf(poles []complex128, boundary []float64, closure complex128, tol float64) error {
+func (p *nyquistPath) continuousHalf(poles []complex128, bd nyquistBoundary, closure complex128) error {
 	wLo, wHi := 1e-3, 1e3
 	scales := make([]float64, 0, len(poles))
 	for _, pole := range poles {
@@ -418,6 +531,9 @@ func (p *nyquistPath) continuousHalf(poles []complex128, boundary []float64, clo
 	axis := func(w float64) complex128 { return complex(0, w) }
 	logAxis := func(u float64) complex128 { return complex(0, math.Exp(u)) }
 	segment := func(a, b float64) error {
+		if !(b > a) {
+			return errNyquistIndent
+		}
 		if a == 0 {
 			first := min(wLo, b/10)
 			if err := p.piece(axis, []float64{0, first}); err != nil {
@@ -431,8 +547,9 @@ func (p *nyquistPath) continuousHalf(poles []complex128, boundary []float64, clo
 	}
 
 	cur := 0.0
-	for _, w0 := range boundary {
-		r := indentRadius(complex(0, w0), 1e-4*math.Max(1, w0), tol, poles)
+	for k, c := range bd.clusters {
+		w0 := c.w0
+		r := bd.indentRadius(k, nyquistIndentBase*math.Max(1, w0), poles)
 		if w0 == 0 {
 			if err := p.arc(0, r, 0, math.Pi/2, false); err != nil {
 				return err
@@ -466,30 +583,30 @@ func (p *nyquistPath) continuousHalf(poles []complex128, boundary []float64, clo
 	return nil
 }
 
-func (p *nyquistPath) discreteHalf(poles []complex128, boundary []float64, tol float64) error {
+func (p *nyquistPath) discreteHalf(poles []complex128, bd nyquistBoundary) error {
 	dt := p.sys.Dt
 	circle := func(theta float64) complex128 { return cmplx.Exp(complex(0, theta)) }
 	segment := func(a, b float64) error {
+		if !(b > a) {
+			return errNyquistIndent
+		}
 		n := max(int(math.Ceil((b-a)/(math.Pi/200))), 2)
 		return p.piece(circle, p.withSeeds(linspace(a, b, n), a, b, func(x float64) float64 { return x }))
 	}
 
 	cur := 0.0
 	closed := false
-	for _, w0 := range boundary {
-		theta := min(w0*dt, math.Pi)
-		center := cmplx.Exp(complex(0, theta))
-		if theta == 0 {
-			center = 1
-		}
-		r := indentRadius(center, 1e-4, tol, poles)
-		switch {
-		case theta == 0:
+	for k, c := range bd.clusters {
+		theta := min(c.w0*dt, math.Pi)
+		center := bd.center(c.w0)
+		r := bd.indentRadius(k, nyquistIndentBase, poles)
+		switch center {
+		case 1:
 			if err := p.arc(1, r, 0, math.Pi/2, true); err != nil {
 				return err
 			}
 			cur = r
-		case theta >= math.Pi*(1-1e-12):
+		case -1:
 			if err := segment(cur, math.Pi-r); err != nil {
 				return err
 			}
