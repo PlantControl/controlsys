@@ -8,6 +8,9 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// FreqResponseMatrix holds a sampled frequency response: Data is row-major
+// per frequency, Data[k*P*M + i*M + j] being the response from input j to
+// output i at Omega[k]; NFreq == len(Omega).
 type FreqResponseMatrix struct {
 	Data       []complex128
 	Omega      []float64
@@ -17,6 +20,7 @@ type FreqResponseMatrix struct {
 	OutputName []string
 }
 
+// At returns the response from input to output at Omega[freq].
 func (f *FreqResponseMatrix) At(freq, output, input int) complex128 {
 	return newSampledComplexResponse(f.Data, f.Omega, f.P, f.M).at(freq, output, input)
 }
@@ -37,6 +41,8 @@ func newFreqResponseMatrixOwned(data []complex128, omega []float64, p, m int, in
 	return newFreqResponseMatrix(data, copyFloatSlice(omega), p, m, inputName, outputName)
 }
 
+// BodeResult holds the magnitude (dB) and unwrapped phase (degrees) of a
+// frequency response at Omega.
 type BodeResult struct {
 	Omega      []float64
 	magDB      []float64
@@ -46,10 +52,13 @@ type BodeResult struct {
 	OutputName []string
 }
 
+// MagDBAt returns the magnitude in dB from input to output at Omega[freq].
 func (b *BodeResult) MagDBAt(freq, output, input int) float64 {
 	return newSampledScalarResponse(b.magDB, b.Omega, b.p, b.m).at(freq, output, input)
 }
 
+// PhaseAt returns the unwrapped phase in degrees from input to output at
+// Omega[freq].
 func (b *BodeResult) PhaseAt(freq, output, input int) float64 {
 	return newSampledScalarResponse(b.phase, b.Omega, b.p, b.m).at(freq, output, input)
 }
@@ -797,10 +806,14 @@ type NicholsResult struct {
 	OutputName []string
 }
 
+// MagDBAt returns the open-loop gain in dB from input to output at
+// Omega[freq].
 func (r *NicholsResult) MagDBAt(freq, output, input int) float64 {
 	return newSampledScalarResponse(r.magDB, r.Omega, r.p, r.m).at(freq, output, input)
 }
 
+// PhaseAt returns the open-loop phase in degrees from input to output at
+// Omega[freq], shifted so the first point lies in (-360, 0].
 func (r *NicholsResult) PhaseAt(freq, output, input int) float64 {
 	return newSampledScalarResponse(r.phase, r.Omega, r.p, r.m).at(freq, output, input)
 }
@@ -851,10 +864,12 @@ type SigmaResult struct {
 	OutputName []string
 }
 
+// At returns the svIndex-th largest singular value at Omega[freq].
 func (r *SigmaResult) At(freq, svIndex int) float64 {
 	return r.sv[freq*r.nSV+svIndex]
 }
 
+// NSV returns the number of singular values per frequency, min(p, m).
 func (r *SigmaResult) NSV() int {
 	return r.nSV
 }

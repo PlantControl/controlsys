@@ -5,20 +5,6 @@ type visibleDelaySelection struct {
 	hasNonzero bool
 }
 
-func selectVisibleDelays(delay []float64, indexes []int) visibleDelaySelection {
-	out := visibleDelaySelection{values: make([]float64, len(indexes))}
-	if delay == nil {
-		return out
-	}
-	for k, idx := range indexes {
-		out.values[k] = delay[idx]
-		if delay[idx] != 0 {
-			out.hasNonzero = true
-		}
-	}
-	return out
-}
-
 // selectHoistableDelays returns the delays of the selected channels that may
 // stay external because open reports them outside every feedback path, plus
 // the indexes of those channels.
