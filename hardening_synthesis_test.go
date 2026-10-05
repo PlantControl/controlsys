@@ -307,7 +307,7 @@ func TestKalman_PVTOL_PartialMeasurement(t *testing.T) {
 		1e-5, 1e-5, 1e-4,
 	})
 
-	res, err := Lqe(A, B, C, Qn, Rn, nil)
+	res, err := Lqe(A, B, C, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

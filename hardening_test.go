@@ -112,7 +112,7 @@ func TestKalman_RejectsSingularDescriptor(t *testing.T) {
 
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
-	_, err := Kalman(sys, Qn, Rn, nil)
+	_, err := Kalman(sys, Qn, Rn, nil, nil)
 	if !errors.Is(err, ErrDescriptorSingular) {
 		t.Errorf("expected ErrDescriptorSingular, got %v", err)
 	}
@@ -489,7 +489,7 @@ func TestLqe_ClosedLoopStability(t *testing.T) {
 	Qn := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 
-	res, err := Lqe(A, G, C, Qn, Rn, nil)
+	res, err := Lqe(A, G, C, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +527,7 @@ func TestKalman_ClosedLoopStability(t *testing.T) {
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 
-	res, err := Kalman(sys, Qn, Rn, nil)
+	res, err := Kalman(sys, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

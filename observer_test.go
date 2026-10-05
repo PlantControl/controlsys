@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -19,7 +20,7 @@ func TestLqe_Scalar(t *testing.T) {
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 
-	res, err := Lqe(A, G, C, Qn, Rn, nil)
+	res, err := Lqe(A, G, C, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +39,7 @@ func TestLqe_DoubleIntegrator(t *testing.T) {
 	Qn := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 
-	res, err := Lqe(A, G, C, Qn, Rn, nil)
+	res, err := Lqe(A, G, C, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +69,7 @@ func TestLqe_NonSquareG(t *testing.T) {
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 
-	res, err := Lqe(A, G, C, Qn, Rn, nil)
+	res, err := Lqe(A, G, C, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,7 @@ func TestLqe_NonSymmetricA(t *testing.T) {
 	Qn := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 
-	res, err := Lqe(A, G, C, Qn, Rn, nil)
+	res, err := Lqe(A, G, C, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,14 +109,14 @@ func TestLqe_DimErrors(t *testing.T) {
 	C := mat.NewDense(1, 2, nil)
 	Qn := mat.NewDense(2, 2, nil)
 	Rn := mat.NewDense(1, 1, []float64{1})
-	_, err := Lqe(A, G, C, Qn, Rn, nil)
+	_, err := Lqe(A, G, C, Qn, Rn, nil, nil)
 	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("expected ErrDimensionMismatch, got %v", err)
 	}
 }
 
 func TestLqe_Empty(t *testing.T) {
-	res, err := Lqe(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, nil)
+	res, err := Lqe(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, nil, nil)
 	if !errors.Is(err, ErrDimensionMismatch) || res != nil {
 		t.Errorf("zero states: res = %v, err = %v, want nil, ErrDimensionMismatch", res, err)
 	}
@@ -135,13 +136,13 @@ func TestKalman_Continuous(t *testing.T) {
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 
-	res, err := Kalman(sys, Qn, Rn, nil)
+	res, err := Kalman(sys, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Compare with direct Lqe(A, B, C, Qn, Rn)
-	res2, err := Lqe(A, B, C, Qn, Rn, nil)
+	res2, err := Lqe(A, B, C, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestKalman_Discrete(t *testing.T) {
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
 
-	res, err := Kalman(sys, Qn, Rn, nil)
+	res, err := Kalman(sys, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +188,7 @@ func TestKalman_NoStates(t *testing.T) {
 	sys, _ := NewGain(D, 0)
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
-	_, err := Kalman(sys, Qn, Rn, nil)
+	_, err := Kalman(sys, Qn, Rn, nil, nil)
 	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("expected ErrDimensionMismatch, got %v", err)
 	}
@@ -261,7 +262,7 @@ func TestEstim_Dims(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 	L := mat.NewDense(2, 1, []float64{1, 2})
 
-	est, err := Estim(sys, L)
+	est, err := estimAll(sys, L)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +281,7 @@ func TestEstim_Values(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 	L := mat.NewDense(2, 1, []float64{3, 4})
 
-	est, err := Estim(sys, L)
+	est, err := estimAll(sys, L)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,10 +327,10 @@ func TestEstim_StableClosedLoop(t *testing.T) {
 	G := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	Qn := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	Rn := mat.NewDense(1, 1, []float64{1})
-	res, _ := Lqe(A, G, C, Qn, Rn, nil)
+	res, _ := Lqe(A, G, C, Qn, Rn, nil, nil)
 	L := res.K
 
-	est, err := Estim(sys, L)
+	est, err := estimAll(sys, L)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +351,7 @@ func TestEstim_DimError(t *testing.T) {
 	D := mat.NewDense(1, 1, nil)
 	sys, _ := New(A, B, C, D, 0)
 	L := mat.NewDense(3, 1, nil) // wrong rows
-	_, err := Estim(sys, L)
+	_, err := estimAll(sys, L)
 	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("expected ErrDimensionMismatch, got %v", err)
 	}
@@ -364,7 +365,7 @@ func TestEstim_Discrete(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0.1)
 	L := mat.NewDense(2, 1, []float64{0.5, 0.3})
 
-	est, err := Estim(sys, L)
+	est, err := estimAll(sys, L)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +464,7 @@ func TestReg_LQG_Integration(t *testing.T) {
 	// Kalman gain
 	Qn := mat.NewDense(1, 1, []float64{1})
 	Rn := mat.NewDense(1, 1, []float64{1})
-	kalRes, err := Kalman(sys, Qn, Rn, nil)
+	kalRes, err := Kalman(sys, Qn, Rn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +619,7 @@ func TestEstim_DescriptorInputDelayOracle(t *testing.T) {
 			if err := sys.SetInputDelay(tc.delay); err != nil {
 				t.Fatal(err)
 			}
-			est, err := Estim(sys, obsTestGain())
+			est, err := estimAll(sys, obsTestGain())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -660,7 +661,7 @@ func TestEstim_RejectsUnsupportedDelays(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, sys := range map[string]*System{"output": out, "iodelay": io, "internal": lft} {
-		if _, err := Estim(sys, L); !errors.Is(err, ErrDelayUnsupported) {
+		if _, err := estimAll(sys, L); !errors.Is(err, ErrDelayUnsupported) {
 			t.Errorf("%s: err=%v, want ErrDelayUnsupported", name, err)
 		}
 	}
@@ -797,11 +798,7 @@ func TestKalman_NoiseFeedthroughMATLAB(t *testing.T) {
 	for _, dt := range []float64{0, 0.1} {
 		for _, N := range []*mat.Dense{nil, Nn} {
 			sys := obsTestPlant(t, dt, false)
-			var opts *RiccatiOpts
-			if N != nil {
-				opts = &RiccatiOpts{S: N}
-			}
-			res, err := Kalman(sys, Qn, Rn, opts)
+			res, err := Kalman(sys, Qn, Rn, N, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -857,7 +854,7 @@ func TestKalman_NoiseFeedthroughMATLAB(t *testing.T) {
 
 func TestKalman_CrossCovarianceDims(t *testing.T) {
 	sys := obsTestPlant(t, 0, false)
-	_, err := Kalman(sys, eye(2), eye(2), &RiccatiOpts{S: mat.NewDense(3, 2, nil)})
+	_, err := Kalman(sys, eye(2), eye(2), mat.NewDense(3, 2, nil), nil)
 	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("err=%v, want ErrDimensionMismatch", err)
 	}
@@ -870,7 +867,7 @@ func TestLqe_CrossCovarianceMapsThroughG(t *testing.T) {
 	Qn := mat.NewDense(1, 1, []float64{0.8})
 	Rn := mat.NewDense(2, 2, []float64{0.5, 0.05, 0.05, 0.3})
 	N := mat.NewDense(1, 2, []float64{0.2, -0.1})
-	res, err := Lqe(A, G, C, Qn, Rn, &RiccatiOpts{S: N})
+	res, err := Lqe(A, G, C, Qn, Rn, N, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -912,7 +909,7 @@ func TestEstimatorDesignRejectsDelays(t *testing.T) {
 	}
 	for name, set := range setters {
 		designs := map[string]func(*System) error{
-			"Kalman": func(s *System) error { _, err := Kalman(s, eye(2), eye(2), nil); return err },
+			"Kalman": func(s *System) error { _, err := Kalman(s, eye(2), eye(2), nil, nil); return err },
 			"Kalmd": func(s *System) error {
 				s.D.Zero()
 				_, err := Kalmd(s, eye(2), eye(2), 0.1, nil)
@@ -967,11 +964,11 @@ func TestKalman_DescriptorMatchesExplicitTwin(t *testing.T) {
 	for _, dt := range []float64{0, 0.1} {
 		sys := obsTestPlant(t, dt, true)
 		twin := descriptorTwin(t, sys)
-		got, err := Kalman(sys, Qn, Rn, &RiccatiOpts{S: Nn})
+		got, err := Kalman(sys, Qn, Rn, Nn, nil)
 		if err != nil {
 			t.Fatalf("dt=%v: %v", dt, err)
 		}
-		want, err := Kalman(twin, Qn, Rn, &RiccatiOpts{S: Nn})
+		want, err := Kalman(twin, Qn, Rn, Nn, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -979,17 +976,17 @@ func TestKalman_DescriptorMatchesExplicitTwin(t *testing.T) {
 		assertMatNear(t, fmt.Sprintf("dt=%v L = E*Lbar", dt), got.K, mulDense(sys.E, want.K), 1e-9)
 		assertEigSetNear(t, fmt.Sprintf("dt=%v Eig", dt), got.Eig, want.Eig, 1e-9)
 
-		est, err := Estim(sys, got.K)
+		est, err := estimAll(sys, got.K)
 		if err != nil {
 			t.Fatal(err)
 		}
-		estTwin, err := Estim(twin, want.K)
+		estTwin, err := estimAll(twin, want.K)
 		if err != nil {
 			t.Fatal(err)
 		}
 		assertSameFrequencyResponse(t, fmt.Sprintf("dt=%v Estim", dt), est, estTwin, 1e-9)
 	}
-	if _, err := Kalman(obsTestPlant(t, 0, false), Qn, Rn, &RiccatiOpts{E: eye(3)}); !errors.Is(err, ErrOptionUnsupported) {
+	if _, err := Kalman(obsTestPlant(t, 0, false), Qn, Rn, nil, &RiccatiOpts{E: eye(3)}); !errors.Is(err, ErrOptionUnsupported) {
 		t.Errorf("opts.E: err = %v, want ErrOptionUnsupported", err)
 	}
 }
@@ -1009,4 +1006,154 @@ func TestKalmd_DescriptorMatchesExplicitTwin(t *testing.T) {
 	}
 	assertMatNear(t, "P", got.X, want.X, 1e-12)
 	assertMatNear(t, "L", got.K, want.K, 1e-12)
+}
+
+// estimAll builds the estimator with every plant input known, the pre-v2
+// default of Estim.
+func estimAll(sys *System, L *mat.Dense) (*System, error) {
+	_, m, _ := sys.Dims()
+	return Estim(sys, L, nil, identityIndices(m))
+}
+
+func TestEstimMATLABSensorsAndKnown(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, withE := range []bool{false, true} {
+			sys := obsTestPlant(t, dt, withE)
+			sys.InputName = []string{"u1", "u2"}
+			sys.OutputName = []string{"y1", "y2"}
+			for _, tc := range []struct {
+				sensors, known []int
+			}{{nil, nil}, {[]int{1}, []int{0}}, {[]int{1, 0}, []int{1, 0}}} {
+				sensors := tc.sensors
+				if sensors == nil {
+					sensors = []int{0, 1}
+				}
+				ps, mk := len(sensors), len(tc.known)
+				L := obsTestGain().Slice(0, 3, 0, ps).(*mat.Dense)
+				est, err := Estim(sys, L, tc.sensors, tc.known)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, m, p := est.Dims(); m != mk+ps || p != ps+3 {
+					t.Fatalf("dims m=%d p=%d, want %d %d", m, p, mk+ps, ps+3)
+				}
+				if est.InputName[mk] != sys.OutputName[sensors[0]] || (mk > 0 && est.InputName[0] != sys.InputName[tc.known[0]]) {
+					t.Fatalf("input names %v", est.InputName)
+				}
+				for _, w := range []float64{0.3, 2.1} {
+					s := complex(0, w)
+					if dt > 0 {
+						s = cmplx.Exp(complex(0, w*dt))
+					}
+					// Oracle: x̂ = (sE - A + L·C2)⁻¹((B2 - L·D22)u + L·y), ŷ = C2x̂ + D22u.
+					M := make([][]complex128, 3)
+					rhs := make([][]complex128, 3)
+					for i := range 3 {
+						M[i] = make([]complex128, 3)
+						rhs[i] = make([]complex128, mk+ps)
+						for j := range 3 {
+							e := 0.0
+							if i == j {
+								e = 1
+							}
+							if withE {
+								e = sys.E.At(i, j)
+							}
+							lc := 0.0
+							for k, r := range sensors {
+								lc += L.At(i, k) * sys.C.At(r, j)
+							}
+							M[i][j] = s*complex(e, 0) - complex(sys.A.At(i, j)-lc, 0)
+						}
+						for k, col := range tc.known {
+							ld := 0.0
+							for q, r := range sensors {
+								ld += L.At(i, q) * sys.D.At(r, col)
+							}
+							rhs[i][k] = complex(sys.B.At(i, col)-ld, 0)
+						}
+						for q := range ps {
+							rhs[i][mk+q] = complex(L.At(i, q), 0)
+						}
+					}
+					X := obsSolveComplex(M, rhs)
+					resp, err := est.FreqResponse([]float64{w})
+					if err != nil {
+						t.Fatal(err)
+					}
+					for j := range mk + ps {
+						for q, r := range sensors {
+							want := 0i
+							for i := range 3 {
+								want += complex(sys.C.At(r, i), 0) * X[i][j]
+							}
+							if j < mk {
+								want += complex(sys.D.At(r, tc.known[j]), 0)
+							}
+							if got := resp.At(0, q, j); cmplx.Abs(got-want) > 1e-10 {
+								t.Fatalf("dt=%g E=%v %+v ŷ%d/in%d = %v, want %v", dt, withE, tc, q, j, got, want)
+							}
+						}
+						for i := range 3 {
+							if got := resp.At(0, ps+i, j); cmplx.Abs(got-X[i][j]) > 1e-10 {
+								t.Fatalf("dt=%g E=%v %+v x̂%d/in%d = %v, want %v", dt, withE, tc, i, j, got, X[i][j])
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestEstimKalmanLqeArgumentErrors(t *testing.T) {
+	sys := obsTestPlant(t, 0, false)
+	L := obsTestGain()
+	for name, args := range map[string][2][]int{
+		"sensor range": {{2}, nil}, "sensor repeat": {{0, 0}, nil}, "sensors empty": {{}, nil},
+		"known range": {nil, {-1}}, "known repeat": {nil, {1, 1}},
+	} {
+		if _, err := Estim(sys, L, args[0], args[1]); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Estim: ") {
+			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
+		}
+	}
+	if _, err := Estim(sys, L, []int{0}, nil); !errors.Is(err, ErrDimensionMismatch) || !strings.HasPrefix(err.Error(), "Estim: ") {
+		t.Errorf("L size err = %v", err)
+	}
+	if _, err := Estim(nil, L, nil, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil sys err = %v", err)
+	}
+	Qn, Rn := eye(2), eye(2)
+	if _, err := Kalman(sys, Qn, Rn, nil, &RiccatiOpts{S: mat.NewDense(2, 2, nil)}); !errors.Is(err, ErrOptionUnsupported) {
+		t.Errorf("Kalman opts.S err = %v, want ErrOptionUnsupported", err)
+	}
+	if _, err := Kalman(sys, Qn, Rn, mat.NewDense(3, 2, nil), nil); !errors.Is(err, ErrDimensionMismatch) || !strings.HasPrefix(err.Error(), "Kalman: ") {
+		t.Errorf("Kalman Nn size err = %v", err)
+	}
+	if _, err := Kalman(nil, Qn, Rn, nil, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Kalman nil err = %v", err)
+	}
+	if _, err := Lqe(sys.A, sys.B, sys.C, Qn, Rn, nil, &RiccatiOpts{S: mat.NewDense(2, 2, nil)}); !errors.Is(err, ErrOptionUnsupported) {
+		t.Errorf("Lqe opts.S err = %v", err)
+	}
+	if _, err := Lqe(sys.A, mat.NewDense(2, 2, nil), sys.C, Qn, Rn, nil, nil); !errors.Is(err, ErrDimensionMismatch) || !strings.HasPrefix(err.Error(), "Lqe: ") {
+		t.Errorf("Lqe G size err = %v", err)
+	}
+	if _, err := Lqe(nil, sys.B, sys.C, Qn, Rn, nil, nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Lqe nil A err = %v", err)
+	}
+	if _, err := Kalmd(sys, Qn, Rn, -1, nil); !errors.Is(err, ErrInvalidSampleTime) || !strings.HasPrefix(err.Error(), "Kalmd: ") {
+		t.Errorf("Kalmd dt err = %v", err)
+	}
+	withNn, err := Lqe(sys.A, sys.B, sys.C, Qn, Rn, mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaKalman, err := Kalman(func() *System { s := sys.Copy(); s.D.Zero(); return s }(), Qn, Rn, mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mat.EqualApprox(withNn.K, viaKalman.K, 1e-9) {
+		t.Errorf("Lqe and Kalman disagree with Nn: %v vs %v", mat.Formatted(withNn.K), mat.Formatted(viaKalman.K))
+	}
 }

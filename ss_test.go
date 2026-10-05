@@ -842,7 +842,7 @@ func emptyIOOps() []emptyIOOp {
 		{"ToExplicit", func(s *System) (any, error) { return s.ToExplicit() }},
 		{"Estim", func(s *System) (any, error) {
 			n, _, p := s.Dims()
-			return Estim(s, newDense(n, p))
+			return estimAll(s, newDense(n, p))
 		}},
 		{"Kalmd", func(s *System) (any, error) {
 			if s.IsDiscrete() {
@@ -878,7 +878,7 @@ func emptyIOOps() []emptyIOOp {
 		{"ModelArray", func(s *System) (any, error) { return NewModelArray([]int{1}, []*System{s}) }},
 		{"Kalman", func(s *System) (any, error) {
 			_, m, p := s.Dims()
-			return Kalman(s, eyeOrEmptyDense(m), eyeOrEmptyDense(p), nil)
+			return Kalman(s, eyeOrEmptyDense(m), eyeOrEmptyDense(p), nil, nil)
 		}},
 	}
 }

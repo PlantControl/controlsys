@@ -311,7 +311,7 @@ func TestLqg_InputNoiseModelMapping(t *testing.T) {
 		rr.Add(rr, Rn)
 		setBlock(&QWV, n, n, rr)
 
-		kal, err := Kalman(sys, Qw, Rn, nil)
+		kal, err := Kalman(sys, Qw, Rn, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
