@@ -25,9 +25,6 @@ func Lqg(sys *System, Q, R, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*LqgResult, e
 	if err != nil {
 		return nil, err
 	}
-	if sys.HasDelay() {
-		return nil, fmt.Errorf("Lqg: %w", ErrDelayUnsupported)
-	}
 
 	kRes, err := policy.regulator(Q, R, opts)
 	if err != nil {
