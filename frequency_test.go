@@ -909,9 +909,14 @@ func TestFreqResponse_SingularLFT(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = sys.FreqResponse([]float64{0.0})
-	if err == nil {
-		t.Fatal("expected error for singular (I - H22*Delta) at w=0 with D22=1")
+	// I - D22·Δ is singular at w = 0, but the loop is decoupled from u and y
+	// (D12 = D21 = B2 = C2 = 0), so G = 1/(s+1) stays finite there.
+	resp, err := sys.FreqResponse([]float64{0.0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := resp.At(0, 0, 0); cmplx.Abs(g-1) > 1e-12 {
+		t.Fatalf("G(0) = %v, want 1", g)
 	}
 }
 

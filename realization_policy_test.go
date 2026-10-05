@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -359,17 +360,31 @@ func TestStructuralOpsPreserveDelayedResponse(t *testing.T) {
 	}
 }
 
-type failingPointSolver struct{}
+// gridSingularSolver fails exactly on the sweep grid, as at a pole, and
+// evaluates normally elsewhere.
+type gridSingularSolver struct {
+	inner frequencyPointSolver
+	grid  []complex128
+}
 
-func (failingPointSolver) evalInto(complex128, []complex128) error { return ErrSingularTransform }
+func (g gridSingularSolver) evalInto(s complex128, dst []complex128) error {
+	if slices.Contains(g.grid, s) {
+		return ErrSingularTransform
+	}
+	return g.inner.evalInto(s, dst)
+}
 
-func TestFrequencySweepTFFallbackAppliesExternalDelaysOnce(t *testing.T) {
+func TestFrequencySweepPoleLimitAppliesExternalDelaysOnce(t *testing.T) {
 	for _, dt := range []float64{0, 0.1} {
 		sys := fieldIODelay(t, dt)
 		e := newFrequencyEvaluator(sys)
 		omega := []float64{0.4, 1.3, 2.2}
+		grid := make([]complex128, len(omega))
+		for k, w := range omega {
+			grid[k] = e.sAt(w)
+		}
 		data := make([]complex128, len(omega)*e.p*e.m)
-		if err := e.sweepInto(omega, data, failingPointSolver{}); err != nil {
+		if err := e.sweepInto(omega, data, gridSingularSolver{e.pointSolver(1), grid}); err != nil {
 			t.Fatal(err)
 		}
 		for k, w := range omega {
@@ -379,7 +394,7 @@ func TestFrequencySweepTFFallbackAppliesExternalDelaysOnce(t *testing.T) {
 				got[i] = data[(k*e.p+i)*e.m : (k*e.p+i+1)*e.m]
 			}
 			if d := fieldMaxDiff(got, want); d > fieldTol {
-				t.Errorf("dt=%v w=%v: fallback response off by %.3g", dt, w, d)
+				t.Errorf("dt=%v w=%v: pole-limit response off by %.3g", dt, w, d)
 			}
 		}
 	}
