@@ -1,109 +1,255 @@
 package controlsys
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"math"
 )
 
+// TuneMethod names the search a tuning result came from.
+type TuneMethod string
+
+// TuneMethodCartesianGrid is the exhaustive search over a Cartesian grid of
+// the free parameters' bounds.
+const TuneMethodCartesianGrid TuneMethod = "cartesian-grid"
+
+// SystuneOptions configures GridTune and Systune. The zero value selects
+// 5 grid points per parameter and at most 100000 evaluations; negative
+// values return ErrInvalidArgument.
 type SystuneOptions struct {
-	GridPoints     int
+	// GridPoints is the number of grid points per free parameter, spanning
+	// its finite bounds; 1 holds every parameter at its current value.
+	GridPoints int
+	// MaxEvaluations bounds the grid size; a larger grid is rejected.
 	MaxEvaluations int
 }
 
+// SystuneResult is the best grid candidate of GridTune, Systune or Looptune.
 type SystuneResult struct {
-	Method     string
-	Pass       bool
-	Score      float64
+	Method TuneMethod
+	// Pass reports whether every hard goal (for GridTune, every goal) is met.
+	Pass bool
+	// Score is the summed normalized violation of the soft goals (for
+	// GridTune, of all goals), MATLAB systune's fSoft analogue.
+	Score float64
+	// HardScore is the summed normalized violation of the hard goals; 0 when
+	// all are met.
+	HardScore  float64
 	Iterations int
 	Parameters map[string]float64
 	Controller *System
 	ClosedLoop *System
-	Goals      []TuningGoalResult
+	// Goals holds the soft goal results followed by the hard goal results.
+	Goals []TuningGoalResult
 }
 
-func Systune(model *GeneralizedClosedLoop, goals []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
-	return GridTune(model, goals, opts)
+// LooptuneOptions configures Looptune. Zero margins select MATLAB's
+// looptuneOptions defaults of 7.6 dB and 45°.
+type LooptuneOptions struct {
+	SystuneOptions
+	GainMarginDB   float64
+	PhaseMarginDeg float64
 }
 
-func Looptune(model *GeneralizedClosedLoop, goals []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
-	return GridTune(model, goals, opts)
+// GridTune searches a Cartesian grid of the controller's free parameters for
+// the candidate with the smallest summed goal violation. Every free parameter
+// needs finite bounds (ErrInvalidArgument otherwise). A candidate whose
+// evaluation fails (for example an unstable closed loop under an overshoot
+// goal) or scores NaN/Inf is skipped as infeasible; when no candidate scores,
+// the first candidate error is returned, or ErrNoTuningCandidate. ctx is
+// checked before each evaluation.
+func GridTune(ctx context.Context, model *GeneralizedClosedLoop, goals []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
+	res, err := gridSearch(ctx, model, goals, nil, opts)
+	if err != nil {
+		return nil, fmt.Errorf("GridTune: %w", err)
+	}
+	res.Pass = allGoalsPass(res.Goals)
+	return res, nil
 }
 
-// GridTune searches a bounded Cartesian grid of the controller's free parameters.
-func GridTune(model *GeneralizedClosedLoop, goals []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
+// Systune tunes the controller of CL0 to minimize the soft goals subject to
+// the hard goals, as MATLAB systune(CL0, SoftReqs, HardReqs, opts), by
+// Cartesian grid search (see GridTune). Among candidates meeting every hard
+// goal the smallest soft score wins; when none does, the candidate with the
+// smallest hard violation is returned with Pass false, as MATLAB returns
+// gHard > 1. See https://www.mathworks.com/help/control/ref/inputoutputmodel.systune.html.
+func Systune(ctx context.Context, CL0 *GeneralizedClosedLoop, soft, hard []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
+	res, err := gridSearch(ctx, CL0, soft, hard, opts)
+	if err != nil {
+		return nil, fmt.Errorf("Systune: %w", err)
+	}
+	return res, nil
+}
+
+// Looptune tunes C0 in the negative feedback loop with plant G0, as MATLAB
+// looptune(G0, C0, wc, Req1, ..., opts). wc is a target crossover frequency
+// (region [wc/2, 2wc]) or a band [wcmin, wcmax] in rad/s. Looptune adds a
+// crossover goal for that band and a stability-margin goal (opts margins,
+// default 7.6 dB and 45°) to reqs, and treats them all as hard goals in
+// Systune. The loop's analysis point is "looptune". See
+// https://www.mathworks.com/help/control/ref/dynamicsystem.looptune.html.
+func Looptune(ctx context.Context, G0 *System, C0 TunableBlock, wc []float64, reqs []TuningGoal, opts *LooptuneOptions) (*SystuneResult, error) {
+	if C0 == nil {
+		return nil, fmt.Errorf("Looptune: C0 is nil: %w", ErrInvalidArgument)
+	}
+	var lo, hi float64
+	switch len(wc) {
+	case 1:
+		lo, hi = wc[0]/2, 2*wc[0]
+	case 2:
+		lo, hi = wc[0], wc[1]
+	default:
+		return nil, fmt.Errorf("Looptune: wc has %d elements, want 1 or 2: %w", len(wc), ErrInvalidArgument)
+	}
+	if !(lo > 0) || !(hi >= lo) || math.IsInf(hi, 0) {
+		return nil, fmt.Errorf("Looptune: crossover band [%g, %g] must be positive, finite and ordered: %w", lo, hi, ErrInvalidArgument)
+	}
+	gm, pm := 7.6, 45.0
+	var sopts *SystuneOptions
+	if opts != nil {
+		if opts.GainMarginDB < 0 || opts.PhaseMarginDeg < 0 {
+			return nil, fmt.Errorf("Looptune: negative margin: %w", ErrInvalidArgument)
+		}
+		if opts.GainMarginDB > 0 {
+			gm = opts.GainMarginDB
+		}
+		if opts.PhaseMarginDeg > 0 {
+			pm = opts.PhaseMarginDeg
+		}
+		sopts = &opts.SystuneOptions
+	}
+	loop, err := NewGeneralizedClosedLoop("looptune", G0, C0, "looptune")
+	if err != nil {
+		return nil, fmt.Errorf("Looptune: %w", err)
+	}
+	crossover, err := NewTuningGoal(TuningGoalSpec{Name: "crossover", Type: TuningGoalCrossover, Min: lo, Max: hi})
+	if err != nil {
+		return nil, fmt.Errorf("Looptune: %w", err)
+	}
+	margins, err := NewMarginGoal("margins", gm, pm)
+	if err != nil {
+		return nil, fmt.Errorf("Looptune: %w", err)
+	}
+	hard := append([]TuningGoal{crossover, margins}, reqs...)
+	res, err := gridSearch(ctx, loop, nil, hard, sopts)
+	if err != nil {
+		return nil, fmt.Errorf("Looptune: %w", err)
+	}
+	return res, nil
+}
+
+type tuneCandidate struct {
+	hard, soft float64
+}
+
+func (c tuneCandidate) better(o tuneCandidate) bool {
+	if c.hard != o.hard {
+		return c.hard < o.hard
+	}
+	return c.soft < o.soft
+}
+
+func gridSearch(ctx context.Context, model *GeneralizedClosedLoop, soft, hard []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("ctx is nil: %w", ErrInvalidArgument)
+	}
 	if model == nil {
-		return nil, fmt.Errorf("GridTune: nil model: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("model is nil: %w", ErrInvalidArgument)
 	}
 	controller := model.tunableController
 	if controller == nil {
-		return nil, fmt.Errorf("GridTune: controller is not tunable: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("controller is not tunable: %w", ErrInvalidArgument)
 	}
-	if len(goals) == 0 {
-		return nil, fmt.Errorf("GridTune: no goals: %w", ErrDimensionMismatch)
+	if len(soft)+len(hard) == 0 {
+		return nil, fmt.Errorf("no goals: %w", ErrInvalidArgument)
 	}
 	gridPoints := 5
 	maxEvaluations := 100_000
-	if opts != nil && opts.GridPoints > 0 {
-		gridPoints = opts.GridPoints
-	}
-	if opts != nil && opts.MaxEvaluations > 0 {
-		maxEvaluations = opts.MaxEvaluations
+	if opts != nil {
+		if opts.GridPoints < 0 || opts.MaxEvaluations < 0 {
+			return nil, fmt.Errorf("GridPoints %d and MaxEvaluations %d must be non-negative: %w", opts.GridPoints, opts.MaxEvaluations, ErrInvalidArgument)
+		}
+		if opts.GridPoints > 0 {
+			gridPoints = opts.GridPoints
+		}
+		if opts.MaxEvaluations > 0 {
+			maxEvaluations = opts.MaxEvaluations
+		}
 	}
 	params := controller.FreeParameters()
 	if len(params) == 0 {
-		return nil, fmt.Errorf("GridTune: no free tunable parameters: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("no free tunable parameters: %w", ErrInvalidArgument)
 	}
+	grids := make([][]float64, len(params))
 	evaluationCount := 1
-	for _, param := range params {
-		count := len(parameterGrid(param, gridPoints))
-		if evaluationCount > maxEvaluations/count {
-			return nil, fmt.Errorf("GridTune: Cartesian grid exceeds %d evaluations: %w", maxEvaluations, ErrDimensionMismatch)
+	for i, param := range params {
+		grid, err := parameterGrid(param, gridPoints)
+		if err != nil {
+			return nil, err
 		}
-		evaluationCount *= count
+		grids[i] = grid
+		if evaluationCount > maxEvaluations/len(grid) {
+			return nil, fmt.Errorf("Cartesian grid exceeds %d evaluations: %w", maxEvaluations, ErrInvalidArgument)
+		}
+		evaluationCount *= len(grid)
 	}
+	goals := append(append([]TuningGoal(nil), soft...), hard...)
 
-	best := &SystuneResult{Method: "cartesian-grid", Score: math.Inf(1)}
+	var best *SystuneResult
+	var bestKey tuneCandidate
+	var firstErr error
 	iterations := 0
 	values := make(map[string]float64, len(params))
-	var search func(int) error
-	search = func(idx int) error {
-		if idx == len(params) {
-			iterations++
-			sampled, err := controller.SampleBlock(values)
-			if err != nil {
-				return err
-			}
-			candidate := model.withSampledController(sampled)
-			closed, err := candidate.ClosedLoop(candidate.primaryAnalysisPointName())
-			if err != nil {
-				return err
-			}
-			goalResults, score, pass, err := evaluateTuningGoals(candidate, closed, goals)
-			if err != nil {
-				return err
-			}
-			if score < best.Score {
+	evaluate := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		iterations++
+		sampled, err := controller.SampleBlock(values)
+		if err != nil {
+			return err
+		}
+		candidate := model.withSampledController(sampled)
+		closed, err := candidate.ClosedLoop(candidate.primaryAnalysisPointName())
+		if err == nil {
+			var results []TuningGoalResult
+			results, err = evaluateTuningGoals(candidate, closed, goals)
+			if err == nil {
+				key := tuneCandidate{soft: sumViolation(results[:len(soft)]), hard: sumViolation(results[len(soft):])}
+				if !isFinite(key.soft) || !isFinite(key.hard) || (best != nil && !key.better(bestKey)) {
+					return nil
+				}
 				ctrl, err := sampled.CurrentSystem()
 				if err != nil {
 					return err
 				}
+				bestKey = key
 				best = &SystuneResult{
-					Method:     "cartesian-grid",
-					Pass:       pass,
-					Score:      score,
+					Method:     TuneMethodCartesianGrid,
+					Pass:       allGoalsPass(results[len(soft):]),
+					Score:      key.soft,
+					HardScore:  key.hard,
 					Parameters: copyStringFloatMap(values),
 					Controller: ctrl,
 					ClosedLoop: closed,
-					Goals:      goalResults,
+					Goals:      results,
 				}
+				return nil
 			}
-			return nil
 		}
-		param := params[idx]
-		candidates := parameterGrid(param, gridPoints)
-		for _, value := range candidates {
-			values[param.Name()] = value
+		if firstErr == nil {
+			firstErr = fmt.Errorf("candidate %v: %w", copyStringFloatMap(values), err)
+		}
+		return nil
+	}
+	var search func(int) error
+	search = func(idx int) error {
+		if idx == len(params) {
+			return evaluate()
+		}
+		for _, value := range grids[idx] {
+			values[params[idx].Name()] = value
 			if err := search(idx + 1); err != nil {
 				return err
 			}
@@ -113,14 +259,35 @@ func GridTune(model *GeneralizedClosedLoop, goals []TuningGoal, opts *SystuneOpt
 	if err := search(0); err != nil {
 		return nil, err
 	}
+	if best == nil {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("%d candidates all scored NaN or Inf: %w", iterations, ErrNoTuningCandidate)
+	}
 	best.Iterations = iterations
 	return best, nil
 }
 
-func evaluateTuningGoals(model *GeneralizedClosedLoop, primaryClosedLoop *System, goals []TuningGoal) ([]TuningGoalResult, float64, bool, error) {
+func sumViolation(results []TuningGoalResult) float64 {
+	total := 0.0
+	for _, r := range results {
+		total += r.Violation
+	}
+	return total
+}
+
+func allGoalsPass(results []TuningGoalResult) bool {
+	for _, r := range results {
+		if !r.Pass {
+			return false
+		}
+	}
+	return true
+}
+
+func evaluateTuningGoals(model *GeneralizedClosedLoop, primaryClosedLoop *System, goals []TuningGoal) ([]TuningGoalResult, error) {
 	results := make([]TuningGoalResult, len(goals))
-	score := 0.0
-	pass := true
 	primary := model.primaryAnalysisPointName()
 	cache := map[tuningGoalResponseKey]*System{
 		{point: primary, response: tuningGoalClosedLoopResponse}: primaryClosedLoop,
@@ -136,21 +303,17 @@ func evaluateTuningGoals(model *GeneralizedClosedLoop, primaryClosedLoop *System
 			var err error
 			sys, err = tuningGoalSystem(model, goal.spec)
 			if err != nil {
-				return nil, 0, false, err
+				return nil, err
 			}
 			cache[key] = sys
 		}
 		result, err := goal.evaluateSystem(sys)
 		if err != nil {
-			return nil, 0, false, err
+			return nil, fmt.Errorf("goal %q: %w", goal.spec.Name, err)
 		}
 		results[i] = result
-		if !result.Pass {
-			pass = false
-		}
-		score += goalViolation(result)
 	}
-	return results, score, pass, nil
+	return results, nil
 }
 
 type tuningGoalResponseKey struct {
@@ -158,35 +321,19 @@ type tuningGoalResponseKey struct {
 	response tuningGoalResponse
 }
 
-func goalViolation(result TuningGoalResult) float64 {
-	return result.Violation
-}
-
-func uniqueFreeTunableReals(params [][]*TunableReal) []*TunableReal {
-	seen := make(map[string]bool)
-	var out []*TunableReal
-	for _, row := range params {
-		for _, param := range row {
-			if param == nil || param.Fixed() || seen[param.Name()] {
-				continue
-			}
-			seen[param.Name()] = true
-			out = append(out, param)
-		}
-	}
-	return out
-}
-
-func parameterGrid(param *TunableReal, points int) []float64 {
+func parameterGrid(param *TunableReal, points int) ([]float64, error) {
 	bounds := param.Bounds()
-	if points < 2 || (bounds.Lower == 0 && bounds.Upper == 0) {
-		return []float64{param.Value()}
+	if points < 2 {
+		return []float64{param.Value()}, nil
+	}
+	if !bounds.finite() {
+		return nil, fmt.Errorf("free parameter %q has bounds [%g, %g]; grid search needs finite bounds: %w", param.Name(), bounds.Lower, bounds.Upper, ErrInvalidArgument)
 	}
 	out := make([]float64, points)
 	for i := range out {
 		out[i] = bounds.Lower + float64(i)*(bounds.Upper-bounds.Lower)/float64(points-1)
 	}
-	return out
+	return out, nil
 }
 
 func copyStringFloatMap(src map[string]float64) map[string]float64 {

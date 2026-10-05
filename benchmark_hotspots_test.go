@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"testing"
@@ -516,8 +517,8 @@ func BenchmarkTunableGainSampleCurrentSystem_4x4(b *testing.B) {
 }
 
 func BenchmarkGeneralizedCurrentSystem_SISO(b *testing.B) {
-	k, _ := NewTunableReal("K", 2, TunableBounds{Lower: 0, Upper: 10})
-	block := NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0)
+	k, _ := newBoundedReal("K", 2, 0, 10)
+	block := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
 	gm, err := NewGeneralizedModel("loop", block)
 	if err != nil {
 		b.Fatal(err)
@@ -532,8 +533,8 @@ func BenchmarkGeneralizedCurrentSystem_SISO(b *testing.B) {
 
 func BenchmarkGeneralizedClosedLoop_SISO(b *testing.B) {
 	plant := benchSysNonSym(4, 1, 1)
-	k, _ := NewTunableReal("K", 2, TunableBounds{Lower: 0, Upper: 10})
-	block := NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0)
+	k, _ := newBoundedReal("K", 2, 0, 10)
+	block := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
 	gm, err := NewGeneralizedClosedLoop("loop", plant, block, "u")
 	if err != nil {
 		b.Fatal(err)
@@ -548,7 +549,7 @@ func BenchmarkGeneralizedClosedLoop_SISO(b *testing.B) {
 
 func BenchmarkTuningGoalWeightedGain_SISO(b *testing.B) {
 	sys := benchSysNonSym(4, 1, 1)
-	goal := NewWeightedGainGoal("gain", 10)
+	goal := mustOK(NewWeightedGainGoal("gain", 10))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := goal.Evaluate(sys); err != nil {
@@ -559,7 +560,7 @@ func BenchmarkTuningGoalWeightedGain_SISO(b *testing.B) {
 
 func BenchmarkTuningGoalWeightedGain_MIMO(b *testing.B) {
 	sys := benchSysNonSym(8, 3, 3)
-	goal := NewWeightedGainGoal("gain", 10)
+	goal := mustOK(NewWeightedGainGoal("gain", 10))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := goal.Evaluate(sys); err != nil {
@@ -590,17 +591,17 @@ func BenchmarkTuningGoalDynamicWeightedGain_MIMO(b *testing.B) {
 
 func BenchmarkSystune_SISO(b *testing.B) {
 	plant := benchSysNonSym(2, 1, 1)
-	k, _ := NewTunableReal("K", 0.5, TunableBounds{Lower: 0.1, Upper: 3})
-	controller := NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0)
+	k, _ := newBoundedReal("K", 0.5, 0.1, 3)
+	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
 	model, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		b.Fatal(err)
 	}
-	goals := []TuningGoal{NewWeightedGainGoal("gain", 10)}
+	goals := []TuningGoal{mustOK(NewWeightedGainGoal("gain", 10))}
 	opts := &SystuneOptions{GridPoints: 5}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := Systune(model, goals, opts); err != nil {
+		if _, err := Systune(context.Background(), model, goals, nil, opts); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -608,18 +609,18 @@ func BenchmarkSystune_SISO(b *testing.B) {
 
 func BenchmarkSystune_MIMO(b *testing.B) {
 	plant := benchSysNonSym(2, 2, 2)
-	k1, _ := NewTunableReal("K1", 0.5, TunableBounds{Lower: 0.1, Upper: 2})
-	k2, _ := NewTunableReal("K2", 0.5, TunableBounds{Lower: 0.1, Upper: 2})
-	controller := NewTunableGain("Kblock", [][]*TunableReal{{k1, fixedBenchReal("z12", 0)}, {fixedBenchReal("z21", 0), k2}}, 0)
+	k1, _ := newBoundedReal("K1", 0.5, 0.1, 2)
+	k2, _ := newBoundedReal("K2", 0.5, 0.1, 2)
+	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k1, fixedBenchReal("z12", 0)}, {fixedBenchReal("z21", 0), k2}}, 0))
 	model, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		b.Fatal(err)
 	}
-	goals := []TuningGoal{NewWeightedGainGoal("gain", 10)}
+	goals := []TuningGoal{mustOK(NewWeightedGainGoal("gain", 10))}
 	opts := &SystuneOptions{GridPoints: 3}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := Systune(model, goals, opts); err != nil {
+		if _, err := Systune(context.Background(), model, goals, nil, opts); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -703,7 +704,7 @@ func benchDescriptorSystem(b *testing.B, n, m, p int) *System {
 }
 
 func fixedBenchReal(name string, value float64) *TunableReal {
-	param, _ := NewTunableReal(name, value, TunableBounds{})
+	param, _ := NewTunableReal(name, value)
 	param.SetFixed(true)
 	return param
 }
@@ -714,18 +715,14 @@ func benchTunableGain(b *testing.B, p, m int) *TunableGain {
 	for i := range params {
 		params[i] = make([]*TunableReal, m)
 		for j := range params[i] {
-			param, err := NewTunableReal(
-				fmt.Sprintf("p_%d_%d", i, j),
-				float64(i-j),
-				TunableBounds{Lower: -10, Upper: 10},
-			)
+			param, err := newBoundedReal(fmt.Sprintf("p_%d_%d", i, j), float64(i-j), -10, 10)
 			if err != nil {
 				b.Fatal(err)
 			}
 			params[i][j] = param
 		}
 	}
-	return NewTunableGain("gain", params, 0)
+	return mustOK(NewTunableGain("gain", params, 0))
 }
 
 func BenchmarkStabsep_N2(b *testing.B)   { benchStabsep(b, 2) }
