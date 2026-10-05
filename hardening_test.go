@@ -126,11 +126,7 @@ func TestLqg_RejectsDescriptor(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}), 0)
 	sys.E = mat.NewDense(2, 2, []float64{1, 0, 0, 2})
 
-	Q := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
-	R := mat.NewDense(1, 1, []float64{1})
-	Qn := mat.NewDense(1, 1, []float64{1})
-	Rn := mat.NewDense(1, 1, []float64{1})
-	_, err := Lqg(sys, Q, R, Qn, Rn, nil)
+	_, err := Lqg(sys, eye(3), eye(3), nil)
 	if !errors.Is(err, ErrDescriptorRiccati) {
 		t.Errorf("expected ErrDescriptorRiccati, got %v", err)
 	}

@@ -918,7 +918,7 @@ func TestEstimatorDesignRejectsDelays(t *testing.T) {
 				_, err := Kalmd(s, eye(2), eye(2), 0.1, nil)
 				return err
 			},
-			"Lqg": func(s *System) error { _, err := Lqg(s, eye(3), eye(2), eye(2), eye(2), nil); return err },
+			"Lqg": func(s *System) error { _, err := Lqg(s, eye(5), eye(5), nil); return err },
 		}
 		for dname, design := range designs {
 			sys := obsTestPlant(t, 0, false)
