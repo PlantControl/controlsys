@@ -2045,7 +2045,7 @@ func TestHinfNorm_NearOptimalLoopsMatchOracle(t *testing.T) {
 	}
 	backoff := closedLoop(t, nearSingular, res.K, 1, 1)
 	assertHinfNormMatchesOracle(t, "near-singular-edge loop (GH3MO7)", backoff, exact(backoff))
-	gp, err := partitionGeneralizedPlant(nearSingular, 1, 1)
+	gp, err := partitionGeneralizedPlant("HinfSyn", nearSingular, 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

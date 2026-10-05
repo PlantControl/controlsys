@@ -187,8 +187,8 @@ func TestRootLocus_ThirdOrder(t *testing.T) {
 	}
 
 	// centroid at -1
-	if math.Abs(res.AsymptoteCentroid-(-1)) > 0.01 {
-		t.Errorf("centroid expected -1, got %f", res.AsymptoteCentroid)
+	if c, ok := res.AsymptoteCentroid(); !ok || math.Abs(c-(-1)) > 0.01 {
+		t.Errorf("centroid = %f, %v, want -1, true", c, ok)
 	}
 }
 
@@ -245,19 +245,180 @@ func TestRootLocus_NotSISO(t *testing.T) {
 
 func TestRootLocus_NonZeroD(t *testing.T) {
 	sys, err := New(
+		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
+		mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 0}),
+		mat.NewDense(1, 1, []float64{0.5}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := RootLocus(sys, []float64{2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// (s²+3s+2)(1+K/2) + K = 0 at K=2 -> s² + 3s + 3 = 0.
+	want := []complex128{complex(-1.5, math.Sqrt(3)/2), complex(-1.5, -math.Sqrt(3)/2)}
+	assertRootSet(t, []complex128{res.Branches[0][0], res.Branches[1][0]}, want, 1e-9)
+	if len(res.AsymptoteAngles) != 0 {
+		t.Errorf("AsymptoteAngles = %v, want none", res.AsymptoteAngles)
+	}
+	if _, ok := res.AsymptoteCentroid(); ok {
+		t.Error("AsymptoteCentroid ok = true with no asymptotes")
+	}
+
+	sys.D.Set(0, 0, -0.5)
+	if _, err := RootLocus(sys, []float64{2}); !errors.Is(err, ErrAlgebraicLoop) {
+		t.Errorf("1+KD=0 error = %v, want ErrAlgebraicLoop", err)
+	}
+}
+
+func TestRootLocus_Descriptor(t *testing.T) {
+	sys, err := NewDescriptor(
 		mat.NewDense(1, 1, []float64{-1}),
 		mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0}),
 		mat.NewDense(1, 1, []float64{2}),
 		0,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	res, err := RootLocus(sys, []float64{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, want := range []complex128{-0.5, -1} {
+		if got := res.Branches[0][k]; cmplx.Abs(got-want) > 1e-12 {
+			t.Errorf("K=%g pole = %v, want %v", res.Gains[k], got, want)
+		}
+	}
 
-	_, err = RootLocus(sys, nil)
-	if err == nil {
-		t.Error("expected error for D != 0")
+	sys2, err := NewDescriptor(
+		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
+		mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 0}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(2, 2, []float64{2, 0, 1, 1}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = RootLocus(sys2, []float64{0, 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// det(sE - (A-KBC)) = 2s² + 7s + 2 + K.
+	for k, K := range res.Gains {
+		disc := complex(49-8*(2+K), 0)
+		sq := cmplx.Sqrt(disc)
+		want := []complex128{(-7 + sq) / 4, (-7 - sq) / 4}
+		assertRootSet(t, []complex128{res.Branches[0][k], res.Branches[1][k]}, want, 1e-9)
+	}
+}
+
+func TestRootLocus_Delays(t *testing.T) {
+	cont, err := New(
+		mat.NewDense(1, 1, []float64{-1}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cont.InputDelay = []float64{1}
+	if _, err := RootLocus(cont, nil); !errors.Is(err, ErrDelayUnsupported) {
+		t.Errorf("continuous delay error = %v, want ErrDelayUnsupported", err)
+	}
+
+	disc, err := New(
+		mat.NewDense(1, 1, []float64{0.5}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0}),
+		0.1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disc.InputDelay = []float64{2}
+	K := 0.1
+	res, err := RootLocus(disc, []float64{K})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Branches) != 3 {
+		t.Fatalf("branches = %d, want 3 (1 state + 2 delay samples)", len(res.Branches))
+	}
+	// z²(z-0.5) + K = 0.
+	for b := range res.Branches {
+		z := res.Branches[b][0]
+		if r := z*z*z - 0.5*z*z + complex(K, 0); cmplx.Abs(r) > 1e-12 {
+			t.Errorf("branch %d pole %v residual %g", b, z, cmplx.Abs(r))
+		}
+	}
+}
+
+func TestRootLocus_InvalidInput(t *testing.T) {
+	siso := func() *System {
+		s, err := New(
+			mat.NewDense(1, 1, []float64{-1}),
+			mat.NewDense(1, 1, []float64{1}),
+			mat.NewDense(1, 1, []float64{1}),
+			mat.NewDense(1, 1, []float64{0}),
+			0,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	gain, err := NewGain(mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nanA := siso()
+	nanA.A.Set(0, 0, math.NaN())
+	cases := []struct {
+		name  string
+		sys   *System
+		gains []float64
+		want  error
+	}{
+		{"nil", nil, nil, ErrInvalidArgument},
+		{"static gain", gain, nil, ErrDimensionMismatch},
+		{"empty gains", siso(), []float64{}, ErrInvalidArgument},
+		{"NaN gain", siso(), []float64{0, math.NaN()}, ErrInvalidArgument},
+		{"Inf gain", siso(), []float64{math.Inf(1)}, ErrInvalidArgument},
+		{"NaN A", nanA, nil, ErrInvalidArgument},
+	}
+	for _, tc := range cases {
+		if _, err := RootLocus(tc.sys, tc.gains); !errors.Is(err, tc.want) {
+			t.Errorf("%s: error = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}
+
+func assertRootSet(t *testing.T, got, want []complex128, tol float64) {
+	t.Helper()
+	used := make([]bool, len(got))
+	for _, w := range want {
+		found := false
+		for i, g := range got {
+			if !used[i] && cmplx.Abs(g-w) <= tol {
+				used[i] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("roots %v missing %v", got, w)
+		}
 	}
 }
 

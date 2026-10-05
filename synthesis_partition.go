@@ -1,8 +1,13 @@
 package controlsys
 
-import "plantcontrol.org/v1/gonum/mat"
+import (
+	"fmt"
+
+	"plantcontrol.org/v1/gonum/mat"
+)
 
 type generalizedPlantPartition struct {
+	op                             string
 	A                              *mat.Dense
 	B1, B2                         *mat.Dense
 	C1, C2                         *mat.Dense
@@ -11,20 +16,29 @@ type generalizedPlantPartition struct {
 	measurementNames, controlNames []string
 }
 
-func partitionGeneralizedPlant(P *System, nmeas, ncont int) (*generalizedPlantPartition, error) {
-	if !P.IsContinuous() {
-		return nil, ErrWrongDomain
+// partitionGeneralizedPlant validates the generalized plant P for the
+// synthesis operation op and splits it into the standard blocks. Delayed
+// plants are rejected, as MATLAB h2syn/hinfsyn do.
+func partitionGeneralizedPlant(op string, P *System, nmeas, ncont int) (*generalizedPlantPartition, error) {
+	if err := requireFiniteSystem(op, P); err != nil {
+		return nil, err
 	}
-	if err := newDescriptorPolicy(P).requireRiccatiStandard("synthesis"); err != nil {
+	if !P.IsContinuous() {
+		return nil, fmt.Errorf("%s: plant must be continuous: %w", op, ErrWrongDomain)
+	}
+	if P.HasDelay() {
+		return nil, fmt.Errorf("%s: plant has time delays: %w", op, ErrDelayUnsupported)
+	}
+	if err := newDescriptorPolicy(P).requireRiccatiStandard(op); err != nil {
 		return nil, err
 	}
 
 	n, m, p := P.Dims()
 	if n == 0 {
-		return nil, ErrInvalidPartition
+		return nil, fmt.Errorf("%s: plant has no states: %w", op, ErrInvalidPartition)
 	}
 	if ncont <= 0 || nmeas <= 0 || ncont > m || nmeas > p {
-		return nil, ErrInvalidPartition
+		return nil, fmt.Errorf("%s: nmeas=%d, ncont=%d for plant with %d outputs and %d inputs: %w", op, nmeas, ncont, p, m, ErrInvalidPartition)
 	}
 
 	m1 := m - ncont
@@ -32,10 +46,11 @@ func partitionGeneralizedPlant(P *System, nmeas, ncont int) (*generalizedPlantPa
 	p1 := p - nmeas
 	p2 := nmeas
 	if m1 <= 0 || p1 <= 0 {
-		return nil, ErrInvalidPartition
+		return nil, fmt.Errorf("%s: no disturbance inputs or performance outputs left (m1=%d, p1=%d): %w", op, m1, p1, ErrInvalidPartition)
 	}
 
 	return &generalizedPlantPartition{
+		op:               op,
 		A:                P.A,
 		B1:               extractBlock(P.B, 0, 0, n, m1),
 		B2:               extractBlock(P.B, 0, m1, n, m2),
@@ -64,18 +79,18 @@ func (gp *generalizedPlantPartition) applyControllerNames(K *System) {
 func (gp *generalizedPlantPartition) validateControllerChannels() error {
 	stab, err := IsStabilizable(gp.A, gp.B2, true)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", gp.op, err)
 	}
 	if !stab {
-		return ErrNotStabilizable
+		return fmt.Errorf("%s: (A, B2) not stabilizable: %w", gp.op, ErrNotStabilizable)
 	}
 
 	det, err := IsDetectable(gp.A, gp.C2, true)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", gp.op, err)
 	}
 	if !det {
-		return ErrNotDetectable
+		return fmt.Errorf("%s: (A, C2) not detectable: %w", gp.op, ErrNotDetectable)
 	}
 	return nil
 }
@@ -98,7 +113,7 @@ func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck, Dk *mat.Dense) (*
 			}
 			M, err := invertSmall(IDD, gp.p2)
 			if err != nil {
-				return nil, ErrAlgebraicLoop
+				return nil, fmt.Errorf("%s: I+D22·Dk singular (%v): %w", gp.op, err, ErrAlgebraicLoop)
 			}
 			MD22Ck := mulDense(mulDense(M, gp.D22), Ck)
 			shifted := mulDense(Bk, MD22Ck)
@@ -116,7 +131,7 @@ func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck, Dk *mat.Dense) (*
 	}
 	K, err := New(Ak, Bk, Ck, Dk, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
 	gp.applyControllerNames(K)
 	return K, nil
@@ -138,7 +153,7 @@ func (gp *generalizedPlantPartition) closedLoopPoles(Ak, Bk, Ck, Dk *mat.Dense) 
 
 	var eig mat.Eigen
 	if ok := eig.Factorize(clA, mat.EigenNone); !ok {
-		return nil, ErrSchurFailed
+		return nil, fmt.Errorf("%s: closed-loop eigenvalues: %w", gp.op, ErrSchurFailed)
 	}
 	return eig.Values(nil), nil
 }
