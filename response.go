@@ -721,11 +721,17 @@ func Damp(sys *System) ([]DampInfo, error) {
 	return result, nil
 }
 
-// Step returns the step response of each input channel. Continuous models
+// Step returns the step response of each input channel. Descriptor models
+// follow MATLAB: proper singular-E models are reduced to an explicit model
+// plus feedthrough, improper ones return ErrImproperModel. Continuous models
 // with internal delays of one common length are sampled exactly (method of
 // steps); other internal-delay models are simulated through the approximate
 // ZOH discretization of the delay channels, as MATLAB does, with O(dt) error.
 func Step(sys *System, tFinal float64) (*TimeResponse, error) {
+	sys, _, _, err := sys.timeResponseForm(nil)
+	if err != nil {
+		return nil, fmt.Errorf("Step: %w", err)
+	}
 	if resp, ok, err := delayChainAuto(sys, tFinal, stepResponse); ok || err != nil {
 		return resp, err
 	}
@@ -742,12 +748,17 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 
 // Impulse returns the impulse response of each input channel. For
 // continuous models the Dirac feedthrough D·δ(t) is dropped and y(0) = C·B,
-// as in MATLAB. A continuous model whose input feeds an internal delay
+// as in MATLAB; for a proper singular-E descriptor model D includes the
+// algebraic part's static gain. A continuous model whose input feeds an internal delay
 // directly (LFT.D21 ≠ 0) carries delayed Diracs and returns
 // ErrInternalDelayImpulse; MATLAB's impulse rejects every continuous
 // internal-delay model, while this library samples the D21 = 0 case (exactly
 // for one common delay length, else by the approximate ZOH discretization).
 func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
+	sys, _, _, err := sys.timeResponseForm(nil)
+	if err != nil {
+		return nil, fmt.Errorf("Impulse: %w", err)
+	}
 	kind := impulseResponse
 	if sys.IsContinuous() {
 		if sys.LFT != nil && sys.HasInternalDelay() && !allZeroDense(sys.LFT.D21) {
@@ -819,6 +830,8 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 }
 
 // Initial returns the free response from x0 with zero delay-line history.
+// As in MATLAB, a descriptor model with singular E rejects a nonzero x0 with
+// ErrDescriptorInitialState.
 // Continuous models without internal delays, or whose internal delays share
 // one length, are sampled exactly; other internal-delay models use the
 // approximate ZOH discretization of the delay channels, as MATLAB does.
@@ -826,7 +839,18 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	if x0 == nil {
 		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrDimensionMismatch)
 	}
-	free := sys.Copy()
+	sim, simX0, reduced, err := sys.timeResponseForm(x0)
+	if err != nil {
+		return nil, fmt.Errorf("Initial: %w", err)
+	}
+	if reduced {
+		simX0 = &mat.VecDense{}
+		if n, _, _ := sim.Dims(); n > 0 {
+			simX0 = mat.NewVecDense(n, nil)
+		}
+	}
+	x0 = simX0
+	free := sim.Copy()
 	free.InputDelay = nil
 	free.Delay = nil
 
@@ -936,10 +960,16 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 }
 
 // Lsim simulates the response to u held constant between samples (ZOH).
+// Descriptor models are handled as in Step; with singular E a nonzero x0
+// returns ErrDescriptorInitialState, as in MATLAB.
 // Continuous models with internal delays of one common length are sampled
 // exactly; other internal-delay models use the approximate ZOH
 // discretization of the delay channels, as MATLAB does.
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
+	sys, x0, _, err := sys.timeResponseForm(x0)
+	if err != nil {
+		return nil, fmt.Errorf("Lsim: %w", err)
+	}
 	plan, uSim, err := prepareLsimResponse(sys, u, t)
 	if err != nil {
 		return nil, err

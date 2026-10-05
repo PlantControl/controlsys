@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -1591,17 +1592,112 @@ func TestImpulseContinuousInternalDelayFedByInputErrors(t *testing.T) {
 	}
 }
 
-func TestTimeResponseSingularDescriptorErrors(t *testing.T) {
+func TestTimeResponseSingularDescriptorRejectsInitialState(t *testing.T) {
 	sys := trMIMO(t, 0)
 	sys.E = mat.NewDense(2, 2, []float64{1, 0, 0, 0})
 	x0 := mat.NewVecDense(2, []float64{1, 1})
+	tGrid := makeTimeVector(11, 0.1)
+	u := mat.NewDense(11, 2, nil)
 	for name, run := range map[string]func() error{
-		"Step":    func() error { _, err := Step(sys, 2); return err },
-		"Impulse": func() error { _, err := Impulse(sys, 2); return err },
 		"Initial": func() error { _, err := Initial(sys, x0, 2); return err },
+		"Lsim":    func() error { _, err := Lsim(sys, u, tGrid, x0); return err },
 	} {
-		if err := run(); !errors.Is(err, ErrDescriptorSingular) {
-			t.Errorf("%s err = %v, want ErrDescriptorSingular", name, err)
+		err := run()
+		if !errors.Is(err, ErrDescriptorInitialState) || !errors.Is(err, ErrDescriptorSingular) {
+			t.Errorf("%s err = %v, want ErrDescriptorInitialState", name, err)
+		}
+	}
+	resp, err := Initial(sys, mat.NewVecDense(2, nil), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mat.Norm(resp.Y, 1) != 0 {
+		t.Fatalf("zero-state Initial = %v, want zeros", mat.Formatted(resp.Y))
+	}
+}
+
+func TestTimeResponseSingularDescriptorMatchesHandReduction(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, delays := range []bool{false, true} {
+			desc, oracle := index1Descriptor(t, dt, delays)
+			name := fmt.Sprintf("dt=%g delays=%v", dt, delays)
+
+			got, err := Step(desc, 2)
+			if err != nil {
+				t.Fatalf("%s Step: %v", name, err)
+			}
+			want, err := Step(oracle, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compareTimeResponses(t, got, want, 1e-10)
+
+			got, err = Impulse(desc, 2)
+			if dt == 0 && delays {
+				if !errors.Is(err, ErrInternalDelayImpulse) {
+					t.Fatalf("%s Impulse err = %v, want ErrInternalDelayImpulse", name, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("%s Impulse: %v", name, err)
+				}
+				want, err := Impulse(oracle, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				compareTimeResponses(t, got, want, 1e-10)
+			}
+
+			step := 0.05
+			if dt > 0 {
+				step = dt
+			}
+			tGrid := makeTimeVector(31, step)
+			u := mat.NewDense(31, 2, nil)
+			for k := range 31 {
+				u.Set(k, 0, math.Sin(0.7*float64(k)))
+				u.Set(k, 1, 1-0.03*float64(k))
+			}
+			got, err = Lsim(desc, u, tGrid, mat.NewVecDense(3, nil))
+			if err != nil {
+				t.Fatalf("%s Lsim: %v", name, err)
+			}
+			want, err = Lsim(oracle, u, tGrid, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compareTimeResponses(t, got, want, 1e-10)
+		}
+	}
+}
+
+func TestTimeResponseIndex2Descriptor(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		desc, oracle := index2Descriptor(t, dt, false)
+		for name, run := range map[string]func(*System, float64) (*TimeResponse, error){"Step": Step, "Impulse": Impulse} {
+			got, err := run(desc, 2)
+			if err != nil {
+				t.Fatalf("dt=%g %s: %v", dt, name, err)
+			}
+			want, err := run(oracle, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compareTimeResponses(t, got, want, 1e-9)
+		}
+
+		improper, _ := index2Descriptor(t, dt, true)
+		for name, run := range map[string]func() error{
+			"Step":    func() error { _, err := Step(improper, 2); return err },
+			"Impulse": func() error { _, err := Impulse(improper, 2); return err },
+			"Lsim": func() error {
+				_, err := Lsim(improper, mat.NewDense(3, 2, nil), makeTimeVector(3, 0.1), nil)
+				return err
+			},
+		} {
+			if err := run(); !errors.Is(err, ErrImproperModel) {
+				t.Errorf("dt=%g %s err = %v, want ErrImproperModel", dt, name, err)
+			}
 		}
 	}
 }
