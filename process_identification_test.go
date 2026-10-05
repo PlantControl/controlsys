@@ -2,8 +2,10 @@ package controlsys
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -188,7 +190,7 @@ func TestProcessFitBoundsCancellationAndExcitation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result == nil || result.Evaluations > 20 || result.Termination == "converged" {
+	if result == nil || result.Evaluations > 20 || result.Termination == ProcessFitConverged {
 		t.Fatalf("exhaustion %+v", result)
 	}
 	for i := range u {
@@ -227,7 +229,7 @@ func TestProcessManualGainAndSeparateValidation(t *testing.T) {
 	validation := processOracle(s, p, u[140:], .1)
 	y := append(train, validation...)
 	d := ProcessFitData{Input: u, Output: y, SampleTime: .1, TrainingSamples: 140}
-	result, err := EvaluateProcess(context.Background(), d, ProcessFitOptions{Structure: s, ValidationInitialCondition: "zero", ValidationInitializationSamples: 5}, p)
+	result, err := EvaluateProcess(context.Background(), d, ProcessFitOptions{Structure: s, ValidationInitialCondition: ProcessValidationZero, ValidationInitializationSamples: 5}, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +237,7 @@ func TestProcessManualGainAndSeparateValidation(t *testing.T) {
 		t.Fatalf("manual/zero init result gain %g rmse %g", result.Parameters.Gain, result.ValidationNRMSE)
 	}
 	p.Gain = 1
-	result, err = EvaluateProcess(context.Background(), d, ProcessFitOptions{Structure: s, ValidationInitialCondition: "zero"}, p)
+	result, err = EvaluateProcess(context.Background(), d, ProcessFitOptions{Structure: s, ValidationInitialCondition: ProcessValidationZero}, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,8 +272,12 @@ func TestProcessFitRetainsBestOnCancellation(t *testing.T) {
 	d := ProcessFitData{Input: u, Output: processOracle(s, p, u, .1), SampleTime: .1, TrainingSamples: 140}
 	ctx := &processCancelContext{Context: context.Background(), done: make(chan struct{})}
 	result, err := FitProcess(ctx, d, ProcessFitOptions{Structure: s})
-	if !errors.Is(err, context.Canceled) || result == nil || result.Termination != "canceled" || !processFinite(result.ValidationNRMSE) {
-		t.Fatalf("canceled fit did not retain valid best: result=%v error=%v", result != nil, err)
+	var canceled *ProcessFitCanceledError
+	if !errors.Is(err, context.Canceled) || result != nil || !errors.As(err, &canceled) {
+		t.Fatalf("canceled fit: result=%v error=%v, want nil and *ProcessFitCanceledError", result != nil, err)
+	}
+	if b := canceled.Best; b == nil || b.Termination != ProcessFitCanceled || !processFinite(b.ValidationNRMSE) {
+		t.Fatalf("canceled fit did not retain valid best: %+v", b)
 	}
 }
 
@@ -299,14 +305,14 @@ func TestProcessResidualLagOneIsPearsonCorrelation(t *testing.T) {
 		{1, -1, 1, -1, 1, -1.5},
 		{3, 2.9, 3.1, 3.3, 2.7, 3},
 	} {
-		got := processResidualLagOne(r)
-		if math.Abs(got) > 1+1e-12 || math.Abs(got-pearson(r)) > 1e-12 {
+		got, ok := processResidualLagOne(r)
+		if !ok || math.Abs(got) > 1+1e-12 || math.Abs(got-pearson(r)) > 1e-12 {
 			t.Fatalf("%v: lag-one %g want %g", r, got, pearson(r))
 		}
 	}
 	for _, r := range [][]float64{nil, {1}, {1, 2}, {2, 2, 2, 2}} {
-		if got := processResidualLagOne(r); got != 0 {
-			t.Fatalf("%v: degenerate lag-one %g", r, got)
+		if got, ok := processResidualLagOne(r); ok {
+			t.Fatalf("%v: degenerate lag-one %g reported defined", r, got)
 		}
 	}
 }
@@ -349,5 +355,58 @@ func TestProcessFitDelayedSteadyStateStartWithNonzeroInput(t *testing.T) {
 		if math.Abs(fit.Parameters.Gain-tc.p.Gain) > 1e-4*math.Abs(tc.p.Gain) || math.Abs(fit.Parameters.Delay-tc.p.Delay) > 1e-4 || fit.TrainingNRMSE > 1e-5 {
 			t.Fatalf("poles=%d fit: %+v training NRMSE %g", tc.s.Poles, fit.Parameters, fit.TrainingNRMSE)
 		}
+	}
+}
+
+func TestProcessFitErrorsAndUndefinedDiagnostics(t *testing.T) {
+	u := processOracleInput(100)
+	s := ProcessStructure{Poles: 1}
+	p := ProcessParameters{Gain: 2, TimeConstants: []float64{1}}
+	y := processOracle(s, p, u, .1)
+	d := ProcessFitData{Input: u, Output: y, SampleTime: .1, TrainingSamples: 98}
+	if _, err := FitProcess(context.Background(), d, ProcessFitOptions{Structure: s}); !errors.Is(err, ErrProcessData) || !strings.HasPrefix(err.Error(), "FitProcess: ") {
+		t.Fatalf("2 held-out samples err = %v, want ErrProcessData", err)
+	}
+	if _, err := FitProcess(nil, d, ProcessFitOptions{Structure: s}); !errors.Is(err, ErrInvalidArgument) { //nolint:staticcheck
+		t.Fatalf("nil ctx err = %v", err)
+	}
+	if _, err := EvaluateProcess(nil, d, ProcessFitOptions{Structure: s}, p); !errors.Is(err, ErrInvalidArgument) { //nolint:staticcheck
+		t.Fatalf("EvaluateProcess nil ctx err = %v", err)
+	}
+	d.TrainingSamples = 70
+	if _, err := FitProcess(context.Background(), d, ProcessFitOptions{Structure: s, ValidationInitialCondition: "warm"}); !errors.Is(err, ErrProcessData) {
+		t.Fatalf("unknown validation init err = %v", err)
+	}
+	zero := ProcessParameters{Gain: 0, TimeConstants: []float64{1}}
+	if _, err := EvaluateProcess(context.Background(), d, ProcessFitOptions{Structure: s, EstimateInitialState: true}, zero); !errors.Is(err, ErrProcessFit) || !strings.HasPrefix(err.Error(), "EvaluateProcess: ") {
+		t.Fatalf("zero gain with initial state err = %v, want ErrProcessFit", err)
+	}
+	b, err := json.Marshal(ProcessFitResult{})
+	if err != nil || strings.Contains(string(b), "residualLagOne") {
+		t.Fatalf("undefined lag-one encoded: %s %v", b, err)
+	}
+	noisy := append([]float64(nil), y...)
+	for i := range noisy {
+		noisy[i] += .01 * math.Sin(float64(i*i))
+	}
+	d.Output = noisy
+	fit, err := EvaluateProcess(context.Background(), d, ProcessFitOptions{Structure: s}, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rho, ok := fit.ResidualLagOne()
+	if !ok {
+		t.Fatal("noisy residual lag-one undefined")
+	}
+	b, err = json.Marshal(fit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ProcessFitResult
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := back.ResidualLagOne(); !ok || got != rho || back.Termination != ProcessFitManual || back.TrainingNRMSE != fit.TrainingNRMSE {
+		t.Fatalf("JSON round trip lost diagnostics: %+v", back)
 	}
 }
