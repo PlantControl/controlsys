@@ -328,7 +328,7 @@ classDiagram
 
     class tuningGoalEvaluator {
         +evaluateSystem()
-        +tuningGoalSystem()
+        +tuningGoalResponse()
         +frequencyGainRange()
         +maximumComplexSingularValue()
     }

@@ -389,7 +389,15 @@ func TestSigmaAndGainGoalsAtPole(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, s := range []*System{sys, three} {
-		goal, err := NewTuningGoal(TuningGoalSpec{Name: "gain", Type: TuningGoalWeightedGain, Max: 10, Omega: []float64{0.5, 1}})
+		s.InputName, s.OutputName = nil, nil
+		_, m, p := s.Dims()
+		if err := s.SetInputName(expandName("r", m)...); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetOutputName(expandName("y", p)...); err != nil {
+			t.Fatal(err)
+		}
+		goal, err := mustOK(NewGainGoal("r", "y", 10)).WithFocus(0.5, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -407,9 +415,10 @@ func TestSigmaAndGainGoalsAtPole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := mustOK(NewTrackingGoal("track", 0.1)).Evaluate(integrating)
-	if err != nil || !math.IsInf(res.Value, 1) {
-		t.Errorf("tracking of integrating delayed model = %+v, %v; want +Inf", res, err)
+	integrating.InputName, integrating.OutputName = []string{"r"}, []string{"y"}
+	res, err := mustOK(NewTrackingGoal("r", "y", 1, 0.1, 1)).Evaluate(integrating)
+	if err != nil || res.Pass || !(res.Value > 10) {
+		t.Errorf("tracking of integrating delayed model = %+v, %v; want large failing value", res, err)
 	}
 	if bw, err := Bandwidth(integrating, 0); !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("Bandwidth of integrating delayed model = %v, %v; want ErrInvalidArgument (infinite DC gain)", bw, err)
