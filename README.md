@@ -226,6 +226,8 @@ func main() {
 | `(*EKF).Predict(u)` | Propagate state and covariance one step |
 | `(*EKF).Update(y)` | Correct state with a measurement |
 | `(*EKF).Step(u, z)` | Run a predict-then-update cycle |
+| `(*EKF).State()`, `StateCovariance()` | Copies of the estimate and its covariance |
+| `(*EKF).SetState(x)`, `SetStateCovariance(P)` | Replace the estimate or covariance (validated) |
 | `type EKFModel` | Nonlinear model: F, H, Jacobians FJac/HJac, noise Q/R |
 
 ### System Identification

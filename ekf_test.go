@@ -77,7 +77,7 @@ func TestEKF_LinearSystem(t *testing.T) {
 	}
 
 	for i := range 2 {
-		diff := math.Abs(ekf.X.AtVec(i) - xTrue.AtVec(i))
+		diff := math.Abs(ekf.x.AtVec(i) - xTrue.AtVec(i))
 		if diff > 1.0 {
 			t.Errorf("state %d: |ekf-true| = %v, want < 1.0", i, diff)
 		}
@@ -113,8 +113,8 @@ func TestEKFCopyAndNoiseMatricesAreIndependent(t *testing.T) {
 		t.Fatalf("NewEKF R aliases caller matrix: got %v, want 0.2", got)
 	}
 
-	ekf.X.SetVec(0, 99)
-	ekf.P.Set(0, 0, 99)
+	ekf.x.SetVec(0, 99)
+	ekf.cov.Set(0, 0, 99)
 	ekf.model.Q.Set(0, 0, 98)
 	ekf.model.R.Set(0, 0, 98)
 
@@ -124,10 +124,10 @@ func TestEKFCopyAndNoiseMatricesAreIndependent(t *testing.T) {
 	if got := cp.model.R.At(0, 0); got != 0.2 {
 		t.Fatalf("Copy R = %v, want 0.2", got)
 	}
-	if got := cp.X.AtVec(0); got != 1 {
+	if got := cp.x.AtVec(0); got != 1 {
 		t.Fatalf("Copy X = %v, want 1", got)
 	}
-	if got := cp.P.At(0, 0); got != 1 {
+	if got := cp.cov.At(0, 0); got != 1 {
 		t.Fatalf("Copy P = %v, want 1", got)
 	}
 }
@@ -190,7 +190,7 @@ func TestEKF_NonlinearPendulum(t *testing.T) {
 		}
 	}
 
-	diff := math.Abs(ekf.X.AtVec(0) - xTrue.AtVec(0))
+	diff := math.Abs(ekf.x.AtVec(0) - xTrue.AtVec(0))
 	if diff > 0.5 {
 		t.Errorf("|theta_ekf - theta_true| = %v, want < 0.5", diff)
 	}
@@ -240,15 +240,15 @@ func TestEKF_StepEquivalence(t *testing.T) {
 	}
 
 	for i := range 2 {
-		if math.Abs(ekf1.X.AtVec(i)-ekf2.X.AtVec(i)) > 1e-14 {
-			t.Errorf("X[%d]: predict+update=%v step=%v", i, ekf1.X.AtVec(i), ekf2.X.AtVec(i))
+		if math.Abs(ekf1.x.AtVec(i)-ekf2.x.AtVec(i)) > 1e-14 {
+			t.Errorf("X[%d]: predict+update=%v step=%v", i, ekf1.x.AtVec(i), ekf2.x.AtVec(i))
 		}
 	}
-	r1, c1 := ekf1.P.Dims()
+	r1, c1 := ekf1.cov.Dims()
 	for i := range r1 {
 		for j := range c1 {
-			if math.Abs(ekf1.P.At(i, j)-ekf2.P.At(i, j)) > 1e-14 {
-				t.Errorf("P[%d,%d]: predict+update=%v step=%v", i, j, ekf1.P.At(i, j), ekf2.P.At(i, j))
+			if math.Abs(ekf1.cov.At(i, j)-ekf2.cov.At(i, j)) > 1e-14 {
+				t.Errorf("P[%d,%d]: predict+update=%v step=%v", i, j, ekf1.cov.At(i, j), ekf2.cov.At(i, j))
 			}
 		}
 	}
@@ -285,18 +285,18 @@ func TestEKF_CovariancePSD(t *testing.T) {
 			t.Fatalf("step %d: %v", k, err)
 		}
 
-		n, _ := ekf.P.Dims()
+		n, _ := ekf.cov.Dims()
 		for i := range n {
 			for j := range n {
-				if math.Abs(ekf.P.At(i, j)-ekf.P.At(j, i)) > 1e-12 {
+				if math.Abs(ekf.cov.At(i, j)-ekf.cov.At(j, i)) > 1e-12 {
 					t.Fatalf("step %d: P not symmetric: P[%d,%d]=%v P[%d,%d]=%v",
-						k, i, j, ekf.P.At(i, j), j, i, ekf.P.At(j, i))
+						k, i, j, ekf.cov.At(i, j), j, i, ekf.cov.At(j, i))
 				}
 			}
 		}
 
 		var eig mat.Eigen
-		ok := eig.Factorize(ekf.P, mat.EigenNone)
+		ok := eig.Factorize(ekf.cov, mat.EigenNone)
 		if !ok {
 			t.Fatalf("step %d: eigen decomposition failed", k)
 		}
@@ -410,4 +410,87 @@ func TestEKF_RejectsWrongFunctionOutputDimensions(t *testing.T) {
 			t.Fatalf("got %v, want ErrDimensionMismatch", err)
 		}
 	})
+}
+
+func TestEKFDoesNotAliasFOutputAndValidatesState(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.9, 0.2, -0.1, 0.8})
+	C := mat.NewDense(1, 2, []float64{1, 0.5})
+	Q := mat.NewDense(2, 2, []float64{0.1, 0.01, 0.01, 0.2})
+	R := mat.NewDense(1, 1, []float64{0.3})
+	buf := mat.NewVecDense(2, nil)
+	model := &EKFModel{
+		F: func(x, u *mat.VecDense) *mat.VecDense {
+			buf.MulVec(A, x)
+			buf.AddScaledVec(buf, u.AtVec(0), mat.NewVecDense(2, []float64{1, 0.5}))
+			return buf
+		},
+		H:    func(x *mat.VecDense) *mat.VecDense { v := mat.NewVecDense(1, nil); v.MulVec(C, x); return v },
+		FJac: func(x, u *mat.VecDense) *mat.Dense { return mat.DenseCopyOf(A) },
+		HJac: func(x *mat.VecDense) *mat.Dense { return mat.DenseCopyOf(C) },
+		Q:    Q,
+		R:    R,
+	}
+	x0 := mat.NewVecDense(2, []float64{1, -1})
+	P0 := mat.NewDense(2, 2, []float64{1, 0.2, 0.2, 2})
+	e, err := NewEKF(model, x0, P0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := mat.NewVecDense(1, []float64{0.4})
+	z := mat.NewVecDense(1, []float64{0.7})
+	if err := e.Step(u, z); err != nil {
+		t.Fatal(err)
+	}
+
+	var xp mat.VecDense
+	xp.MulVec(A, x0)
+	xp.AddScaledVec(&xp, 0.4, mat.NewVecDense(2, []float64{1, 0.5}))
+	var ap, pp mat.Dense
+	ap.Mul(A, P0)
+	pp.Mul(&ap, A.T())
+	pp.Add(&pp, Q)
+	var cp, s mat.Dense
+	cp.Mul(C, &pp)
+	s.Mul(&cp, C.T())
+	s.Add(&s, R)
+	var pct, k mat.Dense
+	pct.Mul(&pp, C.T())
+	k.Scale(1/s.At(0, 0), &pct)
+	innov := 0.7 - (C.At(0, 0)*xp.AtVec(0) + C.At(0, 1)*xp.AtVec(1))
+	got := e.State()
+	for i := range 2 {
+		want := xp.AtVec(i) + k.At(i, 0)*innov
+		if math.Abs(got.AtVec(i)-want) > 1e-12 {
+			t.Errorf("x[%d] = %v, want %v", i, got.AtVec(i), want)
+		}
+		if buf.AtVec(i) != xp.AtVec(i) {
+			t.Errorf("Update mutated F's returned vector: buf[%d] = %v, want %v", i, buf.AtVec(i), xp.AtVec(i))
+		}
+	}
+	got.SetVec(0, 42)
+	if e.State().AtVec(0) == 42 {
+		t.Error("State aliases filter state")
+	}
+
+	if err := e.Update(nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Update(nil): err = %v", err)
+	}
+	if err := e.SetState(mat.NewVecDense(3, nil)); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("SetState wrong length: err = %v", err)
+	}
+	if err := e.SetState(mat.NewVecDense(2, []float64{math.NaN(), 0})); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("SetState NaN: err = %v", err)
+	}
+	if err := e.SetStateCovariance(mat.NewDense(1, 1, []float64{1})); err == nil {
+		t.Error("SetStateCovariance wrong size: nil error")
+	}
+	if err := e.SetStateCovariance(mat.NewDense(2, 2, []float64{2, 0, 0, 3})); err != nil {
+		t.Fatal(err)
+	}
+	if v := e.StateCovariance().At(1, 1); v != 3 {
+		t.Errorf("StateCovariance after Set = %v, want 3", v)
+	}
+	if _, err := NewEKF(nil, x0, P0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("NewEKF(nil model): err = %v", err)
+	}
 }
