@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"math/rand"
 	"sort"
 	"testing"
 
@@ -1214,5 +1215,388 @@ func TestNorm2_UnstableIsInf(t *testing.T) {
 	got, err := Norm(sys, 2)
 	if err != nil || !math.IsInf(got, 1) {
 		t.Errorf("Norm(2) = %g, %v; want +Inf", got, err)
+	}
+}
+
+// bisectionPeakGain is peakGain before the certifying probe: plain
+// Hamiltonian bisection from the sampled lower bound.
+func bisectionPeakGain(sys *System) (float64, float64, error) {
+	n, m, p := sys.Dims()
+	if sys.IsDiscrete() {
+		csys, err := sys.Undiscretize()
+		if err != nil {
+			return 0, 0, err
+		}
+		norm, omega, err := bisectionPeakGain(csys)
+		return norm, 2 * math.Atan(omega*sys.Dt/2) / sys.Dt, err
+	}
+	gammaLow, omegaPeak := hinfLowerBound(sys, m, p)
+	ws := newHamiltonianWS(sys, n, m, p)
+	gammaHigh := math.Max(gammaLow*2, 1e-10)
+	for range 50 {
+		if !ws.hasImagEigs(gammaHigh) {
+			break
+		}
+		gammaHigh *= 2
+	}
+	tol := 1e-10
+	for range 100 {
+		if gammaHigh-gammaLow < tol*gammaHigh {
+			break
+		}
+		mid := (gammaLow + gammaHigh) / 2
+		if !ws.hasImagEigs(mid) {
+			gammaHigh = mid
+			continue
+		}
+		peak, w, err := ws.candidatePeak(sys)
+		if err != nil {
+			gammaLow = mid
+			continue
+		}
+		if peak < mid {
+			gammaHigh = mid
+			continue
+		}
+		gammaLow, omegaPeak = peak, w
+	}
+	return gammaHigh, omegaPeak, nil
+}
+
+func countHamiltonianEvals(f func()) int64 {
+	before := hamiltonianEvals.Load()
+	f()
+	return hamiltonianEvals.Load() - before
+}
+
+func randomStableNormSys(t testing.TB, rng *rand.Rand, n, m, p int, dt float64, withD bool, zeta float64) *System {
+	t.Helper()
+	A := mat.NewDense(n, n, nil)
+	for i := range n {
+		for j := range n {
+			A.Set(i, j, rng.NormFloat64()/math.Sqrt(float64(n)))
+		}
+	}
+	if zeta > 0 && n >= 2 {
+		w0 := 0.3 + 3*rng.Float64()
+		A.Set(0, 0, -zeta*w0)
+		A.Set(0, 1, w0)
+		A.Set(1, 0, -w0)
+		A.Set(1, 1, -zeta*w0)
+		for j := 2; j < n; j++ {
+			A.Set(0, j, 0)
+			A.Set(1, j, 0)
+		}
+	}
+	poles, err := mustNewSys(t, A, m, p).Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shift := math.Inf(-1)
+	for _, pl := range poles {
+		shift = math.Max(shift, real(pl))
+	}
+	if shift > -0.1 {
+		start := 0
+		if zeta > 0 {
+			start = 2
+		}
+		for i := start; i < n; i++ {
+			A.Set(i, i, A.At(i, i)-shift-0.1-rng.Float64())
+		}
+	}
+	B := mat.NewDense(n, m, nil)
+	for i := range n {
+		for j := range m {
+			B.Set(i, j, rng.NormFloat64())
+		}
+	}
+	C := mat.NewDense(p, n, nil)
+	for i := range p {
+		for j := range n {
+			C.Set(i, j, rng.NormFloat64())
+		}
+	}
+	D := mat.NewDense(p, m, nil)
+	if withD {
+		for i := range p {
+			for j := range m {
+				D.Set(i, j, 0.5*rng.NormFloat64())
+			}
+		}
+	}
+	sys, err := New(A, B, C, D, 0)
+	if err == nil && dt > 0 {
+		sys, err = sys.Discretize(dt)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func mustNewSys(t testing.TB, A *mat.Dense, m, p int) *System {
+	t.Helper()
+	n, _ := A.Dims()
+	sys, err := New(A, mat.NewDense(n, m, nil), mat.NewDense(p, n, nil), mat.NewDense(p, m, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// hinfMixedSensitivityLoop is the closed loop of HinfSyn on a 2×2
+// mixed-sensitivity problem: W1 = (0.5s+0.5)/(s+0.005) per channel (dc gain
+// 100, high-frequency gain 0.5), W2 = 0.1. order n gives a 2n+4 state loop.
+func hinfMixedSensitivityLoop(t testing.TB, order int, seed int64) *System {
+	t.Helper()
+	rng := rand.New(rand.NewSource(seed))
+	n, nw := order, order+2
+	Ap := mat.NewDense(nw, nw, nil)
+	Bp := mat.NewDense(nw, 4, nil)
+	Cp := mat.NewDense(6, nw, nil)
+	Dp := mat.NewDense(6, 4, nil)
+	for i := range n {
+		for j := range n {
+			if i == j {
+				Ap.Set(i, j, -1-float64(i)/2)
+			} else {
+				Ap.Set(i, j, 0.1*rng.NormFloat64()/math.Sqrt(float64(n)))
+			}
+		}
+		for j := range 2 {
+			Bp.Set(i, 2+j, rng.NormFloat64())
+			c := rng.NormFloat64()
+			Ap.Set(n+j, i, -c)
+			Cp.Set(j, i, -0.5*c)
+			Cp.Set(4+j, i, -c)
+		}
+	}
+	for j := range 2 {
+		Ap.Set(n+j, n+j, -0.005)
+		Bp.Set(n+j, j, 1)
+		Cp.Set(j, n+j, 0.4975)
+		Dp.Set(j, j, 0.5)
+		Dp.Set(2+j, 2+j, 0.1)
+		Dp.Set(4+j, j, 1)
+	}
+	P, err := New(Ap, Bp, Cp, Dp, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := HinfSyn(P, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl, err := LFT(P, res.K, 2, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cl
+}
+
+func assertPeakMatchesBisection(t *testing.T, name string, sys *System) (evals int64) {
+	t.Helper()
+	want, _, err := bisectionPeakGain(sys)
+	if err != nil {
+		t.Fatalf("%s: bisection: %v", name, err)
+	}
+	var got float64
+	evals = countHamiltonianEvals(func() {
+		got, _, err = peakGain(sys)
+	})
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	if math.Abs(got-want) > 1e-10*math.Max(got, want) {
+		t.Errorf("%s: peakGain = %.15g, bisection = %.15g (rel %.2e)", name, got, want, math.Abs(got-want)/want)
+	}
+	return evals
+}
+
+func TestPeakGain_CertifiedMatchesBisection(t *testing.T) {
+	rng := rand.New(rand.NewSource(20261004))
+	var fast, total int
+	for trial := range 120 {
+		n := 2 + rng.Intn(9)
+		m := 1 + rng.Intn(3)
+		p := 1 + rng.Intn(3)
+		dt := 0.0
+		if trial%2 == 1 {
+			dt = 0.1
+		}
+		zeta := 0.0
+		if trial%3 == 0 {
+			zeta = math.Pow(10, -2-3*rng.Float64())
+		}
+		sys := randomStableNormSys(t, rng, n, m, p, dt, trial%4 >= 2, zeta)
+		if evals := assertPeakMatchesBisection(t, "random", sys); evals == 1 {
+			fast++
+		}
+		total++
+	}
+	if fast < total/3 {
+		t.Errorf("one probe certified %d of %d models", fast, total)
+	}
+
+	assertPeakMatchesBisection(t, "biproper mixed sensitivity", mimoBiproperMixedSensitivityPlant(t))
+	for _, order := range []int{4, 10} {
+		assertPeakMatchesBisection(t, "hinfsyn loop", hinfMixedSensitivityLoop(t, order, 7))
+	}
+
+	nearSingular, err := New(
+		mat.NewDense(2, 2, []float64{-0.01, 0, -0.01, -0.00004320073460981398}),
+		mat.NewDense(2, 2, []float64{0, 1, 1, 0}),
+		mat.NewDense(3, 2, []float64{-0.005, 0.004298473093676491, 0, 0, -0.01, 0}),
+		mat.NewDense(3, 2, []float64{0.5, 0, 0, 0.1, 1, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := HinfSyn(nearSingular, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPeakMatchesBisection(t, "near-singular-edge loop (GH3MO7)", closedLoop(t, nearSingular, res.K, 1, 1))
+
+	nonMinimal := strictMixedSensitivityPlant(t)
+	if res, err = HinfSyn(nonMinimal, 2, 2); err != nil {
+		t.Fatal(err)
+	}
+	assertPeakMatchesBisection(t, "non-minimal near-optimal loop (TI6YYN)", closedLoop(t, nonMinimal, res.K, 2, 2))
+}
+
+// strictMixedSensitivityPlant is the TI6YYN problem: a 3-state 2×2 plant
+// with W1 = 1/(s+0.01) per channel and W2 = 1e-3; its HinfSyn loop is
+// non-minimal and ill-conditioned at low frequency.
+func strictMixedSensitivityPlant(t *testing.T) *System {
+	t.Helper()
+	A := []float64{-1, 0.2, 0, 0, -2, 0.5, 0.1, 0, -3}
+	B := []float64{1, 0, 0, 1, 0.5, 0.5}
+	C := []float64{1, 0, 0.2, 0, 1, 0}
+	Ap := mat.NewDense(5, 5, nil)
+	Bp := mat.NewDense(5, 4, nil)
+	Cp := mat.NewDense(6, 5, nil)
+	Dp := mat.NewDense(6, 4, nil)
+	for i := range 3 {
+		for j := range 3 {
+			Ap.Set(i, j, A[i*3+j])
+		}
+		for j := range 2 {
+			Bp.Set(i, 2+j, B[i*2+j])
+			Ap.Set(3+j, i, -C[j*3+i])
+			Cp.Set(4+j, i, -C[j*3+i])
+		}
+	}
+	for j := range 2 {
+		Ap.Set(3+j, 3+j, -0.01)
+		Bp.Set(3+j, j, 1)
+		Cp.Set(j, 3+j, 1)
+		Dp.Set(2+j, 2+j, 1e-3)
+		Dp.Set(4+j, j, 1)
+	}
+	P, err := New(Ap, Bp, Cp, Dp, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return P
+}
+
+func TestPeakGain_OneHamiltonianProbeWhenSampledPeakIsExact(t *testing.T) {
+	lowPass, _ := New(
+		mat.NewDense(2, 2, []float64{-1, 0.5, 0, -2}),
+		mat.NewDense(2, 2, []float64{1, 0, 0.3, 1}),
+		mat.NewDense(2, 2, []float64{1, 0.2, 0, 1}),
+		mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.1}), 0)
+	discLowPass, _ := New(
+		mat.NewDense(2, 2, []float64{0.5, 0.2, 0, 0.3}),
+		mat.NewDense(2, 1, []float64{1, 0.5}),
+		mat.NewDense(2, 2, []float64{1, 0, 0.4, 1}),
+		mat.NewDense(2, 1, nil), 0.1)
+	unstable, _ := New(
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+
+	for _, tc := range []struct {
+		name string
+		f    func() (float64, error)
+		want float64
+	}{
+		{"HinfNorm continuous MIMO D≠0", func() (float64, error) { g, _, err := HinfNorm(lowPass); return g, err }, maxSVDense(dcGainDense(t, lowPass), 2, 2)},
+		{"HinfNorm discrete", func() (float64, error) { g, _, err := HinfNorm(discLowPass); return g, err }, maxSVDense(dcGainDense(t, discLowPass), 2, 1)},
+		{"Norm Inf unstable", func() (float64, error) { return Norm(unstable, math.Inf(1)) }, 1},
+	} {
+		var got float64
+		var err error
+		evals := countHamiltonianEvals(func() { got, err = tc.f() })
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if evals != 1 {
+			t.Errorf("%s: %d Hamiltonian evaluations, want 1", tc.name, evals)
+		}
+		if got < tc.want || got > tc.want*(1+1e-10) {
+			t.Errorf("%s: norm = %.15g, want DC gain %.15g within 1e-10", tc.name, got, tc.want)
+		}
+	}
+}
+
+func dcGainDense(t *testing.T, sys *System) *mat.Dense {
+	t.Helper()
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+func TestPeakGain_FallbackWhenSampledBoundMissesPeak(t *testing.T) {
+	const zeta, w0 = 1e-4, 1.37
+	A := mat.NewDense(3, 3, []float64{
+		-zeta * w0, w0, 0.3,
+		-w0, -zeta * w0, 0,
+		0, 0, -2,
+	})
+	B := mat.NewDense(3, 2, []float64{0, 1, 1, 0, 0.5, 1})
+	C := mat.NewDense(2, 3, []float64{1, 0, 1, 0.2, 1, 0})
+	D := mat.NewDense(2, 2, []float64{0.1, 0, 0.3, 0})
+	for _, dt := range []float64{0, 0.05} {
+		sys, err := New(A, B, C, D, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dt > 0 {
+			if sys, err = sys.Discretize(dt); err != nil {
+				t.Fatal(err)
+			}
+		}
+		csys := sys
+		if dt > 0 {
+			csys, _ = sys.Undiscretize()
+		}
+		low, _ := hinfLowerBound(csys, 2, 2)
+		evals := assertPeakMatchesBisection(t, "lightly damped", sys)
+		got, _, _ := peakGain(sys)
+		if low > 0.5*got {
+			t.Fatalf("dt=%g: sampled bound %g does not miss peak %g", dt, low, got)
+		}
+		if evals <= 1 || evals > 10 {
+			t.Errorf("dt=%g: %d Hamiltonian evaluations, want a few crossing-midpoint raises", dt, evals)
+		}
+	}
+}
+
+func TestPeakGain_BisectionFallbackWhenProbeInconclusive(t *testing.T) {
+	highPass, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	low, _ := hinfLowerBound(highPass, 1, 1)
+	if low >= 1 {
+		t.Fatalf("sampled bound %g reaches sigma(D) = 1", low)
+	}
+	evals := assertPeakMatchesBisection(t, "high-pass D=1", highPass)
+	if evals < 20 {
+		t.Errorf("%d Hamiltonian evaluations; probe below sigma(D) must fall back to bisection", evals)
 	}
 }

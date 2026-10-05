@@ -1050,6 +1050,21 @@ func BenchmarkHinfNorm(b *testing.B) {
 	}
 }
 
+func BenchmarkHinfNorm_MixedSensitivityLoop(b *testing.B) {
+	for _, order := range []int{10, 20, 30} {
+		cl := hinfMixedSensitivityLoop(b, order, 7)
+		n, _, _ := cl.Dims()
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, _, err := HinfNorm(cl); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkH2Syn_Simple(b *testing.B) {
 	A := mat.NewDense(2, 2, []float64{0, 1, -2, -1})
 	B := mat.NewDense(2, 2, []float64{0, 0, 1, 1})
