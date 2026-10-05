@@ -879,6 +879,163 @@ func TestFRD_NyquistFromFRD(t *testing.T) {
 	}
 }
 
+func frdTestPolyMul(a, b []float64) []float64 {
+	out := make([]float64, len(a)+len(b)-1)
+	for i, x := range a {
+		for j, y := range b {
+			out[i+j] += x * y
+		}
+	}
+	return out
+}
+
+// frdTestCompanion realizes the strictly proper num/den (descending powers,
+// monic den) in controllable canonical form, which has a non-symmetric A.
+func frdTestCompanion(t *testing.T, num, den []float64) *System {
+	t.Helper()
+	n := len(den) - 1
+	a := mat.NewDense(n, n, nil)
+	for i := range n - 1 {
+		a.Set(i, i+1, 1)
+	}
+	for j := range n {
+		a.Set(n-1, j, -den[n-j]/den[0])
+	}
+	b := mat.NewDense(n, 1, nil)
+	b.Set(n-1, 0, 1)
+	c := mat.NewDense(1, n, nil)
+	for k, v := range num {
+		c.Set(0, len(num)-1-k, v/den[0])
+	}
+	sys, err := New(a, b, c, mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func frdTestUnstableCount(t *testing.T, a *mat.Dense, continuous bool) int {
+	t.Helper()
+	var eig mat.Eigen
+	if !eig.Factorize(a, mat.EigenNone) {
+		t.Fatal("eigen failed")
+	}
+	count := 0
+	for _, v := range eig.Values(nil) {
+		if (continuous && real(v) > 1e-9) || (!continuous && cmplx.Abs(v) > 1+1e-9) {
+			count++
+		}
+	}
+	return count
+}
+
+// frdTestNyquistOracle returns Z - P: unstable closed-loop poles under unit
+// negative feedback minus unstable open-loop poles.
+func frdTestNyquistOracle(t *testing.T, sys *System) int {
+	t.Helper()
+	d := sys.D.At(0, 0)
+	var bc mat.Dense
+	bc.Mul(sys.B, sys.C)
+	bc.Scale(1/(1+d), &bc)
+	var acl mat.Dense
+	acl.Sub(sys.A, &bc)
+	ct := sys.IsContinuous()
+	return frdTestUnstableCount(t, &acl, ct) - frdTestUnstableCount(t, sys.A, ct)
+}
+
+func TestFRD_NyquistEncirclements(t *testing.T) {
+	s1, s2, s3 := []float64{1, 1}, []float64{1, 2}, []float64{1, 3}
+	s := []float64{1, 0}
+	s10 := []float64{1, 10}
+	cases := []struct {
+		name     string
+		num, den []float64
+		want     int
+	}{
+		{"repro K=180", []float64{180}, frdTestPolyMul(frdTestPolyMul(s1, s2), s3), 2},
+		{"K=30", []float64{30}, frdTestPolyMul(frdTestPolyMul(s1, s2), s3), 0},
+		{"type1 K=5", []float64{5}, frdTestPolyMul(s, s1), 0},
+		{"type1 K=-2", []float64{-2}, frdTestPolyMul(s, s1), 1},
+		{"type1 K=10 unstable", []float64{10}, frdTestPolyMul(frdTestPolyMul(s, s1), s2), 2},
+		{"type1 K=3", []float64{3}, frdTestPolyMul(frdTestPolyMul(s, s1), s2), 0},
+		{"type2 K=1", []float64{1}, frdTestPolyMul(frdTestPolyMul(s, s), s1), 2},
+		{"type2 lead", []float64{20, 20}, frdTestPolyMul(frdTestPolyMul(s, s), s10), 0},
+		{"type3 K=20", frdTestPolyMul([]float64{20, 20}, s1), frdTestPolyMul(frdTestPolyMul(frdTestPolyMul(s, s), s), s10), 0},
+		{"unstable open loop K=2", []float64{2}, []float64{1, -1}, -1},
+		{"unstable open loop K=0.5", []float64{0.5}, []float64{1, -1}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ct := frdTestCompanion(t, tc.num, tc.den)
+			if got := frdTestNyquistOracle(t, ct); got != tc.want {
+				t.Fatalf("oracle Z-P = %d, want %d", got, tc.want)
+			}
+			dt := 0.05
+			dsys, err := ct.DiscretizeZOH(dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, sys := range []*System{ct, dsys} {
+				wHi := 3.0
+				if sys.IsDiscrete() {
+					wHi = math.Log10(math.Pi / dt * (1 - 1e-12))
+				}
+				f, err := sys.FRD(logspace(-4, wHi, 1500))
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := f.Nyquist()
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := frdTestNyquistOracle(t, sys)
+				if res.Encirclements != want {
+					t.Errorf("dt=%v: Encirclements = %d, want %d", sys.Dt, res.Encirclements, want)
+				}
+				if res.RHPPoles != 0 || res.RHPZerosCL != res.Encirclements {
+					t.Errorf("dt=%v: RHPPoles=%d RHPZerosCL=%d, want 0 and %d", sys.Dt, res.RHPPoles, res.RHPZerosCL, res.Encirclements)
+				}
+			}
+		})
+	}
+}
+
+func TestFRD_NyquistMatchesSystemNyquist(t *testing.T) {
+	sys := frdTestCompanion(t, []float64{180}, frdTestPolyMul(frdTestPolyMul([]float64{1, 1}, []float64{1, 2}), []float64{1, 3}))
+	w := logspace(-3, 3, 600)
+	f, err := sys.FRD(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.Nyquist()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := sys.Nyquist(w, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Encirclements != want.Encirclements || got.Encirclements != 2 {
+		t.Fatalf("FRD Encirclements = %d, System = %d, want 2", got.Encirclements, want.Encirclements)
+	}
+	nw := len(w)
+	for k := range nw {
+		if got.ContourN[k] != cmplx.Conj(got.Contour[nw-1-k]) {
+			t.Fatalf("ContourN[%d] = %v, want conj(Contour[%d]) = %v", k, got.ContourN[k], nw-1-k, cmplx.Conj(got.Contour[nw-1-k]))
+		}
+	}
+}
+
+func TestFRD_NyquistNonFinite(t *testing.T) {
+	f, err := NewFRD([][][]complex128{{{cmplx.Inf()}}, {{1}}}, []float64{0, 1}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Nyquist(); err == nil {
+		t.Fatal("expected error for non-finite response")
+	}
+}
+
 func TestFRD_Sigma(t *testing.T) {
 	sys, _ := New(
 		mat.NewDense(1, 1, []float64{-1}),
