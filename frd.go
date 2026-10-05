@@ -447,6 +447,28 @@ func (f *FRD) Bode() *BodeResult {
 	}
 }
 
+// Nyquist computes the Nyquist response of SISO frequency response data.
+//
+// Contour is the data, ContourN the negative-frequency branch
+// conj(Contour[nw-1-k]) by conjugate symmetry, as MATLAB nyquist plots it;
+// the data must come from a real-coefficient model.
+//
+// Encirclements extends MATLAB: it is the clockwise winding of the loop
+// response around -1 along ContourN, Contour and their closures at both ends
+// of the grid. The count depends on the grid, which must resolve the phase
+// around -1 and reach the asymptotic regions at both ends. At the high end the
+// closure is a straight chord, assuming the data has rolled off. At the low
+// end, n = round(-d ln|H| / d ln ω) from the first two distinct frequencies
+// estimates the number of poles at s=0 (z=1); for n >= 1 the closure is the
+// clockwise arc of about n*pi at radius |H(ω0)| that indenting the contour
+// around those poles maps to, so they count as stable as in
+// (*System).Nyquist. Other poles on the stability boundary cannot be
+// indented from data and must lie outside the grid.
+//
+// Open-loop poles outside the stability boundary cannot be known from
+// frequency data, so RHPPoles is 0 and RHPZerosCL = Encirclements is the
+// closed-loop unstable pole count under unit negative feedback only for a
+// stable open loop; a caller who knows P adds it to both.
 func (f *FRD) Nyquist() (*NyquistResult, error) {
 	p, m := f.Dims()
 	if p != 1 || m != 1 {
@@ -456,27 +478,50 @@ func (f *FRD) Nyquist() (*NyquistResult, error) {
 	contour := make([]complex128, nw)
 	contourN := make([]complex128, nw)
 	for k := range nw {
-		contour[k] = f.Response[k][0][0]
-		contourN[k] = cmplx.Conj(contour[k])
-	}
-	enc := 0
-	for k := 1; k < nw; k++ {
-		re0, im0 := real(contour[k-1])+1, imag(contour[k-1])
-		re1, im1 := real(contour[k])+1, imag(contour[k])
-		if (im0 >= 0) != (im1 >= 0) {
-			xCross := re0 - im0*(re1-re0)/(im1-im0)
-			if xCross < 0 {
-				if im1 > im0 {
-					enc++
-				} else {
-					enc--
-				}
-			}
+		h := f.Response[k][0][0]
+		if cmplx.IsNaN(h) || cmplx.IsInf(h) {
+			return nil, fmt.Errorf("FRD Nyquist: non-finite response at omega[%d]=%v", k, f.Omega[k])
 		}
+		contour[k] = h
+		contourN[nw-1-k] = cmplx.Conj(h)
 	}
+	full := make([]complex128, 0, 2*nw)
+	full = append(full, contourN...)
+	if nw > 0 {
+		full = append(full, frdLowFreqClosure(f.Omega, contour)...)
+	}
+	full = append(full, contour...)
+	enc := -windingNumber(full, -1)
 	omega := make([]float64, nw)
 	copy(omega, f.Omega)
-	return &NyquistResult{Omega: omega, Contour: contour, ContourN: contourN, Encirclements: enc}, nil
+	return &NyquistResult{Omega: omega, Contour: contour, ContourN: contourN, Encirclements: enc, RHPZerosCL: enc}, nil
+}
+
+// frdLowFreqClosure returns the interior points of the arc from conj(h0) to
+// h0 that the indentation around n poles at s=0 maps to: radius |h0| and
+// clockwise rotation nearest to n*pi congruent to 2*arg(h0).
+func frdLowFreqClosure(omega []float64, h []complex128) []complex128 {
+	j := 1
+	for j < len(omega) && omega[j] == omega[0] {
+		j++
+	}
+	if omega[0] <= 0 || j == len(omega) || h[0] == 0 || h[j] == 0 {
+		return nil
+	}
+	slope := math.Log(cmplx.Abs(h[j])/cmplx.Abs(h[0])) / math.Log(omega[j]/omega[0])
+	n := math.Round(-slope)
+	if n < 1 {
+		return nil
+	}
+	a0 := cmplx.Phase(h[0])
+	rot := 2*a0 + 2*math.Pi*math.Round((-n*math.Pi-2*a0)/(2*math.Pi))
+	r := cmplx.Abs(h[0])
+	k := max(int(math.Ceil(math.Abs(rot)/(math.Pi/50))), 2)
+	arc := make([]complex128, 0, k-1)
+	for i := 1; i < k; i++ {
+		arc = append(arc, cmplx.Rect(r, -a0+rot*float64(i)/float64(k)))
+	}
+	return arc
 }
 
 func (f *FRD) Sigma() (*SigmaResult, error) {
