@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -164,8 +165,8 @@ func (p *physicalAssemblyPlan) bindPorts() (map[string]int, error) {
 		}
 		for _, port := range component.Ports {
 			key := component.Name + "." + port.Name
-			inputs := copyIntSlice(port.Input)
-			outputsForPort := copyIntSlice(port.Output)
+			inputs := slices.Clone(port.Input)
+			outputsForPort := slices.Clone(port.Output)
 			if len(inputs) == 0 && len(outputsForPort) == 0 {
 				inputs = claimUnusedPhysicalChannels(usedInputs, port.Dimension)
 				if len(inputs) != port.Dimension {
@@ -475,8 +476,8 @@ func copyPhysicalPorts(ports []PhysicalPort) []PhysicalPort {
 	out := make([]PhysicalPort, len(ports))
 	for i, port := range ports {
 		out[i] = port
-		out[i].Input = copyIntSlice(port.Input)
-		out[i].Output = copyIntSlice(port.Output)
+		out[i].Input = slices.Clone(port.Input)
+		out[i].Output = slices.Clone(port.Output)
 	}
 	return out
 }
