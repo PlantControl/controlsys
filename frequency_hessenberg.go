@@ -7,10 +7,12 @@ import (
 	"plantcontrol.org/v1/gonum/blas"
 )
 
-// balancedRealization is (A, B, C, D) after an exact power-of-two state
-// scaling, the shared starting point of the explicit frequency solvers.
+// balancedRealization is (E, A, B, C, D) after an exact power-of-two state
+// scaling, the shared starting point of the frequency solvers. e is nil for
+// explicit models.
 type balancedRealization struct {
 	n, m, p int
+	e       []float64 // Ê = D⁻¹ED
 	a       []float64 // Â = D⁻¹AD
 	b       []float64 // B̂ = D⁻¹B
 	c       []float64 // Ĉ = CD
@@ -19,6 +21,13 @@ type balancedRealization struct {
 }
 
 func newBalancedRealization(sys *System, n, m, p int) balancedRealization {
+	br := newRealizationCopy(sys, n, m, p)
+	br.balance(nil)
+	return br
+}
+
+// newRealizationCopy copies the realization into one fresh buffer, unscaled.
+func newRealizationCopy(sys *System, n, m, p int) balancedRealization {
 	f := make([]float64, n*n+n*m+p*n)
 	br := balancedRealization{n: n, m: m, p: p, a: f[: n*n : n*n], b: f[n*n : n*n+n*m : n*n+n*m], c: f[n*n+n*m:]}
 	if sys.D != nil {
@@ -30,6 +39,11 @@ func newBalancedRealization(sys *System, n, m, p int) balancedRealization {
 	}
 	a := sys.A.RawMatrix()
 	copyStrided(br.a, n, a.Data, a.Stride, n, n)
+	if sys.E != nil {
+		e := sys.E.RawMatrix()
+		br.e = make([]float64, n*n)
+		copyStrided(br.e, n, e.Data, e.Stride, n, n)
+	}
 	if m > 0 {
 		b := sys.B.RawMatrix()
 		copyStrided(br.b, m, b.Data, b.Stride, n, m)
@@ -38,11 +52,10 @@ func newBalancedRealization(sys *System, n, m, p int) balancedRealization {
 		c := sys.C.RawMatrix()
 		copyStrided(br.c, n, c.Data, c.Stride, p, n)
 	}
-	br.balance()
 	return br
 }
 
-// balancedDense evaluates each frequency by GEPP on sI-Â. GEPP is
+// balancedDense evaluates each frequency by GEPP on sÊ-Â. GEPP is
 // componentwise backward stable, so it needs no refinement; per point it
 // costs O(n³) and beats the Hessenberg sweep for small n.
 type balancedDense struct {
@@ -68,20 +81,29 @@ func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
 		return nil
 	}
 	a, x, inv := bd.pencil, bd.rhs, bd.inv
-	maxAbs := 0.0
+	maxAbs, sScale := 0.0, cabs1(s)
 	for i, v := range bd.a {
 		a[i] = complex(-v, 0)
 		maxAbs = max(maxAbs, math.Abs(v))
 	}
-	for i := range n {
-		a[i*n+i] += s
+	if bd.e == nil {
+		for i := range n {
+			a[i*n+i] += s
+		}
+	} else {
+		maxE := 0.0
+		for i, v := range bd.e {
+			a[i] += s * complex(v, 0)
+			maxE = max(maxE, math.Abs(v))
+		}
+		sScale *= maxE
 	}
 	for i := range n {
 		for j := range m {
 			x[j*n+i] = complex(bd.b[i*m+j], 0)
 		}
 	}
-	tol := float64(n) * (maxAbs + cabs1(s)) * eps()
+	tol := float64(n) * (maxAbs + sScale) * eps()
 	if tol == 0 {
 		tol = 1e-15
 	}
@@ -456,18 +478,19 @@ func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
 var errSingularPencil = fmt.Errorf("controlsys: singular complex matrix: %w", ErrSingularTransform)
 
 // balance applies an exact power-of-two state scaling x = D x̂ chosen to
-// balance the rows and columns of [A B; C ·] (Osborne iteration as in
-// SLICOT TB01ID). The orthogonal reduction is normwise backward stable in
+// balance the rows and columns of [|A|+|E| B; C ·] (Osborne iteration as in
+// SLICOT TB01ID; E enters as in MATLAB ssbal). When t is non-nil it is
+// multiplied by D⁻¹. The orthogonal reduction is normwise backward stable in
 // (A, B, C), so balancing A alone (Dgebal) is not enough: a slow
 // input-driven mode with a near-empty A row is shrunk until B̂ and Ĉ span
 // many decades and roundoff in QᵀB̂ swamps the response.
-func (br *balancedRealization) balance() {
+func (br *balancedRealization) balance(t []float64) {
 	const (
 		radix = 2.0
 		maxIt = 100
 	)
 	n, m, p := br.n, br.m, br.p
-	h, b, c := br.a, br.b, br.c
+	h, e, b, c := br.a, br.e, br.b, br.c
 	for range maxIt {
 		converged := true
 		for i := range n {
@@ -476,6 +499,14 @@ func (br *balancedRealization) balance() {
 				if j != i {
 					col += math.Abs(h[j*n+i])
 					row += math.Abs(h[i*n+j])
+				}
+			}
+			if e != nil {
+				for j := range n {
+					if j != i {
+						col += math.Abs(e[j*n+i])
+						row += math.Abs(e[i*n+j])
+					}
 				}
 			}
 			for k := range p {
@@ -506,6 +537,15 @@ func (br *balancedRealization) balance() {
 			for j := range n {
 				h[i*n+j] *= inv
 				h[j*n+i] *= f
+			}
+			if e != nil {
+				for j := range n {
+					e[i*n+j] *= inv
+					e[j*n+i] *= f
+				}
+			}
+			if t != nil {
+				t[i] *= inv
 			}
 			for k := range m {
 				b[i*m+k] *= inv
