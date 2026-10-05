@@ -141,8 +141,8 @@ func aliasCases() []aliasCase {
 		{"MinimalLFT", aliasPick(fxInternal), aliasOne((*System).MinimalLFT)},
 		{"MinimalLFT/none", aliasPick(fxPlant), aliasOne((*System).MinimalLFT)},
 		{"AugmentInternalDelayOutputs", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { return s.AugmentInternalDelayOutputs("d") })},
-		{"GetDelayModel", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { H, _ := s.GetDelayModel(); return H, nil })},
-		{"GetDelayModel/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { H, _ := s.GetDelayModel(); return H, nil })},
+		{"GetDelayModel", aliasPick(fxInternal), aliasOne(func(s *System) (*System, error) { H, _, err := s.GetDelayModel(); return H, err })},
+		{"GetDelayModel/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { H, _, err := s.GetDelayModel(); return H, err })},
 		{"SetDelayModel", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return SetDelayModel(s, nil)
 		})},

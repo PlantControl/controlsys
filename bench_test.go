@@ -496,7 +496,10 @@ func BenchmarkGetDelayModel(b *testing.B) {
 func BenchmarkSetDelayModel(b *testing.B) {
 	sys := benchSys(5, 2, 2)
 	sys.InputDelay = []float64{0.3, 0.5}
-	H, tau := sys.GetDelayModel()
+	H, tau, err := sys.GetDelayModel()
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		SetDelayModel(H, tau)

@@ -2,7 +2,6 @@ package controlsys
 
 import (
 	"cmp"
-	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -11,7 +10,9 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-var errDelayLoopUnsupported = errors.New("delay loop outside Nyquist test scope")
+// errDelayLoopUnsupported reports a delay loop the Nyquist test cannot
+// decide; it wraps ErrDelayUnsupported.
+var errDelayLoopUnsupported = fmt.Errorf("delay loop outside Nyquist test scope: %w", ErrDelayUnsupported)
 
 // delayLoop is a continuous SISO loop L whose negative-feedback closed-loop
 // characteristic is χ(s) = det(sI-A)·(1+L(s)), with χ entire. Its closed-loop
@@ -25,6 +26,7 @@ type delayLoop struct {
 	tailLimit float64                 // bound on limsup |L(jω)|, ω → ∞
 	tau       float64                 // total loop delay, sets the grid density
 	scales    []float64
+	maxPoints int // grid point budget; 0 selects delayNyquistMaxPoints
 }
 
 type axisPole struct {
@@ -43,7 +45,7 @@ const delayNyquistMaxPoints = 1 << 21
 // delayLoopFromSystem describes the loop sys for the Nyquist test. Internal
 // delays must form an acyclic network, so that the open-loop poles are
 // exactly eig(A); a delay feedback cycle gives infinitely many open-loop
-// poles and is rejected with errDelayLoopUnsupported.
+// poles and is rejected with ErrContinuousInternalDelay.
 func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	if err := newDescriptorPolicy(sys).requireStandard(context); err != nil {
 		return nil, err
@@ -129,7 +131,7 @@ func newRationalTailBound(sys *System) (*rationalTailBound, error) {
 	n, _, _ := sys.Dims()
 	nd := sys.internalDelayCount()
 	if nd > 0 && !lftDelayLoopAcyclic(sys, n) {
-		return nil, fmt.Errorf("internal delay feedback cycle: %w", errDelayLoopUnsupported)
+		return nil, fmt.Errorf("internal delay feedback cycle: %w", ErrContinuousInternalDelay)
 	}
 	k := 1 + nd
 	r := &rationalTailBound{d: make([]float64, k*k), c: make([]float64, k), b: make([]float64, k), nd: nd}
@@ -301,8 +303,10 @@ func lftDelayLoopAcyclic(sys *System, n int) bool {
 // certifies |L| <= tailLimit + frac(1-tailLimit) < 1 on the rest of the
 // closed right half-plane, so no encirclement is missed beyond R. The count
 // is exact up to the grid resolving every passage of 1+L near the origin; a
-// closed-loop root within the bisection tolerance of the axis is reported
-// unstable.
+// closed-loop root within the bisection tolerance of the axis, or an axis
+// eigenvalue hidden from L, is reported unstable. A grid that exceeds the
+// point budget or a winding number that does not resolve to an integer
+// returns errDelayLoopUnsupported rather than a verdict.
 func (l *delayLoop) nyquist(frac float64) (delayNyquist, error) {
 	if !(l.tailLimit < 1) {
 		return delayNyquist{}, fmt.Errorf("neutral delay loop, |L(j∞)| may reach 1: %w", errDelayLoopUnsupported)
@@ -325,8 +329,8 @@ func (l *delayLoop) nyquist(frac float64) (delayNyquist, error) {
 	if !(l.tail(R) <= target) || math.IsInf(R, 1) {
 		return delayNyquist{}, fmt.Errorf("no finite frequency bound for |L|: %w", errDelayLoopUnsupported)
 	}
-	if l.tau > 0 && R*8*l.tau/math.Pi > delayNyquistMaxPoints {
-		return delayNyquist{}, fmt.Errorf("delay grid exceeds %d points: %w", delayNyquistMaxPoints, errDelayLoopUnsupported)
+	if l.tau > 0 && R*8*l.tau/math.Pi > float64(l.pointBudget()) {
+		return delayNyquist{}, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 	}
 
 	if !l.axisOrdersMatch() {
@@ -337,9 +341,12 @@ func (l *delayLoop) nyquist(frac float64) (delayNyquist, error) {
 	var out delayNyquist
 	var phi, phiStart float64
 	for si, seg := range segments {
-		ws, fs, ok := l.refine(seg)
-		if !ok {
+		ws, fs, res := l.refine(seg, l.pointBudget()-len(out.w))
+		switch res {
+		case refineAxisRoot:
 			return delayNyquist{w: out.w, f: out.f}, nil
+		case refineBudget:
+			return delayNyquist{}, fmt.Errorf("refined grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 		}
 		if si == 0 {
 			if seg.from == 0 {
@@ -368,7 +375,7 @@ func (l *delayLoop) nyquist(frac float64) (delayNyquist, error) {
 	turns := (2*(phi-cmplx.Phase(fR)) - 2*phiStart) / (2 * math.Pi)
 	w := math.Round(turns)
 	if math.Abs(turns-w) > 0.25 {
-		return out, nil
+		return delayNyquist{}, fmt.Errorf("winding %.3g turns is not resolved to an integer: %w", turns, errDelayLoopUnsupported)
 	}
 	out.stable = l.rhp-int(w) == 0
 	return out, nil
@@ -470,15 +477,31 @@ func (l *delayLoop) axisOrdersMatch() bool {
 	return true
 }
 
+type refineResult int
+
+const (
+	refineResolved refineResult = iota
+	refineAxisRoot
+	refineBudget
+)
+
+func (l *delayLoop) pointBudget() int {
+	if l.maxPoints > 0 {
+		return l.maxPoints
+	}
+	return delayNyquistMaxPoints
+}
+
 // refine evaluates 1+L on the segment, bisecting until consecutive phases
-// differ by at most π/4. It reports false when 1+L vanishes or cannot be
-// resolved, i.e. a closed-loop root sits on the axis.
-func (l *delayLoop) refine(seg nyquistSegment) ([]float64, []complex128, bool) {
+// differ by at most π/4. It reports refineAxisRoot when 1+L vanishes or its
+// phase turns within the bisection tolerance, i.e. a closed-loop root sits on
+// the axis, and refineBudget when the segment would exceed budget points.
+func (l *delayLoop) refine(seg nyquistSegment, budget int) ([]float64, []complex128, refineResult) {
 	f := func(w float64) complex128 { return 1 + l.at(w) }
 	ws := []float64{seg.pts[0]}
 	fs := []complex128{f(seg.pts[0])}
 	if !resolvedNonzero(fs[0]) {
-		return nil, nil, false
+		return nil, nil, refineAxisRoot
 	}
 	type span struct {
 		a, b   float64
@@ -490,7 +513,7 @@ func (l *delayLoop) refine(seg nyquistSegment) ([]float64, []complex128, bool) {
 			s := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			if !resolvedNonzero(s.fb) {
-				return nil, nil, false
+				return nil, nil, refineAxisRoot
 			}
 			if math.Abs(wrapPi(cmplx.Phase(s.fb)-cmplx.Phase(s.fa))) <= math.Pi/4 {
 				ws = append(ws, s.b)
@@ -498,17 +521,17 @@ func (l *delayLoop) refine(seg nyquistSegment) ([]float64, []complex128, bool) {
 				continue
 			}
 			if s.b-s.a <= 1e-13*max(1, s.b) {
-				return nil, nil, false
+				return nil, nil, refineAxisRoot
 			}
-			if len(ws)+len(stack) > delayNyquistMaxPoints {
-				return nil, nil, false
+			if len(ws)+len(stack) > budget {
+				return nil, nil, refineBudget
 			}
 			mid := (s.a + s.b) / 2
 			fm := f(mid)
 			stack = append(stack, span{mid, s.b, fm, s.fb}, span{s.a, mid, s.fa, fm})
 		}
 	}
-	return ws, fs, true
+	return ws, fs, refineResolved
 }
 
 func resolvedNonzero(v complex128) bool {

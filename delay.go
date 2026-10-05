@@ -3,7 +3,6 @@ package controlsys
 import (
 	"fmt"
 	"math"
-	"slices"
 
 	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
@@ -59,21 +58,26 @@ func (sys *System) SetOutputDelay(delay []float64) error {
 	return nil
 }
 
+// SetInternalDelay sets the internal delays tau of sys and the LFT blocks
+// that connect them: the delayed signals enter through B2 and D12 and leave
+// through C2, D21 and D22, as in the H partition of GetDelayModel. An empty
+// tau removes all internal delays. Each tau must be finite and positive, and
+// an integer number of samples for a discrete model.
 func (sys *System) SetInternalDelay(tau []float64, B2, C2, D12, D21, D22 *mat.Dense) error {
-	if tau == nil {
+	if sys == nil {
+		return fmt.Errorf("SetInternalDelay: system is nil: %w", ErrInvalidArgument)
+	}
+	if len(tau) == 0 {
 		sys.LFT = nil
 		return nil
 	}
 	n, m, p := sys.Dims()
 	N := len(tau)
-	if err := validateSliceDelay(tau, N, sys.Dt); err != nil {
-		return err
-	}
-	if slices.Contains(tau, 0) {
-		return ErrZeroInternalDelay
+	if err := validateInternalTau(tau, sys.Dt); err != nil {
+		return fmt.Errorf("SetInternalDelay: %w", err)
 	}
 	if err := validateLFTDims(n, m, p, N, B2, C2, D12, D21, D22); err != nil {
-		return err
+		return fmt.Errorf("SetInternalDelay: %w", err)
 	}
 	tauCopy := make([]float64, N)
 	copy(tauCopy, tau)
@@ -136,17 +140,31 @@ func validateSliceDelay(delay []float64, expected int, dt float64) error {
 	return nil
 }
 
+// validateInternalTau requires each internal delay to be a valid delay value
+// and nonzero, since a zero internal delay closes an algebraic loop.
+func validateInternalTau(tau []float64, dt float64) error {
+	for i, v := range tau {
+		if err := validateDelayValue(v, dt); err != nil {
+			return fmt.Errorf("tau[%d]: %w", i, err)
+		}
+		if v == 0 {
+			return fmt.Errorf("tau[%d] is 0: %w", i, ErrZeroInternalDelay)
+		}
+	}
+	return nil
+}
+
 // validateDelayValue requires a finite non-negative delay, as MATLAB's delay
 // properties do, that is an integer sample count for discrete models.
 func validateDelayValue(v, dt float64) error {
-	if v < 0 {
-		return ErrNegativeDelay
-	}
 	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return fmt.Errorf("delay %g must be finite: %w", v, ErrInvalidArgument)
 	}
+	if v < 0 {
+		return fmt.Errorf("delay %g: %w", v, ErrNegativeDelay)
+	}
 	if dt > 0 && math.Round(v) != v {
-		return ErrFractionalDelay
+		return fmt.Errorf("delay %g: %w", v, ErrFractionalDelay)
 	}
 	return nil
 }
@@ -227,24 +245,77 @@ func (tf *TransferFunc) HasDelay() bool {
 	return false
 }
 
+// AbsorbScope selects which delays AbsorbDelay absorbs, as the scope
+// argument of MATLAB absorbDelay.
 type AbsorbScope string
 
+// AbsorbDelay scopes. AbsorbAll is the default and absorbs every delay.
 const (
 	AbsorbInput    AbsorbScope = "input"
 	AbsorbOutput   AbsorbScope = "output"
 	AbsorbIO       AbsorbScope = "io"
 	AbsorbInternal AbsorbScope = "internal"
 	AbsorbAll      AbsorbScope = "all"
-
-	DefaultPadeOrder = 5
 )
 
-func (sys *System) AbsorbDelay(scopes ...AbsorbScope) (*System, error) {
-	scope := AbsorbAll
-	if len(scopes) > 0 {
-		scope = scopes[0]
-	}
+// DefaultPadeOrder is the Padé order AbsorbDelay uses for continuous delays.
+const DefaultPadeOrder = 5
 
+// AbsorbDelay replaces the delays selected by scopes with model dynamics, as
+// MATLAB absorbDelay(sys,scope)
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.absorbdelay.html).
+// With no scopes every delay is absorbed; several scopes absorb their union,
+// like a MATLAB scope array. Unselected delays are kept.
+//
+// A discrete delay of k samples becomes k states at z = 0, exactly. A
+// continuous delay has no finite-dimensional representation, so it is
+// replaced by its Padé approximation of order DefaultPadeOrder; use Pade to
+// choose the order. An unknown scope returns ErrInvalidArgument.
+func (sys *System) AbsorbDelay(scopes ...AbsorbScope) (*System, error) {
+	if err := requireSystem("AbsorbDelay", sys); err != nil {
+		return nil, err
+	}
+	set, err := absorbScopeSet(scopes)
+	if err != nil {
+		return nil, err
+	}
+	cur := sys
+	for _, scope := range set {
+		if cur, err = absorbDelayScope(cur, scope); err != nil {
+			return nil, fmt.Errorf("AbsorbDelay: %w", err)
+		}
+	}
+	return cur, nil
+}
+
+// absorbScopeSet validates scopes and orders their union as AbsorbAll does:
+// internal, I/O, input, output.
+func absorbScopeSet(scopes []AbsorbScope) ([]AbsorbScope, error) {
+	order := []AbsorbScope{AbsorbInternal, AbsorbIO, AbsorbInput, AbsorbOutput}
+	want := make(map[AbsorbScope]bool, len(scopes))
+	for _, s := range scopes {
+		switch s {
+		case AbsorbAll:
+			return []AbsorbScope{AbsorbAll}, nil
+		case AbsorbInput, AbsorbOutput, AbsorbIO, AbsorbInternal:
+			want[s] = true
+		default:
+			return nil, fmt.Errorf("AbsorbDelay: unknown scope %q: %w", s, ErrInvalidArgument)
+		}
+	}
+	if len(want) == 0 {
+		return []AbsorbScope{AbsorbAll}, nil
+	}
+	set := make([]AbsorbScope, 0, len(want))
+	for _, s := range order {
+		if want[s] {
+			set = append(set, s)
+		}
+	}
+	return set, nil
+}
+
+func absorbDelayScope(sys *System, scope AbsorbScope) (*System, error) {
 	pending := sys.HasDelay()
 	if scope == AbsorbInternal {
 		pending = sys.HasInternalDelay()
@@ -347,7 +418,10 @@ func absorbInternalDiscreteDelay(sys *System) (*System, error) {
 	internal.Delay = nil
 	internal.InputDelay = nil
 	internal.OutputDelay = nil
-	H, tau := internal.GetDelayModel()
+	H, tau, err := internal.GetDelayModel()
+	if err != nil {
+		return nil, err
+	}
 	n, mN, pN := H.Dims()
 	N := len(tau)
 	m := mN - N
@@ -1513,42 +1587,24 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 	return res, nil
 }
 
-func (sys *System) GetDelayModel() (H *System, tau []float64) {
-	if !sys.HasDelay() && !sys.HasInternalDelay() {
-		return sys.Copy(), nil
+// GetDelayModel returns the delay-free model H and internal delays tau of sys,
+// as MATLAB [H,tau] = getDelayModel(sys)
+// (https://www.mathworks.com/help/control/ref/getdelaymodel.html). Input,
+// output and I/O delays are first pulled into internal delays. The last
+// len(tau) inputs and outputs of H are the delay channels: sys is the LFT of H
+// closed by exp(-s·tau) (z^-tau for discrete models). A model without delays
+// returns a copy of sys and an empty tau.
+func (sys *System) GetDelayModel() (H *System, tau []float64, err error) {
+	if err := requireSystem("GetDelayModel", sys); err != nil {
+		return nil, nil, err
+	}
+	if !sys.HasDelay() {
+		return sys.Copy(), []float64{}, nil
 	}
 
-	// Pull all delays into LFT
 	lft, err := sys.PullDelaysToLFT()
 	if err != nil {
-		// If PullDelaysToLFT fails (e.g. non-decomposable residual),
-		// we fallback to just extracting InternalDelay if it exists,
-		// or return the original system.
-		if sys.LFT == nil {
-			return sys.Copy(), nil
-		}
-		n, m, p := sys.Dims()
-		N := len(sys.LFT.Tau)
-		tau = make([]float64, N)
-		copy(tau, sys.LFT.Tau)
-
-		H = &System{
-			A:  denseCopy(sys.A),
-			B:  newDense(n, m+N),
-			C:  newDense(p+N, n),
-			D:  newDense(p+N, m+N),
-			E:  copyDescriptorE(sys.E),
-			Dt: sys.Dt,
-		}
-		setBlock(H.B, 0, 0, sys.B)
-		setBlock(H.B, 0, m, sys.LFT.B2)
-		setBlock(H.C, 0, 0, sys.C)
-		setBlock(H.C, p, 0, sys.LFT.C2)
-		setBlock(H.D, 0, 0, sys.D)
-		setBlock(H.D, 0, m, sys.LFT.D12)
-		setBlock(H.D, p, 0, sys.LFT.D21)
-		setBlock(H.D, p, m, sys.LFT.D22)
-		return H, tau
+		return nil, nil, fmt.Errorf("GetDelayModel: %w", err)
 	}
 
 	// Get augmented model H from LFT structure
@@ -1562,7 +1618,7 @@ func (sys *System) GetDelayModel() (H *System, tau []float64) {
 		B:  newDense(n, m+N),
 		C:  newDense(p+N, n),
 		D:  newDense(p+N, m+N),
-		E:  lft.E,
+		E:  copyDescriptorE(lft.E),
 		Dt: lft.Dt,
 	}
 	if n > 0 {
@@ -1576,27 +1632,31 @@ func (sys *System) GetDelayModel() (H *System, tau []float64) {
 	setBlock(H.D, p, 0, lft.LFT.D21)
 	setBlock(H.D, p, m, lft.LFT.D22)
 
-	return H, tau
+	return H, tau, nil
 }
 
+// SetDelayModel builds a model with internal delays tau from the delay-free
+// model H partitioned as in GetDelayModel, the inverse of GetDelayModel;
+// it mirrors MATLAB setDelayModel(H,tau)
+// (https://www.mathworks.com/help/control/ref/setdelaymodel.html). The last
+// len(tau) inputs and outputs of H are the delay channels. Each tau must be
+// finite and positive, and an integer number of samples for a discrete H. An
+// empty tau returns a copy of H.
 func SetDelayModel(H *System, tau []float64) (*System, error) {
+	if err := requireSystem("SetDelayModel", H); err != nil {
+		return nil, err
+	}
 	N := len(tau)
 	if N == 0 {
 		return H.Copy(), nil
 	}
-
-	for _, v := range tau {
-		if v < 0 {
-			return nil, ErrNegativeDelay
-		}
-		if v == 0 {
-			return nil, ErrZeroInternalDelay
-		}
+	if err := validateInternalTau(tau, H.Dt); err != nil {
+		return nil, fmt.Errorf("SetDelayModel: %w", err)
 	}
 
 	n, mN, pN := H.Dims()
 	if mN < N || pN < N {
-		return nil, fmt.Errorf("H dimensions %d×%d too small for %d internal delays: %w",
+		return nil, fmt.Errorf("SetDelayModel: H is %d×%d, too small for %d internal delays: %w",
 			pN, mN, N, ErrDimensionMismatch)
 	}
 	m := mN - N
@@ -2052,8 +2112,14 @@ func isZeroGainChannel(sys *System, j, n, m, p, N int) bool {
 	return true
 }
 
+// ZeroDelayApprox returns sys with every internal delay set to zero, closing
+// the delay loops algebraically. A model without internal delays is returned
+// as a copy. An ill-posed loop (I-D22 singular) returns ErrAlgebraicLoop.
 func (sys *System) ZeroDelayApprox() (*System, error) {
-	if sys.LFT == nil {
+	if err := requireSystem("ZeroDelayApprox", sys); err != nil {
+		return nil, err
+	}
+	if sys.internalDelayCount() == 0 {
 		return sys.Copy(), nil
 	}
 

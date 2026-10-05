@@ -253,32 +253,28 @@ func convertSliceDelayToContinuous(delay []float64, dt float64) []float64 {
 func absorbFractionalDelays(disc *System, contInputDelay, contOutputDelay []float64, dt float64, thiranOrder int) (*System, error) {
 	_, m, p := disc.Dims()
 
-	if contInputDelay != nil {
-		bank, err := buildContinuousDelayBank(contInputDelay, m, dt, thiranOrder)
+	if samples := continuousToSampleDelay(contInputDelay, dt); hasFractionalSampleDelay(samples) {
+		bank, err := buildDiscreteSampleDelayBank(samples, m, dt, thiranOrder)
 		if err != nil {
 			return nil, err
 		}
-		if bank != nil {
-			disc, err = Series(bank, disc)
-			if err != nil {
-				return nil, err
-			}
-			disc.InputDelay = nil
+		disc, err = Series(bank, disc)
+		if err != nil {
+			return nil, err
 		}
+		disc.InputDelay = nil
 	}
 
-	if contOutputDelay != nil {
-		bank, err := buildContinuousDelayBank(contOutputDelay, p, dt, thiranOrder)
+	if samples := continuousToSampleDelay(contOutputDelay, dt); hasFractionalSampleDelay(samples) {
+		bank, err := buildDiscreteSampleDelayBank(samples, p, dt, thiranOrder)
 		if err != nil {
 			return nil, err
 		}
-		if bank != nil {
-			disc, err = Series(disc, bank)
-			if err != nil {
-				return nil, err
-			}
-			disc.OutputDelay = nil
+		disc, err = Series(disc, bank)
+		if err != nil {
+			return nil, err
 		}
+		disc.OutputDelay = nil
 	}
 
 	return disc, nil

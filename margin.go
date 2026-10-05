@@ -556,9 +556,10 @@ func DiskMargin(sys *System) (*DiskMarginResult, error) {
 // closed-loop stability comes from a Nyquist encirclement count of 1+L on a
 // delay-aware adaptive frequency grid, and the peaks from the exact frequency
 // response; see delayLoop.nyquist for the resolution limits. Loops whose
-// internal delays form a feedback cycle, whose high-frequency gain may reach
-// 1 (neutral type), or whose delay grid would exceed 2^21 points return
-// ErrContinuousInternalDelay. Descriptor loops return
+// internal delays form a feedback cycle return ErrContinuousInternalDelay;
+// loops whose high-frequency gain may reach 1 (neutral type), whose delay grid
+// would exceed 2^21 points, or whose encirclement count does not resolve
+// return ErrDelayUnsupported. Descriptor loops return
 // ErrDescriptorUnsupported, as HinfNorm does.
 func DiskMarginSkew(sys *System, sigma float64) (*DiskMarginResult, error) {
 	if math.IsNaN(sigma) || math.IsInf(sigma, 0) {
@@ -631,8 +632,8 @@ func diskMarginDelayed(sys *System, sigma, shift float64) (*DiskMarginResult, er
 }
 
 func diskMarginDelayError(err error) error {
-	if errors.Is(err, errDelayLoopUnsupported) {
-		return fmt.Errorf("DiskMargin: %v: %w", err, ErrContinuousInternalDelay)
+	if errors.Is(err, errDelayLoopUnsupported) || errors.Is(err, ErrContinuousInternalDelay) {
+		return fmt.Errorf("DiskMargin: %w", err)
 	}
 	return err
 }
