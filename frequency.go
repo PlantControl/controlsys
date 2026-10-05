@@ -149,10 +149,12 @@ func (sys *System) FreqResponsePointwise(omega []float64) (*FreqResponseMatrix, 
 	return e.responsePointwise(omega)
 }
 
+// Bode returns the magnitude (dB) and phase (deg) of sys at omega. A nil
+// omega evaluates on DefaultFrequencyGrid(nPoints).
 func (sys *System) Bode(omega []float64, nPoints int) (*BodeResult, error) {
 	if omega == nil {
 		var err2 error
-		omega, err2 = autoBodeFreqs(sys, nPoints)
+		omega, err2 = sys.DefaultFrequencyGrid(nPoints)
 		if err2 != nil {
 			return nil, err2
 		}
@@ -367,13 +369,25 @@ func (e frequencyEvaluator) matrix(data []complex128, omega []float64) *FreqResp
 	return newFreqResponseMatrix(data, omega, e.p, e.m, e.sys.InputName, e.sys.OutputName)
 }
 
-// autoBodeFreqs returns the default grid of Bode, Sigma, Nichols, Bandwidth
-// and TunePID: nPoints log-spaced frequencies over the range spanned by the
-// poles, zeros and delays of sys (see autoFreqRange), ending exactly at the
-// Nyquist frequency π/Dt for discrete models. Like MATLAB bode, the range
-// follows the system dynamics and stops at the Nyquist frequency; see
+// DefaultFrequencyGrid returns the frequency grid (rad per time unit) that
+// Bode, Sigma and Nichols evaluate on when omega is nil, without evaluating
+// the response. nPoints <= 0 selects 200 points. The points are
+// log-spaced from one decade below the smallest to one decade above the
+// largest natural frequency among the poles, zeros and delay corners 1/τ of
+// sys; poles and zeros at s=0, z=1 or z=0 carry no feature, and without
+// features the range is [0.01, 100]. For discrete models the grid ends exactly
+// at the Nyquist frequency π/Dt and starts at least two decades below it. A
+// single point (nPoints == 1) is the lower end of the range. Each call returns
+// a fresh slice.
+//
+// MATLAB has no standalone equivalent; the grid plays the role of the wout
+// output of [mag,phase,wout] = bode(sys), whose range likewise follows the
+// system dynamics and stops at the Nyquist frequency; see
 // https://www.mathworks.com/help/control/ref/dynamicsystem.bode.html.
-func autoBodeFreqs(sys *System, nPoints int) ([]float64, error) {
+func (sys *System) DefaultFrequencyGrid(nPoints int) ([]float64, error) {
+	if err := sys.Validate(); err != nil {
+		return nil, fmt.Errorf("DefaultFrequencyGrid: %w", err)
+	}
 	if nPoints <= 0 {
 		nPoints = 200
 	}
@@ -772,6 +786,8 @@ func (r *NicholsResult) PhaseAt(freq, output, input int) float64 {
 	return newSampledScalarResponse(r.phase, r.Omega, r.p, r.m).at(freq, output, input)
 }
 
+// Nichols returns the open-loop gain (dB) and phase (deg) of sys at omega.
+// A nil omega evaluates on DefaultFrequencyGrid(nPoints).
 func (sys *System) Nichols(omega []float64, nPoints int) (*NicholsResult, error) {
 	bode, err := sys.Bode(omega, nPoints)
 	if err != nil {
@@ -824,10 +840,12 @@ func (r *SigmaResult) NSV() int {
 	return r.nSV
 }
 
+// Sigma returns the singular values of the frequency response of sys at
+// omega. A nil omega evaluates on DefaultFrequencyGrid(nPoints).
 func (sys *System) Sigma(omega []float64, nPoints int) (*SigmaResult, error) {
 	if omega == nil {
 		var err error
-		omega, err = autoBodeFreqs(sys, nPoints)
+		omega, err = sys.DefaultFrequencyGrid(nPoints)
 		if err != nil {
 			return nil, err
 		}

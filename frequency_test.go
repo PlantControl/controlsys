@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -1439,5 +1440,144 @@ func TestAutoBodeFreqs_GridCoversDynamics(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDefaultFrequencyGrid(t *testing.T) {
+	mimo, err := New(
+		mat.NewDense(3, 3, []float64{-1, 2, 0, -0.5, -3, 1, 0.2, 0, -10}),
+		mat.NewDense(3, 2, []float64{1, 0, 0, 1, 1, 1}),
+		mat.NewDense(2, 3, []float64{1, 0, 1, 0, 1, -1}),
+		mat.NewDense(2, 2, []float64{0.1, 0, 0.2, 0.3}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lag, err := NewWithDelay(
+		mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(1, 1, []float64{0.1}), 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dmimo, err := New(
+		mat.NewDense(2, 2, []float64{0.5, 0.2, -0.1, 0.8}),
+		mat.NewDense(2, 2, []float64{1, 0, 0.5, 1}),
+		mat.NewDense(2, 2, []float64{1, 1, 0, 1}),
+		mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2}),
+		0.1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dInternal, err := New(
+		mat.NewDense(1, 1, []float64{0.5}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0.1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dInternal.SetInternalDelay([]float64{2},
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0.5}), mat.NewDense(1, 1, []float64{0.3}),
+		mat.NewDense(1, 1, []float64{0})); err != nil {
+		t.Fatal(err)
+	}
+	pureDelay, err := New(
+		mat.NewDense(2, 2, []float64{0, 1, 0, 0}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, []float64{0}), 0.1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gain, err := NewGain(mat.NewDense(2, 1, []float64{2, -1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name       string
+		sys        *System
+		wMin, wMax float64
+	}{
+		{"continuous MIMO", mimo, math.NaN(), math.NaN()},
+		{"continuous IO delay", lag, 0.1, 100},
+		{"discrete MIMO", dmimo, math.NaN(), math.Pi / 0.1},
+		{"discrete internal delay", dInternal, math.Pi / 0.1 / 100, math.Pi / 0.1},
+		{"discrete poles at z=0", pureDelay, 0.01, math.Pi / 0.1},
+		{"static gain", gain, 0.01, 100},
+	}
+	for _, tc := range cases {
+		for _, n := range []int{0, 1, 7, 200} {
+			omega, err := tc.sys.DefaultFrequencyGrid(n)
+			if err != nil {
+				t.Fatalf("%s n=%d: %v", tc.name, n, err)
+			}
+			want := n
+			if n <= 0 {
+				want = 200
+			}
+			if len(omega) != want {
+				t.Fatalf("%s n=%d: len %d, want %d", tc.name, n, len(omega), want)
+			}
+			for k := 1; k < len(omega); k++ {
+				if !(omega[k] > omega[k-1]) {
+					t.Fatalf("%s n=%d: not increasing at %d", tc.name, n, k)
+				}
+			}
+			if !math.IsNaN(tc.wMin) && math.Abs(omega[0]-tc.wMin) > 1e-12*tc.wMin {
+				t.Errorf("%s n=%d: first %v, want %v", tc.name, n, omega[0], tc.wMin)
+			}
+			if n != 1 && !math.IsNaN(tc.wMax) {
+				last := omega[len(omega)-1]
+				if tc.sys.IsDiscrete() && last != tc.wMax {
+					t.Errorf("%s n=%d: last %v, want exactly %v", tc.name, n, last, tc.wMax)
+				} else if math.Abs(last-tc.wMax) > 1e-12*tc.wMax {
+					t.Errorf("%s n=%d: last %v, want %v", tc.name, n, last, tc.wMax)
+				}
+			}
+
+			bode, err := tc.sys.Bode(nil, n)
+			if err != nil {
+				t.Fatalf("%s n=%d Bode: %v", tc.name, n, err)
+			}
+			sigma, err := tc.sys.Sigma(nil, n)
+			if err != nil {
+				t.Fatalf("%s n=%d Sigma: %v", tc.name, n, err)
+			}
+			nichols, err := tc.sys.Nichols(nil, n)
+			if err != nil {
+				t.Fatalf("%s n=%d Nichols: %v", tc.name, n, err)
+			}
+			for name, got := range map[string][]float64{"Bode": bode.Omega, "Sigma": sigma.Omega, "Nichols": nichols.Omega} {
+				if len(got) != len(omega) {
+					t.Fatalf("%s n=%d %s: len %d, want %d", tc.name, n, name, len(got), len(omega))
+				}
+				for k := range omega {
+					if got[k] != omega[k] {
+						t.Fatalf("%s n=%d %s: omega[%d]=%v, grid %v", tc.name, n, name, k, got[k], omega[k])
+					}
+				}
+			}
+		}
+	}
+
+	a, _ := lag.DefaultFrequencyGrid(5)
+	a[0] = -1
+	b, _ := lag.DefaultFrequencyGrid(5)
+	if b[0] == -1 {
+		t.Error("DefaultFrequencyGrid returned a shared slice")
+	}
+}
+
+func TestDefaultFrequencyGridInvalid(t *testing.T) {
+	var nilSys *System
+	if _, err := nilSys.DefaultFrequencyGrid(10); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("nil system: err = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := nilSys.Bode(nil, 10); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("nil system Bode: err = %v, want ErrDimensionMismatch", err)
 	}
 }

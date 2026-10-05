@@ -152,6 +152,7 @@ func main() {
 | `Nyquist` | Nyquist plot with encirclement counting |
 | `Nichols` | Nichols chart (magnitude vs phase) |
 | `Sigma` | Singular value frequency response |
+| `DefaultFrequencyGrid` | Automatic grid `Bode`/`Sigma`/`Nichols` use when `omega` is nil, without evaluating the response |
 | `EvalFr` | Evaluate at arbitrary complex s |
 
 ### FRD Workflows
