@@ -21,38 +21,38 @@ type riccatiProblem struct {
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
 	na, nac := A.Dims()
 	if na != nac {
-		return riccatiProblem{}, ErrDimensionMismatch
+		return riccatiProblem{}, fmt.Errorf("A is %d×%d, want square: %w", na, nac, ErrDimensionMismatch)
 	}
 	nb, m := B.Dims()
 	if nb != na {
-		return riccatiProblem{}, ErrDimensionMismatch
+		return riccatiProblem{}, fmt.Errorf("B has %d rows, want %d: %w", nb, na, ErrDimensionMismatch)
 	}
 	qr, qc := Q.Dims()
 	if qr != na || qc != na {
-		return riccatiProblem{}, ErrDimensionMismatch
+		return riccatiProblem{}, fmt.Errorf("Q is %d×%d, want %d×%d: %w", qr, qc, na, na, ErrDimensionMismatch)
 	}
 	rr, rc := R.Dims()
 	if rr != m || rc != m {
-		return riccatiProblem{}, ErrDimensionMismatch
+		return riccatiProblem{}, fmt.Errorf("R is %d×%d, want %d×%d: %w", rr, rc, m, m, ErrDimensionMismatch)
 	}
 	if na == 0 {
-		return riccatiProblem{}, fmt.Errorf("controlsys: Riccati problem has no states: %w", ErrDimensionMismatch)
+		return riccatiProblem{}, fmt.Errorf("Riccati problem has no states: %w", ErrDimensionMismatch)
 	}
 	if !isSymmetric(Q, eps()*denseNorm(Q)) {
-		return riccatiProblem{}, ErrNotSymmetric
+		return riccatiProblem{}, fmt.Errorf("Q: %w", ErrNotSymmetric)
 	}
 	if !isSymmetric(R, eps()*denseNorm(R)) {
-		return riccatiProblem{}, ErrNotSymmetric
+		return riccatiProblem{}, fmt.Errorf("R: %w", ErrNotSymmetric)
 	}
 	if !isPSD(Q) {
-		return riccatiProblem{}, ErrNotPSD
+		return riccatiProblem{}, fmt.Errorf("Q: %w", ErrNotPSD)
 	}
 
 	var S *mat.Dense
 	if opts != nil && opts.S != nil {
 		sr, sc := opts.S.Dims()
 		if sr != na || sc != m {
-			return riccatiProblem{}, ErrDimensionMismatch
+			return riccatiProblem{}, fmt.Errorf("S is %d×%d, want %d×%d: %w", sr, sc, na, m, ErrDimensionMismatch)
 		}
 		S = opts.S
 	}
@@ -78,7 +78,7 @@ func riccatiDescriptor(opts *RiccatiOpts, n int) (*mat.Dense, error) {
 		return nil, nil
 	}
 	if er, ec := opts.E.Dims(); er != n || ec != n {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("E is %d×%d, want %d×%d: %w", er, ec, n, n, ErrDimensionMismatch)
 	}
 	if isIdentityDescriptor(opts.E) {
 		return nil, nil
@@ -86,7 +86,7 @@ func riccatiDescriptor(opts *RiccatiOpts, n int) (*mat.Dense, error) {
 	var lu mat.LU
 	lu.Factorize(opts.E)
 	if luNearSingular(&lu) {
-		return nil, ErrDescriptorSingular
+		return nil, fmt.Errorf("E: %w", ErrDescriptorSingular)
 	}
 	return opts.E, nil
 }
@@ -101,17 +101,17 @@ type lyapunovProblem struct {
 func newLyapunovProblem(A, Q *mat.Dense, opts *LyapunovOpts) (lyapunovProblem, error) {
 	n, nc := A.Dims()
 	if n != nc {
-		return lyapunovProblem{}, ErrDimensionMismatch
+		return lyapunovProblem{}, fmt.Errorf("A is %d×%d, want square: %w", n, nc, ErrDimensionMismatch)
 	}
 	qr, qc := Q.Dims()
 	if qr != n || qc != n {
-		return lyapunovProblem{}, ErrDimensionMismatch
+		return lyapunovProblem{}, fmt.Errorf("Q is %d×%d, want %d×%d: %w", qr, qc, n, n, ErrDimensionMismatch)
 	}
 	if n == 0 {
 		return lyapunovProblem{A: A, Q: Q, n: n}, nil
 	}
 	if !isSymmetric(Q, eps()*denseNorm(Q)) {
-		return lyapunovProblem{}, ErrNotSymmetric
+		return lyapunovProblem{}, fmt.Errorf("Q: %w", ErrNotSymmetric)
 	}
 
 	var ws *LyapunovWorkspace

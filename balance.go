@@ -219,7 +219,6 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	tGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: tData}
 	tiGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: tinvData}
 
-	// Ab = Tinv * A * T
 	tmp := alloc(n * n)
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, tiGen,
 		blas64.General{Rows: n, Cols: n, Stride: aRaw.Stride, Data: aRaw.Data},
@@ -230,13 +229,11 @@ func Balreal(sys *System) (*BalrealResult, error) {
 		tGen,
 		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: abData})
 
-	// Bb = Tinv * B
 	bbData := alloc(n * m)
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, tiGen,
 		blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
 		0, blas64.General{Rows: n, Cols: m, Stride: m, Data: bbData})
 
-	// Cb = C * T
 	cbData := alloc(p * n)
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
 		blas64.General{Rows: p, Cols: n, Stride: cRaw.Stride, Data: cRaw.Data},
@@ -285,7 +282,7 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 	for i := order; i < n; i++ {
 		elim = append(elim, i)
 	}
-	red, err := Modred(br.Sys, elim, opts.StateProjection)
+	red, err := modred(br.Sys, elim, opts.StateProjection)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Balred: %w", err)
 	}
@@ -308,11 +305,19 @@ func Modred(sys *System, elim []int, method StateProjection) (*System, error) {
 	if err := method.validate("Modred"); err != nil {
 		return nil, err
 	}
+	red, err := modred(sys, elim, method)
+	if err != nil {
+		return nil, fmt.Errorf("Modred: %w", err)
+	}
+	return red, nil
+}
+
+func modred(sys *System, elim []int, method StateProjection) (*System, error) {
 	policy := newRealizationTransformPolicy(sys)
-	if err := policy.requireStandard("Modred"); err != nil {
+	if err := policy.requireStandard("descriptor"); err != nil {
 		return nil, err
 	}
-	if err := policy.requireDelayFree("Modred"); err != nil {
+	if err := policy.requireDelayFree("delay"); err != nil {
 		return nil, err
 	}
 	n, m, p := policy.n, policy.m, policy.p
@@ -320,18 +325,18 @@ func Modred(sys *System, elim []int, method StateProjection) (*System, error) {
 		return policy.zeroOrderCopy(), nil
 	}
 	if m == 0 || p == 0 {
-		return withZeroIOPadding("Modred", sys, func(padded *System) (*System, error) {
-			return Modred(padded, elim, method)
+		return withZeroIOPadding("reduced model", sys, func(padded *System) (*System, error) {
+			return modred(padded, elim, method)
 		})
 	}
 
 	elimSet := make(map[int]bool, len(elim))
 	for _, idx := range elim {
 		if idx < 0 || idx >= n {
-			return nil, fmt.Errorf("Modred: state index %d outside [0,%d): %w", idx, n, ErrInvalidArgument)
+			return nil, fmt.Errorf("state index %d outside [0,%d): %w", idx, n, ErrInvalidArgument)
 		}
 		if elimSet[idx] {
-			return nil, fmt.Errorf("Modred: duplicate state index %d: %w", idx, ErrInvalidArgument)
+			return nil, fmt.Errorf("duplicate state index %d: %w", idx, ErrInvalidArgument)
 		}
 		elimSet[idx] = true
 	}
@@ -417,7 +422,7 @@ func Modred(sys *System, elim []int, method StateProjection) (*System, error) {
 
 	red, err := singularPerturbation(Ap, Bp, Cp, sys.D, A11, B1, C1, n, m, p, r, sys.Dt)
 	if err != nil {
-		return nil, fmt.Errorf("Modred: %w", err)
+		return nil, err
 	}
 	propagateIONames(red, sys)
 	return red, nil
@@ -522,11 +527,11 @@ func residualizedGain(sys *System) (*mat.Dense, error) {
 	var lu mat.LU
 	lu.Factorize(M)
 	if lu.Det() == 0 {
-		return nil, fmt.Errorf("Modred: %w", ErrSingularA22)
+		return nil, ErrSingularA22
 	}
 	var x mat.Dense
 	if err := lu.SolveTo(&x, false, sys.B); err != nil {
-		return nil, fmt.Errorf("Modred: %w", ErrSingularA22)
+		return nil, ErrSingularA22
 	}
 	g := mat.NewDense(p, m, nil)
 	g.Mul(sys.C, &x)

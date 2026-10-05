@@ -783,33 +783,33 @@ func emptyIOOps() []emptyIOOp {
 		{"SpectralFactor", func(s *System) (any, error) { return SpectralFactor(s) }},
 		{"Discretize", func(s *System) (any, error) {
 			if s.IsDiscrete() {
-				return s.Undiscretize()
+				return s.D2C(D2COptions{Method: C2DMethodTustin})
 			}
-			return s.Discretize(0.1)
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 		}},
 		{"DiscretizeFOH", func(s *System) (any, error) {
 			if s.IsDiscrete() {
-				return s.D2D(0.2, C2DOptions{})
+				return s.D2D(0.2, D2DOptions{})
 			}
-			return s.DiscretizeFOH(0.1)
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodFOH})
 		}},
 		{"DiscretizeTustin", func(s *System) (any, error) {
 			if s.IsDiscrete() {
-				return s.D2C(C2DMethodTustin)
+				return s.D2C(D2COptions{Method: C2DMethodTustin})
 			}
-			return s.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin})
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 		}},
 		{"DiscretizeImpulse", func(s *System) (any, error) {
 			if s.IsDiscrete() {
 				return nil, nil
 			}
-			return s.DiscretizeImpulse(0.1)
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodImpulse})
 		}},
 		{"DiscretizeMatched", func(s *System) (any, error) {
 			if s.IsDiscrete() {
 				return nil, nil
 			}
-			return s.DiscretizeMatched(0.1)
+			return s.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
 		}},
 		{"String", func(s *System) (any, error) { return s.String(), nil }},
 		{"Isproper", func(s *System) (any, error) { return s.Isproper(), nil }},
@@ -872,8 +872,8 @@ func emptyIOOps() []emptyIOOp {
 		{"MinimalLFT", func(s *System) (any, error) { return s.MinimalLFT() }},
 		{"ZeroDelayApprox", func(s *System) (any, error) { return s.ZeroDelayApprox() }},
 		{"PullDelaysToLFT", func(s *System) (any, error) { return s.PullDelaysToLFT() }},
-		{"TotalDelay", func(s *System) (any, error) { return s.TotalDelay(), nil }},
-		{"Pidtune", func(s *System) (any, error) { return Pidtune(s, PidtunePI) }},
+		{"TotalDelay", func(s *System) (any, error) { return s.TotalDelay() }},
+		{"Pidtune", func(s *System) (any, error) { return Pidtune(s, PidtunePI, 0, nil) }},
 		{"LFT", func(s *System) (any, error) { return LFT(s, s.Copy(), 0, 0) }},
 		{"ModelArray", func(s *System) (any, error) { return NewModelArray([]int{1}, []*System{s}) }},
 		{"Kalman", func(s *System) (any, error) {
@@ -1361,9 +1361,9 @@ func TestDescriptorWithoutDynamicStatesKeepsIODims(t *testing.T) {
 				t.Fatal(err)
 			}
 			tag := fmt.Sprintf("dt=%g m=%d p=%d", dt, m, p)
-			convert := func() (*System, error) { return sys.Undiscretize() }
+			convert := func() (*System, error) { return sys.D2C(D2COptions{Method: C2DMethodTustin}) }
 			if dt == 0 {
-				convert = func() (*System, error) { return sys.Discretize(0.1) }
+				convert = func() (*System, error) { return sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin}) }
 			}
 			if _, err := convert(); !errors.Is(err, ErrDimensionMismatch) {
 				t.Errorf("%s convert: err = %v, want ErrDimensionMismatch", tag, err)

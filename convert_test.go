@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -26,7 +27,7 @@ func TestDiscretize_WrongDomain(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0.1,
 	)
-	_, err := sys.Discretize(0.1)
+	_, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err == nil {
 		t.Fatal("expected ErrWrongDomain")
 	}
@@ -36,7 +37,7 @@ func TestDiscretize_Roundtrip(t *testing.T) {
 	orig := makeTestSystem()
 	dt := 0.01
 
-	disc, err := orig.Discretize(dt)
+	disc, err := orig.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +48,7 @@ func TestDiscretize_Roundtrip(t *testing.T) {
 		t.Fatalf("Dt = %v, want %v", disc.Dt, dt)
 	}
 
-	rec, err := disc.Undiscretize()
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +75,7 @@ func TestDiscretize_EigenvalueMapping(t *testing.T) {
 		}
 	}
 
-	disc, err := sys.Discretize(0.01)
+	disc, err := sys.C2D(0.01, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestDiscretize_SingularTransform(t *testing.T) {
 	D := mat.NewDense(1, 1, []float64{0})
 	sys, _ := New(A, B, C, D, 0)
 
-	_, err := sys.Discretize(dt)
+	_, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err == nil {
 		t.Fatal("expected ErrSingularTransform")
 	}
@@ -114,7 +115,7 @@ func TestDiscretize_N0_GainOnly(t *testing.T) {
 		Dt: 0,
 	}
 
-	disc, err := sys.Discretize(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestDiscretize_N_GT0_M0(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{-1, 0, 0, -2})
 	sys, _ := New(A, nil, nil, nil, 0)
 
-	disc, err := sys.Discretize(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +142,7 @@ func TestDiscretize_N_GT0_M0(t *testing.T) {
 		t.Fatalf("expected n=2 m=0, got n=%d m=%d", n, m)
 	}
 
-	rec, err := disc.Undiscretize()
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func TestDiscretize_N_GT0_M0(t *testing.T) {
 
 func TestUndiscretize_WrongDomain(t *testing.T) {
 	sys := makeTestSystem()
-	_, err := sys.Undiscretize()
+	_, err := sys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err == nil {
 		t.Fatal("expected ErrWrongDomain")
 	}
@@ -163,7 +164,7 @@ func TestUndiscretize_SingularTransform(t *testing.T) {
 	D := mat.NewDense(1, 1, []float64{0})
 	sys, _ := New(A, B, C, D, 0.1)
 
-	_, err := sys.Undiscretize()
+	_, err := sys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err == nil {
 		t.Fatal("expected ErrSingularTransform for eigenvalue at -1")
 	}
@@ -177,7 +178,7 @@ func TestZOH_WrongDomain(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0.1,
 	)
-	_, err := sys.DiscretizeZOH(0.1)
+	_, err := sys.C2D(0.1, C2DOptions{})
 	if err == nil {
 		t.Fatal("expected ErrWrongDomain")
 	}
@@ -193,7 +194,7 @@ func TestZOH_N0_GainOnly(t *testing.T) {
 		Dt: 0,
 	}
 
-	disc, err := sys.DiscretizeZOH(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +212,7 @@ func TestZOH_ScalarAnalytical(t *testing.T) {
 	D := mat.NewDense(1, 1, []float64{0})
 	sys, _ := New(A, B, C, D, 0)
 
-	disc, err := sys.DiscretizeZOH(dt)
+	disc, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +237,7 @@ func TestZOH_StabilityPreserved(t *testing.T) {
 		t.Fatal("continuous system should be stable")
 	}
 
-	disc, err := sys.DiscretizeZOH(0.01)
+	disc, err := sys.C2D(0.01, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +268,7 @@ func TestZOH_2x2(t *testing.T) {
 	sys, _ := New(A, B, C, D, 0)
 
 	dt := 0.1
-	disc, err := sys.DiscretizeZOH(dt)
+	disc, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +294,7 @@ func TestDiscretizeWithOpts_ZOH_IntegerInputDelay(t *testing.T) {
 	sys.InputDelay = []float64{0.3}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +317,7 @@ func TestDiscretizeWithOpts_Tustin_IntegerOutputDelay(t *testing.T) {
 	sys.OutputDelay = []float64{0.5}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +336,7 @@ func TestDiscretizeWithOpts_FractionalInputDelay_ExactZOH(t *testing.T) {
 	)
 	sys.InputDelay = []float64{0.35}
 
-	disc, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,7 +356,7 @@ func TestDiscretizeWithOpts_FractionalInputDelay_WithThiran(t *testing.T) {
 	sys.InputDelay = []float64{0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +383,7 @@ func TestDiscretizeWithOpts_FractionalOutputDelay_WithThiran(t *testing.T) {
 	sys.OutputDelay = []float64{0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +407,7 @@ func TestDiscretizeWithOpts_MIMO_FractionalInputDelay_WithThiran(t *testing.T) {
 	sys.InputDelay = []float64{0.35, 0.2}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +431,7 @@ func TestDiscretizeWithOpts_MixedIntegerFractionalInputDelay(t *testing.T) {
 	sys.InputDelay = []float64{0.3, 0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +450,7 @@ func TestDiscretizeWithOpts_DefaultMethod(t *testing.T) {
 		0,
 	)
 
-	disc, err := sys.DiscretizeWithOpts(0.1, C2DOptions{})
+	disc, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +467,7 @@ func TestDiscretizeWithOpts_AlreadyDiscrete(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0.1,
 	)
-	_, err := sys.DiscretizeWithOpts(0.1, C2DOptions{})
+	_, err := sys.C2D(0.1, C2DOptions{})
 	if err == nil {
 		t.Fatal("expected error for already discrete")
 	}
@@ -483,7 +484,7 @@ func TestDiscretizeWithOpts_FreqResponseWithThiran(t *testing.T) {
 	sys.InputDelay = []float64{0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +512,7 @@ func TestDiscretizeWithOpts_ZeroDelay_NoThiranNeeded(t *testing.T) {
 	sys.InputDelay = []float64{0}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +526,7 @@ func TestDiscretize_DoesNotMutateReceiver(t *testing.T) {
 	orig := makeTestSystem()
 	before := orig.Copy()
 
-	_, err := orig.Discretize(0.01)
+	_, err := orig.C2D(0.01, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +548,7 @@ func TestDiscretizeWithOpts_SISO_FractionalIODelay_Thiran(t *testing.T) {
 	sys.Delay = mat.NewDense(1, 1, []float64{0.35})
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +579,7 @@ func TestDiscretizeWithOpts_MIMO_DecomposableIODelay_Thiran(t *testing.T) {
 	sys.Delay = mat.NewDense(2, 2, []float64{0.3, 0.5, 0.3, 0.5})
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +600,7 @@ func TestDiscretizeWithOpts_SISO_IntegerIODelay_NoThiran(t *testing.T) {
 	sys.Delay = mat.NewDense(1, 1, []float64{0.3})
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 0})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH, ThiranOrder: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +625,7 @@ func TestDiscretizeWithOpts_MixedIODelay_InputDelay_Thiran(t *testing.T) {
 	sys.InputDelay = []float64{0.15}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +655,7 @@ func TestUndiscretizeInputDelay(t *testing.T) {
 	)
 	sys.InputDelay = []float64{3}
 
-	ct, err := sys.Undiscretize()
+	ct, err := sys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,7 +674,7 @@ func TestUndiscretizeOutputDelay(t *testing.T) {
 	)
 	sys.OutputDelay = []float64{5}
 
-	ct, err := sys.Undiscretize()
+	ct, err := sys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +700,7 @@ func TestUndiscretizeInternalDelay(t *testing.T) {
 		D22: mat.NewDense(1, 1, []float64{0}),
 	}
 
-	ct, err := sys.Undiscretize()
+	ct, err := sys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -729,7 +730,7 @@ func TestUndiscretizeAllDelays(t *testing.T) {
 	sys.InputDelay = []float64{3}
 	sys.OutputDelay = []float64{4}
 
-	ct, err := sys.Undiscretize()
+	ct, err := sys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -756,7 +757,7 @@ func TestRoundtripDelays(t *testing.T) {
 	sys.OutputDelay = []float64{0.5}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,7 +768,7 @@ func TestRoundtripDelays(t *testing.T) {
 		t.Fatalf("discrete OutputDelay = %v, want 5", disc.OutputDelay[0])
 	}
 
-	ct, err := disc.Undiscretize()
+	ct, err := disc.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,7 +791,7 @@ func TestDiscretizeZOHWithInputDelay(t *testing.T) {
 	sys.InputDelay = []float64{0.3}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeZOH(dt)
+	disc, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,7 +811,7 @@ func TestDiscretizeZOHWithOutputDelay(t *testing.T) {
 	sys.OutputDelay = []float64{0.5}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeZOH(dt)
+	disc, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -830,7 +831,7 @@ func TestDiscretizeTustinWithInputDelay(t *testing.T) {
 	sys.InputDelay = []float64{0.3}
 
 	dt := 0.1
-	disc, err := sys.Discretize(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -849,7 +850,7 @@ func TestDiscretizeTustinFractionalDelayRounds(t *testing.T) {
 	)
 	sys.InputDelay = []float64{0.37}
 
-	disc, err := sys.Discretize(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,7 +877,7 @@ func TestDiscretizeZOHWithInternalDelay(t *testing.T) {
 	}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -904,7 +905,7 @@ func TestDiscretizeZOHWithInternalDelay(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
-	ref, _ := refSys.DiscretizeZOH(dt)
+	ref, _ := refSys.C2D(dt, C2DOptions{})
 	assertMatClose(t, "A", disc.A, ref.A, 1e-12)
 	assertMatClose(t, "B", disc.B, ref.B, 1e-12)
 	assertMatClose(t, "C", disc.C, ref.C, 1e-12)
@@ -929,7 +930,7 @@ func TestDiscretizeZOHInternalDelayD22UpperTriangular(t *testing.T) {
 	}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -958,7 +959,7 @@ func TestDiscretizeZOHInternalDelayD22General(t *testing.T) {
 		D22: mat.NewDense(2, 2, []float64{0.1, 0.5, 0.3, 0}),
 	}
 
-	disc, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,7 +982,7 @@ func TestDiscretizeZOHInternalDelayFreqResp(t *testing.T) {
 	}
 
 	dt := 0.1
-	disc, err := lft.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	disc, err := lft.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1018,7 +1019,7 @@ func TestC2DDelayModelingInternal(t *testing.T) {
 	sys.InputDelay = []float64{0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1052,11 +1053,11 @@ func TestC2DDelayModelingInternalFreqResp(t *testing.T) {
 	sys.InputDelay = []float64{0.35}
 	dt := 0.1
 
-	discInternal, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
+	discInternal, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
 	if err != nil {
 		t.Fatal(err)
 	}
-	discState, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	discState, err := sys.C2D(dt, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1092,7 +1093,7 @@ func TestC2DDelayModelingDefault(t *testing.T) {
 	sys.InputDelay = []float64{0.3}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1115,7 +1116,7 @@ func TestC2DDelayModelingIntegerDelay(t *testing.T) {
 	sys.InputDelay = []float64{0.3}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1138,7 +1139,7 @@ func TestC2DDelayModelingInternalOutputDelay(t *testing.T) {
 	sys.OutputDelay = []float64{0.35}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1169,7 +1170,7 @@ func TestC2DDelayModelingInternalMIMO(t *testing.T) {
 	sys.InputDelay = []float64{0.35, 0.2}
 
 	dt := 0.1
-	disc, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodZOH, DelayModeling: C2DDelayModelingInternal})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1205,7 +1206,7 @@ func TestImpulse_WrongDomain(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0.1,
 	)
-	_, err := sys.DiscretizeImpulse(0.1)
+	_, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodImpulse})
 	if err == nil {
 		t.Fatal("expected ErrWrongDomain")
 	}
@@ -1213,11 +1214,11 @@ func TestImpulse_WrongDomain(t *testing.T) {
 
 func TestImpulse_InvalidDt(t *testing.T) {
 	sys := makeTestSystem()
-	_, err := sys.DiscretizeImpulse(0)
+	_, err := sys.C2D(0, C2DOptions{Method: C2DMethodImpulse})
 	if err == nil {
 		t.Fatal("expected error for dt=0")
 	}
-	_, err = sys.DiscretizeImpulse(-1)
+	_, err = sys.C2D(-1, C2DOptions{Method: C2DMethodImpulse})
 	if err == nil {
 		t.Fatal("expected error for dt<0")
 	}
@@ -1226,7 +1227,7 @@ func TestImpulse_InvalidDt(t *testing.T) {
 func TestImpulse_PureGain(t *testing.T) {
 	D := mat.NewDense(2, 3, []float64{1, 2, 3, 4, 5, 6})
 	sys, _ := NewGain(D, 0)
-	disc, err := sys.DiscretizeImpulse(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodImpulse})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1247,7 +1248,7 @@ func TestImpulse_Scalar(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
-	disc, err := sys.DiscretizeImpulse(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodImpulse})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1272,7 +1273,7 @@ func TestImpulse_Scalar(t *testing.T) {
 func TestImpulse_ImpulseResponseMatch(t *testing.T) {
 	sys := makeTestSystem()
 	dt := 0.05
-	disc, err := sys.DiscretizeImpulse(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodImpulse})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1318,7 +1319,7 @@ func TestImpulse_ImpulseResponseMatch(t *testing.T) {
 
 func TestImpulse_Stability(t *testing.T) {
 	sys := makeTestSystem()
-	disc, err := sys.DiscretizeImpulse(0.01)
+	disc, err := sys.C2D(0.01, C2DOptions{Method: C2DMethodImpulse})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1339,7 +1340,7 @@ func TestImpulse_MIMO(t *testing.T) {
 	C := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	D := mat.NewDense(2, 2, []float64{0, 0, 0, 0})
 	sys, _ := New(A, B, C, D, 0)
-	disc, err := sys.DiscretizeImpulse(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodImpulse})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1352,11 +1353,11 @@ func TestImpulse_MIMO(t *testing.T) {
 func TestImpulse_ViaOpts(t *testing.T) {
 	sys := makeTestSystem()
 	dt := 0.1
-	direct, err := sys.DiscretizeImpulse(dt)
+	direct, err := sys.C2D(dt, C2DOptions{Method: C2DMethodImpulse})
 	if err != nil {
 		t.Fatal(err)
 	}
-	viaOpts, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodImpulse})
+	viaOpts, err := sys.C2D(dt, C2DOptions{Method: C2DMethodImpulse})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1377,7 +1378,7 @@ func TestFOH_WrongDomain(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0.1,
 	)
-	_, err := sys.DiscretizeFOH(0.1)
+	_, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodFOH})
 	if err == nil {
 		t.Fatal("expected ErrWrongDomain")
 	}
@@ -1385,7 +1386,7 @@ func TestFOH_WrongDomain(t *testing.T) {
 
 func TestFOH_InvalidDt(t *testing.T) {
 	sys := makeTestSystem()
-	_, err := sys.DiscretizeFOH(0)
+	_, err := sys.C2D(0, C2DOptions{Method: C2DMethodFOH})
 	if err == nil {
 		t.Fatal("expected error for dt=0")
 	}
@@ -1394,7 +1395,7 @@ func TestFOH_InvalidDt(t *testing.T) {
 func TestFOH_PureGain(t *testing.T) {
 	d := mat.NewDense(2, 3, []float64{1, 2, 3, 4, 5, 6})
 	sys, _ := NewGain(d, 0)
-	disc, err := sys.DiscretizeFOH(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1408,7 +1409,7 @@ func TestFOH_PureGain(t *testing.T) {
 func TestFOH_Scalar(t *testing.T) {
 	a, b, c, dt := -2.0, 3.0, 1.0, 0.1
 	sys, _ := New(mat.NewDense(1, 1, []float64{a}), mat.NewDense(1, 1, []float64{b}), mat.NewDense(1, 1, []float64{c}), mat.NewDense(1, 1, []float64{0}), 0)
-	disc, err := sys.DiscretizeFOH(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1428,7 +1429,7 @@ func TestFOH_DoubleIntegrator(t *testing.T) {
 	D := mat.NewDense(1, 1, []float64{0})
 	sys, _ := New(A, B, C, D, 0)
 	dt := 0.1
-	disc, err := sys.DiscretizeFOH(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1456,7 +1457,7 @@ func TestFOH_SingularA(t *testing.T) {
 	C := mat.NewDense(1, 2, []float64{1, 0})
 	D := mat.NewDense(1, 1, []float64{0})
 	sys, _ := New(A, B, C, D, 0)
-	disc, err := sys.DiscretizeFOH(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1472,7 +1473,7 @@ func TestFOH_MIMO(t *testing.T) {
 	C := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	D := mat.NewDense(2, 2, []float64{0, 0, 0, 0})
 	sys, _ := New(A, B, C, D, 0)
-	disc, err := sys.DiscretizeFOH(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1484,7 +1485,7 @@ func TestFOH_MIMO(t *testing.T) {
 
 func TestFOH_Stability(t *testing.T) {
 	sys := makeTestSystem()
-	disc, err := sys.DiscretizeFOH(0.01)
+	disc, err := sys.C2D(0.01, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1502,11 +1503,11 @@ func TestFOH_Stability(t *testing.T) {
 func TestFOH_ViaOpts(t *testing.T) {
 	sys := makeTestSystem()
 	dt := 0.1
-	direct, err := sys.DiscretizeFOH(dt)
+	direct, err := sys.C2D(dt, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
-	viaOpts, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodFOH})
+	viaOpts, err := sys.C2D(dt, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1527,7 +1528,7 @@ func TestMatched_WrongDomain(t *testing.T) {
 		mat.NewDense(1, 1, []float64{0}),
 		0.1,
 	)
-	_, err := sys.DiscretizeMatched(0.1)
+	_, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
 	if err == nil {
 		t.Fatal("expected ErrWrongDomain")
 	}
@@ -1535,7 +1536,7 @@ func TestMatched_WrongDomain(t *testing.T) {
 
 func TestMatched_InvalidDt(t *testing.T) {
 	sys := makeTestSystem()
-	_, err := sys.DiscretizeMatched(0)
+	_, err := sys.C2D(0, C2DOptions{Method: C2DMethodMatched})
 	if err == nil {
 		t.Fatal("expected error for dt=0")
 	}
@@ -1547,7 +1548,7 @@ func TestMatched_NotSISO(t *testing.T) {
 	C := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	D := mat.NewDense(2, 2, []float64{0, 0, 0, 0})
 	sys, _ := New(A, B, C, D, 0)
-	_, err := sys.DiscretizeMatched(0.1)
+	_, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
 	if err == nil {
 		t.Fatal("expected ErrNotSISO")
 	}
@@ -1556,7 +1557,7 @@ func TestMatched_NotSISO(t *testing.T) {
 func TestMatched_PureGain(t *testing.T) {
 	D := mat.NewDense(1, 1, []float64{5})
 	sys, _ := NewGain(D, 0)
-	disc, err := sys.DiscretizeMatched(0.1)
+	disc, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1578,7 +1579,7 @@ func TestMatched_FirstOrder(t *testing.T) {
 		0,
 	)
 	dt := 0.1
-	disc, err := sys.DiscretizeMatched(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1614,7 +1615,7 @@ func TestMatched_SecondOrderComplex(t *testing.T) {
 		0,
 	)
 	dt := 0.1
-	disc, err := sys.DiscretizeMatched(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1647,7 +1648,7 @@ func TestMatched_WithZeros(t *testing.T) {
 		0,
 	)
 	dt := 0.1
-	disc, err := sys.DiscretizeMatched(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1681,7 +1682,7 @@ func TestMatched_Integrator(t *testing.T) {
 		0,
 	)
 	dt := 0.1
-	disc, err := sys.DiscretizeMatched(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1724,7 +1725,7 @@ func TestMatched_DCGain(t *testing.T) {
 		0,
 	)
 	dt := 0.05
-	disc, err := sys.DiscretizeMatched(dt)
+	disc, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1742,7 +1743,7 @@ func TestMatched_DCGain(t *testing.T) {
 
 func TestMatched_Stability(t *testing.T) {
 	sys := makeTestSystem()
-	disc, err := sys.DiscretizeMatched(0.01)
+	disc, err := sys.C2D(0.01, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1766,11 +1767,11 @@ func TestMatched_ViaOpts(t *testing.T) {
 		0,
 	)
 	dt := 0.1
-	direct, err := sys.DiscretizeMatched(dt)
+	direct, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
-	viaOpts, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodMatched})
+	viaOpts, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1785,7 +1786,7 @@ func TestMatched_ViaOpts(t *testing.T) {
 
 func TestD2D_Continuous(t *testing.T) {
 	sys := makeTestSystem()
-	_, err := sys.D2D(0.1, C2DOptions{})
+	_, err := sys.D2D(0.1, D2DOptions{})
 	if err == nil {
 		t.Fatal("expected error for continuous system")
 	}
@@ -1793,12 +1794,12 @@ func TestD2D_Continuous(t *testing.T) {
 
 func TestD2D_InvalidDt(t *testing.T) {
 	sys := makeTestSystem()
-	disc, _ := sys.DiscretizeZOH(0.1)
-	_, err := disc.D2D(0, C2DOptions{})
+	disc, _ := sys.C2D(0.1, C2DOptions{})
+	_, err := disc.D2D(0, D2DOptions{})
 	if err == nil {
 		t.Fatal("expected error for newDt=0")
 	}
-	_, err = disc.D2D(-1, C2DOptions{})
+	_, err = disc.D2D(-1, D2DOptions{})
 	if err == nil {
 		t.Fatal("expected error for newDt<0")
 	}
@@ -1806,8 +1807,8 @@ func TestD2D_InvalidDt(t *testing.T) {
 
 func TestD2D_SameDt(t *testing.T) {
 	sys := makeTestSystem()
-	disc, _ := sys.DiscretizeZOH(0.1)
-	result, err := disc.D2D(0.1, C2DOptions{})
+	disc, _ := sys.C2D(0.1, C2DOptions{})
+	result, err := disc.D2D(0.1, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1820,8 +1821,8 @@ func TestD2D_SameDt(t *testing.T) {
 
 func TestD2D_Downsample(t *testing.T) {
 	sys := makeTestSystem()
-	disc1, _ := sys.DiscretizeZOH(0.05)
-	disc2, err := disc1.D2D(0.1, C2DOptions{})
+	disc1, _ := sys.C2D(0.05, C2DOptions{})
+	disc2, err := disc1.D2D(0.1, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1843,8 +1844,8 @@ func TestD2D_Downsample(t *testing.T) {
 
 func TestD2D_Upsample(t *testing.T) {
 	sys := makeTestSystem()
-	disc1, _ := sys.DiscretizeZOH(0.2)
-	disc2, err := disc1.D2D(0.1, C2DOptions{})
+	disc1, _ := sys.C2D(0.2, C2DOptions{})
+	disc2, err := disc1.D2D(0.1, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1863,8 +1864,8 @@ func TestD2D_MIMO(t *testing.T) {
 	C := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
 	D := mat.NewDense(2, 2, []float64{0, 0, 0, 0})
 	sys, _ := New(A, B, C, D, 0)
-	disc, _ := sys.DiscretizeZOH(0.1)
-	result, err := disc.D2D(0.2, C2DOptions{})
+	disc, _ := sys.C2D(0.1, C2DOptions{})
+	result, err := disc.D2D(0.2, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1876,8 +1877,8 @@ func TestD2D_MIMO(t *testing.T) {
 
 func TestD2D_DefaultMethod(t *testing.T) {
 	sys := makeTestSystem()
-	disc, _ := sys.DiscretizeZOH(0.1)
-	result, err := disc.D2D(0.2, C2DOptions{})
+	disc, _ := sys.C2D(0.1, C2DOptions{})
+	result, err := disc.D2D(0.2, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1890,8 +1891,8 @@ func TestD2D_Names(t *testing.T) {
 	sys := makeTestSystem()
 	sys.InputName = []string{"force"}
 	sys.OutputName = []string{"position"}
-	disc, _ := sys.DiscretizeZOH(0.1)
-	result, err := disc.D2D(0.2, C2DOptions{})
+	disc, _ := sys.C2D(0.1, C2DOptions{})
+	result, err := disc.D2D(0.2, D2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1925,7 +1926,7 @@ func TestDiscretizeTustinWithInternalDelay(t *testing.T) {
 	lft := makeLFTSystem(t)
 
 	dt := 0.1
-	disc, err := lft.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin})
+	disc, err := lft.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1955,7 +1956,7 @@ func TestDiscretizeFOHWithInternalDelay(t *testing.T) {
 	lft := makeLFTSystem(t)
 
 	dt := 0.1
-	disc, err := lft.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodFOH})
+	disc, err := lft.C2D(dt, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1979,7 +1980,7 @@ func TestDiscretizeFOHWithInternalDelay(t *testing.T) {
 func TestDiscretizeImpulseWithInternalDelay(t *testing.T) {
 	lft := makeLFTSystem(t)
 
-	_, err := lft.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodImpulse})
+	_, err := lft.C2D(0.1, C2DOptions{Method: C2DMethodImpulse})
 	if !errors.Is(err, ErrFeedbackDelay) {
 		t.Fatalf("internal impulse: %v", err)
 	}
@@ -1999,11 +2000,11 @@ func TestDiscretizeTustinAugmented_FreqResp(t *testing.T) {
 	}
 
 	dt := 0.1
-	discZOH, err := lft.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodZOH})
+	discZOH, err := lft.C2D(dt, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
-	discTustin, err := lft.DiscretizeWithOpts(dt, C2DOptions{Method: C2DMethodTustin})
+	discTustin, err := lft.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2037,7 +2038,7 @@ func TestDiscretizeFOHAugmented_Stability(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	disc, err := lft.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodFOH})
+	disc, err := lft.C2D(0.1, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2064,7 +2065,7 @@ func TestDiscretizeImpulseAugmented_SISO(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = lft.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodImpulse})
+	_, err = lft.C2D(0.1, C2DOptions{Method: C2DMethodImpulse})
 	if !errors.Is(err, ErrFeedbackDelay) {
 		t.Fatalf("internal impulse: %v", err)
 	}
@@ -2072,20 +2073,20 @@ func TestDiscretizeImpulseAugmented_SISO(t *testing.T) {
 
 func TestD2C_WrongDomain(t *testing.T) {
 	sys := makeTestSystem()
-	if _, err := sys.D2C(C2DMethodZOH); err == nil {
+	if _, err := sys.D2C(D2COptions{Method: C2DMethodZOH}); err == nil {
 		t.Fatal("expected ErrWrongDomain for continuous input")
 	}
-	if _, err := sys.D2C(C2DMethodTustin); err == nil {
+	if _, err := sys.D2C(D2COptions{Method: C2DMethodTustin}); err == nil {
 		t.Fatal("expected ErrWrongDomain for continuous input")
 	}
 }
 
 func TestD2C_UnknownMethod(t *testing.T) {
-	disc, err := makeTestSystem().Discretize(0.05)
+	disc, err := makeTestSystem().C2D(0.05, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := disc.D2C(C2DMethod("bogus")); err == nil {
+	if _, err := disc.D2C(D2COptions{Method: C2DMethod("bogus")}); err == nil {
 		t.Fatal("expected error for unknown method")
 	}
 }
@@ -2094,11 +2095,11 @@ func TestD2C_Tustin_Roundtrip(t *testing.T) {
 	orig := makeTestSystem()
 	dt := 0.02
 
-	disc, err := orig.Discretize(dt)
+	disc, err := orig.C2D(dt, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := disc.D2C(C2DMethodTustin)
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2116,11 +2117,11 @@ func TestD2C_ZOH_Roundtrip(t *testing.T) {
 	orig := makeTestSystem()
 	dt := 0.05
 
-	disc, err := orig.DiscretizeZOH(dt)
+	disc, err := orig.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := disc.D2C(C2DMethodZOH)
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2137,15 +2138,15 @@ func TestD2C_ZOH_Roundtrip(t *testing.T) {
 func TestD2C_ZOH_DefaultMethod(t *testing.T) {
 	orig := makeTestSystem()
 	dt := 0.05
-	disc, err := orig.DiscretizeZOH(dt)
+	disc, err := orig.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	recDefault, err := disc.D2C(C2DMethod(""))
+	recDefault, err := disc.D2C(D2COptions{Method: C2DMethod("")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	recZOH, err := disc.D2C(C2DMethodZOH)
+	recZOH, err := disc.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2155,7 +2156,7 @@ func TestD2C_ZOH_DefaultMethod(t *testing.T) {
 
 func TestD2C_ZOH_NegativeEigenvalue(t *testing.T) {
 	sys, _ := New(mat.NewDense(1, 1, []float64{-0.5}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0.1)
-	out, err := sys.D2C(C2DMethodZOH)
+	out, err := sys.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2166,7 +2167,7 @@ func TestD2C_ZOH_NegativeEigenvalue(t *testing.T) {
 
 func TestD2C_ZOH_EigenvalueAtOne(t *testing.T) {
 	sys, _ := New(mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0.1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0.1)
-	out, err := sys.D2C(C2DMethodZOH)
+	out, err := sys.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2198,11 +2199,11 @@ func TestD2C_ZOH_MIMO_Roundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dt := 0.1
-	disc, err := orig.DiscretizeZOH(dt)
+	disc, err := orig.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, err := disc.D2C(C2DMethodZOH)
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2220,7 +2221,7 @@ func TestD2C_ZOH_N0_GainOnly(t *testing.T) {
 		D:  D,
 		Dt: 0.1,
 	}
-	rec, err := disc.D2C(C2DMethodZOH)
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2242,18 +2243,122 @@ func TestD2C_InputDelayRoundtrip(t *testing.T) {
 	orig.InputDelay = []float64{0.2}
 
 	dt := 0.1
-	disc, err := orig.DiscretizeZOH(dt)
+	disc, err := orig.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(disc.InputDelay) != 1 || disc.InputDelay[0] != 2 {
 		t.Fatalf("discrete input delay = %v, want [2]", disc.InputDelay)
 	}
-	rec, err := disc.D2C(C2DMethodZOH)
+	rec, err := disc.D2C(D2COptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rec.InputDelay) != 1 || math.Abs(rec.InputDelay[0]-0.2) > 1e-12 {
 		t.Fatalf("continuous input delay = %v, want [0.2]", rec.InputDelay)
+	}
+}
+
+func TestConversionDefaultsAreZOH(t *testing.T) {
+	sys, err := New(mat.NewDense(1, 1, []float64{-2}), mat.NewDense(1, 1, []float64{3}), mat.NewDense(1, 1, []float64{4}), mat.NewDense(1, 1, []float64{5}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disc, err := sys.C2D(0.1, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad := math.Exp(-0.2)
+	if math.Abs(disc.A.At(0, 0)-ad) > 1e-14 || math.Abs(disc.B.At(0, 0)-3*(1-ad)/2) > 1e-14 {
+		t.Fatalf("C2D default: A=%g B=%g, want ZOH %g %g", disc.A.At(0, 0), disc.B.At(0, 0), ad, 3*(1-ad)/2)
+	}
+	cont, err := disc.D2C(D2COptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(cont.A.At(0, 0)+2) > 1e-12 || math.Abs(cont.B.At(0, 0)-3) > 1e-12 {
+		t.Fatalf("D2C default: A=%g B=%g, want ZOH inverse -2 3", cont.A.At(0, 0), cont.B.At(0, 0))
+	}
+	re, err := disc.D2D(0.25, D2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := math.Exp(-0.5); math.Abs(re.A.At(0, 0)-want) > 1e-12 {
+		t.Fatalf("D2D default: A=%g, want ZOH %g", re.A.At(0, 0), want)
+	}
+}
+
+func TestConversionNilAndFitMethod(t *testing.T) {
+	var nilSys *System
+	if _, err := nilSys.C2D(0.1, C2DOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("C2D: %v", err)
+	}
+	if _, err := nilSys.D2C(D2COptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("D2C: %v", err)
+	}
+	if _, err := nilSys.D2D(0.1, D2DOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("D2D: %v", err)
+	}
+	if _, _, err := nilSys.C2DFit(0.1, C2DOptions{Method: C2DMethodLeastSquares}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("C2DFit: %v", err)
+	}
+	sys := makeTestSystem()
+	if _, _, err := sys.C2DFit(0.1, C2DOptions{}); !errors.Is(err, ErrOptionUnsupported) {
+		t.Errorf("C2DFit zoh: %v, want ErrOptionUnsupported", err)
+	}
+}
+
+func TestConversionErrorPrefixes(t *testing.T) {
+	sys := makeTestSystem()
+	disc, err := sys.C2D(0.1, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		err    error
+		prefix string
+		want   error
+	}{
+		"C2D discrete":   {func() error { _, err := disc.C2D(0.1, C2DOptions{}); return err }(), "C2D: ", ErrWrongDomain},
+		"C2D delayed":    {func() error { _, err := disc.C2D(0.1, C2DOptions{Method: C2DMethodTustin}); return err }(), "C2D: ", ErrWrongDomain},
+		"C2D method":     {func() error { _, err := sys.C2D(0.1, C2DOptions{Method: "bogus"}); return err }(), "C2D: ", ErrInvalidConversionOptions},
+		"D2C continuous": {func() error { _, err := sys.D2C(D2COptions{}); return err }(), "D2C: ", ErrWrongDomain},
+		"D2D method":     {func() error { _, err := disc.D2D(0.2, D2DOptions{Method: C2DMethodFOH}); return err }(), "D2D: ", ErrInvalidConversionOptions},
+		"C2DMap domain":  {func() error { _, _, err := disc.C2DMap(0.1, C2DOptions{}); return err }(), "C2DMap: ", ErrWrongDomain},
+		"D2CMap domain":  {func() error { _, _, err := sys.D2CMap(D2COptions{}); return err }(), "D2CMap: ", ErrWrongDomain},
+	} {
+		if !errors.Is(tc.err, tc.want) {
+			t.Errorf("%s: err = %v, want %v", name, tc.err, tc.want)
+			continue
+		}
+		msg := tc.err.Error()
+		if !strings.HasPrefix(msg, tc.prefix) || strings.Count(msg, tc.prefix) != 1 || strings.Contains(msg, "controlsys: controlsys:") {
+			t.Errorf("%s: message %q, want single %q prefix", name, msg, tc.prefix)
+		}
+	}
+}
+
+func TestConversionRejectsNonFinite(t *testing.T) {
+	sys := makeTestSystem()
+	sys.A.Set(0, 0, math.NaN())
+	if _, err := sys.C2D(0.1, C2DOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("C2D: %v", err)
+	}
+	if _, _, err := sys.C2DMap(0.1, C2DOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("C2DMap: %v", err)
+	}
+	disc, err := makeTestSystem().C2D(0.1, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disc.B.Set(0, 0, math.Inf(1))
+	if _, err := disc.D2C(D2COptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("D2C: %v", err)
+	}
+	if _, _, err := disc.D2CMap(D2COptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("D2CMap: %v", err)
+	}
+	if _, err := disc.D2D(0.2, D2DOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("D2D: %v", err)
 	}
 }

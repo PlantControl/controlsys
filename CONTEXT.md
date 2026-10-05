@@ -1255,7 +1255,7 @@ _Avoid_: reciprocal when referring to MIMO models
 - An **identified model** is estimated from data rather than specified directly.
 - **Discretization** changes a **continuous-time model** into a **discrete-time model**.
 - A **discretization method** defines how **discretization** approximates or transforms continuous-time behavior.
-- **Zero-order hold** is the default **discretization method** in option-based continuous-to-discrete conversion.
+- **Zero-order hold** is the default **discretization method** for C2D, D2C and D2D, as in MATLAB c2d, d2c and d2d.
 - **First-order hold**, **Tustin method**, **impulse-invariant method**, and **matched pole-zero method** are supported **discretization methods**.
 - The **Tustin method** is the inverse of Tustin **discrete-to-continuous conversion** for valid models in this toolbox.
 - The **matched pole-zero method** is limited to SISO models in this toolbox.

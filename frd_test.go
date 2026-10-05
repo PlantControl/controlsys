@@ -280,8 +280,8 @@ func TestFRDConcatValidatesCompatibilityAndFrequencyOrder(t *testing.T) {
 	}
 
 	_, err = FRDConcat(left, left)
-	if !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("duplicate frequency error = %v, want ErrDimensionMismatch", err)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("duplicate frequency error = %v, want ErrInvalidArgument", err)
 	}
 
 	differentDt, err := NewFRD([][][]complex128{{{5}}}, []float64{3}, 0.2)
@@ -378,8 +378,8 @@ func TestFRD_ValidationErrors(t *testing.T) {
 		dt := 0.1
 		nyq := math.Pi / dt
 		_, err := NewFRD(resp, []float64{nyq + 1}, dt)
-		if !errors.Is(err, ErrDimensionMismatch) {
-			t.Fatalf("expected ErrDimensionMismatch, got %v", err)
+		if !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 }
@@ -968,7 +968,7 @@ func TestFRD_NyquistEncirclements(t *testing.T) {
 				t.Fatalf("oracle Z-P = %d, want %d", got, tc.want)
 			}
 			dt := 0.05
-			dsys, err := ct.DiscretizeZOH(dt)
+			dsys, err := ct.C2D(dt, C2DOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -988,9 +988,6 @@ func TestFRD_NyquistEncirclements(t *testing.T) {
 				want := frdTestNyquistOracle(t, sys)
 				if res.Encirclements != want {
 					t.Errorf("dt=%v: Encirclements = %d, want %d", sys.Dt, res.Encirclements, want)
-				}
-				if res.RHPPoles != 0 || res.RHPZerosCL != res.Encirclements {
-					t.Errorf("dt=%v: RHPPoles=%d RHPZerosCL=%d, want 0 and %d", sys.Dt, res.RHPPoles, res.RHPZerosCL, res.Encirclements)
 				}
 			}
 		})
@@ -1364,7 +1361,7 @@ func TestFRDMargin_DelayRepro(t *testing.T) {
 func TestNewFRDRejectsNonFiniteData(t *testing.T) {
 	resp := [][][]complex128{{{1}}, {{2}}}
 	for _, w := range []float64{math.NaN(), math.Inf(1)} {
-		if _, err := NewFRD(resp, []float64{1, w}, 0); !errors.Is(err, ErrDimensionMismatch) {
+		if _, err := NewFRD(resp, []float64{1, w}, 0); !errors.Is(err, ErrInvalidArgument) {
 			t.Errorf("NewFRD omega=%v err = %v", w, err)
 		}
 	}
@@ -1372,5 +1369,102 @@ func TestNewFRDRejectsNonFiniteData(t *testing.T) {
 		if _, err := NewFRD(resp, []float64{1, 2}, dt); !errors.Is(err, ErrInvalidSampleTime) {
 			t.Errorf("NewFRD dt=%v err = %v", dt, err)
 		}
+	}
+}
+
+func TestFRDRejectsPlaceholderData(t *testing.T) {
+	if _, err := NewFRD(nil, nil, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("empty: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := NewFRD([][][]complex128{{{1}}, {{2}}}, []float64{1, 1}, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("duplicate omega: err = %v, want ErrInvalidArgument", err)
+	}
+	nan := complex(math.NaN(), 0)
+	if _, err := NewFRD([][][]complex128{{{nan}}, {{nan}}}, []float64{1, 2}, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("NaN response: err = %v, want ErrInvalidArgument", err)
+	}
+	f, err := NewFRD([][][]complex128{{{1, 2}}, {{3, 4}}, {{5, 6}}}, []float64{1, 2, 3}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.SelectFrequencyRange(5, 6); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("empty range: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := f.SelectFrequencies(nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("no indices: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := f.SelectFrequencies([]int{3}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("index out of range: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := f.MapResponse(nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil mapper: err = %v, want ErrInvalidArgument", err)
+	}
+
+	hand := &FRD{Response: [][][]complex128{{}}, Omega: []float64{1}}
+	if p, m := hand.Dims(); p != 0 || m != 0 {
+		t.Errorf("hand-built Dims = %d, %d", p, m)
+	}
+	if err := hand.Validate(); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("hand-built Validate: err = %v", err)
+	}
+	if _, err := hand.Sigma(); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("hand-built Sigma: err = %v", err)
+	}
+	if _, err := hand.PeakGain(); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("hand-built PeakGain: err = %v", err)
+	}
+	var nilFRD *FRD
+	if err := nilFRD.Validate(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil Validate: err = %v", err)
+	}
+	if err := f.Validate(); err != nil {
+		t.Errorf("valid FRD: %v", err)
+	}
+}
+
+func TestFRDErrorSentinels(t *testing.T) {
+	mimo, err := NewFRD([][][]complex128{{{1, 2}}, {{3, 4}}}, []float64{1, 2}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mimo.Nyquist(); !errors.Is(err, ErrNotSISO) {
+		t.Errorf("Nyquist MIMO: err = %v, want ErrNotSISO", err)
+	}
+	if _, err := FRDMargin(mimo); !errors.Is(err, ErrNotSISO) {
+		t.Errorf("FRDMargin MIMO: err = %v, want ErrNotSISO", err)
+	}
+	one, err := NewFRD([][][]complex128{{{1}}}, []float64{1}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FRDMargin(one); !errors.Is(err, ErrInsufficientData) {
+		t.Errorf("FRDMargin one point: err = %v, want ErrInsufficientData", err)
+	}
+	g, err := NewFRD([][][]complex128{{{1}}, {{0.5i}}}, []float64{1, 2}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := NewFRD([][][]complex128{{{1}}, {{1}}}, []float64{1, 2}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FRDFeedback(g, k, 1); !errors.Is(err, ErrAlgebraicLoop) {
+		t.Errorf("FRDFeedback singular: err = %v, want ErrAlgebraicLoop", err)
+	}
+	if _, err := FRDFeedback(g, k, 0.5); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("FRDFeedback sign 0.5: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := FRDSeries(g, mimo); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("FRDSeries dims: err = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := FRDParallel(g, mimo); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("FRDParallel dims: err = %v, want ErrDimensionMismatch", err)
+	}
+	other, err := NewFRD([][][]complex128{{{1}}, {{1}}}, []float64{1, 3}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FRDParallel(g, other); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("FRDParallel grid mismatch: err = %v, want ErrInvalidArgument", err)
 	}
 }

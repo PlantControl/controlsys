@@ -22,6 +22,27 @@ const (
 	tokEOF
 )
 
+func (k tokenKind) String() string {
+	switch k {
+	case tokIdent:
+		return "signal name"
+	case tokNumber:
+		return "number"
+	case tokEquals:
+		return "'='"
+	case tokPlus:
+		return "'+'"
+	case tokMinus:
+		return "'-'"
+	case tokStar:
+		return "'*'"
+	case tokSemicolon:
+		return "';'"
+	default:
+		return "end of expression"
+	}
+}
+
 type token struct {
 	kind tokenKind
 	text string
@@ -79,11 +100,11 @@ func tokenize(expr string) ([]token, error) {
 				s := string(runes[start:i])
 				n, err := strconv.ParseFloat(s, 64)
 				if err != nil {
-					return nil, fmt.Errorf("sumblk: invalid number %q: %w", s, ErrInvalidExpression)
+					return nil, fmt.Errorf("invalid number %q: %w", s, ErrInvalidExpression)
 				}
 				tokens = append(tokens, token{kind: tokNumber, text: s, num: n})
 			} else {
-				return nil, fmt.Errorf("sumblk: unexpected character %q: %w", string(r), ErrInvalidExpression)
+				return nil, fmt.Errorf("unexpected character %q: %w", string(r), ErrInvalidExpression)
 			}
 		}
 	}
@@ -109,7 +130,7 @@ func (p *sumblkParser) advance() token {
 func (p *sumblkParser) expect(k tokenKind) (token, error) {
 	t := p.peek()
 	if t.kind != k {
-		return t, fmt.Errorf("sumblk: expected %d, got %q: %w", k, t.text, ErrInvalidExpression)
+		return t, fmt.Errorf("expected %v, got %q: %w", k, t.text, ErrInvalidExpression)
 	}
 	p.advance()
 	return t, nil
@@ -127,14 +148,14 @@ func (p *sumblkParser) parseTerm() (signalTerm, error) {
 	if p.peek().kind == tokNumber {
 		t := p.advance()
 		if _, err := p.expect(tokStar); err != nil {
-			return signalTerm{}, fmt.Errorf("sumblk: expected '*' after number: %w", ErrInvalidExpression)
+			return signalTerm{}, fmt.Errorf("after number %s: %w", t.text, err)
 		}
 		coeff = t.num
 	}
 
 	ident, err := p.expect(tokIdent)
 	if err != nil {
-		return signalTerm{}, fmt.Errorf("sumblk: expected signal name: %w", ErrInvalidExpression)
+		return signalTerm{}, err
 	}
 	return signalTerm{name: ident.text, coeff: sign * coeff}, nil
 }
@@ -142,7 +163,7 @@ func (p *sumblkParser) parseTerm() (signalTerm, error) {
 func (p *sumblkParser) parseEquation() (equation, error) {
 	out, err := p.expect(tokIdent)
 	if err != nil {
-		return equation{}, fmt.Errorf("sumblk: expected output name: %w", ErrInvalidExpression)
+		return equation{}, fmt.Errorf("output: %w", err)
 	}
 	if _, err := p.expect(tokEquals); err != nil {
 		return equation{}, err
@@ -185,7 +206,7 @@ func (p *sumblkParser) parse() ([]equation, error) {
 	}
 
 	if p.peek().kind != tokEOF {
-		return nil, fmt.Errorf("sumblk: unexpected token %q: %w", p.peek().text, ErrInvalidExpression)
+		return nil, fmt.Errorf("unexpected token %q: %w", p.peek().text, ErrInvalidExpression)
 	}
 	return eqs, nil
 }
@@ -205,7 +226,7 @@ type parsedSumBlock struct {
 func parseSumBlock(expr string) (*parsedSumBlock, error) {
 	trimmed := strings.TrimSpace(expr)
 	if trimmed == "" {
-		return nil, fmt.Errorf("sumblk: empty expression: %w", ErrInvalidExpression)
+		return nil, fmt.Errorf("empty expression: %w", ErrInvalidExpression)
 	}
 	tokens, err := tokenize(trimmed)
 	if err != nil {
@@ -226,7 +247,7 @@ func (p *parsedSumBlock) collectSignals() error {
 	outputSet := make(map[string]bool)
 	for _, eq := range p.equations {
 		if outputSet[eq.output] {
-			return fmt.Errorf("sumblk: duplicate output %q: %w", eq.output, ErrInvalidExpression)
+			return fmt.Errorf("duplicate output %q: %w", eq.output, ErrInvalidExpression)
 		}
 		outputSet[eq.output] = true
 		p.outputs = append(p.outputs, eq.output)
@@ -265,10 +286,23 @@ func (p *parsedSumBlock) applyWidths(widths []int) error {
 		}
 	default:
 		if len(widths) != len(p.signals) {
-			return fmt.Errorf("sumblk: got %d widths for %d signals: %w", len(widths), len(p.signals), ErrInvalidExpression)
+			return fmt.Errorf("got %d widths for %d signals: %w", len(widths), len(p.signals), ErrDimensionMismatch)
 		}
 		for i, s := range p.signals {
 			p.widths[s] = widths[i]
+		}
+	}
+	for _, s := range p.signals {
+		if w := p.widths[s]; w < 1 {
+			return fmt.Errorf("signal %q has width %d, want >= 1: %w", s, w, ErrInvalidArgument)
+		}
+	}
+	for _, eq := range p.equations {
+		w := p.widths[eq.output]
+		for _, t := range eq.terms {
+			if wt := p.widths[t.name]; wt != w {
+				return fmt.Errorf("signal %q has width %d but output %q has width %d: %w", t.name, wt, eq.output, w, ErrDimensionMismatch)
+			}
 		}
 	}
 	return nil
@@ -297,9 +331,7 @@ func (p *parsedSumBlock) directMatrix() *mat.Dense {
 		}
 		for name, coeff := range merged {
 			col0 := inputColStart[name]
-			wIn := p.widths[name]
-			diag := min(wIn, w)
-			for k := range diag {
+			for k := range w {
 				D.Set(rowOff+k, col0+k, coeff)
 			}
 		}
@@ -323,18 +355,27 @@ func expandSignalNames(signals []string, widths map[string]int) []string {
 	return expanded
 }
 
+// SumBlk returns the static summing junction described by expr, such as
+// "e = r - y" or "e = r - 2*y; f = e + d", as MATLAB sumblk(formula,
+// signalsize). Inputs and outputs are named after the signals. No widths
+// gives scalar signals and one width applies to every signal, as in MATLAB;
+// as an extension, one width per signal (outputs first, then the remaining
+// inputs in order of appearance) is accepted. All signals in one sum must
+// have the same width (ErrDimensionMismatch) and widths must be at least 1
+// (ErrInvalidArgument). A malformed expression returns ErrInvalidExpression.
+// See https://www.mathworks.com/help/control/ref/sumblk.html.
 func SumBlk(expr string, widths ...int) (*System, error) {
 	parsed, err := parseSumBlock(expr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("SumBlk: %w", err)
 	}
 	if err := parsed.applyWidths(widths); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("SumBlk: %w", err)
 	}
 
 	sys, err := NewGain(parsed.directMatrix(), 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("SumBlk: %w", err)
 	}
 	sys.OutputName = expandSignalNames(parsed.outputs, parsed.widths)
 	sys.InputName = expandSignalNames(parsed.inputs, parsed.widths)

@@ -238,7 +238,7 @@ func (b *TunablePID) CurrentSystem() (*System, error) {
 	if b.Kp == nil || b.Ki == nil || b.Kd == nil {
 		return nil, fmt.Errorf("TunablePID.CurrentSystem: nil gain parameter: %w", ErrInvalidArgument)
 	}
-	pid := NewPID(b.Kp.Value(), b.Ki.Value(), b.Kd.Value(), WithFilter(b.Tf), WithTs(b.Dt), WithPIDFormulas(b.IFormula, b.DFormula))
+	pid := &PID{Kp: b.Kp.Value(), Ki: b.Ki.Value(), Kd: b.Kd.Value(), Tf: b.Tf, Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}
 	return pid.System()
 }
 

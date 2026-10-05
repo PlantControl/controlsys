@@ -36,7 +36,12 @@ type PrescaleResult struct {
 // The state order is preserved, so Sys has the same response, state names,
 // and metadata as sys. I/O delays carry over and internal-delay channels
 // scale like B and C (B2s = TL·B2, C2s = C2·TR).
+//
+// A nil model or NaN/Inf entries return ErrInvalidArgument.
 func Prescale(sys *System) (*PrescaleResult, error) {
+	if err := requireFiniteSystem("Prescale", sys); err != nil {
+		return nil, err
+	}
 	policy := newRealizationTransformPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
 

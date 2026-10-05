@@ -111,13 +111,13 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `(*System).MinimalLFT` | `pure`, `returns-mutable` | Returns reduced LFT delay representation. |
 | `(*System).ZeroDelayApprox` | `pure`, `returns-mutable` | Returns zero-delay approximation. |
 | `(*System).Pade` | `pure`, `returns-mutable` | Returns delay approximation of receiver. |
-| `(*System).Discretize` | `pure`, `returns-mutable` | Default discretization wrapper. |
-| `(*System).DiscretizeWithOpts` | `pure`, `returns-mutable` | Option strings remain compatibility risk. |
-| `(*System).DiscretizeZOH` | `pure`, `returns-mutable` | Zero-order hold conversion. |
-| `(*System).DiscretizeImpulse` | `pure`, `returns-mutable` | Impulse-invariant conversion. |
-| `(*System).DiscretizeFOH` | `pure`, `returns-mutable` | First-order hold conversion. |
-| `(*System).DiscretizeMatched` | `pure`, `returns-mutable` | Matched pole-zero conversion. |
-| `(*System).Undiscretize` | `pure`, `returns-mutable` | Inverse bilinear conversion. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Default discretization wrapper. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Option strings remain compatibility risk. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Zero-order hold conversion. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Impulse-invariant conversion. |
+| `(*System).C2D` | `pure`, `returns-mutable` | First-order hold conversion. |
+| `(*System).C2D` | `pure`, `returns-mutable` | Matched pole-zero conversion. |
+| `(*System).D2C` | `pure`, `returns-mutable` | Inverse bilinear conversion. |
 | `(*System).D2C` | `pure`, `returns-mutable` | Uses typed `C2DMethod` selector. |
 | `(*System).D2D` | `pure`, `returns-mutable` | Resamples through conversion policy. |
 
@@ -335,8 +335,6 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 
 | API | Classification | Audit note |
 | --- | --- | --- |
-| `WithFilter` | `mutates` | Option closure mutates `PID` during construction. |
-| `WithTs` | `mutates` | Option closure mutates `PID` during construction. |
 | `NewPID` | `returns-mutable` | Returns public mutable `PID`. |
 | `NewPIDStd` | `returns-mutable` | Returns public mutable `PID`. |
 | `NewPID2` | `returns-mutable` | Returns public mutable `PID2`. |

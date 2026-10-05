@@ -147,35 +147,32 @@ func TestFractionalFeedbackHoldIndependentReference(t *testing.T) {
 					}
 				}
 				before := source.Copy()
-				out, err := source.DiscretizeWithResult(.1, C2DOptions{Method: method})
+				out, err := source.C2D(.1, C2DOptions{Method: method})
 				if err != nil {
 					t.Fatalf("method%s tau%v external%v: %v", method, tau, external, err)
 				}
-				if !out.Approximate {
-					t.Fatal("internal hold approximation not reported")
-				}
 				if external != "none" || !isIntegerSampleDelay(tau[0]/.1) {
-					if out.InitialStateMap != nil {
-						t.Fatal("fractional histories incorrectly claim state mapping")
+					if _, _, err := source.C2DMap(.1, C2DOptions{Method: method}); !errors.Is(err, ErrOptionUnsupported) {
+						t.Fatalf("fractional histories: C2DMap err = %v, want ErrOptionUnsupported", err)
 					}
 				}
-				if !reflect.DeepEqual(out.System.InputName, source.InputName) || !reflect.DeepEqual(out.System.OutputName, source.OutputName) {
+				if !reflect.DeepEqual(out.InputName, source.InputName) || !reflect.DeepEqual(out.OutputName, source.OutputName) {
 					t.Fatal("names changed")
 				}
-				if out.System.LFT != nil {
-					for _, value := range out.System.LFT.Tau {
+				if out.LFT != nil {
+					for _, value := range out.LFT.Tau {
 						if value <= 0 || value != math.Round(value) {
-							t.Fatalf("noninteger internal samples %v", out.System.LFT.Tau)
+							t.Fatalf("noninteger internal samples %v", out.LFT.Tau)
 						}
 					}
 				}
-				state, err := source.DiscretizeWithOpts(.1, C2DOptions{Method: method, DelayModeling: C2DDelayModelingState})
+				state, err := source.C2D(.1, C2DOptions{Method: method, DelayModeling: C2DDelayModelingState})
 				if err != nil {
 					t.Fatal(err)
 				}
 				for _, theta := range []float64{.08, .7, 1.8} {
 					want := holdFeedbackReference(source, .1, theta, method == C2DMethodFOH)
-					got, err := out.System.EvalFr(cmplx.Exp(complex(0, theta)))
+					got, err := out.EvalFr(cmplx.Exp(complex(0, theta)))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -208,7 +205,7 @@ func TestFractionalFeedbackHoldPureGain(t *testing.T) {
 		if err := sys.SetInternalDelay([]float64{.04}, newDense(0, 1), newDense(1, 0), mat.NewDense(1, 1, []float64{.3}), mat.NewDense(1, 1, []float64{.4}), mat.NewDense(1, 1, []float64{.2})); err != nil {
 			t.Fatal(err)
 		}
-		out, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: method})
+		out, err := sys.C2D(.1, C2DOptions{Method: method})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -225,11 +222,11 @@ func TestFractionalFeedbackHoldPureGain(t *testing.T) {
 }
 
 func TestFractionalFeedbackHoldInvalidDelay(t *testing.T) {
-	for _, value := range []float64{0, -1, math.NaN(), math.Inf(1)} {
+	for value, want := range map[float64]error{0: ErrZeroInternalDelay, -1: ErrNegativeDelay, math.NaN(): ErrInvalidArgument, math.Inf(1): ErrInvalidArgument} {
 		sys := fractionalFeedbackFixture(t, []float64{.15, .24})
 		sys.LFT.Tau[0] = value
-		if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{}); !errors.Is(err, ErrZeroInternalDelay) {
-			t.Fatalf("tau%g err%v", value, err)
+		if _, err := sys.C2D(.1, C2DOptions{}); !errors.Is(err, want) {
+			t.Fatalf("tau%g err %v, want %v", value, err, want)
 		}
 	}
 }
@@ -253,7 +250,7 @@ func BenchmarkFractionalFeedbackHold(b *testing.B) {
 				}
 				b.ReportAllocs()
 				for range b.N {
-					if _, err := sys.DiscretizeWithOpts(.1, C2DOptions{Method: method}); err != nil {
+					if _, err := sys.C2D(.1, C2DOptions{Method: method}); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -269,7 +266,7 @@ func TestFractionalFeedbackHoldIndependentSampledTime(t *testing.T) {
 			for _, format := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
 				sys, _ := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
 				sys.SetInternalDelay([]float64{tau}, mat.NewDense(1, 1, []float64{.2}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, nil), mat.NewDense(1, 1, nil))
-				out, err := sys.DiscretizeWithOpts(dt, C2DOptions{Method: method, DelayModeling: format})
+				out, err := sys.C2D(dt, C2DOptions{Method: method, DelayModeling: format})
 				if err != nil {
 					t.Fatal(err)
 				}

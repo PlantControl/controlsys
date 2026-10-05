@@ -384,7 +384,7 @@ func BenchmarkLsim_MIMO_1e4(b *testing.B) { benchLsimB(b, 10, 4, 4, 10000) }
 
 func BenchmarkLsim_Discrete_SISO(b *testing.B) {
 	sys := benchSysNonSym(4, 1, 1)
-	dsys, _ := sys.DiscretizeZOH(0.01)
+	dsys, _ := sys.C2D(0.01, C2DOptions{})
 	steps := 1000
 	t := make([]float64, steps)
 	for k := range t {
@@ -633,11 +633,15 @@ func BenchmarkPhysicalAssembly_8Components(b *testing.B) {
 		sys.InputName = []string{"force"}
 		sys.OutputName = []string{"position"}
 		sys.StateName = autoLabel("x", 4)
-		components[i] = NewPhysicalComponent(
+		c, err := NewPhysicalComponent(
 			fmt.Sprintf("c%d", i),
 			sys,
 			[]PhysicalPort{{Name: "mount", Kind: PhysicalPortDisplacement, Dimension: 1}},
 		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		components[i] = c
 	}
 	connections := make([]PhysicalConnection, 0, len(components)-1)
 	for i := 0; i < len(components)-1; i++ {
@@ -850,7 +854,7 @@ func BenchmarkPidtune_PI(b *testing.B) {
 	sys := benchSysNonSym(4, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Pidtune(sys, PidtunePI)
+		Pidtune(sys, PidtunePI, 0, nil)
 	}
 }
 
@@ -858,7 +862,7 @@ func BenchmarkPidtune_PID(b *testing.B) {
 	sys := benchSysNonSym(4, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Pidtune(sys, PidtunePID)
+		Pidtune(sys, PidtunePID, 0, nil)
 	}
 }
 
@@ -866,6 +870,6 @@ func BenchmarkPidtune_PIDF(b *testing.B) {
 	sys := benchSysNonSym(4, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Pidtune(sys, PidtunePIDF)
+		Pidtune(sys, PidtunePIDF, 0, nil)
 	}
 }

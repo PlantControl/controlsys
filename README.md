@@ -113,12 +113,11 @@ func main() {
 
 | Function/Type | Description |
 |---------------|-------------|
-| `NewPID` | PID in parallel form (`Kp`, `Ki`, `Kd`) |
-| `NewPIDStd` | PID in standard/ISA form (`Kp`, `Ti`, `Td`) |
-| `NewPID2` | 2-DOF PID controller with setpoint weighting |
-| `Pidtune` | Autotune `P`, `PI`, `PD`, `PID`, or `PIDF` for a SISO plant |
-| `WithFilter` | PID option for derivative filter time constant |
-| `WithTs` | PID option for discrete sample time |
+| `NewPID` | PID in parallel form, as MATLAB `pid(Kp,Ki,Kd,Tf,Ts)` |
+| `NewPIDStd` | PID in standard/ISA form, as MATLAB `pidstd(Kp,Ti,Td,N,Ts)` |
+| `NewPID2` | 2-DOF PID with setpoint weighting, as MATLAB `pid2(Kp,Ki,Kd,Tf,b,c,Ts)` |
+| `Pidtune` | Autotune `P`, `PI`, `PD`, `PID`, or `PIDF` for a SISO plant, as MATLAB `pidtune(sys,type,wc,opts)` |
+| `WithPIDFormulas` | PID option for discrete integral/derivative formulas |
 | `(*PID).System` / `(*PID2).System` | Convert controller model to state-space |
 | `Loopsens` | Sensitivity and complementary-sensitivity functions |
 | `Pzmap` | Pole-zero map |
@@ -226,6 +225,8 @@ func main() {
 | `(*EKF).Predict(u)` | Propagate state and covariance one step |
 | `(*EKF).Update(y)` | Correct state with a measurement |
 | `(*EKF).Step(u, z)` | Run a predict-then-update cycle |
+| `(*EKF).State()`, `StateCovariance()` | Copies of the estimate and its covariance |
+| `(*EKF).SetState(x)`, `SetStateCovariance(P)` | Replace the estimate or covariance (validated) |
 | `type EKFModel` | Nonlinear model: F, H, Jacobians FJac/HJac, noise Q/R |
 
 ### System Identification
@@ -307,15 +308,12 @@ func main() {
 
 | Method | Description |
 |--------|-------------|
-| `Discretize` | Bilinear (Tustin) c2d |
-| `DiscretizeWithOpts` | Option-driven c2d with method and delay-modeling controls |
-| `DiscretizeZOH` | Zero-order hold c2d |
-| `DiscretizeFOH` | First-order hold c2d |
-| `DiscretizeImpulse` | Impulse-invariant c2d |
-| `DiscretizeMatched` | Matched pole-zero c2d |
-| `D2D` | Discrete-to-discrete resampling |
-| `Undiscretize` | Bilinear d2c |
-| `D2C` | Discrete-to-continuous conversion by Tustin or ZOH assumptions |
+| `C2D` | MATLAB `c2d(sys,Ts,opts)`: zoh (default), foh, tustin, impulse, matched, least-squares |
+| `C2DMap` | MATLAB `[sysd,G] = c2d(...)`: also returns the initial-condition map G |
+| `C2DFit` | Least-squares `C2D` plus fit-quality diagnostics |
+| `D2C` | MATLAB `d2c(sys,opts)`: zoh (default), foh, tustin, matched |
+| `D2CMap` | MATLAB `[sysc,G] = d2c(...)` |
+| `D2D` | MATLAB `d2d(sys,Ts,opts)`: zoh (default) or tustin resampling |
 
 ### Interconnection
 

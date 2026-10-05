@@ -64,7 +64,7 @@ func descriptorSISOPlant(t *testing.T, dt float64) *System {
 		if err != nil {
 			t.Fatal(err)
 		}
-		disc, err := cont.DiscretizeZOH(dt)
+		disc, err := cont.C2D(dt, C2DOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,11 +176,11 @@ func TestDiscretizeDescriptorMatchesExplicit(t *testing.T) {
 				if method == C2DMethodLeastSquares {
 					opts.FitOrder = 3
 				}
-				want, err := explicit.DiscretizeWithOpts(dt, opts)
+				want, err := explicit.C2D(dt, opts)
 				if err != nil {
 					t.Fatalf("%s: explicit: %v", label, err)
 				}
-				got, err := sys.DiscretizeWithOpts(dt, opts)
+				got, err := sys.C2D(dt, opts)
 				if err != nil {
 					t.Fatalf("%s: descriptor: %v", label, err)
 				}
@@ -212,17 +212,17 @@ func TestDiscretizeDescriptorShortcutsMatchExplicit(t *testing.T) {
 	const dt = 0.001
 	type conv func(*System) (*System, error)
 	cases := map[string]conv{
-		"Discretize":        func(s *System) (*System, error) { return s.Discretize(dt) },
-		"DiscretizeZOH":     func(s *System) (*System, error) { return s.DiscretizeZOH(dt) },
-		"DiscretizeFOH":     func(s *System) (*System, error) { return s.DiscretizeFOH(dt) },
-		"DiscretizeImpulse": func(s *System) (*System, error) { return s.DiscretizeImpulse(dt) },
-		"DiscretizeMatched": func(s *System) (*System, error) { return s.DiscretizeMatched(dt) },
+		"Discretize":        func(s *System) (*System, error) { return s.C2D(dt, C2DOptions{Method: C2DMethodTustin}) },
+		"DiscretizeZOH":     func(s *System) (*System, error) { return s.C2D(dt, C2DOptions{}) },
+		"DiscretizeFOH":     func(s *System) (*System, error) { return s.C2D(dt, C2DOptions{Method: C2DMethodFOH}) },
+		"DiscretizeImpulse": func(s *System) (*System, error) { return s.C2D(dt, C2DOptions{Method: C2DMethodImpulse}) },
+		"DiscretizeMatched": func(s *System) (*System, error) { return s.C2D(dt, C2DOptions{Method: C2DMethodMatched}) },
 		"DiscretizeLeastSquares": func(s *System) (*System, error) {
-			r, err := s.DiscretizeLeastSquares(dt, 3)
+			rSys, _, err := s.C2DFit(dt, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 3})
 			if err != nil {
 				return nil, err
 			}
-			return r.Sys, nil
+			return rSys, nil
 		},
 	}
 	for name, f := range cases {
@@ -252,7 +252,7 @@ func TestDiscretizeDescriptorShortcutsMatchExplicit(t *testing.T) {
 func TestDescriptorContinuousConversionAccuracy(t *testing.T) {
 	sys := absorbScopePlant(t, 0, false, true)
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodTustin} {
-		disc, err := sys.DiscretizeWithOpts(0.001, C2DOptions{Method: method})
+		disc, err := sys.C2D(0.001, C2DOptions{Method: method})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -287,11 +287,11 @@ func TestD2CDescriptorMatchesExplicit(t *testing.T) {
 			if method == C2DMethodMatched {
 				sys = descriptorSISOPlant(t, 0.1)
 			}
-			want, err := explicitWithLFTOrPlain(t, sys).D2C(method)
+			want, err := explicitWithLFTOrPlain(t, sys).D2C(D2COptions{Method: method})
 			if err != nil {
 				t.Fatalf("%s: explicit: %v", label, err)
 			}
-			got, err := sys.D2C(method)
+			got, err := sys.D2C(D2COptions{Method: method})
 			if err != nil {
 				t.Fatalf("%s: descriptor: %v", label, err)
 			}
@@ -302,21 +302,21 @@ func TestD2CDescriptorMatchesExplicit(t *testing.T) {
 	sys := absorbScopePlant(t, 0.1, false, true)
 	sys.A.Scale(0.5, sys.A)
 	explicit := explicitWithLFTOrPlain(t, sys)
-	want, err := explicit.Undiscretize()
+	want, err := explicit.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := sys.Undiscretize()
+	got, err := sys.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertSystemMatricesClose(t, "Undiscretize", want, got)
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodTustin} {
-		want, err := explicit.D2D(0.05, C2DOptions{Method: method})
+		want, err := explicit.D2D(0.05, D2DOptions{Method: method})
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := sys.D2D(0.05, C2DOptions{Method: method})
+		got, err := sys.D2D(0.05, D2DOptions{Method: method})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -328,18 +328,22 @@ func TestConversionSingularDescriptorReduced(t *testing.T) {
 	cont := singularDescriptorPlant(t, 0)
 	disc := singularDescriptorPlant(t, 0.1)
 	calls := map[string]func() (*System, error){
-		"Discretize":        func() (*System, error) { return cont.Discretize(0.01) },
-		"DiscretizeZOH":     func() (*System, error) { return cont.DiscretizeZOH(0.01) },
-		"DiscretizeFOH":     func() (*System, error) { return cont.DiscretizeFOH(0.01) },
-		"DiscretizeImpulse": func() (*System, error) { return cont.DiscretizeImpulse(0.01) },
-		"DiscretizeMatched": func() (*System, error) { return descriptorSingular(descriptorSISOPlant(t, 0)).DiscretizeMatched(0.01) },
-		"DiscretizeWithOpts": func() (*System, error) {
-			return cont.DiscretizeWithOpts(0.01, C2DOptions{Method: C2DMethodTustin})
+		"Discretize":        func() (*System, error) { return cont.C2D(0.01, C2DOptions{Method: C2DMethodTustin}) },
+		"DiscretizeZOH":     func() (*System, error) { return cont.C2D(0.01, C2DOptions{}) },
+		"DiscretizeFOH":     func() (*System, error) { return cont.C2D(0.01, C2DOptions{Method: C2DMethodFOH}) },
+		"DiscretizeImpulse": func() (*System, error) { return cont.C2D(0.01, C2DOptions{Method: C2DMethodImpulse}) },
+		"DiscretizeMatched": func() (*System, error) {
+			return descriptorSingular(descriptorSISOPlant(t, 0)).C2D(0.01, C2DOptions{Method: C2DMethodMatched})
 		},
-		"D2C":          func() (*System, error) { return disc.D2C(C2DMethodZOH) },
-		"D2CMatched":   func() (*System, error) { return descriptorSingular(descriptorSISOPlant(t, 0.1)).D2C(C2DMethodMatched) },
-		"Undiscretize": func() (*System, error) { return disc.Undiscretize() },
-		"D2D":          func() (*System, error) { return disc.D2D(0.05, C2DOptions{}) },
+		"DiscretizeWithOpts": func() (*System, error) {
+			return cont.C2D(0.01, C2DOptions{Method: C2DMethodTustin})
+		},
+		"D2C": func() (*System, error) { return disc.D2C(D2COptions{Method: C2DMethodZOH}) },
+		"D2CMatched": func() (*System, error) {
+			return descriptorSingular(descriptorSISOPlant(t, 0.1)).D2C(D2COptions{Method: C2DMethodMatched})
+		},
+		"Undiscretize": func() (*System, error) { return disc.D2C(D2COptions{Method: C2DMethodTustin}) },
+		"D2D":          func() (*System, error) { return disc.D2D(0.05, D2DOptions{}) },
 	}
 	for name, call := range calls {
 		got, err := call()
@@ -362,7 +366,7 @@ func descriptorOutputs(s *System) int {
 	return p
 }
 
-func TestConversionResultDescriptorStateMap(t *testing.T) {
+func TestConversionMapDescriptorStateMap(t *testing.T) {
 	for _, internal := range []bool{false, true} {
 		for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodTustin, C2DMethodFOH} {
 			label := string(method)
@@ -370,30 +374,30 @@ func TestConversionResultDescriptorStateMap(t *testing.T) {
 				label += "/internal"
 			}
 			sys := absorbScopePlant(t, 0, internal, true)
-			want, err := explicitWithLFTOrPlain(t, sys).DiscretizeWithResult(0.001, C2DOptions{Method: method})
+			want, wantMap, err := explicitWithLFTOrPlain(t, sys).C2DMap(0.001, C2DOptions{Method: method})
 			if err != nil {
 				t.Fatalf("%s: explicit: %v", label, err)
 			}
-			got, err := sys.DiscretizeWithResult(0.001, C2DOptions{Method: method})
+			got, gotMap, err := sys.C2DMap(0.001, C2DOptions{Method: method})
 			if err != nil {
 				t.Fatalf("%s: descriptor: %v", label, err)
 			}
-			assertSystemMatricesClose(t, label, want.System, got.System)
-			assertStateMapClose(t, label, want.InitialStateMap, got.InitialStateMap)
+			assertSystemMatricesClose(t, label, want, got)
+			assertStateMapClose(t, label, wantMap, gotMap)
 		}
 	}
 	sys := absorbScopePlant(t, 0.1, true, true)
 	sys.A.Scale(0.5, sys.A)
-	want, err := explicitWithLFTOrPlain(t, sys).D2CWithResult(D2COptions{Method: C2DMethodTustin})
+	want, wantMap, err := explicitWithLFTOrPlain(t, sys).D2CMap(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := sys.D2CWithResult(D2COptions{Method: C2DMethodTustin})
+	got, gotMap, err := sys.D2CMap(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSystemMatricesClose(t, "D2CWithResult", want.System, got.System)
-	assertStateMapClose(t, "D2CWithResult", want.InitialStateMap, got.InitialStateMap)
+	assertSystemMatricesClose(t, "D2CMap", want, got)
+	assertStateMapClose(t, "D2CMap", wantMap, gotMap)
 }
 
 func assertStateMapClose(t *testing.T, label string, want, got *mat.Dense) {

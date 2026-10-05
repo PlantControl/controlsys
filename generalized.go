@@ -19,10 +19,17 @@ type fixedSystemBlock struct {
 	sys *System
 }
 
-func (b fixedSystemBlock) CurrentSystem() (*System, error) {
-	if b.sys == nil {
-		return nil, fmt.Errorf("fixed system block is nil: %w", ErrDimensionMismatch)
+// FixedBlock wraps a fixed model as a NumericBlock. The model is copied, so
+// later changes to sys do not affect the block. A nil or invalid sys returns
+// ErrInvalidArgument.
+func FixedBlock(sys *System) (NumericBlock, error) {
+	if err := requireSystem("FixedBlock", sys); err != nil {
+		return nil, err
 	}
+	return fixedSystemBlock{sys: sys.Copy()}, nil
+}
+
+func (b fixedSystemBlock) CurrentSystem() (*System, error) {
 	return b.sys.Copy(), nil
 }
 
@@ -49,30 +56,16 @@ type AnalysisPoint struct {
 	Location AnalysisPointLocation
 }
 
-func NewGeneralizedModel(name string, block any) (*GeneralizedModel, error) {
+func NewGeneralizedModel(name string, block NumericBlock) (*GeneralizedModel, error) {
 	if name == "" {
-		return nil, fmt.Errorf("NewGeneralizedModel: name is empty: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("NewGeneralizedModel: name is empty: %w", ErrInvalidArgument)
 	}
-	numeric, err := numericBlockFromAny(block)
-	if err != nil {
-		return nil, fmt.Errorf("NewGeneralizedModel: %w", err)
+	if block == nil {
+		return nil, fmt.Errorf("NewGeneralizedModel: block is nil: %w", ErrInvalidArgument)
 	}
-	return &GeneralizedModel{name: name, block: numeric, analysisPoints: make(map[string]AnalysisPoint)}, nil
+	return &GeneralizedModel{name: name, block: block, analysisPoints: make(map[string]AnalysisPoint)}, nil
 }
 
-func numericBlockFromAny(block any) (NumericBlock, error) {
-	switch b := block.(type) {
-	case NumericBlock:
-		return b, nil
-	case *System:
-		if b == nil {
-			return nil, fmt.Errorf("system block is nil: %w", ErrInvalidArgument)
-		}
-		return fixedSystemBlock{sys: b.Copy()}, nil
-	default:
-		return nil, fmt.Errorf("unsupported generalized block %T: %w", block, ErrDimensionMismatch)
-	}
-}
 
 func (g *GeneralizedModel) SetInputName(names ...string) {
 	g.inputName = copyStringSlice(names)
@@ -106,18 +99,18 @@ func (g *GeneralizedModel) HasAnalysisPoint(name string) bool {
 
 func (g *GeneralizedModel) AnalysisPoint(name string) (AnalysisPoint, error) {
 	if g == nil {
-		return AnalysisPoint{}, fmt.Errorf("GeneralizedModel.AnalysisPoint: nil model: %w", ErrDimensionMismatch)
+		return AnalysisPoint{}, fmt.Errorf("GeneralizedModel.AnalysisPoint: nil model: %w", ErrInvalidArgument)
 	}
 	ap, ok := g.analysisPoints[name]
 	if !ok {
-		return AnalysisPoint{}, fmt.Errorf("%q: %w", name, ErrSignalNotFound)
+		return AnalysisPoint{}, fmt.Errorf("GeneralizedModel.AnalysisPoint: analysis point %q: %w", name, ErrSignalNotFound)
 	}
 	return ap, nil
 }
 
 func (g *GeneralizedModel) CurrentSystem() (*System, error) {
 	if g == nil || g.block == nil {
-		return nil, fmt.Errorf("GeneralizedModel.CurrentSystem: nil model: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("GeneralizedModel.CurrentSystem: nil model: %w", ErrInvalidArgument)
 	}
 	sys, err := g.block.CurrentSystem()
 	if err != nil {
@@ -145,21 +138,20 @@ type GeneralizedClosedLoop struct {
 	primaryAnalysisPoint string
 }
 
-func NewGeneralizedClosedLoop(name string, plant *System, controller any, analysisPoint string) (*GeneralizedClosedLoop, error) {
-	ctrl, err := numericBlockFromAny(controller)
-	if err != nil {
-		return nil, fmt.Errorf("NewGeneralizedClosedLoop: controller: %w", err)
+func NewGeneralizedClosedLoop(name string, plant *System, controller NumericBlock, analysisPoint string) (*GeneralizedClosedLoop, error) {
+	if controller == nil {
+		return nil, fmt.Errorf("NewGeneralizedClosedLoop: controller is nil: %w", ErrInvalidArgument)
 	}
 	if err := requireSystem("NewGeneralizedClosedLoop", plant); err != nil {
 		return nil, err
 	}
 	if analysisPoint == "" {
-		return nil, fmt.Errorf("NewGeneralizedClosedLoop: analysis point is empty: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("NewGeneralizedClosedLoop: analysis point is empty: %w", ErrInvalidArgument)
 	}
 	g := &GeneralizedClosedLoop{
 		name:                 name,
 		plant:                plant.Copy(),
-		controller:           ctrl,
+		controller:           controller,
 		analysisPoints:       make(map[string]AnalysisPoint),
 		primaryAnalysisPoint: analysisPoint,
 	}
@@ -173,13 +165,13 @@ func NewGeneralizedClosedLoop(name string, plant *System, controller any, analys
 // InsertAnalysisPoint binds name to the plant-input or plant-output loop break.
 func (g *GeneralizedClosedLoop) InsertAnalysisPoint(name string, location AnalysisPointLocation) error {
 	if g == nil {
-		return fmt.Errorf("GeneralizedClosedLoop.InsertAnalysisPoint: nil model: %w", ErrDimensionMismatch)
+		return fmt.Errorf("GeneralizedClosedLoop.InsertAnalysisPoint: nil model: %w", ErrInvalidArgument)
 	}
 	if name == "" {
-		return fmt.Errorf("GeneralizedClosedLoop.InsertAnalysisPoint: name is empty: %w", ErrDimensionMismatch)
+		return fmt.Errorf("GeneralizedClosedLoop.InsertAnalysisPoint: name is empty: %w", ErrInvalidArgument)
 	}
 	if location != AnalysisPointPlantOutput && location != AnalysisPointPlantInput {
-		return fmt.Errorf("GeneralizedClosedLoop.InsertAnalysisPoint: invalid location %d: %w", location, ErrDimensionMismatch)
+		return fmt.Errorf("GeneralizedClosedLoop.InsertAnalysisPoint: invalid location %d: %w", location, ErrInvalidArgument)
 	}
 	if g.analysisPoints == nil {
 		g.analysisPoints = make(map[string]AnalysisPoint)
@@ -202,19 +194,40 @@ func (g *GeneralizedClosedLoop) withSampledController(sampled TunableBlock) *Gen
 	}
 }
 
+// AnalysisPoint returns the analysis point registered as name, or
+// ErrSignalNotFound.
 func (g *GeneralizedClosedLoop) AnalysisPoint(name string) (AnalysisPoint, error) {
-	if g == nil {
-		return AnalysisPoint{}, fmt.Errorf("GeneralizedClosedLoop.AnalysisPoint: nil model: %w", ErrDimensionMismatch)
-	}
-	ap, ok := g.analysisPoints[name]
-	if !ok {
-		return AnalysisPoint{}, fmt.Errorf("%q: %w", name, ErrSignalNotFound)
+	ap, err := g.analysisPoint(name)
+	if err != nil {
+		return AnalysisPoint{}, fmt.Errorf("GeneralizedClosedLoop.AnalysisPoint: %w", err)
 	}
 	return ap, nil
 }
 
+func (g *GeneralizedClosedLoop) analysisPoint(name string) (AnalysisPoint, error) {
+	if g == nil {
+		return AnalysisPoint{}, fmt.Errorf("nil model: %w", ErrInvalidArgument)
+	}
+	ap, ok := g.analysisPoints[name]
+	if !ok {
+		return AnalysisPoint{}, fmt.Errorf("analysis point %q: %w", name, ErrSignalNotFound)
+	}
+	return ap, nil
+}
+
+// OpenLoop returns the loop transfer broken at the named analysis point,
+// L = P·C at the plant output and L = C·P at the plant input, for the
+// negative-feedback loop that ComplementarySensitivity and Sensitivity close.
 func (g *GeneralizedClosedLoop) OpenLoop(name string) (*System, error) {
-	point, err := g.AnalysisPoint(name)
+	loop, err := g.openLoop(name)
+	if err != nil {
+		return nil, fmt.Errorf("GeneralizedClosedLoop.OpenLoop: %w", err)
+	}
+	return loop, nil
+}
+
+func (g *GeneralizedClosedLoop) openLoop(name string) (*System, error) {
+	point, err := g.analysisPoint(name)
 	if err != nil {
 		return nil, err
 	}
@@ -228,26 +241,43 @@ func (g *GeneralizedClosedLoop) OpenLoop(name string) (*System, error) {
 	case AnalysisPointPlantInput:
 		return Series(g.plant, controller)
 	default:
-		return nil, fmt.Errorf("GeneralizedClosedLoop.OpenLoop: analysis point %q has no loop location: %w", name, ErrDimensionMismatch)
+		return nil, fmt.Errorf("analysis point %q has no loop location: %w", name, ErrInvalidArgument)
 	}
 }
 
+// ClosedLoop is ComplementarySensitivity.
 func (g *GeneralizedClosedLoop) ClosedLoop(name string) (*System, error) {
-	return g.ComplementarySensitivity(name)
+	t, err := g.complementarySensitivity(name)
+	if err != nil {
+		return nil, fmt.Errorf("GeneralizedClosedLoop.ClosedLoop: %w", err)
+	}
+	return t, nil
 }
 
+// ComplementarySensitivity returns T = L(I + L)⁻¹ for the open loop L at
+// the named analysis point, like MATLAB getCompSensitivity.
 func (g *GeneralizedClosedLoop) ComplementarySensitivity(name string) (*System, error) {
-	loop, err := g.OpenLoop(name)
+	t, err := g.complementarySensitivity(name)
+	if err != nil {
+		return nil, fmt.Errorf("GeneralizedClosedLoop.ComplementarySensitivity: %w", err)
+	}
+	return t, nil
+}
+
+func (g *GeneralizedClosedLoop) complementarySensitivity(name string) (*System, error) {
+	loop, err := g.openLoop(name)
 	if err != nil {
 		return nil, err
 	}
 	return Feedback(loop, nil, -1)
 }
 
+// Sensitivity returns S = (I + L)⁻¹ for the square open loop L at the named
+// analysis point, like MATLAB getSensitivity.
 func (g *GeneralizedClosedLoop) Sensitivity(name string) (*System, error) {
-	loop, err := g.OpenLoop(name)
+	loop, err := g.openLoop(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GeneralizedClosedLoop.Sensitivity: %w", err)
 	}
 	_, inputs, outputs := loop.Dims()
 	if inputs != outputs {
@@ -257,7 +287,11 @@ func (g *GeneralizedClosedLoop) Sensitivity(name string) (*System, error) {
 	if err != nil {
 		return nil, fmt.Errorf("GeneralizedClosedLoop.Sensitivity: %w", err)
 	}
-	return Feedback(eye, loop, -1)
+	s, err := Feedback(eye, loop, -1)
+	if err != nil {
+		return nil, fmt.Errorf("GeneralizedClosedLoop.Sensitivity: %w", err)
+	}
+	return s, nil
 }
 
 func (g *GeneralizedClosedLoop) primaryAnalysisPointName() string {

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"sort"
@@ -18,7 +19,7 @@ func TestStaircaseControllable(t *testing.T) {
 	B := mat.NewDense(3, 1, []float64{0, 0, 1})
 	C := mat.NewDense(1, 3, []float64{1, 0, 0})
 
-	res := ControllabilityStaircase(A, B, C, 0)
+	res := mustStaircase(t, A, B, C)
 	if res.NCont != 3 {
 		t.Errorf("expected ncont=3, got %d", res.NCont)
 	}
@@ -34,7 +35,7 @@ func TestStaircaseUncontrollable(t *testing.T) {
 	B := mat.NewDense(3, 1, nil)
 	C := mat.NewDense(1, 3, []float64{1, 0, 0})
 
-	res := ControllabilityStaircase(A, B, C, 0)
+	res := mustStaircase(t, A, B, C)
 	if res.NCont != 0 {
 		t.Errorf("expected ncont=0 for zero B, got %d", res.NCont)
 	}
@@ -49,7 +50,7 @@ func TestStaircasePartiallyControllable(t *testing.T) {
 	B := mat.NewDense(3, 1, []float64{0, 1, 0})
 	C := mat.NewDense(1, 3, []float64{1, 0, 0})
 
-	res := ControllabilityStaircase(A, B, C, 0)
+	res := mustStaircase(t, A, B, C)
 	if res.NCont != 2 {
 		t.Errorf("expected ncont=2, got %d", res.NCont)
 	}
@@ -68,7 +69,7 @@ func TestStaircaseSingleInput(t *testing.T) {
 	B := mat.NewDense(4, 1, []float64{0, 0, 0, 1})
 	C := mat.NewDense(1, 4, []float64{1, 0, 0, 0})
 
-	res := ControllabilityStaircase(A, B, C, 0)
+	res := mustStaircase(t, A, B, C)
 	if res.NCont != 4 {
 		t.Errorf("expected ncont=4 for single-input controllable, got %d", res.NCont)
 	}
@@ -96,7 +97,7 @@ func TestStaircaseMultiInput(t *testing.T) {
 	})
 	C := mat.NewDense(1, 3, []float64{1, 1, 1})
 
-	res := ControllabilityStaircase(A, B, C, 0)
+	res := mustStaircase(t, A, B, C)
 	if res.NCont != 3 {
 		t.Errorf("expected ncont=3, got %d", res.NCont)
 	}
@@ -108,7 +109,7 @@ func TestStaircaseZeroDimension(t *testing.T) {
 	B := &mat.Dense{}
 	C := &mat.Dense{}
 
-	res := ControllabilityStaircase(A, B, C, 0)
+	res := mustStaircase(t, A, B, C)
 	if res.NCont != 0 {
 		t.Errorf("expected ncont=0 for n=0, got %d", res.NCont)
 	}
@@ -119,7 +120,7 @@ func TestStaircaseZeroInputs(t *testing.T) {
 	B := &mat.Dense{}
 	C := mat.NewDense(1, 2, []float64{1, 0})
 
-	res := ControllabilityStaircase(A, B, C, 0)
+	res := mustStaircase(t, A, B, C)
 	if res.NCont != 0 {
 		t.Errorf("expected ncont=0 for m=0, got %d", res.NCont)
 	}
@@ -134,7 +135,7 @@ func TestStaircaseOrthogonalSimilarity(t *testing.T) {
 	B := mat.NewDense(3, 1, []float64{0, 0, 1})
 	C := mat.NewDense(1, 3, []float64{1, 0, 0})
 
-	res := ControllabilityStaircase(A, B, C, 0)
+	res := mustStaircase(t, A, B, C)
 
 	_, bCols := res.B.Dims()
 	for i := res.NCont; i < 3; i++ {
@@ -180,4 +181,53 @@ func sortComplex(vals []complex128) {
 		}
 		return imag(vals[i]) < imag(vals[j])
 	})
+}
+
+func mustStaircase(tb testing.TB, A, B, C *mat.Dense) *StaircaseResult {
+	tb.Helper()
+	res, err := controllabilityStaircase(A, B, C, 0, true)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return res
+}
+
+func TestStaircaseTransformAndValidation(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{1, 2, 0, -1, 0.5, 3, 0.2, -2, -1})
+	B := mat.NewDense(3, 2, []float64{1, 0, 0, 0, 1, 0})
+	C := mat.NewDense(1, 3, []float64{1, -1, 2})
+	res := mustStaircase(t, A, B, C)
+	T := res.T
+	var tat, tb, ct, tt mat.Dense
+	tat.Mul(T, A)
+	tat.Mul(&tat, T.T())
+	tb.Mul(T, B)
+	ct.Mul(C, T.T())
+	tt.Mul(T, T.T())
+	for _, c := range []struct {
+		name      string
+		got, want mat.Matrix
+	}{{"T·A·Tᵀ", &tat, res.A}, {"T·B", &tb, res.B}, {"C·Tᵀ", &ct, res.C}, {"T·Tᵀ", &tt, eyeDense(3)}} {
+		if !mat.EqualApprox(c.got, c.want, 1e-12) {
+			t.Errorf("%s = %v, want %v", c.name, mat.Formatted(c.got), mat.Formatted(c.want))
+		}
+	}
+
+	cases := []struct {
+		name    string
+		A, B, C *mat.Dense
+		tol     float64
+		want    error
+	}{
+		{"nil A", nil, B, nil, 0, ErrInvalidArgument},
+		{"B rows", A, mat.NewDense(2, 1, nil), nil, 0, ErrDimensionMismatch},
+		{"C cols", A, B, mat.NewDense(1, 2, nil), 0, ErrDimensionMismatch},
+		{"NaN tol", A, B, C, math.NaN(), ErrInvalidArgument},
+		{"negative tol", A, B, C, -1, ErrInvalidArgument},
+	}
+	for _, tc := range cases {
+		if _, err := controllabilityStaircase(tc.A, tc.B, tc.C, tc.tol, false); !errors.Is(err, tc.want) {
+			t.Errorf("%s: error = %v, want %v", tc.name, err, tc.want)
+		}
+	}
 }

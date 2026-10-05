@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -26,16 +27,16 @@ type hinfGeneralPlant struct {
 func newHinfGeneralPlant(gp *generalizedPlantPartition) (*hinfGeneralPlant, error) {
 	n, m1, m2, p1, p2 := gp.n, gp.m1, gp.m2, gp.p1, gp.p2
 	if p1 < m2 || m1 < p2 {
-		return nil, ErrInvalidPartition
+		return nil, fmt.Errorf("D12 or D21 rank deficient: %w", ErrInvalidPartition)
 	}
 
 	var svd12 mat.SVD
 	if !svd12.Factorize(gp.D12, mat.SVDFull) {
-		return nil, ErrInvalidPartition
+		return nil, fmt.Errorf("D12 or D21 rank deficient: %w", ErrInvalidPartition)
 	}
 	s12 := svd12.Values(nil)
 	if !fullRankValues(s12, max(p1, m2)) {
-		return nil, ErrInvalidPartition
+		return nil, fmt.Errorf("D12 or D21 rank deficient: %w", ErrInvalidPartition)
 	}
 	var U12, V12 mat.Dense
 	svd12.UTo(&U12)
@@ -50,11 +51,11 @@ func newHinfGeneralPlant(gp *generalizedPlantPartition) (*hinfGeneralPlant, erro
 
 	var svd21 mat.SVD
 	if !svd21.Factorize(gp.D21, mat.SVDFull) {
-		return nil, ErrInvalidPartition
+		return nil, fmt.Errorf("D12 or D21 rank deficient: %w", ErrInvalidPartition)
 	}
 	s21 := svd21.Values(nil)
 	if !fullRankValues(s21, max(p2, m1)) {
-		return nil, ErrInvalidPartition
+		return nil, fmt.Errorf("D12 or D21 rank deficient: %w", ErrInvalidPartition)
 	}
 	var U21, V21 mat.Dense
 	svd21.UTo(&U21)
@@ -163,12 +164,12 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	gp := hp.gp
 	n := gp.n
 	if !(gamma > hp.gammaLB) {
-		return nil, nil, nil, nil, ErrGammaNotAchievable
+		return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
 
 	Rinv, err = shiftedInverse(hp.D1dtD1d, gp.m1, gamma)
 	if err != nil {
-		return nil, nil, nil, nil, ErrGammaNotAchievable
+		return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
 	BRinv := mulDense(hp.B, Rinv)
 	Ax := mulDense(BRinv, hp.D1dtC1)
@@ -184,7 +185,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 
 	Rtinv, err = shiftedInverse(hp.Dd1Dd1, gp.p1, gamma)
 	if err != nil {
-		return nil, nil, nil, nil, ErrGammaNotAchievable
+		return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
 	B1Dd1tRtinv := mulDense(hp.B1Dd1t, Rtinv)
 	Ay := mulDense(B1Dd1tRtinv, hp.C)
@@ -200,12 +201,12 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 
 	var eig mat.Eigen
 	if !eig.Factorize(mulDense(X, Y), mat.EigenNone) {
-		return nil, nil, nil, nil, ErrGammaNotAchievable
+		return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
 	g2 := gamma * gamma
 	for _, v := range eig.Values(nil) {
 		if math.Abs(real(v)) >= g2 {
-			return nil, nil, nil, nil, ErrGammaNotAchievable
+			return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 		}
 	}
 	return X, Y, Rinv, Rtinv, nil
@@ -244,7 +245,7 @@ func (hp *hinfGeneralPlant) centralD11(gamma float64) (*mat.Dense, error) {
 		lu.Factorize(W)
 		WinvD1112 := mat.NewDense(r, gp.p2, nil)
 		if err := lu.SolveTo(WinvD1112, false, D1112); err != nil {
-			return nil, ErrGammaNotAchievable
+			return nil, fmt.Errorf("central D11 singular at γ = %g: %w", gamma, ErrGammaNotAchievable)
 		}
 		Dk.Add(Dk, mulDense(mulDense(D1121, mat.DenseCopyOf(D1111.T())), WinvD1112))
 	}
@@ -255,18 +256,18 @@ func (hp *hinfGeneralPlant) centralD11(gamma float64) (*mat.Dense, error) {
 func hinfSynGeneral(gp *generalizedPlantPartition) (*HinfSynResult, error) {
 	hp, err := newHinfGeneralPlant(gp)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
 	gamma, err := hinfControllerGamma(hp.gammaLB, func(g float64) bool {
 		_, _, _, _, err := hp.riccatis(g)
 		return err == nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
 	X, Y, Rinv, Rtinv, err := hp.riccatis(gamma)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
 
 	n, m1, p1, m2, p2 := gp.n, gp.m1, gp.p1, gp.m2, gp.p2
@@ -281,7 +282,7 @@ func hinfSynGeneral(gp *generalizedPlantPartition) (*HinfSynResult, error) {
 
 	Dhat, err := hp.centralD11(gamma)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
 
 	Zarg := mulDense(Y, X)
@@ -300,7 +301,7 @@ func hinfSynGeneral(gp *generalizedPlantPartition) (*HinfSynResult, error) {
 	BL.Sub(BL, extractBlock(L, 0, p1, n, p2))
 	Bhat := mat.NewDense(n, p2, nil)
 	if err := lu.SolveTo(Bhat, false, BL); err != nil {
-		return nil, ErrGammaNotAchievable
+		return nil, fmt.Errorf("%s: controller state matrix singular at γ = %g: %w", gp.op, gamma, ErrGammaNotAchievable)
 	}
 
 	Chat := mulDense(Dhat, C2F)

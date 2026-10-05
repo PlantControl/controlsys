@@ -12,24 +12,24 @@ import (
 // Gain matches the leading low-frequency term, including poles or zeros at DC.
 func (sys *System) d2cMatched() (*System, error) {
 	if sys.IsContinuous() {
-		return nil, fmt.Errorf("D2C matched: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("matched: %w", ErrWrongDomain)
 	}
 	if sys.Dt <= 0 || math.IsNaN(sys.Dt) || math.IsInf(sys.Dt, 0) {
 		return nil, ErrInvalidSampleTime
 	}
 	_, m, p := sys.Dims()
 	if m != 1 || p != 1 {
-		return nil, fmt.Errorf("D2C matched: %w", ErrNotSISO)
+		return nil, fmt.Errorf("matched: %w", ErrNotSISO)
 	}
 	if sys.IsDescriptor() {
 		return nil, ErrDescriptorUnsupported
 	}
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("D2C matched: internal delays: %w", ErrFeedbackDelay)
+		return nil, fmt.Errorf("matched: internal delays: %w", ErrFeedbackDelay)
 	}
 	result, err := sys.rationalTransferFunction(nil)
 	if err != nil {
-		return nil, fmt.Errorf("D2C matched: %w", err)
+		return nil, fmt.Errorf("matched: %w", err)
 	}
 	numerator, artificial := matchedDeflateArtificialZeros(result.TF.Num[0][0])
 	result.TF.Num[0][0] = numerator
@@ -75,7 +75,7 @@ func matchedLogRoots(roots []complex128, dt float64) ([]complex128, error) {
 			return nil, ErrOverflow
 		}
 		if cmplx.Abs(root) == 0 || (real(root) <= 0 && math.Abs(imag(root)) <= 1e-10*(1+cmplx.Abs(root))) {
-			return nil, fmt.Errorf("D2C matched: nonpositive real root %v has no supported real principal logarithm: %w", root, ErrSingularTransform)
+			return nil, fmt.Errorf("matched: nonpositive real root %v has no supported real principal logarithm: %w", root, ErrSingularTransform)
 		}
 		out = append(out, cmplx.Log(root)/complex(dt, 0))
 	}
@@ -98,7 +98,7 @@ func matchedLogRoots(roots []complex128, dt float64) ([]complex128, error) {
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("D2C matched: non-real reconstruction: %w", ErrConjugatePairs)
+			return nil, fmt.Errorf("matched: non-real reconstruction: %w", ErrConjugatePairs)
 		}
 	}
 	return out, nil
@@ -143,7 +143,7 @@ func matchedContinuousGain(dz, dp, cz, cp []complex128, gain, dt float64) (float
 
 func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("DiscretizeMatched: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
 	if dt <= 0 || math.IsNaN(dt) || math.IsInf(dt, 0) {
 		return nil, ErrInvalidSampleTime
@@ -156,7 +156,7 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 		return nil, ErrDescriptorUnsupported
 	}
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("DiscretizeMatched: internal delays: %w", ErrFeedbackDelay)
+		return nil, fmt.Errorf("matched: internal delays: %w", ErrFeedbackDelay)
 	}
 	rational, err := sys.rationalTransferFunction(nil)
 	if err != nil {

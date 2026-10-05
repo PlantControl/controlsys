@@ -259,7 +259,7 @@ func TestLqi_MatchesLqgServo(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertMatEqual(t, "Kx", subDense(res.K, 0, 0, m, n), lqg.K, 1e-10)
-		assertMatEqual(t, "Ki", subDense(res.K, 0, n, m, p), lqg.Ki, 1e-10)
+		assertMatEqual(t, "Ki", subDense(res.K, 0, n, m, p), lqg.ki, 1e-10)
 		assertMatEqual(t, "X", res.X, lqg.Xc, 1e-10)
 	}
 }
@@ -311,7 +311,7 @@ func TestLqi_Errors(t *testing.T) {
 	}{
 		{"Q dims", csys, eye(3), eye(2), ErrDimensionMismatch},
 		{"R dims", csys, eye(5), eye(3), ErrDimensionMismatch},
-		{"nil R", csys, eye(5), nil, ErrDimensionMismatch},
+		{"nil R", csys, eye(5), nil, ErrInvalidArgument},
 		{"Q asymmetric", csys, asym, eye(2), ErrNotSymmetric},
 		{"R asymmetric", csys, eye(5), mat.NewDense(2, 2, []float64{1, 0.1, 0, 1}), ErrNotSymmetric},
 		{"no states", gain, eye(1), eye(1), ErrDimensionMismatch},
@@ -1570,5 +1570,21 @@ func TestPlaceAckerNoStates(t *testing.T) {
 	}
 	if _, err := Acker(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("Acker: err = %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestObserverPolicyNilArgs(t *testing.T) {
+	if _, err := Lqi(nil, eye(2), eye(1), nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Lqi(nil): %v", err)
+	}
+	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := validateRegulatorGains("Reg", sys, nil, eye(1)); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil K: %v", err)
+	}
+	if _, _, _, err := validateRegulatorGains("Reg", sys, eye(2), eye(1)); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("bad K: %v", err)
 	}
 }

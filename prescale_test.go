@@ -1,12 +1,15 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -416,5 +419,20 @@ func TestPrescale_DescriptorAndDelays(t *testing.T) {
 			}
 			assertFieldResponse(t, label, got, func(s complex128) [][]complex128 { return fieldOracle(orig, s) })
 		}
+	}
+}
+
+func TestPrescaleRejectsNonFinite(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-1, 2, math.NaN(), -3})
+	sys, err := New(A, mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 1}), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishesWithin(t, 5*time.Second, func() { _, err = Prescale(sys) })
+	if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "Prescale: ") {
+		t.Fatalf("NaN A err = %v, want Prescale: ... ErrInvalidArgument", err)
+	}
+	if _, err := Prescale(nil); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil err = %v", err)
 	}
 }

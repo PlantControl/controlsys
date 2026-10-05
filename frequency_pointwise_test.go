@@ -113,7 +113,7 @@ func TestFreqResponsePointwise_Discrete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sysd, err := sysc.Discretize(0.5)
+	sysd, err := sysc.C2D(0.5, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

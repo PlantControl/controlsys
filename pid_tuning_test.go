@@ -22,7 +22,7 @@ func TestTunePIDAnalyticTargetsAndFixedWeights(t *testing.T) {
 	if result.Controller.B != b || result.Controller.C != c {
 		t.Fatal("changed fixed weights")
 	}
-	if result.Evidence.Stability != "closed-loop-poles" || !result.Evidence.Feasible {
+	if result.Evidence.Stability != "closed-loop-poles" {
 		t.Fatalf("evidence %+v", result.Evidence)
 	}
 	pid := result.Controller
@@ -63,7 +63,7 @@ func TestTunePIDFocusChangesDesign(t *testing.T) {
 
 func TestTunePIDDiscreteBasisMatchesRealization(t *testing.T) {
 	p := makePlant(t, []float64{1}, []float64{1, 1})
-	sampled, err := p.DiscretizeZOH(.1)
+	sampled, err := p.C2D(.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,13 +98,27 @@ func TestTunePIDCancellationBoundsAndUnattainable(t *testing.T) {
 	}
 	// A P controller cannot add phase: this plant at wc=1 has PM=135, not 60.
 	r, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60, MaxEvaluations: 7})
-	if !errors.Is(err, ErrPIDTuningTargetUnattainable) || r.Evidence.Evaluations > 7 || r.Evidence.Feasible {
+	var tuneErr *PIDTuningError
+	if !errors.Is(err, ErrPIDTuningTargetUnattainable) || !errors.As(err, &tuneErr) || r != nil {
 		t.Fatalf("result %+v err %v", r, err)
 	}
+	if e := tuneErr.Evidence; e.Evaluations == 0 || e.Evaluations > 7 || e.RequestedCrossover != 1 || e.Termination != PIDTerminationEvaluationLimit || !strings.HasPrefix(err.Error(), "TunePID: ") {
+		t.Fatalf("evidence %+v err %v", e, err)
+	}
 	for _, o := range []PIDTuningOptions{{CrossoverFrequency: math.NaN()}, {CrossoverFrequency: -1}, {CrossoverFrequency: 1, PhaseMargin: 180}, {CrossoverFrequency: 1, Focus: "unknown"}, {CrossoverFrequency: 1, MaxEvaluations: 4097}} {
-		if _, err := TunePID(context.Background(), p, PidtunePI, o); err == nil {
-			t.Fatalf("accepted %+v", o)
+		if _, err := TunePID(context.Background(), p, PidtunePI, o); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "TunePID: ") {
+			t.Fatalf("%+v: err %v, want ErrInvalidArgument", o, err)
 		}
+	}
+	if _, err := TunePID(nil, p, PidtunePI, PIDTuningOptions{}); !errors.Is(err, ErrInvalidArgument) { //nolint:staticcheck
+		t.Fatalf("nil ctx err %v", err)
+	}
+	if _, err := TunePID(context.Background(), nil, PidtunePI, PIDTuningOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil plant err %v", err)
+	}
+	known := 1
+	if _, err := TunePID(context.Background(), p, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1, UnstablePoles: &known}); !errors.Is(err, ErrOptionUnsupported) {
+		t.Fatalf("UnstablePoles on System path err %v, want ErrOptionUnsupported", err)
 	}
 }
 
@@ -126,8 +140,8 @@ func TestTunePIDPlantClasses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !r.Evidence.Feasible {
-				t.Fatal("not feasible")
+			if r.Controller == nil {
+				t.Fatal("no controller")
 			}
 		})
 	}
@@ -155,7 +169,7 @@ func isDelayWarning(w string) bool { return strings.Contains(w, "delay") }
 
 func pidTuningOpenLoop(t *testing.T, plant *System, c *PID2) *System {
 	t.Helper()
-	cs, err := NewPID(c.Kp, c.Ki, c.Kd, WithFilter(c.Tf)).System()
+	cs, err := mustPID(t, c.Kp, c.Ki, c.Kd, c.Tf, 0).System()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,8 +210,8 @@ func TestTunePIDDelayNyquistBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stable, ok := pidTuningDelayStability(tc.plant, eval, 1, tc.c.Kd != 0 && tc.c.Tf == 0)
-			if !ok {
+			stable, ok, err := pidTuningDelayStability(tc.plant, eval, 1, tc.c.Kd != 0 && tc.c.Tf == 0)
+			if err != nil || !ok {
 				t.Fatal("plant outside Nyquist scope")
 			}
 			L := func(w float64) complex128 {
@@ -226,7 +240,7 @@ func TestTunePIDDelayNyquistBoundary(t *testing.T) {
 				c.Kp *= f.scale
 				c.Ki *= f.scale
 				c.Kd *= f.scale
-				if got := stable(&c); got != f.want {
+				if got, err := stable(&c); err != nil || got != f.want {
 					t.Fatalf("gain %g (kc=%g at w=%g): stable=%v, want %v", f.scale, kc, wc, got, f.want)
 				}
 			}
@@ -278,7 +292,7 @@ func TestTunePIDGainCrossingEvidenceIndependentMargin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	controller := NewPID(r.Controller.Kp, r.Controller.Ki, 0)
+	controller := mustPID(t, r.Controller.Kp, r.Controller.Ki, 0, 0, 0)
 	loop := pidOpenLoop(t, p, controller)
 	margin, err := Margin(loop)
 	if err != nil {
@@ -330,7 +344,8 @@ func TestTunePIDIdealDerivativeRejectsHiddenUnstableMode(t *testing.T) {
 		}
 		for _, family := range []PidtuneType{PidtunePD, PidtunePID} {
 			r, err := TunePID(context.Background(), p, family, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
-			if !errors.Is(err, ErrPIDTuningTargetUnattainable) || r == nil || r.Evidence.Feasible {
+			var tuneErr *PIDTuningError
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) || !errors.As(err, &tuneErr) || r != nil {
 				t.Fatalf("%s %s: hidden unstable mode certified: %v", hidden, family, err)
 			}
 		}
@@ -346,7 +361,7 @@ func TestTunePIDOneGainFamiliesTakeThePlantsMargin(t *testing.T) {
 				t.Fatalf("%s at crossover %g: %v", family, wc, err)
 			}
 			e := result.Evidence
-			if !e.Feasible || e.RequestedPhaseMargin <= 0 || e.RequestedPhaseMargin >= 180 {
+			if e.RequestedPhaseMargin <= 0 || e.RequestedPhaseMargin >= 180 {
 				t.Fatalf("%s at %g: evidence %+v", family, wc, e)
 			}
 			if wc > 0 && math.Abs(e.AchievedCrossover-wc) > 1e-6*wc {
@@ -381,7 +396,7 @@ func TestTunePIDOneGainAcceptsSeveralCrossovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := result.Evidence
-	if len(e.GainCrossovers) < 3 || !e.Feasible {
+	if len(e.GainCrossovers) < 3 {
 		t.Fatalf("expected several gain crossovers: %+v", e)
 	}
 	lowest := math.Inf(1)
@@ -414,7 +429,7 @@ func TestTunePIDDelayIdealDerivativeOutOfScopeFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for family, want := range map[PidtuneType]string{PidtunePID: "sampled-frequency-only", PidtunePIDF: "nyquist-encirclement"} {
+	for family, want := range map[PidtuneType]PIDStabilityEvidence{PidtunePID: PIDStabilitySampledOnly, PidtunePIDF: PIDStabilityNyquist} {
 		r, err := TunePID(context.Background(), lft, family, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
 		if err != nil {
 			t.Fatalf("%s: %v", family, err)
@@ -480,4 +495,20 @@ func polyMulTest(a, b []float64) []float64 {
 		}
 	}
 	return out
+}
+
+func TestTunePIDStabilityCheckFailureAborts(t *testing.T) {
+	plant := makePlant(t, []float64{1}, []float64{1, 1})
+	eval, err := newSISOEval(plant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("eigen failed")
+	p := pidTuningPlant{low: .01, high: 100, at: eval.at, stability: PIDStabilityClosedLoopPoles,
+		stable: func(*PID2) (bool, error) { return false, boom }}
+	r, err := tunePID(context.Background(), "TunePID", p, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
+	var tuneErr *PIDTuningError
+	if r != nil || !errors.Is(err, boom) || errors.As(err, &tuneErr) || !strings.HasPrefix(err.Error(), "TunePID: ") {
+		t.Fatalf("r=%v err=%v, want aborted with the stability error", r, err)
+	}
 }

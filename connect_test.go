@@ -572,7 +572,7 @@ func TestSeries_WithInputOutputDelay(t *testing.T) {
 	if len(result.OutputDelay) != 1 || result.OutputDelay[0] != 4 {
 		t.Errorf("OutputDelay = %v, want [4]", result.OutputDelay)
 	}
-	td := result.TotalDelay()
+	td := mustTotalDelay(t, result)
 	if td == nil {
 		t.Fatal("TotalDelay should not be nil")
 	}
@@ -664,7 +664,7 @@ func TestSeries_IntermediateDelayUniform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td := result.TotalDelay()
+	td := mustTotalDelay(t, result)
 	if td == nil {
 		t.Fatal("TotalDelay should not be nil")
 	}
@@ -1960,11 +1960,11 @@ func TestFeedback_DelayInFeedbackPath(t *testing.T) {
 		u.Set(0, j, 1.0)
 	}
 
-	Sd, _ := S.DiscretizeZOH(dt)
+	Sd, _ := S.C2D(dt, C2DOptions{})
 	sResp, _ := Sd.Simulate(u, nil, nil)
 	sFinal := sResp.Y.At(0, nSteps-1)
 
-	Td, _ := T.DiscretizeZOH(dt)
+	Td, _ := T.C2D(dt, C2DOptions{})
 	tResp, _ := Td.Simulate(u, nil, nil)
 	tFinal := tResp.Y.At(0, nSteps-1)
 
@@ -1981,8 +1981,8 @@ func TestBlkDiag_Empty(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 0 args")
 	}
-	if !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("got %v, want ErrDimensionMismatch", err)
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("got %v, want ErrInvalidArgument", err)
 	}
 }
 

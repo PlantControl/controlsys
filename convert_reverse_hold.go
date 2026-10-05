@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -35,12 +36,12 @@ func (sys *System) d2cZOHRobust() (*System, error) {
 	if !matrixRightHalfPlane(sys.A) {
 		var eig mat.Eigen
 		if !eig.Factorize(sys.A, mat.EigenNone) {
-			return nil, fmt.Errorf("D2C zoh: eigenvalue computation failed: %w", ErrSchurFailed)
+			return nil, fmt.Errorf("zoh: eigenvalue computation failed: %w", ErrSchurFailed)
 		}
 		values = eig.Values(nil)
 		for _, v := range values {
 			if v == 0 {
-				return nil, fmt.Errorf("D2C zoh: pole at z=0 has no finite continuous logarithm: %w", ErrSingularTransform)
+				return nil, fmt.Errorf("zoh: pole at z=0 has no finite continuous logarithm: %w", ErrSingularTransform)
 			}
 			negative = negative || (imag(v) == 0 && real(v) < 0)
 		}
@@ -56,7 +57,7 @@ func (sys *System) d2cZOHRobust() (*System, error) {
 	} else {
 		logarithm, err := matrixLogISS(augmented)
 		if err != nil {
-			return nil, fmt.Errorf("D2C zoh: %w", err)
+			return nil, fmt.Errorf("zoh: %w", err)
 		}
 		a, b := mat.NewDense(n, n, nil), newDense(n, m)
 		lr, acr, bcr := logarithm.RawMatrix(), a.RawMatrix(), b.RawMatrix()
@@ -92,7 +93,7 @@ func (sys *System) d2cZOHRealExtension(augmented *mat.Dense, values []complex128
 		}
 	}
 	if theta <= 32*(math.Nextafter(1, 2)-1) {
-		return nil, fmt.Errorf("D2C zoh: conjugate poles too close to the logarithm branch cut: %w", ErrSingularTransform)
+		return nil, fmt.Errorf("zoh: conjugate poles too close to the logarithm branch cut: %w", ErrSingularTransform)
 	}
 	rotated := mat.NewDense(2*q, 2*q, nil)
 	rr, ar := rotated.RawMatrix(), augmented.RawMatrix()
@@ -108,7 +109,7 @@ func (sys *System) d2cZOHRealExtension(augmented *mat.Dense, values []complex128
 	}
 	logarithm, err := matrixLogISS(rotated)
 	if err != nil {
-		return nil, fmt.Errorf("D2C zoh: real continuous extension: %w", err)
+		return nil, fmt.Errorf("zoh: real continuous extension: %w", err)
 	}
 	re, im := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
 	rb, ib := newDense(n, m), newDense(n, m)
@@ -134,13 +135,13 @@ func (sys *System) d2cZOHRealExtension(augmented *mat.Dense, values []complex128
 // The discrete state is x_d[k] = x_c(k*dt) - Gamma1*u[k].
 func (sys *System) discretizeModifiedFOH(dt float64) (*System, error) {
 	if sys.IsDiscrete() {
-		return nil, fmt.Errorf("DiscretizeFOH: model already discrete: %w", ErrWrongDomain)
+		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
 	if dt <= 0 || math.IsInf(dt, 0) || math.IsNaN(dt) {
 		return nil, ErrInvalidSampleTime
 	}
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("DiscretizeFOH: modified FOH with internal delays not supported: %w", ErrFeedbackDelay)
+		return nil, fmt.Errorf("foh: internal delays not supported: %w", ErrFeedbackDelay)
 	}
 	n, m, p := sys.Dims()
 	out := sys.Copy()
@@ -183,7 +184,7 @@ func (sys *System) d2cFOH() (*System, error) {
 	}
 	logarithm, err := matLog(sys.A)
 	if err != nil {
-		return nil, fmt.Errorf("D2C foh: requires nonzero poles off the negative real axis: %w", err)
+		return nil, fmt.Errorf("foh: requires nonzero poles off the negative real axis: %w", err)
 	}
 	ac := mat.NewDense(n, n, nil)
 	ac.Scale(1/sys.Dt, logarithm)
@@ -197,7 +198,7 @@ func (sys *System) d2cFOH() (*System, error) {
 		var lu mat.LU
 		lu.Factorize(&kernel)
 		if err := lu.SolveTo(out.B, false, sys.B); err != nil {
-			return nil, fmt.Errorf("D2C foh: input reconstruction is singular: %w", ErrSingularTransform)
+			return nil, fmt.Errorf("foh: input reconstruction is singular: %w", ErrSingularTransform)
 		}
 		if p > 0 {
 			var gamma1, feedthrough mat.Dense

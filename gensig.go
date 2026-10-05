@@ -5,46 +5,64 @@ import (
 	"math"
 )
 
-func GenSig(sigType string, period, dt float64) (t, u []float64, err error) {
-	if !(period > 0) || math.IsInf(period, 1) {
-		return nil, nil, fmt.Errorf("GenSig: period must be positive and finite")
+// GenSig generates a periodic test signal u on the time grid t = 0:ts:tf,
+// like MATLAB [u,t] = gensig(type,tau,Tf,Ts), for use with Lsim. sigType is
+// "sine" (sin(2πt/tau)), "square" (0 on the first half of each period, 1 on
+// the second) or "pulse" (a unit sample at the first grid point at or after
+// each positive multiple of tau). All signals have unit amplitude and start
+// at 0. tf = 0 selects the default 5·tau and ts = 0 the default tau/64. A
+// non-positive or non-finite tau, a negative or non-finite tf or ts, and an
+// unknown sigType return ErrInvalidArgument.
+// See https://www.mathworks.com/help/control/ref/gensig.html.
+func GenSig(sigType string, tau, tf, ts float64) (u, t []float64, err error) {
+	if !(tau > 0) || math.IsInf(tau, 1) {
+		return nil, nil, fmt.Errorf("GenSig: tau is %g, want positive and finite: %w", tau, ErrInvalidArgument)
 	}
-	if !(dt > 0) || math.IsInf(dt, 1) {
-		return nil, nil, fmt.Errorf("GenSig: dt must be positive and finite")
+	if !(tf >= 0) || math.IsInf(tf, 1) {
+		return nil, nil, fmt.Errorf("GenSig: tf is %g, want non-negative and finite: %w", tf, ErrInvalidArgument)
 	}
-
-	steps := gridSampleCount(period, dt)
-	t = make([]float64, steps)
-	u = make([]float64, steps)
-
-	for k := range t {
-		t[k] = float64(k) * dt
+	if !(ts >= 0) || math.IsInf(ts, 1) {
+		return nil, nil, fmt.Errorf("GenSig: ts is %g, want non-negative and finite: %w", ts, ErrInvalidArgument)
 	}
-
+	if tf == 0 {
+		tf = 5 * tau
+	}
+	if ts == 0 {
+		ts = tau / 64
+	}
+	var at func(k int, tk float64) float64
 	switch sigType {
-	case "step":
-		for k := range u {
-			u[k] = 1
-		}
 	case "sine":
-		for k := range u {
-			u[k] = math.Sin(2 * math.Pi * t[k] / period)
-		}
+		at = func(_ int, tk float64) float64 { return math.Sin(2 * math.Pi * tk / tau) }
 	case "square":
-		for k := range u {
-			phase := t[k] / period
-			phase -= math.Floor(phase + gridTol)
-			if phase < 0.5-gridTol {
-				u[k] = 1
-			} else {
-				u[k] = -1
+		at = func(_ int, tk float64) float64 {
+			if gensigPhase(tk, tau) >= 0.5-gridTol {
+				return 1
 			}
+			return 0
 		}
 	case "pulse":
-		u[0] = 1.0 / dt
+		at = func(k int, tk float64) float64 {
+			if k > 0 && math.Floor(tk/tau+gridTol) > math.Floor((tk-ts)/tau+gridTol) {
+				return 1
+			}
+			return 0
+		}
 	default:
-		return nil, nil, fmt.Errorf("GenSig: unknown signal type %q (use step, sine, square, pulse)", sigType)
+		return nil, nil, fmt.Errorf("GenSig: unknown signal type %q (use sine, square or pulse): %w", sigType, ErrInvalidArgument)
 	}
 
-	return t, u, nil
+	steps := gridSampleCount(tf, ts)
+	t = make([]float64, steps)
+	u = make([]float64, steps)
+	for k := range t {
+		t[k] = float64(k) * ts
+		u[k] = at(k, t[k])
+	}
+	return u, t, nil
+}
+
+func gensigPhase(t, tau float64) float64 {
+	phase := t / tau
+	return phase - math.Floor(phase+gridTol)
 }

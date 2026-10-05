@@ -341,7 +341,7 @@ func TestDiscretize_Names(t *testing.T) {
 	sys.StateName = []string{"x"}
 	sys.Notes = "continuous"
 
-	disc, err := sys.Discretize(0.01)
+	disc, err := sys.C2D(0.01, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}

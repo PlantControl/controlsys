@@ -307,7 +307,7 @@ func TestMargin_Discrete(t *testing.T) {
 	}
 
 	dt := 0.01
-	dsys, err := sys.DiscretizeZOH(dt)
+	dsys, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ func TestBandwidth_Discrete(t *testing.T) {
 	}
 
 	dt := 0.01
-	dsys, err := sys.DiscretizeZOH(dt)
+	dsys, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +688,7 @@ func TestAllMargin_Discrete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := sys.DiscretizeZOH(0.01)
+	dsys, err := sys.C2D(0.01, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -899,7 +899,7 @@ func TestDiskMargin_Discrete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := sys.DiscretizeZOH(0.01)
+	dsys, err := sys.C2D(0.01, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1129,7 +1129,7 @@ func TestMargin_Discrete_PythonControl_SecondCase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := sys.DiscretizeZOH(0.1)
+	dsys, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1296,7 +1296,7 @@ func TestDiskMarginSkew_DenseGridOracle(t *testing.T) {
 		t.Fatal(err)
 	}
 	const dt = 0.2
-	dsys, err := csys.DiscretizeZOH(dt)
+	dsys, err := csys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2257,7 +2257,7 @@ func BenchmarkMarginOrder(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("Pidtune/n=%d", n), func(b *testing.B) {
 			for b.Loop() {
-				Pidtune(sys, PidtunePID)
+				Pidtune(sys, PidtunePID, 0, nil)
 			}
 		})
 	}

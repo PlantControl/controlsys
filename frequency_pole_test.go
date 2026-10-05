@@ -132,7 +132,11 @@ func TestFreqResponseAtPoleExplicitAndDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, r := range ar.Responses {
+	for idx := range arr.Len() {
+		r, err := ar.ResponseFlat(idx)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for k, w := range contW {
 			want := contOracle(complex(0, w))
 			for i := range want {
@@ -308,6 +312,15 @@ func TestFreqResponseAtPoleDiscreteInternalDelay(t *testing.T) {
 	if dc, err := outside.DCGain(); err != nil || !math.IsInf(dc.At(0, 0), 1) {
 		t.Errorf("DCGain = %v, %v; want +Inf", dc, err)
 	}
+
+	// Oscillator inside the loop: H is singular at z = ±j, an exact
+	// unit-circle point away from z = 1, where G(j) = 1/(j²+1+j⁻²) = −1.
+	osc := poleSys(t, 2, 1, 1, []float64{0, 1, -1, 0}, []float64{0, 1}, []float64{1, 0}, []float64{0}, dt)
+	oscTF := func(z complex128) [][]complex128 { return [][]complex128{{1 / (z*z + 1 + 1/(z*z))}} }
+	oscW := []float64{1, math.Pi / 2 / dt}
+	checkPoleResponse(t, "discrete oscillator in loop", poleDelayLoop(t, osc.Copy(), []float64{0, -1}, []float64{1, 0}, d), oscW, oscTF)
+	checkPoleResponse(t, "discrete descriptor oscillator in loop",
+		poleDelayLoop(t, poleDescriptorTwin(t, osc), []float64{-0.5, -2}, []float64{1, 0}, d), oscW, oscTF)
 }
 
 // TestFreqResponseAtPoleDoubleIntegrator covers a defective (Jordan) pole:

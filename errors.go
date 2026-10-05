@@ -168,6 +168,10 @@ var (
 	// ErrInvalidExpression reports a malformed SumBlk expression.
 	ErrInvalidExpression = errors.New("controlsys: invalid sumblk expression")
 
+	// ErrVoidModel reports a void slot of a model array, which holds no
+	// model and so no response.
+	ErrVoidModel = errors.New("controlsys: model array slot is void")
+
 	// ErrSignalNotFound reports a signal name absent from the model.
 	ErrSignalNotFound = errors.New("controlsys: signal name not found")
 

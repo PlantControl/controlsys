@@ -60,7 +60,7 @@ func TestRemainingArchitectureDelayTopologyPublicOperations(t *testing.T) {
 	}
 
 	collapsed := base.Copy()
-	if err := collapsed.SetDelay(split.TotalDelay()); err != nil {
+	if err := collapsed.SetDelay(mustTotalDelay(t, split)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -152,11 +152,11 @@ func TestRemainingArchitectureConversionPlannerBehavior(t *testing.T) {
 	sys.InputDelay = []float64{0.2, 0.3}
 	sys.OutputDelay = []float64{0.1, 0.0}
 
-	discDefault, err := sys.DiscretizeWithOpts(0.1, C2DOptions{})
+	discDefault, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	discZOH, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodZOH})
+	discZOH, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodZOH})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestRemainingArchitectureConversionPlannerBehavior(t *testing.T) {
 		t.Fatalf("InputDelay = %v, want [2 3]", discDefault.InputDelay)
 	}
 
-	resampled, err := discDefault.D2D(0.05, C2DOptions{Method: C2DMethodTustin})
+	resampled, err := discDefault.D2D(0.05, D2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,17 +180,17 @@ func TestRemainingArchitectureConversionPlannerBehavior(t *testing.T) {
 		t.Fatalf("state names = %v, want %v", resampled.StateName, sys.StateName)
 	}
 
-	if _, err := sys.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethod("unknown")}); err == nil {
+	if _, err := sys.C2D(0.1, C2DOptions{Method: C2DMethod("unknown")}); err == nil {
 		t.Fatal("expected unknown C2D method to fail")
 	}
-	if _, err := discDefault.D2C(C2DMethod("unknown")); err == nil {
+	if _, err := discDefault.D2C(D2COptions{Method: C2DMethod("unknown")}); err == nil {
 		t.Fatal("expected unknown D2C method to fail")
 	}
 }
 
 func TestRemainingArchitectureTimeDomainPolicyPublicConsumers(t *testing.T) {
 	cont := remainingArchitectureMIMO(t, 0)
-	disc, err := cont.DiscretizeZOH(0.1)
+	disc, err := cont.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,11 +222,11 @@ func TestRemainingArchitectureTimeDomainPolicyPublicConsumers(t *testing.T) {
 		}
 	}
 
-	contAgain, err := disc.D2C(C2DMethodTustin)
+	contAgain, err := disc.D2C(D2COptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	delay := contAgain.TotalDelay()
+	delay := mustTotalDelay(t, contAgain)
 	if delay == nil {
 		t.Fatal("continuous delay is nil")
 	}
@@ -251,7 +251,7 @@ func TestRemainingArchitectureSignalMetadataMappings(t *testing.T) {
 		t.Fatalf("selected states = %v, want %v", selected.StateName, sys.StateName)
 	}
 
-	foh, err := sys.DiscretizeFOH(0.1)
+	foh, err := sys.C2D(0.1, C2DOptions{Method: C2DMethodFOH})
 	if err != nil {
 		t.Fatal(err)
 	}

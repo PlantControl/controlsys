@@ -95,14 +95,14 @@ func ExampleFeedback() {
 	// Closed-loop pole: -2.0
 }
 
-func ExampleSystem_Discretize() {
+func ExampleSystem_C2D() {
 	A := mat.NewDense(1, 1, []float64{-1})
 	B := mat.NewDense(1, 1, []float64{1})
 	C := mat.NewDense(1, 1, []float64{1})
 	D := mat.NewDense(1, 1, []float64{0})
 	sys, _ := controlsys.New(A, B, C, D, 0)
 
-	sd, _ := sys.Discretize(0.1)
+	sd, _ := sys.C2D(0.1, controlsys.C2DOptions{})
 	fmt.Printf("Discrete: dt=%.1f\n", sd.Dt)
 	fmt.Printf("A[0,0]: %.4f\n", sd.A.At(0, 0))
 

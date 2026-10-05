@@ -43,7 +43,7 @@ func TestGram_Discrete_MATLABValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := csys.DiscretizeZOH(0.2)
+	dsys, err := csys.C2D(0.2, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -466,7 +466,7 @@ func TestCare_Dare_Consistency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dsys, err := sys.DiscretizeZOH(dt)
+	dsys, err := sys.C2D(dt, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
