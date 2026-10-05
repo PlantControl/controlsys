@@ -360,3 +360,27 @@ func TestHinfNormContinuousInternalDelayPadeConverges(t *testing.T) {
 		}
 	}
 }
+
+// An output delay on an internal-delay model is a unitary factor and leaves
+// the norm unchanged.
+func TestHinfNormContinuousInternalDelayOutputDelay(t *testing.T) {
+	_, S := delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, 0.8)
+	want, wantW, err := HinfNorm(S)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayed := S.Copy()
+	if err := delayed.SetOutputDelay([]float64{0.4}); err != nil {
+		t.Fatal(err)
+	}
+	if len(delayed.OutputDelay) != 1 || delayed.OutputDelay[0] != 0.4 {
+		t.Fatalf("OutputDelay = %v", delayed.OutputDelay)
+	}
+	got, w, err := HinfNorm(delayed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got-want) > 1e-12*want || math.Abs(w-wantW) > 1e-6 {
+		t.Fatalf("HinfNorm = (%.15g, %g), want (%.15g, %g)", got, w, want, wantW)
+	}
+}

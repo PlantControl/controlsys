@@ -268,9 +268,12 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 // +Inf as above. The peak of a stable model is searched on that grid with
 // the exact delay factors e^{−jωτ}, each local maximum refined by
 // golden-section search; past the grid a resolvent bound on the delay LFT
-// certifies that the gain stays below the peak. A peak approached only as
-// ω → ∞ through a delayed feedthrough returns omega = +Inf, as σ_max(D)
-// does for rational models. Neutral-type models whose difference operator
+// certifies that the gain stays below the peak. Between grid points the
+// result is the refined sample, so a resonance narrower than the grid
+// spacing is not certified. When the high-frequency limit exceeds every
+// finite sample, the limit is returned with omega = +Inf, as σ_max(D) is for
+// rational models; the gain may exceed it by the resolvent bound at the grid
+// end, which the rational path's crossing probe rules out. Neutral-type models whose difference operator
 // is not provably stable (‖D22‖ too large), and cases the grid cannot
 // resolve or certify within its point budget, return ErrDelayUnsupported
 // rather than an approximate answer. The MathWorks pages define the norm of
