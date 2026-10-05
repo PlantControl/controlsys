@@ -877,3 +877,125 @@ func TestSimulate_InternalDelay_NonUnitDt(t *testing.T) {
 			mat.Formatted(got.Y), mat.Formatted(want.Y))
 	}
 }
+
+func TestSimulateDiscreteX0DelaysFreeResponseByOutputDelay(t *testing.T) {
+	a := mat.NewDense(2, 2, []float64{0.5, 0.2, -0.1, 0.7})
+	b := mat.NewDense(2, 2, []float64{1, 0.3, 0, 1})
+	c := mat.NewDense(2, 2, []float64{1, 0, 0.4, 1})
+	d := mat.NewDense(2, 2, []float64{0.2, 0.1, 0, -0.3})
+	sys, err := New(a, b, c, d, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys.InputDelay = []float64{1, 0}
+	sys.OutputDelay = []float64{0, 3}
+	steps := 12
+	u := mat.NewDense(2, steps, nil)
+	for k := range steps {
+		u.Set(0, k, math.Sin(0.7*float64(k)))
+		u.Set(1, k, 1)
+	}
+	x0 := mat.NewVecDense(2, []float64{1, -0.5})
+	resp, err := sys.Simulate(u, x0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inner := make([][]float64, 2)
+	for i := range inner {
+		inner[i] = make([]float64, steps)
+	}
+	x := mat.VecDenseCopyOf(x0)
+	for k := range steps {
+		ud := mat.NewVecDense(2, nil)
+		for j := range 2 {
+			if lag := int(sys.InputDelay[j]); k >= lag {
+				ud.SetVec(j, u.At(j, k-lag))
+			}
+		}
+		var y, cx, du mat.VecDense
+		cx.MulVec(c, x)
+		du.MulVec(d, ud)
+		y.AddVec(&cx, &du)
+		for i := range 2 {
+			inner[i][k] = y.AtVec(i)
+		}
+		var ax, bu mat.VecDense
+		ax.MulVec(a, x)
+		bu.MulVec(b, ud)
+		x.AddVec(&ax, &bu)
+	}
+	for k := range steps {
+		for i := range 2 {
+			want := 0.0
+			if lag := int(sys.OutputDelay[i]); k >= lag {
+				want = inner[i][k-lag]
+			}
+			if math.Abs(resp.Y.At(i, k)-want) > 1e-12 {
+				t.Fatalf("y_%d[%d] = %g, want %g", i, k, resp.Y.At(i, k), want)
+			}
+		}
+	}
+}
+
+func TestSimulateInvertibleDescriptorWithInternalDelays(t *testing.T) {
+	desc := absorbScopePlant(t, 1, true, true)
+	explicit := desc.Copy()
+	explicit.E = nil
+	var lu mat.LU
+	lu.Factorize(desc.E)
+	for _, pair := range [][2]*mat.Dense{{explicit.A, desc.A}, {explicit.B, desc.B}, {explicit.LFT.B2, desc.LFT.B2}} {
+		if err := lu.SolveTo(pair[0], false, pair[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u := mat.NewDense(2, 12, nil)
+	for k := range 12 {
+		u.Set(0, k, math.Cos(0.4*float64(k)))
+		u.Set(1, k, 0.5-0.1*float64(k))
+	}
+	x0 := mat.NewVecDense(3, []float64{0.3, -1, 0.7})
+	got, err := desc.Simulate(u, x0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := explicit.Simulate(u, x0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mat.EqualApprox(got.Y, want.Y, 1e-12) || !mat.EqualApprox(got.XFinal, want.XFinal, 1e-12) {
+		t.Fatalf("Y = %v\nwant %v", mat.Formatted(got.Y), mat.Formatted(want.Y))
+	}
+}
+
+func TestSimulateSingularDescriptor(t *testing.T) {
+	u := mat.NewDense(2, 15, nil)
+	for k := range 15 {
+		u.Set(0, k, math.Sin(0.9*float64(k)))
+		u.Set(1, k, 1)
+	}
+	for _, delays := range []bool{false, true} {
+		desc, oracle := index1Descriptor(t, 0.1, delays)
+		got, err := desc.Simulate(u, nil, &SimulateOpts{Workspace: mat.NewVecDense(3, nil)})
+		if err != nil {
+			t.Fatalf("delays=%v: %v", delays, err)
+		}
+		want, err := oracle.Simulate(u, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !mat.EqualApprox(got.Y, want.Y, 1e-11) {
+			t.Fatalf("delays=%v Y = %v\nwant %v", delays, mat.Formatted(got.Y), mat.Formatted(want.Y))
+		}
+		if got.XFinal != nil {
+			t.Fatalf("XFinal = %v, want nil for singular E", got.XFinal)
+		}
+		if _, err := desc.Simulate(u, mat.NewVecDense(3, []float64{1, 0, 0}), nil); !errors.Is(err, ErrDescriptorInitialState) {
+			t.Fatalf("x0 err = %v, want ErrDescriptorInitialState", err)
+		}
+	}
+	improper, _ := index2Descriptor(t, 0.1, true)
+	if _, err := improper.Simulate(u, nil, nil); !errors.Is(err, ErrImproperModel) {
+		t.Fatalf("non-causal err = %v, want ErrImproperModel", err)
+	}
+}

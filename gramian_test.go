@@ -351,3 +351,14 @@ func TestGram_Empty(t *testing.T) {
 		t.Errorf("dims = (%d,%d), want (0,0)", r, c)
 	}
 }
+
+func TestGram_InternalDelayRejected(t *testing.T) {
+	disc, _ := discreteLFTDelayFixture(t, []float64{0.1, 0.05})
+	for name, sys := range map[string]*System{"discrete": disc, "continuous": scalarDDE(t, -2, 0.5)} {
+		for _, typ := range []GramType{GramControllability, GramObservability} {
+			if _, err := Gram(sys, typ); !errors.Is(err, ErrInternalDelayUnsupported) {
+				t.Fatalf("%s %v: err = %v, want ErrInternalDelayUnsupported", name, typ, err)
+			}
+		}
+	}
+}

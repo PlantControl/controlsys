@@ -5,22 +5,23 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
 
 type MarginResult struct {
 	GainMargin  float64 // dB; +Inf if no phase crossover
-	PhaseMargin float64 // degrees; +Inf if no gain crossover
+	PhaseMargin float64 // degrees in (-180,180]; +Inf if no gain crossover
 	WgFreq      float64 // gain crossover freq (0dB); NaN if none
-	WpFreq      float64 // phase crossover freq (-180deg); NaN if none
+	WpFreq      float64 // phase crossover freq (-180deg mod 360); NaN if none
 }
 
 type AllMarginResult struct {
 	GainMargins     []float64 // dB at each phase crossover
-	PhaseMargins    []float64 // degrees at each gain crossover
+	PhaseMargins    []float64 // degrees in (-180,180] at each gain crossover
 	GainCrossFreqs  []float64 // omega where |G|=0dB
-	PhaseCrossFreqs []float64 // omega where angle(G)=-180deg
+	PhaseCrossFreqs []float64 // omega where angle(G)=-180deg mod 360
 }
 
 type DiskMarginResult struct {
@@ -100,23 +101,160 @@ func (e *sisoEval) at(w float64) complex128 {
 	return h
 }
 
+const (
+	marginMaxRefineDepth   = 10
+	marginMaxDelayPoints   = 20000
+	marginMaxExtendDecades = 10
+)
+
+func marginRange(sys *System) (wMin, wMax float64, err error) {
+	poles, err := sys.Poles()
+	if err != nil {
+		return 0, 0, err
+	}
+	td := newTimeDomain(sys.Dt)
+	lo, hi := math.Inf(1), 0.0
+	for _, p := range poles {
+		wn := td.naturalFrequency(p)
+		if wn > 0 && !math.IsInf(wn, 0) {
+			lo = min(lo, wn)
+			hi = max(hi, wn)
+		}
+	}
+	wMin, wMax = 0.01, 100.0
+	if hi > 0 {
+		wMin, wMax = lo/10, hi*10
+	}
+	if sys.IsDiscrete() && sys.Dt > 0 {
+		wMax = math.Pi / sys.Dt
+		wMin = min(wMin, wMax/100)
+	}
+	return wMin, wMax, nil
+}
+
 func marginFreqs(sys *System, nPoints int) ([]float64, error) {
-	omega, err := autoBodeFreqs(sys, nPoints)
+	wMin, wMax, err := marginRange(sys)
 	if err != nil {
 		return nil, err
 	}
-	if sys.IsDiscrete() && sys.Dt > 0 {
-		nyq := math.Pi / sys.Dt
-		n := 0
-		for _, w := range omega {
-			if w < nyq {
-				omega[n] = w
-				n++
-			}
-		}
-		omega = omega[:n]
-	}
+	omega := logspace(math.Log10(wMin), math.Log10(wMax), nPoints)
+	omega[len(omega)-1] = wMax
 	return omega, nil
+}
+
+func marginLoopDelay(sys *System) float64 {
+	tau := ioDelayTotal(sys, 0, 0)
+	if sys.LFT != nil {
+		for _, t := range sys.LFT.Tau {
+			tau += t
+		}
+	}
+	if sys.IsDiscrete() && sys.Dt > 0 {
+		tau *= sys.Dt
+	}
+	return tau
+}
+
+// extendMarginRange moves w by factor per decade while |L| approaches 1
+// without crossing it, so crossovers set by gain rather than poles are kept.
+func extendMarginRange(w, factor float64, logMag func(float64) float64) float64 {
+	for range marginMaxExtendDecades {
+		m0, m1 := logMag(w), logMag(w*factor)
+		if math.IsNaN(m0) || math.IsNaN(m1) || math.IsInf(m0, 0) || math.IsInf(m1, 0) {
+			break
+		}
+		if m0*m1 <= 0 {
+			return w * factor
+		}
+		if math.Abs(m1) >= math.Abs(m0)-1e-3 {
+			break
+		}
+		w *= factor
+	}
+	return w
+}
+
+func marginGrid(sys *System, eval *sisoEval) ([]float64, []complex128, error) {
+	wMin, wMax, err := marginRange(sys)
+	if err != nil {
+		return nil, nil, err
+	}
+	discrete := sys.IsDiscrete() && sys.Dt > 0
+	tau := marginLoopDelay(sys)
+	if tau > 0 {
+		wMin = min(wMin, 0.1/tau)
+		if !discrete {
+			wMax = max(wMax, 10/tau)
+		}
+	}
+	logMag := func(w float64) float64 { return math.Log(cmplx.Abs(eval.at(w))) }
+	wMin = extendMarginRange(wMin, 0.1, logMag)
+	if !discrete {
+		wMax = extendMarginRange(wMax, 10, logMag)
+	}
+
+	n := max(1000, int(100*math.Log10(wMax/wMin))+1)
+	base := logspace(math.Log10(wMin), math.Log10(wMax), n)
+	if tau > 0 {
+		step := math.Pi / (8 * tau)
+		nl := min(int((wMax-wMin)/step), marginMaxDelayPoints)
+		for k := 1; k <= nl; k++ {
+			base = append(base, wMin+float64(k)*step)
+		}
+		slices.Sort(base)
+		base = slices.Compact(base)
+	}
+	for len(base) > 0 && base[len(base)-1] >= wMax {
+		base = base[:len(base)-1]
+	}
+	base = append(base, wMax)
+
+	omega := make([]float64, 0, len(base))
+	resp := make([]complex128, 0, len(base))
+	var split func(w0, w1 float64, h0, h1 complex128, depth int)
+	split = func(w0, w1 float64, h0, h1 complex128, depth int) {
+		if depth >= marginMaxRefineDepth || !marginNeedsSplit(h0, h1) {
+			return
+		}
+		wm := math.Sqrt(w0 * w1)
+		hm := eval.at(wm)
+		split(w0, wm, h0, hm, depth+1)
+		omega = append(omega, wm)
+		resp = append(resp, hm)
+		split(wm, w1, hm, h1, depth+1)
+	}
+	prev := eval.at(base[0])
+	omega = append(omega, base[0])
+	resp = append(resp, prev)
+	for _, w := range base[1:] {
+		h := eval.at(w)
+		split(omega[len(omega)-1], w, prev, h, 0)
+		omega = append(omega, w)
+		resp = append(resp, h)
+		prev = h
+	}
+	return omega, resp, nil
+}
+
+func marginNeedsSplit(h0, h1 complex128) bool {
+	a0, a1 := cmplx.Abs(h0), cmplx.Abs(h1)
+	if a0 == 0 || a1 == 0 || math.IsNaN(a0+a1) || math.IsInf(a0+a1, 0) {
+		return false
+	}
+	dPhase := wrapDegrees((cmplx.Phase(h1) - cmplx.Phase(h0)) * 180 / math.Pi)
+	return math.Abs(dPhase) > 30 || math.Abs(20*math.Log10(a1/a0)) > 6
+}
+
+func wrapDegrees(x float64) float64 {
+	x = math.Mod(x+180, 360)
+	if x < 0 {
+		x += 360
+	}
+	return x - 180
+}
+
+func phaseOffsetDeg(h complex128) float64 {
+	return wrapDegrees(cmplx.Phase(h)*180/math.Pi + 180)
 }
 
 func findCrossings(omega, vals []float64, level float64) []crossing {
@@ -128,27 +266,33 @@ func findCrossings(omega, vals []float64, level float64) []crossing {
 			continue
 		}
 		if a*b < 0 {
-			frac := a / (a - b)
-			if frac < 0 || frac > 1 {
-				frac = 0.5
-			}
-			logW := math.Log(omega[k]) + frac*(math.Log(omega[k+1])-math.Log(omega[k]))
-			result = append(result, crossing{idx: k, w: math.Exp(logW)})
+			result = append(result, interpCrossing(omega, k, a, b))
 		}
 	}
 	return result
 }
 
-func phaseCrossings(omega, phase []float64, target float64) []crossing {
-	shifted := make([]float64, len(phase))
-	for k := range phase {
-		s := math.Mod(phase[k]-target+180, 360)
-		if s < 0 {
-			s += 360
-		}
-		shifted[k] = s - 180
+func interpCrossing(omega []float64, k int, a, b float64) crossing {
+	frac := a / (a - b)
+	if frac < 0 || frac > 1 {
+		frac = 0.5
 	}
-	return findCrossings(omega, shifted, 0)
+	logW := math.Log(omega[k]) + frac*(math.Log(omega[k+1])-math.Log(omega[k]))
+	return crossing{idx: k, w: math.Exp(logW)}
+}
+
+// phaseCrossings finds where phase passes target (mod 360). A sign change of
+// the wrapped offset with a jump near 360 is the opposite wrap, not a crossing.
+func phaseCrossings(omega, phase []float64, target float64) []crossing {
+	var result []crossing
+	for k := 0; k < len(phase)-1; k++ {
+		a := wrapDegrees(phase[k] - target)
+		b := wrapDegrees(phase[k+1] - target)
+		if a*b < 0 && math.Abs(a-b) < 180 {
+			result = append(result, interpCrossing(omega, k, a, b))
+		}
+	}
+	return result
 }
 
 func refineCrossing(wLo, wHi float64, evalFn func(float64) float64) float64 {
@@ -169,18 +313,6 @@ func refineCrossing(wLo, wHi float64, evalFn func(float64) float64) float64 {
 	return math.Sqrt(wLo * wHi)
 }
 
-func unwrapPhase(phase []float64) {
-	for k := 1; k < len(phase); k++ {
-		diff := phase[k] - phase[k-1]
-		if diff > 180 {
-			phase[k] -= 360
-		}
-		if diff < -180 {
-			phase[k] += 360
-		}
-	}
-}
-
 func evalSISOFreqResponse(sys *System, w float64) (complex128, error) {
 	resp, err := sys.FreqResponse([]float64{w})
 	if err != nil {
@@ -189,20 +321,24 @@ func evalSISOFreqResponse(sys *System, w float64) (complex128, error) {
 	return resp.At(0, 0, 0), nil
 }
 
+func phaseMarginDeg(h complex128) float64 {
+	pm := 180 + cmplx.Phase(h)*180/math.Pi
+	if pm > 180 {
+		pm -= 360
+	}
+	return pm
+}
+
 func AllMargin(sys *System) (*AllMarginResult, error) {
 	if _, err := newSISOLoopModel(sys, "AllMargin"); err != nil {
 		return nil, err
 	}
 
-	omega, err := marginFreqs(sys, 1000)
+	eval, err := newSISOEval(sys)
 	if err != nil {
 		return nil, err
 	}
-	if len(omega) == 0 {
-		return &AllMarginResult{}, nil
-	}
-
-	eval, err := newSISOEval(sys)
+	omega, resp, err := marginGrid(sys, eval)
 	if err != nil {
 		return nil, err
 	}
@@ -210,52 +346,48 @@ func AllMargin(sys *System) (*AllMarginResult, error) {
 	nw := len(omega)
 	magDB := make([]float64, nw)
 	phase := make([]float64, nw)
-	for k, w := range omega {
-		h := eval.at(w)
+	for k, h := range resp {
 		magDB[k] = 20 * math.Log10(cmplx.Abs(h))
 		phase[k] = cmplx.Phase(h) * 180 / math.Pi
 	}
-	unwrapPhase(phase)
 
-	gainCross := findCrossings(omega, magDB, 0.0)
-	phaseCross := phaseCrossings(omega, phase, -180.0)
-
-	gcFreqs := make([]float64, len(gainCross))
-	phaseMargins := make([]float64, len(gainCross))
-	for i, c := range gainCross {
+	res := &AllMarginResult{}
+	for _, c := range findCrossings(omega, magDB, 0.0) {
 		w := refineCrossing(omega[c.idx], omega[c.idx+1], func(w float64) float64 {
 			return 20 * math.Log10(cmplx.Abs(eval.at(w)))
 		})
-		gcFreqs[i] = w
-
 		h := eval.at(w)
-		ph := cmplx.Phase(h) * 180 / math.Pi
-		bodeRef := phase[c.idx]
-		k := math.Round((bodeRef - ph) / 360)
-		phaseMargins[i] = 180 + ph + k*360
+		if math.Abs(20*math.Log10(cmplx.Abs(h))) > 1e-2 {
+			continue
+		}
+		res.GainCrossFreqs = append(res.GainCrossFreqs, w)
+		res.PhaseMargins = append(res.PhaseMargins, phaseMarginDeg(h))
 	}
-
-	pcFreqs := make([]float64, len(phaseCross))
-	gainMargins := make([]float64, len(phaseCross))
-	for i, c := range phaseCross {
+	for _, c := range phaseCrossings(omega, phase, -180.0) {
 		w := refineCrossing(omega[c.idx], omega[c.idx+1], func(w float64) float64 {
-			ph := cmplx.Phase(eval.at(w)) * 180 / math.Pi
-			s := math.Mod(ph+180+180, 360)
-			if s < 0 {
-				s += 360
-			}
-			return s - 180
+			return phaseOffsetDeg(eval.at(w))
 		})
-		pcFreqs[i] = w
-		gainMargins[i] = -20 * math.Log10(cmplx.Abs(eval.at(w)))
+		h := eval.at(w)
+		if math.Abs(phaseOffsetDeg(h)) > 1 {
+			continue
+		}
+		res.PhaseCrossFreqs = append(res.PhaseCrossFreqs, w)
+		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(h)))
 	}
 
-	return &AllMarginResult{
-		GainMargins:     gainMargins,
-		PhaseMargins:    phaseMargins,
-		GainCrossFreqs:  gcFreqs,
-		PhaseCrossFreqs: pcFreqs,
-	}, nil
+	if sys.IsDiscrete() && sys.Dt > 0 {
+		nyq, h := omega[nw-1], resp[nw-1]
+		near := func(ws []float64) bool { return len(ws) > 0 && ws[len(ws)-1] > nyq*(1-1e-8) }
+		if math.Abs(magDB[nw-1]) < 1e-9 && !near(res.GainCrossFreqs) {
+			res.GainCrossFreqs = append(res.GainCrossFreqs, nyq)
+			res.PhaseMargins = append(res.PhaseMargins, phaseMarginDeg(h))
+		}
+		if math.Abs(phaseOffsetDeg(h)) < 1e-6 && !near(res.PhaseCrossFreqs) {
+			res.PhaseCrossFreqs = append(res.PhaseCrossFreqs, nyq)
+			res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(h)))
+		}
+	}
+	return res, nil
 }
 
 func Margin(sys *System) (*MarginResult, error) {
@@ -400,6 +532,11 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	return w, nil
 }
 
+// DiskMargin computes the symmetric disk margin of the SISO loop sys from the
+// peak of the sensitivity 1/(1+L). Discrete loop delays are absorbed exactly;
+// continuous loops whose sensitivity carries internal delays return
+// ErrContinuousInternalDelay since closed-loop stability cannot be decided
+// from a finite pole set.
 func DiskMargin(sys *System) (*DiskMarginResult, error) {
 	if _, err := newSISOLoopModel(sys, "DiskMargin"); err != nil {
 		return nil, err

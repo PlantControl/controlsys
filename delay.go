@@ -1597,6 +1597,12 @@ func SetDelayModel(H *System, tau []float64) (*System, error) {
 	tauCopy := make([]float64, N)
 	copy(tauCopy, tau)
 
+	b2Mat, c2Mat := &mat.Dense{}, &mat.Dense{}
+	if n > 0 {
+		b2Mat = mat.NewDense(n, N, b2Data)
+		c2Mat = mat.NewDense(N, n, c2Data)
+	}
+
 	var bMat, cMat, dMat *mat.Dense
 	if n > 0 && m > 0 {
 		bMat = mat.NewDense(n, m, bData)
@@ -1627,8 +1633,8 @@ func SetDelayModel(H *System, tau []float64) (*System, error) {
 		Dt: H.Dt,
 		LFT: &LFTDelay{
 			Tau: tauCopy,
-			B2:  mat.NewDense(n, N, b2Data),
-			C2:  mat.NewDense(N, n, c2Data),
+			B2:  b2Mat,
+			C2:  c2Mat,
 			D12: mat.NewDense(p, N, d12Data),
 			D21: mat.NewDense(N, m, d21Data),
 			D22: mat.NewDense(N, N, d22Data),
@@ -2043,28 +2049,35 @@ func (sys *System) ZeroDelayApprox() (*System, error) {
 		)
 	}
 
-	EC2 := mat.NewDense(N, n, nil)
-	EC2.Mul(E, sys.LFT.C2)
 	ED21 := mat.NewDense(N, m, nil)
 	ED21.Mul(E, sys.LFT.D21)
-
-	Aa := mat.NewDense(n, n, nil)
-	Aa.Mul(sys.LFT.B2, EC2)
-	Aa.Add(sys.A, Aa)
-
-	Ba := mat.NewDense(n, m, nil)
-	Ba.Mul(sys.LFT.B2, ED21)
-	Ba.Add(sys.B, Ba)
-
-	Ca := mat.NewDense(p, n, nil)
-	Ca.Mul(sys.LFT.D12, EC2)
-	Ca.Add(sys.C, Ca)
 
 	Da := mat.NewDense(p, m, nil)
 	Da.Mul(sys.LFT.D12, ED21)
 	Da.Add(sys.D, Da)
 
-	result, err := newNoCopy(Aa, Ba, Ca, Da, sys.Dt)
+	var result *System
+	var err error
+	if n == 0 {
+		result, err = NewGain(Da, sys.Dt)
+	} else {
+		EC2 := mat.NewDense(N, n, nil)
+		EC2.Mul(E, sys.LFT.C2)
+
+		Aa := mat.NewDense(n, n, nil)
+		Aa.Mul(sys.LFT.B2, EC2)
+		Aa.Add(sys.A, Aa)
+
+		Ba := mat.NewDense(n, m, nil)
+		Ba.Mul(sys.LFT.B2, ED21)
+		Ba.Add(sys.B, Ba)
+
+		Ca := mat.NewDense(p, n, nil)
+		Ca.Mul(sys.LFT.D12, EC2)
+		Ca.Add(sys.C, Ca)
+
+		result, err = newNoCopy(Aa, Ba, Ca, Da, sys.Dt)
+	}
 	if err != nil {
 		return nil, err
 	}

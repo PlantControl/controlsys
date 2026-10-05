@@ -16,6 +16,8 @@ type ConversionResult struct {
 	DelaySignals    int
 	Approximate     bool
 	Warnings        []string
+
+	statesEliminated bool
 }
 
 func (r *ConversionResult) MapInitialState(state, input, delayOutput []float64) ([]float64, error) {
@@ -44,6 +46,9 @@ func (r *ConversionResult) MapInitialState(state, input, delayOutput []float64) 
 			}
 		}
 		for _, value := range state {
+			if value != 0 && r.statesEliminated {
+				return nil, fmt.Errorf("%w: %w", ErrDescriptorInitialState, ErrDescriptorSingular)
+			}
 			if value != 0 {
 				return nil, fmt.Errorf("this conversion has no exact nonzero initial-state mapping: %w", ErrSingularTransform)
 			}
@@ -72,12 +77,19 @@ func (r *ConversionResult) MapInitialState(state, input, delayOutput []float64) 
 	return result, nil
 }
 
+// DiscretizeWithResult discretizes sys like DiscretizeWithOpts and reports
+// the initial-condition map (MATLAB [sysd,G] = c2d(sysc,Ts)) and limitations.
+// A singular-E descriptor model is reduced as in MATLAB dss2ss before
+// conversion; its algebraic states are eliminated, so InitialStateMap is nil
+// and MapInitialState rejects a nonzero source state with
+// ErrDescriptorInitialState, as the time responses do.
 func (sys *System) DiscretizeWithResult(dt float64, opts C2DOptions) (*ConversionResult, error) {
 	opts, err := normalizeC2DOptions(dt, opts)
 	if err != nil {
 		return nil, err
 	}
-	sys, err = conversionStandardForm(sys, "DiscretizeWithResult")
+	source := sys
+	sys, reduced, err := conversionStandardForm(sys, "DiscretizeWithResult")
 	if err != nil {
 		return nil, err
 	}
@@ -85,9 +97,10 @@ func (sys *System) DiscretizeWithResult(dt float64, opts C2DOptions) (*Conversio
 	if err != nil {
 		return nil, err
 	}
-	result := newConversionResult(sys, out, opts.Method)
+	result := newConversionResult(source, out, opts.Method)
+	result.statesEliminated = reduced
 	result.Approximate = opts.Method == C2DMethodTustin || opts.Method == C2DMethodMatched || opts.Method == C2DMethodLeastSquares
-	if conversionCanMapState(sys, out, opts.Method, dt) && !(opts.ThiranOrder > 0 && conversionInitialMapHasFraction(sys, dt)) {
+	if !reduced && conversionCanMapState(sys, out, opts.Method, dt) && !(opts.ThiranOrder > 0 && conversionInitialMapHasFraction(sys, dt)) {
 		result.InitialStateMap, err = conversionStateMap(sys, out, opts.Method, opts.PrewarpFrequency, false)
 		if err != nil {
 			return nil, err
@@ -111,11 +124,15 @@ func (sys *System) DiscretizeWithResult(dt float64, opts C2DOptions) (*Conversio
 	return result, nil
 }
 
+// D2CWithResult converts sys like D2CWithOpts and reports the
+// initial-condition map and limitations. Singular-E descriptor models are
+// handled as in DiscretizeWithResult.
 func (sys *System) D2CWithResult(opts D2COptions) (*ConversionResult, error) {
 	if opts.Method == "" {
 		opts.Method = C2DMethodZOH
 	}
-	sys, err := conversionStandardForm(sys, "D2CWithResult")
+	source := sys
+	sys, reduced, err := conversionStandardForm(sys, "D2CWithResult")
 	if err != nil {
 		return nil, err
 	}
@@ -123,9 +140,14 @@ func (sys *System) D2CWithResult(opts D2COptions) (*ConversionResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := newConversionResult(sys, out, opts.Method)
+	result := newConversionResult(source, out, opts.Method)
+	result.statesEliminated = reduced
 	result.Approximate = opts.Method == C2DMethodTustin || opts.Method == C2DMethodMatched
-	if conversionCanMapState(sys, out, opts.Method, sys.Dt) {
+	if sys.HasInternalDelay() && (opts.Method == C2DMethodZOH || opts.Method == C2DMethodFOH) {
+		result.Approximate = true
+		result.Warnings = append(result.Warnings, "Hold conversion approximates intersample internal feedback.")
+	}
+	if !reduced && conversionCanMapState(sys, out, opts.Method, sys.Dt) {
 		result.InitialStateMap, err = conversionStateMap(sys, out, opts.Method, opts.PrewarpFrequency, true)
 		if err != nil {
 			return nil, err
@@ -157,6 +179,7 @@ func (sys *System) D2DWithResult(dt float64, opts C2DOptions) (*ConversionResult
 		return nil, err
 	}
 	result := newConversionResult(sys, forward.System, opts.Method)
+	result.statesEliminated = inverse.statesEliminated
 	if inverse.InitialStateMap != nil && forward.InitialStateMap != nil && result.DelaySignals == 0 {
 		nc, _, _ := inverse.System.Dims()
 		nf, columns := forward.InitialStateMap.Dims()
@@ -196,6 +219,9 @@ func (r *ConversionResult) describeLimitations(source *System) {
 	}
 	if source.HasDelay() || r.System.HasDelay() {
 		r.Warnings = append(r.Warnings, "Delay history must be initialized separately; the returned mapping covers zero-history conversion only.")
+	}
+	if r.statesEliminated {
+		r.Warnings = append(r.Warnings, "Algebraic descriptor states are eliminated; the state coordinates change.")
 	}
 	if r.InitialStateMap == nil && r.SourceStates > 0 {
 		r.Warnings = append(r.Warnings, "An exact nonzero initial-state mapping is unavailable for this realization.")

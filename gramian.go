@@ -1,6 +1,8 @@
 package controlsys
 
 import (
+	"fmt"
+
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -28,10 +30,16 @@ type GramResult struct {
 //
 //	Continuous: A'·Wo + Wo·A + C'·C = 0
 //	Discrete:   A'·Wo·A - Wo + C'·C = 0
+//
+// Like MATLAB gram, models with internal delays (either domain) return
+// ErrInternalDelayUnsupported; absorb or approximate the delays first.
 func Gram(sys *System, typ GramType) (*GramResult, error) {
 	policy := newEnergyAnalysisPolicy(sys)
 	if err := policy.requireStandard("Gram"); err != nil {
 		return nil, err
+	}
+	if sys.HasInternalDelay() {
+		return nil, fmt.Errorf("Gram: %w", ErrInternalDelayUnsupported)
 	}
 	n := policy.n
 	if n == 0 {

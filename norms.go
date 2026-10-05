@@ -31,7 +31,8 @@ func Norm(sys *System, normType float64) (float64, error) {
 // For continuous systems with D ≠ 0, or with a delayed direct feedthrough
 // through internal delays, the H2 norm is infinite. Input, output and I/O
 // delays do not change the H2 norm. Discrete internal delays are absorbed
-// exactly; continuous strictly proper internal-delay models are rejected.
+// exactly; continuous strictly proper internal-delay models return
+// ErrContinuousInternalDelay.
 func H2Norm(sys *System) (float64, error) {
 	if err := newDescriptorPolicy(sys).requireStandard("H2Norm"); err != nil {
 		return 0, err
@@ -40,7 +41,7 @@ func H2Norm(sys *System) (float64, error) {
 		(!allZeroDense(sys.D) || lftHasDirectFeedthrough(sys.LFT)) {
 		return math.Inf(1), nil
 	}
-	sys, err := absorbEnergyInternalDelay(sys, "H2Norm")
+	sys, err := finiteDimensionalModel(sys, "H2Norm")
 	if err != nil {
 		return 0, err
 	}
@@ -103,11 +104,19 @@ func H2Norm(sys *System) (float64, error) {
 }
 
 // HSV computes the Hankel singular values of a stable LTI system in descending order.
+//
+// Discrete internal delays are absorbed exactly, so the result has one value
+// per original state plus one per delay sample. Continuous internal-delay
+// models return ErrContinuousInternalDelay.
 func HSV(sys *System) ([]float64, error) {
-	policy := newEnergyAnalysisPolicy(sys)
-	if err := policy.requireStandard("HSV"); err != nil {
+	if err := newDescriptorPolicy(sys).requireStandard("HSV"); err != nil {
 		return nil, err
 	}
+	sys, err := finiteDimensionalModel(sys, "HSV")
+	if err != nil {
+		return nil, err
+	}
+	policy := newEnergyAnalysisPolicy(sys)
 	n := policy.n
 	if n == 0 {
 		return nil, nil
@@ -208,11 +217,20 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
 
 // HinfNorm computes the H∞ norm (peak gain) of a stable LTI system
 // and the frequency at which it occurs.
+//
+// Input, output and I/O delays do not change the norm. Discrete internal
+// delays are absorbed exactly; continuous internal-delay models return
+// ErrContinuousInternalDelay because their stability cannot be decided from
+// a finite pole set.
 func HinfNorm(sys *System) (norm float64, omega float64, err error) {
-	policy := newEnergyAnalysisPolicy(sys)
-	if err := policy.requireStandard("HinfNorm"); err != nil {
+	if err := newDescriptorPolicy(sys).requireStandard("HinfNorm"); err != nil {
 		return 0, 0, err
 	}
+	sys, err = finiteDimensionalModel(sys, "HinfNorm")
+	if err != nil {
+		return 0, 0, err
+	}
+	policy := newEnergyAnalysisPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 {

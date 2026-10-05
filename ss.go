@@ -134,7 +134,17 @@ func (sys *System) Poles() ([]complex128, error) {
 	return newDescriptorPolicy(sys).poles(sys.A, n)
 }
 
+// IsStable reports whether every pole lies in the open left half-plane
+// (continuous) or the open unit disk (discrete). Input, output and I/O delays
+// do not affect stability. Discrete internal delays are absorbed exactly into
+// shift-register states before the pole test. Continuous internal delays give
+// infinitely many poles; like MATLAB isstable, which supports only models with
+// a finite number of poles, they return ErrContinuousInternalDelay.
 func (sys *System) IsStable() (bool, error) {
+	sys, err := finiteDimensionalModel(sys, "IsStable")
+	if err != nil {
+		return false, err
+	}
 	poles, err := sys.Poles()
 	if err != nil {
 		return false, err

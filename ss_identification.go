@@ -10,6 +10,8 @@ import (
 
 // IOStateSpaceOptions identifies SISO models from arbitrary sampled input/output.
 // Order excludes explicit input-delay states. Validation never fits dynamics.
+// Estimated InitialHistory holds Order pre-record outputs then InputDelay
+// pre-record inputs.
 type IOStateSpaceOptions struct {
 	Order                      int    `json:"order,omitempty"`
 	MinOrder                   int    `json:"minOrder,omitempty"`
@@ -105,8 +107,8 @@ func IdentifyIOStateSpace(ctx context.Context, trainU, trainY, validationU, vali
 			return nil, fmt.Errorf("identify state space: initialization samples require estimate validation mode")
 		}
 	case "estimate":
-		if options.InitializationSamples < options.MaxOrder || options.InitializationSamples >= len(validationU)-1 {
-			return nil, fmt.Errorf("identify state space: declare at least maxOrder initialization samples, leaving at least two held-out samples")
+		if options.InitializationSamples < options.MaxOrder+options.InputDelay || options.InitializationSamples >= len(validationU)-1 {
+			return nil, fmt.Errorf("identify state space: declare at least maxOrder+inputDelay initialization samples, leaving at least two held-out samples")
 		}
 	default:
 		return nil, fmt.Errorf("identify state space: invalid validation initialization mode")
@@ -295,6 +297,7 @@ func ioFitOrder(ctx context.Context, u, y, vu, vy []float64, dt float64, order i
 func ioPredict(theta, u []float64, n, nb, nk int, jacobian bool) ([]float64, *mat.Dense, bool) {
 	columns := len(theta)
 	dynamics := n + nb
+	delayHistory := ioDelayHistory(n, nb, nk)
 	y := make([]float64, len(u))
 	var j *mat.Dense
 	if jacobian {
@@ -330,6 +333,12 @@ func ioPredict(theta, u []float64, n, nb, nk int, jacobian bool) ([]float64, *ma
 				if jacobian {
 					j.Set(k, n+lag, j.At(k, n+lag)+u[index])
 				}
+			} else if c := dynamics + n - index - 1; -index <= delayHistory && c < len(theta) {
+				value += theta[n+lag] * theta[c]
+				if jacobian {
+					j.Set(k, n+lag, j.At(k, n+lag)+theta[c])
+					j.Set(k, c, j.At(k, c)+theta[n+lag])
+				}
 			}
 		}
 		if !finitePID(value) || math.Abs(value) > 1e100 {
@@ -340,17 +349,22 @@ func ioPredict(theta, u []float64, n, nb, nk int, jacobian bool) ([]float64, *ma
 	return y, j, true
 }
 
+// ioDelayHistory counts pre-record inputs whose effect outlasts the first n
+// samples; earlier ones are absorbed by the n output-history values.
+func ioDelayHistory(n, nb, nk int) int { return max(0, nk+nb-1-n) }
+
 func ioEstimateHistory(theta, u, y []float64, n, nb, nk int) ([]float64, error) {
-	extended := append(append([]float64(nil), theta[:n+nb]...), make([]float64, n)...)
+	unknowns := n + ioDelayHistory(n, nb, nk)
+	extended := append(append([]float64(nil), theta[:n+nb]...), make([]float64, unknowns)...)
 	forced, j, valid := ioPredict(extended, u, n, nb, nk, true)
 	if !valid {
 		return nil, fmt.Errorf("initial-state forced response diverged")
 	}
-	h := mat.NewDense(len(u), n, nil)
+	h := mat.NewDense(len(u), unknowns, nil)
 	target := mat.NewDense(len(u), 1, nil)
 	for k := range u {
 		target.Set(k, 0, y[k]-forced[k])
-		for c := range n {
+		for c := range unknowns {
 			h.Set(k, c, j.At(k, n+nb+c))
 		}
 	}
@@ -359,7 +373,7 @@ func ioEstimateHistory(theta, u, y []float64, n, nb, nk int) ([]float64, error) 
 		return nil, fmt.Errorf("initial-state least squares failed")
 	}
 	rank := svd.Rank(1e-10)
-	history := make([]float64, n)
+	history := make([]float64, unknowns)
 	if rank == 0 {
 		return history, nil
 	}
