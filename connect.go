@@ -366,13 +366,25 @@ func sliceOrZeros(s []float64, n int) []float64 {
 }
 
 // Feedback returns the closed-loop model of plant with controller in the
-// feedback path. sign is -1 for negative feedback, +1 for positive; a nil
-// controller closes unit feedback. The result is exact by default: every
-// plant and controller delay lies inside the loop and becomes an internal
-// delay, matching MATLAB feedback.
-// Pass WithApproximatedDelays, WithPadeOrder, or WithThiranOrder to receive
-// a delay-free rational model instead.
-func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (*System, error) {
+// feedback path, as MATLAB feedback(sys1,sys2,sign) and, with ch,
+// feedback(sys1,sys2,feedin,feedout,sign)
+// (https://www.mathworks.com/help/control/ref/inputoutputmodel.feedback.html).
+// sign is -1 for negative feedback, +1 for positive; MATLAB's default is -1.
+// A nil controller closes unit feedback.
+//
+// With ch, controller output k drives plant input FeedIn[k] and plant output
+// FeedOut[k] drives controller input k; the other plant channels stay open,
+// and the result keeps every plant input and output. Indices are 0-based;
+// empty, repeated or out-of-range indices and more than one ch return
+// ErrInvalidArgument, and a controller that is not len(FeedIn)×len(FeedOut)
+// ErrDimensionMismatch.
+//
+// The result is exact: every plant and controller delay lies inside the loop
+// and becomes an internal delay, as in MATLAB. For a delay-free rational
+// model, approximate the result as MATLAB does: Pade (continuous) or
+// AbsorbDelay (exact for discrete, Padé order DefaultPadeOrder for
+// continuous).
+func Feedback(plant, controller *System, sign float64, ch ...FeedbackChannels) (*System, error) {
 	if err := requireSystem("Feedback", plant); err != nil {
 		return nil, err
 	}
@@ -384,26 +396,12 @@ func Feedback(plant, controller *System, sign float64, opts ...FeedbackOption) (
 	if sign != 1 && sign != -1 {
 		return nil, fmt.Errorf("Feedback: sign %g must be -1 or +1: %w", sign, ErrInvalidArgument)
 	}
-	if controller == nil {
-		_, p, m := plant.Dims()
-		if p != m {
-			return nil, fmt.Errorf("Feedback: plant must be square when controller is nil, got %d outputs × %d inputs: %w", p, m, ErrDimensionMismatch)
-		}
-		eyeData := make([]float64, m*m)
-		for i := range m {
-			eyeData[i*(m+1)] = 1
-		}
-		var err error
-		controller, err = NewGain(mat.NewDense(m, m, eyeData), plant.Dt)
-		if err != nil {
-			return nil, err
-		}
+	controller, err := feedbackController(plant, controller, ch)
+	if err != nil {
+		return nil, err
 	}
 	if err := domainMatch(plant, controller); err != nil {
 		return nil, err
-	}
-	if cfg := newFeedbackConfig(opts); cfg.approximateDelays {
-		return feedbackWithApproximatedDelays(plant, controller, sign, cfg)
 	}
 	n1, m1, p1 := plant.Dims()
 	n2, m2, p2 := controller.Dims()

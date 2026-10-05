@@ -53,11 +53,6 @@ func (dt delayTopology) totalExternal(includeDelayMatrix bool) *mat.Dense {
 	return effectiveIODelayMatrix(dt.sys, dt.p, dt.m, includeDelayMatrix)
 }
 
-func (dt delayTopology) decomposedExternal() delayTopologyDecomposition {
-	total := dt.totalExternal(true)
-	return decomposedDelayMatrix(total)
-}
-
 func decomposedDelayMatrix(delay *mat.Dense) delayTopologyDecomposition {
 	if delay == nil {
 		return delayTopologyDecomposition{}
@@ -70,28 +65,8 @@ func decomposedDelayMatrix(delay *mat.Dense) delayTopologyDecomposition {
 	}
 }
 
-func (dt delayTopology) decomposableExternal(context string) (inputDelay, outputDelay []float64, err error) {
-	decomp := dt.decomposedExternal()
-	if decomp.hasResidual() {
-		return nil, nil, &delayTopologyResidualError{context: context}
-	}
-	return decomp.inputDelay, decomp.outputDelay, nil
-}
-
 func (d delayTopologyDecomposition) hasResidual() bool {
 	return delayMatrixHasNonzero(d.residual)
-}
-
-type delayTopologyResidualError struct {
-	context string
-}
-
-func (e *delayTopologyResidualError) Error() string {
-	return e.context + ": non-decomposable IODelay residual: " + ErrFeedbackDelay.Error()
-}
-
-func (e *delayTopologyResidualError) Unwrap() error {
-	return ErrFeedbackDelay
 }
 
 func delayMatrixHasNonzero(m *mat.Dense) bool {

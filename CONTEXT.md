@@ -500,9 +500,9 @@ _Avoid_: summing junction when referring to the generated model
 An interconnection that closes a feedback loop between compatible model channels.
 _Avoid_: feedback loop when referring specifically to the operation that creates the model
 
-**Safe feedback**:
-A feedback interconnection workflow that handles supported delay cases before closing the loop.
-_Avoid_: feedback interconnection when the delay-handling workflow is specifically meant
+**Feedback channels**:
+The plant inputs (feedin) and outputs (feedout) a feedback interconnection closes, as MATLAB feedback(sys1,sys2,feedin,feedout); the other plant channels stay open.
+_Avoid_: partial feedback
 
 **Algebraic loop**:
 An instantaneous closed-loop dependence caused by direct feedthrough around a feedback path.
@@ -1146,7 +1146,7 @@ _Avoid_: reciprocal when referring to MIMO models
 - A **delay approximation** replaces exact **transport delay** behavior with finite-dimensional dynamics.
 - A **Pade approximation** is a **delay approximation** for continuous-time transport delays.
 - A **Thiran allpass delay** is a **delay approximation** for discrete-time fractional sample delays.
-- **Safe feedback** can use **Pade approximation** for continuous-time delayed models and exact delay absorption for discrete-time delayed models.
+- A **feedback interconnection** keeps every delay exactly as an internal delay; a delay-free closed loop comes from applying a **Pade approximation** (continuous) or exact delay absorption (discrete) to the result, as in MATLAB.
 - An **interconnection** combines one or more systems into another system.
 - A **series interconnection**, **parallel interconnection**, **block-diagonal interconnection**, **signal routing**, and **feedback interconnection** are kinds of **interconnection**.
 - A **summing junction** combines signals inside **signal routing** or a **feedback loop**.

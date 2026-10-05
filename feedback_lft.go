@@ -114,6 +114,11 @@ func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
 	}
 	result.InputName = copyStringSlice(plant.InputName)
 	result.OutputName = copyStringSlice(plant.OutputName)
+	if np, _, _ := plant.Dims(); np == n1 {
+		if nc, _, _ := controller.Dims(); nc == n2 {
+			result.StateName = concatStringSlices([][]string{plant.StateName, controller.StateName}, []int{n1, n2})
+		}
+	}
 	return result, nil
 }
 

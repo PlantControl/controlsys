@@ -84,33 +84,8 @@ func TestPRD95DelayBankPublicWorkflowsShareRules(t *testing.T) {
 		4.5, 8.0,
 	})
 
-	for _, opt := range []FeedbackOption{WithApproximatedDelays(), WithThiranOrder(3)} {
-		if _, err := Feedback(discPlant, controller, -1, opt); !errors.Is(err, ErrFractionalDelay) {
-			t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
-		}
-	}
-}
-
-func TestPRD95DelayBankKeepsIntegerDelayExactWithThiranOrder(t *testing.T) {
-	sys := prd95MIMOModel(t, 0.1)
-	sys.InputDelay = []float64{2, 0}
-	sys.OutputDelay = []float64{0, 3}
-
-	controller, err := NewGain(mat.NewDense(2, 2, []float64{0.2, 0, 0, 0.1}), 0.1)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	closed, err := Feedback(sys, controller, -1, WithThiranOrder(3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, m, p := closed.Dims()
-	if m != 2 || p != 2 {
-		t.Fatalf("closed dims = %d,%d,%d, want 2x2 channels", n, m, p)
-	}
-	if n >= 3+2*3 {
-		t.Fatalf("closed state count = %d, want exact integer delay states rather than one Thiran block per delayed channel", n)
+	if _, err := Feedback(discPlant, controller, -1); !errors.Is(err, ErrFractionalDelay) {
+		t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
 	}
 }
 
