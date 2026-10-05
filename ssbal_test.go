@@ -1,11 +1,13 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -74,14 +76,37 @@ func TestSsbal_Empty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := Ssbal(sys)
+	// T cannot be formed for n = 0 (CONTEXT.md zero-dimension models).
+	if _, err := Ssbal(sys); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("static gain Ssbal: err = %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestResidualOpsRejectNilAndNonFinite(t *testing.T) {
+	var nilSys *System
+	nan, err := New(mat.NewDense(2, 2, []float64{-1, 1, 0, math.NaN()}), mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, 1}), mat.NewDense(1, 1, []float64{0}), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	dc, _ := res.Sys.DCGain()
-	if dc.At(0, 0) != 3 {
-		t.Errorf("dcgain = %g, want 3", dc.At(0, 0))
+	for _, tc := range []struct {
+		name string
+		run  func(*System) error
+	}{
+		{"Ssbal", func(s *System) error { _, err := Ssbal(s); return err }},
+		{"Stabsep", func(s *System) error { _, err := Stabsep(s); return err }},
+	} {
+		for _, s := range []*System{nilSys, nan} {
+			if err := tc.run(s); !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), tc.name+": ") {
+				t.Errorf("%s: err = %v, want %s: ... ErrInvalidArgument", tc.name, err, tc.name)
+			}
+		}
+	}
+	if _, err := Sminreal(nilSys); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Sminreal nil: err = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := nilSys.IsStable(); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("IsStable nil: err = %v, want ErrInvalidArgument", err)
 	}
 }
 

@@ -1,11 +1,14 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// SsbalResult is the result of Ssbal: the balanced model Sys and the
+// diagonal transformation T with Sys = (T⁻¹AT, T⁻¹B, CT, D).
 type SsbalResult struct {
 	Sys *System
 	T   *mat.Dense
@@ -47,11 +50,13 @@ func Ssbal(sys *System, opts ...SsbalOption) (*SsbalResult, error) {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	if err := requireFiniteSystem("Ssbal", sys); err != nil {
+		return nil, err
+	}
 	policy := newRealizationTransformPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
 	if n == 0 {
-		eye := &mat.Dense{}
-		return &SsbalResult{Sys: policy.zeroOrderCopy(), T: eye}, nil
+		return nil, fmt.Errorf("Ssbal: system has no states: %w", ErrDimensionMismatch)
 	}
 
 	aug, ma, pa := sys, m, p
@@ -157,11 +162,4 @@ func augmentRows(a, b *mat.Dense, ar int) *mat.Dense {
 	var r mat.Dense
 	r.Stack(a, b)
 	return &r
-}
-
-func denseFrom(r, c int, data []float64) *mat.Dense {
-	if r == 0 || c == 0 {
-		return &mat.Dense{}
-	}
-	return mat.NewDense(r, c, data)
 }

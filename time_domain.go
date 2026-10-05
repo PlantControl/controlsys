@@ -35,7 +35,7 @@ func (td timeDomain) validateSampleTime() error {
 
 func (td timeDomain) ensureCompatible(other timeDomain) error {
 	if td.dt != other.dt {
-		return ErrDomainMismatch
+		return fmt.Errorf("sample times %g and %g: %w", td.dt, other.dt, ErrDomainMismatch)
 	}
 	return nil
 }
