@@ -674,19 +674,31 @@ func TestLFTEmptyLoopKeepsUpperChannels(t *testing.T) {
 
 func lftZeroWidthPlants(t *testing.T, dt float64, nu, ny int) (M, Delta *System) {
 	t.Helper()
-	const z, w = 2, 2
+	return lftPartitionPlants(t, dt, nu, ny, 2, 2)
+}
+
+// lftPartitionPlants returns M with nu+z inputs and ny+w outputs and a
+// 2-state Delta with w inputs and z outputs.
+func lftPartitionPlants(t *testing.T, dt float64, nu, ny, z, w int) (M, Delta *System) {
+	t.Helper()
 	M = emptyIOFixture(t, 3, nu+z, ny+w, dt)
-	Delta, err := New(
-		mat.NewDense(2, 2, []float64{-0.4, 0.7, -0.3, -0.9}),
-		mat.NewDense(2, w, []float64{1, -0.5, 0.25, 2}),
-		mat.NewDense(z, 2, []float64{0.6, -1, 1.5, 0.2}),
-		mat.NewDense(z, w, []float64{0.3, -0.2, 0.1, 0.4}),
-		dt)
+	fill := func(r, c int, vals ...float64) *mat.Dense {
+		if r == 0 || c == 0 {
+			return nil
+		}
+		d := mat.NewDense(r, c, nil)
+		for k := range r * c {
+			d.Set(k/c, k%c, vals[k%len(vals)])
+		}
+		return d
+	}
+	A := mat.NewDense(2, 2, []float64{-0.4, 0.7, -0.3, -0.9})
+	if dt > 0 {
+		A.Scale(0.5, A)
+	}
+	Delta, err := New(A, fill(2, w, 1, -0.5, 0.25, 2), fill(z, 2, 0.6, -1, 1.5, 0.2), fill(z, w, 0.3, -0.2, 0.1, 0.4), dt)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if dt > 0 {
-		Delta.A.Scale(0.5, Delta.A)
 	}
 	return M, Delta
 }
@@ -808,6 +820,40 @@ func TestLFTZeroWidthPartitionsMatchLoopOracle(t *testing.T) {
 			}
 			u := uAll[:nu]
 			wantDx, wantY := lftLoopOracle(M, Delta, nu, ny, x, u)
+			gotDx, gotY := ssPointEval(got, x, u)
+			for i := range wantDx {
+				if math.Abs(gotDx[i]-wantDx[i]) > 1e-12 {
+					t.Errorf("%s: dx[%d] = %v, want %v", tag, i, gotDx[i], wantDx[i])
+				}
+			}
+			for i := range wantY {
+				if math.Abs(gotY[i]-wantY[i]) > 1e-12 {
+					t.Errorf("%s: y[%d] = %v, want %v", tag, i, gotY[i], wantY[i])
+				}
+			}
+		}
+	}
+}
+
+func TestLFTZeroWidthLoopChannelsMatchLoopOracle(t *testing.T) {
+	x := []float64{0.7, -1.2, 0.4, 0.9, -0.6}
+	u := []float64{1.1, -0.8}
+	for _, dt := range []float64{0, 0.1} {
+		for _, zw := range [][2]int{{0, 2}, {2, 0}} {
+			z, w := zw[0], zw[1]
+			M, Delta := lftPartitionPlants(t, dt, 2, 2, z, w)
+			tag := fmt.Sprintf("dt=%g z=%d w=%d", dt, z, w)
+			got, err := LFT(M, Delta, 2, 2)
+			if err != nil {
+				t.Fatalf("%s: %v", tag, err)
+			}
+			if err := got.Validate(); err != nil {
+				t.Fatalf("%s: Validate: %v", tag, err)
+			}
+			if n, m, p := got.Dims(); n != 5 || m != 2 || p != 2 {
+				t.Fatalf("%s: Dims = (%d,%d,%d), want (5,2,2)", tag, n, m, p)
+			}
+			wantDx, wantY := lftLoopOracle(M, Delta, 2, 2, x, u)
 			gotDx, gotY := ssPointEval(got, x, u)
 			for i := range wantDx {
 				if math.Abs(gotDx[i]-wantDx[i]) > 1e-12 {

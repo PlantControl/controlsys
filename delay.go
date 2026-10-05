@@ -79,11 +79,11 @@ func (sys *System) SetInternalDelay(tau []float64, B2, C2, D12, D21, D22 *mat.De
 	copy(tauCopy, tau)
 	sys.LFT = &LFTDelay{
 		Tau: tauCopy,
-		B2:  mat.DenseCopyOf(B2),
-		C2:  mat.DenseCopyOf(C2),
-		D12: mat.DenseCopyOf(D12),
-		D21: mat.DenseCopyOf(D21),
-		D22: mat.DenseCopyOf(D22),
+		B2:  denseCopySafe(B2, n, N),
+		C2:  denseCopySafe(C2, N, n),
+		D12: denseCopySafe(D12, p, N),
+		D21: denseCopySafe(D21, N, m),
+		D22: denseCopySafe(D22, N, N),
 	}
 	return nil
 }

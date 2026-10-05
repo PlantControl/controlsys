@@ -4221,3 +4221,23 @@ func TestCopyKeepsStaticInternalDelayModelValid(t *testing.T) {
 		t.Errorf("Copy().Validate: %v", err)
 	}
 }
+
+func TestSetInternalDelayStaticGainAcceptsNilEmptyBlocks(t *testing.T) {
+	g, err := NewGain(mat.NewDense(1, 1, []float64{0.5}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := func(v float64) *mat.Dense { return mat.NewDense(1, 1, []float64{v}) }
+	if err := g.SetInternalDelay([]float64{1}, nil, nil, one(1), one(1), one(0.2)); err != nil {
+		t.Fatalf("SetInternalDelay: %v", err)
+	}
+	if err := g.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+	if !g.HasInternalDelay() {
+		t.Error("HasInternalDelay = false")
+	}
+	if err := g.SetInternalDelay([]float64{1}, nil, nil, nil, one(1), one(0.2)); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("nil 1x1 D12: err = %v, want ErrDimensionMismatch", err)
+	}
+}
