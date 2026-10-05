@@ -271,8 +271,11 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 // Place computes state feedback gain F (m×n) via Schur-based pole placement
 // such that eig(A - B*F) equals the desired poles.
 //
-// Uses Varga's method: Schur decomposition with iterative minimum-norm
-// eigenvalue assignment. Works for both SISO and MIMO systems.
+// Uses Varga's method: Schur decomposition with deflating assignment of
+// 1×1 blocks (minimum-norm gain) and 2×2 blocks (closed form; with two
+// independent input directions the block is made normal, so a repeated
+// pole on it is non-defective). Works for both SISO and MIMO systems. A
+// 2×2 block that no input direction can move returns ErrUncontrollable.
 //
 // Poles must come in conjugate pairs. len(poles) must equal n. Unlike
 // MATLAB place, pole multiplicity may exceed rank(B); the closed loop is then
@@ -381,24 +384,22 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 			k = n - 2
 		}
 
-		var tr, det float64
+		var p1, p2 complex128
 		if pidx := closestPlacePole(pool, schurBlock2x2Eig(t, n, k), true); pidx >= 0 {
-			p := pool[pidx]
-			tr, det = 2*real(p), real(p)*real(p)+imag(p)*imag(p)
-			conj := cmplx.Conj(p)
+			p1 = pool[pidx]
+			p2 = cmplx.Conj(p1)
 			pool = removePoolEntry(pool, pidx)
-			pool = removePoolEntry(pool, slices.Index(pool, conj))
+			pool = removePoolEntry(pool, slices.Index(pool, p2))
 		} else {
 			cur := schurBlock2x2Eig(t, n, k)
 			i1 := closestPlacePole(pool, cur, false)
-			r1 := real(pool[i1])
+			p1 = pool[i1]
 			pool = removePoolEntry(pool, i1)
 			i2 := closestPlacePole(pool, cur, false)
-			r2 := real(pool[i2])
+			p2 = pool[i2]
 			pool = removePoolEntry(pool, i2)
-			tr, det = r1+r2, r1*r2
 		}
-		if err := placeAssign2x2(t, z, bhat, fData, fBuf, tr, det, n, m, k); err != nil {
+		if err := placeAssign2x2(t, z, bhat, fData, fBuf, p1, p2, n, m, k); err != nil {
 			return nil, err
 		}
 		standardizeSchur2x2(t, z, n, k)
@@ -460,74 +461,93 @@ func placeAssign1x1(t, z, bhat, fData, fBuf []float64, desired float64, n, m, k 
 	return nil
 }
 
-func placeAssign2x2(t, z, bhat, fData, fBuf []float64, desiredTrace, desiredDet float64, n, m, k int) error {
-	for iter := range 10 {
-		t11 := t[k*n+k]
-		t12 := t[k*n+k+1]
-		t21 := t[(k+1)*n+k]
-		t22 := t[(k+1)*n+k+1]
+// placeAssign2x2 assigns the eigenvalues p1, p2 (a conjugate pair or two
+// reals) to the trailing 2×2 Schur block at k in closed form. When B2 (the
+// block's rows of Bhat) has two well-conditioned input directions, the block
+// is driven to a normal matrix M via F2 = B2⁺(T2−M), giving perfectly
+// conditioned block eigenvalues and non-defective repeated poles. Otherwise a
+// single input direction b = B2·w is used, which fixes F2 uniquely. Targets enter only through
+// (re, im) or (r1, r2), never through (trace, det), so small imaginary parts
+// survive at any scale.
+func placeAssign2x2(t, z, bhat, fData, fBuf []float64, p1, p2 complex128, n, m, k int) error {
+	k1 := k + 1
+	t11, t12, t21, t22 := t[k*n+k], t[k*n+k1], t[k1*n+k], t[k1*n+k1]
+	b0 := bhat[k*m : k*m+m]
+	b1 := bhat[k1*m : k1*m+m]
+	tNorm := math.Abs(t11) + math.Abs(t12) + math.Abs(t21) + math.Abs(t22)
 
-		traceNow := t11 + t22
-		detNow := t11*t22 - t12*t21
-		r1 := traceNow - desiredTrace
-		r2 := detNow - desiredDet
-
-		if math.Abs(r1) < eps()*math.Abs(desiredTrace+traceNow) &&
-			math.Abs(r2) < eps()*math.Abs(desiredDet+detNow) {
-			break
-		}
-
-		cc00, cc01, cc11 := 0.0, 0.0, 0.0
-		for j := range m {
-			b0 := bhat[k*m+j]
-			b1 := bhat[(k+1)*m+j]
-			c1f := b0*t22 - b1*t12
-			c1s := b1*t11 - b0*t21
-
-			cc00 += b0*b0 + b1*b1
-			cc01 += b0*c1f + b1*c1s
-			cc11 += c1f*c1f + c1s*c1s
-		}
-
-		det := cc00*cc11 - cc01*cc01
-		if iter == 0 && math.Abs(det) < eps()*eps()*(cc00*cc11+1) {
-			return fmt.Errorf("Place: mode %d: %w", k, ErrUncontrollable)
-		}
-		if math.Abs(det) < eps()*eps() {
-			break
-		}
-
-		a0 := (cc11*r1 - cc01*r2) / det
-		a1 := (-cc01*r1 + cc00*r2) / det
-
-		fBlock := fBuf[:m*2]
-		for j := range m {
-			b0 := bhat[k*m+j]
-			b1 := bhat[(k+1)*m+j]
-			c1f := b0*t22 - b1*t12
-			c1s := b1*t11 - b0*t21
-
-			fBlock[j*2] = b0*a0 + c1f*a1
-			fBlock[j*2+1] = b1*a0 + c1s*a1
-		}
-
-		blas64.Gemm(blas.NoTrans, blas.NoTrans, -1,
-			blas64.General{Rows: n, Cols: m, Data: bhat, Stride: m},
-			blas64.General{Rows: m, Cols: 2, Data: fBlock, Stride: 2},
-			1, blas64.General{Rows: n, Cols: 2, Data: t[k:], Stride: n})
-
-		for j := range m {
-			for col := range n {
-				fData[j*n+col] += fBlock[j*2]*z[col*n+k] + fBlock[j*2+1]*z[col*n+k+1]
-			}
-		}
+	fBlock := fBuf[:2*m]
+	if !placeMultiInput2x2(fBlock, b0, b1, t11, t12, t21, t22, p1, p2, m) &&
+		!placeSingleInput2x2(fBlock, b0, b1, t11, t12, t21, t22, tNorm, p1, p2, m) {
+		return fmt.Errorf("Place: mode %d: %w", k, ErrUncontrollable)
 	}
-	t11, t12, t21, t22 := t[k*n+k], t[k*n+k+1], t[(k+1)*n+k], t[(k+1)*n+k+1]
-	scale := 1 + math.Abs(desiredTrace) + math.Abs(desiredDet)
-	if math.Abs(t11+t22-desiredTrace) > 1e-8*scale || math.Abs(t11*t22-t12*t21-desiredDet) > 1e-8*scale {
-		return fmt.Errorf("Place: mode %d: assignment did not converge: %w", k, ErrUncontrollable)
+
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, -1,
+		blas64.General{Rows: n, Cols: m, Data: bhat, Stride: m},
+		blas64.General{Rows: m, Cols: 2, Data: fBlock, Stride: 2},
+		1, blas64.General{Rows: n, Cols: 2, Data: t[k:], Stride: n})
+
+	for j := range m {
+		for col := range n {
+			fData[j*n+col] += fBlock[j*2]*z[col*n+k] + fBlock[j*2+1]*z[col*n+k1]
+		}
 	}
 	return nil
+}
+
+// placeSingleInput2x2 writes into f (m×2) the gain w·g that assigns p1, p2
+// through the dominant input direction b = B2·w, reporting false when the
+// block is uncontrollable from b. In the rotated basis where
+// b = [0; β] only the second row of the block changes, and its new entries
+// follow from the factored characteristic polynomial.
+func placeSingleInput2x2(f, b0, b1 []float64, t11, t12, t21, t22, tNorm float64, p1, p2 complex128, m int) bool {
+	g00, g01, g11 := 0.0, 0.0, 0.0
+	for j := range m {
+		g00 += b0[j] * b0[j]
+		g01 += b0[j] * b1[j]
+		g11 += b1[j] * b1[j]
+	}
+	_, _, u0, u1 := impl.Dlaev2(g00, g01, g11)
+	var v0, v1, wn float64
+	for j := range m {
+		w := u0*b0[j] + u1*b1[j]
+		wn += w * w
+		v0 += b0[j] * w
+		v1 += b1[j] * w
+	}
+	wn = math.Sqrt(wn)
+	sigma := math.Hypot(v0, v1)
+	if sigma == 0 {
+		return false
+	}
+	beta := sigma / wn
+	c, s := v1/sigma, v0/sigma
+	// Q = [c -s; s c] maps b to [0; |b|]; A' = Q T2 Qᵀ.
+	a11 := c*(c*t11-s*t21) - s*(c*t12-s*t22)
+	a12 := s*(c*t11-s*t21) + c*(c*t12-s*t22)
+	a21 := c*(s*t11+c*t21) - s*(s*t12+c*t22)
+	a22 := s*(s*t11+c*t21) + c*(s*t12+c*t22)
+	if math.Abs(a12) <= eps()*tNorm {
+		return false
+	}
+	x2 := real(p1) + real(p2) - a11
+	var x1 float64
+	if imag(p1) != 0 {
+		d := a11 - real(p1)
+		x1 = -(d*d + imag(p1)*imag(p1)) / a12
+	} else {
+		x1 = -(a11 - real(p1)) * (a11 - real(p2)) / a12
+	}
+	g0 := (a21 - x1) / beta
+	g1 := (a22 - x2) / beta
+	h0 := g0*c + g1*s
+	h1 := -g0*s + g1*c
+	for j := range m {
+		w := (u0*b0[j] + u1*b1[j]) / wn
+		f[j*2] = w * h0
+		f[j*2+1] = w * h1
+	}
+	return true
 }
 
 // standardizeSchur2x2 rotates the 2×2 block at k into standard Schur form,
@@ -644,4 +664,69 @@ func removePoolEntry(pool []complex128, idx int) []complex128 {
 func schurBlock2x2Eig(t []float64, n, k int) complex128 {
 	ev, _ := schur2x2Eigenvalues(t[k*n+k], t[k*n+k+1], t[(k+1)*n+k], t[(k+1)*n+k+1])
 	return ev
+}
+
+// placeMultiInput2x2 writes into f (m×2) the gain B2⁺(T2−M) that turns the
+// 2×2 block into the normal matrix M with eigenvalues p1, p2, using an LQ
+// factorization of B2 = L·Q. It reports false, leaving f unspecified, when
+// L is too ill-conditioned (l11/l00 < √ε) for B2·B2⁺ ≈ I to hold.
+func placeMultiInput2x2(f, b0, b1 []float64, t11, t12, t21, t22 float64, p1, p2 complex128, m int) bool {
+	if m < 2 {
+		return false
+	}
+	var m11, m12, m21, m22 float64
+	if im := imag(p1); im != 0 {
+		im = math.Abs(im)
+		if t12 < t21 {
+			im = -im
+		}
+		m11, m12, m21, m22 = real(p1), im, -im, real(p1)
+	} else {
+		r1, r2 := real(p1), real(p2)
+		if math.Abs(t11-r1)+math.Abs(t22-r2) > math.Abs(t11-r2)+math.Abs(t22-r1) {
+			r1, r2 = r2, r1
+		}
+		m11, m22 = r1, r2
+	}
+	d00, d01, d10, d11 := t11-m11, t12-m12, t21-m21, t22-m22
+
+	ra, rb := b0, b1
+	n0 := blas64.Nrm2(blas64.Vector{N: m, Data: b0, Inc: 1})
+	n1 := blas64.Nrm2(blas64.Vector{N: m, Data: b1, Inc: 1})
+	l00 := n0
+	if n1 > n0 {
+		ra, rb, l00 = b1, b0, n1
+		d00, d01, d10, d11 = d10, d11, d00, d01
+	}
+	if l00 == 0 {
+		return false
+	}
+	var l10 float64
+	for j := range m {
+		l10 += ra[j] / l00 * rb[j]
+	}
+	var corr float64
+	for j := range m {
+		corr += ra[j] / l00 * (rb[j] - l10*ra[j]/l00)
+	}
+	l10 += corr
+	var l11 float64
+	for j := range m {
+		r := rb[j] - l10*ra[j]/l00
+		l11 += r * r
+	}
+	l11 = math.Sqrt(l11)
+	if l11 < math.Sqrt(eps())*l00 {
+		return false
+	}
+
+	y00, y01 := d00/l00, d01/l00
+	y10, y11 := (d10-l10*y00)/l11, (d11-l10*y01)/l11
+	for j := range m {
+		q0 := ra[j] / l00
+		q1 := (rb[j] - l10*q0) / l11
+		f[j*2] = q0*y00 + q1*y10
+		f[j*2+1] = q0*y01 + q1*y11
+	}
+	return true
 }
