@@ -393,3 +393,12 @@ func checkSymmetric(t *testing.T, X *mat.Dense, tol float64) {
 		}
 	}
 }
+
+func TestDLyapUnitCircleComplexPairIsSingular(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.6, -1.28, 0.5, 0.6})
+	Q := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
+	X, err := DLyap(A, Q, nil)
+	if !errors.Is(err, ErrSingularEquation) {
+		t.Fatalf("X=%v err=%v, want ErrSingularEquation (λ=0.6±0.8i on the unit circle)", X, err)
+	}
+}

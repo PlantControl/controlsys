@@ -239,7 +239,11 @@ func (g *GeneralizedClosedLoop) Sensitivity(name string) (*System, error) {
 	if inputs != outputs {
 		return nil, fmt.Errorf("GeneralizedClosedLoop.Sensitivity: loop at %q is %dx%d: %w", name, outputs, inputs, ErrDimensionMismatch)
 	}
-	return Feedback(makeIdentityGain(outputs, loop.Dt), loop, -1)
+	eye, err := makeIdentityGain(outputs, loop.Dt)
+	if err != nil {
+		return nil, fmt.Errorf("GeneralizedClosedLoop.Sensitivity: %w", err)
+	}
+	return Feedback(eye, loop, -1)
 }
 
 func (g *GeneralizedClosedLoop) primaryAnalysisPointName() string {

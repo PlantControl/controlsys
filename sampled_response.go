@@ -1,6 +1,9 @@
 package controlsys
 
-import "math/cmplx"
+import (
+	"fmt"
+	"math/cmplx"
+)
 
 type sampledComplexResponse struct {
 	data   []complex128
@@ -55,12 +58,15 @@ func (r sampledComplexResponse) blockOffset(freq int) int {
 	return r.layout.blockOffset(freq)
 }
 
-func (r sampledComplexResponse) singularValues(dst []float64, ws *complexSVDWorkspace, freq int) {
+func (r sampledComplexResponse) singularValues(dst []float64, ws *complexSVDWorkspace, freq int) error {
 	if r.layout.p == 1 && r.layout.m == 1 {
 		dst[0] = cmplx.Abs(r.data[freq])
-		return
+		return nil
 	}
-	ws.singularValuesFromFlat(dst, r.data, r.blockOffset(freq), r.layout.p, r.layout.m)
+	if err := ws.singularValuesFromFlat(dst, r.data, r.blockOffset(freq), r.layout.p, r.layout.m); err != nil {
+		return fmt.Errorf("omega=%g: %w", r.layout.omega[freq], err)
+	}
+	return nil
 }
 
 func (r sampledComplexResponse) copyToGrid(dst [][][]complex128) {
@@ -88,10 +94,13 @@ func (r sampledComplexGridResponse) at(freq, output, input int) complex128 {
 	return r.response[freq][output][input]
 }
 
-func (r sampledComplexGridResponse) singularValues(dst []float64, ws *complexSVDWorkspace, freq int) {
+func (r sampledComplexGridResponse) singularValues(dst []float64, ws *complexSVDWorkspace, freq int) error {
 	if r.p == 1 && r.m == 1 {
 		dst[0] = cmplx.Abs(r.response[freq][0][0])
-		return
+		return nil
 	}
-	ws.singularValuesFromNested(dst, r.response[freq], r.p, r.m)
+	if err := ws.singularValuesFromNested(dst, r.response[freq], r.p, r.m); err != nil {
+		return fmt.Errorf("omega=%g: %w", r.omega[freq], err)
+	}
+	return nil
 }

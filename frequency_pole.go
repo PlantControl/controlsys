@@ -23,7 +23,11 @@ func evalWithPoleLimit(eval func(complex128, []complex128) error, sys *System, s
 	if err == nil {
 		return nil
 	}
-	return poleLimitInto(eval, s, poleSpacing(sys, s), dst, err)
+	rho, perr := poleSpacing(sys, s)
+	if perr != nil {
+		return perr
+	}
+	return poleLimitInto(eval, s, rho, dst, err)
 }
 
 // poleLimitInto sets dst to the response at s, a numerical pole of the
@@ -94,11 +98,14 @@ func poleLimitInto(eval func(complex128, []complex128) error, s complex128, rho 
 // delay-free plant (A, E) that is distinct from s, bounded by the overall
 // spectral scale and, for continuous internal delays, by 1/τ, over which
 // e^{-sτ} varies.
-func poleSpacing(sys *System, s complex128) float64 {
+func poleSpacing(sys *System, s complex128) (float64, error) {
 	n, _, _ := sys.Dims()
 	var poles []complex128
 	if n > 0 {
-		poles, _ = newDescriptorPolicy(sys).poles("poleSpacing", sys.A, n)
+		var err error
+		if poles, err = newDescriptorPolicy(sys).poles("pole limit", sys.A, n); err != nil {
+			return 0, err
+		}
 	}
 	scale := cmplx.Abs(s)
 	for _, p := range poles {
@@ -122,7 +129,7 @@ func poleSpacing(sys *System, s complex128) float64 {
 			}
 		}
 	}
-	return rho
+	return rho, nil
 }
 
 // evalFrLFTFrozenInto sets ws.g to G(s) by closing the delay channels with

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"slices"
@@ -39,18 +40,18 @@ func newComplexSVDWorkspace(p, m int) *complexSVDWorkspace {
 	}
 }
 
-func (ws *complexSVDWorkspace) singularValuesFromFlat(dst []float64, data []complex128, base, p, m int) {
+func (ws *complexSVDWorkspace) singularValuesFromFlat(dst []float64, data []complex128, base, p, m int) error {
 	ws.fillBlock(func(i, j int) complex128 {
 		return data[base+i*m+j]
 	}, p, m)
-	ws.singularValues(dst)
+	return ws.singularValues(dst)
 }
 
-func (ws *complexSVDWorkspace) singularValuesFromNested(dst []float64, data [][]complex128, p, m int) {
+func (ws *complexSVDWorkspace) singularValuesFromNested(dst []float64, data [][]complex128, p, m int) error {
 	ws.fillBlock(func(i, j int) complex128 {
 		return data[i][j]
 	}, p, m)
-	ws.singularValues(dst)
+	return ws.singularValues(dst)
 }
 
 func (ws *complexSVDWorkspace) fillBlock(at func(i, j int) complex128, p, m int) {
@@ -97,21 +98,20 @@ func (ws *complexSVDWorkspace) fillBlock(at func(i, j int) complex128, p, m int)
 	}
 }
 
-// singularValues reports a block with an infinite entry, a response at a
-// pole, as σ₁ = +Inf with the remaining values undetermined (NaN).
-func (ws *complexSVDWorkspace) singularValues(dst []float64) {
+// singularValues writes the len(dst) largest singular values. A block with
+// an infinite entry, a response at a pole, has σ₁ = +Inf, but σ₂, … depend on
+// the pole's residue and are not determined by the sampled response, so
+// asking for more than σ₁ there returns ErrInvalidArgument.
+func (ws *complexSVDWorkspace) singularValues(dst []float64) error {
 	if math.IsInf(ws.scale, 1) {
-		for i := range dst {
-			dst[i] = math.NaN()
+		if len(dst) > 1 {
+			return fmt.Errorf("response is infinite (frequency at a pole), singular values below the largest are undetermined: %w", ErrInvalidArgument)
 		}
 		dst[0] = math.Inf(1)
-		return
+		return nil
 	}
 	if !ws.factorize() {
-		for i := range dst {
-			dst[i] = math.NaN()
-		}
-		return
+		return fmt.Errorf("singular values: eigenvalue iteration did not converge: %w", ErrSchurFailed)
 	}
 	scale := 1.0
 	for _, lambda := range ws.eig {
@@ -121,38 +121,39 @@ func (ws *complexSVDWorkspace) singularValues(dst []float64) {
 		lambda := nonnegativeGramEigenvalue(ws.eig[ws.blockN-1-2*i], scale)
 		dst[i] = ws.scale * math.Sqrt(lambda)
 	}
+	return nil
 }
 
-func (ws *complexSVDWorkspace) maximumFromFlat(data []complex128, base, p, m int) (float64, bool) {
+func (ws *complexSVDWorkspace) maximumFromFlat(data []complex128, base, p, m int) (float64, error) {
 	if p == 0 || m == 0 {
-		return 0, true
+		return 0, nil
 	}
 	values := data[base : base+p*m]
 	if slices.ContainsFunc(values, cmplx.IsInf) {
-		return math.Inf(1), true
+		return math.Inf(1), nil
 	}
 	if p == 1 || m == 1 {
 		var norm float64
 		for _, value := range values {
 			norm = math.Hypot(norm, cmplx.Abs(value))
 		}
-		return norm, true
+		return norm, nil
 	}
 	if p == 2 && m == 2 {
-		return maximumComplex2x2SingularValue(values), true
+		return maximumComplex2x2SingularValue(values), nil
 	}
 	ws.fillBlock(func(i, j int) complex128 {
 		return data[base+i*m+j]
 	}, p, m)
 	if !ws.factorize() {
-		return 0, false
+		return 0, fmt.Errorf("maximum singular value: eigenvalue iteration did not converge: %w", ErrSchurFailed)
 	}
 	scale := 1.0
 	for _, lambda := range ws.eig {
 		scale = max(scale, math.Abs(lambda))
 	}
 	lambda := nonnegativeGramEigenvalue(ws.eig[ws.blockN-1], scale)
-	return ws.scale * math.Sqrt(lambda), true
+	return ws.scale * math.Sqrt(lambda), nil
 }
 
 func (ws *complexSVDWorkspace) factorize() bool {

@@ -876,7 +876,9 @@ func (sys *System) Sigma(omega []float64, nPoints int) (*SigmaResult, error) {
 	}
 
 	for k := range nw {
-		response.singularValues(allSV[k*nSV:(k+1)*nSV], ws, k)
+		if err := response.singularValues(allSV[k*nSV:(k+1)*nSV], ws, k); err != nil {
+			return nil, fmt.Errorf("Sigma: %w", err)
+		}
 	}
 
 	return &SigmaResult{Omega: omega, sv: allSV, nSV: nSV, InputName: copyStringSlice(sys.InputName), OutputName: copyStringSlice(sys.OutputName)}, nil

@@ -2096,3 +2096,21 @@ func TestHamiltonianCrossingsNearFeedthroughGain(t *testing.T) {
 		}
 	}
 }
+
+func TestMaxSingularValueMatchesSVD(t *testing.T) {
+	M := mat.NewDense(3, 2, []float64{1, -2, 0.5, 3, -1, 0.25})
+	got, err := maxSingularValue(M)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var svd mat.SVD
+	if !svd.Factorize(M, mat.SVDNone) {
+		t.Fatal("oracle SVD failed")
+	}
+	if want := svd.Values(nil)[0]; math.Abs(got-want) > 1e-12*want {
+		t.Fatalf("maxSingularValue = %.17g, want %.17g", got, want)
+	}
+	if got, err := maxSingularValue(nil); err != nil || got != 0 {
+		t.Fatalf("nil: %g, %v; want 0, nil", got, err)
+	}
+}
