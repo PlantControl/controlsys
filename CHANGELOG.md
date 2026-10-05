@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `HinfSynResult.CL`, `Gamma` and `PeakFrequency`, MATLAB `[K,CL,gamma] = hinfsyn(...)`: the closed loop `LFT(P, K)` from w to z, its H∞ norm `Gamma ≤ GammaOpt` and the frequency where it peaks, taken from the verification `HinfSyn` already runs (no extra computation). `Mixsyn` now reuses them instead of rebuilding the closed loop (`MixsynResult.CL` is `Info.CL`).
+- `H2SynResult.CL` and `Gamma`, MATLAB `[K,CL,gamma] = h2syn(...)`: the closed loop and its H2 norm. This adds one LFT and an H2Norm Lyapunov solve of twice P's order per call (14 → 23 µs on a 2-state plant).
+
 ## v2.1.0
 
 - Dependency: `plantcontrol.org/v1/gonum` v0.20.3. Dhseqr's Dlaqr04 fallback (reached by Dgees/Dgeev when Dlahqr fails, always for NaN input) passed wrong bounds, eigenvalue slices and an undersized Z; fixed, and non-finite input no longer panics (PlantControl/gonum#24).

@@ -303,6 +303,12 @@ func TestHinfSyn_D22LoopShiftMixedSensitivity(t *testing.T) {
 }
 
 func TestHinfSyn_D22LoopShiftMIMO(t *testing.T) {
+	assertHinfSynD22(t, d22MIMOHinfPlant(t), 2, 1)
+}
+
+// d22MIMOHinfPlant has w ∈ R³, u ∈ R, z ∈ R², y ∈ R² and D22 ≠ 0.
+func d22MIMOHinfPlant(t *testing.T) *System {
+	t.Helper()
 	P, err := New(
 		mat.NewDense(3, 3, []float64{
 			-1, 0.5, 0,
@@ -331,7 +337,7 @@ func TestHinfSyn_D22LoopShiftMIMO(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertHinfSynD22(t, P, 2, 1)
+	return P
 }
 
 func TestHinfSyn_ClosedLoopMeetsGamma(t *testing.T) {
@@ -1223,6 +1229,163 @@ func TestHinfYoulaParameterMeetsGamma(t *testing.T) {
 					t.Fatalf("‖Q‖ = %gγ: ‖CL‖∞ = %.12g exceeds γ = %.12g", frac, norm, gamma)
 				}
 			}
+		})
+	}
+}
+
+// lowerLFTOracle is P11 + P12·K·(I − P22·K)⁻¹·P21 at s from independent
+// state-space evaluations of P and K.
+func lowerLFTOracle(P, K *System, nmeas, ncont int, s complex128) [][]complex128 {
+	_, m, p := P.Dims()
+	p1, m1 := p-nmeas, m-ncont
+	h, k := mixsynFR(P, s), mixsynFR(K, s)
+	block := func(r0, r1, c0, c1 int) [][]complex128 {
+		B := make2(r1-r0, c1-c0)
+		for i := r0; i < r1; i++ {
+			copy(B[i-r0], h[i][c0:c1])
+		}
+		return B
+	}
+	P11, P12, P21, P22 := block(0, p1, 0, m1), block(0, p1, m1, m), block(p1, p, 0, m1), block(p1, p, m1, m)
+	IP22K := cmatScale(cmatMul(P22, k), -1)
+	for i := range nmeas {
+		IP22K[i][i] += 1
+	}
+	flat := make([]complex128, 0, nmeas*nmeas)
+	for _, row := range IP22K {
+		flat = append(flat, row...)
+	}
+	X := make2(nmeas, m1)
+	for j := range m1 {
+		col := make([]complex128, nmeas)
+		for i := range nmeas {
+			col[i] = P21[i][j]
+		}
+		for i, v := range complexSolve(flat, col, nmeas) {
+			X[i][j] = v
+		}
+	}
+	CL := cmatMul(cmatMul(P12, k), X)
+	for i := range p1 {
+		for j := range m1 {
+			CL[i][j] += P11[i][j]
+		}
+	}
+	return CL
+}
+
+// complexSigmaMax is σ_max(G) through the real embedding [Re −Im; Im Re],
+// whose singular values are those of G, each twice.
+func complexSigmaMax(t *testing.T, G [][]complex128) float64 {
+	t.Helper()
+	r, c := len(G), len(G[0])
+	E := mat.NewDense(2*r, 2*c, nil)
+	for i := range r {
+		for j := range c {
+			re, im := real(G[i][j]), imag(G[i][j])
+			E.Set(i, j, re)
+			E.Set(i, c+j, -im)
+			E.Set(r+i, j, im)
+			E.Set(r+i, c+j, re)
+		}
+	}
+	var svd mat.SVD
+	if !svd.Factorize(E, mat.SVDNone) {
+		t.Fatal("SVD failed")
+	}
+	return svd.Values(nil)[0]
+}
+
+// assertHinfSynOutputs checks CL, Gamma and PeakFrequency of res against
+// LFT + HinfNorm (bit for bit) and σ_max of CL at the peak, by an
+// independent evaluator (P may have a pole there), and CL against the
+// hand-built closed loop across frequency. HinfNorm reports the attained
+// gain times 1 + 5e-11, the centre of its certified 1e-10 bracket, so Gamma
+// is checked to that bracket rather than to rounding.
+func assertHinfSynOutputs(t *testing.T, P *System, nmeas, ncont int, res *HinfSynResult) {
+	t.Helper()
+	cl, err := LFT(P, res.K, LFTFeedback{Nu: ncont, Ny: nmeas})
+	if err != nil {
+		t.Fatal(err)
+	}
+	norm, omega, err := HinfNorm(cl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Gamma != norm || res.PeakFrequency != omega {
+		t.Fatalf("Gamma, PeakFrequency = %v, %v; HinfNorm(LFT(P, K)) = %v, %v", res.Gamma, res.PeakFrequency, norm, omega)
+	}
+	if !(res.Gamma <= res.GammaOpt) {
+		t.Fatalf("Gamma %v exceeds GammaOpt %v", res.Gamma, res.GammaOpt)
+	}
+	_, m, p := P.Dims()
+	if _, mc, pc := res.CL.Dims(); mc != m-ncont || pc != p-nmeas || res.CL.Dt != P.Dt {
+		t.Fatalf("CL is %d×%d with Dt %v, want %d×%d with Dt %v", pc, mc, res.CL.Dt, p-nmeas, m-ncont, P.Dt)
+	}
+	at := func(w float64) complex128 {
+		if P.IsDiscrete() {
+			return cmplx.Exp(complex(0, w*P.Dt))
+		}
+		return complex(0, w)
+	}
+	var peak float64
+	if math.IsInf(res.PeakFrequency, 1) {
+		D := make2(p-nmeas, m-ncont)
+		for i := range D {
+			for j := range D[i] {
+				D[i][j] = complex(res.CL.D.At(i, j), 0)
+			}
+		}
+		peak = complexSigmaMax(t, D)
+	} else {
+		peak = complexSigmaMax(t, mixsynFR(res.CL, at(res.PeakFrequency)))
+	}
+	if !(peak <= res.Gamma*(1+1e-14)) || res.Gamma-peak > 1e-10*res.Gamma {
+		t.Fatalf("σ_max(CL) at PeakFrequency %v = %.17g, Gamma %.17g (rel %.3g)", res.PeakFrequency, peak, res.Gamma, math.Abs(peak-res.Gamma)/res.Gamma)
+	}
+	for _, w := range []float64{0.001, 0.3, 1, 2.7, 10, 31} {
+		if P.IsDiscrete() && w*P.Dt > math.Pi {
+			continue
+		}
+		s := at(w)
+		assertFRClose(t, fmt.Sprintf("CL(%v)", s), mixsynFR(res.CL, s), lowerLFTOracle(P, res.K, nmeas, ncont, s), 1e-9)
+	}
+}
+
+// HinfSyn returns MATLAB hinfsyn's CL and gamma = ‖CL‖∞ with the peak
+// frequency, from the verification it already performs.
+func TestHinfSyn_ClosedLoopGammaPeak(t *testing.T) {
+	simple := func(t *testing.T) *System {
+		P, err := New(
+			mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
+			mat.NewDense(2, 3, []float64{1, 0, 0, 0, 1, 1}),
+			mat.NewDense(3, 2, []float64{1, 0, 0, 0, 1, 0}),
+			mat.NewDense(3, 3, []float64{0, 0, 0, 0, 0, 1, 0.1, 0.1, 0}),
+			0,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return P
+	}
+	for _, tc := range []struct {
+		name         string
+		plant        func(*testing.T) *System
+		nmeas, ncont int
+	}{
+		{"continuous", simple, 1, 1},
+		{"continuous D11", func(t *testing.T) *System { return sisoBiproperMixedSensitivityPlant(t) }, 1, 1},
+		{"continuous D22", d22MIMOHinfPlant, 2, 1},
+		{"discrete D11 D22", func(t *testing.T) *System { return discreteHinfTestPlant(t, 0.4) }, 2, 1},
+		{"discrete integrator", func(t *testing.T) *System { return twoDisturbancePlant(t, []float64{1, 0.1, 0, 0.6}, 0.5) }, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			P := tc.plant(t)
+			res, err := HinfSyn(P, tc.nmeas, tc.ncont)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertHinfSynOutputs(t, P, tc.nmeas, tc.ncont, res)
 		})
 	}
 }

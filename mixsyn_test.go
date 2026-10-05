@@ -992,3 +992,47 @@ func bilinearToContinuous(t *testing.T, A, B, C, D *mat.Dense) (Ac, Bc, Cc, Dc *
 	Dc.Sub(D, &CB)
 	return Ac, Bc, Cc, Dc
 }
+
+// In the zero-optimum regime (minimum-phase G, W1 only) Mixsyn's CL and
+// Gamma are HinfSyn's, which match LFT + HinfNorm and are attained at
+// PeakFrequency.
+func TestMixsynReusesHinfSynClosedLoop(t *testing.T) {
+	G := mixsynTF(t, []float64{0.5, 1, 2}, []float64{1, 3, 2}, 0)
+	W1 := mixsynWeight(t, 10, []float64{1}, 0.1)
+	Gd, err := G.C2D(0.1, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	W1d, err := Makeweight(10, []float64{1}, 0.1, 0.1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	Gm, Wm := minimumPhaseMIMOW1Only(t)
+	for _, tc := range []struct {
+		name  string
+		G, W1 *System
+	}{
+		{"continuous", G, W1},
+		{"discrete", Gd, W1d},
+		{"MIMO", Gm, Wm},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := Mixsyn(tc.G, tc.W1, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.CL != r.Info.CL || r.Gamma != r.Info.Gamma {
+				t.Fatalf("Mixsyn CL/Gamma not HinfSyn's: Gamma %v, Info.Gamma %v", r.Gamma, r.Info.Gamma)
+			}
+			if r.Info.GammaOpt > 1e-3 {
+				t.Fatalf("GammaOpt %g, want near the zero infimum", r.Info.GammaOpt)
+			}
+			P, err := Augw(tc.G, tc.W1, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, nu, ny := tc.G.Dims()
+			assertHinfSynOutputs(t, P, ny, nu, r.Info)
+		})
+	}
+}
