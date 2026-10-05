@@ -113,12 +113,11 @@ func main() {
 
 | Function/Type | Description |
 |---------------|-------------|
-| `NewPID` | PID in parallel form (`Kp`, `Ki`, `Kd`) |
-| `NewPIDStd` | PID in standard/ISA form (`Kp`, `Ti`, `Td`) |
-| `NewPID2` | 2-DOF PID controller with setpoint weighting |
-| `Pidtune` | Autotune `P`, `PI`, `PD`, `PID`, or `PIDF` for a SISO plant |
-| `WithFilter` | PID option for derivative filter time constant |
-| `WithTs` | PID option for discrete sample time |
+| `NewPID` | PID in parallel form, as MATLAB `pid(Kp,Ki,Kd,Tf,Ts)` |
+| `NewPIDStd` | PID in standard/ISA form, as MATLAB `pidstd(Kp,Ti,Td,N,Ts)` |
+| `NewPID2` | 2-DOF PID with setpoint weighting, as MATLAB `pid2(Kp,Ki,Kd,Tf,b,c,Ts)` |
+| `Pidtune` | Autotune `P`, `PI`, `PD`, `PID`, or `PIDF` for a SISO plant, as MATLAB `pidtune(sys,type,wc,opts)` |
+| `WithPIDFormulas` | PID option for discrete integral/derivative formulas |
 | `(*PID).System` / `(*PID2).System` | Convert controller model to state-space |
 | `Loopsens` | Sensitivity and complementary-sensitivity functions |
 | `Pzmap` | Pole-zero map |
