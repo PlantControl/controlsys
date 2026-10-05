@@ -19,6 +19,9 @@ var (
 
 	ErrZeroInternalDelay = errors.New("controlsys: internal delay must be positive (tau=0 creates algebraic loop)")
 
+	ErrInternalDelayUnsupported = errors.New("controlsys: operation does not support internal delays; use AbsorbDelay or Pade first")
+	ErrContinuousInternalDelay  = errors.New("controlsys: continuous model with internal delays has infinitely many poles; use Pade/AbsorbDelay first")
+
 	ErrAlgebraicLoop = errors.New("controlsys: algebraic loop: (I-D22) singular")
 
 	ErrDomainMismatch  = errors.New("controlsys: systems must share the same time domain")

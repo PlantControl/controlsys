@@ -184,7 +184,7 @@ func TestArchitecturePolynomialChannelAlgebraCoversLeadingZerosAndZeroGain(t *te
 	}
 }
 
-func TestArchitectureZerosUsePolynomialRootSemantics(t *testing.T) {
+func TestArchitectureZerosUseInvariantZeroSemantics(t *testing.T) {
 	sys, err := NewFromSlices(2, 1, 1,
 		[]float64{
 			0, 1,
@@ -202,16 +202,15 @@ func TestArchitectureZerosUsePolynomialRootSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := Poly(tf.TF.Num[0][0]).Roots()
-	if err != nil {
-		t.Fatal(err)
+	if num, _ := Poly(tf.TF.Num[0][0]).Roots(); len(num) != 0 {
+		t.Fatalf("minimal TF numerator roots %v, want none ((s+2) cancels)", num)
 	}
 	got, err := sys.Zeros()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !complexSetsApprox(got, want, 1e-10) {
-		t.Fatalf("zeros = %v, want polynomial roots %v", got, want)
+	if want := []complex128{-2}; !complexSetsApprox(got, want, 1e-10) {
+		t.Fatalf("zeros = %v, want invariant zeros %v (MATLAB zero/tzero)", got, want)
 	}
 }
 

@@ -854,3 +854,49 @@ func TestZeros_ZeroE(t *testing.T) {
 		}
 	}
 }
+
+func TestZeros_SISOKeepsCancelledInvariantZeros(t *testing.T) {
+	E := mat.NewDense(2, 2, []float64{2, 1, 0.5, 3})
+	cases := []struct {
+		name string
+		A, B []float64
+		C    []float64
+		D    float64
+		dt   float64
+		want []complex128
+	}{
+		{"continuous", []float64{-1, 1, 0, -2}, []float64{0, 1}, []float64{1, 1}, 0, 0, []complex128{-2}},
+		{"discrete D", []float64{0.5, 0.3, 0, -0.4}, []float64{0.2, 1}, []float64{0, 1}, 0.5, 0.1, []complex128{0.5, -2.4}},
+	}
+	for _, tc := range cases {
+		for _, desc := range []bool{false, true} {
+			A, B := mat.NewDense(2, 2, tc.A), mat.NewDense(2, 1, tc.B)
+			var sys *System
+			var err error
+			if desc {
+				var EA, EB mat.Dense
+				EA.Mul(E, A)
+				EB.Mul(E, B)
+				sys, err = NewDescriptor(&EA, &EB, mat.NewDense(1, 2, tc.C), mat.NewDense(1, 1, []float64{tc.D}), E, tc.dt)
+			} else {
+				sys, err = New(A, B, mat.NewDense(1, 2, tc.C), mat.NewDense(1, 1, []float64{tc.D}), tc.dt)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := sys.ZerosDetail()
+			if err != nil {
+				t.Fatalf("%s desc=%v: %v", tc.name, desc, err)
+			}
+			if res.Rank != 1 {
+				t.Errorf("%s desc=%v: rank %d, want 1", tc.name, desc, res.Rank)
+			}
+			assertZerosMatch(t, res.Zeros, tc.want, 1e-9)
+			for _, z := range res.Zeros {
+				if r := pencilMinSingularValue(t, sys, z); r > 1e-12 {
+					t.Errorf("%s desc=%v: zero %v not a rank drop: %.3g", tc.name, desc, z, r)
+				}
+			}
+		}
+	}
+}

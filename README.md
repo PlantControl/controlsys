@@ -186,7 +186,8 @@ func main() {
 | `Damp` | Natural frequency, damping ratio, time constant |
 | `Margin` | Gain and phase margins (SISO) |
 | `AllMargin` | All gain/phase crossover points |
-| `DiskMargin` | Disk-based stability margin |
+| `DiskMargin` | Disk-based stability margin (balanced skew σ=0) |
+| `DiskMarginSkew` | Disk margin for skew σ (MATLAB `diskmargin(L,sigma)`) |
 | `Bandwidth` | -3 dB bandwidth |
 | `RootLocus` | Root locus as a function of loop gain |
 | `Pzmap` | Poles and transmission zeros for plotting/inspection |
@@ -279,7 +280,7 @@ func main() {
 |----------|-------------|
 | `Norm` | Generic norm entry point (`NormH2` or `math.Inf(1)`) |
 | `H2Norm` | H2 norm (RMS gain) |
-| `HinfNorm` | H-infinity norm (peak gain) |
+| `HinfNorm` | H-infinity norm (peak gain); +Inf for unstable models |
 | `HSV` | Hankel singular values |
 
 ### Lyapunov Equations

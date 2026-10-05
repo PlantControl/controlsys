@@ -113,15 +113,38 @@ func nonEmptyDense(m *mat.Dense) *mat.Dense {
 	return m
 }
 
+// Poles returns the eigenvalues of A, or the generalized eigenvalues of (A, E)
+// for descriptor models. As in MATLAB pole, internal delays, continuous or
+// discrete, are set to zero (zero-order Padé) so the model has finitely many
+// poles; an ill-posed zero-delay loop returns ErrAlgebraicLoop. Discrete delay
+// poles at z = 0 appear only after AbsorbDelay. Input/output delays add no
+// poles. See https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html.
 func (sys *System) Poles() ([]complex128, error) {
 	n, _, _ := sys.Dims()
 	if n == 0 {
 		return nil, nil
 	}
+	if sys.LFT != nil {
+		zd, err := sys.ZeroDelayApprox()
+		if err != nil {
+			return nil, fmt.Errorf("Poles: %w", err)
+		}
+		sys = zd
+	}
 	return newDescriptorPolicy(sys).poles(sys.A, n)
 }
 
+// IsStable reports whether every pole lies in the open left half-plane
+// (continuous) or the open unit disk (discrete). Input, output and I/O delays
+// do not affect stability. Discrete internal delays are absorbed exactly into
+// shift-register states before the pole test. Continuous internal delays give
+// infinitely many poles; like MATLAB isstable, which supports only models with
+// a finite number of poles, they return ErrContinuousInternalDelay.
 func (sys *System) IsStable() (bool, error) {
+	sys, err := finiteDimensionalModel(sys, "IsStable")
+	if err != nil {
+		return false, err
+	}
 	poles, err := sys.Poles()
 	if err != nil {
 		return false, err

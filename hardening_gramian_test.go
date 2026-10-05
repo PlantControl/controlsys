@@ -172,12 +172,9 @@ func TestHinfNorm_MarginallyStable_IsInfinite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	norm, _, err := HinfNorm(sys)
-	if err != nil {
-		return
-	}
-	if norm < 1e6 {
-		t.Errorf("Hinf = %g for marginally stable system, want very large or +Inf", norm)
+	norm, w, err := HinfNorm(sys)
+	if err != nil || !math.IsInf(norm, 1) || !math.IsInf(w, 1) {
+		t.Errorf("Hinf = %g at %g, %v for marginally stable system, want Inf at Inf", norm, w, err)
 	}
 }
 

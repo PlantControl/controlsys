@@ -19,14 +19,15 @@ type ZerosResult struct {
 }
 
 // Zeros returns the finite invariant zeros: the points s where the system
-// pencil [A-sE B; C D] loses rank below its normal rank (MATLAB tzero).
-// Exception: SISO models with invertible E return the roots of the transfer
-// function numerator, which omits zeros cancelled by poles. Singular-E
-// descriptors, including improper ones, always use the pencil. As in MATLAB
-// zero, internal delays are set
-// to zero (zero-order Padé) and an ill-posed zero-delay loop returns
-// ErrAlgebraicLoop; input/output delays contribute no finite zeros and are
-// ignored. See https://www.mathworks.com/help/control/ref/dynamicsystem.zero.html.
+// pencil [A-sE B; C D] loses rank below its normal rank (MATLAB tzero). This
+// holds for SISO models too, so zeros cancelled by uncontrollable or
+// unobservable poles are kept, matching MATLAB zero on ss models; they coincide
+// with the transfer function numerator roots only for minimal realizations. As
+// in MATLAB zero, internal delays are set to zero (zero-order Padé) and an
+// ill-posed zero-delay loop returns ErrAlgebraicLoop; input/output delays
+// contribute no finite zeros and are ignored. See
+// https://www.mathworks.com/help/control/ref/dynamicsystem.zero.html and
+// https://www.mathworks.com/help/control/ref/dynamicsystem.tzero.html.
 func (sys *System) Zeros() ([]complex128, error) {
 	res, err := sys.ZerosDetail()
 	if err != nil {
@@ -45,16 +46,7 @@ func (sys *System) ZerosDetail() (*ZerosResult, error) {
 		return nil, fmt.Errorf("Zeros: %w", err)
 	}
 	if sys.IsDescriptor() {
-		if m == 1 && p == 1 {
-			if explicit, err := sys.ToExplicit(); err == nil {
-				return sisoZeros(explicit)
-			}
-		}
 		return descriptorZeros(sys)
-	}
-
-	if m == 1 && p == 1 {
-		return sisoZeros(sys)
 	}
 	return mimoZeros(sys)
 }
@@ -69,7 +61,6 @@ func zeroInternalDelays(sys *System) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	out.E = copyDescriptorE(sys.E)
 	out.Delay, out.InputDelay, out.OutputDelay = nil, nil, nil
 	return out, nil
 }
@@ -143,31 +134,6 @@ func descriptorZeros(sys *System) (*ZerosResult, error) {
 	}
 	res.Rank -= q
 	return res, nil
-}
-
-func sisoZeros(sys *System) (*ZerosResult, error) {
-	delayFree := sys
-	if sys.LFT != nil {
-		delayFree = sys.Copy()
-		delayFree.LFT = nil
-	}
-	tfr, err := delayFree.rationalTransferFunction(nil)
-	if err != nil {
-		return nil, err
-	}
-	num := tfr.TF.Num[0][0]
-	zeros, err := Poly(num).Roots()
-	if err != nil {
-		return nil, err
-	}
-	rank := 0
-	for _, c := range num {
-		if c != 0 {
-			rank = 1
-			break
-		}
-	}
-	return &ZerosResult{Zeros: zeros, Rank: rank}, nil
 }
 
 func mimoZeros(sys *System) (*ZerosResult, error) {
