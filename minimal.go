@@ -7,17 +7,25 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// ReduceMode selects which states Reduce removes.
 type ReduceMode int
 
 const (
+	// ReduceAll removes uncontrollable and unobservable states (MATLAB minreal).
 	ReduceAll ReduceMode = iota
+	// ReduceUncontrollable removes only uncontrollable states.
 	ReduceUncontrollable
+	// ReduceUnobservable removes only unobservable states.
 	ReduceUnobservable
 )
 
+// ReduceOpts configures Reduce; the zero value is MATLAB minreal(sys).
 type ReduceOpts struct {
-	Mode     ReduceMode
-	Tol      float64
+	Mode ReduceMode
+	// Tol is the staircase rank tolerance (MATLAB minreal tol); 0 selects
+	// n²·eps relative to the data.
+	Tol float64
+	// Equalize balances A, B, C before the staircase reductions.
 	Equalize bool
 }
 
@@ -27,6 +35,13 @@ type ReduceResult struct {
 	Order int
 }
 
+// Reduce removes uncontrollable and/or unobservable states of sys by
+// orthogonal staircase reductions, like MATLAB minreal(sys,tol); the result
+// has the same transfer function and keeps D and the delays. A nil
+// opts is ReduceAll with the default tolerance. A descriptor model returns
+// ErrDescriptorUnsupported; an unknown Mode, a negative or non-finite Tol,
+// and a nil or non-finite model return ErrInvalidArgument.
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.minreal.html.
 func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	if err := requireFiniteSystem("Reduce", sys); err != nil {
 		return nil, err
@@ -186,6 +201,8 @@ func reduceInternalDelay(sys *System, policy realizationTransformPolicy, opts *R
 	return &ReduceResult{Sys: reduced, Order: nr}, nil
 }
 
+// MinimalRealization is Reduce(nil), MATLAB minreal(sys) with the default
+// tolerance; use Reduce to set Tol.
 func (sys *System) MinimalRealization() (*ReduceResult, error) {
 	return sys.Reduce(nil)
 }

@@ -99,11 +99,3 @@ func (t interconnectionTopology) parallelDelayPlan() interconnectionDelayPlan {
 func (t interconnectionTopology) totalDelayOrZero(sys *System) *mat.Dense {
 	return newDelayTopology(sys).totalExternal(true)
 }
-
-func (t interconnectionTopology) leadingVisibleInputDelay(n int) visibleDelaySelection {
-	return selectLeadingVisibleDelays(t.plan.sys1.InputDelay, n)
-}
-
-func (t interconnectionTopology) leadingVisibleOutputDelay(n int) visibleDelaySelection {
-	return selectLeadingVisibleDelays(t.plan.sys1.OutputDelay, n)
-}

@@ -15,6 +15,7 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// NormH2 selects the H2 norm in Norm; pass math.Inf(1) for the L∞ norm.
 const NormH2 = 2
 
 // Norm returns the H2 norm (normType 2) or the L∞ norm (normType +Inf) of

@@ -5,6 +5,7 @@ import (
 	"math/cmplx"
 )
 
+// ModsepResult is the slow/fast split sys = Slow + Fast returned by Modsep.
 type ModsepResult struct {
 	Slow *System
 	Fast *System

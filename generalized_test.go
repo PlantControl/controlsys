@@ -237,3 +237,13 @@ func fixedBlockT(t testing.TB, sys *System) NumericBlock {
 	}
 	return b
 }
+
+func TestGeneralizedModelNilReceiverSetters(t *testing.T) {
+	var g *GeneralizedModel
+	if err := g.SetInputName("u"); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("SetInputName err = %v, want ErrInvalidArgument", err)
+	}
+	if err := g.SetOutputName("y"); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("SetOutputName err = %v, want ErrInvalidArgument", err)
+	}
+}

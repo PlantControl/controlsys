@@ -4,6 +4,9 @@ import (
 	"fmt"
 )
 
+// LoopsensResult holds the sensitivity functions of the negative-feedback
+// loop of plant P and controller C, a subset of MATLAB loopsens (Li, Lo,
+// PSi, CSo and Stable are not returned; form them with Series/Feedback).
 type LoopsensResult struct {
 	So *System // output sensitivity: (I + P*C)^{-1}
 	To *System // output complementary sensitivity: P*C*(I + P*C)^{-1}
@@ -11,6 +14,12 @@ type LoopsensResult struct {
 	Ti *System // input complementary sensitivity: C*P*(I + C*P)^{-1}
 }
 
+// Loopsens computes the output and input sensitivities and complementary
+// sensitivities of the loop u = -C·y, y = P·u, like MATLAB loopsens(P,C).
+// P and C must be compatible (C has P's outputs as inputs and P's inputs as
+// outputs): ErrDimensionMismatch otherwise; nil models return
+// ErrInvalidArgument.
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.loopsens.html.
 func Loopsens(P, C *System) (*LoopsensResult, error) {
 	if err := requireSystem("Loopsens", P); err != nil {
 		return nil, err

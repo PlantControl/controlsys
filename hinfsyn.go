@@ -10,6 +10,9 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// HinfSynResult is an H∞ controller, as MATLAB hinfsyn returns K, gamma and
+// info: X and Y are the state-feedback and filter Riccati solutions at
+// GammaOpt and CLPoles the closed-loop poles.
 type HinfSynResult struct {
 	K *System
 	// GammaOpt is the gamma K is built for: ||T_zw||inf < GammaOpt, within

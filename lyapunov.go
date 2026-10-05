@@ -24,6 +24,8 @@ type LyapunovWorkspace struct {
 	buf        []float64
 }
 
+// LyapunovOpts configures Lyap and DLyap; a nil *LyapunovOpts allocates
+// fresh storage.
 type LyapunovOpts struct {
 	// Workspace supplies reusable scratch storage. Results may share its storage
 	// until the next call that reuses the same workspace.
@@ -55,6 +57,8 @@ func reuseIntSlice(ws *LyapunovWorkspace, n int, field func(*LyapunovWorkspace) 
 	return make([]int, 0, n)
 }
 
+// NewLyapunovWorkspace preallocates scratch storage for n×n Lyap/DLyap
+// problems; it grows on demand. A workspace is not safe for concurrent use.
 func NewLyapunovWorkspace(n int) *LyapunovWorkspace {
 	return &LyapunovWorkspace{
 		aData:      make([]float64, n*n),
