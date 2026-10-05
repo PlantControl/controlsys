@@ -476,3 +476,200 @@ func BenchmarkHinfNorm_InternalDelay(b *testing.B) {
 		})
 	}
 }
+
+// mimo3DelayedSensitivity returns S = (I + K·P(s)·e^{−sτ})⁻¹ for a 3×3 plant
+// with three distinct input delays, so σ_max takes the general SVD path and
+// the high-frequency gain spans a 3-torus of phases.
+func mimo3DelayedSensitivity(t testing.TB) *System {
+	t.Helper()
+	plant, err := NewFromSlices(3, 3, 3,
+		[]float64{-1, 0.5, 0, -0.3, -2, 0.4, 0.1, 0, -1.5},
+		[]float64{1, 0.2, 0, 0, 1, 0.3, 0.1, 0, 1},
+		[]float64{1, 0, 0.2, 0.4, 1, 0, 0, -0.3, 1},
+		[]float64{0.1, 0, 0, 0, 0.05, 0, 0.02, 0, 0.08}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := plant.SetInputDelay([]float64{0.3, 0.7, 0.45}); err != nil {
+		t.Fatal(err)
+	}
+	K, err := NewGain(mat.NewDense(3, 3, []float64{0.5, 0.1, 0, -0.2, 0.4, 0.05, 0, 0.1, 0.3}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	L, err := Series(plant, K)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eye, err := NewGain(mat.NewDense(3, 3, []float64{1, 0, 0, 0, 1, 0, 0, 0, 1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	S, err := Feedback(eye, L, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return S
+}
+
+// TestHinfNormInternalDelayPinned pins the certified delay peaks of several
+// models, whose bits were checked unchanged by the workspace reuse in the
+// delay path; the tolerances absorb FMA contraction across architectures.
+func TestHinfNormInternalDelayPinned(t *testing.T) {
+	mimo1, _ := mimoDelayedSensitivity(t, 1)
+	mimo2, _ := mimoDelayedSensitivity(t, 1.8)
+	_, siso := delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, 0.8)
+	for _, tc := range []struct {
+		name        string
+		sys         *System
+		norm, omega float64
+	}{
+		{"mimo", mimo1, 1.1518514455448652, 2.8842671969770288},
+		{"mimo-gain1.8", mimo2, 1.305807437760591, 2.9261683608961966},
+		{"mimo3", mimo3DelayedSensitivity(t), 1.1617514017586534, 2.9765362640207087},
+		{"siso", siso, 1.2953131923994292, 3.0729681798684703},
+		{"dde", scalarDDE(t, -2, 1), 4.0512760916649935, 1.9961537806459426},
+	} {
+		norm, omega, err := HinfNorm(tc.sys)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if math.Abs(norm-tc.norm) > 1e-12*tc.norm || math.Abs(omega-tc.omega) > 1e-6*tc.omega {
+			t.Errorf("%s: HinfNorm = (%.17g, %.17g), want (%.17g, %.17g)", tc.name, norm, omega, tc.norm, tc.omega)
+		}
+	}
+}
+
+// refHFAt is highFrequencyGain.at before its phase factors were hoisted.
+func refHFAt(h *highFrequencyGain, theta []float64) float64 {
+	h.samples++
+	nd, p, m := h.e.nd, h.e.p, h.e.m
+	for i := range nd {
+		for j := range nd {
+			h.lu[i*nd+j] = -h.d22[i*nd+j] * cmplx.Exp(complex(0, -theta[j]))
+		}
+		h.lu[i*nd+i]++
+	}
+	if !cLUFactor(h.lu, h.piv, nd) {
+		return math.Inf(1)
+	}
+	copy(h.x, h.d21)
+	cLUSolve(h.lu, h.piv, h.x, nd, m)
+	copy(h.g, h.d11)
+	for i := range p {
+		for k := range nd {
+			c := h.d12[i*nd+k] * cmplx.Exp(complex(0, -theta[k]))
+			if c == 0 {
+				continue
+			}
+			for j := range m {
+				h.g[i*m+j] += c * h.x[k*m+j]
+			}
+		}
+	}
+	sv, err := h.e.svd.maximumFromFlat(h.g, 0, p, m)
+	if err != nil {
+		return math.NaN()
+	}
+	return sv
+}
+
+// refTorusGrid is torusGrid before its cells were packed into one slice.
+func refTorusGrid(nd int) ([][]float64, float64) {
+	n0 := max(2, int(math.Pow(4096, 1/float64(nd))))
+	r := math.Pi / float64(n0)
+	var cells [][]float64
+	idx := make([]int, nd)
+	for {
+		c := make([]float64, nd)
+		for i, k := range idx {
+			c[i] = (2*float64(k) + 1) * r
+		}
+		cells = append(cells, c)
+		i := 0
+		for ; i < nd; i++ {
+			idx[i]++
+			if idx[i] < n0 {
+				break
+			}
+			idx[i] = 0
+		}
+		if i == nd {
+			return cells, r
+		}
+	}
+}
+
+// refHFBelow is highFrequencyGain.below before its cells were packed.
+func refHFBelow(h *highFrequencyGain, level float64, budget int) bool {
+	nd := h.e.nd
+	cells, r := refTorusGrid(nd)
+	for len(cells) > 0 {
+		var next [][]float64
+		for _, c := range cells {
+			v := refHFAt(h, c)
+			if !(v <= level) {
+				return false
+			}
+			if v+h.lip*r <= level {
+				continue
+			}
+			for mask := range 1 << nd {
+				child := make([]float64, nd)
+				for i := range nd {
+					child[i] = c[i] - r/2
+					if mask&(1<<i) != 0 {
+						child[i] = c[i] + r/2
+					}
+				}
+				next = append(next, child)
+			}
+		}
+		if h.samples+len(next) > budget {
+			return false
+		}
+		cells, r = next, r/2
+	}
+	return true
+}
+
+// TestHighFrequencyGainMatchesReference checks that the packed torus grid
+// and hoisted phase factors reproduce the reference sweep bit for bit.
+func TestHighFrequencyGainMatchesReference(t *testing.T) {
+	mimo1, _ := mimoDelayedSensitivity(t, 1)
+	mimo2, _ := mimoDelayedSensitivity(t, 1.8)
+	for _, tc := range []struct {
+		name string
+		sys  *System
+	}{
+		{"mimo", mimo1}, {"mimo-gain1.8", mimo2}, {"mimo3", mimo3DelayedSensitivity(t)},
+	} {
+		e, err := newDelayLFT(tc.sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !e.directFeedthrough || e.nd < 2 {
+			t.Fatalf("%s: want delayed feedthrough with ≥ 2 delays, nd = %d", tc.name, e.nd)
+		}
+		h, ref := newHighFrequencyGain(e), newHighFrequencyGain(e)
+		est := h.estimate()
+		cells, _ := refTorusGrid(e.nd)
+		want := math.Inf(-1)
+		for _, c := range cells {
+			want = max(want, refHFAt(ref, c))
+		}
+		if math.Float64bits(est) != math.Float64bits(want) || h.samples != ref.samples {
+			t.Errorf("%s: estimate = %.17g (%d samples), want %.17g (%d)", tc.name, est, h.samples, want, ref.samples)
+		}
+		for _, f := range []float64{0.5, 0.999, 1.001, 1.05, 1.5} {
+			for _, budget := range []int{5000, 1 << 16} {
+				h.samples, ref.samples = 0, 0
+				got, want := h.below(f*est, budget), refHFBelow(ref, f*est, budget)
+				if got != want || h.samples != ref.samples {
+					t.Errorf("%s: below(%g·est, %d) = %v after %d samples, want %v after %d",
+						tc.name, f, budget, got, h.samples, want, ref.samples)
+				}
+			}
+		}
+	}
+}

@@ -372,3 +372,121 @@ func TestDescriptorResidualIODelayMIMO(t *testing.T) {
 	want, wantW := oraclePeak(func(w float64) float64 { return oracleSigmaMax2(delayed(w)) }, 300, 1e-3)
 	assertPeak(t, "residual io delay", S, want, wantW, 1e-9)
 }
+
+// refDescriptorCertify is descriptorResponse.certify before its samples
+// were pooled: every sample is freshly allocated.
+func refDescriptorCertify(r *descriptorResponse, ws, shifts, peaks, wPeaks []float64, budget int) error {
+	start := r.evals
+	sample := func(w float64) (*descriptorSample, error) {
+		if r.evals-start >= budget {
+			return nil, errDelayPeakUnsupported
+		}
+		s := r.sample(w)
+		if !s.regular {
+			return nil, errDelayPeakUnsupported
+		}
+		for k, c := range shifts {
+			if v := r.gain(s.g, c); v > peaks[k] {
+				peaks[k], wPeaks[k] = v, w
+			}
+		}
+		return s, nil
+	}
+	type span struct{ a, b *descriptorSample }
+	var stack []span
+	a, err := sample(ws[0])
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(ws)-1; {
+		reach := a.w + 1/max(a.zeta, a.zetaL)
+		j := i + 1
+		for j+1 < len(ws) && ws[j+1] <= reach {
+			j++
+		}
+		b, err := sample(ws[j])
+		if err != nil {
+			return err
+		}
+		stack = append(stack[:0], span{a, b})
+		for len(stack) > 0 {
+			sp := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			h := (sp.b.w - sp.a.w) / 2
+			if h <= 0 || r.certified(sp.a, sp.b, h, shifts, peaks) {
+				continue
+			}
+			mid := sp.a.w + h
+			for _, w := range wPeaks {
+				if sp.a.w+h/8 < w && w < sp.b.w-h/8 {
+					mid = w
+					break
+				}
+			}
+			if !(sp.a.w < mid && mid < sp.b.w) {
+				return errDelayPeakUnsupported
+			}
+			sm, err := sample(mid)
+			if err != nil {
+				return err
+			}
+			stack = append(stack, span{sm, sp.b}, span{sp.a, sm})
+		}
+		a, i = b, j
+	}
+	return nil
+}
+
+// TestDescriptorCertifyPoolMatchesFresh checks that pooled samples, reused
+// across calls, reproduce the freshly allocated certification bit for bit.
+func TestDescriptorCertifyPoolMatchesFresh(t *testing.T) {
+	mimo1, _ := mimoDelayedSensitivity(t, 1)
+	mimo2, _ := mimoDelayedSensitivity(t, 1.8)
+	_, siso := delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, 0.8)
+	for _, tc := range []struct {
+		name   string
+		sys    *System
+		shifts []float64
+	}{
+		{"mimo", mimo1, []float64{0}},
+		{"mimo-gain1.8", mimo2, []float64{0}},
+		{"mimo3", mimo3DelayedSensitivity(t), []float64{0}},
+		{"siso", siso, []float64{0, -0.5, 0.3}},
+		{"dde", scalarDDE(t, -2, 1), []float64{0, 0.2}},
+	} {
+		_, l, res, err := delayPeakSetup(tc.sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws := append([]float64{0}, res.w...)
+		ref, err := newDescriptorResponse(tc.sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := newDescriptorResponse(tc.sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k := len(tc.shifts)
+		want, wantW := make([]float64, k), make([]float64, k)
+		if err := refDescriptorCertify(ref, ws, tc.shifts, want, wantW, l.pointBudget()); err != nil {
+			t.Fatalf("%s: reference: %v", tc.name, err)
+		}
+		for pass := range 2 {
+			got, gotW := make([]float64, k), make([]float64, k)
+			r.evals = 0
+			if err := r.certify(ws, tc.shifts, got, gotW, l.pointBudget(), errDelayPeakUnsupported); err != nil {
+				t.Fatalf("%s pass %d: %v", tc.name, pass, err)
+			}
+			for i := range k {
+				if math.Float64bits(got[i]) != math.Float64bits(want[i]) || math.Float64bits(gotW[i]) != math.Float64bits(wantW[i]) {
+					t.Errorf("%s pass %d shift %g: (%.17g, %.17g), want (%.17g, %.17g)",
+						tc.name, pass, tc.shifts[i], got[i], gotW[i], want[i], wantW[i])
+				}
+			}
+			if r.evals != ref.evals {
+				t.Errorf("%s pass %d: %d samples, want %d", tc.name, pass, r.evals, ref.evals)
+			}
+		}
+	}
+}
