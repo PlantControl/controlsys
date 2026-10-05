@@ -709,10 +709,16 @@ func emptyIOOps() []emptyIOOp {
 		{"GramC", func(s *System) (any, error) { return Gram(s, GramControllability) }},
 		{"GramO", func(s *System) (any, error) { return Gram(s, GramObservability) }},
 		{"Balreal", func(s *System) (any, error) { return Balreal(s) }},
-		{"Balred", func(s *System) (any, error) { r, _, err := Balred(s, 1, Truncate); return r, err }},
-		{"BalredSP", func(s *System) (any, error) { r, _, err := Balred(s, 1, SingularPerturbation); return r, err }},
+		{"Balred", func(s *System) (any, error) {
+			r, _, err := Balred(s, 1, BalredOptions{StateProjection: Truncate})
+			return r, err
+		}},
+		{"BalredSP", func(s *System) (any, error) {
+			r, _, err := Balred(s, 1, BalredOptions{StateProjection: MatchDC})
+			return r, err
+		}},
 		{"Modred", func(s *System) (any, error) { return Modred(s, []int{0}, Truncate) }},
-		{"ModredMatchDC", func(s *System) (any, error) { return Modred(s, []int{0}, SingularPerturbation) }},
+		{"ModredMatchDC", func(s *System) (any, error) { return Modred(s, []int{0}, MatchDC) }},
 		{"CanonModal", func(s *System) (any, error) { return Canon(s, CanonModal) }},
 		{"CanonCompanion", func(s *System) (any, error) { return Canon(s, CanonCompanion) }},
 		{"Ssbal", func(s *System) (any, error) { return Ssbal(s) }},
@@ -1179,7 +1185,7 @@ func TestEmptyIOStateTransforms(t *testing.T) {
 			t.Errorf("dt=%g SS2SS Dims = (%d,%d,%d)", dt, n, m, p)
 		}
 
-		red, err := Modred(auto, []int{1}, SingularPerturbation)
+		red, err := Modred(auto, []int{1}, MatchDC)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1278,7 +1284,7 @@ func TestEmptyIOStatelessResults(t *testing.T) {
 	}{
 		{"ModredTruncate", func(s *System) ([]*System, error) { return sysOut(Modred(s, []int{0, 1, 2}, Truncate)) }},
 		{"ModredMatchDC", func(s *System) ([]*System, error) {
-			return sysOut(Modred(s, []int{2, 0, 1}, SingularPerturbation))
+			return sysOut(Modred(s, []int{2, 0, 1}, MatchDC))
 		}},
 		{"MinimalRealization", func(s *System) ([]*System, error) { return reduceOut(s.MinimalRealization()) }},
 		{"ReduceUncontrollable", func(s *System) ([]*System, error) {

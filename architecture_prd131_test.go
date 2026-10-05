@@ -83,7 +83,7 @@ func TestPRD131ReductionAndBalancingPreserveResultConstructionBehavior(t *testin
 	}
 	assertFreqResponseApprox(t, sys, reduced.Sys, []float64{0.05, 0.4}, 1e-8)
 
-	balred, _, err := Balred(sys, 1, Truncate)
+	balred, _, err := Balred(sys, 1, BalredOptions{StateProjection: Truncate})
 	if err != nil {
 		t.Fatal(err)
 	}

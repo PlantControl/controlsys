@@ -249,7 +249,7 @@ func main() {
 | Function/Method | Description |
 |-----------------|-------------|
 | `Balreal` | Balanced realization |
-| `Balred` | Balanced truncation / singular perturbation |
+| `Balred` | Balanced reduction (MatchDC residualization or truncation) |
 | `Reduce` / `MinimalRealization` | Controllable/observable state reduction workflows |
 | `Modred` | Model reduction by eliminating selected states |
 | `Ssbal` | State-space balancing / scaling |

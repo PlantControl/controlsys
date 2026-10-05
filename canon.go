@@ -12,18 +12,37 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// CanonForm selects the canonical realization computed by Canon, as the
+// MATLAB canon type argument. The zero value selects CanonModal, the MATLAB
+// default.
 type CanonForm string
 
 const (
-	CanonModal     CanonForm = "modal"
+	// CanonModal is the real modal form: A is block diagonal with 1×1 blocks
+	// for real eigenvalues and 2×2 blocks [σ ω; -ω σ] for complex pairs,
+	// ordered by ascending eigenvalue magnitude.
+	CanonModal CanonForm = "modal"
+	// CanonCompanion is the MATLAB companion form: A has ones on the
+	// subdiagonal and the negated characteristic polynomial coefficients in
+	// its last column. It needs a model controllable from its first input.
 	CanonCompanion CanonForm = "companion"
 )
 
+// CanonResult holds the outputs of MATLAB [csys,T] = canon(sys,type): the
+// canonical state is xc = T·x, so Sys.A = T·A·T⁻¹, Sys.B = T·B and
+// Sys.C = C·T⁻¹.
 type CanonResult struct {
 	Sys *System
 	T   *mat.Dense
 }
 
+// Canon computes a canonical state-space realization of sys, as MATLAB
+// canon; see https://www.mathworks.com/help/control/ref/dynamicsystem.canon.html.
+// The modal form uses an eigenvector basis and falls back to an ordered real
+// Schur form (quasi-triangular, not block diagonal) when the eigenvectors
+// are ill-conditioned. The companion form returns ErrSingularTransform when
+// sys is not controllable from its first input. Descriptor and delayed
+// models are rejected; a model with no states returns ErrDimensionMismatch.
 func Canon(sys *System, form CanonForm) (*CanonResult, error) {
 	if err := requireFiniteSystem("Canon", sys); err != nil {
 		return nil, err
@@ -35,13 +54,16 @@ func Canon(sys *System, form CanonForm) (*CanonResult, error) {
 	if err := policy.requireDelayFree("Canon"); err != nil {
 		return nil, err
 	}
+	if n, _, _ := sys.Dims(); n == 0 {
+		return nil, fmt.Errorf("Canon: system has no states: %w", ErrDimensionMismatch)
+	}
 	switch form {
-	case CanonModal:
+	case CanonModal, "":
 		return canonModal(sys)
 	case CanonCompanion:
 		return canonCompanion(sys)
 	default:
-		return nil, fmt.Errorf("controlsys: unknown canonical form %q", form)
+		return nil, fmt.Errorf("Canon: unknown form %q: %w", form, ErrInvalidArgument)
 	}
 }
 
@@ -54,11 +76,6 @@ type eigBlock struct {
 
 func canonModal(sys *System) (*CanonResult, error) {
 	policy := newRealizationTransformPolicy(sys)
-	n := policy.n
-	if n == 0 {
-		return &CanonResult{Sys: policy.zeroOrderCopy(), T: &mat.Dense{}}, nil
-	}
-
 	res, err := canonModalEig(sys, policy)
 	if err == nil {
 		return res, nil
@@ -173,8 +190,11 @@ func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult
 	if err != nil {
 		return nil, err
 	}
-
-	return &CanonResult{Sys: newSys, T: T}, nil
+	Tinv := mat.NewDense(n, n, nil)
+	if err := lu.SolveTo(Tinv, false, eyeDense(n)); err != nil {
+		return nil, fmt.Errorf("controlsys: solve failed: %w", ErrSingularTransform)
+	}
+	return &CanonResult{Sys: newSys, T: Tinv}, nil
 }
 
 // canonModalSchur computes a quasi-modal form via ordered real Schur decomposition.
@@ -235,7 +255,8 @@ func canonModalSchur(sys *System, policy realizationTransformPolicy) (*CanonResu
 		return nil, err
 	}
 
-	T := mat.NewDense(n, n, z)
+	T := mat.NewDense(n, n, nil)
+	T.CloneFrom(mat.NewDense(n, n, z).T())
 	return &CanonResult{Sys: newSys, T: T}, nil
 }
 
@@ -281,146 +302,47 @@ func schurSortByMagnitude(t, z []float64, n int) error {
 func canonCompanion(sys *System) (*CanonResult, error) {
 	policy := newRealizationTransformPolicy(sys)
 	n, m, p := policy.n, policy.m, policy.p
-	if n == 0 {
-		return &CanonResult{Sys: policy.zeroOrderCopy(), T: &mat.Dense{}}, nil
-	}
-	if m != 1 || p != 1 {
-		return nil, fmt.Errorf("controlsys: companion form requires SISO system: %w", ErrNotSISO)
+	if m == 0 {
+		return nil, fmt.Errorf("Canon: companion form needs an input: %w", ErrDimensionMismatch)
 	}
 
-	// Observable companion form via similarity: T = Oc^{-1} * Ocomp
-	// where Oc = obsv(A,C) and Ocomp = obsv(Ac, Cc) with Cc = e1'
-
-	charPoly, err := characteristicPoly(sys.A, n)
-	if err != nil {
-		return nil, err
-	}
-	lead := charPoly[n]
-	for i := range charPoly {
-		charPoly[i] /= lead
-	}
-
-	// Build companion A: superdiagonal 1s, last row = -coeffs
-	Ac := mat.NewDense(n, n, nil)
-	for i := 0; i < n-1; i++ {
-		Ac.Set(i, i+1, 1)
+	K := mat.NewDense(n, n, nil)
+	col := mat.NewVecDense(n, nil)
+	for i := range n {
+		col.SetVec(i, sys.B.At(i, 0))
 	}
 	for j := range n {
-		Ac.Set(n-1, j, -charPoly[j])
+		K.SetCol(j, col.RawVector().Data)
+		if j+1 < n {
+			col.MulVec(sys.A, mat.VecDenseCopyOf(col))
+		}
 	}
 
-	// Cc = [1 0 ... 0]
-	Cc := mat.NewDense(1, n, nil)
-	Cc.Set(0, 0, 1)
-
-	Oc := buildObsvMatrix(sys.A, sys.C, n, p)
-	Ocomp := buildObsvMatrix(Ac, Cc, n, 1)
-
-	var luOc mat.LU
-	luOc.Factorize(Oc)
-	if luNearSingular(&luOc) {
-		return nil, fmt.Errorf("controlsys: system not observable, companion form undefined: %w", ErrSingularTransform)
+	var lu mat.LU
+	lu.Factorize(K)
+	if luNearSingular(&lu) {
+		return nil, fmt.Errorf("Canon: system not controllable from its first input: %w", ErrSingularTransform)
 	}
 
-	// T = Oc \ Ocomp  (i.e. Oc * T = Ocomp => T = Oc^{-1} * Ocomp)
-	T := mat.NewDense(n, n, nil)
-	if err := luOc.SolveTo(T, false, Ocomp); err != nil {
-		return nil, fmt.Errorf("controlsys: transformation solve failed: %w", ErrSingularTransform)
-	}
-
-	var luT mat.LU
-	luT.Factorize(T)
-	if luNearSingular(&luT) {
-		return nil, fmt.Errorf("controlsys: transformation matrix singular: %w", ErrSingularTransform)
-	}
-
-	// Anew = T⁻¹*A*T: compute AT = A*T, then solve T*Anew = AT
-	AT := mat.NewDense(n, n, nil)
-	AT.Mul(sys.A, T)
+	AK := mat.NewDense(n, n, nil)
+	AK.Mul(sys.A, K)
 	Anew := mat.NewDense(n, n, nil)
-	if err := luT.SolveTo(Anew, false, AT); err != nil {
-		return nil, fmt.Errorf("controlsys: solve failed: %w", ErrSingularTransform)
+	if err := lu.SolveTo(Anew, false, AK); err != nil {
+		return nil, fmt.Errorf("Canon: %w", ErrSingularTransform)
 	}
-
-	// Bnew = T⁻¹*B: solve T*Bnew = B
-	Bnew := mat.NewDense(n, 1, nil)
-	if err := luT.SolveTo(Bnew, false, sys.B); err != nil {
-		return nil, fmt.Errorf("controlsys: solve failed: %w", ErrSingularTransform)
+	Bnew := mat.NewDense(n, m, nil)
+	if err := lu.SolveTo(Bnew, false, sys.B); err != nil {
+		return nil, fmt.Errorf("Canon: %w", ErrSingularTransform)
 	}
-
-	Cnew := mat.NewDense(1, n, nil)
-	Cnew.Mul(sys.C, T)
+	Cnew := mulDims(p, n, sys.C, K)
+	T := mat.NewDense(n, n, nil)
+	if err := lu.SolveTo(T, false, eyeDense(n)); err != nil {
+		return nil, fmt.Errorf("Canon: %w", ErrSingularTransform)
+	}
 
 	newSys, err := policy.resultWithOriginalFeedthrough(Anew, Bnew, Cnew)
 	if err != nil {
 		return nil, err
 	}
-
 	return &CanonResult{Sys: newSys, T: T}, nil
-}
-
-func characteristicPoly(A *mat.Dense, n int) ([]float64, error) {
-	if n == 0 {
-		return []float64{1}, nil
-	}
-
-	var eig mat.Eigen
-	if !eig.Factorize(A, mat.EigenNone) {
-		return nil, fmt.Errorf("Canon: eigenvalues of A did not converge: %w", ErrSchurFailed)
-	}
-	vals := eig.Values(nil)
-
-	// Build polynomial from roots incrementally: prod(s - lambda_i)
-	// coeffs in descending power: coeffs[0]*s^n + ... + coeffs[n]
-	coeffs := make([]float64, n+1)
-	coeffs[0] = 1.0
-	cur := 1
-	for _, lam := range vals {
-		if math.Abs(imag(lam)) < 1e-10*math.Max(1, cmplx.Abs(lam)) {
-			r := real(lam)
-			for j := cur; j >= 1; j-- {
-				coeffs[j] = coeffs[j-1] - r*coeffs[j]
-			}
-			coeffs[0] = -r * coeffs[0]
-			cur++
-		} else if imag(lam) > 0 {
-			a := -2 * real(lam)
-			b := real(lam)*real(lam) + imag(lam)*imag(lam)
-			newCoeffs := make([]float64, n+1)
-			for j := 0; j <= cur; j++ {
-				newCoeffs[j+2] += coeffs[j]
-				newCoeffs[j+1] += a * coeffs[j]
-				newCoeffs[j] += b * coeffs[j]
-			}
-			copy(coeffs, newCoeffs)
-			cur += 2
-		}
-	}
-
-	// Result in ascending power order: result[i] = coefficient of s^i
-	result := make([]float64, n+1)
-	for i := range result {
-		result[i] = coeffs[n-i]
-	}
-	return result, nil
-}
-
-func buildObsvMatrix(A, C *mat.Dense, n, p int) *mat.Dense {
-	O := mat.NewDense(n*p, n, nil)
-	setBlock(O, 0, 0, C)
-	CA := mat.NewDense(p, n, nil)
-	CA.Mul(C, A)
-	prev := CA
-	setBlock(O, p, 0, CA)
-	for i := 2; i < n; i++ {
-		next := mat.NewDense(p, n, nil)
-		next.Mul(prev, A)
-		setBlock(O, i*p, 0, next)
-		prev = next
-	}
-
-	if n*p == n {
-		return O
-	}
-	return extractSubmatrix(O, 0, n, 0, n)
 }

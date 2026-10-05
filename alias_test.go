@@ -173,9 +173,12 @@ func aliasCases() []aliasCase {
 			return s.FixedInputReduction(map[int]float64{1: 0.5}, "off")
 		})},
 		{"FixedInputReduction/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return s.FixedInputReduction(nil, "off") })},
-		{"Modred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Modred(s, []int{2}, SingularPerturbation) })},
+		{"Modred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Modred(s, []int{2}, MatchDC) })},
 		{"Modred/none", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return Modred(s, nil, Truncate) })},
-		{"Balred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { r, _, err := Balred(s, 2, Truncate); return r, err })},
+		{"Balred", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
+			r, _, err := Balred(s, 2, BalredOptions{StateProjection: Truncate})
+			return r, err
+		})},
 		{"Balreal", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Balreal(s)) })},
 		{"Canon", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Canon(s, CanonModal)) })},
 		{"Prescale", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) { return resultSys(Prescale(s)) })},
