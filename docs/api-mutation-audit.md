@@ -33,7 +33,7 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | P1 | `Lyap`, `DLyap`, `Care`, `Dare`, `Lqr`, `Dlqr`, `Lqi`, `Lqrd` | Workspace-backed result ownership was not consistently visible across Riccati/controller APIs. | Fixed by documenting workspace-backed result lifetime in package docs, `RiccatiOpts`, `RiccatiResult`, and `LyapunovOpts`. |
 | P1 | `PID`, `PID2`, `TransferFunc`, `ZPK`, `FRD`, `EKF` | Public model structs had no uniform copy helper outside `System`/array workflows. | Fixed with `Copy` methods and independence tests for each model type. |
 | P2 | `D2C`, `Pidtune`, `FreqRespEst`, `C2DOptions` | Several APIs used free-form strings for method/type selectors. | Fixed with typed selector fields and parameters for C2D/D2C methods, C2D delay modeling, PID tuning types, and frequency-response estimator methods. |
-| P2 | `NewTrackingGoal`, `NewRejectionGoal`, `NewSensitivityGoal`, `NewWeightedGainGoal`, `NewLoopShapeGoal`, `NewMarginGoal`, `NewPoleGoal`, `NewOvershootGoal` | Convenience constructors call `mustTuningGoal` and can panic on invalid names or bounds. | Fixed by documenting panic behavior and pointing callers to error-returning `NewTuningGoal`. |
+| P2 | `NewTrackingGoal`, `NewRejectionGoal`, `NewSensitivityGoal`, `NewWeightedGainGoal`, `NewLoopShapeGoal`, `NewMarginsGoal`, `NewPolesGoal`, `NewOvershootGoal` | Convenience constructors called `mustTuningGoal` and could panic on invalid names or bounds. | Fixed: every goal constructor takes MATLAB arguments and returns an error. |
 | P2 | Nil receiver behavior | Some methods are nil-safe (`ModelArray`, `TunableReal` accessors), while most model methods are not. | Fixed with package-level docs: nil receivers are unsupported unless a method explicitly documents nil-safe behavior. |
 
 ## Core State-Space APIs
@@ -339,8 +339,8 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `(*TunableSS).FreeParameters` | `alias-risk` | Returns pointers to internal free parameters. |
 | `(*TunableSS).SampleBlock` | `copy-out`, `returns-mutable` | Interface wrapper around `Sample`. |
 | `GridTune` | `view-in`, `returns-mutable` | Returns a mutable result from a bounded Cartesian search. |
-| `Systune` | `view-in`, `returns-mutable` | Compatibility wrapper around `GridTune`. |
-| `Looptune` | `view-in`, `returns-mutable` | Compatibility wrapper around `GridTune`. |
+| `Systune` | `view-in`, `returns-mutable` | MATLAB `systune(CL0,SoftReqs,HardReqs,opts)` by grid search. |
+| `Looptune` | `view-in`, `returns-mutable` | MATLAB `looptune(G0,C0,wc,Req...,opts)` by grid search. |
 
 ## Controller, PID, EKF, Physical, and Goal APIs
 
@@ -365,17 +365,19 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `(*EKF).Step` | `mutates` | Predict-then-update. |
 | `NewPhysicalComponent` | `copy-in`, `returns-mutable` | Copies system and ports. |
 | `AssemblePhysical` | `copy-in`, `returns-mutable` | Copies component systems before assembling. |
-| `NewTuningGoal` | `returns-mutable` | Returns value object with private spec. |
-| `NewTrackingGoal` | `panic-risk` | Convenience wrapper can panic through `mustTuningGoal`. |
-| `NewRejectionGoal` | `panic-risk` | Convenience wrapper can panic through `mustTuningGoal`. |
-| `NewSensitivityGoal` | `panic-risk` | Convenience wrapper can panic through `mustTuningGoal`. |
-| `NewWeightedGainGoal` | `panic-risk` | Convenience wrapper can panic through `mustTuningGoal`. |
-| `NewLoopShapeGoal` | `panic-risk` | Convenience wrapper can panic through `mustTuningGoal`. |
-| `NewMarginGoal` | `panic-risk` | Convenience wrapper can panic through `mustTuningGoal`. |
-| `NewPoleGoal` | `panic-risk` | Convenience wrapper can panic through `mustTuningGoal`. |
-| `NewOvershootGoal` | `panic-risk` | Convenience wrapper can panic through `mustTuningGoal`. |
-| `TuningGoal.Name` | `pure` | Returns private goal name. |
-| `TuningGoal.Evaluate` | `view-in`, `returns-mutable` | Copies system inputs where applicable, returns result map. |
+| `NewTrackingGoal` | `returns-mutable` | MATLAB `TuningGoal.Tracking(inputname,outputname,responsetime,dcerror,peakerror)`; value object. |
+| `NewGainGoal` | `returns-mutable` | MATLAB `TuningGoal.Gain(inputname,outputname,gainvalue)`. |
+| `NewWeightedGainGoal` | `copy-in`, `returns-mutable` | MATLAB `TuningGoal.WeightedGain(inputname,outputname,WL,WR)`; copies weights. |
+| `NewRejectionGoal` | `copy-in`, `returns-mutable` | MATLAB `TuningGoal.Rejection(distloc,attfact)`; copies the profile. |
+| `NewSensitivityGoal` | `copy-in`, `returns-mutable` | MATLAB `TuningGoal.Sensitivity(location,maxsens)`; copies the profile. |
+| `NewLoopShapeGoal` | `copy-in`, `returns-mutable` | MATLAB `TuningGoal.LoopShape(location,loopgain,crosstol)`; copies the profile. |
+| `NewLoopShapeGoalWc` | `returns-mutable` | MATLAB `TuningGoal.LoopShape(location,wc|wcrange)`. |
+| `NewMarginsGoal` | `returns-mutable` | MATLAB `TuningGoal.Margins(location,gainmargin,phasemargin)`; disk-based. |
+| `NewPolesGoal` | `returns-mutable` | MATLAB `TuningGoal.Poles(location,mindecay,mindamping,maxfreq)`. |
+| `NewOvershootGoal` | `returns-mutable` | MATLAB `TuningGoal.Overshoot(inputname,outputname,maxpercent)`. |
+| `TuningGoal.Name` / `TuningGoal.Type` | `pure` | Name defaults to the MATLAB class name. |
+| `TuningGoal.WithName` / `TuningGoal.WithFocus` | `copy-out` | Return modified copies (MATLAB Name and Focus properties). |
+| `TuningGoal.Evaluate` | `view-in`, `returns-mutable` | MATLAB evalGoal; normalized value f with Limit 1. |
 
 ## Polynomial and Utility APIs
 
@@ -405,7 +407,7 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | Model containers | `ModelArray`, `GeneralizedModel`, `GeneralizedClosedLoop`, `TunableReal`, `TunableGain`, `TunablePID`, `TunableTF`, `TunableSS` | Mostly private fields with mutating methods; `FreeParameters` exposes parameter pointers. |
 | Options/workspaces | `C2DOptions`, `TransferFuncOpts`, `StateSpaceOpts`, `FreqRespEstOpts`, `StepInfoOptions`, `SimulateOpts`, `RiccatiOpts`, `RiccatiWorkspace`, `LyapunovOpts`, `LyapunovWorkspace`, `PidtuneOptions`, `SystuneOptions`, `PassivityOptions`, `ReduceOpts`, `ModalTruncateOptions` | Options are caller-owned; workspaces and simulation buffers are mutable and should not be shared concurrently. |
 | Result structs | `BalrealResult`, `CanonResult`, `GramResult`, `H2SynResult`, `HinfSynResult`, `LqgResult`, `LoopsensResult`, `MarginResult`, `AllMarginResult`, `DiskMarginResult`, `ReduceResult`, `ModalReductionResult`, `ModsepResult`, `PrescaleResult`, `PzmapResult`, `TimeResponse`, `StepInfoResult`, `RiccatiResult`, `RootLocusResult`, `Response`, `SsbalResult`, `StabsepResult`, `StaircaseForm`, `StateSpaceResult`, `TransferFuncResult`, `SystuneResult`, `TuningGoalResult`, `ZerosResult`, `ZPKResult`, `ERAResult`, `FRDPeakGainResult`, `FreqRespEstResult`, `ModelArrayFreqResponse`, `ModelArrayTimeResponse` | Results are mutable data containers; callers should treat them as owned outputs unless workspace-backed docs say otherwise. |
-| Value and enum types | `StateProjection`, `BalredOptions`, `CanonForm`, `AbsorbScope`, `GramType`, `PhysicalPortKind`, `PIDForm`, `PidtuneType`, `C2DMethod`, `C2DDelayModeling`, `FreqRespEstMethod`, `ReduceMode`, `TuningGoalType`, `TuningGoalSpec`, `TuningGoal`, `TunableBounds`, `AnalysisPointLocation`, `AnalysisPoint`, `PhysicalPort`, `PhysicalConnection`, `Connection`, `DampInfo`, `StepMetric`, `NonlinearModel`, `EKFModel`, `NumericBlock`, `TunableBlock`, `FRDResponseMapper`, `PIDOption`, `FeedbackOption` | Mostly value types; callback and option function types may retain references through user code. |
+| Value and enum types | `StateProjection`, `BalredOptions`, `CanonForm`, `AbsorbScope`, `GramType`, `PhysicalPortKind`, `PIDForm`, `PidtuneType`, `C2DMethod`, `C2DDelayModeling`, `FreqRespEstMethod`, `ReduceMode`, `TuningGoalType`, `TuningGoal`, `TunableSSStructure`, `TunableBounds`, `AnalysisPointLocation`, `AnalysisPoint`, `PhysicalPort`, `PhysicalConnection`, `Connection`, `DampInfo`, `StepMetric`, `NonlinearModel`, `EKFModel`, `NumericBlock`, `TunableBlock`, `FRDResponseMapper`, `PIDOption`, `FeedbackOption` | Mostly value types; callback and option function types may retain references through user code. |
 
 ## Release Gates
 

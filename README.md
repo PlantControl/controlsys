@@ -134,12 +134,12 @@ func main() {
 | `TunablePID` / `TunablePID2` | Tunable 1-DOF / 2-DOF PID controller blocks |
 | `TunableTF` | Tunable SISO transfer-function block |
 | `TunableSS` | Tunable state-space block |
-| `NewTrackingGoal` / `NewRejectionGoal` | Tuning-goal constructors for tracking and disturbance rejection |
-| `NewSensitivityGoal` / `NewWeightedGainGoal` | Tuning-goal constructors for gain and sensitivity limits |
-| `NewLoopShapeGoal` / `NewMarginGoal` | Tuning-goal constructors for loop-shape and robustness constraints |
-| `NewPoleGoal` / `NewOvershootGoal` | Tuning-goal constructors for pole-location and step-response constraints |
+| `NewTrackingGoal` / `NewGainGoal` / `NewWeightedGainGoal` / `NewOvershootGoal` | MATLAB `TuningGoal.Tracking`/`Gain`/`WeightedGain`/`Overshoot` on named signals or analysis points |
+| `NewSensitivityGoal` / `NewRejectionGoal` | MATLAB `TuningGoal.Sensitivity`/`Rejection` with frequency profiles at a location |
+| `NewLoopShapeGoal` / `NewLoopShapeGoalWc` / `NewMarginsGoal` | MATLAB `TuningGoal.LoopShape` and disk-based `TuningGoal.Margins` |
+| `NewPolesGoal` | MATLAB `TuningGoal.Poles` decay, damping and frequency region |
 | `GridTune` | Bounded Cartesian-grid tuning over free parameters and point-specific goals |
-| `Systune` / `Looptune` | Compatibility wrappers around `GridTune` |
+| `Systune` / `Looptune` | MATLAB `systune`/`looptune` argument shapes, solved by the same bounded grid search |
 
 ### Frequency Response & Plotting
 

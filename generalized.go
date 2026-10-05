@@ -340,3 +340,13 @@ func (g *GeneralizedClosedLoop) primaryAnalysisPointName() string {
 	}
 	return firstAnalysisPointName(g.analysisPoints)
 }
+
+func firstAnalysisPointName(points map[string]AnalysisPoint) string {
+	first := ""
+	for name := range points {
+		if first == "" || name < first {
+			first = name
+		}
+	}
+	return first
+}

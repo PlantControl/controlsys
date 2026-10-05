@@ -549,7 +549,8 @@ func BenchmarkGeneralizedClosedLoop_SISO(b *testing.B) {
 
 func BenchmarkTuningGoalWeightedGain_SISO(b *testing.B) {
 	sys := benchSysNonSym(4, 1, 1)
-	goal := mustOK(NewWeightedGainGoal("gain", 10))
+	sys.InputName, sys.OutputName = []string{"r"}, []string{"y"}
+	goal := mustOK(NewGainGoal("r", "y", 10))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := goal.Evaluate(sys); err != nil {
@@ -560,7 +561,8 @@ func BenchmarkTuningGoalWeightedGain_SISO(b *testing.B) {
 
 func BenchmarkTuningGoalWeightedGain_MIMO(b *testing.B) {
 	sys := benchSysNonSym(8, 3, 3)
-	goal := mustOK(NewWeightedGainGoal("gain", 10))
+	sys.InputName, sys.OutputName = expandName("r", 3), expandName("y", 3)
+	goal := mustOK(NewGainGoal("r", "y", 10))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := goal.Evaluate(sys); err != nil {
@@ -571,13 +573,8 @@ func BenchmarkTuningGoalWeightedGain_MIMO(b *testing.B) {
 
 func BenchmarkTuningGoalDynamicWeightedGain_MIMO(b *testing.B) {
 	sys := benchSysNonSym(8, 3, 3)
-	goal, err := NewTuningGoal(TuningGoalSpec{
-		Name:         "weighted",
-		Type:         TuningGoalWeightedGain,
-		Max:          10,
-		InputWeight:  benchSysNonSym(2, 3, 3),
-		OutputWeight: benchSysNonSym(2, 3, 3),
-	})
+	sys.InputName, sys.OutputName = expandName("r", 3), expandName("y", 3)
+	goal, err := NewWeightedGainGoal("r", "y", benchSysNonSym(2, 3, 3), benchSysNonSym(2, 3, 3))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -597,7 +594,7 @@ func BenchmarkSystune_SISO(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	goals := []TuningGoal{mustOK(NewWeightedGainGoal("gain", 10))}
+	goals := []TuningGoal{mustOK(NewGainGoal("u", "u", 10))}
 	opts := &SystuneOptions{GridPoints: 5}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -616,7 +613,7 @@ func BenchmarkSystune_MIMO(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	goals := []TuningGoal{mustOK(NewWeightedGainGoal("gain", 10))}
+	goals := []TuningGoal{mustOK(NewGainGoal("u", "u", 10))}
 	opts := &SystuneOptions{GridPoints: 3}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

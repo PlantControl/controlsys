@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"math"
 )
 
 // TuneMethod names the search a tuning result came from.
@@ -84,26 +83,16 @@ func Systune(ctx context.Context, CL0 *GeneralizedClosedLoop, soft, hard []Tunin
 
 // Looptune tunes C0 in the negative feedback loop with plant G0, as MATLAB
 // looptune(G0, C0, wc, Req1, ..., opts). wc is a target crossover frequency
-// (region [wc/2, 2wc]) or a band [wcmin, wcmax] in rad/s. Looptune adds a
-// crossover goal for that band and a stability-margin goal (opts margins,
-// default 7.6 dB and 45°) to reqs, and treats them all as hard goals in
-// Systune. The loop's analysis point is "looptune". See
+// or a band [wcmin, wcmax] in rad/s. Looptune adds
+// NewLoopShapeGoalWc("looptune", wc) and NewMarginsGoal("looptune", gm, pm)
+// (opts margins, default 7.6 dB and 45°) to reqs and treats them all as hard
+// goals in Systune. The loop's analysis point is "looptune": its closed loop
+// has C0's InputName and G0's OutputName, so reqs can name those channels or
+// "looptune". See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.looptune.html.
 func Looptune(ctx context.Context, G0 *System, C0 TunableBlock, wc []float64, reqs []TuningGoal, opts *LooptuneOptions) (*SystuneResult, error) {
 	if C0 == nil {
 		return nil, fmt.Errorf("Looptune: C0 is nil: %w", ErrInvalidArgument)
-	}
-	var lo, hi float64
-	switch len(wc) {
-	case 1:
-		lo, hi = wc[0]/2, 2*wc[0]
-	case 2:
-		lo, hi = wc[0], wc[1]
-	default:
-		return nil, fmt.Errorf("Looptune: wc has %d elements, want 1 or 2: %w", len(wc), ErrInvalidArgument)
-	}
-	if !(lo > 0) || !(hi >= lo) || math.IsInf(hi, 0) {
-		return nil, fmt.Errorf("Looptune: crossover band [%g, %g] must be positive, finite and ordered: %w", lo, hi, ErrInvalidArgument)
 	}
 	gm, pm := 7.6, 45.0
 	var sopts *SystuneOptions
@@ -119,15 +108,15 @@ func Looptune(ctx context.Context, G0 *System, C0 TunableBlock, wc []float64, re
 		}
 		sopts = &opts.SystuneOptions
 	}
+	crossover, err := NewLoopShapeGoalWc("looptune", wc)
+	if err != nil {
+		return nil, fmt.Errorf("Looptune: %w", err)
+	}
+	margins, err := NewMarginsGoal("looptune", gm, pm)
+	if err != nil {
+		return nil, fmt.Errorf("Looptune: %w", err)
+	}
 	loop, err := NewGeneralizedClosedLoop("looptune", G0, C0, "looptune")
-	if err != nil {
-		return nil, fmt.Errorf("Looptune: %w", err)
-	}
-	crossover, err := NewTuningGoal(TuningGoalSpec{Name: "crossover", Type: TuningGoalCrossover, Min: lo, Max: hi})
-	if err != nil {
-		return nil, fmt.Errorf("Looptune: %w", err)
-	}
-	margins, err := NewMarginGoal("margins", gm, pm)
 	if err != nil {
 		return nil, fmt.Errorf("Looptune: %w", err)
 	}
@@ -288,37 +277,34 @@ func allGoalsPass(results []TuningGoalResult) bool {
 
 func evaluateTuningGoals(model *GeneralizedClosedLoop, primaryClosedLoop *System, goals []TuningGoal) ([]TuningGoalResult, error) {
 	results := make([]TuningGoalResult, len(goals))
-	primary := model.primaryAnalysisPointName()
 	cache := map[tuningGoalResponseKey]*System{
-		{point: primary, response: tuningGoalClosedLoopResponse}: primaryClosedLoop,
+		{point: model.primaryAnalysisPointName(), response: tuningGoalClosedLoopResponse}: primaryClosedLoop,
 	}
 	for i, goal := range goals {
-		point := goal.spec.AnalysisPoint
-		if point == "" {
-			point = primary
+		if err := goal.valid(); err != nil {
+			return nil, fmt.Errorf("goal %d: %w", i, err)
 		}
-		key := tuningGoalResponseKey{point: point, response: tuningGoalResponseForType(goal.spec.Type)}
+		key, err := goal.responseKey(model)
+		if err != nil {
+			return nil, fmt.Errorf("goal %q: %w", goal.Name(), err)
+		}
 		sys := cache[key]
 		if sys == nil {
-			var err error
-			sys, err = tuningGoalSystem(model, goal.spec)
-			if err != nil {
-				return nil, err
+			if sys, err = model.goalResponse(key); err != nil {
+				return nil, fmt.Errorf("goal %q: %w", goal.Name(), err)
 			}
 			cache[key] = sys
 		}
+		if sys, err = goal.selectResponse(model, sys); err != nil {
+			return nil, fmt.Errorf("goal %q: %w", goal.Name(), err)
+		}
 		result, err := goal.evaluateSystem(sys)
 		if err != nil {
-			return nil, fmt.Errorf("goal %q: %w", goal.spec.Name, err)
+			return nil, fmt.Errorf("goal %q: %w", goal.Name(), err)
 		}
 		results[i] = result
 	}
 	return results, nil
-}
-
-type tuningGoalResponseKey struct {
-	point    string
-	response tuningGoalResponse
 }
 
 func parameterGrid(param *TunableReal, points int) ([]float64, error) {

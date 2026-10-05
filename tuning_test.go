@@ -18,7 +18,7 @@ func TestSystuneTunesSISOTunableGain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Systune(context.Background(), closed, []TuningGoal{mustOK(NewTrackingGoal("track", 0.4))}, nil, &SystuneOptions{GridPoints: 9})
+	result, err := Systune(context.Background(), closed, []TuningGoal{mustOK(NewTrackingGoal("u", "u", 1, 0.4, 1.5))}, nil, &SystuneOptions{GridPoints: 9})
 	if err != nil {
 		t.Fatalf("Systune: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestGridTuneLimitsCartesianSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = GridTune(context.Background(), closed, []TuningGoal{mustOK(NewWeightedGainGoal("bounded", 10))}, &SystuneOptions{GridPoints: 5, MaxEvaluations: 24})
+	_, err = GridTune(context.Background(), closed, []TuningGoal{mustOK(NewGainGoal("u", "u", 10))}, &SystuneOptions{GridPoints: 5, MaxEvaluations: 24})
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("GridTune error = %v, want ErrInvalidArgument", err)
 	}
@@ -61,7 +61,7 @@ func TestSystuneTunesSmallMIMOTunableGain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Systune(context.Background(), closed, nil, []TuningGoal{mustOK(NewWeightedGainGoal("bounded", 10))}, &SystuneOptions{GridPoints: 5})
+	result, err := Systune(context.Background(), closed, nil, []TuningGoal{mustOK(NewGainGoal("u", "u", 10))}, &SystuneOptions{GridPoints: 5})
 	if err != nil {
 		t.Fatalf("Systune: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestSystuneUsesTunableBlockInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Systune(context.Background(), closed, []TuningGoal{mustOK(NewTrackingGoal("track", 0.4))}, nil, &SystuneOptions{GridPoints: 9})
+	result, err := Systune(context.Background(), closed, []TuningGoal{mustOK(NewTrackingGoal("u", "u", 1, 0.4, 1.5))}, nil, &SystuneOptions{GridPoints: 9})
 	if err != nil {
 		t.Fatalf("Systune: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestSystuneUnsupportedControllerFailsClearly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Systune(context.Background(), closed, []TuningGoal{mustOK(NewWeightedGainGoal("gain", 1))}, nil, nil); err == nil {
+	if _, err := Systune(context.Background(), closed, []TuningGoal{mustOK(NewGainGoal("u", "u", 1))}, nil, nil); err == nil {
 		t.Fatal("expected unsupported fixed controller to fail")
 	}
 }
@@ -131,7 +131,7 @@ func tuningGain(t *testing.T, lo, hi float64) *TunableGain {
 
 func TestGridTuneContextAndBounds(t *testing.T) {
 	closed := mustOK(NewGeneralizedClosedLoop("loop", makeSISO(-2, 1, 1, 0), tuningGain(t, 0.1, 5), "u"))
-	goals := []TuningGoal{mustOK(NewTrackingGoal("track", 0.4))}
+	goals := []TuningGoal{mustOK(NewTrackingGoal("u", "u", 1, 0.4, 1.5))}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := GridTune(ctx, closed, goals, nil); !errors.Is(err, context.Canceled) {
@@ -148,7 +148,7 @@ func TestGridTuneContextAndBounds(t *testing.T) {
 }
 
 func TestGridTuneSkipsFailingCandidates(t *testing.T) {
-	goals := []TuningGoal{mustOK(NewOvershootGoal("os", 50))}
+	goals := []TuningGoal{mustOK(NewOvershootGoal("u", "u", 50))}
 	// Plant 1/(s-1): the closed loop 1-K is unstable for K < 1, where the
 	// overshoot goal cannot be evaluated; those grid points are skipped.
 	closed := mustOK(NewGeneralizedClosedLoop("loop", makeSISO(1, 1, 1, 0), tuningGain(t, 0, 4), "u"))
@@ -167,8 +167,8 @@ func TestGridTuneSkipsFailingCandidates(t *testing.T) {
 
 func TestSystuneSoftAndHardGoals(t *testing.T) {
 	closed := mustOK(NewGeneralizedClosedLoop("loop", makeSISO(-2, 1, 1, 0), tuningGain(t, 0.1, 5), "u"))
-	soft := []TuningGoal{mustOK(NewTrackingGoal("track", 0))}
-	hard := []TuningGoal{mustOK(NewPoleGoal("slow", -3))}
+	soft := []TuningGoal{mustOK(NewTrackingGoal("u", "u", 1, 0, 0))}
+	hard := []TuningGoal{mustOK(NewPolesGoal("", 3, 0, math.Inf(1)))}
 	res, err := Systune(context.Background(), closed, soft, hard, &SystuneOptions{GridPoints: 9})
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +176,7 @@ func TestSystuneSoftAndHardGoals(t *testing.T) {
 	if !res.Pass || res.HardScore != 0 || len(res.Goals) != 2 {
 		t.Fatalf("result = %+v, want hard goals met", res)
 	}
-	impossible := []TuningGoal{mustOK(NewPoleGoal("impossible", -100))}
+	impossible := []TuningGoal{mustOK(NewPolesGoal("", 100, 0, math.Inf(1)))}
 	res, err = Systune(context.Background(), closed, soft, impossible, &SystuneOptions{GridPoints: 9})
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestLooptuneCrossoverBand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := Looptune(context.Background(), plant, tuningGain(t, 0.1, 5), []float64{1}, nil, &LooptuneOptions{GridPoints: 50})
+	res, err := Looptune(context.Background(), plant, tuningGain(t, 0.1, 5), []float64{0.5, 2}, nil, &LooptuneOptions{GridPoints: 50})
 	if err != nil {
 		t.Fatal(err)
 	}
