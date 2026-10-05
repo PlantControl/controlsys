@@ -493,8 +493,8 @@ func TestInitial_NilX0_Error(t *testing.T) {
 		0,
 	)
 	_, err := Initial(sys, nil, 1.0)
-	if err == nil {
-		t.Fatal("expected error for nil x0")
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("err = %v, want ErrInvalidArgument for nil x0", err)
 	}
 }
 

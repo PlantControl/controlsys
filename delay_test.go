@@ -4329,8 +4329,8 @@ func TestSetInternalDelayStaticGainAcceptsNilEmptyBlocks(t *testing.T) {
 	if !g.HasInternalDelay() {
 		t.Error("HasInternalDelay = false")
 	}
-	if err := g.SetInternalDelay([]float64{1}, nil, nil, nil, one(1), one(0.2)); !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("nil 1x1 D12: err = %v, want ErrDimensionMismatch", err)
+	if err := g.SetInternalDelay([]float64{1}, nil, nil, nil, one(1), one(0.2)); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("nil 1x1 D12: err = %v, want ErrInvalidArgument", err)
 	}
 }
 

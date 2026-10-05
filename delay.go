@@ -110,7 +110,7 @@ func validateLFTDims(n, m, p, N int, B2, C2, D12, D21, D22 *mat.Dense) error {
 			if empty {
 				return nil
 			}
-			return fmt.Errorf("%s required when InternalDelay is set: %w", name, ErrDimensionMismatch)
+			return fmt.Errorf("%s required when InternalDelay is set: %w", name, ErrInvalidArgument)
 		}
 		r, c := mat.Dims()
 		if empty && r == 0 && c == 0 {

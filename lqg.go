@@ -184,7 +184,7 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 
 func validateLqgWeight(name string, W *mat.Dense, dim int) error {
 	if W == nil {
-		return fmt.Errorf("Lqg: nil %s: %w", name, ErrDimensionMismatch)
+		return fmt.Errorf("Lqg: nil %s: %w", name, ErrInvalidArgument)
 	}
 	r, c := W.Dims()
 	if r != dim || c != dim {

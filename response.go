@@ -898,7 +898,7 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 		return nil, fmt.Errorf("Initial: model has no outputs: %w", ErrDimensionMismatch)
 	}
 	if x0 == nil {
-		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrInvalidArgument)
 	}
 	sim, simX0, reduced, err := sys.timeResponseForm(x0)
 	if err != nil {

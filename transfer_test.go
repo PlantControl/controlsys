@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -864,11 +865,15 @@ func TestTransferFuncStateSpaceInvalidModels(t *testing.T) {
 		{"mixed zero static row", &TransferFunc{Num: [][][]float64{{{1}}, {{1}}}, Den: [][]float64{{1, 2}, {0}}}, ErrSingularDenom},
 		{"empty", &TransferFunc{}, ErrDimensionMismatch},
 		{"ragged", &TransferFunc{Num: [][][]float64{{{1}, {1}}}, Den: [][]float64{{1, 1}, {1, 2}}}, ErrDimensionMismatch},
-		{"nil", nil, ErrDimensionMismatch},
+		{"nil", nil, ErrInvalidArgument},
 	}
 	for _, tc := range cases {
-		if _, err := tc.tf.StateSpace(); !errors.Is(err, tc.want) {
+		_, err := tc.tf.StateSpace()
+		if !errors.Is(err, tc.want) {
 			t.Errorf("%s: StateSpace error = %v, want %v", tc.name, err, tc.want)
+		}
+		if msg := err.Error(); !strings.HasPrefix(msg, "TransferFunc.StateSpace: ") || strings.Count(msg, "TransferFunc") != 1 || strings.Count(msg, "controlsys:") != 1 {
+			t.Errorf("%s: StateSpace error = %q, want single op prefix and sentinel", tc.name, msg)
 		}
 	}
 }
