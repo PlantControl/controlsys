@@ -63,9 +63,12 @@ func TestPRD103InterconnectionTopologyPublicDelayWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !floatSlicesEqual(closed.InputDelay, []float64{2, 0}) {
-		t.Fatalf("closed InputDelay = %v, want [2 0]", closed.InputDelay)
+	if closed.InputDelay != nil || !closed.HasInternalDelay() {
+		t.Fatalf("plant InputDelay must move inside the loop: InputDelay=%v internal=%v", closed.InputDelay, closed.HasInternalDelay())
 	}
+	assertResponseOracle(t, "closed", closed, func(s complex128) [][]complex128 {
+		return closedLoopOracle(t, plant, controller, -1, s)
+	})
 	if !stringSlicesEqual(closed.InputName, plant.InputName) || !stringSlicesEqual(closed.OutputName, plant.OutputName) {
 		t.Fatalf("closed names input=%v output=%v", closed.InputName, closed.OutputName)
 	}
