@@ -230,7 +230,12 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
 }
 
 // HinfNorm computes the H∞ norm (peak gain) of an LTI system and the
-// frequency at which it occurs.
+// frequency at which it occurs, to 1e-10 relative accuracy. A continuous
+// model whose gain approaches its peak σ_max(D) only as ω → ∞ returns
+// omega = +Inf; the Nyquist frequency π/T plays that role for discrete
+// models. The algorithm is that of MATLAB getPeakGain
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.getpeakgain.html):
+// Bruinsma–Steinbuch iteration on the γ-crossings of the extended pencil.
 //
 // Unstable models, including poles on the stability boundary, return
 // norm = omega = +Inf and a nil error, as MATLAB hinfnorm
@@ -258,13 +263,16 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 		return sv, 0, nil
 	}
 
-	if err := policy.requireStable(ErrUnstable); err != nil {
-		if errors.Is(err, ErrUnstable) {
-			return math.Inf(1), math.Inf(1), nil
-		}
+	poles, err := sys.Poles()
+	if err != nil {
 		return 0, 0, err
 	}
-	return peakGain(sys)
+	for _, pole := range poles {
+		if poleOnOrOutsideStabilityBoundary(pole, sys.IsContinuous(), poleStabilityTolerance(pole)) {
+			return math.Inf(1), math.Inf(1), nil
+		}
+	}
+	return peakGain(sys, poles)
 }
 
 // linfNorm returns the L∞ norm (peak gain regardless of stability) and the
@@ -295,38 +303,34 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 		}
 		return math.Inf(1), math.Abs(cmplx.Phase(pole)) / sys.Dt, nil
 	}
-	return peakGain(sys)
+	return peakGain(sys, poles)
 }
 
-// peakGain computes sup_ω σ_max(G(jω)) of a model with no poles on the
-// stability boundary from the Hamiltonian eigenvalue test; stability is not
-// required. A sampled peak is first certified by one probe just above it;
-// when the probe is inconclusive, the upper-bound search may still certify a
-// raised peak, and bisection runs only if it does not.
-// Discrete models are mapped by Tustin, and the peak frequency is unwarped
-// back to the discrete axis.
-func peakGain(sys *System) (norm float64, omega float64, err error) {
+// peakGain computes sup_ω σ_max(G(jω)) (G(e^{jωT}) for discrete models) of a
+// model with no poles on the stability boundary from the γ-crossings of its
+// extended pencil; stability is not required. A sampled peak, or σ_max(D)
+// at ω = ∞ for continuous models, is first certified by one probe just
+// above it; when the probe is inconclusive, the upper-bound search may still
+// certify a raised peak, and bisection runs only if it does not. A
+// continuous peak approached only as ω → ∞ returns omega = +Inf.
+func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err error) {
 	n, m, p := sys.Dims()
-	if sys.IsDiscrete() {
-		csys, err := sys.Undiscretize()
-		if err != nil {
-			return 0, 0, err
-		}
-		norm, omega, err = peakGain(csys)
-		return norm, 2 * math.Atan(omega*sys.Dt/2) / sys.Dt, err
-	}
-
-	gammaLow, omegaPeak := hinfLowerBound(sys, m, p)
-
 	ws := newHamiltonianWS(sys, n, m, p)
 
+	gammaLow, omegaPeak := ws.lowerBound(poles)
+	if sys.IsContinuous() {
+		if sd := maxSVDense(sys.D, p, m); sd > gammaLow {
+			gammaLow, omegaPeak = sd, math.Inf(1)
+		}
+	}
+
 	const tol = 1e-10
-	gammaLow, omegaPeak, certified := ws.certifyPeak(sys, gammaLow, omegaPeak, tol)
+	gammaLow, omegaPeak, certified := ws.certifyPeak(gammaLow, omegaPeak, tol)
 	if certified {
 		return gammaLow * (1 + tol/2), omegaPeak, nil
 	}
 
-	gammaLow, gammaHigh, omegaPeak, certified := ws.upperBound(sys, gammaLow, omegaPeak, tol)
+	gammaLow, gammaHigh, omegaPeak, certified := ws.upperBound(gammaLow, omegaPeak, tol)
 	if certified {
 		return gammaLow * (1 + tol/2), omegaPeak, nil
 	}
@@ -340,7 +344,7 @@ func peakGain(sys *System) (norm float64, omega float64, err error) {
 			gammaHigh = mid
 			continue
 		}
-		peak, w, err := ws.candidatePeak(sys)
+		peak, w, err := ws.candidatePeak()
 		if err != nil {
 			gammaLow = mid
 			continue
@@ -349,7 +353,7 @@ func peakGain(sys *System) (norm float64, omega float64, err error) {
 			gammaHigh = mid
 			continue
 		}
-		gammaLow, omegaPeak, certified = ws.certifyPeak(sys, peak, w, tol)
+		gammaLow, omegaPeak, certified = ws.certifyPeak(peak, w, tol)
 		if certified {
 			return gammaLow * (1 + tol/2), omegaPeak, nil
 		}
@@ -359,14 +363,15 @@ func peakGain(sys *System) (norm float64, omega float64, err error) {
 }
 
 // certifyPeak tries to prove that the attained gain gammaLow is within tol
-// of the peak: no imaginary-axis Hamiltonian eigenvalue at
-// gammaLow·(1+tol/2) makes that level an upper bound. Crossings found there
-// raise gammaLow through their interval midpoints (Boyd–Balakrishnan,
-// Bruinsma–Steinbuch), which converges quadratically. Near-axis eigenvalues
-// whose candidate frequencies stay below the probe count as no crossing, the
-// rule the bisection applies at every level. It reports false when the
-// candidates cannot be evaluated, leaving the bisection to settle the peak.
-func (ws *hamiltonianWS) certifyPeak(sys *System, gammaLow, omegaPeak, tol float64) (float64, float64, bool) {
+// of the peak: no γ-crossing at gammaLow·(1+tol/2) makes that level an upper
+// bound. Crossings found there raise gammaLow through their interval
+// midpoints (Boyd–Balakrishnan, Bruinsma–Steinbuch), and climb carries each
+// raise to the local maximum, so the next probe usually certifies it.
+// Candidates whose evaluated gains stay below the probe count as no
+// crossing, the rule the bisection applies at every level. It reports false
+// when the candidates cannot be evaluated, leaving the bisection to settle
+// the peak.
+func (ws *hamiltonianWS) certifyPeak(gammaLow, omegaPeak, tol float64) (float64, float64, bool) {
 	for range 20 {
 		if !(gammaLow > 0) || math.IsInf(gammaLow, 1) {
 			return gammaLow, omegaPeak, false
@@ -375,38 +380,38 @@ func (ws *hamiltonianWS) certifyPeak(sys *System, gammaLow, omegaPeak, tol float
 		if !ws.hasImagEigs(probe) {
 			return gammaLow, omegaPeak, true
 		}
-		peak, w, err := ws.candidatePeak(sys)
+		peak, w, err := ws.candidatePeak()
 		if err != nil {
 			return gammaLow, omegaPeak, false
 		}
 		if peak < probe {
 			return gammaLow, omegaPeak, true
 		}
-		gammaLow, omegaPeak = peak, w
+		gammaLow, omegaPeak = ws.climb(peak, w)
 	}
 	return gammaLow, omegaPeak, false
 }
 
-// upperBound doubles gammaHigh from 2·gammaLow until the Hamiltonian test
+// upperBound doubles gammaHigh from 2·gammaLow until the crossing test
 // shows no crossing there, under the candidate rule of certifyPeak and the
-// bisection: near-axis eigenvalues whose candidate gains stay below gammaHigh
-// do not count. The near-axis threshold grows with gamma, so without that
-// rule a lightly damped mode is flagged at every level. A candidate gain at
-// or above gammaHigh raises gammaLow through certifyPeak, which may settle
-// the peak outright.
-func (ws *hamiltonianWS) upperBound(sys *System, gammaLow, omegaPeak, tol float64) (float64, float64, float64, bool) {
+// bisection: candidates whose evaluated gains stay below gammaHigh do not
+// count. The pencil eigenvalues of a lightly damped mode stay inside the
+// near-axis band at every level, so without that rule they would be flagged
+// at every level. A candidate gain at or above gammaHigh raises gammaLow
+// through certifyPeak, which may settle the peak outright.
+func (ws *hamiltonianWS) upperBound(gammaLow, omegaPeak, tol float64) (float64, float64, float64, bool) {
 	gammaHigh := math.Max(gammaLow*2, 1e-10)
 	for range 50 {
 		if !ws.hasImagEigs(gammaHigh) {
 			break
 		}
-		peak, w, err := ws.candidatePeak(sys)
+		peak, w, err := ws.candidatePeak()
 		if err == nil && peak < gammaHigh {
 			break
 		}
 		if err == nil {
 			var certified bool
-			gammaLow, omegaPeak, certified = ws.certifyPeak(sys, peak, w, tol)
+			gammaLow, omegaPeak, certified = ws.certifyPeak(peak, w, tol)
 			if certified {
 				return gammaLow, gammaLow * (1 + tol/2), omegaPeak, true
 			}
@@ -416,287 +421,299 @@ func (ws *hamiltonianWS) upperBound(sys *System, gammaLow, omegaPeak, tol float6
 	return gammaLow, gammaHigh, omegaPeak, false
 }
 
-// hamiltonianWS holds pre-allocated buffers for the Hamiltonian eigenvalue test
-// used across bisection iterations in HinfNorm.
+// hamiltonianWS holds the extended pencil of the γ-crossing test, reused
+// across levels, and the evaluator that confirms its candidates.
+//
+// σ_i(G(jω)) = γ exactly when jω is a finite eigenvalue of the pencil
+//
+//	λ·[I 0 0 0; 0 I 0 0; 0 0 0 0; 0 0 0 0] − [A 0 B 0; 0 −Aᵀ 0 −Cᵀ; C 0 D −γI; 0 Bᵀ −γI Dᵀ]
+//
+// in (x, z, u, y); for discrete models e^{jωT} is an eigenvalue of
+//
+//	z·[I 0 0 0; 0 Aᵀ 0 Cᵀ; 0 0 0 0; 0 0 0 0] − [A 0 B 0; 0 I 0 0; C 0 D −γI; 0 Bᵀ −γI Dᵀ].
+//
+// An orthogonal transformation from the right compresses the algebraic rows,
+// leaving a 2n×2n pencil for QZ (as SLICOT AB13DD). Unlike the Hamiltonian
+// matrix, the pencil never inverts R = γ²I − DᵀD, so it keeps its accuracy
+// as γ approaches σ_max(D); it also never forms BBᵀ/γ² and CᵀC, whose
+// imbalance on near-optimal closed loops pushes crossings off the axis.
+// Discrete models are tested on the unit circle directly, without a Tustin
+// map whose rounding would shift lightly damped peaks.
 type hamiltonianWS struct {
+	sys     *System
 	n, m, p int
-	nn      int
-	dIsZero bool
+	nn, nc  int
+	k       int
 
-	aData []float64
-	aStr  int
-	bData []float64
-	bStr  int
-	cData []float64
-	cStr  int
-	dData []float64
-	dStr  int
+	top, topE            []float64 // nn×nc
+	botInit, bot         []float64 // nc×k: the algebraic rows, transposed
+	tau                  []float64
+	pae                  []float64 // 2nn×nc: top over topE
+	a2, e2               []float64 // nn×nn
+	alphar, alphai, beta []float64
+	work                 []float64
 
-	bbt []float64
-	ctc []float64
-
-	h     []float64
 	cands []float64
-	wr    []float64
-	wi    []float64
-	vs    []float64
-	work  []float64
-
-	r       []float64
-	dtc     []float64
-	bt      []float64
-	rinvBt  []float64
-	h11     []float64
-	h12     []float64
-	h21     []float64
-	dRinvDt []float64
+	freqs []float64
+	eval  *sigmaEvaluator
 }
 
 func newHamiltonianWS(sys *System, n, m, p int) *hamiltonianWS {
-	nn := 2 * n
-	aRaw := sys.A.RawMatrix()
-	bRaw := sys.B.RawMatrix()
-	cRaw := sys.C.RawMatrix()
-	dRaw := sys.D.RawMatrix()
-
+	nn, k := 2*n, m+p
+	nc := nn + k
 	ws := &hamiltonianWS{
-		n: n, m: m, p: p, nn: nn,
-		dIsZero: allZeroDense(sys.D),
-		aData:   aRaw.Data, aStr: aRaw.Stride,
-		bData: bRaw.Data, bStr: bRaw.Stride,
-		cData: cRaw.Data, cStr: cRaw.Stride,
-		dData: dRaw.Data, dStr: dRaw.Stride,
-		h:  make([]float64, nn*nn),
-		wr: make([]float64, nn),
-		wi: make([]float64, nn),
-		vs: make([]float64, nn*nn),
+		sys: sys, n: n, m: m, p: p, nn: nn, nc: nc, k: k,
+		top: make([]float64, nn*nc), topE: make([]float64, nn*nc),
+		botInit: make([]float64, nc*k), bot: make([]float64, nc*k),
+		tau: make([]float64, k),
+		pae: make([]float64, 2*nn*nc),
+		a2:  make([]float64, nn*nn), e2: make([]float64, nn*nn),
+		alphar: make([]float64, nn), alphai: make([]float64, nn), beta: make([]float64, nn),
+		eval: newSigmaEvaluator(sys, n, m, p),
 	}
-
-	ws.bbt = make([]float64, n*n)
-	blas64.Gemm(blas.NoTrans, blas.Trans, 1,
-		blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
-		blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
-		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: ws.bbt})
-
-	ws.ctc = make([]float64, n*n)
-	blas64.Gemm(blas.Trans, blas.NoTrans, 1,
-		blas64.General{Rows: p, Cols: n, Stride: cRaw.Stride, Data: cRaw.Data},
-		blas64.General{Rows: p, Cols: n, Stride: cRaw.Stride, Data: cRaw.Data},
-		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: ws.ctc})
-
-	if !ws.dIsZero {
-		ws.r = make([]float64, m*m)
-		ws.dtc = make([]float64, m*n)
-		ws.bt = make([]float64, m*n)
-		ws.rinvBt = make([]float64, m*n)
-		ws.h11 = make([]float64, n*n)
-		ws.h12 = make([]float64, n*n)
-		ws.h21 = make([]float64, n*n)
-		ws.dRinvDt = make([]float64, p*n)
-
-		for i := range n {
+	a, b, c := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
+	top, topE, bot := ws.top, ws.topE, ws.botInit
+	continuous := sys.IsContinuous()
+	for i := range n {
+		copy(top[i*nc:i*nc+n], a.Data[i*a.Stride:i*a.Stride+n])
+		copy(top[i*nc+nn:i*nc+nn+m], b.Data[i*b.Stride:i*b.Stride+m])
+		topE[i*nc+i] = 1
+		row := (n + i) * nc
+		if continuous {
+			topE[row+n+i] = 1
+		} else {
+			top[row+n+i] = 1
+		}
+		sign, dual := -1.0, top
+		if !continuous {
+			sign, dual = 1, topE
+		}
+		for j := range n {
+			dual[row+n+j] = sign * a.Data[j*a.Stride+i]
+		}
+		for j := range p {
+			dual[row+nn+m+j] = sign * c.Data[j*c.Stride+i]
+		}
+		for j := range m {
+			bot[(n+i)*k+p+j] = b.Data[i*b.Stride+j]
+		}
+	}
+	for q := range p {
+		for j := range n {
+			bot[j*k+q] = c.Data[q*c.Stride+j]
+		}
+	}
+	if sys.D != nil {
+		d := sys.D.RawMatrix()
+		for q := range p {
 			for j := range m {
-				ws.bt[j*n+i] = bRaw.Data[i*bRaw.Stride+j]
+				bot[(nn+j)*k+q] = d.Data[q*d.Stride+j]
+				bot[(nn+m+q)*k+p+j] = d.Data[q*d.Stride+j]
 			}
 		}
 	}
 
-	wq := make([]float64, 1)
-	impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
-		nn, ws.h, nn, ws.wr, ws.wi, ws.vs, nn, wq, -1, nil)
-	ws.work = make([]float64, int(wq[0]))
-
+	ws.work = make([]float64, 8*nn)
 	return ws
 }
 
-// hamiltonianEvals counts hasImagEigs calls, one Schur decomposition each.
+// hamiltonianEvals counts hasImagEigs calls, one QZ decomposition each.
 var hamiltonianEvals atomic.Int64
 
+// nearAxisTol is the relative distance |Re λ|/|λ| (|ln|z||/|ln z| for
+// discrete models) within which a pencil eigenvalue is taken as a crossing
+// candidate. A near-optimal H∞ closed loop has σ_max flat to 1e-8 over
+// decades, and unstructured QZ moves its crossings off the axis: by 1e-4
+// relative on the TI6YYN loop and by 1e-3 to 1e-2 on a 50th-order
+// mixed-sensitivity loop. The band is wide because it costs only σ_max
+// evaluations: candidates steer the sampling, and every decision rests on an
+// evaluated σ_max.
+const nearAxisTol = 0.1
+
+// hasImagEigs reports whether the pencil at level gamma has eigenvalues on or
+// near the imaginary axis (unit circle) and records their frequencies as
+// candidates for candidatePeak. A failed QZ counts as a crossing with no
+// candidates.
 func (ws *hamiltonianWS) hasImagEigs(gamma float64) bool {
 	hamiltonianEvals.Add(1)
-	n, m, p := ws.n, ws.m, ws.p
-	nn := ws.nn
-	g2 := gamma * gamma
+	nn, nc, k, m, p := ws.nn, ws.nc, ws.k, ws.m, ws.p
 	ws.cands = ws.cands[:0]
 
-	h := ws.h
-	for i := range len(h) {
-		h[i] = 0
+	copy(ws.bot, ws.botInit)
+	for q := range p {
+		ws.bot[(nn+m+q)*k+q] = -gamma
 	}
-
-	if ws.dIsZero {
-		for i := range n {
-			for j := range n {
-				h[i*nn+j] = ws.aData[i*ws.aStr+j]
-			}
-		}
-
-		scale := 1.0 / g2
-		for i := range n {
-			for j := range n {
-				h[i*nn+(n+j)] = scale * ws.bbt[i*n+j]
-			}
-		}
-
-		for i := range n {
-			for j := range n {
-				h[(n+i)*nn+j] = -ws.ctc[i*n+j]
-			}
-		}
-
-		for i := range n {
-			for j := range n {
-				h[(n+i)*nn+(n+j)] = -ws.aData[j*ws.aStr+i]
-			}
-		}
-	} else {
-		r := ws.r
-		for i := range m * m {
-			r[i] = 0
-		}
-		for i := range m {
-			r[i*m+i] = g2
-		}
-		blas64.Gemm(blas.Trans, blas.NoTrans, -1,
-			blas64.General{Rows: p, Cols: m, Stride: ws.dStr, Data: ws.dData},
-			blas64.General{Rows: p, Cols: m, Stride: ws.dStr, Data: ws.dData},
-			1, blas64.General{Rows: m, Cols: m, Stride: m, Data: r})
-
-		if !impl.Dpotrf(blas.Upper, m, r, m) {
-			return true
-		}
-
-		dtc := ws.dtc
-		blas64.Gemm(blas.Trans, blas.NoTrans, 1,
-			blas64.General{Rows: p, Cols: m, Stride: ws.dStr, Data: ws.dData},
-			blas64.General{Rows: p, Cols: n, Stride: ws.cStr, Data: ws.cData},
-			0, blas64.General{Rows: m, Cols: n, Stride: n, Data: dtc})
-		impl.Dpotrs(blas.Upper, m, n, r, m, dtc, n)
-
-		rinvBt := ws.rinvBt
-		copy(rinvBt, ws.bt)
-		impl.Dpotrs(blas.Upper, m, n, r, m, rinvBt, n)
-
-		h11 := ws.h11
-		copyStrided(h11, n, ws.aData, ws.aStr, n, n)
-		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
-			blas64.General{Rows: n, Cols: m, Stride: ws.bStr, Data: ws.bData},
-			blas64.General{Rows: m, Cols: n, Stride: n, Data: dtc},
-			1, blas64.General{Rows: n, Cols: n, Stride: n, Data: h11})
-
-		h12 := ws.h12
-		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
-			blas64.General{Rows: n, Cols: m, Stride: ws.bStr, Data: ws.bData},
-			blas64.General{Rows: m, Cols: n, Stride: n, Data: rinvBt},
-			0, blas64.General{Rows: n, Cols: n, Stride: n, Data: h12})
-
-		h21 := ws.h21
-		blas64.Gemm(blas.Trans, blas.NoTrans, -1,
-			blas64.General{Rows: p, Cols: n, Stride: ws.cStr, Data: ws.cData},
-			blas64.General{Rows: p, Cols: n, Stride: ws.cStr, Data: ws.cData},
-			0, blas64.General{Rows: n, Cols: n, Stride: n, Data: h21})
-
-		dRinvDt := ws.dRinvDt
-		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
-			blas64.General{Rows: p, Cols: m, Stride: ws.dStr, Data: ws.dData},
-			blas64.General{Rows: m, Cols: n, Stride: n, Data: dtc},
-			0, blas64.General{Rows: p, Cols: n, Stride: n, Data: dRinvDt})
-		blas64.Gemm(blas.Trans, blas.NoTrans, -1,
-			blas64.General{Rows: p, Cols: n, Stride: ws.cStr, Data: ws.cData},
-			blas64.General{Rows: p, Cols: n, Stride: n, Data: dRinvDt},
-			1, blas64.General{Rows: n, Cols: n, Stride: n, Data: h21})
-
-		for i := range n {
-			for j := range n {
-				h[i*nn+j] = h11[i*n+j]
-				h[i*nn+(n+j)] = h12[i*n+j]
-				h[(n+i)*nn+j] = h21[i*n+j]
-				h[(n+i)*nn+(n+j)] = -h11[j*n+i]
-			}
-		}
+	for j := range m {
+		ws.bot[(nn+j)*k+p+j] = -gamma
 	}
+	// Minimal workspaces: gonum's noasm GemvT clears all of y, so Dlarf
+	// clears the whole work slice on every reflector (gonum ergo 2S5Y7S).
+	impl.Dgeqrf(nc, k, ws.bot, k, ws.tau, ws.work[:k], k)
+	copy(ws.pae, ws.top)
+	copy(ws.pae[nn*nc:], ws.topE)
+	impl.Dormqr(blas.Right, blas.NoTrans, 2*nn, nc, k, ws.bot, k, ws.tau, ws.pae, nc, ws.work[:2*nn], 2*nn)
+	copyStrided(ws.a2, nn, ws.pae[k:], nc, nn, nn)
+	copyStrided(ws.e2, nn, ws.pae[nn*nc+k:], nc, nn, nn)
 
-	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
-		nn, h, nn, ws.wr, ws.wi, ws.vs, nn, ws.work, len(ws.work), nil)
-	if !ok {
+	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, nn, ws.a2, nn, ws.e2, nn,
+		ws.alphar, ws.alphai, ws.beta, nil, 1, nil, 1, ws.work, len(ws.work)) {
 		return true
 	}
 
-	threshold := math.Sqrt(eps()) * gamma
+	dt := ws.sys.Dt
 	for i := range nn {
-		absLam := math.Sqrt(ws.wr[i]*ws.wr[i] + ws.wi[i]*ws.wi[i])
-		if absLam > 0 && math.Abs(ws.wr[i]) < threshold*math.Max(1, absLam/gamma) && ws.wi[i] >= 0 {
-			ws.cands = append(ws.cands, ws.wi[i])
+		lam := complex(ws.alphar[i], ws.alphai[i]) / complex(ws.beta[i], 0)
+		if ws.sys.IsDiscrete() {
+			lam = cmplx.Log(lam)
+		}
+		if cmplx.IsInf(lam) || cmplx.IsNaN(lam) || imag(lam) < 0 {
+			continue
+		}
+		if math.Abs(real(lam)) <= nearAxisTol*cmplx.Abs(lam) {
+			w := imag(lam)
+			if ws.sys.IsDiscrete() {
+				w /= dt
+			}
+			ws.cands = append(ws.cands, w)
 		}
 	}
 	return len(ws.cands) > 0
 }
 
-// candidatePeak evaluates sigma_max at the near-axis eigenvalue frequencies
-// found by hasImagEigs and at their midpoints (Bruinsma and Steinbuch). The
-// Hamiltonian of a badly scaled system can show near-axis eigenvalues where
-// no singular value reaches gamma, so only these evaluations certify a
-// crossing.
-func (ws *hamiltonianWS) candidatePeak(sys *System) (peak, omega float64, err error) {
+// candidatePeak evaluates σ_max at the candidate crossings found by
+// hasImagEigs, at ω = 0 (and π/T for discrete models), and at the midpoints
+// of the intervals they bound (Bruinsma and Steinbuch). Candidates only
+// propose frequencies: a crossing counts when an evaluated σ_max reaches the
+// level.
+func (ws *hamiltonianWS) candidatePeak() (peak, omega float64, err error) {
 	if len(ws.cands) == 0 {
 		return 0, 0, ErrSchurFailed
 	}
 	slices.Sort(ws.cands)
-	freqs := slices.Compact(ws.cands)
+	freqs := append(ws.freqs[:0], 0)
+	freqs = append(freqs, ws.cands...)
+	if ws.sys.IsDiscrete() {
+		freqs = append(freqs, math.Pi/ws.sys.Dt)
+	}
+	freqs = slices.Compact(freqs)
 	for i := range len(freqs) - 1 {
 		freqs = append(freqs, (freqs[i]+freqs[i+1])/2)
 	}
-	return sigmaMaxPointwise(sys, freqs)
+	ws.freqs = freqs
+	return ws.eval.peak(freqs, 1e-6)
 }
 
-// sigmaMaxPointwise returns the largest sigma_max over freqs and where it
-// occurs. It solves the state space at each frequency: the batched sweep
-// converts long, high-order sweeps to polynomials, which loses the peak.
-func sigmaMaxPointwise(sys *System, freqs []float64) (peak, omega float64, err error) {
-	_, m, p := sys.Dims()
-	resp, err := sys.FreqResponsePointwise(freqs)
-	if err != nil {
-		return 0, 0, err
-	}
-	nSV := min(p, m)
-	response := newSampledComplexResponse(resp.Data, freqs, p, m)
-	var ws *complexSVDWorkspace
-	if p != 1 || m != 1 {
-		ws = newComplexSVDWorkspace(p, m)
-	}
-	sv := make([]float64, nSV)
-	peak = math.Inf(-1)
-	for k, w := range freqs {
-		response.singularValues(sv, ws, k)
-		if sv[0] > peak || math.IsNaN(sv[0]) {
-			peak, omega = sv[0], w
+// climb maximises σ_max by Brent's method between the candidate points of
+// candidatePeak that bracket w, where σ_max(w) = peak. One crossing test
+// costs as much as tens of evaluations, and landing on the local maximum
+// usually lets the next probe certify it. It returns the larger of peak and
+// the refined gain at the maximiser.
+func (ws *hamiltonianWS) climb(peak, w float64) (float64, float64) {
+	a, b := math.Inf(-1), math.Inf(1)
+	for _, f := range ws.freqs {
+		if f < w {
+			a = math.Max(a, f)
+		} else if f > w {
+			b = math.Min(b, f)
 		}
 	}
-	if math.IsNaN(peak) {
-		return 0, 0, ErrSingularEquation
+	if math.IsInf(a, 0) || math.IsInf(b, 0) {
+		return peak, w
 	}
-	return peak, omega, nil
+	f := func(x float64) float64 {
+		sv, err := ws.eval.sigma(x, false)
+		if err != nil || math.IsNaN(sv) {
+			return math.Inf(1)
+		}
+		return -sv
+	}
+	const cgold = 0.3819660112501051
+	xtol := 1e-7 * (b - a)
+	x, v, u := w, w, w
+	fx := f(x)
+	fv, fu := fx, fx
+	wv, fw := w, fx
+	var d, e float64
+	for range 40 {
+		m := (a + b) / 2
+		tol := xtol + 4*eps()*math.Abs(x)
+		if math.Abs(x-m) <= 2*tol-(b-a)/2 {
+			break
+		}
+		parabolic := false
+		if math.Abs(e) > tol {
+			r := (x - wv) * (fx - fv)
+			q := (x - v) * (fx - fw)
+			pp := (x-v)*q - (x-wv)*r
+			q = 2 * (q - r)
+			if q > 0 {
+				pp = -pp
+			}
+			q = math.Abs(q)
+			if math.Abs(pp) < math.Abs(q*e/2) && pp > q*(a-x) && pp < q*(b-x) {
+				e, d = d, pp/q
+				parabolic = true
+				if u = x + d; u-a < 2*tol || b-u < 2*tol {
+					d = math.Copysign(tol, m-x)
+				}
+			}
+		}
+		if !parabolic {
+			if x >= m {
+				e = a - x
+			} else {
+				e = b - x
+			}
+			d = cgold * e
+		}
+		if math.Abs(d) >= tol {
+			u = x + d
+		} else {
+			u = x + math.Copysign(tol, d)
+		}
+		fu = f(u)
+		if fu <= fx {
+			if u >= x {
+				a = x
+			} else {
+				b = x
+			}
+			v, fv, wv, fw = wv, fw, x, fx
+			x, fx = u, fu
+			continue
+		}
+		if u < x {
+			a = u
+		} else {
+			b = u
+		}
+		if fu <= fw || wv == x {
+			v, fv, wv, fw = wv, fw, u, fu
+		} else if fu <= fv || v == x || v == wv {
+			v, fv = u, fu
+		}
+	}
+	if sv, err := ws.eval.sigma(x, true); err == nil && sv > peak {
+		return sv, x
+	}
+	return peak, w
 }
 
-func hinfLowerBound(sys *System, m, p int) (gammaLow, omegaPeak float64) {
-	poles, err := sys.Poles()
-	if err != nil {
-		return 0, 0
-	}
-
-	freqs := make([]float64, 0, 60)
-	freqs = append(freqs, 0)
-
+// lowerBound samples σ_max at ω = 0 and 50 log-spaced frequencies spanning
+// the magnitudes of poles; discrete models use the magnitudes of their Tustin
+// equivalents, warped back to the unit circle, and add the Nyquist frequency.
+func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak float64) {
+	sys := ws.sys
+	dt := sys.Dt
 	wmin, wmax := math.Inf(1), 0.0
 	for _, pole := range poles {
+		if sys.IsDiscrete() {
+			pole = complex(2/dt, 0) * (pole - 1) / (pole + 1)
+		}
 		w := cmplx.Abs(pole)
-		if w > 0 {
-			if w < wmin {
-				wmin = w
-			}
-			if w > wmax {
-				wmax = w
-			}
+		if w > 0 && !math.IsInf(w, 0) && !math.IsNaN(w) {
+			wmin = math.Min(wmin, w)
+			wmax = math.Max(wmax, w)
 		}
 	}
 	if wmax == 0 {
@@ -705,17 +722,331 @@ func hinfLowerBound(sys *System, m, p int) (gammaLow, omegaPeak float64) {
 	wmin /= 10
 	wmax *= 10
 
+	freqs := append(ws.freqs[:0], 0)
 	for i := range 50 {
 		w := wmin * math.Pow(wmax/wmin, float64(i)/49)
+		if sys.IsDiscrete() {
+			w = 2 * math.Atan(w*dt/2) / dt
+		}
 		freqs = append(freqs, w)
 	}
-
-	if peak, w, err := sigmaMaxPointwise(sys, freqs); err == nil {
+	if sys.IsDiscrete() {
+		freqs = append(freqs, math.Pi/dt)
+	}
+	ws.freqs = freqs
+	if peak, w, err := ws.eval.peak(freqs, 0); err == nil {
 		gammaLow, omegaPeak = peak, w
 	}
-
 	return gammaLow, omegaPeak
 }
+
+// sigmaEvaluator computes σ_max(G) at single frequencies to near working
+// precision. GEPP alone loses accuracy in proportion to the condition number
+// of the resolvent, about 1/(ζω₀) next to a lightly damped pole; two
+// refinement steps with the residual, and C·X + D, accumulated in
+// compensated (FMA) arithmetic recover it.
+type sigmaEvaluator struct {
+	sys     *System
+	n, m, p int
+	lu      []complex128
+	piv     []int
+	x, dx   []complex128 // n×m
+	g       []complex128 // p×m
+	vals    []float64
+	svd     *complexSVDWorkspace
+}
+
+func newSigmaEvaluator(sys *System, n, m, p int) *sigmaEvaluator {
+	e := &sigmaEvaluator{
+		sys: sys, n: n, m: m, p: p,
+		lu: make([]complex128, n*n), piv: make([]int, n),
+		x: make([]complex128, n*m), dx: make([]complex128, n*m),
+		g: make([]complex128, p*m),
+	}
+	if p > 2 || m > 2 {
+		e.svd = newComplexSVDWorkspace(p, m)
+	}
+	return e
+}
+
+// peak returns the largest σ_max over freqs and where it occurs. Every
+// frequency is solved by GEPP alone; those within the relative band of the
+// largest are refined, so the result is an accurately evaluated gain.
+func (e *sigmaEvaluator) peak(freqs []float64, band float64) (peak, omega float64, err error) {
+	vals := e.vals[:0]
+	top := math.Inf(-1)
+	for _, w := range freqs {
+		sv, err := e.sigma(w, false)
+		if err != nil {
+			return 0, 0, err
+		}
+		vals = append(vals, sv)
+		if sv > top || math.IsNaN(sv) {
+			top = sv
+		}
+	}
+	e.vals = vals
+	if math.IsNaN(top) {
+		return 0, 0, ErrSingularEquation
+	}
+	peak = math.Inf(-1)
+	for i, w := range freqs {
+		if vals[i] < top*(1-band) {
+			continue
+		}
+		sv, err := e.sigma(w, true)
+		if err != nil {
+			return 0, 0, err
+		}
+		if sv > peak || math.IsNaN(sv) {
+			peak, omega = sv, w
+		}
+	}
+	if math.IsNaN(peak) {
+		return 0, 0, ErrSingularEquation
+	}
+	return peak, omega, nil
+}
+
+// resolventScalars returns p, q and c with (sI − A)⁻¹ = c·(pI + qA)⁻¹ at
+// frequency w, each with exact real and imaginary parts. Discrete models
+// use z = (1+jν)/(1−jν), ν = tan(ωT/2) (or its reciprocal form past
+// ωT = π/2), which lies on the unit circle for every floating-point ν: a
+// rounded e^{jωT} sits up to ε off the circle, which moves σ_max by ε/(ζω₀T)
+// next to a lightly damped pole.
+func (e *sigmaEvaluator) resolventScalars(w float64) (p, q, c complex128) {
+	if e.sys.IsContinuous() {
+		return complex(0, w), -1, 1
+	}
+	half := w * e.sys.Dt / 2
+	if half <= math.Pi/4 {
+		nu := math.Tan(half)
+		return complex(1, nu), complex(-1, nu), complex(1, -nu)
+	}
+	mu := 1 / math.Tan(half)
+	return complex(1, -mu), complex(1, mu), complex(-1, -mu)
+}
+
+// sigma evaluates σ_max(G) at w, refined as the type comment describes or by
+// GEPP alone.
+func (e *sigmaEvaluator) sigma(w float64, refine bool) (float64, error) {
+	n, m, p := e.n, e.m, e.p
+	sp, sq, sc := e.resolventScalars(w)
+	if err := e.factor(sp, sq); err != nil {
+		return 0, err
+	}
+	b := e.sys.B.RawMatrix()
+	for i := range n {
+		for j := range m {
+			e.x[i*m+j] = complex(b.Data[i*b.Stride+j], 0)
+		}
+	}
+	e.solve(e.x)
+	if refine {
+		for step := range 2 {
+			e.residual(sp, sq)
+			e.solve(e.dx)
+			if step == 0 {
+				for i, v := range e.dx {
+					e.x[i] += v
+				}
+			}
+		}
+		e.output(sc)
+	} else {
+		e.outputPlain(sc)
+	}
+	applyIODelayAtS(e.sys, newTimeDomain(e.sys.Dt).frequencyVariable(w), e.g, p, m, true)
+	sv, ok := e.svd.maximumFromFlat(e.g, 0, p, m)
+	if !ok {
+		return math.NaN(), nil
+	}
+	return sv, nil
+}
+
+// factor computes the GEPP factorization of pI + qA.
+func (e *sigmaEvaluator) factor(sp, sq complex128) error {
+	n, lu := e.n, e.lu
+	a := e.sys.A.RawMatrix()
+	for i := range n {
+		for j := range n {
+			lu[i*n+j] = sq * complex(a.Data[i*a.Stride+j], 0)
+		}
+		lu[i*n+i] += sp
+	}
+	for k := range n {
+		piv, best := k, cabs1(lu[k*n+k])
+		for i := k + 1; i < n; i++ {
+			if v := cabs1(lu[i*n+k]); v > best {
+				piv, best = i, v
+			}
+		}
+		if best == 0 {
+			return ErrSingularEquation
+		}
+		e.piv[k] = piv
+		if piv != k {
+			rk, rp := lu[k*n:(k+1)*n], lu[piv*n:(piv+1)*n]
+			for j := range rk {
+				rk[j], rp[j] = rp[j], rk[j]
+			}
+		}
+		ik := crecip(lu[k*n+k])
+		for i := k + 1; i < n; i++ {
+			f := lu[i*n+k] * ik
+			lu[i*n+k] = f
+			if f == 0 {
+				continue
+			}
+			for j := k + 1; j < n; j++ {
+				lu[i*n+j] -= f * lu[k*n+j]
+			}
+		}
+	}
+	return nil
+}
+
+// solve overwrites the n×m right-hand side x with (pI + qA)⁻¹x.
+func (e *sigmaEvaluator) solve(x []complex128) {
+	n, m, lu := e.n, e.m, e.lu
+	for k, pk := range e.piv {
+		if pk != k {
+			for j := range m {
+				x[k*m+j], x[pk*m+j] = x[pk*m+j], x[k*m+j]
+			}
+		}
+	}
+	for k := range n {
+		for i := k + 1; i < n; i++ {
+			if f := lu[i*n+k]; f != 0 {
+				for j := range m {
+					x[i*m+j] -= f * x[k*m+j]
+				}
+			}
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		inv := crecip(lu[i*n+i])
+		for j := range m {
+			v := x[i*m+j]
+			for k := i + 1; k < n; k++ {
+				v -= lu[i*n+k] * x[k*m+j]
+			}
+			x[i*m+j] = v * inv
+		}
+	}
+}
+
+// residual sets dx = B − (p·x + q·A·x) in compensated arithmetic.
+func (e *sigmaEvaluator) residual(sp, sq complex128) {
+	n, m := e.n, e.m
+	a, b := e.sys.A.RawMatrix(), e.sys.B.RawMatrix()
+	pr, pi, qr, qi := real(sp), imag(sp), real(sq), imag(sq)
+	for i := range n {
+		arow := a.Data[i*a.Stride : i*a.Stride+n]
+		for j := range m {
+			var axr, axi compensatedSum
+			for k, av := range arow {
+				v := e.x[k*m+j]
+				axr.addProd(av, real(v))
+				axi.addProd(av, imag(v))
+			}
+			xr, xi := real(e.x[i*m+j]), imag(e.x[i*m+j])
+			var re, im compensatedSum
+			re.add(b.Data[i*b.Stride+j])
+			re.addProd(-pr, xr)
+			re.addProd(pi, xi)
+			re.addScaled(-qr, axr)
+			re.addScaled(qi, axi)
+			im.addProd(-pr, xi)
+			im.addProd(-pi, xr)
+			im.addScaled(-qr, axi)
+			im.addScaled(-qi, axr)
+			e.dx[i*m+j] = complex(re.value(), im.value())
+		}
+	}
+}
+
+// output sets g = c·C·(x + dx) + D in compensated arithmetic.
+func (e *sigmaEvaluator) output(sc complex128) {
+	n, m, p := e.n, e.m, e.p
+	c := e.sys.C.RawMatrix()
+	cr, ci := real(sc), imag(sc)
+	for i := range p {
+		crow := c.Data[i*c.Stride : i*c.Stride+n]
+		for j := range m {
+			var ur, ui compensatedSum
+			for k, cv := range crow {
+				x, dx := e.x[k*m+j], e.dx[k*m+j]
+				ur.addProd(cv, real(x))
+				ur.addProd(cv, real(dx))
+				ui.addProd(cv, imag(x))
+				ui.addProd(cv, imag(dx))
+			}
+			var re, im compensatedSum
+			if e.sys.D != nil {
+				d := e.sys.D.RawMatrix()
+				re.add(d.Data[i*d.Stride+j])
+			}
+			re.addScaled(cr, ur)
+			re.addScaled(-ci, ui)
+			im.addScaled(cr, ui)
+			im.addScaled(ci, ur)
+			e.g[i*m+j] = complex(re.value(), im.value())
+		}
+	}
+}
+
+// outputPlain sets g = c·C·x + D in working precision.
+func (e *sigmaEvaluator) outputPlain(sc complex128) {
+	n, m, p := e.n, e.m, e.p
+	c := e.sys.C.RawMatrix()
+	for i := range p {
+		crow := c.Data[i*c.Stride : i*c.Stride+n]
+		for j := range m {
+			var re, im float64
+			for k, cv := range crow {
+				x := e.x[k*m+j]
+				re += cv * real(x)
+				im += cv * imag(x)
+			}
+			g := sc * complex(re, im)
+			if e.sys.D != nil {
+				d := e.sys.D.RawMatrix()
+				g += complex(d.Data[i*d.Stride+j], 0)
+			}
+			e.g[i*m+j] = g
+		}
+	}
+}
+
+// compensatedSum accumulates sums and products with error-free
+// transformations (Ogita, Rump and Oishi, Dot2): the result is as accurate
+// as if computed in twice the working precision.
+type compensatedSum struct{ s, c float64 }
+
+func (a *compensatedSum) add(v float64) {
+	t := a.s + v
+	bp := t - a.s
+	a.c += (a.s - (t - bp)) + (v - bp)
+	a.s = t
+}
+
+func (a *compensatedSum) addProd(x, y float64) {
+	// The conversion forbids fusing x*y into the sum, which would make the
+	// FMA residual below meaningless.
+	h := float64(x * y)
+	a.add(h)
+	a.c += math.FMA(x, y, -h)
+}
+
+// addScaled adds x times the unrounded value of b.
+func (a *compensatedSum) addScaled(x float64, b compensatedSum) {
+	a.addProd(x, b.s)
+	a.addProd(x, b.c)
+}
+
+func (a *compensatedSum) value() float64 { return a.s + a.c }
 
 func allZeroDense(m *mat.Dense) bool {
 	if m == nil {

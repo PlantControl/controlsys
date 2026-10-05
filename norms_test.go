@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/cmplx"
 	"math/rand"
+	"slices"
 	"sort"
 	"testing"
 
@@ -1220,19 +1222,19 @@ func TestNorm2_UnstableIsInf(t *testing.T) {
 }
 
 // bisectionPeakGain is peakGain before the certifying probe: plain
-// Hamiltonian bisection from the sampled lower bound.
+// bisection on the crossing test from the sampled lower bound (σ_max(D) at
+// ω = ∞ for continuous models).
 func bisectionPeakGain(sys *System) (float64, float64, error) {
 	n, m, p := sys.Dims()
-	if sys.IsDiscrete() {
-		csys, err := sys.Undiscretize()
-		if err != nil {
-			return 0, 0, err
-		}
-		norm, omega, err := bisectionPeakGain(csys)
-		return norm, 2 * math.Atan(omega*sys.Dt/2) / sys.Dt, err
+	poles, err := sys.Poles()
+	if err != nil {
+		return 0, 0, err
 	}
-	gammaLow, omegaPeak := hinfLowerBound(sys, m, p)
 	ws := newHamiltonianWS(sys, n, m, p)
+	gammaLow, omegaPeak := ws.lowerBound(poles)
+	if sd := maxSVDense(sys.D, p, m); sys.IsContinuous() && sd > gammaLow {
+		gammaLow, omegaPeak = sd, math.Inf(1)
+	}
 	gammaHigh := math.Max(gammaLow*2, 1e-10)
 	for range 50 {
 		if !ws.hasImagEigs(gammaHigh) {
@@ -1250,7 +1252,7 @@ func bisectionPeakGain(sys *System) (float64, float64, error) {
 			gammaHigh = mid
 			continue
 		}
-		peak, w, err := ws.candidatePeak(sys)
+		peak, w, err := ws.candidatePeak()
 		if err != nil {
 			gammaLow = mid
 			continue
@@ -1262,6 +1264,14 @@ func bisectionPeakGain(sys *System) (float64, float64, error) {
 		gammaLow, omegaPeak = peak, w
 	}
 	return gammaHigh, omegaPeak, nil
+}
+
+func polesOf(t testing.TB, sys *System) []complex128 {
+	poles, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return poles
 }
 
 func countHamiltonianEvals(f func()) int64 {
@@ -1404,7 +1414,7 @@ func assertPeakMatchesBisection(t *testing.T, name string, sys *System) (evals i
 	}
 	var got float64
 	evals = countHamiltonianEvals(func() {
-		got, _, err = peakGain(sys)
+		got, _, err = peakGain(sys, polesOf(t, sys))
 	})
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
@@ -1570,13 +1580,9 @@ func TestPeakGain_FallbackWhenSampledBoundMissesPeak(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		csys := sys
-		if dt > 0 {
-			csys, _ = sys.Undiscretize()
-		}
-		low, _ := hinfLowerBound(csys, 2, 2)
+		low, _ := newHamiltonianWS(sys, 3, 2, 2).lowerBound(polesOf(t, sys))
 		evals := assertPeakMatchesBisection(t, "lightly damped", sys)
-		got, _, _ := peakGain(sys)
+		got, _, _ := peakGain(sys, polesOf(t, sys))
 		if low > 0.5*got {
 			t.Fatalf("dt=%g: sampled bound %g does not miss peak %g", dt, low, got)
 		}
@@ -1631,15 +1637,12 @@ func TestPeakGain_ResonanceAboveFeedthroughBoundedEvals(t *testing.T) {
 			dt = 0.1
 		}
 		sys := highPassResonanceSys(t, rng, dt)
-		csys := sys
-		if dt > 0 {
-			csys, _ = sys.Undiscretize()
+		if dt == 0 {
+			if low, _ := newHamiltonianWS(sys, 4, 2, 2).lowerBound(polesOf(t, sys)); low < maxSVDense(sys.D, 2, 2) {
+				belowSigmaD++
+			}
+			total++
 		}
-		low, _ := hinfLowerBound(csys, 2, 2)
-		if low < maxSVDense(csys.D, 2, 2) {
-			belowSigmaD++
-		}
-		total++
 		if evals := assertPeakMatchesBisection(t, fmt.Sprintf("trial %d dt=%g", trial, dt), sys); evals > 10 {
 			t.Errorf("trial %d dt=%g: %d Hamiltonian evaluations, want ≤ 10", trial, dt, evals)
 		}
@@ -1663,14 +1666,14 @@ func TestHamiltonianUpperBound_LightlyDamped(t *testing.T) {
 
 		var high float64
 		var certified bool
-		evals := countHamiltonianEvals(func() { _, high, _, certified = ws.upperBound(sys, peak, 0, 1e-10) })
+		evals := countHamiltonianEvals(func() { _, high, _, certified = ws.upperBound(peak, 0, 1e-10) })
 		if certified || evals != 1 || high != 2*peak {
 			t.Errorf("trial %d from the peak: high = %g (peak %g), certified %v, %d evals; want 2·peak, 1 eval",
 				trial, high, peak, certified, evals)
 		}
 
 		var low float64
-		evals = countHamiltonianEvals(func() { low, high, _, certified = ws.upperBound(sys, peak/4, 0, 1e-10) })
+		evals = countHamiltonianEvals(func() { low, high, _, certified = ws.upperBound(peak/4, 0, 1e-10) })
 		if evals > 8 {
 			t.Errorf("trial %d from peak/4: %d Hamiltonian evaluations, want ≤ 8", trial, evals)
 		}
@@ -1683,19 +1686,38 @@ func TestHamiltonianUpperBound_LightlyDamped(t *testing.T) {
 	}
 }
 
-func TestPeakGain_BisectionFallbackWhenProbeInconclusive(t *testing.T) {
+// TestPeakGain_FeedthroughPeakAtInfinity: the gain of s/(s+1) approaches
+// σ(D) = 1 only as ω → ∞, which MATLAB hinfnorm reports as fpeak = Inf
+// (π/T for the discrete model). The sampled bound misses it, and the γ
+// levels just above σ(D) make R = γ²−D² near singular.
+func TestPeakGain_FeedthroughPeakAtInfinity(t *testing.T) {
 	highPass, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	low, _ := hinfLowerBound(highPass, 1, 1)
-	if low >= 1 {
+	if low, _ := newHamiltonianWS(highPass, 1, 1, 1).lowerBound(polesOf(t, highPass)); low >= 1 {
 		t.Fatalf("sampled bound %g reaches sigma(D) = 1", low)
 	}
-	evals := assertPeakMatchesBisection(t, "high-pass D=1", highPass)
-	if evals < 20 {
-		t.Errorf("%d Hamiltonian evaluations; probe below sigma(D) must fall back to bisection", evals)
+	var got, w float64
+	evals := countHamiltonianEvals(func() { got, w, err = HinfNorm(highPass) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got < 1 || got > 1+1e-10 || !math.IsInf(w, 1) || evals != 1 {
+		t.Errorf("HinfNorm = %.15g at %g in %d evaluations, want 1 at +Inf in 1", got, w, evals)
+	}
+
+	disc, err := highPass.Discretize(0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := math.Abs(disc.D.At(0, 0) + disc.C.At(0, 0)*disc.B.At(0, 0)/(-1-disc.A.At(0, 0)))
+	if got, w, err = HinfNorm(disc); err != nil {
+		t.Fatal(err)
+	}
+	if got < want || got > want*(1+1e-10) || w != math.Pi/0.1 {
+		t.Errorf("discrete HinfNorm = %.15g at %g, want |G(-1)| = %.15g at π/T", got, w, want)
 	}
 }
 
@@ -1705,6 +1727,372 @@ func BenchmarkHinfNorm_ResonanceAboveFeedthrough(b *testing.B) {
 	for b.Loop() {
 		if _, _, err := HinfNorm(sys); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// bigComplex is a complex number in exactPrec-bit floating point.
+type bigComplex struct{ re, im *big.Float }
+
+const exactPrec = 200
+
+func newBig(v float64) *big.Float { return new(big.Float).SetPrec(exactPrec).SetFloat64(v) }
+
+func (a bigComplex) add(b bigComplex) bigComplex {
+	return bigComplex{newBig(0).Add(a.re, b.re), newBig(0).Add(a.im, b.im)}
+}
+
+func (a bigComplex) sub(b bigComplex) bigComplex {
+	return bigComplex{newBig(0).Sub(a.re, b.re), newBig(0).Sub(a.im, b.im)}
+}
+
+func (a bigComplex) mul(b bigComplex) bigComplex {
+	rr, ii := newBig(0).Mul(a.re, b.re), newBig(0).Mul(a.im, b.im)
+	ri, ir := newBig(0).Mul(a.re, b.im), newBig(0).Mul(a.im, b.re)
+	return bigComplex{rr.Sub(rr, ii), ri.Add(ri, ir)}
+}
+
+func (a bigComplex) quo(b bigComplex) bigComplex {
+	den := newBig(0).Mul(b.re, b.re)
+	den.Add(den, newBig(0).Mul(b.im, b.im))
+	q := a.mul(bigComplex{b.re, newBig(0).Neg(b.im)})
+	return bigComplex{q.re.Quo(q.re, den), q.im.Quo(q.im, den)}
+}
+
+func (a bigComplex) abs2() *big.Float {
+	r := newBig(0).Mul(a.re, a.re)
+	return r.Add(r, newBig(0).Mul(a.im, a.im))
+}
+
+// exactSigmaMax is σ_max(G) of the stored realization at frequency w with
+// only the final G rounded: Gaussian elimination in exactPrec bits on sI − A
+// at s = jω, or at z = (1+jν)/(1−jν), ν = tan(ωT/2), which lies exactly on
+// the unit circle. The singular value comes from the Hermitian Gram matrix.
+func exactSigmaMax(sys *System, w float64) float64 {
+	n, m, p := sys.Dims()
+	s := bigComplex{newBig(0), newBig(w)}
+	if sys.IsDiscrete() {
+		nu := newBig(math.Tan(w * sys.Dt / 2))
+		nu2 := newBig(0).Mul(nu, nu)
+		one := newBig(1)
+		s = bigComplex{newBig(0).Sub(one, nu2), newBig(0).Mul(newBig(2), nu)}.quo(bigComplex{newBig(0).Add(one, nu2), newBig(0)})
+	}
+	M := make([][]bigComplex, n)
+	for i := range n {
+		M[i] = make([]bigComplex, n+m)
+		for j := range n {
+			M[i][j] = bigComplex{newBig(-sys.A.At(i, j)), newBig(0)}
+		}
+		M[i][i] = M[i][i].add(s)
+		for j := range m {
+			M[i][n+j] = bigComplex{newBig(sys.B.At(i, j)), newBig(0)}
+		}
+	}
+	for k := range n {
+		piv := k
+		for i := k + 1; i < n; i++ {
+			if M[i][k].abs2().Cmp(M[piv][k].abs2()) > 0 {
+				piv = i
+			}
+		}
+		M[k], M[piv] = M[piv], M[k]
+		for i := k + 1; i < n; i++ {
+			f := M[i][k].quo(M[k][k])
+			for j := k; j < n+m; j++ {
+				M[i][j] = M[i][j].sub(f.mul(M[k][j]))
+			}
+		}
+	}
+	X := make([][]bigComplex, n)
+	for i := n - 1; i >= 0; i-- {
+		X[i] = make([]bigComplex, m)
+		for j := range m {
+			acc := M[i][n+j]
+			for k := i + 1; k < n; k++ {
+				acc = acc.sub(M[i][k].mul(X[k][j]))
+			}
+			X[i][j] = acc.quo(M[i][i])
+		}
+	}
+	G := make([]complex128, p*m)
+	for i := range p {
+		for j := range m {
+			acc := bigComplex{newBig(sys.D.At(i, j)), newBig(0)}
+			for k := range n {
+				acc = acc.add(bigComplex{newBig(sys.C.At(i, k)), newBig(0)}.mul(X[k][j]))
+			}
+			re, _ := acc.re.Float64()
+			im, _ := acc.im.Float64()
+			G[i*m+j] = complex(re, im)
+		}
+	}
+	return gramSigmaMax(G, p, m)
+}
+
+// gramSigmaMax is σ_max of the row-major p×m G from the real symmetric
+// embedding of GᴴG.
+func gramSigmaMax(G []complex128, p, m int) float64 {
+	H := mat.NewSymDense(2*m, nil)
+	for a := range m {
+		for b := a; b < m; b++ {
+			var g complex128
+			for i := range p {
+				g += cmplx.Conj(G[i*m+a]) * G[i*m+b]
+			}
+			H.SetSym(a, b, real(g))
+			H.SetSym(m+a, m+b, real(g))
+			H.SetSym(a, m+b, -imag(g))
+			H.SetSym(b, m+a, imag(g))
+		}
+	}
+	var eig mat.EigenSym
+	if !eig.Factorize(H, false) {
+		return math.NaN()
+	}
+	vals := eig.Values(nil)
+	return math.Sqrt(math.Max(vals[len(vals)-1], 0))
+}
+
+// pointwiseSigmaMax is σ_max from FreqResponsePointwise.
+func pointwiseSigmaMax(t testing.TB, sys *System, freqs []float64) []float64 {
+	t.Helper()
+	_, m, p := sys.Dims()
+	resp, err := sys.FreqResponsePointwise(freqs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]float64, len(freqs))
+	for k := range freqs {
+		out[k] = gramSigmaMax(resp.Data[k*p*m:(k+1)*p*m], p, m)
+	}
+	return out
+}
+
+// oraclePeakGain is sup_ω σ_max found without the crossing test: σ_max on a
+// dense log grid plus points around every pole, then golden-section search
+// with sigma around the three best local maxima. σ_max(D) is the ω → ∞
+// limit of a continuous model.
+func oraclePeakGain(t testing.TB, sys *System, sigma func(float64) float64) float64 {
+	t.Helper()
+	poles, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var freqs []float64
+	wNyq := math.Inf(1)
+	if sys.IsDiscrete() {
+		wNyq = math.Pi / sys.Dt
+		freqs = append(freqs, wNyq)
+	}
+	lo, hi := math.Inf(1), 0.0
+	for _, pl := range poles {
+		if sys.IsDiscrete() {
+			pl = cmplx.Log(pl) / complex(sys.Dt, 0)
+		}
+		wc, d := math.Abs(imag(pl)), math.Abs(real(pl))
+		lo, hi = math.Min(lo, cmplx.Abs(pl)), math.Max(hi, cmplx.Abs(pl))
+		for k := -16; k <= 16; k++ {
+			freqs = append(freqs, wc+float64(k)*d/4)
+		}
+	}
+	lo, hi = math.Max(lo/1e4, 1e-9), math.Min(hi*1e4, wNyq)
+	for i := range 2000 {
+		freqs = append(freqs, lo*math.Pow(hi/lo, float64(i)/1999))
+	}
+	freqs = append(freqs, 0)
+	freqs = slices.DeleteFunc(freqs, func(w float64) bool { return w < 0 || w > wNyq })
+	slices.Sort(freqs)
+	freqs = slices.Compact(freqs)
+	vals := pointwiseSigmaMax(t, sys, freqs)
+
+	var maxima []int
+	for i, v := range vals {
+		if (i == 0 || v >= vals[i-1]) && (i == len(vals)-1 || v >= vals[i+1]) {
+			maxima = append(maxima, i)
+		}
+	}
+	sort.Slice(maxima, func(a, b int) bool { return vals[maxima[a]] > vals[maxima[b]] })
+	best := 0.0
+	if sys.IsContinuous() {
+		_, m, p := sys.Dims()
+		best = maxSVDense(sys.D, p, m)
+	}
+	const r = 0.6180339887498949
+	for _, i := range maxima[:min(3, len(maxima))] {
+		a, b := freqs[max(i-1, 0)], freqs[min(i+1, len(freqs)-1)]
+		c, d := b-r*(b-a), a+r*(b-a)
+		fc, fd := sigma(c), sigma(d)
+		for range 64 {
+			if fc > fd {
+				b, d, fd = d, c, fc
+				c = b - r*(b-a)
+				fc = sigma(c)
+			} else {
+				a, c, fc = c, d, fd
+				d = a + r*(b-a)
+				fd = sigma(d)
+			}
+		}
+		best = max(best, fc, fd, sigma(freqs[i]))
+	}
+	return best
+}
+
+// assertHinfNormMatchesOracle checks the norm against oraclePeakGain to
+// 1e-10 and that the reported frequency attains it.
+func assertHinfNormMatchesOracle(t *testing.T, name string, sys *System, sigma func(float64) float64) {
+	t.Helper()
+	got, w, err := HinfNorm(sys)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	want := oraclePeakGain(t, sys, sigma)
+	if math.Abs(got-want) > 1e-10*want {
+		t.Errorf("%s: HinfNorm = %.15g, oracle %.15g (rel %.2e)", name, got, want, got/want-1)
+	}
+	at := 0.0
+	if math.IsInf(w, 1) {
+		_, m, p := sys.Dims()
+		at = maxSVDense(sys.D, p, m)
+	} else {
+		at = sigma(w)
+	}
+	if at < got*(1-1e-10) {
+		t.Errorf("%s: σ_max(%g) = %.15g, below HinfNorm %.15g (rel %.2e)", name, w, at, got, at/got-1)
+	}
+}
+
+// TestHinfNorm_LightlyDampedMatchesExactOracle (Z5SW7V): ζ ∈ [1e-7, 1e-4]
+// resonances with D up to 1e4, continuous and discrete. Evaluating σ_max by
+// plain GEPP at the peak loses about ε/ζ, a rounded e^{jωT} lies off the
+// unit circle by ε, and the Tustin map shifts discrete peaks: before the
+// fix these models were off by up to 5e-8.
+func TestHinfNorm_LightlyDampedMatchesExactOracle(t *testing.T) {
+	exact := func(sys *System) func(float64) float64 {
+		return func(w float64) float64 { return exactSigmaMax(sys, w) }
+	}
+	rng := rand.New(rand.NewSource(1))
+	for trial := range 200 {
+		n, m, p := 2+rng.Intn(7), 1+rng.Intn(2), 1+rng.Intn(2)
+		zeta := math.Pow(10, -4-3*rng.Float64())
+		dt := 0.0
+		if trial%2 == 1 {
+			dt = 0.1
+		}
+		sys := randomStableNormSys(t, rng, n, m, p, dt, true, zeta)
+		sys.D.Scale(math.Pow(10, 4*rng.Float64()), sys.D)
+		if trial%20 > 1 && trial != 132 {
+			continue
+		}
+		assertHinfNormMatchesOracle(t, fmt.Sprintf("trial %d ζ=%.1e dt=%g", trial, zeta, dt), sys, exact(sys))
+	}
+
+	rng = rand.New(rand.NewSource(1))
+	for trial := range 4 {
+		sys := highPassResonanceSys(t, rng, 0.1*float64(trial%2))
+		assertHinfNormMatchesOracle(t, fmt.Sprintf("high-pass resonance %d", trial), sys, exact(sys))
+	}
+
+	nonMinimal := randomStableNormSys(t, rand.New(rand.NewSource(3)), 5, 2, 2, 0, true, 1e-6)
+	n, m, p := nonMinimal.Dims()
+	A := mat.NewDense(n+2, n+2, nil)
+	A.Slice(0, n, 0, n).(*mat.Dense).Copy(nonMinimal.A)
+	A.Slice(n, n+2, n, n+2).(*mat.Dense).Copy(mat.NewDense(2, 2, []float64{-1e-3, 1, -1, -1e-3}))
+	B := mat.NewDense(n+2, m, nil)
+	B.Slice(0, n, 0, m).(*mat.Dense).Copy(nonMinimal.B)
+	C := mat.NewDense(p, n+2, nil)
+	C.Slice(0, p, 0, n).(*mat.Dense).Copy(nonMinimal.C)
+	C.Set(0, n, 3)
+	C.Set(p-1, n+1, -2)
+	sys, err := New(A, B, C, nonMinimal.D, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertHinfNormMatchesOracle(t, "uncontrollable ζ=1e-3 mode", sys, exact(sys))
+}
+
+// TestHinfNorm_NearOptimalLoopsMatchOracle (TI6YYN, GH3MO7): HinfSyn closed
+// loops whose σ_max is flat to 1e-8 over decades, built from non-minimal,
+// ill-conditioned LFT realizations. Their crossings leave the imaginary axis
+// under QZ, and the Hamiltonian matrix [A BBᵀ/γ²; −CᵀC −Aᵀ] lost them
+// altogether: the TI6YYN loop was under-reported by 8.4e-10.
+func TestHinfNorm_NearOptimalLoopsMatchOracle(t *testing.T) {
+	exact := func(sys *System) func(float64) float64 {
+		return func(w float64) float64 { return exactSigmaMax(sys, w) }
+	}
+	pointwise := func(sys *System) func(float64) float64 {
+		return func(w float64) float64 { return pointwiseSigmaMax(t, sys, []float64{w})[0] }
+	}
+
+	strict := strictMixedSensitivityPlant(t)
+	res, err := HinfSyn(strict, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ti := closedLoop(t, strict, res.K, 2, 2)
+	assertHinfNormMatchesOracle(t, "non-minimal near-optimal loop (TI6YYN)", ti, exact(ti))
+
+	nearSingular, err := New(
+		mat.NewDense(2, 2, []float64{-0.01, 0, -0.01, -0.00004320073460981398}),
+		mat.NewDense(2, 2, []float64{0, 1, 1, 0}),
+		mat.NewDense(3, 2, []float64{-0.005, 0.004298473093676491, 0, 0, -0.01, 0}),
+		mat.NewDense(3, 2, []float64{0.5, 0, 0, 0.1, 1, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err = HinfSyn(nearSingular, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	backoff := closedLoop(t, nearSingular, res.K, 1, 1)
+	assertHinfNormMatchesOracle(t, "near-singular-edge loop (GH3MO7)", backoff, exact(backoff))
+	gp, err := partitionGeneralizedPlant(nearSingular, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	atEdge, err := hinfSynD11Zero(gp, 0.5074089765548706)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edge := closedLoop(t, nearSingular, atEdge.K, 1, 1)
+	assertHinfNormMatchesOracle(t, "controller at the bisection edge (GH3MO7)", edge, exact(edge))
+
+	order50 := mixedSensitivityPlant(t, randomHinfTestPlant(t, 50, 2, 7), 1, 0.01, 0, 0.1)
+	if res, err = HinfSyn(order50, 2, 2); err != nil {
+		t.Fatal(err)
+	}
+	loop50 := closedLoop(t, order50, res.K, 2, 2)
+	assertHinfNormMatchesOracle(t, "order-50 strict W1 loop", loop50, pointwise(loop50))
+	loop24 := hinfMixedSensitivityLoop(t, 10, 7)
+	assertHinfNormMatchesOracle(t, "mixed-sensitivity loop n=24", loop24, pointwise(loop24))
+}
+
+// TestHamiltonianCrossingsNearFeedthroughGain (DLWKKE): at γ = σ_max(D)(1+f)
+// the Hamiltonian needs R⁻¹ = (γ²I − DᵀD)⁻¹ and missed the resonance
+// crossings far below for f ≤ 1e-8; the extended pencil keeps them. Some
+// candidate or midpoint between candidates must lie inside the resonance,
+// where σ_max exceeds γ.
+func TestHamiltonianCrossingsNearFeedthroughGain(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	for trial := range 4 {
+		sys := highPassResonanceSys(t, rng, 0)
+		n, m, p := sys.Dims()
+		ws := newHamiltonianWS(sys, n, m, p)
+		sd := maxSVDense(sys.D, p, m)
+		for _, f := range []float64{1e-14, 1e-12, 1e-10, 1e-8, 1e-6} {
+			gamma := sd * (1 + f)
+			ws.hasImagEigs(gamma)
+			freqs := slices.Sorted(slices.Values(ws.cands))
+			for i := range len(freqs) - 1 {
+				freqs = append(freqs, (freqs[i]+freqs[i+1])/2)
+			}
+			best := 0.0
+			for _, w := range freqs {
+				best = math.Max(best, exactSigmaMax(sys, w))
+			}
+			if best <= gamma {
+				t.Errorf("trial %d: candidates at σ(D)(1+%g) reach σ_max %g, resonance peak %g", trial, f, best,
+					oraclePeakGain(t, sys, func(w float64) float64 { return exactSigmaMax(sys, w) }))
+			}
 		}
 	}
 }
