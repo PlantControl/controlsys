@@ -6,31 +6,57 @@ import (
 	"math"
 )
 
+// StepInfoOptions holds the optional arguments of StepInfo, as MATLAB
+// stepinfo name-value pairs. Zero values select the defaults:
+// RiseTimeLimits [0.1 0.9], SettlingThreshold 0.02 and SteadyStateValue the
+// last sample of each row.
 type StepInfoOptions struct {
 	RiseTimeLimits    [2]float64
 	SettlingThreshold float64
 	SteadyStateValue  []float64
 }
 
+// StepInfoResult holds one StepMetric per response row, in the row order of
+// TimeResponse.Y (input-major for Step: row input*p+output).
 type StepInfoResult struct {
 	Metrics    []StepMetric
 	OutputName []string
 }
 
+// StepMetric holds the step-response characteristics of one row, as MATLAB
+// stepinfo. Overshoot and Undershoot are percentages of the step size; rise
+// and settling times, which may not exist within the sampled horizon, are
+// reported by RiseTime and SettlingTime.
 type StepMetric struct {
-	RiseTime         float64
-	SettlingTime     float64
 	Overshoot        float64
 	Undershoot       float64
 	Peak             float64
 	PeakTime         float64
 	SteadyStateValue float64
-	Settled          bool
+
+	riseTime     float64
+	risen        bool
+	settlingTime float64
+	settled      bool
 }
+
+// RiseTime returns the time to go from the lower to the upper rise-time
+// limit. ok is false when the response does not cross both limits within
+// the horizon or the step size is zero (MATLAB reports NaN).
+func (m StepMetric) RiseTime() (t float64, ok bool) { return m.riseTime, m.risen }
+
+// SettlingTime returns the time after which the response stays within the
+// settling band around SteadyStateValue. ok is false when it has not
+// settled by the last sample (MATLAB reports NaN); lengthen tFinal.
+func (m StepMetric) SettlingTime() (t float64, ok bool) { return m.settlingTime, m.settled }
+
+// StepInfo computes the step-response characteristics of every row of resp,
+// as MATLAB stepinfo (https://www.mathworks.com/help/control/ref/dynamicsystem.stepinfo.html).
+// resp.T must be strictly increasing with at least 2 samples.
 
 func StepInfo(resp *TimeResponse, opts *StepInfoOptions) (*StepInfoResult, error) {
 	if resp == nil || resp.Y == nil {
-		return nil, fmt.Errorf("StepInfo: response must not be nil: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("StepInfo: response must not be nil: %w", ErrInvalidArgument)
 	}
 	rows, cols := resp.Y.Dims()
 	if cols != len(resp.T) {
@@ -60,8 +86,8 @@ func StepInfo(resp *TimeResponse, opts *StepInfoOptions) (*StepInfoResult, error
 // and the metrics come from the simulated response, as MATLAB recommends
 // assessing such models with step.
 func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*StepInfoResult, error) {
-	if sys == nil {
-		return nil, fmt.Errorf("StepInfoForSystem: system must not be nil: %w", ErrDimensionMismatch)
+	if err := requireSystem("StepInfoForSystem", sys); err != nil {
+		return nil, err
 	}
 	stable, err := sys.IsStable()
 	switch {
@@ -73,7 +99,7 @@ func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*Ste
 	}
 	resp, err := Step(sys, tFinal)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("StepInfoForSystem: %w", err)
 	}
 	if opts == nil || opts.SteadyStateValue == nil {
 		gain, err := sys.DCGain()
@@ -93,7 +119,11 @@ func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*Ste
 		}
 		opts = &cfg
 	}
-	return StepInfo(resp, opts)
+	info, err := StepInfo(resp, opts)
+	if err != nil {
+		return nil, fmt.Errorf("StepInfoForSystem: %w", err)
+	}
+	return info, nil
 }
 
 func defaultStepInfoOptions(opts *StepInfoOptions) StepInfoOptions {
@@ -116,10 +146,10 @@ func defaultStepInfoOptions(opts *StepInfoOptions) StepInfoOptions {
 func (cfg StepInfoOptions) validate(rows int) error {
 	lo, hi := cfg.RiseTimeLimits[0], cfg.RiseTimeLimits[1]
 	if !(lo >= 0 && lo < hi && hi <= 1) {
-		return fmt.Errorf("StepInfo: rise-time limits must satisfy 0 <= lo < hi <= 1, got [%g %g]", lo, hi)
+		return fmt.Errorf("StepInfo: rise-time limits must satisfy 0 <= lo < hi <= 1, got [%g %g]: %w", lo, hi, ErrInvalidArgument)
 	}
 	if !(cfg.SettlingThreshold > 0 && cfg.SettlingThreshold < 1) {
-		return fmt.Errorf("StepInfo: settling threshold must be in (0, 1), got %g", cfg.SettlingThreshold)
+		return fmt.Errorf("StepInfo: settling threshold must be in (0, 1), got %g: %w", cfg.SettlingThreshold, ErrInvalidArgument)
 	}
 	if cfg.SteadyStateValue == nil {
 		return nil
@@ -129,7 +159,7 @@ func (cfg StepInfoOptions) validate(rows int) error {
 	}
 	for row, v := range cfg.SteadyStateValue {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return fmt.Errorf("StepInfo: steady-state value %d must be finite, got %g", row, v)
+			return fmt.Errorf("StepInfo: steady-state value %d must be finite, got %g: %w", row, v, ErrInvalidArgument)
 		}
 	}
 	return nil
@@ -138,7 +168,7 @@ func (cfg StepInfoOptions) validate(rows int) error {
 func validateStepInfoTime(t []float64) error {
 	for k := 1; k < len(t); k++ {
 		if t[k] <= t[k-1] {
-			return fmt.Errorf("StepInfo: time vector must be strictly increasing at index %d: %w", k, ErrDimensionMismatch)
+			return fmt.Errorf("StepInfo: time vector must be strictly increasing at index %d: %w", k, ErrInvalidArgument)
 		}
 	}
 	return nil
@@ -162,14 +192,15 @@ func stepMetricForRow(resp *TimeResponse, row int, cfg StepInfoOptions) StepMetr
 	}
 
 	peak, peakTime := directionalPeak(resp, row, direction)
-	rise := math.NaN()
+	var rise float64
+	var risen bool
 	if delta != 0 {
 		lo := initial + delta*cfg.RiseTimeLimits[0]
 		hi := initial + delta*cfg.RiseTimeLimits[1]
-		tLo := crossingTime(resp, row, lo, direction)
-		tHi := crossingTime(resp, row, hi, direction)
-		if !math.IsNaN(tLo) && !math.IsNaN(tHi) {
-			rise = tHi - tLo
+		tLo, okLo := crossingTime(resp, row, lo, direction)
+		tHi, okHi := crossingTime(resp, row, hi, direction)
+		if okLo && okHi {
+			rise, risen = tHi-tLo, true
 		}
 	}
 
@@ -181,14 +212,15 @@ func stepMetricForRow(resp *TimeResponse, row int, cfg StepInfoOptions) StepMetr
 	undershoot := rowUndershoot(resp, row, initial, direction, scale)
 
 	return StepMetric{
-		RiseTime:         rise,
-		SettlingTime:     settling,
 		Overshoot:        overshoot,
 		Undershoot:       undershoot,
 		Peak:             peak,
 		PeakTime:         peakTime,
 		SteadyStateValue: final,
-		Settled:          settled,
+		riseTime:         rise,
+		risen:            risen,
+		settlingTime:     settling,
+		settled:          settled,
 	}
 }
 
@@ -209,21 +241,21 @@ func directionalPeak(resp *TimeResponse, row int, direction float64) (float64, f
 	return peak, peakTime
 }
 
-func crossingTime(resp *TimeResponse, row int, level, direction float64) float64 {
+func crossingTime(resp *TimeResponse, row int, level, direction float64) (float64, bool) {
 	_, cols := resp.Y.Dims()
 	prev := resp.Y.At(row, 0)
 	for k := 1; k < cols; k++ {
 		curr := resp.Y.At(row, k)
 		if direction*(curr-level) >= 0 && direction*(prev-level) < 0 {
 			if curr == prev {
-				return resp.T[k]
+				return resp.T[k], true
 			}
 			alpha := (level - prev) / (curr - prev)
-			return resp.T[k-1] + alpha*(resp.T[k]-resp.T[k-1])
+			return resp.T[k-1] + alpha*(resp.T[k]-resp.T[k-1]), true
 		}
 		prev = curr
 	}
-	return math.NaN()
+	return 0, false
 }
 
 func settlingTime(resp *TimeResponse, row int, final, band float64) (float64, bool) {
@@ -238,7 +270,7 @@ func settlingTime(resp *TimeResponse, row int, final, band float64) (float64, bo
 		return resp.T[0], true
 	}
 	if lastOutside == cols-1 {
-		return math.NaN(), false
+		return 0, false
 	}
 	return resp.T[lastOutside+1], true
 }

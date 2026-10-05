@@ -43,6 +43,12 @@ func newTimeResponsePlanner(sys *System) timeResponsePlanner {
 	return timeResponsePlanner{sys: sys}
 }
 
+// DampInfo describes one pole as MATLAB damp
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.damp.html). For a
+// discrete pole z the values refer to s = ln(z)/Ts. Wn = |s|; Zeta =
+// -cos(∠s), so a pole at the origin has Zeta = -1 and an unstable pole a
+// negative Zeta; Tau = 1/(Wn·Zeta) = -1/Re(s) is negative for an unstable
+// pole, +Inf for a pole on the stability boundary (no decay) and 0 for z = 0.
 type DampInfo struct {
 	Pole complex128
 	Wn   float64
@@ -725,6 +731,9 @@ func signInt(v float64) int {
 	return 1
 }
 
+// Damp returns the natural frequency, damping ratio and time constant of
+// every pole of sys, in the order of Poles; see DampInfo. A static gain has no
+// poles and returns an empty slice.
 func Damp(sys *System) ([]DampInfo, error) {
 	if err := requireSystem("Damp", sys); err != nil {
 		return nil, err
@@ -733,37 +742,25 @@ func Damp(sys *System) ([]DampInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Damp: %w", err)
 	}
-	if len(poles) == 0 {
-		return nil, nil
-	}
 
 	result := make([]DampInfo, len(poles))
 	for i, p := range poles {
-		var wn, zeta float64
-
+		s := p
 		if sys.IsDiscrete() {
-			sc := cmplx.Log(p) / complex(sys.Dt, 0)
-			wn = cmplx.Abs(sc)
-			switch {
-			case math.IsInf(wn, 1):
-				zeta = 1
-			case wn > 0:
-				zeta = -real(sc) / wn
-			}
-		} else {
-			wn = cmplx.Abs(p)
-			if wn > 0 {
-				zeta = -real(p) / wn
-			}
+			s = cmplx.Log(p) / complex(sys.Dt, 0)
 		}
-
-		tau := math.Inf(1)
-		if math.IsInf(wn, 1) && zeta > 0 {
-			tau = 0
-		} else if sigma := zeta * wn; sigma > 0 {
-			tau = 1.0 / sigma
+		wn := cmplx.Abs(s)
+		var zeta, tau float64
+		switch {
+		case math.IsInf(wn, 1):
+			zeta, tau = 1, 0
+		case wn == 0:
+			zeta, tau = -1, math.Inf(1)
+		case real(s) == 0:
+			zeta, tau = 0, math.Inf(1)
+		default:
+			zeta, tau = -real(s)/wn, -1/real(s)
 		}
-
 		result[i] = DampInfo{Pole: p, Wn: wn, Zeta: zeta, Tau: tau}
 	}
 	return result, nil
