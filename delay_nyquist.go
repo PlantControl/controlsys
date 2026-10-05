@@ -354,16 +354,20 @@ func (l *delayLoop) nyquistGrid(frac float64) (delayNyquist, error) {
 	}
 	grid := l.grid(R)
 	segments := l.segments(grid, R)
-	var out delayNyquist
+	size := len(grid) + 2*len(segments)
+	out := delayNyquist{w: make([]float64, 0, size), f: make([]complex128, 0, size)}
 	var phi, phiStart float64
 	for si, seg := range segments {
-		ws, fs, res := l.refine(seg, l.pointBudget()-len(out.w))
+		base := len(out.w)
+		var res refineResult
+		out.w, out.f, res = l.refine(seg, l.pointBudget()-base, out.w, out.f)
 		switch res {
 		case refineAxisRoot:
-			return delayNyquist{w: out.w, f: out.f}, nil
+			return delayNyquist{w: out.w[:base], f: out.f[:base]}, nil
 		case refineBudget:
 			return delayNyquist{}, fmt.Errorf("refined grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 		}
+		fs := out.f[base:]
 		if si == 0 {
 			if seg.from == 0 {
 				phiStart = 0
@@ -384,8 +388,6 @@ func (l *delayLoop) nyquistGrid(frac float64) (delayNyquist, error) {
 		for k := 1; k < len(fs); k++ {
 			phi += wrapPi(cmplx.Phase(fs[k]) - cmplx.Phase(fs[k-1]))
 		}
-		out.w = append(out.w, ws...)
-		out.f = append(out.f, fs...)
 	}
 	fR := out.f[len(out.f)-1]
 	turns := (2*(phi-cmplx.Phase(fR)) - 2*phiStart) / (2 * math.Pi)
@@ -418,12 +420,16 @@ func (l *delayLoop) grid(R float64) []float64 {
 	lo *= 1e-3
 	decades := math.Log10(R / lo)
 	nlog := int(64*decades) + 2
-	pts := make([]float64, 0, nlog+64)
+	step, nlin := 0.0, 0
+	if l.tau > 0 {
+		step = math.Pi / (8 * l.tau)
+		nlin = int(R/step) + 1
+	}
+	pts := make([]float64, 0, nlog+nlin+9*len(l.scales)+1)
 	for i := range nlog {
 		pts = append(pts, lo*math.Pow(R/lo, float64(i)/float64(nlog-1)))
 	}
 	if l.tau > 0 {
-		step := math.Pi / (8 * l.tau)
 		for w := step; w < R; w += step {
 			pts = append(pts, w)
 		}
@@ -466,12 +472,12 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 	segs = append(segs, nyquistSegment{from: start, to: R, jump: jump})
 	for i := range segs {
 		s := &segs[i]
+		lo, _ := slices.BinarySearch(grid, math.Nextafter(s.from, math.Inf(1)))
+		hi, _ := slices.BinarySearch(grid, s.to)
+		hi = max(hi, lo)
+		s.pts = make([]float64, 0, hi-lo+2)
 		s.pts = append(s.pts, s.from)
-		for _, w := range grid {
-			if w > s.from && w < s.to {
-				s.pts = append(s.pts, w)
-			}
-		}
+		s.pts = append(s.pts, grid[lo:hi]...)
 		s.pts = append(s.pts, s.to)
 	}
 	return segs
@@ -512,24 +518,27 @@ func (l *delayLoop) pointBudget() int {
 // differ by at most π/4. It reports refineAxisRoot when 1+L vanishes or its
 // phase turns within the bisection tolerance, i.e. a closed-loop root sits on
 // the axis, and refineBudget when the segment would exceed budget points.
-func (l *delayLoop) refine(seg nyquistSegment, budget int) ([]float64, []complex128, refineResult) {
+// The points are appended to ws and fs.
+func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []complex128) ([]float64, []complex128, refineResult) {
 	f := func(w float64) complex128 { return 1 + l.at(w) }
-	ws := []float64{seg.pts[0]}
-	fs := []complex128{f(seg.pts[0])}
-	if !resolvedNonzero(fs[0]) {
-		return nil, nil, refineAxisRoot
+	base := len(ws)
+	ws = append(ws, seg.pts[0])
+	fs = append(fs, f(seg.pts[0]))
+	if !resolvedNonzero(fs[base]) {
+		return ws, fs, refineAxisRoot
 	}
 	type span struct {
 		a, b   float64
 		fa, fb complex128
 	}
+	var stack []span
 	for k := 1; k < len(seg.pts); k++ {
-		stack := []span{{seg.pts[k-1], seg.pts[k], fs[len(fs)-1], f(seg.pts[k])}}
+		stack = append(stack[:0], span{seg.pts[k-1], seg.pts[k], fs[len(fs)-1], f(seg.pts[k])})
 		for len(stack) > 0 {
 			s := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			if !resolvedNonzero(s.fb) {
-				return nil, nil, refineAxisRoot
+				return ws, fs, refineAxisRoot
 			}
 			if math.Abs(wrapPi(cmplx.Phase(s.fb)-cmplx.Phase(s.fa))) <= math.Pi/4 {
 				ws = append(ws, s.b)
@@ -537,10 +546,10 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int) ([]float64, []complex
 				continue
 			}
 			if s.b-s.a <= 1e-13*max(1, s.b) {
-				return nil, nil, refineAxisRoot
+				return ws, fs, refineAxisRoot
 			}
-			if len(ws)+len(stack) > budget {
-				return nil, nil, refineBudget
+			if len(ws)-base+len(stack) > budget {
+				return ws, fs, refineBudget
 			}
 			mid := (s.a + s.b) / 2
 			fm := f(mid)
