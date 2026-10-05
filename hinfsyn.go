@@ -15,15 +15,22 @@ import (
 // info: X and Y are the state-feedback and filter Riccati solutions at
 // GammaOpt and CLPoles the closed-loop poles. For a discrete plant X and Y
 // solve the Riccati equations of its Tustin-equivalent continuous plant (in
-// the same state coordinates), not discrete Riccati equations.
+// the same state coordinates), not discrete Riccati equations; when HinfSyn
+// first shifts modes away from z = ±1 (see HinfSyn), that of the shifted
+// plant.
 type HinfSynResult struct {
 	K *System
-	// GammaOpt is the gamma K is built for: ||T_zw||inf < GammaOpt, within
-	// hinfControllerBackoff (relative) of the smallest achievable gamma.
+	// GammaOpt is the gamma K is built for, verified on the returned K:
+	// ||T_zw||inf <= GammaOpt. It is within hinfControllerBackoff (relative)
+	// of the smallest achievable gamma unless the Riccati solutions are
+	// ill-conditioned there, as when the infimum is 0 and unattained; then it
+	// is the smallest backed-off gamma whose controller meets it.
 	GammaOpt float64
 	X        *mat.Dense
 	Y        *mat.Dense
 	CLPoles  []complex128
+	// clNorm is ||T_zw||inf of P with K, as verified.
+	clNorm float64
 }
 
 // HinfSyn computes a suboptimal H-infinity output-feedback controller for the
@@ -34,7 +41,11 @@ type HinfSynResult struct {
 // A nonzero D11 uses the Glover-Doyle general formulas, whose central
 // controller may have feedthrough. A nonzero D22 is handled by a loop shift:
 // K is designed for D22 = 0 and returned as K0 (I + D22 K0)^-1, giving the
-// same closed loop and gamma.
+// same closed loop and gamma, as MATLAB's loop-shifting Riccati method does.
+// When that shift is ill-posed for the central controller (I + D22·Dk
+// singular, e.g. the square one-block problem Mixsyn(G, W1, nil, nil) with a
+// biproper G), K0 is the non-central controller of the Youla parameter
+// Q = const with ‖Q‖ = γ/2, which also meets gamma.
 //
 // D12 must have full column rank and D21 full row rank; otherwise HinfSyn
 // returns ErrInvalidPartition (MATLAB regularizes the plant instead).
@@ -46,34 +57,109 @@ type HinfSynResult struct {
 // apply to P12 and P21 at z = -1, the unit-circle point Tustin sends to
 // s = ∞, in line with MATLAB's requirement that they have no zeros on the
 // unit circle. A plant mode at z = -1 is handled by designing for P(-z) and
-// reflecting K back; modes at both z = 1 and z = -1 return
-// ErrOptionUnsupported.
+// reflecting K back. Modes at (or near) both z = 1 and z = -1 are first moved
+// by a static output feedback u = D0·y + v, which leaves the closed loops and
+// gamma unchanged; K is the design for the shifted plant plus D0, and the
+// rank conditions apply to the shifted plant.
+//
+// Bisection stops when the bracket is within relative 1e-6 or absolute
+// hinfGammaAbsTol, like the RelTol and AbsTol of MATLAB hinfsynOptions (see
+// https://www.mathworks.com/help/robust/ref/hinfsynoptions.html) but tighter. As MATLAB
+// returns the controller of a passing gamma, HinfSyn builds K just above the
+// bisection edge and checks ||T_zw||inf <= GammaOpt on the returned K. If the
+// build fails or K misses that gamma (the Riccati solutions are numerically
+// unreliable near an unattained infimum such as 0, where K grows without
+// bound), it backs gamma off upward, since every gamma above the infimum is
+// achievable, until a controller meets it.
 func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	gp, err := partitionGeneralizedPlant("HinfSyn", P, nmeas, ncont)
 	if err != nil {
 		return nil, err
 	}
+	var d hinfDesign
 	if P.IsDiscrete() {
-		return hinfSynDiscrete(gp.op, P, nmeas, ncont)
+		d, err = hinfSynDiscrete(gp, P, nmeas, ncont)
+	} else {
+		d, err = hinfSynPartition(gp, "D12", "D21")
 	}
-	return hinfSynPartition(gp, "D12", "D21")
+	if err != nil {
+		return nil, err
+	}
+	return d.verified(gp.op, P, nmeas, ncont)
 }
 
-func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string) (*HinfSynResult, error) {
+// hinfDesign is a bisected H∞ problem: gammaEdge is the smallest gamma the
+// Riccati test accepts and build returns the controller for P at a gamma.
+type hinfDesign struct {
+	gammaEdge float64
+	build     func(gamma float64) (*HinfSynResult, error)
+}
+
+// hinfGammaAbsTol is the absolute bisection tolerance. It ends bisection
+// toward a zero infimum, and is far below MATLAB's default AbsTol (1e-6) so
+// that the relative 1e-6 governs every gamma above 1e-3.
+const hinfGammaAbsTol = 1e-9
+
+// hinfControllerBackoff is the relative gamma margin above the bisection
+// edge. At the edge X or Y grows without bound, so the central controller is
+// ill-conditioned and overshoots gamma; 1e-4 restores a genuine margin.
+const hinfControllerBackoff = 1e-4
+
+// hinfBackoffTries bounds the doublings of the gamma margin in verified.
+const hinfBackoffTries = 48
+
+// verified builds the controller at gammaEdge plus a margin that starts at
+// hinfControllerBackoff·gammaEdge and doubles (at least to hinfGammaAbsTol)
+// until the build succeeds and the closed loop of P with the returned K
+// meets gamma.
+func (d hinfDesign) verified(op string, P *System, nmeas, ncont int) (*HinfSynResult, error) {
+	margin := hinfControllerBackoff * d.gammaEdge
+	var err error
+	for range hinfBackoffTries {
+		var res *HinfSynResult
+		if res, err = d.build(d.gammaEdge + margin); err == nil {
+			if err = res.meets(op, P, nmeas, ncont); err == nil {
+				return res, nil
+			}
+		}
+		margin = math.Max(2*margin, hinfGammaAbsTol)
+	}
+	return nil, err
+}
+
+// meets checks ||T_zw||inf <= GammaOpt for the closed loop of P with K and
+// records that norm.
+func (res *HinfSynResult) meets(op string, P *System, nmeas, ncont int) error {
+	cl, err := LFT(P, res.K, LFTFeedback{Nu: ncont, Ny: nmeas})
+	if err != nil {
+		return fmt.Errorf("%s: closing the loop: %w", op, err)
+	}
+	norm, _, err := HinfNorm(cl)
+	if err != nil {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	if !(norm <= res.GammaOpt) {
+		return fmt.Errorf("%s: controller for γ = %g gives ‖T_zw‖∞ = %g: %w", op, res.GammaOpt, norm, ErrGammaNotAchievable)
+	}
+	res.clNorm = norm
+	return nil
+}
+
+func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string) (hinfDesign, error) {
 	if err := gp.requireRegularFeedthrough(d12, d21); err != nil {
-		return nil, err
+		return hinfDesign{}, err
 	}
 	if err := gp.validateControllerChannels(); err != nil {
-		return nil, err
+		return hinfDesign{}, err
 	}
 	if !allZeroDense(gp.D11) {
 		return hinfSynGeneral(gp)
 	}
-	gamma, err := hinfControllerGamma(0, func(g float64) bool { return hinfFeasible(gp, g) })
+	gamma, err := hinfBisect(0, func(g float64) bool { return hinfFeasible(gp, g) })
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", gp.op, err)
+		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
-	return hinfSynD11Zero(gp, gamma)
+	return hinfDesign{gammaEdge: gamma, build: func(g float64) (*HinfSynResult, error) { return hinfSynD11Zero(gp, g) }}, nil
 }
 
 // hinfSynDiscrete designs for the discrete plant P through the Tustin map
@@ -81,7 +167,53 @@ func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string) (*HinfSynR
 // when I + A is worse conditioned than I − A (a mode at or near z = −1,
 // which the plain map sends to s = ∞). Both maps take the unit circle onto
 // the imaginary axis and the open unit disk onto the open left half-plane.
-func hinfSynDiscrete(op string, P *System, nmeas, ncont int) (*HinfSynResult, error) {
+// When both I + A and I − A are ill-conditioned (modes at or near both
+// z = 1 and z = −1, or a strongly non-normal A) it first closes a static output feedback u = D0·y + v,
+// which moves those modes, designs K' from y to v, and returns K = K' + D0:
+// the closed loops, and so the achievable γ, are identical.
+func hinfSynDiscrete(gp *generalizedPlantPartition, P *System, nmeas, ncont int) (hinfDesign, error) {
+	op := gp.op
+	if cond := tustinCond(P.A); cond > hinfTustinCond {
+		if D0, Ps, ok := gp.unitCircleModeShift(P, cond); ok {
+			d, err := hinfSynTustin(op, Ps, nmeas, ncont)
+			if err != nil {
+				return hinfDesign{}, err
+			}
+			build := d.build
+			d.build = func(g float64) (*HinfSynResult, error) {
+				res, err := build(g)
+				if err != nil {
+					return nil, err
+				}
+				res.K.D.Add(res.K.D, D0)
+				return res, nil
+			}
+			return d, nil
+		}
+	}
+	return hinfSynTustin(op, P, nmeas, ncont)
+}
+
+// hinfTustinCond is the tustinCond above which hinfSynDiscrete shifts the
+// plant's modes away from z = ±1 before the Tustin map. Beyond it the
+// Tustin-equivalent plant is stiff enough to cost the continuous Riccati
+// solutions accuracy.
+const hinfTustinCond = 1e2
+
+// tustinCond is the condition number of I + A or I − A, whichever is better
+// conditioned: that of the better of the two Tustin maps.
+func tustinCond(A *mat.Dense) float64 {
+	n, _ := A.Dims()
+	var plus, minus mat.LU
+	IpA, ImA := eyeDense(n), eyeDense(n)
+	IpA.Add(IpA, A)
+	ImA.Sub(ImA, A)
+	plus.Factorize(IpA)
+	minus.Factorize(ImA)
+	return math.Min(plus.Cond(), minus.Cond())
+}
+
+func hinfSynTustin(op string, P *System, nmeas, ncont int) (hinfDesign, error) {
 	n, _, _ := P.Dims()
 	var plus, minus mat.LU
 	IpA, ImA := eyeDense(n), eyeDense(n)
@@ -99,57 +231,174 @@ func hinfSynDiscrete(op string, P *System, nmeas, ncont int) (*HinfSynResult, er
 	}
 	Pc, err := Pd.undiscretizeTustin(0)
 	if errors.Is(err, ErrSingularTransform) {
-		return nil, fmt.Errorf("%s: plant has modes at both z = 1 and z = -1, which no Tustin map can take to continuous time: %w", op, ErrOptionUnsupported)
+		return hinfDesign{}, fmt.Errorf("%s: plant has modes at both z = 1 and z = -1 that no static output feedback moves: %w", op, ErrOptionUnsupported)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
+		return hinfDesign{}, fmt.Errorf("%s: %w", op, err)
 	}
 	gp, err := partitionGeneralizedPlant(op, Pc, nmeas, ncont)
 	if err != nil {
-		return nil, err
+		return hinfDesign{}, err
 	}
-	res, err := hinfSynPartition(gp, "P12(z = "+point+")", "P21(z = "+point+")")
+	d, err := hinfSynPartition(gp, "P12(z = "+point+")", "P21(z = "+point+")")
 	if err != nil {
-		return nil, err
+		return hinfDesign{}, err
 	}
-	K, err := res.K.discretizeTustin(P.Dt, 0)
-	if err != nil {
-		return nil, fmt.Errorf("%s: mapping the controller back to discrete time: %w", op, err)
+	build := d.build
+	d.build = func(g float64) (*HinfSynResult, error) {
+		res, err := build(g)
+		if err != nil {
+			return nil, err
+		}
+		K, err := res.K.discretizeTustin(P.Dt, 0)
+		if err != nil {
+			return nil, fmt.Errorf("%s: mapping the controller back to discrete time: %w", op, err)
+		}
+		beta := 2 / P.Dt
+		sign := complex(1, 0)
+		if reflect {
+			K.A.Scale(-1, K.A)
+			K.B.Scale(-1, K.B)
+			sign = -1
+		}
+		for i, s := range res.CLPoles {
+			res.CLPoles[i] = sign * (complex(beta, 0) + s) / (complex(beta, 0) - s)
+		}
+		res.K = K
+		return res, nil
 	}
-	beta := 2 / P.Dt
-	sign := complex(1, 0)
-	if reflect {
-		K.A.Scale(-1, K.A)
-		K.B.Scale(-1, K.B)
-		sign = -1
-	}
-	for i, s := range res.CLPoles {
-		res.CLPoles[i] = sign * (complex(beta, 0) + s) / (complex(beta, 0) - s)
-	}
-	res.K = K
-	return res, nil
+	return d, nil
 }
 
-// hinfGammaFloor ends bisection when the optimum is zero, where the
-// relative stopping rule never triggers.
-const hinfGammaFloor = 1e-12
-
-// hinfControllerBackoff is the relative gamma margin above the bisection
-// edge. At the edge X or Y grows without bound, so the central controller is
-// ill-conditioned and overshoots gamma; 1e-4 restores a genuine margin.
-const hinfControllerBackoff = 1e-4
-
-// hinfControllerGamma returns the gamma to build the central controller at.
-func hinfControllerGamma(gammaLB float64, feasible func(float64) bool) (float64, error) {
-	gamma, err := hinfBisect(gammaLB, feasible)
-	if err != nil {
-		return 0, err
+// unitCircleModeShift returns a static output feedback D0 and the plant P
+// with u = D0·y + v closed, from [w; v] to [z; y]. With Δ = (I − D22 D0)⁻¹:
+//
+//	A' = A + B2 D0 Δ C2,  B' = [B1 + B2 D0 Δ D21, B2 (I + D0 Δ D22)],
+//	C' = [C1 + D12 D0 Δ C2; Δ C2],
+//	D' = [D11 + D12 D0 Δ D21, D12 (I + D0 Δ D22); Δ D21, Δ D22].
+//
+// Static output feedback can move every mode that is both controllable from
+// u and observable from y (Davison & Wang, 1975), which unit-circle modes of
+// a stabilizable and detectable plant are. D0 is the best of a fixed set of
+// candidates by tustinCond, and ok is false when none improves on cond, that
+// of P; any D0 gives the same closed loops, so the choice affects
+// conditioning only.
+func (gp *generalizedPlantPartition) unitCircleModeShift(P *System, cond float64) (*mat.Dense, *System, bool) {
+	m2, p2 := gp.m2, gp.p2
+	base := (1 + mat.Norm(gp.A, 2)) / math.Max(mat.Norm(gp.B2, 2)*mat.Norm(gp.C2, 2), math.SmallestNonzeroFloat64)
+	B2tC2t := mulDense(mat.DenseCopyOf(gp.B2.T()), mat.DenseCopyOf(gp.C2.T()))
+	dirs := []*mat.Dense{B2tC2t}
+	for k := 1; k <= 4; k++ {
+		D := mat.NewDense(m2, p2, nil)
+		for i := range m2 {
+			for j := range p2 {
+				D.Set(i, j, math.Cos(float64(k*(i*p2+j)+k*k)))
+			}
+		}
+		dirs = append(dirs, D)
 	}
-	return gamma * (1 + hinfControllerBackoff), nil
+	var best *mat.Dense
+	bestCond := cond
+	for _, dir := range dirs {
+		dn := mat.Norm(dir, 2)
+		if dn == 0 {
+			continue
+		}
+		for _, t := range []float64{0.1, -0.1, 0.5, -0.5, 1, -1} {
+			D0 := mat.NewDense(m2, p2, nil)
+			D0.Scale(t*base/dn, dir)
+			As, ok := shiftedStateMatrix(gp, D0)
+			if !ok {
+				continue
+			}
+			if c := tustinCond(As); c < bestCond {
+				best, bestCond = D0, c
+			}
+		}
+	}
+	if best == nil {
+		return nil, nil, false
+	}
+	Ps, ok := gp.closeStaticLoop(P, best)
+	if !ok {
+		return nil, nil, false
+	}
+	return best, Ps, true
+}
+
+// staticLoopGain returns D0·Δ = D0 (I − D22 D0)⁻¹, or false when the loop is
+// ill-posed.
+func staticLoopGain(gp *generalizedPlantPartition, D0 *mat.Dense) (*mat.Dense, bool) {
+	IDD := mulDense(gp.D22, D0)
+	IDD.Scale(-1, IDD)
+	for i := range gp.p2 {
+		IDD.Set(i, i, IDD.At(i, i)+1)
+	}
+	var lu mat.LU
+	lu.Factorize(IDD)
+	if !(lu.Cond() < hinfTustinCond) {
+		return nil, false
+	}
+	Delta, err := invertSmall(IDD, gp.p2)
+	if err != nil {
+		return nil, false
+	}
+	return mulDense(D0, Delta), true
+}
+
+func shiftedStateMatrix(gp *generalizedPlantPartition, D0 *mat.Dense) (*mat.Dense, bool) {
+	G, ok := staticLoopGain(gp, D0)
+	if !ok {
+		return nil, false
+	}
+	As := mulDense(mulDense(gp.B2, G), gp.C2)
+	As.Add(gp.A, As)
+	return As, true
+}
+
+func (gp *generalizedPlantPartition) closeStaticLoop(P *System, D0 *mat.Dense) (*System, bool) {
+	G, ok := staticLoopGain(gp, D0)
+	if !ok {
+		return nil, false
+	}
+	n, m1, m2, p1, p2 := gp.n, gp.m1, gp.m2, gp.p1, gp.p2
+	Delta := mulDense(gp.D22, G)
+	for i := range p2 {
+		Delta.Set(i, i, Delta.At(i, i)+1)
+	}
+	U := mulDense(G, gp.D22)
+	for i := range m2 {
+		U.Set(i, i, U.At(i, i)+1)
+	}
+	A := mulDense(mulDense(gp.B2, G), gp.C2)
+	A.Add(gp.A, A)
+	B := mat.NewDense(n, m1+m2, nil)
+	B1 := mulDense(mulDense(gp.B2, G), gp.D21)
+	B1.Add(gp.B1, B1)
+	setBlock(B, 0, 0, B1)
+	setBlock(B, 0, m1, mulDense(gp.B2, U))
+	C := mat.NewDense(p1+p2, n, nil)
+	C1 := mulDense(mulDense(gp.D12, G), gp.C2)
+	C1.Add(gp.C1, C1)
+	setBlock(C, 0, 0, C1)
+	setBlock(C, p1, 0, mulDense(Delta, gp.C2))
+	D := mat.NewDense(p1+p2, m1+m2, nil)
+	D11 := mulDense(mulDense(gp.D12, G), gp.D21)
+	D11.Add(gp.D11, D11)
+	setBlock(D, 0, 0, D11)
+	setBlock(D, 0, m1, mulDense(gp.D12, U))
+	setBlock(D, p1, 0, mulDense(Delta, gp.D21))
+	setBlock(D, p1, m1, mulDense(Delta, gp.D22))
+	Ps, err := New(A, B, C, D, P.Dt)
+	if err != nil {
+		return nil, false
+	}
+	propagateNames(Ps, P)
+	return Ps, true
 }
 
 // hinfBisect returns the smallest gamma above gammaLB, to relative 1e-6 or
-// below hinfGammaFloor, that feasible accepts.
+// absolute hinfGammaAbsTol, that feasible accepts.
 func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
 	gammaUB := gammaLB*2 + 1
 	for !feasible(gammaUB) {
@@ -158,7 +407,7 @@ func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
 			return 0, fmt.Errorf("no feasible gamma below %g: %w", gammaUB, ErrGammaNotAchievable)
 		}
 	}
-	for gammaUB-gammaLB > 1e-6*gammaUB && gammaUB > hinfGammaFloor {
+	for gammaUB-gammaLB > math.Max(1e-6*gammaUB, hinfGammaAbsTol) {
 		mid := (gammaLB + gammaUB) / 2
 		if feasible(mid) {
 			gammaUB = mid

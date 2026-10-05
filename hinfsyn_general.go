@@ -253,23 +253,67 @@ func (hp *hinfGeneralPlant) centralD11(gamma float64) (*mat.Dense, error) {
 	return Dk, nil
 }
 
-func hinfSynGeneral(gp *generalizedPlantPartition) (*HinfSynResult, error) {
+// hinfYoula is the parametrization K = F_l(M∞, Q) of all controllers with
+// ‖T_zw‖∞ < γ for the scaled plant, Q ∈ RH∞ with ‖Q‖∞ < γ (Zhou, Doyle &
+// Glover, Robust and Optimal Control, Thm 17.13). Its fields are M∞ less the
+// zero (2,2) block; Q = 0 is the central controller.
+type hinfYoula struct {
+	hp                  *hinfGeneralPlant
+	gamma               float64
+	A, B1, B2, C1, C2   *mat.Dense
+	D11, D12hat, D21hat *mat.Dense
+}
+
+func hinfSynGeneral(gp *generalizedPlantPartition) (hinfDesign, error) {
 	hp, err := newHinfGeneralPlant(gp)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", gp.op, err)
+		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
-	gamma, err := hinfControllerGamma(hp.gammaLB, func(g float64) bool {
+	gamma, err := hinfBisect(hp.gammaLB, func(g float64) bool {
 		_, _, _, _, err := hp.riccatis(g)
 		return err == nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", gp.op, err)
+		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
+	return hinfDesign{gammaEdge: gamma, build: hp.synthesize}, nil
+}
+
+// synthesize returns the controller at gamma: the central one, or the
+// non-central one of wellPosedQ when the D22 loop shift is ill-posed.
+func (hp *hinfGeneralPlant) synthesize(gamma float64) (*HinfSynResult, error) {
+	gp := hp.gp
 	X, Y, Rinv, Rtinv, err := hp.riccatis(gamma)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
+	M, err := hp.youla(gamma, X, Y, Rinv, Rtinv)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", gp.op, err)
+	}
+	Ak, Bk, Ck, Dk := M.controller(nil)
+	if loopShiftIllPosed(gp.D22, Dk) {
+		Dq, err := M.wellPosedQ(Dk)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", gp.op, err)
+		}
+		Ak, Bk, Ck, Dk = M.controller(Dq)
+	}
 
+	K, err := gp.newController(Ak, Bk, Ck, Dk)
+	if err != nil {
+		return nil, err
+	}
+	clPoles, err := gp.closedLoopPoles(Ak, Bk, Ck, Dk)
+	if err != nil {
+		return nil, err
+	}
+	return &HinfSynResult{K: K, GammaOpt: gamma, X: X, Y: Y, CLPoles: clPoles}, nil
+}
+
+// youla returns M∞ at gamma from the Riccati solutions X and Y.
+func (hp *hinfGeneralPlant) youla(gamma float64, X, Y, Rinv, Rtinv *mat.Dense) (*hinfYoula, error) {
+	gp := hp.gp
 	n, m1, p1, m2, p2 := gp.n, gp.m1, gp.p1, gp.m2, gp.p2
 	F := mulDense(hp.BT, X)
 	F.Add(F, hp.D1dtC1)
@@ -282,7 +326,11 @@ func hinfSynGeneral(gp *generalizedPlantPartition) (*HinfSynResult, error) {
 
 	Dhat, err := hp.centralD11(gamma)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", gp.op, err)
+		return nil, err
+	}
+	D12hat, D21hat, err := hp.youlaFeedthrough(gamma)
+	if err != nil {
+		return nil, err
 	}
 
 	Zarg := mulDense(Y, X)
@@ -295,32 +343,194 @@ func hinfSynGeneral(gp *generalizedPlantPartition) (*HinfSynResult, error) {
 
 	C2F := extractBlock(F, m1-p2, 0, p2, n)
 	C2F.Add(C2F, hp.C2)
-	BL := extractBlock(L, 0, p1-m2, n, m2)
-	BL.Add(BL, hp.B2)
-	BL = mulDense(BL, Dhat)
+	B2L := extractBlock(L, 0, p1-m2, n, m2)
+	B2L.Add(B2L, hp.B2)
+	BL := mulDense(B2L, Dhat)
 	BL.Sub(BL, extractBlock(L, 0, p1, n, p2))
-	Bhat := mat.NewDense(n, p2, nil)
-	if err := lu.SolveTo(Bhat, false, BL); err != nil {
-		return nil, fmt.Errorf("%s: controller state matrix singular at γ = %g: %w", gp.op, gamma, ErrGammaNotAchievable)
+	B1 := mat.NewDense(n, p2, nil)
+	B2 := mat.NewDense(n, m2, nil)
+	if err := lu.SolveTo(B1, false, BL); err != nil {
+		return nil, fmt.Errorf("controller state matrix singular at γ = %g: %w", gamma, ErrGammaNotAchievable)
+	}
+	if err := lu.SolveTo(B2, false, mulDense(B2L, D12hat)); err != nil {
+		return nil, fmt.Errorf("controller state matrix singular at γ = %g: %w", gamma, ErrGammaNotAchievable)
 	}
 
-	Chat := mulDense(Dhat, C2F)
-	Chat.Sub(extractBlock(F, m1, 0, m2, n), Chat)
-	Ak := mulDense(hp.B, F)
-	Ak.Add(gp.A, Ak)
-	Ak.Sub(Ak, mulDense(Bhat, C2F))
+	C1 := mulDense(Dhat, C2F)
+	C1.Sub(extractBlock(F, m1, 0, m2, n), C1)
+	A := mulDense(hp.B, F)
+	A.Add(gp.A, A)
+	A.Sub(A, mulDense(B1, C2F))
+	C2 := mulDense(D21hat, C2F)
+	C2.Scale(-1, C2)
+	return &hinfYoula{hp: hp, gamma: gamma, A: A, B1: B1, B2: B2, C1: C1, C2: C2, D11: Dhat, D12hat: D12hat, D21hat: D21hat}, nil
+}
 
-	Bk := mulDense(Bhat, hp.R21inv)
-	Ck := mulDense(hp.R12inv, Chat)
-	Dk := mulDense(mulDense(hp.R12inv, Dhat), hp.R21inv)
+// youlaFeedthrough returns D̂12 and D̂21 with
+// D̂12 D̂12ᵀ = I − D1121 (γ²I − D1111ᵀD1111)⁻¹ D1121ᵀ and
+// D̂21ᵀ D̂21 = I − D1112ᵀ (γ²I − D1111 D1111ᵀ)⁻¹ D1112.
+func (hp *hinfGeneralPlant) youlaFeedthrough(gamma float64) (D12hat, D21hat *mat.Dense, err error) {
+	gp := hp.gp
+	r, c := gp.p1-gp.m2, gp.m1-gp.p2
+	// gram returns I − Dᵀ (γ²I − EᵀE)⁻¹ D for D (k×dim) and E (rows×k).
+	gram := func(D, E func() *mat.Dense, rows, k, dim int) (*mat.Dense, error) {
+		G := eyeDense(dim)
+		if k == 0 {
+			return G, nil
+		}
+		W := mat.NewDense(k, k, nil)
+		if rows > 0 {
+			e := E()
+			W.Mul(e.T(), e)
+			W.Scale(-1, W)
+		}
+		for i := range k {
+			W.Set(i, i, W.At(i, i)+gamma*gamma)
+		}
+		WinvD := mat.NewDense(k, dim, nil)
+		var lu mat.LU
+		lu.Factorize(W)
+		d := D()
+		if err := lu.SolveTo(WinvD, false, d); err != nil {
+			return nil, fmt.Errorf("Youla feedthrough singular at γ = %g: %w", gamma, ErrGammaNotAchievable)
+		}
+		G.Sub(G, mulDense(mat.DenseCopyOf(d.T()), WinvD))
+		return G, nil
+	}
+	cholUpper := func(G *mat.Dense, dim int) (*mat.Dense, error) {
+		var ch mat.Cholesky
+		if !ch.Factorize(mat.NewSymDense(dim, G.RawMatrix().Data)) {
+			return nil, fmt.Errorf("Youla feedthrough not positive definite at γ = %g: %w", gamma, ErrGammaNotAchievable)
+		}
+		var U mat.TriDense
+		ch.UTo(&U)
+		return mat.DenseCopyOf(&U), nil
+	}
+	D1111 := func() *mat.Dense { return extractBlock(hp.D11, 0, 0, r, c) }
+	G12, err := gram(
+		func() *mat.Dense { return mat.DenseCopyOf(extractBlock(hp.D11, r, 0, gp.m2, c).T()) },
+		D1111, r, c, gp.m2)
+	if err != nil {
+		return nil, nil, err
+	}
+	U12, err := cholUpper(G12, gp.m2)
+	if err != nil {
+		return nil, nil, err
+	}
+	G21, err := gram(
+		func() *mat.Dense { return extractBlock(hp.D11, 0, c, r, gp.p2) },
+		func() *mat.Dense { return mat.DenseCopyOf(D1111().T()) }, c, r, gp.p2)
+	if err != nil {
+		return nil, nil, err
+	}
+	D21hat, err = cholUpper(G21, gp.p2)
+	if err != nil {
+		return nil, nil, err
+	}
+	return mat.DenseCopyOf(U12.T()), D21hat, nil
+}
 
-	K, err := gp.newController(Ak, Bk, Ck, Dk)
+// controller returns F_l(M∞, Q) for the constant Q (nil for the central
+// controller), unscaled to the original plant coordinates.
+func (M *hinfYoula) controller(Q *mat.Dense) (Ak, Bk, Ck, Dk *mat.Dense) {
+	A, B1, C1, D11 := M.A, M.B1, M.C1, M.D11
+	if Q != nil {
+		B2Q := mulDense(M.B2, Q)
+		D12Q := mulDense(M.D12hat, Q)
+		A = mulDense(B2Q, M.C2)
+		A.Add(M.A, A)
+		B1 = mulDense(B2Q, M.D21hat)
+		B1.Add(M.B1, B1)
+		C1 = mulDense(D12Q, M.C2)
+		C1.Add(M.C1, C1)
+		D11 = mulDense(D12Q, M.D21hat)
+		D11.Add(M.D11, D11)
+	}
+	hp := M.hp
+	return A, mulDense(B1, hp.R21inv), mulDense(hp.R12inv, C1), mulDense(mulDense(hp.R12inv, D11), hp.R21inv)
+}
+
+// hinfYoulaFraction is ‖Q‖/γ for the constant Q that makes an ill-posed
+// central loop shift well posed.
+const hinfYoulaFraction = 0.5
+
+// wellPosedQ returns a constant Q with ‖Q‖ = hinfYoulaFraction·γ for which
+// I + D22·Dk(Q) is invertible, Dk0 = Dk(0) being the central feedthrough.
+// With D22 = U1 S V1ᵀ (rank r) and Dk(Q) = Dk0 + T1 Q T2,
+// det(I + D22 Dk(Q)) = det(H0 + A Q B) for H0 = I + S V1ᵀ Dk0 U1,
+// A = S V1ᵀ T1 (full row rank) and B = T2 U1 (full column rank). Q = A⁺ X B⁺
+// with X = c·Uh Vhᵀ from the SVD H0 = Uh Σ Vhᵀ gives H0 + A Q B =
+// Uh (Σ + c I) Vhᵀ, whose smallest singular value is at least
+// c = hinfYoulaFraction·γ·σmin(A)·σmin(B), while ‖Q‖ ≤ c/(σmin(A)·σmin(B)).
+func (M *hinfYoula) wellPosedQ(Dk0 *mat.Dense) (*mat.Dense, error) {
+	gp := M.hp.gp
+	var svd mat.SVD
+	if !svd.Factorize(gp.D22, mat.SVDThin) {
+		return nil, fmt.Errorf("SVD of D22 failed: %w", ErrSchurFailed)
+	}
+	s := svd.Values(nil)
+	r := 0
+	for r < len(s) && s[r] > s[0]*float64(max(gp.p2, gp.m2))*eps() {
+		r++
+	}
+	var U, V mat.Dense
+	svd.UTo(&U)
+	svd.VTo(&V)
+	SV1t := mat.DenseCopyOf(V.Slice(0, gp.m2, 0, r).T())
+	for i := range r {
+		for j := range gp.m2 {
+			SV1t.Set(i, j, s[i]*SV1t.At(i, j))
+		}
+	}
+	U1 := mat.DenseCopyOf(U.Slice(0, gp.p2, 0, r))
+	H0 := mulDense(mulDense(SV1t, Dk0), U1)
+	for i := range r {
+		H0.Set(i, i, H0.At(i, i)+1)
+	}
+	Am := mulDense(SV1t, mulDense(M.hp.R12inv, M.D12hat))
+	Bm := mulDense(mulDense(M.D21hat, M.hp.R21inv), U1)
+
+	Ainv, sa, err := thinPseudoInverse(Am)
 	if err != nil {
 		return nil, err
 	}
-	clPoles, err := gp.closedLoopPoles(Ak, Bk, Ck, Dk)
+	Binv, sb, err := thinPseudoInverse(Bm)
 	if err != nil {
 		return nil, err
 	}
-	return &HinfSynResult{K: K, GammaOpt: gamma, X: X, Y: Y, CLPoles: clPoles}, nil
+	var hsvd mat.SVD
+	if !hsvd.Factorize(H0, mat.SVDThin) {
+		return nil, fmt.Errorf("SVD of the loop-shift matrix failed: %w", ErrSchurFailed)
+	}
+	var Uh, Vh mat.Dense
+	hsvd.UTo(&Uh)
+	hsvd.VTo(&Vh)
+	X := mulDense(&Uh, mat.DenseCopyOf(Vh.T()))
+	X.Scale(hinfYoulaFraction*M.gamma*sa*sb, X)
+	return mulDense(mulDense(Ainv, X), Binv), nil
+}
+
+// thinPseudoInverse returns the pseudo-inverse of the full-rank M and its
+// smallest singular value.
+func thinPseudoInverse(M *mat.Dense) (*mat.Dense, float64, error) {
+	var svd mat.SVD
+	if !svd.Factorize(M, mat.SVDThin) {
+		return nil, 0, fmt.Errorf("SVD failed: %w", ErrSchurFailed)
+	}
+	s := svd.Values(nil)
+	k := len(s)
+	if !fullRankValues(s, k) {
+		return nil, 0, fmt.Errorf("Youla loop-shift factor rank deficient: %w", ErrAlgebraicLoop)
+	}
+	var U, V mat.Dense
+	svd.UTo(&U)
+	svd.VTo(&V)
+	r, c := V.Dims()
+	VS := mat.NewDense(r, c, nil)
+	for i := range r {
+		for j := range c {
+			VS.Set(i, j, V.At(i, j)/s[j])
+		}
+	}
+	return mulDense(VS, mat.DenseCopyOf(U.T())), s[k-1], nil
 }

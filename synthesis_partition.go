@@ -124,6 +124,9 @@ func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck, Dk *mat.Dense) (*
 			for i := range gp.p2 {
 				IDD.Set(i, i, IDD.At(i, i)+1)
 			}
+			if loopShiftIllPosed(gp.D22, Dk) {
+				return nil, fmt.Errorf("%s: I+D22·Dk singular: %w", gp.op, ErrAlgebraicLoop)
+			}
 			M, err := invertSmall(IDD, gp.p2)
 			if err != nil {
 				return nil, fmt.Errorf("%s: I+D22·Dk singular (%v): %w", gp.op, err, ErrAlgebraicLoop)
@@ -148,6 +151,30 @@ func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck, Dk *mat.Dense) (*
 	}
 	gp.applyControllerNames(K)
 	return K, nil
+}
+
+// loopShiftCond bounds (1 + ‖D22‖·‖Dk‖)/σmin(I + D22·Dk); above it the D22
+// loop shift of newController is treated as ill-posed. The bound is
+// relative to the terms' scale because I + D22·Dk can cancel to rounding
+// noise whose plain condition number is small.
+const loopShiftCond = 1e8
+
+func loopShiftIllPosed(D22, Dk *mat.Dense) bool {
+	if allZeroDense(D22) {
+		return false
+	}
+	IDD := mulDense(D22, Dk)
+	p2, _ := IDD.Dims()
+	for i := range p2 {
+		IDD.Set(i, i, IDD.At(i, i)+1)
+	}
+	var svd mat.SVD
+	if !svd.Factorize(IDD, mat.SVDNone) {
+		return true
+	}
+	s := svd.Values(nil)
+	scale := 1 + mat.Norm(D22, 2)*mat.Norm(Dk, 2)
+	return !(s[len(s)-1]*loopShiftCond > scale)
 }
 
 func (gp *generalizedPlantPartition) closedLoopPoles(Ak, Bk, Ck, Dk *mat.Dense) ([]complex128, error) {
