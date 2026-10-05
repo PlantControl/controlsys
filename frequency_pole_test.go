@@ -407,7 +407,7 @@ func TestSigmaAndGainGoalsAtPole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := NewTrackingGoal("track", 0.1).Evaluate(integrating)
+	res, err := mustOK(NewTrackingGoal("track", 0.1)).Evaluate(integrating)
 	if err != nil || !math.IsInf(res.Value, 1) {
 		t.Errorf("tracking of integrating delayed model = %+v, %v; want +Inf", res, err)
 	}

@@ -9,8 +9,8 @@ import (
 )
 
 func TestGeneralizedModelCurrentValueAndAnalysisPoint(t *testing.T) {
-	k, _ := NewTunableReal("K", 2, TunableBounds{Lower: 0, Upper: 10})
-	controller := NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0)
+	k, _ := newBoundedReal("K", 2, 0, 10)
+	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
 	gm, err := NewGeneralizedModel("loop", controller)
 	if err != nil {
 		t.Fatalf("NewGeneralizedModel: %v", err)
@@ -50,8 +50,8 @@ func TestGeneralizedClosedLoopAnalysisHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k, _ := NewTunableReal("K", 1.5, TunableBounds{Lower: 0.1, Upper: 5})
-	controller := NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0)
+	k, _ := newBoundedReal("K", 1.5, 0.1, 5)
+	controller := mustOK(NewTunableGain("Kblock", [][]*TunableReal{{k}}, 0))
 	loop, err := NewGeneralizedClosedLoop("cl", plant, controller, "u")
 	if err != nil {
 		t.Fatalf("NewGeneralizedClosedLoop: %v", err)

@@ -226,6 +226,10 @@ var (
 	// not proof of impossibility.
 	ErrPIDTuningTargetUnattainable = errors.New("controlsys: PID tuning target unattainable within search bounds")
 
+	// ErrNoTuningCandidate reports a controller-tuning search in which no
+	// candidate produced a finite score.
+	ErrNoTuningCandidate = errors.New("controlsys: no tuning candidate produced a finite score")
+
 	// ErrProcessData reports malformed process-identification data.
 	ErrProcessData = errors.New("controlsys: invalid process identification data")
 
