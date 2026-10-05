@@ -187,6 +187,9 @@ func (sys *System) Poles() ([]complex128, error) {
 // infinitely many poles; like MATLAB isstable, which supports only models with
 // a finite number of poles, they return ErrContinuousInternalDelay.
 func (sys *System) IsStable() (bool, error) {
+	if err := requireSystem("IsStable", sys); err != nil {
+		return false, err
+	}
 	sys, err := finiteDimensionalModel(sys, "IsStable")
 	if err != nil {
 		return false, err

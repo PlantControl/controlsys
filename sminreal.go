@@ -2,7 +2,16 @@ package controlsys
 
 import "plantcontrol.org/v1/gonum/mat"
 
+// Sminreal removes states that are structurally disconnected from the inputs
+// or outputs, judged from the sparsity pattern of A, B and C, as MATLAB
+// sminreal. It does not change the transfer function and, unlike
+// MinimalRealization, involves no numerical rank decisions. Descriptor and
+// delayed models are not supported. See
+// https://www.mathworks.com/help/control/ref/dynamicsystem.sminreal.html.
 func Sminreal(sys *System) (*System, error) {
+	if err := requireSystem("Sminreal", sys); err != nil {
+		return nil, err
+	}
 	policy := newRealizationTransformPolicy(sys)
 	if err := policy.requireStandard("Sminreal"); err != nil {
 		return nil, err
