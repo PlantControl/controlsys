@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"strings"
 	"sync"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // ErrPIDTuningTargetUnattainable means no controller passed the requested target
@@ -47,8 +50,12 @@ type PIDTuningEvidence struct {
 	Components, Normalizers                  PIDTuningObjective
 	Evaluations                              int
 	Termination                              string
-	// Stability is "closed-loop-poles" or "sampled-frequency-only". The latter
-	// is deliberately not a global stability certificate.
+	// Stability is "closed-loop-poles", "nyquist-encirclement" or
+	// "sampled-frequency-only". Discrete delays are absorbed into the
+	// closed-loop poles. Continuous delayed plants use a Nyquist encirclement
+	// count on a delay-aware adaptive grid when the plant is standard with an
+	// acyclic delay network; otherwise only sampled frequencies are checked,
+	// which is deliberately not a global stability certificate.
 	Stability string
 	Warnings  []string
 	Feasible  bool
@@ -96,26 +103,35 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if plant.Dt > 0 {
 		p.high = math.Min(p.high, .99*math.Pi/plant.Dt)
 	}
-	if !plant.HasDelay() {
+	model := plant
+	if plant.Dt > 0 && plant.HasDelay() {
+		if absorbed, err := plant.AbsorbDelay(AbsorbAll); err == nil {
+			model = absorbed
+		}
+	}
+	if !model.HasDelay() {
 		p.stability = "closed-loop-poles"
-		hiddenStable := sync.OnceValue(func() bool { return pidTuningHiddenModesStable(plant) })
+		hiddenStable := sync.OnceValue(func() bool { return pidTuningHiddenModesStable(model) })
 		p.stable = func(c *PID2) bool {
 			controller := NewPID(c.Kp, c.Ki, c.Kd, WithFilter(c.Tf), WithPIDFormulas(c.IFormula, c.DFormula))
 			controller.Dt = c.Dt
 			cs, err := controller.System()
 			if err != nil {
 				if c.Kd != 0 && c.Tf == 0 {
-					return hiddenStable() && pidTuningIdealStable(plant, c)
+					return hiddenStable() && pidTuningIdealStable(model, c)
 				}
 				return false
 			}
-			loop, err := Feedback(plant, cs, -1)
+			loop, err := Feedback(model, cs, -1)
 			if err != nil {
 				return false
 			}
 			stable, err := loop.IsStable()
 			return err == nil && stable
 		}
+	} else if stable, ok := pidTuningDelayStability(plant, eval, wc, pidTuningIdealDerivative(family)); ok {
+		p.stability = "nyquist-encirclement"
+		p.stable = stable
 	} else {
 		p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 	}
@@ -663,4 +679,87 @@ func pidTuningCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (
 		margins = append(margins, phase)
 	}
 	return crossings, margins
+}
+
+func pidTuningIdealDerivative(family PidtuneType) bool {
+	f := PidtuneType(strings.ToUpper(string(family)))
+	return f == PidtunePD || f == PidtunePID
+}
+
+// pidTuningDelayStability returns a Nyquist stability test for loops
+// C(s)·P(s) with a continuous delayed plant, or false when the plant is
+// outside the test's scope. Ideal derivative controllers need D = 0 and no
+// internal delays so that |Kd·s·P(s)| has a finite high-frequency bound.
+func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool) (func(*PID2) bool, bool) {
+	if !plant.IsContinuous() {
+		return nil, false
+	}
+	base, err := delayLoopFromSystem(plant, "TunePID")
+	if err != nil {
+		return nil, false
+	}
+	plantTail, plantLimit := base.tail, base.tailLimit
+	var derivTail func(float64) float64
+	if !plant.HasInternalDelay() && plant.D.At(0, 0) == 0 {
+		n, _, _ := plant.Dims()
+		cb, cab, normA := 0.0, 0.0, 0.0
+		if n > 0 {
+			var v, ca mat.Dense
+			v.Mul(plant.C, plant.B)
+			cb = math.Abs(v.At(0, 0))
+			ca.Mul(plant.C, plant.A)
+			cab = mat.Norm(&ca, 2) * mat.Norm(plant.B, 2)
+			normA = mat.Norm(plant.A, 2)
+		}
+		derivTail = func(w float64) float64 {
+			if cab == 0 || math.IsInf(w, 1) {
+				return cb
+			}
+			if w <= normA {
+				return math.Inf(1)
+			}
+			return cb + cab/(w-normA)
+		}
+	}
+	if idealDerivative && derivTail == nil {
+		return nil, false
+	}
+	return func(c *PID2) bool {
+		l := *base
+		l.axis = slices.Clone(base.axis)
+		l.scales = append(slices.Clone(base.scales), wc)
+		if c.Ki != 0 {
+			l.addAxisPole(0, 1)
+		}
+		kp, ki, kd := math.Abs(c.Kp), math.Abs(c.Ki), math.Abs(c.Kd)
+		cand := *c
+		l.at = func(w float64) complex128 {
+			s := complex(0, w)
+			c := complex(cand.Kp, 0)
+			if cand.Ki != 0 {
+				c += complex(cand.Ki, 0) / s
+			}
+			if cand.Kd != 0 {
+				c += complex(cand.Kd, 0) * s / (1 + complex(cand.Tf, 0)*s)
+			}
+			return eval.at(w) * c
+		}
+		switch {
+		case kd == 0 || c.Tf > 0:
+			gain := kp
+			if kd != 0 {
+				gain += kd / c.Tf
+				l.scales = append(l.scales, 1/c.Tf)
+			}
+			l.tail = func(w float64) float64 { return (gain + ki/w) * plantTail(w) }
+			l.tailLimit = gain * plantLimit
+		case derivTail != nil:
+			l.tail = func(w float64) float64 { return (kp+ki/w)*plantTail(w) + kd*derivTail(w) }
+			l.tailLimit = kp*plantLimit + kd*derivTail(math.Inf(1))
+		default:
+			return false
+		}
+		stable, err := l.stableClosedLoop()
+		return err == nil && stable
+	}, true
 }

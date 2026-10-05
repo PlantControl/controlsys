@@ -5,6 +5,8 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"slices"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -137,8 +139,115 @@ func TestTunePIDPlantClasses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Evidence.Stability != "sampled-frequency-only" || len(r.Evidence.Warnings) == 0 {
-		t.Fatal("delay stability overclaimed")
+	if r.Evidence.Stability != "nyquist-encirclement" || slices.ContainsFunc(r.Evidence.Warnings, isDelayWarning) {
+		t.Fatalf("delay stability evidence = %q %v", r.Evidence.Stability, r.Evidence.Warnings)
+	}
+	dm, err := DiskMargin(pidTuningOpenLoop(t, p, r.Controller))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dm.Alpha <= 0 {
+		t.Fatalf("tuned delayed loop unstable: %+v", dm)
+	}
+}
+
+func isDelayWarning(w string) bool { return strings.Contains(w, "delay") }
+
+func pidTuningOpenLoop(t *testing.T, plant *System, c *PID2) *System {
+	t.Helper()
+	cs, err := NewPID(c.Kp, c.Ki, c.Kd, WithFilter(c.Tf)).System()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := Series(cs, plant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+// Closed-form boundaries for C(s)·e^{-τs}·G(s): the critical gain is
+// 1/|L(jω)| at the first ω where arg L(jω) = -π.
+func TestTunePIDDelayNyquistBoundary(t *testing.T) {
+	const tau = 0.5
+	first := makePlant(t, []float64{1}, []float64{1, 1})
+	second := makePlant(t, []float64{1}, []float64{1, 3, 2})
+	for _, p := range []*System{first, second} {
+		if err := p.SetInputDelay([]float64{tau}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		plant *System
+		c     PID2
+		g     func(s complex128) complex128
+	}{
+		{"P", first, PID2{Kp: 1}, func(s complex128) complex128 { return 1 / (s + 1) }},
+		{"I", first, PID2{Ki: 1}, func(s complex128) complex128 { return 1 / (s * (s + 1)) }},
+		{"PI", first, PID2{Kp: 1, Ki: 2}, func(s complex128) complex128 { return (1 + 2/s) / (s + 1) }},
+		{"PDideal", second, PID2{Kp: 1, Kd: 0.5}, func(s complex128) complex128 { return (1 + 0.5*s) / ((s + 1) * (s + 2)) }},
+		{"PIDF", second, PID2{Kp: 1, Ki: 0.5, Kd: 0.5, Tf: 0.1}, func(s complex128) complex128 {
+			return (1 + 0.5/s + 0.5*s/(0.1*s+1)) / ((s + 1) * (s + 2))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eval, err := newSISOEval(tc.plant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stable, ok := pidTuningDelayStability(tc.plant, eval, 1, tc.c.Kd != 0 && tc.c.Tf == 0)
+			if !ok {
+				t.Fatal("plant outside Nyquist scope")
+			}
+			L := func(w float64) complex128 {
+				s := complex(0, w)
+				return tc.g(s) * cmplx.Exp(-s*complex(tau, 0))
+			}
+			phase := func(w float64) float64 {
+				ph := cmplx.Phase(L(w))
+				if ph > 0 {
+					ph -= 2 * math.Pi
+				}
+				return ph + math.Pi
+			}
+			lo := 1e-3
+			hi := lo
+			for phase(hi) > 0 {
+				lo, hi = hi, hi*1.01
+			}
+			wc := bisectRoot(phase, lo, hi)
+			kc := 1 / cmplx.Abs(L(wc))
+			for _, f := range []struct {
+				scale float64
+				want  bool
+			}{{0.97 * kc, true}, {1.03 * kc, false}} {
+				c := tc.c
+				c.Kp *= f.scale
+				c.Ki *= f.scale
+				c.Kd *= f.scale
+				if got := stable(&c); got != f.want {
+					t.Fatalf("gain %g (kc=%g at w=%g): stable=%v, want %v", f.scale, kc, wc, got, f.want)
+				}
+			}
+		})
+	}
+}
+
+func TestTunePIDDiscreteDelayUsesClosedLoopPoles(t *testing.T) {
+	p, err := NewFromSlices(1, 1, 1, []float64{0.9}, []float64{1}, []float64{0.1}, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetInputDelay([]float64{3}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := TunePID(context.Background(), p, PidtunePI, PIDTuningOptions{CrossoverFrequency: 0.5, PhaseMargin: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Evidence.Stability != "closed-loop-poles" || slices.ContainsFunc(r.Evidence.Warnings, isDelayWarning) {
+		t.Fatalf("evidence = %q %v", r.Evidence.Stability, r.Evidence.Warnings)
 	}
 }
 
@@ -294,4 +403,81 @@ func TestTunePIDOneGainAcceptsSeveralCrossovers(t *testing.T) {
 	if _, err := TunePIDFRD(context.Background(), frd, PidtuneP, PIDTuningOptions{CrossoverFrequency: 1}); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		t.Fatalf("sampled one-gain design accepted below its local margin without a stability certificate: %v", err)
 	}
+}
+
+func TestTunePIDDelayIdealDerivativeOutOfScopeFallsBack(t *testing.T) {
+	p := makePlant(t, []float64{1}, []float64{1, 3, 2})
+	if err := p.SetInputDelay([]float64{.2}); err != nil {
+		t.Fatal(err)
+	}
+	lft, err := p.PullDelaysToLFT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for family, want := range map[PidtuneType]string{PidtunePID: "sampled-frequency-only", PidtunePIDF: "nyquist-encirclement"} {
+		r, err := TunePID(context.Background(), lft, family, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
+		if err != nil {
+			t.Fatalf("%s: %v", family, err)
+		}
+		if r.Evidence.Stability != want {
+			t.Fatalf("%s: stability %q, want %q", family, r.Evidence.Stability, want)
+		}
+	}
+}
+
+func TestTunePIDDiscreteDelayPIDClosedLoopStable(t *testing.T) {
+	p, err := NewFromSlices(2, 1, 1, []float64{0.9, 0.2, 0, 0.7}, []float64{0, 1}, []float64{0.1, 0.05}, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetInputDelay([]float64{2}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := TunePID(context.Background(), p, PidtunePID, PIDTuningOptions{CrossoverFrequency: 0.5, PhaseMargin: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Evidence.Stability != "closed-loop-poles" {
+		t.Fatalf("stability %q", r.Evidence.Stability)
+	}
+	c := r.Controller
+	if c.IFormula != ForwardEuler || c.DFormula != ForwardEuler || c.Tf != 0 {
+		t.Fatalf("unexpected controller form %+v", c)
+	}
+	// P(z) = (0.05z-0.025)/((z-0.9)(z-0.7)z²); forward Euler PID
+	// C(z) = (Kp(z-1)h + Ki h² + Kd(z-1)²)/((z-1)h).
+	h := c.Dt
+	den := polyMulTest([]float64{1, -1.6, 0.63, 0, 0}, []float64{h, -h})
+	num := polyMulTest([]float64{0.05, -0.025}, []float64{c.Kd, c.Kp*h - 2*c.Kd, c.Kd - c.Kp*h + c.Ki*h*h})
+	char := slices.Clone(den)
+	for i := range num {
+		char[len(char)-len(num)+i] += num[i]
+	}
+	n := len(char) - 1
+	comp := mat.NewDense(n, n, nil)
+	for j := range n {
+		comp.Set(0, j, -char[j+1]/char[0])
+	}
+	for i := 1; i < n; i++ {
+		comp.Set(i, i-1, 1)
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(comp, mat.EigenNone) {
+		t.Fatal("eigen failed")
+	}
+	for _, z := range eig.Values(nil) {
+		if cmplx.Abs(z) >= 1 {
+			t.Fatalf("closed-loop pole %v outside unit circle (gains %+v)", z, c)
+		}
+	}
+}
+
+func polyMulTest(a, b []float64) []float64 {
+	out := make([]float64, len(a)+len(b)-1)
+	for i, x := range a {
+		for j, y := range b {
+			out[i+j] += x * y
+		}
+	}
+	return out
 }

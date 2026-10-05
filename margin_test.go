@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -991,8 +990,17 @@ func TestDiskMargin_LFTSystem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := DiskMargin(lft); !errors.Is(err, ErrContinuousInternalDelay) {
-		t.Fatalf("err = %v, want ErrContinuousInternalDelay", err)
+	dm, err := DiskMargin(lft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	L := func(w float64) complex128 {
+		s := complex(0, w)
+		return 10 * cmplx.Exp(-0.01*s) / (s + 1)
+	}
+	ms, _ := oraclePeakS(L, 1000)
+	if math.Abs(dm.PeakSensitivity-ms) > 1e-7*ms || dm.Alpha <= 0 {
+		t.Fatalf("Ms=%.12g alpha=%g, oracle Ms=%.12g", dm.PeakSensitivity, dm.Alpha, ms)
 	}
 }
 
