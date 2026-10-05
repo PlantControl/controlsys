@@ -2,10 +2,13 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -950,4 +953,399 @@ func TestZerosDetail_InvalidInput(t *testing.T) {
 	if _, err := sys.Zeros(); !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("Inf B error = %v, want ErrInvalidArgument", err)
 	}
+}
+
+func benchPIDLoop(b *testing.B) *System {
+	b.Helper()
+	pid, err := NewPID(0.8, 0.3, 0.2, 0.05, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	c, err := pid.System()
+	if err != nil {
+		b.Fatal(err)
+	}
+	plant, err := New(
+		mat.NewDense(3, 3, []float64{0, 1, 0, 0, 0, 1, -1, -3, -3}),
+		mat.NewDense(3, 1, []float64{0, 0, 1}),
+		mat.NewDense(1, 3, []float64{1, 0, 0}),
+		mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	loop, err := Series(c, plant)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return loop
+}
+
+func benchGridModels(b *testing.B) map[string]*System {
+	return map[string]*System{"PIDLoop": benchPIDLoop(b), "SS10x2x2": benchSysNonSym(10, 2, 2)}
+}
+
+func BenchmarkZerosGrid(b *testing.B) {
+	for _, name := range []string{"PIDLoop", "SS10x2x2"} {
+		sys := benchGridModels(b)[name]
+		b.Run("Zeros/"+name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := sys.Zeros(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run("DefaultFrequencyGrid/"+name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := sys.DefaultFrequencyGrid(0); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run("Bode/"+name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := sys.Bode(nil, 0); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run("FreqResponse/"+name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				omega, err := sys.DefaultFrequencyGrid(0)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if _, err := sys.FreqResponse(omega); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		if name == "PIDLoop" {
+			b.Run("Margin/"+name, func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, err := Margin(sys); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+type gridCorpusModel struct {
+	name string
+	sys  *System
+}
+
+func gridCorpus(t *testing.T) []gridCorpusModel {
+	t.Helper()
+	must := func(sys *System, err error) *System {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sys
+	}
+	rng := rand.New(rand.NewPCG(7, 25))
+	randDense := func(r, c int, scale float64) *mat.Dense {
+		d := mat.NewDense(max(r, 1), max(c, 1), nil)
+		if r == 0 || c == 0 {
+			return &mat.Dense{}
+		}
+		for i := range r {
+			for j := range c {
+				d.Set(i, j, scale*rng.NormFloat64())
+			}
+		}
+		return d
+	}
+	randSys := func(n, m, p int, dZero bool, dt float64) *System {
+		A := randDense(n, n, 1/math.Sqrt(float64(n)))
+		for i := range n {
+			if dt > 0 {
+				A.Set(i, i, A.At(i, i)*0.5)
+			} else {
+				A.Set(i, i, A.At(i, i)-1-float64(i)/4)
+			}
+		}
+		D := mat.NewDense(p, m, nil)
+		if !dZero {
+			D = randDense(p, m, 1)
+		}
+		return must(New(A, randDense(n, m, 1), randDense(p, n, 1), D, dt))
+	}
+
+	var out []gridCorpusModel
+	add := func(name string, sys *System) { out = append(out, gridCorpusModel{name, sys}) }
+
+	pid, err := NewPID(0.8, 0.3, 0.2, 0.05, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := must(pid.System())
+	plant := must(New(
+		mat.NewDense(3, 3, []float64{0, 1, 0, 0, 0, 1, -1, -3, -3}),
+		mat.NewDense(3, 1, []float64{0, 0, 1}),
+		mat.NewDense(1, 3, []float64{1, 0, 0}),
+		mat.NewDense(1, 1, nil), 0))
+	loop := must(Series(c, plant))
+	add("pid-loop", loop)
+	add("pid-closed", must(Feedback(loop, nil, -1)))
+	add("pid", c)
+	for _, n := range []int{2, 10, 40} {
+		add(fmt.Sprintf("nonsym-%d-2x2", n), benchSysNonSym(n, 2, 2))
+		add(fmt.Sprintf("nonsym-%d-3x2", n), benchSysNonSym(n, 2, 3))
+		add(fmt.Sprintf("integrator-%d-2x3", n), benchIntegratorMIMOSystem(n, 3, 2))
+	}
+	add("static-gain", must(NewGain(mat.NewDense(2, 2, []float64{1, 2, 3, 4}), 0)))
+	add("no-zeros", must(New(
+		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
+		mat.NewDense(2, 2, []float64{1, 0, 0, 1}),
+		mat.NewDense(2, 2, []float64{1, 0, 0, 1}),
+		mat.NewDense(2, 2, nil), 0)))
+	add("integrator", must(New(mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)))
+
+	for k := range 60 {
+		n := 1 + rng.IntN(45)
+		m := 1 + rng.IntN(4)
+		p := 1 + rng.IntN(4)
+		dt := 0.0
+		if k%3 == 2 {
+			dt = 0.1
+		}
+		add(fmt.Sprintf("rand-%d-n%d-m%d-p%d-dt%g", k, n, m, p, dt), randSys(n, m, p, k%2 == 0, dt))
+	}
+
+	desc := randSys(6, 2, 2, false, 0)
+	E := mat.NewDense(6, 6, nil)
+	for i := range 4 {
+		E.Set(i, i, 1+float64(i))
+		E.Set(i, i+1, 0.3)
+	}
+	add("descriptor-singular", must(NewDescriptor(desc.A, desc.B, desc.C, desc.D, E, 0)))
+	Einv := mat.NewDense(6, 6, nil)
+	for i := range 6 {
+		Einv.Set(i, i, 2+float64(i))
+		if i > 0 {
+			Einv.Set(i, i-1, 0.5)
+		}
+	}
+	add("descriptor-invertible", must(NewDescriptor(desc.A, desc.B, desc.C, desc.D, Einv, 0)))
+
+	delayed := randSys(5, 2, 2, true, 0)
+	if err := delayed.SetInputDelay([]float64{0.3, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := delayed.SetOutputDelay([]float64{0, 1.5}); err != nil {
+		t.Fatal(err)
+	}
+	add("io-delay", delayed)
+	dl := randSys(4, 1, 1, true, 0)
+	if err := dl.SetInputDelay([]float64{0.5}); err != nil {
+		t.Fatal(err)
+	}
+	add("internal-delay", must(Feedback(dl, nil, -1)))
+	dd := randSys(4, 1, 1, true, 0.1)
+	if err := dd.SetInputDelay([]float64{3}); err != nil {
+		t.Fatal(err)
+	}
+	add("discrete-delay", dd)
+	add("discrete-internal-delay", must(Feedback(dd, nil, -1)))
+	for _, n := range []int{31, 32, 33, 34, 35, 65} {
+		add(fmt.Sprintf("strictly-proper-siso-%d", n), randSys(n, 1, 1, true, 0))
+	}
+	for _, n := range []int{33, 34, 35} {
+		add(fmt.Sprintf("strictly-proper-2x2-%d", n), randSys(n, 2, 2, true, 0))
+	}
+	return out
+}
+
+// TestDefaultFrequencyGridBitIdentical pins DefaultFrequencyGrid and Zeros
+// bit for bit to a frozen copy of the v2.0.0 implementation on a broad corpus.
+func TestDefaultFrequencyGridBitIdentical(t *testing.T) {
+	sameBits := func(a, b float64) bool { return math.Float64bits(a) == math.Float64bits(b) }
+	for _, mdl := range gridCorpus(t) {
+		z, err := mdl.sys.Zeros()
+		if err != nil {
+			t.Fatalf("%s: %v", mdl.name, err)
+		}
+		wantZ, err := legacyZeros(mdl.sys)
+		if err != nil {
+			t.Fatalf("%s: legacy: %v", mdl.name, err)
+		}
+		if len(z) != len(wantZ) {
+			t.Errorf("%s: %d zeros, want %d", mdl.name, len(z), len(wantZ))
+		} else {
+			for i := range z {
+				if !sameBits(real(z[i]), real(wantZ[i])) || !sameBits(imag(z[i]), imag(wantZ[i])) {
+					t.Errorf("%s: zero[%d] = %v, want %v", mdl.name, i, z[i], wantZ[i])
+				}
+			}
+		}
+		for _, nPoints := range []int{0, 1, 37} {
+			omega, err := mdl.sys.DefaultFrequencyGrid(nPoints)
+			if err != nil {
+				t.Fatalf("%s: %v", mdl.name, err)
+			}
+			want, err := legacyDefaultFrequencyGrid(mdl.sys, nPoints)
+			if err != nil {
+				t.Fatalf("%s: legacy: %v", mdl.name, err)
+			}
+			if len(omega) != len(want) {
+				t.Fatalf("%s: len %d, want %d", mdl.name, len(omega), len(want))
+			}
+			for i := range omega {
+				if !sameBits(omega[i], want[i]) {
+					t.Errorf("%s/%d: omega[%d] = %v, want %v", mdl.name, nPoints, i, omega[i], want[i])
+				}
+			}
+		}
+	}
+}
+
+func legacyDefaultFrequencyGrid(sys *System, nPoints int) ([]float64, error) {
+	if nPoints <= 0 {
+		nPoints = 200
+	}
+	poles, err := sys.Poles()
+	if err != nil {
+		return nil, err
+	}
+	zeros, err := legacyZeros(sys)
+	if err != nil {
+		return nil, err
+	}
+	roots := append(append([]complex128{}, poles...), zeros...)
+	wMin, wMax := autoFreqRange(sys, roots, systemDelays(sys))
+	omega := logspace(math.Log10(wMin), math.Log10(wMax), nPoints)
+	if nPoints > 1 {
+		omega[nPoints-1] = wMax
+	}
+	return omega, nil
+}
+
+func legacyZeros(sys *System) ([]complex128, error) {
+	sys, err := zeroInternalDelays(sys)
+	if err != nil {
+		return nil, err
+	}
+	n, m, p := sys.Dims()
+	switch {
+	case m == 0 || p == 0 || n == 0:
+		return nil, nil
+	case sys.IsDescriptor():
+		return legacyDescriptorZeros(sys)
+	}
+	return legacyMimoZeros(sys)
+}
+
+func legacyDescriptorZeros(sys *System) ([]complex128, error) {
+	n, m, p := sys.Dims()
+	var svd mat.SVD
+	if !svd.Factorize(sys.E, mat.SVDFull) {
+		return nil, ErrSingularTransform
+	}
+	sv := svd.Values(nil)
+	tol := float64(n) * eps() * sv[0]
+	r := 0
+	for r < n && sv[r] > tol {
+		r++
+	}
+	if r == 0 {
+		return nil, nil
+	}
+	var U, V mat.Dense
+	svd.UTo(&U)
+	svd.VTo(&V)
+	var At, tmp, Bt, Ct mat.Dense
+	tmp.Mul(U.T(), sys.A)
+	At.Mul(&tmp, &V)
+	Bt.Mul(U.T(), sys.B)
+	Ct.Mul(sys.C, &V)
+	for i := range r {
+		s := 1 / sv[i]
+		for j := range n {
+			At.Set(i, j, At.At(i, j)*s)
+		}
+		for j := range m {
+			Bt.Set(i, j, Bt.At(i, j)*s)
+		}
+	}
+	q := n - r
+	mh, ph := m+q, p+q
+	at, bt, ct := At.RawMatrix(), Bt.RawMatrix(), Ct.RawMatrix()
+	dh := make([]float64, ph*mh)
+	copyBlock(dh, mh, 0, 0, at.Data, at.Stride, r, r, q, q)
+	copyBlock(dh, mh, 0, q, bt.Data, bt.Stride, r, 0, q, m)
+	copyBlock(dh, mh, q, 0, ct.Data, ct.Stride, 0, r, p, q)
+	dRaw := sys.D.RawMatrix()
+	copyBlock(dh, mh, q, q, dRaw.Data, dRaw.Stride, 0, 0, p, m)
+	ah := make([]float64, r*r)
+	bh := make([]float64, r*mh)
+	ch := make([]float64, ph*r)
+	copyBlock(ah, r, 0, 0, at.Data, at.Stride, 0, 0, r, r)
+	copyBlock(bh, mh, 0, 0, at.Data, at.Stride, 0, r, r, q)
+	copyBlock(bh, mh, 0, q, bt.Data, bt.Stride, 0, 0, r, m)
+	copyBlock(ch, r, 0, 0, at.Data, at.Stride, r, 0, q, r)
+	copyBlock(ch, r, q, 0, ct.Data, ct.Stride, 0, 0, p, r)
+	aug := &System{A: mat.NewDense(r, r, ah), B: mat.NewDense(r, mh, bh), C: mat.NewDense(ph, r, ch), D: mat.NewDense(ph, mh, dh), Dt: sys.Dt}
+	return legacyMimoZeros(aug)
+}
+
+func legacyMimoZeros(sys *System) ([]complex128, error) {
+	n, m, p := sys.Dims()
+	if m == p {
+		var luD mat.LU
+		luD.Factorize(sys.D)
+		if !nearZero(luD.Det()) {
+			var DinvC mat.Dense
+			if err := luD.SolveTo(&DinvC, false, sys.C); err == nil {
+				var BDinvC, M mat.Dense
+				BDinvC.Mul(sys.B, &DinvC)
+				M.Sub(sys.A, &BDinvC)
+				var eig mat.Eigen
+				if !eig.Factorize(&M, mat.EigenNone) {
+					return nil, ErrSchurFailed
+				}
+				zeros := eig.Values(nil)
+				sortZeros(zeros)
+				return zeros, nil
+			}
+		}
+	}
+	afData, bfData, nu, _ := zerosStaircase(sys.A, sys.B, sys.C, sys.D, n, m, p)
+	if nu == 0 {
+		return nil, nil
+	}
+	alphar := make([]float64, nu)
+	alphai := make([]float64, nu)
+	beta := make([]float64, nu)
+	work := make([]float64, 1)
+	impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, nu, afData, nu, bfData, nu,
+		alphar, alphai, beta, nil, 1, nil, 1, work, -1)
+	lwork := int(work[0])
+	work = make([]float64, lwork)
+	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, nu, afData, nu, bfData, nu,
+		alphar, alphai, beta, nil, 1, nil, 1, work, lwork) {
+		return nil, ErrSchurFailed
+	}
+	betaTol := float64(nu) * eps()
+	var zeros []complex128
+	for j := range nu {
+		if math.Abs(beta[j]) <= betaTol {
+			continue
+		}
+		re := alphar[j] / beta[j]
+		im := alphai[j] / beta[j]
+		if math.Abs(im) < math.Abs(re)*eps()*100 {
+			im = 0
+		}
+		zeros = append(zeros, complex(re, im))
+	}
+	sortZeros(zeros)
+	return zeros, nil
 }

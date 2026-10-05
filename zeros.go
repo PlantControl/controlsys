@@ -188,18 +188,9 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 		return &ZerosResult{Rank: rank}, nil
 	}
 
-	alphar := make([]float64, nu)
-	alphai := make([]float64, nu)
-	beta := make([]float64, nu)
-
-	work := make([]float64, 1)
-	impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, nu,
-		afData, nu, bfData, nu,
-		alphar, alphai, beta,
-		nil, 1, nil, 1,
-		work, -1)
-	lwork := int(work[0])
-	work = make([]float64, lwork)
+	lwork := dggevEigenvaluesWorkLen(nu)
+	buf := make([]float64, 3*nu+lwork)
+	alphar, alphai, beta, work := buf[:nu], buf[nu:2*nu], buf[2*nu:3*nu], buf[3*nu:]
 
 	ok := impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, nu,
 		afData, nu, bfData, nu,
@@ -225,6 +216,23 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 	}
 	sortZeros(zeros)
 	return &ZerosResult{Zeros: zeros, Rank: rank}, nil
+}
+
+// dggevEigenvaluesWorkLen returns the Dggev workspace length for an
+// eigenvalues-only n×n pencil. The optimal size includes Dormqr's 64×64
+// block-reflector buffer, but while k ≤ n stays within the Dgeqrf crossover
+// and the Dormqr block size both run unblocked whatever lwork is, so the
+// minimum 8n executes the same arithmetic.
+func dggevEigenvaluesWorkLen(n int) int {
+	nx := impl.Ilaenv(3, "DGEQRF", " ", n, n, -1, -1)
+	nb := min(64, impl.Ilaenv(1, "DORMQR", "LT", n, n, n, -1))
+	if n <= nx && n <= nb {
+		return max(1, 8*n)
+	}
+	work := make([]float64, 1)
+	impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, n,
+		nil, n, nil, n, nil, nil, nil, nil, 1, nil, 1, work, -1)
+	return int(work[0])
 }
 
 func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64, nu, rank int) {
