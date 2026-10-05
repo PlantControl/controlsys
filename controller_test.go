@@ -259,7 +259,7 @@ func TestLqi_MatchesLqgServo(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertMatEqual(t, "Kx", subDense(res.K, 0, 0, m, n), lqg.K, 1e-10)
-		assertMatEqual(t, "Ki", subDense(res.K, 0, n, m, p), lqg.Ki, 1e-10)
+		assertMatEqual(t, "Ki", subDense(res.K, 0, n, m, p), lqg.ki, 1e-10)
 		assertMatEqual(t, "X", res.X, lqg.Xc, 1e-10)
 	}
 }

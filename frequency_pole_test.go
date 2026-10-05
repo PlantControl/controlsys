@@ -132,7 +132,11 @@ func TestFreqResponseAtPoleExplicitAndDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, r := range ar.Responses {
+	for idx := range arr.Len() {
+		r, err := ar.ResponseFlat(idx)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for k, w := range contW {
 			want := contOracle(complex(0, w))
 			for i := range want {
