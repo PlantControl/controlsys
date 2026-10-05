@@ -505,31 +505,40 @@ func TestBandwidth_Discrete(t *testing.T) {
 // === Phase 4: DiskMargin tests ===
 
 // L(s) = 10/(s+1): S = (s+1)/(s+11), Ms ≈ 1.0
+// L = k/(s+1): |S−1/2|² = (ω²+(1−k)²)/(4(ω²+(1+k)²)) rises to 1/4, so the
+// balanced disk margin is exactly 2 (GM [0, Inf], PM 90°), while
+// ‖S‖∞ = 1 gives the σ = 1 margin 1 (GM [1/2, Inf], PM 60°).
 func TestDiskMargin_StableFirstOrder(t *testing.T) {
-	sys, err := New(
-		mat.NewDense(1, 1, []float64{-1}),
-		mat.NewDense(1, 1, []float64{10}),
-		mat.NewDense(1, 1, []float64{1}),
-		mat.NewDense(1, 1, []float64{0}),
-		0,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	dm, err := DiskMargin(sys)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if dm.PeakSensitivity > 1.1 {
-		t.Errorf("Ms = %v, want ≤ ~1.0", dm.PeakSensitivity)
-	}
-	if dm.Alpha < 0.9 {
-		t.Errorf("Alpha = %v, want ~1.0", dm.Alpha)
-	}
-	if dm.PhaseMargin < 50 {
-		t.Errorf("disk PM = %v, want ≥ 50 deg", dm.PhaseMargin)
+	for _, k := range []float64{0.5, 10} {
+		sys, err := New(
+			mat.NewDense(1, 1, []float64{-1}),
+			mat.NewDense(1, 1, []float64{k}),
+			mat.NewDense(1, 1, []float64{1}),
+			mat.NewDense(1, 1, []float64{0}),
+			0,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dm, err := DiskMargin(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(dm.Alpha-2) > 1e-9 || dm.GainMargin[0] > 1e-9 || dm.GainMargin[1] < 1e9 ||
+			math.Abs(dm.PhaseMargin-90) > 1e-7 {
+			t.Errorf("k=%g: %+v, want alpha 2, GM [0 Inf], PM 90", k, dm)
+		}
+		if math.Abs(dm.PeakSensitivity-1) > 1e-9 {
+			t.Errorf("k=%g: Ms=%g, want 1", k, dm.PeakSensitivity)
+		}
+		dm, err = DiskMarginSkew(sys, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(dm.Alpha-1) > 1e-9 || math.Abs(dm.GainMargin[0]-0.5) > 1e-9 || dm.GainMargin[1] < 1e8 ||
+			math.Abs(dm.PhaseMargin-60) > 1e-6 {
+			t.Errorf("k=%g sigma=1: %+v, want alpha 1, GM [0.5 Inf], PM 60", k, dm)
+		}
 	}
 }
 
@@ -836,9 +845,9 @@ func TestBandwidth_Integrator(t *testing.T) {
 	}
 }
 
-// DiskMargin with python-control verified values: L = tf(25, [1,10,10,10])
-func TestDiskMargin_PythonControl(t *testing.T) {
-	// L(s) = 25/(s^3+10s^2+10s+10)
+// MATLAB diskmargin doc, L = tf(25,[1 10 10 10]): GainMargin for skews
+// -2, 0, 2 printed to 4 decimals; python-control gives DM 0.46, DPM 25.8°.
+func TestDiskMargin_MATLABSkewExample(t *testing.T) {
 	sys, err := NewFromSlices(3, 1, 1,
 		[]float64{0, 1, 0, 0, 0, 1, -10, -10, -10},
 		[]float64{0, 0, 1},
@@ -847,26 +856,32 @@ func TestDiskMargin_PythonControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
+	for _, tc := range []struct {
+		sigma float64
+		gm    [2]float64
+	}{{-2, [2]float64{0.4013, 1.3745}}, {0, [2]float64{0.6273, 1.5942}}, {2, [2]float64{0.7717, 1.7247}}} {
+		dm, err := DiskMarginSkew(sys, tc.sigma)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k := range 2 {
+			if math.Abs(dm.GainMargin[k]-tc.gm[k]) > 6e-5 {
+				t.Errorf("sigma=%g: GainMargin=%v, MATLAB %v", tc.sigma, dm.GainMargin, tc.gm)
+			}
+		}
+		if dm.Skew != tc.sigma {
+			t.Errorf("Skew=%g, want %g", dm.Skew, tc.sigma)
+		}
+	}
 	dm, err := DiskMargin(sys)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// python-control: DM=0.46, DGM=4.05 dB, DPM=25.8 deg, peak at ~1.94 rad/s
-	// Our implementation computes α differently (1/Ms vs full disk), so we allow
-	// wider tolerance but still verify the values are in the correct ballpark
-	if math.Abs(dm.Alpha-0.40) > 0.10 {
-		t.Errorf("Alpha = %v, want ~0.40 (python-control: 0.46)", dm.Alpha)
+	if math.Abs(dm.Alpha-0.46) > 0.005 || math.Abs(dm.PhaseMargin-25.8) > 0.05 {
+		t.Errorf("Alpha=%g PM=%g, want 0.46, 25.8", dm.Alpha, dm.PhaseMargin)
 	}
-	if math.Abs(dm.GainMarginDB[1]-3.5) > 1.0 {
-		t.Errorf("DGM_high = %v dB, want ~3.5 (python-control: 4.05)", dm.GainMarginDB[1])
-	}
-	if math.Abs(dm.PhaseMargin-23.0) > 4.0 {
-		t.Errorf("DPM = %v deg, want ~23 (python-control: 25.8)", dm.PhaseMargin)
-	}
-	if dm.PeakFreq < 1.0 || dm.PeakFreq > 3.0 {
-		t.Errorf("PeakFreq = %v, want ~1.94", dm.PeakFreq)
+	if math.Abs(dm.PhaseMargin-2*math.Atan(dm.Alpha/2)*180/math.Pi) > 1e-12 {
+		t.Errorf("PM=%g, want 2·atan(α/2)", dm.PhaseMargin)
 	}
 }
 
@@ -1199,14 +1214,204 @@ func TestDiskMargin_DiscreteLoopDelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ms := 0.0
+	ms, peak := 0.0, 0.0
 	for k := range 200001 {
 		z := cmplx.Exp(complex(0, float64(k)/200000*math.Pi))
 		l := 0.3 / (z - 0.6) / (z * z)
 		ms = math.Max(ms, cmplx.Abs(1/(1+l)))
+		peak = math.Max(peak, cmplx.Abs(1/(1+l)-0.5))
 	}
-	if math.Abs(dm.PeakSensitivity-ms) > 1e-6*ms || math.Abs(dm.Alpha-1/ms) > 1e-6/ms {
-		t.Fatalf("Ms = %.12g alpha = %.12g, want Ms %.12g alpha %.12g", dm.PeakSensitivity, dm.Alpha, ms, 1/ms)
+	if math.Abs(dm.PeakSensitivity-ms) > 1e-6*ms || math.Abs(dm.Alpha-1/peak) > 1e-6/peak {
+		t.Fatalf("Ms = %.12g alpha = %.12g, want Ms %.12g alpha %.12g", dm.PeakSensitivity, dm.Alpha, ms, 1/peak)
+	}
+}
+
+// diskPeakOracle returns sup_ω |1/(1+L(e^{jω})) + c| on a dense grid of
+// [0, wmax] refined by ternary search.
+func diskPeakOracle(l func(w float64) complex128, wmax, c float64) (float64, float64) {
+	f := func(w float64) float64 { return cmplx.Abs(1/(1+l(w)) + complex(c, 0)) }
+	const n = 200000
+	best, bw := 0.0, 0.0
+	for i := range n + 1 {
+		w := wmax * float64(i) / n
+		if v := f(w); v > best {
+			best, bw = v, w
+		}
+	}
+	a, b := math.Max(bw-wmax/n, 0), math.Min(bw+wmax/n, wmax)
+	for range 200 {
+		m1, m2 := a+(b-a)/3, b-(b-a)/3
+		if f(m1) < f(m2) {
+			a = m1
+		} else {
+			b = m2
+		}
+	}
+	w := (a + b) / 2
+	return f(w), w
+}
+
+// L = C(sI−A)⁻¹B + D with non-symmetric A and D ≠ 0, continuous and ZOH
+// discrete, against a hand-evaluated frequency response of 1/(1+L) + c.
+func TestDiskMarginSkew_DenseGridOracle(t *testing.T) {
+	A := []float64{-1, 2, -0.5, -3}
+	B := []float64{1, 0.5}
+	C := []float64{2, -1}
+	const d = 0.3
+	at := func(s complex128) complex128 {
+		a11, a12, a21, a22 := s-complex(A[0], 0), complex(-A[1], 0), complex(-A[2], 0), s-complex(A[3], 0)
+		det := a11*a22 - a12*a21
+		x1 := (a22*complex(B[0], 0) - a12*complex(B[1], 0)) / det
+		x2 := (a11*complex(B[1], 0) - a21*complex(B[0], 0)) / det
+		return complex(C[0], 0)*x1 + complex(C[1], 0)*x2 + d
+	}
+	csys, err := NewFromSlices(2, 1, 1, A, B, C, []float64{d}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const dt = 0.2
+	dsys, err := csys.DiscretizeZOH(dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad, bd, cd := dsys.A.RawMatrix().Data, dsys.B.RawMatrix().Data, dsys.C.RawMatrix().Data
+	dat := func(z complex128) complex128 {
+		a11, a12, a21, a22 := z-complex(ad[0], 0), complex(-ad[1], 0), complex(-ad[2], 0), z-complex(ad[3], 0)
+		det := a11*a22 - a12*a21
+		x1 := (a22*complex(bd[0], 0) - a12*complex(bd[1], 0)) / det
+		x2 := (a11*complex(bd[1], 0) - a21*complex(bd[0], 0)) / det
+		return complex(cd[0], 0)*x1 + complex(cd[1], 0)*x2 + d
+	}
+	for _, tc := range []struct {
+		name string
+		sys  *System
+		l    func(w float64) complex128
+		wmax float64
+	}{
+		{"continuous", csys, func(w float64) complex128 { return at(complex(0, w)) }, 1e3},
+		{"discrete", dsys, func(w float64) complex128 { return dat(cmplx.Exp(complex(0, w*dt))) }, math.Pi / dt},
+	} {
+		for _, sigma := range []float64{-2, -0.5, 0, 1, 2} {
+			dm, err := DiskMarginSkew(tc.sys, sigma)
+			if err != nil {
+				t.Fatal(err)
+			}
+			peak, wp := diskPeakOracle(tc.l, tc.wmax, (sigma-1)/2)
+			if tc.name == "continuous" {
+				peak = math.Max(peak, math.Abs(1/(1+d)+(sigma-1)/2))
+			}
+			if math.Abs(dm.Alpha-1/peak) > 1e-8/peak {
+				t.Errorf("%s sigma=%g: alpha=%.12g, oracle %.12g", tc.name, sigma, dm.Alpha, 1/peak)
+			}
+			if got := cmplx.Abs(1/(1+tc.l(dm.Frequency)) + complex((sigma-1)/2, 0)); !math.IsInf(dm.Frequency, 1) &&
+				math.Abs(got-peak) > 1e-8*peak {
+				t.Errorf("%s sigma=%g: |S+c| at Frequency %g is %.12g, oracle peak %.12g at %g", tc.name, sigma, dm.Frequency, got, peak, wp)
+			}
+			ms, _ := diskPeakOracle(tc.l, tc.wmax, 0)
+			if math.Abs(dm.PeakSensitivity-ms) > 1e-8*ms {
+				t.Errorf("%s: Ms=%.12g, oracle %.12g", tc.name, dm.PeakSensitivity, ms)
+			}
+			gm, pm := diskMarginOracleGM(dm.Alpha, sigma)
+			if math.Abs(dm.GainMargin[0]-gm[0]) > 1e-9 || math.Abs(dm.PhaseMargin-pm) > 1e-7 ||
+				(math.IsInf(gm[1], 1) != math.IsInf(dm.GainMargin[1], 1)) ||
+				(!math.IsInf(gm[1], 1) && math.Abs(dm.GainMargin[1]-gm[1]) > 1e-9*gm[1]) {
+				t.Errorf("%s sigma=%g: GM %v PM %g, oracle %v %g", tc.name, sigma, dm.GainMargin, dm.PhaseMargin, gm, pm)
+			}
+		}
+	}
+}
+
+// diskMarginOracleGM finds the gain interval and phase arc around 1 in
+// {F(δ): |δ| ≤ 1}, F = (1 + aδ)/(1 − bδ), by scanning membership
+// δ = (z−1)/(a + bz) outward from z = 1 and bisecting the first exit.
+func diskMarginOracleGM(alpha, sigma float64) ([2]float64, float64) {
+	a, b := alpha*(1-sigma)/2, alpha*(1+sigma)/2
+	in := func(z complex128) bool { return cmplx.Abs((z-1)/(complex(a, 0)+complex(b, 0)*z)) <= 1 }
+	edge := func(p func(float64) complex128, x0, x1 float64, next func(float64) float64) (float64, bool) {
+		lo := x0
+		for hi := next(lo); ; lo, hi = hi, next(hi) {
+			if (x1 > x0 && hi >= x1) || (x1 < x0 && hi <= x1) {
+				return x1, false
+			}
+			if !in(p(hi)) {
+				for range 200 {
+					mid := (lo + hi) / 2
+					if in(p(mid)) {
+						lo = mid
+					} else {
+						hi = mid
+					}
+				}
+				return lo, true
+			}
+		}
+	}
+	onReal := func(g float64) complex128 { return complex(g, 0) }
+	gm := [2]float64{0, math.Inf(1)}
+	if g, ok := edge(onReal, 1, 0, func(g float64) float64 { return g - 1e-4 }); ok {
+		gm[0] = g
+	}
+	if g, ok := edge(onReal, 1, 1e12, func(g float64) float64 { return g * (1 + 1e-4) }); ok {
+		gm[1] = g
+	}
+	th, _ := edge(func(th float64) complex128 { return cmplx.Exp(complex(0, th)) }, 0, math.Pi,
+		func(th float64) float64 { return th + 1e-4 })
+	return gm, th * 180 / math.Pi
+}
+
+// dm2gm doc examples, σ = 1 and σ = 0 closed forms, and the exterior-disk
+// regime α(1+σ)/2 > 1 against membership bisection.
+func TestDiskGainPhaseMargin(t *testing.T) {
+	gm, pm := diskGainPhaseMargin(0.5, 0)
+	if math.Abs(gm[1]-1.6667) > 5e-5 || math.Abs(pm-28.0725) > 5e-5 {
+		t.Errorf("alpha 0.5 sigma 0: GM %v PM %g, MATLAB 1.6667 28.0725", gm, pm)
+	}
+	gm, pm = diskGainPhaseMargin(0.6, 0.75)
+	if math.Abs(gm[0]-0.6066) > 5e-5 || math.Abs(gm[1]-2.2632) > 5e-5 || math.Abs(pm-34.2267) > 5e-5 {
+		t.Errorf("alpha 0.6 sigma 0.75: GM %v PM %g, MATLAB [0.6066 2.2632] 34.2267", gm, pm)
+	}
+	for _, alpha := range []float64{0.1, 0.7, 1.5} {
+		_, pm := diskGainPhaseMargin(alpha, 1)
+		if math.Abs(pm-2*math.Asin(alpha/2)*180/math.Pi) > 1e-12 {
+			t.Errorf("sigma 1 alpha %g: PM %g, want 2asin(α/2)", alpha, pm)
+		}
+		gm, pm = diskGainPhaseMargin(alpha, 0)
+		if math.Abs(pm-2*math.Atan(alpha/2)*180/math.Pi) > 1e-12 || math.Abs(gm[0]*gm[1]-1) > 1e-12 {
+			t.Errorf("sigma 0 alpha %g: GM %v PM %g, want balanced, 2atan(α/2)", alpha, gm, pm)
+		}
+	}
+	for _, tc := range [][2]float64{{0.5, 0}, {1.2, -3}, {3, -2}, {1.5, 1}, {2, 0}, {2.5, 0}, {3, 0.5}, {6, 0.2}, {1.8, 1.5}, {0.4, 4}, {0.3, 9}} {
+		gm, pm := diskGainPhaseMargin(tc[0], tc[1])
+		ogm, opm := diskMarginOracleGM(tc[0], tc[1])
+		if math.Abs(gm[0]-ogm[0]) > 1e-9 || math.Abs(pm-opm) > 1e-7 || math.IsInf(gm[1], 1) != math.IsInf(ogm[1], 1) ||
+			(!math.IsInf(gm[1], 1) && math.Abs(gm[1]-ogm[1]) > 1e-9*ogm[1]) {
+			t.Errorf("alpha %g sigma %g: GM %v PM %g, oracle %v %g", tc[0], tc[1], gm, pm, ogm, opm)
+		}
+	}
+}
+
+func TestDiskMarginSkew_Unstable(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		a := 1.0
+		if dt > 0 {
+			a = 1.5
+		}
+		sys, err := NewFromSlices(1, 1, 1, []float64{a}, []float64{1}, []float64{0.2}, []float64{0}, dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sigma := range []float64{0, 1, -1} {
+			dm, err := DiskMarginSkew(sys, sigma)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dm.Alpha != 0 || dm.GainMargin != [2]float64{1, 1} || dm.PhaseMargin != 0 || !math.IsInf(dm.PeakSensitivity, 1) {
+				t.Errorf("dt=%g sigma=%g: %+v, want unstable margins", dt, sigma, dm)
+			}
+		}
+	}
+	if _, err := DiskMarginSkew(nil, math.NaN()); err == nil {
+		t.Error("NaN skew accepted")
 	}
 }
 

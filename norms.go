@@ -228,14 +228,14 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) []float64 {
 	return hsv
 }
 
-// HinfNorm computes the H∞ norm (peak gain) of a stable LTI system
-// and the frequency at which it occurs.
+// HinfNorm computes the H∞ norm (peak gain) of an LTI system and the
+// frequency at which it occurs.
 //
 // Unstable models, including poles on the stability boundary, return
-// ErrUnstable. MATLAB hinfnorm
+// norm = omega = +Inf and a nil error, as MATLAB hinfnorm
 // (https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfnorm.html)
-// returns ninf = fpeak = Inf instead. Use Norm(sys, math.Inf(1)) for the
-// L∞ peak gain of an unstable model.
+// does. Use Norm(sys, math.Inf(1)) for the L∞ peak gain of an unstable
+// model.
 //
 // Input, output and I/O delays do not change the norm. Discrete internal
 // delays are absorbed exactly; continuous internal-delay models return
@@ -258,6 +258,9 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 	}
 
 	if err := policy.requireStable(ErrUnstable); err != nil {
+		if errors.Is(err, ErrUnstable) {
+			return math.Inf(1), math.Inf(1), nil
+		}
 		return 0, 0, err
 	}
 	return peakGain(sys)

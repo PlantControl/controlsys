@@ -531,24 +531,43 @@ func (l *delayLoop) stableClosedLoop() (bool, error) {
 	return res.stable, err
 }
 
-// delayLoopPeakSensitivity returns the closed-loop stability of 1/(1+L) and,
-// when stable, ‖S‖∞ with its frequency. The grid peak is refined by golden
-// section; beyond the grid |S| <= 1/(1-tail), which is within 0.1% of the
-// high-frequency limit 1/(1-tailLimit) reported with frequency +Inf.
-func (l *delayLoop) peakSensitivity() (stable bool, peak, wPeak float64, err error) {
+type sensitivityPeak struct{ peak, w float64 }
+
+// sensitivityPeaks returns the closed-loop stability of S = 1/(1+L) and,
+// when stable, sup_ω |S(jω) + c| with its frequency for each shift c. The
+// grid peak is refined by golden section. Beyond the grid |L| <= t with t
+// within 0.1% of tailLimit, and S maps |L| <= t into the disk of centre
+// 1/(1−t²) and radius t/(1−t²), so |S + c| <= |1/(1−t²) + c| + t/(1−t²);
+// that limit at t = tailLimit is reported with frequency +Inf when it
+// exceeds the grid peak.
+func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []sensitivityPeak, err error) {
 	res, err := l.nyquist(1e-3)
 	if err != nil || !res.stable {
-		return false, 0, 0, err
+		return false, nil, err
 	}
-	best := 0
-	for k, v := range res.f {
-		if cmplx.Abs(v) < cmplx.Abs(res.f[best]) {
-			best = k
+	peaks = make([]sensitivityPeak, len(shifts))
+	t := l.tailLimit
+	for i, c := range shifts {
+		g := func(f complex128) float64 { return cmplx.Abs(1/f + complex(c, 0)) }
+		best := 0
+		for k, v := range res.f {
+			if g(v) > g(res.f[best]) {
+				best = k
+			}
 		}
+		wPeak, peak := goldenMax(res.w[max(best-1, 0)], res.w[min(best+1, len(res.w)-1)],
+			res.w[best], g(res.f[best]), func(w float64) float64 { return g(1 + l.at(w)) })
+		if inf := math.Abs(1/(1-t*t)+c) + t/(1-t*t); inf > peak {
+			peak, wPeak = inf, math.Inf(1)
+		}
+		peaks[i] = sensitivityPeak{peak, wPeak}
 	}
-	a, b := res.w[max(best-1, 0)], res.w[min(best+1, len(res.w)-1)]
-	g := func(w float64) float64 { return cmplx.Abs(1 + l.at(w)) }
-	wPeak, minF := res.w[best], cmplx.Abs(res.f[best])
+	return true, peaks, nil
+}
+
+// goldenMax refines a maximum of g bracketed by [a, b], starting from the
+// sample (w0, g0), by golden-section search.
+func goldenMax(a, b, w0, g0 float64, g func(float64) float64) (float64, float64) {
 	const phi = 0.6180339887498949
 	x1, x2 := b-phi*(b-a), a+phi*(b-a)
 	f1, f2 := g(x1), g(x2)
@@ -556,7 +575,7 @@ func (l *delayLoop) peakSensitivity() (stable bool, peak, wPeak float64, err err
 		if b-a <= 1e-12*max(1, b) {
 			break
 		}
-		if f1 < f2 {
+		if f1 > f2 {
 			b, x2, f2 = x2, x1, f1
 			x1 = b - phi*(b-a)
 			f1 = g(x1)
@@ -567,13 +586,9 @@ func (l *delayLoop) peakSensitivity() (stable bool, peak, wPeak float64, err err
 		}
 	}
 	for _, c := range []struct{ w, f float64 }{{x1, f1}, {x2, f2}} {
-		if c.f < minF {
-			wPeak, minF = c.w, c.f
+		if c.f > g0 {
+			w0, g0 = c.w, c.f
 		}
 	}
-	peak = 1 / minF
-	if inf := 1 / (1 - l.tailLimit); inf > peak {
-		return true, inf, math.Inf(1), nil
-	}
-	return true, peak, wPeak, nil
+	return w0, g0
 }
