@@ -7,6 +7,7 @@ import (
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/lapack"
 	gonumLapack "plantcontrol.org/v1/gonum/lapack/gonum"
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -105,6 +106,8 @@ func (tf *TransferFunc) EvalMulti(freqs []complex128) [][][]complex128 {
 	return result
 }
 
+// TransferFuncOpts tolerances are absolute and apply to the balanced
+// realization (see TransferFunction); zero selects a norm-relative default.
 type TransferFuncOpts struct {
 	ControllabilityTol float64
 	ObservabilityTol   float64
@@ -130,6 +133,14 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // TransferFunction returns the rational transfer matrix with every external
 // delay (IODelay, InputDelay, OutputDelay) folded into TransferFunc.Delay.
 // Internal (LFT) delays have no TransferFunc form and are rejected.
+//
+// A is first balanced by an exact power-of-two similarity, which removes
+// accuracy loss caused by poor state scaling. The polynomial form itself
+// stays ill-conditioned for high order or wide dynamic range: coefficients
+// of e.g. a 30-state chain spanning 1e-3..1e3 rad/s, or a discrete model
+// with poles clustered near z = 1, can evaluate with O(1) relative error.
+// As MATLAB advises ("Using the Right Model Representation"), evaluate
+// such models with EvalFr/FreqResponse on the state-space form instead.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
 	res, err := sys.rationalTransferFunction(opts)
 	if err != nil {
@@ -197,7 +208,8 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return c.result(0), nil
 	}
 
-	stair := ControllabilityStaircase(c.sys.A, c.sys.B, c.sys.C, c.opts.ControllabilityTol)
+	a, b, cm := c.balancedABC()
+	stair := ControllabilityStaircase(a, b, cm, c.opts.ControllabilityTol)
 	ncont := stair.NCont
 
 	if ncont == 0 {
@@ -207,6 +219,38 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 
 	totalOrder := c.convertDynamicRows(stair, ncont)
 	return c.result(totalOrder), nil
+}
+
+// balancedABC returns D⁻¹AD, D⁻¹B, CD for the exact power-of-two scaling D
+// from Dgebal. The transfer function is unchanged, but the orthogonal
+// staircase and Hessenberg reductions are only normwise backward stable, so
+// without it small entries of badly scaled A (Padé cascades, stiff chains)
+// are swamped and coefficients lose most of their digits.
+func (c rowRealizationConverter) balancedABC() (a, b, cm *mat.Dense) {
+	n, m, p := c.n, c.m, c.p
+	aData := make([]float64, n*n)
+	raw := c.sys.A.RawMatrix()
+	copyStrided(aData, n, raw.Data, raw.Stride, n, n)
+	scale := make([]float64, n)
+	impl.Dgebal(lapack.Scale, n, aData, n, scale)
+	b = mat.NewDense(n, m, nil)
+	b.Copy(c.sys.B)
+	cm = mat.NewDense(p, n, nil)
+	cm.Copy(c.sys.C)
+	bRaw, cRaw := b.RawMatrix(), cm.RawMatrix()
+	for i, d := range scale {
+		if d == 1 {
+			continue
+		}
+		inv := 1 / d
+		for j := range m {
+			bRaw.Data[i*bRaw.Stride+j] *= inv
+		}
+		for r := range p {
+			cRaw.Data[r*cRaw.Stride+i] *= d
+		}
+	}
+	return mat.NewDense(n, n, aData), b, cm
 }
 
 func (c rowRealizationConverter) convertDynamicRows(stair *StaircaseResult, ncont int) int {
