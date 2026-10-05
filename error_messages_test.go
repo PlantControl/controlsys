@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -97,5 +98,60 @@ func TestGeneralizedClosedLoopErrorsUseCallerOp(t *testing.T) {
 		if !errors.Is(err, ErrSignalNotFound) || !strings.HasPrefix(err.Error(), op) || strings.Count(err.Error(), "GeneralizedClosedLoop.") != 1 {
 			t.Errorf("err = %v, want single prefix %q and ErrSignalNotFound", err, op)
 		}
+	}
+}
+
+func TestAnalysisErrorsWrapSentinelWithOpPrefix(t *testing.T) {
+	singular, err := NewDescriptor(
+		mat.NewDense(2, 2, []float64{-1, 0.5, 0, 0}),
+		mat.NewDense(2, 1, []float64{1, 1}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(2, 2, []float64{1, 0, 0, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{0}), mat.NewDense(1, 1, []float64{1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.OutputDelay = []float64{1}
+	one, err := NewGain(mat.NewDense(1, 1, []float64{1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	neutral, err := Feedback(h, one, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := &mat.Dense{}
+	tests := []struct {
+		name   string
+		prefix string
+		want   error
+		call   func() error
+	}{
+		{"Care no states", "Care: ", ErrDimensionMismatch, func() error { _, err := Care(empty, empty, empty, empty, nil); return err }},
+		{"Dare no states", "Dare: ", ErrDimensionMismatch, func() error { _, err := Dare(empty, empty, empty, empty, nil); return err }},
+		{"AllMargin singular pencil", "AllMargin: ", ErrSingularTransform, func() error { _, err := AllMargin(singular); return err }},
+		{"AllMargin algebraic loop", "AllMargin: ", ErrAlgebraicLoop, func() error { _, err := AllMargin(neutral); return err }},
+		{"Margin algebraic loop", "Margin: ", ErrAlgebraicLoop, func() error { _, err := Margin(neutral); return err }},
+		{"TunePID singular pencil", "TunePID: ", ErrSingularTransform, func() error {
+			_, err := TunePID(context.Background(), singular, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1})
+			return err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			msg := err.Error()
+			if !strings.HasPrefix(msg, tc.prefix) || strings.Count(msg, "controlsys:") != 1 || strings.Count(msg, "Margin:") > 1 {
+				t.Fatalf("err = %q, want prefix %q, one op and one controlsys: sentinel text", msg, tc.prefix)
+			}
+		})
 	}
 }

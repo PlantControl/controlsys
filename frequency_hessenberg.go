@@ -574,7 +574,7 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 	return nil
 }
 
-var errSingularPencil = fmt.Errorf("controlsys: singular complex matrix: %w", ErrSingularTransform)
+var errSingularPencil = fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 
 // balance applies an exact power-of-two state scaling x = D x̂ chosen to
 // balance the rows and columns of [|A|+|E| B; C ·] (Osborne iteration as in

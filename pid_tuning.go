@@ -208,7 +208,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 		}
 	}
-	return tunePID(ctx, "TunePID", p, family, opts)
+	res, err := tunePID(ctx, "TunePID", p, family, opts)
+	if eval.err != nil {
+		return nil, fmt.Errorf("TunePID: %w", eval.err)
+	}
+	return res, err
 }
 
 func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
@@ -778,7 +782,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 	if !plant.IsContinuous() {
 		return nil, false, nil
 	}
-	base, err := delayLoopFromSystem(plant, "TunePID")
+	base, err := delayLoopFromSystem(plant, "delay loop")
 	if errors.Is(err, errDelayLoopUnsupported) {
 		return nil, false, nil
 	}
@@ -820,6 +824,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 		}
 		kp, ki, kd := math.Abs(c.Kp), math.Abs(c.Ki), math.Abs(c.Kd)
 		cand := *c
+		l.eval = eval
 		l.at = func(w float64) complex128 {
 			s := complex(0, w)
 			c := complex(cand.Kp, 0)
