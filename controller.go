@@ -32,45 +32,45 @@ func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	return Dare(A, B, Q, R, opts)
 }
 
-// Lqi computes the linear-quadratic regulator with integral action.
-// The system is augmented with integral states: xi = -C*x, giving
-// Aaug = [A, 0; -C, 0] and Baug = [B; 0].
+// Lqi computes the linear-quadratic regulator with integral action, matching
+// MATLAB lqi(sys,Q,R,N) (https://www.mathworks.com/help/control/ref/ss.lqi.html).
+// The plant x' = Ax + Bu, y = Cx + Du is augmented with the integral xi of
+// the tracking error r - y:
 //
-// A is n×n, B is n×m, C is p×n. Q is (n+p)×(n+p), R is m×m.
-// Returns gain K of size m×(n+p) where K = [Kx, Ki].
-func Lqi(A, B, C, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	na, nac := A.Dims()
-	if na != nac {
-		return nil, ErrDimensionMismatch
+//	continuous: xi' = r - y                 Aa = [A 0; -C 0],     Ba = [B; -D]
+//	discrete:   xi[n+1] = xi[n] + Ts(r - y)  Aa = [A 0; -Ts*C I],  Ba = [B; -Ts*D]
+//
+// and u = -K[x; xi] minimizes the cost on z = [x; xi] with weights Q
+// ((n+p)×(n+p)), R (m×m) and cross term opts.S = N ((n+p)×m), solved with
+// Care or Dare by the plant's time domain. K is m×(n+p), [Kx Ki]; X and Eig
+// are the augmented Riccati solution and closed-loop eigenvalues.
+//
+// Plants without states, inputs or outputs return ErrDimensionMismatch,
+// descriptor plants ErrDescriptorRiccati and plants with delays
+// ErrDelayUnsupported.
+func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	policy, err := newControllerObserverPolicy(sys, "Lqi")
+	if err != nil {
+		return nil, err
 	}
-	nb, m := B.Dims()
-	if nb != na {
-		return nil, ErrDimensionMismatch
+	n, m, p := policy.n, policy.m, policy.p
+	if m == 0 || p == 0 {
+		return nil, fmt.Errorf("Lqi: model needs inputs and outputs: %w", ErrDimensionMismatch)
 	}
-	p, cn := C.Dims()
-	if cn != na {
-		return nil, ErrDimensionMismatch
+	if Q == nil || R == nil {
+		return nil, fmt.Errorf("Lqi: nil weight: %w", ErrDimensionMismatch)
 	}
-	n := na
-	aug := n + p
-
-	aaugData := make([]float64, aug*aug)
-	aRaw := A.RawMatrix()
-	cRaw := C.RawMatrix()
-	copyStrided(aaugData, aug, aRaw.Data, aRaw.Stride, n, n)
-	for i := range p {
-		for j := range n {
-			aaugData[(n+i)*aug+j] = -cRaw.Data[i*cRaw.Stride+j]
-		}
+	if qr, qc := Q.Dims(); qr != n+p || qc != n+p {
+		return nil, fmt.Errorf("Lqi: Q is %dx%d, want %dx%d: %w", qr, qc, n+p, n+p, ErrDimensionMismatch)
 	}
-	Aaug := mat.NewDense(aug, aug, aaugData)
-
-	baugData := make([]float64, aug*m)
-	bRaw := B.RawMatrix()
-	copyStrided(baugData, m, bRaw.Data, bRaw.Stride, n, m)
-	Baug := mat.NewDense(aug, m, baugData)
-
-	return Lqr(Aaug, Baug, Q, R, opts)
+	if rr, rc := R.Dims(); rr != m || rc != m {
+		return nil, fmt.Errorf("Lqi: R is %dx%d, want %dx%d: %w", rr, rc, m, m, ErrDimensionMismatch)
+	}
+	Aa, Ba := lqiAugmentation(sys)
+	if sys.IsContinuous() {
+		return Lqr(Aa, Ba, Q, R, opts)
+	}
+	return Dlqr(Aa, Ba, Q, R, opts)
 }
 
 // Lqrd computes the discrete-time LQR gain from a continuous-time plant,

@@ -208,7 +208,7 @@ func main() {
 | `Kalmd` | Discrete-time Kalman estimator from sampled model data |
 | `Estim` | Observer model assembled from a plant and observer gain |
 | `Reg` | Observer-based regulator assembled from plant, state-feedback gain, and observer gain |
-| `Lqi` | LQR with integral action |
+| `Lqi` | LQR with integral action from a `System` model (MATLAB `lqi`: integrates r - y with D, forward Euler with Ts in discrete time) |
 | `Lqg` | LQG regulator or servo controller (MATLAB `lqg`: QXU/QWV weights, G = I noise model, optional QI, 1-DOF, current estimator) |
 | `H2Syn` | H2 optimal controller synthesis from generalized plant |
 | `HinfSyn` | H-infinity controller synthesis from generalized plant |
