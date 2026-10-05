@@ -33,6 +33,31 @@ func assertSweepMatchesPointwise(t *testing.T, label string, sys *System, omega 
 	}
 }
 
+// assertHessenbergMatchesPointwise holds the Hessenberg kernel itself to the
+// pointwise path, for models the sweep tier would hand to dense GEPP.
+func assertHessenbergMatchesPointwise(t *testing.T, label string, sys *System, omega []float64, relTol float64) {
+	t.Helper()
+	want, err := sys.FreqResponsePointwise(omega)
+	if err != nil {
+		t.Fatalf("%s: FreqResponsePointwise: %v", label, err)
+	}
+	n, m, p := sys.Dims()
+	hs := newHessenbergSweep(sys, n, m, p)
+	td := newTimeDomain(sys.Dt)
+	got := make([]complex128, p*m)
+	for k, w := range omega {
+		if err := hs.evalInto(td.frequencyVariable(w), got); err != nil {
+			t.Fatalf("%s: w=%g: %v", label, w, err)
+		}
+		for i, g := range got {
+			wv := want.Data[k*p*m+i]
+			if d := cmplx.Abs(g - wv); d > relTol*cmplx.Abs(wv) {
+				t.Fatalf("%s: w=%g entry %d rel diff %g", label, w, i, d/cmplx.Abs(wv))
+			}
+		}
+	}
+}
+
 func stiffChain(t *testing.T, n int, lo, hi, dt float64) *System {
 	t.Helper()
 	A := mat.NewDense(n, n, nil)
@@ -97,6 +122,7 @@ func TestFreqResponseSweepStiffModels(t *testing.T) {
 				omega = logspace(-4, math.Log10(math.Pi/tc.dt), 120)
 			}
 			assertSweepMatchesPointwise(t, tc.name, sys, omega, 1e-12)
+			assertHessenbergMatchesPointwise(t, tc.name, sys, omega, 1e-12)
 		})
 	}
 }

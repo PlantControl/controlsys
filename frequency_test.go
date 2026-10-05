@@ -314,6 +314,8 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 		{name: "DiscreteSmallModel", system: discrete, omega: logspace(-2, 1, 100), wantDense: true},
 		{name: "Hessenberg", system: siso, omega: logspace(-2, 2, 100), wantDense: false},
 		{name: "DiscreteHessenberg", system: discreteSISO, omega: logspace(-2, 1, 100), wantDense: false},
+		{name: "CoupledMIMO", system: benchDenseSys(30, 2, 2), omega: logspace(-2, 2, 100), wantDense: false},
+		{name: "UpperHessenbergA", system: benchSys(40, 1, 1), omega: logspace(-2, 2, 100), wantDense: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

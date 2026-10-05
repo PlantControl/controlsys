@@ -518,6 +518,27 @@ func (d *dot2) addProd(a, b float64) {
 
 func (d *dot2) value() float64 { return d.hi + d.lo }
 
+// One refinement step suffices on every model above; forcing the remaining
+// steps keeps that branch exercised and must not lose accuracy.
+func TestHessenbergSweepExtraRefinementSteps(t *testing.T) {
+	defer func(v float64) { refineStop = v }(refineStop)
+	refineStop = 0
+	sys, omega := loadSeriesHinf(t)
+	n, m, p := sys.Dims()
+	if e, w := kernelErr(t, sys, sys, newHessenbergSweep(sys, n, m, p), omega, 1); e > 1e-12 {
+		t.Errorf("hinf loop: vs oracle %g at ω=%g", e, w)
+	}
+	for seed := range 12 {
+		kind := sweepModelKind(seed % int(sweepModelKinds))
+		rng := rand.New(rand.NewPCG(uint64(seed), uint64(kind)))
+		sys, twin := randomSweepModel(rng, kind, 0, false)
+		n, m, p := sys.Dims()
+		if e, w := kernelErr(t, sys, twin, newHessenbergSweep(sys, n, m, p), logspace(-3, 3, 60), 1); e > 1e-12 {
+			t.Errorf("seed=%d kind=%v: vs oracle %g at ω=%g", seed, kind, e, w)
+		}
+	}
+}
+
 // A package variable defeats constant folding, which would hide fusion.
 var dot2FusionProbe = []float64{1 + 0x1p-27, -(1 + 0x1p-26)}
 
