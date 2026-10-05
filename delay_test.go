@@ -4199,3 +4199,25 @@ func TestDelaySettersRejectNonFiniteDelays(t *testing.T) {
 		}
 	}
 }
+
+func TestCopyKeepsStaticInternalDelayModelValid(t *testing.T) {
+	g, err := NewGain(mat.NewDense(1, 1, []float64{0.5}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.OutputDelay = []float64{1}
+	k, err := NewGain(mat.NewDense(1, 1, []float64{1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb, err := Feedback(g, k, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, _ := fb.Dims(); n != 0 || !fb.HasInternalDelay() {
+		t.Fatalf("want static internal-delay model, n=%d internal=%v", n, fb.HasInternalDelay())
+	}
+	if err := fb.Copy().Validate(); err != nil {
+		t.Errorf("Copy().Validate: %v", err)
+	}
+}

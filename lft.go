@@ -67,7 +67,7 @@ func lftExtract(M *System, nu, ny int) (*System, error) {
 	D11 := extractBlock(M.D, 0, 0, ny, nu)
 
 	if nM == 0 {
-		result, err := buildSystem(nil, nil, nil, D11, M.Dt, nil)
+		result, err := lftGain(D11, ny, nu, M.Dt)
 		if err != nil {
 			return nil, err
 		}
@@ -109,22 +109,16 @@ func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
 	}
 
 	Phi := mulDense(Delta.D, F)
-	gRaw := make([]float64, z*z)
-	G := mat.NewDense(z, z, gRaw)
-	G.Mul(Phi, D22)
-	for i := range z {
-		gRaw[i*z+i] += 1
-	}
+	G := lftLoopGain(Phi, D22, z)
 
 	PhiC2 := mulDense(Phi, C2)
 	PhiD21 := mulDense(Phi, D21)
 
 	n := nM + nD
 
+	Dcl := addMulDims(ny, nu, D11, D12, PhiD21)
 	if n == 0 {
-		Dcl := mat.NewDense(ny, nu, nil)
-		Dcl.Add(D11, mulDense(D12, PhiD21))
-		result, err := buildSystem(nil, nil, nil, Dcl, M.Dt, nil)
+		result, err := lftGain(Dcl, ny, nu, M.Dt)
 		if err != nil {
 			return nil, err
 		}
@@ -133,16 +127,14 @@ func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
 	}
 
 	Acl := mat.NewDense(n, n, nil)
-	Bcl := mat.NewDense(n, nu, nil)
-	Ccl := mat.NewDense(ny, n, nil)
-	Dcl := mat.NewDense(ny, nu, nil)
+	Bcl := newDense(n, nu)
+	Ccl := newDense(ny, n)
 
 	var FC2, FD21, FD22Cd, GCd *mat.Dense
 	if nD > 0 {
 		FC2 = mulDense(F, C2)
 		FD21 = mulDense(F, D21)
-		FD22Cd = mat.NewDense(w, nD, nil)
-		FD22Cd.Mul(F, mulDense(D22, Delta.C))
+		FD22Cd = mulDims(w, nD, F, mulDense(D22, Delta.C))
 		GCd = mulDense(G, Delta.C)
 	}
 
@@ -167,8 +159,6 @@ func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
 		setBlock(Ccl, 0, nM, mulDense(D12, GCd))
 	}
 
-	Dcl.Add(D11, mulDense(D12, PhiD21))
-
 	result, err := newNoCopy(Acl, Bcl, Ccl, Dcl, M.Dt)
 	if err != nil {
 		return nil, err
@@ -176,6 +166,32 @@ func lftSimple(M, Delta *System, nu, ny int) (*System, error) {
 	result.E = blkDiagDescriptorE(M, Delta)
 	lftVisibleMetadata(M, nu, ny).applyIOOwned(result)
 	return result, nil
+}
+
+// lftGain builds a static LFT result. A gain with no inputs or no outputs but
+// not both carries no dimensions, so it is rejected as in NewFromSlices.
+func lftGain(D *mat.Dense, ny, nu int, dt float64) (*System, error) {
+	if err := lftGainDims(ny, nu); err != nil {
+		return nil, err
+	}
+	return buildSystem(nil, nil, nil, D, dt, nil)
+}
+
+func lftGainDims(ny, nu int) error {
+	if (ny == 0) != (nu == 0) {
+		return fmt.Errorf("lft: %dx%d static gain cannot be stored: %w", ny, nu, ErrDimensionMismatch)
+	}
+	return nil
+}
+
+// lftLoopGain returns I + Phi·D22, the z×z gain from Delta's outputs through
+// the closed loop.
+func lftLoopGain(Phi, D22 *mat.Dense, z int) *mat.Dense {
+	G := mulDims(z, z, Phi, D22)
+	for i := range z {
+		G.Set(i, i, G.At(i, i)+1)
+	}
+	return G
 }
 
 func solveLFTLoop(D22M, DDelta *mat.Dense, w int) (*mat.Dense, error) {
@@ -230,12 +246,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	}
 
 	Phi := mulDense(DDe, F)
-	gRaw := make([]float64, z*z)
-	G := mat.NewDense(z, z, gRaw)
-	G.Mul(Phi, D22p)
-	for i := range z {
-		gRaw[i*z+i] += 1
-	}
+	G := lftLoopGain(Phi, D22p, z)
 
 	B1 := extractBlock(mH.B, 0, 0, nM, nu)
 	B2p := extractBlock(mH.B, 0, nu, nM, z)
@@ -294,6 +305,9 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 
 	if N == 0 {
 		if n == 0 {
+			if err := lftGainDims(ny, nu); err != nil {
+				return nil, err
+			}
 			Acl = &mat.Dense{}
 		} else {
 			Acl = resizeDense(Acl, n, n)
@@ -350,8 +364,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 		D22iM := extractBlock(mH.D, ny+w, nu+z, NM, NM)
 
 		if nM > 0 {
-			t := mat.NewDense(nM, NM, nil)
-			t.Add(B2iM, mulDense(B2p, PhiD12iMw))
+			t := addMulDims(nM, NM, B2iM, B2p, PhiD12iMw)
 			setBlock(b2, 0, 0, t)
 		}
 		if nD > 0 {
@@ -359,8 +372,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 		}
 
 		if nM > 0 {
-			t := mat.NewDense(NM, nM, nil)
-			t.Add(C2iM, mulDense(D21iMz, PhiC2p))
+			t := addMulDims(NM, nM, C2iM, D21iMz, PhiC2p)
 			setBlock(c2, 0, 0, t)
 		}
 		if nD > 0 {
@@ -368,20 +380,17 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 		}
 
 		{
-			t := mat.NewDense(ny, NM, nil)
-			t.Add(D12iMu, mulDense(D12p, PhiD12iMw))
+			t := addMulDims(ny, NM, D12iMu, D12p, PhiD12iMw)
 			setBlock(d12, 0, 0, t)
 		}
 
 		{
-			t := mat.NewDense(NM, nu, nil)
-			t.Add(D21iMext, mulDense(D21iMz, PhiD21p))
+			t := addMulDims(NM, nu, D21iMext, D21iMz, PhiD21p)
 			setBlock(d21, 0, 0, t)
 		}
 
 		{
-			t := mat.NewDense(NM, NM, nil)
-			t.Add(D22iM, mulDense(D21iMz, PhiD12iMw))
+			t := addMulDims(NM, NM, D22iM, D21iMz, PhiD12iMw)
 			setBlock(d22, 0, 0, t)
 		}
 	}
@@ -395,8 +404,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 			setBlock(b2, 0, NM, mulDense(B2p, GD12iD))
 		}
 		if nD > 0 {
-			t := mat.NewDense(nD, ND, nil)
-			t.Add(B2iD, mulDense(BDe, FD22pD12iD))
+			t := addMulDims(nD, ND, B2iD, BDe, FD22pD12iD)
 			setBlock(b2, nM, NM, t)
 		}
 
@@ -404,8 +412,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 			setBlock(c2, NM, 0, mulDense(D21iD, FC2p))
 		}
 		if nD > 0 {
-			t := mat.NewDense(ND, nD, nil)
-			t.Add(C2iD, mulDense(D21iD, FD22pCDe))
+			t := addMulDims(ND, nD, C2iD, D21iD, FD22pCDe)
 			setBlock(c2, NM, nM, t)
 		}
 
@@ -414,8 +421,7 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 		setBlock(d21, NM, 0, mulDense(D21iD, FD21p))
 
 		{
-			t := mat.NewDense(ND, ND, nil)
-			t.Add(D22iD, mulDense(D21iD, FD22pD12iD))
+			t := addMulDims(ND, ND, D22iD, D21iD, FD22pD12iD)
 			setBlock(d22, NM, NM, t)
 		}
 	}

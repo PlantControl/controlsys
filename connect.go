@@ -539,7 +539,7 @@ func Append(sys1, sys2 *System) (*System, error) {
 	outDel := concatDelay(sys1.OutputDelay, p1, sys2.OutputDelay, p2)
 
 	if n == 0 {
-		sys, _ := NewGain(D, sys1.Dt)
+		sys, _ := NewGain(resizeDense(D, p, m), sys1.Dt)
 		sys.Delay = delay
 		sys.InputDelay = inDel
 		sys.OutputDelay = outDel
@@ -860,7 +860,8 @@ func parallelLFT(sys1, sys2 *System) (*System, error) {
 		setBlock(B, n1, 0, s2.B)
 		setBlock(C, 0, n1, s2.C)
 	}
-	D.Add(s1.D, s2.D)
+	setBlock(D, 0, 0, s1.D)
+	addBlock(D, 0, 0, s2.D)
 
 	A = resizeDense(A, n, n)
 	B = resizeDense(B, n, m)

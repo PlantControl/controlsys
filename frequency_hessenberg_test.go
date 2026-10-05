@@ -190,9 +190,9 @@ func TestFreqResponseRejectsInvalidSystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	static.LFT = &LFTDelay{Tau: []float64{0.5}, D12: mat.NewDense(1, 1, nil), D21: mat.NewDense(1, 1, nil), D22: mat.NewDense(1, 1, nil)}
+	static.LFT = &LFTDelay{Tau: []float64{0.5}, B2: mat.NewDense(1, 1, nil), D12: mat.NewDense(1, 1, nil), D21: mat.NewDense(1, 1, nil), D22: mat.NewDense(1, 1, nil)}
 	if _, err := static.DCGain(); !errors.Is(err, ErrDimensionMismatch) {
-		t.Errorf("static LFT without B2: DCGain err = %v", err)
+		t.Errorf("static LFT with 1x1 B2: DCGain err = %v", err)
 	}
 	var nilSys *System
 	if _, err := nilSys.FreqResponse(absorbScopeOmega); !errors.Is(err, ErrDimensionMismatch) {

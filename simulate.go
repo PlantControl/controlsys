@@ -16,13 +16,19 @@ type Response struct {
 
 type SimulateOpts struct {
 	Workspace *mat.VecDense
+	// Steps is the number of samples, MATLAB's length(t). It is how a model
+	// without inputs (whose n×0 input matrix gonum cannot hold) sets the
+	// horizon; with u given it must be 0 or equal u's column count.
+	Steps int
 
 	yBuf  *mat.Dense
 	duBuf *mat.Dense
 }
 
 // Simulate propagates a discrete model from x0 under u (one column per
-// sample). Descriptor models with invertible E are simulated in their own
+// sample). A nil u means zero samples unless opts.Steps is set; a model
+// without inputs takes nil u and opts.Steps, as MATLAB's lsim takes a
+// length(t)×0 u. Descriptor models with invertible E are simulated in their own
 // state coordinates. Singular E is reduced to its slow subsystem plus
 // feedthrough, as MATLAB does: non-causal (improper) models return
 // ErrImproperModel, a nonzero x0 returns ErrDescriptorInitialState, and
@@ -38,8 +44,23 @@ func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) 
 	if err != nil {
 		return nil, fmt.Errorf("Simulate: %w", err)
 	}
+	n, m, p := sim.Dims()
+	if m == 0 && opts != nil && opts.Steps > 0 {
+		sim, u = zeroInputModel(sim), mat.NewDense(1, opts.Steps, nil)
+	}
 	if !reduced {
-		return simulationDispatcher{sys: sim}.run(u, simX0, opts)
+		if p > 0 || n == 0 || u == nil {
+			return simulationDispatcher{sys: sim}.run(u, simX0, opts)
+		}
+		if opts != nil {
+			opts = &SimulateOpts{Workspace: opts.Workspace}
+		}
+		resp, err := simulationDispatcher{sys: zeroOutputModel(sim)}.run(u, simX0, opts)
+		if err != nil {
+			return nil, err
+		}
+		resp.Y = nil
+		return resp, nil
 	}
 	if opts != nil {
 		opts = &SimulateOpts{yBuf: opts.yBuf, duBuf: opts.duBuf}
@@ -89,6 +110,12 @@ func (sys *System) validateSimulateInputs(u *mat.Dense, x0 *mat.VecDense, opts *
 		}
 		steps = uc
 	}
+	if opts != nil {
+		if err := validateSimulateSteps(opts.Steps, steps, m, u != nil); err != nil {
+			return err
+		}
+		steps = max(steps, opts.Steps)
+	}
 	if x0 != nil && x0.Len() != n {
 		return fmt.Errorf("Simulate: x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
 	}
@@ -109,6 +136,20 @@ func (sys *System) validateSimulateInputs(u *mat.Dense, x0 *mat.VecDense, opts *
 		if dr != p || dc != steps {
 			return fmt.Errorf("Simulate: duBuf %dx%d != %dx%d: %w", dr, dc, p, steps, ErrDimensionMismatch)
 		}
+	}
+	return nil
+}
+
+func validateSimulateSteps(want, cols, m int, hasU bool) error {
+	switch {
+	case want < 0:
+		return fmt.Errorf("Simulate: Steps %d < 0: %w", want, ErrDimensionMismatch)
+	case want == 0:
+		return nil
+	case hasU && want != cols:
+		return fmt.Errorf("Simulate: Steps %d != input columns %d: %w", want, cols, ErrDimensionMismatch)
+	case !hasU && m > 0:
+		return fmt.Errorf("Simulate: Steps without u needs a model with no inputs, have %d: %w", m, ErrDimensionMismatch)
 	}
 	return nil
 }

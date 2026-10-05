@@ -68,90 +68,33 @@ func padeCloseInternalDelay(lft *System, order int) (*System, error) {
 		return nil, err
 	}
 
-	DdE := mat.NewDense(N, N, nil)
-	DdE.Mul(Dd, Einv)
+	DdE := mulDims(N, N, Dd, Einv)
+	DdEC2 := mulDims(N, n, DdE, C2)
+	DdED21 := mulDims(N, m, DdE, D21)
+	D22Cd := mulDims(N, nd, D22, delayBank.C)
+	DdED22CdPlusCd := addMulDims(N, nd, delayBank.C, DdE, D22Cd)
+	BdE := mulDims(nd, N, delayBank.B, Einv)
 
-	var DdEC2 *mat.Dense
-	if n > 0 {
-		DdEC2 = mat.NewDense(N, n, nil)
-		DdEC2.Mul(DdE, C2)
-	}
+	Acl := newDense(nTotal, nTotal)
+	Bcl := newDense(nTotal, m)
+	Ccl := newDense(p, nTotal)
 
-	DdED21 := mat.NewDense(N, m, nil)
-	DdED21.Mul(DdE, D21)
+	setBlock(Acl, 0, 0, lft.A)
+	addBlock(Acl, 0, 0, mulDims(n, n, B2, DdEC2))
+	setBlock(Acl, 0, n, mulDims(n, nd, B2, DdED22CdPlusCd))
+	setBlock(Acl, n, 0, mulDims(nd, n, BdE, C2))
+	setBlock(Acl, n, n, delayBank.A)
+	addBlock(Acl, n, n, mulDims(nd, nd, BdE, D22Cd))
 
-	var D22Cd *mat.Dense
-	DdED22Cd := mat.NewDense(N, nd, nil)
-	if nd > 0 {
-		D22Cd = mat.NewDense(N, nd, nil)
-		D22Cd.Mul(D22, delayBank.C)
-		DdED22Cd.Mul(DdE, D22Cd)
-	}
+	setBlock(Bcl, 0, 0, lft.B)
+	addBlock(Bcl, 0, 0, mulDims(n, m, B2, DdED21))
+	setBlock(Bcl, n, 0, mulDims(nd, m, BdE, D21))
 
-	DdED22CdPlusCd := mat.NewDense(N, nd, nil)
-	if nd > 0 {
-		DdED22CdPlusCd.Add(DdED22Cd, delayBank.C)
-	}
+	setBlock(Ccl, 0, 0, lft.C)
+	addBlock(Ccl, 0, 0, mulDims(p, n, D12, DdEC2))
+	setBlock(Ccl, 0, n, mulDims(p, nd, D12, DdED22CdPlusCd))
 
-	BdE := mat.NewDense(nd, N, nil)
-	if nd > 0 {
-		BdE.Mul(delayBank.B, Einv)
-	}
-
-	Acl := mat.NewDense(nTotal, nTotal, nil)
-	Bcl := mat.NewDense(nTotal, m, nil)
-	Ccl := mat.NewDense(p, nTotal, nil)
-	Dcl := mat.NewDense(p, m, nil)
-
-	if n > 0 {
-		setBlock(Acl, 0, 0, lft.A)
-		tmp := mat.NewDense(n, n, nil)
-		tmp.Mul(B2, DdEC2)
-		addBlock(Acl, 0, 0, tmp)
-
-		if nd > 0 {
-			tmp2 := mat.NewDense(n, nd, nil)
-			tmp2.Mul(B2, DdED22CdPlusCd)
-			setBlock(Acl, 0, n, tmp2)
-		}
-
-		setBlock(Bcl, 0, 0, lft.B)
-		tmp3 := mat.NewDense(n, m, nil)
-		tmp3.Mul(B2, DdED21)
-		addBlock(Bcl, 0, 0, tmp3)
-	}
-
-	if nd > 0 {
-		if n > 0 {
-			tmp := mat.NewDense(nd, n, nil)
-			tmp.Mul(BdE, C2)
-			setBlock(Acl, n, 0, tmp)
-		}
-
-		setBlock(Acl, n, n, delayBank.A)
-		tmp2 := mat.NewDense(nd, nd, nil)
-		tmp2.Mul(BdE, D22Cd)
-		addBlock(Acl, n, n, tmp2)
-
-		tmp3 := mat.NewDense(nd, m, nil)
-		tmp3.Mul(BdE, D21)
-		setBlock(Bcl, n, 0, tmp3)
-	}
-
-	if n > 0 {
-		setBlock(Ccl, 0, 0, lft.C)
-		tmp := mat.NewDense(p, n, nil)
-		tmp.Mul(D12, DdEC2)
-		addBlock(Ccl, 0, 0, tmp)
-	}
-	if nd > 0 {
-		tmp := mat.NewDense(p, nd, nil)
-		tmp.Mul(D12, DdED22CdPlusCd)
-		setBlock(Ccl, 0, n, tmp)
-	}
-
-	Dcl.Mul(D12, DdED21)
-	Dcl.Add(Dcl, lft.D)
+	Dcl := addMulDims(p, m, lft.D, D12, DdED21)
 
 	result, err := newNoCopy(Acl, Bcl, Ccl, Dcl, lft.Dt)
 	if err != nil {
