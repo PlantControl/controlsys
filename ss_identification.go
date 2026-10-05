@@ -8,44 +8,83 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// IOInitialCondition selects how a fit treats the state before the record.
+type IOInitialCondition string
+
+const (
+	// IOInitialZero assumes zero initial history.
+	IOInitialZero IOInitialCondition = "zero"
+	// IOInitialEstimate estimates the initial history from the data (default
+	// for training).
+	IOInitialEstimate IOInitialCondition = "estimate"
+	// IOInitialContinuation runs validation on from the end of the training
+	// record (default for validation).
+	IOInitialContinuation IOInitialCondition = "continuation"
+)
+
+// IOConvergence reports how the output-error refinement of a candidate ended.
+type IOConvergence string
+
+const (
+	// IOConverged means the cost reached its numerical floor.
+	IOConverged IOConvergence = "converged"
+	// IOStationary means the step stopped reducing the cost.
+	IOStationary IOConvergence = "stationary"
+	// IOEvaluationLimit means the evaluation or iteration budget ran out.
+	IOEvaluationLimit IOConvergence = "evaluation_or_iteration_limit"
+	// IOFailed marks a candidate whose fit failed; see its Err.
+	IOFailed IOConvergence = "failed"
+)
+
 // IOStateSpaceOptions identifies SISO models from arbitrary sampled input/output.
 // Order excludes explicit input-delay states. Validation never fits dynamics.
 // Estimated InitialHistory holds Order pre-record outputs then InputDelay
 // pre-record inputs.
+//
+// MATLAB mapping: ssest(data, nx, 'InputDelay', nk, 'Feedthrough', tf) with
+// Order = nx (or MinOrder:MaxOrder for an order scan), InputDelay = nk,
+// DirectFeedthrough = tf and InitialCondition as ssest's 'InitialState'
+// ('zero' or 'estimate'); the model structure is an ARX-seeded output-error
+// fit (arx then oe), realized as a state-space model.
 type IOStateSpaceOptions struct {
-	Order                      int    `json:"order,omitempty"`
-	MinOrder                   int    `json:"minOrder,omitempty"`
-	MaxOrder                   int    `json:"maxOrder,omitempty"`
-	DirectFeedthrough          bool   `json:"directFeedthrough"`
-	InputDelay                 int    `json:"inputDelay"`
-	InitialCondition           string `json:"initialCondition"`
-	ValidationInitialCondition string `json:"validationInitialCondition"`
-	InitializationSamples      int    `json:"initializationSamples,omitempty"`
-	MaxEvaluations             int    `json:"maxEvaluations,omitempty"`
+	Order                      int                `json:"order,omitempty"`
+	MinOrder                   int                `json:"minOrder,omitempty"`
+	MaxOrder                   int                `json:"maxOrder,omitempty"`
+	DirectFeedthrough          bool               `json:"directFeedthrough"`
+	InputDelay                 int                `json:"inputDelay"`
+	InitialCondition           IOInitialCondition `json:"initialCondition"`
+	ValidationInitialCondition IOInitialCondition `json:"validationInitialCondition"`
+	InitializationSamples      int                `json:"initializationSamples,omitempty"`
+	MaxEvaluations             int                `json:"maxEvaluations,omitempty"`
 }
 
+// IOStateSpaceCandidate is the fit of one model order. A failed candidate has
+// Err set (and Failure, its message, for JSON) with Convergence IOFailed; its
+// fit metrics and System are then absent (zero), not a fit result.
 type IOStateSpaceCandidate struct {
-	TrainingPredicted               []float64 `json:"trainingPredicted,omitempty"`
-	ValidationPredicted             []float64 `json:"validationPredicted,omitempty"`
-	Order                           int       `json:"order"`
-	Numerator                       []float64 `json:"numerator,omitempty"`
-	Denominator                     []float64 `json:"denominator,omitempty"`
-	SingularValues                  []float64 `json:"singularValues,omitempty"`
-	Rank                            int       `json:"rank"`
-	Condition                       float64   `json:"condition,omitempty"`
-	TrainingNRMSE                   float64   `json:"trainingNrmse"`
-	ValidationNRMSE                 float64   `json:"validationNrmse"`
-	ValidationBaselineNRMSE         float64   `json:"validationBaselineNrmse"`
-	ResidualAutocorrelation         float64   `json:"residualAutocorrelation"`
-	ResidualInputCorrelation        float64   `json:"residualInputCorrelation"`
-	InitialHistory                  []float64 `json:"initialHistory,omitempty"`
-	ValidationInitializationSamples int       `json:"validationInitializationSamples"`
-	Stable                          bool      `json:"stable"`
-	Convergence                     string    `json:"convergence"`
-	Failure                         string    `json:"failure,omitempty"`
-	System                          *System   `json:"-"`
+	TrainingPredicted               []float64     `json:"trainingPredicted,omitempty"`
+	ValidationPredicted             []float64     `json:"validationPredicted,omitempty"`
+	Order                           int           `json:"order"`
+	Numerator                       []float64     `json:"numerator,omitempty"`
+	Denominator                     []float64     `json:"denominator,omitempty"`
+	SingularValues                  []float64     `json:"singularValues,omitempty"`
+	Rank                            int           `json:"rank"`
+	Condition                       float64       `json:"condition,omitempty"`
+	TrainingNRMSE                   float64       `json:"trainingNrmse"`
+	ValidationNRMSE                 float64       `json:"validationNrmse"`
+	ValidationBaselineNRMSE         float64       `json:"validationBaselineNrmse"`
+	ResidualAutocorrelation         float64       `json:"residualAutocorrelation"`
+	ResidualInputCorrelation        float64       `json:"residualInputCorrelation"`
+	InitialHistory                  []float64     `json:"initialHistory,omitempty"`
+	ValidationInitializationSamples int           `json:"validationInitializationSamples"`
+	Stable                          bool          `json:"stable"`
+	Convergence                     IOConvergence `json:"convergence"`
+	Failure                         string        `json:"failure,omitempty"`
+	Err                             error         `json:"-"`
+	System                          *System       `json:"-"`
 }
 
+// IOStateSpaceResult holds every order's candidate and the selected one.
 type IOStateSpaceResult struct {
 	Options         IOStateSpaceOptions     `json:"options"`
 	Candidates      []IOStateSpaceCandidate `json:"candidates"`
@@ -54,21 +93,31 @@ type IOStateSpaceResult struct {
 	Evaluations     int                     `json:"evaluations"`
 }
 
+// IdentifyIOStateSpace fits discrete SISO state-space models of each order
+// in options to the training record (trainU, trainY), scores them on the
+// held-out record by normalized RMS error, and selects the lowest order
+// within 1% of the best. Invalid records or options return
+// ErrInsufficientData, ErrInvalidSampleTime, ErrInvalidOrder or
+// ErrInvalidArgument; a constant input returns ErrProcessExcitation, and no
+// identifiable order returns the first candidate's error. ctx is checked
+// between and within order fits.
 func IdentifyIOStateSpace(ctx context.Context, trainU, trainY, validationU, validationY []float64, dt float64, options IOStateSpaceOptions) (*IOStateSpaceResult, error) {
+	const op = "IdentifyIOStateSpace"
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	if len(trainU) != len(trainY) || len(validationU) != len(validationY) || len(trainU) < 20 || len(validationU) < 2 || len(trainU)+len(validationU) > 10000 {
-		return nil, fmt.Errorf("identify state space: matching training/validation records require 20/2 minimum and 10000 total samples maximum")
+	if len(trainU) != len(trainY) || len(validationU) != len(validationY) {
+		return nil, fmt.Errorf("%s: training %d/%d and validation %d/%d input/output lengths must match: %w", op, len(trainU), len(trainY), len(validationU), len(validationY), ErrDimensionMismatch)
+	}
+	if len(trainU) < 20 || len(validationU) < 2 || len(trainU)+len(validationU) > 10000 {
+		return nil, fmt.Errorf("%s: training/validation records require 20/2 minimum and 10000 total samples maximum, got %d/%d: %w", op, len(trainU), len(validationU), ErrInsufficientData)
 	}
 	if !finitePID(dt) || dt <= 0 {
-		return nil, fmt.Errorf("identify state space: sample time must be positive and finite")
+		return nil, fmt.Errorf("%s: dt is %g: %w", op, dt, ErrInvalidSampleTime)
 	}
-	for _, values := range [][]float64{trainU, trainY, validationU, validationY} {
-		for _, v := range values {
-			if !finitePID(v) {
-				return nil, fmt.Errorf("identify state space: samples must be finite")
-			}
+	for name, values := range map[string][]float64{"trainU": trainU, "trainY": trainY, "validationU": validationU, "validationY": validationY} {
+		if err := requireFinite(op, name, values...); err != nil {
+			return nil, err
 		}
 	}
 	if options.Order != 0 {
@@ -81,66 +130,66 @@ func IdentifyIOStateSpace(ctx context.Context, trainU, trainY, validationU, vali
 		options.MaxOrder = 6
 	}
 	if options.MinOrder < 1 || options.MaxOrder > 12 || options.MaxOrder < options.MinOrder {
-		return nil, fmt.Errorf("identify state space: orders must lie between 1 and 12")
+		return nil, fmt.Errorf("%s: orders %d..%d must lie between 1 and 12: %w", op, options.MinOrder, options.MaxOrder, ErrInvalidOrder)
 	}
 	if options.InputDelay < 0 || options.InputDelay > 100 {
-		return nil, fmt.Errorf("identify state space: input delay must be 0 to 100 samples")
+		return nil, fmt.Errorf("%s: input delay %d must be 0 to 100 samples: %w", op, options.InputDelay, ErrInvalidArgument)
 	}
 	if options.MaxEvaluations == 0 {
 		options.MaxEvaluations = 2000
 	}
 	if options.MaxEvaluations < 1 || options.MaxEvaluations > 2000 {
-		return nil, fmt.Errorf("identify state space: evaluation budget must be 1 to 2000")
+		return nil, fmt.Errorf("%s: evaluation budget %d must be 1 to 2000: %w", op, options.MaxEvaluations, ErrInvalidArgument)
 	}
 	if options.InitialCondition == "" {
-		options.InitialCondition = "estimate"
+		options.InitialCondition = IOInitialEstimate
 	}
-	if options.InitialCondition != "zero" && options.InitialCondition != "estimate" {
-		return nil, fmt.Errorf("identify state space: initial condition must be zero or estimate")
+	if options.InitialCondition != IOInitialZero && options.InitialCondition != IOInitialEstimate {
+		return nil, fmt.Errorf("%s: initial condition %q must be zero or estimate: %w", op, options.InitialCondition, ErrInvalidArgument)
 	}
 	if options.ValidationInitialCondition == "" {
-		options.ValidationInitialCondition = "continuation"
+		options.ValidationInitialCondition = IOInitialContinuation
 	}
 	switch options.ValidationInitialCondition {
-	case "continuation", "zero":
+	case IOInitialContinuation, IOInitialZero:
 		if options.InitializationSamples != 0 {
-			return nil, fmt.Errorf("identify state space: initialization samples require estimate validation mode")
+			return nil, fmt.Errorf("%s: initialization samples require estimate validation mode: %w", op, ErrInvalidArgument)
 		}
-	case "estimate":
+	case IOInitialEstimate:
 		if options.InitializationSamples < options.MaxOrder+options.InputDelay || options.InitializationSamples >= len(validationU)-1 {
-			return nil, fmt.Errorf("identify state space: declare at least maxOrder+inputDelay initialization samples, leaving at least two held-out samples")
+			return nil, fmt.Errorf("%s: declare at least maxOrder+inputDelay initialization samples, leaving at least two held-out samples: %w", op, ErrInvalidArgument)
 		}
 	default:
-		return nil, fmt.Errorf("identify state space: invalid validation initialization mode")
+		return nil, fmt.Errorf("%s: validation initialization mode %q: %w", op, options.ValidationInitialCondition, ErrInvalidArgument)
 	}
 	variance := ioVariance(trainU)
 	if variance <= 1e-24 {
-		return nil, fmt.Errorf("identify state space: insufficient changing input excitation")
+		return nil, fmt.Errorf("%s: input is constant: %w", op, ErrProcessExcitation)
 	}
 	result := &IOStateSpaceResult{Options: options, Selected: -1}
 	for order := options.MinOrder; order <= options.MaxOrder; order++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 		candidate := ioFitOrder(ctx, trainU, trainY, validationU, validationY, dt, order, options, &result.Evaluations)
 		result.Candidates = append(result.Candidates, candidate)
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 	}
 	best := math.Inf(1)
 	for _, candidate := range result.Candidates {
-		if candidate.Failure == "" && candidate.ValidationNRMSE < best {
+		if candidate.Err == nil && candidate.ValidationNRMSE < best {
 			best = candidate.ValidationNRMSE
 		}
 	}
 	if math.IsInf(best, 1) {
-		return nil, fmt.Errorf("identify state space: no identifiable candidate: %s", result.Candidates[0].Failure)
+		return nil, fmt.Errorf("%s: no identifiable candidate: order %d: %w", op, result.Candidates[0].Order, result.Candidates[0].Err)
 	}
 	// The numerical floor prevents roundoff deciding between equivalent noiseless orders.
 	threshold := math.Max(best*1.01, 1e-8)
 	for i, candidate := range result.Candidates {
-		if candidate.Failure == "" && candidate.ValidationNRMSE <= threshold {
+		if candidate.Err == nil && candidate.ValidationNRMSE <= threshold {
 			result.Selected = i
 			break
 		}
@@ -151,10 +200,8 @@ func IdentifyIOStateSpace(ctx context.Context, trainU, trainY, validationU, vali
 
 func ioFitOrder(ctx context.Context, u, y, vu, vy []float64, dt float64, order int, options IOStateSpaceOptions, evaluations *int) IOStateSpaceCandidate {
 	candidate := IOStateSpaceCandidate{Order: order}
-	fail := func(reason string) IOStateSpaceCandidate {
-		candidate.Failure = reason
-		candidate.Convergence = "failed"
-		return candidate
+	fail := func(err error) IOStateSpaceCandidate {
+		return IOStateSpaceCandidate{Order: order, Convergence: IOFailed, Failure: err.Error(), Err: err}
 	}
 	nb := order
 	if options.DirectFeedthrough {
@@ -168,7 +215,7 @@ func ioFitOrder(ctx context.Context, u, y, vu, vy []float64, dt float64, order i
 	rows := len(u) - skip
 	columns := order + nb
 	if rows < 10*columns {
-		return fail("insufficient training rows: require ten rows per fitted coefficient")
+		return fail(fmt.Errorf("insufficient training rows: require ten rows per fitted coefficient: %w", ErrInsufficientData))
 	}
 	x := mat.NewDense(rows, columns, nil)
 	target := mat.NewDense(rows, 1, nil)
@@ -189,7 +236,7 @@ func ioFitOrder(ctx context.Context, u, y, vu, vy []float64, dt float64, order i
 		}
 		scales[j] = math.Sqrt(sum)
 		if scales[j] == 0 {
-			return fail("rank-deficient regression: insufficient excitation")
+			return fail(fmt.Errorf("rank-deficient regression: %w", ErrProcessExcitation))
 		}
 		for k := range rows {
 			x.Set(k, j, x.At(k, j)/scales[j])
@@ -197,34 +244,34 @@ func ioFitOrder(ctx context.Context, u, y, vu, vy []float64, dt float64, order i
 	}
 	var svd mat.SVD
 	if !svd.Factorize(x, mat.SVDThin) {
-		return fail("regression singular-value decomposition failed")
+		return fail(fmt.Errorf("regression singular-value decomposition failed: %w", ErrSchurFailed))
 	}
 	candidate.SingularValues = svd.Values(nil)
 	candidate.Rank = svd.Rank(1e-10)
 	if candidate.Rank < columns {
-		return fail("rank-deficient regression: insufficient excitation or redundant model order")
+		return fail(fmt.Errorf("rank-deficient regression: redundant model order: %w", ErrProcessExcitation))
 	}
 	candidate.Condition = candidate.SingularValues[0] / candidate.SingularValues[len(candidate.SingularValues)-1]
 	var qr mat.QR
 	qr.Factorize(x)
 	var fitted mat.Dense
 	if err := qr.SolveTo(&fitted, false, target); err != nil {
-		return fail("QR regression failed: " + err.Error())
+		return fail(fmt.Errorf("QR regression: %w", err))
 	}
 	theta := make([]float64, columns)
 	for j := range theta {
 		theta[j] = fitted.At(j, 0) / scales[j]
 	}
-	if options.InitialCondition == "estimate" {
+	if options.InitialCondition == IOInitialEstimate {
 		history, err := ioEstimateHistory(theta, u, y, order, nb, nk)
 		if err != nil {
-			return fail(err.Error())
+			return fail(err)
 		}
 		theta = append(theta, history...)
 	}
 	theta, training, convergence, err := ioRefine(ctx, theta, u, y, order, nb, nk, options.MaxEvaluations, evaluations)
 	if err != nil {
-		return fail(err.Error())
+		return fail(err)
 	}
 	candidate.Convergence = convergence
 	candidate.TrainingPredicted = append([]float64(nil), training...)
@@ -235,29 +282,29 @@ func ioFitOrder(ctx context.Context, u, y, vu, vy []float64, dt float64, order i
 	var prediction []float64
 	start := 0
 	switch options.ValidationInitialCondition {
-	case "continuation":
+	case IOInitialContinuation:
 		all := append(append([]float64(nil), u...), vu...)
 		combined, _, valid := ioPredict(theta, all, order, nb, nk, false)
 		if !valid {
-			return fail("validation free run diverged")
+			return fail(fmt.Errorf("validation free run diverged: %w", ErrUnstable))
 		}
 		prediction = combined[len(u):]
-	case "zero":
+	case IOInitialZero:
 		var valid bool
 		prediction, _, valid = ioPredict(theta[:columns], vu, order, nb, nk, false)
 		if !valid {
-			return fail("validation free run diverged")
+			return fail(fmt.Errorf("validation free run diverged: %w", ErrUnstable))
 		}
-	case "estimate":
+	case IOInitialEstimate:
 		history, e := ioEstimateHistory(theta[:columns], vu[:options.InitializationSamples], vy[:options.InitializationSamples], order, nb, nk)
 		if e != nil {
-			return fail("validation initialization: " + e.Error())
+			return fail(fmt.Errorf("validation initialization: %w", e))
 		}
 		validationTheta := append(append([]float64(nil), theta[:columns]...), history...)
 		var valid bool
 		prediction, _, valid = ioPredict(validationTheta, vu, order, nb, nk, false)
 		if !valid {
-			return fail("validation free run diverged")
+			return fail(fmt.Errorf("validation free run diverged: %w", ErrUnstable))
 		}
 		start = options.InitializationSamples
 	}
@@ -284,12 +331,12 @@ func ioFitOrder(ctx context.Context, u, y, vu, vy []float64, dt float64, order i
 	tf := &TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: dt}
 	realized, e := tf.StateSpace(nil)
 	if e != nil {
-		return fail("state-space realization: " + e.Error())
+		return fail(fmt.Errorf("state-space realization: %w", e))
 	}
 	candidate.Numerator, candidate.Denominator, candidate.System = num, den, realized.Sys
 	candidate.Stable, e = candidate.System.IsStable()
 	if e != nil {
-		return fail("stability analysis: " + e.Error())
+		return fail(fmt.Errorf("stability analysis: %w", e))
 	}
 	return candidate
 }
@@ -358,7 +405,7 @@ func ioEstimateHistory(theta, u, y []float64, n, nb, nk int) ([]float64, error) 
 	extended := append(append([]float64(nil), theta[:n+nb]...), make([]float64, unknowns)...)
 	forced, j, valid := ioPredict(extended, u, n, nb, nk, true)
 	if !valid {
-		return nil, fmt.Errorf("initial-state forced response diverged")
+		return nil, fmt.Errorf("initial-state forced response diverged: %w", ErrUnstable)
 	}
 	h := mat.NewDense(len(u), unknowns, nil)
 	target := mat.NewDense(len(u), 1, nil)
@@ -370,7 +417,7 @@ func ioEstimateHistory(theta, u, y []float64, n, nb, nk int) ([]float64, error) 
 	}
 	var svd mat.SVD
 	if !svd.Factorize(h, mat.SVDThin) {
-		return nil, fmt.Errorf("initial-state least squares failed")
+		return nil, fmt.Errorf("initial-state least squares: %w", ErrSingularTransform)
 	}
 	rank := svd.Rank(1e-10)
 	history := make([]float64, unknowns)
@@ -385,14 +432,14 @@ func ioEstimateHistory(theta, u, y []float64, n, nb, nk int) ([]float64, error) 
 	return history, nil
 }
 
-func ioRefine(ctx context.Context, theta, u, y []float64, n, nb, nk, maxEvaluations int, evaluations *int) ([]float64, []float64, string, error) {
+func ioRefine(ctx context.Context, theta, u, y []float64, n, nb, nk, maxEvaluations int, evaluations *int) ([]float64, []float64, IOConvergence, error) {
 	if *evaluations >= maxEvaluations {
-		return nil, nil, "", fmt.Errorf("training evaluation budget exhausted")
+		return nil, nil, "", fmt.Errorf("training evaluation budget exhausted: %w", ErrInvalidArgument)
 	}
 	prediction, j, valid := ioPredict(theta, u, n, nb, nk, true)
 	*evaluations++
 	if !valid {
-		return nil, nil, "", fmt.Errorf("ARX seed free run diverged")
+		return nil, nil, "", fmt.Errorf("ARX seed free run diverged: %w", ErrUnstable)
 	}
 	cost := ioSSE(prediction, y)
 	lambda := 1e-3
@@ -401,7 +448,7 @@ func ioRefine(ctx context.Context, theta, u, y []float64, n, nb, nk, maxEvaluati
 			return nil, nil, "", err
 		}
 		if cost <= 1e-22*math.Max(1, float64(len(y))*ioVariance(y)) {
-			return theta, prediction, "converged", nil
+			return theta, prediction, IOConverged, nil
 		}
 		columns := len(theta)
 		rows := len(y)
@@ -416,7 +463,7 @@ func ioRefine(ctx context.Context, theta, u, y []float64, n, nb, nk, maxEvaluati
 			}
 			scales[c] = math.Sqrt(sum)
 			if !finitePID(scales[c]) {
-				return nil, nil, "", fmt.Errorf("output-error sensitivity overflow")
+				return nil, nil, "", fmt.Errorf("output-error sensitivity: %w", ErrOverflow)
 			}
 			if scales[c] < 1e-14 {
 				scales[c] = 1
@@ -453,16 +500,16 @@ func ioRefine(ctx context.Context, theta, u, y []float64, n, nb, nk, maxEvaluati
 			theta, prediction, j, cost = trial, next, nextJ, nextCost
 			lambda = math.Max(1e-12, lambda*.3)
 			if relative < 1e-10 || norm < 1e-20 {
-				return theta, prediction, "converged", nil
+				return theta, prediction, IOConverged, nil
 			}
 		} else {
 			lambda *= 10
 			if lambda > 1e12 {
-				return theta, prediction, "stationary", nil
+				return theta, prediction, IOStationary, nil
 			}
 		}
 	}
-	return theta, prediction, "evaluation_or_iteration_limit", nil
+	return theta, prediction, IOEvaluationLimit, nil
 }
 
 func ioMean(values []float64) float64 {

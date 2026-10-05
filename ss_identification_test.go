@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"math"
 	"math/rand"
 	"testing"
@@ -135,13 +136,38 @@ func TestIdentifyIOStateSpaceBoundsExcitationAndCancellation(t *testing.T) {
 	u, y := ioIdentificationFixture(0, false, 0, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := IdentifyIOStateSpace(ctx, u[:600], y[:600], u[600:], y[600:], .1, IOStateSpaceOptions{}); err != context.Canceled {
+	if _, err := IdentifyIOStateSpace(ctx, u[:600], y[:600], u[600:], y[600:], .1, IOStateSpaceOptions{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
 	}
-	for _, opts := range []IOStateSpaceOptions{{Order: 13}, {InputDelay: 101}, {MaxEvaluations: 2001}, {ValidationInitialCondition: "estimate", InitializationSamples: 899}} {
-		if _, err := IdentifyIOStateSpace(context.Background(), u[:600], y[:600], u[600:], y[600:], .1, opts); err == nil {
-			t.Fatalf("invalid options accepted %+v", opts)
+	for _, tc := range []struct {
+		opts IOStateSpaceOptions
+		want error
+	}{
+		{IOStateSpaceOptions{Order: 13}, ErrInvalidOrder},
+		{IOStateSpaceOptions{InputDelay: 101}, ErrInvalidArgument},
+		{IOStateSpaceOptions{MaxEvaluations: 2001}, ErrInvalidArgument},
+		{IOStateSpaceOptions{ValidationInitialCondition: "estimate", InitializationSamples: 899}, ErrInvalidArgument},
+		{IOStateSpaceOptions{InitialCondition: "guess"}, ErrInvalidArgument},
+	} {
+		if _, err := IdentifyIOStateSpace(context.Background(), u[:600], y[:600], u[600:], y[600:], .1, tc.opts); !errors.Is(err, tc.want) {
+			t.Errorf("options %+v: err = %v, want %v", tc.opts, err, tc.want)
 		}
+	}
+	for _, dt := range []float64{0, math.NaN()} {
+		if _, err := IdentifyIOStateSpace(context.Background(), u[:600], y[:600], u[600:], y[600:], dt, IOStateSpaceOptions{}); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("dt=%g: err = %v, want ErrInvalidSampleTime", dt, err)
+		}
+	}
+	if _, err := IdentifyIOStateSpace(context.Background(), u[:10], y[:10], u[600:], y[600:], .1, IOStateSpaceOptions{}); !errors.Is(err, ErrInsufficientData) {
+		t.Errorf("short record: err = %v, want ErrInsufficientData", err)
+	}
+	if _, err := IdentifyIOStateSpace(context.Background(), u[:600], y[:599], u[600:], y[600:], .1, IOStateSpaceOptions{}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("length mismatch: err = %v, want ErrDimensionMismatch", err)
+	}
+	bad := append([]float64(nil), y[:600]...)
+	bad[5] = math.Inf(1)
+	if _, err := IdentifyIOStateSpace(context.Background(), u[:600], bad, u[600:], y[600:], .1, IOStateSpaceOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Inf sample: err = %v, want ErrInvalidArgument", err)
 	}
 	constant := make([]float64, 600)
 	for k := range constant {
@@ -157,7 +183,7 @@ func TestIdentifyIOStateSpaceDelayedExcerptEstimatesPreRecordInputs(t *testing.T
 		for _, delay := range []int{0, 2} {
 			u, y := ioIdentificationFixture(0, direct, delay, []float64{.4, .3})
 			const cut = 100
-			for _, mode := range []string{"continuation", "estimate"} {
+			for _, mode := range []IOInitialCondition{IOInitialContinuation, IOInitialEstimate} {
 				options := IOStateSpaceOptions{Order: 2, InputDelay: delay, DirectFeedthrough: direct, ValidationInitialCondition: mode}
 				vu, vy := u[600:], y[600:]
 				if mode == "estimate" {
@@ -194,6 +220,27 @@ func TestIdentifyIOStateSpaceDelayedExcerptEstimatesPreRecordInputs(t *testing.T
 					}
 				}
 			}
+		}
+	}
+}
+
+func TestIdentifyIOStateSpaceFailedCandidateCarriesError(t *testing.T) {
+	u, y := ioIdentificationFixture(0, false, 0, nil)
+	_, err := IdentifyIOStateSpace(context.Background(), u[:25], y[:25], u[600:], y[600:], .1, IOStateSpaceOptions{Order: 2})
+	if !errors.Is(err, ErrInsufficientData) {
+		t.Fatalf("too few training rows: err = %v, want ErrInsufficientData", err)
+	}
+	res, err := IdentifyIOStateSpace(context.Background(), u[:200], y[:200], u[600:], y[600:], .1, IOStateSpaceOptions{MinOrder: 1, MaxOrder: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range res.Candidates {
+		if c.Err != nil {
+			if c.Convergence != IOFailed || c.Failure != c.Err.Error() || c.System != nil || c.ValidationNRMSE != 0 {
+				t.Errorf("order %d failed candidate = %+v", c.Order, c)
+			}
+		} else if c.System == nil || c.Convergence == IOFailed {
+			t.Errorf("order %d fitted candidate missing System or marked failed", c.Order)
 		}
 	}
 }
