@@ -409,7 +409,7 @@ func discretizeInternalModel(sys *System, dt float64, opts C2DOptions) (*System,
 	case C2DMethodFOH:
 		disc, err = rational.discretizeModifiedFOH(dt)
 	default:
-		return nil, ErrInvalidConversionOptions
+		return nil, fmt.Errorf("method %q with internal delays: %w", opts.Method, ErrOptionUnsupported)
 	}
 	if err != nil {
 		return nil, err
@@ -601,8 +601,7 @@ func discretizeFOHFractionalChannel(cont *System, dt, tau float64) (*System, err
 	oldD.Set(0, 0, cont.D.At(0, 0)*rho/dt)
 	if n > 0 {
 		ad, bd := conversionZOHKernel(cont.A, cont.B, dt)
-		er, k0r, k1r := fohKernel(cont.A, rho)
-		_ = er
+		_, k0r, k1r := fohKernel(cont.A, rho)
 		ef, _, k1f := fohKernel(cont.A, dt-rho)
 		var weighted, plus, minus, minusKernel, adplus mat.Dense
 		weighted.Sub(k0r, k1r)
@@ -666,7 +665,7 @@ func discretizeDelayedChannels(sys *System, dt float64, opts C2DOptions) (*Syste
 			case C2DMethodImpulse:
 				disc, err = discretizeImpulseDelayedChannel(cont, dt, tau)
 			default:
-				return nil, ErrInvalidConversionOptions
+				return nil, fmt.Errorf("method %q with fractional channel delays: %w", opts.Method, ErrOptionUnsupported)
 			}
 			if err != nil {
 				return nil, err

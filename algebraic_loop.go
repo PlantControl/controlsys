@@ -23,6 +23,8 @@ type AlgebraicLoopError struct {
 	cause       error
 }
 
+// Error reports the singular loop, its condition number and any implicated
+// signals.
 func (e *AlgebraicLoopError) Error() string {
 	message := ErrAlgebraicLoop.Error()
 	if e.cause != nil {
@@ -36,6 +38,8 @@ func (e *AlgebraicLoopError) Error() string {
 	return message
 }
 
+// Unwrap returns the underlying cause, ErrAlgebraicLoop unless the loop was
+// reported under another sentinel.
 func (e *AlgebraicLoopError) Unwrap() error {
 	if e.cause != nil {
 		return e.cause

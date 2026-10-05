@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -2304,5 +2305,60 @@ func TestConversionNilAndFitMethod(t *testing.T) {
 	sys := makeTestSystem()
 	if _, _, err := sys.C2DFit(0.1, C2DOptions{}); !errors.Is(err, ErrOptionUnsupported) {
 		t.Errorf("C2DFit zoh: %v, want ErrOptionUnsupported", err)
+	}
+}
+
+func TestConversionErrorPrefixes(t *testing.T) {
+	sys := makeTestSystem()
+	disc, err := sys.C2D(0.1, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		err    error
+		prefix string
+		want   error
+	}{
+		"C2D discrete":   {func() error { _, err := disc.C2D(0.1, C2DOptions{}); return err }(), "C2D: ", ErrWrongDomain},
+		"C2D delayed":    {func() error { _, err := disc.C2D(0.1, C2DOptions{Method: C2DMethodTustin}); return err }(), "C2D: ", ErrWrongDomain},
+		"C2D method":     {func() error { _, err := sys.C2D(0.1, C2DOptions{Method: "bogus"}); return err }(), "C2D: ", ErrInvalidConversionOptions},
+		"D2C continuous": {func() error { _, err := sys.D2C(D2COptions{}); return err }(), "D2C: ", ErrWrongDomain},
+		"D2D method":     {func() error { _, err := disc.D2D(0.2, D2DOptions{Method: C2DMethodFOH}); return err }(), "D2D: ", ErrInvalidConversionOptions},
+		"C2DMap domain":  {func() error { _, _, err := disc.C2DMap(0.1, C2DOptions{}); return err }(), "C2DMap: ", ErrWrongDomain},
+		"D2CMap domain":  {func() error { _, _, err := sys.D2CMap(D2COptions{}); return err }(), "D2CMap: ", ErrWrongDomain},
+	} {
+		if !errors.Is(tc.err, tc.want) {
+			t.Errorf("%s: err = %v, want %v", name, tc.err, tc.want)
+			continue
+		}
+		msg := tc.err.Error()
+		if !strings.HasPrefix(msg, tc.prefix) || strings.Count(msg, tc.prefix) != 1 || strings.Contains(msg, "controlsys: controlsys:") {
+			t.Errorf("%s: message %q, want single %q prefix", name, msg, tc.prefix)
+		}
+	}
+}
+
+func TestConversionRejectsNonFinite(t *testing.T) {
+	sys := makeTestSystem()
+	sys.A.Set(0, 0, math.NaN())
+	if _, err := sys.C2D(0.1, C2DOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("C2D: %v", err)
+	}
+	if _, _, err := sys.C2DMap(0.1, C2DOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("C2DMap: %v", err)
+	}
+	disc, err := makeTestSystem().C2D(0.1, C2DOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disc.B.Set(0, 0, math.Inf(1))
+	if _, err := disc.D2C(D2COptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("D2C: %v", err)
+	}
+	if _, _, err := disc.D2CMap(D2COptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("D2CMap: %v", err)
+	}
+	if _, err := disc.D2D(0.2, D2DOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("D2D: %v", err)
 	}
 }

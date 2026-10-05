@@ -9,10 +9,10 @@ import (
 
 func conversionThiranChannel(samples, dt float64, maxOrder int) (*System, error) {
 	if samples < 0 || math.IsNaN(samples) || math.IsInf(samples, 0) {
-		return nil, ErrNegativeDelay
+		return nil, fmt.Errorf("delay of %g samples: %w", samples, ErrNegativeDelay)
 	}
 	if maxOrder <= 0 {
-		return nil, ErrInvalidConversionOptions
+		return nil, fmt.Errorf("thiran order %d must be positive: %w", maxOrder, ErrInvalidConversionOptions)
 	}
 	if isIntegerSampleDelay(samples) {
 		gain, err := NewGain(mat.NewDense(1, 1, []float64{1}), dt)
@@ -34,7 +34,7 @@ func conversionThiranChannel(samples, dt float64, maxOrder int) (*System, error)
 	numerator := make([]float64, order+1)
 	for i, value := range coefficients {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return nil, fmt.Errorf("Thiran coefficients overflow: %w", ErrOverflow)
+			return nil, fmt.Errorf("thiran coefficients overflow: %w", ErrOverflow)
 		}
 		numerator[order-i] = value
 	}
@@ -177,9 +177,6 @@ func discretizeInternalThiran(sys *System, dt float64, opts C2DOptions) (*System
 		if err != nil {
 			return nil, err
 		}
-	}
-	if err != nil {
-		return nil, err
 	}
 	propagateNames(out, sys)
 	if n, _, _ := out.Dims(); len(out.StateName) != n {

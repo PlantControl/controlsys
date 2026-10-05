@@ -90,7 +90,7 @@ func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult
 	var eig mat.Eigen
 	ok := eig.Factorize(sys.A, mat.EigenRight)
 	if !ok {
-		return nil, fmt.Errorf("controlsys: eigendecomposition failed")
+		return nil, fmt.Errorf("eigendecomposition did not converge: %w", ErrSchurFailed)
 	}
 
 	vals := eig.Values(nil)
@@ -132,7 +132,7 @@ func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult
 			})
 			used[i] = true
 		} else {
-			return nil, fmt.Errorf("controlsys: complex eigenvalue without conjugate pair")
+			return nil, fmt.Errorf("complex eigenvalue without conjugate pair: %w", ErrConjugatePairs)
 		}
 	}
 
@@ -165,22 +165,20 @@ func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult
 
 	cond := lu.Cond()
 	if math.IsNaN(cond) || math.IsInf(cond, 1) || cond > 1e12 {
-		return nil, fmt.Errorf("controlsys: eigenvector matrix ill-conditioned (κ=%.1e)", cond)
+		return nil, fmt.Errorf("eigenvector matrix ill-conditioned (κ=%.1e): %w", cond, ErrSingularTransform)
 	}
 
-	// Anew = T⁻¹*A*T: compute AT = A*T, then solve T*Anew = AT
 	AT := mat.NewDense(n, n, nil)
 	AT.Mul(sys.A, T)
 	Anew := mat.NewDense(n, n, nil)
 	if err := lu.SolveTo(Anew, false, AT); err != nil {
-		return nil, fmt.Errorf("controlsys: solve failed: %w", ErrSingularTransform)
+		return nil, fmt.Errorf("Canon: eigenvector basis solve failed: %w", ErrSingularTransform)
 	}
 
-	// Bnew = T⁻¹*B: solve T*Bnew = B
 	Bnew := newDense(n, m)
 	if m > 0 {
 		if err := lu.SolveTo(Bnew, false, sys.B); err != nil {
-			return nil, fmt.Errorf("controlsys: solve failed: %w", ErrSingularTransform)
+			return nil, fmt.Errorf("Canon: eigenvector basis solve failed: %w", ErrSingularTransform)
 		}
 	}
 
@@ -192,7 +190,7 @@ func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult
 	}
 	Tinv := mat.NewDense(n, n, nil)
 	if err := lu.SolveTo(Tinv, false, eyeDense(n)); err != nil {
-		return nil, fmt.Errorf("controlsys: solve failed: %w", ErrSingularTransform)
+		return nil, fmt.Errorf("Canon: eigenvector basis solve failed: %w", ErrSingularTransform)
 	}
 	return &CanonResult{Sys: newSys, T: Tinv}, nil
 }
@@ -222,7 +220,7 @@ func canonModalSchur(sys *System, policy realizationTransformPolicy) (*CanonResu
 	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
 		n, t, n, wr, wi, z, n, work, lwork, bwork)
 	if !ok {
-		return nil, fmt.Errorf("controlsys: Schur decomposition failed: %w", ErrSchurFailed)
+		return nil, fmt.Errorf("Canon: real Schur decomposition did not converge: %w", ErrSchurFailed)
 	}
 
 	if err := schurSortByMagnitude(t, z, n); err != nil {
@@ -234,13 +232,11 @@ func canonModalSchur(sys *System, policy realizationTransformPolicy) (*CanonResu
 
 	zGen := blas64.General{Rows: n, Cols: n, Stride: n, Data: z}
 
-	// B_modal = Z' * B
 	bNew := make([]float64, n*m)
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1, zGen,
 		blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
 		0, blas64.General{Rows: n, Cols: m, Stride: m, Data: bNew})
 
-	// C_modal = C * Z
 	cNew := make([]float64, p*n)
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
 		blas64.General{Rows: p, Cols: n, Stride: cRaw.Stride, Data: cRaw.Data},
