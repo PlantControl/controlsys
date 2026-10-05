@@ -61,3 +61,38 @@ func TestSynthesisRejectsInvalidPlant(t *testing.T) {
 		}
 	}
 }
+
+// I + D22·Dk that cancels to rounding noise is scale-free well conditioned,
+// so a plain inversion accepted it and returned a garbage controller.
+func TestNewControllerRejectsCancelledLoopShift(t *testing.T) {
+	D22 := mat.NewDense(2, 2, []float64{0.6, 0.2, -0.3, 0.4})
+	D := mat.NewDense(3, 3, nil)
+	D.Set(0, 0, 1)
+	D.Slice(1, 3, 1, 3).(*mat.Dense).Copy(D22)
+	D.Set(1, 0, 1)
+	D.Set(0, 1, 1)
+	P, err := New(
+		mat.NewDense(2, 2, []float64{-1, 0.3, 0.2, -2}),
+		mat.NewDense(2, 3, []float64{1, 0, 0.5, 0, 1, 1}),
+		mat.NewDense(3, 2, []float64{1, 0, 0.4, 1, 0, 1}),
+		D, 0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gp, err := partitionGeneralizedPlant("test", P, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var Dk mat.Dense
+	if err := Dk.Inverse(D22); err != nil {
+		t.Fatal(err)
+	}
+	Dk.Scale(-1, &Dk)
+	Dk.Add(&Dk, mat.NewDense(2, 2, []float64{3e-15, -2e-15, 1e-15, 4e-15}))
+	n := 2
+	_, err = gp.newController(mat.NewDense(n, n, []float64{-1, 0, 0, -1}), mat.NewDense(n, 2, []float64{1, 0, 0, 1}), mat.NewDense(2, n, []float64{1, 0, 0, 1}), &Dk)
+	if !errors.Is(err, ErrAlgebraicLoop) {
+		t.Fatalf("err = %v, want ErrAlgebraicLoop", err)
+	}
+}

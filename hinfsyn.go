@@ -15,7 +15,9 @@ import (
 // info: X and Y are the state-feedback and filter Riccati solutions at
 // GammaOpt and CLPoles the closed-loop poles. For a discrete plant X and Y
 // solve the Riccati equations of its Tustin-equivalent continuous plant (in
-// the same state coordinates), not discrete Riccati equations.
+// the same state coordinates), not discrete Riccati equations; when HinfSyn
+// first shifts modes away from z = ±1 (see HinfSyn), that of the shifted
+// plant.
 type HinfSynResult struct {
 	K *System
 	// GammaOpt is the gamma K is built for: ||T_zw||inf < GammaOpt, within
@@ -34,7 +36,11 @@ type HinfSynResult struct {
 // A nonzero D11 uses the Glover-Doyle general formulas, whose central
 // controller may have feedthrough. A nonzero D22 is handled by a loop shift:
 // K is designed for D22 = 0 and returned as K0 (I + D22 K0)^-1, giving the
-// same closed loop and gamma.
+// same closed loop and gamma, as MATLAB's loop-shifting Riccati method does.
+// When that shift is ill-posed for the central controller (I + D22·Dk
+// singular, e.g. the square one-block problem Mixsyn(G, W1, nil, nil) with a
+// biproper G), K0 is the non-central controller of the Youla parameter
+// Q = const with ‖Q‖ = γ/2, which also meets gamma.
 //
 // D12 must have full column rank and D21 full row rank; otherwise HinfSyn
 // returns ErrInvalidPartition (MATLAB regularizes the plant instead).
@@ -46,15 +52,17 @@ type HinfSynResult struct {
 // apply to P12 and P21 at z = -1, the unit-circle point Tustin sends to
 // s = ∞, in line with MATLAB's requirement that they have no zeros on the
 // unit circle. A plant mode at z = -1 is handled by designing for P(-z) and
-// reflecting K back; modes at both z = 1 and z = -1 return
-// ErrOptionUnsupported.
+// reflecting K back. Modes at (or near) both z = 1 and z = -1 are first moved
+// by a static output feedback u = D0·y + v, which leaves the closed loops and
+// gamma unchanged; K is the design for the shifted plant plus D0, and the
+// rank conditions apply to the shifted plant.
 func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	gp, err := partitionGeneralizedPlant("HinfSyn", P, nmeas, ncont)
 	if err != nil {
 		return nil, err
 	}
 	if P.IsDiscrete() {
-		return hinfSynDiscrete(gp.op, P, nmeas, ncont)
+		return hinfSynDiscrete(gp, P, nmeas, ncont)
 	}
 	return hinfSynPartition(gp, "D12", "D21")
 }
@@ -81,7 +89,45 @@ func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string) (*HinfSynR
 // when I + A is worse conditioned than I − A (a mode at or near z = −1,
 // which the plain map sends to s = ∞). Both maps take the unit circle onto
 // the imaginary axis and the open unit disk onto the open left half-plane.
-func hinfSynDiscrete(op string, P *System, nmeas, ncont int) (*HinfSynResult, error) {
+// When both I + A and I − A are ill-conditioned (modes at or near both
+// z = 1 and z = −1, or a strongly non-normal A) it first closes a static output feedback u = D0·y + v,
+// which moves those modes, designs K' from y to v, and returns K = K' + D0:
+// the closed loops, and so the achievable γ, are identical.
+func hinfSynDiscrete(gp *generalizedPlantPartition, P *System, nmeas, ncont int) (*HinfSynResult, error) {
+	op := gp.op
+	if cond := tustinCond(P.A); cond > hinfTustinCond {
+		if D0, Ps, ok := gp.unitCircleModeShift(P, cond); ok {
+			res, err := hinfSynTustin(op, Ps, nmeas, ncont)
+			if err != nil {
+				return nil, err
+			}
+			res.K.D.Add(res.K.D, D0)
+			return res, nil
+		}
+	}
+	return hinfSynTustin(op, P, nmeas, ncont)
+}
+
+// hinfTustinCond is the tustinCond above which hinfSynDiscrete shifts the
+// plant's modes away from z = ±1 before the Tustin map. Beyond it the
+// Tustin-equivalent plant is stiff enough to cost the continuous Riccati
+// solutions accuracy.
+const hinfTustinCond = 1e2
+
+// tustinCond is the condition number of I + A or I − A, whichever is better
+// conditioned: that of the better of the two Tustin maps.
+func tustinCond(A *mat.Dense) float64 {
+	n, _ := A.Dims()
+	var plus, minus mat.LU
+	IpA, ImA := eyeDense(n), eyeDense(n)
+	IpA.Add(IpA, A)
+	ImA.Sub(ImA, A)
+	plus.Factorize(IpA)
+	minus.Factorize(ImA)
+	return math.Min(plus.Cond(), minus.Cond())
+}
+
+func hinfSynTustin(op string, P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	n, _, _ := P.Dims()
 	var plus, minus mat.LU
 	IpA, ImA := eyeDense(n), eyeDense(n)
@@ -99,7 +145,7 @@ func hinfSynDiscrete(op string, P *System, nmeas, ncont int) (*HinfSynResult, er
 	}
 	Pc, err := Pd.undiscretizeTustin(0)
 	if errors.Is(err, ErrSingularTransform) {
-		return nil, fmt.Errorf("%s: plant has modes at both z = 1 and z = -1, which no Tustin map can take to continuous time: %w", op, ErrOptionUnsupported)
+		return nil, fmt.Errorf("%s: plant has modes at both z = 1 and z = -1 that no static output feedback moves: %w", op, ErrOptionUnsupported)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
@@ -128,6 +174,133 @@ func hinfSynDiscrete(op string, P *System, nmeas, ncont int) (*HinfSynResult, er
 	}
 	res.K = K
 	return res, nil
+}
+
+// unitCircleModeShift returns a static output feedback D0 and the plant P
+// with u = D0·y + v closed, from [w; v] to [z; y]. With Δ = (I − D22 D0)⁻¹:
+//
+//	A' = A + B2 D0 Δ C2,  B' = [B1 + B2 D0 Δ D21, B2 (I + D0 Δ D22)],
+//	C' = [C1 + D12 D0 Δ C2; Δ C2],
+//	D' = [D11 + D12 D0 Δ D21, D12 (I + D0 Δ D22); Δ D21, Δ D22].
+//
+// Static output feedback can move every mode that is both controllable from
+// u and observable from y (Davison & Wang, 1975), which unit-circle modes of
+// a stabilizable and detectable plant are. D0 is the best of a fixed set of
+// candidates by tustinCond, and ok is false when none improves on cond, that
+// of P; any D0 gives the same closed loops, so the choice affects
+// conditioning only.
+func (gp *generalizedPlantPartition) unitCircleModeShift(P *System, cond float64) (*mat.Dense, *System, bool) {
+	m2, p2 := gp.m2, gp.p2
+	base := (1 + mat.Norm(gp.A, 2)) / math.Max(mat.Norm(gp.B2, 2)*mat.Norm(gp.C2, 2), math.SmallestNonzeroFloat64)
+	B2tC2t := mulDense(mat.DenseCopyOf(gp.B2.T()), mat.DenseCopyOf(gp.C2.T()))
+	dirs := []*mat.Dense{B2tC2t}
+	for k := 1; k <= 4; k++ {
+		D := mat.NewDense(m2, p2, nil)
+		for i := range m2 {
+			for j := range p2 {
+				D.Set(i, j, math.Cos(float64(k*(i*p2+j)+k*k)))
+			}
+		}
+		dirs = append(dirs, D)
+	}
+	var best *mat.Dense
+	bestCond := cond
+	for _, dir := range dirs {
+		dn := mat.Norm(dir, 2)
+		if dn == 0 {
+			continue
+		}
+		for _, t := range []float64{0.1, -0.1, 0.5, -0.5, 1, -1} {
+			D0 := mat.NewDense(m2, p2, nil)
+			D0.Scale(t*base/dn, dir)
+			As, ok := shiftedStateMatrix(gp, D0)
+			if !ok {
+				continue
+			}
+			if c := tustinCond(As); c < bestCond {
+				best, bestCond = D0, c
+			}
+		}
+	}
+	if best == nil {
+		return nil, nil, false
+	}
+	Ps, ok := gp.closeStaticLoop(P, best)
+	if !ok {
+		return nil, nil, false
+	}
+	return best, Ps, true
+}
+
+// staticLoopGain returns D0·Δ = D0 (I − D22 D0)⁻¹, or false when the loop is
+// ill-posed.
+func staticLoopGain(gp *generalizedPlantPartition, D0 *mat.Dense) (*mat.Dense, bool) {
+	IDD := mulDense(gp.D22, D0)
+	IDD.Scale(-1, IDD)
+	for i := range gp.p2 {
+		IDD.Set(i, i, IDD.At(i, i)+1)
+	}
+	var lu mat.LU
+	lu.Factorize(IDD)
+	if !(lu.Cond() < hinfTustinCond) {
+		return nil, false
+	}
+	Delta, err := invertSmall(IDD, gp.p2)
+	if err != nil {
+		return nil, false
+	}
+	return mulDense(D0, Delta), true
+}
+
+func shiftedStateMatrix(gp *generalizedPlantPartition, D0 *mat.Dense) (*mat.Dense, bool) {
+	G, ok := staticLoopGain(gp, D0)
+	if !ok {
+		return nil, false
+	}
+	As := mulDense(mulDense(gp.B2, G), gp.C2)
+	As.Add(gp.A, As)
+	return As, true
+}
+
+func (gp *generalizedPlantPartition) closeStaticLoop(P *System, D0 *mat.Dense) (*System, bool) {
+	G, ok := staticLoopGain(gp, D0)
+	if !ok {
+		return nil, false
+	}
+	n, m1, m2, p1, p2 := gp.n, gp.m1, gp.m2, gp.p1, gp.p2
+	Delta := mulDense(gp.D22, G)
+	for i := range p2 {
+		Delta.Set(i, i, Delta.At(i, i)+1)
+	}
+	U := mulDense(G, gp.D22)
+	for i := range m2 {
+		U.Set(i, i, U.At(i, i)+1)
+	}
+	A := mulDense(mulDense(gp.B2, G), gp.C2)
+	A.Add(gp.A, A)
+	B := mat.NewDense(n, m1+m2, nil)
+	B1 := mulDense(mulDense(gp.B2, G), gp.D21)
+	B1.Add(gp.B1, B1)
+	setBlock(B, 0, 0, B1)
+	setBlock(B, 0, m1, mulDense(gp.B2, U))
+	C := mat.NewDense(p1+p2, n, nil)
+	C1 := mulDense(mulDense(gp.D12, G), gp.C2)
+	C1.Add(gp.C1, C1)
+	setBlock(C, 0, 0, C1)
+	setBlock(C, p1, 0, mulDense(Delta, gp.C2))
+	D := mat.NewDense(p1+p2, m1+m2, nil)
+	D11 := mulDense(mulDense(gp.D12, G), gp.D21)
+	D11.Add(gp.D11, D11)
+	setBlock(D, 0, 0, D11)
+	setBlock(D, 0, m1, mulDense(gp.D12, U))
+	setBlock(D, p1, 0, mulDense(Delta, gp.D21))
+	setBlock(D, p1, m1, mulDense(Delta, gp.D22))
+	Ps, err := New(A, B, C, D, P.Dt)
+	if err != nil {
+		return nil, false
+	}
+	propagateNames(Ps, P)
+	return Ps, true
 }
 
 // hinfGammaFloor ends bisection when the optimum is zero, where the

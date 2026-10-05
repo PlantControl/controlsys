@@ -1023,11 +1023,68 @@ func TestHinfSyn_DiscretePoleAtMinusOne(t *testing.T) {
 	}
 }
 
+// Modes at both z = 1 and z = −1 have no Tustin equivalent under either map;
+// HinfSyn first closes a static output feedback that moves them. Checked
+// against the unit-circle sweep, against the plain Tustin route on the plant
+// with a different static gain closed by hand, and against plants whose z = −1 mode is perturbed into the disk.
 func TestHinfSyn_DiscreteModesAtBothPlusMinusOne(t *testing.T) {
 	P := twoDisturbancePlant(t, []float64{1, 0.3, 0, -1}, 0.2)
-	if _, err := HinfSyn(P, 1, 1); !errors.Is(err, ErrOptionUnsupported) {
-		t.Fatalf("HinfSyn err = %v, want ErrOptionUnsupported", err)
+	res := assertDiscreteHinfSyn(t, P, 1, 1)
+
+	// u = d·y + v with D22 = 0 moves both modes (A + B2·d·C2 has eigenvalues
+	// ≈ 1.35 and −0.85), so the shifted plant designs through Tustin alone.
+	const d = 0.5
+	B2, C2 := mat.NewDense(2, 1, []float64{0.5, 1}), mat.NewDense(1, 2, []float64{1, 0.5})
+	shift := func(M, L, R *mat.Dense) *mat.Dense {
+		var LR mat.Dense
+		LR.Mul(L, R)
+		LR.Scale(d, &LR)
+		LR.Add(M, &LR)
+		return &LR
 	}
+	var B1, C1, D11, D12, D21 = P.B.Slice(0, 2, 0, 2).(*mat.Dense), P.C.Slice(0, 2, 0, 2).(*mat.Dense),
+		P.D.Slice(0, 2, 0, 2).(*mat.Dense), P.D.Slice(0, 2, 2, 3).(*mat.Dense), P.D.Slice(2, 3, 0, 2).(*mat.Dense)
+	Bs, Cs, Ds := mat.DenseCopyOf(P.B), mat.DenseCopyOf(P.C), mat.DenseCopyOf(P.D)
+	Bs.Slice(0, 2, 0, 2).(*mat.Dense).Copy(shift(B1, B2, D21))
+	Cs.Slice(0, 2, 0, 2).(*mat.Dense).Copy(shift(C1, D12, C2))
+	Ds.Slice(0, 2, 0, 2).(*mat.Dense).Copy(shift(D11, D12, D21))
+	Ps, err := New(shift(P.A, B2, C2), Bs, Cs, Ds, P.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := assertDiscreteHinfSyn(t, Ps, 1, 1)
+	if math.Abs(res.GammaOpt-ref.GammaOpt) > 1e-6*ref.GammaOpt {
+		t.Fatalf("γ = %.12g, hand-shifted plant γ = %.12g", res.GammaOpt, ref.GammaOpt)
+	}
+
+	// Near-both plants are shifted too: through the Tustin map alone γ was
+	// 1.5 at δ = 1e-5 and 4e4 at δ = 1e-7.
+	for _, delta := range []float64{1e-3, 1e-5, 1e-7} {
+		pert := assertDiscreteHinfSyn(t, twoDisturbancePlant(t, []float64{1, 0.3, 0, -1 + delta}, 0.2), 1, 1)
+		if math.Abs(pert.GammaOpt-res.GammaOpt) > 10*delta*res.GammaOpt {
+			t.Fatalf("A22 = −1 + %g: γ = %.12g, unperturbed γ = %.12g", delta, pert.GammaOpt, res.GammaOpt)
+		}
+	}
+}
+
+// MIMO variant with D22 ≠ 0, two measurements and a third stable mode.
+func TestHinfSyn_DiscreteModesAtBothPlusMinusOneMIMO(t *testing.T) {
+	P, err := New(
+		mat.NewDense(3, 3, []float64{1, 0.3, 0.1, 0, -1, 0.2, 0, 0, 0.5}),
+		mat.NewDense(3, 4, []float64{0.1, 0, 0.2, 0.5, 0, 0.2, 0, 1, 0.3, 0, 0.1, -0.4}),
+		mat.NewDense(4, 3, []float64{1, 0, 0.2, 0, 0.4, 0, 1, 0.5, 0, 0, 1, 1}),
+		mat.NewDense(4, 4, []float64{
+			0.1, 0, 0, 0,
+			0, 0, 0, 0.2,
+			0.3, 0.1, 0, 0.3,
+			0, 0.2, 0.4, -0.5,
+		}),
+		0.1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDiscreteHinfSyn(t, P, 2, 1)
 }
 
 // In discrete time the rank condition is on P12 and P21 at z = −1, the
@@ -1060,5 +1117,70 @@ func TestHinfSyn_DiscreteRankAtMinusOne(t *testing.T) {
 	}
 	if _, err := HinfSyn(mk(-M.At(1, 0)/M.At(0, 0)), 1, 1); !errors.Is(err, ErrInvalidPartition) {
 		t.Fatalf("HinfSyn err = %v, want ErrInvalidPartition", err)
+	}
+}
+
+// Every constant Youla parameter Q with ‖Q‖ < γ must give a stabilizing
+// controller with ‖T_zw‖∞ < γ (Zhou, Doyle & Glover, Thm 17.13); this checks
+// the non-central M∞ blocks (B̂2, Ĉ2, D̂12, D̂21) against a Hamiltonian
+// bisection of the hand-built closed loop, with D1111 nonempty and D22 ≠ 0.
+func TestHinfYoulaParameterMeetsGamma(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		P            *System
+		nmeas, ncont int
+	}{
+		{"generic D11", genericD11Plant(t, 0.3), 1, 1},
+		{"MIMO mixed sensitivity", mimoBiproperMixedSensitivityPlant(t), 2, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			gp, err := partitionGeneralizedPlant("test", c.P, c.nmeas, c.ncont)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hp, err := newHinfGeneralPlant(gp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := HinfSyn(c.P, c.nmeas, c.ncont)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gamma := res.GammaOpt
+			X, Y, Rinv, Rtinv, err := hp.riccatis(gamma)
+			if err != nil {
+				t.Fatal(err)
+			}
+			M, err := hp.youla(gamma, X, Y, Rinv, Rtinv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, frac := range []float64{0.3, 0.9} {
+				Q := mat.NewDense(c.ncont, c.nmeas, nil)
+				for i := range c.ncont {
+					for j := range c.nmeas {
+						Q.Set(i, j, []float64{0.6, -0.3, 0.2, 0.5}[(i*c.nmeas+j)%4])
+					}
+				}
+				Q.Scale(frac*gamma/mat.Norm(Q, 2), Q)
+				K, err := gp.newController(M.controller(Q))
+				if err != nil {
+					t.Fatal(err)
+				}
+				cl := handLFT(t, c.P, K, c.nmeas, c.ncont)
+				var eig mat.Eigen
+				if !eig.Factorize(cl.A, mat.EigenNone) {
+					t.Fatal("closed-loop eigenvalues failed")
+				}
+				for _, ev := range eig.Values(nil) {
+					if real(ev) >= 0 {
+						t.Fatalf("‖Q‖ = %gγ: closed loop unstable: pole %v", frac, ev)
+					}
+				}
+				if norm := hinfNormBisection(t, cl.A, cl.B, cl.C, cl.D); norm > gamma*(1+1e-9) {
+					t.Fatalf("‖Q‖ = %gγ: ‖CL‖∞ = %.12g exceeds γ = %.12g", frac, norm, gamma)
+				}
+			}
+		})
 	}
 }
