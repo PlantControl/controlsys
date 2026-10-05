@@ -42,7 +42,7 @@ type ModalReductionResult struct {
 // returns ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/lti.reducespec.html.
 func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResult, error) {
-	if err := requireSystem("ModalTruncate", sys); err != nil {
+	if err := requireFiniteSystem("ModalTruncate", sys); err != nil {
 		return nil, err
 	}
 	if opts == nil {
