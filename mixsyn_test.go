@@ -837,3 +837,158 @@ func TestMixsynDiscreteMIMO(t *testing.T) {
 	W3 := diagWeight(t, dw(0.05, []float64{8}, 5), dw(0.05, []float64{8}, 5))
 	assertDiscreteMixsyn(t, G, W1, W2, W3)
 }
+
+// With W2 = W3 = nil and a biproper G the problem is square one-block: the
+// central controller has Dk = G(∞)⁻¹, so I + D22·Dk = I − G(∞)·Dk = 0 and its
+// loop shift is ill-posed. HinfSyn returns a non-central controller instead.
+func TestMixsynW1OnlyBiproperPlant(t *testing.T) {
+	W1 := mixsynWeight(t, 10, []float64{1}, 0.1)
+	t.Run("nonminimum phase", func(t *testing.T) {
+		G := mixsynTF(t, []float64{0.5, 1, -2}, []float64{1, 3, 2}, 0)
+		assertMixsynOracle(t, G, W1, nil, nil)
+	})
+	t.Run("MIMO", func(t *testing.T) {
+		// G has a transmission zero at s ≈ 1.19.
+		G, err := New(
+			mat.NewDense(3, 3, []float64{-1, 0.4, 0, -0.3, -2, 0.5, 0.2, 0, -3}),
+			mat.NewDense(3, 2, []float64{1, 0, 0.5, 1, 0, -0.7}),
+			mat.NewDense(2, 3, []float64{1, -0.2, 0.3, 0, -1, 0.8}),
+			mat.NewDense(2, 2, []float64{0.5, 0.1, -0.2, 0.4}),
+			0,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		W := diagWeight(t, W1, mixsynWeight(t, 5, []float64{0.5}, 0.2))
+		assertMixsynOracle(t, G, W, nil, nil)
+	})
+	t.Run("discrete", func(t *testing.T) {
+		const dt = 0.1
+		Gc := mixsynTF(t, []float64{0.5, 1, -2}, []float64{1, 3, 2}, 0)
+		G, err := Gc.C2D(dt, C2DOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		Wd, err := Makeweight(10, []float64{1}, 0.1, dt, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertDiscreteMixsyn(t, G, Wd, nil, nil)
+	})
+	// A minimum-phase G admits S → 0 (K → ∞), so the infimum is 0 and
+	// unattained (6WORAF); the controller must still be stabilizing and meet
+	// the γ it reports.
+	t.Run("minimum phase", func(t *testing.T) {
+		assertZeroInfimumMixsyn(t, mixsynTF(t, []float64{0.5, 1, 2}, []float64{1, 3, 2}, 0), W1)
+	})
+	t.Run("minimum phase MIMO", func(t *testing.T) {
+		G, W := minimumPhaseMIMOW1Only(t)
+		assertZeroInfimumMixsyn(t, G, W)
+	})
+	t.Run("minimum phase discrete", func(t *testing.T) {
+		const dt = 0.1
+		G, err := mixsynTF(t, []float64{0.5, 1, 2}, []float64{1, 3, 2}, 0).C2D(dt, C2DOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		Wd, err := Makeweight(10, []float64{1}, 0.1, dt, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertZeroInfimumMixsyn(t, G, Wd)
+	})
+	t.Run("minimum phase discrete MIMO", func(t *testing.T) {
+		const dt = 0.05
+		Gc, _ := minimumPhaseMIMOW1Only(t)
+		G, err := Gc.C2D(dt, C2DOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		W1d, err := Makeweight(10, []float64{1}, 0.1, dt, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		W2d, err := Makeweight(5, []float64{0.5}, 0.2, dt, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertZeroInfimumMixsyn(t, G, diagWeight(t, W1d, W2d))
+	})
+}
+
+// minimumPhaseMIMOW1Only is the 6WORAF repro: a biproper G with transmission
+// zeros −2.33 and −2.85 ± 2.03i and a diagonal W1.
+func minimumPhaseMIMOW1Only(t *testing.T) (G, W1 *System) {
+	t.Helper()
+	G, err := New(
+		mat.NewDense(3, 3, []float64{-1, 0.4, 0, -0.3, -2, 0.5, 0.2, 0, -3}),
+		mat.NewDense(3, 2, []float64{1, 0, 0.5, 1, 0, -0.7}),
+		mat.NewDense(2, 3, []float64{1, -0.2, 0.3, 0, 1, 0.8}),
+		mat.NewDense(2, 2, []float64{0.5, 0.1, -0.2, 0.4}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return G, diagWeight(t, mixsynWeight(t, 10, []float64{1}, 0.1), mixsynWeight(t, 5, []float64{0.5}, 0.2))
+}
+
+// assertZeroInfimumMixsyn checks Mixsyn(G, W1, nil, nil) for a problem whose
+// infimum is 0 and unattained: the hand-built loop is stable, its H∞ norm (by
+// Hamiltonian bisection, after an exact bilinear map for a discrete G) is
+// Gamma and at most HinfSyn's bound, and that bound is small.
+func assertZeroInfimumMixsyn(t *testing.T, G, W1 *System) {
+	t.Helper()
+	r, err := Mixsyn(G, W1, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	A, B, C, D := mixsynHandLoop(t, G, r.K, W1, nil, nil)
+	if G.IsDiscrete() {
+		assertSchurStable(t, A)
+		A, B, C, D = bilinearToContinuous(t, A, B, C, D)
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(A, mat.EigenNone) {
+		t.Fatal("closed-loop eigenvalues failed")
+	}
+	for _, ev := range eig.Values(nil) {
+		if real(ev) >= 0 {
+			t.Fatalf("closed loop unstable: pole %v", ev)
+		}
+	}
+	norm := hinfNormBisection(t, A, B, C, D)
+	if math.Abs(r.Gamma-norm) > 1e-6*norm || norm > r.Info.GammaOpt*(1+1e-9) {
+		t.Fatalf("Gamma = %.12g, bisection ‖CL‖∞ = %.12g, HinfSyn bound %.12g", r.Gamma, norm, r.Info.GammaOpt)
+	}
+	if r.Info.GammaOpt > 1e-3 {
+		t.Fatalf("HinfSyn bound %g, want near the zero infimum", r.Info.GammaOpt)
+	}
+}
+
+// bilinearToContinuous maps the discrete (A, B, C, D) by z = (1+s)/(1−s),
+// which preserves stability and the H∞ norm.
+func bilinearToContinuous(t *testing.T, A, B, C, D *mat.Dense) (Ac, Bc, Cc, Dc *mat.Dense) {
+	t.Helper()
+	n, _ := A.Dims()
+	IpA := mat.DenseCopyOf(A)
+	for i := range n {
+		IpA.Set(i, i, IpA.At(i, i)+1)
+	}
+	var inv mat.Dense
+	if err := inv.Inverse(IpA); err != nil {
+		t.Fatal(err)
+	}
+	Ac, Bc, Cc, Dc = new(mat.Dense), new(mat.Dense), new(mat.Dense), new(mat.Dense)
+	Ac.Mul(&inv, A)
+	Ac.Sub(Ac, &inv)
+	Bc.Mul(&inv, B)
+	Bc.Scale(math.Sqrt2, Bc)
+	Cc.Mul(C, &inv)
+	Cc.Scale(math.Sqrt2, Cc)
+	var CB mat.Dense
+	CB.Mul(Cc, B)
+	CB.Scale(1/math.Sqrt2, &CB)
+	Dc.Sub(D, &CB)
+	return Ac, Bc, Cc, Dc
+}
