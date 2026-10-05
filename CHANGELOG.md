@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## v2.2.0
+
+- Dependency: `plantcontrol.org/v1/gonum` v0.20.4. SVD (Dgesvd/Dbdsqr/Dlasq1) no longer panics or loops forever on NaN/Inf input (Go `math.Max`/`Min` propagate NaN where gfortran's MAX/MIN ignore it); `mat.SVD.Factorize` returns false for non-finite input (PlantControl/gonum#28).
+- CI fails on unformatted code (`gofmt -l`).
 
 ### Added
 
