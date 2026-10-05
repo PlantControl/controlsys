@@ -13,6 +13,8 @@ type ModsepResult struct {
 // Modsep splits sys = Slow + Fast around cutoff (MATLAB freqsep). Slow holds
 // the modes with natural frequency below cutoff; Fast holds the rest, the
 // feedthrough D and, for singular-E descriptors, the infinite modes.
+// A part without states on a model with no inputs or no outputs would be a
+// p×0 or 0×m static gain, which cannot be stored: ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.freqsep.html.
 func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
 	if !(cutoff > 0) {

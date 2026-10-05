@@ -9,6 +9,8 @@ type StabsepResult struct {
 // modes strictly inside the stability boundary, is always proper and carries
 // the feedthrough D; Unstable holds the remaining finite modes and, for
 // singular-E descriptors, the infinite (nondynamic/improper) modes.
+// A part without states on a model with no inputs or no outputs would be a
+// p×0 or 0×m static gain, which cannot be stored: ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.stabsep.html.
 func Stabsep(sys *System) (*StabsepResult, error) {
 	isStable := func(ev complex128) bool {

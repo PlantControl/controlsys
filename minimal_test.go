@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -290,13 +291,8 @@ func TestReduceMZero(t *testing.T) {
 
 	sys := &System{A: A, B: B, C: C, D: D}
 
-	res, err := sys.Reduce(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if res.Order != 0 {
-		t.Errorf("expected order 0 for m=0, got %d", res.Order)
+	if _, err := sys.Reduce(nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("m=0: err = %v, want ErrDimensionMismatch (MATLAB minreal gives an unstorable static gain)", err)
 	}
 }
 
@@ -308,13 +304,8 @@ func TestReducePZero(t *testing.T) {
 
 	sys := &System{A: A, B: B, C: C, D: D}
 
-	res, err := sys.Reduce(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if res.Order != 0 {
-		t.Errorf("expected order 0 for p=0, got %d", res.Order)
+	if _, err := sys.Reduce(nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("p=0: err = %v, want ErrDimensionMismatch (MATLAB minreal gives an unstorable static gain)", err)
 	}
 }
 

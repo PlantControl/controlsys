@@ -314,6 +314,11 @@ func (sys *System) properExplicitForm() (*System, error) {
 		return nil, fmt.Errorf("controlsys: generalized Schur decomposition failed: %w", ErrDescriptorSingular)
 	}
 	ni := n - nf
+	if nf == 0 {
+		if err := storableStaticGain("controlsys: descriptor has no dynamic states", p, m); err != nil {
+			return nil, err
+		}
+	}
 
 	Q := mat.NewDense(n, n, vsl)
 	Z := mat.NewDense(n, n, vsr)

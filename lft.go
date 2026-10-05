@@ -178,10 +178,7 @@ func lftGain(D *mat.Dense, ny, nu int, dt float64) (*System, error) {
 }
 
 func lftGainDims(ny, nu int) error {
-	if (ny == 0) != (nu == 0) {
-		return fmt.Errorf("lft: %dx%d static gain cannot be stored: %w", ny, nu, ErrDimensionMismatch)
-	}
-	return nil
+	return storableStaticGain("lft", ny, nu)
 }
 
 // lftLoopGain returns I + Phi·D22, the z×z gain from Delta's outputs through
