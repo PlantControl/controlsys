@@ -11,7 +11,7 @@ import (
 
 // delayedSensitivity returns L = k·P·e^{-τs} with P = ss(a, b, c, d) and
 // S = 1/(1+L), whose delay sits inside the feedback loop.
-func delayedSensitivity(t *testing.T, n int, a, b, c, d []float64, tau, k float64) (L, S *System) {
+func delayedSensitivity(t testing.TB, n int, a, b, c, d []float64, tau, k float64) (L, S *System) {
 	t.Helper()
 	plant, err := NewFromSlices(n, 1, 1, a, b, c, d, 0)
 	if err != nil {
@@ -210,11 +210,13 @@ func TestHinfNormContinuousInternalDelayPeakAtInfinity(t *testing.T) {
 func TestHinfNormContinuousInternalDelayUnstable(t *testing.T) {
 	wc := bisectRoot(func(w float64) float64 { return math.Atan(w) + 0.5*w - math.Pi }, 1, 10)
 	kc := math.Hypot(1, wc)
+	mimo, _ := mimoDelayedSensitivity(t, -3)
 	for name, sys := range map[string]*System{
 		"dde":      scalarDDE(t, -2, 2),
 		"loop":     sensitivityOf(delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, 5)),
 		"marginal": sensitivityOf(delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, kc)),
 		"hidden":   sensitivityOf(delayedSensitivity(t, 2, []float64{0, 0, 0, -1}, []float64{0, 1}, []float64{1, 1}, []float64{0}, 0.5, 1)),
+		"mimo":     mimo,
 	} {
 		norm, w, err := HinfNorm(sys)
 		if err != nil {
@@ -223,8 +225,83 @@ func TestHinfNormContinuousInternalDelayUnstable(t *testing.T) {
 		if !math.IsInf(norm, 1) || !math.IsInf(w, 1) {
 			t.Fatalf("%s: HinfNorm = (%g, %g), want (+Inf, +Inf)", name, norm, w)
 		}
-		if _, err := Norm(sys, math.Inf(1)); !errors.Is(err, ErrDelayUnsupported) {
-			t.Fatalf("%s: Norm(Inf) err = %v, want ErrDelayUnsupported", name, err)
+	}
+}
+
+// assertLinf checks Norm(sys, Inf) and the peak frequency against an oracle
+// peak of g, and that g at the returned frequency attains the norm.
+func assertLinf(t *testing.T, name string, sys *System, g func(float64) float64, wMax, dw float64) {
+	t.Helper()
+	want, wantW := oraclePeak(g, wMax, dw)
+	got, w, err := linfNorm(sys)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	if math.Abs(got-want) > 1e-9*want {
+		t.Fatalf("%s: L∞ = %.15g at %g, oracle %.15g at %g", name, got, w, want, wantW)
+	}
+	if at := g(w); math.Abs(at-got) > 1e-9*got {
+		t.Fatalf("%s: oracle gain %.15g at returned ω = %g, L∞ %.15g", name, at, w, got)
+	}
+	if n, err := Norm(sys, math.Inf(1)); err != nil || n != got {
+		t.Fatalf("%s: Norm(Inf) = %g, %v; want %g", name, n, err, got)
+	}
+}
+
+// MATLAB norm(sys, Inf) is the peak gain regardless of stability (ergo
+// HYQUNW): finite for RHP-only roots, +Inf at an imaginary-axis root of χ.
+func TestNormInfUnstableInternalDelay(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		sys      *System
+		chi      func(s complex128) complex128
+		wMax, dw float64
+	}{
+		{"dde", scalarDDE(t, -2, 2), func(s complex128) complex128 { return s + 1 + 2*cmplx.Exp(-2*s) }, 200, 1e-3},
+		{"dde/b=3,tau=0.7", scalarDDE(t, 3, 0.7), func(s complex128) complex128 { return s + 1 - 3*cmplx.Exp(-0.7*s) }, 200, 1e-3},
+		{"loop", sensitivityOf(delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, 5)),
+			func(s complex128) complex128 { return s + 1 + 5*cmplx.Exp(-0.5*s) }, 200, 1e-3},
+		{"neutral", sensitivityOf(delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0.3}, 0.5, 3)),
+			func(s complex128) complex128 { return s + 1 + 3*(0.3*(s+1)+1)*cmplx.Exp(-0.5*s) }, 400, 1e-3},
+	} {
+		if roots := oracleRHPRoots(t, tc.chi, 60); roots == 0 {
+			t.Fatalf("%s: fixture has no RHP root", tc.name)
+		}
+		assertLinf(t, tc.name, tc.sys, func(w float64) float64 {
+			s := complex(0, w)
+			if tc.name == "loop" || tc.name == "neutral" {
+				return cmplx.Abs((s + 1) / tc.chi(s))
+			}
+			return cmplx.Abs(1 / tc.chi(s))
+		}, tc.wMax, tc.dw)
+	}
+
+	mimo, resp := mimoDelayedSensitivity(t, -3)
+	if s0 := resp(0); real(s0[0][0]*s0[1][1]-s0[0][1]*s0[1][0]) >= 0 {
+		t.Fatal("mimo: det(I+L(0)) > 0, fixture lacks the real RHP root")
+	}
+	assertLinf(t, "mimo", mimo, func(w float64) float64 { return oracleSigmaMax2(resp(w)) }, 300, 1e-3)
+}
+
+func TestNormInfInternalDelayAxisRoot(t *testing.T) {
+	wc := bisectRoot(func(w float64) float64 { return math.Atan(w) + 0.5*w - math.Pi }, 1, 10)
+	kc := math.Hypot(1, wc)
+	for _, tc := range []struct {
+		name  string
+		sys   *System
+		wantW float64
+	}{
+		{"dde/s=0", scalarDDE(t, 1, 0.8), 0},
+		{"dde/s=j", scalarDDE(t, math.Sqrt2, 7*math.Pi/4), 1},
+		{"marginal", sensitivityOf(delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, kc)), wc},
+		{"hidden", sensitivityOf(delayedSensitivity(t, 2, []float64{0, 0, 0, -1}, []float64{0, 1}, []float64{1, 1}, []float64{0}, 0.5, 1)), 0},
+	} {
+		got, w, err := linfNorm(tc.sys)
+		if err != nil || !math.IsInf(got, 1) || math.Abs(w-tc.wantW) > 1e-6*max(1, tc.wantW) {
+			t.Errorf("%s: L∞ = %g at ω = %.12g, %v; want +Inf at %.12g", tc.name, got, w, err, tc.wantW)
+		}
+		if n, err := Norm(tc.sys, math.Inf(1)); err != nil || !math.IsInf(n, 1) {
+			t.Errorf("%s: Norm(Inf) = %g, %v; want +Inf", tc.name, n, err)
 		}
 	}
 }
@@ -242,15 +319,15 @@ func TestHinfNormContinuousInternalDelayUndecidable(t *testing.T) {
 	}
 }
 
-// mimoDelayedSensitivity returns S = (I + K·P·diag(e^{-τ_i s}))⁻¹ for a 2×2
+// mimoDelayedSensitivity returns S = (I + gain·K·P·diag(e^{-τ_i s}))⁻¹ for a 2×2
 // plant with non-symmetric A and D ≠ 0, and its closed-form response.
-func mimoDelayedSensitivity(t *testing.T) (*System, func(float64) [2][2]complex128) {
+func mimoDelayedSensitivity(t testing.TB, gain float64) (*System, func(float64) [2][2]complex128) {
 	t.Helper()
 	a := []float64{-1, 0.5, -0.3, -2}
 	b := []float64{1, 0.2, 0, 1}
 	c := []float64{1, 0, 0.4, 1}
 	d := []float64{0.1, 0, 0, 0.05}
-	k := []float64{0.5, 0.1, -0.2, 0.4}
+	k := []float64{0.5 * gain, 0.1 * gain, -0.2 * gain, 0.4 * gain}
 	tau := []float64{0.3, 0.7}
 	plant, err := NewFromSlices(2, 2, 2, a, b, c, d, 0)
 	if err != nil {
@@ -324,7 +401,7 @@ func oracleSigmaMax2(m [2][2]complex128) float64 {
 }
 
 func TestHinfNormContinuousInternalDelayMIMO(t *testing.T) {
-	S, resp := mimoDelayedSensitivity(t)
+	S, resp := mimoDelayedSensitivity(t, 1)
 	want, wantW := oraclePeak(func(w float64) float64 { return oracleSigmaMax2(resp(w)) }, 300, 1e-3)
 	assertPeak(t, "mimo", S, want, wantW, 1e-9)
 }
@@ -333,7 +410,7 @@ func TestHinfNormContinuousInternalDelayMIMO(t *testing.T) {
 // vanishes as n grows, so its H∞ norm converges to the exact-delay one.
 func TestHinfNormContinuousInternalDelayPadeConverges(t *testing.T) {
 	_, siso := delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, 0.8)
-	mimo, _ := mimoDelayedSensitivity(t)
+	mimo, _ := mimoDelayedSensitivity(t, 1)
 	for name, sys := range map[string]*System{"siso": siso, "mimo": mimo} {
 		exact, _, err := HinfNorm(sys)
 		if err != nil {
@@ -382,5 +459,20 @@ func TestHinfNormContinuousInternalDelayOutputDelay(t *testing.T) {
 	}
 	if math.Abs(got-want) > 1e-12*want || math.Abs(w-wantW) > 1e-6 {
 		t.Fatalf("HinfNorm = (%.15g, %g), want (%.15g, %g)", got, w, want, wantW)
+	}
+}
+
+func BenchmarkHinfNorm_InternalDelay(b *testing.B) {
+	_, siso := delayedSensitivity(b, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0.5, 0.8)
+	mimo, _ := mimoDelayedSensitivity(b, 1)
+	for name, sys := range map[string]*System{"siso": siso, "mimo": mimo, "dde": scalarDDE(b, -2, 1)} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, _, err := HinfNorm(sys); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

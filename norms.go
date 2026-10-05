@@ -25,9 +25,10 @@ const NormH2 = 2
 // The H2 norm of an unstable model is +Inf. The L∞ norm is the peak gain
 // over frequency without regard to stability; it equals the H∞ norm for
 // stable models and is +Inf when a pole lies on the stability boundary
-// (imaginary axis or unit circle). For continuous internal-delay models it is
-// computed as HinfNorm describes when the model is stable; an unstable one
-// returns ErrDelayUnsupported.
+// (imaginary axis or unit circle). For continuous internal-delay models the
+// peak is computed as HinfNorm describes, stable or not; it is +Inf when the
+// characteristic function det(sI−A)·det(I − H22(s)Δ(s)) has a root on the
+// imaginary axis, which like the rational case counts hidden modes.
 func Norm(sys *System, normType float64) (float64, error) {
 	if err := requireSystem("Norm", sys); err != nil {
 		return 0, err
@@ -268,9 +269,12 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 // +Inf as above. The peak of a stable model is searched on that grid with
 // the exact delay factors e^{−jωτ}, each local maximum refined by
 // golden-section search; past the grid a resolvent bound on the delay LFT
-// certifies that the gain stays below the peak. Between grid points the
-// result is the refined sample, so a resonance narrower than the grid
-// spacing is not certified. When the high-frequency limit exceeds every
+// certifies that the gain stays below the peak. Between grid points the peak
+// is certified to a relative 1e-9: second-order Taylor bounds from the
+// descriptor form of the delay LFT, with Neumann-series bounds on its
+// resolvent that hold for non-normal A, are bisected until no interval can
+// exceed it, so a resonance narrower than the grid spacing is not missed.
+// When the high-frequency limit exceeds every
 // finite sample, the limit is returned with omega = +Inf, as σ_max(D) is for
 // rational models; the gain may exceed it by the resolvent bound at the grid
 // end, which the rational path's crossing probe rules out. Neutral-type models whose difference operator
@@ -333,12 +337,9 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 		return 0, 0, err
 	}
 	if sys.IsContinuous() && sys.HasInternalDelay() {
-		norm, omega, stable, err := hinfNormDelayed(sys)
+		norm, omega, err := linfNormDelayed(sys)
 		if err != nil {
 			return 0, 0, fmt.Errorf("Norm: %w", err)
-		}
-		if !stable {
-			return 0, 0, fmt.Errorf("Norm: L∞ norm of an unstable continuous internal-delay model: %w", ErrDelayUnsupported)
 		}
 		return norm, omega, nil
 	}

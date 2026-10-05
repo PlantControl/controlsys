@@ -42,6 +42,7 @@ type delayLFT struct {
 	c1, c2, b1, b2     float64
 	d11, d12, d21, d22 float64
 	directFeedthrough  bool
+	desc               *descriptorResponse // for certified peaks
 	err                error
 }
 
@@ -412,25 +413,52 @@ func internalDelayStable(sys *System) (bool, error) {
 // hinfNormDelayed returns the H∞ norm of a continuous model with internal
 // delays, or +Inf for an unstable one, and whether the model is stable.
 func hinfNormDelayed(sys *System) (norm, omega float64, stable bool, err error) {
-	e, err := newDelayLFT(sys)
-	if err != nil {
-		return 0, 0, false, err
-	}
-	l, res, err := e.stability()
+	e, l, res, err := delayPeakSetup(sys)
 	if err != nil {
 		return 0, 0, false, err
 	}
 	if !res.stable {
 		return math.Inf(1), math.Inf(1), false, nil
 	}
-	if e.m == 0 || e.p == 0 {
-		return 0, 0, true, nil
-	}
-	norm, omega, err = e.peak(l, res.w)
+	norm, omega, err = e.peakOrZero(l, res)
 	if err != nil {
 		return 0, 0, false, err
 	}
 	return norm, omega, true, nil
+}
+
+// linfNormDelayed returns the L∞ norm of a continuous model with internal
+// delays, sup_ω σ_max(G(jω)) regardless of stability: +Inf at ω = axisW when χ
+// has a root on the imaginary axis, else the peak over the Nyquist grid, which
+// is complete whenever the RHP roots are counted.
+func linfNormDelayed(sys *System) (norm, omega float64, err error) {
+	e, l, res, err := delayPeakSetup(sys)
+	if err != nil {
+		return 0, 0, err
+	}
+	if res.axisRoot {
+		return math.Inf(1), res.axisW, nil
+	}
+	return e.peakOrZero(l, res)
+}
+
+func delayPeakSetup(sys *System) (*delayLFT, *delayLoop, delayNyquist, error) {
+	e, err := newDelayLFT(sys)
+	if err != nil {
+		return nil, nil, delayNyquist{}, err
+	}
+	l, res, err := e.stability()
+	if err != nil {
+		return nil, nil, delayNyquist{}, err
+	}
+	return e, l, res, nil
+}
+
+func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64, error) {
+	if e.m == 0 || e.p == 0 {
+		return 0, 0, nil
+	}
+	return e.peak(l, res.w)
 }
 
 // peak searches sup_ω σ_max(G(jω)) on the Nyquist grid, which bisects
@@ -440,7 +468,9 @@ func hinfNormDelayed(sys *System) (norm, omega float64, stable bool, err error) 
 // the exact response. Past the grid end the gain is bounded by tailGain; the
 // delay grid of the Nyquist test is extended until that bound stays below
 // the peak. When the high-frequency limit exceeds every finite sample it is
-// reported at ω = +Inf, as σ_max(D) is for a rational model.
+// reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
+// sample on the grid exceeds it. Between samples, up to the grid end, the
+// peak is certified to peakCertTol by descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
 	const tol = 1e-10
 	best, wBest, err := e.scan(grid)
@@ -461,8 +491,18 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
 		}
 	}
+	cert := append([]float64{0}, grid...)
 	if lim > best*(1+tol) {
-		return lim, math.Inf(1), nil
+		top, wTop, err := e.certify(l, cert, lim, math.Inf(1))
+		if err != nil {
+			return 0, 0, err
+		}
+		if top == lim {
+			return lim, math.Inf(1), nil
+		}
+		best, wBest = top, wTop
+	} else if best, wBest, err = e.certify(l, cert, best, wBest); err != nil {
+		return 0, 0, err
 	}
 
 	rGrid := grid[len(grid)-1]
@@ -495,7 +535,24 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	if b > best {
 		best, wBest = b, w
 	}
-	return best, wBest, nil
+	return e.certify(l, ext, best, wBest)
+}
+
+// certify raises (peak, w) to within peakCertTol of sup σ_max(G(jω)) over
+// the span of the sorted grid ws; see descriptorResponse.certify.
+func (e *delayLFT) certify(l *delayLoop, ws []float64, peak, w float64) (float64, float64, error) {
+	if e.desc == nil {
+		desc, err := newDescriptorResponse(e.sys)
+		if err != nil {
+			return 0, 0, err
+		}
+		e.desc = desc
+	}
+	ps, wps := []float64{peak}, []float64{w}
+	if err := e.desc.certify(ws, []float64{0}, ps, wps, l.pointBudget(), errDelayPeakUnsupported); err != nil {
+		return 0, 0, err
+	}
+	return ps[0], wps[0], nil
 }
 
 // scan samples σ_max on the sorted grid and its interval midpoints and

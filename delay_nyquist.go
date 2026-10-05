@@ -19,6 +19,7 @@ var errDelayLoopUnsupported = fmt.Errorf("delay loop outside Nyquist test scope:
 // RHP root count is rhp - W, where W is the winding of 1+L around the origin
 // along the jω axis indented to the right of the imaginary-axis eigenvalues.
 type delayLoop struct {
+	sys       *System // the loop model, for certified sensitivity peaks
 	at        func(w float64) complex128
 	eval      *sisoEval // records the first failure of at
 	rhp       int
@@ -35,11 +36,18 @@ type axisPole struct {
 	mult int
 }
 
+// delayNyquist is the verdict of the Nyquist test. With axisRoot set, χ has a
+// root on the imaginary axis at ±j·axisW, roots is not counted and w, f are
+// incomplete; otherwise roots is the closed-loop RHP root count and w, f
+// cover the whole grid.
 type delayNyquist struct {
-	stable bool
-	roots  int // closed-loop RHP roots of χ when the winding resolved
-	w      []float64
-	f      []complex128 // 1+L(jω) on the refined grid
+	stable   bool
+	roots    int
+	axisRoot bool
+	axisW    float64
+	tailFrom float64 // the tail bound certifies |L| <= lin from here on
+	w        []float64
+	f        []complex128 // 1+L(jω) on the refined grid
 }
 
 const delayNyquistMaxPoints = 1 << 21
@@ -64,7 +72,7 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &delayLoop{at: eval.at, eval: eval, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
+	l := &delayLoop{sys: sys, at: eval.at, eval: eval, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
 	l.addPoles(poles)
 	return l, nil
 }
@@ -306,7 +314,7 @@ func lftDelayLoopAcyclic(sys *System, n int) bool {
 // closed right half-plane, so no encirclement is missed beyond R. The count
 // is exact up to the grid resolving every passage of 1+L near the origin; a
 // closed-loop root within the bisection tolerance of the axis, or an axis
-// eigenvalue hidden from L, is reported unstable. A grid that exceeds the
+// eigenvalue hidden from L, is reported unstable with axisRoot set. A grid that exceeds the
 // point budget or a winding number that does not resolve to an integer
 // returns errDelayLoopUnsupported rather than a verdict.
 func (l *delayLoop) nyquist(frac float64) (delayNyquist, error) {
@@ -372,21 +380,22 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 		return delayNyquist{}, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 	}
 
-	if !l.axisOrdersMatch() {
-		return delayNyquist{}, nil
+	if w, ok := l.hiddenAxisRoot(); ok {
+		return delayNyquist{axisRoot: true, axisW: w}, nil
 	}
 	grid := l.grid(R, w1)
 	segments := l.segments(grid, R)
 	size := len(grid) + 2*len(segments)
-	out := delayNyquist{w: make([]float64, 0, size), f: make([]complex128, 0, size)}
+	out := delayNyquist{tailFrom: w1, w: make([]float64, 0, size), f: make([]complex128, 0, size)}
 	var phi, phiStart float64
 	for si, seg := range segments {
 		base := len(out.w)
 		var res refineResult
-		out.w, out.f, res = l.refine(seg, l.pointBudget()-base, out.w, out.f)
+		var wRoot float64
+		out.w, out.f, res, wRoot = l.refine(seg, l.pointBudget()-base, out.w, out.f)
 		switch res {
 		case refineAxisRoot:
-			return delayNyquist{w: out.w[:base], f: out.f[:base]}, nil
+			return delayNyquist{axisRoot: true, axisW: wRoot, w: out.w[:base], f: out.f[:base]}, nil
 		case refineBudget:
 			return delayNyquist{}, fmt.Errorf("refined grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 		}
@@ -507,20 +516,21 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 	return segs
 }
 
-// axisOrdersMatch reports whether each imaginary-axis eigenvalue is a pole of
-// L of its full multiplicity, from the growth of |L| towards it.
-func (l *delayLoop) axisOrdersMatch() bool {
+// hiddenAxisRoot returns an imaginary-axis eigenvalue that is not a pole of L
+// of its full multiplicity, judged from the growth of |L| towards it; χ
+// vanishes there.
+func (l *delayLoop) hiddenAxisRoot() (float64, bool) {
 	for _, a := range l.axis {
 		g := l.axisGap(a.w)
 		near, far := cmplx.Abs(l.at(a.w+g)), cmplx.Abs(l.at(a.w+10*g))
 		if !(near > 0) || !(far > 0) || math.IsInf(near, 1) {
-			return false
+			return a.w, true
 		}
 		if int(math.Round(math.Log10(near/far))) != a.mult {
-			return false
+			return a.w, true
 		}
 	}
-	return true
+	return 0, false
 }
 
 type refineResult int
@@ -539,17 +549,17 @@ func (l *delayLoop) pointBudget() int {
 }
 
 // refine evaluates 1+L on the segment, bisecting until consecutive phases
-// differ by at most π/4. It reports refineAxisRoot when 1+L vanishes or its
-// phase turns within the bisection tolerance, i.e. a closed-loop root sits on
-// the axis, and refineBudget when the segment would exceed budget points.
-// The points are appended to ws and fs.
-func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []complex128) ([]float64, []complex128, refineResult) {
+// differ by at most π/4. It reports refineAxisRoot and the root frequency when
+// 1+L vanishes or its phase turns within the bisection tolerance, i.e. a
+// closed-loop root sits on the axis, and refineBudget when the segment would
+// exceed budget points. The points are appended to ws and fs.
+func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []complex128) ([]float64, []complex128, refineResult, float64) {
 	f := func(w float64) complex128 { return 1 + l.at(w) }
 	base := len(ws)
 	ws = append(ws, seg.pts[0])
 	fs = append(fs, f(seg.pts[0]))
 	if !resolvedNonzero(fs[base]) {
-		return ws, fs, refineAxisRoot
+		return ws, fs, refineAxisRoot, seg.pts[0]
 	}
 	type span struct {
 		a, b   float64
@@ -562,7 +572,7 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 			s := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			if !resolvedNonzero(s.fb) {
-				return ws, fs, refineAxisRoot
+				return ws, fs, refineAxisRoot, s.b
 			}
 			if math.Abs(wrapPi(cmplx.Phase(s.fb)-cmplx.Phase(s.fa))) <= math.Pi/4 {
 				ws = append(ws, s.b)
@@ -570,17 +580,17 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 				continue
 			}
 			if s.b-s.a <= 1e-13*max(1, s.b) {
-				return ws, fs, refineAxisRoot
+				return ws, fs, refineAxisRoot, (s.a + s.b) / 2
 			}
 			if len(ws)-base+len(stack) > budget {
-				return ws, fs, refineBudget
+				return ws, fs, refineBudget, 0
 			}
 			mid := (s.a + s.b) / 2
 			fm := f(mid)
 			stack = append(stack, span{mid, s.b, fm, s.fb}, span{s.a, mid, s.fa, fm})
 		}
 	}
-	return ws, fs, refineResolved
+	return ws, fs, refineResolved, 0
 }
 
 func resolvedNonzero(v complex128) bool {
@@ -612,7 +622,10 @@ const sensitivityTailLevel = 0.3
 
 // sensitivityPeaks returns the closed-loop stability of S = 1/(1+L) and,
 // when stable, sup_ω |S(jω) + c| with its frequency for each shift c. The
-// grid peak is refined by golden section. Where |L| <= t, S lies in the disk
+// grid peak is refined by golden section and then certified to peakCertTol
+// on [0, tailFrom] by descriptorResponse.certify on the closed-loop
+// descriptor, which bisects wherever a narrow peak could hide between
+// samples. Where |L| <= t, S lies in the disk
 // of centre 1/(1−t²) and radius t/(1−t²), so |S + c| <= diskBound(t, c).
 // The linear delay spacing ends where the tail bound certifies |L| <= t and
 // diskBound(t, c) does not exceed the grid peak for any c, so the sparse
@@ -655,18 +668,60 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 		}
 	}
 	peaks = make([]sensitivityPeak, len(shifts))
-	t := l.tailLimit
-	for i, c := range shifts {
+	for i := range shifts {
 		wPeak, peak := refinePeaks(res, gs[i], best[i], func(w float64) float64 { return gs[i](1 + l.at(w)) })
-		if inf := diskBound(t, c); inf > peak {
-			peak, wPeak = inf, math.Inf(1)
-		}
 		peaks[i] = sensitivityPeak{peak, wPeak}
 	}
 	if err := l.evalErr(); err != nil {
 		return false, nil, err
 	}
+	if err := l.certifyPeaks(res, shifts, peaks); err != nil {
+		return false, nil, err
+	}
+	for i, c := range shifts {
+		if inf := diskBound(l.tailLimit, c); inf > peaks[i].peak {
+			peaks[i] = sensitivityPeak{inf, math.Inf(1)}
+		}
+	}
 	return true, peaks, nil
+}
+
+// certifyPeaks raises each sensitivity peak to within peakCertTol of
+// sup |S + c| on [0, res.tailFrom], beyond which the disk bound holds.
+func (l *delayLoop) certifyPeaks(res delayNyquist, shifts []float64, peaks []sensitivityPeak) error {
+	if l.sys == nil {
+		return fmt.Errorf("sensitivity peaks need the loop model: %w", errDelayLoopUnsupported)
+	}
+	r, err := newDescriptorResponse(l.sys)
+	if err != nil {
+		return err
+	}
+	if err := r.sensitivity(); err != nil {
+		return err
+	}
+	ws := []float64{0}
+	for _, w := range res.w {
+		if w > res.tailFrom {
+			break
+		}
+		if w > ws[len(ws)-1] {
+			ws = append(ws, w)
+		}
+	}
+	if ws[len(ws)-1] < res.tailFrom {
+		ws = append(ws, res.tailFrom)
+	}
+	ps, wps := make([]float64, len(shifts)), make([]float64, len(shifts))
+	for i, p := range peaks {
+		ps[i], wps[i] = p.peak, p.w
+	}
+	if err := r.certify(ws, shifts, ps, wps, l.pointBudget(), errDelayLoopUnsupported); err != nil {
+		return err
+	}
+	for i := range peaks {
+		peaks[i] = sensitivityPeak{ps[i], wps[i]}
+	}
+	return nil
 }
 
 // nearPeakFraction selects the grid local maxima refined besides the grid
