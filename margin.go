@@ -69,20 +69,21 @@ func (r *DiskMarginResult) Frequency() (w float64, ok bool) { return r.frequency
 func (r *DiskMarginResult) PeakFreq() (w float64, ok bool) { return r.peakFreq, r.stable }
 
 // sisoEval evaluates a SISO loop on the boundary of the stability region.
-// Delay-free realizations reuse one state-space solver, so refinement loops
-// pay its setup once and high-order loops keep state-space accuracy.
+// It reuses one point evaluator, the state-space solver or the internal-delay
+// LFT workspace, so refinement loops pay its setup once and high-order loops
+// keep state-space accuracy. Each value is bit-identical to FreqResponse at
+// the same ω.
 //
 // at keeps the signature func(float64) complex128 so it can be passed as a
 // response function; a failed evaluation returns NaN and is kept in err,
 // which callers check once their search is done.
 type sisoEval struct {
-	sys    *System
-	solver frequencyPointSolver
-	delay  *mat.Dense
-	lft    bool
-	td     timeDomain
-	dst    []complex128
-	err    error
+	sys   *System
+	eval  func(frequencyPoint, []complex128) error
+	delay *mat.Dense
+	td    timeDomain
+	dst   []complex128
+	err   error
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -91,28 +92,22 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 		td:  newTimeDomain(sys.Dt),
 		dst: make([]complex128, 1),
 	}
+	fe := newFrequencyEvaluator(sys)
 	if sys.internalDelayCount() > 0 {
-		e.lft = true
-		return e, nil
+		e.eval = fe.pointEval()
+	} else {
+		if err := sys.Validate(); err != nil {
+			return nil, err
+		}
+		e.eval = fe.pointSolver(math.MaxInt).evalInto
 	}
-	if err := sys.Validate(); err != nil {
-		return nil, err
-	}
-	e.solver = newFrequencyEvaluator(sys).pointSolver(math.MaxInt)
 	e.delay = effectiveIODelayMatrix(sys, 1, 1, true)
 	return e, nil
 }
 
 func (e *sisoEval) at(w float64) complex128 {
-	if e.lft {
-		h, err := evalSISOFreqResponse(e.sys, w)
-		if err != nil {
-			return e.fail(w, err)
-		}
-		return h
-	}
 	pt := e.td.frequencyPoint(w)
-	if err := evalWithPoleLimit(e.solver.evalInto, e.sys, pt, e.dst); err != nil {
+	if err := evalWithPoleLimit(e.eval, e.sys, pt, e.dst); err != nil {
 		return e.fail(w, err)
 	}
 	if e.delay != nil {
@@ -322,14 +317,6 @@ func refineCrossing(wLo, wHi float64, evalFn func(float64) float64) float64 {
 		}
 	}
 	return math.Sqrt(wLo * wHi)
-}
-
-func evalSISOFreqResponse(sys *System, w float64) (complex128, error) {
-	resp, err := sys.FreqResponse([]float64{w})
-	if err != nil {
-		return 0, err
-	}
-	return resp.At(0, 0, 0), nil
 }
 
 func phaseMarginDeg(h complex128) float64 {
