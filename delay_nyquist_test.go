@@ -282,7 +282,7 @@ func TestDiskMarginDelayedRepresentationsAgree(t *testing.T) {
 
 func TestDiskMarginDelayedUnsupported(t *testing.T) {
 	neutral := delayedLoop(t, []float64{-1}, []float64{1}, []float64{1}, []float64{1}, 1, 0.1)
-	if _, err := DiskMargin(neutral); !errors.Is(err, ErrContinuousInternalDelay) {
+	if _, err := DiskMargin(neutral); !errors.Is(err, ErrDelayUnsupported) {
 		t.Fatalf("neutral: err = %v", err)
 	}
 	cyclic, err := NewFromSlices(1, 1, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{0}, 0)
@@ -329,5 +329,27 @@ func TestDiskMarginDelayedOscillatorAxisPoles(t *testing.T) {
 		if (dm.Alpha > 0) != tc.stable {
 			t.Fatalf("k=%g: alpha=%g, want stable=%v", tc.k, dm.Alpha, tc.stable)
 		}
+	}
+}
+
+func TestDelayLoopNyquistBudgetIsErrorNotUnstable(t *testing.T) {
+	const k = 0.95
+	l := &delayLoop{
+		at: func(w float64) complex128 {
+			s := complex(0, w)
+			return complex(k, 0) * cmplx.Exp(-50*s) / (s + 1)
+		},
+		tail:      func(w float64) float64 { return k / math.Max(w-1, 1e-300) },
+		tailLimit: 0,
+		scales:    []float64{1},
+	}
+	stable, err := l.stableClosedLoop()
+	if err != nil || !stable {
+		t.Fatalf("default budget: stable=%v err=%v, want stable", stable, err)
+	}
+	l.maxPoints = 3
+	stable, err = l.stableClosedLoop()
+	if !errors.Is(err, ErrDelayUnsupported) {
+		t.Fatalf("exhausted budget: stable=%v err=%v, want ErrDelayUnsupported", stable, err)
 	}
 }

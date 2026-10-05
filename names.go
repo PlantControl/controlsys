@@ -62,7 +62,7 @@ func lookupSignalIndex(names []string, name string) (int, error) {
 			return i, nil
 		}
 	}
-	return -1, fmt.Errorf("%q: %w", name, ErrSignalNotFound)
+	return -1, fmt.Errorf("signal %q: %w", name, ErrSignalNotFound)
 }
 
 func lookupSignalIndices(names []string, targets []string) ([]int, error) {
@@ -260,12 +260,12 @@ func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
 	n, m, p := sys.Dims()
 	for _, idx := range inputs {
 		if idx < 0 || idx >= m {
-			return nil, fmt.Errorf("select: input index %d out of range [0,%d): %w", idx, m, ErrDimensionMismatch)
+			return nil, fmt.Errorf("SelectByIndex: input index %d out of range [0,%d): %w", idx, m, ErrInvalidArgument)
 		}
 	}
 	for _, idx := range outputs {
 		if idx < 0 || idx >= p {
-			return nil, fmt.Errorf("select: output index %d out of range [0,%d): %w", idx, p, ErrDimensionMismatch)
+			return nil, fmt.Errorf("SelectByIndex: output index %d out of range [0,%d): %w", idx, p, ErrInvalidArgument)
 		}
 	}
 
@@ -277,7 +277,7 @@ func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
 	var err error
 	Dsel := selectDense(sys.D, outputs, inputs)
 	if n == 0 {
-		if err := storableStaticGain("select", pSel, mSel); err != nil {
+		if err := storableStaticGain("SelectByIndex", pSel, mSel); err != nil {
 			return nil, err
 		}
 		result, err = NewGain(Dsel, sys.Dt)
@@ -345,11 +345,11 @@ func (sys *System) SelectByName(inputs, outputs []string) (*System, error) {
 	}
 	inIdx, err := lookupSignalIndices(sys.InputName, inputs)
 	if err != nil {
-		return nil, fmt.Errorf("select inputs: %w", err)
+		return nil, fmt.Errorf("SelectByName: inputs: %w", err)
 	}
 	outIdx, err := lookupSignalIndices(sys.OutputName, outputs)
 	if err != nil {
-		return nil, fmt.Errorf("select outputs: %w", err)
+		return nil, fmt.Errorf("SelectByName: outputs: %w", err)
 	}
 	return sys.SelectByIndex(inIdx, outIdx)
 }
@@ -377,29 +377,29 @@ func ConnectByName(systems []*System, connections []Connection, inputs, outputs 
 	}
 	aug, err := BlkDiag(systems...)
 	if err != nil {
-		return nil, fmt.Errorf("connectbyname: %w", err)
+		return nil, fmt.Errorf("ConnectByName: %w", err)
 	}
 
 	_, m, p := aug.Dims()
 
 	inIdx, err := lookupSignalIndices(aug.InputName, inputs)
 	if err != nil {
-		return nil, fmt.Errorf("connectbyname inputs: %w", err)
+		return nil, fmt.Errorf("ConnectByName: inputs: %w", err)
 	}
 	outIdx, err := lookupSignalIndices(aug.OutputName, outputs)
 	if err != nil {
-		return nil, fmt.Errorf("connectbyname outputs: %w", err)
+		return nil, fmt.Errorf("ConnectByName: outputs: %w", err)
 	}
 
 	Q := mat.NewDense(m, p, nil)
 	for _, c := range connections {
 		fromIdx, err := lookupSignalIndex(aug.OutputName, c.From)
 		if err != nil {
-			return nil, fmt.Errorf("connectbyname connection from: %w", err)
+			return nil, fmt.Errorf("ConnectByName: connection from: %w", err)
 		}
 		toIdx, err := lookupSignalIndex(aug.InputName, c.To)
 		if err != nil {
-			return nil, fmt.Errorf("connectbyname connection to: %w", err)
+			return nil, fmt.Errorf("ConnectByName: connection to: %w", err)
 		}
 		if Q.At(toIdx, fromIdx) != 0 {
 			return nil, fmt.Errorf("ConnectByName: connection %s -> %s listed twice: %w", c.From, c.To, ErrInvalidArgument)

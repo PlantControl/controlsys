@@ -9,14 +9,21 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// Response is the result of (*System).Simulate.
 type Response struct {
+	// Y is the p×steps output, one column per sample. It is nil only for a
+	// model without outputs, which Simulate accepts only with
+	// SimulateOpts.FinalState.
 	Y *mat.Dense
 	// XFinal is the state after the last sample, set only when
 	// SimulateOpts.FinalState requests it.
 	XFinal *mat.VecDense
 }
 
+// SimulateOpts holds optional Simulate settings; nil selects the defaults.
 type SimulateOpts struct {
+	// Workspace is an optional length-n scratch vector reused across calls to
+	// avoid an allocation. It is overwritten and never returned as XFinal.
 	Workspace *mat.VecDense
 	// FinalState requests Response.XFinal, as MATLAB lsim's optional x output
 	// requests the state. Simulate returns an error when the final state is
@@ -53,12 +60,33 @@ type SimulateOpts struct {
 // inputs, and a FinalState request returns ErrDelayUnsupported. A model
 // without states has no final state to return, and a FinalState request
 // returns ErrDimensionMismatch.
+//
+// As MATLAB lsim requires a time vector, zero samples return
+// ErrInsufficientData. A model without outputs has no representable Y (gonum
+// cannot hold a 0×steps matrix), so it is accepted only with FinalState, and
+// Y is then nil; otherwise it returns ErrDimensionMismatch.
 func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
+	if err := requireSystem("Simulate", sys); err != nil {
+		return nil, err
+	}
 	if sys.IsContinuous() {
-		return nil, ErrWrongDomain
+		return nil, fmt.Errorf("Simulate: model must be discrete: %w", ErrWrongDomain)
 	}
 	if err := sys.validateSimulateInputs(u, x0, opts); err != nil {
 		return nil, err
+	}
+	steps := 0
+	if u != nil {
+		_, steps = u.Dims()
+	}
+	if opts != nil {
+		steps = max(steps, opts.Steps)
+	}
+	if steps == 0 {
+		return nil, fmt.Errorf("Simulate: no samples: %w", ErrInsufficientData)
+	}
+	if _, _, p := sys.Dims(); p == 0 && (opts == nil || !opts.FinalState) {
+		return nil, fmt.Errorf("Simulate: model has no outputs and FinalState is not requested: %w", ErrDimensionMismatch)
 	}
 	sim, simX0, reduced, err := sys.timeResponseForm(x0)
 	if err != nil {
@@ -137,9 +165,6 @@ func (d simulationDispatcher) simulate(u *mat.Dense, x0 *mat.VecDense, opts *Sim
 }
 
 func (sys *System) validateSimulateInputs(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) error {
-	if err := sys.Validate(); err != nil {
-		return err
-	}
 	n, m, p := sys.Dims()
 	steps := 0
 	if u != nil {
@@ -182,7 +207,7 @@ func (sys *System) validateSimulateInputs(u *mat.Dense, x0 *mat.VecDense, opts *
 func validateSimulateSteps(want, cols, m int, hasU bool) error {
 	switch {
 	case want < 0:
-		return fmt.Errorf("Simulate: Steps %d < 0: %w", want, ErrDimensionMismatch)
+		return fmt.Errorf("Simulate: Steps %d < 0: %w", want, ErrInvalidArgument)
 	case want == 0:
 		return nil
 	case hasU && want != cols:
@@ -307,6 +332,9 @@ func (sys *System) simulateNoDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simulat
 		Y.Add(Y, du)
 	}
 
+	if opts != nil && x == opts.Workspace {
+		x = mat.VecDenseCopyOf(x)
+	}
 	return &Response{
 		Y:      Y,
 		XFinal: x,
@@ -317,7 +345,7 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	problem := newSimulationProblem(sys, u, x0, opts)
 	n, m, p, steps := problem.n, problem.m, problem.p, problem.steps
 
-	totalDelay := sys.TotalDelay()
+	totalDelay := newDelayTopology(sys).totalExternal(true)
 	if totalDelay == nil {
 		totalDelay = mat.NewDense(p, m, nil)
 	}

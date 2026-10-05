@@ -122,7 +122,10 @@ func descriptorOps() []descriptorOp {
 		{name: "SelectByIndex", run: func(f descriptorFixture) (*System, error) { return f.P.SelectByIndex([]int{1}, []int{0, 1}) }},
 		{name: "Augstate", run: func(f descriptorFixture) (*System, error) { return Augstate(f.P) }},
 		{name: "DelayModel", run: func(f descriptorFixture) (*System, error) {
-			H, tau := f.P.GetDelayModel()
+			H, tau, err := f.P.GetDelayModel()
+			if err != nil {
+				return nil, err
+			}
 			return SetDelayModel(H, tau)
 		}},
 		{name: "Pade(P)", continuous: true, run: func(f descriptorFixture) (*System, error) { return f.P.Pade(3) }},

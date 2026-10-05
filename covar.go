@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -17,7 +18,8 @@ import (
 // g_ik(t) = D_ik δ(t-τ_ik) + c_i e^{A(t-τ_ik)} b_k for t > τ_ik; a D-path entry
 // is infinite only when two feedthrough paths share the same total delay.
 // Continuous internal delays have no finite-order form and return
-// ErrContinuousInternalDelay.
+// ErrContinuousInternalDelay. A model with no outputs has no covariance and
+// returns ErrDimensionMismatch; with no inputs P is the p×p zero matrix.
 func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	if err := requireStandardCovarianceSystem(sys, "Covar"); err != nil {
 		return nil, err
@@ -45,7 +47,7 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		return nil, ErrUnstable
 	}
 	if p == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("Covar: model has no outputs: %w", ErrDimensionMismatch)
 	}
 	if m == 0 {
 		return mat.NewDense(p, p, nil), nil

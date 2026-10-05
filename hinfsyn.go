@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"slices"
 
@@ -39,7 +40,7 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	}
 	gamma, err := hinfControllerGamma(0, func(g float64) bool { return hinfFeasible(gp, g) })
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("HinfSyn: %w", err)
 	}
 	return hinfSynD11Zero(gp, gamma)
 }
@@ -69,7 +70,7 @@ func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
 	for !feasible(gammaUB) {
 		gammaUB *= 2
 		if gammaUB > 1e12 {
-			return 0, ErrGammaNotAchievable
+			return 0, fmt.Errorf("no feasible gamma below %g: %w", gammaUB, ErrGammaNotAchievable)
 		}
 	}
 	for gammaUB-gammaLB > 1e-6*gammaUB && gammaUB > hinfGammaFloor {
@@ -91,20 +92,20 @@ func hinfSynD11Zero(gp *generalizedPlantPartition, gamma float64) (*HinfSynResul
 	D12, D21 := gp.D12, gp.D21
 	X, Y, err := hinfSolveRiccatis(gp, gamma)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
 
 	R1 := mulDense(mat.DenseCopyOf(D12.T()), D12)
 	R1inv, err := invertSmall(R1, gp.m2)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: D12ᵀD12: %w", gp.op, err)
 	}
 	S1 := mulDense(mat.DenseCopyOf(D12.T()), C1)
 
 	R2 := mulDense(D21, mat.DenseCopyOf(D21.T()))
 	R2inv, err := invertSmall(R2, gp.p2)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: D21D21ᵀ: %w", gp.op, err)
 	}
 	S2 := mulDense(B1, mat.DenseCopyOf(D21.T()))
 
@@ -136,7 +137,7 @@ func hinfSynD11Zero(gp *generalizedPlantPartition, gamma float64) (*HinfSynResul
 	lu.Factorize(ZpArg)
 	Zp := mat.NewDense(nn, nn, nil)
 	if err := lu.SolveTo(Zp, false, eye); err != nil {
-		return nil, ErrGammaNotAchievable
+		return nil, fmt.Errorf("%s: I − XY/γ² singular at γ = %g: %w", gp.op, gamma, ErrGammaNotAchievable)
 	}
 
 	// Ak = A + ginv2*B1*B1'*X + B2*F + Zp*L*(C2 + ginv2*D21*B1'*X); the D21 term feeds the worst-case disturbance into the observer.
@@ -191,7 +192,7 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	R1 := mulDense(mat.DenseCopyOf(D12.T()), D12)
 	R1inv, err := invertSmall(R1, gp.m2)
 	if err != nil {
-		return nil, nil, ErrInvalidPartition
+		return nil, nil, fmt.Errorf("D12 or D21 not full rank: %w", ErrInvalidPartition)
 	}
 	S1 := mulDense(mat.DenseCopyOf(D12.T()), C1)
 
@@ -231,7 +232,7 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	R2 := mulDense(D21, mat.DenseCopyOf(D21.T()))
 	R2inv, err := invertSmall(R2, gp.p2)
 	if err != nil {
-		return nil, nil, ErrInvalidPartition
+		return nil, nil, fmt.Errorf("D12 or D21 not full rank: %w", ErrInvalidPartition)
 	}
 	S2 := mulDense(B1, mat.DenseCopyOf(D21.T()))
 
@@ -268,13 +269,13 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	var eig mat.Eigen
 	ok := eig.Factorize(XY, mat.EigenNone)
 	if !ok {
-		return nil, nil, ErrGammaNotAchievable
+		return nil, nil, fmt.Errorf("Riccati solutions not admissible at γ = %g: %w", gamma, ErrGammaNotAchievable)
 	}
 	vals := eig.Values(nil)
 	g2 := gamma * gamma
 	for _, v := range vals {
 		if math.Abs(real(v)) >= g2 {
-			return nil, nil, ErrGammaNotAchievable
+			return nil, nil, fmt.Errorf("Riccati solutions not admissible at γ = %g: %w", gamma, ErrGammaNotAchievable)
 		}
 	}
 
@@ -307,13 +308,13 @@ func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 	sdim, ok := impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
 		nn, hData, nn, wr, wi, vs, nn, work, lwork, bwork)
 	if !ok {
-		return nil, ErrSchurFailed
+		return nil, fmt.Errorf("Hamiltonian Schur form did not converge: %w", ErrSchurFailed)
 	}
 	if sdim != n {
-		return nil, ErrNoStabilizing
+		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 	}
 	if hasImaginaryAxisEigenvalue(hData, nn, wr, wi) {
-		return nil, ErrNoStabilizing
+		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 	}
 
 	u11 := make([]float64, n*n)
@@ -323,7 +324,7 @@ func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 
 	ipiv := make([]int, n)
 	if !impl.Dgetrf(n, n, u11, n, ipiv) {
-		return nil, ErrNoStabilizing
+		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 	}
 
 	// X = U21 * U11^{-1}  =>  solve U11' * X' = U21'  =>  transpose approach
@@ -341,12 +342,12 @@ func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 	var eig mat.Eigen
 	eigOk := eig.Factorize(X, mat.EigenNone)
 	if !eigOk {
-		return nil, ErrNoStabilizing
+		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 	}
 	vals := eig.Values(nil)
 	for _, v := range vals {
 		if real(v) < -1e-8 {
-			return nil, ErrNoStabilizing
+			return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 		}
 	}
 

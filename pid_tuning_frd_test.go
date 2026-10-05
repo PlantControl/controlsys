@@ -36,7 +36,7 @@ func TestTunePIDFRDMatchesAnalyticSystem(t *testing.T) {
 	if math.Abs(a.Controller.Kp-b.Controller.Kp) > 1e-3 || math.Abs(a.Controller.Ki-b.Controller.Ki) > 1e-3 {
 		t.Fatalf("system %+v FRD %+v", a.Controller, b.Controller)
 	}
-	if b.Evidence.Stability != "sampled-frequency-only" || len(b.Evidence.Warnings) < 2 {
+	if b.Evidence.Stability != PIDStabilitySampledOnly || len(b.Evidence.Warnings) < 2 {
 		t.Fatal("missing frequency-only/unknown poles evidence")
 	}
 	if math.Abs(b.Evidence.AchievedPhaseMargin-60) > 3.000001 {
@@ -85,7 +85,9 @@ func TestTunePIDFRDExactDelayedSystemAgreement(t *testing.T) {
 	}
 	known := 0
 	o := PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60, UnstablePoles: &known}
-	a, err := TunePID(context.Background(), p, PidtunePI, o)
+	sysOpts := o
+	sysOpts.UnstablePoles = nil
+	a, err := TunePID(context.Background(), p, PidtunePI, sysOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +98,7 @@ func TestTunePIDFRDExactDelayedSystemAgreement(t *testing.T) {
 	if math.Abs(a.Evidence.AchievedCrossover-b.Evidence.AchievedCrossover) > .05 || math.Abs(a.Evidence.AchievedPhaseMargin-b.Evidence.AchievedPhaseMargin) > 3 {
 		t.Fatal("delayed FRD/System disagreement")
 	}
-	if b.Evidence.Stability != "sampled-frequency-only" {
+	if b.Evidence.Stability != PIDStabilitySampledOnly {
 		t.Fatal("known pole count promoted finite FRD to global certificate")
 	}
 }

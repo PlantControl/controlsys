@@ -21,26 +21,36 @@ type LqgOpts struct {
 }
 
 // LqgResult holds the controller and the gains MATLAB lqg returns in info.
+// Gains that exist only for a variant are reported by comma-ok methods: Ki
+// with QI, and Kw, Mx, Mw with Current.
 type LqgResult struct {
 	// Controller is reg; connect it to the plant with positive feedback.
 	Controller *System
 	// K is the m×n state-feedback gain Kx.
 	K *mat.Dense
-	// Ki is the m×p integrator gain; nil without QI.
-	Ki *mat.Dense
-	// Kw is the m×n process-noise gain; nil unless Current.
-	Kw *mat.Dense
 	// L is the n×p Kalman gain (predictor gain in discrete time).
 	L *mat.Dense
-	// Mx and Mw are the n×p innovation gains giving x[n|n] and w[n|n]; nil
-	// unless Current.
-	Mx *mat.Dense
-	Mw *mat.Dense
 	// Xc is the regulator Riccati solution, (n+p)×(n+p) with QI.
 	Xc *mat.Dense
 	// Xf is the Kalman Riccati solution P (steady-state error covariance).
 	Xf *mat.Dense
+
+	ki, kw, mx, mw *mat.Dense
 }
+
+// Ki returns the m×p integrator gain; ok is false unless QI was given.
+func (r *LqgResult) Ki() (ki *mat.Dense, ok bool) { return r.ki, r.ki != nil }
+
+// Kw returns the m×n process-noise gain; ok is false unless Current.
+func (r *LqgResult) Kw() (kw *mat.Dense, ok bool) { return r.kw, r.kw != nil }
+
+// Mx returns the n×p innovation gain giving x[n|n]; ok is false unless
+// Current.
+func (r *LqgResult) Mx() (mx *mat.Dense, ok bool) { return r.mx, r.mx != nil }
+
+// Mw returns the n×p innovation gain giving w[n|n]; ok is false unless
+// Current.
+func (r *LqgResult) Mw() (mw *mat.Dense, ok bool) { return r.mw, r.mw != nil }
 
 // Lqg designs a linear-quadratic-Gaussian controller, matching MATLAB
 // lqg(sys,QXU,QWV[,QI][,'1dof'][,'current'])
@@ -158,7 +168,7 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	}
 	res := &LqgResult{K: subDense(kRes.K, 0, 0, m, n), L: lRes.K, Xc: kRes.X, Xf: lRes.X}
 	if servo {
-		res.Ki = subDense(kRes.K, 0, n, m, p)
+		res.ki = subDense(kRes.K, 0, n, m, p)
 	}
 	var F *mat.Dense
 	if o.Current {
@@ -239,23 +249,23 @@ func (res *LqgResult) currentGains(sys *System, Ba, X, R, Rn, Nn *mat.Dense) (*m
 	if err := Sinv.Inverse(S); err != nil {
 		return nil, fmt.Errorf("Lqg: innovation covariance: %w", ErrSingularEquation)
 	}
-	res.Mx = mulDims(n, p, PCt, &Sinv)
-	res.Mw = mat.NewDense(n, p, nil)
+	res.mx = mulDims(n, p, PCt, &Sinv)
+	res.mw = mat.NewDense(n, p, nil)
 	if Nn != nil {
-		res.Mw.Mul(Nn, &Sinv)
+		res.mw.Mul(Nn, &Sinv)
 	}
 
 	na, _ := X.Dims()
 	BtX := mulDims(m, na, Ba.T(), X)
 	G := mulDims(m, m, BtX, Ba)
 	G.Add(G, R)
-	res.Kw = mat.NewDense(m, n, nil)
-	if err := res.Kw.Solve(G, subDense(BtX, 0, 0, m, n)); err != nil {
+	res.kw = mat.NewDense(m, n, nil)
+	if err := res.kw.Solve(G, subDense(BtX, 0, 0, m, n)); err != nil {
 		return nil, fmt.Errorf("Lqg: %w", ErrSingularR)
 	}
 
-	F := mulDims(m, p, res.K, res.Mx)
-	F.Add(F, mulDims(m, p, res.Kw, res.Mw))
+	F := mulDims(m, p, res.K, res.mx)
+	F.Add(F, mulDims(m, p, res.kw, res.mw))
 	return F, nil
 }
 
@@ -265,7 +275,7 @@ func (res *LqgResult) currentGains(sys *System, Ba, X, R, Rn, Nn *mat.Dense) (*m
 func lqgController(sys *System, res *LqgResult, F *mat.Dense, oneDOF bool) (*System, error) {
 	n, m, p := sys.Dims()
 	q := 0
-	if res.Ki != nil {
+	if res.ki != nil {
 		q = p
 	}
 	nc := n + q
@@ -276,7 +286,7 @@ func lqgController(sys *System, res *LqgResult, F *mat.Dense, oneDOF bool) (*Sys
 	setBlock(Cu, 0, 0, &neg)
 	if q > 0 {
 		var negKi mat.Dense
-		negKi.Scale(-1, res.Ki)
+		negKi.Scale(-1, res.ki)
 		setBlock(Cu, 0, n, &negKi)
 	}
 	Du := mat.NewDense(m, p, nil)

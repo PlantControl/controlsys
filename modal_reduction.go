@@ -11,21 +11,36 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// ModalTruncateOptions selects the retained modes. Set at most one of Order
+// and MaxRealPart; with neither, ModalTruncate keeps about half the modes.
 type ModalTruncateOptions struct {
-	Order       int
-	MaxRealPart float64
+	// Order is the number of retained states; 0 means unset.
+	Order int
+	// MaxRealPart, when non-nil, keeps every mode with real part at or
+	// above *MaxRealPart (any value, including 0), plus all unstable modes.
+	MaxRealPart *float64
 }
 
+// ModalReductionResult is a modal truncation: the reduced model, its
+// order, the retained poles in Schur order, and the n×Order Basis and
+// Order×n Projection with Projection·Basis = I and Sys.A = Projection·A·Basis.
 type ModalReductionResult struct {
 	Sys        *System
 	Order      int
-	Method     string
-	Kept       []int
 	KeptPoles  []complex128
 	Basis      *mat.Dense
 	Projection *mat.Dense
 }
 
+// ModalTruncate keeps the dominant modes of a delay-free state-space model
+// (slowest first, unstable modes always kept) by projecting onto an ordered
+// real Schur basis, never splitting a complex-conjugate pair; the feedthrough
+// D is kept unchanged. It mirrors MATLAB reducespec(sys,"modal") with getrom.
+// Order out of range, an order that would split a pair or drop an unstable
+// mode, and a MaxRealPart that selects nothing return ErrInvalidOrder; both
+// Order and MaxRealPart set return ErrInvalidArgument; a model without states
+// returns ErrDimensionMismatch.
+// See https://www.mathworks.com/help/control/ref/lti.reducespec.html.
 func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResult, error) {
 	if err := requireSystem("ModalTruncate", sys); err != nil {
 		return nil, err
@@ -41,20 +56,30 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 		return nil, err
 	}
 	n, m, p := sys.Dims()
+	if opts.Order != 0 && opts.MaxRealPart != nil {
+		return nil, fmt.Errorf("ModalTruncate: Order and MaxRealPart are both set: %w", ErrInvalidArgument)
+	}
+	if opts.MaxRealPart != nil && math.IsNaN(*opts.MaxRealPart) {
+		return nil, fmt.Errorf("ModalTruncate: MaxRealPart is NaN: %w", ErrInvalidArgument)
+	}
 	if opts.Order < 0 || opts.Order > n {
 		return nil, fmt.Errorf("ModalTruncate: order %d outside [0,%d]: %w", opts.Order, n, ErrInvalidOrder)
 	}
 	if n == 0 {
-		return &ModalReductionResult{Sys: sys.Copy(), Order: 0, Method: "real-schur-modal-truncate", Basis: &mat.Dense{}, Projection: &mat.Dense{}}, nil
+		return nil, fmt.Errorf("ModalTruncate: system has no states: %w", ErrDimensionMismatch)
 	}
 
 	t, z, err := modalSchur(sys)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ModalTruncate: %w", err)
 	}
-	threshold := opts.Order == 0 && opts.MaxRealPart != 0
-	if err := orderModalSchur(t, z, n, sys.Dt, opts.MaxRealPart, threshold); err != nil {
-		return nil, err
+	var maxRealPart float64
+	threshold := opts.MaxRealPart != nil
+	if threshold {
+		maxRealPart = *opts.MaxRealPart
+	}
+	if err := orderModalSchur(t, z, n, sys.Dt, maxRealPart, threshold); err != nil {
+		return nil, fmt.Errorf("ModalTruncate: %w", err)
 	}
 	poles := schurEigenvaluesRaw(t, n)
 	order, err := modalReductionOrder(t, poles, n, sys.Dt, opts)
@@ -76,8 +101,6 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 		return &ModalReductionResult{
 			Sys:        sys.Copy(),
 			Order:      n,
-			Method:     "real-schur-modal-truncate",
-			Kept:       rangeInts(n),
 			KeptPoles:  keptPoles,
 			Basis:      identity,
 			Projection: eyeDense(n),
@@ -112,8 +135,6 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 	return &ModalReductionResult{
 		Sys:        reduced,
 		Order:      order,
-		Method:     "real-schur-modal-truncate",
-		Kept:       rangeInts(order),
 		KeptPoles:  keptPoles,
 		Basis:      basis,
 		Projection: projection,
@@ -134,7 +155,7 @@ func modalSchur(sys *System) (t, z []float64, err error) {
 	work := make([]float64, int(query[0]))
 	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil, n, t, n, wr, wi, z, n, work, len(work), bwork)
 	if !ok {
-		return nil, nil, ErrSchurFailed
+		return nil, nil, fmt.Errorf("real Schur form of A did not converge: %w", ErrSchurFailed)
 	}
 	return t, z, nil
 }
@@ -153,7 +174,7 @@ func orderModalSchur(t, z []float64, n int, dt, maxRealPart float64, threshold b
 		if best != placed {
 			_, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, best, placed, work)
 			if !ok {
-				return ErrSchurFailed
+				return fmt.Errorf("reordering the real Schur form failed: %w", ErrSchurFailed)
 			}
 		}
 		placed += schurBlockSize(t, n, placed)
@@ -185,13 +206,14 @@ func modalReductionOrder(t []float64, poles []complex128, n int, dt float64, opt
 	if opts.Order > 0 {
 		return opts.Order, nil
 	}
-	if opts.MaxRealPart != 0 {
+	if opts.MaxRealPart != nil {
+		maxRealPart := *opts.MaxRealPart
 		order := 0
-		for order < n && (real(poles[order]) >= opts.MaxRealPart || modalPoleUnstable(poles[order], dt)) {
+		for order < n && (real(poles[order]) >= maxRealPart || modalPoleUnstable(poles[order], dt)) {
 			order += schurBlockSize(t, n, order)
 		}
 		if order == 0 {
-			return 0, fmt.Errorf("ModalTruncate: no modes satisfy MaxRealPart %g: %w", opts.MaxRealPart, ErrInvalidOrder)
+			return 0, fmt.Errorf("ModalTruncate: no modes satisfy MaxRealPart %g: %w", maxRealPart, ErrInvalidOrder)
 		}
 		return order, nil
 	}

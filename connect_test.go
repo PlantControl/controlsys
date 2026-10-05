@@ -572,7 +572,7 @@ func TestSeries_WithInputOutputDelay(t *testing.T) {
 	if len(result.OutputDelay) != 1 || result.OutputDelay[0] != 4 {
 		t.Errorf("OutputDelay = %v, want [4]", result.OutputDelay)
 	}
-	td := result.TotalDelay()
+	td := mustTotalDelay(t, result)
 	if td == nil {
 		t.Fatal("TotalDelay should not be nil")
 	}
@@ -664,7 +664,7 @@ func TestSeries_IntermediateDelayUniform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td := result.TotalDelay()
+	td := mustTotalDelay(t, result)
 	if td == nil {
 		t.Fatal("TotalDelay should not be nil")
 	}
@@ -1590,7 +1590,10 @@ func TestSeriesLFT_Roundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	H, tau := result.GetDelayModel()
+	H, tau, err := result.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(tau) != 2 {
 		t.Fatalf("tau length = %d, want 2", len(tau))
 	}
@@ -1632,7 +1635,10 @@ func TestSeriesLFT_IncompatibleMIMOIODelay(t *testing.T) {
 		t.Errorf("dims m=%d p=%d, want m=1 p=1", m, p)
 	}
 
-	H, tau := result.GetDelayModel()
+	H, tau, err := result.GetDelayModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(tau) == 0 {
 		t.Fatal("should have non-empty tau")
 	}
@@ -1954,11 +1960,11 @@ func TestFeedback_DelayInFeedbackPath(t *testing.T) {
 		u.Set(0, j, 1.0)
 	}
 
-	Sd, _ := S.DiscretizeZOH(dt)
+	Sd, _ := S.C2D(dt, C2DOptions{})
 	sResp, _ := Sd.Simulate(u, nil, nil)
 	sFinal := sResp.Y.At(0, nSteps-1)
 
-	Td, _ := T.DiscretizeZOH(dt)
+	Td, _ := T.C2D(dt, C2DOptions{})
 	tResp, _ := Td.Simulate(u, nil, nil)
 	tFinal := tResp.Y.At(0, nSteps-1)
 
@@ -2811,7 +2817,7 @@ func zeroStateDelayBlock(t *testing.T, dt float64, kind int) *System {
 	t.Helper()
 	sc := 1.0
 	if dt > 0 {
-		sc = 10 * dt
+		sc = 10
 	}
 	var H *System
 	var tau []float64

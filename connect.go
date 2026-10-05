@@ -1341,7 +1341,10 @@ func connectWithDelay(sys *System, Q *mat.Dense, inputs, outputs []int) (*System
 	}
 
 	N := sLFT.internalDelayCount()
-	H, tau := sLFT.GetDelayModel()
+	H, tau, err := sLFT.GetDelayModel()
+	if err != nil {
+		return nil, err
+	}
 
 	nH, _, _ := H.Dims()
 

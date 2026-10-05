@@ -137,7 +137,7 @@ func TestMargin_DiscreteTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsys, err := sys.DiscretizeZOH(0.1)
+	dsys, err := sys.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,13 +294,13 @@ func TestBode_MIMOSystem(t *testing.T) {
 	}
 
 	mag00 := bode.MagDBAt(0, 0, 0)
-	wantMag00 := 20 * math.Log10(1.0 / math.Sqrt(2))
+	wantMag00 := 20 * math.Log10(1.0/math.Sqrt(2))
 	if math.Abs(mag00-wantMag00) > 0.1 {
 		t.Errorf("(0,0) mag = %v dB, want ~%v dB", mag00, wantMag00)
 	}
 
 	mag11 := bode.MagDBAt(0, 1, 1)
-	wantMag11 := 20 * math.Log10(1.0 / math.Sqrt(5))
+	wantMag11 := 20 * math.Log10(1.0/math.Sqrt(5))
 	if math.Abs(mag11-wantMag11) > 0.1 {
 		t.Errorf("(1,1) mag = %v dB, want ~%v dB", mag11, wantMag11)
 	}

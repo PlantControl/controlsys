@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
@@ -81,13 +82,21 @@ func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	if err := requireFiniteDense("Lyap", "Q", Q); err != nil {
 		return nil, err
 	}
+	X, err := lyap(A, Q, opts)
+	if err != nil {
+		return nil, fmt.Errorf("Lyap: %w", err)
+	}
+	return X, nil
+}
+
+func lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	problem, err := newLyapunovProblem(A, Q, opts)
 	if err != nil {
 		return nil, err
 	}
 	n := problem.n
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("Lyap: A has no rows: %w", ErrDimensionMismatch)
 	}
 	ws := problem.ws
 
@@ -109,7 +118,7 @@ func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
 		n, aData, n, wr, wi, vs, n, work, lwork, nil)
 	if !ok {
-		return nil, ErrSchurFailed
+		return nil, fmt.Errorf("real Schur form of A did not converge: %w", ErrSchurFailed)
 	}
 
 	tmp := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.tmp })
@@ -130,7 +139,7 @@ func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	scale, sylOk := impl.Dtrsyl(blas.NoTrans, blas.Trans, 1,
 		n, n, aData, n, aData, n, w, n)
 	if !sylOk {
-		return nil, ErrSingularEquation
+		return nil, fmt.Errorf("A and -A share an eigenvalue: %w", ErrSingularEquation)
 	}
 	if scale != 1 {
 		invScale := 1.0 / scale
@@ -166,13 +175,21 @@ func DLyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	if err := requireFiniteDense("DLyap", "Q", Q); err != nil {
 		return nil, err
 	}
+	X, err := dlyap(A, Q, opts)
+	if err != nil {
+		return nil, fmt.Errorf("DLyap: %w", err)
+	}
+	return X, nil
+}
+
+func dlyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	problem, err := newLyapunovProblem(A, Q, opts)
 	if err != nil {
 		return nil, err
 	}
 	n := problem.n
 	if n == 0 {
-		return &mat.Dense{}, nil
+		return nil, fmt.Errorf("DLyap: A has no rows: %w", ErrDimensionMismatch)
 	}
 	ws := problem.ws
 
@@ -194,7 +211,7 @@ func DLyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil,
 		n, aData, n, wr, wi, vs, n, work, lwork, nil)
 	if !ok {
-		return nil, ErrSchurFailed
+		return nil, fmt.Errorf("real Schur form of A did not converge: %w", ErrSchurFailed)
 	}
 
 	tmp := reuseSlice(&ws, nn, func(w *LyapunovWorkspace) *[]float64 { return &w.tmp })

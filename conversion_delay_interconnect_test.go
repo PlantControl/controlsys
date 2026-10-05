@@ -9,7 +9,7 @@ import (
 
 func conversionDynamicLFT(t *testing.T) *System {
 	t.Helper()
-	sys, err := makeTestSystem().Discretize(.1)
+	sys, err := makeTestSystem().C2D(.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,12 +18,12 @@ func conversionDynamicLFT(t *testing.T) *System {
 }
 
 func TestSeriesInternalDelayIndependentProduct(t *testing.T) {
-	bank, err := buildContinuousDelayBank([]float64{.35}, 1, .1, 3)
+	bank, err := buildDiscreteSampleDelayBank(continuousToSampleDelay([]float64{.35}, .1), 1, .1, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	filter := conversionStateAsDelay(bank)
-	plant, err := makeTestSystem().Discretize(.1)
+	plant, err := makeTestSystem().C2D(.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestGainZOHRetainsIntegerPathDelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	sys.Delay = mat.NewDense(1, 1, []float64{.3})
-	disc, err := sys.DiscretizeZOH(.1)
+	disc, err := sys.C2D(.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

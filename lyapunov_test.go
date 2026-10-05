@@ -125,15 +125,8 @@ func TestLyap_10x10(t *testing.T) {
 }
 
 func TestLyap_Empty(t *testing.T) {
-	A := &mat.Dense{}
-	Q := &mat.Dense{}
-	X, err := Lyap(A, Q, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := X.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %d×%d", r, c)
+	if _, err := Lyap(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("err = %v, want ErrDimensionMismatch", err)
 	}
 }
 
@@ -268,13 +261,8 @@ func TestDLyap_10x10(t *testing.T) {
 }
 
 func TestDLyap_Empty(t *testing.T) {
-	X, err := DLyap(&mat.Dense{}, &mat.Dense{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := X.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %d×%d", r, c)
+	if _, err := DLyap(&mat.Dense{}, &mat.Dense{}, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Fatalf("err = %v, want ErrDimensionMismatch", err)
 	}
 }
 

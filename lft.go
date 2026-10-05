@@ -12,28 +12,37 @@ func LFT(M, Delta *System, nu, ny int) (*System, error) {
 	}
 	_, mM, pM := M.Dims()
 	if nu < 0 || ny < 0 {
-		return nil, fmt.Errorf("lft: nu and ny must be non-negative: %w", ErrDimensionMismatch)
+		return nil, fmt.Errorf("LFT: nu=%d, ny=%d, want non-negative: %w", nu, ny, ErrInvalidArgument)
 	}
 	if nu > mM {
-		return nil, fmt.Errorf("lft: nu=%d > M inputs=%d: %w", nu, mM, ErrDimensionMismatch)
+		return nil, fmt.Errorf("LFT: nu=%d > M inputs=%d: %w", nu, mM, ErrDimensionMismatch)
 	}
 	if ny > pM {
-		return nil, fmt.Errorf("lft: ny=%d > M outputs=%d: %w", ny, pM, ErrDimensionMismatch)
+		return nil, fmt.Errorf("LFT: ny=%d > M outputs=%d: %w", ny, pM, ErrDimensionMismatch)
 	}
 
 	if Delta != nil {
 		_, mD, pD := Delta.Dims()
 		if pM-ny != mD {
-			return nil, fmt.Errorf("lft: M lower outputs %d != Delta inputs %d: %w", pM-ny, mD, ErrDimensionMismatch)
+			return nil, fmt.Errorf("LFT: M lower outputs %d != Delta inputs %d: %w", pM-ny, mD, ErrDimensionMismatch)
 		}
 		if mM-nu != pD {
-			return nil, fmt.Errorf("lft: M lower inputs %d != Delta outputs %d: %w", mM-nu, pD, ErrDimensionMismatch)
+			return nil, fmt.Errorf("LFT: M lower inputs %d != Delta outputs %d: %w", mM-nu, pD, ErrDimensionMismatch)
 		}
 		if err := domainMatch(M, Delta); err != nil {
-			return nil, fmt.Errorf("lft: %w", err)
+			return nil, fmt.Errorf("LFT: %w", err)
 		}
 	}
 
+	res, err := lftClose(M, Delta, nu, ny)
+	if err != nil {
+		return nil, fmt.Errorf("LFT: %w", err)
+	}
+	return res, nil
+}
+
+func lftClose(M, Delta *System, nu, ny int) (*System, error) {
+	_, mM, pM := M.Dims()
 	if Delta == nil {
 		return lftExtract(M, nu, ny)
 	}
@@ -178,7 +187,10 @@ func lftGain(D *mat.Dense, ny, nu int, dt float64) (*System, error) {
 }
 
 func lftGainDims(ny, nu int) error {
-	return storableStaticGain("lft", ny, nu)
+	if (ny == 0) != (nu == 0) {
+		return fmt.Errorf("%dx%d static gain cannot be stored: %w", ny, nu, ErrDimensionMismatch)
+	}
+	return nil
 }
 
 // lftLoopGain returns I + Phi·D22, the z×z gain from Delta's outputs through
@@ -218,8 +230,14 @@ func lftWithDelay(M, Delta *System, nu, ny int) (*System, error) {
 	ND := dLFT.internalDelayCount()
 	N := NM + ND
 
-	mH, _ := mLFT.GetDelayModel()
-	dH, _ := dLFT.GetDelayModel()
+	mH, _, err := mLFT.GetDelayModel()
+	if err != nil {
+		return nil, err
+	}
+	dH, _, err := dLFT.GetDelayModel()
+	if err != nil {
+		return nil, err
+	}
 
 	nM, _, _ := mH.Dims()
 	nD, _, _ := dH.Dims()

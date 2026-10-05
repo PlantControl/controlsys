@@ -8,6 +8,8 @@ import (
 	"sort"
 )
 
+// NyquistResult is the Nyquist response and stability count of a SISO loop;
+// see (*System).Nyquist.
 type NyquistResult struct {
 	Omega         []float64
 	Contour       []complex128
@@ -35,15 +37,28 @@ type NyquistResult struct {
 // a pole is on the boundary within sqrt(eps), or within 10*cbrt(eps) for a group
 // of two or more poles (a computed repeated boundary pole); closed-loop poles
 // inside the indentation around a boundary pole are not resolved. The counts
-// never depend on omega.
+// never depend on omega. When 1+L vanishes on the contour (closed-loop poles
+// on the stability boundary) the count is undefined and Nyquist returns
+// ErrSingularTransform.
+//
+// omega nil selects the auto grid with nPoints samples (0 means 500); a
+// non-nil omega must be non-empty, finite, non-negative and, for discrete
+// models, at most π/dt. Negative nPoints or an invalid omega returns
+// ErrInvalidArgument.
 func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error) {
+	if err := requireSystem("Nyquist", sys); err != nil {
+		return nil, err
+	}
 	if _, err := newSISOLoopModel(sys, "Nyquist"); err != nil {
 		return nil, err
+	}
+	if err := validateNyquistGrid(sys, omega, nPoints); err != nil {
+		return nil, fmt.Errorf("Nyquist: %w", err)
 	}
 
 	poles, err := sys.Poles()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Nyquist: %w", err)
 	}
 
 	bd := classifyNyquistBoundary(poles, sys.IsContinuous(), sys.Dt)
@@ -62,7 +77,7 @@ func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error)
 	if len(omega) > 0 {
 		resp, err := sys.FreqResponse(omega)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Nyquist: %w", err)
 		}
 		for k := range omega {
 			contour[k] = resp.At(k, 0, 0)
@@ -76,7 +91,7 @@ func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error)
 
 	enc, err := nyquistEncirclements(sys, poles, bd)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Nyquist: %w", err)
 	}
 
 	return &NyquistResult{
@@ -344,7 +359,29 @@ func autoNyquistFreqs(sys *System, poles []complex128, bd nyquistBoundary, nPoin
 	return filtered
 }
 
-var errNyquistIndent = fmt.Errorf("Nyquist: boundary poles too close to indent separately: %w", ErrSingularTransform)
+var errNyquistIndent = fmt.Errorf("boundary poles too close to indent separately: %w", ErrSingularTransform)
+
+func validateNyquistGrid(sys *System, omega []float64, nPoints int) error {
+	if nPoints < 0 {
+		return fmt.Errorf("nPoints %d must be non-negative (0 = default): %w", nPoints, ErrInvalidArgument)
+	}
+	if omega == nil {
+		return nil
+	}
+	if len(omega) == 0 {
+		return fmt.Errorf("omega is empty; pass nil for the automatic grid: %w", ErrInvalidArgument)
+	}
+	nyq := math.Inf(1)
+	if sys.IsDiscrete() {
+		nyq = math.Pi / sys.Dt
+	}
+	for k, w := range omega {
+		if !isFinite(w) || w < 0 || w > nyq*(1+1e-12) {
+			return fmt.Errorf("omega[%d] = %g must be finite and in [0, %g]: %w", k, w, nyq, ErrInvalidArgument)
+		}
+	}
+	return nil
+}
 
 const (
 	nyquistIndentBase   = 1e-4
@@ -352,6 +389,7 @@ const (
 	nyquistMaxDepth     = 30
 	nyquistTailRatio    = 0.1
 	nyquistMaxFreq      = 1e15
+	nyquistOnContourTol = 1e-12
 )
 
 // nyquistPath samples the loop response along the positive-frequency half of
@@ -359,10 +397,13 @@ const (
 // nyquistMaxPhaseStep between neighbours so the winding count is not aliased.
 type nyquistPath struct {
 	sys   *System
-	eval  func(complex128, []complex128) error
+	eval  func(frequencyPoint, []complex128) error
 	buf   []complex128
 	vals  []complex128
 	seeds []float64
+	// onContour records that 1+L vanished on the contour: a sample came
+	// within nyquistOnContourTol of -1 or bisection could not resolve arg(1+L) at nyquistMaxDepth.
+	onContour bool
 }
 
 // seedResonances adds contour parameters (ω, or θ = ωdt for discrete models)
@@ -402,10 +443,13 @@ func (p *nyquistPath) withSeeds(ts []float64, a, b float64, toT func(float64) fl
 }
 
 func (p *nyquistPath) at(s complex128) (complex128, error) {
-	if err := p.eval(s, p.buf); err != nil {
+	if err := p.eval(pointAt(s), p.buf); err != nil {
 		return 0, err
 	}
 	applyIODelayAtS(p.sys, s, p.buf, 1, 1, true)
+	if v := p.buf[0]; cmplx.Abs(1+v) <= nyquistOnContourTol*math.Max(1, cmplx.Abs(v)) {
+		p.onContour = true
+	}
 	return p.buf[0], nil
 }
 
@@ -432,7 +476,11 @@ func (p *nyquistPath) piece(f func(float64) complex128, ts []float64) error {
 }
 
 func (p *nyquistPath) refine(f func(float64) complex128, ta float64, va complex128, tb float64, vb complex128, depth int) error {
-	if depth >= nyquistMaxDepth || !(phaseStep(1+va, 1+vb) > nyquistMaxPhaseStep) {
+	if !(phaseStep(1+va, 1+vb) > nyquistMaxPhaseStep) {
+		return nil
+	}
+	if depth >= nyquistMaxDepth {
+		p.onContour = true
 		return nil
 	}
 	tm := (ta + tb) / 2
@@ -493,6 +541,9 @@ func nyquistEncirclements(sys *System, poles []complex128, bd nyquistBoundary) (
 	}
 	if err != nil {
 		return 0, err
+	}
+	if path.onContour {
+		return 0, fmt.Errorf("closed loop has poles on the stability boundary (1+L = 0 on the contour): %w", ErrSingularTransform)
 	}
 
 	half := path.vals

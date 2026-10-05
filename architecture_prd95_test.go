@@ -52,7 +52,7 @@ func TestPRD95DelayBankPublicWorkflowsShareRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	disc, err := plant.DiscretizeWithOpts(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
+	disc, err := plant.C2D(0.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: C2DDelayModelingState})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestPRD95TimeDomainResponsePreparationPublicContracts(t *testing.T) {
 		t.Fatalf("Initial OutputName = %v, want %v", initResp.OutputName, cont.OutputName)
 	}
 
-	disc, err := cont.DiscretizeZOH(0.1)
+	disc, err := cont.C2D(0.1, C2DOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestPRD95FrequencyResponseLayoutPublicWorkflowsAgree(t *testing.T) {
 		u.Set(0, k, math.Sin(0.17*float64(k)))
 		u.Set(1, k, math.Cos(0.11*float64(k)))
 	}
-	disc, err := sys.D2D(dt, C2DOptions{Method: C2DMethodTustin})
+	disc, err := sys.D2D(dt, D2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
 	}
