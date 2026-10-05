@@ -148,10 +148,6 @@ func TestRuntimeArchitectureTransformationsRejectDescriptorWorkflows(t *testing.
 			_, err := Balreal(sys)
 			return err
 		}},
-		{name: "Ssbal", run: func() error {
-			_, err := Ssbal(sys)
-			return err
-		}},
 		{name: "Prescale", run: func() error {
 			_, err := Prescale(sys)
 			return err

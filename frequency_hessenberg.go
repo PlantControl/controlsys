@@ -5,62 +5,223 @@ import (
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
-	"plantcontrol.org/v1/gonum/lapack"
 )
 
-// hessenbergSweep evaluates C(sI-A)^{-1}B + D over many frequencies after a
-// single orthogonal reduction A = Q H Qᵀ (Laub 1981). Each point then costs
-// one O(n²m) Hessenberg solve, and stays backward stable where a polynomial
-// transfer-function form loses accuracy on high-order or clustered poles.
-type hessenbergSweep struct {
+// balancedRealization is (E, A, B, C, D) after an exact power-of-two state
+// scaling, the shared starting point of the frequency solvers. e is nil for
+// explicit models.
+type balancedRealization struct {
 	n, m, p int
-	h       []float64
-	bt      []float64
-	ct      []float64
+	e       []float64 // Ê = D⁻¹ED
+	a       []float64 // Â = D⁻¹AD
+	b       []float64 // B̂ = D⁻¹B
+	c       []float64 // Ĉ = CD
 	d       []float64
 	dStride int
-	hMax    float64
-	u       []complex128
-	inv     []complex128
-	rhs     []complex128 // column-major n×m
 }
 
-func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
-	lwork := max(1, n, m, p)
-	f := make([]float64, n*n+n*m+p*n+2*n+lwork)
-	c := make([]complex128, n*n+n+n*m)
-	hs := &hessenbergSweep{
-		n:   n,
-		m:   m,
-		p:   p,
-		h:   f[: n*n : n*n],
-		bt:  f[n*n : n*n+n*m : n*n+n*m],
-		ct:  f[n*n+n*m : n*n+n*m+p*n : n*n+n*m+p*n],
-		u:   c[: n*n : n*n],
-		inv: c[n*n : n*n+n : n*n+n],
-		rhs: c[n*n+n:],
-	}
+func newBalancedRealization(sys *System, n, m, p int) balancedRealization {
+	br := newRealizationCopy(sys, n, m, p)
+	br.balance(nil)
+	return br
+}
+
+// newRealizationCopy copies the realization into one fresh buffer, unscaled.
+func newRealizationCopy(sys *System, n, m, p int) balancedRealization {
+	f := make([]float64, n*n+n*m+p*n)
+	br := balancedRealization{n: n, m: m, p: p, a: f[: n*n : n*n], b: f[n*n : n*n+n*m : n*n+n*m], c: f[n*n+n*m:]}
 	if sys.D != nil {
 		raw := sys.D.RawMatrix()
-		hs.d, hs.dStride = raw.Data, raw.Stride
+		br.d, br.dStride = raw.Data, raw.Stride
 	}
 	if n == 0 {
-		return hs
+		return br
 	}
 	a := sys.A.RawMatrix()
-	copyStrided(hs.h, n, a.Data, a.Stride, n, n)
+	copyStrided(br.a, n, a.Data, a.Stride, n, n)
+	if sys.E != nil {
+		e := sys.E.RawMatrix()
+		br.e = make([]float64, n*n)
+		copyStrided(br.e, n, e.Data, e.Stride, n, n)
+	}
 	if m > 0 {
 		b := sys.B.RawMatrix()
-		copyStrided(hs.bt, m, b.Data, b.Stride, n, m)
+		copyStrided(br.b, m, b.Data, b.Stride, n, m)
 	}
 	if p > 0 {
 		c := sys.C.RawMatrix()
-		copyStrided(hs.ct, n, c.Data, c.Stride, p, n)
+		copyStrided(br.c, n, c.Data, c.Stride, p, n)
 	}
-	scratch := f[n*n+n*m+p*n:]
-	hs.balance(scratch[:n])
+	return br
+}
+
+// balancedDense evaluates each frequency by GEPP on sÊ-Â. GEPP is
+// componentwise backward stable, so it needs no refinement; per point it
+// costs O(n³) and beats the Hessenberg sweep for small n.
+type balancedDense struct {
+	balancedRealization
+	pencil []complex128
+	inv    []complex128
+	rhs    []complex128 // column-major n×m
+}
+
+func newBalancedDense(sys *System, n, m, p int) *balancedDense {
+	return &balancedDense{
+		balancedRealization: newBalancedRealization(sys, n, m, p),
+		pencil:              make([]complex128, n*n),
+		inv:                 make([]complex128, n),
+		rhs:                 make([]complex128, n*m),
+	}
+}
+
+func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
+	n, m, p := bd.n, bd.m, bd.p
+	if n == 0 {
+		copyRealMatrixToComplex(dst, bd.d, bd.dStride, p, m)
+		return nil
+	}
+	a, x, inv := bd.pencil, bd.rhs, bd.inv
+	maxAbs, sScale := 0.0, cabs1(s)
+	for i, v := range bd.a {
+		a[i] = complex(-v, 0)
+		maxAbs = max(maxAbs, math.Abs(v))
+	}
+	if bd.e == nil {
+		for i := range n {
+			a[i*n+i] += s
+		}
+	} else {
+		maxE := 0.0
+		for i, v := range bd.e {
+			a[i] += s * complex(v, 0)
+			maxE = max(maxE, math.Abs(v))
+		}
+		sScale *= maxE
+	}
+	for i := range n {
+		for j := range m {
+			x[j*n+i] = complex(bd.b[i*m+j], 0)
+		}
+	}
+	tol := float64(n) * (maxAbs + sScale) * eps()
+	if tol == 0 {
+		tol = 1e-15
+	}
+
+	for k := range n {
+		piv, best := k, cabs1(a[k*n+k])
+		for i := k + 1; i < n; i++ {
+			if v := cabs1(a[i*n+k]); v > best {
+				piv, best = i, v
+			}
+		}
+		if best < tol {
+			return errSingularPencil
+		}
+		if piv != k {
+			rk, rp := a[k*n:(k+1)*n], a[piv*n:(piv+1)*n]
+			for j := range rk {
+				rk[j], rp[j] = rp[j], rk[j]
+			}
+			for j := range m {
+				x[j*n+k], x[j*n+piv] = x[j*n+piv], x[j*n+k]
+			}
+		}
+		ik := crecip(a[k*n+k])
+		inv[k] = ik
+		rk := a[k*n+k+1 : (k+1)*n]
+		for i := k + 1; i < n; i++ {
+			f := a[i*n+k] * ik
+			if f == 0 {
+				continue
+			}
+			ri := a[i*n+k+1 : (i+1)*n]
+			ri = ri[:len(rk)]
+			for j, v := range rk {
+				ri[j] -= f * v
+			}
+			for j := range m {
+				x[j*n+i] -= f * x[j*n+k]
+			}
+		}
+	}
+	for j := range m {
+		backSubstitute(x[j*n:(j+1)*n], a, inv, n)
+	}
+
+	for row := range p {
+		cr := bd.c[row*n : (row+1)*n]
+		out := dst[row*m : (row+1)*m]
+		for j := range out {
+			xj := x[j*n : (j+1)*n]
+			var re, im float64
+			for k, c := range cr {
+				re += c * real(xj[k])
+				im += c * imag(xj[k])
+			}
+			if bd.d != nil {
+				re += bd.d[row*bd.dStride+j]
+			}
+			out[j] = complex(re, im)
+		}
+	}
+	return nil
+}
+
+// hessenbergSweep evaluates C(sI-A)^{-1}B + D over many frequencies after one
+// orthogonal reduction Â = Q H Qᵀ of the balanced realization (Laub 1981).
+// Each point costs an O(n²) Hessenberg factorization and O(n²m) solves. The
+// reduction alone is only normwise backward stable: it mixes a slow decoupled
+// mode's row with fast rows, so the slow pole is recovered only to ε‖Â‖.
+// Iterative refinement against Â itself (Skeel) restores componentwise
+// stability; one step normally suffices.
+type hessenbergSweep struct {
+	balancedRealization
+	q       []float64
+	h       []float64
+	bt      []float64 // QᵀB̂
+	ct      []float64 // ĈQ
+	hMax    float64
+	u       []complex128
+	inv     []complex128
+	mult    []complex128
+	swapped []bool
+	y       []complex128 // column-major n×m, Hessenberg coordinates
+	x       []complex128 // column-major n×m, balanced coordinates
+	r       []complex128 // column-major n×m
+}
+
+func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
+	nn := n * n
+	f := make([]float64, 2*nn+n*m+p*n)
+	c := make([]complex128, nn+2*n+3*n*m)
+	take := func(k int) []float64 {
+		out := f[:k:k]
+		f = f[k:]
+		return out
+	}
+	ctake := func(k int) []complex128 {
+		out := c[:k:k]
+		c = c[k:]
+		return out
+	}
+	hs := &hessenbergSweep{balancedRealization: newBalancedRealization(sys, n, m, p)}
+	hs.q, hs.h, hs.bt, hs.ct = take(nn), take(nn), take(n*m), take(p*n)
+	hs.u, hs.inv, hs.mult = ctake(nn), ctake(n), ctake(n)
+	hs.y, hs.x, hs.r = ctake(n*m), ctake(n*m), ctake(n*m)
+	hs.swapped = make([]bool, n)
+	if n == 0 {
+		return hs
+	}
+	copy(hs.h, hs.a)
+	copy(hs.bt, hs.b)
+	copy(hs.ct, hs.c)
 	if n >= 3 {
-		hs.reduce(scratch[n:2*n-1], scratch[2*n:])
+		hs.reduce()
+	} else {
+		for i := range n {
+			hs.q[i*n+i] = 1
+		}
 	}
 	for _, v := range hs.h {
 		hs.hMax = max(hs.hMax, math.Abs(v))
@@ -68,10 +229,13 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	return hs
 }
 
-// reduce applies A = Q H Qᵀ to (A, B, C) with the minimal (unblocked)
-// workspace; models here are small enough that blocking only costs memory.
-func (hs *hessenbergSweep) reduce(tau, work []float64) {
+// reduce forms H = QᵀÂQ, QᵀB̂, ĈQ and the explicit Q used by refinement,
+// with the minimal (unblocked) workspace; models here are small enough that
+// blocking only costs memory.
+func (hs *hessenbergSweep) reduce() {
 	n, m, p := hs.n, hs.m, hs.p
+	tau := make([]float64, n-1)
+	work := make([]float64, max(1, n, m, p))
 	lwork := len(work)
 	impl.Dgehrd(n, 0, n-1, hs.h, n, tau, work, lwork)
 	if m > 0 {
@@ -80,6 +244,8 @@ func (hs *hessenbergSweep) reduce(tau, work []float64) {
 	if p > 0 {
 		impl.Dormhr(blas.Right, blas.NoTrans, p, n, 0, n-1, hs.h, n, tau, hs.ct, n, work, lwork)
 	}
+	copy(hs.q, hs.h)
+	impl.Dorghr(n, 0, n-1, hs.q, n, tau, work, lwork)
 	for i := 2; i < n; i++ {
 		clear(hs.h[i*n : i*n+i-1])
 	}
@@ -98,26 +264,17 @@ func crecip(z complex128) complex128 {
 
 func cabs1(z complex128) float64 { return math.Abs(real(z)) + math.Abs(imag(z)) }
 
-// evalInto factors sI-H by Gaussian elimination with adjacent-row pivoting.
-// Row k of u holds the not-yet-pivoted row until step k settles it, so the
-// pencil is never formed.
-func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
-	n, m, p := hs.n, hs.m, hs.p
-	if n == 0 {
-		copyRealMatrixToComplex(dst, hs.d, hs.dStride, p, m)
-		return nil
-	}
-	h, u, b, inv := hs.h, hs.u, hs.rhs, hs.inv
-	for i := range n {
-		for j := range m {
-			b[j*n+i] = complex(hs.bt[i*m+j], 0)
-		}
-	}
+// factor computes the LU factorization of sI-H with adjacent-row pivoting,
+// recording multipliers and swaps so it can be replayed on several
+// right-hand sides. Row k of u holds the not-yet-pivoted row until step k
+// settles it, so the pencil is never formed.
+func (hs *hessenbergSweep) factor(s complex128) error {
+	n := hs.n
+	h, u, inv := hs.h, hs.u, hs.inv
 	tol := float64(n) * (hs.hMax + cabs1(s)) * eps()
 	if tol == 0 {
 		tol = 1e-15
 	}
-
 	for j := range n {
 		u[j] = complex(-h[j], 0)
 	}
@@ -134,17 +291,13 @@ func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
 			}
 			ik := crecip(sub)
 			f := uk[k] * ik
-			inv[k] = ik
+			inv[k], hs.mult[k], hs.swapped[k] = ik, f, true
 			un[k+1] = uk[k+1] - f*diag
 			uk[k+1] = diag
 			for j := k + 2; j < n; j++ {
 				r := complex(-next[j], 0)
 				un[j] = uk[j] - f*r
 				uk[j] = r
-			}
-			for j := range m {
-				x := b[j*n+k:]
-				x[0], x[1] = x[1], x[0]-f*x[1]
 			}
 			continue
 		}
@@ -153,14 +306,10 @@ func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
 		}
 		ik := crecip(uk[k])
 		f := sub * ik
-		inv[k] = ik
+		inv[k], hs.mult[k], hs.swapped[k] = ik, f, false
 		un[k+1] = diag - f*uk[k+1]
 		for j := k + 2; j < n; j++ {
 			un[j] = complex(-next[j], 0) - f*uk[j]
-		}
-		for j := range m {
-			x := b[j*n+k:]
-			x[1] -= f * x[0]
 		}
 	}
 	last := u[n*n-1]
@@ -168,33 +317,159 @@ func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
 		return errSingularPencil
 	}
 	inv[n-1] = crecip(last)
+	return nil
+}
 
-	for j := range m {
+// solve overwrites the column-major n×m b with (sI-H)⁻¹b.
+func (hs *hessenbergSweep) solve(b []complex128) {
+	n, u, inv := hs.n, hs.u, hs.inv
+	for j := range hs.m {
 		x := b[j*n : (j+1)*n]
-		for i := n - 1; i >= 0; i-- {
-			ui := u[i*n : (i+1)*n]
-			acc := x[i]
-			for k := i + 1; k < n; k++ {
-				acc -= ui[k] * x[k]
+		for k := range n - 1 {
+			if hs.swapped[k] {
+				x[k], x[k+1] = x[k+1], x[k]
 			}
-			x[i] = acc * inv[i]
+			x[k+1] -= hs.mult[k] * x[k]
+		}
+		backSubstitute(x, u, inv, n)
+	}
+}
+
+// backSubstitute overwrites x with U⁻¹x for the row-major upper-triangular
+// u whose reciprocal diagonal is inv.
+func backSubstitute(x, u, inv []complex128, n int) {
+	for i := n - 1; i >= 0; i-- {
+		ut := u[i*n+i+1 : (i+1)*n]
+		xt := x[i+1 : i+1+len(ut)]
+		var re, im float64
+		for k, v := range ut {
+			w := xt[k]
+			re += real(v)*real(w) - imag(v)*imag(w)
+			im += real(v)*imag(w) + imag(v)*real(w)
+		}
+		x[i] = (x[i] - complex(re, im)) * inv[i]
+	}
+}
+
+// qMulCols sets dst[:,j] = Q·src[:,j] for the real n×n row-major Q and
+// column-major n×m complex dst, src.
+func qMulCols(dst, src []complex128, q []float64, n, m int) {
+	for j := range m {
+		in, out := src[j*n:(j+1)*n], dst[j*n:(j+1)*n]
+		for i := range out {
+			row := q[i*n : (i+1)*n]
+			var re, im float64
+			for k, a := range row {
+				re += a * real(in[k])
+				im += a * imag(in[k])
+			}
+			out[i] = complex(re, im)
+		}
+	}
+}
+
+// qTMulCols sets dst[:,j] = Qᵀ·src[:,j].
+func qTMulCols(dst, src []complex128, q []float64, n, m int) {
+	for j := range m {
+		in, out := src[j*n:(j+1)*n], dst[j*n:(j+1)*n]
+		clear(out)
+		for k, v := range in {
+			re, im := real(v), imag(v)
+			row := q[k*n : (k+1)*n]
+			for i, a := range row {
+				out[i] += complex(a*re, a*im)
+			}
+		}
+	}
+}
+
+// maxRefineSteps bounds refinement; each step contracts the error by
+// roughly ε‖Â‖‖(sI-Â)⁻¹‖, so well-conditioned points stop after one.
+const maxRefineSteps = 3
+
+// residual sets r = B̂ - (sI-Â)x̂. The diagonal enters as s-âᵢᵢ, as GEPP
+// forms it, and stays out of the off-diagonal sum, so a slow pole near s
+// keeps its relative accuracy instead of cancelling against sx̂ᵢ. A
+// working-precision residual makes one refinement step componentwise
+// backward stable (Skeel 1980), the accuracy class of GEPP on sI-Â;
+// a compensated residual would go further at ~2.5x the per-point cost.
+func (hs *hessenbergSweep) residual(s complex128) {
+	n, m, x, r := hs.n, hs.m, hs.x, hs.r
+	for j := range m {
+		xj, rj := x[j*n:(j+1)*n], r[j*n:(j+1)*n]
+		for i := range n {
+			row := hs.a[i*n : (i+1)*n]
+			var re, im float64
+			for k, a := range row[:i] {
+				re += a * real(xj[k])
+				im += a * imag(xj[k])
+			}
+			for k, a := range row[i+1:] {
+				re += a * real(xj[i+1+k])
+				im += a * imag(xj[i+1+k])
+			}
+			rj[i] = complex(hs.b[i*m+j]+re, im) - (s-complex(row[i], 0))*xj[i]
+		}
+	}
+}
+
+func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
+	n, m, p := hs.n, hs.m, hs.p
+	if n == 0 {
+		copyRealMatrixToComplex(dst, hs.d, hs.dStride, p, m)
+		return nil
+	}
+	if err := hs.factor(s); err != nil {
+		return err
+	}
+	y, x, r := hs.y, hs.x, hs.r
+	for i := range n {
+		for j := range m {
+			y[j*n+i] = complex(hs.bt[i*m+j], 0)
+		}
+	}
+	hs.solve(y)
+	qMulCols(x, y, hs.q, n, m)
+
+	// y ends as the last correction in Hessenberg coordinates; it is
+	// applied through ĈQ, saving a final Q multiply.
+	for step := range maxRefineSteps {
+		if step > 0 {
+			qMulCols(r, y, hs.q, n, m)
+			for i, v := range r {
+				x[i] += v
+			}
+		}
+		hs.residual(s)
+		qTMulCols(y, r, hs.q, n, m)
+		hs.solve(y)
+		var dMax, xMax float64
+		for i, v := range y {
+			dMax = max(dMax, cabs1(v))
+			xMax = max(xMax, cabs1(x[i]))
+		}
+		if dMax <= 4*eps()*xMax {
+			break
 		}
 	}
 
-	for r := range p {
-		cr := hs.ct[r*n : (r+1)*n]
-		out := dst[r*m : (r+1)*m]
+	for row := range p {
+		cr := hs.c[row*n : (row+1)*n]
+		ct := hs.ct[row*n : (row+1)*n]
+		out := dst[row*m : (row+1)*m]
 		for j := range out {
-			x := b[j*n : (j+1)*n]
-			var re, im float64
+			xj, dj := x[j*n:(j+1)*n], y[j*n:(j+1)*n]
+			var re, im, dre, dim float64
 			for k, c := range cr {
-				re += c * real(x[k])
-				im += c * imag(x[k])
+				re += c * real(xj[k])
+				im += c * imag(xj[k])
+				dre += ct[k] * real(dj[k])
+				dim += ct[k] * imag(dj[k])
 			}
 			if hs.d != nil {
-				re += hs.d[r*hs.dStride+j]
+				re += hs.d[row*hs.dStride+j]
 			}
-			out[j] = complex(re, im)
+			out[j] = complex(re+dre, im+dim)
 		}
 	}
 	return nil
@@ -202,22 +477,85 @@ func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
 
 var errSingularPencil = fmt.Errorf("controlsys: singular complex matrix: %w", ErrSingularTransform)
 
-// balance applies the exact power-of-two similarity D⁻¹AD; without it the
-// orthogonal reduction's normwise backward error swamps small entries of
-// badly scaled realizations such as Padé cascades.
-func (hs *hessenbergSweep) balance(scale []float64) {
-	n, m, p := hs.n, hs.m, hs.p
-	impl.Dgebal(lapack.Scale, n, hs.h, n, scale)
-	for i, d := range scale {
-		if d == 1 {
-			continue
+// balance applies an exact power-of-two state scaling x = D x̂ chosen to
+// balance the rows and columns of [|A|+|E| B; C ·] (Osborne iteration as in
+// SLICOT TB01ID; E enters as in MATLAB ssbal). When t is non-nil it is
+// multiplied by D⁻¹. The orthogonal reduction is normwise backward stable in
+// (A, B, C), so balancing A alone (Dgebal) is not enough: a slow
+// input-driven mode with a near-empty A row is shrunk until B̂ and Ĉ span
+// many decades and roundoff in QᵀB̂ swamps the response.
+func (br *balancedRealization) balance(t []float64) {
+	const (
+		radix = 2.0
+		maxIt = 100
+	)
+	n, m, p := br.n, br.m, br.p
+	h, e, b, c := br.a, br.e, br.b, br.c
+	for range maxIt {
+		converged := true
+		for i := range n {
+			var col, row float64
+			for j := range n {
+				if j != i {
+					col += math.Abs(h[j*n+i])
+					row += math.Abs(h[i*n+j])
+				}
+			}
+			if e != nil {
+				for j := range n {
+					if j != i {
+						col += math.Abs(e[j*n+i])
+						row += math.Abs(e[i*n+j])
+					}
+				}
+			}
+			for k := range p {
+				col += math.Abs(c[k*n+i])
+			}
+			for k := range m {
+				row += math.Abs(b[i*m+k])
+			}
+			if col == 0 || row == 0 {
+				continue
+			}
+			f, sum := 1.0, col+row
+			for col < row/radix && f < 0x1p500 {
+				f *= radix
+				col *= radix
+				row /= radix
+			}
+			for col >= row*radix && f > 0x1p-500 {
+				f /= radix
+				col /= radix
+				row *= radix
+			}
+			if col+row >= 0.95*sum {
+				continue
+			}
+			converged = false
+			inv := 1 / f
+			for j := range n {
+				h[i*n+j] *= inv
+				h[j*n+i] *= f
+			}
+			if e != nil {
+				for j := range n {
+					e[i*n+j] *= inv
+					e[j*n+i] *= f
+				}
+			}
+			if t != nil {
+				t[i] *= inv
+			}
+			for k := range m {
+				b[i*m+k] *= inv
+			}
+			for k := range p {
+				c[k*n+i] *= f
+			}
 		}
-		inv := 1 / d
-		for j := range m {
-			hs.bt[i*m+j] *= inv
-		}
-		for r := range p {
-			hs.ct[r*n+i] *= d
+		if converged {
+			return
 		}
 	}
 }

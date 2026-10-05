@@ -139,7 +139,7 @@ func TestBalred_AutoOrder(t *testing.T) {
 func TestBalred_InvalidOrder(t *testing.T) {
 	sys := make4thOrderSystem()
 
-	_, _, err := Balred(sys, 4, Truncate)
+	_, _, err := Balred(sys, 5, Truncate)
 	if !errors.Is(err, ErrInvalidOrder) {
 		t.Errorf("got %v, want ErrInvalidOrder", err)
 	}
@@ -459,5 +459,92 @@ func TestBalred_PythonControl_MatchDC(t *testing.T) {
 	}
 	if !stable {
 		t.Error("reduced system is not stable")
+	}
+}
+
+func spReductionPlant(t *testing.T, dt float64) *System {
+	t.Helper()
+	A := mat.NewDense(3, 3, []float64{-1.2, 0.7, 0.1, -0.3, -2.1, 0.4, 0.25, -0.15, -3.3})
+	if dt > 0 {
+		A.Scale(0.2, A)
+		for i := range 3 {
+			A.Set(i, i, A.At(i, i)+0.9)
+		}
+	}
+	sys, err := New(A,
+		mat.NewDense(3, 2, []float64{1, 0.2, -0.4, 1.3, 0.6, -0.8}),
+		mat.NewDense(3, 3, []float64{1, 0.5, -0.2, 0, 1.1, 0.3, 0.7, -0.6, 1}),
+		mat.NewDense(3, 2, []float64{0.1, 0, 0, -0.2, 0.05, 0.3}), dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func dcGainOracle(t *testing.T, sys *System) *mat.Dense {
+	t.Helper()
+	n, _, _ := sys.Dims()
+	M := mat.NewDense(n, n, nil)
+	for i := range n {
+		for j := range n {
+			v := -sys.A.At(i, j)
+			if sys.IsDiscrete() && i == j {
+				v++
+			}
+			M.Set(i, j, v)
+		}
+	}
+	var X, G mat.Dense
+	if err := X.Solve(M, sys.B); err != nil {
+		t.Fatal(err)
+	}
+	G.Mul(sys.C, &X)
+	G.Add(&G, sys.D)
+	return &G
+}
+
+func TestSingularPerturbation_DCGainMatches(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys := spReductionPlant(t, dt)
+		want := dcGainOracle(t, sys)
+		red, err := Modred(sys, []int{2}, SingularPerturbation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := dcGainOracle(t, red); !matEqual(got, want, 1e-12) {
+			t.Errorf("dt=%v Modred SP DC gain =\n%v\nwant\n%v", dt, mat.Formatted(got), mat.Formatted(want))
+		}
+		bred, _, err := Balred(sys, 2, SingularPerturbation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := dcGainOracle(t, bred); !matEqual(got, want, 1e-10) {
+			t.Errorf("dt=%v Balred SP DC gain =\n%v\nwant\n%v", dt, mat.Formatted(got), mat.Formatted(want))
+		}
+	}
+}
+
+func TestBalred_FullOrderIsNoOp(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys := spReductionPlant(t, dt)
+		for _, method := range []BalredMethod{Truncate, SingularPerturbation} {
+			red, hsv, err := Balred(sys, 3, method)
+			if err != nil {
+				t.Fatalf("dt=%v: %v", dt, err)
+			}
+			if len(hsv) != 3 {
+				t.Errorf("dt=%v: hsv len %d, want 3", dt, len(hsv))
+			}
+			for _, s := range []complex128{complex(0.3, 0.7), complex(-0.2, 2.5)} {
+				got, want := pencilResponse(t, red, s), pencilResponse(t, sys, s)
+				for i := range want {
+					for j := range want[i] {
+						if cmplx.Abs(got[i][j]-want[i][j]) > 1e-12 {
+							t.Fatalf("dt=%v: response mismatch at s=%v", dt, s)
+						}
+					}
+				}
+			}
+		}
 	}
 }

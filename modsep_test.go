@@ -189,3 +189,48 @@ func TestModsep_NonDiagonal(t *testing.T) {
 
 	checkAdditiveDecomposition(t, sys, res.Slow, res.Fast)
 }
+
+func TestModsep_Descriptor(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys := descriptorSplitFixture(t, dt)
+		cutoff := 1.0
+		wantSlow := 0
+		for _, ev := range generalizedEigOracle(t, sys.A, sys.E) {
+			if cmplx.Abs(ev) < cutoff {
+				wantSlow++
+			}
+		}
+		if wantSlow == 0 || wantSlow == 3 {
+			t.Fatalf("dt=%v: fixture not mixed (%d slow)", dt, wantSlow)
+		}
+		res, err := Modsep(sys, cutoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ns, _, _ := res.Slow.Dims(); ns != wantSlow {
+			t.Errorf("dt=%v: slow order %d, want %d", dt, ns, wantSlow)
+		}
+		assertSplitSum(t, "Modsep descriptor", sys, res.Slow, res.Fast)
+	}
+}
+
+func TestModsep_SingularDescriptor(t *testing.T) {
+	for _, tc := range []struct {
+		dt, slow, fast float64
+	}{
+		{0, -0.6, -2.5},
+		{0.1, 0.4, -1.7},
+	} {
+		sys, modal, poly := singularSplitFixture(t, tc.slow, tc.fast, tc.dt)
+		res, err := Modsep(sys, 1)
+		if err != nil {
+			t.Fatalf("dt=%v: %v", tc.dt, err)
+		}
+		if ns, _, _ := res.Slow.Dims(); ns != 1 || res.Slow.IsDescriptor() {
+			t.Fatalf("dt=%v: slow part order %d descriptor=%v, want explicit order 1", tc.dt, ns, res.Slow.IsDescriptor())
+		}
+		assertResponseParts(t, "slow part", res.Slow, nil, func(s complex128) [][]complex128 { return modal(s, 0) })
+		assertResponseParts(t, "fast part", res.Fast, sys.D, func(s complex128) [][]complex128 { return modal(s, 1) }, poly)
+		assertSplitSum(t, "Modsep singular E", sys, res.Slow, res.Fast)
+	}
+}

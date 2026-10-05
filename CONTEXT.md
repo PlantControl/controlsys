@@ -901,7 +901,7 @@ A frequency where the loop response phase is -180 degrees.
 _Avoid_: gain crossover
 
 **Disk margin**:
-A SISO advanced robustness margin derived from peak sensitivity that gives simultaneous gain and phase variation bounds.
+A SISO advanced robustness margin αmax = 1/‖S + (σ−1)/2‖∞ for skew σ (default 0, balanced, as MATLAB diskmargin) that gives simultaneous gain and phase variation bounds; σ = 1 is the peak-sensitivity margin 1/‖S‖∞.
 _Avoid_: classical gain margin, classical phase margin
 
 **Sensitivity function**:
@@ -973,7 +973,7 @@ A numerical scaling transformation that balances state magnitudes for conditioni
 _Avoid_: balanced realization when Gramian balancing is meant
 
 **Prescaling**:
-A numerical conditioning transformation that scales states, inputs, and outputs before computation.
+A response-preserving diagonal state-coordinate scaling (MATLAB `prescale`) applied before computation; input and output scales are only suggested, not applied.
 _Avoid_: model reduction
 
 **Similarity transform**:
@@ -1234,10 +1234,10 @@ _Avoid_: reciprocal when referring to MIMO models
 - **Output sensitivity** and **input sensitivity** differ for MIMO loops when plant-controller multiplication does not commute.
 - **Complementary sensitivity** is paired with a **sensitivity function** in loop analysis.
 - A **loop sensitivity result** contains both input-side and output-side sensitivity models.
-- A **disk margin** is derived from **peak sensitivity**.
+- A **disk margin** is derived from the peak of the shifted **sensitivity function** S + (σ−1)/2; with skew σ = 1 that is **peak sensitivity**.
 - **H2 norm** and **H-infinity norm** are kinds of **system norm**.
 - An **H2 norm** is finite only for stable models without continuous-time direct feedthrough in this toolbox.
-- An **H-infinity norm** is the peak gain over frequency for a stable model.
+- An **H-infinity norm** is the peak gain over frequency for a stable model and +Inf for an unstable one.
 - A **realization** is a **state-space model**.
 - A **minimal realization** is both controllable and observable.
 - A **minimal realization** preserves the input-output behavior of a **transfer function** with the minimum number of states.

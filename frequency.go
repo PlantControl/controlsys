@@ -120,11 +120,11 @@ func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 // FreqResponsePointwise evaluates the frequency response with guaranteed
 // per-frequency single-point arithmetic: the value at each omega[k] is
 // bit-identical to FreqResponse([]float64{omega[k]}), regardless of
-// len(omega). FreqResponse may evaluate long sweeps of delay-free
-// state-space models through one Hessenberg reduction of A, whose values
-// agree with the single-point path to rounding but are not bit-identical;
-// FreqResponsePointwise never does, at the cost of one dense solve per
-// frequency. Use it when downstream comparisons require sweep results to
+// len(omega). FreqResponse may evaluate long sweeps of large delay-free
+// state-space models (n > 20m) through one Hessenberg reduction of A, whose
+// values agree with the single-point path to componentwise rounding but are
+// not bit-identical; FreqResponsePointwise never does, at the cost of one
+// dense solve per frequency. Use it when downstream comparisons require sweep results to
 // reproduce single-point evaluations exactly.
 func (sys *System) FreqResponsePointwise(omega []float64) (*FreqResponseMatrix, error) {
 	e, err := validFrequencyEvaluator(sys, "FreqResponsePointwise")
@@ -169,10 +169,6 @@ type frequencyEvaluator struct {
 	p   int
 }
 
-// denseFrequencySweepLimit is the sweep length up to which per-point dense
-// solves beat one Hessenberg reduction (BenchmarkFrequencySweepKernels).
-const denseFrequencySweepLimit = 2
-
 // validFrequencyEvaluator rejects hand-built systems whose exported fields
 // disagree in shape; the kernels index them unchecked.
 func validFrequencyEvaluator(sys *System, op string) (frequencyEvaluator, error) {
@@ -204,26 +200,20 @@ func (e frequencyEvaluator) response(omega []float64) (*FreqResponseMatrix, erro
 
 	data := make([]complex128, len(omega)*e.p*e.m)
 	if e.sys.IsDescriptor() {
-		if err := e.evalStateSpaceSweepInto(omega, data); err != nil {
+		if err := e.descriptorSweepInto(omega, data); err != nil {
 			return nil, err
 		}
 		applyIODelayPhase(e.sys, omega, data, e.p, e.m, true)
 		return e.matrix(data, omega), nil
 	}
-	var solver frequencyPointSolver
-	if e.useDenseSweep(len(omega)) {
-		solver = newSSEvalWorkspace(e.n, e.p, e.m).bind(e.sys)
-	} else {
-		solver = newHessenbergSweep(e.sys, e.n, e.m, e.p)
-	}
-	if err := e.sweepInto(omega, data, solver); err != nil {
+	if err := e.sweepInto(omega, data, e.pointSolver(len(omega))); err != nil {
 		return nil, err
 	}
 	return e.matrix(data, omega), nil
 }
 
 // responsePointwise evaluates each frequency exactly as response would for
-// a one-element sweep: direct state-space solve first, per-point
+// a one-element sweep: balanced dense solve first, per-point
 // transfer-function fallback on solve failure, with the delay phase applied
 // per point using the flag of whichever path produced the value.
 func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMatrix, error) {
@@ -237,7 +227,7 @@ func (e frequencyEvaluator) responsePointwise(omega []float64) (*FreqResponseMat
 	}
 
 	data := make([]complex128, len(omega)*e.p*e.m)
-	if err := e.sweepInto(omega, data, newSSEvalWorkspace(e.n, e.p, e.m).bind(e.sys)); err != nil {
+	if err := e.sweepInto(omega, data, e.pointSolver(1)); err != nil {
 		return nil, err
 	}
 	return e.matrix(data, omega), nil
@@ -290,7 +280,7 @@ func (e frequencyEvaluator) eval(s complex128) ([][]complex128, error) {
 	}
 
 	data := make([]complex128, pm)
-	if err := e.evalStateSpaceInto(s, data); err != nil {
+	if err := e.pointSolver(1).evalInto(s, data); err != nil {
 		return nil, err
 	}
 	applyIODelayAtS(e.sys, s, data, e.p, e.m, true)
@@ -301,27 +291,37 @@ func (e frequencyEvaluator) sAt(w float64) complex128 {
 	return newTimeDomain(e.sys.Dt).frequencyVariable(w)
 }
 
-func (e frequencyEvaluator) evalStateSpaceInto(s complex128, dst []complex128) error {
-	ws := newSSEvalWorkspace(e.n, e.p, e.m)
-	if err := evalFrSSInto(ws, e.sys, s, e.n, e.p, e.m); err != nil {
-		return err
+// pointSolver picks the delay-free solver for an nw-point sweep. Both solve
+// the balanced realization with componentwise-stable arithmetic; the
+// Hessenberg sweep pays an O(n³) reduction once to make each point O(n²m)
+// and handles only explicit models.
+// FreqResponsePointwise and EvalFr use the nw=1 choice so single points stay
+// bit-identical across entry points.
+func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
+	if e.sys.IsDescriptor() || e.useDenseSweep(nw) {
+		return newBalancedDense(e.sys, e.n, e.m, e.p)
 	}
-	copy(dst, ws.g[:e.p*e.m])
-	return nil
+	return newHessenbergSweep(e.sys, e.n, e.m, e.p)
 }
 
+// useDenseSweep reports whether per-point GEPP (n³/3 per point) beats the
+// refined Hessenberg sweep (two O(n²m) solves plus refinement per point).
+// On fully coupled models (BenchmarkFrequencySweepKernels, M1 Pro) the
+// crossover is near n = 20m: 18 states for SISO, 40-48 for m=2, above 64
+// for m=4.
 func (e frequencyEvaluator) useDenseSweep(nw int) bool {
-	return nw <= denseFrequencySweepLimit
+	return nw <= 2 || e.n <= 20*max(e.m, 1)
 }
 
-func (e frequencyEvaluator) evalStateSpaceSweepInto(omega []float64, dst []complex128) error {
+// descriptorSweepInto fails on a singular pencil rather than falling back to
+// the transfer-function form.
+func (e frequencyEvaluator) descriptorSweepInto(omega []float64, dst []complex128) error {
 	pm := e.p * e.m
-	ws := newSSEvalWorkspace(e.n, e.p, e.m)
+	solver := e.pointSolver(len(omega))
 	for k, w := range omega {
-		if err := evalFrSSInto(ws, e.sys, e.sAt(w), e.n, e.p, e.m); err != nil {
+		if err := solver.evalInto(e.sAt(w), dst[k*pm:(k+1)*pm]); err != nil {
 			return err
 		}
-		copy(dst[k*pm:(k+1)*pm], ws.g[:pm])
 	}
 	return nil
 }
@@ -442,65 +442,6 @@ func applyIODelayMatrixAtS(sys *System, s complex128, data []complex128, p, m in
 	}
 }
 
-type ssEvalWorkspace struct {
-	pencil []complex128
-	rhs    []complex128
-	g      []complex128
-}
-
-func newSSEvalWorkspace(n, p, m int) *ssEvalWorkspace {
-	return &ssEvalWorkspace{
-		pencil: make([]complex128, n*n),
-		rhs:    make([]complex128, n*m),
-		g:      make([]complex128, p*m),
-	}
-}
-
-type boundSSEval struct {
-	ws  *ssEvalWorkspace
-	sys *System
-}
-
-func (ws *ssEvalWorkspace) bind(sys *System) boundSSEval { return boundSSEval{ws: ws, sys: sys} }
-
-func (b boundSSEval) evalInto(s complex128, dst []complex128) error {
-	n, m, p := b.sys.Dims()
-	if err := evalFrSSInto(b.ws, b.sys, s, n, p, m); err != nil {
-		return err
-	}
-	copy(dst, b.ws.g[:p*m])
-	return nil
-}
-
-func evalFrSSInto(ws *ssEvalWorkspace, sys *System, s complex128, n, p, m int) error {
-	var dData []float64
-	var dStride int
-	if sys.D != nil {
-		dRaw := sys.D.RawMatrix()
-		dData, dStride = dRaw.Data, dRaw.Stride
-	}
-	if n == 0 {
-		copyRealMatrixToComplex(ws.g, dData, dStride, p, m)
-		return nil
-	}
-
-	aRaw := sys.A.RawMatrix()
-	if sys.E == nil {
-		fillComplexPencil(ws.pencil, aRaw.Data, aRaw.Stride, nil, 0, s, n)
-	} else {
-		eRaw := sys.E.RawMatrix()
-		fillComplexPencil(ws.pencil, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride, s, n)
-	}
-	bRaw := sys.B.RawMatrix()
-	copyRealMatrixToComplex(ws.rhs, bRaw.Data, bRaw.Stride, n, m)
-	if err := cSolveInPlace(ws.pencil, ws.rhs, n, m); err != nil {
-		return err
-	}
-	cRaw := sys.C.RawMatrix()
-	cRealMulComplexInto(ws.g, cRaw.Data, cRaw.Stride, ws.rhs, dData, dStride, n, p, m)
-	return nil
-}
-
 func fillComplexPencil(dst []complex128, a []float64, aStride int, e []float64, eStride int, s complex128, n int) {
 	for i := range n {
 		row := i * n
@@ -527,21 +468,6 @@ func copyRealMatrixToComplex(dst []complex128, src []float64, stride, rows, cols
 	for i := range rows {
 		for j := range cols {
 			dst[i*cols+j] = complex(src[i*stride+j], 0)
-		}
-	}
-}
-
-func cRealMulComplexInto(dst []complex128, a []float64, aStride int, b []complex128, d []float64, dStride, inner, rows, cols int) {
-	for i := range rows {
-		for j := range cols {
-			var sum complex128
-			for k := range inner {
-				sum += complex(a[i*aStride+k], 0) * b[k*cols+j]
-			}
-			if d != nil {
-				sum += complex(d[i*dStride+j], 0)
-			}
-			dst[i*cols+j] = sum
 		}
 	}
 }

@@ -392,11 +392,10 @@ func TestLeastSquaresOptionsDispatch(t *testing.T) {
 
 func TestLeastSquaresRejectUnsupportedModelClasses(t *testing.T) {
 	source := conversionSISO(t, []float64{1}, []float64{1, 1}, 0)
-	source.E = mat.NewDense(1, 1, []float64{0})
-	if _, err := source.DiscretizeLeastSquares(.2, 1); !errors.Is(err, ErrDescriptorUnsupported) || !errors.Is(err, ErrDescriptorSingular) {
-		t.Fatalf("descriptor err=%v", err)
+	improper, _ := index2Descriptor(t, 0, true)
+	if _, err := siso00(t, improper).DiscretizeLeastSquares(.2, 2); !errors.Is(err, ErrDescriptorUnsupported) || !errors.Is(err, ErrImproperModel) {
+		t.Fatalf("improper descriptor err=%v", err)
 	}
-	source.E = nil
 	source.LFT = &LFTDelay{Tau: []float64{.3}, B2: mat.NewDense(1, 1, []float64{1}), C2: mat.NewDense(1, 1, []float64{1}), D12: mat.NewDense(1, 1, nil), D21: mat.NewDense(1, 1, nil), D22: mat.NewDense(1, 1, nil)}
 	if _, err := source.DiscretizeLeastSquares(.2, 1); !errors.Is(err, ErrFeedbackDelay) {
 		t.Fatalf("internal delay err=%v", err)

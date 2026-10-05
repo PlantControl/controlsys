@@ -9,7 +9,7 @@ import (
 
 func (sys *System) d2cZOHRobust() (*System, error) {
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("D2C: zoh with internal delays not supported: %w", ErrFeedbackDelay)
+		return undiscretizeInternal(sys, (*System).d2cZOHRobust)
 	}
 	n, m, _ := sys.Dims()
 	if n == 0 {
@@ -172,7 +172,7 @@ func (sys *System) discretizeModifiedFOH(dt float64) (*System, error) {
 
 func (sys *System) d2cFOH() (*System, error) {
 	if sys.HasInternalDelay() {
-		return nil, fmt.Errorf("D2C foh: internal delays not supported: %w", ErrFeedbackDelay)
+		return undiscretizeInternal(sys, (*System).d2cFOH)
 	}
 	n, m, p := sys.Dims()
 	if n == 0 {

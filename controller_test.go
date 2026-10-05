@@ -260,32 +260,107 @@ func TestLqrd_DoubleIntegrator(t *testing.T) {
 	}
 }
 
-func TestLqrd_ConsistencyWithManual(t *testing.T) {
+// lqrdOracle discretizes the continuous cost by composite Simpson quadrature of
+// [Φ Γ; 0 I]' [Q N; N' R] [Φ Γ; 0 I] and solves the discrete Riccati equation by
+// value iteration, independently of the Van Loan block exponential and Dare.
+func lqrdOracle(t *testing.T, A, B, Q, R, N *mat.Dense, dt float64) (K, X *mat.Dense) {
+	t.Helper()
+	n, m := B.Dims()
+	nm := n + m
+	M := mat.NewDense(nm, nm, nil)
+	M.Slice(0, n, 0, n).(*mat.Dense).Copy(A)
+	M.Slice(0, n, n, nm).(*mat.Dense).Copy(B)
+	Wc := mat.NewDense(nm, nm, nil)
+	Wc.Slice(0, n, 0, n).(*mat.Dense).Copy(Q)
+	Wc.Slice(n, nm, n, nm).(*mat.Dense).Copy(R)
+	if N != nil {
+		Wc.Slice(0, n, n, nm).(*mat.Dense).Copy(N)
+		Wc.Slice(n, nm, 0, n).(*mat.Dense).Copy(N.T())
+	}
+	const steps = 2000
+	W := mat.NewDense(nm, nm, nil)
+	var Phi mat.Dense
+	for k := 0; k <= steps; k++ {
+		var Ms mat.Dense
+		Ms.Scale(dt*float64(k)/steps, M)
+		Phi.Exp(&Ms)
+		w := 2.0
+		if k == 0 || k == steps {
+			w = 1
+		} else if k%2 == 1 {
+			w = 4
+		}
+		var term, tmp mat.Dense
+		tmp.Mul(Phi.T(), Wc)
+		term.Mul(&tmp, &Phi)
+		term.Scale(w*dt/steps/3, &term)
+		W.Add(W, &term)
+	}
+	Ad := mat.DenseCopyOf(Phi.Slice(0, n, 0, n))
+	Bd := mat.DenseCopyOf(Phi.Slice(0, n, n, nm))
+	Qd := mat.DenseCopyOf(W.Slice(0, n, 0, n))
+	Nd := mat.DenseCopyOf(W.Slice(0, n, n, nm))
+	Rd := mat.DenseCopyOf(W.Slice(n, nm, n, nm))
+
+	X = mat.DenseCopyOf(Qd)
+	for range 20000 {
+		var BtX, BtXB, BtXA, G, AtX, AtXA mat.Dense
+		BtX.Mul(Bd.T(), X)
+		BtXA.Mul(&BtX, Ad)
+		BtXB.Mul(&BtX, Bd)
+		BtXB.Add(&BtXB, Rd)
+		BtXA.Add(&BtXA, Nd.T())
+		var inv mat.Dense
+		if err := inv.Inverse(&BtXB); err != nil {
+			t.Fatal(err)
+		}
+		K = mat.NewDense(m, n, nil)
+		K.Mul(&inv, &BtXA)
+		AtX.Mul(Ad.T(), X)
+		AtXA.Mul(&AtX, Ad)
+		G.Mul(BtXA.T(), K)
+		next := mat.DenseCopyOf(Qd)
+		next.Add(next, &AtXA)
+		next.Sub(next, &G)
+		X = mat.NewDense(n, n, nil)
+		X.Add(next, next.T())
+		X.Scale(0.5, X)
+	}
+	return K, X
+}
+
+func TestLqrd_DiscretizesCostMATLAB(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{0.2, 1, -0.3, -1.5, -0.4, 0.6, 0.3, -0.8, -0.9})
+	B := mat.NewDense(3, 2, []float64{0, 1, 1, 0.3, -0.4, 0.7})
+	Q := mat.NewDense(3, 3, []float64{4, 0.5, 0.1, 0.5, 1, -0.2, 0.1, -0.2, 2})
+	R := mat.NewDense(2, 2, []float64{0.2, 0.05, 0.05, 0.4})
+	N := mat.NewDense(3, 2, []float64{0.1, -0.05, 0.02, 0.1, -0.03, 0.04})
+	dt := 0.5
+	for _, cross := range []*mat.Dense{nil, N} {
+		var opts *RiccatiOpts
+		if cross != nil {
+			opts = &RiccatiOpts{S: cross}
+		}
+		res, err := Lqrd(A, B, Q, R, dt, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		K, X := lqrdOracle(t, A, B, Q, R, cross, dt)
+		if !mat.EqualApprox(res.K, K, 1e-9) {
+			t.Errorf("N=%v: K=%v want %v", cross != nil, mat.Formatted(res.K), mat.Formatted(K))
+		}
+		if !mat.EqualApprox(res.X, X, 1e-9) {
+			t.Errorf("N=%v: X=%v want %v", cross != nil, mat.Formatted(res.X), mat.Formatted(X))
+		}
+	}
+}
+
+func TestLqrd_CrossWeightDims(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{0, 1, -2, -3})
 	B := mat.NewDense(2, 1, []float64{0, 1})
-	Q := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
-	R := mat.NewDense(1, 1, []float64{1})
-	dt := 0.1
-
-	res1, err := Lqrd(A, B, Q, R, dt, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sys, _ := New(A, B, mat.NewDense(1, 2, nil), mat.NewDense(1, 1, nil), 0)
-	dsys, _ := sys.DiscretizeZOH(dt)
-	res2, err := Dlqr(dsys.A, dsys.B, Q, R, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	kr, kc := res1.K.Dims()
-	for i := range kr {
-		for j := range kc {
-			if math.Abs(res1.K.At(i, j)-res2.K.At(i, j)) > 1e-10 {
-				t.Errorf("K(%d,%d): Lqrd=%v, manual=%v", i, j, res1.K.At(i, j), res2.K.At(i, j))
-			}
-		}
+	_, err := Lqrd(A, B, eye(2), eye(1), 0.1, &RiccatiOpts{S: mat.NewDense(1, 2, nil)})
+	if !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("err=%v, want ErrDimensionMismatch", err)
 	}
 }
 
@@ -708,6 +783,124 @@ func TestPlace_CompanionForm(t *testing.T) {
 	if d := matchEigenvalues(eigs, poles, 1e-8); d > 1e-8 {
 		t.Errorf("eigenvalue mismatch: max distance %e, eigs=%v", d, eigs)
 	}
+}
+
+func monicPolyFromRoots(roots []complex128) []complex128 {
+	c := []complex128{1}
+	for _, r := range roots {
+		next := make([]complex128, len(c)+1)
+		for i, v := range c {
+			next[i] += v
+			next[i+1] -= r * v
+		}
+		c = next
+	}
+	return c
+}
+
+// assertCharPoly compares det(sI-(A-BK)) with prod(s-p_i); coefficients stay
+// well-conditioned for repeated poles where eigenvalues split by eps^(1/k).
+func assertCharPoly(t *testing.T, label string, A, B, K *mat.Dense, poles []complex128) {
+	t.Helper()
+	eigs := closedLoopEig(A, B, K)
+	if eigs == nil {
+		t.Fatalf("%s: eig failed", label)
+	}
+	got := monicPolyFromRoots(eigs)
+	want := monicPolyFromRoots(poles)
+	for i := range want {
+		if cmplx.Abs(got[i]-want[i]) > 1e-9*(1+cmplx.Abs(want[i])) {
+			t.Errorf("%s: coef %d = %v, want %v (eig=%v)", label, i, got[i], want[i], eigs)
+		}
+	}
+}
+
+func TestPlace_OscillatorDistinctRealPoles(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0, 1, -1, 0})
+	B := mat.NewDense(2, 1, []float64{0, 1})
+	K, err := Place(A, B, []complex128{-1, -2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// s^2 + k2 s + 1 + k1 = (s+1)(s+2)
+	want := []float64{1, 3}
+	for j, w := range want {
+		if math.Abs(K.At(0, j)-w) > 1e-12 {
+			t.Errorf("K[%d] = %v, want %v", j, K.At(0, j), w)
+		}
+	}
+}
+
+func TestPlace_ComplexOpenLoopContract(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{
+		0.3, 1.0, -0.4, 0.2,
+		-1.1, -0.2, 0.5, 0.0,
+		0.7, 0.1, -1.5, 0.9,
+		0.0, -0.6, 0.3, 0.4,
+	})
+	inputs := map[string]*mat.Dense{
+		"MIMO": mat.NewDense(4, 2, []float64{1, 0, 0.2, 0.5, 0, 1, 0.3, 0}),
+		"SISO": mat.NewDense(4, 1, []float64{0, 0, 0, 1}),
+	}
+	sets := [][]complex128{
+		{-1, -2, -3, -4},
+		{-1, -2, -1 + 2i, -1 - 2i},
+		{-1 + 2i, -1, -1 - 2i, -2},
+		{-1, -1, -2, -3},
+		{-1, -1, -2 + 1i, -2 - 1i},
+		{-2, -2, -2, -3},
+		{-1 + 1i, -1 - 1i, -1 + 1i, -1 - 1i},
+		{-2 + 1i, -2 - 1i, -3 + 0.5i, -3 - 0.5i},
+		{0.5, -0.3, 0.2 + 0.4i, 0.2 - 0.4i},
+		{0.1, 0.2, 0.3, 0.4},
+	}
+	for name, B := range inputs {
+		for _, p := range sets {
+			K, err := Place(A, B, p)
+			if err != nil {
+				t.Errorf("%s %v: %v", name, p, err)
+				continue
+			}
+			assertCharPoly(t, name, A, B, K, p)
+		}
+	}
+}
+
+func TestPlace_RepeatedPolesComplexOpenLoop(t *testing.T) {
+	A3 := mat.NewDense(3, 3, []float64{0.3, 1.0, -0.4, -1.1, -0.2, 0.5, 0.7, 0.1, -1.5})
+	B3 := mat.NewDense(3, 2, []float64{1, 0, 0.2, 0.5, 0, 1})
+	for _, p := range [][]complex128{{-1, -1, -3}, {-3, -1, -1}, {-1, -3, -1}, {-1, -2, -3}} {
+		K, err := Place(A3, B3, p)
+		if err != nil {
+			t.Fatalf("%v: %v", p, err)
+		}
+		assertCharPoly(t, "3x3", A3, B3, K, p)
+	}
+	A2 := mat.NewDense(2, 2, []float64{0.3, 1.0, -1.1, -0.2})
+	B2 := mat.NewDense(2, 2, []float64{1, 0, 0.2, 0.5})
+	for _, p := range [][]complex128{{-1, -1}, {-1, -2}} {
+		K, err := Place(A2, B2, p)
+		if err != nil {
+			t.Fatalf("%v: %v", p, err)
+		}
+		assertCharPoly(t, "2x2", A2, B2, K, p)
+	}
+}
+
+func TestAcker_NonAdjacentConjugates(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{
+		0.3, 1.0, -0.4, 0.2,
+		-1.1, -0.2, 0.5, 0.0,
+		0.7, 0.1, -1.5, 0.9,
+		0.0, -0.6, 0.3, 0.4,
+	})
+	B := mat.NewDense(4, 1, []float64{0, 0, 0, 1})
+	p := []complex128{-1 + 1i, -2, -1 - 1i, -3}
+	K, err := Acker(A, B, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCharPoly(t, "Acker", A, B, K, p)
 }
 
 func TestValidatePoles(t *testing.T) {
