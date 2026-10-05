@@ -136,6 +136,18 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 	if dt <= 0 || newTimeDomain(dt).validateSampleTime() != nil {
 		return nil, ErrInvalidSampleTime
 	}
+	if err := requireFiniteDense("Lqrd", "A", A); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Lqrd", "B", B); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Lqrd", "Q", Q); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Lqrd", "R", R); err != nil {
+		return nil, err
+	}
 	na, nac := A.Dims()
 	if na != nac {
 		return nil, ErrDimensionMismatch
@@ -154,6 +166,9 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 	var N *mat.Dense
 	if opts != nil && opts.S != nil {
 		N = opts.S
+		if err := requireFiniteDense("Lqrd", "opts.S", N); err != nil {
+			return nil, err
+		}
 		if sr, sc := N.Dims(); sr != n || sc != m {
 			return nil, ErrDimensionMismatch
 		}
@@ -236,6 +251,15 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 //
 // Only valid for single-input systems (m=1). Numerically fragile for n > 10.
 func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
+	if err := requireFiniteDense("Acker", "A", A); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Acker", "B", B); err != nil {
+		return nil, err
+	}
+	if err := requireFinitePoles("Acker", poles); err != nil {
+		return nil, err
+	}
 	na, nac := A.Dims()
 	if na != nac {
 		return nil, ErrDimensionMismatch
@@ -329,6 +353,15 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 // a pole repeated (exactly) more than rank(B) times returns
 // ErrPoleMultiplicity; use Acker for repeated single-input poles.
 func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
+	if err := requireFiniteDense("Place", "A", A); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Place", "B", B); err != nil {
+		return nil, err
+	}
+	if err := requireFinitePoles("Place", poles); err != nil {
+		return nil, err
+	}
 	na, nac := A.Dims()
 	if na != nac {
 		return nil, ErrDimensionMismatch
@@ -645,6 +678,15 @@ func standardizeSchur2x2(t, z []float64, n, k int) {
 	}
 	blas64.Rot(blas64.Vector{N: n, Data: z[k:], Inc: n},
 		blas64.Vector{N: n, Data: z[k1:], Inc: n}, cs, sn)
+}
+
+func requireFinitePoles(op string, poles []complex128) error {
+	for i, p := range poles {
+		if !isFinite(real(p)) || !isFinite(imag(p)) {
+			return fmt.Errorf("%s: pole %d is %v: %w", op, i, p, ErrInvalidArgument)
+		}
+	}
+	return nil
 }
 
 func validatePoles(poles []complex128) error {

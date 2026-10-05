@@ -7,6 +7,9 @@ import "plantcontrol.org/v1/gonum/mat"
 // InputDelay and internal delays through x, but carry no OutputDelay, IODelay
 // matrix, or direct internal-delay feedthrough.
 func Augstate(sys *System) (*System, error) {
+	if err := requireSystems("Augstate", sys); err != nil {
+		return nil, err
+	}
 	n, m, p := sys.Dims()
 	if n == 0 {
 		return sys.Copy(), nil

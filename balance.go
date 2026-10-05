@@ -12,6 +12,13 @@ import (
 
 type BalredMethod int
 
+func (m BalredMethod) validate(op string) error {
+	if m != Truncate && m != SingularPerturbation {
+		return fmt.Errorf("%s: unknown method %d: %w", op, m, ErrInvalidArgument)
+	}
+	return nil
+}
+
 const (
 	Truncate BalredMethod = iota
 	SingularPerturbation
@@ -29,6 +36,9 @@ type BalrealResult struct {
 // The returned system has equal controllability and observability gramians,
 // both equal to diag(σ₁, σ₂, …, σₙ) where σᵢ are the Hankel singular values.
 func Balreal(sys *System) (*BalrealResult, error) {
+	if err := requireFiniteSystem("Balreal", sys); err != nil {
+		return nil, err
+	}
 	policy := newRealizationTransformPolicy(sys)
 	if err := policy.requireStandard("Balreal"); err != nil {
 		return nil, err
@@ -147,8 +157,10 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
 		uData, n, vtData, n, wq, -1)
 	svdWork := make([]float64, int(wq[0]))
-	impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
-		uData, n, vtData, n, svdWork, len(svdWork))
+	if !impl.Dgesvd(lapack.SVDAll, lapack.SVDAll, n, n, mData, n, s,
+		uData, n, vtData, n, svdWork, len(svdWork)) {
+		return nil, fmt.Errorf("Balreal: SVD of gramian factors did not converge: %w", ErrSchurFailed)
+	}
 
 	// V = Vt' — scale columns of Vt' by 1/sqrt(σ) → vScaled
 	// T = Lc * vScaled
@@ -233,6 +245,12 @@ func Balreal(sys *System) (*BalrealResult, error) {
 // the largest relative gap in the Hankel singular values.
 // method selects between Truncate (default) and SingularPerturbation (DC-gain matching).
 func Balred(sys *System, order int, method BalredMethod) (*System, []float64, error) {
+	if err := requireFiniteSystem("Balred", sys); err != nil {
+		return nil, nil, err
+	}
+	if err := method.validate("Balred"); err != nil {
+		return nil, nil, err
+	}
 	policy := newRealizationTransformPolicy(sys)
 	br, err := Balreal(sys)
 	if err != nil {
@@ -283,6 +301,12 @@ func Balred(sys *System, order int, method BalredMethod) (*System, []float64, er
 // elim contains 0-based indices of states to remove.
 // method selects Truncate or SingularPerturbation (DC-gain matching).
 func Modred(sys *System, elim []int, method BalredMethod) (*System, error) {
+	if err := requireSystem("Modred", sys); err != nil {
+		return nil, err
+	}
+	if err := method.validate("Modred"); err != nil {
+		return nil, err
+	}
 	policy := newRealizationTransformPolicy(sys)
 	if err := policy.requireStandard("Modred"); err != nil {
 		return nil, err

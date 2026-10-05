@@ -3015,3 +3015,129 @@ func TestAppendEmptyGainKeepsDims(t *testing.T) {
 		}
 	}
 }
+
+func TestInterconnectNilArgs(t *testing.T) {
+	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := mat.NewDense(1, 1, nil)
+	for name, call := range map[string]func() error{
+		"Series(sys,nil)":   func() error { _, err := Series(sys, nil); return err },
+		"Series(nil,sys)":   func() error { _, err := Series(nil, sys); return err },
+		"Parallel(sys,nil)": func() error { _, err := Parallel(sys, nil); return err },
+		"Parallel(nil,sys)": func() error { _, err := Parallel(nil, sys); return err },
+		"Append(sys,nil)":   func() error { _, err := Append(sys, nil); return err },
+		"Append(nil,sys)":   func() error { _, err := Append(nil, sys); return err },
+		"BlkDiag(nil)":      func() error { _, err := BlkDiag(nil); return err },
+		"BlkDiag(sys,nil)":  func() error { _, err := BlkDiag(sys, nil); return err },
+		"Feedback(nil)":     func() error { _, err := Feedback(nil, sys, -1); return err },
+		"Connect(nil)":      func() error { _, err := Connect(nil, q, []int{0}, []int{0}); return err },
+		"Connect(sys,nilQ)": func() error { _, err := Connect(sys, nil, []int{0}, []int{0}); return err },
+		"Augstate(nil)":     func() error { _, err := Augstate(nil); return err },
+	} {
+		if err := call(); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}
+
+func TestInterconnectInvalidSampleTimeGain(t *testing.T) {
+	g := &System{A: &mat.Dense{}, B: &mat.Dense{}, C: &mat.Dense{}, D: mat.NewDense(1, 1, []float64{2}), Dt: -1}
+	if _, err := Append(g, g); !errors.Is(err, ErrInvalidSampleTime) {
+		t.Errorf("Append: err = %v, want ErrInvalidSampleTime", err)
+	}
+	if _, err := BlkDiag(g, g); !errors.Is(err, ErrInvalidSampleTime) {
+		t.Errorf("BlkDiag: err = %v, want ErrInvalidSampleTime", err)
+	}
+}
+
+func TestFeedbackRejectsSign(t *testing.T) {
+	sys, err := New(mat.NewDense(2, 2, []float64{-1, 2, 0, -3}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sign := range []float64{0, 2.5, math.NaN(), -0.5} {
+		if _, err := Feedback(sys, nil, sign); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("sign %g: err = %v, want ErrInvalidArgument", sign, err)
+		}
+		if _, err := Feedback(sys, nil, sign, WithApproximatedDelays()); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("approximated sign %g: err = %v, want ErrInvalidArgument", sign, err)
+		}
+	}
+}
+
+func TestSeriesLFTZeroPortOperands(t *testing.T) {
+	p, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0.5}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.InputDelay = []float64{0.5}
+	cl, err := Feedback(p, nil, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cl.HasInternalDelay() {
+		t.Fatal("closed loop has no internal delay")
+	}
+	a2 := mat.NewDense(2, 2, []float64{-2, 1, 0, -3})
+	noOut, err := New(a2, mat.NewDense(2, 1, []float64{1, 2}), &mat.Dense{}, &mat.Dense{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noOutPad, err := New(a2, mat.NewDense(2, 1, []float64{1, 2}), mat.NewDense(1, 2, nil), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noIn, err := New(a2, &mat.Dense{}, mat.NewDense(1, 2, []float64{1, -1}), &mat.Dense{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noInPad, err := New(a2, mat.NewDense(2, 1, nil), mat.NewDense(1, 2, []float64{1, -1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(name string, got, ref *System, wantM, wantP int) {
+		t.Helper()
+		n, m, pp := got.Dims()
+		rn, _, _ := ref.Dims()
+		if n != rn || m != wantM || pp != wantP {
+			t.Fatalf("%s: dims (%d,%d,%d), want (%d,%d,%d)", name, n, m, pp, rn, wantM, wantP)
+		}
+		if !mat.EqualApprox(got.A, ref.A, 1e-12) {
+			t.Errorf("%s: A = %v, want %v", name, mat.Formatted(got.A), mat.Formatted(ref.A))
+		}
+		if !slices.Equal(got.LFT.Tau, ref.LFT.Tau) || !mat.EqualApprox(got.LFT.D22, ref.LFT.D22, 1e-12) ||
+			!mat.EqualApprox(got.LFT.B2, ref.LFT.B2, 1e-12) || !mat.EqualApprox(got.LFT.C2, ref.LFT.C2, 1e-12) {
+			t.Errorf("%s: LFT mismatch", name)
+		}
+		if err := got.Validate(); err != nil {
+			t.Errorf("%s: Validate: %v", name, err)
+		}
+	}
+	got, err := Series(cl, noOut)
+	if err != nil {
+		t.Fatalf("Series(cl, noOut): %v", err)
+	}
+	ref, err := Series(cl, noOutPad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("Series(cl, noOut)", got, ref, 1, 0)
+	if !mat.EqualApprox(got.B, ref.B, 1e-12) || !mat.EqualApprox(got.LFT.D21, ref.LFT.D21, 1e-12) {
+		t.Errorf("Series(cl, noOut): B/D21 mismatch")
+	}
+
+	got, err = Series(noIn, cl)
+	if err != nil {
+		t.Fatalf("Series(noIn, cl): %v", err)
+	}
+	ref, err = Series(noInPad, cl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("Series(noIn, cl)", got, ref, 0, 1)
+	if !mat.EqualApprox(got.C, ref.C, 1e-12) || !mat.EqualApprox(got.LFT.D12, ref.LFT.D12, 1e-12) {
+		t.Errorf("Series(noIn, cl): C/D12 mismatch")
+	}
+}

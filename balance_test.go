@@ -548,3 +548,25 @@ func TestBalred_FullOrderIsNoOp(t *testing.T) {
 		}
 	}
 }
+
+func TestBalredModredRejectInvalidArgs(t *testing.T) {
+	sys, err := New(mat.NewDense(2, 2, []float64{-1, 2, 0, -3}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nanSys := sys.Copy()
+	nanSys.A.Set(0, 1, math.NaN())
+	for name, call := range map[string]func() error{
+		"Balred unknown method": func() error { _, _, err := Balred(sys, 1, BalredMethod(42)); return err },
+		"Modred unknown method": func() error { _, err := Modred(sys, []int{1}, BalredMethod(-1)); return err },
+		"Balreal nil":           func() error { _, err := Balreal(nil); return err },
+		"Balred nil":            func() error { _, _, err := Balred(nil, 1, Truncate); return err },
+		"Modred nil":            func() error { _, err := Modred(nil, []int{1}, Truncate); return err },
+		"Balreal NaN":           func() error { _, err := Balreal(nanSys); return err },
+		"Balred NaN":            func() error { _, _, err := Balred(nanSys, 1, Truncate); return err },
+	} {
+		if err := call(); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s: err = %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}

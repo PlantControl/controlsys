@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -279,5 +280,11 @@ func TestConversionSeriesMatchesGenericSeries(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestConversionThiranChannelInvalidSampleTime(t *testing.T) {
+	if _, err := conversionThiranChannel(2, -1, 3); !errors.Is(err, ErrInvalidSampleTime) {
+		t.Errorf("err = %v, want ErrInvalidSampleTime", err)
 	}
 }
