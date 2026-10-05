@@ -161,9 +161,9 @@ func (e freqRespEstimate) result(plan freqRespEstPlan, dt float64, p, m int) (*F
 			copy(coh[k*pm:(k+1)*pm], e.cohRe[f*pm:(f+1)*pm])
 		}
 	}
-	h = h[:nw*pm : nw*pm]
+	h = h[: nw*pm : nw*pm]
 	if coh != nil {
-		coh = coh[:nw*pm : nw*pm]
+		coh = coh[: nw*pm : nw*pm]
 	}
 	return &FreqRespEstResult{
 		H:         newFreqResponseMatrixOwned(h, omega, p, m, nil, nil),

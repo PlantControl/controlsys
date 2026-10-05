@@ -76,8 +76,8 @@ func TestArchitectureLocalApproximationRejectsBadCallbackShapes(t *testing.T) {
 		F: func(x, u *mat.VecDense) *mat.VecDense { return nil },
 		H: func(x, u *mat.VecDense) *mat.VecDense { return mat.NewVecDense(1, nil) },
 		N: 2, M: 1, P: 1,
-	}, x0, u0); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("Linearize nil state callback error = %v, want ErrDimensionMismatch", err)
+	}, x0, u0); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("Linearize nil state callback error = %v, want ErrInvalidArgument", err)
 	}
 
 	P0 := mat.NewDense(2, 2, nil)

@@ -636,7 +636,7 @@ func TestLqg_Errors(t *testing.T) {
 	}{
 		{"QXU dims", csys, eye(3), eye(5), nil, ErrDimensionMismatch},
 		{"QWV dims", csys, eye(5), eye(3), nil, ErrDimensionMismatch},
-		{"nil QWV", csys, eye(5), nil, nil, ErrDimensionMismatch},
+		{"nil QWV", csys, eye(5), nil, nil, ErrInvalidArgument},
 		{"QI dims", csys, eye(5), eye(5), &LqgOpts{QI: eye(3)}, ErrDimensionMismatch},
 		{"QXU asymmetric", csys, asym, eye(5), nil, ErrNotSymmetric},
 		{"QWV asymmetric", csys, eye(5), asym, nil, ErrNotSymmetric},

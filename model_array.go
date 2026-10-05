@@ -188,7 +188,6 @@ func copyModelArrays(arrays []*ModelArray) []*System {
 	return models
 }
 
-
 // Shape returns the array dimensions.
 func (a *ModelArray) Shape() []int {
 	if a == nil {

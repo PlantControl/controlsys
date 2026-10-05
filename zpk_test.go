@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -847,6 +848,14 @@ func TestZPKEvalFreqResponseValidate(t *testing.T) {
 	}
 	if want := 4 * (s + 1) / ((s + 2) * (s + 3)); cmplx.Abs(h[0][0]-want) > 1e-12 {
 		t.Errorf("Eval = %v, want %v", h[0][0], want)
+	}
+}
+
+func TestZPKNilModelIsInvalidArgument(t *testing.T) {
+	var z *ZPK
+	_, err := z.FreqResponse([]float64{1})
+	if !errors.Is(err, ErrInvalidArgument) || !strings.HasPrefix(err.Error(), "ZPK.FreqResponse: ") || strings.Count(err.Error(), "ZPK") != 1 {
+		t.Errorf("nil ZPK FreqResponse: err = %v, want single ZPK.FreqResponse: prefix and ErrInvalidArgument", err)
 	}
 }
 
