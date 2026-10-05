@@ -66,6 +66,10 @@ func (k sweepModelKind) String() string {
 func randomSweepModel(rng *rand.Rand, kind sweepModelKind, dt float64, descriptor bool) (stressed, twin *System) {
 	n := 1 + rng.IntN(40)
 	m, p := 1+rng.IntN(4), 1+rng.IntN(4)
+	return randomSweepRealization(rng, kind, dt, descriptor, n, m, p)
+}
+
+func randomSweepRealization(rng *rand.Rand, kind sweepModelKind, dt float64, descriptor bool, n, m, p int) (stressed, twin *System) {
 	A := mat.NewDense(n, n, nil)
 	for i := range n {
 		for j := range n {
@@ -328,6 +332,178 @@ func TestFreqResponseDescriptorSweepRandomized(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Internal-delay sweeps, explicit and descriptor, are held to the LFT closure
+// of the refined oracle on the well-scaled twin of the augmented plant
+// [B B2; C C2]. The delay inputs are scaled by a power of two g so that the
+// closure is well conditioned, ‖gH22‖∞ ≤ 1/2 and ‖gH12‖∞‖H21‖∞ ≤ ‖H11‖∞/2,
+// and G cannot cancel far below the terms GEPP computes it from. EvalFr must
+// agree with the sweep bit for bit. weakrows is skipped: it is unscaled, so it
+// does not exercise balancing, and its discrete descriptor draws reach the
+// delay-free dense tier's GEPP limit (1.01e-12 on H11 alone, ergo YDFVMC).
+func TestFreqResponseInternalDelaySweepRandomized(t *testing.T) {
+	const tol = 1e-12
+	seeds := 240
+	if testing.Short() {
+		seeds = 36
+	}
+	failures := 0
+	for seed := range seeds {
+		for _, descriptor := range []bool{false, true} {
+			for _, dt := range []float64{0, 0.05} {
+				kind := sweepModelKind(seed % int(sweepModelKinds))
+				if kind == sweepWeakRows {
+					continue
+				}
+				rng := rand.New(rand.NewPCG(uint64(seed), uint64(kind)))
+				n := 1 + rng.IntN(40)
+				m, p, N := 1+rng.IntN(4), 1+rng.IntN(4), 1+rng.IntN(3)
+				aug, twin := randomSweepRealization(rng, kind, dt, descriptor, n, m+N, p+N)
+				tau := make([]float64, N)
+				for i := range tau {
+					if dt == 0 {
+						tau[i] = 0.05 + 2*rng.Float64()
+					} else {
+						tau[i] = float64(1 + rng.IntN(5))
+					}
+				}
+				omega := logspace(-3, 3, 60)
+				if dt > 0 {
+					omega = logspace(-3, math.Log10(math.Pi/dt), 60)
+				}
+				td := newTimeDomain(dt)
+				var hs [][]complex128
+				gMax := math.Inf(1)
+				for k := 0; k < len(omega); k += 5 {
+					h := oracleResponse(t, twin, td.frequencyVariable(omega[k]), n, m+N, p+N)
+					hs = append(hs, h)
+					norm := func(r0, r1, c0, c1 int) float64 {
+						v := 0.0
+						for i := r0; i < r1; i++ {
+							row := 0.0
+							for j := c0; j < c1; j++ {
+								row += cmplx.Abs(h[i*(m+N)+j])
+							}
+							v = max(v, row)
+						}
+						return v
+					}
+					gMax = min(gMax, 0.5/norm(p, p+N, m, m+N), 0.5*norm(0, p, 0, m)/(norm(0, p, m, m+N)*norm(p, p+N, 0, m)))
+				}
+				g := 1.0
+				for g > gMax {
+					g /= 2
+				}
+				sys := splitInternalDelay(t, aug, tau, m, p, g)
+
+				got, err := sys.FreqResponse(omega)
+				if err != nil {
+					t.Errorf("seed=%d kind=%v descriptor=%v dt=%g n=%d N=%d: %v", seed, kind, descriptor, dt, n, N, err)
+					if failures++; failures >= 10 {
+						t.FailNow()
+					}
+					continue
+				}
+				worst, at := 0.0, 0.0
+				for k := 0; k < len(omega); k += 5 {
+					s := td.frequencyVariable(omega[k])
+					want := lftClosure(hs[k/5], s, tau, dt, m, p, g)
+					ge, err := sys.EvalFr(s)
+					if err != nil {
+						t.Fatalf("seed=%d EvalFr: %v", seed, err)
+					}
+					norm, diff := 0.0, 0.0
+					for i, v := range want {
+						norm = max(norm, cmplx.Abs(v))
+						diff = max(diff, cmplx.Abs(got.Data[k*p*m+i]-v))
+						if ge[i/m][i%m] != got.Data[k*p*m+i] {
+							t.Fatalf("seed=%d ω=%g: EvalFr %v != sweep %v", seed, omega[k], ge[i/m][i%m], got.Data[k*p*m+i])
+						}
+					}
+					if e := diff / norm; !(e <= worst) {
+						worst, at = e, omega[k]
+					}
+				}
+				if worst <= tol {
+					continue
+				}
+				t.Errorf("seed=%d kind=%v descriptor=%v dt=%g n=%d m=%d p=%d N=%d: internal-delay sweep %g at ω=%g",
+					seed, kind, descriptor, dt, n, m, p, N, worst, at)
+				if failures++; failures >= 10 {
+					t.FailNow()
+				}
+			}
+		}
+	}
+}
+
+// splitInternalDelay turns the delay-free (p+N)×(m+N) model aug into the
+// p×m model closed through internal delays tau on the last N channels, with
+// the delay inputs scaled by g.
+func splitInternalDelay(t *testing.T, aug *System, tau []float64, m, p int, g float64) *System {
+	t.Helper()
+	n, _, _ := aug.Dims()
+	N := len(tau)
+	B, C, D := aug.B, aug.C, aug.D
+	cp := func(x mat.Matrix) *mat.Dense { return mat.DenseCopyOf(x) }
+	var sys *System
+	var err error
+	if aug.E == nil {
+		sys, err = New(cp(aug.A), cp(B.Slice(0, n, 0, m)), cp(C.Slice(0, p, 0, n)), cp(D.Slice(0, p, 0, m)), aug.Dt)
+	} else {
+		sys, err = NewDescriptor(cp(aug.A), cp(B.Slice(0, n, 0, m)), cp(C.Slice(0, p, 0, n)), cp(D.Slice(0, p, 0, m)), cp(aug.E), aug.Dt)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	B2, D12, D22 := cp(B.Slice(0, n, m, m+N)), cp(D.Slice(0, p, m, m+N)), cp(D.Slice(p, p+N, m, m+N))
+	B2.Scale(g, B2)
+	D12.Scale(g, D12)
+	D22.Scale(g, D22)
+	if err := sys.SetInternalDelay(tau, B2, cp(C.Slice(p, p+N, 0, n)), D12, cp(D.Slice(p, p+N, 0, m)), D22); err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// lftClosure returns H11 + H12·Δ·(I - H22·Δ)⁻¹·H21 for the (p+N)×(m+N) h
+// whose delay-input columns are scaled by g.
+func lftClosure(h []complex128, s complex128, tau []float64, dt float64, m, p int, g float64) []complex128 {
+	N := len(tau)
+	w := m + N
+	delta := make([]complex128, N)
+	for j, v := range tau {
+		if dt == 0 {
+			delta[j] = cmplx.Exp(-s * complex(v, 0))
+		} else {
+			delta[j] = 1 / cmplx.Pow(s, complex(v, 0))
+		}
+	}
+	gc := complex(g, 0)
+	a := make([]complex128, N*N)
+	x := make([]complex128, N*m)
+	for i := range N {
+		for j := range N {
+			a[i*N+j] = -gc * h[(p+i)*w+m+j] * delta[j]
+		}
+		a[i*N+i] += 1
+		copy(x[i*m:(i+1)*m], h[(p+i)*w:(p+i)*w+m])
+	}
+	if err := cSolveInPlace(a, x, N, m); err != nil {
+		panic(err)
+	}
+	out := make([]complex128, p*m)
+	for i := range p {
+		for j := range m {
+			v := h[i*w+j]
+			for k := range N {
+				v += gc * h[i*w+m+k] * delta[k] * x[k*m+j]
+			}
+			out[i*m+j] = v
+		}
+	}
+	return out
 }
 
 // loadSeriesHinf loads the 8-state Series(controller, plant) loop from Process

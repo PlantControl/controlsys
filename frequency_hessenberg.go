@@ -68,9 +68,15 @@ type balancedDense struct {
 }
 
 func newBalancedDense(sys *System, n, m, p int) *balancedDense {
+	return newBalancedDenseOf(newBalancedRealization(sys, n, m, p))
+}
+
+// newBalancedDenseOf takes ownership of the balanced realization br.
+func newBalancedDenseOf(br balancedRealization) *balancedDense {
+	n, m := br.n, br.m
 	c := make([]complex128, n*n+n+n*m)
 	bd := &balancedDense{
-		balancedRealization: newBalancedRealization(sys, n, m, p),
+		balancedRealization: br,
 		pencil:              c[: n*n : n*n],
 		inv:                 c[n*n : n*n+n : n*n+n],
 		x:                   c[n*n+n:],
