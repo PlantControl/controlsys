@@ -183,7 +183,7 @@ func sortComplex(vals []complex128) {
 	})
 }
 
-func mustStaircase(tb testing.TB, A, B, C *mat.Dense) *StaircaseResult {
+func mustStaircase(tb testing.TB, A, B, C *mat.Dense) *staircaseResult {
 	tb.Helper()
 	res, err := controllabilityStaircase(A, B, C, 0, true)
 	if err != nil {

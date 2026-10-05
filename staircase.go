@@ -9,10 +9,10 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// StaircaseResult is the orthogonal staircase form returned by CtrbF and
-// ObsvF: A = T·A₀·Tᵀ, B = T·B₀, C = C₀·Tᵀ with the NCont controllable (or
-// observable) states first, in blocks of sizes BlockSizes.
-type StaircaseResult struct {
+// staircaseResult is the orthogonal staircase form behind CtrbF and ObsvF:
+// A = T·A₀·Tᵀ, B = T·B₀, C = C₀·Tᵀ with the NCont controllable states first,
+// in blocks of sizes BlockSizes.
+type staircaseResult struct {
 	A *mat.Dense
 	B *mat.Dense
 	C *mat.Dense
@@ -26,7 +26,7 @@ type StaircaseResult struct {
 // form by orthogonal transformations. C may be nil when the transformed C is
 // not needed; tol = 0 selects n²·eps, relative to each block's norm. wantT
 // accumulates the transformation into the result's T.
-func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*StaircaseResult, error) {
+func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*staircaseResult, error) {
 	if A == nil || B == nil {
 		return nil, fmt.Errorf("A or B is nil: %w", ErrInvalidArgument)
 	}
@@ -53,7 +53,7 @@ func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*Sta
 	}
 
 	if n == 0 || m == 0 {
-		return &StaircaseResult{
+		return &staircaseResult{
 			A:          denseCopy(A),
 			B:          denseCopy(B),
 			C:          denseCopy(C),
@@ -186,7 +186,7 @@ func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*Sta
 		copyBlock(blkRaw.Data, blkRaw.Stride, 0, 0, aRaw.Data, aRaw.Stride, ncont, ncont-rank, remaining, rank)
 	}
 
-	return &StaircaseResult{
+	return &staircaseResult{
 		A:          aWork,
 		B:          bWork,
 		C:          cWork,

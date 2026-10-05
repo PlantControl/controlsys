@@ -1,11 +1,6 @@
 package controlsys
 
-import (
-	"fmt"
-	"math"
-
-	"plantcontrol.org/v1/gonum/mat"
-)
+import "plantcontrol.org/v1/gonum/mat"
 
 type delayConversionPolicy struct {
 	dt          float64
@@ -52,21 +47,6 @@ func (p delayConversionPolicy) applyContinuousDelayFields(cont, disc *System) {
 			D22: mat.DenseCopyOf(disc.LFT.D22),
 		}
 	}
-}
-
-func (p delayConversionPolicy) convertInternalTauToDiscrete(tau []float64) ([]float64, error) {
-	out := make([]float64, len(tau))
-	for j, delay := range tau {
-		samples := delay / p.dt
-		rounded := math.Round(samples)
-		if math.Abs(samples-rounded) < 1e-9 {
-			out[j] = rounded
-			continue
-		}
-		return nil, fmt.Errorf("InternalDelay[%d]=%g not integer multiple of dt=%g: %w",
-			j, delay, p.dt, ErrFractionalDelay)
-	}
-	return out, nil
 }
 
 func (p delayConversionPolicy) applyDiscreteExternal(disc *System, contInputDelay, contOutputDelay []float64) (*System, error) {

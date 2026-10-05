@@ -229,30 +229,41 @@ func (f *FRD) Dims() (p, m int) {
 	return len(f.Response[0]), len(f.Response[0][0])
 }
 
+// NumFrequencies returns the number of frequency points.
 func (f *FRD) NumFrequencies() int {
 	return len(f.Omega)
 }
 
+// IsContinuous reports whether f is continuous-time (Dt == 0).
 func (f *FRD) IsContinuous() bool {
 	return f.Dt == 0
 }
 
+// IsDiscrete reports whether f is discrete-time (Dt > 0).
 func (f *FRD) IsDiscrete() bool {
 	return f.Dt > 0
 }
 
+// At returns the response from input j to output i at Omega[freqIdx]. The
+// indices must be in range.
 func (f *FRD) At(freqIdx, i, j int) complex128 {
 	return f.Response[freqIdx][i][j]
 }
 
+// FRDResponseMapper maps the p×m response h at frequency index freq and
+// frequency omega to a new p×m response; see (*FRD).MapResponse.
 type FRDResponseMapper func(freq int, omega float64, h [][]complex128) ([][]complex128, error)
 
+// FRDPeakGainResult is the largest gain of an FRD and the frequency and
+// index of the grid point where it occurs.
 type FRDPeakGainResult struct {
 	Gain      float64
 	Frequency float64
 	Index     int
 }
 
+// Abs returns the FRD of the response magnitudes |H(jω)|, with zero phase.
+// f must be valid.
 func (f *FRD) Abs() *FRD {
 	p, m := f.Dims()
 	nw := len(f.Omega)

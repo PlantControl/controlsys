@@ -8,6 +8,8 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
+// NewWithDelay returns New(A, B, C, D, dt) with the p×m I/O delay matrix
+// delay set by SetDelay; a nil delay leaves the model delay-free.
 func NewWithDelay(A, B, C, D, delay *mat.Dense, dt float64) (*System, error) {
 	sys, err := New(A, B, C, D, dt)
 	if err != nil {
@@ -21,6 +23,9 @@ func NewWithDelay(A, B, C, D, delay *mat.Dense, dt float64) (*System, error) {
 	return sys, nil
 }
 
+// SetDelay sets the p×m I/O delay matrix (MATLAB IODelay) to a copy of
+// delay; nil clears it. Entries must be finite and non-negative, and whole
+// samples for discrete models.
 func (sys *System) SetDelay(delay *mat.Dense) error {
 	_, m, p := sys.Dims()
 	if err := validateDelay(delay, p, m, sys.Dt); err != nil {
@@ -30,6 +35,9 @@ func (sys *System) SetDelay(delay *mat.Dense) error {
 	return nil
 }
 
+// SetInputDelay sets the per-input delays (MATLAB InputDelay) to a copy of
+// delay, one per input; nil clears them. Entries must be finite and
+// non-negative, and whole samples for discrete models.
 func (sys *System) SetInputDelay(delay []float64) error {
 	_, m, _ := sys.Dims()
 	if err := validateSliceDelay(delay, m, sys.Dt); err != nil {
@@ -44,6 +52,9 @@ func (sys *System) SetInputDelay(delay []float64) error {
 	return nil
 }
 
+// SetOutputDelay sets the per-output delays (MATLAB OutputDelay) to a copy of
+// delay, one per output; nil clears them. Entries must be finite and
+// non-negative, and whole samples for discrete models.
 func (sys *System) SetOutputDelay(delay []float64) error {
 	_, _, p := sys.Dims()
 	if err := validateSliceDelay(delay, p, sys.Dt); err != nil {
@@ -224,6 +235,8 @@ func hasExternalDelay(sys *System, includeDelayMatrix bool) bool {
 	return sys.InputDelay != nil || sys.OutputDelay != nil || (includeDelayMatrix && sys.Delay != nil)
 }
 
+// HasDelay reports whether sys has a nonzero input, output, I/O or internal
+// delay.
 func (sys *System) HasDelay() bool {
 	if sys.HasInternalDelay() {
 		return true
@@ -233,6 +246,7 @@ func (sys *System) HasDelay() bool {
 		delaySliceHasNonzero(sys.OutputDelay)
 }
 
+// HasInternalDelay reports whether sys has a nonzero internal delay.
 func (sys *System) HasInternalDelay() bool {
 	if sys.LFT == nil {
 		return false
@@ -245,6 +259,7 @@ func (sys *System) HasInternalDelay() bool {
 	return false
 }
 
+// HasDelay reports whether tf has a nonzero I/O delay.
 func (tf *TransferFunc) HasDelay() bool {
 	if tf.Delay == nil {
 		return false
@@ -1188,7 +1203,7 @@ func absorbIODelayContinuous(sys *System, order int) (*System, error) {
 // DecomposeIODelay splits ioDelay into input delays, output delays and a
 // nonnegative residual with ioDelay[i][j] = out[i] + in[j] + residual[i][j].
 // Derived values within roundoff of zero relative to the largest delay are
-// returned as exact zeros.
+// returned as exact zeros. ioDelay must not be nil.
 func DecomposeIODelay(ioDelay *mat.Dense) (inputDelay, outputDelay []float64, residual *mat.Dense) {
 	raw := ioDelay.RawMatrix()
 	p, m := raw.Rows, raw.Cols
@@ -1836,6 +1851,9 @@ func slice2DToDense(s [][]float64) *mat.Dense {
 	return mat.NewDense(p, m, data)
 }
 
+// MinimalLFT returns sys without the internal delay channels that carry no
+// signal (zero B2, C2, D12 and D21 columns/rows). A model without internal
+// delays is returned as a copy.
 func (sys *System) MinimalLFT() (*System, error) {
 	if !sys.HasInternalDelay() {
 		return sys.Copy(), nil

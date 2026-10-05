@@ -861,8 +861,8 @@ func emptyIOOps() []emptyIOOp {
 		}},
 		{"Ctrb", func(s *System) (any, error) { return Ctrb(s.A, s.B) }},
 		{"Obsv", func(s *System) (any, error) { return Obsv(s.A, s.C) }},
-		{"CtrbF", func(s *System) (any, error) { return CtrbF(s.A, s.B, s.C) }},
-		{"ObsvF", func(s *System) (any, error) { return ObsvF(s.A, s.B, s.C) }},
+		{"CtrbF", func(s *System) (any, error) { return CtrbF(s.A, s.B, s.C, 0) }},
+		{"ObsvF", func(s *System) (any, error) { return ObsvF(s.A, s.B, s.C, 0) }},
 		{"Lqr", func(s *System) (any, error) {
 			n, m, _ := s.Dims()
 			return Lqr(s.A, s.B, eyeOrEmptyDense(n), eyeOrEmptyDense(m), nil)

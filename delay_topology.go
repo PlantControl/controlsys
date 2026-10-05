@@ -78,10 +78,6 @@ func (dt delayTopology) decomposableExternal(context string) (inputDelay, output
 	return decomp.inputDelay, decomp.outputDelay, nil
 }
 
-func (d delayTopologyDecomposition) hasDelay() bool {
-	return delaySliceHasNonzero(d.inputDelay) || delaySliceHasNonzero(d.outputDelay) || d.hasResidual()
-}
-
 func (d delayTopologyDecomposition) hasResidual() bool {
 	return delayMatrixHasNonzero(d.residual)
 }

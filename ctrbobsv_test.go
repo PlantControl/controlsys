@@ -129,12 +129,12 @@ func TestCtrbF_FullRank(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{0, 1, -2, -3})
 	B := mat.NewDense(2, 1, []float64{0, 1})
 
-	res, err := CtrbF(A, B, nil)
+	res, err := CtrbF(A, B, testOnesRow(A), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NCont != 2 {
-		t.Errorf("NCont = %d, want 2", res.NCont)
+	if sumInts(res.K) != 2 {
+		t.Errorf("NCont = %d, want 2", sumInts(res.K))
 	}
 }
 
@@ -142,17 +142,17 @@ func TestCtrbF_PartialRank(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{1, 0, 0, 2})
 	B := mat.NewDense(2, 1, []float64{1, 0})
 
-	res, err := CtrbF(A, B, nil)
+	res, err := CtrbF(A, B, testOnesRow(A), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NCont != 1 {
-		t.Errorf("NCont = %d, want 1", res.NCont)
+	if sumInts(res.K) != 1 {
+		t.Errorf("NCont = %d, want 1", sumInts(res.K))
 	}
 }
 
 func TestCtrbF_DimMismatch(t *testing.T) {
-	_, err := CtrbF(mat.NewDense(2, 3, nil), mat.NewDense(2, 1, nil), nil)
+	_, err := CtrbF(mat.NewDense(2, 3, nil), mat.NewDense(2, 1, nil), testOnesRow(mat.NewDense(2, 3, nil)), 0)
 	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("got %v, want ErrDimensionMismatch", err)
 	}
@@ -162,12 +162,12 @@ func TestObsvF_FullRank(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{0, 1, -2, -3})
 	C := mat.NewDense(1, 2, []float64{1, 0})
 
-	res, err := ObsvF(A, nil, C)
+	res, err := ObsvF(A, testOnesCol(A), C, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NCont != 2 {
-		t.Errorf("NObs = %d, want 2", res.NCont)
+	if sumInts(res.K) != 2 {
+		t.Errorf("NObs = %d, want 2", sumInts(res.K))
 	}
 }
 
@@ -175,12 +175,12 @@ func TestObsvF_PartialRank(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{1, 0, 0, 2})
 	C := mat.NewDense(1, 2, []float64{1, 0})
 
-	res, err := ObsvF(A, nil, C)
+	res, err := ObsvF(A, testOnesCol(A), C, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NCont != 1 {
-		t.Errorf("NObs = %d, want 1", res.NCont)
+	if sumInts(res.K) != 1 {
+		t.Errorf("NObs = %d, want 1", sumInts(res.K))
 	}
 }
 
@@ -193,17 +193,17 @@ func TestObsvF_Duality(t *testing.T) {
 	B := mat.NewDense(3, 1, []float64{1, 0, 0})
 	C := mat.NewDense(1, 3, []float64{0, 0, 1})
 
-	ctrbRes, _ := CtrbF(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), nil)
-	obsvRes, _ := ObsvF(A, B, C)
+	ctrbRes, _ := CtrbF(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), mat.DenseCopyOf(B.T()), 0)
+	obsvRes, _ := ObsvF(A, B, C, 0)
 
-	if ctrbRes.NCont != obsvRes.NCont {
+	if sumInts(ctrbRes.K) != sumInts(obsvRes.K) {
 		t.Errorf("duality: CtrbF(A',C').NCont=%d != ObsvF(A,B,C).NCont=%d",
-			ctrbRes.NCont, obsvRes.NCont)
+			sumInts(ctrbRes.K), sumInts(obsvRes.K))
 	}
 }
 
 func TestObsvF_DimMismatch(t *testing.T) {
-	_, err := ObsvF(mat.NewDense(2, 3, nil), nil, mat.NewDense(1, 2, nil))
+	_, err := ObsvF(mat.NewDense(2, 3, nil), testOnesCol(mat.NewDense(2, 3, nil)), mat.NewDense(1, 2, nil), 0)
 	if !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("got %v, want ErrDimensionMismatch", err)
 	}
@@ -233,12 +233,12 @@ func TestCtrbF_WithC(t *testing.T) {
 	B := mat.NewDense(2, 1, []float64{0, 1})
 	C := mat.NewDense(1, 2, []float64{1, 0})
 
-	res, err := CtrbF(A, B, C)
+	res, err := CtrbF(A, B, C, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NCont != 2 {
-		t.Errorf("NCont = %d, want 2", res.NCont)
+	if sumInts(res.K) != 2 {
+		t.Errorf("NCont = %d, want 2", sumInts(res.K))
 	}
 	if res.C == nil {
 		t.Fatal("expected transformed C")
@@ -258,12 +258,12 @@ func TestCtrbF_PartialRank_WithC(t *testing.T) {
 	B := mat.NewDense(3, 1, []float64{1, 0, 0})
 	C := mat.NewDense(1, 3, []float64{1, 1, 1})
 
-	res, err := CtrbF(A, B, C)
+	res, err := CtrbF(A, B, C, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NCont != 1 {
-		t.Errorf("NCont = %d, want 1", res.NCont)
+	if sumInts(res.K) != 1 {
+		t.Errorf("NCont = %d, want 1", sumInts(res.K))
 	}
 }
 
@@ -272,12 +272,12 @@ func TestObsvF_WithB(t *testing.T) {
 	B := mat.NewDense(2, 1, []float64{0, 1})
 	C := mat.NewDense(1, 2, []float64{1, 0})
 
-	res, err := ObsvF(A, B, C)
+	res, err := ObsvF(A, B, C, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.NCont != 2 {
-		t.Errorf("NObs = %d, want 2", res.NCont)
+	if sumInts(res.K) != 2 {
+		t.Errorf("NObs = %d, want 2", sumInts(res.K))
 	}
 	if res.B == nil {
 		t.Fatal("expected transformed B")
@@ -420,5 +420,123 @@ func assertMatNearT(t *testing.T, label string, got, want *mat.Dense, tol float6
 				t.Errorf("%s[%d,%d] = %.15g, want %.15g", label, i, j, g, w)
 			}
 		}
+	}
+}
+
+func testOnesRow(A *mat.Dense) *mat.Dense {
+	_, n := A.Dims()
+	r := mat.NewDense(1, n, nil)
+	for j := range n {
+		r.Set(0, j, 1)
+	}
+	return r
+}
+
+func testOnesCol(A *mat.Dense) *mat.Dense {
+	n, _ := A.Dims()
+	c := mat.NewDense(n, 1, nil)
+	for i := range n {
+		c.Set(i, 0, 1)
+	}
+	return c
+}
+
+func sumInts(v []int) int {
+	s := 0
+	for _, x := range v {
+		s += x
+	}
+	return s
+}
+
+func TestCtrbFObsvFMatlabForm(t *testing.T) {
+	c, s := math.Cos(0.7), math.Sin(0.7)
+	R := mat.NewDense(3, 3, []float64{c, 0, -s, 0, 1, 0, s, 0, c})
+	A0 := mat.NewDense(3, 3, []float64{1, 2, 0.4, 3, 4, -0.2, 0, 0, 5})
+	B0 := mat.NewDense(3, 2, []float64{1, 0.5, 0, 0, 0, 0})
+	var A, B mat.Dense
+	A.Product(R, A0, R.T())
+	B.Mul(R, B0)
+	C := mat.NewDense(2, 3, []float64{1, -0.3, 2, 0.5, 1, 0})
+
+	check := func(label string, f *StaircaseForm, A, B, C *mat.Dense) {
+		t.Helper()
+		var tt, want mat.Dense
+		tt.Mul(f.T, f.T.T())
+		assertMatNearT(t, label+" T·Tᵀ", &tt, eye(3), 1e-12)
+		want.Product(f.T, A, f.T.T())
+		assertMatNearT(t, label+" Abar", f.A, &want, 1e-12)
+		want.Reset()
+		want.Mul(f.T, B)
+		assertMatNearT(t, label+" Bbar", f.B, &want, 1e-12)
+		want.Reset()
+		want.Mul(C, f.T.T())
+		assertMatNearT(t, label+" Cbar", f.C, &want, 1e-12)
+	}
+
+	cf, err := CtrbF(&A, &B, C, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sumInts(cf.K) != 2 {
+		t.Fatalf("CtrbF K = %v, want sum 2", cf.K)
+	}
+	check("CtrbF", cf, &A, &B, C)
+	for j := 1; j < 3; j++ {
+		if v := cf.A.At(0, j); math.Abs(v) > 1e-12 {
+			t.Errorf("CtrbF Abar[0,%d] = %g, want 0 (Anc block decoupled)", j, v)
+		}
+	}
+	for j := range 2 {
+		if v := cf.B.At(0, j); math.Abs(v) > 1e-12 {
+			t.Errorf("CtrbF Bbar[0,%d] = %g, want 0", j, v)
+		}
+	}
+	if math.Abs(cf.A.At(0, 0)-5) > 1e-12 {
+		t.Errorf("uncontrollable eigenvalue = %g, want 5", cf.A.At(0, 0))
+	}
+
+	var At, Ct, Bt mat.Dense
+	At.CloneFrom(A.T())
+	Ct.CloneFrom(C.T())
+	Bt.CloneFrom(B.T())
+	of, err := ObsvF(&At, &Ct, &Bt, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("ObsvF", of, &At, &Ct, &Bt)
+	for i := 1; i < 3; i++ {
+		if v := of.A.At(i, 0); math.Abs(v) > 1e-12 {
+			t.Errorf("ObsvF Abar[%d,0] = %g, want 0", i, v)
+		}
+	}
+	for i := range 2 {
+		if v := of.C.At(i, 0); math.Abs(v) > 1e-12 {
+			t.Errorf("ObsvF Cbar[%d,0] = %g, want 0", i, v)
+		}
+	}
+
+	if _, err := CtrbF(&A, &B, nil, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("CtrbF nil C: err = %v", err)
+	}
+	if _, err := ObsvF(&A, nil, C, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("ObsvF nil B: err = %v", err)
+	}
+	if _, err := CtrbF(&A, &B, C, -1); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("CtrbF negative tol: err = %v", err)
+	}
+	bad := mat.DenseCopyOf(&A)
+	bad.Set(1, 1, math.NaN())
+	if _, err := CtrbF(bad, &B, C, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("CtrbF NaN A: err = %v", err)
+	}
+	if _, err := IsStabilizable(bad, &B, true); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("IsStabilizable NaN A: err = %v", err)
+	}
+	if _, err := IsDetectable(bad, C, true); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("IsDetectable NaN A: err = %v", err)
+	}
+	if _, err := IsStabilizable(nil, &B, true); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("IsStabilizable nil A: err = %v", err)
 	}
 }

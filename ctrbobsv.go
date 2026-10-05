@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"fmt"
+	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -90,106 +91,158 @@ func rawToGen(m *mat.Dense) blas64.General {
 	return blas64.General{Rows: n, Cols: raw.Cols, Stride: raw.Cols, Data: data}
 }
 
-// CtrbF computes the controllability staircase form.
-// C may be nil if not needed in the transformed system.
-func CtrbF(A, B, C *mat.Dense) (*StaircaseResult, error) {
-	n, nc := A.Dims()
-	if n != nc {
-		return nil, ErrDimensionMismatch
+// StaircaseForm is the result of CtrbF or ObsvF, the outputs
+// [Abar,Bbar,Cbar,T,k] of MATLAB ctrbf/obsvf: Abar = T·A·Tᵀ, Bbar = T·B and
+// Cbar = C·Tᵀ with T orthogonal. K holds the rank found at each staircase
+// step; their sum is the number of controllable (CtrbF) or observable (ObsvF)
+// states.
+type StaircaseForm struct {
+	A, B, C *mat.Dense
+	T       *mat.Dense
+	K       []int
+}
+
+// CtrbF computes the controllability staircase form of (A, B, C), as MATLAB
+// [Abar,Bbar,Cbar,T,k] = ctrbf(A,B,C,tol)
+// (https://www.mathworks.com/help/control/ref/ctrbf.html):
+//
+//	Abar = [Anc 0; A21 Ac], Bbar = [0; Bc], Cbar = [Cnc Cc]
+//
+// with the nc = sum(K) controllable states last. tol is the relative rank
+// tolerance of each staircase step; 0 selects n²·eps. Unlike MATLAB's absolute
+// default, it scales with the size of each block. Nil, non-finite or
+// mismatched matrices, a negative or NaN tol and a model with no states
+// return an error.
+func CtrbF(A, B, C *mat.Dense, tol float64) (*StaircaseForm, error) {
+	n, err := requireStaircaseArgs("CtrbF", A, B, C, tol)
+	if err != nil {
+		return nil, err
 	}
-	br, _ := B.Dims()
-	if br != n {
-		return nil, ErrDimensionMismatch
-	}
-	if C != nil {
-		_, cc := C.Dims()
-		if cc != n {
-			return nil, ErrDimensionMismatch
-		}
-	}
-	res, err := controllabilityStaircase(A, B, C, 0, true)
+	res, err := controllabilityForm(A, B, C, n, tol)
 	if err != nil {
 		return nil, fmt.Errorf("CtrbF: %w", err)
 	}
 	return res, nil
 }
 
-// ObsvF computes the observability staircase form via duality.
-// B may be nil if not needed in the transformed system.
-func ObsvF(A, B, C *mat.Dense) (*StaircaseResult, error) {
-	n, nc := A.Dims()
-	if n != nc {
-		return nil, ErrDimensionMismatch
+// ObsvF computes the observability staircase form of (A, B, C), as MATLAB
+// [Abar,Bbar,Cbar,T,k] = obsvf(A,B,C,tol)
+// (https://www.mathworks.com/help/control/ref/obsvf.html):
+//
+//	Abar = [Ano A12; 0 Ao], Bbar = [Bno; Bo], Cbar = [0 Co]
+//
+// with the no = sum(K) observable states last. It is the dual of CtrbF:
+// CtrbF(Aᵀ, Cᵀ, Bᵀ, tol) transposed. tol and the errors are as for CtrbF.
+func ObsvF(A, B, C *mat.Dense, tol float64) (*StaircaseForm, error) {
+	n, err := requireStaircaseArgs("ObsvF", A, B, C, tol)
+	if err != nil {
+		return nil, err
 	}
-	_, cc := C.Dims()
-	if cc != n {
-		return nil, ErrDimensionMismatch
-	}
-	if B != nil {
-		br, _ := B.Dims()
-		if br != n {
-			return nil, ErrDimensionMismatch
-		}
-	}
-
-	acT := mat.DenseCopyOf(A.T())
-	ccT := mat.DenseCopyOf(C.T())
-	var bcT *mat.Dense
-	if B != nil {
-		bcT = mat.DenseCopyOf(B.T())
-	}
-
-	dual, err := controllabilityStaircase(acT, ccT, bcT, 0, true)
+	dual, err := controllabilityForm(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), mat.DenseCopyOf(B.T()), n, tol)
 	if err != nil {
 		return nil, fmt.Errorf("ObsvF: %w", err)
 	}
+	return &StaircaseForm{
+		A: mat.DenseCopyOf(dual.A.T()),
+		B: mat.DenseCopyOf(dual.C.T()),
+		C: mat.DenseCopyOf(dual.B.T()),
+		T: dual.T,
+		K: dual.K,
+	}, nil
+}
 
-	nobs := dual.NCont
-	res := &StaircaseResult{
-		T:          dual.T,
-		NCont:      nobs,
-		BlockSizes: dual.BlockSizes,
-	}
-
-	res.A = mat.DenseCopyOf(dual.A.T())
-
-	if dual.C != nil {
-		_, mc := dual.C.Dims()
-		if mc > 0 {
-			res.B = mat.DenseCopyOf(dual.C.T())
-		} else {
-			res.B = &mat.Dense{}
+func requireStaircaseArgs(op string, A, B, C *mat.Dense, tol float64) (int, error) {
+	for _, nm := range []struct {
+		name string
+		m    *mat.Dense
+	}{{"A", A}, {"B", B}, {"C", C}} {
+		if err := requireFiniteDense(op, nm.name, nm.m); err != nil {
+			return 0, err
 		}
-	} else {
-		res.B = &mat.Dense{}
 	}
-
-	dr, _ := dual.B.Dims()
-	if dr > 0 {
-		res.C = mat.DenseCopyOf(dual.B.T())
-	} else {
-		res.C = &mat.Dense{}
+	if !(tol >= 0) || math.IsInf(tol, 1) {
+		return 0, fmt.Errorf("%s: tol %g must be finite and non-negative: %w", op, tol, ErrInvalidArgument)
 	}
+	n, nc := A.Dims()
+	if n != nc {
+		return 0, fmt.Errorf("%s: A is %d×%d, must be square: %w", op, n, nc, ErrDimensionMismatch)
+	}
+	if br, _ := B.Dims(); br != n {
+		return 0, fmt.Errorf("%s: B has %d rows, want %d: %w", op, br, n, ErrDimensionMismatch)
+	}
+	if _, cc := C.Dims(); cc != n {
+		return 0, fmt.Errorf("%s: C has %d columns, want %d: %w", op, cc, n, ErrDimensionMismatch)
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("%s: system has no states: %w", op, ErrDimensionMismatch)
+	}
+	return n, nil
+}
 
+// controllabilityForm runs the staircase with the controllable states first
+// and reverses the state order to MATLAB's layout with the controllable
+// states last.
+func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) (*StaircaseForm, error) {
+	st, err := controllabilityStaircase(A, B, C, tol, true)
+	if err != nil {
+		return nil, err
+	}
+	p, _ := C.Dims()
+	_, m := B.Dims()
+	rev := func(i int) int { return n - 1 - i }
+	res := &StaircaseForm{
+		A: mat.NewDense(n, n, nil),
+		B: mat.NewDense(n, m, nil),
+		C: mat.NewDense(p, n, nil),
+		T: mat.NewDense(n, n, nil),
+		K: append([]int{}, st.BlockSizes...),
+	}
+	for i := range n {
+		for j := range n {
+			res.A.Set(rev(i), rev(j), st.A.At(i, j))
+			res.T.Set(rev(i), j, st.T.At(i, j))
+		}
+		for j := range m {
+			res.B.Set(rev(i), j, st.B.At(i, j))
+		}
+	}
+	for i := range p {
+		for j := range n {
+			res.C.Set(i, rev(j), st.C.At(i, j))
+		}
+	}
 	return res, nil
 }
 
+// IsStabilizable reports whether every uncontrollable mode of (A, B) is
+// stable: in the open left half-plane when continuous, inside the unit circle
+// otherwise. A model with no states is stabilizable. Nil, non-finite or
+// mismatched matrices return an error.
 func IsStabilizable(A, B *mat.Dense, continuous bool) (bool, error) {
+	return isStabilizable("IsStabilizable", A, B, continuous)
+}
+
+func isStabilizable(op string, A, B *mat.Dense, continuous bool) (bool, error) {
+	if err := requireFiniteDense(op, "A", A); err != nil {
+		return false, err
+	}
+	if err := requireFiniteDense(op, "B", B); err != nil {
+		return false, err
+	}
 	n, nc := A.Dims()
 	if n != nc {
-		return false, ErrDimensionMismatch
+		return false, fmt.Errorf("%s: A is %d×%d, must be square: %w", op, n, nc, ErrDimensionMismatch)
 	}
-	br, _ := B.Dims()
-	if br != n {
-		return false, ErrDimensionMismatch
+	if br, _ := B.Dims(); br != n {
+		return false, fmt.Errorf("%s: B has %d rows, want %d: %w", op, br, n, ErrDimensionMismatch)
 	}
 	if n == 0 {
 		return true, nil
 	}
 
-	res, err := CtrbF(A, B, nil)
+	res, err := controllabilityStaircase(A, B, nil, 0, false)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("%s: %w", op, err)
 	}
 	if res.NCont == n {
 		return true, nil
@@ -206,11 +259,9 @@ func IsStabilizable(A, B *mat.Dense, continuous bool) (bool, error) {
 
 	var eig mat.Eigen
 	if !eig.Factorize(auc, mat.EigenNone) {
-		return false, ErrSchurFailed
+		return false, fmt.Errorf("%s: eigenvalues of the uncontrollable part: %w", op, ErrSchurFailed)
 	}
-	vals := eig.Values(nil)
-
-	for _, v := range vals {
+	for _, v := range eig.Values(nil) {
 		if poleOnOrOutsideStabilityBoundary(v, continuous, poleStabilityTolerance(v)) {
 			return false, nil
 		}
@@ -218,14 +269,21 @@ func IsStabilizable(A, B *mat.Dense, continuous bool) (bool, error) {
 	return true, nil
 }
 
+// IsDetectable reports whether every unobservable mode of (A, C) is stable,
+// the dual of IsStabilizable.
 func IsDetectable(A, C *mat.Dense, continuous bool) (bool, error) {
+	if err := requireFiniteDense("IsDetectable", "A", A); err != nil {
+		return false, err
+	}
+	if err := requireFiniteDense("IsDetectable", "C", C); err != nil {
+		return false, err
+	}
 	n, nc := A.Dims()
 	if n != nc {
-		return false, ErrDimensionMismatch
+		return false, fmt.Errorf("IsDetectable: A is %d×%d, must be square: %w", n, nc, ErrDimensionMismatch)
 	}
-	_, cc := C.Dims()
-	if cc != n {
-		return false, ErrDimensionMismatch
+	if _, cc := C.Dims(); cc != n {
+		return false, fmt.Errorf("IsDetectable: C has %d columns, want %d: %w", cc, n, ErrDimensionMismatch)
 	}
-	return IsStabilizable(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), continuous)
+	return isStabilizable("IsDetectable", mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), continuous)
 }
