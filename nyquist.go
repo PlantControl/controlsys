@@ -157,16 +157,11 @@ func autoNyquistFreqs(sys *System, poles []complex128, imagPoles []imagAxisPole,
 		nPoints = 500
 	}
 
+	td := newTimeDomain(sys.Dt)
 	natFreqs := make([]float64, 0, len(poles))
 	for _, p := range poles {
-		var wn float64
-		if sys.IsContinuous() {
-			wn = cmplx.Abs(p)
-		} else {
-			lp := cmplx.Log(p)
-			wn = cmplx.Abs(lp) / sys.Dt
-		}
-		if wn > 0 {
+		wn := td.naturalFrequency(p)
+		if wn > 0 && !math.IsInf(wn, 0) {
 			natFreqs = append(natFreqs, wn)
 		}
 	}
@@ -197,6 +192,7 @@ func autoNyquistFreqs(sys *System, poles []complex128, imagPoles []imagAxisPole,
 		if wMax > nyquistFreq {
 			wMax = nyquistFreq
 		}
+		wMin = min(wMin, wMax/100)
 	}
 
 	baseN := max(nPoints*7/10, 50)

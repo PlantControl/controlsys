@@ -1333,3 +1333,106 @@ func TestSigma_AutoFreq(t *testing.T) {
 		t.Fatalf("len(omega) = %d, want 50", len(r.Omega))
 	}
 }
+
+func TestAutoBodeFreqs_GridCoversDynamics(t *testing.T) {
+	scaled := func(k float64) *System {
+		a := []float64{-1, 2, 0.5, -0.3, -2, 1, 0.2, -0.4, -3}
+		for i := range a {
+			a[i] *= k
+		}
+		sys, _ := New(mat.NewDense(3, 3, a), mat.NewDense(3, 2, []float64{1, 0, 0.5, 1, -1, 2}),
+			mat.NewDense(2, 3, []float64{1, -1, 0.3, 0, 2, 1}), mat.NewDense(2, 2, []float64{0.1, 0, 0.2, -0.3}), 0)
+		return sys
+	}
+	eigFreqs := func(sys *System) []float64 {
+		var eig mat.Eigen
+		eig.Factorize(sys.A, mat.EigenNone)
+		var out []float64
+		for _, p := range eig.Values(nil) {
+			wn := cmplx.Abs(p)
+			if sys.IsDiscrete() {
+				wn = cmplx.Abs(cmplx.Log(p)) / sys.Dt
+			}
+			if wn > 0 && !math.IsInf(wn, 0) {
+				out = append(out, wn)
+			}
+		}
+		return out
+	}
+
+	leadLag, _ := New(mat.NewDense(2, 2, []float64{0, 1, -2, -3}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 27.1}), mat.NewDense(1, 1, []float64{1}), 0)
+	delayed := scaled(1)
+	delayed.InputDelay = []float64{1e-4, 0}
+	zPole, _ := New(mat.NewDense(2, 2, []float64{1, 1, 0, 0}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{0.3, 0}), mat.NewDense(1, 1, nil), 0.1)
+	pureDelay, _ := New(mat.NewDense(1, 1, []float64{0}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0.1)
+	discMIMO, _ := New(mat.NewDense(3, 3, []float64{0.9, 0.2, 0, -0.1, 0.5, 0.3, 0, 0, 0}),
+		mat.NewDense(3, 2, []float64{1, 0, 0.5, 1, 0, 1}), mat.NewDense(2, 3, []float64{1, -1, 0.3, 0, 2, 1}),
+		mat.NewDense(2, 2, []float64{0.1, 0, 0.2, -0.3}), 1e-3)
+	discDelay, _ := New(mat.NewDense(1, 1, []float64{0.999}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0.01)
+	discDelay.InputDelay = []float64{1000}
+
+	cases := []struct {
+		name     string
+		sys      *System
+		features []float64
+	}{
+		{"scaled 1e-5", scaled(1e-5), nil},
+		{"scaled 1", scaled(1), nil},
+		{"scaled 1e5", scaled(1e5), nil},
+		{"zeros 0.1, 30", leadLag, []float64{0.1, 30}},
+		{"input delay 1e-4", delayed, []float64{1e4}},
+		{"discrete z=0 pole", zPole, nil},
+		{"discrete pure delay", pureDelay, nil},
+		{"discrete MIMO z=0 pole", discMIMO, nil},
+		{"discrete 10s delay", discDelay, []float64{0.1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := tc.sys
+			features := append(eigFreqs(sys), tc.features...)
+			bode, err := sys.Bode(nil, 50)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := bode.Omega
+			for k, v := range w {
+				if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+					t.Fatalf("omega[%d] = %g", k, v)
+				}
+				if k > 0 && v <= w[k-1] {
+					t.Fatalf("omega not increasing at %d: %g <= %g", k, v, w[k-1])
+				}
+			}
+			wMin, wMax := w[0], w[len(w)-1]
+			nyq := math.Pi / sys.Dt
+			if sys.IsDiscrete() && wMax != nyq {
+				t.Errorf("last omega = %g, want π/dt = %g", wMax, nyq)
+			}
+			for _, wn := range features {
+				if wMin > wn/10*(1+1e-12) {
+					t.Errorf("wMin = %g above feature %g/10", wMin, wn)
+				}
+				if sys.IsContinuous() && wMax < wn*10*(1-1e-12) {
+					t.Errorf("wMax = %g below 10×feature %g", wMax, wn)
+				}
+			}
+			sg, err := sys.Sigma(nil, 50)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nc, err := sys.Nichols(nil, 50)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k := range w {
+				if sg.Omega[k] != w[k] || nc.Omega[k] != w[k] {
+					t.Fatalf("Sigma/Nichols grid differs from Bode at %d", k)
+				}
+			}
+		})
+	}
+}
