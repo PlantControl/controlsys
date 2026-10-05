@@ -949,6 +949,44 @@ func TestEmptyIOModelsNeverPanic(t *testing.T) {
 	}
 }
 
+// TestEmptyIOInternalDelayModelsNeverPanic repeats the empty-I/O sweep on
+// internal-delay models with no inputs or no outputs, built by closing an LFT
+// around a delayed Delta with nu=0 or ny=0.
+func TestEmptyIOInternalDelayModelsNeverPanic(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, part := range [][2]int{{0, 2}, {2, 0}} {
+			M, Delta := lftZeroWidthPlants(t, dt, part[0], part[1])
+			Delta.InputDelay = []float64{1, 2}
+			if dt == 0 {
+				Delta.InputDelay = []float64{0.1, 0.2}
+			}
+			sys, err := LFT(M, Delta, part[0], part[1])
+			if err != nil {
+				t.Fatalf("dt=%g nu,ny=%v: LFT: %v", dt, part, err)
+			}
+			if !sys.HasInternalDelay() {
+				t.Fatalf("dt=%g nu,ny=%v: want internal delays", dt, part)
+			}
+			for _, op := range emptyIOOps() {
+				tag := fmt.Sprintf("dt=%g nu,ny=%v %s", dt, part, op.name)
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Errorf("%s: panic: %v", tag, r)
+						}
+					}()
+					out, err := op.fn(sys.Copy())
+					if err == nil {
+						if verr := emptyIOCheckOutput(out); verr != nil {
+							t.Errorf("%s: invalid output: %v", tag, verr)
+						}
+					}
+				}()
+			}
+		}
+	}
+}
+
 func autonomousFixture(t *testing.T, dt float64) *System {
 	t.Helper()
 	A := mat.NewDense(2, 2, []float64{-1, 2, -0.5, -3})

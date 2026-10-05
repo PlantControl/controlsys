@@ -2,6 +2,8 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"math/cmplx"
 	"testing"
 
@@ -667,5 +669,328 @@ func TestLFTEmptyLoopKeepsUpperChannels(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func lftZeroWidthPlants(t *testing.T, dt float64, nu, ny int) (M, Delta *System) {
+	t.Helper()
+	return lftPartitionPlants(t, dt, nu, ny, 2, 2)
+}
+
+// lftPartitionPlants returns M with nu+z inputs and ny+w outputs and a
+// 2-state Delta with w inputs and z outputs.
+func lftPartitionPlants(t *testing.T, dt float64, nu, ny, z, w int) (M, Delta *System) {
+	t.Helper()
+	M = emptyIOFixture(t, 3, nu+z, ny+w, dt)
+	fill := func(r, c int, vals ...float64) *mat.Dense {
+		if r == 0 || c == 0 {
+			return nil
+		}
+		d := mat.NewDense(r, c, nil)
+		for k := range r * c {
+			d.Set(k/c, k%c, vals[k%len(vals)])
+		}
+		return d
+	}
+	A := mat.NewDense(2, 2, []float64{-0.4, 0.7, -0.3, -0.9})
+	if dt > 0 {
+		A.Scale(0.5, A)
+	}
+	Delta, err := New(A, fill(2, w, 1, -0.5, 0.25, 2), fill(z, 2, 0.6, -1, 1.5, 0.2), fill(z, w, 0.3, -0.2, 0.1, 0.4), dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return M, Delta
+}
+
+// lftLoopOracle evaluates the interconnection of M and Delta at one point by
+// solving the algebraic loop directly; it returns the state update [xM'; xD']
+// and the closed-loop output y.
+func lftLoopOracle(M, Delta *System, nu, ny int, x, u []float64) (dx, y []float64) {
+	nM, mM, pM := M.Dims()
+	nD, _, _ := Delta.Dims()
+	z, w := mM-nu, pM-ny
+	K := mat.NewDense(w+z, w+z, nil)
+	rhs := mat.NewVecDense(w+z, nil)
+	for i := range w + z {
+		K.Set(i, i, 1)
+	}
+	for i := range w {
+		for j := range z {
+			K.Set(i, w+j, -M.D.At(ny+i, nu+j))
+		}
+		v := 0.0
+		for j := range nM {
+			v += M.C.At(ny+i, j) * x[j]
+		}
+		for j := range nu {
+			v += M.D.At(ny+i, j) * u[j]
+		}
+		rhs.SetVec(i, v)
+	}
+	for i := range z {
+		for j := range w {
+			K.Set(w+i, j, -Delta.D.At(i, j))
+		}
+		v := 0.0
+		for j := range nD {
+			v += Delta.C.At(i, j) * x[nM+j]
+		}
+		rhs.SetVec(w+i, v)
+	}
+	var sig mat.VecDense
+	if err := sig.SolveVec(K, rhs); err != nil {
+		panic(err)
+	}
+	dx = make([]float64, nM+nD)
+	for i := range nM {
+		for j := range nM {
+			dx[i] += M.A.At(i, j) * x[j]
+		}
+		for j := range nu {
+			dx[i] += M.B.At(i, j) * u[j]
+		}
+		for j := range z {
+			dx[i] += M.B.At(i, nu+j) * sig.AtVec(w+j)
+		}
+	}
+	for i := range nD {
+		for j := range nD {
+			dx[nM+i] += Delta.A.At(i, j) * x[nM+j]
+		}
+		for j := range w {
+			dx[nM+i] += Delta.B.At(i, j) * sig.AtVec(j)
+		}
+	}
+	y = make([]float64, ny)
+	for i := range ny {
+		for j := range nM {
+			y[i] += M.C.At(i, j) * x[j]
+		}
+		for j := range nu {
+			y[i] += M.D.At(i, j) * u[j]
+		}
+		for j := range z {
+			y[i] += M.D.At(i, nu+j) * sig.AtVec(w+j)
+		}
+	}
+	return dx, y
+}
+
+func ssPointEval(sys *System, x, u []float64) (dx, y []float64) {
+	n, m, p := sys.Dims()
+	dx = make([]float64, n)
+	y = make([]float64, p)
+	for i := range n {
+		for j := range n {
+			dx[i] += sys.A.At(i, j) * x[j]
+		}
+		for j := range m {
+			dx[i] += sys.B.At(i, j) * u[j]
+		}
+	}
+	for i := range p {
+		for j := range n {
+			y[i] += sys.C.At(i, j) * x[j]
+		}
+		for j := range m {
+			y[i] += sys.D.At(i, j) * u[j]
+		}
+	}
+	return dx, y
+}
+
+func TestLFTZeroWidthPartitionsMatchLoopOracle(t *testing.T) {
+	x := []float64{0.7, -1.2, 0.4, 0.9, -0.6}
+	uAll := []float64{1.1, -0.8}
+	for _, dt := range []float64{0, 0.1} {
+		for _, part := range [][2]int{{0, 2}, {2, 0}, {0, 0}, {1, 2}} {
+			nu, ny := part[0], part[1]
+			M, Delta := lftZeroWidthPlants(t, dt, nu, ny)
+			tag := fmt.Sprintf("dt=%g nu=%d ny=%d", dt, nu, ny)
+			got, err := LFT(M, Delta, nu, ny)
+			if err != nil {
+				t.Fatalf("%s: %v", tag, err)
+			}
+			if err := got.Validate(); err != nil {
+				t.Fatalf("%s: Validate: %v", tag, err)
+			}
+			if n, m, p := got.Dims(); n != 5 || m != nu || p != ny {
+				t.Fatalf("%s: Dims = (%d,%d,%d), want (5,%d,%d)", tag, n, m, p, nu, ny)
+			}
+			u := uAll[:nu]
+			wantDx, wantY := lftLoopOracle(M, Delta, nu, ny, x, u)
+			gotDx, gotY := ssPointEval(got, x, u)
+			for i := range wantDx {
+				if math.Abs(gotDx[i]-wantDx[i]) > 1e-12 {
+					t.Errorf("%s: dx[%d] = %v, want %v", tag, i, gotDx[i], wantDx[i])
+				}
+			}
+			for i := range wantY {
+				if math.Abs(gotY[i]-wantY[i]) > 1e-12 {
+					t.Errorf("%s: y[%d] = %v, want %v", tag, i, gotY[i], wantY[i])
+				}
+			}
+		}
+	}
+}
+
+func TestLFTZeroWidthLoopChannelsMatchLoopOracle(t *testing.T) {
+	x := []float64{0.7, -1.2, 0.4, 0.9, -0.6}
+	u := []float64{1.1, -0.8}
+	for _, dt := range []float64{0, 0.1} {
+		for _, zw := range [][2]int{{0, 2}, {2, 0}} {
+			z, w := zw[0], zw[1]
+			M, Delta := lftPartitionPlants(t, dt, 2, 2, z, w)
+			tag := fmt.Sprintf("dt=%g z=%d w=%d", dt, z, w)
+			got, err := LFT(M, Delta, 2, 2)
+			if err != nil {
+				t.Fatalf("%s: %v", tag, err)
+			}
+			if err := got.Validate(); err != nil {
+				t.Fatalf("%s: Validate: %v", tag, err)
+			}
+			if n, m, p := got.Dims(); n != 5 || m != 2 || p != 2 {
+				t.Fatalf("%s: Dims = (%d,%d,%d), want (5,2,2)", tag, n, m, p)
+			}
+			wantDx, wantY := lftLoopOracle(M, Delta, 2, 2, x, u)
+			gotDx, gotY := ssPointEval(got, x, u)
+			for i := range wantDx {
+				if math.Abs(gotDx[i]-wantDx[i]) > 1e-12 {
+					t.Errorf("%s: dx[%d] = %v, want %v", tag, i, gotDx[i], wantDx[i])
+				}
+			}
+			for i := range wantY {
+				if math.Abs(gotY[i]-wantY[i]) > 1e-12 {
+					t.Errorf("%s: y[%d] = %v, want %v", tag, i, gotY[i], wantY[i])
+				}
+			}
+		}
+	}
+}
+
+func TestLFTZeroWidthUpperChannelsSimulate(t *testing.T) {
+	const steps = 6
+	M, Delta := lftZeroWidthPlants(t, 0.1, 0, 2)
+	got, err := LFT(M, Delta, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := []float64{0.7, -1.2, 0.4, 0.9, -0.6}
+	resp, err := got.Simulate(nil, mat.NewVecDense(5, append([]float64(nil), x...)), &SimulateOpts{Steps: steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, c := resp.Y.Dims(); r != 2 || c != steps {
+		t.Fatalf("Y dims = %dx%d, want 2x%d", r, c, steps)
+	}
+	for k := range steps {
+		dx, y := lftLoopOracle(M, Delta, 0, 2, x, nil)
+		for i := range y {
+			if math.Abs(resp.Y.At(i, k)-y[i]) > 1e-10 {
+				t.Errorf("k=%d y[%d] = %v, want %v", k, i, resp.Y.At(i, k), y[i])
+			}
+		}
+		x = dx
+	}
+	for i := range x {
+		if math.Abs(resp.XFinal.AtVec(i)-x[i]) > 1e-10 {
+			t.Errorf("XFinal[%d] = %v, want %v", i, resp.XFinal.AtVec(i), x[i])
+		}
+	}
+}
+
+func TestLFTZeroWidthStaticGain(t *testing.T) {
+	M, err := NewGain(mat.NewDense(3, 2, []float64{1, 2, 3, 4, 5, 6}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	Delta, err := NewGain(mat.NewDense(2, 2, []float64{0.1, 0.2, -0.3, 0.4}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LFT(M, Delta, 0, 1); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("LFT gain nu=0 ny=1: err = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := LFT(M, nil, 0, 2); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("LFT gain nil Delta nu=0 ny=2: err = %v, want ErrDimensionMismatch", err)
+	}
+	M2, err := NewGain(mat.NewDense(2, 2, []float64{1, 2, 3, 4}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := LFT(M2, Delta, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, m, p := got.Dims(); n != 0 || m != 0 || p != 0 {
+		t.Errorf("Dims = (%d,%d,%d), want (0,0,0)", n, m, p)
+	}
+}
+
+// TestLFTZeroWidthDelayedDeltaMatchesFullPartition checks the internal-delay
+// LFT path: closing the loop with nu=0 (ny=0) must reproduce the full
+// partition's free response (state trajectory) with the upper inputs zeroed
+// (outputs dropped).
+func TestLFTZeroWidthDelayedDeltaMatchesFullPartition(t *testing.T) {
+	const steps = 8
+	full, Delta := lftZeroWidthPlants(t, 0.1, 2, 2)
+	Delta.InputDelay = []float64{1, 2}
+	fullLFT, err := LFT(full, Delta, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _, _ := fullLFT.Dims()
+	x0 := mat.NewVecDense(n, nil)
+	for i := range n {
+		x0.SetVec(i, 0.3*float64(i+1)-0.7*float64(i%2))
+	}
+	u := mat.NewDense(2, steps, nil)
+	for k := range steps {
+		u.Set(0, k, math.Sin(float64(k)))
+		u.Set(1, k, 0.5-0.1*float64(k))
+	}
+
+	noInputs, err := New(full.A, mat.DenseCopyOf(full.B.Slice(0, 3, 2, 4)), full.C, mat.DenseCopyOf(full.D.Slice(0, 4, 2, 4)), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := LFT(noInputs, Delta, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotR, err := got.Simulate(nil, x0, &SimulateOpts{Steps: steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantR, err := fullLFT.Simulate(mat.NewDense(2, steps, nil), x0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matEqual(gotR.Y, wantR.Y, 1e-10) {
+		t.Errorf("nu=0 Y =\n%v\nwant\n%v", mat.Formatted(gotR.Y), mat.Formatted(wantR.Y))
+	}
+
+	noOutputs, err := New(full.A, full.B, mat.DenseCopyOf(full.C.Slice(2, 4, 0, 3)), mat.DenseCopyOf(full.D.Slice(2, 4, 0, 4)), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = LFT(noOutputs, Delta, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotR, err = got.Simulate(u, x0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantR, err = fullLFT.Simulate(u, x0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotR.Y != nil {
+		t.Errorf("ny=0 Y = %v, want nil", gotR.Y)
+	}
+	if !vecEqual(gotR.XFinal, wantR.XFinal, 1e-10) {
+		t.Errorf("ny=0 XFinal = %v, want %v", mat.Formatted(gotR.XFinal.T()), mat.Formatted(wantR.XFinal.T()))
 	}
 }

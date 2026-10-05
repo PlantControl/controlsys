@@ -51,11 +51,13 @@ func Augstate(sys *System) (*System, error) {
 		copy(result.OutputDelay, sys.OutputDelay)
 	}
 	if sys.LFT != nil {
+		d12 := newDense(pNew, len(sys.LFT.Tau))
+		setBlock(d12, 0, 0, sys.LFT.D12)
 		result.LFT = &LFTDelay{
 			Tau: append([]float64(nil), sys.LFT.Tau...),
 			B2:  copyDelayOrNil(sys.LFT.B2),
 			C2:  copyDelayOrNil(sys.LFT.C2),
-			D12: padZeroRows(sys.LFT.D12, pNew),
+			D12: d12,
 			D21: copyDelayOrNil(sys.LFT.D21),
 			D22: copyDelayOrNil(sys.LFT.D22),
 		}

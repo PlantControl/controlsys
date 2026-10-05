@@ -918,6 +918,21 @@ func zeroInputModel(sys *System) *System {
 	return pad
 }
 
+// zeroOutputModel returns sys with one zero output standing in for p = 0, so
+// the simulation kernels still propagate the state.
+func zeroOutputModel(sys *System) *System {
+	n, m, _ := sys.Dims()
+	pad := sys.Copy()
+	pad.C = newDense(1, n)
+	pad.D = newDense(1, m)
+	pad.OutputDelay = nil
+	pad.Delay = nil
+	if pad.LFT != nil {
+		pad.LFT.D12 = newDense(1, len(pad.LFT.Tau))
+	}
+	return pad
+}
+
 func (sys *System) continuousFreeResponse(x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
 	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
 	if err != nil {

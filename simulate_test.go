@@ -158,13 +158,6 @@ func TestSimulateNoInputs(t *testing.T) {
 
 	x0 := mat.NewVecDense(2, []float64{4, 8})
 
-	// Need to pass u=nil but steps would be 0. For autonomous propagation we need
-	// a way to specify steps. With u=nil, steps=0 so we get empty Y.
-	// Instead, pass a 0-row input with the desired number of columns.
-	// Actually m=0 for this system, so we can't create a 0×steps matrix.
-	// The spec says u==nil means zero input → 0 steps.
-	// For m=0 systems, we must construct a dummy input to set step count.
-	// Let's test with u=nil → steps=0, XFinal=x0.
 	r, err := sys.Simulate(nil, x0, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -997,5 +990,100 @@ func TestSimulateSingularDescriptor(t *testing.T) {
 	improper, _ := index2Descriptor(t, 0.1, true)
 	if _, err := improper.Simulate(u, nil, nil); !errors.Is(err, ErrImproperModel) {
 		t.Fatalf("non-causal err = %v, want ErrImproperModel", err)
+	}
+}
+
+func TestSimulateAutonomousSteps(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{0.5, 0.2, -0.1, -0.3, 0.4, 0.25, 0.1, -0.2, 0.6})
+	C := mat.NewDense(2, 3, []float64{1, -0.5, 0.3, 0.2, 1, -1})
+	x0 := []float64{1, -2, 0.5}
+	const steps = 7
+	for _, p := range []int{2, 0} {
+		var Cp *mat.Dense
+		if p > 0 {
+			Cp = C
+		}
+		sys, err := New(A, nil, Cp, nil, 0.1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := sys.Simulate(nil, mat.NewVecDense(3, append([]float64(nil), x0...)), &SimulateOpts{Steps: steps})
+		if err != nil {
+			t.Fatalf("p=%d: %v", p, err)
+		}
+		x := mat.NewVecDense(3, append([]float64(nil), x0...))
+		for k := range steps {
+			for i := range p {
+				want := mat.Dot(C.RowView(i), x)
+				if math.Abs(r.Y.At(i, k)-want) > 1e-12 {
+					t.Errorf("p=%d y[%d][%d] = %v, want C·A^%d·x0 = %v", p, i, k, r.Y.At(i, k), k, want)
+				}
+			}
+			var next mat.VecDense
+			next.MulVec(A, x)
+			x = &next
+		}
+		if p == 0 && r.Y != nil && !r.Y.IsEmpty() {
+			t.Errorf("p=0: Y = %v, want empty", r.Y)
+		}
+		if !vecEqual(r.XFinal, x, 1e-12) {
+			t.Errorf("p=%d XFinal = %v, want A^%d·x0 = %v", p, mat.Formatted(r.XFinal.T()), steps, mat.Formatted(x.T()))
+		}
+	}
+}
+
+func TestSimulateStepsOptionValidation(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{0.5, 0.1, -0.2, 0.3}),
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, 1}),
+		mat.NewDense(1, 1, []float64{0.5}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sys.Simulate(nil, nil, &SimulateOpts{Steps: 3}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Steps without u on m=1 model: err = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := sys.Simulate(mat.NewDense(1, 4, nil), nil, &SimulateOpts{Steps: 3}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Steps != u columns: err = %v, want ErrDimensionMismatch", err)
+	}
+	if _, err := sys.Simulate(mat.NewDense(1, 3, nil), nil, &SimulateOpts{Steps: -1}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("negative Steps: err = %v, want ErrDimensionMismatch", err)
+	}
+	r, err := sys.Simulate(mat.NewDense(1, 3, []float64{1, 0, 0}), nil, &SimulateOpts{Steps: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := mat.NewDense(1, 3, []float64{0.5, 1, 0.3})
+	if !matEqual(r.Y, want, 1e-12) {
+		t.Errorf("Y = %v, want %v", mat.Formatted(r.Y), mat.Formatted(want))
+	}
+}
+
+func TestSimulateNoOutputsPropagatesState(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.5, 0.2, -0.3, 0.4})
+	B := mat.NewDense(2, 1, []float64{1, -0.5})
+	sys, err := New(A, B, nil, nil, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := mat.NewDense(1, 5, []float64{1, -1, 0.5, 2, 0})
+	x0 := mat.NewVecDense(2, []float64{0.3, -0.8})
+	r, err := sys.Simulate(u, x0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := mat.VecDenseCopyOf(x0)
+	for k := range 5 {
+		var next mat.VecDense
+		next.MulVec(A, x)
+		next.AddScaledVec(&next, u.At(0, k), B.ColView(0))
+		x = &next
+	}
+	if r.Y != nil {
+		t.Errorf("Y = %v, want nil", r.Y)
+	}
+	if !vecEqual(r.XFinal, x, 1e-12) {
+		t.Errorf("XFinal = %v, want %v", mat.Formatted(r.XFinal.T()), mat.Formatted(x.T()))
 	}
 }

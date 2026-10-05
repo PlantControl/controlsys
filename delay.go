@@ -79,22 +79,26 @@ func (sys *System) SetInternalDelay(tau []float64, B2, C2, D12, D21, D22 *mat.De
 	copy(tauCopy, tau)
 	sys.LFT = &LFTDelay{
 		Tau: tauCopy,
-		B2:  mat.DenseCopyOf(B2),
-		C2:  mat.DenseCopyOf(C2),
-		D12: mat.DenseCopyOf(D12),
-		D21: mat.DenseCopyOf(D21),
-		D22: mat.DenseCopyOf(D22),
+		B2:  denseCopySafe(B2, n, N),
+		C2:  denseCopySafe(C2, N, n),
+		D12: denseCopySafe(D12, p, N),
+		D21: denseCopySafe(D21, N, m),
+		D22: denseCopySafe(D22, N, N),
 	}
 	return nil
 }
 
 func validateLFTDims(n, m, p, N int, B2, C2, D12, D21, D22 *mat.Dense) error {
 	check := func(name string, mat *mat.Dense, wantR, wantC int) error {
+		empty := wantR == 0 || wantC == 0
 		if mat == nil {
+			if empty {
+				return nil
+			}
 			return fmt.Errorf("%s required when InternalDelay is set: %w", name, ErrDimensionMismatch)
 		}
 		r, c := mat.Dims()
-		if (wantR == 0 || wantC == 0) && r == 0 && c == 0 {
+		if empty && r == 0 && c == 0 {
 			return nil
 		}
 		if r != wantR || c != wantC {
@@ -494,9 +498,9 @@ func absorbInternalDiscreteDelay(sys *System) (*System, error) {
 
 	result, err := newNoCopy(
 		mat.NewDense(nAug, nAug, aAug),
-		mat.NewDense(nAug, m, bAug),
-		mat.NewDense(p, nAug, cAug),
-		mat.NewDense(p, m, dAug),
+		denseFromData(nAug, m, bAug),
+		denseFromData(p, nAug, cAug),
+		denseFromData(p, m, dAug),
 		sys.Dt,
 	)
 	if err != nil {
@@ -1647,8 +1651,8 @@ func SetDelayModel(H *System, tau []float64) (*System, error) {
 			Tau: tauCopy,
 			B2:  b2Mat,
 			C2:  c2Mat,
-			D12: mat.NewDense(p, N, d12Data),
-			D21: mat.NewDense(N, m, d21Data),
+			D12: denseFromData(p, N, d12Data),
+			D21: denseFromData(N, m, d21Data),
 			D22: mat.NewDense(N, N, d22Data),
 		},
 	}
@@ -1764,17 +1768,17 @@ func (sys *System) MinimalLFT() (*System, error) {
 func lftSelectChannels(sys *System, keep []int, n, m, p int) *System {
 	Nk := len(keep)
 	newTau := make([]float64, Nk)
-	newB2 := mat.NewDense(n, Nk, nil)
-	newC2 := mat.NewDense(Nk, n, nil)
-	newD12 := mat.NewDense(p, Nk, nil)
-	newD21 := mat.NewDense(Nk, m, nil)
-	newD22 := mat.NewDense(Nk, Nk, nil)
+	newB2 := newDense(n, Nk)
+	newC2 := newDense(Nk, n)
+	newD12 := newDense(p, Nk)
+	newD21 := newDense(Nk, m)
+	newD22 := newDense(Nk, Nk)
 
-	b2Raw := sys.LFT.B2.RawMatrix()
-	c2Raw := sys.LFT.C2.RawMatrix()
-	d12Raw := sys.LFT.D12.RawMatrix()
-	d21Raw := sys.LFT.D21.RawMatrix()
-	d22Raw := sys.LFT.D22.RawMatrix()
+	b2Raw := rawOrEmpty(sys.LFT.B2)
+	c2Raw := rawOrEmpty(sys.LFT.C2)
+	d12Raw := rawOrEmpty(sys.LFT.D12)
+	d21Raw := rawOrEmpty(sys.LFT.D21)
+	d22Raw := rawOrEmpty(sys.LFT.D22)
 	nb2 := newB2.RawMatrix()
 	nc2 := newC2.RawMatrix()
 	nd12 := newD12.RawMatrix()
@@ -1812,9 +1816,9 @@ func lftMergeProportional(sys *System, n, m, p int) *System {
 		return sys
 	}
 
-	c2Raw := sys.LFT.C2.RawMatrix()
-	d21Raw := sys.LFT.D21.RawMatrix()
-	d22Raw := sys.LFT.D22.RawMatrix()
+	c2Raw := rawOrEmpty(sys.LFT.C2)
+	d21Raw := rawOrEmpty(sys.LFT.D21)
+	d22Raw := rawOrEmpty(sys.LFT.D22)
 
 	merged := make([]int, N)
 	for i := range merged {
@@ -1872,15 +1876,15 @@ func lftMergeProportional(sys *System, n, m, p int) *System {
 		repIdx[r] = ki
 	}
 
-	b2Raw := sys.LFT.B2.RawMatrix()
-	d12Raw := sys.LFT.D12.RawMatrix()
+	b2Raw := rawOrEmpty(sys.LFT.B2)
+	d12Raw := rawOrEmpty(sys.LFT.D12)
 
 	newTau := make([]float64, Nk)
-	newB2 := mat.NewDense(n, Nk, nil)
-	newC2 := mat.NewDense(Nk, n, nil)
-	newD12 := mat.NewDense(p, Nk, nil)
-	newD21 := mat.NewDense(Nk, m, nil)
-	newD22 := mat.NewDense(Nk, Nk, nil)
+	newB2 := newDense(n, Nk)
+	newC2 := newDense(Nk, n)
+	newD12 := newDense(p, Nk)
+	newD21 := newDense(Nk, m)
+	newD22 := newDense(Nk, Nk)
 	nb2 := newB2.RawMatrix()
 	nc2 := newC2.RawMatrix()
 	nd12 := newD12.RawMatrix()
@@ -1978,31 +1982,31 @@ func proportionalRows(c2Raw, d21Raw blas64.General, i, j, n, m int, tol float64)
 
 func isZeroGainChannel(sys *System, j, n, m, p, N int) bool {
 	const tol = 1e-15
-	b2Raw := sys.LFT.B2.RawMatrix()
+	b2Raw := rawOrEmpty(sys.LFT.B2)
 	for i := range n {
 		if math.Abs(b2Raw.Data[i*b2Raw.Stride+j]) > tol {
 			return false
 		}
 	}
-	d12Raw := sys.LFT.D12.RawMatrix()
+	d12Raw := rawOrEmpty(sys.LFT.D12)
 	for i := range p {
 		if math.Abs(d12Raw.Data[i*d12Raw.Stride+j]) > tol {
 			return false
 		}
 	}
-	c2Raw := sys.LFT.C2.RawMatrix()
+	c2Raw := rawOrEmpty(sys.LFT.C2)
 	for i := range n {
 		if math.Abs(c2Raw.Data[j*c2Raw.Stride+i]) > tol {
 			return false
 		}
 	}
-	d21Raw := sys.LFT.D21.RawMatrix()
+	d21Raw := rawOrEmpty(sys.LFT.D21)
 	for i := range m {
 		if math.Abs(d21Raw.Data[j*d21Raw.Stride+i]) > tol {
 			return false
 		}
 	}
-	d22Raw := sys.LFT.D22.RawMatrix()
+	d22Raw := rawOrEmpty(sys.LFT.D22)
 	for i := range N {
 		if math.Abs(d22Raw.Data[j*d22Raw.Stride+i]) > tol {
 			return false
@@ -2055,32 +2059,18 @@ func (sys *System) ZeroDelayApprox() (*System, error) {
 		)
 	}
 
-	ED21 := mat.NewDense(N, m, nil)
-	ED21.Mul(E, sys.LFT.D21)
-
-	Da := mat.NewDense(p, m, nil)
-	Da.Mul(sys.LFT.D12, ED21)
-	Da.Add(sys.D, Da)
+	ED21 := mulDims(N, m, E, sys.LFT.D21)
+	Da := addMulDims(p, m, sys.D, sys.LFT.D12, ED21)
 
 	var result *System
 	var err error
 	if n == 0 {
 		result, err = NewGain(Da, sys.Dt)
 	} else {
-		EC2 := mat.NewDense(N, n, nil)
-		EC2.Mul(E, sys.LFT.C2)
-
-		Aa := mat.NewDense(n, n, nil)
-		Aa.Mul(sys.LFT.B2, EC2)
-		Aa.Add(sys.A, Aa)
-
-		Ba := mat.NewDense(n, m, nil)
-		Ba.Mul(sys.LFT.B2, ED21)
-		Ba.Add(sys.B, Ba)
-
-		Ca := mat.NewDense(p, n, nil)
-		Ca.Mul(sys.LFT.D12, EC2)
-		Ca.Add(sys.C, Ca)
+		EC2 := mulDims(N, n, E, sys.LFT.C2)
+		Aa := addMulDims(n, n, sys.A, sys.LFT.B2, EC2)
+		Ba := addMulDims(n, m, sys.B, sys.LFT.B2, ED21)
+		Ca := addMulDims(p, n, sys.C, sys.LFT.D12, EC2)
 
 		result, err = newNoCopy(Aa, Ba, Ca, Da, sys.Dt)
 	}

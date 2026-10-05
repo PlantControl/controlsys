@@ -2984,3 +2984,34 @@ func TestZeroStateInternalDelayInterconnectionsHaveNoPhantomStates(t *testing.T)
 		}
 	}
 }
+
+func TestAppendEmptyGainKeepsDims(t *testing.T) {
+	empty, err := NewGain(&mat.Dense{}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auto, err := New(mat.NewDense(1, 1, []float64{0.5}), nil, mat.NewDense(1, 1, []float64{2}), nil, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		a, b    *System
+		n, m, p int
+	}{
+		{"gain+gain", empty, empty, 0, 0, 0},
+		{"gain+autonomous", empty, auto, 1, 0, 1},
+		{"autonomous+gain", auto, empty, 1, 0, 1},
+	} {
+		got, err := Append(tc.a, tc.b.Copy())
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if n, m, p := got.Dims(); n != tc.n || m != tc.m || p != tc.p {
+			t.Errorf("%s: Dims = (%d,%d,%d), want (%d,%d,%d)", tc.name, n, m, p, tc.n, tc.m, tc.p)
+		}
+		if err := got.Validate(); err != nil {
+			t.Errorf("%s: Validate: %v", tc.name, err)
+		}
+	}
+}

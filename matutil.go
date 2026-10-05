@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
+	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -80,11 +81,28 @@ func mulDims(r, c int, a, b mat.Matrix) *mat.Dense {
 	return out
 }
 
+// addMulDims returns the r×c matrix x + a·b, treating empty operands as
+// zero blocks.
+func addMulDims(r, c int, x, a, b *mat.Dense) *mat.Dense {
+	out := mulDims(r, c, a, b)
+	addBlock(out, 0, 0, x)
+	return out
+}
+
 func eyeOrEmptyDense(n int) *mat.Dense {
 	if n == 0 {
 		return &mat.Dense{}
 	}
 	return eyeDense(n)
+}
+
+// rawOrEmpty returns m's raw storage, or an empty General for nil m (Copy
+// stores empty delay blocks as nil).
+func rawOrEmpty(m *mat.Dense) blas64.General {
+	if m == nil {
+		return blas64.General{}
+	}
+	return m.RawMatrix()
 }
 
 func isEmptyMatrix(a mat.Matrix) bool {
@@ -209,12 +227,12 @@ func invertSmall(m *mat.Dense, n int) (*mat.Dense, error) {
 	return inv, nil
 }
 
+// extractBlock copies the rows×cols block of m at (r0, c0). A block with a
+// zero dimension is returned empty (gonum cannot hold n×0), so callers combine
+// it through mulDims, addMulDims, setBlock or addBlock, never Dense.Add/Mul.
 func extractBlock(m *mat.Dense, r0, c0, rows, cols int) *mat.Dense {
-	if rows == 0 && cols == 0 {
-		return &mat.Dense{}
-	}
 	if rows == 0 || cols == 0 {
-		return mat.NewDense(max(rows, 1), max(cols, 1), nil)
+		return &mat.Dense{}
 	}
 	raw := m.RawMatrix()
 	data := make([]float64, rows*cols)
