@@ -70,9 +70,18 @@ type LqgResult struct {
 // Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0]; a singular I - (Kx Mx + Kw Mw)D makes
 // the controller non-causal and returns ErrAlgebraicLoop.
 //
+// A descriptor plant E x' = Ax + Bu + w with nonsingular E (Qn and Nn in QWV
+// are the covariances of this w; MATLAB lqg does not document descriptor
+// models) is designed as its explicit model (E⁻¹A, E⁻¹B, noise E⁻¹w): K, Ki
+// and Mx equal the explicit-model gains, Xc solves the explicit regulator
+// Riccati equation (as MATLAB lqr/lqi for descriptor models) and Xf is the
+// error covariance. Mw and Kw act on w, so Mw = E·M̄w and Kw = K̄w·E⁻¹ for
+// the explicit-model gains M̄w, K̄w, and L is Kalman's descriptor gain (E
+// times the explicit gain). The controller keeps E: its descriptor is blkdiag(E, I).
+//
 // Plants without inputs, outputs or states are rejected with
-// ErrDimensionMismatch, descriptor plants with ErrDescriptorRiccati and
-// plants with delays with ErrDelayUnsupported.
+// ErrDimensionMismatch, singular E with ErrDescriptorSingular and plants
+// with delays with ErrDelayUnsupported.
 func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	policy, err := newControllerObserverPolicy(sys, "Lqg")
 	if err != nil {
@@ -105,15 +114,19 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	N := subDense(QXU, 0, n, n, m)
 	R := subDense(QXU, n, n, m, m)
 	Aa, Ba := sys.A, sys.B
+	q := 0
+	if servo {
+		q = p
+	}
 	if servo {
 		if err := validateLqgWeight("QI", o.QI, p); err != nil {
 			return nil, err
 		}
 		Aa, Ba, Q, N = lqgServoProblem(sys, Q, N, o.QI)
 	}
-	var ropts *RiccatiOpts
+	ropts := &RiccatiOpts{E: augmentedDescriptor(sys.E, q)}
 	if !allZeroDense(N) {
-		ropts = &RiccatiOpts{S: N}
+		ropts.S = N
 	}
 	var kRes *RiccatiResult
 	if continuous {
@@ -131,18 +144,22 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	if allZeroDense(Nn) {
 		Nn = nil
 	}
-	lRes, err := kalmanGain("Lqg", continuous, sys.A, eyeDense(n), sys.C, nil, Qn, Rn, Nn, nil)
+	lRes, err := kalmanGain("Lqg", continuous, sys.A, sys.E, eyeDense(n), sys.C, nil, Qn, Rn, Nn, nil)
 	if err != nil {
 		return nil, err
 	}
 
+	xGen := kRes.X
+	if kRes, err = explicitRiccatiSolution(kRes, ropts, nil); err != nil {
+		return nil, err
+	}
 	res := &LqgResult{K: subDense(kRes.K, 0, 0, m, n), L: lRes.K, Xc: kRes.X, Xf: lRes.X}
 	if servo {
 		res.Ki = subDense(kRes.K, 0, n, m, p)
 	}
 	var F *mat.Dense
 	if o.Current {
-		if F, err = res.currentGains(sys, Ba, R, Rn, Nn); err != nil {
+		if F, err = res.currentGains(sys, Ba, xGen, R, Rn, Nn); err != nil {
 			return nil, err
 		}
 	}
@@ -208,7 +225,9 @@ func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
 	return Aa, Ba
 }
 
-func (res *LqgResult) currentGains(sys *System, Ba, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {
+// currentGains takes X, the regulator solution of the generalized Riccati
+// equation: Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] for E x[n+1] = ... + w.
+func (res *LqgResult) currentGains(sys *System, Ba, X, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {
 	n, m, p := sys.Dims()
 	PCt := mulDims(n, p, res.Xf, sys.C.T())
 	S := mulDims(p, p, sys.C, PCt)
@@ -223,8 +242,8 @@ func (res *LqgResult) currentGains(sys *System, Ba, R, Rn, Nn *mat.Dense) (*mat.
 		res.Mw.Mul(Nn, &Sinv)
 	}
 
-	na, _ := res.Xc.Dims()
-	BtX := mulDims(m, na, Ba.T(), res.Xc)
+	na, _ := X.Dims()
+	BtX := mulDims(m, na, Ba.T(), X)
 	G := mulDims(m, m, BtX, Ba)
 	G.Add(G, R)
 	res.Kw = mat.NewDense(m, n, nil)
@@ -333,6 +352,7 @@ func lqgController(sys *System, res *LqgResult, F *mat.Dense, oneDOF bool) (*Sys
 	if err != nil {
 		return nil, fmt.Errorf("Lqg: %w", err)
 	}
+	ctrl.E = augmentedDescriptor(sys.E, q)
 	ctrl.InputName = inputNames
 	ctrl.OutputName = copyStringSlice(sys.InputName)
 	return ctrl, nil

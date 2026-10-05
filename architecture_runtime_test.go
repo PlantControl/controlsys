@@ -98,8 +98,10 @@ func TestRuntimeArchitectureCovarianceRejectsDescriptorWorkflows(t *testing.T) {
 			_, err := Covar(sys, Qn)
 			return err
 		}},
-		{name: "Kalmd", want: ErrDescriptorRiccati, run: func() error {
-			_, err := Kalmd(sys, Qn, Rn, 0.1, nil)
+		{name: "Kalmd singular E", want: ErrDescriptorSingular, run: func() error {
+			singular := sys.Copy()
+			singular.E = mat.NewDense(2, 2, []float64{2, 0, 0, 0})
+			_, err := Kalmd(singular, Qn, Rn, 0.1, nil)
 			return err
 		}},
 	}

@@ -290,7 +290,8 @@ func TestLqi_MatlabLqgDocExample(t *testing.T) {
 
 func TestLqi_Errors(t *testing.T) {
 	csys := obsTestPlant(t, 0, false)
-	desc := obsTestPlant(t, 0, true)
+	singular := obsTestPlant(t, 0, true)
+	singular.E = mat.NewDense(3, 3, []float64{1, 2, 0, 2, 4, 0, 0, 0, 1})
 	delayed := obsTestPlant(t, 0, false)
 	if err := delayed.SetInputDelay([]float64{0.2, 0}); err != nil {
 		t.Fatal(err)
@@ -315,13 +316,16 @@ func TestLqi_Errors(t *testing.T) {
 		{"R asymmetric", csys, eye(5), mat.NewDense(2, 2, []float64{1, 0.1, 0, 1}), ErrNotSymmetric},
 		{"no states", gain, eye(1), eye(1), ErrDimensionMismatch},
 		{"no outputs", noOut, eye(2), eye(2), ErrDimensionMismatch},
-		{"descriptor", desc, eye(5), eye(2), ErrDescriptorRiccati},
+		{"singular E", singular, eye(5), eye(2), ErrDescriptorSingular},
 		{"delay", delayed, eye(5), eye(2), ErrDelayUnsupported},
 	}
 	for _, tc := range cases {
 		if _, err := Lqi(tc.sys, tc.q, tc.r, nil); !errors.Is(err, tc.want) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.want)
 		}
+	}
+	if _, err := Lqi(csys, eye(5), eye(2), &RiccatiOpts{E: eye(5)}); !errors.Is(err, ErrOptionUnsupported) {
+		t.Errorf("opts.E: err = %v, want ErrOptionUnsupported", err)
 	}
 }
 
@@ -1487,5 +1491,56 @@ func newPlaceRNG(seed uint64) func() float64 {
 		s ^= s >> 7
 		s ^= s << 17
 		return float64(s>>11)/float64(1<<53)*2 - 1
+	}
+}
+
+func TestLqr_DescriptorReturnsExplicitSolution(t *testing.T) {
+	for _, discrete := range []bool{false, true} {
+		A, B, Q, R, S, E := descriptorRiccatiData(discrete)
+		Ab, Bb := explicitTwin(t, E, A, B)
+		solve, name := Lqr, "Lqr"
+		if discrete {
+			solve, name = Dlqr, "Dlqr"
+		}
+		got, err := solve(A, B, Q, R, &RiccatiOpts{S: S, E: E})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		want, err := solve(Ab, Bb, Q, R, &RiccatiOpts{S: S})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertMatNear(t, name+" X", got.X, want.X, 1e-9)
+		assertMatNear(t, name+" K", got.K, want.K, 1e-9)
+		assertEigSetNear(t, name+" Eig", got.Eig, want.Eig, 1e-9)
+	}
+	A, B, Q, R, _, E := descriptorRiccatiData(false)
+	if _, err := Lqrd(A, B, Q, R, 0.1, &RiccatiOpts{E: E}); !errors.Is(err, ErrOptionUnsupported) {
+		t.Errorf("Lqrd opts.E: err = %v, want ErrOptionUnsupported", err)
+	}
+}
+
+func TestLqi_DescriptorMatchesExplicitTwin(t *testing.T) {
+	Q := mat.NewDense(5, 5, nil)
+	for i := range 5 {
+		Q.Set(i, i, 1+0.2*float64(i))
+	}
+	Q.Set(0, 3, 0.1)
+	Q.Set(3, 0, 0.1)
+	R := mat.NewDense(2, 2, []float64{1.2, 0.1, 0.1, 0.9})
+	N := mat.NewDense(5, 2, []float64{0.05, 0, 0, 0.04, 0.02, -0.01, 0, 0.03, -0.02, 0})
+	for _, dt := range []float64{0, 0.1} {
+		sys := obsTestPlant(t, dt, true)
+		got, err := Lqi(sys, Q, R, &RiccatiOpts{S: N})
+		if err != nil {
+			t.Fatalf("dt=%v: %v", dt, err)
+		}
+		want, err := Lqi(descriptorTwin(t, sys), Q, R, &RiccatiOpts{S: N})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertMatNear(t, fmt.Sprintf("dt=%v K", dt), got.K, want.K, 1e-9)
+		assertMatNear(t, fmt.Sprintf("dt=%v X", dt), got.X, want.X, 1e-9)
+		assertEigSetNear(t, fmt.Sprintf("dt=%v Eig", dt), got.Eig, want.Eig, 1e-9)
 	}
 }

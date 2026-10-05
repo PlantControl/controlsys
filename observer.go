@@ -13,8 +13,12 @@ import (
 // stable.
 //
 // A is n×n, G is n×g (noise input), C is p×n, Qn is g×g, Rn is p×p.
-// opts.S, when set, is the g×p noise cross-covariance N = E{w v'}.
+// opts.S, when set, is the g×p noise cross-covariance N = E{w v'}. opts.E is
+// rejected with ErrOptionUnsupported.
 func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	if opts != nil && opts.E != nil {
+		return nil, fmt.Errorf("Lqe: opts.E: %w", ErrOptionUnsupported)
+	}
 	na, nac := A.Dims()
 	if na != nac {
 		return nil, ErrDimensionMismatch
@@ -40,9 +44,9 @@ func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) 
 	}
 
 	if n == 0 {
-		return &RiccatiResult{X: &mat.Dense{}, K: &mat.Dense{}, Eig: nil}, nil
+		return nil, fmt.Errorf("Lqe: no states: %w", ErrDimensionMismatch)
 	}
-	return kalmanGain("Lqe", true, A, G, C, nil, Qn, Rn, Nn, opts)
+	return kalmanGain("Lqe", true, A, nil, G, C, nil, Qn, Rn, Nn, opts)
 }
 
 // Kalman computes the Kalman filter gain for a state-space system, matching
@@ -60,6 +64,18 @@ func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) 
 // covariance). opts.S, when set, is the m×p cross-covariance N = E{w v'}
 // (MATLAB's Nn). Plants with delays are rejected with ErrDelayUnsupported,
 // as MATLAB requires a delay-free (Padé/absorbDelay) model.
+//
+// A descriptor plant E x' = Ax + Gw with nonsingular E is solved with the
+// dual generalized Riccati equation (Care/Dare with opts.E = E'). X = P is
+// the estimation error covariance, equal to that of the explicit model
+// (E⁻¹A, E⁻¹G, C, H), and L is the gain of the descriptor estimator
+//
+//	E x̂' = Ax̂ + Bu + L(y - Cx̂ - Du)
+//
+// that Estim and Reg build from sys, i.e. E times the explicit-model gain.
+// MATLAB's kalman documentation does not specify descriptor models; this is
+// the form consistent with Estim. Singular E returns ErrDescriptorSingular
+// and opts.E ErrOptionUnsupported.
 func Kalman(sys *System, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	policy, err := newControllerObserverPolicy(sys, "Kalman")
 	if err != nil {
@@ -68,6 +84,9 @@ func Kalman(sys *System, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, 
 	if policy.p == 0 {
 		return nil, fmt.Errorf("Kalman: model has no measured outputs: %w", ErrDimensionMismatch)
 	}
+	if err := policy.rejectOptsE(opts); err != nil {
+		return nil, err
+	}
 	if err := policy.validateNoise(Qn, Rn); err != nil {
 		return nil, err
 	}
@@ -75,7 +94,7 @@ func Kalman(sys *System, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, 
 	if err != nil {
 		return nil, err
 	}
-	return kalmanGain("Kalman", sys.IsContinuous(), sys.A, sys.B, sys.C, sys.D, Qn, Rn, Nn, opts)
+	return kalmanGain("Kalman", sys.IsContinuous(), sys.A, sys.E, sys.B, sys.C, sys.D, Qn, Rn, Nn, opts)
 }
 
 func noiseCrossCovariance(context string, opts *RiccatiOpts, g, p int) (*mat.Dense, error) {
@@ -89,7 +108,7 @@ func noiseCrossCovariance(context string, opts *RiccatiOpts, g, p int) (*mat.Den
 	return opts.S, nil
 }
 
-func kalmanGain(context string, continuous bool, A, G, C, H, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	n, _ := A.Dims()
 	g := Qn.RawMatrix().Rows
 	p, _ := C.Dims()
@@ -123,6 +142,9 @@ func kalmanGain(context string, continuous bool, A, G, C, H, Qn, Rn, Nn *mat.Den
 	}
 
 	ropts := &RiccatiOpts{S: Nbar}
+	if !isIdentityDescriptor(E) {
+		ropts.E = mat.DenseCopyOf(E.T())
+	}
 	if opts != nil {
 		ropts.Workspace = opts.Workspace
 	}
@@ -147,8 +169,11 @@ func kalmanGain(context string, continuous bool, A, G, C, H, Qn, Rn, Nn *mat.Den
 // rejected with ErrNoiseFeedthrough, and plants with delays with
 // ErrDelayUnsupported. Qn is m×m, Rn is p×p, dt > 0; Qd is discretized with
 // Van Loan's method and Rd = Rn/dt.
-// opts.S is rejected with ErrOptionUnsupported; opts.Workspace is used for the
-// discrete Riccati solve and must be sized NewRiccatiWorkspace(n, p).
+// opts.S and opts.E are rejected with ErrOptionUnsupported; opts.Workspace is
+// used for the discrete Riccati solve and must be sized NewRiccatiWorkspace(n, p).
+// A descriptor plant with nonsingular E is discretized as its explicit model
+// x' = E⁻¹Ax + E⁻¹Bw, so the result is that of the explicit discrete model;
+// singular E returns ErrDescriptorSingular.
 func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if opts != nil && opts.S != nil {
 		return nil, fmt.Errorf("Kalmd: cross-term S: %w", ErrOptionUnsupported)
@@ -173,13 +198,28 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 	if !allZeroDense(sys.D) {
 		return nil, fmt.Errorf("Kalmd: %w", ErrNoiseFeedthrough)
 	}
+	if err := policy.rejectOptsE(opts); err != nil {
+		return nil, err
+	}
+	A, G := sys.A, sys.B
+	if !isIdentityDescriptor(sys.E) {
+		var lu mat.LU
+		lu.Factorize(sys.E)
+		A, G = new(mat.Dense), new(mat.Dense)
+		if err := lu.SolveTo(A, false, sys.A); err != nil {
+			return nil, fmt.Errorf("Kalmd: %w", ErrDescriptorSingular)
+		}
+		if err := lu.SolveTo(G, false, sys.B); err != nil {
+			return nil, fmt.Errorf("Kalmd: %w", ErrDescriptorSingular)
+		}
+	}
 
-	GQnGt := inputNoiseIntensity(sys.B, Qn, n, m)
+	GQnGt := inputNoiseIntensity(G, Qn, n, m)
 
 	// Van Loan augmented matrix: F = [[-A, GQnGt], [0, A']] * dt
 	nn := 2 * n
 	F := mat.NewDense(nn, nn, nil)
-	aRaw := sys.A.RawMatrix()
+	aRaw := A.RawMatrix()
 	gRaw := GQnGt.RawMatrix()
 	fRaw := F.RawMatrix()
 	for i := range n {

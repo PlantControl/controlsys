@@ -1,6 +1,10 @@
 package controlsys
 
-import "plantcontrol.org/v1/gonum/mat"
+import (
+	"fmt"
+
+	"plantcontrol.org/v1/gonum/mat"
+)
 
 type riccatiProblem struct {
 	A  *mat.Dense
@@ -8,6 +12,7 @@ type riccatiProblem struct {
 	Q  *mat.Dense
 	R  *mat.Dense
 	S  *mat.Dense
+	E  *mat.Dense
 	ws *RiccatiWorkspace
 	n  int
 	m  int
@@ -31,7 +36,7 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 		return riccatiProblem{}, ErrDimensionMismatch
 	}
 	if na == 0 {
-		return riccatiProblem{A: A, B: B, Q: Q, R: R, n: na, m: m}, nil
+		return riccatiProblem{}, fmt.Errorf("controlsys: Riccati problem has no states: %w", ErrDimensionMismatch)
 	}
 	if !isSymmetric(Q, eps()*denseNorm(Q)) {
 		return riccatiProblem{}, ErrNotSymmetric
@@ -52,6 +57,11 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 		S = opts.S
 	}
 
+	E, err := riccatiDescriptor(opts, na)
+	if err != nil {
+		return riccatiProblem{}, err
+	}
+
 	var ws *RiccatiWorkspace
 	if opts != nil && opts.Workspace != nil {
 		ws = opts.Workspace
@@ -59,7 +69,26 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 		ws = NewRiccatiWorkspace(na, m)
 	}
 
-	return riccatiProblem{A: A, B: B, Q: Q, R: R, S: S, ws: ws, n: na, m: m}, nil
+	return riccatiProblem{A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws, n: na, m: m}, nil
+}
+
+// riccatiDescriptor returns opts.E, or nil when it is absent or the identity.
+func riccatiDescriptor(opts *RiccatiOpts, n int) (*mat.Dense, error) {
+	if opts == nil || opts.E == nil {
+		return nil, nil
+	}
+	if er, ec := opts.E.Dims(); er != n || ec != n {
+		return nil, ErrDimensionMismatch
+	}
+	if isIdentityDescriptor(opts.E) {
+		return nil, nil
+	}
+	var lu mat.LU
+	lu.Factorize(opts.E)
+	if luNearSingular(&lu) {
+		return nil, ErrDescriptorSingular
+	}
+	return opts.E, nil
 }
 
 type lyapunovProblem struct {

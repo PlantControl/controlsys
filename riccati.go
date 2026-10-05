@@ -75,6 +75,10 @@ func NewRiccatiWorkspace(n, m int) *RiccatiWorkspace {
 type RiccatiOpts struct {
 	// S is the optional cross-term matrix. It is read during the call.
 	S *mat.Dense
+	// E is the optional nonsingular descriptor matrix of E x' = Ax + Bu
+	// (E x[k+1] = Ax[k] + Bu[k]), as in MATLAB icare/idare. nil means I.
+	// It is read during the call.
+	E *mat.Dense
 	// Workspace supplies reusable scratch storage. Results may share its storage
 	// until the next call that reuses the same workspace.
 	Workspace *RiccatiWorkspace
@@ -97,15 +101,22 @@ type RiccatiResult struct {
 //	A'X + XA - XB*R⁻¹*B'X + Q = 0
 //
 // A is n×n, B is n×m, Q is n×n symmetric, R is m×m symmetric positive definite.
+//
+// With opts.E, Care solves the generalized equation of MATLAB icare
+// (https://www.mathworks.com/help/control/ref/icare.html)
+//
+//	A'XE + E'XA - (E'XB+S)*R⁻¹*(B'XE+S') + Q = 0,  K = R⁻¹*(B'XE+S')
+//
+// from the stable deflating subspace of the extended pencil, and Eig holds
+// the generalized eigenvalues of (A-BK, E). X is the generalized solution;
+// E'XE solves the Care of the explicit model (E⁻¹A, E⁻¹B). A singular E
+// returns ErrDescriptorSingular.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	problem, err := newRiccatiProblem(A, B, Q, R, opts)
 	if err != nil {
 		return nil, err
 	}
 	n, m := problem.n, problem.m
-	if n == 0 {
-		return &RiccatiResult{X: &mat.Dense{}, K: &mat.Dense{}, Eig: nil}, nil
-	}
 	S, ws := problem.S, problem.ws
 
 	// Cholesky factor R
@@ -114,6 +125,9 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	copyStrided(rChol, m, rRaw.Data, rRaw.Stride, m, m)
 	if !impl.Dpotrf(blas.Upper, m, rChol, m) {
 		return nil, ErrSingularR
+	}
+	if problem.E != nil {
+		return problem.descriptorCare()
 	}
 
 	// Working copies of A and Q for cross-term transformation
@@ -272,15 +286,21 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 //	A'XA - X - A'XB*(R+B'XB)⁻¹*B'XA + Q = 0
 //
 // A is n×n, B is n×m, Q is n×n symmetric, R is m×m symmetric positive definite.
+//
+// With opts.E, Dare solves the generalized equation of MATLAB idare
+// (https://www.mathworks.com/help/control/ref/idare.html)
+//
+//	A'XA - E'XE - (A'XB+S)*(R+B'XB)⁻¹*(B'XA+S') + Q = 0
+//
+// with the same K formula, and Eig holds the generalized eigenvalues of
+// (A-BK, E). E'XE solves the Dare of the explicit model (E⁻¹A, E⁻¹B). A
+// singular E returns ErrDescriptorSingular.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	problem, err := newRiccatiProblem(A, B, Q, R, opts)
 	if err != nil {
 		return nil, err
 	}
 	n, m := problem.n, problem.m
-	if n == 0 {
-		return &RiccatiResult{X: &mat.Dense{}, K: &mat.Dense{}, Eig: nil}, nil
-	}
 	S, ws := problem.S, problem.ws
 
 	// Cholesky factor R
@@ -298,34 +318,10 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	vs := subspace.vectors
-
-	// Extract U11 = vs[0:n, 0:n], U21 = vs[n:2n, 0:n]
-	u11 := ws.u11[:n*n]
-	u21 := ws.u21[:n*n]
-	copyStrided(u11, n, vs, 2*n, n, n)
-	copyBlock(u21, n, 0, 0, vs, 2*n, n, 0, n, n)
-
-	work := ws.work
-	anorm := impl.Dlange(lapack.MaxColumnSum, n, n, u11, n, work[:n])
-	ipiv := ws.ipiv[:n]
-	if !impl.Dgetrf(n, n, u11, n, ipiv) {
-		return nil, ErrNoStabilizing
+	X, xData, rcnd, err := problem.stabilizingSolution(subspace.vectors)
+	if err != nil {
+		return nil, err
 	}
-
-	iwork2 := ws.iwork[:n]
-	rcnd := impl.Dgecon(lapack.MaxColumnSum, n, u11, n, anorm, work[:4*n], iwork2)
-
-	xData := ws.xData[:n*n]
-	for i := range n {
-		for j := range n {
-			xData[i*n+j] = u21[j*n+i]
-		}
-	}
-	impl.Dgetrs(blas.Trans, n, n, u11, n, ipiv, xData, n)
-
-	symmetrize(xData, n, n)
-	X := mat.NewDense(n, n, xData)
 
 	// Closed-loop eigenvalues
 	eig := ws.eig[:n]
@@ -372,21 +368,103 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	return &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd}, nil
 }
 
-type discreteRiccatiSubspace struct {
+// stabilizingSolution returns X = U21*(E*U11)⁻¹ from the stable subspace
+// basis [U11; U21] of a pencil with 2n columns.
+func (problem riccatiProblem) stabilizingSolution(vs []float64) (X *mat.Dense, xData []float64, rcnd float64, err error) {
+	n, ws := problem.n, problem.ws
+	u11 := ws.u11[:n*n]
+	u21 := ws.u21[:n*n]
+	copyStrided(u11, n, vs, 2*n, n, n)
+	copyBlock(u21, n, 0, 0, vs, 2*n, n, 0, n, n)
+	if problem.E != nil {
+		eRaw := problem.E.RawMatrix()
+		eu11 := ws.aWork[:n*n]
+		blas64.Gemm(blas.NoTrans, blas.NoTrans,
+			1, blas64.General{Rows: n, Cols: n, Data: eRaw.Data, Stride: eRaw.Stride},
+			blas64.General{Rows: n, Cols: n, Data: u11, Stride: n},
+			0, blas64.General{Rows: n, Cols: n, Data: eu11, Stride: n})
+		u11 = eu11
+	}
+
+	work := ws.work
+	anorm := impl.Dlange(lapack.MaxColumnSum, n, n, u11, n, work[:n])
+	ipiv := ws.ipiv[:n]
+	if !impl.Dgetrf(n, n, u11, n, ipiv) {
+		return nil, nil, 0, ErrNoStabilizing
+	}
+	rcnd = impl.Dgecon(lapack.MaxColumnSum, n, u11, n, anorm, work[:4*n], ws.iwork[:n])
+
+	xData = ws.xData[:n*n]
+	for i := range n {
+		for j := range n {
+			xData[i*n+j] = u21[j*n+i]
+		}
+	}
+	impl.Dgetrs(blas.Trans, n, n, u11, n, ipiv, xData, n)
+	symmetrize(xData, n, n)
+	return mat.NewDense(n, n, xData), xData, rcnd, nil
+}
+
+// descriptorCare solves the generalized continuous Riccati equation; R is
+// already Cholesky-factored in ws.rChol.
+func (problem riccatiProblem) descriptorCare() (*RiccatiResult, error) {
+	n, m, ws := problem.n, problem.m, problem.ws
+	subspace, err := problem.generalizedStableSubspace(true)
+	if err != nil {
+		return nil, err
+	}
+	X, xData, rcnd, err := problem.stabilizingSolution(subspace.vectors)
+	if err != nil {
+		return nil, err
+	}
+	eig := ws.eig[:n]
+	for i := range n {
+		eig[i] = complex(subspace.alphaR[i]/subspace.beta[i], subspace.alphaI[i]/subspace.beta[i])
+	}
+
+	bRaw := problem.B.RawMatrix()
+	eRaw := problem.E.RawMatrix()
+	btx := ws.btx[:m*n]
+	blas64.Gemm(blas.Trans, blas.NoTrans,
+		1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
+		blas64.General{Rows: n, Cols: n, Data: xData, Stride: n},
+		0, blas64.General{Rows: m, Cols: n, Data: btx, Stride: n})
+	kData := ws.kData[:m*n]
+	blas64.Gemm(blas.NoTrans, blas.NoTrans,
+		1, blas64.General{Rows: m, Cols: n, Data: btx, Stride: n},
+		blas64.General{Rows: n, Cols: n, Data: eRaw.Data, Stride: eRaw.Stride},
+		0, blas64.General{Rows: m, Cols: n, Data: kData, Stride: n})
+	if problem.S != nil {
+		sRaw := problem.S.RawMatrix()
+		for j := range m {
+			row := kData[j*n:]
+			for i := range n {
+				row[i] += sRaw.Data[i*sRaw.Stride+j]
+			}
+		}
+	}
+	impl.Dpotrs(blas.Upper, m, n, ws.rChol[:m*m], m, kData, n)
+	return &RiccatiResult{X: X, K: mat.NewDense(m, n, kData), Eig: eig, Rcnd: rcnd}, nil
+}
+
+type riccatiSubspace struct {
 	vectors []float64
 	alphaR  []float64
 	alphaI  []float64
 	beta    []float64
 }
 
-func (problem riccatiProblem) discreteStableSubspace() (discreteRiccatiSubspace, error) {
+func (problem riccatiProblem) discreteStableSubspace() (riccatiSubspace, error) {
+	if problem.E != nil {
+		return problem.generalizedStableSubspace(false)
+	}
 	if subspace, suitable, err := problem.regularDiscreteStableSubspace(); suitable || err != nil {
 		return subspace, err
 	}
-	return problem.generalizedDiscreteStableSubspace()
+	return problem.generalizedStableSubspace(false)
 }
 
-func (problem riccatiProblem) regularDiscreteStableSubspace() (subspace discreteRiccatiSubspace, suitable bool, err error) {
+func (problem riccatiProblem) regularDiscreteStableSubspace() (subspace riccatiSubspace, suitable bool, err error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	nn := 2 * n
 	aRaw := problem.A.RawMatrix()
@@ -448,11 +526,11 @@ func (problem riccatiProblem) regularDiscreteStableSubspace() (subspace discrete
 	anorm := impl.Dlange(lapack.MaxColumnSum, n, n, ait, n, work[:n])
 	ipiv := ws.ipiv[:n]
 	if !impl.Dgetrf(n, n, ait, n, ipiv) {
-		return discreteRiccatiSubspace{}, false, nil
+		return riccatiSubspace{}, false, nil
 	}
 	rcnd := impl.Dgecon(lapack.MaxColumnSum, n, ait, n, anorm, work[:4*n], ws.iwork[:n])
 	if rcnd < math.Sqrt(eps()) {
-		return discreteRiccatiSubspace{}, false, nil
+		return riccatiSubspace{}, false, nil
 	}
 	var inverseQuery [1]float64
 	impl.Dgetri(n, ait, n, ipiv, inverseQuery[:], -1)
@@ -504,15 +582,15 @@ func (problem riccatiProblem) regularDiscreteStableSubspace() (subspace discrete
 	sdim, ok := impl.Dgees(lapack.SchurHess, lapack.SortSelected, insideUnitCircle,
 		nn, z, nn, alphaR, alphaI, vectors, nn, ws.work, lwork, bwork)
 	if !ok {
-		return discreteRiccatiSubspace{}, true, ErrSchurFailed
+		return riccatiSubspace{}, true, ErrSchurFailed
 	}
 	if sdim != n {
-		return discreteRiccatiSubspace{}, true, ErrNoStabilizing
+		return riccatiSubspace{}, true, ErrNoStabilizing
 	}
 	for i := range nn {
 		beta[i] = 1
 	}
-	return discreteRiccatiSubspace{
+	return riccatiSubspace{
 		vectors: vectors,
 		alphaR:  alphaR,
 		alphaI:  alphaI,
@@ -520,7 +598,14 @@ func (problem riccatiProblem) regularDiscreteStableSubspace() (subspace discrete
 	}, true, nil
 }
 
-func (problem riccatiProblem) generalizedDiscreteStableSubspace() (discreteRiccatiSubspace, error) {
+// generalizedStableSubspace deflates the extended pencil
+//
+//	continuous: [A 0 B; -Q -A' -S; S' B' R] - λ[E 0 0; 0 E' 0; 0 0 0]
+//	discrete:   [A 0 B; -Q E' -S; S' 0 R]   - λ[E 0 0; 0 A' 0; 0 -B' 0]
+//
+// to 2n×2n by a QR of its input columns and orders the stable eigenvalues
+// first. E nil means I.
+func (problem riccatiProblem) generalizedStableSubspace(continuous bool) (riccatiSubspace, error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	nn := 2 * n
 	rows := nn + m
@@ -541,14 +626,32 @@ func (problem riccatiProblem) generalizedDiscreteStableSubspace() (discreteRicca
 		sRaw = problem.S.RawMatrix()
 	}
 
+	var eRaw blas64.General
+	if problem.E != nil {
+		eRaw = problem.E.RawMatrix()
+	}
+	e := func(i, j int) float64 {
+		if problem.E != nil {
+			return eRaw.Data[i*eRaw.Stride+j]
+		}
+		if i == j {
+			return 1
+		}
+		return 0
+	}
 	for i := range n {
 		for j := range n {
 			hLeft[i*nn+j] = aRaw.Data[i*aRaw.Stride+j]
 			hLeft[(n+i)*nn+j] = -qRaw.Data[i*qRaw.Stride+j]
-			jLeft[(n+i)*nn+n+j] = aRaw.Data[j*aRaw.Stride+i]
+			jLeft[i*nn+j] = e(i, j)
+			if continuous {
+				hLeft[(n+i)*nn+n+j] = -aRaw.Data[j*aRaw.Stride+i]
+				jLeft[(n+i)*nn+n+j] = e(j, i)
+			} else {
+				hLeft[(n+i)*nn+n+j] = e(j, i)
+				jLeft[(n+i)*nn+n+j] = aRaw.Data[j*aRaw.Stride+i]
+			}
 		}
-		hLeft[(n+i)*nn+n+i] = 1
-		jLeft[i*nn+i] = 1
 
 		for j := range m {
 			input[i*m+j] = bRaw.Data[i*bRaw.Stride+j]
@@ -556,7 +659,11 @@ func (problem riccatiProblem) generalizedDiscreteStableSubspace() (discreteRicca
 				input[(n+i)*m+j] = -sRaw.Data[i*sRaw.Stride+j]
 				hLeft[(nn+j)*nn+i] = sRaw.Data[i*sRaw.Stride+j]
 			}
-			jLeft[(nn+j)*nn+n+i] = -bRaw.Data[i*bRaw.Stride+j]
+			if continuous {
+				hLeft[(nn+j)*nn+n+i] = bRaw.Data[i*bRaw.Stride+j]
+			} else {
+				jLeft[(nn+j)*nn+n+i] = -bRaw.Data[i*bRaw.Stride+j]
+			}
 		}
 	}
 	for i := range m {
@@ -589,33 +696,38 @@ func (problem riccatiProblem) generalizedDiscreteStableSubspace() (discreteRicca
 	beta := ws.beta[:nn]
 	vectors := ws.vs[:nn*nn]
 	bwork := ws.bwork[:nn]
-	insideUnitCircle := func(alphaR, alphaI, beta float64) bool {
+	stable := func(alphaR, alphaI, beta float64) bool {
 		return math.Hypot(alphaR, alphaI) < math.Abs(beta)
+	}
+	if continuous {
+		stable = func(alphaR, _, beta float64) bool {
+			return alphaR*beta < 0
+		}
 	}
 
 	var workQuery [1]float64
-	impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, insideUnitCircle,
+	impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, stable,
 		nn, h, nn, j, nn, alphaR, alphaI, beta, nil, 1, vectors, nn, workQuery[:], -1, bwork)
 	lwork := int(workQuery[0])
 	if len(ws.work) < lwork {
 		ws.work = make([]float64, lwork)
 	}
 
-	sdim, ok := impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, insideUnitCircle,
+	sdim, ok := impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, stable,
 		nn, h, nn, j, nn, alphaR, alphaI, beta, nil, 1, vectors, nn, ws.work, lwork, bwork)
 	if !ok {
-		return discreteRiccatiSubspace{}, ErrSchurFailed
+		return riccatiSubspace{}, ErrSchurFailed
 	}
 	if sdim != n {
-		return discreteRiccatiSubspace{}, ErrNoStabilizing
+		return riccatiSubspace{}, ErrNoStabilizing
 	}
 	for i := range n {
 		if beta[i] == 0 {
-			return discreteRiccatiSubspace{}, ErrNoStabilizing
+			return riccatiSubspace{}, ErrNoStabilizing
 		}
 	}
 
-	return discreteRiccatiSubspace{
+	return riccatiSubspace{
 		vectors: vectors,
 		alphaR:  alphaR,
 		alphaI:  alphaI,

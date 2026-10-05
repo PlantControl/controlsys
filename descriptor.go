@@ -61,6 +61,35 @@ func (p descriptorPolicy) requireStandard(context string) error {
 	return fmt.Errorf("%s: %w", context, ErrDescriptorUnsupported)
 }
 
+// requireNonsingular rejects a singular E, as MATLAB lqr, lqi, icare and
+// idare require nonsingular E.
+func (p descriptorPolicy) requireNonsingular(context string) error {
+	if !p.isDescriptor() {
+		return nil
+	}
+	var lu mat.LU
+	lu.Factorize(p.E)
+	if luNearSingular(&lu) {
+		return fmt.Errorf("%s: %w", context, ErrDescriptorSingular)
+	}
+	return nil
+}
+
+// augmentedDescriptor returns blkdiag(E, I_extra), or nil when E is nil or
+// the identity.
+func augmentedDescriptor(E *mat.Dense, extra int) *mat.Dense {
+	if isIdentityDescriptor(E) {
+		return nil
+	}
+	n, _ := E.Dims()
+	out := mat.NewDense(n+extra, n+extra, nil)
+	setBlockOrIdentity(out, 0, E, n)
+	for i := n; i < n+extra; i++ {
+		out.Set(i, i, 1)
+	}
+	return out
+}
+
 func (p descriptorPolicy) requireRiccatiStandard(context string) error {
 	if p.E == nil || isIdentityDescriptor(p.E) {
 		return nil

@@ -18,8 +18,16 @@ import (
 //
 // A is n×n, B is n×m, Q is n×n symmetric PSD, R is m×m symmetric PD.
 // Returns gain K (m×n), Riccati solution X, and closed-loop eigenvalues.
+//
+// opts.E, when set, is a nonsingular descriptor matrix for E dx/dt = Ax + Bu.
+// As MATLAB lqr for descriptor models
+// (https://www.mathworks.com/help/control/ref/lti.lqr.html), X then solves the
+// Riccati equation of the explicit model dx/dt = E⁻¹Ax + E⁻¹Bu (E'X_gE for
+// the Care solution X_g with E); K is unchanged and Eig holds the
+// generalized eigenvalues of (A-BK, E).
 func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	return Care(A, B, Q, R, opts)
+	res, err := Care(A, B, Q, R, opts)
+	return explicitRiccatiSolution(res, opts, err)
 }
 
 // Dlqr solves the discrete-time linear-quadratic regulator problem.
@@ -28,8 +36,24 @@ func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 //
 // A is n×n, B is n×m, Q is n×n symmetric PSD, R is m×m symmetric PD.
 // Returns gain K (m×n), Riccati solution X, and closed-loop eigenvalues.
+// opts.E is handled as in Lqr: X solves the Riccati equation of the explicit
+// model x[k+1] = E⁻¹Ax[k] + E⁻¹Bu[k].
 func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	return Dare(A, B, Q, R, opts)
+	res, err := Dare(A, B, Q, R, opts)
+	return explicitRiccatiSolution(res, opts, err)
+}
+
+// explicitRiccatiSolution maps the generalized solution X of a Care or Dare
+// solved with opts.E to E'XE, the solution for the explicit model.
+func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (*RiccatiResult, error) {
+	if err != nil || opts == nil || isIdentityDescriptor(opts.E) {
+		return res, err
+	}
+	n, _ := res.X.Dims()
+	xe := mulDims(n, n, res.X, opts.E)
+	res.X = mulDims(n, n, opts.E.T(), xe)
+	symmetrize(res.X.RawMatrix().Data, n, n)
+	return res, nil
 }
 
 // Lqi computes the linear-quadratic regulator with integral action, matching
@@ -45,9 +69,13 @@ func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // Care or Dare by the plant's time domain. K is m×(n+p), [Kx Ki]; X and Eig
 // are the augmented Riccati solution and closed-loop eigenvalues.
 //
+// Descriptor plants E x' = Ax + Bu with nonsingular E are supported as in
+// MATLAB: the augmented descriptor is blkdiag(E, I), K is the gain of the
+// explicit model (E⁻¹A, E⁻¹B, C, D) and X solves its Riccati equation.
+//
 // Plants without states, inputs or outputs return ErrDimensionMismatch,
-// asymmetric Q or R ErrNotSymmetric, descriptor plants ErrDescriptorRiccati and plants with delays
-// ErrDelayUnsupported.
+// asymmetric Q or R ErrNotSymmetric, singular E ErrDescriptorSingular,
+// opts.E ErrOptionUnsupported and plants with delays ErrDelayUnsupported.
 func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	policy, err := newControllerObserverPolicy(sys, "Lqi")
 	if err != nil {
@@ -56,6 +84,9 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	n, m, p := policy.n, policy.m, policy.p
 	if m == 0 || p == 0 {
 		return nil, fmt.Errorf("Lqi: model needs inputs and outputs: %w", ErrDimensionMismatch)
+	}
+	if err := policy.rejectOptsE(opts); err != nil {
+		return nil, err
 	}
 	if Q == nil || R == nil {
 		return nil, fmt.Errorf("Lqi: nil weight: %w", ErrDimensionMismatch)
@@ -70,6 +101,13 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		return nil, fmt.Errorf("Lqi: %w", ErrNotSymmetric)
 	}
 	Aa, Ba := lqiAugmentation(sys)
+	if Ea := augmentedDescriptor(sys.E, p); Ea != nil {
+		o := RiccatiOpts{E: Ea}
+		if opts != nil {
+			o.S, o.Workspace = opts.S, opts.Workspace
+		}
+		opts = &o
+	}
 	if sys.IsContinuous() {
 		return Lqr(Aa, Ba, Q, R, opts)
 	}
@@ -90,8 +128,11 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 //
 // A is n×n, B is n×m, Q is n×n, R is m×m, dt > 0. opts.S, when set, is the
 // continuous cross weight N (n×m); opts.Workspace is used for the discrete
-// Riccati solve.
+// Riccati solve. opts.E is rejected with ErrOptionUnsupported.
 func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
+	if opts != nil && opts.E != nil {
+		return nil, fmt.Errorf("Lqrd: opts.E: %w", ErrOptionUnsupported)
+	}
 	if dt <= 0 || newTimeDomain(dt).validateSampleTime() != nil {
 		return nil, ErrInvalidSampleTime
 	}
@@ -119,7 +160,7 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 	}
 
 	if n == 0 {
-		return Dlqr(A, B, Q, R, opts)
+		return nil, fmt.Errorf("Lqrd: no states: %w", ErrDimensionMismatch)
 	}
 
 	nm := n + m
