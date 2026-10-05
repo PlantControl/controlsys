@@ -1,8 +1,10 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
+	"reflect"
 	"sort"
 	"testing"
 
@@ -358,20 +360,61 @@ func TestPrescale_MIMONonSymmetricFeedthrough(t *testing.T) {
 	}
 }
 
-func TestPrescale_RejectsDescriptorAndDelay(t *testing.T) {
-	sys, _ := New(
-		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
-		mat.NewDense(2, 1, []float64{1, 1}),
-		mat.NewDense(1, 2, []float64{1, 0}),
-		mat.NewDense(1, 1, []float64{0}), 0)
-	desc := sys.Copy()
-	desc.E = mat.NewDense(2, 2, []float64{2, 0, 0, 1})
-	if _, err := Prescale(desc); err == nil {
-		t.Error("descriptor: want error")
-	}
-	del := sys.Copy()
-	del.InputDelay = []float64{0.3}
-	if _, err := Prescale(del); err == nil {
-		t.Error("input delay: want error")
+// TestPrescale_DescriptorAndDelays checks MATLAB prescale semantics on
+// descriptor and delayed models: Es = TL·E·TR etc., response preserved.
+func TestPrescale_DescriptorAndDelays(t *testing.T) {
+	fixtures := []struct {
+		name string
+		mk   func(*testing.T, float64) *System
+	}{{"io", fieldIODelay}, {"lft", fieldLFT}, {"descriptor", fieldDescriptor}, {"descriptor-lft", transformDescriptorLFT}}
+	for _, dt := range []float64{0, 0.1} {
+		for _, fx := range fixtures {
+			label := fmt.Sprintf("%s/dt=%g", fx.name, dt)
+			orig := fx.mk(t, dt)
+			orig.A.Set(0, 2, 40)
+			orig.A.Set(2, 0, 0.01)
+			pr, err := Prescale(orig)
+			if err != nil {
+				t.Fatalf("%s: %v", label, err)
+			}
+			got := pr.Sys
+			TL := mat.NewDiagDense(3, pr.Info.LeftScale)
+			TR := mat.NewDiagDense(3, pr.Info.StateScale)
+			var want, tmp mat.Dense
+			tmp.Mul(orig.A, TR)
+			want.Mul(TL, &tmp)
+			if !matClose(got.A, &want, 1e-12) {
+				t.Errorf("%s: As != TL·A·TR", label)
+			}
+			if orig.E != nil {
+				tmp.Mul(orig.E, TR)
+				want.Mul(TL, &tmp)
+				if !matClose(got.E, &want, 1e-12) {
+					t.Errorf("%s: Es != TL·E·TR", label)
+				}
+			} else {
+				if got.E != nil {
+					t.Errorf("%s: explicit model gained E", label)
+				}
+				for i := range 3 {
+					if d := pr.Info.LeftScale[i] * pr.Info.StateScale[i]; math.Abs(d-1) > 1e-15 {
+						t.Errorf("%s: explicit TL·TR[%d] = %v, want 1", label, i, d)
+					}
+				}
+			}
+			var wantB, wantC mat.Dense
+			wantB.Mul(TL, orig.B)
+			if !matClose(got.B, &wantB, 1e-12) {
+				t.Errorf("%s: Bs != TL·B", label)
+			}
+			wantC.Mul(orig.C, TR)
+			if !matClose(got.C, &wantC, 1e-12) {
+				t.Errorf("%s: Cs != C·TR", label)
+			}
+			if !reflect.DeepEqual(got.InputDelay, orig.InputDelay) || !reflect.DeepEqual(got.OutputDelay, orig.OutputDelay) {
+				t.Errorf("%s: I/O delays changed", label)
+			}
+			assertFieldResponse(t, label, got, func(s complex128) [][]complex128 { return fieldOracle(orig, s) })
+		}
 	}
 }

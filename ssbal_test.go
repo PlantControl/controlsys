@@ -1,8 +1,11 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
+	"reflect"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -406,6 +409,51 @@ func TestSsbal_CondT(t *testing.T) {
 				if bound == 1 && !mat.Equal(res.Sys.A, sys.A) {
 					t.Errorf("condT=%g: A changed by a scalar T", condT)
 				}
+			}
+		}
+	}
+}
+
+// TestSsbal_Delays checks that I/O and internal delays are kept, matching
+// MATLAB ssbal, and that internal-delay channels are scaled like B and C.
+func TestSsbal_Delays(t *testing.T) {
+	fixtures := []struct {
+		name string
+		mk   func(*testing.T, float64) *System
+	}{{"io", fieldIODelay}, {"lft", fieldLFT}, {"descriptor", fieldDescriptor}, {"descriptor-lft", transformDescriptorLFT}}
+	for _, dt := range []float64{0, 0.1} {
+		for _, fx := range fixtures {
+			label := fmt.Sprintf("%s/dt=%g", fx.name, dt)
+			orig := fx.mk(t, dt)
+			orig.A.Set(0, 2, 1e4)
+			for _, condT := range []float64{math.Inf(1), 4} {
+				label := fmt.Sprintf("%s/condT=%g", label, condT)
+				res, err := Ssbal(orig, WithCondT(condT))
+				if err != nil {
+					t.Fatalf("%s: %v", label, err)
+				}
+				got := res.Sys
+				tt := make([]float64, 3)
+				for i := range tt {
+					tt[i] = res.T.At(i, i)
+				}
+				if tt[0] == tt[2] {
+					t.Errorf("%s: T = %v did not balance", label, tt)
+				}
+				if c := slices.Max(tt) / slices.Min(tt); c > condT {
+					t.Errorf("%s: cond(T) = %v > %v", label, c, condT)
+				}
+				if !reflect.DeepEqual(got.InputDelay, orig.InputDelay) || !reflect.DeepEqual(got.OutputDelay, orig.OutputDelay) {
+					t.Errorf("%s: I/O delays changed", label)
+				}
+				if orig.LFT != nil {
+					for i := range 3 {
+						if got.LFT.B2.At(i, 0) != tt[i]*orig.LFT.B2.At(i, 0) || got.LFT.C2.At(0, i) != orig.LFT.C2.At(0, i)/tt[i] {
+							t.Errorf("%s: LFT channel %d not scaled by T", label, i)
+						}
+					}
+				}
+				assertFieldResponse(t, label, got, func(s complex128) [][]complex128 { return fieldOracle(orig, s) })
 			}
 		}
 	}
