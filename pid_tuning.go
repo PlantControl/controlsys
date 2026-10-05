@@ -585,7 +585,7 @@ func pidTuningHiddenModesStable(plant *System) bool {
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic directly.
 func pidTuningIdealStable(plant *System, c *PID2) bool {
-	transfer, err := plant.TransferFunction(nil)
+	transfer, err := plant.rationalTransferFunction(nil)
 	if err != nil {
 		return false
 	}

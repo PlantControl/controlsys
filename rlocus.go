@@ -210,7 +210,7 @@ func makeBranches(allEigs [][]complex128, nStates, nGains int) [][]complex128 {
 }
 
 func computeBreakaway(sys *System, poles, zeros []complex128) []complex128 {
-	tfr, err := sys.TransferFunction(nil)
+	tfr, err := sys.rationalTransferFunction(nil)
 	if err != nil {
 		return nil
 	}

@@ -28,7 +28,8 @@ var (
 	ErrFeedbackDelay   = errors.New("controlsys: feedback with delays not supported")
 	ErrMixedDelayTypes = errors.New("controlsys: InternalDelay and IODelay cannot coexist")
 
-	ErrInternalDelayImpulse = errors.New("controlsys: continuous impulse response undefined: input feeds an internal delay directly (D21 != 0)")
+	ErrDelayNotRepresentable = errors.New("controlsys: target model cannot represent the time delays")
+	ErrInternalDelayImpulse  = errors.New("controlsys: continuous impulse response undefined: input feeds an internal delay directly (D21 != 0)")
 
 	ErrNotSymmetric     = errors.New("controlsys: matrix must be symmetric")
 	ErrNotPSD           = errors.New("controlsys: Q matrix must be positive semi-definite")

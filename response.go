@@ -466,7 +466,7 @@ func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
 	if gain, ok := sys.dcGainByDecoupledSingularModes(); ok {
 		return gain, nil
 	}
-	res, err := sys.TransferFunction(nil)
+	res, err := sys.rationalTransferFunction(nil)
 	if err != nil {
 		return nil, fmt.Errorf("DCGain: %w", err)
 	}

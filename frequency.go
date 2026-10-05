@@ -245,7 +245,6 @@ type frequencyPointSolver interface {
 func (e frequencyEvaluator) sweepInto(omega []float64, data []complex128, solver frequencyPointSolver) error {
 	pm := e.p * e.m
 	delaySS := effectiveIODelayMatrix(e.sys, e.p, e.m, true)
-	var delayTF *mat.Dense
 	var tf *TransferFunc
 	for k, w := range omega {
 		s := e.sAt(w)
@@ -262,12 +261,8 @@ func (e frequencyEvaluator) sweepInto(omega []float64, data []complex128, solver
 				return err
 			}
 			tf = res.TF
-			delayTF = effectiveIODelayMatrix(e.sys, e.p, e.m, false)
 		}
 		tf.evalInto(s, dst)
-		if delayTF != nil {
-			applyIODelayMatrixAtS(e.sys, s, dst, e.p, e.m, delayTF)
-		}
 	}
 	return nil
 }

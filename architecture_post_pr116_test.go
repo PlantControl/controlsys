@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math/cmplx"
 	"reflect"
 	"testing"
@@ -47,6 +48,13 @@ func TestPostPR116CrossSeamConversionMetadataRationalAndFRD(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !reflect.DeepEqual(tf.TF.Delay, [][]float64{{0.2}}) {
+		t.Fatalf("TF Delay = %v, want [[0.2]]", tf.TF.Delay)
+	}
+	if _, err := tf.TF.ZPK(); !errors.Is(err, ErrDelayNotRepresentable) {
+		t.Fatalf("ZPK of delayed TF err = %v, want ErrDelayNotRepresentable", err)
+	}
+	tf.TF.Delay = nil
 	zpk, err := tf.TF.ZPK()
 	if err != nil {
 		t.Fatal(err)

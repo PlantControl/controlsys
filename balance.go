@@ -210,7 +210,10 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	Cb := mat.NewDense(p, n, cbData)
 	Db := denseCopy(sys.D)
 
-	balSys, _ := policy.result(Ab, Bb, Cb, Db)
+	balSys, err := policy.result(Ab, Bb, Cb, Db)
+	if err != nil {
+		return nil, err
+	}
 
 	return &BalrealResult{
 		Sys:  balSys,

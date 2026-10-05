@@ -127,9 +127,28 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 	return dst
 }
 
+// TransferFunction returns the rational transfer matrix with every external
+// delay (IODelay, InputDelay, OutputDelay) folded into TransferFunc.Delay.
+// Internal (LFT) delays have no TransferFunc form and are rejected.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
+	res, err := sys.rationalTransferFunction(opts)
+	if err != nil {
+		return nil, err
+	}
+	if total := sys.TotalDelay(); total != nil {
+		res.TF.Delay = denseToSlice2D(total)
+	}
+	return res, nil
+}
+
+// rationalTransferFunction returns the delay-free rational part; callers
+// account for external delays themselves.
+func (sys *System) rationalTransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
 	if err := newDescriptorPolicy(sys).requireStandard("TransferFunction"); err != nil {
 		return nil, err
+	}
+	if sys.internalDelayCount() > 0 {
+		return nil, fmt.Errorf("TransferFunction: internal delays: %w", ErrDelayNotRepresentable)
 	}
 	if opts == nil {
 		opts = &TransferFuncOpts{}
@@ -236,9 +255,6 @@ func (c rowRealizationConverter) fillStaticRows() {
 }
 
 func (c rowRealizationConverter) result(order int) *TransferFuncResult {
-	if c.sys.Delay != nil {
-		c.tf.Delay = denseToSlice2D(c.sys.Delay)
-	}
 	c.tf.InputName = copyStringSlice(c.sys.InputName)
 	c.tf.OutputName = copyStringSlice(c.sys.OutputName)
 	return &TransferFuncResult{TF: c.tf, MinimalOrder: order, RowDegrees: c.rows}
@@ -565,6 +581,9 @@ func (tf *TransferFunc) StateSpace(opts *StateSpaceOpts) (*StateSpaceResult, err
 			}
 		}
 		sys, _ := NewGain(D, tf.Dt)
+		if tf.Delay != nil {
+			sys.Delay = slice2DToDense(tf.Delay)
+		}
 		sys.InputName = copyStringSlice(tf.InputName)
 		sys.OutputName = copyStringSlice(tf.OutputName)
 		return &StateSpaceResult{Sys: sys, MinimalOrder: 0, BlockSizes: degrees}, nil
@@ -689,8 +708,97 @@ func (tf *TransferFunc) StateSpace(opts *StateSpaceOpts) (*StateSpaceResult, err
 	}, nil
 }
 
+// Isproper reports whether the delay-free part of sys, including internal
+// delay channels, is proper. Explicit models always are; a descriptor model
+// is proper iff its infinite eigenvalues are all nondynamic.
 func (sys *System) Isproper() bool {
-	return true
+	if !sys.IsDescriptor() {
+		return true
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	if !luNearSingular(&lu) {
+		return true
+	}
+	n, m, p := sys.Dims()
+	N := sys.internalDelayCount()
+	if m+N == 0 || p+N == 0 {
+		return true
+	}
+	F, ok := regularDescriptorShift(sys.A, sys.E, n)
+	if !ok {
+		return false
+	}
+	B := newDense(n, m+N)
+	C := newDense(p+N, n)
+	setBlock(B, 0, 0, sys.B)
+	setBlock(C, 0, 0, sys.C)
+	if N > 0 {
+		setBlock(B, 0, m, sys.LFT.B2)
+		setBlock(C, p, 0, sys.LFT.C2)
+	}
+	var K, Fb mat.Dense
+	if F.SolveTo(&K, false, sys.E) != nil || F.SolveTo(&Fb, false, B) != nil {
+		return false
+	}
+	// With F = A-σE, K = F⁻¹E and ν = 1/(s-σ):
+	// G(s) = D - ν·C(νI-K)⁻¹F⁻¹B, so G is proper iff that transfer has at
+	// most a simple pole at ν = 0, i.e. K's zero eigenvalue is semisimple
+	// in a minimal realization.
+	aux, err := New(&K, &Fb, C, newDense(p+N, m+N), 0)
+	if err != nil {
+		return false
+	}
+	red, err := aux.Reduce(nil)
+	if err != nil {
+		return false
+	}
+	if red.Order == 0 {
+		return true
+	}
+	Kr := red.Sys.A
+	var K2 mat.Dense
+	K2.Mul(Kr, Kr)
+	return numericRank(Kr) == numericRank(&K2)
+}
+
+func regularDescriptorShift(A, E *mat.Dense, n int) (*mat.LU, bool) {
+	var best *mat.LU
+	bestCond := math.Inf(1)
+	for _, sigma := range []float64{0, 1, -1, 0.618, -2.414, 3.7} {
+		F := mat.NewDense(n, n, nil)
+		F.Scale(-sigma, E)
+		F.Add(A, F)
+		lu := new(mat.LU)
+		lu.Factorize(F)
+		if c := lu.Cond(); c < bestCond {
+			best, bestCond = lu, c
+		}
+	}
+	if best == nil || nearSingularCondition(bestCond) {
+		return nil, false
+	}
+	return best, true
+}
+
+func numericRank(M *mat.Dense) int {
+	var svd mat.SVD
+	if !svd.Factorize(M, mat.SVDNone) {
+		return 0
+	}
+	sv := svd.Values(nil)
+	if len(sv) == 0 || sv[0] == 0 {
+		return 0
+	}
+	r, c := M.Dims()
+	tol := float64(max(r, c)) * 1e3 * eps() * sv[0]
+	rank := 0
+	for _, v := range sv {
+		if v > tol {
+			rank++
+		}
+	}
+	return rank
 }
 
 func (tf *TransferFunc) Isproper() bool {
