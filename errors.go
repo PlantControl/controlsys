@@ -55,4 +55,6 @@ var (
 	ErrDescriptorSingular    = errors.New("controlsys: descriptor matrix E is singular")
 	ErrDescriptorRiccati     = errors.New("controlsys: standard Riccati solvers do not support descriptor systems (E != I)")
 	ErrDescriptorUnsupported = errors.New("controlsys: operation does not support descriptor systems (E != I)")
+	ErrDelayUnsupported      = errors.New("controlsys: operation does not support this delay structure")
+	ErrOptionUnsupported     = errors.New("controlsys: option not supported by this operation")
 )
