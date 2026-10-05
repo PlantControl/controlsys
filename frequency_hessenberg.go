@@ -70,9 +70,9 @@ type balancedDense struct {
 	last   []int
 	pencil []complex128
 	inv    []complex128
-	x      []complex128 // row-major n×m
-	piv    []int        // refine's factorization, allocated on first use
-	r      []complex128 // row-major n×m, refine's residual
+	x      []complex128   // row-major n×m
+	piv    []int          // refine's factorization, allocated on first use
+	r      []complex128   // row-major n×m, refine's residual
 	pt     frequencyPoint // the point evalInto last factored, for refine
 	tol    float64
 }
