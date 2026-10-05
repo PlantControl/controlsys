@@ -150,8 +150,8 @@ func TestGeneralizedClosedLoopRejectsInvalidAnalysisPointLocation(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := loop.InsertAnalysisPoint("bad", AnalysisPointUnspecified); !errors.Is(err, ErrDimensionMismatch) {
-		t.Fatalf("InsertAnalysisPoint error = %v, want ErrDimensionMismatch", err)
+	if err := loop.InsertAnalysisPoint("bad", AnalysisPointUnspecified); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("InsertAnalysisPoint error = %v, want ErrInvalidArgument", err)
 	}
 }
 

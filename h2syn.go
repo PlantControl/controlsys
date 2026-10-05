@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -34,7 +35,7 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	for i := range gp.p1 {
 		for j := range gp.m1 {
 			if math.Abs(d11Raw.Data[i*d11Raw.Stride+j]) > tol {
-				return nil, ErrNoFiniteH2Norm
+				return nil, fmt.Errorf("%s: D11[%d,%d] = %g: %w", gp.op, i, j, d11Raw.Data[i*d11Raw.Stride+j], ErrNoFiniteH2Norm)
 			}
 		}
 	}
@@ -50,7 +51,7 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 
 	resX, err := Care(A, B2, Q1, R1, &RiccatiOpts{S: S1})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, err)
 	}
 	X := resX.X
 
@@ -65,7 +66,7 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 
 	resY, err := Care(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C2.T()), Q2, R2, &RiccatiOpts{S: S2})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: filter %w", gp.op, err)
 	}
 	Y := resY.X
 

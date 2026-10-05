@@ -71,7 +71,7 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 
 	t, z, err := modalSchur(sys)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ModalTruncate: %w", err)
 	}
 	var maxRealPart float64
 	threshold := opts.MaxRealPart != nil
@@ -79,7 +79,7 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 		maxRealPart = *opts.MaxRealPart
 	}
 	if err := orderModalSchur(t, z, n, sys.Dt, maxRealPart, threshold); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ModalTruncate: %w", err)
 	}
 	poles := schurEigenvaluesRaw(t, n)
 	order, err := modalReductionOrder(t, poles, n, sys.Dt, opts)
@@ -155,7 +155,7 @@ func modalSchur(sys *System) (t, z []float64, err error) {
 	work := make([]float64, int(query[0]))
 	_, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil, n, t, n, wr, wi, z, n, work, len(work), bwork)
 	if !ok {
-		return nil, nil, ErrSchurFailed
+		return nil, nil, fmt.Errorf("real Schur form of A did not converge: %w", ErrSchurFailed)
 	}
 	return t, z, nil
 }
@@ -174,7 +174,7 @@ func orderModalSchur(t, z []float64, n int, dt, maxRealPart float64, threshold b
 		if best != placed {
 			_, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, best, placed, work)
 			if !ok {
-				return ErrSchurFailed
+				return fmt.Errorf("reordering the real Schur form failed: %w", ErrSchurFailed)
 			}
 		}
 		placed += schurBlockSize(t, n, placed)
