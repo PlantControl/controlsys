@@ -746,8 +746,7 @@ func emptyIOOps() []emptyIOOp {
 		}},
 		{"Loopsens", func(s *System) (any, error) { return Loopsens(s, s.Copy()) }},
 		{"Connect", func(s *System) (any, error) {
-			_, m, _ := s.Dims()
-			return Connect(s, newDense(m, 2), nil, nil)
+			return Connect(s, nil, nil, nil)
 		}},
 		{"Margin", func(s *System) (any, error) { return Margin(s) }},
 		{"AllMargin", func(s *System) (any, error) { return AllMargin(s) }},

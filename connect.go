@@ -1269,67 +1269,124 @@ func blkDiagInternalDelay(sys *System, srcs []*System, ns, ms, ps []int, nTotal,
 	}
 }
 
-// Connect closes internal connections of the block-diagonal model sys, as
+// Connect closes internal connections of the block-diagonal model blksys, as
 // the index-based MATLAB form sysc = connect(blksys,connections,inputs,outputs);
 // see https://www.mathworks.com/help/control/ref/dynamicsystem.connect.html.
 // For name-based connections use ConnectByName.
 //
-// The MATLAB connections list maps to the m×p gain matrix Q: the row
-// [i, j, -k] (u(i) is driven by w(j) - w(k), 1-based) is Q[i-1][j-1] = 1 and
-// Q[i-1][k-1] = -1, so u = Q·y + v with v the external input. Q may hold any
-// real gains. inputs and outputs are 0-based indices of the inputs of sys
-// kept as external inputs and the outputs kept as external outputs; they must
-// be non-empty, in range and unique (ErrInvalidArgument). Q of the wrong size
-// returns ErrDimensionMismatch and a singular I - Q·D ErrAlgebraicLoop.
-func Connect(sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) {
-	if err := requireSystem("Connect", sys); err != nil {
+// Every index is 1-based, as in MATLAB, so the sign encoding and zero padding
+// of connections carry over verbatim. Each row of connections is one summing
+// junction: its first entry i selects input u(i) of blksys and each further
+// entry ±j adds ±w(j), output j of blksys, to it. Zero entries are padding,
+// so rows may be ragged or zero-padded; repeated terms add. For example
+// {{3, 2}, {7, 2, -15, 6}} feeds w(2) into u(3) and w(2) - w(15) + w(6) into
+// u(7). inputs and outputs select the inputs and outputs of blksys kept as the
+// external inputs and outputs of sysc, in that order.
+//
+// An empty row, an index out of range, empty inputs or outputs, or a
+// duplicate in inputs or outputs returns ErrInvalidArgument; a singular
+// algebraic loop returns ErrAlgebraicLoop.
+func Connect(blksys *System, connections [][]int, inputs, outputs []int) (*System, error) {
+	if err := requireSystem("Connect", blksys); err != nil {
 		return nil, err
 	}
-	if Q == nil {
-		return nil, fmt.Errorf("Connect: Q is nil: %w", ErrInvalidArgument)
+	_, m, p := blksys.Dims()
+	in, err := oneBasedIndices("Connect", "inputs", inputs, m)
+	if err != nil {
+		return nil, err
 	}
-	n, m, p := sys.Dims()
+	out, err := oneBasedIndices("Connect", "outputs", outputs, p)
+	if err != nil {
+		return nil, err
+	}
+	Q := mat.NewDense(m, p, nil)
+	for r, row := range connections {
+		if len(row) == 0 {
+			return nil, fmt.Errorf("Connect: connections row %d is empty: %w", r+1, ErrInvalidArgument)
+		}
+		if row[0] < 1 || row[0] > m {
+			return nil, fmt.Errorf("Connect: connections row %d input %d outside [1,%d]: %w", r+1, row[0], m, ErrInvalidArgument)
+		}
+		for _, k := range row[1:] {
+			j, sign := k, 1.0
+			if k < 0 {
+				j, sign = -k, -1
+			}
+			if j == 0 {
+				continue
+			}
+			if j > p {
+				return nil, fmt.Errorf("Connect: connections row %d output %d outside [1,%d]: %w", r+1, k, p, ErrInvalidArgument)
+			}
+			Q.Set(row[0]-1, j-1, Q.At(row[0]-1, j-1)+sign)
+		}
+	}
+	return connectGain("Connect", blksys, Q, in, out)
+}
 
-	qr, qc := Q.Dims()
-	if qr != m || qc != p {
-		return nil, fmt.Errorf("Connect: Q size %dx%d != %dx%d: %w", qr, qc, m, p, ErrDimensionMismatch)
+// oneBasedIndices converts the 1-based MATLAB index vector idx over n
+// channels to 0-based, requiring it non-empty, in range and duplicate-free.
+func oneBasedIndices(op, name string, idx []int, n int) ([]int, error) {
+	if len(idx) == 0 {
+		return nil, fmt.Errorf("%s: %s must be non-empty: %w", op, name, ErrInvalidArgument)
+	}
+	out := make([]int, len(idx))
+	seen := make(map[int]bool, len(idx))
+	for k, v := range idx {
+		if v < 1 || v > n {
+			return nil, fmt.Errorf("%s: %s index %d outside [1,%d]: %w", op, name, v, n, ErrInvalidArgument)
+		}
+		if seen[v] {
+			return nil, fmt.Errorf("%s: duplicate %s index %d: %w", op, name, v, ErrInvalidArgument)
+		}
+		seen[v] = true
+		out[k] = v - 1
+	}
+	return out, nil
+}
+
+// connectGain closes u = Q·y + v on the validated model sys, keeping the
+// 0-based inputs and outputs. Q is m×p.
+func connectGain(op string, sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) {
+	n, m, p := sys.Dims()
+	if qr, qc := Q.Dims(); qr != m || qc != p {
+		return nil, fmt.Errorf("%s: Q size %dx%d != %dx%d: %w", op, qr, qc, m, p, ErrDimensionMismatch)
 	}
 	if len(inputs) == 0 {
-		return nil, fmt.Errorf("Connect: inputs must be non-empty: %w", ErrInvalidArgument)
+		return nil, fmt.Errorf("%s: inputs must be non-empty: %w", op, ErrInvalidArgument)
 	}
 	if len(outputs) == 0 {
-		return nil, fmt.Errorf("Connect: outputs must be non-empty: %w", ErrInvalidArgument)
+		return nil, fmt.Errorf("%s: outputs must be non-empty: %w", op, ErrInvalidArgument)
 	}
-
 	inSeen := make(map[int]bool, len(inputs))
 	for _, idx := range inputs {
 		if idx < 0 || idx >= m {
-			return nil, fmt.Errorf("Connect: input index %d outside [0,%d): %w", idx, m, ErrInvalidArgument)
+			return nil, fmt.Errorf("%s: input index %d outside [0,%d): %w", op, idx, m, ErrInvalidArgument)
 		}
 		if inSeen[idx] {
-			return nil, fmt.Errorf("Connect: duplicate input index %d: %w", idx, ErrInvalidArgument)
+			return nil, fmt.Errorf("%s: duplicate input index %d: %w", op, idx, ErrInvalidArgument)
 		}
 		inSeen[idx] = true
 	}
 	outSeen := make(map[int]bool, len(outputs))
 	for _, idx := range outputs {
 		if idx < 0 || idx >= p {
-			return nil, fmt.Errorf("Connect: output index %d outside [0,%d): %w", idx, p, ErrInvalidArgument)
+			return nil, fmt.Errorf("%s: output index %d outside [0,%d): %w", op, idx, p, ErrInvalidArgument)
 		}
 		if outSeen[idx] {
-			return nil, fmt.Errorf("Connect: duplicate output index %d: %w", idx, ErrInvalidArgument)
+			return nil, fmt.Errorf("%s: duplicate output index %d: %w", op, idx, ErrInvalidArgument)
 		}
 		outSeen[idx] = true
 	}
 
 	if sys.HasDelay() || sys.HasInternalDelay() {
-		return connectWithDelay(sys, Q, inputs, outputs)
+		return connectWithDelay(op, sys, Q, inputs, outputs)
 	}
 
-	return connectSimple(sys, Q, inputs, outputs, n, m, p)
+	return connectSimple(op, sys, Q, inputs, outputs, n, m, p)
 }
 
-func connectWithDelay(sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) {
+func connectWithDelay(op string, sys *System, Q *mat.Dense, inputs, outputs []int) (*System, error) {
 	_, m, p := sys.Dims()
 
 	qRaw := Q.RawMatrix()
@@ -1370,7 +1427,7 @@ func connectWithDelay(sys *System, Q *mat.Dense, inputs, outputs []int) (*System
 	nH, _, _ := H.Dims()
 
 	Dcore := extractBlock(H.D, 0, 0, p, m)
-	E, err := solveIdentityMinusProduct(Q, Dcore, m, "Connect", ErrAlgebraicLoop)
+	E, err := solveIdentityMinusProduct(Q, Dcore, m, op, ErrAlgebraicLoop)
 	if err != nil {
 		return nil, err
 	}
@@ -1520,11 +1577,11 @@ func connectWithDelay(sys *System, Q *mat.Dense, inputs, outputs []int) (*System
 	return result, nil
 }
 
-func connectSimple(sys *System, Q *mat.Dense, inputs, outputs []int, n, m, p int) (*System, error) {
+func connectSimple(op string, sys *System, Q *mat.Dense, inputs, outputs []int, n, m, p int) (*System, error) {
 	mExt := len(inputs)
 	pExt := len(outputs)
 
-	E, err := solveIdentityMinusProduct(Q, sys.D, m, "Connect", ErrAlgebraicLoop)
+	E, err := solveIdentityMinusProduct(Q, sys.D, m, op, ErrAlgebraicLoop)
 	if err != nil {
 		return nil, err
 	}

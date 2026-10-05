@@ -79,7 +79,7 @@ ownership clarity, and release readiness, not shrinking the toolbox shape.
 | `Feedback` | `pure`, `returns-mutable` | Builds closed-loop model; does not mutate inputs. |
 | `Append` | `pure`, `returns-mutable` | Appends models into a new model. |
 | `BlkDiag` | `pure`, `returns-mutable` | Builds block-diagonal model. |
-| `Connect` | `view-in`, `returns-mutable` | Uses connection matrix by value during construction. |
+| `Connect` | `view-in`, `returns-mutable` | Reads connection rows by value during construction. |
 | `ConnectByName` | `view-in`, `returns-mutable` | Uses named signals and builds through `BlkDiag`/`Connect`. |
 | `Inv` | `pure`, `returns-mutable` | Returns inverse model. |
 | `LFT` | `pure`, `returns-mutable` | Builds LFT model or visible extraction. |

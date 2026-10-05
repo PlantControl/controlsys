@@ -230,10 +230,10 @@ func aliasCases() []aliasCase {
 		{"LFT", aliasPick(fxPlant, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b) })},
 		{"LFT/delayed", aliasPick(fxDelayed, fxSISOK), aliasTwo(func(a, b *System) (*System, error) { return LFT(a, b) })},
 		{"Connect", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
-			return Connect(s, mat.NewDense(2, 2, []float64{0, 0.5, 0, 0}), []int{0, 1}, []int{0, 1})
+			return Connect(s, [][]int{{1, 2}}, []int{1, 2}, []int{1, 2})
 		})},
 		{"Connect/delayed", aliasPick(fxDelayed), aliasOne(func(s *System) (*System, error) {
-			return Connect(s, mat.NewDense(2, 2, nil), []int{0, 1}, []int{0, 1})
+			return Connect(s, nil, []int{1, 2}, []int{1, 2})
 		})},
 		{"ConnectByName", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return ConnectByName([]*System{s}, nil, []string{"u0", "u1"}, []string{"y0", "y1"})
