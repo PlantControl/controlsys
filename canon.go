@@ -157,13 +157,14 @@ func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult
 	}
 
 	// Bnew = T⁻¹*B: solve T*Bnew = B
-	Bnew := mat.NewDense(n, m, nil)
-	if err := lu.SolveTo(Bnew, false, sys.B); err != nil {
-		return nil, fmt.Errorf("controlsys: solve failed: %w", ErrSingularTransform)
+	Bnew := newDense(n, m)
+	if m > 0 {
+		if err := lu.SolveTo(Bnew, false, sys.B); err != nil {
+			return nil, fmt.Errorf("controlsys: solve failed: %w", ErrSingularTransform)
+		}
 	}
 
-	Cnew := mat.NewDense(p, n, nil)
-	Cnew.Mul(sys.C, T)
+	Cnew := mulDims(p, n, sys.C, T)
 
 	newSys, err := policy.resultWithOriginalFeedthrough(Anew, Bnew, Cnew)
 	if err != nil {

@@ -37,6 +37,9 @@ func requireStandardEstimatorSystem(sys *System, context string) error {
 }
 
 func inputNoiseIntensity(B, W *mat.Dense, n, m int) *mat.Dense {
+	if m == 0 {
+		return mat.NewDense(n, n, nil)
+	}
 	bRaw := B.RawMatrix()
 	wRaw := W.RawMatrix()
 

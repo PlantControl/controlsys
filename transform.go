@@ -37,16 +37,15 @@ func SS2SS(sys *System, T *mat.Dense) (*System, error) {
 		return nil, fmt.Errorf("SS2SS: %w", ErrSingularTransform)
 	}
 
-	var tmp, A2, B2, C2 mat.Dense
+	var tmp, A2 mat.Dense
 	tmp.Mul(sys.A, &Tinv)
 	A2.Mul(T, &tmp)
-	B2.Mul(T, sys.B)
-	C2.Mul(sys.C, &Tinv)
+	_, m, p := sys.Dims()
 
 	result := sys.Copy()
 	result.A = mat.DenseCopyOf(&A2)
-	result.B = mat.DenseCopyOf(&B2)
-	result.C = mat.DenseCopyOf(&C2)
+	result.B = mulDims(n, m, T, sys.B)
+	result.C = mulDims(p, n, sys.C, &Tinv)
 	if sys.internalDelayCount() > 0 {
 		result.LFT.B2.Mul(T, sys.LFT.B2)
 		result.LFT.C2.Mul(sys.LFT.C2, &Tinv)

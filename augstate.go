@@ -24,11 +24,13 @@ func Augstate(sys *System) (*System, error) {
 		cRaw.Data[(p+i)*cRaw.Stride+i] = 1
 	}
 
-	dNew := mat.NewDense(pNew, m, nil)
-	dRaw := dNew.RawMatrix()
-	origD := sys.D.RawMatrix()
-	for i := range p {
-		copy(dRaw.Data[i*dRaw.Stride:i*dRaw.Stride+m], origD.Data[i*origD.Stride:i*origD.Stride+m])
+	dNew := newDense(pNew, m)
+	if m > 0 {
+		dRaw := dNew.RawMatrix()
+		origD := sys.D.RawMatrix()
+		for i := range p {
+			copy(dRaw.Data[i*dRaw.Stride:i*dRaw.Stride+m], origD.Data[i*origD.Stride:i*origD.Stride+m])
+		}
 	}
 
 	result := &System{

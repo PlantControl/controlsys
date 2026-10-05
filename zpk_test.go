@@ -815,3 +815,14 @@ func TestZPKRejectsDelays(t *testing.T) {
 		t.Errorf("zero delay: %v", err)
 	}
 }
+
+func TestNewZPKRejectsNonFiniteSampleTime(t *testing.T) {
+	for _, dt := range []float64{math.NaN(), math.Inf(1)} {
+		if _, err := NewZPK(nil, []complex128{-1}, 1, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("NewZPK dt=%v err = %v", dt, err)
+		}
+		if _, err := NewZPKMIMO([][][]complex128{{nil}}, [][][]complex128{{{-1}}}, [][]float64{{1}}, dt); !errors.Is(err, ErrInvalidSampleTime) {
+			t.Errorf("NewZPKMIMO dt=%v err = %v", dt, err)
+		}
+	}
+}

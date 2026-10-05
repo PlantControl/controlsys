@@ -87,7 +87,7 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 	}
 	bModal, cModal := modalInputOutput(sys, z, n, m, p)
 	aReduced := extractModalBlock(t, n, 0, order, 0, order)
-	bReduced := mat.NewDense(order, m, nil)
+	bReduced := newDense(order, m)
 	for i := range order {
 		for j := range m {
 			value := bModal[i*m+j]
@@ -97,7 +97,7 @@ func ModalTruncate(sys *System, opts *ModalTruncateOptions) (*ModalReductionResu
 			bReduced.Set(i, j, value)
 		}
 	}
-	cReduced := mat.NewDense(p, order, nil)
+	cReduced := newDense(p, order)
 	for i := range p {
 		copy(cReduced.RawMatrix().Data[i*order:(i+1)*order], cModal[i*n:i*n+order])
 	}
@@ -228,13 +228,18 @@ func separateSchurBlocks(t []float64, n, order int, context string) ([]float64, 
 
 func modalInputOutput(sys *System, z []float64, n, m, p int) (bModal, cModal []float64) {
 	zGeneral := blas64.General{Rows: n, Cols: n, Stride: n, Data: z}
-	bRaw := sys.B.RawMatrix()
 	bModal = make([]float64, n*m)
-	blas64.Gemm(blas.Trans, blas.NoTrans, 1, zGeneral,
-		blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
-		0, blas64.General{Rows: n, Cols: m, Stride: m, Data: bModal})
-	cRaw := sys.C.RawMatrix()
+	if m > 0 {
+		bRaw := sys.B.RawMatrix()
+		blas64.Gemm(blas.Trans, blas.NoTrans, 1, zGeneral,
+			blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
+			0, blas64.General{Rows: n, Cols: m, Stride: m, Data: bModal})
+	}
 	cModal = make([]float64, p*n)
+	if p == 0 {
+		return bModal, cModal
+	}
+	cRaw := sys.C.RawMatrix()
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
 		blas64.General{Rows: p, Cols: n, Stride: cRaw.Stride, Data: cRaw.Data}, zGeneral,
 		0, blas64.General{Rows: p, Cols: n, Stride: n, Data: cModal})
@@ -261,6 +266,9 @@ func modalProjectionBases(z, x []float64, n, order int) (*mat.Dense, *mat.Dense)
 func extractModalBlock(data []float64, stride, rowStart, rowEnd, colStart, colEnd int) *mat.Dense {
 	rows := rowEnd - rowStart
 	cols := colEnd - colStart
+	if rows == 0 || cols == 0 {
+		return &mat.Dense{}
+	}
 	out := mat.NewDense(rows, cols, nil)
 	for i := range rows {
 		copy(out.RawMatrix().Data[i*cols:(i+1)*cols], data[(rowStart+i)*stride+colStart:(rowStart+i)*stride+colEnd])

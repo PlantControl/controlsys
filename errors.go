@@ -66,4 +66,5 @@ var (
 	ErrDelayUnsupported       = errors.New("controlsys: operation does not support this delay structure")
 	ErrOptionUnsupported      = errors.New("controlsys: option not supported by this operation")
 	ErrNoiseFeedthrough       = errors.New("controlsys: noise inputs must not feed through to outputs (D != 0)")
+	ErrInvalidArgument        = errors.New("controlsys: invalid argument")
 )

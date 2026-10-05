@@ -162,8 +162,8 @@ func padeCloseInternalDelay(lft *System, order int) (*System, error) {
 }
 
 func PadeDelay(tau float64, order int) (*System, error) {
-	if tau < 0 {
-		return nil, ErrNegativeDelay
+	if err := validateDelayValue(tau, 0); err != nil {
+		return nil, err
 	}
 	if order < 1 || order > 10 {
 		return nil, fmt.Errorf("PadeDelay: order must be 1-10: %w", ErrDimensionMismatch)

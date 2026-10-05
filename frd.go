@@ -35,8 +35,8 @@ func (f *FRD) Copy() *FRD {
 // NewFRD creates an FRD model from response data and frequency vector.
 // response[k] is the p*m complex response matrix at frequency omega[k].
 func NewFRD(response [][][]complex128, omega []float64, dt float64) (*FRD, error) {
-	if dt < 0 {
-		return nil, fmt.Errorf("FRD: negative sample time: %w", ErrInvalidSampleTime)
+	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
+		return nil, fmt.Errorf("FRD: %w", err)
 	}
 	if len(response) != len(omega) {
 		return nil, fmt.Errorf("FRD: len(response)=%d != len(omega)=%d: %w",
@@ -47,8 +47,8 @@ func NewFRD(response [][][]complex128, omega []float64, dt float64) (*FRD, error
 	}
 
 	for i := range omega {
-		if omega[i] < 0 {
-			return nil, fmt.Errorf("FRD: omega[%d]=%v is negative: %w", i, omega[i], ErrDimensionMismatch)
+		if !(omega[i] >= 0) || math.IsInf(omega[i], 1) {
+			return nil, fmt.Errorf("FRD: omega[%d]=%v must be finite and non-negative: %w", i, omega[i], ErrDimensionMismatch)
 		}
 	}
 	if !sort.Float64sAreSorted(omega) {

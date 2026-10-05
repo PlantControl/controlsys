@@ -71,7 +71,7 @@ func Ssbal(sys *System, opts ...SsbalOption) (*SsbalResult, error) {
 	}
 
 	newSys, err := policy.result(
-		mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c), denseCopy(sys.D))
+		mat.NewDense(n, n, br.a), denseFromData(n, m, br.b), denseFromData(p, n, br.c), denseCopy(sys.D))
 	if err != nil {
 		return nil, err
 	}

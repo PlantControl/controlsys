@@ -423,11 +423,22 @@ func Margin(sys *System) (*MarginResult, error) {
 	return result, nil
 }
 
+// Bandwidth returns the first frequency where the gain falls dbDrop dB below
+// its DC value. dbDrop = 0 selects MATLAB's default of -3 dB; like MATLAB
+// bandwidth, dbDrop must otherwise be a finite negative scalar, and a model
+// with no inputs or no outputs is rejected.
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.bandwidth.html.
 func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if dbDrop == 0 {
 		dbDrop = -3
 	}
+	if !(dbDrop < 0) || math.IsInf(dbDrop, -1) {
+		return 0, fmt.Errorf("Bandwidth: dbDrop must be a finite negative scalar, got %g: %w", dbDrop, ErrInvalidArgument)
+	}
 	_, m, p := sys.Dims()
+	if m == 0 || p == 0 {
+		return 0, fmt.Errorf("Bandwidth: model has no inputs or no outputs: %w", ErrDimensionMismatch)
+	}
 
 	dcGain, err := sys.DCGain()
 	if err != nil {

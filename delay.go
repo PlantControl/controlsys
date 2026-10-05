@@ -125,12 +125,24 @@ func validateSliceDelay(delay []float64, expected int, dt float64) error {
 		return fmt.Errorf("delay length %d != %d: %w", len(delay), expected, ErrDimensionMismatch)
 	}
 	for _, v := range delay {
-		if v < 0 {
-			return ErrNegativeDelay
+		if err := validateDelayValue(v, dt); err != nil {
+			return err
 		}
-		if dt > 0 && math.Round(v) != v {
-			return ErrFractionalDelay
-		}
+	}
+	return nil
+}
+
+// validateDelayValue requires a finite non-negative delay, as MATLAB's delay
+// properties do, that is an integer sample count for discrete models.
+func validateDelayValue(v, dt float64) error {
+	if v < 0 {
+		return ErrNegativeDelay
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return fmt.Errorf("delay %g must be finite: %w", v, ErrInvalidArgument)
+	}
+	if dt > 0 && math.Round(v) != v {
+		return ErrFractionalDelay
 	}
 	return nil
 }
@@ -1666,14 +1678,8 @@ func validateDelay(delay *mat.Dense, p, m int, dt float64) error {
 	raw := delay.RawMatrix()
 	for i := range dr {
 		for j := range dc {
-			v := raw.Data[i*raw.Stride+j]
-			if v < 0 {
-				return ErrNegativeDelay
-			}
-			if dt > 0 {
-				if math.Round(v) != v {
-					return ErrFractionalDelay
-				}
+			if err := validateDelayValue(raw.Data[i*raw.Stride+j], dt); err != nil {
+				return err
 			}
 		}
 	}

@@ -72,12 +72,15 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 
 	B1 := extractModalBlock(bt, m, 0, n1, 0, m)
 	B2 := extractModalBlock(bt, m, n1, n, 0, m)
-	b1Raw := B1.RawMatrix()
-	blas64.Gemm(blas.NoTrans, blas.NoTrans, -1, xGen, B2.RawMatrix(), 1, b1Raw)
+	if m > 0 {
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, -1, xGen, B2.RawMatrix(), 1, B1.RawMatrix())
+	}
 
 	C1 := extractModalBlock(ct, n, 0, p, 0, n1)
 	C2 := extractModalBlock(ct, n, 0, p, n1, n)
-	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, C1.RawMatrix(), xGen, 1, C2.RawMatrix())
+	if p > 0 {
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, C1.RawMatrix(), xGen, 1, C2.RawMatrix())
+	}
 
 	sys1, err := policy.resultWithZeroFeedthrough(extractModalBlock(t, n, 0, n1, 0, n1), B1, C1)
 	if err != nil {

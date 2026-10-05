@@ -68,11 +68,8 @@ func Prescale(sys *System) (*PrescaleResult, error) {
 
 	Ab := mat.NewDense(n, n, aData)
 
-	Bb := mat.NewDense(n, m, nil)
-	Bb.Mul(DsInv, sys.B)
-
-	Cb := mat.NewDense(p, n, nil)
-	Cb.Mul(sys.C, Ds)
+	Bb := mulDims(n, m, DsInv, sys.B)
+	Cb := mulDims(p, n, sys.C, Ds)
 
 	Db := denseCopy(sys.D)
 

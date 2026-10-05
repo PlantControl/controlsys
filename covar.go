@@ -44,6 +44,12 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	if !stable {
 		return nil, ErrUnstable
 	}
+	if p == 0 {
+		return &mat.Dense{}, nil
+	}
+	if m == 0 {
+		return mat.NewDense(p, p, nil), nil
+	}
 	if sys.IsContinuous() && sys.HasDelay() {
 		return covarContinuousDelayed(sys, W)
 	}
@@ -75,9 +81,6 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		var CX mat.Dense
 		CX.Mul(sys.C, X)
 		P.Mul(&CX, sys.C.T())
-	}
-	if m == 0 {
-		return P, nil
 	}
 
 	var DW, DWDt mat.Dense

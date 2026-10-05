@@ -65,6 +65,9 @@ func Kalman(sys *System, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, 
 	if err != nil {
 		return nil, err
 	}
+	if policy.p == 0 {
+		return nil, fmt.Errorf("Kalman: model has no measured outputs: %w", ErrDimensionMismatch)
+	}
 	if err := policy.validateNoise(Qn, Rn); err != nil {
 		return nil, err
 	}
@@ -153,12 +156,15 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 	if sys.IsDiscrete() {
 		return nil, fmt.Errorf("Kalmd: %w", ErrWrongDomain)
 	}
-	if dt <= 0 {
+	if dt <= 0 || newTimeDomain(dt).validateSampleTime() != nil {
 		return nil, ErrInvalidSampleTime
 	}
 	policy, err := newControllerObserverPolicy(sys, "Kalmd")
 	if err != nil {
 		return nil, err
+	}
+	if policy.p == 0 {
+		return nil, fmt.Errorf("Kalmd: model has no measured outputs: %w", ErrDimensionMismatch)
 	}
 	if err := policy.validateNoise(Qn, Rn); err != nil {
 		return nil, err
@@ -268,18 +274,17 @@ func Estim(sys *System, L *mat.Dense) (*System, error) {
 	}
 
 	// Ae = A - L*C
-	Ae := mat.NewDense(n, n, nil)
-	Ae.Mul(L, sys.C)
+	Ae := mulDims(n, n, L, sys.C)
 	Ae.Sub(sys.A, Ae)
 
 	// Be = [B - L*D, L]
-	LD := mat.NewDense(n, m, nil)
-	LD.Mul(L, sys.D)
-	BmLD := mat.NewDense(n, m, nil)
-	BmLD.Sub(sys.B, LD)
+	BmLD := mulDims(n, m, L, sys.D)
+	if m > 0 {
+		BmLD.Sub(sys.B, BmLD)
+	}
 
 	mp := m + p
-	Be := mat.NewDense(n, mp, nil)
+	Be := newDense(n, mp)
 	setBlock(Be, 0, 0, BmLD)
 	setBlock(Be, 0, m, L)
 
@@ -292,7 +297,7 @@ func Estim(sys *System, L *mat.Dense) (*System, error) {
 	}
 
 	// De = [D, 0; 0, 0]
-	De := mat.NewDense(pn, mp, nil)
+	De := newDense(pn, mp)
 	setBlock(De, 0, 0, sys.D)
 
 	result, err := New(Ae, Be, Ce, De, sys.Dt)

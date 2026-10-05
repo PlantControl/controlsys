@@ -43,7 +43,23 @@ func LFT(M, Delta *System, nu, ny int) (*System, error) {
 		return lftWithDelay(M, Delta, nu, ny)
 	}
 
+	if mM == nu && pM == ny {
+		return lftEmptyLoop(M, Delta, nu, ny)
+	}
 	return lftSimple(M, Delta, nu, ny)
+}
+
+// lftEmptyLoop closes an LFT whose loop carries no signals: the result is M's
+// upper channels with Delta's states appended, unreachable and unobservable.
+func lftEmptyLoop(M, Delta *System, nu, ny int) (*System, error) {
+	upper, err := lftExtract(M, nu, ny)
+	if err != nil {
+		return nil, err
+	}
+	if nD, _, _ := Delta.Dims(); nD == 0 {
+		return upper, nil
+	}
+	return Append(upper, Delta)
 }
 
 func lftExtract(M *System, nu, ny int) (*System, error) {
