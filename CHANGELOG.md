@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `HinfNorm` and `Norm(sys, Inf)` accept continuous internal-delay models instead of returning `ErrContinuousInternalDelay`. Stability is decided exactly by the Nyquist count of det(I − H22·Δ) (unstable returns `(+Inf, +Inf, nil)`); the peak uses the exact delay factors e^{−jωτ}. Neutral-type or uncertifiable cases return `ErrDelayUnsupported`, as does `Norm(sys, Inf)` of an unstable one.
+
 ## v2.0.0
 
 v2 is a breaking release. It applies one set of rules to the whole API:

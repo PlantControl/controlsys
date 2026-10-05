@@ -25,7 +25,9 @@ const NormH2 = 2
 // The H2 norm of an unstable model is +Inf. The L∞ norm is the peak gain
 // over frequency without regard to stability; it equals the H∞ norm for
 // stable models and is +Inf when a pole lies on the stability boundary
-// (imaginary axis or unit circle).
+// (imaginary axis or unit circle). For continuous internal-delay models it is
+// computed as HinfNorm describes when the model is stable; an unstable one
+// returns ErrDelayUnsupported.
 func Norm(sys *System, normType float64) (float64, error) {
 	if err := requireSystem("Norm", sys); err != nil {
 		return 0, err
@@ -255,15 +257,39 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 // model.
 //
 // Input, output and I/O delays do not change the norm. Discrete internal
-// delays are absorbed exactly; continuous internal-delay models return
-// ErrContinuousInternalDelay because their stability cannot be decided from
-// a finite pole set.
+// delays are absorbed exactly.
+//
+// Continuous internal delays leave infinitely many poles, the roots of the
+// entire function χ(s) = det(sI−A)·det(I − H22(s)Δ(s)), with
+// H22 = D22 + C2(sI−A)⁻¹B2 and Δ = diag(e^{−sτ}). Stability is decided
+// exactly by counting the right-half-plane roots of χ with the argument
+// principle on a delay-aware adaptive grid (the Nyquist test of DiskMargin),
+// and an unstable model, including a root on the imaginary axis, returns
+// +Inf as above. The peak of a stable model is searched on that grid with
+// the exact delay factors e^{−jωτ}, each local maximum refined by
+// golden-section search; past the grid a resolvent bound on the delay LFT
+// certifies that the gain stays below the peak. A peak approached only as
+// ω → ∞ through a delayed feedthrough returns omega = +Inf, as σ_max(D)
+// does for rational models. Neutral-type models whose difference operator
+// is not provably stable (‖D22‖ too large), and cases the grid cannot
+// resolve or certify within its point budget, return ErrDelayUnsupported
+// rather than an approximate answer. The MathWorks pages define the norm of
+// an unstable model as Inf but say nothing specific about delays; this
+// follows the exact-delay frequency response that MATLAB's frequency
+// analysis of delay models uses.
 func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 	if err := requireSystem("HinfNorm", sys); err != nil {
 		return 0, 0, err
 	}
 	if err := newDescriptorPolicy(sys).requireStandard("HinfNorm"); err != nil {
 		return 0, 0, err
+	}
+	if sys.IsContinuous() && sys.HasInternalDelay() {
+		norm, omega, _, err = hinfNormDelayed(sys)
+		if err != nil {
+			return 0, 0, fmt.Errorf("HinfNorm: %w", err)
+		}
+		return norm, omega, nil
 	}
 	sys, err = finiteDimensionalModel(sys, "HinfNorm")
 	if err != nil {
@@ -302,6 +328,16 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 func linfNorm(sys *System) (norm float64, omega float64, err error) {
 	if err := newDescriptorPolicy(sys).requireStandard("Norm"); err != nil {
 		return 0, 0, err
+	}
+	if sys.IsContinuous() && sys.HasInternalDelay() {
+		norm, omega, stable, err := hinfNormDelayed(sys)
+		if err != nil {
+			return 0, 0, fmt.Errorf("Norm: %w", err)
+		}
+		if !stable {
+			return 0, 0, fmt.Errorf("Norm: L∞ norm of an unstable continuous internal-delay model: %w", ErrDelayUnsupported)
+		}
+		return norm, omega, nil
 	}
 	sys, err = finiteDimensionalModel(sys, "Norm")
 	if err != nil {

@@ -989,14 +989,8 @@ func TestHSV_DiscreteInternalDelay(t *testing.T) {
 
 func TestNorms_ContinuousInternalDelayRejected(t *testing.T) {
 	sys := scalarDDE(t, -2, 2)
-	if _, _, err := HinfNorm(sys); !errors.Is(err, ErrContinuousInternalDelay) {
-		t.Fatalf("HinfNorm err = %v, want ErrContinuousInternalDelay", err)
-	}
 	if _, err := HSV(sys); !errors.Is(err, ErrContinuousInternalDelay) {
 		t.Fatalf("HSV err = %v, want ErrContinuousInternalDelay", err)
-	}
-	if _, err := Norm(sys, math.Inf(1)); !errors.Is(err, ErrContinuousInternalDelay) {
-		t.Fatalf("Norm(Inf) err = %v, want ErrContinuousInternalDelay", err)
 	}
 }
 
