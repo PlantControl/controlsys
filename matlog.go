@@ -11,7 +11,7 @@ import (
 func matLog(a *mat.Dense) (*mat.Dense, error) {
 	n, c := a.Dims()
 	if n != c {
-		return nil, fmt.Errorf("matLog: non-square %dx%d", n, c)
+		return nil, fmt.Errorf("matLog: non-square %dx%d: %w", n, c, ErrDimensionMismatch)
 	}
 	if n == 0 {
 		return newDense(0, 0), nil

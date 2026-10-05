@@ -23,20 +23,20 @@ func Loopsens(P, C *System) (*LoopsensResult, error) {
 	_, cm, cp := C.Dims()
 
 	if pp != cm {
-		return nil, fmt.Errorf("controlsys: loopsens: P outputs %d != C inputs %d: %w", pp, cm, ErrDimensionMismatch)
+		return nil, fmt.Errorf("Loopsens: P outputs %d != C inputs %d: %w", pp, cm, ErrDimensionMismatch)
 	}
 	if cp != pm {
-		return nil, fmt.Errorf("controlsys: loopsens: C outputs %d != P inputs %d: %w", cp, pm, ErrDimensionMismatch)
+		return nil, fmt.Errorf("Loopsens: C outputs %d != P inputs %d: %w", cp, pm, ErrDimensionMismatch)
 	}
 
 	Lo, err := Series(C, P)
 	if err != nil {
-		return nil, fmt.Errorf("controlsys: loopsens: cannot form output loop P*C: %w", err)
+		return nil, fmt.Errorf("Loopsens: cannot form output loop P*C: %w", err)
 	}
 
 	Li, err := Series(P, C)
 	if err != nil {
-		return nil, fmt.Errorf("controlsys: loopsens: cannot form input loop C*P: %w", err)
+		return nil, fmt.Errorf("Loopsens: cannot form input loop C*P: %w", err)
 	}
 
 	eyeO, err := makeIdentityGain(pp, Lo.Dt)
@@ -50,22 +50,22 @@ func Loopsens(P, C *System) (*LoopsensResult, error) {
 
 	So, err := Feedback(eyeO, Lo, -1)
 	if err != nil {
-		return nil, fmt.Errorf("controlsys: loopsens So: %w", err)
+		return nil, fmt.Errorf("Loopsens: So: %w", err)
 	}
 
 	To, err := Feedback(Lo, eyeO, -1)
 	if err != nil {
-		return nil, fmt.Errorf("controlsys: loopsens To: %w", err)
+		return nil, fmt.Errorf("Loopsens: To: %w", err)
 	}
 
 	Si, err := Feedback(eyeI, Li, -1)
 	if err != nil {
-		return nil, fmt.Errorf("controlsys: loopsens Si: %w", err)
+		return nil, fmt.Errorf("Loopsens: Si: %w", err)
 	}
 
 	Ti, err := Feedback(Li, eyeI, -1)
 	if err != nil {
-		return nil, fmt.Errorf("controlsys: loopsens Ti: %w", err)
+		return nil, fmt.Errorf("Loopsens: Ti: %w", err)
 	}
 
 	return &LoopsensResult{So: So, To: To, Si: Si, Ti: Ti}, nil

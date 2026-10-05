@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
@@ -222,7 +223,7 @@ func invertSmall(m *mat.Dense, n int) (*mat.Dense, error) {
 		eye.Set(i, i, 1)
 	}
 	if err := lu.SolveTo(inv, false, eye); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%v: %w", err, ErrSingularTransform)
 	}
 	return inv, nil
 }
