@@ -367,11 +367,11 @@ type gridSingularSolver struct {
 	grid  []complex128
 }
 
-func (g gridSingularSolver) evalInto(s complex128, dst []complex128) error {
-	if slices.Contains(g.grid, s) {
+func (g gridSingularSolver) evalInto(pt frequencyPoint, dst []complex128) error {
+	if slices.Contains(g.grid, pt.value()) {
 		return ErrSingularTransform
 	}
-	return g.inner.evalInto(s, dst)
+	return g.inner.evalInto(pt, dst)
 }
 
 func TestFrequencySweepPoleLimitAppliesExternalDelaysOnce(t *testing.T) {
@@ -381,14 +381,14 @@ func TestFrequencySweepPoleLimitAppliesExternalDelaysOnce(t *testing.T) {
 		omega := []float64{0.4, 1.3, 2.2}
 		grid := make([]complex128, len(omega))
 		for k, w := range omega {
-			grid[k] = e.sAt(w)
+			grid[k] = e.pointAt(w).value()
 		}
 		data := make([]complex128, len(omega)*e.p*e.m)
 		if err := e.sweepInto(omega, data, gridSingularSolver{e.pointSolver(1), grid}); err != nil {
 			t.Fatal(err)
 		}
 		for k, w := range omega {
-			want := fieldOracle(sys, e.sAt(w))
+			want := fieldOracle(sys, e.pointAt(w).value())
 			got := make([][]complex128, e.p)
 			for i := range e.p {
 				got[i] = data[(k*e.p+i)*e.m : (k*e.p+i+1)*e.m]

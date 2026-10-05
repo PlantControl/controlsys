@@ -93,13 +93,9 @@ func newBalancedDenseOf(br balancedRealization) *balancedDense {
 	return bd
 }
 
-func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
-	n, m, p := bd.n, bd.m, bd.p
-	if n == 0 {
-		copyRealMatrixToComplex(dst, bd.d, bd.dStride, p, m)
-		return nil
-	}
-	a, x, inv := bd.pencil, bd.x, bd.inv
+// fillPencil sets bd.pencil to sÊ-Â and returns the scale of its entries.
+func (bd *balancedDense) fillPencil(s complex128) float64 {
+	a, n := bd.pencil, bd.n
 	maxAbs, sScale := 0.0, cabs1(s)
 	if bd.e == nil {
 		for i, v := range bd.a {
@@ -109,22 +105,67 @@ func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
 		for i := range n {
 			a[i*n+i] += s
 		}
-	} else {
-		maxE := 0.0
+		return maxAbs + sScale
+	}
+	maxE := 0.0
+	for i, v := range bd.a {
+		e := bd.e[i]
+		// Fused: near a pole zÊ-Â is far smaller than zÊ, and a
+		// rounded product would cost ε|zÊ|/|zÊ-Â| relative accuracy.
+		a[i] = complex(math.FMA(real(s), e, -v), imag(s)*e)
+		maxAbs = max(maxAbs, math.Abs(v))
+		maxE = max(maxE, math.Abs(e))
+	}
+	return maxAbs + sScale*maxE
+}
+
+// fillPencilAt sets bd.pencil to a matrix M and returns the scale of its
+// entries and c with (sÊ-Â)⁻¹ = c·M⁻¹: sI-Â with exact-point diagonal
+// shifts for explicit models, and pÊ+qÂ, c = −q, for descriptor models.
+func (bd *balancedDense) fillPencilAt(pt frequencyPoint) (float64, complex128) {
+	a, n := bd.pencil, bd.n
+	maxAbs := 0.0
+	if bd.e == nil {
 		for i, v := range bd.a {
-			e := bd.e[i]
-			// Fused: near a pole zÊ-Â is far smaller than zÊ, and a
-			// rounded product would cost ε|zÊ|/|zÊ-Â| relative accuracy.
-			a[i] = complex(math.FMA(real(s), e, -v), imag(s)*e)
+			a[i] = complex(-v, 0)
 			maxAbs = max(maxAbs, math.Abs(v))
-			maxE = max(maxE, math.Abs(e))
 		}
-		sScale *= maxE
+		for i := range n {
+			a[i*n+i] = pt.shift(bd.a[i*n+i])
+		}
+		return maxAbs + cabs1(pt.p), 1
+	}
+	pr, pi := real(pt.p), imag(pt.p)
+	maxE := 0.0
+	for i, v := range bd.a {
+		e := bd.e[i]
+		// With q = −conj(p), pe+qa = pr(e−a) + j·pi(e+a): near a pole e−a
+		// is small, and a rounded product qr·a would cost ε|a|/|e−a|
+		// relative accuracy.
+		a[i] = complex(pr*(e-v), pi*(e+v))
+		maxAbs = max(maxAbs, math.Abs(v))
+		maxE = max(maxE, math.Abs(e))
+	}
+	return cabs1(pt.q)*maxAbs + cabs1(pt.p)*maxE, pt.scale()
+}
+
+func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
+	n, m, p := bd.n, bd.m, bd.p
+	if n == 0 {
+		copyRealMatrixToComplex(dst, bd.d, bd.dStride, p, m)
+		return nil
+	}
+	a, x, inv := bd.pencil, bd.x, bd.inv
+	scale, gs := 0.0, complex(1, 0)
+	if pt.isPlain() {
+		scale = bd.fillPencil(pt.value())
+	} else {
+		scale, gs = bd.fillPencilAt(pt)
 	}
 	for i, v := range bd.b {
 		x[i] = complex(v, 0)
 	}
-	tol := float64(n) * (maxAbs + sScale) * eps()
+	tol := float64(n) * scale * eps()
 	if tol == 0 {
 		tol = 1e-15
 	}
@@ -198,6 +239,10 @@ func (bd *balancedDense) evalInto(s complex128, dst []complex128) error {
 				re += c * real(v)
 				im += c * imag(v)
 			}
+			if gs != 1 {
+				g := complex(re, im) * gs
+				re, im = real(g), imag(g)
+			}
 			if bd.d != nil {
 				re += bd.d[row*bd.dStride+j]
 			}
@@ -223,6 +268,7 @@ type hessenbergSweep struct {
 	hMax    float64
 	u       []complex128
 	inv     []complex128
+	shift   []complex128 // s-âᵢᵢ at the current point
 	mult    []complex128
 	swapped []bool
 	y       []complex128 // column-major n×m, Hessenberg coordinates
@@ -233,7 +279,7 @@ type hessenbergSweep struct {
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	nn := n * n
 	f := make([]float64, 2*nn+n*m+p*n)
-	c := make([]complex128, nn+2*n+3*n*m)
+	c := make([]complex128, nn+3*n+3*n*m)
 	take := func(k int) []float64 {
 		out := f[:k:k]
 		f = f[k:]
@@ -246,7 +292,7 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	}
 	hs := &hessenbergSweep{balancedRealization: newBalancedRealization(sys, n, m, p)}
 	hs.q, hs.h, hs.bt, hs.ct = take(nn), take(nn), take(n*m), take(p*n)
-	hs.u, hs.inv, hs.mult = ctake(nn), ctake(n), ctake(n)
+	hs.u, hs.inv, hs.mult, hs.shift = ctake(nn), ctake(n), ctake(n), ctake(n)
 	hs.y, hs.x, hs.r = ctake(n*m), ctake(n*m), ctake(n*m)
 	hs.swapped = make([]bool, n)
 	if n == 0 {
@@ -304,10 +350,12 @@ func crecip(z complex128) complex128 {
 func cabs1(z complex128) float64 { return math.Abs(real(z)) + math.Abs(imag(z)) }
 
 // factor computes the LU factorization of sI-H with adjacent-row pivoting,
+// its diagonal shifted as pt.shift forms it,
 // recording multipliers and swaps so it can be replayed on several
 // right-hand sides. Row k of u holds the not-yet-pivoted row until step k
 // settles it, so the pencil is never formed.
-func (hs *hessenbergSweep) factor(s complex128) error {
+func (hs *hessenbergSweep) factor(pt frequencyPoint) error {
+	s := pt.value()
 	n := hs.n
 	h, u, inv := hs.h, hs.u, hs.inv
 	tol := float64(n) * (hs.hMax + cabs1(s)) * eps()
@@ -317,13 +365,17 @@ func (hs *hessenbergSweep) factor(s complex128) error {
 	for j := range n {
 		u[j] = complex(-h[j], 0)
 	}
-	u[0] += s
+	if pt.isPlain() {
+		u[0] += s
+	} else {
+		u[0] = pt.shift(h[0])
+	}
 	for k := range n - 1 {
 		next := h[(k+1)*n : (k+2)*n]
 		uk := u[k*n : (k+1)*n]
 		un := u[(k+1)*n : (k+2)*n]
 		sub := complex(-next[k], 0)
-		diag := s - complex(next[k+1], 0)
+		diag := pt.shift(next[k+1])
 		if cabs1(sub) > cabs1(uk[k]) {
 			if cabs1(sub) < tol {
 				return errSingularPencil
@@ -432,12 +484,12 @@ const maxRefineSteps = 3
 var refineStop = math.Sqrt(eps())
 
 // residual sets r = B̂ - (sI-Â)x̂. The diagonal enters as s-âᵢᵢ, as GEPP
-// forms it, and stays out of the off-diagonal sum, so a slow pole near s
+// forms it (hs.shift), and stays out of the off-diagonal sum, so a slow pole near s
 // keeps its relative accuracy instead of cancelling against sx̂ᵢ. A
 // working-precision residual makes one refinement step componentwise
 // backward stable (Skeel 1980), the accuracy class of GEPP on sI-Â;
 // a compensated residual would go further at ~2.5x the per-point cost.
-func (hs *hessenbergSweep) residual(s complex128) {
+func (hs *hessenbergSweep) residual() {
 	n, m, x, r := hs.n, hs.m, hs.x, hs.r
 	for j := range m {
 		xj, rj := x[j*n:(j+1)*n], r[j*n:(j+1)*n]
@@ -452,19 +504,22 @@ func (hs *hessenbergSweep) residual(s complex128) {
 				re += a * real(xj[i+1+k])
 				im += a * imag(xj[i+1+k])
 			}
-			rj[i] = complex(hs.b[i*m+j]+re, im) - (s-complex(row[i], 0))*xj[i]
+			rj[i] = complex(hs.b[i*m+j]+re, im) - hs.shift[i]*xj[i]
 		}
 	}
 }
 
-func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
+func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 	n, m, p := hs.n, hs.m, hs.p
 	if n == 0 {
 		copyRealMatrixToComplex(dst, hs.d, hs.dStride, p, m)
 		return nil
 	}
-	if err := hs.factor(s); err != nil {
+	if err := hs.factor(pt); err != nil {
 		return err
+	}
+	for i := range n {
+		hs.shift[i] = pt.shift(hs.a[i*n+i])
 	}
 	y, x, r := hs.y, hs.x, hs.r
 	for i := range n {
@@ -484,7 +539,7 @@ func (hs *hessenbergSweep) evalInto(s complex128, dst []complex128) error {
 				x[i] += v
 			}
 		}
-		hs.residual(s)
+		hs.residual()
 		qTMulCols(y, r, hs.q, n, m)
 		hs.solve(y)
 		var dMax, xMax float64
