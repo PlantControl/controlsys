@@ -203,10 +203,10 @@ func main() {
 | `Lqr` | Continuous-time LQR regulator |
 | `Dlqr` | Discrete-time LQR regulator |
 | `Lqrd` | Discrete LQR obtained from continuous data and sample time |
-| `Lqe` | Kalman filter (observer) gain |
-| `Kalman` | Kalman estimator from a `System` model |
+| `Lqe` | Kalman filter (observer) gain, as MATLAB `lqe(A,G,C,Qn,Rn,Nn)` |
+| `Kalman` | Kalman estimator from a `System` model, as MATLAB `kalman(sys,Qn,Rn,Nn)` |
 | `Kalmd` | Discrete-time Kalman estimator from sampled model data |
-| `Estim` | Observer model assembled from a plant and observer gain |
+| `Estim` | Observer model from a plant and observer gain, as MATLAB `estim(sys,L,sensors,known)` |
 | `Reg` | Observer-based regulator assembled from plant, state-feedback gain, and observer gain |
 | `Lqi` | LQR with integral action from a `System` model (MATLAB `lqi`: integrates r - y with D, forward Euler with Ts in discrete time) |
 | `Lqg` | LQG regulator or servo controller (MATLAB `lqg`: QXU/QWV weights, G = I noise model, optional QI, 1-DOF, current estimator) |

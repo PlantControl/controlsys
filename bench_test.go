@@ -1244,7 +1244,7 @@ func benchKalman(b *testing.B, n, m, p int) {
 	opts := &RiccatiOpts{Workspace: ws}
 	b.ResetTimer()
 	for range b.N {
-		Kalman(sys, Qn, Rn, opts)
+		Kalman(sys, Qn, Rn, nil, opts)
 	}
 }
 
@@ -1260,7 +1260,7 @@ func benchEstim(b *testing.B, n, m, p int) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		Estim(sys, L)
+		estimAll(sys, L)
 	}
 }
 

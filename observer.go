@@ -6,31 +6,40 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// Lqe computes the Kalman estimator gain via duality with LQR, matching
-// MATLAB lqe(A,G,C,Qn,Rn,N) for dx/dt = Ax + Gw, y = Cx + v.
-// It solves the continuous CARE for the dual system (A', C', G*Qn*G', Rn) with
-// cross term G*N and returns observer gain L (n×p) such that eig(A - L*C) is
-// stable.
+// Lqe computes the Kalman estimator gain via duality with LQR, as MATLAB
+// lqe(A,G,C,Qn,Rn,Nn) (https://www.mathworks.com/help/control/ref/lqe.html)
+// for dx/dt = Ax + Gw, y = Cx + v. It solves the continuous CARE for the dual
+// system (A', C', G*Qn*G', Rn) with cross term G*Nn and returns observer gain
+// L (n×p) such that eig(A - L*C) is stable.
 //
-// A is n×n, G is n×g (noise input), C is p×n, Qn is g×g, Rn is p×p.
-// opts.S, when set, is the g×p noise cross-covariance N = E{w v'}. opts.E is
-// rejected with ErrOptionUnsupported.
-func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	if opts != nil && opts.E != nil {
-		return nil, fmt.Errorf("Lqe: opts.E: %w", ErrOptionUnsupported)
+// A is n×n, G is n×g (noise input), C is p×n, Qn is g×g, Rn is p×p and Nn,
+// the g×p noise cross-covariance E{w v'}, may be nil for 0. opts carries only
+// the Workspace (sized NewRiccatiWorkspace(n, p)); opts.S and opts.E return
+// ErrOptionUnsupported.
+func Lqe(A, G, C, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	for _, m := range []struct {
+		name string
+		m    *mat.Dense
+	}{{"A", A}, {"G", G}, {"C", C}} {
+		if err := requireFiniteDense("Lqe", m.name, m.m); err != nil {
+			return nil, err
+		}
+	}
+	if err := rejectKalmanOpts("Lqe", opts); err != nil {
+		return nil, err
 	}
 	na, nac := A.Dims()
 	if na != nac {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Lqe: A is %d×%d, want square: %w", na, nac, ErrDimensionMismatch)
 	}
 	n := na
 	ng, g := G.Dims()
 	if ng != n {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Lqe: G has %d rows, want %d: %w", ng, n, ErrDimensionMismatch)
 	}
 	p, cn := C.Dims()
 	if cn != n {
-		return nil, ErrDimensionMismatch
+		return nil, fmt.Errorf("Lqe: C has %d columns, want %d: %w", cn, n, ErrDimensionMismatch)
 	}
 	if err := validateCovarianceRole("Lqe", covarianceProcessNoise, Qn, g); err != nil {
 		return nil, err
@@ -38,8 +47,7 @@ func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) 
 	if err := validateCovarianceRole("Lqe", covarianceMeasurementNoise, Rn, p); err != nil {
 		return nil, err
 	}
-	Nn, err := noiseCrossCovariance("Lqe", opts, g, p)
-	if err != nil {
+	if err := validateNoiseCrossCovariance("Lqe", Nn, g, p); err != nil {
 		return nil, err
 	}
 
@@ -47,6 +55,21 @@ func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) 
 		return nil, fmt.Errorf("Lqe: no states: %w", ErrDimensionMismatch)
 	}
 	return kalmanGain("Lqe", true, A, nil, G, C, nil, Qn, Rn, Nn, opts)
+}
+
+// rejectKalmanOpts keeps opts to the Workspace: the noise cross-covariance is
+// the positional Nn argument, as in MATLAB.
+func rejectKalmanOpts(op string, opts *RiccatiOpts) error {
+	if opts == nil {
+		return nil
+	}
+	if opts.S != nil {
+		return fmt.Errorf("%s: opts.S: pass the noise cross-covariance as Nn: %w", op, ErrOptionUnsupported)
+	}
+	if opts.E != nil {
+		return fmt.Errorf("%s: opts.E: %w", op, ErrOptionUnsupported)
+	}
+	return nil
 }
 
 // Kalman computes the Kalman filter gain for a state-space system, matching
@@ -60,10 +83,14 @@ func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) 
 // L = (A*P*C' + Nbar)*(C*P*C' + Rbar)⁻¹ in discrete time, with X = P.
 // Rbar must be positive definite.
 //
-// Qn is m×m (process noise covariance), Rn is p×p (measurement noise
-// covariance). opts.S, when set, is the m×p cross-covariance N = E{w v'}
-// (MATLAB's Nn). Plants with delays are rejected with ErrDelayUnsupported,
-// as MATLAB requires a delay-free (Padé/absorbDelay) model.
+// The arguments follow MATLAB kalman(sys,Qn,Rn,Nn)
+// (https://www.mathworks.com/help/control/ref/ss.kalman.html): Qn is m×m
+// (process noise covariance), Rn is p×p (measurement noise covariance) and
+// Nn, the m×p cross-covariance E{w v'}, may be nil for 0. opts carries only
+// the Workspace (sized NewRiccatiWorkspace(n, p)); opts.S and opts.E return
+// ErrOptionUnsupported. Plants with delays are rejected with
+// ErrDelayUnsupported, as MATLAB requires a delay-free (Padé/absorbDelay)
+// model.
 //
 // A descriptor plant E x' = Ax + Gw with nonsingular E is solved with the
 // dual generalized Riccati equation (Care/Dare with opts.E = E'). X = P is
@@ -74,9 +101,14 @@ func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) 
 //
 // that Estim and Reg build from sys, i.e. E times the explicit-model gain.
 // MATLAB's kalman documentation does not specify descriptor models; this is
-// the form consistent with Estim. Singular E returns ErrDescriptorSingular
-// and opts.E ErrOptionUnsupported.
-func Kalman(sys *System, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+// the form consistent with Estim. Singular E returns ErrDescriptorSingular.
+func Kalman(sys *System, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	if err := requireSystem("Kalman", sys); err != nil {
+		return nil, err
+	}
+	if err := rejectKalmanOpts("Kalman", opts); err != nil {
+		return nil, err
+	}
 	policy, err := newControllerObserverPolicy(sys, "Kalman")
 	if err != nil {
 		return nil, err
@@ -84,28 +116,26 @@ func Kalman(sys *System, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, 
 	if policy.p == 0 {
 		return nil, fmt.Errorf("Kalman: model has no measured outputs: %w", ErrDimensionMismatch)
 	}
-	if err := policy.rejectOptsE(opts); err != nil {
-		return nil, err
-	}
 	if err := policy.validateNoise(Qn, Rn); err != nil {
 		return nil, err
 	}
-	Nn, err := noiseCrossCovariance("Kalman", opts, policy.m, policy.p)
-	if err != nil {
+	if err := validateNoiseCrossCovariance("Kalman", Nn, policy.m, policy.p); err != nil {
 		return nil, err
 	}
 	return kalmanGain("Kalman", sys.IsContinuous(), sys.A, sys.E, sys.B, sys.C, sys.D, Qn, Rn, Nn, opts)
 }
 
-func noiseCrossCovariance(context string, opts *RiccatiOpts, g, p int) (*mat.Dense, error) {
-	if opts == nil || opts.S == nil {
-		return nil, nil
+func validateNoiseCrossCovariance(op string, Nn *mat.Dense, g, p int) error {
+	if Nn == nil {
+		return nil
 	}
-	r, c := opts.S.Dims()
-	if r != g || c != p {
-		return nil, fmt.Errorf("%s: noise cross-covariance is %dx%d, want %dx%d: %w", context, r, c, g, p, ErrDimensionMismatch)
+	if err := requireFiniteDense(op, "Nn", Nn); err != nil {
+		return err
 	}
-	return opts.S, nil
+	if r, c := Nn.Dims(); r != g || c != p {
+		return fmt.Errorf("%s: Nn is %d×%d, want %d×%d: %w", op, r, c, g, p, ErrDimensionMismatch)
+	}
+	return nil
 }
 
 func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -175,6 +205,9 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 // x' = E⁻¹Ax + E⁻¹Bw, so the result is that of the explicit discrete model;
 // singular E returns ErrDescriptorSingular.
 func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
+	if err := requireSystem("Kalmd", sys); err != nil {
+		return nil, err
+	}
 	if opts != nil && opts.S != nil {
 		return nil, fmt.Errorf("Kalmd: cross-term S: %w", ErrOptionUnsupported)
 	}
@@ -182,7 +215,7 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 		return nil, fmt.Errorf("Kalmd: %w", ErrWrongDomain)
 	}
 	if dt <= 0 || newTimeDomain(dt).validateSampleTime() != nil {
-		return nil, ErrInvalidSampleTime
+		return nil, fmt.Errorf("Kalmd: dt %g: %w", dt, ErrInvalidSampleTime)
 	}
 	policy, err := newControllerObserverPolicy(sys, "Kalmd")
 	if err != nil {
@@ -293,14 +326,28 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 	return &RiccatiResult{X: res.X, K: L, Eig: res.Eig, Rcnd: res.Rcnd}, nil
 }
 
-// Estim constructs an estimator system from a plant and observer gain L.
-// The estimator takes [u; y] as input and produces [y_hat; x_hat] as output.
+// Estim constructs the state estimator of a plant with observer gain L, as
+// MATLAB estim(sys,L,sensors,known)
+// (https://www.mathworks.com/help/control/ref/ss.estim.html). sensors indexes
+// the measured outputs y (nil means all) and known the deterministic inputs u
+// (nil means none: every input is stochastic, as MATLAB estim(sys,L)).
+// Indices are 0-based, distinct and in range, else ErrInvalidArgument. With
+// C2, D22 the rows of C, D for sensors and B2 the columns of B for known, the
+// estimator is
 //
-// L is n×p. Returns system with n states, (m+p) inputs, (p+n) outputs.
-// A descriptor E is carried over (E x̂' = A x̂ + ...). Plant input delays are
-// applied to the u inputs; output, I/O-matrix and internal delays are rejected
-// with ErrDelayUnsupported.
-func Estim(sys *System, L *mat.Dense) (*System, error) {
+//	x̂' = (A - L·C2)x̂ + (B2 - L·D22)u + L·y,  [ŷ; x̂] = [C2; I]x̂ + [D22; 0]u
+//
+// (x̂[k+1] for discrete models), with inputs [u; y] and outputs [ŷ; x̂]. L
+// is n×len(sensors). A descriptor E is carried over (E x̂' = ...). Input
+// delays of known inputs carry over; output, I/O-matrix and internal delays
+// are rejected with ErrDelayUnsupported.
+func Estim(sys *System, L *mat.Dense, sensors, known []int) (*System, error) {
+	if err := requireSystem("Estim", sys); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Estim", "L", L); err != nil {
+		return nil, err
+	}
 	n, m, p := sys.Dims()
 	if n == 0 {
 		return nil, fmt.Errorf("Estim: system has no states: %w", ErrDimensionMismatch)
@@ -308,50 +355,108 @@ func Estim(sys *System, L *mat.Dense) (*System, error) {
 	if delaySliceHasNonzero(sys.OutputDelay) || delayMatrixHasNonzero(sys.Delay) || sys.HasInternalDelay() {
 		return nil, fmt.Errorf("Estim: %w", ErrDelayUnsupported)
 	}
-	lr, lc := L.Dims()
-	if lr != n || lc != p {
-		return nil, ErrDimensionMismatch
+	if sensors == nil {
+		sensors = identityIndices(p)
+	}
+	if err := validateChannelIndices("Estim", "sensors", sensors, p); err != nil {
+		return nil, err
+	}
+	if len(sensors) == 0 {
+		return nil, fmt.Errorf("Estim: sensors is empty: %w", ErrInvalidArgument)
+	}
+	if err := validateChannelIndices("Estim", "known", known, m); err != nil {
+		return nil, err
+	}
+	ps, mk := len(sensors), len(known)
+	if lr, lc := L.Dims(); lr != n || lc != ps {
+		return nil, fmt.Errorf("Estim: L is %d×%d, want %d×%d: %w", lr, lc, n, ps, ErrDimensionMismatch)
 	}
 
-	// Ae = A - L*C
-	Ae := mulDims(n, n, L, sys.C)
+	C2 := mat.NewDense(ps, n, nil)
+	for i, row := range sensors {
+		C2.SetRow(i, mat.Row(nil, row, sys.C))
+	}
+	B2 := newDense(n, mk)
+	D22 := newDense(ps, mk)
+	for j, col := range known {
+		for i := range n {
+			B2.Set(i, j, sys.B.At(i, col))
+		}
+		for i, row := range sensors {
+			D22.Set(i, j, sys.D.At(row, col))
+		}
+	}
+
+	Ae := mulDims(n, n, L, C2)
 	Ae.Sub(sys.A, Ae)
 
-	// Be = [B - L*D, L]
-	BmLD := mulDims(n, m, L, sys.D)
-	if m > 0 {
-		BmLD.Sub(sys.B, BmLD)
+	Be := newDense(n, mk+ps)
+	if mk > 0 {
+		BmLD := mulDims(n, mk, L, D22)
+		BmLD.Sub(B2, BmLD)
+		setBlock(Be, 0, 0, BmLD)
 	}
+	setBlock(Be, 0, mk, L)
 
-	mp := m + p
-	Be := newDense(n, mp)
-	setBlock(Be, 0, 0, BmLD)
-	setBlock(Be, 0, m, L)
-
-	// Ce = [C; I_n]
-	pn := p + n
-	Ce := mat.NewDense(pn, n, nil)
-	setBlock(Ce, 0, 0, sys.C)
+	Ce := mat.NewDense(ps+n, n, nil)
+	setBlock(Ce, 0, 0, C2)
 	for i := range n {
-		Ce.Set(p+i, i, 1)
+		Ce.Set(ps+i, i, 1)
 	}
 
-	// De = [D, 0; 0, 0]
-	De := newDense(pn, mp)
-	setBlock(De, 0, 0, sys.D)
+	De := newDense(ps+n, mk+ps)
+	if mk > 0 {
+		setBlock(De, 0, 0, D22)
+	}
 
 	result, err := New(Ae, Be, Ce, De, sys.Dt)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Estim: %w", err)
 	}
 	result.E = copyDescriptorE(sys.E)
 	if delaySliceHasNonzero(sys.InputDelay) {
-		result.InputDelay = make([]float64, mp)
-		copy(result.InputDelay, sys.InputDelay)
+		result.InputDelay = make([]float64, mk+ps)
+		for j, col := range known {
+			result.InputDelay[j] = sys.InputDelay[col]
+		}
 	}
-	result.InputName = concatStringSlices([][]string{sys.InputName, sys.OutputName}, []int{m, p})
-	result.OutputName = concatStringSlices([][]string{sys.OutputName, sys.StateName}, []int{p, n})
+	inNames, outNames := selectNames(sys.InputName, known), selectNames(sys.OutputName, sensors)
+	result.InputName = concatStringSlices([][]string{inNames, outNames}, []int{mk, ps})
+	result.OutputName = concatStringSlices([][]string{outNames, sys.StateName}, []int{ps, n})
 	return result, nil
+}
+
+func identityIndices(n int) []int {
+	idx := make([]int, n)
+	for i := range idx {
+		idx[i] = i
+	}
+	return idx
+}
+
+func validateChannelIndices(op, name string, idx []int, count int) error {
+	seen := make(map[int]bool, len(idx))
+	for _, i := range idx {
+		if i < 0 || i >= count || seen[i] {
+			return fmt.Errorf("%s: %s index %d out of range [0,%d) or repeated: %w", op, name, i, count, ErrInvalidArgument)
+		}
+		seen[i] = true
+	}
+	return nil
+}
+
+// selectNames picks names[idx]; nil names stay nil.
+func selectNames(names []string, idx []int) []string {
+	if names == nil {
+		return nil
+	}
+	out := make([]string, len(idx))
+	for k, i := range idx {
+		if i < len(names) {
+			out[k] = names[i]
+		}
+	}
+	return out
 }
 
 // Reg constructs a regulator (observer-based controller) from a plant,
@@ -431,5 +536,5 @@ func dualRiccatiSetup(A, B, C, Qn *mat.Dense, n, m, p int) (GQnGt, At, Ct *mat.D
 		}
 	}
 	Ct = mat.NewDense(n, p, ctData)
-	return
+	return GQnGt, At, Ct
 }

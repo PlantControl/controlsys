@@ -188,7 +188,7 @@ func TestPRD125MatrixEquationPublicNumericalBehavior(t *testing.T) {
 	if _, err := Dlqr(sys.A, sys.B, Q, R, nil); err != nil {
 		t.Fatalf("Dlqr with nonsymmetric A: %v", err)
 	}
-	if _, err := Kalman(sys, mat.NewDense(1, 1, []float64{0.2}), mat.NewDense(1, 1, []float64{0.4}), nil); err != nil {
+	if _, err := Kalman(sys, mat.NewDense(1, 1, []float64{0.2}), mat.NewDense(1, 1, []float64{0.4}), nil, nil); err != nil {
 		t.Fatalf("Kalman with nonsymmetric A: %v", err)
 	}
 	if h2, err := H2Norm(sys); err != nil || h2 <= 0 || math.IsNaN(h2) {

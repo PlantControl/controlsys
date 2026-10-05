@@ -207,7 +207,7 @@ func aliasCases() []aliasCase {
 		{"Inv", aliasPick(fxPlant), aliasOne(Inv)},
 		{"Inv/gain", aliasPick(fxGain), aliasOne(Inv)},
 		{"Estim", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
-			return Estim(s, mat.NewDense(3, 2, []float64{0.1, 0, 0, 0.2, 0.1, 0.1}))
+			return estimAll(s, mat.NewDense(3, 2, []float64{0.1, 0, 0, 0.2, 0.1, 0.1}))
 		})},
 		{"Reg", aliasPick(fxPlant), aliasOne(func(s *System) (*System, error) {
 			return Reg(s, mat.NewDense(2, 3, []float64{0.1, 0, 0.2, 0, 0.3, 0}), mat.NewDense(3, 2, []float64{0.1, 0, 0, 0.2, 0.1, 0.1}))
