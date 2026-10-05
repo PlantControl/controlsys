@@ -722,3 +722,94 @@ func TestDot2AddProdErrorFree(t *testing.T) {
 		t.Fatalf("dot2 value = %g, want %g; a*b fused into the TwoSum add", got, 0x1p-54)
 	}
 }
+
+// 6FISAR: sweeps of more than a few points once went through the
+// transfer-function polynomials whenever n > 40, which are useless at this
+// order. The user-facing sweep is held to the refined oracle on the twin.
+func TestFreqResponseSweepHighOrder(t *testing.T) {
+	const points, stride = 25, 6
+	orders := []int{41, 120, 204}
+	if testing.Short() {
+		orders = orders[:2]
+	}
+	for _, n := range orders {
+		for kind := range sweepModelKinds {
+			for _, dt := range []float64{0, 0.05} {
+				rng := rand.New(rand.NewPCG(uint64(n), uint64(kind)))
+				m, p := 1+rng.IntN(3), 1+rng.IntN(4)
+				sys, twin := randomSweepRealization(rng, kind, dt, false, n, m, p)
+				omega := logspace(-3, 3, points)
+				if dt > 0 {
+					omega = logspace(-3, math.Log10(math.Pi/dt), points)
+				}
+				got, err := sys.FreqResponse(omega)
+				if err != nil {
+					t.Fatal(err)
+				}
+				td := newTimeDomain(dt)
+				for k := 0; k < points; k += stride {
+					want := oracleResponse(t, twin, td.frequencyVariable(omega[k]), n, m, p)
+					norm, diff := 0.0, 0.0
+					for i, v := range want {
+						norm = max(norm, cmplx.Abs(v))
+						diff = max(diff, cmplx.Abs(got.Data[k*p*m+i]-v))
+					}
+					if e := diff / norm; !(e <= 1e-12) {
+						t.Errorf("n=%d kind=%v dt=%g m=%d p=%d ω=%g: rel err %g", n, kind, dt, m, p, omega[k], e)
+					}
+				}
+			}
+		}
+	}
+}
+
+// The 204-state H∞ mixed-sensitivity closed loop of 6FISAR, whose Sigma
+// peaked at 0.5746 near 6.74 rad/s instead of 0.3941. Its near-optimal
+// controller makes the loop so ill-conditioned that even single-point GEPP
+// is 4e-11 off the refined oracle (sweep: 3e-11), and the controller varies
+// with build flags, hence 1e-9.
+func TestSigmaHighOrderHinfLoop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("HinfSyn on a 102-state plant")
+	}
+	P := mixedSensitivityPlant(t, randomHinfTestPlant(t, 100, 2, 7), 1, 0.01, 0, 0.1)
+	res, err := HinfSyn(P, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := closedLoop(t, P, res.K, 2, 2)
+	n, m, p := cl.Dims()
+	omega := append(logspace(-3, 3, 51), 6.74)
+	resp, err := cl.FreqResponse(omega)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sigma, err := cl.Sigma(omega, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, w := range omega {
+		want := oracleResponse(t, cl, complex(0, w), n, m, p)
+		norm, diff := 0.0, 0.0
+		var g11, g22 float64
+		var g12 complex128
+		for i, v := range want {
+			norm = max(norm, cmplx.Abs(v))
+			diff = max(diff, cmplx.Abs(resp.Data[k*p*m+i]-v))
+			if i%m == 0 {
+				g11 += real(v * cmplx.Conj(v))
+				g12 += cmplx.Conj(v) * want[i+1]
+			} else {
+				g22 += real(v * cmplx.Conj(v))
+			}
+		}
+		if e := diff / norm; !(e <= 1e-9) {
+			t.Errorf("ω=%g: FreqResponse rel err %g", w, e)
+		}
+		h := (g11 - g22) / 2
+		sMax := math.Sqrt((g11+g22)/2 + math.Sqrt(h*h+real(g12*cmplx.Conj(g12))))
+		if e := math.Abs(sigma.At(k, 0)-sMax) / sMax; !(e <= 1e-9) {
+			t.Errorf("ω=%g: σmax %g, oracle %g", w, sigma.At(k, 0), sMax)
+		}
+	}
+}
