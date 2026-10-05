@@ -527,6 +527,10 @@ func (problem riccatiProblem) discreteStableSubspace() (riccatiSubspace, error) 
 	return problem.generalizedStableSubspace(false)
 }
 
+// regularDiscreteStableSubspace orders the symplectic matrix built from
+// A⁻ᵀ. suitable false (nil error) means A is too ill-conditioned for that
+// form and the caller uses the extended pencil instead; a non-nil error is
+// a failure of the suitable path.
 func (problem riccatiProblem) regularDiscreteStableSubspace() (subspace riccatiSubspace, suitable bool, err error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	nn := 2 * n

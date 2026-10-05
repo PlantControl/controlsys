@@ -16,12 +16,16 @@ import (
 // of [Cs D]); they are not applied to Sys.
 type PrescaleResult struct {
 	Sys  *System
-	Info struct {
-		LeftScale   []float64
-		StateScale  []float64
-		InputScale  []float64
-		OutputScale []float64
-	}
+	Info PrescaleInfo
+}
+
+// PrescaleInfo is the scaling information of Prescale, as MATLAB prescale's
+// info output; see PrescaleResult.
+type PrescaleInfo struct {
+	LeftScale   []float64
+	StateScale  []float64
+	InputScale  []float64
+	OutputScale []float64
 }
 
 // Prescale scales the state vector of sys to improve the accuracy of

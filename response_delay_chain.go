@@ -40,7 +40,9 @@ type chainSource struct {
 }
 
 // delayChainModel returns the explicit form of sys and its common internal
-// delay when sys is a continuous model the chain samples exactly.
+// delay when sys is a continuous model the chain samples exactly. A model
+// ToExplicit cannot reduce is outside the chain's class (ok false); the
+// caller's ZOH path then reports or handles it.
 func delayChainModel(sys *System) (*System, float64, bool) {
 	if !sys.IsContinuous() || !sys.HasInternalDelay() {
 		return nil, 0, false
@@ -59,7 +61,9 @@ func delayChainModel(sys *System) (*System, float64, bool) {
 }
 
 // newDelayChain builds the chain for the given input columns; shifts bounds
-// the distinct source shifts, each costing one exponential per block.
+// the distinct source shifts, each costing one exponential per block. ok is
+// false when the chain would exceed delayChainMaxExpm or delayChainMaxWork;
+// callers then fall back to the approximate ZOH discretization.
 func newDelayChain(sys *System, tau float64, inputs []int, dt float64, steps, shifts int) (*delayChain, bool) {
 	n, _, p := sys.Dims()
 	q := len(sys.LFT.Tau)
@@ -309,7 +313,7 @@ func (c *delayChain) response(Y *mat.Dense, rowOffset int, sourcesFor func(r int
 		src := sourcesFor(r)
 		var key strings.Builder
 		for _, s := range src {
-			key.WriteString(fmt.Sprintf("%v,", s.shift))
+			fmt.Fprintf(&key, "%v,", s.shift)
 		}
 		if _, ok := groups[key.String()]; !ok {
 			keys = append(keys, key.String())
