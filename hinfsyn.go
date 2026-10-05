@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -12,7 +13,9 @@ import (
 
 // HinfSynResult is an H∞ controller, as MATLAB hinfsyn returns K, gamma and
 // info: X and Y are the state-feedback and filter Riccati solutions at
-// GammaOpt and CLPoles the closed-loop poles.
+// GammaOpt and CLPoles the closed-loop poles. For a discrete plant X and Y
+// solve the Riccati equations of its Tustin-equivalent continuous plant (in
+// the same state coordinates), not discrete Riccati equations.
 type HinfSynResult struct {
 	K *System
 	// GammaOpt is the gamma K is built for: ||T_zw||inf < GammaOpt, within
@@ -24,15 +27,40 @@ type HinfSynResult struct {
 }
 
 // HinfSyn computes a suboptimal H-infinity output-feedback controller for the
-// continuous generalized plant P whose last nmeas outputs are measurements
-// and last ncont inputs are controls, bisecting to the smallest achievable
-// gamma. A nonzero D11 uses the Glover-Doyle general formulas, whose central
+// generalized plant P whose last nmeas outputs are measurements and last
+// ncont inputs are controls, bisecting to the smallest achievable gamma, as
+// MATLAB hinfsyn(P,nmeas,ncont); see
+// https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfsyn.html.
+// A nonzero D11 uses the Glover-Doyle general formulas, whose central
 // controller may have feedthrough. A nonzero D22 is handled by a loop shift:
 // K is designed for D22 = 0 and returned as K0 (I + D22 K0)^-1, giving the
 // same closed loop and gamma.
+//
+// D12 must have full column rank and D21 full row rank; otherwise HinfSyn
+// returns ErrInvalidPartition (MATLAB regularizes the plant instead).
+//
+// A discrete P (Ts > 0) is mapped to continuous time by the Tustin
+// transform, which preserves the H∞ norm and closed-loop stability exactly;
+// K is the continuous design mapped back, with P's sample time, so GammaOpt
+// equals the continuous design on P.D2C with Tustin. The rank conditions then
+// apply to P12 and P21 at z = -1, the unit-circle point Tustin sends to
+// s = ∞, in line with MATLAB's requirement that they have no zeros on the
+// unit circle. A plant mode at z = -1 is handled by designing for P(-z) and
+// reflecting K back; modes at both z = 1 and z = -1 return
+// ErrOptionUnsupported.
 func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	gp, err := partitionGeneralizedPlant("HinfSyn", P, nmeas, ncont)
 	if err != nil {
+		return nil, err
+	}
+	if P.IsDiscrete() {
+		return hinfSynDiscrete(gp.op, P, nmeas, ncont)
+	}
+	return hinfSynPartition(gp, "D12", "D21")
+}
+
+func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string) (*HinfSynResult, error) {
+	if err := gp.requireRegularFeedthrough(d12, d21); err != nil {
 		return nil, err
 	}
 	if err := gp.validateControllerChannels(); err != nil {
@@ -43,9 +71,63 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	}
 	gamma, err := hinfControllerGamma(0, func(g float64) bool { return hinfFeasible(gp, g) })
 	if err != nil {
-		return nil, fmt.Errorf("HinfSyn: %w", err)
+		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
 	return hinfSynD11Zero(gp, gamma)
+}
+
+// hinfSynDiscrete designs for the discrete plant P through the Tustin map
+// z = (β+s)/(β−s), β = 2/Ts, or through z = −(β+s)/(β−s) applied to P(−z)
+// when I + A is worse conditioned than I − A (a mode at or near z = −1,
+// which the plain map sends to s = ∞). Both maps take the unit circle onto
+// the imaginary axis and the open unit disk onto the open left half-plane.
+func hinfSynDiscrete(op string, P *System, nmeas, ncont int) (*HinfSynResult, error) {
+	n, _, _ := P.Dims()
+	var plus, minus mat.LU
+	IpA, ImA := eyeDense(n), eyeDense(n)
+	IpA.Add(IpA, P.A)
+	ImA.Sub(ImA, P.A)
+	plus.Factorize(IpA)
+	minus.Factorize(ImA)
+	reflect := plus.Cond() > minus.Cond()
+	Pd, point := P, "-1"
+	if reflect {
+		Pd = P.Copy()
+		Pd.A.Scale(-1, Pd.A)
+		Pd.B.Scale(-1, Pd.B)
+		point = "1"
+	}
+	Pc, err := Pd.undiscretizeTustin(0)
+	if errors.Is(err, ErrSingularTransform) {
+		return nil, fmt.Errorf("%s: plant has modes at both z = 1 and z = -1, which no Tustin map can take to continuous time: %w", op, ErrOptionUnsupported)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	gp, err := partitionGeneralizedPlant(op, Pc, nmeas, ncont)
+	if err != nil {
+		return nil, err
+	}
+	res, err := hinfSynPartition(gp, "P12(z = "+point+")", "P21(z = "+point+")")
+	if err != nil {
+		return nil, err
+	}
+	K, err := res.K.discretizeTustin(P.Dt, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%s: mapping the controller back to discrete time: %w", op, err)
+	}
+	beta := 2 / P.Dt
+	sign := complex(1, 0)
+	if reflect {
+		K.A.Scale(-1, K.A)
+		K.B.Scale(-1, K.B)
+		sign = -1
+	}
+	for i, s := range res.CLPoles {
+		res.CLPoles[i] = sign * (complex(beta, 0) + s) / (complex(beta, 0) - s)
+	}
+	res.K = K
+	return res, nil
 }
 
 // hinfGammaFloor ends bisection when the optimum is zero, where the

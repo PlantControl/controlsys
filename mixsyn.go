@@ -224,12 +224,16 @@ type MixsynResult struct {
 // should be stable and G stabilizable and detectable, as MATLAB requires.
 // MATLAB's gamTry, gamRange and opts arguments are not supported.
 //
-// Errors are Augw's, plus: D12 = [−W1(∞)·G(∞); W2(∞); W3·G(∞)] without full
-// column rank (for example W2 nil with a strictly proper G) returns
-// ErrInvalidPartition, since the Riccati synthesis needs it; a discrete G
-// returns HinfSyn's ErrWrongDomain (MATLAB also handles discrete plants,
-// this library's HinfSyn does not); delays return ErrDelayUnsupported, as
-// MATLAB hinfsyn rejects them; and synthesis failures are HinfSyn's.
+// A discrete G (with discrete weights of the same sample time) is designed
+// by HinfSyn's Tustin route.
+//
+// Errors are Augw's, plus: for a continuous G, D12 = [−W1(∞)·G(∞); W2(∞);
+// W3·G(∞)] without full column rank (for example W2 nil with a strictly
+// proper G) returns ErrInvalidPartition, since the Riccati synthesis needs
+// it; for a discrete G the same condition applies at z = −1 instead of
+// s = ∞, so W2 may be nil for a strictly proper G with G(−1) ≠ 0; delays
+// return ErrDelayUnsupported, as MATLAB hinfsyn rejects them; and synthesis
+// failures are HinfSyn's.
 func Mixsyn(G, W1, W2, W3 *System) (*MixsynResult, error) {
 	const op = "Mixsyn"
 	P, err := augw(op, G, W1, W2, W3)
@@ -238,7 +242,7 @@ func Mixsyn(G, W1, W2, W3 *System) (*MixsynResult, error) {
 	}
 	_, nu, ny := G.Dims()
 	_, m, p := P.Dims()
-	if p > ny && nu > 0 {
+	if P.IsContinuous() && p > ny && nu > 0 {
 		if !fullColumnRank(mat.DenseCopyOf(P.D.Slice(0, p-ny, m-nu, m))) {
 			return nil, fmt.Errorf("%s: D12 = [−W1·D_G; W2(∞); W3·D_G] has rank below %d; W2 needs feedthrough or G must be biproper: %w", op, nu, ErrInvalidPartition)
 		}
