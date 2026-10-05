@@ -2132,16 +2132,19 @@ func marginRandomLoop(n int, kind sweepModelKind, dt float64, descriptor, mimo b
 // AllMargin and Bandwidth find every crossing of high-order loops, where
 // polynomial candidates from the transfer function missed some from about
 // order 60 (ergo MY3SAU). Phase crossovers of continuous delayed loops come
-// from a grid search and are not checked here.
+// from a grid search and are not checked here; their gain crossings and
+// bandwidth are checked against the delay-free twin, which has the same |L|
+// without a phase that winds 0.2·ω rad.
 func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
 	orders := []int{20, 60, 100, 150}
-	if testing.Short() {
+	if testing.Short() || raceEnabled {
 		orders = orders[:2]
 	}
 	for _, n := range orders {
 		for _, dt := range []float64{0, 0.05} {
 			for _, variant := range []string{"siso", "mimo", "descriptor", "delay"} {
-				if (variant == "descriptor" || variant == "delay") && n > 60 {
+				if (variant == "descriptor" || variant == "delay") && n > 60 ||
+					raceEnabled && (variant == "mimo" || variant == "descriptor") && n > 20 {
 					continue
 				}
 				for kind := range sweepModelKinds {
@@ -2162,7 +2165,12 @@ func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						eval, err := newSISOEval(sys)
+						oracleSys := sys
+						if variant == "delay" && dt == 0 {
+							oracleSys = sys.Copy()
+							oracleSys.InputDelay = nil
+						}
+						eval, err := newSISOEval(oracleSys)
 						if err != nil {
 							t.Fatal(err)
 						}
