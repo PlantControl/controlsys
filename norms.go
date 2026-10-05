@@ -1110,21 +1110,3 @@ func maxSingularValue(M *mat.Dense) (float64, error) {
 	}
 	return sv[0], nil
 }
-
-func maxSVDense(D *mat.Dense, p, m int) float64 {
-	if D == nil || p == 0 || m == 0 {
-		return 0
-	}
-	raw := D.RawMatrix()
-	data := make([]float64, p*m)
-	copyStrided(data, m, raw.Data, raw.Stride, p, m)
-	sv := make([]float64, min(p, m))
-	wq := make([]float64, 1)
-	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, p, m, data, m, sv, nil, 1, nil, 1, wq, -1)
-	work := make([]float64, int(wq[0]))
-	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, p, m, data, m, sv, nil, 1, nil, 1, work, len(work))
-	if len(sv) == 0 {
-		return 0
-	}
-	return sv[0]
-}

@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -126,11 +127,11 @@ func TestMargin_Integrator(t *testing.T) {
 	if math.Abs(r.PhaseMargin-90) > 1 {
 		t.Errorf("PM = %v, want ~90 deg", r.PhaseMargin)
 	}
-	if !math.IsNaN(r.WpFreq) {
-		t.Errorf("WpFreq = %v, want NaN", r.WpFreq)
+	if !math.IsNaN(wpFreq(r)) {
+		t.Errorf("WpFreq = %v, want NaN", wpFreq(r))
 	}
-	if math.Abs(r.WgFreq-1) > 0.05 {
-		t.Errorf("WgFreq = %v, want ~1", r.WgFreq)
+	if math.Abs(wgFreq(r)-1) > 0.05 {
+		t.Errorf("WgFreq = %v, want ~1", wgFreq(r))
 	}
 }
 
@@ -162,14 +163,14 @@ func TestMargin_ThirdOrder(t *testing.T) {
 	if math.Abs(r.GainMargin-wantGM) > 0.5 {
 		t.Errorf("GM = %v dB, want ~%v dB", r.GainMargin, wantGM)
 	}
-	if math.Abs(r.WpFreq-math.Sqrt(2)) > 0.05 {
-		t.Errorf("WpFreq = %v, want ~%v", r.WpFreq, math.Sqrt(2))
+	if math.Abs(wpFreq(r)-math.Sqrt(2)) > 0.05 {
+		t.Errorf("WpFreq = %v, want ~%v", wpFreq(r), math.Sqrt(2))
 	}
 	if math.Abs(r.PhaseMargin-53.4) > 1.5 {
 		t.Errorf("PM = %v deg, want ~53.4 deg", r.PhaseMargin)
 	}
-	if math.Abs(r.WgFreq-0.446) > 0.05 {
-		t.Errorf("WgFreq = %v, want ~0.446", r.WgFreq)
+	if math.Abs(wgFreq(r)-0.446) > 0.05 {
+		t.Errorf("WgFreq = %v, want ~0.446", wgFreq(r))
 	}
 }
 
@@ -202,8 +203,8 @@ func TestMargin_NearUnstable(t *testing.T) {
 	if math.Abs(r.GainMargin-wantGM) > 0.3 {
 		t.Errorf("GM = %v dB, want ~%v dB", r.GainMargin, wantGM)
 	}
-	if math.Abs(r.WpFreq-math.Sqrt(10)) > 0.1 {
-		t.Errorf("WpFreq = %v, want ~%v", r.WpFreq, math.Sqrt(10))
+	if math.Abs(wpFreq(r)-math.Sqrt(10)) > 0.1 {
+		t.Errorf("WpFreq = %v, want ~%v", wpFreq(r), math.Sqrt(10))
 	}
 }
 
@@ -346,8 +347,8 @@ func TestMargin_WithDelay(t *testing.T) {
 	if math.Abs(r.PhaseMargin-wantPM) > 2 {
 		t.Errorf("PM = %v, want ~%v", r.PhaseMargin, wantPM)
 	}
-	if math.Abs(r.WgFreq-math.Sqrt(3)) > 0.1 {
-		t.Errorf("WgFreq = %v, want ~%v", r.WgFreq, math.Sqrt(3))
+	if math.Abs(wgFreq(r)-math.Sqrt(3)) > 0.1 {
+		t.Errorf("WgFreq = %v, want ~%v", wgFreq(r), math.Sqrt(3))
 	}
 }
 
@@ -706,11 +707,11 @@ func TestAllMargin_Discrete(t *testing.T) {
 	if math.Abs(m.PhaseMargin-32.4) > 2 {
 		t.Errorf("PM = %v deg, want ~32.4 deg", m.PhaseMargin)
 	}
-	if math.Abs(m.WgFreq-0.749) > 0.05 {
-		t.Errorf("WgFreq = %v, want ~0.749", m.WgFreq)
+	if math.Abs(wgFreq(m)-0.749) > 0.05 {
+		t.Errorf("WgFreq = %v, want ~0.749", wgFreq(m))
 	}
-	if math.Abs(m.WpFreq-1.404) > 0.05 {
-		t.Errorf("WpFreq = %v, want ~1.404", m.WpFreq)
+	if math.Abs(wpFreq(m)-1.404) > 0.05 {
+		t.Errorf("WpFreq = %v, want ~1.404", wpFreq(m))
 	}
 }
 
@@ -747,11 +748,11 @@ func TestAllMargin_MultipleGainCrossovers(t *testing.T) {
 	if math.Abs(m.PhaseMargin-67.6058) > 1.0 {
 		t.Errorf("PM = %v deg, want ~67.6058 deg", m.PhaseMargin)
 	}
-	if math.Abs(m.WgFreq-0.7663) > 0.03 {
-		t.Errorf("WgFreq = %v, want ~0.7663", m.WgFreq)
+	if math.Abs(wgFreq(m)-0.7663) > 0.03 {
+		t.Errorf("WgFreq = %v, want ~0.7663", wgFreq(m))
 	}
-	if math.Abs(m.WpFreq-1.7322) > 0.05 {
-		t.Errorf("WpFreq = %v, want ~1.7322", m.WpFreq)
+	if math.Abs(wpFreq(m)-1.7322) > 0.05 {
+		t.Errorf("WpFreq = %v, want ~1.7322", wpFreq(m))
 	}
 	_ = all
 }
@@ -779,8 +780,8 @@ func TestMargin_NonMinimumPhase(t *testing.T) {
 	if math.Abs(m.GainMargin-wantGM) > 0.5 {
 		t.Errorf("GM = %v dB, want ~%v dB", m.GainMargin, wantGM)
 	}
-	if math.Abs(m.WpFreq-5.6569) > 0.1 {
-		t.Errorf("WpFreq = %v, want ~5.6569", m.WpFreq)
+	if math.Abs(wpFreq(m)-5.6569) > 0.1 {
+		t.Errorf("WpFreq = %v, want ~5.6569", wpFreq(m))
 	}
 }
 
@@ -807,9 +808,7 @@ func TestAllMargin_NoCrossings(t *testing.T) {
 	}
 }
 
-// Bandwidth with MIMO system (exercises Sigma path)
-// Diagonal MIMO: diag(1/(s+1), 1/(s+2)) → max singular value = 1/(s+1)
-// -3dB bandwidth of 1/(s+1) is w=1
+// MATLAB bandwidth accepts only SISO models.
 func TestBandwidth_MIMO(t *testing.T) {
 	sys, err := NewFromSlices(2, 2, 2,
 		[]float64{-1, 0, 0, -2},
@@ -820,12 +819,8 @@ func TestBandwidth_MIMO(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bw, err := Bandwidth(sys, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if math.Abs(bw-1.0) > 0.15 {
-		t.Errorf("MIMO bandwidth = %v, want ~1.0 (from 1/(s+1) channel)", bw)
+	if _, err := Bandwidth(sys, 0); !errors.Is(err, ErrNotSISO) {
+		t.Errorf("MIMO bandwidth err = %v, want ErrNotSISO", err)
 	}
 }
 
@@ -840,11 +835,13 @@ func TestBandwidth_Integrator(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bw, err := Bandwidth(sys, 0)
-	if err == nil {
-		if bw != 0 {
-			t.Errorf("integrator bandwidth = %v, want 0 or error", bw)
-		}
+	if bw, err := Bandwidth(sys, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("integrator bandwidth = %v, %v; want ErrInvalidArgument (infinite DC gain)", bw, err)
+	}
+	zero := makeSISO(-1, 1, 1, 0)
+	zero.C.Set(0, 0, 0)
+	if bw, err := Bandwidth(zero, 0); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("zero-gain bandwidth = %v, %v; want ErrInvalidArgument", bw, err)
 	}
 }
 
@@ -1043,11 +1040,11 @@ func TestMargin_PythonControl_StableNoMargin(t *testing.T) {
 	if !math.IsInf(m.PhaseMargin, 1) {
 		t.Errorf("PM = %v, want +Inf", m.PhaseMargin)
 	}
-	if !math.IsNaN(m.WgFreq) {
-		t.Errorf("WgFreq = %v, want NaN", m.WgFreq)
+	if !math.IsNaN(wgFreq(m)) {
+		t.Errorf("WgFreq = %v, want NaN", wgFreq(m))
 	}
-	if !math.IsNaN(m.WpFreq) {
-		t.Errorf("WpFreq = %v, want NaN", m.WpFreq)
+	if !math.IsNaN(wpFreq(m)) {
+		t.Errorf("WpFreq = %v, want NaN", wpFreq(m))
 	}
 }
 
@@ -1072,11 +1069,11 @@ func TestMargin_PythonControl_StateSpace(t *testing.T) {
 	if math.Abs(m.PhaseMargin-147.0743) > 0.5 {
 		t.Errorf("PM = %v deg, want ~147.0743 deg", m.PhaseMargin)
 	}
-	if math.Abs(m.WgFreq-2.5483) > 0.02 {
-		t.Errorf("WgFreq = %v, want ~2.5483", m.WgFreq)
+	if math.Abs(wgFreq(m)-2.5483) > 0.02 {
+		t.Errorf("WgFreq = %v, want ~2.5483", wgFreq(m))
 	}
-	if !math.IsNaN(m.WpFreq) {
-		t.Errorf("WpFreq = %v, want NaN", m.WpFreq)
+	if !math.IsNaN(wpFreq(m)) {
+		t.Errorf("WpFreq = %v, want NaN", wpFreq(m))
 	}
 }
 
@@ -1146,11 +1143,11 @@ func TestMargin_Discrete_PythonControl_SecondCase(t *testing.T) {
 	if math.Abs(m.PhaseMargin-65.4212) > 0.5 {
 		t.Errorf("PM = %v deg, want ~65.4212 deg", m.PhaseMargin)
 	}
-	if math.Abs(m.WpFreq-1.6283) > 0.02 {
-		t.Errorf("WpFreq = %v, want ~1.6283", m.WpFreq)
+	if math.Abs(wpFreq(m)-1.6283) > 0.02 {
+		t.Errorf("WpFreq = %v, want ~1.6283", wpFreq(m))
 	}
-	if math.Abs(m.WgFreq-0.76625) > 0.02 {
-		t.Errorf("WgFreq = %v, want ~0.76625", m.WgFreq)
+	if math.Abs(wgFreq(m)-0.76625) > 0.02 {
+		t.Errorf("WgFreq = %v, want ~0.76625", wgFreq(m))
 	}
 }
 
@@ -1329,9 +1326,9 @@ func TestDiskMarginSkew_DenseGridOracle(t *testing.T) {
 			if math.Abs(dm.Alpha-1/peak) > 1e-8/peak {
 				t.Errorf("%s sigma=%g: alpha=%.12g, oracle %.12g", tc.name, sigma, dm.Alpha, 1/peak)
 			}
-			if got := cmplx.Abs(1/(1+tc.l(dm.Frequency)) + complex((sigma-1)/2, 0)); !math.IsInf(dm.Frequency, 1) &&
+			if got := cmplx.Abs(1/(1+tc.l(dmFreq(dm))) + complex((sigma-1)/2, 0)); !math.IsInf(dmFreq(dm), 1) &&
 				math.Abs(got-peak) > 1e-8*peak {
-				t.Errorf("%s sigma=%g: |S+c| at Frequency %g is %.12g, oracle peak %.12g at %g", tc.name, sigma, dm.Frequency, got, peak, wp)
+				t.Errorf("%s sigma=%g: |S+c| at Frequency %g is %.12g, oracle peak %.12g at %g", tc.name, sigma, dmFreq(dm), got, peak, wp)
 			}
 			ms, _ := diskPeakOracle(tc.l, tc.wmax, 0)
 			if math.Abs(dm.PeakSensitivity-ms) > 1e-8*ms {
@@ -1770,11 +1767,11 @@ func TestMargin_ClosedForms(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
-		if !math.IsNaN(c.gm) && (math.Abs(r.GainMargin-c.gm) > 1e-6 || math.Abs(r.WpFreq-c.wp) > 1e-6*c.wp) {
-			t.Errorf("%s: GM=%g@%g, want %g@%g", c.name, r.GainMargin, r.WpFreq, c.gm, c.wp)
+		if !math.IsNaN(c.gm) && (math.Abs(r.GainMargin-c.gm) > 1e-6 || math.Abs(wpFreq(r)-c.wp) > 1e-6*c.wp) {
+			t.Errorf("%s: GM=%g@%g, want %g@%g", c.name, r.GainMargin, wpFreq(r), c.gm, c.wp)
 		}
-		if !math.IsNaN(c.pm) && (math.Abs(r.PhaseMargin-c.pm) > 1e-6 || (!math.IsNaN(c.wg) && math.Abs(r.WgFreq-c.wg) > 1e-6*c.wg)) {
-			t.Errorf("%s: PM=%g@%g, want %g@%g", c.name, r.PhaseMargin, r.WgFreq, c.pm, c.wg)
+		if !math.IsNaN(c.pm) && (math.Abs(r.PhaseMargin-c.pm) > 1e-6 || (!math.IsNaN(c.wg) && math.Abs(wgFreq(r)-c.wg) > 1e-6*c.wg)) {
+			t.Errorf("%s: PM=%g@%g, want %g@%g", c.name, r.PhaseMargin, wgFreq(r), c.pm, c.wg)
 		}
 	}
 }
@@ -1885,8 +1882,8 @@ func TestAllMargin_NarrowPhaseDip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(m.WpFreq-w0) > 1e-2*w0 {
-		t.Errorf("Margin WpFreq=%g, want the dip near %g", m.WpFreq, w0)
+	if math.Abs(wpFreq(m)-w0) > 1e-2*w0 {
+		t.Errorf("Margin WpFreq=%g, want the dip near %g", wpFreq(m), w0)
 	}
 }
 
@@ -1937,8 +1934,8 @@ func TestAllMargin_FarCrossover(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if math.Abs(m.WgFreq-wc) > 1e-9*wc {
-			t.Errorf("wc=%g: WgFreq=%.15g", wc, m.WgFreq)
+		if math.Abs(wgFreq(m)-wc) > 1e-9*wc {
+			t.Errorf("wc=%g: WgFreq=%.15g", wc, wgFreq(m))
 		}
 		if pm := 90 - math.Atan(wc)*180/math.Pi; math.Abs(m.PhaseMargin-pm) > 1e-7 {
 			t.Errorf("wc=%g: PM=%.12g, want %.12g", wc, m.PhaseMargin, pm)
@@ -1986,10 +1983,10 @@ func TestMargin_ClosestToZeroSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(m.GainMargin-gm(w1)) > 1e-9 || math.Abs(m.WpFreq-w1) > 1e-12 {
-		t.Errorf("GM=%g@%g, want %g@%g", m.GainMargin, m.WpFreq, gm(w1), w1)
+	if math.Abs(m.GainMargin-gm(w1)) > 1e-9 || math.Abs(wpFreq(m)-w1) > 1e-12 {
+		t.Errorf("GM=%g@%g, want %g@%g", m.GainMargin, wpFreq(m), gm(w1), w1)
 	}
-	if got, _ := selectMargin([]float64{-30, 20, -5, 5}, []float64{1, 2, 3, 4}); got != -5 {
+	if got, w, _ := selectMargin([]float64{-30, 20, -5, 5}, []float64{1, 2, 3, 4}); got != -5 || w != 3 {
 		t.Errorf("selectMargin=%g, want -5 (closest to 0, lower frequency on a tie)", got)
 	}
 }
@@ -2162,7 +2159,15 @@ func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
 							t.Fatal(err)
 						}
 						bw, err := Bandwidth(sys, 0)
-						if err != nil {
+						dc, dcErr := sys.DCGain()
+						if dcErr != nil {
+							t.Fatal(dcErr)
+						}
+						if g := math.Abs(dc.At(0, 0)); g == 0 || math.IsInf(g, 0) || math.IsNaN(g) {
+							if !errors.Is(err, ErrInvalidArgument) {
+								t.Fatalf("bandwidth with DC gain %g: err = %v, want ErrInvalidArgument", g, err)
+							}
+						} else if err != nil {
 							t.Fatal(err)
 						}
 						oracleSys := sys
@@ -2185,9 +2190,8 @@ func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
 							marginExactMatch(t, "phase", marginCountIn(all.PhaseCrossFreqs, wlo, whi), pc)
 						}
 
-						dc, err := sys.DCGain()
-						if err != nil {
-							t.Fatal(err)
+						if g := math.Abs(dc.At(0, 0)); g == 0 || math.IsInf(g, 0) || math.IsNaN(g) {
+							return
 						}
 						bgc, _ := grid.crossings(math.Abs(dc.At(0, 0)) * math.Pow(10, -3.0/20))
 						want := math.Inf(1)
@@ -2288,5 +2292,128 @@ func TestAllMargin_SingularE(t *testing.T) {
 		gc, pc := newMarginDenseGrid(eval, 1e-5, whi).crossings(1)
 		marginExactMatch(t, fmt.Sprintf("dt=%g gain", dt), all.GainCrossFreqs, gc)
 		marginExactMatch(t, fmt.Sprintf("dt=%g phase", dt), all.PhaseCrossFreqs, pc)
+	}
+}
+
+func wgFreq(r *MarginResult) float64 {
+	if w, ok := r.GainCrossover(); ok {
+		return w
+	}
+	return math.NaN()
+}
+
+func wpFreq(r *MarginResult) float64 {
+	if w, ok := r.PhaseCrossover(); ok {
+		return w
+	}
+	return math.NaN()
+}
+
+func dmFreq(r *DiskMarginResult) float64 {
+	if w, ok := r.Frequency(); ok {
+		return w
+	}
+	return math.NaN()
+}
+
+func dmPeakFreq(r *DiskMarginResult) float64 {
+	if w, ok := r.PeakFreq(); ok {
+		return w
+	}
+	return math.NaN()
+}
+
+func TestMarginCrossoverAccessors(t *testing.T) {
+	none, err := Margin(makeSISO(-10, 1, 1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := none.GainCrossover(); ok {
+		t.Error("1/(s+10): GainCrossover ok, want none")
+	}
+	if _, ok := none.PhaseCrossover(); ok {
+		t.Error("1/(s+10): PhaseCrossover ok, want none")
+	}
+	if !math.IsInf(none.GainMargin, 1) || !math.IsInf(none.PhaseMargin, 1) {
+		t.Errorf("margins = %g, %g; want +Inf, +Inf", none.GainMargin, none.PhaseMargin)
+	}
+
+	// L = 2/(s+1)³: phase −180° at ω = √3 with |L| = 1/4; |L| = 1 at
+	// ω = √(2^(2/3) − 1).
+	sys, err := NewFromSlices(3, 1, 1,
+		[]float64{0, 1, 0, 0, 0, 1, -1, -3, -3},
+		[]float64{0, 0, 1},
+		[]float64{2, 0, 0},
+		[]float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := Margin(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wpc, ok := m.PhaseCrossover()
+	if !ok || math.Abs(wpc-math.Sqrt(3)) > 1e-9 || math.Abs(m.GainMargin-20*math.Log10(4)) > 1e-9 {
+		t.Errorf("phase crossover %g (ok %v), GM %g; want √3, %g dB", wpc, ok, m.GainMargin, 20*math.Log10(4))
+	}
+	wgc, ok := m.GainCrossover()
+	want := math.Sqrt(math.Pow(2, 2.0/3) - 1)
+	if !ok || math.Abs(wgc-want) > 1e-9 || math.Abs(m.PhaseMargin-(180-3*math.Atan(want)*180/math.Pi)) > 1e-7 {
+		t.Errorf("gain crossover %g (ok %v), PM %g; want %g", wgc, ok, m.PhaseMargin, want)
+	}
+}
+
+func TestDiskMarginUnstableHasNoFrequencies(t *testing.T) {
+	dm, err := DiskMargin(makeSISO(1, 1, 1, 0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dm.Alpha != 0 || dm.GainMargin != [2]float64{1, 1} || dm.PhaseMargin != 0 {
+		t.Errorf("unstable disk margin = %+v, want MATLAB's 0, [1 1], 0", dm)
+	}
+	if _, ok := dm.Frequency(); ok {
+		t.Error("unstable loop: Frequency ok, want none")
+	}
+	if _, ok := dm.PeakFreq(); ok {
+		t.Error("unstable loop: PeakFreq ok, want none")
+	}
+	stable, err := DiskMargin(makeSISO(-1, 1, 1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stable.Frequency(); !ok {
+		t.Error("stable loop: Frequency not ok")
+	}
+}
+
+func TestMarginFamilyRejects(t *testing.T) {
+	nan := makeSISO(math.NaN(), 1, 1, 0)
+	tests := []struct {
+		prefix string
+		want   error
+		call   func() error
+	}{
+		{"DiskMarginSkew: ", ErrInvalidArgument, func() error { _, err := DiskMarginSkew(makeSISO(-1, 1, 1, 0), math.NaN()); return err }},
+		{"DiskMarginSkew: ", ErrInvalidArgument, func() error { _, err := DiskMarginSkew(nil, 0); return err }},
+		{"DiskMargin: ", ErrInvalidArgument, func() error { _, err := DiskMargin(nan); return err }},
+		{"AllMargin: ", ErrInvalidArgument, func() error { _, err := AllMargin(nil); return err }},
+		{"Margin: ", ErrInvalidArgument, func() error { _, err := Margin(nan); return err }},
+		{"Bandwidth: ", ErrInvalidArgument, func() error { _, err := Bandwidth(nil, 0); return err }},
+	}
+	for _, tc := range tests {
+		err := tc.call()
+		if !errors.Is(err, tc.want) || !strings.HasPrefix(err.Error(), tc.prefix) {
+			t.Errorf("err = %v, want %q prefix and %v", err, tc.prefix, tc.want)
+		}
+	}
+}
+
+func TestBandwidthFirstOrderOracle(t *testing.T) {
+	bw, err := Bandwidth(makeSISO(-1, 1, 1, 0), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := math.Sqrt(math.Pow(10, 0.3) - 1); math.Abs(bw-want) > 1e-10 {
+		t.Errorf("bandwidth = %.12g, want %.12g", bw, want)
 	}
 }

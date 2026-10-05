@@ -7,6 +7,9 @@ type sisoLoopModel struct {
 }
 
 func newSISOLoopModel(sys *System, context string) (*sisoLoopModel, error) {
+	if err := requireFiniteSystem(context, sys); err != nil {
+		return nil, err
+	}
 	_, m, p := sys.Dims()
 	if p != 1 || m != 1 {
 		return nil, fmt.Errorf("%s: SISO model required: %w", context, ErrNotSISO)

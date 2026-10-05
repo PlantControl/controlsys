@@ -513,8 +513,8 @@ func TestAllMargin_MATLAB_tf25(t *testing.T) {
 	}
 
 	wantWp := 3.1623
-	if math.Abs(r.WpFreq-wantWp) > 0.05 {
-		t.Errorf("WpFreq = %v, want ~%v", r.WpFreq, wantWp)
+	if math.Abs(wpFreq(r)-wantWp) > 0.05 {
+		t.Errorf("WpFreq = %v, want ~%v", wpFreq(r), wantWp)
 	}
 
 	wantPM := 29.1104
@@ -523,8 +523,8 @@ func TestAllMargin_MATLAB_tf25(t *testing.T) {
 	}
 
 	wantWg := 1.7844
-	if math.Abs(r.WgFreq-wantWg) > 0.05 {
-		t.Errorf("WgFreq = %v, want ~%v", r.WgFreq, wantWg)
+	if math.Abs(wgFreq(r)-wantWg) > 0.05 {
+		t.Errorf("WgFreq = %v, want ~%v", wgFreq(r), wantWg)
 	}
 }
 

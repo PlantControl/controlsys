@@ -69,8 +69,8 @@ func TestRuntimeArchitectureSISOLoopAnalysisKeepsGainWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mr.WgFreq == mr.WgFreq {
-		t.Fatalf("WgFreq = %v, want NaN for static gain without gain crossover", mr.WgFreq)
+	if wgFreq(mr) == wgFreq(mr) {
+		t.Fatalf("WgFreq = %v, want NaN for static gain without gain crossover", wgFreq(mr))
 	}
 }
 

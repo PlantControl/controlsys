@@ -103,8 +103,8 @@ func TestDiskMarginDelayedFirstOrderBoundary(t *testing.T) {
 		if math.Abs(dm.PeakSensitivity-ms) > 1e-7*ms || math.Abs(dm.Alpha-alpha) > 1e-7*alpha {
 			t.Fatalf("k=%g: Ms=%.12g alpha=%.12g, oracle Ms=%.12g alpha=%.12g", tc.k, dm.PeakSensitivity, dm.Alpha, ms, alpha)
 		}
-		if ms > 1+1e-6 && math.Abs(dm.PeakFreq-wp) > 1e-4*max(1, wp) {
-			t.Fatalf("k=%g: wPeak=%g, oracle %g", tc.k, dm.PeakFreq, wp)
+		if ms > 1+1e-6 && math.Abs(dmPeakFreq(dm)-wp) > 1e-4*max(1, wp) {
+			t.Fatalf("k=%g: wPeak=%g, oracle %g", tc.k, dmPeakFreq(dm), wp)
 		}
 	}
 }
@@ -198,8 +198,8 @@ func TestDiskMarginDelayedSecondOrderNonSymmetric(t *testing.T) {
 				}
 				peak, wp := oraclePeakShifted(L, 100, (sigma-1)/2)
 				peak = math.Max(peak, math.Abs((sigma+1)/2))
-				if math.Abs(got.Alpha-1/peak) > 1e-7/peak || (peak > math.Abs((sigma+1)/2)+1e-6 && math.Abs(got.Frequency-wp) > 1e-4*max(1, wp)) {
-					t.Fatalf("sigma=%g: alpha=%.12g at %g, oracle %.12g at %g", sigma, got.Alpha, got.Frequency, 1/peak, wp)
+				if math.Abs(got.Alpha-1/peak) > 1e-7/peak || (peak > math.Abs((sigma+1)/2)+1e-6 && math.Abs(dmFreq(got)-wp) > 1e-4*max(1, wp)) {
+					t.Fatalf("sigma=%g: alpha=%.12g at %g, oracle %.12g at %g", sigma, got.Alpha, dmFreq(got), 1/peak, wp)
 				}
 			}
 		}
@@ -214,11 +214,11 @@ func TestDiskMarginDelayedFeedthroughLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(dm.PeakSensitivity-2) > 1e-12 || !math.IsInf(dm.PeakFreq, 1) {
-		t.Fatalf("Ms=%g at %g, want 2 at +Inf", dm.PeakSensitivity, dm.PeakFreq)
+	if math.Abs(dm.PeakSensitivity-2) > 1e-12 || !math.IsInf(dmPeakFreq(dm), 1) {
+		t.Fatalf("Ms=%g at %g, want 2 at +Inf", dm.PeakSensitivity, dmPeakFreq(dm))
 	}
-	if math.Abs(dm.Alpha-2.0/3) > 1e-12 || !math.IsInf(dm.Frequency, 1) {
-		t.Fatalf("alpha=%g at %g, want 2/3 = 1/sup|(1-L)/(2(1+L))| at +Inf", dm.Alpha, dm.Frequency)
+	if math.Abs(dm.Alpha-2.0/3) > 1e-12 || !math.IsInf(dmFreq(dm), 1) {
+		t.Fatalf("alpha=%g at %g, want 2/3 = 1/sup|(1-L)/(2(1+L))| at +Inf", dm.Alpha, dmFreq(dm))
 	}
 }
 
@@ -274,7 +274,7 @@ func TestDiskMarginDelayedRepresentationsAgree(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if math.Abs(got.Alpha-want.Alpha) > 1e-9 || math.Abs(got.PeakFreq-want.PeakFreq) > 1e-6 {
+		if math.Abs(got.Alpha-want.Alpha) > 1e-9 || math.Abs(dmPeakFreq(got)-dmPeakFreq(want)) > 1e-6 {
 			t.Fatalf("%s: %+v, want %+v", name, got, want)
 		}
 	}

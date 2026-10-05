@@ -1143,11 +1143,11 @@ func TestFRDMargin_NegativeMargins(t *testing.T) {
 	if math.Abs(mr.PhaseMargin-sysMr.PhaseMargin) > 3 {
 		t.Errorf("FRDMargin PM = %g, sys PM = %g", mr.PhaseMargin, sysMr.PhaseMargin)
 	}
-	if math.IsNaN(mr.WgFreq) {
-		t.Errorf("FRDMargin WgFreq = NaN, want finite (sys = %g)", sysMr.WgFreq)
+	if math.IsNaN(wgFreq(mr)) {
+		t.Errorf("FRDMargin WgFreq = NaN, want finite (sys = %g)", wgFreq(sysMr))
 	}
-	if math.IsNaN(mr.WpFreq) {
-		t.Errorf("FRDMargin WpFreq = NaN, want finite (sys = %g)", sysMr.WpFreq)
+	if math.IsNaN(wpFreq(mr)) {
+		t.Errorf("FRDMargin WpFreq = NaN, want finite (sys = %g)", wpFreq(sysMr))
 	}
 }
 
@@ -1313,20 +1313,20 @@ func TestFRDMargin_WrappedCrossings(t *testing.T) {
 			wantGM, wantWp := pickMargin(gms, wps)
 			wantPM, wantWg := pickMargin(pms, wgs)
 
-			if math.Abs(mr.GainMargin-wantGM) > 1e-3 || math.Abs(mr.WpFreq-wantWp) > 1e-4*wantWp {
-				t.Errorf("GM = %g @ %g, want %g @ %g", mr.GainMargin, mr.WpFreq, wantGM, wantWp)
+			if math.Abs(mr.GainMargin-wantGM) > 1e-3 || math.Abs(wpFreq(mr)-wantWp) > 1e-4*wantWp {
+				t.Errorf("GM = %g @ %g, want %g @ %g", mr.GainMargin, wpFreq(mr), wantGM, wantWp)
 			}
-			if math.Abs(mr.PhaseMargin-wantPM) > 1e-3 || math.Abs(mr.WgFreq-wantWg) > 1e-4*wantWg {
-				t.Errorf("PM = %g @ %g, want %g @ %g", mr.PhaseMargin, mr.WgFreq, wantPM, wantWg)
+			if math.Abs(mr.PhaseMargin-wantPM) > 1e-3 || math.Abs(wgFreq(mr)-wantWg) > 1e-4*wantWg {
+				t.Errorf("PM = %g @ %g, want %g @ %g", mr.PhaseMargin, wgFreq(mr), wantPM, wantWg)
 			}
 			if mr.PhaseMargin <= -180 || mr.PhaseMargin > 180 {
 				t.Errorf("PM = %g outside (-180,180]", mr.PhaseMargin)
 			}
-			off := math.Mod(c.phase(mr.WpFreq)+180, 360)
+			off := math.Mod(c.phase(wpFreq(mr))+180, 360)
 			if math.Min(math.Abs(off), 360-math.Abs(off)) > 1e-2 {
-				t.Errorf("angle at WpFreq = %g, not -180 mod 360", c.phase(mr.WpFreq))
+				t.Errorf("angle at WpFreq = %g, not -180 mod 360", c.phase(wpFreq(mr)))
 			}
-			if gm := -20 * math.Log10(cmplx.Abs(c.resp(mr.WpFreq))); math.Abs(gm-mr.GainMargin) > 1e-3 {
+			if gm := -20 * math.Log10(cmplx.Abs(c.resp(wpFreq(mr)))); math.Abs(gm-mr.GainMargin) > 1e-3 {
 				t.Errorf("GM = %g, -20log|L(WpFreq)| = %g", mr.GainMargin, gm)
 			}
 		})
@@ -1353,8 +1353,8 @@ func TestFRDMargin_DelayRepro(t *testing.T) {
 	if wantPM <= -180 {
 		wantPM += 360
 	}
-	if math.Abs(mr.PhaseMargin-wantPM) > 1e-3 || math.Abs(mr.WgFreq-wg) > 1e-4 {
-		t.Errorf("PM = %g @ %g, want %g @ %g", mr.PhaseMargin, mr.WgFreq, wantPM, wg)
+	if math.Abs(mr.PhaseMargin-wantPM) > 1e-3 || math.Abs(wgFreq(mr)-wg) > 1e-4 {
+		t.Errorf("PM = %g @ %g, want %g @ %g", mr.PhaseMargin, wgFreq(mr), wantPM, wg)
 	}
 }
 

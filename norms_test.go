@@ -2114,3 +2114,11 @@ func TestMaxSingularValueMatchesSVD(t *testing.T) {
 		t.Fatalf("nil: %g, %v; want 0, nil", got, err)
 	}
 }
+
+func maxSVDense(D *mat.Dense, _, _ int) float64 {
+	sv, err := maxSingularValue(D)
+	if err != nil {
+		panic(err)
+	}
+	return sv
+}
