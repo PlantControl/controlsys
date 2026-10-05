@@ -116,12 +116,11 @@ func TestLqe_DimErrors(t *testing.T) {
 
 func TestLqe_Empty(t *testing.T) {
 	res, err := Lqe(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, nil)
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrDimensionMismatch) || res != nil {
+		t.Errorf("zero states: res = %v, err = %v, want nil, ErrDimensionMismatch", res, err)
 	}
-	r, c := res.X.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %dx%d", r, c)
+	if _, err := Lqrd(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, 0.1, nil); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("Lqrd zero states: err = %v, want ErrDimensionMismatch", err)
 	}
 }
 

@@ -192,12 +192,8 @@ func TestCare_RSingular(t *testing.T) {
 
 func TestCare_Empty(t *testing.T) {
 	res, err := Care(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := res.X.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %d×%d", r, c)
+	if !errors.Is(err, ErrDimensionMismatch) || res != nil {
+		t.Errorf("zero states: res = %v, err = %v, want nil, ErrDimensionMismatch", res, err)
 	}
 }
 
@@ -332,12 +328,8 @@ func TestDare_RSingular(t *testing.T) {
 
 func TestDare_Empty(t *testing.T) {
 	res, err := Dare(&mat.Dense{}, &mat.Dense{}, &mat.Dense{}, &mat.Dense{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, c := res.X.Dims()
-	if r != 0 || c != 0 {
-		t.Errorf("expected empty, got %d×%d", r, c)
+	if !errors.Is(err, ErrDimensionMismatch) || res != nil {
+		t.Errorf("zero states: res = %v, err = %v, want nil, ErrDimensionMismatch", res, err)
 	}
 }
 

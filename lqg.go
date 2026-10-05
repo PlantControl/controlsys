@@ -70,12 +70,14 @@ type LqgResult struct {
 // Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0]; a singular I - (Kx Mx + Kw Mw)D makes
 // the controller non-causal and returns ErrAlgebraicLoop.
 //
-// A descriptor plant E x' = Ax + Bu + w with nonsingular E is designed as its
-// explicit model (E⁻¹A, E⁻¹B, E⁻¹ noise input): K, Ki, Kw, Mx and Mw are the
-// explicit-model gains, Xc solves the explicit regulator Riccati equation (as
-// MATLAB lqr/lqi for descriptor models) and Xf is the error covariance. L is
-// Kalman's descriptor gain (E times the explicit gain) and the controller
-// keeps E: its descriptor is blkdiag(E, I).
+// A descriptor plant E x' = Ax + Bu + w with nonsingular E (Qn and Nn in QWV
+// are the covariances of this w; MATLAB lqg does not document descriptor
+// models) is designed as its explicit model (E⁻¹A, E⁻¹B, noise E⁻¹w): K, Ki
+// and Mx equal the explicit-model gains, Xc solves the explicit regulator
+// Riccati equation (as MATLAB lqr/lqi for descriptor models) and Xf is the
+// error covariance. Mw and Kw act on w, so Mw = E·M̄w and Kw = K̄w·E⁻¹ for
+// the explicit-model gains M̄w, K̄w, and L is Kalman's descriptor gain (E
+// times the explicit gain). The controller keeps E: its descriptor is blkdiag(E, I).
 //
 // Plants without inputs, outputs or states are rejected with
 // ErrDimensionMismatch, singular E with ErrDescriptorSingular and plants

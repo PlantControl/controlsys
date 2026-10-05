@@ -60,7 +60,7 @@ var (
 	ErrH2DirectFeedthrough    = errors.New("controlsys: H2 synthesis requires D22 = 0")
 	ErrGammaNotAchievable     = errors.New("controlsys: no stabilizing controller exists for given gamma")
 	ErrDescriptorSingular     = errors.New("controlsys: descriptor matrix E is singular")
-	ErrDescriptorRiccati      = errors.New("controlsys: standard Riccati solvers do not support descriptor systems (E != I)")
+	ErrDescriptorRiccati      = errors.New("controlsys: H2/H-infinity synthesis does not support descriptor systems (E != I)")
 	ErrDescriptorUnsupported  = errors.New("controlsys: operation does not support descriptor systems (E != I)")
 	ErrImproperModel          = errors.New("controlsys: cannot simulate the time response of improper models")
 	ErrDescriptorInitialState = errors.New("controlsys: cannot simulate state trajectory for models with singular E matrix")

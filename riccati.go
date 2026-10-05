@@ -117,9 +117,6 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	n, m := problem.n, problem.m
-	if n == 0 {
-		return &RiccatiResult{X: &mat.Dense{}, K: &mat.Dense{}, Eig: nil}, nil
-	}
 	S, ws := problem.S, problem.ws
 
 	// Cholesky factor R
@@ -304,9 +301,6 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	n, m := problem.n, problem.m
-	if n == 0 {
-		return &RiccatiResult{X: &mat.Dense{}, K: &mat.Dense{}, Eig: nil}, nil
-	}
 	S, ws := problem.S, problem.ws
 
 	// Cholesky factor R

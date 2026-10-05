@@ -50,9 +50,6 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 		return res, err
 	}
 	n, _ := res.X.Dims()
-	if n == 0 {
-		return res, nil
-	}
 	xe := mulDims(n, n, res.X, opts.E)
 	res.X = mulDims(n, n, opts.E.T(), xe)
 	symmetrize(res.X.RawMatrix().Data, n, n)
@@ -163,7 +160,7 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 	}
 
 	if n == 0 {
-		return Dlqr(A, B, Q, R, opts)
+		return nil, fmt.Errorf("Lqrd: no states: %w", ErrDimensionMismatch)
 	}
 
 	nm := n + m

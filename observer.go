@@ -44,7 +44,7 @@ func Lqe(A, G, C, Qn, Rn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) 
 	}
 
 	if n == 0 {
-		return &RiccatiResult{X: &mat.Dense{}, K: &mat.Dense{}, Eig: nil}, nil
+		return nil, fmt.Errorf("Lqe: no states: %w", ErrDimensionMismatch)
 	}
 	return kalmanGain("Lqe", true, A, nil, G, C, nil, Qn, Rn, Nn, opts)
 }

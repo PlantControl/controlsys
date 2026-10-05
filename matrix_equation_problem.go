@@ -1,6 +1,10 @@
 package controlsys
 
-import "plantcontrol.org/v1/gonum/mat"
+import (
+	"fmt"
+
+	"plantcontrol.org/v1/gonum/mat"
+)
 
 type riccatiProblem struct {
 	A  *mat.Dense
@@ -32,7 +36,7 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 		return riccatiProblem{}, ErrDimensionMismatch
 	}
 	if na == 0 {
-		return riccatiProblem{A: A, B: B, Q: Q, R: R, n: na, m: m}, nil
+		return riccatiProblem{}, fmt.Errorf("controlsys: Riccati problem has no states: %w", ErrDimensionMismatch)
 	}
 	if !isSymmetric(Q, eps()*denseNorm(Q)) {
 		return riccatiProblem{}, ErrNotSymmetric
