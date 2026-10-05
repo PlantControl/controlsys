@@ -1213,7 +1213,7 @@ func TestFeedbackApprox_DiscreteWithThiranOrder(t *testing.T) {
 	}
 }
 
-func TestFeedbackApprox_DiscreteFractionalDelayRequiresThiranOrder(t *testing.T) {
+func TestFeedback_DiscreteFractionalDelayRejected(t *testing.T) {
 	plant, _ := New(
 		mat.NewDense(1, 1, []float64{0.7}),
 		mat.NewDense(1, 1, []float64{1}),
@@ -1224,20 +1224,10 @@ func TestFeedbackApprox_DiscreteFractionalDelayRequiresThiranOrder(t *testing.T)
 	plant.InputDelay = []float64{3.5}
 	controller, _ := NewGain(mat.NewDense(1, 1, []float64{0.2}), 0.1)
 
-	if _, err := Feedback(plant, controller, -1, WithApproximatedDelays()); !errors.Is(err, ErrFractionalDelay) {
-		t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
-	}
-
-	cl, err := Feedback(plant, controller, -1, WithThiranOrder(3))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cl.HasDelay() {
-		t.Fatal("Thiran safe feedback should absorb external delays")
-	}
-	n, m, p := cl.Dims()
-	if n != 4 || m != 1 || p != 1 {
-		t.Fatalf("closed-loop dims n=%d m=%d p=%d, want 4,1,1", n, m, p)
+	for _, opt := range []FeedbackOption{WithApproximatedDelays(), WithThiranOrder(3)} {
+		if _, err := Feedback(plant, controller, -1, opt); !errors.Is(err, ErrFractionalDelay) {
+			t.Fatalf("Feedback fractional delay error = %v, want ErrFractionalDelay", err)
+		}
 	}
 }
 
@@ -1250,8 +1240,8 @@ func TestFeedbackApprox_DiscreteThiranRejectsResidualIODelay(t *testing.T) {
 		0.1,
 	)
 	plant.Delay = mat.NewDense(2, 2, []float64{
-		1.5, 4.0,
-		2.0, 1.5,
+		1, 4,
+		2, 1,
 	})
 	controller, _ := NewGain(mat.NewDense(2, 2, []float64{0.1, 0, 0, 0.2}), 0.1)
 
@@ -3149,5 +3139,51 @@ func TestSeriesLFTZeroPortOperands(t *testing.T) {
 	check("Series(noIn, cl)", got, ref, 0, 1)
 	if !mat.EqualApprox(got.C, ref.C, 1e-12) || !mat.EqualApprox(got.LFT.D12, ref.LFT.D12, 1e-12) {
 		t.Errorf("Series(noIn, cl): C/D12 mismatch")
+	}
+}
+
+func TestInterconnectionsRejectInvalidModels(t *testing.T) {
+	good, err := New(
+		mat.NewDense(2, 2, []float64{0.5, 0.2, -0.1, 0.3}),
+		mat.NewDense(2, 1, []float64{1, 0.4}),
+		mat.NewDense(1, 2, []float64{0.7, -1}),
+		mat.NewDense(1, 1, []float64{0.2}),
+		0.1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frac := good.Copy()
+	frac.InputDelay = []float64{1.5}
+	misnamed := good.Copy()
+	misnamed.InputName = []string{"a", "b"}
+	q := mat.NewDense(1, 1, nil)
+
+	ops := map[string]func(bad *System) error{
+		"Series":   func(bad *System) error { _, err := Series(good, bad); return err },
+		"Parallel": func(bad *System) error { _, err := Parallel(bad, good); return err },
+		"Append":   func(bad *System) error { _, err := Append(good, bad); return err },
+		"BlkDiag":  func(bad *System) error { _, err := BlkDiag(good, bad); return err },
+		"Connect":  func(bad *System) error { _, err := Connect(bad, q, []int{0}, []int{0}); return err },
+		"Augstate": func(bad *System) error { _, err := Augstate(bad); return err },
+		"Feedback": func(bad *System) error { _, err := Feedback(bad, good, -1); return err },
+		"Feedback controller": func(bad *System) error {
+			_, err := Feedback(good, bad, -1, WithThiranOrder(3))
+			return err
+		},
+	}
+	for name, op := range ops {
+		if err := op(frac); !errors.Is(err, ErrFractionalDelay) {
+			t.Errorf("%s fractional discrete delay: err = %v, want ErrFractionalDelay", name, err)
+		}
+		if err := op(misnamed); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("%s bad InputName length: err = %v, want ErrDimensionMismatch", name, err)
+		}
+		if name == "Feedback controller" {
+			continue
+		}
+		if err := op(nil); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("%s nil: err = %v, want ErrInvalidArgument", name, err)
+		}
 	}
 }
