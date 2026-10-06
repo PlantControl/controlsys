@@ -235,12 +235,17 @@ func BenchmarkFractionalFeedbackHold(b *testing.B) {
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
 		for _, mode := range []string{"integer", "fractional", "integer-output", "mixed-output"} {
 			b.Run(string(method)+"/"+mode, func(b *testing.B) {
-				sys, _ := New(mat.NewDense(2, 2, []float64{-1, 2, 0, -3}), mat.NewDense(2, 1, []float64{1, .5}), mat.NewDense(1, 2, []float64{1, -.2}), mat.NewDense(1, 1, nil), 0)
+				sys, err := New(mat.NewDense(2, 2, []float64{-1, 2, 0, -3}), mat.NewDense(2, 1, []float64{1, .5}), mat.NewDense(1, 2, []float64{1, -.2}), mat.NewDense(1, 1, nil), 0)
+				if err != nil {
+					b.Fatal(err)
+				}
 				tau := []float64{.15, .24}
 				if mode == "integer" {
 					tau = []float64{.2, .3}
 				}
-				sys.SetInternalDelay(tau, mat.NewDense(2, 2, []float64{.2, .1, -.1, .15}), mat.NewDense(2, 2, []float64{.3, -.1, .1, .2}), mat.NewDense(1, 2, []float64{.2, .1}), mat.NewDense(2, 1, []float64{.1, .2}), mat.NewDense(2, 2, []float64{.1, .05, -.04, .12}))
+				if err := sys.SetInternalDelay(tau, mat.NewDense(2, 2, []float64{.2, .1, -.1, .15}), mat.NewDense(2, 2, []float64{.3, -.1, .1, .2}), mat.NewDense(1, 2, []float64{.2, .1}), mat.NewDense(2, 1, []float64{.1, .2}), mat.NewDense(2, 2, []float64{.1, .05, -.04, .12})); err != nil {
+					b.Fatal(err)
+				}
 				if mode == "integer-output" || mode == "mixed-output" {
 					sys.InputDelay = []float64{.035}
 					sys.OutputDelay = []float64{.2}

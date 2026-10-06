@@ -981,7 +981,7 @@ func benchPIDLoop(b *testing.B) *System {
 }
 
 func benchGridModels(b *testing.B) map[string]*System {
-	return map[string]*System{"PIDLoop": benchPIDLoop(b), "SS10x2x2": benchSysNonSym(10, 2, 2)}
+	return map[string]*System{"PIDLoop": benchPIDLoop(b), "SS10x2x2": benchSysNonSym(b, 10, 2, 2)}
 }
 
 func BenchmarkZerosGrid(b *testing.B) {
@@ -1097,9 +1097,9 @@ func gridCorpus(t *testing.T) []gridCorpusModel {
 	add("pid-closed", must(Feedback(loop, nil, -1)))
 	add("pid", c)
 	for _, n := range []int{2, 10, 40} {
-		add(fmt.Sprintf("nonsym-%d-2x2", n), benchSysNonSym(n, 2, 2))
-		add(fmt.Sprintf("nonsym-%d-3x2", n), benchSysNonSym(n, 2, 3))
-		add(fmt.Sprintf("integrator-%d-2x3", n), benchIntegratorMIMOSystem(n, 3, 2))
+		add(fmt.Sprintf("nonsym-%d-2x2", n), benchSysNonSym(t, n, 2, 2))
+		add(fmt.Sprintf("nonsym-%d-3x2", n), benchSysNonSym(t, n, 2, 3))
+		add(fmt.Sprintf("integrator-%d-2x3", n), benchIntegratorMIMOSystem(t, n, 3, 2))
 	}
 	add("static-gain", must(NewGain(mat.NewDense(2, 2, []float64{1, 2, 3, 4}), 0)))
 	add("no-zeros", must(New(
