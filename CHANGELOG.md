@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix: `System.Bode`, `System.Nichols` and `FRD.Bode` unwrap phase across multiple 360° turns (previously one turn per step, e.g. a 1 s delay at ω≈9.74 rad/s gave −198° instead of −558°). Jumps of an odd multiple of 180° resolve as MATLAB `unwrap`; NaN samples are skipped.
+
 ## v2.3.0
 
 - Breaking: the module path is now `plantcontrol.org/v2/controlsys/v2` (site namespace v2; Go still requires the trailing `/v2` for v2.x tags). The API is unchanged from v2.2.0. Migrate with:
