@@ -60,7 +60,6 @@ jobs:
           else
             base=$(git merge-base "${PR_BASE:-origin/main}" "$candidate")
           fi
-          git diff --name-only "$base" "$candidate" | tee changed.txt
           compare=false
           crossover=false
           if [ "$EVENT" = workflow_dispatch ]; then
@@ -71,14 +70,6 @@ jobs:
           elif [ "$HAS_LABEL" = true ]; then
             compare=true
             crossover=true
-          else
-            sensitive=$(awk '/^[^\/]+\.go$/ && (!/_test\.go$/ || $0 == "bench_test.go") || /^go\.(mod|sum)$/' changed.txt)
-            if [ -n "$sensitive" ]; then
-              compare=true
-            fi
-            if echo "$sensitive" | grep -Eq '^(frequency[^/]*\.go|bench_test\.go)$'; then
-              crossover=true
-            fi
           fi
           {
             echo "compare=$compare"

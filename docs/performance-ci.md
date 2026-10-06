@@ -26,10 +26,8 @@ Triggers:
 
 - Manual `workflow_dispatch`, with optional base, candidate, benchmark regex,
   rounds, benchtime and the crossover job.
-- Pull requests labelled `performance`.
-- Pull requests that change root non-test `.go` files, `bench_test.go`,
-  `go.mod` or `go.sum`. Frequency files or `bench_test.go` also start the
-  crossover job.
+- Pull requests labelled `performance` (comparison and crossover). Other pull
+  requests skip it; a full comparison takes 30–45 minutes.
 
 The default baseline is the merge base of the candidate and the PR base (or
 `origin/main`); the candidate is the PR head, not the merge commit. Pull
