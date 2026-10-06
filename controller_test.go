@@ -545,6 +545,29 @@ func TestAcker_ConjugatePairError(t *testing.T) {
 	}
 }
 
+// For this 14-state chain with B = e₀ and poles −0.1, …, −1.4, Ackermann's
+// gain matches the exact one to 1e-14, yet the eigenvalues of A − B·K computed
+// in 100-digit arithmetic are 29.5% off (34% in float64): the assignment is
+// intrinsically ill-conditioned (even the rounded exact gain is 23.7% off).
+// MATLAB acker warns; Acker must refuse the gain.
+func TestAcker_PoleAccuracy(t *testing.T) {
+	n := 14
+	A := benchStableA(n)
+	B := mat.NewDense(n, 1, nil)
+	B.Set(0, 0, 1)
+	p := make([]complex128, n)
+	for i := range n {
+		p[i] = complex(-0.1*float64(i+1), 0)
+	}
+	K, err := Acker(A, B, p)
+	if !errors.Is(err, ErrPoleAccuracy) {
+		t.Fatalf("err = %v, want ErrPoleAccuracy", err)
+	}
+	if K != nil {
+		t.Errorf("K = %v, want nil", mat.Formatted(K))
+	}
+}
+
 // --- Place Tests ---
 
 func TestPlace_SISO_2x2(t *testing.T) {

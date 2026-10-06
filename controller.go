@@ -252,6 +252,8 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 // returns gain K (1×n) such that eig(A - B*K) = poles.
 //
 // Only valid for single-input systems (m=1). Numerically fragile for n > 10.
+// Where MATLAB acker warns, Acker returns ErrPoleAccuracy instead of K, using
+// the same 10% pole-error criterion as Place.
 func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	if err := requireFiniteDense("Acker", "A", A); err != nil {
 		return nil, err
@@ -335,7 +337,11 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 		kData[j] = s
 	}
 
-	return mat.NewDense(1, n, kData), nil
+	K := mat.NewDense(1, n, kData)
+	if e := placePoleError(A, B, K, poles); !(e <= placeMaxPoleError) {
+		return nil, fmt.Errorf("Acker: worst relative pole error %.3g: %w", e, ErrPoleAccuracy)
+	}
+	return K, nil
 }
 
 // Place computes the state-feedback gain K (m×n) such that eig(A − B·K)
