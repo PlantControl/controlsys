@@ -1,4 +1,4 @@
-module plantcontrol.org/v1/controlsys/v2
+module plantcontrol.org/v2/controlsys/v2
 
 go 1.27.1
 

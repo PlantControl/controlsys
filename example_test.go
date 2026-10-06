@@ -6,8 +6,8 @@ import (
 	"math/cmplx"
 	"slices"
 
-	"plantcontrol.org/v1/controlsys/v2"
 	"plantcontrol.org/v1/gonum/mat"
+	"plantcontrol.org/v2/controlsys/v2"
 )
 
 func ExampleStep() {
