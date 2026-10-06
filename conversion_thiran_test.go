@@ -174,7 +174,7 @@ func TestInternalThiranTinyDelayAndSingularInstantaneousLoop(t *testing.T) {
 
 func BenchmarkConversionThiran(b *testing.B) {
 	b.Run("rounded", func(b *testing.B) {
-		sys := thiranMIMOFixtureBenchmark()
+		sys := thiranMIMOFixtureBenchmark(b)
 		b.ReportAllocs()
 		for b.Loop() {
 			if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin}); err != nil {
@@ -184,7 +184,7 @@ func BenchmarkConversionThiran(b *testing.B) {
 	})
 	for _, mode := range []C2DDelayModeling{C2DDelayModelingInternal, C2DDelayModelingState} {
 		b.Run(string(mode), func(b *testing.B) {
-			sys := thiranMIMOFixtureBenchmark()
+			sys := thiranMIMOFixtureBenchmark(b)
 			b.ReportAllocs()
 			for b.Loop() {
 				if _, err := sys.C2D(.1, C2DOptions{Method: C2DMethodTustin, ThiranOrder: 3, DelayModeling: mode}); err != nil {
@@ -194,9 +194,16 @@ func BenchmarkConversionThiran(b *testing.B) {
 		})
 	}
 }
-func thiranMIMOFixtureBenchmark() *System {
-	sys, _ := New(mat.NewDense(2, 2, []float64{-1, .3, -.2, -2}), mat.NewDense(2, 2, []float64{1, .2, -.1, .8}), mat.NewDense(2, 2, []float64{1, .5, -.4, .9}), mat.NewDense(2, 2, nil), 0)
-	_ = sys.SetInternalDelay([]float64{.024, .54}, mat.NewDense(2, 2, []float64{.2, .5, -.3, .1}), mat.NewDense(2, 2, []float64{.4, .2, -.1, .3}), mat.NewDense(2, 2, []float64{.1, .2, .3, -.2}), mat.NewDense(2, 2, []float64{.3, .5, .1, -.1}), mat.NewDense(2, 2, []float64{.01, .04, .02, .03}))
+func thiranMIMOFixtureBenchmark(tb testing.TB) *System {
+	tb.Helper()
+	sys, err := New(mat.NewDense(2, 2, []float64{-1, .3, -.2, -2}), mat.NewDense(2, 2, []float64{1, .2, -.1, .8}), mat.NewDense(2, 2, []float64{1, .5, -.4, .9}), mat.NewDense(2, 2, nil), 0)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	err = sys.SetInternalDelay([]float64{.024, .54}, mat.NewDense(2, 2, []float64{.2, .5, -.3, .1}), mat.NewDense(2, 2, []float64{.4, .2, -.1, .3}), mat.NewDense(2, 2, []float64{.1, .2, .3, -.2}), mat.NewDense(2, 2, []float64{.3, .5, .1, -.1}), mat.NewDense(2, 2, []float64{.01, .04, .02, .03}))
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return sys
 }
 

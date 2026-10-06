@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 
@@ -15,7 +16,10 @@ func BenchmarkSimulateWithDelay_SISO(b *testing.B) {
 	C := mat.NewDense(1, 2, []float64{1, 1})
 	D := mat.NewDense(1, 1, []float64{0.5})
 	delay := mat.NewDense(1, 1, []float64{5})
-	sys, _ := NewWithDelay(A, B, C, D, delay, 1.0)
+	sys, err := NewWithDelay(A, B, C, D, delay, 1.0)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	steps := 100
 	u := mat.NewDense(1, steps, nil)
@@ -26,7 +30,9 @@ func BenchmarkSimulateWithDelay_SISO(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Simulate(u, x0, nil)
+		if _, err := sys.Simulate(u, x0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -55,7 +61,10 @@ func BenchmarkSimulateWithDelay_MIMO(b *testing.B) {
 			delay.Set(i, j, float64(2+i+j))
 		}
 	}
-	sys, _ := NewWithDelay(A, B, C, D, delay, 1.0)
+	sys, err := NewWithDelay(A, B, C, D, delay, 1.0)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	steps := 200
 	u := mat.NewDense(m, steps, nil)
@@ -71,7 +80,9 @@ func BenchmarkSimulateWithDelay_MIMO(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Simulate(u, x0, nil)
+		if _, err := sys.Simulate(u, x0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -92,11 +103,16 @@ func BenchmarkBilinearDiscretize(b *testing.B) {
 	C.Set(0, 0, 1)
 	C.Set(1, n-1, 1)
 	D := mat.NewDense(2, 3, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.C2D(0.01, C2DOptions{Method: C2DMethodTustin})
+		if _, err := sys.C2D(0.01, C2DOptions{Method: C2DMethodTustin}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -122,11 +138,16 @@ func BenchmarkTransferFunction_MIMO(b *testing.B) {
 		C.Set(i, i%n, 1)
 	}
 	D := mat.NewDense(p, m, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.TransferFunction(nil)
+		if _, err := sys.TransferFunction(nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -146,11 +167,16 @@ func BenchmarkReduce(b *testing.B) {
 	C.Set(0, 0, 1)
 	C.Set(1, 1, 1)
 	D := mat.NewDense(2, 2, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Reduce(nil)
+		if _, err := sys.Reduce(nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -171,11 +197,16 @@ func BenchmarkAbsorbDelay(b *testing.B) {
 	C.Set(1, 4, 1)
 	D := mat.NewDense(2, 3, nil)
 	delay := mat.NewDense(2, 3, []float64{3, 5, 3, 5, 3, 5})
-	sys, _ := NewWithDelay(A, B, C, D, delay, 1.0)
+	sys, err := NewWithDelay(A, B, C, D, delay, 1.0)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.AbsorbDelay()
+		if _, err := sys.AbsorbDelay(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -198,11 +229,16 @@ func BenchmarkDiscretizeZOH(b *testing.B) {
 	C.Set(1, 5, 1)
 	C.Set(2, n-1, 1)
 	D := mat.NewDense(3, m, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.C2D(0.01, C2DOptions{})
+		if _, err := sys.C2D(0.01, C2DOptions{}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -220,67 +256,85 @@ func BenchmarkDenseNorm(b *testing.B) {
 }
 
 func BenchmarkSeries(b *testing.B) {
-	sys1 := benchSys(10, 3, 4)
-	sys2 := benchSys(8, 4, 2)
+	sys1 := benchSys(b, 10, 3, 4)
+	sys2 := benchSys(b, 8, 4, 2)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Series(sys1, sys2)
+		if _, err := Series(sys1, sys2); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkParallel(b *testing.B) {
-	sys1 := benchSys(10, 3, 4)
-	sys2 := benchSys(8, 3, 4)
+	sys1 := benchSys(b, 10, 3, 4)
+	sys2 := benchSys(b, 8, 3, 4)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Parallel(sys1, sys2)
+		if _, err := Parallel(sys1, sys2); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkFeedback(b *testing.B) {
-	plant := benchSys(10, 3, 3)
-	ctrl := benchSys(5, 3, 3)
+	plant := benchSys(b, 10, 3, 3)
+	ctrl := benchSys(b, 5, 3, 3)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Feedback(plant, ctrl, -1)
+		if _, err := Feedback(plant, ctrl, -1); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkFeedbackLFT(b *testing.B) {
-	plant := benchSys(10, 3, 3)
-	_ = plant.SetOutputDelay([]float64{0.5, 1.0, 0.3})
-	ctrl := benchSys(5, 3, 3)
-	_ = ctrl.SetInputDelay([]float64{0.2, 0.4, 0.6})
+	plant := benchSys(b, 10, 3, 3)
+	if err := plant.SetOutputDelay([]float64{0.5, 1.0, 0.3}); err != nil {
+		b.Fatal(err)
+	}
+	ctrl := benchSys(b, 5, 3, 3)
+	if err := ctrl.SetInputDelay([]float64{0.2, 0.4, 0.6}); err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Feedback(plant, ctrl, -1)
+		if _, err := Feedback(plant, ctrl, -1); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkAppend(b *testing.B) {
-	sys1 := benchSys(10, 3, 4)
-	sys2 := benchSys(8, 2, 3)
+	sys1 := benchSys(b, 10, 3, 4)
+	sys2 := benchSys(b, 8, 2, 3)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Append(sys1, sys2)
+		if _, err := Append(sys1, sys2); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkFreqResponse(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	omega := logspace(-2, 2, 100)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.FreqResponse(omega)
+		if _, err := sys.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkFreqResponse_ShortSweep(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	omega := logspace(-2, 2, 8)
 	b.ResetTimer()
 	for b.Loop() {
-		sys.FreqResponse(omega)
+		if _, err := sys.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -296,7 +350,7 @@ func BenchmarkFrequencySweepKernels(b *testing.B) {
 		{48, 1, 1, 100}, {48, 2, 2, 100}, {64, 1, 1, 100}, {64, 4, 4, 100}, {100, 2, 2, 100},
 	}
 	for _, test := range tests {
-		sys := benchDenseSys(test.n, test.m, test.p)
+		sys := benchDenseSys(b, test.n, test.m, test.p)
 		evaluator := newFrequencyEvaluator(sys)
 		omega := logspace(-2, 2, test.nw)
 		size := test.nw * test.p * test.m
@@ -322,7 +376,8 @@ func BenchmarkFrequencySweepKernels(b *testing.B) {
 
 // benchDenseSys is a fully coupled stable model; banded benchSys lets GEPP
 // skip zero multipliers and understates the dense per-point cost.
-func benchDenseSys(n, m, p int) *System {
+func benchDenseSys(tb testing.TB, n, m, p int) *System {
+	tb.Helper()
 	rng := rand.New(rand.NewPCG(uint64(n), uint64(m*16+p)))
 	fill := func(r, c int, scale float64) *mat.Dense {
 		out := mat.NewDense(r, c, nil)
@@ -337,15 +392,20 @@ func benchDenseSys(n, m, p int) *System {
 	for i := range n {
 		A.Set(i, i, A.At(i, i)-2)
 	}
-	sys, _ := New(A, fill(n, m, 1), fill(p, n, 1), mat.NewDense(p, m, nil), 0)
+	sys, err := New(A, fill(n, m, 1), fill(p, n, 1), mat.NewDense(p, m, nil), 0)
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return sys
 }
 
 func BenchmarkBode(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Bode(nil, 200)
+		if _, err := sys.Bode(nil, 200); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -360,18 +420,25 @@ func BenchmarkZeros_SISO(b *testing.B) {
 	B := mat.NewDense(5, 1, []float64{1, 0, 0, 0, 0})
 	C := mat.NewDense(1, 5, []float64{0, 0, 0, 0, 1})
 	D := mat.NewDense(1, 1, []float64{0.1})
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Zeros()
+		if _, err := sys.Zeros(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkZeros_MIMO(b *testing.B) {
-	sys := benchSys(10, 3, 3)
+	sys := benchSys(b, 10, 3, 3)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Zeros()
+		if _, err := sys.Zeros(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -396,10 +463,15 @@ func BenchmarkZeros_NonSquare(b *testing.B) {
 		C.Set(i, i%n, 1)
 	}
 	D := mat.NewDense(p, m, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Zeros()
+		if _, err := sys.Zeros(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -426,7 +498,7 @@ func BenchmarkControllabilityStaircase(b *testing.B) {
 }
 
 func BenchmarkSimulateNoDelay(b *testing.B) {
-	sys := benchSys(20, 3, 4)
+	sys := benchSys(b, 20, 3, 4)
 	sys.Dt = 0.01
 	steps := 500
 	u := mat.NewDense(3, steps, nil)
@@ -441,21 +513,27 @@ func BenchmarkSimulateNoDelay(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Simulate(u, x0, nil)
+		if _, err := sys.Simulate(u, x0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkThiranDelay(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		thiranDelay(0.35, 3, 0.1)
+		if _, err := thiranDelay(0.35, 3, 0.1); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkPadeDelay(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		PadeDelay(0.5, 5)
+		if _, err := PadeDelay(0.5, 5); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -473,28 +551,32 @@ func BenchmarkDecomposeIODelay(b *testing.B) {
 }
 
 func BenchmarkPullDelaysToLFT(b *testing.B) {
-	sys := benchSys(5, 3, 2)
+	sys := benchSys(b, 5, 3, 2)
 	sys.InputDelay = []float64{0.3, 0.5, 0.1}
 	sys.OutputDelay = []float64{0.2, 0.4}
 	sys.Delay = mat.NewDense(2, 3, []float64{1, 2, 1, 2, 3, 2})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.PullDelaysToLFT()
+		if _, err := sys.PullDelaysToLFT(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkGetDelayModel(b *testing.B) {
-	sys := benchSys(5, 2, 2)
+	sys := benchSys(b, 5, 2, 2)
 	sys.InputDelay = []float64{0.3, 0.5}
 	sys.OutputDelay = []float64{0.2, 0.4}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.GetDelayModel()
+		if _, _, err := sys.GetDelayModel(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkSetDelayModel(b *testing.B) {
-	sys := benchSys(5, 2, 2)
+	sys := benchSys(b, 5, 2, 2)
 	sys.InputDelay = []float64{0.3, 0.5}
 	H, tau, err := sys.GetDelayModel()
 	if err != nil {
@@ -502,7 +584,9 @@ func BenchmarkSetDelayModel(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		SetDelayModel(H, tau)
+		if _, err := SetDelayModel(H, tau); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -521,16 +605,23 @@ func BenchmarkAbsorbInternalDelay(b *testing.B) {
 	C.Set(0, 0, 1)
 	C.Set(1, 4, 1)
 	D := mat.NewDense(2, 2, nil)
-	sys, _ := New(A, B, C, D, 1.0)
+	sys, err := New(A, B, C, D, 1.0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	B2 := mat.NewDense(5, 2, []float64{0.5, 0, 0, 0.3, 0.1, 0, 0, 0.2, 0, 0.1})
 	C2 := mat.NewDense(2, 5, []float64{0.2, 0.4, 0, 0, 0, 0, 0, 0.3, 0.1, 0})
 	D12 := mat.NewDense(2, 2, nil)
 	D21 := mat.NewDense(2, 2, nil)
 	D22 := mat.NewDense(2, 2, nil)
-	sys.SetInternalDelay([]float64{3, 5}, B2, C2, D12, D21, D22)
+	if err := sys.SetInternalDelay([]float64{3, 5}, B2, C2, D12, D21, D22); err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.AbsorbDelay(AbsorbInternal)
+		if _, err := sys.AbsorbDelay(AbsorbInternal); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -544,24 +635,34 @@ func BenchmarkAbsorbInternalDelayContinuous(b *testing.B) {
 	}
 	B := mat.NewDense(5, 2, []float64{1, 0, 0, 1, 0.2, 0, 0, 0.1, 0.3, 0})
 	C := mat.NewDense(2, 5, []float64{1, 0, 0.2, 0, 0, 0, 0, 0.1, 0, 1})
-	sys, _ := New(A, B, C, mat.NewDense(2, 2, nil), 0)
+	sys, err := New(A, B, C, mat.NewDense(2, 2, nil), 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	B2 := mat.NewDense(5, 2, []float64{0.5, 0, 0, 0.3, 0.1, 0, 0, 0.2, 0, 0.1})
 	C2 := mat.NewDense(2, 5, []float64{0.2, 0.4, 0, 0, 0, 0, 0, 0.3, 0.1, 0})
-	sys.SetInternalDelay([]float64{0.3, 0.7}, B2, C2, mat.NewDense(2, 2, nil), mat.NewDense(2, 2, nil), mat.NewDense(2, 2, []float64{0, 0.1, 0.2, 0}))
+	if err := sys.SetInternalDelay([]float64{0.3, 0.7}, B2, C2, mat.NewDense(2, 2, nil), mat.NewDense(2, 2, nil), mat.NewDense(2, 2, []float64{0, 0.1, 0.2, 0})); err != nil {
+		b.Fatal(err)
+	}
 	b.ReportAllocs()
 	for b.Loop() {
-		sys.AbsorbDelay(AbsorbInternal)
+		if _, err := sys.AbsorbDelay(AbsorbInternal); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkDiscretizeWithOpts_Thiran(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
 		mat.NewDense(2, 1, []float64{0, 1}),
 		mat.NewDense(1, 2, []float64{1, 0}),
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
+	if err != nil {
+		b.Fatal(err)
+	}
 	sys.InputDelay = []float64{0.35}
 	b.ReportAllocs()
 	for b.Loop() {
@@ -572,13 +673,16 @@ func BenchmarkDiscretizeWithOpts_Thiran(b *testing.B) {
 }
 
 func BenchmarkDiscretizeWithOpts_IODelayThiran(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(2, 2, []float64{0, 1, -2, -3}),
 		mat.NewDense(2, 1, []float64{0, 1}),
 		mat.NewDense(1, 2, []float64{1, 0}),
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
+	if err != nil {
+		b.Fatal(err)
+	}
 	sys.Delay = mat.NewDense(1, 1, []float64{0.35})
 	b.ReportAllocs()
 	for b.Loop() {
@@ -590,7 +694,7 @@ func BenchmarkDiscretizeWithOpts_IODelayThiran(b *testing.B) {
 
 func BenchmarkDiscretizeWithOpts_PathThiran(b *testing.B) {
 	for _, size := range []struct{ n, io int }{{4, 2}, {8, 4}} {
-		sys := benchSys(size.n, size.io, size.io)
+		sys := benchSys(b, size.n, size.io, size.io)
 		sys.Delay = mat.NewDense(size.io, size.io, nil)
 		for i := range size.io {
 			sys.Delay.Set(i, i, 0.035+0.02*float64(i))
@@ -610,14 +714,19 @@ func BenchmarkDiscretizeWithOpts_PathThiran(b *testing.B) {
 }
 
 func BenchmarkFeedbackAbsorbDelay(b *testing.B) {
-	plant := benchSys(10, 3, 3)
+	plant := benchSys(b, 10, 3, 3)
 	plant.Dt = 1.0
-	ctrl := benchSys(5, 3, 3)
+	ctrl := benchSys(b, 5, 3, 3)
 	ctrl.Dt = 1.0
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		cl, _ := Feedback(plant, ctrl, -1)
-		cl.AbsorbDelay()
+		cl, err := Feedback(plant, ctrl, -1)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := cl.AbsorbDelay(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -626,13 +735,18 @@ func BenchmarkSimulateInternalDelay(b *testing.B) {
 	B := mat.NewDense(3, 1, []float64{1, 0, 0})
 	C := mat.NewDense(1, 3, []float64{1, 0, 0})
 	D := mat.NewDense(1, 1, []float64{0})
-	sys, _ := New(A, B, C, D, 1.0)
+	sys, err := New(A, B, C, D, 1.0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	B2 := mat.NewDense(3, 1, []float64{0.5, 0.3, 0.1})
 	C2 := mat.NewDense(1, 3, []float64{0.2, 0.4, 0})
 	D12 := mat.NewDense(1, 1, []float64{0})
 	D21 := mat.NewDense(1, 1, []float64{0})
 	D22 := mat.NewDense(1, 1, []float64{0})
-	sys.SetInternalDelay([]float64{3}, B2, C2, D12, D21, D22)
+	if err := sys.SetInternalDelay([]float64{3}, B2, C2, D12, D21, D22); err != nil {
+		b.Fatal(err)
+	}
 
 	steps := 200
 	u := mat.NewDense(1, steps, nil)
@@ -643,43 +757,53 @@ func BenchmarkSimulateInternalDelay(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Simulate(u, x0, nil)
+		if _, err := sys.Simulate(u, x0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkFreqResponseWithDelay(b *testing.B) {
-	sys := benchSys(5, 2, 2)
+	sys := benchSys(b, 5, 2, 2)
 	sys.InputDelay = []float64{0.3, 0.5}
 	sys.OutputDelay = []float64{0.2, 0.4}
 	omega := logspace(-2, 2, 100)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.FreqResponse(omega)
+		if _, err := sys.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkPadeSystem(b *testing.B) {
-	sys := benchSys(5, 2, 2)
+	sys := benchSys(b, 5, 2, 2)
 	sys.InputDelay = []float64{0.3, 0.5}
 	sys.OutputDelay = []float64{0.2, 0.4}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Pade(3)
+		if _, err := sys.Pade(3); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkZeroDelayApprox(b *testing.B) {
-	sys := benchSys(5, 2, 2)
+	sys := benchSys(b, 5, 2, 2)
 	sys.Dt = 1.0
 	B2 := mat.NewDense(5, 2, []float64{0.5, 0, 0, 0.3, 0.1, 0, 0, 0.2, 0, 0.1})
 	C2 := mat.NewDense(2, 5, []float64{0.2, 0.4, 0, 0, 0, 0, 0, 0.3, 0.1, 0})
 	D12 := mat.NewDense(2, 2, nil)
 	D21 := mat.NewDense(2, 2, nil)
 	D22 := mat.NewDense(2, 2, nil)
-	sys.SetInternalDelay([]float64{3, 5}, B2, C2, D12, D21, D22)
+	if err := sys.SetInternalDelay([]float64{3, 5}, B2, C2, D12, D21, D22); err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.ZeroDelayApprox()
+		if _, err := sys.ZeroDelayApprox(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -698,32 +822,42 @@ func BenchmarkIsStrictlyUpperTriangular(b *testing.B) {
 }
 
 func BenchmarkFreqResponseLFT(b *testing.B) {
-	sys := benchSys(5, 2, 2)
+	sys := benchSys(b, 5, 2, 2)
 	sys.Dt = 1.0
 	B2 := mat.NewDense(5, 2, []float64{0.5, 0, 0, 0.3, 0.1, 0, 0, 0.2, 0, 0.1})
 	C2 := mat.NewDense(2, 5, []float64{0.2, 0.4, 0, 0, 0, 0, 0, 0.3, 0.1, 0})
 	D12 := mat.NewDense(2, 2, nil)
 	D21 := mat.NewDense(2, 2, nil)
 	D22 := mat.NewDense(2, 2, nil)
-	sys.SetInternalDelay([]float64{3, 5}, B2, C2, D12, D21, D22)
+	if err := sys.SetInternalDelay([]float64{3, 5}, B2, C2, D12, D21, D22); err != nil {
+		b.Fatal(err)
+	}
 	omega := logspace(-2, 2, 100)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.FreqResponse(omega)
+		if _, err := sys.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // DC motor (MATLAB standard example, L=0 simplification)
 // States: [theta, omega], Input: voltage, Output: angle
 func BenchmarkSimulate_DCMotor(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(2, 2, []float64{0, 1, 0, -10.01}),
 		mat.NewDense(2, 1, []float64{0, 1}),
 		mat.NewDense(1, 2, []float64{1, 0}),
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
-	disc, _ := sys.C2D(0.001, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	disc, err := sys.C2D(0.001, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
 	steps := 1000
 	u := mat.NewDense(1, steps, nil)
 	for k := range steps {
@@ -731,14 +865,16 @@ func BenchmarkSimulate_DCMotor(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		disc.Simulate(u, nil, nil)
+		if _, err := disc.Simulate(u, nil, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // Boeing 747 lateral-directional (Franklin, Powell & Emami-Naeini)
 // States: [beta, yaw rate, roll rate, roll angle]
 func BenchmarkFreqResponse_B747Lateral(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(4, 4, []float64{
 			-0.0558, -0.9968, 0.0802, 0.0415,
 			0.598, -0.115, -0.0318, 0,
@@ -756,17 +892,22 @@ func BenchmarkFreqResponse_B747Lateral(b *testing.B) {
 		mat.NewDense(2, 2, nil),
 		0,
 	)
+	if err != nil {
+		b.Fatal(err)
+	}
 	omega := logspace(-3, 2, 200)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.FreqResponse(omega)
+		if _, err := sys.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // Mass-spring-damper chain (4 masses, k=10, c=0.5, m=1)
 // 8 states, SISO, from Skogestad & Postlethwaite
 func BenchmarkSimulate_MassSpringDamper(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(8, 8, []float64{
 			0, 0, 0, 0, 1, 0, 0, 0,
 			0, 0, 0, 0, 0, 1, 0, 0,
@@ -782,7 +923,13 @@ func BenchmarkSimulate_MassSpringDamper(b *testing.B) {
 		mat.NewDense(1, 1, nil),
 		0,
 	)
-	disc, _ := sys.C2D(0.01, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	disc, err := sys.C2D(0.01, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
 	steps := 500
 	u := mat.NewDense(1, steps, nil)
 	for k := range steps {
@@ -790,13 +937,15 @@ func BenchmarkSimulate_MassSpringDamper(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		disc.Simulate(u, nil, nil)
+		if _, err := disc.Simulate(u, nil, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // Boeing 747 longitudinal (Ogata) - discretize + simulate workflow
 func BenchmarkDiscretizeAndSimulate_B747Longitudinal(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(4, 4, []float64{
 			-0.003, 0.039, 0, -0.322,
 			-0.065, -0.319, 7.74, 0,
@@ -814,7 +963,13 @@ func BenchmarkDiscretizeAndSimulate_B747Longitudinal(b *testing.B) {
 		mat.NewDense(2, 2, nil),
 		0,
 	)
-	disc, _ := sys.C2D(0.05, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	disc, err := sys.C2D(0.05, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
 	steps := 200
 	u := mat.NewDense(2, steps, nil)
 	for k := range steps {
@@ -825,14 +980,16 @@ func BenchmarkDiscretizeAndSimulate_B747Longitudinal(b *testing.B) {
 	x0 := mat.NewVecDense(4, []float64{0, 0, 0, 0})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		disc.Simulate(u, x0, nil)
+		if _, err := disc.Simulate(u, x0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // Large system simulation (50 states) - scalability test
 func BenchmarkSimulate_Large(b *testing.B) {
 	n, m, p := 50, 5, 5
-	sys := benchSys(n, m, p)
+	sys := benchSys(b, n, m, p)
 	sys.Dt = 0.01
 	steps := 1000
 	u := mat.NewDense(m, steps, nil)
@@ -844,13 +1001,15 @@ func BenchmarkSimulate_Large(b *testing.B) {
 	x0 := mat.NewVecDense(n, nil)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Simulate(u, x0, nil)
+		if _, err := sys.Simulate(u, x0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // Feedback + simulate pipeline (typical design workflow)
 func BenchmarkFeedbackAndSimulate(b *testing.B) {
-	plant, _ := New(
+	plant, err := New(
 		mat.NewDense(4, 4, []float64{
 			-0.0558, -0.9968, 0.0802, 0.0415,
 			0.598, -0.115, -0.0318, 0,
@@ -868,15 +1027,27 @@ func BenchmarkFeedbackAndSimulate(b *testing.B) {
 		mat.NewDense(2, 2, nil),
 		0,
 	)
-	ctrl, _ := New(
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctrl, err := New(
 		mat.NewDense(2, 2, []float64{-1, 0, 0, -2}),
 		mat.NewDense(2, 2, []float64{1, 0, 0, 1}),
 		mat.NewDense(2, 2, []float64{-0.5, 0, 0, -1}),
 		mat.NewDense(2, 2, nil),
 		0,
 	)
-	cl, _ := Feedback(plant, ctrl, -1)
-	disc, _ := cl.C2D(0.05, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	cl, err := Feedback(plant, ctrl, -1)
+	if err != nil {
+		b.Fatal(err)
+	}
+	disc, err := cl.C2D(0.05, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
 	steps := 200
 	u := mat.NewDense(2, steps, nil)
 	for k := range 50 {
@@ -884,17 +1055,21 @@ func BenchmarkFeedbackAndSimulate(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		disc.Simulate(u, nil, nil)
+		if _, err := disc.Simulate(u, nil, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // Bode of large MIMO system (scalability)
 func BenchmarkBode_LargeMIMO(b *testing.B) {
-	sys := benchSys(30, 5, 5)
+	sys := benchSys(b, 30, 5, 5)
 	omega := logspace(-2, 3, 200)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.FreqResponse(omega)
+		if _, err := sys.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -953,7 +1128,9 @@ func benchLyap(b *testing.B, n int) {
 	Q := benchSymPD(n)
 	b.ResetTimer()
 	for range b.N {
-		Lyap(A, Q, nil)
+		if _, err := Lyap(A, Q, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -966,7 +1143,9 @@ func benchDLyap(b *testing.B, n int) {
 	Q := benchSymPD(n)
 	b.ResetTimer()
 	for range b.N {
-		DLyap(A, Q, nil)
+		if _, err := DLyap(A, Q, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -986,7 +1165,9 @@ func benchCare(b *testing.B, n, m int) {
 	opts := &RiccatiOpts{Workspace: ws}
 	b.ResetTimer()
 	for range b.N {
-		Care(A, B, Q, R, opts)
+		if _, err := Care(A, B, Q, R, opts); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1006,7 +1187,9 @@ func benchDare(b *testing.B, n, m int) {
 	opts := &RiccatiOpts{Workspace: ws}
 	b.ResetTimer()
 	for range b.N {
-		Dare(A, B, Q, R, opts)
+		if _, err := Dare(A, B, Q, R, opts); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1015,42 +1198,52 @@ func BenchmarkDare_N50_M5(b *testing.B)  { benchDare(b, 50, 5) }
 func BenchmarkDare_N100_M5(b *testing.B) { benchDare(b, 100, 5) }
 
 func BenchmarkGram(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
 	for b.Loop() {
-		Gram(sys, GramControllability)
+		if _, err := Gram(sys, GramControllability); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkCtrb(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
 	for b.Loop() {
-		Ctrb(sys.A, sys.B)
+		if _, err := Ctrb(sys.A, sys.B); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkH2Norm(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
 	for b.Loop() {
-		H2Norm(sys)
+		if _, err := H2Norm(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkHSV(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
 	for b.Loop() {
-		HSV(sys)
+		if _, err := HSV(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkHinfNorm(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
 	for b.Loop() {
-		HinfNorm(sys)
+		if _, _, err := HinfNorm(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1082,10 +1275,15 @@ func BenchmarkH2Syn_Simple(b *testing.B) {
 		0, 1,
 		0.1, 0,
 	})
-	P, _ := New(A, B, C, D, 0)
+	P, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for b.Loop() {
-		H2Syn(P, 1, 1)
+		if _, err := H2Syn(P, 1, 1); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1105,10 +1303,15 @@ func BenchmarkHinfSyn_Simple(b *testing.B) {
 		0, 0, 1,
 		0.1, 0.1, 0,
 	})
-	P, _ := New(A, B, C, D, 0)
+	P, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for b.Loop() {
-		HinfSyn(P, 1, 1)
+		if _, err := HinfSyn(P, 1, 1); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1132,39 +1335,104 @@ func BenchmarkHinfSyn_D11(b *testing.B) {
 }
 
 func BenchmarkBalreal(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
 	for b.Loop() {
-		Balreal(sys)
+		if _, err := Balreal(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkBalred(b *testing.B) {
-	sys := benchSys(10, 2, 3)
+	sys := benchSys(b, 10, 2, 3)
 	b.ResetTimer()
 	for b.Loop() {
-		Balred(sys, 5, BalredOptions{StateProjection: Truncate})
+		if _, _, err := Balred(sys, 5, BalredOptions{StateProjection: Truncate}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // --- Controller & Observer Benchmarks ---
 
-func benchPlace(b *testing.B, n, m int) {
-	A := benchStableA(n)
-	B := benchB(n, m)
-	poles := make([]complex128, n)
-	for i := range n {
-		poles[i] = complex(-float64(i+1)*2, 0)
-	}
+type placeFixture func(n, m int) (A, B *mat.Dense, poles []complex128)
+
+func benchPlace(b *testing.B, fixture placeFixture, n, m int) {
+	A, B, poles := fixture(n, m)
 	b.ResetTimer()
 	for range b.N {
-		Place(A, B, poles)
+		if _, err := Place(A, B, poles); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
-func BenchmarkPlace_N10_M2(b *testing.B)  { benchPlace(b, 10, 2) }
-func BenchmarkPlace_N50_M5(b *testing.B)  { benchPlace(b, 50, 5) }
-func BenchmarkPlace_N100_M5(b *testing.B) { benchPlace(b, 100, 5) }
+func placeChainFixture(n, m int) (A, B *mat.Dense, poles []complex128) {
+	poles = make([]complex128, n)
+	for i := range n {
+		poles[i] = complex(-float64(i+1)*2, 0)
+	}
+	return benchStableA(n), benchB(n, m), poles
+}
+
+// placeSpreadFixture drives every state through a dense B. With B only on the
+// first states of the benchStableA chain, far-state controllability decays
+// like 0.2^(n-m) and is lost in double precision for large n.
+func placeSpreadFixture(n, m int) (A, B *mat.Dense, poles []complex128) {
+	rng := newPlaceRNG(5)
+	B = mat.NewDense(n, m, nil)
+	for i := range n {
+		for j := range m {
+			B.Set(i, j, rng())
+		}
+	}
+	poles = make([]complex128, n)
+	for i := range n {
+		poles[i] = complex(-float64(i+1)*0.3-1, 0)
+	}
+	return benchStableA(n), B, poles
+}
+
+func BenchmarkPlace_N10_M2(b *testing.B)  { benchPlace(b, placeChainFixture, 10, 2) }
+func BenchmarkPlace_N50_M5(b *testing.B)  { benchPlace(b, placeSpreadFixture, 50, 5) }
+func BenchmarkPlace_N100_M5(b *testing.B) { benchPlace(b, placeSpreadFixture, 100, 5) }
+
+func TestPlaceBenchFixturesAssignPoles(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture placeFixture
+		n, m    int
+	}{
+		{"chain/N10_M2", placeChainFixture, 10, 2},
+		{"spread/N50_M5", placeSpreadFixture, 50, 5},
+		{"spread/N100_M5", placeSpreadFixture, 100, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			A, B, poles := tc.fixture(tc.n, tc.m)
+			K, err := Place(A, B, poles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cl mat.Dense
+			cl.Mul(B, K)
+			cl.Sub(A, &cl)
+			var eig mat.Eigen
+			if !eig.Factorize(&cl, mat.EigenNone) {
+				t.Fatal("closed-loop eigendecomposition failed")
+			}
+			for _, v := range eig.Values(nil) {
+				best := math.Inf(1)
+				for _, p := range poles {
+					best = math.Min(best, cmplx.Abs(v-p)/cmplx.Abs(p))
+				}
+				if best > 1e-4 {
+					t.Fatalf("closed-loop eigenvalue %v is %g from nearest target pole", v, best)
+				}
+			}
+		})
+	}
+}
 
 func benchPlaceRandom(b *testing.B, n, m int) {
 	rng := newPlaceRNG(3)
@@ -1187,7 +1455,9 @@ func benchPlaceRandom(b *testing.B, n, m int) {
 	}
 	b.ResetTimer()
 	for b.Loop() {
-		Place(A, B, poles)
+		if _, err := Place(A, B, poles); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1204,7 +1474,9 @@ func benchAcker(b *testing.B, n int) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		Acker(A, bCol, poles)
+		if _, err := Acker(A, bCol, poles); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1223,7 +1495,9 @@ func benchLqr(b *testing.B, n, m int) {
 	opts := &RiccatiOpts{Workspace: ws}
 	b.ResetTimer()
 	for range b.N {
-		Lqr(A, B, Q, R, opts)
+		if _, err := Lqr(A, B, Q, R, opts); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1232,7 +1506,7 @@ func BenchmarkLqr_N50_M5(b *testing.B)  { benchLqr(b, 50, 5) }
 func BenchmarkLqr_N100_M5(b *testing.B) { benchLqr(b, 100, 5) }
 
 func benchKalman(b *testing.B, n, m, p int) {
-	sys := benchSys(n, m, p)
+	sys := benchSys(b, n, m, p)
 	Qn := mat.NewDense(m, m, nil)
 	for i := range m {
 		Qn.Set(i, i, 1)
@@ -1245,7 +1519,9 @@ func benchKalman(b *testing.B, n, m, p int) {
 	opts := &RiccatiOpts{Workspace: ws}
 	b.ResetTimer()
 	for range b.N {
-		Kalman(sys, Qn, Rn, nil, opts)
+		if _, err := Kalman(sys, Qn, Rn, nil, opts); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1254,14 +1530,16 @@ func BenchmarkKalman_N50_M5_P5(b *testing.B)  { benchKalman(b, 50, 5, 5) }
 func BenchmarkKalman_N100_M5_P5(b *testing.B) { benchKalman(b, 100, 5, 5) }
 
 func benchEstim(b *testing.B, n, m, p int) {
-	sys := benchSys(n, m, p)
+	sys := benchSys(b, n, m, p)
 	L := mat.NewDense(n, p, nil)
 	for i := range min(n, p) {
 		L.Set(i, i, 1)
 	}
 	b.ResetTimer()
 	for range b.N {
-		estimAll(sys, L)
+		if _, err := estimAll(sys, L); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1270,7 +1548,7 @@ func BenchmarkEstim_N50_M5_P5(b *testing.B)  { benchEstim(b, 50, 5, 5) }
 func BenchmarkEstim_N100_M5_P5(b *testing.B) { benchEstim(b, 100, 5, 5) }
 
 func benchReg(b *testing.B, n, m, p int) {
-	sys := benchSys(n, m, p)
+	sys := benchSys(b, n, m, p)
 	K := mat.NewDense(m, n, nil)
 	L := mat.NewDense(n, p, nil)
 	for i := range min(m, n) {
@@ -1281,7 +1559,9 @@ func benchReg(b *testing.B, n, m, p int) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		Reg(sys, K, L)
+		if _, err := Reg(sys, K, L); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1296,40 +1576,57 @@ func BenchmarkPolyRoots_N10(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		p.Roots()
+		if _, err := p.Roots(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkZPKEval_SISO(b *testing.B) {
-	z, _ := NewZPK([]complex128{-1, -2, -3}, []complex128{-4, -5, -6, -7}, 2.0, 0)
+	z, err := NewZPK([]complex128{-1, -2, -3}, []complex128{-4, -5, -6, -7}, 2.0, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	s := complex(0, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		z.Eval(s)
+		if _, err := z.Eval(s); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkZPKFreqResponse_SISO_100(b *testing.B) {
-	z, _ := NewZPK([]complex128{-1, -2}, []complex128{-3, -4, -5}, 2.0, 0)
+	z, err := NewZPK([]complex128{-1, -2}, []complex128{-3, -4, -5}, 2.0, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	omega := make([]float64, 100)
 	for i := range omega {
 		omega[i] = 0.01 * math.Pow(10, 4*float64(i)/99)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		z.FreqResponse(omega)
+		if _, err := z.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkZPKFreqResponseDiscrete_SISO_100(b *testing.B) {
-	z, _ := NewZPK([]complex128{0.5, -0.2}, []complex128{0.9, 0.6 + 0.3i, 0.6 - 0.3i}, 2.0, 0.1)
+	z, err := NewZPK([]complex128{0.5, -0.2}, []complex128{0.9, 0.6 + 0.3i, 0.6 - 0.3i}, 2.0, 0.1)
+	if err != nil {
+		b.Fatal(err)
+	}
 	omega := make([]float64, 100)
 	for i := range omega {
 		omega[i] = 0.01 * math.Pow(10, 3.4*float64(i)/99)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		z.FreqResponse(omega)
+		if _, err := z.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1342,10 +1639,15 @@ func BenchmarkZPKToTF_SISO_N10(b *testing.B) {
 	for i := range poles {
 		poles[i] = complex(float64(-i-11), 0)
 	}
-	z, _ := NewZPK(zeros, poles, 1.0, 0)
+	z, err := NewZPK(zeros, poles, 1.0, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		z.TransferFunction()
+		if _, err := z.TransferFunction(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1358,27 +1660,42 @@ func BenchmarkTFToZPK_SISO_N10(b *testing.B) {
 	for i := range poles {
 		poles[i] = complex(float64(-i-11), 0)
 	}
-	z, _ := NewZPK(zeros, poles, 1.0, 0)
-	tf, _ := z.TransferFunction()
+	z, err := NewZPK(zeros, poles, 1.0, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	tf, err := z.TransferFunction()
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tf.ZPK()
+		if _, err := tf.ZPK(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkSSToZPK_SISO(b *testing.B) {
-	sys := benchSys(5, 1, 1)
+	sys := benchSys(b, 5, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.ZPKModel(nil)
+		if _, err := sys.ZPKModel(nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkZPKToSS_SISO(b *testing.B) {
-	z, _ := NewZPK([]complex128{-1, -2}, []complex128{-3, -4, -5}, 2.0, 0)
+	z, err := NewZPK([]complex128{-1, -2}, []complex128{-3, -4, -5}, 2.0, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		z.StateSpace()
+		if _, err := z.StateSpace(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1394,37 +1711,45 @@ func BenchmarkPolyFromComplexRoots_N20(b *testing.B) {
 }
 
 func BenchmarkSigma_SISO(b *testing.B) {
-	sys := benchSys(4, 1, 1)
+	sys := benchSys(b, 4, 1, 1)
 	omega := logspace(-1, 2, 200)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Sigma(omega, 0)
+		if _, err := sys.Sigma(omega, 0); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkSigma_MIMO(b *testing.B) {
-	sys := benchSys(4, 2, 2)
+	sys := benchSys(b, 4, 2, 2)
 	omega := logspace(-1, 2, 200)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Sigma(omega, 0)
+		if _, err := sys.Sigma(omega, 0); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkNichols(b *testing.B) {
-	sys := benchSys(4, 1, 1)
+	sys := benchSys(b, 4, 1, 1)
 	omega := logspace(-1, 2, 200)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Nichols(omega, 0)
+		if _, err := sys.Nichols(omega, 0); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkNyquist(b *testing.B) {
-	sys := benchSys(4, 1, 1)
+	sys := benchSys(b, 4, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.Nyquist(nil, 500)
+		if _, err := sys.Nyquist(nil, 500); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1441,7 +1766,9 @@ func BenchmarkFreqRespEst_SISO(b *testing.B) {
 	y := mat.NewDense(1, N, yData)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FreqRespEst(u, y, dt, nil)
+		if _, err := FreqRespEst(u, y, dt, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -1458,11 +1785,14 @@ func BenchmarkFreqRespEst_MIMO(b *testing.B) {
 	y := mat.NewDense(2, N, yData)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FreqRespEst(u, y, dt, nil)
+		if _, err := FreqRespEst(u, y, dt, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
-func benchSys(n, m, p int) *System {
+func benchSys(tb testing.TB, n, m, p int) *System {
+	tb.Helper()
 	A := mat.NewDense(n, n, nil)
 	for i := range n {
 		A.Set(i, i, -float64(i+1)*0.3)
@@ -1482,24 +1812,32 @@ func benchSys(n, m, p int) *System {
 		C.Set(i, i, 1)
 	}
 	D := mat.NewDense(p, m, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return sys
 }
 
 func BenchmarkBlkDiag(b *testing.B) {
-	s1 := benchSys(10, 3, 4)
-	s2 := benchSys(8, 2, 3)
-	s3 := benchSys(6, 4, 2)
+	s1 := benchSys(b, 10, 3, 4)
+	s2 := benchSys(b, 8, 2, 3)
+	s3 := benchSys(b, 6, 4, 2)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		BlkDiag(s1, s2, s3)
+		if _, err := BlkDiag(s1, s2, s3); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkConnect(b *testing.B) {
-	s1 := benchSys(10, 3, 4)
-	s2 := benchSys(8, 4, 3)
-	aug, _ := BlkDiag(s1, s2)
+	s1 := benchSys(b, 10, 3, 4)
+	s2 := benchSys(b, 8, 4, 3)
+	aug, err := BlkDiag(s1, s2)
+	if err != nil {
+		b.Fatal(err)
+	}
 	_, m, p := aug.Dims()
 	Q := mat.NewDense(m, p, nil)
 	for i := 0; i < min(4, min(m, p)); i++ {
@@ -1509,29 +1847,36 @@ func BenchmarkConnect(b *testing.B) {
 	outputs := []int{4, 5, 6}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		connectGain("Connect", aug, Q, inputs, outputs)
+		if _, err := connectGain("Connect", aug, Q, inputs, outputs); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkLFT(b *testing.B) {
-	M := benchSys(10, 6, 6)
-	Delta := benchSys(5, 3, 3)
+	M := benchSys(b, 10, 6, 6)
+	Delta := benchSys(b, 5, 3, 3)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		LFT(M, Delta, LFTFeedback{Nu: 3, Ny: 3})
+		if _, err := LFT(M, Delta, LFTFeedback{Nu: 3, Ny: 3}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkLFT_Large(b *testing.B) {
-	M := benchSys(20, 12, 12)
-	Delta := benchSys(10, 6, 6)
+	M := benchSys(b, 20, 12, 12)
+	Delta := benchSys(b, 10, 6, 6)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		LFT(M, Delta, LFTFeedback{Nu: 6, Ny: 6})
+		if _, err := LFT(M, Delta, LFTFeedback{Nu: 6, Ny: 6}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
-func benchD2CSystem(n, m int, dt float64) *System {
+func benchD2CSystem(tb testing.TB, n, m int, dt float64) *System {
+	tb.Helper()
 	A := mat.NewDense(n, n, nil)
 	for i := range n {
 		A.Set(i, i, -float64(i+1)*0.5)
@@ -1546,70 +1891,90 @@ func benchD2CSystem(n, m int, dt float64) *System {
 	C := mat.NewDense(1, n, nil)
 	C.Set(0, 0, 1)
 	D := mat.NewDense(1, m, nil)
-	cont, _ := New(A, B, C, D, 0)
-	disc, _ := cont.C2D(dt, C2DOptions{})
+	cont, err := New(A, B, C, D, 0)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	disc, err := cont.C2D(dt, C2DOptions{})
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return disc
 }
 
 func BenchmarkD2C_ZOH_N2(b *testing.B) {
-	sys := benchD2CSystem(2, 1, 0.05)
+	sys := benchD2CSystem(b, 2, 1, 0.05)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(D2COptions{Method: C2DMethodZOH})
+		if _, err := sys.D2C(D2COptions{Method: C2DMethodZOH}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkD2C_ZOH_N5(b *testing.B) {
-	sys := benchD2CSystem(5, 2, 0.05)
+	sys := benchD2CSystem(b, 5, 2, 0.05)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(D2COptions{Method: C2DMethodZOH})
+		if _, err := sys.D2C(D2COptions{Method: C2DMethodZOH}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkD2C_ZOH_N20(b *testing.B) {
-	sys := benchD2CSystem(20, 5, 0.01)
+	sys := benchD2CSystem(b, 20, 5, 0.01)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(D2COptions{Method: C2DMethodZOH})
+		if _, err := sys.D2C(D2COptions{Method: C2DMethodZOH}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkD2C_ZOH_N50(b *testing.B) {
-	sys := benchD2CSystem(50, 10, 0.01)
+	sys := benchD2CSystem(b, 50, 10, 0.01)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(D2COptions{Method: C2DMethodZOH})
+		if _, err := sys.D2C(D2COptions{Method: C2DMethodZOH}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkD2C_Tustin_N20(b *testing.B) {
-	sys := benchD2CSystem(20, 5, 0.01)
+	sys := benchD2CSystem(b, 20, 5, 0.01)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.D2C(D2COptions{Method: C2DMethodTustin})
+		if _, err := sys.D2C(D2COptions{Method: C2DMethodTustin}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkMatLog_N20(b *testing.B) {
-	sys := benchD2CSystem(20, 1, 0.01)
+	sys := benchD2CSystem(b, 20, 1, 0.01)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		matLog(sys.A)
+		if _, err := matLog(sys.A); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkMatLog_N50(b *testing.B) {
-	sys := benchD2CSystem(50, 1, 0.01)
+	sys := benchD2CSystem(b, 50, 1, 0.01)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		matLog(sys.A)
+		if _, err := matLog(sys.A); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkLFTExtract(b *testing.B) {
 	for _, n := range []int{10, 50} {
-		M := benchSys(n, 6, 6)
+		M := benchSys(b, n, 6, 6)
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
@@ -1623,7 +1988,7 @@ func BenchmarkLFTExtract(b *testing.B) {
 
 func BenchmarkAugstateDelayed(b *testing.B) {
 	for _, n := range []int{10, 50} {
-		sys := benchSys(n, 4, 4)
+		sys := benchSys(b, n, 4, 4)
 		delay := mat.NewDense(4, 4, nil)
 		for i := range 4 {
 			delay.Set(i, (i+1)%4, 0.1*float64(i+1))
@@ -1646,7 +2011,7 @@ func BenchmarkAugstateDelayed(b *testing.B) {
 }
 
 func BenchmarkEvalFr_N4(b *testing.B) {
-	sys := benchSys(4, 2, 2)
+	sys := benchSys(b, 4, 2, 2)
 	for b.Loop() {
 		if _, err := sys.EvalFr(1i); err != nil {
 			b.Fatal(err)

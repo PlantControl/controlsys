@@ -5,6 +5,7 @@
 - Behaviour change: `Place` returns the new `ErrPoleAccuracy` instead of a gain when the achieved closed-loop poles are more than 10% from the requested ones (where MATLAB `place` warns). It previously returned such gains with a nil error, including destabilizing ones (e.g. max Re eig(A−BK) = +702 for a 50-state tridiagonal plant; scipy `place_poles` also misses these by >10%).
 - Behaviour change: `Acker` returns `ErrPoleAccuracy` under the same 10% criterion as `Place` (where MATLAB `acker` warns), instead of a gain with a nil error. E.g. a 14-state chain with poles −0.1…−1.4: the gain is exact to 1e-14 but its closed-loop poles are 30% off (34% in float64). As in MATLAB, the check uses float64 eig(A−BK), so it also rejects gains whose closed-loop eigenproblem alone is ill-conditioned.
 - `Place` keeps the robust (KNV) gain whenever its eigenvector matrix is numerically nonsingular and its poles are accurate, instead of switching to the Schur gain when κ₁(X) > 1/√ε. On a random 30-state, 5-input plant with clustered poles the error drops from 7% to 1e-5; the Schur gain is still tried when the robust one fails and the more accurate one is kept.
+- Fix: `System.Bode`, `System.Nichols` and `FRD.Bode` unwrap phase across multiple 360° turns (previously one turn per step, e.g. a 1 s delay at ω≈9.74 rad/s gave −198° instead of −558°). Jumps of an odd multiple of 180° resolve as MATLAB `unwrap`; NaN samples are skipped.
 
 ## v2.3.0
 
