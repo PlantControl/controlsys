@@ -37,7 +37,7 @@ func TestSystuneTunesSISOTunableGain(t *testing.T) {
 }
 
 func TestGridTuneLimitsCartesianSearch(t *testing.T) {
-	plant := benchSysNonSym(2, 2, 2)
+	plant := benchSysNonSym(t, 2, 2, 2)
 	k1, _ := newBoundedReal("K1", 0.1, 0.1, 2)
 	k2, _ := newBoundedReal("K2", 0.1, 0.1, 2)
 	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k1, fixedReal(t, "z12_limit", 0)}, {fixedReal(t, "z21_limit", 0), k2}}))
@@ -52,7 +52,7 @@ func TestGridTuneLimitsCartesianSearch(t *testing.T) {
 }
 
 func TestSystuneTunesSmallMIMOTunableGain(t *testing.T) {
-	plant := benchSysNonSym(2, 2, 2)
+	plant := benchSysNonSym(t, 2, 2, 2)
 	k1, _ := newBoundedReal("K1", 0.1, 0.1, 2)
 	k2, _ := newBoundedReal("K2", 0.1, 0.1, 2)
 	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k1, fixedReal(t, "z12", 0)}, {fixedReal(t, "z21", 0), k2}}))

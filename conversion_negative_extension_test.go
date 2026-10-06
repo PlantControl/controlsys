@@ -161,7 +161,10 @@ func BenchmarkNegativeZOHCompressedExtension(b *testing.B) {
 				input[i] = float64(i+1) / 4
 				output[i] = float64(n-i) / 3
 			}
-			sys, _ := New(a, mat.NewDense(n, 1, input), mat.NewDense(1, n, output), mat.NewDense(1, 1, nil), .2)
+			sys, err := New(a, mat.NewDense(n, 1, input), mat.NewDense(1, n, output), mat.NewDense(1, 1, nil), .2)
+			if err != nil {
+				b.Fatal(err)
+			}
 			b.ReportAllocs()
 			for range b.N {
 				if _, err := sys.D2C(D2COptions{Method: C2DMethodZOH}); err != nil {

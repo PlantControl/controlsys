@@ -10,11 +10,15 @@ import (
 )
 
 // benchSysNonSym builds a stable system with non-symmetric A for benchmark workloads.
-// A has sub/superdiagonal coupling so transposition bugs surface.
-func benchSysNonSym(n, m, p int) *System {
+// A has sub/superdiagonal coupling so transposition bugs surface. The -1 diagonal
+// shift keeps A stable for every n: A is diagonally similar to a symmetric
+// tridiagonal with off-diagonals sqrt(0.1(i+1)), and Gershgorin bounds that
+// below zero.
+func benchSysNonSym(tb testing.TB, n, m, p int) *System {
+	tb.Helper()
 	A := mat.NewDense(n, n, nil)
 	for i := range n {
-		A.Set(i, i, -float64(i+1)*0.3)
+		A.Set(i, i, -float64(i+1)*0.3-1)
 		if i > 0 {
 			A.Set(i, i-1, 1.0)
 		}
@@ -39,17 +43,43 @@ func benchSysNonSym(n, m, p int) *System {
 		C.Set(0, 1, 0.3)
 	}
 	D := mat.NewDense(p, m, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return sys
 }
 
-func benchFRDFromSys(sys *System, nw int) *FRD {
+func TestBenchSysNonSymStable(t *testing.T) {
+	for n := 1; n <= 200; n++ {
+		sys := benchSysNonSym(t, n, 2, 2)
+		if n > 1 && mat.Equal(sys.A, sys.A.T()) {
+			t.Fatalf("n=%d: A is symmetric", n)
+		}
+		var eig mat.Eigen
+		if !eig.Factorize(sys.A, mat.EigenNone) {
+			t.Fatalf("n=%d: eigendecomposition failed", n)
+		}
+		for _, v := range eig.Values(nil) {
+			if real(v) >= 0 {
+				t.Fatalf("n=%d: eigenvalue %v not in open left half-plane", n, v)
+			}
+		}
+	}
+}
+
+func benchFRDFromSys(tb testing.TB, sys *System, nw int) *FRD {
+	tb.Helper()
 	omega := logspace(-2, 3, nw)
-	f, _ := sys.FRD(omega)
+	f, err := sys.FRD(omega)
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return f
 }
 
-func benchIntegratorMIMOSystem(n, m, p int) *System {
+func benchIntegratorMIMOSystem(tb testing.TB, n, m, p int) *System {
+	tb.Helper()
 	A := mat.NewDense(n, n, nil)
 	for i := 1; i < n; i++ {
 		A.Set(i, i, -float64(i+1)*0.25)
@@ -77,7 +107,10 @@ func benchIntegratorMIMOSystem(n, m, p int) *System {
 		}
 	}
 	D := mat.NewDense(p, m, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		tb.Fatal(err)
+	}
 	return sys
 }
 
@@ -88,7 +121,7 @@ func benchModelArray(b *testing.B, count, n, m, p int) *ModelArray {
 		if i%7 == 3 {
 			continue
 		}
-		sys := benchSysNonSym(n, m, p)
+		sys := benchSysNonSym(b, n, m, p)
 		sys.A.Set(0, 0, sys.A.At(0, 0)-float64(i)*0.01)
 		models[i] = sys
 	}
@@ -102,7 +135,7 @@ func benchModelArray(b *testing.B, count, n, m, p int) *ModelArray {
 // --------------- DC gain ---------------
 
 func BenchmarkDCGain_StableMIMO_N10_M4_P6(b *testing.B) {
-	sys := benchSysNonSym(10, 4, 6)
+	sys := benchSysNonSym(b, 10, 4, 6)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := sys.DCGain(); err != nil {
@@ -112,7 +145,7 @@ func BenchmarkDCGain_StableMIMO_N10_M4_P6(b *testing.B) {
 }
 
 func BenchmarkDCGain_IntegratorMIMO_N10_M4_P6(b *testing.B) {
-	sys := benchIntegratorMIMOSystem(10, 4, 6)
+	sys := benchIntegratorMIMOSystem(b, 10, 4, 6)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := sys.DCGain(); err != nil {
@@ -122,7 +155,7 @@ func BenchmarkDCGain_IntegratorMIMO_N10_M4_P6(b *testing.B) {
 }
 
 func BenchmarkDCGain_IntegratorMIMO_N40_M8_P8(b *testing.B) {
-	sys := benchIntegratorMIMOSystem(40, 8, 8)
+	sys := benchIntegratorMIMOSystem(b, 40, 8, 8)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := sys.DCGain(); err != nil {
@@ -142,11 +175,13 @@ func BenchmarkSystemFRD_MIMO_10000(b *testing.B) { benchSystemFRD(b, 10, 3, 4, 1
 func BenchmarkSystemFRD_Large_2000(b *testing.B) { benchSystemFRD(b, 50, 4, 6, 2000) }
 
 func benchSystemFRD(b *testing.B, n, m, p, nw int) {
-	sys := benchSysNonSym(n, m, p)
+	sys := benchSysNonSym(b, n, m, p)
 	omega := logspace(-2, 3, nw)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sys.FRD(omega)
+		if _, err := sys.FRD(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -158,11 +193,13 @@ func BenchmarkFRDSigma_MIMO_10000(b *testing.B) { benchFRDSigma(b, 10, 3, 4, 100
 func BenchmarkFRDSigma_Large_2000(b *testing.B) { benchFRDSigma(b, 50, 4, 6, 2000) }
 
 func benchFRDSigma(b *testing.B, n, m, p, nw int) {
-	sys := benchSysNonSym(n, m, p)
-	f := benchFRDFromSys(sys, nw)
+	sys := benchSysNonSym(b, n, m, p)
+	f := benchFRDFromSys(b, sys, nw)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		f.Sigma()
+		if _, err := f.Sigma(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -175,20 +212,27 @@ func BenchmarkFRDMargin_NegGM_2000(b *testing.B) {
 	B := mat.NewDense(3, 1, []float64{0, 0, 10})
 	C := mat.NewDense(1, 3, []float64{1, 0, 0})
 	D := mat.NewDense(1, 1, []float64{0})
-	sys, _ := New(A, B, C, D, 0)
-	f := benchFRDFromSys(sys, 2000)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	f := benchFRDFromSys(b, sys, 2000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FRDMargin(f)
+		if _, err := FRDMargin(f); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func benchFRDMargin(b *testing.B, n, nw int) {
-	sys := benchSysNonSym(n, 1, 1)
-	f := benchFRDFromSys(sys, nw)
+	sys := benchSysNonSym(b, n, 1, 1)
+	f := benchFRDFromSys(b, sys, nw)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FRDMargin(f)
+		if _, err := FRDMargin(f); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -201,13 +245,15 @@ func BenchmarkFRDSeries_MIMO_2000(b *testing.B)  { benchFRDSeries(b, 10, 3, 3, 2
 func BenchmarkFRDSeries_MIMO_10000(b *testing.B) { benchFRDSeries(b, 10, 3, 3, 10000) }
 
 func benchFRDSeries(b *testing.B, n, m, p, nw int) {
-	s1 := benchSysNonSym(n, m, p)
-	s2 := benchSysNonSym(n, p, m)
-	f1 := benchFRDFromSys(s1, nw)
-	f2 := benchFRDFromSys(s2, nw)
+	s1 := benchSysNonSym(b, n, m, p)
+	s2 := benchSysNonSym(b, n, p, m)
+	f1 := benchFRDFromSys(b, s1, nw)
+	f2 := benchFRDFromSys(b, s2, nw)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FRDSeries(f1, f2)
+		if _, err := FRDSeries(f1, f2); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -215,12 +261,14 @@ func BenchmarkFRDParallel_SISO_2000(b *testing.B) { benchFRDParallel(b, 2, 1, 1,
 func BenchmarkFRDParallel_MIMO_2000(b *testing.B) { benchFRDParallel(b, 10, 3, 3, 2000) }
 
 func benchFRDParallel(b *testing.B, n, m, p, nw int) {
-	sys := benchSysNonSym(n, m, p)
-	f1 := benchFRDFromSys(sys, nw)
-	f2 := benchFRDFromSys(sys, nw)
+	sys := benchSysNonSym(b, n, m, p)
+	f1 := benchFRDFromSys(b, sys, nw)
+	f2 := benchFRDFromSys(b, sys, nw)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FRDParallel(f1, f2)
+		if _, err := FRDParallel(f1, f2); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -234,18 +282,20 @@ func BenchmarkFRDFeedback_MIMO8x8_2000(b *testing.B) {
 }
 
 func benchFRDFeedback(b *testing.B, n, m, p, nw int) {
-	plant := benchSysNonSym(n, m, p)
-	ctrl := benchSysNonSym(n/2+1, p, m)
-	fp := benchFRDFromSys(plant, nw)
-	fc := benchFRDFromSys(ctrl, nw)
+	plant := benchSysNonSym(b, n, m, p)
+	ctrl := benchSysNonSym(b, n/2+1, p, m)
+	fp := benchFRDFromSys(b, plant, nw)
+	fc := benchFRDFromSys(b, ctrl, nw)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FRDFeedback(fp, fc, -1)
+		if _, err := FRDFeedback(fp, fc, -1); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkFRDAbs_MIMO_2000(b *testing.B) {
-	frd := benchFRDFromSys(benchSysNonSym(10, 3, 4), 2000)
+	frd := benchFRDFromSys(b, benchSysNonSym(b, 10, 3, 4), 2000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		frd.Abs()
@@ -253,7 +303,7 @@ func BenchmarkFRDAbs_MIMO_2000(b *testing.B) {
 }
 
 func BenchmarkFRDSelectFrequencies_MIMO_2000(b *testing.B) {
-	frd := benchFRDFromSys(benchSysNonSym(10, 3, 4), 2000)
+	frd := benchFRDFromSys(b, benchSysNonSym(b, 10, 3, 4), 2000)
 	indices := make([]int, 0, 1000)
 	for i := 0; i < 2000; i += 2 {
 		indices = append(indices, i)
@@ -267,7 +317,7 @@ func BenchmarkFRDSelectFrequencies_MIMO_2000(b *testing.B) {
 }
 
 func BenchmarkFRDPeakGain_MIMO_2000(b *testing.B) {
-	frd := benchFRDFromSys(benchSysNonSym(10, 3, 4), 2000)
+	frd := benchFRDFromSys(b, benchSysNonSym(b, 10, 3, 4), 2000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := frd.PeakGain(); err != nil {
@@ -312,10 +362,12 @@ func BenchmarkStep_SISO_N50(b *testing.B) { benchStep(b, 50, 1, 1) }
 func BenchmarkStep_MIMO_N10(b *testing.B) { benchStep(b, 10, 3, 4) }
 
 func benchStep(b *testing.B, n, m, p int) {
-	sys := benchSysNonSym(n, m, p)
+	sys := benchSysNonSym(b, n, m, p)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Step(sys, 10)
+		if _, err := Step(sys, 10); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -323,7 +375,7 @@ func BenchmarkStepInfo_SISO_N10(b *testing.B) { benchStepInfo(b, 10, 1, 1) }
 func BenchmarkStepInfo_MIMO_N10(b *testing.B) { benchStepInfo(b, 10, 3, 4) }
 
 func benchStepInfo(b *testing.B, n, m, p int) {
-	sys := benchSysNonSym(n, m, p)
+	sys := benchSysNonSym(b, n, m, p)
 	resp, err := Step(sys, 10)
 	if err != nil {
 		b.Fatal(err)
@@ -368,10 +420,12 @@ func BenchmarkImpulse_SISO_N50(b *testing.B) { benchImpulse(b, 50, 1, 1) }
 func BenchmarkImpulse_MIMO_N10(b *testing.B) { benchImpulse(b, 10, 3, 4) }
 
 func benchImpulse(b *testing.B, n, m, p int) {
-	sys := benchSysNonSym(n, m, p)
+	sys := benchSysNonSym(b, n, m, p)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Impulse(sys, 10)
+		if _, err := Impulse(sys, 10); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -383,8 +437,11 @@ func BenchmarkLsim_SISO_1e4(b *testing.B) { benchLsimB(b, 4, 1, 1, 10000) }
 func BenchmarkLsim_MIMO_1e4(b *testing.B) { benchLsimB(b, 10, 4, 4, 10000) }
 
 func BenchmarkLsim_Discrete_SISO(b *testing.B) {
-	sys := benchSysNonSym(4, 1, 1)
-	dsys, _ := sys.C2D(0.01, C2DOptions{})
+	sys := benchSysNonSym(b, 4, 1, 1)
+	dsys, err := sys.C2D(0.01, C2DOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
 	steps := 1000
 	t := make([]float64, steps)
 	for k := range t {
@@ -396,12 +453,14 @@ func BenchmarkLsim_Discrete_SISO(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Lsim(dsys, u, t, nil)
+		if _, err := Lsim(dsys, u, t, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func benchLsimB(b *testing.B, n, m, p, steps int) {
-	sys := benchSysNonSym(n, m, p)
+	sys := benchSysNonSym(b, n, m, p)
 	dt := 0.01
 	t := make([]float64, steps)
 	for k := range t {
@@ -415,7 +474,9 @@ func benchLsimB(b *testing.B, n, m, p, steps int) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Lsim(sys, u, t, nil)
+		if _, err := Lsim(sys, u, t, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -426,11 +487,13 @@ func BenchmarkLoopsens_SISO_N10(b *testing.B) { benchLoopsens(b, 10, 1, 1) }
 func BenchmarkLoopsens_MIMO_N10(b *testing.B) { benchLoopsens(b, 10, 3, 3) }
 
 func benchLoopsens(b *testing.B, n, m, p int) {
-	P := benchSysNonSym(n, m, p)
-	C := benchSysNonSym(n/2+1, p, m)
+	P := benchSysNonSym(b, n, m, p)
+	C := benchSysNonSym(b, n/2+1, p, m)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Loopsens(P, C)
+		if _, err := Loopsens(P, C); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -444,10 +507,12 @@ func BenchmarkCanon_Comp_N2(b *testing.B)    { benchCanon(b, CanonCompanion, 2) 
 func BenchmarkCanon_Comp_N10(b *testing.B)   { benchCanon(b, CanonCompanion, 10) }
 
 func benchCanon(b *testing.B, form CanonForm, n int) {
-	sys := benchSysNonSym(n, 1, 1)
+	sys := benchSysNonSym(b, n, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Canon(sys, form)
+		if _, err := Canon(sys, form); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -481,7 +546,7 @@ func benchDescriptorFreqResponse(b *testing.B, n, m, p, nw int) {
 }
 
 func BenchmarkFixedInputReduction_N10(b *testing.B) {
-	sys := benchSysNonSym(10, 4, 2)
+	sys := benchSysNonSym(b, 10, 4, 2)
 	fixed := map[int]float64{1: 0.5, 3: -2}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -517,7 +582,10 @@ func BenchmarkTunableGainSampleCurrentSystem_4x4(b *testing.B) {
 }
 
 func BenchmarkGeneralizedCurrentSystem_SISO(b *testing.B) {
-	k, _ := newBoundedReal("K", 2, 0, 10)
+	k, err := newBoundedReal("K", 2, 0, 10)
+	if err != nil {
+		b.Fatal(err)
+	}
 	block := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	gm, err := NewGeneralizedModel("loop", block)
 	if err != nil {
@@ -532,8 +600,11 @@ func BenchmarkGeneralizedCurrentSystem_SISO(b *testing.B) {
 }
 
 func BenchmarkGeneralizedClosedLoop_SISO(b *testing.B) {
-	plant := benchSysNonSym(4, 1, 1)
-	k, _ := newBoundedReal("K", 2, 0, 10)
+	plant := benchSysNonSym(b, 4, 1, 1)
+	k, err := newBoundedReal("K", 2, 0, 10)
+	if err != nil {
+		b.Fatal(err)
+	}
 	block := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	gm, err := NewGeneralizedClosedLoop("loop", plant, block, "u")
 	if err != nil {
@@ -548,7 +619,7 @@ func BenchmarkGeneralizedClosedLoop_SISO(b *testing.B) {
 }
 
 func BenchmarkTuningGoalWeightedGain_SISO(b *testing.B) {
-	sys := benchSysNonSym(4, 1, 1)
+	sys := benchSysNonSym(b, 4, 1, 1)
 	sys.InputName, sys.OutputName = []string{"r"}, []string{"y"}
 	goal := mustOK(NewGainGoal("r", "y", 10))
 	b.ResetTimer()
@@ -560,7 +631,7 @@ func BenchmarkTuningGoalWeightedGain_SISO(b *testing.B) {
 }
 
 func BenchmarkTuningGoalWeightedGain_MIMO(b *testing.B) {
-	sys := benchSysNonSym(8, 3, 3)
+	sys := benchSysNonSym(b, 8, 3, 3)
 	sys.InputName, sys.OutputName = expandName("r", 3), expandName("y", 3)
 	goal := mustOK(NewGainGoal("r", "y", 10))
 	b.ResetTimer()
@@ -572,9 +643,9 @@ func BenchmarkTuningGoalWeightedGain_MIMO(b *testing.B) {
 }
 
 func BenchmarkTuningGoalDynamicWeightedGain_MIMO(b *testing.B) {
-	sys := benchSysNonSym(8, 3, 3)
+	sys := benchSysNonSym(b, 8, 3, 3)
 	sys.InputName, sys.OutputName = expandName("r", 3), expandName("y", 3)
-	goal, err := NewWeightedGainGoal("r", "y", benchSysNonSym(2, 3, 3), benchSysNonSym(2, 3, 3))
+	goal, err := NewWeightedGainGoal("r", "y", benchSysNonSym(b, 2, 3, 3), benchSysNonSym(b, 2, 3, 3))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -587,8 +658,11 @@ func BenchmarkTuningGoalDynamicWeightedGain_MIMO(b *testing.B) {
 }
 
 func BenchmarkSystune_SISO(b *testing.B) {
-	plant := benchSysNonSym(2, 1, 1)
-	k, _ := newBoundedReal("K", 0.5, 0.1, 3)
+	plant := benchSysNonSym(b, 2, 1, 1)
+	k, err := newBoundedReal("K", 0.5, 0.1, 3)
+	if err != nil {
+		b.Fatal(err)
+	}
 	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k}}))
 	model, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
@@ -605,10 +679,16 @@ func BenchmarkSystune_SISO(b *testing.B) {
 }
 
 func BenchmarkSystune_MIMO(b *testing.B) {
-	plant := benchSysNonSym(2, 2, 2)
-	k1, _ := newBoundedReal("K1", 0.5, 0.1, 2)
-	k2, _ := newBoundedReal("K2", 0.5, 0.1, 2)
-	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k1, fixedBenchReal("z12", 0)}, {fixedBenchReal("z21", 0), k2}}))
+	plant := benchSysNonSym(b, 2, 2, 2)
+	k1, err := newBoundedReal("K1", 0.5, 0.1, 2)
+	if err != nil {
+		b.Fatal(err)
+	}
+	k2, err := newBoundedReal("K2", 0.5, 0.1, 2)
+	if err != nil {
+		b.Fatal(err)
+	}
+	controller := mustOK(tunableGainWith("Kblock", [][]*TunableReal{{k1, fixedBenchReal(b, "z12", 0)}, {fixedBenchReal(b, "z21", 0), k2}}))
 	model, err := NewGeneralizedClosedLoop("loop", plant, controller, "u")
 	if err != nil {
 		b.Fatal(err)
@@ -658,7 +738,7 @@ func BenchmarkPhysicalAssembly_8Components(b *testing.B) {
 }
 
 func BenchmarkModalTruncate_N50_Order10(b *testing.B) {
-	sys := benchSysNonSym(50, 2, 2)
+	sys := benchSysNonSym(b, 50, 2, 2)
 	opts := &ModalTruncateOptions{Order: 10}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -680,7 +760,7 @@ func BenchmarkPassivity_SISO(b *testing.B) {
 }
 
 func BenchmarkFRDPassivity_MIMO(b *testing.B) {
-	sys := benchSysNonSym(4, 2, 2)
+	sys := benchSysNonSym(b, 4, 2, 2)
 	frd, err := sys.FRD(logspace(-2, 2, 200))
 	if err != nil {
 		b.Fatal(err)
@@ -695,7 +775,7 @@ func BenchmarkFRDPassivity_MIMO(b *testing.B) {
 
 func benchDescriptorSystem(b *testing.B, n, m, p int) *System {
 	b.Helper()
-	sys := benchSysNonSym(n, m, p)
+	sys := benchSysNonSym(b, n, m, p)
 	E := mat.NewDense(n, n, nil)
 	for i := range n {
 		E.Set(i, i, 1+0.1*float64(i+1))
@@ -704,8 +784,12 @@ func benchDescriptorSystem(b *testing.B, n, m, p int) *System {
 	return sys
 }
 
-func fixedBenchReal(name string, value float64) *TunableReal {
-	param, _ := NewTunableReal(name, value)
+func fixedBenchReal(tb testing.TB, name string, value float64) *TunableReal {
+	tb.Helper()
+	param, err := NewTunableReal(name, value)
+	if err != nil {
+		tb.Fatal(err)
+	}
 	param.SetFixed(true)
 	return param
 }
@@ -757,10 +841,15 @@ func benchStabsep(b *testing.B, n int) {
 		C.Set(1, 1, 1)
 	}
 	D := mat.NewDense(2, 2, nil)
-	sys, _ := New(A, B, C, D, 0)
+	sys, err := New(A, B, C, D, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Stabsep(sys)
+		if _, err := Stabsep(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -768,10 +857,12 @@ func BenchmarkModsep_N10(b *testing.B) { benchModsep(b, 10) }
 func BenchmarkModsep_N50(b *testing.B) { benchModsep(b, 50) }
 
 func benchModsep(b *testing.B, n int) {
-	sys := benchSysNonSym(n, 2, 2)
+	sys := benchSysNonSym(b, n, 2, 2)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Modsep(sys, 1.0)
+		if _, err := Modsep(sys, 1.0); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -780,10 +871,12 @@ func BenchmarkSsbal_N10(b *testing.B) { benchSsbalB(b, 10) }
 func BenchmarkSsbal_N50(b *testing.B) { benchSsbalB(b, 50) }
 
 func benchSsbalB(b *testing.B, n int) {
-	sys := benchSysNonSym(n, 2, 2)
+	sys := benchSysNonSym(b, n, 2, 2)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Ssbal(sys)
+		if _, err := Ssbal(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -792,10 +885,12 @@ func BenchmarkPrescale_N10(b *testing.B) { benchPrescaleB(b, 10) }
 func BenchmarkPrescale_N50(b *testing.B) { benchPrescaleB(b, 50) }
 
 func benchPrescaleB(b *testing.B, n int) {
-	sys := benchSysNonSym(n, 2, 2)
+	sys := benchSysNonSym(b, n, 2, 2)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Prescale(sys)
+		if _, err := Prescale(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -804,10 +899,12 @@ func BenchmarkSminreal_N10(b *testing.B) { benchSminrealB(b, 10) }
 func BenchmarkSminreal_N50(b *testing.B) { benchSminrealB(b, 50) }
 
 func benchSminrealB(b *testing.B, n int) {
-	sys := benchSysNonSym(n, 2, 2)
+	sys := benchSysNonSym(b, n, 2, 2)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Sminreal(sys)
+		if _, err := Sminreal(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -816,14 +913,16 @@ func BenchmarkInv_SISO_N10(b *testing.B) { benchInvB(b, 10, 1, 1) }
 func BenchmarkInv_MIMO_N10(b *testing.B) { benchInvB(b, 10, 3, 3) }
 
 func benchInvB(b *testing.B, n, m, p int) {
-	sys := benchSysNonSym(n, m, p)
+	sys := benchSysNonSym(b, n, m, p)
 	sys.D.Set(0, 0, 1)
 	for i := 1; i < m && i < p; i++ {
 		sys.D.Set(i, i, 1)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Inv(sys)
+		if _, err := Inv(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -834,39 +933,47 @@ func BenchmarkCovar_SISO_N100(b *testing.B) { benchCovarB(b, 100, 1, 1) }
 func BenchmarkCovar_MIMO_N10(b *testing.B)  { benchCovarB(b, 10, 3, 4) }
 
 func benchCovarB(b *testing.B, n, m, p int) {
-	sys := benchSysNonSym(n, m, p)
+	sys := benchSysNonSym(b, n, m, p)
 	W := mat.NewDense(m, m, nil)
 	for i := range m {
 		W.Set(i, i, 1)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Covar(sys, W)
+		if _, err := Covar(sys, W); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 // --------------- Pidtune ---------------
 
 func BenchmarkPidtune_PI(b *testing.B) {
-	sys := benchSysNonSym(4, 1, 1)
+	sys := benchSysNonSym(b, 4, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Pidtune(sys, PidtunePI, 0, nil)
+		if _, err := Pidtune(sys, PidtunePI, 0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkPidtune_PID(b *testing.B) {
-	sys := benchSysNonSym(4, 1, 1)
+	sys := benchSysNonSym(b, 4, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Pidtune(sys, PidtunePID, 0, nil)
+		if _, err := Pidtune(sys, PidtunePID, 0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkPidtune_PIDF(b *testing.B) {
-	sys := benchSysNonSym(4, 1, 1)
+	sys := benchSysNonSym(b, 4, 1, 1)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Pidtune(sys, PidtunePIDF, 0, nil)
+		if _, err := Pidtune(sys, PidtunePIDF, 0, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
