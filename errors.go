@@ -162,6 +162,11 @@ var (
 	// ErrPoleMultiplicity reports a pole repeated more often than rank(B).
 	ErrPoleMultiplicity = errors.New("controlsys: pole multiplicity exceeds rank(B)")
 
+	// ErrPoleAccuracy reports a pole assignment whose achieved closed-loop
+	// poles are more than 10% from the requested ones, typically because the
+	// problem is too ill-conditioned for any gain to place them reliably.
+	ErrPoleAccuracy = errors.New("controlsys: achieved poles more than 10% in error")
+
 	// ErrInsufficientData reports too few samples for an estimation.
 	ErrInsufficientData = errors.New("controlsys: insufficient data for estimation")
 

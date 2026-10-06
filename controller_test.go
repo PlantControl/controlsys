@@ -545,6 +545,29 @@ func TestAcker_ConjugatePairError(t *testing.T) {
 	}
 }
 
+// For this 14-state chain with B = e₀ and poles −0.1, …, −1.4, Ackermann's
+// gain matches the exact one to 1e-14, yet the eigenvalues of A − B·K computed
+// in 100-digit arithmetic are 29.5% off (34% in float64): the assignment is
+// intrinsically ill-conditioned (even the rounded exact gain is 23.7% off).
+// MATLAB acker warns; Acker must refuse the gain.
+func TestAcker_PoleAccuracy(t *testing.T) {
+	n := 14
+	A := benchStableA(n)
+	B := mat.NewDense(n, 1, nil)
+	B.Set(0, 0, 1)
+	p := make([]complex128, n)
+	for i := range n {
+		p[i] = complex(-0.1*float64(i+1), 0)
+	}
+	K, err := Acker(A, B, p)
+	if !errors.Is(err, ErrPoleAccuracy) {
+		t.Fatalf("err = %v, want ErrPoleAccuracy", err)
+	}
+	if K != nil {
+		t.Errorf("K = %v, want nil", mat.Formatted(K))
+	}
+}
+
 // --- Place Tests ---
 
 func TestPlace_SISO_2x2(t *testing.T) {
@@ -1470,6 +1493,127 @@ func TestPlace_RobustBeatsSchurConditioning(t *testing.T) {
 	}
 	if gm := sumNew / float64(cnt); gm > sumOld/float64(cnt)-1 {
 		t.Errorf("geometric-mean log10 kappa: robust %.2f, Schur %.2f; want ≥1 decade improvement", gm, sumOld/float64(cnt))
+	}
+}
+
+func placeTridiagA(n int) *mat.Dense {
+	A := mat.NewDense(n, n, nil)
+	for i := range n {
+		A.Set(i, i, -0.3*float64(i+1))
+		if i > 0 {
+			A.Set(i, i-1, 0.2)
+		}
+		if i < n-1 {
+			A.Set(i, i+1, 0.1)
+		}
+	}
+	return A
+}
+
+func placeRandomAB(seed uint64, n, m int) (*mat.Dense, *mat.Dense, []complex128) {
+	rng := newPlaceRNG(seed)
+	a := make([]float64, n*n)
+	for i := range a {
+		a[i] = rng() / math.Sqrt(float64(n))
+	}
+	b := make([]float64, n*m)
+	for i := range b {
+		b[i] = rng()
+	}
+	p := make([]complex128, n)
+	for i := range n {
+		p[i] = complex(-1-float64(i)/float64(n-1), 0)
+	}
+	return mat.NewDense(n, n, a), mat.NewDense(n, m, b), p
+}
+
+// scipy.signal.place_poles also misses these by more than 10%, stopping
+// unconverged with cond(X) ≈ 1e14–1e18 (KNV0 and YT at 10 iterations; KNV0
+// at 3 for n=100): the assignments are inherently ill-conditioned.
+func TestPlace_InaccurateAssignmentReturnsError(t *testing.T) {
+	n := 50
+	triPoles := make([]complex128, n)
+	for i := range n {
+		triPoles[i] = complex(-2*float64(i+1), 0)
+	}
+	bMod := mat.NewDense(n, 5, nil)
+	for i := range n {
+		bMod.Set(i, i%5, 1)
+	}
+	rng := newPlaceRNG(5)
+	bRand := mat.NewDense(n, 5, nil)
+	for i := range n {
+		for j := range 5 {
+			bRand.Set(i, j, rng())
+		}
+	}
+	a50, b50, p50 := placeRandomAB(3, 50, 5)
+	a100, b100, p100 := placeRandomAB(3, 100, 5)
+	cases := []struct {
+		name  string
+		A, B  *mat.Dense
+		poles []complex128
+	}{
+		{"tridiag B(i,i%5)=1", placeTridiagA(n), bMod, triPoles},
+		{"tridiag random B", placeTridiagA(n), bRand, triPoles},
+		{"random n=50", a50, b50, p50},
+		{"random n=100", a100, b100, p100},
+	}
+	for _, c := range cases {
+		K, err := Place(c.A, c.B, c.poles)
+		if !errors.Is(err, ErrPoleAccuracy) {
+			t.Errorf("%s: err = %v, want ErrPoleAccuracy", c.name, err)
+		}
+		if K != nil {
+			t.Errorf("%s: K returned with error", c.name)
+		}
+	}
+}
+
+// The robust eigenvectors reach κ(X) ≈ 1e9 here; they used to be discarded
+// (threshold 1/√ε) for the Schur gain, whose poles were 7% off. scipy YT
+// reaches 6e-5 relative error.
+func TestPlace_IllConditionedRobustGainKept(t *testing.T) {
+	A, B, p := placeRandomAB(3, 30, 5)
+	K, err := Place(A, B, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPlacedEig(t, "random n=30", A, B, K, p, 0)
+	if e := placePoleError(A, B, K, p); !(e < 1e-4) {
+		t.Errorf("relative pole error %.3g, want < 1e-4", e)
+	}
+}
+
+func TestPlacePoleError(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{
+		0, 1, 0, 0,
+		-5, -2, 0, 0,
+		0, 0, 0, 0,
+		0, 0, 0.5, -3,
+	})
+	diag := mat.NewDense(2, 2, []float64{-1.06, 0, 0, -0.9})
+	shifted := mat.NewDense(2, 2, []float64{0.3, 1, 0, -3})
+	zero := mat.NewDense(2, 2, []float64{0, 0, 0.25, 0.5})
+	cases := []struct {
+		A     *mat.Dense
+		poles []complex128
+		want  float64
+	}{
+		{A, []complex128{complex(-1, 2), complex(-1, -2), 0, -3}, 0},
+		{A, []complex128{complex(-1, -2), -3, 0, complex(-1, 2)}, 0},
+		{A, []complex128{complex(-1, 2), complex(-1, -2), 0, -2.7}, 0.3 / 2.7},
+		{A, []complex128{complex(-1, 2), complex(-1, -2), 0.25, -3}, 1},
+		{shifted, []complex128{0, -3}, 0.3 / 3},
+		{diag, []complex128{-1, -1.1}, 0.1},
+		{zero, []complex128{0, 0}, 0.5 / 0.5},
+	}
+	for _, c := range cases {
+		n, _ := c.A.Dims()
+		B, K := mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil)
+		if got := placePoleError(c.A, B, K, c.poles); math.Abs(got-c.want) > 1e-12 {
+			t.Errorf("%v: got %.15g, want %.15g", c.poles, got, c.want)
+		}
 	}
 }
 

@@ -103,16 +103,21 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 	response := newSampledScalarResponse(phase, nil, p, m)
 	for i := range p {
 		for j := range m {
-			for k := 1; k < nw; k++ {
+			prev := math.NaN()
+			for k := range nw {
 				cur := response.layout.offset(k, i, j)
-				prev := response.layout.offset(k-1, i, j)
-				diff := phase[cur] - phase[prev]
-				if diff > 180 {
-					phase[cur] -= 360
+				if math.IsNaN(phase[cur]) || math.IsInf(phase[cur], 0) {
+					continue
 				}
-				if diff < -180 {
-					phase[cur] += 360
+				if diff := phase[cur] - prev; math.Abs(diff) > 180 {
+					turns := math.Floor((diff + 180) / 360)
+					// MATLAB unwrap resolves a positive jump of an odd multiple of 180 to +180, not -180.
+					if diff-360*turns == -180 && diff > 0 {
+						turns--
+					}
+					phase[cur] -= 360 * turns
 				}
+				prev = phase[cur]
 			}
 		}
 	}
