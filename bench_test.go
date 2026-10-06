@@ -396,7 +396,7 @@ func BenchmarkFrequencyDispatch(b *testing.B) {
 		}
 	}
 	for _, tc := range cases {
-		sys := benchDenseSys(tc.n, tc.m, tc.m)
+		sys := benchDenseSys(b, tc.n, tc.m, tc.m)
 		shape := "full"
 		if tc.hess {
 			shape = "hessenberg"
