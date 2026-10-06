@@ -362,8 +362,8 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 }
 
 func TestUseDenseSweepUnboundedGrid(t *testing.T) {
-	if !newFrequencyEvaluator(benchDenseSys(t, 12, 1, 1)).useDenseSweep(math.MaxInt) {
-		t.Error("n = 3c/4: want dense for any grid")
+	if !newFrequencyEvaluator(benchDenseSys(t, 8, 1, 1)).useDenseSweep(math.MaxInt) {
+		t.Error("n = c/2: want dense for any grid")
 	}
 	if newFrequencyEvaluator(benchDenseSys(t, 80, 4, 4)).useDenseSweep(math.MaxInt) {
 		t.Error("n = 2c: want Hessenberg for an unbounded grid")

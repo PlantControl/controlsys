@@ -6,7 +6,7 @@ package controlsys
 // coupled model with n states and m inputs, by {n, m}.
 var lastDenseGrid = map[[2]int]int{
 	{16, 1}: 5,
-	{24, 1}: 2,
-	{44, 4}: 4,
+	{24, 1}: 3,
+	{44, 4}: 3,
 	{80, 4}: 2,
 }

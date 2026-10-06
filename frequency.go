@@ -377,17 +377,19 @@ func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
 
 // useDenseSweep reports whether per-point GEPP (n³/3 per point) beats the
 // refined Hessenberg sweep for an nw-point grid. In dense points, the sweep
-// costs a setup sigma for the O(n³) reduction plus kappa·c/n per point with
-// c = 8m+8 (O(n²m) solves, products with Q, one refinement step), so dense
-// is kept while sigma/nw + kappa·c/n >= 1. sigma and kappa depend on Gonum's
-// kernels (sweepSetup20, sweepPoint20): about 6 and 0.9 for pure Go, 1.4 and
-// 0.75 for amd64 assembly (docs/benchmarks/frequency-dispatch). When A is
-// already upper Hessenberg, GEPP skips the zero multipliers, costs O(n²) per
-// point like the sweep, and needs no orthogonal reduction or refinement.
+// costs a setup sigma = s0 + s1/n for the O(n³) reduction plus
+// rho = kappa·c/n + rho0 per point with c = 8m+8 (O(n²m) solves, products
+// with Q, one refinement step), so dense is kept while sigma/nw + rho >= 1.
+// The constants depend on Gonum's kernels (backend_asm.go, backend_noasm.go):
+// pure Go has a large setup and rho near c/n, so n <= 0.9c stays dense;
+// amd64 assembly switches for n > 0.6c, after 3-6 points once n >= c
+// (docs/benchmarks/frequency-dispatch). When A is already upper Hessenberg,
+// GEPP skips the zero multipliers, costs O(n²) per point like the sweep, and
+// needs no orthogonal reduction or refinement.
 func (e frequencyEvaluator) useDenseSweep(nw int) bool {
 	c := 8*max(e.m, 1) + 8
-	excess := 20*e.n - sweepPoint20*c
-	return excess <= 0 || nw <= sweepSetup20*e.n/excess || isUpperHessenberg(e.sys.A)
+	excess := (20-sweepPointFloor20)*e.n - sweepPoint20*c
+	return excess <= 0 || nw <= (sweepSetup20*e.n+sweepSetupFixed20)/excess || isUpperHessenberg(e.sys.A)
 }
 
 func isUpperHessenberg(a *mat.Dense) bool {

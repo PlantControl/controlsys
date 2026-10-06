@@ -7,9 +7,11 @@ package controlsys
 const gonumKernels = "amd64-asm"
 
 // Hessenberg sweep cost in twentieths of a dense point, fitted on AMD EPYC
-// (docs/benchmarks/frequency-dispatch): setup 1.4 points, then 0.75·c/n per
-// point.
+// (docs/benchmarks/frequency-dispatch): setup 1 + 16/n points, then
+// 0.5·c/n + 0.15 per point.
 const (
-	sweepSetup20 = 28
-	sweepPoint20 = 15
+	sweepSetup20      = 20
+	sweepSetupFixed20 = 320
+	sweepPoint20      = 10
+	sweepPointFloor20 = 3
 )

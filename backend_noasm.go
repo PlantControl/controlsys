@@ -5,9 +5,11 @@ package controlsys
 const gonumKernels = "pure-go"
 
 // Hessenberg sweep cost in twentieths of a dense point, fitted on Apple M1 Pro
-// (docs/benchmarks/frequency-dispatch): setup 6 points, then 0.9·c/n per
-// point.
+// and the macos-latest runner (docs/benchmarks/frequency-dispatch): setup 6
+// points, then 0.9·c/n per point.
 const (
-	sweepSetup20 = 120
-	sweepPoint20 = 18
+	sweepSetup20      = 120
+	sweepSetupFixed20 = 0
+	sweepPoint20      = 18
+	sweepPointFloor20 = 0
 )
