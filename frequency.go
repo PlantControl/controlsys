@@ -160,9 +160,9 @@ func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 // FreqResponsePointwise evaluates the frequency response with guaranteed
 // per-frequency single-point arithmetic: the value at each omega[k] is
 // bit-identical to FreqResponse([]float64{omega[k]}), regardless of
-// len(omega). FreqResponse may evaluate long sweeps of large delay-free
-// state-space models (n > 8m+8, A not upper Hessenberg) through one
-// Hessenberg reduction of A, whose values agree with the single-point path
+// len(omega). FreqResponse may evaluate multi-point sweeps of delay-free
+// state-space models with A not upper Hessenberg and n large relative to the
+// input count through one Hessenberg reduction of A, whose values agree with the single-point path
 // to componentwise rounding but are not bit-identical;
 // FreqResponsePointwise never does, at the cost of one dense solve per
 // frequency. Use it when downstream comparisons require sweep results to
@@ -376,14 +376,20 @@ func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
 }
 
 // useDenseSweep reports whether per-point GEPP (n³/3 per point) beats the
-// refined Hessenberg sweep (O(n²m) solves, products with Q and one
-// refinement step per point). On fully coupled models
-// (BenchmarkFrequencySweepKernels, M1 Pro) the crossover is near
-// n = 8m+8: 16 states for SISO, 24 for m=2, 40 for m=4. When A is already
-// upper Hessenberg, GEPP skips the zero multipliers, costs O(n²) per point
-// like the sweep, and needs no orthogonal reduction or refinement.
+// refined Hessenberg sweep for an nw-point grid. In dense points, the sweep
+// costs a setup sigma = s0 + s1/n for the O(n³) reduction plus
+// rho = kappa·c/n + rho0 per point with c = 8m+8 (O(n²m) solves, products
+// with Q, one refinement step), so dense is kept while sigma/nw + rho >= 1.
+// The constants depend on Gonum's kernels (backend_asm.go, backend_noasm.go):
+// pure Go has a large setup and rho near c/n, so n <= 0.9c stays dense;
+// amd64 assembly switches for n > 0.6c, after 3-6 points once n >= c
+// (docs/benchmarks/frequency-dispatch). When A is already upper Hessenberg,
+// GEPP skips the zero multipliers, costs O(n²) per point like the sweep, and
+// needs no orthogonal reduction or refinement.
 func (e frequencyEvaluator) useDenseSweep(nw int) bool {
-	return nw <= 2 || e.n <= 8*max(e.m, 1)+8 || isUpperHessenberg(e.sys.A)
+	c := 8*max(e.m, 1) + 8
+	excess := (20-sweepPointFloor20)*e.n - sweepPoint20*c
+	return excess <= 0 || nw <= (sweepSetup20*e.n+sweepSetupFixed20)/excess || isUpperHessenberg(e.sys.A)
 }
 
 func isUpperHessenberg(a *mat.Dense) bool {

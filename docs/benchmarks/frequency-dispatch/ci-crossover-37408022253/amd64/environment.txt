@@ -1,0 +1,21 @@
+commit: ef0c522ce10f8ae04f0a22e62bf2fe28dbeffb17
+dirty: false
+go version go1.27.1 linux/amd64
+{
+	"CGO_ENABLED": "1",
+	"GOAMD64": "v1",
+	"GOARCH": "amd64",
+	"GOARM64": "",
+	"GOEXPERIMENT": "",
+	"GOFLAGS": "",
+	"GOOS": "linux"
+}
+Linux runnervm8df0l 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+AMD EPYC 7763 64-Core Processor
+4
+GOMAXPROCS env: unset
+rounds: 6 benchtime: 100ms
+controlsys-backend goos=linux goarch=amd64 backend=gonum.Implementation/amd64-asm
+/home/runner/go/bin/benchstat: go1.27.1
+	path	golang.org/x/perf/cmd/benchstat
+	mod	golang.org/x/perf	v0.0.0-20260312031701-16a31bc5fbd0	h1:VgUwdbeBqkERh4BX46p4O2fSng7duMS+0V01EEAt2Vk=

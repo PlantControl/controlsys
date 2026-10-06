@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"math/cmplx"
@@ -307,12 +308,13 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 	discreteSISO.InputDelay = []float64{2}
 	discreteSISO.OutputDelay = []float64{1}
 
-	tests := []struct {
+	type sweepCase struct {
 		name      string
 		system    *System
 		omega     []float64
 		wantDense bool
-	}{
+	}
+	tests := []sweepCase{
 		{name: "ShortSweep", system: siso, omega: logspace(-2, 2, 2), wantDense: true},
 		{name: "SmallModel", system: sys, omega: logspace(-2, 2, 100), wantDense: true},
 		{name: "DiscreteSmallModel", system: discrete, omega: logspace(-2, 1, 100), wantDense: true},
@@ -320,6 +322,18 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 		{name: "DiscreteHessenberg", system: discreteSISO, omega: logspace(-2, 1, 100), wantDense: false},
 		{name: "CoupledMIMO", system: benchDenseSys(t, 30, 2, 2), omega: logspace(-2, 2, 100), wantDense: false},
 		{name: "UpperHessenbergA", system: benchSys(t, 40, 1, 1), omega: logspace(-2, 2, 100), wantDense: true},
+		{name: "SISOBelowGridCrossover", system: siso, omega: logspace(-2, 2, lastDenseGrid[[2]int{24, 1}]), wantDense: true},
+		{name: "SISOAtGridCrossover", system: siso, omega: logspace(-2, 2, lastDenseGrid[[2]int{24, 1}]+1), wantDense: false},
+		{name: "ThreeQuarterCLongGrid", system: benchDenseSys(t, 12, 1, 1), omega: logspace(-2, 2, 200), wantDense: threeQuarterCLongGridDense},
+	}
+	for _, size := range [][2]int{{16, 1}, {44, 4}, {80, 4}} {
+		sys := benchDenseSys(t, size[0], size[1], size[1])
+		nw := lastDenseGrid[size]
+		name := fmt.Sprintf("n=%d/m=%d", size[0], size[1])
+		tests = append(tests,
+			sweepCase{name: name + "/LastDense", system: sys, omega: logspace(-2, 2, nw), wantDense: true},
+			sweepCase{name: name + "/FirstHessenberg", system: sys, omega: logspace(-2, 2, nw+1), wantDense: false},
+		)
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -345,6 +359,15 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestUseDenseSweepUnboundedGrid(t *testing.T) {
+	if !newFrequencyEvaluator(benchDenseSys(t, 8, 1, 1)).useDenseSweep(math.MaxInt) {
+		t.Error("n = c/2: want dense for any grid")
+	}
+	if newFrequencyEvaluator(benchDenseSys(t, 80, 4, 4)).useDenseSweep(math.MaxInt) {
+		t.Error("n = 2c: want Hessenberg for an unbounded grid")
 	}
 }
 

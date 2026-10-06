@@ -150,7 +150,7 @@ func TestFreqResponseAtPoleExplicitAndDescriptor(t *testing.T) {
 }
 
 // TestFreqResponseAtPoleHessenbergSweep drives the pole through the
-// Hessenberg sweep (n > 8m+8, nw > 2, A not upper Hessenberg): outputs
+// Hessenberg sweep (n = 17, m = 1, 104 points, A not upper Hessenberg): outputs
 // 1/(s²+1) and 1/(s+1)^8 + 1/(s+1)^7 + 0.3 from two interleaved lag chains
 // z_k' = -z_k + z_{k-2}.
 func TestFreqResponseAtPoleHessenbergSweep(t *testing.T) {
@@ -169,7 +169,8 @@ func TestFreqResponseAtPoleHessenbergSweep(t *testing.T) {
 	}
 	c[0], c[2*n-1], c[2*n-2] = 1, 1, 1
 	sys := poleSys(t, n, 1, 2, a, b, c, []float64{0, 0.3}, 0)
-	if newFrequencyEvaluator(sys).useDenseSweep(4) {
+	omega := append([]float64{0.5, 1, 2, 3}, logspace(-1, 1, 100)...)
+	if newFrequencyEvaluator(sys).useDenseSweep(len(omega)) {
 		t.Fatal("expected the Hessenberg sweep")
 	}
 	oracle := func(s complex128) [][]complex128 {
@@ -180,7 +181,7 @@ func TestFreqResponseAtPoleHessenbergSweep(t *testing.T) {
 		lag := 1 / (s + 1)
 		return [][]complex128{{g1}, {cmplx.Pow(lag, 8) + cmplx.Pow(lag, 7) + 0.3}}
 	}
-	checkPoleResponse(t, "hessenberg", sys, []float64{0.5, 1, 2, 3}, oracle)
+	checkPoleResponse(t, "hessenberg", sys, omega, oracle)
 }
 
 func TestFreqResponseAtPoleIntegratorMIMO(t *testing.T) {

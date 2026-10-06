@@ -1,0 +1,21 @@
+commit: 8e56d2c7d09c6460f7b8469624aea4908644a5fa
+dirty: false
+go version go1.27.1 darwin/arm64
+{
+	"CGO_ENABLED": "1",
+	"GOAMD64": "",
+	"GOARCH": "arm64",
+	"GOARM64": "v8.0",
+	"GOEXPERIMENT": "",
+	"GOFLAGS": "",
+	"GOOS": "darwin"
+}
+Darwin sat12-bq158-51a0fe6e-37f8-4e79-b406-c4924d626b7b-C6AD20A4FD98.local 25.6.0 Darwin Kernel Version 25.6.0: Fri Jul 31 19:16:43 PDT 2026; root:xnu-12377.161.14~5/RELEASE_ARM64_VMAPPLE arm64
+Apple M1 (Virtual)
+3
+GOMAXPROCS env: unset
+rounds: 6 benchtime: 100ms
+controlsys-backend goos=darwin goarch=arm64 backend=gonum.Implementation/pure-go
+/Users/runner/go/bin/benchstat: go1.27.1
+	path	golang.org/x/perf/cmd/benchstat
+	mod	golang.org/x/perf	v0.0.0-20260312031701-16a31bc5fbd0	h1:VgUwdbeBqkERh4BX46p4O2fSng7duMS+0V01EEAt2Vk=
