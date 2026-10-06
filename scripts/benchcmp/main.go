@@ -177,7 +177,7 @@ func compare(c config) (err error) {
 
 	md.GoVersion, _ = output(root, "go", "version")
 	md.GoEnv = goEnv(root)
-	md.BuildCmd = []string{"go", "test", "-c", "-o", "<bin>", "."}
+	md.BuildCmd = []string{"GOWORK=off", "go", "test", "-c", "-o", "<bin>", "."}
 	md.Flags = c.flags()
 	if path, err := exec.LookPath(c.benchstat); err == nil {
 		info, _ := output("", "go", "version", "-m", path)
@@ -405,9 +405,12 @@ func runBinary(c config, bin, stdoutPath, stderrPath string, seconds *float64) (
 	return stdout.String(), nil
 }
 
+// output runs a helper command. GOWORK=off keeps builds to each revision's
+// own go.mod even when the output directory lies under a go.work.
 func output(dir, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOWORK=off")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

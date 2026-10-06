@@ -3,6 +3,7 @@
 # on this host and writes raw samples, benchstat by path, and environment.
 # Usage: scripts/crossover.sh OUT_DIR [ROUNDS] [BENCHTIME]
 set -euo pipefail
+export GOWORK=off
 
 out=${1:?usage: scripts/crossover.sh OUT_DIR [ROUNDS] [BENCHTIME]}
 rounds=${2:-10}
