@@ -41,7 +41,10 @@ Long grids (w=200), around n = 8m+8:
 No threshold was changed in that run; the follow-up below makes the rule
 grid-length aware.
 
-## Grid-length-aware rule (darwin/arm64, Apple M1 Pro)
+## Grid-length-aware rule (darwin/arm64, Apple M1 Pro; superseded)
+
+PR #325. Fitted on arm64 only; on amd64-asm it loses up to 2.1x (see
+[Backend-aware rule](#backend-aware-rule)). Kept for its arm64 evidence.
 
 ### Crossover data (`arm64-m1pro-grid/`)
 
@@ -113,22 +116,87 @@ more, no allocs/op increase).
 - End-to-end callers: no significant change (all `~`); they use 100-200
   points or small/banded models that were already dense.
 
-### amd64
+### amd64 (`amd64-ci-crossover/`, `amd64-ci-rule-compare/`)
 
-Not measured: no amd64 host is available locally, and the `crossover` job of
-the `Performance comparison` workflow has not been run for this rule. The
-change only moves cases from Hessenberg to dense, and on arm64 the moved cases
-are at most 4.6% slower (dense 2x faster at w=3). If amd64's assembly
-kernels shift the per-point ratio towards Hessenberg, losses would be largest
-just above c at w of 20-60 where the arm64 margin is only 3-13%; the far
-short-grid region (w <= 5) has a 1.5-2.5x arm64 margin. Rerun the
-`crossover` job and retain `crossover-amd64-*` here to confirm or tune the
-constant.
+`Performance comparison` run 37404887559 (AMD EPYC 7763 crossover; EPYC 9V45
+comparison, amd64-asm). Hessenberg is far cheaper per point than on arm64
+(rho about 0.6c/n, setup sigma 1.5-2.5 dense points), so it already wins at
+n = c for w >= 10. Against the old rule, the grid-length rule regresses
+`path=auto` by +87% (n=20/m=1/w=20), +60% (28/2/20), +40% (44/4/20) and
++12-26% at w=3.
 
-## linux/amd64
+## Backend-aware rule
 
-Pending for both the state threshold and the grid-length rule: run the
-`Performance comparison` workflow (`crossover` job, `ubuntu-latest`) and
-retain its `crossover-amd64-*` artifact here. A
-GitHub-hosted runner is a shared VM; record its CPU model from
-`environment.txt`.
+### Rule
+
+`useDenseSweep` keeps per-point GEPP while
+
+    (s0 + s1/n)/nw + kappa·c/n + rho0 >= 1     (c = 8m+8)
+
+or A is already upper Hessenberg. The left side is the modelled
+Hessenberg/dense time ratio: setup s0 + s1/n dense points, then
+kappa·c/n + rho0 per point. The constants are chosen at build time with the
+build constraint of Gonum's `internal/asm/f64` kernels (`backend_asm.go`,
+`backend_noasm.go`), in twentieths so the test is an integer comparison
+`nw <= (20·s0·n + 20·s1) / ((20 - 20·rho0)·n - 20·kappa·c)` that cannot
+overflow for `nw = math.MaxInt`:
+
+| backend | s0 | s1 | kappa | rho0 | always dense | Hessenberg at n = c | at n = 2c |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| pure-go (arm64, `noasm`) | 6 | 0 | 0.9 | 0 | n <= 0.9c | > 60 points | > 10 points |
+| amd64-asm | 1 | 16 | 0.5 | 0.15 | n <= 10c/17 | > 4-5 points | > 2 points |
+
+pure-go keeps the #325 form with kappa 0.9 instead of 1. amd64 needs the
+extra terms: its fitted setup falls from about 3 dense points at n=12/m=1 to
+1.1 at n=80/m=4, and its rho·n/c rises with n (0.5 to 0.85), so a two-term
+rule fitted there loses 38% at n=3c/4, w=200. Constants come from a least
+squares fit of the ratio model (w >= 3, ratio 0.5-2) on
+`amd64-ci-crossover/` and CI run 37408022253, rounded.
+
+`evalrule.py` scores rules offline: worst loss of the chosen kernel against
+the faster forced kernel ("vs best") and against the old rule `w <= 2 or
+n <= c` ("vs main"), over coupled A:
+
+    python3 evalrule.py --rule 1 16 0.5 0.15 --rule 6 0 0.9 0 RAW...
+    uv run --with numpy python evalrule.py --fit RAW...   # refit
+
+### Verification
+
+Bench grid adds n = 3c/4 (n in c/2, 3c/4, c, c+4, 3c/2, 2c). Worst case of
+the shipped rule (`(n, m, w)`):
+
+| data | host | vs best | vs main |
+| --- | --- | ---: | ---: |
+| `amd64-ci-crossover/` (fit) | EPYC 7763 | +1.7% (80,4,2) | +0.6% (24,2,5) |
+| `ci-crossover-37408022253/amd64` (fit) | EPYC 7763 | +3.0% (80,4,2) | +2.1% (30,4,10) |
+| `ci-crossover-37409545812/amd64` (holdout) | EPYC 7763 | +3.2% (80,4,2) | +1.1% (24,2,5) |
+| `arm64-m1pro-grid/` (fit) | M1 Pro | +4.6% (32,1,10) | +4.6% (32,1,10) |
+| `arm64-m1pro-backend/` (holdout) | M1 Pro | +3.7% (32,1,10) | +3.7% (32,1,10) |
+| `ci-crossover-37408022253/arm64` | M1 (Virtual) | +5.5% (16,1,200) | +5.5% (16,1,200) |
+| `ci-crossover-37409545812/arm64` | M1 (Virtual) | +19.9% (48,2,10) | +19.9% (48,2,10) |
+| `ci-crossover-37409545812/arm64-attempt2` | M1 (Virtual) | +2.4% (16,1,200) | +2.4% (16,1,200) |
+| all three macos-latest runs pooled | M1 (Virtual) | +2.5% (16,1,200) | +2.5% (16,1,200) |
+
+The rule switches near ratio 1, so these are cases where the two kernels are
+within a few percent; the old rule loses up to 75% (amd64) and 2.4x (arm64)
+on the same data. The `macos-latest` runner is noisy (median benchstat
+interval ±17-38%, ±1% for the amd64 runner and the local M1 Pro); the 19.9%
+row comes from the noisiest attempt (±38%, dense times 30-40% above the
+other attempts) and does not repeat in the rerun or the pooled samples.
+n = c with m=1 at w=200 is a tie on pure-go (ratio 1.00-1.06) and either
+choice of kappa moves the worst case between (16,1,200) and (24,2,200).
+
+`arm64-m1pro-backend/`: commit `8e56d2c`, Go 1.27.1, pure-go, GOMAXPROCS 8,
+`scripts/crossover.sh OUT 10 100ms`, load average 1.3-2.8.
+
+`ci-crossover-37409545812/compare-summary.md` (`scripts/benchcmp`, merge base
+vs `8e56d2c`, EPYC 7763, 6 rounds): `path=auto` improves by up to 43% (n=16/m=1/w=200)
+and shows no time regression; where the path moves to Hessenberg B/op and
+allocs/op rise (7 to 10 allocs), as for any Hessenberg sweep. Unrelated rows
+flagged at 5-37% (FRD arithmetic, `FreqResponse_B747Lateral`,
+forced-dense kernels) do not reach `useDenseSweep` or keep the same path,
+and vary run to run on the shared runner.
+
+Already upper-Hessenberg A stays dense on both backends. On amd64 the sweep
+is 6% faster for n=32/m=1/w=200 (ratio 0.94), 1.0-2.1x slower elsewhere; not
+changed.

@@ -160,9 +160,9 @@ func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {
 // FreqResponsePointwise evaluates the frequency response with guaranteed
 // per-frequency single-point arithmetic: the value at each omega[k] is
 // bit-identical to FreqResponse([]float64{omega[k]}), regardless of
-// len(omega). FreqResponse may evaluate long sweeps of large delay-free
-// state-space models (n > 8m+8, A not upper Hessenberg) through one
-// Hessenberg reduction of A, whose values agree with the single-point path
+// len(omega). FreqResponse may evaluate multi-point sweeps of delay-free
+// state-space models with A not upper Hessenberg and n large relative to the
+// input count through one Hessenberg reduction of A, whose values agree with the single-point path
 // to componentwise rounding but are not bit-identical;
 // FreqResponsePointwise never does, at the cost of one dense solve per
 // frequency. Use it when downstream comparisons require sweep results to

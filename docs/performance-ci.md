@@ -102,19 +102,27 @@ Apple M1 Pro; expect several times longer on runners.
 ## Frequency dispatch crossover
 
 `BenchmarkFrequencyDispatch` times the dense and Hessenberg sweep kernels and
-the public `FreqResponse` (`path=auto`) around `useDenseSweep`'s state
-threshold `c = 8m+8` (n in c/2..2c) on 1- to 200-point grids, with coupled and
-already upper-Hessenberg A. The rule keeps dense while `nw·(n-c) < 6n`. `scripts/crossover.sh OUT [ROUNDS] [BENCHTIME]` builds once,
-runs the rounds, and writes `environment.txt`, `raw.txt` and
-`benchstat -col /path` tables. The perf workflow's `crossover` job runs it on
-`ubuntu-latest` (amd64) and `macos-latest` (arm64).
+the public `FreqResponse` (`path=auto`) around `useDenseSweep`'s scale
+`c = 8m+8` (n in c/2..2c) on 1- to 200-point grids, with coupled and already
+upper-Hessenberg A. The rule keeps dense while
+`(s0 + s1/n)/nw + kappa·c/n + rho0 >= 1`, with constants per Gonum kernel
+backend (`backend_asm.go`, `backend_noasm.go`).
+`scripts/crossover.sh OUT [ROUNDS] [BENCHTIME]` builds once, runs the rounds,
+and writes `environment.txt`, `raw.txt` and `benchstat -col /path` tables. The
+perf workflow's `crossover` job runs it on `ubuntu-latest` (amd64) and
+`macos-latest` (arm64);
+`docs/benchmarks/frequency-dispatch/evalrule.py` scores a rule against its
+`raw.txt`.
 
-Evidence status:
+Evidence (retained in
+[benchmarks/frequency-dispatch](benchmarks/frequency-dispatch/README.md)):
 
-- darwin/arm64 (Apple M1 Pro, local): retained in
-  [benchmarks/frequency-dispatch](benchmarks/frequency-dispatch/README.md).
-- linux/amd64: **pending** the first run of the `crossover` job. No amd64
-  dispatch claim is made until that artifact is retained.
+- linux/amd64 (amd64-asm, EPYC 7763): CI runs 37404887559, 37408022253,
+  37409545812. Benchstat intervals are about ±1%.
+- darwin/arm64 (pure-go): local Apple M1 Pro (±1%) and `macos-latest`
+  (Apple M1 Virtual, 3 cores). The `macos-latest` crossover is too noisy for
+  single-run decisions (median interval ±17-38%); rerun the job or pool
+  attempts before acting on it.
 
 ## Harness verification
 
