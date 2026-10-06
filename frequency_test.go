@@ -324,6 +324,7 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 		{name: "UpperHessenbergA", system: benchSys(t, 40, 1, 1), omega: logspace(-2, 2, 100), wantDense: true},
 		{name: "SISOBelowGridCrossover", system: siso, omega: logspace(-2, 2, lastDenseGrid[[2]int{24, 1}]), wantDense: true},
 		{name: "SISOAtGridCrossover", system: siso, omega: logspace(-2, 2, lastDenseGrid[[2]int{24, 1}]+1), wantDense: false},
+		{name: "ThreeQuarterCLongGrid", system: benchDenseSys(t, 12, 1, 1), omega: logspace(-2, 2, 200), wantDense: threeQuarterCLongGridDense},
 	}
 	for _, size := range [][2]int{{16, 1}, {44, 4}, {80, 4}} {
 		sys := benchDenseSys(t, size[0], size[1], size[1])
