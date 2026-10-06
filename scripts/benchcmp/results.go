@@ -246,7 +246,7 @@ func header(b *strings.Builder, md *metadata) {
 		fmt.Fprintf(b, "- Runner: %s %s %s\n", md.Host["RUNNER_NAME"], img, md.Host["ImageVersion"])
 	}
 	fmt.Fprintf(b, "- Samples: %d interleaved rounds per revision; flags `%s`\n", md.Rounds, strings.Join(md.Flags, " "))
-	if bb != nil && cb != nil && bb.Backend != cb.Backend {
+	if bb != nil && cb != nil && bb.Backend != cb.Backend && bb.Backend != unreported && cb.Backend != unreported {
 		b.WriteString("- **Warning:** baseline and candidate report different backends.\n")
 	}
 }

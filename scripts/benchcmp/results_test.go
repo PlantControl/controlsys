@@ -116,4 +116,8 @@ func TestSummaryListsTradeoffs(t *testing.T) {
 			t.Errorf("summary missing %q:\n%s", want, s)
 		}
 	}
+	md.Binaries[baseLabel].Backend = unreported
+	if s := summary(md, cs, 5); strings.Contains(s, "different backends") {
+		t.Error("warned about an unreported backend")
+	}
 }

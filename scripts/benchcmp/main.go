@@ -105,8 +105,9 @@ func (c config) flags() []string {
 }
 
 const (
-	baseLabel = "baseline"
-	candLabel = "candidate"
+	baseLabel  = "baseline"
+	candLabel  = "candidate"
+	unreported = "unreported (revision lacks TestNativeBackend)"
 )
 
 func main() {
@@ -173,6 +174,7 @@ func compare(c config) (err error) {
 		}
 		save()
 		_ = os.RemoveAll(filepath.Join(out, "src"))
+		_ = os.RemoveAll(filepath.Join(out, "bin"))
 	}()
 
 	md.GoVersion, _ = output(root, "go", "version")
@@ -373,7 +375,7 @@ func build(dir, bin string) (*binary, error) {
 	b := &binary{Path: bin, SHA256: hex.EncodeToString(sum[:])}
 	b.BuildInfo, _ = output("", "go", "version", "-m", bin)
 	backend, _ := output(dir, bin, "-test.run=^TestNativeBackend$", "-test.v")
-	b.Backend = "unreported"
+	b.Backend = unreported
 	if m := regexp.MustCompile(`(?m)^controlsys-backend (.*)$`).FindStringSubmatch(backend); m != nil {
 		b.Backend = m[1]
 	}
