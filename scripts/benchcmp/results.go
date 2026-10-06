@@ -249,6 +249,17 @@ func header(b *strings.Builder, md *metadata) {
 	if bb != nil && cb != nil && bb.Backend != cb.Backend && bb.Backend != unreported && cb.Backend != unreported {
 		b.WriteString("- **Warning:** baseline and candidate report different backends.\n")
 	}
+	if bb != nil && cb != nil && toolchain(bb.BuildInfo) != toolchain(cb.BuildInfo) {
+		fmt.Fprintf(b, "- **Warning:** binaries built by different toolchains (%s vs %s).\n", toolchain(bb.BuildInfo), toolchain(cb.BuildInfo))
+	}
+}
+
+// toolchain extracts the Go version from go version -m output, whose first
+// line is "<path>: <version>".
+func toolchain(buildInfo string) string {
+	first, _, _ := strings.Cut(buildInfo, "\n")
+	_, v, _ := strings.Cut(first, ": ")
+	return v
 }
 
 func changeTable(b *strings.Builder, cs []change) {

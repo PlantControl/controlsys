@@ -117,7 +117,12 @@ func TestSummaryListsTradeoffs(t *testing.T) {
 		}
 	}
 	md.Binaries[baseLabel].Backend = unreported
-	if s := summary(md, cs, 5); strings.Contains(s, "different backends") {
-		t.Error("warned about an unreported backend")
+	if s := summary(md, cs, 5); strings.Contains(s, "different backends") || strings.Contains(s, "different toolchains") {
+		t.Error("warned about an unreported backend or equal toolchains")
+	}
+	md.Binaries[baseLabel].BuildInfo = "/x/baseline.test: go1.27.1\n\tpath\tp"
+	md.Binaries[candLabel].BuildInfo = "/x/candidate.test: go1.28.0\n\tpath\tp"
+	if s := summary(md, cs, 5); !strings.Contains(s, "different toolchains (go1.27.1 vs go1.28.0)") {
+		t.Errorf("no toolchain warning:\n%s", s)
 	}
 }
