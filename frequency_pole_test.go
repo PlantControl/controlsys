@@ -150,7 +150,7 @@ func TestFreqResponseAtPoleExplicitAndDescriptor(t *testing.T) {
 }
 
 // TestFreqResponseAtPoleHessenbergSweep drives the pole through the
-// Hessenberg sweep (n > 8m+8, nw·(n-8m-8) >= 6n, A not upper Hessenberg): outputs
+// Hessenberg sweep (n = 17, m = 1, 104 points, A not upper Hessenberg): outputs
 // 1/(s²+1) and 1/(s+1)^8 + 1/(s+1)^7 + 0.3 from two interleaved lag chains
 // z_k' = -z_k + z_{k-2}.
 func TestFreqResponseAtPoleHessenbergSweep(t *testing.T) {
