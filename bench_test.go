@@ -375,7 +375,7 @@ func BenchmarkFrequencySweepKernels(b *testing.B) {
 }
 
 // BenchmarkFrequencyDispatch times both delay-free sweep kernels around the
-// useDenseSweep crossover n = 8m+8, on short and long grids, for coupled and
+// useDenseSweep state threshold n = 8m+8 across grid lengths, for coupled and
 // already upper-Hessenberg A. path=auto is the public FreqResponse call and
 // includes validation and dispatch. Compare paths with benchstat -col /path.
 func BenchmarkFrequencyDispatch(b *testing.B) {
@@ -386,13 +386,15 @@ func BenchmarkFrequencyDispatch(b *testing.B) {
 	var cases []dispatchCase
 	for _, m := range []int{1, 2, 4} {
 		c := 8*m + 8
-		for _, n := range []int{c / 2, c - 4, c, c + 4, 2 * c} {
-			for _, nw := range []int{3, 20, 200} {
+		for _, n := range []int{c / 2, c, c + 4, 3 * c / 2, 2 * c} {
+			for _, nw := range []int{1, 2, 3, 5, 10, 20, 50, 200} {
 				cases = append(cases, dispatchCase{n: n, m: m, nw: nw})
 			}
 		}
 		for _, n := range []int{c, 2 * c} {
-			cases = append(cases, dispatchCase{n: n, m: m, nw: 200, hess: true})
+			for _, nw := range []int{3, 20, 200} {
+				cases = append(cases, dispatchCase{n: n, m: m, nw: nw, hess: true})
+			}
 		}
 	}
 	for _, tc := range cases {
