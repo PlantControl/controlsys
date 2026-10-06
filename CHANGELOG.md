@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Behaviour change: `Place` returns the new `ErrPoleAccuracy` instead of a gain when the achieved closed-loop poles are more than 10% from the requested ones (where MATLAB `place` warns). It previously returned such gains with a nil error, including destabilizing ones (e.g. max Re eig(A−BK) = +702 for a 50-state tridiagonal plant; scipy `place_poles` also misses these by >10%).
+- `Place` keeps the robust (KNV) gain whenever its eigenvector matrix is numerically nonsingular and its poles are accurate, instead of switching to the Schur gain when κ₁(X) > 1/√ε. On a random 30-state, 5-input plant with clustered poles the error drops from 7% to 1e-5; the Schur gain is still tried when the robust one fails and the more accurate one is kept.
+
 ## v2.3.0
 
 - Breaking: the module path is now `plantcontrol.org/v2/controlsys/v2` (site namespace v2; Go still requires the trailing `/v2` for v2.x tags). The API is unchanged from v2.2.0. Migrate with:
