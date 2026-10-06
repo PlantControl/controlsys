@@ -375,7 +375,7 @@ func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
 // reduction worth about 5-6 dense points, then costs about c/n of a dense
 // point with c = 8m+8 (O(n²m) solves, products with Q, one refinement step).
 // It wins when nw·(1 - c/n) exceeds the setup, so dense is kept while
-// nw·(n-c) < 6n: always for n <= c, below 6-12 points for n >= 2c, and longer
+// nw·(n-c) < 6n: always for n <= c, below 12 points at n = 2c (7 for large n), longer
 // near c (docs/benchmarks/frequency-dispatch). When A is already upper
 // Hessenberg, GEPP skips the zero multipliers, costs O(n²) per point like the
 // sweep, and needs no orthogonal reduction or refinement.
