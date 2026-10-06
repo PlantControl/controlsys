@@ -10,12 +10,15 @@ import (
 )
 
 // benchSysNonSym builds a stable system with non-symmetric A for benchmark workloads.
-// A has sub/superdiagonal coupling so transposition bugs surface.
+// A has sub/superdiagonal coupling so transposition bugs surface. The -1 diagonal
+// shift keeps A stable for every n: A is diagonally similar to a symmetric
+// tridiagonal with off-diagonals sqrt(0.1(i+1)), and Gershgorin bounds that
+// below zero.
 func benchSysNonSym(tb testing.TB, n, m, p int) *System {
 	tb.Helper()
 	A := mat.NewDense(n, n, nil)
 	for i := range n {
-		A.Set(i, i, -float64(i+1)*0.3)
+		A.Set(i, i, -float64(i+1)*0.3-1)
 		if i > 0 {
 			A.Set(i, i-1, 1.0)
 		}
@@ -45,6 +48,24 @@ func benchSysNonSym(tb testing.TB, n, m, p int) *System {
 		tb.Fatal(err)
 	}
 	return sys
+}
+
+func TestBenchSysNonSymStable(t *testing.T) {
+	for n := 1; n <= 200; n++ {
+		sys := benchSysNonSym(t, n, 2, 2)
+		if n > 1 && mat.Equal(sys.A, sys.A.T()) {
+			t.Fatalf("n=%d: A is symmetric", n)
+		}
+		var eig mat.Eigen
+		if !eig.Factorize(sys.A, mat.EigenNone) {
+			t.Fatalf("n=%d: eigendecomposition failed", n)
+		}
+		for _, v := range eig.Values(nil) {
+			if real(v) >= 0 {
+				t.Fatalf("n=%d: eigenvalue %v not in open left half-plane", n, v)
+			}
+		}
+	}
 }
 
 func benchFRDFromSys(tb testing.TB, sys *System, nw int) *FRD {

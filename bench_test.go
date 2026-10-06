@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 
@@ -1355,13 +1356,10 @@ func BenchmarkBalred(b *testing.B) {
 
 // --- Controller & Observer Benchmarks ---
 
-func benchPlace(b *testing.B, n, m int) {
-	A := benchStableA(n)
-	B := benchB(n, m)
-	poles := make([]complex128, n)
-	for i := range n {
-		poles[i] = complex(-float64(i+1)*2, 0)
-	}
+type placeFixture func(n, m int) (A, B *mat.Dense, poles []complex128)
+
+func benchPlace(b *testing.B, fixture placeFixture, n, m int) {
+	A, B, poles := fixture(n, m)
 	b.ResetTimer()
 	for range b.N {
 		if _, err := Place(A, B, poles); err != nil {
@@ -1370,9 +1368,71 @@ func benchPlace(b *testing.B, n, m int) {
 	}
 }
 
-func BenchmarkPlace_N10_M2(b *testing.B)  { benchPlace(b, 10, 2) }
-func BenchmarkPlace_N50_M5(b *testing.B)  { benchPlace(b, 50, 5) }
-func BenchmarkPlace_N100_M5(b *testing.B) { benchPlace(b, 100, 5) }
+func placeChainFixture(n, m int) (A, B *mat.Dense, poles []complex128) {
+	poles = make([]complex128, n)
+	for i := range n {
+		poles[i] = complex(-float64(i+1)*2, 0)
+	}
+	return benchStableA(n), benchB(n, m), poles
+}
+
+// placeSpreadFixture drives every state through a dense B. With B only on the
+// first states of the benchStableA chain, far-state controllability decays
+// like 0.2^(n-m) and is lost in double precision for large n.
+func placeSpreadFixture(n, m int) (A, B *mat.Dense, poles []complex128) {
+	rng := newPlaceRNG(5)
+	B = mat.NewDense(n, m, nil)
+	for i := range n {
+		for j := range m {
+			B.Set(i, j, rng())
+		}
+	}
+	poles = make([]complex128, n)
+	for i := range n {
+		poles[i] = complex(-float64(i+1)*0.3-1, 0)
+	}
+	return benchStableA(n), B, poles
+}
+
+func BenchmarkPlace_N10_M2(b *testing.B)  { benchPlace(b, placeChainFixture, 10, 2) }
+func BenchmarkPlace_N50_M5(b *testing.B)  { benchPlace(b, placeSpreadFixture, 50, 5) }
+func BenchmarkPlace_N100_M5(b *testing.B) { benchPlace(b, placeSpreadFixture, 100, 5) }
+
+func TestPlaceBenchFixturesAssignPoles(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture placeFixture
+		n, m    int
+	}{
+		{"chain/N10_M2", placeChainFixture, 10, 2},
+		{"spread/N50_M5", placeSpreadFixture, 50, 5},
+		{"spread/N100_M5", placeSpreadFixture, 100, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			A, B, poles := tc.fixture(tc.n, tc.m)
+			K, err := Place(A, B, poles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cl mat.Dense
+			cl.Mul(B, K)
+			cl.Sub(A, &cl)
+			var eig mat.Eigen
+			if !eig.Factorize(&cl, mat.EigenNone) {
+				t.Fatal("closed-loop eigendecomposition failed")
+			}
+			for _, v := range eig.Values(nil) {
+				best := math.Inf(1)
+				for _, p := range poles {
+					best = math.Min(best, cmplx.Abs(v-p)/cmplx.Abs(p))
+				}
+				if best > 1e-4 {
+					t.Fatalf("closed-loop eigenvalue %v is %g from nearest target pole", v, best)
+				}
+			}
+		})
+	}
+}
 
 func benchPlaceRandom(b *testing.B, n, m int) {
 	rng := newPlaceRNG(3)
