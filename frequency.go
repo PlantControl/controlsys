@@ -371,14 +371,17 @@ func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
 }
 
 // useDenseSweep reports whether per-point GEPP (n³/3 per point) beats the
-// refined Hessenberg sweep (O(n²m) solves, products with Q and one
-// refinement step per point). On fully coupled models
-// (BenchmarkFrequencySweepKernels, M1 Pro) the crossover is near
-// n = 8m+8: 16 states for SISO, 24 for m=2, 40 for m=4. When A is already
-// upper Hessenberg, GEPP skips the zero multipliers, costs O(n²) per point
-// like the sweep, and needs no orthogonal reduction or refinement.
+// refined Hessenberg sweep for an nw-point grid. The sweep pays an O(n³)
+// reduction worth about 5-6 dense points, then costs about c/n of a dense
+// point with c = 8m+8 (O(n²m) solves, products with Q, one refinement step).
+// It wins when nw·(1 - c/n) exceeds the setup, so dense is kept while
+// nw·(n-c) < 6n: always for n <= c, below 6-12 points for n >= 2c, and longer
+// near c (docs/benchmarks/frequency-dispatch). When A is already upper
+// Hessenberg, GEPP skips the zero multipliers, costs O(n²) per point like the
+// sweep, and needs no orthogonal reduction or refinement.
 func (e frequencyEvaluator) useDenseSweep(nw int) bool {
-	return nw <= 2 || e.n <= 8*max(e.m, 1)+8 || isUpperHessenberg(e.sys.A)
+	c := 8*max(e.m, 1) + 8
+	return e.n <= c || nw <= (6*e.n-1)/(e.n-c) || isUpperHessenberg(e.sys.A)
 }
 
 func isUpperHessenberg(a *mat.Dense) bool {

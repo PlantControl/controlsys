@@ -104,9 +104,9 @@ Apple M1 Pro; expect several times longer on runners.
 ## Frequency dispatch crossover
 
 `BenchmarkFrequencyDispatch` times the dense and Hessenberg sweep kernels and
-the public `FreqResponse` (`path=auto`) around `useDenseSweep`'s `n = 8m+8`
-crossover, on 3-, 20- and 200-point grids, with coupled and already
-upper-Hessenberg A. `scripts/crossover.sh OUT [ROUNDS] [BENCHTIME]` builds once,
+the public `FreqResponse` (`path=auto`) around `useDenseSweep`'s state
+threshold `c = 8m+8` (n in c/2..2c) on 1- to 200-point grids, with coupled and
+already upper-Hessenberg A. The rule keeps dense while `nw·(n-c) < 6n`. `scripts/crossover.sh OUT [ROUNDS] [BENCHTIME]` builds once,
 runs the rounds, and writes `environment.txt`, `raw.txt` and
 `benchstat -col /path` tables. The perf workflow's `crossover` job runs it on
 `ubuntu-latest` (amd64) and `macos-latest` (arm64).

@@ -320,6 +320,12 @@ func TestFrequencyEvaluatorSweepKernelParity(t *testing.T) {
 		{name: "DiscreteHessenberg", system: discreteSISO, omega: logspace(-2, 1, 100), wantDense: false},
 		{name: "CoupledMIMO", system: benchDenseSys(t, 30, 2, 2), omega: logspace(-2, 2, 100), wantDense: false},
 		{name: "UpperHessenbergA", system: benchSys(t, 40, 1, 1), omega: logspace(-2, 2, 100), wantDense: true},
+		{name: "SISOBelowGridCrossover", system: siso, omega: logspace(-2, 2, 17), wantDense: true},
+		{name: "SISOAtGridCrossover", system: siso, omega: logspace(-2, 2, 18), wantDense: false},
+		{name: "NearStateThresholdShortGrid", system: benchDenseSys(t, 44, 4, 4), omega: logspace(-2, 2, 65), wantDense: true},
+		{name: "NearStateThresholdLongGrid", system: benchDenseSys(t, 44, 4, 4), omega: logspace(-2, 2, 66), wantDense: false},
+		{name: "LargeMIMOShortGrid", system: benchDenseSys(t, 80, 4, 4), omega: logspace(-2, 2, 11), wantDense: true},
+		{name: "LargeMIMOGrid", system: benchDenseSys(t, 80, 4, 4), omega: logspace(-2, 2, 12), wantDense: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
