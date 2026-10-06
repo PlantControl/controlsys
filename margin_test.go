@@ -1152,7 +1152,7 @@ func TestMargin_Discrete_PythonControl_SecondCase(t *testing.T) {
 }
 
 func BenchmarkMargin_SISO(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(3, 3, []float64{
 			0, 1, 0,
 			0, 0, 1,
@@ -1163,37 +1163,52 @@ func BenchmarkMargin_SISO(b *testing.B) {
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for range b.N {
-		Margin(sys)
+		if _, err := Margin(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkBandwidth_SISO(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(1, 1, []float64{-1}),
 		mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for range b.N {
-		Bandwidth(sys, 0)
+		if _, err := Bandwidth(sys, 0); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func BenchmarkDiskMargin_SISO(b *testing.B) {
-	sys, _ := New(
+	sys, err := New(
 		mat.NewDense(1, 1, []float64{-1}),
 		mat.NewDense(1, 1, []float64{10}),
 		mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{0}),
 		0,
 	)
+	if err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for range b.N {
-		DiskMargin(sys)
+		if _, err := DiskMargin(sys); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -2098,7 +2113,8 @@ func marginExactMatch(t *testing.T, label string, got, want []float64) {
 // marginRandomLoop draws a stable SISO loop with D ≠ 0 and |L(jω0)| = 3. With
 // mimo set it is channel (1,0) of a 2×2 realization, so it carries modes
 // that are uncontrollable or unobservable from that channel.
-func marginRandomLoop(n int, kind sweepModelKind, dt float64, descriptor, mimo bool) *System {
+func marginRandomLoop(tb testing.TB, n int, kind sweepModelKind, dt float64, descriptor, mimo bool) *System {
+	tb.Helper()
 	seed := uint64(n)<<8 | uint64(kind)<<1
 	if dt > 0 {
 		seed |= 1 << 20
@@ -2116,10 +2132,16 @@ func marginRandomLoop(n int, kind sweepModelKind, dt float64, descriptor, mimo b
 	}
 	sys, _ := randomSweepRealization(rng, kind, dt, descriptor, n, io, io)
 	if mimo {
-		sys, _ = sys.SelectByIndex([]int{0}, []int{1})
+		var err error
+		if sys, err = sys.SelectByIndex([]int{0}, []int{1}); err != nil {
+			tb.Fatal(err)
+		}
 	}
 	sys.D.Set(0, 0, 0.5+rng.Float64())
-	eval, _ := newSISOEval(sys)
+	eval, err := newSISOEval(sys)
+	if err != nil {
+		tb.Fatal(err)
+	}
 	k := 3 / cmplx.Abs(eval.at(1))
 	sys.C.Scale(k, sys.C)
 	sys.D.Scale(k, sys.D)
@@ -2147,7 +2169,7 @@ func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
 				for kind := range sweepModelKinds {
 					t.Run(fmt.Sprintf("n=%d/dt=%g/%s/%v", n, dt, variant, kind), func(t *testing.T) {
 						t.Parallel()
-						sys := marginRandomLoop(n, kind, dt, variant == "descriptor", variant == "mimo")
+						sys := marginRandomLoop(t, n, kind, dt, variant == "descriptor", variant == "mimo")
 						if variant == "delay" {
 							sys.InputDelay = []float64{0.2}
 							if dt > 0 {
@@ -2243,25 +2265,33 @@ func TestAllMargin_SingularPencils(t *testing.T) {
 
 func BenchmarkMarginOrder(b *testing.B) {
 	for _, n := range []int{10, 100} {
-		sys := marginRandomLoop(n, sweepDense, 0, false, false)
+		sys := marginRandomLoop(b, n, sweepDense, 0, false, false)
 		b.Run(fmt.Sprintf("Margin/n=%d", n), func(b *testing.B) {
 			for b.Loop() {
-				Margin(sys)
+				if _, err := Margin(sys); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 		b.Run(fmt.Sprintf("AllMargin/n=%d", n), func(b *testing.B) {
 			for b.Loop() {
-				AllMargin(sys)
+				if _, err := AllMargin(sys); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 		b.Run(fmt.Sprintf("Bandwidth/n=%d", n), func(b *testing.B) {
 			for b.Loop() {
-				Bandwidth(sys, 0)
+				if _, err := Bandwidth(sys, 0); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 		b.Run(fmt.Sprintf("Pidtune/n=%d", n), func(b *testing.B) {
 			for b.Loop() {
-				Pidtune(sys, PidtunePID, 0, nil)
+				if _, err := Pidtune(sys, PidtunePID, 0, nil); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}

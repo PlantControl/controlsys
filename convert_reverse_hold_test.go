@@ -309,7 +309,7 @@ func TestFOHIntegratorFeedthroughAndReverseLimitations(t *testing.T) {
 }
 
 func BenchmarkModifiedFOHForwardN20(b *testing.B) {
-	sys := benchD2CSystem(20, 5, 0.01)
+	sys := benchD2CSystem(b, 20, 5, 0.01)
 	sys.Dt = 0
 	b.ReportAllocs()
 	for b.Loop() {
@@ -320,7 +320,7 @@ func BenchmarkModifiedFOHForwardN20(b *testing.B) {
 }
 
 func BenchmarkModifiedFOHReverseN20(b *testing.B) {
-	sys := benchD2CSystem(20, 5, 0.01)
+	sys := benchD2CSystem(b, 20, 5, 0.01)
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := sys.D2C(D2COptions{Method: C2DMethodFOH}); err != nil {
