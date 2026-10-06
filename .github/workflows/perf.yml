@@ -1,0 +1,155 @@
+name: Performance comparison
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Baseline revision (default merge base of candidate and origin/main)
+        default: ''
+      candidate:
+        description: Candidate revision (default the dispatched ref)
+        default: ''
+      bench:
+        description: go test -bench regular expression
+        default: '.'
+      rounds:
+        description: Interleaved samples per revision
+        default: '10'
+      benchtime:
+        description: go test -benchtime per sample
+        default: '100ms'
+      crossover:
+        description: Also measure dense/Hessenberg frequency crossover on amd64 and arm64
+        type: boolean
+        default: true
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+permissions:
+  contents: read
+concurrency:
+  group: perf-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'labeled' && github.event.label.name != 'performance' && github.run_id || 'run' }}
+  cancel-in-progress: true
+env:
+  GO_VERSION: '1.27.1'
+  BENCHSTAT: golang.org/x/perf/cmd/benchstat@v0.0.0-20260312031701-16a31bc5fbd0
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      compare: ${{ steps.decide.outputs.compare }}
+      crossover: ${{ steps.decide.outputs.crossover }}
+      base: ${{ steps.decide.outputs.base }}
+      candidate: ${{ steps.decide.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || inputs.candidate || github.sha }}
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          ADDED_LABEL: ${{ github.event.label.name }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'performance') }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          INPUT_BASE: ${{ inputs.base }}
+          INPUT_CROSSOVER: ${{ inputs.crossover }}
+        run: |
+          candidate=$(git rev-parse HEAD)
+          if [ -n "$INPUT_BASE" ]; then
+            base=$(git rev-parse --verify "$INPUT_BASE^{commit}")
+          else
+            base=$(git merge-base "${PR_BASE:-origin/main}" "$candidate")
+          fi
+          compare=false
+          crossover=false
+          if [ "$EVENT" = workflow_dispatch ]; then
+            compare=true
+            crossover=$INPUT_CROSSOVER
+          elif [ "$ACTION" = labeled ] && [ "$ADDED_LABEL" != performance ]; then
+            :
+          elif [ "$HAS_LABEL" = true ]; then
+            compare=true
+            crossover=true
+          fi
+          {
+            echo "compare=$compare"
+            echo "crossover=$crossover"
+            echo "base=$base"
+            echo "candidate=$candidate"
+          } | tee -a "$GITHUB_OUTPUT"
+  compare:
+    needs: gate
+    if: needs.gate.outputs.compare == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.gate.outputs.candidate }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go install "$BENCHSTAT"
+      - name: Compare baseline and candidate
+        env:
+          BASE: ${{ needs.gate.outputs.base }}
+          CANDIDATE: ${{ needs.gate.outputs.candidate }}
+          BENCH: ${{ inputs.bench || '.' }}
+          ROUNDS: ${{ inputs.rounds || '6' }}
+          BENCHTIME: ${{ inputs.benchtime || '100ms' }}
+        run: |
+          go run ./scripts/benchcmp -base "$BASE" -candidate "$CANDIDATE" \
+            -bench "$BENCH" -rounds "$ROUNDS" -benchtime "$BENCHTIME" \
+            -out "$RUNNER_TEMP/perf-compare"
+      - if: always()
+        run: cat "$RUNNER_TEMP/perf-compare/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-compare-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/perf-compare
+          if-no-files-found: warn
+  crossover:
+    needs: gate
+    if: needs.gate.outputs.crossover == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goarch: amd64
+          - os: macos-latest
+            goarch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.candidate }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go install "$BENCHSTAT"
+      - name: Measure frequency dispatch crossover
+        env:
+          CONTROLSYS_EXPECT_GOARCH: ${{ matrix.goarch }}
+          ROUNDS: ${{ inputs.rounds || '6' }}
+          BENCHTIME: ${{ inputs.benchtime || '100ms' }}
+        run: |
+          go test -count=1 -run '^TestNativeBackend$' .
+          scripts/crossover.sh "$RUNNER_TEMP/crossover" "$ROUNDS" "$BENCHTIME"
+      - if: always()
+        run: |
+          {
+            echo "## Frequency dispatch crossover (${{ matrix.goarch }})"
+            echo '```'
+            cat "$RUNNER_TEMP/crossover/environment.txt" "$RUNNER_TEMP/crossover/benchstat.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossover-${{ matrix.goarch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/crossover
+          if-no-files-found: warn

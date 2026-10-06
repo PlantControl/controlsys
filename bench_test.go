@@ -374,6 +374,67 @@ func BenchmarkFrequencySweepKernels(b *testing.B) {
 	}
 }
 
+// BenchmarkFrequencyDispatch times both delay-free sweep kernels around the
+// useDenseSweep crossover n = 8m+8, on short and long grids, for coupled and
+// already upper-Hessenberg A. path=auto is the public FreqResponse call and
+// includes validation and dispatch. Compare paths with benchstat -col /path.
+func BenchmarkFrequencyDispatch(b *testing.B) {
+	type dispatchCase struct {
+		n, m, nw int
+		hess     bool
+	}
+	var cases []dispatchCase
+	for _, m := range []int{1, 2, 4} {
+		c := 8*m + 8
+		for _, n := range []int{c / 2, c - 4, c, c + 4, 2 * c} {
+			for _, nw := range []int{3, 20, 200} {
+				cases = append(cases, dispatchCase{n: n, m: m, nw: nw})
+			}
+		}
+		for _, n := range []int{c, 2 * c} {
+			cases = append(cases, dispatchCase{n: n, m: m, nw: 200, hess: true})
+		}
+	}
+	for _, tc := range cases {
+		sys := benchDenseSys(b, tc.n, tc.m, tc.m)
+		shape := "full"
+		if tc.hess {
+			shape = "hessenberg"
+			raw := sys.A.RawMatrix()
+			for i := 2; i < tc.n; i++ {
+				clear(raw.Data[i*raw.Stride : i*raw.Stride+i-1])
+			}
+		}
+		evaluator := newFrequencyEvaluator(sys)
+		omega := logspace(-2, 2, tc.nw)
+		size := tc.nw * tc.m * tc.m
+		name := fmt.Sprintf("n=%d/m=%d/w=%d/a=%s", tc.n, tc.m, tc.nw, shape)
+		b.Run(name+"/path=dense", func(b *testing.B) {
+			for b.Loop() {
+				data := make([]complex128, size)
+				if err := evaluator.sweepInto(omega, data, newBalancedDense(sys, tc.n, tc.m, tc.m)); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(name+"/path=hessenberg", func(b *testing.B) {
+			for b.Loop() {
+				data := make([]complex128, size)
+				if err := evaluator.sweepInto(omega, data, newHessenbergSweep(sys, tc.n, tc.m, tc.m)); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(name+"/path=auto", func(b *testing.B) {
+			for b.Loop() {
+				if _, err := sys.FreqResponse(omega); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // benchDenseSys is a fully coupled stable model; banded benchSys lets GEPP
 // skip zero multipliers and understates the dense per-point cost.
 func benchDenseSys(tb testing.TB, n, m, p int) *System {
