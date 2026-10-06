@@ -4,19 +4,55 @@ env:
   GO_VERSION: '1.27.1'
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goarch: amd64
+            machine: x86_64
+            backend: gonum.Implementation/amd64-asm
+          - os: macos-latest
+            goarch: arm64
+            machine: arm64
+            backend: gonum.Implementation/pure-go
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
+      - name: Assert native architecture and backend
+        env:
+          EXPECT_MACHINE: ${{ matrix.machine }}
+          CONTROLSYS_EXPECT_GOARCH: ${{ matrix.goarch }}
+          CONTROLSYS_EXPECT_BACKEND: ${{ matrix.backend }}
+        run: |
+          go version
+          go env GOOS GOARCH GOAMD64 GOARM64 CGO_ENABLED GOFLAGS
+          uname -a
+          test "$(go env GOARCH)" = "$CONTROLSYS_EXPECT_GOARCH"
+          test "$(uname -m)" = "$EXPECT_MACHINE"
+          if [ "$RUNNER_OS" = macOS ]; then
+            sysctl -n machdep.cpu.brand_string
+            test "$(sysctl -in sysctl.proc_translated)" != 1
+          else
+            lscpu | sed -n 's/^Model name: *//p'
+          fi
+          go test -count=1 -run '^TestNativeBackend$' -v .
       - run: go fix ./...
       - run: git diff --exit-code
       - run: test -z "$(gofmt -l .)" || (gofmt -l .; exit 1)
       - run: go vet ./...
+      - run: go install golang.org/x/perf/cmd/benchstat@v0.0.0-20260312031701-16a31bc5fbd0
       - run: go test -v -count=1 -race -timeout 25m ./...
   bench:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
