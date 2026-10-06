@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/cmplx"
 	"slices"
+	"sort"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -251,6 +252,8 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 // returns gain K (1×n) such that eig(A - B*K) = poles.
 //
 // Only valid for single-input systems (m=1). Numerically fragile for n > 10.
+// Where MATLAB acker warns, Acker returns ErrPoleAccuracy instead of K, using
+// the same 10% pole-error criterion as Place.
 func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	if err := requireFiniteDense("Acker", "A", A); err != nil {
 		return nil, err
@@ -334,7 +337,11 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 		kData[j] = s
 	}
 
-	return mat.NewDense(1, n, kData), nil
+	K := mat.NewDense(1, n, kData)
+	if e := placePoleError(A, B, K, poles); !(e <= placeMaxPoleError) {
+		return nil, fmt.Errorf("Acker: worst relative pole error %.3g: %w", e, ErrPoleAccuracy)
+	}
+	return K, nil
 }
 
 // Place computes the state-feedback gain K (m×n) such that eig(A − B·K)
@@ -345,10 +352,16 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 // chosen within its admissible subspace to keep the eigenvector matrix well
 // conditioned, so the poles are insensitive to perturbations in A and B and a
 // repeated pole is non-defective. When rank(B) = 1 the gain is unique and is
-// computed by Varga's Schur method, which is also the fallback when the robust
-// eigenvector matrix has 1-norm condition number above 1/√ε (an
-// uncontrollable mode makes it singular). A mode that no input can move
-// returns ErrUncontrollable.
+// computed by Varga's Schur method, which is also tried when the robust
+// eigenvector matrix is numerically singular (an uncontrollable mode makes it
+// so) or its poles are inaccurate; the more accurate gain is kept. A mode that
+// no input can move returns ErrUncontrollable.
+//
+// Where MATLAB place warns, Place returns ErrPoleAccuracy instead of K: when
+// no one-to-one pairing of the eigenvalues of A − B·K with the requested
+// poles keeps each within 0.1·|p| of its pole p (a zero pole uses the
+// largest |p| instead; MATLAB ignores zero poles). This signals an assignment too
+// ill-conditioned (huge gains, near-uncontrollable modes) to be trusted.
 //
 // Poles must come in conjugate pairs and len(poles) must equal n. As in MATLAB,
 // a pole repeated (exactly) more than rank(B) times returns
@@ -399,16 +412,129 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	if maxPoleMultiplicity(poles) > r {
 		return nil, fmt.Errorf("Place: pole multiplicity %d exceeds rank(B) = %d: %w", maxPoleMultiplicity(poles), r, ErrPoleMultiplicity)
 	}
+	var K *mat.Dense
+	kErr := math.Inf(1)
 	if r >= 2 {
-		if K := placeKNV(A, &svd, sv[:r], poles); K != nil {
-			return K, nil
+		if K = placeKNV(A, &svd, sv[:r], poles); K != nil {
+			if kErr = placePoleError(A, B, K, poles); kErr <= placeMaxPoleError {
+				return K, nil
+			}
 		}
 	}
-	K, err := placeSchur(A, B, poles)
+	Ks, err := placeSchur(A, B, poles)
 	if err != nil {
 		return nil, fmt.Errorf("Place: %w", err)
 	}
+	if sErr := placePoleError(A, B, Ks, poles); !(kErr <= sErr) {
+		K, kErr = Ks, sErr
+	}
+	if !(kErr <= placeMaxPoleError) {
+		return nil, fmt.Errorf("Place: worst relative pole error %.3g: %w", kErr, ErrPoleAccuracy)
+	}
 	return K, nil
+}
+
+const placeMaxPoleError = 0.1
+
+// placePoleError returns the smallest e such that the eigenvalues λ of
+// A − B·K can be paired one-to-one with the requested poles p so that every
+// |λ − p| ≤ e·|p|. A zero pole is scaled by the largest |p| instead, or by
+// ‖A‖₁ when all poles are zero.
+func placePoleError(A, B, K *mat.Dense, poles []complex128) float64 {
+	var cl mat.Dense
+	cl.Mul(B, K)
+	cl.Sub(A, &cl)
+	var eig mat.Eigen
+	if !eig.Factorize(&cl, mat.EigenNone) {
+		return math.Inf(1)
+	}
+	got := eig.Values(nil)
+	n := len(poles)
+	zeroScale := 0.0
+	for _, p := range poles {
+		zeroScale = math.Max(zeroScale, cmplx.Abs(p))
+	}
+	if zeroScale == 0 {
+		zeroScale = mat.Norm(A, 1)
+	}
+	if zeroScale == 0 {
+		zeroScale = 1
+	}
+	w := make([]float64, n*n)
+	lb := 0.0
+	for j, p := range poles {
+		d := cmplx.Abs(p)
+		if d == 0 {
+			d = zeroScale
+		}
+		row := w[j*n : (j+1)*n]
+		nearest := math.Inf(1)
+		for i, g := range got {
+			row[i] = cmplx.Abs(g-p) / d
+			nearest = math.Min(nearest, row[i])
+		}
+		lb = math.Max(lb, nearest)
+	}
+	if !(lb < math.Inf(1)) {
+		return math.Inf(1)
+	}
+	m := newPlaceMatcher(w, n)
+	if m.perfect(lb) {
+		return lb
+	}
+	cand := make([]float64, 0, len(w))
+	for _, v := range w {
+		if v > lb {
+			cand = append(cand, v)
+		}
+	}
+	slices.Sort(cand)
+	i := sort.Search(len(cand), func(i int) bool { return m.perfect(cand[i]) })
+	if i == len(cand) {
+		return math.Inf(1)
+	}
+	return cand[i]
+}
+
+// placeMatcher decides by augmenting paths whether the poles (rows of w) and
+// eigenvalues (columns) admit a perfect matching using only w ≤ th.
+type placeMatcher struct {
+	w     []float64
+	n     int
+	owner []int
+	seen  []bool
+}
+
+func newPlaceMatcher(w []float64, n int) *placeMatcher {
+	return &placeMatcher{w: w, n: n, owner: make([]int, n), seen: make([]bool, n)}
+}
+
+func (m *placeMatcher) perfect(th float64) bool {
+	for i := range m.owner {
+		m.owner[i] = -1
+	}
+	for j := range m.n {
+		clear(m.seen)
+		if !m.augment(j, th) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *placeMatcher) augment(j int, th float64) bool {
+	row := m.w[j*m.n : (j+1)*m.n]
+	for i, v := range row {
+		if v > th || m.seen[i] {
+			continue
+		}
+		m.seen[i] = true
+		if m.owner[i] < 0 || m.augment(m.owner[i], th) {
+			m.owner[i] = j
+			return true
+		}
+	}
+	return false
 }
 
 // placeSchur is Varga's Schur-based pole placement: deflating assignment of
@@ -877,7 +1003,7 @@ func maxPoleMultiplicity(poles []complex128) int {
 // replaces every eigenvector, or conjugate pair jointly, by the admissible
 // unit vector maximizing |det X| with the others fixed, read off the rows of
 // X⁻¹. X is kept in real form (Re x, Im x for a pair). It returns nil when
-// κ₁(X) ≥ 1/√ε.
+// κ₁(X) ≥ 1/ε.
 func placeKNV(A *mat.Dense, svd *mat.SVD, sv []float64, poles []complex128) *mat.Dense {
 	n, _ := A.Dims()
 	r := len(sv)
@@ -1015,7 +1141,7 @@ func placeKNV(A *mat.Dense, svd *mat.SVD, sv []float64, poles []complex128) *mat
 		}
 	}
 
-	xinv = ws.inverse(x, math.Sqrt(eps()))
+	xinv = ws.inverse(x, eps())
 	if xinv == nil {
 		return nil
 	}
@@ -1292,7 +1418,7 @@ func newPlaceKNVWork(n int) *placeKNVWork {
 	}
 }
 
-// inverse returns x⁻¹ in reused storage, or nil when κ₁(x) ≥ 1/√ε.
+// inverse returns x⁻¹ in reused storage, or nil when rcond₁(x) ≤ minRcond.
 func (w *placeKNVWork) inverse(x []float64, minRcond float64) []float64 {
 	n := w.n
 	copy(w.lu, x)
