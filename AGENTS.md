@@ -1,40 +1,31 @@
 # Controlsys
 
-For domain terminology, modeling assumptions, and project language, read
-`CONTEXT.md` before making design, documentation, or behavior changes.
+Read `CONTEXT.md` for domain terms and modeling assumptions before design, doc, or behavior changes.
 
 ## gopls MCP
 
-Use `gopls mcp -instructions` as the source of truth. `gopls mcp` runs detached over stdio and only sees saved files.
+When `gopls` MCP tools are available (`gopls mcp -instructions` is authoritative; it sees saved files only):
+start with `go_workspace`, run `go_symbol_references` before changing a symbol definition, and
+`go_diagnostics` on edited Go files before tests (omit `files` for the workspace; no Markdown).
+Run `go_vulncheck` if `go.mod` changes. If the tools are not exposed, say so and use the CLI.
 
-When `gopls` MCP tools are available for Go work, start with `go_workspace`, use `go_symbol_references` before changing symbol definitions, and run `go_diagnostics` on edited Go files before tests. Omit `files` for workspace diagnostics; do not pass Markdown files. If `go.mod` changes, run `go_vulncheck`.
-
-If the MCP tools are not exposed in Codex, say so and use CLI checks instead.
-
-## Static Checks
-
-Run `go fix` the same way you run `go vet`:
+## Checks
 
 ```bash
 go fix ./...
 go vet ./...
+go test -v -count=1 ./...
 ```
 
-## Build & Test
+## Conventions
 
-```bash
-go test -v -count=1
-```
-
-## Key Conventions
-
-- gonum LAPACK uses **row-major** flat arrays (`a[row*n+col]`), not column-major like Fortran
-- Always test with non-symmetric A matrices (diagonal A hides transposition bugs)
-- No inline comments unless logic is counter-intuitive
+- gonum LAPACK is **row-major** (`a[row*n+col]`), unlike Fortran.
+- Test with non-symmetric A; diagonal A hides transposition bugs.
+- No inline comments unless logic is counter-intuitive.
 
 ## Performance
 
-- Always benchmark before/after with `go test -bench=. -benchmem` and `benchstat`
-- Prefer `m.RawMatrix().Data` with stride-aware indexing over `At(i,j)`/`Set(i,j)`
-- Use `copy()` on raw slices for submatrix extraction, not element-wise loops
-- Pre-allocate buffers outside loops; reuse LAPACK work arrays across calls
+- Compare revisions with `go run ./scripts/benchcmp -base <rev> -candidate .`
+  (alternating rounds + `benchstat`; flags in its doc comment).
+- Use `m.RawMatrix().Data` with stride-aware indexing, not `At`/`Set`; `copy()` raw slices for submatrices.
+- Pre-allocate buffers outside loops; reuse LAPACK work arrays across calls.
