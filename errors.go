@@ -3,8 +3,7 @@ package controlsys
 import "errors"
 
 // Sentinel errors. Every error returned by an exported operation wraps exactly
-// one of these with %w, so callers can branch with errors.Is; see CONTEXT.md
-// "Error conventions" for the message format and the choice between them.
+// one of these with %w, so callers can branch with errors.Is.
 var (
 	// ErrInvalidArgument reports an argument that is wrong regardless of the
 	// model's shape: a nil model, function or required matrix, a NaN/Inf value,

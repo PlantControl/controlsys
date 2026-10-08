@@ -1,7 +1,5 @@
 # Controlsys
 
-Read `CONTEXT.md` for domain terms and modeling assumptions before design, doc, or behavior changes.
-
 ## gopls MCP
 
 When `gopls` MCP tools are available (`gopls mcp -instructions` is authoritative; it sees saved files only):

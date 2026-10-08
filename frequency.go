@@ -382,8 +382,8 @@ func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
 // with Q, one refinement step), so dense is kept while sigma/nw + rho >= 1.
 // The constants depend on Gonum's kernels (backend_asm.go, backend_noasm.go):
 // pure Go has a large setup and rho near c/n, so n <= 0.9c stays dense;
-// amd64 assembly switches for n > 0.6c, after 3-6 points once n >= c
-// (docs/benchmarks/frequency-dispatch). When A is already upper Hessenberg,
+// amd64 assembly switches for n > 0.6c, after 3-6 points once n >= c.
+// When A is already upper Hessenberg,
 // GEPP skips the zero multipliers, costs O(n²) per point like the sweep, and
 // needs no orthogonal reduction or refinement.
 func (e frequencyEvaluator) useDenseSweep(nw int) bool {

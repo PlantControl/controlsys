@@ -12,7 +12,7 @@
 
 Go control-system toolbox for modeling, analyzing, transforming, and designing continuous-time and discrete-time linear time-invariant models.
 
-The state-space model is the fundamental representation. Transfer-function, zero-pole-gain, frequency-response data, model-array, generalized-model, and tunable-block workflows convert to or build on that core representation where needed. See [docs/codebase-interface-diagram.md](docs/codebase-interface-diagram.md) for the current interface map.
+The state-space model is the fundamental representation. Transfer-function, zero-pole-gain, frequency-response data, model-array, generalized-model, and tunable-block workflows convert to or build on that core representation where needed.
 
 ## Install
 
@@ -20,7 +20,7 @@ The state-space model is the fundamental representation. Transfer-function, zero
 go get plantcontrol.org/v2/controlsys/v2
 ```
 
-Formerly `github.com/jamestjsp/controlsys` (releases up to v1.8.0). From v1.9.0 the module path is `plantcontrol.org/v1/controlsys`; for v2.0.0–v2.2.0 it is `plantcontrol.org/v1/controlsys/v2`; from v2.3.0 it is `plantcontrol.org/v2/controlsys/v2`. See [CHANGELOG.md](CHANGELOG.md) for the v2 migration.
+Formerly `github.com/jamestjsp/controlsys` (releases up to v1.8.0). From v1.9.0 the module path is `plantcontrol.org/v1/controlsys`; for v2.0.0–v2.2.0 it is `plantcontrol.org/v1/controlsys/v2`; from v2.3.0 it is `plantcontrol.org/v2/controlsys/v2`.
 
 Linear algebra uses [`plantcontrol.org/v1/gonum`](https://github.com/PlantControl/gonum), PlantControl's Gonum fork with additional LAPACK routines. It is an ordinary module dependency; no `replace` directive is needed.
 
@@ -32,7 +32,6 @@ This package is intended to be usable in production control and estimation code,
 - Validate mission-critical models against an external reference, especially for ill-conditioned realizations and delay-heavy systems.
 - `System` values are mutable. Use `Copy` before sharing a model across goroutines that may mutate names, delays, notes, or other receiver state. Use `Validate` after direct field edits.
 - The repository CI runs `go fix ./...`, `go vet ./...`, `go test -v -count=1 -race ./...`, and a downstream consumer import check; those are the recommended baseline checks for downstream integrations.
-- Public API and mutation semantics are tracked in [docs/api-mutation-audit.md](docs/api-mutation-audit.md).
 
 ## Features
 
