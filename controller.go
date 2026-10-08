@@ -106,7 +106,7 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	if Ea := augmentedDescriptor(sys.E, p); Ea != nil {
 		o := RiccatiOpts{E: Ea}
 		if opts != nil {
-			o.S, o.Workspace = opts.S, opts.Workspace
+			o.S, o.Workspace, o.NoScaling = opts.S, opts.Workspace, opts.NoScaling
 		}
 		opts = &o
 	}
@@ -242,7 +242,7 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 
 	dopts := &RiccatiOpts{S: mat.NewDense(n, m, ndData)}
 	if opts != nil {
-		dopts.Workspace = opts.Workspace
+		dopts.Workspace, dopts.NoScaling = opts.Workspace, opts.NoScaling
 	}
 	return Dlqr(mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData), mat.NewDense(n, n, qdData), mat.NewDense(m, m, rdData), dopts)
 }

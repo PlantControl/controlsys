@@ -176,7 +176,7 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 		ropts.E = mat.DenseCopyOf(E.T())
 	}
 	if opts != nil {
-		ropts.Workspace = opts.Workspace
+		ropts.Workspace, ropts.NoScaling = opts.Workspace, opts.NoScaling
 	}
 	var res *RiccatiResult
 	var err error

@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"fmt"
+	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -16,6 +17,8 @@ type riccatiProblem struct {
 	ws *RiccatiWorkspace
 	n  int
 	m  int
+	// t is the state scaling x̂ = diag(t)·x of A, B, Q, S, E, or nil.
+	t []float64
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -119,4 +122,97 @@ func newLyapunovProblem(A, Q *mat.Dense, opts *LyapunovOpts) (lyapunovProblem, e
 		ws = opts.Workspace
 	}
 	return lyapunovProblem{A: A, Q: Q, ws: ws, n: n}, nil
+}
+
+// scale replaces A, B, Q, S and E by their images under the exact
+// power-of-two state scaling x̂ = T·x that balances [|A|+|E| B; C ·], with
+// Q = C'C represented by the row √diag(Q) and S by S' (both transform like
+// C): Â = TAT⁻¹, Ê = TET⁻¹, B̂ = TB, Q̂ = T⁻¹QT⁻¹, Ŝ = T⁻¹S. R is unchanged.
+func (problem *riccatiProblem) scale(opts *RiccatiOpts) {
+	if opts != nil && opts.NoScaling {
+		return
+	}
+	n, m, ws := problem.n, problem.m, problem.ws
+	p := 1
+	if problem.S != nil {
+		p += m
+	}
+	br := balancedRealization{n: n, m: m, p: p,
+		a: ws.scaledA[:n*n], b: ws.scaledB[:n*m], c: ws.scaleProxy[:p*n]}
+	aRaw := problem.A.RawMatrix()
+	copyStrided(br.a, n, aRaw.Data, aRaw.Stride, n, n)
+	bRaw := problem.B.RawMatrix()
+	copyStrided(br.b, m, bRaw.Data, bRaw.Stride, n, m)
+	if problem.E != nil {
+		br.e = ws.scaledE[:n*n]
+		eRaw := problem.E.RawMatrix()
+		copyStrided(br.e, n, eRaw.Data, eRaw.Stride, n, n)
+	}
+	qRaw := problem.Q.RawMatrix()
+	for i := range n {
+		br.c[i] = math.Sqrt(max(0, qRaw.Data[i*qRaw.Stride+i]))
+	}
+	if problem.S != nil {
+		sRaw := problem.S.RawMatrix()
+		for j := range m {
+			for i := range n {
+				br.c[(1+j)*n+i] = sRaw.Data[i*sRaw.Stride+j]
+			}
+		}
+	}
+	t := ws.scaleT[:n]
+	for i := range t {
+		t[i] = 1
+	}
+	br.balance(t)
+	identity := true
+	for _, v := range t {
+		identity = identity && v == 1
+	}
+	if identity {
+		return
+	}
+
+	q := ws.scaledQ[:n*n]
+	for i := range n {
+		for j := range n {
+			q[i*n+j] = qRaw.Data[i*qRaw.Stride+j] / (t[i] * t[j])
+		}
+	}
+	problem.A = mat.NewDense(n, n, br.a)
+	problem.B = mat.NewDense(n, m, br.b)
+	problem.Q = mat.NewDense(n, n, q)
+	if problem.E != nil {
+		problem.E = mat.NewDense(n, n, br.e)
+	}
+	if problem.S != nil {
+		sRaw := problem.S.RawMatrix()
+		s := ws.scaledS[:n*m]
+		for i := range n {
+			for j := range m {
+				s[i*m+j] = sRaw.Data[i*sRaw.Stride+j] / t[i]
+			}
+		}
+		problem.S = mat.NewDense(n, m, s)
+	}
+	problem.t = t
+}
+
+// result maps the scaled solution back: X = T·X̂·T, K = K̂·T.
+func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd float64) *RiccatiResult {
+	if t := problem.t; t != nil {
+		n, m := problem.n, problem.m
+		x, k := X.RawMatrix(), K.RawMatrix()
+		for i := range n {
+			for j := range n {
+				x.Data[i*x.Stride+j] *= t[i] * t[j]
+			}
+		}
+		for i := range m {
+			for j := range n {
+				k.Data[i*k.Stride+j] *= t[j]
+			}
+		}
+	}
+	return &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd}
 }
