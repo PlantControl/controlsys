@@ -47,13 +47,20 @@ type RiccatiWorkspace struct {
 	btx         []float64
 	rbar        []float64
 	iwork       []int
+	scaleT      []float64
+	scaledA     []float64
+	scaledE     []float64
+	scaledQ     []float64
+	scaledB     []float64
+	scaledS     []float64
+	scaleProxy  []float64
 }
 
 // NewRiccatiWorkspace returns a workspace for problems with up to n states
 // and m inputs.
 func NewRiccatiWorkspace(n, m int) *RiccatiWorkspace {
 	nn := 2 * n
-	return &RiccatiWorkspace{
+	ws := &RiccatiWorkspace{
 		n:           n,
 		m:           m,
 		rChol:       make([]float64, m*m),
@@ -84,6 +91,14 @@ func NewRiccatiWorkspace(n, m int) *RiccatiWorkspace {
 		rbar:        make([]float64, m*m),
 		iwork:       make([]int, n),
 	}
+	scale := make([]float64, n+3*n*n+2*n*m+(1+m)*n)
+	ws.scaleT, scale = scale[:n:n], scale[n:]
+	ws.scaledA, scale = scale[:n*n:n*n], scale[n*n:]
+	ws.scaledE, scale = scale[:n*n:n*n], scale[n*n:]
+	ws.scaledQ, scale = scale[:n*n:n*n], scale[n*n:]
+	ws.scaledB, scale = scale[:n*m:n*m], scale[n*m:]
+	ws.scaledS, ws.scaleProxy = scale[:n*m:n*m], scale[n*m:]
+	return ws
 }
 
 // RiccatiOpts holds the optional arguments of Care and Dare; nil means none.
@@ -98,6 +113,9 @@ type RiccatiOpts struct {
 	// until the next call that reuses the same workspace, and it must not be
 	// shared across goroutines.
 	Workspace *RiccatiWorkspace
+	// NoScaling disables the default power-of-two state scaling, as the
+	// MATLAB icare/idare 'noscaling' option.
+	NoScaling bool
 }
 
 // RiccatiResult is the stabilizing solution of Care or Dare.
@@ -110,7 +128,8 @@ type RiccatiResult struct {
 	Eig []complex128
 	// Rcnd is the reciprocal 1-norm condition estimate of U11, where
 	// [U11; U21] spans the stable invariant subspace and X = U21·U11⁻¹. A
-	// tiny Rcnd means X may be inaccurate.
+	// tiny Rcnd means X may be inaccurate. Unless opts.NoScaling is set, U11
+	// is that of the state-scaled problem.
 	Rcnd float64
 }
 
@@ -168,6 +187,10 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // E'XE solves the Care of the explicit model (E⁻¹A, E⁻¹B). A singular E
 // returns ErrDescriptorSingular. Nil or NaN/Inf arguments return
 // ErrInvalidArgument.
+//
+// As MATLAB icare, Care first balances the states by an exact power-of-two
+// diagonal scaling, so X, K and Eig do not depend on the units of x;
+// opts.NoScaling disables it.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -188,7 +211,8 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := problem.ws.fits(n, m); err != nil {
 		return nil, err
 	}
-	S, ws := problem.S, problem.ws
+	problem.scale(opts)
+	A, B, Q, S, ws := problem.A, problem.B, problem.Q, problem.S, problem.ws
 
 	// Cholesky factor R
 	rChol := ws.rChol[:m*m]
@@ -322,7 +346,7 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	impl.Dpotrs(blas.Upper, m, n, rChol, m, kData, n)
 	K := mat.NewDense(m, n, kData)
 
-	return &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd}, nil
+	return problem.result(X, K, eig, rcnd), nil
 }
 
 // Dare solves the discrete algebraic Riccati equation:
@@ -344,6 +368,9 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // (A-BK, E). E'XE solves the Dare of the explicit model (E⁻¹A, E⁻¹B). A
 // singular E returns ErrDescriptorSingular. Nil or NaN/Inf arguments return
 // ErrInvalidArgument.
+//
+// Dare scales the states as Care does (MATLAB idare); opts.NoScaling
+// disables it.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -364,7 +391,8 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := problem.ws.fits(n, m); err != nil {
 		return nil, err
 	}
-	S, ws := problem.S, problem.ws
+	problem.scale(opts)
+	A, B, S, ws := problem.A, problem.B, problem.S, problem.ws
 
 	// Cholesky factor R
 	rChol := ws.rChol[:m*m]
@@ -428,7 +456,7 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	impl.Dpotrs(blas.Upper, m, n, rbar, m, kData, n)
 	K := mat.NewDense(m, n, kData)
 
-	return &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd}, nil
+	return problem.result(X, K, eig, rcnd), nil
 }
 
 // stabilizingSolution returns X = U21*(E*U11)⁻¹ from the stable subspace
@@ -507,7 +535,7 @@ func (problem riccatiProblem) descriptorCare() (*RiccatiResult, error) {
 		}
 	}
 	impl.Dpotrs(blas.Upper, m, n, ws.rChol[:m*m], m, kData, n)
-	return &RiccatiResult{X: X, K: mat.NewDense(m, n, kData), Eig: eig, Rcnd: rcnd}, nil
+	return problem.result(X, mat.NewDense(m, n, kData), eig, rcnd), nil
 }
 
 type riccatiSubspace struct {
