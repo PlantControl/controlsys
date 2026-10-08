@@ -76,7 +76,7 @@ func TestSsbal_Empty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// T cannot be formed for n = 0 (CONTEXT.md zero-dimension models).
+	// T cannot be formed for n = 0.
 	if _, err := Ssbal(sys); !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("static gain Ssbal: err = %v, want ErrDimensionMismatch", err)
 	}

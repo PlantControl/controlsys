@@ -1,3 +1,0 @@
-# Keep the Core LTI-First and Handle Nonlinearity Locally
-
-Controlsys is a control-system toolbox centered on linear time-invariant models because that is the representation used by most analysis, interconnection, synthesis, and reduction routines in the library. Nonlinear behavior is supported only through pragmatic local approximation workflows such as linearization around an operating point and extended Kalman filtering, rather than expanding the package into a general nonlinear control toolbox. This keeps the core model language, algorithms, and numerical expectations coherent while still supporting common engineering practice for nonlinear systems.
