@@ -625,68 +625,24 @@ func discretizeFOHFractionalChannel(cont *System, dt, tau float64) (*System, err
 }
 
 func discretizeDelayedChannels(sys *System, dt float64, opts C2DOptions) (*System, error) {
-	n, m, p := sys.Dims()
+	_, m, p := sys.Dims()
 	if sys.HasInternalDelay() {
 		return nil, ErrFeedbackDelay
 	}
 	if m == 0 || p == 0 {
 		return nil, ErrDimensionMismatch
 	}
-	var combined *System
+	stack := conversionChannelStack{m: m, p: p}
 	for i := range p {
 		for j := range m {
-			tau := 0.
-			if len(sys.InputDelay) > 0 {
-				tau += sys.InputDelay[j]
-			}
-			if len(sys.OutputDelay) > 0 {
-				tau += sys.OutputDelay[i]
-			}
-			if sys.Delay != nil {
-				tau += sys.Delay.At(i, j)
-			}
-			cont := &System{A: denseCopy(sys.A), B: newDense(n, 1), C: newDense(1, n), D: newDense(1, 1)}
-			for k := range n {
-				cont.B.Set(k, 0, sys.B.At(k, j))
-				cont.C.Set(0, k, sys.C.At(i, k))
-			}
-			cont.D.Set(0, 0, sys.D.At(i, j))
-			var disc *System
-			var err error
-			switch opts.Method {
-			case C2DMethodZOH:
-				disc, err = cont.discretizeZOH(dt)
-				if err == nil {
-					cont.InputDelay = []float64{tau}
-					disc, err = discretizeZOHExternal(cont, disc, dt)
-				}
-			case C2DMethodFOH:
-				disc, err = discretizeFOHFractionalChannel(cont, dt, tau)
-			case C2DMethodImpulse:
-				disc, err = discretizeImpulseDelayedChannel(cont, dt, tau)
-			default:
-				return nil, fmt.Errorf("method %q with fractional channel delays: %w", opts.Method, ErrOptionUnsupported)
-			}
+			disc, err := discretizeConversionChannel(sys, i, j, dt, opts)
 			if err != nil {
 				return nil, err
 			}
-			if disc.HasDelay() {
-				disc, err = disc.PullDelaysToLFT()
-				if err != nil {
-					return nil, err
-				}
-			}
-			expanded := embedConversionChannel(disc, m, p, i, j)
-			if combined == nil {
-				combined = expanded
-			} else {
-				combined, err = Parallel(combined, expanded)
-				if err != nil {
-					return nil, err
-				}
-			}
+			stack.add(disc, i, j)
 		}
 	}
+	combined := stack.system()
 	propagateIONames(combined, sys)
 	if opts.DelayModeling == C2DDelayModelingState {
 		return absorbConversionInternal(combined)
@@ -694,21 +650,121 @@ func discretizeDelayedChannels(sys *System, dt float64, opts C2DOptions) (*Syste
 	return combined, nil
 }
 
-func embedConversionChannel(sys *System, m, p, output, input int) *System {
+// discretizeConversionChannel discretizes the SISO path from input j to
+// output i of sys with its total I/O delay, delays pulled into LFT form.
+func discretizeConversionChannel(sys *System, i, j int, dt float64, opts C2DOptions) (*System, error) {
 	n, _, _ := sys.Dims()
-	out := &System{A: denseCopy(sys.A), B: newDense(n, m), C: newDense(p, n), D: newDense(p, m), Dt: sys.Dt}
-	for i := range n {
-		out.B.Set(i, input, sys.B.At(i, 0))
-		out.C.Set(output, i, sys.C.At(0, i))
+	tau := 0.
+	if len(sys.InputDelay) > 0 {
+		tau += sys.InputDelay[j]
 	}
-	out.D.Set(output, input, sys.D.At(0, 0))
-	if sys.LFT != nil {
-		count := len(sys.LFT.Tau)
-		out.LFT = &LFTDelay{Tau: append([]float64(nil), sys.LFT.Tau...), B2: denseCopy(sys.LFT.B2), C2: denseCopy(sys.LFT.C2), D12: newDense(p, count), D21: newDense(count, m), D22: denseCopy(sys.LFT.D22)}
-		for k := range count {
-			out.LFT.D12.Set(output, k, sys.LFT.D12.At(0, k))
-			out.LFT.D21.Set(k, input, sys.LFT.D21.At(k, 0))
+	if len(sys.OutputDelay) > 0 {
+		tau += sys.OutputDelay[i]
+	}
+	if sys.Delay != nil {
+		tau += sys.Delay.At(i, j)
+	}
+	cont := &System{A: denseCopy(sys.A), B: newDense(n, 1), C: newDense(1, n), D: newDense(1, 1)}
+	for k := range n {
+		cont.B.Set(k, 0, sys.B.At(k, j))
+		cont.C.Set(0, k, sys.C.At(i, k))
+	}
+	cont.D.Set(0, 0, sys.D.At(i, j))
+	var disc *System
+	var err error
+	switch opts.Method {
+	case C2DMethodZOH:
+		disc, err = cont.discretizeZOH(dt)
+		if err == nil {
+			cont.InputDelay = []float64{tau}
+			disc, err = discretizeZOHExternal(cont, disc, dt)
 		}
+	case C2DMethodFOH:
+		disc, err = discretizeFOHFractionalChannel(cont, dt, tau)
+	case C2DMethodImpulse:
+		disc, err = discretizeImpulseDelayedChannel(cont, dt, tau)
+	default:
+		return nil, fmt.Errorf("method %q with fractional channel delays: %w", opts.Method, ErrOptionUnsupported)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if disc.HasDelay() {
+		disc, err = disc.PullDelaysToLFT()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return disc, nil
+}
+
+// conversionChannelStack assembles delay-free-I/O SISO channel models, each
+// optionally carrying LFT internal delays, into the p×m model that folding
+// Parallel over their embedConversionChannel embeddings in add order gives,
+// without the quadratic copying of the fold.
+type conversionChannelStack struct {
+	m, p  int
+	parts []conversionChannel
+}
+
+type conversionChannel struct {
+	sys           *System
+	output, input int
+}
+
+func (s *conversionChannelStack) add(sys *System, output, input int) {
+	s.parts = append(s.parts, conversionChannel{sys: sys, output: output, input: input})
+}
+
+func (s *conversionChannelStack) system() *System {
+	m, p := s.m, s.p
+	n, count := 0, 0
+	for _, part := range s.parts {
+		ni, _, _ := part.sys.Dims()
+		n += ni
+		count += part.sys.internalDelayCount()
+	}
+	out := &System{A: newDense(n, n), B: newDense(n, m), C: newDense(p, n), D: newDense(p, m), Dt: s.parts[0].sys.Dt}
+	if count > 0 || (len(s.parts) == 1 && s.parts[0].sys.LFT != nil) {
+		out.LFT = &LFTDelay{B2: newDense(n, count), C2: newDense(count, n), D12: newDense(p, count), D21: newDense(count, m), D22: newDense(count, count)}
+		if count > 0 {
+			out.LFT.Tau = make([]float64, 0, count)
+		}
+	}
+	d := out.D.RawMatrix()
+	offset, delayOffset := 0, 0
+	for _, part := range s.parts {
+		ch := part.sys
+		ni, _, _ := ch.Dims()
+		if ni > 0 {
+			setBlock(out.A, offset, offset, ch.A)
+			for k := range ni {
+				out.B.Set(offset+k, part.input, ch.B.At(k, 0))
+				out.C.Set(part.output, offset+k, ch.C.At(0, k))
+			}
+		}
+		if len(s.parts) == 1 {
+			d.Data[part.output*d.Stride+part.input] = ch.D.At(0, 0)
+		} else {
+			d.Data[part.output*d.Stride+part.input] += ch.D.At(0, 0)
+		}
+		if ch.LFT != nil && out.LFT != nil {
+			ci := len(ch.LFT.Tau)
+			out.LFT.Tau = append(out.LFT.Tau, ch.LFT.Tau...)
+			if ci > 0 {
+				if ni > 0 {
+					setBlock(out.LFT.B2, offset, delayOffset, ch.LFT.B2)
+					setBlock(out.LFT.C2, delayOffset, offset, ch.LFT.C2)
+				}
+				setBlock(out.LFT.D22, delayOffset, delayOffset, ch.LFT.D22)
+				for k := range ci {
+					out.LFT.D12.Set(part.output, delayOffset+k, ch.LFT.D12.At(0, k))
+					out.LFT.D21.Set(delayOffset+k, part.input, ch.LFT.D21.At(k, 0))
+				}
+			}
+			delayOffset += ci
+		}
+		offset += ni
 	}
 	return out
 }
