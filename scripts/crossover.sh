@@ -42,4 +42,5 @@ cat "$out"/round-*.txt >"$out/raw.txt"
 rm "$out/controlsys.test"
 benchstat -col /path -row /n,/m,/w,/a -filter '.unit:sec/op' "$out/raw.txt" >"$out/benchstat.txt"
 benchstat -col /path -row /n,/m,/w,/a -format csv "$out/raw.txt" >"$out/benchstat.csv" 2>/dev/null
+awk -f "$root/scripts/crossover_paired.awk" "$out/raw.txt" >"$out/paired.txt"
 echo "crossover: $out"

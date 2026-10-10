@@ -119,8 +119,14 @@ jobs:
         include:
           - os: ubuntu-latest
             goarch: amd64
+            round-scale: 1
+            benchtime: ''
+          # macOS runners drift 5-25% between rounds; more, shorter rounds
+          # tighten the paired medians in paired.txt (ergo G7CDEX).
           - os: macos-latest
             goarch: arm64
+            round-scale: 3
+            benchtime: 50ms
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -135,16 +141,21 @@ jobs:
         env:
           CONTROLSYS_EXPECT_GOARCH: ${{ matrix.goarch }}
           ROUNDS: ${{ inputs.rounds || '6' }}
-          BENCHTIME: ${{ inputs.benchtime || '100ms' }}
+          ROUND_SCALE: ${{ matrix.round-scale }}
+          BENCHTIME: ${{ matrix.benchtime || inputs.benchtime || '100ms' }}
         run: |
           go test -count=1 -run '^TestNativeBackend$' .
-          scripts/crossover.sh "$RUNNER_TEMP/crossover" "$ROUNDS" "$BENCHTIME"
+          scripts/crossover.sh "$RUNNER_TEMP/crossover" "$((ROUNDS * ROUND_SCALE))" "$BENCHTIME"
       - if: always()
         run: |
           {
             echo "## Frequency dispatch crossover (${{ matrix.goarch }})"
             echo '```'
             cat "$RUNNER_TEMP/crossover/environment.txt" "$RUNNER_TEMP/crossover/benchstat.txt"
+            echo '```'
+            echo "### Paired per-round medians (cancel runner drift; use these for dispatch decisions)"
+            echo '```'
+            cat "$RUNNER_TEMP/crossover/paired.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY" || true
       - if: always()
