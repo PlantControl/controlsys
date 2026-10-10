@@ -146,6 +146,10 @@ jobs:
             echo '```'
             cat "$RUNNER_TEMP/crossover/environment.txt" "$RUNNER_TEMP/crossover/benchstat.txt"
             echo '```'
+            echo "### Paired per-round medians (cancel runner drift; arm64 still ±5-14%, advisory only)"
+            echo '```'
+            cat "$RUNNER_TEMP/crossover/paired.txt"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY" || true
       - if: always()
         uses: actions/upload-artifact@v4
