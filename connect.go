@@ -658,6 +658,25 @@ func mulDense(a, b *mat.Dense) *mat.Dense {
 	return r
 }
 
+// mulInto returns a·b, overwriting dst when it already holds a product of the
+// same shape, as when a loop forms the same products repeatedly.
+func mulInto(dst, a, b *mat.Dense) *mat.Dense {
+	if dst == nil || dst.IsEmpty() {
+		return mulDense(a, b)
+	}
+	dst.Mul(a, b)
+	return dst
+}
+
+// transposeInto returns a copy of aᵀ, overwriting dst when it already holds one.
+func transposeInto(dst, a *mat.Dense) *mat.Dense {
+	if dst == nil || dst.IsEmpty() {
+		return mat.DenseCopyOf(a.T())
+	}
+	dst.Copy(a.T())
+	return dst
+}
+
 func seriesLFT(sys1, sys2 *System) (*System, error) {
 	savedInput1 := copySliceOrNil(sys1.InputDelay)
 	savedOutput2 := copySliceOrNil(sys2.OutputDelay)

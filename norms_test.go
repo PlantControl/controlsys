@@ -1953,7 +1953,7 @@ func TestHinfNorm_NearOptimalLoopsMatchOracle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	atEdge, err := hinfSynD11Zero(gp, 0.5074089765548706)
+	atEdge, err := hinfSynD11Zero(gp, newHinfD11ZeroRiccatis(gp), 0.5074089765548706)
 	if err != nil {
 		t.Fatal(err)
 	}

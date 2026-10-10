@@ -22,6 +22,27 @@ type hinfGeneralPlant struct {
 	C1tC1, B1B1t   *mat.Dense
 	R12inv, R21inv *mat.Dense
 	gammaLB        float64
+	rw             *hinfGeneralRiccatiWork
+}
+
+// hinfGeneralRiccatiWork holds the products riccatis forms at every γ.
+type hinfGeneralRiccatiWork struct {
+	ham                    *hamiltonianRiccatiWork
+	D1dtC1T, B1Dd1tT       *mat.Dense
+	BRinv, Ax, Gx, RD, Qx  *mat.Dense
+	BDRt, Ay, AyT, RtC, Gy *mat.Dense
+	Qy, XY                 *mat.Dense
+}
+
+func (hp *hinfGeneralPlant) riccatiWork() *hinfGeneralRiccatiWork {
+	if hp.rw == nil {
+		hp.rw = &hinfGeneralRiccatiWork{
+			ham:     newHamiltonianRiccatiWork(hp.gp.n),
+			D1dtC1T: mat.DenseCopyOf(hp.D1dtC1.T()),
+			B1Dd1tT: mat.DenseCopyOf(hp.B1Dd1t.T()),
+		}
+	}
+	return hp.rw
 }
 
 func newHinfGeneralPlant(gp *generalizedPlantPartition) (*hinfGeneralPlant, error) {
@@ -162,7 +183,6 @@ func shiftedInverse(G *mat.Dense, k int, gamma float64) (*mat.Dense, error) {
 // returns X, Y together with R^-1 and R~^-1.
 func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dense, err error) {
 	gp := hp.gp
-	n := gp.n
 	if !(gamma > hp.gammaLB) {
 		return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
@@ -171,14 +191,17 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
-	BRinv := mulDense(hp.B, Rinv)
-	Ax := mulDense(BRinv, hp.D1dtC1)
-	Ax.Sub(gp.A, Ax)
-	Gx := mulDense(BRinv, hp.BT)
-	Gx.Scale(-1, Gx)
-	Qx := mulDense(mat.DenseCopyOf(hp.D1dtC1.T()), mulDense(Rinv, hp.D1dtC1))
-	Qx.Sub(hp.C1tC1, Qx)
-	X, err = solveHamiltonianRiccati(hamiltonian(Ax, Gx, Qx, n), n)
+	rw := hp.riccatiWork()
+	rw.BRinv = mulInto(rw.BRinv, hp.B, Rinv)
+	rw.Ax = mulInto(rw.Ax, rw.BRinv, hp.D1dtC1)
+	rw.Ax.Sub(gp.A, rw.Ax)
+	rw.Gx = mulInto(rw.Gx, rw.BRinv, hp.BT)
+	rw.Gx.Scale(-1, rw.Gx)
+	rw.RD = mulInto(rw.RD, Rinv, hp.D1dtC1)
+	rw.Qx = mulInto(rw.Qx, rw.D1dtC1T, rw.RD)
+	rw.Qx.Sub(hp.C1tC1, rw.Qx)
+	rw.ham.setHamiltonian(rw.Ax, rw.Gx, rw.Qx)
+	X, err = rw.ham.solve()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -187,20 +210,24 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
-	B1Dd1tRtinv := mulDense(hp.B1Dd1t, Rtinv)
-	Ay := mulDense(B1Dd1tRtinv, hp.C)
-	Ay.Sub(gp.A, Ay)
-	Gy := mulDense(hp.CT, mulDense(Rtinv, hp.C))
-	Gy.Scale(-1, Gy)
-	Qy := mulDense(B1Dd1tRtinv, mat.DenseCopyOf(hp.B1Dd1t.T()))
-	Qy.Sub(hp.B1B1t, Qy)
-	Y, err = solveHamiltonianRiccati(hamiltonian(mat.DenseCopyOf(Ay.T()), Gy, Qy, n), n)
+	rw.BDRt = mulInto(rw.BDRt, hp.B1Dd1t, Rtinv)
+	rw.Ay = mulInto(rw.Ay, rw.BDRt, hp.C)
+	rw.Ay.Sub(gp.A, rw.Ay)
+	rw.RtC = mulInto(rw.RtC, Rtinv, hp.C)
+	rw.Gy = mulInto(rw.Gy, hp.CT, rw.RtC)
+	rw.Gy.Scale(-1, rw.Gy)
+	rw.Qy = mulInto(rw.Qy, rw.BDRt, rw.B1Dd1tT)
+	rw.Qy.Sub(hp.B1B1t, rw.Qy)
+	rw.AyT = transposeInto(rw.AyT, rw.Ay)
+	rw.ham.setHamiltonian(rw.AyT, rw.Gy, rw.Qy)
+	Y, err = rw.ham.solve()
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 
+	rw.XY = mulInto(rw.XY, X, Y)
 	var eig mat.Eigen
-	if !eig.Factorize(mulDense(X, Y), mat.EigenNone) {
+	if !eig.Factorize(rw.XY, mat.EigenNone) {
 		return nil, nil, nil, nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
 	g2 := gamma * gamma
@@ -210,20 +237,6 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 		}
 	}
 	return X, Y, Rinv, Rtinv, nil
-}
-
-// hamiltonian returns [F G; -Q -F'].
-func hamiltonian(F, G, Q *mat.Dense, n int) *mat.Dense {
-	H := mat.NewDense(2*n, 2*n, nil)
-	setBlock(H, 0, 0, F)
-	setBlock(H, 0, n, G)
-	negQ := mat.NewDense(n, n, nil)
-	negQ.Scale(-1, Q)
-	setBlock(H, n, 0, negQ)
-	negFt := mat.NewDense(n, n, nil)
-	negFt.Scale(-1, F.T())
-	setBlock(H, n, n, negFt)
-	return H
 }
 
 // centralD11 returns the central controller feedthrough
