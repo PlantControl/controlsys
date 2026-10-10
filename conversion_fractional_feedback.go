@@ -155,7 +155,7 @@ func discretizeFOHInputFractions(cont *System, dt float64) (*System, error) {
 
 func discretizeHoldFeedbackPaths(sys *System, input, output []float64, dt float64, opts C2DOptions) (*System, error) {
 	n, m, p := sys.Dims()
-	var combined *System
+	stack := conversionChannelStack{m: m, p: p}
 	for i := range p {
 		for j := range m {
 			channel := &System{A: denseCopy(sys.A), B: newDense(n, 1), C: newDense(1, n), D: newDense(1, 1)}
@@ -187,17 +187,10 @@ func discretizeHoldFeedbackPaths(sys *System, input, output []float64, dt float6
 					return nil, err
 				}
 			}
-			expanded := embedConversionChannel(disc, m, p, i, j)
-			if combined == nil {
-				combined = expanded
-			} else {
-				combined, err = Parallel(combined, expanded)
-				if err != nil {
-					return nil, err
-				}
-			}
+			stack.add(disc, i, j)
 		}
 	}
+	combined := stack.system()
 	propagateIONames(combined, sys)
 	return combined, nil
 }
