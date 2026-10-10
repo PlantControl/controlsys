@@ -165,11 +165,12 @@ func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string) (hinfDesig
 	if !allZeroDense(gp.D11) {
 		return hinfSynGeneral(gp)
 	}
-	gamma, err := hinfBisect(0, func(g float64) bool { return hinfFeasible(gp, g) })
+	ric := newHinfD11ZeroRiccatis(gp)
+	gamma, err := hinfBisect(0, ric.feasible)
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
-	return hinfDesign{gammaEdge: gamma, build: func(g float64) (*HinfSynResult, error) { return hinfSynD11Zero(gp, g) }}, nil
+	return hinfDesign{gammaEdge: gamma, build: func(g float64) (*HinfSynResult, error) { return hinfSynD11Zero(gp, ric, g) }}, nil
 }
 
 // hinfSynDiscrete designs for the discrete plant P through the Tustin map
@@ -428,13 +429,13 @@ func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
 	return gammaUB, nil
 }
 
-func hinfSynD11Zero(gp *generalizedPlantPartition, gamma float64) (*HinfSynResult, error) {
+func hinfSynD11Zero(gp *generalizedPlantPartition, ric *hinfD11ZeroRiccatis, gamma float64) (*HinfSynResult, error) {
 	n := gp.n
 	A := gp.A
 	B1, B2 := gp.B1, gp.B2
 	C1, C2 := gp.C1, gp.C2
 	D12, D21 := gp.D12, gp.D21
-	X, Y, err := hinfSolveRiccatis(gp, gamma)
+	X, Y, err := ric.solve(gamma)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
@@ -520,63 +521,56 @@ func hinfSynD11Zero(gp *generalizedPlantPartition, gamma float64) (*HinfSynResul
 	return &HinfSynResult{K: K, GammaOpt: gamma, X: X, Y: Y, CLPoles: clPoles}, nil
 }
 
-func hinfFeasible(gp *generalizedPlantPartition, gamma float64) bool {
-	_, _, err := hinfSolveRiccatis(gp, gamma)
-	return err == nil
+// hinfD11ZeroRiccatis holds the γ-independent terms of the D11 = 0 Riccati
+// pair, so each γ of a bisection only forms Gx and Gy and solves.
+type hinfD11ZeroRiccatis struct {
+	errR1, errR2        error
+	B1B1t, C1tC1        *mat.Dense
+	Ahat, Qhat, B2R1B2t *mat.Dense
+	AtildeT, Qy, C2R2C2 *mat.Dense
+	Gx, Gy, XY          *mat.Dense
+	ham                 *hamiltonianRiccatiWork
 }
 
-func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense, *mat.Dense, error) {
+func newHinfD11ZeroRiccatis(gp *generalizedPlantPartition) *hinfD11ZeroRiccatis {
 	A := gp.A
 	B1, B2 := gp.B1, gp.B2
 	C1, C2 := gp.C1, gp.C2
 	D12, D21 := gp.D12, gp.D21
 	n := gp.n
-	ginv2 := 1.0 / (gamma * gamma)
+	r := &hinfD11ZeroRiccatis{}
 
 	R1 := mulDense(mat.DenseCopyOf(D12.T()), D12)
 	R1inv, err := invertSmall(R1, gp.m2)
 	if err != nil {
-		return nil, nil, fmt.Errorf("D12 or D21 not full rank: %w", ErrInvalidPartition)
+		r.errR1 = fmt.Errorf("D12 or D21 not full rank: %w", ErrInvalidPartition)
+		return r
 	}
 	S1 := mulDense(mat.DenseCopyOf(D12.T()), C1)
 
-	B1B1t := mulDense(B1, mat.DenseCopyOf(B1.T()))
-	C1tC1 := mulDense(mat.DenseCopyOf(C1.T()), C1)
+	r.B1B1t = mulDense(B1, mat.DenseCopyOf(B1.T()))
+	r.C1tC1 = mulDense(mat.DenseCopyOf(C1.T()), C1)
 
 	// X-Riccati: Ahat = A - B2*R1inv*S1
 	B2R1inv := mulDense(B2, R1inv)
-	Ahat := mat.NewDense(n, n, nil)
-	Ahat.Sub(A, mulDense(B2R1inv, S1))
+	r.Ahat = mat.NewDense(n, n, nil)
+	r.Ahat.Sub(A, mulDense(B2R1inv, S1))
 
 	// Qhat = C1'C1 - S1'*R1inv*S1
-	Qhat := mat.NewDense(n, n, nil)
-	Qhat.Sub(C1tC1, mulDense(mat.DenseCopyOf(S1.T()), mulDense(R1inv, S1)))
+	r.Qhat = mat.NewDense(n, n, nil)
+	r.Qhat.Sub(r.C1tC1, mulDense(mat.DenseCopyOf(S1.T()), mulDense(R1inv, S1)))
 
 	// Gx = ginv2*B1*B1' - B2*R1inv*B2'
-	Gx := mat.NewDense(n, n, nil)
-	Gx.Scale(ginv2, B1B1t)
-	Gx.Sub(Gx, mulDense(B2R1inv, mat.DenseCopyOf(B2.T())))
-
-	Hx := mat.NewDense(2*n, 2*n, nil)
-	setBlock(Hx, 0, 0, Ahat)
-	setBlock(Hx, 0, n, Gx)
-	negQhat := mat.NewDense(n, n, nil)
-	negQhat.Scale(-1, Qhat)
-	setBlock(Hx, n, 0, negQhat)
-	negAhatT := mat.NewDense(n, n, nil)
-	negAhatT.Scale(-1, mat.DenseCopyOf(Ahat.T()))
-	setBlock(Hx, n, n, negAhatT)
-
-	X, err := solveHamiltonianRiccati(Hx, n)
-	if err != nil {
-		return nil, nil, err
-	}
+	r.B2R1B2t = mulDense(B2R1inv, mat.DenseCopyOf(B2.T()))
+	r.Gx = mat.NewDense(n, n, nil)
+	r.ham = newHamiltonianRiccatiWork(n)
 
 	// Y-Riccati
 	R2 := mulDense(D21, mat.DenseCopyOf(D21.T()))
 	R2inv, err := invertSmall(R2, gp.p2)
 	if err != nil {
-		return nil, nil, fmt.Errorf("D12 or D21 not full rank: %w", ErrInvalidPartition)
+		r.errR2 = fmt.Errorf("D12 or D21 not full rank: %w", ErrInvalidPartition)
+		return r
 	}
 	S2 := mulDense(B1, mat.DenseCopyOf(D21.T()))
 
@@ -584,34 +578,51 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 	S2R2inv := mulDense(S2, R2inv)
 	Atilde := mat.NewDense(n, n, nil)
 	Atilde.Sub(A, mulDense(S2R2inv, C2))
+	r.AtildeT = mat.DenseCopyOf(Atilde.T())
 
 	// Qy = B1*B1' - S2*R2inv*S2'
-	Qy := mat.NewDense(n, n, nil)
-	Qy.Sub(B1B1t, mulDense(S2R2inv, mat.DenseCopyOf(S2.T())))
+	r.Qy = mat.NewDense(n, n, nil)
+	r.Qy.Sub(r.B1B1t, mulDense(S2R2inv, mat.DenseCopyOf(S2.T())))
 
 	// Gy = ginv2*C1'C1 - C2'*R2inv*C2
-	Gy := mat.NewDense(n, n, nil)
-	Gy.Scale(ginv2, C1tC1)
-	Gy.Sub(Gy, mulDense(mat.DenseCopyOf(C2.T()), mulDense(R2inv, C2)))
+	r.C2R2C2 = mulDense(mat.DenseCopyOf(C2.T()), mulDense(R2inv, C2))
+	r.Gy = mat.NewDense(n, n, nil)
+	return r
+}
 
-	Hy := mat.NewDense(2*n, 2*n, nil)
-	setBlock(Hy, 0, 0, mat.DenseCopyOf(Atilde.T()))
-	setBlock(Hy, 0, n, Gy)
-	negQy := mat.NewDense(n, n, nil)
-	negQy.Scale(-1, Qy)
-	setBlock(Hy, n, 0, negQy)
-	negAtilde := mat.NewDense(n, n, nil)
-	negAtilde.Scale(-1, Atilde)
-	setBlock(Hy, n, n, negAtilde)
+func (r *hinfD11ZeroRiccatis) feasible(gamma float64) bool {
+	_, _, err := r.solve(gamma)
+	return err == nil
+}
 
-	Y, err := solveHamiltonianRiccati(Hy, n)
+func (r *hinfD11ZeroRiccatis) solve(gamma float64) (*mat.Dense, *mat.Dense, error) {
+	if r.errR1 != nil {
+		return nil, nil, r.errR1
+	}
+	ginv2 := 1.0 / (gamma * gamma)
+
+	r.Gx.Scale(ginv2, r.B1B1t)
+	r.Gx.Sub(r.Gx, r.B2R1B2t)
+	r.ham.setHamiltonian(r.Ahat, r.Gx, r.Qhat)
+	X, err := r.ham.solve()
+	if err != nil {
+		return nil, nil, err
+	}
+	if r.errR2 != nil {
+		return nil, nil, r.errR2
+	}
+
+	r.Gy.Scale(ginv2, r.C1tC1)
+	r.Gy.Sub(r.Gy, r.C2R2C2)
+	r.ham.setHamiltonian(r.AtildeT, r.Gy, r.Qy)
+	Y, err := r.ham.solve()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	XY := mulDense(X, Y)
+	r.XY = mulInto(r.XY, X, Y)
 	var eig mat.Eigen
-	ok := eig.Factorize(XY, mat.EigenNone)
+	ok := eig.Factorize(r.XY, mat.EigenNone)
 	if !ok {
 		return nil, nil, fmt.Errorf("Riccati solutions not admissible at γ = %g: %w", gamma, ErrGammaNotAchievable)
 	}
@@ -631,23 +642,78 @@ func hinfSolveRiccatis(gp *generalizedPlantPartition, gamma float64) (*mat.Dense
 // imaginary axis to within rounding, where the stable/unstable split is
 // arbitrary and yields spurious solutions.
 func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
+	w := newHamiltonianRiccatiWork(n)
+	setBlock(w.H, 0, 0, H)
+	return w.solve()
+}
+
+// hamiltonianRiccatiWork holds the Hamiltonian and LAPACK buffers reused by
+// repeated solves of one order, as along a γ bisection.
+type hamiltonianRiccatiWork struct {
+	n        int
+	H        *mat.Dense
+	hData    []float64
+	wr, wi   []float64
+	vs       []float64
+	bwork    []bool
+	work     []float64
+	u11, u21 []float64
+	ipiv     []int
+}
+
+func newHamiltonianRiccatiWork(n int) *hamiltonianRiccatiWork {
 	nn := 2 * n
-	hRaw := H.RawMatrix()
-	hData := make([]float64, nn*nn)
+	return &hamiltonianRiccatiWork{
+		n:     n,
+		H:     mat.NewDense(nn, nn, nil),
+		hData: make([]float64, nn*nn),
+		wr:    make([]float64, nn),
+		wi:    make([]float64, nn),
+		vs:    make([]float64, nn*nn),
+		bwork: make([]bool, nn),
+		u11:   make([]float64, n*n),
+		u21:   make([]float64, n*n),
+		ipiv:  make([]int, n),
+	}
+}
+
+// setHamiltonian sets H to [F G; -Q -Fᵀ].
+func (w *hamiltonianRiccatiWork) setHamiltonian(F, G, Q *mat.Dense) {
+	n := w.n
+	h := w.H.RawMatrix()
+	f, g, q := F.RawMatrix(), G.RawMatrix(), Q.RawMatrix()
+	for i := range n {
+		top := h.Data[i*h.Stride : i*h.Stride+2*n]
+		copy(top[:n], f.Data[i*f.Stride:i*f.Stride+n])
+		copy(top[n:], g.Data[i*g.Stride:i*g.Stride+n])
+		bottom := h.Data[(n+i)*h.Stride : (n+i)*h.Stride+2*n]
+		for j := range n {
+			bottom[j] = -q.Data[i*q.Stride+j]
+			bottom[n+j] = -f.Data[j*f.Stride+i]
+		}
+	}
+}
+
+// solve returns the stabilizing Riccati solution for the Hamiltonian in H.
+func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
+	n := w.n
+	nn := 2 * n
+	hRaw := w.H.RawMatrix()
+	hData := w.hData
 	copyStrided(hData, nn, hRaw.Data, hRaw.Stride, nn, nn)
 
-	wr := make([]float64, nn)
-	wi := make([]float64, nn)
-	vs := make([]float64, nn*nn)
-	bwork := make([]bool, nn)
+	wr, wi, vs, bwork := w.wr, w.wi, w.vs, w.bwork
 
 	selctg := func(wr, wi float64) bool { return wr < 0 }
 
-	var workQuery [1]float64
-	impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
-		nn, hData, nn, wr, wi, vs, nn, workQuery[:], -1, bwork)
-	lwork := int(workQuery[0])
-	work := make([]float64, lwork)
+	if w.work == nil {
+		var workQuery [1]float64
+		impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
+			nn, hData, nn, wr, wi, vs, nn, workQuery[:], -1, bwork)
+		w.work = make([]float64, int(workQuery[0]))
+	}
+	work := w.work
+	lwork := len(work)
 
 	sdim, ok := impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
 		nn, hData, nn, wr, wi, vs, nn, work, lwork, bwork)
@@ -661,12 +727,11 @@ func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 	}
 
-	u11 := make([]float64, n*n)
-	u21 := make([]float64, n*n)
+	u11, u21 := w.u11, w.u21
 	copyStrided(u11, n, vs, nn, n, n)
 	copyBlock(u21, n, 0, 0, vs, nn, n, 0, n, n)
 
-	ipiv := make([]int, n)
+	ipiv := w.ipiv
 	if !impl.Dgetrf(n, n, u11, n, ipiv) {
 		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 	}
