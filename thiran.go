@@ -47,12 +47,14 @@ func validateThiranArgs(tau, dt float64) error {
 	return nil
 }
 
-// thiranDelay is ThiranDelay with a fixed filter order N (1-10). A delay of D = tau/dt samples is stable only for
-// D > N-1; smaller delays return ErrFractionalDelay. Near that bound the
-// poles approach -1 and the filter is poorly conditioned. Integer D returns
-// the exact delay z^-D with D states for any N. For D > N+0.5 the excess
-// whole samples are realized as a leading shift register, so the system has
-// round(D) states; more than MaxAbsorbedDelayStates returns ErrInvalidArgument.
+// thiranDelay is ThiranDelay with a fixed filter order N (1-10), kept as a
+// test reference for fixed-order filters. A delay of D = tau/dt samples is
+// stable only for D > N-1; smaller delays return ErrFractionalDelay. Near
+// that bound the poles approach -1 and the filter is poorly conditioned.
+// Integer D returns the exact delay z^-D with D states for any N. For
+// D > N+0.5 the excess whole samples are realized as a leading shift
+// register, so the system has round(D) states; more than
+// MaxAbsorbedDelayStates returns ErrInvalidArgument.
 func thiranDelay(tau float64, order int, dt float64) (*System, error) {
 	if err := validateThiranArgs(tau, dt); err != nil {
 		return nil, err
