@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -217,6 +218,34 @@ func TestFeedbackDelayedKeepsStateNames(t *testing.T) {
 		}
 		if want := []string{"p1", "p2", "p3"}; !slices.Equal(cl.StateName, want) {
 			t.Errorf("dt=%v: StateName = %v, want %v", dt, cl.StateName, want)
+		}
+	}
+}
+
+func TestFeedbackDelayedSingularLoopIsAlgebraicLoop(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		direct, err := NewGain(mat.NewDense(1, 1, []float64{1}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delayed, err := NewGain(mat.NewDense(1, 1, []float64{0.5}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := delayed.SetInputDelay([]float64{2}); err != nil {
+			t.Fatal(err)
+		}
+		plant, err := Parallel(direct, delayed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !plant.HasDelay() {
+			t.Fatalf("dt=%g: plant lost its delay", dt)
+		}
+		cl, err := Feedback(plant, nil, 1)
+		var loop *AlgebraicLoopError
+		if cl != nil || !errors.Is(err, ErrAlgebraicLoop) || !errors.As(err, &loop) {
+			t.Fatalf("dt=%g: Feedback = %v, %v; want ErrAlgebraicLoop", dt, cl, err)
 		}
 	}
 }

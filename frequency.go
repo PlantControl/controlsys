@@ -574,10 +574,7 @@ func applyIODelayMatrixAtS(sys *System, s complex128, data []complex128, p, m in
 				data[off] *= cmplx.Exp(-s * complex(tau, 0))
 				continue
 			}
-			d := int(math.Round(tau))
-			for range d {
-				data[off] /= s
-			}
+			data[off] *= cmplx.Pow(s, complex(-math.Round(tau), 0))
 		}
 	}
 }

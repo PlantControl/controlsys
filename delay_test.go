@@ -435,6 +435,91 @@ func TestAbsorbDelayNonUniform(t *testing.T) {
 	}
 }
 
+func TestAbsorbDelayStateLimit(t *testing.T) {
+	half := float64(MaxAbsorbedDelayStates / 2)
+	cases := []struct {
+		name  string
+		build func(t *testing.T) *System
+	}{
+		{"input sum", func(t *testing.T) *System {
+			sys, err := NewFromSlices(1, 2, 1, []float64{0.5}, []float64{1, 2}, []float64{1}, []float64{0, 0}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sys.SetInputDelay([]float64{half, half}); err != nil {
+				t.Fatal(err)
+			}
+			return sys
+		}},
+		{"output overflow", func(t *testing.T) *System {
+			sys, err := NewFromSlices(1, 1, 1, []float64{0.5}, []float64{1}, []float64{1}, []float64{0}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sys.SetOutputDelay([]float64{1e19}); err != nil {
+				t.Fatal(err)
+			}
+			return sys
+		}},
+		{"io", func(t *testing.T) *System {
+			sys, err := NewFromSlices(1, 1, 1, []float64{0.5}, []float64{1}, []float64{1}, []float64{0}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sys.SetDelay(mat.NewDense(1, 1, []float64{1e9})); err != nil {
+				t.Fatal(err)
+			}
+			return sys
+		}},
+		{"residual split sum", func(t *testing.T) *System {
+			sys, err := NewFromSlices(1, 2, 2, []float64{0.5}, []float64{1, 2}, []float64{1, 3}, []float64{0, 0, 0, 0}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sys.SetDelay(mat.NewDense(2, 2, []float64{0, 6000, 6000, 0})); err != nil {
+				t.Fatal(err)
+			}
+			return sys
+		}},
+		{"internal", func(t *testing.T) *System {
+			sys, err := NewFromSlices(1, 1, 1, []float64{0.5}, []float64{1}, []float64{1}, []float64{0}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = sys.SetInternalDelay([]float64{MaxAbsorbedDelayStates},
+				mat.NewDense(1, 1, []float64{0.1}), mat.NewDense(1, 1, []float64{0.3}),
+				mat.NewDense(1, 1, []float64{0.4}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0.5}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return sys
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.build(t).AbsorbDelay()
+			if !errors.Is(err, ErrInvalidArgument) || got != nil {
+				t.Fatalf("AbsorbDelay = %v, %v; want nil, ErrInvalidArgument", got, err)
+			}
+		})
+	}
+
+	sys, err := NewFromSlices(1, 1, 1, []float64{0.5}, []float64{1}, []float64{1}, []float64{0}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInputDelay([]float64{4}); err != nil {
+		t.Fatal(err)
+	}
+	aug, err := sys.AbsorbDelay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, _ := aug.Dims(); n != 5 {
+		t.Errorf("absorbed states = %d, want 5", n)
+	}
+}
+
 func TestAbsorbDelayDimensions(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{0.9, 0.1, 0, 0.8})
 	B := mat.NewDense(2, 2, []float64{1, 0, 0, 1})
@@ -4432,4 +4517,45 @@ func mustTotalDelay(t *testing.T, sys *System) *mat.Dense {
 		t.Fatal(err)
 	}
 	return td
+}
+
+func TestDelayChainStatelessInternalDelay(t *testing.T) {
+	H, err := NewGain(mat.NewDense(2, 2, []float64{0, 1, 1, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := SetDelayModel(H, []float64{0.8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := func(tk float64) float64 {
+		if tk >= 0.8-1e-12 {
+			return 1
+		}
+		return 0
+	}
+	step, err := Step(sys, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, tk := range step.T {
+		if got := step.Y.At(0, k); math.Abs(got-want(tk)) > 1e-12 {
+			t.Fatalf("Step t=%g: got %g, want %g", tk, got, want(tk))
+		}
+	}
+	tm := make([]float64, 25)
+	u := mat.NewDense(25, 1, nil)
+	for k := range tm {
+		tm[k] = 0.125 * float64(k)
+		u.Set(k, 0, 1)
+	}
+	ls, err := Lsim(sys, u, tm, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, tk := range tm {
+		if got := ls.Y.At(0, k); math.Abs(got-want(tk)) > 1e-12 {
+			t.Fatalf("Lsim t=%g: got %g, want %g", tk, got, want(tk))
+		}
+	}
 }

@@ -524,10 +524,7 @@ func (sys *System) simulateWithInternalDelay(u *mat.Dense, x0 *mat.VecDense, opt
 		}
 	}
 
-	bufSize := maxDelay
-	if N > 0 && bufSize == 0 {
-		bufSize = 1
-	}
+	bufSize := max(min(maxDelay, steps), 1)
 
 	Y := problem.newY()
 	x := problem.newXFinal()
