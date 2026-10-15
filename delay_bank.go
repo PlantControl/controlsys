@@ -57,6 +57,11 @@ func buildDelayBank(spec delayBankSpec) (*System, error) {
 	if spec.channels == 0 {
 		return nil, fmt.Errorf("delay bank has no channels: %w", ErrDimensionMismatch)
 	}
+	if spec.kind == delayBankSample {
+		if _, _, err := absorbShifts(0, spec.sampleDelay); err != nil {
+			return nil, err
+		}
+	}
 	var bank *System
 	for i := range spec.channels {
 		ch, err := buildDelayChannel(spec, i)
@@ -99,7 +104,7 @@ func buildSampleDelayChannel(samples, dt float64, thiranOrder int) (*System, err
 		return NewGain(mat.NewDense(1, 1, []float64{1}), dt)
 	}
 	if isIntegerSampleDelay(samples) {
-		return integerDelaySS(int(math.Round(samples)), dt)
+		return integerDelaySS(samples, dt)
 	}
 	return thiranDelay(samples*dt, thiranOrder, dt)
 }

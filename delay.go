@@ -290,8 +290,8 @@ const (
 // DefaultPadeOrder is the Padé order AbsorbDelay uses for continuous delays.
 const DefaultPadeOrder = 5
 
-// MaxAbsorbedDelayStates bounds the states of a discrete model built by
-// AbsorbDelay, whose dense A holds their square.
+// MaxAbsorbedDelayStates bounds the states of a discrete delay model built by
+// AbsorbDelay or ThiranDelay, whose dense A holds their square.
 const MaxAbsorbedDelayStates = 10000
 
 // AbsorbDelay replaces the delays selected by scopes with model dynamics, as

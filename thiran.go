@@ -12,7 +12,8 @@ import (
 // D = tau/dt samples, an integer D gives the exact delay z^-D (a unit gain
 // for D = 0); otherwise the filter order is N = ceil(D), which keeps the
 // filter stable. The system is SISO. A negative or non-finite tau returns
-// ErrNegativeDelay and a non-positive or non-finite dt ErrInvalidSampleTime.
+// ErrNegativeDelay, a non-positive or non-finite dt ErrInvalidSampleTime, and
+// a filter needing more than MaxAbsorbedDelayStates states ErrInvalidArgument.
 // See https://www.mathworks.com/help/control/ref/thiran.html.
 func ThiranDelay(tau, dt float64) (*System, error) {
 	if err := validateThiranArgs(tau, dt); err != nil {
@@ -20,11 +21,14 @@ func ThiranDelay(tau, dt float64) (*System, error) {
 	}
 	D := tau / dt
 	if isIntegerSampleDelay(D) {
-		sys, err := integerDelaySS(int(math.Round(D)), dt)
+		sys, err := integerDelaySS(D, dt)
 		if err != nil {
 			return nil, fmt.Errorf("ThiranDelay: %w", err)
 		}
 		return sys, nil
+	}
+	if _, _, err := absorbShifts(0, []float64{math.Ceil(D)}); err != nil {
+		return nil, fmt.Errorf("ThiranDelay: %w", err)
 	}
 	sys, err := thiranFilter(D, int(math.Ceil(D)), dt)
 	if err != nil {
@@ -49,7 +53,7 @@ func validateThiranArgs(tau, dt float64) error {
 // poles approach -1 and the filter is poorly conditioned. Integer D returns
 // the exact delay z^-D with D states for any N. For D > N+0.5 the excess
 // whole samples are realized as a leading shift register, so the system has
-// round(D) states.
+// round(D) states; more than MaxAbsorbedDelayStates returns ErrInvalidArgument.
 func thiranDelay(tau float64, order int, dt float64) (*System, error) {
 	if err := validateThiranArgs(tau, dt); err != nil {
 		return nil, err
@@ -62,19 +66,23 @@ func thiranDelay(tau float64, order int, dt float64) (*System, error) {
 	N := order
 
 	if isIntegerSampleDelay(D) {
-		return integerDelaySS(int(math.Round(D)), dt)
+		return integerDelaySS(D, dt)
 	}
 	if D <= float64(N-1) {
 		return nil, fmt.Errorf("delay %.4f samples <= order-1 = %d (unstable): %w",
 			D, N-1, ErrFractionalDelay)
 	}
 
+	if _, _, err := absorbShifts(0, []float64{D}); err != nil {
+		return nil, err
+	}
+
 	// Split into integer shift + fractional Thiran when D >> N
-	intPart := 0
+	intPart := 0.0
 	Deff := D
 	if D > float64(N)+0.5 {
-		intPart = int(math.Round(D)) - N
-		Deff = D - float64(intPart)
+		intPart = math.Round(D) - float64(N)
+		Deff = D - intPart
 	}
 
 	result, err := thiranFilter(Deff, N, dt)
@@ -154,8 +162,15 @@ func binomial(n, k int) float64 {
 	return result
 }
 
-// integerDelaySS returns a discrete state-space system implementing z^{-d}.
-func integerDelaySS(d int, dt float64) (*System, error) {
+// integerDelaySS returns a discrete state-space system implementing z^{-d}
+// for d rounded to whole samples, rejecting d beyond MaxAbsorbedDelayStates
+// or non-finite with ErrInvalidArgument.
+func integerDelaySS(samples, dt float64) (*System, error) {
+	shifts, _, err := absorbShifts(0, []float64{samples})
+	if err != nil {
+		return nil, err
+	}
+	d := shifts[0]
 	if d <= 0 {
 		return NewGain(mat.NewDense(1, 1, []float64{1}), dt)
 	}
