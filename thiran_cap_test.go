@@ -77,9 +77,10 @@ func TestDelayBankRejectsHugeDelay(t *testing.T) {
 		{"NaN", []float64{math.NaN()}},
 		{"Inf", []float64{math.Inf(1)}},
 		{"total over cap", []float64{half, half}},
+		{"fractional channels count order states", []float64{MaxAbsorbedDelayStates - 1, 0.3, 0.3}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			bank, err := buildDiscreteSampleDelayBank(tc.samples, len(tc.samples), 0.1, 3)
+			bank, err := buildDiscreteSampleDelayBank(tc.samples, len(tc.samples), 0.1, 1)
 			if !errors.Is(err, ErrInvalidArgument) || bank != nil {
 				t.Fatalf("bank(%v) = %v, %v; want nil, ErrInvalidArgument", tc.samples, bank, err)
 			}

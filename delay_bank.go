@@ -58,7 +58,7 @@ func buildDelayBank(spec delayBankSpec) (*System, error) {
 		return nil, fmt.Errorf("delay bank has no channels: %w", ErrDimensionMismatch)
 	}
 	if spec.kind == delayBankSample {
-		if _, _, err := absorbShifts(0, spec.sampleDelay); err != nil {
+		if _, _, err := absorbShifts(0, sampleBankStates(spec.sampleDelay, spec.thiranOrder)); err != nil {
 			return nil, err
 		}
 	}
@@ -78,6 +78,19 @@ func buildDelayBank(spec delayBankSpec) (*System, error) {
 		}
 	}
 	return bank, nil
+}
+
+// sampleBankStates returns each channel's state count: round(d) for an
+// integer delay, max(round(d), order) for a fixed-order Thiran channel.
+func sampleBankStates(sampleDelay []float64, thiranOrder int) []float64 {
+	states := make([]float64, len(sampleDelay))
+	for i, d := range sampleDelay {
+		states[i] = math.Round(d)
+		if d != 0 && !isIntegerSampleDelay(d) {
+			states[i] = math.Max(states[i], float64(thiranOrder))
+		}
+	}
+	return states
 }
 
 func hasFractionalSampleDelay(sampleDelay []float64) bool {
