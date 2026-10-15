@@ -62,8 +62,10 @@ func delayChainModel(sys *System) (*System, float64, bool) {
 
 // newDelayChain builds the chain for the given input columns; shifts bounds
 // the distinct source shifts, each costing one exponential per block. ok is
-// false when the chain would exceed delayChainMaxExpm or delayChainMaxWork;
-// callers then fall back to the approximate ZOH discretization.
+// false when the chain would exceed delayChainMaxExpm or delayChainMaxWork,
+// checked in float64 before sizing so a delay far below dt cannot overflow
+// the block count; callers then fall back to the approximate ZOH
+// discretization.
 func newDelayChain(sys *System, tau float64, inputs []int, dt float64, steps, shifts int) (*delayChain, bool) {
 	n, _, p := sys.Dims()
 	q := len(sys.LFT.Tau)
@@ -72,7 +74,11 @@ func newDelayChain(sys *System, tau float64, inputs []int, dt float64, steps, sh
 	if na == 0 {
 		return nil, false
 	}
-	K := max(int(math.Floor(float64(steps-1)*dt/tau+gridTol)), 0)
+	blocks := math.Floor(float64(steps-1)*dt/tau+gridTol) + 1
+	if blocks*float64(steps) > delayChainMaxWork {
+		return nil, false
+	}
+	K := max(int(blocks)-1, 0)
 	c := &delayChain{na: na, p: p, blocks: K + 1, tau: tau, dt: dt, steps: steps, expCache: make(map[float64][]*mat.Dense)}
 
 	left := mat.NewDense(q, na, nil)
