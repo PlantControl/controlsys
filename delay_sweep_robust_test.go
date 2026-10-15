@@ -1648,11 +1648,7 @@ func FuzzSweepRobustDelayTopology(f *testing.F) {
 			tf = 0
 		}
 		_, _ = sys.FreqResponse([]float64{0, 0.5, 3})
-		if md.dt > 0 || n > 0 || N == 0 {
-			_, _ = controlsys.Step(sys, tf)
-		} else {
-			t.Logf("known defect, ergo HV27R6: Step panics on stateless continuous internal-delay model; not run")
-		}
+		_, _ = controlsys.Step(sys, tf)
 		_, _ = sys.PullDelaysToLFT()
 		if H, tau, err := sys.GetDelayModel(); err == nil {
 			_, _ = controlsys.SetDelayModel(H, tau)

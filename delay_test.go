@@ -4433,3 +4433,44 @@ func mustTotalDelay(t *testing.T, sys *System) *mat.Dense {
 	}
 	return td
 }
+
+func TestDelayChainStatelessInternalDelay(t *testing.T) {
+	H, err := NewGain(mat.NewDense(2, 2, []float64{0, 1, 1, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := SetDelayModel(H, []float64{0.8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := func(tk float64) float64 {
+		if tk >= 0.8-1e-12 {
+			return 1
+		}
+		return 0
+	}
+	step, err := Step(sys, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, tk := range step.T {
+		if got := step.Y.At(0, k); math.Abs(got-want(tk)) > 1e-12 {
+			t.Fatalf("Step t=%g: got %g, want %g", tk, got, want(tk))
+		}
+	}
+	tm := make([]float64, 25)
+	u := mat.NewDense(25, 1, nil)
+	for k := range tm {
+		tm[k] = 0.125 * float64(k)
+		u.Set(k, 0, 1)
+	}
+	ls, err := Lsim(sys, u, tm, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, tk := range tm {
+		if got := ls.Y.At(0, k); math.Abs(got-want(tk)) > 1e-12 {
+			t.Fatalf("Lsim t=%g: got %g, want %g", tk, got, want(tk))
+		}
+	}
+}

@@ -186,9 +186,6 @@ func TestSweepAnalyticPureDelayStep(t *testing.T) {
 			t.Run(label, func(t *testing.T) {
 				sys := sweepAnalyticPure(t, L, 0, form)
 				want := func(tk float64) float64 { return sweepAnalyticUnitStep(tk - L) }
-				if form == "internal" {
-					t.Skipf("known defect, ergo HV27R6: Step/Lsim panic on stateless internal-delay model")
-				}
 				sweepAnalyticLsimStep(t, label, sys, 0.125, 25, want, tol)
 				sweepAnalyticStepCheck(t, label, sys, 3, func(tk float64) float64 {
 					if math.Abs(tk-L) < 1e-12*L {
@@ -293,9 +290,6 @@ func TestSweepAnalyticSeriesDelaysAdd(t *testing.T) {
 					t.Fatalf("%s pure Series: %v", label, err)
 				}
 				sweepAnalyticCheckFreq(t, label+" pure", pp, omega, pureWant, 1e-9, 1e-12)
-				if n, _, _ := pp.Dims(); n == 0 && pp.LFT != nil {
-					t.Skipf("known defect, ergo HV27R6: Step/Lsim panic on stateless internal-delay model")
-				}
 				sweepAnalyticLsimStep(t, label+" pure", pp, 0.125, 30, func(tk float64) float64 {
 					return sweepAnalyticUnitStep(tk - (a + b))
 				}, 1e-12)

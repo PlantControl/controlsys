@@ -117,14 +117,16 @@ func newDelayChain(sys *System, tau float64, inputs []int, dt float64, steps, sh
 		if allZeroDense(pow) {
 			break
 		}
-		g := mat.NewDense(na, na, nil)
-		g.Slice(0, n, 0, na).(*mat.Dense).Mul(sys.LFT.B2, pow)
+		if n > 0 {
+			g := mat.NewDense(na, na, nil)
+			g.Slice(0, n, 0, na).(*mat.Dense).Mul(sys.LFT.B2, pow)
+			c.gen[j] = g
+		}
 		if p > 0 {
 			o := mat.NewDense(p, na, nil)
 			o.Mul(sys.LFT.D12, pow)
 			c.out[j] = o
 		}
-		c.gen[j] = g
 	}
 
 	order := min(K, 4)
