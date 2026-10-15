@@ -128,7 +128,7 @@ func (l *delayLoop) addAxisPole(w float64, mult int) {
 
 // rationalTailBound bounds |L(s)| for Re s >= 0 and |s| >= w from the
 // augmented realization H = Daug + Caug(sI-A)^{-1}Baug of the delay LFT,
-// using |c(sI-A)^{-1}b| <= ‖c‖‖b‖/(|s|-‖A‖_F), |e^{-sτ}| <= 1 and the finite
+// using |c(sI-A)^{-1}b| <= ‖c‖‖b‖/(|s|-‖A‖₂), |e^{-sτ}| <= 1 and the finite
 // Neumann series of the acyclic delay loop.
 type rationalTailBound struct {
 	normA float64
@@ -146,7 +146,7 @@ func newRationalTailBound(sys *System) (*rationalTailBound, error) {
 	k := 1 + nd
 	r := &rationalTailBound{d: make([]float64, k*k), c: make([]float64, k), b: make([]float64, k), nd: nd}
 	if n > 0 {
-		r.normA = mat.Norm(sys.A, 2)
+		r.normA = spectralNorm(sys.A)
 	}
 	r.d[0] = math.Abs(sys.D.At(0, 0))
 	r.c[0] = rowNorm(sys.C, 0)

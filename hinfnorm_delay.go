@@ -7,6 +7,7 @@ import (
 	"math/cmplx"
 	"slices"
 
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -88,7 +89,7 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 			return nil, err
 		}
 		e.poles = poles
-		e.normA = mat.Norm(sys.A, 2)
+		e.normA = spectralNorm(sys.A)
 		e.c1, e.c2 = spectralNorm(sys.C), spectralNorm(lft.C2)
 		e.b1, e.b2 = spectralNorm(sys.B), spectralNorm(lft.B2)
 	}
@@ -108,11 +109,26 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 	return e, nil
 }
 
+// spectralNorm returns an upper bound on σ_max(m): the computed largest
+// singular value raised by its rounding error, capped by the Frobenius norm.
 func spectralNorm(m *mat.Dense) float64 {
 	if m == nil || m.IsEmpty() {
 		return 0
 	}
-	return mat.Norm(m, 2)
+	frob := mat.Norm(m, 2)
+	r, c := m.Dims()
+	if r == 1 || c == 1 || frob == 0 || math.IsInf(frob, 0) || math.IsNaN(frob) {
+		return frob
+	}
+	k := min(r, c)
+	buf := make([]float64, r*c+k+max(3*k+max(r, c), 5*k))
+	data, sv, work := buf[:r*c], buf[r*c:r*c+k], buf[r*c+k:]
+	raw := m.RawMatrix()
+	copyStrided(data, c, raw.Data, raw.Stride, r, c)
+	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, data, c, sv, nil, 1, nil, 1, work, len(work)) {
+		return frob
+	}
+	return min(frob, sv[0]*(1+8*float64(max(r, c))*0x1p-52))
 }
 
 func (e *delayLFT) fail(w float64, err error) {
