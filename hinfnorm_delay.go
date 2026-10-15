@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"math/cmplx"
 	"slices"
 
@@ -41,9 +42,17 @@ type delayLFT struct {
 	// spectral norms of C, C2, B, B2 and the D blocks
 	c1, c2, b1, b2     float64
 	d11, d12, d21, d22 float64
-	directFeedthrough  bool
-	desc               *descriptorResponse // for certified peaks
-	err                error
+	// entrywise |D12|, |D21|, |D22|, the row norms of C, C2, the column
+	// norms of B, B2, and Q0 = (I − |D22|)⁻¹ with r0 = ‖Q0‖ (nil, +Inf when
+	// ρ(|D22|) >= 1)
+	abs12, abs21, abs22 []float64
+	rowC1, rowC2        []float64
+	colB1, colB2        []float64
+	q0                  []float64
+	r0                  float64
+	directFeedthrough   bool
+	desc                *descriptorResponse // for certified peaks
+	err                 error
 }
 
 func newDelayLFT(sys *System) (*delayLFT, error) {
@@ -82,6 +91,15 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 	}
 	e.d11, e.d12 = spectralNorm(sys.D), spectralNorm(lft.D12)
 	e.d21, e.d22 = spectralNorm(lft.D21), spectralNorm(lft.D22)
+	e.abs12, e.abs21, e.abs22 = absEntries(lft.D12, p, nd), absEntries(lft.D21, nd, m), absEntries(lft.D22, nd, nd)
+	e.rowC1, e.rowC2 = rowNorms(sys.C, p), rowNorms(lft.C2, nd)
+	e.colB1, e.colB2 = colNorms(sys.B, m), colNorms(lft.B2, nd)
+	e.r0 = math.Inf(1)
+	if nd > 0 {
+		if q0, ok := nonnegResolvent(e.abs22, nd); ok {
+			e.q0, e.r0 = q0, spectralNorm(mat.NewDense(nd, nd, q0))
+		}
+	}
 	e.directFeedthrough = lftHasDirectFeedthrough(lft)
 	return e, nil
 }
@@ -143,12 +161,174 @@ func (e *delayLFT) charMinusOne(w float64) complex128 {
 	return det - 1
 }
 
-// tail bounds |det(I − H22Δ) − 1| for Re s ≥ 0, |s| ≥ w by
+// tail bounds |det(I − H22Δ) − 1| for Re s ≥ 0, |s| ≥ w by the smaller of
 // (1 + ‖H22‖)^nd − 1, since |det(I+M) − 1| ≤ ∏(1+σᵢ(M)) − 1 and
-// ‖H22(s)‖ ≤ ‖D22‖ + ‖C2‖‖B2‖/(|s| − ‖A‖).
+// ‖H22(s)‖ ≤ ‖D22‖ + ‖C2‖‖B2‖/(|s| − ‖A‖), and per(I + P) − 1 for the
+// entrywise bound |H22(s)Δ(s)| ≤ P, since every monomial of det(I − M) − 1
+// appears in per(I + P) − 1 with coefficient +1. The permanent bound vanishes
+// at w = ∞ when D22 is nilpotent in pattern, a cascade of delays with no
+// algebraic delay cycle.
 func (e *delayLFT) tail(w float64) float64 {
 	h := e.h(e.d22, e.c2, e.b2, w)
-	return math.Pow(1+h, float64(e.nd)) - 1
+	bound := math.Pow(1+h, float64(e.nd)) - 1
+	if e.nd <= maxPermanentDelays {
+		p22 := entryBound(e.abs22, e.rowC2, e.colB2, e.nd, e.nd, e.resolvent(w))
+		bound = min(bound, permanentOfIPlus(p22, e.nd)-1)
+	}
+	return bound
+}
+
+// maxPermanentDelays caps the O(2^nd·nd) permanent in tail.
+const maxPermanentDelays = 12
+
+// resolvent bounds ‖(sI−A)⁻¹‖ for |s| ≥ w; 0 without states or at w = ∞.
+func (e *delayLFT) resolvent(w float64) float64 {
+	switch {
+	case e.n == 0 || math.IsInf(w, 1):
+		return 0
+	case w <= e.normA:
+		return math.Inf(1)
+	}
+	return 1 / (w - e.normA)
+}
+
+// entryBound returns |D| + rows·colsᵀ·g, an entrywise bound on
+// D + C(sI−A)⁻¹B when ‖(sI−A)⁻¹‖ ≤ g, from the row norms of C and the column
+// norms of B.
+func entryBound(abs, rows, cols []float64, r, c int, g float64) []float64 {
+	out := slices.Clone(abs)
+	for i := range r {
+		for j := range c {
+			if cb := rows[i] * cols[j]; cb > 0 {
+				out[i*c+j] += cb * g
+			}
+		}
+	}
+	return out
+}
+
+// permanentOfIPlus returns per(I + P) for a nonnegative n×n P by dynamic
+// programming over column subsets, free of cancellation.
+func permanentOfIPlus(p []float64, n int) float64 {
+	f := make([]float64, 1<<n)
+	f[0] = 1
+	for mask := 1; mask < len(f); mask++ {
+		i := bits.OnesCount(uint(mask)) - 1
+		sum := 0.0
+		for j := range n {
+			if mask&(1<<j) == 0 {
+				continue
+			}
+			v := p[i*n+j]
+			if i == j {
+				v++
+			}
+			if v != 0 {
+				sum += f[mask&^(1<<j)] * v
+			}
+		}
+		f[mask] = sum
+	}
+	return f[len(f)-1]
+}
+
+// nonnegResolvent returns (I − P)⁻¹ for a nonnegative n×n P with
+// ρ(P) < 1, which is then entrywise nonnegative and bounds |(I − M)⁻¹|
+// entrywise for every |M| ≤ P by the Neumann series; ok is false otherwise.
+func nonnegResolvent(p []float64, n int) ([]float64, bool) {
+	a := mat.NewDense(n, n, nil)
+	for i := range n {
+		for j := range n {
+			v := -p[i*n+j]
+			if i == j {
+				v++
+			}
+			if math.IsInf(v, 0) || math.IsNaN(v) {
+				return nil, false
+			}
+			a.Set(i, j, v)
+		}
+	}
+	var inv mat.Dense
+	if err := inv.Inverse(a); err != nil {
+		return nil, false
+	}
+	q := inv.RawMatrix().Data
+	scale := 0.0
+	for _, v := range q {
+		if math.IsInf(v, 0) || math.IsNaN(v) {
+			return nil, false
+		}
+		scale = max(scale, math.Abs(v))
+	}
+	for i, v := range q {
+		if v < -1e-12*scale {
+			return nil, false
+		}
+		q[i] = max(v, 0)
+	}
+	return q, true
+}
+
+func absEntries(m *mat.Dense, r, c int) []float64 {
+	out := make([]float64, r*c)
+	if m == nil || m.IsEmpty() {
+		return out
+	}
+	for i := range r {
+		for j := range c {
+			out[i*c+j] = math.Abs(m.At(i, j))
+		}
+	}
+	return out
+}
+
+func rowNorms(m *mat.Dense, r int) []float64 {
+	out := make([]float64, r)
+	if m == nil || m.IsEmpty() {
+		return out
+	}
+	for i := range r {
+		out[i] = rowNorm(m, i)
+	}
+	return out
+}
+
+func colNorms(m *mat.Dense, c int) []float64 {
+	out := make([]float64, c)
+	if m == nil || m.IsEmpty() {
+		return out
+	}
+	for j := range c {
+		out[j] = colNorm(m, j)
+	}
+	return out
+}
+
+// unstableDifferenceOperator reports whether all delays are equal, τ > 0,
+// and ρ(D22) > 1. Then det(I − D22·e^{−sτ}) vanishes on Re s = ln ρ/τ > 0,
+// periodically in Im s, and since H22 → D22 uniformly in the closed right
+// half-plane, χ has infinitely many roots there by Rouché.
+func (e *delayLFT) unstableDifferenceOperator() bool {
+	d22 := e.sys.LFT.D22
+	if e.nd == 0 || d22 == nil || d22.IsEmpty() || !(e.tau[0] > 0) {
+		return false
+	}
+	for _, t := range e.tau {
+		if t != e.tau[0] {
+			return false
+		}
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(d22, mat.EigenNone) {
+		return false
+	}
+	for _, v := range eig.Values(nil) {
+		if cmplx.Abs(v) > 1+1e-9 {
+			return true
+		}
+	}
+	return false
 }
 
 // h bounds ‖D + C(sI−A)⁻¹B‖ for |s| ≥ w.
@@ -230,8 +410,23 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		d21: toC(lft.D21, nd, m), d22: toC(lft.D22, nd, nd),
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
 		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
-		lip: e.d12 * e.d21 / ((1 - e.d22) * (1 - e.d22)),
+		lip: highFrequencyLipschitz(e),
 	}
+}
+
+// highFrequencyLipschitz bounds the Lipschitz constant of G∞ in θ by
+// ‖D12‖‖D21‖·r², with r bounding both ‖(I − ΔD22)⁻¹‖ and ‖(I − D22Δ)⁻¹‖:
+// 1/(1 − ‖D22‖) when ‖D22‖ < 1, and ‖(I − |D22|)⁻¹‖ when ρ(|D22|) < 1.
+func highFrequencyLipschitz(e *delayLFT) float64 {
+	k := e.d12 * e.d21
+	if k == 0 {
+		return 0
+	}
+	r := e.r0
+	if e.d22 < 1 {
+		r = min(r, 1/(1-e.d22))
+	}
+	return k * r * r
 }
 
 func (h *highFrequencyGain) at(theta []float64) float64 {
@@ -386,17 +581,49 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 }
 
 // tailGain bounds σ_max(G(jω)) for ω ≥ w by lim + ‖G − G∞‖, with
-// ‖G − G∞‖ ≤ (h11 − d11) + h12·h21/(1 − h22) − d12·d21/(1 − d22) from the
-// resolvent bound on each block.
+// ‖G − G∞‖ ≤ (h11 − d11) + min(h12·h21/(1 − h22) − d12·d21/(1 − d22),
+// ‖P12·Q·P21 − |D12|·Q0·|D21|‖) from the Neumann series of the delay loop,
+// bounded termwise in norm or entrywise: Pij bounds |Hij| entrywise and
+// Q = (I − P22)⁻¹, Q0 = (I − |D22|)⁻¹.
 func (e *delayLFT) tailGain(lim, w float64) float64 {
 	h11 := e.h(e.d11, e.c1, e.b1, w)
 	h12 := e.h(e.d12, e.c1, e.b2, w)
 	h21 := e.h(e.d21, e.c2, e.b1, w)
 	h22 := e.h(e.d22, e.c2, e.b2, w)
-	if !(h22 < 1) {
+	loop := math.Inf(1)
+	if h22 < 1 {
+		loop = h12*h21/(1-h22) - e.d12*e.d21/(1-e.d22)
+	}
+	loop = min(loop, e.entrywiseLoopGap(w))
+	return lim + (h11 - e.d11) + loop
+}
+
+// entrywiseLoopGap returns ‖P12·Q·P21 − |D12|·Q0·|D21|‖ for |s| ≥ w, or +Inf
+// when ρ(P22) >= 1.
+func (e *delayLFT) entrywiseLoopGap(w float64) float64 {
+	nd, p, m := e.nd, e.p, e.m
+	if e.q0 == nil {
 		return math.Inf(1)
 	}
-	return lim + (h11 - e.d11) + h12*h21/(1-h22) - e.d12*e.d21/(1-e.d22)
+	g := e.resolvent(w)
+	q, ok := nonnegResolvent(entryBound(e.abs22, e.rowC2, e.colB2, nd, nd, g), nd)
+	if !ok {
+		return math.Inf(1)
+	}
+	p12 := mat.NewDense(p, nd, entryBound(e.abs12, e.rowC1, e.colB2, p, nd, g))
+	p21 := mat.NewDense(nd, m, entryBound(e.abs21, e.rowC2, e.colB1, nd, m, g))
+	var gap, ref mat.Dense
+	gap.Product(p12, mat.NewDense(nd, nd, q), p21)
+	ref.Product(mat.NewDense(p, nd, slices.Clone(e.abs12)), mat.NewDense(nd, nd, e.q0), mat.NewDense(nd, m, slices.Clone(e.abs21)))
+	gap.Sub(&gap, &ref)
+	raw := gap.RawMatrix()
+	for i := range p {
+		for j := range m {
+			k := i*raw.Stride + j
+			raw.Data[k] = max(raw.Data[k], 0)
+		}
+	}
+	return spectralNorm(&gap)
 }
 
 // stability counts the closed-loop right-half-plane roots of χ with the
@@ -417,6 +644,9 @@ func internalDelayStable(sys *System) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if e.unstableDifferenceOperator() {
+		return false, nil
+	}
 	_, res, err := e.stability()
 	if err != nil {
 		return false, err
@@ -427,7 +657,14 @@ func internalDelayStable(sys *System) (bool, error) {
 // hinfNormDelayed returns the H∞ norm of a continuous model with internal
 // delays, or +Inf for an unstable one, and whether the model is stable.
 func hinfNormDelayed(sys *System) (norm, omega float64, stable bool, err error) {
-	e, l, res, err := delayPeakSetup(sys)
+	e, err := newDelayLFT(sys)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	if e.unstableDifferenceOperator() {
+		return math.Inf(1), math.Inf(1), false, nil
+	}
+	l, res, err := e.stability()
 	if err != nil {
 		return 0, 0, false, err
 	}

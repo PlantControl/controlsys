@@ -1763,16 +1763,21 @@ func TestIsStable_ContinuousInternalDelayMarginal(t *testing.T) {
 }
 
 // Neutral-type models whose difference operator is not provably stable are
-// left undecided rather than guessed.
+// left undecided rather than guessed; |D22| > 1 is provably unstable.
 func TestIsStable_ContinuousInternalDelayNeutralUnsupported(t *testing.T) {
-	for _, d22 := range []float64{1, -1.5} {
-		sys := internalDelayModel(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{d22}, []float64{0.5})
-		if _, err := sys.IsStable(); !errors.Is(err, ErrDelayUnsupported) {
-			t.Fatalf("d22=%g: IsStable err = %v, want ErrDelayUnsupported", d22, err)
-		}
-		if _, _, err := HinfNorm(sys); !errors.Is(err, ErrDelayUnsupported) {
-			t.Fatalf("d22=%g: HinfNorm err = %v, want ErrDelayUnsupported", d22, err)
-		}
+	sys := internalDelayModel(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{1}, []float64{0.5})
+	if _, err := sys.IsStable(); !errors.Is(err, ErrDelayUnsupported) {
+		t.Fatalf("IsStable err = %v, want ErrDelayUnsupported", err)
+	}
+	if _, _, err := HinfNorm(sys); !errors.Is(err, ErrDelayUnsupported) {
+		t.Fatalf("HinfNorm err = %v, want ErrDelayUnsupported", err)
+	}
+	sys = internalDelayModel(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{-1.5}, []float64{0.5})
+	if stable, err := sys.IsStable(); err != nil || stable {
+		t.Fatalf("IsStable = %v, %v; want false", stable, err)
+	}
+	if n, _, err := HinfNorm(sys); err != nil || !math.IsInf(n, 1) {
+		t.Fatalf("HinfNorm = %g, %v; want +Inf", n, err)
 	}
 }
 

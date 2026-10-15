@@ -308,11 +308,12 @@ func TestNormInfInternalDelayAxisRoot(t *testing.T) {
 
 func sensitivityOf(_, s *System) *System { return s }
 
-func TestHinfNormContinuousInternalDelayUndecidable(t *testing.T) {
-	// |D22| = 1.2: the difference operator is unstable (neutral type).
+func TestHinfNormContinuousInternalDelayUnstableDifferenceOperator(t *testing.T) {
+	// |D22| = 1.2: the difference operator is unstable (neutral type), so
+	// H∞ is +Inf; the L∞ peak is not certified.
 	_, S := delayedSensitivity(t, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{1.2}, 0.5, 1)
-	if _, _, err := HinfNorm(S); !errors.Is(err, ErrDelayUnsupported) {
-		t.Fatalf("HinfNorm err = %v, want ErrDelayUnsupported", err)
+	if n, _, err := HinfNorm(S); err != nil || !math.IsInf(n, 1) {
+		t.Fatalf("HinfNorm = %g, %v; want +Inf", n, err)
 	}
 	if _, err := Norm(S, math.Inf(1)); !errors.Is(err, ErrDelayUnsupported) {
 		t.Fatalf("Norm(Inf) err = %v, want ErrDelayUnsupported", err)

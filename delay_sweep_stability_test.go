@@ -68,14 +68,18 @@ func sweepStabilityAssertNotStable(t *testing.T, sys *controlsys.System) {
 	}
 }
 
-// sweepStabilityAssertKnownRefusal is sweepStabilityAssert with the known
-// false refusal of retarded loops whose D22 is nilpotent skipped.
-func sweepStabilityAssertKnownRefusal(t *testing.T, sys *controlsys.System, want bool) {
+// sweepStabilityAssertHinf requires HinfNorm to decide: finite for a stable
+// model, +Inf for an unstable one.
+func sweepStabilityAssertHinf(t *testing.T, sys *controlsys.System, stable bool) float64 {
 	t.Helper()
-	if _, err := sys.IsStable(); errors.Is(err, controlsys.ErrDelayUnsupported) {
-		t.Skipf("known defect, ergo A6FJ66: retarded loop refused as neutral: %v", err)
+	norm, _, err := controlsys.HinfNorm(sys)
+	if err != nil {
+		t.Fatalf("HinfNorm error: %v", err)
 	}
-	sweepStabilityAssert(t, sys, want, true)
+	if stable != !math.IsInf(norm, 1) {
+		t.Fatalf("HinfNorm = %v for stable = %v", norm, stable)
+	}
+	return norm
 }
 
 func sweepStabilityBisect(f func(float64) float64, lo, hi float64) float64 {
@@ -345,7 +349,11 @@ func TestSweepStabilityMIMOTriangular(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("tau1=%gc/tau2=%gc", c.f1, c.f2), func(t *testing.T) {
 			t.Run("inputOnly", func(t *testing.T) { sweepStabilityAssert(t, build(c.f1*t1, c.f2*t2, true), c.want, true) })
-			t.Run("inputOutput", func(t *testing.T) { sweepStabilityAssertKnownRefusal(t, build(c.f1*t1, c.f2*t2, false), c.want) })
+			t.Run("inputOutput", func(t *testing.T) {
+				sys := build(c.f1*t1, c.f2*t2, false)
+				sweepStabilityAssert(t, sys, c.want, true)
+				sweepStabilityAssertHinf(t, sys, c.want)
+			})
 		})
 	}
 }
@@ -381,7 +389,8 @@ func TestSweepStabilityDifferenceLoop(t *testing.T) {
 			case 0:
 				sweepStabilityAssertNotStable(t, sys)
 			default:
-				sweepStabilityAssert(t, sys, false, false)
+				sweepStabilityAssert(t, sys, false, true)
+				sweepStabilityAssertHinf(t, sys, false)
 			}
 		})
 	}
@@ -535,7 +544,24 @@ func TestSweepStabilitySplitDelayIntegrator(t *testing.T) {
 			if err := plant.SetOutputDelay([]float64{0.4 * total}); err != nil {
 				t.Fatal(err)
 			}
-			sweepStabilityAssertKnownRefusal(t, sweepStabilityFeedback(t, plant, nil), total < math.Pi/2)
+			split := sweepStabilityFeedback(t, plant, nil)
+			stable := total < math.Pi/2
+			sweepStabilityAssert(t, split, stable, true)
+			norm := sweepStabilityAssertHinf(t, split, stable)
+			if !stable {
+				return
+			}
+			inputOnly := sweepStabilitySys(t, 0, 1, 1, 0)
+			if err := inputOnly.SetInputDelay([]float64{total}); err != nil {
+				t.Fatal(err)
+			}
+			want, _, err := controlsys.HinfNorm(sweepStabilityFeedback(t, inputOnly, nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if math.Abs(norm-want) > 1e-6*want {
+				t.Fatalf("HinfNorm(split) = %v, want %v as for the input-delay realization", norm, want)
+			}
 		})
 	}
 }

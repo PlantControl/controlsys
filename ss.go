@@ -224,7 +224,9 @@ func (sys *System) Poles() ([]complex128, error) {
 // χ(s) = det(sI−A)·det(I − H22(s)·diag(e^{−sτ})) as poles; they are counted
 // exactly by the Nyquist test of HinfNorm, where MATLAB pole sets the
 // internal delays to zero
-// (https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html). Neutral-type models whose
+// (https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html). Equal
+// internal delays with ρ(D22) > 1 are unstable through their difference
+// operator. Other neutral-type models whose
 // difference operator is not provably stable, and loops the test cannot
 // resolve, return ErrDelayUnsupported; descriptor ones
 // ErrDescriptorUnsupported.
