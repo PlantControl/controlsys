@@ -1283,20 +1283,22 @@ func TestSweepRobustLargeDiscreteDelay(t *testing.T) {
 	sweepRobustCheckSim(t, "internal 1e5", resp.Y, sweepRobustSimRef(imd, u, steps), 1e-12, imd)
 	sweepRobustCheckFreq(t, "internal 1e5", isys, imd, []float64{0.3, 1.1}, 1e-9)
 
-	t.Run("absorb1e9", func(t *testing.T) {
-		huge := sweepRobustModel{n: 1, m: 1, p: 1, dt: 1, A: []float64{0.5}, B: []float64{1}, C: []float64{1}, D: []float64{0}, in: []float64{1e9}}
-		hs := sweepRobustMustBuild(t, huge)
-		var aerr error
-		if r := sweepRobustGuard(t, "AbsorbDelay 1e9", 10*time.Second, func() { _, aerr = hs.AbsorbDelay() }); r != nil {
-			t.Skipf("known defect, ergo %s: AbsorbDelay(InputDelay=1e9) panics (%v) instead of returning an error", sweepRobustErgoAbsorbSize, r)
-		}
-		if aerr == nil {
-			t.Fatalf("AbsorbDelay(1e9) succeeded; expected an explicit size error")
-		}
-	})
-	t.Run("absorb1e5", func(t *testing.T) {
-		t.Skipf("known defect, ergo %s: AbsorbDelay of a 1e5-sample delay allocates a dense (n+1e5)^2 A (80 GB) with no size guard; not run", sweepRobustErgoAbsorbSize)
-	})
+	for _, tc := range []struct {
+		name string
+		tau  float64
+	}{{"absorb1e9", 1e9}, {"absorb1e5", 1e5}} {
+		t.Run(tc.name, func(t *testing.T) {
+			huge := sweepRobustModel{n: 1, m: 1, p: 1, dt: 1, A: []float64{0.5}, B: []float64{1}, C: []float64{1}, D: []float64{0}, in: []float64{tc.tau}}
+			hs := sweepRobustMustBuild(t, huge)
+			var aerr error
+			if r := sweepRobustGuard(t, "AbsorbDelay "+tc.name, 10*time.Second, func() { _, aerr = hs.AbsorbDelay() }); r != nil {
+				t.Fatalf("AbsorbDelay(InputDelay=%g) panicked: %v", tc.tau, r)
+			}
+			if !errors.Is(aerr, controlsys.ErrInvalidArgument) {
+				t.Fatalf("AbsorbDelay(InputDelay=%g) err = %v, want ErrInvalidArgument size error", tc.tau, aerr)
+			}
+		})
+	}
 	t.Run("freq1e9", func(t *testing.T) {
 		t.Skipf("known defect, ergo %s: discrete FreqResponse applies a d-sample I/O delay by d complex divisions (seconds per frequency at 1e9); not run", sweepRobustErgoFreqIOLoop)
 	})
@@ -1306,7 +1308,6 @@ func TestSweepRobustLargeDiscreteDelay(t *testing.T) {
 }
 
 const (
-	sweepRobustErgoAbsorbSize = "XOUPQW"
 	sweepRobustErgoSimBuffer  = "6Z2TFQ"
 	sweepRobustErgoFreqIOLoop = "CIC2TD"
 	sweepRobustErgoFeedbackEr = "KVUJYJ"
@@ -1542,9 +1543,7 @@ func TestSweepRobustConcurrentDelayedUse(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 16)
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 3 {
 				fc, fd, sc, sd, sim, ad, err := run()
 				if err != nil {
@@ -1557,7 +1556,7 @@ func TestSweepRobustConcurrentDelayedUse(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

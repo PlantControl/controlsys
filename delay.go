@@ -290,6 +290,10 @@ const (
 // DefaultPadeOrder is the Padé order AbsorbDelay uses for continuous delays.
 const DefaultPadeOrder = 5
 
+// MaxAbsorbedDelayStates bounds the states of a discrete model built by
+// AbsorbDelay, whose dense A holds their square.
+const MaxAbsorbedDelayStates = 10000
+
 // AbsorbDelay replaces the delays selected by scopes with model dynamics, as
 // MATLAB absorbDelay(sys,scope)
 // (https://www.mathworks.com/help/control/ref/dynamicsystem.absorbdelay.html).
@@ -299,7 +303,8 @@ const DefaultPadeOrder = 5
 // A discrete delay of k samples becomes k states at z = 0, exactly. A
 // continuous delay has no finite-dimensional representation, so it is
 // replaced by its Padé approximation of order DefaultPadeOrder; use Pade to
-// choose the order. An unknown scope returns ErrInvalidArgument.
+// choose the order. An unknown scope, or a discrete absorption needing more
+// than MaxAbsorbedDelayStates states, returns ErrInvalidArgument.
 func (sys *System) AbsorbDelay(scopes ...AbsorbScope) (*System, error) {
 	if err := requireSystem("AbsorbDelay", sys); err != nil {
 		return nil, err
@@ -456,11 +461,9 @@ func absorbInternalDiscreteDelay(sys *System) (*System, error) {
 	m := mN - N
 	p := pN - N
 
-	delays := make([]int, N)
-	totalShift := 0
-	for j := range N {
-		delays[j] = int(math.Round(tau[j]))
-		totalShift += delays[j]
+	delays, totalShift, err := absorbShifts(n, tau)
+	if err != nil {
+		return nil, err
 	}
 
 	if totalShift == 0 {
@@ -755,6 +758,22 @@ func absorbIODelay(sys *System) (*System, error) {
 	return cur, nil
 }
 
+// absorbShifts rounds discrete delays to sample shifts and rejects a total
+// that would give n states plus the shifts more than MaxAbsorbedDelayStates,
+// summing in float64 so huge delays cannot overflow int.
+func absorbShifts(n int, tau []float64) ([]int, int, error) {
+	shifts := make([]int, len(tau))
+	total := float64(n)
+	for j, d := range tau {
+		total += math.Round(d)
+		if !(total <= MaxAbsorbedDelayStates) {
+			return nil, 0, fmt.Errorf("absorbed model would have %g states, limit %d: %w", total, MaxAbsorbedDelayStates, ErrInvalidArgument)
+		}
+		shifts[j] = int(math.Round(d))
+	}
+	return shifts, int(total) - n, nil
+}
+
 func absorbInputDelay(sys *System) (*System, error) {
 	if sys.IsContinuous() {
 		return nil, fmt.Errorf("absorbInputDelay: %w", ErrWrongDomain)
@@ -762,14 +781,12 @@ func absorbInputDelay(sys *System) (*System, error) {
 
 	n, m, p := sys.Dims()
 
-	totalShift := 0
 	delays := make([]int, m)
-	if sys.InputDelay != nil {
-		for j, d := range sys.InputDelay {
-			delays[j] = int(math.Round(d))
-			totalShift += delays[j]
-		}
+	shifts, totalShift, err := absorbShifts(n, sys.InputDelay)
+	if err != nil {
+		return nil, err
 	}
+	copy(delays, shifts)
 
 	if totalShift == 0 {
 		cp := sys.Copy()
@@ -865,14 +882,12 @@ func absorbOutputDelay(sys *System) (*System, error) {
 
 	n, m, p := sys.Dims()
 
-	totalShift := 0
 	delays := make([]int, p)
-	if sys.OutputDelay != nil {
-		for i, d := range sys.OutputDelay {
-			delays[i] = int(math.Round(d))
-			totalShift += delays[i]
-		}
+	shifts, totalShift, err := absorbShifts(n, sys.OutputDelay)
+	if err != nil {
+		return nil, err
 	}
+	copy(delays, shifts)
 
 	if totalShift == 0 {
 		cp := sys.Copy()
