@@ -50,6 +50,7 @@ type delayLFT struct {
 	colB1, colB2        []float64
 	q0                  []float64
 	r0                  float64
+	entrywise           bool // norm bounds cannot certify the w = ∞ tail
 	directFeedthrough   bool
 	desc                *descriptorResponse // for certified peaks
 	err                 error
@@ -91,11 +92,12 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 	}
 	e.d11, e.d12 = spectralNorm(sys.D), spectralNorm(lft.D12)
 	e.d21, e.d22 = spectralNorm(lft.D21), spectralNorm(lft.D22)
-	e.abs12, e.abs21, e.abs22 = absEntries(lft.D12, p, nd), absEntries(lft.D21, nd, m), absEntries(lft.D22, nd, nd)
-	e.rowC1, e.rowC2 = rowNorms(sys.C, p), rowNorms(lft.C2, nd)
-	e.colB1, e.colB2 = colNorms(sys.B, m), colNorms(lft.B2, nd)
 	e.r0 = math.Inf(1)
-	if nd > 0 {
+	e.entrywise = nd > 0 && (e.d22 >= 1 || math.Pow(1+e.d22, float64(nd))-1 >= 1)
+	if e.entrywise {
+		e.abs12, e.abs21, e.abs22 = absEntries(lft.D12, p, nd), absEntries(lft.D21, nd, m), absEntries(lft.D22, nd, nd)
+		e.rowC1, e.rowC2 = rowNorms(sys.C, p), rowNorms(lft.C2, nd)
+		e.colB1, e.colB2 = colNorms(sys.B, m), colNorms(lft.B2, nd)
 		if q0, ok := nonnegResolvent(e.abs22, nd); ok {
 			e.q0, e.r0 = q0, spectralNorm(mat.NewDense(nd, nd, q0))
 		}
@@ -171,7 +173,7 @@ func (e *delayLFT) charMinusOne(w float64) complex128 {
 func (e *delayLFT) tail(w float64) float64 {
 	h := e.h(e.d22, e.c2, e.b2, w)
 	bound := math.Pow(1+h, float64(e.nd)) - 1
-	if g := e.resolvent(w); e.nd <= maxPermanentDelays && !math.IsInf(g, 1) {
+	if g := e.resolvent(w); e.entrywise && e.nd <= maxPermanentDelays && !math.IsInf(g, 1) {
 		p22 := entryBound(e.abs22, e.rowC2, e.colB2, e.nd, e.nd, g)
 		bound = min(bound, permanentOfIPlus(p22, e.nd)-1)
 	}
@@ -320,7 +322,7 @@ func colNorms(m *mat.Dense, c int) []float64 {
 // half-plane, χ has infinitely many roots there by Rouché.
 func (e *delayLFT) unstableDifferenceOperator() bool {
 	d22 := e.sys.LFT.D22
-	if e.nd == 0 || d22 == nil || d22.IsEmpty() || !(e.tau[0] > 0) {
+	if e.nd == 0 || !(e.d22 > 1) || d22 == nil || d22.IsEmpty() || !(e.tau[0] > 0) {
 		return false
 	}
 	for _, t := range e.tau {
