@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -565,6 +566,14 @@ func sweepRobustCheckSim(t *testing.T, label string, Y *mat.Dense, ref [][]float
 
 // sweepRobustGuard runs fn in a goroutine, converting panics into a returned
 // value and failing when fn exceeds limit.
+func sweepRobustAllocBytes(fn func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
 func sweepRobustGuard(t *testing.T, label string, limit time.Duration, fn func()) (panicked any) {
 	t.Helper()
 	done := make(chan any, 1)
@@ -1314,6 +1323,9 @@ func TestSweepRobustLargeDiscreteDelay(t *testing.T) {
 		if herr != nil {
 			t.Fatalf("internal 1e9 Simulate: %v", herr)
 		}
+		if b := sweepRobustAllocBytes(func() { _, _ = hs.Simulate(U, nil, nil) }); b > 1<<26 {
+			t.Fatalf("internal 1e9 Simulate allocated %d bytes for %d steps; delay buffer not bounded by horizon", b, steps)
+		}
 		sweepRobustCheckSim(t, "internal 1e9", hresp.Y, sweepRobustSimRef(hmd, u, steps), 1e-12, hmd)
 
 		mmd := sweepRobustModel{n: 1, m: 1, p: 1, N: 2, dt: 1, A: []float64{0.5}, B: []float64{1}, C: []float64{1}, D: []float64{0.2},
@@ -1325,6 +1337,9 @@ func TestSweepRobustLargeDiscreteDelay(t *testing.T) {
 		}
 		if herr != nil {
 			t.Fatalf("internal {3,1e9} Simulate: %v", herr)
+		}
+		if b := sweepRobustAllocBytes(func() { _, _ = ms.Simulate(U, nil, nil) }); b > 1<<26 {
+			t.Fatalf("internal {3,1e9} Simulate allocated %d bytes for %d steps; delay buffer not bounded by horizon", b, steps)
 		}
 		sweepRobustCheckSim(t, "internal {3,1e9}", hresp.Y, sweepRobustSimRef(mmd, u, steps), 1e-12, mmd)
 	})
