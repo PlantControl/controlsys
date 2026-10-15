@@ -27,7 +27,7 @@ func ThiranDelay(tau, dt float64) (*System, error) {
 		}
 		return sys, nil
 	}
-	if _, _, err := absorbShifts(0, []float64{math.Ceil(D)}); err != nil {
+	if err := checkAbsorbedStates(math.Ceil(D)); err != nil {
 		return nil, fmt.Errorf("ThiranDelay: %w", err)
 	}
 	sys, err := thiranFilter(D, int(math.Ceil(D)), dt)
@@ -73,7 +73,7 @@ func thiranDelay(tau float64, order int, dt float64) (*System, error) {
 			D, N-1, ErrFractionalDelay)
 	}
 
-	if _, _, err := absorbShifts(0, []float64{D}); err != nil {
+	if err := checkAbsorbedStates(math.Round(D)); err != nil {
 		return nil, err
 	}
 
@@ -166,11 +166,10 @@ func binomial(n, k int) float64 {
 // for d rounded to whole samples, rejecting d beyond MaxAbsorbedDelayStates
 // or non-finite with ErrInvalidArgument.
 func integerDelaySS(samples, dt float64) (*System, error) {
-	shifts, _, err := absorbShifts(0, []float64{samples})
-	if err != nil {
+	if err := checkAbsorbedStates(math.Round(samples)); err != nil {
 		return nil, err
 	}
-	d := shifts[0]
+	d := int(math.Round(samples))
 	if d <= 0 {
 		return NewGain(mat.NewDense(1, 1, []float64{1}), dt)
 	}

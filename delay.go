@@ -780,12 +780,20 @@ func absorbShifts(n int, tau []float64) ([]int, int, error) {
 	total := float64(n)
 	for j, d := range tau {
 		total += math.Round(d)
-		if !(total <= MaxAbsorbedDelayStates) {
-			return nil, 0, fmt.Errorf("absorbed model would have %g states, limit %d: %w", total, MaxAbsorbedDelayStates, ErrInvalidArgument)
+		if err := checkAbsorbedStates(total); err != nil {
+			return nil, 0, err
 		}
 		shifts[j] = int(math.Round(d))
 	}
 	return shifts, int(total) - n, nil
+}
+
+// checkAbsorbedStates rejects a state count above MaxAbsorbedDelayStates or NaN.
+func checkAbsorbedStates(total float64) error {
+	if !(total <= MaxAbsorbedDelayStates) {
+		return fmt.Errorf("absorbed model would have %g states, limit %d: %w", total, MaxAbsorbedDelayStates, ErrInvalidArgument)
+	}
+	return nil
 }
 
 func absorbInputDelay(sys *System) (*System, error) {
