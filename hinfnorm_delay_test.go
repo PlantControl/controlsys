@@ -320,6 +320,9 @@ func TestHinfNormContinuousInternalDelayUnstableDifferenceOperator(t *testing.T)
 	if err != nil || math.Abs(n-5) > 1e-9*5 || !math.IsInf(w, 1) {
 		t.Fatalf("L∞ = %.15g at ω = %g, %v; want 5 at +Inf", n, w, err)
 	}
+	if n, err := Norm(S, math.Inf(1)); err != nil || math.Abs(n-5) > 1e-9*5 {
+		t.Fatalf("Norm(Inf) = %.15g, %v; want 5", n, err)
+	}
 }
 
 // mimoDelayedSensitivity returns S = (I + gain·K·P·diag(e^{-τ_i s}))⁻¹ for a 2×2
