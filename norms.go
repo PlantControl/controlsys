@@ -917,7 +917,7 @@ func (e *sigmaEvaluator) sigma(w float64, refine bool) (float64, error) {
 	} else {
 		e.outputPlain(sc)
 	}
-	applyIODelayAtS(e.sys, pt.value(), e.g, p, m, true)
+	applyIODelayAtS(e.sys, pt, e.g, p, m, true)
 	return e.svd.maximumFromFlat(e.g, 0, p, m)
 }
 

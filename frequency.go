@@ -314,7 +314,7 @@ func (e frequencyEvaluator) sweepInto(omega []float64, data []complex128, solver
 			return err
 		}
 		if delaySS != nil {
-			applyIODelayMatrixAtS(e.sys, pt.value(), dst, e.p, e.m, delaySS)
+			applyIODelayMatrixAtS(e.sys, pt, dst, e.p, e.m, delaySS)
 		}
 	}
 	return nil
@@ -337,7 +337,7 @@ func (e frequencyEvaluator) evalPoint(pt frequencyPoint, poleLimit bool) ([][]co
 	} else if err := evalWithPoleLimit(eval, e.sys, pt, data); err != nil {
 		return nil, err
 	}
-	applyIODelayAtS(e.sys, pt.value(), data, e.p, e.m, true)
+	applyIODelayAtS(e.sys, pt, data, e.p, e.m, true)
 	return complexFlatToGrid(data, e.p, e.m), nil
 }
 
@@ -549,19 +549,20 @@ func applyIODelayPhase(sys *System, omega []float64, data []complex128, p, m int
 	pm := p * m
 	td := newTimeDomain(sys.Dt)
 	for k, w := range omega {
-		applyIODelayMatrixAtS(sys, td.frequencyPoint(w).value(), data[k*pm:(k+1)*pm], p, m, delay)
+		applyIODelayMatrixAtS(sys, td.frequencyPoint(w), data[k*pm:(k+1)*pm], p, m, delay)
 	}
 }
 
-func applyIODelayAtS(sys *System, s complex128, data []complex128, p, m int, includeDelayMatrix bool) {
+func applyIODelayAtS(sys *System, pt frequencyPoint, data []complex128, p, m int, includeDelayMatrix bool) {
 	delay := effectiveIODelayMatrix(sys, p, m, includeDelayMatrix)
 	if delay == nil {
 		return
 	}
-	applyIODelayMatrixAtS(sys, s, data, p, m, delay)
+	applyIODelayMatrixAtS(sys, pt, data, p, m, delay)
 }
 
-func applyIODelayMatrixAtS(sys *System, s complex128, data []complex128, p, m int, delay *mat.Dense) {
+func applyIODelayMatrixAtS(sys *System, pt frequencyPoint, data []complex128, p, m int, delay *mat.Dense) {
+	s := pt.value()
 	dRaw := delay.RawMatrix()
 	for i := range p {
 		for j := range m {
@@ -574,7 +575,7 @@ func applyIODelayMatrixAtS(sys *System, s complex128, data []complex128, p, m in
 				data[off] *= cmplx.Exp(-s * complex(tau, 0))
 				continue
 			}
-			data[off] *= cmplx.Pow(s, complex(-math.Round(tau), 0))
+			data[off] *= pt.delayFactor(tau)
 		}
 	}
 }
@@ -771,11 +772,7 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, pt frequencyPoint, N, p, m int
 		if cont {
 			ws.delta[j] = cmplx.Exp(-s * complex(tau, 0))
 		} else {
-			d := int(math.Round(tau))
-			ws.delta[j] = 1
-			for range d {
-				ws.delta[j] /= s
-			}
+			ws.delta[j] = pt.delayFactor(tau)
 		}
 	}
 	h := ws.h
@@ -841,11 +838,12 @@ const maxAbsorbedStates = 256
 func (ws *lftWorkspace) absorbedSolver(sys *System) *balancedDense {
 	if ws.absorbed == nil && ws.absorbedErr == nil {
 		n, _, _ := sys.Dims()
+		total := float64(n)
 		for _, tau := range sys.LFT.Tau {
-			n += int(math.Round(tau))
+			total += math.Round(tau)
 		}
-		if n > maxAbsorbedStates {
-			ws.absorbedErr = fmt.Errorf("%d absorbed states: %w", n, ErrInvalidArgument)
+		if !(total <= maxAbsorbedStates) {
+			ws.absorbedErr = fmt.Errorf("%g absorbed states: %w", total, ErrInvalidArgument)
 			return nil
 		}
 		abs, err := absorbInternalDiscreteDelay(sys)

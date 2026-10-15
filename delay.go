@@ -765,6 +765,16 @@ func absorbIODelay(sys *System) (*System, error) {
 // absorbShifts rounds discrete delays to sample shifts and rejects a total
 // that would give n states plus the shifts more than MaxAbsorbedDelayStates,
 // summing in float64 so huge delays cannot overflow int.
+// delaySteps is the whole-sample delay d, capped at horizon in float64 so a
+// delay past the int range cannot wrap; a delay of horizon samples or more
+// never reaches a response of that length.
+func delaySteps(d float64, horizon int) int {
+	if r := math.Round(d); r < float64(horizon) {
+		return int(r)
+	}
+	return horizon
+}
+
 func absorbShifts(n int, tau []float64) ([]int, int, error) {
 	shifts := make([]int, len(tau))
 	total := float64(n)

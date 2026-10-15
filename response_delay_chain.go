@@ -217,10 +217,11 @@ func (c *delayChain) injections(sources []chainSource) []chainInjection {
 		dir := mat.NewVecDense(c.na, s.dir)
 		for i := range c.blocks {
 			phi := s.shift + float64(i)*c.tau
-			m0 := max(int(math.Ceil(phi/c.dt-gridTol)), 0)
-			if m0 >= c.steps {
+			first := math.Ceil(phi/c.dt - gridTol)
+			if first >= float64(c.steps) {
 				break
 			}
+			m0 := max(int(first), 0)
 			delta := float64(m0)*c.dt - phi
 			if delta < gridTol*c.dt {
 				delta = 0

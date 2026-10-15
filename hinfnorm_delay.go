@@ -371,7 +371,7 @@ func (e *delayLFT) sigma(w float64) float64 {
 		return math.NaN()
 	}
 	if e.ioDelay != nil {
-		applyIODelayMatrixAtS(e.sys, pt.value(), e.gbuf, e.p, e.m, e.ioDelay)
+		applyIODelayMatrixAtS(e.sys, pt, e.gbuf, e.p, e.m, e.ioDelay)
 	}
 	sv, err := e.svd.maximumFromFlat(e.gbuf, 0, e.p, e.m)
 	if err != nil {

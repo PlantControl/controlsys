@@ -111,7 +111,7 @@ func (e *sisoEval) at(w float64) complex128 {
 		return e.fail(w, err)
 	}
 	if e.delay != nil {
-		applyIODelayMatrixAtS(e.sys, pt.value(), e.dst, 1, 1, e.delay)
+		applyIODelayMatrixAtS(e.sys, pt, e.dst, 1, 1, e.delay)
 	}
 	return e.dst[0]
 }

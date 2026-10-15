@@ -1030,10 +1030,11 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 	next := mat.NewVecDense(n, nil)
 	yRaw := Y.RawMatrix()
 	for _, tau := range delays {
-		k0 := max(int(math.Ceil(tau/dt-gridTol)), 0)
-		if k0 >= steps {
+		first := math.Ceil(tau/dt - gridTol)
+		if first >= float64(steps) {
 			continue
 		}
+		k0 := max(int(first), 0)
 		x.CopyVec(x0)
 		if lead := float64(k0)*dt - tau; lead > 0 {
 			var lag mat.Dense

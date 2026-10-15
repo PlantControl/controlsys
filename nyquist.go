@@ -446,7 +446,7 @@ func (p *nyquistPath) at(s complex128) (complex128, error) {
 	if err := p.eval(pointAt(s), p.buf); err != nil {
 		return 0, err
 	}
-	applyIODelayAtS(p.sys, s, p.buf, 1, 1, true)
+	applyIODelayAtS(p.sys, pointAt(s), p.buf, 1, 1, true)
 	if v := p.buf[0]; cmplx.Abs(1+v) <= nyquistOnContourTol*math.Max(1, cmplx.Abs(v)) {
 		p.onContour = true
 	}
