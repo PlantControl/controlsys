@@ -690,7 +690,11 @@ func absorbIODelay(sys *System) (*System, error) {
 
 	inDel, outDel, residual := decomposeIODelay(sys.Delay)
 	if delayMatrixHasNonzero(residual) {
-		return newResidualDelaySplit(sys).apply(sys, absorbDecomposedDelay)
+		split := newResidualDelaySplit(sys)
+		if states := split.states(); !(states <= MaxAbsorbedDelayStates) {
+			return nil, fmt.Errorf("absorbed model would have %g states, limit %d: %w", states, MaxAbsorbedDelayStates, ErrInvalidArgument)
+		}
+		return split.apply(sys, absorbDecomposedDelay)
 	}
 
 	cp := sys.Copy()

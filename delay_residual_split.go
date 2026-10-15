@@ -12,6 +12,7 @@ import (
 // delay sub-blocks decompose exactly.
 type residualDelaySplit struct {
 	byRow  bool
+	n      int
 	groups []residualDelayGroup
 }
 
@@ -29,9 +30,9 @@ func newResidualDelaySplit(sys *System) residualDelaySplit {
 	cols, colCost := residualDelayGroups(total, false, n)
 	rows, rowCost := residualDelayGroups(total, true, n)
 	if rowCost < colCost {
-		return residualDelaySplit{byRow: true, groups: rows}
+		return residualDelaySplit{byRow: true, n: n, groups: rows}
 	}
-	return residualDelaySplit{groups: cols}
+	return residualDelaySplit{n: n, groups: cols}
 }
 
 func residualDelayGroups(total *mat.Dense, byRow bool, n int) ([]residualDelayGroup, float64) {
@@ -114,6 +115,22 @@ func splitDelayBlock(total *mat.Dense, byRow bool, members []int) *mat.Dense {
 		}
 	}
 	return out
+}
+
+// states is the state count of the stacked model when each group's delays
+// are absorbed as discrete shifts.
+func (s residualDelaySplit) states() float64 {
+	total := 0.0
+	for _, g := range s.groups {
+		total += float64(s.n)
+		for _, v := range g.inputDelay {
+			total += math.Round(v)
+		}
+		for _, v := range g.outputDelay {
+			total += math.Round(v)
+		}
+	}
+	return total
 }
 
 // apply realizes each group, carrying only input and output delays, with

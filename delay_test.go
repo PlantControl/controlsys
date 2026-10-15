@@ -471,6 +471,16 @@ func TestAbsorbDelayStateLimit(t *testing.T) {
 			}
 			return sys
 		}},
+		{"residual split sum", func(t *testing.T) *System {
+			sys, err := NewFromSlices(1, 2, 2, []float64{0.5}, []float64{1, 2}, []float64{1, 3}, []float64{0, 0, 0, 0}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sys.SetDelay(mat.NewDense(2, 2, []float64{0, 6000, 6000, 0})); err != nil {
+				t.Fatal(err)
+			}
+			return sys
+		}},
 		{"internal", func(t *testing.T) *System {
 			sys, err := NewFromSlices(1, 1, 1, []float64{0.5}, []float64{1}, []float64{1}, []float64{0}, 1)
 			if err != nil {
