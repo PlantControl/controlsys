@@ -1309,7 +1309,24 @@ func TestSweepRobustLargeDiscreteDelay(t *testing.T) {
 		})
 	}
 	t.Run("freq1e9", func(t *testing.T) {
-		t.Skipf("known defect, ergo %s: discrete FreqResponse applies a d-sample I/O delay by d complex divisions (seconds per frequency at 1e9); not run", sweepRobustErgoFreqIOLoop)
+		for _, kind := range []string{"input", "output"} {
+			md := sweepRobustModel{n: 1, m: 1, p: 1, dt: 1, A: []float64{0.5}, B: []float64{1}, C: []float64{1}, D: []float64{1}}
+			if kind == "input" {
+				md.in = []float64{1e9}
+			} else {
+				md.out = []float64{1e9}
+			}
+			sys := sweepRobustMustBuild(t, md)
+			omegas := []float64{0.3, 1.1}
+			var err error
+			if r := sweepRobustGuard(t, kind+" FreqResponse 1e9", 2*time.Second, func() { _, err = sys.FreqResponse(omegas) }); r != nil {
+				t.Fatalf("%s delay 1e9 FreqResponse panicked: %v", kind, r)
+			}
+			if err != nil {
+				t.Fatalf("%s delay 1e9 FreqResponse: %v", kind, err)
+			}
+			sweepRobustCheckFreq(t, kind+" delay 1e9", sys, md, omegas, 1e-6)
+		}
 	})
 	t.Run("internal1e9", func(t *testing.T) {
 		hmd := imd
@@ -1346,7 +1363,6 @@ func TestSweepRobustLargeDiscreteDelay(t *testing.T) {
 }
 
 const (
-	sweepRobustErgoFreqIOLoop = "CIC2TD"
 	sweepRobustErgoFeedbackEr = "KVUJYJ"
 )
 
