@@ -384,6 +384,9 @@ func sliceOrZeros(s []float64, n int) []float64 {
 // model, approximate the result as MATLAB does: Pade (continuous) or
 // AbsorbDelay (exact for discrete, Padé order DefaultPadeOrder for
 // continuous).
+//
+// An ill-posed loop (I - sign·D1·D2 singular) returns ErrAlgebraicLoop as an
+// *AlgebraicLoopError.
 func Feedback(plant, controller *System, sign float64, ch ...FeedbackChannels) (*System, error) {
 	if err := requireSystem("Feedback", plant); err != nil {
 		return nil, err
@@ -424,7 +427,7 @@ func Feedback(plant, controller *System, sign float64, ch ...FeedbackChannels) (
 	m := m1
 	p := p1
 
-	E21, err := solveFeedbackFeedthrough(plant.D, controller.D, feedbackSign, p1, "Feedback", ErrSingularTransform)
+	E21, err := solveFeedbackFeedthrough(plant.D, controller.D, feedbackSign, p1, "Feedback", ErrAlgebraicLoop)
 	if err != nil {
 		return nil, err
 	}

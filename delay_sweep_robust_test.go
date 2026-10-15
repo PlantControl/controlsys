@@ -747,7 +747,7 @@ func TestSweepRobustFeedbackAlgebraicLoop(t *testing.T) {
 	for _, dt := range []float64{0, 0.1} {
 		cl, err := controlsys.Feedback(sweepRobustGain(t, 1, dt), nil, 1)
 		if !sweepRobustIsLoopError(err) || cl != nil {
-			t.Fatalf("Feedback(1,1,+1) dt=%g: sys=%v err=%v, want ErrAlgebraicLoop (ergo %s)", dt, cl, err, sweepRobustErgoFeedbackEr)
+			t.Fatalf("Feedback(1,1,+1) dt=%g: sys=%v err=%v, want ErrAlgebraicLoop", dt, cl, err)
 		}
 		cl, err = controlsys.Feedback(sweepRobustScalarSys(t, -1, 1, 1, 2, dt), sweepRobustGain(t, 0.5, dt), 1)
 		if !sweepRobustIsLoopError(err) || cl != nil {
@@ -1362,12 +1362,8 @@ func TestSweepRobustLargeDiscreteDelay(t *testing.T) {
 	})
 }
 
-const (
-	sweepRobustErgoFeedbackEr = "KVUJYJ"
-)
-
 func sweepRobustIsLoopError(err error) bool {
-	return errors.Is(err, controlsys.ErrAlgebraicLoop) || errors.Is(err, controlsys.ErrSingularTransform)
+	return errors.Is(err, controlsys.ErrAlgebraicLoop)
 }
 
 // TestSweepRobustMixedTimeScales (E-C): poles at -1e-4 and -1e4 with input

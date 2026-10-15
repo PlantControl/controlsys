@@ -369,8 +369,9 @@ func TestFeedback_SingularM(t *testing.T) {
 	controller, _ := NewGain(mat.NewDense(1, 1, []float64{-1}), 0)
 
 	_, err := Feedback(plant, controller, -1)
-	if !errors.Is(err, ErrSingularTransform) {
-		t.Errorf("expected ErrSingularTransform, got %v", err)
+	var loop *AlgebraicLoopError
+	if !errors.Is(err, ErrAlgebraicLoop) || !errors.As(err, &loop) || !math.IsInf(loop.Condition, 1) {
+		t.Errorf("expected *AlgebraicLoopError with infinite condition, got %v", err)
 	}
 }
 

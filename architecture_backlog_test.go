@@ -191,8 +191,8 @@ func TestDirectFeedthroughLoopBehaviorAcrossPublicInterconnections(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Feedback(plant, controller, 1); !errors.Is(err, ErrSingularTransform) {
-			t.Fatalf("Feedback err = %v, want ErrSingularTransform", err)
+		if _, err := Feedback(plant, controller, 1); !errors.Is(err, ErrAlgebraicLoop) {
+			t.Fatalf("Feedback err = %v, want ErrAlgebraicLoop", err)
 		}
 
 		lftPlant, err := NewGain(mat.NewDense(2, 2, []float64{0, 1, 1, 1}), 0)
