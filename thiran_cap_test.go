@@ -56,11 +56,23 @@ func TestThiranDelayIntegerBelowCapIsExactShift(t *testing.T) {
 	}
 }
 
-func TestFixedOrderThiranRejectsHugeDelay(t *testing.T) {
-	for _, D := range []float64{1e9, 1e9 + 0.4, 1e19, MaxAbsorbedDelayStates + 1.4} {
-		sys, err := thiranDelay(D, 3, 1)
-		if !errors.Is(err, ErrInvalidArgument) || sys != nil {
-			t.Errorf("thiranDelay(%g, 3, 1) = %v, %v; want nil, ErrInvalidArgument", D, sys, err)
+func TestConversionThiranChannelHugeDelayKeepsWholeSamples(t *testing.T) {
+	for _, tc := range []struct {
+		samples, whole float64
+		states         int
+	}{
+		{1e9, 1e9, 0},
+		{1e9 + 0.4, 1e9 - 2, 3},
+		{1e19, 1e19, 0},
+		{MaxAbsorbedDelayStates + 1.4, MaxAbsorbedDelayStates - 1, 3},
+	} {
+		sys, err := conversionThiranChannel(tc.samples, 1, 3)
+		if err != nil {
+			t.Fatalf("D=%g: %v", tc.samples, err)
+		}
+		n, _, _ := sys.Dims()
+		if n != tc.states || len(sys.InputDelay) != 1 || math.Abs(sys.InputDelay[0]-tc.whole) > 1e-6*tc.whole {
+			t.Errorf("D=%g: states %d InputDelay %v, want %d and [%g]", tc.samples, n, sys.InputDelay, tc.states, tc.whole)
 		}
 	}
 }

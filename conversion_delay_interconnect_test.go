@@ -18,11 +18,13 @@ func conversionDynamicLFT(t *testing.T) *System {
 }
 
 func TestSeriesInternalDelayIndependentProduct(t *testing.T) {
-	bank, err := thiranDelay(.35, 3, .1)
+	filter, err := conversionThiranBank([]float64{.35}, .1, 3, C2DDelayModelingInternal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	filter := conversionStateAsDelay(bank)
+	if len(filter.InputDelay) != 1 || filter.InputDelay[0] != 1 || filter.internalDelayCount() != 3 {
+		t.Fatalf("bank InputDelay %v internal %d, want [1] and 3", filter.InputDelay, filter.internalDelayCount())
+	}
 	plant, err := makeTestSystem().C2D(.1, C2DOptions{Method: C2DMethodTustin})
 	if err != nil {
 		t.Fatal(err)
