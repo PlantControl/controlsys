@@ -26,7 +26,8 @@ type differenceBounds struct{ polydisk, rhp, torus float64 }
 // τ_i = k_i·h reduce to that case through liftD22. On the torus an
 // invertible D22 gives (I − D22Θ)⁻¹ = −(I − Θ⁻¹W)⁻¹Θ⁻¹W with W = D22⁻¹,
 // bounded by κ(S)γ/(1 − γ) when γ = ‖S⁻¹WS‖ < 1, the anti-stable
-// difference operator.
+// difference operator. When all of these fail for nd >= 4, where diagonal
+// scaling is not exact, torusCellBound may still certify the polydisk.
 func (e *delayLFT) difference() *differenceBounds {
 	if e.diff != nil {
 		return e.diff
@@ -60,7 +61,224 @@ func (e *delayLFT) difference() *differenceBounds {
 			b.torus = diagonalScalingBound(&w, mat.Norm(&w, 2)*delta/(1-delta), true)
 		}
 	}
+	if e.nd >= 4 && e.nd <= maxCellDelays && math.IsInf(b.rhp, 1) && math.IsInf(b.torus, 1) {
+		if c := torusCellBound(d22); !math.IsInf(c, 1) {
+			b.polydisk, b.rhp, b.torus = c, c, c
+		}
+	}
 	return b
+}
+
+const (
+	// maxCellDelays caps nd for torusCellBound, whose box count grows
+	// exponentially in nd; below 4 diagonal scaling is already exact.
+	maxCellDelays = 8
+	// maxCells caps the boxes torusCellBound examines.
+	maxCells = 1 << 15
+	// cellGamma is the scaled perturbation norm below which a box is
+	// accepted, so that its resolvent bound stays within 1/(1 − cellGamma)
+	// of κ(S)‖X‖.
+	cellGamma = 0.75
+)
+
+// torusCellBound bounds ‖(I − D22Z)⁻¹‖ over the unit polydisk by branch and
+// bound on the torus of phases θ, for the nd >= 4 where diagonal scaling
+// (the μ upper bound) is not exact. Over a box |θ_k − c_k| <= δ_k,
+// e^{jθ_k} = C_k + s_k·u_k, |u_k| <= 1, with C_k = cos δ_k·e^{jc_k},
+// s_k = sin δ_k for δ_k <= π/2 (else C_k = 0, s_k = 1). With X ≈ B⁻¹,
+// B = I − D22·C, N = X·D22·diag(s) and R = I − XB, X(I − D22Θ) =
+// I − (R + N·U), so γ = κ(S)‖R‖ + ‖S⁻¹NS‖ < 1 for a positive diagonal S
+// (Osborne-balanced on |N|) gives ‖(I − D22Θ)⁻¹‖ <= κ(S)‖X‖/(1 − γ).
+// Boxes, dyadic in each phase so that centres carry one rounding, are
+// inflated by it; those failing γ <= cellGamma are halved in the phase of
+// the largest scaled column of N. D22 real makes the bound at Θ̄ that at Θ, so θ_1 ∈ [0, π]
+// suffices. I − D22Θ invertible on the connected torus and ρ(D22) < 1
+// (steinBound) keep every eigenvalue of D22Θ inside the unit circle, since
+// a crossing e^{jα} would make I − D22·e^{−jα}Θ singular; so ρ(D22Z) < 1
+// on the polydisk, and ‖(I − D22Z)⁻¹‖, subharmonic in each z_k, peaks on
+// the torus. +Inf when the budget runs out or a box centre has
+// ρ(D22Θ) >= 1.
+func torusCellBound(d22 *mat.Dense) float64 {
+	inf := math.Inf(1)
+	n, _ := d22.Dims()
+	if math.IsInf(steinBound(d22), 1) {
+		return inf
+	}
+	m := 2 * n
+	const eps = 0x1p-52
+	d := d22.RawMatrix()
+	dfrob := mat.Norm(d22, 2)
+	be := mat.NewDense(m, m, nil)
+	ne := mat.NewDense(m, m, nil)
+	var xe, res mat.Dense
+	bRaw, nRaw := be.RawMatrix().Data, ne.RawMatrix().Data
+	cr, ci, s := make([]float64, n), make([]float64, n), make([]float64, n)
+	x, ex, abs := make([]float64, n), make([]float64, n), make([]float64, n*n)
+	bc, br := make([]float64, n), make([]float64, n)
+	type box struct {
+		idx []uint64
+		lvl []int
+	}
+	stack := []box{{make([]uint64, n), make([]int, n)}}
+	worst := 0.0
+	for count := 0; len(stack) > 0; count++ {
+		if count >= maxCells {
+			return inf
+		}
+		bx := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for k := range n {
+			span := 2 * math.Pi
+			if k == 0 {
+				span = math.Pi
+			}
+			if bx.lvl[k] > 40 {
+				return inf
+			}
+			br[k] = math.Ldexp(span, -bx.lvl[k]-1)
+			bc[k] = float64(2*bx.idx[k]+1) * br[k]
+		}
+		split, wide := -1, 0.0
+		for k, r := range br {
+			if r > math.Pi/2 && r > wide {
+				split, wide = k, r
+			}
+		}
+		if split < 0 {
+			for k := range n {
+				dk := br[k] + 8*eps*(math.Abs(bc[k])+math.Pi)
+				sc, cc := math.Sincos(bc[k])
+				if dk <= math.Pi/2 {
+					sd, cd := math.Sincos(dk)
+					cr[k], ci[k], s[k] = cd*cc, cd*sc, sd*(1+2*eps)+8*eps
+				} else {
+					cr[k], ci[k], s[k] = 0, 0, 1
+				}
+			}
+			for i := range n {
+				for j := range n {
+					v := d.Data[i*d.Stride+j]
+					re, im := -v*cr[j], -v*ci[j]
+					if i == j {
+						re++
+					}
+					bRaw[i*m+j], bRaw[(i+n)*m+j+n] = re, re
+					bRaw[i*m+j+n], bRaw[(i+n)*m+j] = -im, im
+				}
+			}
+			var g, kappa, xn float64
+			ok := xe.Inverse(be) == nil
+			if ok {
+				res.Mul(&xe, be)
+				xRaw := xe.RawMatrix().Data
+				xfrob := mat.Norm(&xe, 2)
+				delta := residualNorm(&res, xfrob*mat.Norm(be, 2))
+				for i := range m {
+					for j := range n {
+						var p, q float64
+						for k := range n {
+							p += xRaw[i*m+k] * d.Data[k*d.Stride+j]
+							q += xRaw[i*m+k+n] * d.Data[k*d.Stride+j]
+						}
+						nRaw[i*m+j], nRaw[i*m+j+n] = p*s[j], q*s[j]
+					}
+				}
+				for i := range n {
+					for j := range n {
+						re, im := nRaw[i*m+j], nRaw[(i+n)*m+j]
+						abs[i*n+j] = re*re + im*im
+					}
+				}
+				osborne(abs, x, ex, n, 10)
+				for i := range m {
+					for j := range m {
+						nRaw[i*m+j] *= ex[j%n] / ex[i%n]
+					}
+				}
+				kappa = slices.Max(ex) / slices.Min(ex)
+				xn = spectralNorm(&xe)
+				rounding := 4 * float64(m) * eps * kappa * xfrob * (dfrob + 1) * (1 + slices.Max(s))
+				g = (spectralNorm(ne) + kappa*delta + rounding) * (1 + similarityGap)
+				ok = !math.IsInf(g, 0) && !math.IsNaN(g)
+			}
+			if ok && g <= cellGamma {
+				worst = max(worst, kappa*xn/(1-g))
+				continue
+			}
+			best := -1.0
+			for j := range n {
+				var c float64
+				for i := range m {
+					c += nRaw[i*m+j] * nRaw[i*m+j]
+				}
+				if !ok {
+					c = br[j]
+				}
+				if c > best {
+					split, best = j, c
+				}
+			}
+			if slices.Max(br) <= math.Pi/16 && centreRadius(d22, bc) >= 1 {
+				return inf
+			}
+		}
+		for half := range uint64(2) {
+			idx, lvl := slices.Clone(bx.idx), slices.Clone(bx.lvl)
+			idx[split], lvl[split] = 2*idx[split]+half, lvl[split]+1
+			stack = append(stack, box{idx, lvl})
+		}
+	}
+	return worst
+}
+
+// osborne balances the n×n matrix of squared magnitudes a2, returning in x
+// the log-scales that minimize the off-diagonal Frobenius norm of
+// diag(e^{−x})·|A|·diag(e^x), and e^x in ex.
+func osborne(a2, x, ex []float64, n, sweeps int) {
+	for i := range n {
+		x[i], ex[i] = 0, 1
+	}
+	for range sweeps {
+		for i := range n {
+			r, c := 0.0, 0.0
+			for j := range n {
+				if j != i {
+					w := ex[j] / ex[i]
+					r += a2[i*n+j] * w * w
+					c += a2[j*n+i] / (w * w)
+				}
+			}
+			if r > 0 && c > 0 {
+				x[i] = math.Max(-30, math.Min(30, x[i]+0.25*math.Log(r/c)))
+				ex[i] = math.Exp(x[i])
+			}
+		}
+	}
+}
+
+// centreRadius returns the computed ρ(D22·diag(e^{jθ})), NaN on failure.
+func centreRadius(d22 *mat.Dense, theta []float64) float64 {
+	n, _ := d22.Dims()
+	e := mat.NewDense(2*n, 2*n, nil)
+	for i := range n {
+		for j := range n {
+			sn, cs := math.Sincos(theta[j])
+			v := d22.At(i, j)
+			e.Set(i, j, v*cs)
+			e.Set(i+n, j+n, v*cs)
+			e.Set(i, j+n, -v*sn)
+			e.Set(i+n, j, v*sn)
+		}
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(e, mat.EigenNone) {
+		return math.NaN()
+	}
+	r := 0.0
+	for _, v := range eig.Values(nil) {
+		r = max(r, cmplx.Abs(v))
+	}
+	return r
 }
 
 // opNorm returns the largest singular value of m, +Inf when the SVD fails.
