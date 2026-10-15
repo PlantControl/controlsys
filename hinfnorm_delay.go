@@ -25,7 +25,8 @@ type delayLFT struct {
 	n, m, p int
 	nd      int
 	tau     []float64
-	mult    *[]int // see multiples, computed on demand
+	mult    []int // see multiples, computed on demand
+	multOK  bool
 	td      timeDomain
 
 	h22sys *System
@@ -165,11 +166,10 @@ func (e *delayLFT) h22Det(w float64) (complex128, bool) {
 
 // multiples returns commensurateMultiples of the delays, computed once.
 func (e *delayLFT) multiples() []int {
-	if e.mult == nil {
-		m := commensurateMultiples(e.tau)
-		e.mult = &m
+	if !e.multOK {
+		e.mult, e.multOK = commensurateMultiples(e.tau), true
 	}
-	return *e.mult
+	return e.mult
 }
 
 func (e *delayLFT) d22Complex() []complex128 {
@@ -490,7 +490,7 @@ type highFrequencyGain struct {
 	e       *delayLFT
 	dim     int
 	grp     []int
-	k       []float64
+	k       []float64 // k_i, nil when all ones
 	kmax    float64
 	d11     []complex128
 	d12     []complex128
@@ -522,12 +522,17 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		}
 		return out
 	}
-	grp, k, kmax := make([]int, nd), make([]float64, nd), 1.0
-	dim := 1
+	ints := make([]int, 2*nd)
+	grp, dim := ints[nd:], 1
+	var k []float64
+	kmax := 1.0
 	if mult := e.multiples(); mult != nil {
-		for i, ki := range mult {
-			k[i] = float64(ki)
-			kmax = max(kmax, k[i])
+		if slices.Max(mult) > 1 {
+			k = make([]float64, nd)
+			for i, ki := range mult {
+				k[i] = float64(ki)
+				kmax = max(kmax, k[i])
+			}
 		}
 	} else {
 		dim = 0
@@ -538,7 +543,6 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 				grp[i] = dim
 				dim++
 			}
-			k[i] = 1
 		}
 	}
 	h := &highFrequencyGain{
@@ -546,7 +550,7 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		d11: toC(e.sys.D, p, m), d12: toC(lft.D12, p, nd),
 		d21: toC(lft.D21, nd, m), d22: toC(lft.D22, nd, nd),
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
-		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
+		phase: make([]complex128, nd), piv: ints[:nd], g: make([]complex128, p*m),
 	}
 	h.lip = h.lipschitz()
 	return h
@@ -581,8 +585,12 @@ func (h *highFrequencyGain) lipschitz() float64 {
 func (h *highFrequencyGain) at(theta []float64) float64 {
 	h.samples++
 	nd, p, m := h.e.nd, h.e.p, h.e.m
-	for k := range nd {
-		h.phase[k] = cmplx.Exp(complex(0, -h.k[k]*theta[h.grp[k]]))
+	for i := range nd {
+		t := theta[h.grp[i]]
+		if h.k != nil {
+			t *= h.k[i]
+		}
+		h.phase[i] = cmplx.Exp(complex(0, -t))
 	}
 	for i := range nd {
 		for j := range nd {
