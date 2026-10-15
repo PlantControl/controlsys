@@ -22,9 +22,11 @@ type differenceBounds struct{ polydisk, rhp, torus float64 }
 // κ(S)/(1 − ‖S⁻¹D22S‖) for a positive diagonal S, which commutes with Z, so
 // that (I − D22Z)⁻¹ = S(I − S⁻¹D22S·Z)⁻¹S⁻¹. Without it, equal delays make
 // Z = zI, |z| <= 1, and any similarity S does, taken from the Stein equation
-// P − D22ᵀPD22 = I, solvable when ρ(D22) < 1. On the torus an invertible D22
-// gives (I − D22Θ)⁻¹ = −(I − Θ⁻¹W)⁻¹Θ⁻¹W with W = D22⁻¹, bounded by
-// κ(S)γ/(1 − γ) when γ = ‖S⁻¹WS‖ < 1, the anti-stable difference operator.
+// P − D22ᵀPD22 = I, solvable when ρ(D22) < 1; commensurate delays
+// τ_i = k_i·h reduce to that case through liftD22. On the torus an
+// invertible D22 gives (I − D22Θ)⁻¹ = −(I − Θ⁻¹W)⁻¹Θ⁻¹W with W = D22⁻¹,
+// bounded by κ(S)γ/(1 − γ) when γ = ‖S⁻¹WS‖ < 1, the anti-stable
+// difference operator.
 func (e *delayLFT) difference() *differenceBounds {
 	if e.diff != nil {
 		return e.diff
@@ -48,8 +50,8 @@ func (e *delayLFT) difference() *differenceBounds {
 	if !math.IsInf(p, 1) {
 		return b
 	}
-	if equalDelays(e.tau) {
-		b.rhp = steinBound(d22)
+	if mult := e.multiples(); mult != nil {
+		b.rhp = steinBound(liftD22(d22, mult))
 	}
 	var w, res mat.Dense
 	if err := w.Inverse(d22); err == nil {
@@ -89,6 +91,87 @@ func equalDelays(tau []float64) bool {
 		}
 	}
 	return true
+}
+
+// maxLiftedOrder caps Σk_i, the order of liftD22.
+const maxLiftedOrder = 64
+
+// commensurateMultiples returns integers k_i with τ_i = k_i·h for a common
+// h > 0, exactly in the stored float64 delays, and Σk_i <= maxLiftedOrder;
+// all ones for equal delays, nil otherwise. A near-commensurate ratio is
+// rejected: stability that is not strong is not robust to the delays.
+func commensurateMultiples(tau []float64) []int {
+	if len(tau) == 0 {
+		return nil
+	}
+	if equalDelays(tau) {
+		k := make([]int, len(tau))
+		for i := range k {
+			k[i] = 1
+		}
+		return k
+	}
+	tmin, tmax := slices.Min(tau), slices.Max(tau)
+	if !(tmin >= 0x1p-900) || !(tmax <= 0x1p900) {
+		return nil
+	}
+	for l := 1; l <= maxLiftedOrder; l++ {
+		sum := 0
+		for _, t := range tau {
+			k := math.Round(t / tmin * float64(l))
+			if !exactProductsEqual(t, float64(l), tmin, k) {
+				sum = -1
+				break
+			}
+			sum += int(k)
+		}
+		if sum > maxLiftedOrder {
+			return nil
+		}
+		if sum > 0 {
+			k := make([]int, len(tau))
+			for i, t := range tau {
+				k[i] = int(math.Round(t / tmin * float64(l)))
+			}
+			return k
+		}
+	}
+	return nil
+}
+
+// exactProductsEqual reports a·b == c·d in exact arithmetic, by the
+// error-free products p + e = a·b, e = fma(a, b, −p), for normal products.
+func exactProductsEqual(a, b, c, d float64) bool {
+	p, q := a*b, c*d
+	return p == q && math.FMA(a, b, -p) == math.FMA(c, d, -q)
+}
+
+// liftD22 returns the companion lift M of order Σk_i with
+// det(I − zM) = det(I − D22·diag(z^{k_i})), whose resolvent (I − zM)⁻¹ has
+// (I − D22·diag(z^{k_i}))⁻¹ as its leading nd×nd block: state i holds x_i and
+// the k_i − 1 delayed copies z^m·x_i, m < k_i, after it.
+func liftD22(d22 *mat.Dense, k []int) *mat.Dense {
+	nd := len(k)
+	n, last := 0, make([]int, nd)
+	for _, ki := range k {
+		n += ki
+	}
+	m := mat.NewDense(n, n, nil)
+	row := nd
+	for j, kj := range k {
+		last[j] = j
+		for range kj - 1 {
+			m.Set(row, last[j], 1)
+			last[j] = row
+			row++
+		}
+	}
+	for i := range nd {
+		for j := range nd {
+			m.Set(i, last[j], d22.At(i, j))
+		}
+	}
+	return m
 }
 
 // similarityGap is the relative margin on a computed norm γ before γ < 1 is

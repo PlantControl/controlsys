@@ -25,6 +25,7 @@ type delayLFT struct {
 	n, m, p int
 	nd      int
 	tau     []float64
+	mult    *[]int // see multiples, computed on demand
 	td      timeDomain
 
 	h22sys *System
@@ -162,6 +163,15 @@ func (e *delayLFT) h22Det(w float64) (complex128, bool) {
 	return e.loopDet(pt.value(), e.hbuf), true
 }
 
+// multiples returns commensurateMultiples of the delays, computed once.
+func (e *delayLFT) multiples() []int {
+	if e.mult == nil {
+		m := commensurateMultiples(e.tau)
+		e.mult = &m
+	}
+	return *e.mult
+}
+
 func (e *delayLFT) d22Complex() []complex128 {
 	if e.d22c == nil {
 		nd := e.nd
@@ -180,6 +190,9 @@ func (e *delayLFT) d22Complex() []complex128 {
 // loopDet returns det(I − h·Δ(s)), 0 when it is singular.
 func (e *delayLFT) loopDet(s complex128, h []complex128) complex128 {
 	nd := e.nd
+	if nd == 1 {
+		return 1 + -h[0]*cmplx.Exp(-s*complex(e.tau[0], 0))
+	}
 	for j := range nd {
 		dj := cmplx.Exp(-s * complex(e.tau[j], 0))
 		for i := range nd {
@@ -383,9 +396,10 @@ func colNorms(m *mat.Dense, c int) []float64 {
 }
 
 // unstableDifferenceOperator reports whether f(s) = det(I − D22·Δ(s)) has a
-// zero s0 with Re s0 > 0: for equal delays τ > 0, ρ(D22) > 1, so f vanishes
-// on Re s = ln ρ/τ; otherwise, when the loop is neutral and its difference
-// operator is not certified stable, a zero certified by expPoly.rhpRoot.
+// zero s0 with Re s0 > 0: for commensurate delays τ_i = k_i·h > 0, an
+// eigenvalue μ of liftD22 with |μ| > 1, so f vanishes on Re s = ln|μ|/h;
+// otherwise, when the loop is neutral and its difference operator is not
+// certified stable, a zero certified by expPoly.rhpRoot.
 // f(s + 2πjq) is uniformly close to f(s) near s0 for infinitely many integers
 // q, by Dirichlet's simultaneous approximation of the qτ_k by integers, and
 // H22 → D22 uniformly there, so χ has infinitely many roots in Re s > 0 by
@@ -395,14 +409,15 @@ func (e *delayLFT) unstableDifferenceOperator() bool {
 	if e.nd == 0 || !(e.d22 > 1) || d22 == nil || d22.IsEmpty() {
 		return false
 	}
-	if !equalDelays(e.tau) || !(e.tau[0] > 0) {
+	mult := e.multiples()
+	if mult == nil || !(e.tau[0] > 0) {
 		if e.tail(math.Inf(1)) < 1 || !math.IsInf(e.difference().rhp, 1) || e.nd > maxPermanentDelays {
 			return false
 		}
 		return newExpPoly(d22, e.tau).rhpRoot(d22, e.tau)
 	}
 	var eig mat.Eigen
-	if !eig.Factorize(d22, mat.EigenNone) {
+	if !eig.Factorize(liftD22(d22, mult), mat.EigenNone) {
 		return false
 	}
 	for _, v := range eig.Values(nil) {
@@ -467,10 +482,16 @@ func (e *delayLFT) sigma(w float64) float64 {
 	return sv
 }
 
-// highFrequencyGain evaluates σ_max(G∞(θ)), G∞ = D11 + D12·Δ(I − D22·Δ)⁻¹·D21
-// with Δ = diag(e^{−jθ}), the values G(jω) approaches as ω → ∞.
+// highFrequencyGain evaluates σ_max(G∞(φ)), G∞ = D11 + D12·Δ(I − D22·Δ)⁻¹·D21
+// with Δ_i = e^{−j·k_i·φ_g(i)}, the values G(jω) approaches as ω → ∞. The
+// phases φ range over a torus of dim coordinates: one, φ = ωh, for
+// commensurate delays τ_i = k_i·h, else one per distinct delay with k_i = 1.
 type highFrequencyGain struct {
 	e       *delayLFT
+	dim     int
+	grp     []int
+	k       []float64
+	kmax    float64
 	d11     []complex128
 	d12     []complex128
 	d21     []complex128
@@ -501,23 +522,46 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		}
 		return out
 	}
-	return &highFrequencyGain{
-		e:   e,
+	grp, k, kmax := make([]int, nd), make([]float64, nd), 1.0
+	dim := 1
+	if mult := e.multiples(); mult != nil {
+		for i, ki := range mult {
+			k[i] = float64(ki)
+			kmax = max(kmax, k[i])
+		}
+	} else {
+		dim = 0
+		for i, t := range e.tau {
+			if f := slices.Index(e.tau, t); f < i {
+				grp[i] = grp[f]
+			} else {
+				grp[i] = dim
+				dim++
+			}
+			k[i] = 1
+		}
+	}
+	h := &highFrequencyGain{
+		e: e, dim: dim, grp: grp, k: k, kmax: kmax,
 		d11: toC(e.sys.D, p, m), d12: toC(lft.D12, p, nd),
 		d21: toC(lft.D21, nd, m), d22: toC(lft.D22, nd, nd),
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
 		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
-		lip: highFrequencyLipschitz(e),
 	}
+	h.lip = h.lipschitz()
+	return h
 }
 
-// highFrequencyLipschitz bounds the Lipschitz constant of G∞ in θ by
-// ‖D12‖‖D21‖·r², with r bounding both ‖(I − ΔD22)⁻¹‖ and ‖(I − D22Δ)⁻¹‖:
-// 1/(1 − ‖D22‖) when ‖D22‖ < 1, ‖(I − |D22|)⁻¹‖ when ρ(|D22|) < 1, else the
-// torus bound of difference.
-func highFrequencyLipschitz(e *delayLFT) float64 {
-	k := e.d12 * e.d21
-	if k == 0 {
+// lipschitz bounds the Lipschitz constant of G∞ in φ, in the max-norm, by
+// k_max·‖D12‖‖D21‖·r², with r bounding ‖(I − D22Δ)⁻¹‖ on the phase torus,
+// which also bounds ‖(I − ΔD22)⁻¹‖ = ‖Δ(I − D22Δ)⁻¹Δ⁻¹‖: 1/(1 − ‖D22‖)
+// when ‖D22‖ < 1, ‖(I − |D22|)⁻¹‖ when ρ(|D22|) < 1, else the polydisk or
+// torus bound of difference, or for one phase its right half-plane bound,
+// since Δ(φ) then is Δ(jφ/h).
+func (h *highFrequencyGain) lipschitz() float64 {
+	e := h.e
+	c := e.d12 * e.d21
+	if c == 0 {
 		return 0
 	}
 	r := e.r0
@@ -525,16 +569,20 @@ func highFrequencyLipschitz(e *delayLFT) float64 {
 		r = min(r, 1/(1-e.d22))
 	}
 	if math.IsInf(r, 1) {
-		r = e.difference().torus
+		d := e.difference()
+		r = min(d.polydisk, d.torus)
+		if h.dim == 1 {
+			r = min(r, d.rhp)
+		}
 	}
-	return k * r * r
+	return h.kmax * c * r * r
 }
 
 func (h *highFrequencyGain) at(theta []float64) float64 {
 	h.samples++
 	nd, p, m := h.e.nd, h.e.p, h.e.m
 	for k := range nd {
-		h.phase[k] = cmplx.Exp(complex(0, -theta[k]))
+		h.phase[k] = cmplx.Exp(complex(0, -h.k[k]*theta[h.grp[k]]))
 	}
 	for i := range nd {
 		for j := range nd {
@@ -566,17 +614,17 @@ func (h *highFrequencyGain) at(theta []float64) float64 {
 	return sv
 }
 
-// oneDelaySup returns sup_θ σ_max(G∞(θ)) for one internal delay, where θ =
-// ωτ sweeps the whole circle as ω → ∞: the largest of 1024 samples, each
+// onePhaseSup returns sup_φ σ_max(G∞(φ)) for one phase, where φ = ωh
+// sweeps the whole circle as ω → ∞: the largest of 1024·k_max samples, each
 // local maximum refined by golden-section search.
-func (h *highFrequencyGain) oneDelaySup() float64 {
+func (h *highFrequencyGain) onePhaseSup() float64 {
 	theta := make([]float64, 1)
 	at := func(t float64) float64 {
 		theta[0] = t
 		return h.at(theta)
 	}
-	const k = 1024
-	step := 2 * math.Pi / k
+	k := 1024 * int(h.kmax)
+	step := 2 * math.Pi / float64(k)
 	vals := make([]float64, k)
 	for i := range k {
 		vals[i] = at(float64(i) * step)
@@ -594,12 +642,12 @@ func (h *highFrequencyGain) oneDelaySup() float64 {
 }
 
 // torusGrid returns the centres of a uniform grid of about 4096 cells on
-// the torus of phases, nd consecutive values per cell, and their half-width.
+// the torus of phases, dim consecutive values per cell, and their half-width.
 func (h *highFrequencyGain) torusGrid() ([]float64, float64) {
 	if h.grid != nil {
 		return h.grid, h.gridR
 	}
-	nd := h.e.nd
+	nd := h.dim
 	n0 := max(2, int(math.Pow(4096, 1/float64(nd))))
 	r := math.Pi / float64(n0)
 	total := nd
@@ -628,14 +676,14 @@ func (h *highFrequencyGain) torusGrid() ([]float64, float64) {
 }
 
 // estimate returns a lower estimate of sup σ_max(G∞): the exact supremum
-// for one delay, else the largest sample of torusGrid.
+// for one phase, else the largest sample of torusGrid.
 func (h *highFrequencyGain) estimate() float64 {
-	if h.e.nd == 1 {
-		return h.oneDelaySup()
+	if h.dim == 1 {
+		return h.onePhaseSup()
 	}
 	cells, _ := h.torusGrid()
 	best := math.Inf(-1)
-	for c := range slices.Chunk(cells, h.e.nd) {
+	for c := range slices.Chunk(cells, h.dim) {
 		best = max(best, h.at(c))
 	}
 	return best
@@ -643,13 +691,13 @@ func (h *highFrequencyGain) estimate() float64 {
 
 // below reports whether σ_max(G∞) <= level on the whole torus of phases,
 // by branch and bound: G∞ is Lipschitz in θ with constant lip (see
-// highFrequencyLipschitz) in the max-norm, since
+// lipschitz) in the max-norm, since
 // dΔ(I − D22Δ)⁻¹ = (I − ΔD22)⁻¹·dΔ·(I − D22Δ)⁻¹, so a cell of half-width r
 // around a sample v cannot exceed v + lip·r. Cells that may exceed level are
 // split until none remain, a sample exceeds level, or the sample budget is
 // spent.
 func (h *highFrequencyGain) below(level float64, budget int) bool {
-	nd := h.e.nd
+	nd := h.dim
 	cells, r := h.torusGrid()
 	var bufs [2][]float64
 	for gen := 0; len(cells) > 0; gen++ {
@@ -855,7 +903,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		switch {
 		case est < best && hf.below(level, 1<<21):
 			lim = level
-		case e.nd == 1 && est > best*(1+tol):
+		case hf.dim == 1 && est > best*(1+tol):
 			lim = est
 		default:
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
