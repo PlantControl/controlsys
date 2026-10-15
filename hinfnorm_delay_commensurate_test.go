@@ -27,6 +27,9 @@ func TestCommensurateMultiples(t *testing.T) {
 		{[]float64{1, math.Sqrt2}, nil},
 		{[]float64{0, 1}, nil},
 		{[]float64{1, 65}, nil},
+		{[]float64{1, 64}, nil},
+		{[]float64{1, 63}, []int{1, 63}},
+		{[]float64{0x1p-100, 0x1p100}, nil},
 	} {
 		if got := commensurateMultiples(tc.tau); !slices.Equal(got, tc.want) {
 			t.Errorf("commensurateMultiples(%v) = %v, want %v", tc.tau, got, tc.want)

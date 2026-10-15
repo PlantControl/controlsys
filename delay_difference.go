@@ -112,7 +112,7 @@ func commensurateMultiples(tau []float64) []int {
 		return k
 	}
 	tmin, tmax := slices.Min(tau), slices.Max(tau)
-	if !(tmin >= 0x1p-900) || !(tmax <= 0x1p900) {
+	if !(tmin >= 0x1p-900) || !(tmax <= 0x1p900) || tmax/tmin > maxLiftedOrder {
 		return nil
 	}
 	for l := 1; l <= maxLiftedOrder; l++ {
