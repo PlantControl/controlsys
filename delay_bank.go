@@ -7,64 +7,15 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-type delayBankKind int
-
-const (
-	delayBankSample delayBankKind = iota
-	delayBankPade
-)
-
-type delayBankSpec struct {
-	sampleDelay     []float64
-	continuousDelay []float64
-	channels        int
-	dt              float64
-	thiranOrder     int
-	padeOrder       int
-	kind            delayBankKind
-}
-
-// continuousToSampleDelay converts continuous delays to sample counts at dt.
-func continuousToSampleDelay(contDelay []float64, dt float64) []float64 {
-	samples := make([]float64, len(contDelay))
-	for i, d := range contDelay {
-		samples[i] = d / dt
-	}
-	return samples
-}
-
-func buildDiscreteSampleDelayBank(sampleDelay []float64, channels int, dt float64, thiranOrder int) (*System, error) {
-	return buildDelayBank(delayBankSpec{
-		sampleDelay: sampleDelay,
-		channels:    channels,
-		dt:          dt,
-		thiranOrder: thiranOrder,
-		kind:        delayBankSample,
-	})
-}
-
+// buildContinuousPadeDelayBank returns the block-diagonal bank of per-channel
+// Padé delay models.
 func buildContinuousPadeDelayBank(contDelay []float64, order int) (*System, error) {
-	return buildDelayBank(delayBankSpec{
-		continuousDelay: contDelay,
-		channels:        len(contDelay),
-		padeOrder:       order,
-		kind:            delayBankPade,
-	})
-}
-
-// buildDelayBank returns the block-diagonal bank of per-channel delay models.
-func buildDelayBank(spec delayBankSpec) (*System, error) {
-	if spec.channels == 0 {
+	if len(contDelay) == 0 {
 		return nil, fmt.Errorf("delay bank has no channels: %w", ErrDimensionMismatch)
 	}
-	if spec.kind == delayBankSample {
-		if _, _, err := absorbShifts(0, sampleBankStates(spec.sampleDelay, spec.thiranOrder)); err != nil {
-			return nil, err
-		}
-	}
 	var bank *System
-	for i := range spec.channels {
-		ch, err := buildDelayChannel(spec, i)
+	for _, tau := range contDelay {
+		ch, err := buildPadeDelayChannel(tau, order)
 		if err != nil {
 			return nil, err
 		}
@@ -78,48 +29,6 @@ func buildDelayBank(spec delayBankSpec) (*System, error) {
 		}
 	}
 	return bank, nil
-}
-
-// sampleBankStates returns each channel's state count: round(d) for an
-// integer delay, max(round(d), order) for a fixed-order Thiran channel.
-func sampleBankStates(sampleDelay []float64, thiranOrder int) []float64 {
-	states := make([]float64, len(sampleDelay))
-	for i, d := range sampleDelay {
-		states[i] = math.Round(d)
-		if d != 0 && !isIntegerSampleDelay(d) {
-			states[i] = math.Max(states[i], float64(thiranOrder))
-		}
-	}
-	return states
-}
-
-func hasFractionalSampleDelay(sampleDelay []float64) bool {
-	for _, samples := range sampleDelay {
-		if samples == 0 {
-			continue
-		}
-		if !isIntegerSampleDelay(samples) {
-			return true
-		}
-	}
-	return false
-}
-
-func buildDelayChannel(spec delayBankSpec, channel int) (*System, error) {
-	if spec.kind == delayBankPade {
-		return buildPadeDelayChannel(spec.continuousDelay[channel], spec.padeOrder)
-	}
-	return buildSampleDelayChannel(spec.sampleDelay[channel], spec.dt, spec.thiranOrder)
-}
-
-func buildSampleDelayChannel(samples, dt float64, thiranOrder int) (*System, error) {
-	if samples == 0 {
-		return NewGain(mat.NewDense(1, 1, []float64{1}), dt)
-	}
-	if isIntegerSampleDelay(samples) {
-		return integerDelaySS(samples, dt)
-	}
-	return thiranDelay(samples*dt, thiranOrder, dt)
 }
 
 func buildPadeDelayChannel(tau float64, order int) (*System, error) {

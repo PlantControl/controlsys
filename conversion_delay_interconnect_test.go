@@ -18,7 +18,7 @@ func conversionDynamicLFT(t *testing.T) *System {
 }
 
 func TestSeriesInternalDelayIndependentProduct(t *testing.T) {
-	bank, err := buildDiscreteSampleDelayBank(continuousToSampleDelay([]float64{.35}, .1), 1, .1, 3)
+	bank, err := thiranDelay(.35, 3, .1)
 	if err != nil {
 		t.Fatal(err)
 	}

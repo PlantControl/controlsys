@@ -47,8 +47,7 @@ func validateThiranArgs(tau, dt float64) error {
 	return nil
 }
 
-// thiranDelay is ThiranDelay with a fixed filter order N (1-10), used by C2D
-// Thiran delay banks. A delay of D = tau/dt samples is stable only for
+// thiranDelay is ThiranDelay with a fixed filter order N (1-10). A delay of D = tau/dt samples is stable only for
 // D > N-1; smaller delays return ErrFractionalDelay. Near that bound the
 // poles approach -1 and the filter is poorly conditioned. Integer D returns
 // the exact delay z^-D with D states for any N. For D > N+0.5 the excess

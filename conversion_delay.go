@@ -60,7 +60,7 @@ func applyConversionExternalDelays(cont, disc *System, input, output []float64, 
 			return out, nil
 		}
 	}
-	policy := newDelayConversionPolicy(dt, opts.ThiranOrder, 0)
+	policy := newDelayConversionPolicy(dt)
 	if opts.Method == C2DMethodTustin || opts.Method == C2DMethodMatched {
 		if opts.ThiranOrder == 0 {
 			var err error

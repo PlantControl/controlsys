@@ -3,13 +3,11 @@ package controlsys
 import "plantcontrol.org/v1/gonum/mat"
 
 type delayConversionPolicy struct {
-	dt          float64
-	thiranOrder int
-	padeOrder   int
+	dt float64
 }
 
-func newDelayConversionPolicy(dt float64, thiranOrder, padeOrder int) delayConversionPolicy {
-	return delayConversionPolicy{dt: dt, thiranOrder: thiranOrder, padeOrder: padeOrder}
+func newDelayConversionPolicy(dt float64) delayConversionPolicy {
+	return delayConversionPolicy{dt: dt}
 }
 
 func (p delayConversionPolicy) applyDiscreteDelayFields(disc, cont *System) (*System, error) {
@@ -20,11 +18,11 @@ func (p delayConversionPolicy) applyDiscreteDelayFields(disc, cont *System) (*Sy
 			return nil, err
 		}
 	}
-	disc.InputDelay, err = convertSliceDelayToDiscrete(cont.InputDelay, p.dt, p.thiranOrder)
+	disc.InputDelay, err = convertSliceDelayToDiscrete(cont.InputDelay, p.dt, 0)
 	if err != nil {
 		return nil, err
 	}
-	disc.OutputDelay, err = convertSliceDelayToDiscrete(cont.OutputDelay, p.dt, p.thiranOrder)
+	disc.OutputDelay, err = convertSliceDelayToDiscrete(cont.OutputDelay, p.dt, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -51,19 +49,13 @@ func (p delayConversionPolicy) applyContinuousDelayFields(cont, disc *System) {
 
 func (p delayConversionPolicy) applyDiscreteExternal(disc *System, contInputDelay, contOutputDelay []float64) (*System, error) {
 	var err error
-	disc.InputDelay, err = convertSliceDelayToDiscrete(contInputDelay, p.dt, p.thiranOrder)
+	disc.InputDelay, err = convertSliceDelayToDiscrete(contInputDelay, p.dt, 0)
 	if err != nil {
 		return nil, err
 	}
-	disc.OutputDelay, err = convertSliceDelayToDiscrete(contOutputDelay, p.dt, p.thiranOrder)
+	disc.OutputDelay, err = convertSliceDelayToDiscrete(contOutputDelay, p.dt, 0)
 	if err != nil {
 		return nil, err
-	}
-	if p.thiranOrder > 0 {
-		disc, err = absorbFractionalDelays(disc, contInputDelay, contOutputDelay, p.dt, p.thiranOrder)
-		if err != nil {
-			return nil, err
-		}
 	}
 	return disc, nil
 }

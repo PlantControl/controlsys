@@ -72,7 +72,7 @@ func (sys *System) discretizeTustin(dt, prewarp float64) (*System, error) {
 		return nil, err
 	}
 	out.Dt = dt
-	policy := newDelayConversionPolicy(dt, 0, 0)
+	policy := newDelayConversionPolicy(dt)
 	if out, err = policy.applyDiscreteDelayFields(out, sys); err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (sys *System) undiscretizeTustin(prewarp float64) (*System, error) {
 		return nil, err
 	}
 	out.Dt = 0
-	policy := newDelayConversionPolicy(sys.Dt, 0, 0)
+	policy := newDelayConversionPolicy(sys.Dt)
 	policy.applyContinuousDelayFields(out, sys)
 	propagateNames(out, sys)
 	return out, nil
@@ -297,36 +297,6 @@ func convertSliceDelayToContinuous(delay []float64, dt float64) []float64 {
 	return out
 }
 
-func absorbFractionalDelays(disc *System, contInputDelay, contOutputDelay []float64, dt float64, thiranOrder int) (*System, error) {
-	_, m, p := disc.Dims()
-
-	if samples := continuousToSampleDelay(contInputDelay, dt); hasFractionalSampleDelay(samples) {
-		bank, err := buildDiscreteSampleDelayBank(samples, m, dt, thiranOrder)
-		if err != nil {
-			return nil, err
-		}
-		disc, err = Series(bank, disc)
-		if err != nil {
-			return nil, err
-		}
-		disc.InputDelay = nil
-	}
-
-	if samples := continuousToSampleDelay(contOutputDelay, dt); hasFractionalSampleDelay(samples) {
-		bank, err := buildDiscreteSampleDelayBank(samples, p, dt, thiranOrder)
-		if err != nil {
-			return nil, err
-		}
-		disc, err = Series(disc, bank)
-		if err != nil {
-			return nil, err
-		}
-		disc.OutputDelay = nil
-	}
-
-	return disc, nil
-}
-
 func (sys *System) discretizeZOH(dt float64) (*System, error) {
 	if sys.IsDiscrete() {
 		return nil, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
@@ -353,7 +323,7 @@ func (sys *System) discretizeZOH(dt float64) (*System, error) {
 			Dt: dt,
 		}
 		propagateNames(out, sys)
-		return newDelayConversionPolicy(dt, 0, 0).applyDiscreteDelayFields(out, sys)
+		return newDelayConversionPolicy(dt).applyDiscreteDelayFields(out, sys)
 	}
 
 	nm := n + m
@@ -366,7 +336,7 @@ func (sys *System) discretizeZOH(dt float64) (*System, error) {
 		Ad.Copy(&eA)
 		out := &System{A: Ad, B: denseCopy(sys.B), C: C, D: D, Dt: dt}
 		propagateNames(out, sys)
-		return newDelayConversionPolicy(dt, 0, 0).applyDiscreteDelayFields(out, sys)
+		return newDelayConversionPolicy(dt).applyDiscreteDelayFields(out, sys)
 	}
 
 	M := mat.NewDense(nm, nm, nil)
@@ -399,7 +369,7 @@ func (sys *System) discretizeZOH(dt float64) (*System, error) {
 	Bd := mat.NewDense(n, m, bdData)
 
 	out := &System{A: Ad, B: Bd, C: C, D: D, Dt: dt}
-	policy := newDelayConversionPolicy(dt, 0, 0)
+	policy := newDelayConversionPolicy(dt)
 	out, err := policy.applyDiscreteDelayFields(out, sys)
 	if err != nil {
 		return nil, err
@@ -468,7 +438,7 @@ func (sys *System) d2cZOH() (*System, error) {
 }
 
 func d2cPropagateDelays(out, sys *System, dt float64) {
-	policy := newDelayConversionPolicy(dt, 0, 0)
+	policy := newDelayConversionPolicy(dt)
 	policy.applyContinuousDelayFields(out, sys)
 }
 
