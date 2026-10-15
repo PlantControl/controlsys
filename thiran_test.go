@@ -440,6 +440,7 @@ func TestThiranDelayRejectsInvalidArgs(t *testing.T) {
 		{math.NaN(), 0.1, ErrNegativeDelay},
 		{math.Inf(1), 0.1, ErrNegativeDelay},
 		{0.1, 0, ErrInvalidSampleTime},
+		{0.1, -1, ErrInvalidSampleTime},
 		{0.1, math.NaN(), ErrInvalidSampleTime},
 		{0.1, math.Inf(1), ErrInvalidSampleTime},
 	} {

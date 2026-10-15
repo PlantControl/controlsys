@@ -71,7 +71,7 @@ func TestConversionThiranChannelHugeDelayKeepsWholeSamples(t *testing.T) {
 			t.Fatalf("D=%g: %v", tc.samples, err)
 		}
 		n, _, _ := sys.Dims()
-		if n != tc.states || len(sys.InputDelay) != 1 || math.Abs(sys.InputDelay[0]-tc.whole) > 1e-6*tc.whole {
+		if n != tc.states || len(sys.InputDelay) != 1 || sys.InputDelay[0] != tc.whole {
 			t.Errorf("D=%g: states %d InputDelay %v, want %d and [%g]", tc.samples, n, sys.InputDelay, tc.states, tc.whole)
 		}
 	}
