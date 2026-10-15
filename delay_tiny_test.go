@@ -61,13 +61,13 @@ func TestTinyInternalDelayResponses(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s Impulse: %v", label, err)
 		}
-		tinyDelayCheck(t, label+" Impulse", resp, decay, 4*tol)
+		tinyDelayCheck(t, label+" Impulse", resp, decay, 2*tol)
 
 		resp, err = controlsys.Initial(sys, mat.NewVecDense(1, []float64{1}), tFinal)
 		if err != nil {
 			t.Fatalf("%s Initial: %v", label, err)
 		}
-		tinyDelayCheck(t, label+" Initial", resp, decay, 4*tol)
+		tinyDelayCheck(t, label+" Initial", resp, decay, 2*tol)
 
 		const steps = 61
 		tm := make([]float64, steps)
