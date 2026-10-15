@@ -1303,12 +1303,34 @@ func TestSweepRobustLargeDiscreteDelay(t *testing.T) {
 		t.Skipf("known defect, ergo %s: discrete FreqResponse applies a d-sample I/O delay by d complex divisions (seconds per frequency at 1e9); not run", sweepRobustErgoFreqIOLoop)
 	})
 	t.Run("internal1e9", func(t *testing.T) {
-		t.Skipf("known defect, ergo %s: Simulate with a 1e9-sample internal delay allocates N*(maxDelay+1) floats (8 GB) regardless of horizon; not run", sweepRobustErgoSimBuffer)
+		hmd := imd
+		hmd.tau = []float64{1e9}
+		hs := sweepRobustMustBuild(t, hmd)
+		var hresp *controlsys.Response
+		var herr error
+		if r := sweepRobustGuard(t, "internal 1e9 Simulate", 10*time.Second, func() { hresp, herr = hs.Simulate(U, nil, nil) }); r != nil {
+			t.Fatalf("internal 1e9 Simulate panicked: %v", r)
+		}
+		if herr != nil {
+			t.Fatalf("internal 1e9 Simulate: %v", herr)
+		}
+		sweepRobustCheckSim(t, "internal 1e9", hresp.Y, sweepRobustSimRef(hmd, u, steps), 1e-12, hmd)
+
+		mmd := sweepRobustModel{n: 1, m: 1, p: 1, N: 2, dt: 1, A: []float64{0.5}, B: []float64{1}, C: []float64{1}, D: []float64{0.2},
+			B2: []float64{0.1, -0.2}, C2: []float64{0.3, 0.7}, D12: []float64{0.4, 0.6}, D21: []float64{1, -0.5},
+			D22: []float64{0.5, 0.1, -0.3, 0.2}, tau: []float64{3, 1e9}}
+		ms := sweepRobustMustBuild(t, mmd)
+		if r := sweepRobustGuard(t, "internal {3,1e9} Simulate", 10*time.Second, func() { hresp, herr = ms.Simulate(U, nil, nil) }); r != nil {
+			t.Fatalf("internal {3,1e9} Simulate panicked: %v", r)
+		}
+		if herr != nil {
+			t.Fatalf("internal {3,1e9} Simulate: %v", herr)
+		}
+		sweepRobustCheckSim(t, "internal {3,1e9}", hresp.Y, sweepRobustSimRef(mmd, u, steps), 1e-12, mmd)
 	})
 }
 
 const (
-	sweepRobustErgoSimBuffer  = "6Z2TFQ"
 	sweepRobustErgoFreqIOLoop = "CIC2TD"
 	sweepRobustErgoFeedbackEr = "KVUJYJ"
 )
