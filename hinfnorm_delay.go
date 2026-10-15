@@ -171,8 +171,8 @@ func (e *delayLFT) charMinusOne(w float64) complex128 {
 func (e *delayLFT) tail(w float64) float64 {
 	h := e.h(e.d22, e.c2, e.b2, w)
 	bound := math.Pow(1+h, float64(e.nd)) - 1
-	if e.nd <= maxPermanentDelays {
-		p22 := entryBound(e.abs22, e.rowC2, e.colB2, e.nd, e.nd, e.resolvent(w))
+	if g := e.resolvent(w); e.nd <= maxPermanentDelays && !math.IsInf(g, 1) {
+		p22 := entryBound(e.abs22, e.rowC2, e.colB2, e.nd, e.nd, g)
 		bound = min(bound, permanentOfIPlus(p22, e.nd)-1)
 	}
 	return bound
@@ -247,6 +247,15 @@ func nonnegResolvent(p []float64, n int) ([]float64, bool) {
 				return nil, false
 			}
 			a.Set(i, j, v)
+		}
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(mat.NewDense(n, n, slices.Clone(p)), mat.EigenNone) {
+		return nil, false
+	}
+	for _, v := range eig.Values(nil) {
+		if !(cmplx.Abs(v) < 1) {
+			return nil, false
 		}
 	}
 	var inv mat.Dense
@@ -541,8 +550,8 @@ func (h *highFrequencyGain) estimate() float64 {
 }
 
 // below reports whether σ_max(G∞) <= level on the whole torus of phases,
-// by branch and bound: G∞ is Lipschitz in θ with constant
-// ‖D12‖‖D21‖/(1 − ‖D22‖)² in the max-norm, since
+// by branch and bound: G∞ is Lipschitz in θ with constant lip (see
+// highFrequencyLipschitz) in the max-norm, since
 // dΔ(I − D22Δ)⁻¹ = (I − ΔD22)⁻¹·dΔ·(I − D22Δ)⁻¹, so a cell of half-width r
 // around a sample v cannot exceed v + lip·r. Cells that may exceed level are
 // split until none remain, a sample exceeds level, or the sample budget is
