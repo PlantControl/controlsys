@@ -637,12 +637,19 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	if hasP && hasI && hasD {
-		seed := c
-		seed.Kd = 0
-		seed.Ki = imag(target) / imag(ib)
-		seed.Kp = real(target) - seed.Ki*real(ib)
-		if err := evaluate(seed); err != nil {
-			return nil, fmt.Errorf("%s: %w", op, err)
+		// The lead-heavy seed can break a derivative tail bound; smaller Kd
+		// on the same target are tried only when no seed is feasible.
+		for _, frac := range []float64{0, .75, .5, .25} {
+			if frac > 0 && finitePID(incumbentScore) {
+				break
+			}
+			seed := c
+			seed.Kd = frac * c.Kd
+			seed.Ki = (imag(target) - seed.Kd*imag(db)) / imag(ib)
+			seed.Kp = real(target) - seed.Ki*real(ib) - seed.Kd*real(db)
+			if err := evaluate(seed); err != nil {
+				return nil, fmt.Errorf("%s: %w", op, err)
+			}
 		}
 	}
 	evidence.SeedObjective = bestScore
@@ -988,9 +995,10 @@ func pidDerivTail(plant *System) func(float64) float64 {
 // pidTuningMaxTail bounds limsup |L(jω)| of a delayed loop with an ideal
 // derivative. Above 1 the loop is unstable; near 1 the neutral root chain at
 // Re s = ln|L(j∞)|/τ that Kd·CB sets is barely damped, which no finite-band
-// phase margin reveals. ½ keeps 6 dB of high-frequency gain margin and
-// |S| <= 2 along the chain. Other candidates need only limsup |L| < 1.
-const pidTuningMaxTail = 0.5
+// phase margin reveals. 1 − 1/pidTuningMaxSensitivity keeps |S| along the
+// chain within the bound used for default designs. Other candidates need
+// only limsup |L| < 1.
+const pidTuningMaxTail = 1 - 1.0/pidTuningMaxSensitivity
 
 // pidTuningDelayStability returns a Nyquist stability test for loops
 // C(s)·P(s) with a continuous delayed plant, or false when the plant is

@@ -307,7 +307,7 @@ func TestTunePIDDefaultPDMovesCrossover(t *testing.T) {
 	}
 }
 
-// The ½ tail cap guards the Kd·CB neutral chain only; P on a delayed
+// The ideal-derivative tail cap guards the Kd·CB neutral chain only; P on a delayed
 // biproper plant needs just limsup |L| < 1.
 func TestTunePIDDelayTailCapIdealDerivativeOnly(t *testing.T) {
 	p := makePlant(t, []float64{.5, 1}, []float64{1, 1})
@@ -440,5 +440,32 @@ func TestTunePIDDiscreteMovedCrossoverBoundsSensitivity(t *testing.T) {
 	}
 	if _, err := TunePID(context.Background(), d, PidtunePD, PIDTuningOptions{}); !pidSensitivityRejected(err) {
 		t.Fatalf("err %v, want sensitivity rejection", err)
+	}
+}
+
+// An integrator with delay needs Kd·CB above ½; the tail cap must still admit
+// a strongly stable ideal-derivative PID (f7f60ac tuned Kd ≈ 0.69 here).
+func TestTunePIDDelayedIntegratorPID(t *testing.T) {
+	const tau = 1.0
+	p := makePlant(t, []float64{1}, []float64{1, 0})
+	if err := p.SetInputDelay([]float64{tau}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := TunePID(context.Background(), p, PidtunePID, PIDTuningOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := r.Controller
+	if c.Kp <= 0 || c.Ki < 0 || c.Kd < 0 || c.Kd > pidTuningMaxTail || r.Evidence.Stability != PIDStabilityNyquist {
+		t.Fatalf("%+v evidence %q", c, r.Evidence.Stability)
+	}
+	minRet := math.Inf(1)
+	for w := 1e-3; w < 1e3; w = math.Min(w*1.0005, w+1e-3) {
+		s := complex(0, w)
+		l := (complex(c.Kp, 0) + complex(c.Ki, 0)/s + complex(c.Kd, 0)*s) * cmplx.Exp(-s*complex(tau, 0)) / s
+		minRet = math.Min(minRet, cmplx.Abs(1+l))
+	}
+	if minRet < 1/(pidTuningMaxSensitivity+.5) {
+		t.Errorf("%+v: min|1+L| = %g", c, minRet)
 	}
 }
