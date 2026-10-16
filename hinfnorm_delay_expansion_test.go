@@ -244,24 +244,60 @@ func TestHinfNormLimitBelowEveryPassage(t *testing.T) {
 	}
 }
 
-// BenchmarkHinfNorm_DelayLimitAtInf times delay models whose peak is the
-// ω → ∞ limit, decided by limitVerdict: "limit" and "flat" with k = 2 ("flat"
-// with κ small, so the expansion must reach far), "k20" with k = 20.
+// limitAtInfCases are delay models whose peak is the ω → ∞ limit, decided by
+// limitVerdict: "limit" and "flat" with k = 2 ("flat" with κ small, so the
+// expansion must reach far), "k20" with k = 20.
+var limitAtInfCases = []struct {
+	expansionCase
+	k float64
+}{
+	{expansionLimit, 2},
+	{expansionCase{"flat",
+		[]float64{0.5888561770149723, -0.10453534772349099, 0.26009762791254687, -0.4187778122618928},
+		[]float64{-1.3972940735741266, 0.09637692295337041}, []float64{-1.601893769323554, 0.40406439147179873},
+		0.3547077050852388}, 2},
+	{expansionCase{"k20",
+		[]float64{-0.6267854986926139, -0.22753476407416448, 0.7604859326403655, 0.3445225407726179},
+		[]float64{2.0994008736286496, -0.7771379653940502}, []float64{2.8964548762636153, -1.852398922038503},
+		0.23582769791420977}, 20},
+}
+
+// TestModelMaxMatchesFullScan checks the pruned modelMax against the model
+// evaluated directly at every sample with every local maximum refined.
+func TestModelMaxMatchesFullScan(t *testing.T) {
+	for _, c := range limitAtInfCases {
+		t.Run(c.name, func(t *testing.T) {
+			sys, _, _ := feedthroughDifferenceLoop(t, c.d22, c.d12, c.d21, []float64{c.h, c.k * c.h}, [2]float64{1, c.k})
+			e, err := newDelayLFT(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			x := newHighFrequencyExpansion(e, newHighFrequencyGain(e))
+			n := 1024 * int(c.k)
+			step := 2 * math.Pi / float64(n)
+			for _, tt := range []float64{0.2, 0.05, 1e-2, 1e-4, 1e-8} {
+				f := func(phi float64) float64 { return x.model(phi, tt) }
+				v := make([]float64, n)
+				for i := range v {
+					v[i] = f(float64(i) * step)
+				}
+				want := 0.0
+				for i := range v {
+					if v[i] >= v[(i+n-1)%n] && v[i] >= v[(i+1)%n] {
+						_, g := goldenMax(float64(i-1)*step, float64(i+1)*step, float64(i)*step, v[i], f)
+						want = max(want, g)
+					}
+				}
+				if got := x.modelMax(tt); math.Abs(got-want) > 1e-12*want {
+					t.Errorf("t = %g: modelMax = %.16g, full scan %.16g", tt, got, want)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkHinfNorm_DelayLimitAtInf(b *testing.B) {
-	for _, c := range []struct {
-		expansionCase
-		k float64
-	}{
-		{expansionLimit, 2},
-		{expansionCase{"flat",
-			[]float64{0.5888561770149723, -0.10453534772349099, 0.26009762791254687, -0.4187778122618928},
-			[]float64{-1.3972940735741266, 0.09637692295337041}, []float64{-1.601893769323554, 0.40406439147179873},
-			0.3547077050852388}, 2},
-		{expansionCase{"k20",
-			[]float64{-0.6267854986926139, -0.22753476407416448, 0.7604859326403655, 0.3445225407726179},
-			[]float64{2.0994008736286496, -0.7771379653940502}, []float64{2.8964548762636153, -1.852398922038503},
-			0.23582769791420977}, 20},
-	} {
+	for _, c := range limitAtInfCases {
 		sys, _, _ := feedthroughDifferenceLoop(b, c.d22, c.d12, c.d21, []float64{c.h, c.k * c.h}, [2]float64{1, c.k})
 		b.Run(c.name, func(b *testing.B) {
 			b.ReportAllocs()
