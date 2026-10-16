@@ -204,15 +204,7 @@ func (x *highFrequencyExpansion) sampleCircle() {
 			x.singular = true
 			continue
 		}
-		for r := range x.g[0] {
-			for a := range expansionOrder + 1 {
-				ga := x.g[a][r]
-				for b := range expansionOrder + 1 {
-					gb := x.g[b][r]
-					c[a+b] += real(ga)*real(gb) + imag(ga)*imag(gb)
-				}
-			}
-		}
+		x.squared(c)
 		for n := 1; n < polyLen; n++ {
 			x.polyMax[n] = max(x.polyMax[n], math.Abs(c[n]))
 		}
@@ -225,26 +217,59 @@ func (x *highFrequencyExpansion) sampleCircle() {
 	x.vals, x.stamp = make([]float64, k), make([]int, k)
 }
 
-// sampleModel returns the model at sample i for t, cached for this epoch.
-func (x *highFrequencyExpansion) sampleModel(i int, t float64) float64 {
+// squared adds to c the coefficients c_n = Σ_{i+j=n} Re⟨g_i, g_j⟩ of the
+// squared model at the phase of the last at.
+func (x *highFrequencyExpansion) squared(c []float64) {
+	for r := range x.g[0] {
+		for a := range expansionOrder + 1 {
+			ga := x.g[a][r]
+			for b := range expansionOrder + 1 {
+				gb := x.g[b][r]
+				c[a+b] += real(ga)*real(gb) + imag(ga)*imag(gb)
+			}
+		}
+	}
+}
+
+// overInterval returns Σ_n c_n·t_n with t_n = t2ⁿ where c_n > 0, else t1ⁿ,
+// which bounds Σ_n c_n·tⁿ for every t ∈ [t1, t2], 0 <= t1 <= t2.
+func overInterval(c []float64, t1, t2 float64) float64 {
+	v, p1, p2 := c[0], 1.0, 1.0
+	for _, cn := range c[1:] {
+		p1, p2 = p1*t1, p2*t2
+		if cn > 0 {
+			v += cn * p2
+		} else {
+			v += cn * p1
+		}
+	}
+	return v
+}
+
+// sampleModel returns the bound overInterval of the squared model at sample
+// i for t ∈ [t1, t2], square-rooted and cached for this epoch.
+func (x *highFrequencyExpansion) sampleModel(i int, t1, t2 float64) float64 {
 	if x.stamp[i] == x.epoch {
 		return x.vals[i]
 	}
-	c := x.poly[i*polyLen : (i+1)*polyLen]
-	v := c[polyLen-1]
-	for j := polyLen - 2; j >= 0; j-- {
-		v = v*t + c[j]
-	}
+	v := overInterval(x.poly[i*polyLen:(i+1)*polyLen], t1, t2)
 	x.stamp[i], x.vals[i] = x.epoch, math.Sqrt(max(v, 0))
 	return x.vals[i]
 }
 
-// modelMax returns sup_φ ‖Σ_{k<=N} t^k·g_k‖: the largest sample of the
-// model, local maxima within a factor 1 − 1e-3 of it refined by
-// golden-section search as in maxima. The squared model at sample i is
-// at most c_0,i + Σ_{n>=1} max_j |c_n,j|·t^n, so walking the samples by
-// decreasing c_0 stops once that bound falls 1% below the largest sample.
+// modelMax returns sup_φ ‖Σ_{k<=N} t^k·g_k‖; see modelMaxOver.
 func (x *highFrequencyExpansion) modelMax(t float64) float64 {
+	return x.modelMaxOver(t, t)
+}
+
+// modelMaxOver returns sup over φ and t ∈ [t1, t2] of the bound
+// overInterval of the squared model, square-rooted, which for t1 = t2 is
+// the model ‖Σ_{k<=N} t^k·g_k‖ itself: the largest sample, local maxima
+// within a factor 1 − 1e-3 of it refined by golden-section search as in
+// maxima. The bound at sample i is at most c_0,i + Σ_{n>=1} max_j |c_n,j|·t2^n,
+// so walking the samples by decreasing c_0 stops once that falls 1% below
+// the largest sample.
+func (x *highFrequencyExpansion) modelMaxOver(t1, t2 float64) float64 {
 	x.sampleCircle()
 	if x.singular {
 		return math.Inf(1)
@@ -253,7 +278,7 @@ func (x *highFrequencyExpansion) modelMax(t float64) float64 {
 	x.epoch++
 	slack := 0.0
 	for n := polyLen - 1; n >= 1; n-- {
-		slack = (slack + x.polyMax[n]) * t
+		slack = (slack + x.polyMax[n]) * t2
 	}
 	top, last := 0.0, k
 	for j, i := range x.byS {
@@ -261,14 +286,26 @@ func (x *highFrequencyExpansion) modelMax(t float64) float64 {
 			last = j
 			break
 		}
-		top = max(top, x.sampleModel(i, t))
+		top = max(top, x.sampleModel(i, t1, t2))
+	}
+	f := func(phi float64) float64 { return x.model(phi, t1) }
+	if t1 != t2 {
+		var c [polyLen]float64
+		f = func(phi float64) float64 {
+			if !x.at(phi) {
+				return math.Inf(1)
+			}
+			c = [polyLen]float64{}
+			x.squared(c[:])
+			return math.Sqrt(max(overInterval(c[:], t1, t2), 0))
+		}
 	}
 	step := 2 * math.Pi / float64(k)
 	var idx []int
 	var est []float64
 	for _, i := range x.byS[:last] {
 		v := x.vals[i]
-		y0, y2 := x.sampleModel((i+k-1)%k, t), x.sampleModel((i+1)%k, t)
+		y0, y2 := x.sampleModel((i+k-1)%k, t1, t2), x.sampleModel((i+1)%k, t1, t2)
 		if v < y0 || v < y2 {
 			continue
 		}
@@ -285,10 +322,33 @@ func (x *highFrequencyExpansion) modelMax(t float64) float64 {
 			continue
 		}
 		phi := float64(i) * step
-		_, g := goldenMax(phi-step, phi+step, phi, x.vals[i], func(phi float64) float64 { return x.model(phi, t) })
+		_, g := goldenMax(phi-step, phi+step, phi, x.vals[i], f)
 		best = max(best, g)
 	}
 	return best
+}
+
+// tailBelow reports whether ‖G(jω)‖ <= level for ω >= 1/T: by
+// modelMaxOver plus the Cauchy bound on the remainder over the intervals
+// t ∈ [T·2^−(i+1), T·2^−i], i < 40, and [0, T·2^−40], which cover (0, T].
+// Like limitVerdict, it rests on sampling the circle of φ.
+func (x *highFrequencyExpansion) tailBelow(level, T float64) bool {
+	w := x.radius(T)
+	if w == 0 {
+		return false
+	}
+	E := x.e.tailGain(0, w)
+	for i := 0; i <= 40; i++ {
+		t2 := T * math.Ldexp(1, -i)
+		t1 := t2 / 2
+		if i == 40 {
+			t1 = 0
+		}
+		if !(x.modelMaxOver(t1, t2)+x.remainder(E, t2*w) <= level) {
+			return false
+		}
+	}
+	return true
 }
 
 // maxima returns the local maxima of φ ↦ f(φ) on the circle within a factor

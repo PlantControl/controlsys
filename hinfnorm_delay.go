@@ -1159,14 +1159,18 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		}
 	}
 	for {
+		level := best * (1 + tol)
+		closed := func(R float64) bool {
+			return e.tailGain(lim, R) <= level || hfx != nil && hfx.tailBelow(level, 1/R)
+		}
 		R := max(hi, 2*e.normA+1)
 		for range 200 {
-			if e.tailGain(lim, R) <= best*(1+tol) {
+			if closed(R) {
 				break
 			}
 			R *= 2
 		}
-		if !(e.tailGain(lim, R) <= best*(1+tol)) {
+		if !closed(R) {
 			return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
 		}
 		if R-rGrid > span {

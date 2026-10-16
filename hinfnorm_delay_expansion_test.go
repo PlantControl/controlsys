@@ -296,6 +296,70 @@ func TestModelMaxMatchesFullScan(t *testing.T) {
 	}
 }
 
+// slightPeakCases have k = 4 and a finite peak above sup |G∞| by only
+// about 1e-6 relative, far past the grid end, so tailGain alone closes the
+// tail only near ω ~ 1/(peak − lim).
+var slightPeakCases = []expansionCase{
+	{"A230",
+		[]float64{-0.4679143293904018, 0.5568820700329411, 0.5970290865070236, 0.04088492140928639},
+		[]float64{-2.7256683166786164, 4.53724253238323}, []float64{-4.626184319536489, -0.5701210155921768},
+		0.38635252096584244},
+	{"A26",
+		[]float64{-0.3076283919048543, -0.5018015133454836, 0.47779093311037, -0.14453698005791601},
+		[]float64{-2.335077036398033, 1.74556187352366}, []float64{-4.571548904310475, 4.6882244033680855},
+		0.19446812828709992},
+}
+
+func TestHinfNormSlightFinitePeakPastLimit(t *testing.T) {
+	for _, c := range slightPeakCases {
+		t.Run(c.name, func(t *testing.T) {
+			sys, gain, _ := feedthroughDifferenceLoop(t, c.d22, c.d12, c.d21, []float64{c.h, 4 * c.h}, [2]float64{1, 4})
+			want, wWant := oraclePeak(gain, 1500, 1e-3)
+			for _, wc := range []float64{3e3, 1e4, 1e5} {
+				if m, w := passageMax(gain, c.h, math.Mod(wWant*c.h, 2*math.Pi), wc); !(m < want) {
+					t.Fatalf("passage at %g peaks at %.15g above the oracle peak %.15g", w, m, want)
+				}
+			}
+			got, w, err := HinfNorm(sys)
+			if err != nil {
+				t.Fatalf("HinfNorm: %v", err)
+			}
+			if math.Abs(got-want) > 1e-9*want || math.Abs(w-wWant) > 1e-3 {
+				t.Fatalf("HinfNorm = (%.15g, %.10g), want (%.15g, %.10g)", got, w, want, wWant)
+			}
+		})
+	}
+}
+
+// TestTailBelowBoundsResponse checks that where tailBelow certifies a level
+// past ω = R, a dense sweep of the response on [R, 4R] stays below it, and
+// that the certificate is reached within a few times the peak frequency.
+func TestTailBelowBoundsResponse(t *testing.T) {
+	c := slightPeakCases[0]
+	sys, gain, _ := feedthroughDifferenceLoop(t, c.d22, c.d12, c.d21, []float64{c.h, 4 * c.h}, [2]float64{1, 4})
+	want, wWant := oraclePeak(gain, 1500, 1e-3)
+	e, err := newDelayLFT(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := newHighFrequencyExpansion(e, newHighFrequencyGain(e))
+	level := want * (1 + 1e-10)
+	R := 100.0
+	for !x.tailBelow(level, 1/R) {
+		if R *= 2; R > 64*wWant {
+			t.Fatalf("no certificate up to ω = %g, peak at %g", R, wWant)
+		}
+	}
+	if x.tailBelow(want*(1-1e-9), 2/wWant) {
+		t.Fatalf("tailBelow certifies %.15g past ω = %g, below the peak %.15g at %g", want*(1-1e-9), wWant/2, want, wWant)
+	}
+	for w := R; w <= 4*R; w += 1e-3 {
+		if g := gain(w); !(g <= level) {
+			t.Fatalf("|G(j%g)| = %.15g above the certified %.15g past %g", w, g, level, R)
+		}
+	}
+}
+
 func BenchmarkHinfNorm_DelayLimitAtInf(b *testing.B) {
 	for _, c := range limitAtInfCases {
 		sys, _, _ := feedthroughDifferenceLoop(b, c.d22, c.d12, c.d21, []float64{c.h, c.k * c.h}, [2]float64{1, c.k})
