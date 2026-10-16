@@ -489,8 +489,12 @@ func (e *delayLFT) sigma(w float64) float64 {
 
 // highFrequencyGain evaluates σ_max(G∞(φ)), G∞ = D11 + D12·Δ(I − D22·Δ)⁻¹·D21
 // with Δ_i = e^{−j·k_i·φ_g(i)}, the values G(jω) approaches as ω → ∞. The
-// phases φ range over a torus of dim coordinates: one, φ = ωh, for
-// commensurate delays τ_i = k_i·h, else one per distinct delay with k_i = 1.
+// phases φ range over a torus of dim coordinates, one φ_c = ωh_c per class
+// of commensurate delays τ_i = k_i·h_c (see commensurateClasses). The values
+// of Δ(jω) as ω → ∞ lie on this torus, and fill it when the h_c are
+// rationally independent, which the exact grouping cannot always confirm:
+// below then still certifies an upper bound, and estimate is taken as the
+// limit only for dim = 1, a single class, where φ = ωh sweeps the circle.
 type highFrequencyGain struct {
 	e       *delayLFT
 	dim     int
@@ -527,27 +531,14 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		}
 		return out
 	}
-	ints := make([]int, 2*nd)
-	grp, dim := ints[nd:], 1
+	grp, mult, dim := commensurateClasses(e.tau)
 	var k []float64
 	kmax := 1.0
-	if mult := e.multiples(); mult != nil {
-		if slices.Max(mult) > 1 {
-			k = make([]float64, nd)
-			for i, ki := range mult {
-				k[i] = float64(ki)
-				kmax = max(kmax, k[i])
-			}
-		}
-	} else {
-		dim = 0
-		for i, t := range e.tau {
-			if f := slices.Index(e.tau, t); f < i {
-				grp[i] = grp[f]
-			} else {
-				grp[i] = dim
-				dim++
-			}
+	if nd > 0 && slices.Max(mult) > 1 {
+		k = make([]float64, nd)
+		for i, ki := range mult {
+			k[i] = float64(ki)
+			kmax = max(kmax, k[i])
 		}
 	}
 	h := &highFrequencyGain{
@@ -555,7 +546,7 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		d11: toC(e.sys.D, p, m), d12: toC(lft.D12, p, nd),
 		d21: toC(lft.D21, nd, m), d22: toC(lft.D22, nd, nd),
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
-		phase: make([]complex128, nd), piv: ints[:nd], g: make([]complex128, p*m),
+		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
 	}
 	h.lip = h.lipschitz()
 	return h

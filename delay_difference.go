@@ -357,6 +357,53 @@ func commensurateMultiples(tau []float64) []int {
 	return nil
 }
 
+// commensurateClasses partitions the delays into classes of exactly
+// commensurate ones, τ_i = k_i·h_c for class c = grp[i], greedily in index
+// order: τ_i joins the first class whose delays it extends to a set that
+// commensurateMultiples accepts, else opens a new one. k holds the multiples
+// within each class; dim is the number of classes. All delays form one class
+// exactly when commensurateMultiples accepts the whole set.
+func commensurateClasses(tau []float64) (grp, k []int, dim int) {
+	nd := len(tau)
+	grp, k = make([]int, nd), make([]int, nd)
+	if mult := commensurateMultiples(tau); mult != nil {
+		copy(k, mult)
+		return grp, k, min(nd, 1)
+	}
+	buf := make([]float64, 0, nd)
+	members := func(c, n int) []float64 {
+		buf = buf[:0]
+		for j, g := range grp[:n] {
+			if g == c {
+				buf = append(buf, tau[j])
+			}
+		}
+		return buf
+	}
+	for i, t := range tau {
+		grp[i] = dim
+		for c := range dim {
+			if commensurateMultiples(append(members(c, i), t)) != nil {
+				grp[i] = c
+				break
+			}
+		}
+		if grp[i] == dim {
+			dim++
+		}
+	}
+	for c := range dim {
+		mult := commensurateMultiples(members(c, nd))
+		for j, i := 0, 0; i < nd; i++ {
+			if grp[i] == c {
+				k[i] = mult[j]
+				j++
+			}
+		}
+	}
+	return grp, k, dim
+}
+
 // exactProductsEqual reports a·b == c·d in exact arithmetic, by the
 // error-free products p + e = a·b, e = fma(a, b, −p), for normal products.
 func exactProductsEqual(a, b, c, d float64) bool {
