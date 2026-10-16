@@ -108,7 +108,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 // checkPidtuneStability rejects a design whose closed loop is certifiably
 // unstable; loops outside the screen's scope pass unchecked.
 func checkPidtuneStability(plant *System, eval *sisoEval, pid *PID, pidType PidtuneType, wc float64) error {
-	screen, err := newPIDStabilityScreen(plant, eval)
+	screen, err := newPIDStabilityScreen(plant, eval, 1)
 	if err != nil {
 		return err
 	}
@@ -306,7 +306,7 @@ func computePIDGainsPositive(plant *System, pidType PidtuneType, wc, pmDeg, sign
 		pid.Kd = imag(target) / imag(d)
 		pid.Kp = real(target) - pid.Kd*real(d)
 		if pid.Kp < 0 || pid.Kd < 0 {
-			return nil, fmt.Errorf("requested phase is unattainable by a positive-gain PDF at wc=%g: %w", wc, ErrPIDTuningTargetUnattainable)
+			return nil, fmt.Errorf("requested phase is unattainable by a same-sign PDF at wc=%g: %w", wc, ErrPIDTuningTargetUnattainable)
 		}
 	case PidtunePID:
 		computePID(pid, terms, magP, phiC)

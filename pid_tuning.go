@@ -168,13 +168,16 @@ func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) flo
 // pidStabilityScreen certifies closed-loop stability of PID candidates on a
 // SISO plant: by closed-loop poles when the model is delay-free (discrete
 // delays absorbed), by a Nyquist test for supported continuous delays.
+// maxTail bounds limsup |L| of a delayed ideal-derivative loop: 1 accepts
+// every stable loop, pidTuningMaxTail adds TunePID's robustness margin.
 type pidStabilityScreen struct {
 	plant, model *System
 	eval         *sisoEval
 	hiddenStable func() (bool, error)
+	maxTail      float64
 }
 
-func newPIDStabilityScreen(plant *System, eval *sisoEval) (*pidStabilityScreen, error) {
+func newPIDStabilityScreen(plant *System, eval *sisoEval, maxTail float64) (*pidStabilityScreen, error) {
 	model := plant
 	if plant.Dt > 0 && plant.HasDelay() {
 		var err error
@@ -183,7 +186,7 @@ func newPIDStabilityScreen(plant *System, eval *sisoEval) (*pidStabilityScreen, 
 		}
 	}
 	return &pidStabilityScreen{
-		plant: plant, model: model, eval: eval,
+		plant: plant, model: model, eval: eval, maxTail: maxTail,
 		hiddenStable: sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) }),
 	}, nil
 }
@@ -195,7 +198,7 @@ func (s *pidStabilityScreen) at(wc float64, family PidtuneType) (func(*PID2) (bo
 	if !s.model.HasDelay() {
 		return s.closedLoopPoles, PIDStabilityClosedLoopPoles, nil
 	}
-	stable, ok, err := pidTuningDelayStability(s.plant, s.eval, wc, pidTuningIdealDerivative(family))
+	stable, ok, err := pidTuningDelayStability(s.plant, s.eval, wc, pidTuningIdealDerivative(family), s.maxTail)
 	if err != nil || !ok {
 		return nil, PIDStabilitySampledOnly, err
 	}
@@ -278,7 +281,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	screen, err := newPIDStabilityScreen(plant, eval)
+	screen, err := newPIDStabilityScreen(plant, eval, pidTuningMaxTail)
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
@@ -1034,9 +1037,9 @@ const pidTuningMaxTail = 1 - 1.0/pidTuningMaxSensitivity
 // outside the test's scope. Ideal derivative controllers need no internal
 // delays; with D ≠ 0, |Kd·s·P(s)| is unbounded, so every Kd ≠ 0 is rejected.
 // A candidate loop outside the Nyquist test's scope, or an ideal derivative
-// whose high-frequency gain exceeds pidTuningMaxTail, is rejected; other
+// whose high-frequency gain exceeds maxTail (≤ 1), is rejected; other
 // failures are errors.
-func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool) (func(*PID2) (bool, error), bool, error) {
+func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool, maxTail float64) (func(*PID2) (bool, error), bool, error) {
 	if !plant.IsContinuous() {
 		return nil, false, nil
 	}
@@ -1088,7 +1091,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 		case derivTail != nil:
 			l.tail = func(w float64) float64 { return (kp+ki/w)*plantTail(w) + kd*derivTail(w) }
 			l.tailLimit = kp*plantLimit + kd*derivTail(math.Inf(1))
-			if l.tailLimit > pidTuningMaxTail {
+			if l.tailLimit > maxTail {
 				return false, nil
 			}
 		default:

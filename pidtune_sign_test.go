@@ -167,3 +167,27 @@ func TestPidtuneReturnsOnlyStableDesigns(t *testing.T) {
 		t.Fatal("expected some designs to be rejected")
 	}
 }
+
+// e^{-s}/(s+1) with an ideal PID has limsup |L(jω)| = |Kd|: Kd < 1 is a
+// stable neutral chain, Kd > 1 is unstable. Pidtune must not apply TunePID's
+// 0.75 robustness cap.
+func TestPidtuneDelayedIdealPIDTail(t *testing.T) {
+	p := makePlant(t, []float64{1}, []float64{1, 1})
+	if err := p.SetInputDelay([]float64{1}); err != nil {
+		t.Fatal(err)
+	}
+	pid, err := Pidtune(p, PidtunePID, 2, &PidtuneOptions{PhaseMargin: 45})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid.Kd <= pidTuningMaxTail || pid.Kd >= 1 {
+		t.Fatalf("Kd=%g, want in (%g, 1) to exercise the tail", pid.Kd, pidTuningMaxTail)
+	}
+	if stable, _ := pidDelayLoopCheckPole(t, &PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd}, 1, 1); !stable {
+		t.Fatalf("%+v unstable by winding check", pid)
+	}
+	pid, err = Pidtune(p, PidtunePID, 2, nil)
+	if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Fatalf("got %+v, %v; want unattainable (Kd > 1)", pid, err)
+	}
+}
