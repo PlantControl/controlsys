@@ -133,7 +133,7 @@ func TestPidtuneDefaultCrossoverHonoursDelay(t *testing.T) {
 
 func TestTunePIDRejectsSignInconsistentDerivative(t *testing.T) {
 	for _, family := range []PidtuneType{PidtunePD, PidtunePDF} {
-		_, err := TunePID(context.Background(), delayedFirstOrder(t, .05), family, PIDTuningOptions{})
+		_, err := TunePID(context.Background(), makePlant(t, []float64{1}, []float64{1, 10}), family, PIDTuningOptions{})
 		var te *PIDTuningError
 		if !errors.As(err, &te) || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 			t.Fatalf("%s: err %v, want PIDTuningError", family, err)
@@ -142,8 +142,9 @@ func TestTunePIDRejectsSignInconsistentDerivative(t *testing.T) {
 			t.Errorf("%s: warnings %q do not name the sign rule", family, te.Evidence.Warnings)
 		}
 	}
-	if _, err := TunePID(context.Background(), makePlant(t, []float64{1}, []float64{1, 10}), PidtunePD, PIDTuningOptions{}); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-		t.Errorf("delay-free PD needing negative Kd: err %v", err)
+	_, err := TunePID(context.Background(), delayedFirstOrder(t, .05), PidtunePD, PIDTuningOptions{CrossoverFrequency: 10})
+	if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Errorf("explicit crossover needing negative Kd: err %v", err)
 	}
 	if pidTuningSignConsistent(PID2{Kp: 10.25, Kd: -.974}, 1) {
 		t.Error("accepted negative Kd on positive-DC-gain plant")
@@ -235,5 +236,125 @@ func TestTunePIDDelayFeedthroughRejectsIdealDerivative(t *testing.T) {
 		t.Fatalf("design %+v evidence %q", r.Controller, r.Evidence.Stability)
 	} else if err != nil && !errors.As(err, &te) {
 		t.Fatal(err)
+	}
+}
+
+// Same-sign PD only adds lead, so a default crossover where the plant phase
+// exceeds −180°+PM moves to where a positive-Kd design meets the margin.
+func TestTunePIDDefaultPDMovesCrossover(t *testing.T) {
+	moved := func(r *PIDTuningResult) bool {
+		return slices.ContainsFunc(r.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "moved") })
+	}
+	for _, family := range []PidtuneType{PidtunePD, PidtunePDF} {
+		r, err := TunePID(context.Background(), makePlant(t, []float64{1}, []float64{1, 3, 3, 1}), family, PIDTuningOptions{})
+		if err != nil {
+			t.Fatalf("%s 1/(s+1)³: %v", family, err)
+		}
+		c := r.Controller
+		if c.Kp <= 0 || c.Kd <= 0 || r.Evidence.Stability != PIDStabilityClosedLoopPoles || !moved(r) {
+			t.Errorf("%s 1/(s+1)³: %+v evidence %q warnings %q", family, c, r.Evidence.Stability, r.Evidence.Warnings)
+		}
+		if pm := r.Evidence.AchievedPhaseMargin; pm < 57-1e-9 || pm > 63+1e-9 {
+			t.Errorf("%s 1/(s+1)³: phase margin %g", family, pm)
+		}
+		if ph := -3 * math.Atan(r.Evidence.AchievedCrossover) * 180 / math.Pi; ph > -120 {
+			t.Errorf("%s 1/(s+1)³: plant phase %g° at crossover leaves no lead", family, ph)
+		}
+
+		const tau = .05
+		r, err = TunePID(context.Background(), delayedFirstOrder(t, tau), family, PIDTuningOptions{})
+		if err != nil {
+			t.Fatalf("%s delayed: %v", family, err)
+		}
+		c = r.Controller
+		if c.Kp <= 0 || c.Kd <= 0 || r.Evidence.Stability != PIDStabilityNyquist || !moved(r) {
+			t.Errorf("%s delayed: %+v evidence %q", family, c, r.Evidence.Stability)
+		}
+		if stable, peak := pidDelayLoopCheck(t, c, tau); !stable || peak > 3 {
+			t.Errorf("%s delayed: independent check stable=%v |S|max=%g", family, stable, peak)
+		}
+	}
+	d, err := NewFromSlices(1, 1, 1, []float64{0.9}, []float64{1}, []float64{0.1}, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetInputDelay([]float64{30}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := TunePID(context.Background(), d, PidtunePD, PIDTuningOptions{})
+	if err != nil {
+		t.Fatalf("discrete delayed PD: %v", err)
+	}
+	if c := r.Controller; c.Kp <= 0 || c.Kd <= 0 || r.Evidence.AchievedCrossover >= math.Pi/d.Dt || !moved(r) {
+		t.Errorf("discrete delayed PD %+v at %g, warnings %q", c, r.Evidence.AchievedCrossover, r.Evidence.Warnings)
+	}
+	neg := makePlant(t, []float64{-1}, []float64{1, 1})
+	if err := neg.SetInputDelay([]float64{1}); err != nil {
+		t.Fatal(err)
+	}
+	r, err = TunePID(context.Background(), neg, PidtunePD, PIDTuningOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := r.Controller; c.Kp >= 0 || c.Kd >= 0 || r.Evidence.Stability != PIDStabilityNyquist {
+		t.Errorf("negative-DC delayed PD %+v evidence %q", c, r.Evidence.Stability)
+	}
+}
+
+// The ½ tail cap guards the Kd·CB neutral chain only; P on a delayed
+// biproper plant needs just limsup |L| < 1.
+func TestTunePIDDelayTailCapIdealDerivativeOnly(t *testing.T) {
+	p := makePlant(t, []float64{.5, 1}, []float64{1, 1})
+	if err := p.SetInputDelay([]float64{1}); err != nil {
+		t.Fatal(err)
+	}
+	eval, err := newSISOEval(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, ok, err := pidTuningDelayStability(p, eval, 1, false)
+	if err != nil || !ok {
+		t.Fatalf("out of scope: %v", err)
+	}
+	for _, tc := range []struct {
+		kp   float64
+		want bool
+	}{{1.4, true}, {1.6, true}, {1.8, false}, {2.1, false}} {
+		if got, err := stable(&PID2{Kp: tc.kp}); err != nil || got != tc.want {
+			t.Errorf("Kp=%g (tail %g): stable=%v err=%v, want %v", tc.kp, tc.kp/2, got, err, tc.want)
+		}
+	}
+	for _, family := range []PidtuneType{PidtuneP, PidtunePI} {
+		r, err := TunePID(context.Background(), p, family, PIDTuningOptions{})
+		if err != nil {
+			t.Fatalf("%s: %v", family, err)
+		}
+		if c := r.Controller; c.Kp <= .5 || c.Ki < 0 || r.Evidence.Stability != PIDStabilityNyquist {
+			t.Errorf("%s: %+v evidence %q", family, c, r.Evidence.Stability)
+		}
+	}
+}
+
+// G = −0.4k·s/((s+1)(s+3)) has DC gain exactly 0; rounding must not pick a
+// gain sign that varies with the positive scale k.
+func TestPidTuningDCSignIgnoresRoundingZero(t *testing.T) {
+	sign := func(d, k float64) float64 {
+		p, err := NewFromSlices(2, 1, 1, []float64{-1, 2, 0, -3}, []float64{1, 1}, []float64{.1 * k, -.5 * k}, []float64{d}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eval, err := newSISOEval(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pidTuningDCSign(p, eval.at, 10)
+	}
+	for _, k := range []float64{1, 3, 1.3, .9} {
+		if s := sign(0, k); s != 0 {
+			t.Errorf("k=%g: sign %g, want 0", k, s)
+		}
+	}
+	if s := sign(1e-6, 1); s != 1 {
+		t.Errorf("small genuine DC gain: sign %g, want 1", s)
 	}
 }
