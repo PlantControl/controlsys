@@ -120,7 +120,7 @@ func TestNeutralCommensurateDelays(t *testing.T) {
 // feedthroughDifferenceLoop returns G = D11 + C1(sI−A)⁻¹B1 +
 // (D12 + C1(sI−A)⁻¹B2)·Δ(I − D22Δ)⁻¹·D21 with C2 = 0, so H22 = D22; gain
 // evaluates |G(jω)| and gInf |G∞(φ)| with Δ_i = e^{−j·k_i·φ} in closed form.
-func feedthroughDifferenceLoop(t *testing.T, d22, d12, d21, tau []float64, k [2]float64) (*System, func(float64) float64, func(float64) float64) {
+func feedthroughDifferenceLoop(t testing.TB, d22, d12, d21, tau []float64, k [2]float64) (*System, func(float64) float64, func(float64) float64) {
 	t.Helper()
 	const d11 = 0.1
 	a := []float64{-1, 2, -0.7, -3}

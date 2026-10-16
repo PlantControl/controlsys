@@ -38,6 +38,9 @@ type highFrequencyExpansion struct {
 	q11, q12, q21, q22 []complex128 // CiABj
 	x, l1, l2          []complex128
 	g0, g1, g2         []complex128
+
+	poly    [][5]float64 // see sampleCircle
+	samples []float64
 }
 
 // newHighFrequencyExpansion returns the expansion, or nil outside its scope:
@@ -151,26 +154,82 @@ func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
 	return s2, a, c
 }
 
-// maxima returns the local maxima of φ ↦ f(φ) on the circle within a factor
-// 1 − rel of the largest, sampled at 1024·k_max points and refined by
-// golden-section search.
-func (x *highFrequencyExpansion) maxima(f func(float64) float64, rel float64) (phis, vals []float64) {
-	k := 1024 * int(x.hf.kmax)
-	step := 2 * math.Pi / float64(k)
-	samples := make([]float64, k)
-	for i := range k {
-		samples[i] = f(float64(i) * step)
+// sampleCircle fills, at the 1024·k_max samples φ_i of the circle, the
+// coefficients of ‖g0 + t·g1 + t²·g2‖² = Σ_j poly[i][j]·t^j, so the model
+// is evaluated on the samples for any t without solving at φ_i again.
+func (x *highFrequencyExpansion) sampleCircle() {
+	if x.poly != nil {
+		return
 	}
+	k := 1024 * int(x.hf.kmax)
+	x.poly = make([][5]float64, k)
+	step := 2 * math.Pi / float64(k)
+	for i := range k {
+		c := &x.poly[i]
+		if !x.at(float64(i) * step) {
+			c[0] = math.Inf(1)
+			continue
+		}
+		for j, g := range x.g0 {
+			g1, g2 := x.g1[j], x.g2[j]
+			c[0] += real(g)*real(g) + imag(g)*imag(g)
+			c[1] += 2 * (real(g)*real(g1) + imag(g)*imag(g1))
+			c[2] += real(g1)*real(g1) + imag(g1)*imag(g1) + 2*(real(g)*real(g2)+imag(g)*imag(g2))
+			c[3] += 2 * (real(g1)*real(g2) + imag(g1)*imag(g2))
+			c[4] += real(g2)*real(g2) + imag(g2)*imag(g2)
+		}
+	}
+}
+
+// modelMax returns sup_φ ‖g0 + t·g1 + t²·g2‖: the largest sample of the
+// model, each local maximum refined by golden-section search.
+func (x *highFrequencyExpansion) modelMax(t float64) float64 {
+	x.sampleCircle()
+	if x.samples == nil {
+		x.samples = make([]float64, len(x.poly))
+	}
+	for i, c := range x.poly {
+		x.samples[i] = math.Sqrt(max(c[0]+t*(c[1]+t*(c[2]+t*(c[3]+t*c[4]))), 0))
+	}
+	_, vals := x.maxima(x.samples, func(phi float64) float64 { return x.model(phi, t) }, 0)
+	if len(vals) == 0 {
+		return math.Inf(1)
+	}
+	return slices.Max(vals)
+}
+
+// maxima returns the local maxima of φ ↦ f(φ) on the circle within a factor
+// 1 − rel of the largest, from samples f(2π·i/k), i < k, refined by
+// golden-section search. Only the sampled maxima whose parabolic
+// interpolation lies within a factor 1 − max(rel, 1e-3) of the largest are
+// refined; at this sampling density the interpolation error is far smaller.
+func (x *highFrequencyExpansion) maxima(samples []float64, f func(float64) float64, rel float64) (phis, vals []float64) {
+	k := len(samples)
+	step := 2 * math.Pi / float64(k)
+	var idx []int
+	var est []float64
 	for i, v := range samples {
-		if v < samples[(i+k-1)%k] || v < samples[(i+1)%k] {
+		y0, y2 := samples[(i+k-1)%k], samples[(i+1)%k]
+		if v < y0 || v < y2 {
+			continue
+		}
+		e := v
+		if d := 2*v - y0 - y2; d > 0 {
+			e += (y0 - y2) * (y0 - y2) / (8 * d)
+		}
+		idx, est = append(idx, i), append(est, e)
+	}
+	if len(idx) == 0 {
+		return nil, nil
+	}
+	cut := slices.Max(est) * (1 - max(rel, 1e-3))
+	for j, i := range idx {
+		if est[j] < cut {
 			continue
 		}
 		t := float64(i) * step
-		w, g := goldenMax(t-step, t+step, t, v, f)
+		w, g := goldenMax(t-step, t+step, t, samples[i], f)
 		phis, vals = append(phis, w), append(vals, g)
-	}
-	if len(vals) == 0 {
-		return nil, nil
 	}
 	top := slices.Max(vals)
 	var outP, outV []float64
@@ -194,7 +253,12 @@ func (x *highFrequencyExpansion) maxima(f func(float64) float64, rel float64) (p
 // expansion, not on a certificate over every t. ok is false when neither is
 // decided.
 func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (finite bool, W float64, ok bool) {
-	phis, _ := x.maxima(func(phi float64) float64 {
+	x.sampleCircle()
+	s := make([]float64, len(x.poly))
+	for i, c := range x.poly {
+		s[i] = math.Sqrt(c[0])
+	}
+	phis, _ := x.maxima(s, func(phi float64) float64 {
 		s2, _, _ := x.coefficients(phi)
 		return math.Sqrt(s2)
 	}, 1e-9)
@@ -235,6 +299,8 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 		return false, 0, false
 	}
 	level := lim * (1 + tol)
+	// T halves, so the t of successive T coincide exactly.
+	sup := map[float64]float64{}
 	holds := func(T float64) bool {
 		w := x.radius(T)
 		if w == 0 {
@@ -243,8 +309,15 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 		E := x.e.tailGain(0, w)
 		for t := T; t > T*0x1p-40; t /= 2 {
 			q := t * w
-			_, vals := x.maxima(func(phi float64) float64 { return x.model(phi, t) }, 1)
-			if len(vals) == 0 || !(slices.Max(vals)+E*q*q*q/(1-q) <= level) {
+			if !(E*q*q*q/(1-q) <= level) {
+				return false
+			}
+			m, ok := sup[t]
+			if !ok {
+				m = x.modelMax(t)
+				sup[t] = m
+			}
+			if !(m+E*q*q*q/(1-q) <= level) {
 				return false
 			}
 		}

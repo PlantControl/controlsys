@@ -32,7 +32,7 @@ var (
 		0.4851105119841035}
 )
 
-func (c expansionCase) build(t *testing.T) (*System, func(float64) float64, float64) {
+func (c expansionCase) build(t testing.TB) (*System, func(float64) float64, float64) {
 	t.Helper()
 	sys, gain, gInf := feedthroughDifferenceLoop(t, c.d22, c.d12, c.d21, []float64{c.h, 2 * c.h}, [2]float64{1, 2})
 	const k = 1 << 18
@@ -139,5 +139,35 @@ func TestHinfNormLimitBelowEveryPassage(t *testing.T) {
 	}
 	if !math.IsInf(w, 1) || math.Abs(got-lim) > 1e-9*lim {
 		t.Fatalf("HinfNorm = (%.15g, %g), want (%.15g, +Inf)", got, w, lim)
+	}
+}
+
+// BenchmarkHinfNorm_DelayLimitAtInf times delay models whose peak is the
+// ω → ∞ limit, decided by limitVerdict: "limit" and "flat" with k = 2 ("flat"
+// with κ small, so the expansion must reach far), "k20" with k = 20.
+func BenchmarkHinfNorm_DelayLimitAtInf(b *testing.B) {
+	for _, c := range []struct {
+		expansionCase
+		k float64
+	}{
+		{expansionLimit, 2},
+		{expansionCase{"flat",
+			[]float64{0.5888561770149723, -0.10453534772349099, 0.26009762791254687, -0.4187778122618928},
+			[]float64{-1.3972940735741266, 0.09637692295337041}, []float64{-1.601893769323554, 0.40406439147179873},
+			0.3547077050852388}, 2},
+		{expansionCase{"k20",
+			[]float64{-0.6267854986926139, -0.22753476407416448, 0.7604859326403655, 0.3445225407726179},
+			[]float64{2.0994008736286496, -0.7771379653940502}, []float64{2.8964548762636153, -1.852398922038503},
+			0.23582769791420977}, 20},
+	} {
+		sys, _, _ := feedthroughDifferenceLoop(b, c.d22, c.d12, c.d21, []float64{c.h, c.k * c.h}, [2]float64{1, c.k})
+		b.Run(c.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, w, err := HinfNorm(sys); err != nil || !math.IsInf(w, 1) {
+					b.Fatal(w, err)
+				}
+			}
+		})
 	}
 }
