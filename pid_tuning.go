@@ -54,6 +54,11 @@ const (
 type PIDTuningError struct {
 	Op       string
 	Evidence PIDTuningEvidence
+	// unstable: candidates reached the stability check and all failed it.
+	// excess: least |S| excess among candidates meeting the margins; 0 if
+	// none did or the bound was off.
+	unstable bool
+	excess   float64
 }
 
 func (e *PIDTuningError) Error() string {
@@ -80,7 +85,8 @@ type PIDTuningOptions struct {
 	Focus              PIDDesignFocus
 	IFormula, DFormula PIDFormula
 	Weights            *PIDTuningWeights
-	// MaxEvaluations bounds candidate evaluations, 1..4096; 0 means 4096.
+	// MaxEvaluations bounds candidate evaluations over the whole call,
+	// fallbacks included, 1..4096; 0 means 4096.
 	MaxEvaluations int
 	// UnstablePoles is optional user knowledge for TunePIDFRD; nil means
 	// unknown. TunePID rejects it with ErrOptionUnsupported.
@@ -243,6 +249,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if plant.Dt > 0 {
 		tau *= plant.Dt
 	}
+	// MaxEvaluations caps the whole call: the ±3° attempt, moved crossovers
+	// and floor bands draw on one budget, and the evidence counts them all.
+	budget, used := opts.MaxEvaluations, 0
+	if budget == 0 {
+		budget = 4096
+	}
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
 		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
@@ -292,22 +304,47 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if floor {
 			tune = tunePIDFloor
 		}
+		opts.MaxEvaluations = budget - used
 		res, err := tune(ctx, "TunePID", p, family, opts)
 		if eval.err != nil {
 			return nil, fmt.Errorf("TunePID: %w", eval.err)
 		}
+		if te, ok := errors.AsType[*PIDTuningError](err); ok {
+			used += te.Evidence.Evaluations
+		} else if err == nil {
+			used += res.Evidence.Evaluations
+		}
 		return res, err
 	}
-	// The ±3° band is tried first; failing that, the margin is a floor.
-	withFloor := func(wc, gainSign float64, robust bool, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
-		if !errors.As(err, new(*PIDTuningError)) {
+	// stamp reports the whole call's evaluations on the returned evidence.
+	stamp := func(res *PIDTuningResult, err error) (*PIDTuningResult, error) {
+		var ev *PIDTuningEvidence
+		if err == nil {
+			ev = &res.Evidence
+		} else if te, ok := errors.AsType[*PIDTuningError](err); ok {
+			ev = &te.Evidence
+		} else {
 			return res, err
+		}
+		ev.Evaluations = used
+		if used >= budget {
+			ev.Termination = PIDTerminationEvaluationLimit
+		}
+		return res, err
+	}
+	// The ±3° band is tried first; failing that, the margin is a floor,
+	// unless every candidate meeting the band was unstable: raising the
+	// margin at the same crossover only adds the gain that destabilized them.
+	withFloor := func(wc, gainSign float64, robust bool, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
+		var te *PIDTuningError
+		if !errors.As(err, &te) || te.unstable || used >= budget {
+			return stamp(res, err)
 		}
 		r, e := tuneAt(wc, gainSign, robust, true)
 		if errors.As(e, new(*PIDTuningError)) {
-			return res, err
+			return stamp(res, err)
 		}
-		return r, e
+		return stamp(r, e)
 	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, eval.at, wc)
@@ -336,6 +373,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	ladderWarning := ""
 	for _, lead := range []float64{15, 30, 45, 60} {
+		if used >= budget {
+			break
+		}
 		wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
 		if eval.err != nil {
 			return nil, fmt.Errorf("TunePID: %w", eval.err)
@@ -346,7 +386,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		r, e := tuneAt(wc, gainSign, true, false)
 		if e == nil {
 			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where same-sign PD gains can meet the phase margin.", wc0, wc))
-			return r, nil
+			return stamp(r, nil)
 		}
 		var te *PIDTuningError
 		if !errors.As(e, &te) {
@@ -462,27 +502,8 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		return nil, invalid("evaluation bound %d must be 1..4096", o.MaxEvaluations)
 	}
 	family = PidtuneType(strings.ToUpper(string(family)))
-	hasP, hasI, hasD, filtered := true, false, false, false
-	switch family {
-	case PidtuneP:
-	case PidtuneI:
-		hasP = false
-		hasI = true
-	case PidtunePI:
-		hasI = true
-	case PidtunePD:
-		hasD = true
-	case PidtunePDF:
-		hasD = true
-		filtered = true
-	case PidtunePID:
-		hasI = true
-		hasD = true
-	case PidtunePIDF:
-		hasI = true
-		hasD = true
-		filtered = true
-	default:
+	hasP, hasI, hasD, filtered, ok := pidTuningTerms(family)
+	if !ok {
 		return nil, invalid("unsupported family %q", family)
 	}
 	// Only explicitly filtered families introduce a derivative filter.
@@ -599,12 +620,13 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	var best, incumbent PID2
 	var bestParts PIDTuningObjective
 	signRejected, sensitivityRejected := false, false
+	stabilityChecked, stableFound := false, false
 	evaluate := func(candidate PID2) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		if evidence.Evaluations >= o.MaxEvaluations {
 			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		evidence.Evaluations++
 		if filtered && (candidate.Tf < math.Max(.001/wc, p.dt*.51) || candidate.Tf > 10/wc) {
@@ -635,9 +657,11 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 			if err != nil {
 				return fmt.Errorf("stability check: %w", err)
 			}
+			stabilityChecked = true
 			if !stable {
 				return nil
 			}
+			stableFound = true
 		}
 		// A free one-gain design has no margin to hold at other crossovers:
 		// with a model-based stability certificate it needs only positive
@@ -745,7 +769,11 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		if sensitivityRejected {
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a sensitivity peak above %g at the default crossover; such designs are rejected.", p.maxSensitivity))
 		}
-		return nil, &PIDTuningError{Op: op, Evidence: evidence}
+		e := &PIDTuningError{Op: op, Evidence: evidence, unstable: stabilityChecked && !stableFound}
+		if finitePID(incumbentExcess) {
+			e.excess = incumbentExcess
+		}
+		return nil, e
 	}
 	if !finitePID(evidence.SeedObjective) {
 		evidence.SeedObjective = bestScore
@@ -767,11 +795,68 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	return &PIDTuningResult{Controller: &best, Evidence: evidence}, nil
 }
 
+// pidTuningTerms reports the terms of an upper-case family.
+func pidTuningTerms(family PidtuneType) (hasP, hasI, hasD, filtered, ok bool) {
+	switch family {
+	case PidtuneP:
+		return true, false, false, false, true
+	case PidtuneI:
+		return false, true, false, false, true
+	case PidtunePI:
+		return true, true, false, false, true
+	case PidtunePD:
+		return true, false, true, false, true
+	case PidtunePDF:
+		return true, false, true, true, true
+	case PidtunePID:
+		return true, true, true, false, true
+	case PidtunePIDF:
+		return true, true, true, true, true
+	}
+	return false, false, false, false, false
+}
+
+// pidTuningReachable reports whether a candidate of the family can put the
+// loop phase at wc within 3° of −180°+pm. Gains of one sign span the cone
+// of the term phasors; a filter only pulls the derivative phasor toward the
+// proportional one, so its smallest admissible Tf bounds the cone. Unknown
+// gain sign, or a cone wider than a half-plane, reaches every phase.
+func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions, pm float64) bool {
+	hasP, hasI, hasD, filtered, ok := pidTuningTerms(family)
+	if !ok || p.gainSign == 0 {
+		return true
+	}
+	wc := o.CrossoverFrequency
+	c := PID2{Dt: p.dt, IFormula: o.IFormula, DFormula: o.DFormula}
+	if filtered {
+		c.Tf = math.Max(.001/wc, p.dt*.51)
+	}
+	ib, db := pidTuningBasis(c, wc)
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for _, t := range []struct {
+		on bool
+		v  complex128
+	}{{hasP, 1}, {hasI, ib}, {hasD, db}} {
+		if t.on {
+			a := cmplx.Phase(t.v) * 180 / math.Pi
+			lo, hi = math.Min(lo, a), math.Max(hi, a)
+		}
+	}
+	if hi-lo >= 180 {
+		return true
+	}
+	want := -180 + pm - cmplx.Phase(complex(p.gainSign, 0)*p.at(wc))*180/math.Pi
+	return !(math.Abs(math.Remainder(want-(lo+hi)/2, 360)) > (hi-lo)/2+3+1e-9)
+}
+
 // tunePIDFloor treats the phase margin as a floor, as pidtune does, once the
 // ±3° band around it is unattainable: it targets the nearest band above,
 // stepping 6° so the bands tile [PM+3°, 180°], and keeps PM−3° at the other
 // crossovers. A free one-gain design already targets its own margin. The
-// bands share one evaluation budget.
+// bands share the caller's remaining evaluation budget. Bands no candidate
+// phase can reach are skipped, and the search stops once a band is
+// hopeless: all its candidates unstable, since a higher margin only adds
+// lead, or |S| excess no smaller than that of the band below.
 func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	fam := PidtuneType(strings.ToUpper(string(family)))
 	if o.PhaseMargin == 0 && (fam == PidtuneP || fam == PidtuneI) {
@@ -786,14 +871,21 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 		budget = 4096
 	}
 	p.crossFloor, p.hasCrossFloor = pm-3, true
-	used := 0
+	used, excess := 0, 0.
 	last := &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: o.CrossoverFrequency, RequestedPhaseMargin: pm, Stability: p.stability}}
 	for target := pm + 6; target < 180 && used < budget; target += 6 {
+		if !pidTuningReachable(p, fam, o, target) {
+			continue
+		}
 		o.PhaseMargin = target
 		o.MaxEvaluations = budget - used
 		r, err := tunePID(ctx, op, p, family, o)
 		if errors.As(err, &last) {
 			used += last.Evidence.Evaluations
+			if last.unstable || last.excess > 0 && excess > 0 && last.excess >= excess {
+				break
+			}
+			excess = last.excess
 			continue
 		}
 		if err != nil {
@@ -804,6 +896,7 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 		r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Phase margin %g° is a floor: no design met it within ±3°, so the nearest feasible band above, %g°±3°, was targeted.", pm, target))
 		return r, nil
 	}
+	last.Evidence.Evaluations = used
 	return nil, last
 }
 
