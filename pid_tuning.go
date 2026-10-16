@@ -127,7 +127,16 @@ type pidTuningPlant struct {
 	// gainSign is the sign every nonzero gain must take: that of the DC gain
 	// of a stable plant, or 0 when unknown.
 	gainSign float64
+	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
+	// 0 for none; tau is the loop delay in seconds that sets its grid step.
+	maxSensitivity, tau float64
 }
+
+// pidTuningMaxSensitivity bounds |S| for a delay-capped or moved default
+// crossover, so the design keeps at least 2.5 dB of gain margin and 14° of
+// phase margin at every frequency. A margin met only at wc can leave
+// |L| ≈ 1 where the delay phase passes −180° or the lead fades.
+const pidTuningMaxSensitivity = 4
 
 // pidTuningDCSign returns the sign of the DC gain of a stable plant, or 0
 // when the plant is not known to be stable or its DC gain is zero relative
@@ -179,7 +188,10 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // as Pidtune. For a stable plant every nonzero gain takes the sign of its DC
 // gain; when that leaves a default-crossover PD or PDF design infeasible, the
 // crossover moves to where the plant phase is 15°, 30°, 45° or 60° below
-// −180°+PM, the lead same-sign gains supply. A continuous delayed loop with an ideal derivative must keep
+// −180°+PM, the lead same-sign gains supply. A default design on a delayed
+// plant, or at a moved crossover, must keep |S| <= 4 (2.5 dB gain margin)
+// at every sampled frequency, since a margin met at the crossover alone does
+// not bound it there. A continuous delayed loop with an ideal derivative must keep
 // limsup |L(jω)| <= ½, so a near-neutral loop is rejected even when its
 // sampled margins look healthy.
 //
@@ -214,9 +226,16 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 	}
 	hiddenStable := sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) })
-	tuneAt := func(wc, gainSign float64) (*PIDTuningResult, error) {
+	tau := sisoLoopDelay(plant)
+	if plant.Dt > 0 {
+		tau *= plant.Dt
+	}
+	tuneAt := func(wc, gainSign float64, robust bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
-		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign}
+		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
+		if robust {
+			p.maxSensitivity = pidTuningMaxSensitivity
+		}
 		if plant.Dt > 0 {
 			p.high = math.Min(p.high, .99*math.Pi/plant.Dt)
 		}
@@ -262,7 +281,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return res, err
 	}
 	if opts.CrossoverFrequency != 0 {
-		return tuneAt(opts.CrossoverFrequency, pidTuningDCSign(plant, eval.at, opts.CrossoverFrequency))
+		return tuneAt(opts.CrossoverFrequency, pidTuningDCSign(plant, eval.at, opts.CrossoverFrequency), false)
 	}
 	pm := opts.PhaseMargin
 	if pm <= 0 || pm >= 180 || !finitePID(pm) {
@@ -273,19 +292,18 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
 	gainSign := pidTuningDCSign(plant, eval.at, wc0)
-	res, err := tuneAt(wc0, gainSign)
+	res, err := tuneAt(wc0, gainSign, tau > 0)
 	fam := PidtuneType(strings.ToUpper(string(family)))
 	if gainSign == 0 || fam != PidtunePD && fam != PidtunePDF || !errors.As(err, new(*PIDTuningError)) {
 		return res, err
 	}
 	// Same-sign PD gains add lead in (0°, 90°) only, so retry where the
 	// plant phase leaves a moderate lead to supply.
-	tau := sisoLoopDelay(plant)
 	wMax := wc0 * 1e4
 	if plant.Dt > 0 {
-		tau *= plant.Dt
 		wMax = math.Min(wMax, .98*math.Pi/plant.Dt)
 	}
+	ladderWarning := ""
 	for _, lead := range []float64{15, 30, 45, 60} {
 		wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
 		if eval.err != nil {
@@ -294,14 +312,24 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if !ok || wc == wc0 {
 			continue
 		}
-		r, e := tuneAt(wc, gainSign)
+		r, e := tuneAt(wc, gainSign, true)
 		if e == nil {
 			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where same-sign PD gains can meet the phase margin.", wc0, wc))
 			return r, nil
 		}
-		if !errors.As(e, new(*PIDTuningError)) {
+		var te *PIDTuningError
+		if !errors.As(e, &te) {
 			return nil, e
 		}
+		for _, w := range te.Evidence.Warnings {
+			if strings.Contains(w, "sensitivity peak") {
+				ladderWarning = fmt.Sprintf("Moved crossover %.4g: %s", wc, w)
+			}
+		}
+	}
+	var te *PIDTuningError
+	if ladderWarning != "" && errors.As(err, &te) && !slices.Contains(te.Evidence.Warnings, ladderWarning) {
+		te.Evidence.Warnings = append(te.Evidence.Warnings, ladderWarning)
 	}
 	return res, err
 }
@@ -534,10 +562,12 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	}
 	evidence := PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: o.PhaseMargin, Stability: p.stability, Warnings: append([]string(nil), p.warnings...), Normalizers: norms, Termination: PIDTerminationConverged}
 
-	bestScore := math.Inf(1)
-	var best PID2
+	// The search follows the incumbent; best also meets the sensitivity
+	// bound, which a path to a robust optimum may cross.
+	bestScore, incumbentScore := math.Inf(1), math.Inf(1)
+	var best, incumbent PID2
 	var bestParts PIDTuningObjective
-	signRejected := false
+	signRejected, sensitivityRejected := false, false
 	evaluate := func(candidate PID2) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -593,6 +623,13 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 				return nil
 			}
 		}
+		if j < incumbentScore {
+			incumbent, incumbentScore = candidate, j
+		}
+		if p.maxSensitivity > 0 && pidTuningSensitivityPeak(p, candidate) > p.maxSensitivity {
+			sensitivityRejected = true
+			return nil
+		}
 		best, bestScore, bestParts = candidate, j, v
 		return nil
 	}
@@ -614,9 +651,9 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	current := c
 	step := .5
 	for round := 0; round < 64 && evidence.Evaluations < o.MaxEvaluations; round++ {
-		previous := bestScore
-		if finitePID(bestScore) {
-			current = best
+		previous := incumbentScore
+		if finitePID(incumbentScore) {
+			current = incumbent
 		}
 		for axis := range 4 {
 			if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && !filtered {
@@ -640,7 +677,7 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 				}
 			}
 		}
-		if bestScore >= previous-1e-6*math.Max(1, math.Abs(previous)) || !finitePID(bestScore) {
+		if incumbentScore >= previous-1e-6*math.Max(1, math.Abs(previous)) || !finitePID(incumbentScore) {
 			step *= .5
 		}
 		if step < 1e-5 {
@@ -656,6 +693,9 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	if !finitePID(bestScore) {
 		if signRejected {
 			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target needed a gain of sign opposite to the stable plant's DC gain; such designs are rejected.")
+		}
+		if sensitivityRejected {
+			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a sensitivity peak above %g at the default crossover; such designs are rejected.", p.maxSensitivity))
 		}
 		return nil, &PIDTuningError{Op: op, Evidence: evidence}
 	}
@@ -860,6 +900,23 @@ func pidTuningIdealStable(plant *System, c *PID2) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// pidTuningSensitivityPeak samples max |1/(1+L(jω))| over [p.low, p.high]
+// with a step that turns the delay phase by at most π/16.
+func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
+	peak := 0.
+	for w := p.low; ; {
+		peak = math.Max(peak, 1/cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)))
+		if w >= p.high {
+			return peak
+		}
+		next := w * 1.01
+		if p.tau > 0 {
+			next = math.Min(next, w+math.Pi/16/p.tau)
+		}
+		w = math.Min(next, p.high)
+	}
 }
 
 // Report all located gain crossings, retaining the exactly normalized target.

@@ -26,13 +26,19 @@ func delayedFirstOrder(t *testing.T, tau float64) *System {
 // returns the sampled sensitivity peak, bounded by 1/(1−|L|) beyond the grid.
 func pidDelayLoopCheck(t *testing.T, c *PID2, tau float64) (stable bool, peak float64) {
 	t.Helper()
+	return pidDelayLoopCheckPole(t, c, tau, 10)
+}
+
+// pidDelayLoopCheckPole is pidDelayLoopCheck for C(s)·e^{-τs}/(s+a), a > 0.
+func pidDelayLoopCheckPole(t *testing.T, c *PID2, tau, a float64) (stable bool, peak float64) {
+	t.Helper()
 	L := func(w float64) complex128 {
 		s := complex(0, w)
 		k := complex(c.Kp, 0) + complex(c.Kd, 0)*s/(1+complex(c.Tf, 0)*s)
 		if c.Ki != 0 {
 			k += complex(c.Ki, 0) / s
 		}
-		return k * cmplx.Exp(-s*complex(tau, 0)) / (s + 10)
+		return k * cmplx.Exp(-s*complex(tau, 0)) / (s + complex(a, 0))
 	}
 	const wEnd = 1e4
 	hf := math.Abs(c.Kp)/wEnd + math.Abs(c.Ki)/(wEnd*wEnd)
@@ -278,7 +284,7 @@ func TestTunePIDDefaultPDMovesCrossover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.SetInputDelay([]float64{30}); err != nil {
+	if err := d.SetInputDelay([]float64{3}); err != nil {
 		t.Fatal(err)
 	}
 	r, err := TunePID(context.Background(), d, PidtunePD, PIDTuningOptions{})
@@ -356,5 +362,83 @@ func TestPidTuningDCSignIgnoresRoundingZero(t *testing.T) {
 	}
 	if s := sign(1e-6, 1); s != 1 {
 		t.Errorf("small genuine DC gain: sign %g, want 1", s)
+	}
+}
+
+func pidSensitivityRejected(err error) bool {
+	var te *PIDTuningError
+	return errors.As(err, &te) && slices.ContainsFunc(te.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "sensitivity peak") })
+}
+
+// A delay-capped default crossover fixes only where |L| = 1; on a plant whose
+// |G| is flat below the cap, P lands at DC loop gain ≈ 1 and moved-crossover
+// PD leaves |L| ≈ 1 where the delay phase passes −180°. Such designs have
+// |S| peaks of 10–100 despite healthy margins at wc and must be rejected.
+func TestTunePIDDefaultDelayBoundsSensitivity(t *testing.T) {
+	for _, tc := range []struct {
+		a, tau float64
+		family PidtuneType
+		ok     bool
+	}{
+		{10, 2.1, PidtuneP, false},
+		{1, 5, PidtuneP, false},
+		{1, 5, PidtunePDF, false},
+		{1, 5, PidtunePI, true},
+		{1, 5, PidtunePID, true},
+		{1, 1, PidtunePDF, true},
+		{10, 2.1, PidtunePI, true},
+	} {
+		p := makePlant(t, []float64{1}, []float64{1, tc.a})
+		if err := p.SetInputDelay([]float64{tc.tau}); err != nil {
+			t.Fatal(err)
+		}
+		r, err := TunePID(context.Background(), p, tc.family, PIDTuningOptions{})
+		if !tc.ok {
+			if !pidSensitivityRejected(err) {
+				t.Errorf("1/(s+%g) τ=%g %s: err %v, want sensitivity rejection", tc.a, tc.tau, tc.family, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("1/(s+%g) τ=%g %s: %v", tc.a, tc.tau, tc.family, err)
+			continue
+		}
+		if stable, peak := pidDelayLoopCheckPole(t, r.Controller, tc.tau, tc.a); !stable || peak > pidTuningMaxSensitivity*1.01 {
+			t.Errorf("1/(s+%g) τ=%g %s: %+v independent stable=%v |S|max=%g", tc.a, tc.tau, tc.family, r.Controller, stable, peak)
+		}
+	}
+	p := makePlant(t, []float64{1}, []float64{1, 10})
+	if err := p.SetInputDelay([]float64{2.1}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: .4987})
+	if err != nil {
+		t.Fatalf("explicit crossover is the caller's choice: %v", err)
+	}
+	if _, peak := pidDelayLoopCheckPole(t, r.Controller, 2.1, 10); peak < 50 {
+		t.Errorf("explicit P %+v |S|max=%g; fragile reference design changed", r.Controller, peak)
+	}
+	eval, err := newSISOEval(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp := pidTuningPlant{low: .004987, high: 49.87, at: eval.at, tau: 2.1}
+	if peak := pidTuningSensitivityPeak(pp, *r.Controller); peak < 50 {
+		t.Errorf("sampled |S| peak %g missed the near-neutral loop", peak)
+	}
+}
+
+// 0.1/(z−0.9) with 30 samples of delay: the moved PD crossover meets the
+// margin at wc only, with |S| ≈ 9 at the delay's −180° crossing.
+func TestTunePIDDiscreteMovedCrossoverBoundsSensitivity(t *testing.T) {
+	d, err := NewFromSlices(1, 1, 1, []float64{0.9}, []float64{1}, []float64{0.1}, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetInputDelay([]float64{30}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TunePID(context.Background(), d, PidtunePD, PIDTuningOptions{}); !pidSensitivityRejected(err) {
+		t.Fatalf("err %v, want sensitivity rejection", err)
 	}
 }
