@@ -495,12 +495,15 @@ func (e *delayLFT) sigma(w float64) float64 {
 // rationally independent, which the exact grouping cannot always confirm:
 // below then still certifies an upper bound, and estimate is taken as the
 // limit only for dim = 1, a single class, where φ = ωh sweeps the circle.
+// Coordinate c is scaled by K_c = max k_i over its class: G∞ moves at most
+// as fast along each, so cells of half-width r/K_c share one Lipschitz bound.
 type highFrequencyGain struct {
 	e       *delayLFT
 	dim     int
 	grp     []int
 	k       []float64 // k_i, nil when all ones
 	kmax    float64
+	scale   []float64 // K_c
 	d11     []complex128
 	d12     []complex128
 	d21     []complex128
@@ -511,12 +514,40 @@ type highFrequencyGain struct {
 	g       []complex128
 	lip     float64
 	samples int
+	over    float64 // largest sample that failed below
 
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
 }
 
 func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
+	grp, mult, dim := commensurateClasses(e.tau)
+	return newHighFrequencyGainOn(e, grp, mult, dim)
+}
+
+// distinctDelays returns the gain on the torus of one phase per distinct
+// delay with k_i = 1, which also holds every limit of Δ(jω) as ω → ∞ and may
+// certify a bound with fewer samples when some K_c is large; nil when it is
+// the same torus.
+func (h *highFrequencyGain) distinctDelays() *highFrequencyGain {
+	tau := h.e.tau
+	grp, mult, dim := make([]int, len(tau)), make([]int, len(tau)), 0
+	for i, t := range tau {
+		mult[i] = 1
+		if f := slices.Index(tau, t); f < i {
+			grp[i] = grp[f]
+		} else {
+			grp[i] = dim
+			dim++
+		}
+	}
+	if dim == h.dim && h.k == nil {
+		return nil
+	}
+	return newHighFrequencyGainOn(h.e, grp, mult, dim)
+}
+
+func newHighFrequencyGainOn(e *delayLFT, grp, mult []int, dim int) *highFrequencyGain {
 	lft := e.sys.LFT
 	nd, p, m := e.nd, e.p, e.m
 	toC := func(d *mat.Dense, r, c int) []complex128 {
@@ -531,18 +562,22 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		}
 		return out
 	}
-	grp, mult, dim := commensurateClasses(e.tau)
 	var k []float64
 	kmax := 1.0
+	scale := make([]float64, dim)
+	for c := range scale {
+		scale[c] = 1
+	}
 	if nd > 0 && slices.Max(mult) > 1 {
 		k = make([]float64, nd)
 		for i, ki := range mult {
 			k[i] = float64(ki)
 			kmax = max(kmax, k[i])
+			scale[grp[i]] = max(scale[grp[i]], k[i])
 		}
 	}
 	h := &highFrequencyGain{
-		e: e, dim: dim, grp: grp, k: k, kmax: kmax,
+		e: e, dim: dim, grp: grp, k: k, kmax: kmax, scale: scale, over: math.Inf(-1),
 		d11: toC(e.sys.D, p, m), d12: toC(lft.D12, p, nd),
 		d21: toC(lft.D21, nd, m), d22: toC(lft.D22, nd, nd),
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
@@ -552,8 +587,8 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 	return h
 }
 
-// lipschitz bounds the Lipschitz constant of G∞ in φ, in the max-norm, by
-// k_max·‖D12‖‖D21‖·r², with r bounding ‖(I − D22Δ)⁻¹‖ on the phase torus,
+// lipschitz bounds the Lipschitz constant of G∞ in φ, in the max-norm of
+// K_c·φ_c, by ‖D12‖‖D21‖·r², with r bounding ‖(I − D22Δ)⁻¹‖ on the phase torus,
 // which also bounds ‖(I − ΔD22)⁻¹‖ = ‖Δ(I − D22Δ)⁻¹Δ⁻¹‖: 1/(1 − ‖D22‖)
 // when ‖D22‖ < 1, ‖(I − |D22|)⁻¹‖ when ρ(|D22|) < 1, else the polydisk or
 // torus bound of difference, or for one phase its right half-plane bound,
@@ -575,7 +610,7 @@ func (h *highFrequencyGain) lipschitz() float64 {
 			r = min(r, d.rhp)
 		}
 	}
-	return h.kmax * c * r * r
+	return c * r * r
 }
 
 func (h *highFrequencyGain) at(theta []float64) float64 {
@@ -645,29 +680,38 @@ func (h *highFrequencyGain) onePhaseSup() float64 {
 	return best
 }
 
-// torusGrid returns the centres of a uniform grid of about 4096 cells on
-// the torus of phases, dim consecutive values per cell, and their half-width.
+// torusGrid returns the centres of a grid of about 4096 cells on the torus
+// of phases, dim consecutive values per cell, with n_c ∝ K_c cells along
+// coordinate c, and the scaled half-width r = max_c π·K_c/n_c: φ_c spans at
+// most r/K_c either side of a centre.
 func (h *highFrequencyGain) torusGrid() ([]float64, float64) {
 	if h.grid != nil {
 		return h.grid, h.gridR
 	}
 	nd := h.dim
-	n0 := max(2, int(math.Pow(4096, 1/float64(nd))))
-	r := math.Pi / float64(n0)
-	total := nd
-	for range nd {
-		total *= n0
+	prod := 1.0
+	for _, s := range h.scale {
+		prod *= s
+	}
+	n0 := math.Pow(4096/prod, 1/float64(nd))
+	n, w := make([]int, nd), make([]float64, nd)
+	r, total := 0.0, nd
+	for c, s := range h.scale {
+		n[c] = max(2, int(s*n0))
+		w[c] = math.Pi / float64(n[c])
+		r = max(r, s*w[c])
+		total *= n[c]
 	}
 	cells := make([]float64, 0, total)
 	idx := make([]int, nd)
 	for {
-		for _, k := range idx {
-			cells = append(cells, (2*float64(k)+1)*r)
+		for c, k := range idx {
+			cells = append(cells, (2*float64(k)+1)*w[c])
 		}
 		i := 0
 		for ; i < nd; i++ {
 			idx[i]++
-			if idx[i] < n0 {
+			if idx[i] < n[i] {
 				break
 			}
 			idx[i] = 0
@@ -695,9 +739,9 @@ func (h *highFrequencyGain) estimate() float64 {
 
 // below reports whether σ_max(G∞) <= level on the whole torus of phases,
 // by branch and bound: G∞ is Lipschitz in θ with constant lip (see
-// lipschitz) in the max-norm, since
-// dΔ(I − D22Δ)⁻¹ = (I − ΔD22)⁻¹·dΔ·(I − D22Δ)⁻¹, so a cell of half-width r
-// around a sample v cannot exceed v + lip·r. Cells that may exceed level are
+// lipschitz) in the max-norm of K_c·θ_c, since
+// dΔ(I − D22Δ)⁻¹ = (I − ΔD22)⁻¹·dΔ·(I − D22Δ)⁻¹ and |dΔ_i| <= k_i·|dθ_g(i)|,
+// so a cell of scaled half-width r around a sample v cannot exceed v + lip·r. Cells that may exceed level are
 // split until none remain, a sample exceeds level, or the sample budget is
 // spent.
 func (h *highFrequencyGain) below(level float64, budget int) bool {
@@ -709,6 +753,7 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 		for c := range slices.Chunk(cells, nd) {
 			v := h.at(c)
 			if !(v <= level) {
+				h.over = max(h.over, v)
 				return false
 			}
 			if v+h.lip*r <= level {
@@ -716,9 +761,10 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 			}
 			for mask := range 1 << nd {
 				for i := range nd {
-					x := c[i] - r/2
+					d := r / 2 / h.scale[i]
+					x := c[i] - d
 					if mask&(1<<i) != 0 {
-						x = c[i] + r/2
+						x = c[i] + d
 					}
 					next = append(next, x)
 				}
@@ -731,6 +777,30 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 		cells, r = next, r/2
 	}
 	return true
+}
+
+// levelBelow searches a level in (sup σ_max(G∞), best) that below certifies,
+// starting midway from the lower estimate est. A sample above a trial level
+// raises est to it; when below runs out of budget instead, which caps the
+// samples of all attempts together, the distinct-delay torus is tried.
+func (h *highFrequencyGain) levelBelow(est, best float64) (float64, bool) {
+	const budget = 1 << 21
+	for range 16 {
+		if !(est < best) {
+			break
+		}
+		level := (est + best) / 2
+		if h.below(level, budget) {
+			return level, true
+		}
+		if h.over > level {
+			est = max(est, h.over)
+			continue
+		}
+		d := h.distinctDelays()
+		return level, d != nil && d.below(level, budget)
+	}
+	return 0, false
 }
 
 // tailGain bounds σ_max(G(jω)) for ω ≥ w by lim + ‖G − G∞‖, with
@@ -903,9 +973,9 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	if e.directFeedthrough {
 		hf := newHighFrequencyGain(e)
 		est := hf.estimate()
-		level := (est + best) / 2
+		level, ok := hf.levelBelow(est, best)
 		switch {
-		case est < best && hf.below(level, 1<<21):
+		case ok:
 			lim = level
 		case hf.dim == 1 && est > best*(1+tol):
 			lim = est

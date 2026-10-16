@@ -42,24 +42,33 @@ func TestCommensurateClasses(t *testing.T) {
 	}
 }
 
-// partlyCommensurateLoop returns G(s) = r(s) + Σ c_i·e^{−sτ_i}/(1 − d_i·e^{−sτ_i})
-// with r(s) = kr/(s² + 2ζω0·s + ω0²) and τ = (1, 2, 3, √2), as a delay LFT
-// with diagonal D22 = diag(d), and |G(jω)| in closed form.
+// partlyCommensurateLoop returns delayResonanceLoop with τ = (1, 2, 3, √2).
 func partlyCommensurateLoop(t *testing.T, kr float64, c, d []float64) (*System, func(float64) float64) {
 	t.Helper()
-	tau := []float64{1, 2, 3, math.Sqrt2}
+	return delayResonanceLoop(t, []float64{1, 2, 3, math.Sqrt2}, kr, c, d)
+}
+
+// delayResonanceLoop returns G(s) = r(s) + Σ c_i·e^{−sτ_i}/(1 − d_i·e^{−sτ_i})
+// with r(s) = kr/(s² + 2ζω0·s + ω0²), as a delay LFT with diagonal
+// D22 = diag(d), and |G(jω)| in closed form.
+func delayResonanceLoop(t *testing.T, tau []float64, kr float64, c, d []float64) (*System, func(float64) float64) {
+	t.Helper()
+	nd := len(tau)
+	n := nd + 1
 	const w0, zeta = 1.3, 0.05
-	dd := make([]float64, 25)
-	dd[1], dd[2], dd[3], dd[4] = c[0], c[1], c[2], c[3]
-	for i := range 4 {
-		dd[5*(i+1)] = 1
-		dd[5*(i+1)+i+1] = d[i]
+	dd := make([]float64, n*n)
+	for i := range nd {
+		dd[i+1] = c[i]
+		dd[n*(i+1)] = 1
+		dd[n*(i+1)+i+1] = d[i]
 	}
-	H, err := NewFromSlices(2, 5, 5,
+	b := make([]float64, 2*n)
+	b[n] = kr
+	cm := make([]float64, 2*n)
+	cm[0] = 1
+	H, err := NewFromSlices(2, n, n,
 		[]float64{0, 1, -w0 * w0, -2 * zeta * w0},
-		[]float64{0, 0, 0, 0, 0, kr, 0, 0, 0, 0},
-		[]float64{1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		dd, 0)
+		b, cm, dd, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,5 +311,115 @@ func TestDelayModelsRejectZeroInternalDelay(t *testing.T) {
 		if _, err := sys.IsStable(); !errors.Is(err, ErrZeroInternalDelay) {
 			t.Errorf("%v: IsStable err = %v, want ErrZeroInternalDelay", tau, err)
 		}
+	}
+}
+
+// TestHinfNormLargeMultipleClass checks τ = (1, K, √2) with K up to 63: the
+// class {1, K} moves K times faster along its phase, so cells are scaled by
+// K_c rather than the whole torus by k_max, and a coarse first estimate is
+// raised by samples that exceed a trial level. sup |G∞| = 2.3/0.7, with
+// c = (1, 0.3, 1), d = 0.3, below the finite peak at DC or the resonance.
+func TestHinfNormLargeMultipleClass(t *testing.T) {
+	c, d := []float64{1, 0.3, 1}, []float64{0.3, 0.3, 0.3}
+	const sup = 2.3 / 0.7
+	for _, tc := range []struct {
+		k, kr, want, wWant float64
+	}{
+		{20, 0.1, 0.1/1.69 + sup, 0},
+		{40, 0.1, 0.1/1.69 + sup, 0},
+		{40, 0.2, 0.2/1.69 + sup, 0},
+		{63, 0.1, 0.1/1.69 + sup, 0},
+		{63, 0.25, 3.604434473, 1.31165},
+		{63, 0.3, 3.893320594, 1.31121},
+	} {
+		sys, gain := delayResonanceLoop(t, []float64{1, tc.k, math.Sqrt2}, tc.kr, c, d)
+		e, err := newDelayLFT(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hf := newHighFrequencyGain(e)
+		if hf.dim != 2 || !slices.Equal(hf.scale, []float64{tc.k, 1}) {
+			t.Fatalf("K=%g: dim = %d, scale = %v; want 2, [%g 1]", tc.k, hf.dim, hf.scale, tc.k)
+		}
+		if !hf.below(sup*1.01, 1<<21) || hf.samples > 1<<17 {
+			t.Errorf("K=%g: below(sup·1.01) needs %d samples", tc.k, hf.samples)
+		}
+		if hf.below(sup*0.999, 1<<21) {
+			t.Errorf("K=%g: below(sup·0.999) = true", tc.k)
+		}
+		if lvl, ok := newHighFrequencyGain(e).levelBelow(0, sup*1.02); !ok || !(lvl > sup && lvl < sup*1.02) {
+			t.Errorf("K=%g: levelBelow(0, sup·1.02) = %g, %v", tc.k, lvl, ok)
+		}
+		got, w, err := HinfNorm(sys)
+		if err != nil {
+			t.Fatalf("K=%g kr=%g: HinfNorm: %v", tc.k, tc.kr, err)
+		}
+		if math.Abs(got-tc.want) > 1e-9*tc.want || math.Abs(w-tc.wWant) > 1e-5 {
+			t.Errorf("K=%g kr=%g: HinfNorm = (%.12g, %.8g), want (%.12g, %.8g)", tc.k, tc.kr, got, w, tc.want, tc.wWant)
+		}
+		if g := gain(w); math.Abs(g-got) > 1e-9*got {
+			t.Errorf("K=%g kr=%g: |G(j%g)| = %.12g, HinfNorm %.12g", tc.k, tc.kr, w, g, got)
+		}
+		if peak, _ := oraclePeak(gain, 20, 1e-3); peak > got*(1+1e-9) {
+			t.Errorf("K=%g kr=%g: oracle peak %.12g above HinfNorm %.12g", tc.k, tc.kr, peak, got)
+		}
+	}
+}
+
+// TestHinfNormManyLargeMultipleClasses checks that the grid stays near 4096
+// cells when several classes hold a large multiple: τ = h_c·(1, 63) for
+// h = (1, √2/2, √3/2), the last two rounded to 30 bits so 63·h_c is exact.
+func TestHinfNormManyLargeMultipleClasses(t *testing.T) {
+	h1 := math.Ldexp(math.Round(math.Ldexp(math.Sqrt2/2, 30)), -30)
+	h2 := math.Ldexp(math.Round(math.Ldexp(math.Sqrt(3)/2, 30)), -30)
+	tau := []float64{1, 63, h1, 63 * h1, h2, 63 * h2}
+	c := []float64{1, 0.3, 1, 0.3, 1, 0.3}
+	d := []float64{0.3, 0.3, 0.3, 0.3, 0.3, 0.3}
+	sys, gain := delayResonanceLoop(t, tau, 1, c, d)
+	e, err := newDelayLFT(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hf := newHighFrequencyGain(e)
+	if hf.dim != 3 || !slices.Equal(hf.scale, []float64{63, 63, 63}) {
+		t.Fatalf("dim = %d, scale = %v; want 3, [63 63 63]", hf.dim, hf.scale)
+	}
+	if cells, _ := hf.torusGrid(); len(cells)/hf.dim > 2*4096 {
+		t.Fatalf("torusGrid has %d cells", len(cells)/hf.dim)
+	}
+	got, w, err := HinfNorm(sys)
+	if err != nil {
+		t.Fatalf("HinfNorm: %v", err)
+	}
+	want, wWant := oraclePeak(gain, 20, 1e-3)
+	if !(want > 3.9/0.7) || math.Abs(got-want) > 1e-9*want || math.Abs(w-wWant) > 1e-5 {
+		t.Errorf("HinfNorm = (%.12g, %.8g), oracle (%.12g, %.8g)", got, w, want, wWant)
+	}
+}
+
+// TestHighFrequencyGainDistinctDelays checks the fallback torus of one
+// phase per distinct delay: a superset of the class torus, so it certifies
+// only levels above the class sup, and nil when the two coincide.
+func TestHighFrequencyGainDistinctDelays(t *testing.T) {
+	c, d := []float64{1, 0.3, 1}, []float64{0.3, 0.3, 0.3}
+	sys, _ := delayResonanceLoop(t, []float64{1, 8, 1}, 0.1, c, d)
+	e, err := newDelayLFT(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dd := newHighFrequencyGain(e).distinctDelays()
+	if dd == nil || dd.dim != 2 || dd.k != nil || !slices.Equal(dd.grp, []int{0, 1, 0}) {
+		t.Fatalf("distinctDelays = %+v; want dim 2, grp [0 1 0], k nil", dd)
+	}
+	const sup = 2.3 / 0.7
+	if !dd.below(sup*1.01, 1<<21) || dd.below(sup*0.999, 1<<21) {
+		t.Error("distinct torus does not bracket sup |G∞|")
+	}
+	sys, _ = delayResonanceLoop(t, []float64{1, math.Sqrt2, math.Sqrt(3)}, 0.1, c, d)
+	if e, err = newDelayLFT(sys); err != nil {
+		t.Fatal(err)
+	}
+	if dd := newHighFrequencyGain(e).distinctDelays(); dd != nil {
+		t.Errorf("distinctDelays of rationally independent delays = %+v, want nil", dd)
 	}
 }
