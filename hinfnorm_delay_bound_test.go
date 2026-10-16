@@ -84,6 +84,30 @@ func TestSpectralNormIsInducedTwoNorm(t *testing.T) {
 	}
 }
 
+func TestSpectralNormerReusesBufferAcrossShapes(t *testing.T) {
+	var sn spectralNormer
+	for _, tc := range []struct {
+		m    *mat.Dense
+		want float64
+	}{
+		{mat.NewDense(3, 3, []float64{0, 0, 0, 0, 0, 0, 0, 0, 7}), 7},
+		{mat.NewDense(2, 2, []float64{-3, 0, -4, -5}), math.Sqrt(45)},
+		{mat.NewDense(2, 3, []float64{3, 0, 0, 0, 4, 0}), 4},
+		{mat.NewDense(2, 2, []float64{1, 0, 0, 2}), 2},
+	} {
+		if got := sn.norm(tc.m); got < tc.want || got > tc.want*(1+1e-14) {
+			t.Errorf("norm(%v) = %.17g, want upper bound within 1e-14 of %.17g", mat.Formatted(tc.m), got, tc.want)
+		}
+	}
+	m := mat.NewDense(2, 2, []float64{-3, 0, -4, -5})
+	if allocs := testing.AllocsPerRun(10, func() { sn.norm(m) }); allocs != 0 {
+		t.Errorf("warm spectralNormer allocates %v per call, want 0", allocs)
+	}
+	if allocs := testing.AllocsPerRun(10, func() { _, _ = maxSingularValue(m) }); allocs > 1 {
+		t.Errorf("maxSingularValue allocates %v per call, want ≤ 1", allocs)
+	}
+}
+
 func TestDelayLFTNormsAreSpectral(t *testing.T) {
 	sys := internalDelayModel(t, 2, []float64{-1, 1, -1, -1}, []float64{1, 0, 0, 1}, []float64{1, 0, 0, 1},
 		[]float64{0.3, 0, 0, 0.3}, []float64{0.5, 0.7})

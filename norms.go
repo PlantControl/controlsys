@@ -1059,16 +1059,27 @@ func maxSingularValue(M *mat.Dense) (float64, error) {
 	if M == nil || M.IsEmpty() {
 		return 0, nil
 	}
-	r, c := M.Dims()
-	raw := M.RawMatrix()
-	data := make([]float64, r*c)
-	copyStrided(data, c, raw.Data, raw.Stride, r, c)
-	sv := make([]float64, min(r, c))
-	wq := make([]float64, 1)
-	impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, data, c, sv, nil, 1, nil, 1, wq, -1)
-	work := make([]float64, int(wq[0]))
-	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, data, c, sv, nil, 1, nil, 1, work, len(work)) {
+	sv, ok, _ := svdMaxInto(M, nil)
+	if !ok {
 		return 0, fmt.Errorf("singular value iteration did not converge: %w", ErrSchurFailed)
 	}
-	return sv[0], nil
+	return sv, nil
+}
+
+// svdMaxInto returns the computed σ_max of a non-empty m, using buf (grown as
+// needed and returned for reuse) for the copy, singular values and minimum
+// Dgesvd workspace.
+func svdMaxInto(m *mat.Dense, buf []float64) (float64, bool, []float64) {
+	r, c := m.Dims()
+	k := min(r, c)
+	need := r*c + k + max(3*k+max(r, c), 5*k)
+	if cap(buf) < need {
+		buf = make([]float64, need)
+	}
+	buf = buf[:need]
+	data, sv, work := buf[:r*c], buf[r*c:r*c+k], buf[r*c+k:]
+	raw := m.RawMatrix()
+	copyStrided(data, c, raw.Data, raw.Stride, r, c)
+	ok := impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, data, c, sv, nil, 1, nil, 1, work, len(work))
+	return sv[0], ok, buf
 }

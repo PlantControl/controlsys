@@ -761,6 +761,30 @@ func pidTuningIdealDerivative(family PidtuneType) bool {
 	return f == PidtunePD || f == PidtunePID
 }
 
+// pidDerivTail bounds |s·G(s)| = |CB + CA(sI−A)⁻¹B| for Re s ≥ 0, |s| ≥ w of a
+// strictly proper SISO plant G, delays excluded.
+func pidDerivTail(plant *System) func(float64) float64 {
+	n, _, _ := plant.Dims()
+	cb, cab, normA := 0.0, 0.0, 0.0
+	if n > 0 {
+		var v, ca mat.Dense
+		v.Mul(plant.C, plant.B)
+		cb = math.Abs(v.At(0, 0))
+		ca.Mul(plant.C, plant.A)
+		cab = spectralNorm(&ca) * spectralNorm(plant.B)
+		normA = spectralNorm(plant.A)
+	}
+	return func(w float64) float64 {
+		if cab == 0 || math.IsInf(w, 1) {
+			return cb
+		}
+		if w <= normA {
+			return math.Inf(1)
+		}
+		return cb + cab/(w-normA)
+	}
+}
+
 // pidTuningDelayStability returns a Nyquist stability test for loops
 // C(s)·P(s) with a continuous delayed plant, or false when the plant is
 // outside the test's scope. Ideal derivative controllers need D = 0 and no
@@ -781,25 +805,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 	plantTail, plantLimit := base.tail, base.tailLimit
 	var derivTail func(float64) float64
 	if !plant.HasInternalDelay() && plant.D.At(0, 0) == 0 {
-		n, _, _ := plant.Dims()
-		cb, cab, normA := 0.0, 0.0, 0.0
-		if n > 0 {
-			var v, ca mat.Dense
-			v.Mul(plant.C, plant.B)
-			cb = math.Abs(v.At(0, 0))
-			ca.Mul(plant.C, plant.A)
-			cab = mat.Norm(&ca, 2) * mat.Norm(plant.B, 2)
-			normA = mat.Norm(plant.A, 2)
-		}
-		derivTail = func(w float64) float64 {
-			if cab == 0 || math.IsInf(w, 1) {
-				return cb
-			}
-			if w <= normA {
-				return math.Inf(1)
-			}
-			return cb + cab/(w-normA)
-		}
+		derivTail = pidDerivTail(plant)
 	}
 	if idealDerivative && derivTail == nil {
 		return nil, false, nil

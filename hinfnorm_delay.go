@@ -7,7 +7,6 @@ import (
 	"math/cmplx"
 	"slices"
 
-	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -76,6 +75,7 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 		g:    newFrequencyEvaluator(sys).pointEval(),
 	}
 	e.ioDelay = effectiveIODelayMatrix(sys, p, m, true)
+	var sn spectralNormer
 	if p > 2 || m > 2 {
 		e.svd = newComplexSVDWorkspace(p, m)
 	}
@@ -91,12 +91,12 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 			return nil, err
 		}
 		e.poles = poles
-		e.normA = spectralNorm(sys.A)
-		e.c1, e.c2 = spectralNorm(sys.C), spectralNorm(lft.C2)
-		e.b1, e.b2 = spectralNorm(sys.B), spectralNorm(lft.B2)
+		e.normA = sn.norm(sys.A)
+		e.c1, e.c2 = sn.norm(sys.C), sn.norm(lft.C2)
+		e.b1, e.b2 = sn.norm(sys.B), sn.norm(lft.B2)
 	}
-	e.d11, e.d12 = spectralNorm(sys.D), spectralNorm(lft.D12)
-	e.d21, e.d22 = spectralNorm(lft.D21), spectralNorm(lft.D22)
+	e.d11, e.d12 = sn.norm(sys.D), sn.norm(lft.D12)
+	e.d21, e.d22 = sn.norm(lft.D21), sn.norm(lft.D22)
 	e.r0 = math.Inf(1)
 	e.entrywise = nd > 0 && (e.d22 >= 1 || math.Pow(1+e.d22, float64(nd))-1 >= 1)
 	if e.entrywise {
@@ -104,7 +104,7 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 		e.rowC1, e.rowC2 = rowNorms(sys.C, p), rowNorms(lft.C2, nd)
 		e.colB1, e.colB2 = colNorms(sys.B, m), colNorms(lft.B2, nd)
 		if q0, ok := nonnegResolvent(e.abs22, nd); ok {
-			e.q0, e.r0 = q0, spectralNorm(mat.NewDense(nd, nd, q0))
+			e.q0, e.r0 = q0, sn.norm(mat.NewDense(nd, nd, q0))
 		}
 	}
 	e.directFeedthrough = lftHasDirectFeedthrough(lft)
@@ -114,6 +114,14 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 // spectralNorm returns an upper bound on σ_max(m): the computed largest
 // singular value raised by its rounding error, capped by the Frobenius norm.
 func spectralNorm(m *mat.Dense) float64 {
+	var s spectralNormer
+	return s.norm(m)
+}
+
+// spectralNormer evaluates spectralNorm reusing one SVD buffer across calls.
+type spectralNormer struct{ buf []float64 }
+
+func (s *spectralNormer) norm(m *mat.Dense) float64 {
 	if m == nil || m.IsEmpty() {
 		return 0
 	}
@@ -122,15 +130,12 @@ func spectralNorm(m *mat.Dense) float64 {
 	if r == 1 || c == 1 || frob == 0 || math.IsInf(frob, 0) || math.IsNaN(frob) {
 		return frob
 	}
-	k := min(r, c)
-	buf := make([]float64, r*c+k+max(3*k+max(r, c), 5*k))
-	data, sv, work := buf[:r*c], buf[r*c:r*c+k], buf[r*c+k:]
-	raw := m.RawMatrix()
-	copyStrided(data, c, raw.Data, raw.Stride, r, c)
-	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, data, c, sv, nil, 1, nil, 1, work, len(work)) {
+	sv, ok, buf := svdMaxInto(m, s.buf)
+	s.buf = buf
+	if !ok {
 		return frob
 	}
-	return min(frob, sv[0]*(1+8*float64(max(r, c))*0x1p-52))
+	return min(frob, sv*(1+8*float64(max(r, c))*0x1p-52))
 }
 
 func (e *delayLFT) fail(w float64, err error) {
