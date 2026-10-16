@@ -212,7 +212,7 @@ func TestThiranCoeffsDirectly(t *testing.T) {
 
 // Verify integerDelaySS frequency response matches exp(-jω*d*dt)
 func TestIntegerDelaySSFreqResponse(t *testing.T) {
-	for _, d := range []int{1, 3, 7} {
+	for _, d := range []float64{1, 3, 7} {
 		dt := 0.1
 		sys, _ := integerDelaySS(d, dt)
 		tfRes, _ := sys.TransferFunction(nil)
@@ -222,7 +222,7 @@ func TestIntegerDelaySSFreqResponse(t *testing.T) {
 			got := mustEval(t, tfRes.TF, z)[0][0]
 			want := cmplx.Exp(complex(0, -w*float64(d)*dt))
 			if cmplx.Abs(got-want) > 1e-12 {
-				t.Errorf("d=%d w=%v: got %v, want %v", d, w, got, want)
+				t.Errorf("d=%g w=%v: got %v, want %v", d, w, got, want)
 			}
 		}
 	}

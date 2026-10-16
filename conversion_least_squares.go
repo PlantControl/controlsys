@@ -144,7 +144,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 	if err != nil {
 		return nil, none, err
 	}
-	out, err := newDelayConversionPolicy(dt, 0, 0).applyDiscreteDelayFields(realized, sys)
+	out, err := newDelayConversionPolicy(dt).applyDiscreteDelayFields(realized, sys)
 	if err != nil {
 		return nil, none, err
 	}

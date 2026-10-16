@@ -290,8 +290,8 @@ const (
 // DefaultPadeOrder is the Padé order AbsorbDelay uses for continuous delays.
 const DefaultPadeOrder = 5
 
-// MaxAbsorbedDelayStates bounds the states of a discrete model built by
-// AbsorbDelay, whose dense A holds their square.
+// MaxAbsorbedDelayStates bounds the states of a discrete delay model built by
+// AbsorbDelay or ThiranDelay, whose dense A holds their square.
 const MaxAbsorbedDelayStates = 10000
 
 // AbsorbDelay replaces the delays selected by scopes with model dynamics, as
@@ -762,6 +762,16 @@ func absorbIODelay(sys *System) (*System, error) {
 	return cur, nil
 }
 
+// delaySteps is the whole-sample delay d, capped at horizon in float64 so a
+// delay past the int range cannot wrap; a delay of horizon samples or more
+// never reaches a response of that length.
+func delaySteps(d float64, horizon int) int {
+	if r := math.Round(d); r < float64(horizon) {
+		return int(r)
+	}
+	return horizon
+}
+
 // absorbShifts rounds discrete delays to sample shifts and rejects a total
 // that would give n states plus the shifts more than MaxAbsorbedDelayStates,
 // summing in float64 so huge delays cannot overflow int.
@@ -770,12 +780,20 @@ func absorbShifts(n int, tau []float64) ([]int, int, error) {
 	total := float64(n)
 	for j, d := range tau {
 		total += math.Round(d)
-		if !(total <= MaxAbsorbedDelayStates) {
-			return nil, 0, fmt.Errorf("absorbed model would have %g states, limit %d: %w", total, MaxAbsorbedDelayStates, ErrInvalidArgument)
+		if err := checkAbsorbedStates(total); err != nil {
+			return nil, 0, err
 		}
 		shifts[j] = int(math.Round(d))
 	}
 	return shifts, int(total) - n, nil
+}
+
+// checkAbsorbedStates rejects a state count above MaxAbsorbedDelayStates or NaN.
+func checkAbsorbedStates(total float64) error {
+	if !(total <= MaxAbsorbedDelayStates) {
+		return fmt.Errorf("absorbed model would have %g states, limit %d: %w", total, MaxAbsorbedDelayStates, ErrInvalidArgument)
+	}
+	return nil
 }
 
 func absorbInputDelay(sys *System) (*System, error) {

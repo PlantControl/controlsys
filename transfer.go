@@ -101,9 +101,7 @@ func (tf *TransferFunc) eval(s complex128) [][]complex128 {
 				if tf.Dt == 0 {
 					h *= cmplx.Exp(-s * complex(tau, 0))
 				} else {
-					for range int(tau) {
-						h /= s
-					}
+					h *= cmplx.Pow(s, complex(-tau, 0))
 				}
 			}
 			result[i][j] = h

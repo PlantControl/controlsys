@@ -277,10 +277,11 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 // When the high-frequency limit exceeds every
 // finite sample, the limit is returned with omega = +Inf, as σ_max(D) is for
 // rational models; the gain may exceed it by the resolvent bound at the grid
-// end, which the rational path's crossing probe rules out. Equal internal
-// delays with ρ(D22) > 1 give an unstable difference operator and +Inf.
-// Other neutral-type models whose difference operator is not provably
-// stable, and cases the grid cannot
+// end, which the rational path's crossing probe rules out. A neutral-type
+// model is decided when its difference operator I − D22·Δ(s) is certified
+// stable (strongly, or for equal delays ρ(D22) < 1) or is shown to have a root
+// in Re s > 0, which gives +Inf. Other neutral-type models, whose difference
+// operator is not provably stable or unstable, and cases the grid cannot
 // resolve or certify within its point budget, return ErrDelayUnsupported
 // rather than an approximate answer. The MathWorks pages define the norm of
 // an unstable model as Inf but say nothing specific about delays; this
@@ -917,7 +918,7 @@ func (e *sigmaEvaluator) sigma(w float64, refine bool) (float64, error) {
 	} else {
 		e.outputPlain(sc)
 	}
-	applyIODelayAtS(e.sys, pt.value(), e.g, p, m, true)
+	applyIODelayAtS(e.sys, pt, e.g, p, m, true)
 	return e.svd.maximumFromFlat(e.g, 0, p, m)
 }
 

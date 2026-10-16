@@ -354,7 +354,7 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	var stateLag []int
 	if finalState {
 		var ok bool
-		if stateLag, ok = sys.stateInputLags(); !ok {
+		if stateLag, ok = sys.stateInputLags(steps); !ok {
 			return nil, fmt.Errorf("Simulate: final state with Delay lacking an input+output split: %w", ErrDelayUnsupported)
 		}
 		xFinal = problem.newXFinal()
@@ -376,7 +376,7 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 		outputLag := make([]int, p)
 		if sys.OutputDelay != nil {
 			for i := range p {
-				outputLag[i] = int(math.Round(sys.OutputDelay[i]))
+				outputLag[i] = delaySteps(sys.OutputDelay[i], steps)
 			}
 		}
 		for k := range steps {
@@ -406,11 +406,11 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 	delayIdx := make([]int, p*m)
 	for i := range p {
 		for j := range m {
-			d := int(math.Round(delayRaw.Data[i*delayRaw.Stride+j]))
+			d := delayRaw.Data[i*delayRaw.Stride+j]
 			if d < 0 {
-				return nil, fmt.Errorf("%w: delay(%d,%d) = %d", ErrNegativeDelay, i, j, d)
+				return nil, fmt.Errorf("%w: delay(%d,%d) = %g", ErrNegativeDelay, i, j, d)
 			}
-			delayIdx[i*m+j] = d
+			delayIdx[i*m+j] = delaySteps(d, steps)
 		}
 	}
 
@@ -471,21 +471,26 @@ func (sys *System) simulateWithDelay(u *mat.Dense, x0 *mat.VecDense, opts *Simul
 // stateInputLags returns the delay each input reaches the states with:
 // InputDelay plus the input share of Delay, split as PullDelaysToLFT does.
 // ok is false when Delay has no input+output split, so no single state of
-// (A, B) sees the delayed inputs.
-func (sys *System) stateInputLags() (lags []int, ok bool) {
+// (A, B) sees the delayed inputs. Lags are capped at steps+1, past any
+// remaining count addLaggedStates matches.
+func (sys *System) stateInputLags(steps int) (lags []int, ok bool) {
 	_, m, _ := sys.Dims()
-	lags = make([]int, m)
+	total := make([]float64, m)
 	if sys.Delay != nil {
 		in, _, residual := decomposeIODelay(sys.Delay)
 		if delayMatrixHasNonzero(residual) {
 			return nil, false
 		}
 		for j, d := range in {
-			lags[j] = int(math.Round(d))
+			total[j] = math.Round(d)
 		}
 	}
 	for j, d := range sys.InputDelay {
-		lags[j] += int(math.Round(d))
+		total[j] += math.Round(d)
+	}
+	lags = make([]int, m)
+	for j, d := range total {
+		lags[j] = delaySteps(d, steps+1)
 	}
 	return lags, true
 }
@@ -518,7 +523,7 @@ func (sys *System) simulateWithInternalDelay(u *mat.Dense, x0 *mat.VecDense, opt
 	delays := make([]int, N)
 	maxDelay := 0
 	for j := range N {
-		delays[j] = int(math.Round(sys.LFT.Tau[j]))
+		delays[j] = delaySteps(sys.LFT.Tau[j], steps)
 		if delays[j] > maxDelay {
 			maxDelay = delays[j]
 		}

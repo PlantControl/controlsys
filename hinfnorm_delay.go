@@ -7,6 +7,7 @@ import (
 	"math/cmplx"
 	"slices"
 
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -24,6 +25,8 @@ type delayLFT struct {
 	n, m, p int
 	nd      int
 	tau     []float64
+	mult    []int // see multiples, computed on demand
+	multOK  bool
 	td      timeDomain
 
 	h22sys *System
@@ -53,6 +56,8 @@ type delayLFT struct {
 	entrywise           bool // norm bounds cannot certify the w = ∞ tail
 	directFeedthrough   bool
 	desc                *descriptorResponse // for certified peaks
+	diff                *differenceBounds   // see difference, computed on demand
+	d22c                []complex128
 	err                 error
 }
 
@@ -86,7 +91,7 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 			return nil, err
 		}
 		e.poles = poles
-		e.normA = mat.Norm(sys.A, 2)
+		e.normA = spectralNorm(sys.A)
 		e.c1, e.c2 = spectralNorm(sys.C), spectralNorm(lft.C2)
 		e.b1, e.b2 = spectralNorm(sys.B), spectralNorm(lft.B2)
 	}
@@ -106,11 +111,26 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 	return e, nil
 }
 
+// spectralNorm returns an upper bound on σ_max(m): the computed largest
+// singular value raised by its rounding error, capped by the Frobenius norm.
 func spectralNorm(m *mat.Dense) float64 {
 	if m == nil || m.IsEmpty() {
 		return 0
 	}
-	return mat.Norm(m, 2)
+	frob := mat.Norm(m, 2)
+	r, c := m.Dims()
+	if r == 1 || c == 1 || frob == 0 || math.IsInf(frob, 0) || math.IsNaN(frob) {
+		return frob
+	}
+	k := min(r, c)
+	buf := make([]float64, r*c+k+max(3*k+max(r, c), 5*k))
+	data, sv, work := buf[:r*c], buf[r*c:r*c+k], buf[r*c+k:]
+	raw := m.RawMatrix()
+	copyStrided(data, c, raw.Data, raw.Stride, r, c)
+	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, r, c, data, c, sv, nil, 1, nil, 1, work, len(work)) {
+		return frob
+	}
+	return min(frob, sv[0]*(1+8*float64(max(r, c))*0x1p-52))
 }
 
 func (e *delayLFT) fail(w float64, err error) {
@@ -123,35 +143,67 @@ func (e *delayLFT) fail(w float64, err error) {
 // test whose 1+L has the zeros of χ and the poles of eig(A) it does not
 // cancel.
 func (e *delayLFT) charMinusOne(w float64) complex128 {
+	det, ok := e.h22Det(w)
+	if !ok {
+		return complex(math.NaN(), math.NaN())
+	}
+	return det - 1
+}
+
+// h22Det returns det(I − H22(jω)Δ(jω)).
+func (e *delayLFT) h22Det(w float64) (complex128, bool) {
 	pt := e.td.frequencyPoint(w)
-	s := pt.value()
-	nd := e.nd
 	if e.h22 != nil {
 		if err := evalWithPoleLimit(e.h22, e.h22sys, pt, e.hbuf); err != nil {
 			e.fail(w, err)
-			return complex(math.NaN(), math.NaN())
+			return 0, false
 		}
 	} else {
-		clear(e.hbuf)
+		copy(e.hbuf, e.d22Complex())
+	}
+	return e.loopDet(pt.value(), e.hbuf), true
+}
+
+// multiples returns commensurateMultiples of the delays, computed once.
+func (e *delayLFT) multiples() []int {
+	if !e.multOK {
+		e.mult, e.multOK = commensurateMultiples(e.tau), true
+	}
+	return e.mult
+}
+
+func (e *delayLFT) d22Complex() []complex128 {
+	if e.d22c == nil {
+		nd := e.nd
+		e.d22c = make([]complex128, nd*nd)
 		if d22 := e.sys.LFT.D22; d22 != nil {
 			for i := range nd {
 				for j := range nd {
-					e.hbuf[i*nd+j] = complex(d22.At(i, j), 0)
+					e.d22c[i*nd+j] = complex(d22.At(i, j), 0)
 				}
 			}
 		}
 	}
+	return e.d22c
+}
+
+// loopDet returns det(I − h·Δ(s)), 0 when it is singular.
+func (e *delayLFT) loopDet(s complex128, h []complex128) complex128 {
+	nd := e.nd
+	if nd == 1 {
+		return 1 + -h[0]*cmplx.Exp(-s*complex(e.tau[0], 0))
+	}
 	for j := range nd {
 		dj := cmplx.Exp(-s * complex(e.tau[j], 0))
 		for i := range nd {
-			e.lu[i*nd+j] = -e.hbuf[i*nd+j] * dj
+			e.lu[i*nd+j] = -h[i*nd+j] * dj
 		}
 	}
 	for i := range nd {
 		e.lu[i*nd+i]++
 	}
 	if !cLUFactor(e.lu, e.piv, nd) {
-		return -1
+		return 0
 	}
 	det := complex(1, 0)
 	for k := range nd {
@@ -160,7 +212,34 @@ func (e *delayLFT) charMinusOne(w float64) complex128 {
 			det = -det
 		}
 	}
-	return det - 1
+	return det
+}
+
+// normalizedMinusOne returns det(I − H22Δ)/det(I − D22Δ) − 1 at jω, the loop
+// of the Nyquist test once the difference operator I − D22Δ is certified
+// nonsingular on the closed right half-plane: χ/det(I − D22Δ) then has the
+// zeros of χ there and the same poles.
+func (e *delayLFT) normalizedMinusOne(w float64) complex128 {
+	num, ok := e.h22Det(w)
+	if !ok {
+		return complex(math.NaN(), math.NaN())
+	}
+	den := e.loopDet(complex(0, w), e.d22Complex())
+	if den == 0 {
+		return complex(math.NaN(), math.NaN())
+	}
+	return num/den - 1
+}
+
+// normalizedTail returns the tail bound of normalizedMinusOne for
+// ‖(I − D22Δ)⁻¹‖ <= r: det(I − H22Δ)/det(I − D22Δ) = det(I − (I − D22Δ)⁻¹EΔ)
+// with E = C2(sI−A)⁻¹B2 of rank at most min(n, nd), so its distance from 1 is
+// at most (1 + r‖E‖)^min(n,nd) − 1.
+func (e *delayLFT) normalizedTail(r float64) func(float64) float64 {
+	k := float64(min(e.n, e.nd))
+	return func(w float64) float64 {
+		return math.Pow(1+r*e.h(0, e.c2, e.b2, w), k) - 1
+	}
 }
 
 // tail bounds |det(I − H22Δ) − 1| for Re s ≥ 0, |s| ≥ w by the smaller of
@@ -316,22 +395,29 @@ func colNorms(m *mat.Dense, c int) []float64 {
 	return out
 }
 
-// unstableDifferenceOperator reports whether all delays are equal, τ > 0,
-// and ρ(D22) > 1. Then det(I − D22·e^{−sτ}) vanishes on Re s = ln ρ/τ > 0,
-// periodically in Im s, and since H22 → D22 uniformly in the closed right
-// half-plane, χ has infinitely many roots there by Rouché.
+// unstableDifferenceOperator reports whether f(s) = det(I − D22·Δ(s)) has a
+// zero s0 with Re s0 > 0: for commensurate delays τ_i = k_i·h > 0, an
+// eigenvalue μ of liftD22 with |μ| > 1, so f vanishes on Re s = ln|μ|/h;
+// otherwise, when the loop is neutral and its difference operator is not
+// certified stable, a zero certified by expPoly.rhpRoot.
+// f(s + 2πjq) is uniformly close to f(s) near s0 for infinitely many integers
+// q, by Dirichlet's simultaneous approximation of the qτ_k by integers, and
+// H22 → D22 uniformly there, so χ has infinitely many roots in Re s > 0 by
+// Rouché.
 func (e *delayLFT) unstableDifferenceOperator() bool {
 	d22 := e.sys.LFT.D22
-	if e.nd == 0 || !(e.d22 > 1) || d22 == nil || d22.IsEmpty() || !(e.tau[0] > 0) {
+	if e.nd == 0 || !(e.d22 > 1) || d22 == nil || d22.IsEmpty() {
 		return false
 	}
-	for _, t := range e.tau {
-		if t != e.tau[0] {
+	mult := e.multiples()
+	if mult == nil || !(e.tau[0] > 0) {
+		if e.tail(math.Inf(1)) < 1 || !math.IsInf(e.difference().rhp, 1) || e.nd > maxPermanentDelays {
 			return false
 		}
+		return newExpPoly(d22, e.tau).rhpRoot(d22, e.tau)
 	}
 	var eig mat.Eigen
-	if !eig.Factorize(d22, mat.EigenNone) {
+	if !eig.Factorize(liftD22(d22, mult), mat.EigenNone) {
 		return false
 	}
 	for _, v := range eig.Values(nil) {
@@ -354,8 +440,23 @@ func (e *delayLFT) h(d, c, b, w float64) float64 {
 	return d + cb/(w-e.normA)
 }
 
-func (e *delayLFT) loop() *delayLoop {
+// loop returns the delay loop of the Nyquist test. A neutral loop whose tail
+// bound does not fall below 1 is normalized by its difference operator when
+// that is certified stable; with axisOnly the torus bound also serves, which
+// certifies the tail on the imaginary axis only, for the grid of the L∞
+// peak, and the root count is then void.
+func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1))}
+	if !(l.tailLimit < 1) {
+		d := e.difference()
+		r := d.rhp
+		if axisOnly {
+			r = min(r, d.torus)
+		}
+		if !math.IsInf(r, 1) {
+			l.at, l.tail, l.tailLimit = e.normalizedMinusOne, e.normalizedTail(r), 0
+		}
+	}
 	for _, t := range e.tau {
 		l.tau += t
 	}
@@ -371,7 +472,7 @@ func (e *delayLFT) sigma(w float64) float64 {
 		return math.NaN()
 	}
 	if e.ioDelay != nil {
-		applyIODelayMatrixAtS(e.sys, pt.value(), e.gbuf, e.p, e.m, e.ioDelay)
+		applyIODelayMatrixAtS(e.sys, pt, e.gbuf, e.p, e.m, e.ioDelay)
 	}
 	sv, err := e.svd.maximumFromFlat(e.gbuf, 0, e.p, e.m)
 	if err != nil {
@@ -381,10 +482,16 @@ func (e *delayLFT) sigma(w float64) float64 {
 	return sv
 }
 
-// highFrequencyGain evaluates σ_max(G∞(θ)), G∞ = D11 + D12·Δ(I − D22·Δ)⁻¹·D21
-// with Δ = diag(e^{−jθ}), the values G(jω) approaches as ω → ∞.
+// highFrequencyGain evaluates σ_max(G∞(φ)), G∞ = D11 + D12·Δ(I − D22·Δ)⁻¹·D21
+// with Δ_i = e^{−j·k_i·φ_g(i)}, the values G(jω) approaches as ω → ∞. The
+// phases φ range over a torus of dim coordinates: one, φ = ωh, for
+// commensurate delays τ_i = k_i·h, else one per distinct delay with k_i = 1.
 type highFrequencyGain struct {
 	e       *delayLFT
+	dim     int
+	grp     []int
+	k       []float64 // k_i, nil when all ones
+	kmax    float64
 	d11     []complex128
 	d12     []complex128
 	d21     []complex128
@@ -415,36 +522,75 @@ func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
 		}
 		return out
 	}
-	return &highFrequencyGain{
-		e:   e,
+	ints := make([]int, 2*nd)
+	grp, dim := ints[nd:], 1
+	var k []float64
+	kmax := 1.0
+	if mult := e.multiples(); mult != nil {
+		if slices.Max(mult) > 1 {
+			k = make([]float64, nd)
+			for i, ki := range mult {
+				k[i] = float64(ki)
+				kmax = max(kmax, k[i])
+			}
+		}
+	} else {
+		dim = 0
+		for i, t := range e.tau {
+			if f := slices.Index(e.tau, t); f < i {
+				grp[i] = grp[f]
+			} else {
+				grp[i] = dim
+				dim++
+			}
+		}
+	}
+	h := &highFrequencyGain{
+		e: e, dim: dim, grp: grp, k: k, kmax: kmax,
 		d11: toC(e.sys.D, p, m), d12: toC(lft.D12, p, nd),
 		d21: toC(lft.D21, nd, m), d22: toC(lft.D22, nd, nd),
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
-		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
-		lip: highFrequencyLipschitz(e),
+		phase: make([]complex128, nd), piv: ints[:nd], g: make([]complex128, p*m),
 	}
+	h.lip = h.lipschitz()
+	return h
 }
 
-// highFrequencyLipschitz bounds the Lipschitz constant of G∞ in θ by
-// ‖D12‖‖D21‖·r², with r bounding both ‖(I − ΔD22)⁻¹‖ and ‖(I − D22Δ)⁻¹‖:
-// 1/(1 − ‖D22‖) when ‖D22‖ < 1, and ‖(I − |D22|)⁻¹‖ when ρ(|D22|) < 1.
-func highFrequencyLipschitz(e *delayLFT) float64 {
-	k := e.d12 * e.d21
-	if k == 0 {
+// lipschitz bounds the Lipschitz constant of G∞ in φ, in the max-norm, by
+// k_max·‖D12‖‖D21‖·r², with r bounding ‖(I − D22Δ)⁻¹‖ on the phase torus,
+// which also bounds ‖(I − ΔD22)⁻¹‖ = ‖Δ(I − D22Δ)⁻¹Δ⁻¹‖: 1/(1 − ‖D22‖)
+// when ‖D22‖ < 1, ‖(I − |D22|)⁻¹‖ when ρ(|D22|) < 1, else the polydisk or
+// torus bound of difference, or for one phase its right half-plane bound,
+// since Δ(φ) then is Δ(jφ/h).
+func (h *highFrequencyGain) lipschitz() float64 {
+	e := h.e
+	c := e.d12 * e.d21
+	if c == 0 {
 		return 0
 	}
 	r := e.r0
 	if e.d22 < 1 {
 		r = min(r, 1/(1-e.d22))
 	}
-	return k * r * r
+	if math.IsInf(r, 1) {
+		d := e.difference()
+		r = min(d.polydisk, d.torus)
+		if h.dim == 1 {
+			r = min(r, d.rhp)
+		}
+	}
+	return h.kmax * c * r * r
 }
 
 func (h *highFrequencyGain) at(theta []float64) float64 {
 	h.samples++
 	nd, p, m := h.e.nd, h.e.p, h.e.m
-	for k := range nd {
-		h.phase[k] = cmplx.Exp(complex(0, -theta[k]))
+	for i := range nd {
+		t := theta[h.grp[i]]
+		if h.k != nil {
+			t *= h.k[i]
+		}
+		h.phase[i] = cmplx.Exp(complex(0, -t))
 	}
 	for i := range nd {
 		for j := range nd {
@@ -476,17 +622,17 @@ func (h *highFrequencyGain) at(theta []float64) float64 {
 	return sv
 }
 
-// oneDelaySup returns sup_θ σ_max(G∞(θ)) for one internal delay, where θ =
-// ωτ sweeps the whole circle as ω → ∞: the largest of 1024 samples, each
+// onePhaseSup returns sup_φ σ_max(G∞(φ)) for one phase, where φ = ωh
+// sweeps the whole circle as ω → ∞: the largest of 1024·k_max samples, each
 // local maximum refined by golden-section search.
-func (h *highFrequencyGain) oneDelaySup() float64 {
+func (h *highFrequencyGain) onePhaseSup() float64 {
 	theta := make([]float64, 1)
 	at := func(t float64) float64 {
 		theta[0] = t
 		return h.at(theta)
 	}
-	const k = 1024
-	step := 2 * math.Pi / k
+	k := 1024 * int(h.kmax)
+	step := 2 * math.Pi / float64(k)
 	vals := make([]float64, k)
 	for i := range k {
 		vals[i] = at(float64(i) * step)
@@ -504,12 +650,12 @@ func (h *highFrequencyGain) oneDelaySup() float64 {
 }
 
 // torusGrid returns the centres of a uniform grid of about 4096 cells on
-// the torus of phases, nd consecutive values per cell, and their half-width.
+// the torus of phases, dim consecutive values per cell, and their half-width.
 func (h *highFrequencyGain) torusGrid() ([]float64, float64) {
 	if h.grid != nil {
 		return h.grid, h.gridR
 	}
-	nd := h.e.nd
+	nd := h.dim
 	n0 := max(2, int(math.Pow(4096, 1/float64(nd))))
 	r := math.Pi / float64(n0)
 	total := nd
@@ -538,14 +684,14 @@ func (h *highFrequencyGain) torusGrid() ([]float64, float64) {
 }
 
 // estimate returns a lower estimate of sup σ_max(G∞): the exact supremum
-// for one delay, else the largest sample of torusGrid.
+// for one phase, else the largest sample of torusGrid.
 func (h *highFrequencyGain) estimate() float64 {
-	if h.e.nd == 1 {
-		return h.oneDelaySup()
+	if h.dim == 1 {
+		return h.onePhaseSup()
 	}
 	cells, _ := h.torusGrid()
 	best := math.Inf(-1)
-	for c := range slices.Chunk(cells, h.e.nd) {
+	for c := range slices.Chunk(cells, h.dim) {
 		best = max(best, h.at(c))
 	}
 	return best
@@ -553,13 +699,13 @@ func (h *highFrequencyGain) estimate() float64 {
 
 // below reports whether σ_max(G∞) <= level on the whole torus of phases,
 // by branch and bound: G∞ is Lipschitz in θ with constant lip (see
-// highFrequencyLipschitz) in the max-norm, since
+// lipschitz) in the max-norm, since
 // dΔ(I − D22Δ)⁻¹ = (I − ΔD22)⁻¹·dΔ·(I − D22Δ)⁻¹, so a cell of half-width r
 // around a sample v cannot exceed v + lip·r. Cells that may exceed level are
 // split until none remain, a sample exceeds level, or the sample budget is
 // spent.
 func (h *highFrequencyGain) below(level float64, budget int) bool {
-	nd := h.e.nd
+	nd := h.dim
 	cells, r := h.torusGrid()
 	var bufs [2][]float64
 	for gen := 0; len(cells) > 0; gen++ {
@@ -595,7 +741,10 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 // ‖G − G∞‖ ≤ (h11 − d11) + min(h12·h21/(1 − h22) − d12·d21/(1 − d22),
 // ‖P12·Q·P21 − |D12|·Q0·|D21|‖) from the Neumann series of the delay loop,
 // bounded termwise in norm or entrywise: Pij bounds |Hij| entrywise and
-// Q = (I − P22)⁻¹, Q0 = (I − |D22|)⁻¹.
+// Q = (I − P22)⁻¹, Q0 = (I − |D22|)⁻¹. Failing both, with ‖M0‖ <= r for
+// M0 = (I − D22Δ)⁻¹ on the axis and ε = ‖H22 − D22‖ < 1/r, M = (I − H22Δ)⁻¹ =
+// (I − M0EΔ)⁻¹M0 has ‖M‖ <= m = r/(1 − rε) and M − M0 = M·EΔ·M0, so the loop
+// gap is at most (h12 − d12)·m·h21 + d12·r·m·ε·h21 + d12·r·(h21 − d21).
 func (e *delayLFT) tailGain(lim, w float64) float64 {
 	h11 := e.h(e.d11, e.c1, e.b1, w)
 	h12 := e.h(e.d12, e.c1, e.b2, w)
@@ -606,6 +755,14 @@ func (e *delayLFT) tailGain(lim, w float64) float64 {
 		loop = h12*h21/(1-h22) - e.d12*e.d21/(1-e.d22)
 	}
 	loop = min(loop, e.entrywiseLoopGap(w))
+	if math.IsInf(loop, 1) {
+		d := e.difference()
+		r := min(d.rhp, d.torus)
+		if eps := h22 - e.d22; r*eps < 1 {
+			m := r / (1 - r*eps)
+			loop = (h12-e.d12)*m*h21 + e.d12*r*m*eps*h21 + e.d12*r*(h21-e.d21)
+		}
+	}
 	return lim + (h11 - e.d11) + loop
 }
 
@@ -640,7 +797,11 @@ func (e *delayLFT) entrywiseLoopGap(w float64) float64 {
 // stability counts the closed-loop right-half-plane roots of χ with the
 // Nyquist test of the delay loop.
 func (e *delayLFT) stability() (*delayLoop, delayNyquist, error) {
-	l := e.loop()
+	return e.nyquist(false)
+}
+
+func (e *delayLFT) nyquist(axisOnly bool) (*delayLoop, delayNyquist, error) {
+	l := e.loop(axisOnly)
 	res, err := l.nyquist(0.5)
 	if err == nil && e.err != nil {
 		err = e.err
@@ -692,7 +853,8 @@ func hinfNormDelayed(sys *System) (norm, omega float64, stable bool, err error) 
 // linfNormDelayed returns the L∞ norm of a continuous model with internal
 // delays, sup_ω σ_max(G(jω)) regardless of stability: +Inf at ω = axisW when χ
 // has a root on the imaginary axis, else the peak over the Nyquist grid, which
-// is complete whenever the RHP roots are counted.
+// is complete whenever the grid tail is certified on the axis, also for an
+// unstable difference operator bounded on the torus.
 func linfNormDelayed(sys *System) (norm, omega float64, err error) {
 	e, l, res, err := delayPeakSetup(sys)
 	if err != nil {
@@ -704,12 +866,14 @@ func linfNormDelayed(sys *System) (norm, omega float64, err error) {
 	return e.peakOrZero(l, res)
 }
 
+// delayPeakSetup returns the Nyquist grid of the L∞ peak, whose root count is
+// void when only the torus bound certifies the tail.
 func delayPeakSetup(sys *System) (*delayLFT, *delayLoop, delayNyquist, error) {
 	e, err := newDelayLFT(sys)
 	if err != nil {
 		return nil, nil, delayNyquist{}, err
 	}
-	l, res, err := e.stability()
+	l, res, err := e.nyquist(true)
 	if err != nil {
 		return nil, nil, delayNyquist{}, err
 	}
@@ -747,7 +911,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		switch {
 		case est < best && hf.below(level, 1<<21):
 			lim = level
-		case e.nd == 1 && est > best*(1+tol):
+		case hf.dim == 1 && est > best*(1+tol):
 			lim = est
 		default:
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)

@@ -62,7 +62,7 @@ func (sys *System) d2cMatched() (*System, error) {
 		return nil, err
 	}
 	out := ss.Sys
-	newDelayConversionPolicy(sys.Dt, 0, 0).applyContinuousDelayFields(out, sys)
+	newDelayConversionPolicy(sys.Dt).applyContinuousDelayFields(out, sys)
 	propagateNames(out, sys)
 	out.StateName = nil
 	return out, nil
@@ -193,7 +193,7 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := newDelayConversionPolicy(dt, 0, 0).applyDiscreteDelayFields(realized.Sys, sys)
+	out, err := newDelayConversionPolicy(dt).applyDiscreteDelayFields(realized.Sys, sys)
 	if err != nil {
 		return nil, err
 	}

@@ -69,6 +69,16 @@ func (pt frequencyPoint) value() complex128 {
 	return complex(math.FMA(pr, pr, -pi*pi), 2*pr*pi)
 }
 
+// delayFactor is z^-d for a whole-sample delay d. Off the plain point z =
+// p/conj(p) lies exactly on the unit circle, so z^-d = e^{-2jd·arg p} keeps
+// unit modulus for any d, where a power of the rounded z drifts by about dε.
+func (pt frequencyPoint) delayFactor(d float64) complex128 {
+	if pt.isPlain() {
+		return cmplx.Pow(pt.p, complex(-math.Round(d), 0))
+	}
+	return cmplx.Exp(complex(0, -2*math.Round(d)*cmplx.Phase(pt.p)))
+}
+
 // isPlain reports whether pt is solved as sE − A. A unit-circle point
 // with q = −1 is z = 1 = s.
 func (pt frequencyPoint) isPlain() bool {

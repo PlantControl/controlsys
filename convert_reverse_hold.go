@@ -163,7 +163,7 @@ func (sys *System) discretizeModifiedFOH(dt float64) (*System, error) {
 		}
 
 	}
-	policy := newDelayConversionPolicy(dt, 0, 0)
+	policy := newDelayConversionPolicy(dt)
 	var err error
 	if out, err = policy.applyDiscreteDelayFields(out, sys); err != nil {
 		return nil, err
