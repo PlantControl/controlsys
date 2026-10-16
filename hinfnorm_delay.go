@@ -803,6 +803,18 @@ func (h *highFrequencyGain) levelBelow(est, best float64) (float64, bool) {
 	return 0, false
 }
 
+// period returns 2π/h, the period in ω of G∞ for one phase φ = ωh, else 0.
+func (h *highFrequencyGain) period() float64 {
+	if h.dim != 1 || len(h.e.tau) == 0 {
+		return 0
+	}
+	k := 1.0
+	if h.k != nil {
+		k = h.k[0]
+	}
+	return 2 * math.Pi * k / h.e.tau[0]
+}
+
 // tailGain bounds σ_max(G(jω)) for ω ≥ w by lim + ‖G − G∞‖, with
 // ‖G − G∞‖ ≤ (h11 − d11) + min(h12·h21/(1 − h22) − d12·d21/(1 − d22),
 // ‖P12·Q·P21 − |D12|·Q0·|D21|‖) from the Neumann series of the delay loop,
@@ -961,17 +973,21 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // delay grid of the Nyquist test is extended until that bound stays below
 // the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
-// sample on the grid exceeds it. Between samples, up to the grid end, the
-// peak is certified to peakCertTol by descriptorResponse.certify.
+// sample exceeds it on the grid nor on an extension of span max(R, 2P), with
+// R the grid end and P = 2π/h the period of G∞ for one phase φ = ωh, which
+// tailGain cannot close since G − G∞ decays only as 1/ω. Between samples, up
+// to the grid end, the peak is certified to peakCertTol by
+// descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
 	const tol = 1e-10
 	best, wBest, err := e.scan(grid)
 	if err != nil {
 		return 0, 0, err
 	}
-	lim := e.d11
+	lim, period := e.d11, 0.0
 	if e.directFeedthrough {
 		hf := newHighFrequencyGain(e)
+		period = hf.period()
 		est := hf.estimate()
 		level, ok := hf.levelBelow(est, best)
 		switch {
@@ -984,50 +1000,68 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		}
 	}
 	cert := append([]float64{0}, grid...)
+	atInf := false
 	if lim > best*(1+tol) {
 		top, wTop, err := e.certify(l, cert, lim, math.Inf(1))
 		if err != nil {
 			return 0, 0, err
 		}
-		if top == lim {
-			return lim, math.Inf(1), nil
-		}
-		best, wBest = top, wTop
+		best, wBest, atInf = top, wTop, top == lim
 	} else if best, wBest, err = e.certify(l, cert, best, wBest); err != nil {
 		return 0, 0, err
 	}
 
 	rGrid := grid[len(grid)-1]
-	R := max(rGrid, 2*e.normA+1)
-	for range 200 {
-		if e.tailGain(lim, R) <= best*(1+tol) {
-			break
+	span := math.Inf(1)
+	if l.tau > 0 {
+		span = float64(l.pointBudget()) * math.Pi / (8 * l.tau)
+	}
+	for hi := rGrid; ; {
+		R := max(hi, 2*e.normA+1)
+		for range 200 {
+			if e.tailGain(lim, R) <= best*(1+tol) {
+				break
+			}
+			R *= 2
 		}
-		R *= 2
-	}
-	if !(e.tailGain(lim, R) <= best*(1+tol)) {
-		return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
-	}
-	if R <= rGrid {
-		return best, wBest, nil
-	}
-	if l.tau > 0 && (R-rGrid)*8*l.tau/math.Pi > float64(l.pointBudget()) {
-		return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)
-	}
-	ext := []float64{rGrid}
-	for _, w := range l.grid(R, R) {
-		if w > rGrid {
-			ext = append(ext, w)
+		if atInf {
+			R0 := max(hi, 2*e.normA+1)
+			R = min(R, R0+max(R0, 2*period), rGrid+span)
+		} else {
+			if !(e.tailGain(lim, R) <= best*(1+tol)) {
+				return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
+			}
+			if R-rGrid > span {
+				return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)
+			}
 		}
+		if R <= hi {
+			return best, wBest, nil
+		}
+		ext := []float64{hi}
+		for _, w := range l.grid(R, R) {
+			if w > hi {
+				ext = append(ext, w)
+			}
+		}
+		b, w, err := e.scan(ext)
+		if err != nil {
+			return 0, 0, err
+		}
+		if atInf {
+			if !(b > best*(1+tol)) {
+				return best, wBest, nil
+			}
+			atInf = false
+		}
+		if b > best {
+			best, wBest = b, w
+		}
+		if best, wBest, err = e.certify(l, ext, best, wBest); err != nil {
+			return 0, 0, err
+		}
+		hi = R
 	}
-	b, w, err := e.scan(ext)
-	if err != nil {
-		return 0, 0, err
-	}
-	if b > best {
-		best, wBest = b, w
-	}
-	return e.certify(l, ext, best, wBest)
 }
 
 // certify raises (peak, w) to within peakCertTol of sup σ_max(G(jω)) over
