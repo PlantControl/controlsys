@@ -585,7 +585,7 @@ func BenchmarkSimulateNoDelay(b *testing.B) {
 func BenchmarkThiranDelay(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := thiranDelay(0.35, 3, 0.1); err != nil {
+		if _, err := conversionThiranChannel(3.5, 0.1, 3); err != nil {
 			b.Fatal(err)
 		}
 	}

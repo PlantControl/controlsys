@@ -47,59 +47,6 @@ func validateThiranArgs(tau, dt float64) error {
 	return nil
 }
 
-// thiranDelay is ThiranDelay with a fixed filter order N (1-10), kept as a
-// test reference for fixed-order filters. A delay of D = tau/dt samples is
-// stable only for D > N-1; smaller delays return ErrFractionalDelay. Near
-// that bound the poles approach -1 and the filter is poorly conditioned.
-// Integer D returns the exact delay z^-D with D states for any N. For
-// D > N+0.5 the excess whole samples are realized as a leading shift
-// register, so the system has round(D) states; more than
-// MaxAbsorbedDelayStates returns ErrInvalidArgument.
-func thiranDelay(tau float64, order int, dt float64) (*System, error) {
-	if err := validateThiranArgs(tau, dt); err != nil {
-		return nil, err
-	}
-	if order < 1 || order > 10 {
-		return nil, fmt.Errorf("Thiran order %d outside 1-10: %w", order, ErrInvalidOrder)
-	}
-
-	D := tau / dt
-	N := order
-
-	if isIntegerSampleDelay(D) {
-		return integerDelaySS(D, dt)
-	}
-	if D <= float64(N-1) {
-		return nil, fmt.Errorf("delay %.4f samples <= order-1 = %d (unstable): %w",
-			D, N-1, ErrFractionalDelay)
-	}
-
-	if err := checkAbsorbedStates(math.Round(D)); err != nil {
-		return nil, err
-	}
-
-	// Split into integer shift + fractional Thiran when D >> N
-	intPart := 0.0
-	Deff := D
-	if D > float64(N)+0.5 {
-		intPart = math.Round(D) - float64(N)
-		Deff = D - intPart
-	}
-
-	result, err := thiranFilter(Deff, N, dt)
-	if err != nil {
-		return nil, err
-	}
-	if intPart > 0 {
-		intSys, err := integerDelaySS(intPart, dt)
-		if err != nil {
-			return nil, err
-		}
-		return Series(intSys, result)
-	}
-	return result, nil
-}
-
 // thiranFilter realizes the order-N Thiran allpass filter for D samples.
 func thiranFilter(D float64, N int, dt float64) (*System, error) {
 	a := thiranCoeffs(D, N)

@@ -143,7 +143,7 @@ func TestPade_PythonControl_CoeffTable(t *testing.T) {
 // --- 2. Thiran Approximation Tests ---
 
 func TestThiran_MATLAB_Fractional(t *testing.T) {
-	sys, err := thiranDelay(2.4, 2, 1.0)
+	sys, err := conversionThiranChannel(2.4, 1.0, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,14 +152,8 @@ func TestThiran_MATLAB_Fractional(t *testing.T) {
 		t.Fatal("expected discrete")
 	}
 
-	tfRes, err := sys.TransferFunction(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	for _, w := range []float64{0.01, 0.1, 0.5, 1.0} {
-		z := cmplx.Exp(complex(0, w))
-		h := mustEval(t, tfRes.TF, z)[0][0]
+		h := mustEvalFr(t, sys, cmplx.Exp(complex(0, w)))
 		mag := cmplx.Abs(h)
 		if math.Abs(mag-1) > 1e-6 {
 			t.Errorf("w=%v: |H| = %v, want 1 (allpass)", w, mag)
@@ -167,10 +161,8 @@ func TestThiran_MATLAB_Fractional(t *testing.T) {
 	}
 
 	dw := 1e-6
-	z1 := cmplx.Exp(complex(0, dw))
-	z2 := cmplx.Exp(complex(0, 2*dw))
-	h1 := mustEval(t, tfRes.TF, z1)[0][0]
-	h2 := mustEval(t, tfRes.TF, z2)[0][0]
+	h1 := mustEvalFr(t, sys, cmplx.Exp(complex(0, dw)))
+	h2 := mustEvalFr(t, sys, cmplx.Exp(complex(0, 2*dw)))
 	groupDelay := -(cmplx.Phase(h2) - cmplx.Phase(h1)) / dw
 	if math.Abs(groupDelay-2.4) > 0.05 {
 		t.Errorf("group delay at DC = %v, want ~2.4", groupDelay)
@@ -178,7 +170,7 @@ func TestThiran_MATLAB_Fractional(t *testing.T) {
 }
 
 func TestThiran_MATLAB_Integer(t *testing.T) {
-	sys, err := thiranDelay(2.5, 5, 0.5)
+	sys, err := ThiranDelay(2.5, 0.5)
 	if err != nil {
 		t.Fatal(err)
 	}
