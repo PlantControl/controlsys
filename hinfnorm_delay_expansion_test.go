@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/cmplx"
 	"testing"
 )
 
@@ -59,32 +60,133 @@ func passageMax(gain func(float64) float64, h, phi, wc float64) (float64, float6
 	return best, bw
 }
 
+// checkExpansionOrder checks the expansion of sys against gain at equal
+// phases φ = ωh, where the remainder scales as ω^−(N+1).
+func checkExpansionOrder(t *testing.T, sys *System, gain func(float64) float64, h float64) {
+	t.Helper()
+	e, err := newDelayLFT(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := newHighFrequencyExpansion(e, newHighFrequencyGain(e))
+	if x == nil {
+		t.Fatal("no expansion")
+	}
+	var errs, ws []float64
+	for _, wc := range []float64{50, 400} {
+		w := (1.234 + 2*math.Pi*math.Round(wc*h/(2*math.Pi))) / h
+		err := math.Abs(gain(w) - x.model(w*h, 1/w))
+		first := math.Abs(gain(w) - x.model(w*h, 0))
+		if !(first > 1e3*err) {
+			t.Fatalf("ω = %g: |G − model| = %g, |G − G∞| = %g", w, err, first)
+		}
+		errs, ws = append(errs, err), append(ws, w)
+	}
+	want := math.Pow(ws[1]/ws[0], expansionOrder+1)
+	if r := errs[0] / errs[1]; !(r > want/2 && r < 2*want) {
+		t.Fatalf("remainder ratio %g (%g, %g), want about %g (O(1/ω^(N+1)))", r, errs[0], errs[1], want)
+	}
+}
+
 func TestHighFrequencyExpansionMatchesResponse(t *testing.T) {
 	for _, c := range append([]expansionCase{expansionLimit}, expansionFinite...) {
 		t.Run(c.name, func(t *testing.T) {
 			sys, gain, _ := c.build(t)
-			e, err := newDelayLFT(sys)
-			if err != nil {
-				t.Fatal(err)
-			}
-			x := newHighFrequencyExpansion(e, newHighFrequencyGain(e))
-			if x == nil {
-				t.Fatal("no expansion")
-			}
-			var errs []float64
-			for _, w := range []float64{1000.37, 10000.37} {
-				err := math.Abs(gain(w) - x.model(w*c.h, 1/w))
-				first := math.Abs(gain(w) - x.model(w*c.h, 0))
-				if !(first > 1e3*err) {
-					t.Fatalf("ω = %g: |G − model| = %g, |G − G∞| = %g", w, err, first)
-				}
-				errs = append(errs, err)
-			}
-			if r := errs[0] / errs[1]; !(r > 300) {
-				t.Fatalf("remainder ratio over a decade %g, want about 1e3 (O(1/ω³))", r)
-			}
+			checkExpansionOrder(t, sys, gain, c.h)
 		})
 	}
+}
+
+// TestHighFrequencyExpansionLoopDynamics checks the expansion of a 1×2 gain
+// whose delay loop has dynamics (C2, B2 ≠ 0, so every H22,k ≠ 0) against
+// the response solved directly from the LFT equations
+//
+//	(jωI − A)·x − B2·Δ·z = B1,  −C2·x + (I − D22·Δ)·z = D21,  G = C1·x + D11 + D12·Δ·z.
+func TestHighFrequencyExpansionLoopDynamics(t *testing.T) {
+	const n, nu, nd = 2, 2, 2
+	a := []float64{-1, 2, -0.7, -3}
+	b1 := []float64{1, 0.2, 0.5, -1}
+	b2 := []float64{0.3, -0.4, 0.6, 1}
+	c1 := []float64{1, -0.4}
+	c2 := []float64{0.5, 0.2, -0.3, 0.8}
+	d11 := []float64{0.1, 0.05}
+	d12 := []float64{-0.6, 0.7}
+	d21 := []float64{0.25, 0.75, -0.5, 0.3}
+	d22 := []float64{-0.4, 0.3, -0.35, -0.2}
+	h := 0.37
+	B := make([]float64, 0, n*(nu+nd))
+	for i := range n {
+		B = append(append(B, b1[i*nu:(i+1)*nu]...), b2[i*nd:(i+1)*nd]...)
+	}
+	C := append(append([]float64{}, c1...), c2...)
+	D := append(append([]float64{}, d11...), d12...)
+	for i := range nd {
+		D = append(append(D, d21[i*nu:(i+1)*nu]...), d22[i*nd:(i+1)*nd]...)
+	}
+	H, err := NewFromSlices(n, nu+nd, 1+nd, a, B, C, D, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := SetDelayModel(H, []float64{h, 2 * h})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gain := func(w float64) float64 {
+		s := complex(0, w)
+		dl := []complex128{cmplx.Exp(-s * complex(h, 0)), cmplx.Exp(-s * complex(2*h, 0))}
+		const k = n + nd
+		var norm2 float64
+		for j := range nu {
+			var m [k][k + 1]complex128
+			for r := range n {
+				for c := range n {
+					m[r][c] = complex(-a[r*n+c], 0)
+				}
+				m[r][r] += s
+				for c := range nd {
+					m[r][n+c] = complex(-b2[r*nd+c], 0) * dl[c]
+				}
+				m[r][k] = complex(b1[r*nu+j], 0)
+			}
+			for r := range nd {
+				for c := range n {
+					m[n+r][c] = complex(-c2[r*n+c], 0)
+				}
+				for c := range nd {
+					m[n+r][n+c] = complex(-d22[r*nd+c], 0) * dl[c]
+				}
+				m[n+r][n+r]++
+				m[n+r][k] = complex(d21[r*nu+j], 0)
+			}
+			for c := range k {
+				piv := c
+				for r := c + 1; r < k; r++ {
+					if cmplx.Abs(m[r][c]) > cmplx.Abs(m[piv][c]) {
+						piv = r
+					}
+				}
+				m[c], m[piv] = m[piv], m[c]
+				for r := range k {
+					if r != c {
+						f := m[r][c] / m[c][c]
+						for q := c; q <= k; q++ {
+							m[r][q] -= f * m[c][q]
+						}
+					}
+				}
+			}
+			g := complex(d11[j], 0)
+			for c := range n {
+				g += complex(c1[c], 0) * m[c][k] / m[c][c]
+			}
+			for c := range nd {
+				g += complex(d12[c], 0) * dl[c] * m[n+c][k] / m[n+c][n+c]
+			}
+			norm2 += real(g)*real(g) + imag(g)*imag(g)
+		}
+		return math.Sqrt(norm2)
+	}
+	checkExpansionOrder(t, sys, gain, h)
 }
 
 func TestHinfNormFinitePeakPastLimitScan(t *testing.T) {
