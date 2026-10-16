@@ -41,7 +41,12 @@ const (
 // without filter uses a backward-Euler derivative to stay causal. An
 // explicitly requested phase margin the family cannot reach at wc returns
 // ErrPIDTuningTargetUnattainable instead of a controller with a different
-// margin. TunePID offers bounded search with achieved-target evidence.
+// margin. For a stable plant with nonzero DC gain every gain takes the sign
+// of that gain, so a negative-DC plant gets the mirror of its positive
+// twin's design. A design whose closed loop is unstable by its poles (delay
+// absorbed for discrete plants) or by a Nyquist test (continuous delays)
+// returns ErrPIDTuningTargetUnattainable; loops outside both tests are not
+// screened. TunePID offers bounded search with achieved-target evidence.
 func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
 	if err := requireFiniteSystem("Pidtune", plant); err != nil {
 		return nil, err
