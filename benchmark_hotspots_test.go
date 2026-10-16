@@ -977,3 +977,25 @@ func BenchmarkPidtune_PIDF(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkPidtune_Delayed(b *testing.B) {
+	r, err := (&TransferFunc{Num: [][][]float64{{{0.3, -1}}}, Den: [][]float64{{1, 4, 6, 4, 1}}}).StateSpace()
+	if err != nil {
+		b.Fatal(err)
+	}
+	sys := r.Sys
+	if err := sys.SetInputDelay([]float64{5}); err != nil {
+		b.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		typ  PidtuneType
+		wc   float64
+	}{{"PI", PidtunePI, 0}, {"PD", PidtunePD, 0}, {"PIDF", PidtunePIDF, 0}, {"PD_wc10", PidtunePD, 10}} {
+		b.Run(c.name, func(b *testing.B) {
+			for b.Loop() {
+				_, _ = Pidtune(sys, c.typ, c.wc, nil)
+			}
+		})
+	}
+}
