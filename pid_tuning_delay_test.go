@@ -32,20 +32,28 @@ func pidDelayLoopCheck(t *testing.T, c *PID2, tau float64) (stable bool, peak fl
 // pidDelayLoopCheckPole is pidDelayLoopCheck for C(s)·e^{-τs}/(s+a), a > 0.
 func pidDelayLoopCheckPole(t *testing.T, c *PID2, tau, a float64) (stable bool, peak float64) {
 	t.Helper()
+	return pidDelayLoopCheckPlant(t, c, tau, func(s complex128) complex128 { return 1 / (s + complex(a, 0)) }, 1)
+}
+
+// pidDelayLoopCheckPlant is pidDelayLoopCheck for C(s)·e^{-τs}·G(s), G
+// stable with |G(jω)| <= g/ω^r for ω >= 1e4 (r = rel, g = 1).
+func pidDelayLoopCheckPlant(t *testing.T, c *PID2, tau float64, g func(complex128) complex128, rel int) (stable bool, peak float64) {
+	t.Helper()
 	L := func(w float64) complex128 {
 		s := complex(0, w)
 		k := complex(c.Kp, 0) + complex(c.Kd, 0)*s/(1+complex(c.Tf, 0)*s)
 		if c.Ki != 0 {
 			k += complex(c.Ki, 0) / s
 		}
-		return k * cmplx.Exp(-s*complex(tau, 0)) / (s + complex(a, 0))
+		return k * cmplx.Exp(-s*complex(tau, 0)) * g(s)
 	}
 	const wEnd = 1e4
-	hf := math.Abs(c.Kp)/wEnd + math.Abs(c.Ki)/(wEnd*wEnd)
+	gEnd := math.Pow(wEnd, -float64(rel))
+	hf := (math.Abs(c.Kp) + math.Abs(c.Ki)/wEnd) * gEnd
 	if c.Tf > 0 {
-		hf += math.Abs(c.Kd) / c.Tf / wEnd
+		hf += math.Abs(c.Kd) / c.Tf * gEnd
 	} else {
-		hf += math.Abs(c.Kd)
+		hf += math.Abs(c.Kd) * wEnd * gEnd
 	}
 	if hf >= 1 {
 		return false, math.Inf(1)
@@ -477,5 +485,60 @@ func TestTunePIDDelayedIntegratorPID(t *testing.T) {
 	}
 	if minRet < 1/(pidTuningMaxSensitivity+.5) {
 		t.Errorf("%+v: min|1+L| = %g", c, minRet)
+	}
+}
+
+// 1/(s+1)² with a 3 s input delay: the PID/PIDF seeds meet PM 60° at the
+// delay-capped wc but break |S| <= 4, and the search used to chase the
+// best-scoring such design. A brute force at wc finds Kp=1.03 Ki=0.257
+// Kd=0.85 with |S|=3.43, so feasibility must lead the search.
+func TestTunePIDDelaySearchIsSensitivityAware(t *testing.T) {
+	const tau = 3.0
+	p := makePlant(t, []float64{1}, []float64{1, 2, 1})
+	if err := p.SetInputDelay([]float64{tau}); err != nil {
+		t.Fatal(err)
+	}
+	g := func(s complex128) complex128 { return 1 / ((s + 1) * (s + 1)) }
+	wc := (math.Pi - math.Pi/3) / (2 * tau)
+	for _, family := range []PidtuneType{PidtunePID, PidtunePIDF} {
+		r, err := TunePID(context.Background(), p, family, PIDTuningOptions{})
+		if err != nil {
+			t.Errorf("%s: %v", family, err)
+			continue
+		}
+		c := r.Controller
+		if math.Abs(r.Evidence.RequestedCrossover-wc) > 1e-12*wc || r.Evidence.Evaluations > 4096 {
+			t.Errorf("%s: wc %g evaluations %d", family, r.Evidence.RequestedCrossover, r.Evidence.Evaluations)
+		}
+		if c.Kp <= 0 || c.Ki <= 0 || c.Kd <= 0 {
+			t.Errorf("%s: %+v gains must share the DC sign", family, c)
+		}
+		if stable, peak := pidDelayLoopCheckPlant(t, c, tau, g, 2); !stable || peak > pidTuningMaxSensitivity*1.001 {
+			t.Errorf("%s: %+v independent stable=%v |S|max=%g", family, c, stable, peak)
+		}
+		s := complex(0, wc)
+		k := complex(c.Kp, 0) + complex(c.Ki, 0)/s + complex(c.Kd, 0)*s/(1+complex(c.Tf, 0)*s)
+		l := k * cmplx.Exp(-s*complex(tau, 0)) * g(s)
+		if pm := 180 + cmplx.Phase(l)*180/math.Pi; math.Abs(cmplx.Abs(l)-1) > 1e-9 || math.Abs(pm-60) > 3+1e-9 {
+			t.Errorf("%s: |L(jwc)|=%g PM=%g", family, cmplx.Abs(l), pm)
+		}
+		loop := func(w float64) complex128 {
+			s := complex(0, w)
+			k := complex(c.Kp, 0) + complex(c.Ki, 0)/s + complex(c.Kd, 0)*s/(1+complex(c.Tf, 0)*s)
+			return k * cmplx.Exp(-s*complex(tau, 0)) * g(s)
+		}
+		prev := cmplx.Abs(loop(1e-4)) - 1
+		for w := 1e-4; w < 1e3; {
+			w = math.Min(w*1.001, w+1e-3)
+			m := cmplx.Abs(loop(w)) - 1
+			if pm := 180 + cmplx.Phase(loop(w))*180/math.Pi; m*prev <= 0 && pm < 57-.05 {
+				t.Errorf("%s: crossing %g PM %g", family, w, pm)
+			}
+			prev = m
+		}
+		again, err := TunePID(context.Background(), p, family, PIDTuningOptions{})
+		if err != nil || *again.Controller != *c {
+			t.Errorf("%s: rerun %+v %v, want %+v", family, again.Controller, err, c)
+		}
 	}
 }

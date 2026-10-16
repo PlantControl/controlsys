@@ -588,9 +588,9 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	}
 	evidence := PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: o.PhaseMargin, Stability: p.stability, Warnings: append([]string(nil), p.warnings...), Normalizers: norms, Termination: PIDTerminationConverged}
 
-	// The search follows the incumbent; best also meets the sensitivity
-	// bound, which a path to a robust optimum may cross.
-	bestScore, incumbentScore := math.Inf(1), math.Inf(1)
+	// The search follows the incumbent, ranked feasibility first: least
+	// sensitivity excess over the bound, then score. best also meets the bound.
+	bestScore, incumbentScore, incumbentExcess := math.Inf(1), math.Inf(1), math.Inf(1)
 	var best, incumbent PID2
 	var bestParts PIDTuningObjective
 	signRejected, sensitivityRejected := false, false
@@ -652,10 +652,14 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 				return nil
 			}
 		}
-		if j < incumbentScore {
-			incumbent, incumbentScore = candidate, j
+		excess := 0.
+		if p.maxSensitivity > 0 {
+			excess = math.Max(0, pidTuningSensitivityPeak(p, candidate)-p.maxSensitivity)
 		}
-		if p.maxSensitivity > 0 && pidTuningSensitivityPeak(p, candidate) > p.maxSensitivity {
+		if excess < incumbentExcess || excess == incumbentExcess && j < incumbentScore {
+			incumbent, incumbentScore, incumbentExcess = candidate, j, excess
+		}
+		if excess > 0 {
 			sensitivityRejected = true
 			return nil
 		}
@@ -669,7 +673,7 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		// The lead-heavy seed can break a derivative tail bound; smaller Kd
 		// on the same target are tried only when no seed is feasible.
 		for _, frac := range []float64{0, .75, .5, .25} {
-			if frac > 0 && finitePID(incumbentScore) {
+			if frac > 0 && finitePID(bestScore) {
 				break
 			}
 			seed := c
@@ -687,7 +691,7 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	current := c
 	step := .5
 	for round := 0; round < 64 && evidence.Evaluations < o.MaxEvaluations; round++ {
-		previous := incumbentScore
+		previous, previousExcess := incumbentScore, incumbentExcess
 		if finitePID(incumbentScore) {
 			current = incumbent
 		}
@@ -713,7 +717,10 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 				}
 			}
 		}
-		if incumbentScore >= previous-1e-6*math.Max(1, math.Abs(previous)) || !finitePID(incumbentScore) {
+		improved := finitePID(incumbentExcess) && (!finitePID(previousExcess) ||
+			incumbentExcess < previousExcess-1e-6*math.Max(1, previousExcess) ||
+			incumbentExcess == previousExcess && incumbentScore < previous-1e-6*math.Max(1, math.Abs(previous)))
+		if !improved {
 			step *= .5
 		}
 		if step < 1e-5 {
