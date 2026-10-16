@@ -514,7 +514,12 @@ type highFrequencyGain struct {
 	g       []complex128
 	lip     float64
 	samples int
-	over    float64 // largest sample that failed below
+	// factors of localBound and quadBound at the last sample, see local
+	xm               []complex128
+	z                []complex128
+	locA, locX, locM float64
+	linG, linJ       float64
+	over             float64 // largest sample that failed below
 
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
@@ -653,6 +658,114 @@ func (h *highFrequencyGain) at(theta []float64) float64 {
 	return sv
 }
 
+// local sets the factors of localBound and quadBound at the last sample of
+// at, from its LU factors of I − D22Δ: it solves (I − D22Δ)·[X M] =
+// [D21 I] for M = (I − D22Δ)⁻¹ and sets the Frobenius norms locA of
+// D12·Δ·M, locX of X and locM of M, then the slopes of localSlopes.
+func (h *highFrequencyGain) local() {
+	nd, p, m := h.e.nd, h.e.p, h.e.m
+	w := m + nd
+	if h.xm == nil {
+		h.xm = make([]complex128, nd*w)
+		h.z = make([]complex128, p*nd)
+	}
+	xm := h.xm
+	clear(xm)
+	for i := range nd {
+		copy(xm[i*w:i*w+m], h.d21[i*m:(i+1)*m])
+		xm[i*w+m+i] = 1
+	}
+	cLUSolve(h.lu, h.piv, xm, nd, w)
+	var sx, sm, sa float64
+	for i := range nd {
+		for _, v := range xm[i*w : i*w+m] {
+			sx += real(v)*real(v) + imag(v)*imag(v)
+		}
+		for _, v := range xm[i*w+m : (i+1)*w] {
+			sm += real(v)*real(v) + imag(v)*imag(v)
+		}
+	}
+	for i := range p {
+		for j := range nd {
+			var z complex128
+			for k := range nd {
+				z += h.d12[i*nd+k] * h.phase[k] * xm[k*w+m+j]
+			}
+			h.z[i*nd+j] = z
+			sa += real(z)*real(z) + imag(z)*imag(z)
+		}
+	}
+	h.locA, h.locX, h.locM = math.Sqrt(sa), math.Sqrt(sx), math.Sqrt(sm)
+	h.localSlopes()
+}
+
+// localSlopes sets, for a vector G∞ (p = 1 or m = 1), the slopes of
+// quadBound: with Z = D12·Δ·M, ∂G∞/∂φ_c = J_c = −i·Σ_{g(i)=c} k_i·Z_{:i}·X_{i:},
+// linG = Σ_c |Re⟨G∞, J_c⟩|/K_c and linJ = Σ_c ‖J_c‖/K_c.
+func (h *highFrequencyGain) localSlopes() {
+	nd, p, m := h.e.nd, h.e.p, h.e.m
+	h.linG, h.linJ = math.NaN(), math.NaN()
+	if p != 1 && m != 1 {
+		return
+	}
+	var lg, lj float64
+	for c := range h.dim {
+		var re, nj float64
+		for r := range p {
+			for col := range m {
+				var jv complex128
+				for i := range nd {
+					if h.grp[i] != c {
+						continue
+					}
+					k := 1.0
+					if h.k != nil {
+						k = h.k[i]
+					}
+					jv += complex(k, 0) * h.z[r*nd+i] * h.x[i*m+col]
+				}
+				jv *= -1i
+				g := h.g[r*m+col]
+				re += real(g)*real(jv) + imag(g)*imag(jv)
+				nj += real(jv)*real(jv) + imag(jv)*imag(jv)
+			}
+		}
+		lg += math.Abs(re) / h.scale[c]
+		lj += math.Sqrt(nj) / h.scale[c]
+	}
+	h.linG, h.linJ = lg, lj
+}
+
+// quadBound bounds σ_max(G∞) within scaled distance r of the last sample φ,
+// with value v, for a vector G∞: E = Δ(φ') − Δ(φ) differs from its linear
+// part E₁ = Σ_c (φ'_c − φ_c)·∂Δ/∂φ_c by at most r²/2 and
+// G∞(φ') − G∞(φ) = D12·N·E·X + D12·N·E·M·D22·E·X' with N = (I − ΔD22)⁻¹, so
+// G∞(φ') = G∞(φ) + Σ_c (φ'_c − φ_c)·J_c + R, ‖R‖ <= ‖Z‖‖X‖r²·(1/2 +
+// ‖M‖‖D22‖/(1 − ‖M‖‖D22‖r)), and ‖G∞ + Σ d_c·J_c‖² <= v² +
+// 2r·linG + (r·linJ)² for |d_c| <= r/K_c. +Inf when not applicable.
+func (h *highFrequencyGain) quadBound(v, r float64) float64 {
+	q := h.locM * h.e.d22
+	den := 1 - q*r
+	if math.IsNaN(h.linG) || !(den > 0) {
+		return math.Inf(1)
+	}
+	lin := math.Sqrt(v*v + 2*r*h.linG + r*r*h.linJ*h.linJ)
+	return lin + h.locA*h.locX*r*r*(0.5+q/den)
+}
+
+// localBound bounds σ_max(G∞(φ')) − σ_max(G∞(φ)) for φ' within scaled
+// distance r of the last sample φ, with E = Δ(φ') − Δ(φ), ‖E‖ <= r: by
+// G∞(φ') − G∞(φ) = D12·(I − ΔD22)⁻¹·E·X' with X' = (I − D22Δ')⁻¹D21 =
+// X + M·D22·E·X', ‖D12(I − ΔD22)⁻¹‖ = ‖D12·Δ·M‖ and
+// ‖X'‖ <= ‖X‖/(1 − ‖M‖‖D22‖r); else, or when larger, by lip·r.
+func (h *highFrequencyGain) localBound(r float64) float64 {
+	b := h.lip * r
+	if den := 1 - h.locM*h.e.d22*r; den > 0 {
+		b = min(b, h.locA*r*h.locX/den)
+	}
+	return b
+}
+
 // onePhaseSup returns sup_φ σ_max(G∞(φ)) for one phase, where φ = ωh
 // sweeps the whole circle as ω → ∞: the largest of 1024·k_max samples, each
 // local maximum refined by golden-section search.
@@ -741,9 +854,10 @@ func (h *highFrequencyGain) estimate() float64 {
 // by branch and bound: G∞ is Lipschitz in θ with constant lip (see
 // lipschitz) in the max-norm of K_c·θ_c, since
 // dΔ(I − D22Δ)⁻¹ = (I − ΔD22)⁻¹·dΔ·(I − D22Δ)⁻¹ and |dΔ_i| <= k_i·|dθ_g(i)|,
-// so a cell of scaled half-width r around a sample v cannot exceed v + lip·r. Cells that may exceed level are
-// split until none remain, a sample exceeds level, or the sample budget is
-// spent.
+// so a cell of scaled half-width r around a sample v cannot exceed v + lip·r,
+// nor the tighter localBound and quadBound from the sample's own resolvent.
+// Cells that may exceed level are split until none remain, a sample exceeds
+// level, or the sample budget is spent.
 func (h *highFrequencyGain) below(level float64, budget int) bool {
 	nd := h.dim
 	cells, r := h.torusGrid()
@@ -757,6 +871,9 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 				return false
 			}
 			if v+h.lip*r <= level {
+				continue
+			}
+			if h.local(); min(v+h.localBound(r), h.quadBound(v, r)) <= level {
 				continue
 			}
 			for mask := range 1 << nd {
@@ -781,8 +898,9 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 
 // levelBelow searches a level in (sup σ_max(G∞), best) that below certifies,
 // starting midway from the lower estimate est. A sample above a trial level
-// raises est to it; when below runs out of budget instead, which caps the
-// samples of all attempts together, the distinct-delay torus is tried.
+// raises est to it; when below runs out of budget instead, the
+// distinct-delay torus is tried with what remains of it, so all attempts
+// together take at most one budget of samples.
 func (h *highFrequencyGain) levelBelow(est, best float64) (float64, bool) {
 	const budget = 1 << 21
 	for range 16 {
@@ -798,7 +916,7 @@ func (h *highFrequencyGain) levelBelow(est, best float64) (float64, bool) {
 			continue
 		}
 		d := h.distinctDelays()
-		return level, d != nil && d.below(level, budget)
+		return level, d != nil && d.below(level, budget-h.samples)
 	}
 	return 0, false
 }
