@@ -973,10 +973,8 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // delay grid of the Nyquist test is extended until that bound stays below
 // the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
-// sample exceeds it on the grid nor on an extension of span max(R, 2P), with
-// R the grid end and P = 2π/h the period of G∞ for one phase φ = ωh, which
-// tailGain cannot close since G − G∞ decays only as 1/ω. Between samples, up
-// to the grid end, the peak is certified to peakCertTol by
+// sample exceeds it on the grid nor past it (see peakPastLimit). Between
+// samples, up to the grid end, the peak is certified to peakCertTol by
 // descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
 	const tol = 1e-10
@@ -985,6 +983,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		return 0, 0, err
 	}
 	lim, period := e.d11, 0.0
+	var hfx *highFrequencyExpansion
 	if e.directFeedthrough {
 		hf := newHighFrequencyGain(e)
 		period = hf.period()
@@ -998,6 +997,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		default:
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
 		}
+		hfx = newHighFrequencyExpansion(e, hf)
 	}
 	cert := append([]float64{0}, grid...)
 	atInf := false
@@ -1016,7 +1016,31 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	if l.tau > 0 {
 		span = float64(l.pointBudget()) * math.Pi / (8 * l.tau)
 	}
-	for hi := rGrid; ; {
+	extend := func(lo, R float64) ([]float64, float64, float64, error) {
+		ext := []float64{lo}
+		for _, w := range l.grid(R, R) {
+			if w > lo {
+				ext = append(ext, w)
+			}
+		}
+		b, w, err := e.scan(ext)
+		return ext, b, w, err
+	}
+	hi := rGrid
+	if atInf {
+		found, err := e.peakPastLimit(lim, tol, period, hfx, rGrid+span, &hi, extend)
+		if err != nil {
+			return 0, 0, err
+		}
+		if found == nil {
+			return best, wBest, nil
+		}
+		best, wBest = found.b, found.w
+		if best, wBest, err = e.certify(l, found.ext, best, wBest); err != nil {
+			return 0, 0, err
+		}
+	}
+	for {
 		R := max(hi, 2*e.normA+1)
 		for range 200 {
 			if e.tailGain(lim, R) <= best*(1+tol) {
@@ -1024,35 +1048,18 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 			}
 			R *= 2
 		}
-		if atInf {
-			R0 := max(hi, 2*e.normA+1)
-			R = min(R, R0+max(R0, 2*period), rGrid+span)
-		} else {
-			if !(e.tailGain(lim, R) <= best*(1+tol)) {
-				return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
-			}
-			if R-rGrid > span {
-				return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)
-			}
+		if !(e.tailGain(lim, R) <= best*(1+tol)) {
+			return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
+		}
+		if R-rGrid > span {
+			return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)
 		}
 		if R <= hi {
 			return best, wBest, nil
 		}
-		ext := []float64{hi}
-		for _, w := range l.grid(R, R) {
-			if w > hi {
-				ext = append(ext, w)
-			}
-		}
-		b, w, err := e.scan(ext)
+		ext, b, w, err := extend(hi, R)
 		if err != nil {
 			return 0, 0, err
-		}
-		if atInf {
-			if !(b > best*(1+tol)) {
-				return best, wBest, nil
-			}
-			atInf = false
 		}
 		if b > best {
 			best, wBest = b, w
@@ -1061,6 +1068,62 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 			return 0, 0, err
 		}
 		hi = R
+	}
+}
+
+// pastLimit is a finite sample above the high-frequency limit, found on the
+// grid extension ext.
+type pastLimit struct {
+	ext  []float64
+	b, w float64
+}
+
+// peakPastLimit scans past the grid end *hi for a finite gain above the
+// limit lim, which every grid sample stays below. With the expansion of
+// highFrequencyExpansion, limitVerdict decides: when the finite peaks exceed
+// lim, the extension doubles until a sample does, and fails past rMax; when
+// they stay below, it scans to the horizon W <= rMax of limitVerdict.
+// Undecided, or without the expansion (a matrix gain, several
+// delay classes), it scans an extension of span max(R, 2P), with R the grid
+// end and P = 2π/h the period of G∞ for one phase φ = ωh, which tailGain
+// cannot close since G − G∞ decays only as 1/ω. It returns nil when no
+// sample exceeds lim, which is then the peak at ω = +Inf; *hi is advanced to
+// the end of the scan.
+func (e *delayLFT) peakPastLimit(lim, tol, period float64, hfx *highFrequencyExpansion, rMax float64, hi *float64,
+	extend func(lo, R float64) ([]float64, float64, float64, error)) (*pastLimit, error) {
+	R0 := max(*hi, 2*e.normA+1)
+	R := R0 + max(R0, 2*period)
+	finite, W, decided := false, 0.0, false
+	if hfx != nil {
+		finite, W, decided = hfx.limitVerdict(lim, tol, *hi, min(rMax, 1e12))
+	}
+	if decided && !finite {
+		R = max(R, W)
+	}
+	for Rt := max(*hi, 2*e.normA+1); Rt < R; Rt *= 2 {
+		if e.tailGain(lim, Rt) <= lim*(1+tol) {
+			R = Rt
+			break
+		}
+	}
+	for {
+		if Rs := min(R, rMax); Rs > *hi {
+			ext, b, w, err := extend(*hi, Rs)
+			if err != nil {
+				return nil, err
+			}
+			*hi = Rs
+			if b > lim*(1+tol) {
+				return &pastLimit{ext, b, w}, nil
+			}
+		}
+		if !finite {
+			return nil, nil
+		}
+		if *hi >= rMax {
+			return nil, fmt.Errorf("finite peak above the ω → ∞ limit past %d grid points: %w", delayNyquistMaxPoints, errDelayPeakUnsupported)
+		}
+		R *= 2
 	}
 }
 
