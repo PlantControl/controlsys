@@ -11,8 +11,7 @@ import (
 // expansionOrder is the order N of the expansion of highFrequencyExpansion.
 const expansionOrder = 3
 
-// highFrequencyExpansion expands a vector-valued gain (p = 1 or m = 1) with
-// one class of commensurate delays τ_i = k_i·h about ω = ∞. With t = 1/ω,
+// highFrequencyExpansion expands a gain with one class of commensurate delays τ_i = k_i·h about ω = ∞. With t = 1/ω,
 // φ = ωh and u = 1/s = −j·t, G(jω) = G(t, φ) for
 //
 //	G(t, φ) = H11 + H12·Δ(I − H22·Δ)⁻¹·H21,  Hij = Σ_k u^k·Hij,k,  Hij,0 = Dij,  Hij,k = Ci·A^{k−1}·Bj,  Δ = diag(e^{−j·k_i·φ}),
@@ -34,8 +33,10 @@ const expansionOrder = 3
 // φ: a maximiser off 0 and π comes with its mirror where a has the other
 // sign, and a finite peak exceeds lim; at φ* = 0 or π, a = 0 and κ decides.
 type highFrequencyExpansion struct {
-	e  *delayLFT
-	hf *highFrequencyGain
+	e      *delayLFT
+	hf     *highFrequencyGain
+	vector bool // p = 1 or m = 1, where ‖·‖ is the Euclidean norm
+	buf    []complex128
 
 	h11, h12, h21, h22 [expansionOrder + 1][]complex128 // Hij,k, k >= 1; nil when zero
 	y, g               [expansionOrder + 1][]complex128
@@ -52,14 +53,14 @@ type highFrequencyExpansion struct {
 }
 
 // newHighFrequencyExpansion returns the expansion, or nil outside its scope:
-// a matrix gain, no states, or more than one class of delays.
+// no states, or more than one class of delays.
 func newHighFrequencyExpansion(e *delayLFT, hf *highFrequencyGain) *highFrequencyExpansion {
-	if hf == nil || hf.dim != 1 || (e.p != 1 && e.m != 1) || e.n == 0 {
+	if hf == nil || hf.dim != 1 || e.n == 0 {
 		return nil
 	}
 	lft := e.sys.LFT
 	nd, p, m := e.nd, e.p, e.m
-	x := &highFrequencyExpansion{e: e, hf: hf}
+	x := &highFrequencyExpansion{e: e, hf: hf, vector: p == 1 || m == 1, buf: make([]complex128, p*m)}
 	terms := func(dst *[expansionOrder + 1][]complex128, c, b *mat.Dense, rows, cols int) {
 		var ab, next mat.Dense
 		empty := c == nil || b == nil || c.IsEmpty() || b.IsEmpty()
@@ -153,26 +154,55 @@ func (x *highFrequencyExpansion) at(phi float64) bool {
 	return true
 }
 
-// model returns ‖Σ_{k<=N} t^k·g_k‖ at φ.
+// model returns σ_max(Σ_{k<=N} t^k·g_k) at φ.
 func (x *highFrequencyExpansion) model(phi, t float64) float64 {
 	if !x.at(phi) {
 		return math.Inf(1)
 	}
-	s, tc := 0.0, complex(t, 0)
+	return x.sum(t)
+}
+
+// sum returns σ_max(Σ_{k<=N} t^k·g_k) at the phase of the last at.
+func (x *highFrequencyExpansion) sum(t float64) float64 {
+	tc, s := complex(t, 0), 0.0
 	for i := range x.g[0] {
 		v := x.g[expansionOrder][i]
 		for k := expansionOrder - 1; k >= 0; k-- {
 			v = v*tc + x.g[k][i]
 		}
+		x.buf[i] = v
 		s += real(v)*real(v) + imag(v)*imag(v)
 	}
-	return math.Sqrt(s)
+	if x.vector {
+		return math.Sqrt(s)
+	}
+	sv, err := x.e.svd.maximumFromFlat(x.buf, 0, x.e.p, x.e.m)
+	if err != nil {
+		return math.NaN()
+	}
+	return sv
 }
 
-// coefficients returns S², a = Re⟨g0, g1⟩ and c = ‖g1‖² + 2·Re⟨g0, g2⟩ at φ.
+// coefficients returns, at φ, S², a = Re⟨g0, g1⟩ and
+// c = ‖g1‖² + 2·Re⟨g0, g2⟩, the coefficients of t and t² in ‖g0 + t·g1 +
+// t²·g2‖², for a vector gain. For a matrix gain a = ½·dσ_max²/dt at t = 0,
+// by a five-point difference, and c = ‖g1‖_F², a scale only.
 func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
 	if !x.at(phi) {
 		return math.Inf(1), 0, 0
+	}
+	if !x.vector {
+		s := x.sum(0)
+		for _, g := range x.g[1] {
+			c += real(g)*real(g) + imag(g)*imag(g)
+		}
+		if c == 0 || s == 0 {
+			return s * s, 0, c
+		}
+		d := 1e-3 * s / math.Sqrt(c)
+		l := func(t float64) float64 { v := x.sum(t); return v * v }
+		a = (8*(l(d)-l(-d)) - (l(2*d) - l(-2*d))) / (24 * d)
+		return s * s, a, c
 	}
 	for i, g := range x.g[0] {
 		g1, g2 := x.g[1][i], x.g[2][i]
@@ -202,6 +232,11 @@ func (x *highFrequencyExpansion) sampleCircle() {
 		if !x.at(float64(i) * step) {
 			c[0] = math.Inf(1)
 			x.singular = true
+			continue
+		}
+		if !x.vector {
+			v := x.sum(0)
+			c[0] = v * v
 			continue
 		}
 		x.squared(c)
@@ -268,10 +303,11 @@ func (x *highFrequencyExpansion) modelMax(t float64) float64 {
 // within a factor 1 − 1e-3 of it refined by golden-section search as in
 // maxima. The bound at sample i is at most c_0,i + Σ_{n>=1} max_j |c_n,j|·t2^n,
 // so walking the samples by decreasing c_0 stops once that falls 1% below
-// the largest sample.
+// the largest sample. +Inf for a matrix gain, whose σ_max has no such
+// polynomial.
 func (x *highFrequencyExpansion) modelMaxOver(t1, t2 float64) float64 {
 	x.sampleCircle()
-	if x.singular {
+	if x.singular || !x.vector {
 		return math.Inf(1)
 	}
 	k := len(x.byS)
@@ -404,7 +440,8 @@ func (x *highFrequencyExpansion) maxima(samples []float64, f func(float64) float
 // t = T·2^−i, i = 0…40, T = 1/W; past these samples the leading term κ·t²
 // and the remainder O(t^{N+1}) only shrink. This +Inf verdict rests on the
 // expansion, not on a certificate over every t. ok is false when neither is
-// decided.
+// decided, and for a matrix gain whenever a ≈ 0 at every maximiser, since κ
+// and the model maximum are only formed for a vector gain.
 func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (finite bool, W float64, ok bool) {
 	x.sampleCircle()
 	s := make([]float64, len(x.poly)/polyLen)
@@ -431,6 +468,9 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 			return a/(lim*wMin) > tol*lim, 0, a/(lim*wMin) > tol*lim
 		} else if a < -eps {
 			continue
+		}
+		if !x.vector {
+			return false, 0, false
 		}
 		const hs = 1e-4
 		sp, _, _ := x.coefficients(phi + hs)

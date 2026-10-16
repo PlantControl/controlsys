@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/cmplx"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 type expansionCase struct {
@@ -356,6 +358,78 @@ func TestTailBelowBoundsResponse(t *testing.T) {
 	for w := R; w <= 4*R; w += 1e-3 {
 		if g := gain(w); !(g <= level) {
 			t.Fatalf("|G(j%g)| = %.15g above the certified %.15g past %g", w, g, level, R)
+		}
+	}
+}
+
+// matrixGain returns U·diag(G, d)·V for the delay model G of c, with u, v
+// the row-major U, V, and σ_max of its response in closed form from G(jω).
+func (c expansionCase) matrixGain(t *testing.T, d float64, u, v []float64) (*System, func(float64) float64) {
+	t.Helper()
+	sys, resp, _ := feedthroughDifferenceResponse(t, c.d22, c.d12, c.d21, []float64{c.h, 2 * c.h}, [2]float64{1, 2})
+	gain := func(r, c int, d []float64) *System {
+		g, err := NewGain(mat.NewDense(r, c, d), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	ap, err := Append(sys, gain(1, 1, []float64{d}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ap, err = Series(gain(2, 2, v), ap); err != nil {
+		t.Fatal(err)
+	}
+	if ap, err = Series(ap, gain(2, 2, u)); err != nil {
+		t.Fatal(err)
+	}
+	sigma := func(w float64) float64 {
+		g := [2]complex128{resp(w), complex(d, 0)}
+		var m [4]complex128
+		var f float64
+		for i := range 2 {
+			for j := range 2 {
+				for k := range 2 {
+					m[i*2+j] += complex(u[i*2+k]*v[k*2+j], 0) * g[k]
+				}
+				f += real(m[i*2+j])*real(m[i*2+j]) + imag(m[i*2+j])*imag(m[i*2+j])
+			}
+		}
+		det := cmplx.Abs(m[0]*m[3] - m[1]*m[2])
+		return math.Sqrt((f + math.Sqrt(max(f*f-4*det*det, 0))) / 2)
+	}
+	return ap, sigma
+}
+
+// TestHinfNormMatrixFinitePeakPastLimit checks 2×2 gains built from the
+// expansionFinite cases, block diagonal and coupled by constant U, V, whose
+// finite peak lies past the grid end above sup σ_max(G∞).
+func TestHinfNormMatrixFinitePeakPastLimit(t *testing.T) {
+	for _, c := range expansionFinite {
+		for _, m := range []struct {
+			name string
+			d    float64
+			u, v []float64
+		}{
+			{"diag", 0.01, []float64{1, 0, 0, 1}, []float64{1, 0, 0, 1}},
+			{"coupled", 0.3, []float64{1, 0.4, -0.3, 0.8}, []float64{0.7, -0.2, 0.5, 1.1}},
+		} {
+			t.Run(c.name+"/"+m.name, func(t *testing.T) {
+				sys, sigma := c.matrixGain(t, m.d, m.u, m.v)
+				checkExpansionOrder(t, sys, sigma, c.h)
+				want, wWant := oraclePeak(sigma, 600, 1e-3)
+				if far, _ := passageMax(sigma, c.h, math.Mod(wWant*c.h, 2*math.Pi), 1e5); !(want > far*(1+1e-6)) {
+					t.Fatalf("oracle peak %.12g not above the passage at 1e5, %.12g", want, far)
+				}
+				got, w, err := HinfNorm(sys)
+				if err != nil {
+					t.Fatalf("HinfNorm: %v", err)
+				}
+				if math.Abs(got-want) > 1e-9*want || math.Abs(w-wWant) > 1e-3 {
+					t.Fatalf("HinfNorm = (%.15g, %.10g), want (%.15g, %.10g)", got, w, want, wWant)
+				}
+			})
 		}
 	}
 }
