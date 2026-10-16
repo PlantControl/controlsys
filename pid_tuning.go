@@ -132,6 +132,9 @@ type pidTuningPlant struct {
 	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
 	// 0 for none; tau is the loop delay in seconds that sets its grid step.
 	maxSensitivity, tau float64
+	// modes are the plant's upper-half-plane poles and zeros in s, which
+	// refine that grid near lightly damped resonances.
+	modes []complex128
 	// crossFloor, when hasCrossFloor, is the margin floor at the other gain
 	// crossovers once the wc target is raised above the requested margin.
 	crossFloor    float64
@@ -235,6 +238,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 	}
 	hiddenStable := sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) })
+	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(model) })
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
 		tau *= plant.Dt
@@ -244,6 +248,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
 		if robust {
 			p.maxSensitivity = pidTuningMaxSensitivity
+			p.modes = modes()
 		}
 		if plant.Dt > 0 {
 			p.high = math.Min(p.high, .99*math.Pi/plant.Dt)
@@ -985,21 +990,80 @@ func pidTuningIdealStable(plant *System, c *PID2) (bool, error) {
 	return true, nil
 }
 
-// pidTuningSensitivityPeak samples max |1/(1+L(jω))| over [p.low, p.high]
-// with a step that turns the delay phase by at most π/16.
+// pidTuningModes returns the plant poles and zeros σ+jω₀ with |σ| < 0.05·ω₀,
+// discrete ones mapped by s = ln(z)/dt, for the |S| grid; nil when unknown.
+// Better damped modes never cut its 1% step.
+func pidTuningModes(plant *System) []complex128 {
+	var modes []complex128
+	poles, err := plant.Poles()
+	if err != nil {
+		return nil
+	}
+	zeros, err := plant.Zeros()
+	if err != nil {
+		zeros = nil
+	}
+	for _, m := range slices.Concat(poles, zeros) {
+		if plant.Dt > 0 {
+			m = cmplx.Log(m) / complex(plant.Dt, 0)
+		}
+		if pidFiniteComplex(m) && math.Abs(real(m)) < .05*imag(m) {
+			modes = append(modes, m)
+		}
+	}
+	return modes
+}
+
+// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [p.low, p.high].
+// The grid step turns the delay phase by at most π/16 and, near a plant mode
+// σ+jω₀, is at most max(|σ|, |ω−ω₀|)/4, so a lightly damped mode's narrow
+// peak is bracketed. Grid maxima within 0.8 of the running peak are then
+// refined by golden section on log ω, since a delay ripple can sit between
+// samples and read ~10% low.
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
+	s := func(w float64) float64 { return 1 / cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)) }
 	peak := 0.
-	for w := p.low; ; {
-		peak = math.Max(peak, 1/cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)))
+	var w0, v0, w1, v1 float64
+	for k, w := 0, p.low; ; k++ {
+		v := s(w)
+		if k >= 2 && v1 >= v0 && v1 >= v && v1 >= .8*math.Max(peak, v) {
+			peak = math.Max(peak, pidTuningGoldenMax(s, w0, w))
+		}
+		peak = math.Max(peak, v)
+		w0, v0, w1, v1 = w1, v1, w, v
 		if w >= p.high {
 			return peak
 		}
-		next := w * 1.01
+		step := .01 * w
 		if p.tau > 0 {
-			next = math.Min(next, w+math.Pi/16/p.tau)
+			step = math.Min(step, math.Pi/16/p.tau)
 		}
-		w = math.Min(next, p.high)
+		for _, m := range p.modes {
+			step = math.Min(step, math.Max(math.Max(math.Abs(real(m)), math.Abs(w-imag(m))), 1e-6*w)/4)
+		}
+		w = math.Min(w+step, p.high)
 	}
+}
+
+// pidTuningGoldenMax returns the largest f found by golden-section search
+// over log ω in [lo, hi], where f is unimodal.
+func pidTuningGoldenMax(f func(float64) float64, lo, hi float64) float64 {
+	const r = 0.6180339887498949
+	a, b := math.Log(lo), math.Log(hi)
+	x1, x2 := b-r*(b-a), a+r*(b-a)
+	f1, f2 := f(math.Exp(x1)), f(math.Exp(x2))
+	for range 24 {
+		if f1 >= f2 {
+			b, x2, f2 = x2, x1, f1
+			x1 = b - r*(b-a)
+			f1 = f(math.Exp(x1))
+		} else {
+			a, x1, f1 = x1, x2, f2
+			x2 = a + r*(b-a)
+			f2 = f(math.Exp(x2))
+		}
+	}
+	return math.Max(f1, f2)
 }
 
 // Report all located gain crossings, retaining the exactly normalized target.
