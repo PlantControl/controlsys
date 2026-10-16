@@ -165,6 +165,65 @@ func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) flo
 	return math.Copysign(1, real(dc))
 }
 
+// pidStabilityScreen certifies closed-loop stability of PID candidates on a
+// SISO plant: by closed-loop poles when the model is delay-free (discrete
+// delays absorbed), by a Nyquist test for supported continuous delays.
+type pidStabilityScreen struct {
+	plant, model *System
+	eval         *sisoEval
+	hiddenStable func() (bool, error)
+}
+
+func newPIDStabilityScreen(plant *System, eval *sisoEval) (*pidStabilityScreen, error) {
+	model := plant
+	if plant.Dt > 0 && plant.HasDelay() {
+		var err error
+		if model, err = plant.AbsorbDelay(AbsorbAll); err != nil {
+			return nil, err
+		}
+	}
+	return &pidStabilityScreen{
+		plant: plant, model: model, eval: eval,
+		hiddenStable: sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) }),
+	}, nil
+}
+
+// at returns the stability test for family tuned at wc and its evidence
+// kind, or a nil test with PIDStabilitySampledOnly when the loop is outside
+// the scope of both certificates.
+func (s *pidStabilityScreen) at(wc float64, family PidtuneType) (func(*PID2) (bool, error), PIDStabilityEvidence, error) {
+	if !s.model.HasDelay() {
+		return s.closedLoopPoles, PIDStabilityClosedLoopPoles, nil
+	}
+	stable, ok, err := pidTuningDelayStability(s.plant, s.eval, wc, pidTuningIdealDerivative(family))
+	if err != nil || !ok {
+		return nil, PIDStabilitySampledOnly, err
+	}
+	return stable, PIDStabilityNyquist, nil
+}
+
+func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
+	controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
+	cs, err := controller.System()
+	if err != nil {
+		if c.Kd != 0 && c.Tf == 0 {
+			if ok, err := s.hiddenStable(); !ok || err != nil {
+				return false, err
+			}
+			return pidTuningIdealStable(s.model, c)
+		}
+		return false, err
+	}
+	loop, err := Feedback(s.model, cs, -1)
+	if errors.Is(err, ErrAlgebraicLoop) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return loop.IsStable()
+}
+
 // pidTuningSignConsistent reports whether every nonzero gain of c has sign
 // want; want = 0 accepts any signs. Other signs on a stable plant come from
 // the wrapped-phase branch of the crossover equations.
@@ -180,8 +239,8 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 	return true
 }
 
-// TunePID designs a SISO negative-feedback controller. The original Pidtune API
-// retains its historical behavior. This operation enforces finite targets,
+// TunePID designs a SISO negative-feedback controller. Unlike the
+// closed-form Pidtune, this operation enforces finite targets,
 // bounded computation and explicit achieved-target/stability evidence.
 //
 // A zero CrossoverFrequency is capped by the loop delay τ at (180°−PM)/(2τ),
@@ -219,13 +278,10 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	model := plant
-	if plant.Dt > 0 && plant.HasDelay() {
-		if model, err = plant.AbsorbDelay(AbsorbAll); err != nil {
-			return nil, fmt.Errorf("TunePID: %w", err)
-		}
+	screen, err := newPIDStabilityScreen(plant, eval)
+	if err != nil {
+		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	hiddenStable := sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) })
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
 		tau *= plant.Dt
@@ -239,40 +295,13 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if plant.Dt > 0 {
 			p.high = math.Min(p.high, .99*math.Pi/plant.Dt)
 		}
-		if !model.HasDelay() {
-			p.stability = PIDStabilityClosedLoopPoles
-			p.stable = func(c *PID2) (bool, error) {
-				controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
-				cs, err := controller.System()
-				if err != nil {
-					if c.Kd != 0 && c.Tf == 0 {
-						if ok, err := hiddenStable(); !ok || err != nil {
-							return false, err
-						}
-						return pidTuningIdealStable(model, c)
-					}
-					return false, err
-				}
-				loop, err := Feedback(model, cs, -1)
-				if errors.Is(err, ErrAlgebraicLoop) {
-					return false, nil
-				}
-				if err != nil {
-					return false, err
-				}
-				return loop.IsStable()
-			}
-		} else {
-			stable, ok, err := pidTuningDelayStability(plant, eval, wc, pidTuningIdealDerivative(family))
-			if err != nil {
-				return nil, fmt.Errorf("TunePID: %w", err)
-			}
-			if ok {
-				p.stability = PIDStabilityNyquist
-				p.stable = stable
-			} else {
-				p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
-			}
+		stable, evidence, err := screen.at(wc, family)
+		if err != nil {
+			return nil, fmt.Errorf("TunePID: %w", err)
+		}
+		p.stable, p.stability = stable, evidence
+		if stable == nil {
+			p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 		}
 		res, err := tunePID(ctx, "TunePID", p, family, opts)
 		if eval.err != nil {

@@ -72,7 +72,19 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
 
-	pid, err := computePIDGains(plant, pidType, wc, pm)
+	eval, err := newSISOEval(plant)
+	if err != nil {
+		return nil, fmt.Errorf("Pidtune: %w", err)
+	}
+	sign := 1.0
+	if pidTuningDCSign(plant, eval.at, wc) < 0 {
+		sign = -1
+	}
+	if eval.err != nil {
+		return nil, fmt.Errorf("Pidtune: %w", eval.err)
+	}
+
+	pid, err := computePIDGains(plant, pidType, wc, pm, sign)
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
@@ -82,7 +94,34 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 			return nil, fmt.Errorf("Pidtune: %w", err)
 		}
 	}
+	if err := checkPidtuneStability(plant, eval, pid, pidType, wc); err != nil {
+		return nil, fmt.Errorf("Pidtune: %w", err)
+	}
 	return pid, nil
+}
+
+// checkPidtuneStability rejects a design whose closed loop is certifiably
+// unstable; loops outside the screen's scope pass unchecked.
+func checkPidtuneStability(plant *System, eval *sisoEval, pid *PID, pidType PidtuneType, wc float64) error {
+	screen, err := newPIDStabilityScreen(plant, eval)
+	if err != nil {
+		return err
+	}
+	stable, _, err := screen.at(wc, pidType)
+	if err != nil || stable == nil {
+		return err
+	}
+	ok, err := stable(&PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula})
+	if err == nil {
+		err = eval.err
+	}
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%s design at wc=%g gives an unstable closed loop: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
+	}
+	return nil
 }
 
 const pidtuneMarginTol = 0.5
@@ -198,7 +237,20 @@ func (t pidtuneTerms) derivative(tf float64) complex128 {
 	return 1 / (complex(tf, 0) + pidtuneIntegrator(t.dFormula, t.wc, t.dt))
 }
 
-func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg float64) (*PID, error) {
+// computePIDGains designs for sign·G and returns the gains scaled by sign,
+// so a negative-DC plant gets the mirror of its positive twin's design.
+func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64) (*PID, error) {
+	pid, err := computePIDGainsPositive(plant, pidType, wc, pmDeg, sign)
+	if err != nil {
+		return nil, err
+	}
+	pid.Kp *= sign
+	pid.Ki *= sign
+	pid.Kd *= sign
+	return pid, nil
+}
+
+func computePIDGainsPositive(plant *System, pidType PidtuneType, wc, pmDeg, sign float64) (*PID, error) {
 	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
 		return nil, fmt.Errorf("crossover %g must be below the Nyquist frequency %g: %w", wc, math.Pi/plant.Dt, ErrInvalidArgument)
 	}
@@ -206,6 +258,7 @@ func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg float64) (*PI
 	if err != nil {
 		return nil, err
 	}
+	h *= complex(sign, 0)
 	magP := cmplx.Abs(h)
 	phaseP := cmplx.Phase(h) * 180 / math.Pi
 
