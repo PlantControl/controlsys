@@ -73,7 +73,9 @@ type PIDTuningOptions struct {
 	// geometric band centre (TunePIDFRD).
 	CrossoverFrequency float64
 	// PhaseMargin in degrees, in (0, 180); 0 means 60, or the plant's own
-	// margin for the one-gain P and I families.
+	// margin for the one-gain P and I families. TunePID treats it as a
+	// floor, as pidtune does: it targets PM±3° and, failing that, the
+	// nearest feasible margin above.
 	PhaseMargin        float64
 	Focus              PIDDesignFocus
 	IFormula, DFormula PIDFormula
@@ -130,6 +132,10 @@ type pidTuningPlant struct {
 	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
 	// 0 for none; tau is the loop delay in seconds that sets its grid step.
 	maxSensitivity, tau float64
+	// crossFloor, when hasCrossFloor, is the margin floor at the other gain
+	// crossovers once the wc target is raised above the requested margin.
+	crossFloor    float64
+	hasCrossFloor bool
 }
 
 // pidTuningMaxSensitivity bounds |S| for a delay-capped or moved default
@@ -191,7 +197,10 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // −180°+PM, the lead same-sign gains supply. A default design on a delayed
 // plant, or at a moved crossover, must keep |S| <= 4 (2.5 dB gain margin)
 // at every sampled frequency, since a margin met at the crossover alone does
-// not bound it there. A continuous delayed loop with an ideal derivative must keep
+// not bound it there. Only when neither the default nor the moved crossovers
+// meet PM±3° does the margin become a floor at the original crossover, as in
+// pidtune: the design takes the nearest feasible margin above PM. A
+// continuous delayed loop with an ideal derivative must keep
 // limsup |L(jω)| <= ½, so a near-neutral loop is rejected even when its
 // sampled margins look healthy.
 //
@@ -230,7 +239,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if plant.Dt > 0 {
 		tau *= plant.Dt
 	}
-	tuneAt := func(wc, gainSign float64, robust bool) (*PIDTuningResult, error) {
+	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
 		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
 		if robust {
@@ -274,14 +283,31 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 			}
 		}
-		res, err := tunePID(ctx, "TunePID", p, family, opts)
+		tune := tunePID
+		if floor {
+			tune = tunePIDFloor
+		}
+		res, err := tune(ctx, "TunePID", p, family, opts)
 		if eval.err != nil {
 			return nil, fmt.Errorf("TunePID: %w", eval.err)
 		}
 		return res, err
 	}
-	if opts.CrossoverFrequency != 0 {
-		return tuneAt(opts.CrossoverFrequency, pidTuningDCSign(plant, eval.at, opts.CrossoverFrequency), false)
+	// The ±3° band is tried first; failing that, the margin is a floor.
+	withFloor := func(wc, gainSign float64, robust bool, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
+		if !errors.As(err, new(*PIDTuningError)) {
+			return res, err
+		}
+		r, e := tuneAt(wc, gainSign, robust, true)
+		if errors.As(e, new(*PIDTuningError)) {
+			return res, err
+		}
+		return r, e
+	}
+	if wc := opts.CrossoverFrequency; wc != 0 {
+		gainSign := pidTuningDCSign(plant, eval.at, wc)
+		res, err := tuneAt(wc, gainSign, false, false)
+		return withFloor(wc, gainSign, false, res, err)
 	}
 	pm := opts.PhaseMargin
 	if pm <= 0 || pm >= 180 || !finitePID(pm) {
@@ -292,10 +318,10 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
 	gainSign := pidTuningDCSign(plant, eval.at, wc0)
-	res, err := tuneAt(wc0, gainSign, tau > 0)
+	res, err := tuneAt(wc0, gainSign, tau > 0, false)
 	fam := PidtuneType(strings.ToUpper(string(family)))
 	if gainSign == 0 || fam != PidtunePD && fam != PidtunePDF || !errors.As(err, new(*PIDTuningError)) {
-		return res, err
+		return withFloor(wc0, gainSign, tau > 0, res, err)
 	}
 	// Same-sign PD gains add lead in (0°, 90°) only, so retry where the
 	// plant phase leaves a moderate lead to supply.
@@ -312,7 +338,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if !ok || wc == wc0 {
 			continue
 		}
-		r, e := tuneAt(wc, gainSign, true)
+		r, e := tuneAt(wc, gainSign, true, false)
 		if e == nil {
 			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where same-sign PD gains can meet the phase margin.", wc0, wc))
 			return r, nil
@@ -331,7 +357,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if ladderWarning != "" && errors.As(err, &te) && !slices.Contains(te.Evidence.Warnings, ladderWarning) {
 		te.Evidence.Warnings = append(te.Evidence.Warnings, ladderWarning)
 	}
-	return res, err
+	return withFloor(wc0, gainSign, tau > 0, res, err)
 }
 
 // pidTuningPhaseCrossing returns the first ω in [wLo, wHi] at which the
@@ -614,6 +640,9 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		// since their wrapped phase can hide a negative margin.
 		relaxed := oneGain && p.stable != nil
 		floor := o.PhaseMargin - 3
+		if p.hasCrossFloor {
+			floor = p.crossFloor
+		}
 		if relaxed {
 			floor = 0
 		}
@@ -724,6 +753,46 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	evidence.FrequencyBand = [2]float64{p.low, p.high}
 	evidence.Warnings = append(evidence.Warnings, "Margins describe the recorded finite analysis band; unresolved crossings outside that band are not excluded.")
 	return &PIDTuningResult{Controller: &best, Evidence: evidence}, nil
+}
+
+// tunePIDFloor treats the phase margin as a floor, as pidtune does, once the
+// ±3° band around it is unattainable: it targets the nearest band above,
+// stepping 6° so the bands tile [PM+3°, 180°], and keeps PM−3° at the other
+// crossovers. A free one-gain design already targets its own margin. The
+// bands share one evaluation budget.
+func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
+	fam := PidtuneType(strings.ToUpper(string(family)))
+	if o.PhaseMargin == 0 && (fam == PidtuneP || fam == PidtuneI) {
+		return nil, &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: o.CrossoverFrequency, Stability: p.stability}}
+	}
+	pm := o.PhaseMargin
+	if pm == 0 {
+		pm = 60
+	}
+	budget := o.MaxEvaluations
+	if budget == 0 {
+		budget = 4096
+	}
+	p.crossFloor, p.hasCrossFloor = pm-3, true
+	used := 0
+	last := &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: o.CrossoverFrequency, RequestedPhaseMargin: pm, Stability: p.stability}}
+	for target := pm + 6; target < 180 && used < budget; target += 6 {
+		o.PhaseMargin = target
+		o.MaxEvaluations = budget - used
+		r, err := tunePID(ctx, op, p, family, o)
+		if errors.As(err, &last) {
+			used += last.Evidence.Evaluations
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		r.Evidence.Evaluations += used
+		r.Evidence.RequestedPhaseMargin = pm
+		r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Phase margin %g° is a floor: no design met it within ±3°, so the nearest feasible band above, %g°±3°, was targeted.", pm, target))
+		return r, nil
+	}
+	return nil, last
 }
 
 func pidTuningBasis(c PID2, w float64) (integral, derivative complex128) {

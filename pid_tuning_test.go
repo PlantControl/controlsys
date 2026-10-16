@@ -96,8 +96,8 @@ func TestTunePIDCancellationBoundsAndUnattainable(t *testing.T) {
 	if _, err := TunePID(ctx, p, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1}); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	// A P controller cannot add phase: this plant at wc=1 has PM=135, not 60.
-	r, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60, MaxEvaluations: 7})
+	// A P controller cannot add phase: this plant at wc=1 has PM=135, below a 150 floor.
+	r, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 150, MaxEvaluations: 7})
 	var tuneErr *PIDTuningError
 	if !errors.Is(err, ErrPIDTuningTargetUnattainable) || !errors.As(err, &tuneErr) || r != nil {
 		t.Fatalf("result %+v err %v", r, err)
@@ -382,7 +382,7 @@ func TestTunePIDOneGainFamiliesTakeThePlantsMargin(t *testing.T) {
 	if err != nil || math.Abs(result.Evidence.RequestedPhaseMargin-margin) > 1e-9 {
 		t.Fatalf("P margin %v, want %g: %v", result, margin, err)
 	}
-	if _, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: 0.185, PhaseMargin: 42}); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+	if _, err := TunePID(context.Background(), p, PidtuneP, PIDTuningOptions{CrossoverFrequency: 0.185, PhaseMargin: 160}); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		t.Fatalf("an explicit unreachable margin was not refused: %v", err)
 	}
 }

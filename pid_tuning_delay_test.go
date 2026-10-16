@@ -138,8 +138,10 @@ func TestPidtuneDefaultCrossoverHonoursDelay(t *testing.T) {
 }
 
 func TestTunePIDRejectsSignInconsistentDerivative(t *testing.T) {
+	// 1/(s+1)³ at ω=1.52 has phase −170°: same-sign PD reaches PM < 100°,
+	// so PM 120° needs Kp < 0 at any band at or above it.
 	for _, family := range []PidtuneType{PidtunePD, PidtunePDF} {
-		_, err := TunePID(context.Background(), makePlant(t, []float64{1}, []float64{1, 10}), family, PIDTuningOptions{})
+		_, err := TunePID(context.Background(), makePlant(t, []float64{1}, []float64{1, 3, 3, 1}), family, PIDTuningOptions{CrossoverFrequency: 1.52, PhaseMargin: 120})
 		var te *PIDTuningError
 		if !errors.As(err, &te) || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 			t.Fatalf("%s: err %v, want PIDTuningError", family, err)
@@ -148,9 +150,17 @@ func TestTunePIDRejectsSignInconsistentDerivative(t *testing.T) {
 			t.Errorf("%s: warnings %q do not name the sign rule", family, te.Evidence.Warnings)
 		}
 	}
-	_, err := TunePID(context.Background(), delayedFirstOrder(t, .05), PidtunePD, PIDTuningOptions{CrossoverFrequency: 10})
-	if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-		t.Errorf("explicit crossover needing negative Kd: err %v", err)
+	// At ω=10 e^{-0.05s}/(s+10) has phase −73.6°: PM 60° would need negative
+	// Kd, so the margin floor takes the nearest same-sign design above it.
+	r, err := TunePID(context.Background(), delayedFirstOrder(t, .05), PidtunePD, PIDTuningOptions{CrossoverFrequency: 10})
+	if err != nil {
+		t.Fatalf("explicit crossover with margin floor: %v", err)
+	}
+	if c := r.Controller; c.Kp <= 0 || c.Kd < 0 || r.Evidence.AchievedPhaseMargin < 57 {
+		t.Fatalf("design %+v margin %g", c, r.Evidence.AchievedPhaseMargin)
+	}
+	if stable, _ := pidDelayLoopCheck(t, r.Controller, .05); !stable {
+		t.Fatalf("design %+v independently unstable", r.Controller)
 	}
 	if pidTuningSignConsistent(PID2{Kp: 10.25, Kd: -.974}, 1) {
 		t.Error("accepted negative Kd on positive-DC-gain plant")
@@ -158,7 +168,7 @@ func TestTunePIDRejectsSignInconsistentDerivative(t *testing.T) {
 	if !pidTuningSignConsistent(PID2{Kp: -1, Kd: 2}, 0) {
 		t.Error("sign rule applied without a known DC sign")
 	}
-	r, err := TunePID(context.Background(), makePlant(t, []float64{-1}, []float64{1, 1}), PidtunePI, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
+	r, err = TunePID(context.Background(), makePlant(t, []float64{-1}, []float64{1, 1}), PidtunePI, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
 	if err != nil {
 		t.Fatal(err)
 	}
