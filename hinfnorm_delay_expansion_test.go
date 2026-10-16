@@ -248,7 +248,7 @@ func TestHinfNormLimitBelowEveryPassage(t *testing.T) {
 
 // limitAtInfCases are delay models whose peak is the ω → ∞ limit, decided by
 // limitVerdict: "limit" and "flat" with k = 2 ("flat" with κ small, so the
-// expansion must reach far), "k20" with k = 20.
+// expansion must reach far), "k20" with k = 20 and "far" with k = 3.
 var limitAtInfCases = []struct {
 	expansionCase
 	k float64
@@ -262,7 +262,15 @@ var limitAtInfCases = []struct {
 		[]float64{-0.6267854986926139, -0.22753476407416448, 0.7604859326403655, 0.3445225407726179},
 		[]float64{2.0994008736286496, -0.7771379653940502}, []float64{2.8964548762636153, -1.852398922038503},
 		0.23582769791420977}, 20},
+	{phaseScanLimit, 3},
 }
+
+// phaseScanLimit, with k = 3, has its +Inf horizon W of limitVerdict about
+// 8.5 times the dense scan end, so phaseScan covers most of the tail.
+var phaseScanLimit = expansionCase{"far",
+	[]float64{-0.4379881585197284, 0.39331592038980734, -0.08540018365047253, -0.200674608663282},
+	[]float64{-0.14302132366907738, -2.4255577468517746}, []float64{2.4202689080449487, 0.08789889153068065},
+	0.3411510888275282}
 
 // TestModelMaxMatchesFullScan checks the pruned modelMax against the model
 // evaluated directly at every sample with every local maximum refined.

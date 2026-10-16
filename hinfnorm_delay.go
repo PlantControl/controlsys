@@ -1134,19 +1134,23 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	if l.tau > 0 {
 		span = float64(l.pointBudget()) * math.Pi / (8 * l.tau)
 	}
-	extend := func(lo, R float64) ([]float64, float64, float64, error) {
+	points := func(lo, R float64) []float64 {
 		ext := []float64{lo}
 		for _, w := range l.grid(R, R) {
 			if w > lo {
 				ext = append(ext, w)
 			}
 		}
+		return ext
+	}
+	extend := func(lo, R float64) ([]float64, float64, float64, error) {
+		ext := points(lo, R)
 		b, w, err := e.scan(ext)
 		return ext, b, w, err
 	}
 	hi := rGrid
 	if atInf {
-		found, err := e.peakPastLimit(lim, tol, period, hfx, rGrid+span, &hi, extend)
+		found, err := e.peakPastLimit(lim, tol, period, hfx, rGrid+span, &hi, points)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -1160,17 +1164,28 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	}
 	for {
 		level := best * (1 + tol)
-		closed := func(R float64) bool {
-			return e.tailGain(lim, R) <= level || hfx != nil && hfx.tailBelow(level, 1/R)
-		}
-		R := max(hi, 2*e.normA+1)
+		R0 := max(hi, 2*e.normA+1)
+		R, closed := R0, false
 		for range 200 {
-			if closed(R) {
+			if closed = e.tailGain(lim, R) <= level; closed {
 				break
 			}
 			R *= 2
 		}
-		if !closed(R) {
+		if hfx != nil && (!closed || (R-hi)*8*l.tau/math.Pi > hfx.circleCost()) {
+			certified := false
+			for Rt := R0; Rt < R && Rt-rGrid <= span; Rt *= 2 {
+				if certified = hfx.tailBelow(level, 1/Rt); certified {
+					R, closed = Rt, true
+					break
+				}
+			}
+			if !certified && (!closed || R-rGrid > span) && 2*R0-rGrid <= span {
+				// The finite peak may lie further out, above best.
+				R, closed = 2*R0, true
+			}
+		}
+		if !closed {
 			return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
 		}
 		if R-rGrid > span {
@@ -1204,17 +1219,28 @@ type pastLimit struct {
 // limit lim, which every grid sample stays below. With the expansion of
 // highFrequencyExpansion, limitVerdict decides: when the finite peaks exceed
 // lim, the extension doubles until a sample does, and fails past rMax; when
-// they stay below, it scans to the horizon W <= rMax of limitVerdict.
-// Undecided, or without the expansion (a matrix gain, several
-// delay classes), it scans an extension of span max(R, 2P), with R the grid
-// end and P = 2π/h the period of G∞ for one phase φ = ωh, which tailGain
-// cannot close since G − G∞ decays only as 1/ω. It returns nil when no
-// sample exceeds lim, which is then the peak at ω = +Inf; *hi is advanced to
-// the end of the scan.
+// they stay below, it scans to the horizon W <= rMax of limitVerdict, densely
+// up to the span below and past it only where phaseScan finds the expansion
+// may reach lim. Undecided, or without the expansion (several delay
+// classes), it scans an extension of span max(R, 2P), with R the grid end
+// and P = 2π/h the period of G∞ for one phase φ = ωh, which tailGain cannot
+// close since G − G∞ decays only as 1/ω. It returns nil when no sample
+// exceeds lim, which is then the peak at ω = +Inf; *hi is advanced to the
+// end of the scan.
 func (e *delayLFT) peakPastLimit(lim, tol, period float64, hfx *highFrequencyExpansion, rMax float64, hi *float64,
-	extend func(lo, R float64) ([]float64, float64, float64, error)) (*pastLimit, error) {
+	points func(lo, R float64) []float64) (*pastLimit, error) {
+	level := lim * (1 + tol)
+	extend := func(lo, R float64) (*pastLimit, error) {
+		ext := points(lo, R)
+		b, w, err := e.scan(ext)
+		if err != nil || !(b > level) {
+			return nil, err
+		}
+		return &pastLimit{ext, b, w}, nil
+	}
 	R0 := max(*hi, 2*e.normA+1)
 	R := R0 + max(R0, 2*period)
+	dense := R
 	finite, W, decided := false, 0.0, false
 	if hfx != nil {
 		finite, W, decided = hfx.limitVerdict(lim, tol, *hi, min(rMax, 1e12))
@@ -1222,21 +1248,27 @@ func (e *delayLFT) peakPastLimit(lim, tol, period float64, hfx *highFrequencyExp
 	if decided && !finite {
 		R = max(R, W)
 	}
-	for Rt := max(*hi, 2*e.normA+1); Rt < R; Rt *= 2 {
-		if e.tailGain(lim, Rt) <= lim*(1+tol) {
+	for Rt := R0; Rt < R; Rt *= 2 {
+		if e.tailGain(lim, Rt) <= level {
 			R = Rt
 			break
 		}
 	}
+	if Rs := min(R, rMax); decided && !finite && Rs > dense {
+		h0 := *hi
+		*hi = Rs
+		found, err := e.phaseScan(hfx, level, h0, dense, Rs, points)
+		if found != nil && err == nil {
+			found, err = extend(h0, Rs)
+		}
+		return found, err
+	}
 	for {
 		if Rs := min(R, rMax); Rs > *hi {
-			ext, b, w, err := extend(*hi, Rs)
-			if err != nil {
-				return nil, err
-			}
+			found, err := extend(*hi, Rs)
 			*hi = Rs
-			if b > lim*(1+tol) {
-				return &pastLimit{ext, b, w}, nil
+			if found != nil || err != nil {
+				return found, err
 			}
 		}
 		if !finite {
@@ -1247,6 +1279,59 @@ func (e *delayLFT) peakPastLimit(lim, tol, period float64, hfx *highFrequencyExp
 		}
 		R *= 2
 	}
+}
+
+// phaseScan reports whether a grid point of (lo, R] may exceed level,
+// scanning those up to dense, and past it, in octaves [ω1, ω2] of ω, only
+// those near a phase φ = ωh where phaseMask cannot bound the expansion over
+// t = 1/ω ∈ [1/ω2, 1/ω1] plus its Cauchy remainder by level. A sample above
+// level is returned, for the dense scan to redo; nil otherwise.
+func (e *delayLFT) phaseScan(hfx *highFrequencyExpansion, level, lo, dense, R float64, points func(lo, R float64) []float64) (*pastLimit, error) {
+	ws := points(lo, R)
+	keep := make([]bool, len(ws))
+	h := hfx.phaseRate()
+	var mask []bool
+	bot, top := 0.0, 0.0
+	for i, w := range ws {
+		if w <= dense {
+			keep[i] = true
+			continue
+		}
+		if top == 0 || w > top {
+			if top == 0 {
+				bot, top = dense, 2*dense
+			}
+			for w > top {
+				bot, top = top, 2*top
+			}
+			mask = nil
+			t2 := 1 / bot
+			if r := hfx.radius(t2); r > 0 {
+				rem := hfx.remainder(e.tailGain(0, r), t2*r)
+				mask = hfx.phaseMask(1/min(top, R), t2, level-rem)
+			}
+		}
+		if mask == nil || mask[hfx.sampleAt(w*h)] {
+			keep[max(i-1, 0)], keep[i] = true, true
+			if i+1 < len(ws) {
+				keep[i+1] = true
+			}
+		}
+	}
+	var sub []float64
+	for i, w := range ws {
+		if keep[i] {
+			sub = append(sub, w)
+		}
+	}
+	if len(sub) == 0 {
+		return nil, nil
+	}
+	b, w, err := e.scan(sub)
+	if err != nil || !(b > level) {
+		return nil, err
+	}
+	return &pastLimit{sub, b, w}, nil
 }
 
 // certify raises (peak, w) to within peakCertTol of sup σ_max(G(jω)) over

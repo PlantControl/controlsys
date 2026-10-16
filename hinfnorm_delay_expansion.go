@@ -46,6 +46,13 @@ type highFrequencyExpansion struct {
 	poly     []float64
 	byS      []int
 	polyMax  [polyLen]float64
+	gMax     [expansionOrder + 1]float64 // matrix gain: largest ‖g_k‖_F over the samples
+	sg       [][]complex128              // matrix gain: g_0…g_N at sample i, set on first use
+	sn       [][expansionOrder + 1]float64
+	flat     []complex128
+	flatN    [expansionOrder + 1]float64
+	gap      [expansionOrder + 1]float64 // secantGap of the current modelMaxOver
+	sup0     float64                     // modelMax(0), 0 until set
 	singular bool
 	vals     []float64
 	stamp    []int
@@ -185,8 +192,11 @@ func (x *highFrequencyExpansion) sum(t float64) float64 {
 
 // coefficients returns, at φ, S², a = Re⟨g0, g1⟩ and
 // c = ‖g1‖² + 2·Re⟨g0, g2⟩, the coefficients of t and t² in ‖g0 + t·g1 +
-// t²·g2‖², for a vector gain. For a matrix gain a = ½·dσ_max²/dt at t = 0,
-// by a five-point difference with step 10⁻³·min_k (S/‖g_k‖)^{1/k}, and c = ‖g1‖_F², a scale only.
+// t²·g2‖², for a vector gain. For a matrix gain a = ½·dσ_max²/dt at t = 0+,
+// by a one-sided four-point difference with step d = 10⁻³·min_k
+// (S/‖g_k‖)^{1/k}, and c = ‖g1‖_F², a scale only: t > 0, and where σ_max(g0)
+// is repeated the slopes from either side differ, the right one being the
+// largest Re u^H·g1·v over its top singular pairs.
 func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
 	if !x.at(phi) {
 		return math.Inf(1), 0, 0
@@ -211,7 +221,7 @@ func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
 		}
 		d *= 1e-3
 		l := func(t float64) float64 { v := x.sum(t); return v * v }
-		a = (8*(l(d)-l(-d)) - (l(2*d) - l(-2*d))) / (24 * d)
+		a = (-11*s*s + 18*l(d) - 9*l(2*d) + 2*l(3*d)) / (12 * d)
 		return s * s, a, c
 	}
 	for i, g := range x.g[0] {
@@ -247,6 +257,9 @@ func (x *highFrequencyExpansion) sampleCircle() {
 		if !x.vector {
 			v := x.sum(0)
 			c[0] = v * v
+			for n := 1; n <= expansionOrder; n++ {
+				x.gMax[n] = max(x.gMax[n], cFrobenius(x.g[n]))
+			}
 			continue
 		}
 		x.squared(c)
@@ -260,6 +273,87 @@ func (x *highFrequencyExpansion) sampleCircle() {
 	}
 	slices.SortFunc(x.byS, func(a, b int) int { return cmp.Compare(x.poly[b*polyLen], x.poly[a*polyLen]) })
 	x.vals, x.stamp = make([]float64, k), make([]int, k)
+	if !x.vector {
+		x.sg, x.sn = make([][]complex128, k), make([][expansionOrder + 1]float64, k)
+	}
+}
+
+func cFrobenius(g []complex128) float64 {
+	var s float64
+	for _, v := range g {
+		s += real(v)*real(v) + imag(v)*imag(v)
+	}
+	return math.Sqrt(s)
+}
+
+// flatten copies g_0…g_N at the phase of the last at into dst, (N+1)·p·m
+// long, and sets n[k] = σ_max(g_k), k >= 2.
+func (x *highFrequencyExpansion) flatten(dst []complex128, n *[expansionOrder + 1]float64) {
+	pm := len(x.g[0])
+	for k := range expansionOrder + 1 {
+		copy(dst[k*pm:], x.g[k])
+		if k >= 2 {
+			n[k], _ = x.e.svd.maximumFromFlat(dst, k*pm, x.e.p, x.e.m)
+		}
+	}
+}
+
+// sampleTerms returns g_0…g_N and σ_max(g_k) at sample i of a matrix gain.
+func (x *highFrequencyExpansion) sampleTerms(i int) ([]complex128, *[expansionOrder + 1]float64) {
+	if x.sg[i] == nil {
+		x.at(float64(i) * (2 * math.Pi / float64(len(x.byS))))
+		x.sg[i] = make([]complex128, (expansionOrder+1)*len(x.g[0]))
+		x.flatten(x.sg[i], &x.sn[i])
+	}
+	return x.sg[i], &x.sn[i]
+}
+
+// sigmaAt returns σ_max(Σ_k t^k·g_k) for the flattened g.
+func (x *highFrequencyExpansion) sigmaAt(g []complex128, t float64) float64 {
+	pm := len(x.buf)
+	tc := complex(t, 0)
+	for i := range x.buf {
+		v := g[expansionOrder*pm+i]
+		for k := expansionOrder - 1; k >= 0; k-- {
+			v = v*tc + g[k*pm+i]
+		}
+		x.buf[i] = v
+	}
+	sv, err := x.e.svd.maximumFromFlat(x.buf, 0, x.e.p, x.e.m)
+	if err != nil {
+		return math.Inf(1)
+	}
+	return sv
+}
+
+// secantGap returns max over t ∈ [t1, t2] of the secant of t^k through t1
+// and t2 minus t^k, 0 <= t1 <= t2.
+func secantGap(k int, t1, t2 float64) float64 {
+	if t1 == t2 {
+		return 0
+	}
+	f := float64(k)
+	p1, p2 := math.Pow(t1, f), math.Pow(t2, f)
+	s := (p2 - p1) / (t2 - t1)
+	t := math.Pow(s/f, 1/(f-1))
+	return max(p1+s*(t-t1)-math.Pow(t, f), 0)
+}
+
+// intervalSigma bounds σ_max(Σ_k t^k·g_k) over t ∈ [t1, t2] for the
+// flattened g with n[k] = σ_max(g_k): each t^k, k >= 2, is its secant L_k(t)
+// less a gap in [0, gap[k]] (secantGap), and σ_max(g0 + t·g1 + Σ_k L_k(t)·g_k) is
+// convex in t, the norm of an affine function, so it peaks at t1 or t2,
+// where L_k = t^k. Exact for t1 = t2.
+func (x *highFrequencyExpansion) intervalSigma(g []complex128, n *[expansionOrder + 1]float64, t1, t2 float64, gap *[expansionOrder + 1]float64) float64 {
+	v := x.sigmaAt(g, t2)
+	if t1 == t2 {
+		return v
+	}
+	v = max(v, x.sigmaAt(g, t1))
+	for k := 2; k <= expansionOrder; k++ {
+		v += gap[k] * n[k]
+	}
+	return v
 }
 
 // squared adds to c the coefficients c_n = Σ_{i+j=n} Re⟨g_i, g_j⟩ of the
@@ -297,6 +391,11 @@ func (x *highFrequencyExpansion) sampleModel(i int, t1, t2 float64) float64 {
 	if x.stamp[i] == x.epoch {
 		return x.vals[i]
 	}
+	if !x.vector {
+		g, n := x.sampleTerms(i)
+		x.stamp[i], x.vals[i] = x.epoch, x.intervalSigma(g, n, t1, t2, &x.gap)
+		return x.vals[i]
+	}
 	v := overInterval(x.poly[i*polyLen:(i+1)*polyLen], t1, t2)
 	x.stamp[i], x.vals[i] = x.epoch, math.Sqrt(max(v, 0))
 	return x.vals[i]
@@ -304,7 +403,7 @@ func (x *highFrequencyExpansion) sampleModel(i int, t1, t2 float64) float64 {
 
 // modelMax returns sup_φ ‖Σ_{k<=N} t^k·g_k‖; see modelMaxOver.
 func (x *highFrequencyExpansion) modelMax(t float64) float64 {
-	return x.modelMaxOver(t, t)
+	return x.modelMaxOver(t, t, math.Inf(1))
 }
 
 // modelMaxOver returns sup over φ and t ∈ [t1, t2] of the bound
@@ -313,29 +412,52 @@ func (x *highFrequencyExpansion) modelMax(t float64) float64 {
 // within a factor 1 − 1e-3 of it refined by golden-section search as in
 // maxima. The bound at sample i is at most c_0,i + Σ_{n>=1} max_j |c_n,j|·t2^n,
 // so walking the samples by decreasing c_0 stops once that falls 1% below
-// the largest sample. +Inf for a matrix gain, whose σ_max has no such
-// polynomial.
-func (x *highFrequencyExpansion) modelMaxOver(t1, t2 float64) float64 {
+// the largest sample. For a matrix gain the bound is intervalSigma, at most
+// σ_max(g0) + Σ_{k>=1} max_j ‖g_k,j‖_F·(t2^k + secantGap). It returns a
+// value above stop as soon as one is found, and for finite stop the bound
+// from modelMax(0) and these slacks when that is at most stop.
+func (x *highFrequencyExpansion) modelMaxOver(t1, t2, stop float64) float64 {
 	x.sampleCircle()
-	if x.singular || !x.vector {
+	if x.singular {
 		return math.Inf(1)
 	}
 	k := len(x.byS)
-	x.epoch++
-	slack := 0.0
-	for n := polyLen - 1; n >= 1; n-- {
-		slack = (slack + x.polyMax[n]) * t2
+	if !math.IsInf(stop, 1) && x.sup0 == 0 {
+		x.sup0 = x.modelMaxOver(0, 0, math.Inf(1))
+	}
+	slack := x.prepare(t1, t2)
+	if !math.IsInf(stop, 1) {
+		b := math.Sqrt(x.sup0*x.sup0 + slack)
+		if !x.vector {
+			b = x.sup0 + slack
+		}
+		if b <= stop {
+			return b
+		}
 	}
 	top, last := 0.0, k
 	for j, i := range x.byS {
-		if math.Sqrt(max(x.poly[i*polyLen]+slack, 0)) < top*(1-1e-2) {
+		if x.upper(i, slack) < top*(1-1e-2) {
 			last = j
 			break
 		}
-		top = max(top, x.sampleModel(i, t1, t2))
+		if top = max(top, x.sampleModel(i, t1, t2)); top > stop {
+			return top
+		}
 	}
 	f := func(phi float64) float64 { return x.model(phi, t1) }
-	if t1 != t2 {
+	if !x.vector && t1 != t2 {
+		if x.flat == nil {
+			x.flat = make([]complex128, (expansionOrder+1)*len(x.g[0]))
+		}
+		f = func(phi float64) float64 {
+			if !x.at(phi) {
+				return math.Inf(1)
+			}
+			x.flatten(x.flat, &x.flatN)
+			return x.intervalSigma(x.flat, &x.flatN, t1, t2, &x.gap)
+		}
+	} else if t1 != t2 {
 		var c [polyLen]float64
 		f = func(phi float64) float64 {
 			if !x.at(phi) {
@@ -369,9 +491,95 @@ func (x *highFrequencyExpansion) modelMaxOver(t1, t2 float64) float64 {
 		}
 		phi := float64(i) * step
 		_, g := goldenMax(phi-step, phi+step, phi, x.vals[i], f)
-		best = max(best, g)
+		if best = max(best, g); best > stop {
+			return best
+		}
 	}
 	return best
+}
+
+// prepare starts a new epoch of sampleModel for t ∈ [t1, t2] and returns
+// the slack of upper.
+func (x *highFrequencyExpansion) prepare(t1, t2 float64) float64 {
+	x.epoch++
+	slack := 0.0
+	if x.vector {
+		for n := polyLen - 1; n >= 1; n-- {
+			slack = (slack + x.polyMax[n]) * t2
+		}
+		return slack
+	}
+	for n := 1; n <= expansionOrder; n++ {
+		x.gap[n] = secantGap(n, t1, t2)
+		slack += x.gMax[n] * (math.Pow(t2, float64(n)) + x.gap[n])
+	}
+	return slack
+}
+
+// upper bounds sampleModel at sample i from its c_0 and the slack of prepare.
+func (x *highFrequencyExpansion) upper(i int, slack float64) float64 {
+	c0 := x.poly[i*polyLen]
+	if x.vector {
+		return math.Sqrt(max(c0+slack, 0))
+	}
+	return math.Sqrt(c0) + slack
+}
+
+// phaseRate returns h, with φ = ωh the phase of G∞ at ω.
+func (x *highFrequencyExpansion) phaseRate() float64 {
+	return 2 * math.Pi / x.hf.period()
+}
+
+// sampleAt returns the index of the circle sample nearest φ.
+func (x *highFrequencyExpansion) sampleAt(phi float64) int {
+	x.sampleCircle()
+	k := len(x.byS)
+	i := int(math.Round(math.Mod(phi, 2*math.Pi) / (2 * math.Pi / float64(k))))
+	return ((i % k) + k) % k
+}
+
+// phaseMask marks the circle samples near which sampleModel over t ∈ [t1,
+// t2] may exceed level: those above it, the local maxima whose parabolic
+// interpolation is, and their two neighbours on either side. Walking the
+// samples by decreasing c_0 stops once upper falls below level·(1 − 1e-3).
+// nil where I − D22Δ is singular.
+func (x *highFrequencyExpansion) phaseMask(t1, t2, level float64) []bool {
+	x.sampleCircle()
+	if x.singular {
+		return nil
+	}
+	k := len(x.byS)
+	slack := x.prepare(t1, t2)
+	mask := make([]bool, k)
+	for _, i := range x.byS {
+		if x.upper(i, slack) < level*(1-1e-3) {
+			break
+		}
+		v := x.sampleModel(i, t1, t2)
+		bad := v > level
+		if y0, y2 := x.sampleModel((i+k-1)%k, t1, t2), x.sampleModel((i+1)%k, t1, t2); !bad && v >= y0 && v >= y2 {
+			e := v
+			if d := 2*v - y0 - y2; d > 0 {
+				e += (y0 - y2) * (y0 - y2) / (8 * d)
+			}
+			bad = e > level
+		}
+		if bad {
+			for d := -2; d <= 2; d++ {
+				mask[(i+d+k)%k] = true
+			}
+		}
+	}
+	return mask
+}
+
+// circleCost returns the number of solves sampleCircle still takes, the
+// grid points worth scanning before tailBelow is tried instead.
+func (x *highFrequencyExpansion) circleCost() float64 {
+	if x.poly != nil {
+		return 0
+	}
+	return 1024 * x.hf.kmax
 }
 
 // tailBelow reports whether ‖G(jω)‖ <= level for ω >= 1/T: by
@@ -390,7 +598,8 @@ func (x *highFrequencyExpansion) tailBelow(level, T float64) bool {
 		if i == 40 {
 			t1 = 0
 		}
-		if !(x.modelMaxOver(t1, t2)+x.remainder(E, t2*w) <= level) {
+		r := x.remainder(E, t2*w)
+		if !(x.modelMaxOver(t1, t2, level-r)+r <= level) {
 			return false
 		}
 	}
