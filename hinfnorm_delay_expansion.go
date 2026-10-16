@@ -186,7 +186,7 @@ func (x *highFrequencyExpansion) sum(t float64) float64 {
 // coefficients returns, at φ, S², a = Re⟨g0, g1⟩ and
 // c = ‖g1‖² + 2·Re⟨g0, g2⟩, the coefficients of t and t² in ‖g0 + t·g1 +
 // t²·g2‖², for a vector gain. For a matrix gain a = ½·dσ_max²/dt at t = 0,
-// by a five-point difference, and c = ‖g1‖_F², a scale only.
+// by a five-point difference with step 10⁻³·min_k (S/‖g_k‖)^{1/k}, and c = ‖g1‖_F², a scale only.
 func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
 	if !x.at(phi) {
 		return math.Inf(1), 0, 0
@@ -199,7 +199,17 @@ func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
 		if c == 0 || s == 0 {
 			return s * s, 0, c
 		}
-		d := 1e-3 * s / math.Sqrt(c)
+		d := s / math.Sqrt(c)
+		for k := 2; k <= expansionOrder; k++ {
+			var n float64
+			for _, g := range x.g[k] {
+				n += real(g)*real(g) + imag(g)*imag(g)
+			}
+			if n > 0 {
+				d = min(d, math.Pow(s/math.Sqrt(n), 1/float64(k)))
+			}
+		}
+		d *= 1e-3
 		l := func(t float64) float64 { v := x.sum(t); return v * v }
 		a = (8*(l(d)-l(-d)) - (l(2*d) - l(-2*d))) / (24 * d)
 		return s * s, a, c
