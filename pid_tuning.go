@@ -1000,28 +1000,71 @@ func pidTuningIdealDerivative(family PidtuneType) bool {
 	return f == PidtunePD || f == PidtunePID
 }
 
-// pidDerivTail bounds |s·G(s)| = |CB + CA(sI−A)⁻¹B| for Re s ≥ 0, |s| ≥ w of a
-// strictly proper SISO plant G, delays excluded.
-func pidDerivTail(plant *System) func(float64) float64 {
+// pidMarkovTail bounds |s^p·C(sI−A)⁻¹B|, p ∈ {0, 1}, for Re s ≥ 0, |s| ≥ w of
+// a SISO plant, delays and D excluded. Expanding (sI−A)⁻¹ to order k gives
+// Σ_{j<k} |CAʲB|·w^{p−j−1} + ‖CAᵏ‖‖B‖·w^{p−k}/(w−‖A‖); the minimum over
+// k = 0..n decays like the plant's relative degree, so the delay grid ends
+// near crossover instead of where a first-order bound falls below 1.
+type pidMarkovTail struct {
+	normA  float64
+	markov []float64 // |CAʲB|
+	rem    []float64 // ‖CAᵏ‖‖B‖
+}
+
+func newPIDMarkovTail(plant *System) *pidMarkovTail {
 	n, _, _ := plant.Dims()
-	cb, cab, normA := 0.0, 0.0, 0.0
-	if n > 0 {
-		var v, ca mat.Dense
-		v.Mul(plant.C, plant.B)
-		cb = math.Abs(v.At(0, 0))
-		ca.Mul(plant.C, plant.A)
-		cab = spectralNorm(&ca) * spectralNorm(plant.B)
-		normA = spectralNorm(plant.A)
+	t := &pidMarkovTail{markov: make([]float64, n), rem: make([]float64, n+1)}
+	if n == 0 {
+		return t
 	}
-	return func(w float64) float64 {
-		if cab == 0 || math.IsInf(w, 1) {
-			return cb
+	t.normA = spectralNorm(plant.A)
+	normB := spectralNorm(plant.B)
+	ca := mat.DenseCopyOf(plant.C)
+	var next, v mat.Dense
+	for k := range n + 1 {
+		t.rem[k] = spectralNorm(ca) * normB
+		if k == n {
+			break
 		}
-		if w <= normA {
-			return math.Inf(1)
-		}
-		return cb + cab/(w-normA)
+		v.Mul(ca, plant.B)
+		t.markov[k] = math.Abs(v.At(0, 0))
+		next.Mul(ca, plant.A)
+		ca.Copy(&next)
 	}
+	return t
+}
+
+func (t *pidMarkovTail) at(w float64, p int) float64 {
+	if len(t.markov) == 0 {
+		return 0
+	}
+	if math.IsInf(w, 1) {
+		if p == 1 {
+			return t.markov[0]
+		}
+		return 0
+	}
+	best, sum, f := math.Inf(1), 0.0, math.Pow(w, float64(p-1))
+	for k := range t.rem {
+		switch {
+		case t.rem[k] == 0:
+			best = min(best, sum)
+		case w > t.normA:
+			best = min(best, sum+t.rem[k]*f*w/(w-t.normA))
+		}
+		if k < len(t.markov) {
+			sum += t.markov[k] * f
+			f /= w
+		}
+	}
+	return best
+}
+
+// pidDerivTail bounds |s·G(s)| for Re s ≥ 0, |s| ≥ w of a strictly proper
+// SISO plant G, delays excluded.
+func pidDerivTail(plant *System) func(float64) float64 {
+	t := newPIDMarkovTail(plant)
+	return func(w float64) float64 { return t.at(w, 1) }
 }
 
 // pidTuningMaxTail bounds limsup |L(jω)| of a delayed loop with an ideal
@@ -1040,6 +1083,12 @@ const pidTuningMaxTail = 1 - 1.0/pidTuningMaxSensitivity
 // whose high-frequency gain exceeds maxTail (≤ 1), is rejected; other
 // failures are errors.
 func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool, maxTail float64) (func(*PID2) (bool, error), bool, error) {
+	return pidTuningDelayStabilityBudget(plant, eval, wc, idealDerivative, maxTail, 0)
+}
+
+// pidTuningDelayStabilityBudget is pidTuningDelayStability with the Nyquist
+// grid capped at maxPoints; 0 selects delayNyquistMaxPoints.
+func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, idealDerivative bool, maxTail float64, maxPoints int) (func(*PID2) (bool, error), bool, error) {
 	if !plant.IsContinuous() {
 		return nil, false, nil
 	}
@@ -1050,10 +1099,15 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 	if err != nil {
 		return nil, false, err
 	}
+	base.maxPoints = maxPoints
 	plantTail, plantLimit := base.tail, base.tailLimit
 	var derivTail func(float64) float64
-	if !plant.HasInternalDelay() && plant.D.At(0, 0) == 0 {
-		derivTail = pidDerivTail(plant)
+	if !plant.HasInternalDelay() {
+		markov, d := newPIDMarkovTail(plant), math.Abs(plant.D.At(0, 0))
+		plantTail = func(w float64) float64 { return min(base.tail(w), d+markov.at(w, 0)) }
+		if d == 0 {
+			derivTail = func(w float64) float64 { return markov.at(w, 1) }
+		}
 	}
 	if idealDerivative && plant.HasInternalDelay() {
 		return nil, false, nil

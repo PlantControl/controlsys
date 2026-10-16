@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -113,6 +114,9 @@ func checkPidtuneStability(plant *System, eval *sisoEval, pid *PID, pidType Pidt
 		return err
 	}
 	stable, _, err := screen.at(wc, pidType)
+	if errors.Is(err, ErrContinuousInternalDelay) {
+		return nil
+	}
 	if err != nil || stable == nil {
 		return err
 	}
