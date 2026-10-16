@@ -69,7 +69,8 @@ type PIDTuningWeights struct{ FixedB, FixedC *float64 }
 // PIDTuningOptions holds the TunePID targets; zero values select defaults.
 type PIDTuningOptions struct {
 	// CrossoverFrequency is the target gain crossover in rad/s; 0 picks it
-	// from the plant (TunePID) or the geometric band centre (TunePIDFRD).
+	// from the plant, capped by its delay phase budget (TunePID), or the
+	// geometric band centre (TunePIDFRD).
 	CrossoverFrequency float64
 	// PhaseMargin in degrees, in (0, 180); 0 means 60, or the plant's own
 	// margin for the one-gain P and I families.
@@ -123,11 +124,47 @@ type pidTuningPlant struct {
 	stable        func(*PID2) (bool, error)
 	stability     PIDStabilityEvidence
 	warnings      []string
+	// gainSign is the sign every nonzero gain must take: that of the DC gain
+	// of a stable plant, or 0 when unknown.
+	gainSign float64
+}
+
+// pidTuningDCSign returns the sign of the DC gain of a stable plant, or 0
+// when the plant is not known to be stable or its DC gain is zero.
+func pidTuningDCSign(plant *System) float64 {
+	if stable, err := plant.IsStable(); err != nil || !stable {
+		return 0
+	}
+	dc, err := evalPlantAt(plant, 0)
+	if err != nil || !pidFiniteComplex(dc) || math.Abs(imag(dc)) > 1e-9*cmplx.Abs(dc) || real(dc) == 0 {
+		return 0
+	}
+	return math.Copysign(1, real(dc))
+}
+
+// pidTuningSignConsistent reports whether every nonzero gain of c has sign
+// want; want = 0 accepts any signs. Other signs on a stable plant come from
+// the wrapped-phase branch of the crossover equations.
+func pidTuningSignConsistent(c PID2, want float64) bool {
+	if want == 0 {
+		return true
+	}
+	for _, g := range []float64{c.Kp, c.Ki, c.Kd} {
+		if g != 0 && math.Copysign(1, g) != want {
+			return false
+		}
+	}
+	return true
 }
 
 // TunePID designs a SISO negative-feedback controller. The original Pidtune API
 // retains its historical behavior. This operation enforces finite targets,
 // bounded computation and explicit achieved-target/stability evidence.
+//
+// A zero CrossoverFrequency is capped by the loop delay τ at (180°−PM)/(2τ),
+// as Pidtune. For a stable plant every nonzero gain takes the sign of its DC
+// gain. A continuous delayed loop must keep limsup |L(jω)| <= ½, so a
+// near-neutral loop is rejected even when its sampled margins look healthy.
 //
 // An unattainable target returns a *PIDTuningError (wrapping
 // ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
@@ -151,8 +188,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	wc := opts.CrossoverFrequency
 	if wc == 0 {
+		pm := opts.PhaseMargin
+		if pm <= 0 || pm >= 180 || !finitePID(pm) {
+			pm = 60
+		}
 		var err error
-		wc, err = findCrossoverFreq(plant, 0)
+		wc, err = findCrossoverFreq(plant, 0, pm)
 		if err != nil {
 			return nil, fmt.Errorf("TunePID: %w", err)
 		}
@@ -162,7 +203,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly}
+	p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly, gainSign: pidTuningDCSign(plant)}
 	if plant.Dt > 0 {
 		p.high = math.Min(p.high, .99*math.Pi/plant.Dt)
 	}
@@ -342,7 +383,11 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		a := c
 		a.Kp = -a.Kp
 		a.Ki = -a.Ki
-		if pidPhaseDistance(p.at(wc)*pidTuningFeedback(a, wc), o.PhaseMargin) < pidPhaseDistance(p.at(wc)*pidTuningFeedback(c, wc), o.PhaseMargin) {
+		if p.gainSign != 0 {
+			if math.Copysign(1, c.Kp+c.Ki) != p.gainSign {
+				c = a
+			}
+		} else if pidPhaseDistance(p.at(wc)*pidTuningFeedback(a, wc), o.PhaseMargin) < pidPhaseDistance(p.at(wc)*pidTuningFeedback(c, wc), o.PhaseMargin) {
 			c = a
 		}
 	}
@@ -402,6 +447,7 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	bestScore := math.Inf(1)
 	var best PID2
 	var bestParts PIDTuningObjective
+	signRejected := false
 	evaluate := func(candidate PID2) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -411,6 +457,10 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		}
 		evidence.Evaluations++
 		if filtered && (candidate.Tf < math.Max(.001/wc, p.dt*.51) || candidate.Tf > 10/wc) {
+			return nil
+		}
+		if !pidTuningSignConsistent(candidate, p.gainSign) {
+			signRejected = true
 			return nil
 		}
 		mag := cmplx.Abs(h * pidTuningFeedback(candidate, wc))
@@ -514,6 +564,9 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		evidence.Termination = PIDTerminationEvaluationLimit
 	}
 	if !finitePID(bestScore) {
+		if signRejected {
+			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target needed a gain of sign opposite to the stable plant's DC gain; such designs are rejected.")
+		}
 		return nil, &PIDTuningError{Op: op, Evidence: evidence}
 	}
 	if !finitePID(evidence.SeedObjective) {
@@ -785,12 +838,18 @@ func pidDerivTail(plant *System) func(float64) float64 {
 	}
 }
 
+// pidTuningMaxTail bounds limsup |L(jω)| of a tuned delayed loop. Above 1 the
+// loop is unstable; near 1 a neutral root chain at Re s = ln|L(j∞)|/τ makes it
+// barely damped, which no finite-band phase margin reveals. ½ keeps 6 dB of
+// high-frequency gain margin and |S| <= 2 along the chain.
+const pidTuningMaxTail = 0.5
+
 // pidTuningDelayStability returns a Nyquist stability test for loops
 // C(s)·P(s) with a continuous delayed plant, or false when the plant is
-// outside the test's scope. Ideal derivative controllers need D = 0 and no
-// internal delays so that |Kd·s·P(s)| has a finite high-frequency bound. A
-// candidate loop outside the Nyquist test's scope is rejected; other
-// failures are errors.
+// outside the test's scope. Ideal derivative controllers need no internal
+// delays; with D ≠ 0, |Kd·s·P(s)| is unbounded, so every Kd ≠ 0 is rejected.
+// A candidate loop outside the Nyquist test's scope, or whose high-frequency
+// gain exceeds pidTuningMaxTail, is rejected; other failures are errors.
 func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool) (func(*PID2) (bool, error), bool, error) {
 	if !plant.IsContinuous() {
 		return nil, false, nil
@@ -807,7 +866,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 	if !plant.HasInternalDelay() && plant.D.At(0, 0) == 0 {
 		derivTail = pidDerivTail(plant)
 	}
-	if idealDerivative && derivTail == nil {
+	if idealDerivative && plant.HasInternalDelay() {
 		return nil, false, nil
 	}
 	return func(c *PID2) (bool, error) {
@@ -844,6 +903,9 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 			l.tail = func(w float64) float64 { return (kp+ki/w)*plantTail(w) + kd*derivTail(w) }
 			l.tailLimit = kp*plantLimit + kd*derivTail(math.Inf(1))
 		default:
+			return false, nil
+		}
+		if l.tailLimit > pidTuningMaxTail {
 			return false, nil
 		}
 		stable, err := l.stableClosedLoop()

@@ -33,7 +33,8 @@ const (
 // Pidtune tunes a PID of family pidType for the SISO plant at crossover wc,
 // as MATLAB pidtune(sys,type,wc,opts)
 // (https://www.mathworks.com/help/control/ref/dynamicsystem.pidtune.html).
-// wc = 0 picks the crossover from the plant; a negative or non-finite wc, or
+// wc = 0 picks the crossover from the plant, capped at (180°−PM)/(2τ) for a
+// loop delay τ so the delay lag leaves room for the margin; a negative or non-finite wc, or
 // a phase margin outside (0, 180), returns ErrInvalidArgument. The loop
 // crossover and phase margin are placed using the realized controller
 // response: discrete plants use the discrete PID terms, and a discrete PID
@@ -66,7 +67,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: unsupported type %q: %w", pidType, ErrInvalidArgument)
 	}
 
-	wc, err := findCrossoverFreq(plant, wc)
+	wc, err := findCrossoverFreq(plant, wc, pm)
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
@@ -109,10 +110,28 @@ func checkPidtuneMargin(plant *System, pid *PID, wc, pm float64) error {
 	return nil
 }
 
-func findCrossoverFreq(plant *System, wcTarget float64) (float64, error) {
+// findCrossoverFreq returns wcTarget, or when it is 0 a crossover from the
+// plant magnitude capped at (180°−pm)/(2τ) for a total loop delay τ, so the
+// delay lag spends at most half the phase left after the margin.
+func findCrossoverFreq(plant *System, wcTarget, pm float64) (float64, error) {
 	if wcTarget > 0 {
 		return wcTarget, nil
 	}
+	wc, err := plantCrossoverFreq(plant)
+	if err != nil {
+		return 0, err
+	}
+	tau := sisoLoopDelay(plant)
+	if plant.Dt > 0 {
+		tau *= plant.Dt
+	}
+	if tau > 0 {
+		wc = math.Min(wc, (180-pm)*math.Pi/180/(2*tau))
+	}
+	return wc, nil
+}
+
+func plantCrossoverFreq(plant *System) (float64, error) {
 
 	all, err := AllMargin(plant)
 	if err != nil {
