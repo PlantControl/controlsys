@@ -87,8 +87,9 @@ type PIDTuningOptions struct {
 	IFormula, DFormula PIDFormula
 	Weights            *PIDTuningWeights
 	// MaxEvaluations bounds candidate evaluations of each TunePID search,
-	// 1..4096; 0 means 4096. The ±3° attempt and each moved crossover are
-	// searches; the floor bands share one. Evidence counts the whole call.
+	// 1..4096; 0 means 4096. The ±3° attempt and each moved or backed-off
+	// crossover are searches; the floor bands at one crossover share one.
+	// Evidence counts the whole call.
 	MaxEvaluations int
 	// UnstablePoles is optional user knowledge for TunePIDFRD; nil means
 	// unknown. TunePID rejects it with ErrOptionUnsupported.
@@ -286,6 +287,13 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // limsup |L(jω)| <= ½, so a near-neutral loop is rejected even when its
 // sampled margins look healthy.
 //
+// When both fail for a default-crossover PI, PID or PIDF design on a stable
+// delayed plant, the crossover backs off by octaves to 1/1024 of the default,
+// each tried at PM±3° then as a floor under |S| <= 4 sampled up to 100× the
+// default, and the first success is refined a half octave upward: a lightly
+// damped resonance near the delay cap can leave only a low-bandwidth design,
+// as pidtune returns.
+//
 // An unattainable target returns a *PIDTuningError (wrapping
 // ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
 // options return ErrInvalidArgument; a numerical failure of a stability
@@ -320,10 +328,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if plant.Dt > 0 {
 		tau *= plant.Dt
 	}
-	used := 0
+	// minHigh keeps a backed-off crossover's band over the default one,
+	// where the resonance that forced the back-off sits.
+	used, minHigh := 0, 0.
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
-		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
+		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: math.Max(wc*100, minHigh), at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
 		if robust {
 			p.maxSensitivity = pidTuningMaxSensitivity
 		}
@@ -383,6 +393,40 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		return stamp(r, e)
 	}
+	// backOff lowers a failed default crossover by octaves to wc0/1024,
+	// trying PM±3° then the floor at each, and refines the first success
+	// by a half octave toward the failure above it.
+	backOff := func(wc0, gainSign float64, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
+		minHigh = wc0 * 100
+		try := func(wc float64) (*PIDTuningResult, error) {
+			r, e := tuneAt(wc, gainSign, true, false)
+			if errors.As(e, new(*PIDTuningError)) {
+				r, e = tuneAt(wc, gainSign, true, true)
+			}
+			return r, e
+		}
+		for k := 1; k <= 10; k++ {
+			wc := math.Ldexp(wc0, -k)
+			r, e := try(wc)
+			if errors.As(e, new(*PIDTuningError)) {
+				continue
+			}
+			if e != nil {
+				return nil, e
+			}
+			if r2, e2 := try(wc * math.Sqrt2); e2 == nil {
+				r, wc = r2, wc*math.Sqrt2
+			} else if !errors.As(e2, new(*PIDTuningError)) {
+				return nil, e2
+			}
+			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, wc, pidTuningMaxSensitivity, minHigh))
+			return stamp(r, nil)
+		}
+		if te, ok := errors.AsType[*PIDTuningError](err); ok {
+			te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers down to %.4g rad/s were also tried.", math.Ldexp(wc0, -10)))
+		}
+		return stamp(res, err)
+	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, eval.at, wc)
 		res, err := tuneAt(wc, gainSign, false, false)
@@ -399,6 +443,13 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	gainSign := pidTuningDCSign(plant, eval.at, wc0)
 	res, err := tuneAt(wc0, gainSign, tau > 0, false)
 	fam := PidtuneType(strings.ToUpper(string(family)))
+	if _, hasI, _, _, _ := pidTuningTerms(fam); hasI && fam != PidtuneI && gainSign != 0 && tau > 0 {
+		res, err = withFloor(wc0, gainSign, true, res, err)
+		if !errors.As(err, new(*PIDTuningError)) {
+			return res, err
+		}
+		return backOff(wc0, gainSign, res, err)
+	}
 	if gainSign == 0 || fam != PidtunePD && fam != PidtunePDF || !errors.As(err, new(*PIDTuningError)) {
 		return withFloor(wc0, gainSign, tau > 0, res, err)
 	}
