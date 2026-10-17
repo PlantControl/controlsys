@@ -1013,6 +1013,11 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	pidTuningSolveWeights(&c, o.Weights, omega, plant, wc)
 	norms := components(c)
 	if !finitePID(norms.Tracking) || !finitePID(norms.Rejection) || !finitePID(norms.Effort) {
+		// A P or I gain only scales the loop, so a seed off the phase band
+		// means no candidate meets it; such a seed can sit on −1 at wc.
+		if !hasD && hasP != hasI && pidPhaseDistance(h*pidTuningFeedback(c, wc), o.PhaseMargin) > 3 {
+			return nil, &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: o.PhaseMargin, Stability: p.stability, Warnings: append([]string(nil), p.warnings...)}}
+		}
 		return nil, fmt.Errorf("%s: objective overflows; rescale plant units: %w", op, ErrOverflow)
 	}
 	norms.Tracking = math.Max(norms.Tracking, 1e-3)
