@@ -101,3 +101,35 @@ func TestTunePIDMarginCheckFindsResonanceCrossings(t *testing.T) {
 		}
 	}
 }
+
+// Searching under the refined crossing check changed the search path: an
+// intermediate incumbent with a real −11° crossing pair at the 0.51 rad/s
+// mode was rejected, and the search never reached base's design, which
+// meets the floor at its only crossing. The search now runs on the grid
+// scan and the refined check vets its design. Oracle: dense margins over
+// the evidence band.
+func TestTunePIDRefinedCheckKeepsSoundDesign(t *testing.T) {
+	num, den := []float64{.112, 1.487, -6.146}, []float64{1, 1.630, .398, .424, .0311}
+	r, err := TunePID(context.Background(), makePlant(t, num, den), PidtunePID, PIDTuningOptions{CrossoverFrequency: .053647})
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := r.Controller
+	L := func(w float64) complex128 {
+		s := complex(0, w)
+		return pidPolyAt(num, s) / pidPolyAt(den, s) * (complex(k.Kp, 0) + complex(k.Ki, 0)/s + complex(k.Kd, 0)*s)
+	}
+	band := r.Evidence.FrequencyBand
+	margins := pidLoopMargins(L, band[0], band[1])
+	for _, pm := range margins {
+		if pm > 180 {
+			pm -= 360
+		}
+		if pm < 57 {
+			t.Errorf("%+v: dense margin %g below 57° (%v)", *k, pm, margins)
+		}
+	}
+	if len(margins) != len(r.Evidence.GainCrossovers) {
+		t.Errorf("evidence crossovers %v, dense margins %v", r.Evidence.GainCrossovers, margins)
+	}
+}

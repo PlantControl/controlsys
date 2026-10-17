@@ -87,9 +87,11 @@ type PIDTuningOptions struct {
 	IFormula, DFormula PIDFormula
 	Weights            *PIDTuningWeights
 	// MaxEvaluations bounds candidate evaluations of each TunePID search,
-	// 1..4096; 0 means 4096. The ±3° attempt and each moved or backed-off
-	// crossover are searches; the floor bands at one crossover share one.
-	// Evidence counts the whole call.
+	// 1..4096; 0 means 4096. The ±3° attempt and each moved crossover are
+	// searches; the floor bands at one crossover share one, as do all
+	// backed-off crossovers. A search that verifies its design under the
+	// refined crossing check and searches again spends one budget. Evidence
+	// counts the whole call.
 	MaxEvaluations int
 	// UnstablePoles is optional user knowledge for TunePIDFRD; nil means
 	// unknown. TunePID rejects it with ErrOptionUnsupported.
@@ -153,7 +155,25 @@ type pidTuningPlant struct {
 	// other crossovers to the plant's dynamics, since a floor design's
 	// high gain can cross 0 dB near a mode outside the band.
 	crossLow, crossHigh float64
+	// crossScan selects the margin check of a search outside the floor.
+	crossScan pidCrossScan
 }
+
+type pidCrossScan int
+
+const (
+	// pidCrossAuto searches with the coarse scan, then verifies the design
+	// with the refined one and searches again under it if that fails.
+	pidCrossAuto pidCrossScan = iota
+	pidCrossCoarse
+	pidCrossRefined
+)
+
+// pidCoarseRejected reports a coarse-scan design that the refined crossing
+// check rejects.
+type pidCoarseRejected struct{ evaluations int }
+
+func (*pidCoarseRejected) Error() string { return "coarse design fails refined crossing check" }
 
 // pidTuningMaxSensitivity bounds |S| for a delay-capped or moved default
 // crossover, so the design keeps at least 2.5 dB of gain margin and 14° of
@@ -288,9 +308,11 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // sampled margins look healthy.
 //
 // When both fail for a default-crossover PI, PID or PIDF design on a stable
-// delayed plant, the crossover backs off by octaves to 1/1024 of the default,
-// each tried at PM±3° then as a floor under |S| <= 4 sampled up to 100× the
-// default, and the first success is refined a half octave upward: a lightly
+// delayed plant, and either a candidate exceeded |S| <= 4 or a lightly damped
+// mode lies within a factor 100 of the default, the crossover backs off by
+// half octaves to 1/1024 of the default, each tried at PM±3° then as a floor
+// under |S| <= 4 sampled up to 100× the default. Depths are bisected, taking
+// success as monotone in depth, within one evaluation budget: a lightly
 // damped resonance near the delay cap can leave only a low-bandwidth design,
 // as pidtune returns.
 //
@@ -330,7 +352,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	// minHigh keeps a backed-off crossover's band over the default one,
 	// where the resonance that forced the back-off sits.
-	used, minHigh := 0, 0.
+	// sRejected records a search that failed with candidates over the |S|
+	// bound.
+	used, minHigh, sRejected := 0, 0., false
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
 		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: math.Max(wc*100, minHigh), at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
@@ -364,6 +388,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		if te, ok := errors.AsType[*PIDTuningError](err); ok {
 			used += te.Evidence.Evaluations
+			sRejected = sRejected || te.excess > 0
 		} else if err == nil {
 			used += res.Evidence.Evaluations
 		}
@@ -393,37 +418,48 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		return stamp(r, e)
 	}
-	// backOff lowers a failed default crossover by octaves to wc0/1024,
-	// trying PM±3° then the floor at each, and refines the first success
-	// by a half octave toward the failure above it.
+	// backOff lowers a failed default crossover by half octaves down to
+	// wc0/1024, trying PM±3° then the floor at each. It bisects on the
+	// half-octave index, taking success as monotone in depth, and keeps the
+	// shallowest success found; all its searches share one budget.
 	backOff := func(wc0, gainSign float64, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
 		minHigh = wc0 * 100
-		try := func(wc float64) (*PIDTuningResult, error) {
-			r, e := tuneAt(wc, gainSign, true, false)
-			if errors.As(e, new(*PIDTuningError)) {
-				r, e = tuneAt(wc, gainSign, true, true)
-			}
-			return r, e
+		budget, start := opts.MaxEvaluations, used
+		if budget == 0 {
+			budget = 4096
 		}
-		for k := 1; k <= 10; k++ {
-			wc := math.Ldexp(wc0, -k)
-			r, e := try(wc)
-			if errors.As(e, new(*PIDTuningError)) {
+		at := func(j int) float64 { return wc0 * math.Pow(2, -float64(j)/2) }
+		var best *PIDTuningResult
+		lo, hi, lowest := 0, 21, 0
+		for hi-lo > 1 && used-start < budget {
+			j := (lo + hi) / 2
+			var r *PIDTuningResult
+			var e error
+			for _, floor := range []bool{false, true} {
+				if used-start >= budget {
+					break
+				}
+				opts.MaxEvaluations = budget - (used - start)
+				if r, e = tuneAt(at(j), gainSign, true, floor); !errors.As(e, new(*PIDTuningError)) {
+					break
+				}
+			}
+			lowest = max(lowest, j)
+			if e == nil && r != nil {
+				best, hi = r, j
 				continue
 			}
-			if e != nil {
+			if !errors.As(e, new(*PIDTuningError)) && e != nil {
 				return nil, e
 			}
-			if r2, e2 := try(wc * math.Sqrt2); e2 == nil {
-				r, wc = r2, wc*math.Sqrt2
-			} else if !errors.As(e2, new(*PIDTuningError)) {
-				return nil, e2
-			}
-			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, wc, pidTuningMaxSensitivity, minHigh))
-			return stamp(r, nil)
+			lo = j
 		}
-		if te, ok := errors.AsType[*PIDTuningError](err); ok {
-			te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers down to %.4g rad/s were also tried.", math.Ldexp(wc0, -10)))
+		if best != nil {
+			best.Evidence.Warnings = append(best.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, at(hi), pidTuningMaxSensitivity, minHigh))
+			return stamp(best, nil)
+		}
+		if te, ok := errors.AsType[*PIDTuningError](err); ok && lowest > 0 {
+			te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers down to %.4g rad/s were also tried.", at(lowest)))
 		}
 		return stamp(res, err)
 	}
@@ -446,6 +482,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if _, hasI, _, _, _ := pidTuningTerms(fam); hasI && fam != PidtuneI && gainSign != 0 && tau > 0 {
 		res, err = withFloor(wc0, gainSign, true, res, err)
 		if !errors.As(err, new(*PIDTuningError)) {
+			return res, err
+		}
+		// Only an |S| rejection or a lightly damped mode near wc0 suggests
+		// that a lower crossover can succeed.
+		resonant := slices.ContainsFunc(modes(), func(m complex128) bool { return imag(m) > wc0/100 && imag(m) < wc0*100 })
+		if !sRejected && !resonant {
 			return res, err
 		}
 		return backOff(wc0, gainSign, res, err)
@@ -549,7 +591,40 @@ func pidTuningPhaseWalk(at func(float64) complex128, sign, target, wLo, wHi, tau
 	return 0, 0, false
 }
 
+// tunePID outside the floor searches with the grid-only crossing scan, whose
+// path the refined scan's extra rejections would change, and accepts the
+// design only if the refined scan finds every crossing above the floor;
+// otherwise it searches again under the refined scan with the rest of the
+// budget.
 func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
+	if p.hasCrossFloor || p.crossScan != pidCrossAuto {
+		return tunePIDScan(ctx, op, p, family, o)
+	}
+	p.crossScan = pidCrossCoarse
+	r, err := tunePIDScan(ctx, op, p, family, o)
+	cr, ok := errors.AsType[*pidCoarseRejected](err)
+	if !ok {
+		return r, err
+	}
+	budget := o.MaxEvaluations
+	if budget == 0 {
+		budget = 4096
+	}
+	p.crossScan = pidCrossRefined
+	if cr.evaluations >= budget {
+		return nil, &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: o.CrossoverFrequency, RequestedPhaseMargin: o.PhaseMargin, Evaluations: cr.evaluations, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
+	}
+	o.MaxEvaluations = budget - cr.evaluations
+	r, err = tunePIDScan(ctx, op, p, family, o)
+	if te, ok := errors.AsType[*PIDTuningError](err); ok {
+		te.Evidence.Evaluations += cr.evaluations
+	} else if err == nil {
+		r.Evidence.Evaluations += cr.evaluations
+	}
+	return r, err
+}
+
+func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
@@ -686,7 +761,11 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	}
 	omega[mid] = wc
 	plant[mid] = h
-	crossOmega := pidTuningCrossGrid(p, omega)
+	refinedOmega := pidTuningCrossGrid(p, omega)
+	crossOmega, crossings := refinedOmega, pidTuningCrossings
+	if p.crossScan == pidCrossCoarse {
+		crossOmega, crossings = omega, pidTuningCoarseCrossings
+	}
 	components := func(c PID2) PIDTuningObjective {
 		v := PIDTuningObjective{}
 		for k, w := range omega {
@@ -736,6 +815,27 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	// crossovers, summed over them, for a restart.
 	var nearest PID2
 	nearestViolation := math.Inf(1)
+	// A free one-gain design has no margin to hold at other crossovers:
+	// with a model-based stability certificate it needs only positive
+	// margins and reports its lowest. Sampled responses keep the floor,
+	// since their wrapped phase can hide a negative margin.
+	relaxed := oneGain && p.stable != nil
+	floor := o.PhaseMargin - 3
+	if p.hasCrossFloor {
+		floor = p.crossFloor
+	}
+	if relaxed {
+		floor = 0
+	}
+	violationOf := func(margins []float64) (violation float64, violated bool) {
+		for _, margin := range margins {
+			if margin < floor || relaxed && margin <= 0 {
+				violation += floor - margin
+				violated = true
+			}
+		}
+		return violation, violated
+	}
 	evaluate := func(candidate PID2) error {
 		if evidence.Evaluations >= o.MaxEvaluations {
 			return nil
@@ -767,27 +867,8 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		if !finitePID(j) || j >= bestScore {
 			return nil
 		}
-		// A free one-gain design has no margin to hold at other crossovers:
-		// with a model-based stability certificate it needs only positive
-		// margins and reports its lowest. Sampled responses keep the floor,
-		// since their wrapped phase can hide a negative margin.
-		relaxed := oneGain && p.stable != nil
-		floor := o.PhaseMargin - 3
-		if p.hasCrossFloor {
-			floor = p.crossFloor
-		}
-		if relaxed {
-			floor = 0
-		}
-		_, margins := pidTuningCrossings(p, candidate, crossOmega, wc)
-		violation, violated := 0., false
-		for _, margin := range margins {
-			if margin < floor || relaxed && margin <= 0 {
-				violation += floor - margin
-				violated = true
-			}
-		}
-		if violated {
+		_, margins := crossings(p, candidate, crossOmega, wc)
+		if violation, violated := violationOf(margins); violated {
 			if violation < nearestViolation {
 				nearest, nearestViolation = candidate, violation
 			}
@@ -966,11 +1047,14 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	if evidence.AchievedPhaseMargin > 180 {
 		evidence.AchievedPhaseMargin -= 360
 	}
-	evidence.GainCrossovers, evidence.PhaseMargins = pidTuningCrossings(p, best, crossOmega, wc)
+	evidence.GainCrossovers, evidence.PhaseMargins = pidTuningCrossings(p, best, refinedOmega, wc)
+	if _, violated := violationOf(evidence.PhaseMargins); violated && p.crossScan == pidCrossCoarse {
+		return nil, &pidCoarseRejected{evaluations: evidence.Evaluations}
+	}
 	for _, margin := range evidence.PhaseMargins {
 		evidence.AchievedPhaseMargin = math.Min(evidence.AchievedPhaseMargin, margin)
 	}
-	evidence.FrequencyBand = [2]float64{crossOmega[0], crossOmega[len(crossOmega)-1]}
+	evidence.FrequencyBand = [2]float64{refinedOmega[0], refinedOmega[len(refinedOmega)-1]}
 	evidence.Warnings = append(evidence.Warnings, "Margins describe the recorded finite analysis band; unresolved crossings outside that band are not excluded.")
 	return &PIDTuningResult{Controller: &best, Evidence: evidence}, nil
 }
@@ -1066,7 +1150,9 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 		budget = 4096
 	}
 	p.crossFloor, p.hasCrossFloor = pm-3, true
-	used, excess := 0, 0.
+	// least is the least positive excess over all bands, which the
+	// returned error carries.
+	used, excess, least := 0, 0., 0.
 	phase := math.NaN()
 	if p.gainSign != 0 {
 		phase = pidTuningUnwrappedPhase(p.at, p.gainSign, o.CrossoverFrequency, p.tau)
@@ -1081,6 +1167,9 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 		r, err := tunePID(ctx, op, p, family, o)
 		if errors.As(err, &last) {
 			used += last.Evidence.Evaluations
+			if last.excess > 0 && (least == 0 || last.excess < least) {
+				least = last.excess
+			}
 			if last.unstable || last.excess > 0 && excess > 0 && last.excess >= excess {
 				break
 			}
@@ -1096,6 +1185,7 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 		return r, nil
 	}
 	last.Evidence.Evaluations = used
+	last.excess = least
 	return nil, last
 }
 
@@ -1484,6 +1574,36 @@ func pidTuningCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (
 			}
 		}
 		before, previous = previous, next
+	}
+	return crossings, pidTuningMargins(p, c, crossings)
+}
+
+// pidTuningCoarseCrossings scans omega for sign changes of |L| − 1 only,
+// bisecting each.
+func pidTuningCoarseCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (crossings, margins []float64) {
+	crossings = []float64{wc}
+	previous := cmplx.Abs(p.at(omega[0])*pidTuningFeedback(c, omega[0])) - 1
+	for k := 1; k < len(omega); k++ {
+		next := cmplx.Abs(p.at(omega[k])*pidTuningFeedback(c, omega[k])) - 1
+		if previous*next < 0 {
+			lo, hi := omega[k-1], omega[k]
+			lowSign := previous
+			for range 24 {
+				mid := math.Sqrt(lo * hi)
+				v := cmplx.Abs(p.at(mid)*pidTuningFeedback(c, mid)) - 1
+				if lowSign*v <= 0 {
+					hi = mid
+				} else {
+					lo = mid
+					lowSign = v
+				}
+			}
+			w := math.Sqrt(lo * hi)
+			if math.Abs(math.Log(w/wc)) > 1e-6 {
+				crossings = append(crossings, w)
+			}
+		}
+		previous = next
 	}
 	return crossings, pidTuningMargins(p, c, crossings)
 }
