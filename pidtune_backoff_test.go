@@ -297,6 +297,42 @@ func TestPidtuneDiscreteFilterFallsBackToForwardEuler(t *testing.T) {
 	}
 }
 
+// When the backward-Euler redesign of a filter pole 1−Dt/Tf outside the
+// unit circle has no same-sign PDF gains, Pidtune falls back to the
+// forward-Euler design: (−0.7z+0.9)/(z²−1.6z+0.7), Dt = 1, PDF at wc = 0.5.
+// Oracle: the gains solving C(e^{jωc})·G(e^{jωc}) = 1∠−120° with Tf = 0.1/ωc
+// for each derivative formula, and the characteristic roots in z.
+func TestPidtuneDiscreteFilterFallsBackWhenBackwardEulerUnattainable(t *testing.T) {
+	const dt, wc = 1.0, 0.5
+	num, den := Poly{-0.7, 0.9}, Poly{1, -1.6, 0.7}
+	z := cmplx.Exp(complex(0, wc*dt))
+	target := cmplx.Rect(1, -120*math.Pi/180) * den.Eval(z) / num.Eval(z)
+	tf := 0.1 / wc
+	gains := func(w float64) (kp, kd float64) {
+		d := 1 / (complex(tf, 0) + complex(dt, 0)*(complex(w, 0)*z+complex(1-w, 0))/(z-1))
+		kd = imag(target) / imag(d)
+		return real(target) - kd*real(d), kd
+	}
+	if kp, kd := gains(1); kp >= 0 && kd >= 0 {
+		t.Fatalf("backward-Euler Kp %g Kd %g same-sign; the fallback is untested", kp, kd)
+	}
+	kp, kd := gains(0)
+	if kp <= 0 || kd <= 0 || tf > dt/2 {
+		t.Fatalf("forward-Euler Kp %g Kd %g Tf %g", kp, kd, tf)
+	}
+	p := pidtuneBackoffPlant(t, num, den, dt, 0)
+	pid, err := Pidtune(p, PidtunePDF, wc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid.DFormula != ForwardEuler || math.Abs(pid.Kp-kp) > 1e-9*kp || math.Abs(pid.Kd-kd) > 1e-9*kd || math.Abs(pid.Tf-tf) > 1e-12 {
+		t.Fatalf("%+v, want forward Euler Kp %g Kd %g Tf %g", pid, kp, kd, tf)
+	}
+	if stable, ok := pidtuneOracleStable(t, pid, num, den, dt, 0); !ok || !stable {
+		t.Fatalf("%+v unstable", pid)
+	}
+}
+
 // Q7GUKL back-off gate: a design found by lowering the crossover keeps the
 // phase margin at every crossover and |S| ≤ 4. These plants have close
 // crossover pairs (2.058 and 2.101 rad/s, PM 6.5° and 4.5°, Ms 532 for the

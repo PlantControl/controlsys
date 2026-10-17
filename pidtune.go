@@ -154,7 +154,7 @@ type pidtuneRun struct {
 // is set and the screen has a stability test there, and screens each; gated
 // designs must also pass the back-off gate. A discrete derivative moved to
 // backward Euler for its filter pole falls back to the forward-Euler design
-// when only that one passes.
+// when only that one passes, or the backward-Euler gains are unattainable.
 func (r *pidtuneRun) design(wc, sign float64, gated bool) (*PID, error) {
 	pid, err := r.signed(wc, sign, gated)
 	if r.mirror && errors.Is(err, ErrPIDTuningTargetUnattainable) && r.screened(wc) {
@@ -174,12 +174,14 @@ func (r *pidtuneRun) screened(wc float64) bool {
 
 func (r *pidtuneRun) signed(wc, sign float64, gated bool) (*PID, error) {
 	pid, err := computePIDGains(r.plant, r.pidType, wc, r.pm, sign, true)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		err = r.check(pid, wc, gated)
+		if err == nil || pid.DFormula != BackwardEuler {
+			return pid, err
+		}
 	}
-	err = r.check(pid, wc, gated)
-	if err == nil || pid.DFormula != BackwardEuler || r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-		return pid, err
+	if r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		return nil, err
 	}
 	fe, feErr := computePIDGains(r.plant, r.pidType, wc, r.pm, sign, false)
 	if feErr != nil || fe.DFormula != ForwardEuler || r.check(fe, wc, gated) != nil {
