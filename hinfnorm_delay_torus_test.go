@@ -284,14 +284,7 @@ func TestHinfNormTorusGiveUpCost(t *testing.T) {
 	seen := 0
 	for _, k := range [][2]float64{{1, 3}, {2, 3}} {
 		for i := range 30 {
-			rng := rand.New(rand.NewPCG(uint64(i+1000), 7))
-			u := func(a float64) float64 { return a * (2*rng.Float64() - 1) }
-			d22 := []float64{u(.8), u(.8), u(.8), u(.8)}
-			d12 := []float64{u(1), u(1)}
-			d21 := []float64{u(1), u(1)}
-			h := 0.02 + 0.3*rng.Float64()
-			sys, _, _ := feedthroughDifferenceLoop(t, d22, d12, d21, []float64{k[0] * h, k[1] * h}, k)
-			e, err := newDelayLFT(sys)
+			e, err := newDelayLFT(torusSeedModel(t, k, k, i))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -311,5 +304,44 @@ func TestHinfNormTorusGiveUpCost(t *testing.T) {
 	}
 	if seen < 4 {
 		t.Fatalf("only %d torus-unsupported models", seen)
+	}
+}
+
+// torusSeedModel is the feedthroughDifferenceLoop of seed i with delays
+// (k0·h, k1·h) and oracle multiples kk.
+func torusSeedModel(tb testing.TB, k, kk [2]float64, i int) *System {
+	rng := rand.New(rand.NewPCG(uint64(i+1000), 7))
+	u := func(a float64) float64 { return a * (2*rng.Float64() - 1) }
+	d22 := []float64{u(.8), u(.8), u(.8), u(.8)}
+	d12 := []float64{u(1), u(1)}
+	d21 := []float64{u(1), u(1)}
+	h := 0.02 + 0.3*rng.Float64()
+	sys, _, _ := feedthroughDifferenceLoop(tb, d22, d12, d21, []float64{k[0] * h, k[1] * h}, kk)
+	return sys
+}
+
+// BenchmarkHinfNormTorusGiveUp times HinfNorm on torus models that end
+// unsupported after the search past the limit: the GiveUpCost seeds and the
+// slowest τ = (h, √2·h) seeds of a 200-seed sweep.
+func BenchmarkHinfNormTorusGiveUp(b *testing.B) {
+	var models []*System
+	for _, k := range [][2]float64{{1, 3}, {2, 3}} {
+		for _, i := range []int{15, 22, 29} {
+			models = append(models, torusSeedModel(b, k, k, i))
+		}
+	}
+	for _, i := range []int{7, 63, 101, 140} {
+		models = append(models, torusSeedModel(b, [2]float64{1, math.Sqrt2}, [2]float64{1, 1}, i))
+	}
+	for _, sys := range models {
+		if _, _, err := HinfNorm(sys); !errors.Is(err, errDelayPeakUnsupported) {
+			b.Fatalf("HinfNorm err = %v, want errDelayPeakUnsupported", err)
+		}
+	}
+	b.ResetTimer()
+	for range b.N {
+		for _, sys := range models {
+			HinfNorm(sys)
+		}
 	}
 }
