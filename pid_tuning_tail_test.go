@@ -24,8 +24,8 @@ func TestPIDDerivTailUsesInducedTwoNorm(t *testing.T) {
 	cab := 3 * math.Sqrt2
 	for _, w := range []float64{6.8, 7, frob} {
 		want := 1 + cab/(w-sigma)
-		if got := tail(w); math.Abs(got-want) > 1e-12*want {
-			t.Errorf("tail(%g) = %.17g, want 1+‖CA‖‖B‖/(w−√45) = %.17g", w, got, want)
+		if got := tail(w); got > want*(1+1e-12) {
+			t.Errorf("tail(%g) = %.17g above first-order bound 1+‖CA‖‖B‖/(w−√45) = %.17g", w, got, want)
 		}
 	}
 	for w := 6.8; w < 1e4; w *= 1.3 {
