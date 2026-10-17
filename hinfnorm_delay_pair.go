@@ -156,3 +156,257 @@ func (gp *gramPair) expand(g0, g1, g2 []complex128) (l0, l1, l2, gap float64, ok
 	}
 	return l0, l1, l2, gap, true
 }
+
+// hermTop returns the eigenvalues of the n×n Hermitian flat h in
+// descending order and, as the columns of the n×k flat basis, an
+// orthonormal basis of the eigenvectors of the k largest, those within
+// rel·|λ_max| + abs of λ_max. ok is false where the eigensolver fails.
+func hermTop(h []complex128, n int, rel, abs float64) (vals []float64, basis []complex128, k int, ok bool) {
+	s := 2 * n
+	b, e, q := make([]float64, s*s), make([]float64, s), make([]float64, 1)
+	for i := range n {
+		for j := range n {
+			z := h[i*n+j]
+			b[i*s+j], b[i*s+n+j] = real(z), -imag(z)
+			b[(n+i)*s+j], b[(n+i)*s+n+j] = imag(z), real(z)
+		}
+	}
+	impl.Dsyev(lapack.EVCompute, blas.Upper, s, b, s, e, q, -1)
+	if !impl.Dsyev(lapack.EVCompute, blas.Upper, s, b, s, e, make([]float64, int(q[0])), int(q[0])) {
+		return nil, nil, 0, false
+	}
+	vals = make([]float64, n)
+	for i := range n {
+		vals[i] = e[s-1-2*i]
+	}
+	tol := rel*math.Abs(vals[0]) + abs
+	for k < n && vals[k] >= vals[0]-tol {
+		k++
+	}
+	// The real embedding doubles each eigenvalue: its top 2k eigenvectors
+	// x + j·y span the eigenspace twice over (u and j·u), so complex
+	// Gram–Schmidt picking the largest residual keeps k of them.
+	cand := make([][]complex128, 2*k)
+	for c := range cand {
+		v := make([]complex128, n)
+		for i := range n {
+			v[i] = complex(b[i*s+s-1-c], b[(n+i)*s+s-1-c])
+		}
+		cand[c] = v
+	}
+	basis = make([]complex128, n*k)
+	for j := range k {
+		best, bn := -1, 0.0
+		for c, v := range cand {
+			if v != nil {
+				if nv := cFrobenius(v); nv > bn {
+					best, bn = c, nv
+				}
+			}
+		}
+		if best < 0 {
+			return nil, nil, 0, false
+		}
+		u := cand[best]
+		cand[best] = nil
+		for i := range n {
+			basis[i*k+j] = u[i] / complex(bn, 0)
+		}
+		for range 2 {
+			for _, v := range cand {
+				if v == nil {
+					continue
+				}
+				var d complex128
+				for i := range n {
+					d += cmplx.Conj(basis[i*k+j]) * v[i]
+				}
+				for i := range n {
+					v[i] -= d * basis[i*k+j]
+				}
+			}
+		}
+	}
+	return vals, basis, k, true
+}
+
+// clusterPencil extends expand to a top eigenvalue λ0 of M0 repeated to
+// repeatedGap, with eigenspace V, along the paths φ = φ* + s·t through a
+// maximiser φ* of λ0(φ): G = g0 + t·(g1 + s·d0) + t²·(g2 + s·d1 + s²/2·dd0)
+// + O(t³), d0 = g0′, d1 = g1′, dd0 = g0″ in φ. The eigenvalues of M(t)
+// near λ0 are λ0 + t·μ + t²·ν + O(t³), μ those of A1 = V^H·M1·V, s-free
+// since V^H·M0′·V = 0 at a maximiser. The top branches keep the
+// eigenspace C of μ1 = λ_max(A1), to tolMu, of dimension r, and there ν
+// are the eigenvalues of K(s) = U^H·M2·U + W^H·(λ0·I − M0)⁺·W, U = V·C,
+// W = M1·U − V·V^H·M1·U (degenerate perturbation with the reduced
+// resolvent outside the cluster), applied as (λ0·I − M0 + λ0·V·V^H)⁻¹.
+// K(s) = Q0 + s·Q1 + s²·Q2 is quadratic in s; q holds the r×r Q_i. reach
+// is as for expand with λ_next the largest eigenvalue below the cluster,
+// +Inf without one.
+func (gp *gramPair) clusterPencil(g0, g1, g2, d0, d1, dd0 []complex128, tolMu float64) (q [3][]complex128, r int, mu1, reach float64, ok bool) {
+	n := gp.n
+	clear(gp.m0)
+	gp.addGram(gp.m0, g0, g0)
+	vals, v, k, ok := hermTop(gp.m0, n, repeatedGap, 0)
+	if !ok || !(vals[0] > 0) {
+		return q, 0, 0, 0, false
+	}
+	l0 := vals[0]
+	pm := len(g0)
+	g1s, g2s := make([]complex128, pm), make([]complex128, pm)
+	path := func(s float64) {
+		for i := range pm {
+			g1s[i] = g1[i] + complex(s, 0)*d0[i]
+			g2s[i] = g2[i] + complex(s, 0)*d1[i] + complex(s*s/2, 0)*dd0[i]
+		}
+		clear(gp.m1)
+		clear(gp.m2)
+		gp.addGram(gp.m1, g0, g1s)
+		gp.addGram(gp.m1, g1s, g0)
+		gp.addGram(gp.m2, g1s, g1s)
+		gp.addGram(gp.m2, g0, g2s)
+		gp.addGram(gp.m2, g2s, g0)
+	}
+	// mul returns X^H·A·Y for the n×n A, n×cx X and n×cy Y.
+	mul := func(x, a, y []complex128, cx, cy int) []complex128 {
+		out := make([]complex128, cx*cy)
+		for i := range cx {
+			for j := range cy {
+				var acc complex128
+				for row := range n {
+					var ay complex128
+					for col := range n {
+						ay += a[row*n+col] * y[col*cy+j]
+					}
+					acc += cmplx.Conj(x[row*cx+i]) * ay
+				}
+				out[i*cy+j] = acc
+			}
+		}
+		return out
+	}
+	path(0)
+	muVals, c, r, ok := hermTop(mul(v, gp.m1, v, k, k), k, 0, tolMu)
+	if !ok {
+		return q, 0, 0, 0, false
+	}
+	mu1 = muVals[0]
+	u := make([]complex128, n*r)
+	for i := range n {
+		for j := range r {
+			for l := range k {
+				u[i*r+j] += v[i*k+l] * c[l*r+j]
+			}
+		}
+	}
+	for i := range n {
+		for j := range n {
+			var vv complex128
+			for l := range k {
+				vv += v[i*k+l] * cmplx.Conj(v[j*k+l])
+			}
+			gp.lu[i*n+j] = -gp.m0[i*n+j] + complex(l0, 0)*vv
+		}
+		gp.lu[i*n+i] += complex(l0, 0)
+	}
+	if !cLUFactor(gp.lu, gp.piv, n) {
+		return q, 0, 0, 0, false
+	}
+	reach = math.Inf(1)
+	if k < n {
+		reach = (l0 - vals[k]) / (4 * cFrobenius(gp.m1))
+	}
+	w, y, vw := make([]complex128, n*r), make([]complex128, n*r), make([]complex128, k*r)
+	var kAt [3][]complex128
+	for idx, s := range []float64{-1, 0, 1} {
+		path(s)
+		k2 := mul(u, gp.m2, u, r, r)
+		clear(vw)
+		for i := range n {
+			for j := range r {
+				var z complex128
+				for l := range n {
+					z += gp.m1[i*n+l] * u[l*r+j]
+				}
+				w[i*r+j] = z
+				for l := range k {
+					vw[l*r+j] += cmplx.Conj(v[i*k+l]) * z
+				}
+			}
+		}
+		for i := range n {
+			for j := range r {
+				for l := range k {
+					w[i*r+j] -= v[i*k+l] * vw[l*r+j]
+				}
+			}
+		}
+		copy(y, w)
+		cLUSolve(gp.lu, gp.piv, y, n, r)
+		for i := range r {
+			for j := range r {
+				var z complex128
+				for l := range n {
+					z += cmplx.Conj(w[l*r+i]) * y[l*r+j]
+				}
+				k2[i*r+j] += z
+			}
+		}
+		kAt[idx] = k2
+	}
+	for i := range q {
+		q[i] = make([]complex128, r*r)
+	}
+	for i := range r * r {
+		q[0][i] = kAt[1][i]
+		q[1][i] = (kAt[2][i] - kAt[0][i]) / 2
+		q[2][i] = (kAt[2][i]+kAt[0][i])/2 - kAt[1][i]
+	}
+	return q, r, mu1, reach, true
+}
+
+// pencilSup returns sup_s λ_max(Q0 + s·Q1 + s²·Q2) for the r×r Hermitian
+// q, false unless Q2 is negative definite, −λ_max(Q2) = ν > 1e-9·‖Q2‖_F.
+// The sup lies in |s| <= sB, past which ‖Q0‖ + |s|·‖Q1‖ − ν·s² < −‖Q0‖;
+// for r > 1 it is taken from 401 samples, the best refined by golden
+// section.
+func pencilSup(q [3][]complex128, r int) (float64, bool) {
+	top := func(a []complex128) float64 {
+		vals, _, _, ok := hermTop(a, r, 0, 0)
+		if !ok {
+			return math.NaN()
+		}
+		return vals[0]
+	}
+	nu := -top(q[2])
+	if !(nu > 1e-9*cFrobenius(q[2])) {
+		return 0, false
+	}
+	if r == 1 {
+		q1 := real(q[1][0])
+		return real(q[0][0]) + q1*q1/(4*nu), true
+	}
+	n0, n1 := cFrobenius(q[0]), cFrobenius(q[1])
+	sB := (n1 + math.Sqrt(n1*n1+8*nu*n0)) / (2 * nu)
+	buf := make([]complex128, r*r)
+	f := func(s float64) float64 {
+		for i := range buf {
+			buf[i] = q[0][i] + complex(s, 0)*q[1][i] + complex(s*s, 0)*q[2][i]
+		}
+		return top(buf)
+	}
+	const samples = 400
+	step := 2 * sB / samples
+	best, bs := math.Inf(-1), 0.0
+	for i := range samples + 1 {
+		s := -sB + float64(i)*step
+		if v := f(s); v > best {
+			best, bs = v, s
+		}
+	}
+	if math.IsNaN(best) || math.IsInf(best, 0) {
+		return 0, false
+	}
+	_, best = goldenMax(bs-step, bs+step, bs, best, f)
+	return best, true
+}
