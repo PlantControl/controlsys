@@ -319,7 +319,15 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // as Pidtune. For a stable plant every nonzero gain takes the sign of its DC
 // gain; when that leaves a default-crossover PD or PDF design infeasible, the
 // crossover moves to where the plant phase is 15°, 30°, 45° or 60° below
-// −180°+PM, the lead same-sign gains supply. A default design on a delayed
+// −180°+PM, the lead same-sign gains supply. Likewise, when a default PI
+// design fails at the default crossover, also under the margin floor, unless the
+// delayed stable plant's back-off below handles it, the crossover moves to
+// the frequency nearest the default, on either side, where the plant phase
+// is 15°, 30°, 45° or 60° above −180°+PM, the lag PI gains supply (for an
+// unknown gain sign, of either sign·G); this is how an unstable or
+// integrating plant needing lead at its own crossover gets a PI design that
+// still meets PM±3°, where Pidtune keeps the crossover and gives up margin.
+// A default design on a delayed
 // plant, or at a moved crossover, must keep |S| <= 4 (2.5 dB gain margin)
 // at every sampled frequency, since a margin met at the crossover alone does
 // not bound it there. Only when neither the default nor the moved crossovers
@@ -579,6 +587,43 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		return backOff(wc0, gainSign, pm, res, err)
 	}
+	if fam == PidtunePI {
+		res, err = withFloor(wc0, gainSign, tau > 0, res, err)
+		if !errors.As(err, new(*PIDTuningError)) {
+			return res, err
+		}
+		// PI gains of one sign add lag in (0°, 90°) only, so retry where
+		// the plant phase leaves a moderate lag to supply, on either side
+		// of wc0.
+		signs := []float64{gainSign}
+		if gainSign == 0 {
+			signs = []float64{1, -1}
+		}
+		wLo, wHi := wc0*1e-4, wc0*1e4
+		if plant.Dt > 0 {
+			wHi = math.Min(wHi, .98*math.Pi/plant.Dt)
+		}
+		for _, lag := range []float64{15, 30, 45, 60} {
+			for _, sign := range signs {
+				wc, ok := pidTuningNearestPhase(eval.at, sign, -180+pm+lag, wc0, wLo, wHi, tau)
+				if eval.err != nil {
+					return nil, fmt.Errorf("TunePID: %w", eval.err)
+				}
+				if !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
+					continue
+				}
+				r, e := tuneAt(wc, gainSign, true, false)
+				if e == nil {
+					r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where PI gains can meet the phase margin.", wc0, wc))
+					return stamp(r, nil)
+				}
+				if !errors.As(e, new(*PIDTuningError)) {
+					return nil, e
+				}
+			}
+		}
+		return stamp(res, err)
+	}
 	if gainSign == 0 || fam != PidtunePD && fam != PidtunePDF || !errors.As(err, new(*PIDTuningError)) {
 		return withFloor(wc0, gainSign, tau > 0, res, err)
 	}
@@ -632,6 +677,79 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 func pidTuningPhaseCrossing(at func(float64) complex128, sign, target, wLo, wHi, tau float64) (float64, bool) {
 	w, _, ok := pidTuningPhaseWalk(at, sign, target, wLo, wHi, tau)
 	return w, ok
+}
+
+// pidTuningNearestPhase returns the ω in [wLo, wHi] nearest wc0 in log
+// distance at which the wrapped phase of sign·G(jω) crosses target degrees,
+// walking out from wc0 on both sides. A crossing is accepted only between
+// samples within 90° of the target, so a wrap at ±180° away from it is not
+// one.
+func pidTuningNearestPhase(at func(float64) complex128, sign, target, wc0, wLo, wHi, tau float64) (float64, bool) {
+	dev := func(w float64) (float64, bool) {
+		g := complex(sign, 0) * at(w)
+		if !pidFiniteComplex(g) || g == 0 {
+			return 0, false
+		}
+		return math.Remainder(cmplx.Phase(g)*180/math.Pi-target, 360), true
+	}
+	walk := func(up bool) (float64, bool) {
+		w := wc0
+		d, ok := dev(w)
+		if !ok {
+			return 0, false
+		}
+		if d == 0 {
+			return w, true
+		}
+		for range 1 << 16 {
+			if up && w >= wHi || !up && w <= wLo {
+				return 0, false
+			}
+			var next float64
+			if up {
+				next = math.Min(w*1.02, wHi)
+				if tau > 0 {
+					next = math.Min(next, w+math.Pi/8/tau)
+				}
+			} else {
+				next = math.Max(w/1.02, wLo)
+			}
+			nd, ok := dev(next)
+			if !ok {
+				return 0, false
+			}
+			if math.Signbit(d) != math.Signbit(nd) && math.Abs(d) < 90 && math.Abs(nd) < 90 {
+				a, b, da := w, next, d
+				for range 60 {
+					m := math.Sqrt(a * b)
+					dm, ok := dev(m)
+					if !ok {
+						return 0, false
+					}
+					if math.Signbit(dm) == math.Signbit(da) {
+						a, da = m, dm
+					} else {
+						b = m
+					}
+				}
+				return math.Sqrt(a * b), true
+			}
+			w, d = next, nd
+		}
+		return 0, false
+	}
+	lo, okLo := walk(false)
+	hi, okHi := walk(true)
+	switch {
+	case okLo && okHi:
+		if math.Log(wc0/lo) <= math.Log(hi/wc0) {
+			return lo, true
+		}
+		return hi, true
+	case okLo:
+		return lo, true
+	}
+	return hi, okHi
 }
 
 // pidTuningUnwrappedPhase returns the phase in degrees of sign·G(jw),
