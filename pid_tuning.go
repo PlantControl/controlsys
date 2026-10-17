@@ -141,7 +141,8 @@ type pidTuningPlant struct {
 	// 0 for none; tau is the loop delay in seconds that sets its grid step.
 	maxSensitivity, tau float64
 	// modes are the plant's upper-half-plane poles and zeros in s, which
-	// refine that grid near lightly damped resonances.
+	// refine that grid and the crossover grid near lightly damped
+	// resonances.
 	modes []complex128
 	// crossFloor, when hasCrossFloor, is the margin floor at the other gain
 	// crossovers once the wc target is raised above the requested margin.
@@ -326,9 +327,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if robust {
 			p.maxSensitivity = pidTuningMaxSensitivity
 		}
-		if robust || floor {
-			p.modes = modes()
-		}
+		p.modes = modes()
 		if floor {
 			lo, hi := span()
 			p.crossLow, p.crossHigh = math.Min(p.low, lo/10), math.Max(p.high, hi*10)
@@ -636,10 +635,7 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	}
 	omega[mid] = wc
 	plant[mid] = h
-	crossOmega := omega
-	if p.hasCrossFloor {
-		crossOmega = pidTuningCrossGrid(p, omega)
-	}
+	crossOmega := pidTuningCrossGrid(p, omega)
 	components := func(c PID2) PIDTuningObjective {
 		v := PIDTuningObjective{}
 		for k, w := range omega {
@@ -1237,23 +1233,29 @@ func pidTuningDynamicsSpan(plant *System) (lo, hi float64) {
 }
 
 // pidTuningCrossGrid extends the log grid omega at its own step over
-// [p.crossLow, p.crossHigh] and adds points within 4|σ| of each lightly
-// damped mode σ+jω₀, so a crossover pair at a resonance is not stepped over.
+// [p.crossLow, p.crossHigh] under the floor and adds points within 4|σ| of
+// each lightly damped mode σ+jω₀, so a crossover pair at a resonance is not
+// stepped over.
 func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 	n := len(omega)
 	step := math.Log(omega[n-1]/omega[0]) / float64(n-1)
 	var grid []float64
-	for k := math.Ceil(math.Log(omega[0]/p.crossLow) / step); k >= 1; k-- {
-		grid = append(grid, omega[0]*math.Exp(-k*step))
+	if p.hasCrossFloor {
+		for k := math.Ceil(math.Log(omega[0]/p.crossLow) / step); k >= 1; k-- {
+			grid = append(grid, omega[0]*math.Exp(-k*step))
+		}
 	}
 	grid = append(grid, omega...)
-	for k := 1.; k <= math.Ceil(math.Log(p.crossHigh/omega[n-1])/step); k++ {
-		grid = append(grid, math.Min(omega[n-1]*math.Exp(k*step), p.crossHigh))
+	if p.hasCrossFloor {
+		for k := 1.; k <= math.Ceil(math.Log(p.crossHigh/omega[n-1])/step); k++ {
+			grid = append(grid, math.Min(omega[n-1]*math.Exp(k*step), p.crossHigh))
+		}
 	}
+	lo, hi := grid[0], grid[len(grid)-1]
 	for _, m := range p.modes {
 		d := math.Max(math.Abs(real(m)), 1e-6*imag(m))
 		for k := -8.; k <= 8; k++ {
-			if w := imag(m) + k*d/2; w > grid[0] && w < grid[len(grid)-1] {
+			if w := imag(m) + k*d/2; w > lo && w < hi {
 				grid = append(grid, w)
 			}
 		}
@@ -1344,39 +1346,11 @@ func pidTuningGoldenMax(f func(float64) float64, lo, hi float64) (float64, float
 
 // Report all located gain crossings, retaining the exactly normalized target.
 // Endpoint/grid evidence is explicitly finite-band even for a known rational plant.
-// Under the floor, a grid extremum of |L| within a factor 2 of 0 dB is
-// refined by golden section, so a crossover pair between samples, as at a
-// lightly damped resonance, is found.
+// A grid extremum of |L| within a factor 2 of 0 dB is refined by golden
+// section, so a crossover pair between samples, as at a lightly damped
+// resonance, is found.
 func pidTuningCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (crossings, margins []float64) {
 	crossings = []float64{wc}
-	// Outside the floor the scan is kept verbatim: the search amplifies
-	// last-bit changes in |L| into different designs.
-	if !p.hasCrossFloor {
-		previous := cmplx.Abs(p.at(omega[0])*pidTuningFeedback(c, omega[0])) - 1
-		for k := 1; k < len(omega); k++ {
-			next := cmplx.Abs(p.at(omega[k])*pidTuningFeedback(c, omega[k])) - 1
-			if previous*next < 0 {
-				lo, hi := omega[k-1], omega[k]
-				lowSign := previous
-				for range 24 {
-					mid := math.Sqrt(lo * hi)
-					v := cmplx.Abs(p.at(mid)*pidTuningFeedback(c, mid)) - 1
-					if lowSign*v <= 0 {
-						hi = mid
-					} else {
-						lo = mid
-						lowSign = v
-					}
-				}
-				w := math.Sqrt(lo * hi)
-				if math.Abs(math.Log(w/wc)) > 1e-6 {
-					crossings = append(crossings, w)
-				}
-			}
-			previous = next
-		}
-		return crossings, pidTuningMargins(p, c, crossings)
-	}
 	excess := func(w float64) float64 { return cmplx.Abs(p.at(w)*pidTuningFeedback(c, w)) - 1 }
 	add := func(lo, hi, lowSign float64) {
 		for range 24 {
