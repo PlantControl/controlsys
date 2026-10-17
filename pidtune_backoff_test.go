@@ -542,3 +542,56 @@ func pidtuneWindingStable(pid *PID, num, den Poly, tau float64) (stable, ok bool
 	}
 	return math.Abs(total-target) < math.Pi/2, true
 }
+
+// The back-off gate's cached grids must reproduce the uncached loop bit for
+// bit, or back-off would return different designs: controller response
+// against pidTuningFeedback for every formula pair, and the crossings scan
+// against pidTuningCrossings.
+func TestPidtuneGateGridExact(t *testing.T) {
+	formulas := []PIDFormula{ForwardEuler, BackwardEuler, Trapezoidal}
+	for _, dt := range []float64{0, 0.1} {
+		den := []float64{1, 0.6, 0.25}
+		if dt > 0 {
+			den = []float64{1, -1.6, 0.68}
+		}
+		p := pidtuneBackoffPlant(t, []float64{0.4, 0.3}, den, dt, 0)
+		eval, err := newSISOEval(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gate := newPidtuneGate(p, p, eval, 2)
+		checked := 0
+		for _, fi := range formulas {
+			for _, fd := range formulas {
+				for _, c := range []PID2{
+					{Kp: 1.3, Ki: 0.7, Kd: 0.4, Tf: 0.05},
+					{Kp: -0.2, Ki: 3, Kd: 2, Tf: 0.3},
+					{Kp: 0.9},
+				} {
+					c.Dt, c.IFormula, c.DFormula = dt, fi, fd
+					k := gate.sens.feedback(c)
+					for i, w := range gate.sens.w {
+						if got, want := k(i), pidTuningFeedback(c, w); got != want {
+							t.Fatalf("dt=%g %+v: w=%g cached %v, direct %v", dt, c, w, got, want)
+						}
+					}
+					wc0, m0 := pidTuningCrossings(gate.p, c, gate.cross.w, 2)
+					wc1, m1 := pidTuningCrossingsOn(gate.p, c, gate.cross.w, 2, gate.crossExcess(c))
+					if fmt.Sprint(wc0, m0) != fmt.Sprint(wc1, m1) {
+						t.Fatalf("dt=%g %+v: crossings %v %v, cached %v %v", dt, c, wc0, m0, wc1, m1)
+					}
+					checked += len(wc0) - 1
+				}
+				if dt == 0 {
+					break
+				}
+			}
+			if dt == 0 {
+				break
+			}
+		}
+		if checked == 0 {
+			t.Fatalf("dt=%g: no crossing besides wc compared", dt)
+		}
+	}
+}

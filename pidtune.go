@@ -324,13 +324,51 @@ func pidtuneNearIntegrator(plant *System, wc float64) bool {
 // pidtuneGate checks a backed-off design over the whole back-off band with
 // TunePID's sampling: |S| ≤ pidTuningMaxSensitivity, and the phase margin
 // at every gain crossover, close pairs at a resonance or a near-miss of
-// 0 dB included. The plant response on both grids is computed once.
+// 0 dB included. The plant response and the discrete controller terms on
+// both grids are computed once.
 type pidtuneGate struct {
 	p     pidTuningPlant
-	omega []float64
-	sw    []float64
-	sg    []complex128
+	sens  pidtuneGrid
+	cross pidtuneGrid
 	at    func(float64) complex128
+}
+
+// pidtuneGrid caches, at each frequency w, the plant response g and, for
+// discrete loops, each formula's integrator and its inverse, so a design is
+// checked without trigonometry or plant evaluations at the grid points.
+type pidtuneGrid struct {
+	w        []float64
+	g        []complex128
+	dt       float64
+	integral map[PIDFormula][]complex128
+	inverse  map[PIDFormula][]complex128
+}
+
+// feedback returns i ↦ pidTuningFeedback(c, w[i]), bit for bit.
+func (q *pidtuneGrid) feedback(c PID2) func(int) complex128 {
+	if q.dt == 0 {
+		return func(i int) complex128 { return pidTuningFeedback(c, q.w[i]) }
+	}
+	integral := q.integrator(c.IFormula)
+	q.integrator(c.DFormula)
+	inverse := q.inverse[c.DFormula]
+	return func(i int) complex128 { return pidTuningDiscreteFeedback(c, integral[i], inverse[i]) }
+}
+
+func (q *pidtuneGrid) integrator(f PIDFormula) []complex128 {
+	if v, ok := q.integral[f]; ok {
+		return v
+	}
+	v, inv := make([]complex128, len(q.w)), make([]complex128, len(q.w))
+	for i, w := range q.w {
+		v[i] = pidtuneIntegrator(f, w, q.dt)
+		inv[i] = 1 / v[i]
+	}
+	if q.integral == nil {
+		q.integral, q.inverse = map[PIDFormula][]complex128{}, map[PIDFormula][]complex128{}
+	}
+	q.integral[f], q.inverse[f] = v, inv
+	return v
 }
 
 const pidtuneGatePerDecade = 100
@@ -375,10 +413,12 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc float64) *pidtuneGa
 	for i := range omega {
 		omega[i] = math.Min(lo*math.Pow(10, float64(i)/pidtuneGatePerDecade), hi)
 	}
-	gate := &pidtuneGate{p: p, omega: pidTuningCrossGrid(p, omega), at: at}
+	gate := &pidtuneGate{p: p, at: at}
+	gate.cross = pidtuneGrid{w: pidTuningCrossGrid(p, omega), dt: plant.Dt}
+	gate.sens.dt = plant.Dt
 	for w := lo; ; {
-		gate.sw = append(gate.sw, w)
-		gate.sg = append(gate.sg, at(w))
+		gate.sens.w = append(gate.sens.w, w)
+		gate.sens.g = append(gate.sens.g, at(w))
 		if w >= hi {
 			break
 		}
@@ -399,7 +439,7 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64) error
 	if ms := g.sensitivityOver(c, g.p.maxSensitivity); ms > g.p.maxSensitivity {
 		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
 	}
-	_, margins := pidTuningCrossings(g.p, c, g.omega, wc)
+	_, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
 	for _, m := range margins {
 		if !(m >= pm-pidtuneMarginTol) {
 			return fmt.Errorf("%s design at wc=%g has phase margin %.3g° at a gain crossover: %w", pidType, wc, m, ErrPIDTuningTargetUnattainable)
@@ -408,22 +448,35 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64) error
 	return nil
 }
 
+// crossExcess returns k ↦ |L(cross.w[k])|−1, sampling the plant on the
+// first call.
+func (g *pidtuneGate) crossExcess(c PID2) func(int) float64 {
+	if g.cross.g == nil {
+		for _, w := range g.cross.w {
+			g.cross.g = append(g.cross.g, g.p.at(w))
+		}
+	}
+	k := g.cross.feedback(c)
+	return func(i int) float64 { return cmplx.Abs(g.cross.g[i]*k(i)) - 1 }
+}
+
 // sensitivityOver returns a sampled |S| above bound, or the largest sampled
 // |S| when none is; as pidTuningSensitivityPeak, grid maxima above half the
 // bound are refined by golden section. Unevaluable samples are skipped.
 func (g *pidtuneGate) sensitivityOver(c PID2, bound float64) float64 {
-	s := func(w float64, gw complex128) float64 { return 1 / cmplx.Abs(1+gw*pidTuningFeedback(c, w)) }
-	refine := func(w float64) float64 { return s(w, g.at(w)) }
+	s := func(gw, k complex128) float64 { return 1 / cmplx.Abs(1+gw*k) }
+	refine := func(w float64) float64 { return s(g.at(w), pidTuningFeedback(c, w)) }
+	k := g.sens.feedback(c)
 	peak := 0.0
 	var v0, v1 float64
-	for i, w := range g.sw {
-		v := s(w, g.sg[i])
+	for i, w := range g.sens.w {
+		v := s(g.sens.g[i], k(i))
 		if math.IsNaN(v) {
 			v0, v1 = 0, 0
 			continue
 		}
 		if i >= 2 && v1 >= v0 && v1 >= v && v1 > bound/2 {
-			_, r := pidTuningGoldenMax(refine, g.sw[i-2], w)
+			_, r := pidTuningGoldenMax(refine, g.sens.w[i-2], w)
 			if r > bound {
 				return r
 			}
