@@ -58,6 +58,7 @@ type delayLFT struct {
 	diff                *differenceBounds   // see difference, computed on demand
 	d22c                []complex128
 	err                 error
+	sigmaCalls          int
 }
 
 func newDelayLFT(sys *System) (*delayLFT, error) {
@@ -471,6 +472,7 @@ func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 
 // sigma returns σ_max(G(jω)) with the exact delay factors.
 func (e *delayLFT) sigma(w float64) float64 {
+	e.sigmaCalls++
 	pt := e.td.frequencyPoint(w)
 	if err := evalWithPoleLimit(e.g, e.sys, pt, e.gbuf); err != nil {
 		e.fail(w, err)
@@ -520,7 +522,7 @@ type highFrequencyGain struct {
 	locA, locX, locM float64
 	linG, linJ       float64
 	jac, vert        []complex128 // matrix G∞: J_c of localSlopes, quadBound buffer
-	over             float64 // largest sample that failed below
+	over             float64      // largest sample that failed below
 
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
@@ -1209,7 +1211,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	hi := rGrid
 	if torus != nil {
 		var found *pastLimit
-		if lim, found, hi, err = e.torusPastLimit(torus, best, tol, rGrid, span, points); err != nil {
+		if lim, found, hi, err = e.torusPastLimit(torus, best, tol, rGrid, math.Pi/(8*l.tau), span, points); err != nil {
 			return 0, 0, err
 		}
 		if found != nil {

@@ -161,11 +161,13 @@ func floats2Norm(v []float64) float64 {
 // θ = ω·h close to it rise above S(θ*); at a fixed point θ* ∈ {0, π}^dim,
 // where a = 0, κ > 0 suggests the same (see risesPast). When a maximiser
 // within 1e-9 of the largest does, a level lim >= sup S is certified by
-// below, and the grid is extended past rGrid, doubling up to span, until a
-// sample exceeds lim·(1 + tol), unless best already does. It returns lim,
+// below, and the grid of the given step is extended past rGrid, doubling up
+// to span, sampled only on the passages of torusPassages, at most
+// torusScanPoints samples, until one exceeds lim·(1 + tol), unless best
+// already does. It returns lim,
 // that sample on the extension past rGrid (nil for best) and the end of the
 // scan, else errDelayPeakUnsupported.
-func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, span float64,
+func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, step, span float64,
 	points func(lo, R float64) []float64) (float64, *pastLimit, float64, error) {
 	unsupported := fmt.Errorf("gain may peak as ω → ∞ over the phase torus of delays not exactly commensurate in float64: %w", errDelayPeakUnsupported)
 	x := newTorusExpansion(e, hf)
@@ -206,12 +208,38 @@ func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, span 
 	}
 	hi := rGrid
 	R0 := max(rGrid, 2*e.normA+1)
+	near := newTorusPassages(e, hf, ms, sup, R0)
+	var ks []int
+	run := make([]float64, 0, 64)
+	evals := 0
 	for R := 2 * R0; ; R *= 2 {
 		Rs := min(R, rGrid+span)
-		ext := points(hi, Rs)
-		b, w, err := e.scan(ext)
-		if err != nil {
-			return 0, nil, 0, err
+		ks = near.indices(hi, Rs, step, ks[:0])
+		b, w := math.Inf(-1), 0.0
+		for i := 0; i < len(ks); {
+			j := i + 1
+			for j < len(ks) && ks[j] == ks[j-1]+1 {
+				j++
+			}
+			run = run[:0]
+			for k := ks[i] - 1; k <= ks[j-1]+1; k++ {
+				w := float64(k) * step
+				run = append(run, w)
+				if w > 2*R0 {
+					evals++
+				}
+			}
+			if evals > torusScanPoints {
+				return 0, nil, 0, unsupported
+			}
+			bi, wi, err := e.scan(run)
+			if err != nil {
+				return 0, nil, 0, err
+			}
+			if bi > b {
+				b, w = bi, wi
+			}
+			i = j
 		}
 		if b > level {
 			return lim, &pastLimit{points(rGrid, Rs), b, w}, Rs, nil
@@ -221,6 +249,105 @@ func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, span 
 			return 0, nil, 0, unsupported
 		}
 	}
+}
+
+// torusScanPoints caps the frequencies torusPastLimit samples past the grid
+// end before it gives up on a finite peak above the limit.
+const torusScanPoints = 1 << 12
+
+// torusPassages selects the frequencies ω whose phases θ = ω·h pass close
+// to a maximiser θ* of S = σ_max(G∞) or its mirror −θ*, the only places
+// where G(jω) = G∞(θ) + O(1/ω) can rise above sup S once ω is large: the
+// rise near θ* is O(1/ω) and S falls quadratically away from it, so the
+// reach shrinks as 1/√ω. torusPassageReach is calibrated on random 2×2 and
+// SISO models with two classes of delays, whose finite peaks above the limit
+// lay within 2·√(R0/ω) of a maximiser in the max-norm of K_c·θ_c; every ω
+// up to 2·R0 is kept. The selection steers the search only.
+type torusPassages struct {
+	h       []float64 // h_c, θ_c = ω·h_c
+	scale   []float64
+	targets [][]float64
+	r0      float64
+}
+
+const torusPassageReach = 4
+
+func newTorusPassages(e *delayLFT, hf *highFrequencyGain, ms []torusMaximum, sup, r0 float64) *torusPassages {
+	p := &torusPassages{h: make([]float64, hf.dim), scale: hf.scale, r0: r0}
+	for i, c := range hf.grp {
+		k := 1.0
+		if hf.k != nil {
+			k = hf.k[i]
+		}
+		p.h[c] = e.tau[i] / k
+	}
+	for _, m := range ms {
+		if m.value < sup*(1-1e-3) {
+			break
+		}
+		neg := make([]float64, len(m.theta))
+		for c, t := range m.theta {
+			neg[c] = -t
+		}
+		p.targets = append(p.targets, m.theta, neg)
+	}
+	return p
+}
+
+func (p *torusPassages) reach(w float64) float64 {
+	return torusPassageReach * math.Sqrt(p.r0/w)
+}
+
+// indices appends to dst, ascending, the k with lo < k·step <= hi whose
+// ω = k·step is selected: all up to 2·R0, past it those within reach of a
+// target, found from the windows where class 0 alone is.
+func (p *torusPassages) indices(lo, hi, step float64, dst []int) []int {
+	k0 := int(math.Floor(lo/step)) + 1
+	k1 := int(math.Floor(hi / step))
+	kd := min(k1, int(math.Floor(2*p.r0/step)))
+	for k := k0; k <= kd; k++ {
+		dst = append(dst, k)
+	}
+	k0 = max(k0, kd+1)
+	if k0 > k1 {
+		return dst
+	}
+	n0 := len(dst)
+	h0, s0 := p.h[0], p.scale[0]
+	period := 2 * math.Pi / h0
+	wlo, whi := float64(k0)*step, float64(k1)*step
+	for _, t := range p.targets {
+		n := math.Ceil((wlo*h0-t[0])/(2*math.Pi) - 1)
+		for ; ; n++ {
+			wc := (t[0] + 2*math.Pi*n) / h0
+			half := p.reach(max(2*p.r0, wc-period)) / (s0 * h0)
+			if wc-half > whi {
+				break
+			}
+			a := max(k0, int(math.Ceil((wc-half)/step)))
+			b := min(k1, int(math.Floor((wc+half)/step)))
+			for k := a; k <= b; k++ {
+				if p.near(float64(k)*step, t) {
+					dst = append(dst, k)
+				}
+			}
+		}
+	}
+	tail := dst[n0:]
+	slices.Sort(tail)
+	return append(dst[:n0], slices.Compact(tail)...)
+}
+
+func (p *torusPassages) near(w float64, t []float64) bool {
+	r := p.reach(w)
+	for c, h := range p.h {
+		x := w*h - t[c]
+		x -= 2 * math.Pi * math.Round(x/(2*math.Pi))
+		if p.scale[c]*math.Abs(x) >= r {
+			return false
+		}
+	}
+	return true
 }
 
 // risesPast reports whether the finite peaks near the maximiser θ of

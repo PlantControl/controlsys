@@ -37,8 +37,8 @@ type highFrequencyExpansion struct {
 	hf     *highFrequencyGain
 	vector bool // p = 1 or m = 1, where ‖·‖ is the Euclidean norm
 	buf    []complex128
-	pair   *gramPair // matrix gain, set on first use
-	theta  []float64 // φ of at
+	pair   *gramPair  // matrix gain, set on first use
+	theta  [1]float64 // φ of at
 
 	h11, h12, h21, h22 [expansionOrder + 1][]complex128 // Hij,k, k >= 1; nil when zero
 	y, g               [expansionOrder + 1][]complex128
@@ -79,7 +79,7 @@ func newTorusExpansion(e *delayLFT, hf *highFrequencyGain) *highFrequencyExpansi
 	}
 	lft := e.sys.LFT
 	nd, p, m := e.nd, e.p, e.m
-	x := &highFrequencyExpansion{e: e, hf: hf, vector: p == 1 || m == 1, buf: make([]complex128, p*m), theta: make([]float64, 1)}
+	x := &highFrequencyExpansion{e: e, hf: hf, vector: p == 1 || m == 1, buf: make([]complex128, p*m)}
 	terms := func(dst *[expansionOrder + 1][]complex128, c, b *mat.Dense, rows, cols int) {
 		var ab, next mat.Dense
 		empty := c == nil || b == nil || c.IsEmpty() || b.IsEmpty()
@@ -136,7 +136,7 @@ func addDelta(dst, c, phase, v []complex128, r, nd, m int) {
 // at fills g_k, k <= N, at phase φ; false where I − D22Δ is singular.
 func (x *highFrequencyExpansion) at(phi float64) bool {
 	x.theta[0] = phi
-	return x.atTheta(x.theta)
+	return x.atTheta(x.theta[:])
 }
 
 // atTheta is at for the phases θ of the torus.
@@ -218,7 +218,7 @@ func (x *highFrequencyExpansion) sum(t float64) float64 {
 // (S/‖g_k‖)^{1/k}, the largest slope of its splitting.
 func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c, scale float64, ok bool) {
 	x.theta[0] = phi
-	return x.coefficientsAt(x.theta)
+	return x.coefficientsAt(x.theta[:])
 }
 
 // coefficientsAt is coefficients at the phases θ of the torus.

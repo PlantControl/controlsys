@@ -273,3 +273,43 @@ func gInfTorus(d22, d12, d21 []float64, t1, t2 float64) float64 {
 	v1 := (m[0]*c(d21[1]) - m[2]*c(d21[0])) / det
 	return cmplx.Abs(0.1 + c(d12[0])*e1*v0 + c(d12[1])*e2*v1)
 }
+
+// TestHinfNormTorusGiveUpCost pins that the search of torusPastLimit for a
+// finite peak above the limit, on the OUWA5P models τ = (k0·h, k1·h) with
+// fl(k·h) ≠ k·h that stay unsupported, samples G only near passages of the
+// phases past a maximiser and gives up within a bounded number of samples
+// instead of scanning the whole grid budget.
+func TestHinfNormTorusGiveUpCost(t *testing.T) {
+	const maxCalls = 1 << 16
+	seen := 0
+	for _, k := range [][2]float64{{1, 3}, {2, 3}} {
+		for i := range 30 {
+			rng := rand.New(rand.NewPCG(uint64(i+1000), 7))
+			u := func(a float64) float64 { return a * (2*rng.Float64() - 1) }
+			d22 := []float64{u(.8), u(.8), u(.8), u(.8)}
+			d12 := []float64{u(1), u(1)}
+			d21 := []float64{u(1), u(1)}
+			h := 0.02 + 0.3*rng.Float64()
+			sys, _, _ := feedthroughDifferenceLoop(t, d22, d12, d21, []float64{k[0] * h, k[1] * h}, k)
+			e, err := newDelayLFT(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l, res, err := e.stability()
+			if err != nil || !res.stable {
+				continue
+			}
+			_, _, err = e.peakOrZero(l, res)
+			if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "not exactly commensurate") {
+				continue
+			}
+			seen++
+			if e.sigmaCalls > maxCalls {
+				t.Errorf("k=%v seed %d: %d samples of G before giving up, want <= %d", k, i, e.sigmaCalls, maxCalls)
+			}
+		}
+	}
+	if seen < 4 {
+		t.Fatalf("only %d torus-unsupported models", seen)
+	}
+}
