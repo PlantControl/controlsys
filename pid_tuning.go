@@ -1423,8 +1423,15 @@ func pidTuningIdealDerivative(family PidtuneType) bool {
 // a SISO plant, delays and D excluded. Expanding (sI−A)⁻¹ to order k gives
 // Σ_{j<k} |CAʲB|·w^{p−j−1} + ‖CAᵏ‖‖B‖·w^{p−k}/(w−‖A‖); the minimum over
 // k = 0..n decays like the plant's relative degree, so the delay grid ends
-// near crossover instead of where a first-order bound falls below 1.
+// near crossover instead of where a first-order bound falls below 1. Both
+// the given and the balanced realization give a bound and the smaller is
+// used: a companion form's ‖A‖ can exceed its spectral radius by orders of
+// magnitude, which would stretch the linear delay grid to ‖A‖.
 type pidMarkovTail struct {
+	reals []pidMarkovRealization
+}
+
+type pidMarkovRealization struct {
 	normA  float64
 	markov []float64 // |CAʲB|
 	rem    []float64 // ‖CAᵏ‖‖B‖
@@ -1432,31 +1439,47 @@ type pidMarkovTail struct {
 
 func newPIDMarkovTail(plant *System) *pidMarkovTail {
 	n, _, _ := plant.Dims()
-	t := &pidMarkovTail{markov: make([]float64, n), rem: make([]float64, n+1)}
 	if n == 0 {
-		return t
+		return &pidMarkovTail{}
 	}
-	t.normA = spectralNorm(plant.A)
-	normB := spectralNorm(plant.B)
-	ca := mat.DenseCopyOf(plant.C)
+	br := newBalancedRealization(plant, n, 1, 1)
+	return &pidMarkovTail{reals: []pidMarkovRealization{
+		newPIDMarkovRealization(plant.A, plant.B, plant.C),
+		newPIDMarkovRealization(mat.NewDense(n, n, br.a), mat.NewDense(n, 1, br.b), mat.NewDense(1, n, br.c)),
+	}}
+}
+
+func newPIDMarkovRealization(a, b, c *mat.Dense) pidMarkovRealization {
+	n, _ := a.Dims()
+	r := pidMarkovRealization{markov: make([]float64, n), rem: make([]float64, n+1), normA: spectralNorm(a)}
+	normB := spectralNorm(b)
+	ca := mat.DenseCopyOf(c)
 	var next, v mat.Dense
 	for k := range n + 1 {
-		t.rem[k] = spectralNorm(ca) * normB
+		r.rem[k] = spectralNorm(ca) * normB
 		if k == n {
 			break
 		}
-		v.Mul(ca, plant.B)
-		t.markov[k] = math.Abs(v.At(0, 0))
-		next.Mul(ca, plant.A)
+		v.Mul(ca, b)
+		r.markov[k] = math.Abs(v.At(0, 0))
+		next.Mul(ca, a)
 		ca.Copy(&next)
 	}
-	return t
+	return r
 }
 
 func (t *pidMarkovTail) at(w float64, p int) float64 {
-	if len(t.markov) == 0 {
+	if len(t.reals) == 0 {
 		return 0
 	}
+	best := math.Inf(1)
+	for i := range t.reals {
+		best = min(best, t.reals[i].at(w, p))
+	}
+	return best
+}
+
+func (t *pidMarkovRealization) at(w float64, p int) float64 {
 	if math.IsInf(w, 1) {
 		if p == 1 {
 			return t.markov[0]

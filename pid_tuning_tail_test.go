@@ -18,8 +18,18 @@ func TestPIDDerivTailUsesInducedTwoNorm(t *testing.T) {
 	}
 	tail := pidDerivTail(plant)
 	sigma, frob := math.Sqrt(45), math.Sqrt(50)
-	if got := tail(0.999 * sigma); !math.IsInf(got, 1) {
-		t.Fatalf("tail(%g) = %g below σ_max(A) = √45, want +Inf", 0.999*sigma, got)
+	// Below σ_max(A) only the balanced realization's bound is finite.
+	for _, w := range []float64{0.999 * sigma, 0.95 * sigma} {
+		got := tail(w)
+		if math.IsInf(got, 1) {
+			t.Fatalf("tail(%g) = +Inf, want the balanced realization's finite bound", w)
+		}
+		for k := 0; k <= 64; k++ {
+			s := cmplx.Rect(w, math.Pi/2*(1-float64(k)/32))
+			if a := cmplx.Abs(s / (s + 3)); a > got {
+				t.Errorf("|sG(%v)| = %g exceeds tail(%g) = %g", s, a, w, got)
+			}
+		}
 	}
 	cab := 3 * math.Sqrt2
 	for _, w := range []float64{6.8, 7, frob} {
