@@ -331,8 +331,7 @@ func TestPidtuneGainSignMatchesStabilizingGains(t *testing.T) {
 // Brute force over ideal PD and PID gains: the forced sign holds only while
 // the closed-loop polynomial's leading coefficient has the sign of a; a
 // relative-degree-one plant flips it with Kd·n₁/a < −1. Every stabilizing
-// triple against the forced sign must flip it, and pidtuneMirrorAdmissible
-// must admit it (it may reject only unstable designs). Oracle: roots of
+// triple against the forced sign must flip it. Oracle: roots of
 // den·denC + num·numC.
 func TestPidtuneGainSignWithDerivative(t *testing.T) {
 	plants := []struct{ num, den Poly }{
@@ -353,7 +352,6 @@ func TestPidtuneGainSignWithDerivative(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		admissible := pidtuneMirrorAdmissible(p)
 		for _, integral := range []bool{false, true} {
 			want, rule := pidtuneGainSign(p, eval.at, 1, integral)
 			kis := []float64{0}
@@ -376,9 +374,6 @@ func TestPidtuneGainSignWithDerivative(t *testing.T) {
 							continue
 						}
 						against++
-						if !admissible(pid) {
-							t.Errorf("%v/%v: stable %+v not admitted", pl.num, pl.den, pid)
-						}
 						numC, denC := pidtuneOracleController(pid, 0)
 						lead := pl.den.Mul(denC).Add(pl.num.Mul(numC))[0]
 						if lead*pl.den[0] >= 0 {

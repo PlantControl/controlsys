@@ -103,13 +103,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	run := &pidtuneRun{plant: plant, screen: screen, eval: eval, pidType: pidType, pm: pm, explicit: explicit, wc: wc}
-	switch rule {
-	case pidtuneSignGuessed:
-		run.mirror = func(*PID) bool { return true }
-	case pidtuneSignForced:
-		run.mirror = pidtuneMirrorAdmissible(screen.model)
-	}
+	run := &pidtuneRun{plant: plant, screen: screen, eval: eval, pidType: pidType, pm: pm, explicit: explicit, wc: wc, mirror: rule != pidtuneSignFixed}
 
 	steps := 0
 	// An unstable plant needs bandwidth that a continuous delay already
@@ -150,37 +144,37 @@ type pidtuneRun struct {
 	pidType  PidtuneType
 	pm, wc   float64
 	explicit bool
-	// mirror, when set, admits a design against the chosen gain sign to be
-	// tried after the signed one fails.
-	mirror func(*PID) bool
+	// mirror tries the design against the chosen gain sign after the
+	// signed one fails.
+	mirror bool
 	gate   *pidtuneGate
 }
 
 // design designs pidType at wc for sign·G, then for −sign·G when r.mirror
-// admits it, and screens each; gated designs must also pass the back-off
+// is set, and screens each; gated designs must also pass the back-off
 // gate. A discrete derivative moved to backward Euler for its filter pole
 // falls back to the forward-Euler design when only that one passes.
 func (r *pidtuneRun) design(wc, sign float64, gated bool) (*PID, error) {
-	pid, err := r.signed(wc, sign, nil, gated)
-	if r.mirror != nil && errors.Is(err, ErrPIDTuningTargetUnattainable) {
-		if alt, altErr := r.signed(wc, -sign, r.mirror, gated); altErr == nil {
+	pid, err := r.signed(wc, sign, gated)
+	if r.mirror && errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		if alt, altErr := r.signed(wc, -sign, gated); altErr == nil {
 			return alt, nil
 		}
 	}
 	return pid, err
 }
 
-func (r *pidtuneRun) signed(wc, sign float64, admissible func(*PID) bool, gated bool) (*PID, error) {
+func (r *pidtuneRun) signed(wc, sign float64, gated bool) (*PID, error) {
 	pid, err := computePIDGains(r.plant, r.pidType, wc, r.pm, sign, true)
 	if err != nil {
 		return nil, err
 	}
-	err = r.check(pid, wc, sign, admissible, gated)
+	err = r.check(pid, wc, gated)
 	if err == nil || pid.DFormula != BackwardEuler || r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		return pid, err
 	}
 	fe, feErr := computePIDGains(r.plant, r.pidType, wc, r.pm, sign, false)
-	if feErr != nil || fe.DFormula != ForwardEuler || r.check(fe, wc, sign, admissible, gated) != nil {
+	if feErr != nil || fe.DFormula != ForwardEuler || r.check(fe, wc, gated) != nil {
 		return nil, err
 	}
 	return fe, nil
@@ -188,10 +182,7 @@ func (r *pidtuneRun) signed(wc, sign float64, admissible func(*PID) bool, gated 
 
 // check screens pid; the gate, cheaper than a Nyquist test of a continuous
 // delay, runs before it there and after the pole test otherwise.
-func (r *pidtuneRun) check(pid *PID, wc, sign float64, admissible func(*PID) bool, gated bool) error {
-	if admissible != nil && !admissible(pid) {
-		return fmt.Errorf("%s design at wc=%g with gain sign %g cannot be stable: %w", r.pidType, wc, sign, ErrPIDTuningTargetUnattainable)
-	}
+func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	if r.explicit {
 		if err := checkPidtuneMargin(r.plant, pid, wc, r.pm); err != nil {
 			return err
@@ -229,7 +220,7 @@ const (
 	pidtuneSignFixed pidtuneSignRule = iota
 	// pidtuneSignForced: K·N(0)/a > 0, which a stable loop needs whenever
 	// its characteristic polynomial's leading coefficient has the sign of
-	// a (see pidtuneMirrorAdmissible).
+	// a; mirrored when that coefficient may flip.
 	pidtuneSignForced
 	// pidtuneSignGuessed: the high-frequency gain sign, or 1; no rule.
 	pidtuneSignGuessed
@@ -328,69 +319,6 @@ func pidtuneNearIntegrator(plant *System, wc float64) bool {
 		}
 	}
 	return false
-}
-
-// pidtuneMirrorAdmissible returns whether a design against the forced sign
-// may be stable on model (discrete delays absorbed; a continuous delay,
-// positive on the real axis, is left out): only when the leading
-// coefficient of its closed-loop polynomial D·Dc + N·Nc lacks the sign of
-// D's, as when a relative-degree-one plant meets an ideal derivative with
-// Kd·N(s)/D(s)·s → Kd·n/a < −1. Unknown polynomials admit every design.
-func pidtuneMirrorAdmissible(model *System) func(*PID) bool {
-	res, err := model.rationalTransferFunction(nil)
-	if err != nil {
-		return func(*PID) bool { return true }
-	}
-	num, den := Poly(res.TF.Num[0][0]), Poly(res.TF.Den[0])
-	peak := 0.0
-	for _, c := range num {
-		peak = math.Max(peak, math.Abs(c))
-	}
-	for len(num) > 0 && math.Abs(num[0]) <= 1e3*0x1p-52*peak {
-		num = num[1:]
-	}
-	return func(pid *PID) bool {
-		if len(den) == 0 || den[0] == 0 || len(num) == 0 {
-			return true
-		}
-		numC, denC := pidtuneControllerPoly(pid, model.Dt)
-		char := den.Mul(denC).Add(num.Mul(numC))
-		scale := 0.0
-		for _, c := range den.Mul(denC) {
-			scale = math.Max(scale, math.Abs(c))
-		}
-		for _, c := range num.Mul(numC) {
-			scale = math.Max(scale, math.Abs(c))
-		}
-		return !finitePID(char[0]) || char[0]*math.Copysign(1, den[0]) <= 1e3*0x1p-52*scale
-	}
-}
-
-// pidtuneControllerPoly returns the numerator and denominator of pid in s,
-// or in z when dt > 0.
-func pidtuneControllerPoly(pid *PID, dt float64) (num, den Poly) {
-	var x, dd, ki Poly
-	if dt == 0 {
-		x, dd, ki = Poly{1, 0}, Poly{pid.Tf, 1}, Poly{pid.Ki}
-	} else {
-		w := pidFormulaWeight(pid.DFormula)
-		x = Poly{1, -1}
-		dd = Poly{pid.Tf + w*dt, dt - pid.Tf - w*dt}
-		wi := pidFormulaWeight(pid.IFormula)
-		ki = Poly{pid.Ki * dt * wi, pid.Ki * dt * (1 - wi)}
-	}
-	for len(dd) > 1 && dd[0] == 0 {
-		dd = dd[1:]
-	}
-	switch {
-	case pid.Ki != 0 && pid.Kd != 0:
-		return Poly{pid.Kp}.Mul(x).Mul(dd).Add(ki.Mul(dd)).Add(Poly{pid.Kd}.Mul(x).Mul(x)), x.Mul(dd)
-	case pid.Ki != 0:
-		return Poly{pid.Kp}.Mul(x).Add(ki), x
-	case pid.Kd != 0:
-		return Poly{pid.Kp}.Mul(dd).Add(Poly{pid.Kd}.Mul(x)), dd
-	}
-	return Poly{pid.Kp}, Poly{1}
 }
 
 // pidtuneGate checks a backed-off design over the whole back-off band with
