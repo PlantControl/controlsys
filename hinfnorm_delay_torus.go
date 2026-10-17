@@ -502,11 +502,13 @@ func (p *torusPassages) near(w float64, t []float64) bool {
 // search ends.
 func (x *highFrequencyExpansion) risesPast(theta []float64) bool {
 	s2, a, c, scale, exact := x.coefficientsAt(theta)
-	if math.Abs(a) > 1e-6*math.Sqrt(s2*max(scale, 1)) {
+	eps := 1e-6 * math.Sqrt(s2*max(scale, 1))
+	if math.Abs(a) > eps {
 		return true
 	}
 	if !exact {
-		return false
+		lo, _, ok := x.torusClusterKappa(theta, eps)
+		return ok && lo > 1e-6*s2
 	}
 	nd := len(theta)
 	th := make([]float64, nd)
@@ -545,6 +547,22 @@ func (x *highFrequencyExpansion) risesPast(theta []float64) bool {
 	return c+mat.Dot(g, y) > 1e-6*s2
 }
 
+// torusClusterKappa returns the bounds of clusterKappaAt at θ, where
+// σ_max(G∞(θ)) of a matrix gain is repeated and a ≈ 0 to eps, ok only when
+// they are formed and μ1, the slope of the top branches, is 0 to 2·eps.
+func (x *highFrequencyExpansion) torusClusterKappa(theta []float64, eps float64) (lo, hi float64, ok bool) {
+	if x.vector {
+		return 0, 0, false
+	}
+	if k := &x.kappa; k.theta != nil && k.eps == eps && slices.Equal(k.theta, theta) {
+		return k.lo, k.hi, k.ok
+	}
+	lo, hi, mu1, _, ok := x.clusterKappaAt(theta, 2*eps)
+	ok = ok && math.Abs(mu1) <= 2*eps
+	x.kappa = clusterVerdict{slices.Clone(theta), eps, lo, hi, ok}
+	return lo, hi, ok
+}
+
 // snapFixedPoints moves each maximiser within 1e-6 of a fixed point
 // θ ∈ {0, π}^dim onto it, where G∞(−θ) = conj G∞(θ) makes S stationary, when
 // S there is not lower, marks it fixed and sorts ms again, largest first.
@@ -578,8 +596,13 @@ func snapFixedPoints(hf *highFrequencyGain, ms []torusMaximum) {
 // central differences and a margin for their errors.
 func (x *highFrequencyExpansion) fallsPast(theta []float64) bool {
 	s2, a, c, scale, exact := x.coefficientsAt(theta)
-	if !exact || math.Abs(a) > 1e-6*math.Sqrt(s2*max(scale, 1)) {
+	eps := 1e-6 * math.Sqrt(s2*max(scale, 1))
+	if math.Abs(a) > eps {
 		return false
+	}
+	if !exact {
+		_, hi, ok := x.torusClusterKappa(theta, eps)
+		return ok && hi < -1e-6*s2
 	}
 	nd := len(theta)
 	th := make([]float64, nd)
