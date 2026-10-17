@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -439,6 +440,86 @@ func TestHinfNormMatrixFinitePeakPastLimit(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestHinfNormSharpResonanceLimit has one delay with D22 near 1, so sup |G∞|
+// at φ = 0 is a resonance of width about 1 − D22 in φ, where c and a′²/α
+// nearly cancel in κ. The passage maxima of the closed-form response rise
+// toward the limit from below, so the peak is the limit at ω = +Inf.
+func TestHinfNormSharpResonanceLimit(t *testing.T) {
+	for _, d22 := range []float64{0.999, 0.9993457031381653, 0.99999} {
+		t.Run(fmt.Sprint(d22), func(t *testing.T) { checkSharpResonanceLimit(t, d22) })
+	}
+}
+
+func checkSharpResonanceLimit(t *testing.T, d22 float64) {
+	const a, tau = -1.8797942063939619, 0.6705489857287816
+	b1 := []float64{-0.02704717913348858, -0.1805137473767608}
+	const b2, c1, c2 = 0.20395346902869235, 0.5803594342648284, -0.5430833291216368
+	d11 := []float64{0.7650979509126943, 0.3709492250386599}
+	const d12 = 0.6232424759105828
+	d21 := []float64{0.5963224441233179, -0.7001397032844845}
+	H, err := NewFromSlices(1, 3, 2, []float64{a}, []float64{b1[0], b1[1], b2}, []float64{c1, c2},
+		[]float64{d11[0], d11[1], d12, d21[0], d21[1], d22}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := SetDelayModel(H, []float64{tau})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := func(r, z complex128) float64 {
+		den := 1 - z*(complex(c2, 0)*r*complex(b2, 0)+complex(d22, 0))
+		var n2 float64
+		for i := range 2 {
+			v := complex(c2, 0)*r*complex(b1[i], 0) + complex(d21[i], 0)
+			g := complex(c1, 0)*r*complex(b1[i], 0) + complex(d11[i], 0) +
+				(complex(c1, 0)*r*complex(b2, 0)+complex(d12, 0))*z*v/den
+			n2 += real(g)*real(g) + imag(g)*imag(g)
+		}
+		return math.Sqrt(n2)
+	}
+	gain := func(w float64) float64 {
+		return row(1/(complex(0, w)-complex(a, 0)), cmplx.Exp(complex(0, -w*tau)))
+	}
+	gInf := func(phi float64) float64 { return row(0, cmplx.Exp(complex(0, -phi))) }
+	const k = 1 << 16
+	lim, at := 0.0, 0.0
+	for i := range k {
+		if g := gInf(2 * math.Pi * float64(i) / k); g > lim {
+			lim, at = g, 2*math.Pi*float64(i)/k
+		}
+	}
+	at, lim = goldenMax(at-2*math.Pi/k, at+2*math.Pi/k, at, lim, gInf)
+	if math.Abs(math.Remainder(at, 2*math.Pi)) > 1e-6 {
+		t.Fatalf("sup |G∞| at φ = %g, want 0", at)
+	}
+	prev := 0.0
+	for _, kp := range []float64{1e2, 1e3, 1e4, 1e5} {
+		w0, dw := 2*math.Pi*kp/tau, 20*(1-d22)/tau
+		best, bw := 0.0, w0
+		for j := -2000; j <= 2000; j++ {
+			w := w0 + dw*float64(j)/2000
+			if g := gain(w); g > best {
+				best, bw = g, w
+			}
+		}
+		_, best = goldenMax(bw-dw/2000, bw+dw/2000, bw, best, gain)
+		if !(best < lim && best > prev) {
+			t.Fatalf("passage %g peaks at %.15g, previous %.15g, sup |G∞| %.15g", kp, best, prev, lim)
+		}
+		prev = best
+	}
+	if peak, _ := oraclePeak(gain, 2000, 1e-3); !(peak < lim) {
+		t.Fatalf("oracle peak %.15g reaches sup |G∞| %.15g", peak, lim)
+	}
+	got, w, err := HinfNorm(sys)
+	if err != nil {
+		t.Fatalf("HinfNorm: %v", err)
+	}
+	if !math.IsInf(w, 1) || math.Abs(got-lim) > 1e-9*lim {
+		t.Fatalf("HinfNorm = (%.15g, %g), want (%.15g, +Inf)", got, w, lim)
 	}
 }
 

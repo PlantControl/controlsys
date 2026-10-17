@@ -677,10 +677,11 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 	allNegative := true
 	for _, phi := range phis {
 		s2, a, c := x.coefficients(phi)
-		const ha = 1e-5
-		_, aPlus, _ := x.coefficients(phi + ha)
-		_, aMinus, _ := x.coefficients(phi - ha)
-		ap := (aPlus - aMinus) / (2 * ha)
+		ap, apErr := richardson(1e-4, func(h float64) float64 {
+			_, aPlus, _ := x.coefficients(phi + h)
+			_, aMinus, _ := x.coefficients(phi - h)
+			return (aPlus - aMinus) / (2 * h)
+		})
 		// φ* is located to about 1e-8 only, so a(φ*) carries an error of
 		// about a′·1e-8 that a zero of a must absorb.
 		if eps := 1e-6 * (math.Abs(ap) + math.Sqrt(s2*max(c, 1))); a > eps {
@@ -691,19 +692,24 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 		if !x.vector {
 			return false, 0, false
 		}
-		const hs = 1e-4
-		sp, _, _ := x.coefficients(phi + hs)
-		sm, _, _ := x.coefficients(phi - hs)
-		alpha := -(sp - 2*s2 + sm) / (2 * hs * hs)
-		if !(alpha > 0) {
+		alpha, alphaErr := richardson(1e-4, func(h float64) float64 {
+			sp, _, _ := x.coefficients(phi + h)
+			sm, _, _ := x.coefficients(phi - h)
+			return -(sp - 2*s2 + sm) / (2 * h * h)
+		})
+		if !(alpha > alphaErr) {
 			return false, 0, false
 		}
-		kappa := c + ap*ap/alpha
+		// At a sharp peak c and a′²/α nearly cancel, so the margin scales
+		// with them and with the error of the difference estimates.
+		q := ap * ap / alpha
+		kappa := c + q
+		margin := 1e-6*s2 + 1e-9*(math.Abs(c)+q) + 2*math.Abs(ap)*apErr/alpha + q*alphaErr/(alpha-alphaErr)
 		switch {
-		case kappa > 1e-6*s2:
+		case kappa > margin:
 			seen := kappa/(2*lim*wMin*wMin) > tol*lim
 			return seen, 0, seen
-		case !(kappa < -1e-6*s2):
+		case !(kappa < -margin):
 			allNegative = false
 		}
 	}
@@ -741,6 +747,36 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 		}
 	}
 	return false, 0, false
+}
+
+// richardson returns the limit as h → 0 of the central difference d(h),
+// error O(h²), by Richardson extrapolation over steps h0·2^−i, with an
+// estimate of its error. It stops once that estimate, already small, grows,
+// where roundoff takes over; growth before that is h closing in on the scale
+// on which d varies.
+func richardson(h0 float64, d func(h float64) float64) (v, err float64) {
+	prev := d(h0)
+	v, err = prev, math.Inf(1)
+	var last float64
+	for i := 1; i <= 16; i++ {
+		cur := d(h0 * math.Ldexp(1, -i))
+		r := (4*cur - prev) / 3
+		prev = cur
+		if i > 1 {
+			e := math.Abs(r - last)
+			if e > 2*err && err <= 1e-3*math.Abs(v) {
+				break
+			}
+			if e < err {
+				v, err = r, e
+			}
+			if err <= 1e-12*math.Abs(v) {
+				break
+			}
+		}
+		last = r
+	}
+	return v, err
 }
 
 // remainder returns the Cauchy bound E·q^{N+1}/(1 − q) on the remainder of
