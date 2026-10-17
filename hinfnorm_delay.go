@@ -497,9 +497,10 @@ func (e *delayLFT) sigma(w float64) float64 {
 // of commensurate delays τ_i = k_i·h_c (see commensurateClasses, which takes
 // multiples up to rounding as exact). The values
 // of Δ(jω) as ω → ∞ lie on this torus, and fill it when the h_c are
-// rationally independent, which the grouping cannot always confirm:
-// below then still certifies an upper bound, and estimate is taken as the
-// limit only for dim = 1, a single class, where φ = ωh sweeps the circle.
+// rationally independent, as classes left apart by the grouping are taken
+// to be: estimate is the exact limit for dim = 1, where φ = ωh sweeps the
+// circle, and a lower estimate for dim > 1, refined by torusMaxima and
+// bounded above by below (see torusPastLimit).
 // Coordinate c is scaled by K_c = max k_i over its class: G∞ moves at most
 // as fast along each, so cells of half-width r/K_c share one Lipschitz bound.
 type highFrequencyGain struct {
@@ -1164,9 +1165,8 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // delay grid of the Nyquist test is extended until that bound stays below
 // the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
-// sample exceeds it on the grid nor past it (see peakPastLimit); with
-// several classes of delays only a finite peak above it is (see
-// torusPastLimit). Between
+// sample exceeds it on the grid nor past it (see peakPastLimit, and
+// torusPastLimit for several classes of delays). Between
 // samples, up to the grid end, the peak is certified to peakCertTol by
 // descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
@@ -1229,13 +1229,20 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	hi := rGrid
 	if torus != nil {
 		var found *pastLimit
-		if lim, found, hi, err = e.torusPastLimit(torus, best, tol, rGrid, math.Pi/(8*l.tau), span, points); err != nil {
+		var final bool
+		if lim, found, hi, final, err = e.torusPastLimit(torus, best, wBest, tol, rGrid, math.Pi/(8*l.tau), span, points); err != nil {
 			return 0, 0, err
 		}
 		if found != nil {
-			if best, wBest, err = e.certify(l, found.ext, found.b, found.w); err != nil {
-				return 0, 0, err
+			best, wBest = found.b, found.w
+			if found.ext != nil {
+				if best, wBest, err = e.certify(l, found.ext, best, wBest); err != nil {
+					return 0, 0, err
+				}
 			}
+		}
+		if final {
+			return best, wBest, nil
 		}
 	}
 	if atInf {

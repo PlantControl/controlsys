@@ -40,7 +40,11 @@ var torusPeakCases = []lftCase{
 // torusSup returns sup σ_max(G∞) over the 2-torus of c by a 512² grid with
 // each of the largest cells refined by coordinate golden-section search.
 func torusSup(c lftCase) float64 {
-	g := func(p, q float64) float64 { return lftGInf2(c, p, q) }
+	return torusSupOf(func(p, q float64) float64 { return lftGInf2(c, p, q) })
+}
+
+// torusSupOf is torusSup for the gain g on the 2-torus.
+func torusSupOf(g func(p, q float64) float64) float64 {
 	const n = 512
 	type cell struct{ p, q, v float64 }
 	var top []cell
@@ -140,32 +144,40 @@ func TestHinfNormTorusFinitePeakPastLimit(t *testing.T) {
 	}
 }
 
-// TestHinfNormTorusFixedPointLimitUnsupported pins that a torus sup at a
-// fixed point θ* ∈ {0, π}² with κ < 0, approached from below, is still not
-// reported at ω = +Inf: the passages near θ* depend on how well √2 is
-// approximated by the ratios of floating-point delays.
-func TestHinfNormTorusFixedPointLimitUnsupported(t *testing.T) {
+// TestHinfNormTorusFixedPointLimit pins IBRQNM: with τ = (h, √2·h), two
+// classes taken as rationally independent, the torus sup of G∞ (dense 2-D
+// grid with golden refinement) lies at a fixed point θ* ∈ {0, π}² with
+// κ < 0 and above every finite peak (dense ω scan), so HinfNorm reports it
+// at ω = +Inf, where it used to give up.
+func TestHinfNormTorusFixedPointLimit(t *testing.T) {
 	for _, c := range expansionFinite {
-		sys, _, _ := feedthroughDifferenceLoop(t, c.d22, c.d12, c.d21, []float64{c.h, math.Sqrt2 * c.h}, [2]float64{1, 1})
+		sys, gain, _ := feedthroughDifferenceLoop(t, c.d22, c.d12, c.d21, []float64{c.h, math.Sqrt2 * c.h}, [2]float64{1, 1})
 		e, err := newDelayLFT(sys)
 		if err != nil {
 			t.Fatal(err)
 		}
 		hf := newHighFrequencyGain(e)
 		ms := torusMaxima(hf)
+		snapFixedPoints(hf, ms)
 		x := newTorusExpansion(e, hf)
 		for _, m := range ms {
-			for _, th := range m.theta {
-				if r := math.Remainder(th, math.Pi); math.Abs(r) > 1e-6 {
-					t.Fatalf("%s: maximiser %v off the fixed points", c.name, m.theta)
-				}
+			if m.value < ms[0].value*(1-1e-9) {
+				break
 			}
-			if x.risesPast(m.theta) {
-				t.Fatalf("%s: risesPast at %v, want κ < 0", c.name, m.theta)
+			if !m.fixed {
+				t.Fatalf("%s: maximiser %v off the fixed points", c.name, m.theta)
+			}
+			if x.risesPast(m.theta) || !x.fallsPast(m.theta) {
+				t.Fatalf("%s: at %v want κ < 0", c.name, m.theta)
 			}
 		}
-		if _, _, err := HinfNorm(sys); !errors.Is(err, errDelayPeakUnsupported) {
-			t.Fatalf("%s: HinfNorm err = %v, want errDelayPeakUnsupported", c.name, err)
+		sup := torusSupOf(func(p, q float64) float64 { return gInfTorus(c.d22, c.d12, c.d21, p, q) })
+		if fin, w := oraclePeak(gain, 10000, 2e-3); !(fin < sup*(1-1e-8)) {
+			t.Fatalf("%s: finite peak %.15g at %g not below torus sup %.15g", c.name, fin, w, sup)
+		}
+		got, w, err := HinfNorm(sys)
+		if err != nil || !math.IsInf(w, 1) || math.Abs(got-sup) > 1e-9*sup {
+			t.Fatalf("%s: HinfNorm = %.15g @%g, %v; want %.15g @+Inf", c.name, got, w, err, sup)
 		}
 	}
 }
