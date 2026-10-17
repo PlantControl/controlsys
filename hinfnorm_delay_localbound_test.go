@@ -63,7 +63,7 @@ func TestHighFrequencyGainLocalBounds(t *testing.T) {
 			v := hf.at(c)
 			hf.local()
 			lb, qb := v+hf.localBound(r), hf.quadBound(v, r)
-			if vector == math.IsInf(qb, 1) && r < 0.1 {
+			if math.IsInf(qb, 1) && r < 0.1 {
 				t.Fatalf("%v: quadBound(%g) = %g, vector %v", tc.tau, r, qb, vector)
 			}
 			if qb < v+hf.lip*r {

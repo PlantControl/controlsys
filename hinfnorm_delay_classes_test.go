@@ -25,6 +25,9 @@ func TestCommensurateClasses(t *testing.T) {
 		{[]float64{1, r2, 2, 2 * r2, 3}, []int{0, 1, 0, 1, 0}, []int{1, 1, 2, 2, 3}, 2},
 		{[]float64{1, r2, r3}, []int{0, 1, 2}, []int{1, 1, 1}, 3},
 		{[]float64{1, r2, 1}, []int{0, 1, 0}, []int{1, 1, 1}, 2},
+		// fl(3·0.1) ≠ 0.3 ≠ 3·0.1: commensurate up to rounding.
+		{[]float64{0.1, r2, 0.3}, []int{0, 1, 0}, []int{1, 1, 3}, 2},
+		{[]float64{0.1, 0.1 * r2, 0.3, 0.3 * r2}, []int{0, 1, 0, 1}, []int{1, 1, 3, 3}, 2},
 		// Commensurate but past maxLiftedOrder: separate classes.
 		{[]float64{1, 64}, []int{0, 1}, []int{1, 1}, 2},
 	} {
@@ -34,7 +37,7 @@ func TestCommensurateClasses(t *testing.T) {
 		}
 		for i := range tc.tau {
 			for j := range tc.tau {
-				if grp[i] == grp[j] && !exactProductsEqual(tc.tau[i], float64(k[j]), tc.tau[j], float64(k[i])) {
+				if grp[i] == grp[j] && !nearProductsEqual(tc.tau[i], float64(k[j]), tc.tau[j], float64(k[i])) {
 					t.Errorf("%v: τ_%d/τ_%d != %d/%d", tc.tau, i, j, k[i], k[j])
 				}
 			}

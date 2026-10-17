@@ -58,6 +58,9 @@ type delayLFT struct {
 	diff                *differenceBounds   // see difference, computed on demand
 	d22c                []complex128
 	err                 error
+	sigmaCalls          int
+	gInfCalls           int       // samples of σ_max(G∞), see highFrequencyGain.at
+	scanW, scanV        []float64 // scan buffers
 }
 
 func newDelayLFT(sys *System) (*delayLFT, error) {
@@ -451,7 +454,7 @@ func (e *delayLFT) h(d, c, b, w float64) float64 {
 // certifies the tail on the imaginary axis only, for the grid of the L∞
 // peak, and the root count is then void.
 func (e *delayLFT) loop(axisOnly bool) *delayLoop {
-	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1))}
+	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1)), multiChannel: e.nd > 1}
 	if !(l.tailLimit < 1) {
 		d := e.difference()
 		r := d.rhp
@@ -471,6 +474,7 @@ func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 
 // sigma returns σ_max(G(jω)) with the exact delay factors.
 func (e *delayLFT) sigma(w float64) float64 {
+	e.sigmaCalls++
 	pt := e.td.frequencyPoint(w)
 	if err := evalWithPoleLimit(e.g, e.sys, pt, e.gbuf); err != nil {
 		e.fail(w, err)
@@ -490,11 +494,13 @@ func (e *delayLFT) sigma(w float64) float64 {
 // highFrequencyGain evaluates σ_max(G∞(φ)), G∞ = D11 + D12·Δ(I − D22·Δ)⁻¹·D21
 // with Δ_i = e^{−j·k_i·φ_g(i)}, the values G(jω) approaches as ω → ∞. The
 // phases φ range over a torus of dim coordinates, one φ_c = ωh_c per class
-// of commensurate delays τ_i = k_i·h_c (see commensurateClasses). The values
+// of commensurate delays τ_i = k_i·h_c (see commensurateClasses, which takes
+// multiples up to rounding as exact). The values
 // of Δ(jω) as ω → ∞ lie on this torus, and fill it when the h_c are
-// rationally independent, which the exact grouping cannot always confirm:
-// below then still certifies an upper bound, and estimate is taken as the
-// limit only for dim = 1, a single class, where φ = ωh sweeps the circle.
+// rationally independent, as classes left apart by the grouping are taken
+// to be: estimate is the exact limit for dim = 1, where φ = ωh sweeps the
+// circle, and a lower estimate for dim > 1, refined by torusMaxima and
+// bounded above by below (see torusPastLimit).
 // Coordinate c is scaled by K_c = max k_i over its class: G∞ moves at most
 // as fast along each, so cells of half-width r/K_c share one Lipschitz bound.
 type highFrequencyGain struct {
@@ -519,10 +525,12 @@ type highFrequencyGain struct {
 	z                []complex128
 	locA, locX, locM float64
 	linG, linJ       float64
-	over             float64 // largest sample that failed below
+	jac, vert        []complex128 // matrix G∞: J_c of localSlopes, quadBound buffer
+	over             float64      // largest sample that failed below
 
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
+	gridV []float64 // σ_max(G∞) at the cell centres, see gridValues
 }
 
 func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
@@ -620,6 +628,7 @@ func (h *highFrequencyGain) lipschitz() float64 {
 
 func (h *highFrequencyGain) at(theta []float64) float64 {
 	h.samples++
+	h.e.gInfCalls++
 	nd, p, m := h.e.nd, h.e.p, h.e.m
 	for i := range nd {
 		t := theta[h.grp[i]]
@@ -699,13 +708,35 @@ func (h *highFrequencyGain) local() {
 	h.localSlopes()
 }
 
-// localSlopes sets, for a vector G∞ (p = 1 or m = 1), the slopes of
-// quadBound: with Z = D12·Δ·M, ∂G∞/∂φ_c = J_c = −i·Σ_{g(i)=c} k_i·Z_{:i}·X_{i:},
-// linG = Σ_c |Re⟨G∞, J_c⟩|/K_c and linJ = Σ_c ‖J_c‖/K_c.
+// localSlopes sets the slopes of quadBound: with Z = D12·Δ·M,
+// ∂G∞/∂φ_c = J_c = −i·Σ_{g(i)=c} k_i·Z_{:i}·X_{i:}; for a vector G∞ (p = 1
+// or m = 1) linG = Σ_c |Re⟨G∞, J_c⟩|/K_c and linJ = Σ_c ‖J_c‖/K_c, else
+// jac holds the J_c.
 func (h *highFrequencyGain) localSlopes() {
 	nd, p, m := h.e.nd, h.e.p, h.e.m
 	h.linG, h.linJ = math.NaN(), math.NaN()
 	if p != 1 && m != 1 {
+		if h.jac == nil {
+			h.jac = make([]complex128, h.dim*p*m)
+			h.vert = make([]complex128, p*m)
+		}
+		clear(h.jac)
+		for i := range nd {
+			k := 1.0
+			if h.k != nil {
+				k = h.k[i]
+			}
+			jc := h.jac[h.grp[i]*p*m : (h.grp[i]+1)*p*m]
+			for r := range p {
+				f := complex(0, -k) * h.z[r*nd+i]
+				if f == 0 {
+					continue
+				}
+				for col := range m {
+					jc[r*m+col] += f * h.x[i*m+col]
+				}
+			}
+		}
 		return
 	}
 	var lg, lj float64
@@ -737,20 +768,50 @@ func (h *highFrequencyGain) localSlopes() {
 }
 
 // quadBound bounds σ_max(G∞) within scaled distance r of the last sample φ,
-// with value v, for a vector G∞: E = Δ(φ') − Δ(φ) differs from its linear
-// part E₁ = Σ_c (φ'_c − φ_c)·∂Δ/∂φ_c by at most r²/2 and
+// with value v: E = Δ(φ') − Δ(φ) differs from its linear part
+// E₁ = Σ_c (φ'_c − φ_c)·∂Δ/∂φ_c by at most r²/2 and
 // G∞(φ') − G∞(φ) = D12·N·E·X + D12·N·E·M·D22·E·X' with N = (I − ΔD22)⁻¹, so
 // G∞(φ') = G∞(φ) + Σ_c (φ'_c − φ_c)·J_c + R, ‖R‖ <= ‖Z‖‖X‖r²·(1/2 +
-// ‖M‖‖D22‖/(1 − ‖M‖‖D22‖r)), and ‖G∞ + Σ d_c·J_c‖² <= v² +
-// 2r·linG + (r·linJ)² for |d_c| <= r/K_c. +Inf when not applicable.
+// ‖M‖‖D22‖/(1 − ‖M‖‖D22‖r)). For |d_c| <= r/K_c, ‖G∞ + Σ d_c·J_c‖² <= v² +
+// 2r·linG + (r·linJ)² for a vector G∞; for a matrix σ_max(G∞ + Σ d_c·J_c),
+// convex in d, peaks at a vertex d_c = ±r/K_c of the box. +Inf when not
+// applicable.
 func (h *highFrequencyGain) quadBound(v, r float64) float64 {
 	q := h.locM * h.e.d22
 	den := 1 - q*r
-	if math.IsNaN(h.linG) || !(den > 0) {
+	if !(den > 0) {
 		return math.Inf(1)
 	}
-	lin := math.Sqrt(v*v + 2*r*h.linG + r*r*h.linJ*h.linJ)
-	return lin + h.locA*h.locX*r*r*(0.5+q/den)
+	rem := h.locA * h.locX * r * r * (0.5 + q/den)
+	if h.e.p != 1 && h.e.m != 1 {
+		if h.jac == nil {
+			return math.Inf(1)
+		}
+		pm := h.e.p * h.e.m
+		lin := 0.0
+		for mask := range 1 << h.dim {
+			copy(h.vert, h.g)
+			for c := range h.dim {
+				d := complex(r/h.scale[c], 0)
+				if mask&(1<<c) != 0 {
+					d = -d
+				}
+				for i, j := range h.jac[c*pm : (c+1)*pm] {
+					h.vert[i] += d * j
+				}
+			}
+			sv, err := h.e.svd.maximumFromFlat(h.vert, 0, h.e.p, h.e.m)
+			if err != nil {
+				return math.Inf(1)
+			}
+			lin = max(lin, sv)
+		}
+		return lin + rem
+	}
+	if math.IsNaN(h.linG) {
+		return math.Inf(1)
+	}
+	return math.Sqrt(v*v+2*r*h.linG+r*r*h.linJ*h.linJ) + rem
 }
 
 // localBound bounds σ_max(G∞(φ')) − σ_max(G∞(φ)) for φ' within scaled
@@ -842,12 +903,25 @@ func (h *highFrequencyGain) estimate() float64 {
 	if h.dim == 1 {
 		return h.onePhaseSup()
 	}
-	cells, _ := h.torusGrid()
 	best := math.Inf(-1)
-	for c := range slices.Chunk(cells, h.dim) {
-		best = max(best, h.at(c))
+	for _, v := range h.gridValues() {
+		best = max(best, v)
 	}
 	return best
+}
+
+// gridValues returns σ_max(G∞) at the cells of torusGrid, sampled once.
+func (h *highFrequencyGain) gridValues() []float64 {
+	if h.gridV != nil {
+		return h.gridV
+	}
+	cells, _ := h.torusGrid()
+	vals := make([]float64, 0, len(cells)/h.dim)
+	for c := range slices.Chunk(cells, h.dim) {
+		vals = append(vals, h.at(c))
+	}
+	h.gridV = vals
+	return vals
 }
 
 // below reports whether σ_max(G∞) <= level on the whole torus of phases,
@@ -1091,7 +1165,8 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // delay grid of the Nyquist test is extended until that bound stays below
 // the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
-// sample exceeds it on the grid nor past it (see peakPastLimit). Between
+// sample exceeds it on the grid nor past it (see peakPastLimit, and
+// torusPastLimit for several classes of delays). Between
 // samples, up to the grid end, the peak is certified to peakCertTol by
 // descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
@@ -1102,6 +1177,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	}
 	lim, period := e.d11, 0.0
 	var hfx *highFrequencyExpansion
+	var torus *highFrequencyGain
 	if e.directFeedthrough {
 		hf := newHighFrequencyGain(e)
 		period = hf.period()
@@ -1112,6 +1188,8 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 			lim = level
 		case hf.dim == 1 && est > best*(1+tol):
 			lim = est
+		case hf.dim > 1:
+			torus = hf
 		default:
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
 		}
@@ -1119,7 +1197,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	}
 	cert := append([]float64{0}, grid...)
 	atInf := false
-	if lim > best*(1+tol) {
+	if torus == nil && lim > best*(1+tol) {
 		top, wTop, err := e.certify(l, cert, lim, math.Inf(1))
 		if err != nil {
 			return 0, 0, err
@@ -1149,6 +1227,24 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		return ext, b, w, err
 	}
 	hi := rGrid
+	if torus != nil {
+		var found *pastLimit
+		var final bool
+		if lim, found, hi, final, err = e.torusPastLimit(torus, best, wBest, tol, rGrid, math.Pi/(8*l.tau), span, points); err != nil {
+			return 0, 0, err
+		}
+		if found != nil {
+			best, wBest = found.b, found.w
+			if found.ext != nil {
+				if best, wBest, err = e.certify(l, found.ext, best, wBest); err != nil {
+					return 0, 0, err
+				}
+			}
+		}
+		if final {
+			return best, wBest, nil
+		}
+	}
 	if atInf {
 		found, err := e.peakPastLimit(lim, tol, period, hfx, rGrid+span, &hi, points)
 		if err != nil {
@@ -1358,14 +1454,15 @@ func (e *delayLFT) certify(l *delayLoop, ws []float64, peak, w float64) (float64
 // scan samples σ_max on the sorted grid and its interval midpoints and
 // refines every local maximum within a factor 2 of the largest sample.
 func (e *delayLFT) scan(grid []float64) (float64, float64, error) {
-	ws := make([]float64, 0, 2*len(grid))
+	ws := slices.Grow(e.scanW[:0], 2*len(grid))
 	for i, w := range grid {
 		if i > 0 {
 			ws = append(ws, (grid[i-1]+w)/2)
 		}
 		ws = append(ws, w)
 	}
-	vals := make([]float64, len(ws))
+	vals := slices.Grow(e.scanV[:0], len(ws))[:len(ws)]
+	e.scanW, e.scanV = ws, vals
 	for i, w := range ws {
 		vals[i] = e.sigma(w)
 	}

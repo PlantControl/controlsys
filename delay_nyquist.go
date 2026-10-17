@@ -29,6 +29,9 @@ type delayLoop struct {
 	tau       float64                 // total loop delay, sets the grid density
 	scales    []float64
 	maxPoints int // grid point budget; 0 selects delayNyquistMaxPoints
+	// multiChannel marks 1+L as a determinant over several delay channels,
+	// whose poles and zeros near the axis can be multiple.
+	multiChannel bool
 }
 
 type axisPole struct {
@@ -428,6 +431,9 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 		return delayNyquist{}, fmt.Errorf("winding %.3g turns is not resolved to an integer: %w", turns, errDelayLoopUnsupported)
 	}
 	out.roots = l.rhp - int(w)
+	if out.roots < 0 {
+		return delayNyquist{}, fmt.Errorf("negative closed-loop root count %d: %w", out.roots, errDelayLoopUnsupported)
+	}
 	out.stable = out.roots == 0
 	return out, nil
 }
@@ -568,7 +574,9 @@ func (l *delayLoop) pointBudget() int {
 }
 
 // refine evaluates 1+L on the segment, bisecting until consecutive phases
-// differ by at most π/4. It reports refineAxisRoot and the root frequency when
+// differ by at most π/4 and, for a multi-channel loop, log moduli by
+// multiChannelModStep and, where an even zero could hide near the origin,
+// nearOriginStep holds. It reports refineAxisRoot and the root frequency when
 // 1+L vanishes or its phase turns within the bisection tolerance, i.e. a
 // closed-loop root sits on the axis, and refineBudget when the segment would
 // exceed budget points. The points are appended to ws and fs.
@@ -593,24 +601,79 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 			if !resolvedNonzero(s.fb) {
 				return ws, fs, refineAxisRoot, s.b
 			}
-			if math.Abs(wrapPi(cmplx.Phase(s.fb)-cmplx.Phase(s.fa))) <= math.Pi/4 {
-				ws = append(ws, s.b)
-				fs = append(fs, s.fb)
-				continue
+			mid := (s.a + s.b) / 2
+			var fm complex128
+			evaluated := false
+			if l.smallLogStep(s.fa, s.fb) {
+				ok := !l.multiChannel || !nearOrigin(s.fa, s.fb)
+				if !ok {
+					fm, evaluated = f(mid), true
+					ok = resolvedNonzero(fm) && l.nearOriginStep(s.fa, fm, s.fb)
+				}
+				if ok {
+					ws = append(ws, s.b)
+					fs = append(fs, s.fb)
+					continue
+				}
 			}
 			if s.b-s.a <= 1e-13*max(1, s.b) {
-				return ws, fs, refineAxisRoot, (s.a + s.b) / 2
+				return ws, fs, refineAxisRoot, mid
 			}
 			if len(ws)-base+len(stack) > budget {
 				return ws, fs, refineBudget, 0
 			}
-			mid := (s.a + s.b) / 2
-			fm := f(mid)
+			if !evaluated {
+				fm = f(mid)
+			}
 			stack = append(stack, span{mid, s.b, fm, s.fb}, span{s.a, mid, s.fa, fm})
 		}
 	}
 	return ws, fs, refineResolved, 0
 }
+
+// smallLogStep reports whether the phase of 1+L moves by at most π/4 and,
+// for a multi-channel loop, log|1+L| by at most multiChannelModStep between
+// two samples. The phase step is only known mod 2π. A pole or zero of 1+L of
+// order k near the axis turns its phase by about kπ while |1+L| swings by
+// decades, so for k >= 2, e.g. a near-neutral channel repeated in
+// det(I − H22Δ), two samples astride it can see a small phase step over a 2π
+// turn; their moduli still differ unless the samples sit symmetrically. A
+// single channel's poles and zeros are generically simple.
+func (l *delayLoop) smallLogStep(a, b complex128) bool {
+	if math.Abs(wrapPi(cmplx.Phase(b)-cmplx.Phase(a))) > math.Pi/4 {
+		return false
+	}
+	return !l.multiChannel || math.Abs(math.Log(cmplx.Abs(b)/cmplx.Abs(a))) <= multiChannelModStep
+}
+
+const multiChannelModStep = 0.4
+
+// nearOriginLevel is the |1+L| below which a multi-channel span's endpoint
+// phases alone do not resolve it: a zero of 1+L of even multiplicity near the
+// axis, e.g. a closed-loop root pair shared by duplicated channels of
+// det(I − H22Δ), turns the phase by a multiple of 2π between two samples that
+// wrapPi reduces to a small step. Every such span gets the midpoint test of
+// nearOriginStep: a three-point curvature estimate from the previous sample
+// misjudges a zero sitting near one end of a span where 1+L bends sharply.
+const nearOriginLevel = 1
+
+func nearOrigin(a, b complex128) bool {
+	return min(cmplx.Abs(a), cmplx.Abs(b)) < nearOriginLevel
+}
+
+// nearOriginStep accepts a span near the origin when the half phase steps
+// are small and the midpoint modulus does not dip below nearOriginDip times
+// the endpoint mean. Near an even zero |1+L| ≈ |g|((ω−ω₀)²+δ²), whose
+// midpoint value is the endpoint mean less |g|(b−a)²/4, so a span holding the
+// zero dips to about half the mean wherever it sits; a flank of a resolved
+// simple zero is near linear and does not dip. This is a sampling rule, not a
+// certified bound.
+func (l *delayLoop) nearOriginStep(fa, fm, fb complex128) bool {
+	mean := (cmplx.Abs(fa) + cmplx.Abs(fb)) / 2
+	return cmplx.Abs(fm) >= nearOriginDip*mean && l.smallLogStep(fa, fm) && l.smallLogStep(fm, fb)
+}
+
+const nearOriginDip = 0.75
 
 func resolvedNonzero(v complex128) bool {
 	a := cmplx.Abs(v)

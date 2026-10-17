@@ -453,8 +453,14 @@ func TestHinfNormSharpResonanceLimit(t *testing.T) {
 	}
 }
 
-func checkSharpResonanceLimit(t *testing.T, d22 float64) {
-	const a, tau = -1.8797942063939619, 0.6705489857287816
+// sharpResonanceTau is the delay of sharpResonanceModel.
+const sharpResonanceTau = 0.6705489857287816
+
+// sharpResonanceModel returns the 1×2 model of
+// TestHinfNormSharpResonanceLimit, its gain and |G∞(φ)| in closed form.
+func sharpResonanceModel(t *testing.T, d22 float64) (*System, func(float64) float64, func(float64) float64) {
+	t.Helper()
+	const a, tau = -1.8797942063939619, sharpResonanceTau
 	b1 := []float64{-0.02704717913348858, -0.1805137473767608}
 	const b2, c1, c2 = 0.20395346902869235, 0.5803594342648284, -0.5430833291216368
 	d11 := []float64{0.7650979509126943, 0.3709492250386599}
@@ -484,6 +490,12 @@ func checkSharpResonanceLimit(t *testing.T, d22 float64) {
 		return row(1/(complex(0, w)-complex(a, 0)), cmplx.Exp(complex(0, -w*tau)))
 	}
 	gInf := func(phi float64) float64 { return row(0, cmplx.Exp(complex(0, -phi))) }
+	return sys, gain, gInf
+}
+
+func checkSharpResonanceLimit(t *testing.T, d22 float64) {
+	const tau = sharpResonanceTau
+	sys, gain, gInf := sharpResonanceModel(t, d22)
 	const k = 1 << 16
 	lim, at := 0.0, 0.0
 	for i := range k {

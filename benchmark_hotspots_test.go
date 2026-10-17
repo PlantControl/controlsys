@@ -978,6 +978,33 @@ func BenchmarkPidtune_PIDF(b *testing.B) {
 	}
 }
 
+// Automatic crossovers that fail at every back-off step: the gate rejects
+// the discrete P designs, the closed-loop screen the continuous I designs.
+func BenchmarkPidtune_BackoffFail(b *testing.B) {
+	for _, c := range []struct {
+		name     string
+		num, den []float64
+		dt       float64
+		typ      PidtuneType
+	}{
+		{"GateP", []float64{-0.6858912806938919, -1.3365885581834462}, []float64{1, 0.7263312708484464, -0.3168161508617398}, 0.1, PidtuneP},
+		{"ScreenI", []float64{1}, []float64{1, -1, -2}, 0, PidtuneI},
+	} {
+		r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: c.dt}).StateSpace()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := Pidtune(r.Sys, c.typ, 0, nil); err == nil {
+			b.Fatalf("%s: Pidtune succeeded", c.name)
+		}
+		b.Run(c.name, func(b *testing.B) {
+			for b.Loop() {
+				_, _ = Pidtune(r.Sys, c.typ, 0, nil)
+			}
+		})
+	}
+}
+
 func BenchmarkPidtune_Delayed(b *testing.B) {
 	r, err := (&TransferFunc{Num: [][][]float64{{{0.3, -1}}}, Den: [][]float64{{1, 4, 6, 4, 1}}}).StateSpace()
 	if err != nil {
