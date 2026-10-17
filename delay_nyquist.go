@@ -568,7 +568,7 @@ func (l *delayLoop) pointBudget() int {
 }
 
 // refine evaluates 1+L on the segment, bisecting until consecutive phases
-// differ by at most π/4. It reports refineAxisRoot and the root frequency when
+// differ by at most π/4 and, near the origin, nearOriginStep holds. It reports refineAxisRoot and the root frequency when
 // 1+L vanishes or its phase turns within the bisection tolerance, i.e. a
 // closed-loop root sits on the axis, and refineBudget when the segment would
 // exceed budget points. The points are appended to ws and fs.
@@ -593,23 +593,62 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 			if !resolvedNonzero(s.fb) {
 				return ws, fs, refineAxisRoot, s.b
 			}
-			if math.Abs(wrapPi(cmplx.Phase(s.fb)-cmplx.Phase(s.fa))) <= math.Pi/4 {
-				ws = append(ws, s.b)
-				fs = append(fs, s.fb)
-				continue
+			mid := (s.a + s.b) / 2
+			var fm complex128
+			evaluated := false
+			if smallPhaseStep(s.fa, s.fb) {
+				ok := !nearOrigin(s.fa, s.fb)
+				if !ok {
+					fm, evaluated = f(mid), true
+					ok = resolvedNonzero(fm) && nearOriginStep(s.fa, fm, s.fb)
+				}
+				if ok {
+					ws = append(ws, s.b)
+					fs = append(fs, s.fb)
+					continue
+				}
 			}
 			if s.b-s.a <= 1e-13*max(1, s.b) {
-				return ws, fs, refineAxisRoot, (s.a + s.b) / 2
+				return ws, fs, refineAxisRoot, mid
 			}
 			if len(ws)-base+len(stack) > budget {
 				return ws, fs, refineBudget, 0
 			}
-			mid := (s.a + s.b) / 2
-			fm := f(mid)
+			if !evaluated {
+				fm = f(mid)
+			}
 			stack = append(stack, span{mid, s.b, fm, s.fb}, span{s.a, mid, s.fa, fm})
 		}
 	}
 	return ws, fs, refineResolved, 0
+}
+
+func smallPhaseStep(a, b complex128) bool {
+	return math.Abs(wrapPi(cmplx.Phase(b)-cmplx.Phase(a))) <= math.Pi/4
+}
+
+// nearOriginLevel is the |1+L| below which a span's endpoint phases alone do
+// not resolve it: a zero of 1+L of even multiplicity near the axis, e.g. a
+// closed-loop root pair shared by duplicated channels of det(I − H22Δ),
+// turns the phase by a multiple of 2π between two samples that wrapPi
+// reduces to a small step.
+const nearOriginLevel = 0.5
+
+func nearOrigin(a, b complex128) bool {
+	return min(cmplx.Abs(a), cmplx.Abs(b)) < nearOriginLevel
+}
+
+// nearOriginStep accepts a span near the origin when its endpoint moduli are
+// within a factor 3 on both halves and the half phase steps are small. A
+// near-axis zero bracketed off-centre breaks the modulus ratio; one bracketed
+// centrally sits near the midpoint, where the modulus dips. This is a
+// sampling rule, not a certified bound.
+func nearOriginStep(fa, fm, fb complex128) bool {
+	ratio := func(x, y complex128) bool {
+		p, q := cmplx.Abs(x), cmplx.Abs(y)
+		return max(p, q) <= 3*min(p, q)
+	}
+	return ratio(fa, fb) && ratio(fa, fm) && ratio(fm, fb) && smallPhaseStep(fa, fm) && smallPhaseStep(fm, fb)
 }
 
 func resolvedNonzero(v complex128) bool {
