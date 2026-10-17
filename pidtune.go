@@ -314,10 +314,7 @@ func pidtuneNearIntegrator(plant *System, wc float64) bool {
 	if err != nil {
 		return false
 	}
-	zeros, err := model.Zeros()
-	if err != nil {
-		return false
-	}
+	zeros, _ := model.Zeros()
 	at, tol := complex(0, 0), 1e-6*wc
 	if plant.Dt > 0 {
 		at, tol = 1, max(tol*plant.Dt, 1e-8)
