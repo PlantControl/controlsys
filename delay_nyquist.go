@@ -568,7 +568,8 @@ func (l *delayLoop) pointBudget() int {
 }
 
 // refine evaluates 1+L on the segment, bisecting until consecutive phases
-// differ by at most π/4 and, near the origin, nearOriginStep holds. It reports refineAxisRoot and the root frequency when
+// differ by at most π/4 and, where an even zero could hide near the origin,
+// nearOriginStep holds. It reports refineAxisRoot and the root frequency when
 // 1+L vanishes or its phase turns within the bisection tolerance, i.e. a
 // closed-loop root sits on the axis, and refineBudget when the segment would
 // exceed budget points. The points are appended to ws and fs.
@@ -598,6 +599,9 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 			evaluated := false
 			if smallPhaseStep(s.fa, s.fb) {
 				ok := !nearOrigin(s.fa, s.fb)
+				if !ok && len(ws)-base >= 2 {
+					ok = !evenZeroFits(ws[len(ws)-2], fs[len(fs)-2], s.a, s.fa, s.b, s.fb)
+				}
 				if !ok {
 					fm, evaluated = f(mid), true
 					ok = resolvedNonzero(fm) && nearOriginStep(s.fa, fm, s.fb)
@@ -638,18 +642,35 @@ func nearOrigin(a, b complex128) bool {
 	return min(cmplx.Abs(a), cmplx.Abs(b)) < nearOriginLevel
 }
 
-// nearOriginStep accepts a span near the origin when its endpoint moduli are
-// within a factor 3 on both halves and the half phase steps are small. A
-// near-axis zero bracketed off-centre breaks the modulus ratio; one bracketed
-// centrally sits near the midpoint, where the modulus dips. This is a
-// sampling rule, not a certified bound.
-func nearOriginStep(fa, fm, fb complex128) bool {
-	ratio := func(x, y complex128) bool {
-		p, q := cmplx.Abs(x), cmplx.Abs(y)
-		return max(p, q) <= 3*min(p, q)
-	}
-	return ratio(fa, fb) && ratio(fa, fm) && ratio(fm, fb) && smallPhaseStep(fa, fm) && smallPhaseStep(fm, fb)
+// evenZeroFits reports whether an even zero of 1+L could hide in [a, b]
+// given the local curvature from the previous sample p. Near a double zero
+// 1+L ≈ g(ω−z)², whose second divided difference on any three points is g,
+// and a zero inside [a, b] that the endpoint phases miss gives
+// |fa|+|fb| ≈ |g|((a−Re z)²+(b−Re z)²) <= |g|(b−a)². A higher even zero
+// gives a larger curvature relative to the endpoint moduli. Flanks of a
+// resolved simple zero, where the curve is near linear, fail this; an
+// unresolved curvature counts as fitting.
+func evenZeroFits(p float64, fp complex128, a float64, fa complex128, b float64, fb complex128) bool {
+	g := ((fb-fa)/complex(b-a, 0) - (fa-fp)/complex(a-p, 0)) / complex(b-p, 0)
+	w := b - a
+	return !(cmplx.Abs(fa)+cmplx.Abs(fb) > evenZeroMargin*cmplx.Abs(g)*w*w)
 }
+
+const evenZeroMargin = 4
+
+// nearOriginStep accepts a span near the origin when the half phase steps
+// are small and the midpoint modulus does not dip below nearOriginDip times
+// the endpoint mean. Near an even zero |1+L| ≈ |g|((ω−ω₀)²+δ²), whose
+// midpoint value is the endpoint mean less |g|(b−a)²/4, so a span holding the
+// zero dips to about half the mean wherever it sits; a flank of a resolved
+// simple zero is near linear and does not dip. This is a sampling rule, not a
+// certified bound.
+func nearOriginStep(fa, fm, fb complex128) bool {
+	mean := (cmplx.Abs(fa) + cmplx.Abs(fb)) / 2
+	return cmplx.Abs(fm) >= nearOriginDip*mean && smallPhaseStep(fa, fm) && smallPhaseStep(fm, fb)
+}
+
+const nearOriginDip = 0.75
 
 func resolvedNonzero(v complex128) bool {
 	a := cmplx.Abs(v)
