@@ -734,7 +734,20 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 				return nil
 			}
 		}
+		excess, peaked := 0., false
+		beats := func() bool {
+			return excessFirst && (excess < incumbentExcess || excess == incumbentExcess && j < incumbentScore) || !excessFirst && j < incumbentScore
+		}
 		if p.stable != nil {
+			// Past a stable incumbent, a stable candidate over the bound
+			// changes nothing unless it would become incumbent or lower
+			// leastExcess, so the costly stability check is skipped.
+			if p.maxSensitivity > 0 && finitePID(incumbentScore) && sensitivityRejected {
+				excess, peaked = math.Max(0, pidTuningSensitivityPeak(p, candidate)-p.maxSensitivity), true
+				if excess > 0 && excess >= leastExcess && !beats() {
+					return nil
+				}
+			}
 			stable, err := p.stable(&candidate)
 			if err != nil {
 				return fmt.Errorf("stability check: %w", err)
@@ -745,12 +758,11 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 			}
 			stableFound = true
 		}
-		excess := 0.
-		if p.maxSensitivity > 0 {
+		if p.maxSensitivity > 0 && !peaked {
 			excess = math.Max(0, pidTuningSensitivityPeak(p, candidate)-p.maxSensitivity)
 		}
 		leastExcess = math.Min(leastExcess, excess)
-		if excessFirst && (excess < incumbentExcess || excess == incumbentExcess && j < incumbentScore) || !excessFirst && j < incumbentScore {
+		if beats() {
 			incumbent, incumbentScore, incumbentExcess = candidate, j, excess
 		}
 		if excess > 0 {
