@@ -42,9 +42,9 @@ const (
 // without filter uses a backward-Euler derivative to stay causal. An
 // explicitly requested phase margin the family cannot reach at wc returns
 // ErrPIDTuningTargetUnattainable instead of a controller with a different
-// margin. For a stable plant with nonzero DC gain every gain takes the sign
-// of that gain, so a negative-DC plant gets the mirror of its positive
-// twin's design. A design whose closed loop is unstable by its poles (delay
+// margin. Every gain takes one sign: that of the DC gain for a stable plant,
+// and for an integrating or unstable plant the sign stabilization forces
+// (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G). A design whose closed loop is unstable by its poles (delay
 // absorbed for discrete plants) or by a Nyquist test (continuous delays)
 // returns ErrPIDTuningTargetUnattainable; loops outside both tests are not
 // screened. TunePID offers bounded search with achieved-target evidence.
@@ -82,10 +82,8 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	sign := 1.0
-	if pidTuningDCSign(plant, eval.at, wc) < 0 {
-		sign = -1
-	}
+	_, hasI, _, _, _ := pidTuningTerms(pidType)
+	sign := pidtuneGainSign(plant, eval.at, wc, hasI)
 	if eval.err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", eval.err)
 	}
@@ -104,6 +102,69 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
 	return pid, nil
+}
+
+// pidtuneGainSign returns the sign of every Pidtune gain: that of the DC
+// gain of a stable plant, else of N(0)/a for the minimal G = N/D with D's
+// leading coefficient a (N(1)/a in z) when it is forced, else of the
+// high-frequency gain. A stable monic closed-loop polynomial is positive at
+// s = 0 (z = 1), where it is D(0)/a + K·N(0)/a for P/PD and K·N(0)/a under
+// integral action, so K·N(0)/a > 0 is forced when D(0)/a ≤ 0 (an integrator
+// or an odd count of unstable real poles) or integral is set. That is the
+// DC gain sign of G with integrators removed and unstable poles reflected.
+// It returns 1 when no rule applies.
+func pidtuneGainSign(plant *System, at func(float64) complex128, wc float64, integral bool) float64 {
+	if s := pidTuningDCSign(plant, at, wc); s != 0 {
+		return s
+	}
+	if stable, err := plant.IsStable(); err != nil || stable {
+		return 1
+	}
+	res, err := plant.rationalTransferFunction(nil)
+	if err != nil {
+		return 1
+	}
+	num, den := res.TF.Num[0][0], res.TF.Den[0]
+	if len(num) == 0 || len(den) == 0 || den[0] == 0 {
+		return 1
+	}
+	x := 1.0
+	if plant.Dt == 0 {
+		x = wc
+	}
+	// atOrigin returns p(0) (p(1) in z) and whether it is nonzero relative
+	// to the terms of p at |s| = wc (|z| = 1).
+	atOrigin := func(p []float64) (float64, bool) {
+		v, scale := 0.0, 0.0
+		for i, c := range p {
+			if plant.Dt > 0 {
+				v += c
+			} else if i == len(p)-1 {
+				v = c
+			}
+			scale += math.Abs(c) * math.Pow(x, float64(len(p)-1-i))
+		}
+		return v, finitePID(v) && finitePID(scale) && math.Abs(v) > 1e3*0x1p-52*scale
+	}
+	n0, nOK := atOrigin(num)
+	d0, dOK := atOrigin(den)
+	a := math.Copysign(1, den[0])
+	if integral || !dOK || d0*a < 0 {
+		if nOK && n0*a < 0 {
+			return -1
+		}
+		return 1
+	}
+	scale := 0.0
+	for i, c := range num {
+		scale = math.Max(scale, math.Abs(c)*math.Pow(x, float64(len(num)-1-i)))
+	}
+	for i, c := range num {
+		if math.Abs(c)*math.Pow(x, float64(len(num)-1-i)) > 1e3*0x1p-52*scale {
+			return math.Copysign(1, c) * a
+		}
+	}
+	return 1
 }
 
 // checkPidtuneStability rejects a design whose closed loop is certifiably
