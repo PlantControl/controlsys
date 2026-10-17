@@ -440,17 +440,20 @@ func TestPidtuneMirroredSignWhenLeadFlips(t *testing.T) {
 	}
 }
 
-// YVAIMU: rounding leaves the integrator of (0.1z+0.05)/((z−1)(z−0.999)²)
-// at z = 1−3.2e-10, so IsStable holds and the DC gain is +Inf. The sign rule
-// must still treat it as integrating: Pidtune(−G) mirrors Pidtune(G).
+// YVAIMU: rounding moves the integrator of (0.1z+0.05)/((z−1)(z−0.999)²)
+// off z = 1 by ~3e-10, inside or outside depending on the platform. The sign
+// rule must still treat it as integrating: Pidtune(−G) mirrors Pidtune(G).
 // Oracle: roots of den·denC + num·numC with the exact integrator.
 func TestPidtuneNearIntegratorMirrors(t *testing.T) {
 	num, den := Poly{0.1, 0.05}, Poly{1, -1}.Mul(Poly{1, -0.999}).Mul(Poly{1, -0.999})
 	pos, neg := negatedPlant(t, num, den, .1)
 	for _, p := range []*System{pos, neg} {
-		stable, err := p.IsStable()
-		if err != nil || !stable {
-			t.Fatalf("precondition: IsStable %v, %v", stable, err)
+		poles, err := p.Poles()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(poles, func(z complex128) bool { return cmplx.Abs(z-1) < 1e-8 }) {
+			t.Fatalf("precondition: no pole near z=1 in %v", poles)
 		}
 		eval, err := newSISOEval(p)
 		if err != nil {
