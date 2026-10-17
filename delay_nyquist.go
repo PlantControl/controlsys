@@ -464,7 +464,8 @@ func (l *delayLoop) grid(R, w1 float64) []float64 {
 			pts = append(pts, w)
 		}
 	}
-	extra := make([]float64, 0, nlog+9*len(l.scales)+1)
+	var buf [1024]float64
+	extra := slices.Grow(buf[:0], nlog+9*len(l.scales)+1)
 	for i := range nlog {
 		extra = append(extra, lo*math.Pow(R/lo, float64(i)/float64(nlog-1)))
 	}

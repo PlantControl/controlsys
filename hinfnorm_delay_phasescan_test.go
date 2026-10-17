@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"slices"
@@ -80,5 +81,32 @@ func TestSampleAtNearest(t *testing.T) {
 		if got != best && d(got)-d(best) > 1e-6*step {
 			t.Fatalf("φ=%g: sampleAt %d at distance %g, nearest %d at %g", phi, got, d(got), best, d(best))
 		}
+	}
+}
+
+// BenchmarkHinfNorm_DelaySharpLimit times the model of
+// TestHinfNormSharpResonanceLimit, whose +Inf horizon phaseScan covers.
+func BenchmarkHinfNorm_DelaySharpLimit(b *testing.B) {
+	for _, d22 := range []float64{0.999, 0.9999} {
+		H, err := NewFromSlices(1, 3, 2, []float64{-1.8797942063939619},
+			[]float64{-0.02704717913348858, -0.1805137473767608, 0.20395346902869235},
+			[]float64{0.5803594342648284, -0.5430833291216368},
+			[]float64{0.7650979509126943, 0.3709492250386599, 0.6232424759105828,
+				0.5963224441233179, -0.7001397032844845, d22}, 0)
+		if err != nil {
+			b.Fatal(err)
+		}
+		sys, err := SetDelayModel(H, []float64{0.6705489857287816})
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprint(d22), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, w, err := HinfNorm(sys); err != nil || !math.IsInf(w, 1) {
+					b.Fatal(w, err)
+				}
+			}
+		})
 	}
 }
