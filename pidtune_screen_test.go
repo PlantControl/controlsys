@@ -58,8 +58,9 @@ func TestPIDMarkovTailBoundsArc(t *testing.T) {
 		num[0] = math.Copysign(0.2+math.Abs(num[0]), num[0])
 		plant := scrambledPlant(t, rng, num, den)
 		tail := newPIDMarkovTail(plant)
+		normA := min(tail.reals[0].normA, tail.reals[1].normA)
 		for _, f := range []float64{1.01, 1.3, 2, 5, 30, 1e3} {
-			w := f * tail.normA
+			w := f * normA
 			b0, b1 := tail.at(w, 0), tail.at(w, 1)
 			for k := 0; k <= 64; k++ {
 				s := cmplx.Rect(w, math.Pi/2*(1-float64(k)/32))
@@ -75,7 +76,7 @@ func TestPIDMarkovTailBoundsArc(t *testing.T) {
 		if r > 3 {
 			continue
 		}
-		w := 1e3 * tail.normA
+		w := 1e3 * normA
 		want := math.Abs(num[0]) / math.Pow(w, float64(r-1))
 		if got := tail.at(w, 1); got > 1.1*want {
 			t.Errorf("trial %d (n=%d, r=%d): |sP| bound %g at w=%g, want ≈ %g", trial, n, r, got, w, want)
