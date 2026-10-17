@@ -172,6 +172,12 @@ const (
 	pidCrossAuto pidCrossScan = iota
 	pidCrossCoarse
 	pidCrossRefined
+	// pidCrossGrid scans the grid only for search, check and evidence.
+	// Free one-gain designs on sampled data keep it: without a stability
+	// certificate a crossing the refined scan adds on −1's far side can be
+	// neither counted the far way round nor rejected without losing the
+	// robust designs this scan returns.
+	pidCrossGrid
 )
 
 // pidCoarseRejected reports a coarse-scan design that the refined crossing
@@ -328,11 +334,14 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 //
 // Another gain crossover whose wrapped margin is −floor or below has ∠L in
 // (0°, 180° − floor], at least the floor from −1 the other way round: it
-// passes when a pole or Nyquist check certifies the loop stable, or, with
-// sampled data only, when the loop phase unwrapped from the target crossover
-// sits one turn up there. Evidence reports wrapped margins, as allmargin does, and the achieved
-// margin is the least so evaluated. An unattainable target names the
-// crossover nearest to passing that failed.
+// passes only when a pole or Nyquist check certifies the loop stable; with
+// sampled data only, its wrapped margin stands. A free P or I design on
+// sampled data checks, against its own margin less 3°, only the other
+// crossovers the grid finds, since the refined scan's additions near a
+// resonance would reject robust designs with nothing to certify them. Evidence
+// reports wrapped margins, as allmargin does, and the achieved margin is the
+// least so evaluated. An unattainable target names the crossover nearest to
+// passing that failed.
 //
 // An unattainable target returns a *PIDTuningError (wrapping
 // ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
@@ -670,6 +679,10 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	if p.hasCrossFloor || p.crossScan != pidCrossAuto {
 		return tunePIDScan(ctx, op, p, family, o)
 	}
+	if hasP, hasI, hasD, _, ok := pidTuningTerms(family); ok && p.stable == nil && o.PhaseMargin == 0 && !hasD && hasP != hasI {
+		p.crossScan = pidCrossGrid
+		return tunePIDScan(ctx, op, p, family, o)
+	}
 	p.crossScan = pidCrossCoarse
 	r, err := tunePIDScan(ctx, op, p, family, o)
 	cr, ok := errors.AsType[*pidCoarseRejected](err)
@@ -839,8 +852,11 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	plant[mid] = h
 	refinedOmega := pidTuningCrossGrid(p, omega)
 	crossOmega, crossings := refinedOmega, pidTuningCrossings
-	if p.crossScan == pidCrossCoarse {
+	if p.crossScan == pidCrossCoarse || p.crossScan == pidCrossGrid {
 		crossOmega, crossings = omega, pidTuningCoarseCrossings
+	}
+	if p.crossScan == pidCrossGrid {
+		refinedOmega = omega
 	}
 	components := func(c PID2) PIDTuningObjective {
 		v := PIDTuningObjective{}
@@ -894,8 +910,9 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	// A free one-gain design has no margin to hold at other crossovers:
 	// with a model-based stability certificate it needs only positive
 	// margins, as pidTuningCrossingMargin evaluates them, and reports its
-	// lowest. Sampled responses keep the floor,
-	// since their wrapped phase can hide a negative margin.
+	// lowest. Sampled responses keep the floor, since their wrapped phase
+	// can hide a negative margin, and check only the grid's crossings
+	// (pidCrossGrid).
 	relaxed := oneGain && p.stable != nil
 	floor := o.PhaseMargin - 3
 	if p.hasCrossFloor {
@@ -918,7 +935,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			}
 			margin := m
 			if reflect {
-				margin = pidTuningCrossingMargin(p, c, wc, crossings[i], m, floor, p.stable != nil)
+				margin = pidTuningCrossingMargin(wc, crossings[i], m, floor, p.stable != nil)
 			}
 			reflected = reflected || p.stable != nil && margin != m
 			if margin < floor || relaxed && margin <= 0 {
@@ -1170,12 +1187,16 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	if evidence.AchievedPhaseMargin > 180 {
 		evidence.AchievedPhaseMargin -= 360
 	}
-	evidence.GainCrossovers, evidence.PhaseMargins = pidTuningCrossings(p, best, refinedOmega, wc)
+	evidenceCrossings := pidTuningCrossings
+	if p.crossScan == pidCrossGrid {
+		evidenceCrossings = pidTuningCoarseCrossings
+	}
+	evidence.GainCrossovers, evidence.PhaseMargins = evidenceCrossings(p, best, refinedOmega, wc)
 	if _, violated, _, _, _ := violationOf(best, evidence.GainCrossovers, evidence.PhaseMargins, true); violated && p.crossScan == pidCrossCoarse {
 		return nil, &pidCoarseRejected{evaluations: evidence.Evaluations}
 	}
 	for i, margin := range evidence.PhaseMargins {
-		margin = pidTuningCrossingMargin(p, best, wc, evidence.GainCrossovers[i], margin, floor, p.stable != nil)
+		margin = pidTuningCrossingMargin(wc, evidence.GainCrossovers[i], margin, floor, p.stable != nil)
 		evidence.AchievedPhaseMargin = math.Min(evidence.AchievedPhaseMargin, margin)
 	}
 	evidence.FrequencyBand = [2]float64{refinedOmega[0], refinedOmega[len(refinedOmega)-1]}
@@ -1755,60 +1776,11 @@ func pidTuningMargins(p pidTuningPlant, c PID2, crossings []float64) (margins []
 // lifts |L| over 1 below wc while lead holds the phase. For a loop a
 // Nyquist or pole check certifies stable, that distance, −m, is the margin
 // such a crossing erodes; certified asks for it, and the caller must
-// confirm stability. Without a certificate, m < 0 may mean a loop phase
-// truly past −180°, so −m is taken only when the phase less its delay τω,
-// unwrapped from wc, whose margin 180° + ∠L lies in (0°, 180°), sits one
-// turn up there; otherwise, or if the walk fails, m stands.
-func pidTuningCrossingMargin(p pidTuningPlant, c PID2, wc, w, m, floor float64, certified bool) float64 {
-	if m > -floor || w == wc {
-		return m
-	}
-	if certified {
+// confirm stability. Without a certificate m stands: the phase at one
+// crossing, unwrapped or not, cannot count encirclements of −1.
+func pidTuningCrossingMargin(wc, w, m, floor float64, certified bool) float64 {
+	if certified && m <= -floor && w != wc {
 		return -m
-	}
-	rational := func(x float64) complex128 {
-		return p.at(x) * pidTuningFeedback(c, x) * cmplx.Rect(1, p.tau*x)
-	}
-	g := rational(wc)
-	if !pidFiniteComplex(g) || g == 0 {
-		return m
-	}
-	phase := cmplx.Phase(p.at(wc)*pidTuningFeedback(c, wc)) + p.tau*wc
-	x, ratio := wc, 1.02
-	if w < wc {
-		ratio = 1 / ratio
-	}
-	for range 1 << 16 {
-		if x == w {
-			if math.Round((180+(phase-p.tau*w)*180/math.Pi-m)/360) == 1 {
-				return -m
-			}
-			return m
-		}
-		next := x * ratio
-		if (next-w)*(x-w) <= 0 {
-			next = w
-		}
-		for _, mode := range p.modes {
-			limit := math.Max(math.Max(math.Abs(real(mode)), math.Abs(x-imag(mode))), 1e-6*x) / 4
-			if math.Abs(next-x) > limit {
-				next = x + math.Copysign(limit, next-x)
-			}
-		}
-		var ng complex128
-		var step float64
-		for {
-			ng = rational(next)
-			if !pidFiniteComplex(ng) || ng == 0 {
-				return m
-			}
-			step = cmplx.Phase(ng / g)
-			if math.Abs(step) <= math.Pi/2 || math.Abs(next-x) < 1e-12*x {
-				break
-			}
-			next = x + (next-x)/2
-		}
-		x, g, phase = next, ng, phase+step
 	}
 	return m
 }

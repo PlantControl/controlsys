@@ -79,104 +79,28 @@ func TestTunePIDKeepsCrossingFarFromMinusOne(t *testing.T) {
 	}
 }
 
-// Without a stability certificate the sign of a wrapped margin is kept
-// unless the loop phase, unwrapped from wc, shows the crossing one turn up.
-// Oracle: the phase of the rational transfer function unwrapped on a dense
-// grid from wc, less τω.
-func TestPIDTuningCrossingMarginUnwrapsFromWc(t *testing.T) {
+// A wrapped margin at or below −floor counts the far way round from −1
+// only for a loop the caller certifies stable; the phase at one crossing,
+// unwrapped or not, says nothing about encirclements.
+func TestPIDTuningCrossingMarginNeedsCertificate(t *testing.T) {
 	cases := []struct {
-		name     string
-		num, den []float64
-		tau      float64
-		c        PID2
+		wc, w, m, floor float64
+		certified       bool
+		want            float64
 	}{
-		{"sweep 25 PD", []float64{0.8422342409714305}, []float64{1, 18.256125636185075, 81.17131833086688, 0.43675721515933075, 1.7478700537696203}, 0.0464207739550963, PID2{Kp: 0.025106867451115664, Kd: 0.24450446435911616, B: 1, C: 1}},
-		{"sweep 8 P", []float64{-0.7598912272633042}, []float64{1, 0.9911134835150913, 10.725723972363745, 10.38488812408643, 0.45166140242452574}, 0, PID2{Kp: -1, B: 1, C: 1}},
-		{"sweep 70 P", []float64{-0.4839653090567671, 0.17578851538367593}, []float64{1, 0.5373380700910566, 29.303982053625848, 14.634713107039508, 0.7589946108096222}, 0.021518142814529132, PID2{Kp: 6.098853395484589, B: 1, C: 1}},
+		{1, 2, -160, 57, true, 160},
+		{1, 2, -57, 57, true, 57},
+		{1, 2, -56, 57, true, -56},
+		{1, 1, -160, 57, true, -160},
+		{1, 2, 30, 57, true, 30},
+		{1, 2, -160, 57, false, -160},
+		{1, .5, -120, 57, false, -120},
+		{1, 2, 30, 57, false, 30},
 	}
-	reflected, kept := 0, 0
 	for _, c := range cases {
-		plant := pidPlantDelayed(t, c.num, c.den, c.tau)
-		eval, err := newSISOEval(plant)
-		if err != nil {
-			t.Fatal(err)
+		if got := pidTuningCrossingMargin(c.wc, c.w, c.m, c.floor, c.certified); got != c.want {
+			t.Errorf("%+v: got %g", c, got)
 		}
-		rational := func(w float64) complex128 {
-			s := complex(0, w)
-			return pidPolyAt(c.num, s) / pidPolyAt(c.den, s) * pidTuningFeedback(c.c, w)
-		}
-		L := func(w float64) complex128 { return rational(w) * cmplx.Exp(complex(0, -c.tau*w)) }
-		var crossings []float64
-		lo, hi := 1e-4, 1e3
-		prev := cmplx.Abs(L(lo)) - 1
-		for w := lo * 1.0001; w < hi; w *= 1.0001 {
-			next := cmplx.Abs(L(w)) - 1
-			if prev*next < 0 {
-				a, b := w/1.0001, w
-				for range 60 {
-					m := math.Sqrt(a * b)
-					if (cmplx.Abs(L(m))-1)*prev > 0 {
-						a = m
-					} else {
-						b = m
-					}
-				}
-				crossings = append(crossings, math.Sqrt(a*b))
-			}
-			prev = next
-		}
-		if len(crossings) < 2 {
-			t.Fatalf("%s: crossings %v", c.name, crossings)
-		}
-		wc := crossings[0]
-		for _, x := range crossings {
-			if m := 180 + cmplx.Phase(L(x))*180/math.Pi; m > 0 && m < 180 {
-				wc = x
-				break
-			}
-		}
-		p := pidTuningPlant{at: eval.at, tau: c.tau, modes: pidTuningModes(plant)}
-		checked := 0
-		for _, w := range crossings {
-			m := phaseMarginDeg(L(w))
-			if m > -57 || w == wc {
-				continue
-			}
-			phase, prev := cmplx.Phase(L(wc))+c.tau*wc, rational(wc)
-			ratio := 1.0001
-			if w < wc {
-				ratio = 1 / ratio
-			}
-			for x := wc; x != w; {
-				if x *= ratio; (x-w)*(x/ratio-w) <= 0 {
-					x = w
-				}
-				next := rational(x)
-				phase += cmplx.Phase(next / prev)
-				prev = next
-			}
-			unwrapped := 180 + (phase-c.tau*w)*180/math.Pi
-			want := m
-			if math.Abs(unwrapped-(m+360)) < 1e-6 {
-				want = -m
-				reflected++
-			} else {
-				kept++
-			}
-			if got := pidTuningCrossingMargin(p, c.c, wc, w, m, 57, false); math.Abs(got-want) > 1e-9 {
-				t.Errorf("%s: crossing %g wrapped %g° unwrapped %g°: got %g°, want %g°", c.name, w, m, unwrapped, got, want)
-			}
-			if got := pidTuningCrossingMargin(p, c.c, wc, w, m, 57, true); got != -m {
-				t.Errorf("%s: certified crossing %g wrapped %g°: got %g°, want %g°", c.name, w, m, got, -m)
-			}
-			checked++
-		}
-		if checked == 0 {
-			t.Errorf("%s: no crossing with wrapped margin <= −57° among %v", c.name, crossings)
-		}
-	}
-	if reflected == 0 || kept == 0 {
-		t.Errorf("%d crossings one turn up, %d not: want both", reflected, kept)
 	}
 }
 
