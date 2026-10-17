@@ -640,7 +640,10 @@ func refHFBelow(h *highFrequencyGain, level float64, budget int) bool {
 }
 
 // TestHighFrequencyGainMatchesReference checks that the packed torus grid
-// and hoisted phase factors reproduce the reference sweep bit for bit.
+// and hoisted phase factors reproduce the reference estimate bit for bit,
+// and that below, pruning also by localBound and quadBound, agrees with the
+// reference sweep pruning by lip alone in no more samples, or certifies a
+// level the reference certifies given a larger budget.
 func TestHighFrequencyGainMatchesReference(t *testing.T) {
 	mimo1, _ := mimoDelayedSensitivity(t, 1)
 	mimo2, _ := mimoDelayedSensitivity(t, 1.8)
@@ -671,10 +674,17 @@ func TestHighFrequencyGainMatchesReference(t *testing.T) {
 			for _, budget := range []int{5000, 1 << 16} {
 				h.samples, ref.samples = 0, 0
 				got, want := h.below(f*est, budget), refHFBelow(ref, f*est, budget)
-				if got != want || h.samples != ref.samples {
-					t.Errorf("%s: below(%g·est, %d) = %v after %d samples, want %v after %d",
-						tc.name, f, budget, got, h.samples, want, ref.samples)
+				if got == want && h.samples <= ref.samples {
+					continue
 				}
+				if got && !want {
+					ref.samples = 0
+					if refHFBelow(ref, f*est, 1<<22) {
+						continue
+					}
+				}
+				t.Errorf("%s: below(%g·est, %d) = %v after %d samples, reference %v after %d",
+					tc.name, f, budget, got, h.samples, want, ref.samples)
 			}
 		}
 	}

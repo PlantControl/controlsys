@@ -519,6 +519,7 @@ type highFrequencyGain struct {
 	z                []complex128
 	locA, locX, locM float64
 	linG, linJ       float64
+	jac, vert        []complex128 // matrix G∞: J_c of localSlopes, quadBound buffer
 	over             float64 // largest sample that failed below
 
 	grid  []float64 // torusGrid cell centres, nd per cell
@@ -699,13 +700,35 @@ func (h *highFrequencyGain) local() {
 	h.localSlopes()
 }
 
-// localSlopes sets, for a vector G∞ (p = 1 or m = 1), the slopes of
-// quadBound: with Z = D12·Δ·M, ∂G∞/∂φ_c = J_c = −i·Σ_{g(i)=c} k_i·Z_{:i}·X_{i:},
-// linG = Σ_c |Re⟨G∞, J_c⟩|/K_c and linJ = Σ_c ‖J_c‖/K_c.
+// localSlopes sets the slopes of quadBound: with Z = D12·Δ·M,
+// ∂G∞/∂φ_c = J_c = −i·Σ_{g(i)=c} k_i·Z_{:i}·X_{i:}; for a vector G∞ (p = 1
+// or m = 1) linG = Σ_c |Re⟨G∞, J_c⟩|/K_c and linJ = Σ_c ‖J_c‖/K_c, else
+// jac holds the J_c.
 func (h *highFrequencyGain) localSlopes() {
 	nd, p, m := h.e.nd, h.e.p, h.e.m
 	h.linG, h.linJ = math.NaN(), math.NaN()
 	if p != 1 && m != 1 {
+		if h.jac == nil {
+			h.jac = make([]complex128, h.dim*p*m)
+			h.vert = make([]complex128, p*m)
+		}
+		clear(h.jac)
+		for i := range nd {
+			k := 1.0
+			if h.k != nil {
+				k = h.k[i]
+			}
+			jc := h.jac[h.grp[i]*p*m : (h.grp[i]+1)*p*m]
+			for r := range p {
+				f := complex(0, -k) * h.z[r*nd+i]
+				if f == 0 {
+					continue
+				}
+				for col := range m {
+					jc[r*m+col] += f * h.x[i*m+col]
+				}
+			}
+		}
 		return
 	}
 	var lg, lj float64
@@ -737,20 +760,50 @@ func (h *highFrequencyGain) localSlopes() {
 }
 
 // quadBound bounds σ_max(G∞) within scaled distance r of the last sample φ,
-// with value v, for a vector G∞: E = Δ(φ') − Δ(φ) differs from its linear
-// part E₁ = Σ_c (φ'_c − φ_c)·∂Δ/∂φ_c by at most r²/2 and
+// with value v: E = Δ(φ') − Δ(φ) differs from its linear part
+// E₁ = Σ_c (φ'_c − φ_c)·∂Δ/∂φ_c by at most r²/2 and
 // G∞(φ') − G∞(φ) = D12·N·E·X + D12·N·E·M·D22·E·X' with N = (I − ΔD22)⁻¹, so
 // G∞(φ') = G∞(φ) + Σ_c (φ'_c − φ_c)·J_c + R, ‖R‖ <= ‖Z‖‖X‖r²·(1/2 +
-// ‖M‖‖D22‖/(1 − ‖M‖‖D22‖r)), and ‖G∞ + Σ d_c·J_c‖² <= v² +
-// 2r·linG + (r·linJ)² for |d_c| <= r/K_c. +Inf when not applicable.
+// ‖M‖‖D22‖/(1 − ‖M‖‖D22‖r)). For |d_c| <= r/K_c, ‖G∞ + Σ d_c·J_c‖² <= v² +
+// 2r·linG + (r·linJ)² for a vector G∞; for a matrix σ_max(G∞ + Σ d_c·J_c),
+// convex in d, peaks at a vertex d_c = ±r/K_c of the box. +Inf when not
+// applicable.
 func (h *highFrequencyGain) quadBound(v, r float64) float64 {
 	q := h.locM * h.e.d22
 	den := 1 - q*r
-	if math.IsNaN(h.linG) || !(den > 0) {
+	if !(den > 0) {
 		return math.Inf(1)
 	}
-	lin := math.Sqrt(v*v + 2*r*h.linG + r*r*h.linJ*h.linJ)
-	return lin + h.locA*h.locX*r*r*(0.5+q/den)
+	rem := h.locA * h.locX * r * r * (0.5 + q/den)
+	if h.e.p != 1 && h.e.m != 1 {
+		if h.jac == nil {
+			return math.Inf(1)
+		}
+		pm := h.e.p * h.e.m
+		lin := 0.0
+		for mask := range 1 << h.dim {
+			copy(h.vert, h.g)
+			for c := range h.dim {
+				d := complex(r/h.scale[c], 0)
+				if mask&(1<<c) != 0 {
+					d = -d
+				}
+				for i, j := range h.jac[c*pm : (c+1)*pm] {
+					h.vert[i] += d * j
+				}
+			}
+			sv, err := h.e.svd.maximumFromFlat(h.vert, 0, h.e.p, h.e.m)
+			if err != nil {
+				return math.Inf(1)
+			}
+			lin = max(lin, sv)
+		}
+		return lin + rem
+	}
+	if math.IsNaN(h.linG) {
+		return math.Inf(1)
+	}
+	return math.Sqrt(v*v+2*r*h.linG+r*r*h.linJ*h.linJ) + rem
 }
 
 // localBound bounds σ_max(G∞(φ')) − σ_max(G∞(φ)) for φ' within scaled
@@ -1091,7 +1144,9 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // delay grid of the Nyquist test is extended until that bound stays below
 // the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
-// sample exceeds it on the grid nor past it (see peakPastLimit). Between
+// sample exceeds it on the grid nor past it (see peakPastLimit); with
+// several classes of delays only a finite peak above it is (see
+// torusPastLimit). Between
 // samples, up to the grid end, the peak is certified to peakCertTol by
 // descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
@@ -1102,6 +1157,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	}
 	lim, period := e.d11, 0.0
 	var hfx *highFrequencyExpansion
+	var torus *highFrequencyGain
 	if e.directFeedthrough {
 		hf := newHighFrequencyGain(e)
 		period = hf.period()
@@ -1112,6 +1168,8 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 			lim = level
 		case hf.dim == 1 && est > best*(1+tol):
 			lim = est
+		case hf.dim > 1:
+			torus = hf
 		default:
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
 		}
@@ -1119,7 +1177,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	}
 	cert := append([]float64{0}, grid...)
 	atInf := false
-	if lim > best*(1+tol) {
+	if torus == nil && lim > best*(1+tol) {
 		top, wTop, err := e.certify(l, cert, lim, math.Inf(1))
 		if err != nil {
 			return 0, 0, err
@@ -1149,6 +1207,17 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		return ext, b, w, err
 	}
 	hi := rGrid
+	if torus != nil {
+		var found *pastLimit
+		if lim, found, hi, err = e.torusPastLimit(torus, best, tol, rGrid, span, points); err != nil {
+			return 0, 0, err
+		}
+		if found != nil {
+			if best, wBest, err = e.certify(l, found.ext, found.b, found.w); err != nil {
+				return 0, 0, err
+			}
+		}
+	}
 	if atInf {
 		found, err := e.peakPastLimit(lim, tol, period, hfx, rGrid+span, &hi, points)
 		if err != nil {

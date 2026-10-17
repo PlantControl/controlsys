@@ -37,6 +37,8 @@ type highFrequencyExpansion struct {
 	hf     *highFrequencyGain
 	vector bool // p = 1 or m = 1, where ‖·‖ is the Euclidean norm
 	buf    []complex128
+	pair   *gramPair // matrix gain, set on first use
+	theta  []float64 // φ of at
 
 	h11, h12, h21, h22 [expansionOrder + 1][]complex128 // Hij,k, k >= 1; nil when zero
 	y, g               [expansionOrder + 1][]complex128
@@ -62,12 +64,22 @@ type highFrequencyExpansion struct {
 // newHighFrequencyExpansion returns the expansion, or nil outside its scope:
 // no states, or more than one class of delays.
 func newHighFrequencyExpansion(e *delayLFT, hf *highFrequencyGain) *highFrequencyExpansion {
-	if hf == nil || hf.dim != 1 || e.n == 0 {
+	if hf == nil || hf.dim != 1 {
+		return nil
+	}
+	return newTorusExpansion(e, hf)
+}
+
+// newTorusExpansion returns the expansion on the torus of phases of hf, nil
+// without states. For dim > 1 only atTheta and coefficientsAt apply; the
+// rest samples the circle of one phase.
+func newTorusExpansion(e *delayLFT, hf *highFrequencyGain) *highFrequencyExpansion {
+	if hf == nil || e.n == 0 {
 		return nil
 	}
 	lft := e.sys.LFT
 	nd, p, m := e.nd, e.p, e.m
-	x := &highFrequencyExpansion{e: e, hf: hf, vector: p == 1 || m == 1, buf: make([]complex128, p*m)}
+	x := &highFrequencyExpansion{e: e, hf: hf, vector: p == 1 || m == 1, buf: make([]complex128, p*m), theta: make([]float64, 1)}
 	terms := func(dst *[expansionOrder + 1][]complex128, c, b *mat.Dense, rows, cols int) {
 		var ab, next mat.Dense
 		empty := c == nil || b == nil || c.IsEmpty() || b.IsEmpty()
@@ -123,8 +135,14 @@ func addDelta(dst, c, phase, v []complex128, r, nd, m int) {
 
 // at fills g_k, k <= N, at phase φ; false where I − D22Δ is singular.
 func (x *highFrequencyExpansion) at(phi float64) bool {
+	x.theta[0] = phi
+	return x.atTheta(x.theta)
+}
+
+// atTheta is at for the phases θ of the torus.
+func (x *highFrequencyExpansion) atTheta(theta []float64) bool {
 	h := x.hf
-	if math.IsInf(h.at([]float64{phi}), 1) {
+	if math.IsInf(h.at(theta), 1) {
 		return false
 	}
 	nd, p, m := h.e.nd, h.e.p, h.e.m
@@ -190,26 +208,40 @@ func (x *highFrequencyExpansion) sum(t float64) float64 {
 	return sv
 }
 
-// coefficients returns, at φ, S², a = Re⟨g0, g1⟩ and
-// c = ‖g1‖² + 2·Re⟨g0, g2⟩, the coefficients of t and t² in ‖g0 + t·g1 +
-// t²·g2‖², for a vector gain. For a matrix gain a = ½·dσ_max²/dt at t = 0+,
-// by a one-sided four-point difference with step d = 10⁻³·min_k
-// (S/‖g_k‖)^{1/k}, and c = ‖g1‖_F², a scale only: t > 0, and where σ_max(g0)
-// is repeated the slopes from either side differ, the right one being the
-// largest Re u^H·g1·v over its top singular pairs.
-func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
-	if !x.at(phi) {
-		return math.Inf(1), 0, 0
+// coefficients returns, at φ, S², a and c, the coefficients of t and t² in
+// σ_max(Σ_{k<=N} t^k·g_k)² = S² + 2t·a + t²·c + O(t³): for a vector gain
+// a = Re⟨g0, g1⟩ and c = ‖g1‖² + 2·Re⟨g0, g2⟩, for a matrix gain λ1/2 and
+// λ2 of gramPair. scale is c for a vector gain and ‖g1‖_F² for a matrix
+// gain, a size for the tolerance on a. ok is false where c is not formed:
+// for a matrix gain whose σ_max(g0) is repeated, a then is ½·dσ_max²/dt at
+// t = 0+ by a one-sided four-point difference with step d = 10⁻³·min_k
+// (S/‖g_k‖)^{1/k}, the largest slope of its splitting.
+func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c, scale float64, ok bool) {
+	x.theta[0] = phi
+	return x.coefficientsAt(x.theta)
+}
+
+// coefficientsAt is coefficients at the phases θ of the torus.
+func (x *highFrequencyExpansion) coefficientsAt(theta []float64) (s2, a, c, scale float64, ok bool) {
+	if !x.atTheta(theta) {
+		return math.Inf(1), 0, 0, 0, false
 	}
 	if !x.vector {
-		s := x.sum(0)
+		if x.pair == nil {
+			x.pair = newGramPair(x.e.p, x.e.m)
+		}
 		for _, g := range x.g[1] {
-			c += real(g)*real(g) + imag(g)*imag(g)
+			scale += real(g)*real(g) + imag(g)*imag(g)
 		}
-		if c == 0 || s == 0 {
-			return s * s, 0, c
+		l0, l1, l2, _, exact := x.pair.expand(x.g[0], x.g[1], x.g[2])
+		if exact {
+			return l0, l1 / 2, l2, scale, true
 		}
-		d := s / math.Sqrt(c)
+		s := x.sum(0)
+		if scale == 0 || s == 0 {
+			return s * s, 0, 0, scale, false
+		}
+		d := s / math.Sqrt(scale)
 		for k := 2; k <= expansionOrder; k++ {
 			var n float64
 			for _, g := range x.g[k] {
@@ -222,7 +254,7 @@ func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
 		d *= 1e-3
 		l := func(t float64) float64 { v := x.sum(t); return v * v }
 		a = (-11*s*s + 18*l(d) - 9*l(2*d) + 2*l(3*d)) / (12 * d)
-		return s * s, a, c
+		return s * s, a, 0, scale, false
 	}
 	for i, g := range x.g[0] {
 		g1, g2 := x.g[1][i], x.g[2][i]
@@ -230,7 +262,7 @@ func (x *highFrequencyExpansion) coefficients(phi float64) (s2, a, c float64) {
 		a += real(g)*real(g1) + imag(g)*imag(g1)
 		c += real(g1)*real(g1) + imag(g1)*imag(g1) + 2*(real(g)*real(g2)+imag(g)*imag(g2))
 	}
-	return s2, a, c
+	return s2, a, c, c, true
 }
 
 // polyLen is the number of coefficients of ‖Σ_{k<=N} t^k·g_k‖² in t.
@@ -656,15 +688,16 @@ func (x *highFrequencyExpansion) maxima(samples []float64, f func(float64) float
 // limitVerdict decides whether the finite peaks of ‖G(jω)‖ exceed the limit
 // lim = sup S. finite reports that they do, from a > 0 or κ > 0 at a
 // maximiser of S, provided the predicted excess at wMin, a/(lim·wMin) or
-// κ/(2·lim·wMin²), is above tol·lim, so that a sample can show it. Otherwise,
-// with κ < 0 at every maximiser, W <= wMax is a frequency past which
+// κ·t²/(2·lim), t = 1/wMin or for a matrix gain at most the reach of
+// gramPair, is above tol·lim, so that a sample can show it. Otherwise,
+// with a < 0 or κ < 0 at every maximiser, W <= wMax is a frequency past which
 // ‖G(jω)‖ <= lim·(1 + tol) is checked: sup_φ ‖Σ_{k<=N} t^k·g_k‖, maximised
 // over φ as in onePhaseSup, plus the Cauchy bound on R stays below it at
 // t = T·2^−i, i = 0…40, T = 1/W; past these samples the leading term κ·t²
 // and the remainder O(t^{N+1}) only shrink. This +Inf verdict rests on the
 // expansion, not on a certificate over every t. ok is false when neither is
-// decided, and for a matrix gain whenever a ≈ 0 at every maximiser, since κ
-// and the model maximum are only formed for a vector gain.
+// decided, and for a matrix gain when a ≈ 0 at a maximiser where σ_max(g0)
+// is repeated, since κ is formed only for a simple σ_max.
 func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (finite bool, W float64, ok bool) {
 	x.sampleCircle()
 	s := make([]float64, len(x.poly)/polyLen)
@@ -672,7 +705,7 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 		s[i] = math.Sqrt(x.poly[i*polyLen])
 	}
 	phis, _ := x.maxima(s, func(phi float64) float64 {
-		s2, _, _ := x.coefficients(phi)
+		s2, _, _, _, _ := x.coefficients(phi)
 		return math.Sqrt(s2)
 	}, 1e-9)
 	if len(phis) == 0 {
@@ -680,25 +713,29 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 	}
 	allNegative := true
 	for _, phi := range phis {
-		s2, a, c := x.coefficients(phi)
+		s2, a, c, scale, exact := x.coefficients(phi)
+		tSeen := 1 / wMin
+		if exact && !x.vector {
+			tSeen = min(tSeen, x.pair.reach)
+		}
 		ap, apErr := richardson(1e-4, func(h float64) float64 {
-			_, aPlus, _ := x.coefficients(phi + h)
-			_, aMinus, _ := x.coefficients(phi - h)
+			_, aPlus, _, _, _ := x.coefficients(phi + h)
+			_, aMinus, _, _, _ := x.coefficients(phi - h)
 			return (aPlus - aMinus) / (2 * h)
 		})
 		// φ* is located to about 1e-8 only, so a(φ*) carries an error of
 		// about a′·1e-8 that a zero of a must absorb.
-		if eps := 1e-6 * (math.Abs(ap) + math.Sqrt(s2*max(c, 1))); a > eps {
+		if eps := 1e-6 * (math.Abs(ap) + math.Sqrt(s2*max(scale, 1))); a > eps {
 			return a/(lim*wMin) > tol*lim, 0, a/(lim*wMin) > tol*lim
 		} else if a < -eps {
 			continue
 		}
-		if !x.vector {
+		if !exact {
 			return false, 0, false
 		}
 		alpha, alphaErr := richardson(1e-4, func(h float64) float64 {
-			sp, _, _ := x.coefficients(phi + h)
-			sm, _, _ := x.coefficients(phi - h)
+			sp, _, _, _, _ := x.coefficients(phi + h)
+			sm, _, _, _, _ := x.coefficients(phi - h)
 			return -(sp - 2*s2 + sm) / (2 * h * h)
 		})
 		if !(alpha > alphaErr) {
@@ -711,7 +748,7 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 		margin := 1e-6*s2 + 1e-9*(math.Abs(c)+q) + 2*math.Abs(ap)*apErr/alpha + q*alphaErr/(alpha-alphaErr)
 		switch {
 		case kappa > margin:
-			seen := kappa/(2*lim*wMin*wMin) > tol*lim
+			seen := kappa*tSeen*tSeen/(2*lim) > tol*lim
 			return seen, 0, seen
 		case !(kappa < -margin):
 			allNegative = false
