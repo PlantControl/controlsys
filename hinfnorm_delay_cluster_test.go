@@ -182,6 +182,43 @@ func resonancePair(kr1, kr2, c2, d2 float64) func(t *testing.T) (*System, *Syste
 	}
 }
 
+// farChannel is G = c·z/(1 − d·z) + kr/(s + p)² + k4/(s + p)⁴, z = e^{−sτ}:
+// at φ = 0, |G| − 4/3 ≈ (−kr/ω² + k4/ω⁴)·(4/3)/|G∞| for c/(1 − d) = 4/3, so
+// with kr, k4 < 0 the passages through φ = 0 cross lim at ω ≈ √(k4/kr)
+// and the excess peaks near √(2·k4/kr).
+func farChannel(t *testing.T, tau, c, d, kr, k4, p float64) (*System, func(float64) float64) {
+	t.Helper()
+	ds, _ := delayResonanceLoop(t, []float64{tau}, 0, []float64{c}, []float64{d})
+	a := []float64{-p, 0, 0, 0, 1, -p, 0, 0, 0, 1, -p, 0, 0, 0, 1, -p}
+	r, err := NewFromSlices(4, 1, 1, a, []float64{1, 0, 0, 0}, []float64{0, kr, 0, k4}, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := Parallel(ds, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys, func(w float64) float64 {
+		s := complex(0, w)
+		z := cmplx.Exp(-s * complex(tau, 0))
+		q := s + complex(p, 0)
+		q2 := q * q
+		return cmplx.Abs(complex(c, 0)*z/(1-complex(d, 0)*z) + complex(kr, 0)/q2 + complex(k4, 0)/(q2*q2))
+	}
+}
+
+// farPair is diag(G1, G2) of farChannel with kr = −10⁻³, k4 = −10: the
+// finite peak, about 6·10⁻⁸ above lim at ω ≈ 102, lies past the span
+// scanned when limitVerdict is undecided.
+func farPair(d2 float64) func(t *testing.T) (*System, *System, func(float64) float64, func(float64) float64, float64) {
+	return func(t *testing.T) (*System, *System, func(float64) float64, func(float64) float64, float64) {
+		const tau = 0.37
+		s1, g1 := farChannel(t, tau, 0.8, 0.4, -1e-3, -10, 3)
+		s2, g2 := farChannel(t, tau, 4.0/3*(1-d2), d2, -1.3e-3, -7, 3)
+		return s1, s2, g1, g2, tau
+	}
+}
+
 // limitPair is diag(G, G) for the expansionLimit model, sup σ_max(G∞) at
 // φ* = π with a′ ≠ 0 and κ = c + a′²/α < 0.
 func limitPair(t *testing.T) (*System, *System, func(float64) float64, func(float64) float64, float64) {
@@ -250,13 +287,17 @@ func TestLimitVerdictMatrixCluster(t *testing.T) {
 // TestHinfNormMatrixClusterLimit checks HinfNorm on 2×2 cluster gains:
 // resonances with kr < 0 small enough that σ_max stays below lim = 4/3 up
 // to the passages through φ* = 0, which rise above it, so the peak is
-// finite; and diag(G, G) of expansionLimit, lim at +Inf. Oracle: dense ω
-// scan of the closed-form σ_max with golden refinement, and the passage
-// at 1e5 for lim.
+// finite; farPair, whose finite peak lies past the span scanned when the
+// cluster leaves limitVerdict undecided, where HinfNorm returned lim at
+// +Inf before the degenerate expansion; and diag(G, G) of expansionLimit,
+// lim at +Inf. Oracle: dense ω scan of the closed-form σ_max with golden
+// refinement, and the passage at 1e5 for lim.
 func TestHinfNormMatrixClusterLimit(t *testing.T) {
 	for _, c := range []clusterGain{
 		{"equal/rise", resonancePair(-0.01, -0.02, 0.8, 0.4), 0, true},
 		{"cross/rise", resonancePair(-0.02, -0.01, 0.4, 0.7), 0, true},
+		{"far/equal", farPair(0.4), 0, true},
+		{"far/cross", farPair(0.7), 0, true},
 		{"limit", limitPair, math.Pi, false},
 	} {
 		for ri, rot := range rotations {

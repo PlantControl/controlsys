@@ -461,7 +461,7 @@ const sharpResonanceTau = 0.6705489857287816
 func sharpResonanceModel(t *testing.T, d22 float64) (*System, func(float64) float64, func(float64) float64) {
 	t.Helper()
 	const a, tau = -1.8797942063939619, sharpResonanceTau
-	b1 :=[]float64{-0.02704717913348858, -0.1805137473767608}
+	b1 := []float64{-0.02704717913348858, -0.1805137473767608}
 	const b2, c1, c2 = 0.20395346902869235, 0.5803594342648284, -0.5430833291216368
 	d11 := []float64{0.7650979509126943, 0.3709492250386599}
 	const d12 = 0.6232424759105828
