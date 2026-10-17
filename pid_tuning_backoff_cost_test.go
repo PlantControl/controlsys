@@ -74,7 +74,7 @@ func pidTuningCallEvidence(r *PIDTuningResult, err error) (*PIDTuningEvidence, e
 // An RHP zero and a ζ=0.025 mode below the default crossover leave no
 // same-sign design at wc0, and the bisected back-off spent its whole budget
 // even though it found one: 4161-4229 evaluations. The scan down stops at
-// its first design.
+// its first design; the deep gate adds two depths.
 func TestTunePIDBackOffStopsAtFirstDesign(t *testing.T) {
 	plant := pidPlantDelayed(t, []float64{2.4655092866840786, -3.982218498257481}, []float64{1, 1.0125481422685352, 1.0543664790048073, .9556591577782928}, .4563737532946457)
 	for _, fam := range []PidtuneType{PidtunePI, PidtunePID, PidtunePIDF} {
@@ -83,8 +83,32 @@ func TestTunePIDBackOffStopsAtFirstDesign(t *testing.T) {
 			t.Errorf("%s: %v", fam, err)
 			continue
 		}
-		if r.Evidence.Evaluations > 3500 {
-			t.Errorf("%s: %d evaluations, want <= 3500", fam, r.Evidence.Evaluations)
+		if r.Evidence.Evaluations > 3900 {
+			t.Errorf("%s: %d evaluations, want <= 3900", fam, r.Evidence.Evaluations)
+		}
+	}
+}
+
+// An RHP zero and a ζ=0.03 mode near wc0 leave no same-sign PID or PIDF at
+// any depth, and the scan down from wc0 tried all twenty: 4197 and 4229
+// evaluations against base 15ca52c's 202 and 133. After the two shallowest
+// depths the back-off tries the two deepest and, both failing, stops. Oracle
+// for "no design": a full scan of every depth, each with its own budget,
+// found none.
+func TestTunePIDBackOffFailsFastWhenDeepestFail(t *testing.T) {
+	plant := pidPlantDelayed(t, []float64{1.0794, -.89075}, []float64{1, 18.247, 107.37, 1711.56}, .01834)
+	for _, fam := range []PidtuneType{PidtunePID, PidtunePIDF} {
+		_, err := TunePID(context.Background(), plant, fam, PIDTuningOptions{PhaseMargin: 68.08})
+		te, ok := errors.AsType[*PIDTuningError](err)
+		if !ok {
+			t.Errorf("%s: %v, want unattainable", fam, err)
+			continue
+		}
+		if te.Evidence.Evaluations > 600 {
+			t.Errorf("%s: %d evaluations, want <= 600", fam, te.Evidence.Evaluations)
+		}
+		if !slices.ContainsFunc(te.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "also tried") }) {
+			t.Errorf("%s: no back-off in %q", fam, te.Evidence.Warnings)
 		}
 	}
 }

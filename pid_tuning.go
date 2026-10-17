@@ -316,10 +316,11 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // delayed plant, and either a candidate exceeded |S| <= 4 or a lightly damped
 // mode lies within a factor 100 of the default, the crossover backs off by
 // half octaves to 1/1024 of the default, each tried at PM±3° then as a floor
-// under |S| <= 4 sampled up to 100× the default. Depths are bisected, taking
-// success as monotone in depth, within one evaluation budget: a lightly
-// damped resonance near the delay cap can leave only a low-bandwidth design,
-// as pidtune returns.
+// under |S| <= 4 sampled up to 100× the default. After the two shallowest,
+// the two deepest are tried and, both failing, end the back-off; otherwise
+// the shallowest design within one evaluation budget is returned, or the
+// deep one when the budget runs out: a lightly damped resonance near the delay cap can leave only a
+// low-bandwidth design, as pidtune returns.
 //
 // An unattainable target returns a *PIDTuningError (wrapping
 // ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
@@ -433,17 +434,21 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// deeper. Each crossover tries PM±3° when pidTuningReachable admits it,
 	// then the floor's lowest admitted band only, which keeps a failing
 	// crossover near one search's minimum; a deep floor design sits there.
-	// All its searches share one budget.
+	// All its searches share one budget. After the two shallowest depths,
+	// the two deepest, furthest from the delay and the resonance, gate the
+	// rest: when both fail no depth between is scanned, as a design there is
+	// rare, so an untunable plant costs four depths, not twenty. A pair
+	// rides out a depth that fails alone. When the scan between runs out of
+	// budget, the deep design is kept.
 	backOff := func(wc0, gainSign, pm float64, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
 		minHigh, probing = wc0*100, true
 		budget, start := opts.MaxEvaluations, used
 		if budget == 0 {
 			budget = 4096
 		}
+		const deepest = 20
 		at := func(j int) float64 { return wc0 * math.Pow(2, -float64(j)/2) }
-		lowest := 0
-		for j := 1; j <= 20 && used-start < budget; j++ {
-			lowest = j
+		design := func(j int) (*PIDTuningResult, error) {
 			o := opts
 			o.CrossoverFrequency = at(j)
 			p := pidTuningPlant{dt: plant.Dt, at: eval.at, gainSign: gainSign}
@@ -459,17 +464,45 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				r, e := tuneAt(at(j), gainSign, true, floor)
 				if e == nil {
 					r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, at(j), pidTuningMaxSensitivity, minHigh))
-					return stamp(r, nil)
+					return r, nil
 				}
 				if !errors.As(e, new(*PIDTuningError)) {
 					return nil, e
 				}
 			}
+			return nil, nil
 		}
-		if te, ok := errors.AsType[*PIDTuningError](err); ok && lowest > 0 {
-			te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers down to %.4g rad/s were also tried.", at(lowest)))
+		// first returns the first design over depths lo..hi, stepping toward
+		// hi, and the depth it sits at.
+		first := func(lo, hi int) (*PIDTuningResult, int, error) {
+			step := 1
+			if hi < lo {
+				step = -1
+			}
+			for j := lo; j != hi+step && used-start < budget; j += step {
+				if r, e := design(j); r != nil || e != nil {
+					return r, j, e
+				}
+			}
+			return nil, 0, nil
 		}
-		return stamp(res, err)
+		if r, _, e := first(1, 2); r != nil || e != nil {
+			return stamp(r, e)
+		}
+		deep, gate, e := first(deepest, deepest-1)
+		if e != nil {
+			return nil, e
+		}
+		if deep == nil {
+			if te, ok := errors.AsType[*PIDTuningError](err); ok {
+				te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers %.4g and %.4g rad/s were also tried.", at(deepest-1), at(deepest)))
+			}
+			return stamp(res, err)
+		}
+		if r, _, e := first(3, gate-1); r != nil || e != nil {
+			return stamp(r, e)
+		}
+		return stamp(deep, nil)
 	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, eval.at, wc)

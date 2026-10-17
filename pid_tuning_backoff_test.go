@@ -15,8 +15,10 @@ import (
 // design; the default crossover now backs off. In the second plant the
 // back-off reaches 2⁻⁸·wc0,
 // whose own band [wc/100, 100wc] ends below the ζ=0.0035 resonance at 1.3:
-// |S| there was unchecked and reached 7.7. Oracles: dense margins, dense |S|
-// over the default and backed-off bands, and the winding of 1+L(jω), +90°
+// |S| there was unchecked and reached 7.7. The third, with an RHP zero, has
+// PIDF designs only from 2⁻⁹·wc0 down; the scan down from wc0 spent the
+// budget first and failed, and the deep design is now kept. Oracles: dense
+// margins, dense |S| over the default and backed-off bands, and the winding of 1+L(jω), +90°
 // for a stable loop with one integrator.
 func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
 	for _, c := range []struct {
@@ -26,6 +28,7 @@ func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
 	}{
 		{[]float64{1}, []float64{1, .05, 1}, 1, []PidtuneType{PidtunePI, PidtunePID, PidtunePIDF}},
 		{[]float64{2.229880306748357}, []float64{1, .009089419529549078, 1.6808028078517465}, .0415713306402339, []PidtuneType{PidtunePI}},
+		{[]float64{3.1016, -.99088}, []float64{1, 1.02767, .71308, .45281, .113657}, .03776, []PidtuneType{PidtunePIDF}},
 	} {
 		plant := makePlant(t, c.num, c.den)
 		if err := plant.SetInputDelay([]float64{c.tau}); err != nil {
@@ -46,7 +49,8 @@ func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
 				continue
 			}
 			k := r.Controller
-			if k.Ki <= 0 || k.Kp < 0 || k.Kd < 0 {
+			dc := math.Copysign(1, c.num[len(c.num)-1]/c.den[len(c.den)-1])
+			if dc*k.Ki <= 0 || dc*k.Kp < 0 || dc*k.Kd < 0 {
 				t.Errorf("%v %s: %+v gains not of the plant's DC sign", c.den, fam, *k)
 			}
 			wc := r.Evidence.AchievedCrossover
