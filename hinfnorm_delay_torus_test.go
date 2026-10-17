@@ -345,3 +345,37 @@ func BenchmarkHinfNormTorusGiveUp(b *testing.B) {
 		}
 	}
 }
+
+// TestLargestCells checks the selection of torusMaxima's starting cells
+// against the full descending sort, with distinct values, ties at and above
+// the cut, NaN and ±Inf.
+func TestLargestCells(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5, 9))
+	for trial := range 2000 {
+		n := 1 + rng.IntN(40)
+		vals := make([]float64, n)
+		for i := range vals {
+			switch r := rng.IntN(20); {
+			case trial%2 == 0:
+				vals[i] = rng.NormFloat64()
+			case r == 0:
+				vals[i] = math.NaN()
+			case r == 1:
+				vals[i] = math.Inf(2*rng.IntN(2) - 1)
+			default:
+				vals[i] = float64(rng.IntN(8))
+			}
+		}
+		for _, m := range []int{1, 5, 12, 50} {
+			got, want := largestCells(vals, m), sortedCells(vals, m)
+			if len(got) != len(want) {
+				t.Fatalf("vals %v, n=%d: %v, sort %v", vals, m, got, want)
+			}
+			for j := range got {
+				if got[j] != want[j] {
+					t.Fatalf("vals %v, n=%d: %v, sort %v", vals, m, got, want)
+				}
+			}
+		}
+	}
+}

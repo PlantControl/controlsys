@@ -59,6 +59,7 @@ type delayLFT struct {
 	d22c                []complex128
 	err                 error
 	sigmaCalls          int
+	scanW, scanV        []float64 // scan buffers
 }
 
 func newDelayLFT(sys *System) (*delayLFT, error) {
@@ -526,6 +527,7 @@ type highFrequencyGain struct {
 
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
+	gridV []float64 // σ_max(G∞) at the cell centres, see gridValues
 }
 
 func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
@@ -897,12 +899,25 @@ func (h *highFrequencyGain) estimate() float64 {
 	if h.dim == 1 {
 		return h.onePhaseSup()
 	}
-	cells, _ := h.torusGrid()
 	best := math.Inf(-1)
-	for c := range slices.Chunk(cells, h.dim) {
-		best = max(best, h.at(c))
+	for _, v := range h.gridValues() {
+		best = max(best, v)
 	}
 	return best
+}
+
+// gridValues returns σ_max(G∞) at the cells of torusGrid, sampled once.
+func (h *highFrequencyGain) gridValues() []float64 {
+	if h.gridV != nil {
+		return h.gridV
+	}
+	cells, _ := h.torusGrid()
+	vals := make([]float64, 0, len(cells)/h.dim)
+	for c := range slices.Chunk(cells, h.dim) {
+		vals = append(vals, h.at(c))
+	}
+	h.gridV = vals
+	return vals
 }
 
 // below reports whether σ_max(G∞) <= level on the whole torus of phases,
@@ -1429,14 +1444,15 @@ func (e *delayLFT) certify(l *delayLoop, ws []float64, peak, w float64) (float64
 // scan samples σ_max on the sorted grid and its interval midpoints and
 // refines every local maximum within a factor 2 of the largest sample.
 func (e *delayLFT) scan(grid []float64) (float64, float64, error) {
-	ws := make([]float64, 0, 2*len(grid))
+	ws := slices.Grow(e.scanW[:0], 2*len(grid))
 	for i, w := range grid {
 		if i > 0 {
 			ws = append(ws, (grid[i-1]+w)/2)
 		}
 		ws = append(ws, w)
 	}
-	vals := make([]float64, len(ws))
+	vals := slices.Grow(e.scanV[:0], len(ws))[:len(ws)]
+	e.scanW, e.scanV = ws, vals
 	for i, w := range ws {
 		vals[i] = e.sigma(w)
 	}

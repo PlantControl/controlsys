@@ -23,15 +23,9 @@ func torusMaxima(hf *highFrequencyGain) []torusMaximum {
 	const starts = 12
 	cells, _ := hf.torusGrid()
 	nd := hf.dim
-	k := len(cells) / nd
-	vals := make([]float64, k)
-	idx := make([]int, k)
-	for i := range k {
-		vals[i], idx[i] = hf.at(cells[i*nd:(i+1)*nd]), i
-	}
-	slices.SortFunc(idx, func(a, b int) int { return cmp.Compare(vals[b], vals[a]) })
+	vals := hf.gridValues()
 	var out []torusMaximum
-	for _, i := range idx[:min(starts, k)] {
+	for _, i := range largestCells(vals, starts) {
 		if math.IsInf(vals[i], 0) || math.IsNaN(vals[i]) {
 			continue
 		}
@@ -49,6 +43,48 @@ func torusMaxima(hf *highFrequencyGain) []torusMaximum {
 	}
 	slices.SortFunc(out, func(a, b torusMaximum) int { return cmp.Compare(b.value, a.value) })
 	return out
+}
+
+// largestCells returns the indices of the n largest vals, largest first, as
+// a descending sort by cmp.Compare orders them. When the n+1 largest are
+// distinct the order is forced and a selection finds it; ties fall back to
+// the sort, whose order among them is its own.
+func largestCells(vals []float64, n int) []int {
+	m := min(n+1, len(vals))
+	top := make([]int, 0, m)
+	for i, v := range vals {
+		if len(top) == m && cmp.Compare(v, vals[top[m-1]]) <= 0 {
+			if v == vals[top[m-1]] || math.IsNaN(v) && math.IsNaN(vals[top[m-1]]) {
+				return sortedCells(vals, n)
+			}
+			continue
+		}
+		j := len(top)
+		if j < m {
+			top = append(top, i)
+		} else {
+			j--
+		}
+		for ; j > 0 && cmp.Compare(v, vals[top[j-1]]) >= 0; j-- {
+			top[j] = top[j-1]
+		}
+		top[j] = i
+	}
+	for j := 1; j < len(top); j++ {
+		if cmp.Compare(vals[top[j-1]], vals[top[j]]) <= 0 {
+			return sortedCells(vals, n)
+		}
+	}
+	return top[:min(n, len(top))]
+}
+
+func sortedCells(vals []float64, n int) []int {
+	idx := make([]int, len(vals))
+	for i := range idx {
+		idx[i] = i
+	}
+	slices.SortFunc(idx, func(a, b int) int { return cmp.Compare(vals[b], vals[a]) })
+	return idx[:min(n, len(idx))]
 }
 
 func torusDistance(a, b []float64) float64 {
@@ -194,7 +230,10 @@ func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, step,
 	const budget = 1 << 20
 	lim, ok := 0.0, false
 	for _, d := range []float64{1e-9, 1e-7, 1e-5} {
-		if lim = sup * (1 + d); hf.below(lim, hf.samples+budget) {
+		if lim = sup * (1 + d); hf.over > lim {
+			continue // a torus sample above lim: below(lim) cannot hold
+		}
+		if hf.below(lim, hf.samples+budget) {
 			ok = true
 			break
 		}
