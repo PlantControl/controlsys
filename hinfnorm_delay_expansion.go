@@ -59,6 +59,9 @@ type highFrequencyExpansion struct {
 	vals     []float64
 	stamp    []int
 	epoch    int
+
+	torusG        []complex128 // g_0…g_N at the cells of torusGrid, see torusModelMax
+	torusSingular bool
 }
 
 // newHighFrequencyExpansion returns the expansion, or nil outside its scope:
@@ -263,6 +266,85 @@ func (x *highFrequencyExpansion) coefficientsAt(theta []float64) (s2, a, c, scal
 		c += real(g1)*real(g1) + imag(g1)*imag(g1) + 2*(real(g)*real(g2)+imag(g)*imag(g2))
 	}
 	return s2, a, c, c, true
+}
+
+// clusterKappa returns bounds lo <= κ <= hi on κ = sup_s λ_max(K(s)) of
+// gramPair.clusterPencil at a maximiser φ of S of a matrix gain where
+// σ_max(g0) is repeated: the passage maxima have σ_max² − lim² ≈ κ·t²
+// (for a simple σ_max K(s) = c + 2s·a′ − s²·α, whose sup is c + a′²/α).
+// It also returns μ1 (2a of the top branches) and the reach of the pencil.
+// g0′, g1′, g0″ in φ come from five-point stencils at h = 10⁻¹/k_max·2^−i,
+// i = 0…30; κ is taken once its change over a halving has shrunk 8-fold
+// twice running (the O(h⁴) regime, past the width of a sharp peak), from
+// the h with the least change, which widens [lo, hi] twice over. tolMu is
+// the tolerance on μ for the top branches. ok is false where I − D22Δ is
+// singular nearby, the pencil is not concave in s, or κ does not settle.
+func (x *highFrequencyExpansion) clusterKappa(phi, tolMu float64) (lo, hi, mu1, reach float64, ok bool) {
+	if x.pair == nil {
+		x.pair = newGramPair(x.e.p, x.e.m)
+	}
+	pm := len(x.g[0])
+	var f [2][5][]complex128
+	for k := range f {
+		for j := range f[k] {
+			f[k][j] = make([]complex128, pm)
+		}
+	}
+	d0, d1, dd0 := make([]complex128, pm), make([]complex128, pm), make([]complex128, pm)
+	if !x.at(phi) {
+		return 0, 0, 0, 0, false
+	}
+	s0 := x.sum(0)
+	s0 *= s0
+	prev, prevDiff, best := math.NaN(), math.Inf(1), math.Inf(1)
+	settled := 0
+	for i := range 31 {
+		h := math.Ldexp(0.1/x.hf.kmax, -i)
+		for j := range 5 {
+			if !x.at(phi + float64(j-2)*h) {
+				return 0, 0, 0, 0, false
+			}
+			copy(f[0][j], x.g[0])
+			copy(f[1][j], x.g[1])
+		}
+		for l := range pm {
+			d0[l] = (f[0][0][l] - 8*f[0][1][l] + 8*f[0][3][l] - f[0][4][l]) / complex(12*h, 0)
+			d1[l] = (f[1][0][l] - 8*f[1][1][l] + 8*f[1][3][l] - f[1][4][l]) / complex(12*h, 0)
+			dd0[l] = (-f[0][0][l] + 16*f[0][1][l] - 30*f[0][2][l] + 16*f[0][3][l] - f[0][4][l]) / complex(12*h*h, 0)
+		}
+		if !x.at(phi) {
+			return 0, 0, 0, 0, false
+		}
+		q, r, mu, rch, pok := x.pair.clusterPencil(x.g[0], x.g[1], x.g[2], d0, d1, dd0, tolMu)
+		if !pok {
+			return 0, 0, 0, 0, false
+		}
+		kLo, kHi, pok := pencilSup(q, r)
+		if !pok {
+			return 0, 0, 0, 0, false
+		}
+		k := (kLo + kHi) / 2
+		if i > 0 {
+			diff := math.Abs(k - prev)
+			tiny := diff <= 1e-13*(math.Abs(k)+s0)
+			if tiny {
+				settled = 2
+			} else if diff <= prevDiff/8 {
+				settled++
+			} else if settled < 2 {
+				settled = 0
+			}
+			if settled >= 2 && diff < best {
+				best, lo, hi, mu1, reach = diff, kLo-2*diff, kHi+2*diff, mu, rch
+			}
+			if tiny || (settled >= 2 && diff > 2*prevDiff) {
+				break
+			}
+			prevDiff = diff
+		}
+		prev = k
+	}
+	return lo, hi, mu1, reach, settled >= 2
 }
 
 // polyLen is the number of coefficients of ‖Σ_{k<=N} t^k·g_k‖² in t.
@@ -696,8 +778,9 @@ func (x *highFrequencyExpansion) maxima(samples []float64, f func(float64) float
 // t = T·2^−i, i = 0…40, T = 1/W; past these samples the leading term κ·t²
 // and the remainder O(t^{N+1}) only shrink. This +Inf verdict rests on the
 // expansion, not on a certificate over every t. ok is false when neither is
-// decided, and for a matrix gain when a ≈ 0 at a maximiser where σ_max(g0)
-// is repeated, since κ is formed only for a simple σ_max.
+// decided. For a matrix gain with σ_max(g0) repeated at a maximiser and
+// a ≈ 0 there, κ is clusterKappa, from the degenerate expansion of the
+// cluster; its pencil not concave leaves it undecided.
 func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (finite bool, W float64, ok bool) {
 	x.sampleCircle()
 	s := make([]float64, len(x.poly)/polyLen)
@@ -725,13 +808,30 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 		})
 		// φ* is located to about 1e-8 only, so a(φ*) carries an error of
 		// about a′·1e-8 that a zero of a must absorb.
-		if eps := 1e-6 * (math.Abs(ap) + math.Sqrt(s2*max(scale, 1))); a > eps {
+		eps := 1e-6 * (math.Abs(ap) + math.Sqrt(s2*max(scale, 1)))
+		if a > eps {
 			return a/(lim*wMin) > tol*lim, 0, a/(lim*wMin) > tol*lim
 		} else if a < -eps {
 			continue
 		}
 		if !exact {
-			return false, 0, false
+			if x.vector {
+				return false, 0, false
+			}
+			kLo, kHi, mu1, reach, kok := x.clusterKappa(phi, 2*eps)
+			if !kok || math.Abs(mu1) > 2*eps {
+				return false, 0, false
+			}
+			margin := 1e-6 * s2
+			switch {
+			case kLo > margin:
+				t := min(tSeen, reach)
+				seen := kLo*t*t/(2*lim) > tol*lim
+				return seen, 0, seen
+			case !(kHi < -margin):
+				allNegative = false
+			}
+			continue
 		}
 		alpha, alphaErr := richardson(1e-4, func(h float64) float64 {
 			sp, _, _, _, _ := x.coefficients(phi + h)
@@ -757,7 +857,15 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 	if !allNegative {
 		return false, 0, false
 	}
-	level := lim * (1 + tol)
+	W, ok = x.horizon(lim*(1+tol), wMax, x.modelMax)
+	return false, W, ok
+}
+
+// horizon returns a frequency W <= wMax past which ‖G(jω)‖ <= level by the
+// expansion: modelMax(t), the sup over the phases of ‖Σ_{k<=N} t^k·g_k‖,
+// plus the Cauchy bound on R stays below level at t = T·2^−i, i = 0…40,
+// T = 1/W, for the first T, halving from 1/(4‖A‖ + 1), where it does.
+func (x *highFrequencyExpansion) horizon(level, wMax float64, modelMax func(t float64) float64) (float64, bool) {
 	// T halves, so the t of successive T coincide exactly.
 	sup := map[float64]float64{}
 	holds := func(T float64) bool {
@@ -773,7 +881,7 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 			}
 			m, ok := sup[t]
 			if !ok {
-				m = x.modelMax(t)
+				m = modelMax(t)
 				sup[t] = m
 			}
 			if !(m+r <= level) {
@@ -784,10 +892,10 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 	}
 	for T := 1 / max(x.e.normA*4+1, 1); T*wMax >= 1; T /= 2 {
 		if holds(T) {
-			return false, 1 / T, true
+			return 1 / T, true
 		}
 	}
-	return false, 0, false
+	return 0, false
 }
 
 // richardson returns the limit as h → 0 of the central difference d(h),

@@ -21,9 +21,14 @@ func TestCommensurateMultiples(t *testing.T) {
 		{[]float64{0.75, 0.5}, []int{3, 2}},
 		{[]float64{0.25, 0.75, 1.25}, []int{1, 3, 5}},
 		{[]float64{0.1, 0.2}, []int{1, 2}},
-		// 0.8 and 0.3 are not exact float multiples of 0.1 and 0.5.
-		{[]float64{0.5, 0.8}, nil},
-		{[]float64{0.1, 0.3}, nil},
+		// 0.8 and 0.3 are multiples of 0.5 and 0.1 only up to rounding.
+		{[]float64{0.5, 0.8}, []int{5, 8}},
+		{[]float64{0.1, 0.3}, []int{1, 3}},
+		{[]float64{0.3, 0.1}, []int{3, 1}},
+		{[]float64{0.2, 0.3}, []int{2, 3}},
+		{[]float64{0.1, 0.7, 0.3}, []int{1, 7, 3}},
+		{[]float64{1, 3 * (1 + 64*0x1p-52)}, nil},
+		{[]float64{1, 3 * (1 + 1e-12)}, nil},
 		{[]float64{1, math.Sqrt2}, nil},
 		{[]float64{0, 1}, nil},
 		{[]float64{1, 65}, nil},
@@ -65,18 +70,23 @@ func notStronglyStable(d22 []float64) bool {
 	return eig.Factorize(theta, mat.EigenNone) && maxAbs(eig.Values(nil)) > 1
 }
 
+// TestNeutralCommensurateDelays also takes τ_2 one ulp off 2·τ_1, a
+// multiple up to rounding, which is the same commensurate model.
 func TestNeutralCommensurateDelays(t *testing.T) {
-	tau := []float64{0.7, 1.4}
 	for _, tc := range []struct {
 		name   string
 		d22    []float64
 		stable bool
+		tau    []float64
 	}{
 		// det(I − D22·diag(z, z²)) = 1 − 0.54z + 0.54z² + 0.0684z³ has all
 		// zeros outside the unit disk.
-		{"stable", []float64{0.54, 0.6, -0.6, -0.54}, true},
-		{"unstable", []float64{0.6, 1, -1, -0.9}, false},
+		{"stable", []float64{0.54, 0.6, -0.6, -0.54}, true, []float64{0.7, 1.4}},
+		{"unstable", []float64{0.6, 1, -1, -0.9}, false, []float64{0.7, 1.4}},
+		{"stable-rounded", []float64{0.54, 0.6, -0.6, -0.54}, true, []float64{0.7, math.Nextafter(1.4, 2)}},
+		{"unstable-rounded", []float64{0.6, 1, -1, -0.9}, false, []float64{0.7, math.Nextafter(1.4, 2)}},
 	} {
+		tau := tc.tau
 		t.Run(tc.name, func(t *testing.T) {
 			if got := maxAbs(reciprocalRoots(tc.d22)) < 1; got != tc.stable {
 				t.Fatalf("companion reference stable = %v, want %v", got, tc.stable)
