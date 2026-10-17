@@ -494,9 +494,10 @@ func (e *delayLFT) sigma(w float64) float64 {
 // highFrequencyGain evaluates σ_max(G∞(φ)), G∞ = D11 + D12·Δ(I − D22·Δ)⁻¹·D21
 // with Δ_i = e^{−j·k_i·φ_g(i)}, the values G(jω) approaches as ω → ∞. The
 // phases φ range over a torus of dim coordinates, one φ_c = ωh_c per class
-// of commensurate delays τ_i = k_i·h_c (see commensurateClasses). The values
+// of commensurate delays τ_i = k_i·h_c (see commensurateClasses, which takes
+// multiples up to rounding as exact). The values
 // of Δ(jω) as ω → ∞ lie on this torus, and fill it when the h_c are
-// rationally independent, which the exact grouping cannot always confirm:
+// rationally independent, which the grouping cannot always confirm:
 // below then still certifies an upper bound, and estimate is taken as the
 // limit only for dim = 1, a single class, where φ = ωh sweeps the circle.
 // Coordinate c is scaled by K_c = max k_i over its class: G∞ moves at most

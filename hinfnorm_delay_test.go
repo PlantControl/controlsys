@@ -639,7 +639,9 @@ func refHFBelow(h *highFrequencyGain, level float64, budget int) bool {
 	return true
 }
 
-// TestHighFrequencyGainMatchesReference checks that the packed torus grid
+// TestHighFrequencyGainMatchesReference checks, on the torus of one phase
+// per delay (the delays here are commensurate up to rounding), that the
+// packed torus grid
 // and hoisted phase factors reproduce the reference estimate bit for bit,
 // and that below, pruning also by localBound and quadBound, agrees with the
 // reference sweep pruning by lip alone in no more samples, or certifies a
@@ -660,7 +662,14 @@ func TestHighFrequencyGainMatchesReference(t *testing.T) {
 		if !e.directFeedthrough || e.nd < 2 {
 			t.Fatalf("%s: want delayed feedthrough with ≥ 2 delays, nd = %d", tc.name, e.nd)
 		}
-		h, ref := newHighFrequencyGain(e), newHighFrequencyGain(e)
+		perDelay := func() *highFrequencyGain {
+			grp, ones := make([]int, e.nd), make([]int, e.nd)
+			for i := range grp {
+				grp[i], ones[i] = i, 1
+			}
+			return newHighFrequencyGainOn(e, grp, ones, e.nd)
+		}
+		h, ref := perDelay(), perDelay()
 		est := h.estimate()
 		cells, _ := refTorusGrid(e.nd)
 		want := math.Inf(-1)

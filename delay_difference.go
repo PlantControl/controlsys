@@ -314,10 +314,22 @@ func equalDelays(tau []float64) bool {
 // maxLiftedOrder caps Σk_i, the order of liftD22.
 const maxLiftedOrder = 64
 
+// commensurateTol is the relative gap |τ_i·l − τ_min·k_i| up to which
+// commensurateMultiples takes τ_i/τ_min = k_i/l: a few ulps, covering
+// fl(k·h) and decimal literals such as 0.1 and 0.3, while ratios p/q with
+// q <= maxLiftedOrder stay at least 1/maxLiftedOrder² apart.
+const commensurateTol = 8 * 0x1p-52
+
 // commensurateMultiples returns integers k_i with τ_i = k_i·h for a common
-// h > 0, exactly in the stored float64 delays, and Σk_i <= maxLiftedOrder;
-// all ones for equal delays, nil otherwise. A near-commensurate ratio is
-// rejected: stability that is not strong is not robust to the delays.
+// h > 0, up to floating-point rounding (commensurateTol), and
+// Σk_i <= maxLiftedOrder; all ones for equal delays, nil otherwise. As in
+// MATLAB, which evaluates the frequency response at the stored delays and
+// never resolves the gap, delays that are integer multiples up to rounding
+// are commensurate: the lifted model, its stability and its limit at
+// ω = ∞ are those of the exact multiples, whose phases ω·τ_i differ from
+// the stored ones by ω·|τ_i − k_i·h| <= ω·τ_i·commensurateTol, about 2e-9
+// rad at ω·τ_i = 1e6, beyond the grids scanned. A ratio further from k_i/l
+// is rejected: stability that is not strong is not robust to the delays.
 func commensurateMultiples(tau []float64) []int {
 	if len(tau) == 0 {
 		return nil
@@ -337,7 +349,7 @@ func commensurateMultiples(tau []float64) []int {
 		sum := 0
 		for _, t := range tau {
 			k := math.Round(t / tmin * float64(l))
-			if !exactProductsEqual(t, float64(l), tmin, k) {
+			if !nearProductsEqual(t, float64(l), tmin, k) {
 				sum = -1
 				break
 			}
@@ -357,9 +369,9 @@ func commensurateMultiples(tau []float64) []int {
 	return nil
 }
 
-// commensurateClasses partitions the delays into classes of exactly
-// commensurate ones, τ_i = k_i·h_c for class c = grp[i], greedily in index
-// order: τ_i joins the first class whose delays it extends to a set that
+// commensurateClasses partitions the delays into classes of commensurate
+// ones, τ_i = k_i·h_c up to rounding (see commensurateMultiples) for class
+// c = grp[i], greedily in index order: τ_i joins the first class whose delays it extends to a set that
 // commensurateMultiples accepts, else opens a new one. k holds the multiples
 // within each class; dim is the number of classes. All delays form one class
 // exactly when commensurateMultiples accepts the whole set.
@@ -404,11 +416,11 @@ func commensurateClasses(tau []float64) (grp, k []int, dim int) {
 	return grp, k, dim
 }
 
-// exactProductsEqual reports a·b == c·d in exact arithmetic, by the
-// error-free products p + e = a·b, e = fma(a, b, −p), for normal products.
-func exactProductsEqual(a, b, c, d float64) bool {
-	p, q := a*b, c*d
-	return p == q && math.FMA(a, b, -p) == math.FMA(c, d, -q)
+// nearProductsEqual reports |a·b − c·d| <= commensurateTol·|c·d| for
+// nonnegative normal products, a·b − fl(c·d) taken exactly by fma.
+func nearProductsEqual(a, b, c, d float64) bool {
+	q := c * d
+	return math.Abs(math.FMA(a, b, -q)) <= commensurateTol*q
 }
 
 // liftD22 returns the companion lift M of order Σk_i with

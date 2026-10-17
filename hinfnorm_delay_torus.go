@@ -190,7 +190,8 @@ func floats2Norm(v []float64) float64 {
 // over the torus of phases is not below the grid peak best. The values of
 // Δ(jω) as ω → ∞ approach every point of the torus only when the classes'
 // periods are rationally independent, which floating-point delays cannot
-// confirm, so the limit is never reported as the peak at ω = +Inf; a finite
+// confirm (classes commensurate up to rounding are merged, see
+// commensurateMultiples), so the limit is never reported as the peak at ω = +Inf; a finite
 // peak above it is. With t = 1/ω, G(jω) = G∞(θ) + t·g1(θ) + O(t²), and where
 // a = Re⟨g0, g1⟩ ≠ 0 at a maximiser θ* of S = σ_max(G∞), one of θ* and its
 // mirror −θ*, where a has the other sign, has a > 0, so passages of
@@ -206,7 +207,7 @@ func floats2Norm(v []float64) float64 {
 // and run first, so a give-up decided by it costs no certificate.
 func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, step, span float64,
 	points func(lo, R float64) []float64) (float64, *pastLimit, float64, error) {
-	unsupported := fmt.Errorf("gain may peak as ω → ∞ over the phase torus of delays not exactly commensurate in float64: %w", errDelayPeakUnsupported)
+	unsupported := fmt.Errorf("gain may peak as ω → ∞ over the phase torus of incommensurate delays: %w", errDelayPeakUnsupported)
 	x := newTorusExpansion(e, hf)
 	if x == nil || math.IsInf(span, 1) {
 		return 0, nil, 0, unsupported

@@ -213,10 +213,11 @@ func TestQuadBoundMatrix(t *testing.T) {
 }
 
 // TestHinfNormRoundedMultipleDelays pins OUWA5P: τ = (h, fl(3h)) with
-// fl(3h) ≠ 3h is two classes, whose torus sup lies above every finite peak
-// (dense 2-D oracle) and is approached only once ω·|fl(3h) − 3h| ~ 1, so
-// HinfNorm reports the torus case as unsupported; the same model with a
-// dyadic h, exactly commensurate, matches the finite and limit oracles.
+// fl(3h) ≠ 3h is commensurate up to rounding, as in MATLAB, so HinfNorm
+// reports the finite peak or the one-phase limit (dense ω and circle
+// oracles), not the sup over the 2-torus of literal floats (dense 2-D
+// oracle), which lies above and is approached only once ω·|fl(3h) − 3h| ~ 1.
+// The same model with a dyadic h, exactly commensurate, agrees likewise.
 func TestHinfNormRoundedMultipleDelays(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1008, 7))
 	u := func(a float64) float64 { return a * (2*rng.Float64() - 1) }
@@ -225,41 +226,37 @@ func TestHinfNormRoundedMultipleDelays(t *testing.T) {
 	d21 := []float64{u(1), u(1)}
 	h := 0.02 + 0.3*rng.Float64()
 	k := [2]float64{1, 3}
-	if exactProductsEqual(3*h, 1, h, 3) {
+	if math.FMA(3, h, -3*h) == 0 {
 		t.Fatal("fl(3h) must differ from 3h")
 	}
-	sys, gain, _ := feedthroughDifferenceLoop(t, d22, d12, d21, []float64{h, 3 * h}, k)
-	if st, err := sys.IsStable(); err != nil || !st {
-		t.Fatalf("IsStable = %v, %v", st, err)
-	}
-	fin, _ := oraclePeak(gain, 80, 1e-3)
-	torus := 0.0
-	const n = 512
-	for a := range n {
-		for b := range n {
-			torus = max(torus, gInfTorus(d22, d12, d21, 2*math.Pi*float64(a)/n, 2*math.Pi*float64(b)/n))
-		}
-	}
-	if !(torus > 1.5*fin) {
-		t.Fatalf("torus sup %g not above finite peak %g", torus, fin)
-	}
-	_, _, err := HinfNorm(sys)
-	if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "not exactly commensurate") {
-		t.Fatalf("HinfNorm err = %v, want torus errDelayPeakUnsupported", err)
-	}
-
 	hd := math.Ldexp(math.Round(math.Ldexp(h, 30)), -30)
-	sys, gain, gInf := feedthroughDifferenceLoop(t, d22, d12, d21, []float64{hd, 3 * hd}, k)
-	got, w, err := HinfNorm(sys)
-	if err != nil {
-		t.Fatalf("dyadic HinfNorm: %v", err)
-	}
-	want, _ := oraclePeak(gain, 80, 1e-3)
-	for j := range 1 << 16 {
-		want = max(want, gInf(2*math.Pi*float64(j)/(1<<16)))
-	}
-	if math.Abs(got-want) > 1e-8*want {
-		t.Fatalf("dyadic HinfNorm = %.12g @%g, want %.12g", got, w, want)
+	for _, hh := range []float64{h, hd} {
+		sys, gain, gInf := feedthroughDifferenceLoop(t, d22, d12, d21, []float64{hh, 3 * hh}, k)
+		if st, err := sys.IsStable(); err != nil || !st {
+			t.Fatalf("h=%g: IsStable = %v, %v", hh, st, err)
+		}
+		fin, _ := oraclePeak(gain, 80, 1e-3)
+		if hh == h {
+			torus := 0.0
+			const n = 512
+			for a := range n {
+				for b := range n {
+					torus = max(torus, gInfTorus(d22, d12, d21, 2*math.Pi*float64(a)/n, 2*math.Pi*float64(b)/n))
+				}
+			}
+			if !(torus > 1.5*fin) {
+				t.Fatalf("torus sup %g not above finite peak %g", torus, fin)
+			}
+		}
+		got, w, err := HinfNorm(sys)
+		if err != nil {
+			t.Fatalf("h=%g: HinfNorm: %v", hh, err)
+		}
+		circle, _ := oraclePeak(gInf, 2*math.Pi, 2*math.Pi/(1<<16))
+		want := max(fin, circle)
+		if math.Abs(got-want) > 1e-8*want {
+			t.Fatalf("h=%g: HinfNorm = %.12g @%g, want %.12g", hh, got, w, want)
+		}
 	}
 }
 
@@ -274,17 +271,22 @@ func gInfTorus(d22, d12, d21 []float64, t1, t2 float64) float64 {
 	return cmplx.Abs(0.1 + c(d12[0])*e1*v0 + c(d12[1])*e2*v1)
 }
 
+// nearThree is a multiple 1e-9 off 3, far past commensurateTol: τ = (h,
+// nearThree·h) is two classes whose torus sup G attains only near
+// ω ~ 1e9/h, as fl(3h) did before rounded multiples were commensurate.
+const nearThree = 3 * (1 + 1e-9)
+
 // TestHinfNormTorusGiveUpCost pins that the search of torusPastLimit for a
 // finite peak above the limit, on the OUWA5P models τ = (k0·h, k1·h) with
-// fl(k·h) ≠ k·h that stay unsupported, samples G only near passages of the
+// k1 = nearThree that stay unsupported, samples G only near passages of the
 // phases past a maximiser and gives up within a bounded number of samples
 // instead of scanning the whole grid budget.
 func TestHinfNormTorusGiveUpCost(t *testing.T) {
 	const maxCalls = 1 << 16
 	seen := 0
-	for _, k := range [][2]float64{{1, 3}, {2, 3}} {
+	for _, k := range [][2]float64{{1, nearThree}, {2, nearThree}} {
 		for i := range 30 {
-			e, err := newDelayLFT(torusSeedModel(t, k, k, i))
+			e, err := newDelayLFT(torusSeedModel(t, k, [2]float64{k[0], 3}, i))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -293,7 +295,7 @@ func TestHinfNormTorusGiveUpCost(t *testing.T) {
 				continue
 			}
 			_, _, err = e.peakOrZero(l, res)
-			if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "not exactly commensurate") {
+			if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "incommensurate") {
 				continue
 			}
 			seen++
@@ -307,12 +309,12 @@ func TestHinfNormTorusGiveUpCost(t *testing.T) {
 	}
 }
 
-// torusRidgeCase is a 2×2 gain with τ = (h, fl(3h)), two classes, whose G∞
+// torusRidgeCase is a 2×2 gain with τ = (h, nearThree·h), two classes, whose G∞
 // does not depend on the phase of the second delay (D12 and D22 decouple
 // it), so σ_max(G∞) peaks on a ridge of the torus. below cannot certify a
 // level just above the ridge within its budget, and the passages past the
 // grid never rise above it.
-var torusRidgeCase = lftCase{name: "ridge", n: 2, k: 3, h: 0.14203862636269235,
+var torusRidgeCase = lftCase{name: "ridge", n: 2, k: nearThree, h: 0.14203862636269235,
 	a:   []float64{-2.962039195292603, 0.2686701083868679, -0.6345679716724708, -2.796724595801912},
 	b1:  []float64{0.5081790286051484, 0.39788305561091986, -0.733344475495167, -0.2244946492194182},
 	b2:  []float64{-0.39010924967934457, 0.3895287085521675, -0.941343914254797, 0.05768657407229405},
@@ -360,7 +362,7 @@ func TestHinfNormTorusRidgeGiveUpCost(t *testing.T) {
 		t.Fatalf("stability = %v, %v", res.stable, err)
 	}
 	_, _, err = e.peakOrZero(l, res)
-	if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "not exactly commensurate") {
+	if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "incommensurate") {
 		t.Fatalf("peak err = %v, want torus errDelayPeakUnsupported", err)
 	}
 	const maxGInf = 1 << 16
@@ -387,9 +389,9 @@ func torusSeedModel(tb testing.TB, k, kk [2]float64, i int) *System {
 // slowest τ = (h, √2·h) seeds of a 200-seed sweep.
 func BenchmarkHinfNormTorusGiveUp(b *testing.B) {
 	var models []*System
-	for _, k := range [][2]float64{{1, 3}, {2, 3}} {
+	for _, k := range [][2]float64{{1, nearThree}, {2, nearThree}} {
 		for _, i := range []int{15, 22, 29} {
-			models = append(models, torusSeedModel(b, k, k, i))
+			models = append(models, torusSeedModel(b, k, [2]float64{k[0], 3}, i))
 		}
 	}
 	for _, i := range []int{7, 63, 101, 140} {
