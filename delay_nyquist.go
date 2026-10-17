@@ -459,24 +459,43 @@ func (l *delayLoop) grid(R, w1 float64) []float64 {
 		nlin = int(w1/step) + 2
 	}
 	pts := make([]float64, 0, nlog+nlin+9*len(l.scales)+1)
-	for i := range nlog {
-		pts = append(pts, lo*math.Pow(R/lo, float64(i)/float64(nlog-1)))
-	}
 	if l.tau > 0 {
 		for w, prev := step, 0.0; w < R && prev < w1; prev, w = w, w+step {
 			pts = append(pts, w)
 		}
 	}
+	var buf [1024]float64
+	extra := slices.Grow(buf[:0], nlog+9*len(l.scales)+1)
+	for i := range nlog {
+		extra = append(extra, lo*math.Pow(R/lo, float64(i)/float64(nlog-1)))
+	}
 	for _, s := range l.scales {
 		for _, d := range []float64{-0.3, -0.1, -1e-2, -1e-3, 0, 1e-3, 1e-2, 0.1, 0.3} {
 			if w := s * (1 + d); w > 0 && w < R {
-				pts = append(pts, w)
+				extra = append(extra, w)
 			}
 		}
 	}
-	pts = append(pts, R)
-	slices.Sort(pts)
-	return slices.Compact(pts)
+	extra = append(extra, R)
+	slices.Sort(extra)
+	return slices.Compact(mergeSorted(pts, extra))
+}
+
+// mergeSorted merges the sorted b into the sorted a, in place in a's
+// capacity when it holds both.
+func mergeSorted(a, b []float64) []float64 {
+	i, j := len(a)-1, len(b)-1
+	a = slices.Grow(a, len(b))[:len(a)+len(b)]
+	for k := len(a) - 1; j >= 0; k-- {
+		if i >= 0 && a[i] > b[j] {
+			a[k] = a[i]
+			i--
+		} else {
+			a[k] = b[j]
+			j--
+		}
+	}
+	return a
 }
 
 type nyquistSegment struct {

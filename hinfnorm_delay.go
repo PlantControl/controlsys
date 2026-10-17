@@ -514,7 +514,12 @@ type highFrequencyGain struct {
 	g       []complex128
 	lip     float64
 	samples int
-	over    float64 // largest sample that failed below
+	// factors of localBound and quadBound at the last sample, see local
+	xm               []complex128
+	z                []complex128
+	locA, locX, locM float64
+	linG, linJ       float64
+	over             float64 // largest sample that failed below
 
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
@@ -653,6 +658,114 @@ func (h *highFrequencyGain) at(theta []float64) float64 {
 	return sv
 }
 
+// local sets the factors of localBound and quadBound at the last sample of
+// at, from its LU factors of I − D22Δ: it solves (I − D22Δ)·[X M] =
+// [D21 I] for M = (I − D22Δ)⁻¹ and sets the Frobenius norms locA of
+// D12·Δ·M, locX of X and locM of M, then the slopes of localSlopes.
+func (h *highFrequencyGain) local() {
+	nd, p, m := h.e.nd, h.e.p, h.e.m
+	w := m + nd
+	if h.xm == nil {
+		h.xm = make([]complex128, nd*w)
+		h.z = make([]complex128, p*nd)
+	}
+	xm := h.xm
+	clear(xm)
+	for i := range nd {
+		copy(xm[i*w:i*w+m], h.d21[i*m:(i+1)*m])
+		xm[i*w+m+i] = 1
+	}
+	cLUSolve(h.lu, h.piv, xm, nd, w)
+	var sx, sm, sa float64
+	for i := range nd {
+		for _, v := range xm[i*w : i*w+m] {
+			sx += real(v)*real(v) + imag(v)*imag(v)
+		}
+		for _, v := range xm[i*w+m : (i+1)*w] {
+			sm += real(v)*real(v) + imag(v)*imag(v)
+		}
+	}
+	for i := range p {
+		for j := range nd {
+			var z complex128
+			for k := range nd {
+				z += h.d12[i*nd+k] * h.phase[k] * xm[k*w+m+j]
+			}
+			h.z[i*nd+j] = z
+			sa += real(z)*real(z) + imag(z)*imag(z)
+		}
+	}
+	h.locA, h.locX, h.locM = math.Sqrt(sa), math.Sqrt(sx), math.Sqrt(sm)
+	h.localSlopes()
+}
+
+// localSlopes sets, for a vector G∞ (p = 1 or m = 1), the slopes of
+// quadBound: with Z = D12·Δ·M, ∂G∞/∂φ_c = J_c = −i·Σ_{g(i)=c} k_i·Z_{:i}·X_{i:},
+// linG = Σ_c |Re⟨G∞, J_c⟩|/K_c and linJ = Σ_c ‖J_c‖/K_c.
+func (h *highFrequencyGain) localSlopes() {
+	nd, p, m := h.e.nd, h.e.p, h.e.m
+	h.linG, h.linJ = math.NaN(), math.NaN()
+	if p != 1 && m != 1 {
+		return
+	}
+	var lg, lj float64
+	for c := range h.dim {
+		var re, nj float64
+		for r := range p {
+			for col := range m {
+				var jv complex128
+				for i := range nd {
+					if h.grp[i] != c {
+						continue
+					}
+					k := 1.0
+					if h.k != nil {
+						k = h.k[i]
+					}
+					jv += complex(k, 0) * h.z[r*nd+i] * h.x[i*m+col]
+				}
+				jv *= -1i
+				g := h.g[r*m+col]
+				re += real(g)*real(jv) + imag(g)*imag(jv)
+				nj += real(jv)*real(jv) + imag(jv)*imag(jv)
+			}
+		}
+		lg += math.Abs(re) / h.scale[c]
+		lj += math.Sqrt(nj) / h.scale[c]
+	}
+	h.linG, h.linJ = lg, lj
+}
+
+// quadBound bounds σ_max(G∞) within scaled distance r of the last sample φ,
+// with value v, for a vector G∞: E = Δ(φ') − Δ(φ) differs from its linear
+// part E₁ = Σ_c (φ'_c − φ_c)·∂Δ/∂φ_c by at most r²/2 and
+// G∞(φ') − G∞(φ) = D12·N·E·X + D12·N·E·M·D22·E·X' with N = (I − ΔD22)⁻¹, so
+// G∞(φ') = G∞(φ) + Σ_c (φ'_c − φ_c)·J_c + R, ‖R‖ <= ‖Z‖‖X‖r²·(1/2 +
+// ‖M‖‖D22‖/(1 − ‖M‖‖D22‖r)), and ‖G∞ + Σ d_c·J_c‖² <= v² +
+// 2r·linG + (r·linJ)² for |d_c| <= r/K_c. +Inf when not applicable.
+func (h *highFrequencyGain) quadBound(v, r float64) float64 {
+	q := h.locM * h.e.d22
+	den := 1 - q*r
+	if math.IsNaN(h.linG) || !(den > 0) {
+		return math.Inf(1)
+	}
+	lin := math.Sqrt(v*v + 2*r*h.linG + r*r*h.linJ*h.linJ)
+	return lin + h.locA*h.locX*r*r*(0.5+q/den)
+}
+
+// localBound bounds σ_max(G∞(φ')) − σ_max(G∞(φ)) for φ' within scaled
+// distance r of the last sample φ, with E = Δ(φ') − Δ(φ), ‖E‖ <= r: by
+// G∞(φ') − G∞(φ) = D12·(I − ΔD22)⁻¹·E·X' with X' = (I − D22Δ')⁻¹D21 =
+// X + M·D22·E·X', ‖D12(I − ΔD22)⁻¹‖ = ‖D12·Δ·M‖ and
+// ‖X'‖ <= ‖X‖/(1 − ‖M‖‖D22‖r); else, or when larger, by lip·r.
+func (h *highFrequencyGain) localBound(r float64) float64 {
+	b := h.lip * r
+	if den := 1 - h.locM*h.e.d22*r; den > 0 {
+		b = min(b, h.locA*r*h.locX/den)
+	}
+	return b
+}
+
 // onePhaseSup returns sup_φ σ_max(G∞(φ)) for one phase, where φ = ωh
 // sweeps the whole circle as ω → ∞: the largest of 1024·k_max samples, each
 // local maximum refined by golden-section search.
@@ -741,9 +854,10 @@ func (h *highFrequencyGain) estimate() float64 {
 // by branch and bound: G∞ is Lipschitz in θ with constant lip (see
 // lipschitz) in the max-norm of K_c·θ_c, since
 // dΔ(I − D22Δ)⁻¹ = (I − ΔD22)⁻¹·dΔ·(I − D22Δ)⁻¹ and |dΔ_i| <= k_i·|dθ_g(i)|,
-// so a cell of scaled half-width r around a sample v cannot exceed v + lip·r. Cells that may exceed level are
-// split until none remain, a sample exceeds level, or the sample budget is
-// spent.
+// so a cell of scaled half-width r around a sample v cannot exceed v + lip·r,
+// nor the tighter localBound and quadBound from the sample's own resolvent.
+// Cells that may exceed level are split until none remain, a sample exceeds
+// level, or the sample budget is spent.
 func (h *highFrequencyGain) below(level float64, budget int) bool {
 	nd := h.dim
 	cells, r := h.torusGrid()
@@ -757,6 +871,9 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 				return false
 			}
 			if v+h.lip*r <= level {
+				continue
+			}
+			if h.local(); min(v+h.localBound(r), h.quadBound(v, r)) <= level {
 				continue
 			}
 			for mask := range 1 << nd {
@@ -781,8 +898,9 @@ func (h *highFrequencyGain) below(level float64, budget int) bool {
 
 // levelBelow searches a level in (sup σ_max(G∞), best) that below certifies,
 // starting midway from the lower estimate est. A sample above a trial level
-// raises est to it; when below runs out of budget instead, which caps the
-// samples of all attempts together, the distinct-delay torus is tried.
+// raises est to it; when below runs out of budget instead, the
+// distinct-delay torus is tried with what remains of it, so all attempts
+// together take at most one budget of samples.
 func (h *highFrequencyGain) levelBelow(est, best float64) (float64, bool) {
 	const budget = 1 << 21
 	for range 16 {
@@ -798,7 +916,7 @@ func (h *highFrequencyGain) levelBelow(est, best float64) (float64, bool) {
 			continue
 		}
 		d := h.distinctDelays()
-		return level, d != nil && d.below(level, budget)
+		return level, d != nil && d.below(level, budget-h.samples)
 	}
 	return 0, false
 }
@@ -973,10 +1091,8 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // delay grid of the Nyquist test is extended until that bound stays below
 // the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
-// sample exceeds it on the grid nor on an extension of span max(R, 2P), with
-// R the grid end and P = 2π/h the period of G∞ for one phase φ = ωh, which
-// tailGain cannot close since G − G∞ decays only as 1/ω. Between samples, up
-// to the grid end, the peak is certified to peakCertTol by
+// sample exceeds it on the grid nor past it (see peakPastLimit). Between
+// samples, up to the grid end, the peak is certified to peakCertTol by
 // descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
 	const tol = 1e-10
@@ -985,6 +1101,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		return 0, 0, err
 	}
 	lim, period := e.d11, 0.0
+	var hfx *highFrequencyExpansion
 	if e.directFeedthrough {
 		hf := newHighFrequencyGain(e)
 		period = hf.period()
@@ -998,6 +1115,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		default:
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
 		}
+		hfx = newHighFrequencyExpansion(e, hf)
 	}
 	cert := append([]float64{0}, grid...)
 	atInf := false
@@ -1016,43 +1134,69 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	if l.tau > 0 {
 		span = float64(l.pointBudget()) * math.Pi / (8 * l.tau)
 	}
-	for hi := rGrid; ; {
-		R := max(hi, 2*e.normA+1)
+	points := func(lo, R float64) []float64 {
+		g := l.grid(R, R)
+		i, _ := slices.BinarySearch(g, math.Nextafter(lo, math.Inf(1)))
+		if i == 0 {
+			return append([]float64{lo}, g...)
+		}
+		g[i-1] = lo
+		return g[i-1:]
+	}
+	extend := func(lo, R float64) ([]float64, float64, float64, error) {
+		ext := points(lo, R)
+		b, w, err := e.scan(ext)
+		return ext, b, w, err
+	}
+	hi := rGrid
+	if atInf {
+		found, err := e.peakPastLimit(lim, tol, period, hfx, rGrid+span, &hi, points)
+		if err != nil {
+			return 0, 0, err
+		}
+		if found == nil {
+			return best, wBest, nil
+		}
+		best, wBest = found.b, found.w
+		if best, wBest, err = e.certify(l, found.ext, best, wBest); err != nil {
+			return 0, 0, err
+		}
+	}
+	for {
+		level := best * (1 + tol)
+		R0 := max(hi, 2*e.normA+1)
+		R, closed := R0, false
 		for range 200 {
-			if e.tailGain(lim, R) <= best*(1+tol) {
+			if closed = e.tailGain(lim, R) <= level; closed {
 				break
 			}
 			R *= 2
 		}
-		if atInf {
-			R0 := max(hi, 2*e.normA+1)
-			R = min(R, R0+max(R0, 2*period), rGrid+span)
-		} else {
-			if !(e.tailGain(lim, R) <= best*(1+tol)) {
-				return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
+		if hfx != nil && (!closed || (R-hi)*8*l.tau/math.Pi > hfx.circleCost()) {
+			certified := false
+			for Rt := R0; Rt < R && Rt-rGrid <= span; Rt *= 2 {
+				if certified = hfx.tailBelow(level, 1/Rt); certified {
+					R, closed = Rt, true
+					break
+				}
 			}
-			if R-rGrid > span {
-				return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)
+			if !certified && (!closed || R-rGrid > span) && 2*R0-rGrid <= span {
+				// The finite peak may lie further out, above best.
+				R, closed = 2*R0, true
 			}
+		}
+		if !closed {
+			return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
+		}
+		if R-rGrid > span {
+			return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)
 		}
 		if R <= hi {
 			return best, wBest, nil
 		}
-		ext := []float64{hi}
-		for _, w := range l.grid(R, R) {
-			if w > hi {
-				ext = append(ext, w)
-			}
-		}
-		b, w, err := e.scan(ext)
+		ext, b, w, err := extend(hi, R)
 		if err != nil {
 			return 0, 0, err
-		}
-		if atInf {
-			if !(b > best*(1+tol)) {
-				return best, wBest, nil
-			}
-			atInf = false
 		}
 		if b > best {
 			best, wBest = b, w
@@ -1062,6 +1206,136 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		}
 		hi = R
 	}
+}
+
+// pastLimit is a finite sample above the high-frequency limit, found on the
+// grid extension ext, which spans every band scanned past the grid end.
+type pastLimit struct {
+	ext  []float64
+	b, w float64
+}
+
+// peakPastLimit scans past the grid end *hi for a finite gain above the
+// limit lim, which every grid sample stays below. With the expansion of
+// highFrequencyExpansion, limitVerdict decides: when the finite peaks exceed
+// lim, the extension doubles until a sample does, and fails past rMax; when
+// they stay below, it scans to the horizon W <= rMax of limitVerdict, densely
+// up to the span below and past it only where phaseScan finds the expansion
+// may reach lim. Undecided, or without the expansion (several delay
+// classes), it scans an extension of span max(R, 2P), with R the grid end
+// and P = 2π/h the period of G∞ for one phase φ = ωh, which tailGain cannot
+// close since G − G∞ decays only as 1/ω. It returns nil when no sample
+// exceeds lim, which is then the peak at ω = +Inf; *hi is advanced to the
+// end of the scan.
+func (e *delayLFT) peakPastLimit(lim, tol, period float64, hfx *highFrequencyExpansion, rMax float64, hi *float64,
+	points func(lo, R float64) []float64) (*pastLimit, error) {
+	level := lim * (1 + tol)
+	extend := func(lo, R float64) (*pastLimit, error) {
+		ext := points(lo, R)
+		b, w, err := e.scan(ext)
+		if err != nil || !(b > level) {
+			return nil, err
+		}
+		return &pastLimit{ext, b, w}, nil
+	}
+	R0 := max(*hi, 2*e.normA+1)
+	R := R0 + max(R0, 2*period)
+	dense := R
+	finite, W, decided := false, 0.0, false
+	if hfx != nil {
+		finite, W, decided = hfx.limitVerdict(lim, tol, *hi, min(rMax, 1e12))
+	}
+	if decided && !finite {
+		R = max(R, W)
+	}
+	for Rt := R0; Rt < R; Rt *= 2 {
+		if e.tailGain(lim, Rt) <= level {
+			R = Rt
+			break
+		}
+	}
+	if Rs := min(R, rMax); decided && !finite && Rs > dense {
+		h0 := *hi
+		*hi = Rs
+		found, err := e.phaseScan(hfx, level, h0, dense, Rs, points)
+		if found != nil && err == nil {
+			found, err = extend(h0, Rs)
+		}
+		return found, err
+	}
+	h0 := *hi
+	for {
+		if Rs := min(R, rMax); Rs > *hi {
+			found, err := extend(*hi, Rs)
+			*hi = Rs
+			if found != nil {
+				found.ext = points(h0, Rs)
+			}
+			if found != nil || err != nil {
+				return found, err
+			}
+		}
+		if !finite {
+			return nil, nil
+		}
+		if *hi >= rMax {
+			return nil, fmt.Errorf("finite peak above the ω → ∞ limit past %d grid points: %w", delayNyquistMaxPoints, errDelayPeakUnsupported)
+		}
+		R *= 2
+	}
+}
+
+// phaseScan reports whether a grid point of (lo, R] may exceed level,
+// scanning those up to dense, and past it, in octaves [ω1, ω2] of ω, only
+// those near a phase φ = ωh where phaseMask cannot bound the expansion over
+// t = 1/ω ∈ [1/ω2, 1/ω1] plus its Cauchy remainder by level. A sample above
+// level is returned, for the dense scan to redo; nil otherwise.
+func (e *delayLFT) phaseScan(hfx *highFrequencyExpansion, level, lo, dense, R float64, points func(lo, R float64) []float64) (*pastLimit, error) {
+	ws := points(lo, R)
+	keep := make([]bool, len(ws))
+	h := hfx.phaseRate()
+	var mask []bool
+	bot, top := 0.0, 0.0
+	for i, w := range ws {
+		if w <= dense {
+			keep[i] = true
+			continue
+		}
+		if top == 0 || w > top {
+			if top == 0 {
+				bot, top = dense, 2*dense
+			}
+			for w > top {
+				bot, top = top, 2*top
+			}
+			mask = nil
+			t2 := 1 / bot
+			if r := hfx.radius(t2); r > 0 {
+				rem := hfx.remainder(e.tailGain(0, r), t2*r)
+				mask = hfx.phaseMask(1/min(top, R), t2, level-rem)
+			}
+		}
+		if mask == nil || mask[hfx.sampleAt(w*h)] {
+			keep[max(i-1, 0)], keep[i] = true, true
+			if i+1 < len(ws) {
+				keep[i+1] = true
+			}
+		}
+	}
+	var sub []float64
+	for i, w := range ws {
+		if keep[i] {
+			sub = append(sub, w)
+		}
+	}
+	if len(sub) == 0 {
+		return nil, nil
+	}
+	b, w, err := e.scan(sub)
+	if err != nil || !(b > level) {
+		return nil, err
+	}
+	return &pastLimit{sub, b, w}, nil
 }
 
 // certify raises (peak, w) to within peakCertTol of sup σ_max(G(jω)) over

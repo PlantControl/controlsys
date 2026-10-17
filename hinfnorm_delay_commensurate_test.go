@@ -120,7 +120,15 @@ func TestNeutralCommensurateDelays(t *testing.T) {
 // feedthroughDifferenceLoop returns G = D11 + C1(sI−A)⁻¹B1 +
 // (D12 + C1(sI−A)⁻¹B2)·Δ(I − D22Δ)⁻¹·D21 with C2 = 0, so H22 = D22; gain
 // evaluates |G(jω)| and gInf |G∞(φ)| with Δ_i = e^{−j·k_i·φ} in closed form.
-func feedthroughDifferenceLoop(t *testing.T, d22, d12, d21, tau []float64, k [2]float64) (*System, func(float64) float64, func(float64) float64) {
+func feedthroughDifferenceLoop(t testing.TB, d22, d12, d21, tau []float64, k [2]float64) (*System, func(float64) float64, func(float64) float64) {
+	t.Helper()
+	sys, resp, gInf := feedthroughDifferenceResponse(t, d22, d12, d21, tau, k)
+	return sys, func(w float64) float64 { return cmplx.Abs(resp(w)) }, gInf
+}
+
+// feedthroughDifferenceResponse is feedthroughDifferenceLoop with the
+// response G(jω) itself.
+func feedthroughDifferenceResponse(t testing.TB, d22, d12, d21, tau []float64, k [2]float64) (*System, func(float64) complex128, func(float64) float64) {
 	t.Helper()
 	const d11 = 0.1
 	a := []float64{-1, 2, -0.7, -3}
@@ -147,7 +155,7 @@ func feedthroughDifferenceLoop(t *testing.T, d22, d12, d21, tau []float64, k [2]
 		v1 := (m[0]*c(d21[1]) - m[2]*c(d21[0])) / det
 		return e1 * v0, e2 * v1
 	}
-	gain := func(w float64) float64 {
+	resp := func(w float64) complex128 {
 		s := complex(0, w)
 		v0, v1 := loop(cmplx.Exp(-s*c(tau[0])), cmplx.Exp(-s*c(tau[1])))
 		u0 := c(b1[0]) + c(b2[0])*v0 + c(b2[1])*v1
@@ -156,13 +164,13 @@ func feedthroughDifferenceLoop(t *testing.T, d22, d12, d21, tau []float64, k [2]
 		rd := r[0]*r[3] - r[1]*r[2]
 		x0 := (r[3]*u0 - r[1]*u1) / rd
 		x1 := (r[0]*u1 - r[2]*u0) / rd
-		return cmplx.Abs(c(d11) + c(c1[0])*x0 + c(c1[1])*x1 + c(d12[0])*v0 + c(d12[1])*v1)
+		return c(d11) + c(c1[0])*x0 + c(c1[1])*x1 + c(d12[0])*v0 + c(d12[1])*v1
 	}
 	gInf := func(phi float64) float64 {
 		v0, v1 := loop(cmplx.Exp(complex(0, -k[0]*phi)), cmplx.Exp(complex(0, -k[1]*phi)))
 		return cmplx.Abs(c(d11) + c(d12[0])*v0 + c(d12[1])*v1)
 	}
-	return sys, gain, gInf
+	return sys, resp, gInf
 }
 
 func TestNeutralOnePhaseFeedthrough(t *testing.T) {
