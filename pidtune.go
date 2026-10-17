@@ -45,8 +45,10 @@ const (
 // only the forward-Euler design gives a stable loop. An explicitly
 // requested phase margin the family cannot reach at wc returns
 // ErrPIDTuningTargetUnattainable instead of a controller with a different
-// margin. Every gain takes one sign: that of the DC gain for a stable plant,
-// and for an integrating or unstable plant the sign stabilization forces
+// margin; without one, a PDF needing phase lag at wc takes its least lead,
+// a small Kd, as MATLAB does. Every gain takes one sign: that of the DC
+// gain for a stable plant, and for an integrating or unstable plant the
+// sign stabilization forces
 // (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G); where the force
 // lapses, as for an ideal derivative large enough to flip the closed-loop
 // polynomial's leading coefficient, the other sign is tried when the forced
@@ -103,7 +105,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	run := &pidtuneRun{plant: plant, screen: screen, eval: eval, pidType: pidType, pm: pm, explicit: explicit, wc: wc, mirror: rule != pidtuneSignFixed}
+	run := &pidtuneRun{plant: plant, screen: screen, eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, mirror: rule != pidtuneSignFixed}
 
 	steps := 0
 	// An unstable plant needs bandwidth that a continuous delay already
@@ -144,6 +146,7 @@ type pidtuneRun struct {
 	pidType  PidtuneType
 	pm, wc   float64
 	explicit bool
+	auto     bool
 	// mirror tries the design against the chosen gain sign after the
 	// signed one fails.
 	mirror bool
@@ -155,10 +158,25 @@ type pidtuneRun struct {
 // designs must also pass the back-off gate. A discrete derivative moved to
 // backward Euler for its filter pole falls back to the forward-Euler design
 // when only that one passes, or the backward-Euler gains are unattainable.
+// Without an explicit margin, a PDF needing phase lag falls back to its
+// least lead, gated under an automatic crossover since its margin exceeds
+// the requested one.
 func (r *pidtuneRun) design(wc, sign float64, gated bool) (*PID, error) {
-	pid, err := r.signed(wc, sign, gated)
+	pid, err := r.mirrored(wc, sign, gated, false)
+	if err != nil && !r.explicit && errors.Is(err, errPidtunePDFLag) {
+		if alt, altErr := r.mirrored(wc, sign, gated || r.auto, true); altErr == nil {
+			return alt, nil
+		}
+	}
+	return pid, err
+}
+
+// mirrored designs for sign·G, then for −sign·G as design describes; with
+// lagFloor a PDF needing phase lag gets the least lead instead.
+func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (*PID, error) {
+	pid, err := r.signed(wc, sign, gated, lagFloor)
 	if r.mirror && errors.Is(err, ErrPIDTuningTargetUnattainable) && r.screened(wc) {
-		if alt, altErr := r.signed(wc, -sign, gated); altErr == nil {
+		if alt, altErr := r.signed(wc, -sign, gated, lagFloor); altErr == nil {
 			return alt, nil
 		}
 	}
@@ -172,8 +190,8 @@ func (r *pidtuneRun) screened(wc float64) bool {
 	return err == nil && stable != nil
 }
 
-func (r *pidtuneRun) signed(wc, sign float64, gated bool) (*PID, error) {
-	pid, err := computePIDGains(r.plant, r.pidType, wc, r.pm, sign, true)
+func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error) {
+	pid, err := pidtuneGains(r.plant, r.pidType, wc, r.pm, sign, true, lagFloor)
 	if err == nil {
 		err = r.check(pid, wc, gated)
 		if err == nil || pid.DFormula != BackwardEuler {
@@ -183,7 +201,7 @@ func (r *pidtuneRun) signed(wc, sign float64, gated bool) (*PID, error) {
 	if r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		return nil, err
 	}
-	fe, feErr := computePIDGains(r.plant, r.pidType, wc, r.pm, sign, false)
+	fe, feErr := pidtuneGains(r.plant, r.pidType, wc, r.pm, sign, false, lagFloor)
 	if feErr != nil || fe.DFormula != ForwardEuler || r.check(fe, wc, gated) != nil {
 		return nil, err
 	}
@@ -632,6 +650,8 @@ func evalPlantAt(plant *System, w float64) (complex128, error) {
 type pidtuneTerms struct {
 	wc, dt   float64
 	dFormula PIDFormula
+	// lagFloor raises a PDF phase below the family's range to its floor.
+	lagFloor bool
 }
 
 func pidtuneIntegrator(f PIDFormula, w, dt float64) complex128 {
@@ -653,7 +673,11 @@ func (t pidtuneTerms) derivative(tf float64) complex128 {
 // With stableFilter, a discrete forward-Euler derivative whose filter pole
 // 1−Dt/Tf leaves the unit circle is redesigned with backward Euler.
 func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter bool) (*PID, error) {
-	pid, err := computePIDGainsPositive(plant, pidType, wc, pmDeg, sign, stableFilter)
+	return pidtuneGains(plant, pidType, wc, pmDeg, sign, stableFilter, false)
+}
+
+func pidtuneGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
+	pid, err := computePIDGainsPositive(plant, pidType, wc, pmDeg, sign, stableFilter, lagFloor)
 	if err != nil {
 		return nil, err
 	}
@@ -664,7 +688,7 @@ func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64
 	return pid, nil
 }
 
-func computePIDGainsPositive(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter bool) (*PID, error) {
+func computePIDGainsPositive(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
 	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
 		return nil, fmt.Errorf("crossover %g must be below the Nyquist frequency %g: %w", wc, math.Pi/plant.Dt, ErrInvalidArgument)
 	}
@@ -693,13 +717,21 @@ func computePIDGainsPositive(plant *System, pidType PidtuneType, wc, pmDeg, sign
 	if plant.Dt > 0 && pidType == PidtunePID {
 		dFormula = BackwardEuler
 	}
-	pid, err := pidtuneFamily(pidType, pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula}, magP, phiC)
+	pid, err := pidtuneFamily(pidType, pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula, lagFloor: lagFloor}, magP, phiC)
 	if err == nil && stableFilter && plant.Dt > 0 && pid.DFormula == ForwardEuler && pid.Kd != 0 && pid.Tf <= plant.Dt/2 {
 		// The forward-Euler filter pole 1−Dt/Tf is outside the unit circle.
-		pid, err = pidtuneFamily(pidType, pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: BackwardEuler}, magP, phiC)
+		pid, err = pidtuneFamily(pidType, pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: BackwardEuler, lagFloor: lagFloor}, magP, phiC)
 	}
 	return pid, err
 }
+
+// pidtunePDFLagFloor is the PDF phase, in radians, used in place of a
+// requested phase lag: the least lead of a PDF with a small Kd, as computePD
+// floors its phase.
+const pidtunePDFLagFloor = 0.05
+
+// errPidtunePDFLag reports that a PDF would need phase lag at the crossover.
+var errPidtunePDFLag = fmt.Errorf("PDF needs phase lag: %w", ErrPIDTuningTargetUnattainable)
 
 // pidtuneFamily designs pidType at terms.wc with the derivative formula of terms.
 func pidtuneFamily(pidType PidtuneType, terms pidtuneTerms, magP, phiC float64) (*PID, error) {
@@ -719,12 +751,21 @@ func pidtuneFamily(pidType PidtuneType, terms pidtuneTerms, magP, phiC float64) 
 
 	case PidtunePDF:
 		pid.Tf = .1 / terms.wc
-		target := cmplx.Rect(1/magP, phiC*math.Pi/180)
 		d := terms.derivative(pid.Tf)
+		phiCRad := phiC * math.Pi / 180
+		// Same-sign PDF phase range: [0, arg d].
+		if phiCRad < 0 && terms.lagFloor && cmplx.Phase(d) > 2*pidtunePDFLagFloor {
+			phiCRad = pidtunePDFLagFloor
+		}
+		target := cmplx.Rect(1/magP, phiCRad)
 		pid.Kd = imag(target) / imag(d)
 		pid.Kp = real(target) - pid.Kd*real(d)
 		if pid.Kp < 0 || pid.Kd < 0 {
-			return nil, fmt.Errorf("requested phase is unattainable by a same-sign PDF at wc=%g: %w", terms.wc, ErrPIDTuningTargetUnattainable)
+			err := ErrPIDTuningTargetUnattainable
+			if phiCRad < 0 {
+				err = errPidtunePDFLag
+			}
+			return nil, fmt.Errorf("requested phase is unattainable by a same-sign PDF at wc=%g: %w", terms.wc, err)
 		}
 	case PidtunePID:
 		computePID(pid, terms, magP, phiC)
