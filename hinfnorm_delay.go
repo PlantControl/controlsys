@@ -448,6 +448,25 @@ func (e *delayLFT) h(d, c, b, w float64) float64 {
 	return d + cb/(w-e.normA)
 }
 
+// balancedTail is tail, lowered to the same bound in the balanced
+// coordinates of H22 when smaller: H22 is invariant under state similarity,
+// and a companion form's ‖A‖₂ can exceed its spectral radius by orders of
+// magnitude, which would stretch the stability grid to ‖A‖₂.
+func (e *delayLFT) balancedTail() func(float64) float64 {
+	if e.n == 0 || e.h22sys == nil {
+		return e.tail
+	}
+	br := newBalancedRealization(e.h22sys, e.n, e.nd, e.nd)
+	a, b2, c2 := mat.NewDense(e.n, e.n, br.a), mat.NewDense(e.n, e.nd, br.b), mat.NewDense(e.nd, e.n, br.c)
+	var sn spectralNormer
+	bal := *e
+	bal.normA, bal.c2, bal.b2 = sn.norm(a), sn.norm(c2), sn.norm(b2)
+	if bal.entrywise {
+		bal.rowC2, bal.colB2 = rowNorms(c2, e.nd), colNorms(b2, e.nd)
+	}
+	return func(w float64) float64 { return min(e.tail(w), bal.tail(w)) }
+}
+
 // loop returns the delay loop of the Nyquist test. A neutral loop whose tail
 // bound does not fall below 1 is normalized by its difference operator when
 // that is certified stable; with axisOnly the torus bound also serves, which
@@ -455,6 +474,9 @@ func (e *delayLFT) h(d, c, b, w float64) float64 {
 // peak, and the root count is then void.
 func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1)), multiChannel: e.nd > 1}
+	if !axisOnly {
+		l.tail = e.balancedTail()
+	}
 	if !(l.tailLimit < 1) {
 		d := e.difference()
 		r := d.rhp

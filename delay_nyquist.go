@@ -132,12 +132,20 @@ func (l *delayLoop) addAxisPole(w float64, mult int) {
 // rationalTailBound bounds |L(s)| for Re s >= 0 and |s| >= w from the
 // augmented realization H = Daug + Caug(sI-A)^{-1}Baug of the delay LFT,
 // using |c(sI-A)^{-1}b| <= ‖c‖‖b‖/(|s|-‖A‖₂), |e^{-sτ}| <= 1 and the finite
-// Neumann series of the acyclic delay loop.
+// Neumann series of the acyclic delay loop. Each block of H is invariant
+// under state similarity, so its bound is the smaller of those from the
+// given and the jointly balanced (A, Baug, Caug): a companion form's ‖A‖₂
+// can exceed its spectral radius by orders of magnitude, which would
+// stretch the delay grid to ‖A‖₂.
 type rationalTailBound struct {
-	normA float64
+	reals []tailRealization
 	d     []float64 // (1+N)×(1+N) |Daug|
-	c, b  []float64 // row norms of Caug, column norms of Baug
 	nd    int
+}
+
+type tailRealization struct {
+	normA float64
+	c, b  []float64 // row norms of Caug, column norms of Baug
 }
 
 func newRationalTailBound(sys *System) (*rationalTailBound, error) {
@@ -147,18 +155,21 @@ func newRationalTailBound(sys *System) (*rationalTailBound, error) {
 		return nil, fmt.Errorf("internal delay feedback cycle: %w", ErrContinuousInternalDelay)
 	}
 	k := 1 + nd
-	r := &rationalTailBound{d: make([]float64, k*k), c: make([]float64, k), b: make([]float64, k), nd: nd}
-	if n > 0 {
-		r.normA = spectralNorm(sys.A)
-	}
+	r := &rationalTailBound{d: make([]float64, k*k), nd: nd}
 	r.d[0] = math.Abs(sys.D.At(0, 0))
-	r.c[0] = rowNorm(sys.C, 0)
-	r.b[0] = colNorm(sys.B, 0)
+	br := augmentedRealization(sys, n, nd)
+	given := br.tailRealization()
+	r.reals = []tailRealization{given}
+	if n > 0 {
+		r.reals[0].normA = spectralNorm(sys.A)
+		br.balance(nil)
+		bal := br.tailRealization()
+		bal.normA = spectralNorm(mat.NewDense(n, n, br.a))
+		r.reals = append(r.reals, bal)
+	}
 	if nd > 0 {
 		lft := sys.LFT
 		for i := range nd {
-			r.c[1+i] = rowNorm(lft.C2, i)
-			r.b[1+i] = colNorm(lft.B2, i)
 			if lft.D12 != nil {
 				r.d[1+i] = math.Abs(lft.D12.At(0, i))
 			}
@@ -173,6 +184,53 @@ func newRationalTailBound(sys *System) (*rationalTailBound, error) {
 		}
 	}
 	return r, nil
+}
+
+// augmentedRealization copies (A, [B B2], [C; C2]) unscaled.
+func augmentedRealization(sys *System, n, nd int) balancedRealization {
+	k := 1 + nd
+	br := balancedRealization{n: n, m: k, p: k, a: make([]float64, n*n), b: make([]float64, n*k), c: make([]float64, k*n)}
+	if n == 0 {
+		return br
+	}
+	a := sys.A.RawMatrix()
+	copyStrided(br.a, n, a.Data, a.Stride, n, n)
+	for i := range n {
+		br.b[i*k] = sys.B.At(i, 0)
+		br.c[i] = sys.C.At(0, i)
+	}
+	if nd == 0 {
+		return br
+	}
+	lft := sys.LFT
+	for i := range n {
+		for j := range nd {
+			if lft.B2 != nil {
+				br.b[i*k+1+j] = lft.B2.At(i, j)
+			}
+			if lft.C2 != nil {
+				br.c[(1+j)*n+i] = lft.C2.At(j, i)
+			}
+		}
+	}
+	return br
+}
+
+func (br *balancedRealization) tailRealization() tailRealization {
+	n, k := br.n, br.m
+	t := tailRealization{c: make([]float64, k), b: make([]float64, k)}
+	if n == 0 {
+		return t
+	}
+	col := make([]float64, n)
+	for j := range k {
+		for i := range n {
+			col[i] = br.b[i*k+j]
+		}
+		t.b[j] = mat.Norm(mat.NewVecDense(n, col), 2)
+		t.c[j] = mat.Norm(mat.NewVecDense(n, br.c[j*n:(j+1)*n]), 2)
+	}
+	return t
 }
 
 func rowNorm(m *mat.Dense, i int) float64 {
@@ -202,14 +260,23 @@ func (r *rationalTailBound) at(w float64) float64 {
 	h := make([]float64, k*k)
 	for i := range k {
 		for j := range k {
-			v := r.d[i*k+j]
-			if cb := r.c[i] * r.b[j]; cb > 0 && !math.IsInf(w, 1) {
-				if w <= r.normA {
-					return math.Inf(1)
-				}
-				v += cb / (w - r.normA)
+			h[i*k+j] = r.d[i*k+j]
+			if math.IsInf(w, 1) {
+				continue
 			}
-			h[i*k+j] = v
+			best := math.Inf(1)
+			for _, t := range r.reals {
+				switch cb := t.c[i] * t.b[j]; {
+				case cb == 0:
+					best = 0
+				case w > t.normA:
+					best = min(best, cb/(w-t.normA))
+				}
+			}
+			if math.IsInf(best, 1) {
+				return best
+			}
+			h[i*k+j] += best
 		}
 	}
 	bound := h[0]
