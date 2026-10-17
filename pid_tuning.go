@@ -54,11 +54,9 @@ const (
 type PIDTuningError struct {
 	Op       string
 	Evidence PIDTuningEvidence
-	// unstable: candidates reached the stability check and all failed it.
 	// excess: least |S| excess among candidates meeting the margins; 0 if
 	// none did or the bound was off.
-	unstable bool
-	excess   float64
+	excess float64
 }
 
 func (e *PIDTuningError) Error() string {
@@ -85,8 +83,9 @@ type PIDTuningOptions struct {
 	Focus              PIDDesignFocus
 	IFormula, DFormula PIDFormula
 	Weights            *PIDTuningWeights
-	// MaxEvaluations bounds candidate evaluations over the whole call,
-	// fallbacks included, 1..4096; 0 means 4096.
+	// MaxEvaluations bounds candidate evaluations of each TunePID search,
+	// 1..4096; 0 means 4096. The ±3° attempt and each moved crossover are
+	// searches; the floor bands share one. Evidence counts the whole call.
 	MaxEvaluations int
 	// UnstablePoles is optional user knowledge for TunePIDFRD; nil means
 	// unknown. TunePID rejects it with ErrOptionUnsupported.
@@ -208,7 +207,10 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // at every sampled frequency, since a margin met at the crossover alone does
 // not bound it there. Only when neither the default nor the moved crossovers
 // meet PM±3° does the margin become a floor at the original crossover, as in
-// pidtune: the design takes the nearest feasible margin above PM. A
+// pidtune: the design takes the nearest feasible 6° band above PM. Bands
+// whose phase is out of reach with |L| ≥ 1 below the crossover are skipped,
+// and under the |S| bound the bands stop once the excess stops falling, so
+// a feasible band can be missed. A
 // continuous delayed loop with an ideal derivative must keep
 // limsup |L(jω)| <= ½, so a near-neutral loop is rejected even when its
 // sampled margins look healthy.
@@ -249,12 +251,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if plant.Dt > 0 {
 		tau *= plant.Dt
 	}
-	// MaxEvaluations caps the whole call: the ±3° attempt, moved crossovers
-	// and floor bands draw on one budget, and the evidence counts them all.
-	budget, used := opts.MaxEvaluations, 0
-	if budget == 0 {
-		budget = 4096
-	}
+	used := 0
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
 		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: wc * 100, at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
@@ -304,7 +301,6 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if floor {
 			tune = tunePIDFloor
 		}
-		opts.MaxEvaluations = budget - used
 		res, err := tune(ctx, "TunePID", p, family, opts)
 		if eval.err != nil {
 			return nil, fmt.Errorf("TunePID: %w", eval.err)
@@ -327,17 +323,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			return res, err
 		}
 		ev.Evaluations = used
-		if used >= budget {
-			ev.Termination = PIDTerminationEvaluationLimit
-		}
 		return res, err
 	}
-	// The ±3° band is tried first; failing that, the margin is a floor,
-	// unless every candidate meeting the band was unstable: raising the
-	// margin at the same crossover only adds the gain that destabilized them.
+	// The ±3° band is tried first; failing that, the margin is a floor.
 	withFloor := func(wc, gainSign float64, robust bool, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
-		var te *PIDTuningError
-		if !errors.As(err, &te) || te.unstable || used >= budget {
+		if !errors.As(err, new(*PIDTuningError)) {
 			return stamp(res, err)
 		}
 		r, e := tuneAt(wc, gainSign, robust, true)
@@ -373,9 +363,6 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	ladderWarning := ""
 	for _, lead := range []float64{15, 30, 45, 60} {
-		if used >= budget {
-			break
-		}
 		wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
 		if eval.err != nil {
 			return nil, fmt.Errorf("TunePID: %w", eval.err)
@@ -409,16 +396,35 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 // phase of sign·G(jω), unwrapped from its wrapped value at wLo, falls to
 // target degrees.
 func pidTuningPhaseCrossing(at func(float64) complex128, sign, target, wLo, wHi, tau float64) (float64, bool) {
+	w, _, ok := pidTuningPhaseWalk(at, sign, target, wLo, wHi, tau)
+	return w, ok
+}
+
+// pidTuningUnwrappedPhase returns the phase in degrees of sign·G(jw),
+// unwrapped from its wrapped value at w·1e-6, or NaN when the walk fails.
+func pidTuningUnwrappedPhase(at func(float64) complex128, sign, w, tau float64) float64 {
+	end, phase, ok := pidTuningPhaseWalk(at, sign, math.Inf(-1), w*1e-6, w, tau)
+	if ok || end != w {
+		return math.NaN()
+	}
+	return phase
+}
+
+// pidTuningPhaseWalk walks the unwrapped phase of sign·G(jω) up from wLo.
+// It returns the first ω at which the phase falls to target degrees, or
+// false with wHi and the phase there in degrees; a nonfinite or zero
+// response ends the walk with ω = 0.
+func pidTuningPhaseWalk(at func(float64) complex128, sign, target, wLo, wHi, tau float64) (float64, float64, bool) {
 	target *= math.Pi / 180
 	w := wLo
 	g := complex(sign, 0) * at(w)
 	if !pidFiniteComplex(g) || g == 0 {
-		return 0, false
+		return 0, 0, false
 	}
 	phase := cmplx.Phase(g)
 	for range 1 << 16 {
 		if w >= wHi {
-			return 0, false
+			return w, phase * 180 / math.Pi, false
 		}
 		next := math.Min(w*1.02, wHi)
 		if tau > 0 {
@@ -429,7 +435,7 @@ func pidTuningPhaseCrossing(at func(float64) complex128, sign, target, wLo, wHi,
 		for {
 			ng = complex(sign, 0) * at(next)
 			if !pidFiniteComplex(ng) || ng == 0 {
-				return 0, false
+				return 0, 0, false
 			}
 			step = cmplx.Phase(ng / g)
 			if math.Abs(step) <= math.Pi/2 || next-w < 1e-12*w {
@@ -438,11 +444,11 @@ func pidTuningPhaseCrossing(at func(float64) complex128, sign, target, wLo, wHi,
 			next = w + (next-w)/2
 		}
 		if phase+step <= target {
-			return w + (next-w)*(phase-target)/(-step), true
+			return w + (next-w)*(phase-target)/(-step), target * 180 / math.Pi, true
 		}
 		w, g, phase = next, ng, phase+step
 	}
-	return 0, false
+	return 0, 0, false
 }
 
 func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
@@ -620,7 +626,6 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	var best, incumbent PID2
 	var bestParts PIDTuningObjective
 	signRejected, sensitivityRejected := false, false
-	stabilityChecked, stableFound := false, false
 	evaluate := func(candidate PID2) error {
 		if evidence.Evaluations >= o.MaxEvaluations {
 			return nil
@@ -652,17 +657,6 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		if !finitePID(j) || j >= bestScore {
 			return nil
 		}
-		if p.stable != nil {
-			stable, err := p.stable(&candidate)
-			if err != nil {
-				return fmt.Errorf("stability check: %w", err)
-			}
-			stabilityChecked = true
-			if !stable {
-				return nil
-			}
-			stableFound = true
-		}
 		// A free one-gain design has no margin to hold at other crossovers:
 		// with a model-based stability certificate it needs only positive
 		// margins and reports its lowest. Sampled responses keep the floor,
@@ -678,6 +672,15 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		_, margins := pidTuningCrossings(p, candidate, omega, wc)
 		for _, margin := range margins {
 			if margin < floor || relaxed && margin <= 0 {
+				return nil
+			}
+		}
+		if p.stable != nil {
+			stable, err := p.stable(&candidate)
+			if err != nil {
+				return fmt.Errorf("stability check: %w", err)
+			}
+			if !stable {
 				return nil
 			}
 		}
@@ -769,7 +772,7 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		if sensitivityRejected {
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a sensitivity peak above %g at the default crossover; such designs are rejected.", p.maxSensitivity))
 		}
-		e := &PIDTuningError{Op: op, Evidence: evidence, unstable: stabilityChecked && !stableFound}
+		e := &PIDTuningError{Op: op, Evidence: evidence}
 		if finitePID(incumbentExcess) {
 			e.excess = incumbentExcess
 		}
@@ -820,8 +823,15 @@ func pidTuningTerms(family PidtuneType) (hasP, hasI, hasD, filtered, ok bool) {
 // loop phase at wc within 3° of −180°+pm. Gains of one sign span the cone
 // of the term phasors; a filter only pulls the derivative phasor toward the
 // proportional one, so its smallest admissible Tf bounds the cone. Unknown
-// gain sign, or a cone wider than a half-plane, reaches every phase.
-func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions, pm float64) bool {
+// gain sign reaches every phase.
+//
+// phase is the unwrapped phase of gainSign·G(jwc) in degrees, or NaN. The
+// loop phase starts within ±90° at low frequency, so if |L| ≥ 1 below wc,
+// a stable loop needs its unwrapped phase at wc above −180°; with phase
+// known the band is judged unwrapped. This excludes designs whose |L|
+// dips below 1 and recovers below wc. Otherwise a cone wider than a
+// half-plane reaches every phase.
+func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions, pm, phase float64) bool {
 	hasP, hasI, hasD, filtered, ok := pidTuningTerms(family)
 	if !ok || p.gainSign == 0 {
 		return true
@@ -842,10 +852,14 @@ func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions
 			lo, hi = math.Min(lo, a), math.Max(hi, a)
 		}
 	}
+	want := -180 + pm
+	if !math.IsNaN(phase) {
+		return want >= phase+lo-3-1e-9 && want <= phase+hi+3+1e-9
+	}
 	if hi-lo >= 180 {
 		return true
 	}
-	want := -180 + pm - cmplx.Phase(complex(p.gainSign, 0)*p.at(wc))*180/math.Pi
+	want -= cmplx.Phase(complex(p.gainSign, 0)*p.at(wc)) * 180 / math.Pi
 	return !(math.Abs(math.Remainder(want-(lo+hi)/2, 360)) > (hi-lo)/2+3+1e-9)
 }
 
@@ -853,10 +867,10 @@ func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions
 // ±3° band around it is unattainable: it targets the nearest band above,
 // stepping 6° so the bands tile [PM+3°, 180°], and keeps PM−3° at the other
 // crossovers. A free one-gain design already targets its own margin. The
-// bands share the caller's remaining evaluation budget. Bands no candidate
-// phase can reach are skipped, and the search stops once a band is
-// hopeless: all its candidates unstable, since a higher margin only adds
-// lead, or |S| excess no smaller than that of the band below.
+// bands share one evaluation budget. Bands pidTuningReachable rules out are
+// skipped. Under an |S| bound the search stops once a band's least excess
+// is no smaller than the band below's: a heuristic for speed, since a later
+// band's controller shape may still meet the bound.
 func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	fam := PidtuneType(strings.ToUpper(string(family)))
 	if o.PhaseMargin == 0 && (fam == PidtuneP || fam == PidtuneI) {
@@ -872,9 +886,13 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 	}
 	p.crossFloor, p.hasCrossFloor = pm-3, true
 	used, excess := 0, 0.
+	phase := math.NaN()
+	if p.gainSign != 0 {
+		phase = pidTuningUnwrappedPhase(p.at, p.gainSign, o.CrossoverFrequency, p.tau)
+	}
 	last := &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: o.CrossoverFrequency, RequestedPhaseMargin: pm, Stability: p.stability}}
 	for target := pm + 6; target < 180 && used < budget; target += 6 {
-		if !pidTuningReachable(p, fam, o, target) {
+		if !pidTuningReachable(p, fam, o, target, phase) {
 			continue
 		}
 		o.PhaseMargin = target
@@ -882,7 +900,7 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 		r, err := tunePID(ctx, op, p, family, o)
 		if errors.As(err, &last) {
 			used += last.Evidence.Evaluations
-			if last.unstable || last.excess > 0 && excess > 0 && last.excess >= excess {
+			if last.excess > 0 && excess > 0 && last.excess >= excess {
 				break
 			}
 			excess = last.excess

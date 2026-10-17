@@ -49,9 +49,10 @@ func pidDelayedLag(t *testing.T, a, tau float64) *System {
 	return p
 }
 
-// MaxEvaluations caps the ±3° attempt, the moved crossovers and the floor
-// bands together, and Evidence.Evaluations counts all of them.
-func TestTunePIDEvaluationBudgetCoversWholeCall(t *testing.T) {
+// MaxEvaluations caps each search: the ±3° attempt, each of up to four
+// moved crossovers, and the floor bands together. Evidence.Evaluations
+// counts all of them.
+func TestTunePIDEvaluationBudgetPerSearch(t *testing.T) {
 	cases := []struct {
 		name   string
 		plant  *System
@@ -64,37 +65,32 @@ func TestTunePIDEvaluationBudgetCoversWholeCall(t *testing.T) {
 	for _, c := range cases {
 		for _, limit := range []int{60, 400} {
 			_, ev, searches, _ := pidTuneCounted(t, c.plant, c.family, PIDTuningOptions{MaxEvaluations: limit})
-			bound := limit
-			if bound == 0 {
-				bound = 4096
-			}
 			// One ±3° attempt, four moved crossovers and 20 floor bands at most.
-			if ev.Evaluations > bound || searches < 1 || searches > 25 {
+			// At 60 the ±3° attempt exhausts its cap, so later searches add more.
+			if ev.Evaluations > 6*limit || searches < 1 || searches > 25 || limit == 60 && searches > 1 && ev.Evaluations <= limit {
 				t.Errorf("%s limit %d: %d evaluations reported, %d searches inferred", c.name, limit, ev.Evaluations, searches)
-			}
-			if ev.Evaluations == bound && ev.Termination != PIDTerminationEvaluationLimit {
-				t.Errorf("%s limit %d: termination %q at the cap", c.name, limit, ev.Termination)
 			}
 		}
 	}
 }
 
 // On 1/(s(s+1)) a PI controller adds phase lead at wc only with Ki < 0, and
-// s³ + s² + Kp s + Ki then fails Routh. Every candidate meeting PM 75°±3° is
-// unstable, as is every candidate above, so the floor is not searched.
-func TestTunePIDFloorSkippedWhenBandUnstable(t *testing.T) {
+// s³ + s² + Kp s + Ki then fails Routh. Every band is unattainable, but an
+// all-unstable band does not stop the floor: the controller shape changes
+// with the target, so a later band may hold a stable design.
+func TestTunePIDFloorSearchedPastUnstableBand(t *testing.T) {
 	p := makePlant(t, []float64{1}, []float64{1, 1, 0})
 	_, ev, searches, err := pidTuneCounted(t, p, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 75})
 	if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		t.Fatalf("err %v", err)
 	}
-	if searches != 1 || ev.Evaluations == 0 {
-		t.Fatalf("%d searches, %d evaluations; want only the ±3° search", searches, ev.Evaluations)
+	if searches < 2 || ev.Evaluations == 0 {
+		t.Fatalf("%d searches, %d evaluations; want the floor searched", searches, ev.Evaluations)
 	}
 }
 
 // A P controller has no phase of its own: on 1/(s+1) at wc = 1 only the
-// 135° band is reachable, so the floor skips straight to it and fits a
+// 135° band is reachable, so the floor skips straight to it within its
 // 40-evaluation budget. Kp = √2 gives |L(j)| = 1 and PM = 180° − 45°.
 func TestTunePIDFloorSkipsUnreachableBands(t *testing.T) {
 	r, ev, searches, err := pidTuneCounted(t, pidDelayedLag(t, 1, 0), PidtuneP, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 45, MaxEvaluations: 40})
@@ -104,7 +100,7 @@ func TestTunePIDFloorSkipsUnreachableBands(t *testing.T) {
 	if math.Abs(r.Controller.Kp-math.Sqrt2) > 1e-9 || math.Abs(ev.AchievedPhaseMargin-135) > 1e-6 {
 		t.Fatalf("Kp %g margin %g, want √2 and 135", r.Controller.Kp, ev.AchievedPhaseMargin)
 	}
-	if ev.Evaluations > 40 || searches != 2 {
+	if ev.Evaluations > 80 || searches != 2 {
 		t.Fatalf("%d evaluations, %d searches", ev.Evaluations, searches)
 	}
 }
