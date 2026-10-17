@@ -314,13 +314,25 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 //
 // When both fail for a default-crossover PI, PID or PIDF design on a stable
 // delayed plant, and either a candidate exceeded |S| <= 4 or a lightly damped
-// mode lies within a factor 100 of the default, the crossover backs off by
-// half octaves to 1/1024 of the default, each tried at PM±3° then as a floor
-// under |S| <= 4 sampled up to 100× the default. After the two shallowest,
-// the two deepest are tried and, both failing, end the back-off; otherwise
-// the shallowest design within one evaluation budget is returned, or the
-// deep one when the budget runs out: a lightly damped resonance near the delay cap can leave only a
-// low-bandwidth design, as pidtune returns.
+// mode lies within a factor 100 of the default, the crossover backs off in
+// half octaves, down to 1/1024 of the default, under |S| <= 4 sampled up to
+// 100× the default. Each crossover tried targets PM±3° where the plant phase
+// can reach it, then only the floor's lowest reachable band. Depths are tried
+// in a fixed order within one evaluation budget: the two shallowest, then the
+// two deepest, then depths 9, 12 and 16 (crossovers 2^-4.5, 2^-6 and 2^-8 of
+// the default); if all fail, the back-off ends. Otherwise the depths between
+// the shallow pair and the first that succeeded are scanned shallowest first
+// and the first design is returned, or that one if the budget runs out: a
+// lightly damped resonance near the delay cap can leave only a low-bandwidth
+// design, as pidtune returns.
+//
+// Another gain crossover whose wrapped margin is −floor or below has ∠L in
+// (0°, 180° − floor], at least the floor from −1 the other way round: it
+// passes when a pole or Nyquist check certifies the loop stable, or, with
+// sampled data only, when the loop phase unwrapped from the target crossover
+// sits one turn up there. Evidence reports wrapped margins, as allmargin does, and the achieved
+// margin is the least so evaluated. An unattainable target names the
+// crossover nearest to passing that failed.
 //
 // An unattainable target returns a *PIDTuningError (wrapping
 // ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
@@ -435,11 +447,13 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// then the floor's lowest admitted band only, which keeps a failing
 	// crossover near one search's minimum; a deep floor design sits there.
 	// All its searches share one budget. After the two shallowest depths,
-	// the two deepest, furthest from the delay and the resonance, gate the
-	// rest: when both fail no depth between is scanned, as a design there is
-	// rare, so an untunable plant costs four depths, not twenty. A pair
-	// rides out a depth that fails alone. When the scan between runs out of
-	// budget, the deep design is kept.
+	// the two deepest, furthest from the delay and the resonance, then
+	// depths 9, 12 and 16, gate the rest: the first of them to succeed opens
+	// a scan of the depths between it and the shallow pair, and when all
+	// fail the back-off ends, so an untunable plant costs seven depths, not
+	// twenty. Designs between can come in short runs (depths 13-18, 9-10,
+	// 12 alone on sweep plants), which the probes catch. When the scan
+	// between runs out of budget, the gate's design is kept.
 	backOff := func(wc0, gainSign, pm float64, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
 		minHigh, probing = wc0*100, true
 		budget, start := opts.MaxEvaluations, used
@@ -492,6 +506,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			return stamp(r, e)
 		}
 		deep, gate, e := first(deepest, deepest-1)
+		for _, j := range []int{9, 12, 16} {
+			if deep != nil || e != nil || used-start >= budget {
+				break
+			}
+			deep, gate, e = first(j, j)
+		}
 		if e != nil {
 			return nil, e
 		}

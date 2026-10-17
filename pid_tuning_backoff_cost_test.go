@@ -92,7 +92,8 @@ func TestTunePIDBackOffStopsAtFirstDesign(t *testing.T) {
 // An RHP zero and a ζ=0.03 mode near wc0 leave no same-sign PID or PIDF at
 // any depth, and the scan down from wc0 tried all twenty: 4197 and 4229
 // evaluations against base 15ca52c's 202 and 133. After the two shallowest
-// depths the back-off tries the two deepest and, both failing, stops. Oracle
+// depths the back-off tries the two deepest and depths 9, 12 and 16 and,
+// all failing, stops at about a quarter of that. Oracle
 // for "no design": a full scan of every depth, each with its own budget,
 // found none.
 func TestTunePIDBackOffFailsFastWhenDeepestFail(t *testing.T) {
@@ -104,8 +105,8 @@ func TestTunePIDBackOffFailsFastWhenDeepestFail(t *testing.T) {
 			t.Errorf("%s: %v, want unattainable", fam, err)
 			continue
 		}
-		if te.Evidence.Evaluations > 600 {
-			t.Errorf("%s: %d evaluations, want <= 600", fam, te.Evidence.Evaluations)
+		if te.Evidence.Evaluations > 1600 {
+			t.Errorf("%s: %d evaluations, want <= 1600", fam, te.Evidence.Evaluations)
 		}
 		if !slices.ContainsFunc(te.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "also tried") }) {
 			t.Errorf("%s: no back-off in %q", fam, te.Evidence.Warnings)

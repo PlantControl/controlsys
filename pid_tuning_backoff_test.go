@@ -18,7 +18,10 @@ import (
 // |S| there was unchecked and reached 7.7. The third, with an RHP zero, has
 // PIDF designs only from 2⁻⁹·wc0 down; the scan down from wc0 spent the
 // budget first and failed, and the deep design is now kept. The last two,
-// TestTunePIDBackOffProbesShallowFirst's, back off one or two depths.
+// TestTunePIDBackOffProbesShallowFirst's, back off one or two depths. The
+// two after, from a seeded sweep, have designs only at depths 13-18 and
+// 12-17 (PID at 12 alone) while both deepest fail, so the deep gate lost
+// them; the mid-depth probes find them.
 // Oracles: dense
 // margins, dense |S| over the default and backed-off bands, and the winding of 1+L(jω), +90°
 // for a stable loop with one integrator.
@@ -33,6 +36,8 @@ func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
 		{[]float64{3.1016, -.99088}, []float64{1, 1.02767, .71308, .45281, .113657}, .03776, []PidtuneType{PidtunePIDF}},
 		{[]float64{4469.208567469051, 3872.5108510086206}, []float64{1, .13029988431555797, 635.262873587796}, .0008295413703164025, []PidtuneType{PidtunePI}},
 		{[]float64{50939.635002137285}, []float64{1, 74.35099627689756, 84.57397936219536, 6173.81323963725}, .01232428206353334, []PidtuneType{PidtunePID}},
+		{[]float64{-829.9233529498596, 385.9534649577797}, []float64{1, 1.3979863130162498, 88.69018768710332, 59.61767784915426}, .06820806116630618, []PidtuneType{PidtunePID}},
+		{[]float64{.7432501908577885, .11503292699378517}, []float64{1, .04811033390987361, 17.226160634569503, .6708668130621463}, .45827350160174746, []PidtuneType{PidtunePI, PidtunePID}},
 	} {
 		plant := makePlant(t, c.num, c.den)
 		if err := plant.SetInputDelay([]float64{c.tau}); err != nil {
