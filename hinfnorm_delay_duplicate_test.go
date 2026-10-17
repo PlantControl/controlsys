@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"math/rand"
@@ -205,5 +206,167 @@ func TestDelayNyquistNearNeutralBudget(t *testing.T) {
 		if res.roots != c.roots || res.stable != (c.roots == 0) {
 			t.Errorf("eps=%g seed=%d: %d RHP roots (stable %v), oracle %d", c.eps, c.seed, res.roots, res.stable, c.roots)
 		}
+	}
+}
+
+// nearNeutralSISODelayLoop draws randomSISODelayLoop, for odd seeds with a
+// slow pole, a larger loop gain and a longer delay, and sets |d22| within
+// eps of 1.
+func nearNeutralSISODelayLoop(seed int64, eps float64) sisoDelayLoop {
+	rng := rand.New(rand.NewSource(seed))
+	p := randomSISODelayLoop(rng)
+	if seed%2 == 1 {
+		p.a = -0.05 - 3*rng.Float64()
+		p.b2 *= 1 + 3*rng.Float64()
+		p.h = 0.1 + 3*rng.Float64()
+	}
+	p.d22 = math.Copysign(1-eps*rng.Float64(), p.d22)
+	return p
+}
+
+// rectRoots counts the roots of χ(s) = (s−a)(1−d22·e^{−sh}) − b2c2·e^{−sh}
+// in Re s > 0 by the argument principle on the rectangle [0, R]×[−R, R],
+// R past |s−a| <= |b2c2|/(1−|d22|) that holds them all, bisecting each
+// boundary piece until arg χ moves by less than π/16 and log|χ| by less than
+// 0.2.
+func (p sisoDelayLoop) rectRoots() int {
+	bc := complex(p.b2*p.c2, 0)
+	h := complex(p.h, 0)
+	chi := func(s complex128) complex128 {
+		e := cmplx.Exp(-s * h)
+		return (s-complex(p.a, 0))*(1-complex(p.d22, 0)*e) - bc*e
+	}
+	R := math.Abs(p.b2*p.c2)/(1-math.Abs(p.d22)) + math.Abs(p.a) + 1
+	corners := []complex128{complex(0, -R), complex(R, -R), complex(R, R), complex(0, R), complex(0, -R)}
+	turn := 0.0
+	var walk func(a, b, fa, fb complex128, depth int)
+	walk = func(a, b, fa, fb complex128, depth int) {
+		d := wrapPi(cmplx.Phase(fb) - cmplx.Phase(fa))
+		if math.Abs(d) < math.Pi/16 && math.Abs(math.Log(cmplx.Abs(fb)/cmplx.Abs(fa))) < 0.2 || depth > 60 {
+			turn += d
+			return
+		}
+		m := (a + b) / 2
+		fm := chi(m)
+		walk(a, m, fa, fm, depth+1)
+		walk(m, b, fm, fb, depth+1)
+	}
+	for i := range len(corners) - 1 {
+		a, b := corners[i], corners[i+1]
+		n := int(cmplx.Abs(b-a)*p.h*16) + 16
+		for k := range n {
+			s0 := a + (b-a)*complex(float64(k)/float64(n), 0)
+			s1 := a + (b-a)*complex(float64(k+1)/float64(n), 0)
+			walk(s0, s1, chi(s0), chi(s1), 0)
+		}
+	}
+	return int(math.Round(turn / (2 * math.Pi)))
+}
+
+// pair returns the block-diagonal of p and q.
+func (p sisoDelayLoop) pair(t *testing.T, q sisoDelayLoop) *System {
+	t.Helper()
+	a := make([]float64, 4)
+	b := make([]float64, 8)
+	c := make([]float64, 8)
+	d := make([]float64, 16)
+	tau := make([]float64, 2)
+	for i, p := range []sisoDelayLoop{p, q} {
+		a[i*2+i] = p.a
+		b[i*4+i], b[i*4+2+i] = p.b1, p.b2
+		c[i*2+i], c[(2+i)*2+i] = p.c1, p.c2
+		d[i*4+i], d[i*4+2+i] = p.d11, p.d12
+		d[(2+i)*4+i], d[(2+i)*4+2+i] = p.d21, p.d22
+		tau[i] = p.h
+	}
+	H, err := NewFromSlices(2, 4, 4, a, b, c, d, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys, err := SetDelayModel(H, tau)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// TestHinfNormDelayNearNeutralReplica: with |d22| near 1 the normalized loop
+// det(I − H22Δ)/det(I − D22Δ) of k identical channels has poles of order k
+// near the axis, where its phase turns by about kπ within one grid step and a
+// 2π turn passes for a small one. The count went wrong both ways: too few
+// (finite norm of an unstable replica) and negative (+Inf for a stable one).
+// Two channels whose d22 differ by 1e-7 split each double root into a close
+// pair.
+func TestHinfNormDelayNearNeutralReplica(t *testing.T) {
+	cases := []struct {
+		name  string
+		p     sisoDelayLoop
+		roots int
+		pair  bool
+	}{
+		{name: "false stable", p: sisoDelayLoop{a: -3.4495080813388497, b1: -0.057854272810938155, b2: 0.16092035055548803,
+			c1: 0.6025740677484148, c2: -1.0552115640699384, d11: 0.38036538276901166, d12: -2.4122147266495095,
+			d21: 0.9918311278676921, d22: -0.9993353290172704, h: 0.10841451899761129}, roots: 2},
+		{name: "false unstable", p: sisoDelayLoop{a: -1.7122239672475017, b1: -0.4806591033435851, b2: 1.1423007290835272,
+			c1: 0.20220161351732413, c2: 0.6884135686976489, d11: -0.04704061087516162, d12: -0.9007179545656091,
+			d21: 0.1134943999550504, d22: -0.9940874638769287, h: 1.9262380841867917}, roots: 0},
+		{name: "eps 0.01 seed 10", p: nearNeutralSISODelayLoop(10, 0.01), roots: 0},
+		{name: "eps 0.01 seed 7", p: nearNeutralSISODelayLoop(7, 0.01), roots: 20},
+		{name: "pair eps 0.03 seed 84", p: nearNeutralSISODelayLoop(84, 0.03), roots: 0, pair: true},
+		{name: "pair eps 0.03 seed 7", p: nearNeutralSISODelayLoop(7, 0.03), roots: 12, pair: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.p.rectRoots(); got != c.roots {
+				t.Fatalf("oracle %d RHP roots, want %d", got, c.roots)
+			}
+			want, _, err := HinfNorm(c.p.siso(t))
+			if err != nil || math.IsInf(want, 1) != (c.roots > 0) {
+				t.Fatalf("SISO HinfNorm = %g, %v; oracle %d roots", want, err, c.roots)
+			}
+			sys, n := c.p.replicate(t, 1, 1, 1, 1), 4
+			if c.pair {
+				q := c.p
+				q.d22 *= 1 + 1e-7
+				if got := q.rectRoots(); got != c.roots {
+					t.Fatalf("perturbed oracle %d RHP roots", got)
+				}
+				wq, _, err := HinfNorm(q.siso(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = max(want, wq)
+				sys, n = c.p.pair(t, q), 2
+			}
+			e, err := newDelayLFT(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, res, err := e.stability()
+			if err != nil || res.roots != n*c.roots {
+				t.Errorf("%d RHP roots, %v; oracle %d", res.roots, err, n*c.roots)
+			}
+			got, _, err := HinfNorm(sys)
+			switch {
+			case err != nil:
+				t.Errorf("HinfNorm: %v", err)
+			case math.IsInf(want, 1) != math.IsInf(got, 1) || !math.IsInf(want, 1) && math.Abs(got-want) > 1e-6*want:
+				t.Errorf("HinfNorm = %g, SISO %g", got, want)
+			}
+		})
+	}
+}
+
+// TestDelayNyquistNegativeCount: 1+L = (s+1)/(s−1) winds once
+// counterclockwise, which with no open-loop RHP pole on record gives −1
+// closed-loop roots; that count is impossible and must not read as unstable.
+func TestDelayNyquistNegativeCount(t *testing.T) {
+	l := &delayLoop{
+		at:     func(w float64) complex128 { return 2 / complex(-1, w) },
+		tail:   func(w float64) float64 { return 2 / math.Max(w-1, 0) },
+		scales: []float64{1},
+	}
+	if res, err := l.nyquist(0.5); !errors.Is(err, errDelayLoopUnsupported) {
+		t.Fatalf("roots %d, stable %v, err %v", res.roots, res.stable, err)
 	}
 }

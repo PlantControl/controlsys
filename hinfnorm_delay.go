@@ -453,7 +453,7 @@ func (e *delayLFT) h(d, c, b, w float64) float64 {
 // certifies the tail on the imaginary axis only, for the grid of the L∞
 // peak, and the root count is then void.
 func (e *delayLFT) loop(axisOnly bool) *delayLoop {
-	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1))}
+	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1)), multiChannel: e.nd > 1}
 	if !(l.tailLimit < 1) {
 		d := e.difference()
 		r := d.rhp
