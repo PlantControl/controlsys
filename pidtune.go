@@ -244,12 +244,14 @@ const (
 // When that leading coefficient has the sign of a, as for every loop whose
 // L(∞) is 0, K·N(0)/a > 0 is forced if D(0)/a ≤ 0 (an integrator or an odd
 // count of unstable real poles) or integral is set: the DC gain sign of G
-// with integrators removed and unstable poles reflected.
+// with integrators removed and unstable poles reflected. A stable plant
+// with no DC sign and a pole at the integrator (pidtuneNearIntegrator) takes
+// this rule too.
 func pidtuneGainSign(plant *System, at func(float64) complex128, wc float64, integral bool) (float64, pidtuneSignRule) {
 	if s := pidTuningDCSign(plant, at, wc); s != 0 {
 		return s, pidtuneSignFixed
 	}
-	if stable, err := plant.IsStable(); err != nil || stable {
+	if stable, err := plant.IsStable(); err != nil || stable && !pidtuneNearIntegrator(plant, wc) {
 		return 1, pidtuneSignFixed
 	}
 	res, err := plant.rationalTransferFunction(nil)
@@ -297,6 +299,35 @@ func pidtuneGainSign(plant *System, at func(float64) complex128, wc float64, int
 		}
 	}
 	return 1, pidtuneSignGuessed
+}
+
+// pidtuneNearIntegrator returns whether plant has a pole within 1e-6·wc of
+// s = 0 (1e-6·wc·Dt of z = 1), or within 1e-8 of it relative to the largest
+// pole (to 1): rounding can leave an integrator just inside the stability
+// boundary, where it still acts as one over the design band.
+func pidtuneNearIntegrator(plant *System, wc float64) bool {
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return false
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return false
+	}
+	at, tol := complex(0, 0), 1e-6*wc
+	if plant.Dt > 0 {
+		at, tol = 1, max(tol*plant.Dt, 1e-8)
+	} else {
+		for _, p := range poles {
+			tol = max(tol, 1e-8*cmplx.Abs(p))
+		}
+	}
+	for _, p := range poles {
+		if cmplx.Abs(p-at) <= tol {
+			return true
+		}
+	}
+	return false
 }
 
 // pidtuneMirrorAdmissible returns whether a design against the forced sign

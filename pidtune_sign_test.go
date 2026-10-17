@@ -444,3 +444,50 @@ func TestPidtuneMirroredSignWhenLeadFlips(t *testing.T) {
 		}
 	}
 }
+
+// YVAIMU: rounding leaves the integrator of (0.1z+0.05)/((z−1)(z−0.999)²)
+// at z = 1−3.2e-10, so IsStable holds and the DC gain is +Inf. The sign rule
+// must still treat it as integrating: Pidtune(−G) mirrors Pidtune(G).
+// Oracle: roots of den·denC + num·numC with the exact integrator.
+func TestPidtuneNearIntegratorMirrors(t *testing.T) {
+	num, den := Poly{0.1, 0.05}, Poly{1, -1}.Mul(Poly{1, -0.999}).Mul(Poly{1, -0.999})
+	pos, neg := negatedPlant(t, num, den, .1)
+	for _, p := range []*System{pos, neg} {
+		stable, err := p.IsStable()
+		if err != nil || !stable {
+			t.Fatalf("precondition: IsStable %v, %v", stable, err)
+		}
+		eval, err := newSISOEval(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := pidTuningDCSign(p, eval.at, 1); s != 0 {
+			t.Fatalf("precondition: DC sign %g", s)
+		}
+	}
+	negNum := Poly{-num[0], -num[1]}
+	for _, c := range []struct {
+		f  PidtuneType
+		wc float64
+	}{{PidtunePID, 0}, {PidtuneP, 1e-3}, {PidtunePI, 1e-3}, {PidtunePID, 1e-3}} {
+		cp, err := Pidtune(pos, c.f, c.wc, nil)
+		if err != nil {
+			t.Fatalf("%s wc=%g: G: %v", c.f, c.wc, err)
+		}
+		cn, err := Pidtune(neg, c.f, c.wc, nil)
+		if err != nil {
+			t.Fatalf("%s wc=%g: −G: %v", c.f, c.wc, err)
+		}
+		for _, g := range [][2]float64{{cp.Kp, cn.Kp}, {cp.Ki, cn.Ki}, {cp.Kd, cn.Kd}} {
+			if math.Abs(g[0]+g[1]) > 1e-12*math.Abs(g[0]) {
+				t.Errorf("%s wc=%g: %+v, %+v not mirrored", c.f, c.wc, cp, cn)
+			}
+		}
+		if stable, ok := pidtuneOracleStable(t, cn, negNum, den, .1, 0); !ok || !stable {
+			t.Errorf("%s wc=%g: −G design %+v unstable", c.f, c.wc, cn)
+		}
+		if stable, ok := pidtuneOracleStable(t, cp, num, den, .1, 0); !ok || !stable {
+			t.Errorf("%s wc=%g: G design %+v unstable", c.f, c.wc, cp)
+		}
+	}
+}
