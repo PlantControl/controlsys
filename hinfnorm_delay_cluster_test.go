@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -236,14 +237,11 @@ func TestLimitVerdictMatrixCluster(t *testing.T) {
 				if (excess > 0) != c.finite {
 					t.Fatalf("oracle (max − lim)·ω² = %g, case wants finite = %v", excess, c.finite)
 				}
-				kappa, _, _, _, ok := x.clusterKappa(c.phi, 1e-9)
-				if !ok || math.Abs(kappa/(2*lim)-excess) > 0.02*math.Abs(excess) {
-					t.Fatalf("clusterKappa = %g (%v), κ/(2·lim) = %g, oracle %g", kappa, ok, kappa/(2*lim), excess)
-				}
 				finite, W, ok := x.limitVerdict(lim, 1e-10, 10, 1e6)
 				if !ok || finite != c.finite || (!finite && !(W > 0)) {
 					t.Fatalf("limitVerdict = %v, %g, %v; want finite = %v", finite, W, ok, c.finite)
 				}
+				checkClusterKappa(t, x, c.phi, lim, excess)
 			})
 		}
 	}
@@ -314,9 +312,95 @@ func TestClusterKappaSimple(t *testing.T) {
 				}
 				v, w := passageMax(sigma, c.h, phi, 1e4)
 				excess := (v - lim) * w * w
-				kappa, _, _, _, ok := x.clusterKappa(phi, 1e-9)
-				if !ok || math.Abs(kappa/(2*lim)-excess) > 0.02*math.Abs(excess) {
-					t.Fatalf("clusterKappa = %g (%v), κ/(2·lim) = %g, oracle %g", kappa, ok, kappa/(2*lim), excess)
+				checkClusterKappa(t, x, phi, lim, excess)
+			})
+		}
+	}
+}
+
+// checkClusterKappa checks that the bounds of clusterKappa at φ are tight
+// and hold κ/(2·lim) = excess, the passage oracle, to 2%.
+func checkClusterKappa(t *testing.T, x *highFrequencyExpansion, phi, lim, excess float64) {
+	t.Helper()
+	lo, hi, _, _, ok := x.clusterKappa(phi, 1e-9)
+	tol := 0.02 * math.Abs(excess) * 2 * lim
+	if !ok || !(hi-lo <= 1e-3*math.Abs(lo+hi)) || !(lo-tol <= 2*lim*excess && 2*lim*excess <= hi+tol) {
+		t.Fatalf("clusterKappa in [%g, %g] (%v), want κ = %g", lo, hi, ok, 2*lim*excess)
+	}
+}
+
+// TestPencilSupNarrowBranch checks pencilSup on the decoupled pencil
+// diag(−1 + 2s·b − 10⁻³·s², −1 + 2s·a′ − 10⁴·s²), a′ = √(1.5·10⁴): the
+// flat branch sets |s| <= sB ~ 10², the sharp one peaks at
+// −1 + a′²/10⁴ = 0.5 at s = a′/10⁴ ≈ 0.012, narrower than a uniform
+// sample spacing over [−sB, sB]. The exact sup is max of the two
+// branch maxima, −1 + b²/10⁻³ and 0.5.
+func TestPencilSupNarrowBranch(t *testing.T) {
+	ap := math.Sqrt(1.5e4)
+	for _, b := range []float64{0, 0.01, 0.04} {
+		q := [3][]complex128{{-1, 0, 0, -1}, {complex(2*b, 0), 0, 0, complex(2*ap, 0)}, {-1e-3, 0, 0, -1e4}}
+		want := max(-1+b*b/1e-3, 0.5)
+		lo, hi, ok := pencilSup(q, 2)
+		if !ok || !(lo <= want+1e-12) || !(want <= hi+1e-12) || hi-lo > 1e-6 {
+			t.Errorf("b = %g: pencilSup in [%.12g, %.12g] (%v), want %.12g", b, lo, hi, ok, want)
+		}
+		// Rotate by a unitary: the bounds must not change.
+		c, s := complex(math.Cos(0.7), 0), complex(0, math.Sin(0.7))
+		u := []complex128{c, -s, -s, c}
+		var qr [3][]complex128
+		for k := range q {
+			qr[k] = usw(u, q[k], u, 2, 2)
+		}
+		lo2, hi2, ok := pencilSup(qr, 2)
+		if !ok || !(lo2 <= want+1e-12) || !(want <= hi2+1e-12) || hi2-lo2 > 1e-6 {
+			t.Errorf("b = %g rotated: pencilSup in [%.12g, %.12g] (%v), want %.12g", b, lo2, hi2, ok, want)
+		}
+	}
+}
+
+// TestLimitVerdictMatrixClusterSharp checks diag(G, G) and U·diag(G, G)
+// of the sharp resonance model of TestHinfNormSharpResonanceLimit, where
+// c and a′²/α nearly cancel in κ < 0 and the peak has width about 1 − D22
+// in φ, so φ-derivatives need small steps: limitVerdict is +Inf or
+// undecided, never finite, and HinfNorm is sup σ_max(G∞) at +Inf, as for
+// the 1×2 model.
+func TestLimitVerdictMatrixClusterSharp(t *testing.T) {
+	for _, d22 := range []float64{0.999, 0.99999} {
+		for ri, rot := range rotations {
+			t.Run(fmt.Sprint(d22)+map[int]string{0: "/diag", 1: "/rot"}[ri], func(t *testing.T) {
+				g, _, gInf := sharpResonanceModel(t, d22)
+				sys, err := Append(g, g)
+				if err != nil {
+					t.Fatal(err)
+				}
+				u, err := NewGain(mat.NewDense(2, 2, rot[0]), 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if sys, err = Series(sys, u); err != nil {
+					t.Fatal(err)
+				}
+				e, err := newDelayLFT(sys)
+				if err != nil {
+					t.Fatal(err)
+				}
+				hf := newHighFrequencyGain(e)
+				x := newHighFrequencyExpansion(e, hf)
+				lim := hf.onePhaseSup()
+				if math.Abs(lim-gInf(0)) > 1e-12*lim {
+					t.Fatalf("sup σ_max(G∞) = %.15g, |G∞(0)| = %.15g", lim, gInf(0))
+				}
+				finite, W, ok := x.limitVerdict(lim, 1e-10, 10, 1e6)
+				t.Logf("limitVerdict = %v, %g, %v", finite, W, ok)
+				if ok && (finite || !(W > 0)) {
+					t.Fatalf("limitVerdict = %v, %g, %v; want +Inf or undecided", finite, W, ok)
+				}
+				got, w, err := HinfNorm(sys)
+				if err != nil {
+					t.Fatalf("HinfNorm: %v", err)
+				}
+				if !math.IsInf(w, 1) || math.Abs(got-lim) > 1e-9*lim {
+					t.Fatalf("HinfNorm = (%.15g, %g), want (%.15g, +Inf)", got, w, lim)
 				}
 			})
 		}

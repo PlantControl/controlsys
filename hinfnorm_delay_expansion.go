@@ -268,15 +268,18 @@ func (x *highFrequencyExpansion) coefficientsAt(theta []float64) (s2, a, c, scal
 	return s2, a, c, c, true
 }
 
-// clusterKappa returns κ = sup_s λ_max(K(s)) of gramPair.clusterPencil at
-// a maximiser φ of S of a matrix gain where σ_max(g0) is repeated: the
-// passage maxima have σ_max² − lim² ≈ κ·t² (for a simple σ_max K(s) =
-// c + 2s·a′ − s²·α, whose sup is c + a′²/α). It also returns μ1 (2a of the
-// top branches), the reach of the pencil and err, the change of κ from
-// φ-derivatives of g0, g1 by five-point stencils at step h = 10⁻²/k_max
-// to h/2. tolMu is the tolerance on μ for the top branches. ok is false
-// where I − D22Δ is singular nearby or the pencil is not concave in s.
-func (x *highFrequencyExpansion) clusterKappa(phi, tolMu float64) (kappa, mu1, reach, err float64, ok bool) {
+// clusterKappa returns bounds lo <= κ <= hi on κ = sup_s λ_max(K(s)) of
+// gramPair.clusterPencil at a maximiser φ of S of a matrix gain where
+// σ_max(g0) is repeated: the passage maxima have σ_max² − lim² ≈ κ·t²
+// (for a simple σ_max K(s) = c + 2s·a′ − s²·α, whose sup is c + a′²/α).
+// It also returns μ1 (2a of the top branches) and the reach of the pencil.
+// g0′, g1′, g0″ in φ come from five-point stencils at h = 10⁻¹/k_max·2^−i,
+// i = 0…30; κ is taken once its change over a halving has shrunk 8-fold
+// twice running (the O(h⁴) regime, past the width of a sharp peak), from
+// the h with the least change, which widens [lo, hi] twice over. tolMu is
+// the tolerance on μ for the top branches. ok is false where I − D22Δ is
+// singular nearby, the pencil is not concave in s, or κ does not settle.
+func (x *highFrequencyExpansion) clusterKappa(phi, tolMu float64) (lo, hi, mu1, reach float64, ok bool) {
 	if x.pair == nil {
 		x.pair = newGramPair(x.e.p, x.e.m)
 	}
@@ -288,8 +291,15 @@ func (x *highFrequencyExpansion) clusterKappa(phi, tolMu float64) (kappa, mu1, r
 		}
 	}
 	d0, d1, dd0 := make([]complex128, pm), make([]complex128, pm), make([]complex128, pm)
-	var res [2]float64
-	for i, h := range []float64{1e-2 / x.hf.kmax, 0.5e-2 / x.hf.kmax} {
+	if !x.at(phi) {
+		return 0, 0, 0, 0, false
+	}
+	s0 := x.sum(0)
+	s0 *= s0
+	prev, prevDiff, best := math.NaN(), math.Inf(1), math.Inf(1)
+	settled := 0
+	for i := range 31 {
+		h := math.Ldexp(0.1/x.hf.kmax, -i)
 		for j := range 5 {
 			if !x.at(phi + float64(j-2)*h) {
 				return 0, 0, 0, 0, false
@@ -309,12 +319,32 @@ func (x *highFrequencyExpansion) clusterKappa(phi, tolMu float64) (kappa, mu1, r
 		if !pok {
 			return 0, 0, 0, 0, false
 		}
-		if res[i], pok = pencilSup(q, r); !pok {
+		kLo, kHi, pok := pencilSup(q, r)
+		if !pok {
 			return 0, 0, 0, 0, false
 		}
-		mu1, reach = mu, rch
+		k := (kLo + kHi) / 2
+		if i > 0 {
+			diff := math.Abs(k - prev)
+			tiny := diff <= 1e-13*(math.Abs(k)+s0)
+			if tiny {
+				settled = 2
+			} else if diff <= prevDiff/8 {
+				settled++
+			} else if settled < 2 {
+				settled = 0
+			}
+			if settled >= 2 && diff < best {
+				best, lo, hi, mu1, reach = diff, kLo-2*diff, kHi+2*diff, mu, rch
+			}
+			if tiny || (settled >= 2 && diff > 2*prevDiff) {
+				break
+			}
+			prevDiff = diff
+		}
+		prev = k
 	}
-	return res[1], mu1, reach, math.Abs(res[1] - res[0]), true
+	return lo, hi, mu1, reach, settled >= 2
 }
 
 // polyLen is the number of coefficients of ‖Σ_{k<=N} t^k·g_k‖² in t.
@@ -788,17 +818,17 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 			if x.vector {
 				return false, 0, false
 			}
-			kappa, mu1, reach, kErr, kok := x.clusterKappa(phi, 2*eps)
+			kLo, kHi, mu1, reach, kok := x.clusterKappa(phi, 2*eps)
 			if !kok || math.Abs(mu1) > 2*eps {
 				return false, 0, false
 			}
-			margin := 1e-6*s2 + 4*kErr
+			margin := 1e-6 * s2
 			switch {
-			case kappa > margin:
+			case kLo > margin:
 				t := min(tSeen, reach)
-				seen := kappa*t*t/(2*lim) > tol*lim
+				seen := kLo*t*t/(2*lim) > tol*lim
 				return seen, 0, seen
-			case !(kappa < -margin):
+			case !(kHi < -margin):
 				allNegative = false
 			}
 			continue

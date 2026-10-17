@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"container/heap"
 	"math"
 	"math/cmplx"
 
@@ -365,12 +366,33 @@ func (gp *gramPair) clusterPencil(g0, g1, g2, d0, d1, dd0 []complex128, tolMu fl
 	return q, r, mu1, reach, true
 }
 
-// pencilSup returns sup_s λ_max(Q0 + s·Q1 + s²·Q2) for the r×r Hermitian
-// q, false unless Q2 is negative definite, −λ_max(Q2) = ν > 1e-9·‖Q2‖_F.
-// The sup lies in |s| <= sB, past which ‖Q0‖ + |s|·‖Q1‖ − ν·s² < −‖Q0‖;
-// for r > 1 it is taken from 401 samples, the best refined by golden
-// section.
-func pencilSup(q [3][]complex128, r int) (float64, bool) {
+// pencilSpan is an interval [a, b] of s with ub, a bound on λ_max(K(s))
+// over it.
+type pencilSpan struct{ a, b, ub float64 }
+
+type pencilSpans []pencilSpan
+
+func (h pencilSpans) Len() int           { return len(h) }
+func (h pencilSpans) Less(i, j int) bool { return h[i].ub > h[j].ub }
+func (h pencilSpans) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *pencilSpans) Push(x any)        { *h = append(*h, x.(pencilSpan)) }
+func (h *pencilSpans) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
+}
+
+// pencilSup returns bounds lo <= sup_s λ_max(K(s)) <= hi, K(s) = Q0 +
+// s·Q1 + s²·Q2, for the r×r Hermitian q, false unless Q2 is negative
+// definite, −λ_max(Q2) = ν > 1e-9·‖Q2‖_F. The sup lies in |s| <= sB, past
+// which ‖Q0‖ + |s|·‖Q1‖ − ν·s² < −‖Q0‖. For r = 1 it is Q0 + Q1²/(4ν).
+// For r > 1, with s = m + δ, K(s) = K(m) + δ·D + δ²·Q2 ≼ K(m) + δ·D,
+// D = Q1 + 2m·Q2, and λ_max of the right side is convex in δ, so over
+// |δ| <= w/2 it is bounded by its value at δ = ±w/2. Spans are split,
+// largest bound first, until hi − lo <= 1e-9·(‖Q0‖ + |lo|) or 4096
+// splits; lo is the largest λ_max(K(m)) seen.
+func pencilSup(q [3][]complex128, r int) (lo, hi float64, ok bool) {
 	top := func(a []complex128) float64 {
 		vals, _, _, ok := hermTop(a, r, 0, 0)
 		if !ok {
@@ -380,33 +402,59 @@ func pencilSup(q [3][]complex128, r int) (float64, bool) {
 	}
 	nu := -top(q[2])
 	if !(nu > 1e-9*cFrobenius(q[2])) {
-		return 0, false
+		return 0, 0, false
 	}
 	if r == 1 {
 		q1 := real(q[1][0])
-		return real(q[0][0]) + q1*q1/(4*nu), true
+		v := real(q[0][0]) + q1*q1/(4*nu)
+		return v, v, true
 	}
 	n0, n1 := cFrobenius(q[0]), cFrobenius(q[1])
 	sB := (n1 + math.Sqrt(n1*n1+8*nu*n0)) / (2 * nu)
-	buf := make([]complex128, r*r)
-	f := func(s float64) float64 {
-		for i := range buf {
-			buf[i] = q[0][i] + complex(s, 0)*q[1][i] + complex(s*s, 0)*q[2][i]
+	km, buf := make([]complex128, r*r), make([]complex128, r*r)
+	lo = math.Inf(-1)
+	bad := false
+	span := func(a, b float64) pencilSpan {
+		m, d := (a+b)/2, (b-a)/2
+		for i := range km {
+			km[i] = q[0][i] + complex(m, 0)*q[1][i] + complex(m*m, 0)*q[2][i]
 		}
-		return top(buf)
-	}
-	const samples = 400
-	step := 2 * sB / samples
-	best, bs := math.Inf(-1), 0.0
-	for i := range samples + 1 {
-		s := -sB + float64(i)*step
-		if v := f(s); v > best {
-			best, bs = v, s
+		fm := top(km)
+		ub := math.Inf(-1)
+		for _, sg := range []float64{-d, d} {
+			for i := range buf {
+				buf[i] = km[i] + complex(sg, 0)*(q[1][i]+complex(2*m, 0)*q[2][i])
+			}
+			ub = max(ub, top(buf))
 		}
+		if math.IsNaN(fm) || math.IsNaN(ub) {
+			bad = true
+		}
+		lo = max(lo, fm)
+		return pencilSpan{a, b, ub}
 	}
-	if math.IsNaN(best) || math.IsInf(best, 0) {
-		return 0, false
+	const initial = 64
+	h := make(pencilSpans, 0, initial+4096)
+	step := 2 * sB / initial
+	for i := range initial {
+		a := -sB + float64(i)*step
+		h = append(h, span(a, a+step))
 	}
-	_, best = goldenMax(bs-step, bs+step, bs, best, f)
-	return best, true
+	heap.Init(&h)
+	for range 4096 {
+		if bad {
+			return 0, 0, false
+		}
+		if h[0].ub-lo <= 1e-9*(n0+math.Abs(lo)) {
+			break
+		}
+		sp := heap.Pop(&h).(pencilSpan)
+		m := (sp.a + sp.b) / 2
+		heap.Push(&h, span(sp.a, m))
+		heap.Push(&h, span(m, sp.b))
+	}
+	if bad {
+		return 0, 0, false
+	}
+	return lo, max(lo, h[0].ub), true
 }
