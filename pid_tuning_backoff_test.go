@@ -10,9 +10,10 @@ import (
 )
 
 // e^{-s}/(s²+0.05s+1): the delay-capped default wc = π/3 sits past the ζ=0.025
-// resonance (|G| = 20), where no PI/PID/PIDF meets |S| <= 4, so the call
-// failed. MATLAB pidtune returns a stable low-bandwidth design; the default
-// crossover now backs off. In the second plant the back-off reaches 2⁻⁸·wc0,
+// resonance (|G| = 20), whose phase drop leaves no same-sign PI/PID/PIDF
+// there, so the call failed. MATLAB pidtune returns a stable lower-bandwidth
+// design; the default crossover now backs off. In the second plant the
+// back-off reaches 2⁻⁸·wc0,
 // whose own band [wc/100, 100wc] ends below the ζ=0.0035 resonance at 1.3:
 // |S| there was unchecked and reached 7.7. Oracles: dense margins, dense |S|
 // over the default and backed-off bands, and the winding of 1+L(jω), +90°
@@ -75,5 +76,41 @@ func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
 				t.Errorf("%v %s: %+v arg(1+L) changes by %g°, want 90°", c.den, fam, *k, wind)
 			}
 		}
+	}
+}
+
+// The back-off bisected the half-octave depth, taking success as monotone.
+// On e^{-s}/(s²+0.05s+1) a PID crossing at wc0/2 (Ki ≈ 0.55, Kd ≈ 0.6)
+// meets 60°±3° with failures from wc0/2^1.5 to wc0/2^4.5, so bisection
+// returned wc0/32; and PIDF, seeded at Tf = 0.1/wc, found no design there.
+// The scan down from wc0 keeps the shallowest design, and PIDF a minimal-Tf
+// seed. Oracle: |L(jω)| = 1 at the reported crossover, from the plant's
+// transfer function; TestTunePIDBacksOffResonantDelayedDefault vets the
+// margins, |S| and stability of the same designs.
+func TestTunePIDBackOffKeepsShallowDesign(t *testing.T) {
+	plant := pidPlantDelayed(t, []float64{1}, []float64{1, .05, 1}, 1)
+	wc0, err := findCrossoverFreq(plant, 0, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wc := map[PidtuneType]float64{}
+	for _, fam := range []PidtuneType{PidtunePID, PidtunePIDF} {
+		r, err := TunePID(context.Background(), plant, fam, PIDTuningOptions{})
+		if err != nil {
+			t.Fatalf("%s: %v", fam, err)
+		}
+		k, w := r.Controller, r.Evidence.AchievedCrossover
+		s := complex(0, w)
+		L := cmplx.Exp(-s) / (s*s + .05*s + 1) * (complex(k.Kp, 0) + complex(k.Ki, 0)/s + complex(k.Kd, 0)*s/(1+complex(k.Tf, 0)*s))
+		if math.Abs(cmplx.Abs(L)-1) > 1e-6 {
+			t.Errorf("%s: |L(j%g)| = %g", fam, w, cmplx.Abs(L))
+		}
+		if w <= wc0/4 {
+			t.Errorf("%s: crossover %g <= wc0/4 = %g", fam, w, wc0/4)
+		}
+		wc[fam] = w
+	}
+	if wc[PidtunePIDF] < wc[PidtunePID]/2 {
+		t.Errorf("PIDF crossover %g below half PID's %g", wc[PidtunePIDF], wc[PidtunePID])
 	}
 }

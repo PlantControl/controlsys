@@ -70,3 +70,21 @@ func pidTuningCallEvidence(r *PIDTuningResult, err error) (*PIDTuningEvidence, e
 	}
 	return nil, err
 }
+
+// An RHP zero and a ζ=0.025 mode below the default crossover leave no
+// same-sign design at wc0, and the bisected back-off spent its whole budget
+// even though it found one: 4161-4229 evaluations. The scan down stops at
+// its first design.
+func TestTunePIDBackOffStopsAtFirstDesign(t *testing.T) {
+	plant := pidPlantDelayed(t, []float64{2.4655092866840786, -3.982218498257481}, []float64{1, 1.0125481422685352, 1.0543664790048073, .9556591577782928}, .4563737532946457)
+	for _, fam := range []PidtuneType{PidtunePI, PidtunePID, PidtunePIDF} {
+		r, err := TunePID(context.Background(), plant, fam, PIDTuningOptions{})
+		if err != nil {
+			t.Errorf("%s: %v", fam, err)
+			continue
+		}
+		if r.Evidence.Evaluations > 3500 {
+			t.Errorf("%s: %d evaluations, want <= 3500", fam, r.Evidence.Evaluations)
+		}
+	}
+}

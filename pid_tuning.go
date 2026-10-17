@@ -157,6 +157,11 @@ type pidTuningPlant struct {
 	crossLow, crossHigh float64
 	// crossScan selects the margin check of a search outside the floor.
 	crossScan pidCrossScan
+	// floorRungs, if positive, caps the floor bands tried; minTfSeed seeds
+	// a filtered family at its least admissible Tf when no other seed is
+	// feasible. A backed-off crossover's probes set both.
+	floorRungs int
+	minTfSeed  bool
 }
 
 type pidCrossScan int
@@ -354,7 +359,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// where the resonance that forced the back-off sits.
 	// sRejected records a search that failed with candidates over the |S|
 	// bound.
-	used, minHigh, sRejected := 0, 0., false
+	// probing marks the back-off's searches.
+	used, minHigh, sRejected, probing := 0, 0., false, false
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
 		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: math.Max(wc*100, minHigh), at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
@@ -375,6 +381,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			return nil, fmt.Errorf("TunePID: %w", err)
 		}
 		p.stable, p.stability = stable, evidence
+		if probing {
+			p.floorRungs, p.minTfSeed = 1, true
+		}
 		if stable == nil {
 			p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 		}
@@ -419,44 +428,43 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return stamp(r, e)
 	}
 	// backOff lowers a failed default crossover by half octaves down to
-	// wc0/1024, trying PM±3° then the floor at each. It bisects on the
-	// half-octave index, taking success as monotone in depth, and keeps the
-	// shallowest success found; all its searches share one budget.
-	backOff := func(wc0, gainSign float64, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
-		minHigh = wc0 * 100
+	// wc0/1024 and keeps the first, shallowest, design: success need not be
+	// monotone in depth, as a design can sit just below wc0 with failures
+	// deeper. Each crossover tries PM±3° when pidTuningReachable admits it,
+	// then the floor's lowest admitted band only, which keeps a failing
+	// crossover near one search's minimum; a deep floor design sits there.
+	// All its searches share one budget.
+	backOff := func(wc0, gainSign, pm float64, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
+		minHigh, probing = wc0*100, true
 		budget, start := opts.MaxEvaluations, used
 		if budget == 0 {
 			budget = 4096
 		}
 		at := func(j int) float64 { return wc0 * math.Pow(2, -float64(j)/2) }
-		var best *PIDTuningResult
-		lo, hi, lowest := 0, 21, 0
-		for hi-lo > 1 && used-start < budget {
-			j := (lo + hi) / 2
-			var r *PIDTuningResult
-			var e error
+		lowest := 0
+		for j := 1; j <= 20 && used-start < budget; j++ {
+			lowest = j
+			o := opts
+			o.CrossoverFrequency = at(j)
+			p := pidTuningPlant{dt: plant.Dt, at: eval.at, gainSign: gainSign}
+			reachable := pidTuningReachable(p, family, o, pm, pidTuningUnwrappedPhase(eval.at, gainSign, at(j), tau))
+			if eval.err != nil {
+				return nil, fmt.Errorf("TunePID: %w", eval.err)
+			}
 			for _, floor := range []bool{false, true} {
-				if used-start >= budget {
-					break
+				if !floor && !reachable || used-start >= budget {
+					continue
 				}
 				opts.MaxEvaluations = budget - (used - start)
-				if r, e = tuneAt(at(j), gainSign, true, floor); !errors.As(e, new(*PIDTuningError)) {
-					break
+				r, e := tuneAt(at(j), gainSign, true, floor)
+				if e == nil {
+					r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, at(j), pidTuningMaxSensitivity, minHigh))
+					return stamp(r, nil)
+				}
+				if !errors.As(e, new(*PIDTuningError)) {
+					return nil, e
 				}
 			}
-			lowest = max(lowest, j)
-			if e == nil && r != nil {
-				best, hi = r, j
-				continue
-			}
-			if !errors.As(e, new(*PIDTuningError)) && e != nil {
-				return nil, e
-			}
-			lo = j
-		}
-		if best != nil {
-			best.Evidence.Warnings = append(best.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, at(hi), pidTuningMaxSensitivity, minHigh))
-			return stamp(best, nil)
 		}
 		if te, ok := errors.AsType[*PIDTuningError](err); ok && lowest > 0 {
 			te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers down to %.4g rad/s were also tried.", at(lowest)))
@@ -490,7 +498,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if !sRejected && !resonant {
 			return res, err
 		}
-		return backOff(wc0, gainSign, res, err)
+		return backOff(wc0, gainSign, pm, res, err)
 	}
 	if gainSign == 0 || fam != PidtunePD && fam != PidtunePDF || !errors.As(err, new(*PIDTuningError)) {
 		return withFloor(wc0, gainSign, tau > 0, res, err)
@@ -712,34 +720,40 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		o.PhaseMargin = margin
 	}
 	target := cmplx.Rect(1, (-180+o.PhaseMargin)*math.Pi/180) / h
-	ib, db := pidTuningBasis(c, wc)
-	if hasP && hasI {
-		if hasD {
-			c.Kd = math.Copysign(math.Abs(imag(target)/imag(db))+.5*cmplx.Abs(target)/wc, real(target))
+	// seedAt puts a controller with filter tf on the target.
+	seedAt := func(tf float64) (c PID2, ib, db complex128) {
+		c = PID2{Tf: tf, Dt: p.dt, IFormula: o.IFormula, DFormula: o.DFormula, B: 1, C: 1}
+		ib, db = pidTuningBasis(c, wc)
+		if hasP && hasI {
+			if hasD {
+				c.Kd = math.Copysign(math.Abs(imag(target)/imag(db))+.5*cmplx.Abs(target)/wc, real(target))
+			}
+			c.Ki = (imag(target) - c.Kd*imag(db)) / imag(ib)
+			c.Kp = real(target) - c.Ki*real(ib) - c.Kd*real(db)
+		} else if hasP && hasD {
+			c.Kd = imag(target) / imag(db)
+			c.Kp = real(target) - c.Kd*real(db)
+		} else if hasI {
+			c.Ki = cmplx.Abs(target) / cmplx.Abs(ib)
+		} else {
+			c.Kp = cmplx.Abs(target)
 		}
-		c.Ki = (imag(target) - c.Kd*imag(db)) / imag(ib)
-		c.Kp = real(target) - c.Ki*real(ib) - c.Kd*real(db)
-	} else if hasP && hasD {
-		c.Kd = imag(target) / imag(db)
-		c.Kp = real(target) - c.Kd*real(db)
-	} else if hasI {
-		c.Ki = cmplx.Abs(target) / cmplx.Abs(ib)
-	} else {
-		c.Kp = cmplx.Abs(target)
-	}
-	// Negative-gain plants require a signed P or I seed.
-	if !hasP || (!hasI && !hasD) {
-		a := c
-		a.Kp = -a.Kp
-		a.Ki = -a.Ki
-		if p.gainSign != 0 {
-			if math.Copysign(1, c.Kp+c.Ki) != p.gainSign {
+		// Negative-gain plants require a signed P or I seed.
+		if !hasP || (!hasI && !hasD) {
+			a := c
+			a.Kp = -a.Kp
+			a.Ki = -a.Ki
+			if p.gainSign != 0 {
+				if math.Copysign(1, c.Kp+c.Ki) != p.gainSign {
+					c = a
+				}
+			} else if pidPhaseDistance(p.at(wc)*pidTuningFeedback(a, wc), o.PhaseMargin) < pidPhaseDistance(p.at(wc)*pidTuningFeedback(c, wc), o.PhaseMargin) {
 				c = a
 			}
-		} else if pidPhaseDistance(p.at(wc)*pidTuningFeedback(a, wc), o.PhaseMargin) < pidPhaseDistance(p.at(wc)*pidTuningFeedback(c, wc), o.PhaseMargin) {
-			c = a
 		}
+		return c, ib, db
 	}
+	c, ib, db := seedAt(tf)
 	if !finitePID(c.Kp) || !finitePID(c.Ki) || !finitePID(c.Kd) {
 		return nil, fmt.Errorf("%s: singular controller basis at crossover %g: %w", op, wc, ErrSingularTransform)
 	}
@@ -930,10 +944,10 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		seeded := func() bool {
 			return excessFirst && finitePID(bestScore) || !excessFirst && finitePID(incumbentScore)
 		}
-		if err := evaluate(c); err != nil {
-			return nil, fmt.Errorf("%s: %w", op, err)
-		}
-		if hasP && hasI && hasD {
+		seedFrom := func(c PID2, ib, db complex128) error {
+			if err := evaluate(c); err != nil || !hasP || !hasI || !hasD {
+				return err
+			}
 			// The lead-heavy seed can break a derivative tail bound; smaller Kd
 			// on the same target are tried only when no seed is feasible.
 			for _, frac := range []float64{0, .75, .5, .25} {
@@ -945,9 +959,17 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 				seed.Ki = (imag(target) - seed.Kd*imag(db)) / imag(ib)
 				seed.Kp = real(target) - seed.Ki*real(ib) - seed.Kd*real(db)
 				if err := evaluate(seed); err != nil {
-					return nil, fmt.Errorf("%s: %w", op, err)
+					return err
 				}
 			}
+			return nil
+		}
+		err := seedFrom(c, ib, db)
+		if err == nil && filtered && p.minTfSeed && !seeded() {
+			err = seedFrom(seedAt(math.Max(.001/wc, p.dt*.51)))
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
 		}
 		if pass == first {
 			evidence.SeedObjective = bestScore
@@ -1158,10 +1180,15 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 		phase = pidTuningUnwrappedPhase(p.at, p.gainSign, o.CrossoverFrequency, p.tau)
 	}
 	last := &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: o.CrossoverFrequency, RequestedPhaseMargin: pm, Stability: p.stability}}
+	rungs := 0
 	for target := pm + 6; target < 180 && used < budget; target += 6 {
 		if !pidTuningReachable(p, fam, o, target, phase) {
 			continue
 		}
+		if p.floorRungs > 0 && rungs == p.floorRungs {
+			break
+		}
+		rungs++
 		o.PhaseMargin = target
 		o.MaxEvaluations = budget - used
 		r, err := tunePID(ctx, op, p, family, o)
