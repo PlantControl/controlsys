@@ -392,8 +392,11 @@ func TestPencilSupNarrowBranch(t *testing.T) {
 		for k := range q {
 			qr[k] = usw(u, q[k], u, 2, 2)
 		}
+		// Rounding in the rotation moves ν = 1e-3 by ~eps·‖Q2‖ ≈ 2e-12, so the
+		// rotated pencil's sup b²/ν − 1 differs from want by ~(want+1)·2e-9.
+		tol := 64 * 0x1p-52 * 1e4 / 1e-3 * (want + 1)
 		lo2, hi2, ok := pencilSup(qr, 2)
-		if !ok || !(lo2 <= want+1e-12) || !(want <= hi2+1e-12) || hi2-lo2 > 1e-6 {
+		if !ok || !(lo2 <= want+tol) || !(want <= hi2+tol) || hi2-lo2 > 1e-6 {
 			t.Errorf("b = %g rotated: pencilSup in [%.12g, %.12g] (%v), want %.12g", b, lo2, hi2, ok, want)
 		}
 	}
