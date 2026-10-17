@@ -309,8 +309,8 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // at one whose margin-meeting candidates are all unstable and, under the
 // |S| bound, once the excess stops falling, so a feasible band can be
 // missed. A continuous delayed loop with an ideal derivative must keep
-// limsup |L(jω)| <= ½, so a near-neutral loop is rejected even when its
-// sampled margins look healthy.
+// limsup |L(jω)| <= ¾ (|S| <= 4 there), so a near-neutral loop is rejected
+// even when its sampled margins look healthy.
 //
 // When both fail for a default-crossover PI, PID or PIDF design on a stable
 // delayed plant, and either a candidate exceeded |S| <= 4 or a lightly damped
