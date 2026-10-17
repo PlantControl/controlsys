@@ -3,7 +3,9 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"math/cmplx"
 	"math/rand/v2"
+	"strings"
 	"testing"
 )
 
@@ -208,4 +210,66 @@ func TestQuadBoundMatrix(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestHinfNormRoundedMultipleDelays pins OUWA5P: τ = (h, fl(3h)) with
+// fl(3h) ≠ 3h is two classes, whose torus sup lies above every finite peak
+// (dense 2-D oracle) and is approached only once ω·|fl(3h) − 3h| ~ 1, so
+// HinfNorm reports the torus case as unsupported; the same model with a
+// dyadic h, exactly commensurate, matches the finite and limit oracles.
+func TestHinfNormRoundedMultipleDelays(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1008, 7))
+	u := func(a float64) float64 { return a * (2*rng.Float64() - 1) }
+	d22 := []float64{u(.8), u(.8), u(.8), u(.8)}
+	d12 := []float64{u(1), u(1)}
+	d21 := []float64{u(1), u(1)}
+	h := 0.02 + 0.3*rng.Float64()
+	k := [2]float64{1, 3}
+	if exactProductsEqual(3*h, 1, h, 3) {
+		t.Fatal("fl(3h) must differ from 3h")
+	}
+	sys, gain, _ := feedthroughDifferenceLoop(t, d22, d12, d21, []float64{h, 3 * h}, k)
+	if st, err := sys.IsStable(); err != nil || !st {
+		t.Fatalf("IsStable = %v, %v", st, err)
+	}
+	fin, _ := oraclePeak(gain, 80, 1e-3)
+	torus := 0.0
+	const n = 512
+	for a := range n {
+		for b := range n {
+			torus = max(torus, gInfTorus(d22, d12, d21, 2*math.Pi*float64(a)/n, 2*math.Pi*float64(b)/n))
+		}
+	}
+	if !(torus > 1.5*fin) {
+		t.Fatalf("torus sup %g not above finite peak %g", torus, fin)
+	}
+	_, _, err := HinfNorm(sys)
+	if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "not exactly commensurate") {
+		t.Fatalf("HinfNorm err = %v, want torus errDelayPeakUnsupported", err)
+	}
+
+	hd := math.Ldexp(math.Round(math.Ldexp(h, 30)), -30)
+	sys, gain, gInf := feedthroughDifferenceLoop(t, d22, d12, d21, []float64{hd, 3 * hd}, k)
+	got, w, err := HinfNorm(sys)
+	if err != nil {
+		t.Fatalf("dyadic HinfNorm: %v", err)
+	}
+	want, _ := oraclePeak(gain, 80, 1e-3)
+	for j := range 1 << 16 {
+		want = max(want, gInf(2*math.Pi*float64(j)/(1<<16)))
+	}
+	if math.Abs(got-want) > 1e-8*want {
+		t.Fatalf("dyadic HinfNorm = %.12g @%g, want %.12g", got, w, want)
+	}
+}
+
+// gInfTorus is |G∞| of feedthroughDifferenceLoop with independent phases.
+func gInfTorus(d22, d12, d21 []float64, t1, t2 float64) float64 {
+	c := func(x float64) complex128 { return complex(x, 0) }
+	e1, e2 := cmplx.Exp(complex(0, -t1)), cmplx.Exp(complex(0, -t2))
+	m := [4]complex128{1 - c(d22[0])*e1, -c(d22[1]) * e2, -c(d22[2]) * e1, 1 - c(d22[3])*e2}
+	det := m[0]*m[3] - m[1]*m[2]
+	v0 := (m[3]*c(d21[0]) - m[1]*c(d21[1])) / det
+	v1 := (m[0]*c(d21[1]) - m[2]*c(d21[0])) / det
+	return cmplx.Abs(0.1 + c(d12[0])*e1*v0 + c(d12[1])*e2*v1)
 }

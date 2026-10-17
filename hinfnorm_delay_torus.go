@@ -167,7 +167,7 @@ func floats2Norm(v []float64) float64 {
 // scan, else errDelayPeakUnsupported.
 func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, span float64,
 	points func(lo, R float64) []float64) (float64, *pastLimit, float64, error) {
-	unsupported := fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
+	unsupported := fmt.Errorf("gain may peak as ω → ∞ over the phase torus of delays not exactly commensurate in float64: %w", errDelayPeakUnsupported)
 	x := newTorusExpansion(e, hf)
 	if x == nil || math.IsInf(span, 1) {
 		return 0, nil, 0, unsupported
