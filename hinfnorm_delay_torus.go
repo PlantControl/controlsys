@@ -497,8 +497,9 @@ func (p *torusPassages) near(w float64, t []float64) bool {
 // S = σ_max(G∞) on the torus rise above S(θ) as ω → ∞ along a passage
 // through θ: when a ≠ 0, or when a = 0 and κ = c + ∇aᵀ·α⁻¹·∇a > 0 with
 // α = −½·∇²S², the torus analogue of limitVerdict, by central differences.
-// With several classes a passage need not come close enough to θ, so this
-// only steers the search of torusPastLimit.
+// It routes torusPastLimit to the search for a finite peak, which alone
+// decides the result: a passage need not come close enough to θ before the
+// search ends.
 func (x *highFrequencyExpansion) risesPast(theta []float64) bool {
 	s2, a, c, scale, exact := x.coefficientsAt(theta)
 	if math.Abs(a) > 1e-6*math.Sqrt(s2*max(scale, 1)) {
