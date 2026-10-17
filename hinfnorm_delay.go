@@ -1209,7 +1209,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 }
 
 // pastLimit is a finite sample above the high-frequency limit, found on the
-// grid extension ext.
+// grid extension ext, which spans every band scanned past the grid end.
 type pastLimit struct {
 	ext  []float64
 	b, w float64
@@ -1263,10 +1263,14 @@ func (e *delayLFT) peakPastLimit(lim, tol, period float64, hfx *highFrequencyExp
 		}
 		return found, err
 	}
+	h0 := *hi
 	for {
 		if Rs := min(R, rMax); Rs > *hi {
 			found, err := extend(*hi, Rs)
 			*hi = Rs
+			if found != nil {
+				found.ext = points(h0, Rs)
+			}
 			if found != nil || err != nil {
 				return found, err
 			}

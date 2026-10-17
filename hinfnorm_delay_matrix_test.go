@@ -202,6 +202,47 @@ func TestHinfNormMatrixSlightPeakPastLimit(t *testing.T) {
 	}
 }
 
+// rotationPeakCases are 2×2 gains with D22 = 0.995·R(θ) and one delay τ = h
+// whose sharp resonance lies past the grid end, between coarse samples of
+// the first extension, while a lower sample above sup σ_max(G∞) shows only
+// further out. Certifying only the band of that sample missed the peak.
+var rotationPeakCases = []lftCase{
+	{name: "45", n: 1, k: 1, h: 0.17133943004352065, a: []float64{-0.3891225688477558},
+		b1: []float64{-0.13437382356615915, -0.17811361189307126}, b2: []float64{-0.040227447176823916, -0.08172736487304914},
+		c1: []float64{0.60542500893994, 0.7235434981121045}, c2: []float64{-0.044781710873726954, -0.13883564001921944},
+		d11: []float64{0.9773686594669422, -0.3317525131382739, -0.22694016905124026, 0.08946817726311607},
+		d12: []float64{-0.9048458159109407, -0.050824713822984036, 0.7199940698039866, 0.6023311789597776},
+		d21: []float64{0.527451499237213, 0.7859275451294025, -0.9833570279044317, 0.3851548242763596},
+		d22: []float64{0.9666683137691793, 0.23574853372746882, -0.23574853372746882, 0.9666683137691793}},
+	{name: "66", n: 1, k: 1, h: 0.08894239476424244, a: []float64{-0.6090946775461605},
+		b1: []float64{0.2191669743174119, -0.02092853006121247}, b2: []float64{0.06100825337353448, 0.13567202912123746},
+		c1: []float64{-0.7554699319964289, 0.9933952584895338}, c2: []float64{-0.020966839358250056, 0.3694976989993981},
+		d11: []float64{-0.40140652729226356, 0.9688594831396169, 0.17757141328034987, 0.14441755578675997},
+		d12: []float64{0.40209295780640475, 0.9217593180911479, 0.9226533528549246, 0.844668500440229},
+		d21: []float64{-0.027583786888382367, -0.8820988041034896, 0.2397060424107409, -0.478068658105977},
+		d22: []float64{0.3963188752394251, -0.9126644230652123, 0.9126644230652123, 0.3963188752394251}},
+}
+
+func TestHinfNormPeakPastLimitCertifiesEveryBand(t *testing.T) {
+	for _, c := range rotationPeakCases {
+		t.Run(c.name, func(t *testing.T) {
+			sys := c.system(t)
+			lim := circleMax(c.gInf)
+			want, wWant := oraclePeak(c.sigma, 600, 2e-4)
+			if !(want > lim*(1+1e-3)) {
+				t.Fatalf("oracle peak %.12g at %g, want above sup σ_max(G∞) %.12g", want, wWant, lim)
+			}
+			got, w, err := HinfNorm(sys)
+			if err != nil {
+				t.Fatalf("HinfNorm: %v", err)
+			}
+			if math.Abs(got-want) > 1e-9*want || math.Abs(w-wWant) > 1e-3 {
+				t.Fatalf("HinfNorm = (%.15g, %.10g), want (%.15g, %.10g)", got, w, want, wWant)
+			}
+		})
+	}
+}
+
 // TestHinfNormSlightPeakFarPastGrid checks a SISO gain, k = 10, whose
 // finite peak above sup |G∞| first shows near ω = 1500 but keeps rising to
 // about 2971, so tailBelow cannot certify the tail at the first sample
