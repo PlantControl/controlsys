@@ -51,13 +51,11 @@ func pidPlantDelayed(t *testing.T, num, den []float64, tau float64) *System {
 	return p
 }
 
-// An all-unstable band does not end the floor: the controller shape changes
-// with the target band, so a later band can be stable. Stopping the floor
-// on unstable bands returned no design for either plant. An
+// The floor returns designs for plants whose default target fails. An
 // independent dense sweep checks the margins, and the change of arg(1+L)
 // over (0+, ∞) checks stability: with a stable plant and one integrator,
 // 1+L turns from −90° to 0° when it does not encircle the origin.
-func TestTunePIDFloorSearchesPastUnstableBands(t *testing.T) {
+func TestTunePIDFloorDesignsSound(t *testing.T) {
 	cases := []struct {
 		name     string
 		num, den []float64
