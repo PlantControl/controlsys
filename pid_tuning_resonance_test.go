@@ -57,7 +57,11 @@ func TestPIDTuningCrossingsFindsResonancePair(t *testing.T) {
 // PM − 3° and is reported. The first plant's ζ = 0.0057 mode at 3.257 rad/s
 // hid a 37° crossing at the moved crossover. The second has sound PD designs
 // only in a 1% pocket at its resonance, off every crossover the search
-// tries, so it may fail; it must not return the 36° design.
+// tries, so it may fail; it must not return the 36° design. The third's
+// second crossover lies between wc and the next grid sample, where
+// |L(wc)| = 1 hides the sign change. The fourth's seeds all cross 0 dB at
+// a resonance with negative margin; the search must still reach the sound
+// design from the least violating one.
 func TestTunePIDMarginCheckFindsResonanceCrossings(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -68,6 +72,8 @@ func TestTunePIDMarginCheckFindsResonanceCrossings(t *testing.T) {
 	}{
 		{"0.05372(s+0.7974)/((s+0.779)(s+0.101)(s²+0.03714s+10.61))", pidPoly(.05372, []float64{1, .7974}), pidPoly(1, []float64{1, .779}, []float64{1, .101}, []float64{1, .03714, 10.61}), 0, PidtunePDF, false},
 		{"-0.0503(s-9.178)/((s²+0.06089s+1.043)(s+0.0589)(s+6.552))e^-0.0301s", pidPoly(-.0503, []float64{1, -9.178}), pidPoly(1, []float64{1, .06089, 1.043}, []float64{1, .0589}, []float64{1, 6.552}), .0301, PidtunePD, true},
+		{"sweep 42: partner 0.12% above wc", []float64{9.941801896667057, 75.47424183387096}, []float64{1, .6967863957610382, .6499124770289462, .4126294043259971, .10128779613762952, .05905400275971327}, 0, PidtunePD, false},
+		{"sweep 109: every seed crosses at the 6.17 rad/s mode", []float64{-8.347729847190841}, []float64{1, .7307546373686498, 61.81362857880511, 31.504618973121026, 902.1672488522788, 215.17111864467765}, 0, PidtunePID, false},
 	}
 	for _, c := range cases {
 		r, err := TunePID(context.Background(), pidPlantDelayed(t, c.num, c.den, c.tau), c.family, PIDTuningOptions{})

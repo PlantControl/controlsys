@@ -681,6 +681,10 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	stabilityChecked, stableFound := false, false
 	leastExcess := math.Inf(1)
 	excessFirst := false
+	// nearest is the candidate least below the margin floor at other
+	// crossovers, summed over them, for a restart.
+	var nearest PID2
+	nearestViolation := math.Inf(1)
 	evaluate := func(candidate PID2) error {
 		if evidence.Evaluations >= o.MaxEvaluations {
 			return nil
@@ -725,10 +729,18 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 			floor = 0
 		}
 		_, margins := pidTuningCrossings(p, candidate, crossOmega, wc)
+		violation, violated := 0., false
 		for _, margin := range margins {
 			if margin < floor || relaxed && margin <= 0 {
-				return nil
+				violation += floor - margin
+				violated = true
 			}
+		}
+		if violated {
+			if violation < nearestViolation {
+				nearest, nearestViolation = candidate, violation
+			}
+			return nil
 		}
 		excess, peaked := 0., false
 		beats := func() bool {
@@ -779,7 +791,7 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		if pass > first && (finitePID(bestScore) || !sensitivityRejected || evidence.Evaluations >= o.MaxEvaluations) {
 			break
 		}
-		incumbentScore, incumbentExcess = math.Inf(1), math.Inf(1)
+		incumbentScore, incumbentExcess, nearestViolation = math.Inf(1), math.Inf(1), math.Inf(1)
 		evidence.Termination = PIDTerminationConverged
 		// A seed is feasible for the pass's ranking: any incumbent when
 		// ranked by score, one within the bound when ranked by excess.
@@ -808,52 +820,71 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 		if pass == first {
 			evidence.SeedObjective = bestScore
 		}
+		seedViolated := finitePID(nearestViolation)
 		// Signed, scaled coordinate pattern search; each candidate is gain-normalized
 		// at wc and must preserve target phase and model-based stability when available.
-		current := c
-		step := .5
-		for round := 0; round < 64 && evidence.Evaluations < o.MaxEvaluations; round++ {
-			previous, previousExcess := incumbentScore, incumbentExcess
-			if finitePID(incumbentScore) {
-				current = incumbent
-			}
-			for axis := range 4 {
-				if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && !filtered {
-					continue
+		// When a seed failed only the margins at other crossovers and the
+		// search from c finds no incumbent, it restarts from the candidate
+		// least below the floor, as such a seed can sit next to the
+		// feasible set; the restart counts a smaller violation as progress.
+		// Floor bands, which share one budget, skip it.
+		for restart := range 2 {
+			current := c
+			if restart == 1 {
+				if p.hasCrossFloor || !seedViolated || finitePID(incumbentScore) {
+					break
 				}
-				for _, sign := range []float64{-1, 1} {
-					candidate := current
-					scale := 1 / cmplx.Abs(h)
-					switch axis {
-					case 0:
-						candidate.Kp += sign * step * scale
-					case 1:
-						candidate.Ki += sign * step * scale * wc
-					case 2:
-						candidate.Kd += sign * step * scale / wc
-					case 3:
-						candidate.Tf *= math.Exp(sign * step)
+				current = nearest
+			}
+			step := .5
+			for round := 0; round < 64 && evidence.Evaluations < o.MaxEvaluations; round++ {
+				previous, previousExcess, previousViolation := incumbentScore, incumbentExcess, nearestViolation
+				if finitePID(incumbentScore) {
+					current = incumbent
+				} else if restart == 1 {
+					current = nearest
+				}
+				for axis := range 4 {
+					if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && !filtered {
+						continue
 					}
-					if err := evaluate(candidate); err != nil {
-						return nil, fmt.Errorf("%s: %w", op, err)
+					for _, sign := range []float64{-1, 1} {
+						candidate := current
+						scale := 1 / cmplx.Abs(h)
+						switch axis {
+						case 0:
+							candidate.Kp += sign * step * scale
+						case 1:
+							candidate.Ki += sign * step * scale * wc
+						case 2:
+							candidate.Kd += sign * step * scale / wc
+						case 3:
+							candidate.Tf *= math.Exp(sign * step)
+						}
+						if err := evaluate(candidate); err != nil {
+							return nil, fmt.Errorf("%s: %w", op, err)
+						}
 					}
 				}
-			}
-			tol := previous - 1e-6*math.Max(1, math.Abs(previous))
-			improved := finitePID(incumbentScore) && !(incumbentScore >= tol)
-			if excessFirst {
-				improved = finitePID(incumbentExcess) && (!finitePID(previousExcess) ||
-					incumbentExcess < previousExcess-1e-6*math.Max(1, previousExcess) ||
-					incumbentExcess == previousExcess && incumbentScore < tol)
-			}
-			if !improved {
-				step *= .5
-			}
-			if step < 1e-5 {
-				break
-			}
-			if round == 63 {
-				evidence.Termination = PIDTerminationRoundLimit
+				tol := previous - 1e-6*math.Max(1, math.Abs(previous))
+				improved := finitePID(incumbentScore) && !(incumbentScore >= tol)
+				if excessFirst {
+					improved = finitePID(incumbentExcess) && (!finitePID(previousExcess) ||
+						incumbentExcess < previousExcess-1e-6*math.Max(1, previousExcess) ||
+						incumbentExcess == previousExcess && incumbentScore < tol)
+				}
+				if restart == 1 && !finitePID(incumbentScore) {
+					improved = !(nearestViolation >= previousViolation-1e-6*math.Max(1, previousViolation))
+				}
+				if !improved {
+					step *= .5
+				}
+				if step < 1e-5 {
+					break
+				}
+				if round == 63 {
+					evidence.Termination = PIDTerminationRoundLimit
+				}
 			}
 		}
 		if evidence.Evaluations >= o.MaxEvaluations {
@@ -1364,8 +1395,25 @@ func pidTuningCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (
 			}
 		}
 		w := math.Sqrt(lo * hi)
-		if math.Abs(math.Log(w/wc)) > 1e-6 {
+		if !slices.ContainsFunc(crossings, func(x float64) bool { return math.Abs(math.Log(w/x)) <= 1e-6 }) {
 			crossings = append(crossings, w)
+		}
+	}
+	// |L(wc)| = 1 hides the sign of the grid sample at wc, so a crossover
+	// paired with wc inside an adjacent interval is sought by golden section
+	// for a sign opposite to the far endpoint's.
+	if i, ok := slices.BinarySearch(omega, wc); ok {
+		for _, f := range []int{i - 1, i + 1} {
+			if f < 0 || f >= len(omega) {
+				continue
+			}
+			ef := excess(omega[f])
+			sign := math.Copysign(1, ef)
+			lo, hi := min(wc, omega[f]), max(wc, omega[f])
+			w, v := pidTuningGoldenMax(func(w float64) float64 { return -sign * excess(w) }, lo, hi)
+			if v > 0 {
+				add(omega[f], w, ef)
+			}
 		}
 	}
 	var before float64
