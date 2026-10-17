@@ -202,7 +202,8 @@ func floats2Norm(v []float64) float64 {
 // torusScanPoints samples, until one exceeds lim·(1 + tol), unless best
 // already does. It returns lim,
 // that sample on the extension past rGrid (nil for best) and the end of the
-// scan, else errDelayPeakUnsupported.
+// scan, else errDelayPeakUnsupported. The scan is shared by every trial lim,
+// and run first, so a give-up decided by it costs no certificate.
 func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, step, span float64,
 	points func(lo, R float64) []float64) (float64, *pastLimit, float64, error) {
 	unsupported := fmt.Errorf("gain may peak as ω → ∞ over the phase torus of delays not exactly commensurate in float64: %w", errDelayPeakUnsupported)
@@ -228,12 +229,33 @@ func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, step,
 		return 0, nil, 0, unsupported
 	}
 	const budget = 1 << 20
+	R0 := max(rGrid, 2*e.normA+1)
+	sc := &torusScan{e: e, near: newTorusPassages(e, hf, ms, sup, R0), step: step, r0: R0,
+		end: rGrid + span, hi: rGrid, R: 2 * R0}
+	// The outcome at level L is unsupported, whatever below certifies, when
+	// best and every scanned band stay at or below L; levels only rise with d.
+	hopeless := func(level float64) bool {
+		return !(best > level) && sc.walk(level).kind == bandGiveUp
+	}
+	ds := [...]float64{1e-9, 1e-7, 1e-5}
+	if hopeless(sup * (1 + ds[0]) * (1 + tol)) {
+		return 0, nil, 0, unsupported
+	}
+	// below fails at every level when it fails at the highest: a lower level
+	// splits a superset of its cells, generation by generation.
+	top := sup * (1 + ds[len(ds)-1])
+	if hf.over > top || !hf.below(top, hf.samples+budget) {
+		return 0, nil, 0, unsupported
+	}
 	lim, ok := 0.0, false
-	for _, d := range []float64{1e-9, 1e-7, 1e-5} {
+	for i, d := range ds {
 		if lim = sup * (1 + d); hf.over > lim {
 			continue // a torus sample above lim: below(lim) cannot hold
 		}
-		if hf.below(lim, hf.samples+budget) {
+		if hopeless(lim * (1 + tol)) {
+			return 0, nil, 0, unsupported
+		}
+		if i == len(ds)-1 || hf.below(lim, hf.samples+budget) {
 			ok = true
 			break
 		}
@@ -245,49 +267,109 @@ func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, tol, rGrid, step,
 	if best > level {
 		return lim, nil, rGrid, nil
 	}
-	hi := rGrid
-	R0 := max(rGrid, 2*e.normA+1)
-	near := newTorusPassages(e, hf, ms, sup, R0)
-	var ks []int
-	run := make([]float64, 0, 64)
-	evals := 0
-	for R := 2 * R0; ; R *= 2 {
-		Rs := min(R, rGrid+span)
-		ks = near.indices(hi, Rs, step, ks[:0])
-		b, w := math.Inf(-1), 0.0
-		for i := 0; i < len(ks); {
-			j := i + 1
-			for j < len(ks) && ks[j] == ks[j-1]+1 {
-				j++
-			}
-			run = run[:0]
-			for k := ks[i] - 1; k <= ks[j-1]+1; k++ {
-				w := float64(k) * step
-				run = append(run, w)
-				if w > 2*R0 {
-					evals++
-				}
-			}
-			if evals > torusScanPoints {
-				return 0, nil, 0, unsupported
-			}
-			bi, wi, err := e.scan(run)
-			if err != nil {
-				return 0, nil, 0, err
-			}
-			if bi > b {
-				b, w = bi, wi
-			}
-			i = j
+	switch bd := sc.walk(level); bd.kind {
+	case bandFailed:
+		e.err = bd.eErr
+		return 0, nil, 0, bd.err
+	case bandGiveUp:
+		return 0, nil, 0, unsupported
+	default:
+		return lim, &pastLimit{points(rGrid, bd.Rs), bd.b, bd.w}, bd.Rs, nil
+	}
+}
+
+// torusScan samples G on the passages of torusPassages past the grid end in
+// bands doubling in reach, at most torusScanPoints samples past 2·R0, each
+// band computed once on demand, so that the walks at several levels share
+// them.
+type torusScan struct {
+	e     *delayLFT
+	near  *torusPassages
+	step  float64
+	r0    float64
+	end   float64 // rGrid + span
+	hi, R float64
+	evals int
+	ks    []int
+	run   []float64
+	bands []torusBand
+}
+
+type bandKind int
+
+const (
+	bandScanned bandKind = iota
+	bandGiveUp           // sample cap reached, or the last band scanned
+	bandFailed           // e.scan failed
+)
+
+// torusBand is the largest sample b at w of the band up to Rs, last when it
+// reaches the end; a band that gives up or fails ends the scan.
+type torusBand struct {
+	kind bandKind
+	b, w float64
+	Rs   float64
+	last bool
+	err  error
+	eErr error // e.err set by the failure, cleared until a walk reaches it
+}
+
+// walk returns the first band above level, else the band that ends the
+// scan: one that gives up or fails, or the last scanned, as bandGiveUp.
+func (s *torusScan) walk(level float64) torusBand {
+	for i := 0; ; i++ {
+		if i == len(s.bands) {
+			s.next()
 		}
-		if b > level {
-			return lim, &pastLimit{points(rGrid, Rs), b, w}, Rs, nil
+		bd := s.bands[i]
+		if bd.kind != bandScanned || bd.b > level {
+			return bd
 		}
-		hi = Rs
-		if Rs >= rGrid+span {
-			return 0, nil, 0, unsupported
+		if bd.last {
+			bd.kind = bandGiveUp
+			return bd
 		}
 	}
+}
+
+func (s *torusScan) next() {
+	e := s.e
+	Rs := min(s.R, s.end)
+	s.R *= 2
+	s.ks = s.near.indices(s.hi, Rs, s.step, s.ks[:0])
+	ks := s.ks
+	bd := torusBand{b: math.Inf(-1), Rs: Rs, last: Rs >= s.end}
+	for i := 0; i < len(ks); {
+		j := i + 1
+		for j < len(ks) && ks[j] == ks[j-1]+1 {
+			j++
+		}
+		s.run = s.run[:0]
+		for k := ks[i] - 1; k <= ks[j-1]+1; k++ {
+			w := float64(k) * s.step
+			s.run = append(s.run, w)
+			if w > 2*s.r0 {
+				s.evals++
+			}
+		}
+		if s.evals > torusScanPoints {
+			s.bands = append(s.bands, torusBand{kind: bandGiveUp})
+			return
+		}
+		prev := e.err
+		bi, wi, err := e.scan(s.run)
+		if err != nil {
+			s.bands = append(s.bands, torusBand{kind: bandFailed, err: err, eErr: e.err})
+			e.err = prev
+			return
+		}
+		if bi > bd.b {
+			bd.b, bd.w = bi, wi
+		}
+		i = j
+	}
+	s.hi = Rs
+	s.bands = append(s.bands, bd)
 }
 
 // torusScanPoints caps the frequencies torusPastLimit samples past the grid

@@ -307,6 +307,68 @@ func TestHinfNormTorusGiveUpCost(t *testing.T) {
 	}
 }
 
+// torusRidgeCase is a 2×2 gain with τ = (h, fl(3h)), two classes, whose G∞
+// does not depend on the phase of the second delay (D12 and D22 decouple
+// it), so σ_max(G∞) peaks on a ridge of the torus. below cannot certify a
+// level just above the ridge within its budget, and the passages past the
+// grid never rise above it.
+var torusRidgeCase = lftCase{name: "ridge", n: 2, k: 3, h: 0.14203862636269235,
+	a:   []float64{-2.962039195292603, 0.2686701083868679, -0.6345679716724708, -2.796724595801912},
+	b1:  []float64{0.5081790286051484, 0.39788305561091986, -0.733344475495167, -0.2244946492194182},
+	b2:  []float64{-0.39010924967934457, 0.3895287085521675, -0.941343914254797, 0.05768657407229405},
+	c1:  []float64{-0.06027153725477197, -0.7956306203657832, 0.8308563416306809, -0.9242055934389009},
+	c2:  []float64{-0.01780411809160969, 0.29620918015012004, -0.27469060290794917, -0.12397353111408},
+	d11: []float64{0.19381783401710284, 0.5068987776739651, -0.8225189331768248, 0.5478464568719901},
+	d12: []float64{-1.3653674626757386, 0, 1.7391250053961054, 0},
+	d21: []float64{1.6532401089184012, 0.5755580725486191, 0.9350526799456751, 1.2985772473625867},
+	d22: []float64{0.3039147703483084, 0, -0.5702170597304429, 0.5523836464496369}}
+
+// TestHinfNormTorusRidgeGiveUpCost pins that torusPastLimit gives up on
+// torusRidgeCase, whose torus sup (dense 2-D oracle) lies above every finite
+// sample, after the passage scan alone: with no sample above the lowest
+// level it tries, no certificate of below can change the outcome. It used to
+// spend three below budgets, about 1.5M samples of G∞.
+func TestHinfNormTorusRidgeGiveUpCost(t *testing.T) {
+	c := torusRidgeCase
+	const n = 256
+	sup := 0.0
+	for i := range n {
+		p := 2 * math.Pi * float64(i) / n
+		g := lftGInf2(c, p, 0)
+		for j := range n {
+			q := 2 * math.Pi * float64(j) / n
+			v := lftGInf2(c, p, q)
+			if math.Abs(v-g) > 1e-12*g {
+				t.Fatalf("G∞(%g, %g) = %g, G∞(%g, 0) = %g: not a ridge", p, q, v, p, g)
+			}
+			sup = max(sup, v)
+		}
+	}
+	if fin, _ := oraclePeak(c.sigma, 200, 1e-3); !(sup > fin) {
+		t.Fatalf("torus sup %g not above finite peak %g", sup, fin)
+	}
+
+	e, err := newDelayLFT(c.system(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hf := newHighFrequencyGain(e); hf.dim != 2 {
+		t.Fatalf("dim = %d, want 2", hf.dim)
+	}
+	l, res, err := e.stability()
+	if err != nil || !res.stable {
+		t.Fatalf("stability = %v, %v", res.stable, err)
+	}
+	_, _, err = e.peakOrZero(l, res)
+	if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "not exactly commensurate") {
+		t.Fatalf("peak err = %v, want torus errDelayPeakUnsupported", err)
+	}
+	const maxGInf = 1 << 16
+	if e.gInfCalls > maxGInf {
+		t.Errorf("%d samples of G∞ before giving up, want <= %d", e.gInfCalls, maxGInf)
+	}
+}
+
 // torusSeedModel is the feedthroughDifferenceLoop of seed i with delays
 // (k0·h, k1·h) and oracle multiples kk.
 func torusSeedModel(tb testing.TB, k, kk [2]float64, i int) *System {

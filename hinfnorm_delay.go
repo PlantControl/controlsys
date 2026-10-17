@@ -59,6 +59,7 @@ type delayLFT struct {
 	d22c                []complex128
 	err                 error
 	sigmaCalls          int
+	gInfCalls           int       // samples of σ_max(G∞), see highFrequencyGain.at
 	scanW, scanV        []float64 // scan buffers
 }
 
@@ -625,6 +626,7 @@ func (h *highFrequencyGain) lipschitz() float64 {
 
 func (h *highFrequencyGain) at(theta []float64) float64 {
 	h.samples++
+	h.e.gInfCalls++
 	nd, p, m := h.e.nd, h.e.p, h.e.m
 	for i := range nd {
 		t := theta[h.grp[i]]
