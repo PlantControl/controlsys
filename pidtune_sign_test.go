@@ -260,6 +260,7 @@ func TestPidtuneGainSignMatchesStabilizingGains(t *testing.T) {
 		{[]float64{.2, -.1}, []float64{1, -2.3, 1.2}, .1},
 		{[]float64{1, .5}, []float64{1, -1.5, .5}, .5},
 		{[]float64{2.7, 4.239, -1.6929}, []float64{1, 9.88, 27.4856, 404.15328}, 0},
+		{[]float64{.3, -.15}, []float64{1, -1.93062, 1.21}, .1},
 	}
 	stableRoots := func(char Poly, dt float64) bool {
 		for len(char) > 1 && char[0] == 0 {
