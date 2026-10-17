@@ -112,3 +112,37 @@ func TestTunePIDBackOffFailsFastWhenDeepestFail(t *testing.T) {
 		}
 	}
 }
+
+// Designs one or two half octaves below wc0 on plants whose two deepest
+// depths both fail, which the deep gate alone lost. Seed-8 sweep plants;
+// TestTunePIDBacksOffResonantDelayedDefault vets the margins, |S| and
+// stability of the first's PI and the second's PID.
+func TestTunePIDBackOffProbesShallowFirst(t *testing.T) {
+	for _, c := range []struct {
+		num, den []float64
+		tau      float64
+		fams     []PidtuneType
+	}{
+		{[]float64{4469.208567469051, 3872.5108510086206}, []float64{1, .13029988431555797, 635.262873587796}, .0008295413703164025, []PidtuneType{PidtunePI, PidtunePID}},
+		{[]float64{50939.635002137285}, []float64{1, 74.35099627689756, 84.57397936219536, 6173.81323963725}, .01232428206353334, []PidtuneType{PidtunePID}},
+	} {
+		plant := pidPlantDelayed(t, c.num, c.den, c.tau)
+		wc0, err := findCrossoverFreq(plant, 0, 60)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fam := range c.fams {
+			r, err := TunePID(context.Background(), plant, fam, PIDTuningOptions{})
+			if err != nil {
+				t.Errorf("%v %s: %v", c.den, fam, err)
+				continue
+			}
+			if wc := r.Evidence.AchievedCrossover; wc < wc0/2*(1-1e-9) || wc >= wc0 {
+				t.Errorf("%v %s: crossover %g, want in [wc0/2, wc0) = [%g, %g)", c.den, fam, wc, wc0/2, wc0)
+			}
+			if !slices.ContainsFunc(r.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "lowered to") }) {
+				t.Errorf("%v %s: no back-off in %q", c.den, fam, r.Evidence.Warnings)
+			}
+		}
+	}
+}

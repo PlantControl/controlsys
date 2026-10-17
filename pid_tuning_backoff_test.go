@@ -17,7 +17,9 @@ import (
 // whose own band [wc/100, 100wc] ends below the ζ=0.0035 resonance at 1.3:
 // |S| there was unchecked and reached 7.7. The third, with an RHP zero, has
 // PIDF designs only from 2⁻⁹·wc0 down; the scan down from wc0 spent the
-// budget first and failed, and the deep design is now kept. Oracles: dense
+// budget first and failed, and the deep design is now kept. The last two,
+// TestTunePIDBackOffProbesShallowFirst's, back off one or two depths.
+// Oracles: dense
 // margins, dense |S| over the default and backed-off bands, and the winding of 1+L(jω), +90°
 // for a stable loop with one integrator.
 func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
@@ -29,6 +31,8 @@ func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
 		{[]float64{1}, []float64{1, .05, 1}, 1, []PidtuneType{PidtunePI, PidtunePID, PidtunePIDF}},
 		{[]float64{2.229880306748357}, []float64{1, .009089419529549078, 1.6808028078517465}, .0415713306402339, []PidtuneType{PidtunePI}},
 		{[]float64{3.1016, -.99088}, []float64{1, 1.02767, .71308, .45281, .113657}, .03776, []PidtuneType{PidtunePIDF}},
+		{[]float64{4469.208567469051, 3872.5108510086206}, []float64{1, .13029988431555797, 635.262873587796}, .0008295413703164025, []PidtuneType{PidtunePI}},
+		{[]float64{50939.635002137285}, []float64{1, 74.35099627689756, 84.57397936219536, 6173.81323963725}, .01232428206353334, []PidtuneType{PidtunePID}},
 	} {
 		plant := makePlant(t, c.num, c.den)
 		if err := plant.SetInputDelay([]float64{c.tau}); err != nil {
@@ -76,7 +80,7 @@ func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
 			if peak, at := pidDenseSensitivity(*k, g, wc/1e3, wc0*100); peak > 4+1e-3 {
 				t.Errorf("%v %s: %+v |S| %g at ω=%g", c.den, fam, *k, peak, at)
 			}
-			if wind := pidWindingDeg(L, 1e-6, 1e4); math.Abs(wind-90) > 1 {
+			if wind := pidWindingDeg(L, 1e-6, math.Max(1e4, wc0*1e4)); math.Abs(wind-90) > 1 {
 				t.Errorf("%v %s: %+v arg(1+L) changes by %g°, want 90°", c.den, fam, *k, wind)
 			}
 		}

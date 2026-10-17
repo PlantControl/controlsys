@@ -474,12 +474,14 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		// first returns the first design over depths lo..hi, stepping toward
 		// hi, and the depth it sits at.
+		lowest := 0
 		first := func(lo, hi int) (*PIDTuningResult, int, error) {
 			step := 1
 			if hi < lo {
 				step = -1
 			}
 			for j := lo; j != hi+step && used-start < budget; j += step {
+				lowest = max(lowest, j)
 				if r, e := design(j); r != nil || e != nil {
 					return r, j, e
 				}
@@ -494,8 +496,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			return nil, e
 		}
 		if deep == nil {
-			if te, ok := errors.AsType[*PIDTuningError](err); ok {
-				te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers %.4g and %.4g rad/s were also tried.", at(deepest-1), at(deepest)))
+			if te, ok := errors.AsType[*PIDTuningError](err); ok && lowest > 0 {
+				te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers down to %.4g rad/s were also tried.", at(lowest)))
 			}
 			return stamp(res, err)
 		}
