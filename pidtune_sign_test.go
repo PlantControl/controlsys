@@ -486,3 +486,68 @@ func TestPidtuneNearIntegratorMirrors(t *testing.T) {
 		}
 	}
 }
+
+// With a continuous internal delay no stability test applies, so the design
+// against the unforced sign must not be tried. G = e^{−0.2s}/(s(s+1)) +
+// 0.01e^{−0.5s}/(s+5) has no poles in Re s > 0, and 1+C(σ)G(σ) → 1 as
+// σ → +∞. Oracle: 1+C(σ)G(σ) > 0 on a real grid in σ > 0, else a real
+// closed-loop root lies in Re s > 0 (Ki < 0 drives it to −∞ as σ → 0+).
+func TestPidtuneNoMirrorWithoutScreen(t *testing.T) {
+	a := makePlant(t, []float64{1}, []float64{1, 1, 0})
+	b := makePlant(t, []float64{0.01}, []float64{1, 5})
+	if err := a.SetInputDelay([]float64{0.2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetInputDelay([]float64{0.5}); err != nil {
+		t.Fatal(err)
+	}
+	g, err := Parallel(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.HasInternalDelay() {
+		t.Fatal("precondition: internal delay")
+	}
+	plantAt := func(s float64) float64 {
+		return math.Exp(-0.2*s)/(s*(s+1)) + 0.01*math.Exp(-0.5*s)/(s+5)
+	}
+	for _, c := range [][2]float64{{3, 80}, {4, 60}, {4, 80}, {5, 60}, {5, 80}, {6, 45}, {6, 60}, {6, 80}, {8, 30}, {8, 45}, {8, 60}, {8, 80}} {
+		pid, err := Pidtune(g, PidtunePID, c[0], &PidtuneOptions{PhaseMargin: c[1]})
+		if err != nil {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("wc=%g pm=%g: %v", c[0], c[1], err)
+			}
+			continue
+		}
+		for k := -6.0; k <= 4; k += 0.05 {
+			s := math.Pow(10, k)
+			cs := pid.Kp + pid.Ki/s + pid.Kd*s/(pid.Tf*s+1)
+			if 1+cs*plantAt(s) <= 0 {
+				t.Errorf("wc=%g pm=%g: %+v has a real closed-loop root in (0, %g]", c[0], c[1], pid, s)
+				break
+			}
+		}
+	}
+}
+
+// A zero at s = 0 cancels the near integrator of −s e^{−0.5s}/((s+ε)(s+1)),
+// so the sign rule stays fixed and −G gets no mirrored design. Oracle: the
+// characteristic function D·Dc + N·Nc·e^{−0.5s} vanishes at s = 0 for every
+// integral design (N(0) = Dc(0) = 0), a closed-loop pole at the origin.
+// Pidtune(+G) still returns such a design (G4YFOH).
+func TestPidtuneNearIntegratorCancelledByZero(t *testing.T) {
+	for _, eps := range []float64{1e-10, 1e-8, 1e-7} {
+		g := makePlant(t, []float64{-1, 0}, []float64{1, 1 + eps, eps})
+		if err := g.SetInputDelay([]float64{0.5}); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []struct {
+			f  PidtuneType
+			wc float64
+		}{{PidtunePI, 1}, {PidtunePID, 3}} {
+			if pid, err := Pidtune(g, c.f, c.wc, nil); err == nil {
+				t.Errorf("eps=%g %s wc=%g: %+v has a closed-loop pole at s=0", eps, c.f, c.wc, pid)
+			}
+		}
+	}
+}

@@ -151,17 +151,25 @@ type pidtuneRun struct {
 }
 
 // design designs pidType at wc for sign·G, then for −sign·G when r.mirror
-// is set, and screens each; gated designs must also pass the back-off
-// gate. A discrete derivative moved to backward Euler for its filter pole
-// falls back to the forward-Euler design when only that one passes.
+// is set and the screen has a stability test there, and screens each; gated
+// designs must also pass the back-off gate. A discrete derivative moved to
+// backward Euler for its filter pole falls back to the forward-Euler design
+// when only that one passes.
 func (r *pidtuneRun) design(wc, sign float64, gated bool) (*PID, error) {
 	pid, err := r.signed(wc, sign, gated)
-	if r.mirror && errors.Is(err, ErrPIDTuningTargetUnattainable) {
+	if r.mirror && errors.Is(err, ErrPIDTuningTargetUnattainable) && r.screened(wc) {
 		if alt, altErr := r.signed(wc, -sign, gated); altErr == nil {
 			return alt, nil
 		}
 	}
 	return pid, err
+}
+
+// screened returns whether checkPidtuneStability tests designs at wc: an
+// unscreened design against the unforced sign may be certainly unstable.
+func (r *pidtuneRun) screened(wc float64) bool {
+	stable, _, err := r.screen.at(wc, r.pidType)
+	return err == nil && stable != nil
 }
 
 func (r *pidtuneRun) signed(wc, sign float64, gated bool) (*PID, error) {
@@ -292,16 +300,21 @@ func pidtuneGainSign(plant *System, at func(float64) complex128, wc float64, int
 	return 1, pidtuneSignGuessed
 }
 
-// pidtuneNearIntegrator returns whether plant has a pole within 1e-6·wc of
-// s = 0 (1e-6·wc·Dt of z = 1), or within 1e-8 of it relative to the largest
-// pole (to 1): rounding can leave an integrator just inside the stability
-// boundary, where it still acts as one over the design band.
+// pidtuneNearIntegrator returns whether plant has more poles than zeros
+// within 1e-6·wc of s = 0 (1e-6·wc·Dt of z = 1), or within 1e-8 of it
+// relative to the largest pole (to 1): rounding can leave an integrator just
+// inside the stability boundary, where it still acts as one over the design
+// band unless a zero there cancels it.
 func pidtuneNearIntegrator(plant *System, wc float64) bool {
 	model, err := finiteDimensionalModel(plant, "Pidtune")
 	if err != nil {
 		return false
 	}
 	poles, err := model.Poles()
+	if err != nil {
+		return false
+	}
+	zeros, err := model.Zeros()
 	if err != nil {
 		return false
 	}
@@ -313,12 +326,18 @@ func pidtuneNearIntegrator(plant *System, wc float64) bool {
 			tol = max(tol, 1e-8*cmplx.Abs(p))
 		}
 	}
+	near := 0
 	for _, p := range poles {
 		if cmplx.Abs(p-at) <= tol {
-			return true
+			near++
 		}
 	}
-	return false
+	for _, z := range zeros {
+		if cmplx.Abs(z-at) <= tol {
+			near--
+		}
+	}
+	return near > 0
 }
 
 // pidtuneGate checks a backed-off design over the whole back-off band with
