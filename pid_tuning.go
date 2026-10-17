@@ -196,6 +196,17 @@ type pidStabilityScreen struct {
 	eval         *sisoEval
 	hiddenStable func() (bool, error)
 	maxTail      float64
+	// transferRes caches model's rational transfer function for
+	// ideal-derivative screens; transferErr its failure.
+	transferRes *TransferFuncResult
+	transferErr error
+}
+
+func (s *pidStabilityScreen) transfer() (*TransferFuncResult, error) {
+	if s.transferRes == nil && s.transferErr == nil {
+		s.transferRes, s.transferErr = s.model.rationalTransferFunction(nil)
+	}
+	return s.transferRes, s.transferErr
 }
 
 func newPIDStabilityScreen(plant *System, eval *sisoEval, maxTail float64) (*pidStabilityScreen, error) {
@@ -234,7 +245,11 @@ func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 			if ok, err := s.hiddenStable(); !ok || err != nil {
 				return false, err
 			}
-			return pidTuningIdealStable(s.model, c)
+			transfer, err := s.transfer()
+			if err != nil {
+				return false, err
+			}
+			return pidTuningIdealStable(transfer, c)
 		}
 		return false, err
 	}
@@ -1014,13 +1029,24 @@ func pidTuningBasis(c PID2, w float64) (integral, derivative complex128) {
 		s := complex(0, w)
 		return 1 / s, s / (1 + complex(c.Tf, 0)*s)
 	}
-	integral = pidtuneIntegrator(c.IFormula, w, c.Dt)
-	d := 1 / pidtuneIntegrator(c.DFormula, w, c.Dt)
-	return integral, d / (1 + complex(c.Tf, 0)*d)
+	return pidtuneIntegrator(c.IFormula, w, c.Dt), pidTuningDiscreteDerivative(c, 1/pidtuneIntegrator(c.DFormula, w, c.Dt))
 }
+
+// pidTuningDiscreteDerivative is the filtered derivative term for d, the
+// inverse of the derivative formula's integrator.
+func pidTuningDiscreteDerivative(c PID2, d complex128) complex128 {
+	return d / (1 + complex(c.Tf, 0)*d)
+}
+
 func pidTuningFeedback(c PID2, w float64) complex128 {
 	i, d := pidTuningBasis(c, w)
 	return complex(c.Kp, 0) + complex(c.Ki, 0)*i + complex(c.Kd, 0)*d
+}
+
+// pidTuningDiscreteFeedback is pidTuningFeedback of a discrete c from its
+// integral term and the inverse d of its derivative formula's integrator.
+func pidTuningDiscreteFeedback(c PID2, integral, d complex128) complex128 {
+	return complex(c.Kp, 0) + complex(c.Ki, 0)*integral + complex(c.Kd, 0)*pidTuningDiscreteDerivative(c, d)
 }
 func pidTuningReference(c PID2, w float64) complex128 {
 	i, d := pidTuningBasis(c, w)
@@ -1132,11 +1158,7 @@ func pidTuningHiddenModesStable(plant *System) (bool, error) {
 
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic directly.
-func pidTuningIdealStable(plant *System, c *PID2) (bool, error) {
-	transfer, err := plant.rationalTransferFunction(nil)
-	if err != nil {
-		return false, err
-	}
+func pidTuningIdealStable(transfer *TransferFuncResult, c *PID2) (bool, error) {
 	var ip, id, dn, dd Poly
 	if c.Ki == 0 {
 		ip, id = Poly{0}, Poly{1}
@@ -1336,6 +1358,12 @@ func pidTuningGoldenMax(f func(float64) float64, lo, hi float64) (float64, float
 // refined by golden section, so a crossover pair between samples, as at a
 // lightly damped resonance, is found.
 func pidTuningCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (crossings, margins []float64) {
+	return pidTuningCrossingsOn(p, c, omega, wc, nil)
+}
+
+// pidTuningCrossingsOn is pidTuningCrossings with grid(k), when set, giving
+// the floor scan's |L(omega[k])|−1.
+func pidTuningCrossingsOn(p pidTuningPlant, c PID2, omega []float64, wc float64, grid func(int) float64) (crossings, margins []float64) {
 	crossings = []float64{wc}
 	// Outside the floor the scan is kept verbatim: the search amplifies
 	// last-bit changes in |L| into different designs.
@@ -1366,6 +1394,9 @@ func pidTuningCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (
 		return crossings, pidTuningMargins(p, c, crossings)
 	}
 	excess := func(w float64) float64 { return cmplx.Abs(p.at(w)*pidTuningFeedback(c, w)) - 1 }
+	if grid == nil {
+		grid = func(k int) float64 { return excess(omega[k]) }
+	}
 	add := func(lo, hi, lowSign float64) {
 		for range 24 {
 			mid := math.Sqrt(lo * hi)
@@ -1383,9 +1414,9 @@ func pidTuningCrossings(p pidTuningPlant, c PID2, omega []float64, wc float64) (
 		}
 	}
 	var before float64
-	previous := excess(omega[0])
+	previous := grid(0)
 	for k := 1; k < len(omega); k++ {
-		next := excess(omega[k])
+		next := grid(k)
 		if previous*next < 0 {
 			add(omega[k-1], omega[k], previous)
 		} else if k >= 2 && before*previous > 0 && previous*next > 0 &&
