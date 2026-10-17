@@ -534,8 +534,12 @@ func (x *highFrequencyExpansion) phaseRate() float64 {
 func (x *highFrequencyExpansion) sampleAt(phi float64) int {
 	x.sampleCircle()
 	k := len(x.byS)
-	i := int(math.Round(math.Mod(phi, 2*math.Pi) / (2 * math.Pi / float64(k))))
-	return ((i % k) + k) % k
+	u := phi * (float64(k) / (2 * math.Pi))
+	if math.Abs(u) >= 1<<52 {
+		u = math.Mod(phi, 2*math.Pi) / (2 * math.Pi / float64(k))
+	}
+	i := int(math.Round(u)) % k
+	return (i + k) % k
 }
 
 // phaseMask marks the circle samples near which sampleModel over t ∈ [t1,

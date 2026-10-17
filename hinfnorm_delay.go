@@ -1135,13 +1135,13 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		span = float64(l.pointBudget()) * math.Pi / (8 * l.tau)
 	}
 	points := func(lo, R float64) []float64 {
-		ext := []float64{lo}
-		for _, w := range l.grid(R, R) {
-			if w > lo {
-				ext = append(ext, w)
-			}
+		g := l.grid(R, R)
+		i, _ := slices.BinarySearch(g, math.Nextafter(lo, math.Inf(1)))
+		if i == 0 {
+			return append([]float64{lo}, g...)
 		}
-		return ext
+		g[i-1] = lo
+		return g[i-1:]
 	}
 	extend := func(lo, R float64) ([]float64, float64, float64, error) {
 		ext := points(lo, R)
