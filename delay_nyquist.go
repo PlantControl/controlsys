@@ -607,9 +607,17 @@ func (l *delayLoop) axisMult(w float64) int {
 	return 0
 }
 
-// stableClosedLoop reports whether 1/(1+L) is stable.
+// stableClosedLoop reports whether 1/(1+L) is stable. The linear delay
+// spacing ends where the tail bound certifies |L| <= sensitivityTailLevel,
+// not at the grid end, so a fast controller pole does not stretch it.
 func (l *delayLoop) stableClosedLoop() (bool, error) {
-	res, err := l.nyquist(0.5)
+	var res delayNyquist
+	var err error
+	if l.tau > 0 && l.tailLimit < sensitivityTailLevel {
+		res, err = l.nyquistLinearTo(1e-3, sensitivityTailLevel)
+	} else {
+		res, err = l.nyquist(0.5)
+	}
 	return res.stable, err
 }
 

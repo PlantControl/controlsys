@@ -186,6 +186,68 @@ func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) flo
 	return math.Copysign(1, real(dc))
 }
 
+// pidStabilityScreen certifies closed-loop stability of PID candidates on a
+// SISO plant: by closed-loop poles when the model is delay-free (discrete
+// delays absorbed), by a Nyquist test for supported continuous delays.
+// maxTail bounds limsup |L| of a delayed ideal-derivative loop: 1 accepts
+// every stable loop, pidTuningMaxTail adds TunePID's robustness margin.
+type pidStabilityScreen struct {
+	plant, model *System
+	eval         *sisoEval
+	hiddenStable func() (bool, error)
+	maxTail      float64
+}
+
+func newPIDStabilityScreen(plant *System, eval *sisoEval, maxTail float64) (*pidStabilityScreen, error) {
+	model := plant
+	if plant.Dt > 0 && plant.HasDelay() {
+		var err error
+		if model, err = plant.AbsorbDelay(AbsorbAll); err != nil {
+			return nil, err
+		}
+	}
+	return &pidStabilityScreen{
+		plant: plant, model: model, eval: eval, maxTail: maxTail,
+		hiddenStable: sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) }),
+	}, nil
+}
+
+// at returns the stability test for family tuned at wc and its evidence
+// kind, or a nil test with PIDStabilitySampledOnly when the loop is outside
+// the scope of both certificates.
+func (s *pidStabilityScreen) at(wc float64, family PidtuneType) (func(*PID2) (bool, error), PIDStabilityEvidence, error) {
+	if !s.model.HasDelay() {
+		return s.closedLoopPoles, PIDStabilityClosedLoopPoles, nil
+	}
+	stable, ok, err := pidTuningDelayStability(s.plant, s.eval, wc, pidTuningIdealDerivative(family), s.maxTail)
+	if err != nil || !ok {
+		return nil, PIDStabilitySampledOnly, err
+	}
+	return stable, PIDStabilityNyquist, nil
+}
+
+func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
+	controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
+	cs, err := controller.System()
+	if err != nil {
+		if c.Kd != 0 && c.Tf == 0 {
+			if ok, err := s.hiddenStable(); !ok || err != nil {
+				return false, err
+			}
+			return pidTuningIdealStable(s.model, c)
+		}
+		return false, err
+	}
+	loop, err := Feedback(s.model, cs, -1)
+	if errors.Is(err, ErrAlgebraicLoop) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return loop.IsStable()
+}
+
 // pidTuningSignConsistent reports whether every nonzero gain of c has sign
 // want; want = 0 accepts any signs. Other signs on a stable plant come from
 // the wrapped-phase branch of the crossover equations.
@@ -201,8 +263,8 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 	return true
 }
 
-// TunePID designs a SISO negative-feedback controller. The original Pidtune API
-// retains its historical behavior. This operation enforces finite targets,
+// TunePID designs a SISO negative-feedback controller. Unlike the
+// closed-form Pidtune, this operation enforces finite targets,
 // bounded computation and explicit achieved-target/stability evidence.
 //
 // A zero CrossoverFrequency is capped by the loop delay τ at (180°−PM)/(2τ),
@@ -247,15 +309,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	model := plant
-	if plant.Dt > 0 && plant.HasDelay() {
-		if model, err = plant.AbsorbDelay(AbsorbAll); err != nil {
-			return nil, fmt.Errorf("TunePID: %w", err)
-		}
+	screen, err := newPIDStabilityScreen(plant, eval, pidTuningMaxTail)
+	if err != nil {
+		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	hiddenStable := sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) })
-	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(model) })
-	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(model) })
+	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(screen.model) })
+	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(screen.model) })
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
 		tau *= plant.Dt
@@ -278,40 +337,13 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			p.high = math.Min(p.high, .99*math.Pi/plant.Dt)
 			p.crossHigh = math.Min(p.crossHigh, .99*math.Pi/plant.Dt)
 		}
-		if !model.HasDelay() {
-			p.stability = PIDStabilityClosedLoopPoles
-			p.stable = func(c *PID2) (bool, error) {
-				controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
-				cs, err := controller.System()
-				if err != nil {
-					if c.Kd != 0 && c.Tf == 0 {
-						if ok, err := hiddenStable(); !ok || err != nil {
-							return false, err
-						}
-						return pidTuningIdealStable(model, c)
-					}
-					return false, err
-				}
-				loop, err := Feedback(model, cs, -1)
-				if errors.Is(err, ErrAlgebraicLoop) {
-					return false, nil
-				}
-				if err != nil {
-					return false, err
-				}
-				return loop.IsStable()
-			}
-		} else {
-			stable, ok, err := pidTuningDelayStability(plant, eval, wc, pidTuningIdealDerivative(family))
-			if err != nil {
-				return nil, fmt.Errorf("TunePID: %w", err)
-			}
-			if ok {
-				p.stability = PIDStabilityNyquist
-				p.stable = stable
-			} else {
-				p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
-			}
+		stable, evidence, err := screen.at(wc, family)
+		if err != nil {
+			return nil, fmt.Errorf("TunePID: %w", err)
+		}
+		p.stable, p.stability = stable, evidence
+		if stable == nil {
+			p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 		}
 		tune := tunePID
 		if floor {
@@ -1387,28 +1419,71 @@ func pidTuningIdealDerivative(family PidtuneType) bool {
 	return f == PidtunePD || f == PidtunePID
 }
 
-// pidDerivTail bounds |s·G(s)| = |CB + CA(sI−A)⁻¹B| for Re s ≥ 0, |s| ≥ w of a
-// strictly proper SISO plant G, delays excluded.
-func pidDerivTail(plant *System) func(float64) float64 {
+// pidMarkovTail bounds |s^p·C(sI−A)⁻¹B|, p ∈ {0, 1}, for Re s ≥ 0, |s| ≥ w of
+// a SISO plant, delays and D excluded. Expanding (sI−A)⁻¹ to order k gives
+// Σ_{j<k} |CAʲB|·w^{p−j−1} + ‖CAᵏ‖‖B‖·w^{p−k}/(w−‖A‖); the minimum over
+// k = 0..n decays like the plant's relative degree, so the delay grid ends
+// near crossover instead of where a first-order bound falls below 1.
+type pidMarkovTail struct {
+	normA  float64
+	markov []float64 // |CAʲB|
+	rem    []float64 // ‖CAᵏ‖‖B‖
+}
+
+func newPIDMarkovTail(plant *System) *pidMarkovTail {
 	n, _, _ := plant.Dims()
-	cb, cab, normA := 0.0, 0.0, 0.0
-	if n > 0 {
-		var v, ca mat.Dense
-		v.Mul(plant.C, plant.B)
-		cb = math.Abs(v.At(0, 0))
-		ca.Mul(plant.C, plant.A)
-		cab = spectralNorm(&ca) * spectralNorm(plant.B)
-		normA = spectralNorm(plant.A)
+	t := &pidMarkovTail{markov: make([]float64, n), rem: make([]float64, n+1)}
+	if n == 0 {
+		return t
 	}
-	return func(w float64) float64 {
-		if cab == 0 || math.IsInf(w, 1) {
-			return cb
+	t.normA = spectralNorm(plant.A)
+	normB := spectralNorm(plant.B)
+	ca := mat.DenseCopyOf(plant.C)
+	var next, v mat.Dense
+	for k := range n + 1 {
+		t.rem[k] = spectralNorm(ca) * normB
+		if k == n {
+			break
 		}
-		if w <= normA {
-			return math.Inf(1)
-		}
-		return cb + cab/(w-normA)
+		v.Mul(ca, plant.B)
+		t.markov[k] = math.Abs(v.At(0, 0))
+		next.Mul(ca, plant.A)
+		ca.Copy(&next)
 	}
+	return t
+}
+
+func (t *pidMarkovTail) at(w float64, p int) float64 {
+	if len(t.markov) == 0 {
+		return 0
+	}
+	if math.IsInf(w, 1) {
+		if p == 1 {
+			return t.markov[0]
+		}
+		return 0
+	}
+	best, sum, f := math.Inf(1), 0.0, math.Pow(w, float64(p-1))
+	for k := range t.rem {
+		switch {
+		case t.rem[k] == 0:
+			best = min(best, sum)
+		case w > t.normA:
+			best = min(best, sum+t.rem[k]*f*w/(w-t.normA))
+		}
+		if k < len(t.markov) {
+			sum += t.markov[k] * f
+			f /= w
+		}
+	}
+	return best
+}
+
+// pidDerivTail bounds |s·G(s)| for Re s ≥ 0, |s| ≥ w of a strictly proper
+// SISO plant G, delays excluded.
+func pidDerivTail(plant *System) func(float64) float64 {
+	t := newPIDMarkovTail(plant)
+	return func(w float64) float64 { return t.at(w, 1) }
 }
 
 // pidTuningMaxTail bounds limsup |L(jω)| of a delayed loop with an ideal
@@ -1424,9 +1499,15 @@ const pidTuningMaxTail = 1 - 1.0/pidTuningMaxSensitivity
 // outside the test's scope. Ideal derivative controllers need no internal
 // delays; with D ≠ 0, |Kd·s·P(s)| is unbounded, so every Kd ≠ 0 is rejected.
 // A candidate loop outside the Nyquist test's scope, or an ideal derivative
-// whose high-frequency gain exceeds pidTuningMaxTail, is rejected; other
+// whose high-frequency gain exceeds maxTail (≤ 1), is rejected; other
 // failures are errors.
-func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool) (func(*PID2) (bool, error), bool, error) {
+func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDerivative bool, maxTail float64) (func(*PID2) (bool, error), bool, error) {
+	return pidTuningDelayStabilityBudget(plant, eval, wc, idealDerivative, maxTail, 0)
+}
+
+// pidTuningDelayStabilityBudget is pidTuningDelayStability with the Nyquist
+// grid capped at maxPoints; 0 selects delayNyquistMaxPoints.
+func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, idealDerivative bool, maxTail float64, maxPoints int) (func(*PID2) (bool, error), bool, error) {
 	if !plant.IsContinuous() {
 		return nil, false, nil
 	}
@@ -1437,10 +1518,15 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 	if err != nil {
 		return nil, false, err
 	}
+	base.maxPoints = maxPoints
 	plantTail, plantLimit := base.tail, base.tailLimit
 	var derivTail func(float64) float64
-	if !plant.HasInternalDelay() && plant.D.At(0, 0) == 0 {
-		derivTail = pidDerivTail(plant)
+	if !plant.HasInternalDelay() {
+		markov, d := newPIDMarkovTail(plant), math.Abs(plant.D.At(0, 0))
+		plantTail = func(w float64) float64 { return min(base.tail(w), d+markov.at(w, 0)) }
+		if d == 0 {
+			derivTail = func(w float64) float64 { return markov.at(w, 1) }
+		}
 	}
 	if idealDerivative && plant.HasInternalDelay() {
 		return nil, false, nil
@@ -1478,7 +1564,7 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 		case derivTail != nil:
 			l.tail = func(w float64) float64 { return (kp+ki/w)*plantTail(w) + kd*derivTail(w) }
 			l.tailLimit = kp*plantLimit + kd*derivTail(math.Inf(1))
-			if l.tailLimit > pidTuningMaxTail {
+			if l.tailLimit > maxTail {
 				return false, nil
 			}
 		default:

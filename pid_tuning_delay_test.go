@@ -210,7 +210,7 @@ func TestTunePIDDelayRejectsNearNeutralDerivative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stable, ok, err := pidTuningDelayStability(p, eval, 10, true)
+	stable, ok, err := pidTuningDelayStability(p, eval, 10, true, pidTuningMaxTail)
 	if err != nil || !ok {
 		t.Fatalf("out of scope: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestTunePIDDelayFeedthroughRejectsIdealDerivative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stable, ok, err := pidTuningDelayStability(p, eval, 1, true)
+	stable, ok, err := pidTuningDelayStability(p, eval, 1, true, pidTuningMaxTail)
 	if err != nil || !ok {
 		t.Fatalf("fell back to sampled screen: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestTunePIDDelayTailCapIdealDerivativeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stable, ok, err := pidTuningDelayStability(p, eval, 1, false)
+	stable, ok, err := pidTuningDelayStability(p, eval, 1, false, pidTuningMaxTail)
 	if err != nil || !ok {
 		t.Fatalf("out of scope: %v", err)
 	}

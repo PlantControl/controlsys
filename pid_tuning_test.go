@@ -210,7 +210,7 @@ func TestTunePIDDelayNyquistBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stable, ok, err := pidTuningDelayStability(tc.plant, eval, 1, tc.c.Kd != 0 && tc.c.Tf == 0)
+			stable, ok, err := pidTuningDelayStability(tc.plant, eval, 1, tc.c.Kd != 0 && tc.c.Tf == 0, pidTuningMaxTail)
 			if err != nil || !ok {
 				t.Fatal("plant outside Nyquist scope")
 			}
