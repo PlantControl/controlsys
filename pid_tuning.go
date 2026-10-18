@@ -963,7 +963,10 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// fail the back-off ends, so an untunable plant costs seven depths, not
 	// twenty. Designs between can come in short runs (depths 13-18, 9-10,
 	// 12 alone on sweep plants), which the probes catch. When the scan
-	// between runs out of budget, the gate's design is kept.
+	// between runs out of budget, the gate's design is kept. A depth whose
+	// response cannot be evaluated, as near multiple poles at z = 1, tells
+	// nothing, so when one did and all gates fail, the depths left are
+	// scanned shallowest first within the budget.
 	backOff := func(wc0, gainSign, pm float64, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
 		minHigh, probing = wc0*100, true
 		budget, start := opts.MaxEvaluations, used
@@ -971,6 +974,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			budget = 4096
 		}
 		const deepest = 20
+		blind := false
 		at := func(j int) float64 { return wc0 * math.Pow(2, -float64(j)/2) }
 		design := func(j int) (*PIDTuningResult, error) {
 			o := opts
@@ -991,6 +995,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				opts.MaxEvaluations = budget - (used - start)
 				r, e := tuneAt(at(j), gainSign, true, floor)
 				if skipped(e) {
+					blind = true
 					continue
 				}
 				if e == nil {
@@ -1035,6 +1040,15 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		if e != nil {
 			return nil, e
+		}
+		for j := 3; deep == nil && blind && j < deepest-1 && used-start < budget; j++ {
+			if j == 9 || j == 12 || j == 16 {
+				continue
+			}
+			if r, e := design(j); r != nil || e != nil {
+				return stamp(r, e)
+			}
+			lowest = max(lowest, j)
 		}
 		if deep == nil {
 			if te, ok := errors.AsType[*PIDTuningError](err); ok && lowest > 0 {

@@ -130,40 +130,7 @@ func TestTunePIDUndelayedIntegratorBackOff(t *testing.T) {
 				t.Errorf("%s: no design: %v", name, err)
 				continue
 			}
-			k := r.Controller
-			loop := func(w float64) complex128 {
-				x := complex(0, w)
-				if c.dt > 0 {
-					x = cmplx.Exp(complex(0, w*c.dt))
-				}
-				g := Poly(c.num).Eval(x) / Poly(c.den).Eval(x)
-				var integ, deriv complex128
-				if c.dt > 0 {
-					integ = complex(c.dt, 0) / (x - 1)
-					deriv = 1 / (complex(k.Tf, 0) + complex(c.dt, 0)/(x-1))
-				} else {
-					integ = 1 / x
-					deriv = x / (complex(k.Tf, 0)*x + 1)
-				}
-				return g * (complex(k.Kp, 0) + complex(k.Ki, 0)*integ + complex(k.Kd, 0)*deriv)
-			}
-			wc := r.Evidence.AchievedCrossover
-			l := loop(wc)
-			pm := 180 + cmplx.Phase(l)*180/math.Pi
-			if math.Abs(cmplx.Abs(l)-1) > 1e-3 || math.Abs(math.Remainder(pm-r.Evidence.AchievedPhaseMargin, 360)) > .5 || pm < 56 {
-				t.Errorf("%s: |L(%.4g)| = %.6g, margin %.4g, reported %.4g", name, wc, cmplx.Abs(l), pm, r.Evidence.AchievedPhaseMargin)
-			}
-			hi := 1e3 * wc
-			if c.dt > 0 {
-				hi = math.Pi / c.dt
-			}
-			peak := 0.
-			for w := wc * 1e-3; w < hi; w *= 1.001 {
-				peak = math.Max(peak, 1/cmplx.Abs(1+loop(w)))
-			}
-			if peak > pidTuningMaxSensitivity*1.01 {
-				t.Errorf("%s: sampled |S| peak %.4g at wc %.4g", name, peak, wc)
-			}
+			pidCheckUndelayedMarginAndS(t, name, c.num, c.den, c.dt, r)
 		}
 	}
 }
@@ -183,5 +150,46 @@ func TestTunePIDFreePScanSkipsNyquist(t *testing.T) {
 	for _, c := range cases {
 		r, err := TunePID(context.Background(), makeDiscretePlant(t, c.num, c.den, c.dt), PidtuneP, PIDTuningOptions{})
 		pidCheckZPoleResult(t, c.name, c.num, c.den, c.dt, r, err)
+	}
+}
+
+// pidCheckUndelayedMarginAndS checks r on the raw num/den: margin within
+// 0.5° of the reported one and >= 56° at the reported crossover, and sampled
+// |S| <= 4 from 1e-3·wc up to Nyquist or 1e3·wc.
+func pidCheckUndelayedMarginAndS(t *testing.T, name string, num, den []float64, dt float64, r *PIDTuningResult) {
+	t.Helper()
+	k := r.Controller
+	loop := func(w float64) complex128 {
+		x := complex(0, w)
+		if dt > 0 {
+			x = cmplx.Exp(complex(0, w*dt))
+		}
+		g := Poly(num).Eval(x) / Poly(den).Eval(x)
+		var integ, deriv complex128
+		if dt > 0 {
+			integ = complex(dt, 0) / (x - 1)
+			deriv = 1 / (complex(k.Tf, 0) + complex(dt, 0)/(x-1))
+		} else {
+			integ = 1 / x
+			deriv = x / (complex(k.Tf, 0)*x + 1)
+		}
+		return g * (complex(k.Kp, 0) + complex(k.Ki, 0)*integ + complex(k.Kd, 0)*deriv)
+	}
+	wc := r.Evidence.AchievedCrossover
+	l := loop(wc)
+	pm := 180 + cmplx.Phase(l)*180/math.Pi
+	if math.Abs(cmplx.Abs(l)-1) > 1e-3 || math.Abs(math.Remainder(pm-r.Evidence.AchievedPhaseMargin, 360)) > .5 || pm < 56 {
+		t.Errorf("%s: |L(%.4g)| = %.6g, margin %.4g, reported %.4g", name, wc, cmplx.Abs(l), pm, r.Evidence.AchievedPhaseMargin)
+	}
+	hi := 1e3 * wc
+	if dt > 0 {
+		hi = math.Pi / dt
+	}
+	peak := 0.
+	for w := wc * 1e-3; w < hi; w *= 1.001 {
+		peak = math.Max(peak, 1/cmplx.Abs(1+loop(w)))
+	}
+	if peak > pidTuningMaxSensitivity*1.01 {
+		t.Errorf("%s: sampled |S| peak %.4g at wc %.4g", name, peak, wc)
 	}
 }
