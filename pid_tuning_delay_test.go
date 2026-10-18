@@ -115,7 +115,7 @@ func TestFindCrossoverFreqDelayCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wc, err := findCrossoverFreq(delayedFirstOrder(t, .05), 0, 60); err != nil || wc != mag {
+	if wc, err := findCrossoverFreq(delayedFirstOrder(t, .05), 0, 60); err != nil || math.Abs(wc-mag) > 1e-14*mag {
 		t.Errorf("cap bound a small delay: %g, %v; want %g", wc, err, mag)
 	}
 	d, err := NewFromSlices(1, 1, 1, []float64{0.9}, []float64{1}, []float64{0.1}, []float64{0}, 0.1)
