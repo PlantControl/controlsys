@@ -397,21 +397,42 @@ func torusSeedModel(tb testing.TB, k, kk [2]float64, i int) *System {
 }
 
 // BenchmarkHinfNormTorusGiveUp times HinfNorm on torus models that end
-// unsupported after the search past the limit: the GiveUpCost seeds and the
-// slowest τ = (h, √2·h) seeds of a 200-seed sweep.
+// unsupported after the search past the limit: the GiveUpCost seeds still
+// unsupported and three-class seeds whose maximisers have a ≠ 0.
 func BenchmarkHinfNormTorusGiveUp(b *testing.B) {
 	var models []*System
 	for _, k := range [][2]float64{{1, nearThree}, {2, nearThree}} {
-		for _, i := range []int{15, 22, 29} {
+		for _, i := range []int{15, 22} {
 			models = append(models, torusSeedModel(b, k, [2]float64{k[0], 3}, i))
 		}
 	}
-	for _, i := range []int{7, 63, 101, 140} {
-		models = append(models, torusSeedModel(b, [2]float64{1, math.Sqrt2}, [2]float64{1, 1}, i))
+	for _, i := range []int{1, 9} {
+		models = append(models, torusRiseSeed("irr3", i).system(b))
 	}
 	for _, sys := range models {
 		if _, _, err := HinfNorm(sys); !errors.Is(err, errDelayPeakUnsupported) {
 			b.Fatalf("HinfNorm err = %v, want errDelayPeakUnsupported", err)
+		}
+	}
+	b.ResetTimer()
+	for range b.N {
+		for _, sys := range models {
+			HinfNorm(sys)
+		}
+	}
+}
+
+// BenchmarkHinfNormTorusFixedPointRise times HinfNorm on the τ = (h, √2·h)
+// seeds that used to give up in BenchmarkHinfNormTorusGiveUp and now end at
+// the torus sup at a fixed point, see TestHinfNormTorusFixedPointRise.
+func BenchmarkHinfNormTorusFixedPointRise(b *testing.B) {
+	var models []*System
+	for _, i := range []int{7, 63, 101, 140} {
+		models = append(models, torusSeedModel(b, [2]float64{1, math.Sqrt2}, [2]float64{1, 1}, i))
+	}
+	for _, sys := range models {
+		if _, w, err := HinfNorm(sys); err != nil || !math.IsInf(w, 1) {
+			b.Fatalf("HinfNorm ω = %g, err = %v, want +Inf, nil", w, err)
 		}
 	}
 	b.ResetTimer()
