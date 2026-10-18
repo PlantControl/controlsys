@@ -18,7 +18,7 @@ func TestDelayNyquistDoubleIntegratorTinyPoles(t *testing.T) {
 		den: []float64{1, -0.0046923109514164976, -1.0433945828807056e-05, 7.829332736549319e-11, 0, 0},
 		tau: 0.0029979187523625347, box: 200,
 	}
-	if want := oracleRHPRoots(t, q.chi, q.box); want != 0 {
+	if want := oracleRHPRoots(t, q.chi, q.box, q.den, q.num); want != 0 {
 		t.Fatalf("oracle %d RHP roots, want 0", want)
 	}
 	var supT, supS float64
@@ -68,7 +68,7 @@ func TestDelayNyquistMultipleIntegrator(t *testing.T) {
 		{name: "s3", num: []float64{0.2, 0.3, 0.05}, den: []float64{1, 0, 0, 0}, tau: 0.05, box: 200},
 	} {
 		t.Run(q.name, func(t *testing.T) {
-			want := oracleRHPRoots(t, q.chi, q.box)
+			want := oracleRHPRoots(t, q.chi, q.box, q.den, q.num)
 			sys := q.system(t)
 			for _, frac := range []float64{0.5, 1e-3} {
 				l, err := delayLoopFromSystem(sys, "delay loop")
@@ -129,7 +129,7 @@ func TestTunePIDIntegratingDelayedPlant(t *testing.T) {
 			denC = []float64{k.Tf, 1, 0}
 		}
 		q := quasiLoop{num: polyMul(numC, c.num), den: polyMul(denC, c.den), tau: c.tau}
-		if n := oracleRHPRoots(t, q.chi, 200); n != 0 {
+		if n := oracleRHPRoots(t, q.chi, 200, q.den, q.num); n != 0 {
 			t.Fatalf("%v/%v τ=%g: %+v closes %d RHP roots", c.num, c.den, c.tau, *k, n)
 		}
 	}

@@ -30,7 +30,7 @@ func TestDelayNyquistAxisCluster(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			q := quasiLoop{num: c.num, den: c.den, tau: c.tau}
-			if n := oracleRHPRoots(t, q.chi, 200); n != 0 {
+			if n := oracleRHPRoots(t, q.chi, 200, q.den, q.num); n != 0 {
 				t.Fatalf("oracle %d RHP roots", n)
 			}
 			p := makePlant(t, c.num, c.den)
@@ -64,7 +64,7 @@ func TestDelayNyquistOriginClusterParallelDelays(t *testing.T) {
 		k := complex(k1, 0)*e(t1) + complex(k2, 0)*e(t2)
 		return polyEval(den, s) + polyEval(num, s)*k*e(tin+tout)
 	}
-	if n := oracleRHPRoots(t, chi, 200); n != 0 {
+	if n := oracleRHPRoots(t, chi, 200, den, num); n != 0 {
 		t.Fatalf("oracle %d RHP roots", n)
 	}
 	p := makePlant(t, num, den)
