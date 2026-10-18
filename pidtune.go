@@ -65,7 +65,8 @@ const (
 // rejected; loops outside both tests are not screened. With wc = 0 a
 // rejected design is retried at crossovers lowered up to three decades, or
 // to a hundredth of the slowest non-integrating pole's natural frequency
-// when that is lower, six decades at most (not for an integrating or
+// when that is lower, six decades at most (six when wc came from a pole
+// because G has no gain crossover or bandwidth; not for an integrating or
 // unstable plant with a continuous delay),
 // accepting the first that passes, keeps the phase margin at every gain
 // crossover and keeps |S| ≤ 4; otherwise, and for an explicit wc, the
@@ -97,7 +98,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	}
 
 	auto := wc == 0
-	wc, err := findCrossoverFreq(plant, wc, pm)
+	wc, fromPole, err := autoCrossoverFreq(plant, wc, pm)
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
@@ -115,7 +116,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, mirror: rule != pidtuneSignFixed}
+	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, fromPole: fromPole, mirror: rule != pidtuneSignFixed}
 
 	pid, first := run.design(wc, sign, false)
 	if first == nil {
@@ -228,7 +229,9 @@ type pidtuneRun struct {
 	pidType PidtuneType
 	pm, wc  float64
 	// floor caches backoffFloor.
-	floor    float64
+	floor float64
+	// fromPole: wc is plantCrossoverFreq's pole fallback.
+	fromPole bool
 	explicit bool
 	auto     bool
 	// mirror tries the design against the chosen gain sign after the
@@ -342,6 +345,9 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 func (r *pidtuneRun) backoffFloor() float64 {
 	if r.floor == 0 {
 		r.floor = pidtuneBackoffFloor(r.plant, r.wc)
+		if r.fromPole {
+			r.floor = r.wc * math.Pow(10, -pidtuneBackoffMaxDecade)
+		}
 	}
 	return r.floor
 }
@@ -880,12 +886,19 @@ func checkPidtuneMargin(plant *System, pid *PID, wc, pm float64) error {
 // plant magnitude capped at (180°−pm)/(2τ) for a total loop delay τ, so the
 // delay lag spends at most half the phase left after the margin.
 func findCrossoverFreq(plant *System, wcTarget, pm float64) (float64, error) {
+	wc, _, err := autoCrossoverFreq(plant, wcTarget, pm)
+	return wc, err
+}
+
+// autoCrossoverFreq is findCrossoverFreq, also reporting whether the
+// crossover came from plantCrossoverFreq's pole fallback.
+func autoCrossoverFreq(plant *System, wcTarget, pm float64) (float64, bool, error) {
 	if wcTarget > 0 {
-		return wcTarget, nil
+		return wcTarget, false, nil
 	}
-	wc, err := plantCrossoverFreq(plant)
+	wc, fromPole, err := plantCrossoverFreqFrom(plant)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
@@ -894,33 +907,41 @@ func findCrossoverFreq(plant *System, wcTarget, pm float64) (float64, error) {
 	if tau > 0 {
 		wc = math.Min(wc, (180-pm)*math.Pi/180/(2*tau))
 	}
-	return wc, nil
+	return wc, fromPole, nil
 }
 
 func plantCrossoverFreq(plant *System) (float64, error) {
+	wc, _, err := plantCrossoverFreqFrom(plant)
+	return wc, err
+}
 
+// plantCrossoverFreqFrom is plantCrossoverFreq, also reporting whether the
+// crossover came from the slowest pole: G has no gain crossover, a finite
+// DC gain and no -3 dB bandwidth, as for a high-pass plant with |G| < 1.
+func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if len(all.GainCrossFreqs) > 0 {
-		return all.GainCrossFreqs[0], nil
+		return all.GainCrossFreqs[0], false, nil
 	}
 	if dc, err := plant.DCGain(); err == nil && math.IsInf(dc.At(0, 0), 0) {
-		return pidtuneIntegratingCrossover(plant)
+		wc, err := pidtuneIntegratingCrossover(plant)
+		return wc, false, err
 	}
 
 	bw, err := Bandwidth(plant, -3)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if bw > 0 && !math.IsInf(bw, 0) {
-		return bw, nil
+		return bw, false, nil
 	}
 
 	poles, err := plant.Poles()
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	at, tol := pidtuneIntegratorCluster(plant, poles)
 	if w := pidtuneSlowestRoot(plant, poles, at, tol); !math.IsInf(w, 1) {
@@ -928,10 +949,10 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 		if plant.Dt > 0 {
 			w = math.Min(w, 0.1*math.Pi/plant.Dt)
 		}
-		return w, nil
+		return w, true, nil
 	}
 
-	return 0, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
+	return 0, false, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
 }
 
 // pidtuneIntegratingCrossover picks the crossover of an integrating plant
