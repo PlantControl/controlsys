@@ -19,12 +19,14 @@ var errDelayLoopUnsupported = fmt.Errorf("delay loop outside Nyquist test scope:
 // RHP root count is rhp - W, where W is the winding of 1+L around the origin
 // along the jω axis indented to the right of the imaginary-axis eigenvalues.
 type delayLoop struct {
-	sys        *System // the loop model, for certified sensitivity peaks
-	at         func(w float64) complex128
-	atS        func(s complex128) (complex128, bool) // L(s) off the axis for clusterWinding; nil disables it
-	one        func(w float64) complex128            // 1+L formed directly; nil: 1 + at
-	eval       *sisoEval                             // records the first failure of at
-	fails      *error                                // where at records its first failure when eval is nil
+	sys *System // the loop model, for certified sensitivity peaks
+	at  func(w float64) complex128
+	// atS is L(s) off the axis for clusterWinding, dd allowing the
+	// double-double fallback; nil disables it.
+	atS        func(s complex128, dd bool) (complex128, bool)
+	one        func(w float64) complex128 // 1+L formed directly; nil: 1 + at
+	eval       *sisoEval                  // records the first failure of at
+	fails      *error                     // where at records its first failure when eval is nil
 	rhp        int
 	axis       []axisPole
 	poles      []complex128
@@ -1429,7 +1431,11 @@ func (l *delayLoop) failed() bool {
 // clusterWinding counts the roots with cluster indentations around every
 // axis pole, the base failure point and every near-axis pole. It reports
 // false, with l unchanged, unless every indentation verifies and the walk
-// resolves.
+// resolves. Failing that, the circles are retried with the double-double
+// fallback, as where the double solve is singular on every circle around
+// an integrator triple with sub-1e-6 real poles. The double pass comes
+// first: the fallback verifies tighter circles, which can start the walk
+// where it fails beside a real pole ~1e-7 off the origin.
 func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyquist, bool) {
 	ws, required := l.clusterCandidates(base)
 	if len(ws) == 0 {
@@ -1441,10 +1447,26 @@ func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyqui
 		saved = *slot
 	}
 	savedAxis := l.axis
+	for _, dd := range []bool{false, true} {
+		if res, ok := l.clusterAttempt(R, w1, slices.Clone(ws), slices.Clone(required), dd); ok {
+			return res, true
+		}
+	}
+	l.axis = savedAxis
+	if slot != nil {
+		*slot = saved
+	}
+	return delayNyquist{}, false
+}
+
+// clusterAttempt is one pass of clusterWinding; a walk that meets an
+// uncovered axis root adds a cluster there.
+func (l *delayLoop) clusterAttempt(R, w1 float64, ws []float64, required []bool, dd bool) (delayNyquist, bool) {
+	slot := l.errSlot()
 	for range 4 {
-		axis, ok := l.buildClusters(ws, required)
+		axis, ok := l.buildClusters(ws, required, dd)
 		if !ok {
-			break
+			return delayNyquist{}, false
 		}
 		if slot != nil {
 			*slot = nil
@@ -1456,13 +1478,9 @@ func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyqui
 			return res, true
 		}
 		if err != nil || l.failed() || !res.axisRoot || clusterCovers(axis, res.axisW) {
-			break
+			return delayNyquist{}, false
 		}
 		ws, required = append(ws, res.axisW), append(required, true)
-	}
-	l.axis = savedAxis
-	if slot != nil {
-		*slot = saved
 	}
 	return delayNyquist{}, false
 }
@@ -1490,7 +1508,8 @@ func (l *delayLoop) clusterCandidates(base delayNyquist) (ws []float64, required
 
 // buildClusters forms disjoint verified clusters at the candidates that
 // together enclose every boundary pole; a cluster replaces those inside it.
-func (l *delayLoop) buildClusters(ws []float64, required []bool) ([]axisPole, bool) {
+// dd is passed to atS.
+func (l *delayLoop) buildClusters(ws []float64, required []bool, dd bool) ([]axisPole, bool) {
 	idx := make([]int, len(ws))
 	for i := range idx {
 		idx[i] = i
@@ -1501,7 +1520,7 @@ func (l *delayLoop) buildClusters(ws []float64, required []bool) ([]axisPole, bo
 		if clusterCovers(axis, ws[i]) {
 			continue
 		}
-		a, ok := l.formCluster(ws[i])
+		a, ok := l.formCluster(ws[i], dd)
 		if !ok {
 			if required[i] {
 				return nil, false
@@ -1531,7 +1550,7 @@ func (l *delayLoop) buildClusters(ws []float64, required []bool) ([]axisPole, bo
 
 // formCluster finds the smallest k such that the k poles nearest to jw0
 // fit a disk whose circle verifies.
-func (l *delayLoop) formCluster(w0 float64) (axisPole, bool) {
+func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 	c := complex(0, w0)
 	ds := make([]float64, len(l.poles))
 	for i, p := range l.poles {
@@ -1556,12 +1575,12 @@ func (l *delayLoop) formCluster(w0 float64) (axisPole, bool) {
 			continue
 		}
 		for _, t := range []float64{0.5, 0.25, 0.75} {
-			if a, ok := l.verifyCluster(w0, lo*math.Pow(hi/lo, t), k); ok {
+			if a, ok := l.verifyCluster(w0, lo*math.Pow(hi/lo, t), k, dd); ok {
 				return a, true
 			}
 		}
 		for g := lo; g <= hi; g *= clusterSweep {
-			if a, ok := l.verifyCluster(w0, g, k); ok {
+			if a, ok := l.verifyCluster(w0, g, k, dd); ok {
 				return a, true
 			}
 		}
@@ -1574,7 +1593,7 @@ func (l *delayLoop) formCluster(w0 float64) (axisPole, bool) {
 // requires |L| >= clusterDominance, a winding of L of -k, and agreement
 // with l.at where the circle meets the axis; it returns the indentation
 // with the measured phase change of 1+L on its right arc.
-func (l *delayLoop) verifyCluster(w0, g float64, k int) (axisPole, bool) {
+func (l *delayLoop) verifyCluster(w0, g float64, k int, dd bool) (axisPole, bool) {
 	c := complex(0, w0)
 	type sample struct {
 		t    float64
@@ -1582,7 +1601,7 @@ func (l *delayLoop) verifyCluster(w0, g float64, k int) (axisPole, bool) {
 	}
 	at := func(t float64) (sample, bool) {
 		sn, cs := math.Sincos(t)
-		v, ok := l.atS(c + complex(g*cs, g*sn))
+		v, ok := l.atS(c+complex(g*cs, g*sn), dd)
 		return sample{t, v, 1 + v}, ok && finite(v) && cmplx.Abs(v) >= clusterDominance
 	}
 	fine := func(a, b sample) bool {
@@ -1645,7 +1664,7 @@ func (l *delayLoop) verifyCluster(w0, g float64, k int) (axisPole, bool) {
 			continue
 		}
 		v, ok := l.sampleValue(w)
-		ref, ok2 := l.atS(complex(0, w))
+		ref, ok2 := l.atS(complex(0, w), dd)
 		if !ok || !ok2 || !(cmplx.Abs(v-ref) <= 1e-6*cmplx.Abs(ref)) {
 			return axisPole{}, false
 		}
@@ -1680,11 +1699,22 @@ func (l *delayLoop) sampleValue(w float64) (complex128, bool) {
 }
 
 // atComplex evaluates L(s) at a point off the axis without recording a
-// failure.
-func (e *sisoEval) atComplex(s complex128) (complex128, bool) {
+// failure. With dd, where the double solve is singular, as within ~1e-3 of
+// an integrator triple with sub-1e-6 real poles, it falls back to
+// ddSISOResponse without at's ddAllow gate: that gate guards the uniform
+// axis walk, while verifyCluster bisects the circle to clusterStep and
+// checks the winding and the axis agreement itself.
+func (e *sisoEval) atComplex(s complex128, dd bool) (complex128, bool) {
 	pt := pointAt(s)
 	if err := e.eval(pt, e.dst); err != nil {
-		return 0, false
+		if !dd || e.sys.internalDelayCount() > 0 {
+			return 0, false
+		}
+		h, ok := ddSISOResponse(e.sys, pt)
+		if !ok {
+			return 0, false
+		}
+		e.dst[0] = h
 	}
 	if e.delay != nil {
 		applyIODelayMatrixAtS(e.sys, pt, e.dst, 1, 1, e.delay)
@@ -1693,11 +1723,19 @@ func (e *sisoEval) atComplex(s complex128) (complex128, bool) {
 }
 
 // minusOneAt is charMinusOne at a point off the axis, without recording a
-// failure.
-func (e *delayLFT) minusOneAt(s complex128) (complex128, bool) {
+// failure, with atComplex's double-double fallback for a single delay
+// channel.
+func (e *delayLFT) minusOneAt(s complex128, dd bool) (complex128, bool) {
 	if e.h22 != nil {
 		if err := e.h22(pointAt(s), e.hbuf); err != nil {
-			return 0, false
+			if !dd || len(e.hbuf) != 1 {
+				return 0, false
+			}
+			h, ok := ddSISOResponse(e.h22sys, pointAt(s))
+			if !ok {
+				return 0, false
+			}
+			e.hbuf[0] = h
 		}
 	} else {
 		copy(e.hbuf, e.d22Complex())

@@ -1,6 +1,9 @@
 package controlsys
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // TestDelayNyquistTinyRealPolesAtOrigin: den = s^m·q(s) with real roots of q
 // within ~1e-6 of the origin, off the axis, and one more pole near 1e-2 (RHP
@@ -41,6 +44,64 @@ func TestDelayNyquistTinyRealPolesAtOrigin(t *testing.T) {
 		dm, err := DiskMargin(p)
 		if err != nil || !(dm.Alpha <= 1/supS*(1+1e-6) && dm.Alpha >= 1/supS*(1-1e-3)) {
 			t.Errorf("case %d: DiskMargin = %+v, %v; dense alpha %g", i, dm, err, 1/supS)
+		}
+	}
+}
+
+// TestDelayNyquistTinyRealPolesDDCircles: den = s^m·q(s), q with real roots
+// between ~1e-9 and ~1e-6 and one near 1e-3..1e-2. The double solve is
+// singular on every circle that encloses only the poles near the origin,
+// and a circle past the root near 1e-2 encloses zeros of L too, so no
+// cluster verified (IsStable, HinfNorm, DiskMargin errored); the circles
+// now retry with the double-double fallback. The last case needs the
+// double pass kept: there the fallback verifies a circle of ~2e-8 inside
+// the RHP pole at 1.3e-7, beside which the walk then fails. Oracles:
+// argument principle on χ and a dense sweep of |T| and |S-1/2|.
+func TestDelayNyquistTinyRealPolesDDCircles(t *testing.T) {
+	cases := []quasiLoop{
+		{num: []float64{1.1248828988699036, 5.337591591109049, 7.966020292280976, 3.9251826905697533, 0.16739720620721268, 0.0017474023654776626}, den: []float64{1, 0.004586181042618237, -1.0902408236859952e-08, -2.02597355493661e-17, 0, 0, 0}, tau: 0.1456899273039475},
+		{num: []float64{7.428774737994522, 27.535483143910717, 26.496350076689353, 9.510730545180923, 1.1303308497133764, 0.004373771149703272}, den: []float64{1, 0.006386411776610228, 3.0129825054035514e-08, 1.2921688426134479e-17, 0, 0, 0}, tau: 0.025221635624798323},
+		{num: []float64{13.957650091429352, 48.99854842584783, 43.80141762536648, 4.501015527990205, 0.1490286842188432, 0.0013924016856337376}, den: []float64{1, -0.006475852535513324, 1.1087869874845573e-10, -4.719961128965432e-19, 0, 0, 0}, tau: 0.0459183954903688},
+		{num: []float64{6.0081561026318875, 42.587588538843804, 100.0156287702273, 78.17092084395361, 0.8939171565437924, 0.0022150939168672614}, den: []float64{1, 0.009108165476837352, 9.754504803190256e-10, -8.018521765223733e-19, 0, 0, 0}, tau: 0.002451378336097036},
+		{num: []float64{1.9188317375876882, 1.5083785090172463, 0.32156836056367194, 0.015658860719559062}, den: []float64{1, 0.46404121934763415, -6.209067747296065e-08, 0, 0}, tau: 0.001181949427158492},
+	}
+	for i, q := range cases {
+		want := oracleRHPRoots(t, q.chi, 200, q.den, q.num)
+		p := makePlant(t, q.num, q.den)
+		if err := p.SetInputDelay([]float64{q.tau}); err != nil {
+			t.Fatal(err)
+		}
+		l, err := delayLoopFromSystem(p, "delay loop")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res, err := l.nyquist(0.5); err != nil || res.axisRoot || res.roots != want {
+			t.Errorf("case %d: nyquist roots %d, axis root %v, %v; oracle %d", i, res.roots, res.axisRoot, err, want)
+		}
+		cl, err := Feedback(p, nil, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stable, err := cl.IsStable(); err != nil || stable != (want == 0) {
+			t.Errorf("case %d: IsStable = %v, %v; oracle %d RHP roots", i, stable, err, want)
+		}
+		norm, _, normErr := HinfNorm(cl)
+		dm, dmErr := DiskMargin(p)
+		if want != 0 {
+			if normErr != nil || !math.IsInf(norm, 1) {
+				t.Errorf("case %d: HinfNorm = %g, %v; oracle unstable", i, norm, normErr)
+			}
+			if dmErr != nil || dm.Alpha != 0 {
+				t.Errorf("case %d: DiskMargin = %+v, %v; oracle unstable", i, dm, dmErr)
+			}
+			continue
+		}
+		supT, supS := denseLoopPeaks(q)
+		if normErr != nil || !(norm >= supT*(1-1e-6) && norm <= supT*(1+1e-3)) {
+			t.Errorf("case %d: HinfNorm = %g, %v; dense sup|T| %g", i, norm, normErr, supT)
+		}
+		if dmErr != nil || !(dm.Alpha <= 1/supS*(1+1e-6) && dm.Alpha >= 1/supS*(1-1e-3)) {
+			t.Errorf("case %d: DiskMargin = %+v, %v; dense alpha %g", i, dm, dmErr, 1/supS)
 		}
 	}
 }
