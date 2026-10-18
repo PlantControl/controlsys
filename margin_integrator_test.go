@@ -160,3 +160,46 @@ func TestAllMarginDiscreteDoubleIntegratorDelayHarmonics(t *testing.T) {
 		}
 	}
 }
+
+// ZQL2JH: k·z^−d with k < 0 is real negative at θ = 2πm/d, |L| = |k|, so
+// phase crossovers there with GM = −20·log10|k|. L(0) = k makes the phase
+// error 0 at ω = 0, and a crossover at twice another has it 0 at half its
+// frequency too; MATLAB allmargin lists every crossover.
+func TestAllMarginNegativeGainDelayHarmonics(t *testing.T) {
+	for _, k := range []float64{-2, -116.75, -0.3} {
+		for _, dt := range []float64{1, 0.1, 0.79} {
+			for d := 1; d <= 12; d++ {
+				for _, asDelay := range []bool{false, true} {
+					den := []float64{1}
+					if !asDelay {
+						den = append(den, make([]float64, d)...)
+					}
+					r, err := (&TransferFunc{Num: [][][]float64{{{k}}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+					if err != nil {
+						t.Fatal(err)
+					}
+					sys := r.Sys
+					if asDelay {
+						sys.InputDelay = []float64{float64(d)}
+					}
+					res, err := AllMargin(sys)
+					if err != nil {
+						t.Fatalf("k %g dt %g d %d delay %v: %v", k, dt, d, asDelay, err)
+					}
+					var ws []float64
+					for m := 1; 2*m <= d; m++ {
+						ws = append(ws, 2*math.Pi*float64(m)/float64(d)/dt)
+					}
+					gm := -20 * math.Log10(-k)
+					ok := len(res.PhaseCrossFreqs) == len(ws)
+					for i := 0; ok && i < len(ws); i++ {
+						ok = math.Abs(res.PhaseCrossFreqs[i]-ws[i]) <= 1e-9*ws[i] && math.Abs(res.GainMargins[i]-gm) <= 1e-9
+					}
+					if !ok {
+						t.Errorf("k %g dt %g d %d delay %v: wpc %v gm %v, want %v %g", k, dt, d, asDelay, res.PhaseCrossFreqs, res.GainMargins, ws, gm)
+					}
+				}
+			}
+		}
+	}
+}

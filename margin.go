@@ -990,8 +990,10 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // |f| ≤ tol. A candidate without a sign change, a tangency or the discrete
 // Nyquist frequency, is kept only if |f| ≤ tol there. When ω = 0 itself
 // satisfies |f| ≤ tol, as for the root L − L~ always has there, a candidate
-// whose |f| stays within tol down to half its frequency is that root moved
-// off 0 by rounding, and is dropped. When L has a pole at ω = 0, a
+// below every kept crossing whose |f| stays within tol down to half its
+// frequency is that root moved off 0 by rounding, and is dropped; above a
+// kept crossing the test would drop crossings at twice another, as for
+// k·z^−d with k < 0. When L has a pole at ω = 0, a
 // candidate is dropped only when L cannot be evaluated at half its
 // frequency, or at itself: a pencil root that the pole's rounding moved off
 // 0. |f| ≈ 0 at half its frequency is no test there, as for
@@ -1030,7 +1032,7 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 			break
 		}
 		v := math.Abs(f(best))
-		if _, ok := r.eval.try(best / 2); zeroRoot && within(best/2) || pole0 && !ok {
+		if _, ok := r.eval.try(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {
 			continue
 		}
 		if v <= tol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
