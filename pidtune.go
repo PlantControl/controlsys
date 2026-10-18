@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -1087,7 +1088,7 @@ func pidtuneIntegratingCrossover(plant *System) (float64, error) {
 }
 
 // pidtuneIntegratorCluster returns the integrator location, s = 0 or z = 1,
-// and a radius holding the largest m roots that lie within
+// and a radius holding the pidtuneClusterSize roots it counts there, within
 // 100·ε^(1/m)·scale of it, ε the machine epsilon: rounding splits an m-fold
 // root by about ε^(1/m) relative to the root scale (1 for z = 1, the largest
 // root magnitude for s = 0).
@@ -1107,24 +1108,37 @@ func pidtuneIntegratorCluster(plant *System, roots []complex128) (complex128, fl
 	return at, pidtuneClusterRadius(m, scale)
 }
 
-// pidtuneClusterSize returns the largest m such that m roots lie within
-// pidtuneClusterRadius(m, scale) of at.
+// pidtuneClusterSize returns the largest m such that the m roots nearest at
+// lie within pidtuneClusterRadius(m, scale) of it and their mean lies within
+// pidtuneClusterCentroid·scale of it. Rounding splits an m-fold root into a
+// ring whose mean, the trace, stays accurate; distinct roots swept in by the
+// radius, which grows with m, move the mean off at.
 func pidtuneClusterSize(roots []complex128, at complex128, scale float64) int {
-	d := make([]float64, len(roots))
-	for i, r := range roots {
-		d[i] = cmplx.Abs(r - at)
+	r := slices.Clone(roots)
+	slices.SortFunc(r, func(a, b complex128) int {
+		return cmp.Compare(cmplx.Abs(a-at), cmplx.Abs(b-at))
+	})
+	var sum complex128
+	sums := make([]complex128, len(r))
+	for i, x := range r {
+		sum += x - at
+		sums[i] = sum
 	}
-	slices.Sort(d)
-	for m := len(d); m > 0; m-- {
-		if d[m-1] <= pidtuneClusterRadius(m, scale) {
+	for m := len(r); m > 0; m-- {
+		if cmplx.Abs(r[m-1]-at) <= pidtuneClusterRadius(m, scale) &&
+			cmplx.Abs(sums[m-1])/float64(m) <= pidtuneClusterCentroid*scale {
 			return m
 		}
 	}
 	return 0
 }
 
+const pidtuneClusterCentroid = 1e-6
+
+// pidtuneClusterRadius is 100·ε^(1/m)·scale, capped at 1e-2·scale so that
+// a cluster never reaches the roots that set scale.
 func pidtuneClusterRadius(m int, scale float64) float64 {
-	return 100 * math.Pow(0x1p-52, 1/float64(m)) * scale
+	return min(100*math.Pow(0x1p-52, 1/float64(m)), 1e-2) * scale
 }
 
 // pidtunePlantPoint evaluates evalPlantAt(plant, w) bit for bit: it
