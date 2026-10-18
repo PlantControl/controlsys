@@ -855,11 +855,12 @@ func (r *rationalLoop) gainCandidates(gamma float64) ([]float64, error) {
 	m, k := make([]float64, N*N), make([]float64, N*N)
 	u := 2 * n
 	d := r.d / gamma
+	bs, cs := ioScale(r.b, r.c, gamma)
 	for i := range n {
-		ci := r.c[i] / gamma
+		ci := r.c[i] * cs
 		for j := range n {
 			m[i*N+j] = r.a[i*n+j]
-			m[(n+i)*N+j] = -ci * r.c[j] / gamma
+			m[(n+i)*N+j] = -ci * r.c[j] * cs
 			k[i*N+j] = r.e[i*n+j]
 			if r.discrete() {
 				m[(n+i)*N+n+j] = r.e[j*n+i]
@@ -869,17 +870,32 @@ func (r *rationalLoop) gainCandidates(gamma float64) ([]float64, error) {
 				k[(n+i)*N+n+j] = r.e[j*n+i]
 			}
 		}
-		m[i*N+u] = r.b[i]
+		bi := r.b[i] * bs
+		m[i*N+u] = bi
 		m[(n+i)*N+u] = -ci * d
 		m[u*N+i] = d * ci
 		if r.discrete() {
-			k[u*N+n+i] = -r.b[i]
+			k[u*N+n+i] = -bi
 		} else {
-			m[u*N+n+i] = r.b[i]
+			m[u*N+n+i] = bi
 		}
 	}
 	m[u*N+u] = d*d - 1
 	return r.boundaryRoots(m, k, N)
+}
+
+// ioScale splits 1/gamma between B and C as bs·cs = 1/gamma, powers of two
+// up to the split, that equalise ‖B·bs‖ and ‖C·cs‖. A realization with
+// B ≪ C/γ, as for small DC gain at the bandwidth level, otherwise puts
+// C·Cᵀ/γ² far above A and B, and QZ loses the boundary roots.
+func ioScale(b, c []float64, gamma float64) (bs, cs float64) {
+	nb, nc := frobenius(b), frobenius(c)
+	if nb == 0 || nc == 0 {
+		return 1, 1 / gamma
+	}
+	_, eb := math.Frexp(math.Sqrt(nc / (gamma * nb)))
+	bs = math.Ldexp(1, eb)
+	return bs, 1 / (gamma * bs)
 }
 
 // realCandidates returns approximate ω > 0 where L is real: boundary
@@ -931,7 +947,11 @@ const marginBoundaryBand = 1e-2
 // the imaginary axis (continuous) or the unit circle (discrete) to
 // frequencies in (0, ∞) or (0, π/Dt], merging those that agree to rounding.
 func (r *rationalLoop) boundaryRoots(m, k []float64, N int) ([]float64, error) {
-	scaleInputRowCol(m, k, N)
+	var ref float64
+	for i := range r.a {
+		ref = max(ref, math.Abs(r.a[i]), math.Abs(r.e[i]))
+	}
+	scaleInputRowCol(m, k, N, ref)
 	kNorm := frobenius(k)
 	alphar, alphai, beta := make([]float64, N), make([]float64, N), make([]float64, N)
 	work := make([]float64, 8*N)
@@ -972,20 +992,16 @@ func (r *rationalLoop) boundaryRoots(m, k []float64, N int) ([]float64, error) {
 }
 
 // scaleInputRowCol scales the last column, then the last row, of the pencil
-// (m, k) by a power of two up to the largest magnitude of the state block
+// (m, k) by a power of two up to ref, the largest magnitude of A and E,
 // when it lies below √eps of it; equivalence leaves the eigenvalues as they
 // are. B or C of a loop with tiny gain, as of k/(z+1)⁴ with |k| ≈ 1e-14,
 // sit below QZ's backward error relative to the state block, which then
 // loses boundary roots far from the cluster. Moderate imbalance is left: it
 // does not hide roots, and scaling it moves roots beside a pole pair 1 ± jε.
-func scaleInputRowCol(m, k []float64, N int) {
+// ref excludes the C·Cᵀ/γ² block of the gain pencil: for small γ it dwarfs
+// A, and scaling up to it swamps the pencil in its last column.
+func scaleInputRowCol(m, k []float64, N int, ref float64) {
 	u := N - 1
-	var ref float64
-	for i := range u {
-		for j := range u {
-			ref = max(ref, math.Abs(m[i*N+j]), math.Abs(k[i*N+j]))
-		}
-	}
 	scale := func(at func(i int) int) {
 		var mx float64
 		for i := range N {

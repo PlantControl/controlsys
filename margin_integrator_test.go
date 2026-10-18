@@ -795,3 +795,80 @@ func TestAllMarginGainCrossTinyGainNyquistCluster(t *testing.T) {
 		}
 	}
 }
+
+// Bandwidth of a loop with small DC gain: the gain pencil at γ = |L(0)|·10^(−3/20)
+// carried C/γ against B ≪ C/γ, and C·Cᵀ/γ² swamped A, so QZ lost the root
+// and Bandwidth returned +Inf. Oracle: analytic a·√(10^0.3 − 1) for k/(s+a);
+// factored-form bisection on a log grid for the seeded sweep.
+func TestBandwidthSmallDCGain(t *testing.T) {
+	a := 0.597392081703245
+	for _, k := range []float64{1e-14, 1e-12, 1e-10, 1} {
+		r, err := (&TransferFunc{Num: [][][]float64{{{k}}}, Den: [][]float64{{1, a}}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := a * math.Sqrt(math.Pow(10, 0.3)-1)
+		if bw, err := Bandwidth(r.Sys, -3); err != nil || math.Abs(bw-want) > 1e-9*want {
+			t.Errorf("k %g: bw %v err %v, want %v", k, bw, err, want)
+		}
+	}
+	rng := rand.New(rand.NewPCG(11, 13))
+	for range 150 {
+		k := math.Copysign(math.Pow(10, -14+14*rng.Float64()), rng.Float64()-0.5)
+		var zs, ps []float64
+		for range 1 + rng.IntN(4) {
+			ps = append(ps, -math.Pow(10, -2+4*rng.Float64()))
+		}
+		if rng.IntN(2) == 0 {
+			zs = append(zs, -math.Pow(10, -2+4*rng.Float64()))
+		}
+		num, den := []float64{k}, []float64{1}
+		for _, q := range zs {
+			num = polyMul(num, []float64{1, -q})
+		}
+		for _, q := range ps {
+			den = polyMul(den, []float64{1, -q})
+		}
+		mag := func(w float64) float64 {
+			h := complex(k, 0)
+			for _, q := range zs {
+				h *= complex(-q, w)
+			}
+			for _, q := range ps {
+				h /= complex(-q, w)
+			}
+			return cmplx.Abs(h)
+		}
+		lvl := mag(0) * math.Pow(10, -3.0/20)
+		above := func(w float64) bool { return mag(w) > lvl }
+		want := math.Inf(1)
+		lo, hi := math.Log(1e-6), math.Log(1e6)
+		const N = 20000
+		for i := 1; i <= N; i++ {
+			a, b := math.Exp(lo+(hi-lo)*float64(i-1)/N), math.Exp(lo+(hi-lo)*float64(i)/N)
+			if above(a) == above(b) {
+				continue
+			}
+			for range 200 {
+				m := (a + b) / 2
+				if m <= a || m >= b {
+					break
+				}
+				if above(m) == above(a) {
+					a = m
+				} else {
+					b = m
+				}
+			}
+			want = (a + b) / 2
+			break
+		}
+		r, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bw, err := Bandwidth(r.Sys, -3); err != nil || math.Abs(bw-want) > 1e-7*want {
+			t.Errorf("k %g zs %v ps %v: bw %v err %v, want %v", k, zs, ps, bw, err, want)
+		}
+	}
+}
