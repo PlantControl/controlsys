@@ -968,8 +968,9 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 
 // plantCrossoverFreqFrom is plantCrossoverFreq, also reporting whether the
 // crossover came from the slowest pole: G has no gain crossover and a
-// finite DC gain that is exactly 0 or has no -3 dB bandwidth, as for a
-// high-pass plant with |G| < 1.
+// finite DC gain that is 0 (a zero at the integrator, whose rounded DC gain
+// would give a -3 dB bandwidth at rounding level) or has no -3 dB
+// bandwidth, as for a high-pass plant with |G| < 1.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
@@ -983,7 +984,7 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 		wc, err := pidtuneIntegratingCrossover(plant)
 		return wc, false, err
 	}
-	if err != nil || dc.At(0, 0) != 0 {
+	if err != nil || dc.At(0, 0) != 0 && !pidtuneZeroAtIntegrator(plant) {
 		bw, err := Bandwidth(plant, -3)
 		if err != nil {
 			return 0, false, err
