@@ -1080,7 +1080,7 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	}
 	var cands []float64
 	for _, w := range reals {
-		if h, ok := r.eval.try(w); ok && math.Abs(phaseOffsetDeg(h)) < 90 {
+		if h, ok := r.eval.try(w); !ok || math.Abs(phaseOffsetDeg(h)) < 90 {
 			cands = append(cands, w)
 		}
 	}
@@ -1103,6 +1103,11 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // probed where L evaluates: a bracket next to a pole cluster, as at z = −1
 // of k/(z+1)⁴, may reach a numerically singular ω, which rejects it, and a
 // refinement that meets one there ends off the crossing and is dropped.
+// Pencil roots next to a pole pair 1 ± jε land up to a few percent off the
+// crossing, at times on or past the pole: when no bracket spans the crossing
+// and the candidate or a bracket end is unevaluable, walk scans out to a
+// tenth of the frequency, below first, past the singular band, and keeps the
+// first sign change that refines to |f| ≤ tol.
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
@@ -1119,11 +1124,44 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 	h0, ok := r.eval.try(0)
 	pole0 := !ok || cmplx.IsInf(h0)
 	zeroRoot := !pole0 && math.Abs(f(0)) <= tol
+	walk := func(w, lim float64) (float64, bool) {
+		pw, pf := w, ft(w)
+		for d := 1e-12; ; d *= 2 {
+			x := w + math.Copysign(min(d*w, math.Abs(lim)), lim)
+			fx := ft(x)
+			switch {
+			case math.IsNaN(fx):
+				pw, pf = x, fx
+			case math.IsNaN(pf):
+				e := x
+				for range 60 {
+					m := (pw + e) / 2
+					if m == pw || m == e {
+						break
+					}
+					if math.IsNaN(ft(m)) {
+						pw = m
+					} else {
+						e = m
+					}
+				}
+				pw, pf = e, ft(e)
+				fallthrough
+			default:
+				if pf*fx <= 0 && pw != x {
+					if c := refineCrossing(min(pw, x), max(pw, x), ft); math.Abs(ft(c)) <= tol {
+						return c, true
+					}
+				}
+				pw, pf = x, fx
+			}
+			if d*w >= math.Abs(lim) {
+				return 0, false
+			}
+		}
+	}
 	var out []float64
 	for i, w := range cands {
-		if _, ok := r.eval.try(w); !ok {
-			continue
-		}
 		lo, hi := w/2, (wTop-w)/2
 		if i > 0 {
 			lo = (w - cands[i-1]) / 2
@@ -1131,14 +1169,33 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		if i+1 < len(cands) {
 			hi = min(hi, (cands[i+1]-w)/2)
 		}
-		best := w
-		for d := 1e-12; d <= 1e-2; d *= 100 {
-			a, b := w-min(d*w, lo), w+min(d*w, hi)
-			if a >= b || !(ft(a)*ft(b) <= 0) {
+		best, bracketed, unevaluable := w, false, false
+		if _, ok := r.eval.try(w); !ok {
+			unevaluable = true
+		} else {
+			for d := 1e-12; d <= 1e-2; d *= 100 {
+				a, b := w-min(d*w, lo), w+min(d*w, hi)
+				if a >= b {
+					continue
+				}
+				fa, fb := ft(a), ft(b)
+				if fa*fb <= 0 {
+					best, bracketed = refineCrossing(a, b, ft), true
+					break
+				}
+				unevaluable = unevaluable || math.IsNaN(fa) || math.IsNaN(fb)
+			}
+		}
+		if !bracketed && unevaluable {
+			c, ok := walk(w, -min(lo, w/10))
+			if !ok {
+				c, ok = walk(w, min(hi, w/10))
+			}
+			if ok {
+				best = c
+			} else if _, ok := r.eval.try(w); !ok {
 				continue
 			}
-			best = refineCrossing(a, b, ft)
-			break
 		}
 		v := math.Abs(ft(best))
 		if _, ok := r.eval.try(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {

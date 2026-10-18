@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
 	"testing"
@@ -461,4 +462,112 @@ func TestAllMarginRoundedUnitPolePair(t *testing.T) {
 	} else if err == nil && !pidtuneExactSchurStable(t, p, num, den, dt) {
 		t.Errorf("Pidtune PIDF: unstable design %+v", *p)
 	}
+}
+
+// UFBPWZ: the pencil root next to a pole pair 1 ± jε lands 0.6% off the
+// phase crossover below the pair, and the first bracket spanning it reaches
+// past the pole on its far end, where the solve fails; polish dropped the
+// crossover. Oracle: factored-form evaluation bisected on a log grid locates
+// the crossovers; rounding the expanded denominator moves the pair by
+// ~eps/|den'| ≈ 1e-10, so each is re-bisected on the float64 coefficients
+// evaluated exactly in big.Float. MATLAB allmargin lists every crossover.
+func TestAllMarginPhaseCrossBesidePolePair(t *testing.T) {
+	cases := []struct {
+		k, eps, dt, wpcLow float64
+		zs, ps             []float64
+	}{
+		{-0.02309469977260592, 2.9030126265483175e-05, 1, 2.8582737529213393e-05,
+			[]float64{-0.4863575702993606}, []float64{0.9561590173593617, 0.8871366217113326, -0.43121472459012195}},
+		{-0.21501793541077313, 6.176538894270818e-05, 0.79, 7.731566170130944e-05,
+			[]float64{-0.4405797671906855, -0.6838981765389421}, []float64{0.9703560326623678, 0.8574995610377053, 0.7919093674641045}},
+	}
+	bisect := func(a, b float64, f func(float64) float64) float64 {
+		fa := f(a)
+		for range 200 {
+			m := (a + b) / 2
+			if m <= a || m >= b {
+				break
+			}
+			if fm := f(m); (fm > 0) == (fa > 0) {
+				a, fa = m, fm
+			} else {
+				b = m
+			}
+		}
+		return (a + b) / 2
+	}
+	for _, c := range cases {
+		loop := func(th float64) complex128 {
+			z := cmplx.Rect(1, th)
+			h := complex(c.k, 0) / ((z - complex(1, c.eps)) * (z - complex(1, -c.eps)))
+			for _, q := range c.zs {
+				h *= z - complex(q, 0)
+			}
+			for _, q := range c.ps {
+				h /= z - complex(q, 0)
+			}
+			return h
+		}
+		phase := func(th float64) float64 { return phaseOffsetDeg(loop(th)) }
+		var thp []float64
+		const N = 200000
+		lo, hi := math.Log(1e-9), math.Log(math.Pi)
+		for i := 1; i <= N; i++ {
+			a, b := math.Exp(lo+(hi-lo)*float64(i-1)/N), math.Exp(lo+(hi-lo)*float64(i)/N)
+			if p := phase(b); (p > 0) != (phase(a) > 0) && math.Abs(p) < 90 {
+				thp = append(thp, bisect(a, b, phase))
+			}
+		}
+		if len(thp) == 0 || math.Abs(thp[0]/c.dt-c.wpcLow) > 1e-9*c.wpcLow {
+			t.Fatalf("oracle θ %v, want first ω %v", thp, c.wpcLow)
+		}
+		num, den := []float64{c.k}, []float64{1, -2, 1 + c.eps*c.eps}
+		for _, q := range c.zs {
+			num = polyMul(num, []float64{1, -q})
+		}
+		for _, q := range c.ps {
+			den = polyMul(den, []float64{1, -q})
+		}
+		exact := func(th float64) complex128 {
+			n, d := bigHorner(num, th), bigHorner(den, th)
+			return n / d
+		}
+		for i, th := range thp {
+			thp[i] = bisect(th*(1-1e-4), min(th*(1+1e-4), math.Pi), func(th float64) float64 { return phaseOffsetDeg(exact(th)) })
+		}
+		loop = exact
+		r, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: c.dt}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Fatalf("k %g: %v", c.k, err)
+		}
+		ok := len(res.PhaseCrossFreqs) == len(thp)
+		for i := 0; ok && i < len(thp); i++ {
+			th := thp[i]
+			ok =math.Abs(res.PhaseCrossFreqs[i]*c.dt-th) <= 1e-7*th &&
+				math.Abs(res.GainMargins[i]+20*math.Log10(cmplx.Abs(loop(th)))) <= 1e-5
+		}
+		if !ok {
+			t.Errorf("k %g: wpc %v gm %v, want θ %v", c.k, res.PhaseCrossFreqs, res.GainMargins, thp)
+		}
+	}
+}
+
+// bigHorner evaluates the real polynomial p (descending) at e^{jθ}, taken
+// in float64, rounding only the result.
+func bigHorner(p []float64, th float64) complex128 {
+	nf := func(x float64) *big.Float { return new(big.Float).SetPrec(300).SetFloat64(x) }
+	zr, zi := nf(math.Cos(th)), nf(math.Sin(th))
+	re, im, t1, t2 := nf(0), nf(0), nf(0), nf(0)
+	for _, c := range p {
+		nr := nf(0).Sub(t1.Mul(re, zr), t2.Mul(im, zi))
+		im.Add(t1.Mul(re, zi), t2.Mul(im, zr))
+		re.Add(nr, nf(c))
+	}
+	r, _ := re.Float64()
+	i, _ := im.Float64()
+	return complex(r, i)
 }
