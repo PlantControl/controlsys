@@ -90,8 +90,10 @@ type sisoEval struct {
 	skipped  error
 	resolved bool
 	// extended falls back to ddSISOResponse where the double solve fails;
-	// see rationalLoop.gainCrossings.
+	// see rationalLoop.gainCrossings. ddAllow, when set, limits the
+	// fallback to the frequencies it accepts.
 	extended bool
+	ddAllow  func(w float64) bool
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -117,7 +119,7 @@ func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
 	if err := evalWithPoleLimit(e.eval, e.sys, pt, e.dst); err != nil {
 		h, ok := complex(0, 0), false
-		if e.extended && e.sys.internalDelayCount() == 0 {
+		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) {
 			h, ok = ddSISOResponse(e.sys, pt)
 		}
 		if !ok {

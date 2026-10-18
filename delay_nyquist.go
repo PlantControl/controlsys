@@ -103,13 +103,31 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	if err != nil {
 		return nil, err
 	}
-	eval.extended = true
 	l := &delayLoop{sys: sys, at: eval.at, eval: eval, cert: cert, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
+	eval.extended, eval.ddAllow = true, l.ddAllowed
 	if sys.IsContinuous() {
 		l.atS = eval.atComplex
 	}
 	l.addPoles(poles)
 	return l, nil
+}
+
+// ddAllowed reports whether the double-double fallback may evaluate L(jω):
+// only where a boundary pole is nearest, so the walk resolves indentations
+// next to crowded axis poles. Near any other pole a double failure must
+// stand, so that clusterWinding counts the roots: there the fallback would
+// let the uniform walk miss a phase turn between samples.
+func (l *delayLoop) ddAllowed(w float64) bool {
+	s := complex(0, w)
+	best, boundary := math.Inf(1), false
+	for _, p := range l.poles {
+		d := cmplx.Abs(p - s)
+		b := classifyPoleStability(p, true, poleStabilityTolerance(p)) == poleClassBoundary
+		if d < best || (d == best && !b) {
+			best, boundary = d, b
+		}
+	}
+	return boundary
 }
 
 func sisoLoopDelay(sys *System) float64 {
