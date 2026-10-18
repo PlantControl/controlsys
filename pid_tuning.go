@@ -341,7 +341,11 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // as Pidtune. For a stable plant every nonzero gain takes the sign of its DC
 // gain; when that leaves a default-crossover PD or PDF design infeasible, the
 // crossover moves to where the plant phase is 15°, 30°, 45° or 60° below
-// −180°+PM, the lead same-sign gains supply. Likewise, when a default PI
+// −180°+PM, the lead same-sign gains supply; when those and the margin floor
+// at the default crossover fail, to where it is 7.5° or 2.5° below if that is
+// within an octave of a lightly damped mode, since on a resonance, where the
+// phase swings fast, only a small lead can leave the crossings on the peak
+// clear of −1. Likewise, when a default PI
 // design fails at the default crossover, also under the margin floor, unless the
 // delayed stable plant's back-off below handles it, the crossover moves to
 // the frequency nearest the default, on either side, where the plant phase
@@ -714,30 +718,51 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// ladder keeps, per kind, the last moved crossover's rejection warning.
 	kinds := []string{"sensitivity peak", "crossed 0 dB again"}
 	ladder := make([]string, len(kinds))
-	for _, lead := range []float64{15, 30, 45, 60} {
-		wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
-		if eval.err != nil {
-			return nil, fmt.Errorf("TunePID: %w", eval.err)
-		}
-		if !ok || wc == wc0 {
-			continue
-		}
-		r, e := tuneAt(wc, gainSign, true, false)
-		if e == nil {
-			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where same-sign PD gains can meet the phase margin.", wc0, wc))
-			return stamp(r, nil)
-		}
-		var te *PIDTuningError
-		if !errors.As(e, &te) {
-			return nil, e
-		}
-		for _, w := range te.Evidence.Warnings {
-			for i, kind := range kinds {
-				if strings.Contains(w, kind) {
-					ladder[i] = fmt.Sprintf("Moved crossover %.4g: %s", wc, w)
+	// move returns the first design at the leads' crossovers, or nil;
+	// resonant restricts it to crossovers within an octave of a lightly
+	// damped mode.
+	move := func(resonant bool, leads ...float64) (*PIDTuningResult, error) {
+		for _, lead := range leads {
+			wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
+			if eval.err != nil {
+				return nil, fmt.Errorf("TunePID: %w", eval.err)
+			}
+			if !ok || wc == wc0 {
+				continue
+			}
+			if resonant && !slices.ContainsFunc(modes(), func(m complex128) bool { return imag(m) > wc/2 && imag(m) < wc*2 }) {
+				continue
+			}
+			r, e := tuneAt(wc, gainSign, true, false)
+			if e == nil {
+				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where same-sign PD gains can meet the phase margin.", wc0, wc))
+				return stamp(r, nil)
+			}
+			var te *PIDTuningError
+			if !errors.As(e, &te) {
+				return nil, e
+			}
+			for _, w := range te.Evidence.Warnings {
+				for i, kind := range kinds {
+					if strings.Contains(w, kind) {
+						ladder[i] = fmt.Sprintf("Moved crossover %.4g: %s", wc, w)
+					}
 				}
 			}
 		}
+		return nil, nil
+	}
+	if r, e := move(false, 15, 30, 45, 60); r != nil || e != nil {
+		return r, e
+	}
+	res, err = withFloor(wc0, gainSign, tau > 0, res, err)
+	if !errors.As(err, new(*PIDTuningError)) {
+		return res, err
+	}
+	// The small leads come after the floor so that they change no design
+	// the floor finds.
+	if r, e := move(true, 7.5, 2.5); r != nil || e != nil {
+		return r, e
 	}
 	if te, ok := errors.AsType[*PIDTuningError](err); ok {
 		for _, w := range ladder {
@@ -746,7 +771,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			}
 		}
 	}
-	return withFloor(wc0, gainSign, tau > 0, res, err)
+	return stamp(res, err)
 }
 
 // pidTuningPhaseCrossing returns the first ω in [wLo, wHi] at which the

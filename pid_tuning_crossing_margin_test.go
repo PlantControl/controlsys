@@ -13,7 +13,9 @@ import (
 // damped mode lifts |L| over 1 and ∠L lies in (0°, 60°). The wrapped margin
 // 180° + ∠L − 360° ≈ −160° failed the floor, so designs base returned became
 // unattainable, though the crossing is ≥ 120° from −1. Cases from a seeded
-// base-vs-branch sweep of P/PD/PDF on lightly damped plants. Oracles: dense
+// base-vs-branch sweep of P/PD/PDF on lightly damped plants; the wave3 cases
+// meet the floor only at a crossover needing a lead below 15°, crossing on
+// the resonance peak. Oracles: dense
 // crossings of |L| = 1 over the evidence band, each at least 57° (P: 0°)
 // from −1 measured either way round, |S| <= 4, and no net turn of
 // arg(1+L(jω)), as the stable plant has no integrator.
@@ -30,6 +32,8 @@ func TestTunePIDKeepsCrossingFarFromMinusOne(t *testing.T) {
 		{"sweep 80 PD", []float64{-1.054599885306892}, []float64{1, 0.00299557580140128, 1.0733714787112956}, 0, PidtunePD},
 		{"sweep 120 PDF", []float64{6.738053635107616}, []float64{1, 0.023101701101633985, 5.622166008185011}, 0, PidtunePDF},
 		{"sweep 164 PDF", []float64{-0.37781717849161434, 1.4548937506677857}, []float64{1, 3.73663341903153, 52.126647355084614, 190.64242557388877, 9.501545598819801}, 0, PidtunePDF},
+		{"wave3 721 PDF", []float64{0.05915718168601447, -0.03850025311540502}, []float64{1, 0.02540777560403741, 0.9961181911321898, 0.02128588738739602, 0.048431759857534264}, 0, PidtunePDF},
+		{"wave3 1386 PD", []float64{0.021974236609892076}, []float64{1, 0.2123180290064929, 0.0669625854627303, 0.014056617896414958, 0.0010167405231239408, 0.00021000099895791412}, 0, PidtunePD},
 		{"sweep 70 P", []float64{-0.4839653090567671, 0.17578851538367593}, []float64{1, 0.5373380700910566, 29.303982053625848, 14.634713107039508, 0.7589946108096222}, 0.021518142814529132, PidtuneP},
 	}
 	for _, c := range cases {
