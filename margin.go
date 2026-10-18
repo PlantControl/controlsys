@@ -439,10 +439,10 @@ func allMargin(sys *System) (*AllMarginResult, error) {
 	for _, w := range res.GainCrossFreqs {
 		res.PhaseMargins = append(res.PhaseMargins, phaseMarginDeg(eval.at(w)))
 	}
-	eval.extended = false
 	for _, w := range res.PhaseCrossFreqs {
 		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(eval.at(w))))
 	}
+	eval.extended = false
 	if err := eval.checkSkipped(); err != nil {
 		return nil, err
 	}
@@ -1156,7 +1156,170 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 			cands = append(cands, w)
 		}
 	}
-	return r.polish(cands, func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }, 1e-7), nil
+	f := func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }
+	out := r.polish(cands, f, 1e-7)
+	for _, c := range r.resonanceCrossings(f, 1e-7) {
+		if i, found := slices.BinarySearchFunc(out, c, func(a, b float64) int {
+			if math.Abs(a-b) <= 1e-7*b {
+				return 0
+			}
+			return cmpFloat(a, b)
+		}); !found {
+			out = slices.Insert(out, i, c)
+		}
+	}
+	return out, nil
+}
+
+func cmpFloat(a, b float64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+// resonancePoles returns the boundary frequencies of the complex poles of L
+// within 1% of their frequency from the boundary: lightly damped pairs, and
+// pairs 1 ± jε next to z = 1. A pair whose first-order perturbation bound
+// cond(p)·eps·(‖A‖ + |p|·‖E‖) exceeds 1e-3·Im p is left out: a double or
+// quadruple real pole, as of an integrator squared, splits by rounding into
+// such pairs, whose crossings the loop lacks.
+func (r *rationalLoop) resonancePoles() []float64 {
+	n := r.n
+	if n == 0 {
+		return nil
+	}
+	a, e := slices.Clone(r.a), slices.Clone(r.e)
+	aNorm, eNorm := frobenius(a), frobenius(e)
+	alphar, alphai, beta := make([]float64, n), make([]float64, n), make([]float64, n)
+	vl, vr := make([]float64, n*n), make([]float64, n*n)
+	work := make([]float64, max(8*n, 1))
+	if !impl.Dggev(lapack.LeftEVCompute, lapack.RightEVCompute, n, a, n, e, n, alphar, alphai, beta, vl, n, vr, n, work, len(work)) {
+		return nil
+	}
+	var ws []float64
+	for j := 0; j < n; j++ {
+		if alphai[j] == 0 {
+			continue
+		}
+		jj := j
+		j++
+		if beta[jj] == 0 || alphai[jj] < 0 {
+			continue
+		}
+		p := complex(alphar[jj]/beta[jj], alphai[jj]/beta[jj])
+		x, y := make([]complex128, n), make([]complex128, n)
+		var nx, ny float64
+		for i := range n {
+			x[i] = complex(vr[i*n+jj], vr[i*n+jj+1])
+			y[i] = complex(vl[i*n+jj], vl[i*n+jj+1])
+			nx += real(x[i])*real(x[i]) + imag(x[i])*imag(x[i])
+			ny += real(y[i])*real(y[i]) + imag(y[i])*imag(y[i])
+		}
+		var yex complex128
+		for i := range n {
+			var ex complex128
+			for k := range n {
+				ex += complex(r.e[i*n+k], 0) * x[k]
+			}
+			yex += cmplx.Conj(y[i]) * ex
+		}
+		cond := math.Sqrt(nx*ny) / cmplx.Abs(yex)
+		if !(cond*eps()*(aNorm+cmplx.Abs(p)*eNorm) <= 1e-3*imag(p)) {
+			continue
+		}
+		var w, dist float64
+		if r.discrete() {
+			w, dist = cmplx.Phase(p)/r.dt, math.Abs(cmplx.Abs(p)-1)/cmplx.Phase(p)
+		} else {
+			w, dist = imag(p), math.Abs(real(p))/imag(p)
+		}
+		if dist <= 1e-2 {
+			ws = append(ws, w)
+		}
+	}
+	return ws
+}
+
+// resonanceCrossings scans f beside each resonance pole on a grid graded
+// towards it, from a tenth to ten times its frequency. Pencil roots near a
+// pole pair 1 ± jε, ε ≲ 1e-4, are off by more than ε: the pencil of L − L~
+// carries the pair, its reflection and the crossings in a cluster of radius
+// ε, whose roots move by a root of the backward error. A sign change between
+// evaluable grid points with |f| < 90, the far side of the pole and the
+// ±180 wrap excluded, is kept when it refines to |f| ≤ tol and still holds
+// walkClearance either side, or as far as the grid spacing when closer.
+func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) []float64 {
+	wTop := math.Inf(1)
+	if r.discrete() {
+		wTop = r.nyquist()
+	}
+	ft := func(w float64) float64 {
+		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if !ok || math.Abs(v) >= 90 {
+			return math.NaN()
+		}
+		return v
+	}
+	r.eval.extended = true
+	defer func() { r.eval.extended = false }()
+	const perDecade = 20
+	var out []float64
+	for _, wp := range r.resonancePoles() {
+		var grid []float64
+		for i := 4 * perDecade; i >= 0; i-- {
+			grid = append(grid, wp*(1-0.9*math.Pow(10, -float64(i)/perDecade)))
+		}
+		for i := range 5*perDecade + 1 {
+			if w := wp * (1 + 9*math.Pow(10, -float64(5*perDecade-i)/perDecade)); w < wTop {
+				grid = append(grid, w)
+			}
+		}
+		slices.Sort(grid)
+		for i := 1; i < len(grid); i++ {
+			a, b := grid[i-1], grid[i]
+			fa, fb := ft(a), ft(b)
+			if math.IsNaN(fa) == math.IsNaN(fb) {
+				if math.IsNaN(fa) || fa*fb > 0 {
+					continue
+				}
+			} else {
+				ok, bad := a, b
+				if math.IsNaN(fa) {
+					ok, bad = b, a
+				}
+				for range 60 {
+					m := (ok + bad) / 2
+					if m == ok || m == bad {
+						break
+					}
+					if math.IsNaN(ft(m)) {
+						bad = m
+					} else {
+						ok = m
+					}
+				}
+				if math.IsNaN(fa) {
+					a, fa = ok, ft(ok)
+				} else {
+					b, fb = ok, ft(ok)
+				}
+				if a >= b || fa*fb > 0 {
+					continue
+				}
+			}
+			c := refineCrossing(a, b, ft)
+			d := min(walkClearance, (c-a)/c, (b-c)/c)
+			if math.Abs(ft(c)) <= tol && ft(c*(1-d))*ft(c*(1+d)) < 0 {
+				out = append(out, c)
+			}
+		}
+	}
+	slices.Sort(out)
+	return slices.CompactFunc(out, func(a, b float64) bool { return math.Abs(b-a) <= 1e-7*b })
 }
 
 // polish refines each candidate to a sign change of f within half the gap to

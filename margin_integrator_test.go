@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -643,7 +644,8 @@ func bigHorner(p []float64, th float64) complex128 {
 // from the cluster. Oracle: factored form with z+1 = 2·cos(θ/2)·e^{jθ/2},
 // bisected on a log grid; coefficient rounding moves L there by ~1e-9
 // relative. Crossovers within 0.05 of Nyquist are left out: rounding of the
-// expanded (z+1)⁴ is O(1) relative there.
+// expanded (z+1)⁴ is O(1) relative there. A seeded sweep of |k| in
+// [1e-15, 1e-11] with an optional zero and lag follows the repros.
 func TestAllMarginPhaseCrossTinyGainNyquistCluster(t *testing.T) {
 	cases := []struct {
 		k, dt  float64
@@ -654,8 +656,21 @@ func TestAllMarginPhaseCrossTinyGainNyquistCluster(t *testing.T) {
 		{-5.6015128843776325e-14, 0.1, []float64{0.8621385615295611}, nil},
 		{-1.7579243818241682e-14, 0.79, []float64{0.5819112675552129}, nil},
 	}
+	rng := rand.New(rand.NewPCG(41, 43))
+	dts := []float64{1, 0.1, 0.79, 0.01}
+	for i := range 80 {
+		c := cases[0]
+		c.k, c.dt, c.zs, c.ps = math.Copysign(math.Pow(10, -15+4*rng.Float64()), rng.Float64()-0.5), dts[i%4], nil, nil
+		if rng.IntN(2) == 0 {
+			c.zs = []float64{1 - 2*rng.Float64()}
+		}
+		if rng.IntN(2) == 0 {
+			c.ps = []float64{0.9 - 1.8*rng.Float64()}
+		}
+		cases = append(cases, c)
+	}
 	const thMax = math.Pi - 0.05
-	for _, c := range cases {
+	for ci, c := range cases {
 		num, den := []float64{c.k}, polyMul([]float64{1, 2, 1}, []float64{1, 2, 1})
 		for _, q := range c.zs {
 			num = polyMul(num, []float64{1, -q})
@@ -696,7 +711,7 @@ func TestAllMarginPhaseCrossTinyGainNyquistCluster(t *testing.T) {
 			}
 			thp = append(thp, (a+b)/2)
 		}
-		if len(thp) == 0 {
+		if len(thp) == 0 && ci < 4 {
 			t.Fatalf("k %g: oracle found no crossover", c.k)
 		}
 		r, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: c.dt}).StateSpace()
@@ -871,4 +886,163 @@ func TestBandwidthSmallDCGain(t *testing.T) {
 			t.Errorf("k %g zs %v ps %v: bw %v err %v, want %v", k, zs, ps, bw, err, want)
 		}
 	}
+}
+
+// UFBPWZ sweep: pole pairs 1 ± jε, ε in [1e-6, 1e-3], with lags and zeros.
+// The pencil of L − L~ holds the pair, its reflection and the crossings in a
+// cluster of radius ε and lost crossovers near ε for ε ≲ 1e-4.5. Oracle:
+// the expanded float64 coefficients evaluated exactly in big.Float, phase
+// offset bisected on a log grid, plus θ = π when L is real negative there.
+// Realization rounding moves ε² by ~eps, so θ is held to 50·eps/ε² relative
+// (1-ulp coefficient perturbations move it by up to ~10·eps/ε²).
+func TestAllMarginPhaseCrossPolePairSweep(t *testing.T) {
+	rng := rand.New(rand.NewPCG(21, 23))
+	dts := []float64{1, 0.1, 0.79}
+	for it := range 90 {
+		k := math.Copysign(math.Pow(10, -3+3*rng.Float64()), rng.Float64()-0.5)
+		ep := math.Pow(10, -6+3*rng.Float64())
+		num, den := []float64{k}, []float64{1, -2, 1 + ep*ep}
+		for range rng.IntN(3) {
+			num = polyMul(num, []float64{1, -(1.8*rng.Float64() - 0.9)})
+		}
+		for range 1 + rng.IntN(3) {
+			den = polyMul(den, []float64{1, -(1.9*rng.Float64() - 0.9)})
+		}
+		dt := dts[it%3]
+		ph := func(th float64) float64 { return phaseOffsetDeg(bigHorner(num, th) / bigHorner(den, th)) }
+		var want []float64
+		const N = 5000
+		lo, hi := math.Log(1e-9), math.Log(math.Pi)
+		for i := 1; i <= N; i++ {
+			a, b := math.Exp(lo+(hi-lo)*float64(i-1)/N), math.Exp(lo+(hi-lo)*float64(i)/N)
+			if i == N {
+				b = math.Pi
+			}
+			pa, pb := ph(a), ph(b)
+			if (pa > 0) == (pb > 0) || math.Abs(pb) >= 90 || math.Abs(pa) >= 90 {
+				continue
+			}
+			for range 200 {
+				m := (a + b) / 2
+				if m <= a || m >= b {
+					break
+				}
+				if pm := ph(m); (pm > 0) == (pa > 0) {
+					a, pa = m, pm
+				} else {
+					b = m
+				}
+			}
+			want = append(want, (a+b)/2)
+		}
+		if math.Abs(ph(math.Pi)) <= 1e-7 && (len(want) == 0 || want[len(want)-1] < math.Pi*(1-1e-9)) {
+			want = append(want, math.Pi)
+		}
+		r, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Errorf("%d: %v", it, err)
+			continue
+		}
+		rel := max(1e-7, 50*eps()/(ep*ep))
+		ok := len(res.PhaseCrossFreqs) == len(want)
+		for i := 0; ok && i < len(want); i++ {
+			ok = math.Abs(res.PhaseCrossFreqs[i]*dt-want[i]) <= rel*want[i]
+		}
+		if !ok {
+			t.Errorf("%d ε %.3g num %v den %v dt %g: wpc %v, want θ %v", it, ep, num, den, dt, res.PhaseCrossFreqs, want)
+		}
+	}
+}
+
+// The resonance scan applies to continuous lightly damped pairs too; it must
+// add only crossovers the loop has. Oracle: the expanded coefficients at jω
+// in big.Float, bisected on a log grid refined around the pair.
+func TestAllMarginPhaseCrossLightlyDampedSweep(t *testing.T) {
+	rng := rand.New(rand.NewPCG(31, 37))
+	for it := range 60 {
+		k := math.Copysign(math.Pow(10, -2+4*rng.Float64()), rng.Float64()-0.5)
+		w0 := math.Pow(10, -2+4*rng.Float64())
+		z := math.Pow(10, -7+4*rng.Float64())
+		num, den := []float64{k}, []float64{1, 2 * z * w0, w0 * w0}
+		for range rng.IntN(3) {
+			num = polyMul(num, []float64{1, math.Copysign(math.Pow(10, -2+4*rng.Float64()), rng.Float64()-0.3)})
+		}
+		for range 1 + rng.IntN(3) {
+			den = polyMul(den, []float64{1, math.Pow(10, -2+4*rng.Float64())})
+		}
+		ph := func(w float64) float64 { return phaseOffsetDeg(bigHornerJ(num, w) / bigHornerJ(den, w)) }
+		var grid []float64
+		const N = 5000
+		lo, hi := math.Log(1e-5), math.Log(1e5)
+		for i := 0; i <= N; i++ {
+			grid = append(grid, math.Exp(lo+(hi-lo)*float64(i)/N))
+		}
+		for i := 0; i <= 1000; i++ {
+			s := math.Pow(10, -10+10*float64(i)/1000)
+			grid = append(grid, w0*(1-0.9*s), w0*(1+9*s))
+		}
+		slices.Sort(grid)
+		var want []float64
+		for i := 1; i < len(grid); i++ {
+			a, b := grid[i-1], grid[i]
+			pa, pb := ph(a), ph(b)
+			if (pa > 0) == (pb > 0) || math.Abs(pb) >= 90 || math.Abs(pa) >= 90 {
+				continue
+			}
+			for range 200 {
+				m := (a + b) / 2
+				if m <= a || m >= b {
+					break
+				}
+				if pm := ph(m); (pm > 0) == (pa > 0) {
+					a, pa = m, pm
+				} else {
+					b = m
+				}
+			}
+			want = append(want, (a+b)/2)
+		}
+		r, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Errorf("%d: %v", it, err)
+			continue
+		}
+		var got []float64
+		for _, w := range res.PhaseCrossFreqs {
+			if w > 1e-5 && w < 1e5 {
+				got = append(got, w)
+			}
+		}
+		ok := len(got) == len(want)
+		for i := 0; ok && i < len(want); i++ {
+			ok = math.Abs(got[i]-want[i]) <= 1e-6*want[i]
+		}
+		if !ok {
+			t.Errorf("%d ζ %.3g ω0 %.3g num %v den %v: wpc %v, want %v", it, z, w0, num, den, got, want)
+		}
+	}
+}
+
+// bigHornerJ evaluates the real polynomial p (descending) at jω exactly,
+// rounding only the result.
+func bigHornerJ(p []float64, w float64) complex128 {
+	nf := func(x float64) *big.Float { return new(big.Float).SetPrec(300).SetFloat64(x) }
+	zi := nf(w)
+	re, im, t1 := nf(0), nf(0), nf(0)
+	for _, c := range p {
+		nr := nf(0).Neg(t1.Mul(im, zi))
+		im.Mul(re, zi)
+		re.Add(nr, nf(c))
+	}
+	r, _ := re.Float64()
+	i, _ := im.Float64()
+	return complex(r, i)
 }
