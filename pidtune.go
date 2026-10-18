@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -49,7 +50,10 @@ const (
 // requested phase margin the family cannot reach at wc returns
 // ErrPIDTuningTargetUnattainable instead of a controller with a different
 // margin; without one, a PDF needing phase lag at wc takes its least lead,
-// a small Kd, as MATLAB does. Every gain takes one sign: that of the DC
+// a small Kd, as MATLAB does. A PIDF takes Tf = Td/10 unless that filter's
+// lag keeps the margin from being reached at wc; it then takes Tf = 0.1/wc,
+// else the off-target Td/10 design, whichever first keeps the margin at
+// every gain crossover and |S| ≤ 4. Every gain takes one sign: that of the DC
 // gain for a stable plant, and for an integrating or unstable plant the
 // sign stabilization forces
 // (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G); where the force
@@ -173,8 +177,19 @@ func pidtuneSlowestPole(plant *System, wc float64) float64 {
 		return 0
 	}
 	at, tol := pidtuneIntegratorTol(plant, poles, wc)
+	slow := pidtuneSlowestRoot(plant, poles, at, tol)
+	if math.IsInf(slow, 1) {
+		return 0
+	}
+	return slow
+}
+
+// pidtuneSlowestRoot returns the smallest natural frequency (|ln z|/Dt for
+// discrete plants) of roots farther than tol from at, or +Inf when there is
+// none.
+func pidtuneSlowestRoot(plant *System, roots []complex128, at complex128, tol float64) float64 {
 	slow := math.Inf(1)
-	for _, p := range poles {
+	for _, p := range roots {
 		if cmplx.Abs(p-at) <= tol {
 			continue
 		}
@@ -185,9 +200,6 @@ func pidtuneSlowestPole(plant *System, wc float64) float64 {
 		if w > 0 && w < slow {
 			slow = w
 		}
-	}
-	if math.IsInf(slow, 1) || math.IsNaN(slow) {
-		return 0
 	}
 	return slow
 }
@@ -265,21 +277,41 @@ func (r *pidtuneRun) screened(wc float64) bool {
 }
 
 func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error) {
-	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, true, lagFloor)
-	if err == nil {
-		err = r.check(pid, wc, gated)
-		if err == nil || pid.DFormula != BackwardEuler {
-			return pid, err
-		}
+	pid, err := r.checked(wc, sign, gated, true, lagFloor)
+	if err == nil || pid != nil && pid.DFormula != BackwardEuler {
+		return pid, err
 	}
 	if r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		return nil, err
 	}
-	fe, feErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, false, lagFloor)
-	if feErr != nil || fe.DFormula != ForwardEuler || r.check(fe, wc, gated) != nil {
+	fe, feErr := r.checked(wc, sign, gated, false, lagFloor)
+	if feErr != nil || fe.DFormula != ForwardEuler {
 		return nil, err
 	}
 	return fe, nil
+}
+
+// checked designs and checks one candidate, returning the design with its
+// check error so signed can see its derivative formula. A PIDF whose
+// Td/10 filter misses the target phase is replaced by its design at the
+// default filter, else by the missed design itself, whichever first passes
+// the back-off gate: a missed design can cross over elsewhere with almost
+// no margin.
+func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor bool) (*PID, error) {
+	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pidtunePIDFIterate)
+	if err == nil {
+		return pid, r.check(pid, wc, gated)
+	}
+	if !errors.Is(err, errPidtunePIDFMiss) {
+		return nil, err
+	}
+	for _, mode := range []pidtunePIDFMode{pidtunePIDFDefaultTf, pidtunePIDFKeep} {
+		alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, mode)
+		if altErr == nil && r.check(alt, wc, true) == nil {
+			return alt, nil
+		}
+	}
+	return nil, err
 }
 
 // check screens pid; the gate, cheaper than a Nyquist test of a continuous
@@ -872,6 +904,9 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 	if len(all.GainCrossFreqs) > 0 {
 		return all.GainCrossFreqs[0], nil
 	}
+	if dc, err := plant.DCGain(); err == nil && math.IsInf(dc.At(0, 0), 0) {
+		return pidtuneIntegratingCrossover(plant)
+	}
 
 	bw, err := Bandwidth(plant, -3)
 	if err != nil {
@@ -899,6 +934,67 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 	}
 
 	return 0, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
+}
+
+// pidtuneIntegratingCrossover picks the crossover of an integrating plant
+// with no gain crossover, whose bandwidth is undefined: half the slowest
+// natural frequency of a pole, else of a zero, away from s = 0 (z = 1),
+// capped for discrete plants a decade below Nyquist, which is also the pick
+// when there is neither.
+func pidtuneIntegratingCrossover(plant *System) (float64, error) {
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return 0, err
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return 0, err
+	}
+	at, tol := pidtuneIntegratorCluster(plant, poles)
+	w := pidtuneSlowestRoot(plant, poles, at, tol)
+	if math.IsInf(w, 1) {
+		zeros, err := model.Zeros()
+		if err != nil {
+			return 0, err
+		}
+		at, tol = pidtuneIntegratorCluster(plant, zeros)
+		w = pidtuneSlowestRoot(plant, zeros, at, tol)
+	}
+	w *= 0.5
+	if plant.Dt > 0 {
+		w = math.Min(w, 0.1*math.Pi/plant.Dt)
+	}
+	if math.IsInf(w, 1) {
+		return 0, fmt.Errorf("integrating plant without gain crossover or nonintegrating pole or zero to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
+	}
+	return w, nil
+}
+
+// pidtuneIntegratorCluster returns the integrator location, s = 0 or z = 1,
+// and a radius holding the largest m roots that lie within
+// 100·ε^(1/m)·scale of it, ε the machine epsilon: rounding splits an m-fold
+// root by about ε^(1/m) relative to the root scale (1 for z = 1, the largest
+// root magnitude for s = 0).
+func pidtuneIntegratorCluster(plant *System, roots []complex128) (complex128, float64) {
+	at, scale := complex128(0), 0.0
+	if plant.Dt > 0 {
+		at, scale = 1, 1
+	} else {
+		for _, r := range roots {
+			scale = max(scale, cmplx.Abs(r))
+		}
+	}
+	d := make([]float64, len(roots))
+	for i, r := range roots {
+		d[i] = cmplx.Abs(r - at)
+	}
+	slices.Sort(d)
+	for m := len(d); m > 0; m-- {
+		if tol := 100 * math.Pow(0x1p-52, 1/float64(m)) * scale; d[m-1] <= tol {
+			return at, tol
+		}
+	}
+	return at, 0
 }
 
 // pidtunePlantPoint evaluates evalPlantAt(plant, w) bit for bit: it
@@ -964,7 +1060,25 @@ type pidtuneTerms struct {
 	dFormula PIDFormula
 	// lagFloor raises a PDF phase below the family's range to its floor.
 	lagFloor bool
+	pidf     pidtunePIDFMode
 }
+
+// pidtunePIDFMode selects computePIDF's design.
+type pidtunePIDFMode int
+
+const (
+	// pidtunePIDFIterate: Tf = Td/10, errPidtunePIDFMiss when the
+	// iteration misses the target phase.
+	pidtunePIDFIterate pidtunePIDFMode = iota
+	// pidtunePIDFKeep: Tf = Td/10, returning a missed design.
+	pidtunePIDFKeep
+	// pidtunePIDFDefaultTf: Tf = 0.1/wc as PDF and TunePID, solved exactly.
+	pidtunePIDFDefaultTf
+)
+
+// errPidtunePIDFMiss reports that the Td/10 filter iteration missed the
+// target phase.
+var errPidtunePIDFMiss = fmt.Errorf("PIDF with Tf = Td/10 misses the target phase: %w", ErrPIDTuningTargetUnattainable)
 
 func pidtuneIntegrator(f PIDFormula, w, dt float64) complex128 {
 	if dt == 0 {
@@ -985,13 +1099,13 @@ func (t pidtuneTerms) derivative(tf float64) complex128 {
 // With stableFilter, a discrete forward-Euler derivative whose filter pole
 // 1−Dt/Tf leaves the unit circle is redesigned with backward Euler.
 func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter bool) (*PID, error) {
-	return pidtuneGains(plant, nil, pidType, wc, pmDeg, sign, stableFilter, false)
+	return pidtuneGains(plant, nil, pidType, wc, pmDeg, sign, stableFilter, false, pidtunePIDFKeep)
 }
 
-// pidtuneGains is computePIDGains, lagFloor aside, evaluating the plant
-// with at.
-func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
-	pid, err := computePIDGainsPositive(plant, at, pidType, wc, pmDeg, sign, stableFilter, lagFloor)
+// pidtuneGains is computePIDGains, lagFloor and pidf aside, evaluating the
+// plant with at.
+func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pidf pidtunePIDFMode) (*PID, error) {
+	pid, err := computePIDGainsPositive(plant, at, pidType, wc, pmDeg, sign, stableFilter, lagFloor, pidf)
 	if err != nil {
 		return nil, err
 	}
@@ -1002,7 +1116,7 @@ func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc,
 	return pid, nil
 }
 
-func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
+func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pidf pidtunePIDFMode) (*PID, error) {
 	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
 		return nil, fmt.Errorf("crossover %g must be below the Nyquist frequency %g: %w", wc, math.Pi/plant.Dt, ErrInvalidArgument)
 	}
@@ -1031,10 +1145,21 @@ func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType Pidtu
 	if plant.Dt > 0 && pidType == PidtunePID {
 		dFormula = BackwardEuler
 	}
-	pid, err := pidtuneFamily(pidType, pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula, lagFloor: lagFloor}, magP, phiC)
-	if err == nil && stableFilter && plant.Dt > 0 && pid.DFormula == ForwardEuler && pid.Kd != 0 && pid.Tf <= plant.Dt/2 {
+	terms := pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula, lagFloor: lagFloor, pidf: pidf}
+	pid, err := pidtuneFamily(pidType, terms, magP, phiC)
+	if !stableFilter || plant.Dt == 0 || dFormula != ForwardEuler {
+		return pid, err
+	}
+	filter := pid
+	if errors.Is(err, errPidtunePIDFMiss) {
+		keep := terms
+		keep.pidf = pidtunePIDFKeep
+		filter, _ = pidtuneFamily(pidType, keep, magP, phiC)
+	}
+	if filter != nil && filter.Kd != 0 && filter.Tf <= plant.Dt/2 {
 		// The forward-Euler filter pole 1−Dt/Tf is outside the unit circle.
-		pid, err = pidtuneFamily(pidType, pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: BackwardEuler, lagFloor: lagFloor}, magP, phiC)
+		terms.dFormula = BackwardEuler
+		pid, err = pidtuneFamily(pidType, terms, magP, phiC)
 	}
 	return pid, err
 }
@@ -1085,7 +1210,9 @@ func pidtuneFamily(pidType PidtuneType, terms pidtuneTerms, magP, phiC float64) 
 		computePID(pid, terms, magP, phiC)
 
 	case PidtunePIDF:
-		computePIDF(pid, terms, magP, phiC)
+		if err := computePIDF(pid, terms, magP, phiC); err != nil {
+			return nil, err
+		}
 	}
 
 	return pid, nil
@@ -1137,11 +1264,12 @@ func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	}
 }
 
-// pidFromPhase solves Kp + Ki*I + Kd*D = target with Ki = Kp*wc/b, relaxing
-// the integral ratio and finally dropping Kd when the derivative turns negative.
-func pidFromPhase(terms pidtuneTerms, magP, phiCRad, b float64) (Kp, Ki, Kd float64) {
+// pidFromPhase solves Kp + Ki*I + Kd*D = target with Ki = Kp*wc/b and D the
+// derivative filtered by tf, relaxing the integral ratio and finally dropping
+// Kd when the derivative turns negative.
+func pidFromPhase(terms pidtuneTerms, magP, phiCRad, b, tf float64) (Kp, Ki, Kd float64) {
 	target := cmplx.Rect(1/magP, phiCRad)
-	i, d := terms.integral(), terms.derivative(0)
+	i, d := terms.integral(), terms.derivative(tf)
 	solve := func(ratio float64) (kp, kd float64) {
 		a11, a12 := 1+ratio*real(i), real(d)
 		a21, a22 := ratio*imag(i), imag(d)
@@ -1180,11 +1308,13 @@ func computePID(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 		phiCRad = -math.Pi/2 + 0.05
 	}
 
-	pid.Kp, pid.Ki, pid.Kd = pidFromPhase(terms, magP, phiCRad, 5.0)
+	pid.Kp, pid.Ki, pid.Kd = pidFromPhase(terms, magP, phiCRad, 5.0, 0)
 }
 
-func computePIDF(pid *PID, terms pidtuneTerms, magP, phiC float64) {
-	// Iteratively design PID then compensate for filter (Tf=Td/10) phase loss.
+// computePIDF designs a PIDF for the phase phiC, clamped to (−90°, 90°), as
+// terms.pidf selects; the Td/10 iteration can miss it when the filter lag
+// outgrows the lead the derivative adds.
+func computePIDF(pid *PID, terms pidtuneTerms, magP, phiC float64) error {
 	wc := terms.wc
 	phiCRad := phiC * math.Pi / 180
 	if phiCRad >= math.Pi/2 {
@@ -1195,10 +1325,24 @@ func computePIDF(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	}
 
 	i := terms.integral()
+	missed := func(kp, ki, kd, tf float64) bool {
+		c := complex(kp, 0) + complex(ki, 0)*i + complex(kd, 0)*terms.derivative(tf)
+		return !(math.Abs(cmplx.Phase(c)-phiCRad) <= pidtuneMarginTol*math.Pi/180)
+	}
+	if terms.pidf == pidtunePIDFDefaultTf {
+		tf := .1 / wc
+		pid.Kp, pid.Ki, pid.Kd = pidFromPhase(terms, magP, phiCRad, 5.0, tf)
+		pid.Tf = tf
+		if pid.Kp < 0 || pid.Ki < 0 || pid.Kd < 0 || missed(pid.Kp, pid.Ki, pid.Kd, tf) {
+			return fmt.Errorf("PIDF with Tf = 0.1/wc misses the target phase at wc=%g: %w", wc, ErrPIDTuningTargetUnattainable)
+		}
+		return nil
+	}
+	// Iteratively design PID then compensate for filter (Tf=Td/10) phase loss.
 	phiAdj := phiCRad
 	var Kp, Ki, Kd float64
 	for range 100 {
-		Kp, Ki, Kd = pidFromPhase(terms, magP, phiAdj, 5.0)
+		Kp, Ki, Kd = pidFromPhase(terms, magP, phiAdj, 5.0, 0)
 		Td := 0.0
 		if Kp > 0 {
 			Td = Kd / Kp
@@ -1242,4 +1386,8 @@ func computePIDF(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	if pid.Tf <= 0 {
 		pid.Tf = 1.0 / (10 * wc)
 	}
+	if terms.pidf == pidtunePIDFIterate && missed(pid.Kp, pid.Ki, pid.Kd, pid.Tf) {
+		return errPidtunePIDFMiss
+	}
+	return nil
 }
