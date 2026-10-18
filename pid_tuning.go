@@ -558,6 +558,55 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		return stamp(deep, nil)
 	}
+	// tuneOneGain designs a free P or I loop. Its one gain takes the plant's
+	// margin at wc0, which a lightly damped mode can leave near zero at
+	// another crossing, so the design must keep sampled |S| within the bound
+	// over a band reaching past every mode; failing that, wc moves to the
+	// nearest frequency where the unit loop has the pm margin, as MATLAB
+	// targets 60° by moving wc.
+	tuneOneGain := func(wc0, gainSign, pm float64) (*PIDTuningResult, error) {
+		for _, m := range modes() {
+			minHigh = math.Max(minHigh, 10*imag(m))
+		}
+		res, err := tuneAt(wc0, gainSign, true, false)
+		res, err = withFloor(wc0, gainSign, true, res, err)
+		if !errors.As(err, new(*PIDTuningError)) {
+			return res, err
+		}
+		unit := PID2{Dt: plant.Dt, IFormula: opts.IFormula, B: 1, C: 1}
+		if strings.EqualFold(string(family), string(PidtuneI)) {
+			unit.Ki = 1
+		} else {
+			unit.Kp = 1
+		}
+		atUnit := func(w float64) complex128 { return eval.at(w) * pidTuningFeedback(unit, w) }
+		signs := []float64{gainSign}
+		if gainSign == 0 {
+			signs = []float64{1, -1}
+		}
+		wHi := wc0 * 1e4
+		if plant.Dt > 0 {
+			wHi = math.Min(wHi, .98*math.Pi/plant.Dt)
+		}
+		for _, sign := range signs {
+			wc, _, ok := pidTuningPhaseWalk(atUnit, sign, -180+pm, wc0*1e-6, wHi, tau, true)
+			if eval.err != nil {
+				return nil, fmt.Errorf("TunePID: %w", eval.err)
+			}
+			if !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
+				continue
+			}
+			r, e := tuneAt(wc, gainSign, true, false)
+			if e == nil {
+				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where the one-gain loop has a %g° phase margin and sampled |S| <= %d.", wc0, wc, pm, pidTuningMaxSensitivity))
+				return stamp(r, nil)
+			}
+			if !errors.As(e, new(*PIDTuningError)) {
+				return nil, e
+			}
+		}
+		return res, err
+	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, eval.at, wc)
 		res, err := tuneAt(wc, gainSign, false, false)
@@ -572,8 +621,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
 	gainSign := pidTuningDCSign(plant, eval.at, wc0)
-	res, err := tuneAt(wc0, gainSign, tau > 0, false)
 	fam := PidtuneType(strings.ToUpper(string(family)))
+	if (fam == PidtuneP || fam == PidtuneI) && opts.PhaseMargin == 0 {
+		return tuneOneGain(wc0, gainSign, pm)
+	}
+	res, err := tuneAt(wc0, gainSign, tau > 0, false)
 	if _, hasI, _, _, _ := pidTuningTerms(fam); hasI && fam != PidtuneI && gainSign != 0 && tau > 0 {
 		res, err = withFloor(wc0, gainSign, true, res, err)
 		if !errors.As(err, new(*PIDTuningError)) {
@@ -675,7 +727,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 // phase of sign·G(jω), unwrapped from its wrapped value at wLo, falls to
 // target degrees.
 func pidTuningPhaseCrossing(at func(float64) complex128, sign, target, wLo, wHi, tau float64) (float64, bool) {
-	w, _, ok := pidTuningPhaseWalk(at, sign, target, wLo, wHi, tau)
+	w, _, ok := pidTuningPhaseWalk(at, sign, target, wLo, wHi, tau, false)
 	return w, ok
 }
 
@@ -755,7 +807,7 @@ func pidTuningNearestPhase(at func(float64) complex128, sign, target, wc0, wLo, 
 // pidTuningUnwrappedPhase returns the phase in degrees of sign·G(jw),
 // unwrapped from its wrapped value at w·1e-6, or NaN when the walk fails.
 func pidTuningUnwrappedPhase(at func(float64) complex128, sign, w, tau float64) float64 {
-	end, phase, ok := pidTuningPhaseWalk(at, sign, math.Inf(-1), w*1e-6, w, tau)
+	end, phase, ok := pidTuningPhaseWalk(at, sign, math.Inf(-1), w*1e-6, w, tau, false)
 	if ok || end != w {
 		return math.NaN()
 	}
@@ -765,8 +817,10 @@ func pidTuningUnwrappedPhase(at func(float64) complex128, sign, w, tau float64) 
 // pidTuningPhaseWalk walks the unwrapped phase of sign·G(jω) up from wLo.
 // It returns the first ω at which the phase falls to target degrees, or
 // false with wHi and the phase there in degrees; a nonfinite or zero
-// response ends the walk with ω = 0.
-func pidTuningPhaseWalk(at func(float64) complex128, sign, target, wLo, wHi, tau float64) (float64, float64, bool) {
+// response ends the walk with ω = 0. The crossing is interpolated linearly
+// within a step, which can turn 90° and so miss target by tens of degrees
+// past a lightly damped mode, or with bisect found by bisection.
+func pidTuningPhaseWalk(at func(float64) complex128, sign, target, wLo, wHi, tau float64, bisect bool) (float64, float64, bool) {
 	target *= math.Pi / 180
 	w := wLo
 	g := complex(sign, 0) * at(w)
@@ -794,6 +848,22 @@ func pidTuningPhaseWalk(at func(float64) complex128, sign, target, wLo, wHi, tau
 				break
 			}
 			next = w + (next-w)/2
+		}
+		if phase+step <= target && bisect {
+			a, b := w, next
+			for range 60 {
+				m := math.Sqrt(a * b)
+				gm := complex(sign, 0) * at(m)
+				if !pidFiniteComplex(gm) || gm == 0 {
+					return 0, 0, false
+				}
+				if phase+cmplx.Phase(gm/g) > target {
+					a = m
+				} else {
+					b = m
+				}
+			}
+			return math.Sqrt(a * b), target * 180 / math.Pi, true
 		}
 		if phase+step <= target {
 			return w + (next-w)*(phase-target)/(-step), target * 180 / math.Pi, true
