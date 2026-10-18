@@ -106,3 +106,38 @@ func TestDelayNyquistReplicatedAxisRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestDelayNyquistSixfoldNearAxisPerturbed: scaling b2 of the pcg3-1530
+// loop by 1 ± 1e-2 moves its root pair at −7.4e-4 ± 1.19j to either side of
+// the axis; the 6-fold replica must count six times the RHP roots of
+// rectRoots, the unstable side included.
+func TestDelayNyquistSixfoldNearAxisPerturbed(t *testing.T) {
+	p0 := sisoDelayLoop{a: -0.4434243465876844, b1: 0.18119827899774696, b2: 0.7413873232125012,
+		c1: -1.2555390938558657, c2: -1.4544758552057484, d11: 0.24405386530661488, d12: -0.7104932753569169,
+		d21: 0.49674482991137303, d22: -0.30658129709177573, h: 1.865063162626451}
+	unstable := 0
+	for _, f := range []float64{1 - 1e-2, 1 + 1e-2} {
+		p := p0
+		p.b2 *= f
+		oracle := p.rectRoots()
+		if oracle > 0 {
+			unstable++
+		}
+		sys := p.replicate(t, 1, 1, 1, 1, 1, 1)
+		e, err := newDelayLFT(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, res, err := e.stability()
+		if err != nil || res.axisRoot || res.roots != 6*oracle {
+			t.Errorf("b2·%g: %d RHP roots, axis root %v, %v; oracle 6·%d", f, res.roots, res.axisRoot, err, oracle)
+		}
+		got, _, err := HinfNorm(sys)
+		if err != nil || math.IsInf(got, 1) != (oracle > 0) {
+			t.Errorf("b2·%g: HinfNorm = %g, %v; oracle %d RHP roots", f, got, err, oracle)
+		}
+	}
+	if unstable != 1 {
+		t.Fatalf("%d of 2 perturbations unstable; want one on each side", unstable)
+	}
+}
