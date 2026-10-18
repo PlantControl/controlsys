@@ -1351,7 +1351,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	}
 	lim, period := e.d11, 0.0
 	var hfx *highFrequencyExpansion
-	var torus *highFrequencyGain
+	var torus, tailTorus *highFrequencyGain
 	if e.directFeedthrough {
 		hf := newHighFrequencyGain(e)
 		period = hf.period()
@@ -1366,6 +1366,9 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 			torus = hf
 		default:
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
+		}
+		if hf.dim > 1 {
+			tailTorus = hf
 		}
 		hfx = newHighFrequencyExpansion(e, hf)
 	}
@@ -1455,10 +1458,10 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 				R, closed = 2*R0, true
 			}
 		}
-		if torus != nil && (!closed || (R-hi)*8*l.tau/math.Pi > torusTailPoints) {
+		if tailTorus != nil && (!closed || (R-hi)*8*l.tau/math.Pi > torusTailPoints) {
 			spent := 0
 			for Rt := R0; (!closed || Rt < R) && Rt-rGrid <= span && spent < 2; Rt *= 2 {
-				ok, out := e.torusTailBelow(torus, lim, level, Rt, 1<<18)
+				ok, out := e.torusTailBelow(tailTorus, lim, level, Rt, 1<<18)
 				if ok {
 					R, closed = Rt, true
 					break
