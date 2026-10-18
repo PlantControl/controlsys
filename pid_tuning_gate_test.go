@@ -16,6 +16,7 @@ import (
 // test, meet its reported margin at its crossover on the raw num/den, keep
 // sampled |S| <= 4 to Nyquist, and stay within the back-off's budget.
 func TestTunePIDBackOffScansPastBlindGates(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		name     string
 		num, den []float64

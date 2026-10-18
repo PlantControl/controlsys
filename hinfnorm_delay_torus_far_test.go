@@ -149,6 +149,7 @@ func passageOracle(z torusRiseCase, th []float64, sup, wMax float64) (float64, f
 // norm is S* at ω = +Inf. All gave up at 66bac00. The oracles are the dense
 // torus grid for S* and passageOracle for the finite peaks.
 func TestHinfNormTorusFarPassages(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		kind   string
 		i      int
@@ -263,6 +264,7 @@ func TestNearCrossings(t *testing.T) {
 // The oracles are the dense torus grid for S* and, for the finite peak,
 // passageOracle with a fine scan to ω = 400.
 func TestHinfNormTorusFarAfterFind(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		kind string
 		i    int

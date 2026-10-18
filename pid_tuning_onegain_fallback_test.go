@@ -134,6 +134,7 @@ func TestTunePIDFreePResonantSixtyPointScansDown(t *testing.T) {
 // crossover), TunePID must return a Routh-stable P design with dense
 // |S| <= 4; base returned unattainable on most of them.
 func TestTunePIDFreePUnstableSecondOrderSweep(t *testing.T) {
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(7, 11))
 	checked, scanned := 0, 0
 	for trial := range 100 {

@@ -745,6 +745,7 @@ func TestAllMarginPhaseCrossTinyGainNyquistCluster(t *testing.T) {
 // in big floats, bisected on a grid graded to Nyquist; the two reviewer
 // repros and a seeded sweep of |k| in [1e-14, 3e-13].
 func TestAllMarginGainCrossTinyGainNyquistCluster(t *testing.T) {
+	skipSlowUnderRace(t)
 	type tc struct {
 		num, den []float64
 		dt       float64
