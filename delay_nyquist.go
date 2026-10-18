@@ -1369,6 +1369,7 @@ const (
 	clusterNearAxis  = 1e-5 // |Re p| <= clusterNearAxis·max(1,|p|) makes p a candidate
 	clusterStep      = 0.1  // max change of arg and log|·| between arc samples
 	clusterMaxPoints = 1 << 14
+	clusterSweep     = 1.3335214321633240 // 10^(1/8)
 	arcSnapTol       = 0.5
 )
 
@@ -1516,6 +1517,11 @@ func (l *delayLoop) formCluster(w0 float64) (axisPole, bool) {
 		}
 		for _, t := range []float64{0.5, 0.25, 0.75} {
 			if a, ok := l.verifyCluster(w0, lo*math.Pow(hi/lo, t), k); ok {
+				return a, true
+			}
+		}
+		for g := lo; g <= hi; g *= clusterSweep {
+			if a, ok := l.verifyCluster(w0, g, k); ok {
 				return a, true
 			}
 		}
