@@ -920,17 +920,13 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(poles) > 0 {
-		minW := math.Inf(1)
-		for _, pole := range poles {
-			w := cmplx.Abs(pole)
-			if w > 0 && w < minW {
-				minW = w
-			}
+	at, tol := pidtuneIntegratorCluster(plant, poles)
+	if w := pidtuneSlowestRoot(plant, poles, at, tol); !math.IsInf(w, 1) {
+		w *= 0.5
+		if plant.Dt > 0 {
+			w = math.Min(w, 0.1*math.Pi/plant.Dt)
 		}
-		if !math.IsInf(minW, 1) {
-			return minW * 0.5, nil
-		}
+		return w, nil
 	}
 
 	return 0, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
