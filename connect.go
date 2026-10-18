@@ -432,8 +432,11 @@ func Feedback(plant, controller *System, sign float64, ch ...FeedbackChannels) (
 		return nil, err
 	}
 
-	E12 := eyeOrEmptyDense(m1)
-	if m1 > 0 {
+	// E12 = (I − s·D2·D1)⁻¹ is solved, not formed as I + s·D2·E21·D1: that
+	// sum cancels to rounding noise when |D1·D2| is large.
+	E12, err := solveFeedbackFeedthrough(controller.D, plant.D, feedbackSign, m1, "Feedback", ErrAlgebraicLoop)
+	if err != nil {
+		E12 = eyeOrEmptyDense(m1)
 		tmp2 := mulDims(m1, m1, mulDims(m1, p1, controller.D, E21), plant.D)
 		tmp2.Scale(sign, tmp2)
 		E12.Sub(E12, tmp2)
