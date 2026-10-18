@@ -794,8 +794,7 @@ func (l *delayLoop) kindPhase(n *refineNode, k int, h float64) float64 {
 	if !nm.good[k] {
 		return math.Inf(1)
 	}
-	m := &nm.m[k]
-	return stadiumPhase(m.f, m.df, h, l.cert.remainder(k, m, h), m.rho, m.unit)
+	return l.cert.phase(k, &nm.m[k], h)
 }
 
 // resolved reports whether the phase of the sample n of 1+L is meaningful:
