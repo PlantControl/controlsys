@@ -1259,7 +1259,8 @@ func (r *rationalLoop) resonancePoles() []float64 {
 // ε, whose roots move by a root of the backward error. A sign change between
 // evaluable grid points with |f| < 90, the far side of the pole and the
 // ±180 wrap excluded, is kept when it refines to |f| ≤ tol and still holds
-// walkClearance either side, or as far as the grid spacing when closer.
+// walkClearance either side, or as far as the grid spacing when closer;
+// tol widens to ulpTol where f moves by more than tol per ulp.
 func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
