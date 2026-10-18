@@ -61,6 +61,9 @@ type PIDTuningError struct {
 	// unstable: candidates met the margins, and the stability check
 	// rejected every one.
 	unstable bool
+	// crossed: a candidate meeting the phase target crossed 0 dB again
+	// below the margin floor.
+	crossed bool
 }
 
 func (e *PIDTuningError) Error() string {
@@ -158,11 +161,16 @@ type pidTuningPlant struct {
 	// other crossovers to the plant's dynamics, since a floor design's
 	// high gain can cross 0 dB near a mode outside the band.
 	crossLow, crossHigh float64
+	// zeroScan extends each candidate's crossing scan to its controller
+	// zeros; see pidTuningZeroGrid. Sampled data, without a model below its
+	// band, leaves it off.
+	zeroScan bool
 	// crossScan selects the margin check of a search outside the floor.
 	crossScan pidCrossScan
 	// floorRungs, if positive, caps the floor bands tried; minTfSeed seeds
 	// a filtered family at its least admissible Tf when no other seed is
-	// feasible. A backed-off crossover's probes set both.
+	// feasible. A backed-off crossover's probes set both; TunePID retries
+	// a failed filtered search with minTfSeed.
 	floorRungs int
 	minTfSeed  bool
 	// returnSensitivity, if set, returns |S(∞)| of a candidate, +Inf when
@@ -812,7 +820,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	used, minHigh, sRejected, probing := 0, 0., false, false
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
-		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: math.Max(wc*100, minHigh), at: eval.at, try: eval.try, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
+		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: math.Max(wc*100, minHigh), at: eval.at, try: eval.try, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
 		if robust {
 			p.maxSensitivity = pidTuningMaxSensitivity
 			p.loopTail = loopTail()
@@ -845,6 +853,34 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		res, err := tune(ctx, "TunePID", p, family, opts)
 		if eval.err != nil {
 			return nil, fmt.Errorf("TunePID: %w", eval.err)
+		}
+		// A filtered search without the |S| bound that failed on other
+		// crossings is retried from the least admissible Tf: the default
+		// Tf's lag can leave only near-pure-D designs, whose lightly damped
+		// zeros notch |L| through 1 (pidTuningZeroGrid).
+		if te, ok := errors.AsType[*PIDTuningError](err); ok && te.crossed && p.maxSensitivity == 0 && !floor && !p.minTfSeed {
+			_, _, _, filtered, _ := pidTuningTerms(PidtuneType(strings.ToUpper(string(family))))
+			budget := opts.MaxEvaluations
+			if budget == 0 {
+				budget = 4096
+			}
+			if left := budget - te.Evidence.Evaluations; filtered && left > 0 {
+				o := opts
+				o.MaxEvaluations = left
+				p.minTfSeed = true
+				r, e := tune(ctx, "TunePID", p, family, o)
+				if eval.err != nil {
+					return nil, fmt.Errorf("TunePID: %w", eval.err)
+				}
+				if e == nil {
+					r.Evidence.Evaluations += te.Evidence.Evaluations
+					res, err = r, nil
+				} else if retry, ok := errors.AsType[*PIDTuningError](e); ok {
+					te.Evidence.Evaluations += retry.Evidence.Evaluations
+				} else {
+					return nil, e
+				}
+			}
 		}
 		if te, ok := errors.AsType[*PIDTuningError](err); ok {
 			used += te.Evidence.Evaluations
@@ -1588,6 +1624,29 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	if p.crossScan == pidCrossGrid {
 		refinedOmega = omega
 	}
+	// gridFor gives a candidate's crossing grid and q the plant that scans
+	// it, reusing samples below the band across candidates. Below the band
+	// q reads a sample the solve cannot resolve, as next to rounded
+	// multiple poles at z = 1 or s = 0, as infinite, since the integrators
+	// keep |L| ≫ 1 there.
+	q, gridFor := p, func(_ PID2, grid []float64) []float64 { return grid }
+	if p.zeroScan {
+		cache := map[float64]complex128{}
+		q.at = func(w float64) complex128 {
+			if v, ok := cache[w]; ok {
+				return v
+			}
+			if w >= p.low || p.try == nil {
+				return p.at(w)
+			}
+			if v, ok := p.try(w); ok {
+				return v
+			}
+			return cmplx.Inf()
+		}
+		step := math.Log(p.high/p.low) / (points - 1)
+		gridFor = func(c PID2, grid []float64) []float64 { return pidTuningZeroGrid(p, c, grid, step, cache) }
+	}
 	components := func(c PID2) PIDTuningObjective {
 		v := PIDTuningObjective{}
 		for k, w := range omega {
@@ -1730,7 +1789,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		if !finitePID(j) || j >= bestScore {
 			return nil
 		}
-		at, margins := crossings(p, candidate, crossOmega, wc)
+		at, margins := crossings(q, candidate, gridFor(candidate, crossOmega), wc)
 		violation, violated, worstAt, worst, reflected := violationOf(candidate, at, margins, true)
 		// A crossing counted the far way round from −1 holds only for a
 		// stable loop; otherwise its wrapped margin stands.
@@ -1924,7 +1983,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		if finitePID(nearestViolation) {
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target crossed 0 dB again with a margin below the %g° floor (closest candidate: %.4g° at %.4g rad/s); such designs are rejected.", floor, crossingMargin, crossingAt))
 		}
-		e := &PIDTuningError{Op: op, Evidence: evidence, unstable: stabilityChecked && !stableFound}
+		e := &PIDTuningError{Op: op, Evidence: evidence, unstable: stabilityChecked && !stableFound, crossed: finitePID(nearestViolation)}
 		if finitePID(leastExcess) {
 			e.excess = leastExcess
 		}
@@ -1945,7 +2004,8 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	if p.crossScan == pidCrossGrid {
 		evidenceCrossings = pidTuningCoarseCrossings
 	}
-	evidence.GainCrossovers, evidence.PhaseMargins = evidenceCrossings(p, best, refinedOmega, wc)
+	evidenceOmega := gridFor(best, refinedOmega)
+	evidence.GainCrossovers, evidence.PhaseMargins = evidenceCrossings(q, best, evidenceOmega, wc)
 	if _, violated, _, _, _ := violationOf(best, evidence.GainCrossovers, evidence.PhaseMargins, true); violated && p.crossScan == pidCrossCoarse {
 		return nil, &pidCoarseRejected{evaluations: evidence.Evaluations}
 	}
@@ -1953,7 +2013,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		margin = pidTuningCrossingMargin(wc, evidence.GainCrossovers[i], margin, floor, p.stable != nil)
 		evidence.AchievedPhaseMargin = math.Min(evidence.AchievedPhaseMargin, margin)
 	}
-	evidence.FrequencyBand = [2]float64{refinedOmega[0], refinedOmega[len(refinedOmega)-1]}
+	evidence.FrequencyBand = [2]float64{evidenceOmega[0], evidenceOmega[len(evidenceOmega)-1]}
 	evidence.Warnings = append(evidence.Warnings, "Margins describe the recorded finite analysis band; unresolved crossings outside that band are not excluded.")
 	return &PIDTuningResult{Controller: &best, Evidence: evidence}, nil
 }
@@ -2381,6 +2441,77 @@ func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 		h, ok := p.try(w)
 		return !ok || !pidFiniteComplex(h)
 	})
+}
+
+// pidTuningZeroGrid adds to grid, sorted, the points where c's zeros can
+// put a 0 dB crossing that grid misses: a lightly damped pair σ+jω₀ of
+// Kd·s² + Kp·s + Ki, as when tiny Kp and Ki set it below the band, notches
+// |L| through 1 within a few |σ| of ω₀. It extends grid at step (in log ω)
+// down to a tenth of the slowest zero, at most four decades, and adds
+// points within 4|σ| of ω₀. Discrete controllers use the continuous zeros,
+// which match theirs well below Nyquist. Points where p.try fails are
+// dropped; cache keeps the samples of the extension, whose points recur.
+func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, cache map[float64]complex128) []float64 {
+	a, b, k := c.Kp*c.Tf+c.Kd, c.Kp+c.Ki*c.Tf, c.Ki
+	var zeros []complex128
+	if a != 0 {
+		q := -.5 * (complex(b, 0) + complex(math.Copysign(1, b), 0)*cmplx.Sqrt(complex(b*b-4*a*k, 0)))
+		if q != 0 {
+			zeros = append(zeros, q/complex(a, 0), complex(k, 0)/q)
+		}
+	} else if b != 0 {
+		zeros = append(zeros, complex(-k/b, 0))
+	}
+	lo, hi := grid[0], grid[len(grid)-1]
+	slowest := math.Inf(1)
+	var extra []float64
+	for _, z := range zeros {
+		m := cmplx.Abs(z)
+		if !finitePID(m) || m == 0 {
+			continue
+		}
+		slowest = math.Min(slowest, m)
+		if w0 := math.Abs(imag(z)); w0 > 0 && imag(z) > 0 {
+			d := math.Max(math.Abs(real(z)), 1e-6*w0)
+			for j := -8.; j <= 8; j++ {
+				extra = append(extra, w0+j*d/2)
+			}
+		}
+	}
+	floor := math.Max(slowest/10, lo*1e-4)
+	for j := 1.; j <= math.Ceil(math.Log(lo/floor)/step); j++ {
+		extra = append(extra, lo*math.Exp(-j*step))
+	}
+	bottom := math.Min(lo, floor*math.Exp(-step))
+	extra = slices.DeleteFunc(extra, func(w float64) bool {
+		if w < bottom || w > hi || w <= 0 {
+			return true
+		}
+		if _, ok := slices.BinarySearch(grid, w); ok {
+			return true
+		}
+		h, ok := cache[w]
+		if !ok {
+			if p.try != nil {
+				h, ok = p.try(w)
+			} else {
+				h, ok = p.at(w), true
+			}
+			if !ok {
+				h = cmplx.NaN()
+			}
+			if w < lo {
+				cache[w] = h
+			}
+		}
+		return !pidFiniteComplex(h)
+	})
+	if len(extra) == 0 {
+		return grid
+	}
+	out := slices.Concat(grid, extra)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // pidTuningModes returns the plant poles and zeros σ+jω₀ with |σ| < 0.05·ω₀,
