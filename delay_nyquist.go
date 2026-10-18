@@ -660,8 +660,8 @@ func (l *delayLoop) pointBudget() int {
 // refine evaluates 1+L on the segment, bisecting until each span between
 // consecutive points is certified: either the tail bound puts 1+L in the
 // disk of radius sin(π/8) around 1 beyond the span's start, or the Taylor
-// models of l.cert at both ends, each covering half the span, prove that
-// 1+L has no zero on it and that its phase varies by at most spanCertPhase
+// models of l.cert, at one end covering the span or at both ends each
+// covering half (see certifiedSpan), prove that 1+L has no zero on it and that its phase varies by at most spanCertPhase
 // (see stadiumPhase). The phase step between consecutive points is then
 // exactly the wrapped difference of their phases. It reports refineAxisRoot
 // and the root frequency when 1+L vanishes, or when a span of the bisection
@@ -747,6 +747,13 @@ func (l *delayLoop) modelSlot() int {
 	return len(l.models) - 1
 }
 
+// certifiedSpan bounds the phase variation of 1+L over the span with as
+// few model evaluations as it can: first by one model covering the whole
+// span, from an end where one is evaluated already or else from the right
+// end, which the next span reuses; then by the models of the preferred kind
+// at both ends, each covering half; then by every kind at both ends. Each
+// stage accepts a superset of the spans the previous one does, and the last
+// accepts every span that the best model at each end certifies.
 func (l *delayLoop) certifiedSpan(s *refineSpan) bool {
 	if l.tail(s.a.w) <= sinPi8 {
 		return true
@@ -754,35 +761,75 @@ func (l *delayLoop) certifiedSpan(s *refineSpan) bool {
 	if math.Abs(wrapPi(cmplx.Phase(s.b.f)-cmplx.Phase(s.a.f))) > spanCertPhase {
 		return false
 	}
-	h := (s.b.w - s.a.w) / 2
-	pa := l.halfSpanPhase(&s.a, h)
-	if !(pa <= spanCertPhase) {
+	d := s.b.w - s.a.w
+	if l.knownPhase(&s.a, d) <= spanCertPhase || l.knownPhase(&s.b, -d) <= spanCertPhase {
+		return true
+	}
+	if !l.hasModel(&s.b) && l.kindPhase(&s.b, l.firstKind(&s.b), -d) <= spanCertPhase {
+		return true
+	}
+	h := d / 2
+	if !l.hasModel(&s.a) {
+		l.kindPhase(&s.a, l.firstKind(&s.a), h)
+	}
+	pa, pb := l.knownPhase(&s.a, h), l.knownPhase(&s.b, -h)
+	if pa+pb <= spanCertPhase {
+		return true
+	}
+	if l.cert.kinds() == 1 {
 		return false
 	}
-	return pa+l.halfSpanPhase(&s.b, -h) <= spanCertPhase
+	ends := [2]*refineNode{&s.a, &s.b}
+	if pb > pa {
+		ends[0], ends[1] = ends[1], ends[0]
+	}
+	for _, n := range ends {
+		hn := h
+		if n == &s.b {
+			hn = -h
+		}
+		p := l.knownPhase(n, hn)
+		for k := range 2 {
+			if !l.models[n.mi].has[k] {
+				p = min(p, l.kindPhase(n, k, hn))
+			}
+		}
+		if n == &s.a {
+			pa = p
+		} else {
+			pb = p
+		}
+		if pa+pb <= spanCertPhase {
+			return true
+		}
+	}
+	return false
 }
 
-// halfSpanPhase bounds the phase variation of 1+L over [n.w, n.w+h] by the
-// model of S first where |1+L| > 1, near the open-loop poles, and of 1+L
-// first elsewhere, unless only the other is evaluated at n already, trying
-// the other kind when the first leaves more than half of spanCertPhase.
-func (l *delayLoop) halfSpanPhase(n *refineNode, h float64) float64 {
-	if l.cert.kinds() == 1 {
-		return l.kindPhase(n, 0, h)
-	}
-	first := 0
+func (l *delayLoop) hasModel(n *refineNode) bool {
 	nm := &l.models[n.mi]
-	switch {
-	case nm.has[1] && !nm.has[0]:
-		first = 1
-	case !nm.has[0] && cmplx.Abs(n.f) > 1:
-		first = 1
+	return nm.has[0] || nm.has[1]
+}
+
+// firstKind is the kind to evaluate first at n: the model of S where
+// |1+L| > 1, near the open-loop poles, and of 1+L elsewhere.
+func (l *delayLoop) firstKind(n *refineNode) int {
+	if l.cert.kinds() == 2 && cmplx.Abs(n.f) > 1 {
+		return 1
 	}
-	p := l.kindPhase(n, first, h)
-	if p <= spanCertPhase/2 {
-		return p
+	return 0
+}
+
+// knownPhase bounds the phase variation of 1+L over [n.w, n.w+h] by the
+// models evaluated at n, +Inf without one.
+func (l *delayLoop) knownPhase(n *refineNode, h float64) float64 {
+	p := math.Inf(1)
+	for k, has := range l.models[n.mi].has {
+		if has {
+			p = min(p, l.kindPhase(n, k, h))
+		}
 	}
-	return min(p, l.kindPhase(n, 1-first, h))
+	return p
 }
 
 func (l *delayLoop) kindPhase(n *refineNode, k int, h float64) float64 {
@@ -794,8 +841,7 @@ func (l *delayLoop) kindPhase(n *refineNode, k int, h float64) float64 {
 	if !nm.good[k] {
 		return math.Inf(1)
 	}
-	m := &nm.m[k]
-	return stadiumPhase(m.f, m.df, h, l.cert.remainder(k, m, h), m.rho, m.unit)
+	return l.cert.phase(k, &nm.m[k], h)
 }
 
 // resolved reports whether the phase of the sample n of 1+L is meaningful:

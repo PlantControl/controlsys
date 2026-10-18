@@ -9,15 +9,14 @@ import (
 )
 
 // loopCertifier gives certified local models on the jω axis of f = 1+L
-// (kind 0) and, where kinds() is 2, of S = 1/f (kind 1), whose phase
-// varies as much as that of f and which is finite and nonzero exactly where
-// f is: model returns g(ω) and g′(ω) for the function g of the kind, and
-// remainder bounds |g(ω+t) − g(ω) − t·g′(ω)| for |t| ≤ |h|, +Inf where it
-// has none.
+// (kind 0) and, where kinds() is 2, of a second function regular where f
+// has a pole (kind 1): model returns the model of the kind at ω, and phase
+// bounds the phase variation of f over [ω, ω+h] from it, +Inf where it
+// cannot.
 type loopCertifier interface {
 	kinds() int
 	model(kind int, w float64) (loopModel, bool)
-	remainder(kind int, m *loopModel, h float64) float64
+	phase(kind int, m *loopModel, h float64) float64
 }
 
 // loopModel is the Taylor model of one kind at one frequency with the
@@ -37,6 +36,10 @@ type loopModel struct {
 	// normalized loops: the same for the difference operator I − D22Δ
 	nu0, normY0, d0T2 float64
 	a0                complex128
+	// det M models (detCertifier kind 1): ‖ZW²‖_F, and the model of
+	// det(I − D22Δ) with its rounding on normalized loops
+	zW2, rho0 float64
+	u0        complex128
 }
 
 // spanCertPhase bounds the phase variation of 1+L over an accepted span.
@@ -149,6 +152,10 @@ func (c *descriptorCertifier) remainder(kind int, m *loopModel, h float64) float
 	return c.r[kind].remainder(&m.s, h)
 }
 
+func (c *descriptorCertifier) phase(kind int, m *loopModel, h float64) float64 {
+	return stadiumPhase(m.f, m.df, h, c.remainder(kind, m, h), m.rho, m.unit)
+}
+
 func finite(z complex128) bool {
 	return !cmplx.IsNaN(z) && !cmplx.IsInf(z)
 }
@@ -161,21 +168,37 @@ func finite(z complex128) bool {
 // √nd·‖X‖_F, since det(I+X) − 1 − tr X = Σ_{k>=2} e_k(λ(X)),
 // |e_k(λ)| <= C(nd,k)(Σ|λᵢ|/nd)^k by Maclaurin's inequality and
 // Σ|λᵢ| <= ‖X‖_*.
+//
+// Near a multiple imaginary-axis pole of H22 ‖(jωI − A)⁻¹‖ grows faster than
+// |H22|, so the reach of that model falls below the bisection tolerance.
+// Kind 1 then models det M(ω) of the delay descriptor (see
+// descriptorResponse) M = M₀ + diag(jωIₙ, e^{jωτ}), which is entire with
+// det M = det(jωI − A)·e^{jωΣτ}·det(I − H22Δ) and regular off the
+// closed-loop roots: the phase of f varies by at most that of det M, plus
+// |h|Στ, plus the angle each eigenvalue of A off the axis subtends from the
+// span; an eigenvalue on the axis adds nothing, as the span lies on the axis
+// off it.
 type detCertifier struct {
 	e          *delayLFT
 	h22        *descriptorResponse // nil without states
 	buf        *descriptorSample
 	normalized bool
-	sqrtNd     float64
 	g, g1, n   []complex128
 	inv        []complex128
 	piv        []int
+
+	desc    *descriptorResponse // M₀ of kind 1, see chiDescriptor
+	descErr bool
+	mlu     []complex128
+	mpiv    []int
+	offAxis []complex128
+	sumTau  float64
 }
 
 func newDetCertifier(e *delayLFT, normalized bool) (*detCertifier, error) {
 	nd := e.nd
 	c := &detCertifier{
-		e: e, normalized: normalized, sqrtNd: math.Sqrt(float64(nd)),
+		e: e, normalized: normalized,
 		g: make([]complex128, nd*nd), g1: make([]complex128, nd*nd),
 		n: make([]complex128, nd*nd), inv: make([]complex128, nd*nd), piv: make([]int, nd),
 	}
@@ -189,9 +212,44 @@ func newDetCertifier(e *delayLFT, normalized bool) (*detCertifier, error) {
 	return c, nil
 }
 
-func (c *detCertifier) kinds() int { return 1 }
+// kinds is 2 with states; the descriptor of kind 1 is built on first use.
+func (c *detCertifier) kinds() int {
+	if c.h22 == nil {
+		return 1
+	}
+	return 2
+}
 
-func (c *detCertifier) model(_ int, w float64) (loopModel, bool) {
+func (c *detCertifier) chiDescriptor() *descriptorResponse {
+	if c.desc != nil || c.descErr {
+		return c.desc
+	}
+	e := c.e
+	sys, err := SetDelayModel(e.h22sys, e.tau)
+	if err == nil {
+		c.desc, err = newDescriptorResponse(sys)
+	}
+	if err != nil {
+		c.descErr = true
+		return nil
+	}
+	size := c.desc.size
+	c.mlu, c.mpiv = make([]complex128, size*size), make([]int, size)
+	for _, p := range e.poles {
+		if classifyPoleStability(p, true, poleStabilityTolerance(p)) != poleClassBoundary {
+			c.offAxis = append(c.offAxis, p)
+		}
+	}
+	for _, t := range e.tau {
+		c.sumTau += t
+	}
+	return c.desc
+}
+
+func (c *detCertifier) model(kind int, w float64) (loopModel, bool) {
+	if kind == 1 {
+		return c.chiModel(w)
+	}
 	nd := c.e.nd
 	var m loopModel
 	if c.h22 != nil {
@@ -226,29 +284,139 @@ func (c *detCertifier) model(_ int, w float64) (loopModel, bool) {
 	m.f, m.df = u, u*m.a1
 	m.rho = c.detRho(m.nu, gF)
 	if c.normalized {
-		d22 := c.e.d22Complex()
-		copy(c.g, d22)
-		clear(c.g1)
-		for i := range nd {
-			for k := range nd {
-				t2 := tau[k] * tau[k]
-				m.d0T2 += sq(d22[i*nd+k]) * t2 * t2
-			}
-		}
-		m.d0T2 = math.Sqrt(m.d0T2)
-		g0F := cFrobenius(c.g)
-		u0, ok := c.relative(w, c.g, c.g1, &m.nu0, &m.normY0, &m.a0)
-		if !ok {
+		if !c.differenceModel(w, &m) {
 			return m, false
 		}
-		m.f = u / u0
+		m.f = u / m.u0
 		m.df = m.f * (m.a1 - m.a0)
-		m.rho += c.detRho(m.nu0, g0F)
+		m.rho += m.rho0
 	}
 	if !finite(m.f) || !finite(m.df) {
 		return m, false
 	}
 	return m, true
+}
+
+// differenceModel sets the model of u0 = det(I − D22Δ) in m.
+func (c *detCertifier) differenceModel(w float64, m *loopModel) bool {
+	nd, tau := c.e.nd, c.e.tau
+	d22 := c.e.d22Complex()
+	copy(c.g, d22)
+	clear(c.g1)
+	m.d0T2 = 0
+	for i := range nd {
+		for k := range nd {
+			t2 := tau[k] * tau[k]
+			m.d0T2 += sq(d22[i*nd+k]) * t2 * t2
+		}
+	}
+	m.d0T2 = math.Sqrt(m.d0T2)
+	g0F := cFrobenius(c.g)
+	u0, ok := c.relative(w, c.g, c.g1, &m.nu0, &m.normY0, &m.a0)
+	if !ok || !finite(u0) || u0 == 0 {
+		return false
+	}
+	m.u0, m.rho0 = u0, c.detRho(m.nu0, g0F)
+	return true
+}
+
+// chiModel returns the model of det M at ω: with Z = M⁻¹ and
+// M′ = j·diag(1, τe^{jωτ}), det M(ω+t)/det M(ω) = det(I + X),
+// X = tZM′ + ZR, where R = M(ω+t) − M(ω) − tM′ is diagonal with
+// |R_kk| <= t²τ_k²/2, so ‖ZR‖_F <= ‖ZW²‖_F·t²/2.
+func (c *detCertifier) chiModel(w float64) (loopModel, bool) {
+	var m loopModel
+	r := c.chiDescriptor()
+	if r == nil {
+		return m, false
+	}
+	n, size := r.n, r.size
+	lu := c.mlu
+	copy(lu, r.m0)
+	for i := range size {
+		if i < n {
+			r.unit[i] = complex(0, 1)
+			lu[i*size+i] += complex(0, w)
+		} else {
+			e := cmplx.Exp(complex(0, w*r.tau[i-n]))
+			r.unit[i] = complex(0, r.tau[i-n]) * e
+			lu[i*size+i] += e
+		}
+	}
+	mF := cFrobenius(lu)
+	copy(r.inv, lu)
+	if !cLUFactor(lu, c.mpiv, size) {
+		return m, false
+	}
+	det := complex(1, 0)
+	for k := range size {
+		det *= lu[k*size+k]
+		if c.mpiv[k] != k {
+			det = -det
+		}
+	}
+	if !cInvert(r.inv, c.mpiv, size) {
+		return m, false
+	}
+	var nu float64
+	for i := range size {
+		for j := range size {
+			z := r.inv[i*size+j]
+			az := sq(z)
+			nu += az
+			wj := r.weight[j] * r.weight[j]
+			m.normY += az * wj
+			if j >= n {
+				m.zW2 += az * wj * wj
+			}
+			if i == j {
+				m.a1 += z * r.unit[j]
+			}
+		}
+	}
+	nu, m.normY, m.zW2 = math.Sqrt(nu), math.Sqrt(m.normY), math.Sqrt(m.zW2)
+	m.f, m.df = det, det*m.a1
+	m.rho = 16 * float64(size) * 0x1p-52 * (1 + nu*mF)
+	if c.normalized && !c.differenceModel(w, &m) {
+		return m, false
+	}
+	if !finite(m.f) || !finite(m.df) || m.f == 0 {
+		return m, false
+	}
+	m.s.w, m.s.regular = w, true
+	return m, true
+}
+
+func (c *detCertifier) phase(kind int, m *loopModel, h float64) float64 {
+	if kind == 0 {
+		return stadiumPhase(m.f, m.df, h, c.remainder(0, m, h), m.rho, m.unit)
+	}
+	ah := math.Abs(h)
+	rel := relativeDetRemainder(ah, m.normY, m.zW2*ah*ah/2, c.desc.size) + m.rho*ah*m.normY
+	p := stadiumPhase(m.f, m.df, h, cmplx.Abs(m.f)*rel, m.rho, 0) + ah*c.sumTau
+	if c.normalized {
+		rel0 := c.relRemainder(ah, m.nu0, m.normY0, ah*ah*m.d0T2/2) + m.rho0*ah*m.normY0
+		p += stadiumPhase(m.u0, m.u0*m.a0, h, cmplx.Abs(m.u0)*rel0, m.rho0, 0)
+	}
+	lo, hi := m.s.w, m.s.w+h
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	for _, l := range c.offAxis {
+		d := cmplx.Abs(l - complex(0, min(hi, max(lo, imag(l)))))
+		p += min(math.Pi, ah/d)
+		if !(p <= math.Pi) {
+			return math.Inf(1)
+		}
+	}
+	return p
+}
+
+// relativeDetRemainder bounds |det(I+X) − 1 − t·tr Y| for the dim×dim
+// X = tY + R, |t| <= ah, ‖R‖_F <= r.
+func relativeDetRemainder(ah, normY, r float64, dim int) float64 {
+	s := math.Sqrt(float64(dim))
+	return s*r + detHigherTerms(s*(ah*normY+r), dim)
 }
 
 // detRho bounds the relative rounding of det N and of tr Y for
@@ -332,9 +500,7 @@ func (c *detCertifier) remainder(_ int, m *loopModel, h float64) float64 {
 
 // relRemainder bounds |det(I+X) − 1 − t·tr Y| for ‖R‖_F <= ν·remG.
 func (c *detCertifier) relRemainder(ah, nu, normY, remG float64) float64 {
-	r := nu * remG
-	x := c.sqrtNd * (ah*normY + r)
-	return c.sqrtNd*r + detHigherTerms(x, c.e.nd)
+	return relativeDetRemainder(ah, normY, nu*remG, c.e.nd)
 }
 
 // detHigherTerms returns Σ_{k=2}^{nd} C(nd,k)(x/nd)^k.
