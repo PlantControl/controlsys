@@ -723,3 +723,75 @@ func TestAllMarginPhaseCrossTinyGainNyquistCluster(t *testing.T) {
 		}
 	}
 }
+
+// Y3RHVQ: beside the cluster of k/((z+1)⁴·q(z)) with tiny |k|, |L| reaches 1
+// where the double solve of zI − A is singular to working precision, and
+// gain crossovers were dropped. Oracle: the expanded coefficients evaluated
+// in big floats, bisected on a grid graded to Nyquist; the two reviewer
+// repros and a seeded sweep of |k| in [1e-14, 3e-13].
+func TestAllMarginGainCrossTinyGainNyquistCluster(t *testing.T) {
+	type tc struct {
+		num, den []float64
+		dt       float64
+	}
+	den4 := polyMul([]float64{1, 2, 1}, []float64{1, 2, 1})
+	cases := []tc{
+		{[]float64{-1.6726418877515324e-14}, polyMul(den4, []float64{1, 0.7445460248190218}), 0.1},
+		{polyMul([]float64{2.4983505154002314e-13}, []float64{1, 0.8685335634364679}), polyMul(den4, []float64{1, 0.6851821799011946}), 0.79},
+	}
+	rng := rand.New(rand.NewPCG(3, 5))
+	dts := []float64{1, 0.1, 0.79, 0.01}
+	for i := range 40 {
+		k := math.Copysign(math.Pow(10, -14+math.Log10(30)*rng.Float64()), rng.Float64()-0.5)
+		c := tc{[]float64{k}, den4, dts[i%4]}
+		if rng.IntN(2) == 0 {
+			c.num = polyMul(c.num, []float64{1, 1 - 2*rng.Float64()})
+		}
+		if rng.IntN(2) == 0 {
+			c.den = polyMul(c.den, []float64{1, 0.9 - 1.8*rng.Float64()})
+		}
+		cases = append(cases, c)
+	}
+	for _, c := range cases {
+		loop := func(th float64) complex128 { return bigHorner(c.num, th) / bigHorner(c.den, th) }
+		lm := func(th float64) float64 { return math.Log(cmplx.Abs(loop(th))) }
+		var want []float64
+		const N = 20000
+		for i := 1; i < N; i++ {
+			a, b := math.Pi*(1-math.Pow(1-float64(i-1)/N, 4)), math.Pi*(1-math.Pow(1-float64(i)/N, 4))
+			fa, fb := lm(a), lm(b)
+			if (fa > 0) == (fb > 0) {
+				continue
+			}
+			for range 100 {
+				m := (a + b) / 2
+				if m <= a || m >= b {
+					break
+				}
+				if fm := lm(m); (fm > 0) == (fa > 0) {
+					a, fa = m, fm
+				} else {
+					b = m
+				}
+			}
+			want = append(want, (a+b)/2)
+		}
+		r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: c.dt}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Fatalf("%v/%v dt %g: %v", c.num, c.den, c.dt, err)
+		}
+		ok := len(res.GainCrossFreqs) == len(want)
+		for i := 0; ok && i < len(want); i++ {
+			th := want[i]
+			ok = math.Abs(res.GainCrossFreqs[i]*c.dt-th) <= 1e-7*th &&
+				math.Abs(wrapDegrees(res.PhaseMargins[i]-phaseMarginDeg(loop(th)))) <= 1e-4
+		}
+		if !ok {
+			t.Errorf("%v/%v dt %g: wgc %v pm %v, want θ %v", c.num, c.den, c.dt, res.GainCrossFreqs, res.PhaseMargins, want)
+		}
+	}
+}

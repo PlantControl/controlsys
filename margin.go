@@ -88,6 +88,9 @@ type sisoEval struct {
 	// at some ω > 0; see checkSkipped.
 	skipped  error
 	resolved bool
+	// extended falls back to ddSISOResponse where the double solve fails;
+	// see rationalLoop.gainCrossings.
+	extended bool
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -112,7 +115,14 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
 	if err := evalWithPoleLimit(e.eval, e.sys, pt, e.dst); err != nil {
-		return e.fail(w, err)
+		h, ok := complex(0, 0), false
+		if e.extended && e.sys.internalDelayCount() == 0 {
+			h, ok = ddSISOResponse(e.sys, pt)
+		}
+		if !ok {
+			return e.fail(w, err)
+		}
+		e.dst[0] = h
 	}
 	if e.delay != nil {
 		applyIODelayMatrixAtS(e.sys, pt, e.dst, 1, 1, e.delay)
@@ -425,9 +435,11 @@ func allMargin(sys *System) (*AllMarginResult, error) {
 		}
 		res.PhaseCrossFreqs = phase
 	}
+	eval.extended = loop != nil
 	for _, w := range res.GainCrossFreqs {
 		res.PhaseMargins = append(res.PhaseMargins, phaseMarginDeg(eval.at(w)))
 	}
+	eval.extended = false
 	for _, w := range res.PhaseCrossFreqs {
 		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(eval.at(w))))
 	}
@@ -1001,6 +1013,11 @@ func frobenius(a []float64) float64 {
 }
 
 // gainCrossings returns the verified ω > 0 where |L(jω)| = gamma, ascending.
+// Where the double solve is singular it evaluates in double-double: beside
+// a cluster k/(z+1)⁴ with tiny k, |L| reaches gamma where the pivot of
+// zI − A is below n·eps·‖A‖, yet the model is resolved there. Phase
+// crossings keep the double solve: the phase of the model as rounded beside
+// such a cluster departs from that of its factored form.
 func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	cands, err := r.gainCandidates(gamma)
 	if err != nil {
@@ -1008,6 +1025,8 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	}
 	lg := math.Log(gamma)
 	f := func(w float64) float64 { return math.Log(cmplx.Abs(r.eval.at(w))) - lg }
+	r.eval.extended = true
+	defer func() { r.eval.extended = false }()
 	return r.endCrossings(r.polish(cands, f, 1e-9), f, 1e-9), nil
 }
 
