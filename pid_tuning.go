@@ -355,7 +355,7 @@ const (
 	// pole may lie and still be retested exactly.
 	pidTuningExactBand = 1e-3
 	// pidTuningExactOrder caps the closed-loop order tested exactly.
-	pidTuningExactOrder = 10
+	pidTuningExactOrder = 16
 )
 
 // pidTuningPolesStable decides stability of the negative-feedback loop of
@@ -363,10 +363,12 @@ const (
 // state matrix a, as IsStable, except that the exact test decides when the
 // float verdict is in doubt: every pole the float test rejects lies within
 // pidTuningExactBand outside the boundary (with |p| <= 1 in continuous
-// time), or a pole it accepts has a stability margin below its error
-// estimate (pidTuningPoleUncertain). A cluster of poles near the boundary,
-// as a slow plant pole and a tiny-gain integrator give near z = 1, carries
-// eigenvalue errors far above the margin the gains leave. The loop's A is
+// time) or within ten error scales of it, or a pole it accepts has a
+// stability margin below its error estimate (pidTuningPoleUncertain). A
+// cluster of poles near the boundary, as a slow plant pole and a tiny-gain
+// integrator give near z = 1, carries eigenvalue errors far above the
+// margin the gains leave; so does a slow pole beside a fast one of a
+// high-gain loop, whose errors scale with ‖A‖. The loop's A is
 // then built from the realizations in exact integer arithmetic, and its
 // characteristic polynomial must have every root at |z| < 1−1e-10, or
 // Re s < −1e-10, as poleStabilityTolerance asks of a pole with |p| <= 1.
@@ -388,8 +390,11 @@ func pidTuningPolesStable(poles []complex128, a *mat.Dense, plant, c *System) bo
 			continue
 		}
 		stable = false
-		if continuous && (cmplx.Abs(p) > 1 || real(p) > pidTuningExactBand) ||
-			!continuous && cmplx.Abs(p)-1 > pidTuningExactBand {
+		excess := cmplx.Abs(p) - 1 + poleStabilityTolerance(p)
+		if continuous {
+			excess = real(p) + poleStabilityTolerance(p)
+		}
+		if excess > pidTuningPoleMarginSafety*eta && (continuous && cmplx.Abs(p) > 1 || excess > pidTuningExactBand) {
 			return false
 		}
 	}
@@ -417,6 +422,8 @@ const (
 // polynomial moves the root by about the e solving e·∏ max(e, δj) = eta:
 // eta/∏δj for an isolated root, eta^(1/k) inside a k-fold cluster. The left
 // side increases with e, so the root may move by e when it is below eta.
+// A matrix perturbation eta also moves a simple eigenvalue by about eta
+// itself, however far the others lie, so e below eta is uncertain too.
 func pidTuningPoleUncertain(poles []complex128, i int, e, eta float64) bool {
 	if !(e > 0) {
 		return true
@@ -427,7 +434,7 @@ func pidTuningPoleUncertain(poles []complex128, i int, e, eta float64) bool {
 			f *= max(e, cmplx.Abs(poles[i]-q))
 		}
 	}
-	return f < eta
+	return e < eta || f < eta
 }
 
 // pidTuningExactStable is pidTuningPolesStable's exact test; ok is false
