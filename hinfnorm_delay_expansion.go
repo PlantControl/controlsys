@@ -911,15 +911,16 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 	if !allNegative {
 		return false, 0, false
 	}
-	W, ok = x.horizon(lim*(1+tol), wMax, x.modelMax)
+	W, ok = x.horizon(lim*(1+tol), 0, wMax, x.modelMax)
 	return false, W, ok
 }
 
 // horizon returns a frequency W <= wMax past which ‖G(jω)‖ <= level by the
 // expansion: modelMax(t), the sup over the phases of ‖Σ_{k<=N} t^k·g_k‖,
 // plus the Cauchy bound on R stays below level at t = T·2^−i, i = 0…40,
-// T = 1/W, for the first T, halving from 1/(4‖A‖ + 1), where it does.
-func (x *highFrequencyExpansion) horizon(level, wMax float64, modelMax func(t float64) float64) (float64, bool) {
+// T = 1/W, for the first T, halving from 1/max(4‖A‖ + 1, wMin), where it
+// does.
+func (x *highFrequencyExpansion) horizon(level, wMin, wMax float64, modelMax func(t float64) float64) (float64, bool) {
 	// T halves, so the t of successive T coincide exactly.
 	sup := map[float64]float64{}
 	holds := func(T float64) bool {
@@ -944,7 +945,7 @@ func (x *highFrequencyExpansion) horizon(level, wMax float64, modelMax func(t fl
 		}
 		return true
 	}
-	for T := 1 / max(x.e.normA*4+1, 1); T*wMax >= 1; T /= 2 {
+	for T := 1 / max(x.e.normA*4+1, 1, wMin); T*wMax >= 1; T /= 2 {
 		if holds(T) {
 			return 1 / T, true
 		}

@@ -202,6 +202,9 @@ func floats2Norm(v []float64) float64 {
 // maximiser within 1e-9 of the largest rises, torusRisesPast searches the
 // finite peak above S*, and when it finds none and every such maximiser is
 // a fixed point, where the rise is O(1/ω²), torusAtInf decides as below;
+// when its scan of the passages reaches the end of the span with no sample
+// above S* and some such maximiser is not a fixed point, torusFarPassages
+// searches the passages past it;
 // when every one of them falls, torusAtInf decides between a finite peak
 // and S* at ω = +Inf. final reports that the result
 // needs no further tail closing: the peak is found's sample, or S* at
@@ -237,6 +240,9 @@ func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, wBest, tol, rGrid
 		if fixed && errors.Is(err, errTorusUnsupported) {
 			return e.torusAtInf(x, hf, ms, best, wBest, tol, rGrid, span, true, points)
 		}
+		if errors.Is(err, errTorusScanned) {
+			return e.torusFarPassages(x, hf, ms, best, wBest, rGrid+span)
+		}
 		return lim, found, hi, false, err
 	case falls:
 		return e.torusAtInf(x, hf, ms, best, wBest, tol, rGrid, span, false, points)
@@ -245,6 +251,11 @@ func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, wBest, tol, rGrid
 }
 
 var errTorusUnsupported = fmt.Errorf("gain may peak as ω → ∞ over the phase torus of incommensurate delays: %w", errDelayPeakUnsupported)
+
+// errTorusScanned is errTorusUnsupported from torusRisesPast when its scan
+// of the passages reached the end of the span without a sample above the
+// lowest level it tries.
+var errTorusScanned = fmt.Errorf("%w", errTorusUnsupported)
 
 // torusRisesPast certifies a level lim >= sup S by below and extends the
 // grid of the given step past rGrid, doubling up to span, sampled only on
@@ -267,7 +278,10 @@ func (e *delayLFT) torusRisesPast(x *highFrequencyExpansion, hf *highFrequencyGa
 		return !(best > level) && sc.walk(level).kind == bandGiveUp
 	}
 	ds := [...]float64{1e-9, 1e-7, 1e-5}
-	if hopeless(sup * (1 + ds[0]) * (1 + tol)) {
+	if l0 := sup * (1 + ds[0]) * (1 + tol); hopeless(l0) {
+		if sc.walk(l0).last {
+			unsupported = errTorusScanned
+		}
 		return 0, nil, 0, unsupported
 	}
 	// below fails at every level when it fails at the highest: a lower level
@@ -403,7 +417,7 @@ func (s *torusScan) next() {
 
 // torusScanPoints caps the frequencies torusPastLimit samples past the grid
 // end before it gives up on a finite peak above the limit.
-const torusScanPoints = 1 << 12
+const torusScanPoints = 1 << 15
 
 // torusTailPoints is the grid extension past which peak tries
 // torusTailBelow to close the tail of several delay classes nearer.
@@ -454,7 +468,8 @@ func (p *torusPassages) reach(w float64) float64 {
 
 // indices appends to dst, ascending, the k with lo < k·step <= hi whose
 // ω = k·step is selected: all up to 2·R0, past it those within reach of a
-// target, found from the windows where class 0 alone is.
+// target, found from the windows where class 0 alone is, each bracketed by
+// the grid points about it, as it may be narrower than step.
 func (p *torusPassages) indices(lo, hi, step float64, dst []int) []int {
 	k0 := int(math.Floor(lo/step)) + 1
 	k1 := int(math.Floor(hi / step))
@@ -478,12 +493,14 @@ func (p *torusPassages) indices(lo, hi, step float64, dst []int) []int {
 			if wc-half > whi {
 				break
 			}
-			a := max(k0, int(math.Ceil((wc-half)/step)))
-			b := min(k1, int(math.Floor((wc+half)/step)))
+			lo, hi, ok := p.window(wc, t)
+			if !ok {
+				continue
+			}
+			a := max(k0, int(math.Floor(lo/step)))
+			b := min(k1, int(math.Ceil(hi/step)))
 			for k := a; k <= b; k++ {
-				if p.near(float64(k)*step, t) {
-					dst = append(dst, k)
-				}
+				dst = append(dst, k)
 			}
 		}
 	}
@@ -492,16 +509,20 @@ func (p *torusPassages) indices(lo, hi, step float64, dst []int) []int {
 	return append(dst[:n0], slices.Compact(tail)...)
 }
 
-func (p *torusPassages) near(w float64, t []float64) bool {
-	r := p.reach(w)
+// window returns the interval of ω about wc, where class 0 is at t[0],
+// on which every class is within reach of t, the phases linear in ω
+// across it; ok is false when it is empty.
+func (p *torusPassages) window(wc float64, t []float64) (lo, hi float64, ok bool) {
+	r := p.reach(wc)
+	lo, hi = math.Inf(-1), math.Inf(1)
 	for c, h := range p.h {
-		x := w*h - t[c]
+		x := wc*h - t[c]
 		x -= 2 * math.Pi * math.Round(x/(2*math.Pi))
-		if p.scale[c]*math.Abs(x) >= r {
-			return false
-		}
+		d := r / p.scale[c]
+		lo = max(lo, wc+(-d-x)/h)
+		hi = min(hi, wc+(d-x)/h)
 	}
-	return true
+	return lo, hi, lo < hi
 }
 
 // risesPast reports whether the finite peaks near the maximiser θ of
@@ -707,18 +728,18 @@ func (x *highFrequencyExpansion) flatSigma(g []complex128, t float64) float64 {
 // torusModelMax estimates sup_θ ‖Σ_{k<=N} t^k·g_k(θ)‖ over the torus from
 // below, as onePhaseSup does on the circle: the largest value on the cells
 // of torusGrid, whose g_k are solved once, and the ascents of torusAscent
-// from the 12 largest cells and from starts; +Inf where I − D22Δ is
-// singular at a cell.
-func (x *highFrequencyExpansion) torusModelMax(t float64, starts [][]float64) float64 {
+// from the given number of largest cells and from starts; +Inf where
+// I − D22Δ is singular at a cell.
+func (x *highFrequencyExpansion) torusModelMax(t float64, cells int, starts [][]float64) float64 {
 	h := x.hf
-	cells, _ := h.torusGrid()
+	grid, _ := h.torusGrid()
 	nd := h.dim
-	n := len(cells) / nd
+	n := len(grid) / nd
 	size := (expansionOrder + 1) * len(x.g[0])
 	if x.torusG == nil {
 		x.torusG = make([]complex128, n*size)
 		for i := range n {
-			if !x.atTheta(cells[i*nd : (i+1)*nd]) {
+			if !x.atTheta(grid[i*nd : (i+1)*nd]) {
 				x.torusSingular = true
 				break
 			}
@@ -741,8 +762,8 @@ func (x *highFrequencyExpansion) torusModelMax(t float64, starts [][]float64) fl
 		return x.sum(t)
 	}
 	best := slices.Max(vals)
-	for _, i := range largestCells(vals, 12) {
-		_, v := torusAscent(f, cells[i*nd:(i+1)*nd], vals[i])
+	for _, i := range largestCells(vals, cells) {
+		_, v := torusAscent(f, grid[i*nd:(i+1)*nd], vals[i])
 		best = max(best, v)
 	}
 	for _, s := range starts {
@@ -804,8 +825,8 @@ func (e *delayLFT) torusAtInf(x *highFrequencyExpansion, hf *highFrequencyGain, 
 	for _, m := range ms {
 		starts = append(starts, m.theta)
 	}
-	W, ok := x.horizon(level, min(rGrid+span, 1e12), func(t float64) float64 {
-		return x.torusModelMax(t, starts)
+	W, ok := x.horizon(level, 0, min(rGrid+span, 1e12), func(t float64) float64 {
+		return x.torusModelMax(t, 12, starts)
 	})
 	if !ok || W-rGrid > span {
 		return 0, nil, 0, false, errTorusUnsupported
