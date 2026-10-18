@@ -46,7 +46,8 @@ const (
 // terms, a discrete PID without filter uses a backward-Euler derivative to
 // stay causal, and a discrete derivative whose forward-Euler filter pole
 // 1−Dt/Tf would leave the unit circle (Tf ≤ Dt/2) uses backward Euler unless
-// only the forward-Euler design gives a stable loop. An explicitly
+// only the forward-Euler design gives a stable loop that keeps the margin at
+// every gain crossover and |S| ≤ 4. An explicitly
 // requested phase margin the family cannot reach at wc returns
 // ErrPIDTuningTargetUnattainable instead of a controller with a different
 // margin; without one, a PDF needing phase lag at wc takes its least lead,
@@ -64,12 +65,19 @@ const (
 // rejected; loops outside both tests are not screened. With wc = 0 a
 // rejected design is retried at crossovers lowered up to three decades, or
 // to a hundredth of the slowest non-integrating pole's natural frequency
-// when that is lower, six decades at most (not for an integrating or
+// when that is lower, six decades at most (six when wc came from a pole
+// because G has no gain crossover or bandwidth; not for an integrating or
 // unstable plant with a continuous delay),
 // accepting the first that passes, keeps the phase margin at every gain
-// crossover and keeps |S| ≤ 4; otherwise, and for an explicit wc, the
-// result is ErrPIDTuningTargetUnattainable. TunePID offers bounded search
-// with achieved-target evidence.
+// crossover and keeps |S| ≤ 4; a wc from a pole must pass that test from
+// the first design. On a loop certified stable, a margin at or below −pm
+// counts as its distance from −1 (at wc only for P and I). Otherwise, and
+// for an explicit wc, the result is ErrPIDTuningTargetUnattainable.
+// A family with an integral term on a plant with a zero at the integrator
+// (s = 0, z = 1, up to rounding) leaves a closed-loop pole there at any
+// gain and also returns ErrPIDTuningTargetUnattainable; a zero strictly
+// inside the stability region does not. TunePID offers bounded search with
+// achieved-target evidence.
 func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
 	if err := requireFiniteSystem("Pidtune", plant); err != nil {
 		return nil, err
@@ -96,7 +104,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	}
 
 	auto := wc == 0
-	wc, err := findCrossoverFreq(plant, wc, pm)
+	wc, fromPole, err := autoCrossoverFreq(plant, wc, pm)
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
@@ -106,6 +114,9 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
 	_, hasI, _, _, _ := pidTuningTerms(pidType)
+	if hasI && pidtuneZeroAtIntegrator(plant) {
+		return nil, fmt.Errorf("Pidtune: %s: a plant zero at the integrator cancels the integral term, leaving a closed-loop pole on the stability boundary: %w", pidType, ErrPIDTuningTargetUnattainable)
+	}
 	sign, rule := pidtuneGainSign(plant, eval.at, wc, hasI)
 	if eval.err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", eval.err)
@@ -114,9 +125,9 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, mirror: rule != pidtuneSignFixed}
+	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, fromPole: fromPole, mirror: rule != pidtuneSignFixed}
 
-	pid, first := run.design(wc, sign, false)
+	pid, first := run.design(wc, sign, fromPole)
 	if first == nil {
 		return pid, nil
 	}
@@ -227,7 +238,9 @@ type pidtuneRun struct {
 	pidType PidtuneType
 	pm, wc  float64
 	// floor caches backoffFloor.
-	floor    float64
+	floor float64
+	// fromPole: wc is plantCrossoverFreq's pole fallback.
+	fromPole bool
 	explicit bool
 	auto     bool
 	// mirror tries the design against the chosen gain sign after the
@@ -240,7 +253,8 @@ type pidtuneRun struct {
 // is set and the screen has a stability test there, and screens each; gated
 // designs must also pass the back-off gate. A discrete derivative moved to
 // backward Euler for its filter pole falls back to the forward-Euler design
-// when only that one passes, or the backward-Euler gains are unattainable.
+// when only that one passes, or the backward-Euler gains are unattainable;
+// the fallback must always pass the back-off gate.
 // Without an explicit margin, a PDF needing phase lag falls back to its
 // least lead, gated under an automatic crossover since its margin exceeds
 // the requested one.
@@ -284,7 +298,7 @@ func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error
 	if r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		return nil, err
 	}
-	fe, feErr := r.checked(wc, sign, gated, false, lagFloor)
+	fe, feErr := r.checked(wc, sign, true, false, lagFloor)
 	if feErr != nil || fe.DFormula != ForwardEuler {
 		return nil, err
 	}
@@ -324,7 +338,7 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	}
 	gateFirst := r.plant.Dt == 0 && r.plant.HasDelay()
 	if gated && gateFirst {
-		if err := r.gated(pid, wc); err != nil {
+		if err := r.gated(pid, wc, false); err != nil {
 			return err
 		}
 	}
@@ -332,7 +346,7 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 		return err
 	}
 	if gated && !gateFirst {
-		return r.gated(pid, wc)
+		return r.gated(pid, wc, r.screened(wc))
 	}
 	return nil
 }
@@ -340,15 +354,18 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 func (r *pidtuneRun) backoffFloor() float64 {
 	if r.floor == 0 {
 		r.floor = pidtuneBackoffFloor(r.plant, r.wc)
+		if r.fromPole {
+			r.floor = r.wc * math.Pow(10, -pidtuneBackoffMaxDecade)
+		}
 	}
 	return r.floor
 }
 
-func (r *pidtuneRun) gated(pid *PID, wc float64) error {
+func (r *pidtuneRun) gated(pid *PID, wc float64, certified bool) error {
 	if r.gate == nil {
 		r.gate = newPidtuneGate(r.plant, r.screen.model, r.eval, r.wc, r.backoffFloor())
 	}
-	return r.gate.check(pid, r.pidType, wc, r.pm)
+	return r.gate.check(pid, r.pidType, wc, r.pm, certified)
 }
 
 // pidtuneSignRule says how pidtuneGainSign chose its sign, and so whether
@@ -461,6 +478,36 @@ func pidtuneNearIntegrator(plant *System, wc float64) bool {
 		}
 	}
 	return near > 0
+}
+
+// pidtuneZeroAtIntegrator returns whether plant has more zeros than poles at
+// s = 0 (z = 1) up to rounding, counted as pidtuneIntegratorCluster does
+// with the root scale of poles and zeros together: G vanishes there, and an
+// integral term's pole cancels against the zero into a closed-loop pole at
+// the integrator for every gain. A zero strictly inside the stability
+// region, however close, leaves that pole strictly stable.
+func pidtuneZeroAtIntegrator(plant *System) bool {
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return false
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return false
+	}
+	zeros, err := model.Zeros()
+	if err != nil {
+		return false
+	}
+	at, scale := complex128(0), 0.0
+	if plant.Dt > 0 {
+		at, scale = 1, 1
+	} else {
+		for _, r := range slices.Concat(poles, zeros) {
+			scale = max(scale, cmplx.Abs(r))
+		}
+	}
+	return pidtuneClusterSize(zeros, at, scale) > pidtuneClusterSize(poles, at, scale)
 }
 
 // pidtuneGate checks a backed-off design over the whole back-off band with
@@ -576,14 +623,32 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 	return gate
 }
 
-func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64) error {
+// check rejects pid when |S| exceeds the bound or a gain crossover keeps
+// less than pm; on a loop certified stable, a crossover counts its distance
+// from −1 as pidTuningCrossingMargin does, wc included for P and I, which
+// set only the gain there and leave the phase to the plant. wc counts only
+// when |L(wc)| = 1: a design clamped short of the gain there must cross
+// elsewhere.
+func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certified bool) error {
 	c := PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
 	if ms := g.sensitivityOver(c, g.p.maxSensitivity); ms > g.p.maxSensitivity {
 		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
 	}
-	_, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
-	for _, m := range margins {
-		if !(m >= pm-pidtuneMarginTol) {
+	crossings, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
+	floor := pm - pidtuneMarginTol
+	at := wc
+	if pidType == PidtuneP || pidType == PidtuneI {
+		// NaN matches no crossing, so wc is reflected too.
+		at = math.NaN()
+	}
+	if math.Abs(cmplx.Abs(g.p.at(wc)*pidTuningFeedback(c, wc))-1) > 1e-6 {
+		crossings, margins = crossings[1:], margins[1:]
+		if len(margins) == 0 {
+			return fmt.Errorf("%s design at wc=%g has no gain crossover: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
+		}
+	}
+	for i, m := range margins {
+		if m = pidTuningCrossingMargin(at, crossings[i], m, floor, certified); !(m >= floor) {
 			return fmt.Errorf("%s design at wc=%g has phase margin %.3g° at a gain crossover: %w", pidType, wc, m, ErrPIDTuningTargetUnattainable)
 		}
 	}
@@ -691,8 +756,9 @@ func (e *pidtuneUnstableError) Unwrap() error { return ErrPIDTuningTargetUnattai
 // model without delays, with buffers reused across designs: the controller
 // realization, I−D1·D2 solve and closed-loop A take PID.System's and
 // Feedback's operations in their order, so the poles are bit for bit those
-// of Feedback(model, C, −1) and the verdict is closedLoopPoles'. Anything else,
-// errors included, goes to closedLoopPoles.
+// of Feedback(model, C, −1) and the verdict is closedLoopPoles'; for SISO
+// Feedback's two feedthrough solves agree, so one serves both. Anything
+// else, errors included, goes to closedLoopPoles.
 type pidtuneLoop struct {
 	model *System
 	n1    int
@@ -703,7 +769,6 @@ type pidtuneLoop struct {
 	ca, cb, cc, cd        *mat.Dense
 	eye, ill, e21         *mat.Dense
 	lu                    mat.LU
-	e12, de, ded          *mat.Dense
 	b1e12, b1e12d2, block *mat.Dense
 	byOrder               map[int]*pidtuneLoopBuffers
 	eig                   mat.Eigen
@@ -728,7 +793,6 @@ func newPidtuneLoop(model *System) *pidtuneLoop {
 		model: model, n1: n1, byOrder: map[int]*pidtuneLoopBuffers{},
 		ca: scalar(), cb: scalar(), cc: scalar(), cd: scalar(),
 		eye: eyeDense(1), ill: scalar(), e21: scalar(),
-		e12: scalar(), de: scalar(), ded: scalar(),
 	}
 	l.p = System{A: &mat.Dense{}, B: &mat.Dense{}, C: &mat.Dense{}, D: l.cd}
 	l.i = System{A: l.ca, B: l.cb, C: l.cc, D: l.cd}
@@ -808,15 +872,10 @@ func (l *pidtuneLoop) stable(screen *pidStabilityScreen, c *PID2) (bool, error) 
 		return true, nil
 	}
 	const sign = 1.0
-	l.de.Mul(cs.D, e21)
-	l.ded.Mul(l.de, plant.D)
-	l.ded.Scale(sign, l.ded)
-	l.e12.Set(0, 0, 1)
-	l.e12.Sub(l.e12, l.ded)
 
 	b := l.buffers(n2)
 	if n1 > 0 {
-		l.b1e12.Mul(plant.B, l.e12)
+		l.b1e12.Mul(plant.B, e21)
 		l.b1e12d2.Mul(l.b1e12, cs.D)
 		l.block.Mul(l.b1e12d2, plant.C)
 		l.block.Scale(sign, l.block)
@@ -878,12 +937,19 @@ func checkPidtuneMargin(plant *System, pid *PID, wc, pm float64) error {
 // plant magnitude capped at (180°−pm)/(2τ) for a total loop delay τ, so the
 // delay lag spends at most half the phase left after the margin.
 func findCrossoverFreq(plant *System, wcTarget, pm float64) (float64, error) {
+	wc, _, err := autoCrossoverFreq(plant, wcTarget, pm)
+	return wc, err
+}
+
+// autoCrossoverFreq is findCrossoverFreq, also reporting whether the
+// crossover came from plantCrossoverFreq's pole fallback.
+func autoCrossoverFreq(plant *System, wcTarget, pm float64) (float64, bool, error) {
 	if wcTarget > 0 {
-		return wcTarget, nil
+		return wcTarget, false, nil
 	}
-	wc, err := plantCrossoverFreq(plant)
+	wc, fromPole, err := plantCrossoverFreqFrom(plant)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
@@ -892,48 +958,52 @@ func findCrossoverFreq(plant *System, wcTarget, pm float64) (float64, error) {
 	if tau > 0 {
 		wc = math.Min(wc, (180-pm)*math.Pi/180/(2*tau))
 	}
-	return wc, nil
+	return wc, fromPole, nil
 }
 
 func plantCrossoverFreq(plant *System) (float64, error) {
+	wc, _, err := plantCrossoverFreqFrom(plant)
+	return wc, err
+}
 
+// plantCrossoverFreqFrom is plantCrossoverFreq, also reporting whether the
+// crossover came from the slowest pole: G has no gain crossover, a finite
+// DC gain and no -3 dB bandwidth, as for a high-pass plant with |G| < 1.
+func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if len(all.GainCrossFreqs) > 0 {
-		return all.GainCrossFreqs[0], nil
+		return all.GainCrossFreqs[0], false, nil
 	}
 	if dc, err := plant.DCGain(); err == nil && math.IsInf(dc.At(0, 0), 0) {
-		return pidtuneIntegratingCrossover(plant)
+		wc, err := pidtuneIntegratingCrossover(plant)
+		return wc, false, err
 	}
 
 	bw, err := Bandwidth(plant, -3)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if bw > 0 && !math.IsInf(bw, 0) {
-		return bw, nil
+		return bw, false, nil
 	}
 
 	poles, err := plant.Poles()
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if len(poles) > 0 {
-		minW := math.Inf(1)
-		for _, pole := range poles {
-			w := cmplx.Abs(pole)
-			if w > 0 && w < minW {
-				minW = w
-			}
+	at, tol := pidtuneIntegratorCluster(plant, poles)
+	if w := pidtuneSlowestRoot(plant, poles, at, tol); !math.IsInf(w, 1) {
+		w *= 0.5
+		if plant.Dt > 0 {
+			w = math.Min(w, 0.1*math.Pi/plant.Dt)
 		}
-		if !math.IsInf(minW, 1) {
-			return minW * 0.5, nil
-		}
+		return w, true, nil
 	}
 
-	return 0, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
+	return 0, false, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
 }
 
 // pidtuneIntegratingCrossover picks the crossover of an integrating plant
@@ -984,17 +1054,31 @@ func pidtuneIntegratorCluster(plant *System, roots []complex128) (complex128, fl
 			scale = max(scale, cmplx.Abs(r))
 		}
 	}
+	m := pidtuneClusterSize(roots, at, scale)
+	if m == 0 {
+		return at, 0
+	}
+	return at, pidtuneClusterRadius(m, scale)
+}
+
+// pidtuneClusterSize returns the largest m such that m roots lie within
+// pidtuneClusterRadius(m, scale) of at.
+func pidtuneClusterSize(roots []complex128, at complex128, scale float64) int {
 	d := make([]float64, len(roots))
 	for i, r := range roots {
 		d[i] = cmplx.Abs(r - at)
 	}
 	slices.Sort(d)
 	for m := len(d); m > 0; m-- {
-		if tol := 100 * math.Pow(0x1p-52, 1/float64(m)) * scale; d[m-1] <= tol {
-			return at, tol
+		if d[m-1] <= pidtuneClusterRadius(m, scale) {
+			return m
 		}
 	}
-	return at, 0
+	return 0
+}
+
+func pidtuneClusterRadius(m int, scale float64) float64 {
+	return 100 * math.Pow(0x1p-52, 1/float64(m)) * scale
 }
 
 // pidtunePlantPoint evaluates evalPlantAt(plant, w) bit for bit: it

@@ -408,6 +408,43 @@ func TestFeedback_ZeroD(t *testing.T) {
 	}
 }
 
+// G = d(s+z)/(s+p) under a static gain K: the closed-loop pole is the root
+// of (s+p) ∓ K·d·(s+z). With |K·d| ~ 1e15, forming E12 as 1 + D2·E21·D1
+// cancelled to rounding noise and moved the pole by about 10%.
+func TestFeedback_LargeFeedthroughProduct(t *testing.T) {
+	const d, z, p = 1.0, 2.0, 1.0
+	plant, err := New(
+		mat.NewDense(1, 1, []float64{-p}),
+		mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{d * (z - p)}),
+		mat.NewDense(1, 1, []float64{d}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []float64{1e13, 3e14, 1e15, 7.3e15} {
+		for _, sign := range []float64{-1, 1} {
+			ctrl, err := NewGain(mat.NewDense(1, 1, []float64{k}), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cl, err := Feedback(plant, ctrl, sign)
+			if err != nil {
+				t.Fatal(err)
+			}
+			poles, err := cl.Poles()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := (Poly{1, p}).Add(Poly{-sign * k * d, -sign * k * d * z})
+			if len(poles) != 1 || math.Abs(real(poles[0])+want[1]/want[0]) > 1e-9 {
+				t.Errorf("K=%g sign=%g: poles %v, want %g", k, sign, poles, -want[1]/want[0])
+			}
+		}
+	}
+}
+
 func TestFeedback_WithDelay(t *testing.T) {
 	plant, _ := New(
 		mat.NewDense(1, 1, []float64{0}),

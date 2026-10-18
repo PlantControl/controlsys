@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -263,47 +264,88 @@ func TestPidtuneDiscretePDStableFilter(t *testing.T) {
 	}
 }
 
-// When only the forward-Euler design with Tf < Dt/2 gives a stable loop,
-// Pidtune keeps it, as before the backward-Euler rule: 0.24591/(z²−1.84612z
-// +0.74449), Dt = 0.274846, PIDF at wc = 0. Oracle: characteristic roots in
-// z, and the gains of the forward-Euler design at the automatic crossover.
-func TestPidtuneDiscreteFilterFallsBackToForwardEuler(t *testing.T) {
-	const dt = 0.274846
-	num, den := Poly{0.24591}, Poly{1, -1.84612, 0.74449}
-	p := pidtuneBackoffPlant(t, num, den, dt, 0)
-	pid, err := Pidtune(p, PidtunePIDF, 0, nil)
-	if err != nil {
-		t.Fatal(err)
+// pidtuneRobustOrUnattainable checks that Pidtune either reports the target
+// unattainable or returns a design keeping pm at every crossover of the
+// directly evaluated loop on (0, π/Dt] with |S| ≤ 4 (sampling slack only).
+func pidtuneRobustOrUnattainable(t *testing.T, name string, pid *PID, err error, num, den Poly, dt, pm float64) {
+	t.Helper()
+	if errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		return
 	}
-	want := PID{Kp: 0.5514610869643058, Ki: 0.15294000350176945, Kd: 0.6891169929194345, Tf: 0.12496203435003903}
-	for _, g := range [][2]float64{{pid.Kp, want.Kp}, {pid.Ki, want.Ki}, {pid.Kd, want.Kd}, {pid.Tf, want.Tf}} {
-		if math.Abs(g[0]-g[1]) > 1e-9*math.Abs(g[1]) {
-			t.Fatalf("%+v, want %+v", pid, want)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, dt, 0), 1e-6, math.Pi/dt)
+	if ms > 4.5 {
+		t.Errorf("%s: %+v |S| peak %.3g", name, pid, ms)
+	}
+	for _, m := range pms {
+		if m < pm-1.5 {
+			t.Errorf("%s: %+v phase margin %.3g° at a crossover", name, pid, m)
 		}
 	}
-	if pid.DFormula != ForwardEuler || pid.Tf > dt/2 {
-		t.Fatalf("%+v: want forward Euler with Tf < Dt/2", pid)
-	}
 	if stable, ok := pidtuneOracleStable(t, pid, num, den, dt, 0); !ok || !stable {
-		t.Fatalf("%+v unstable", pid)
-	}
-	wc, err := findCrossoverFreq(p, 0, 60)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pid, err := computePIDGains(p, PidtunePIDF, wc, 60, 1, true); err != nil || pid.DFormula != BackwardEuler {
-		t.Fatalf("backward-Euler redesign %+v, %v", pid, err)
-	} else if stable, ok := pidtuneOracleStable(t, pid, num, den, dt, 0); !ok || stable {
-		t.Fatalf("backward-Euler redesign %+v stable %v ok %v; the fallback is untested", pid, stable, ok)
+		t.Errorf("%s: %+v unstable", name, pid)
 	}
 }
 
-// When the backward-Euler redesign of a filter pole 1−Dt/Tf outside the
-// unit circle has no same-sign PDF gains, Pidtune falls back to the
-// forward-Euler design: (−0.7z+0.9)/(z²−1.6z+0.7), Dt = 1, PDF at wc = 0.5.
-// Oracle: the gains solving C(e^{jωc})·G(e^{jωc}) = 1∠−120° with Tf = 0.1/ωc
-// for each derivative formula, and the characteristic roots in z.
-func TestPidtuneDiscreteFilterFallsBackWhenBackwardEulerUnattainable(t *testing.T) {
+// YXFRDR: when the backward-Euler redesign of a forward-Euler filter pole
+// 1−Dt/Tf outside the unit circle (Tf < Dt/2) is unstable, the forward-Euler
+// design is the fallback only if it keeps the margin at every crossover and
+// |S| ≤ 4. These stable forward-Euler PIDFs cross over a second time with
+// PM −34.5° (|S| 8.6, wc = 0 on an unstable plant) and −23.6° (explicit wc),
+// which the ungated fallback returned. Oracle: characteristic roots in z and
+// the signed margin at every crossover of the directly evaluated loop.
+func TestPidtuneDiscreteFilterForwardEulerFallbackGated(t *testing.T) {
+	cases := []struct {
+		num, den Poly
+		dt, wc   float64
+	}{
+		{Poly{0.24591}, Poly{1, -1.84612, 0.74449}, 0.274846, 0},
+		{Poly{0.17032241632981948, 1.4143934743506665}, Poly{1, -1.8341193107935498, 0.756547032348602}, 0.3419630736464782, 1.763289606616569},
+	}
+	for _, c := range cases {
+		name := fmt.Sprintf("%v/%v wc=%g", c.num, c.den, c.wc)
+		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
+		wc := c.wc
+		if wc == 0 {
+			var err error
+			if wc, err = findCrossoverFreq(p, 0, 60); err != nil {
+				t.Fatal(err)
+			}
+		}
+		be, err := computePIDGains(p, PidtunePIDF, wc, 60, 1, true)
+		if err != nil || be.DFormula != BackwardEuler {
+			t.Fatalf("%s: backward-Euler redesign %+v, %v", name, be, err)
+		}
+		if stable, ok := pidtuneOracleStable(t, be, c.num, c.den, c.dt, 0); !ok || stable {
+			t.Fatalf("%s: backward-Euler redesign %+v stable %v ok %v; the fallback is untested", name, be, stable, ok)
+		}
+		fe, err := computePIDGains(p, PidtunePIDF, wc, 60, 1, false)
+		if err != nil || fe.DFormula != ForwardEuler || fe.Tf > c.dt/2 {
+			t.Fatalf("%s: forward-Euler design %+v, %v", name, fe, err)
+		}
+		if stable, ok := pidtuneOracleStable(t, fe, c.num, c.den, c.dt, 0); !ok || !stable {
+			t.Fatalf("%s: forward-Euler design %+v unstable; the fallback is untested", name, fe)
+		}
+		pms, _ := pidtuneSignedMargins(pidtuneOracleLoop(fe, c.num, c.den, c.dt, 0), 1e-6, math.Pi/c.dt)
+		if len(pms) == 0 || slices.Min(pms) > 0 {
+			t.Fatalf("%s: forward-Euler design %+v margins %v; the gate is untested", name, fe, pms)
+		}
+		pid, err := Pidtune(p, PidtunePIDF, c.wc, nil)
+		pidtuneRobustOrUnattainable(t, name, pid, err, c.num, c.den, c.dt, 60)
+	}
+}
+
+// YXFRDR: when the backward-Euler redesign of a filter pole 1−Dt/Tf outside
+// the unit circle has no same-sign PDF gains, the forward-Euler design is
+// the fallback only if it passes the back-off gate:
+// (−0.7z+0.9)/(z²−1.6z+0.7), Dt = 1, PDF at wc = 0.5, whose stable
+// forward-Euler design has PM −3.6° at a second crossover and |S| 23.
+// Oracle: the gains solving C(e^{jωc})·G(e^{jωc}) = 1∠−120° with
+// Tf = 0.1/ωc for each derivative formula, the characteristic roots in z and
+// the signed margin at every crossover of the directly evaluated loop.
+func TestPidtuneDiscreteFilterFallbackWhenBackwardEulerUnattainable(t *testing.T) {
 	const dt, wc = 1.0, 0.5
 	num, den := Poly{-0.7, 0.9}, Poly{1, -1.6, 0.7}
 	z := cmplx.Exp(complex(0, wc*dt))
@@ -321,17 +363,17 @@ func TestPidtuneDiscreteFilterFallsBackWhenBackwardEulerUnattainable(t *testing.
 	if kp <= 0 || kd <= 0 || tf > dt/2 {
 		t.Fatalf("forward-Euler Kp %g Kd %g Tf %g", kp, kd, tf)
 	}
+	fe := &PID{Kp: kp, Kd: kd, Tf: tf, Dt: dt, DFormula: ForwardEuler}
+	if stable, ok := pidtuneOracleStable(t, fe, num, den, dt, 0); !ok || !stable {
+		t.Fatalf("forward-Euler design %+v unstable; the fallback is untested", fe)
+	}
+	pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(fe, num, den, dt, 0), 1e-6, math.Pi/dt)
+	if slices.Min(pms) > 0 || ms < 4.5 {
+		t.Fatalf("forward-Euler design %+v margins %v |S| %.3g; the gate is untested", fe, pms, ms)
+	}
 	p := pidtuneBackoffPlant(t, num, den, dt, 0)
 	pid, err := Pidtune(p, PidtunePDF, wc, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pid.DFormula != ForwardEuler || math.Abs(pid.Kp-kp) > 1e-9*kp || math.Abs(pid.Kd-kd) > 1e-9*kd || math.Abs(pid.Tf-tf) > 1e-12 {
-		t.Fatalf("%+v, want forward Euler Kp %g Kd %g Tf %g", pid, kp, kd, tf)
-	}
-	if stable, ok := pidtuneOracleStable(t, pid, num, den, dt, 0); !ok || !stable {
-		t.Fatalf("%+v unstable", pid)
-	}
+	pidtuneRobustOrUnattainable(t, "PDF", pid, err, num, den, dt, 60)
 }
 
 // Q7GUKL back-off gate: a design found by lowering the crossover keeps the
