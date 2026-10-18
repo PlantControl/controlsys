@@ -61,9 +61,6 @@ type PIDTuningError struct {
 	// unstable: candidates met the margins, and the stability check
 	// rejected every one.
 	unstable bool
-	// crossed: a candidate meeting the phase target crossed 0 dB again
-	// below the margin floor.
-	crossed bool
 }
 
 func (e *PIDTuningError) Error() string {
@@ -161,10 +158,11 @@ type pidTuningPlant struct {
 	// other crossovers to the plant's dynamics, since a floor design's
 	// high gain can cross 0 dB near a mode outside the band.
 	crossLow, crossHigh float64
-	// zeroScan extends each candidate's crossing scan to its controller
-	// zeros; see pidTuningZeroGrid. Sampled data, without a model below its
-	// band, leaves it off.
-	zeroScan bool
+	// zeroScan checks the returned design's crossings down to its
+	// controller zeros (pidTuningZeroGrid) and fails with pidZeroRejected
+	// when one is below the floor; zeroSearch checks every candidate so.
+	// Sampled data, without a model below its band, leaves both off.
+	zeroScan, zeroSearch bool
 	// crossScan selects the margin check of a search outside the floor.
 	crossScan pidCrossScan
 	// floorRungs, if positive, caps the floor bands tried; minTfSeed seeds
@@ -204,6 +202,12 @@ const (
 type pidCoarseRejected struct{ evaluations int }
 
 func (*pidCoarseRejected) Error() string { return "coarse design fails refined crossing check" }
+
+// pidZeroRejected reports a design that fails the crossing check down to
+// its controller zeros.
+type pidZeroRejected struct{ evaluations int }
+
+func (*pidZeroRejected) Error() string { return "design fails crossing check at its controller zeros" }
 
 // pidNonfiniteResponse reports a plant sample in the scan band that is not
 // finite, as for a band far under integrators' rounded poles.
@@ -854,32 +858,45 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if eval.err != nil {
 			return nil, fmt.Errorf("TunePID: %w", eval.err)
 		}
-		// A filtered search without the |S| bound that failed on other
-		// crossings is retried from the least admissible Tf: the default
-		// Tf's lag can leave only near-pure-D designs, whose lightly damped
-		// zeros notch |L| through 1 (pidTuningZeroGrid).
-		if te, ok := errors.AsType[*PIDTuningError](err); ok && te.crossed && p.maxSensitivity == 0 && !floor && !p.minTfSeed {
-			_, _, _, filtered, _ := pidTuningTerms(PidtuneType(strings.ToUpper(string(family))))
+		// A design whose controller zeros notch |L| through 1 below the
+		// band, as tiny Kp and Ki against Kd do, is searched for again with
+		// every candidate so checked, then, for a filtered family, from the
+		// least admissible Tf: the default Tf's lag can leave only such
+		// near-pure-D designs. Designs passing the check are unchanged.
+		if zr, ok := errors.AsType[*pidZeroRejected](err); ok {
 			budget := opts.MaxEvaluations
 			if budget == 0 {
 				budget = 4096
 			}
-			if left := budget - te.Evidence.Evaluations; filtered && left > 0 {
+			spent := zr.evaluations
+			p.zeroSearch = true
+			seeds := []bool{p.minTfSeed}
+			if _, _, _, filtered, _ := pidTuningTerms(PidtuneType(strings.ToUpper(string(family)))); filtered && !p.minTfSeed {
+				seeds = append(seeds, true)
+			}
+			for _, minTf := range seeds {
+				if spent >= budget {
+					break
+				}
 				o := opts
-				o.MaxEvaluations = left
-				p.minTfSeed = true
-				r, e := tune(ctx, "TunePID", p, family, o)
+				o.MaxEvaluations = budget - spent
+				p.minTfSeed = minTf
+				res, err = tune(ctx, "TunePID", p, family, o)
 				if eval.err != nil {
 					return nil, fmt.Errorf("TunePID: %w", eval.err)
 				}
-				if e == nil {
-					r.Evidence.Evaluations += te.Evidence.Evaluations
-					res, err = r, nil
-				} else if retry, ok := errors.AsType[*PIDTuningError](e); ok {
-					te.Evidence.Evaluations += retry.Evidence.Evaluations
-				} else {
-					return nil, e
+				te, ok := errors.AsType[*PIDTuningError](err)
+				if !ok {
+					break
 				}
+				spent += te.Evidence.Evaluations
+			}
+			if te, ok := errors.AsType[*PIDTuningError](err); ok {
+				te.Evidence.Evaluations = spent
+			} else if err == nil {
+				res.Evidence.Evaluations += spent
+			} else if errors.As(err, new(*pidZeroRejected)) {
+				res, err = nil, &PIDTuningError{Op: "TunePID", Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: opts.PhaseMargin, Evaluations: spent, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
 			}
 		}
 		if te, ok := errors.AsType[*PIDTuningError](err); ok {
@@ -1789,7 +1806,11 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		if !finitePID(j) || j >= bestScore {
 			return nil
 		}
-		at, margins := crossings(q, candidate, gridFor(candidate, crossOmega), wc)
+		grid := crossOmega
+		if p.zeroSearch {
+			grid = gridFor(candidate, grid)
+		}
+		at, margins := crossings(q, candidate, grid, wc)
 		violation, violated, worstAt, worst, reflected := violationOf(candidate, at, margins, true)
 		// A crossing counted the far way round from −1 holds only for a
 		// stable loop; otherwise its wrapped margin stands.
@@ -1983,7 +2004,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		if finitePID(nearestViolation) {
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target crossed 0 dB again with a margin below the %g° floor (closest candidate: %.4g° at %.4g rad/s); such designs are rejected.", floor, crossingMargin, crossingAt))
 		}
-		e := &PIDTuningError{Op: op, Evidence: evidence, unstable: stabilityChecked && !stableFound, crossed: finitePID(nearestViolation)}
+		e := &PIDTuningError{Op: op, Evidence: evidence, unstable: stabilityChecked && !stableFound}
 		if finitePID(leastExcess) {
 			e.excess = leastExcess
 		}
@@ -2008,6 +2029,8 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	evidence.GainCrossovers, evidence.PhaseMargins = evidenceCrossings(q, best, evidenceOmega, wc)
 	if _, violated, _, _, _ := violationOf(best, evidence.GainCrossovers, evidence.PhaseMargins, true); violated && p.crossScan == pidCrossCoarse {
 		return nil, &pidCoarseRejected{evaluations: evidence.Evaluations}
+	} else if violated && !p.zeroSearch {
+		return nil, &pidZeroRejected{evaluations: evidence.Evaluations}
 	}
 	for i, margin := range evidence.PhaseMargins {
 		margin = pidTuningCrossingMargin(wc, evidence.GainCrossovers[i], margin, floor, p.stable != nil)
@@ -2129,6 +2152,9 @@ func tunePIDFloor(ctx context.Context, op string, p pidTuningPlant, family Pidtu
 		o.PhaseMargin = target
 		o.MaxEvaluations = budget - used
 		r, err := tunePID(ctx, op, p, family, o)
+		if zr, ok := errors.AsType[*pidZeroRejected](err); ok {
+			zr.evaluations += used
+		}
 		if errors.As(err, &last) {
 			used += last.Evidence.Evaluations
 			if last.excess > 0 && (least == 0 || last.excess < least) {

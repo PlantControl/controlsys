@@ -44,15 +44,30 @@ func routhStable(p []float64) bool {
 // Tiny Kp and Ki against Kd put a lightly damped controller zero pair near
 // 0.009 rad/s, below the wc/100 analysis band, where |L| notched through
 // 0 dB with a 1.2° (|S| 49) and 7.6° margin while the evidence reported 57°.
-// Oracle: a dense sweep of L(jω) = G(jω)·C(jω) from closed forms over
-// [1e-4·wc, 1e4·wc] for every 0 dB crossing and the |S| peak, and Routh on
-// den·s(Tf·s+1) + num·((Kd+Kp·Tf)s² + (Kp+Ki·Tf)s + Ki).
+// The delayed PIDF plant had the same notch (4.6°, |S| 12.8). The delayed
+// PID plant's base design passes the check and must stay: rejecting notched
+// candidates during every search lost it.
+// Oracle: a dense sweep of L(jω) = G(jω)·e^{-jωτ}·C(jω) from closed forms
+// over [1e-4·wc, 1e4·wc] for every 0 dB crossing and the |S| peak, and,
+// without delay, Routh on den·s(Tf·s+1) + num·((Kd+Kp·Tf)s² + (Kp+Ki·Tf)s + Ki).
 func TestTunePIDZeroNotchBelowBand(t *testing.T) {
-	for _, c := range []struct{ num, den []float64 }{
-		{[]float64{-3.8562437633148288}, []float64{1, 2.38218255046348, 0.43053693845881924, 0}},
-		{[]float64{6.021719327000207}, []float64{1, 3.3266544288844027, 0.13253243642255236, 0}},
+	for _, c := range []struct {
+		num, den []float64
+		tau      float64
+		fam      PidtuneType
+	}{
+		{[]float64{-3.8562437633148288}, []float64{1, 2.38218255046348, 0.43053693845881924, 0}, 0, PidtunePIDF},
+		{[]float64{6.021719327000207}, []float64{1, 3.3266544288844027, 0.13253243642255236, 0}, 0, PidtunePIDF},
+		{[]float64{7.02250420495713}, []float64{1, 3.724992750062828, 0.25077428529612844, 0}, .0343, PidtunePIDF},
+		{[]float64{-9.763501740035617}, []float64{1, 3.150659208630323, 0.5162802773067582, 0}, .0509, PidtunePID},
 	} {
-		r, err := TunePID(context.Background(), makePlant(t, c.num, c.den), PidtunePIDF, PIDTuningOptions{})
+		plant := makePlant(t, c.num, c.den)
+		if c.tau > 0 {
+			if err := plant.SetInputDelay([]float64{c.tau}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r, err := TunePID(context.Background(), plant, c.fam, PIDTuningOptions{})
 		if err != nil {
 			t.Fatalf("%v: %v", c.num, err)
 		}
@@ -67,7 +82,7 @@ func TestTunePIDZeroNotchBelowBand(t *testing.T) {
 		}
 		loop := func(w float64) complex128 {
 			s := complex(0, w)
-			return eval(c.num, s) / eval(c.den, s) * (complex(k.Kp, 0) + complex(k.Ki, 0)/s + complex(k.Kd, 0)*s/(complex(k.Tf, 0)*s+1))
+			return eval(c.num, s) / eval(c.den, s) * cmplx.Exp(complex(0, -w*c.tau)) * (complex(k.Kp, 0) + complex(k.Ki, 0)/s + complex(k.Kd, 0)*s/(complex(k.Tf, 0)*s+1))
 		}
 		const n = 400000
 		peak, crossings := 0., 0
@@ -97,7 +112,7 @@ func TestTunePIDZeroNotchBelowBand(t *testing.T) {
 		for i := range nc {
 			ch[len(ch)-len(nc)+i] += nc[i]
 		}
-		if !routhStable(ch) {
+		if c.tau == 0 && !routhStable(ch) {
 			t.Errorf("%v: closed loop %v unstable", c.num, ch)
 		}
 		a, b := k.Kd+k.Kp*k.Tf, k.Kp+k.Ki*k.Tf
