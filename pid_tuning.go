@@ -323,7 +323,7 @@ func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return pidTuningPolesStable(poles, s.model, cs), nil
+	return pidTuningPolesStable(poles, loop.A, s.model, cs), nil
 }
 
 const (
@@ -335,21 +335,32 @@ const (
 )
 
 // pidTuningPolesStable decides stability of the negative-feedback loop of
-// delay-free SISO standard models plant and c from its float poles, as
-// IsStable, except that when every pole the float test rejects lies within
+// delay-free SISO standard models plant and c from the float poles of its
+// state matrix a, as IsStable, except that the exact test decides when the
+// float verdict is in doubt: every pole the float test rejects lies within
 // pidTuningExactBand outside the boundary (with |p| <= 1 in continuous
-// time) the exact test decides: a cluster of poles near the boundary, as a
-// slow plant pole and a tiny-gain integrator give near z = 1, carries
+// time), or a pole it accepts has a stability margin below its error
+// estimate (pidTuningPoleUncertain). A cluster of poles near the boundary,
+// as a slow plant pole and a tiny-gain integrator give near z = 1, carries
 // eigenvalue errors far above the margin the gains leave. The loop's A is
 // then built from the realizations in exact integer arithmetic, and its
 // characteristic polynomial must have every root at |z| < 1−1e-10, or
 // Re s < −1e-10, as poleStabilityTolerance asks of a pole with |p| <= 1.
-// Float-stable verdicts stand.
-func pidTuningPolesStable(poles []complex128, plant, c *System) bool {
+// Loops outside the exact test's scope keep the float verdict.
+func pidTuningPolesStable(poles []complex128, a *mat.Dense, plant, c *System) bool {
+	if len(poles) == 0 {
+		return true
+	}
 	continuous := plant.Dt == 0
-	stable := true
-	for _, p := range poles {
+	stable, doubt := true, false
+	eta := pidTuningPoleErrorScale * float64(len(poles)) * 0x1p-52 * mat.Norm(a, math.Inf(1))
+	for i, p := range poles {
 		if poleInsideStabilityBoundary(p, continuous, poleStabilityTolerance(p)) {
+			margin := 1 - cmplx.Abs(p)
+			if continuous {
+				margin = -real(p)
+			}
+			doubt = doubt || pidTuningPoleUncertain(poles, i, margin/pidTuningPoleMarginSafety, eta)
 			continue
 		}
 		stable = false
@@ -358,11 +369,41 @@ func pidTuningPolesStable(poles []complex128, plant, c *System) bool {
 			return false
 		}
 	}
-	if stable {
+	if stable && !doubt {
 		return true
 	}
 	exact, ok := pidTuningExactStable(plant, c)
-	return ok && exact
+	if !ok {
+		return stable
+	}
+	return exact
+}
+
+const (
+	// pidTuningPoleErrorScale and pidTuningPoleMarginSafety pad the
+	// first-order eigenvalue error model of pidTuningPoleUncertain against
+	// non-normal realizations.
+	pidTuningPoleErrorScale   = 1e3
+	pidTuningPoleMarginSafety = 10
+)
+
+// pidTuningPoleUncertain reports whether float eigenvalue errors of size
+// eta, a backward error of the state matrix, may move poles[i] by e or more.
+// With δj = |poles[i]−poles[j]|, a perturbation eta of the characteristic
+// polynomial moves the root by about the e solving e·∏ max(e, δj) = eta:
+// eta/∏δj for an isolated root, eta^(1/k) inside a k-fold cluster. The left
+// side increases with e, so the root may move by e when it is below eta.
+func pidTuningPoleUncertain(poles []complex128, i int, e, eta float64) bool {
+	if !(e > 0) {
+		return true
+	}
+	f := e
+	for j, q := range poles {
+		if j != i {
+			f *= max(e, cmplx.Abs(poles[i]-q))
+		}
+	}
+	return f < eta
 }
 
 // pidTuningExactStable is pidTuningPolesStable's exact test; ok is false

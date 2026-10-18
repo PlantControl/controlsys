@@ -819,12 +819,7 @@ func (l *pidtuneLoop) stable(screen *pidStabilityScreen, c *PID2) (bool, error) 
 		l.poles = make([]complex128, n)
 	}
 	l.poles = l.eig.Values(l.poles[:n])
-	for _, p := range l.poles {
-		if poleOnOrOutsideStabilityBoundary(p, plant.Dt == 0, poleStabilityTolerance(p)) {
-			return pidTuningPolesStable(l.poles, plant, cs), nil
-		}
-	}
-	return true, nil
+	return pidTuningPolesStable(l.poles, b.a, plant, cs), nil
 }
 
 const pidtuneMarginTol = 0.5
