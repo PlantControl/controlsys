@@ -1061,6 +1061,17 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			}
 			c.Ki = (imag(target) - c.Kd*imag(db)) / imag(ib)
 			c.Kp = real(target) - c.Ki*real(ib) - c.Kd*real(db)
+			// pidTuningReachable admits a band whose center lies up to 3°
+			// past the cone of same-sign PI gains; the exact seed then has a
+			// gain of the wrong sign, and the feasible sliver along the cone
+			// edge can fall between pattern steps, so seed on that edge.
+			if !hasD && p.gainSign != 0 && !pidTuningSignConsistent(c, p.gainSign) {
+				if math.Copysign(1, c.Kp) != p.gainSign {
+					c.Kp, c.Ki = 0, p.gainSign*cmplx.Abs(target)/cmplx.Abs(ib)
+				} else {
+					c.Kp, c.Ki = p.gainSign*cmplx.Abs(target), 0
+				}
+			}
 		} else if hasP && hasD {
 			c.Kd = imag(target) / imag(db)
 			c.Kp = real(target) - c.Kd*real(db)
