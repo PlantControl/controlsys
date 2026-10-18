@@ -2191,6 +2191,33 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 	return pidTuningDelayStabilityBudget(plant, eval, wc, idealDerivative, maxTail, 0)
 }
 
+// pidTuningOriginZero reports whether a continuous plant has an invariant
+// zero at s = 0, within 1e-9 of its largest pole or zero magnitude, delays
+// set to zero. An integrator cancels it: the characteristic
+// s·den(s) + (Kp·s+Ki)·num(s)·e^{−τs} keeps the root s = 0 for any Ki, which
+// leaves L, and so the Nyquist test, as a hidden mode: r→u is not
+// asymptotically stable. Failures report false.
+func pidTuningOriginZero(plant *System) bool {
+	zeros, err := plant.Zeros()
+	if err != nil || len(zeros) == 0 {
+		return false
+	}
+	poles, err := plant.Poles()
+	if err != nil {
+		return false
+	}
+	least, hi := math.Inf(1), 0.0
+	for _, m := range zeros {
+		least = math.Min(least, cmplx.Abs(m))
+	}
+	for _, m := range slices.Concat(poles, zeros) {
+		if a := cmplx.Abs(m); finitePID(a) {
+			hi = math.Max(hi, a)
+		}
+	}
+	return least <= 1e-9*hi
+}
+
 // pidTuningDelayStabilityBudget is pidTuningDelayStability with the Nyquist
 // grid capped at maxPoints; 0 selects delayNyquistMaxPoints.
 func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, idealDerivative bool, maxTail float64, maxPoints int) (func(*PID2) (bool, error), bool, error) {
@@ -2217,7 +2244,11 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 	if idealDerivative && plant.HasInternalDelay() {
 		return nil, false, nil
 	}
+	originZero := sync.OnceValue(func() bool { return pidTuningOriginZero(plant) })
 	return func(c *PID2) (bool, error) {
+		if c.Ki != 0 && originZero() {
+			return false, nil
+		}
 		l := *base
 		l.axis = slices.Clone(base.axis)
 		l.scales = append(slices.Clone(base.scales), wc)
