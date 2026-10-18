@@ -656,7 +656,38 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				return nil, e
 			}
 		}
-		return res, err
+		if !strings.EqualFold(string(family), string(PidtuneI)) {
+			return res, err
+		}
+		// A free I rotates a lightly damped peak to −180°, where only a slow
+		// integrator keeps |L| < 1, so wc steps down by half octaves to
+		// wc0/1024. Ki ≈ wc/|G(0)| makes the peak |L| grow with wc, so the
+		// shallowest design is the fastest robust one.
+		budget, start := opts.MaxEvaluations, used
+		if budget == 0 {
+			budget = 4096
+		}
+		lowest := 0.
+		for j := 1; j <= 20 && used-start < budget; j++ {
+			wc := wc0 * math.Pow(2, -float64(j)/2)
+			lowest = wc
+			opts.MaxEvaluations = budget - (used - start)
+			r, e := tuneAt(wc, gainSign, true, false)
+			if evalFailed() {
+				continue
+			}
+			if e == nil {
+				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the one-gain integrator keeps sampled |S| <= %d up to %.4g rad/s.", wc0, wc, pidTuningMaxSensitivity, math.Max(wc*100, minHigh)))
+				return stamp(r, nil)
+			}
+			if !errors.As(e, new(*PIDTuningError)) {
+				return nil, e
+			}
+		}
+		if te, ok := errors.AsType[*PIDTuningError](err); ok && lowest > 0 {
+			te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers down to %.4g rad/s were also tried.", lowest))
+		}
+		return stamp(res, err)
 	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, eval.at, wc)

@@ -60,7 +60,8 @@ func TestTunePIDFreePMovesCrossoverOffLightlyDampedMode(t *testing.T) {
 // Free P and I designs on seeded lightly damped plants (ζ 0.001–0.2, with
 // an extra pole, a zero or a delay) keep dense |S| ≤ 4 and a stable loop:
 // the winding of 1+L is 0 under P and 90° under I, the integrator's
-// indentation. Before WDBBJB a third of them returned PM 0.1–12° designs.
+// indentation. Before WDBBJB a third of them returned PM 0.1–12° designs;
+// before V2CIOE free I designed 57 of 120 cases, now 108.
 func TestTunePIDFreeOneGainLightlyDampedRobust(t *testing.T) {
 	rng := rand.New(rand.NewPCG(41, 43))
 	designs, moved := 0, 0
@@ -119,8 +120,61 @@ func TestTunePIDFreeOneGainLightlyDampedRobust(t *testing.T) {
 			}
 		}
 	}
-	if designs < 40 || moved < 15 {
+	if designs < 100 || moved < 40 {
 		t.Fatalf("designs %d, moved %d", designs, moved)
 	}
 	t.Logf("designs %d, moved %d", designs, moved)
+}
+
+// V2CIOE: free I on the same plant rotates the resonance to −180°, so every
+// 60° move crosses 0 dB again and base returned unattainable. Only a slow
+// integrator keeps |L| < 1 at the peak. Oracle: wc* = the largest crossover
+// whose Ki = −wc/|G(jwc)| keeps dense |S| ≤ 4 and |L| < 1 at the
+// resonance, by bisection; the half-octave
+// back-off must land in (wc*/√2, wc*].
+func TestTunePIDFreeILowersCrossoverBelowLightlyDampedMode(t *testing.T) {
+	k, a, b := -1.054599885306892, 0.00299557580140128, 1.0733714787112956
+	r, err := TunePID(context.Background(), makePlant(t, []float64{k}, []float64{1, a, b}), PidtuneI, PIDTuningOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := func(w float64) complex128 {
+		s := complex(0, w)
+		return complex(k, 0) / (s*s + complex(a, 0)*s + complex(b, 0))
+	}
+	ki := func(wc float64) float64 { return -wc / cmplx.Abs(g(wc)) }
+	lo, hi := 1e-5, .137
+	for range 50 {
+		m := math.Sqrt(lo * hi)
+		lmax := 0.
+		for w := .5; w <= 2; w *= 1 + 1e-5 {
+			lmax = math.Max(lmax, cmplx.Abs(complex(ki(m), 0)/complex(0, w)*g(w)))
+		}
+		if peak, _ := pidDenseSensitivity(PID2{Ki: ki(m)}, g, .5, 2); peak <= 4 && lmax < 1 {
+			lo = m
+		} else {
+			hi = m
+		}
+	}
+	c := *r.Controller
+	wc := r.Evidence.AchievedCrossover
+	if wc <= lo/math.Sqrt2 || wc > lo {
+		t.Fatalf("crossover %g, want in (%g, %g]", wc, lo/math.Sqrt2, lo)
+	}
+	if c.Kp != 0 || c.Kd != 0 || math.Abs(c.Ki-ki(wc)) > 1e-6*math.Abs(ki(wc)) {
+		t.Fatalf("gains %+v, want Ki %g", c, ki(wc))
+	}
+	if !slices.ContainsFunc(r.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "lowered to") }) {
+		t.Fatalf("no back-off warning: %v", r.Evidence.Warnings)
+	}
+	L := func(w float64) complex128 { return complex(c.Ki, 0) / complex(0, w) * g(w) }
+	if margins := pidLoopMargins(L, 1e-5, 1e3); len(margins) != 1 || margins[0] < 89 {
+		t.Fatalf("dense margins %v", margins)
+	}
+	if peak, at := pidDenseSensitivity(c, g, wc/1e3, 1e2); peak > 4 {
+		t.Fatalf("|S| %g at ω=%g", peak, at)
+	}
+	if wind := pidWindingDeg(L, 1e-8, 1e4); math.Abs(wind-90) > 1 {
+		t.Fatalf("arg(1+L) turns %g°", wind)
+	}
 }
