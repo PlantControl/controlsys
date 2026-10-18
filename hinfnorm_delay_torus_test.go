@@ -322,9 +322,10 @@ func TestHinfNormTorusNearThreeAtInf(t *testing.T) {
 
 // torusRidgeCase is a 2×2 gain with τ = (h, nearThree·h), two classes, whose G∞
 // does not depend on the phase of the second delay (D12 and D22 decouple
-// it), so σ_max(G∞) peaks on a ridge of the torus. below cannot certify a
-// level just above the ridge within its budget, and the passages past the
-// grid never rise above it.
+// it), so σ_max(G∞) peaks on a ridge of the torus. below certifies a level
+// just above the ridge on its flat-free torus (see flatClasses), but the
+// passages past the grid never rise above it before the scan cap: along the
+// crossings of θ0 = 0 the second phase stays near 0, where a ≈ 0.
 var torusRidgeCase = lftCase{name: "ridge", n: 2, k: nearThree, h: 0.14203862636269235,
 	a:   []float64{-2.962039195292603, 0.2686701083868679, -0.6345679716724708, -2.796724595801912},
 	b1:  []float64{0.5081790286051484, 0.39788305561091986, -0.733344475495167, -0.2244946492194182},
