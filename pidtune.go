@@ -46,7 +46,8 @@ const (
 // terms, a discrete PID without filter uses a backward-Euler derivative to
 // stay causal, and a discrete derivative whose forward-Euler filter pole
 // 1−Dt/Tf would leave the unit circle (Tf ≤ Dt/2) uses backward Euler unless
-// only the forward-Euler design gives a stable loop. An explicitly
+// only the forward-Euler design gives a stable loop that keeps the margin at
+// every gain crossover and |S| ≤ 4. An explicitly
 // requested phase margin the family cannot reach at wc returns
 // ErrPIDTuningTargetUnattainable instead of a controller with a different
 // margin; without one, a PDF needing phase lag at wc takes its least lead,
@@ -240,7 +241,8 @@ type pidtuneRun struct {
 // is set and the screen has a stability test there, and screens each; gated
 // designs must also pass the back-off gate. A discrete derivative moved to
 // backward Euler for its filter pole falls back to the forward-Euler design
-// when only that one passes, or the backward-Euler gains are unattainable.
+// when only that one passes, or the backward-Euler gains are unattainable;
+// the fallback must always pass the back-off gate.
 // Without an explicit margin, a PDF needing phase lag falls back to its
 // least lead, gated under an automatic crossover since its margin exceeds
 // the requested one.
@@ -284,7 +286,7 @@ func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error
 	if r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		return nil, err
 	}
-	fe, feErr := r.checked(wc, sign, gated, false, lagFloor)
+	fe, feErr := r.checked(wc, sign, true, false, lagFloor)
 	if feErr != nil || fe.DFormula != ForwardEuler {
 		return nil, err
 	}
