@@ -285,3 +285,59 @@ func TestDetCertifierChiPhaseBoundsSamples(t *testing.T) {
 		}
 	}
 }
+
+// TestDelayNyquistDetSplitDelayDoubleIntegrator: a double-integrator loop
+// with its delay split between input and output closes into two delay
+// channels; IsStable and HinfNorm errored at the indentation ω ≈ 1e-7
+// (BRT7G3). Verdicts are pinned against the argument-principle oracle on χ,
+// the H∞ norm of L/(1+L) against a dense sweep.
+func TestDelayNyquistDetSplitDelayDoubleIntegrator(t *testing.T) {
+	for _, c := range []struct {
+		num, den []float64
+		in, out  float64
+	}{
+		{[]float64{1, 0.5}, []float64{1, 0, 0}, 0.05, 0.05},
+		{[]float64{1, 0.5}, []float64{1, 0, 0}, 0.02, 0.13},
+		{[]float64{0.3, 0.1}, []float64{1, 0, 0}, 0.4, 0.3},
+		{[]float64{4, 2}, []float64{1, 0, 0}, 0.1, 0.2},
+		{[]float64{2.19702}, []float64{1, 0.39245, 0, 0}, 0.00813, 0.00813},
+		{[]float64{0.05}, []float64{1, 0.39245, 0, 0}, 0.3, 0.1},
+	} {
+		q := quasiLoop{num: c.num, den: c.den}
+		sys := q.system(t)
+		if err := sys.SetInputDelay([]float64{c.in}); err != nil {
+			t.Fatal(err)
+		}
+		if err := sys.SetOutputDelay([]float64{c.out}); err != nil {
+			t.Fatal(err)
+		}
+		cl, err := Feedback(sys, nil, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cl.LFT == nil || len(cl.LFT.Tau) != 2 {
+			t.Fatalf("%v/%v: want 2 delay channels", c.num, c.den)
+		}
+		q.tau = c.in + c.out
+		want := oracleRHPRoots(t, q.chi, 200)
+		stable, err := cl.IsStable()
+		if err != nil || stable != (want == 0) {
+			t.Fatalf("%v/%v τ=%g+%g: IsStable = %v, %v; oracle %d RHP roots", c.num, c.den, c.in, c.out, stable, err, want)
+		}
+		got, _, err := HinfNorm(cl)
+		if want != 0 {
+			if err != nil || !math.IsInf(got, 1) {
+				t.Fatalf("%v/%v: HinfNorm = %g, %v; unstable", c.num, c.den, got, err)
+			}
+			continue
+		}
+		ref := 0.0
+		for i := range 200001 {
+			l := q.L(1e-3 * math.Pow(1e7, float64(i)/200000))
+			ref = max(ref, cmplx.Abs(l/(1+l)))
+		}
+		if err != nil || got < ref*(1-1e-9) || got > ref*(1+1e-4) {
+			t.Fatalf("%v/%v τ=%g+%g: HinfNorm = %g, %v; sweep %g", c.num, c.den, c.in, c.out, got, err, ref)
+		}
+	}
+}
