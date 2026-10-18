@@ -788,6 +788,11 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // least so evaluated. An unattainable target names the crossover nearest to
 // passing that failed.
 //
+// A stable delay-free continuous plant with a real zero within the stability
+// tolerance of s = 0 leaves every I, PI or PIDF loop a closed-loop pole there
+// (pidTuningIntegralZero), so those families are searched only at the
+// requested or default crossover and fail with a warning naming the zero.
+//
 // An unattainable target returns a *PIDTuningError (wrapping
 // ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
 // options return ErrInvalidArgument; a numerical failure of a stability
@@ -1194,8 +1199,21 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		return stamp(res, err)
 	}
+	fam := PidtuneType(strings.ToUpper(string(family)))
+	zero, blocked := pidTuningIntegralZero(screen.model, fam)
+	// integralBlocked tunes once at wc, as the full search finds nothing.
+	integralBlocked := func(wc, gainSign float64) (*PIDTuningResult, error) {
+		res, err := tuneAt(wc, gainSign, false, false)
+		if te, ok := errors.AsType[*PIDTuningError](err); ok {
+			te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Plant zero %.4g is within the stability tolerance of s = 0: every %s loop keeps a closed-loop pole between it and 0, so none is certified stable.", zero, fam))
+		}
+		return stamp(res, err)
+	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, eval.at, wc)
+		if blocked {
+			return integralBlocked(wc, gainSign)
+		}
 		resolveFloor = true
 		res, err := tuneAt(wc, gainSign, false, false)
 		return withFloor(wc, gainSign, false, res, err)
@@ -1209,7 +1227,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
 	gainSign := pidTuningDCSign(plant, eval.at, wc0)
-	fam := PidtuneType(strings.ToUpper(string(family)))
+	if blocked {
+		return integralBlocked(wc0, gainSign)
+	}
 	if (fam == PidtuneP || fam == PidtuneI) && opts.PhaseMargin == 0 {
 		return tuneOneGain(wc0, gainSign, pm)
 	}
@@ -2617,6 +2637,36 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 // pidTuningModes returns the plant poles and zeros σ+jω₀ with |σ| < 0.05·ω₀,
 // discrete ones mapped by s = ln(z)/dt, for the |S| grid; nil when unknown.
 // Better damped modes never cut its 1% step.
+// pidTuningIntegralZero returns a real zero z of a stable, strictly proper,
+// delay-free continuous plant with |z| <= poleStabilityTolerance(z), when
+// family is I, PI or PIDF. Under C = Nc/(s·Dc), Dc(s) = 1 or 1+Tf·s, the
+// characteristic s·Dc·Dp + Nc·Np, Dp monic, has a positive leading
+// coefficient and equals Ki·Np(0) at 0 and z·Dc(z)·Dp(z) ≤ 0 at z, so it
+// has a real root in [z, 0] when Ki takes the DC gain's sign and in (0, ∞)
+// otherwise: no such loop passes IsStable. PID's ideal-derivative screen is
+// not this pole test, so PID is left to the search.
+func pidTuningIntegralZero(plant *System, family PidtuneType) (float64, bool) {
+	if _, hasI, hasD, filtered, ok := pidTuningTerms(family); !ok || !hasI || hasD && !filtered {
+		return 0, false
+	}
+	if plant.Dt != 0 || plant.HasDelay() || plant.E != nil || plant.D.At(0, 0) != 0 {
+		return 0, false
+	}
+	if stable, err := plant.IsStable(); err != nil || !stable {
+		return 0, false
+	}
+	zeros, err := plant.Zeros()
+	if err != nil {
+		return 0, false
+	}
+	for _, z := range zeros {
+		if imag(z) == 0 && math.Abs(real(z)) <= poleStabilityTolerance(z) {
+			return real(z), true
+		}
+	}
+	return 0, false
+}
+
 func pidTuningModes(plant *System) []complex128 {
 	var modes []complex128
 	poles, err := plant.Poles()
