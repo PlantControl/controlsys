@@ -976,7 +976,10 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 // next to a pole cluster at z = 1 or −1, as of k/(z−1)ⁿ with tiny k, lose
 // accuracy beyond any polish bracket. log|L| is continuous on the boundary
 // away from its poles and zeros, where it does not change sign, so every
-// bracket is a crossing.
+// bracket is a crossing. Next to the cluster the response carries relative
+// rounding of order eps/θⁿ, so a root is accepted on its bisected finite
+// sign bracket rather than on |f| at the root; a bracket closing on an
+// unevaluable ω is rejected.
 func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
 	ft := func(w float64) float64 {
 		if _, ok := r.eval.try(w); !ok {
@@ -1001,14 +1004,20 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 		return sgn(f(w))
 	}
 	find := func(a, b float64) (float64, bool) {
-		c := refineCrossing(a, b, ft)
-		fc, scale := ft(c), 1.0
-		for _, e := range []float64{a, b} {
-			if fe := ft(e); !math.IsInf(fe, 0) && !math.IsNaN(fe) && e != c {
-				scale = max(scale, math.Abs(fe-fc)/math.Abs(math.Log(e/c)))
+		fa, fb := ft(a), ft(b)
+		for range 64 {
+			m := math.Sqrt(a * b)
+			if m <= a || m >= b {
+				break
+			}
+			if fm := ft(m); fa*fm <= 0 {
+				b, fb = m, fm
+			} else {
+				a, fa = m, fm
 			}
 		}
-		return c, math.Abs(fc) <= tol*scale && !math.IsInf(scale, 0)
+		finite := !math.IsNaN(fa) && !math.IsNaN(fb) && !math.IsInf(fa, 0) && !math.IsInf(fb, 0)
+		return math.Sqrt(a * b), finite && fa*fb <= 0
 	}
 	scan := func(t float64, at func(float64) float64, want int) (float64, bool) {
 		step := 10.0

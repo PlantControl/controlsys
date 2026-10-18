@@ -214,6 +214,65 @@ func TestAllMarginTinyGainPoleCluster(t *testing.T) {
 	}
 }
 
+// JPZZRT follow-up: next to the cluster at z = 1 the response of
+// k·num/(z−1)ⁿ carries relative rounding of order eps/θⁿ, which exceeded the
+// fixed tolerance endCrossings used to accept a bisected root, so correctly
+// bracketed crossovers were dropped. Oracle: |e^{jθ} − 1| = 2·sin(θ/2), so
+// |L(θ)| = k·|num(e^{jθ})|/(2·sin(θ/2))ⁿ is evaluated without cancellation
+// and bisected for |L| = 1; ω and phase margin are held to that rounding.
+func TestAllMarginTinyGainNearUnitCluster(t *testing.T) {
+	cases := []struct {
+		num []float64
+		n   int
+	}{
+		{[]float64{1e-10}, 2}, {[]float64{math.Pow(10, -10.5)}, 2}, {[]float64{math.Pow(10, -9.25)}, 2},
+		{[]float64{3.01e-12}, 2}, {[]float64{1e-14}, 2}, {[]float64{1.08e-9, 0.31 * 1.08e-9}, 2},
+		{[]float64{1e-14}, 3}, {[]float64{1e-13}, 4}, {[]float64{math.Pow(10, -13.25)}, 4},
+	}
+	for _, c := range cases {
+		den := []float64{1}
+		for range c.n {
+			next := make([]float64, len(den)+1)
+			for i, v := range den {
+				next[i] += v
+				next[i+1] -= v
+			}
+			den = next
+		}
+		loop := func(th float64) complex128 {
+			z, num := cmplx.Rect(1, th), complex(0, 0)
+			for _, v := range c.num {
+				num = num*z + complex(v, 0)
+			}
+			return num / cmplx.Pow(cmplx.Rect(2*math.Sin(th/2), (th+math.Pi)/2), complex(float64(c.n), 0))
+		}
+		lo, hi := 1e-12, 1e-2
+		for range 200 {
+			if m := math.Sqrt(lo * hi); cmplx.Abs(loop(m)) > 1 {
+				lo = m
+			} else {
+				hi = m
+			}
+		}
+		th := math.Sqrt(lo * hi)
+		noise := 1e-15 / math.Pow(th, float64(c.n))
+		pm := phaseMarginDeg(loop(th))
+		for _, dt := range []float64{1, 0.1} {
+			r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := AllMargin(r.Sys)
+			if err != nil {
+				t.Fatalf("num %v n %d dt %g: %v", c.num, c.n, dt, err)
+			}
+			if len(res.GainCrossFreqs) != 1 || math.Abs(res.GainCrossFreqs[0]-th/dt) > max(1e-8, noise)*th/dt || math.Abs(res.PhaseMargins[0]-pm) > max(1e-4, noise*180/math.Pi) {
+				t.Errorf("num %v n %d dt %g: wgc %v pm %v, want %.17g %.10g", c.num, c.n, dt, res.GainCrossFreqs, res.PhaseMargins, th/dt, pm)
+			}
+		}
+	}
+}
+
 // ZQL2JH: k·z^−d with k < 0 is real negative at θ = 2πm/d, |L| = |k|, so
 // phase crossovers there with GM = −20·log10|k|. L(0) = k makes the phase
 // error 0 at ω = 0, and a crossover at twice another has it 0 at half its
