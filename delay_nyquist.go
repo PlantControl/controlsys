@@ -793,9 +793,14 @@ func (l *delayLoop) kindPhase(n *refineNode, k int, h float64) float64 {
 	return stadiumPhase(nm.m[k].f, nm.m[k].df, h, l.cert.remainder(k, &nm.m[k], h))
 }
 
+// resolvedNonzero reports whether the sample v of 1+L, formed as 1 + L, is
+// above its rounding uncertainty eps·(1+|L|), so that its phase is
+// meaningful. The floor is not absolute: a k-fold closed-loop root at
+// distance δ from the axis leaves |1+L| ~ δ^k, and whether a span holds a
+// zero is decided by the certified models in refine, not by this test.
 func resolvedNonzero(v complex128) bool {
 	a := cmplx.Abs(v)
-	return a > 1e-12 && !math.IsNaN(a)
+	return a > 64*0x1p-52*(1+cmplx.Abs(v-1)) && !math.IsNaN(a)
 }
 
 func (l *delayLoop) axisMult(w float64) int {
