@@ -274,3 +274,126 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 		t.Fatalf("sweep kept %d plants, %d displaced", kept, displaced)
 	}
 }
+
+// SJ5QTW/TA526O review: unstable plants with a zero near the integrator keep
+// the -3 dB bandwidth crossover, where the PDF lag floor taken when only the
+// mirrored sign lagged gave PDF Kp −1.8e9 whose closed loop has a root near
+// 1e-10 in s > 0 (constant term −0.63, leading Tf > 0), and stable PDFs
+// crossing 0 dB at 1.25e-7 with PM 6.4° and |S| 160, where 6a728b2 errored.
+// Case 1's zero at +1.4e-9 lies below its unstable pole 0.213, so no stable
+// controller stabilizes it (parity interlacing). Oracle: Bandwidth; exact
+// Routh test, dense margins and |S| on [1e-10, 1e7]. P and PD, which never
+// take the lag floor, are left out: as in 6a728b2 they return designs the
+// pole test misses roots of or with |S| up to 800.
+func TestPidtuneUnstableBandwidthLagFloor(t *testing.T) {
+	for _, c := range []struct{ num, den Poly }{
+		{Poly{-0.12851687378089954, 1.827217025221083e-10}, Poly{1, 1.1881765967408056, -0.29841510512323605}},
+		{Poly{-0.011742895229596644, -8.703213959160969e-13}, Poly{1, -1.2883025580770138, -206.68825123865938}},
+		{Poly{-0.08096947227011618, 2.849829949486798e-11}, Poly{1, 18.28073944410921, -2.193118184378895}},
+		{Poly{-0.08892180697264399, -1.3561740229044294e-13}, Poly{1, 5.04214482512001, -79.10168669801203}},
+		{Poly{-0.020532597597922114, 5.863958650611105e-14}, Poly{1, 0.6789049920746436, -0.10457076289624506}},
+		{Poly{-0.017989551265351702, 2.0099607239269687e-08}, Poly{1, -15.376997209772385, 7.2747594545148075}},
+		{Poly{-2.1243501066617125, -0.3754289703529278, 1.2534782657779512e-05}, Poly{1, -8.883497559326386, -57.23481627365082, 89.10956726077973}},
+		{Poly{-0.5496489873828221, -0.3110705188753598, 8.219087877604514e-06}, Poly{1, 3.0604165976957916, -0.9814565587506462, 0.0745769201632338}},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, 0, 0)
+		bw, err := Bandwidth(p, -3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wc, fromPole, err := autoCrossoverFreq(p, 0, 60); err != nil || fromPole || wc != bw {
+			t.Errorf("%v/%v: crossover %g (pole %v), %v; want bandwidth %g", c.num, c.den, wc, fromPole, err, bw)
+		}
+		for _, f := range []PidtuneType{PidtuneI, PidtunePI, PidtunePDF, PidtunePID, PidtunePIDF} {
+			name := fmt.Sprintf("%s %v/%v", f, c.num, c.den)
+			pid, err := Pidtune(p, f, 0, nil)
+			if err != nil {
+				if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+					t.Errorf("%s: %v", name, err)
+				}
+				continue
+			}
+			pidtuneRolloffRobust(t, name, f, pid, c.num, c.den)
+		}
+	}
+}
+
+// TA526O review: a stable plant with a zero near the integrator and a
+// continuous input delay took the rolloff crossover, where the delay's lag
+// leaves a PDF needing phase lag ("unattainable" at wc 28.7 for case 1);
+// the delay-capped bandwidth has a robust PDF (6a728b2: PM 60°, |S| 2.88).
+// Oracle: Bandwidth capped at (180°−PM)/(2τ); Nyquist winding, dense
+// margins and |S| of the directly evaluated delayed loop.
+func TestPidtuneRolloffDelayKeepsBandwidth(t *testing.T) {
+	check := func(num, den Poly, tau float64, want bool) {
+		t.Helper()
+		name := fmt.Sprintf("%v/%v τ=%g", num, den, tau)
+		p := pidtuneBackoffPlant(t, num, den, 0, tau)
+		bw, err := Bandwidth(pidtuneBackoffPlant(t, num, den, 0, 0), -3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantWc := math.Min(bw, (180-60)*math.Pi/180/(2*tau))
+		if wc, fromPole, err := autoCrossoverFreq(p, 0, 60); err != nil || fromPole || math.Abs(wc-wantWc) > 1e-9*wantWc {
+			t.Errorf("%s: crossover %g (pole %v), %v; want %g", name, wc, fromPole, err, wantWc)
+		}
+		pid, err := Pidtune(p, PidtunePDF, 0, nil)
+		if err != nil {
+			if want || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s: %v", name, err)
+			}
+			return
+		}
+		if stable, ok := pidtuneWindingStable(pid, num, den, tau); !ok || !stable {
+			t.Errorf("%s: %+v not stable by winding (ok %v)", name, pid, ok)
+			return
+		}
+		if !want {
+			return
+		}
+		pm, ms := pidtuneLoopMarginBand(pidtuneOracleLoop(pid, num, den, 0, tau), 1e-10, 1e7, 1.001)
+		if pm < 58.5 || ms > 4.05 {
+			t.Errorf("%s: %+v phase margin %.3g, |S| %.3g", name, pid, pm, ms)
+		}
+	}
+	for _, c := range []struct {
+		num, den Poly
+		tau      float64
+	}{
+		{Poly{-0.10741411672891396, -3.230296708983251e-06}, Poly{1, 3.663417582210873, 1.7231714426773892}, 0.013688309558579217},
+		{Poly{0.015035095437983783, 5.402994672543609e-07}, Poly{1, 0.4181878551368774, 0.03350934017285575}, 0.11529063838884701},
+		{Poly{0.42181178954733345, 1.6345035762368298e-09}, Poly{1, 1.283524811348602, 0.21980553487118143}, 0.022145359893947905},
+		{Poly{-0.7683877383500903, -1.793530740229162e-10}, Poly{1, 5.039155455719128, 1.2593858413801469}, 0.014311486405501969},
+	} {
+		check(c.num, c.den, c.tau, true)
+	}
+
+	skipSlowUnderRace(t)
+	rng := rand.New(rand.NewPCG(11, 3))
+	rolloff := 0
+	for range 60 {
+		z0 := math.Pow(10, -4-6*rng.Float64())
+		if rng.IntN(2) == 0 {
+			z0 = -z0
+		}
+		a, b := 0.1+5*rng.Float64(), 0.1+5*rng.Float64()
+		k := math.Pow(10, -2+2*rng.Float64())
+		if rng.IntN(2) == 0 {
+			k = -k
+		}
+		num, den := Poly{k, k * z0}, Poly{1, a + b, a * b}
+		free := pidtuneBackoffPlant(t, num, den, 0, 0)
+		bw, err := Bandwidth(free, -3)
+		if err != nil || !(bw > 0) || math.IsInf(bw, 0) {
+			continue
+		}
+		if _, ok := pidtuneRolloffCrossover(free, bw); !ok {
+			continue
+		}
+		rolloff++
+		check(num, den, math.Pow(10, -2+1.5*rng.Float64()), false)
+	}
+	if rolloff < 20 {
+		t.Fatalf("sweep kept %d rolloff plants", rolloff)
+	}
+}

@@ -72,7 +72,7 @@ const (
 // because G has no gain crossover or bandwidth, or because its -3 dB
 // bandwidth lies beyond ten times every pole and zero natural frequency
 // with |G| peaking over 1e3 times its value there, set by zeros near the
-// integrator of a stable plant, when wc is the first such step below ten times that
+// integrator of a stable plant without a continuous delay, when wc is the first such step below ten times that
 // frequency; not for an integrating or unstable plant with a continuous
 // delay), accepting the first that passes, keeps the phase margin at every
 // gain crossover, those above the band the first wc sets included up to
@@ -147,7 +147,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, fromPole: fromPole, mirror: rule != pidtuneSignFixed}
+	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, fromPole: fromPole, mirror: rule != pidtuneSignFixed, rule: rule}
 
 	pid, first := run.design(wc, sign, fromPole)
 	if first == nil {
@@ -268,6 +268,7 @@ type pidtuneRun struct {
 	// mirror tries the design against the chosen gain sign after the
 	// signed one fails.
 	mirror bool
+	rule   pidtuneSignRule
 	gate   *pidtuneGate
 }
 
@@ -292,7 +293,9 @@ func (r *pidtuneRun) design(wc, sign float64, gated bool) (*PID, error) {
 
 // mirrored designs for sign·G, then for −sign·G as design describes; with
 // lagFloor a PDF needing phase lag gets the least lead instead. lag reports
-// that either sign's PDF needed phase lag.
+// that the signed PDF needed phase lag, or under pidtuneSignStable either
+// one: elsewhere the mirrored sign opposes the one stabilization favours,
+// and its least lead can leave a closed-loop root the pole test misses.
 func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (pid *PID, lag bool, err error) {
 	pid, err = r.signed(wc, sign, gated, lagFloor)
 	lag = errors.Is(err, errPidtunePDFLag)
@@ -301,7 +304,7 @@ func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (pid *PID,
 		if altErr == nil {
 			return alt, false, nil
 		}
-		lag = lag || errors.Is(altErr, errPidtunePDFLag)
+		lag = lag || r.rule == pidtuneSignStable && errors.Is(altErr, errPidtunePDFLag)
 	}
 	return pid, lag, err
 }
@@ -1105,8 +1108,10 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 // would give a -3 dB bandwidth at rounding level) or has no -3 dB
 // bandwidth, as for a high-pass plant with |G| < 1, both taking half the
 // slowest pole, or one pidtuneRolloffCrossover finds set by zeros near the
-// integrator of a stable plant; an unstable one needs the gain the
-// bandwidth gives, which a crossover capped by its roots cannot reach.
+// integrator of a stable plant without a continuous delay; an unstable one
+// needs the gain the bandwidth gives, which a crossover capped by its roots
+// cannot reach, and a delay's lag at the capped crossover leaves a PDF
+// needing phase lag where the delay-capped bandwidth has a robust design.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
@@ -1126,7 +1131,7 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 			return 0, false, err
 		}
 		if bw > 0 && !math.IsInf(bw, 0) {
-			if stable, err := plant.IsStable(); err == nil && stable {
+			if stable, err := plant.IsStable(); err == nil && stable && !(plant.Dt == 0 && plant.HasDelay()) {
 				if wc, ok := pidtuneRolloffCrossover(plant, bw); ok {
 					return wc, true, nil
 				}
