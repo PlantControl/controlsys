@@ -547,7 +547,7 @@ func TestAllMarginPhaseCrossBesidePolePair(t *testing.T) {
 		ok := len(res.PhaseCrossFreqs) == len(thp)
 		for i := 0; ok && i < len(thp); i++ {
 			th := thp[i]
-			ok =math.Abs(res.PhaseCrossFreqs[i]*c.dt-th) <= 1e-7*th &&
+			ok = math.Abs(res.PhaseCrossFreqs[i]*c.dt-th) <= 1e-7*th &&
 				math.Abs(res.GainMargins[i]+20*math.Log10(cmplx.Abs(loop(th)))) <= 1e-5
 		}
 		if !ok {
