@@ -61,7 +61,8 @@ func TestTunePIDFreePMovesCrossoverOffLightlyDampedMode(t *testing.T) {
 // an extra pole, a zero or a delay) keep dense |S| ≤ 4 and a stable loop:
 // the winding of 1+L is 0 under P and 90° under I, the integrator's
 // indentation. Before WDBBJB a third of them returned PM 0.1–12° designs;
-// before V2CIOE free I designed 57 of 120 cases, now 108.
+// before V2CIOE free I designed 57 of 120 cases, then 108; the LV4BRD free
+// P scan makes 109.
 func TestTunePIDFreeOneGainLightlyDampedRobust(t *testing.T) {
 	rng := rand.New(rand.NewPCG(41, 43))
 	designs, moved := 0, 0

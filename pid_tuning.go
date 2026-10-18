@@ -394,7 +394,12 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // sampled data only, its wrapped margin stands. A free P or I design on
 // sampled data checks, against its own margin less 3°, only the other
 // crossovers the grid finds, since the refined scan's additions near a
-// resonance would reject robust designs with nothing to certify them. Evidence
+// resonance would reject robust designs with nothing to certify them. When
+// neither wc0 nor the unit loop's 60° point gives a free P design with
+// sampled |S| <= 4, as on an unstable plant whose phase caps the margin
+// below 60° or a resonance at the 60° point, crossovers 2^(j/2)·wc0 for j
+// from 6 down to −20 are tried and the design whose margin is nearest 60° is
+// returned with a warning; free I instead backs off below wc0. Evidence
 // reports wrapped margins, as allmargin does, and the achieved margin is the
 // least so evaluated. An unattainable target names the crossover nearest to
 // passing that failed.
@@ -599,7 +604,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// another crossing, so the design must keep sampled |S| within the bound
 	// over a band reaching past every mode; failing that, wc moves to the
 	// nearest frequency where the unit loop has the pm margin, as MATLAB
-	// targets 60° by moving wc.
+	// targets 60° by moving wc; failing that, free P scans half octaves and
+	// free I backs off below wc0.
 	tuneOneGain := func(wc0, gainSign, pm float64) (*PIDTuningResult, error) {
 		for _, m := range modes() {
 			minHigh = math.Max(minHigh, 10*imag(m))
@@ -656,17 +662,53 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				return nil, e
 			}
 		}
+		budget, start := opts.MaxEvaluations, used
+		if budget == 0 {
+			budget = 4096
+		}
 		if !strings.EqualFold(string(family), string(PidtuneI)) {
-			return res, err
+			// Kp = ±1/|G(wc)| leaves the margin to the plant phase, which
+			// an unstable plant can cap below pm and a resonance can leave
+			// with |S| over the bound at the pm point, so wc scans half
+			// octaves from 8·wc0 down to wc0/1024 and keeps the design
+			// whose margin is nearest pm, the higher wc on a tie. The scan
+			// starts above wc0 since the margin there can exceed pm.
+			var best *PIDTuningResult
+			hiTried, loTried := 0., 0.
+			for j := 6; j >= -20 && used-start < budget; j-- {
+				if j == 0 {
+					continue
+				}
+				wc := wc0 * math.Pow(2, float64(j)/2)
+				hiTried, loTried = math.Max(hiTried, wc), wc
+				opts.MaxEvaluations = budget - (used - start)
+				r, e := tuneAt(wc, gainSign, true, false)
+				if evalFailed() {
+					continue
+				}
+				if e != nil {
+					if !errors.As(e, new(*PIDTuningError)) {
+						return nil, e
+					}
+					continue
+				}
+				if best == nil || math.Abs(r.Evidence.AchievedPhaseMargin-pm) < math.Abs(best.Evidence.AchievedPhaseMargin-pm) {
+					best = r
+				}
+			}
+			if best == nil {
+				if te, ok := errors.AsType[*PIDTuningError](err); ok && hiTried > 0 {
+					te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Crossovers %.4g to %.4g rad/s were also tried.", loTried, hiTried))
+				}
+				return stamp(res, err)
+			}
+			best.Evidence.Warnings = append(best.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, the scanned crossover whose %.3g° phase margin is nearest %g° with sampled |S| <= %d.", wc0, best.Evidence.AchievedCrossover, best.Evidence.AchievedPhaseMargin, pm, pidTuningMaxSensitivity))
+			return stamp(best, nil)
 		}
 		// A free I rotates a lightly damped peak to −180°, where only a slow
 		// integrator keeps |L| < 1, so wc steps down by half octaves to
 		// wc0/1024. Ki ≈ wc/|G(0)| makes the peak |L| grow with wc, so the
 		// shallowest design is the fastest robust one.
-		budget, start := opts.MaxEvaluations, used
-		if budget == 0 {
-			budget = 4096
-		}
 		lowest := 0.
 		for j := 1; j <= 20 && used-start < budget; j++ {
 			wc := wc0 * math.Pow(2, -float64(j)/2)
