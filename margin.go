@@ -919,6 +919,7 @@ const marginBoundaryBand = 1e-2
 // the imaginary axis (continuous) or the unit circle (discrete) to
 // frequencies in (0, ∞) or (0, π/Dt], merging those that agree to rounding.
 func (r *rationalLoop) boundaryRoots(m, k []float64, N int) ([]float64, error) {
+	scaleInputRowCol(m, k, N)
 	kNorm := frobenius(k)
 	alphar, alphai, beta := make([]float64, N), make([]float64, N), make([]float64, N)
 	work := make([]float64, 8*N)
@@ -956,6 +957,39 @@ func (r *rationalLoop) boundaryRoots(m, k []float64, N int) ([]float64, error) {
 	}
 	slices.Sort(ws)
 	return slices.CompactFunc(ws, func(a, b float64) bool { return math.Abs(b-a) <= 1e-9*max(a, b) }), nil
+}
+
+// scaleInputRowCol scales the last column, then the last row, of the pencil
+// (m, k) by a power of two up to the largest magnitude of the state block
+// when it lies below √eps of it; equivalence leaves the eigenvalues as they
+// are. B or C of a loop with tiny gain, as of k/(z+1)⁴ with |k| ≈ 1e-14,
+// sit below QZ's backward error relative to the state block, which then
+// loses boundary roots far from the cluster. Moderate imbalance is left: it
+// does not hide roots, and scaling it moves roots beside a pole pair 1 ± jε.
+func scaleInputRowCol(m, k []float64, N int) {
+	u := N - 1
+	var ref float64
+	for i := range u {
+		for j := range u {
+			ref = max(ref, math.Abs(m[i*N+j]), math.Abs(k[i*N+j]))
+		}
+	}
+	scale := func(at func(i int) int) {
+		var mx float64
+		for i := range N {
+			mx = max(mx, math.Abs(m[at(i)]), math.Abs(k[at(i)]))
+		}
+		if mx == 0 || mx > math.Sqrt(eps())*ref {
+			return
+		}
+		s := math.Ldexp(1, int(math.Round(math.Log2(ref/mx))))
+		for i := range N {
+			m[at(i)] *= s
+			k[at(i)] *= s
+		}
+	}
+	scale(func(i int) int { return i*N + u })
+	scale(func(j int) int { return u*N + j })
 }
 
 func frobenius(a []float64) float64 {

@@ -637,3 +637,89 @@ func bigHorner(p []float64, th float64) complex128 {
 	i, _ := im.Float64()
 	return complex(r, i)
 }
+
+// Y3RHVQ: B of k/((z+1)⁴·q(z)) with |k| ≈ 1e-14 sits below QZ's backward
+// error relative to A, and the pencil of L − L~ lost phase crossovers far
+// from the cluster. Oracle: factored form with z+1 = 2·cos(θ/2)·e^{jθ/2},
+// bisected on a log grid; coefficient rounding moves L there by ~1e-9
+// relative. Crossovers within 0.05 of Nyquist are left out: rounding of the
+// expanded (z+1)⁴ is O(1) relative there.
+func TestAllMarginPhaseCrossTinyGainNyquistCluster(t *testing.T) {
+	cases := []struct {
+		k, dt  float64
+		zs, ps []float64
+	}{
+		{-1.6726418877515324e-14, 0.1, nil, []float64{-0.7445460248190218}},
+		{1.0113710330406558e-14, 1, nil, []float64{-0.6087189607622736}},
+		{-5.6015128843776325e-14, 0.1, []float64{0.8621385615295611}, nil},
+		{-1.7579243818241682e-14, 0.79, []float64{0.5819112675552129}, nil},
+	}
+	const thMax = math.Pi - 0.05
+	for _, c := range cases {
+		num, den := []float64{c.k}, polyMul([]float64{1, 2, 1}, []float64{1, 2, 1})
+		for _, q := range c.zs {
+			num = polyMul(num, []float64{1, -q})
+		}
+		for _, q := range c.ps {
+			den = polyMul(den, []float64{1, -q})
+		}
+		loop := func(th float64) complex128 {
+			z := cmplx.Rect(1, th)
+			h := complex(c.k, 0) / cmplx.Pow(cmplx.Rect(2*math.Cos(th/2), th/2), 4)
+			for _, q := range c.zs {
+				h *= z - complex(q, 0)
+			}
+			for _, q := range c.ps {
+				h /= z - complex(q, 0)
+			}
+			return h
+		}
+		var thp []float64
+		const N = 100000
+		lo, hi := math.Log(1e-6), math.Log(thMax)
+		for i := 1; i <= N; i++ {
+			a, b := math.Exp(lo+(hi-lo)*float64(i-1)/N), math.Exp(lo+(hi-lo)*float64(i)/N)
+			pa, pb := phaseOffsetDeg(loop(a)), phaseOffsetDeg(loop(b))
+			if (pa > 0) == (pb > 0) || math.Abs(pb) >= 90 {
+				continue
+			}
+			for range 200 {
+				m := (a + b) / 2
+				if m <= a || m >= b {
+					break
+				}
+				if pm := phaseOffsetDeg(loop(m)); (pm > 0) == (pa > 0) {
+					a, pa = m, pm
+				} else {
+					b = m
+				}
+			}
+			thp = append(thp, (a+b)/2)
+		}
+		if len(thp) == 0 {
+			t.Fatalf("k %g: oracle found no crossover", c.k)
+		}
+		r, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: c.dt}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Fatalf("k %g: %v", c.k, err)
+		}
+		var got, gm []float64
+		for i, w := range res.PhaseCrossFreqs {
+			if w*c.dt < thMax {
+				got, gm = append(got, w*c.dt), append(gm, res.GainMargins[i])
+			}
+		}
+		ok := len(got) == len(thp)
+		for i := 0; ok && i < len(thp); i++ {
+			th := thp[i]
+			ok = math.Abs(got[i]-th) <= 1e-6*th && math.Abs(gm[i]+20*math.Log10(cmplx.Abs(loop(th)))) <= 1e-5
+		}
+		if !ok {
+			t.Errorf("k %g: θpc %v gm %v, want θ %v", c.k, got, gm, thp)
+		}
+	}
+}
