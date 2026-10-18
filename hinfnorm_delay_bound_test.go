@@ -135,7 +135,7 @@ func TestRationalTailBoundUsesSpectralNormA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if math.Abs(r.normA-math.Sqrt2) > 1e-14 {
-		t.Fatalf("normA = %v, want ‖A‖₂ = √2", r.normA)
+	if math.Abs(r.reals[0].normA-math.Sqrt2) > 1e-14 {
+		t.Fatalf("normA = %v, want ‖A‖₂ = √2", r.reals[0].normA)
 	}
 }

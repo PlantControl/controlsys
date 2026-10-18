@@ -288,44 +288,44 @@ func gInfTorus(d22, d12, d21 []float64, t1, t2 float64) float64 {
 // ω ~ 1e9/h, as fl(3h) did before rounded multiples were commensurate.
 const nearThree = 3 * (1 + 1e-9)
 
-// TestHinfNormTorusGiveUpCost pins that the search of torusPastLimit for a
-// finite peak above the limit, on the OUWA5P models τ = (k0·h, k1·h) with
-// k1 = nearThree that stay unsupported, samples G only near passages of the
-// phases past a maximiser and gives up within a bounded number of samples
-// instead of scanning the whole grid budget.
-func TestHinfNormTorusGiveUpCost(t *testing.T) {
-	const maxCalls = 1 << 16
-	seen := 0
+// TestHinfNormTorusNearThreeAtInf checks the OUWA5P models τ = (k0·h,
+// nearThree·h), seeds 15 and 22, which gave up after the passage scan
+// (ADKXZX): their torus maximisers have a ≠ 0 and no passage up to the
+// horizon of the expansion rises above the torus sup S*, so the norm is S*
+// at ω = +Inf, against a 512² torus grid oracle, with no sample of a dense
+// scan of the closed-form response to ω = 2·10⁴ above it.
+func TestHinfNormTorusNearThreeAtInf(t *testing.T) {
 	for _, k := range [][2]float64{{1, nearThree}, {2, nearThree}} {
-		for i := range 30 {
-			e, err := newDelayLFT(torusSeedModel(t, k, [2]float64{k[0], 3}, i))
+		for _, i := range []int{15, 22} {
+			rng := rand.New(rand.NewPCG(uint64(i+1000), 7))
+			u := func(a float64) float64 { return a * (2*rng.Float64() - 1) }
+			d22 := []float64{u(.8), u(.8), u(.8), u(.8)}
+			d12 := []float64{u(1), u(1)}
+			d21 := []float64{u(1), u(1)}
+			h := 0.02 + 0.3*rng.Float64()
+			sys, sigma, _ := feedthroughDifferenceLoop(t, d22, d12, d21, []float64{k[0] * h, k[1] * h}, [2]float64{k[0], 3})
+			got, w, err := HinfNorm(sys)
 			if err != nil {
-				t.Fatal(err)
-			}
-			l, res, err := e.stability()
-			if err != nil || !res.stable {
+				t.Errorf("k=%v seed %d: %v", k, i, err)
 				continue
 			}
-			_, _, err = e.peakOrZero(l, res)
-			if !errors.Is(err, errDelayPeakUnsupported) || !strings.Contains(err.Error(), "incommensurate") {
-				continue
+			sup := torusSupOf(func(p, q float64) float64 { return gInfTorus(d22, d12, d21, p, q) })
+			if math.Abs(got-sup) > 1e-9*sup || !math.IsInf(w, 1) {
+				t.Errorf("k=%v seed %d: norm %.15g at %g, want torus sup %.15g at +Inf", k, i, got, w, sup)
 			}
-			seen++
-			if e.sigmaCalls > maxCalls {
-				t.Errorf("k=%v seed %d: %d samples of G before giving up, want <= %d", k, i, e.sigmaCalls, maxCalls)
+			if fin, wf := denseScanMax(sigma, 2e4, math.Pi/(16*k[1]*h)); fin > sup*(1+peakCertTol) {
+				t.Errorf("k=%v seed %d: finite sample %.15g at %g above torus sup %.15g", k, i, fin, wf, sup)
 			}
 		}
-	}
-	if seen < 4 {
-		t.Fatalf("only %d torus-unsupported models", seen)
 	}
 }
 
 // torusRidgeCase is a 2×2 gain with τ = (h, nearThree·h), two classes, whose G∞
 // does not depend on the phase of the second delay (D12 and D22 decouple
-// it), so σ_max(G∞) peaks on a ridge of the torus. below cannot certify a
-// level just above the ridge within its budget, and the passages past the
-// grid never rise above it.
+// it), so σ_max(G∞) peaks on a ridge of the torus. below certifies a level
+// just above the ridge on its flat-free torus (see flatClasses), but the
+// passages past the grid never rise above it before the scan cap: along the
+// crossings of θ0 = 0 the second phase stays near 0, where a ≈ 0.
 var torusRidgeCase = lftCase{name: "ridge", n: 2, k: nearThree, h: 0.14203862636269235,
 	a:   []float64{-2.962039195292603, 0.2686701083868679, -0.6345679716724708, -2.796724595801912},
 	b1:  []float64{0.5081790286051484, 0.39788305561091986, -0.733344475495167, -0.2244946492194182},
@@ -396,22 +396,45 @@ func torusSeedModel(tb testing.TB, k, kk [2]float64, i int) *System {
 	return sys
 }
 
-// BenchmarkHinfNormTorusGiveUp times HinfNorm on torus models that end
-// unsupported after the search past the limit: the GiveUpCost seeds and the
-// slowest τ = (h, √2·h) seeds of a 200-seed sweep.
-func BenchmarkHinfNormTorusGiveUp(b *testing.B) {
+// BenchmarkHinfNormTorusFarPassages times HinfNorm on torus models whose
+// maximisers have a ≠ 0 and whose passage scan finds no sample above the
+// torus sup, decided by torusFarPassages: the nearThree seeds of
+// TestHinfNormTorusNearThreeAtInf and three-class seeds of
+// TestHinfNormTorusFarPassages. They used to give up.
+func BenchmarkHinfNormTorusFarPassages(b *testing.B) {
 	var models []*System
 	for _, k := range [][2]float64{{1, nearThree}, {2, nearThree}} {
-		for _, i := range []int{15, 22, 29} {
+		for _, i := range []int{15, 22} {
 			models = append(models, torusSeedModel(b, k, [2]float64{k[0], 3}, i))
 		}
 	}
+	for _, i := range []int{1, 9} {
+		models = append(models, torusRiseSeed("irr3", i).system(b))
+	}
+	for _, sys := range models {
+		if _, _, err := HinfNorm(sys); err != nil {
+			b.Fatalf("HinfNorm err = %v", err)
+		}
+	}
+	b.ResetTimer()
+	for range b.N {
+		for _, sys := range models {
+			HinfNorm(sys)
+		}
+	}
+}
+
+// BenchmarkHinfNormTorusFixedPointRise times HinfNorm on the τ = (h, √2·h)
+// seeds that used to give up and now end at
+// the torus sup at a fixed point, see TestHinfNormTorusFixedPointRise.
+func BenchmarkHinfNormTorusFixedPointRise(b *testing.B) {
+	var models []*System
 	for _, i := range []int{7, 63, 101, 140} {
 		models = append(models, torusSeedModel(b, [2]float64{1, math.Sqrt2}, [2]float64{1, 1}, i))
 	}
 	for _, sys := range models {
-		if _, _, err := HinfNorm(sys); !errors.Is(err, errDelayPeakUnsupported) {
-			b.Fatalf("HinfNorm err = %v, want errDelayPeakUnsupported", err)
+		if _, w, err := HinfNorm(sys); err != nil || !math.IsInf(w, 1) {
+			b.Fatalf("HinfNorm ω = %g, err = %v, want +Inf, nil", w, err)
 		}
 	}
 	b.ResetTimer()

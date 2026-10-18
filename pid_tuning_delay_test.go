@@ -115,7 +115,7 @@ func TestFindCrossoverFreqDelayCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wc, err := findCrossoverFreq(delayedFirstOrder(t, .05), 0, 60); err != nil || wc != mag {
+	if wc, err := findCrossoverFreq(delayedFirstOrder(t, .05), 0, 60); err != nil || math.Abs(wc-mag) > 1e-14*mag {
 		t.Errorf("cap bound a small delay: %g, %v; want %g", wc, err, mag)
 	}
 	d, err := NewFromSlices(1, 1, 1, []float64{0.9}, []float64{1}, []float64{0.1}, []float64{0}, 0.1)
@@ -540,5 +540,49 @@ func TestTunePIDDelaySearchIsSensitivityAware(t *testing.T) {
 		if err != nil || *again.Controller != *c {
 			t.Errorf("%s: rerun %+v %v, want %+v", family, again.Controller, err, c)
 		}
+	}
+}
+
+// 2.47e^{-0.0279s}/((s+0.125)(s+2.7)(s+6.4)): the default PID crossover is
+// 0.07 rad/s, and an ideal derivative large enough to cross 0 dB again
+// beyond the 100·wc band (Kd ≈ 137: 0.35° at 17.8 rad/s) must be rejected.
+func TestTunePIDDefaultDelayBoundsSensitivityPastBand(t *testing.T) {
+	num := []float64{2.472272636569423}
+	den := []float64{1, 9.186133786090226, 18.145256089844757, 2.168002510114956}
+	const tau = 0.027893978083026242
+	p := makePlant(t, num, den)
+	if err := p.SetInputDelay([]float64{tau}); err != nil {
+		t.Fatal(err)
+	}
+	g := func(s complex128) complex128 {
+		return complex(num[0], 0) / (((s+complex(den[1], 0))*s+complex(den[2], 0))*s + complex(den[3], 0))
+	}
+	fragile := &PID2{Kp: 0.0684988011781491, Ki: 0.7383139487048626, Kd: 137.17716633336596, B: 1, C: 1}
+	// |G| <= 1/ω² for ω >= 1e4 satisfies the oracle's tail precondition.
+	if stable, peak := pidDelayLoopCheckPlant(t, fragile, tau, g, 2); !stable || peak < 100 {
+		t.Fatalf("reference design stable=%v |S|max=%g; repro changed", stable, peak)
+	}
+	r, err := TunePID(context.Background(), p, PidtunePID, PIDTuningOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stable, peak := pidDelayLoopCheckPlant(t, r.Controller, tau, g, 2); !stable || peak > pidTuningMaxSensitivity {
+		t.Errorf("%+v independent stable=%v |S|max=%g, want stable with |S| <= %d", r.Controller, stable, peak, pidTuningMaxSensitivity)
+	}
+	if math.Abs(r.Evidence.AchievedPhaseMargin-60) > 3 {
+		t.Errorf("achieved margin %g, want 60±3", r.Evidence.AchievedPhaseMargin)
+	}
+	eval, err := newSISOEval(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wc := r.Evidence.AchievedCrossover
+	pp := pidTuningPlant{low: wc / 100, high: wc * 100, at: eval.at, tau: tau, maxSensitivity: pidTuningMaxSensitivity}
+	if peak := pidTuningSensitivityPeak(pp, *fragile); peak > 2 {
+		t.Fatalf("in-band |S| peak %g; the repro's peak should lie past the band", peak)
+	}
+	pp.loopTail = pidTuningLoopTail(p)
+	if peak := pidTuningSensitivityPeak(pp, *fragile); peak < 100 {
+		t.Errorf("tail-extended |S| peak %g missed the crossing at 17.8 rad/s", peak)
 	}
 }

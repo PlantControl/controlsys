@@ -571,3 +571,12 @@ func TestIsProper_TFEqualDegree(t *testing.T) {
 		t.Error("tf([1 1], [1 2]) should be proper (equal degree)")
 	}
 }
+
+// skipSlowUnderRace skips single-goroutine numerical sweeps under -race,
+// where they add CI time but no race coverage.
+func skipSlowUnderRace(t *testing.T) {
+	t.Helper()
+	if raceEnabled {
+		t.Skip("single-goroutine numerical sweep; slow under -race")
+	}
+}

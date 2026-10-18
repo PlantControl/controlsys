@@ -4,9 +4,11 @@ import (
 	"container/heap"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/lapack"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // repeatedGap is the relative gap λ0 − λ1 <= repeatedGap·λ0 below which
@@ -231,34 +233,75 @@ func hermTop(h []complex128, n int, rel, abs float64) (vals []float64, basis []c
 	return vals, basis, k, true
 }
 
-// clusterPencil extends expand to a top eigenvalue λ0 of M0 repeated to
-// repeatedGap, with eigenspace V, along the paths φ = φ* + s·t through a
-// maximiser φ* of λ0(φ): G = g0 + t·(g1 + s·d0) + t²·(g2 + s·d1 + s²/2·dd0)
-// + O(t³), d0 = g0′, d1 = g1′, dd0 = g0″ in φ. The eigenvalues of M(t)
-// near λ0 are λ0 + t·μ + t²·ν + O(t³), μ those of A1 = V^H·M1·V, s-free
-// since V^H·M0′·V = 0 at a maximiser. The top branches keep the
-// eigenspace C of μ1 = λ_max(A1), to tolMu, of dimension r, and there ν
-// are the eigenvalues of K(s) = U^H·M2·U + W^H·(λ0·I − M0)⁺·W, U = V·C,
-// W = M1·U − V·V^H·M1·U (degenerate perturbation with the reduced
-// resolvent outside the cluster), applied as (λ0·I − M0 + λ0·V·V^H)⁻¹.
-// K(s) = Q0 + s·Q1 + s²·Q2 is quadratic in s; q holds the r×r Q_i. reach
-// is as for expand with λ_next the largest eigenvalue below the cluster,
-// +Inf without one.
+// clusterQuad is K(s) = Q0 + Σ_i s_i·Q1_i + Σ_ij s_i·s_j·Q2_ij, s ∈ R^dim,
+// with r×r Hermitian Q and Q2_ij = Q2_ji.
+type clusterQuad struct {
+	r  int
+	q0 []complex128
+	q1 [][]complex128
+	q2 [][][]complex128
+}
+
+// clusterPencil is clusterPencilN for one phase, q holding Q0, Q1, Q2.
 func (gp *gramPair) clusterPencil(g0, g1, g2, d0, d1, dd0 []complex128, tolMu float64) (q [3][]complex128, r int, mu1, reach float64, ok bool) {
+	k, mu1, reach, ok := gp.clusterPencilN(g0, g1, g2, [][]complex128{d0}, [][]complex128{d1}, [][][]complex128{{dd0}}, tolMu)
+	if !ok {
+		return q, 0, 0, 0, false
+	}
+	return [3][]complex128{k.q0, k.q1[0], k.q2[0][0]}, k.r, mu1, reach, true
+}
+
+// clusterPencilN extends expand to a top eigenvalue λ0 of M0 repeated to
+// repeatedGap, with eigenspace V, along the paths θ = θ* + s·t, s ∈ R^dim,
+// through a maximiser θ* of λ0(θ): G = g0 + t·(g1 + Σ s_i·d0_i) +
+// t²·(g2 + Σ s_i·d1_i + ½·Σ_ij s_i·s_j·dd0_ij) + O(t³), d0_i = ∂_i g0,
+// d1_i = ∂_i g1, dd0_ij = ∂_i∂_j g0, dd0[i][j] read for j <= i only. The
+// eigenvalues of M(t) near λ0 are λ0 + t·μ + t²·ν + O(t³), μ those of
+// A1 = V^H·M1·V, s-free since V^H·∂_i M0·V = 0 at a maximiser. The top
+// branches keep the eigenspace C of μ1 = λ_max(A1), to tolMu, of
+// dimension r, and there ν are the eigenvalues of K(s) = U^H·M2·U +
+// W^H·(λ0·I − M0)⁺·W, U = V·C, W = M1·U − V·V^H·M1·U (degenerate
+// perturbation with the reduced resolvent outside the cluster), applied
+// as (λ0·I − M0 + λ0·V·V^H)⁻¹. K is quadratic in s, so its clusterQuad
+// follows exactly from K at s = 0, ±e_i and e_i + e_j. reach is as for
+// expand with λ_next the largest eigenvalue below the cluster, +Inf
+// without one.
+func (gp *gramPair) clusterPencilN(g0, g1, g2 []complex128, d0, d1 [][]complex128, dd0 [][][]complex128, tolMu float64) (kq clusterQuad, mu1, reach float64, ok bool) {
 	n := gp.n
+	nd := len(d0)
 	clear(gp.m0)
 	gp.addGram(gp.m0, g0, g0)
 	vals, v, k, ok := hermTop(gp.m0, n, repeatedGap, 0)
 	if !ok || !(vals[0] > 0) {
-		return q, 0, 0, 0, false
+		return kq, 0, 0, false
 	}
 	l0 := vals[0]
 	pm := len(g0)
 	g1s, g2s := make([]complex128, pm), make([]complex128, pm)
-	path := func(s float64) {
-		for i := range pm {
-			g1s[i] = g1[i] + complex(s, 0)*d0[i]
-			g2s[i] = g2[i] + complex(s, 0)*d1[i] + complex(s*s/2, 0)*dd0[i]
+	path := func(s []float64) {
+		copy(g1s, g1)
+		copy(g2s, g2)
+		for a := range nd {
+			if s[a] == 0 {
+				continue
+			}
+			sa := complex(s[a], 0)
+			for i := range pm {
+				g1s[i] += sa * d0[a][i]
+				g2s[i] += sa * d1[a][i]
+			}
+			for b := range a + 1 {
+				if s[b] == 0 {
+					continue
+				}
+				f := complex(s[a]*s[b], 0)
+				if a == b {
+					f = complex(s[a]*s[a]/2, 0)
+				}
+				for i := range pm {
+					g2s[i] += f * dd0[a][b][i]
+				}
+			}
 		}
 		clear(gp.m1)
 		clear(gp.m2)
@@ -286,10 +329,11 @@ func (gp *gramPair) clusterPencil(g0, g1, g2, d0, d1, dd0 []complex128, tolMu fl
 		}
 		return out
 	}
-	path(0)
+	s := make([]float64, nd)
+	path(s)
 	muVals, c, r, ok := hermTop(mul(v, gp.m1, v, k, k), k, 0, tolMu)
 	if !ok {
-		return q, 0, 0, 0, false
+		return kq, 0, 0, false
 	}
 	mu1 = muVals[0]
 	u := make([]complex128, n*r)
@@ -311,15 +355,14 @@ func (gp *gramPair) clusterPencil(g0, g1, g2, d0, d1, dd0 []complex128, tolMu fl
 		gp.lu[i*n+i] += complex(l0, 0)
 	}
 	if !cLUFactor(gp.lu, gp.piv, n) {
-		return q, 0, 0, 0, false
+		return kq, 0, 0, false
 	}
 	reach = math.Inf(1)
 	if k < n {
 		reach = (l0 - vals[k]) / (4 * cFrobenius(gp.m1))
 	}
 	w, y, vw := make([]complex128, n*r), make([]complex128, n*r), make([]complex128, k*r)
-	var kAt [3][]complex128
-	for idx, s := range []float64{-1, 0, 1} {
+	kAt := func() []complex128 {
 		path(s)
 		k2 := mul(u, gp.m2, u, r, r)
 		clear(vw)
@@ -353,105 +396,232 @@ func (gp *gramPair) clusterPencil(g0, g1, g2, d0, d1, dd0 []complex128, tolMu fl
 				k2[i*r+j] += z
 			}
 		}
-		kAt[idx] = k2
+		return k2
 	}
-	for i := range q {
-		q[i] = make([]complex128, r*r)
+	rr := r * r
+	kq = clusterQuad{r: r, q1: make([][]complex128, nd), q2: make([][][]complex128, nd)}
+	for a := range nd {
+		kq.q2[a] = make([][]complex128, nd)
 	}
-	for i := range r * r {
-		q[0][i] = kAt[1][i]
-		q[1][i] = (kAt[2][i] - kAt[0][i]) / 2
-		q[2][i] = (kAt[2][i]+kAt[0][i])/2 - kAt[1][i]
+	kq.q0 = kAt()
+	for a := range nd {
+		s[a] = -1
+		km := kAt()
+		s[a] = 1
+		kp := kAt()
+		s[a] = 0
+		q1, q2 := make([]complex128, rr), make([]complex128, rr)
+		for i := range rr {
+			q1[i] = (kp[i] - km[i]) / 2
+			q2[i] = (kp[i]+km[i])/2 - kq.q0[i]
+		}
+		kq.q1[a], kq.q2[a][a] = q1, q2
 	}
-	return q, r, mu1, reach, true
+	for a := range nd {
+		for b := range a {
+			s[a], s[b] = 1, 1
+			kab := kAt()
+			s[a], s[b] = 0, 0
+			q2 := make([]complex128, rr)
+			for i := range rr {
+				q2[i] = (kab[i] - kq.q0[i] - kq.q1[a][i] - kq.q1[b][i] - kq.q2[a][a][i] - kq.q2[b][b][i]) / 2
+			}
+			kq.q2[a][b], kq.q2[b][a] = q2, q2
+		}
+	}
+	return kq, mu1, reach, true
 }
 
-// pencilSpan is an interval [a, b] of s with ub, a bound on λ_max(K(s))
+// pencilBox is a box [a, b] of s ∈ R^dim with ub, a bound on λ_max(K(s))
 // over it.
-type pencilSpan struct{ a, b, ub float64 }
+type pencilBox struct {
+	a, b []float64
+	ub   float64
+}
 
-type pencilSpans []pencilSpan
+type pencilBoxes []pencilBox
 
-func (h pencilSpans) Len() int           { return len(h) }
-func (h pencilSpans) Less(i, j int) bool { return h[i].ub > h[j].ub }
-func (h pencilSpans) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *pencilSpans) Push(x any)        { *h = append(*h, x.(pencilSpan)) }
-func (h *pencilSpans) Pop() any {
+func (h pencilBoxes) Len() int           { return len(h) }
+func (h pencilBoxes) Less(i, j int) bool { return h[i].ub > h[j].ub }
+func (h pencilBoxes) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *pencilBoxes) Push(x any)        { *h = append(*h, x.(pencilBox)) }
+func (h *pencilBoxes) Pop() any {
 	old := *h
 	x := old[len(old)-1]
 	*h = old[:len(old)-1]
 	return x
 }
 
-// pencilSup returns bounds lo <= sup_s λ_max(K(s)) <= hi, K(s) = Q0 +
-// s·Q1 + s²·Q2, for the r×r Hermitian q, false unless Q2 is negative
-// definite, −λ_max(Q2) = ν > 1e-9·‖Q2‖_F. The sup lies in |s| <= sB, past
-// which ‖Q0‖ + |s|·‖Q1‖ − ν·s² < −‖Q0‖. For r = 1 it is Q0 + Q1²/(4ν).
-// For r > 1, with s = m + δ, K(s) = K(m) + δ·D + δ²·Q2 ≼ K(m) + δ·D,
-// D = Q1 + 2m·Q2, and λ_max of the right side is convex in δ, so over
-// |δ| <= w/2 it is bounded by its value at δ = ±w/2. Spans are split,
-// largest bound first, until hi − lo <= 1e-9·(‖Q0‖ + |lo|) or 4096
-// splits; lo is the largest λ_max(K(m)) seen.
+// pencilSup is pencilSupN for K(s) = Q0 + s·Q1 + s²·Q2, s ∈ R.
 func pencilSup(q [3][]complex128, r int) (lo, hi float64, ok bool) {
-	top := func(a []complex128) float64 {
-		vals, _, _, ok := hermTop(a, r, 0, 0)
-		if !ok {
+	return pencilSupN(clusterQuad{r: r, q0: q[0], q1: [][]complex128{q[1]}, q2: [][][]complex128{{q[2]}}})
+}
+
+// pencilSupN returns bounds lo <= sup_s λ_max(K(s)) <= hi over s ∈ R^dim,
+// false unless K is uniformly concave: with B the dim·r × dim·r Hermitian
+// block matrix [Q2_ij], (s⊗x)^H·B·(s⊗x) = Σ s_i·s_j·x^H·Q2_ij·x, so
+// −λ_max(B) = ν > 1e-9·‖B‖_F gives Σ s_i·s_j·Q2_ij ≼ −ν·|s|²·I. The sup lies
+// in |s| <= sB, past which ‖Q0‖ + |s|·‖Q1‖ − ν·|s|² < −‖Q0‖, ‖Q1‖² =
+// Σ ‖Q1_i‖_F². For r = 1 it is Q0 + ¼·q1ᵀ·A⁻¹·q1, A = −Q2. For r > 1, with
+// s = m + δ, K(s) ≼ K(m) + Σ δ_i·D_i, D_i = Q1_i + 2·Σ_j m_j·Q2_ij, whose
+// λ_max is convex in δ, so over a box it is bounded by its largest value at
+// the vertices. The cube [−sB, sB]^dim is cut into boxes, split along their
+// longest side, largest bound first, until hi − lo <= 1e-9·(‖Q0‖ + |lo|)
+// or 4096·dim splits; lo is the largest λ_max(K(m)) seen.
+func pencilSupN(kq clusterQuad) (lo, hi float64, ok bool) {
+	r, nd := kq.r, len(kq.q1)
+	var tb, te, tw []float64
+	top := func(a []complex128, n int) float64 {
+		s := 2 * n
+		if len(tb) < s*s {
+			tb, te = make([]float64, s*s), make([]float64, s)
+			q := make([]float64, 1)
+			impl.Dsyev(lapack.EVNone, blas.Upper, s, tb, s, te, q, -1)
+			tw = make([]float64, int(q[0]))
+		}
+		b := tb[:s*s]
+		for i := range n {
+			for j := range n {
+				z := a[i*n+j]
+				b[i*s+j], b[i*s+n+j] = real(z), -imag(z)
+				b[(n+i)*s+j], b[(n+i)*s+n+j] = imag(z), real(z)
+			}
+		}
+		if !impl.Dsyev(lapack.EVNone, blas.Upper, s, b, s, te[:s], tw, len(tw)) {
 			return math.NaN()
 		}
-		return vals[0]
+		return te[s-1]
 	}
-	nu := -top(q[2])
-	if !(nu > 1e-9*cFrobenius(q[2])) {
+	bn := nd * r
+	bm := make([]complex128, bn*bn)
+	for a := range nd {
+		for b := range nd {
+			for i := range r {
+				for j := range r {
+					bm[(a*r+i)*bn+b*r+j] = kq.q2[a][b][i*r+j]
+				}
+			}
+		}
+	}
+	nu := -top(bm, bn)
+	if !(nu > 1e-9*cFrobenius(bm)) {
 		return 0, 0, false
 	}
 	if r == 1 {
-		q1 := real(q[1][0])
-		v := real(q[0][0]) + q1*q1/(4*nu)
+		if nd == 1 {
+			q1 := real(kq.q1[0][0])
+			v := real(kq.q0[0]) + q1*q1/(4*nu)
+			return v, v, true
+		}
+		a := mat.NewSymDense(nd, nil)
+		g := mat.NewVecDense(nd, nil)
+		for i := range nd {
+			g.SetVec(i, real(kq.q1[i][0]))
+			for j := range i + 1 {
+				a.SetSym(i, j, -real(kq.q2[i][j][0]))
+			}
+		}
+		var ch mat.Cholesky
+		y := mat.NewVecDense(nd, nil)
+		if !ch.Factorize(a) || ch.SolveVecTo(y, g) != nil {
+			return 0, 0, false
+		}
+		v := real(kq.q0[0]) + mat.Dot(g, y)/4
 		return v, v, true
 	}
-	n0, n1 := cFrobenius(q[0]), cFrobenius(q[1])
+	n0 := cFrobenius(kq.q0)
+	var n1 float64
+	for _, q := range kq.q1 {
+		n1 = math.Hypot(n1, cFrobenius(q))
+	}
 	sB := (n1 + math.Sqrt(n1*n1+8*nu*n0)) / (2 * nu)
-	km, buf := make([]complex128, r*r), make([]complex128, r*r)
+	rr := r * r
+	km, buf, dm := make([]complex128, rr), make([]complex128, rr), make([][]complex128, nd)
+	for i := range dm {
+		dm[i] = make([]complex128, rr)
+	}
+	m, d := make([]float64, nd), make([]float64, nd)
 	lo = math.Inf(-1)
 	bad := false
-	span := func(a, b float64) pencilSpan {
-		m, d := (a+b)/2, (b-a)/2
-		for i := range km {
-			km[i] = q[0][i] + complex(m, 0)*q[1][i] + complex(m*m, 0)*q[2][i]
+	box := func(a, b []float64) pencilBox {
+		for i := range nd {
+			m[i], d[i] = (a[i]+b[i])/2, (b[i]-a[i])/2
 		}
-		fm := top(km)
-		ub := math.Inf(-1)
-		for _, sg := range []float64{-d, d} {
-			for i := range buf {
-				buf[i] = km[i] + complex(sg, 0)*(q[1][i]+complex(2*m, 0)*q[2][i])
+		copy(km, kq.q0)
+		for i := range nd {
+			mi := complex(m[i], 0)
+			copy(dm[i], kq.q1[i])
+			for l := range rr {
+				km[l] += mi * kq.q1[i][l]
 			}
-			ub = max(ub, top(buf))
+			for j := range nd {
+				f, g := complex(m[i]*m[j], 0), complex(2*m[j], 0)
+				for l := range rr {
+					km[l] += f * kq.q2[i][j][l]
+					dm[i][l] += g * kq.q2[i][j][l]
+				}
+			}
+		}
+		fm := top(km, r)
+		ub := math.Inf(-1)
+		for vx := range 1 << nd {
+			copy(buf, km)
+			for i := range nd {
+				sg := complex(-d[i], 0)
+				if vx>>i&1 == 1 {
+					sg = complex(d[i], 0)
+				}
+				for l := range rr {
+					buf[l] += sg * dm[i][l]
+				}
+			}
+			ub = max(ub, top(buf, r))
 		}
 		if math.IsNaN(fm) || math.IsNaN(ub) {
 			bad = true
 		}
 		lo = max(lo, fm)
-		return pencilSpan{a, b, ub}
+		return pencilBox{a, b, ub}
 	}
-	const initial = 64
-	h := make(pencilSpans, 0, initial+4096)
-	step := 2 * sB / initial
-	for i := range initial {
-		a := -sB + float64(i)*step
-		h = append(h, span(a, a+step))
+	initial := 64
+	if nd > 1 {
+		initial = max(2, int(math.Pow(1024, 1/float64(nd))))
+	}
+	step := 2 * sB / float64(initial)
+	cells := 1
+	for range nd {
+		cells *= initial
+	}
+	splits := 4096 * nd
+	h := make(pencilBoxes, 0, cells+splits+4)
+	for c := range cells {
+		a, b := make([]float64, nd), make([]float64, nd)
+		for i, ci := 0, c; i < nd; i, ci = i+1, ci/initial {
+			a[i] = -sB + float64(ci%initial)*step
+			b[i] = a[i] + step
+		}
+		h = append(h, box(a, b))
 	}
 	heap.Init(&h)
-	for range 4096 {
+	for range splits {
 		if bad {
 			return 0, 0, false
 		}
 		if h[0].ub-lo <= 1e-9*(n0+math.Abs(lo)) {
 			break
 		}
-		sp := heap.Pop(&h).(pencilSpan)
-		m := (sp.a + sp.b) / 2
-		heap.Push(&h, span(sp.a, m))
-		heap.Push(&h, span(m, sp.b))
+		bx := heap.Pop(&h).(pencilBox)
+		w := 0
+		for i := range nd {
+			if bx.b[i]-bx.a[i] > bx.b[w]-bx.a[w] {
+				w = i
+			}
+		}
+		mid := (bx.a[w] + bx.b[w]) / 2
+		b1, a2 := slices.Clone(bx.b), slices.Clone(bx.a)
+		b1[w], a2[w] = mid, mid
+		heap.Push(&h, box(bx.a, b1))
+		heap.Push(&h, box(a2, bx.b))
 	}
 	if bad {
 		return 0, 0, false

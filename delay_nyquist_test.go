@@ -335,15 +335,9 @@ func TestDiskMarginDelayedOscillatorAxisPoles(t *testing.T) {
 }
 
 func TestDelayLoopNyquistBudgetIsErrorNotUnstable(t *testing.T) {
-	const k = 0.95
-	l := &delayLoop{
-		at: func(w float64) complex128 {
-			s := complex(0, w)
-			return complex(k, 0) * cmplx.Exp(-50*s) / (s + 1)
-		},
-		tail:      func(w float64) float64 { return k / math.Max(w-1, 1e-300) },
-		tailLimit: 0,
-		scales:    []float64{1},
+	l, err := delayLoopFromSystem(delayedLoop(t, []float64{-1}, []float64{1}, []float64{0.95}, []float64{0}, 1, 50), "delay loop")
+	if err != nil {
+		t.Fatal(err)
 	}
 	stable, err := l.stableClosedLoop()
 	if err != nil || !stable {
@@ -463,8 +457,11 @@ func (q quasiLoop) system(t *testing.T) *System {
 
 // oracleRHPRoots counts the roots of χ in the open right half-plane by the
 // argument principle on the rectangle [0, box]×[-box, box], sampled densely
-// and bisected wherever arg χ moves by more than 0.2 between samples.
-func oracleRHPRoots(t *testing.T, chi func(complex128) complex128, box float64) int {
+// and bisected wherever arg χ moves by more than 0.2 between samples. The
+// imaginary-axis edge is also sampled geometrically around ω = 0 and the root
+// frequencies of each poly in polys: near clustered lightly damped poles arg χ
+// can turn 2π between uniform samples, which bisection cannot detect.
+func oracleRHPRoots(t *testing.T, chi func(complex128) complex128, box float64, polys ...[]float64) int {
 	t.Helper()
 	corners := []complex128{complex(0, -box), complex(box, -box), complex(box, box), complex(0, box), complex(0, -box)}
 	total := 0.0
@@ -484,14 +481,51 @@ func oracleRHPRoots(t *testing.T, chi func(complex128) complex128, box float64) 
 		walk(m, b, fm, fb, depth+1)
 	}
 	const n = 20000
+	axis := make([]float64, 0, n+1)
+	for i := range n + 1 {
+		axis = append(axis, box*(1-2*float64(i)/n))
+	}
+	freqs := []float64{0}
+	for _, p := range polys {
+		if len(p) < 2 {
+			continue
+		}
+		roots, err := Poly(p).Roots()
+		if err != nil {
+			t.Fatalf("oracle poly roots: %v", err)
+		}
+		for _, r := range roots {
+			freqs = append(freqs, math.Abs(imag(r)))
+		}
+	}
+	for _, w := range freqs {
+		for d := 1e-13; d < 0.5; d *= 1.5 {
+			for _, v := range []float64{w + d*max(1, w), w - d*max(1, w)} {
+				if math.Abs(v) < box {
+					axis = append(axis, v, -v)
+				}
+			}
+		}
+	}
+	slices.Sort(axis)
+	slices.Reverse(axis)
+	axis = slices.Compact(axis)
 	for e := range 4 {
 		a, b := corners[e], corners[e+1]
 		prev, fprev := a, chi(a)
-		for i := 1; i <= n; i++ {
-			z := a + (b-a)*complex(float64(i)/n, 0)
+		step := func(z complex128) {
 			fz := chi(z)
 			walk(prev, z, fprev, fz, 0)
 			prev, fprev = z, fz
+		}
+		if e == 3 {
+			for _, w := range axis[1:] {
+				step(complex(0, w))
+			}
+			continue
+		}
+		for i := 1; i <= n; i++ {
+			step(a + (b-a)*complex(float64(i)/n, 0))
 		}
 	}
 	turns := total / (2 * math.Pi)
@@ -499,6 +533,46 @@ func oracleRHPRoots(t *testing.T, chi func(complex128) complex128, box float64) 
 		t.Fatalf("oracle winding %g not an integer", turns)
 	}
 	return int(math.Round(turns))
+}
+
+// TestOracleRHPRootsClusteredAxisPoles: den has two lightly damped pole pairs
+// 1e-4 rad/s apart near ω = 0.6914; uniform axis samples (spacing 2 rad/s)
+// aliased arg χ by 2π there and counted 2 RHP roots. A dense local winding
+// over [0, 1]×[0.6, 0.8] (the cluster) and the sweep oracle both find none.
+func TestOracleRHPRootsClusteredAxisPoles(t *testing.T) {
+	q := quasiLoop{
+		num: []float64{-8171.912837099235, 1.6822882600399005, -7814.689216252464, -0.046521640682292836, -1868.165755288988},
+		den: []float64{1, 8174.619511588051, 0.9525453671937382, 7815.785348697253, 0.2268327569483714, 1868.175614262993},
+		tau: 0.012138572095017666,
+	}
+	if n := oracleRHPRoots(t, q.chi, 2e4, q.den, q.num); n != 0 {
+		t.Fatalf("oracle %d RHP roots, want 0", n)
+	}
+	corners := []complex128{complex(0, 0.6), complex(1, 0.6), complex(1, 0.8), complex(0, 0.8), complex(0, 0.6)}
+	local := 0.0
+	for e := range 4 {
+		const n = 400000
+		a, b := corners[e], corners[e+1]
+		f := q.chi(a)
+		for i := 1; i <= n; i++ {
+			fz := q.chi(a + (b-a)*complex(float64(i)/n, 0))
+			local += cmplx.Phase(fz / f)
+			f = fz
+		}
+	}
+	if turns := local / (2 * math.Pi); math.Abs(turns) > 1e-6 {
+		t.Fatalf("local cluster winding %g, want 0", turns)
+	}
+	if n, ok := sweepOracle(q); !ok || n != 0 {
+		t.Fatalf("sweep oracle %d (ok=%v), want 0", n, ok)
+	}
+	cl, err := Feedback(q.system(t), nil, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stable, err := cl.IsStable(); err != nil || !stable {
+		t.Fatalf("IsStable = %v, %v; want stable", stable, err)
+	}
 }
 
 func pidDelayQuasiLoop(name string, k float64) quasiLoop {
@@ -565,7 +639,7 @@ func delayStabilityCases() []quasiLoop {
 func TestDelayLoopEncirclementsMatchRootOracle(t *testing.T) {
 	for _, q := range delayStabilityCases() {
 		t.Run(q.name, func(t *testing.T) {
-			want := oracleRHPRoots(t, q.chi, max(q.box, 1))
+			want := oracleRHPRoots(t, q.chi, max(q.box, 1), q.den, q.num)
 			if q.analytic != 0 && (want == 0) != (q.analytic == 1) {
 				t.Fatalf("oracle roots %d contradict the analytic verdict", want)
 			}
