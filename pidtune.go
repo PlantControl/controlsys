@@ -66,8 +66,10 @@ const (
 // rejected design is retried at crossovers lowered up to three decades, or
 // to a hundredth of the slowest non-integrating pole's natural frequency
 // when that is lower, six decades at most (six when wc came from a pole
-// because G has no gain crossover or bandwidth; not for an integrating or
-// unstable plant with a continuous delay),
+// because G has no gain crossover or bandwidth, or its -3 dB bandwidth lies
+// beyond ten times every pole and zero natural frequency, set by zeros that
+// attenuate the DC gain rather than by a passband; not for an integrating
+// or unstable plant with a continuous delay),
 // accepting the first that passes, keeps the phase margin at every gain
 // crossover and keeps |S| ≤ 4; a wc from a pole must pass that test from
 // the first design. On a loop certified stable, a margin at or below −pm
@@ -76,7 +78,8 @@ const (
 // A family with an integral term on a plant with a zero at the integrator
 // (s = 0, z = 1, up to rounding) leaves a closed-loop pole there at any
 // gain and also returns ErrPIDTuningTargetUnattainable; a zero strictly
-// inside the stability region does not. TunePID offers bounded search with
+// inside the stability region does not, unless it leaves that pole within
+// the stability screen's tolerance of the boundary. TunePID offers bounded search with
 // achieved-target evidence.
 func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
 	if err := requireFiniteSystem("Pidtune", plant); err != nil {
@@ -970,7 +973,9 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 // crossover came from the slowest pole: G has no gain crossover and a
 // finite DC gain that is 0 (a zero at the integrator, whose rounded DC gain
 // would give a -3 dB bandwidth at rounding level) or has no -3 dB
-// bandwidth, as for a high-pass plant with |G| < 1.
+// bandwidth, as for a high-pass plant with |G| < 1, or one beyond
+// pidtuneRolloffFactor times its fastest root, as for a zero near the
+// integrator.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
@@ -989,7 +994,7 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 		if err != nil {
 			return 0, false, err
 		}
-		if bw > 0 && !math.IsInf(bw, 0) {
+		if bw > 0 && !math.IsInf(bw, 0) && bw <= pidtuneRolloffFactor*pidtuneFastestRoot(plant) {
 			return bw, false, nil
 		}
 	}
@@ -1008,6 +1013,43 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	}
 
 	return 0, false, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
+}
+
+// A -3 dB bandwidth beyond pidtuneRolloffFactor times every finite pole and
+// zero natural frequency lies on G's c/s^r asymptote: G = N/D with deg D −
+// deg N = r ≥ 1 falls to 0.708·|G(0)| there only when zeros well below the
+// poles attenuate G(0) by about that factor to the power r, so the
+// bandwidth measures that attenuation, not a passband.
+const pidtuneRolloffFactor = 10
+
+// pidtuneFastestRoot returns the largest natural frequency (|ln z|/Dt for
+// discrete plants) of a finite pole or zero of plant, +Inf for a root at
+// z = 0 or when the roots are unavailable.
+func pidtuneFastestRoot(plant *System) float64 {
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return math.Inf(1)
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return math.Inf(1)
+	}
+	zeros, err := model.Zeros()
+	if err != nil {
+		return math.Inf(1)
+	}
+	fast := 0.0
+	for _, r := range slices.Concat(poles, zeros) {
+		w := cmplx.Abs(r)
+		if plant.Dt > 0 {
+			w = cmplx.Abs(cmplx.Log(r)) / plant.Dt
+		}
+		if math.IsNaN(w) {
+			return math.Inf(1)
+		}
+		fast = max(fast, w)
+	}
+	return fast
 }
 
 // pidtuneIntegratingCrossover picks the crossover of an integrating plant
