@@ -527,6 +527,9 @@ type highFrequencyGain struct {
 	linG, linJ       float64
 	jac, vert        []complex128 // matrix G∞: J_c of localSlopes, quadBound buffer
 	over             float64      // largest sample that failed below
+	// bounds on ‖D12‖‖D21‖, ‖D22‖ and ‖D22 − D22(∞)‖ for the blocks held,
+	// those of G(jw) at a finite w for atFrequency
+	n1221, n22, eps float64
 
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
@@ -595,6 +598,7 @@ func newHighFrequencyGainOn(e *delayLFT, grp, mult []int, dim int) *highFrequenc
 		d21: toC(lft.D21, nd, m), d22: toC(lft.D22, nd, nd),
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
 		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
+		n1221: e.d12 * e.d21, n22: e.d22,
 	}
 	h.lip = h.lipschitz()
 	return h
@@ -605,10 +609,10 @@ func newHighFrequencyGainOn(e *delayLFT, grp, mult []int, dim int) *highFrequenc
 // which also bounds ‖(I − ΔD22)⁻¹‖ = ‖Δ(I − D22Δ)⁻¹Δ⁻¹‖: 1/(1 − ‖D22‖)
 // when ‖D22‖ < 1, ‖(I − |D22|)⁻¹‖ when ρ(|D22|) < 1, else the polydisk or
 // torus bound of difference, or for one phase its right half-plane bound,
-// since Δ(φ) then is Δ(jφ/h).
+// since Δ(φ) then is Δ(jφ/h). Blocks off ∞ by eps raise r to r/(1 − r·eps).
 func (h *highFrequencyGain) lipschitz() float64 {
 	e := h.e
-	c := e.d12 * e.d21
+	c := h.n1221
 	if c == 0 {
 		return 0
 	}
@@ -621,6 +625,12 @@ func (h *highFrequencyGain) lipschitz() float64 {
 		r = min(d.polydisk, d.torus)
 		if h.dim == 1 {
 			r = min(r, d.rhp)
+		}
+	}
+	if h.eps > 0 {
+		r = r / (1 - r*h.eps)
+		if !(r > 0) {
+			r = math.Inf(1)
 		}
 	}
 	return c * r * r
@@ -777,7 +787,7 @@ func (h *highFrequencyGain) localSlopes() {
 // convex in d, peaks at a vertex d_c = ±r/K_c of the box. +Inf when not
 // applicable.
 func (h *highFrequencyGain) quadBound(v, r float64) float64 {
-	q := h.locM * h.e.d22
+	q := h.locM * h.n22
 	den := 1 - q*r
 	if !(den > 0) {
 		return math.Inf(1)
@@ -821,7 +831,7 @@ func (h *highFrequencyGain) quadBound(v, r float64) float64 {
 // ‖X'‖ <= ‖X‖/(1 − ‖M‖‖D22‖r); else, or when larger, by lip·r.
 func (h *highFrequencyGain) localBound(r float64) float64 {
 	b := h.lip * r
-	if den := 1 - h.locM*h.e.d22*r; den > 0 {
+	if den := 1 - h.locM*h.n22*r; den > 0 {
 		b = min(b, h.locA*r*h.locX/den)
 	}
 	return b
@@ -1161,9 +1171,10 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // wherever arg χ turns by more than π/4 and so is densest at the lightly
 // damped closed-loop roots where G resonates, together with the midpoints of
 // its intervals. Each local maximum is refined by golden-section search on
-// the exact response. Past the grid end the gain is bounded by tailGain; the
-// delay grid of the Nyquist test is extended until that bound stays below
-// the peak. When the high-frequency limit exceeds every finite sample it is
+// the exact response. Past the grid end the gain is bounded by tailGain, or
+// for several delay classes by torusTailBelow where tailGain would need a
+// long extension; the delay grid of the Nyquist test is extended until that
+// bound stays below the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
 // sample exceeds it on the grid nor past it (see peakPastLimit, and
 // torusPastLimit for several classes of delays). Between
@@ -1279,6 +1290,19 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 			if !certified && (!closed || R-rGrid > span) && 2*R0-rGrid <= span {
 				// The finite peak may lie further out, above best.
 				R, closed = 2*R0, true
+			}
+		}
+		if torus != nil && (!closed || (R-hi)*8*l.tau/math.Pi > torusTailPoints) {
+			spent := 0
+			for Rt := R0; (!closed || Rt < R) && Rt-rGrid <= span && spent < 2; Rt *= 2 {
+				ok, out := e.torusTailBelow(torus, lim, level, Rt, 1<<18)
+				if ok {
+					R, closed = Rt, true
+					break
+				}
+				if out {
+					spent++
+				}
 			}
 		}
 		if !closed {

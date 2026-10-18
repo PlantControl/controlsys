@@ -398,6 +398,10 @@ func (s *torusScan) next() {
 // end before it gives up on a finite peak above the limit.
 const torusScanPoints = 1 << 12
 
+// torusTailPoints is the grid extension past which peak tries
+// torusTailBelow to close the tail of several delay classes nearer.
+const torusTailPoints = 1 << 14
+
 // torusPassages selects the frequencies ω whose phases θ = ω·h pass close
 // to a maximiser θ* of S = σ_max(G∞) or its mirror −θ*, the only places
 // where G(jω) = G∞(θ) + O(1/ω) can rise above sup S once ω is large: the
@@ -787,4 +791,107 @@ func (e *delayLFT) torusAtInf(x *highFrequencyExpansion, hf *highFrequencyGain, 
 		return lim, &pastLimit{nil, best, wBest}, hi, true, nil
 	}
 	return lim, &pastLimit{nil, sup, math.Inf(1)}, hi, true, nil
+}
+
+// atFrequency returns the gain on the torus of h with the blocks of
+// G(jw), D + C(jwI − A)⁻¹B for each, in place of those at ω = ∞, and the
+// norm bounds of delayLFT.h; nil without states, for w <= ‖A‖ or where
+// jwI − A is singular.
+func (h *highFrequencyGain) atFrequency(w float64) *highFrequencyGain {
+	e := h.e
+	if e.n == 0 || e.sys.E != nil || !(w > e.normA) {
+		return nil
+	}
+	n, nd, p, m := e.n, e.nd, e.p, e.m
+	lft := e.sys.LFT
+	a := e.sys.A.RawMatrix()
+	lu := make([]complex128, n*n)
+	for i := range n {
+		for j := range n {
+			lu[i*n+j] = complex(-a.Data[i*a.Stride+j], 0)
+		}
+		lu[i*n+i] += complex(0, w)
+	}
+	piv := make([]int, n)
+	if !cLUFactor(lu, piv, n) {
+		return nil
+	}
+	cols := m + nd
+	x := make([]complex128, n*cols)
+	for k, b := range []*mat.Dense{e.sys.B, lft.B2} {
+		off, c := k*m, m
+		if k == 1 {
+			c = nd
+		}
+		if b == nil || b.IsEmpty() {
+			continue
+		}
+		for i := range n {
+			for j := range c {
+				x[i*cols+off+j] = complex(b.At(i, j), 0)
+			}
+		}
+	}
+	cLUSolve(lu, piv, x, n, cols)
+	block := func(d []complex128, c *mat.Dense, off, r, cc int) []complex128 {
+		out := slices.Clone(d)
+		if c == nil || c.IsEmpty() {
+			return out
+		}
+		for i := range r {
+			for j := range cc {
+				var s complex128
+				for k := range n {
+					s += complex(c.At(i, k), 0) * x[k*cols+off+j]
+				}
+				out[i*cc+j] += s
+			}
+		}
+		return out
+	}
+	f := &highFrequencyGain{
+		e: e, dim: h.dim, grp: h.grp, k: h.k, kmax: h.kmax, scale: h.scale, over: math.Inf(-1),
+		d11: block(h.d11, e.sys.C, 0, p, m), d12: block(h.d12, e.sys.C, m, p, nd),
+		d21: block(h.d21, lft.C2, 0, nd, m), d22: block(h.d22, lft.C2, m, nd, nd),
+		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
+		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
+		grid: h.grid, gridR: h.gridR,
+		n1221: e.h(e.d12, e.c1, e.b2, w) * e.h(e.d21, e.c2, e.b1, w),
+		n22:   e.h(e.d22, e.c2, e.b2, w),
+	}
+	f.eps = f.n22 - e.d22
+	f.lip = f.lipschitz()
+	return f
+}
+
+// torusTailBelow reports whether σ_max(G(jω)) <= level for every ω >= R,
+// given S = σ_max(G∞) <= lim on the torus hf. With t = 1/ω and the phases θ
+// held, G is analytic in t for |t| <= 1/w, w > ‖A‖, with ‖G − G∞‖ <= E =
+// tailGain(0, w), so on t ∈ [0, 1/R] it lies within err = E/4·(w/(R − w))²
+// (1/8 of the squared interval times the Cauchy bound on ∂²G/∂t²) of the
+// chord from G∞(θ) to F(θ) = G at t = 1/R, whose gain is convex along it:
+// σ_max(G) <= max(S, σ_max(F)) + err. below then certifies σ_max(F) <=
+// level − err over the torus, within budget samples, once the grid of
+// torusGrid does not exceed it; spent reports that below ran out of budget.
+func (e *delayLFT) torusTailBelow(hf *highFrequencyGain, lim, level, R float64, budget int) (ok, spent bool) {
+	errT := math.Inf(1)
+	for w := e.normA*1.01 + 1e-9; w < 0.9*R; w *= 1.2 {
+		q := w / (R - w)
+		errT = min(errT, e.tailGain(0, w)/4*q*q)
+	}
+	room := level - errT
+	if !(room >= lim) {
+		return false, false
+	}
+	f := hf.atFrequency(R)
+	if f == nil {
+		return false, false
+	}
+	for _, v := range f.gridValues() {
+		if !(v <= room) {
+			return false, false
+		}
+	}
+	ok = f.below(room, f.samples+budget)
+	return ok, !ok && !(f.over > room)
 }
