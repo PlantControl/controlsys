@@ -21,9 +21,10 @@ var errDelayLoopUnsupported = fmt.Errorf("delay loop outside Nyquist test scope:
 type delayLoop struct {
 	sys        *System // the loop model, for certified sensitivity peaks
 	at         func(w float64) complex128
-	one        func(w float64) complex128 // 1+L formed directly; nil: 1 + at
-	eval       *sisoEval                  // records the first failure of at
-	fails      *error                     // where at records its first failure when eval is nil
+	atS        func(s complex128) (complex128, bool) // L(s) off the axis for clusterWinding; nil disables it
+	one        func(w float64) complex128            // 1+L formed directly; nil: 1 + at
+	eval       *sisoEval                             // records the first failure of at
+	fails      *error                                // where at records its first failure when eval is nil
 	rhp        int
 	axis       []axisPole
 	poles      []complex128
@@ -37,6 +38,7 @@ type delayLoop struct {
 	stack      []refineSpan  // refine work buffers
 	models     []nodeModels
 	freeModels []int
+	clusters   []axisPole // verified cluster indentations, once adopted
 }
 
 type axisPole struct {
@@ -47,6 +49,11 @@ type axisPole struct {
 	// open-loop poles it encloses (see indentCluster); 0 selects mult. inner
 	// counts the enclosed RHP poles, which leave the contour's interior.
 	order, inner int
+	// arcSet marks an indentation whose phase change of 1+L, arc, was
+	// measured on the arc by verifyCluster: from j(w-gap) to j(w+gap), or at
+	// the origin from gap to j·gap, where 1+L has phase arcStart.
+	arcSet        bool
+	arc, arcStart float64
 }
 
 func (a axisPole) poles() int {
@@ -97,6 +104,9 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 		return nil, err
 	}
 	l := &delayLoop{sys: sys, at: eval.at, eval: eval, cert: cert, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
+	if sys.IsContinuous() {
+		l.atS = eval.atComplex
+	}
 	l.addPoles(poles)
 	return l, nil
 }
@@ -478,12 +488,32 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 	if l.tau > 0 && w1*8*l.tau/math.Pi > float64(l.pointBudget()) {
 		return delayNyquist{}, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 	}
+	if l.clusters != nil {
+		l.axis = l.clusters
+		return l.winding(R, w1)
+	}
+	pre := l.failed()
+	res, err := l.indentedWinding(R, w1)
+	if (err == nil && !res.axisRoot && !l.failed()) || l.atS == nil || pre {
+		return res, err
+	}
+	if alt, ok := l.clusterWinding(R, w1, res); ok {
+		return alt, nil
+	}
+	return res, err
+}
 
+func (l *delayLoop) indentedWinding(R, w1 float64) (delayNyquist, error) {
 	if w, ok, err := l.indent(); err != nil {
 		return delayNyquist{}, err
 	} else if ok {
 		return delayNyquist{axisRoot: true, axisW: w}, nil
 	}
+	return l.winding(R, w1)
+}
+
+// winding counts the closed-loop RHP roots along the indented axis up to R.
+func (l *delayLoop) winding(R, w1 float64) (delayNyquist, error) {
 	grid := l.grid(R, w1)
 	segments := l.segments(grid, R)
 	size := len(grid) + 2*len(segments)
@@ -503,20 +533,29 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 			return delayNyquist{}, fmt.Errorf("phase of 1+L not certified near ω=%g: %w", wRoot, errDelayLoopUnsupported)
 		}
 		fs := out.f[base:]
-		if si == 0 {
-			if seg.from == 0 {
-				phiStart = 0
-				if real(fs[0]) < 0 {
-					phiStart = math.Pi
-				}
-				phi = phiStart
-			} else {
-				m := l.axisMult(0)
-				phiStart = math.Pi * math.Round((cmplx.Phase(fs[0])+float64(m)*math.Pi/2)/math.Pi)
-				phi = phiStart - float64(m)*math.Pi/2
-				phi += wrapPi(cmplx.Phase(fs[0]) - phi)
+		switch {
+		case si == 0 && seg.from == 0:
+			phiStart = 0
+			if real(fs[0]) < 0 {
+				phiStart = math.Pi
 			}
-		} else {
+			phi = phiStart
+		case seg.arc != nil:
+			if si == 0 {
+				phiStart, phi = seg.arc.arcStart, seg.arc.arcStart
+			}
+			phi += seg.arc.arc
+			if d := wrapPi(cmplx.Phase(fs[0]) - phi); math.Abs(d) <= arcSnapTol {
+				phi += d
+			} else {
+				return delayNyquist{}, fmt.Errorf("measured indentation at ω=%g misses 1+L by %.3g rad: %w", seg.arc.w, d, errDelayLoopUnsupported)
+			}
+		case si == 0:
+			m := l.axisMult(0)
+			phiStart = math.Pi * math.Round((cmplx.Phase(fs[0])+float64(m)*math.Pi/2)/math.Pi)
+			phi = phiStart - float64(m)*math.Pi/2
+			phi += wrapPi(cmplx.Phase(fs[0]) - phi)
+		default:
 			phi -= float64(seg.jump) * math.Pi
 			phi += wrapPi(cmplx.Phase(fs[0]) - phi)
 		}
@@ -617,7 +656,8 @@ func mergeSorted(a, b []float64) []float64 {
 type nyquistSegment struct {
 	from, to float64
 	pts      []float64
-	jump     int // indentation multiplicity at from
+	jump     int       // indentation multiplicity at from
+	arc      *axisPole // the measured indentation ending at from, if any
 }
 
 // segments splits the grid at the indentations around imaginary-axis poles
@@ -628,16 +668,24 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 	slices.SortFunc(axis, func(a, b axisPole) int { return cmp.Compare(a.w, b.w) })
 	var segs []nyquistSegment
 	start, jump := 0.0, 0
+	var arc *axisPole
+	measured := func(a *axisPole) *axisPole {
+		if a.arcSet {
+			return a
+		}
+		return nil
+	}
 	if len(axis) > 0 && axis[0].w == 0 {
-		start = axis[0].radius(l)
+		start, arc = axis[0].radius(l), measured(&axis[0])
 		axis = axis[1:]
 	}
-	for _, a := range axis {
+	for i := range axis {
+		a := &axis[i]
 		g := a.radius(l)
-		segs = append(segs, nyquistSegment{from: start, to: a.w - g, jump: jump})
-		start, jump = a.w+g, a.poles()
+		segs = append(segs, nyquistSegment{from: start, to: a.w - g, jump: jump, arc: arc})
+		start, jump, arc = a.w+g, a.poles(), measured(a)
 	}
-	segs = append(segs, nyquistSegment{from: start, to: R, jump: jump})
+	segs = append(segs, nyquistSegment{from: start, to: R, jump: jump, arc: arc})
 	for i := range segs {
 		s := &segs[i]
 		lo, _ := slices.BinarySearch(grid, math.Nextafter(s.from, math.Inf(1)))
@@ -1267,4 +1315,313 @@ func goldenMax(a, b, w0, g0 float64, g func(float64) float64) (float64, float64)
 		}
 	}
 	return w0, g0
+}
+
+// Cluster indentations. Where the indentation of indent fails, or the axis
+// walk meets a pole, because open-loop poles crowd the axis (a defective
+// pair split by rounding into one RHP and one LHP eigenvalue, integrators
+// with tiny real poles nearby), clusterWinding retries with indentations
+// that enclose every pole near the axis point jw0 in a disk |s-jw0| < g,
+// with the other poles at least clusterMargin·g away. verifyCluster samples
+// L on the whole circle: |L| >= clusterDominance there and a winding of -k
+// for the k enclosed eigenvalues give, by Rouché, no closed-loop root in
+// the disk and all k eigenvalues poles of L. The RHP members leave the
+// contour's interior, in the disk and its mirror, and are counted in inner,
+// so the count does not depend on which side of the axis rounding put them.
+// The phase change of 1+L on the right arc is measured, not assumed.
+
+const (
+	clusterMargin    = 4
+	clusterDominance = 4
+	clusterNearAxis  = 1e-5 // |Re p| <= clusterNearAxis·max(1,|p|) makes p a candidate
+	clusterStep      = 0.1  // max change of arg and log|·| between arc samples
+	clusterMaxPoints = 1 << 14
+	arcSnapTol       = 0.5
+)
+
+// errSlot is where l.at records its first failure.
+func (l *delayLoop) errSlot() *error {
+	if l.eval != nil {
+		return &l.eval.err
+	}
+	return l.fails
+}
+
+func (l *delayLoop) failed() bool {
+	slot := l.errSlot()
+	return slot != nil && *slot != nil
+}
+
+// clusterWinding counts the roots with cluster indentations around every
+// axis pole, the base failure point and every near-axis pole. It reports
+// false, with l unchanged, unless every indentation verifies and the walk
+// resolves.
+func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyquist, bool) {
+	ws, required := l.clusterCandidates(base)
+	if len(ws) == 0 {
+		return delayNyquist{}, false
+	}
+	slot := l.errSlot()
+	var saved error
+	if slot != nil {
+		saved = *slot
+	}
+	savedAxis := l.axis
+	for range 4 {
+		axis, ok := l.buildClusters(ws, required)
+		if !ok {
+			break
+		}
+		if slot != nil {
+			*slot = nil
+		}
+		l.axis = axis
+		res, err := l.winding(R, w1)
+		if err == nil && !l.failed() && !res.axisRoot {
+			l.clusters = axis
+			return res, true
+		}
+		if err != nil || l.failed() || !res.axisRoot || clusterCovers(axis, res.axisW) {
+			break
+		}
+		ws, required = append(ws, res.axisW), append(required, true)
+	}
+	l.axis = savedAxis
+	if slot != nil {
+		*slot = saved
+	}
+	return delayNyquist{}, false
+}
+
+func clusterCovers(axis []axisPole, w float64) bool {
+	return slices.ContainsFunc(axis, func(a axisPole) bool { return math.Abs(a.w-w) <= a.gap })
+}
+
+// clusterCandidates returns the cluster centres to try; a required one
+// must verify.
+func (l *delayLoop) clusterCandidates(base delayNyquist) (ws []float64, required []bool) {
+	for _, a := range l.axis {
+		ws, required = append(ws, a.w), append(required, true)
+	}
+	if base.axisRoot {
+		ws, required = append(ws, base.axisW), append(required, true)
+	}
+	for _, p := range l.poles {
+		if imag(p) >= 0 && math.Abs(real(p)) <= clusterNearAxis*max(1, cmplx.Abs(p)) {
+			ws, required = append(ws, imag(p)), append(required, false)
+		}
+	}
+	return ws, required
+}
+
+// buildClusters forms disjoint verified clusters at the candidates that
+// together enclose every boundary pole; a cluster replaces those inside it.
+func (l *delayLoop) buildClusters(ws []float64, required []bool) ([]axisPole, bool) {
+	idx := make([]int, len(ws))
+	for i := range idx {
+		idx[i] = i
+	}
+	slices.SortFunc(idx, func(a, b int) int { return cmp.Compare(ws[a], ws[b]) })
+	var axis []axisPole
+	for _, i := range idx {
+		if clusterCovers(axis, ws[i]) {
+			continue
+		}
+		a, ok := l.formCluster(ws[i])
+		if !ok {
+			if required[i] {
+				return nil, false
+			}
+			continue
+		}
+		axis = slices.DeleteFunc(axis, func(b axisPole) bool { return math.Abs(a.w-b.w)+b.gap <= a.gap })
+		axis = append(axis, a)
+	}
+	slices.SortFunc(axis, func(a, b axisPole) int { return cmp.Compare(a.w, b.w) })
+	for i := 1; i < len(axis); i++ {
+		if axis[i-1].w+axis[i-1].gap >= axis[i].w-axis[i].gap {
+			return nil, false
+		}
+	}
+	for _, p := range l.poles {
+		if classifyPoleStability(p, true, poleStabilityTolerance(p)) != poleClassBoundary {
+			continue
+		}
+		q := complex(real(p), math.Abs(imag(p)))
+		if !slices.ContainsFunc(axis, func(a axisPole) bool { return cmplx.Abs(q-complex(0, a.w)) < a.gap }) {
+			return nil, false
+		}
+	}
+	return axis, len(axis) > 0
+}
+
+// formCluster finds the smallest k such that the k poles nearest to jw0
+// fit a disk whose circle verifies.
+func (l *delayLoop) formCluster(w0 float64) (axisPole, bool) {
+	c := complex(0, w0)
+	ds := make([]float64, len(l.poles))
+	for i, p := range l.poles {
+		ds[i] = cmplx.Abs(p - c)
+	}
+	slices.Sort(ds)
+	scale := max(1, w0)
+	for k := 1; k <= len(ds); k++ {
+		dn := math.Inf(1)
+		if k < len(ds) {
+			dn = ds[k]
+		}
+		lo := max(clusterMargin*ds[k-1], 1e-8*scale)
+		hi := min(dn/clusterMargin, scale)
+		if w0 > 0 {
+			hi = min(hi, w0/clusterMargin)
+		}
+		if lo > scale {
+			break
+		}
+		if !(lo <= hi) {
+			continue
+		}
+		for _, t := range []float64{0.5, 0.25, 0.75} {
+			if a, ok := l.verifyCluster(w0, lo*math.Pow(hi/lo, t), k); ok {
+				return a, true
+			}
+		}
+	}
+	return axisPole{}, false
+}
+
+// verifyCluster samples L on |s-jw0| = g, bisecting until arg L, log|L|
+// and arg(1+L) each move by at most clusterStep between samples. It
+// requires |L| >= clusterDominance, a winding of L of -k, and agreement
+// with l.at where the circle meets the axis; it returns the indentation
+// with the measured phase change of 1+L on its right arc.
+func (l *delayLoop) verifyCluster(w0, g float64, k int) (axisPole, bool) {
+	c := complex(0, w0)
+	type sample struct {
+		t    float64
+		v, f complex128
+	}
+	at := func(t float64) (sample, bool) {
+		sn, cs := math.Sincos(t)
+		v, ok := l.atS(c + complex(g*cs, g*sn))
+		return sample{t, v, 1 + v}, ok && finite(v) && cmplx.Abs(v) >= clusterDominance
+	}
+	fine := func(a, b sample) bool {
+		return math.Abs(wrapPi(cmplx.Phase(b.v)-cmplx.Phase(a.v))) <= clusterStep &&
+			math.Abs(math.Log(cmplx.Abs(b.v)/cmplx.Abs(a.v))) <= clusterStep &&
+			math.Abs(wrapPi(cmplx.Phase(b.f)-cmplx.Phase(a.f))) <= clusterStep
+	}
+	const n0 = 64
+	prev, ok := at(-math.Pi)
+	if !ok {
+		return axisPole{}, false
+	}
+	var windL, turnF, start float64
+	from, to := n0/4, 3*n0/4
+	if w0 == 0 {
+		from = n0 / 2
+	}
+	count := 1
+	var stack [][2]sample
+	for i := 1; i <= n0; i++ {
+		b, ok := at(-math.Pi + 2*math.Pi*float64(i)/n0)
+		if !ok {
+			return axisPole{}, false
+		}
+		inArc := i > from && i <= to
+		stack = append(stack[:0], [2]sample{prev, b})
+		for len(stack) > 0 {
+			s := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if fine(s[0], s[1]) {
+				windL += wrapPi(cmplx.Phase(s[1].v) - cmplx.Phase(s[0].v))
+				if inArc {
+					turnF += wrapPi(cmplx.Phase(s[1].f) - cmplx.Phase(s[0].f))
+				}
+				count++
+				continue
+			}
+			if count+len(stack) > clusterMaxPoints || s[1].t-s[0].t < 1e-9 {
+				return axisPole{}, false
+			}
+			m, ok := at((s[0].t + s[1].t) / 2)
+			if !ok {
+				return axisPole{}, false
+			}
+			stack = append(stack, [2]sample{m, s[1]}, [2]sample{s[0], m})
+		}
+		if i == from && w0 == 0 {
+			start = 0
+			if real(b.f) < 0 {
+				start = math.Pi
+			}
+		}
+		prev = b
+	}
+	if math.Abs(windL/(2*math.Pi)+float64(k)) > 0.05 {
+		return axisPole{}, false
+	}
+	for _, w := range []float64{w0 + g, w0 - g} {
+		if w < 0 {
+			continue
+		}
+		v, ok := l.sampleValue(w)
+		ref, ok2 := l.atS(complex(0, w))
+		if !ok || !ok2 || !(cmplx.Abs(v-ref) <= 1e-6*cmplx.Abs(ref)) {
+			return axisPole{}, false
+		}
+	}
+	inner := 0
+	for _, p := range l.poles {
+		if cmplx.Abs(p-c) < g && classifyPoleStability(p, true, poleStabilityTolerance(p)) == poleClassUnstable {
+			inner++
+		}
+	}
+	if w0 > 0 {
+		inner *= 2
+	}
+	return axisPole{w: w0, mult: k, gap: g, order: k, inner: inner, arcSet: true, arc: turnF, arcStart: start}, true
+}
+
+// sampleValue returns L(jω) and whether it is finite, without recording a
+// failed evaluation.
+func (l *delayLoop) sampleValue(w float64) (complex128, bool) {
+	slot := l.errSlot()
+	var saved error
+	if slot != nil {
+		saved, *slot = *slot, nil
+	}
+	v := l.at(w)
+	ok := finite(v)
+	if slot != nil {
+		ok = ok && *slot == nil
+		*slot = saved
+	}
+	return v, ok
+}
+
+// atComplex evaluates L(s) at a point off the axis without recording a
+// failure.
+func (e *sisoEval) atComplex(s complex128) (complex128, bool) {
+	pt := pointAt(s)
+	if err := e.eval(pt, e.dst); err != nil {
+		return 0, false
+	}
+	if e.delay != nil {
+		applyIODelayMatrixAtS(e.sys, pt, e.dst, 1, 1, e.delay)
+	}
+	return e.dst[0], true
+}
+
+// minusOneAt is charMinusOne at a point off the axis, without recording a
+// failure.
+func (e *delayLFT) minusOneAt(s complex128) (complex128, bool) {
+	if e.h22 != nil {
+		if err := e.h22(pointAt(s), e.hbuf); err != nil {
+			return 0, false
+		}
+	} else {
+		copy(e.hbuf, e.d22Complex())
+	}
+	return e.loopDet(s, e.hbuf) - 1, true
 }

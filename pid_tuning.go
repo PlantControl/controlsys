@@ -2980,6 +2980,7 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 			return false, nil
 		}
 		l := *base
+		l.atS, l.clusters = nil, nil
 		l.axis = slices.Clone(base.axis)
 		l.scales = append(slices.Clone(base.scales), wc)
 		if c.Ki != 0 {

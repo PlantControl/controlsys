@@ -598,6 +598,9 @@ func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 			normalized = true
 		}
 	}
+	if !normalized {
+		l.atS = e.minusOneAt
+	}
 	if !normalized && e.nd == 1 && e.h22sys != nil {
 		l.cert, l.certErr = singleChannelCertifier(e)
 	} else {
