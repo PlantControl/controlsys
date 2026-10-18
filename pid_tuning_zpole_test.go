@@ -104,3 +104,84 @@ func TestTunePIDUnitPoleClusterSweep(t *testing.T) {
 	}
 	t.Logf("%d designs", designs)
 }
+
+// HXK42S: undelayed integrating plants whose gain crossover sits above a
+// lag, where the loop phase is out of reach for PID or PD gains. TunePID
+// tried only that crossover and reported the target unattainable, while
+// explicit crossovers one to three decades lower have designs and MATLAB
+// pidtune returns one. Each design must be closed-loop stable by the exact
+// test, meet its reported margin at its reported crossover on the raw
+// num/den, and keep |S| <= 4 sampled independently up to Nyquist or 1e3·wc.
+func TestTunePIDUndelayedIntegratorBackOff(t *testing.T) {
+	cases := []struct {
+		name     string
+		num, den []float64
+		dt       float64
+	}{
+		{"k/((z-1)^2(z-0.987))", []float64{-0.14994524256120972}, []float64{1, -2.9872237308563525, 2.974447461712705, -0.9872237308563525}, 0.018062614213725733},
+		{"k/((z-1)^2 lags)", []float64{2.976756686381004}, []float64{1, -3.737722851489804, 5.228826969943391, -3.2444853854173696, 0.7533812669637826}, 0.041200685092028046},
+		{"(0.18s+1.6)/(s^2(s+0.64))", []float64{0.1813581630182136, 1.6005930866011284}, []float64{1, 0.6385258302218032, 0, 0}, 0},
+	}
+	for _, c := range cases {
+		for _, fam := range []PidtuneType{PidtunePID, PidtunePIDF, PidtunePD, PidtunePDF} {
+			name := fmt.Sprintf("%s %s", c.name, fam)
+			r, err := TunePID(context.Background(), makeDiscretePlant(t, c.num, c.den, c.dt), fam, PIDTuningOptions{})
+			if !pidCheckZPoleResult(t, name, c.num, c.den, c.dt, r, err) {
+				t.Errorf("%s: no design: %v", name, err)
+				continue
+			}
+			k := r.Controller
+			loop := func(w float64) complex128 {
+				x := complex(0, w)
+				if c.dt > 0 {
+					x = cmplx.Exp(complex(0, w*c.dt))
+				}
+				g := Poly(c.num).Eval(x) / Poly(c.den).Eval(x)
+				var integ, deriv complex128
+				if c.dt > 0 {
+					integ = complex(c.dt, 0) / (x - 1)
+					deriv = 1 / (complex(k.Tf, 0) + complex(c.dt, 0)/(x-1))
+				} else {
+					integ = 1 / x
+					deriv = x / (complex(k.Tf, 0)*x + 1)
+				}
+				return g * (complex(k.Kp, 0) + complex(k.Ki, 0)*integ + complex(k.Kd, 0)*deriv)
+			}
+			wc := r.Evidence.AchievedCrossover
+			l := loop(wc)
+			pm := 180 + cmplx.Phase(l)*180/math.Pi
+			if math.Abs(cmplx.Abs(l)-1) > 1e-3 || math.Abs(math.Remainder(pm-r.Evidence.AchievedPhaseMargin, 360)) > .5 || pm < 56 {
+				t.Errorf("%s: |L(%.4g)| = %.6g, margin %.4g, reported %.4g", name, wc, cmplx.Abs(l), pm, r.Evidence.AchievedPhaseMargin)
+			}
+			hi := 1e3 * wc
+			if c.dt > 0 {
+				hi = math.Pi / c.dt
+			}
+			peak := 0.
+			for w := wc * 1e-3; w < hi; w *= 1.001 {
+				peak = math.Max(peak, 1/cmplx.Abs(1+loop(w)))
+			}
+			if peak > pidTuningMaxSensitivity*1.01 {
+				t.Errorf("%s: sampled |S| peak %.4g at wc %.4g", name, peak, wc)
+			}
+		}
+	}
+}
+
+// A free P scan's crossovers at or above Nyquist (8·wc0 on a discrete plant
+// whose gain crossover is near Nyquist) failed the call with an
+// invalid-argument error; they are skipped.
+func TestTunePIDFreePScanSkipsNyquist(t *testing.T) {
+	cases := []struct {
+		name     string
+		num, den []float64
+		dt       float64
+	}{
+		{"k/((z-1)^2(z-0.987))", []float64{-0.14994524256120972}, []float64{1, -2.9872237308563525, 2.974447461712705, -0.9872237308563525}, 0.018062614213725733},
+		{"(z-0.97)/((z-1)^2 lags)", []float64{-2.046618214878878, 2.0175518549605798}, []float64{1, -3.4280233577799715, 4.316862995517887, -2.3496559176958596, 0.4608162799579439}, 0.07421327254084888},
+	}
+	for _, c := range cases {
+		r, err := TunePID(context.Background(), makeDiscretePlant(t, c.num, c.den, c.dt), PidtuneP, PIDTuningOptions{})
+		pidCheckZPoleResult(t, c.name, c.num, c.den, c.dt, r, err)
+	}
+}

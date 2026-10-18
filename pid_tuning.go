@@ -970,10 +970,14 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			o := opts
 			o.CrossoverFrequency = at(j)
 			p := pidTuningPlant{dt: plant.Dt, at: eval.at, gainSign: gainSign}
-			reachable := pidTuningReachable(p, family, o, pm, pidTuningUnwrappedPhase(eval.at, gainSign, at(j), tau))
-			if evalFailed() {
-				return nil, nil
+			// A walk failing on rounded poles at z = 1 or s = 0 leaves the
+			// phase unknown; the depth is still tried.
+			phase := math.NaN()
+			if gainSign != 0 {
+				phase = pidTuningUnwrappedPhase(eval.at, gainSign, at(j), tau)
+				evalFailed()
 			}
+			reachable := pidTuningReachable(p, family, o, pm, phase)
 			for _, floor := range []bool{false, true} {
 				if !floor && !reachable || used-start >= budget {
 					continue
@@ -984,7 +988,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 					continue
 				}
 				if e == nil {
-					r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, at(j), pidTuningMaxSensitivity, minHigh))
+					hi := minHigh
+					if plant.Dt > 0 {
+						hi = math.Min(hi, .99*math.Pi/plant.Dt)
+					}
+					r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, at(j), pidTuningMaxSensitivity, hi))
 					return r, nil
 				}
 				if !errors.As(e, new(*PIDTuningError)) {
@@ -1105,6 +1113,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 					continue
 				}
 				wc := wc0 * math.Pow(2, float64(j)/2)
+				if plant.Dt > 0 && wc >= .98*math.Pi/plant.Dt {
+					continue
+				}
 				hiTried, loTried = math.Max(hiTried, wc), wc
 				opts.MaxEvaluations = budget - (used - start)
 				r, e := tuneAt(wc, gainSign, true, false)
@@ -1225,8 +1236,21 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		return stamp(res, err)
 	}
+	// undelayed backs off a failed undelayed PID or PD default crossover:
+	// a plant crossover above a lag can leave the loop phase there out of
+	// reach, as under a discrete double integrator, while a lower one has
+	// a design.
+	undelayed := func(res *PIDTuningResult, err error) (*PIDTuningResult, error) {
+		if tau > 0 || !errors.As(err, new(*PIDTuningError)) {
+			return res, err
+		}
+		if _, _, hasD, _, _ := pidTuningTerms(fam); !hasD {
+			return res, err
+		}
+		return backOff(wc0, gainSign, pm, res, err)
+	}
 	if gainSign == 0 || fam != PidtunePD && fam != PidtunePDF || !errors.As(err, new(*PIDTuningError)) {
-		return withFloor(wc0, gainSign, tau > 0, res, err)
+		return undelayed(withFloor(wc0, gainSign, tau > 0, res, err))
 	}
 	// Same-sign PD gains add lead in (0°, 90°) only, so retry where the
 	// plant phase leaves a moderate lead to supply.
@@ -1292,7 +1316,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			}
 		}
 	}
-	return stamp(res, err)
+	return undelayed(stamp(res, err))
 }
 
 // pidTuningPhaseCrossing returns the first ω in [wLo, wHi] at which the
