@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -82,12 +81,26 @@ func TestPidtunePIDFMissedFilterPhase(t *testing.T) {
 
 	// −(…)/(…) at wc = 1 has phase 81° once signed: the 159° lead needed
 	// exceeds any same-sign PIDF, and the clamped Td/10 design crosses at
-	// wc with a −76° margin. It is unattainable, not returned.
+	// wc with signed margin −76°. Its loop is pole-certified stable, so the
+	// gate counts the classical 180° − |∠L| = 76° there (FPLHR5) and keeps
+	// it: every crossover is ≥ 60° from −1 and |S| ≈ 1.2.
 	num := Poly{-0.9872552701278292, -0.6864360868728736, -0.7928397763180903, -0.5894001648613465}
 	den := Poly{1, 5.318581187837577, 9.734059318548901, 7.470525385519017, 2.061318122442111}
 	p := pidtuneBackoffPlant(t, num, den, 0, 0)
-	if pid, err := Pidtune(p, PidtunePIDF, 1, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-		pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, 0, 0), 1e-6, 1e4)
-		t.Errorf("unreachable lead: %+v (margins %v, |S| %.3g), %v; want ErrPIDTuningTargetUnattainable", pid, pms, ms, err)
+	pid, err := Pidtune(p, PidtunePIDF, 1, nil)
+	if err != nil {
+		t.Fatalf("unreachable lead: %v", err)
+	}
+	if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, 0); !ok || !stable {
+		t.Errorf("unreachable lead: %+v unstable", pid)
+	}
+	pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, 0, 0), 1e-6, 1e4)
+	if len(pms) == 0 || ms > pidTuningMaxSensitivity {
+		t.Errorf("unreachable lead: %+v crossovers %v, |S| peak %.3g", pid, pms, ms)
+	}
+	for _, m := range pms {
+		if math.Abs(m) < 58.5 {
+			t.Errorf("unreachable lead: %+v phase margin %.3g° at a crossover", pid, m)
+		}
 	}
 }
