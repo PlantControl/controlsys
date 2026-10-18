@@ -618,15 +618,30 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if plant.Dt > 0 {
 			wHi = math.Min(wHi, .98*math.Pi/plant.Dt)
 		}
-		for _, sign := range signs {
-			wc, _, ok := pidTuningPhaseWalk(atUnit, sign, -180+pm, wc0*1e-6, wHi, tau, true)
-			if eval.err != nil {
-				return nil, fmt.Errorf("TunePID: %w", eval.err)
+		// A move that only fails to evaluate, as near a multiple pole at the
+		// origin, leaves the wc0 result.
+		skip := func(e error) bool {
+			if eval.err == nil && (e == nil || errors.As(e, new(*PIDTuningError)) || ctx.Err() != nil) {
+				return false
 			}
-			if !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
+			eval.err = nil
+			return true
+		}
+		for _, sign := range signs {
+			lo := wc0 * 1e-6
+			wc, _, ok := pidTuningPhaseWalk(atUnit, sign, -180+pm, lo, wHi, tau, true)
+			// A walk failing at its floor or starting past the target, as
+			// under a double integrator, cannot see the phase rise to it.
+			if skip(nil) || !ok || wc < lo*1.03 {
+				wc, ok = pidTuningNearestPhase(atUnit, sign, -180+pm, wc0, wc0*1e-4, wHi, tau)
+			}
+			if skip(nil) || !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
 				continue
 			}
 			r, e := tuneAt(wc, gainSign, true, false)
+			if skip(e) {
+				continue
+			}
 			if e == nil {
 				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where the one-gain loop has a %g° phase margin and sampled |S| <= %d.", wc0, wc, pm, pidTuningMaxSensitivity))
 				return stamp(r, nil)
