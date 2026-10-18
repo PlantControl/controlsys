@@ -227,8 +227,15 @@ func (e *delayLFT) h22Det(w float64) (complex128, bool) {
 	pt := e.td.frequencyPoint(w)
 	if e.h22 != nil {
 		if err := evalWithPoleLimit(e.h22, e.h22sys, pt, e.hbuf); err != nil {
-			e.fail(w, err)
-			return 0, false
+			h, ok := complex(0, 0), false
+			if len(e.hbuf) == 1 {
+				h, ok = ddSISOResponse(e.h22sys, pt)
+			}
+			if !ok {
+				e.fail(w, err)
+				return 0, false
+			}
+			e.hbuf[0] = h
 		}
 	} else {
 		copy(e.hbuf, e.d22Complex())

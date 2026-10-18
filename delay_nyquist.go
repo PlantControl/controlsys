@@ -103,6 +103,7 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	if err != nil {
 		return nil, err
 	}
+	eval.extended = true
 	l := &delayLoop{sys: sys, at: eval.at, eval: eval, cert: cert, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
 	if sys.IsContinuous() {
 		l.atS = eval.atComplex
