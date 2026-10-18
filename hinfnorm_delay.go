@@ -491,6 +491,8 @@ func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 	}
 	if cert, err := newDetCertifier(e, normalized); err == nil {
 		l.cert = cert
+	} else {
+		l.certErr = err
 	}
 	for _, t := range e.tau {
 		l.tau += t

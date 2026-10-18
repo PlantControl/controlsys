@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"math/rand"
 	"testing"
 )
 
@@ -62,6 +63,83 @@ func TestDelayNyquistCloseZeroPair(t *testing.T) {
 				t.Fatalf("DiskMargin alpha=%g, oracle %d RHP roots", dm.Alpha, want)
 			}
 		})
+	}
+}
+
+// TestDetCertifierRemainderBoundsSamples checks the Taylor model of
+// det(I − H22Δ), and of its ratio to det(I − D22Δ), against dense samples of
+// charMinusOne and normalizedMinusOne for coupled loops of 2 and 3 delay
+// channels: |f(ω+t) − f(ω) − t·f′(ω)| must stay within remainder(h) for
+// |t| <= h.
+func TestDetCertifierRemainderBoundsSamples(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	for _, nd := range []int{2, 3} {
+		const n = 3
+		k := 1 + nd
+		a := make([]float64, n*n)
+		for i := range a {
+			a[i] = rng.NormFloat64()
+		}
+		for i := range n {
+			a[i*n+i] -= 4
+		}
+		b, c, d := make([]float64, n*k), make([]float64, k*n), make([]float64, k*k)
+		for i := range b {
+			b[i], c[i] = rng.NormFloat64(), rng.NormFloat64()
+		}
+		for i := range d {
+			d[i] = 0.25 * rng.NormFloat64()
+		}
+		H, err := NewFromSlices(n, k, k, a, b, c, d, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tau := []float64{0.3, 0.7, 1.1}[:nd]
+		sys, err := SetDelayModel(H, tau)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, err := newDelayLFT(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, normalized := range []bool{false, true} {
+			c, err := newDetCertifier(e, normalized)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := func(w float64) complex128 { return 1 + e.charMinusOne(w) }
+			if normalized {
+				f = func(w float64) complex128 { return 1 + e.normalizedMinusOne(w) }
+			}
+			finite := 0
+			for _, w := range []float64{0.05, 0.9, 2.3, 7, 31} {
+				m, ok := c.model(0, w)
+				if !ok {
+					t.Fatalf("nd=%d normalized=%v: no model at ω=%g", nd, normalized, w)
+				}
+				if fw := f(w); cmplx.Abs(m.f-fw) > 1e-10*(1+cmplx.Abs(fw)) {
+					t.Fatalf("nd=%d normalized=%v ω=%g: model f=%v, sample %v", nd, normalized, w, m.f, fw)
+				}
+				for _, h := range []float64{1e-3, 1e-2, 0.1, 0.4} {
+					rem := c.remainder(0, &m, h)
+					if math.IsInf(rem, 1) {
+						continue
+					}
+					finite++
+					for i := -100; i <= 100; i++ {
+						s := h * float64(i) / 100
+						got := cmplx.Abs(f(w+s) - m.f - complex(s, 0)*m.df)
+						if got > rem*(1+1e-9)+1e-13*(1+cmplx.Abs(m.f)) {
+							t.Fatalf("nd=%d normalized=%v ω=%g h=%g t=%g: |f − tangent| = %g > remainder %g", nd, normalized, w, h, s, got, rem)
+						}
+					}
+				}
+			}
+			if finite == 0 {
+				t.Fatalf("nd=%d normalized=%v: every remainder infinite", nd, normalized)
+			}
+		}
 	}
 }
 

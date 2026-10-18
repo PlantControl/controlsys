@@ -30,6 +30,7 @@ type delayLoop struct {
 	scales     []float64
 	maxPoints  int           // grid point budget; 0 selects delayNyquistMaxPoints
 	cert       loopCertifier // certified local models of 1+L for refine
+	certErr    error         // why cert is nil
 	stack      []refineSpan  // refine work buffers
 	models     []nodeModels
 	freeModels []int
@@ -384,7 +385,8 @@ func lftDelayLoopAcyclic(sys *System, n int) bool {
 // nyquist counts closed-loop RHP roots of χ by the argument principle on a
 // delay-aware grid: log spacing, linear spacing π/(8τ), points around every
 // open-loop pole magnitude, and bisection until refine certifies every span
-// free of zeros of 1+L with phase variation at most π/4. The grid ends at R
+// free of zeros of 1+L with phase variation at most spanCertPhase < π, so
+// that the wrapped phase steps add up to the winding. The grid ends at R
 // where the tail bound certifies |L| <= tailLimit + frac(1-tailLimit) < 1 on
 // the rest of the closed right half-plane, so no encirclement is missed
 // beyond R. The count is exact up to rounding; a closed-loop root within the
@@ -422,6 +424,9 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 		return delayNyquist{}, fmt.Errorf("neutral delay loop, |L(j∞)| may reach 1: %w", errDelayLoopUnsupported)
 	}
 	if l.cert == nil {
+		if l.certErr != nil {
+			return delayNyquist{}, l.certErr
+		}
 		return delayNyquist{}, fmt.Errorf("delay loop without a certified model: %w", errDelayLoopUnsupported)
 	}
 	target := l.tailLimit + frac*(1-l.tailLimit)
