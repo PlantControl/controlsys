@@ -966,7 +966,103 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	}
 	lg := math.Log(gamma)
 	f := func(w float64) float64 { return math.Log(cmplx.Abs(r.eval.at(w))) - lg }
-	return r.polish(cands, f, 1e-9), nil
+	return r.endCrossings(r.polish(cands, f, 1e-9), f, 1e-9), nil
+}
+
+// endCrossings adds a crossing of f = log|L| − log γ that the pencil missed
+// below the first crossing ws[0], or, discrete, above the last: |L| → ∞ at a
+// pole, and else |L| at ω = 0 or Nyquist, fixes the sign of f there, and a
+// differing sign next to the outer crossing brackets one more. Pencil roots
+// next to a pole cluster at z = 1 or −1, as of k/(z−1)ⁿ with tiny k, lose
+// accuracy beyond any polish bracket. log|L| is continuous on the boundary
+// away from its poles and zeros, where it does not change sign, so every
+// bracket is a crossing. Next to the cluster the response carries relative
+// rounding of order eps/θⁿ, so a root is accepted on its bisected finite
+// sign bracket rather than on |f| at the root; a bracket closing on an
+// unevaluable ω is rejected.
+func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
+	ft := func(w float64) float64 {
+		if _, ok := r.eval.try(w); !ok {
+			return math.NaN()
+		}
+		return f(w)
+	}
+	sgn := func(v float64) int {
+		if math.IsNaN(v) || math.Abs(v) <= tol {
+			return 0
+		}
+		if v > 0 {
+			return 1
+		}
+		return -1
+	}
+	endSign := func(w float64) int {
+		h, ok := r.eval.try(w)
+		if !ok || cmplx.IsInf(h) {
+			return 1
+		}
+		return sgn(f(w))
+	}
+	find := func(a, b float64) (float64, bool) {
+		fa, fb := ft(a), ft(b)
+		for range 64 {
+			m := math.Sqrt(a * b)
+			if m <= a || m >= b {
+				break
+			}
+			if fm := ft(m); fa*fm <= 0 {
+				b, fb = m, fm
+			} else {
+				a, fa = m, fm
+			}
+		}
+		finite := !math.IsNaN(fa) && !math.IsNaN(fb) && !math.IsInf(fa, 0) && !math.IsInf(fb, 0)
+		return math.Sqrt(a * b), finite && fa*fb <= 0
+	}
+	scan := func(t float64, at func(float64) float64, want int) (float64, bool) {
+		step := 10.0
+		for range 2000 {
+			tn := t / step
+			w, wn := at(t), at(tn)
+			if tn < 1e-300 || wn == w {
+				break
+			}
+			switch v := ft(wn); {
+			case sgn(v) == want:
+				return find(min(w, wn), max(w, wn))
+			case !math.IsNaN(v):
+				t = tn
+			default:
+				if step = math.Sqrt(step); step < 1+1e-9 {
+					return 0, false
+				}
+			}
+		}
+		return 0, false
+	}
+	wTop := math.Inf(1)
+	if r.discrete() {
+		wTop = r.nyquist()
+	}
+	pLo, pHi := wTop/2, wTop/2
+	if len(ws) > 0 {
+		pLo, pHi = ws[0]*(1-1e-6), ws[len(ws)-1]*(1+1e-6)
+	}
+	if !math.IsInf(pLo, 0) {
+		if s0, s := endSign(0), sgn(ft(pLo)); s0 != 0 && s != 0 && s != s0 {
+			if c, ok := scan(pLo, func(t float64) float64 { return t }, s0); ok && (len(ws) == 0 || c < ws[0]*(1-1e-9)) {
+				ws = append([]float64{c}, ws...)
+			}
+		}
+	}
+	if r.discrete() && pHi < wTop {
+		if sTop, s := endSign(wTop), sgn(ft(pHi)); sTop != 0 && s != 0 && s != sTop {
+			if c, ok := scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok && (len(ws) == 0 || c > ws[len(ws)-1]*(1+1e-9)) {
+				ws = append(ws, c)
+			}
+		}
+	}
+	return ws
 }
 
 // phaseCrossings returns the verified ω > 0 where L(jω) is real and negative,
@@ -990,8 +1086,10 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // |f| ≤ tol. A candidate without a sign change, a tangency or the discrete
 // Nyquist frequency, is kept only if |f| ≤ tol there. When ω = 0 itself
 // satisfies |f| ≤ tol, as for the root L − L~ always has there, a candidate
-// whose |f| stays within tol down to half its frequency is that root moved
-// off 0 by rounding, and is dropped. When L has a pole at ω = 0, a
+// below every kept crossing whose |f| stays within tol down to half its
+// frequency is that root moved off 0 by rounding, and is dropped; above a
+// kept crossing the test would drop crossings at twice another, as for
+// k·z^−d with k < 0. When L has a pole at ω = 0, a
 // candidate is dropped only when L cannot be evaluated at half its
 // frequency, or at itself: a pencil root that the pole's rounding moved off
 // 0. |f| ≈ 0 at half its frequency is no test there, as for
@@ -1030,7 +1128,7 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 			break
 		}
 		v := math.Abs(f(best))
-		if _, ok := r.eval.try(best / 2); zeroRoot && within(best/2) || pole0 && !ok {
+		if _, ok := r.eval.try(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {
 			continue
 		}
 		if v <= tol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {

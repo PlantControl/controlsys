@@ -160,3 +160,158 @@ func TestAllMarginDiscreteDoubleIntegratorDelayHarmonics(t *testing.T) {
 		}
 	}
 }
+
+// JPZZRT: for k/(z∓1)ⁿ with tiny k the pencil roots near the pole cluster
+// at z = ±1 lose accuracy beyond the polish bracket and the gain crossover
+// vanished. Oracle: |e^{jθ} − 1| = 2·sin(θ/2), |e^{jθ} + 1| = 2·cos(θ/2), so
+// |L| = 1 at sin(θ/2) = k^{1/n}/2, or θ = π minus that, with angle
+// −n(θ+π)/2, or −nθ/2. Next to z = −1 the response itself carries relative
+// rounding of order eps/|e^{jθ}+1|ⁿ, which bounds ω to 1e-9·θ and the phase
+// margin to 1e-4°.
+func TestAllMarginTinyGainPoleCluster(t *testing.T) {
+	cases := []struct {
+		s float64
+		n int
+		k float64
+	}{
+		{-1, 1, 1e-14}, {-1, 2, 3.1623e-8}, {-1, 3, 3.1623e-8}, {-1, 3, 1e-10},
+		{-1, 4, 1e-7}, {-1, 4, 3.1623e-8}, {-1, 4, 1e-10},
+		{1, 1, 3.1623e-8}, {1, 1, 1e-10}, {1, 1, 1e-14}, {1, 2, 1e-10}, {1, 2, 1e-14},
+		{1, 3, 1e-10}, {1, 3, 1e-14}, {1, 4, 1e-10},
+	}
+	for _, c := range cases {
+		den := []float64{1}
+		for range c.n {
+			next := make([]float64, len(den)+1)
+			for i, v := range den {
+				next[i] += v
+				next[i+1] += c.s * v
+			}
+			den = next
+		}
+		nc := complex(float64(c.n), 0)
+		half := math.Asin(math.Pow(c.k, 1/float64(c.n)) / 2)
+		th, gap := 2*half, 2*half
+		h := complex(c.k, 0) / cmplx.Pow(cmplx.Rect(2*math.Sin(half), (th+math.Pi)/2), nc)
+		if c.s > 0 {
+			th = math.Pi - 2*half
+			h = complex(c.k, 0) / cmplx.Pow(cmplx.Rect(2*math.Cos(th/2), th/2), nc)
+		}
+		pm := phaseMarginDeg(h)
+		for _, dt := range []float64{1, 0.1} {
+			r, err := (&TransferFunc{Num: [][][]float64{{{c.k}}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := AllMargin(r.Sys)
+			if err != nil {
+				t.Fatalf("s %g n %d k %g dt %g: %v", c.s, c.n, c.k, dt, err)
+			}
+			if len(res.GainCrossFreqs) != 1 || math.Abs(res.GainCrossFreqs[0]-th/dt) > (1e-8*gap+1e-9*th)/dt || math.Abs(res.PhaseMargins[0]-pm) > 1e-4 {
+				t.Errorf("s %g n %d k %g dt %g: wgc %v pm %v, want %.17g %.10g", c.s, c.n, c.k, dt, res.GainCrossFreqs, res.PhaseMargins, th/dt, pm)
+			}
+		}
+	}
+}
+
+// JPZZRT follow-up: next to the cluster at z = 1 the response of
+// k·num/(z−1)ⁿ carries relative rounding of order eps/θⁿ, which exceeded the
+// fixed tolerance endCrossings used to accept a bisected root, so correctly
+// bracketed crossovers were dropped. Oracle: |e^{jθ} − 1| = 2·sin(θ/2), so
+// |L(θ)| = k·|num(e^{jθ})|/(2·sin(θ/2))ⁿ is evaluated without cancellation
+// and bisected for |L| = 1; ω and phase margin are held to that rounding.
+func TestAllMarginTinyGainNearUnitCluster(t *testing.T) {
+	cases := []struct {
+		num []float64
+		n   int
+	}{
+		{[]float64{1e-10}, 2}, {[]float64{math.Pow(10, -10.5)}, 2}, {[]float64{math.Pow(10, -9.25)}, 2},
+		{[]float64{3.01e-12}, 2}, {[]float64{1e-14}, 2}, {[]float64{1.08e-9, 0.31 * 1.08e-9}, 2},
+		{[]float64{1e-14}, 3}, {[]float64{1e-13}, 4}, {[]float64{math.Pow(10, -13.25)}, 4},
+	}
+	for _, c := range cases {
+		den := []float64{1}
+		for range c.n {
+			next := make([]float64, len(den)+1)
+			for i, v := range den {
+				next[i] += v
+				next[i+1] -= v
+			}
+			den = next
+		}
+		loop := func(th float64) complex128 {
+			z, num := cmplx.Rect(1, th), complex(0, 0)
+			for _, v := range c.num {
+				num = num*z + complex(v, 0)
+			}
+			return num / cmplx.Pow(cmplx.Rect(2*math.Sin(th/2), (th+math.Pi)/2), complex(float64(c.n), 0))
+		}
+		lo, hi := 1e-12, 1e-2
+		for range 200 {
+			if m := math.Sqrt(lo * hi); cmplx.Abs(loop(m)) > 1 {
+				lo = m
+			} else {
+				hi = m
+			}
+		}
+		th := math.Sqrt(lo * hi)
+		noise := 1e-15 / math.Pow(th, float64(c.n))
+		pm := phaseMarginDeg(loop(th))
+		for _, dt := range []float64{1, 0.1} {
+			r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := AllMargin(r.Sys)
+			if err != nil {
+				t.Fatalf("num %v n %d dt %g: %v", c.num, c.n, dt, err)
+			}
+			if len(res.GainCrossFreqs) != 1 || math.Abs(res.GainCrossFreqs[0]-th/dt) > max(1e-8, noise)*th/dt || math.Abs(res.PhaseMargins[0]-pm) > max(1e-4, noise*180/math.Pi) {
+				t.Errorf("num %v n %d dt %g: wgc %v pm %v, want %.17g %.10g", c.num, c.n, dt, res.GainCrossFreqs, res.PhaseMargins, th/dt, pm)
+			}
+		}
+	}
+}
+
+// ZQL2JH: k·z^−d with k < 0 is real negative at θ = 2πm/d, |L| = |k|, so
+// phase crossovers there with GM = −20·log10|k|. L(0) = k makes the phase
+// error 0 at ω = 0, and a crossover at twice another has it 0 at half its
+// frequency too; MATLAB allmargin lists every crossover.
+func TestAllMarginNegativeGainDelayHarmonics(t *testing.T) {
+	for _, k := range []float64{-2, -116.75, -0.3} {
+		for _, dt := range []float64{1, 0.1, 0.79} {
+			for d := 1; d <= 12; d++ {
+				for _, asDelay := range []bool{false, true} {
+					den := []float64{1}
+					if !asDelay {
+						den = append(den, make([]float64, d)...)
+					}
+					r, err := (&TransferFunc{Num: [][][]float64{{{k}}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+					if err != nil {
+						t.Fatal(err)
+					}
+					sys := r.Sys
+					if asDelay {
+						sys.InputDelay = []float64{float64(d)}
+					}
+					res, err := AllMargin(sys)
+					if err != nil {
+						t.Fatalf("k %g dt %g d %d delay %v: %v", k, dt, d, asDelay, err)
+					}
+					var ws []float64
+					for m := 1; 2*m <= d; m++ {
+						ws = append(ws, 2*math.Pi*float64(m)/float64(d)/dt)
+					}
+					gm := -20 * math.Log10(-k)
+					ok := len(res.PhaseCrossFreqs) == len(ws)
+					for i := 0; ok && i < len(ws); i++ {
+						ok = math.Abs(res.PhaseCrossFreqs[i]-ws[i]) <= 1e-9*ws[i] && math.Abs(res.GainMargins[i]-gm) <= 1e-9
+					}
+					if !ok {
+						t.Errorf("k %g dt %g d %d delay %v: wpc %v gm %v, want %v %g", k, dt, d, asDelay, res.PhaseCrossFreqs, res.GainMargins, ws, gm)
+					}
+				}
+			}
+		}
+	}
+}
