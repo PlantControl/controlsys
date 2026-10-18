@@ -19,17 +19,20 @@ var errDelayLoopUnsupported = fmt.Errorf("delay loop outside Nyquist test scope:
 // RHP root count is rhp - W, where W is the winding of 1+L around the origin
 // along the jω axis indented to the right of the imaginary-axis eigenvalues.
 type delayLoop struct {
-	sys       *System // the loop model, for certified sensitivity peaks
-	at        func(w float64) complex128
-	eval      *sisoEval // records the first failure of at
-	rhp       int
-	axis      []axisPole
-	tail      func(w float64) float64 // bound on |L(s)| for Re s >= 0, |s| >= w
-	tailLimit float64                 // bound on limsup |L(jω)|, ω → ∞
-	tau       float64                 // total loop delay, sets the grid density
-	scales    []float64
-	maxPoints int // grid point budget; 0 selects delayNyquistMaxPoints
-	cert      loopCertifier // certified local models of 1+L for refine
+	sys        *System // the loop model, for certified sensitivity peaks
+	at         func(w float64) complex128
+	eval       *sisoEval // records the first failure of at
+	rhp        int
+	axis       []axisPole
+	tail       func(w float64) float64 // bound on |L(s)| for Re s >= 0, |s| >= w
+	tailLimit  float64                 // bound on limsup |L(jω)|, ω → ∞
+	tau        float64                 // total loop delay, sets the grid density
+	scales     []float64
+	maxPoints  int           // grid point budget; 0 selects delayNyquistMaxPoints
+	cert       loopCertifier // certified local models of 1+L for refine
+	stack      []refineSpan  // refine work buffers
+	models     []nodeModels
+	freeModels []int
 }
 
 type axisPole struct {
@@ -663,23 +666,26 @@ func (l *delayLoop) pointBudget() int {
 func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []complex128) ([]float64, []complex128, refineResult, float64) {
 	f := func(w float64) complex128 { return 1 + l.at(w) }
 	base := len(ws)
-	prev := refineNode{w: seg.pts[0], f: f(seg.pts[0])}
+	l.models, l.freeModels = l.models[:0], l.freeModels[:0]
+	node := func(w float64) refineNode { return refineNode{w: w, f: f(w), mi: l.modelSlot()} }
+	prev := node(seg.pts[0])
 	ws = append(ws, prev.w)
 	fs = append(fs, prev.f)
 	if !resolvedNonzero(prev.f) {
 		return ws, fs, refineAxisRoot, prev.w
 	}
-	type span struct{ a, b refineNode }
-	var stack []span
+	stack := l.stack[:0]
+	defer func() { l.stack = stack[:0] }()
 	for k := 1; k < len(seg.pts); k++ {
-		stack = append(stack[:0], span{prev, refineNode{w: seg.pts[k], f: f(seg.pts[k])}})
+		stack = append(stack[:0], refineSpan{prev, node(seg.pts[k])})
 		for len(stack) > 0 {
 			s := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			if !resolvedNonzero(s.b.f) {
 				return ws, fs, refineAxisRoot, s.b.w
 			}
-			if l.certifiedSpan(&s.a, &s.b) {
+			if l.certifiedSpan(&s) {
+				l.freeModels = append(l.freeModels, s.a.mi)
 				ws = append(ws, s.b.w)
 				fs = append(fs, s.b.f)
 				prev = s.b
@@ -695,60 +701,91 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 			if len(ws)-base+len(stack) > budget {
 				return ws, fs, refineBudget, 0
 			}
-			m := refineNode{w: mid, f: f(mid)}
-			stack = append(stack, span{m, s.b}, span{s.a, m})
+			m := node(mid)
+			stack = append(stack, refineSpan{m, s.b}, refineSpan{s.a, m})
 		}
 	}
 	return ws, fs, refineResolved, 0
 }
 
-// refineNode is a sample of 1+L with the models of each certifier kind,
-// evaluated on demand.
+// refineNode is a sample of 1+L; mi indexes its models in l.models, shared
+// by the copies of the node in adjacent spans.
 type refineNode struct {
-	w    float64
-	f    complex128
-	m    [2]loopModel
-	has  [2]bool
-	good [2]bool
+	w  float64
+	f  complex128
+	mi int
 }
 
-func (l *delayLoop) certifiedSpan(a, b *refineNode) bool {
-	if l.tail(a.w) <= sinPi8 {
+type refineSpan struct{ a, b refineNode }
+
+// nodeModels holds the models of each certifier kind at one node,
+// evaluated on demand.
+type nodeModels struct {
+	m         [2]loopModel
+	has, good [2]bool
+}
+
+// modelSlot returns a cleared slot of l.models, reusing those of nodes left
+// of every pending span.
+func (l *delayLoop) modelSlot() int {
+	if k := len(l.freeModels); k > 0 {
+		i := l.freeModels[k-1]
+		l.freeModels = l.freeModels[:k-1]
+		l.models[i] = nodeModels{}
+		return i
+	}
+	l.models = append(l.models, nodeModels{})
+	return len(l.models) - 1
+}
+
+func (l *delayLoop) certifiedSpan(s *refineSpan) bool {
+	if l.tail(s.a.w) <= sinPi8 {
 		return true
 	}
-	h := (b.w - a.w) / 2
-	pa := l.halfSpanPhase(a, h)
+	if math.Abs(wrapPi(cmplx.Phase(s.b.f)-cmplx.Phase(s.a.f))) > spanCertPhase {
+		return false
+	}
+	h := (s.b.w - s.a.w) / 2
+	pa := l.halfSpanPhase(&s.a, h)
 	if !(pa <= spanCertPhase) {
 		return false
 	}
-	return pa+l.halfSpanPhase(b, -h) <= spanCertPhase
+	return pa+l.halfSpanPhase(&s.b, -h) <= spanCertPhase
 }
 
 // halfSpanPhase bounds the phase variation of 1+L over [n.w, n.w+h] by the
 // model of S first where |1+L| > 1, near the open-loop poles, and of 1+L
-// first elsewhere, trying the other kind when the first leaves more than
-// half of spanCertPhase.
+// first elsewhere, unless only the other is evaluated at n already, trying
+// the other kind when the first leaves more than half of spanCertPhase.
 func (l *delayLoop) halfSpanPhase(n *refineNode, h float64) float64 {
+	if l.cert.kinds() == 1 {
+		return l.kindPhase(n, 0, h)
+	}
 	first := 0
-	if l.cert.kinds() > 1 && cmplx.Abs(n.f) > 1 {
+	nm := &l.models[n.mi]
+	switch {
+	case nm.has[1] && !nm.has[0]:
+		first = 1
+	case !nm.has[0] && cmplx.Abs(n.f) > 1:
 		first = 1
 	}
 	p := l.kindPhase(n, first, h)
-	if p <= spanCertPhase/2 || l.cert.kinds() == 1 {
+	if p <= spanCertPhase/2 {
 		return p
 	}
 	return min(p, l.kindPhase(n, 1-first, h))
 }
 
 func (l *delayLoop) kindPhase(n *refineNode, k int, h float64) float64 {
-	if !n.has[k] {
-		n.m[k], n.good[k] = l.cert.model(k, n.w)
-		n.has[k] = true
+	nm := &l.models[n.mi]
+	if !nm.has[k] {
+		nm.m[k], nm.good[k] = l.cert.model(k, n.w)
+		nm.has[k] = true
 	}
-	if !n.good[k] {
+	if !nm.good[k] {
 		return math.Inf(1)
 	}
-	return stadiumPhase(n.m[k].f, n.m[k].df, h, l.cert.remainder(k, &n.m[k], h))
+	return stadiumPhase(nm.m[k].f, nm.m[k].df, h, l.cert.remainder(k, &nm.m[k], h))
 }
 
 func resolvedNonzero(v complex128) bool {
