@@ -273,6 +273,109 @@ func TestAllMarginTinyGainNearUnitCluster(t *testing.T) {
 	}
 }
 
+// 5RWUVZ: polish probed brackets up to half the gap to the next candidate,
+// which next to the 4-fold pole cluster at z = −1 of k·num/((z+1)⁴·den)
+// reached an ω where the solve is singular, and the sticky error failed
+// AllMargin. Oracle: e^{jθ}+1 = 2·cos(θ/2)·e^{jθ/2}, so L(θ) is evaluated
+// without cancellation and its crossings bisected on a grid graded towards
+// Nyquist; the pole limit at Nyquist is no crossover. The response carries
+// relative rounding of order eps/(2·cos(θ/2))⁴, which bounds ω and the
+// margins. For k < 0 over (z+1)⁴ alone, arg L = π − 2θ meets −π only at
+// the pole θ = π, so there is no phase crossover.
+func TestAllMarginNyquistPoleCluster(t *testing.T) {
+	cases := []struct {
+		k      float64
+		zs, ps []float64
+		dt     float64
+	}{
+		{-1e-6, nil, nil, 1}, {-5.32259e-11, nil, nil, 1}, {-7.926960706503617e-11, nil, nil, 1},
+		{-1.7380762773365073e-06, nil, nil, 1}, {-0.0014485035794807087, nil, nil, 0.79},
+		{1e-6, nil, nil, 1}, {2.33286e-6, []float64{0.49718}, nil, 1},
+		{2.919066787947241e-06, nil, []float64{-0.13565250527172176}, 0.79},
+		{-0.4751559371429119, []float64{0.36215662478514177}, []float64{-0.3392596002410553}, 0.01},
+		{8.016558531989637e-08, nil, []float64{0.3435098967102221}, 0.1},
+		{-6.214045044554006e-06, []float64{-0.17935431128743506}, []float64{0.22517105094095477}, 0.01},
+		{-0.1987764295225583, []float64{-0.19913536571637425}, []float64{0.26106995883500667}, 0.1},
+	}
+	poly := func(k float64, rs []float64) []float64 {
+		p := []float64{k}
+		for _, r := range rs {
+			next := make([]float64, len(p)+1)
+			for i, v := range p {
+				next[i] += v
+				next[i+1] -= r * v
+			}
+			p = next
+		}
+		return p
+	}
+	bisect := func(a, b float64, f func(float64) float64) float64 {
+		fa := f(a)
+		for range 200 {
+			m := (a + b) / 2
+			if m <= a || m >= b {
+				break
+			}
+			if fm := f(m); (fm > 0) == (fa > 0) {
+				a, fa = m, fm
+			} else {
+				b = m
+			}
+		}
+		return (a + b) / 2
+	}
+	noise := func(th float64) float64 { return 1e-15 / math.Pow(2*math.Cos(th/2), 4) }
+	for _, c := range cases {
+		loop := func(th float64) complex128 {
+			z := cmplx.Rect(1, th)
+			h := complex(c.k, 0) / cmplx.Pow(cmplx.Rect(2*math.Cos(th/2), th/2), 4)
+			for _, q := range c.zs {
+				h *= z - complex(q, 0)
+			}
+			for _, q := range c.ps {
+				h /= z - complex(q, 0)
+			}
+			return h
+		}
+		logMag := func(th float64) float64 { return math.Log(cmplx.Abs(loop(th))) }
+		phase := func(th float64) float64 { return phaseOffsetDeg(loop(th)) }
+		var thg, thp []float64
+		const N = 100000
+		for i := 2; i < N; i++ {
+			a, b := math.Pi*(1-math.Pow(1-float64(i-1)/N, 3)), math.Pi*(1-math.Pow(1-float64(i)/N, 3))
+			if (logMag(a) > 0) != (logMag(b) > 0) {
+				thg = append(thg, bisect(a, b, logMag))
+			}
+			if p := phase(b); (p > 0) != (phase(a) > 0) && math.Abs(p) < 90 && b < math.Pi-1e-8 {
+				thp = append(thp, bisect(a, b, phase))
+			}
+		}
+		r, err := (&TransferFunc{Num: [][][]float64{{poly(c.k, c.zs)}}, Den: [][]float64{poly(1, append(c.ps, -1, -1, -1, -1))}, Dt: c.dt}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Fatalf("k %g zs %v ps %v dt %g: %v", c.k, c.zs, c.ps, c.dt, err)
+		}
+		ok := len(res.GainCrossFreqs) == len(thg) && len(res.PhaseCrossFreqs) == len(thp)
+		for i := 0; ok && i < len(thg); i++ {
+			th, e := thg[i], noise(thg[i])
+			ok = math.Abs(res.GainCrossFreqs[i]*c.dt-th) <= 1e-9*th+e*(math.Pi-th) &&
+				math.Abs(res.PhaseMargins[i]-phaseMarginDeg(loop(th))) <= 1e-4+e*180/math.Pi
+		}
+		for i := 0; ok && i < len(thp); i++ {
+			th, e := thp[i], noise(thp[i])
+			ok = math.Abs(res.PhaseCrossFreqs[i]*c.dt-th) <= 1e-9*th+e &&
+				math.Abs(res.GainMargins[i]+20*math.Log10(cmplx.Abs(loop(th)))) <= 1e-6+10*e
+		}
+		if !ok {
+			t.Errorf("k %g zs %v ps %v dt %g: wgc %v pm %v wpc %v gm %v, want θ %v %v", c.k, c.zs, c.ps, c.dt,
+				res.GainCrossFreqs, res.PhaseMargins, res.PhaseCrossFreqs, res.GainMargins, thg, thp)
+		}
+	}
+}
+
 // ZQL2JH: k·z^−d with k < 0 is real negative at θ = 2πm/d, |L| = |k|, so
 // phase crossovers there with GM = −20·log10|k|. L(0) = k makes the phase
 // error 0 at ω = 0, and a crossover at twice another has it 0 at half its

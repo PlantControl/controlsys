@@ -125,15 +125,20 @@ func (e *sisoEval) at(w float64) complex128 {
 // sit on a pole the solve cannot resolve, such as a pencil root next to an
 // integrator; ok is false where at would fail.
 func (e *sisoEval) try(w float64) (h complex128, ok bool) {
+	return tryEval(e, func() complex128 { return e.at(w) })
+}
+
+// tryEval runs g, which evaluates through e, with try's failure handling.
+func tryEval[T any](e *sisoEval, g func() T) (v T, ok bool) {
 	saved := e.err
 	e.err = nil
-	h = e.at(w)
+	v = g()
 	ok = e.err == nil
 	if !ok && e.skipped == nil {
 		e.skipped = e.err
 	}
 	e.err = saved
-	return h, ok
+	return v, ok
 }
 
 // checkSkipped returns the evaluation error when try skipped failures and
@@ -982,10 +987,11 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 // unevaluable ω is rejected.
 func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
 	ft := func(w float64) float64 {
-		if _, ok := r.eval.try(w); !ok {
+		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if !ok {
 			return math.NaN()
 		}
-		return f(w)
+		return v
 	}
 	sgn := func(v float64) int {
 		if math.IsNaN(v) || math.Abs(v) <= tol {
@@ -1093,16 +1099,23 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // candidate is dropped only when L cannot be evaluated at half its
 // frequency, or at itself: a pencil root that the pole's rounding moved off
 // 0. |f| ≈ 0 at half its frequency is no test there, as for
-// k/((z−1)²·z^d), whose crossovers include twice one another.
+// k/((z−1)²·z^d), whose crossovers include twice one another. f is only
+// probed where L evaluates: a bracket next to a pole cluster, as at z = −1
+// of k/(z+1)⁴, may reach a numerically singular ω, which rejects it, and a
+// refinement that meets one there ends off the crossing and is dropped.
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
 	}
-	within := func(w float64) bool {
-		_, ok := r.eval.try(w)
-		return ok && math.Abs(f(w)) <= tol
+	ft := func(w float64) float64 {
+		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if !ok {
+			return math.NaN()
+		}
+		return v
 	}
+	within := func(w float64) bool { return math.Abs(ft(w)) <= tol }
 	h0, ok := r.eval.try(0)
 	pole0 := !ok || cmplx.IsInf(h0)
 	zeroRoot := !pole0 && math.Abs(f(0)) <= tol
@@ -1121,13 +1134,13 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		best := w
 		for d := 1e-12; d <= 1e-2; d *= 100 {
 			a, b := w-min(d*w, lo), w+min(d*w, hi)
-			if a >= b || !(f(a)*f(b) <= 0) {
+			if a >= b || !(ft(a)*ft(b) <= 0) {
 				continue
 			}
-			best = refineCrossing(a, b, f)
+			best = refineCrossing(a, b, ft)
 			break
 		}
-		v := math.Abs(f(best))
+		v := math.Abs(ft(best))
 		if _, ok := r.eval.try(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {
 			continue
 		}
