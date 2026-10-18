@@ -945,7 +945,7 @@ func (x *highFrequencyExpansion) horizon(level, wMin, wMax float64, modelMax fun
 		}
 		return true
 	}
-	for T := 1 / max(x.e.normA*4+1, 1, wMin); T*wMax >= 1; T /= 2 {
+	for T := 1 / max(x.e.minNormA()*4+1, 1, wMin); T*wMax >= 1; T /= 2 {
 		if holds(T) {
 			return 1 / T, true
 		}
@@ -993,7 +993,7 @@ func (x *highFrequencyExpansion) remainder(E, q float64) float64 {
 // t = T, or 0 when none is finite.
 func (x *highFrequencyExpansion) radius(T float64) float64 {
 	best, wBest := math.Inf(1), 0.0
-	for w := x.e.normA*1.01 + 1e-9; w*T < 0.9; w *= 1.2 {
+	for w := x.e.minNormA()*1.01 + 1e-9; w*T < 0.9; w *= 1.2 {
 		if b := x.remainder(x.e.tailGain(0, w), w*T); b < best {
 			best, wBest = b, w
 		}

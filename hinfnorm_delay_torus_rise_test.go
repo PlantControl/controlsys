@@ -37,6 +37,8 @@ func torusRiseSeed(kind string, i int) torusRiseCase {
 	case "irr3":
 		r1, r2 := irr(), irr()
 		z.tau, z.cls, z.k, z.dim = []float64{h, r1 * h, r2 * h}, []int{0, 1, 2}, []int{1, 1, 1}, 3
+	case "irr2":
+		z.tau, z.cls, z.k, z.dim = []float64{h, irr() * h}, []int{0, 1}, []int{1, 1}, 2
 	case "mixed":
 		k := 2 + rng.IntN(2)
 		z.tau, z.cls, z.k, z.dim = []float64{h, float64(k) * h, irr() * h}, []int{0, 0, 1}, []int{1, k, 1}, 2

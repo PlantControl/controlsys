@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/bits"
@@ -39,17 +40,13 @@ type delayLFT struct {
 	ioDelay *mat.Dense
 	svd     *complexSVDWorkspace
 
-	poles []complex128
-	normA float64
-	// spectral norms of C, C2, B, B2 and the D blocks
-	c1, c2, b1, b2     float64
-	d11, d12, d21, d22 float64
-	// entrywise |D12|, |D21|, |D22|, the row norms of C, C2, the column
-	// norms of B, B2, and Q0 = (I − |D22|)⁻¹ with r0 = ‖Q0‖ (nil, +Inf when
-	// ρ(|D22|) >= 1)
+	poles              []complex128
+	stateBounds                     // of the given realization
+	bal                *stateBounds // of the jointly balanced one, nil without states
+	d11, d12, d21, d22 float64      // spectral norms of the D blocks
+	// entrywise |D12|, |D21|, |D22| and Q0 = (I − |D22|)⁻¹ with r0 = ‖Q0‖
+	// (nil, +Inf when ρ(|D22|) >= 1)
 	abs12, abs21, abs22 []float64
-	rowC1, rowC2        []float64
-	colB1, colB2        []float64
 	q0                  []float64
 	r0                  float64
 	entrywise           bool // norm bounds cannot certify the w = ∞ tail
@@ -59,8 +56,9 @@ type delayLFT struct {
 	d22c                []complex128
 	err                 error
 	sigmaCalls          int
-	gInfCalls           int       // samples of σ_max(G∞), see highFrequencyGain.at
-	scanW, scanV        []float64 // scan buffers
+	gInfCalls           int                 // samples of σ_max(G∞), see highFrequencyGain.at
+	scanW, scanV        []float64           // scan buffers
+	gapMemo             map[float64]float64 // tailGain(0, w)
 }
 
 func newDelayLFT(sys *System) (*delayLFT, error) {
@@ -94,24 +92,84 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 			return nil, err
 		}
 		e.poles = poles
-		e.normA = sn.norm(sys.A)
-		e.c1, e.c2 = sn.norm(sys.C), sn.norm(lft.C2)
-		e.b1, e.b2 = sn.norm(sys.B), sn.norm(lft.B2)
 	}
 	e.d11, e.d12 = sn.norm(sys.D), sn.norm(lft.D12)
 	e.d21, e.d22 = sn.norm(lft.D21), sn.norm(lft.D22)
 	e.r0 = math.Inf(1)
 	e.entrywise = nd > 0 && (e.d22 >= 1 || math.Pow(1+e.d22, float64(nd))-1 >= 1)
+	e.stateBounds = newStateBounds(&sn, sys.A, sys.B, lft.B2, sys.C, lft.C2, p, m, nd, e.entrywise)
+	if n > 0 && sys.E == nil {
+		e.bal = balancedStateBounds(&sn, sys, e.entrywise)
+	}
 	if e.entrywise {
 		e.abs12, e.abs21, e.abs22 = absEntries(lft.D12, p, nd), absEntries(lft.D21, nd, m), absEntries(lft.D22, nd, nd)
-		e.rowC1, e.rowC2 = rowNorms(sys.C, p), rowNorms(lft.C2, nd)
-		e.colB1, e.colB2 = colNorms(sys.B, m), colNorms(lft.B2, nd)
 		if q0, ok := nonnegResolvent(e.abs22, nd); ok {
 			e.q0, e.r0 = q0, sn.norm(mat.NewDense(nd, nd, q0))
 		}
 	}
 	e.directFeedthrough = lftHasDirectFeedthrough(lft)
 	return e, nil
+}
+
+// stateBounds holds the norms of a state-space realization of the LFT blocks
+// Hij = Dij + Ci(sI−A)⁻¹Bj that bound them for |s| > ‖A‖: ‖A‖₂, the spectral
+// norms of C, C2, B, B2 and, for the entrywise bounds, the row norms of C,
+// C2 and the column norms of B, B2. Each Hij is invariant under state
+// similarity, so the bounds of any realization hold, and their minimum.
+type stateBounds struct {
+	normA          float64
+	c1, c2, b1, b2 float64
+	rowC1, rowC2   []float64
+	colB1, colB2   []float64
+}
+
+func newStateBounds(sn *spectralNormer, a, b1, b2, c1, c2 *mat.Dense, p, m, nd int, entrywise bool) stateBounds {
+	s := stateBounds{normA: sn.norm(a), c1: sn.norm(c1), c2: sn.norm(c2), b1: sn.norm(b1), b2: sn.norm(b2)}
+	if entrywise {
+		s.rowC1, s.rowC2 = rowNorms(c1, p), rowNorms(c2, nd)
+		s.colB1, s.colB2 = colNorms(b1, m), colNorms(b2, nd)
+	}
+	return s
+}
+
+// balancedStateBounds returns the bounds of (A, [B B2], [C; C2]) balanced
+// jointly: a companion form's ‖A‖₂ can exceed its spectral radius by orders
+// of magnitude, which would push the gain tail bound out to ‖A‖₂.
+func balancedStateBounds(sn *spectralNormer, sys *System, entrywise bool) *stateBounds {
+	n, m, p := sys.Dims()
+	lft := sys.LFT
+	nd := len(lft.Tau)
+	mm, pp := m+nd, p+nd
+	br := balancedRealization{n: n, m: mm, p: pp, a: make([]float64, n*n), b: make([]float64, n*mm), c: make([]float64, pp*n)}
+	a := sys.A.RawMatrix()
+	copyStrided(br.a, n, a.Data, a.Stride, n, n)
+	for k, blk := range []*mat.Dense{sys.B, lft.B2} {
+		if blk != nil && !blk.IsEmpty() {
+			raw := blk.RawMatrix()
+			copyStrided(br.b[k*m:], mm, raw.Data, raw.Stride, n, raw.Cols)
+		}
+	}
+	for k, blk := range []*mat.Dense{sys.C, lft.C2} {
+		if blk != nil && !blk.IsEmpty() {
+			raw := blk.RawMatrix()
+			copyStrided(br.c[k*p*n:], n, raw.Data, raw.Stride, raw.Rows, n)
+		}
+	}
+	br.balance(nil)
+	sub := func(data []float64, stride, r0, r, c0, c int) *mat.Dense {
+		if r == 0 || c == 0 {
+			return nil
+		}
+		out := mat.NewDense(r, c, nil)
+		for i := range r {
+			copy(out.RawRowView(i), data[(r0+i)*stride+c0:(r0+i)*stride+c0+c])
+		}
+		return out
+	}
+	s := newStateBounds(sn, mat.NewDense(n, n, br.a),
+		sub(br.b, mm, 0, n, 0, m), sub(br.b, mm, 0, n, m, nd),
+		sub(br.c, n, 0, p, 0, n), sub(br.c, n, p, nd, 0, n), p, m, nd, entrywise)
+	return &s
 }
 
 // spectralNorm returns an upper bound on σ_max(m): the computed largest
@@ -257,8 +315,39 @@ func (e *delayLFT) normalizedChar(w float64) complex128 {
 func (e *delayLFT) normalizedTail(r float64) func(float64) float64 {
 	k := float64(min(e.n, e.nd))
 	return func(w float64) float64 {
-		return math.Pow(1+r*e.h(0, e.c2, e.b2, w), k) - 1
+		h := math.Inf(1)
+		for _, s := range e.realizations() {
+			h = min(h, s.h(0, s.c2, s.b2, w))
+		}
+		return math.Pow(1+r*h, k) - 1
 	}
+}
+
+// realizations returns the state bounds of the given realization and, when
+// there are states, of the balanced one.
+func (e *delayLFT) realizations() []*stateBounds {
+	if e.bal == nil {
+		return []*stateBounds{&e.stateBounds}
+	}
+	return []*stateBounds{&e.stateBounds, e.bal}
+}
+
+// minBound is min(a, b) with a NaN b, an undefined bound such as 0·∞
+// below a realization's ‖A‖₂, taken as +Inf.
+func minBound(a, b float64) float64 {
+	if math.IsNaN(b) {
+		return a
+	}
+	return min(a, b)
+}
+
+// minNormA is the smallest ‖A‖₂ over realizations, past which the bounds
+// of tail and tailGain are finite.
+func (e *delayLFT) minNormA() float64 {
+	if e.bal == nil {
+		return e.normA
+	}
+	return min(e.normA, e.bal.normA)
 }
 
 // tail bounds |det(I − H22Δ) − 1| for Re s ≥ 0, |s| ≥ w by the smaller of
@@ -269,10 +358,18 @@ func (e *delayLFT) normalizedTail(r float64) func(float64) float64 {
 // at w = ∞ when D22 is nilpotent in pattern, a cascade of delays with no
 // algebraic delay cycle.
 func (e *delayLFT) tail(w float64) float64 {
-	h := e.h(e.d22, e.c2, e.b2, w)
+	bound := math.Inf(1)
+	for _, s := range e.realizations() {
+		bound = minBound(bound, e.tailOf(s, w))
+	}
+	return bound
+}
+
+func (e *delayLFT) tailOf(s *stateBounds, w float64) float64 {
+	h := s.h(e.d22, s.c2, s.b2, w)
 	bound := math.Pow(1+h, float64(e.nd)) - 1
-	if g := e.resolvent(w); e.entrywise && e.nd <= maxPermanentDelays && !math.IsInf(g, 1) {
-		p22 := entryBound(e.abs22, e.rowC2, e.colB2, e.nd, e.nd, g)
+	if g := e.resolventOf(s, w); e.entrywise && e.nd <= maxPermanentDelays && !math.IsInf(g, 1) {
+		p22 := entryBound(e.abs22, s.rowC2, s.colB2, e.nd, e.nd, g)
 		bound = min(bound, permanentOfIPlus(p22, e.nd)-1)
 	}
 	return bound
@@ -282,14 +379,14 @@ func (e *delayLFT) tail(w float64) float64 {
 const maxPermanentDelays = 12
 
 // resolvent bounds ‖(sI−A)⁻¹‖ for |s| ≥ w; 0 without states or at w = ∞.
-func (e *delayLFT) resolvent(w float64) float64 {
+func (e *delayLFT) resolventOf(s *stateBounds, w float64) float64 {
 	switch {
 	case e.n == 0 || math.IsInf(w, 1):
 		return 0
-	case w <= e.normA:
+	case w <= s.normA:
 		return math.Inf(1)
 	}
-	return 1 / (w - e.normA)
+	return 1 / (w - s.normA)
 }
 
 // entryBound returns |D| + rows·colsᵀ·g, an entrywise bound on
@@ -448,15 +545,15 @@ func (e *delayLFT) unstableDifferenceOperator() bool {
 }
 
 // h bounds ‖D + C(sI−A)⁻¹B‖ for |s| ≥ w.
-func (e *delayLFT) h(d, c, b, w float64) float64 {
+func (s *stateBounds) h(d, c, b, w float64) float64 {
 	cb := c * b
 	if cb == 0 || math.IsInf(w, 1) {
 		return d
 	}
-	if w <= e.normA {
+	if w <= s.normA {
 		return math.Inf(1)
 	}
-	return d + cb/(w-e.normA)
+	return d + cb/(w-s.normA)
 }
 
 // balancedTail is tail, lowered to the same bound in the balanced
@@ -471,11 +568,12 @@ func (e *delayLFT) balancedTail() func(float64) float64 {
 	a, b2, c2 := mat.NewDense(e.n, e.n, br.a), mat.NewDense(e.n, e.nd, br.b), mat.NewDense(e.nd, e.n, br.c)
 	var sn spectralNormer
 	bal := *e
+	bal.gapMemo = nil
 	bal.normA, bal.c2, bal.b2 = sn.norm(a), sn.norm(c2), sn.norm(b2)
 	if bal.entrywise {
 		bal.rowC2, bal.colB2 = rowNorms(c2, e.nd), colNorms(b2, e.nd)
 	}
-	return func(w float64) float64 { return min(e.tail(w), bal.tail(w)) }
+	return func(w float64) float64 { return min(e.tail(w), bal.tailOf(&bal.stateBounds, w)) }
 }
 
 // loop returns the delay loop of the Nyquist test. A neutral loop whose tail
@@ -577,6 +675,12 @@ type highFrequencyGain struct {
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
 	gridV []float64 // σ_max(G∞) at the cell centres, see gridValues
+
+	// flat marks the classes G∞ does not depend on, see flatClasses; ridge
+	// is the gain on the torus of the others, which below certifies in
+	// their place. Both nil when no class, or every class, is flat.
+	flat  []bool
+	ridge *highFrequencyGain
 }
 
 func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
@@ -644,7 +748,76 @@ func newHighFrequencyGainOn(e *delayLFT, grp, mult []int, dim int) *highFrequenc
 		n1221: e.d12 * e.d21, n22: e.d22,
 	}
 	h.lip = h.lipschitz()
+	if dim > 1 {
+		h.flatClasses()
+	}
 	return h
+}
+
+// flatClasses sets flat and ridge. Delay i enters G∞ = D11 + D12·Δ·
+// (I − D22Δ)⁻¹·D21 only when z_i is reached from the input, through D21 and
+// the edges w_j → z_k of D22, and w_i reaches the output through D22 and
+// D12: otherwise z_i ≡ 0 or w_i is never read, (I − D22Δ) being block
+// triangular in the unreached delays, so G∞ is exactly independent of δ_i.
+// A class all of whose delays are such is flat: S = σ_max(G∞) is constant
+// along it, a ridge where below would split cells along it in vain.
+func (h *highFrequencyGain) flatClasses() {
+	nd, p, m := h.e.nd, h.e.p, h.e.m
+	in, out := make([]bool, nd), make([]bool, nd)
+	for i := range nd {
+		in[i] = slices.ContainsFunc(h.d21[i*m:(i+1)*m], func(v complex128) bool { return v != 0 })
+		for r := range p {
+			out[i] = out[i] || h.d12[r*nd+i] != 0
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for i := range nd {
+			for j := range nd {
+				if h.d22[i*nd+j] == 0 {
+					continue
+				}
+				if in[j] && !in[i] {
+					in[i], changed = true, true
+				}
+				if out[i] && !out[j] {
+					out[j], changed = true, true
+				}
+			}
+		}
+	}
+	flat := make([]bool, h.dim)
+	for c := range flat {
+		flat[c] = true
+	}
+	for i, c := range h.grp {
+		if in[i] && out[i] {
+			flat[c] = false
+		}
+	}
+	n := 0
+	idx := make([]int, h.dim)
+	for c, f := range flat {
+		if !f {
+			idx[c] = n
+			n++
+		}
+	}
+	if n == h.dim || n == 0 {
+		return
+	}
+	grp, mult := make([]int, nd), make([]int, nd)
+	for i, c := range h.grp {
+		mult[i] = 1
+		if flat[c] {
+			continue
+		}
+		grp[i] = idx[c]
+		if h.k != nil {
+			mult[i] = int(h.k[i])
+		}
+	}
+	h.flat, h.ridge = flat, newHighFrequencyGainOn(h.e, grp, mult, n)
 }
 
 // lipschitz bounds the Lipschitz constant of G∞ in φ, in the max-norm of
@@ -986,6 +1159,13 @@ func (h *highFrequencyGain) gridValues() []float64 {
 // Cells that may exceed level are split until none remain, a sample exceeds
 // level, or the sample budget is spent.
 func (h *highFrequencyGain) below(level float64, budget int) bool {
+	if r := h.ridge; r != nil {
+		n := r.samples
+		ok := r.below(level, n+budget-h.samples)
+		h.samples += r.samples - n
+		h.over = max(h.over, r.over)
+		return ok
+	}
 	nd := h.dim
 	cells, r := h.torusGrid()
 	var bufs [2][]float64
@@ -1069,15 +1249,38 @@ func (h *highFrequencyGain) period() float64 {
 // (I − M0EΔ)⁻¹M0 has ‖M‖ <= m = r/(1 − rε) and M − M0 = M·EΔ·M0, so the loop
 // gap is at most (h12 − d12)·m·h21 + d12·r·m·ε·h21 + d12·r·(h21 − d21).
 func (e *delayLFT) tailGain(lim, w float64) float64 {
-	h11 := e.h(e.d11, e.c1, e.b1, w)
-	h12 := e.h(e.d12, e.c1, e.b2, w)
-	h21 := e.h(e.d21, e.c2, e.b1, w)
-	h22 := e.h(e.d22, e.c2, e.b2, w)
+	if lim == 0 {
+		if g, ok := e.gapMemo[w]; ok {
+			return g
+		}
+	}
+	g := math.Inf(1)
+	for _, s := range e.realizations() {
+		g = minBound(g, e.tailGainOf(s, lim, w))
+	}
+	if lim == 0 && len(e.gapMemo) < maxGapMemo {
+		if e.gapMemo == nil {
+			e.gapMemo = map[float64]float64{}
+		}
+		e.gapMemo[w] = g
+	}
+	return g
+}
+
+// maxGapMemo caps the memo of tailGain(0, w), which the radius searches
+// query on one geometric sequence of w.
+const maxGapMemo = 4096
+
+func (e *delayLFT) tailGainOf(s *stateBounds, lim, w float64) float64 {
+	h11 := s.h(e.d11, s.c1, s.b1, w)
+	h12 := s.h(e.d12, s.c1, s.b2, w)
+	h21 := s.h(e.d21, s.c2, s.b1, w)
+	h22 := s.h(e.d22, s.c2, s.b2, w)
 	loop := math.Inf(1)
 	if h22 < 1 {
 		loop = h12*h21/(1-h22) - e.d12*e.d21/(1-e.d22)
 	}
-	loop = min(loop, e.entrywiseLoopGap(w))
+	loop = min(loop, e.entrywiseLoopGap(s, w))
 	if math.IsInf(loop, 1) {
 		d := e.difference()
 		r := min(d.rhp, d.torus)
@@ -1091,18 +1294,18 @@ func (e *delayLFT) tailGain(lim, w float64) float64 {
 
 // entrywiseLoopGap returns ‖P12·Q·P21 − |D12|·Q0·|D21|‖ for |s| ≥ w, or +Inf
 // when ρ(P22) >= 1.
-func (e *delayLFT) entrywiseLoopGap(w float64) float64 {
+func (e *delayLFT) entrywiseLoopGap(s *stateBounds, w float64) float64 {
 	nd, p, m := e.nd, e.p, e.m
 	if e.q0 == nil {
 		return math.Inf(1)
 	}
-	g := e.resolvent(w)
-	q, ok := nonnegResolvent(entryBound(e.abs22, e.rowC2, e.colB2, nd, nd, g), nd)
+	g := e.resolventOf(s, w)
+	q, ok := nonnegResolvent(entryBound(e.abs22, s.rowC2, s.colB2, nd, nd, g), nd)
 	if !ok {
 		return math.Inf(1)
 	}
-	p12 := mat.NewDense(p, nd, entryBound(e.abs12, e.rowC1, e.colB2, p, nd, g))
-	p21 := mat.NewDense(nd, m, entryBound(e.abs21, e.rowC2, e.colB1, nd, m, g))
+	p12 := mat.NewDense(p, nd, entryBound(e.abs12, s.rowC1, s.colB2, p, nd, g))
+	p21 := mat.NewDense(nd, m, entryBound(e.abs21, s.rowC2, s.colB1, nd, m, g))
 	var gap, ref mat.Dense
 	gap.Product(p12, mat.NewDense(nd, nd, q), p21)
 	ref.Product(mat.NewDense(p, nd, slices.Clone(e.abs12)), mat.NewDense(nd, nd, e.q0), mat.NewDense(nd, m, slices.Clone(e.abs21)))
@@ -1220,7 +1423,8 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // bound stays below the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
 // sample exceeds it on the grid nor past it (see peakPastLimit, and
-// torusPastLimit for several classes of delays). Between
+// torusPastLimit for several classes of delays, whose far passages decide a
+// tail the span cannot close). Between
 // samples, up to the grid end, the peak is certified to peakCertTol by
 // descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
@@ -1231,7 +1435,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	}
 	lim, period := e.d11, 0.0
 	var hfx *highFrequencyExpansion
-	var torus *highFrequencyGain
+	var torus, tailTorus *highFrequencyGain
 	if e.directFeedthrough {
 		hf := newHighFrequencyGain(e)
 		period = hf.period()
@@ -1246,6 +1450,9 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 			torus = hf
 		default:
 			return 0, 0, fmt.Errorf("gain may peak as ω → ∞ through a delayed feedthrough: %w", errDelayPeakUnsupported)
+		}
+		if hf.dim > 1 {
+			tailTorus = hf
 		}
 		hfx = newHighFrequencyExpansion(e, hf)
 	}
@@ -1281,10 +1488,11 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		return ext, b, w, err
 	}
 	hi := rGrid
+	var far torusFar
 	if torus != nil {
 		var found *pastLimit
 		var final bool
-		if lim, found, hi, final, err = e.torusPastLimit(torus, best, wBest, tol, rGrid, math.Pi/(8*l.tau), span, points); err != nil {
+		if lim, found, hi, final, far, err = e.torusPastLimit(torus, best, wBest, tol, rGrid, math.Pi/(8*l.tau), span, points); err != nil {
 			return 0, 0, err
 		}
 		if found != nil {
@@ -1314,7 +1522,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 	}
 	for {
 		level := best * (1 + tol)
-		R0 := max(hi, 2*e.normA+1)
+		R0 := max(hi, 2*e.minNormA()+1)
 		R, closed := R0, false
 		for range 200 {
 			if closed = e.tailGain(lim, R) <= level; closed {
@@ -1335,10 +1543,10 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 				R, closed = 2*R0, true
 			}
 		}
-		if torus != nil && (!closed || (R-hi)*8*l.tau/math.Pi > torusTailPoints) {
+		if tailTorus != nil && (!closed || (R-hi)*8*l.tau/math.Pi > torusTailPoints) {
 			spent := 0
 			for Rt := R0; (!closed || Rt < R) && Rt-rGrid <= span && spent < 2; Rt *= 2 {
-				ok, out := e.torusTailBelow(torus, lim, level, Rt, 1<<18)
+				ok, out := e.torusTailBelow(tailTorus, lim, level, Rt, 1<<18)
 				if ok {
 					R, closed = Rt, true
 					break
@@ -1350,6 +1558,18 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		}
 		if !closed {
 			return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
+		}
+		if R-rGrid > span && far != nil {
+			f, err := far(best, wBest, hi)
+			if err != nil && !errors.Is(err, errTorusUnsupported) {
+				return 0, 0, err
+			}
+			if err == nil {
+				if f.ext == nil {
+					return f.b, f.w, nil
+				}
+				return e.certify(l, f.ext, f.b, f.w)
+			}
 		}
 		if R-rGrid > span {
 			return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)
@@ -1401,7 +1621,7 @@ func (e *delayLFT) peakPastLimit(lim, tol, period float64, hfx *highFrequencyExp
 		}
 		return &pastLimit{ext, b, w}, nil
 	}
-	R0 := max(*hi, 2*e.normA+1)
+	R0 := max(*hi, 2*e.minNormA()+1)
 	R := R0 + max(R0, 2*period)
 	dense := R
 	finite, W, decided := false, 0.0, false
