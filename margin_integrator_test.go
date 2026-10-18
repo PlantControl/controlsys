@@ -1,6 +1,8 @@
 package controlsys
 
 import (
+	"context"
+	"errors"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -416,5 +418,47 @@ func TestAllMarginNegativeGainDelayHarmonics(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// 6WSXWR: rounded poles of z⁴ − 3.927z³ + … at 0.9329, 0.99437 and
+// 1 ± 1.26e-6. The L − L~ pencil root next to the pair lands at ω ≈ 1.6e-4,
+// and polish probed f through the sticky evaluation at a bracket end where
+// the solve is singular, failing AllMargin and with it TunePID and Pidtune's
+// crossover search. Oracle: mpmath at 60 digits on the transfer function,
+// which gives the crossover, PM and the Nyquist GM below. Its phase
+// crossover at ω ≈ 8.27e-6, |L| ≈ 5.5e13, lies where the state-space solve
+// is singular in double, as at every ω ≤ 1e-4, so only ω ≥ 1e-3 is checked.
+func TestAllMarginRoundedUnitPolePair(t *testing.T) {
+	num := []float64{0.5296264797589852, -0.49398687205654906}
+	den := []float64{1, -3.927287723431127, 5.782240810121571, -3.7826184499497617, 0.9276653632593171}
+	dt := 0.0422252269048428
+	tf := &TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: dt}
+	r, err := tf.StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := AllMargin(r.Sys)
+	if err != nil {
+		t.Fatalf("AllMargin: %v", err)
+	}
+	var wpc, gm []float64
+	for i, w := range res.PhaseCrossFreqs {
+		if w >= 1e-3 {
+			wpc, gm = append(wpc, w), append(gm, res.GainMargins[i])
+		}
+	}
+	const wgc, pm, gmNyq = 19.74525666665513, -161.30454669064147, 23.558862928861675
+	if len(res.GainCrossFreqs) != 1 || math.Abs(res.GainCrossFreqs[0]-wgc) > 1e-9*wgc || math.Abs(res.PhaseMargins[0]-pm) > 1e-6 ||
+		len(wpc) != 1 || math.Abs(wpc[0]-math.Pi/dt) > 1e-9*wpc[0] || math.Abs(gm[0]-gmNyq) > 1e-8 {
+		t.Errorf("wgc %v pm %v wpc %v gm %v, want [%v] [%v] [%v] [%v]", res.GainCrossFreqs, res.PhaseMargins,
+			res.PhaseCrossFreqs, res.GainMargins, wgc, pm, math.Pi/dt, gmNyq)
+	}
+	tr, err := TunePID(context.Background(), r.Sys, PidtunePIDF, PIDTuningOptions{})
+	pidCheckZPoleResult(t, "TunePID PIDF", num, den, dt, tr, err)
+	if p, err := Pidtune(r.Sys, PidtunePIDF, 0, nil); err != nil && !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Errorf("Pidtune PIDF: %v", err)
+	} else if err == nil && !pidtuneExactSchurStable(t, p, num, den, dt) {
+		t.Errorf("Pidtune PIDF: unstable design %+v", *p)
 	}
 }
