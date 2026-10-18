@@ -43,6 +43,17 @@ type axisPole struct {
 	w    float64
 	mult int
 	gap  float64 // indentation radius, set by indent; 0 selects axisGap
+	// order is the pole count of L within the indentation, mult plus the
+	// open-loop poles it encloses (see indentCluster); 0 selects mult. inner
+	// counts the enclosed RHP poles, which leave the contour's interior.
+	order, inner int
+}
+
+func (a axisPole) poles() int {
+	if a.order > 0 {
+		return a.order
+	}
+	return a.mult
 }
 
 // delayNyquist is the verdict of the Nyquist test. With axisRoot set, χ has a
@@ -520,6 +531,9 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 		return delayNyquist{}, fmt.Errorf("winding %.3g turns is not resolved to an integer: %w", turns, errDelayLoopUnsupported)
 	}
 	out.roots = l.rhp - int(w)
+	for _, a := range l.axis {
+		out.roots -= a.inner
+	}
 	if out.roots < 0 {
 		return delayNyquist{}, fmt.Errorf("negative closed-loop root count %d: %w", out.roots, errDelayLoopUnsupported)
 	}
@@ -621,7 +635,7 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 	for _, a := range axis {
 		g := a.radius(l)
 		segs = append(segs, nyquistSegment{from: start, to: a.w - g, jump: jump})
-		start, jump = a.w+g, a.mult
+		start, jump = a.w+g, a.poles()
 	}
 	segs = append(segs, nyquistSegment{from: start, to: R, jump: jump})
 	for i := range segs {
@@ -646,11 +660,12 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 // stays within a tenth of the other poles and of the delay scale. An
 // enlarged radius needs |L| >= 1e3 on that decade, so that χ ≈ s^m + c has
 // no root within it. A pole at which
-// no radius gives finite samples returns errDelayLoopUnsupported: a failed
+// no radius gives finite samples is left to indentCluster: a failed
 // evaluation does not show a root.
 func (l *delayLoop) indent() (float64, bool, error) {
 	for i := range l.axis {
 		a := &l.axis[i]
+		a.order, a.inner = 0, 0
 		g0 := l.axisGap(a.w)
 		gmax := l.indentLimit(a.w)
 		found := false
@@ -671,10 +686,87 @@ func (l *delayLoop) indent() (float64, bool, error) {
 			break
 		}
 		if !found {
-			return 0, false, fmt.Errorf("L not finite near the axis pole ω=%g: %w", a.w, errDelayLoopUnsupported)
+			if err := l.indentCluster(a); err != nil {
+				return 0, false, err
+			}
 		}
 	}
 	return 0, false, nil
+}
+
+// indentCluster sets the indentation of the pole a at the origin when L
+// cannot be evaluated within indentLimit, as for a multiple integrator with
+// another pole close by. The indentation encloses the k open-loop poles
+// nearest to the origin, at most D away, for growing k, with a radius g in
+// [10D, 0.1·min(next pole, 1, 1/τ)] (from beyond indentLimit for k = 0).
+// On its arc L ≈ c·s^-order, order = mult + k, so the arc turns the phase
+// by order·π, up to 0.1 rad per pole. The growth of |L| over [g, 10g] must
+// match that of the known poles within 0.3 decades, so that no zero of L or
+// hidden mode sits nearby, and |L| >= 1e3 at 10g, so that 1+L has no zero
+// within the indentation. Enclosed RHP poles leave the contour's interior
+// and are counted in inner. Anything else, and an axis pole off the
+// origin, returns errDelayLoopUnsupported, never a verdict.
+func (l *delayLoop) indentCluster(a *axisPole) error {
+	unevaluable := fmt.Errorf("L not finite near the axis pole ω=%g: %w", a.w, errDelayLoopUnsupported)
+	if a.w != 0 {
+		return unevaluable
+	}
+	type member struct {
+		d     float64
+		class poleStabilityClass
+	}
+	var others []member
+	for _, p := range l.poles {
+		if d := cmplx.Abs(p); d > 1e-6 {
+			others = append(others, member{d, classifyPoleStability(p, true, poleStabilityTolerance(p))})
+		}
+	}
+	slices.SortFunc(others, func(x, y member) int { return cmp.Compare(x.d, y.d) })
+	lim := 1.0
+	if l.tau > 0 {
+		lim = min(lim, 1/l.tau)
+	}
+	growth := func(g float64) float64 {
+		v := float64(a.mult)
+		for _, p := range l.poles {
+			if cmplx.Abs(p) > 1e-6 {
+				v += math.Log10(cmplx.Abs(complex(0, 10*g)-p) / cmplx.Abs(complex(0, g)-p))
+			}
+		}
+		return v
+	}
+	step := math.Sqrt(math.Sqrt(10))
+	inner := 0
+	for k := 0; k <= len(others); k++ {
+		lo := l.indentLimit(0) * step
+		if k > 0 {
+			m := others[k-1]
+			if m.class == poleClassBoundary {
+				break
+			}
+			if m.class == poleClassUnstable {
+				inner++
+			}
+			lo = 10 * m.d
+		}
+		next := lim
+		if k < len(others) {
+			next = min(next, others[k].d)
+		}
+		for g := lo; g <= 0.1*next; g *= step {
+			near, ok1 := l.sample(g)
+			far, ok2 := l.sample(10 * g)
+			if !ok1 || !ok2 {
+				continue
+			}
+			if !(far >= 1e3) || !(near > 0) || math.Abs(math.Log10(near/far)-growth(g)) > 0.3 {
+				return fmt.Errorf("|L| near the poles at the origin does not follow them: %w", errDelayLoopUnsupported)
+			}
+			a.gap, a.order, a.inner = g, a.mult+k, inner
+			return nil
+		}
+	}
+	return unevaluable
 }
 
 // sample returns |L(jω)| and whether it is finite, without recording a
@@ -953,7 +1045,7 @@ func resolvedNonzero(v complex128) bool {
 func (l *delayLoop) axisMult(w float64) int {
 	for _, a := range l.axis {
 		if a.w == w {
-			return a.mult
+			return a.poles()
 		}
 	}
 	return 0
