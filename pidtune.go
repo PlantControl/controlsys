@@ -73,7 +73,11 @@ const (
 // or unstable plant with a continuous delay),
 // accepting the first that passes, keeps the phase margin at every gain
 // crossover and keeps |S| ≤ 4; a wc from a pole must pass that test from
-// the first design. On a loop the pole test certifies stable, the margin at
+// the first design, except that on a continuous plant without delay a P,
+// or a PD clamped short of the margin at wc (with the default margin; an
+// explicit one rejects it), is kept when the pole test certifies it stable
+// with |S| ≤ 4, as a k·sᵐ high-pass plant leaves no phase to back off
+// into. On a loop the pole test certifies stable, the margin at
 // each gain crossover, wc included (TunePID excludes wc), is the classical
 // 180° − |∠L|;
 // a continuous delay, gated before its Nyquist test, keeps the signed
@@ -353,9 +357,30 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 		return err
 	}
 	if gated && !gateFirst {
+		if r.unshaped(pid, wc) {
+			return r.gateOf().sensitive(pid, r.pidType, wc)
+		}
 		return r.gated(pid, wc, r.screened(wc))
 	}
 	return nil
+}
+
+// unshaped returns whether pid is a first design at a continuous wc from a
+// pole that the pole test certifies stable and that leaves the loop phase to
+// the plant: a P, or a PD clamped short of the requested margin at wc. A
+// k·sᵐ high-pass plant leads up to 180° below its poles, where no back-off
+// helps, so only |S| gates it.
+func (r *pidtuneRun) unshaped(pid *PID, wc float64) bool {
+	if !r.fromPole || r.plant.Dt != 0 || wc != r.wc || r.loop == nil {
+		return false
+	}
+	switch r.pidType {
+	case PidtuneP:
+		return true
+	case PidtunePD:
+		return checkPidtuneMargin(r.plant, pid, wc, r.pm) != nil
+	}
+	return false
 }
 
 func (r *pidtuneRun) backoffFloor() float64 {
@@ -369,10 +394,14 @@ func (r *pidtuneRun) backoffFloor() float64 {
 }
 
 func (r *pidtuneRun) gated(pid *PID, wc float64, certified bool) error {
+	return r.gateOf().check(pid, r.pidType, wc, r.pm, certified)
+}
+
+func (r *pidtuneRun) gateOf() *pidtuneGate {
 	if r.gate == nil {
 		r.gate = newPidtuneGate(r.plant, r.screen.model, r.eval, r.wc, r.backoffFloor())
 	}
-	return r.gate.check(pid, r.pidType, wc, r.pm, certified)
+	return r.gate
 }
 
 // pidtuneSignRule says how pidtuneGainSign chose its sign, and so whether
@@ -637,10 +666,10 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 // when |L(wc)| = 1: a design clamped short of the gain there must cross
 // elsewhere.
 func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certified bool) error {
-	c := PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
-	if ms := g.sensitivityOver(c, g.p.maxSensitivity); ms > g.p.maxSensitivity {
-		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
+	if err := g.sensitive(pid, pidType, wc); err != nil {
+		return err
 	}
+	c := pidtuneGateController(pid)
 	crossings, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
 	floor := pm - pidtuneMarginTol
 	if math.Abs(cmplx.Abs(g.p.at(wc)*pidTuningFeedback(c, wc))-1) > 1e-6 {
@@ -658,6 +687,18 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 		}
 	}
 	return nil
+}
+
+// sensitive rejects pid when |S| exceeds the bound.
+func (g *pidtuneGate) sensitive(pid *PID, pidType PidtuneType, wc float64) error {
+	if ms := g.sensitivityOver(pidtuneGateController(pid), g.p.maxSensitivity); ms > g.p.maxSensitivity {
+		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
+	}
+	return nil
+}
+
+func pidtuneGateController(pid *PID) PID2 {
+	return PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
 }
 
 // crossExcess returns k ↦ |L(cross.w[k])|−1, sampling the plant on the

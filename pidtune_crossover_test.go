@@ -243,6 +243,97 @@ func TestPidtunePoleFallbackContinuousStable(t *testing.T) {
 	}
 }
 
+// A continuous k·sᵐ/den plant with |G| < 1 leads up to 180° below its
+// poles, so a P design, or a PD clamped at its phase limit, at the pole
+// crossover keeps a margin under pm at some crossover whatever the back-off.
+// The full first-design gate turned these stable designs into errors
+// (EU24XW); MATLAB returns them, so they pass when stable with |S| ≤ 4.
+// Oracle: Kp = 1/|G(jwc)| and closed-loop roots from num/den, |S| of the
+// directly evaluated loop; over a seeded population every P and PD whose
+// first design (gain sign +1, as for every stable plant without a DC
+// sign) is oracle-stable with |S| < 3.5 is returned.
+func TestPidtunePoleFallbackUnshapedKept(t *testing.T) {
+	evalAt := func(p Poly, w float64) complex128 {
+		v := complex(0, 0)
+		for _, c := range p {
+			v = v*complex(0, w) + complex(c, 0)
+		}
+		return v
+	}
+	robust := func(name string, pid *PID, num, den Poly) {
+		t.Helper()
+		if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, 0); !ok || !stable {
+			t.Errorf("%s: %+v unstable", name, pid)
+		}
+		if _, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, 0, 0), 1e-9, 1e9); ms > 4.5 {
+			t.Errorf("%s: %+v |S| peak %.3g", name, pid, ms)
+		}
+	}
+	num, den := Poly{0.9108330442863755, 0, 0}, Poly{1, 3.6385316848945637, 2.197552090147012}
+	p := pidtuneBackoffPlant(t, num, den, 0, 0)
+	wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
+	if err != nil || !fromPole {
+		t.Fatalf("pole fallback %v, %v", fromPole, err)
+	}
+	pid, err := Pidtune(p, PidtuneP, 0, nil)
+	if err != nil {
+		t.Fatalf("P: %v", err)
+	}
+	if want := 1 / cmplx.Abs(evalAt(num, wc)/evalAt(den, wc)); math.Abs(pid.Kp-want) > 1e-9*want || math.Abs(want-18.6157) > 1e-3 {
+		t.Errorf("P: Kp %g, want %g", pid.Kp, want)
+	}
+	robust("P", pid, num, den)
+	pid, err = Pidtune(p, PidtunePD, 0, nil)
+	if err != nil {
+		t.Fatalf("PD: %v", err)
+	}
+	if math.Abs(pid.Kp-0.9304) > 1e-3 || math.Abs(pid.Kd-48.63) > 1e-2 {
+		t.Errorf("PD: %+v, want Kp 0.9304 Kd 48.63", pid)
+	}
+	robust("PD", pid, num, den)
+
+	rng := rand.New(rand.NewPCG(5, 9))
+	plants, kept := 0, 0
+	for trial := 0; plants < 200 && trial < 100000; trial++ {
+		n := 1 + rng.IntN(3)
+		den := Poly{1}
+		for range n {
+			den = den.Mul(Poly{1, 0.05 + 4*rng.Float64()})
+		}
+		num := Poly{2*rng.Float64() - 1}
+		for range 1 + rng.IntN(n) {
+			num = num.Mul(Poly{1, 0})
+		}
+		p := pidtuneBackoffPlant(t, num, den, 0, 0)
+		wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
+		if err != nil || !fromPole {
+			continue
+		}
+		plants++
+		for _, f := range []PidtuneType{PidtuneP, PidtunePD} {
+			name := fmt.Sprintf("%s %v/%v", f, num, den)
+			pid, err := Pidtune(p, f, 0, nil)
+			if err == nil {
+				kept++
+				robust(name, pid, num, den)
+				continue
+			}
+			first, ferr := computePIDGains(p, f, wc, 60, 1, true)
+			if ferr != nil {
+				t.Fatalf("%s: %v", name, ferr)
+			}
+			stable, ok := pidtuneOracleStable(t, first, num, den, 0, 0)
+			_, ms := pidtuneSignedMargins(pidtuneOracleLoop(first, num, den, 0, 0), 1e-9, 1e9)
+			if ok && stable && ms < 3.5 {
+				t.Errorf("%s: first design %+v stable, |S| %.3g; got %v", name, first, ms, err)
+			}
+		}
+	}
+	if plants < 200 || kept < plants/2 {
+		t.Fatalf("%d pole-fallback plants, %d P/PD designs", plants, kept)
+	}
+}
+
 // On these high-pass plants the loop phase at a crossover is positive, so
 // the signed margin 180° + ∠L is negative however far L stays from −1. The
 // back-off gate read it signed: PD, PID and PIDF on T0/T2 errored at every
