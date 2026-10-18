@@ -6,6 +6,8 @@ import (
 	"math"
 	"math/cmplx"
 	"strings"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // PidtuneOptions holds the optional settings of Pidtune, as MATLAB
@@ -107,7 +109,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	run := &pidtuneRun{plant: plant, screen: screen, eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, mirror: rule != pidtuneSignFixed}
+	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), at: pidtunePlantAt(plant), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, mirror: rule != pidtuneSignFixed}
 
 	pid, first := run.design(wc, sign, false)
 	if first == nil {
@@ -204,8 +206,11 @@ func pidtuneIntegratorTol(plant *System, poles []complex128, wc float64) (comple
 
 // pidtuneRun holds what Pidtune's designs at successive crossovers share.
 type pidtuneRun struct {
-	plant   *System
-	screen  *pidStabilityScreen
+	plant  *System
+	screen *pidStabilityScreen
+	loop   *pidtuneLoop
+	// at is pidtunePlantAt(plant).
+	at      func(float64) (complex128, error)
 	eval    *sisoEval
 	pidType PidtuneType
 	pm, wc  float64
@@ -252,12 +257,15 @@ func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (*PID, err
 // screened returns whether checkPidtuneStability tests designs at wc: an
 // unscreened design against the unforced sign may be certainly unstable.
 func (r *pidtuneRun) screened(wc float64) bool {
+	if r.loop != nil {
+		return true
+	}
 	stable, _, err := r.screen.at(wc, r.pidType)
 	return err == nil && stable != nil
 }
 
 func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error) {
-	pid, err := pidtuneGains(r.plant, r.pidType, wc, r.pm, sign, true, lagFloor)
+	pid, err := pidtuneGains(r.plant, r.at, r.pidType, wc, r.pm, sign, true, lagFloor)
 	if err == nil {
 		err = r.check(pid, wc, gated)
 		if err == nil || pid.DFormula != BackwardEuler {
@@ -267,7 +275,7 @@ func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error
 	if r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		return nil, err
 	}
-	fe, feErr := pidtuneGains(r.plant, r.pidType, wc, r.pm, sign, false, lagFloor)
+	fe, feErr := pidtuneGains(r.plant, r.at, r.pidType, wc, r.pm, sign, false, lagFloor)
 	if feErr != nil || fe.DFormula != ForwardEuler || r.check(fe, wc, gated) != nil {
 		return nil, err
 	}
@@ -288,7 +296,7 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 			return err
 		}
 	}
-	if err := checkPidtuneStability(r.screen, r.eval, pid, r.pidType, wc); err != nil {
+	if err := checkPidtuneStability(r.screen, r.loop, r.eval, pid, r.pidType, wc); err != nil {
 		return err
 	}
 	if gated && !gateFirst {
@@ -603,15 +611,25 @@ func pidtuneControllerAt(pid *PID, w, dt float64) complex128 {
 
 // checkPidtuneStability rejects a design whose closed loop is certifiably
 // unstable; loops outside the screen's scope pass unchecked.
-func checkPidtuneStability(screen *pidStabilityScreen, eval *sisoEval, pid *PID, pidType PidtuneType, wc float64) error {
-	stable, _, err := screen.at(wc, pidType)
-	if errors.Is(err, ErrContinuousInternalDelay) {
-		return nil
+// A non-nil loop, whose model has no delay, stands for screen's
+// closed-loop pole test.
+func checkPidtuneStability(screen *pidStabilityScreen, loop *pidtuneLoop, eval *sisoEval, pid *PID, pidType PidtuneType, wc float64) error {
+	var ok bool
+	var err error
+	if loop != nil {
+		loop.c = PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
+		ok, err = loop.stable(screen, &loop.c)
+	} else {
+		var stable func(*PID2) (bool, error)
+		stable, _, err = screen.at(wc, pidType)
+		if errors.Is(err, ErrContinuousInternalDelay) {
+			return nil
+		}
+		if err != nil || stable == nil {
+			return err
+		}
+		ok, err = stable(&PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula})
 	}
-	if err != nil || stable == nil {
-		return err
-	}
-	ok, err := stable(&PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula})
 	if err == nil {
 		err = eval.err
 	}
@@ -619,9 +637,194 @@ func checkPidtuneStability(screen *pidStabilityScreen, eval *sisoEval, pid *PID,
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("%s design at wc=%g gives an unstable closed loop: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
+		return &pidtuneUnstableError{pidType: pidType, wc: wc}
 	}
 	return nil
+}
+
+// pidtuneUnstableError reports an unstable closed loop; most are dropped
+// by the back-off, so the message is formatted only when read.
+type pidtuneUnstableError struct {
+	pidType PidtuneType
+	wc      float64
+}
+
+func (e *pidtuneUnstableError) Error() string {
+	return fmt.Sprintf("%s design at wc=%g gives an unstable closed loop: %v", e.pidType, e.wc, ErrPIDTuningTargetUnattainable)
+}
+
+func (e *pidtuneUnstableError) Unwrap() error { return ErrPIDTuningTargetUnattainable }
+
+// pidtuneLoop is pidStabilityScreen.closedLoopPoles for a standard SISO
+// model without delays, with buffers reused across designs: the controller
+// realization, I−D1·D2 solve and closed-loop A take PID.System's and
+// Feedback's operations in their order, so the poles, and the verdict, are
+// bit for bit those of Feedback(model, C, −1).IsStable(). Anything else,
+// errors included, goes to closedLoopPoles.
+type pidtuneLoop struct {
+	model *System
+	n1    int
+	c     PID2
+	// p, i are the realizations controller returns.
+	p, i System
+	// ca, cb, cc, cd realize a continuous controller without derivative.
+	ca, cb, cc, cd        *mat.Dense
+	eye, ill, e21         *mat.Dense
+	lu                    mat.LU
+	e12, de, ded          *mat.Dense
+	b1e12, b1e12d2, block *mat.Dense
+	byOrder               map[int]*pidtuneLoopBuffers
+	eig                   mat.Eigen
+	poles                 []complex128
+}
+
+// pidtuneLoopBuffers holds the blocks for an n2-state controller.
+type pidtuneLoopBuffers struct {
+	a, block2, b2e21, b2e21c1, b2e21d1, block3 *mat.Dense
+}
+
+func newPidtuneLoop(model *System) *pidtuneLoop {
+	if model.HasDelay() || model.E != nil || model.validate() != nil {
+		return nil
+	}
+	n1, m1, p1 := model.Dims()
+	if m1 != 1 || p1 != 1 || !pidtuneLoopShaped(model, n1) {
+		return nil
+	}
+	scalar := func() *mat.Dense { return mat.NewDense(1, 1, nil) }
+	l := &pidtuneLoop{
+		model: model, n1: n1, byOrder: map[int]*pidtuneLoopBuffers{},
+		ca: scalar(), cb: scalar(), cc: scalar(), cd: scalar(),
+		eye: eyeDense(1), ill: scalar(), e21: scalar(),
+		e12: scalar(), de: scalar(), ded: scalar(),
+	}
+	l.p = System{A: &mat.Dense{}, B: &mat.Dense{}, C: &mat.Dense{}, D: l.cd}
+	l.i = System{A: l.ca, B: l.cb, C: l.cc, D: l.cd}
+	if n1 > 0 {
+		l.b1e12, l.b1e12d2, l.block = mat.NewDense(n1, 1, nil), mat.NewDense(n1, 1, nil), mat.NewDense(n1, n1, nil)
+	}
+	return l
+}
+
+// pidtuneLoopShaped reports whether sys's matrices are stored at their
+// SISO n-state dimensions, so no product meets mulDims's empty operands.
+func pidtuneLoopShaped(sys *System, n int) bool {
+	shaped := func(m *mat.Dense, r, c int) bool {
+		if r == 0 || c == 0 {
+			return true
+		}
+		mr, mc := m.Dims()
+		return mr == r && mc == c
+	}
+	return sys.A != nil && sys.B != nil && sys.C != nil && sys.D != nil &&
+		shaped(sys.A, n, n) && shaped(sys.B, n, 1) && shaped(sys.C, 1, n) && shaped(sys.D, 1, 1)
+}
+
+func (l *pidtuneLoop) buffers(n2 int) *pidtuneLoopBuffers {
+	if b, ok := l.byOrder[n2]; ok {
+		return b
+	}
+	n1 := l.n1
+	b := &pidtuneLoopBuffers{a: newDense(n1+n2, n1+n2)}
+	if n2 > 0 {
+		b.b2e21, b.b2e21d1, b.block3 = mat.NewDense(n2, 1, nil), mat.NewDense(n2, 1, nil), mat.NewDense(n2, n2, nil)
+		if n1 > 0 {
+			b.block2, b.b2e21c1 = mat.NewDense(n1, n2, nil), mat.NewDense(n2, n1, nil)
+		}
+	}
+	l.byOrder[n2] = b
+	return b
+}
+
+// controller returns c's realization as PID.System gives it, the
+// derivative-free continuous ones (whose entries are copies of gains) in
+// l's buffers.
+func (l *pidtuneLoop) controller(c *PID2) (*System, error) {
+	if c.Dt != 0 || c.Kd != 0 || validatePID(c.Kp, c.Ki, c.Kd, c.Tf, c.Dt, c.IFormula, c.DFormula) != nil {
+		return (&PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}).System()
+	}
+	l.cd.Set(0, 0, c.Kp)
+	if c.Ki == 0 {
+		return &l.p, nil
+	}
+	l.ca.Set(0, 0, 0)
+	l.cb.Set(0, 0, 1)
+	l.cc.Set(0, 0, c.Ki)
+	return &l.i, nil
+}
+
+func (l *pidtuneLoop) stable(screen *pidStabilityScreen, c *PID2) (bool, error) {
+	cs, err := l.controller(c)
+	if err != nil {
+		return screen.closedLoopPoles(c)
+	}
+	n2, m2, p2 := cs.Dims()
+	if m2 != 1 || p2 != 1 || cs.E != nil || cs.HasDelay() || cs.Dt != l.model.Dt || !pidtuneLoopShaped(cs, n2) {
+		return screen.closedLoopPoles(c)
+	}
+	plant := l.model
+	l.ill.Mul(plant.D, cs.D)
+	l.ill.Scale(-1, l.ill)
+	l.ill.Sub(l.eye, l.ill)
+	l.lu.Factorize(l.ill)
+	if nearSingularCondition(l.lu.Cond()) || l.lu.SolveTo(l.e21, false, l.eye) != nil {
+		return screen.closedLoopPoles(c)
+	}
+	e21 := l.e21
+	n1, n := l.n1, l.n1+n2
+	if n == 0 {
+		return true, nil
+	}
+	const sign = 1.0
+	l.de.Mul(cs.D, e21)
+	l.ded.Mul(l.de, plant.D)
+	l.ded.Scale(sign, l.ded)
+	l.e12.Set(0, 0, 1)
+	l.e12.Sub(l.e12, l.ded)
+
+	b := l.buffers(n2)
+	if n1 > 0 {
+		l.b1e12.Mul(plant.B, l.e12)
+		l.b1e12d2.Mul(l.b1e12, cs.D)
+		l.block.Mul(l.b1e12d2, plant.C)
+		l.block.Scale(sign, l.block)
+		setBlock(b.a, 0, 0, plant.A)
+		subBlock(b.a, 0, 0, l.block)
+		if n2 > 0 {
+			b.block2.Mul(l.b1e12, cs.C)
+			b.block2.Scale(-sign, b.block2)
+			setBlock(b.a, 0, n1, b.block2)
+		}
+	}
+	if n2 > 0 {
+		b.b2e21.Mul(cs.B, e21)
+		if n1 > 0 {
+			b.b2e21c1.Mul(b.b2e21, plant.C)
+			setBlock(b.a, n1, 0, b.b2e21c1)
+		}
+		setBlock(b.a, n1, n1, cs.A)
+		b.b2e21d1.Mul(b.b2e21, plant.D)
+		b.block3.Mul(b.b2e21d1, cs.C)
+		b.block3.Scale(sign, b.block3)
+		subBlock(b.a, n1, n1, b.block3)
+	}
+
+	if err := requireFiniteDense("Poles", "A", b.a); err != nil {
+		return false, err
+	}
+	if !l.eig.Factorize(b.a, mat.EigenNone) {
+		return false, fmt.Errorf("Poles: eigenvalue decomposition failed to converge: %w", ErrSchurFailed)
+	}
+	if cap(l.poles) < n {
+		l.poles = make([]complex128, n)
+	}
+	l.poles = l.eig.Values(l.poles[:n])
+	for _, p := range l.poles {
+		if poleOnOrOutsideStabilityBoundary(p, plant.Dt == 0, poleStabilityTolerance(p)) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 const pidtuneMarginTol = 0.5
@@ -703,6 +906,43 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 	return 0, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
 }
 
+// pidtunePlantAt returns w ↦ evalPlantAt(plant, w), bit for bit: it
+// remembers the last frequency and, for a standard SISO model without
+// internal delays, keeps FreqResponse's single-point solver, whose
+// workspaces evalInto overwrites at each point.
+func pidtunePlantAt(plant *System) func(float64) (complex128, error) {
+	fe := newFrequencyEvaluator(plant)
+	var solve func(frequencyPoint, []complex128) error
+	if !plant.HasInternalDelay() && !plant.IsDescriptor() && fe.m == 1 && fe.p == 1 {
+		if bd, ok := fe.pointSolver(1).(*balancedDense); ok {
+			solve = bd.evalInto
+		}
+	}
+	delay := effectiveIODelayMatrix(plant, fe.p, fe.m, true)
+	dst := make([]complex128, 1)
+	lastW, lastH, lastErr, seen := 0.0, complex128(0), error(nil), false
+	return func(w float64) (complex128, error) {
+		if seen && math.Float64bits(w) == math.Float64bits(lastW) {
+			return lastH, lastErr
+		}
+		var h complex128
+		var err error
+		if solve == nil {
+			h, err = evalPlantAt(plant, w)
+		} else {
+			pt := fe.pointAt(w)
+			if err = evalWithPoleLimit(solve, plant, pt, dst); err == nil {
+				if delay != nil {
+					applyIODelayMatrixAtS(plant, pt, dst, 1, 1, delay)
+				}
+				h = dst[0]
+			}
+		}
+		lastW, lastH, lastErr, seen = w, h, err, true
+		return h, err
+	}
+}
+
 func evalPlantAt(plant *System, w float64) (complex128, error) {
 	resp, err := plant.FreqResponse([]float64{w})
 	if err != nil {
@@ -739,11 +979,14 @@ func (t pidtuneTerms) derivative(tf float64) complex128 {
 // With stableFilter, a discrete forward-Euler derivative whose filter pole
 // 1−Dt/Tf leaves the unit circle is redesigned with backward Euler.
 func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter bool) (*PID, error) {
-	return pidtuneGains(plant, pidType, wc, pmDeg, sign, stableFilter, false)
+	at := func(w float64) (complex128, error) { return evalPlantAt(plant, w) }
+	return pidtuneGains(plant, at, pidType, wc, pmDeg, sign, stableFilter, false)
 }
 
-func pidtuneGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
-	pid, err := computePIDGainsPositive(plant, pidType, wc, pmDeg, sign, stableFilter, lagFloor)
+// pidtuneGains is computePIDGains, lagFloor aside, with at(w) standing for
+// evalPlantAt(plant, w).
+func pidtuneGains(plant *System, at func(float64) (complex128, error), pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
+	pid, err := computePIDGainsPositive(plant, at, pidType, wc, pmDeg, sign, stableFilter, lagFloor)
 	if err != nil {
 		return nil, err
 	}
@@ -754,11 +997,11 @@ func pidtuneGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, s
 	return pid, nil
 }
 
-func computePIDGainsPositive(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
+func computePIDGainsPositive(plant *System, at func(float64) (complex128, error), pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
 	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
 		return nil, fmt.Errorf("crossover %g must be below the Nyquist frequency %g: %w", wc, math.Pi/plant.Dt, ErrInvalidArgument)
 	}
-	h, err := evalPlantAt(plant, wc)
+	h, err := at(wc)
 	if err != nil {
 		return nil, err
 	}
