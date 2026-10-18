@@ -55,8 +55,9 @@ type delayLFT struct {
 	d22c                []complex128
 	err                 error
 	sigmaCalls          int
-	gInfCalls           int       // samples of σ_max(G∞), see highFrequencyGain.at
-	scanW, scanV        []float64 // scan buffers
+	gInfCalls           int                 // samples of σ_max(G∞), see highFrequencyGain.at
+	scanW, scanV        []float64           // scan buffers
+	gapMemo             map[float64]float64 // tailGain(0, w)
 }
 
 func newDelayLFT(sys *System) (*delayLFT, error) {
@@ -557,6 +558,7 @@ func (e *delayLFT) balancedTail() func(float64) float64 {
 	a, b2, c2 := mat.NewDense(e.n, e.n, br.a), mat.NewDense(e.n, e.nd, br.b), mat.NewDense(e.nd, e.n, br.c)
 	var sn spectralNormer
 	bal := *e
+	bal.gapMemo = nil
 	bal.normA, bal.c2, bal.b2 = sn.norm(a), sn.norm(c2), sn.norm(b2)
 	if bal.entrywise {
 		bal.rowC2, bal.colB2 = rowNorms(c2, e.nd), colNorms(b2, e.nd)
@@ -1155,12 +1157,27 @@ func (h *highFrequencyGain) period() float64 {
 // (I − M0EΔ)⁻¹M0 has ‖M‖ <= m = r/(1 − rε) and M − M0 = M·EΔ·M0, so the loop
 // gap is at most (h12 − d12)·m·h21 + d12·r·m·ε·h21 + d12·r·(h21 − d21).
 func (e *delayLFT) tailGain(lim, w float64) float64 {
+	if lim == 0 {
+		if g, ok := e.gapMemo[w]; ok {
+			return g
+		}
+	}
 	g := math.Inf(1)
 	for _, s := range e.realizations() {
 		g = min(g, e.tailGainOf(s, lim, w))
 	}
+	if lim == 0 && len(e.gapMemo) < maxGapMemo {
+		if e.gapMemo == nil {
+			e.gapMemo = map[float64]float64{}
+		}
+		e.gapMemo[w] = g
+	}
 	return g
 }
+
+// maxGapMemo caps the memo of tailGain(0, w), which the radius searches
+// query on one geometric sequence of w.
+const maxGapMemo = 4096
 
 func (e *delayLFT) tailGainOf(s *stateBounds, lim, w float64) float64 {
 	h11 := s.h(e.d11, s.c1, s.b1, w)
