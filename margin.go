@@ -94,6 +94,10 @@ type sisoEval struct {
 	// fallback to the frequencies it accepts.
 	extended bool
 	ddAllow  func(w float64) bool
+	// exact evaluates in double-double first: beside a pair 1 ± jε the
+	// double solve's phase is off by up to ~1e-5°, beyond the crossing
+	// tolerance; see resonanceCrossings.
+	exact bool
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -117,7 +121,9 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 
 func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
-	if err := evalWithPoleLimit(e.eval, e.sys, pt, e.dst); err != nil {
+	if h, ok := e.exactAt(pt); ok {
+		e.dst[0] = h
+	} else if err := evalWithPoleLimit(e.eval, e.sys, pt, e.dst); err != nil {
 		h, ok := complex(0, 0), false
 		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) {
 			h, ok = ddSISOResponse(e.sys, pt)
@@ -132,6 +138,13 @@ func (e *sisoEval) at(w float64) complex128 {
 	}
 	e.resolved = e.resolved || w > 0
 	return e.dst[0]
+}
+
+func (e *sisoEval) exactAt(pt frequencyPoint) (complex128, bool) {
+	if !e.exact || e.sys.internalDelayCount() > 0 {
+		return 0, false
+	}
+	return ddSISOResponse(e.sys, pt)
 }
 
 // try evaluates L(jω) without recording a failure, for candidates that may
@@ -372,6 +385,20 @@ func refineCrossing(wLo, wHi float64, evalFn func(float64) float64) float64 {
 		}
 	}
 	return math.Sqrt(wLo * wHi)
+}
+
+// ulpTol widens tol for a bisected sign change of f at c to what one
+// rounding step of c moves f by, measured as four times the mean step over
+// ±64 ulps, capped at 1e-3. Beside a resonance with ζ ≲ 1e-7, f moves by more
+// than tol per ulp, so no float c meets tol; a jump of f, as across the ±180
+// wrap or an undamped pole, leaves |f| beyond the cap.
+func ulpTol(c float64, f func(float64) float64, tol float64) float64 {
+	u := math.Nextafter(c, math.Inf(1)) - c
+	step := math.Abs(f(c+64*u)-f(c-64*u)) / 128
+	if !(step < math.Inf(1)) {
+		return tol
+	}
+	return max(tol, min(4*step, 1e-3))
 }
 
 func phaseMarginDeg(h complex128) float64 {
@@ -1049,7 +1076,7 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	f := func(w float64) float64 { return math.Log(cmplx.Abs(r.eval.at(w))) - lg }
 	r.eval.extended = true
 	defer func() { r.eval.extended = false }()
-	return r.endCrossings(r.polish(cands, f, 1e-9), f, 1e-9), nil
+	return r.endCrossings(r.polish(cands, f, 1e-9, false), f, 1e-9), nil
 }
 
 // endCrossings adds a crossing of f = log|L| − log γ that the pencil missed
@@ -1163,18 +1190,46 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 		}
 	}
 	f := func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }
-	out := r.polish(cands, f, 1e-7)
-	for _, c := range r.resonanceCrossings(f, 1e-7) {
-		if i, found := slices.BinarySearchFunc(out, c, func(a, b float64) int {
-			if math.Abs(a-b) <= 1e-7*b {
-				return 0
+	out := r.polish(cands, f, 1e-7, true)
+	return r.mergeResonanceCrossings(out, r.resonanceCrossings(f, 1e-7), f), nil
+}
+
+// mergeResonanceCrossings inserts the resonance-scan crossings cs into the
+// polished ws. Where the phase stays within tol of −180° over a band, as
+// below a pair 1 ± jε, the double solve passes tol up to ~1e-6 off the
+// crossing; a polished ω within 1e-5 of c whose phase, in double-double,
+// has the sign it has between it and c is that crossing and gives way to c.
+func (r *rationalLoop) mergeResonanceCrossings(ws, cs []float64, f func(float64) float64) []float64 {
+	if len(cs) == 0 {
+		return ws
+	}
+	r.eval.extended, r.eval.exact = true, true
+	defer func() { r.eval.extended, r.eval.exact = false, false }()
+	sign := func(w float64) int {
+		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if !ok || math.IsNaN(v) {
+			return 0
+		}
+		return cmp.Compare(v, 0)
+	}
+	for _, c := range cs {
+		i, _ := slices.BinarySearch(ws, c)
+		j := -1
+		for _, k := range []int{i - 1, i} {
+			if k >= 0 && k < len(ws) && math.Abs(ws[k]-c) <= 1e-5*c && (j < 0 || math.Abs(ws[k]-c) < math.Abs(ws[j]-c)) {
+				j = k
 			}
-			return cmp.Compare(a, b)
-		}); !found {
-			out = slices.Insert(out, i, c)
+		}
+		switch {
+		case j >= 0 && math.Abs(ws[j]-c) <= 1e-7*c:
+		case j >= 0 && sign(ws[j]) != 0 && sign(ws[j]) == sign((ws[j]+c)/2):
+			ws[j] = c
+		default:
+			ws = slices.Insert(ws, i, c)
 		}
 	}
-	return out, nil
+	slices.Sort(ws)
+	return ws
 }
 
 // resonancePoles returns the boundary frequencies of the complex poles of L
@@ -1240,14 +1295,18 @@ func (r *rationalLoop) resonancePoles() []float64 {
 	return ws
 }
 
-// resonanceCrossings scans f beside each resonance pole on a grid graded
-// towards it, from a tenth to ten times its frequency. Pencil roots near a
+// resonanceCrossings scans f, in double-double, beside each resonance pole
+// on a grid graded towards it, from 1e-4 to ten times its frequency: below
+// a pair 1 ± jε the phase can stay within 1e-8° of −180° and cross it down
+// to ~1e-2 of the pole frequency, where pencil roots land far off and the
+// double solve's phase error exceeds tol next to the pole. Pencil roots near a
 // pole pair 1 ± jε, ε ≲ 1e-4, are off by more than ε: the pencil of L − L~
 // carries the pair, its reflection and the crossings in a cluster of radius
 // ε, whose roots move by a root of the backward error. A sign change between
 // evaluable grid points with |f| < 90, the far side of the pole and the
 // ±180 wrap excluded, is kept when it refines to |f| ≤ tol and still holds
-// walkClearance either side, or as far as the grid spacing when closer.
+// walkClearance either side, or as far as the grid spacing when closer;
+// tol widens to ulpTol where f moves by more than tol per ulp.
 func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
@@ -1260,12 +1319,15 @@ func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) 
 		}
 		return v
 	}
-	r.eval.extended = true
-	defer func() { r.eval.extended = false }()
+	r.eval.extended, r.eval.exact = true, true
+	defer func() { r.eval.extended, r.eval.exact = false, false }()
 	const perDecade = 20
 	var out []float64
 	for _, wp := range r.resonancePoles() {
 		var grid []float64
+		for i := 3 * perDecade; i > 0; i-- {
+			grid = append(grid, wp*math.Pow(10, -1-float64(i)/perDecade))
+		}
 		for i := 4 * perDecade; i >= 0; i-- {
 			grid = append(grid, wp*(1-0.9*math.Pow(10, -float64(i)/perDecade)))
 		}
@@ -1309,7 +1371,7 @@ func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) 
 			}
 			c := refineCrossing(a, b, ft)
 			d := min(walkClearance, (c-a)/c, (b-c)/c)
-			if math.Abs(ft(c)) <= tol && ft(c*(1-d))*ft(c*(1+d)) < 0 {
+			if math.Abs(ft(c)) <= ulpTol(c, ft, tol) && ft(c*(1-d))*ft(c*(1+d)) < 0 {
 				out = append(out, c)
 			}
 		}
@@ -1340,8 +1402,9 @@ func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) 
 // tenth of the frequency, below first, past the singular band, and keeps the
 // first sign change that refines to |f| ≤ tol and still holds walkClearance
 // either side. Rounding grows without bound towards the band, as eps/δ⁴
-// beside k/(z+1)⁴, and makes sign changes there that the loop lacks.
-func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64) []float64 {
+// beside k/(z+1)⁴, and makes sign changes there that the loop lacks. When
+// steep, a refined sign change is held to ulpTol rather than tol.
+func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64, steep bool) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
@@ -1354,6 +1417,12 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		return v
 	}
 	within := func(w float64) bool { return math.Abs(ft(w)) <= tol }
+	crossTol := func(c float64) float64 {
+		if steep {
+			return ulpTol(c, ft, tol)
+		}
+		return tol
+	}
 	h0, ok := r.eval.try(0)
 	pole0 := !ok || cmplx.IsInf(h0)
 	zeroRoot := !pole0 && math.Abs(f(0)) <= tol
@@ -1383,7 +1452,7 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 			default:
 				if pf*fx <= 0 && pw != x {
 					c := refineCrossing(min(pw, x), max(pw, x), ft)
-					if hc := c * (1 + walkClearance); hc < wTop && math.Abs(ft(c)) <= tol && ft(c*(1-walkClearance))*ft(hc) < 0 {
+					if hc := c * (1 + walkClearance); hc < wTop && math.Abs(ft(c)) <= crossTol(c) && ft(c*(1-walkClearance))*ft(hc) < 0 {
 						return c, true
 					}
 				}
@@ -1426,16 +1495,19 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 				c, ok = walk(w, min(hi, w/10))
 			}
 			if ok {
-				best = c
+				best, bracketed = c, true
 			} else if _, ok := r.eval.try(w); !ok {
 				continue
 			}
 		}
-		v := math.Abs(ft(best))
+		v, vTol := math.Abs(ft(best)), tol
+		if bracketed {
+			vTol = crossTol(best)
+		}
 		if _, ok := r.eval.try(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {
 			continue
 		}
-		if v <= tol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
+		if v <= vTol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
 			out = append(out, best)
 		}
 	}

@@ -557,6 +557,87 @@ func TestAllMarginPhaseCrossBesidePolePair(t *testing.T) {
 	}
 }
 
+// UJSGC2: the pencil root for the crossover below an unstable pair 1 ± jε,
+// |p| − 1 ≈ 1e-10, lands past the pair (arm64 1.4888e-5, amd64 1.4700e-5,
+// pole 1.4688e-5), where L is real positive; polish never sees it and the
+// resonance scan must recover the crossover 1% below the pole. Oracle:
+// float64 coefficients evaluated at z = e^{jθ} with cos, sin and Horner in
+// 300-bit big.Float, Im(N·conj D) bisected; Re < 0 there.
+func TestAllMarginPhaseCrossPastUnstablePolePair(t *testing.T) {
+	num := []float64{-2.166935933035251, 1.9807432626284676}
+	den := []float64{1, -2.73127553541105, 2.2142827468764708, -0.23473888724605785, -0.2482683242149491}
+	nf := func(x float64) *big.Float { return new(big.Float).SetPrec(300).SetFloat64(x) }
+	mul := func(a, b *big.Float) *big.Float { return nf(0).Mul(a, b) }
+	at := func(p []float64, th float64) (re, im *big.Float) {
+		c, s, term := nf(0), nf(0), nf(1)
+		for k := range 40 {
+			switch k % 4 {
+			case 0:
+				c.Add(c, term)
+			case 1:
+				s.Add(s, term)
+			case 2:
+				c.Sub(c, term)
+			default:
+				s.Sub(s, term)
+			}
+			term.Mul(term, nf(th)).Quo(term, nf(float64(k+1)))
+		}
+		re, im = nf(0), nf(0)
+		for _, a := range p {
+			re, im = nf(0).Sub(mul(re, c), mul(im, s)), nf(0).Add(mul(re, s), mul(im, c))
+			re.Add(re, nf(a))
+		}
+		return re, im
+	}
+	loop := func(th float64) (re, im *big.Float, mag float64) {
+		nr, ni := at(num, th)
+		dr, di := at(den, th)
+		re = nf(0).Add(mul(nr, dr), mul(ni, di))
+		im = nf(0).Sub(mul(ni, dr), mul(nr, di))
+		n2, _ := nf(0).Add(mul(nr, nr), mul(ni, ni)).Float64()
+		d2, _ := nf(0).Add(mul(dr, dr), mul(di, di)).Float64()
+		return re, im, math.Sqrt(n2 / d2)
+	}
+	cross := func(a, b float64) (w, gm float64) {
+		_, ia, _ := loop(a)
+		for range 200 {
+			m := (a + b) / 2
+			if m <= a || m >= b {
+				break
+			}
+			if _, im, _ := loop(m); im.Sign() == ia.Sign() {
+				a = m
+			} else {
+				b = m
+			}
+		}
+		re, _, mag := loop(a)
+		if re.Sign() >= 0 {
+			t.Fatalf("oracle: Re L ≥ 0 at %v", a)
+		}
+		return a, -20 * math.Log10(mag)
+	}
+	wLow, gmLow := cross(1.44e-5, 1.465e-5)
+	wHigh, gmHigh := cross(1.6, 1.75)
+	r, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: 1}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := AllMargin(r.Sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, wantGM := []float64{wLow, wHigh}, []float64{gmLow, gmHigh}
+	ok := len(res.PhaseCrossFreqs) == len(want)
+	for i := 0; ok && i < len(want); i++ {
+		ok = math.Abs(res.PhaseCrossFreqs[i]-want[i]) <= 1e-7*want[i] && math.Abs(res.GainMargins[i]-wantGM[i]) <= 1e-5
+	}
+	if !ok {
+		t.Errorf("wpc %v gm %v, want %v %v", res.PhaseCrossFreqs, res.GainMargins, want, wantGM)
+	}
+}
+
 // The walk past a singular band must not keep a sign change that rounding
 // makes beside it: next to (z+1)⁴ the response carries relative rounding
 // eps/(2·cos(θ/2))⁴, which near θ ≈ 3.1411 flips the sign of a phase offset
@@ -826,6 +907,16 @@ func TestBandwidthSmallDCGain(t *testing.T) {
 		want := a * math.Sqrt(math.Pow(10, 0.3)-1)
 		if bw, err := Bandwidth(r.Sys, -3); err != nil || math.Abs(bw-want) > 1e-9*want {
 			t.Errorf("k %g: bw %v err %v, want %v", k, bw, err, want)
+		}
+	}
+	want2 := math.Sqrt((-5 + math.Sqrt(9+16*math.Pow(10, 0.3))) / 2)
+	for _, k := range []float64{1e-16, 1e-12, 1e-8, 1e-4, 1} {
+		r, err := (&TransferFunc{Num: [][][]float64{{{k}}}, Den: [][]float64{{1, 3, 2}}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bw, err := Bandwidth(r.Sys, -3); err != nil || math.Abs(bw-want2) > 1e-9*want2 {
+			t.Errorf("k/((s+1)(s+2)) k %g: bw %v err %v, want %v", k, bw, err, want2)
 		}
 	}
 	rng := rand.New(rand.NewPCG(11, 13))
