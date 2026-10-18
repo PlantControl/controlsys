@@ -268,9 +268,8 @@ func bigUnitPhaseCrossings(num, den []float64, thp float64) []float64 {
 // frequency, where the phase stays within 1e-8° of −180°, or just past it,
 // where the double solve's phase is off by 1e-5°. Oracle: float64
 // coefficients at exact e^{jθ} in big.Float, Im L bisected, Re L < 0. Where
-// the phase is that flat the crossing is set only to ~eps/slope: a
-// frequency within 1e-5 of the oracle passes when the exact phase there is
-// within 64·eps rad of −180°.
+// the phase is that flat, arg L + 180° rounded to ulp(360) moved the
+// crossing by up to 1e-5 relative (XRXQ4I); crossings must match to 1e-7.
 func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
 	type tc struct {
 		num, den []float64
@@ -284,6 +283,9 @@ func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
 		{[]float64{0.00043269717096372506, -2.5205075284572747}, []float64{1, -2, 1.0000000032590524}, 1},
 		{[]float64{0.4156266235836725, -0.4127608532382766}, []float64{1, -2, 1.0000000006278533}, 1},
 		{[]float64{0.3541729069514521, -0.7616599197851204}, []float64{1, -2, 1.0000000000823044}, 1},
+		{[]float64{-0.8619931462988315, -0.4791089481661279}, []float64{1, -1.4487438779878845, -0.10251224401424697, 0.5512561220176192}, 1},
+		{[]float64{-0.0002929580685127985}, []float64{1, -2.1599186255777103, 2.317720058857019, -2.155684240978195, 0.9978828077015948}, 0.1},
+		{[]float64{-0.012285664809521195, -0.013093860530681841, -0.016387643969841954}, []float64{1, -3.8905296631703514, 5.780997890779641, -3.890406792047608, 0.9999385644389388}, 0.01},
 	}
 	rng := rand.New(rand.NewPCG(21, 99))
 	for range 30 {
@@ -312,10 +314,8 @@ func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
 		}
 		ok := len(got) == len(want)
 		for k := 0; ok && k < len(want); k++ {
-			re, im, mag := bigUnitLoop(c.num, c.den, got[k])
-			q, _ := new(big.Float).Quo(im, re).Float64()
-			d := math.Abs(got[k]-want[k]) / want[k]
-			ok = re.Sign() < 0 && (d <= 1e-7 || d <= 1e-5 && math.Abs(q) <= 64*eps()) &&
+			re, _, mag := bigUnitLoop(c.num, c.den, got[k])
+			ok = re.Sign() < 0 && math.Abs(got[k]-want[k]) <= 1e-7*want[k] &&
 				math.Abs(gm[k]+20*math.Log10(mag)) <= 1e-5
 		}
 		if !ok {

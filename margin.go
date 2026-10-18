@@ -72,8 +72,8 @@ func (r *DiskMarginResult) PeakFreq() (w float64, ok bool) { return r.peakFreq, 
 // sisoEval evaluates a SISO loop on the boundary of the stability region.
 // It reuses one point evaluator, the state-space solver or the internal-delay
 // LFT workspace, so refinement loops pay its setup once and high-order loops
-// keep state-space accuracy. Each value is bit-identical to FreqResponse at
-// the same ω.
+// keep state-space accuracy. Unless extended or exact, each value is
+// bit-identical to FreqResponse at the same ω.
 //
 // at keeps the signature func(float64) complex128 so it can be passed as a
 // response function; a failed evaluation returns NaN and is kept in err,
@@ -306,8 +306,12 @@ func wrapDegrees(x float64) float64 {
 	return x - 360*math.Ceil((x-180)/360)
 }
 
+// phaseOffsetDeg is the phase of h from −180°, in (−180, 180]. It is taken
+// as arg(−h): adding 180 to arg h rounds the offset to ulp(360) ≈ 6e-14°,
+// and where the phase is that flat, beside a pair 1 ± jε, the crossing
+// moves by 1e-6 relative.
 func phaseOffsetDeg(h complex128) float64 {
-	return wrapDegrees(cmplx.Phase(h)*180/math.Pi + 180)
+	return wrapDegrees(cmplx.Phase(-h) * 180 / math.Pi)
 }
 
 // crossing is a level crossing on segment idx of a sampled curve, at
@@ -465,14 +469,15 @@ func allMargin(sys *System) (*AllMarginResult, error) {
 		}
 		res.PhaseCrossFreqs = phase
 	}
-	eval.extended = loop != nil
+	// Beside a pair 1 ± jε the double solve's |L| is off by up to ~1e-5.
+	eval.extended, eval.exact = loop != nil, loop != nil
 	for _, w := range res.GainCrossFreqs {
 		res.PhaseMargins = append(res.PhaseMargins, phaseMarginDeg(eval.at(w)))
 	}
 	for _, w := range res.PhaseCrossFreqs {
 		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(eval.at(w))))
 	}
-	eval.extended = false
+	eval.extended, eval.exact = false, false
 	if err := eval.checkSkipped(); err != nil {
 		return nil, err
 	}
