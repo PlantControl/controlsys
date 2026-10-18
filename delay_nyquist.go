@@ -23,8 +23,10 @@ type delayLoop struct {
 	at         func(w float64) complex128
 	one        func(w float64) complex128 // 1+L formed directly; nil: 1 + at
 	eval       *sisoEval                  // records the first failure of at
+	fails      *error                     // where at records its first failure when eval is nil
 	rhp        int
 	axis       []axisPole
+	poles      []complex128
 	tail       func(w float64) float64 // bound on |L(s)| for Re s >= 0, |s| >= w
 	tailLimit  float64                 // bound on limsup |L(jω)|, ω → ∞
 	tau        float64                 // total loop delay, sets the grid density
@@ -40,6 +42,7 @@ type delayLoop struct {
 type axisPole struct {
 	w    float64
 	mult int
+	gap  float64 // indentation radius, set by indent; 0 selects axisGap
 }
 
 // delayNyquist is the verdict of the Nyquist test. With axisRoot set, χ has a
@@ -107,6 +110,7 @@ func sisoLoopDelay(sys *System) float64 {
 }
 
 func (l *delayLoop) addPoles(poles []complex128) {
+	l.poles = append(l.poles, poles...)
 	for _, p := range poles {
 		if a := cmplx.Abs(p); a > 0 {
 			l.scales = append(l.scales, a, math.Abs(imag(p)))
@@ -464,7 +468,9 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 		return delayNyquist{}, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 	}
 
-	if w, ok := l.hiddenAxisRoot(); ok {
+	if w, ok, err := l.indent(); err != nil {
+		return delayNyquist{}, err
+	} else if ok {
 		return delayNyquist{axisRoot: true, axisW: w}, nil
 	}
 	grid := l.grid(R, w1)
@@ -526,6 +532,13 @@ func wrapPi(a float64) float64 {
 }
 
 func (l *delayLoop) axisGap(w float64) float64 { return 1e-7 * max(1, w) }
+
+func (a axisPole) radius(l *delayLoop) float64 {
+	if a.gap > 0 {
+		return a.gap
+	}
+	return l.axisGap(a.w)
+}
 
 func (l *delayLoop) grid(R, w1 float64) []float64 {
 	lo := 1.0
@@ -602,11 +615,11 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 	var segs []nyquistSegment
 	start, jump := 0.0, 0
 	if len(axis) > 0 && axis[0].w == 0 {
-		start = l.axisGap(0)
+		start = axis[0].radius(l)
 		axis = axis[1:]
 	}
 	for _, a := range axis {
-		g := l.axisGap(a.w)
+		g := a.radius(l)
 		segs = append(segs, nyquistSegment{from: start, to: a.w - g, jump: jump})
 		start, jump = a.w+g, a.mult
 	}
@@ -624,21 +637,78 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 	return segs
 }
 
-// hiddenAxisRoot returns an imaginary-axis eigenvalue that is not a pole of L
-// of its full multiplicity, judged from the growth of |L| towards it; χ
-// vanishes there.
-func (l *delayLoop) hiddenAxisRoot() (float64, bool) {
-	for _, a := range l.axis {
-		g := l.axisGap(a.w)
-		near, far := cmplx.Abs(l.at(a.w+g)), cmplx.Abs(l.at(a.w+10*g))
-		if !(near > 0) || !(far > 0) || math.IsInf(near, 1) {
-			return a.w, true
+// indent sets the indentation radius of each imaginary-axis pole and
+// returns an imaginary-axis eigenvalue that is not a pole of L of its full
+// multiplicity, judged from the growth of |L| over the decade outside the
+// indentation; χ vanishes there. The radius starts at axisGap; where L
+// cannot be evaluated there, as next to a multiple pole whose pencil the
+// solver deems singular, it grows while it stays far inside the other
+// singularities and the delay scale. An enlarged radius needs |L| >= 1e3 on
+// that decade, so that χ ≈ s^m + c has no root within it. A pole at which
+// no radius gives finite samples returns errDelayLoopUnsupported: a failed
+// evaluation does not show a root.
+func (l *delayLoop) indent() (float64, bool, error) {
+	for i := range l.axis {
+		a := &l.axis[i]
+		g0 := l.axisGap(a.w)
+		gmax := l.indentLimit(a.w)
+		found := false
+		for k := 0; k == 0 || g0*math.Pow(10, float64(k)/2) <= gmax; k++ {
+			g := g0 * math.Pow(10, float64(k)/2)
+			near, ok1 := l.sample(a.w + g)
+			far, ok2 := l.sample(a.w + 10*g)
+			if !ok1 || !ok2 {
+				continue
+			}
+			if k > 0 && near > 0 && !(far >= 1e3) {
+				return 0, false, fmt.Errorf("|L| = %g is not dominant at the indentation of ω=%g: %w", far, a.w, errDelayLoopUnsupported)
+			}
+			a.gap, found = g, true
+			if !(near > 0) || !(far > 0) || int(math.Round(math.Log10(near/far))) != a.mult {
+				return a.w, true, nil
+			}
+			break
 		}
-		if int(math.Round(math.Log10(near/far))) != a.mult {
-			return a.w, true
+		if !found {
+			return 0, false, fmt.Errorf("L not finite near the axis pole ω=%g: %w", a.w, errDelayLoopUnsupported)
 		}
 	}
-	return 0, false
+	return 0, false, nil
+}
+
+// sample returns |L(jω)| and whether it is finite, without recording a
+// failed evaluation.
+func (l *delayLoop) sample(w float64) (float64, bool) {
+	slot := l.fails
+	if l.eval != nil {
+		slot = &l.eval.err
+	}
+	var saved error
+	if slot != nil {
+		saved, *slot = *slot, nil
+	}
+	v := cmplx.Abs(l.at(w))
+	ok := !math.IsInf(v, 1) && !math.IsNaN(v)
+	if slot != nil {
+		ok = ok && *slot == nil
+		*slot = saved
+	}
+	return v, ok
+}
+
+// indentLimit bounds the indentation radius at jω by 1e-4 of the distance
+// to the other open-loop poles, of max(1, ω) and of 1/τ.
+func (l *delayLoop) indentLimit(w float64) float64 {
+	lim := max(1, w)
+	if l.tau > 0 {
+		lim = min(lim, 1/l.tau)
+	}
+	for _, p := range l.poles {
+		if d := cmplx.Abs(p - complex(0, w)); d > 1e-6*max(1, w) {
+			lim = min(lim, d)
+		}
+	}
+	return 1e-4 * lim
 }
 
 type refineResult int
