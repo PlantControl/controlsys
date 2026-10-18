@@ -168,3 +168,120 @@ func TestPidtunePoleFallbackFirstDesignGated(t *testing.T) {
 		t.Fatalf("%d pole-fallback plants, %d designs", plants, designs)
 	}
 }
+
+// Continuous high-pass plants k·sᵐ/den(s) with |G| < 1 take the crossover
+// from their slowest pole. Lowered six decades, the P, PDF and I designs
+// reached |K| ~ 1e6–1e18, where Feedback's E12 = 1 + D2·E21·D1 cancelled to
+// rounding noise and an RHP pair passed the pole test, and where the
+// realization's split double zero at s = 0 hid the integrator it cancels
+// (TFE7I2 review); an integral term on a plant zero at the integrator is
+// never asymptotically stable. Oracle: closed-loop roots from num/den;
+// over a seeded population every returned design is stable.
+func TestPidtunePoleFallbackContinuousStable(t *testing.T) {
+	for _, c := range []struct {
+		f        PidtuneType
+		num, den Poly
+	}{
+		{PidtuneP, Poly{-0.24371488599761515, 0, 0, 0}, Poly{1, 5.3999877579765405, 7.271135289167493, 2.7160209747907498}},
+		{PidtunePDF, Poly{0.4680649732178014, 0, 0, 0}, Poly{1, 4.609720722243954, 4.49026010353689, 1.2399444016467684}},
+		{PidtuneI, Poly{0.8638233193779494, 0, 0}, Poly{1, 3.6152996784214597, 3.1165143190980205}},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, 0, 0)
+		if _, fromPole, err := autoCrossoverFreq(p, 0, 60); err != nil || !fromPole {
+			t.Fatalf("%v/%v: pole fallback %v, %v", c.num, c.den, fromPole, err)
+		}
+		pid, err := Pidtune(p, c.f, 0, nil)
+		if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			stable, _ := pidtuneOracleStable(t, pid, c.num, c.den, 0, 0)
+			t.Errorf("%s %v/%v: %+v (stable %v), %v; want ErrPIDTuningTargetUnattainable", c.f, c.num, c.den, pid, stable, err)
+		}
+	}
+	for _, f := range []PidtuneType{PidtuneI, PidtunePI, PidtunePIDF} {
+		p := pidtuneBackoffPlant(t, Poly{0.5, 0}, Poly{1, 2}, 0, 0)
+		if pid, err := Pidtune(p, f, 1, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			t.Errorf("%s on 0.5s/(s+2) at wc=1: %+v, %v; want ErrPIDTuningTargetUnattainable", f, pid, err)
+		}
+	}
+
+	fams := []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF}
+	rng := rand.New(rand.NewPCG(5, 9))
+	plants, designs := 0, 0
+	for trial := 0; plants < 60 && trial < 10000; trial++ {
+		n := 1 + rng.IntN(3)
+		den := Poly{1}
+		for range n {
+			den = den.Mul(Poly{1, 0.05 + 4*rng.Float64()})
+		}
+		num := Poly{2*rng.Float64() - 1}
+		for range 1 + rng.IntN(n) {
+			num = num.Mul(Poly{1, 0})
+		}
+		p := pidtuneBackoffPlant(t, num, den, 0, 0)
+		if _, fromPole, err := autoCrossoverFreq(p, 0, 60); err != nil || !fromPole {
+			continue
+		}
+		plants++
+		for _, f := range fams {
+			pid, err := Pidtune(p, f, 0, nil)
+			if err != nil {
+				if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+					t.Errorf("%s %v/%v: %v", f, num, den, err)
+				}
+				continue
+			}
+			designs++
+			if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, 0); !ok || !stable {
+				t.Errorf("%s %v/%v: %+v unstable", f, num, den, pid)
+			}
+		}
+	}
+	if plants < 60 || 2*designs < plants {
+		t.Fatalf("%d pole-fallback plants, %d designs", plants, designs)
+	}
+}
+
+// PD on k·s/(s+a) cannot lag at the pole-fallback crossover; its clamped
+// design meets |L(wc)| ≈ 0.49 and crosses over well above, 137° from −1.
+// The gate read wc as a crossover with margin −92.6°, as at every back-off
+// step, so Pidtune errored (TFE7I2 review). Oracle: closed-loop root, and
+// the signed margin at every crossover and |S| of the directly evaluated
+// loop; gains match the design before TFE7I2.
+func TestPidtunePoleFallbackPDHighPass(t *testing.T) {
+	for _, c := range []struct {
+		k, a       float64
+		kp, kd, tf float64
+	}{
+		{0.10902430967794469, 0.23104521558459049, 1.025063312, 177.3174913, 17.29819897},
+		{0.5499305783505386, 3.6597358499148074, 0.2032, 2.219, 1.092},
+	} {
+		num, den := Poly{c.k, 0}, Poly{1, c.a}
+		p := pidtuneBackoffPlant(t, num, den, 0, 0)
+		wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
+		if err != nil || !fromPole {
+			t.Fatalf("%v/%v: pole fallback %v, %v", num, den, fromPole, err)
+		}
+		pid, err := Pidtune(p, PidtunePD, 0, nil)
+		if err != nil {
+			t.Errorf("%v/%v: %v", num, den, err)
+			continue
+		}
+		for _, g := range [][2]float64{{pid.Kp, c.kp}, {pid.Kd, c.kd}, {pid.Tf, c.tf}} {
+			if math.Abs(g[0]-g[1]) > 1e-3*math.Abs(g[1]) {
+				t.Errorf("%v/%v: %+v, want Kp %g Kd %g Tf %g", num, den, pid, c.kp, c.kd, c.tf)
+				break
+			}
+		}
+		if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, 0); !ok || !stable {
+			t.Errorf("%v/%v: %+v unstable", num, den, pid)
+		}
+		pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, 0, 0), wc*1e-6, wc*1e6)
+		if len(pms) == 0 || ms > 1.1 {
+			t.Errorf("%v/%v: %+v crossovers %v, |S| peak %.3g", num, den, pid, pms, ms)
+		}
+		for _, m := range pms {
+			if math.Abs(m) < 120 {
+				t.Errorf("%v/%v: %+v margin %.3g° at a crossover", num, den, pid, m)
+			}
+		}
+	}
+}

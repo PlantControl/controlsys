@@ -110,6 +110,9 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
 	_, hasI, _, _, _ := pidTuningTerms(pidType)
+	if hasI && pidtuneIntegratorExcess(plant, wc) < 0 {
+		return nil, fmt.Errorf("Pidtune: %s: a plant zero at the integrator cancels the integral term, leaving a closed-loop pole on the stability boundary: %w", pidType, ErrPIDTuningTargetUnattainable)
+	}
 	sign, rule := pidtuneGainSign(plant, eval.at, wc, hasI)
 	if eval.err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", eval.err)
@@ -449,13 +452,22 @@ func pidtuneGainSign(plant *System, at func(float64) complex128, wc float64, int
 // inside the stability boundary, where it still acts as one over the design
 // band unless a zero there cancels it.
 func pidtuneNearIntegrator(plant *System, wc float64) bool {
+	return pidtuneIntegratorExcess(plant, wc) > 0
+}
+
+// pidtuneIntegratorExcess returns the number of poles less zeros of plant
+// within pidtuneNearIntegrator's tolerance of the integrator, 0 when they
+// cannot be computed. Below 0, G vanishes there, and an integral term's pole
+// cancels against the zero into a closed-loop pole at the integrator for
+// every gain.
+func pidtuneIntegratorExcess(plant *System, wc float64) int {
 	model, err := finiteDimensionalModel(plant, "Pidtune")
 	if err != nil {
-		return false
+		return 0
 	}
 	poles, err := model.Poles()
 	if err != nil {
-		return false
+		return 0
 	}
 	zeros, _ := model.Zeros()
 	at, tol := pidtuneIntegratorTol(plant, poles, wc)
@@ -470,7 +482,7 @@ func pidtuneNearIntegrator(plant *System, wc float64) bool {
 			near--
 		}
 	}
-	return near > 0
+	return near
 }
 
 // pidtuneGate checks a backed-off design over the whole back-off band with
@@ -589,7 +601,9 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 // check rejects pid when |S| exceeds the bound or a gain crossover keeps
 // less than pm; on a loop certified stable, a crossover counts its distance
 // from −1 as pidTuningCrossingMargin does, wc included for P and I, which
-// set only the gain there and leave the phase to the plant.
+// set only the gain there and leave the phase to the plant. wc counts only
+// when |L(wc)| = 1: a design clamped short of the gain there crosses
+// elsewhere.
 func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certified bool) error {
 	c := PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
 	if ms := g.sensitivityOver(c, g.p.maxSensitivity); ms > g.p.maxSensitivity {
@@ -601,6 +615,9 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 	if pidType == PidtuneP || pidType == PidtuneI {
 		// NaN matches no crossing, so wc is reflected too.
 		at = math.NaN()
+	}
+	if math.Abs(cmplx.Abs(g.p.at(wc)*pidTuningFeedback(c, wc))-1) > 1e-6 {
+		crossings, margins = crossings[1:], margins[1:]
 	}
 	for i, m := range margins {
 		if m = pidTuningCrossingMargin(at, crossings[i], m, floor, certified); !(m >= floor) {
@@ -711,8 +728,9 @@ func (e *pidtuneUnstableError) Unwrap() error { return ErrPIDTuningTargetUnattai
 // model without delays, with buffers reused across designs: the controller
 // realization, I−D1·D2 solve and closed-loop A take PID.System's and
 // Feedback's operations in their order, so the poles are bit for bit those
-// of Feedback(model, C, −1) and the verdict is closedLoopPoles'. Anything else,
-// errors included, goes to closedLoopPoles.
+// of Feedback(model, C, −1) and the verdict is closedLoopPoles'; for SISO
+// Feedback's two feedthrough solves agree, so one serves both. Anything
+// else, errors included, goes to closedLoopPoles.
 type pidtuneLoop struct {
 	model *System
 	n1    int
@@ -723,7 +741,6 @@ type pidtuneLoop struct {
 	ca, cb, cc, cd        *mat.Dense
 	eye, ill, e21         *mat.Dense
 	lu                    mat.LU
-	e12, de, ded          *mat.Dense
 	b1e12, b1e12d2, block *mat.Dense
 	byOrder               map[int]*pidtuneLoopBuffers
 	eig                   mat.Eigen
@@ -748,7 +765,6 @@ func newPidtuneLoop(model *System) *pidtuneLoop {
 		model: model, n1: n1, byOrder: map[int]*pidtuneLoopBuffers{},
 		ca: scalar(), cb: scalar(), cc: scalar(), cd: scalar(),
 		eye: eyeDense(1), ill: scalar(), e21: scalar(),
-		e12: scalar(), de: scalar(), ded: scalar(),
 	}
 	l.p = System{A: &mat.Dense{}, B: &mat.Dense{}, C: &mat.Dense{}, D: l.cd}
 	l.i = System{A: l.ca, B: l.cb, C: l.cc, D: l.cd}
@@ -828,15 +844,10 @@ func (l *pidtuneLoop) stable(screen *pidStabilityScreen, c *PID2) (bool, error) 
 		return true, nil
 	}
 	const sign = 1.0
-	l.de.Mul(cs.D, e21)
-	l.ded.Mul(l.de, plant.D)
-	l.ded.Scale(sign, l.ded)
-	l.e12.Set(0, 0, 1)
-	l.e12.Sub(l.e12, l.ded)
 
 	b := l.buffers(n2)
 	if n1 > 0 {
-		l.b1e12.Mul(plant.B, l.e12)
+		l.b1e12.Mul(plant.B, e21)
 		l.b1e12d2.Mul(l.b1e12, cs.D)
 		l.block.Mul(l.b1e12d2, plant.C)
 		l.block.Scale(sign, l.block)
