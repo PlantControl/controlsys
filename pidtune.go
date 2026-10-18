@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -173,8 +174,19 @@ func pidtuneSlowestPole(plant *System, wc float64) float64 {
 		return 0
 	}
 	at, tol := pidtuneIntegratorTol(plant, poles, wc)
+	slow := pidtuneSlowestRoot(plant, poles, at, tol)
+	if math.IsInf(slow, 1) {
+		return 0
+	}
+	return slow
+}
+
+// pidtuneSlowestRoot returns the smallest natural frequency (|ln z|/Dt for
+// discrete plants) of roots farther than tol from at, or +Inf when there is
+// none.
+func pidtuneSlowestRoot(plant *System, roots []complex128, at complex128, tol float64) float64 {
 	slow := math.Inf(1)
-	for _, p := range poles {
+	for _, p := range roots {
 		if cmplx.Abs(p-at) <= tol {
 			continue
 		}
@@ -185,9 +197,6 @@ func pidtuneSlowestPole(plant *System, wc float64) float64 {
 		if w > 0 && w < slow {
 			slow = w
 		}
-	}
-	if math.IsInf(slow, 1) || math.IsNaN(slow) {
-		return 0
 	}
 	return slow
 }
@@ -872,6 +881,9 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 	if len(all.GainCrossFreqs) > 0 {
 		return all.GainCrossFreqs[0], nil
 	}
+	if dc, err := plant.DCGain(); err == nil && math.IsInf(dc.At(0, 0), 0) {
+		return pidtuneIntegratingCrossover(plant)
+	}
 
 	bw, err := Bandwidth(plant, -3)
 	if err != nil {
@@ -899,6 +911,67 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 	}
 
 	return 0, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
+}
+
+// pidtuneIntegratingCrossover picks the crossover of an integrating plant
+// with no gain crossover, whose bandwidth is undefined: half the slowest
+// natural frequency of a pole, else of a zero, away from s = 0 (z = 1),
+// capped for discrete plants a decade below Nyquist, which is also the pick
+// when there is neither.
+func pidtuneIntegratingCrossover(plant *System) (float64, error) {
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return 0, err
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return 0, err
+	}
+	at, tol := pidtuneIntegratorCluster(plant, poles)
+	w := pidtuneSlowestRoot(plant, poles, at, tol)
+	if math.IsInf(w, 1) {
+		zeros, err := model.Zeros()
+		if err != nil {
+			return 0, err
+		}
+		at, tol = pidtuneIntegratorCluster(plant, zeros)
+		w = pidtuneSlowestRoot(plant, zeros, at, tol)
+	}
+	w *= 0.5
+	if plant.Dt > 0 {
+		w = math.Min(w, 0.1*math.Pi/plant.Dt)
+	}
+	if math.IsInf(w, 1) {
+		return 0, fmt.Errorf("integrating plant without gain crossover or nonintegrating pole or zero to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
+	}
+	return w, nil
+}
+
+// pidtuneIntegratorCluster returns the integrator location, s = 0 or z = 1,
+// and a radius holding the largest m roots that lie within
+// 100·ε^(1/m)·scale of it, ε the machine epsilon: rounding splits an m-fold
+// root by about ε^(1/m) relative to the root scale (1 for z = 1, the largest
+// root magnitude for s = 0).
+func pidtuneIntegratorCluster(plant *System, roots []complex128) (complex128, float64) {
+	at, scale := complex128(0), 0.0
+	if plant.Dt > 0 {
+		at, scale = 1, 1
+	} else {
+		for _, r := range roots {
+			scale = max(scale, cmplx.Abs(r))
+		}
+	}
+	d := make([]float64, len(roots))
+	for i, r := range roots {
+		d[i] = cmplx.Abs(r - at)
+	}
+	slices.Sort(d)
+	for m := len(d); m > 0; m-- {
+		if tol := 100 * math.Pow(0x1p-52, 1/float64(m)) * scale; d[m-1] <= tol {
+			return at, tol
+		}
+	}
+	return at, 0
 }
 
 // pidtunePlantPoint evaluates evalPlantAt(plant, w) bit for bit: it
