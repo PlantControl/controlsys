@@ -1,0 +1,276 @@
+package controlsys
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"math/big"
+	"math/cmplx"
+	"math/rand/v2"
+	"testing"
+)
+
+func skipSlowUnderRace(t *testing.T) {
+	t.Helper()
+	if raceEnabled {
+		t.Skip("slow numerical sweep under -race")
+	}
+}
+
+var pidtuneAllTypes = []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF}
+
+func pidtuneRat(v float64) *big.Rat { return new(big.Rat).SetFloat64(v) }
+
+func pidtuneRatPoly(p ...*big.Rat) []*big.Rat { return p }
+
+func pidtuneRatMul(a, b []*big.Rat) []*big.Rat {
+	out := make([]*big.Rat, len(a)+len(b)-1)
+	for i := range out {
+		out[i] = new(big.Rat)
+	}
+	for i, x := range a {
+		for j, y := range b {
+			out[i+j].Add(out[i+j], new(big.Rat).Mul(x, y))
+		}
+	}
+	return out
+}
+
+func pidtuneRatAdd(a, b []*big.Rat) []*big.Rat {
+	if len(a) < len(b) {
+		a, b = b, a
+	}
+	out := make([]*big.Rat, len(a))
+	for i := range a {
+		out[i] = new(big.Rat).Set(a[i])
+		if k := i - (len(a) - len(b)); k >= 0 {
+			out[i].Add(out[i], b[k])
+		}
+	}
+	return out
+}
+
+// pidtuneExactSchur reports whether the discrete loop of pid on num/den
+// (in z, highest power first) has every closed-loop root in |z| < 1, by
+// the Schur–Cohn recursion on the exact characteristic polynomial in
+// 2048-bit floats: an integrator among poles within 1e-3 of z = 1 defeats
+// float64 root finding.
+func pidtuneExactSchur(pid *PID, num, den Poly, dt float64) bool {
+	r := pidtuneRat
+	rdt := r(dt)
+	poly := func(p Poly) []*big.Rat {
+		out := make([]*big.Rat, len(p))
+		for i, v := range p {
+			out[i] = r(v)
+		}
+		return out
+	}
+	x := pidtuneRatPoly(r(1), r(-1))
+	wi, wd := r(pidFormulaWeight(pid.IFormula)), r(pidFormulaWeight(pid.DFormula))
+	one := r(1)
+	iNum := pidtuneRatMul(pidtuneRatPoly(new(big.Rat).Mul(r(pid.Ki), rdt)), pidtuneRatPoly(wi, new(big.Rat).Sub(one, wi)))
+	lead := new(big.Rat).Add(r(pid.Tf), new(big.Rat).Mul(wd, rdt))
+	dd := pidtuneRatPoly(lead, new(big.Rat).Sub(rdt, lead))
+	if dd[0].Sign() == 0 {
+		dd = dd[1:]
+	}
+	kp, kd := pidtuneRatPoly(r(pid.Kp)), pidtuneRatPoly(r(pid.Kd))
+	numC, denC := kp, pidtuneRatPoly(r(1))
+	switch {
+	case pid.Ki != 0 && pid.Kd != 0:
+		numC = pidtuneRatAdd(pidtuneRatAdd(pidtuneRatMul(pidtuneRatMul(kp, x), dd), pidtuneRatMul(iNum, dd)), pidtuneRatMul(pidtuneRatMul(kd, x), x))
+		denC = pidtuneRatMul(x, dd)
+	case pid.Ki != 0:
+		numC, denC = pidtuneRatAdd(pidtuneRatMul(kp, x), iNum), x
+	case pid.Kd != 0:
+		numC, denC = pidtuneRatAdd(pidtuneRatMul(kp, dd), pidtuneRatMul(kd, x)), dd
+	}
+	c := pidtuneRatAdd(pidtuneRatMul(poly(den), denC), pidtuneRatMul(poly(num), numC))
+	for len(c) > 1 && c[0].Sign() == 0 {
+		c = c[1:]
+	}
+	const prec = 2048
+	f := make([]*big.Float, len(c))
+	for i, v := range c {
+		f[i] = new(big.Float).SetPrec(prec).SetRat(v)
+	}
+	for n := len(f) - 1; n > 0; n-- {
+		k := new(big.Float).SetPrec(prec).Quo(f[n], f[0])
+		if new(big.Float).Abs(k).Cmp(big.NewFloat(1)) >= 0 {
+			return false
+		}
+		q := make([]*big.Float, n)
+		for i := range q {
+			q[i] = new(big.Float).SetPrec(prec).Mul(k, f[n-i])
+			q[i].Sub(f[i], q[i])
+		}
+		f = q
+	}
+	return true
+}
+
+// pidtuneCheckDesigns runs every family at wc = 0: an error must be
+// ErrPIDTuningTargetUnattainable, a design stable by pidtuneExactSchur.
+// want lists families that must return a design.
+func pidtuneCheckDesigns(t *testing.T, name string, p *System, num, den Poly, dt float64, want []PidtuneType) {
+	t.Helper()
+	for _, f := range pidtuneAllTypes {
+		pid, err := Pidtune(p, f, 0, nil)
+		if err != nil {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s %s: %v", name, f, err)
+			}
+			for _, w := range want {
+				if w == f {
+					t.Errorf("%s %s: %v", name, f, err)
+				}
+			}
+			continue
+		}
+		if !pidtuneExactSchur(pid, num, den, dt) {
+			t.Errorf("%s %s: %+v unstable", name, f, pid)
+		}
+	}
+}
+
+// TA526O review: the rolloff fallback also fired for unstable plants with a
+// zero near the integrator, whose stabilizing gain the bandwidth gives; the
+// capped crossover and its back-off never stabilize them, turning designs
+// into errors (P "unstable" at wc 90.7 for case 1). The crossover of an
+// unstable plant is its -3 dB bandwidth. Oracle: Bandwidth; exact Routh
+// test of every design.
+func TestPidtuneRolloffUnstableKeepsBandwidth(t *testing.T) {
+	for _, c := range []struct {
+		num, den Poly
+		want     []PidtuneType
+	}{
+		{Poly{0.27517413517840106, 3.6669924390083567e-05}, Poly{1, 6.391643798250351, -30.351456187775952}, []PidtuneType{PidtuneP, PidtuneI, PidtunePD, PidtunePDF}},
+		{Poly{3.24364602965127, 0.0021262777284359194}, Poly{1, 13.719866434906919, 22.960516396640905, -141.22246804852216}, []PidtuneType{PidtuneP}},
+		{Poly{0.15352054260394388, 2.4370462844322383e-06}, Poly{1, 9.545146152266515, -3.889305115757257}, []PidtuneType{PidtuneP, PidtunePD, PidtunePDF}},
+	} {
+		pidtuneRolloffUnstableCase(t, c.num, c.den, c.want, true)
+	}
+
+	skipSlowUnderRace(t)
+	rng := rand.New(rand.NewPCG(7, 9))
+	for range 120 {
+		z0 := math.Pow(10, -3-5*rng.Float64())
+		if rng.IntN(2) == 0 {
+			z0 = -z0
+		}
+		num, den := Poly{1, z0}, Poly{1, -(0.1 + 5*rng.Float64())}
+		for range rng.IntN(3) {
+			den = den.Mul(Poly{1, 0.2 + 10*rng.Float64()})
+		}
+		if rng.IntN(3) == 0 {
+			num = num.Mul(Poly{1, 0.5 + 5*rng.Float64()})
+		}
+		if rng.IntN(4) == 0 {
+			den = den.Mul(Poly{1, -(0.1 + 3*rng.Float64())})
+		}
+		num = num.Mul(Poly{math.Pow(10, -2+3*rng.Float64())})
+		if len(num) > len(den) {
+			continue
+		}
+		pidtuneRolloffUnstableCase(t, num, den, nil, z0 > 0)
+	}
+}
+
+// pidtuneRolloffUnstableCase checks the crossover, and with designs every
+// design: a real zero in s > 0 with an odd count of real unstable poles
+// above it admits no stable stabilizing controller (parity interlacing),
+// which Pidtune does not detect, so the sweep skips designs for such zeros.
+func pidtuneRolloffUnstableCase(t *testing.T, num, den Poly, want []PidtuneType, designs bool) {
+	t.Helper()
+	p := pidtuneBackoffPlant(t, num, den, 0, 0)
+	name := fmt.Sprintf("%v/%v", num, den)
+	if am, err := AllMargin(p); err != nil || len(am.GainCrossFreqs) > 0 {
+		return
+	}
+	bw, err := Bandwidth(p, -3)
+	if err != nil || !(bw > 0) || math.IsInf(bw, 0) {
+		return
+	}
+	if wc, fromPole, err := autoCrossoverFreq(p, 0, 60); err != nil || fromPole || wc != bw {
+		t.Errorf("%s: crossover %g (pole %v), %v; want bandwidth %g", name, wc, fromPole, err, bw)
+	}
+	if !designs {
+		return
+	}
+	for _, f := range pidtuneAllTypes {
+		pid, err := Pidtune(p, f, 0, nil)
+		if err != nil {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s %s: %v", name, f, err)
+			}
+			for _, w := range want {
+				if w == f {
+					t.Errorf("%s %s: %v", name, f, err)
+				}
+			}
+			continue
+		}
+		if !pidtuneExactHurwitz(pid, num, den) {
+			t.Errorf("%s %s: %+v closed loop not Hurwitz", name, f, pid)
+		}
+	}
+}
+
+// FPMBHI review: an ill-conditioned realization of (z−1)·∏(z−pᵢ), pᵢ near
+// 1, moves the integrator pole 1e-10..1e-8 off z = 1, beyond the simple
+// cluster radius 100·ε, while DCGain stays infinite; with |G| < 1 the
+// displaced integrator was taken as the slowest pole, giving wc ~1e-9 and
+// "zero or infinite gain" or "singular complex matrix" errors. Oracle: the
+// crossover is half the slowest generated pole's |ln p|/Dt, capped at
+// 0.1π/Dt (poles near one another round by up to 1e-3 relative); every
+// design stable by the exact Schur–Cohn test.
+func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
+	skipSlowUnderRace(t)
+	rng := rand.New(rand.NewPCG(5, 8))
+	kept, displaced := 0, 0
+	for range 800 {
+		dt := []float64{0.01, 0.1, 1}[rng.IntN(3)]
+		num, den := Poly{math.Pow(10, -16+4*rng.Float64())}, Poly{1, -1}
+		slow := math.Inf(1)
+		for range 5 + rng.IntN(4) {
+			a := math.Pow(10, -1+3*rng.Float64())
+			slow = math.Min(slow, a)
+			den = den.Mul(Poly{1, -math.Exp(-a * dt)})
+		}
+		for range rng.IntN(3) {
+			num = num.Mul(Poly{1, -(rng.Float64()*1.8 - 0.9)})
+		}
+		p := pidtuneBackoffPlant(t, num, den, dt, 0)
+		am, err := AllMargin(p)
+		if err != nil || len(am.GainCrossFreqs) > 0 {
+			continue
+		}
+		dc, err := p.DCGain()
+		if err != nil || !math.IsInf(dc.At(0, 0), 0) {
+			continue
+		}
+		kept++
+		poles, err := p.Poles()
+		if err != nil {
+			t.Fatal(err)
+		}
+		near := math.Inf(1)
+		for _, r := range poles {
+			near = math.Min(near, cmplx.Abs(r-1))
+		}
+		if near > 100*0x1p-52 {
+			displaced++
+		}
+		name := fmt.Sprintf("%v/%v dt=%g", num, den, dt)
+		want := math.Min(0.5*slow, 0.1*math.Pi/dt)
+		wc, err := plantCrossoverFreq(p)
+		if err != nil || math.Abs(wc-want) > 1e-2*want {
+			t.Errorf("%s: crossover %g, %v; want %g", name, wc, err, want)
+			continue
+		}
+		pidtuneCheckDesigns(t, name, p, num, den, dt, nil)
+	}
+	if kept < 20 || displaced < 10 {
+		t.Fatalf("sweep kept %d plants, %d displaced", kept, displaced)
+	}
+}

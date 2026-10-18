@@ -72,7 +72,7 @@ const (
 // because G has no gain crossover or bandwidth, or because its -3 dB
 // bandwidth lies beyond ten times every pole and zero natural frequency
 // with |G| peaking over 1e3 times its value there, set by zeros near the
-// integrator, when wc is the first such step below ten times that
+// integrator of a stable plant, when wc is the first such step below ten times that
 // frequency; not for an integrating or unstable plant with a continuous
 // delay), accepting the first that passes, keeps the phase margin at every
 // gain crossover, those above the band the first wc sets included up to
@@ -1105,7 +1105,8 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 // would give a -3 dB bandwidth at rounding level) or has no -3 dB
 // bandwidth, as for a high-pass plant with |G| < 1, both taking half the
 // slowest pole, or one pidtuneRolloffCrossover finds set by zeros near the
-// integrator.
+// integrator of a stable plant; an unstable one needs the gain the
+// bandwidth gives, which a crossover capped by its roots cannot reach.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
@@ -1125,8 +1126,10 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 			return 0, false, err
 		}
 		if bw > 0 && !math.IsInf(bw, 0) {
-			if wc, ok := pidtuneRolloffCrossover(plant, bw); ok {
-				return wc, true, nil
+			if stable, err := plant.IsStable(); err == nil && stable {
+				if wc, ok := pidtuneRolloffCrossover(plant, bw); ok {
+					return wc, true, nil
+				}
 			}
 			return bw, false, nil
 		}
@@ -1238,6 +1241,9 @@ func pidtuneIntegratingCrossover(plant *System) (float64, error) {
 		return 0, err
 	}
 	at, tol := pidtuneIntegratorCluster(plant, poles)
+	if tol == 0 {
+		tol = pidtuneDisplacedIntegrator(plant, poles, at)
+	}
 	w := pidtuneSlowestRoot(plant, poles, at, tol)
 	if math.IsInf(w, 1) {
 		zeros, err := model.Zeros()
@@ -1276,6 +1282,28 @@ func pidtuneIntegratorCluster(plant *System, roots []complex128) (complex128, fl
 		return at, 0
 	}
 	return at, pidtuneClusterRadius(m, scale)
+}
+
+// pidtuneDisplacedIntegrator returns, for the poles of a plant whose DC
+// gain is infinite but which have no pidtuneIntegratorCluster at at, the
+// distance of the pole nearest at when it lies within
+// pidtuneClusterRadius(2, scale), else 0: an ill-conditioned eigenproblem
+// moves a simple integrator pole beyond 100·ε·scale.
+func pidtuneDisplacedIntegrator(plant *System, poles []complex128, at complex128) float64 {
+	scale, near := 0.0, math.Inf(1)
+	if plant.Dt > 0 {
+		scale = 1
+	}
+	for _, p := range poles {
+		if plant.Dt == 0 {
+			scale = max(scale, cmplx.Abs(p))
+		}
+		near = min(near, cmplx.Abs(p-at))
+	}
+	if near <= pidtuneClusterRadius(2, scale) {
+		return near
+	}
+	return 0
 }
 
 // pidtuneClusterSize returns the largest m such that the m roots nearest at
