@@ -759,9 +759,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if !errors.As(err, new(*PIDTuningError)) {
 		return res, err
 	}
-	// The small leads come after the floor so that they change no design
-	// the floor finds.
-	if r, e := move(true, 7.5, 2.5); r != nil || e != nil {
+	// These leads come after the floor so that they change no design the
+	// floor finds. Past a lightly damped peak the plant phase falls through
+	// −180°…−210° within about 1%, where only near-pure D (lead 75°, 85°)
+	// keeps every crossing's margin.
+	if r, e := move(true, 7.5, 2.5, 75, 85); r != nil || e != nil {
 		return r, e
 	}
 	if te, ok := errors.AsType[*PIDTuningError](err); ok {
