@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"testing"
+	"time"
 )
 
 // pidtuneCheckDelayRobust checks pid on num/den·e^{−delay·s} by the
@@ -61,16 +62,18 @@ func TestPidtuneDelayReflectedCrossingClassical(t *testing.T) {
 	}
 }
 
-// Every sampled winding verdict by which the reflected-crossing path skips
-// a Nyquist test agrees with the test: over seeded stable delayed plants and
-// designs at crossovers down to the back-off floor, and the high-gain PDs
-// on a zero-DC plant whose tail bound is out of reach (BIAA3G), each loop
-// winds reports unstable is unstable by pidTuningDelayStability.
+// Every sampled winding verdict by which a gated design on a stable delayed
+// plant skips its Nyquist test agrees with the test: over seeded stable
+// delayed plants and designs (least-lead PDFs included) at crossovers down
+// to the back-off floor, the high-gain PDs on a zero-DC plant whose tail
+// bound is out of reach, and the gate-passing PDFs of the BIAA3G plants,
+// each loop winds reports unstable is unstable by pidTuningDelayStability.
 func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 	if raceEnabled {
 		t.Skip("slow under race")
 	}
-	wound, checked := 0, 0
+	wound, checked, passed := 0, 0, 0
+	onlyPassing := false
 	run := func(num, den Poly, delay float64, fams []PidtuneType, k0, k1, dk int) {
 		p := pidtuneBackoffPlant(t, num, den, 0, delay)
 		wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
@@ -94,26 +97,35 @@ func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 			for k := k0; k <= k1; k += dk {
 				w := wc * math.Pow(10, -float64(k)/pidtuneBackoffPerDecade)
 				for _, sign := range []float64{1, -1} {
-					pid, err := computePIDGains(p, f, w, 60, sign, true)
-					if err != nil {
-						continue
-					}
-					c := pidtuneGateController(pid)
-					if !gate.winds(c) {
-						continue
-					}
-					wound++
-					stable, _, err := screen.at(w, f)
-					if err != nil || stable == nil {
-						continue
-					}
-					ok, err := stable(&c)
-					if err != nil {
-						continue
-					}
-					checked++
-					if ok {
-						t.Errorf("%s %v/%v delay %g at wc=%g sign %g: %+v winds but Nyquist-stable", f, num, den, delay, w, sign, pid)
+					for _, lagFloor := range []bool{false, true} {
+						pid, err := pidtuneGains(p, &pidtunePlantPoint{}, f, w, 60, sign, true, lagFloor, pidtunePIDFIterate)
+						if err != nil {
+							continue
+						}
+						c := pidtuneGateController(pid)
+						if !gate.winds(c) {
+							continue
+						}
+						wound++
+						pass := gate.check(pid, f, w, 60, false) == nil
+						if onlyPassing && !pass {
+							continue
+						}
+						stable, _, err := screen.at(w, f)
+						if err != nil || stable == nil {
+							continue
+						}
+						ok, err := stable(&c)
+						if err != nil {
+							continue
+						}
+						checked++
+						if pass {
+							passed++
+						}
+						if ok {
+							t.Errorf("%s %v/%v delay %g at wc=%g sign %g lag floor %v: %+v winds but Nyquist-stable", f, num, den, delay, w, sign, lagFloor, pid)
+						}
 					}
 				}
 			}
@@ -123,6 +135,14 @@ func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 	if wound == 0 {
 		t.Errorf("BIAA3G plant: no high-gain PD winds")
 	}
+	onlyPassing = true
+	run(Poly{0.012075199185333292, 0, 0}, Poly{1, 3.9182743506554067, 0.27016515117488543, 0.047907185397301336}, 0.11879022516031652, []PidtuneType{PidtunePDF}, 0, 41, 3)
+	run(Poly{0.1043562311628774, 0}, Poly{1, 2.157756223719102, 12.93308866944033}, 0.06098188011777296, []PidtuneType{PidtunePDF}, 72, 110, 4)
+	t.Logf("BIAA3G plants: %d wound, %d checked, %d gate-passing", wound, checked, passed)
+	if passed < 8 {
+		t.Errorf("BIAA3G plants: %d gate-passing designs wind, want the back-off's", passed)
+	}
+	onlyPassing = false
 	rng := rand.New(rand.NewPCG(10, 31))
 	fams := []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF}
 	for trial := range 60 {
@@ -226,5 +246,102 @@ func TestPidtuneAutoFirstDesignFallback(t *testing.T) {
 	q := pidtuneBackoffPlant(t, Poly{1}, Poly{1, -1, -2}, 0, 0)
 	if pid, err := Pidtune(q, PidtuneI, 0, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		t.Errorf("I on 1/(s²−s−2): %+v, %v; want ErrPIDTuningTargetUnattainable", pid, err)
+	}
+}
+
+// BIAA3G: on stable zero-DC plants with a continuous delay, the back-off
+// gate passes designs whose loop is unstable, each costing a Nyquist test
+// that grew to over a second at low crossovers (4–10 s per call). The
+// gate's sampled winding rejects them first (agreement with the Nyquist
+// test: TestPidtuneGateWindsAgreesWithNyquist); the results are unchanged.
+func TestPidtuneZeroDCDelayBackoffCost(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing under race")
+	}
+	for _, c := range []struct {
+		f        PidtuneType
+		num, den Poly
+		delay    float64
+		ok       bool
+	}{
+		{PidtunePDF, Poly{0.012075199185333292, 0, 0}, Poly{1, 3.9182743506554067, 0.27016515117488543, 0.047907185397301336}, 0.11879022516031652, false},
+		{PidtunePDF, Poly{0.1043562311628774, 0}, Poly{1, 2.157756223719102, 12.93308866944033}, 0.06098188011777296, false},
+		{PidtunePD, Poly{-0.014478772994582018, 0}, Poly{1, 17.775626209671092, 25.212313873525357}, 0.08062746075097056, true},
+	} {
+		name := fmt.Sprintf("%s %v/%v delay %g", c.f, c.num, c.den, c.delay)
+		p := pidtuneBackoffPlant(t, c.num, c.den, 0, c.delay)
+		start := time.Now()
+		pid, err := Pidtune(p, c.f, 0, nil)
+		if d := time.Since(start); d > 2*time.Second {
+			t.Errorf("%s: %v", name, d)
+		}
+		if !c.ok {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s: %+v, %v; want ErrPIDTuningTargetUnattainable", name, pid, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		pidtuneCheckDelayRobust(t, name, pid, c.num, c.den, c.delay)
+	}
+}
+
+// The gate's cached |S| scan above its band matches pidTuningSensitivityPeak
+// bit for bit, over designs whose tail bound extends the scan.
+func TestPidtuneGateTailPeakMatchesScan(t *testing.T) {
+	extended := 0
+	for _, c := range []struct {
+		f        PidtuneType
+		num, den Poly
+		delay    float64
+	}{
+		{PidtunePDF, Poly{0.012075199185333292, 0, 0}, Poly{1, 3.9182743506554067, 0.27016515117488543, 0.047907185397301336}, 0.11879022516031652},
+		{PidtuneP, Poly{-0.7103680010513562, 0}, Poly{1, 7.438667224341966, 36.6377214599462}, 0.66426273141541514},
+		{PidtunePD, Poly{-0.46375204436937656, -0.36621853843466834, 0}, Poly{1, 11.51148942688912, 43.55983162707241, 54.30021224234672}, 0.485905856269508},
+		{PidtunePID, Poly{1, 2}, Poly{1, 0.4, 4, 1}, 0},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, 0, c.delay)
+		wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eval, err := newSISOEval(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		screen, err := newPIDStabilityScreen(p, eval, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		floor := pidtuneBackoffFloor(p, wc)
+		if fromPole {
+			floor = wc * math.Pow(10, -pidtuneBackoffMaxDecade)
+		}
+		gate := newPidtuneGate(p, screen.model, eval, wc, floor)
+		for k := 0; k <= 120; k += 3 {
+			w := wc * math.Pow(10, -float64(k)/pidtuneBackoffPerDecade)
+			for _, sign := range []float64{1, -1} {
+				pid, err := computePIDGains(p, c.f, w, 60, sign, true)
+				if err != nil {
+					continue
+				}
+				ctrl := pidtuneGateController(pid)
+				if gate.beyond(&ctrl) == nil {
+					continue
+				}
+				extended++
+				q := gate.p
+				q.low, q.loopTail = q.high, gate.tail
+				if got, want := gate.tailPeak(ctrl), pidTuningSensitivityPeak(q, ctrl); got != want && !(math.IsNaN(got) && math.IsNaN(want)) {
+					t.Errorf("%s %v/%v at wc=%g: tailPeak %v, scan %v", c.f, c.num, c.den, w, got, want)
+				}
+			}
+		}
+	}
+	if extended < 20 {
+		t.Errorf("%d designs extend the scan", extended)
 	}
 }

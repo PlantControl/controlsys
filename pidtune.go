@@ -378,9 +378,10 @@ func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor boo
 // gate counts signed margins 180° + ∠L, as the loop is not yet certified;
 // when it fails only on reflected crossings, whose classical margin
 // 180° − |∠L| holds, and |S| passes, the design passes if the Nyquist test
-// certifies it stable, and keeps the signed failure when no test applies
-// or, sparing the test, when the plant is stable and the gate's samples
-// show 1+L winding about 0 (pidtuneGate.winds).
+// certifies it stable, and keeps the signed failure when no test applies.
+// On a stable plant, a design the gate passes or fails only at reflected
+// crossings is rejected, sparing the test, when the gate's samples show
+// 1+L winding about 0 (pidtuneGate.winds).
 func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	if r.explicit {
 		if err := checkPidtuneMargin(r.plant, pid, wc, r.pm); err != nil {
@@ -389,10 +390,15 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	}
 	gateFirst := r.plant.Dt == 0 && r.plant.HasDelay()
 	if gated && gateFirst {
-		if err := r.gated(pid, wc, false); err != nil {
-			if !errors.Is(err, errPidtuneReflected) || r.openStable() && r.gateOf().winds(pidtuneGateController(pid)) || !r.screened(wc) {
+		err := r.gated(pid, wc, false)
+		if err != nil && (!errors.Is(err, errPidtuneReflected) || !r.screened(wc)) {
+			return err
+		}
+		if r.openStable() && r.screened(wc) && r.gateOf().winds(pidtuneGateController(pid)) {
+			if err != nil {
 				return err
 			}
+			return &pidtuneUnstableError{pidType: r.pidType, wc: wc}
 		}
 	}
 	if err := checkPidtuneStability(r.screen, r.loop, r.eval, pid, r.pidType, wc); err != nil {
@@ -632,6 +638,12 @@ type pidtuneGate struct {
 	// zero magnitudes, built by rotates on first use (NaN when unknown).
 	rootSum, rootMax float64
 	rootsDone        bool
+	// tailW, tailG and tailTop are tailPeak's grid, plant samples and
+	// whether the scan's band ends at each; tailHigh is the band's end.
+	tailW    []float64
+	tailG    []complex128
+	tailTop  []bool
+	tailHigh float64
 }
 
 // pidtuneGrid caches, at each frequency w, the plant response g and, for
@@ -893,14 +905,66 @@ func (g *pidtuneGate) sensitive(pid *PID, pidType PidtuneType, wc float64) error
 	c := pidtuneGateController(pid)
 	ms := g.sensitivityOver(c, g.p.maxSensitivity)
 	if above := g.beyond(&c); above != nil && ms <= g.p.maxSensitivity {
-		p := g.p
-		p.low, p.loopTail = p.high, g.tail
-		ms = pidTuningSensitivityPeak(p, c)
+		ms = g.tailPeak(c)
 	}
 	if ms > g.p.maxSensitivity {
 		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
 	}
 	return nil
+}
+
+// tailPeak is pidTuningSensitivityPeak from the band's top with the tail
+// bound, bit for bit, sampling the plant on its grid once for all designs:
+// the grid does not depend on c, only where the scan stops.
+func (g *pidtuneGate) tailPeak(c PID2) float64 {
+	s := func(gw complex128, w float64) float64 { return 1 / cmplx.Abs(1+gw*pidTuningFeedback(c, w)) }
+	refine := func(w float64) float64 { return s(g.at(w), w) }
+	bound, reach := 1-1/g.p.maxSensitivity, g.p.high*pidTuningTailReach
+	peak := 0.
+	var w0, v0, w1, v1 float64
+	for k := 0; ; k++ {
+		g.tailGrid(k)
+		w := g.tailW[k]
+		v := s(g.tailG[k], w)
+		if k >= 2 && v1 >= v0 && v1 >= v && v1 >= .8*math.Max(peak, v) {
+			_, r := pidTuningGoldenMax(refine, w0, w)
+			peak = math.Max(peak, r)
+		}
+		peak = math.Max(peak, v)
+		w0, v0, w1, v1 = w1, v1, w, v
+		if k >= pidTuningTailPoints {
+			return peak
+		}
+		if g.tailTop[k] && (w >= reach || g.tail(&c, w) <= bound) {
+			return peak
+		}
+	}
+}
+
+// tailGrid extends tailPeak's grid through index k.
+func (g *pidtuneGate) tailGrid(k int) {
+	p := g.p
+	for n := len(g.tailW); n <= k; n++ {
+		w := p.high
+		if n == 0 {
+			g.tailHigh = p.high
+		} else {
+			w = g.tailW[n-1]
+			if g.tailTop[n-1] {
+				g.tailHigh = math.Min(2*w, p.high*pidTuningTailReach)
+			}
+			step := .01 * w
+			if p.tau > 0 {
+				step = math.Min(step, math.Pi/16/p.tau)
+			}
+			for _, m := range p.modes {
+				step = math.Min(step, math.Max(math.Max(math.Abs(real(m)), math.Abs(w-imag(m))), 1e-6*w)/4)
+			}
+			w = math.Min(w+step, g.tailHigh)
+		}
+		g.tailW, g.tailG = append(g.tailW, w), append(g.tailG, g.at(w))
+		g.tailTop = append(g.tailTop, w >= g.tailHigh)
+	}
 }
 
 // beyond returns a log grid from the top of a continuous gate's band up to
