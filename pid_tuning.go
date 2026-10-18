@@ -821,10 +821,16 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// sRejected records a search that failed with candidates over the |S|
 	// bound.
 	// probing marks the back-off's searches.
-	used, minHigh, sRejected, probing := 0, 0., false, false
+	// resolveFloor raises an explicit crossover's band floor off samples
+	// the solve cannot resolve.
+	used, minHigh, sRejected, probing, resolveFloor := 0, 0., false, false, false
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency = wc
-		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: math.Max(wc*100, minHigh), at: eval.at, try: eval.try, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
+		low := wc / 100
+		if resolveFloor {
+			low = pidTuningResolvedFloor(eval.try, low, wc)
+		}
+		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: eval.at, try: eval.try, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
 		if robust {
 			p.maxSensitivity = pidTuningMaxSensitivity
 			p.loopTail = loopTail()
@@ -1169,6 +1175,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, eval.at, wc)
+		resolveFloor = true
 		res, err := tuneAt(wc, gainSign, false, false)
 		return withFloor(wc, gainSign, false, res, err)
 	}
@@ -1317,6 +1324,28 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 	}
 	return undelayed(stamp(res, err))
+}
+
+// pidTuningResolvedFloor returns lo, or, when try fails or is not finite
+// there, as next to rounded multiple poles at z = 1 or s = 0 where |G| ≫ 1
+// outruns the solve, one band step over the least frequency above lo where
+// it resolves. A floor that would pass wc/2 stays lo, so the band reports
+// the failure.
+func pidTuningResolvedFloor(try func(float64) (complex128, bool), lo, wc float64) float64 {
+	ok := func(w float64) bool {
+		h, ok := try(w)
+		return ok && pidFiniteComplex(h)
+	}
+	if ok(lo) {
+		return lo
+	}
+	step := math.Pow(1e4, 1./240)
+	for w := lo * step; w*step < wc/2; w *= step {
+		if ok(w) && ok(w*step) {
+			return w * step
+		}
+	}
+	return lo
 }
 
 // pidTuningPhaseCrossing returns the first ω in [wLo, wHi] at which the
