@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"strconv"
 	"strings"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -109,7 +110,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), at: pidtunePlantAt(plant), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, mirror: rule != pidtuneSignFixed}
+	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, mirror: rule != pidtuneSignFixed}
 
 	pid, first := run.design(wc, sign, false)
 	if first == nil {
@@ -206,11 +207,10 @@ func pidtuneIntegratorTol(plant *System, poles []complex128, wc float64) (comple
 
 // pidtuneRun holds what Pidtune's designs at successive crossovers share.
 type pidtuneRun struct {
-	plant  *System
-	screen *pidStabilityScreen
-	loop   *pidtuneLoop
-	// at is pidtunePlantAt(plant).
-	at      func(float64) (complex128, error)
+	plant   *System
+	screen  *pidStabilityScreen
+	loop    *pidtuneLoop
+	at      pidtunePlantPoint
 	eval    *sisoEval
 	pidType PidtuneType
 	pm, wc  float64
@@ -265,7 +265,7 @@ func (r *pidtuneRun) screened(wc float64) bool {
 }
 
 func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error) {
-	pid, err := pidtuneGains(r.plant, r.at, r.pidType, wc, r.pm, sign, true, lagFloor)
+	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, true, lagFloor)
 	if err == nil {
 		err = r.check(pid, wc, gated)
 		if err == nil || pid.DFormula != BackwardEuler {
@@ -275,7 +275,7 @@ func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error
 	if r.plant.Dt == 0 || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		return nil, err
 	}
-	fe, feErr := pidtuneGains(r.plant, r.at, r.pidType, wc, r.pm, sign, false, lagFloor)
+	fe, feErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, false, lagFloor)
 	if feErr != nil || fe.DFormula != ForwardEuler || r.check(fe, wc, gated) != nil {
 		return nil, err
 	}
@@ -650,7 +650,7 @@ type pidtuneUnstableError struct {
 }
 
 func (e *pidtuneUnstableError) Error() string {
-	return fmt.Sprintf("%s design at wc=%g gives an unstable closed loop: %v", e.pidType, e.wc, ErrPIDTuningTargetUnattainable)
+	return string(e.pidType) + " design at wc=" + strconv.FormatFloat(e.wc, 'g', -1, 64) + " gives an unstable closed loop: " + ErrPIDTuningTargetUnattainable.Error()
 }
 
 func (e *pidtuneUnstableError) Unwrap() error { return ErrPIDTuningTargetUnattainable }
@@ -906,41 +906,52 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 	return 0, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
 }
 
-// pidtunePlantAt returns w ↦ evalPlantAt(plant, w), bit for bit: it
-// remembers the last frequency and, for a standard SISO model without
-// internal delays, keeps FreqResponse's single-point solver, whose
-// workspaces evalInto overwrites at each point.
-func pidtunePlantAt(plant *System) func(float64) (complex128, error) {
-	fe := newFrequencyEvaluator(plant)
-	var solve func(frequencyPoint, []complex128) error
-	if !plant.HasInternalDelay() && !plant.IsDescriptor() && fe.m == 1 && fe.p == 1 {
-		if bd, ok := fe.pointSolver(1).(*balancedDense); ok {
-			solve = bd.evalInto
+// pidtunePlantPoint evaluates evalPlantAt(plant, w) bit for bit: it
+// remembers the last frequency and, from the second frequency on, for a
+// standard SISO model without internal delays, keeps FreqResponse's
+// single-point solver, whose workspaces evalInto overwrites at each point.
+// A nil pidtunePlantPoint calls evalPlantAt.
+type pidtunePlantPoint struct {
+	fe      frequencyEvaluator
+	solve   func(frequencyPoint, []complex128) error
+	delay   *mat.Dense
+	dst     [1]complex128
+	lastW   float64
+	lastH   complex128
+	lastErr error
+	calls   int
+}
+
+func (p *pidtunePlantPoint) at(plant *System, w float64) (complex128, error) {
+	if p == nil {
+		return evalPlantAt(plant, w)
+	}
+	if p.calls > 0 && math.Float64bits(w) == math.Float64bits(p.lastW) {
+		return p.lastH, p.lastErr
+	}
+	if p.calls == 1 && !plant.HasInternalDelay() && !plant.IsDescriptor() {
+		p.fe = newFrequencyEvaluator(plant)
+		if bd, ok := p.fe.pointSolver(1).(*balancedDense); ok && p.fe.m == 1 && p.fe.p == 1 {
+			p.solve = bd.evalInto
+			p.delay = effectiveIODelayMatrix(plant, 1, 1, true)
 		}
 	}
-	delay := effectiveIODelayMatrix(plant, fe.p, fe.m, true)
-	dst := make([]complex128, 1)
-	lastW, lastH, lastErr, seen := 0.0, complex128(0), error(nil), false
-	return func(w float64) (complex128, error) {
-		if seen && math.Float64bits(w) == math.Float64bits(lastW) {
-			return lastH, lastErr
-		}
-		var h complex128
-		var err error
-		if solve == nil {
-			h, err = evalPlantAt(plant, w)
-		} else {
-			pt := fe.pointAt(w)
-			if err = evalWithPoleLimit(solve, plant, pt, dst); err == nil {
-				if delay != nil {
-					applyIODelayMatrixAtS(plant, pt, dst, 1, 1, delay)
-				}
-				h = dst[0]
+	p.calls++
+	var h complex128
+	var err error
+	if p.solve == nil {
+		h, err = evalPlantAt(plant, w)
+	} else {
+		pt := p.fe.pointAt(w)
+		if err = evalWithPoleLimit(p.solve, plant, pt, p.dst[:]); err == nil {
+			if p.delay != nil {
+				applyIODelayMatrixAtS(plant, pt, p.dst[:], 1, 1, p.delay)
 			}
+			h = p.dst[0]
 		}
-		lastW, lastH, lastErr, seen = w, h, err, true
-		return h, err
 	}
+	p.lastW, p.lastH, p.lastErr = w, h, err
+	return h, err
 }
 
 func evalPlantAt(plant *System, w float64) (complex128, error) {
@@ -979,13 +990,12 @@ func (t pidtuneTerms) derivative(tf float64) complex128 {
 // With stableFilter, a discrete forward-Euler derivative whose filter pole
 // 1−Dt/Tf leaves the unit circle is redesigned with backward Euler.
 func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter bool) (*PID, error) {
-	at := func(w float64) (complex128, error) { return evalPlantAt(plant, w) }
-	return pidtuneGains(plant, at, pidType, wc, pmDeg, sign, stableFilter, false)
+	return pidtuneGains(plant, nil, pidType, wc, pmDeg, sign, stableFilter, false)
 }
 
-// pidtuneGains is computePIDGains, lagFloor aside, with at(w) standing for
-// evalPlantAt(plant, w).
-func pidtuneGains(plant *System, at func(float64) (complex128, error), pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
+// pidtuneGains is computePIDGains, lagFloor aside, evaluating the plant
+// with at.
+func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
 	pid, err := computePIDGainsPositive(plant, at, pidType, wc, pmDeg, sign, stableFilter, lagFloor)
 	if err != nil {
 		return nil, err
@@ -997,11 +1007,11 @@ func pidtuneGains(plant *System, at func(float64) (complex128, error), pidType P
 	return pid, nil
 }
 
-func computePIDGainsPositive(plant *System, at func(float64) (complex128, error), pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
+func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool) (*PID, error) {
 	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
 		return nil, fmt.Errorf("crossover %g must be below the Nyquist frequency %g: %w", wc, math.Pi/plant.Dt, ErrInvalidArgument)
 	}
-	h, err := at(wc)
+	h, err := at.at(plant, wc)
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"testing"
@@ -160,10 +161,10 @@ func TestPidtuneLoopScope(t *testing.T) {
 	}
 }
 
-// pidtunePlantAt must return evalPlantAt bit for bit, at a pole (the pole
+// pidtunePlantPoint must return evalPlantAt bit for bit, at a pole (the pole
 // limit), repeated frequencies, with I/O delays and on descriptor and
 // internally delayed models (which fall back).
-func TestPidtunePlantAtMatchesEvalPlantAt(t *testing.T) {
+func TestPidtunePlantPointMatchesEvalPlantAt(t *testing.T) {
 	rng := rand.New(rand.NewPCG(8, 13))
 	integ := makePlant(t, []float64{1, 2}, []float64{1, 0, 4})
 	plants := []*System{integ}
@@ -208,14 +209,14 @@ func TestPidtunePlantAtMatchesEvalPlantAt(t *testing.T) {
 		plants = append(plants, s)
 	}
 	for i, s := range plants {
-		at := pidtunePlantAt(s)
+		pt := &pidtunePlantPoint{}
 		ws := []float64{2, 0.5, 0.5, 1.3, 2, 1e-3, 7}
 		if s.Dt > 0 {
 			ws = append(ws, 31)
 		}
 		for _, w := range ws {
 			want, wantErr := evalPlantAt(s, w)
-			got, gotErr := at(w)
+			got, gotErr := pt.at(s, w)
 			if (gotErr == nil) != (wantErr == nil) || gotErr != nil && gotErr.Error() != wantErr.Error() {
 				t.Fatalf("plant %d, w=%g: err %v, want %v", i, w, gotErr, wantErr)
 			}
@@ -236,5 +237,16 @@ func TestPidtuneScreenBoundBackoffAllocs(t *testing.T) {
 	}
 	if a := testing.AllocsPerRun(5, func() { _, _ = Pidtune(plant, PidtuneI, 0, nil) }); a > 1500 {
 		t.Fatalf("%g allocations, want <= 1500", a)
+	}
+}
+
+// pidtuneUnstableError must read as the fmt.Errorf it replaces.
+func TestPidtuneUnstableErrorText(t *testing.T) {
+	for _, wc := range []float64{0.7, 1e-5, 123456789, 3.0000000000000004, 1e21} {
+		want := fmt.Errorf("%s design at wc=%g gives an unstable closed loop: %w", PidtunePIDF, wc, ErrPIDTuningTargetUnattainable)
+		got := &pidtuneUnstableError{pidType: PidtunePIDF, wc: wc}
+		if got.Error() != want.Error() || !errors.Is(got, ErrPIDTuningTargetUnattainable) {
+			t.Errorf("wc=%g: %q, want %q", wc, got, want)
+		}
 	}
 }
