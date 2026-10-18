@@ -379,9 +379,9 @@ func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor boo
 // when it fails only on reflected crossings, whose classical margin
 // 180° − |∠L| holds, and |S| passes, the design passes if the Nyquist test
 // certifies it stable, and keeps the signed failure when no test applies.
-// On a stable plant, a design the gate passes or fails only at reflected
-// crossings is rejected, sparing the test, when the gate's samples show
-// 1+L winding about 0 (pidtuneGate.winds).
+// On a stable plant, a design failing only at reflected crossings, or a
+// back-off design the gate passes, is rejected, sparing the test, when the
+// gate's samples show 1+L winding about 0 (pidtuneGate.winds).
 func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	if r.explicit {
 		if err := checkPidtuneMargin(r.plant, pid, wc, r.pm); err != nil {
@@ -391,14 +391,19 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	gateFirst := r.plant.Dt == 0 && r.plant.HasDelay()
 	if gated && gateFirst {
 		err := r.gated(pid, wc, false)
-		if err != nil && (!errors.Is(err, errPidtuneReflected) || !r.screened(wc)) {
+		if err != nil && !errors.Is(err, errPidtuneReflected) {
 			return err
 		}
-		if r.openStable() && r.screened(wc) && r.gateOf().winds(pidtuneGateController(pid)) {
+		if (err != nil || wc != r.wc) && r.openStable() && r.gateOf().winds(pidtuneGateController(pid)) {
 			if err != nil {
 				return err
 			}
-			return &pidtuneUnstableError{pidType: r.pidType, wc: wc}
+			if r.screened(wc) {
+				return &pidtuneUnstableError{pidType: r.pidType, wc: wc}
+			}
+		}
+		if err != nil && !r.screened(wc) {
+			return err
 		}
 	}
 	if err := checkPidtuneStability(r.screen, r.loop, r.eval, pid, r.pidType, wc); err != nil {
