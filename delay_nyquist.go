@@ -72,7 +72,7 @@ type delayNyquist struct {
 	roots    int
 	axisRoot bool
 	axisW    float64
-	tailFrom float64 // the tail bound certifies |L| <= lin from here on
+	tailFrom float64 // the tail bound certifies |L| <= max(lin, grid-end level) from here on
 	w        []float64
 	f        []complex128 // 1+L(jω) on the refined grid
 }
@@ -1163,9 +1163,10 @@ const sensitivityTailLevel = 0.3
 // The linear delay spacing ends where the tail bound certifies |L| <= t and
 // diskBound(t, c) does not exceed the grid peak for any c, so the sparse
 // tail cannot hold a larger sample; otherwise the grid is rebuilt with t
-// lowered until it does, or with the full linear spacing. Beyond the grid
-// |L| <= t with t within 0.1% of tailLimit, and diskBound at t = tailLimit is
-// reported with frequency +Inf when it exceeds the grid peak.
+// lowered until it does, or with the full linear spacing. The grid tail only
+// certifies |L| <= max(t, grid-end level), so certifyPeaks extends the band
+// to peakTailEnd. diskBound at t = tailLimit is reported with frequency +Inf
+// when it exceeds the peak.
 func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []sensitivityPeak, err error) {
 	gs := make([]func(complex128) float64, len(shifts))
 	for i, c := range shifts {
@@ -1220,7 +1221,7 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 }
 
 // certifyPeaks raises each sensitivity peak to within peakCertTol of
-// sup |S + c| on [0, res.tailFrom], beyond which the disk bound holds.
+// sup |S + c| on [0, peakTailEnd], beyond which the disk bound holds.
 func (l *delayLoop) certifyPeaks(res delayNyquist, shifts []float64, peaks []sensitivityPeak) error {
 	if l.sys == nil {
 		return fmt.Errorf("sensitivity peaks need the loop model: %w", errDelayLoopUnsupported)
@@ -1251,10 +1252,49 @@ func (l *delayLoop) certifyPeaks(res delayNyquist, shifts []float64, peaks []sen
 	if err := r.certify(ws, shifts, ps, wps, l.pointBudget(), errDelayLoopUnsupported); err != nil {
 		return err
 	}
+	if end := l.peakTailEnd(res.tailFrom, shifts, ps); end > res.tailFrom {
+		ws = append(ws[:0], res.tailFrom)
+		for _, w := range res.w {
+			if w > res.tailFrom && w < end {
+				ws = append(ws, w)
+			}
+		}
+		for w := 2 * ws[len(ws)-1]; w < end; w *= 2 {
+			ws = append(ws, w)
+		}
+		ws = append(ws, end)
+		_ = r.certify(ws, shifts, ps, wps, peakTailBudget, errDelayLoopUnsupported)
+	}
 	for i := range peaks {
 		peaks[i] = sensitivityPeak{ps[i], wps[i]}
 	}
 	return nil
+}
+
+// peakTailBudget caps the samples that certify the peaks beyond the grid
+// tail, where the delay limits the Taylor reach to ~1/τ.
+const peakTailBudget = 1 << 15
+
+// peakTailEnd returns the frequency beyond which the tail bound puts every
+// |S + c| within (1 + peakCertTol)·max(peak, diskBound(tailLimit, c)), the
+// value finally reported. The grid's tail level target is absolute, so
+// beyond from |L| may exceed the level the peaks need by up to 1e-3; the
+// peaks are certified on [from, end] too. Where end is out of reach, a peak
+// approached as ω → ∞, the band beyond from is certified as far as
+// peakTailBudget allows and the rest rests on the grid level.
+func (l *delayLoop) peakTailEnd(from float64, shifts, peaks []float64) float64 {
+	t := l.tail(from)
+	for i, c := range shifts {
+		t = diskBoundLevel(c, (1+peakCertTol)*max(peaks[i], diskBound(l.tailLimit, c)), t)
+	}
+	end := from
+	for range 200 {
+		if l.tail(end) <= t {
+			return end
+		}
+		end *= 2
+	}
+	return end
 }
 
 // nearPeakFraction selects the grid local maxima refined besides the grid
