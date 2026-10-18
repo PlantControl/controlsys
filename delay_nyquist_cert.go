@@ -109,11 +109,40 @@ func (c *descriptorCertifier) model(kind int, w float64) (loopModel, bool) {
 		return loopModel{}, false
 	}
 	m := loopModel{f: s.g[0], df: s.g1[0], s: *s, rho: modelRho, unit: 1}
+	m.s.g, m.s.g1 = nil, nil
 	if kind == 0 {
 		m.f++
+		return m, true
 	}
-	m.s.g, m.s.g1 = nil, nil
+	if cmplx.Abs(m.f) < sensitivityFloor {
+		c.sensitivityFromLoop(&m, w)
+	}
 	return m, true
+}
+
+// sensitivityFloor is the |S| below which the absolute rounding of the S
+// descriptor exceeds 1e-6 relative.
+const sensitivityFloor = 1e6 * modelRho
+
+// sensitivityFromLoop replaces the S value of m by 1/(1+L) where |1+L| > 1.
+// The closed-loop descriptor forms S as β minus a term near β, so its
+// absolute rounding ~eps swamps |S| ~ ω^k/K near a k-fold pole of L at the
+// origin, while 1/(1+L) keeps the relative accuracy of the sample of L. Both
+// are the same function, so the remainder of the S descriptor still holds.
+func (c *descriptorCertifier) sensitivityFromLoop(m *loopModel, w float64) {
+	s := c.r[0].sampleInto(c.buf[0], w)
+	if !s.regular || !finite(s.g[0]) || !finite(s.g1[0]) {
+		return
+	}
+	f := 1 + s.g[0]
+	if !(cmplx.Abs(f) > 1) {
+		return
+	}
+	sv, dsv := 1/f, -s.g1[0]/(f*f)
+	if !finite(sv) || !finite(dsv) {
+		return
+	}
+	m.f, m.df, m.rho, m.unit = sv, dsv, 2*modelRho, 0
 }
 
 func (c *descriptorCertifier) remainder(kind int, m *loopModel, h float64) float64 {
@@ -319,6 +348,21 @@ func detHigherTerms(x float64, nd int) float64 {
 	return sum
 }
 
+// singleChannelCertifier returns the certifier of 1 + L = 1 − H22·e^{−sτ}
+// for a single delay channel, whose S model the determinant lacks: near a
+// multiple pole of H22 on the axis the reach of every model of 1+L falls
+// below the bisection tolerance.
+func singleChannelCertifier(e *delayLFT) (*descriptorCertifier, error) {
+	var c2, d22 mat.Dense
+	c2.Scale(-1, e.h22sys.C)
+	d22.Scale(-1, e.h22sys.D)
+	loop := &System{A: e.h22sys.A, B: e.h22sys.B, C: &c2, D: &d22}
+	if err := loop.SetInputDelay([]float64{e.tau[0]}); err != nil {
+		return nil, err
+	}
+	return newDescriptorCertifier(loop)
+}
+
 // pidLoopCertifier returns the certifier of the loop c·plant, with an ideal
 // derivative (Kd ≠ 0, Tf = 0) realized as Kd·s·P = Kd·(CB + CA(sI−A)⁻¹B)
 // on a second copy of the delay-free strictly proper plant.
@@ -355,6 +399,10 @@ func pidLoopSystem(plant *System, c *PID2) (*System, error) {
 	return Series(ctrl, plant)
 }
 
+// pidIdealDerivativeLoop realizes (Kp + Ki/s + Kd·s)·P on one copy of the
+// plant, x′ = Ax + Bu, w′ = Cx: L = (Kp·C + Kd·CA)x + Ki·w + Kd·CB·u. A
+// second plant copy for the derivative would leave hidden modes at the plant
+// poles, which make the descriptor matrices of 1+L and S singular there.
 func pidIdealDerivativeLoop(plant *System, c *PID2) (*System, error) {
 	if plant.HasInternalDelay() {
 		return nil, fmt.Errorf("ideal derivative on internal delays: %w", errDelayLoopUnsupported)
@@ -364,15 +412,11 @@ func pidIdealDerivativeLoop(plant *System, c *PID2) (*System, error) {
 	if c.Ki != 0 {
 		nz = 1
 	}
-	n := 2*np + nz
-	off := np + nz
+	n := np + nz
 	a := mat.NewDense(n, n, nil)
 	b := mat.NewDense(n, 1, nil)
 	cm := mat.NewDense(1, n, nil)
 	d := 0.0
-	if nz == 1 {
-		b.Set(np, 0, 1)
-	}
 	for i := range np {
 		var ca float64
 		for k := range np {
@@ -381,15 +425,15 @@ func pidIdealDerivativeLoop(plant *System, c *PID2) (*System, error) {
 		d += plant.C.At(0, i) * plant.B.At(i, 0)
 		for j := range np {
 			a.Set(i, j, plant.A.At(i, j))
-			a.Set(off+i, off+j, plant.A.At(i, j))
 		}
 		if nz == 1 {
-			a.Set(i, np, c.Ki*plant.B.At(i, 0))
+			a.Set(np, i, plant.C.At(0, i))
 		}
-		b.Set(i, 0, c.Kp*plant.B.At(i, 0))
-		b.Set(off+i, 0, plant.B.At(i, 0))
-		cm.Set(0, i, plant.C.At(0, i))
-		cm.Set(0, off+i, c.Kd*ca)
+		b.Set(i, 0, plant.B.At(i, 0))
+		cm.Set(0, i, c.Kp*plant.C.At(0, i)+c.Kd*ca)
+	}
+	if nz == 1 {
+		cm.Set(0, np, c.Ki)
 	}
 	loop, err := New(a, b, cm, mat.NewDense(1, 1, []float64{c.Kd * d}), 0)
 	if err != nil {

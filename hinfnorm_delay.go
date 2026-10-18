@@ -500,10 +500,13 @@ func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 			normalized = true
 		}
 	}
-	if cert, err := newDetCertifier(e, normalized); err == nil {
-		l.cert = cert
+	if !normalized && e.nd == 1 && e.h22sys != nil {
+		l.cert, l.certErr = singleChannelCertifier(e)
 	} else {
-		l.certErr = err
+		l.cert, l.certErr = newDetCertifier(e, normalized)
+	}
+	if l.certErr != nil {
+		l.cert = nil
 	}
 	for _, t := range e.tau {
 		l.tau += t

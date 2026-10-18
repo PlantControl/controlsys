@@ -815,7 +815,9 @@ func (l *delayLoop) resolved(n *refineNode) bool {
 		nm.m[0], nm.good[0] = l.cert.model(0, n.w)
 		nm.has[0] = true
 	}
-	return nm.good[0] && nm.m[0].rho <= maxSampleRho
+	m := &nm.m[0]
+	a := cmplx.Abs(n.f)
+	return nm.good[0] && m.rho*(m.unit+a) <= maxSampleRho*a
 }
 
 // maxSampleRho bounds the relative rounding of a sample of 1+L that falls
