@@ -167,6 +167,9 @@ type pidTuningPlant struct {
 	// excess, so the search may cross it as it crosses the sampled bound.
 	returnSensitivity    func(*PID2) float64
 	maxReturnSensitivity float64
+	// loopTail, if set, bounds |L(jω')| over ω' ≥ ω for a candidate, so the
+	// |S| scan runs past high until |S| <= maxSensitivity is certain.
+	loopTail func(c *PID2, w float64) float64
 }
 
 type pidCrossScan int
@@ -356,7 +359,8 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // A default design on a delayed
 // plant, or at a moved crossover, must keep |S| <= 4 (2.5 dB gain margin)
 // at every sampled frequency, since a margin met at the crossover alone does
-// not bound it there. Only when neither the default nor the moved crossovers
+// not bound it there; for a continuous plant without internal delays the
+// samples run past 100·wc until a Markov-parameter bound gives |L| <= ¾. Only when neither the default nor the moved crossovers
 // meet PM±3° does the margin become a floor at the original crossover, as in
 // pidtune: the design takes the nearest feasible 6° band above PM, with
 // PM−3° at every crossover over the plant's dynamics. Bands whose phase is
@@ -424,6 +428,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
 	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(screen.model) })
+	loopTail := sync.OnceValue(func() func(*PID2, float64) float64 { return pidTuningLoopTail(plant) })
 	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(screen.model) })
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
@@ -440,6 +445,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		p := pidTuningPlant{dt: plant.Dt, low: wc / 100, high: math.Max(wc*100, minHigh), at: eval.at, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau}
 		if robust {
 			p.maxSensitivity = pidTuningMaxSensitivity
+			p.loopTail = loopTail()
 		}
 		p.modes = modes()
 		if floor {
@@ -1943,7 +1949,11 @@ func pidTuningModes(plant *System) []complex128 {
 	return modes
 }
 
-// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [p.low, p.high].
+// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [p.low, p.high],
+// extended, by at most pidTuningTailPoints samples up to
+// pidTuningTailReach·p.high, while p.loopTail admits |L| > 1 − 1/p.maxSensitivity
+// beyond, since a large derivative gain can cross 0 dB again far above the
+// crossover.
 // The grid step turns the delay phase by at most π/16 and, near a plant mode
 // σ+jω₀, is at most max(|σ|, |ω−ω₀|)/4, so a lightly damped mode's narrow
 // peak is bracketed. Grid maxima within 0.8 of the running peak are then
@@ -1952,8 +1962,12 @@ func pidTuningModes(plant *System) []complex128 {
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 	s := func(w float64) float64 { return 1 / cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)) }
 	peak := 0.
+	high, extend, inBand := p.high, p.loopTail != nil && p.maxSensitivity > 1, 0
 	var w0, v0, w1, v1 float64
 	for k, w := 0, p.low; ; k++ {
+		if w <= p.high {
+			inBand = k
+		}
 		v := s(w)
 		if k >= 2 && v1 >= v0 && v1 >= v && v1 >= .8*math.Max(peak, v) {
 			_, g := pidTuningGoldenMax(s, w0, w)
@@ -1961,8 +1975,14 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 		}
 		peak = math.Max(peak, v)
 		w0, v0, w1, v1 = w1, v1, w, v
-		if w >= p.high {
+		if k-inBand >= pidTuningTailPoints {
 			return peak
+		}
+		if w >= high {
+			if !extend || w >= p.high*pidTuningTailReach || p.loopTail(&c, w) <= 1-1/p.maxSensitivity {
+				return peak
+			}
+			high = math.Min(2*w, p.high*pidTuningTailReach)
 		}
 		step := .01 * w
 		if p.tau > 0 {
@@ -1971,7 +1991,36 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 		for _, m := range p.modes {
 			step = math.Min(step, math.Max(math.Max(math.Abs(real(m)), math.Abs(w-imag(m))), 1e-6*w)/4)
 		}
-		w = math.Min(w+step, p.high)
+		w = math.Min(w+step, high)
+	}
+}
+
+// pidTuningTailReach and pidTuningTailPoints cap the |S| scan's extension
+// past its band.
+const (
+	pidTuningTailReach  = 1e4
+	pidTuningTailPoints = 4096
+)
+
+// pidTuningLoopTail returns a bound on |C(jω')·P(jω')| over ω' ≥ ω for a
+// continuous plant without internal delays, or nil; see pidMarkovTail.
+func pidTuningLoopTail(plant *System) func(*PID2, float64) float64 {
+	if !plant.IsContinuous() || plant.HasInternalDelay() {
+		return nil
+	}
+	markov, d := newPIDMarkovTail(plant), math.Abs(plant.D.At(0, 0))
+	return func(c *PID2, w float64) float64 {
+		g := d + markov.at(w, 0)
+		k := math.Abs(c.Kp) + math.Abs(c.Ki)/w
+		switch {
+		case c.Kd == 0:
+			return k * g
+		case c.Tf > 0:
+			return (k + math.Abs(c.Kd)/c.Tf) * g
+		case d != 0:
+			return math.Inf(1)
+		}
+		return k*g + math.Abs(c.Kd)*markov.at(w, 1)
 	}
 }
 
