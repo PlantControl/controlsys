@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -360,5 +361,77 @@ func TestPidtunePDBackoffNeedsCrossover(t *testing.T) {
 			continue
 		}
 		pidtuneCheckRobust(t, name, pid, c.num, c.den, c.dt, 3)
+	}
+}
+
+// A plant with an exact zero at the integrator (s = 0, z = 1) has DC gain
+// exactly 0, so Bandwidth errored before the pole fallback and every family
+// returned ErrInvalidArgument (SJ5QTW). The crossover is half the slowest
+// pole's natural frequency, capped a decade below Nyquist; integral
+// families return ErrPIDTuningTargetUnattainable, also when no crossover
+// can be inferred (poles only at z = 0). Oracle: crossover from den's roots;
+// closed-loop roots and |S| of the directly evaluated loop.
+func TestPidtuneExactZeroAtIntegrator(t *testing.T) {
+	for _, c := range []struct {
+		num, den Poly
+		dt       float64
+		designs  []PidtuneType
+	}{
+		{Poly{-0.0563, 0.3311, 0}, Poly{1, 7.063, 15.54, 12.54}, 0, []PidtuneType{PidtuneP, PidtunePD}},
+		{Poly{0.5, 0}, Poly{1, 2}, 0, []PidtuneType{PidtuneP, PidtunePD}},
+		{Poly{0.3, -0.3}, Poly{1, -0.5}, 0.1, []PidtuneType{PidtuneP, PidtunePD}},
+		{Poly{0.3, -0.3}, Poly{1, -1.2, 0.35}, 0.1, nil},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
+		roots, err := c.den.Roots()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := math.Inf(1)
+		for _, r := range roots {
+			w := cmplx.Abs(r)
+			if c.dt > 0 {
+				w = cmplx.Abs(cmplx.Log(r)) / c.dt
+			}
+			want = math.Min(want, 0.5*w)
+		}
+		if c.dt > 0 {
+			want = math.Min(want, 0.1*math.Pi/c.dt)
+		}
+		wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
+		if err != nil || !fromPole || math.Abs(wc-want) > 1e-9*want {
+			t.Fatalf("%v/%v: crossover %g (pole %v), %v; want %g", c.num, c.den, wc, fromPole, err, want)
+		}
+		for _, f := range []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF} {
+			name := fmt.Sprintf("%s %v/%v dt=%g", f, c.num, c.den, c.dt)
+			pid, err := Pidtune(p, f, 0, nil)
+			if err != nil {
+				if !errors.Is(err, ErrPIDTuningTargetUnattainable) || slices.Contains(c.designs, f) {
+					t.Errorf("%s: %v", name, err)
+				}
+				continue
+			}
+			if _, hasI, _, _, _ := pidTuningTerms(f); hasI {
+				t.Errorf("%s: %+v; want ErrPIDTuningTargetUnattainable", name, pid)
+				continue
+			}
+			if stable, ok := pidtuneOracleStable(t, pid, c.num, c.den, c.dt, 0); !ok || !stable {
+				t.Errorf("%s: %+v unstable", name, pid)
+			}
+			hi := wc * 1e6
+			if c.dt > 0 {
+				hi = math.Pi / c.dt
+			}
+			if _, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, c.num, c.den, c.dt, 0), wc*1e-6, hi); ms > 4.05 {
+				t.Errorf("%s: %+v |S| peak %.3g", name, pid, ms)
+			}
+		}
+	}
+
+	p := pidtuneBackoffPlant(t, Poly{0.3, -0.3}, Poly{1, 0}, 0.1, 0)
+	for _, f := range []PidtuneType{PidtuneI, PidtunePI, PidtunePID, PidtunePIDF} {
+		if pid, err := Pidtune(p, f, 0, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			t.Errorf("%s on 0.3(z-1)/z: %+v, %v; want ErrPIDTuningTargetUnattainable", f, pid, err)
+		}
 	}
 }

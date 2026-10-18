@@ -103,6 +103,10 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: unsupported type %q: %w", pidType, ErrInvalidArgument)
 	}
 
+	_, hasI, _, _, _ := pidTuningTerms(pidType)
+	if hasI && pidtuneZeroAtIntegrator(plant) {
+		return nil, fmt.Errorf("Pidtune: %s: a plant zero at the integrator cancels the integral term, leaving a closed-loop pole on the stability boundary: %w", pidType, ErrPIDTuningTargetUnattainable)
+	}
 	auto := wc == 0
 	wc, fromPole, err := autoCrossoverFreq(plant, wc, pm)
 	if err != nil {
@@ -112,10 +116,6 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	eval, err := newSISOEval(plant)
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
-	}
-	_, hasI, _, _, _ := pidTuningTerms(pidType)
-	if hasI && pidtuneZeroAtIntegrator(plant) {
-		return nil, fmt.Errorf("Pidtune: %s: a plant zero at the integrator cancels the integral term, leaving a closed-loop pole on the stability boundary: %w", pidType, ErrPIDTuningTargetUnattainable)
 	}
 	sign, rule := pidtuneGainSign(plant, eval.at, wc, hasI)
 	if eval.err != nil {
@@ -967,8 +967,9 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 }
 
 // plantCrossoverFreqFrom is plantCrossoverFreq, also reporting whether the
-// crossover came from the slowest pole: G has no gain crossover, a finite
-// DC gain and no -3 dB bandwidth, as for a high-pass plant with |G| < 1.
+// crossover came from the slowest pole: G has no gain crossover and a
+// finite DC gain that is exactly 0 or has no -3 dB bandwidth, as for a
+// high-pass plant with |G| < 1.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
@@ -977,17 +978,19 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	if len(all.GainCrossFreqs) > 0 {
 		return all.GainCrossFreqs[0], false, nil
 	}
-	if dc, err := plant.DCGain(); err == nil && math.IsInf(dc.At(0, 0), 0) {
+	dc, err := plant.DCGain()
+	if err == nil && math.IsInf(dc.At(0, 0), 0) {
 		wc, err := pidtuneIntegratingCrossover(plant)
 		return wc, false, err
 	}
-
-	bw, err := Bandwidth(plant, -3)
-	if err != nil {
-		return 0, false, err
-	}
-	if bw > 0 && !math.IsInf(bw, 0) {
-		return bw, false, nil
+	if err != nil || dc.At(0, 0) != 0 {
+		bw, err := Bandwidth(plant, -3)
+		if err != nil {
+			return 0, false, err
+		}
+		if bw > 0 && !math.IsInf(bw, 0) {
+			return bw, false, nil
+		}
 	}
 
 	poles, err := plant.Poles()
