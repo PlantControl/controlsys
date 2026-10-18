@@ -658,8 +658,8 @@ func (e *pidtuneUnstableError) Unwrap() error { return ErrPIDTuningTargetUnattai
 // pidtuneLoop is pidStabilityScreen.closedLoopPoles for a standard SISO
 // model without delays, with buffers reused across designs: the controller
 // realization, I−D1·D2 solve and closed-loop A take PID.System's and
-// Feedback's operations in their order, so the poles, and the verdict, are
-// bit for bit those of Feedback(model, C, −1).IsStable(). Anything else,
+// Feedback's operations in their order, so the poles are bit for bit those
+// of Feedback(model, C, −1) and the verdict is closedLoopPoles'. Anything else,
 // errors included, goes to closedLoopPoles.
 type pidtuneLoop struct {
 	model *System
@@ -821,7 +821,7 @@ func (l *pidtuneLoop) stable(screen *pidStabilityScreen, c *PID2) (bool, error) 
 	l.poles = l.eig.Values(l.poles[:n])
 	for _, p := range l.poles {
 		if poleOnOrOutsideStabilityBoundary(p, plant.Dt == 0, poleStabilityTolerance(p)) {
-			return false, nil
+			return pidTuningPolesStable(l.poles, plant, cs), nil
 		}
 	}
 	return true, nil
