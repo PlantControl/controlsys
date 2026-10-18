@@ -323,3 +323,72 @@ func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
 		}
 	}
 }
+
+// WSF2HP: crossovers beside a real pair straddling or next to z = 1, where
+// the phase stays within ~1e-6 rad of −180° up to θ ~ ε and the double
+// solve's phase error is of that order: crossings were missed, or reported
+// a few percent off (case 1). Oracle: as for
+// TestAllMarginPhaseCrossBesideUnitPolePair.
+func TestAllMarginPhaseCrossBesideRealUnitPolePair(t *testing.T) {
+	type tc struct {
+		num, den []float64
+		eps      float64
+	}
+	cases := []tc{
+		{[]float64{0.6942811935961309, 4.422597857871295}, []float64{1, -2, 0.9999999998197421}, 1.34e-5},
+		{[]float64{1e-3, 1}, []float64{1, -2, 1 - 2e-4*2e-4}, 2e-4},
+		{[]float64{1e-4, 1}, []float64{1, -2, 1 - 2e-3*2e-3}, 2e-3},
+		{[]float64{10, 1}, []float64{1, -2, 1 - 5e-4*5e-4}, 5e-4},
+	}
+	rng := rand.New(rand.NewPCG(7, 31))
+	for k := range 45 {
+		e := math.Pow(10, -6+3*rng.Float64())
+		num := []float64{rng.NormFloat64(), rng.NormFloat64()}
+		var den []float64
+		switch k % 3 {
+		case 0:
+			den = []float64{1, -2, 1 - e*e}
+			num[1] = math.Abs(num[1])
+			num[0] = num[1] * math.Pow(10, -3*rng.Float64())
+		case 1:
+			den = polyMul([]float64{1, -1 + e}, []float64{1, -1 + e*(1+4*rng.Float64())})
+		default:
+			den = polyMul([]float64{1, -1}, []float64{1, -1 + e})
+		}
+		if k%3 != 0 && rng.IntN(2) == 1 {
+			den = polyMul(den, []float64{1, 0.9 - 1.8*rng.Float64()})
+		}
+		cases = append(cases, tc{num, den, e})
+	}
+	for i, c := range cases {
+		r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: 1}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		var want []float64
+		for _, w := range bigUnitPhaseCrossings(c.num, c.den, c.eps) {
+			if w < 10*c.eps {
+				want = append(want, w)
+			}
+		}
+		var got, gm []float64
+		for k, w := range res.PhaseCrossFreqs {
+			if w < 10*c.eps {
+				got, gm = append(got, w), append(gm, res.GainMargins[k])
+			}
+		}
+		ok := len(got) == len(want)
+		for k := 0; ok && k < len(want); k++ {
+			re, _, mag := bigUnitLoop(c.num, c.den, got[k])
+			ok = re.Sign() < 0 && math.Abs(got[k]-want[k]) <= 1e-7*want[k] &&
+				math.Abs(gm[k]+20*math.Log10(mag)) <= 1e-5
+		}
+		if !ok {
+			t.Errorf("case %d num %v den %v: θpc %v GM %v, want θ %v", i, c.num, c.den, got, gm, want)
+		}
+	}
+}

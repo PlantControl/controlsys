@@ -1196,7 +1196,35 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	}
 	f := func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }
 	out := r.polish(cands, f, 1e-7, true)
-	return r.mergeResonanceCrossings(out, r.resonanceCrossings(f, 1e-7), f), nil
+	pairs, realPoles := r.resonancePoles()
+	out = r.dropRefuted(out, realPoles, f)
+	return r.mergeResonanceCrossings(out, r.resonanceCrossings(append(pairs, realPoles...), f, 1e-7), f), nil
+}
+
+// dropRefuted removes the polished ws inside the scan band of a real pole
+// pair next to z = 1 whose phase, in double-double, has one sign within 1e-5
+// either side: below the pair the double solve's phase error makes sign
+// changes up to a few percent off the crossing, which the scan supplies.
+func (r *rationalLoop) dropRefuted(ws, poles []float64, f func(float64) float64) []float64 {
+	if len(poles) == 0 {
+		return ws
+	}
+	r.eval.extended, r.eval.exact = true, true
+	defer func() { r.eval.extended, r.eval.exact = false, false }()
+	at := func(w float64) float64 {
+		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if !ok {
+			return math.NaN()
+		}
+		return v
+	}
+	return slices.DeleteFunc(ws, func(w float64) bool {
+		if !slices.ContainsFunc(poles, func(wp float64) bool { return w >= 1e-4*wp && w <= 10*wp }) {
+			return false
+		}
+		lo, hi := at(w*(1-1e-5)), at(w*(1+1e-5))
+		return math.Abs(lo) < 90 && math.Abs(hi) < 90 && lo*hi > 0
+	})
 }
 
 // mergeResonanceCrossings inserts the resonance-scan crossings cs into the
@@ -1237,16 +1265,20 @@ func (r *rationalLoop) mergeResonanceCrossings(ws, cs []float64, f func(float64)
 	return ws
 }
 
-// resonancePoles returns the boundary frequencies of the complex poles of L
-// within 1% of their frequency from the boundary: lightly damped pairs, and
-// pairs 1 ± jε next to z = 1. A pair whose first-order perturbation bound
-// cond(p)·eps·(‖A‖ + |p|·‖E‖) exceeds 1e-3·Im p is left out: a double or
-// quadruple real pole, as of an integrator squared, splits by rounding into
-// such pairs, whose crossings the loop lacks.
-func (r *rationalLoop) resonancePoles() []float64 {
+// resonancePoles returns in pairs the boundary frequencies of the complex
+// poles of L within 1% of their frequency from the boundary: lightly damped
+// pairs, and pairs 1 ± jε next to z = 1. Discrete, reals holds |ln p|/Δt for real poles
+// p within 1e-2 of z = 1 when at least two poles lie there: beside a real
+// pair 1 ± ε the phase can stay within ~1e-6 rad of −180° and cross it at θ
+// down to ~1e-2·ε, where the double solve's phase error is of that order.
+// A pole whose first-order perturbation bound
+// cond(p)·eps·(‖A‖ + |p|·‖E‖) exceeds 1e-3 of its frequency is left out: a
+// double or quadruple real pole, as of an integrator squared, splits by
+// rounding into such poles, whose crossings the loop lacks.
+func (r *rationalLoop) resonancePoles() (pairs, reals []float64) {
 	n := r.n
 	if n == 0 {
-		return nil
+		return nil, nil
 	}
 	a, e := slices.Clone(r.a), slices.Clone(r.e)
 	aNorm, eNorm := frobenius(a), frobenius(e)
@@ -1254,24 +1286,12 @@ func (r *rationalLoop) resonancePoles() []float64 {
 	vl, vr := make([]float64, n*n), make([]float64, n*n)
 	work := make([]float64, max(8*n, 1))
 	if !impl.Dggev(lapack.LeftEVCompute, lapack.RightEVCompute, n, a, n, e, n, alphar, alphai, beta, vl, n, vr, n, work, len(work)) {
-		return nil
+		return nil, nil
 	}
-	var ws []float64
-	for j := 0; j < n; j++ {
-		if alphai[j] == 0 {
-			continue
-		}
-		jj := j
-		j++
-		if beta[jj] == 0 || alphai[jj] < 0 {
-			continue
-		}
-		p := complex(alphar[jj]/beta[jj], alphai[jj]/beta[jj])
-		x, y := make([]complex128, n), make([]complex128, n)
+	x, y := make([]complex128, n), make([]complex128, n)
+	resolved := func(p complex128, scale float64) bool {
 		var nx, ny float64
 		for i := range n {
-			x[i] = complex(vr[i*n+jj], vr[i*n+jj+1])
-			y[i] = complex(vl[i*n+jj], vl[i*n+jj+1])
 			nx += real(x[i])*real(x[i]) + imag(x[i])*imag(x[i])
 			ny += real(y[i])*real(y[i]) + imag(y[i])*imag(y[i])
 		}
@@ -1284,7 +1304,39 @@ func (r *rationalLoop) resonancePoles() []float64 {
 			yex += cmplx.Conj(y[i]) * ex
 		}
 		cond := math.Sqrt(nx*ny) / cmplx.Abs(yex)
-		if !(cond*eps()*(aNorm+cmplx.Abs(p)*eNorm) <= 1e-3*imag(p)) {
+		return cond*eps()*(aNorm+cmplx.Abs(p)*eNorm) <= 1e-3*scale
+	}
+	var ws, nearOne []float64
+	nOne := 0
+	for j := 0; j < n; j++ {
+		if alphai[j] == 0 {
+			if !r.discrete() || beta[j] == 0 {
+				continue
+			}
+			p := alphar[j] / beta[j]
+			if math.Abs(p-1) > 1e-2 {
+				continue
+			}
+			nOne++
+			for i := range n {
+				x[i], y[i] = complex(vr[i*n+j], 0), complex(vl[i*n+j], 0)
+			}
+			if th := math.Abs(math.Log(p)); th > 0 && resolved(complex(p, 0), th) {
+				nearOne = append(nearOne, th/r.dt)
+			}
+			continue
+		}
+		jj := j
+		j++
+		if beta[jj] == 0 || alphai[jj] < 0 {
+			continue
+		}
+		p := complex(alphar[jj]/beta[jj], alphai[jj]/beta[jj])
+		for i := range n {
+			x[i] = complex(vr[i*n+jj], vr[i*n+jj+1])
+			y[i] = complex(vl[i*n+jj], vl[i*n+jj+1])
+		}
+		if !resolved(p, imag(p)) {
 			continue
 		}
 		var w, dist float64
@@ -1297,7 +1349,10 @@ func (r *rationalLoop) resonancePoles() []float64 {
 			ws = append(ws, w)
 		}
 	}
-	return ws
+	if nOne < 2 {
+		nearOne = nil
+	}
+	return ws, nearOne
 }
 
 // resonanceCrossings scans f, in double-double, beside each resonance pole
@@ -1312,7 +1367,7 @@ func (r *rationalLoop) resonancePoles() []float64 {
 // ±180 wrap excluded, is kept when it refines to |f| ≤ tol and still holds
 // walkClearance either side, or as far as the grid spacing when closer;
 // tol widens to ulpTol where f moves by more than tol per ulp.
-func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) []float64 {
+func (r *rationalLoop) resonanceCrossings(poles []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
@@ -1328,7 +1383,7 @@ func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) 
 	defer func() { r.eval.extended, r.eval.exact = false, false }()
 	const perDecade = 20
 	var out []float64
-	for _, wp := range r.resonancePoles() {
+	for _, wp := range poles {
 		var grid []float64
 		for i := 3 * perDecade; i > 0; i-- {
 			grid = append(grid, wp*math.Pow(10, -1-float64(i)/perDecade))
