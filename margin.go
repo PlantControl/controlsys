@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -1032,8 +1033,11 @@ func frobenius(a []float64) float64 {
 // Where the double solve is singular it evaluates in double-double: beside
 // a cluster k/(z+1)⁴ with tiny k, |L| reaches gamma where the pivot of
 // zI − A is below n·eps·‖A‖, yet the model is resolved there. Phase
-// crossings keep the double solve: the phase of the model as rounded beside
-// such a cluster departs from that of its factored form.
+// crossings keep the double solve beside such a cluster, where the phase of
+// the model as rounded departs from that of its factored form; only
+// resonanceCrossings evaluates phase in double-double, beside pairs that
+// pass the conditioning bound of resonancePoles. Margins at any verified
+// crossover use it too.
 func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	cands, err := r.gainCandidates(gamma)
 	if err != nil {
@@ -1163,22 +1167,12 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 			if math.Abs(a-b) <= 1e-7*b {
 				return 0
 			}
-			return cmpFloat(a, b)
+			return cmp.Compare(a, b)
 		}); !found {
 			out = slices.Insert(out, i, c)
 		}
 	}
 	return out, nil
-}
-
-func cmpFloat(a, b float64) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
 }
 
 // resonancePoles returns the boundary frequencies of the complex poles of L
