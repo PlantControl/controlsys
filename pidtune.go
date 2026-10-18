@@ -74,9 +74,10 @@ const (
 // counts as its distance from −1 (at wc only for P and I). Otherwise, and
 // for an explicit wc, the result is ErrPIDTuningTargetUnattainable.
 // A family with an integral term on a plant with a zero at the integrator
-// (s = 0, z = 1; within pidtuneNearIntegrator's tolerance) leaves a
-// closed-loop pole there at any gain and also returns
-// ErrPIDTuningTargetUnattainable. TunePID offers bounded search with achieved-target evidence.
+// (s = 0, z = 1, up to rounding) leaves a closed-loop pole there at any
+// gain and also returns ErrPIDTuningTargetUnattainable; a zero strictly
+// inside the stability region does not. TunePID offers bounded search with
+// achieved-target evidence.
 func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
 	if err := requireFiniteSystem("Pidtune", plant); err != nil {
 		return nil, err
