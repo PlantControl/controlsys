@@ -10,9 +10,9 @@ import (
 // EDMYXL: G(s) = (−184.15s+35.68)/(s³+4.559s²+3.272s+14.24)·e^{−1.0817s}
 // (Hurwitz: 4.559·3.272 > 14.24; RHP zero 0.194) is the PI back-off plant.
 // At depths 9 and 13 the floor's lowest admitted band center needs PI phase
-// −92.1° resp. −92.0°, 2° past the same-sign cone [−90°, 0°]: the exact seed
-// had Kp < 0, and the pattern steps from it skipped the sliver
-// 0 < Kp ≲ 0.007 within the band, so the probe failed while depths 10-12
+// −92.3° resp. −92.0°, 2° past the same-sign cone [−90°, 0°]: the exact seed
+// had Kp < 0, and the pattern steps from it skipped the sliver within the
+// band (0 < Kp ≲ 0.007 at depth 13), so the probe failed while depths 10-12
 // succeeded. The design is checked on L = (Kp+Ki/s)·G evaluated directly:
 // unit gain and band phase at wc, the 57° floor over a dense sweep, and
 // closed-loop stability by the winding of 1+L.
