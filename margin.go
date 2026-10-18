@@ -372,6 +372,20 @@ func refineCrossing(wLo, wHi float64, evalFn func(float64) float64) float64 {
 	return math.Sqrt(wLo * wHi)
 }
 
+// ulpTol widens tol for a bisected sign change of f at c to what one
+// rounding step of c moves f by, measured as four times the mean step over
+// ±64 ulps, capped at 1e-3. Beside a resonance with ζ ≲ 1e-7, f moves by more
+// than tol per ulp, so no float c meets tol; a jump of f, as across the ±180
+// wrap or an undamped pole, leaves |f| beyond the cap.
+func ulpTol(c float64, f func(float64) float64, tol float64) float64 {
+	u := math.Nextafter(c, math.Inf(1)) - c
+	step := math.Abs(f(c+64*u)-f(c-64*u)) / 128
+	if !(step < math.Inf(1)) {
+		return tol
+	}
+	return max(tol, min(4*step, 1e-3))
+}
+
 func phaseMarginDeg(h complex128) float64 {
 	pm := 180 + cmplx.Phase(h)*180/math.Pi
 	if pm > 180 {
@@ -1047,7 +1061,7 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	f := func(w float64) float64 { return math.Log(cmplx.Abs(r.eval.at(w))) - lg }
 	r.eval.extended = true
 	defer func() { r.eval.extended = false }()
-	return r.endCrossings(r.polish(cands, f, 1e-9), f, 1e-9), nil
+	return r.endCrossings(r.polish(cands, f, 1e-9, false), f, 1e-9), nil
 }
 
 // endCrossings adds a crossing of f = log|L| − log γ that the pencil missed
@@ -1161,7 +1175,7 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 		}
 	}
 	f := func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }
-	out := r.polish(cands, f, 1e-7)
+	out := r.polish(cands, f, 1e-7, true)
 	for _, c := range r.resonanceCrossings(f, 1e-7) {
 		if i, found := slices.BinarySearchFunc(out, c, func(a, b float64) int {
 			if math.Abs(a-b) <= 1e-7*b {
@@ -1307,7 +1321,7 @@ func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) 
 			}
 			c := refineCrossing(a, b, ft)
 			d := min(walkClearance, (c-a)/c, (b-c)/c)
-			if math.Abs(ft(c)) <= tol && ft(c*(1-d))*ft(c*(1+d)) < 0 {
+			if math.Abs(ft(c)) <= ulpTol(c, ft, tol) && ft(c*(1-d))*ft(c*(1+d)) < 0 {
 				out = append(out, c)
 			}
 		}
@@ -1338,8 +1352,9 @@ func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) 
 // tenth of the frequency, below first, past the singular band, and keeps the
 // first sign change that refines to |f| ≤ tol and still holds walkClearance
 // either side. Rounding grows without bound towards the band, as eps/δ⁴
-// beside k/(z+1)⁴, and makes sign changes there that the loop lacks.
-func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64) []float64 {
+// beside k/(z+1)⁴, and makes sign changes there that the loop lacks. When
+// steep, a refined sign change is held to ulpTol rather than tol.
+func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64, steep bool) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
@@ -1352,6 +1367,12 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		return v
 	}
 	within := func(w float64) bool { return math.Abs(ft(w)) <= tol }
+	crossTol := func(c float64) float64 {
+		if steep {
+			return ulpTol(c, ft, tol)
+		}
+		return tol
+	}
 	h0, ok := r.eval.try(0)
 	pole0 := !ok || cmplx.IsInf(h0)
 	zeroRoot := !pole0 && math.Abs(f(0)) <= tol
@@ -1381,7 +1402,7 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 			default:
 				if pf*fx <= 0 && pw != x {
 					c := refineCrossing(min(pw, x), max(pw, x), ft)
-					if hc := c * (1 + walkClearance); hc < wTop && math.Abs(ft(c)) <= tol && ft(c*(1-walkClearance))*ft(hc) < 0 {
+					if hc := c * (1 + walkClearance); hc < wTop && math.Abs(ft(c)) <= crossTol(c) && ft(c*(1-walkClearance))*ft(hc) < 0 {
 						return c, true
 					}
 				}
@@ -1424,16 +1445,19 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 				c, ok = walk(w, min(hi, w/10))
 			}
 			if ok {
-				best = c
+				best, bracketed = c, true
 			} else if _, ok := r.eval.try(w); !ok {
 				continue
 			}
 		}
-		v := math.Abs(ft(best))
+		v, vTol := math.Abs(ft(best)), tol
+		if bracketed {
+			vTol = crossTol(best)
+		}
 		if _, ok := r.eval.try(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {
 			continue
 		}
-		if v <= tol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
+		if v <= vTol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
 			out = append(out, best)
 		}
 	}
