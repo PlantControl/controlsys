@@ -48,14 +48,16 @@ const (
 // stay causal, and a discrete derivative whose forward-Euler filter pole
 // 1−Dt/Tf would leave the unit circle (Tf ≤ Dt/2) uses backward Euler unless
 // only the forward-Euler design gives a stable loop that keeps the margin at
-// every gain crossover and |S| ≤ 4. An explicitly
+// every gain crossover and |S| ≤ 4, for any wc, as its controller is
+// unstable. An explicitly
 // requested phase margin the family cannot reach at wc returns
 // ErrPIDTuningTargetUnattainable instead of a controller with a different
 // margin; without one, a PDF needing phase lag at wc takes its least lead,
 // a small Kd, as MATLAB does. A PIDF takes Tf = Td/10 unless that filter's
 // lag keeps the margin from being reached at wc; it then takes Tf = 0.1/wc,
-// else the off-target Td/10 design, whichever first keeps the margin at
-// every gain crossover and |S| ≤ 4. Every gain takes one sign: that of the DC
+// else the off-target Td/10 design, whichever first gives a stable loop
+// that, with wc = 0, keeps the margin at every gain crossover and |S| ≤ 4.
+// Every gain takes one sign: that of the DC
 // gain for a stable plant, and for an integrating or unstable plant the
 // sign stabilization forces
 // (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G); where the force
@@ -81,8 +83,14 @@ const (
 // each gain crossover, wc included (TunePID excludes wc), is the classical
 // 180° − |∠L|;
 // a continuous delay, gated before its Nyquist test, keeps the signed
-// 180° + ∠L. Otherwise, and
-// for an explicit wc, the result is ErrPIDTuningTargetUnattainable.
+// 180° + ∠L. Otherwise the result is ErrPIDTuningTargetUnattainable.
+// An explicit wc is honoured as in MATLAB: the design at wc is returned
+// whenever its closed loop passes the stability test (an unstable
+// forward-Euler filter aside), without back-off and
+// without checking the margin at other gain crossovers or |S| (the
+// achieved margins are the caller's to check, as with AllMargin); only an
+// unstable design, or an explicit phase margin unreachable at wc, returns
+// ErrPIDTuningTargetUnattainable.
 // A family with an integral term on a plant with a zero at the integrator
 // (s = 0, z = 1, up to rounding) leaves a closed-loop pole there at any
 // gain and also returns ErrPIDTuningTargetUnattainable; a zero strictly
@@ -320,8 +328,8 @@ func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error
 // check error so signed can see its derivative formula. A PIDF whose
 // Td/10 filter misses the target phase is replaced by its design at the
 // default filter, else by the missed design itself, whichever first passes
-// the back-off gate: a missed design can cross over elsewhere with almost
-// no margin.
+// check, gated for wc = 0: a missed design can cross over elsewhere with
+// almost no margin.
 func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor bool) (*PID, error) {
 	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pidtunePIDFIterate)
 	if err == nil {
@@ -332,7 +340,7 @@ func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor boo
 	}
 	for _, mode := range []pidtunePIDFMode{pidtunePIDFDefaultTf, pidtunePIDFKeep} {
 		alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, mode)
-		if altErr == nil && r.check(alt, wc, true) == nil {
+		if altErr == nil && r.check(alt, wc, gated || r.auto) == nil {
 			return alt, nil
 		}
 	}
