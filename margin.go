@@ -1021,10 +1021,8 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 			switch v := ft(wn); {
 			case sgn(v) == want:
 				return find(min(w, wn), max(w, wn))
-			case sgn(v) != 0:
-				t = tn
 			case !math.IsNaN(v):
-				return wn, true
+				t = tn
 			default:
 				if step = math.Sqrt(step); step < 1+1e-9 {
 					return 0, false
@@ -1043,14 +1041,14 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 	}
 	if !math.IsInf(pLo, 0) {
 		if s0, s := endSign(0), sgn(ft(pLo)); s0 != 0 && s != 0 && s != s0 {
-			if c, ok := scan(pLo, func(t float64) float64 { return t }, s0); ok {
+			if c, ok := scan(pLo, func(t float64) float64 { return t }, s0); ok && (len(ws) == 0 || c < ws[0]*(1-1e-9)) {
 				ws = append([]float64{c}, ws...)
 			}
 		}
 	}
 	if r.discrete() && pHi < wTop {
 		if sTop, s := endSign(wTop), sgn(ft(pHi)); sTop != 0 && s != 0 && s != sTop {
-			if c, ok := scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok {
+			if c, ok := scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok && (len(ws) == 0 || c > ws[len(ws)-1]*(1+1e-9)) {
 				ws = append(ws, c)
 			}
 		}
