@@ -55,8 +55,10 @@ const (
 // one fails. A design whose closed loop is unstable by its poles (delay
 // absorbed for discrete plants) or by a Nyquist test (continuous delays) is
 // rejected; loops outside both tests are not screened. With wc = 0 a
-// rejected design is retried at crossovers lowered up to three decades
-// (not for an integrating or unstable plant with a continuous delay),
+// rejected design is retried at crossovers lowered up to three decades, or
+// to a hundredth of the slowest non-integrating pole's natural frequency
+// when that is lower, six decades at most (not for an integrating or
+// unstable plant with a continuous delay),
 // accepting the first that passes, keeps the phase margin at every gain
 // crossover and keeps |S| ≤ 4; otherwise, and for an explicit wc, the
 // result is ErrPIDTuningTargetUnattainable. TunePID offers bounded search
@@ -107,20 +109,21 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	}
 	run := &pidtuneRun{plant: plant, screen: screen, eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, mirror: rule != pidtuneSignFixed}
 
-	steps := 0
+	pid, first := run.design(wc, sign, false)
+	if first == nil {
+		return pid, nil
+	}
 	// An unstable plant needs bandwidth that a continuous delay already
 	// caps, and each back-off step would run a Nyquist test.
-	if auto && (rule == pidtuneSignFixed || plant.Dt > 0 || !plant.HasDelay()) {
-		steps = pidtuneBackoffSteps
+	if !auto || !errors.Is(first, ErrPIDTuningTargetUnattainable) ||
+		rule != pidtuneSignFixed && plant.Dt == 0 && plant.HasDelay() {
+		return nil, fmt.Errorf("Pidtune: %w", first)
 	}
-	var first error
-	for k := 0; k <= steps; k++ {
-		pid, err := run.design(wc*math.Pow(10, -float64(k)/pidtuneBackoffPerDecade), sign, k > 0)
+	steps := int(math.Ceil(pidtuneBackoffPerDecade*math.Log10(wc/run.backoffFloor()) - 1e-9))
+	for k := 1; k <= steps; k++ {
+		pid, err := run.design(wc*math.Pow(10, -float64(k)/pidtuneBackoffPerDecade), sign, true)
 		if err == nil {
 			return pid, nil
-		}
-		if first == nil {
-			first = err
 		}
 		if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 			break
@@ -129,22 +132,85 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	return nil, fmt.Errorf("Pidtune: %w", first)
 }
 
-// An automatic crossover whose design fails is lowered geometrically, up to
-// pidtuneBackoffSteps/pidtuneBackoffPerDecade decades, until the design is
-// stable, keeps the phase margin at every gain crossover of the loop and
-// keeps |S| ≤ pidTuningMaxSensitivity.
+// An automatic crossover whose design fails is lowered geometrically,
+// pidtuneBackoffPerDecade steps a decade, down to pidtuneBackoffFloor, until
+// the design is stable, keeps the phase margin at every gain crossover of
+// the loop and keeps |S| ≤ pidTuningMaxSensitivity.
 const (
 	pidtuneBackoffPerDecade = 20
-	pidtuneBackoffSteps     = 60
+	pidtuneBackoffDecades   = 3
+	pidtuneBackoffMaxDecade = 6
+	pidtuneSlowPoleBackoff  = 100
 )
+
+// pidtuneBackoffFloor returns the lowest back-off crossover for an automatic
+// crossover wc: pidtuneBackoffDecades below it, or lower, by at most
+// pidtuneBackoffMaxDecade decades, to 1/pidtuneSlowPoleBackoff of the
+// slowest non-integrating pole, whose phase lag can make every crossover
+// above it unattainable for a family without lead.
+func pidtuneBackoffFloor(plant *System, wc float64) float64 {
+	floor := wc * math.Pow(10, -pidtuneBackoffDecades)
+	slow := pidtuneSlowestPole(plant, wc)
+	if slow > 0 {
+		floor = math.Max(math.Min(floor, slow/pidtuneSlowPoleBackoff), wc*math.Pow(10, -pidtuneBackoffMaxDecade))
+	}
+	return floor
+}
+
+// pidtuneSlowestPole returns the smallest natural frequency of a plant pole
+// (|ln z|/Dt for discrete plants) outside pidtuneNearIntegrator's tolerance
+// of the integrator, or 0 when there is none.
+func pidtuneSlowestPole(plant *System, wc float64) float64 {
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return 0
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return 0
+	}
+	at, tol := pidtuneIntegratorTol(plant, poles, wc)
+	slow := math.Inf(1)
+	for _, p := range poles {
+		if cmplx.Abs(p-at) <= tol {
+			continue
+		}
+		w := cmplx.Abs(p)
+		if plant.Dt > 0 {
+			w = cmplx.Abs(cmplx.Log(p)) / plant.Dt
+		}
+		if w > 0 && w < slow {
+			slow = w
+		}
+	}
+	if math.IsInf(slow, 1) || math.IsNaN(slow) {
+		return 0
+	}
+	return slow
+}
+
+// pidtuneIntegratorTol returns the integrator location, s = 0 or z = 1, and
+// the distance within which pidtuneNearIntegrator counts a pole as one.
+func pidtuneIntegratorTol(plant *System, poles []complex128, wc float64) (complex128, float64) {
+	if plant.Dt > 0 {
+		return 1, max(1e-6*wc*plant.Dt, 1e-8)
+	}
+	tol := 1e-6 * wc
+	for _, p := range poles {
+		tol = max(tol, 1e-8*cmplx.Abs(p))
+	}
+	return 0, tol
+}
 
 // pidtuneRun holds what Pidtune's designs at successive crossovers share.
 type pidtuneRun struct {
-	plant    *System
-	screen   *pidStabilityScreen
-	eval     *sisoEval
-	pidType  PidtuneType
-	pm, wc   float64
+	plant   *System
+	screen  *pidStabilityScreen
+	eval    *sisoEval
+	pidType PidtuneType
+	pm, wc  float64
+	// floor caches backoffFloor.
+	floor    float64
 	explicit bool
 	auto     bool
 	// mirror tries the design against the chosen gain sign after the
@@ -231,9 +297,16 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	return nil
 }
 
+func (r *pidtuneRun) backoffFloor() float64 {
+	if r.floor == 0 {
+		r.floor = pidtuneBackoffFloor(r.plant, r.wc)
+	}
+	return r.floor
+}
+
 func (r *pidtuneRun) gated(pid *PID, wc float64) error {
 	if r.gate == nil {
-		r.gate = newPidtuneGate(r.plant, r.screen.model, r.eval, r.wc)
+		r.gate = newPidtuneGate(r.plant, r.screen.model, r.eval, r.wc, r.backoffFloor())
 	}
 	return r.gate.check(pid, r.pidType, wc, r.pm)
 }
@@ -335,14 +408,7 @@ func pidtuneNearIntegrator(plant *System, wc float64) bool {
 		return false
 	}
 	zeros, _ := model.Zeros()
-	at, tol := complex(0, 0), 1e-6*wc
-	if plant.Dt > 0 {
-		at, tol = 1, max(tol*plant.Dt, 1e-8)
-	} else {
-		for _, p := range poles {
-			tol = max(tol, 1e-8*cmplx.Abs(p))
-		}
-	}
+	at, tol := pidtuneIntegratorTol(plant, poles, wc)
 	near := 0
 	for _, p := range poles {
 		if cmplx.Abs(p-at) <= tol {
@@ -409,8 +475,8 @@ func (q *pidtuneGrid) integrator(f PIDFormula) []complex128 {
 
 const pidtuneGatePerDecade = 100
 
-func newPidtuneGate(plant, model *System, eval *sisoEval, wc float64) *pidtuneGate {
-	lo, hi := wc*1e-6, wc*1e3
+func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pidtuneGate {
+	lo, hi := floor*1e-3, wc*1e3
 	if plant.Dt > 0 {
 		hi = math.Min(hi, math.Pi/plant.Dt)
 	}

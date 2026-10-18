@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
 	"testing"
@@ -595,7 +596,7 @@ func TestPidtuneGateGridExact(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		gate := newPidtuneGate(p, p, eval, 2)
+		gate := newPidtuneGate(p, p, eval, 2, 2e-3)
 		checked := 0
 		for _, fi := range formulas {
 			for _, fd := range formulas {
@@ -630,4 +631,145 @@ func TestPidtuneGateGridExact(t *testing.T) {
 			t.Fatalf("dt=%g: no crossing besides wc compared", dt)
 		}
 	}
+}
+
+// G = (0.1z+0.05)/((z−1)(z−0.999)²), Dt = 0.1: the double pole at ≈0.01 rad/s
+// lags P/PI/PD past −180° at every crossover within three decades of the
+// automatic 5.3 rad/s. Oracles: closed-loop roots of the polynomial loop,
+// and the phase margin and peak |S| of L(e^{jωDt}) from the raw polynomials
+// on a dense grid.
+func TestPidtuneSlowPoleBackoff(t *testing.T) {
+	const dt = .1
+	num, den := Poly{0.1, 0.05}, Poly{1, -1}.Mul(Poly{1, -0.999}).Mul(Poly{1, -0.999})
+	pos, neg := negatedPlant(t, num, den, dt)
+	negNum := Poly{-num[0], -num[1]}
+	for _, f := range []PidtuneType{PidtuneP, PidtunePI, PidtunePD} {
+		cp, err := Pidtune(pos, f, 0, nil)
+		if err != nil {
+			t.Fatalf("%s: G: %v", f, err)
+		}
+		cn, err := Pidtune(neg, f, 0, nil)
+		if err != nil {
+			t.Fatalf("%s: −G: %v", f, err)
+		}
+		for _, g := range [][2]float64{{cp.Kp, cn.Kp}, {cp.Ki, cn.Ki}, {cp.Kd, cn.Kd}} {
+			if math.Abs(g[0]+g[1]) > 1e-12*math.Abs(g[0]) {
+				t.Errorf("%s: %+v, %+v not mirrored", f, cp, cn)
+			}
+		}
+		for _, c := range []struct {
+			pid *PID
+			num Poly
+		}{{cp, num}, {cn, negNum}} {
+			if !pidtuneExactSchurStable(t, c.pid, c.num, den, dt) {
+				t.Errorf("%s: %+v unstable", f, c.pid)
+			}
+			numC, denC := pidtuneOracleController(c.pid, dt)
+			loop := func(w float64) complex128 {
+				z := cmplx.Exp(complex(0, w*dt))
+				return c.num.Eval(z) * numC.Eval(z) / (den.Eval(z) * denC.Eval(z))
+			}
+			var crosses []float64
+			ms, prev := 0.0, math.NaN()
+			for w := 1e-7; w < math.Pi/dt; w *= 1.001 {
+				l := loop(w)
+				ms = math.Max(ms, 1/cmplx.Abs(1+l))
+				m := cmplx.Abs(l) - 1
+				if prev > 0 && m <= 0 {
+					crosses = append(crosses, w)
+					pm := 180 + cmplx.Phase(l)*180/math.Pi
+					if pm > 180 {
+						pm -= 360
+					}
+					if pm < 59 {
+						t.Errorf("%s: %+v phase margin %.3g° at %g", f, c.pid, pm, w)
+					}
+				}
+				prev = m
+			}
+			if len(crosses) == 0 || crosses[0] < 1e-3 || crosses[0] > 1e-2 {
+				t.Errorf("%s: %+v gain crossovers %v, want first in [1e-3, 1e-2]", f, c.pid, crosses)
+			}
+			if ms > pidTuningMaxSensitivity*1.01 {
+				t.Errorf("%s: %+v peak |S| %.3g", f, c.pid, ms)
+			}
+		}
+	}
+}
+
+// pidtuneExactSchurStable reports whether the discrete loop of a
+// forward-Euler-integral pid and num/den has every closed-loop root strictly
+// inside the unit circle, by the Schur–Cohn recursion in exact rationals:
+// clustered roots near z = 1 defeat floating-point root finding.
+func pidtuneExactSchurStable(t *testing.T, pid *PID, num, den Poly, dt float64) bool {
+	t.Helper()
+	if pid.IFormula != ForwardEuler {
+		t.Fatalf("oracle needs a forward-Euler integral, got %v", pid.IFormula)
+	}
+	r := func(v float64) *big.Rat { return new(big.Rat).SetFloat64(v) }
+	poly := func(p Poly) []*big.Rat {
+		out := make([]*big.Rat, len(p))
+		for i, v := range p {
+			out[i] = r(v)
+		}
+		return out
+	}
+	mul := func(a, b []*big.Rat) []*big.Rat {
+		out := make([]*big.Rat, len(a)+len(b)-1)
+		for i := range out {
+			out[i] = new(big.Rat)
+		}
+		for i, x := range a {
+			for j, y := range b {
+				out[i+j].Add(out[i+j], new(big.Rat).Mul(x, y))
+			}
+		}
+		return out
+	}
+	add := func(a, b []*big.Rat) []*big.Rat {
+		if len(a) < len(b) {
+			a, b = b, a
+		}
+		out := make([]*big.Rat, len(a))
+		for i := range a {
+			out[i] = new(big.Rat).Set(a[i])
+			if k := i - (len(a) - len(b)); k >= 0 {
+				out[i].Add(out[i], b[k])
+			}
+		}
+		return out
+	}
+	x := []*big.Rat{r(1), r(-1)}
+	kp, kd, dtR := []*big.Rat{r(pid.Kp)}, []*big.Rat{r(pid.Kd)}, r(dt)
+	ki := []*big.Rat{new(big.Rat).Mul(r(pid.Ki), dtR)}
+	lead := new(big.Rat).Add(r(pid.Tf), new(big.Rat).Mul(r(pidFormulaWeight(pid.DFormula)), dtR))
+	dd := []*big.Rat{lead, new(big.Rat).Sub(dtR, lead)}
+	if lead.Sign() == 0 {
+		dd = dd[1:]
+	}
+	numC, denC := kp, []*big.Rat{r(1)}
+	switch {
+	case pid.Ki != 0 && pid.Kd != 0:
+		numC = add(add(mul(mul(kp, x), dd), mul(ki, dd)), mul(mul(kd, x), x))
+		denC = mul(x, dd)
+	case pid.Ki != 0:
+		numC, denC = add(mul(kp, x), ki), x
+	case pid.Kd != 0:
+		numC, denC = add(mul(kp, dd), mul(kd, x)), dd
+	}
+	c := add(mul(poly(den), denC), mul(poly(num), numC))
+	for len(c) > 1 && c[0].Sign() == 0 {
+		c = c[1:]
+	}
+	for n := len(c) - 1; n > 0; n-- {
+		if new(big.Rat).Abs(c[n]).Cmp(new(big.Rat).Abs(c[0])) >= 0 {
+			return false
+		}
+		q := make([]*big.Rat, n)
+		for i := range q {
+			q[i] = new(big.Rat).Sub(new(big.Rat).Mul(c[0], c[i]), new(big.Rat).Mul(c[n], c[n-i]))
+		}
+		c = q
+	}
+	return true
 }
