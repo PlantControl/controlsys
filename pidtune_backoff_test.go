@@ -109,12 +109,13 @@ func pidtuneBackedOff(t *testing.T, p *System, f PidtuneType, opts *PidtuneOptio
 }
 
 // pidtuneDenseRobust checks a backed-off design by a dense sweep of the
-// directly evaluated loop over the gate's band: every crossover keeps the
-// phase margin and |S| stays near the gate's bound pidTuningMaxSensitivity
-// (sampling slack only).
+// directly evaluated loop over the gate's band and four decades above it,
+// which the gate scans while the loop gain has yet to roll off: every
+// crossover keeps the phase margin and |S| stays near the gate's bound
+// pidTuningMaxSensitivity (sampling slack only).
 func pidtuneDenseRobust(t *testing.T, name string, pid *PID, num, den Poly, dt, delay, wc, pm float64) {
 	t.Helper()
-	hi := wc * 1e3
+	hi := wc * 1e7
 	if dt > 0 {
 		hi = math.Pi / dt
 	}

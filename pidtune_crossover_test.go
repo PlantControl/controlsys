@@ -604,12 +604,15 @@ func TestPidtuneExactZeroAtIntegrator(t *testing.T) {
 
 // A zero near, not at, the integrator attenuates G(0) so far that its
 // -3 dB bandwidth lies on the c/s asymptote, where gains of 1e9..1e18
-// placed a closed-loop pole at the zero (TA526O). The crossover is half the
-// slowest pole's natural frequency instead, for every realization; integral
+// placed a closed-loop pole at the zero (TA526O). The crossover is instead
+// the first back-off step below ten times the fastest root, a pole fallback,
+// for every realization, which keeps gains on the plant's scale; integral
 // families may fail when the closed-loop pole left near the zero is within
-// the stability tolerance. Bandwidths within ten times the fastest root,
-// a resonant low-pass included, are kept. Oracle: crossover from den's
-// roots; closed-loop roots, gains against 1/|G(j·wc)| and |S| of the
+// the stability tolerance. Bandwidths within ten times the fastest root, a
+// resonant low-pass included, or above it with |G| rising less than 1e3
+// times its bandwidth value (zeros at 1e-3 and 1e-2 of the poles), are
+// kept. Oracle: crossover from num/den's roots and Bandwidth; closed-loop
+// roots, gains against 1/|G| at half the slowest pole and |S| of the
 // directly evaluated loop.
 func TestPidtuneZeroNearIntegrator(t *testing.T) {
 	all := []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePID, PidtunePIDF}
@@ -620,19 +623,24 @@ func TestPidtuneZeroNearIntegrator(t *testing.T) {
 		{Poly{0.8296, 0.8296e-10}, Poly{1, 0.999, 0.1257}, []PidtuneType{PidtuneP, PidtunePD}},
 		{Poly{-0.1376, -0.1376e-10}, Poly{1, 4.684, 1.41}, []PidtuneType{PidtuneP, PidtunePD}},
 		{Poly{0.8296, 0.8296e-6}, Poly{1, 0.999, 0.1257}, all},
-		{Poly{0.8296, 0.8296e-3}, Poly{1, 0.999, 0.1257}, all},
-		{Poly{0.8296, 0.8296e-2}, Poly{1, 0.999, 0.1257}, all},
 	} {
 		base := pidtuneBackoffPlant(t, c.num, c.den, 0, 0)
-		roots, err := c.den.Roots()
+		poles, err := c.den.Roots()
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := math.Inf(1)
-		for _, r := range roots {
-			want = math.Min(want, 0.5*cmplx.Abs(r))
+		zeros, err := c.num.Roots()
+		if err != nil {
+			t.Fatal(err)
 		}
-		bound := 1e3 * cmplx.Abs(c.den.Eval(complex(0, want))/c.num.Eval(complex(0, want)))
+		slow, fast := math.Inf(1), 0.0
+		for _, r := range poles {
+			slow = math.Min(slow, 0.5*cmplx.Abs(r))
+		}
+		for _, r := range slices.Concat(poles, zeros) {
+			fast = math.Max(fast, cmplx.Abs(r))
+		}
+		bound := 1e3 * cmplx.Abs(c.den.Eval(complex(0, slow))/c.num.Eval(complex(0, slow)))
 		n, _, _ := base.Dims()
 		T := mat.NewDense(n, n, nil)
 		for i := range n {
@@ -650,6 +658,16 @@ func TestPidtuneZeroNearIntegrator(t *testing.T) {
 			t.Fatal(err)
 		}
 		for k, p := range []*System{base, transformed, balanced.Sys} {
+			// The bandwidth on the asymptote varies with the realization's
+			// rounding by parts in 1e6.
+			bw, err := Bandwidth(p, -3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := bw * math.Pow(10, -math.Ceil(20*math.Log10(bw/(10*fast)))/20)
+			if !(want <= 10*fast && want > 10*fast*math.Pow(10, -1./20)) {
+				t.Fatalf("%v/%v: oracle crossover %g, fastest root %g", c.num, c.den, want, fast)
+			}
 			wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
 			if err != nil || !fromPole || math.Abs(wc-want) > 1e-9*want {
 				t.Fatalf("%v/%v realization %d: crossover %g (pole %v), %v; want %g", c.num, c.den, k, wc, fromPole, err, want)
@@ -679,6 +697,8 @@ func TestPidtuneZeroNearIntegrator(t *testing.T) {
 	for _, c := range []struct{ num, den Poly }{
 		{Poly{0.8296, 0.08296}, Poly{1, 0.999, 0.1257}},
 		{Poly{0.8296, 0.024888}, Poly{1, 0.999, 0.1257}},
+		{Poly{0.8296, 0.8296e-2}, Poly{1, 0.999, 0.1257}},
+		{Poly{0.8296, 0.8296e-3}, Poly{1, 0.999, 0.1257}},
 		{Poly{0.001}, Poly{1, 0.01, 1}},
 	} {
 		p := pidtuneBackoffPlant(t, c.num, c.den, 0, 0)

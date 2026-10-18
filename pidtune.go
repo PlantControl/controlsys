@@ -69,12 +69,15 @@ const (
 // rejected design is retried at crossovers lowered up to three decades, or
 // to a hundredth of the slowest non-integrating pole's natural frequency
 // when that is lower, six decades at most (six when wc came from a pole
-// because G has no gain crossover or bandwidth, or its -3 dB bandwidth lies
-// beyond ten times every pole and zero natural frequency, set by zeros that
-// attenuate the DC gain rather than by a passband; not for an integrating
-// or unstable plant with a continuous delay),
-// accepting the first that passes, keeps the phase margin at every gain
-// crossover and keeps |S| ≤ 4; a wc from a pole must pass that test from
+// because G has no gain crossover or bandwidth, or because its -3 dB
+// bandwidth lies beyond ten times every pole and zero natural frequency
+// with |G| peaking over 1e3 times its value there, set by zeros near the
+// integrator, when wc is the first such step below ten times that
+// frequency; not for an integrating or unstable plant with a continuous
+// delay), accepting the first that passes, keeps the phase margin at every
+// gain crossover, those above the band the first wc sets included up to
+// where the loop's Markov bound keeps |L| ≤ 3/4 (continuous plants without
+// internal delays), and keeps |S| ≤ 4; a wc from a pole must pass that test from
 // the first design, except that on a continuous plant without delay a P,
 // or a PD clamped short of the margin at wc (with the default margin; an
 // explicit one rejects it), is kept when the pole test certifies it stable
@@ -564,6 +567,10 @@ type pidtuneGate struct {
 	sens  pidtuneGrid
 	cross pidtuneGrid
 	at    func(float64) complex128
+	// tail bounds |L| above the band (pidTuningLoopTail), built on first use.
+	plant    *System
+	tail     func(*PID2, float64) float64
+	tailDone bool
 }
 
 // pidtuneGrid caches, at each frequency w, the plant response g and, for
@@ -609,7 +616,7 @@ const pidtuneGatePerDecade = 100
 func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pidtuneGate {
 	lo, hi := floor*1e-3, wc*1e3
 	if plant.Dt > 0 {
-		hi = math.Min(hi, math.Pi/plant.Dt)
+		hi = math.Pi / plant.Dt
 	}
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
@@ -646,7 +653,7 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 	for i := range omega {
 		omega[i] = math.Min(lo*math.Pow(10, float64(i)/pidtuneGatePerDecade), hi)
 	}
-	gate := &pidtuneGate{p: p, at: at}
+	gate := &pidtuneGate{p: p, at: at, plant: plant}
 	gate.cross = pidtuneGrid{w: pidTuningCrossGrid(p, omega), dt: plant.Dt}
 	gate.sens.dt = plant.Dt
 	for w := lo; ; {
@@ -678,10 +685,21 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 		return err
 	}
 	c := pidtuneGateController(pid)
-	crossings, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
+	_, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
+	// A back-off wc lies between grid points, where the scan cannot see a
+	// crossover paired with it; pidTuningCrossingsOn seeks one when wc is on
+	// the grid.
+	if i, ok := slices.BinarySearch(g.cross.w, wc); !ok && i > 0 && i < len(g.cross.w) {
+		_, m := pidTuningCrossingsOn(g.p, c, []float64{g.cross.w[i-1], wc, g.cross.w[i]}, wc, nil)
+		margins = append(margins, m[1:]...)
+	}
+	if above := g.beyond(&c); above != nil {
+		_, m := pidTuningCrossingsOn(g.p, c, above, wc, nil)
+		margins = append(margins, m[1:]...)
+	}
 	floor := pm - pidtuneMarginTol
 	if math.Abs(cmplx.Abs(g.p.at(wc)*pidTuningFeedback(c, wc))-1) > 1e-6 {
-		crossings, margins = crossings[1:], margins[1:]
+		margins = margins[1:]
 		if len(margins) == 0 {
 			return fmt.Errorf("%s design at wc=%g has no gain crossover: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
 		}
@@ -697,12 +715,54 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 	return nil
 }
 
-// sensitive rejects pid when |S| exceeds the bound.
+// sensitive rejects pid when |S| exceeds the bound, on the band and above
+// it as far as beyond reaches.
 func (g *pidtuneGate) sensitive(pid *PID, pidType PidtuneType, wc float64) error {
-	if ms := g.sensitivityOver(pidtuneGateController(pid), g.p.maxSensitivity); ms > g.p.maxSensitivity {
+	c := pidtuneGateController(pid)
+	ms := g.sensitivityOver(c, g.p.maxSensitivity)
+	if above := g.beyond(&c); above != nil && ms <= g.p.maxSensitivity {
+		p := g.p
+		p.low, p.loopTail = p.high, g.tail
+		ms = pidTuningSensitivityPeak(p, c)
+	}
+	if ms > g.p.maxSensitivity {
 		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
 	}
 	return nil
+}
+
+// beyond returns a log grid from the top of a continuous gate's band up to
+// where pidTuningLoopTail bounds |L| by 1 − 1/maxSensitivity, which rules
+// out a crossover or an |S| excess further up; nil when the bound holds at
+// the top, is unknown (discrete bands reach π/Dt), or does not hold within
+// pidTuningTailReach times the top, as for a loop gain that does not roll
+// off (a biproper plant, an ideal derivative), left to the band as before.
+// The band is set by the first crossover, and a large Kp, or Kd/Tf, at a
+// crossover backed off below it can cross 0 dB again above it.
+func (g *pidtuneGate) beyond(c *PID2) []float64 {
+	if !g.tailDone {
+		g.tailDone = true
+		if g.plant.Dt == 0 {
+			g.tail = pidTuningLoopTail(g.plant)
+		}
+	}
+	top, bound := g.p.high, 1-1/g.p.maxSensitivity
+	if g.tail == nil || g.tail(c, top) <= bound {
+		return nil
+	}
+	end := top
+	for end < top*pidTuningTailReach && g.tail(c, end) > bound {
+		end *= 2
+	}
+	if g.tail(c, end) > bound {
+		return nil
+	}
+	n := int(math.Ceil(math.Log10(end/top)*pidtuneGatePerDecade)) + 1
+	grid := make([]float64, n)
+	for i := range grid {
+		grid[i] = math.Min(top*math.Pow(10, float64(i)/pidtuneGatePerDecade), end)
+	}
+	return grid
 }
 
 func pidtuneGateController(pid *PID) PID2 {
@@ -1021,11 +1081,11 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 }
 
 // plantCrossoverFreqFrom is plantCrossoverFreq, also reporting whether the
-// crossover came from the slowest pole: G has no gain crossover and a
+// crossover came from a pole fallback: G has no gain crossover and a
 // finite DC gain that is 0 (a zero at the integrator, whose rounded DC gain
 // would give a -3 dB bandwidth at rounding level) or has no -3 dB
-// bandwidth, as for a high-pass plant with |G| < 1, or one beyond
-// pidtuneRolloffFactor times its fastest root, as for a zero near the
+// bandwidth, as for a high-pass plant with |G| < 1, both taking half the
+// slowest pole, or one pidtuneRolloffCrossover finds set by zeros near the
 // integrator.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	all, err := AllMargin(plant)
@@ -1045,7 +1105,10 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 		if err != nil {
 			return 0, false, err
 		}
-		if bw > 0 && !math.IsInf(bw, 0) && bw <= pidtuneRolloffFactor*pidtuneFastestRoot(plant) {
+		if bw > 0 && !math.IsInf(bw, 0) {
+			if wc, ok := pidtuneRolloffCrossover(plant, bw); ok {
+				return wc, true, nil
+			}
 			return bw, false, nil
 		}
 	}
@@ -1067,11 +1130,49 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 }
 
 // A -3 dB bandwidth beyond pidtuneRolloffFactor times every finite pole and
-// zero natural frequency lies on G's c/s^r asymptote: G = N/D with deg D −
-// deg N = r ≥ 1 falls to 0.708·|G(0)| there only when zeros well below the
-// poles attenuate G(0) by about that factor to the power r, so the
-// bandwidth measures that attenuation, not a passband.
-const pidtuneRolloffFactor = 10
+// zero natural frequency lies on G's c/s^r asymptote, where G falls to
+// 0.708·|G(0)| only because zeros attenuate G(0). When |G| also peaks more
+// than pidtuneRolloffGain times above its value there, as for a zero near
+// the integrator, gains placing the crossover at the bandwidth exceed the
+// plant's scale by as much, up to 1e18, leaving a closed-loop pole at the
+// zero; a milder rise, as from a mid-band or non-minimum-phase zero, keeps
+// the bandwidth.
+const (
+	pidtuneRolloffFactor = 10
+	pidtuneRolloffGain   = 1e3
+)
+
+// pidtuneRolloffCrossover returns the crossover for a plant whose -3 dB
+// bandwidth bw is set by DC attenuation, as pidtuneRolloffFactor describes:
+// the first back-off step bw·10^(−k/pidtuneBackoffPerDecade) at or below
+// pidtuneRolloffFactor times the fastest root, so the back-off from there
+// visits the crossovers a back-off from bw would below it. ok is false when
+// bw is a passband edge.
+func pidtuneRolloffCrossover(plant *System, bw float64) (wc float64, ok bool) {
+	limit := pidtuneRolloffFactor * pidtuneFastestRoot(plant)
+	if !(bw > limit) || limit == 0 {
+		return 0, false
+	}
+	const decades, perDecade = 9, 20
+	omega := make([]float64, decades*perDecade+2)
+	for i := range len(omega) - 1 {
+		omega[i] = limit * math.Pow(10, -float64(i)/perDecade)
+	}
+	omega[len(omega)-1] = bw
+	resp, err := plant.FreqResponse(omega)
+	if err != nil {
+		return 0, false
+	}
+	edge, peak := cmplx.Abs(resp.At(len(omega)-1, 0, 0)), 0.0
+	for i := range len(omega) - 1 {
+		peak = max(peak, cmplx.Abs(resp.At(i, 0, 0)))
+	}
+	if !(peak > pidtuneRolloffGain*edge) {
+		return 0, false
+	}
+	k := math.Ceil(pidtuneBackoffPerDecade*math.Log10(bw/limit) - 1e-9)
+	return bw * math.Pow(10, -k/pidtuneBackoffPerDecade), true
+}
 
 // pidtuneFastestRoot returns the largest natural frequency (|ln z|/Dt for
 // discrete plants) of a finite pole or zero of plant, +Inf for a root at
