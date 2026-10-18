@@ -21,7 +21,8 @@ var errDelayLoopUnsupported = fmt.Errorf("delay loop outside Nyquist test scope:
 type delayLoop struct {
 	sys        *System // the loop model, for certified sensitivity peaks
 	at         func(w float64) complex128
-	eval       *sisoEval // records the first failure of at
+	one        func(w float64) complex128 // 1+L formed directly; nil: 1 + at
+	eval       *sisoEval                  // records the first failure of at
 	rhp        int
 	axis       []axisPole
 	tail       func(w float64) float64 // bound on |L(s)| for Re s >= 0, |s| >= w
@@ -669,14 +670,17 @@ func (l *delayLoop) pointBudget() int {
 // turns less; and refineBudget when the segment would exceed budget points.
 // The points are appended to ws and fs.
 func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []complex128) ([]float64, []complex128, refineResult, float64) {
-	f := func(w float64) complex128 { return 1 + l.at(w) }
+	f := l.one
+	if f == nil {
+		f = func(w float64) complex128 { return 1 + l.at(w) }
+	}
 	base := len(ws)
 	l.models, l.freeModels = l.models[:0], l.freeModels[:0]
 	node := func(w float64) refineNode { return refineNode{w: w, f: f(w), mi: l.modelSlot()} }
 	prev := node(seg.pts[0])
 	ws = append(ws, prev.w)
 	fs = append(fs, prev.f)
-	if !resolvedNonzero(prev.f) {
+	if !l.resolved(&prev) {
 		return ws, fs, refineAxisRoot, prev.w
 	}
 	stack := l.stack[:0]
@@ -686,7 +690,7 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 		for len(stack) > 0 {
 			s := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			if !resolvedNonzero(s.b.f) {
+			if !l.resolved(&s.b) {
 				return ws, fs, refineAxisRoot, s.b.w
 			}
 			if l.certifiedSpan(&s) {
@@ -790,14 +794,38 @@ func (l *delayLoop) kindPhase(n *refineNode, k int, h float64) float64 {
 	if !nm.good[k] {
 		return math.Inf(1)
 	}
-	return stadiumPhase(nm.m[k].f, nm.m[k].df, h, l.cert.remainder(k, &nm.m[k], h))
+	m := &nm.m[k]
+	return stadiumPhase(m.f, m.df, h, l.cert.remainder(k, m, h), m.rho, m.unit)
 }
 
-// resolvedNonzero reports whether the sample v of 1+L, formed as 1 + L, is
-// above its rounding uncertainty eps·(1+|L|), so that its phase is
-// meaningful. The floor is not absolute: a k-fold closed-loop root at
-// distance δ from the axis leaves |1+L| ~ δ^k, and whether a span holds a
-// zero is decided by the certified models in refine, not by this test.
+// resolved reports whether the phase of the sample n of 1+L is meaningful:
+// it clears resolvedNonzero, or 1+L is formed directly and the model at n
+// bounds its relative rounding by maxSampleRho. A k-fold closed-loop root at
+// distance δ from the axis leaves |1+L| ~ δ^k but a relative rounding that
+// grows like 1/δ only.
+func (l *delayLoop) resolved(n *refineNode) bool {
+	if resolvedNonzero(n.f) {
+		return true
+	}
+	if l.one == nil || !finite(n.f) || n.f == 0 {
+		return false
+	}
+	nm := &l.models[n.mi]
+	if !nm.has[0] {
+		nm.m[0], nm.good[0] = l.cert.model(0, n.w)
+		nm.has[0] = true
+	}
+	return nm.good[0] && nm.m[0].rho <= maxSampleRho
+}
+
+// maxSampleRho bounds the relative rounding of a sample of 1+L that falls
+// below resolvedNonzero's floor; it moves the sampled phase by less than 0.01.
+const maxSampleRho = 0.01
+
+// resolvedNonzero reports whether the sample v of 1+L is above the rounding
+// uncertainty eps·(1+|L|) of 1 + L, so that its phase is meaningful.
+// Whether a span holds a zero is decided by the certified models in refine,
+// not by this test.
 func resolvedNonzero(v complex128) bool {
 	a := cmplx.Abs(v)
 	return a > 64*0x1p-52*(1+cmplx.Abs(v-1)) && !math.IsNaN(a)

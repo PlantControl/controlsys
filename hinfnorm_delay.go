@@ -151,11 +151,17 @@ func (e *delayLFT) fail(w float64, err error) {
 // test whose 1+L has the zeros of χ and the poles of eig(A) it does not
 // cancel.
 func (e *delayLFT) charMinusOne(w float64) complex128 {
+	return e.char(w) - 1
+}
+
+// char returns det(I − H22(jω)Δ(jω)), the 1+L of charMinusOne formed
+// without the rounding of 1 + (det − 1).
+func (e *delayLFT) char(w float64) complex128 {
 	det, ok := e.h22Det(w)
 	if !ok {
 		return complex(math.NaN(), math.NaN())
 	}
-	return det - 1
+	return det
 }
 
 // h22Det returns det(I − H22(jω)Δ(jω)).
@@ -228,6 +234,11 @@ func (e *delayLFT) loopDet(s complex128, h []complex128) complex128 {
 // nonsingular on the closed right half-plane: χ/det(I − D22Δ) then has the
 // zeros of χ there and the same poles.
 func (e *delayLFT) normalizedMinusOne(w float64) complex128 {
+	return e.normalizedChar(w) - 1
+}
+
+// normalizedChar is the 1+L of normalizedMinusOne, formed directly.
+func (e *delayLFT) normalizedChar(w float64) complex128 {
 	num, ok := e.h22Det(w)
 	if !ok {
 		return complex(math.NaN(), math.NaN())
@@ -236,7 +247,7 @@ func (e *delayLFT) normalizedMinusOne(w float64) complex128 {
 	if den == 0 {
 		return complex(math.NaN(), math.NaN())
 	}
-	return num/den - 1
+	return num / den
 }
 
 // normalizedTail returns the tail bound of normalizedMinusOne for
@@ -473,7 +484,7 @@ func (e *delayLFT) balancedTail() func(float64) float64 {
 // certifies the tail on the imaginary axis only, for the grid of the L∞
 // peak, and the root count is then void.
 func (e *delayLFT) loop(axisOnly bool) *delayLoop {
-	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1))}
+	l := &delayLoop{at: e.charMinusOne, one: e.char, tail: e.tail, tailLimit: e.tail(math.Inf(1))}
 	if !axisOnly {
 		l.tail = e.balancedTail()
 	}
@@ -485,7 +496,7 @@ func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 			r = min(r, d.torus)
 		}
 		if !math.IsInf(r, 1) {
-			l.at, l.tail, l.tailLimit = e.normalizedMinusOne, e.normalizedTail(r), 0
+			l.at, l.one, l.tail, l.tailLimit = e.normalizedMinusOne, e.normalizedChar, e.normalizedTail(r), 0
 			normalized = true
 		}
 	}

@@ -154,7 +154,7 @@ func TestStadiumPhaseBoundsSampledPhase(t *testing.T) {
 	accepted := 0
 	for a := 9.0; a < 11; a += 0.0137 {
 		for _, h := range []float64{1e-3, 1e-2, 0.05, 0.2, -0.05, -0.2} {
-			bound := stadiumPhase(f(a), df(a), h, h*h)
+			bound := stadiumPhase(f(a), df(a), h, h*h, modelRho, 1)
 			if math.IsInf(bound, 1) {
 				continue
 			}

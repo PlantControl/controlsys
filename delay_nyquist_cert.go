@@ -24,7 +24,10 @@ type loopCertifier interface {
 // scalars its remainder needs.
 type loopModel struct {
 	f, df complex128
-	s     descriptorSample // scalar norms only; g and g1 are nil
+	// f and df carry rounding rho·(unit + |f| + |h·df|): unit 1 where f is
+	// formed as 1 + L, 0 for a determinant with relative error rho.
+	rho, unit float64
+	s         descriptorSample // scalar norms only; g and g1 are nil
 	// det(I − G) models: the remainder of G = H22Δ is
 	// t²(gT2/2 + g1T) + remainder(s, t), and det(I − G(ω+t))/det(I − G(ω))
 	// = det(I + X), X = tY + R, ‖R‖_F <= nu·remG.
@@ -43,15 +46,19 @@ const spanCertPhase = 0.9 * math.Pi
 
 var sinPi8 = math.Sin(math.Pi / 8)
 
+// modelRho is the rounding of a model formed as 1 + L, relative to 1+|f|.
+const modelRho = 16 * 0x1p-52
+
 // stadiumPhase bounds the phase variation of f over [ω, ω+h] from its
-// model at ω: f lies within rem of the segment from f(ω) to f(ω) + h·f′(ω).
+// model at ω: f lies within rem of the segment from f(ω) to f(ω) + h·f′(ω),
+// widened by the model's rounding rho·(unit + |f| + |h·f′|).
 // When rem is below the distance d of the segment from the origin, f has no
 // zero there and its phase varies by at most the angle the segment subtends
 // plus 2·asin(rem/d); otherwise it returns +Inf.
-func stadiumPhase(f, df complex128, h, rem float64) float64 {
+func stadiumPhase(f, df complex128, h, rem, rho, unit float64) float64 {
 	v := complex(h, 0) * df
 	p1 := f + v
-	rem += 16 * 0x1p-52 * (1 + cmplx.Abs(f) + cmplx.Abs(v))
+	rem += rho * (unit + cmplx.Abs(f) + cmplx.Abs(v))
 	t := 0.0
 	if vv := real(v)*real(v) + imag(v)*imag(v); vv > 0 {
 		t = min(1, max(0, -(real(f)*real(v)+imag(f)*imag(v))/vv))
@@ -101,7 +108,7 @@ func (c *descriptorCertifier) model(kind int, w float64) (loopModel, bool) {
 	if !s.regular || !finite(s.g[0]) || !finite(s.g1[0]) {
 		return loopModel{}, false
 	}
-	m := loopModel{f: s.g[0], df: s.g1[0], s: *s}
+	m := loopModel{f: s.g[0], df: s.g1[0], s: *s, rho: modelRho, unit: 1}
 	if kind == 0 {
 		m.f++
 	}
@@ -182,11 +189,13 @@ func (c *detCertifier) model(_ int, w float64) (loopModel, bool) {
 		}
 	}
 	m.gT2, m.g1T = math.Sqrt(m.gT2), math.Sqrt(m.g1T)
+	gF := cFrobenius(c.g)
 	u, ok := c.relative(w, c.g, c.g1, &m.nu, &m.normY, &m.a1)
 	if !ok {
 		return m, false
 	}
 	m.f, m.df = u, u*m.a1
+	m.rho = c.detRho(m.nu, gF)
 	if c.normalized {
 		d22 := c.e.d22Complex()
 		copy(c.g, d22)
@@ -198,17 +207,28 @@ func (c *detCertifier) model(_ int, w float64) (loopModel, bool) {
 			}
 		}
 		m.d0T2 = math.Sqrt(m.d0T2)
+		g0F := cFrobenius(c.g)
 		u0, ok := c.relative(w, c.g, c.g1, &m.nu0, &m.normY0, &m.a0)
 		if !ok {
 			return m, false
 		}
 		m.f = u / u0
 		m.df = m.f * (m.a1 - m.a0)
+		m.rho += c.detRho(m.nu0, g0F)
 	}
 	if !finite(m.f) || !finite(m.df) {
 		return m, false
 	}
 	return m, true
+}
+
+// detRho bounds the relative rounding of det N and of tr Y for
+// N = I − HΔ, ‖N⁻¹‖_F = nu, ‖H‖_F = hF: forming N and its LU factors is
+// backward stable with ‖E‖_F <~ nd·eps·(1+hF), and det(N+E)/det N − 1 ≈
+// tr(N⁻¹E) <= nu·‖E‖_F. A near-singular N, not a small |det N|, makes the
+// determinant inaccurate.
+func (c *detCertifier) detRho(nu, hF float64) float64 {
+	return 16 * float64(c.e.nd) * 0x1p-52 * (1 + nu*(1+hF))
 }
 
 // relative returns det N for N = I − HΔ at ω, with ν = ‖N⁻¹‖_F, ‖Y‖_F and
@@ -268,7 +288,7 @@ func (c *detCertifier) remainder(_ int, m *loopModel, h float64) float64 {
 		remH = c.h22.remainder(&m.s, h)
 	}
 	remG := ah*ah*(m.gT2/2+m.g1T) + remH
-	r1 := c.relRemainder(ah, m.nu, m.normY, remG)
+	r1 := c.relRemainder(ah, m.nu, m.normY, remG) + m.rho*ah*(m.normY+m.normY0)
 	if !c.normalized {
 		return cmplx.Abs(m.f) * r1
 	}
