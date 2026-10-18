@@ -84,6 +84,10 @@ type sisoEval struct {
 	td    timeDomain
 	dst   []complex128
 	err   error
+	// skipped is try's first failure and resolved whether at has succeeded
+	// at some ω > 0; see checkSkipped.
+	skipped  error
+	resolved bool
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -113,7 +117,37 @@ func (e *sisoEval) at(w float64) complex128 {
 	if e.delay != nil {
 		applyIODelayMatrixAtS(e.sys, pt, e.dst, 1, 1, e.delay)
 	}
+	e.resolved = e.resolved || w > 0
 	return e.dst[0]
+}
+
+// try evaluates L(jω) without recording a failure, for candidates that may
+// sit on a pole the solve cannot resolve, such as a pencil root next to an
+// integrator; ok is false where at would fail.
+func (e *sisoEval) try(w float64) (h complex128, ok bool) {
+	saved := e.err
+	e.err = nil
+	h = e.at(w)
+	ok = e.err == nil
+	if !ok && e.skipped == nil {
+		e.skipped = e.err
+	}
+	e.err = saved
+	return h, ok
+}
+
+// checkSkipped returns the evaluation error when try skipped failures and
+// at never succeeded at ω > 0 but fails at a generic ω too, as for a
+// singular pencil, which no frequency resolves.
+func (e *sisoEval) checkSkipped() error {
+	if e.err == nil && e.skipped != nil && !e.resolved {
+		w := 1.0
+		if e.sys.IsDiscrete() && e.sys.Dt > 0 {
+			w = 1 / e.sys.Dt
+		}
+		e.at(w)
+	}
+	return e.err
 }
 
 func (e *sisoEval) fail(w float64, err error) complex128 {
@@ -389,8 +423,8 @@ func allMargin(sys *System) (*AllMarginResult, error) {
 	for _, w := range res.PhaseCrossFreqs {
 		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(eval.at(w))))
 	}
-	if eval.err != nil {
-		return nil, eval.err
+	if err := eval.checkSkipped(); err != nil {
+		return nil, err
 	}
 	return res, nil
 }
@@ -944,7 +978,7 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	}
 	var cands []float64
 	for _, w := range reals {
-		if math.Abs(phaseOffsetDeg(r.eval.at(w))) < 90 {
+		if h, ok := r.eval.try(w); ok && math.Abs(phaseOffsetDeg(h)) < 90 {
 			cands = append(cands, w)
 		}
 	}
@@ -957,15 +991,27 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // Nyquist frequency, is kept only if |f| ≤ tol there. When ω = 0 itself
 // satisfies |f| ≤ tol, as for the root L − L~ always has there, a candidate
 // whose |f| stays within tol down to half its frequency is that root moved
-// off 0 by rounding, and is dropped.
+// off 0 by rounding, and is dropped. The same holds when L has a pole at
+// ω = 0, where also a candidate is dropped when L cannot be evaluated at
+// half its frequency, or at itself: a pencil root that the pole's rounding
+// moved off 0.
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
 	}
-	zeroRoot := math.Abs(f(0)) <= tol
+	within := func(w float64) bool {
+		_, ok := r.eval.try(w)
+		return ok && math.Abs(f(w)) <= tol
+	}
+	h0, ok := r.eval.try(0)
+	pole0 := !ok || cmplx.IsInf(h0)
+	zeroRoot := pole0 || math.Abs(f(0)) <= tol
 	var out []float64
 	for i, w := range cands {
+		if _, ok := r.eval.try(w); !ok {
+			continue
+		}
 		lo, hi := w/2, (wTop-w)/2
 		if i > 0 {
 			lo = (w - cands[i-1]) / 2
@@ -983,23 +1029,23 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 			break
 		}
 		v := math.Abs(f(best))
-		if zeroRoot && math.Abs(f(best/2)) <= tol {
+		if _, ok := r.eval.try(best / 2); zeroRoot && within(best/2) || pole0 && !ok {
 			continue
 		}
 		if v <= tol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
 			out = append(out, best)
 		}
 	}
-	if len(out) > 0 && r.flat(out, f, tol, wTop) {
+	if len(out) > 0 && r.flat(out, within, wTop) {
 		return nil
 	}
 	return out
 }
 
-// flat reports whether |f| ≤ tol also between and beyond the crossings ws,
+// flat reports whether within holds also between and beyond the crossings ws,
 // as when the pencil is singular because |L| ≡ γ or L is real on the whole
 // boundary; such a loop has no isolated crossings.
-func (r *rationalLoop) flat(ws []float64, f func(float64) float64, tol, wTop float64) bool {
+func (r *rationalLoop) flat(ws []float64, within func(float64) bool, wTop float64) bool {
 	probes := []float64{ws[0] / 2}
 	for i := 1; i < len(ws); i++ {
 		probes = append(probes, math.Sqrt(ws[i-1]*ws[i]))
@@ -1008,7 +1054,7 @@ func (r *rationalLoop) flat(ws []float64, f func(float64) float64, tol, wTop flo
 		probes = append(probes, min(2*last, (last+wTop)/2))
 	}
 	for _, w := range probes {
-		if !(math.Abs(f(w)) <= tol) {
+		if !within(w) {
 			return false
 		}
 	}

@@ -6,7 +6,6 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
-	"strings"
 	"testing"
 )
 
@@ -25,6 +24,7 @@ func TestTunePIDFreePDoubleIntegratorMovesToLeadPoint(t *testing.T) {
 	}{
 		{"3600(s+0.1)/(s²(s+10))", []float64{3600, 360}, []float64{1, 10, 0, 0}, (9.9 + math.Sqrt(9.9*9.9-12)) / (2 * r3)},
 		{"−(0.0917s+0.1721)/s²", []float64{-.0917, -.1721}, []float64{1, 0, 0}, .1721 / .0917 * r3},
+		{"DSRJ7M −(0.0320s+0.0522)/s²", []float64{-0.032012382534863985, -0.052223340965159556}, []float64{1, 0, 0}, 0.052223340965159556 / 0.032012382534863985 * r3},
 	}
 	for _, c := range cases {
 		r, err := TunePID(context.Background(), makePlant(t, c.num, c.den), PidtuneP, PIDTuningOptions{})
@@ -75,8 +75,7 @@ func TestTunePIDFreePDoubleIntegratorSweep(t *testing.T) {
 			den = []float64{1, math.Pow(10, 2*rng.Float64()-1), 0, 0}
 		}
 		r, err := TunePID(context.Background(), makePlant(t, num, den), PidtuneP, PIDTuningOptions{})
-		// DSRJ7M: the default crossover's AllMargin fails on one plant.
-		if errors.Is(err, ErrPIDTuningTargetUnattainable) || err != nil && strings.HasPrefix(err.Error(), "TunePID: AllMargin:") {
+		if errors.Is(err, ErrPIDTuningTargetUnattainable) {
 			continue
 		}
 		if err != nil {
