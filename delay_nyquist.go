@@ -29,9 +29,7 @@ type delayLoop struct {
 	tau       float64                 // total loop delay, sets the grid density
 	scales    []float64
 	maxPoints int // grid point budget; 0 selects delayNyquistMaxPoints
-	// multiChannel marks 1+L as a determinant over several delay channels,
-	// whose poles and zeros near the axis can be multiple.
-	multiChannel bool
+	cert      loopCertifier // certified local models of 1+L for refine
 }
 
 type axisPole struct {
@@ -75,7 +73,11 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &delayLoop{sys: sys, at: eval.at, eval: eval, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
+	cert, err := newDescriptorCertifier(sys)
+	if err != nil {
+		return nil, err
+	}
+	l := &delayLoop{sys: sys, at: eval.at, eval: eval, cert: cert, tail: bound.at, tailLimit: bound.at(math.Inf(1)), tau: sisoLoopDelay(sys)}
 	l.addPoles(poles)
 	return l, nil
 }
@@ -378,15 +380,15 @@ func lftDelayLoopAcyclic(sys *System, n int) bool {
 
 // nyquist counts closed-loop RHP roots of χ by the argument principle on a
 // delay-aware grid: log spacing, linear spacing π/(8τ), points around every
-// open-loop pole magnitude, and bisection wherever arg(1+L) moves by more
-// than π/4 between neighbours. The grid ends at R where the tail bound
-// certifies |L| <= tailLimit + frac(1-tailLimit) < 1 on the rest of the
-// closed right half-plane, so no encirclement is missed beyond R. The count
-// is exact up to the grid resolving every passage of 1+L near the origin; a
-// closed-loop root within the bisection tolerance of the axis, or an axis
-// eigenvalue hidden from L, is reported unstable with axisRoot set. A grid that exceeds the
-// point budget or a winding number that does not resolve to an integer
-// returns errDelayLoopUnsupported rather than a verdict.
+// open-loop pole magnitude, and bisection until refine certifies every span
+// free of zeros of 1+L with phase variation at most π/4. The grid ends at R
+// where the tail bound certifies |L| <= tailLimit + frac(1-tailLimit) < 1 on
+// the rest of the closed right half-plane, so no encirclement is missed
+// beyond R. The count is exact up to rounding; a closed-loop root within the
+// bisection tolerance of the axis, or an axis eigenvalue hidden from L, is
+// reported unstable with axisRoot set. A grid that exceeds the point budget
+// or a winding number that does not resolve to an integer returns
+// errDelayLoopUnsupported rather than a verdict.
 func (l *delayLoop) nyquist(frac float64) (delayNyquist, error) {
 	return l.nyquistLinearTo(frac, 0)
 }
@@ -415,6 +417,9 @@ func (l *delayLoop) evalErr() error {
 func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 	if !(l.tailLimit < 1) {
 		return delayNyquist{}, fmt.Errorf("neutral delay loop, |L(j∞)| may reach 1: %w", errDelayLoopUnsupported)
+	}
+	if l.cert == nil {
+		return delayNyquist{}, fmt.Errorf("delay loop without a certified model: %w", errDelayLoopUnsupported)
 	}
 	target := l.tailLimit + frac*(1-l.tailLimit)
 	hi := 1.0
@@ -468,6 +473,8 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 			return delayNyquist{axisRoot: true, axisW: wRoot, w: out.w[:base], f: out.f[:base]}, nil
 		case refineBudget:
 			return delayNyquist{}, fmt.Errorf("refined grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
+		case refineUncertified:
+			return delayNyquist{}, fmt.Errorf("phase of 1+L not certified near ω=%g: %w", wRoot, errDelayLoopUnsupported)
 		}
 		fs := out.f[base:]
 		if si == 0 {
@@ -631,6 +638,7 @@ const (
 	refineResolved refineResult = iota
 	refineAxisRoot
 	refineBudget
+	refineUncertified
 )
 
 func (l *delayLoop) pointBudget() int {
@@ -640,107 +648,108 @@ func (l *delayLoop) pointBudget() int {
 	return delayNyquistMaxPoints
 }
 
-// refine evaluates 1+L on the segment, bisecting until consecutive phases
-// differ by at most π/4 and, for a multi-channel loop, log moduli by
-// multiChannelModStep and, where an even zero could hide near the origin,
-// nearOriginStep holds. It reports refineAxisRoot and the root frequency when
-// 1+L vanishes or its phase turns within the bisection tolerance, i.e. a
-// closed-loop root sits on the axis, and refineBudget when the segment would
-// exceed budget points. The points are appended to ws and fs.
+// refine evaluates 1+L on the segment, bisecting until each span between
+// consecutive points is certified: either the tail bound puts 1+L in the
+// disk of radius sin(π/8) around 1 beyond the span's start, or the Taylor
+// models of l.cert at both ends, each covering half the span, prove that
+// 1+L has no zero on it and that its phase varies by at most spanCertPhase
+// (see stadiumPhase). The phase step between consecutive points is then
+// exactly the wrapped difference of their phases. It reports refineAxisRoot
+// and the root frequency when 1+L vanishes, or when a span of the bisection
+// tolerance is not certified and its phase turns by more than π/4, i.e. a
+// closed-loop root sits on the axis; refineUncertified when such a span
+// turns less; and refineBudget when the segment would exceed budget points.
+// The points are appended to ws and fs.
 func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []complex128) ([]float64, []complex128, refineResult, float64) {
 	f := func(w float64) complex128 { return 1 + l.at(w) }
 	base := len(ws)
-	ws = append(ws, seg.pts[0])
-	fs = append(fs, f(seg.pts[0]))
-	if !resolvedNonzero(fs[base]) {
-		return ws, fs, refineAxisRoot, seg.pts[0]
+	prev := refineNode{w: seg.pts[0], f: f(seg.pts[0])}
+	ws = append(ws, prev.w)
+	fs = append(fs, prev.f)
+	if !resolvedNonzero(prev.f) {
+		return ws, fs, refineAxisRoot, prev.w
 	}
-	type span struct {
-		a, b   float64
-		fa, fb complex128
-	}
+	type span struct{ a, b refineNode }
 	var stack []span
 	for k := 1; k < len(seg.pts); k++ {
-		stack = append(stack[:0], span{seg.pts[k-1], seg.pts[k], fs[len(fs)-1], f(seg.pts[k])})
+		stack = append(stack[:0], span{prev, refineNode{w: seg.pts[k], f: f(seg.pts[k])}})
 		for len(stack) > 0 {
 			s := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			if !resolvedNonzero(s.fb) {
-				return ws, fs, refineAxisRoot, s.b
+			if !resolvedNonzero(s.b.f) {
+				return ws, fs, refineAxisRoot, s.b.w
 			}
-			mid := (s.a + s.b) / 2
-			var fm complex128
-			evaluated := false
-			if l.smallLogStep(s.fa, s.fb) {
-				ok := !l.multiChannel || !nearOrigin(s.fa, s.fb)
-				if !ok {
-					fm, evaluated = f(mid), true
-					ok = resolvedNonzero(fm) && l.nearOriginStep(s.fa, fm, s.fb)
-				}
-				if ok {
-					ws = append(ws, s.b)
-					fs = append(fs, s.fb)
-					continue
-				}
+			if l.certifiedSpan(&s.a, &s.b) {
+				ws = append(ws, s.b.w)
+				fs = append(fs, s.b.f)
+				prev = s.b
+				continue
 			}
-			if s.b-s.a <= 1e-13*max(1, s.b) {
-				return ws, fs, refineAxisRoot, mid
+			mid := (s.a.w + s.b.w) / 2
+			if s.b.w-s.a.w <= 1e-13*max(1, s.b.w) {
+				if math.Abs(wrapPi(cmplx.Phase(s.b.f)-cmplx.Phase(s.a.f))) > math.Pi/4 {
+					return ws, fs, refineAxisRoot, mid
+				}
+				return ws, fs, refineUncertified, mid
 			}
 			if len(ws)-base+len(stack) > budget {
 				return ws, fs, refineBudget, 0
 			}
-			if !evaluated {
-				fm = f(mid)
-			}
-			stack = append(stack, span{mid, s.b, fm, s.fb}, span{s.a, mid, s.fa, fm})
+			m := refineNode{w: mid, f: f(mid)}
+			stack = append(stack, span{m, s.b}, span{s.a, m})
 		}
 	}
 	return ws, fs, refineResolved, 0
 }
 
-// smallLogStep reports whether the phase of 1+L moves by at most π/4 and,
-// for a multi-channel loop, log|1+L| by at most multiChannelModStep between
-// two samples. The phase step is only known mod 2π. A pole or zero of 1+L of
-// order k near the axis turns its phase by about kπ while |1+L| swings by
-// decades, so for k >= 2, e.g. a near-neutral channel repeated in
-// det(I − H22Δ), two samples astride it can see a small phase step over a 2π
-// turn; their moduli still differ unless the samples sit symmetrically. A
-// single channel's poles and zeros are generically simple.
-func (l *delayLoop) smallLogStep(a, b complex128) bool {
-	if math.Abs(wrapPi(cmplx.Phase(b)-cmplx.Phase(a))) > math.Pi/4 {
+// refineNode is a sample of 1+L with the models of each certifier kind,
+// evaluated on demand.
+type refineNode struct {
+	w    float64
+	f    complex128
+	m    [2]loopModel
+	has  [2]bool
+	good [2]bool
+}
+
+func (l *delayLoop) certifiedSpan(a, b *refineNode) bool {
+	if l.tail(a.w) <= sinPi8 {
+		return true
+	}
+	h := (b.w - a.w) / 2
+	pa := l.halfSpanPhase(a, h)
+	if !(pa <= spanCertPhase) {
 		return false
 	}
-	return !l.multiChannel || math.Abs(math.Log(cmplx.Abs(b)/cmplx.Abs(a))) <= multiChannelModStep
+	return pa+l.halfSpanPhase(b, -h) <= spanCertPhase
 }
 
-const multiChannelModStep = 0.4
-
-// nearOriginLevel is the |1+L| below which a multi-channel span's endpoint
-// phases alone do not resolve it: a zero of 1+L of even multiplicity near the
-// axis, e.g. a closed-loop root pair shared by duplicated channels of
-// det(I − H22Δ), turns the phase by a multiple of 2π between two samples that
-// wrapPi reduces to a small step. Every such span gets the midpoint test of
-// nearOriginStep: a three-point curvature estimate from the previous sample
-// misjudges a zero sitting near one end of a span where 1+L bends sharply.
-const nearOriginLevel = 1
-
-func nearOrigin(a, b complex128) bool {
-	return min(cmplx.Abs(a), cmplx.Abs(b)) < nearOriginLevel
+// halfSpanPhase bounds the phase variation of 1+L over [n.w, n.w+h] by the
+// model of S first where |1+L| > 1, near the open-loop poles, and of 1+L
+// first elsewhere, trying the other kind when the first leaves more than
+// half of spanCertPhase.
+func (l *delayLoop) halfSpanPhase(n *refineNode, h float64) float64 {
+	first := 0
+	if l.cert.kinds() > 1 && cmplx.Abs(n.f) > 1 {
+		first = 1
+	}
+	p := l.kindPhase(n, first, h)
+	if p <= spanCertPhase/2 || l.cert.kinds() == 1 {
+		return p
+	}
+	return min(p, l.kindPhase(n, 1-first, h))
 }
 
-// nearOriginStep accepts a span near the origin when the half phase steps
-// are small and the midpoint modulus does not dip below nearOriginDip times
-// the endpoint mean. Near an even zero |1+L| ≈ |g|((ω−ω₀)²+δ²), whose
-// midpoint value is the endpoint mean less |g|(b−a)²/4, so a span holding the
-// zero dips to about half the mean wherever it sits; a flank of a resolved
-// simple zero is near linear and does not dip. This is a sampling rule, not a
-// certified bound.
-func (l *delayLoop) nearOriginStep(fa, fm, fb complex128) bool {
-	mean := (cmplx.Abs(fa) + cmplx.Abs(fb)) / 2
-	return cmplx.Abs(fm) >= nearOriginDip*mean && l.smallLogStep(fa, fm) && l.smallLogStep(fm, fb)
+func (l *delayLoop) kindPhase(n *refineNode, k int, h float64) float64 {
+	if !n.has[k] {
+		n.m[k], n.good[k] = l.cert.model(k, n.w)
+		n.has[k] = true
+	}
+	if !n.good[k] {
+		return math.Inf(1)
+	}
+	return stadiumPhase(n.m[k].f, n.m[k].df, h, l.cert.remainder(k, &n.m[k], h))
 }
-
-const nearOriginDip = 0.75
 
 func resolvedNonzero(v complex128) bool {
 	a := cmplx.Abs(v)

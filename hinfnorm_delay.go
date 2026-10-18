@@ -473,10 +473,11 @@ func (e *delayLFT) balancedTail() func(float64) float64 {
 // certifies the tail on the imaginary axis only, for the grid of the L∞
 // peak, and the root count is then void.
 func (e *delayLFT) loop(axisOnly bool) *delayLoop {
-	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1)), multiChannel: e.nd > 1}
+	l := &delayLoop{at: e.charMinusOne, tail: e.tail, tailLimit: e.tail(math.Inf(1))}
 	if !axisOnly {
 		l.tail = e.balancedTail()
 	}
+	normalized := false
 	if !(l.tailLimit < 1) {
 		d := e.difference()
 		r := d.rhp
@@ -485,7 +486,11 @@ func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 		}
 		if !math.IsInf(r, 1) {
 			l.at, l.tail, l.tailLimit = e.normalizedMinusOne, e.normalizedTail(r), 0
+			normalized = true
 		}
+	}
+	if cert, err := newDetCertifier(e, normalized); err == nil {
+		l.cert = cert
 	}
 	for _, t := range e.tau {
 		l.tau += t

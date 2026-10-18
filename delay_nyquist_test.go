@@ -335,15 +335,9 @@ func TestDiskMarginDelayedOscillatorAxisPoles(t *testing.T) {
 }
 
 func TestDelayLoopNyquistBudgetIsErrorNotUnstable(t *testing.T) {
-	const k = 0.95
-	l := &delayLoop{
-		at: func(w float64) complex128 {
-			s := complex(0, w)
-			return complex(k, 0) * cmplx.Exp(-50*s) / (s + 1)
-		},
-		tail:      func(w float64) float64 { return k / math.Max(w-1, 1e-300) },
-		tailLimit: 0,
-		scales:    []float64{1},
+	l, err := delayLoopFromSystem(delayedLoop(t, []float64{-1}, []float64{1}, []float64{0.95}, []float64{0}, 1, 50), "delay loop")
+	if err != nil {
+		t.Fatal(err)
 	}
 	stable, err := l.stableClosedLoop()
 	if err != nil || !stable {

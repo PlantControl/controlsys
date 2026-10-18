@@ -361,11 +361,15 @@ func TestHinfNormDelayNearNeutralReplica(t *testing.T) {
 // counterclockwise, which with no open-loop RHP pole on record gives −1
 // closed-loop roots; that count is impossible and must not read as unstable.
 func TestDelayNyquistNegativeCount(t *testing.T) {
-	l := &delayLoop{
-		at:     func(w float64) complex128 { return 2 / complex(-1, w) },
-		tail:   func(w float64) float64 { return 2 / math.Max(w-1, 0) },
-		scales: []float64{1},
+	sys, err := NewFromSlices(1, 1, 1, []float64{1}, []float64{1}, []float64{2}, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
+	l, err := delayLoopFromSystem(sys, "delay loop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.rhp = 0
 	if res, err := l.nyquist(0.5); !errors.Is(err, errDelayLoopUnsupported) {
 		t.Fatalf("roots %d, stable %v, err %v", res.roots, res.stable, err)
 	}

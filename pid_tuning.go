@@ -1995,6 +1995,14 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 		default:
 			return false, nil
 		}
+		cert, err := pidLoopCertifier(plant, &cand)
+		if errors.Is(err, errDelayLoopUnsupported) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		l.cert = cert
 		stable, err := l.stableClosedLoop()
 		if errors.Is(err, errDelayLoopUnsupported) {
 			return false, nil

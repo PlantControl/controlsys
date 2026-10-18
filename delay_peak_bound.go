@@ -386,6 +386,20 @@ func sigmaMaxSmall(g []complex128, p, m int) float64 {
 // min(m2·h²/2, ‖G″(s.w)‖·h²/2 + m3·|h|³/6) of the tangent
 // G(s.w) + t·G′(s.w), whose gain is convex in t and so largest at an end.
 func (r *descriptorResponse) bound(s *descriptorSample, h, c float64) float64 {
+	rem := r.remainder(s, h)
+	if math.IsInf(rem, 1) {
+		return rem
+	}
+	for i := range r.tmp {
+		r.tmp[i] = s.g[i] + complex(h, 0)*s.g1[i]
+	}
+	return max(r.gain(s.g, c), r.gain(r.tmp, c)) + rem
+}
+
+// remainder bounds ‖G(s.w + t) − G(s.w) − t·G′(s.w)‖_F for |t| ≤ |h| by the
+// Taylor model of bound; +Inf beyond the reach of its Neumann series. It
+// reads only the scalar norms of s.
+func (r *descriptorResponse) remainder(s *descriptorSample, h float64) float64 {
 	ah := math.Abs(h)
 	if !s.regular || !(ah*s.zeta < 1) || !(ah*s.zetaL < 1) {
 		return math.Inf(1)
@@ -394,11 +408,7 @@ func (r *descriptorResponse) bound(s *descriptorSample, h, c float64) float64 {
 	aw, z, b, bw := s.alphaW*q, s.zeta*q, s.beta*q, s.betaW*qL
 	m2 := aw * (2*z*b + bw)
 	m3 := aw * (6*z*z*b + 3*s.xi*qL*b + 3*z*bw + r.maxWeight*bw)
-	rem := min(m2*h*h/2, s.g2*h*h/2+m3*ah*ah*ah/6)
-	for i := range r.tmp {
-		r.tmp[i] = s.g[i] + complex(h, 0)*s.g1[i]
-	}
-	return max(r.gain(s.g, c), r.gain(r.tmp, c)) + rem
+	return min(m2*h*h/2, s.g2*h*h/2+m3*ah*ah*ah/6)
 }
 
 // certify raises (peak, wPeak) to within peakCertTol of sup σ_max(G(jω) + c)
