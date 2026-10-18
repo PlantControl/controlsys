@@ -165,6 +165,9 @@ func TestHinfNormTorusFarPassages(t *testing.T) {
 		z := torusRiseSeed(c.kind, c.i)
 		th, sup := z.torusArgSup()
 		fin, wf := passageOracle(z, th, sup, c.wMax)
+		if lo, wl := denseScanMax(z.sigma, 400, 1e-3); lo > fin {
+			fin, wf = lo, wl
+		}
 		got, w, err := HinfNorm(z.system(t))
 		if err != nil {
 			t.Errorf("%s %d: %v", c.kind, c.i, err)
@@ -255,8 +258,10 @@ func TestNearCrossings(t *testing.T) {
 // sample above S* = sup σ_max(G∞) within the grid span, but the tail cannot
 // be closed at that peak inside the span — for "mixed" 155 a higher passage
 // peak lies past it (1.8e6, span end 5e5) — so peak gave up with "delay
-// grid exceeds" at 8015ead. The oracles are the dense torus grid for S*
-// and passageOracle for the finite peak.
+// grid exceeds" at 8015ead. KPL4UB "mixed" 44 and "irr2" 42 gave up the
+// same way, their peak a narrow resonance below ω = 400 (S* within ~1e-5).
+// The oracles are the dense torus grid for S* and, for the finite peak,
+// passageOracle with a fine scan to ω = 400.
 func TestHinfNormTorusFarAfterFind(t *testing.T) {
 	for _, c := range []struct {
 		kind string
@@ -265,10 +270,15 @@ func TestHinfNormTorusFarAfterFind(t *testing.T) {
 	}{
 		{"mixed", 155, 4e6},
 		{"irr3", 73, 1e6},
+		{"mixed", 44, 1e6},
+		{"irr2", 42, 1e6},
 	} {
 		z := torusRiseSeed(c.kind, c.i)
 		th, sup := z.torusArgSup()
 		fin, wf := passageOracle(z, th, sup, c.wMax)
+		if lo, wl := denseScanMax(z.sigma, 400, 1e-3); lo > fin {
+			fin, wf = lo, wl
+		}
 		if !(fin > sup*(1+1e-9)) {
 			t.Fatalf("%s %d: oracle peak %.15g at %g not above torus sup %.15g", c.kind, c.i, fin, wf, sup)
 		}
