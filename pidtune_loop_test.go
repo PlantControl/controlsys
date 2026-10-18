@@ -235,6 +235,9 @@ func TestPidtuneScreenBoundBackoffAllocs(t *testing.T) {
 	if _, err := Pidtune(plant, PidtuneI, 0, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		t.Fatalf("err = %v, want ErrPIDTuningTargetUnattainable", err)
 	}
+	if raceEnabled {
+		t.Skip("race detector inflates allocation counts")
+	}
 	if a := testing.AllocsPerRun(5, func() { _, _ = Pidtune(plant, PidtuneI, 0, nil) }); a > 1500 {
 		t.Fatalf("%g allocations, want <= 1500", a)
 	}
