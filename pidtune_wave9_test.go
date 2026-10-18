@@ -10,13 +10,6 @@ import (
 	"testing"
 )
 
-func skipSlowUnderRace(t *testing.T) {
-	t.Helper()
-	if raceEnabled {
-		t.Skip("slow numerical sweep under -race")
-	}
-}
-
 var pidtuneAllTypes = []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF}
 
 func pidtuneRat(v float64) *big.Rat { return new(big.Rat).SetFloat64(v) }
