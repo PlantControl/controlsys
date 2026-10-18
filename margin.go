@@ -991,10 +991,11 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // Nyquist frequency, is kept only if |f| ≤ tol there. When ω = 0 itself
 // satisfies |f| ≤ tol, as for the root L − L~ always has there, a candidate
 // whose |f| stays within tol down to half its frequency is that root moved
-// off 0 by rounding, and is dropped. The same holds when L has a pole at
-// ω = 0, where also a candidate is dropped when L cannot be evaluated at
-// half its frequency, or at itself: a pencil root that the pole's rounding
-// moved off 0.
+// off 0 by rounding, and is dropped. When L has a pole at ω = 0, a
+// candidate is dropped only when L cannot be evaluated at half its
+// frequency, or at itself: a pencil root that the pole's rounding moved off
+// 0. |f| ≈ 0 at half its frequency is no test there, as for
+// k/((z−1)²·z^d), whose crossovers include twice one another.
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
@@ -1006,7 +1007,7 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 	}
 	h0, ok := r.eval.try(0)
 	pole0 := !ok || cmplx.IsInf(h0)
-	zeroRoot := pole0 || math.Abs(f(0)) <= tol
+	zeroRoot := !pole0 && math.Abs(f(0)) <= tol
 	var out []float64
 	for i, w := range cands {
 		if _, ok := r.eval.try(w); !ok {

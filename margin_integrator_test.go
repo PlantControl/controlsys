@@ -117,3 +117,46 @@ func crossingsMatch(got, dense []float64) bool {
 	}
 	return true
 }
+
+// k/((z−1)²·z^d) has phase −180° − (d+1)θ, so phase crossovers at
+// θ = 2πm/(d+1) with |L| = k/(4 sin²(θ/2)); the pole at z = 1 must not drop
+// a crossover at twice another, where the phase error is 0 at half of it.
+func TestAllMarginDiscreteDoubleIntegratorDelayHarmonics(t *testing.T) {
+	const k = 0.01
+	for _, dt := range []float64{1, 0.1} {
+		for d := 1; d <= 8; d++ {
+			for _, asDelay := range []bool{false, true} {
+				den := []float64{1, -2, 1}
+				if !asDelay {
+					den = append(den, make([]float64, d)...)
+				}
+				r, err := (&TransferFunc{Num: [][][]float64{{{k}}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+				if err != nil {
+					t.Fatal(err)
+				}
+				sys := r.Sys
+				if asDelay {
+					sys.InputDelay = []float64{float64(d)}
+				}
+				res, err := AllMargin(sys)
+				if err != nil {
+					t.Fatalf("dt %g d %d delay %v: %v", dt, d, asDelay, err)
+				}
+				var ws, gms []float64
+				for m := 1; 2*m <= d+1; m++ {
+					th := 2 * math.Pi * float64(m) / float64(d+1)
+					s := math.Sin(th / 2)
+					ws = append(ws, th/dt)
+					gms = append(gms, -20*math.Log10(k/(4*s*s)))
+				}
+				ok := len(res.PhaseCrossFreqs) == len(ws)
+				for i := 0; ok && i < len(ws); i++ {
+					ok = math.Abs(res.PhaseCrossFreqs[i]-ws[i]) <= 1e-9*ws[i] && math.Abs(res.GainMargins[i]-gms[i]) <= 1e-9
+				}
+				if !ok {
+					t.Errorf("dt %g d %d delay %v: wpc %v gm %v, want %v %v", dt, d, asDelay, res.PhaseCrossFreqs, res.GainMargins, ws, gms)
+				}
+			}
+		}
+	}
+}
