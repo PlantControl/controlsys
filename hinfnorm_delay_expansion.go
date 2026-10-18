@@ -62,6 +62,16 @@ type highFrequencyExpansion struct {
 
 	torusG        []complex128 // g_0…g_N at the cells of torusGrid, see torusModelMax
 	torusSingular bool
+
+	kappa clusterVerdict // last torusClusterKappa, shared by risesPast and fallsPast
+}
+
+// clusterVerdict caches torusClusterKappa at theta for eps.
+type clusterVerdict struct {
+	theta  []float64
+	eps    float64
+	lo, hi float64
+	ok     bool
 }
 
 // newHighFrequencyExpansion returns the expansion, or nil outside its scope:
@@ -268,30 +278,65 @@ func (x *highFrequencyExpansion) coefficientsAt(theta []float64) (s2, a, c, scal
 	return s2, a, c, c, true
 }
 
-// clusterKappa returns bounds lo <= κ <= hi on κ = sup_s λ_max(K(s)) of
-// gramPair.clusterPencil at a maximiser φ of S of a matrix gain where
-// σ_max(g0) is repeated: the passage maxima have σ_max² − lim² ≈ κ·t²
-// (for a simple σ_max K(s) = c + 2s·a′ − s²·α, whose sup is c + a′²/α).
-// It also returns μ1 (2a of the top branches) and the reach of the pencil.
-// g0′, g1′, g0″ in φ come from five-point stencils at h = 10⁻¹/k_max·2^−i,
-// i = 0…30; κ is taken once its change over a halving has shrunk 8-fold
-// twice running (the O(h⁴) regime, past the width of a sharp peak), from
-// the h with the least change, which widens [lo, hi] twice over. tolMu is
-// the tolerance on μ for the top branches. ok is false where I − D22Δ is
-// singular nearby, the pencil is not concave in s, or κ does not settle.
+// clusterKappa is clusterKappaAt at the phase φ of one class.
 func (x *highFrequencyExpansion) clusterKappa(phi, tolMu float64) (lo, hi, mu1, reach float64, ok bool) {
+	return x.clusterKappaAt([]float64{phi}, tolMu)
+}
+
+// clusterKappaAt returns bounds lo <= κ <= hi on κ = sup_s λ_max(K(s)),
+// s ∈ R^dim, of gramPair.clusterPencilN at a maximiser θ of S of a matrix
+// gain where σ_max(g0) is repeated: the passage maxima have σ_max² − lim²
+// ≈ κ·t² at most (for a simple σ_max K(s) = c + 2s·∇a − sᵀ·α·s, whose sup
+// is c + ∇aᵀ·α⁻¹·∇a). It also returns μ1 (2a of the top branches) and the
+// reach of the pencil. ∂_i g0, ∂_i g1 and ∂_i∂_j g0 in θ come from
+// five-point stencils at h = 10⁻¹/k_max·2^−i, i = 0…30, along e_i and,
+// for the mixed ∂_i∂_j g0, along e_i + e_j; κ is taken once its change
+// over a halving has shrunk 8-fold twice running (the O(h⁴) regime, past
+// the width of a sharp peak), from the h with the least change, which
+// widens [lo, hi] twice over. tolMu is the tolerance on μ for the top
+// branches. ok is false where I − D22Δ is singular nearby, the pencil is
+// not concave in s, or κ does not settle.
+func (x *highFrequencyExpansion) clusterKappaAt(theta []float64, tolMu float64) (lo, hi, mu1, reach float64, ok bool) {
 	if x.pair == nil {
 		x.pair = newGramPair(x.e.p, x.e.m)
 	}
-	pm := len(x.g[0])
+	nd, pm := len(theta), len(x.g[0])
 	var f [2][5][]complex128
 	for k := range f {
 		for j := range f[k] {
 			f[k][j] = make([]complex128, pm)
 		}
 	}
-	d0, d1, dd0 := make([]complex128, pm), make([]complex128, pm), make([]complex128, pm)
-	if !x.at(phi) {
+	d0, d1, dd0 := make([][]complex128, nd), make([][]complex128, nd), make([][][]complex128, nd)
+	for i := range nd {
+		d0[i], d1[i], dd0[i] = make([]complex128, pm), make([]complex128, pm), make([][]complex128, i+1)
+		for j := range i + 1 {
+			dd0[i][j] = make([]complex128, pm)
+		}
+	}
+	th := make([]float64, nd)
+	// stencil fills f with g0 and g1 at θ + (j − 2)·h·(e_a + e_b), j < 5.
+	stencil := func(a, b int, h float64) bool {
+		for j := range 5 {
+			copy(th, theta)
+			th[a] += float64(j-2) * h
+			if b != a {
+				th[b] += float64(j-2) * h
+			}
+			if !x.atTheta(th) {
+				return false
+			}
+			copy(f[0][j], x.g[0])
+			copy(f[1][j], x.g[1])
+		}
+		return true
+	}
+	second := func(dst []complex128, h float64) {
+		for l := range pm {
+			dst[l] = (-f[0][0][l] + 16*f[0][1][l] - 30*f[0][2][l] + 16*f[0][3][l] - f[0][4][l]) / complex(12*h*h, 0)
+		}
+	}
+	if !x.atTheta(theta) {
 		return 0, 0, 0, 0, false
 	}
 	s0 := x.sum(0)
@@ -300,26 +345,35 @@ func (x *highFrequencyExpansion) clusterKappa(phi, tolMu float64) (lo, hi, mu1, 
 	settled := 0
 	for i := range 31 {
 		h := math.Ldexp(0.1/x.hf.kmax, -i)
-		for j := range 5 {
-			if !x.at(phi + float64(j-2)*h) {
+		for a := range nd {
+			if !stencil(a, a, h) {
 				return 0, 0, 0, 0, false
 			}
-			copy(f[0][j], x.g[0])
-			copy(f[1][j], x.g[1])
+			for l := range pm {
+				d0[a][l] = (f[0][0][l] - 8*f[0][1][l] + 8*f[0][3][l] - f[0][4][l]) / complex(12*h, 0)
+				d1[a][l] = (f[1][0][l] - 8*f[1][1][l] + 8*f[1][3][l] - f[1][4][l]) / complex(12*h, 0)
+			}
+			second(dd0[a][a], h)
 		}
-		for l := range pm {
-			d0[l] = (f[0][0][l] - 8*f[0][1][l] + 8*f[0][3][l] - f[0][4][l]) / complex(12*h, 0)
-			d1[l] = (f[1][0][l] - 8*f[1][1][l] + 8*f[1][3][l] - f[1][4][l]) / complex(12*h, 0)
-			dd0[l] = (-f[0][0][l] + 16*f[0][1][l] - 30*f[0][2][l] + 16*f[0][3][l] - f[0][4][l]) / complex(12*h*h, 0)
+		for a := range nd {
+			for b := range a {
+				if !stencil(a, b, h) {
+					return 0, 0, 0, 0, false
+				}
+				second(dd0[a][b], h)
+				for l := range pm {
+					dd0[a][b][l] = (dd0[a][b][l] - dd0[a][a][l] - dd0[b][b][l]) / 2
+				}
+			}
 		}
-		if !x.at(phi) {
+		if !x.atTheta(theta) {
 			return 0, 0, 0, 0, false
 		}
-		q, r, mu, rch, pok := x.pair.clusterPencil(x.g[0], x.g[1], x.g[2], d0, d1, dd0, tolMu)
+		kq, mu, rch, pok := x.pair.clusterPencilN(x.g[0], x.g[1], x.g[2], d0, d1, dd0, tolMu)
 		if !pok {
 			return 0, 0, 0, 0, false
 		}
-		kLo, kHi, pok := pencilSup(q, r)
+		kLo, kHi, pok := pencilSupN(kq)
 		if !pok {
 			return 0, 0, 0, 0, false
 		}
@@ -857,15 +911,16 @@ func (x *highFrequencyExpansion) limitVerdict(lim, tol, wMin, wMax float64) (fin
 	if !allNegative {
 		return false, 0, false
 	}
-	W, ok = x.horizon(lim*(1+tol), wMax, x.modelMax)
+	W, ok = x.horizon(lim*(1+tol), 0, wMax, x.modelMax)
 	return false, W, ok
 }
 
 // horizon returns a frequency W <= wMax past which ‖G(jω)‖ <= level by the
 // expansion: modelMax(t), the sup over the phases of ‖Σ_{k<=N} t^k·g_k‖,
 // plus the Cauchy bound on R stays below level at t = T·2^−i, i = 0…40,
-// T = 1/W, for the first T, halving from 1/(4‖A‖ + 1), where it does.
-func (x *highFrequencyExpansion) horizon(level, wMax float64, modelMax func(t float64) float64) (float64, bool) {
+// T = 1/W, for the first T, halving from 1/max(4‖A‖ + 1, wMin), where it
+// does.
+func (x *highFrequencyExpansion) horizon(level, wMin, wMax float64, modelMax func(t float64) float64) (float64, bool) {
 	// T halves, so the t of successive T coincide exactly.
 	sup := map[float64]float64{}
 	holds := func(T float64) bool {
@@ -890,7 +945,7 @@ func (x *highFrequencyExpansion) horizon(level, wMax float64, modelMax func(t fl
 		}
 		return true
 	}
-	for T := 1 / max(x.e.normA*4+1, 1); T*wMax >= 1; T /= 2 {
+	for T := 1 / max(x.e.normA*4+1, 1, wMin); T*wMax >= 1; T /= 2 {
 		if holds(T) {
 			return 1 / T, true
 		}
