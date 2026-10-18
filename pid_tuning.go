@@ -618,10 +618,10 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if plant.Dt > 0 {
 			wHi = math.Min(wHi, .98*math.Pi/plant.Dt)
 		}
-		// A move that only fails to evaluate, as near a multiple pole at the
-		// origin, leaves the wc0 result.
-		skip := func(e error) bool {
-			if eval.err == nil && (e == nil || errors.As(e, new(*PIDTuningError)) || ctx.Err() != nil) {
+		// evalFailed clears a move's evaluation failure, as near a multiple
+		// pole at the origin, so the move is skipped and wc0's result kept.
+		evalFailed := func() bool {
+			if eval.err == nil {
 				return false
 			}
 			eval.err = nil
@@ -632,14 +632,14 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			wc, _, ok := pidTuningPhaseWalk(atUnit, sign, -180+pm, lo, wHi, tau, true)
 			// A walk failing at its floor or starting past the target, as
 			// under a double integrator, cannot see the phase rise to it.
-			if skip(nil) || !ok || wc < lo*1.03 {
+			if evalFailed() || !ok || wc < lo*1.03 {
 				wc, ok = pidTuningNearestPhase(atUnit, sign, -180+pm, wc0, wc0*1e-4, wHi, tau)
 			}
-			if skip(nil) || !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
+			if evalFailed() || !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
 				continue
 			}
 			r, e := tuneAt(wc, gainSign, true, false)
-			if skip(e) {
+			if evalFailed() {
 				continue
 			}
 			if e == nil {
