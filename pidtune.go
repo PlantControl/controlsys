@@ -69,9 +69,11 @@ const (
 // because G has no gain crossover or bandwidth; not for an integrating or
 // unstable plant with a continuous delay),
 // accepting the first that passes, keeps the phase margin at every gain
-// crossover and keeps |S| ≤ 4; otherwise, and for an explicit wc, the
-// result is ErrPIDTuningTargetUnattainable. TunePID offers bounded search
-// with achieved-target evidence.
+// crossover and keeps |S| ≤ 4; a wc from a pole must pass that test from
+// the first design. On a loop certified stable, a margin at or below −pm
+// counts as its distance from −1 (at wc only for P and I). Otherwise, and
+// for an explicit wc, the result is ErrPIDTuningTargetUnattainable.
+// TunePID offers bounded search with achieved-target evidence.
 func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
 	if err := requireFiniteSystem("Pidtune", plant); err != nil {
 		return nil, err
@@ -118,7 +120,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	}
 	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, fromPole: fromPole, mirror: rule != pidtuneSignFixed}
 
-	pid, first := run.design(wc, sign, false)
+	pid, first := run.design(wc, sign, fromPole)
 	if first == nil {
 		return pid, nil
 	}
@@ -329,7 +331,7 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	}
 	gateFirst := r.plant.Dt == 0 && r.plant.HasDelay()
 	if gated && gateFirst {
-		if err := r.gated(pid, wc); err != nil {
+		if err := r.gated(pid, wc, false); err != nil {
 			return err
 		}
 	}
@@ -337,7 +339,7 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 		return err
 	}
 	if gated && !gateFirst {
-		return r.gated(pid, wc)
+		return r.gated(pid, wc, r.screened(wc))
 	}
 	return nil
 }
@@ -352,11 +354,11 @@ func (r *pidtuneRun) backoffFloor() float64 {
 	return r.floor
 }
 
-func (r *pidtuneRun) gated(pid *PID, wc float64) error {
+func (r *pidtuneRun) gated(pid *PID, wc float64, certified bool) error {
 	if r.gate == nil {
 		r.gate = newPidtuneGate(r.plant, r.screen.model, r.eval, r.wc, r.backoffFloor())
 	}
-	return r.gate.check(pid, r.pidType, wc, r.pm)
+	return r.gate.check(pid, r.pidType, wc, r.pm, certified)
 }
 
 // pidtuneSignRule says how pidtuneGainSign chose its sign, and so whether
@@ -584,14 +586,24 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 	return gate
 }
 
-func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64) error {
+// check rejects pid when |S| exceeds the bound or a gain crossover keeps
+// less than pm; on a loop certified stable, a crossover counts its distance
+// from −1 as pidTuningCrossingMargin does, wc included for P and I, which
+// set only the gain there and leave the phase to the plant.
+func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certified bool) error {
 	c := PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
 	if ms := g.sensitivityOver(c, g.p.maxSensitivity); ms > g.p.maxSensitivity {
 		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
 	}
-	_, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
-	for _, m := range margins {
-		if !(m >= pm-pidtuneMarginTol) {
+	crossings, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
+	floor := pm - pidtuneMarginTol
+	at := wc
+	if pidType == PidtuneP || pidType == PidtuneI {
+		// NaN matches no crossing, so wc is reflected too.
+		at = math.NaN()
+	}
+	for i, m := range margins {
+		if m = pidTuningCrossingMargin(at, crossings[i], m, floor, certified); !(m >= floor) {
 			return fmt.Errorf("%s design at wc=%g has phase margin %.3g° at a gain crossover: %w", pidType, wc, m, ErrPIDTuningTargetUnattainable)
 		}
 	}
