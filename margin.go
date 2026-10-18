@@ -166,6 +166,9 @@ const (
 	marginMaxRefineDepth   = 10
 	marginMaxDelayPoints   = 20000
 	marginMaxExtendDecades = 10
+	// walkClearance is the relative distance either side of a crossing found
+	// next to a numerically singular band at which f must still change sign.
+	walkClearance = 1e-3
 )
 
 func marginLoopDelay(sys *System) float64 {
@@ -1107,7 +1110,9 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // crossing, at times on or past the pole: when no bracket spans the crossing
 // and the candidate or a bracket end is unevaluable, walk scans out to a
 // tenth of the frequency, below first, past the singular band, and keeps the
-// first sign change that refines to |f| ≤ tol.
+// first sign change that refines to |f| ≤ tol and still holds walkClearance
+// either side. Rounding grows without bound towards the band, as eps/δ⁴
+// beside k/(z+1)⁴, and makes sign changes there that the loop lacks.
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
@@ -1149,7 +1154,8 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 				fallthrough
 			default:
 				if pf*fx <= 0 && pw != x {
-					if c := refineCrossing(min(pw, x), max(pw, x), ft); math.Abs(ft(c)) <= tol {
+					c := refineCrossing(min(pw, x), max(pw, x), ft)
+					if hc := c * (1 + walkClearance); hc < wTop && math.Abs(ft(c)) <= tol && ft(c*(1-walkClearance))*ft(hc) < 0 {
 						return c, true
 					}
 				}

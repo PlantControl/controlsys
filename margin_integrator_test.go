@@ -556,6 +556,72 @@ func TestAllMarginPhaseCrossBesidePolePair(t *testing.T) {
 	}
 }
 
+// The walk past a singular band must not keep a sign change that rounding
+// makes beside it: next to (z+1)⁴ the response carries relative rounding
+// eps/(2·cos(θ/2))⁴, which near θ ≈ 3.1411 flips the sign of a phase offset
+// of −4e-4° (amd64 reported a crossover there, GM −211 dB). Oracle:
+// factored form with z+1 = 2·cos(θ/2)·e^{jθ/2}; arg L + π stays negative
+// from the crossover near θ = 3.0769 up to the pole at π.
+func TestAllMarginNoCrossoverBesideNyquistCluster(t *testing.T) {
+	k := -0.0075348300096785325
+	zs := []float64{-0.3183318840227378, -0.6312441609901465}
+	ps := []float64{-0.22135332000025376, 0.13662162891886176}
+	num, den := []float64{k}, polyMul([]float64{1, 2, 1}, []float64{1, 2, 1})
+	for _, q := range zs {
+		num = polyMul(num, []float64{1, -q})
+	}
+	for _, q := range ps {
+		den = polyMul(den, []float64{1, -q})
+	}
+	loop := func(th float64) complex128 {
+		z := cmplx.Rect(1, th)
+		h := complex(k, 0) / cmplx.Pow(cmplx.Rect(2*math.Cos(th/2), th/2), 4)
+		for _, q := range zs {
+			h *= z - complex(q, 0)
+		}
+		for _, q := range ps {
+			h /= z - complex(q, 0)
+		}
+		return h
+	}
+	var thp []float64
+	const N = 100000
+	for i := 2; i < N; i++ {
+		a, b := math.Pi*(1-math.Pow(1-float64(i-1)/N, 3)), math.Pi*(1-math.Pow(1-float64(i)/N, 3))
+		pa, pb := phaseOffsetDeg(loop(a)), phaseOffsetDeg(loop(b))
+		if (pa > 0) != (pb > 0) && math.Abs(pb) < 90 {
+			for range 200 {
+				m := (a + b) / 2
+				if m <= a || m >= b {
+					break
+				}
+				if pm := phaseOffsetDeg(loop(m)); (pm > 0) == (pa > 0) {
+					a, pa = m, pm
+				} else {
+					b = m
+				}
+			}
+			thp = append(thp, (a+b)/2)
+		}
+	}
+	r, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: 1}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := AllMargin(r.Sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := len(thp) == 1 && math.Abs(thp[0]-3.0769) < 1e-3 && len(res.PhaseCrossFreqs) == 1
+	if ok {
+		th := thp[0]
+		ok = math.Abs(res.PhaseCrossFreqs[0]-th) <= 1e-9*th && math.Abs(res.GainMargins[0]+20*math.Log10(cmplx.Abs(loop(th)))) <= 1e-6
+	}
+	if !ok {
+		t.Errorf("wpc %v gm %v, want θ %v", res.PhaseCrossFreqs, res.GainMargins, thp)
+	}
+}
+
 // bigHorner evaluates the real polynomial p (descending) at e^{jθ}, taken
 // in float64, rounding only the result.
 func bigHorner(p []float64, th float64) complex128 {
