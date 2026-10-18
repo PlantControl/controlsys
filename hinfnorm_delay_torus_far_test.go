@@ -250,3 +250,35 @@ func TestNearCrossings(t *testing.T) {
 		t.Fatalf("only %d solutions over all trials", total)
 	}
 }
+
+// TestHinfNormTorusFarAfterFind pins BEFIOK: the passage scan finds a
+// sample above S* = sup σ_max(G∞) within the grid span, but the tail cannot
+// be closed at that peak inside the span — for "mixed" 155 a higher passage
+// peak lies past it (1.8e6, span end 5e5) — so peak gave up with "delay
+// grid exceeds" at 8015ead. The oracles are the dense torus grid for S*
+// and passageOracle for the finite peak.
+func TestHinfNormTorusFarAfterFind(t *testing.T) {
+	for _, c := range []struct {
+		kind string
+		i    int
+		wMax float64
+	}{
+		{"mixed", 155, 4e6},
+		{"irr3", 73, 1e6},
+	} {
+		z := torusRiseSeed(c.kind, c.i)
+		th, sup := z.torusArgSup()
+		fin, wf := passageOracle(z, th, sup, c.wMax)
+		if !(fin > sup*(1+1e-9)) {
+			t.Fatalf("%s %d: oracle peak %.15g at %g not above torus sup %.15g", c.kind, c.i, fin, wf, sup)
+		}
+		got, w, err := HinfNorm(z.system(t))
+		if err != nil {
+			t.Errorf("%s %d: %v", c.kind, c.i, err)
+			continue
+		}
+		if math.Abs(got-fin) > 2e-9*fin || math.IsInf(w, 1) {
+			t.Errorf("%s %d: norm %.15g at %g, want finite peak %.15g at %g", c.kind, c.i, got, w, fin, wf)
+		}
+	}
+}

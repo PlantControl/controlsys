@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/bits"
@@ -1340,7 +1341,8 @@ func (e *delayLFT) peakOrZero(l *delayLoop, res delayNyquist) (float64, float64,
 // bound stays below the peak. When the high-frequency limit exceeds every finite sample it is
 // reported at ω = +Inf, as σ_max(D) is for a rational model, once no finite
 // sample exceeds it on the grid nor past it (see peakPastLimit, and
-// torusPastLimit for several classes of delays). Between
+// torusPastLimit for several classes of delays, whose far passages decide a
+// tail the span cannot close). Between
 // samples, up to the grid end, the peak is certified to peakCertTol by
 // descriptorResponse.certify.
 func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) {
@@ -1404,10 +1406,11 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		return ext, b, w, err
 	}
 	hi := rGrid
+	var far torusFar
 	if torus != nil {
 		var found *pastLimit
 		var final bool
-		if lim, found, hi, final, err = e.torusPastLimit(torus, best, wBest, tol, rGrid, math.Pi/(8*l.tau), span, points); err != nil {
+		if lim, found, hi, final, far, err = e.torusPastLimit(torus, best, wBest, tol, rGrid, math.Pi/(8*l.tau), span, points); err != nil {
 			return 0, 0, err
 		}
 		if found != nil {
@@ -1473,6 +1476,18 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		}
 		if !closed {
 			return 0, 0, fmt.Errorf("no finite frequency bound for the gain: %w", errDelayPeakUnsupported)
+		}
+		if R-rGrid > span && far != nil {
+			f, err := far(best, wBest, hi)
+			if err != nil && !errors.Is(err, errTorusUnsupported) {
+				return 0, 0, err
+			}
+			if err == nil {
+				if f.ext == nil {
+					return f.b, f.w, nil
+				}
+				return e.certify(l, f.ext, f.b, f.w)
+			}
 		}
 		if R-rGrid > span {
 			return 0, 0, fmt.Errorf("delay grid exceeds %d points: %w", l.pointBudget(), errDelayPeakUnsupported)

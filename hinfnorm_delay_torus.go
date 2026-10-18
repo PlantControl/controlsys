@@ -210,16 +210,17 @@ func floats2Norm(v []float64) float64 {
 // needs no further tail closing: the peak is found's sample, or S* at
 // ω = +Inf when found.w is +Inf. Otherwise it returns a level lim >= S*,
 // the sample above it on the extension past rGrid (nil for best) and the end
-// of the scan, else errDelayPeakUnsupported.
+// of the scan, with far, when some such maximiser is not a fixed point, for
+// a tail peak cannot close within the span; else errDelayPeakUnsupported.
 func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, wBest, tol, rGrid, step, span float64,
-	points func(lo, R float64) []float64) (lim float64, found *pastLimit, hi float64, final bool, err error) {
+	points func(lo, R float64) []float64) (lim float64, found *pastLimit, hi float64, final bool, far torusFar, err error) {
 	x := newTorusExpansion(e, hf)
 	if x == nil || math.IsInf(span, 1) {
-		return 0, nil, 0, false, errTorusUnsupported
+		return 0, nil, 0, false, nil, errTorusUnsupported
 	}
 	ms := torusMaxima(hf)
 	if len(ms) == 0 {
-		return 0, nil, 0, false, errTorusUnsupported
+		return 0, nil, 0, false, nil, errTorusUnsupported
 	}
 	snapFixedPoints(hf, ms)
 	sup := ms[0].value
@@ -238,17 +239,31 @@ func (e *delayLFT) torusPastLimit(hf *highFrequencyGain, best, wBest, tol, rGrid
 	case rises:
 		lim, found, hi, err = e.torusRisesPast(x, hf, ms, best, tol, rGrid, step, span, points)
 		if fixed && errors.Is(err, errTorusUnsupported) {
-			return e.torusAtInf(x, hf, ms, best, wBest, tol, rGrid, span, true, points)
+			lim, found, hi, final, err = e.torusAtInf(x, hf, ms, best, wBest, tol, rGrid, span, true, points)
+			return lim, found, hi, final, nil, err
 		}
 		if errors.Is(err, errTorusScanned) {
-			return e.torusFarPassages(x, hf, ms, best, wBest, rGrid+span)
+			lim, found, hi, final, err = e.torusFarPassages(x, hf, ms, best, wBest, rGrid+span)
+			return lim, found, hi, final, nil, err
 		}
-		return lim, found, hi, false, err
+		if err == nil && !fixed {
+			far = func(best, wBest, end float64) (*pastLimit, error) {
+				_, f, _, _, err := e.torusFarPassages(x, hf, ms, best, wBest, end)
+				return f, err
+			}
+		}
+		return lim, found, hi, false, far, err
 	case falls:
-		return e.torusAtInf(x, hf, ms, best, wBest, tol, rGrid, span, false, points)
+		lim, found, hi, final, err = e.torusAtInf(x, hf, ms, best, wBest, tol, rGrid, span, false, points)
+		return lim, found, hi, final, nil, err
 	}
-	return 0, nil, 0, false, errTorusUnsupported
+	return 0, nil, 0, false, nil, errTorusUnsupported
 }
+
+// torusFar decides by torusFarPassages a tail of the rising case that peak
+// cannot close within the span: the grid up to end is certified to the
+// peak best at wBest, and the result is final.
+type torusFar func(best, wBest, end float64) (*pastLimit, error)
 
 var errTorusUnsupported = fmt.Errorf("gain may peak as ω → ∞ over the phase torus of incommensurate delays: %w", errDelayPeakUnsupported)
 
