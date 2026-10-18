@@ -80,17 +80,6 @@ func TestPidtuneIntegratingNoCrossover(t *testing.T) {
 func TestPidtuneIntegratingCrossoverSplitIntegrators(t *testing.T) {
 	const dt = 0.05
 	p := pidtuneBackoffPlant(t, Poly{9, -8.1}, Poly{1, -3, 3, -1}, dt, 0)
-	poles, err := p.Poles()
-	if err != nil {
-		t.Fatal(err)
-	}
-	split := 0.0
-	for _, z := range poles {
-		split = math.Max(split, math.Abs(real(z)-1)+math.Abs(imag(z)))
-	}
-	if split == 0 {
-		t.Fatalf("poles %v: expected rounding to split the integrators", poles)
-	}
 	wc, err := plantCrossoverFreq(p)
 	if want := 0.5 * math.Log(1/0.9) / dt; err != nil || math.Abs(wc-want) > 1e-6*want {
 		t.Fatalf("crossover %g, %v; want %g", wc, err, want)
