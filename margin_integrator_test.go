@@ -827,6 +827,16 @@ func TestBandwidthSmallDCGain(t *testing.T) {
 			t.Errorf("k %g: bw %v err %v, want %v", k, bw, err, want)
 		}
 	}
+	want2 := math.Sqrt((-5 + math.Sqrt(9+16*math.Pow(10, 0.3))) / 2)
+	for _, k := range []float64{1e-16, 1e-12, 1e-8, 1e-4, 1} {
+		r, err := (&TransferFunc{Num: [][][]float64{{{k}}}, Den: [][]float64{{1, 3, 2}}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bw, err := Bandwidth(r.Sys, -3); err != nil || math.Abs(bw-want2) > 1e-9*want2 {
+			t.Errorf("k/((s+1)(s+2)) k %g: bw %v err %v, want %v", k, bw, err, want2)
+		}
+	}
 	rng := rand.New(rand.NewPCG(11, 13))
 	for range 150 {
 		k := math.Copysign(math.Pow(10, -14+14*rng.Float64()), rng.Float64()-0.5)
