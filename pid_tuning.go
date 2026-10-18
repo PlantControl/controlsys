@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/cmplx"
 	"slices"
 	"strings"
@@ -318,7 +319,318 @@ func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return loop.IsStable()
+	poles, err := loop.Poles()
+	if err != nil {
+		return false, err
+	}
+	return pidTuningPolesStable(poles, s.model, cs), nil
+}
+
+const (
+	// pidTuningExactBand is how far outside the stability boundary a float
+	// pole may lie and still be retested exactly.
+	pidTuningExactBand = 1e-3
+	// pidTuningExactOrder caps the closed-loop order tested exactly.
+	pidTuningExactOrder = 10
+)
+
+// pidTuningPolesStable decides stability of the negative-feedback loop of
+// delay-free SISO standard models plant and c from its float poles, as
+// IsStable, except that when every pole the float test rejects lies within
+// pidTuningExactBand outside the boundary (with |p| <= 1 in continuous
+// time) the exact test decides: a cluster of poles near the boundary, as a
+// slow plant pole and a tiny-gain integrator give near z = 1, carries
+// eigenvalue errors far above the margin the gains leave. The loop's A is
+// then built from the realizations in exact integer arithmetic, and its
+// characteristic polynomial must have every root at |z| < 1−1e-10, or
+// Re s < −1e-10, as poleStabilityTolerance asks of a pole with |p| <= 1.
+// Float-stable verdicts stand.
+func pidTuningPolesStable(poles []complex128, plant, c *System) bool {
+	continuous := plant.Dt == 0
+	stable := true
+	for _, p := range poles {
+		if poleInsideStabilityBoundary(p, continuous, poleStabilityTolerance(p)) {
+			continue
+		}
+		stable = false
+		if continuous && (cmplx.Abs(p) > 1 || real(p) > pidTuningExactBand) ||
+			!continuous && cmplx.Abs(p)-1 > pidTuningExactBand {
+			return false
+		}
+	}
+	if stable {
+		return true
+	}
+	exact, ok := pidTuningExactStable(plant, c)
+	return ok && exact
+}
+
+// pidTuningExactStable is pidTuningPolesStable's exact test; ok is false
+// when the loop is outside its scope.
+func pidTuningExactStable(plant, c *System) (stable, ok bool) {
+	if plant.E != nil || c.E != nil || plant.HasDelay() || c.HasDelay() || c.Dt != plant.Dt {
+		return false, false
+	}
+	n1, m1, p1 := plant.Dims()
+	n2, m2, p2 := c.Dims()
+	if m1 != 1 || p1 != 1 || m2 != 1 || p2 != 1 || n1+n2 == 0 || n1+n2 > pidTuningExactOrder {
+		return false, false
+	}
+	for _, a := range []*mat.Dense{plant.A, plant.B, plant.C, plant.D, c.A, c.B, c.C, c.D} {
+		if a != nil && requireFiniteDense("", "", a) != nil {
+			return false, false
+		}
+	}
+	m, ln, ld := pidTuningExactClosedLoop(plant, c, n1, n2)
+	if m == nil {
+		return false, false
+	}
+	p := intCharPoly(m)
+	const tol = 1e-10
+	if plant.Dt == 0 {
+		t := new(big.Rat).SetFloat64(tol)
+		intScaleRoots(p, big.NewInt(1), new(big.Int).Mul(ld, t.Denom()))
+		return intHurwitz(intShift(p, new(big.Int).Neg(new(big.Int).Mul(ln, t.Num())))), true
+	}
+	rho := new(big.Rat).SetFloat64(1 - tol)
+	intScaleRoots(p, new(big.Int).Mul(ln, rho.Num()), new(big.Int).Mul(ld, rho.Denom()))
+	return intSchur(p), true
+}
+
+// intScaleRoots scales p, leading coefficient first, in place so that its
+// roots are those of p times den/num.
+func intScaleRoots(p []*big.Int, num, den *big.Int) {
+	scale := big.NewInt(1)
+	for _, v := range slices.Backward(p) {
+		v.Mul(v, scale)
+		scale.Mul(scale, num)
+	}
+	scale.SetInt64(1)
+	for _, v := range p {
+		v.Mul(v, scale)
+		scale.Mul(scale, den)
+	}
+}
+
+// dyadic is the exact value m·2^e.
+type dyadic struct {
+	m *big.Int
+	e int
+}
+
+func newDyadic(x float64) dyadic {
+	f, e := math.Frexp(x)
+	return dyadic{big.NewInt(int64(math.Ldexp(f, 53))), e - 53}
+}
+
+func (d dyadic) mul(o dyadic) dyadic { return dyadic{new(big.Int).Mul(d.m, o.m), d.e + o.e} }
+
+// sub returns d − o.
+func (d dyadic) sub(o dyadic) dyadic {
+	if d.e <= o.e {
+		t := new(big.Int).Lsh(o.m, uint(o.e-d.e))
+		return dyadic{t.Sub(d.m, t), d.e}
+	}
+	t := new(big.Int).Lsh(d.m, uint(d.e-o.e))
+	return dyadic{t.Sub(t, o.m), o.e}
+}
+
+// pidTuningExactClosedLoop returns an integer matrix m and positive integers
+// ln, ld such that the A of Feedback(plant, c, −1) is m·ld/ln exactly, or a
+// nil m for an algebraic loop. With δ = 1+D1D2, δ·A is
+// [δA1−D2B1C1, −B1C2; B2C1, δA2−D1B2C2], whose entries are dyadic.
+func pidTuningExactClosedLoop(plant, c *System, n1, n2 int) (m [][]*big.Int, ln, ld *big.Int) {
+	at := func(a *mat.Dense, i, j int) dyadic { return newDyadic(a.At(i, j)) }
+	d1, d2 := at(plant.D, 0, 0), at(c.D, 0, 0)
+	zero := newDyadic(0)
+	delta := newDyadic(1).sub(zero.sub(d1.mul(d2)))
+	if delta.m.Sign() == 0 {
+		return nil, nil, nil
+	}
+	n := n1 + n2
+	ent := make([][]dyadic, n)
+	for i := range ent {
+		ent[i] = make([]dyadic, n)
+	}
+	for i := range n1 {
+		b1 := at(plant.B, i, 0)
+		for j := range n1 {
+			ent[i][j] = delta.mul(at(plant.A, i, j)).sub(d2.mul(b1).mul(at(plant.C, 0, j)))
+		}
+		for j := range n2 {
+			ent[i][n1+j] = zero.sub(b1.mul(at(c.C, 0, j)))
+		}
+	}
+	for i := range n2 {
+		b2 := at(c.B, i, 0)
+		for j := range n1 {
+			ent[n1+i][j] = b2.mul(at(plant.C, 0, j))
+		}
+		for j := range n2 {
+			ent[n1+i][n1+j] = delta.mul(at(c.A, i, j)).sub(d1.mul(b2).mul(at(c.C, 0, j)))
+		}
+	}
+	emin := delta.e
+	for _, row := range ent {
+		for _, v := range row {
+			emin = min(emin, v.e)
+		}
+	}
+	neg := delta.m.Sign() < 0
+	m = make([][]*big.Int, n)
+	for i, row := range ent {
+		m[i] = make([]*big.Int, n)
+		for j, v := range row {
+			x := new(big.Int).Lsh(v.m, uint(v.e-emin))
+			if neg {
+				x.Neg(x)
+			}
+			m[i][j] = x
+		}
+	}
+	ln, ld = new(big.Int).Abs(delta.m), big.NewInt(1)
+	if s := delta.e - emin; s >= 0 {
+		ln.Lsh(ln, uint(s))
+	} else {
+		ld.Lsh(ld, uint(-s))
+	}
+	return m, ln, ld
+}
+
+// intCharPoly returns det(λI−m), leading coefficient first, by Berkowitz's
+// division-free recursion: the polynomial of the leading (r+1)×(r+1) block
+// is the lower-triangular Toeplitz matrix with first column
+// (1, −m_rr, −R·C, −R·M·C, …, −R·M^(r−1)·C) times that of the leading r×r
+// block M, with R and C the rest of row and column r.
+func intCharPoly(m [][]*big.Int) []*big.Int {
+	n := len(m)
+	c := []*big.Int{big.NewInt(1), new(big.Int).Neg(m[0][0])}
+	t := new(big.Int)
+	for r := 1; r < n; r++ {
+		col := make([]*big.Int, r+2)
+		col[0], col[1] = big.NewInt(1), new(big.Int).Neg(m[r][r])
+		v, w := make([]*big.Int, r), make([]*big.Int, r)
+		for i := range v {
+			v[i], w[i] = new(big.Int).Set(m[i][r]), new(big.Int)
+		}
+		for k := range r {
+			s := new(big.Int)
+			for j := range r {
+				s.Add(s, t.Mul(m[r][j], v[j]))
+			}
+			col[k+2] = s.Neg(s)
+			if k == r-1 {
+				break
+			}
+			for i := range r {
+				w[i].SetInt64(0)
+				for j := range r {
+					w[i].Add(w[i], t.Mul(m[i][j], v[j]))
+				}
+			}
+			v, w = w, v
+		}
+		next := make([]*big.Int, r+2)
+		for i := range next {
+			s := new(big.Int)
+			for j := max(0, i-r-1); j <= min(i, r); j++ {
+				s.Add(s, t.Mul(col[i-j], c[j]))
+			}
+			next[i] = s
+		}
+		c = next
+	}
+	return c
+}
+
+// intShift returns the coefficients of p(x+h), leading first.
+func intShift(p []*big.Int, h *big.Int) []*big.Int {
+	q := make([]*big.Int, len(p))
+	for i, v := range p {
+		q[i] = new(big.Int).Set(v)
+	}
+	t := new(big.Int)
+	for i := 1; i < len(q); i++ {
+		for j := 1; j <= len(q)-i; j++ {
+			q[j].Add(q[j], t.Mul(q[j-1], h))
+		}
+	}
+	return q
+}
+
+// intContent divides p by the gcd of its coefficients.
+func intContent(p []*big.Int) {
+	g := new(big.Int)
+	for _, v := range p {
+		g.GCD(nil, nil, g, new(big.Int).Abs(v))
+	}
+	if g.Sign() == 0 || g.IsInt64() && g.Int64() == 1 {
+		return
+	}
+	for _, v := range p {
+		v.Quo(v, g)
+	}
+}
+
+// intHurwitz reports whether every root of p, leading coefficient first,
+// has negative real part, by the fraction-free Routh array: strict
+// stability needs every first-column entry nonzero and of one sign, and
+// rows scaled by positive factors keep their signs.
+func intHurwitz(p []*big.Int) bool {
+	if len(p) == 0 || p[0].Sign() == 0 {
+		return false
+	}
+	neg := p[0].Sign() < 0
+	row := func(off int) []*big.Int {
+		var out []*big.Int
+		for i := off; i < len(p); i += 2 {
+			v := new(big.Int).Set(p[i])
+			if neg {
+				v.Neg(v)
+			}
+			out = append(out, v)
+		}
+		return out
+	}
+	prev, cur := row(0), row(1)
+	t := new(big.Int)
+	for range len(p) - 1 {
+		if len(cur) == 0 || cur[0].Sign() <= 0 {
+			return false
+		}
+		next := make([]*big.Int, len(prev)-1)
+		for j := range next {
+			v := new(big.Int).Mul(cur[0], prev[j+1])
+			if j+1 < len(cur) {
+				v.Sub(v, t.Mul(prev[0], cur[j+1]))
+			}
+			next[j] = v
+		}
+		intContent(next)
+		prev, cur = cur, next
+	}
+	return true
+}
+
+// intSchur reports whether every root of p, leading coefficient first,
+// lies strictly inside the unit circle, by the fraction-free Schur–Cohn
+// recursion.
+func intSchur(p []*big.Int) bool {
+	c := p
+	t, u := new(big.Int), new(big.Int)
+	for n := len(c) - 1; n > 0; n-- {
+		if t.Abs(c[n]).Cmp(u.Abs(c[0])) >= 0 {
+			return false
+		}
+		q := make([]*big.Int, n)
+		for i := range q {
+			q[i] = new(big.Int).Mul(c[0], c[i])
+			q[i].Sub(q[i], t.Mul(c[n], c[n-i]))
+		}
+		intContent(q)
+		c = q
+	}
+	return true
 }
 
 // pidTuningSignConsistent reports whether every nonzero gain of c has sign
