@@ -113,7 +113,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
 	_, hasI, _, _, _ := pidTuningTerms(pidType)
-	if hasI && pidtuneIntegratorExcess(plant, wc) < 0 {
+	if hasI && pidtuneZeroAtIntegrator(plant) {
 		return nil, fmt.Errorf("Pidtune: %s: a plant zero at the integrator cancels the integral term, leaving a closed-loop pole on the stability boundary: %w", pidType, ErrPIDTuningTargetUnattainable)
 	}
 	sign, rule := pidtuneGainSign(plant, eval.at, wc, hasI)
@@ -455,22 +455,13 @@ func pidtuneGainSign(plant *System, at func(float64) complex128, wc float64, int
 // inside the stability boundary, where it still acts as one over the design
 // band unless a zero there cancels it.
 func pidtuneNearIntegrator(plant *System, wc float64) bool {
-	return pidtuneIntegratorExcess(plant, wc) > 0
-}
-
-// pidtuneIntegratorExcess returns the number of poles less zeros of plant
-// within pidtuneNearIntegrator's tolerance of the integrator, 0 when they
-// cannot be computed. Below 0, G vanishes there, and an integral term's pole
-// cancels against the zero into a closed-loop pole at the integrator for
-// every gain.
-func pidtuneIntegratorExcess(plant *System, wc float64) int {
 	model, err := finiteDimensionalModel(plant, "Pidtune")
 	if err != nil {
-		return 0
+		return false
 	}
 	poles, err := model.Poles()
 	if err != nil {
-		return 0
+		return false
 	}
 	zeros, _ := model.Zeros()
 	at, tol := pidtuneIntegratorTol(plant, poles, wc)
@@ -485,7 +476,37 @@ func pidtuneIntegratorExcess(plant *System, wc float64) int {
 			near--
 		}
 	}
-	return near
+	return near > 0
+}
+
+// pidtuneZeroAtIntegrator returns whether plant has more zeros than poles at
+// s = 0 (z = 1) up to rounding, counted as pidtuneIntegratorCluster does
+// with the root scale of poles and zeros together: G vanishes there, and an
+// integral term's pole cancels against the zero into a closed-loop pole at
+// the integrator for every gain. A zero strictly inside the stability
+// region, however close, leaves that pole strictly stable.
+func pidtuneZeroAtIntegrator(plant *System) bool {
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return false
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return false
+	}
+	zeros, err := model.Zeros()
+	if err != nil {
+		return false
+	}
+	at, scale := complex128(0), 0.0
+	if plant.Dt > 0 {
+		at, scale = 1, 1
+	} else {
+		for _, r := range slices.Concat(poles, zeros) {
+			scale = max(scale, cmplx.Abs(r))
+		}
+	}
+	return pidtuneClusterSize(zeros, at, scale) > pidtuneClusterSize(poles, at, scale)
 }
 
 // pidtuneGate checks a backed-off design over the whole back-off band with
@@ -605,7 +626,7 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 // less than pm; on a loop certified stable, a crossover counts its distance
 // from −1 as pidTuningCrossingMargin does, wc included for P and I, which
 // set only the gain there and leave the phase to the plant. wc counts only
-// when |L(wc)| = 1: a design clamped short of the gain there crosses
+// when |L(wc)| = 1: a design clamped short of the gain there must cross
 // elsewhere.
 func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certified bool) error {
 	c := PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
@@ -621,6 +642,9 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 	}
 	if math.Abs(cmplx.Abs(g.p.at(wc)*pidTuningFeedback(c, wc))-1) > 1e-6 {
 		crossings, margins = crossings[1:], margins[1:]
+		if len(margins) == 0 {
+			return fmt.Errorf("%s design at wc=%g has no gain crossover: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
+		}
 	}
 	for i, m := range margins {
 		if m = pidTuningCrossingMargin(at, crossings[i], m, floor, certified); !(m >= floor) {
@@ -1029,17 +1053,31 @@ func pidtuneIntegratorCluster(plant *System, roots []complex128) (complex128, fl
 			scale = max(scale, cmplx.Abs(r))
 		}
 	}
+	m := pidtuneClusterSize(roots, at, scale)
+	if m == 0 {
+		return at, 0
+	}
+	return at, pidtuneClusterRadius(m, scale)
+}
+
+// pidtuneClusterSize returns the largest m such that m roots lie within
+// pidtuneClusterRadius(m, scale) of at.
+func pidtuneClusterSize(roots []complex128, at complex128, scale float64) int {
 	d := make([]float64, len(roots))
 	for i, r := range roots {
 		d[i] = cmplx.Abs(r - at)
 	}
 	slices.Sort(d)
 	for m := len(d); m > 0; m-- {
-		if tol := 100 * math.Pow(0x1p-52, 1/float64(m)) * scale; d[m-1] <= tol {
-			return at, tol
+		if d[m-1] <= pidtuneClusterRadius(m, scale) {
+			return m
 		}
 	}
-	return at, 0
+	return 0
+}
+
+func pidtuneClusterRadius(m int, scale float64) float64 {
+	return 100 * math.Pow(0x1p-52, 1/float64(m)) * scale
 }
 
 // pidtunePlantPoint evaluates evalPlantAt(plant, w) bit for bit: it

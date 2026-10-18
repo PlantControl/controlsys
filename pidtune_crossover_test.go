@@ -285,3 +285,80 @@ func TestPidtunePoleFallbackPDHighPass(t *testing.T) {
 		}
 	}
 }
+
+// pidtuneCheckRobust checks pid on num/den by the independent oracle:
+// closed-loop roots, a crossover with every signed margin at least 58.5°,
+// and |S| at most msMax on the directly evaluated loop.
+func pidtuneCheckRobust(t *testing.T, name string, pid *PID, num, den Poly, dt, msMax float64) {
+	t.Helper()
+	if stable, ok := pidtuneOracleStable(t, pid, num, den, dt, 0); !ok || !stable {
+		t.Errorf("%s: %+v unstable", name, pid)
+	}
+	hi := 1e6
+	if dt > 0 {
+		hi = math.Pi / dt
+	}
+	pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, dt, 0), 1e-6, hi)
+	if len(pms) == 0 || ms > msMax {
+		t.Errorf("%s: %+v crossovers %v, |S| %.3g", name, pid, pms, ms)
+	}
+	for _, m := range pms {
+		if math.Abs(m) < 58.5 {
+			t.Errorf("%s: %+v margin %.3g°", name, pid, m)
+		}
+	}
+}
+
+// A plant zero strictly inside the stability region, however close to the
+// integrator, leaves the closed-loop pole an integral term pairs with it
+// strictly stable, and MATLAB pidtune designs there. The reject for a zero
+// at the integrator took 1e-6·wc as its radius and caught zeros at −1e-3
+// (wc 8669), −1e-7, −1e-5, −1e-8 and z = 1−1e-8 (TFE7I2 review).
+func TestPidtuneZeroNearIntegratorDesigns(t *testing.T) {
+	all := []PidtuneType{PidtuneI, PidtunePI, PidtunePID, PidtunePIDF}
+	for _, c := range []struct {
+		num, den Poly
+		dt, wc   float64
+		fams     []PidtuneType
+	}{
+		{Poly{0.69687559053705495}.Mul(Poly{1, 1e-3}), Poly{1, 4.403080400780377, 1.6256391362894465}, 0, 0, []PidtuneType{PidtunePI}},
+		{Poly{0.11030945862927788}.Mul(Poly{1, 1e-7}), Poly{1, 1.3644905835382877}, 0, 0, []PidtuneType{PidtuneI}},
+		{Poly{-0.53434948917407166}.Mul(Poly{1, 1e-5}), Poly{1, 2.5122667807172974, 0.82341538655475466, 0.069695621091596771}, 0, 0, []PidtuneType{PidtunePI}},
+		{Poly{2.0875}.Mul(Poly{1, 1e-8}).Mul(Poly{1, 3}), Poly{1, 1}.Mul(Poly{1, 2}).Mul(Poly{1, 0.5}), 0, 0.7335, all},
+		{Poly{0.5}.Mul(Poly{1, -(1 - 1e-8)}).Mul(Poly{1, -0.3}), Poly{1, -0.6}.Mul(Poly{1, -0.4}).Mul(Poly{1, 0.2}), 0.1, 0, all},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
+		for _, f := range c.fams {
+			name := fmt.Sprintf("%s %v/%v dt=%g", f, c.num, c.den, c.dt)
+			pid, err := Pidtune(p, f, c.wc, nil)
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+				continue
+			}
+			pidtuneCheckRobust(t, name, pid, c.num, c.den, c.dt, 4.5)
+		}
+	}
+}
+
+// A PD design clamped short of |L(wc)| = 1 crossed nowhere; the gate, which
+// drops wc then, checked no crossover and accepted a loop with |L| ≤ 0.18
+// everywhere where the design at the automatic crossover keeps a 60° margin
+// (TFE7I2 review).
+func TestPidtunePDBackoffNeedsCrossover(t *testing.T) {
+	for _, c := range []struct {
+		num, den Poly
+		dt       float64
+	}{
+		{Poly{-0.94546289712921561}, Poly{1, -1.4539218418093962, 0.51962244899907128}, 0.3697375861344023},
+		{Poly{0.79755174815541685}, Poly{1, -1.0025664143562638, -0.069075795306954832, 0.16754669270864272, 0.012844162343441125}, 0.2798273375686335},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
+		name := fmt.Sprintf("%v/%v dt=%g", c.num, c.den, c.dt)
+		pid, err := Pidtune(p, PidtunePD, 0, nil)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		pidtuneCheckRobust(t, name, pid, c.num, c.den, c.dt, 3)
+	}
+}
