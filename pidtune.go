@@ -73,8 +73,11 @@ const (
 // or unstable plant with a continuous delay),
 // accepting the first that passes, keeps the phase margin at every gain
 // crossover and keeps |S| ≤ 4; a wc from a pole must pass that test from
-// the first design. On a loop certified stable, a margin at or below −pm
-// counts as its distance from −1 (at wc only for P and I). Otherwise, and
+// the first design. On a loop the pole test certifies stable, the margin at
+// each gain crossover, wc included (TunePID excludes wc), is the classical
+// 180° − |∠L|;
+// a continuous delay, gated before its Nyquist test, keeps the signed
+// 180° + ∠L. Otherwise, and
 // for an explicit wc, the result is ErrPIDTuningTargetUnattainable.
 // A family with an integral term on a plant with a zero at the integrator
 // (s = 0, z = 1, up to rounding) leaves a closed-loop pole there at any
@@ -628,9 +631,9 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 }
 
 // check rejects pid when |S| exceeds the bound or a gain crossover keeps
-// less than pm; on a loop certified stable, a crossover counts its distance
-// from −1 as pidTuningCrossingMargin does, wc included for P and I, which
-// set only the gain there and leave the phase to the plant. wc counts only
+// less than pm; on a loop certified stable, every crossover, wc included,
+// counts its classical margin 180° − |∠L|, the distance from −1 either way
+// round the circle, which is |m| for the wrapped margin m. wc counts only
 // when |L(wc)| = 1: a design clamped short of the gain there must cross
 // elsewhere.
 func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certified bool) error {
@@ -640,19 +643,17 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 	}
 	crossings, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
 	floor := pm - pidtuneMarginTol
-	at := wc
-	if pidType == PidtuneP || pidType == PidtuneI {
-		// NaN matches no crossing, so wc is reflected too.
-		at = math.NaN()
-	}
 	if math.Abs(cmplx.Abs(g.p.at(wc)*pidTuningFeedback(c, wc))-1) > 1e-6 {
 		crossings, margins = crossings[1:], margins[1:]
 		if len(margins) == 0 {
 			return fmt.Errorf("%s design at wc=%g has no gain crossover: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
 		}
 	}
-	for i, m := range margins {
-		if m = pidTuningCrossingMargin(at, crossings[i], m, floor, certified); !(m >= floor) {
+	for _, m := range margins {
+		if certified {
+			m = math.Abs(m)
+		}
+		if !(m >= floor) {
 			return fmt.Errorf("%s design at wc=%g has phase margin %.3g° at a gain crossover: %w", pidType, wc, m, ErrPIDTuningTargetUnattainable)
 		}
 	}

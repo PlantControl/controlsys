@@ -243,6 +243,58 @@ func TestPidtunePoleFallbackContinuousStable(t *testing.T) {
 	}
 }
 
+// On these high-pass plants the loop phase at a crossover is positive, so
+// the signed margin 180° + ∠L is negative however far L stays from −1. The
+// back-off gate read it signed: PD, PID and PIDF on T0/T2 errored at every
+// step (FPLHR5), and the PDF least-lead design, crossing at wc itself with
+// signed margin ≈ −120°…−160°, was rejected there for every family, so PDF
+// errored with "needs phase lag". On a pole-certified loop the gate counts
+// 180° − |∠L|. Oracle: closed-loop roots from num/den, and the classical
+// margin at every crossover and |S| of the directly evaluated loop.
+func TestPidtuneGateClassicalMargin(t *testing.T) {
+	t0 := [2]Poly{{-0.04189665061210819, 0.07677735137479592, -0.03510307300396654}, {1, 0.9371514351204928, 0.13383773145948022}}
+	t2 := [2]Poly{{0.02168291613348848, -0.040003288616014994, 0.018372574831365913}, {1, 1.0961478669592766, 0.30038125589712455}}
+	all := []PidtuneType{PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF}
+	for _, c := range []struct {
+		num, den Poly
+		dt       float64
+		fams     []PidtuneType
+	}{
+		{t0[0], t0[1], 0.0757765515708101, all},
+		{t2[0], t2[1], 0.06586027470121651, all},
+		{Poly{0.9147921246960318, -0.39502144372826553}, Poly{1, -0.5431690613836653, -0.1892877676898109}, 0.31622446378773106, []PidtuneType{PidtunePDF}},
+		{Poly{0.799289620228443, 0}, Poly{1, 1.6124129207235272, 0.6499446539813588}, 0, []PidtuneType{PidtunePDF}},
+		{Poly{0.3109408305381509, 0}, Poly{1, 4.675160826318902, 5.1106958875365285}, 0, []PidtuneType{PidtunePDF}},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
+		wMax := 1e4
+		if c.dt > 0 {
+			wMax = math.Pi / c.dt
+		}
+		for _, f := range c.fams {
+			name := fmt.Sprintf("%s %v/%v dt=%g", f, c.num, c.den, c.dt)
+			pid, err := Pidtune(p, f, 0, nil)
+			if err != nil {
+				t.Errorf("%s: %v", name, err)
+				continue
+			}
+			if stable, ok := pidtuneOracleStable(t, pid, c.num, c.den, c.dt, 0); !ok || !stable {
+				t.Errorf("%s: %+v unstable", name, pid)
+				continue
+			}
+			pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, c.num, c.den, c.dt, 0), 1e-9, wMax)
+			if len(pms) == 0 || ms > pidTuningMaxSensitivity {
+				t.Errorf("%s: %+v crossovers %v, |S| peak %.3g", name, pid, pms, ms)
+			}
+			for _, m := range pms {
+				if math.Abs(m) < 58.5 {
+					t.Errorf("%s: %+v phase margin %.3g° at a crossover", name, pid, m)
+				}
+			}
+		}
+	}
+}
+
 // PD on k·s/(s+a) cannot lag at the pole-fallback crossover; its clamped
 // design meets |L(wc)| ≈ 0.49 and crosses over well above, 137° from −1.
 // The gate read wc as a crossover with margin −92.6°, as at every back-off
