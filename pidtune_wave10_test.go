@@ -144,7 +144,7 @@ func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 	}
 	onlyPassing = false
 	rng := rand.New(rand.NewPCG(10, 31))
-	fams := []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF}
+	fams := []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF}
 	for trial := range 60 {
 		n := 1 + rng.IntN(3)
 		den := Poly{1}
