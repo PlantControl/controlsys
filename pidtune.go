@@ -59,11 +59,11 @@ const (
 // that, with wc = 0, keeps the margin at every gain crossover and |S| ≤ 4.
 // Every gain takes one sign: that of the DC
 // gain for a stable plant, and for an integrating or unstable plant the
-// sign stabilization forces
+// sign stabilization forces, else that of the high-frequency gain
 // (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G); where the force
-// lapses, as for an ideal derivative large enough to flip the closed-loop
-// polynomial's leading coefficient, the other sign is tried when the forced
-// one fails. A design whose closed loop is unstable by its poles (delay
+// lapses or there is none, as for an ideal derivative large enough to flip
+// the closed-loop polynomial's leading coefficient or a stable plant with
+// zero DC gain, the other sign is tried when the first one fails. A design whose closed loop is unstable by its poles (delay
 // absorbed for discrete plants) or by a Nyquist test (continuous delays) is
 // rejected; loops outside both tests are not screened. With wc = 0 a
 // rejected design is retried at crossovers lowered up to three decades, or
@@ -156,7 +156,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	// An unstable plant needs bandwidth that a continuous delay already
 	// caps, and each back-off step would run a Nyquist test.
 	if !auto || !errors.Is(first, ErrPIDTuningTargetUnattainable) ||
-		rule != pidtuneSignFixed && plant.Dt == 0 && plant.HasDelay() {
+		(rule == pidtuneSignForced || rule == pidtuneSignGuessed) && plant.Dt == 0 && plant.HasDelay() {
 		return nil, fmt.Errorf("Pidtune: %w", first)
 	}
 	steps := int(math.Ceil(pidtuneBackoffPerDecade*math.Log10(wc/run.backoffFloor()) - 1e-9))
@@ -281,9 +281,9 @@ type pidtuneRun struct {
 // least lead, gated under an automatic crossover since its margin exceeds
 // the requested one.
 func (r *pidtuneRun) design(wc, sign float64, gated bool) (*PID, error) {
-	pid, err := r.mirrored(wc, sign, gated, false)
-	if err != nil && !r.explicit && errors.Is(err, errPidtunePDFLag) {
-		if alt, altErr := r.mirrored(wc, sign, gated || r.auto, true); altErr == nil {
+	pid, lag, err := r.mirrored(wc, sign, gated, false)
+	if err != nil && !r.explicit && lag {
+		if alt, _, altErr := r.mirrored(wc, sign, gated || r.auto, true); altErr == nil {
 			return alt, nil
 		}
 	}
@@ -291,15 +291,19 @@ func (r *pidtuneRun) design(wc, sign float64, gated bool) (*PID, error) {
 }
 
 // mirrored designs for sign·G, then for −sign·G as design describes; with
-// lagFloor a PDF needing phase lag gets the least lead instead.
-func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (*PID, error) {
-	pid, err := r.signed(wc, sign, gated, lagFloor)
+// lagFloor a PDF needing phase lag gets the least lead instead. lag reports
+// that either sign's PDF needed phase lag.
+func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (pid *PID, lag bool, err error) {
+	pid, err = r.signed(wc, sign, gated, lagFloor)
+	lag = errors.Is(err, errPidtunePDFLag)
 	if r.mirror && errors.Is(err, ErrPIDTuningTargetUnattainable) && r.screened(wc) {
-		if alt, altErr := r.signed(wc, -sign, gated, lagFloor); altErr == nil {
-			return alt, nil
+		alt, altErr := r.signed(wc, -sign, gated, lagFloor)
+		if altErr == nil {
+			return alt, false, nil
 		}
+		lag = lag || errors.Is(altErr, errPidtunePDFLag)
 	}
-	return pid, err
+	return pid, lag, err
 }
 
 // screened returns whether checkPidtuneStability tests designs at wc: an
@@ -420,9 +424,12 @@ func (r *pidtuneRun) gateOf() *pidtuneGate {
 type pidtuneSignRule int
 
 const (
-	// pidtuneSignFixed: the DC gain sign of a stable plant, or 1 for a
-	// stable plant without one; never mirrored.
+	// pidtuneSignFixed: the DC gain sign of a stable plant; never
+	// mirrored.
 	pidtuneSignFixed pidtuneSignRule = iota
+	// pidtuneSignStable: a stable plant without a DC gain sign takes the
+	// sign the other rules give; mirrored, and backed off as Fixed.
+	pidtuneSignStable
 	// pidtuneSignForced: K·N(0)/a > 0, which a stable loop needs whenever
 	// its characteristic polynomial's leading coefficient has the sign of
 	// a; mirrored when that coefficient may flip.
@@ -442,14 +449,26 @@ const (
 // count of unstable real poles) or integral is set: the DC gain sign of G
 // with integrators removed and unstable poles reflected. A stable plant
 // with no DC sign and a pole at the integrator (pidtuneNearIntegrator) takes
-// this rule too.
+// this rule too; one without such a pole, a zero-DC plant, takes the same
+// signs under pidtuneSignStable, so −G gets −sign and either is mirrored.
 func pidtuneGainSign(plant *System, at func(float64) complex128, wc float64, integral bool) (float64, pidtuneSignRule) {
 	if s := pidTuningDCSign(plant, at, wc); s != 0 {
 		return s, pidtuneSignFixed
 	}
-	if stable, err := plant.IsStable(); err != nil || stable && !pidtuneNearIntegrator(plant, wc) {
+	stable, err := plant.IsStable()
+	if err != nil {
 		return 1, pidtuneSignFixed
 	}
+	if stable && !pidtuneNearIntegrator(plant, wc) {
+		s, _ := pidtuneForcedSign(plant, wc, integral)
+		return s, pidtuneSignStable
+	}
+	return pidtuneForcedSign(plant, wc, integral)
+}
+
+// pidtuneForcedSign returns pidtuneGainSign's sign and rule past the DC
+// gain of a stable plant.
+func pidtuneForcedSign(plant *System, wc float64, integral bool) (float64, pidtuneSignRule) {
 	res, err := plant.rationalTransferFunction(nil)
 	if err != nil {
 		return 1, pidtuneSignGuessed
