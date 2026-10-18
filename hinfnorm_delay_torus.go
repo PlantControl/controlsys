@@ -269,7 +269,7 @@ func (e *delayLFT) torusRisesPast(x *highFrequencyExpansion, hf *highFrequencyGa
 	unsupported := errTorusUnsupported
 	sup := ms[0].value
 	const budget = 1 << 20
-	R0 := max(rGrid, 2*e.normA+1)
+	R0 := max(rGrid, 2*e.minNormA()+1)
 	sc := &torusScan{e: e, near: newTorusPassages(e, hf, ms, sup, R0), step: step, r0: R0,
 		end: rGrid + span, hi: rGrid, R: 2 * R0}
 	// The outcome at level L is unsupported, whatever below certifies, when
@@ -858,7 +858,7 @@ func (e *delayLFT) torusAtInf(x *highFrequencyExpansion, hf *highFrequencyGain, 
 // jwI − A is singular.
 func (h *highFrequencyGain) atFrequency(w float64) *highFrequencyGain {
 	e := h.e
-	if e.n == 0 || e.sys.E != nil || !(w > e.normA) {
+	if e.n == 0 || e.sys.E != nil || !(w > e.minNormA()) {
 		return nil
 	}
 	n, nd, p, m := e.n, e.nd, e.p, e.m
@@ -915,8 +915,11 @@ func (h *highFrequencyGain) atFrequency(w float64) *highFrequencyGain {
 		lu: make([]complex128, nd*nd), x: make([]complex128, nd*m),
 		phase: make([]complex128, nd), piv: make([]int, nd), g: make([]complex128, p*m),
 		grid: h.grid, gridR: h.gridR,
-		n1221: e.h(e.d12, e.c1, e.b2, w) * e.h(e.d21, e.c2, e.b1, w),
-		n22:   e.h(e.d22, e.c2, e.b2, w),
+		n1221: math.Inf(1), n22: math.Inf(1),
+	}
+	for _, s := range e.realizations() {
+		f.n1221 = min(f.n1221, s.h(e.d12, s.c1, s.b2, w)*s.h(e.d21, s.c2, s.b1, w))
+		f.n22 = min(f.n22, s.h(e.d22, s.c2, s.b2, w))
 	}
 	f.eps = f.n22 - e.d22
 	f.lip = f.lipschitz()
@@ -934,7 +937,7 @@ func (h *highFrequencyGain) atFrequency(w float64) *highFrequencyGain {
 // torusGrid does not exceed it; spent reports that below ran out of budget.
 func (e *delayLFT) torusTailBelow(hf *highFrequencyGain, lim, level, R float64, budget int) (ok, spent bool) {
 	errT := math.Inf(1)
-	for w := e.normA*1.01 + 1e-9; w < 0.9*R; w *= 1.2 {
+	for w := e.minNormA()*1.01 + 1e-9; w < 0.9*R; w *= 1.2 {
 		q := w / (R - w)
 		errT = min(errT, e.tailGain(0, w)/4*q*q)
 	}
