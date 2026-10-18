@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/cmplx"
 	"testing"
 )
@@ -86,20 +87,19 @@ func TestPIDTuningDelayOriginZeroOracle(t *testing.T) {
 	}
 }
 
-func TestPIDTuningOriginZero(t *testing.T) {
+func TestPIDTuningLeastZero(t *testing.T) {
 	for _, tc := range []struct {
 		num, den []float64
-		want     bool
+		lo, hi   float64
 	}{
-		{[]float64{1, 0}, []float64{1, 1 + 1e-8, 1e-8}, true},
-		{[]float64{1, 0}, []float64{1, 2, 1}, true},
-		{[]float64{1, 1e-6}, []float64{1, 2, 1}, false},
-		{[]float64{1, 1e-3}, []float64{1, 1 + 1e-8, 1e-8}, false},
-		{[]float64{1, 1}, []float64{1, 2, 1}, false},
-		{[]float64{1}, []float64{1, 1}, false},
+		{[]float64{1, 0}, []float64{1, 1 + 1e-8, 1e-8}, 0, 1e-12},
+		{[]float64{1, 0}, []float64{1, 2, 1}, 0, 1e-12},
+		{[]float64{1, 1e-6}, []float64{1, 2, 1}, .99e-6, 1.01e-6},
+		{[]float64{1, 1e-4}, []float64{1, 1e6 + 1, 1e6}, .99e-4, 1.01e-4},
+		{[]float64{1}, []float64{1, 1}, math.Inf(1), math.Inf(1)},
 	} {
-		if got := pidTuningOriginZero(makePlant(t, tc.num, tc.den)); got != tc.want {
-			t.Errorf("%v/%v: got %v want %v", tc.num, tc.den, got, tc.want)
+		if got := pidTuningLeastZero(makePlant(t, tc.num, tc.den)); !(got >= tc.lo && got <= tc.hi) {
+			t.Errorf("%v/%v: got %g want [%g, %g]", tc.num, tc.den, got, tc.lo, tc.hi)
 		}
 	}
 }
@@ -119,5 +119,40 @@ func TestPIDTuningDelayNearOriginZeroTunes(t *testing.T) {
 	}
 	if _, err := Pidtune(p, PidtunePI, 1, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A slow zero under a fast pole is not cancelled; the spread must not trip
+// the origin test.
+func TestPIDTuningDelaySlowZeroFastPoleTunes(t *testing.T) {
+	p := makePlant(t, []float64{1, 1e-4}, []float64{1, 1e6 + 1, 1e6})
+	if err := p.SetInputDelay([]float64{.5}); err != nil {
+		t.Fatal(err)
+	}
+	eval, err := newSISOEval(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, ok, err := pidTuningDelayStability(p, eval, 1, false, 1)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if got, err := stable(&PID2{Kp: 1e5, Ki: 1e5, B: 1, C: 1}); !got || err != nil {
+		t.Fatalf("screen = %v, %v; want stable", got, err)
+	}
+	q, err := p.Pade(6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mustPID(t, 1e5, 1e5, 0, 0, 0).System()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ru, err := Feedback(cs, q, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := ru.IsStable(); !ok || err != nil {
+		t.Fatalf("Padé r→u stable = %v, %v", ok, err)
 	}
 }
