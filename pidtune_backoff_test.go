@@ -703,6 +703,13 @@ func TestPidtuneSlowPoleBackoff(t *testing.T) {
 // clustered roots near z = 1 defeat floating-point root finding.
 func pidtuneExactSchurStable(t *testing.T, pid *PID, num, den Poly, dt float64) bool {
 	t.Helper()
+	return pidtuneExactSchurStableRadius(t, pid, num, den, dt, 1)
+}
+
+// pidtuneExactSchurStableRadius is pidtuneExactSchurStable for roots
+// strictly inside |z| = rho.
+func pidtuneExactSchurStableRadius(t *testing.T, pid *PID, num, den Poly, dt, rho float64) bool {
+	t.Helper()
 	if pid.IFormula != ForwardEuler {
 		t.Fatalf("oracle needs a forward-Euler integral, got %v", pid.IFormula)
 	}
@@ -760,6 +767,11 @@ func pidtuneExactSchurStable(t *testing.T, pid *PID, num, den Poly, dt float64) 
 	c := add(mul(poly(den), denC), mul(poly(num), numC))
 	for len(c) > 1 && c[0].Sign() == 0 {
 		c = c[1:]
+	}
+	scale := r(1)
+	for i := len(c) - 2; i >= 0; i-- {
+		scale.Mul(scale, r(rho))
+		c[i].Mul(c[i], scale)
 	}
 	for n := len(c) - 1; n > 0; n-- {
 		if new(big.Rat).Abs(c[n]).Cmp(new(big.Rat).Abs(c[0])) >= 0 {
