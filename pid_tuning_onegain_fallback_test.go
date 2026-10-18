@@ -66,7 +66,10 @@ func TestTunePIDFreePUnstablePlantBestMargin(t *testing.T) {
 		if !ok || pm < best-.5 || math.Abs(r.Evidence.AchievedPhaseMargin-pm) > 1e-6 {
 			t.Fatalf("%v: margin %g (evidence %g), oracle best %g", c, pm, r.Evidence.AchievedPhaseMargin, best)
 		}
-		g := func(w float64) complex128 { s := complex(0, w); return complex(k, 0) / (s*s + complex(a, 0)*s + complex(b, 0)) }
+		g := func(w float64) complex128 {
+			s := complex(0, w)
+			return complex(k, 0) / (s*s + complex(a, 0)*s + complex(b, 0))
+		}
 		if peak, at := pidDenseSensitivity(ctl, g, 1e-3, 1e2); peak > 4 {
 			t.Fatalf("%v: |S| %g at ω=%g", c, peak, at)
 		}
@@ -164,7 +167,10 @@ func TestTunePIDFreePUnstableSecondOrderSweep(t *testing.T) {
 			t.Errorf("trial %d: gains %+v unstable or not P", trial, ctl)
 			continue
 		}
-		g := func(w float64) complex128 { s := complex(0, w); return complex(k, 0) / (s*s + complex(a, 0)*s + complex(b, 0)) }
+		g := func(w float64) complex128 {
+			s := complex(0, w)
+			return complex(k, 0) / (s*s + complex(a, 0)*s + complex(b, 0))
+		}
 		wc := r.Evidence.AchievedCrossover
 		if peak, at := pidDenseSensitivity(ctl, g, wc/1e3, wc*1e3); peak > 4 {
 			t.Errorf("trial %d: %+v |S| %g at ω=%g", trial, ctl, peak, at)
