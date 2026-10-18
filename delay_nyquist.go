@@ -642,9 +642,10 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 // multiplicity, judged from the growth of |L| over the decade outside the
 // indentation; χ vanishes there. The radius starts at axisGap; where L
 // cannot be evaluated there, as next to a multiple pole whose pencil the
-// solver deems singular, it grows while it stays far inside the other
-// singularities and the delay scale. An enlarged radius needs |L| >= 1e3 on
-// that decade, so that χ ≈ s^m + c has no root within it. A pole at which
+// solver deems singular, it grows up to indentLimit, so that the decade
+// stays within a tenth of the other poles and of the delay scale. An
+// enlarged radius needs |L| >= 1e3 on that decade, so that χ ≈ s^m + c has
+// no root within it. A pole at which
 // no radius gives finite samples returns errDelayLoopUnsupported: a failed
 // evaluation does not show a root.
 func (l *delayLoop) indent() (float64, bool, error) {
@@ -696,7 +697,7 @@ func (l *delayLoop) sample(w float64) (float64, bool) {
 	return v, ok
 }
 
-// indentLimit bounds the indentation radius at jω by 1e-4 of the distance
+// indentLimit bounds the indentation radius at jω by 1e-2 of the distance
 // to the other open-loop poles, of max(1, ω) and of 1/τ.
 func (l *delayLoop) indentLimit(w float64) float64 {
 	lim := max(1, w)
@@ -708,7 +709,7 @@ func (l *delayLoop) indentLimit(w float64) float64 {
 			lim = min(lim, d)
 		}
 	}
-	return 1e-4 * lim
+	return 1e-2 * lim
 }
 
 type refineResult int

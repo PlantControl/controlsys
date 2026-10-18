@@ -41,7 +41,9 @@ func indentTestDelayedGains(t *testing.T, k1, t1, k2, t2 float64) *System {
 // Oracles: argument principle for χ = den + num·K·e^{-τs} on the box
 // [0,60]×[-400,400] and Newton roots (rightmost -0.4389, -0.1131±0.2889j,
 // -0.1113±3.1034j, 0.9811±1.2163j), and a dense sweep (ratio 1+1e-5) of
-// |P/(1+PK)| and |1/(1+L)| from the polynomials.
+// |P/(1+PK)| and |1/(1+L)| from the polynomials. p4, p5: L is finite only
+// beyond 1e-4 of the gap to the next pole; argument principle on χ gives 2
+// and 3 RHP roots.
 func TestDelayNyquistIndentNearMultipleIntegrator(t *testing.T) {
 	p0 := func() *System {
 		p := indentTestPlant(t, []float64{5.910980332296372, 27.806410726825444, 37.431038620035174, 11.565340194450041}, []float64{1, 0.20389057161026952, -0.07104652183880648, 0, 0})
@@ -70,6 +72,18 @@ func TestDelayNyquistIndentNearMultipleIntegrator(t *testing.T) {
 		}
 		return p
 	}
+	p4 := func() *System {
+		p := indentTestPlant(t, []float64{1.7564813852082757, 1.388622390508125}, []float64{1, -0.21409111912503734, 0, 0, 0})
+		if err := p.SetInputDelay([]float64{0.1}); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p5 := indentTestPlant(t, []float64{1.1718148861896658, 24.751460741266797}, []float64{1, 0, 0.7958029956388403, 0, 0, 0})
+	if err := p5.SetInputDelay([]float64{0.2336578227553776}); err != nil {
+		t.Fatal(err)
+	}
+	k5 := indentTestDelayedGains(t, -0.007883409556943888, 0.06107819230285669, 0, 0)
 
 	cases := []struct {
 		name  string
@@ -82,6 +96,8 @@ func TestDelayNyquistIndentNearMultipleIntegrator(t *testing.T) {
 		{"triple integrator nd=3", p1, k1, 0, 1.698009432484453},
 		{"triple integrator out+2 delays", p2, k2, 0, 11.589371381816779},
 		{"triple integrator unstable", p3(), nil, 2, math.Inf(1)},
+		{"triple integrator, L finite beyond 1e-4 of pole gap", p4(), nil, 2, math.Inf(1)},
+		{"triple integrator + axis pair, L finite beyond 1e-4 of pole gap", p5, k5, 3, math.Inf(1)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,6 +152,7 @@ func TestDelayNyquistIndentNearMultipleIntegrator(t *testing.T) {
 			{"double integrator", p0(), 1.352067449972263},
 			{"triple integrator", loop, 18.13206091451099},
 			{"triple integrator unstable", p3(), math.Inf(1)},
+			{"triple integrator, L finite beyond 1e-4 of pole gap", p4(), math.Inf(1)},
 		} {
 			r, err := DiskMargin(tc.loop)
 			if err != nil {
