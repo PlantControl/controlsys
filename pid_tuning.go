@@ -162,6 +162,11 @@ type pidTuningPlant struct {
 	// feasible. A backed-off crossover's probes set both.
 	floorRungs int
 	minTfSeed  bool
+	// returnSensitivity, if set, returns |S(∞)| of a candidate, +Inf when
+	// the screen rejects it; above maxReturnSensitivity it counts as |S|
+	// excess, so the search may cross it as it crosses the sampled bound.
+	returnSensitivity    func(*PID2) float64
+	maxReturnSensitivity float64
 }
 
 type pidCrossScan int
@@ -270,11 +275,28 @@ func (s *pidStabilityScreen) at(wc float64, family PidtuneType) (func(*PID2) (bo
 	return stable, PIDStabilityNyquist, nil
 }
 
+// returnSensitivity returns |S(∞)| = 1/(1+L(∞)) of a continuous delay-free
+// loop with an ideal derivative, +Inf when 1+L(∞) is below
+// pidTuningIdealReturnTol, and 0 for other loops; see pidTuningIdealReturn.
+func (s *pidStabilityScreen) returnSensitivity(c *PID2) float64 {
+	if c.Kd == 0 || c.Tf != 0 || c.Dt != 0 || s.model.Dt != 0 || s.model.HasDelay() {
+		return 0
+	}
+	r := pidTuningIdealReturn(s.model, c.Kd)
+	if !(r >= pidTuningIdealReturnTol) {
+		return math.Inf(1)
+	}
+	return 1 / r
+}
+
 func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 	controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
 	cs, err := controller.System()
 	if err != nil {
 		if c.Kd != 0 && c.Tf == 0 {
+			if math.IsInf(s.returnSensitivity(c), 1) {
+				return false, nil
+			}
 			if ok, err := s.hiddenStable(); !ok || err != nil {
 				return false, err
 			}
@@ -339,7 +361,10 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // |S| bound, once the excess stops falling, so a feasible band can be
 // missed. A continuous delayed loop with an ideal derivative must keep
 // limsup |L(jω)| <= ¾ (|S| <= 4 there), so a near-neutral loop is rejected
-// even when its sampled margins look healthy.
+// even when its sampled margins look healthy; a delay-free one must keep
+// 1+L(∞) ≥ ¼ (|S(∞)| ≤ 4), an |S| bound the search path may cross, and
+// 1+L(∞) > 0 on that path too, since below 0 every derivative filter
+// destabilizes it.
 //
 // When both fail for a default-crossover PI, PID or PIDF design on a stable
 // delayed plant, and either a candidate exceeded |S| <= 4 or a lightly damped
@@ -426,6 +451,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			return nil, fmt.Errorf("TunePID: %w", err)
 		}
 		p.stable, p.stability = stable, evidence
+		p.returnSensitivity, p.maxReturnSensitivity = screen.returnSensitivity, 1/(1-pidTuningMaxTail)
 		if probing {
 			p.floorRungs, p.minTfSeed = 1, true
 		}
@@ -1157,6 +1183,13 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	}
 	// crossingAt and crossingMargin describe nearest's worst crossing.
 	var crossingAt, crossingMargin float64
+	returnRejected := false
+	sampledExcess := func(c PID2, returnExcess float64) float64 {
+		if p.maxSensitivity > 0 {
+			return math.Max(returnExcess, pidTuningSensitivityPeak(p, c)-p.maxSensitivity)
+		}
+		return returnExcess
+	}
 	evaluate := func(candidate PID2) error {
 		if evidence.Evaluations >= o.MaxEvaluations {
 			return nil
@@ -1181,6 +1214,14 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		candidate.Kd /= mag
 		if pidPhaseDistance(h*pidTuningFeedback(candidate, wc), o.PhaseMargin) > 3 {
 			return nil
+		}
+		returnExcess := 0.
+		if p.returnSensitivity != nil {
+			s := p.returnSensitivity(&candidate)
+			if math.IsInf(s, 1) {
+				return nil
+			}
+			returnExcess = math.Max(0, s-p.maxReturnSensitivity)
 		}
 		pidTuningSolveWeights(&candidate, o.Weights, omega, plant, wc)
 		v := components(candidate)
@@ -1217,8 +1258,8 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			// Past a stable incumbent, a stable candidate over the bound
 			// changes nothing unless it would become incumbent or lower
 			// leastExcess, so the costly stability check is skipped.
-			if p.maxSensitivity > 0 && finitePID(incumbentScore) && sensitivityRejected {
-				excess, peaked = math.Max(0, pidTuningSensitivityPeak(p, candidate)-p.maxSensitivity), true
+			if (p.maxSensitivity > 0 || returnExcess > 0) && finitePID(incumbentScore) && sensitivityRejected {
+				excess, peaked = sampledExcess(candidate, returnExcess), true
 				if excess > 0 && excess >= leastExcess && !beats() {
 					return nil
 				}
@@ -1235,8 +1276,8 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			}
 			stableFound = true
 		}
-		if p.maxSensitivity > 0 && !peaked {
-			excess = math.Max(0, pidTuningSensitivityPeak(p, candidate)-p.maxSensitivity)
+		if !peaked {
+			excess = sampledExcess(candidate, returnExcess)
 		}
 		leastExcess = math.Min(leastExcess, excess)
 		if beats() {
@@ -1244,6 +1285,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		}
 		if excess > 0 {
 			sensitivityRejected = true
+			returnRejected = returnRejected || returnExcess > 0
 			return nil
 		}
 		best, bestScore, bestParts = candidate, j, v
@@ -1372,7 +1414,10 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		if signRejected {
 			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target needed a gain of sign opposite to the stable plant's DC gain; such designs are rejected.")
 		}
-		if sensitivityRejected {
+		if returnRejected {
+			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a high-frequency sensitivity 1/(1+Kd·CB) above %g with the ideal derivative; such designs are rejected.", p.maxReturnSensitivity))
+		}
+		if sensitivityRejected && p.maxSensitivity > 0 {
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a sensitivity peak above %g at the default crossover; such designs are rejected.", p.maxSensitivity))
 		}
 		if finitePID(nearestViolation) {
@@ -1678,6 +1723,29 @@ func pidTuningHiddenModesStable(plant *System) (bool, error) {
 	}
 	return IsDetectable(plant.A, plant.C, plant.Dt == 0)
 }
+
+// pidTuningIdealReturn returns 1+L(∞) = 1+Kd·CB, the high-frequency return
+// difference of a continuous delay-free strictly proper SISO plant under an
+// ideal derivative, or +Inf when D ≠ 0 makes |L(∞)| unbounded. A loop whose
+// characteristic is Hurwitz while 1+L(∞) ≤ 0 is positive feedback at high
+// frequency: any derivative filter or unmodelled roll-off Tf adds a root near
+// −(1+L(∞))/Tf in the right half-plane, and |S(∞)| = 1/|1+L(∞)| is unbounded
+// as it nears 0. The screen, for Pidtune and TunePID, rejects 1+L(∞) below
+// pidTuningIdealReturnTol; TunePID's search also bounds |S(∞)| by
+// 1/(1−pidTuningMaxTail), as that bounds the delayed chain.
+func pidTuningIdealReturn(model *System, kd float64) float64 {
+	if model.D.At(0, 0) != 0 {
+		return math.Inf(1)
+	}
+	if n, _, _ := model.Dims(); n == 0 {
+		return 1
+	}
+	return 1 + kd*mat.Dot(model.C.RowView(0), model.B.ColView(0))
+}
+
+// pidTuningIdealReturnTol is the least 1+L(∞) treated as positive: below it
+// cancellation in 1+Kd·CB leaves its sign unresolved.
+const pidTuningIdealReturnTol = 0x1p-26
 
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic directly.

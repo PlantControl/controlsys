@@ -393,9 +393,11 @@ func TestPidtuneGainSignWithDerivative(t *testing.T) {
 
 // YVAIMU with a flipped leading coefficient: on this relative-degree-one
 // unstable plant the forced-sign ideal PID is unstable at the automatic
-// crossover and at wc = 0.5, while the positive one is stable because
-// 1 + Kd·n₁ < 0. Pidtune returns it. Oracle: characteristic roots, and
-// |L| = 1 with a 60° margin at the crossover from the evaluated loop.
+// crossover and at wc = 0.5, while the positive one has a Hurwitz
+// characteristic only because 1 + Kd·n₁ < 0. M5IIG3: that design is now
+// rejected, since every derivative filter Tf adds a root near
+// −(1 + Kd·n₁)/Tf > 0. Oracle: characteristic roots with and without the
+// filter, and |L| = 1 with a 60° margin at the crossover.
 func TestPidtuneMirroredSignWhenLeadFlips(t *testing.T) {
 	num, den := Poly{-0.38686, 0.064537, -0.71409}, Poly{1, -0.49821, -1.41706, 0.93640}
 	p := makePlant(t, num, den)
@@ -404,22 +406,14 @@ func TestPidtuneMirroredSignWhenLeadFlips(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {
-		wc   float64
-		want PID
+		wc     float64
+		former PID
 	}{
 		{0, PID{Kp: 1.6036731692862303, Ki: 0.13045843094084314, Kd: 3.0674122167888167}},
 		{0.5, PID{Kp: 1.9805683643314023, Ki: 0.19805683643314023, Kd: 2.6256569062850224}},
 	} {
-		pid, err := Pidtune(p, PidtunePID, c.wc, nil)
-		if err != nil {
-			t.Fatalf("wc=%g: %v", c.wc, err)
-		}
-		for _, g := range [][2]float64{{pid.Kp, c.want.Kp}, {pid.Ki, c.want.Ki}, {pid.Kd, c.want.Kd}} {
-			if math.Abs(g[0]-g[1]) > 1e-9*math.Abs(g[1]) {
-				t.Fatalf("wc=%g: %+v, want %+v", c.wc, pid, c.want)
-			}
-		}
-		if stable, _ := pidtuneOracleStable(t, pid, num, den, 0, 0); !stable {
+		pid := c.former
+		if stable, _ := pidtuneOracleStable(t, &pid, num, den, 0, 0); !stable {
 			t.Fatalf("wc=%g: %+v unstable", c.wc, pid)
 		}
 		if lead := den[0] + pid.Kd*num[0]; lead >= 0 || pid.Ki*num[2] >= 0 {
@@ -429,13 +423,23 @@ func TestPidtuneMirroredSignWhenLeadFlips(t *testing.T) {
 		if w == 0 {
 			w = auto
 		}
-		l := pidtuneOracleLoop(pid, num, den, 0, 0)(w)
+		l := pidtuneOracleLoop(&pid, num, den, 0, 0)(w)
 		if pm := 180 - math.Abs(cmplx.Phase(l))*180/math.Pi; math.Abs(cmplx.Abs(l)-1) > 1e-9 || math.Abs(pm-60) > 1e-6 {
 			t.Fatalf("wc=%g: |L|=%g PM=%g at the crossover", c.wc, cmplx.Abs(l), pm)
 		}
 		mirror := &PID{Kp: -pid.Kp, Ki: -pid.Ki, Kd: -pid.Kd}
 		if stable, _ := pidtuneOracleStable(t, mirror, num, den, 0, 0); stable {
 			t.Fatalf("wc=%g: forced-sign %+v is stable, the fallback is untested", c.wc, mirror)
+		}
+		for _, tf := range []float64{1e-3, 1e-6} {
+			filtered := pid
+			filtered.Tf = tf / w
+			if stable, _ := pidtuneOracleStable(t, &filtered, num, den, 0, 0); stable {
+				t.Fatalf("wc=%g: %+v stable", c.wc, filtered)
+			}
+		}
+		if got, err := Pidtune(p, PidtunePID, c.wc, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			t.Fatalf("wc=%g: got %+v, %v; want unattainable", c.wc, got, err)
 		}
 	}
 }
