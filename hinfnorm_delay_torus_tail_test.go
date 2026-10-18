@@ -166,3 +166,117 @@ func TestHinfNormTorusRidgeTail(t *testing.T) {
 		}
 	}
 }
+
+// ridgeArgSup is the phase θ0* of the first delay at which a torusRidgeSeed
+// attains its ridge sup, by the scan of ridgeSup.
+func ridgeArgSup(c lftCase) float64 {
+	g := func(p float64) float64 { return lftGInf2(c, p, 0) }
+	const n = 1 << 12
+	step := 2 * math.Pi / n
+	best, arg := 0.0, 0.0
+	for i := range n {
+		p := float64(i) * step
+		v := g(p)
+		if v >= g(p-step) && v >= g(p+step) {
+			p, v = goldenMax(p-step, p+step, p, v, g)
+		}
+		if v > best {
+			best, arg = v, p
+		}
+	}
+	return arg
+}
+
+// ridgeCrossingOracle is the finite peak of a torusRidgeSeed up to wMax: a
+// dense scan to ω = 1500 and, past ω = 1000, a golden-section search about
+// every crossing ω·h = ±θ0* (mod 2π) of the ridge, the only place where G,
+// within O(1/ω) of G∞, can come near its sup once ω is large.
+func ridgeCrossingOracle(c lftCase, wMax float64) (float64, float64) {
+	th := ridgeArgSup(c)
+	best, wb := oraclePeak(c.sigma, 1500, 1e-2)
+	for _, t0 := range []float64{th, -th} {
+		for n := math.Ceil((1000*c.h - t0) / (2 * math.Pi)); ; n++ {
+			wc := (t0 + 2*math.Pi*n) / c.h
+			if wc > wMax {
+				break
+			}
+			d := 0.02 / c.h
+			if w, v := goldenMax(wc-d, wc+d, wc, c.sigma(wc), c.sigma); v > best {
+				best, wb = v, w
+			}
+		}
+	}
+	return best, wb
+}
+
+// TestFlatClasses checks that the second class of a torusRidgeSeed, which
+// D12 and D22 decouple, is flat and that below certifies the ridge sup
+// (dense oracle) to 1e-9 on the torus of the first, which the 2-D cells
+// could not within 1<<20 samples, while it refuses a level under it. The
+// classes of torusRiseSeed models are not flat.
+func TestFlatClasses(t *testing.T) {
+	for _, i := range []int{115, 153, 232} {
+		c := torusRidgeSeed(i)
+		e, err := newDelayLFT(c.system(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hf := newHighFrequencyGain(e)
+		if len(hf.flat) != 2 || hf.flat[0] || !hf.flat[1] || hf.ridge == nil || hf.ridge.dim != 1 {
+			t.Fatalf("seed %d: flat %v, ridge %v", i, hf.flat, hf.ridge)
+		}
+		sup := ridgeSup(t, c)
+		if !hf.below(sup*(1+1e-9), hf.samples+1<<16) {
+			t.Errorf("seed %d: below(sup·(1+1e-9)) failed", i)
+		}
+		if hf.below(sup*(1-1e-9), hf.samples+1<<16) {
+			t.Errorf("seed %d: below(sup·(1−1e-9)) certified", i)
+		}
+	}
+	for _, s := range []struct {
+		kind string
+		i    int
+	}{{"irr3", 4}, {"mixed", 25}, {"irr2", 42}} {
+		e, err := newDelayLFT(torusRiseSeed(s.kind, s.i).system(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hf := newHighFrequencyGain(e); hf.flat != nil || hf.ridge != nil {
+			t.Errorf("%s %d: flat %v", s.kind, s.i, hf.flat)
+		}
+	}
+}
+
+// TestHinfNormTorusRidgeCrossing pins KPL4UB: torusRidgeSeed 232 peaks
+// 2.6e-8 above its ridge sup S* at ω ≈ 3183, where a crossing of the ridge
+// meets a phase of the second delay at which G rises above it. below could
+// not certify S*·(1 + 1e-9) on the 2-D torus, the passage scan found
+// nothing above S*·(1 + 1e-7), and torusFarPassages refused the flat
+// direction, so peak gave up at 8015ead. The oracles are ridgeSup and
+// ridgeCrossingOracle to 2e5.
+func TestHinfNormTorusRidgeCrossing(t *testing.T) {
+	c := torusRidgeSeed(232)
+	e, err := newDelayLFT(c.system(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, res, err := e.stability()
+	if err != nil || !res.stable {
+		t.Fatalf("stability = %v, %v", res.stable, err)
+	}
+	got, w, err := e.peakOrZero(l, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, wWant := ridgeCrossingOracle(c, 2e5)
+	if sup := ridgeSup(t, c); !(want > sup*(1+1e-8)) {
+		t.Fatalf("oracle peak %.15g at %g not above the ridge sup %.15g", want, wWant, sup)
+	}
+	if math.Abs(got-want) > 1e-9*want || math.Abs(w-wWant) > 1e-6*wWant {
+		t.Errorf("peak %.15g at %g, oracle %.15g at %g", got, w, want, wWant)
+	}
+	const maxCalls = 1 << 19
+	if e.sigmaCalls > maxCalls {
+		t.Errorf("%d samples of G, want <= %d", e.sigmaCalls, maxCalls)
+	}
+}

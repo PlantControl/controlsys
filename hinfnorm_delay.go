@@ -675,6 +675,12 @@ type highFrequencyGain struct {
 	grid  []float64 // torusGrid cell centres, nd per cell
 	gridR float64
 	gridV []float64 // σ_max(G∞) at the cell centres, see gridValues
+
+	// flat marks the classes G∞ does not depend on, see flatClasses; ridge
+	// is the gain on the torus of the others, which below certifies in
+	// their place. Both nil when no class, or every class, is flat.
+	flat  []bool
+	ridge *highFrequencyGain
 }
 
 func newHighFrequencyGain(e *delayLFT) *highFrequencyGain {
@@ -742,7 +748,76 @@ func newHighFrequencyGainOn(e *delayLFT, grp, mult []int, dim int) *highFrequenc
 		n1221: e.d12 * e.d21, n22: e.d22,
 	}
 	h.lip = h.lipschitz()
+	if dim > 1 {
+		h.flatClasses()
+	}
 	return h
+}
+
+// flatClasses sets flat and ridge. Delay i enters G∞ = D11 + D12·Δ·
+// (I − D22Δ)⁻¹·D21 only when z_i is reached from the input, through D21 and
+// the edges w_j → z_k of D22, and w_i reaches the output through D22 and
+// D12: otherwise z_i ≡ 0 or w_i is never read, (I − D22Δ) being block
+// triangular in the unreached delays, so G∞ is exactly independent of δ_i.
+// A class all of whose delays are such is flat: S = σ_max(G∞) is constant
+// along it, a ridge where below would split cells along it in vain.
+func (h *highFrequencyGain) flatClasses() {
+	nd, p, m := h.e.nd, h.e.p, h.e.m
+	in, out := make([]bool, nd), make([]bool, nd)
+	for i := range nd {
+		in[i] = slices.ContainsFunc(h.d21[i*m:(i+1)*m], func(v complex128) bool { return v != 0 })
+		for r := range p {
+			out[i] = out[i] || h.d12[r*nd+i] != 0
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for i := range nd {
+			for j := range nd {
+				if h.d22[i*nd+j] == 0 {
+					continue
+				}
+				if in[j] && !in[i] {
+					in[i], changed = true, true
+				}
+				if out[i] && !out[j] {
+					out[j], changed = true, true
+				}
+			}
+		}
+	}
+	flat := make([]bool, h.dim)
+	for c := range flat {
+		flat[c] = true
+	}
+	for i, c := range h.grp {
+		if in[i] && out[i] {
+			flat[c] = false
+		}
+	}
+	n := 0
+	idx := make([]int, h.dim)
+	for c, f := range flat {
+		if !f {
+			idx[c] = n
+			n++
+		}
+	}
+	if n == h.dim || n == 0 {
+		return
+	}
+	grp, mult := make([]int, nd), make([]int, nd)
+	for i, c := range h.grp {
+		mult[i] = 1
+		if flat[c] {
+			continue
+		}
+		grp[i] = idx[c]
+		if h.k != nil {
+			mult[i] = int(h.k[i])
+		}
+	}
+	h.flat, h.ridge = flat, newHighFrequencyGainOn(h.e, grp, mult, n)
 }
 
 // lipschitz bounds the Lipschitz constant of G∞ in φ, in the max-norm of
@@ -1084,6 +1159,13 @@ func (h *highFrequencyGain) gridValues() []float64 {
 // Cells that may exceed level are split until none remain, a sample exceeds
 // level, or the sample budget is spent.
 func (h *highFrequencyGain) below(level float64, budget int) bool {
+	if r := h.ridge; r != nil {
+		n := r.samples
+		ok := r.below(level, n+budget-h.samples)
+		h.samples += r.samples - n
+		h.over = max(h.over, r.over)
+		return ok
+	}
 	nd := h.dim
 	cells, r := h.torusGrid()
 	var bufs [2][]float64

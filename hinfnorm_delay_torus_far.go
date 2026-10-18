@@ -7,8 +7,12 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// torusFarPoints caps the passages torusFarPassages steps through.
-const torusFarPoints = 1 << 25
+// torusFarPoints caps the passages torusFarPassages steps through;
+// torusRidgePoints those of a ridge, every one of which it samples.
+const (
+	torusFarPoints   = 1 << 25
+	torusRidgePoints = 1 << 17
+)
 
 // torusFarPassages decides the case of torusRisesPast where a maximiser θ*
 // of S = σ_max(G∞) has a = Re⟨g0, g1⟩ ≠ 0 and the scan of its passages to
@@ -25,7 +29,11 @@ const torusFarPoints = 1 << 25
 // so like torusAtInf this rests on the expansion. level = max(best, S*)·
 // (1 + peakCertTol); the peak is the largest window sample above it, its
 // window returned for peak to certify, else best above S*, else S* at
-// ω = +Inf, as final.
+// ω = +Inf, as final. Along a flat class (see flatClasses) S is constant
+// and λ_m vanishes: δ, λ_m and the crossings then concern the other
+// classes alone, e_m is the largest slope over a grid of the flat ones,
+// which a passage meets anywhere, and with one other class every passage
+// of it is sampled.
 func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequencyGain, ms []torusMaximum, best, wBest, end float64) (float64, *pastLimit, float64, bool, error) {
 	const budget = 1 << 20
 	sup := ms[0].value
@@ -56,7 +64,7 @@ func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequency
 		for _, th := range [][]float64{m.theta, neg} {
 			dup := false
 			for _, o := range ts {
-				if torusDistance(o.theta, th) < 1e-6 {
+				if torusDistanceOn(o.theta, th, hf.flat) < 1e-6 {
 					dup = true
 					break
 				}
@@ -64,15 +72,15 @@ func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequency
 			if dup {
 				continue
 			}
-			if !x.atTheta(th) {
+			sm := hf.at(th)
+			slope, ok := ridgeSlope(x, hf.flat, th, sm, t0)
+			if !ok {
 				return 0, nil, 0, false, errTorusUnsupported
 			}
-			sm := hf.at(th)
-			slope := 2 * math.Abs(x.sum(t0)-sm) / t0
 			if !(sm+slope*t0+r0 >= level) {
 				continue
 			}
-			lam := torusCurvature(hf, th, sm)
+			lam := torusCurvature(hf, th, sm, hf.flat)
 			if !(lam > 1e-6*sup) {
 				return 0, nil, 0, false, errTorusUnsupported
 			}
@@ -86,8 +94,12 @@ func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequency
 	for _, tg := range ts {
 		starts = append(starts, tg.theta)
 	}
+	cells := 0
+	if hf.flat != nil {
+		cells = 12
+	}
 	W, ok := x.horizon(level, end, 1e12, func(t float64) float64 {
-		return x.torusModelMax(t, 0, starts)
+		return x.torusModelMax(t, cells, starts)
 	})
 	if !ok {
 		return 0, nil, 0, false, errTorusUnsupported
@@ -100,15 +112,13 @@ func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequency
 		}
 		h[c] = e.tau[i] / k
 	}
-	c0, c1 := 0, 1
-	if h[1] < h[0] {
-		c0, c1 = 1, 0
-	}
-	for c := 2; c < len(h); c++ {
+	c0, c1 := -1, -1
+	for c := range h {
 		switch {
-		case h[c] < h[c0]:
+		case hf.flat != nil && hf.flat[c]:
+		case c0 < 0 || h[c] < h[c0]:
 			c0, c1 = c, c0
-		case h[c] < h[c1]:
+		case c1 < 0 || h[c] < h[c1]:
 			c1 = c
 		}
 	}
@@ -121,8 +131,11 @@ func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequency
 		if tg.slope > 0 {
 			wEnd = min(W, max(end, tg.slope/(level-tg.s)))
 		}
-		alpha := h[c1] / h[c0]
-		gamma := (tg.theta[c0]*alpha - tg.theta[c1]) / (2 * math.Pi)
+		alpha, gamma := 0.0, 0.0
+		if c1 >= 0 {
+			alpha = h[c1] / h[c0]
+			gamma = (tg.theta[c0]*alpha - tg.theta[c1]) / (2 * math.Pi)
+		}
 		for B := end; B < wEnd; B *= 2 {
 			t := 1 / B
 			d2 := 8 * (tg.s - level + tg.slope*t + min(r0, rem(t))) / tg.lam
@@ -134,14 +147,14 @@ func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequency
 			n0 := int64(math.Ceil((B*h[c0] - tg.theta[c0]) / (2 * math.Pi)))
 			n1 := int64(math.Floor((hiB*h[c0] - tg.theta[c0]) / (2 * math.Pi)))
 			eps := 1.1*delta*(1+alpha)/(2*math.Pi) + 1e-12
-			ok := nearCrossings(alpha, gamma, n0, n1, eps, func(n int64) bool {
+			visit := func(n int64) bool {
 				if steps++; steps > torusFarPoints {
 					return false
 				}
 				wc := (tg.theta[c0] + 2*math.Pi*float64(n)) / h[c0]
 				lo, hi := wc-delta/h[c0], wc+delta/h[c0]
 				for c, hc := range h {
-					if c == c0 {
+					if c == c0 || hf.flat != nil && hf.flat[c] {
 						continue
 					}
 					x := wc*hc - tg.theta[c]
@@ -166,7 +179,18 @@ func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequency
 					bFar, wFar, extFar = b, w, ws
 				}
 				return true
-			})
+			}
+			ok := true
+			if c1 < 0 {
+				if steps+int(n1-n0+1) > torusRidgePoints {
+					return 0, nil, 0, false, errTorusUnsupported
+				}
+				for n := n0; n <= n1 && ok; n++ {
+					ok = visit(n)
+				}
+			} else {
+				ok = nearCrossings(alpha, gamma, n0, n1, eps, visit)
+			}
 			if scanErr != nil {
 				return 0, nil, 0, false, scanErr
 			}
@@ -185,10 +209,16 @@ func (e *delayLFT) torusFarPassages(x *highFrequencyExpansion, hf *highFrequency
 }
 
 // torusCurvature returns the least eigenvalue of −∇²S at θ, S(θ) = s, by
-// central differences, NaN when it cannot be formed.
-func torusCurvature(hf *highFrequencyGain, theta []float64, s float64) float64 {
-	nd := len(theta)
-	th := make([]float64, nd)
+// central differences over the classes not flat, NaN when it cannot be
+// formed.
+func torusCurvature(hf *highFrequencyGain, theta []float64, s float64, flat []bool) float64 {
+	var cs []int
+	for c := range theta {
+		if flat == nil || !flat[c] {
+			cs = append(cs, c)
+		}
+	}
+	th := make([]float64, len(theta))
 	at := func(i, j int, di, dj float64) float64 {
 		copy(th, theta)
 		th[i] += di
@@ -196,12 +226,12 @@ func torusCurvature(hf *highFrequencyGain, theta []float64, s float64) float64 {
 		return hf.at(th)
 	}
 	const d = 1e-4
-	hess := mat.NewSymDense(nd, nil)
-	for i := range nd {
-		hess.SetSym(i, i, -(at(i, i, d, 0)-2*s+at(i, i, -d, 0))/(d*d))
-		for j := range i {
+	hess := mat.NewSymDense(len(cs), nil)
+	for a, i := range cs {
+		hess.SetSym(a, a, -(at(i, i, d, 0)-2*s+at(i, i, -d, 0))/(d*d))
+		for b, j := range cs[:a] {
 			v := at(i, j, d, d) - at(i, j, d, -d) - at(i, j, -d, d) + at(i, j, -d, -d)
-			hess.SetSym(i, j, -v/(4*d*d))
+			hess.SetSym(a, b, -v/(4*d*d))
 		}
 	}
 	var es mat.EigenSym
@@ -209,6 +239,49 @@ func torusCurvature(hf *highFrequencyGain, theta []float64, s float64) float64 {
 		return math.NaN()
 	}
 	return slices.Min(es.Values(nil))
+}
+
+// torusDistanceOn is torusDistance over the classes not flat.
+func torusDistanceOn(a, b []float64, flat []bool) float64 {
+	d := 0.0
+	for c := range a {
+		if flat == nil || !flat[c] {
+			d = max(d, torusDistance(a[c:c+1], b[c:c+1]))
+		}
+	}
+	return d
+}
+
+// ridgeSlope returns twice the largest slope |‖G∞ + t0·g1 + …‖ − s|/t0 at
+// θ, with s = S(θ), over a grid of the flat classes, which a passage close
+// to θ in the others crosses anywhere; ok is false where I − D22Δ is
+// singular.
+func ridgeSlope(x *highFrequencyExpansion, flat []bool, theta []float64, s, t0 float64) (float64, bool) {
+	var fs []int
+	for c, f := range flat {
+		if f {
+			fs = append(fs, c)
+		}
+	}
+	n := 1
+	if len(fs) > 0 {
+		n = max(4, int(math.Pow(4096, 1/float64(len(fs)))))
+	}
+	th := slices.Clone(theta)
+	total := int(math.Pow(float64(n), float64(len(fs))))
+	slope := 0.0
+	for idx := range total {
+		r := idx
+		for _, c := range fs {
+			th[c] = 2 * math.Pi * float64(r%n) / float64(n)
+			r /= n
+		}
+		if !x.atTheta(th) {
+			return 0, false
+		}
+		slope = max(slope, 2*math.Abs(x.sum(t0)-s)/t0)
+	}
+	return slope, true
 }
 
 // nearCrossings calls f, ascending, for every n in [n0, n1] with the
