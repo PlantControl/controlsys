@@ -966,7 +966,96 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	}
 	lg := math.Log(gamma)
 	f := func(w float64) float64 { return math.Log(cmplx.Abs(r.eval.at(w))) - lg }
-	return r.polish(cands, f, 1e-9), nil
+	return r.endCrossings(r.polish(cands, f, 1e-9), f, 1e-9), nil
+}
+
+// endCrossings adds a crossing of f = log|L| − log γ that the pencil missed
+// below the first crossing ws[0], or, discrete, above the last: |L| → ∞ at a
+// pole, and else |L| at ω = 0 or Nyquist, fixes the sign of f there, and a
+// differing sign next to the outer crossing brackets one more. Pencil roots
+// next to a pole cluster at z = 1 or −1, as of k/(z−1)ⁿ with tiny k, lose
+// accuracy beyond any polish bracket. log|L| is continuous on the boundary
+// away from its poles and zeros, where it does not change sign, so every
+// bracket is a crossing.
+func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
+	ft := func(w float64) float64 {
+		if _, ok := r.eval.try(w); !ok {
+			return math.NaN()
+		}
+		return f(w)
+	}
+	sgn := func(v float64) int {
+		if math.IsNaN(v) || math.Abs(v) <= tol {
+			return 0
+		}
+		if v > 0 {
+			return 1
+		}
+		return -1
+	}
+	endSign := func(w float64) int {
+		h, ok := r.eval.try(w)
+		if !ok || cmplx.IsInf(h) {
+			return 1
+		}
+		return sgn(f(w))
+	}
+	find := func(a, b float64) (float64, bool) {
+		c := refineCrossing(a, b, ft)
+		fc, scale := ft(c), 1.0
+		for _, e := range []float64{a, b} {
+			if fe := ft(e); !math.IsInf(fe, 0) && !math.IsNaN(fe) && e != c {
+				scale = max(scale, math.Abs(fe-fc)/math.Abs(math.Log(e/c)))
+			}
+		}
+		return c, math.Abs(fc) <= tol*scale && !math.IsInf(scale, 0)
+	}
+	scan := func(t float64, at func(float64) float64, want int) (float64, bool) {
+		step := 10.0
+		for range 2000 {
+			tn := t / step
+			w, wn := at(t), at(tn)
+			if tn < 1e-300 || wn == w {
+				break
+			}
+			switch v := ft(wn); {
+			case sgn(v) == want:
+				return find(min(w, wn), max(w, wn))
+			case sgn(v) != 0:
+				t = tn
+			case !math.IsNaN(v):
+				return wn, true
+			default:
+				if step = math.Sqrt(step); step < 1+1e-9 {
+					return 0, false
+				}
+			}
+		}
+		return 0, false
+	}
+	wTop := math.Inf(1)
+	if r.discrete() {
+		wTop = r.nyquist()
+	}
+	pLo, pHi := wTop/2, wTop/2
+	if len(ws) > 0 {
+		pLo, pHi = ws[0]*(1-1e-6), ws[len(ws)-1]*(1+1e-6)
+	}
+	if !math.IsInf(pLo, 0) {
+		if s0, s := endSign(0), sgn(ft(pLo)); s0 != 0 && s != 0 && s != s0 {
+			if c, ok := scan(pLo, func(t float64) float64 { return t }, s0); ok {
+				ws = append([]float64{c}, ws...)
+			}
+		}
+	}
+	if r.discrete() && pHi < wTop {
+		if sTop, s := endSign(wTop), sgn(ft(pHi)); sTop != 0 && s != 0 && s != sTop {
+			if c, ok := scan(wTop-pHi, func(t float64) float64 { return wTop - t }, sTop); ok {
+				ws = append(ws, c)
+			}
+		}
+	}
+	return ws
 }
 
 // phaseCrossings returns the verified ω > 0 where L(jω) is real and negative,

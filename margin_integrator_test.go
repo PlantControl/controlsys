@@ -161,6 +161,59 @@ func TestAllMarginDiscreteDoubleIntegratorDelayHarmonics(t *testing.T) {
 	}
 }
 
+// JPZZRT: for k/(z∓1)ⁿ with tiny k the pencil roots near the pole cluster
+// at z = ±1 lose accuracy beyond the polish bracket and the gain crossover
+// vanished. Oracle: |e^{jθ} − 1| = 2·sin(θ/2), |e^{jθ} + 1| = 2·cos(θ/2), so
+// |L| = 1 at sin(θ/2) = k^{1/n}/2, or θ = π minus that, with angle
+// −n(θ+π)/2, or −nθ/2. Next to z = −1 the response itself carries relative
+// rounding of order eps/|e^{jθ}+1|ⁿ, which bounds ω to 1e-9·θ and the phase
+// margin to 1e-4°.
+func TestAllMarginTinyGainPoleCluster(t *testing.T) {
+	cases := []struct {
+		s float64
+		n int
+		k float64
+	}{
+		{-1, 1, 1e-14}, {-1, 2, 3.1623e-8}, {-1, 3, 3.1623e-8}, {-1, 3, 1e-10},
+		{-1, 4, 1e-7}, {-1, 4, 3.1623e-8}, {-1, 4, 1e-10},
+		{1, 1, 3.1623e-8}, {1, 1, 1e-10}, {1, 1, 1e-14}, {1, 2, 1e-10}, {1, 2, 1e-14},
+		{1, 3, 1e-10}, {1, 3, 1e-14}, {1, 4, 1e-10},
+	}
+	for _, c := range cases {
+		den := []float64{1}
+		for range c.n {
+			next := make([]float64, len(den)+1)
+			for i, v := range den {
+				next[i] += v
+				next[i+1] += c.s * v
+			}
+			den = next
+		}
+		nc := complex(float64(c.n), 0)
+		half := math.Asin(math.Pow(c.k, 1/float64(c.n)) / 2)
+		th, gap := 2*half, 2*half
+		h := complex(c.k, 0) / cmplx.Pow(cmplx.Rect(2*math.Sin(half), (th+math.Pi)/2), nc)
+		if c.s > 0 {
+			th = math.Pi - 2*half
+			h = complex(c.k, 0) / cmplx.Pow(cmplx.Rect(2*math.Cos(th/2), th/2), nc)
+		}
+		pm := phaseMarginDeg(h)
+		for _, dt := range []float64{1, 0.1} {
+			r, err := (&TransferFunc{Num: [][][]float64{{{c.k}}}, Den: [][]float64{den}, Dt: dt}).StateSpace()
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := AllMargin(r.Sys)
+			if err != nil {
+				t.Fatalf("s %g n %d k %g dt %g: %v", c.s, c.n, c.k, dt, err)
+			}
+			if len(res.GainCrossFreqs) != 1 || math.Abs(res.GainCrossFreqs[0]-th/dt) > (1e-8*gap+1e-9*th)/dt || math.Abs(res.PhaseMargins[0]-pm) > 1e-4 {
+				t.Errorf("s %g n %d k %g dt %g: wgc %v pm %v, want %.17g %.10g", c.s, c.n, c.k, dt, res.GainCrossFreqs, res.PhaseMargins, th/dt, pm)
+			}
+		}
+	}
+}
+
 // ZQL2JH: k·z^−d with k < 0 is real negative at θ = 2πm/d, |L| = |k|, so
 // phase crossovers there with GM = −20·log10|k|. L(0) = k makes the phase
 // error 0 at ω = 0, and a crossover at twice another has it 0 at half its
