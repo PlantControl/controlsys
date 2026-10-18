@@ -3,9 +3,12 @@ package controlsys
 import (
 	"math"
 	"math/big"
+	"math/cmplx"
 	"math/rand/v2"
 	"slices"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 const bigPrec = 160
@@ -146,6 +149,177 @@ func TestAllMargin_LightlyDampedPhaseCrossover(t *testing.T) {
 			if got := all.GainMargins[k]; math.Abs(got-wantGM[k]) > 1e-6*max(1, math.Abs(wantGM[k])) {
 				t.Errorf("case %d: GM[%d] = %.17g, want %.17g", i, k, got, wantGM[k])
 			}
+		}
+	}
+}
+
+// bigUnitCosSin returns cos θ and sin θ in big.Float: Taylor series at
+// θ/2¹⁰, then ten angle doublings.
+func bigUnitCosSin(th float64) (c, s *big.Float) {
+	nf := func(x float64) *big.Float { return new(big.Float).SetPrec(bigPrec).SetFloat64(x) }
+	x := nf(th)
+	x.SetMantExp(x, -10)
+	c, s, term := nf(0), nf(0), nf(1)
+	for k := range 40 {
+		switch k % 4 {
+		case 0:
+			c.Add(c, term)
+		case 1:
+			s.Add(s, term)
+		case 2:
+			c.Sub(c, term)
+		default:
+			s.Sub(s, term)
+		}
+		term.Mul(term, x).Quo(term, nf(float64(k+1)))
+	}
+	for range 10 {
+		c, s = nf(0).Sub(nf(0).Mul(c, c), nf(0).Mul(s, s)), nf(0).Mul(nf(2), nf(0).Mul(s, c))
+	}
+	return c, s
+}
+
+// bigUnitLoop returns N(e^{jθ})·conj(D(e^{jθ})) and |N/D| in big.Float from
+// float64 coefficients in descending powers of z.
+func bigUnitLoop(num, den []float64, th float64) (re, im *big.Float, mag float64) {
+	nf := func(x float64) *big.Float { return new(big.Float).SetPrec(bigPrec).SetFloat64(x) }
+	mul := func(a, b *big.Float) *big.Float { return nf(0).Mul(a, b) }
+	c, s := bigUnitCosSin(th)
+	at := func(p []float64) (re, im *big.Float) {
+		re, im = nf(0), nf(0)
+		for _, a := range p {
+			re, im = nf(0).Sub(mul(re, c), mul(im, s)), nf(0).Add(mul(re, s), mul(im, c))
+			re.Add(re, nf(a))
+		}
+		return re, im
+	}
+	nr, ni := at(num)
+	dr, di := at(den)
+	n2, _ := nf(0).Add(mul(nr, nr), mul(ni, ni)).Float64()
+	d2, _ := nf(0).Add(mul(dr, dr), mul(di, di)).Float64()
+	return nf(0).Add(mul(nr, dr), mul(ni, di)), nf(0).Sub(mul(ni, dr), mul(nr, di)), math.Sqrt(n2 / d2)
+}
+
+// unitPairAngle returns the smallest positive angle among the complex roots
+// of den.
+func unitPairAngle(t *testing.T, den []float64) float64 {
+	n := len(den) - 1
+	comp := mat.NewDense(n, n, nil)
+	for j := range n {
+		comp.Set(0, j, -den[j+1]/den[0])
+		if j > 0 {
+			comp.Set(j, j-1, 1)
+		}
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(comp, mat.EigenNone) {
+		t.Fatal("eigen failed")
+	}
+	th := math.Inf(1)
+	for _, p := range eig.Values(nil) {
+		if a := cmplx.Phase(p); imag(p) > 0 && a < th {
+			th = a
+		}
+	}
+	return th
+}
+
+// bigUnitPhaseCrossings returns the θ in (0, π) where Im L(e^{jθ}) changes
+// sign with Re L < 0, on a log grid from 1e-10 graded towards thp, bisected
+// in big.Float.
+func bigUnitPhaseCrossings(num, den []float64, thp float64) []float64 {
+	var g []float64
+	for x := -10.0; x < math.Log10(math.Pi); x += 0.02 {
+		g = append(g, math.Pow(10, x))
+	}
+	for k := -13.0; k <= -0.5; k += 0.05 {
+		d := math.Pow(10, k)
+		g = append(g, thp*(1-d), thp*(1+d))
+	}
+	g = append(g, math.Pi*(1-1e-12))
+	slices.Sort(g)
+	sign := func(th float64) int { _, im, _ := bigUnitLoop(num, den, th); return im.Sign() }
+	var out []float64
+	for i := 1; i < len(g); i++ {
+		a, b := g[i-1], g[i]
+		sa := sign(a)
+		if sa == 0 || sa*sign(b) > 0 {
+			continue
+		}
+		for {
+			m := (a + b) / 2
+			if m <= a || m >= b {
+				break
+			}
+			if sign(m) == sa {
+				a = m
+			} else {
+				b = m
+			}
+		}
+		if re, _, _ := bigUnitLoop(num, den, b); re.Sign() < 0 {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// VT3OF7: crossovers beside a pair 1 ± jε, below it down to ~1e-2 of its
+// frequency, where the phase stays within 1e-8° of −180°, or just past it,
+// where the double solve's phase is off by 1e-5°. Oracle: float64
+// coefficients at exact e^{jθ} in big.Float, Im L bisected, Re L < 0. Where
+// the phase is that flat the crossing is set only to ~eps/slope: a
+// frequency within 1e-5 of the oracle passes when the exact phase there is
+// within 64·eps rad of −180°.
+func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
+	type tc struct {
+		num, den []float64
+		dt       float64
+	}
+	cases := []tc{
+		{[]float64{-0.0013196134305395058, -0.00023536903292695072}, []float64{1, -2.3854598907075455, 1.770919781465705, -0.3854598907270551}, 0.1},
+		{[]float64{-4.737105371029762, -1.0653329101644098}, []float64{1, -0.4415335279470294, -1.5153667659780603, 0.355334116135632, 0.6015661780899885}, 1},
+		{[]float64{-0.8297128408865633, -0.25644473472126117}, []float64{1, -1.7049260410106568, 0.40985208202314993, 0.29507395898988503}, 1},
+		{[]float64{0.010321862812979532, -2.1987678119075276}, []float64{1, -2, 1.0000000000036688}, 1},
+		{[]float64{0.00043269717096372506, -2.5205075284572747}, []float64{1, -2, 1.0000000032590524}, 1},
+		{[]float64{0.4156266235836725, -0.4127608532382766}, []float64{1, -2, 1.0000000006278533}, 1},
+		{[]float64{0.3541729069514521, -0.7616599197851204}, []float64{1, -2, 1.0000000000823044}, 1},
+	}
+	rng := rand.New(rand.NewPCG(21, 99))
+	for range 30 {
+		e := math.Pow(10, -6+4*rng.Float64())
+		den := []float64{1, -2, 1 + e*e}
+		for range rng.IntN(3) {
+			den = polyMul(den, []float64{1, 0.9 - 1.8*rng.Float64()})
+		}
+		cases = append(cases, tc{[]float64{rng.NormFloat64(), rng.NormFloat64()}, den, 1})
+	}
+	for i, c := range cases {
+		r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: c.dt}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		want := bigUnitPhaseCrossings(c.num, c.den, unitPairAngle(t, c.den))
+		var got, gm []float64
+		for k, w := range res.PhaseCrossFreqs {
+			if w*c.dt < math.Pi*(1-1e-12) {
+				got, gm = append(got, w*c.dt), append(gm, res.GainMargins[k])
+			}
+		}
+		ok := len(got) == len(want)
+		for k := 0; ok && k < len(want); k++ {
+			re, im, mag := bigUnitLoop(c.num, c.den, got[k])
+			q, _ := new(big.Float).Quo(im, re).Float64()
+			d := math.Abs(got[k]-want[k]) / want[k]
+			ok = re.Sign() < 0 && (d <= 1e-7 || d <= 1e-5 && math.Abs(q) <= 64*eps()) &&
+				math.Abs(gm[k]+20*math.Log10(mag)) <= 1e-5
+		}
+		if !ok {
+			t.Errorf("case %d num %v den %v: θpc %v GM %v, want θ %v", i, c.num, c.den, got, gm, want)
 		}
 	}
 }

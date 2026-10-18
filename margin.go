@@ -92,6 +92,10 @@ type sisoEval struct {
 	// extended falls back to ddSISOResponse where the double solve fails;
 	// see rationalLoop.gainCrossings.
 	extended bool
+	// exact evaluates in double-double first: beside a pair 1 ± jε the
+	// double solve's phase is off by up to ~1e-5°, beyond the crossing
+	// tolerance; see resonanceCrossings.
+	exact bool
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -115,7 +119,9 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 
 func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
-	if err := evalWithPoleLimit(e.eval, e.sys, pt, e.dst); err != nil {
+	if h, ok := e.exactAt(pt); ok {
+		e.dst[0] = h
+	} else if err := evalWithPoleLimit(e.eval, e.sys, pt, e.dst); err != nil {
 		h, ok := complex(0, 0), false
 		if e.extended && e.sys.internalDelayCount() == 0 {
 			h, ok = ddSISOResponse(e.sys, pt)
@@ -130,6 +136,13 @@ func (e *sisoEval) at(w float64) complex128 {
 	}
 	e.resolved = e.resolved || w > 0
 	return e.dst[0]
+}
+
+func (e *sisoEval) exactAt(pt frequencyPoint) (complex128, bool) {
+	if !e.exact || e.sys.internalDelayCount() > 0 {
+		return 0, false
+	}
+	return ddSISOResponse(e.sys, pt)
 }
 
 // try evaluates L(jω) without recording a failure, for candidates that may
@@ -1176,17 +1189,45 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	}
 	f := func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }
 	out := r.polish(cands, f, 1e-7, true)
-	for _, c := range r.resonanceCrossings(f, 1e-7) {
-		if i, found := slices.BinarySearchFunc(out, c, func(a, b float64) int {
-			if math.Abs(a-b) <= 1e-7*b {
-				return 0
+	return r.mergeResonanceCrossings(out, r.resonanceCrossings(f, 1e-7), f), nil
+}
+
+// mergeResonanceCrossings inserts the resonance-scan crossings cs into the
+// polished ws. Where the phase stays within tol of −180° over a band, as
+// below a pair 1 ± jε, the double solve passes tol up to ~1e-6 off the
+// crossing; a polished ω within 1e-5 of c whose phase, in double-double,
+// has the sign it has between it and c is that crossing and gives way to c.
+func (r *rationalLoop) mergeResonanceCrossings(ws, cs []float64, f func(float64) float64) []float64 {
+	if len(cs) == 0 {
+		return ws
+	}
+	r.eval.extended, r.eval.exact = true, true
+	defer func() { r.eval.extended, r.eval.exact = false, false }()
+	sign := func(w float64) int {
+		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if !ok || math.IsNaN(v) {
+			return 0
+		}
+		return cmp.Compare(v, 0)
+	}
+	for _, c := range cs {
+		i, _ := slices.BinarySearch(ws, c)
+		j := -1
+		for _, k := range []int{i - 1, i} {
+			if k >= 0 && k < len(ws) && math.Abs(ws[k]-c) <= 1e-5*c && (j < 0 || math.Abs(ws[k]-c) < math.Abs(ws[j]-c)) {
+				j = k
 			}
-			return cmp.Compare(a, b)
-		}); !found {
-			out = slices.Insert(out, i, c)
+		}
+		switch {
+		case j >= 0 && math.Abs(ws[j]-c) <= 1e-7*c:
+		case j >= 0 && sign(ws[j]) != 0 && sign(ws[j]) == sign((ws[j]+c)/2):
+			ws[j] = c
+		default:
+			ws = slices.Insert(ws, i, c)
 		}
 	}
-	return out, nil
+	slices.Sort(ws)
+	return ws
 }
 
 // resonancePoles returns the boundary frequencies of the complex poles of L
@@ -1252,8 +1293,11 @@ func (r *rationalLoop) resonancePoles() []float64 {
 	return ws
 }
 
-// resonanceCrossings scans f beside each resonance pole on a grid graded
-// towards it, from a tenth to ten times its frequency. Pencil roots near a
+// resonanceCrossings scans f, in double-double, beside each resonance pole
+// on a grid graded towards it, from 1e-4 to ten times its frequency: below
+// a pair 1 ± jε the phase can stay within 1e-8° of −180° and cross it down
+// to ~1e-2 of the pole frequency, where pencil roots land far off and the
+// double solve's phase error exceeds tol next to the pole. Pencil roots near a
 // pole pair 1 ± jε, ε ≲ 1e-4, are off by more than ε: the pencil of L − L~
 // carries the pair, its reflection and the crossings in a cluster of radius
 // ε, whose roots move by a root of the backward error. A sign change between
@@ -1273,12 +1317,15 @@ func (r *rationalLoop) resonanceCrossings(f func(float64) float64, tol float64) 
 		}
 		return v
 	}
-	r.eval.extended = true
-	defer func() { r.eval.extended = false }()
+	r.eval.extended, r.eval.exact = true, true
+	defer func() { r.eval.extended, r.eval.exact = false, false }()
 	const perDecade = 20
 	var out []float64
 	for _, wp := range r.resonancePoles() {
 		var grid []float64
+		for i := 3 * perDecade; i > 0; i-- {
+			grid = append(grid, wp*math.Pow(10, -1-float64(i)/perDecade))
+		}
 		for i := 4 * perDecade; i >= 0; i-- {
 			grid = append(grid, wp*(1-0.9*math.Pow(10, -float64(i)/perDecade)))
 		}
