@@ -162,6 +162,11 @@ type pidTuningPlant struct {
 	// feasible. A backed-off crossover's probes set both.
 	floorRungs int
 	minTfSeed  bool
+	// returnSensitivity, if set, returns |S(∞)| of a candidate, +Inf when
+	// the screen rejects it; above maxReturnSensitivity it counts as |S|
+	// excess, so the search may cross it as it crosses the sampled bound.
+	returnSensitivity    func(*PID2) float64
+	maxReturnSensitivity float64
 }
 
 type pidCrossScan int
@@ -270,11 +275,28 @@ func (s *pidStabilityScreen) at(wc float64, family PidtuneType) (func(*PID2) (bo
 	return stable, PIDStabilityNyquist, nil
 }
 
+// returnSensitivity returns |S(∞)| = 1/(1+L(∞)) of a continuous delay-free
+// loop with an ideal derivative, +Inf when 1+L(∞) is below
+// pidTuningIdealReturnTol, and 0 for other loops; see pidTuningIdealReturn.
+func (s *pidStabilityScreen) returnSensitivity(c *PID2) float64 {
+	if c.Kd == 0 || c.Tf != 0 || c.Dt != 0 || s.model.Dt != 0 || s.model.HasDelay() {
+		return 0
+	}
+	r := pidTuningIdealReturn(s.model, c.Kd)
+	if !(r >= pidTuningIdealReturnTol) {
+		return math.Inf(1)
+	}
+	return 1 / r
+}
+
 func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 	controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
 	cs, err := controller.System()
 	if err != nil {
 		if c.Kd != 0 && c.Tf == 0 {
+			if math.IsInf(s.returnSensitivity(c), 1) {
+				return false, nil
+			}
 			if ok, err := s.hiddenStable(); !ok || err != nil {
 				return false, err
 			}
@@ -319,7 +341,19 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // as Pidtune. For a stable plant every nonzero gain takes the sign of its DC
 // gain; when that leaves a default-crossover PD or PDF design infeasible, the
 // crossover moves to where the plant phase is 15°, 30°, 45° or 60° below
-// −180°+PM, the lead same-sign gains supply. A default design on a delayed
+// −180°+PM, the lead same-sign gains supply; when those and the margin floor
+// at the default crossover fail, to where it is 7.5° or 2.5° below if that is
+// within an octave of a lightly damped mode, since on a resonance, where the
+// phase swings fast, only a small lead can leave the crossings on the peak
+// clear of −1. Likewise, when a default PI
+// design fails at the default crossover, also under the margin floor, unless the
+// delayed stable plant's back-off below handles it, the crossover moves to
+// the frequency nearest the default, on either side, where the plant phase
+// is 15°, 30°, 45° or 60° above −180°+PM, the lag PI gains supply (for an
+// unknown gain sign, of either sign·G); this is how an unstable or
+// integrating plant needing lead at its own crossover gets a PI design that
+// still meets PM±3°, where Pidtune keeps the crossover and gives up margin.
+// A default design on a delayed
 // plant, or at a moved crossover, must keep |S| <= 4 (2.5 dB gain margin)
 // at every sampled frequency, since a margin met at the crossover alone does
 // not bound it there. Only when neither the default nor the moved crossovers
@@ -331,7 +365,10 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // |S| bound, once the excess stops falling, so a feasible band can be
 // missed. A continuous delayed loop with an ideal derivative must keep
 // limsup |L(jω)| <= ¾ (|S| <= 4 there), so a near-neutral loop is rejected
-// even when its sampled margins look healthy.
+// even when its sampled margins look healthy; a delay-free one must keep
+// 1+L(∞) ≥ ¼ (|S(∞)| ≤ 4), an |S| bound the search path may cross, and
+// 1+L(∞) > 0 on that path too, since below 0 every derivative filter
+// destabilizes it.
 //
 // When both fail for a default-crossover PI, PID or PIDF design on a stable
 // delayed plant, and either a candidate exceeded |S| <= 4 or a lightly damped
@@ -418,6 +455,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			return nil, fmt.Errorf("TunePID: %w", err)
 		}
 		p.stable, p.stability = stable, evidence
+		p.returnSensitivity, p.maxReturnSensitivity = screen.returnSensitivity, 1/(1-pidTuningMaxTail)
 		if probing {
 			p.floorRungs, p.minTfSeed = 1, true
 		}
@@ -550,6 +588,70 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		return stamp(deep, nil)
 	}
+	// tuneOneGain designs a free P or I loop. Its one gain takes the plant's
+	// margin at wc0, which a lightly damped mode can leave near zero at
+	// another crossing, so the design must keep sampled |S| within the bound
+	// over a band reaching past every mode; failing that, wc moves to the
+	// nearest frequency where the unit loop has the pm margin, as MATLAB
+	// targets 60° by moving wc.
+	tuneOneGain := func(wc0, gainSign, pm float64) (*PIDTuningResult, error) {
+		for _, m := range modes() {
+			minHigh = math.Max(minHigh, 10*imag(m))
+		}
+		res, err := tuneAt(wc0, gainSign, true, false)
+		res, err = withFloor(wc0, gainSign, true, res, err)
+		if !errors.As(err, new(*PIDTuningError)) {
+			return res, err
+		}
+		unit := PID2{Dt: plant.Dt, IFormula: opts.IFormula, B: 1, C: 1}
+		if strings.EqualFold(string(family), string(PidtuneI)) {
+			unit.Ki = 1
+		} else {
+			unit.Kp = 1
+		}
+		atUnit := func(w float64) complex128 { return eval.at(w) * pidTuningFeedback(unit, w) }
+		signs := []float64{gainSign}
+		if gainSign == 0 {
+			signs = []float64{1, -1}
+		}
+		wHi := wc0 * 1e4
+		if plant.Dt > 0 {
+			wHi = math.Min(wHi, .98*math.Pi/plant.Dt)
+		}
+		// evalFailed clears a move's evaluation failure, as near a multiple
+		// pole at the origin, so the move is skipped and wc0's result kept.
+		evalFailed := func() bool {
+			if eval.err == nil {
+				return false
+			}
+			eval.err = nil
+			return true
+		}
+		for _, sign := range signs {
+			lo := wc0 * 1e-6
+			wc, _, ok := pidTuningPhaseWalk(atUnit, sign, -180+pm, lo, wHi, tau, true)
+			// A walk failing at its floor or starting past the target, as
+			// under a double integrator, cannot see the phase rise to it.
+			if evalFailed() || !ok || wc < lo*1.03 {
+				wc, ok = pidTuningNearestPhase(atUnit, sign, -180+pm, wc0, wc0*1e-4, wHi, tau)
+			}
+			if evalFailed() || !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
+				continue
+			}
+			r, e := tuneAt(wc, gainSign, true, false)
+			if evalFailed() {
+				continue
+			}
+			if e == nil {
+				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where the one-gain loop has a %g° phase margin and sampled |S| <= %d.", wc0, wc, pm, pidTuningMaxSensitivity))
+				return stamp(r, nil)
+			}
+			if !errors.As(e, new(*PIDTuningError)) {
+				return nil, e
+			}
+		}
+		return res, err
+	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, eval.at, wc)
 		res, err := tuneAt(wc, gainSign, false, false)
@@ -564,8 +666,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
 	gainSign := pidTuningDCSign(plant, eval.at, wc0)
-	res, err := tuneAt(wc0, gainSign, tau > 0, false)
 	fam := PidtuneType(strings.ToUpper(string(family)))
+	if (fam == PidtuneP || fam == PidtuneI) && opts.PhaseMargin == 0 {
+		return tuneOneGain(wc0, gainSign, pm)
+	}
+	res, err := tuneAt(wc0, gainSign, tau > 0, false)
 	if _, hasI, _, _, _ := pidTuningTerms(fam); hasI && fam != PidtuneI && gainSign != 0 && tau > 0 {
 		res, err = withFloor(wc0, gainSign, true, res, err)
 		if !errors.As(err, new(*PIDTuningError)) {
@@ -579,6 +684,43 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		return backOff(wc0, gainSign, pm, res, err)
 	}
+	if fam == PidtunePI {
+		res, err = withFloor(wc0, gainSign, tau > 0, res, err)
+		if !errors.As(err, new(*PIDTuningError)) {
+			return res, err
+		}
+		// PI gains of one sign add lag in (0°, 90°) only, so retry where
+		// the plant phase leaves a moderate lag to supply, on either side
+		// of wc0.
+		signs := []float64{gainSign}
+		if gainSign == 0 {
+			signs = []float64{1, -1}
+		}
+		wLo, wHi := wc0*1e-4, wc0*1e4
+		if plant.Dt > 0 {
+			wHi = math.Min(wHi, .98*math.Pi/plant.Dt)
+		}
+		for _, lag := range []float64{15, 30, 45, 60} {
+			for _, sign := range signs {
+				wc, ok := pidTuningNearestPhase(eval.at, sign, -180+pm+lag, wc0, wLo, wHi, tau)
+				if eval.err != nil {
+					return nil, fmt.Errorf("TunePID: %w", eval.err)
+				}
+				if !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
+					continue
+				}
+				r, e := tuneAt(wc, gainSign, true, false)
+				if e == nil {
+					r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where PI gains can meet the phase margin.", wc0, wc))
+					return stamp(r, nil)
+				}
+				if !errors.As(e, new(*PIDTuningError)) {
+					return nil, e
+				}
+			}
+		}
+		return stamp(res, err)
+	}
 	if gainSign == 0 || fam != PidtunePD && fam != PidtunePDF || !errors.As(err, new(*PIDTuningError)) {
 		return withFloor(wc0, gainSign, tau > 0, res, err)
 	}
@@ -591,30 +733,53 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// ladder keeps, per kind, the last moved crossover's rejection warning.
 	kinds := []string{"sensitivity peak", "crossed 0 dB again"}
 	ladder := make([]string, len(kinds))
-	for _, lead := range []float64{15, 30, 45, 60} {
-		wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
-		if eval.err != nil {
-			return nil, fmt.Errorf("TunePID: %w", eval.err)
-		}
-		if !ok || wc == wc0 {
-			continue
-		}
-		r, e := tuneAt(wc, gainSign, true, false)
-		if e == nil {
-			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where same-sign PD gains can meet the phase margin.", wc0, wc))
-			return stamp(r, nil)
-		}
-		var te *PIDTuningError
-		if !errors.As(e, &te) {
-			return nil, e
-		}
-		for _, w := range te.Evidence.Warnings {
-			for i, kind := range kinds {
-				if strings.Contains(w, kind) {
-					ladder[i] = fmt.Sprintf("Moved crossover %.4g: %s", wc, w)
+	// move returns the first design at the leads' crossovers, or nil;
+	// resonant restricts it to crossovers within an octave of a lightly
+	// damped mode.
+	move := func(resonant bool, leads ...float64) (*PIDTuningResult, error) {
+		for _, lead := range leads {
+			wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
+			if eval.err != nil {
+				return nil, fmt.Errorf("TunePID: %w", eval.err)
+			}
+			if !ok || wc == wc0 {
+				continue
+			}
+			if resonant && !slices.ContainsFunc(modes(), func(m complex128) bool { return imag(m) > wc/2 && imag(m) < wc*2 }) {
+				continue
+			}
+			r, e := tuneAt(wc, gainSign, true, false)
+			if e == nil {
+				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g moved to %.4g rad/s, where same-sign PD gains can meet the phase margin.", wc0, wc))
+				return stamp(r, nil)
+			}
+			var te *PIDTuningError
+			if !errors.As(e, &te) {
+				return nil, e
+			}
+			for _, w := range te.Evidence.Warnings {
+				for i, kind := range kinds {
+					if strings.Contains(w, kind) {
+						ladder[i] = fmt.Sprintf("Moved crossover %.4g: %s", wc, w)
+					}
 				}
 			}
 		}
+		return nil, nil
+	}
+	if r, e := move(false, 15, 30, 45, 60); r != nil || e != nil {
+		return r, e
+	}
+	res, err = withFloor(wc0, gainSign, tau > 0, res, err)
+	if !errors.As(err, new(*PIDTuningError)) {
+		return res, err
+	}
+	// These leads come after the floor so that they change no design the
+	// floor finds. Past a lightly damped peak the plant phase falls through
+	// −180°…−210° within about 1%, where only near-pure D (lead 75°, 85°)
+	// keeps every crossing's margin.
+	if r, e := move(true, 7.5, 2.5, 75, 85); r != nil || e != nil {
+		return r, e
 	}
 	if te, ok := errors.AsType[*PIDTuningError](err); ok {
 		for _, w := range ladder {
@@ -623,21 +788,94 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			}
 		}
 	}
-	return withFloor(wc0, gainSign, tau > 0, res, err)
+	return stamp(res, err)
 }
 
 // pidTuningPhaseCrossing returns the first ω in [wLo, wHi] at which the
 // phase of sign·G(jω), unwrapped from its wrapped value at wLo, falls to
 // target degrees.
 func pidTuningPhaseCrossing(at func(float64) complex128, sign, target, wLo, wHi, tau float64) (float64, bool) {
-	w, _, ok := pidTuningPhaseWalk(at, sign, target, wLo, wHi, tau)
+	w, _, ok := pidTuningPhaseWalk(at, sign, target, wLo, wHi, tau, false)
 	return w, ok
+}
+
+// pidTuningNearestPhase returns the ω in [wLo, wHi] nearest wc0 in log
+// distance at which the wrapped phase of sign·G(jω) crosses target degrees,
+// walking out from wc0 on both sides. A crossing is accepted only between
+// samples within 90° of the target, so a wrap at ±180° away from it is not
+// one.
+func pidTuningNearestPhase(at func(float64) complex128, sign, target, wc0, wLo, wHi, tau float64) (float64, bool) {
+	dev := func(w float64) (float64, bool) {
+		g := complex(sign, 0) * at(w)
+		if !pidFiniteComplex(g) || g == 0 {
+			return 0, false
+		}
+		return math.Remainder(cmplx.Phase(g)*180/math.Pi-target, 360), true
+	}
+	walk := func(up bool) (float64, bool) {
+		w := wc0
+		d, ok := dev(w)
+		if !ok {
+			return 0, false
+		}
+		if d == 0 {
+			return w, true
+		}
+		for range 1 << 16 {
+			if up && w >= wHi || !up && w <= wLo {
+				return 0, false
+			}
+			var next float64
+			if up {
+				next = math.Min(w*1.02, wHi)
+				if tau > 0 {
+					next = math.Min(next, w+math.Pi/8/tau)
+				}
+			} else {
+				next = math.Max(w/1.02, wLo)
+			}
+			nd, ok := dev(next)
+			if !ok {
+				return 0, false
+			}
+			if math.Signbit(d) != math.Signbit(nd) && math.Abs(d) < 90 && math.Abs(nd) < 90 {
+				a, b, da := w, next, d
+				for range 60 {
+					m := math.Sqrt(a * b)
+					dm, ok := dev(m)
+					if !ok {
+						return 0, false
+					}
+					if math.Signbit(dm) == math.Signbit(da) {
+						a, da = m, dm
+					} else {
+						b = m
+					}
+				}
+				return math.Sqrt(a * b), true
+			}
+			w, d = next, nd
+		}
+		return 0, false
+	}
+	lo, okLo := walk(false)
+	hi, okHi := walk(true)
+	switch {
+	case okLo && okHi:
+		if math.Log(wc0/lo) <= math.Log(hi/wc0) {
+			return lo, true
+		}
+		return hi, true
+	case okLo:
+		return lo, true
+	}
+	return hi, okHi
 }
 
 // pidTuningUnwrappedPhase returns the phase in degrees of sign·G(jw),
 // unwrapped from its wrapped value at w·1e-6, or NaN when the walk fails.
 func pidTuningUnwrappedPhase(at func(float64) complex128, sign, w, tau float64) float64 {
-	end, phase, ok := pidTuningPhaseWalk(at, sign, math.Inf(-1), w*1e-6, w, tau)
+	end, phase, ok := pidTuningPhaseWalk(at, sign, math.Inf(-1), w*1e-6, w, tau, false)
 	if ok || end != w {
 		return math.NaN()
 	}
@@ -647,8 +885,10 @@ func pidTuningUnwrappedPhase(at func(float64) complex128, sign, w, tau float64) 
 // pidTuningPhaseWalk walks the unwrapped phase of sign·G(jω) up from wLo.
 // It returns the first ω at which the phase falls to target degrees, or
 // false with wHi and the phase there in degrees; a nonfinite or zero
-// response ends the walk with ω = 0.
-func pidTuningPhaseWalk(at func(float64) complex128, sign, target, wLo, wHi, tau float64) (float64, float64, bool) {
+// response ends the walk with ω = 0. The crossing is interpolated linearly
+// within a step, which can turn 90° and so miss target by tens of degrees
+// past a lightly damped mode, or with bisect found by bisection.
+func pidTuningPhaseWalk(at func(float64) complex128, sign, target, wLo, wHi, tau float64, bisect bool) (float64, float64, bool) {
 	target *= math.Pi / 180
 	w := wLo
 	g := complex(sign, 0) * at(w)
@@ -676,6 +916,22 @@ func pidTuningPhaseWalk(at func(float64) complex128, sign, target, wLo, wHi, tau
 				break
 			}
 			next = w + (next-w)/2
+		}
+		if phase+step <= target && bisect {
+			a, b := w, next
+			for range 60 {
+				m := math.Sqrt(a * b)
+				gm := complex(sign, 0) * at(m)
+				if !pidFiniteComplex(gm) || gm == 0 {
+					return 0, 0, false
+				}
+				if phase+cmplx.Phase(gm/g) > target {
+					a = m
+				} else {
+					b = m
+				}
+			}
+			return math.Sqrt(a * b), target * 180 / math.Pi, true
 		}
 		if phase+step <= target {
 			return w + (next-w)*(phase-target)/(-step), target * 180 / math.Pi, true
@@ -820,6 +1076,14 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			}
 			c.Ki = (imag(target) - c.Kd*imag(db)) / imag(ib)
 			c.Kp = real(target) - c.Ki*real(ib) - c.Kd*real(db)
+			// pidTuningReachable admits a band whose center lies up to 3°
+			// past the integral edge of the same-sign PI cone; the exact
+			// seed then has Kp of the wrong sign, and the feasible sliver
+			// along that edge can fall between pattern steps, so seed on it.
+			// The proportional edge would drop integral action.
+			if !hasD && p.gainSign != 0 && c.Kp != 0 && math.Copysign(1, c.Kp) != p.gainSign && math.Copysign(1, c.Ki) == p.gainSign {
+				c.Kp, c.Ki = 0, p.gainSign*cmplx.Abs(target)/cmplx.Abs(ib)
+			}
 		} else if hasP && hasD {
 			c.Kd = imag(target) / imag(db)
 			c.Kp = real(target) - c.Kd*real(db)
@@ -895,6 +1159,11 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	pidTuningSolveWeights(&c, o.Weights, omega, plant, wc)
 	norms := components(c)
 	if !finitePID(norms.Tracking) || !finitePID(norms.Rejection) || !finitePID(norms.Effort) {
+		// A P or I gain only scales the loop, so a seed off the phase band
+		// means no candidate meets it; such a seed can sit on −1 at wc.
+		if !hasD && hasP != hasI && pidPhaseDistance(h*pidTuningFeedback(c, wc), o.PhaseMargin) > 3 {
+			return nil, &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: o.PhaseMargin, Stability: p.stability, Warnings: append([]string(nil), p.warnings...)}}
+		}
 		return nil, fmt.Errorf("%s: objective overflows; rescale plant units: %w", op, ErrOverflow)
 	}
 	norms.Tracking = math.Max(norms.Tracking, 1e-3)
@@ -964,6 +1233,13 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	}
 	// crossingAt and crossingMargin describe nearest's worst crossing.
 	var crossingAt, crossingMargin float64
+	returnRejected := false
+	sampledExcess := func(c PID2, returnExcess float64) float64 {
+		if p.maxSensitivity > 0 {
+			return math.Max(returnExcess, pidTuningSensitivityPeak(p, c)-p.maxSensitivity)
+		}
+		return returnExcess
+	}
 	evaluate := func(candidate PID2) error {
 		if evidence.Evaluations >= o.MaxEvaluations {
 			return nil
@@ -988,6 +1264,14 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		candidate.Kd /= mag
 		if pidPhaseDistance(h*pidTuningFeedback(candidate, wc), o.PhaseMargin) > 3 {
 			return nil
+		}
+		returnExcess := 0.
+		if p.returnSensitivity != nil {
+			s := p.returnSensitivity(&candidate)
+			if math.IsInf(s, 1) {
+				return nil
+			}
+			returnExcess = math.Max(0, s-p.maxReturnSensitivity)
 		}
 		pidTuningSolveWeights(&candidate, o.Weights, omega, plant, wc)
 		v := components(candidate)
@@ -1024,8 +1308,8 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			// Past a stable incumbent, a stable candidate over the bound
 			// changes nothing unless it would become incumbent or lower
 			// leastExcess, so the costly stability check is skipped.
-			if p.maxSensitivity > 0 && finitePID(incumbentScore) && sensitivityRejected {
-				excess, peaked = math.Max(0, pidTuningSensitivityPeak(p, candidate)-p.maxSensitivity), true
+			if (p.maxSensitivity > 0 || returnExcess > 0) && finitePID(incumbentScore) && sensitivityRejected {
+				excess, peaked = sampledExcess(candidate, returnExcess), true
 				if excess > 0 && excess >= leastExcess && !beats() {
 					return nil
 				}
@@ -1042,8 +1326,8 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			}
 			stableFound = true
 		}
-		if p.maxSensitivity > 0 && !peaked {
-			excess = math.Max(0, pidTuningSensitivityPeak(p, candidate)-p.maxSensitivity)
+		if !peaked {
+			excess = sampledExcess(candidate, returnExcess)
 		}
 		leastExcess = math.Min(leastExcess, excess)
 		if beats() {
@@ -1051,6 +1335,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		}
 		if excess > 0 {
 			sensitivityRejected = true
+			returnRejected = returnRejected || returnExcess > 0
 			return nil
 		}
 		best, bestScore, bestParts = candidate, j, v
@@ -1179,7 +1464,10 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		if signRejected {
 			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target needed a gain of sign opposite to the stable plant's DC gain; such designs are rejected.")
 		}
-		if sensitivityRejected {
+		if returnRejected {
+			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a high-frequency sensitivity 1/(1+Kd·CB) above %g with the ideal derivative; such designs are rejected.", p.maxReturnSensitivity))
+		}
+		if sensitivityRejected && p.maxSensitivity > 0 {
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a sensitivity peak above %g at the default crossover; such designs are rejected.", p.maxSensitivity))
 		}
 		if finitePID(nearestViolation) {
@@ -1485,6 +1773,29 @@ func pidTuningHiddenModesStable(plant *System) (bool, error) {
 	}
 	return IsDetectable(plant.A, plant.C, plant.Dt == 0)
 }
+
+// pidTuningIdealReturn returns 1+L(∞) = 1+Kd·CB, the high-frequency return
+// difference of a continuous delay-free strictly proper SISO plant under an
+// ideal derivative, or +Inf when D ≠ 0 makes |L(∞)| unbounded. A loop whose
+// characteristic is Hurwitz while 1+L(∞) ≤ 0 is positive feedback at high
+// frequency: any derivative filter or unmodelled roll-off Tf adds a root near
+// −(1+L(∞))/Tf in the right half-plane, and |S(∞)| = 1/|1+L(∞)| is unbounded
+// as it nears 0. The screen, for Pidtune and TunePID, rejects 1+L(∞) below
+// pidTuningIdealReturnTol; TunePID's search also bounds |S(∞)| by
+// 1/(1−pidTuningMaxTail), as that bounds the delayed chain.
+func pidTuningIdealReturn(model *System, kd float64) float64 {
+	if model.D.At(0, 0) != 0 {
+		return math.Inf(1)
+	}
+	if n, _, _ := model.Dims(); n == 0 {
+		return 1
+	}
+	return 1 + kd*mat.Dot(model.C.RowView(0), model.B.ColView(0))
+}
+
+// pidTuningIdealReturnTol is the least 1+L(∞) treated as positive: below it
+// cancellation in 1+Kd·CB leaves its sign unresolved.
+const pidTuningIdealReturnTol = 0x1p-26
 
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic directly.
@@ -1930,6 +2241,25 @@ func pidTuningDelayStability(plant *System, eval *sisoEval, wc float64, idealDer
 	return pidTuningDelayStabilityBudget(plant, eval, wc, idealDerivative, maxTail, 0)
 }
 
+// pidTuningLeastZero returns the least invariant zero magnitude of a
+// continuous plant, delays set to zero; +Inf when there is none or on
+// failure. An integrator cancels a zero at s = 0: the characteristic
+// s·den(s) + (Kp·s+Ki)·num(s)·e^{−τs} keeps the root s = 0 for any Ki, which
+// L, and so the Nyquist test, hides: r→u is not asymptotically stable. A
+// zero within 1e-9·wc of the origin is taken as there; one further out
+// leaves a visible closed-loop root.
+func pidTuningLeastZero(plant *System) float64 {
+	zeros, err := plant.Zeros()
+	least := math.Inf(1)
+	if err != nil {
+		return least
+	}
+	for _, m := range zeros {
+		least = math.Min(least, cmplx.Abs(m))
+	}
+	return least
+}
+
 // pidTuningDelayStabilityBudget is pidTuningDelayStability with the Nyquist
 // grid capped at maxPoints; 0 selects delayNyquistMaxPoints.
 func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, idealDerivative bool, maxTail float64, maxPoints int) (func(*PID2) (bool, error), bool, error) {
@@ -1956,7 +2286,11 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 	if idealDerivative && plant.HasInternalDelay() {
 		return nil, false, nil
 	}
+	leastZero := sync.OnceValue(func() float64 { return pidTuningLeastZero(plant) })
 	return func(c *PID2) (bool, error) {
+		if c.Ki != 0 && leastZero() <= 1e-9*wc {
+			return false, nil
+		}
 		l := *base
 		l.axis = slices.Clone(base.axis)
 		l.scales = append(slices.Clone(base.scales), wc)

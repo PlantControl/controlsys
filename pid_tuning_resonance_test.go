@@ -2,7 +2,6 @@ package controlsys
 
 import (
 	"context"
-	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -56,38 +55,39 @@ func TestPIDTuningCrossingsFindsResonancePair(t *testing.T) {
 // End to end, every crossing in a dense sweep of the evidence band meets
 // PM − 3° and is reported. The first plant's ζ = 0.0057 mode at 3.257 rad/s
 // hid a 37° crossing at the moved crossover. The second has sound PD designs
-// only in a 1% pocket at its resonance, off every crossover the search
-// tries, so it may fail; it must not return the 36° design. The third's
+// only in a 1% pocket just past its resonance peak, which leads of 75° or
+// more reach; it must not return the 36° design. The third's
 // second crossover lies between wc and the next grid sample, where
 // |L(wc)| = 1 hides the sign change. The fourth's seeds all cross 0 dB at
 // a resonance with negative margin; the search must still reach the sound
-// design from the least violating one.
+// design from the least violating one. Each design also keeps dense
+// |S| <= 4, and a loop without integral action shows no net turn of
+// arg(1+L(jω)): every plant is stable.
 func TestTunePIDMarginCheckFindsResonanceCrossings(t *testing.T) {
 	cases := []struct {
 		name     string
 		num, den []float64
 		tau      float64
 		family   PidtuneType
-		mayFail  bool
 	}{
-		{"0.05372(s+0.7974)/((s+0.779)(s+0.101)(s²+0.03714s+10.61))", pidPoly(.05372, []float64{1, .7974}), pidPoly(1, []float64{1, .779}, []float64{1, .101}, []float64{1, .03714, 10.61}), 0, PidtunePDF, false},
-		{"-0.0503(s-9.178)/((s²+0.06089s+1.043)(s+0.0589)(s+6.552))e^-0.0301s", pidPoly(-.0503, []float64{1, -9.178}), pidPoly(1, []float64{1, .06089, 1.043}, []float64{1, .0589}, []float64{1, 6.552}), .0301, PidtunePD, true},
-		{"sweep 42: partner 0.12% above wc", []float64{9.941801896667057, 75.47424183387096}, []float64{1, .6967863957610382, .6499124770289462, .4126294043259971, .10128779613762952, .05905400275971327}, 0, PidtunePD, false},
-		{"sweep 109: every seed crosses at the 6.17 rad/s mode", []float64{-8.347729847190841}, []float64{1, .7307546373686498, 61.81362857880511, 31.504618973121026, 902.1672488522788, 215.17111864467765}, 0, PidtunePID, false},
+		{"0.05372(s+0.7974)/((s+0.779)(s+0.101)(s²+0.03714s+10.61))", pidPoly(.05372, []float64{1, .7974}), pidPoly(1, []float64{1, .779}, []float64{1, .101}, []float64{1, .03714, 10.61}), 0, PidtunePDF},
+		{"-0.0503(s-9.178)/((s²+0.06089s+1.043)(s+0.0589)(s+6.552))e^-0.0301s", pidPoly(-.0503, []float64{1, -9.178}), pidPoly(1, []float64{1, .06089, 1.043}, []float64{1, .0589}, []float64{1, 6.552}), .0301, PidtunePD},
+		{"sweep 42: partner 0.12% above wc", []float64{9.941801896667057, 75.47424183387096}, []float64{1, .6967863957610382, .6499124770289462, .4126294043259971, .10128779613762952, .05905400275971327}, 0, PidtunePD},
+		{"sweep 109: every seed crosses at the 6.17 rad/s mode", []float64{-8.347729847190841}, []float64{1, .7307546373686498, 61.81362857880511, 31.504618973121026, 902.1672488522788, 215.17111864467765}, 0, PidtunePID},
 	}
 	for _, c := range cases {
 		r, err := TunePID(context.Background(), pidPlantDelayed(t, c.num, c.den, c.tau), c.family, PIDTuningOptions{})
-		if c.mayFail && errors.Is(err, ErrPIDTuningTargetUnattainable) {
-			continue
-		}
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
 		k := r.Controller
+		g := func(w float64) complex128 {
+			s := complex(0, w)
+			return pidPolyAt(c.num, s) / pidPolyAt(c.den, s) * cmplx.Exp(-s*complex(c.tau, 0))
+		}
 		L := func(w float64) complex128 {
 			s := complex(0, w)
-			g := pidPolyAt(c.num, s) / pidPolyAt(c.den, s) * cmplx.Exp(-s*complex(c.tau, 0))
-			return g * (complex(k.Kp, 0) + complex(k.Ki, 0)/s + complex(k.Kd, 0)*s/(1+complex(k.Tf, 0)*s))
+			return g(w) * (complex(k.Kp, 0) + complex(k.Ki, 0)/s + complex(k.Kd, 0)*s/(1+complex(k.Tf, 0)*s))
 		}
 		band := r.Evidence.FrequencyBand
 		margins := pidLoopMargins(L, band[0], band[1])
@@ -98,6 +98,15 @@ func TestTunePIDMarginCheckFindsResonanceCrossings(t *testing.T) {
 		}
 		if len(margins) != len(r.Evidence.GainCrossovers) {
 			t.Errorf("%s: evidence crossovers %v, dense margins %v", c.name, r.Evidence.GainCrossovers, margins)
+		}
+		wc := r.Evidence.AchievedCrossover
+		if peak, at := pidDenseSensitivity(*k, g, wc/1e3, wc*1e2); peak > 4 {
+			t.Errorf("%s: %+v |S| %g at ω=%g", c.name, *k, peak, at)
+		}
+		if k.Ki == 0 {
+			if wind := pidWindingDeg(L, 1e-6, wc*1e4); math.Abs(wind) > 1 {
+				t.Errorf("%s: %+v arg(1+L) turns %g°", c.name, *k, wind)
+			}
 		}
 	}
 }
