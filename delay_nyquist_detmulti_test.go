@@ -30,7 +30,7 @@ func TestDelayNyquistDetMultipleAxisPole(t *testing.T) {
 		{"s2+hot", s2, hot},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			want := oracleRHPRoots(t, func(s complex128) complex128 { return c.a.chi(s) * c.b.chi(s) }, 200)
+			want := oracleRHPRoots(t, func(s complex128) complex128 { return c.a.chi(s) * c.b.chi(s) }, 200, c.a.den, c.a.num, c.b.den, c.b.num)
 			ca, err := Feedback(c.a.system(t), nil, -1)
 			if err != nil {
 				t.Fatal(err)
@@ -79,7 +79,7 @@ func TestDelayNyquistDetCoupledDoubleIntegrator(t *testing.T) {
 		kAt := func(s complex128) complex128 {
 			return complex(c.k1, 0)*cmplx.Exp(-s*tau1) + complex(c.k2, 0)*cmplx.Exp(-s*tau2)
 		}
-		want := oracleRHPRoots(t, func(s complex128) complex128 { return s*s + (s+0.5)*kAt(s) }, 200)
+		want := oracleRHPRoots(t, func(s complex128) complex128 { return s*s + (s+0.5)*kAt(s) }, 200, []float64{1, 0, 0}, []float64{1, 0.5})
 		gain := func(k, tau float64) *System {
 			g, err := NewGain(mat.NewDense(1, 1, []float64{k}), 0)
 			if err != nil {
@@ -319,7 +319,7 @@ func TestDelayNyquistDetSplitDelayDoubleIntegrator(t *testing.T) {
 			t.Fatalf("%v/%v: want 2 delay channels", c.num, c.den)
 		}
 		q.tau = c.in + c.out
-		want := oracleRHPRoots(t, q.chi, 200)
+		want := oracleRHPRoots(t, q.chi, 200, q.den, q.num)
 		stable, err := cl.IsStable()
 		if err != nil || stable != (want == 0) {
 			t.Fatalf("%v/%v τ=%g+%g: IsStable = %v, %v; oracle %d RHP roots", c.num, c.den, c.in, c.out, stable, err, want)

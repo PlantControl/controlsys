@@ -172,10 +172,11 @@ func TestDelayNyquistIndentNearMultipleIntegrator(t *testing.T) {
 }
 
 // Loops with a multiple integrator and another open-loop pole near it, where
-// L is not finite inside 1e-2 of the gap (all errored before indentCluster;
-// the last is ergo GFXRCX): the indentation grows
+// the double solve cannot evaluate L inside 1e-2 of the gap (all errored
+// before indentCluster; the last is ergo GFXRCX): the indentation grows
 // past indentLimit or encloses the nearby pole (enclosed: poles enclosed
-// besides the integrator; inner: those in the RHP). Oracles: argument
+// besides the integrator; inner: those in the RHP). Where the double-double
+// fallback evaluates L at axisGap, the plain indentation encloses none. Oracles: argument
 // principle for χ = den + num·K·e^{-τs} on a box bounding its RHP roots, and
 // a dense sweep (ratio 1+1e-5, refined) of |P/(1+PK)| and |1/(1+KP)| from
 // the polynomials.
@@ -191,8 +192,8 @@ func TestDelayNyquistIndentPoleCluster(t *testing.T) {
 	}{
 		{"triple integrator, pole at -0.0028", []float64{1.45142418583699, 1.7771868624571499, 0.7337024564555565, 0.1491670039392469, 0.011972359539458527}, []float64{1, 0.6735426670516077, 0.00188436338869233, 0, 0, 0}, 0.0021047148122163885, nil, 0, 0, 0, 1.38344291476588, 1.00301885979056},
 		{"triple integrator, enclosed RHP pole 2.7e-4", []float64{1.4364650281495652, 0.7289142902933975, 0.1579532558455607, 0.012465726823420125}, []float64{1, -0.00026662308744651494, 0, 0, 0}, 0.03743190011595099, []float64{0.9159105466881329, 0.0028822272430659075, -0.08609255836401393, 0.09917128660413921}, 1, 1, 0, 1.73597844290612, 1.04818875003705},
-		{"triple integrator, enclosed pole -7.5e-5", []float64{0.5948608803738119, 0.18021188904600305, 0.02373347440976468, 0.0015423370227633894, 3.955326526685069e-05}, []float64{1, 0.08062050596496431, 6.018829832700829e-06, 0, 0, 0}, 0.24120324143499425, nil, 1, 0, 0, 1.4115919346666, 1.15249495294211},
-		{"triple integrator, enclosed RHP pole 2.1e-5, unstable", []float64{3.9318328957351754, 9.01550405735846, 7.781485125822608, 2.941510858787714, 0.3164957596584042}, []float64{1, 0.9269292765925116, -2.0846422608156813e-05, 0, 0, 0}, 0.8792379781321229, nil, 1, 1, 2, math.Inf(1), math.Inf(1)},
+		{"triple integrator, enclosed pole -7.5e-5", []float64{0.5948608803738119, 0.18021188904600305, 0.02373347440976468, 0.0015423370227633894, 3.955326526685069e-05}, []float64{1, 0.08062050596496431, 6.018829832700829e-06, 0, 0, 0}, 0.24120324143499425, nil, 0, 0, 0, 1.4115919346666, 1.15249495294211},
+		{"triple integrator, enclosed RHP pole 2.1e-5, unstable", []float64{3.9318328957351754, 9.01550405735846, 7.781485125822608, 2.941510858787714, 0.3164957596584042}, []float64{1, 0.9269292765925116, -2.0846422608156813e-05, 0, 0, 0}, 0.8792379781321229, nil, 0, 0, 2, math.Inf(1), math.Inf(1)},
 		{"triple integrator, RHP pole 6.7e-3, delayed gain, unstable", []float64{3.310364316932462, -3.4690921208593335}, []float64{1, -0.0066905036607369794, 0, 0, 0}, 0.3333286130472003, []float64{-0.9519745006566804, 0.2094256006355884, 0, 0}, 0, 0, 2, math.Inf(1), math.Inf(1)},
 	}
 	for _, tc := range cases {

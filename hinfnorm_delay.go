@@ -32,8 +32,11 @@ type delayLFT struct {
 	h22sys *System
 	h22    func(frequencyPoint, []complex128) error
 	hbuf   []complex128
-	lu     []complex128
-	piv    []int
+	// ddAllow limits the double-double fallback of h22Det; see
+	// delayLoop.ddAllowed.
+	ddAllow func(w float64) bool
+	lu      []complex128
+	piv     []int
 
 	g       func(frequencyPoint, []complex128) error
 	gbuf    []complex128
@@ -227,8 +230,15 @@ func (e *delayLFT) h22Det(w float64) (complex128, bool) {
 	pt := e.td.frequencyPoint(w)
 	if e.h22 != nil {
 		if err := evalWithPoleLimit(e.h22, e.h22sys, pt, e.hbuf); err != nil {
-			e.fail(w, err)
-			return 0, false
+			h, ok := complex(0, 0), false
+			if len(e.hbuf) == 1 && (e.ddAllow == nil || e.ddAllow(w)) {
+				h, ok = ddSISOResponse(e.h22sys, pt)
+			}
+			if !ok {
+				e.fail(w, err)
+				return 0, false
+			}
+			e.hbuf[0] = h
 		}
 	} else {
 		copy(e.hbuf, e.d22Complex())
@@ -613,6 +623,7 @@ func (e *delayLFT) loop(axisOnly bool) *delayLoop {
 		l.tau += t
 	}
 	l.addPoles(e.poles)
+	e.ddAllow = l.ddAllowed
 	return l
 }
 

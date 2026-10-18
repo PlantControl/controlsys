@@ -65,7 +65,7 @@ func TestHinfNormDelayStiffCompanionLoop(t *testing.T) {
 		den: []float64{1, 155.944003732878, 9955.032050307716, 303390.20384392294, 3.7420871694087246e+06},
 		tau: 0.1821465736750913, box: 400,
 	}
-	if roots := oracleRHPRoots(t, q.chi, q.box); roots != 0 {
+	if roots := oracleRHPRoots(t, q.chi, q.box, q.den, q.num); roots != 0 {
 		t.Fatalf("oracle RHP roots %d, want 0", roots)
 	}
 	cl := unitFeedback(t, q.system(t))

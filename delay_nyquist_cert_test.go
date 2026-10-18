@@ -35,7 +35,7 @@ func TestDelayNyquistCloseZeroPair(t *testing.T) {
 		closeZeroPairLoop(10, 0.05, 0.01, 1e-4),
 	} {
 		t.Run(q.name, func(t *testing.T) {
-			want := oracleRHPRoots(t, q.chi, q.box)
+			want := oracleRHPRoots(t, q.chi, q.box, q.den, q.num)
 			sys := q.system(t)
 			for _, frac := range []float64{0.5, 1e-3} {
 				l, err := delayLoopFromSystem(sys, "delay loop")

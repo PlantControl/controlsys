@@ -28,7 +28,7 @@ func TestDelayLoopCompanionTailUsesBalancedRealization(t *testing.T) {
 		if a := spectralNorm(sys.A); a < 1e4 {
 			t.Fatalf("‖A‖₂ = %g, want companion form > 1e4", a)
 		}
-		want := oracleRHPRoots(t, q.chi, q.box)
+		want := oracleRHPRoots(t, q.chi, q.box, q.den, q.num)
 		l, err := delayLoopFromSystem(sys, "delay loop")
 		if err != nil {
 			t.Fatal(err)
@@ -77,7 +77,7 @@ func TestInternalDelayStabilityCompanionTail(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := oracleRHPRoots(t, q.chi, q.box)
+		want := oracleRHPRoots(t, q.chi, q.box, q.den, q.num)
 		e, err := newDelayLFT(cl)
 		if err != nil {
 			t.Fatal(err)

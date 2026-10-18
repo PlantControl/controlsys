@@ -15,7 +15,7 @@ func TestDelayNyquistRefineModelCost(t *testing.T) {
 	for _, k := range []float64{1, 2, 4, 8} {
 		q := pidDelayQuasiLoop(fmt.Sprintf("k=%g", k), k)
 		t.Run(q.name, func(t *testing.T) {
-			want := oracleRHPRoots(t, q.chi, q.box)
+			want := oracleRHPRoots(t, q.chi, q.box, q.den, q.num)
 			l, err := delayLoopFromSystem(q.system(t), "delay loop")
 			if err != nil {
 				t.Fatal(err)
