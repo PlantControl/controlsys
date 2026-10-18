@@ -708,7 +708,9 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 // solver deems singular, it grows up to indentLimit, so that the decade
 // stays within a tenth of the other poles and of the delay scale. An
 // enlarged radius needs |L| >= 1e3 on that decade, so that χ ≈ s^m + c has
-// no root within it. A pole at which
+// no root within it. An off-axis pole within the decade, as one below
+// indentLimit's cutoff, voids the check and returns errDelayLoopUnsupported,
+// which leaves the count to clusterWinding. A pole at which
 // no radius gives finite samples is left to indentCluster: a failed
 // evaluation does not show a root.
 func (l *delayLoop) indent() (float64, bool, error) {
@@ -727,6 +729,9 @@ func (l *delayLoop) indent() (float64, bool, error) {
 			}
 			if k > 0 && near > 0 && !(far >= 1e3) {
 				return 0, false, fmt.Errorf("|L| = %g is not dominant at the indentation of ω=%g: %w", far, a.w, errDelayLoopUnsupported)
+			}
+			if l.poleNear(a.w, 10*g) {
+				return 0, false, fmt.Errorf("open-loop pole within the indentation decade of ω=%g: %w", a.w, errDelayLoopUnsupported)
 			}
 			a.gap, found = g, true
 			if !(near > 0) || !(far > 0) || int(math.Round(math.Log10(near/far))) != a.mult {
@@ -836,6 +841,15 @@ func (l *delayLoop) sample(w float64) (float64, bool) {
 		*slot = saved
 	}
 	return v, ok
+}
+
+// poleNear reports an open-loop pole off the imaginary axis within r of jω,
+// which the growth of |L| by mult decades over the indentation decade does
+// not account for.
+func (l *delayLoop) poleNear(w, r float64) bool {
+	return slices.ContainsFunc(l.poles, func(p complex128) bool {
+		return cmplx.Abs(p-complex(0, w)) < r && classifyPoleStability(p, true, poleStabilityTolerance(p)) != poleClassBoundary
+	})
 }
 
 // indentLimit bounds the indentation radius at jω by 1e-2 of the distance

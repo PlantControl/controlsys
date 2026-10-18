@@ -134,3 +134,68 @@ func TestTunePIDIntegratingDelayedPlant(t *testing.T) {
 		}
 	}
 }
+
+// TestDelayNyquistIntegratorNearOriginPoles: multiple integrators with real
+// poles closer to the origin than indentLimit's 1e-6 cutoff. With the dd
+// fallback, indent evaluated L at an enlarged radius enclosing them, saw |L|
+// fall by more decades than mult and took it for an axis root at ω=0:
+// IsStable false, HinfNorm +Inf, DiskMargin 0, although χ(0) = num(0) ≠ 0.
+// An off-axis pole inside the indentation now leaves the count to
+// clusterWinding, which errors here like the base did. With exact, the pole
+// sits outside the indentation and the values must match the oracles.
+func TestDelayNyquistIntegratorNearOriginPoles(t *testing.T) {
+	for _, c := range []struct {
+		q     quasiLoop
+		exact bool
+	}{
+		{q: quasiLoop{ // s³, poles 1.31e-9, -2.72e-9, -0.1286
+			num: []float64{13.222200959921482, 63.741266377137514, 129.45539425818563, 104.87423932251659, 34.825187773001446, 3.8595098872161198},
+			den: []float64{1, 0.12864478027547946, 1.8146789689495635e-10, -4.594790547398718e-19, 0, 0, 0},
+			tau: 0.003604611258568011, box: 200,
+		}},
+		{q: quasiLoop{ // s², poles 1.34e-7, -0.464
+			num: []float64{1.9188317375876882, 1.5083785090172463, 0.32156836056367194, 0.015658860719559062},
+			den: []float64{1, 0.46404121934763415, -6.209067747296065e-08, 0, 0},
+			tau: 0.001181949427158492, box: 200,
+		}, exact: true},
+	} {
+		q := c.q
+		if want := oracleRHPRoots(t, q.chi, q.box, q.num, q.den); want != 0 {
+			t.Fatalf("%v: oracle %d RHP roots, want 0", q.den, want)
+		}
+		var supT, supS float64
+		for i := range 200001 {
+			l := q.L(math.Pow(10, -8+13*float64(i)/200000))
+			supT = max(supT, cmplx.Abs(l/(1+l)))
+			supS = max(supS, cmplx.Abs(1/(1+l)-0.5))
+		}
+		p := makePlant(t, q.num, q.den)
+		if err := p.SetInputDelay([]float64{q.tau}); err != nil {
+			t.Fatal(err)
+		}
+		if !c.exact {
+			l, err := delayLoopFromSystem(p, "delay loop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if w, root, err := l.indent(); err == nil {
+				t.Fatalf("%v: indent = %g, %v, nil; want errDelayLoopUnsupported", q.den, w, root)
+			}
+		}
+		cl, err := Feedback(p, nil, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stable, err := cl.IsStable(); (err == nil && !stable) || (c.exact && err != nil) {
+			t.Fatalf("%v: IsStable = %v, %v; oracle 0 RHP roots", q.den, stable, err)
+		}
+		norm, _, err := HinfNorm(cl)
+		if (err == nil && !(norm >= supT*(1-1e-9) && norm <= supT*(1+1e-3))) || (c.exact && err != nil) {
+			t.Fatalf("%v: HinfNorm = %g, %v; dense sup|T| %g", q.den, norm, err, supT)
+		}
+		dm, err := DiskMargin(p)
+		if (err == nil && !(dm.Alpha <= 1/supS*(1+1e-9) && dm.Alpha >= 1/supS*(1-1e-3))) || (c.exact && err != nil) {
+			t.Fatalf("%v: DiskMargin = %+v, %v; dense alpha %g", q.den, dm, err, 1/supS)
+		}
+	}
+}
