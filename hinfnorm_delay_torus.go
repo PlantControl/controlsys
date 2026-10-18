@@ -918,8 +918,8 @@ func (h *highFrequencyGain) atFrequency(w float64) *highFrequencyGain {
 		n1221: math.Inf(1), n22: math.Inf(1),
 	}
 	for _, s := range e.realizations() {
-		f.n1221 = min(f.n1221, s.h(e.d12, s.c1, s.b2, w)*s.h(e.d21, s.c2, s.b1, w))
-		f.n22 = min(f.n22, s.h(e.d22, s.c2, s.b2, w))
+		f.n1221 = minBound(f.n1221, s.h(e.d12, s.c1, s.b2, w)*s.h(e.d21, s.c2, s.b1, w))
+		f.n22 = minBound(f.n22, s.h(e.d22, s.c2, s.b2, w))
 	}
 	f.eps = f.n22 - e.d22
 	f.lip = f.lipschitz()

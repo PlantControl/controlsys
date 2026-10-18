@@ -81,7 +81,8 @@ func TestHinfNormDelayStiffCompanionLoop(t *testing.T) {
 
 // tailGain must bound ‖G(jω) − G∞(jω)‖ for ω >= w with the jointly
 // balanced realization of a badly scaled MIMO model, both in norm and
-// entrywise (‖D22‖ = 0.5), and be finite well below the given ‖A‖₂. Oracle:
+// entrywise (‖D22‖ = 0.5), also with a zero row of C2 and column of B2, and
+// be finite well below the given ‖A‖₂, never NaN. Oracle:
 // G and G∞ closed over Δ = diag(e^{-jωτ}) from complex solves with jωI − A.
 func TestDelayTailGainBalancedMIMOBoundsGap(t *testing.T) {
 	rng := rand.New(rand.NewPCG(11, 5))
@@ -130,6 +131,12 @@ func TestDelayTailGainBalancedMIMOBoundsGap(t *testing.T) {
 			d22 = 0.3
 		}
 		D22 := mat.NewDense(nd, nd, []float64{0, 0, d22, 0})
+		if trial%3 == 2 {
+			for i := range n {
+				C2.Set(0, i, 0)
+				B2.Set(i, 1, 0)
+			}
+		}
 		sys, err := New(mat.NewDense(n, n, a), B, C, D, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -152,6 +159,9 @@ func TestDelayTailGainBalancedMIMOBoundsGap(t *testing.T) {
 		for _, f := range []float64{2, 5, 30, 1e3} {
 			w := f * bal
 			bound := e.tailGain(0, w)
+			if math.IsNaN(bound) {
+				t.Fatalf("trial %d: tailGain NaN at w = %g·balanced ‖A‖₂", trial, f)
+			}
 			if f >= 5 && math.IsInf(bound, 1) {
 				t.Fatalf("trial %d: tailGain +Inf at w = %g·balanced ‖A‖₂", trial, f)
 			}
@@ -161,6 +171,19 @@ func TestDelayTailGainBalancedMIMOBoundsGap(t *testing.T) {
 					t.Fatalf("trial %d: ‖G − G∞‖(%g) = %g > tailGain(0, %g) = %g", trial, om, gap, w, bound)
 				}
 			}
+		}
+	}
+}
+
+// A realization's undefined bound (0·∞ below its ‖A‖₂) must not mask
+// another's finite one.
+func TestMinBoundSkipsNaN(t *testing.T) {
+	inf := math.Inf(1)
+	for _, c := range []struct{ a, b, want float64 }{
+		{inf, math.NaN(), inf}, {2, math.NaN(), 2}, {inf, 3, 3}, {2, 3, 2},
+	} {
+		if got := minBound(c.a, c.b); got != c.want {
+			t.Errorf("minBound(%g, %g) = %g, want %g", c.a, c.b, got, c.want)
 		}
 	}
 }

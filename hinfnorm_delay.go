@@ -331,6 +331,15 @@ func (e *delayLFT) realizations() []*stateBounds {
 	return []*stateBounds{&e.stateBounds, e.bal}
 }
 
+// minBound is min(a, b) with a NaN b, an undefined bound such as 0·∞
+// below a realization's ‖A‖₂, taken as +Inf.
+func minBound(a, b float64) float64 {
+	if math.IsNaN(b) {
+		return a
+	}
+	return min(a, b)
+}
+
 // minNormA is the smallest ‖A‖₂ over realizations, past which the bounds
 // of tail and tailGain are finite.
 func (e *delayLFT) minNormA() float64 {
@@ -350,7 +359,7 @@ func (e *delayLFT) minNormA() float64 {
 func (e *delayLFT) tail(w float64) float64 {
 	bound := math.Inf(1)
 	for _, s := range e.realizations() {
-		bound = min(bound, e.tailOf(s, w))
+		bound = minBound(bound, e.tailOf(s, w))
 	}
 	return bound
 }
@@ -1164,7 +1173,7 @@ func (e *delayLFT) tailGain(lim, w float64) float64 {
 	}
 	g := math.Inf(1)
 	for _, s := range e.realizations() {
-		g = min(g, e.tailGainOf(s, lim, w))
+		g = minBound(g, e.tailGainOf(s, lim, w))
 	}
 	if lim == 0 && len(e.gapMemo) < maxGapMemo {
 		if e.gapMemo == nil {
