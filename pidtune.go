@@ -860,13 +860,21 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 		tau *= plant.Dt
 	}
 	// at leaves eval.err as it was, so a failed sample cannot fail the
-	// stability screens that share eval; it reads NaN instead.
+	// stability screens that share eval. A failed sample takes the response
+	// the gains were designed from (evalPlantAt), else reads NaN: eval's
+	// double solve is singular to working precision over decades beside a
+	// pole cluster at z = 1 that FreqResponse resolves, and NaN margins and
+	// |S| there failed every back-off step, leaving the retry gated only
+	// on those NaN samples to return the first design (PM 34° for P).
 	at := func(w float64) complex128 {
 		saved := eval.err
 		eval.err = nil
 		g := eval.at(w)
 		if eval.err != nil {
 			g = cmplx.NaN()
+			if h, err := evalPlantAt(plant, w); err == nil {
+				g = h
+			}
 		}
 		eval.err = saved
 		return g
@@ -1786,6 +1794,9 @@ func pidtuneIntegratingCrossover(plant *System) (float64, error) {
 	if tol == 0 {
 		tol = pidtuneDisplacedIntegrator(plant, poles, at)
 	}
+	if tol == 0 {
+		tol = pidtuneIsolatedIntegrator(plant, poles, at)
+	}
 	w := pidtuneSlowestRoot(plant, poles, at, tol)
 	if math.IsInf(w, 1) {
 		zeros, err := model.Zeros()
@@ -1843,6 +1854,42 @@ func pidtuneDisplacedIntegrator(plant *System, poles []complex128, at complex128
 		near = min(near, cmplx.Abs(p-at))
 	}
 	if near <= pidtuneClusterRadius(2, scale) {
+		return near
+	}
+	return 0
+}
+
+// pidtuneIsolationRatio is how much farther from the integrator than the
+// nearest pole every other pole must lie for pidtuneIsolatedIntegrator.
+const pidtuneIsolationRatio = 10
+
+// pidtuneIsolatedIntegrator returns, for the poles of a plant whose DC gain
+// is infinite, the distance of the pole nearest at when it lies within
+// 1e-2·scale and every other pole lies pidtuneIsolationRatio times farther,
+// else 0. Rounding moves a simple integrator by about δ/∏|at−pᵢ|, so slow
+// poles clustered near it, as of ∏(z−e^(−aᵢ·Dt)) at small Dt, push it
+// beyond any fixed radius (2.9e-6 for 1.35e-15/((z−1)·∏(z−pᵢ)), pᵢ down to
+// 0.998), and taking it as the slowest pole gave a crossover 600 times
+// below half the slowest one. An isolated pole that close is the integrator
+// DCGain found; a conjugate pair or poles at comparable distances is a
+// cluster rounding scattered, whose slowest root is kept.
+func pidtuneIsolatedIntegrator(plant *System, poles []complex128, at complex128) float64 {
+	scale, near, second := 0.0, math.Inf(1), math.Inf(1)
+	if plant.Dt > 0 {
+		scale = 1
+	}
+	for _, p := range poles {
+		if plant.Dt == 0 {
+			scale = max(scale, cmplx.Abs(p))
+		}
+		switch d := cmplx.Abs(p - at); {
+		case d < near:
+			near, second = d, near
+		case d < second:
+			second = d
+		}
+	}
+	if near <= 1e-2*scale && pidtuneIsolationRatio*near <= second {
 		return near
 	}
 	return 0

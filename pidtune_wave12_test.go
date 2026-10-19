@@ -3,6 +3,9 @@ package controlsys
 import (
 	"errors"
 	"fmt"
+	"math"
+	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 )
 
@@ -106,5 +109,116 @@ func TestPidtuneZeroDCLegacyPDGated(t *testing.T) {
 			continue
 		}
 		pidtuneCheckRobust(t, name, pid, c.num, c.den, 0, pidTuningMaxSensitivity)
+	}
+}
+
+// FI3ZIB: rounding moves a simple integrator of (z−1)·∏(z−pᵢ), pᵢ near 1,
+// beyond pidtuneClusterRadius(2, 1) while DCGain stays infinite; taking it
+// as the slowest pole put the crossover ~600x below half the slowest
+// generated pole (1.46e-4 for the repro, its integrator 2.9e-6 off z = 1).
+// At the corrected crossover the gate's double solve was singular over the
+// band, so every back-off step failed on NaN margins and the retry returned
+// the first design: P with PM 33.8° on the second plant. Oracles: for a
+// nearest pole beyond that radius with every other pole ten times farther,
+// half the slowest generated pole's |ln p|/Dt, capped at 0.1π/Dt, to 10%
+// when the others lie 100 times farther and 2x below that (rounding also
+// scatters the slow poles); every design stable by the exact Schur–Cohn
+// test and, on every other plant for time, robust by extended-precision
+// Schur–Cohn, margins and |S| from the coefficients: margins ≥ 58.5°
+// unless den has a root outside the unit circle, where the retry owes
+// only |S| ≤ 4 and a crossover. Conjugate pairs or comparable distances
+// are scattered clusters this oracle does not describe.
+func TestPidtuneIsolatedDisplacedIntegrator(t *testing.T) {
+	num := Poly{1.353366909367569e-15}
+	den := Poly{1, -5.60431550709433, 13.063429504287544, -16.210023582131356, 11.292650985912374, -4.187371704674265, 0.6456303037000314}
+	p := pidtuneBackoffPlant(t, num, den, 0.01, 0)
+	if wc, err := plantCrossoverFreq(p); err != nil || math.Abs(wc-0.0895) > 0.02*0.0895 {
+		t.Errorf("repro crossover %g, %v; want 0.0895", wc, err)
+	}
+	num = Poly{1.1974308853542987e-16}
+	den = Poly{1, -6.184746550403649, 16.242438259051475, -23.437999081676736, 20.022569140290482, -10.09289718715969, 2.766371287397997, -0.31573586749987936}
+	p = pidtuneBackoffPlant(t, num, den, 0.01, 0)
+	for _, f := range []PidtuneType{PidtuneP, PidtunePI} {
+		pid, err := Pidtune(p, f, 0, nil)
+		if err != nil {
+			t.Errorf("gate repro %s: %v", f, err)
+			continue
+		}
+		pidDCSignCheckRobust(t, fmt.Sprintf("gate repro %s", f), pid, num, den, 0.01, 58.5)
+	}
+
+	skipSlowUnderRace(t)
+	rng := rand.New(rand.NewPCG(5, 8))
+	kept, close := 0, 0
+	for range 300 {
+		dt := 0.01
+		num, den := Poly{math.Pow(10, -16+4*rng.Float64())}, Poly{1, -1}
+		slow := math.Inf(1)
+		for range 5 + rng.IntN(4) {
+			a := math.Pow(10, -1+3*rng.Float64())
+			slow = math.Min(slow, a)
+			den = den.Mul(Poly{1, -math.Exp(-a * dt)})
+		}
+		for range rng.IntN(3) {
+			num = num.Mul(Poly{1, -(rng.Float64()*1.8 - 0.9)})
+		}
+		p := pidtuneBackoffPlant(t, num, den, dt, 0)
+		am, err := AllMargin(p)
+		if err != nil || len(am.GainCrossFreqs) > 0 {
+			continue
+		}
+		dc, err := p.DCGain()
+		if err != nil || !math.IsInf(dc.At(0, 0), 0) {
+			continue
+		}
+		poles, err := p.Poles()
+		if err != nil {
+			t.Fatal(err)
+		}
+		near, second := math.Inf(1), math.Inf(1)
+		for _, r := range poles {
+			switch d := cmplx.Abs(r - 1); {
+			case d < near:
+				near, second = d, near
+			case d < second:
+				second = d
+			}
+		}
+		if near <= pidtuneClusterRadius(2, 1) || second < 10*near {
+			continue
+		}
+		kept++
+		name := fmt.Sprintf("%v/%v dt=%g", num, den, dt)
+		want := math.Min(0.5*slow, 0.1*math.Pi/dt)
+		wc, err := plantCrossoverFreq(p)
+		if second >= 100*near {
+			close++
+			if err != nil || math.Abs(wc-want) > 0.1*want {
+				t.Errorf("%s: crossover %g, %v; want %g", name, wc, err, want)
+			}
+		} else if err != nil || wc < want/2 || wc > 2*want {
+			t.Errorf("%s: crossover %g, %v; want %g within 2x", name, wc, err, want)
+		}
+		minPM := 58.5
+		if !pidDCSignSchurCohn(pidDCSignBig(den)) {
+			minPM = 0
+		}
+		for _, f := range pidtuneAllTypes {
+			pid, err := Pidtune(p, f, 0, nil)
+			if err != nil {
+				if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+					t.Errorf("%s %s: %v", name, f, err)
+				}
+				continue
+			}
+			if kept%2 == 1 {
+				pidDCSignCheckRobust(t, fmt.Sprintf("%s %v", name, f), pid, num, den, dt, minPM)
+			} else if !pidtuneExactSchur(pid, num, den, dt) {
+				t.Errorf("%s %s: %+v unstable", name, f, pid)
+			}
+		}
+	}
+	if kept < 20 || close < 10 {
+		t.Fatalf("sweep kept %d plants, %d with poles 100x farther", kept, close)
 	}
 }

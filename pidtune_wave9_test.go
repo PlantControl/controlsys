@@ -218,7 +218,7 @@ func pidtuneRolloffUnstableCase(t *testing.T, num, den Poly, want []PidtuneType,
 // crossover is half the slowest generated pole's |ln p|/Dt, capped at
 // 0.1π/Dt, to 5% (clustered poles round, 3% on amd64); every
 // design stable by the exact Schur–Cohn test. Integrators displaced beyond
-// pidtuneClusterRadius(2, 1) are TestPidtuneRoundedZeroDCIntegrator's.
+// pidtuneClusterRadius(2, 1) are TestPidtuneIsolatedDisplacedIntegrator's.
 func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(5, 8))
