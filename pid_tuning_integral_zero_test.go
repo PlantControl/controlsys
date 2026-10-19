@@ -3,6 +3,7 @@ package controlsys
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -36,7 +37,7 @@ func TestTunePIDIntegralZeroOnBoundary(t *testing.T) {
 		}
 	}
 	for _, wc := range []float64{0, 1, 7.93} {
-		for _, fam := range []PidtuneType{PidtuneI, PidtunePI, PidtunePIDF} {
+		for _, fam := range []PidtuneType{PidtuneI, PidtunePI, PidtunePID, PidtunePIDF} {
 			r, err := TunePID(context.Background(), plant, fam, PIDTuningOptions{CrossoverFrequency: wc})
 			te, ok := errors.AsType[*PIDTuningError](err)
 			if !ok {
@@ -79,5 +80,57 @@ func TestTunePIDIntegralZeroOffBoundary(t *testing.T) {
 		if stable, err := loop.IsStable(); err != nil || !stable {
 			t.Errorf("%s: %+v closed loop IsStable %v %v", fam, *c, stable, err)
 		}
+	}
+}
+
+// OI7P4M: TunePID returned this ideal PID for the D33HSG plant; its slow
+// closed-loop pole −a0/a1 sits inside the IsStable band.
+func TestPIDTuningIdealStableBand(t *testing.T) {
+	c := &PID2{Kp: 7.954440137905823, Ki: 121.18255736538495, Kd: 1.2450662060726023, B: 1, C: 1}
+	for _, tc := range []struct {
+		z    float64
+		want bool
+	}{{1e-10, false}, {1e-8, true}} {
+		num, den := Poly{0.8296, 0.8296 * tc.z}, Poly{1, 0.999, 0.1257}
+		ch := Poly{1, 0}.Mul(den).Add(Poly{c.Kd, c.Kp, c.Ki}.Mul(num))
+		slow := -ch[3] / ch[2]
+		if slow >= 0 || (slow > -1e-10) == tc.want || math.Abs(real(ch.Eval(complex(slow, 0)))) > 1e-6*ch[3] {
+			t.Fatalf("z %g: characteristic %v slow root %g", tc.z, ch, slow)
+		}
+		tf, err := makePlant(t, num, den).rationalTransferFunction(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := pidTuningIdealStable(tf, c); err != nil || got != tc.want {
+			t.Errorf("z %g: pidTuningIdealStable %v %v, want %v (slow root %g)", tc.z, got, err, tc.want, slow)
+		}
+	}
+}
+
+func TestPIDTuningIntegralZeroSign(t *testing.T) {
+	den := Poly{1, 2, 1}
+	if _, ok := pidTuningIntegralZero(makePlant(t, Poly{1, 1e-10}, den), PidtunePID); !ok {
+		t.Error("zero -1e-10: PID not blocked")
+	}
+	rhp := makePlant(t, Poly{-1, 1e-10}, den)
+	for _, fam := range []PidtuneType{PidtuneI, PidtunePI, PidtunePID, PidtunePIDF} {
+		if z, ok := pidTuningIntegralZero(rhp, fam); ok {
+			t.Errorf("zero +1e-10 %s: blocked at %g", fam, z)
+		}
+	}
+	ch := Poly{1, 0}.Mul(den).Add(Poly{-0.9, 0.9e-10})
+	if slow := -ch[3] / ch[2]; math.Abs(slow+9e-10) > 1e-12 {
+		t.Fatalf("I Ki 0.9: slow root %g, want -9e-10", slow)
+	}
+	cs, err := (&PID{Ki: 0.9}).System()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop, err := Feedback(rhp, cs, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stable, err := loop.IsStable(); err != nil || !stable {
+		t.Errorf("I Ki 0.9 on zero +1e-10: IsStable %v %v, want true", stable, err)
 	}
 }
