@@ -502,9 +502,11 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 
 // unshaped returns whether pid is a first design at a continuous wc from a
 // pole of a zero-DC plant that the pole test certifies stable and that
-// leaves the loop phase to the plant: a P, or a PD clamped short of the
-// requested margin at wc. A k·sᵐ high-pass plant leads up to 180° below its
-// poles, where no back-off helps, so only |S| gates it.
+// leaves the loop phase to the plant: a P, or a legacy PD clamped short of
+// the requested margin at wc. A k·sᵐ high-pass plant leads up to 180° below
+// its poles, where no back-off helps, so only |S| gates it. A placed PD
+// crosses over at wc, so its short margin there is the loop's: it takes the
+// full gate, then back-off and the legacy rerun.
 func (r *pidtuneRun) unshaped(pid *PID, wc float64) bool {
 	if r.src != pidtuneCrossZeroDC || r.plant.Dt != 0 || wc != r.wc || r.loop == nil {
 		return false
@@ -513,7 +515,7 @@ func (r *pidtuneRun) unshaped(pid *PID, wc float64) bool {
 	case PidtuneP:
 		return true
 	case PidtunePD:
-		return checkPidtuneMargin(r.plant, pid, wc, r.pm) != nil
+		return r.pd == pidtunePDLegacy && checkPidtuneMargin(r.plant, pid, wc, r.pm) != nil
 	}
 	return false
 }
