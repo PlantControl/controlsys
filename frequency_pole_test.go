@@ -642,18 +642,16 @@ func TestPoleLimitOriginClusterNoWindow(t *testing.T) {
 	}
 }
 
-// TestPoleLimitAtPoleKeepsInf: where s is a pole to relative precision the
-// limit stays +Inf: a near-double axis pair at its frequency, and a double
+// TestPoleLimitAtPoleKeepsInf: where s is a pole of the realization the
+// limit stays +Inf: an undamped axis pair at its frequency, and a double
 // integrator at ω = 0.
 func TestPoleLimitAtPoleKeepsInf(t *testing.T) {
-	w2 := 1 + 1e-8
-	pair := polyMul([]float64{1, 2e-9, 1}, []float64{1, 2e-9 * w2, w2 * w2})
 	for _, c := range []struct {
 		name string
 		den  []float64
 		w    float64
 	}{
-		{"near-double pair", polyMul(pair, []float64{1, 2}), 1},
+		{"(s²+1)(s+2)", []float64{1, 2, 1, 2}, 1},
 		{"s²(s+1)", []float64{1, 1, 0, 0}, 0},
 	} {
 		sys := makePlant(t, []float64{1, 3, 1}, c.den)
@@ -1097,6 +1095,134 @@ func TestPoleLimitLightlyDampedDiscretePair(t *testing.T) {
 			t.Fatalf("EvalFr(e^{j%g}): %v", w, err)
 		}
 		check("EvalFr", w, frBigC(z), h[0])
+	}
+}
+
+// TestPoleLimitUnresolvedPoleTakesDD (ND75VC): next to a lightly damped
+// pair a computed pole is uncertain by about eps/|p−p̄|, more than its
+// distance to s, yet within the pole limit's step, or, with p̄ inside
+// poleClusterTol, the step jumps past the pair. The double solve failed
+// there and the pole limit gave +Inf, nil for a finite response that dd
+// resolves; the realization's own poles lie off the axis (unit circle).
+// Fixed repros, a near-double axis pair at its frequency and a random
+// sweep at computed pole frequencies, each in SISO, 1×2 and descriptor
+// form. Oracles: the stored realization in big.Float, and num/den for the
+// explicit forms (M·A of the descriptor twin rounds).
+func TestPoleLimitUnresolvedPoleTakesDD(t *testing.T) {
+	type plant struct {
+		num, den []float64
+		dt       float64
+		ws       []float64
+	}
+	w2 := 1 + 1e-8
+	pair := polyMul([]float64{1, 2e-9, 1}, []float64{1, 2e-9 * w2, w2 * w2})
+	plants := []plant{
+		{[]float64{0.11931901744373974, 0.19831174247945071, 0.037218094309625305}, []float64{1, -2.4315716530191986, 1.8631433060586569, -0.4315716530365083}, 0.1, []float64{2.2779283771334325e-05}},
+		{[]float64{1.0114337837321554, -0.38455634485006573, 0.4304747928833453}, []float64{1, -2.4687192781174288, 1.9374385619169319, -0.46871928379944205}, 0.1, []float64{3.394055460334797e-06, 3.3978457972625797e-06}},
+		{[]float64{1, 3, 1}, polyMul(pair, []float64{1, 2}), 0, []float64{1}},
+	}
+	rng := rand.New(rand.NewPCG(7, 0x4d75))
+	for range 40 {
+		th := math.Pow(10, -7+3*rng.Float64())
+		r := 1 - math.Pow(10, -12+4*rng.Float64())
+		den := polyMul([]float64{1, -2 * r * math.Cos(th), r * r}, []float64{1, -0.9 * rng.Float64()})
+		plants = append(plants, plant{[]float64{rng.NormFloat64(), rng.NormFloat64(), rng.NormFloat64()}, den, 0.1, nil})
+	}
+	poly := func(c []float64, z frBig) frBig {
+		v := frBigC(0)
+		for _, x := range c {
+			v = v.mul(z).add(frBigC(complex(x, 0)))
+		}
+		return v
+	}
+	exercised := 0
+	for k, pl := range plants {
+		tf := func(num ...[]float64) *System {
+			r, err := (&TransferFunc{Num: [][][]float64{num}, Den: [][]float64{pl.den}, Dt: pl.dt}).StateSpace()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return r.Sys
+		}
+		siso := tf(pl.num)
+		ws := pl.ws
+		if ws == nil {
+			poles, err := siso.Poles()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range poles {
+				if imag(p) > 0 {
+					ws = append(ws, cmplx.Phase(p)/pl.dt)
+				}
+			}
+		}
+		td := newTimeDomain(pl.dt)
+		failing := func(sys *System) []float64 {
+			_, m, _ := sys.Dims()
+			eval := newFrequencyEvaluator(sys).pointSolver(math.MaxInt).evalInto
+			var fails []float64
+			for _, w := range ws {
+				if eval(td.frequencyPoint(w), make([]complex128, m)) != nil {
+					fails = append(fails, w)
+				}
+			}
+			return fails
+		}
+		if fails := failing(siso); k < 3 && len(fails) != len(ws) {
+			t.Fatalf("plant %d: double solve succeeded at %v; case no longer exercises the pole limit", k, ws)
+		} else if len(fails) > 0 {
+			exercised++
+		}
+		half := []float64{0.5 * pl.num[0], -pl.num[1], 2 * pl.num[2]}
+		for form, sys := range map[string]*System{"SISO": siso, "1×2": tf(pl.num, half), "descriptor": poleDescriptorTwin(t, siso)} {
+			fails := failing(sys)
+			if len(fails) == 0 {
+				continue
+			}
+			check := func(api string, w float64, z frBig, got []complex128) {
+				t.Helper()
+				want := frExactResponse(sys, z)
+				if g := poly(pl.num, z).quo(poly(pl.den, z)).complex(); sys.E == nil && cmplx.Abs(g-want[0]) > 1e-9*cmplx.Abs(g) {
+					t.Fatalf("plant %d %s ω=%g: realization %v disagrees with num/den %v", k, form, w, want[0], g)
+				}
+				for j := range want {
+					if cmplx.IsInf(got[j]) || cmplx.Abs(got[j]-want[j]) > 1e-9*cmplx.Abs(want[j]) {
+						t.Errorf("plant %d %s %s(%.17g)[%d] = %v; want %v", k, form, api, w, j, got[j], want[j])
+					}
+				}
+			}
+			_, m, _ := sys.Dims()
+			for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+				"FreqResponse":          sys.FreqResponse,
+				"FreqResponsePointwise": sys.FreqResponsePointwise,
+			} {
+				fr, err := f(fails)
+				if err != nil {
+					t.Errorf("plant %d %s %s: %v", k, form, api, err)
+					continue
+				}
+				for i, w := range fails {
+					got := make([]complex128, m)
+					for j := range m {
+						got[j] = fr.At(i, 0, j)
+					}
+					check(api, w, frExactPoint(w, pl.dt), got)
+				}
+			}
+			for _, w := range fails {
+				s := td.frequencyVariable(w)
+				h, err := sys.EvalFr(s)
+				if err != nil {
+					t.Errorf("plant %d %s EvalFr(%v): %v", k, form, s, err)
+					continue
+				}
+				check("EvalFr", w, frBigC(s), h[0])
+			}
+		}
+	}
+	if exercised < 20 {
+		t.Errorf("%d of %d plants exercise the pole limit; want ≥ 20", exercised, len(plants))
 	}
 }
 

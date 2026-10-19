@@ -25,16 +25,22 @@ const (
 // evalWithPoleLimit sets dst to eval(pt), or where eval fails to the
 // response there: at a numerical pole of the realization its pole limit
 // (see poleLimitInto), and off every pole the double-double response of the
-// delay-free realization (ddResponseInto). pt is a pole when a pole p lies
-// within poleRelativeTol of s relative to max(|s|, |p|) and within the pole
-// limit's step poleStepFraction·rho of s, where its samples see p at s;
-// farther out, as beside a lightly damped pair, they straddle p and misread
-// the finite response as a pole. For s = 0 it is a pole when one lies
+// delay-free realization (ddResponseInto). A computed pole p is near pt
+// when it lies within poleRelativeTol of s relative to max(|s|, |p|) and
+// within the pole limit's step poleStepFraction·rho of s, where its samples
+// see p at s; farther out, as beside a lightly damped pair, they straddle p
+// and misread the finite response as a pole. At DC (s = 0, or z = 1 for a
+// discrete model) a near pole is a pole at pt, and for s = 0 so is one
 // within poleClusterTol of the spectral scale, the radius poleSpacing takes
 // as s itself: a computed integrator is of order eps·‖A‖ and a k-fold one
-// spreads by eps^{1/k}. Next to a pole cluster at the origin the double solve
-// fails at |s| of the cluster's size, where no pole is near s and the
-// response is large but finite. The pole limit's samples fail there too;
+// spreads by eps^{1/k}. Elsewhere a computed pole locates the realization's
+// own pole only to about eps over its separation from the next pole, which
+// beside a lightly damped pair exceeds the step, so the double-double
+// response decides: pt is a pole where that is singular too or its
+// simple-pole fit (ddAtPole) puts the pole within working precision of s.
+// Next to a pole cluster at the origin the double solve fails at |s| of the
+// cluster's size, where no pole is near s and the response is large but
+// finite. The pole limit's samples fail there too;
 // each failed sample is solved in double-double, and where that is singular
 // as well the step is taken past the cluster at s (poleSpacing's wide).
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
@@ -46,10 +52,14 @@ func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syste
 // tuned to it: the rational margin search takes near-roots of an
 // asymptotically real L next to an origin cluster for crossings once that
 // region evaluates. Otherwise, where allow(w) reports false, eval's error is
-// returned; a nil allow allows the fallback. Any restriction also keeps the
-// pole limit's samples in double, so its errors stand for the caller.
+// returned; a nil allow allows the fallback. With allow or snap set a near
+// computed pole is a pole at pt as at DC, without the double-double check;
+// the margin search keeps the pole limit's +Inf there. allow and limit also
+// keep the pole limit's samples in double, so its errors stand for the
+// caller.
 type ddGate struct {
 	limit bool
+	snap  bool
 	allow func(float64) bool
 	w     float64
 }
@@ -62,16 +72,18 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return nil
 	}
 	s := pt.value()
-	rho, wide, near, perr := poleSpacing(sys, s)
+	sp, perr := poleSpacing(sys, s)
 	if perr != nil {
 		return perr
 	}
+	rho, wide := sp.rho, sp.wide
 	delayFree := sys.internalDelayCount() == 0
-	if !near && !gate.limit && delayFree {
+	dc := s == 0 || !sys.IsContinuous() && s == 1
+	if !gate.limit && delayFree && (!sp.near || gate.allow == nil && !gate.snap && !dc) {
 		if gate.allow != nil && !gate.allow(gate.w) {
 			return err
 		}
-		if ddResponseInto(sys, pt, dst) {
+		if ddResponseInto(sys, pt, dst) && (!sp.near || !ddAtPole(sys, s, sp, dst)) {
 			return nil
 		}
 	}
@@ -154,19 +166,54 @@ func poleLimitInto(eval func(frequencyPoint, []complex128) error, s complex128, 
 	return nil
 }
 
-// poleSpacing returns the distance rho from s to the nearest pole of the
-// delay-free plant (A, E) that is distinct from s, bounded by the overall
-// spectral scale and, for continuous internal delays, by 1/τ, over which
-// e^{-sτ} varies. wide is rho with the k nearest poles also taken as s when
-// all lie within poleClusterSpread·eps^{1/k} of the scale, the spread of a
-// computed k-fold pole. near reports a pole at s as evalWithPoleLimit
-// defines it.
-func poleSpacing(sys *System, s complex128) (rho, wide float64, near bool, err error) {
+// ddAtPole reports whether g, the double-double response at s next to a
+// computed pole, is that of a pole within working precision of s, at
+// poleClusterSpread·eps of the spectral scale. A simple pole p with residue
+// r has 1/G(z) ≈ (z−p)/r, so G at s and at s+h, h ≪ the distance to the
+// next pole, give r = h/(1/G(s+h) − 1/G(s)) and s−p = r/G(s), in the
+// largest entry. A multiple pole fits nearer than it is. A dd failure at
+// s+h counts as a pole.
+func ddAtPole(sys *System, s complex128, sp poleGeometry, g []complex128) bool {
+	tol := poleClusterSpread * eps() * sp.scale
+	h := max(2*sp.gap, tol)
+	gh := make([]complex128, len(g))
+	if !ddResponseInto(sys, pointAt(s+complex(h, 0)), gh) {
+		return true
+	}
+	j := 0
+	for i, v := range g {
+		if cmplx.Abs(v) > cmplx.Abs(g[j]) {
+			j = i
+		}
+	}
+	if g[j] == 0 {
+		return false
+	}
+	r := complex(h, 0) / (1/gh[j] - 1/g[j])
+	return cmplx.Abs(r/g[j]) <= tol
+}
+
+// poleGeometry locates s among the poles of the delay-free plant (A, E).
+// rho is the distance from s to the nearest pole that is distinct from s,
+// bounded by the overall spectral scale and, for continuous internal
+// delays, by 1/τ, over which e^{-sτ} varies. wide is rho with the k nearest
+// poles also taken as s when all lie within poleClusterSpread·eps^{1/k} of
+// the scale, the spread of a computed k-fold pole. gap is the distance to
+// the nearest finite pole, scale the largest of |s| and the finite pole
+// magnitudes, and near reports a computed pole near s as
+// evalWithPoleLimit defines it.
+type poleGeometry struct {
+	rho, wide, gap, scale float64
+	near                  bool
+}
+
+func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 	n, _, _ := sys.Dims()
 	var poles []complex128
 	if n > 0 {
+		var err error
 		if poles, err = newDescriptorPolicy(sys).poles("pole limit", sys.A, n); err != nil {
-			return 0, 0, false, err
+			return poleGeometry{}, err
 		}
 	}
 	scale := cmplx.Abs(s)
@@ -178,7 +225,8 @@ func poleSpacing(sys *System, s complex128) (rho, wide float64, near bool, err e
 	if scale == 0 {
 		scale = 1
 	}
-	rho = scale
+	rho := scale
+	near := false
 	dist := make([]float64, 0, len(poles))
 	relative := false
 	for _, p := range poles {
@@ -199,7 +247,7 @@ func poleSpacing(sys *System, s complex128) (rho, wide float64, near bool, err e
 			cluster = k + 1
 		}
 	}
-	wide = scale
+	wide := scale
 	if cluster < len(dist) {
 		wide = min(scale, max(rho, dist[cluster]))
 	}
@@ -212,7 +260,11 @@ func poleSpacing(sys *System, s complex128) (rho, wide float64, near bool, err e
 		}
 	}
 	near = near || relative && dist[0] <= poleStepFraction*rho
-	return rho, wide, near, nil
+	gap := math.Inf(1)
+	if len(dist) > 0 {
+		gap = dist[0]
+	}
+	return poleGeometry{rho: rho, wide: wide, gap: gap, scale: scale, near: near}, nil
 }
 
 // ddResponseInto sets dst to the p×m response C(sE−A)⁻¹B + D of the
