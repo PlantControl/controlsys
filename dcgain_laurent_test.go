@@ -229,6 +229,31 @@ func TestDCGain_LaurentPrefersUndeflatedModel(t *testing.T) {
 	}
 }
 
+// OTMOFO: G = γ²·1e-4/(s(s+2γ)(s+γ)) has numerator 1e-4·γ², trimmed by the
+// transfer limit's absolute floor 100·ε once γ ≤ 1e-6, so the gain was 0.
+// The integrator is not a 1×1 block, so Laurent declines.
+func TestDCGain_SmallNormAIntegrator(t *testing.T) {
+	for _, gm := range []float64{1, 1e-2, 1e-4, 1e-6, 1e-8, 1e-12} {
+		a := []float64{-gm, gm, 0, gm, -gm, 0, 0, gm * 1e-4, -gm}
+		b, c := []float64{1, 0, 0}, []float64{0, 0, 1}
+		want := fzSISOExactLimit(3, a, b, c)
+		if !math.IsInf(want, 1) {
+			t.Fatalf("γ=%g: oracle %v, want +Inf", gm, want)
+		}
+		sys, err := NewFromSlices(3, 1, 1, a, b, c, []float64{0}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := sys.DCGain()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := g.At(0, 0); got != want {
+			t.Errorf("γ=%g: DCGain = %v, exact limit %v", gm, got, want)
+		}
+	}
+}
+
 // E2AY73 follow-ups, integer models with an exact integrator beside a
 // singular 2×2 or 3×3 block, where the deflated Laurent gave the wrong Inf
 // sign (base 2e4a07d was right):

@@ -511,6 +511,9 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) 
 // floor, so an exact integrator–zero cancellation would otherwise hinge on
 // the scale of B and C.
 func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
+	if gain, ok := sys.dcGainTimeScaled(); ok {
+		return gain, nil
+	}
 	scaled, inScale, outScale := sys.dcGainIOScaled()
 	gain, ok := scaled.dcGainByDecoupledSingularModes()
 	if !ok {
@@ -541,6 +544,37 @@ func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
 		gain.Add(gain, sys.D)
 	}
 	return gain, nil
+}
+
+// dcGainTimeScaled returns, for a continuous sys with ‖A‖ < 1/2, the
+// gain of (2ᵏA, B, C, 0), ‖2ᵏA‖ in [1/2, 1), times 2ᵏ plus D: an exact
+// rescaling of s that keeps pole orders at 0 and Inf signs, where the
+// transfer limit's absolute coefficient floor of 1 would otherwise swamp
+// numerators of order ‖A‖ⁿ. B stays as given so roundoff in the transfer
+// numerator keeps its scale. A discrete pole at z = 1 forces ‖A‖ ≥ 1.
+func (sys *System) dcGainTimeScaled() (*mat.Dense, bool) {
+	if !sys.IsContinuous() {
+		return nil, false
+	}
+	na := denseNorm(sys.A)
+	if !(na > 0 && na < 0.5) {
+		return nil, false
+	}
+	_, m, p := sys.Dims()
+	_, e := math.Frexp(na)
+	f := math.Ldexp(1, -e)
+	a := mat.DenseCopyOf(sys.A)
+	a.Scale(f, a)
+	ts := &System{A: a, B: sys.B, C: sys.C, D: mat.NewDense(p, m, nil), Dt: sys.Dt}
+	gain, err := ts.dcGainByTransferFunctionLimit()
+	if err != nil {
+		return nil, false
+	}
+	gain.Scale(f, gain)
+	if sys.D != nil {
+		gain.Add(gain, sys.D)
+	}
+	return gain, true
 }
 
 // dcGainByStructuralEntries evaluates each entry on the states reachable
