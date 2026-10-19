@@ -16,12 +16,17 @@ package controlsys
 // plus the discrete Nyquist point z = −1 when L(−1) < 0.
 //
 // A crossing is required (the library must report it) only when it survives
-// every model within rounding: an odd, isolated root whose f (ln|L| − ln γ,
-// or the phase offset from −180°) has opposite signs at ω0(1 ± 1e-6) with
-// both |f| above budget = 1e3·n·eps·cond(T)²·(κ_N + κ_D) plus a floor, κ the
-// coefficient condition number of each polynomial on the boundary. A
-// reported crossing is sound when an exact root lies within 1e-5 relative
-// or |f| there is within budget.
+// every model within rounding of the given entries: an odd, isolated root
+// whose f (ln|L| − ln γ, or the phase offset from −180°) has opposite signs
+// at ω0(1 ± r), the smallest r in 1e-6..1e-2 where both |f| exceed rsens
+// (first-order change of f under eps-relative real perturbations of each
+// entry of A, b, c, d) plus a floor; r is then its location tolerance. A
+// phase crossing also needs L finite and Re L < 0 certain at the root and no
+// other root of Im L in the bracket, so the sign change is not a ±180° wrap
+// through a pole; a Nyquist crossing needs L(−1) above coefficient noise, as
+// AllMargin does. A reported crossing is sound when an exact root lies
+// within its tolerance or |f| there is within budget, a generous normwise
+// bound on the evaluation error of the realization.
 
 import (
 	"math"
