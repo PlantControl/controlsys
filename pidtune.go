@@ -73,9 +73,7 @@ const (
 // also pass the back-off gate: keep the phase margin at every gain
 // crossover, those above the band the first wc sets included up to where
 // the loop's Markov bound keeps |L| ≤ 3/4 (continuous plants without
-// internal delays), and keep |S| ≤ 4; a back-off design must also not cross
-// over above that band, which lowering wc would not raise. A first design
-// failing it is retried
+// internal delays), and keep |S| ≤ 4. A first design failing it is retried
 // at crossovers lowered up to three decades, or to a hundredth of the
 // slowest non-integrating pole's natural frequency when that is lower, six
 // decades at most (six when wc came from a pole because G has no gain
@@ -661,10 +659,7 @@ func pidtuneZeroAtIntegrator(plant *System) bool {
 // 0 dB included. The plant response and the discrete controller terms on
 // both grids are computed once.
 type pidtuneGate struct {
-	p pidTuningPlant
-	// wc is the first design's crossover; designs below it are back-off
-	// steps.
-	wc    float64
+	p     pidTuningPlant
 	sens  pidtuneGrid
 	cross pidtuneGrid
 	at    func(float64) complex128
@@ -765,7 +760,7 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 	for i := range omega {
 		omega[i] = math.Min(lo*math.Pow(10, float64(i)/pidtuneGatePerDecade), hi)
 	}
-	gate := &pidtuneGate{p: p, wc: wc, at: at, plant: plant}
+	gate := &pidtuneGate{p: p, at: at, plant: plant}
 	gate.cross = pidtuneGrid{w: pidTuningCrossGrid(p, omega), dt: plant.Dt}
 	gate.sens.dt = plant.Dt
 	for w := lo; ; {
@@ -807,9 +802,6 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 	}
 	if above, _ := g.beyond(&c); above != nil {
 		_, m := pidTuningCrossingsOn(g.p, c, above, wc, nil)
-		if wc < g.wc && len(m) > 1 {
-			return fmt.Errorf("%s design at wc=%g, below wc=%g: %w", pidType, wc, g.wc, errPidtuneAboveBand)
-		}
 		margins = append(margins, m[1:]...)
 	}
 	floor := pm - pidtuneMarginTol
@@ -935,12 +927,6 @@ func (g *pidtuneGate) rotates(c PID2) bool {
 	top := g.p.high
 	return big <= top/2 && 4*sum < g.p.tau*top*top
 }
-
-// errPidtuneAboveBand marks a back-off design crossing over above the band
-// the first crossover sets: lowering wc must not raise the bandwidth, as a
-// gain placed where a zero near the integrator leaves |G| small does,
-// decades up.
-var errPidtuneAboveBand = fmt.Errorf("crosses over above the band of the first crossover: %w", ErrPIDTuningTargetUnattainable)
 
 // errPidtuneReflected marks a gate failure at reflected crossings only,
 // whose signed margin 180° + ∠L is at most −(pm − tol): their classical
