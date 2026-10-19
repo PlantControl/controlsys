@@ -195,7 +195,7 @@ func ddSISOSolve(sys *System, pt frequencyPoint, withNoise bool) (h complex128, 
 		y = y.add(ddComplex{re: dd{cr.Data[i], 0}}.mul(x[i]))
 	}
 	q := ddComplex{dd{-qr, 0}, dd{-qi, 0}}
-	h = y.mul(q).complex128() + complex(d, 0)
+	h = y.mul(q).add(ddComplex{re: dd{d, 0}}).complex128()
 	ap, aq := cmplx.Abs(pt.p), cmplx.Abs(pt.q)
 	var cNorm, xNorm float64
 	for i := range n {
