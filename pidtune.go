@@ -662,6 +662,13 @@ type pidtuneGate struct {
 	p     pidTuningPlant
 	sens  pidtuneGrid
 	cross pidtuneGrid
+	// onSens[k] is the index of cross.w[k] in sens.w, or −1.
+	onSens []int
+	// loopC's L on sens.w, filled through loopN by loop.
+	loopC PID2
+	loopK func(int) complex128
+	loopL []complex128
+	loopN int
 	at    func(float64) complex128
 	// tail bounds |L| above the band (pidTuningLoopTail), built on first use.
 	plant    *System
@@ -755,13 +762,7 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 			return g
 		},
 	}
-	n := int(math.Ceil(math.Log10(hi/lo)*pidtuneGatePerDecade)) + 1
-	omega := make([]float64, n)
-	for i := range omega {
-		omega[i] = math.Min(lo*math.Pow(10, float64(i)/pidtuneGatePerDecade), hi)
-	}
 	gate := &pidtuneGate{p: p, at: at, plant: plant}
-	gate.cross = pidtuneGrid{w: pidTuningCrossGrid(p, omega), dt: plant.Dt}
 	gate.sens.dt = plant.Dt
 	for w := lo; ; {
 		gate.sens.w = append(gate.sens.w, w)
@@ -778,6 +779,7 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 		}
 		w = math.Min(w+step, hi)
 	}
+	gate.cross = pidtuneGrid{w: pidTuningCrossGrid(p, gate.sens.w), dt: plant.Dt}
 	return gate
 }
 
@@ -866,9 +868,9 @@ func (g *pidtuneGate) winds(c PID2) bool {
 		prev = v
 		return true
 	}
-	k := g.sens.feedback(c)
+	l := g.loop(c)
 	for i := range g.sens.w {
-		if !step(1 + g.sens.g[i]*k(i)) {
+		if !step(1 + l(i)) {
 			return false
 		}
 	}
@@ -1112,29 +1114,62 @@ func pidtuneGateController(pid *PID) PID2 {
 	return PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
 }
 
-// crossExcess returns k ↦ |L(cross.w[k])|−1, sampling the plant on the
-// first call.
+// crossExcess returns k ↦ |L(cross.w[k])|−1. The crossover grid is the
+// |S| grid plus mode points, sampled on the first call.
 func (g *pidtuneGate) crossExcess(c PID2) func(int) float64 {
 	if g.cross.g == nil {
-		for _, w := range g.cross.w {
-			g.cross.g = append(g.cross.g, g.p.at(w))
+		g.cross.g = make([]complex128, len(g.cross.w))
+		g.onSens = make([]int, len(g.cross.w))
+		j := 0
+		for i, w := range g.cross.w {
+			for j < len(g.sens.w) && g.sens.w[j] < w {
+				j++
+			}
+			g.onSens[i] = -1
+			if j < len(g.sens.w) && g.sens.w[j] == w {
+				g.cross.g[i], g.onSens[i] = g.sens.g[j], j
+			} else {
+				g.cross.g[i] = g.p.at(w)
+			}
 		}
 	}
 	k := g.cross.feedback(c)
-	return func(i int) float64 { return cmplx.Abs(g.cross.g[i]*k(i)) - 1 }
+	l := g.loop(c)
+	return func(i int) float64 {
+		if j := g.onSens[i]; j >= 0 {
+			return cmplx.Abs(l(j)) - 1
+		}
+		return cmplx.Abs(g.cross.g[i]*k(i)) - 1
+	}
+}
+
+// loop returns i ↦ L(sens.w[i]) for c, computed once per point for the
+// latest c.
+func (g *pidtuneGate) loop(c PID2) func(int) complex128 {
+	if g.loopK == nil || g.loopC != c {
+		g.loopC, g.loopK, g.loopN = c, g.sens.feedback(c), 0
+		if g.loopL == nil {
+			g.loopL = make([]complex128, len(g.sens.w))
+		}
+	}
+	return func(i int) complex128 {
+		for ; g.loopN <= i; g.loopN++ {
+			g.loopL[g.loopN] = g.sens.g[g.loopN] * g.loopK(g.loopN)
+		}
+		return g.loopL[i]
+	}
 }
 
 // sensitivityOver returns a sampled |S| above bound, or the largest sampled
 // |S| when none is; as pidTuningSensitivityPeak, grid maxima above half the
 // bound are refined by golden section. Unevaluable samples are skipped.
 func (g *pidtuneGate) sensitivityOver(c PID2, bound float64) float64 {
-	s := func(gw, k complex128) float64 { return 1 / cmplx.Abs(1+gw*k) }
-	refine := func(w float64) float64 { return s(g.at(w), pidTuningFeedback(c, w)) }
-	k := g.sens.feedback(c)
+	refine := func(w float64) float64 { return 1 / cmplx.Abs(1+g.at(w)*pidTuningFeedback(c, w)) }
+	l := g.loop(c)
 	peak := 0.0
 	var v0, v1 float64
 	for i, w := range g.sens.w {
-		v := s(g.sens.g[i], k(i))
+		v := 1 / cmplx.Abs(1+l(i))
 		if math.IsNaN(v) {
 			v0, v1 = 0, 0
 			continue
