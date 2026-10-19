@@ -52,6 +52,31 @@ func TestOrderSchurGroupFirstSplitBlock(t *testing.T) {
 	}
 }
 
+func TestOrderSchurGroupFirstSplitBlockOneHalf(t *testing.T) {
+	const n = 3
+	tm := []float64{
+		1, 0.3, -0.7,
+		0, -9.5, 1,
+		0, 0.25, -9.5,
+	}
+	z := make([]float64, n*n)
+	for i := range n {
+		z[i*n+i] = 1
+	}
+	got, err := orderSchurGroupFirst(tm, z, n, func(e complex128) bool { return real(e) > -9.5 && real(e) < 0 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := schurEigenvaluesRaw(tm, n)
+	if got != 1 || math.Abs(real(ev[0])+9) > 1e-12 {
+		t.Fatalf("placed %d, eigenvalues %v; want 1 with -9 leading", got, ev)
+	}
+	rest := []float64{real(ev[1]), real(ev[2])}
+	if math.Abs(rest[0]+rest[1]-(-9)) > 1e-12 || math.Abs(rest[0]*rest[1]-(-10)) > 1e-11 {
+		t.Fatalf("trailing eigenvalues %v, want {-10, 1}", rest)
+	}
+}
+
 // Double stable poles that Dgees returns as a near-real 2x2 block must both
 // land in Stable.
 func TestStabsepRepeatedPoleSchurBlock(t *testing.T) {
