@@ -2297,6 +2297,21 @@ func BenchmarkMarginOrder(b *testing.B) {
 	}
 }
 
+// BenchmarkAllMarginDiscrete times AllMargin on discrete loops, whose
+// phase crossings include the scan towards Nyquist.
+func BenchmarkAllMarginDiscrete(b *testing.B) {
+	for _, n := range []int{20, 60, 150} {
+		sys := marginRandomLoop(b, n, sweepDense, 0.05, false, false)
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				if _, err := AllMargin(sys); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // A descriptor loop with an algebraic state (singular E) adds infinite
 // eigenvalues to the crossing pencils; the finite crossings still match the
 // dense grid.
