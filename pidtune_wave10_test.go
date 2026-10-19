@@ -100,7 +100,7 @@ func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 				w := wc * math.Pow(10, -float64(k)/pidtuneBackoffPerDecade)
 				for _, sign := range []float64{1, -1} {
 					for _, lagFloor := range []bool{false, true} {
-						pid, err := pidtuneGains(p, &pidtunePlantPoint{}, f, w, 60, sign, true, lagFloor, pidtunePIDFIterate)
+						pid, err := pidtuneGains(p, &pidtunePlantPoint{}, f, w, 60, sign, true, lagFloor, pidtunePDLegacy, pidtunePIDFIterate)
 						if err != nil {
 							continue
 						}
@@ -171,15 +171,20 @@ func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 // AUOTFB: an automatic first design is gated like a back-off step (the
 // classical margin on loops the pole test certifies); before, PI-family
 // designs at the bandwidth crossover returned PM 3.2° with |S| 18 (I) and
-// PM 6.4° with |S| 28 (PD). An explicit wc stays ungated (V7UW3M). Oracle:
-// closed-loop roots, classical margin at every crossover and |S|.
+// PM 6.4° with |S| 28 (PD). An explicit wc stays ungated (V7UW3M): |S| 24
+// for the second PD; the first one's explicit-wc PD, placed at |L(wc)| = 1
+// since E4I7RE, is unstable for every Td/10 filtered PD of either sign
+// (oracle sweep), so it errors. Oracle: closed-loop roots, classical margin
+// at every crossover and |S|.
 func TestPidtuneAutoFirstDesignGated(t *testing.T) {
 	for _, c := range []struct {
 		f        PidtuneType
 		num, den Poly
+		unstable bool
 	}{
-		{PidtuneI, Poly{0.8296, 0.008296}, Poly{1, 0.999, 0.1257}},
-		{PidtunePD, Poly{0.9259305881240456, -0.25001768378306766, -14.09549687784304, -4.875339983688054}, Poly{1, 10.913817523403575, 51.69190733555752, 143.2440252325901, 183.43503385908775}},
+		{PidtuneI, Poly{0.8296, 0.008296}, Poly{1, 0.999, 0.1257}, false},
+		{PidtunePD, Poly{0.9259305881240456, -0.25001768378306766, -14.09549687784304, -4.875339983688054}, Poly{1, 10.913817523403575, 51.69190733555752, 143.2440252325901, 183.43503385908775}, true},
+		{PidtunePD, Poly{0.8001772693191576, -0.930259502360965}, Poly{1, 7.820477719021238, 22.734552161124903, 29.06460406628826, 13.753654621908568}, false},
 	} {
 		name := fmt.Sprintf("%s %v/%v", c.f, c.num, c.den)
 		p := pidtuneBackoffPlant(t, c.num, c.den, 0, 0)
@@ -194,6 +199,12 @@ func TestPidtuneAutoFirstDesignGated(t *testing.T) {
 			t.Fatal(err)
 		}
 		first, err := Pidtune(p, c.f, wc, nil)
+		if c.unstable {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s at explicit wc=%g: %+v, %v; want ErrPIDTuningTargetUnattainable", name, wc, first, err)
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatalf("%s at explicit wc=%g: %v", name, wc, err)
 		}
@@ -501,7 +512,7 @@ func TestPidtuneBackoffStaysInBand(t *testing.T) {
 	gate := newPidtuneGate(p, screen.model, eval, wc, wc*math.Pow(10, -pidtuneBackoffMaxDecade))
 
 	w := wc * math.Pow(10, -110.0/pidtuneBackoffPerDecade)
-	pid, err := pidtuneGains(p, &pidtunePlantPoint{}, PidtunePID, w, 60, 1, true, false, pidtunePIDFIterate)
+	pid, err := pidtuneGains(p, &pidtunePlantPoint{}, PidtunePID, w, 60, 1, true, false, pidtunePDLegacy, pidtunePIDFIterate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +523,7 @@ func TestPidtuneBackoffStaysInBand(t *testing.T) {
 		t.Errorf("PID at %g: %+v gate %v; want rejected above the band", w, pid, err)
 	}
 
-	pi, err := pidtuneGains(p, &pidtunePlantPoint{}, PidtunePI, wc, 60, 1, true, false, pidtunePIDFIterate)
+	pi, err := pidtuneGains(p, &pidtunePlantPoint{}, PidtunePI, wc, 60, 1, true, false, pidtunePDLegacy, pidtunePIDFIterate)
 	if err != nil {
 		t.Fatal(err)
 	}

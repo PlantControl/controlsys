@@ -92,9 +92,12 @@ func pidtuneOracleLoop(pid *PID, num, den Poly, dt, delay float64) func(float64)
 	}
 }
 
-// pidtuneBackedOff reports whether Pidtune(p, f, 0, opts) had to lower the
-// automatic crossover: the design at that crossover itself is rejected.
-func pidtuneBackedOff(t *testing.T, p *System, f PidtuneType, opts *PidtuneOptions) bool {
+// pidtuneBackedOff reports whether Pidtune(p, f, 0, opts), returning pid,
+// had to lower the automatic crossover: the design at that crossover itself
+// is rejected. An explicit-wc PD is placed on its realized response, unlike
+// the automatic first design (pidtunePDLegacy), which pid is then compared
+// with.
+func pidtuneBackedOff(t *testing.T, p *System, f PidtuneType, opts *PidtuneOptions, pid *PID) bool {
 	t.Helper()
 	pm := 60.0
 	if opts != nil && opts.PhaseMargin != 0 {
@@ -103,6 +106,16 @@ func pidtuneBackedOff(t *testing.T, p *System, f PidtuneType, opts *PidtuneOptio
 	wc, err := findCrossoverFreq(p, 0, pm)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if f == PidtunePD && pid != nil {
+		for _, sign := range []float64{1, -1} {
+			for _, sf := range []bool{true, false} {
+				first, err := pidtuneGains(p, &pidtunePlantPoint{}, f, wc, pm, sign, sf, false, pidtunePDLegacy, pidtunePIDFIterate)
+				if err == nil && *first == *pid {
+					return false
+				}
+			}
+		}
 	}
 	_, err = Pidtune(p, f, wc, opts)
 	return err != nil
@@ -398,7 +411,7 @@ func TestPidtuneBackoffGateRobust(t *testing.T) {
 	for _, c := range cases {
 		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, c.delay)
 		name := fmt.Sprintf("%v/%v %s", c.num, c.den, c.typ)
-		if !pidtuneBackedOff(t, p, c.typ, nil) {
+		if !pidtuneBackedOff(t, p, c.typ, nil, nil) {
 			t.Fatalf("%s: automatic crossover accepted, the gate is untested", name)
 		}
 		pid, err := Pidtune(p, c.typ, 0, nil)
@@ -526,7 +539,7 @@ func TestPidtuneAutoCrossoverRandomStable(t *testing.T) {
 					continue
 				}
 				name := fmt.Sprintf("trial %d %s %v/%v dt=%g delay=%g", trial, f, num, den, dt, delay)
-				if pidtuneBackedOff(t, p, f, opts) {
+				if pidtuneBackedOff(t, p, f, opts, pid) {
 					backedOff++
 					pm := 60.0
 					if opts != nil {

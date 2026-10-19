@@ -101,7 +101,10 @@ const (
 // plant, or internal delays). Otherwise the result is ErrPIDTuningTargetUnattainable.
 // An explicit wc is honoured as in MATLAB: the design at wc is returned
 // whenever its closed loop passes the stability test (an unstable
-// forward-Euler filter aside), without back-off and
+// forward-Euler filter aside), with |L(wc)| = 1 (a PD places its phase on
+// its Td/10 filtered response, clamped to [0.05 rad, its most lead], else,
+// when the most lead gives an unstable loop, keeps the Td of the automatic
+// design, which clamps phase on the ideal derivative), without back-off and
 // without checking the margin at other gain crossovers or |S| (the
 // achieved margins are the caller's to check, as with AllMargin); only an
 // unstable design, or an explicit phase margin unreachable at wc, returns
@@ -368,17 +371,30 @@ func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error
 // Td/10 filter misses the target phase is replaced by its design at the
 // default filter, else by the missed design itself, whichever first passes
 // check, gated for wc = 0: a missed design can cross over elsewhere with
-// almost no margin.
+// almost no margin. An explicit-wc PD at its most lead failing check is
+// replaced by its legacy-Td design (pidtunePDLegacyTd), whose larger Td sits
+// on the ideal-derivative clamp, when that one passes.
 func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor bool) (*PID, error) {
-	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pidtunePIDFIterate)
+	pd := pidtunePDLegacy
+	if !r.auto {
+		pd = pidtunePDPlaced
+	}
+	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pd, pidtunePIDFIterate)
 	if err == nil {
-		return pid, r.check(pid, wc, gated)
+		err = r.check(pid, wc, gated)
+		if err != nil && pd == pidtunePDPlaced && r.pidType == PidtunePD && errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pidtunePDLegacyTd, pidtunePIDFIterate)
+			if altErr == nil && alt.Kd/alt.Kp > pid.Kd/pid.Kp && r.check(alt, wc, gated) == nil {
+				return alt, nil
+			}
+		}
+		return pid, err
 	}
 	if !errors.Is(err, errPidtunePIDFMiss) {
 		return nil, err
 	}
 	for _, mode := range []pidtunePIDFMode{pidtunePIDFDefaultTf, pidtunePIDFKeep} {
-		alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, mode)
+		alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pd, mode)
 		if altErr == nil && r.check(alt, wc, gated || r.auto) == nil {
 			return alt, nil
 		}
@@ -1781,8 +1797,25 @@ type pidtuneTerms struct {
 	dFormula PIDFormula
 	// lagFloor raises a PDF phase below the family's range to its floor.
 	lagFloor bool
+	pd       pidtunePDMode
 	pidf     pidtunePIDFMode
 }
+
+// pidtunePDMode selects computePD's design.
+type pidtunePDMode int
+
+const (
+	// pidtunePDLegacy: phase and gain placed on the ideal derivative, the
+	// Td/10 filter then added, so |L(wc)| ≠ 1, as the automatic crossover's
+	// gate was tuned on.
+	pidtunePDLegacy pidtunePDMode = iota
+	// pidtunePDPlaced: phase and gain placed on the realized Td/10 response
+	// (placedPD).
+	pidtunePDPlaced
+	// pidtunePDLegacyTd: the legacy Td, with Kp for |L(wc)| = 1 on the
+	// realized response.
+	pidtunePDLegacyTd
+)
 
 // pidtunePIDFMode selects computePIDF's design.
 type pidtunePIDFMode int
@@ -1820,13 +1853,13 @@ func (t pidtuneTerms) derivative(tf float64) complex128 {
 // With stableFilter, a discrete forward-Euler derivative whose filter pole
 // 1−Dt/Tf leaves the unit circle is redesigned with backward Euler.
 func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter bool) (*PID, error) {
-	return pidtuneGains(plant, nil, pidType, wc, pmDeg, sign, stableFilter, false, pidtunePIDFKeep)
+	return pidtuneGains(plant, nil, pidType, wc, pmDeg, sign, stableFilter, false, pidtunePDLegacy, pidtunePIDFKeep)
 }
 
-// pidtuneGains is computePIDGains, lagFloor and pidf aside, evaluating the
-// plant with at.
-func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pidf pidtunePIDFMode) (*PID, error) {
-	pid, err := computePIDGainsPositive(plant, at, pidType, wc, pmDeg, sign, stableFilter, lagFloor, pidf)
+// pidtuneGains is computePIDGains, lagFloor, pd and pidf aside,
+// evaluating the plant with at.
+func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pd pidtunePDMode, pidf pidtunePIDFMode) (*PID, error) {
+	pid, err := computePIDGainsPositive(plant, at, pidType, wc, pmDeg, sign, stableFilter, lagFloor, pd, pidf)
 	if err != nil {
 		return nil, err
 	}
@@ -1837,7 +1870,7 @@ func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc,
 	return pid, nil
 }
 
-func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pidf pidtunePIDFMode) (*PID, error) {
+func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pd pidtunePDMode, pidf pidtunePIDFMode) (*PID, error) {
 	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
 		return nil, fmt.Errorf("crossover %g must be below the Nyquist frequency %g: %w", wc, math.Pi/plant.Dt, ErrInvalidArgument)
 	}
@@ -1866,7 +1899,7 @@ func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType Pidtu
 	if plant.Dt > 0 && pidType == PidtunePID {
 		dFormula = BackwardEuler
 	}
-	terms := pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula, lagFloor: lagFloor, pidf: pidf}
+	terms := pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula, lagFloor: lagFloor, pd: pd, pidf: pidf}
 	pid, err := pidtuneFamily(pidType, terms, magP, phiC)
 	if !stableFilter || plant.Dt == 0 || dFormula != ForwardEuler {
 		return pid, err
@@ -1956,8 +1989,10 @@ func computePI(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	pid.Kp = real(target) - pid.Ki*real(i)
 }
 
-// computePD preserves the legacy PD tuning seed, including its Td/10 filter.
-// Callers requesting an ideal PD must explicitly set Tf=0.
+// computePD designs a Td/10-filtered PD as terms.pd selects; the legacy
+// design places phase and gain on the ideal derivative, leaving |L(wc)| ≠ 1
+// (≈ 0.49 at the upper clamp). Callers requesting an ideal PD must
+// explicitly set Tf=0.
 func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	// C = Kp*(1 + Td*D), angle = arg(1 + Td*D)
 	phiCRad := phiC * math.Pi / 180
@@ -1970,6 +2005,11 @@ func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 		phiCRad = math.Pi/2 - 0.05
 	}
 
+	if terms.pd == pidtunePDPlaced {
+		placedPD(pid, terms, magP, phiC)
+		return
+	}
+
 	d := terms.derivative(0)
 	tan := math.Tan(phiCRad)
 	Td := tan / (imag(d) - real(d)*tan)
@@ -1977,12 +2017,66 @@ func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 		Td = 0.1 / terms.wc
 	}
 
+	pid.Tf = Td / 10
+	if terms.pd == pidtunePDLegacyTd {
+		d = terms.derivative(pid.Tf)
+	}
 	pid.Kp = 1.0 / (magP * cmplx.Abs(1+complex(Td, 0)*d))
 	pid.Kd = pid.Kp * Td
-	pid.Tf = Td / 10
-	if pid.Tf <= 0 {
-		pid.Tf = 1.0 / (10 * terms.wc)
+}
+
+// placedPD sets a Td/10-filtered PD whose realized phase at wc is phiC
+// degrees clamped to [0.05 rad, the family's most lead] (56.4° for a
+// continuous plant, at Td·wc = 1/√0.11), with Kp for |C(jwc)| = 1/magP, so
+// |L(wc)| = 1 as MATLAB places the crossover. computePIDF clamps its phase
+// on the ideal derivative instead.
+func placedPD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
+	integ := pidtuneIntegrator(terms.dFormula, terms.wc, terms.dt)
+	c := func(logX float64) complex128 {
+		td := math.Exp(logX) / terms.wc
+		return 1 + complex(td, 0)/(complex(td/10, 0)+integ)
 	}
+	lead := func(logX float64) float64 { return cmplx.Phase(c(logX)) }
+
+	const lo, hi = -18.0, 14.0
+	const g = 0.6180339887498949
+	a, b := lo, hi
+	x1, x2 := b-g*(b-a), a+g*(b-a)
+	f1, f2 := lead(x1), lead(x2)
+	for b-a > 1e-10 {
+		if f1 < f2 {
+			a, x1, f1 = x1, x2, f2
+			x2 = a + g*(b-a)
+			f2 = lead(x2)
+		} else {
+			b, x2, f2 = x2, x1, f1
+			x1 = b - g*(b-a)
+			f1 = lead(x1)
+		}
+	}
+	logX := (a + b) / 2
+	most := lead(logX)
+	phiCRad := math.Max(phiC*math.Pi/180, 0.05)
+	if most > phiCRad {
+		a, b = lo, logX
+		for b-a > 1e-13 {
+			m := (a + b) / 2
+			if lead(m) < phiCRad {
+				a = m
+			} else {
+				b = m
+			}
+		}
+		logX = (a + b) / 2
+	}
+	if !(lead(logX) > 0) {
+		logX = math.Log(0.1)
+	}
+	Td := math.Exp(logX) / terms.wc
+
+	pid.Tf = Td / 10
+	pid.Kp = 1.0 / (magP * cmplx.Abs(c(logX)))
+	pid.Kd = pid.Kp * Td
 }
 
 // pidFromPhase solves Kp + Ki*I + Kd*D = target with Ki = Kp*wc/b and D the
