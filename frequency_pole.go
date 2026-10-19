@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"slices"
 )
 
 // poleResponse is the response entry at one of its poles. Like MATLAB's 1/0
@@ -16,6 +17,9 @@ const (
 	poleResidueFloor = 1e-10
 	poleRelativeTol  = 1e-3
 	poleClusterTol   = 1e-6
+	// poleClusterSpread allows for the conditioning of a multiple pole's
+	// eigenvectors in its eps^{1/k} spread.
+	poleClusterSpread = 10
 )
 
 // evalWithPoleLimit sets dst to eval(pt), or where eval fails to the
@@ -27,7 +31,9 @@ const (
 // as s itself: a computed integrator is of order eps·‖A‖ and a k-fold one
 // spreads by eps^{1/k}. Next to a pole cluster at the origin the double solve
 // fails at |s| of the cluster's size, where no pole is near s and the
-// response is large but finite.
+// response is large but finite. The pole limit's samples fail there too;
+// each failed sample is solved in double-double, and where that is singular
+// as well the step is taken past the cluster at s (poleSpacing's wide).
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
 }
@@ -37,7 +43,8 @@ func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syste
 // tuned to it: the rational margin search takes near-roots of an
 // asymptotically real L next to an origin cluster for crossings once that
 // region evaluates. Otherwise, where allow(w) reports false, eval's error is
-// returned; a nil allow allows the fallback.
+// returned; a nil allow allows the fallback. Any restriction also keeps the
+// pole limit's samples in double, so its errors stand for the caller.
 type ddGate struct {
 	limit bool
 	allow func(float64) bool
@@ -52,11 +59,12 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return nil
 	}
 	s := pt.value()
-	rho, near, perr := poleSpacing(sys, s)
+	rho, wide, near, perr := poleSpacing(sys, s)
 	if perr != nil {
 		return perr
 	}
-	if !near && !gate.limit && sys.internalDelayCount() == 0 {
+	delayFree := sys.internalDelayCount() == 0
+	if !near && !gate.limit && delayFree {
 		if gate.allow != nil && !gate.allow(gate.w) {
 			return err
 		}
@@ -64,7 +72,19 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 			return nil
 		}
 	}
-	return poleLimitInto(eval, s, rho, dst, err)
+	if !delayFree || gate.limit || gate.allow != nil {
+		return poleLimitInto(eval, s, rho, dst, err)
+	}
+	sample := func(pt frequencyPoint, dst []complex128) error {
+		if err := eval(pt, dst); err == nil || !ddResponseInto(sys, pt, dst) {
+			return err
+		}
+		return nil
+	}
+	if lerr := poleLimitInto(sample, s, rho, dst, err); lerr == nil || wide <= rho {
+		return lerr
+	}
+	return poleLimitInto(sample, s, wide, dst, err)
 }
 
 // poleLimitInto sets dst to the response at s, a numerical pole of the
@@ -131,16 +151,19 @@ func poleLimitInto(eval func(frequencyPoint, []complex128) error, s complex128, 
 	return nil
 }
 
-// poleSpacing returns the distance from s to the nearest pole of the
+// poleSpacing returns the distance rho from s to the nearest pole of the
 // delay-free plant (A, E) that is distinct from s, bounded by the overall
 // spectral scale and, for continuous internal delays, by 1/τ, over which
-// e^{-sτ} varies. near reports a pole at s as evalWithPoleLimit defines it.
-func poleSpacing(sys *System, s complex128) (rho float64, near bool, err error) {
+// e^{-sτ} varies. wide is rho with the k nearest poles also taken as s when
+// all lie within poleClusterSpread·eps^{1/k} of the scale, the spread of a
+// computed k-fold pole. near reports a pole at s as evalWithPoleLimit
+// defines it.
+func poleSpacing(sys *System, s complex128) (rho, wide float64, near bool, err error) {
 	n, _, _ := sys.Dims()
 	var poles []complex128
 	if n > 0 {
 		if poles, err = newDescriptorPolicy(sys).poles("pole limit", sys.A, n); err != nil {
-			return 0, false, err
+			return 0, 0, false, err
 		}
 	}
 	scale := cmplx.Abs(s)
@@ -153,6 +176,7 @@ func poleSpacing(sys *System, s complex128) (rho float64, near bool, err error) 
 		scale = 1
 	}
 	rho = scale
+	dist := make([]float64, 0, len(poles))
 	for _, p := range poles {
 		d := cmplx.Abs(p - s)
 		if d > poleClusterTol*scale && d < rho {
@@ -160,16 +184,29 @@ func poleSpacing(sys *System, s complex128) (rho float64, near bool, err error) 
 		}
 		if !cmplx.IsInf(p) {
 			near = near || d <= poleRelativeTol*max(cmplx.Abs(s), cmplx.Abs(p)) || s == 0 && d <= poleClusterTol*scale
+			dist = append(dist, d)
 		}
+	}
+	slices.Sort(dist)
+	cluster := 0
+	for k, d := range dist {
+		if d <= poleClusterSpread*math.Pow(eps(), 1/float64(k+1))*scale {
+			cluster = k + 1
+		}
+	}
+	wide = scale
+	if cluster < len(dist) {
+		wide = min(scale, max(rho, dist[cluster]))
 	}
 	if sys.IsContinuous() && sys.LFT != nil {
 		for _, tau := range sys.LFT.Tau {
 			if tau > 0 {
 				rho = min(rho, 1/tau)
+				wide = min(wide, 1/tau)
 			}
 		}
 	}
-	return rho, near, nil
+	return rho, wide, near, nil
 }
 
 // ddResponseInto sets dst to the p×m response C(sE−A)⁻¹B + D of the

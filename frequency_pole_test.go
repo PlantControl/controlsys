@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -491,6 +492,10 @@ func TestPoleLimitOffOriginCluster(t *testing.T) {
 			if err != nil || cmplx.Abs(h-want) > 1e-12*cmplx.Abs(want) {
 				t.Errorf("ω=%g, descriptor %v: evalWithPoleLimit = %v, %v; want %v", w, sys.E != nil, h, err, want)
 			}
+			fr, err := sys.FreqResponse([]float64{w})
+			if err != nil || cmplx.Abs(fr.Data[0]-want) > 1e-12*cmplx.Abs(want) {
+				t.Errorf("ω=%g, descriptor %v: FreqResponse = %v, %v; want %v", w, sys.E != nil, fr, err, want)
+			}
 		}
 		got, ok := e.h22Det(w)
 		if want := 1 + q.L(w); !ok || cmplx.Abs(got-want) > 1e-9*cmplx.Abs(want) {
@@ -850,5 +855,168 @@ func TestPoleLimitOffOriginClusterPublicAPIs(t *testing.T) {
 	}
 	if math.Abs(m.GainMargin-am.GainMargins[0]) > 1e-9 || math.Abs(m.PhaseMargin-am.PhaseMargins[0]) > 1e-9 {
 		t.Errorf("Margin = %+v; want GM %v, PM %v", m, am.GainMargins[0], am.PhaseMargins[0])
+	}
+}
+
+// TestPoleLimitSamplesBesideOriginCluster (D4OV3H): the pole-limit samples
+// s+kδ hit the singular double solve beside a cluster at the pole, and the
+// solve error replaced +Inf: s²(s+1)(s+1e−9) at ω = 0 and 1e−14 (dd-singular
+// too), and (z−1)³, whose computed poles spread by eps^{1/3}, so δ was a
+// fraction of 7e−6. Ungated, the samples fall back to dd and, if still
+// singular, δ steps past the cluster. A gated caller keeps the double
+// failure. Oracle: big.Float solve of the stored realization.
+func TestPoleLimitSamplesBesideOriginCluster(t *testing.T) {
+	cont := makePlant(t, []float64{1, 3, 1}, []float64{1, 1 + 1e-9, 1e-9, 0, 0})
+	disc := makeDiscretePlant(t, []float64{0.2376376495436092, -0.22623825681198792}, []float64{1, -3, 3, -1}, 0.0411986772067474)
+	for _, c := range []struct {
+		name      string
+		sys       *System
+		inf, fin  []float64
+		finiteTol float64
+	}{
+		{"s²(s+1)(s+1e-9)", cont, []float64{0, 1e-14}, []float64{1e-10, 1e-3}, 1e-9},
+		{"(z-1)³", disc, []float64{0, 1e-9}, []float64{1e-5, 1e-4, 1e-3}, 1e-8},
+	} {
+		if _, raw, _ := poleLimitAt(c.sys, 0); raw == nil {
+			t.Fatalf("%s: double solve succeeded at ω=0; case no longer exercises the pole limit", c.name)
+		}
+		ws := append(append([]float64{}, c.inf...), c.fin...)
+		for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+			"FreqResponse":          c.sys.FreqResponse,
+			"FreqResponsePointwise": c.sys.FreqResponsePointwise,
+		} {
+			fr, err := f(ws)
+			if err != nil {
+				t.Errorf("%s %s: %v", c.name, api, err)
+				continue
+			}
+			for k, w := range ws {
+				got := fr.At(k, 0, 0)
+				if k < len(c.inf) {
+					if !cmplx.IsInf(got) {
+						t.Errorf("%s %s(%g) = %v; want +Inf", c.name, api, w, got)
+					}
+					continue
+				}
+				if want := frExactResponse(c.sys, frExactPoint(w, c.sys.Dt))[0]; cmplx.Abs(got-want) > c.finiteTol*cmplx.Abs(want) {
+					t.Errorf("%s %s(%g) = %v; want %v", c.name, api, w, got, want)
+				}
+			}
+		}
+		z := complex(1, 0)
+		if c.sys.IsContinuous() {
+			z = 0
+		}
+		if h, err := c.sys.EvalFr(z); err != nil || !cmplx.IsInf(h[0][0]) {
+			t.Errorf("%s EvalFr(%v) = %v, %v; want +Inf", c.name, z, h, err)
+		}
+	}
+	eval := newFrequencyEvaluator(cont).pointSolver(math.MaxInt).evalInto
+	pt := newTimeDomain(0).frequencyPoint(0)
+	dst := make([]complex128, 1)
+	allow := func(float64) bool { return true }
+	for _, gate := range []ddGate{{allow: allow}, {limit: true}} {
+		if err := evalWithPoleLimitGated(eval, cont, pt, dst, gate); !errors.Is(err, ErrSingularTransform) {
+			t.Errorf("gate limit=%v: evalWithPoleLimitGated = %v, %v; want ErrSingularTransform", gate.limit, dst[0], err)
+		}
+	}
+}
+
+// TestPoleLimitRotatedTripleIntegrator (D4OV3H): T·(J₃(0)⊕−1)·T⁻¹ rounded
+// has poles −1, −1.8e−6±3.1e−6i and 3.6e−6, the eps^{1/3} spread of the
+// triple root, so the stored realization is regular at 0 and its response
+// there finite. The double solve fails at ω ≤ 1e−10 and so did the pole
+// limit; the response is the dd one. Oracle: big.Float solve.
+func TestPoleLimitRotatedTripleIntegrator(t *testing.T) {
+	a := mat.NewDense(4, 4, []float64{-0.09724203518782691, -0.6262482168330955, 1.1245839277223013, 0.3649548264384213, 0.19892217467110473, -0.13456966238706608, -0.2670787763512443, -0.25756855286099223, -0.010778253288952289, -0.34569662387066097, 0.32921223648755743, 0.42431447139007766, 0.004453954667934697, 0.4472658107465526, -0.0286891741955936, -1.0974005389126644})
+	sys, err := New(a, mat.NewDense(4, 1, []float64{1, -0.4, 0.8, 0.5}), mat.NewDense(1, 4, []float64{0.6, 1.1, -0.9, 0.3}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, raw, _ := poleLimitAt(sys, 0); raw == nil {
+		t.Fatal("double solve succeeded at ω=0; case no longer exercises the pole limit")
+	}
+	ws := []float64{0, 1e-14, 1e-10, 1e-8, 1e-6}
+	check := func(api string, w float64, got complex128) {
+		t.Helper()
+		if want := frExactResponse(sys, frExactPoint(w, 0))[0]; cmplx.Abs(got-want) > 1e-9*cmplx.Abs(want) {
+			t.Errorf("%s(%g) = %v; want %v", api, w, got, want)
+		}
+	}
+	for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+		"FreqResponse":          sys.FreqResponse,
+		"FreqResponsePointwise": sys.FreqResponsePointwise,
+	} {
+		fr, err := f(ws)
+		if err != nil {
+			t.Fatalf("%s: %v", api, err)
+		}
+		for k, w := range ws {
+			check(api, w, fr.At(k, 0, 0))
+		}
+	}
+	for _, w := range ws {
+		h, err := sys.EvalFr(complex(0, w))
+		if err != nil {
+			t.Fatalf("EvalFr(%g): %v", w, err)
+		}
+		check("EvalFr", w, h[0][0])
+	}
+}
+
+// TestPoleLimitIntegratorBesideTinyPoleSweep (D4OV3H): s(s²+as+b) with
+// |b| ≤ 1e−10 has a pole of order b/a beside the integrator; where the double
+// solve is singular off both, FreqResponse, Bode and AllMargin failed for
+// most such plants. Oracles: big.Float solve of the stored realization, and
+// |L| = 1 at each gain crossover from the polynomials.
+func TestPoleLimitIntegratorBesideTinyPoleSweep(t *testing.T) {
+	rng := rand.New(rand.NewPCG(11, 3))
+	ws := make([]float64, 0, 71)
+	for e := -13.0; e <= 1; e += 0.2 {
+		ws = append(ws, math.Pow(10, e))
+	}
+	exercised := 0
+	for trial := range 40 {
+		a := math.Pow(10, -4+3*rng.Float64())
+		b := math.Pow(10, -16+6*rng.Float64())
+		if rng.IntN(2) == 0 {
+			b = -b
+		}
+		num := []float64{rng.NormFloat64(), rng.NormFloat64(), rng.NormFloat64()}
+		den := []float64{1, a, b, 0}
+		sys := makePlant(t, num, den)
+		for _, w := range ws {
+			if _, raw, _ := poleLimitAt(sys, w); raw != nil {
+				exercised++
+				break
+			}
+		}
+		fr, err := sys.FreqResponse(ws)
+		if err != nil {
+			t.Errorf("trial %d %v/%v: FreqResponse: %v", trial, num, den, err)
+			continue
+		}
+		for k, w := range ws {
+			if want := frExactResponse(sys, frExactPoint(w, 0))[0]; cmplx.Abs(fr.At(k, 0, 0)-want) > 1e-9*cmplx.Abs(want) {
+				t.Errorf("trial %d %v/%v: G(%g) = %v; want %v", trial, num, den, w, fr.At(k, 0, 0), want)
+			}
+		}
+		if _, err := sys.Bode(nil, 200); err != nil {
+			t.Errorf("trial %d %v/%v: Bode: %v", trial, num, den, err)
+		}
+		am, err := AllMargin(sys)
+		if err != nil {
+			t.Errorf("trial %d %v/%v: AllMargin: %v", trial, num, den, err)
+			continue
+		}
+		for _, wc := range am.GainCrossFreqs {
+			s := complex(0, wc)
+			if l := cmplx.Abs(polyEval(num, s) / polyEval(den, s)); math.Abs(l-1) > 1e-8 {
+				t.Errorf("trial %d %v/%v: |L(j%g)| = %v; want 1", trial, num, den, wc, l)
+			}
+		}
+	}
+	if exercised < 20 {
+		t.Errorf("%d of 40 plants exercise the pole limit; want ≥ 20", exercised)
 	}
 }
