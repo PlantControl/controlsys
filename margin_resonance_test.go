@@ -153,6 +153,68 @@ func TestAllMargin_LightlyDampedPhaseCrossover(t *testing.T) {
 	}
 }
 
+// bigGainMarginDB returns −20·log10|N(jω)/D(jω)| from big.Float N·conj D and |D|².
+func bigGainMarginDB(num, den []float64, w float64) float64 {
+	re, im := bigLoopAt(num, den, w)
+	d2, _ := bigLoopAt(den, den, w)
+	r, _ := re.Float64()
+	i, _ := im.Float64()
+	d, _ := d2.Float64()
+	return -20 * math.Log10(math.Hypot(r, i)/d)
+}
+
+// BYP4ZM: beside a pair with ζ ~ 1e-12 the phase crossover lies within ulps
+// of the pole and f moves by ~0.1° per ulp; the scan held it to 1e-3° and to
+// clearance points rounded past the |f| = 90 bracket end, and missed it.
+// Oracle: as for TestAllMargin_LightlyDampedPhaseCrossover; GM from big.Float
+// |L| at the reported ω, since |L| moves by ~1e-4 per ulp there.
+func TestAllMarginPhaseCrossUltraLightResonance(t *testing.T) {
+	type tc struct {
+		num, den []float64
+		wn       float64
+	}
+	cases := []tc{
+		{[]float64{-14.58076267912999, 0.2780388291113343}, []float64{1, 1.7493356310572988e-11, 60.9821144190896}, math.Sqrt(60.9821144190896)},
+		{[]float64{-0.47065815665752997, -78.56895717226088}, []float64{1, 4.978584544201923, 349.09061740501886, 1737.9771496708024, 0.23425954438849886, 1.1653612415035386}, 18.6839488959572},
+		{[]float64{-10.117578176208571, -11.554653627263235}, []float64{1, 5.725929450921608e-13, 0.5811185290875198}, math.Sqrt(0.5811185290875198)},
+	}
+	rng := rand.New(rand.NewPCG(5, 11))
+	for range 300 {
+		wn := math.Pow(10, -1+2*rng.Float64())
+		zeta := math.Pow(10, -12.5+2.5*rng.Float64())
+		den := []float64{1, 2 * zeta * wn, wn * wn}
+		if rng.IntN(2) == 0 {
+			p := math.Pow(10, -1+2*rng.Float64())
+			den = []float64{1, den[1] + p, den[2] + p*den[1], p * den[2]}
+		}
+		num := []float64{10 * rng.NormFloat64()}
+		if rng.IntN(2) == 0 {
+			num = append(num, 10*rng.NormFloat64())
+		}
+		cases = append(cases, tc{num, den, wn})
+	}
+	for i, c := range cases {
+		res, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		all, err := AllMargin(res.Sys)
+		if err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		want, _ := bigPhaseCrossings(c.num, c.den, resonanceGrid(1e-4, 1e4, c.wn))
+		ok := len(all.PhaseCrossFreqs) == len(want)
+		for k := 0; ok && k < len(want); k++ {
+			w := all.PhaseCrossFreqs[k]
+			gm := bigGainMarginDB(c.num, c.den, w)
+			ok = math.Abs(w-want[k]) <= 1e-9*want[k] && math.Abs(all.GainMargins[k]-gm) <= 1e-6*max(1, math.Abs(gm))
+		}
+		if !ok {
+			t.Errorf("case %d num %v den %v: wpc %v GM %v, want %v", i, c.num, c.den, all.PhaseCrossFreqs, all.GainMargins, want)
+		}
+	}
+}
+
 // bigUnitCosSin returns cos θ and sin θ in big.Float: Taylor series at
 // θ/2¹⁰, then ten angle doublings.
 func bigUnitCosSin(th float64) (c, s *big.Float) {
@@ -268,9 +330,8 @@ func bigUnitPhaseCrossings(num, den []float64, thp float64) []float64 {
 // frequency, where the phase stays within 1e-8° of −180°, or just past it,
 // where the double solve's phase is off by 1e-5°. Oracle: float64
 // coefficients at exact e^{jθ} in big.Float, Im L bisected, Re L < 0. Where
-// the phase is that flat the crossing is set only to ~eps/slope: a
-// frequency within 1e-5 of the oracle passes when the exact phase there is
-// within 64·eps rad of −180°.
+// the phase is that flat, arg L + 180° rounded to ulp(360) moved the
+// crossing by up to 1e-5 relative (XRXQ4I); crossings must match to 1e-7.
 func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
 	type tc struct {
 		num, den []float64
@@ -284,6 +345,9 @@ func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
 		{[]float64{0.00043269717096372506, -2.5205075284572747}, []float64{1, -2, 1.0000000032590524}, 1},
 		{[]float64{0.4156266235836725, -0.4127608532382766}, []float64{1, -2, 1.0000000006278533}, 1},
 		{[]float64{0.3541729069514521, -0.7616599197851204}, []float64{1, -2, 1.0000000000823044}, 1},
+		{[]float64{-0.8619931462988315, -0.4791089481661279}, []float64{1, -1.4487438779878845, -0.10251224401424697, 0.5512561220176192}, 1},
+		{[]float64{-0.0002929580685127985}, []float64{1, -2.1599186255777103, 2.317720058857019, -2.155684240978195, 0.9978828077015948}, 0.1},
+		{[]float64{-0.012285664809521195, -0.013093860530681841, -0.016387643969841954}, []float64{1, -3.8905296631703514, 5.780997890779641, -3.890406792047608, 0.9999385644389388}, 0.01},
 	}
 	rng := rand.New(rand.NewPCG(21, 99))
 	for range 30 {
@@ -312,14 +376,103 @@ func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
 		}
 		ok := len(got) == len(want)
 		for k := 0; ok && k < len(want); k++ {
-			re, im, mag := bigUnitLoop(c.num, c.den, got[k])
-			q, _ := new(big.Float).Quo(im, re).Float64()
-			d := math.Abs(got[k]-want[k]) / want[k]
-			ok = re.Sign() < 0 && (d <= 1e-7 || d <= 1e-5 && math.Abs(q) <= 64*eps()) &&
+			re, _, mag := bigUnitLoop(c.num, c.den, got[k])
+			ok = re.Sign() < 0 && math.Abs(got[k]-want[k]) <= 1e-7*want[k] &&
 				math.Abs(gm[k]+20*math.Log10(mag)) <= 1e-5
 		}
 		if !ok {
 			t.Errorf("case %d num %v den %v: θpc %v GM %v, want θ %v", i, c.num, c.den, got, gm, want)
+		}
+	}
+}
+
+// WSF2HP: crossovers beside a real pair straddling or next to z = 1, where
+// the phase stays within ~1e-6 rad of −180° up to θ ~ ε and the double
+// solve's phase error is of that order: crossings were missed, or reported
+// a few percent off (case 1). Oracle: as for
+// TestAllMarginPhaseCrossBesideUnitPolePair.
+func TestAllMarginPhaseCrossBesideRealUnitPolePair(t *testing.T) {
+	type tc struct {
+		num, den []float64
+		eps      float64
+	}
+	cases := []tc{
+		{[]float64{0.6942811935961309, 4.422597857871295}, []float64{1, -2, 0.9999999998197421}, 1.34e-5},
+		{[]float64{1e-3, 1}, []float64{1, -2, 1 - 2e-4*2e-4}, 2e-4},
+		{[]float64{1e-4, 1}, []float64{1, -2, 1 - 2e-3*2e-3}, 2e-3},
+		{[]float64{10, 1}, []float64{1, -2, 1 - 5e-4*5e-4}, 5e-4},
+	}
+	rng := rand.New(rand.NewPCG(7, 31))
+	for k := range 45 {
+		e := math.Pow(10, -6+3*rng.Float64())
+		num := []float64{rng.NormFloat64(), rng.NormFloat64()}
+		var den []float64
+		switch k % 3 {
+		case 0:
+			den = []float64{1, -2, 1 - e*e}
+			num[1] = math.Abs(num[1])
+			num[0] = num[1] * math.Pow(10, -3*rng.Float64())
+		case 1:
+			den = polyMul([]float64{1, -1 + e}, []float64{1, -1 + e*(1+4*rng.Float64())})
+		default:
+			den = polyMul([]float64{1, -1}, []float64{1, -1 + e})
+		}
+		if k%3 != 0 && rng.IntN(2) == 1 {
+			den = polyMul(den, []float64{1, 0.9 - 1.8*rng.Float64()})
+		}
+		cases = append(cases, tc{num, den, e})
+	}
+	for i, c := range cases {
+		r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: 1}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		var want []float64
+		for _, w := range bigUnitPhaseCrossings(c.num, c.den, c.eps) {
+			if w < 10*c.eps {
+				want = append(want, w)
+			}
+		}
+		var got, gm []float64
+		for k, w := range res.PhaseCrossFreqs {
+			if w < 10*c.eps {
+				got, gm = append(got, w), append(gm, res.GainMargins[k])
+			}
+		}
+		ok := len(got) == len(want)
+		for k := 0; ok && k < len(want); k++ {
+			re, _, mag := bigUnitLoop(c.num, c.den, got[k])
+			ok = re.Sign() < 0 && math.Abs(got[k]-want[k]) <= 1e-7*want[k] &&
+				math.Abs(gm[k]+20*math.Log10(mag)) <= 1e-5
+		}
+		if !ok {
+			t.Errorf("case %d num %v den %v: θpc %v GM %v, want θ %v", i, c.num, c.den, got, gm, want)
+		}
+	}
+}
+
+// WSF2HP scanned beside each real pole next to z = 1 in double-double, and
+// slow modes at Δt = 0.05 put dozens there: AllMargin of order 150 took
+// minutes. The scan shares one grid across them and keeps the double solve
+// where the phase is ≥ 1e-2° from −180°.
+func TestAllMarginRealUnitPoleScanCost(t *testing.T) {
+	for _, n := range []int{60, 100} {
+		r, err := newRationalLoop(marginRandomLoop(t, n, sweepWeakRows, 0.05, false, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, reals := r.resonancePoles(); len(reals) < 5 {
+			t.Fatalf("n=%d: %d real poles next to z = 1, want ≥ 5", n, len(reals))
+		}
+		if _, err := r.phaseCrossings(); err != nil {
+			t.Fatal(err)
+		}
+		if r.eval.ddSolves > 400 {
+			t.Errorf("n=%d: %d double-double solves, want ≤ 400", n, r.eval.ddSolves)
 		}
 	}
 }

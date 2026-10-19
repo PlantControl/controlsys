@@ -42,7 +42,10 @@ const (
 // wc = 0 picks the crossover from the plant, capped at (180°−PM)/(2τ) for a
 // loop delay τ so the delay lag leaves room for the margin; a negative or
 // non-finite wc, or a phase margin outside (0, 180), returns
-// ErrInvalidArgument. The loop crossover and phase margin are placed using
+// ErrInvalidArgument, as does a plant whose frequency response is
+// numerically singular where Pidtune evaluates it (the error also wraps
+// ErrSingularTransform), as for a high-order discrete realization with
+// poles clustered near z = 1 that rounding scatters. The loop crossover and phase margin are placed using
 // the realized controller response: discrete plants use the discrete PID
 // terms, a discrete PID without filter uses a backward-Euler derivative to
 // stay causal, and a discrete derivative whose forward-Euler filter pole
@@ -59,37 +62,47 @@ const (
 // that, with wc = 0, keeps the margin at every gain crossover and |S| ≤ 4.
 // Every gain takes one sign: that of the DC
 // gain for a stable plant, and for an integrating or unstable plant the
-// sign stabilization forces, else that of the high-frequency gain
+// sign stabilization forces, else that of the numerator term largest at wc
 // (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G); where the force
 // lapses or there is none, as for an ideal derivative large enough to flip
 // the closed-loop polynomial's leading coefficient or a stable plant with
-// zero DC gain, the other sign is tried when the first one fails. A design whose closed loop is unstable by its poles (delay
-// absorbed for discrete plants) or by a Nyquist test (continuous delays) is
-// rejected; loops outside both tests are not screened. With wc = 0 a
-// rejected design is retried at crossovers lowered up to three decades, or
-// to a hundredth of the slowest non-integrating pole's natural frequency
-// when that is lower, six decades at most (six when wc came from a pole
-// because G has no gain crossover or bandwidth, or because its -3 dB
-// bandwidth lies beyond ten times every pole and zero natural frequency
-// with |G| peaking over 1e3 times its value there, set by zeros near the
-// integrator of a stable plant without a continuous delay, when wc is the first such step below ten times that
-// frequency; not for an integrating or unstable plant with a continuous
-// delay), accepting the first that passes, keeps the phase margin at every
-// gain crossover, those above the band the first wc sets included up to
-// where the loop's Markov bound keeps |L| ≤ 3/4 (continuous plants without
-// internal delays), and keeps |S| ≤ 4; a wc from a pole must pass that test from
-// the first design, except that on a continuous plant without delay a P,
-// or a PD clamped short of the margin at wc (with the default margin; an
-// explicit one rejects it), is kept when the pole test certifies it stable
-// with |S| ≤ 4, as a k·sᵐ high-pass plant leaves no phase to back off
-// into. On a loop the pole test certifies stable, the margin at
-// each gain crossover, wc included (TunePID excludes wc), is the classical
-// 180° − |∠L|;
-// a continuous delay, gated before its Nyquist test, keeps the signed
-// 180° + ∠L. Otherwise the result is ErrPIDTuningTargetUnattainable.
+// zero DC gain, the other sign is tried when the first one fails. A
+// design whose closed loop is unstable by its poles (delay absorbed for
+// discrete plants) or by a Nyquist test (continuous delays) is rejected;
+// loops outside both tests are not screened. With wc = 0 a design must
+// also pass the back-off gate: keep the phase margin at every gain
+// crossover, those above the band the first wc sets included up to where
+// the loop's Markov bound keeps |L| ≤ 3/4 (continuous plants without
+// internal delays), and keep |S| ≤ 4. A first design failing it is retried
+// at crossovers lowered up to three decades, or to a hundredth of the
+// slowest non-integrating pole's natural frequency when that is lower, six
+// decades at most (six when wc came from a pole because G has no gain
+// crossover or bandwidth, or because its -3 dB bandwidth lies beyond ten
+// times every pole and zero natural frequency with |G| peaking over 1e3
+// times its value there, set by zeros near the integrator of a stable plant
+// without a continuous delay, when wc is the first such step below ten
+// times that frequency; not for an integrating or unstable plant with a
+// continuous delay), accepting the first that passes. When none passes, the
+// first design is returned if it passed the stability test, except for a
+// wc from a pole of a plant without bandwidth, which must pass the gate;
+// on a continuous plant with zero DC gain and no delay, a k·sᵐ high-pass
+// plant leaving no phase to back off into, a P, or a PD clamped short of
+// the margin at wc (with the default margin; an explicit one rejects it),
+// passes there when the pole test certifies it stable with |S| ≤ 4. On a
+// loop the pole test certifies stable, the margin at each gain crossover,
+// wc included (TunePID excludes wc), is the classical 180° − |∠L|. A
+// continuous delay is gated before its Nyquist test on the signed
+// 180° + ∠L; a design failing only at reflected crossings, signed margin at
+// most −(pm − 0.5°), with |S| ≤ 4 passes on the classical margin when the
+// Nyquist test then certifies it stable, and keeps the signed failure where
+// that test does not apply (as for an ideal derivative on a relative-degree-1
+// plant, or internal delays). Otherwise the result is ErrPIDTuningTargetUnattainable.
 // An explicit wc is honoured as in MATLAB: the design at wc is returned
 // whenever its closed loop passes the stability test (an unstable
-// forward-Euler filter aside), without back-off and
+// forward-Euler filter aside), with |L(wc)| = 1 (a PD places its phase on
+// its Td/10 filtered response, clamped to [0.05 rad, its most lead], else,
+// when the most lead gives an unstable loop, keeps the Td of the automatic
+// design, which clamps phase on the ideal derivative), without back-off and
 // without checking the margin at other gain crossovers or |S| (the
 // achieved margins are the caller's to check, as with AllMargin); only an
 // unstable design, or an explicit phase margin unreachable at wc, returns
@@ -101,6 +114,14 @@ const (
 // the stability screen's tolerance of the boundary. TunePID offers bounded search with
 // achieved-target evidence.
 func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
+	pid, err := pidtune(plant, pidType, wc, opts)
+	if errors.Is(err, ErrSingularTransform) && !errors.Is(err, ErrInvalidArgument) {
+		return nil, fmt.Errorf("%w: plant realization too ill-conditioned to evaluate: %w", err, ErrInvalidArgument)
+	}
+	return pid, err
+}
+
+func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
 	if err := requireFiniteSystem("Pidtune", plant); err != nil {
 		return nil, err
 	}
@@ -130,7 +151,7 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 		return nil, fmt.Errorf("Pidtune: %s: a plant zero at the integrator cancels the integral term, leaving a closed-loop pole on the stability boundary: %w", pidType, ErrPIDTuningTargetUnattainable)
 	}
 	auto := wc == 0
-	wc, fromPole, err := autoCrossoverFreq(plant, wc, pm)
+	wc, src, err := autoCrossoverSource(plant, wc, pm)
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
@@ -147,26 +168,32 @@ func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, fromPole: fromPole, mirror: rule != pidtuneSignFixed, rule: rule}
+	run := &pidtuneRun{plant: plant, screen: screen, loop: newPidtuneLoop(screen.model), eval: eval, pidType: pidType, pm: pm, explicit: explicit, auto: auto, wc: wc, src: src, fromPole: src != pidtuneCrossGain, mirror: rule != pidtuneSignFixed, rule: rule}
 
-	pid, first := run.design(wc, sign, fromPole)
+	pid, first := run.design(wc, sign, auto)
 	if first == nil {
 		return pid, nil
 	}
-	// An unstable plant needs bandwidth that a continuous delay already
-	// caps, and each back-off step would run a Nyquist test.
-	if !auto || !errors.Is(first, ErrPIDTuningTargetUnattainable) ||
-		(rule == pidtuneSignForced || rule == pidtuneSignGuessed) && plant.Dt == 0 && plant.HasDelay() {
+	if !auto || !errors.Is(first, ErrPIDTuningTargetUnattainable) {
 		return nil, fmt.Errorf("Pidtune: %w", first)
 	}
-	steps := int(math.Ceil(pidtuneBackoffPerDecade*math.Log10(wc/run.backoffFloor()) - 1e-9))
-	for k := 1; k <= steps; k++ {
-		pid, err := run.design(wc*math.Pow(10, -float64(k)/pidtuneBackoffPerDecade), sign, true)
-		if err == nil {
-			return pid, nil
+	// An unstable plant needs bandwidth that a continuous delay already
+	// caps, and each back-off step would run a Nyquist test.
+	if !((rule == pidtuneSignForced || rule == pidtuneSignGuessed) && plant.Dt == 0 && plant.HasDelay()) {
+		steps := int(math.Ceil(pidtuneBackoffPerDecade*math.Log10(wc/run.backoffFloor()) - 1e-9))
+		for k := 1; k <= steps; k++ {
+			pid, err := run.design(wc*math.Pow(10, -float64(k)/pidtuneBackoffPerDecade), sign, true)
+			if err == nil {
+				return pid, nil
+			}
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				break
+			}
 		}
-		if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-			break
+	}
+	if src == pidtuneCrossGain || src == pidtuneCrossRolloff {
+		if pid, err := run.design(wc, sign, false); err == nil {
+			return pid, nil
 		}
 	}
 	return nil, fmt.Errorf("Pidtune: %w", first)
@@ -259,6 +286,7 @@ type pidtuneRun struct {
 	eval    *sisoEval
 	pidType PidtuneType
 	pm, wc  float64
+	src     pidtuneCrossover
 	// floor caches backoffFloor.
 	floor float64
 	// fromPole: wc is plantCrossoverFreq's pole fallback.
@@ -270,6 +298,8 @@ type pidtuneRun struct {
 	mirror bool
 	rule   pidtuneSignRule
 	gate   *pidtuneGate
+	// stable caches openStable: 0 unknown, 1 stable, −1 not.
+	stable int
 }
 
 // design designs pidType at wc for sign·G, then for −sign·G when r.mirror
@@ -339,17 +369,30 @@ func (r *pidtuneRun) signed(wc, sign float64, gated, lagFloor bool) (*PID, error
 // Td/10 filter misses the target phase is replaced by its design at the
 // default filter, else by the missed design itself, whichever first passes
 // check, gated for wc = 0: a missed design can cross over elsewhere with
-// almost no margin.
+// almost no margin. An explicit-wc PD at its most lead failing check is
+// replaced by its legacy-Td design (pidtunePDLegacyTd), whose larger Td sits
+// on the ideal-derivative clamp, when that one passes.
 func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor bool) (*PID, error) {
-	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pidtunePIDFIterate)
+	pd := pidtunePDLegacy
+	if !r.auto {
+		pd = pidtunePDPlaced
+	}
+	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pd, pidtunePIDFIterate)
 	if err == nil {
-		return pid, r.check(pid, wc, gated)
+		err = r.check(pid, wc, gated)
+		if err != nil && pd == pidtunePDPlaced && r.pidType == PidtunePD && errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pidtunePDLegacyTd, pidtunePIDFIterate)
+			if altErr == nil && alt.Kd/alt.Kp > pid.Kd/pid.Kp && r.check(alt, wc, gated) == nil {
+				return alt, nil
+			}
+		}
+		return pid, err
 	}
 	if !errors.Is(err, errPidtunePIDFMiss) {
 		return nil, err
 	}
 	for _, mode := range []pidtunePIDFMode{pidtunePIDFDefaultTf, pidtunePIDFKeep} {
-		alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, mode)
+		alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pd, mode)
 		if altErr == nil && r.check(alt, wc, gated || r.auto) == nil {
 			return alt, nil
 		}
@@ -358,7 +401,14 @@ func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor boo
 }
 
 // check screens pid; the gate, cheaper than a Nyquist test of a continuous
-// delay, runs before it there and after the pole test otherwise.
+// delay, runs before it there and after the pole test otherwise. There the
+// gate counts signed margins 180° + ∠L, as the loop is not yet certified;
+// when it fails only on reflected crossings, whose classical margin
+// 180° − |∠L| holds, and |S| passes, the design passes if the Nyquist test
+// certifies it stable, and keeps the signed failure when no test applies.
+// On a stable plant, a design failing only at reflected crossings, or a
+// back-off design the gate passes, is rejected, sparing the test, when the
+// gate's samples show 1+L winding about 0 (pidtuneGate.winds).
 func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	if r.explicit {
 		if err := checkPidtuneMargin(r.plant, pid, wc, r.pm); err != nil {
@@ -367,7 +417,19 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 	}
 	gateFirst := r.plant.Dt == 0 && r.plant.HasDelay()
 	if gated && gateFirst {
-		if err := r.gated(pid, wc, false); err != nil {
+		err := r.gated(pid, wc, false)
+		if err != nil && !errors.Is(err, errPidtuneReflected) {
+			return err
+		}
+		if (err != nil || wc != r.wc) && r.openStable() && r.gateOf().winds(pidtuneGateController(pid)) {
+			if err != nil {
+				return err
+			}
+			if r.screened(wc) {
+				return &pidtuneUnstableError{pidType: r.pidType, wc: wc}
+			}
+		}
+		if err != nil && !r.screened(wc) {
 			return err
 		}
 	}
@@ -384,12 +446,12 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 }
 
 // unshaped returns whether pid is a first design at a continuous wc from a
-// pole that the pole test certifies stable and that leaves the loop phase to
-// the plant: a P, or a PD clamped short of the requested margin at wc. A
-// k·sᵐ high-pass plant leads up to 180° below its poles, where no back-off
-// helps, so only |S| gates it.
+// pole of a zero-DC plant that the pole test certifies stable and that
+// leaves the loop phase to the plant: a P, or a PD clamped short of the
+// requested margin at wc. A k·sᵐ high-pass plant leads up to 180° below its
+// poles, where no back-off helps, so only |S| gates it.
 func (r *pidtuneRun) unshaped(pid *PID, wc float64) bool {
-	if !r.fromPole || r.plant.Dt != 0 || wc != r.wc || r.loop == nil {
+	if r.src != pidtuneCrossZeroDC || r.plant.Dt != 0 || wc != r.wc || r.loop == nil {
 		return false
 	}
 	switch r.pidType {
@@ -399,6 +461,17 @@ func (r *pidtuneRun) unshaped(pid *PID, wc float64) bool {
 		return checkPidtuneMargin(r.plant, pid, wc, r.pm) != nil
 	}
 	return false
+}
+
+// openStable returns whether the plant is stable, computed once.
+func (r *pidtuneRun) openStable() bool {
+	if r.stable == 0 {
+		r.stable = -1
+		if ok, err := r.plant.IsStable(); err == nil && ok {
+			r.stable = 1
+		}
+	}
+	return r.stable > 0
 }
 
 func (r *pidtuneRun) backoffFloor() float64 {
@@ -437,14 +510,15 @@ const (
 	// its characteristic polynomial's leading coefficient has the sign of
 	// a; mirrored when that coefficient may flip.
 	pidtuneSignForced
-	// pidtuneSignGuessed: the high-frequency gain sign, or 1; no rule.
+	// pidtuneSignGuessed: the sign of N/a's term largest at wc, or 1; no
+	// rule.
 	pidtuneSignGuessed
 )
 
 // pidtuneGainSign returns the sign of every Pidtune gain: that of the DC
 // gain of a stable plant, else of N(0)/a for the minimal G = N/D with D's
-// leading coefficient a (N(1)/a in z) when it is forced, else of the
-// high-frequency gain. The closed-loop polynomial P = D·Dc + N·Nc of a
+// leading coefficient a (N(1)/a in z) when it is forced, else of c/a for
+// N's term c·sᵏ largest at |s| = wc (c·zᵏ largest at |z| = 1). The closed-loop polynomial P = D·Dc + N·Nc of a
 // stable loop keeps the sign of its leading coefficient on [0, ∞) (z ≥ 1),
 // where P(0) is D(0) + K·N(0) for P/PD and K·N(0) under integral action.
 // When that leading coefficient has the sign of a, as for every loop whose
@@ -507,16 +581,16 @@ func pidtuneForcedSign(plant *System, wc float64, integral bool) (float64, pidtu
 		}
 		return math.Copysign(1, n0*a), pidtuneSignForced
 	}
-	scale := 0.0
+	dom, scale := 0.0, 0.0
 	for i, c := range num {
-		scale = math.Max(scale, math.Abs(c)*math.Pow(x, float64(len(num)-1-i)))
-	}
-	for i, c := range num {
-		if math.Abs(c)*math.Pow(x, float64(len(num)-1-i)) > 1e3*0x1p-52*scale {
-			return math.Copysign(1, c) * a, pidtuneSignGuessed
+		if v := math.Abs(c) * math.Pow(x, float64(len(num)-1-i)); v > scale {
+			dom, scale = c, v
 		}
 	}
-	return 1, pidtuneSignGuessed
+	if !finitePID(scale) || scale == 0 {
+		return 1, pidtuneSignGuessed
+	}
+	return math.Copysign(1, dom) * a, pidtuneSignGuessed
 }
 
 // pidtuneNearIntegrator returns whether plant has more poles than zeros
@@ -588,11 +662,29 @@ type pidtuneGate struct {
 	p     pidTuningPlant
 	sens  pidtuneGrid
 	cross pidtuneGrid
+	// onSens[k] is the index of cross.w[k] in sens.w, or −1.
+	onSens []int
+	// loopC's L on sens.w, filled through loopN by loop.
+	loopC PID2
+	loopK func(int) complex128
+	loopL []complex128
+	loopN int
 	at    func(float64) complex128
 	// tail bounds |L| above the band (pidTuningLoopTail), built on first use.
 	plant    *System
 	tail     func(*PID2, float64) float64
+	markov   *pidMarkovTail
 	tailDone bool
+	// rootSum and rootMax are the sum and largest of the plant's pole and
+	// zero magnitudes, built by rotates on first use (NaN when unknown).
+	rootSum, rootMax float64
+	rootsDone        bool
+	// tailW, tailG and tailTop are tailPeak's grid, plant samples and
+	// whether the scan's band ends at each; tailHigh is the band's end.
+	tailW    []float64
+	tailG    []complex128
+	tailTop  []bool
+	tailHigh float64
 }
 
 // pidtuneGrid caches, at each frequency w, the plant response g and, for
@@ -670,13 +762,7 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 			return g
 		},
 	}
-	n := int(math.Ceil(math.Log10(hi/lo)*pidtuneGatePerDecade)) + 1
-	omega := make([]float64, n)
-	for i := range omega {
-		omega[i] = math.Min(lo*math.Pow(10, float64(i)/pidtuneGatePerDecade), hi)
-	}
 	gate := &pidtuneGate{p: p, at: at, plant: plant}
-	gate.cross = pidtuneGrid{w: pidTuningCrossGrid(p, omega), dt: plant.Dt}
 	gate.sens.dt = plant.Dt
 	for w := lo; ; {
 		gate.sens.w = append(gate.sens.w, w)
@@ -693,6 +779,7 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 		}
 		w = math.Min(w+step, hi)
 	}
+	gate.cross = pidtuneGrid{w: pidTuningCrossGrid(p, gate.sens.w), dt: plant.Dt}
 	return gate
 }
 
@@ -715,7 +802,7 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 		_, m := pidTuningCrossingsOn(g.p, c, []float64{g.cross.w[i-1], wc, g.cross.w[i]}, wc, nil)
 		margins = append(margins, m[1:]...)
 	}
-	if above := g.beyond(&c); above != nil {
+	if above, _ := g.beyond(&c); above != nil {
 		_, m := pidTuningCrossingsOn(g.p, c, above, wc, nil)
 		margins = append(margins, m[1:]...)
 	}
@@ -726,26 +813,136 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 			return fmt.Errorf("%s design at wc=%g has no gain crossover: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
 		}
 	}
+	short := math.NaN()
 	for _, m := range margins {
 		if certified {
 			m = math.Abs(m)
 		}
 		if !(m >= floor) {
-			return fmt.Errorf("%s design at wc=%g has phase margin %.3g° at a gain crossover: %w", pidType, wc, m, ErrPIDTuningTargetUnattainable)
+			if math.IsNaN(short) {
+				short = m
+			}
+			if !(m <= -floor) {
+				return fmt.Errorf("%s design at wc=%g has phase margin %.3g° at a gain crossover: %w", pidType, wc, m, ErrPIDTuningTargetUnattainable)
+			}
 		}
+	}
+	if !math.IsNaN(short) {
+		return fmt.Errorf("%s design at wc=%g has phase margin %.3g° at a gain crossover: %w", pidType, wc, short, errPidtuneReflected)
 	}
 	return nil
 }
 
-// sensitive rejects pid when |S| exceeds the bound, on the band and above
-// it as far as beyond reaches.
+// winds reports whether the sampled Nyquist curve of a continuous loop
+// with c on a stable plant shows its closed loop unstable, sparing the
+// Nyquist test. Over [0⁺, ∞) a stable loop turns 1+L by 0, or by π/2 from
+// −π/2 under integral action with Ki·G(0) > 0. The turn is unwrapped on the
+// |S| grid, where |1+L| ≥ 1/maxSensitivity, taking 1+L not to wind below the
+// band, and above it up to where the tail bound keeps |L| ≤
+// 1 − 1/maxSensitivity, so 1+L returns to 1 inside Re > 0; a turn over π/2
+// off the stable one is then unstable. Without that bound, a loop whose ∠L
+// falls throughout [top, ∞), the delay outrunning every pole and zero (see
+// rotates), crosses (−∞, −1) only clockwise there, so 1+L turns back by less
+// than 2π; a turn short of the stable one by over 2.5π is then unstable.
+func (g *pidtuneGate) winds(c PID2) bool {
+	if g.plant.Dt != 0 || c.Tf < 0 || c.Kd != 0 && c.Tf == 0 {
+		return false
+	}
+	g0 := g.at(0)
+	if !pidFiniteComplex(g0) {
+		return false
+	}
+	start, target := cmplx.Phase(1+g0*complex(c.Kp, 0)), 0.0
+	if c.Ki != 0 {
+		if !(c.Ki*real(g0) > 0) || math.Abs(imag(g0)) > 1e-9*math.Abs(real(g0)) {
+			return false
+		}
+		start, target = -math.Pi/2, math.Pi/2
+	}
+	prev, total := cmplx.Rect(1, start), 0.0
+	step := func(v complex128) bool {
+		if !pidFiniteComplex(v) || v == 0 {
+			return false
+		}
+		total += cmplx.Phase(v / prev)
+		prev = v
+		return true
+	}
+	g.setLoop(c)
+	for i := range g.sens.w {
+		if !step(1 + g.loopAt(i)) {
+			return false
+		}
+	}
+	above, level := g.beyond(&c)
+	if g.tail != nil && level == 0 && (above != nil || g.tail(&c, g.p.high) <= 1-1/g.p.maxSensitivity) {
+		for _, w := range above {
+			if !step(1 + g.p.at(w)*pidTuningFeedback(c, w)) {
+				return false
+			}
+		}
+		return math.Abs(total-cmplx.Phase(prev)-target) > math.Pi/2
+	}
+	return total < target-2.5*math.Pi && g.rotates(c)
+}
+
+// rotates returns whether ∠L falls throughout [top, ∞) for the band's top:
+// a root r of the plant or c with |r| ≤ top/2 turns ∠L there at a rate
+// below 4|r|/top², and the delay at τ.
+func (g *pidtuneGate) rotates(c PID2) bool {
+	if !g.rootsDone {
+		g.rootsDone = true
+		g.rootSum, g.rootMax = math.NaN(), math.NaN()
+		model, err := finiteDimensionalModel(g.plant, "Pidtune")
+		if err != nil {
+			return false
+		}
+		poles, err := model.Poles()
+		if err != nil {
+			return false
+		}
+		zeros, err := model.Zeros()
+		if err != nil {
+			return false
+		}
+		g.rootSum, g.rootMax = 0, 0
+		for _, r := range slices.Concat(poles, zeros) {
+			g.rootSum += cmplx.Abs(r)
+			g.rootMax = max(g.rootMax, cmplx.Abs(r))
+		}
+	}
+	sum, big := g.rootSum, g.rootMax
+	ctrl := []float64{c.Kd + c.Kp*c.Tf, c.Kp + c.Ki*c.Tf, c.Ki}
+	if c.Tf > 0 {
+		sum, big = sum+1/c.Tf, max(big, 1/c.Tf)
+	}
+	for len(ctrl) > 1 && ctrl[0] == 0 {
+		ctrl = ctrl[1:]
+	}
+	zeros, err := Poly(ctrl).Roots()
+	if err != nil {
+		return false
+	}
+	for _, z := range zeros {
+		sum, big = sum+cmplx.Abs(z), max(big, cmplx.Abs(z))
+	}
+	top := g.p.high
+	return big <= top/2 && 4*sum < g.p.tau*top*top
+}
+
+// errPidtuneReflected marks a gate failure at reflected crossings only,
+// whose signed margin 180° + ∠L is at most −(pm − tol): their classical
+// margin 180° − |∠L| holds.
+var errPidtuneReflected = fmt.Errorf("classical margin met at every gain crossover: %w", ErrPIDTuningTargetUnattainable)
+
+// sensitive rejects pid when |S| exceeds the bound, on the band, above it
+// as far as beyond reaches, or as ω → ∞ on a loop whose gain levels off.
 func (g *pidtuneGate) sensitive(pid *PID, pidType PidtuneType, wc float64) error {
 	c := pidtuneGateController(pid)
-	ms := g.sensitivityOver(c, g.p.maxSensitivity)
-	if above := g.beyond(&c); above != nil && ms <= g.p.maxSensitivity {
-		p := g.p
-		p.low, p.loopTail = p.high, g.tail
-		ms = pidTuningSensitivityPeak(p, c)
+	above, level := g.beyond(&c)
+	ms := max(g.sensitivityOver(c, g.p.maxSensitivity), level)
+	if above != nil && ms <= g.p.maxSensitivity {
+		ms = max(ms, g.tailPeak(c, above[len(above)-1]))
 	}
 	if ms > g.p.maxSensitivity {
 		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
@@ -753,15 +950,76 @@ func (g *pidtuneGate) sensitive(pid *PID, pidType PidtuneType, wc float64) error
 	return nil
 }
 
+// tailPeak is pidTuningSensitivityPeak from the band's top with the tail
+// bound, stopping by reach instead of pidTuningTailReach times the top (bit
+// for bit when both stop by the bound), sampling the plant on its grid once
+// for all designs: the grid does not depend on c, only where the scan stops.
+func (g *pidtuneGate) tailPeak(c PID2, reach float64) float64 {
+	s := func(gw complex128, w float64) float64 { return 1 / cmplx.Abs(1+gw*pidTuningFeedback(c, w)) }
+	refine := func(w float64) float64 { return s(g.at(w), w) }
+	bound := 1 - 1/g.p.maxSensitivity
+	peak := 0.
+	var w0, v0, w1, v1 float64
+	for k := 0; ; k++ {
+		g.tailGrid(k)
+		w := g.tailW[k]
+		v := s(g.tailG[k], w)
+		if k >= 2 && v1 >= v0 && v1 >= v && v1 >= .8*math.Max(peak, v) {
+			_, r := pidTuningGoldenMax(refine, w0, w)
+			peak = math.Max(peak, r)
+		}
+		peak = math.Max(peak, v)
+		w0, v0, w1, v1 = w1, v1, w, v
+		if k >= pidTuningTailPoints {
+			return peak
+		}
+		if g.tailTop[k] && (w >= reach || g.tail(&c, w) <= bound) {
+			return peak
+		}
+	}
+}
+
+// tailGrid extends tailPeak's grid through index k.
+func (g *pidtuneGate) tailGrid(k int) {
+	p := g.p
+	for n := len(g.tailW); n <= k; n++ {
+		w := p.high
+		if n == 0 {
+			g.tailHigh = p.high
+		} else {
+			w = g.tailW[n-1]
+			if g.tailTop[n-1] {
+				g.tailHigh = math.Min(2*w, p.high*pidtuneGateReach)
+			}
+			step := .01 * w
+			if p.tau > 0 {
+				step = math.Min(step, math.Pi/16/p.tau)
+			}
+			for _, m := range p.modes {
+				step = math.Min(step, math.Max(math.Max(math.Abs(real(m)), math.Abs(w-imag(m))), 1e-6*w)/4)
+			}
+			w = math.Min(w+step, g.tailHigh)
+		}
+		g.tailW, g.tailG = append(g.tailW, w), append(g.tailG, g.at(w))
+		g.tailTop = append(g.tailTop, w >= g.tailHigh)
+	}
+}
+
+// pidtuneGateReach caps, as a multiple of the band's top, how far beyond
+// extends the gate's scans.
+const pidtuneGateReach = 1e12
+
 // beyond returns a log grid from the top of a continuous gate's band up to
-// where pidTuningLoopTail bounds |L| by 1 − 1/maxSensitivity, which rules
-// out a crossover or an |S| excess further up; nil when the bound holds at
-// the top, is unknown (discrete bands reach π/Dt), or does not hold within
-// pidTuningTailReach times the top, as for a loop gain that does not roll
-// off (a biproper plant, an ideal derivative), left to the band as before.
-// The band is set by the first crossover, and a large Kp, or Kd/Tf, at a
-// crossover backed off below it can cross 0 dB again above it.
-func (g *pidtuneGate) beyond(c *PID2) []float64 {
+// where no crossover or |S| excess lies further up, and, for a loop whose
+// gain levels off at L(j∞) ≠ 0, the limit of sup |S| as ω → ∞. A loop
+// rolling off ends where pidTuningLoopTail bounds |L| by 1 − 1/maxSensitivity,
+// however far a large Kp, or Kd/Tf, at a crossover backed off below the band
+// pushes it; one leveling off ends where asymptote keeps L within half the
+// distance its limit leaves to |L| = 1 and to |1+L| = 1/maxSensitivity. The
+// grid is nil when the top already ends it, the bound is unknown (discrete
+// bands reach π/Dt, ideal derivatives), or it does not end within
+// pidtuneGateReach times the top, left to the band as before.
+func (g *pidtuneGate) beyond(c *PID2) (grid []float64, level float64) {
 	if !g.tailDone {
 		g.tailDone = true
 		if g.plant.Dt == 0 {
@@ -770,50 +1028,158 @@ func (g *pidtuneGate) beyond(c *PID2) []float64 {
 	}
 	top, bound := g.p.high, 1-1/g.p.maxSensitivity
 	if g.tail == nil || g.tail(c, top) <= bound {
-		return nil
+		return nil, 0
 	}
-	end := top
-	for end < top*pidTuningTailReach && g.tail(c, end) > bound {
-		end *= 2
-	}
-	if g.tail(c, end) > bound {
-		return nil
+	end, reach := top, top*pidtuneGateReach
+	if g.tail(c, math.Inf(1)) <= bound {
+		for end < reach && g.tail(c, end) > bound {
+			end *= 2
+		}
+		if g.tail(c, end) > bound {
+			return nil, 0
+		}
+	} else {
+		lim, dev, ok := g.asymptote(c)
+		if !ok {
+			return nil, 0
+		}
+		// Delay turns L(j∞) round the circle of radius |L(j∞)|.
+		dist := 1 - math.Abs(lim)
+		gap := dist - 1/g.p.maxSensitivity
+		if g.p.tau == 0 {
+			dist = math.Abs(1 + lim)
+			gap = min(math.Abs(math.Abs(lim)-1), dist-1/g.p.maxSensitivity)
+		}
+		level = math.Inf(1)
+		if dist > 0 {
+			level = 1 / dist
+		}
+		if dev == nil || !(gap > 0) {
+			return nil, level
+		}
+		for end < reach && !(dev(end) <= gap/2) {
+			end *= 2
+		}
+		if !(dev(end) <= gap/2) {
+			return nil, level
+		}
+		if end == top {
+			return nil, level
+		}
 	}
 	n := int(math.Ceil(math.Log10(end/top)*pidtuneGatePerDecade)) + 1
-	grid := make([]float64, n)
+	grid = make([]float64, n)
 	for i := range grid {
 		grid[i] = math.Min(top*math.Pow(10, float64(i)/pidtuneGatePerDecade), end)
 	}
-	return grid
+	return grid, level
+}
+
+// asymptote returns L(j∞) of a continuous loop with c leveling off, and
+// dev(ω) bounding |L(jω′) − L(j∞)| over ω′ ≥ ω: with C∞ = Kp + Kd/Tf and
+// r = (|Ki| + |Kd|/Tf²)/ω bounding |C − C∞|, |L − L∞| ≤ (|C∞| + r)·|G − D|
+// + r·|D|, |G − D| bounded by pidMarkovTail. An ideal derivative on a
+// strictly proper plant levels off at Kd·CB, with dev nil; ok is false for
+// one on a biproper plant, unbounded, or a descriptor plant.
+func (g *pidtuneGate) asymptote(c *PID2) (lim float64, dev func(float64) float64, ok bool) {
+	if g.plant.E != nil {
+		return 0, nil, false
+	}
+	if c.Kd != 0 && !(c.Tf > 0) {
+		if g.plant.D.At(0, 0) != 0 {
+			return 0, nil, false
+		}
+		n, _ := g.plant.A.Dims()
+		cb := 0.0
+		for i := range n {
+			cb += g.plant.C.At(0, i) * g.plant.B.At(i, 0)
+		}
+		return c.Kd * cb, nil, true
+	}
+	if g.markov == nil {
+		g.markov = newPIDMarkovTail(g.plant)
+	}
+	d, k, kr := g.plant.D.At(0, 0), c.Kp, math.Abs(c.Ki)
+	if c.Kd != 0 {
+		k += c.Kd / c.Tf
+		kr += math.Abs(c.Kd) / (c.Tf * c.Tf)
+	}
+	return k * d, func(w float64) float64 {
+		r := kr / w
+		return (math.Abs(k)+r)*g.markov.at(w, 0) + r*math.Abs(d)
+	}, true
 }
 
 func pidtuneGateController(pid *PID) PID2 {
 	return PID2{Kp: pid.Kp, Ki: pid.Ki, Kd: pid.Kd, Tf: pid.Tf, Dt: pid.Dt, IFormula: pid.IFormula, DFormula: pid.DFormula}
 }
 
-// crossExcess returns k ↦ |L(cross.w[k])|−1, sampling the plant on the
-// first call.
+// crossExcess returns k ↦ |L(cross.w[k])|−1. The crossover grid is the
+// |S| grid plus mode points, sampled on the first call.
 func (g *pidtuneGate) crossExcess(c PID2) func(int) float64 {
 	if g.cross.g == nil {
-		for _, w := range g.cross.w {
-			g.cross.g = append(g.cross.g, g.p.at(w))
+		g.cross.g = make([]complex128, len(g.cross.w))
+		g.onSens = make([]int, len(g.cross.w))
+		j := 0
+		for i, w := range g.cross.w {
+			for j < len(g.sens.w) && g.sens.w[j] < w {
+				j++
+			}
+			g.onSens[i] = -1
+			if j < len(g.sens.w) && g.sens.w[j] == w {
+				g.cross.g[i], g.onSens[i] = g.sens.g[j], j
+			} else {
+				g.cross.g[i] = g.p.at(w)
+			}
 		}
 	}
 	k := g.cross.feedback(c)
-	return func(i int) float64 { return cmplx.Abs(g.cross.g[i]*k(i)) - 1 }
+	g.setLoop(c)
+	return func(i int) float64 {
+		if j := g.onSens[i]; j >= 0 {
+			return cmplx.Abs(g.loopAt(j)) - 1
+		}
+		return cmplx.Abs(g.cross.g[i]*k(i)) - 1
+	}
+}
+
+// setLoop makes c the design loopAt evaluates, keeping its samples when
+// c is unchanged.
+func (g *pidtuneGate) setLoop(c PID2) {
+	if g.loopK == nil || g.loopC != c {
+		g.loopC, g.loopK, g.loopN = c, g.sens.feedback(c), 0
+		if g.loopL == nil {
+			g.loopL = make([]complex128, len(g.sens.w))
+		}
+	}
+}
+
+// loopAt returns L(sens.w[i]) for the setLoop design, computed once.
+func (g *pidtuneGate) loopAt(i int) complex128 {
+	if i >= g.loopN {
+		g.fillLoop(i)
+	}
+	return g.loopL[i]
+}
+
+func (g *pidtuneGate) fillLoop(i int) {
+	end := min(max(i+1, g.loopN+64), len(g.loopL))
+	for k := g.loopN; k < end; k++ {
+		g.loopL[k] = g.sens.g[k] * g.loopK(k)
+	}
+	g.loopN = end
 }
 
 // sensitivityOver returns a sampled |S| above bound, or the largest sampled
 // |S| when none is; as pidTuningSensitivityPeak, grid maxima above half the
 // bound are refined by golden section. Unevaluable samples are skipped.
 func (g *pidtuneGate) sensitivityOver(c PID2, bound float64) float64 {
-	s := func(gw, k complex128) float64 { return 1 / cmplx.Abs(1+gw*k) }
-	refine := func(w float64) float64 { return s(g.at(w), pidTuningFeedback(c, w)) }
-	k := g.sens.feedback(c)
+	refine := func(w float64) float64 { return 1 / cmplx.Abs(1+g.at(w)*pidTuningFeedback(c, w)) }
+	g.setLoop(c)
 	peak := 0.0
 	var v0, v1 float64
 	for i, w := range g.sens.w {
-		v := s(g.sens.g[i], k(i))
+		v := 1 / cmplx.Abs(1+g.loopAt(i))
 		if math.IsNaN(v) {
 			v0, v1 = 0, 0
 			continue
@@ -1080,12 +1446,33 @@ func findCrossoverFreq(plant *System, wcTarget, pm float64) (float64, error) {
 // autoCrossoverFreq is findCrossoverFreq, also reporting whether the
 // crossover came from plantCrossoverFreq's pole fallback.
 func autoCrossoverFreq(plant *System, wcTarget, pm float64) (float64, bool, error) {
+	wc, src, err := autoCrossoverSource(plant, wcTarget, pm)
+	return wc, src != pidtuneCrossGain, err
+}
+
+// pidtuneCrossover names where plantCrossoverFreq took its crossover from.
+type pidtuneCrossover int
+
+const (
+	// pidtuneCrossGain: a gain crossover, the bandwidth, an integrating
+	// plant's pick, or an explicit wc.
+	pidtuneCrossGain pidtuneCrossover = iota
+	// pidtuneCrossRolloff: pidtuneRolloffCrossover below the bandwidth.
+	pidtuneCrossRolloff
+	// pidtuneCrossPole: half the slowest pole of a plant without bandwidth.
+	pidtuneCrossPole
+	// pidtuneCrossZeroDC: half the slowest pole of a plant with zero DC
+	// gain, a k·sᵐ high-pass plant.
+	pidtuneCrossZeroDC
+)
+
+func autoCrossoverSource(plant *System, wcTarget, pm float64) (float64, pidtuneCrossover, error) {
 	if wcTarget > 0 {
-		return wcTarget, false, nil
+		return wcTarget, pidtuneCrossGain, nil
 	}
-	wc, fromPole, err := plantCrossoverFreqFrom(plant)
+	wc, src, err := plantCrossoverSource(plant)
 	if err != nil {
-		return 0, false, err
+		return 0, pidtuneCrossGain, err
 	}
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
@@ -1094,7 +1481,7 @@ func autoCrossoverFreq(plant *System, wcTarget, pm float64) (float64, bool, erro
 	if tau > 0 {
 		wc = math.Min(wc, (180-pm)*math.Pi/180/(2*tau))
 	}
-	return wc, fromPole, nil
+	return wc, src, nil
 }
 
 func plantCrossoverFreq(plant *System) (float64, error) {
@@ -1112,37 +1499,45 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 // needs the gain the bandwidth gives, which a crossover capped by its roots
 // cannot reach, and a delay's lag at the capped crossover leaves a PDF
 // needing phase lag where the delay-capped bandwidth has a robust design.
+// A DC gain rounded to 0 on a pidtuneRoundedIntegrator plant is infinite.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
+	wc, src, err := plantCrossoverSource(plant)
+	return wc, src != pidtuneCrossGain, err
+}
+
+func plantCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {
 	all, err := AllMargin(plant)
 	if err != nil {
-		return 0, false, err
+		return 0, pidtuneCrossGain, err
 	}
 	if len(all.GainCrossFreqs) > 0 {
-		return all.GainCrossFreqs[0], false, nil
+		return all.GainCrossFreqs[0], pidtuneCrossGain, nil
 	}
 	dc, err := plant.DCGain()
-	if err == nil && math.IsInf(dc.At(0, 0), 0) {
+	if err == nil && (math.IsInf(dc.At(0, 0), 0) || dc.At(0, 0) == 0 && pidtuneRoundedIntegrator(plant)) {
 		wc, err := pidtuneIntegratingCrossover(plant)
-		return wc, false, err
+		return wc, pidtuneCrossGain, err
 	}
+	pole := pidtuneCrossZeroDC
 	if err != nil || dc.At(0, 0) != 0 && !pidtuneZeroAtIntegrator(plant) {
+		pole = pidtuneCrossPole
 		bw, err := Bandwidth(plant, -3)
 		if err != nil {
-			return 0, false, err
+			return 0, pidtuneCrossGain, err
 		}
 		if bw > 0 && !math.IsInf(bw, 0) {
 			if stable, err := plant.IsStable(); err == nil && stable && !(plant.Dt == 0 && plant.HasDelay()) {
 				if wc, ok := pidtuneRolloffCrossover(plant, bw); ok {
-					return wc, true, nil
+					return wc, pidtuneCrossRolloff, nil
 				}
 			}
-			return bw, false, nil
+			return bw, pidtuneCrossGain, nil
 		}
 	}
 
 	poles, err := plant.Poles()
 	if err != nil {
-		return 0, false, err
+		return 0, pidtuneCrossGain, err
 	}
 	at, tol := pidtuneIntegratorCluster(plant, poles)
 	if w := pidtuneSlowestRoot(plant, poles, at, tol); !math.IsInf(w, 1) {
@@ -1150,10 +1545,10 @@ func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 		if plant.Dt > 0 {
 			w = math.Min(w, 0.1*math.Pi/plant.Dt)
 		}
-		return w, true, nil
+		return w, pole, nil
 	}
 
-	return 0, false, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
+	return 0, pidtuneCrossGain, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
 }
 
 // A -3 dB bandwidth beyond pidtuneRolloffFactor times every finite pole and
@@ -1311,6 +1706,32 @@ func pidtuneDisplacedIntegrator(plant *System, poles []complex128, at complex128
 	return 0
 }
 
+// pidtuneRoundedIntegrator reports whether a discrete plant whose DCGain is
+// 0 is an integrating plant: no zero at the integrator and a pole displaced
+// from z = 1 beyond pidtuneIntegratorCluster but within
+// pidtuneDisplacedIntegrator. Its true DC gain is infinite; an
+// ill-conditioned (z−1)·∏(z−pᵢ) realization rounds C(I−A)⁻¹B to 0, and the
+// pole fallback would take the displaced pole as the slowest, a crossover
+// ~1e-8 where (zI−A) is singular. A clustered integrator is already
+// excluded there.
+func pidtuneRoundedIntegrator(plant *System) bool {
+	if plant.Dt == 0 || pidtuneZeroAtIntegrator(plant) {
+		return false
+	}
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return false
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return false
+	}
+	if _, tol := pidtuneIntegratorCluster(plant, poles); tol > 0 {
+		return false
+	}
+	return pidtuneDisplacedIntegrator(plant, poles, 1) > 0
+}
+
 // pidtuneClusterSize returns the largest m such that the m roots nearest at
 // lie within pidtuneClusterRadius(m, scale) of it and their mean lies within
 // pidtuneClusterCentroid·scale of it. Rounding splits an m-fold root into a
@@ -1407,8 +1828,25 @@ type pidtuneTerms struct {
 	dFormula PIDFormula
 	// lagFloor raises a PDF phase below the family's range to its floor.
 	lagFloor bool
+	pd       pidtunePDMode
 	pidf     pidtunePIDFMode
 }
+
+// pidtunePDMode selects computePD's design.
+type pidtunePDMode int
+
+const (
+	// pidtunePDLegacy: phase and gain placed on the ideal derivative, the
+	// Td/10 filter then added, so |L(wc)| ≠ 1, as the automatic crossover's
+	// gate was tuned on.
+	pidtunePDLegacy pidtunePDMode = iota
+	// pidtunePDPlaced: phase and gain placed on the realized Td/10 response
+	// (placedPD).
+	pidtunePDPlaced
+	// pidtunePDLegacyTd: the legacy Td, with Kp for |L(wc)| = 1 on the
+	// realized response.
+	pidtunePDLegacyTd
+)
 
 // pidtunePIDFMode selects computePIDF's design.
 type pidtunePIDFMode int
@@ -1446,13 +1884,13 @@ func (t pidtuneTerms) derivative(tf float64) complex128 {
 // With stableFilter, a discrete forward-Euler derivative whose filter pole
 // 1−Dt/Tf leaves the unit circle is redesigned with backward Euler.
 func computePIDGains(plant *System, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter bool) (*PID, error) {
-	return pidtuneGains(plant, nil, pidType, wc, pmDeg, sign, stableFilter, false, pidtunePIDFKeep)
+	return pidtuneGains(plant, nil, pidType, wc, pmDeg, sign, stableFilter, false, pidtunePDLegacy, pidtunePIDFKeep)
 }
 
-// pidtuneGains is computePIDGains, lagFloor and pidf aside, evaluating the
-// plant with at.
-func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pidf pidtunePIDFMode) (*PID, error) {
-	pid, err := computePIDGainsPositive(plant, at, pidType, wc, pmDeg, sign, stableFilter, lagFloor, pidf)
+// pidtuneGains is computePIDGains, lagFloor, pd and pidf aside,
+// evaluating the plant with at.
+func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pd pidtunePDMode, pidf pidtunePIDFMode) (*PID, error) {
+	pid, err := computePIDGainsPositive(plant, at, pidType, wc, pmDeg, sign, stableFilter, lagFloor, pd, pidf)
 	if err != nil {
 		return nil, err
 	}
@@ -1463,7 +1901,7 @@ func pidtuneGains(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc,
 	return pid, nil
 }
 
-func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pidf pidtunePIDFMode) (*PID, error) {
+func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType PidtuneType, wc, pmDeg, sign float64, stableFilter, lagFloor bool, pd pidtunePDMode, pidf pidtunePIDFMode) (*PID, error) {
 	if plant.Dt > 0 && wc >= math.Pi/plant.Dt {
 		return nil, fmt.Errorf("crossover %g must be below the Nyquist frequency %g: %w", wc, math.Pi/plant.Dt, ErrInvalidArgument)
 	}
@@ -1492,7 +1930,7 @@ func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType Pidtu
 	if plant.Dt > 0 && pidType == PidtunePID {
 		dFormula = BackwardEuler
 	}
-	terms := pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula, lagFloor: lagFloor, pidf: pidf}
+	terms := pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula, lagFloor: lagFloor, pd: pd, pidf: pidf}
 	pid, err := pidtuneFamily(pidType, terms, magP, phiC)
 	if !stableFilter || plant.Dt == 0 || dFormula != ForwardEuler {
 		return pid, err
@@ -1582,8 +2020,10 @@ func computePI(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	pid.Kp = real(target) - pid.Ki*real(i)
 }
 
-// computePD preserves the legacy PD tuning seed, including its Td/10 filter.
-// Callers requesting an ideal PD must explicitly set Tf=0.
+// computePD designs a Td/10-filtered PD as terms.pd selects; the legacy
+// design places phase and gain on the ideal derivative, leaving |L(wc)| ≠ 1
+// (≈ 0.49 at the upper clamp). Callers requesting an ideal PD must
+// explicitly set Tf=0.
 func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	// C = Kp*(1 + Td*D), angle = arg(1 + Td*D)
 	phiCRad := phiC * math.Pi / 180
@@ -1596,6 +2036,11 @@ func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 		phiCRad = math.Pi/2 - 0.05
 	}
 
+	if terms.pd == pidtunePDPlaced {
+		placedPD(pid, terms, magP, phiC)
+		return
+	}
+
 	d := terms.derivative(0)
 	tan := math.Tan(phiCRad)
 	Td := tan / (imag(d) - real(d)*tan)
@@ -1603,12 +2048,66 @@ func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 		Td = 0.1 / terms.wc
 	}
 
+	pid.Tf = Td / 10
+	if terms.pd == pidtunePDLegacyTd {
+		d = terms.derivative(pid.Tf)
+	}
 	pid.Kp = 1.0 / (magP * cmplx.Abs(1+complex(Td, 0)*d))
 	pid.Kd = pid.Kp * Td
-	pid.Tf = Td / 10
-	if pid.Tf <= 0 {
-		pid.Tf = 1.0 / (10 * terms.wc)
+}
+
+// placedPD sets a Td/10-filtered PD whose realized phase at wc is phiC
+// degrees clamped to [0.05 rad, the family's most lead] (56.4° for a
+// continuous plant, at Td·wc = 1/√0.11), with Kp for |C(jwc)| = 1/magP, so
+// |L(wc)| = 1 as MATLAB places the crossover. computePIDF clamps its phase
+// on the ideal derivative instead.
+func placedPD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
+	integ := pidtuneIntegrator(terms.dFormula, terms.wc, terms.dt)
+	c := func(logX float64) complex128 {
+		td := math.Exp(logX) / terms.wc
+		return 1 + complex(td, 0)/(complex(td/10, 0)+integ)
 	}
+	lead := func(logX float64) float64 { return cmplx.Phase(c(logX)) }
+
+	const lo, hi = -18.0, 14.0
+	const g = 0.6180339887498949
+	a, b := lo, hi
+	x1, x2 := b-g*(b-a), a+g*(b-a)
+	f1, f2 := lead(x1), lead(x2)
+	for b-a > 1e-10 {
+		if f1 < f2 {
+			a, x1, f1 = x1, x2, f2
+			x2 = a + g*(b-a)
+			f2 = lead(x2)
+		} else {
+			b, x2, f2 = x2, x1, f1
+			x1 = b - g*(b-a)
+			f1 = lead(x1)
+		}
+	}
+	logX := (a + b) / 2
+	most := lead(logX)
+	phiCRad := math.Max(phiC*math.Pi/180, 0.05)
+	if most > phiCRad {
+		a, b = lo, logX
+		for b-a > 1e-13 {
+			m := (a + b) / 2
+			if lead(m) < phiCRad {
+				a = m
+			} else {
+				b = m
+			}
+		}
+		logX = (a + b) / 2
+	}
+	if !(lead(logX) > 0) {
+		logX = math.Log(0.1)
+	}
+	Td := math.Exp(logX) / terms.wc
+
+	pid.Tf = Td / 10
+	pid.Kp = 1.0 / (magP * cmplx.Abs(c(logX)))
+	pid.Kd = pid.Kp * Td
 }
 
 // pidFromPhase solves Kp + Ki*I + Kd*D = target with Ki = Kp*wc/b and D the

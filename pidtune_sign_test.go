@@ -558,3 +558,40 @@ func TestPidtuneNearIntegratorCancelledByZero(t *testing.T) {
 		}
 	}
 }
+
+// QIQEGI: a zero-DC stable plant guesses the sign of its numerator term
+// largest at wc, not of its leading nonnegligible term. Oracle: of the P
+// gains ±1/|G(jwc)| crossing over at wc, only the guessed sign is stable by
+// the closed-loop roots; above √(0.3311/0.0563) the s² term leads.
+func TestPidtuneGuessedSignDominantTerm(t *testing.T) {
+	num, den := Poly{0.0563, -0.3311, 0}, Poly{1, 7.063, 15.54, 12.54}
+	pos, neg := negatedPlant(t, num, den, 0)
+	for i, p := range []*System{pos, neg} {
+		n, flip := num, 1.0
+		if i == 1 {
+			n, flip = Poly{-num[0], -num[1], 0}, -1
+		}
+		eval, err := newSISOEval(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const wc = 0.895762703582968
+		sign, rule := pidtuneGainSign(p, eval.at, wc, false)
+		if rule != pidtuneSignStable {
+			t.Fatalf("rule %d, want pidtuneSignStable", rule)
+		}
+		if sign != -flip {
+			t.Errorf("flip=%g: sign %g at wc=%g, want %g", flip, sign, wc, -flip)
+		}
+		k := 1 / cmplx.Abs(eval.at(wc))
+		if st, _ := pidtuneOracleStable(t, &PID{Kp: sign * k}, n, den, 0, 0); !st {
+			t.Errorf("flip=%g: Kp=%g unstable", flip, sign*k)
+		}
+		if st, _ := pidtuneOracleStable(t, &PID{Kp: -sign * k}, n, den, 0, 0); st {
+			t.Errorf("flip=%g: Kp=%g stable", flip, -sign*k)
+		}
+		if s, _ := pidtuneGainSign(p, eval.at, 20, false); s != flip {
+			t.Errorf("flip=%g: sign %g at wc=20, want %g", flip, s, flip)
+		}
+	}
+}

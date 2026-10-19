@@ -245,6 +245,51 @@ func TestDiskMarginDelayedFeedthroughPeak(t *testing.T) {
 	}
 }
 
+// A low-gain loop whose |S − 1/2| peak lies beyond the grid end R, where
+// the tail bound gave only |L| <= 1e-3, not the level the grid peak needed:
+// Alpha was 1.99973862566 (peak at ω=54.69). Oracle: dense sweep of the
+// transfer function.
+func TestDiskMarginDelayedPeakBeyondGridTail(t *testing.T) {
+	q := quasiLoop{
+		num: []float64{0.016474487941507507, 0.009196941210536021, 0.00018303184914893273},
+		den: []float64{1, 5.649976667543539, 0.9891218320217057, 0},
+		tau: 0.005714716137404789,
+	}
+	P := makePlant(t, q.num, q.den)
+	if err := P.SetInputDelay([]float64{q.tau}); err != nil {
+		t.Fatal(err)
+	}
+	dm, err := DiskMargin(P)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peak, w := oraclePeakShifted(q.L, 3000, -0.5)
+	if math.Abs(1/dm.Alpha-peak) > 1e-9*peak {
+		t.Fatalf("1/Alpha=%.12g, oracle %.12g at ω=%g", 1/dm.Alpha, peak, w)
+	}
+	ms, _ := oraclePeakShifted(q.L, 3000, 0)
+	if math.Abs(dm.PeakSensitivity-ms) > 1e-9*ms {
+		t.Fatalf("Ms=%.12g, oracle %.12g", dm.PeakSensitivity, ms)
+	}
+}
+
+// |L| = 0.5|jω+1|/|jω+2| rises to its limit 0.5, so sup |S − 1/2| = 1.5 is
+// approached as ω → ∞ and the band beyond the grid cannot be certified to
+// peakCertTol: the peak stays the high-frequency disk bound.
+func TestDiskMarginDelayedPeakAtInfinity(t *testing.T) {
+	P := makePlant(t, []float64{0.5, 0.5}, []float64{1, 2})
+	if err := P.SetInputDelay([]float64{0.01}); err != nil {
+		t.Fatal(err)
+	}
+	dm, err := DiskMargin(P)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 1 / diskBound(0.5, -0.5); math.Abs(dm.Alpha-want) > 1e-12*want {
+		t.Fatalf("Alpha=%.15g, want %.15g", dm.Alpha, want)
+	}
+}
+
 func TestDiskMarginDelayedRepresentationsAgree(t *testing.T) {
 	const k, a, tau = 2.0, 1.5, 0.25
 	base := delayedLoop(t, []float64{-a}, []float64{1}, []float64{k}, []float64{0}, 1, tau)
