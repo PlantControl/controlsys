@@ -1020,3 +1020,80 @@ func TestPoleLimitIntegratorBesideTinyPoleSweep(t *testing.T) {
 		t.Errorf("%d of 40 plants exercise the pole limit; want ≥ 20", exercised)
 	}
 }
+
+// TestPoleLimitLightlyDampedDiscretePair (ND75VC): the discrete pair
+// 1±2.9e−6j, |p|−1 ≈ 4e−12, leaves the double solve singular 4e−10 from a
+// pole, within 1e−3 relative but 7× the pole limit's step 1e−5·|p−p̄|. Its
+// samples straddled the pole and read a residue: FreqResponse returned the
+// solve error, then +Inf, where G ≈ 9.3e13 is finite. Oracles: big.Float
+// solve of the stored realization, and num(z)/den(z) in big.Float, for both
+// columns of a 1×2 model.
+func TestPoleLimitLightlyDampedDiscretePair(t *testing.T) {
+	num := []float64{1.5841368901875659, -1.4026199636681365}
+	den := []float64{1, -2.348244102065107, 1.6964882041386697, -0.3482441020680517}
+	r, err := (&TransferFunc{Num: [][][]float64{{num, {-0.5 * num[0], -0.5 * num[1]}}}, Den: [][]float64{den}, Dt: 1}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := r.Sys
+	const w0 = 2.9074070280281846e-06
+	rs, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}, Dt: 1}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	siso := rs.Sys
+	if _, raw, _ := poleLimitAt(siso, w0); raw == nil {
+		t.Fatal("double solve succeeded; case no longer exercises the pole limit")
+	}
+	poly := func(c []float64, z frBig) frBig {
+		v := frBigC(0)
+		for _, x := range c {
+			v = v.mul(z).add(frBigC(complex(x, 0)))
+		}
+		return v
+	}
+	ratio := func(z frBig) complex128 { return poly(num, z).quo(poly(den, z)).complex() }
+	check := func(api string, w float64, z frBig, got []complex128) {
+		t.Helper()
+		want := frExactResponse(sys, z)
+		if g := ratio(z); cmplx.Abs(g-want[0]) > 1e-12*cmplx.Abs(g) {
+			t.Fatalf("ω=%g: realization %v disagrees with num/den %v", w, want[0], g)
+		}
+		for j := range want {
+			if cmplx.IsInf(got[j]) || cmplx.Abs(got[j]-want[j]) > 1e-12*cmplx.Abs(want[j]) {
+				t.Errorf("%s(%.17g)[%d] = %v; want %v", api, w, j, got[j], want[j])
+			}
+		}
+	}
+	ws := []float64{w0}
+	for _, k := range []float64{1e-9, 1e-8, 1e-7, 1e-6} {
+		ws = append(ws, w0*(1-k), w0*(1+k))
+	}
+	for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+		"FreqResponse":          sys.FreqResponse,
+		"FreqResponsePointwise": sys.FreqResponsePointwise,
+	} {
+		fr, err := f(ws)
+		if err != nil {
+			t.Fatalf("%s: %v", api, err)
+		}
+		for k, w := range ws {
+			check(api, w, frExactPoint(w, 1), []complex128{fr.At(k, 0, 0), fr.At(k, 0, 1)})
+		}
+	}
+	for _, w := range ws {
+		fr, err := siso.FreqResponse([]float64{w})
+		if err != nil {
+			t.Fatalf("SISO FreqResponse(%g): %v", w, err)
+		}
+		if want := frExactResponse(siso, frExactPoint(w, 1))[0]; cmplx.Abs(fr.At(0, 0, 0)-want) > 1e-12*cmplx.Abs(want) {
+			t.Errorf("SISO FreqResponse(%.17g) = %v; want %v", w, fr.At(0, 0, 0), want)
+		}
+		z := cmplx.Exp(complex(0, w))
+		h, err := sys.EvalFr(z)
+		if err != nil {
+			t.Fatalf("EvalFr(e^{j%g}): %v", w, err)
+		}
+		check("EvalFr", w, frBigC(z), h[0])
+	}
+}

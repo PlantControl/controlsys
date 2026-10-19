@@ -26,7 +26,10 @@ const (
 // response there: at a numerical pole of the realization its pole limit
 // (see poleLimitInto), and off every pole the double-double response of the
 // delay-free realization (ddResponseInto). pt is a pole when a pole p lies
-// within poleRelativeTol of s relative to max(|s|, |p|), or, for s = 0,
+// within poleRelativeTol of s relative to max(|s|, |p|) and within the pole
+// limit's step poleStepFraction·rho of s, where its samples see p at s;
+// farther out, as beside a lightly damped pair, they straddle p and misread
+// the finite response as a pole. For s = 0 it is a pole when one lies
 // within poleClusterTol of the spectral scale, the radius poleSpacing takes
 // as s itself: a computed integrator is of order eps·‖A‖ and a k-fold one
 // spreads by eps^{1/k}. Next to a pole cluster at the origin the double solve
@@ -177,13 +180,15 @@ func poleSpacing(sys *System, s complex128) (rho, wide float64, near bool, err e
 	}
 	rho = scale
 	dist := make([]float64, 0, len(poles))
+	relative := false
 	for _, p := range poles {
 		d := cmplx.Abs(p - s)
 		if d > poleClusterTol*scale && d < rho {
 			rho = d
 		}
 		if !cmplx.IsInf(p) {
-			near = near || d <= poleRelativeTol*max(cmplx.Abs(s), cmplx.Abs(p)) || s == 0 && d <= poleClusterTol*scale
+			relative = relative || d <= poleRelativeTol*max(cmplx.Abs(s), cmplx.Abs(p))
+			near = near || s == 0 && d <= poleClusterTol*scale
 			dist = append(dist, d)
 		}
 	}
@@ -206,6 +211,7 @@ func poleSpacing(sys *System, s complex128) (rho, wide float64, near bool, err e
 			}
 		}
 	}
+	near = near || relative && dist[0] <= poleStepFraction*rho
 	return rho, wide, near, nil
 }
 
