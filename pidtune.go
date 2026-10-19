@@ -196,6 +196,9 @@ func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 			return pid, nil
 		}
 	}
+	if run.capErr != nil {
+		return nil, fmt.Errorf("Pidtune: %w", run.capErr)
+	}
 	return nil, fmt.Errorf("Pidtune: %w", first)
 }
 
@@ -300,6 +303,12 @@ type pidtuneRun struct {
 	gate   *pidtuneGate
 	// stable caches openStable: 0 unknown, 1 stable, −1 not.
 	stable int
+	// first holds the gains pidtuneGains first gave at r.wc, when firstSet,
+	// for levelCapped.
+	first    PID2
+	firstSet bool
+	// capErr is levelCapped's first rejection.
+	capErr error
 }
 
 // design designs pidType at wc for sign·G, then for −sign·G when r.mirror
@@ -379,9 +388,13 @@ func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor boo
 	}
 	pid, err := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pd, pidtunePIDFIterate)
 	if err == nil {
+		r.keepFirst(pid, wc)
 		err = r.check(pid, wc, gated)
 		if err != nil && pd == pidtunePDPlaced && r.pidType == PidtunePD && errors.Is(err, ErrPIDTuningTargetUnattainable) {
 			alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pidtunePDLegacyTd, pidtunePIDFIterate)
+			if altErr == nil {
+				r.keepFirst(alt, wc)
+			}
 			if altErr == nil && alt.Kd/alt.Kp > pid.Kd/pid.Kp && r.check(alt, wc, gated) == nil {
 				return alt, nil
 			}
@@ -393,6 +406,9 @@ func (r *pidtuneRun) checked(wc, sign float64, gated, stableFilter, lagFloor boo
 	}
 	for _, mode := range []pidtunePIDFMode{pidtunePIDFDefaultTf, pidtunePIDFKeep} {
 		alt, altErr := pidtuneGains(r.plant, &r.at, r.pidType, wc, r.pm, sign, stableFilter, lagFloor, pd, mode)
+		if altErr == nil {
+			r.keepFirst(alt, wc)
+		}
 		if altErr == nil && r.check(alt, wc, gated || r.auto) == nil {
 			return alt, nil
 		}
@@ -485,7 +501,55 @@ func (r *pidtuneRun) backoffFloor() float64 {
 }
 
 func (r *pidtuneRun) gated(pid *PID, wc float64, certified bool) error {
-	return r.gateOf().check(pid, r.pidType, wc, r.pm, certified)
+	err := r.gateOf().check(pid, r.pidType, wc, r.pm, certified)
+	if err == nil && certified && wc != r.wc && r.plant.Dt == 0 {
+		err = r.levelCapped(pid, wc)
+	}
+	return err
+}
+
+// pidtuneLevelCap and pidtuneLevelGrowth bound |L(j∞)| of a back-off design
+// by max(pidtuneLevelCap, pidtuneLevelGrowth·L0), L0 that of the first
+// design: a back-off step raises the gain, and a loop leveling off far above
+// 0 dB keeps |S| small and its margins without shaping the response.
+const (
+	pidtuneLevelCap    = 10
+	pidtuneLevelGrowth = 100
+)
+
+// keepFirst records the first gains designed at r.wc.
+func (r *pidtuneRun) keepFirst(pid *PID, wc float64) {
+	if wc == r.wc && !r.firstSet {
+		r.first, r.firstSet = pidtuneGateController(pid), true
+	}
+}
+
+// levelCapped rejects a continuous back-off design whose loop levels off at
+// |L(j∞)| above its cap, remembering the first rejection for Pidtune. L0 is
+// |D|/|G(j r.wc)| when no first gains exist or their level is unbounded, an
+// ideal derivative on a biproper plant.
+func (r *pidtuneRun) levelCapped(pid *PID, wc float64) error {
+	g := r.gateOf()
+	c := pidtuneGateController(pid)
+	_, _, lim := g.beyondLevel(&c)
+	if math.IsNaN(lim) {
+		return nil
+	}
+	l0 := math.Abs(r.plant.D.At(0, 0)) / cmplx.Abs(g.at(r.wc))
+	if r.firstSet {
+		if v, _, ok := g.asymptote(&r.first); ok {
+			l0 = math.Abs(v)
+		}
+	}
+	limit := max(pidtuneLevelCap, pidtuneLevelGrowth*l0)
+	if !(math.Abs(lim) > limit) {
+		return nil
+	}
+	err := fmt.Errorf("%s back-off design at wc=%g levels off at |L(j∞)| = %.3g, above %.3g; specify wc: %w", r.pidType, wc, math.Abs(lim), limit, ErrPIDTuningTargetUnattainable)
+	if r.capErr == nil {
+		r.capErr = err
+	}
+	return err
 }
 
 func (r *pidtuneRun) gateOf() *pidtuneGate {
@@ -1020,15 +1084,23 @@ const pidtuneGateReach = 1e12
 // bands reach π/Dt, ideal derivatives), or it does not end within
 // pidtuneGateReach times the top, left to the band as before.
 func (g *pidtuneGate) beyond(c *PID2) (grid []float64, level float64) {
+	grid, level, _ = g.beyondLevel(c)
+	return grid, level
+}
+
+// beyondLevel is beyond that also returns L(j∞) when the loop above the band
+// levels off at it per asymptote, else NaN.
+func (g *pidtuneGate) beyondLevel(c *PID2) (grid []float64, level, lim float64) {
 	if !g.tailDone {
 		g.tailDone = true
 		if g.plant.Dt == 0 {
 			g.tail = pidTuningLoopTail(g.plant)
 		}
 	}
+	lim = math.NaN()
 	top, bound := g.p.high, 1-1/g.p.maxSensitivity
 	if g.tail == nil || g.tail(c, top) <= bound {
-		return nil, 0
+		return nil, 0, lim
 	}
 	end, reach := top, top*pidtuneGateReach
 	if g.tail(c, math.Inf(1)) <= bound {
@@ -1036,13 +1108,14 @@ func (g *pidtuneGate) beyond(c *PID2) (grid []float64, level float64) {
 			end *= 2
 		}
 		if g.tail(c, end) > bound {
-			return nil, 0
+			return nil, 0, lim
 		}
 	} else {
-		lim, dev, ok := g.asymptote(c)
+		l, dev, ok := g.asymptote(c)
 		if !ok {
-			return nil, 0
+			return nil, 0, lim
 		}
+		lim = l
 		// Delay turns L(j∞) round the circle of radius |L(j∞)|.
 		dist := 1 - math.Abs(lim)
 		gap := dist - 1/g.p.maxSensitivity
@@ -1055,16 +1128,16 @@ func (g *pidtuneGate) beyond(c *PID2) (grid []float64, level float64) {
 			level = 1 / dist
 		}
 		if dev == nil || !(gap > 0) {
-			return nil, level
+			return nil, level, lim
 		}
 		for end < reach && !(dev(end) <= gap/2) {
 			end *= 2
 		}
 		if !(dev(end) <= gap/2) {
-			return nil, level
+			return nil, level, lim
 		}
 		if end == top {
-			return nil, level
+			return nil, level, lim
 		}
 	}
 	n := int(math.Ceil(math.Log10(end/top)*pidtuneGatePerDecade)) + 1
@@ -1072,7 +1145,7 @@ func (g *pidtuneGate) beyond(c *PID2) (grid []float64, level float64) {
 	for i := range grid {
 		grid[i] = math.Min(top*math.Pow(10, float64(i)/pidtuneGatePerDecade), end)
 	}
-	return grid, level
+	return grid, level, lim
 }
 
 // asymptote returns L(j∞) of a continuous loop with c leveling off, and
