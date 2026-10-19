@@ -72,8 +72,12 @@ func (r *DiskMarginResult) PeakFreq() (w float64, ok bool) { return r.peakFreq, 
 // sisoEval evaluates a SISO loop on the boundary of the stability region.
 // It reuses one point evaluator, the state-space solver or the internal-delay
 // LFT workspace, so refinement loops pay its setup once and high-order loops
-// keep state-space accuracy. Unless extended or exact, each value is
-// bit-identical to FreqResponse at the same ω.
+// keep state-space accuracy. Unless extended or exact, each value the double
+// solve resolves is bit-identical to FreqResponse at the same ω. Where it
+// fails, at takes the pole limit in double (ddGate.limit) instead of
+// FreqResponse's double-double response, and a failure there stands: the
+// rational margin search and the PID screens read it as unresolved, as next
+// to an origin or Nyquist cluster or multiple poles at z = 1.
 //
 // at keeps the signature func(float64) complex128 so it can be passed as a
 // response function; a failed evaluation returns NaN and is kept in err,
