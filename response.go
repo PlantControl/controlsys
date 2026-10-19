@@ -1035,9 +1035,10 @@ func structuralClosure(a blas64.General, set []bool, reverse bool) {
 
 // dcGainIOScaled returns sys with column j of B scaled by inScale[j], row i
 // of C by outScale[i] and D zeroed, exact powers of two (capped at 2¹⁰²³)
-// bringing each nonzero column or row whose max-abs entry is below
-// 2⁻²⁰·max(‖A‖, 1) up to about max(‖A‖, 1). Above that a B·C product clears
-// the 100·ε·max(‖A‖, 1) and n²·ε·‖A‖ floors, so well-scaled models are
+// bringing each nonzero column or row whose max-abs entry has a smaller
+// binary exponent than max(‖A‖, 1) up to about max(‖A‖, 1). Any smaller
+// scale lets a small internal coupling push a transfer numerator under the
+// limit's absolute coefficient floor. Models already at that scale are
 // returned as they are, D included.
 func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
 	n, m, p := sys.Dims()
@@ -1060,8 +1061,10 @@ func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
 	unit := true
 	for k, v := range scales {
 		scales[k] = 1
-		if finite && v != 0 && v < 0x1p-20*target {
-			_, e := math.Frexp(v)
+		if !finite || v == 0 || !(v < target) {
+			continue
+		}
+		if _, e := math.Frexp(v); e < targetExp {
 			scales[k] = math.Ldexp(1, min(targetExp-e, 1023))
 			unit = false
 		}

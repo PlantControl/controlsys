@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -136,5 +137,61 @@ func TestDCGain_NearSingularSolveStaysFinite(t *testing.T) {
 	}
 	if got := g.At(0, 0); math.IsInf(got, 0) || math.Abs(got-0.5082518651448561) > 0.25 {
 		t.Errorf("DCGain = %v, want finite near 0.508", got)
+	}
+}
+
+// OTMOFO: B and C entries just above the old 2⁻²⁰·‖A‖ scaling threshold
+// and a 1e-4 coupling put the transfer numerator (~1e-15) under the limit's
+// absolute coefficient floor, so an integrator in a 2×2 exactly singular
+// block (no 1×1 exact pole for the Laurent path) read as 0. Oracle: exact
+// rational limit on the float model.
+func TestDCGain_SmallNumeratorBelowAbsoluteFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    []float64
+		c    []float64
+		dt   float64
+	}{
+		{"ct", []float64{-1, 1, 0, 1, -1, 0, 0, 1e-4, -1}, []float64{0, 0, 4e-6}, 0},
+		{"ct-neg", []float64{-1, 1, 0, 1, -1, 0, 0, 1e-4, -1}, []float64{0, 0, -4e-6}, 0},
+		{"dt", []float64{0.5, 0.5, 0, 0.5, 0.5, 0, 0, 1e-4, 0.5}, []float64{0, 0, 4e-6}, 1},
+		{"mimo", []float64{-1, 1, 0, 1, -1, 0, 0, 1e-4, -1}, []float64{3e-6, 0, 4e-6}, 0},
+		{"mimo-dt", []float64{0.5, 0.5, 0, 0.5, 0.5, 0, 0, 1e-4, 0.5}, []float64{3e-6, 0, 4e-6}, 1},
+	} {
+		const k = 4e-6
+		b := []float64{k, k, 0, -k, 0, 0}
+		d := []float64{0.5, 0}
+		m := 2
+		if !strings.HasPrefix(tc.name, "mimo") {
+			b, d, m = []float64{k, 0, 0}, []float64{0}, 1
+		}
+		sys, err := NewFromSlices(3, m, 1, tc.a, b, tc.c, d, tc.dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := sys.DCGain()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		x0 := fzRat(0)
+		if tc.dt > 0 {
+			x0 = fzRat(1)
+		}
+		cp := fzCharPolyExact(tc.a, 3)
+		for j := range m {
+			bj := []float64{b[j], b[m+j], b[2*m+j]}
+			want := fzLimitAt(fzPencilDetRat(3, 1, tc.a, bj, tc.c, []float64{d[j]}), cp, x0)
+			got := g.At(0, j)
+			if j == 0 && !math.IsInf(want, 0) {
+				t.Fatalf("%s: oracle [0,0] = %v finite; case no longer exercises an integrator", tc.name, want)
+			}
+			if math.IsInf(want, 0) {
+				if got != want {
+					t.Errorf("%s [0,%d]: DCGain = %v, want %v", tc.name, j, got, want)
+				}
+			} else if math.Abs(got-want) > 1e-8*math.Abs(want) {
+				t.Errorf("%s [0,%d]: DCGain = %v, want %v", tc.name, j, got, want)
+			}
+		}
 	}
 }
