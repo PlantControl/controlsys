@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 
+	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -498,35 +499,149 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) 
 	return reduced.DCGain()
 }
 
-// dcGainByTransferFunctionLimit first rescales each input and output to the
-// norm of A: the singular-mode and controllability tolerances are relative
-// to ‖A‖, so a tiny but nonzero B or C would otherwise be dropped as
-// rounding and an integrator's infinite gain reported as 0.
+// dcGainByTransferFunctionLimit rescales each input and output to the norm
+// of A: the singular-mode and controllability tolerances are relative to
+// ‖A‖, so a tiny but nonzero B or C would otherwise be dropped as rounding
+// and an integrator's infinite gain reported as 0. Before the transfer
+// limit it drops, per entry, states structurally disconnected from that
+// input or output: the limit's root tests use an absolute coefficient
+// floor, so an exact integrator–zero cancellation would otherwise hinge on
+// the scale of B and C.
 func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
 	scaled, inScale, outScale := sys.dcGainIOScaled()
 	gain, ok := scaled.dcGainByDecoupledSingularModes()
 	if !ok {
+		if gain, ok, err := sys.dcGainByStructuralEntries(); ok {
+			return gain, err
+		}
 		res, err := scaled.rationalTransferFunction(nil)
 		if err != nil {
 			return nil, fmt.Errorf("DCGain: %w", err)
 		}
 		gain = dcGainFromTransferFunction(res.TF)
 	}
+	if scaled == sys {
+		return gain, nil
+	}
 	raw := gain.RawMatrix()
 	for i, so := range outScale {
 		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
 		for j, si := range inScale {
-			row[j] /= so * si
+			row[j] /= so
+			row[j] /= si
 		}
+	}
+	if sys.D != nil {
+		gain.Add(gain, sys.D)
 	}
 	return gain, nil
 }
 
-// dcGainIOScaled returns sys with column j of B and D scaled by inScale[j]
-// and row i of C and D by outScale[i], exact powers of two bringing each
-// nonzero column or row whose max-abs entry is below 2⁻²⁰·max(‖A‖, 1) up to
-// about max(‖A‖, 1). Above that a B·C product clears the 100·ε·max(‖A‖, 1)
-// and n²·ε·‖A‖ floors, so well-scaled models are left as they are.
+// dcGainByStructuralEntries evaluates each entry on the states reachable
+// from its input and observable from its output by the exact sparsity of A,
+// B and C (MATLAB sminreal per channel). ok is false when no entry loses a
+// state, so the reduced channels never recurse back into it.
+func (sys *System) dcGainByStructuralEntries() (*mat.Dense, bool, error) {
+	n, m, p := sys.Dims()
+	aRaw, bRaw, cRaw := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
+	reach := make([][]bool, m)
+	for j := range m {
+		r := make([]bool, n)
+		for k := range n {
+			r[k] = bRaw.Data[k*bRaw.Stride+j] != 0
+		}
+		structuralClosure(aRaw, r, false)
+		reach[j] = r
+	}
+	obs := make([][]bool, p)
+	for i := range p {
+		o := make([]bool, n)
+		for k := range n {
+			o[k] = cRaw.Data[i*cRaw.Stride+k] != 0
+		}
+		structuralClosure(aRaw, o, true)
+		obs[i] = o
+	}
+	reduced := false
+	for i := range p {
+		for j := range m {
+			for k := range n {
+				reduced = reduced || !reach[j][k] || !obs[i][k]
+			}
+		}
+	}
+	if !reduced {
+		return nil, false, nil
+	}
+	gain := denseCopySafe(sys.D, p, m)
+	keep := make([]int, 0, n)
+	for i := range p {
+		for j := range m {
+			keep = keep[:0]
+			for k := range n {
+				if reach[j][k] && obs[i][k] {
+					keep = append(keep, k)
+				}
+			}
+			r := len(keep)
+			if r == 0 {
+				continue
+			}
+			ar := mat.NewDense(r, r, nil)
+			br := mat.NewDense(r, 1, nil)
+			cr := mat.NewDense(1, r, nil)
+			arRaw, brData, crData := ar.RawMatrix(), br.RawMatrix().Data, cr.RawMatrix().Data
+			for ii, k := range keep {
+				row := aRaw.Data[k*aRaw.Stride:]
+				for jj, l := range keep {
+					arRaw.Data[ii*arRaw.Stride+jj] = row[l]
+				}
+				brData[ii] = bRaw.Data[k*bRaw.Stride+j]
+				crData[ii] = cRaw.Data[i*cRaw.Stride+k]
+			}
+			sub := &System{A: ar, B: br, C: cr, D: mat.NewDense(1, 1, nil), Dt: sys.Dt}
+			g, err := sub.DCGain()
+			if err != nil {
+				return nil, true, err
+			}
+			gain.Set(i, j, gain.At(i, j)+g.At(0, 0))
+		}
+	}
+	return gain, true, nil
+}
+
+// structuralClosure grows set to every state driven by a member through a
+// nonzero A entry (A[i,k] ≠ 0: x_k drives x_i), or with reverse to every
+// state driving a member.
+func structuralClosure(a blas64.General, set []bool, reverse bool) {
+	n := len(set)
+	for changed := true; changed; {
+		changed = false
+		for i := range n {
+			if set[i] {
+				continue
+			}
+			for k := range n {
+				v := a.Data[i*a.Stride+k]
+				if reverse {
+					v = a.Data[k*a.Stride+i]
+				}
+				if set[k] && v != 0 {
+					set[i] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+}
+
+// dcGainIOScaled returns sys with column j of B scaled by inScale[j], row i
+// of C by outScale[i] and D zeroed, exact powers of two (capped at 2¹⁰²³)
+// bringing each nonzero column or row whose max-abs entry is below
+// 2⁻²⁰·max(‖A‖, 1) up to about max(‖A‖, 1). Above that a B·C product clears
+// the 100·ε·max(‖A‖, 1) and n²·ε·‖A‖ floors, so well-scaled models are
+// returned as they are, D included.
 func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
 	n, m, p := sys.Dims()
 	scales := make([]float64, m+p)
@@ -550,7 +665,7 @@ func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
 		scales[k] = 1
 		if finite && v != 0 && v < 0x1p-20*target {
 			_, e := math.Frexp(v)
-			scales[k] = math.Ldexp(1, targetExp-e)
+			scales[k] = math.Ldexp(1, min(targetExp-e, 1023))
 			unit = false
 		}
 	}
@@ -571,15 +686,7 @@ func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
 			row[k] *= s
 		}
 	}
-	d := denseCopySafe(sys.D, p, m)
-	dRaw := d.RawMatrix()
-	for i, so := range outScale {
-		row := dRaw.Data[i*dRaw.Stride : i*dRaw.Stride+m]
-		for j, si := range inScale {
-			row[j] *= so * si
-		}
-	}
-	return &System{A: sys.A, B: b, C: c, D: d, Dt: sys.Dt}, inScale, outScale
+	return &System{A: sys.A, B: b, C: c, D: mat.NewDense(p, m, nil), Dt: sys.Dt}, inScale, outScale
 }
 
 func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
