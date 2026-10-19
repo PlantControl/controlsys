@@ -1033,18 +1033,32 @@ func structuralClosure(a blas64.General, set []bool, reverse bool) {
 	}
 }
 
-// dcGainIOScaled returns sys with column j of B scaled by inScale[j], row i
-// of C by outScale[i] and D zeroed, exact powers of two (capped at 2¹⁰²³)
-// bringing each nonzero column or row whose max-abs entry has a smaller
-// binary exponent than max(‖A‖, 1) up to about max(‖A‖, 1). Any smaller
-// scale lets a small internal coupling push a transfer numerator under the
-// limit's absolute coefficient floor. Models already at that scale are
-// returned as they are, D included.
+// dcGainIOScaled returns sys with B, C scaled by ioPow2Scales and D
+// zeroed; any smaller scale lets a small internal coupling push a transfer
+// numerator under the limit's absolute coefficient floor. Models already at
+// that scale are returned as they are, D included.
 func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
-	n, m, p := sys.Dims()
+	_, m, p := sys.Dims()
+	inScale, outScale, unit := ioPow2Scales(sys.A, sys.B, sys.C)
+	if unit {
+		return sys, inScale, outScale
+	}
+	b, c := mat.DenseCopyOf(sys.B), mat.DenseCopyOf(sys.C)
+	applyIOScales(b, c, inScale, outScale)
+	return &System{A: sys.A, B: b, C: c, D: mat.NewDense(p, m, nil), Dt: sys.Dt}, inScale, outScale
+}
+
+// ioPow2Scales returns exact powers of two (capped at 2¹⁰²³) for each
+// column j of B and row i of C, bringing each nonzero one whose max-abs
+// entry has a smaller binary exponent than max(‖A‖, 1) up to about
+// max(‖A‖, 1). unit reports that every scale is 1.
+func ioPow2Scales(a, b, c *mat.Dense) (inScale, outScale []float64, unit bool) {
+	n, _ := a.Dims()
+	_, m := b.Dims()
+	p, _ := c.Dims()
 	scales := make([]float64, m+p)
-	inScale, outScale := scales[:m], scales[m:]
-	sbRaw, scRaw := sys.B.RawMatrix(), sys.C.RawMatrix()
+	inScale, outScale = scales[:m], scales[m:]
+	sbRaw, scRaw := b.RawMatrix(), c.RawMatrix()
 	for k := range n {
 		for j, v := range sbRaw.Data[k*sbRaw.Stride : k*sbRaw.Stride+m] {
 			inScale[j] = math.Max(inScale[j], math.Abs(v))
@@ -1055,10 +1069,10 @@ func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
 			outScale[i] = math.Max(outScale[i], math.Abs(v))
 		}
 	}
-	target := math.Max(denseNorm(sys.A), 1)
+	target := math.Max(denseNorm(a), 1)
 	_, targetExp := math.Frexp(target)
 	finite := !math.IsInf(target, 0) && !math.IsNaN(target)
-	unit := true
+	unit = true
 	for k, v := range scales {
 		scales[k] = 1
 		if !finite || v == 0 || !(v < target) {
@@ -1069,24 +1083,25 @@ func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
 			unit = false
 		}
 	}
-	if unit {
-		return sys, inScale, outScale
-	}
-	b, c := mat.DenseCopyOf(sys.B), mat.DenseCopyOf(sys.C)
+	return inScale, outScale, unit
+}
+
+// applyIOScales scales column j of b by inScale[j] and row i of c by
+// outScale[i] in place.
+func applyIOScales(b, c *mat.Dense, inScale, outScale []float64) {
 	bRaw, cRaw := b.RawMatrix(), c.RawMatrix()
-	for k := range n {
-		row := bRaw.Data[k*bRaw.Stride : k*bRaw.Stride+m]
+	for k := range bRaw.Rows {
+		row := bRaw.Data[k*bRaw.Stride : k*bRaw.Stride+bRaw.Cols]
 		for j, s := range inScale {
 			row[j] *= s
 		}
 	}
 	for i, s := range outScale {
-		row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+n]
+		row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+cRaw.Cols]
 		for k := range row {
 			row[k] *= s
 		}
 	}
-	return &System{A: sys.A, B: b, C: c, D: mat.NewDense(p, m, nil), Dt: sys.Dt}, inScale, outScale
 }
 
 func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
