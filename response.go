@@ -476,16 +476,17 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 // dcGainOffPole resolves a delay-free explicit model whose DC solve failed.
 // With offPole set it does so as FreqResponse does: with no computed pole
 // near DC (poleSpacing) the double-double solve decides, so an
-// ill-conditioned but nonsingular pencil keeps its finite gain. An exact
-// zero pivot (infinite condition), as of a decoupled integrator, skips the
-// pole search. Otherwise, or where the double-double solve is singular too,
-// the transfer limit finds the integrators.
+// ill-conditioned but nonsingular pencil keeps its finite gain, even at an
+// exact zero pivot of the double LU. A zero row or column of A − s0·I is an
+// exact pole at DC and skips the pole search. Otherwise, or where the
+// double-double solve is singular too, the transfer limit finds the
+// integrators.
 func (sys *System) dcGainOffPole(offPole bool, solveErr error) (*mat.Dense, error) {
-	if cond, ok := solveErr.(mat.Condition); offPole && ok && !math.IsInf(float64(cond), 1) {
-		s0 := complex(0, 0)
-		if sys.IsDiscrete() {
-			s0 = 1
-		}
+	s0 := complex(0, 0)
+	if sys.IsDiscrete() {
+		s0 = 1
+	}
+	if _, ok := solveErr.(mat.Condition); offPole && ok && !hasZeroLine(sys.A, real(s0)) {
 		_, m, p := sys.Dims()
 		dst := make([]complex128, p*m)
 		if sp, err := poleSpacing(sys, s0); err == nil && !sp.near && ddResponseInto(sys, pointAt(s0), dst) {
@@ -829,6 +830,28 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 		}
 	}
 	return gain, true
+}
+
+// hasZeroLine reports whether a − shift·I has an exactly zero row or column.
+func hasZeroLine(a *mat.Dense, shift float64) bool {
+	raw := a.RawMatrix()
+	n := raw.Rows
+	for k := range n {
+		row, col := true, true
+		for j := 0; j < n && (row || col); j++ {
+			r, c := raw.Data[k*raw.Stride+j], raw.Data[j*raw.Stride+k]
+			if j == k {
+				r -= shift
+				c = r
+			}
+			row = row && r == 0
+			col = col && c == 0
+		}
+		if row || col {
+			return true
+		}
+	}
+	return false
 }
 
 func rowColDecoupledAt(a *mat.Dense, k int, tol float64) bool {
