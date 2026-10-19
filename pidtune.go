@@ -198,20 +198,20 @@ func (r *pidtuneRun) pipeline(sign float64) (*PID, error) {
 	return r.attempt(sign)
 }
 
-// attempt is backedOff, then for a crossover from the plant's gain the
-// ungated design at r.wc.
+// attempt is backedOff, then, unless levelCapped rejected a back-off step,
+// for a crossover from the plant's gain the ungated design at r.wc.
 func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 	pid, err := r.backedOff(sign)
 	if err == nil || !r.auto || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		return pid, err
 	}
+	if r.capErr != nil {
+		return nil, r.capErr
+	}
 	if r.src == pidtuneCrossGain || r.src == pidtuneCrossRolloff {
 		if pid, err := r.design(r.wc, sign, false); err == nil {
 			return pid, nil
 		}
-	}
-	if r.capErr != nil {
-		return nil, r.capErr
 	}
 	return nil, err
 }

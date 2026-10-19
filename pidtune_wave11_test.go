@@ -50,6 +50,38 @@ func TestPidtuneBackoffLevelCapped(t *testing.T) {
 	}
 }
 
+// 26T5XY review: on biproper gain-crossover plants whose every back-off
+// step the cap rejects, the ungated design at wc ran before the cap error
+// and returned fragile loops: PID with an ideal derivative (worst margin
+// 1.6°, |S| 39), PD with no 0 dB crossing or |S| 4.98, PI with PM 16°. They
+// now return the cap error, or a design robust per the oracle margins and
+// |S| of the directly evaluated loop.
+func TestPidtuneLevelCappedGainSource(t *testing.T) {
+	for _, c := range []struct {
+		f        PidtuneType
+		num, den Poly
+	}{
+		{PidtunePID, Poly{0.0526145298369273, 0.09850694040108975, 6.479336680488852e-05}, Poly{1, 0.05549916906689037, 1.312022785519552}},
+		{PidtunePD, Poly{-0.05081777337581659, -0.024330319418974466, -2.906628966763354e-09}, Poly{1, 0.060832011111875334, 2.042918947643126}},
+		{PidtunePD, Poly{0.06293130656568592, 0.1269834378653455, 0.019629540046287263, 3.1895484290748856e-09}, Poly{1, 1.0877309346904058, 2.1584038875316245, 2.3120037925637735}},
+		{PidtunePI, Poly{0.06605624869768673, 0.03409642515501172, 6.837066608086198e-09}, Poly{1, 0.008011001940457408, 8.102832839220882}},
+	} {
+		name := fmt.Sprintf("%s %v/%v", c.f, c.num, c.den)
+		p := pidtuneBackoffPlant(t, c.num, c.den, 0, 0)
+		if _, src, err := autoCrossoverSource(p, 0, 60); err != nil || src != pidtuneCrossGain {
+			t.Fatalf("%s: crossover source %v, %v", name, src, err)
+		}
+		pid, err := Pidtune(p, c.f, 0, nil)
+		if err != nil {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) || !strings.Contains(err.Error(), "specify wc") {
+				t.Errorf("%s: %v", name, err)
+			}
+			continue
+		}
+		pidtuneCheckRobust(t, name, pid, c.num, c.den, 0, 4.05)
+	}
+}
+
 func pidtuneLevelOracle(pid *PID, num, den Poly) float64 {
 	k := pid.Kp
 	if pid.Kd != 0 {
