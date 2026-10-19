@@ -410,46 +410,56 @@ func TestPidtuneGateClassicalMargin(t *testing.T) {
 	}
 }
 
-// PD on k·s/(s+a) cannot lag at the pole-fallback crossover; its clamped
-// design meets |L(wc)| ≈ 0.49 and crosses over well above, 137° from −1.
-// The gate read wc as a crossover with margin −92.6°, as at every back-off
-// step, so Pidtune errored (TFE7I2 review). Oracle: closed-loop root, and
-// the signed margin at every crossover and |S| of the directly evaluated
-// loop; gains match the design before TFE7I2.
+// PD on k·s/(s+a) cannot lag at the pole-fallback crossover wc = a/2, so
+// its Td/10 filtered response takes its most lead there. The legacy design
+// clamped phase on the ideal derivative, leaving |L(wc)| ≈ 0.49 (TFE7I2);
+// as MATLAB, the automatic PD now crosses over at wc (PBXZCH). Oracle:
+// Td·wc = 1/√0.11, the lead maximum of 1 + jx/(1 + jx/10), Tf = Td/10 and
+// Kp = 1/(|G(jwc)|·|1 + jx/(1 + jx/10)|) from k and a; closed-loop root,
+// the classical margin at every crossover and |S| of the directly
+// evaluated loop.
 func TestPidtunePoleFallbackPDHighPass(t *testing.T) {
 	for _, c := range []struct {
 		k, a       float64
 		kp, kd, tf float64
 	}{
-		{0.10902430967794469, 0.23104521558459049, 1.025063312, 177.3174913, 17.29819897},
-		{0.5499305783505386, 3.6597358499148074, 0.2032, 2.219, 1.092},
+		{0.10902430967794469, 0.23104521558459049, 6.18394, 161.399, 2.60998},
+		{0.5499305783505386, 3.6597358499148074, 1.22597, 2.02006, 0.164772},
 	} {
 		num, den := Poly{c.k, 0}, Poly{1, c.a}
 		p := pidtuneBackoffPlant(t, num, den, 0, 0)
 		wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
-		if err != nil || !fromPole {
-			t.Fatalf("%v/%v: pole fallback %v, %v", num, den, fromPole, err)
+		if err != nil || !fromPole || math.Abs(wc-c.a/2) > 1e-9*c.a {
+			t.Fatalf("%v/%v: pole fallback wc %g %v, %v", num, den, wc, fromPole, err)
 		}
 		pid, err := Pidtune(p, PidtunePD, 0, nil)
 		if err != nil {
 			t.Errorf("%v/%v: %v", num, den, err)
 			continue
 		}
-		for _, g := range [][2]float64{{pid.Kp, c.kp}, {pid.Kd, c.kd}, {pid.Tf, c.tf}} {
-			if math.Abs(g[0]-g[1]) > 1e-3*math.Abs(g[1]) {
-				t.Errorf("%v/%v: %+v, want Kp %g Kd %g Tf %g", num, den, pid, c.kp, c.kd, c.tf)
+		x := 1 / math.Sqrt(0.11)
+		td := x / wc
+		g := cmplx.Abs(complex(c.k, 0) * complex(0, wc) / complex(c.a, wc))
+		kp := 1 / (g * cmplx.Abs(1+complex(0, x)/complex(1, x/10)))
+		for _, v := range [][3]float64{{pid.Kp, kp, c.kp}, {pid.Kd, kp * td, c.kd}, {pid.Tf, td / 10, c.tf}} {
+			if math.Abs(v[0]-v[1]) > 1e-6*math.Abs(v[1]) || math.Abs(v[0]-v[2]) > 1e-5*math.Abs(v[2]) {
+				t.Errorf("%v/%v: %+v, want Kp %g Kd %g Tf %g", num, den, pid, kp, kp*td, td/10)
 				break
 			}
+		}
+		L := pidtuneOracleLoop(pid, num, den, 0, 0)
+		if l := cmplx.Abs(L(wc)); math.Abs(l-1) > 1e-6 {
+			t.Errorf("%v/%v: |L(wc)| %g", num, den, l)
 		}
 		if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, 0); !ok || !stable {
 			t.Errorf("%v/%v: %+v unstable", num, den, pid)
 		}
-		pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, 0, 0), wc*1e-6, wc*1e6)
-		if len(pms) == 0 || ms > 1.1 {
+		pms, ms := pidtuneSignedMargins(L, wc*1e-6, wc*1e6)
+		if len(pms) != 1 || ms > 1.3 {
 			t.Errorf("%v/%v: %+v crossovers %v, |S| peak %.3g", num, den, pid, pms, ms)
 		}
 		for _, m := range pms {
-			if math.Abs(m) < 120 {
+			if math.Abs(m) < 58.5 {
 				t.Errorf("%v/%v: %+v margin %.3g° at a crossover", num, den, pid, m)
 			}
 		}
@@ -513,7 +523,8 @@ func TestPidtuneZeroNearIntegratorDesigns(t *testing.T) {
 // A PD design clamped short of |L(wc)| = 1 crossed nowhere; the gate, which
 // drops wc then, checked no crossover and accepted a loop with |L| ≤ 0.18
 // everywhere where the design at the automatic crossover keeps a 60° margin
-// (TFE7I2 review).
+// (TFE7I2 review). The second plant's placed design (PBXZCH) keeps 60° with
+// |S| 3.43, within the gate's pidTuningMaxSensitivity.
 func TestPidtunePDBackoffNeedsCrossover(t *testing.T) {
 	for _, c := range []struct {
 		num, den Poly
@@ -529,7 +540,7 @@ func TestPidtunePDBackoffNeedsCrossover(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 			continue
 		}
-		pidtuneCheckRobust(t, name, pid, c.num, c.den, c.dt, 3)
+		pidtuneCheckRobust(t, name, pid, c.num, c.den, c.dt, pidTuningMaxSensitivity)
 	}
 }
 
