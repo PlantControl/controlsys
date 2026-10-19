@@ -1031,7 +1031,7 @@ func deflateBlockAt(A, B, C *mat.Dense, abs *laurentAbs, blk []int, x0 float64) 
 		}
 	}
 	for i := range d {
-		for j := 0; j < i; j++ {
+		for j := range i {
 			if math.Abs(tc[i*r+j]) > guard {
 				return false
 			}
