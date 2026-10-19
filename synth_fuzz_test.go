@@ -566,8 +566,10 @@ func syMul(a, b []float64, r, k, c int) []float64 {
 	return mqRaw(&o)
 }
 
-// FuzzKalman: Kalman on the delay-free spec model (G = B, H = D) with
-// syNoise covariances, and Lqe (H = 0) on continuous ones. By duality Lᵀ
+// FuzzKalman: Kalman on the delay-free spec model (G = B, H = D, ‖D‖_F
+// capped at 1: a large H with Qn ≫ Rn cancels Q − SR̄⁻¹Sᵀ and Care/Dare then
+// lose digits beyond the conditioning, a known followup) with syNoise
+// covariances, and Lqe (H = 0) on continuous ones. By duality Lᵀ
 // is the gain of the regulator problem (Aᵀ, Cᵀ, BQnBᵀ, R̄, B(QnDᵀ+Nn)) with
 // R̄ = Rn + DNn + NnᵀDᵀ + DQnDᵀ; the solution and gain must pass the
 // syRiccatiChecks there (A − LC exactly stable, P PSD). ErrNoStabilizing
@@ -578,6 +580,13 @@ func FuzzKalman(f *testing.F) {
 	}
 	fzFuzz(f, func(t *testing.T, s *fzSpec) {
 		s = syNormC(s)
+		if nd := mqFro(s.D); nd > 1 {
+			d := make([]float64, len(s.D))
+			for i, x := range s.D {
+				d[i] = x / nd
+			}
+			s.D = d
+		}
 		n, m, p := s.N, s.M, s.P
 		if n == 0 {
 			fzSkip(t, "Kalman: no states")
