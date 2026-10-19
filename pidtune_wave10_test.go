@@ -621,7 +621,7 @@ func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
 			near = math.Min(near, cmplx.Abs(r-1))
 		}
 		name := fmt.Sprintf("%v/%v dt=%g", num, den, dt)
-		if near > 100*0x1p-52 && near <= 1.5e-6 {
+		if near > 100*0x1p-52 && near <= pidtuneClusterRadius(2, 1) {
 			displaced++
 			want := math.Min(0.5*slow, 0.1*math.Pi/dt)
 			if wc, err := plantCrossoverFreq(p); err != nil || math.Abs(wc-want) > 5e-2*want {
