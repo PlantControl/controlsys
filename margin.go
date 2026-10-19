@@ -1238,7 +1238,9 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // coefficient noise at the scan's ends off the negative real axis, so a
 // sign of f there is no rounding; a high-order loop pays two noise solves
 // rather than ~50 double-double solves. Next to the ±180° wrap the sign
-// of f needs no test: a sign change there is a wrap the scan skips.
+// of f needs no test: a sign change there is a wrap the scan skips. The
+// noise at the ends stands for the band's: crossings beside poles on the
+// arc there are the resonance scan's.
 func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
 	if !r.discrete() {
 		return ws
