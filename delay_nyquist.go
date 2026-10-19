@@ -133,22 +133,32 @@ func (l *delayLoop) axisAt(w float64) complex128 {
 }
 
 // ddAllowed reports whether the double-double fallback may evaluate L(jω):
-// only where a boundary pole is nearest, so the walk resolves indentations
-// next to crowded axis poles. Near any other pole a double failure must
-// stand, so that clusterWinding counts the roots: there the fallback would
-// let the uniform walk miss a phase turn between samples.
+// where a boundary pole is nearest, so the walk resolves indentations next
+// to crowded axis poles, and where no other pole q lies within
+// ddDenyReach·|Re q| of jω. There a double failure must stand, so that
+// clusterWinding counts the roots: the fallback would let the uniform walk
+// miss the phase turn of a pole that close to the axis. Farther out, as in
+// the wide band where a companion realization of a near-double lightly
+// damped pair is too ill-conditioned for the double solve, the fallback
+// evaluates L and the failure at the pole frequency still reaches
+// clusterWinding.
 func (l *delayLoop) ddAllowed(w float64) bool {
 	s := complex(0, w)
-	best, boundary := math.Inf(1), false
+	best, boundary, inReach := math.Inf(1), false, false
 	for _, p := range l.poles {
 		d := cmplx.Abs(p - s)
 		b := classifyPoleStability(p, true, poleStabilityTolerance(p)) == poleClassBoundary
 		if d < best || (d == best && !b) {
 			best, boundary = d, b
 		}
+		inReach = inReach || !b && d <= ddDenyReach*math.Abs(real(p))
 	}
-	return boundary
+	return boundary || !inReach
 }
+
+// ddDenyReach: 2..10 cleared 2400 probed near-double-pair loops with no
+// wrong verdict; >= 100 left many errors standing.
+const ddDenyReach = 10
 
 func sisoLoopDelay(sys *System) float64 {
 	tau := 0.0
