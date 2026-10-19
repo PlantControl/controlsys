@@ -204,6 +204,12 @@ const (
 	// double solve's phase error there is at most ~1e-7° in the WSF2HP
 	// tests and ~1e-15° for high-order loops with many slow real poles.
 	realPoleDDBelow = 1e-2
+	// nyquistScanDDAbove is the distance of L from the negative real axis,
+	// |L|·min(|f|, 1) with f the phase offset in radians, over the coefficient
+	// noise above which the scan towards Nyquist keeps the double solve. In the
+	// 6OPXWW tests and the high-order loops the double solve's error in L
+	// stays below 0.22 times that noise.
+	nyquistScanDDAbove = 1e4
 )
 
 func marginLoopDelay(sys *System) float64 {
@@ -1227,7 +1233,12 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // The scan does not test the latter: crossings beside a cluster with exact
 // coefficients lie at |L| ~ that bound. A pole at
 // Nyquist, where rounding makes sign changes beside the cluster, skips the
-// scan.
+// scan. f must be phaseOffsetDeg of r.eval.at: a point keeps the double
+// solve while L lies more than nyquistScanDDAbove times the larger
+// coefficient noise at the scan's ends off the negative real axis, so a
+// sign of f there is no rounding; a high-order loop pays two noise solves
+// rather than ~50 double-double solves. Next to the ±180° wrap the sign
+// of f needs no test: a sign change there is a wrap the scan skips.
 func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
 	if !r.discrete() {
 		return ws
@@ -1244,10 +1255,25 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 	if len(below) > 0 {
 		t = below[len(below)-1] * (1 + 1e-6)
 	}
-	r.eval.extended, r.eval.exact = true, true
+	floor := math.Inf(1)
+	if t < wTop && r.eval.sys.internalDelayCount() == 0 {
+		_, _, c0, ok0 := ddSISOResponseNoise(r.eval.sys, r.eval.td.frequencyPoint(t))
+		_, _, c1, ok1 := ddSISOResponseNoise(r.eval.sys, r.eval.td.frequencyPoint(wTop))
+		r.eval.ddSolves += 2
+		if ok0 && ok1 {
+			floor = nyquistScanDDAbove * max(c0, c1)
+		}
+	}
+	r.eval.extended = true
 	defer func() { r.eval.extended, r.eval.exact = false, false }()
 	ft := func(w float64) float64 {
+		r.eval.exact = false
 		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if ok && cmplx.Abs(r.eval.dst[0])*min(math.Abs(v)*math.Pi/180, 1) > floor {
+			return v
+		}
+		r.eval.exact = true
+		v, ok = tryEval(r.eval, func() float64 { return f(w) })
 		if !ok {
 			return math.NaN()
 		}
