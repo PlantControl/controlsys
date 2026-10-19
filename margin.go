@@ -204,6 +204,12 @@ const (
 	// double solve's phase error there is at most ~1e-7° in the WSF2HP
 	// tests and ~1e-15° for high-order loops with many slow real poles.
 	realPoleDDBelow = 1e-2
+	// nyquistScanDDAbove is the distance of L from the negative real axis,
+	// |L|·min(|f|, 1) with f the phase offset in radians, over the coefficient
+	// noise above which the scan towards Nyquist keeps the double solve. In the
+	// 6OPXWW tests and the high-order loops the double solve's error in L
+	// stays below 0.22 times that noise.
+	nyquistScanDDAbove = 1e4
 )
 
 func marginLoopDelay(sys *System) float64 {
@@ -1227,7 +1233,14 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // The scan does not test the latter: crossings beside a cluster with exact
 // coefficients lie at |L| ~ that bound. A pole at
 // Nyquist, where rounding makes sign changes beside the cluster, skips the
-// scan.
+// scan. f must be phaseOffsetDeg of r.eval.at: a point keeps the double
+// solve while L lies more than nyquistScanDDAbove times the larger
+// coefficient noise at the scan's ends off the negative real axis, so a
+// sign of f there is no rounding; a high-order loop pays two noise solves
+// rather than ~50 double-double solves. Next to the ±180° wrap the sign
+// of f needs no test: a sign change there is a wrap the scan skips. The
+// noise at the ends stands for the band's: crossings beside poles on the
+// arc there are the resonance scan's.
 func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
 	if !r.discrete() {
 		return ws
@@ -1244,13 +1257,25 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 	if len(below) > 0 {
 		t = below[len(below)-1] * (1 + 1e-6)
 	}
-	if t >= wTop {
-		return ws
+	floor := math.Inf(1)
+	if t < wTop && r.eval.sys.internalDelayCount() == 0 {
+		_, _, c0, ok0 := ddSISOResponseNoise(r.eval.sys, r.eval.td.frequencyPoint(t))
+		_, _, c1, ok1 := ddSISOResponseNoise(r.eval.sys, r.eval.td.frequencyPoint(wTop))
+		r.eval.ddSolves += 2
+		if ok0 && ok1 {
+			floor = nyquistScanDDAbove * max(c0, c1)
+		}
 	}
-	r.eval.extended, r.eval.exact = true, true
+	r.eval.extended = true
 	defer func() { r.eval.extended, r.eval.exact = false, false }()
 	ft := func(w float64) float64 {
+		r.eval.exact = false
 		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if ok && cmplx.Abs(r.eval.dst[0])*min(math.Abs(v)*math.Pi/180, 1) > floor {
+			return v
+		}
+		r.eval.exact = true
+		v, ok = tryEval(r.eval, func() float64 { return f(w) })
 		if !ok {
 			return math.NaN()
 		}
@@ -1267,7 +1292,10 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 		return !ok || !(cmplx.Abs(h) <= solve)
 	}
 	out := slices.Clone(below)
-	a, fa := t, ft(t)
+	a, fa := t, math.NaN()
+	if t < wTop {
+		fa = ft(t)
+	}
 	for gap := (wTop - t) / 2; gap > 0; gap /= 2 {
 		b := wTop - gap
 		if b <= a {
@@ -1285,7 +1313,7 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 		}
 		a, fa = b, fb
 	}
-	if len(below) < len(ws) || math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol && aboveNoise(wTop, true) {
+	if len(below) < len(ws) || math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol && aboveNoise(wTop, true) && (len(out) == 0 || wTop > out[len(out)-1]*(1+1e-9)) {
 		out = append(out, wTop)
 	}
 	return out
@@ -1590,7 +1618,9 @@ func (r *rationalLoop) resonanceCrossings(pairs, reals []float64, f func(float64
 // first sign change that refines to |f| ≤ tol and still holds walkClearance
 // either side. Rounding grows without bound towards the band, as eps/δ⁴
 // beside k/(z+1)⁴, and makes sign changes there that the loop lacks. When
-// steep, a refined sign change is held to ulpTol rather than tol.
+// steep, a refined sign change is held to ulpTol rather than tol, and one
+// that refines to a ±180° phase wrap, |f| > 90, as a wide bracket below the
+// crossing at Nyquist may span, leaves the candidate unbracketed.
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64, steep bool) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
@@ -1670,7 +1700,9 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 				}
 				fa, fb := ft(a), ft(b)
 				if fa*fb <= 0 {
-					best, bracketed = refineCrossing(a, b, ft), true
+					if c := refineCrossing(a, b, ft); !steep || math.Abs(ft(c)) <= 90 {
+						best, bracketed = c, true
+					}
 					break
 				}
 				unevaluable = unevaluable || math.IsNaN(fa) || math.IsNaN(fb)

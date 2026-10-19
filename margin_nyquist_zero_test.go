@@ -205,3 +205,29 @@ func TestAllMarginDiscreteNyquistRealEnd(t *testing.T) {
 		}
 	}
 }
+
+// 3FHD47: the scan towards Nyquist solved in double-double at each of ~50
+// points, O(n³) each, most of AllMargin's time on high-order discrete loops.
+// It keeps the double solve where |L| is far above the coefficient noise and
+// the phase offset is not small; the crossings stay those of phaseCrossings.
+func TestNyquistPhaseCrossingsScanCost(t *testing.T) {
+	for kind := range sweepModelKinds {
+		r, err := newRationalLoop(marginRandomLoop(t, 60, kind, 0.05, false, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws, err := r.phaseCrossings()
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.eval.ddSolves = 0
+		f := func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }
+		got := r.nyquistPhaseCrossings(slices.Clone(ws), f, 1e-7)
+		if !slices.Equal(got, ws) {
+			t.Errorf("%v: nyquistPhaseCrossings = %v, want %v", kind, got, ws)
+		}
+		if r.eval.ddSolves > 30 {
+			t.Errorf("%v: %d double-double solves, want ≤ 30", kind, r.eval.ddSolves)
+		}
+	}
+}
