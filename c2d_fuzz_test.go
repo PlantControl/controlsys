@@ -214,11 +214,12 @@ func fzC2DChecks(t *testing.T, s *fzSpec, sys *System, dt float64) {
 		return
 	}
 	for _, c := range []struct {
-		name string
-		sd   *System
-		opts D2COptions
-		q    fzMats
-	}{{"D2C(C2D(zoh))", zd, D2COptions{}, zm}, {"D2C(C2D(foh))", fd, D2COptions{Method: C2DMethodFOH}, fm}} {
+		name  string
+		sd    *System
+		opts  D2COptions
+		q     fzMats
+		known string
+	}{{"D2C(C2D(zoh))", zd, D2COptions{}, zm, fzNearUnit(zm)}, {"D2C(C2D(foh))", fd, D2COptions{Method: C2DMethodFOH}, fm, ""}} {
 		back, err := c.sd.D2C(c.opts)
 		fzContract(t, s, c.name, back != nil, err)
 		fzErr(t, s, c.name, err)
@@ -236,7 +237,7 @@ func fzC2DChecks(t *testing.T, s *fzSpec, sys *System, dt float64) {
 				continue
 			}
 			tol := orig.pert(x, dA, kr*eps*nB*(1+inv), kr*eps*nC*(1+inv), kr*eps*(nD+nC*nB*dt*(1+inv)))
-			fzCompare(t, s, c.name, x, hr, hc, tol, fzNearUnit(c.q))
+			fzCompare(t, s, c.name, x, hr, hc, tol, c.known)
 		}
 	}
 }
@@ -309,13 +310,13 @@ func fzUnitGap(q fzMats) float64 {
 	return sv[q.n-1] / math.Max(1, fzFrob(q.a))
 }
 
-// fzNearUnit names the D2C defect (followup) for a discrete model whose
-// Ad − I is nearly singular: the input-matrix recovery solves with Ad − I
+// fzNearUnit names the D2C(zoh) defect (followup) for a discrete model
+// whose Ad − I is nearly singular: the input-matrix recovery solves with Ad − I
 // and loses digits in proportion to its condition, which the D2C bounds
 // carry as the factor 1/fzUnitGap; below 1e-6 that loss is O(1).
 func fzNearUnit(q fzMats) string {
 	if fzUnitGap(q) < 1e-6 {
-		return "D2C(zoh/foh) with Ad − I near singular loses accuracy (followup)"
+		return "D2C(zoh) with Ad − I near singular loses accuracy (followup)"
 	}
 	return ""
 }

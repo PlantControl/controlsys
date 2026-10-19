@@ -255,7 +255,7 @@ func fzG(x float64) string { return strconv.FormatFloat(x, 'g', 3, 64) }
 // fzSSToTFSeeds adds external and internal delays to the conversion seeds.
 func fzSSToTFSeeds() []fzSeed {
 	seeds := fzConvSeeds()
-	for _, k := range []int{1, 3, 7} {
+	for _, k := range []int{2, 4, 8} {
 		s := seeds[k]
 		s.In, s.Out, s.IO, s.Tau = -1, 0.3, 0, 0.1
 		seeds = append(seeds, s)
