@@ -226,8 +226,9 @@ func (*pidNonfiniteResponse) Unwrap() error { return ErrInvalidArgument }
 const pidTuningMaxSensitivity = 4
 
 // pidTuningDCSign returns the sign of the DC gain of a stable plant, or 0
-// when the plant is not known to be stable, its DCGain is infinite, as for
-// an integrator displaced inside the unit circle, or its DC gain is zero
+// when the plant is not known to be stable, its integratingDCGain is
+// infinite, as for an integrator displaced inside the unit circle (whose
+// DCGain is finite), or its DC gain is zero
 // relative to the peak of |G| sampled over six decades around wc. A
 // frequency response at DC is no substitute: next to such an integrator it
 // can be finite, and the samples below wc then fail.
@@ -235,7 +236,7 @@ func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) flo
 	if stable, err := plant.IsStable(); err != nil || !stable {
 		return 0
 	}
-	g, err := plant.DCGain()
+	g, err := plant.integratingDCGain()
 	if err != nil {
 		return 0
 	}
