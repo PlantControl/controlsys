@@ -868,9 +868,9 @@ func (g *pidtuneGate) winds(c PID2) bool {
 		prev = v
 		return true
 	}
-	l := g.loop(c)
+	g.setLoop(c)
 	for i := range g.sens.w {
-		if !step(1 + l(i)) {
+		if !step(1 + g.loopAt(i)) {
 			return false
 		}
 	}
@@ -1134,30 +1134,40 @@ func (g *pidtuneGate) crossExcess(c PID2) func(int) float64 {
 		}
 	}
 	k := g.cross.feedback(c)
-	l := g.loop(c)
+	g.setLoop(c)
 	return func(i int) float64 {
 		if j := g.onSens[i]; j >= 0 {
-			return cmplx.Abs(l(j)) - 1
+			return cmplx.Abs(g.loopAt(j)) - 1
 		}
 		return cmplx.Abs(g.cross.g[i]*k(i)) - 1
 	}
 }
 
-// loop returns i ↦ L(sens.w[i]) for c, computed once per point for the
-// latest c.
-func (g *pidtuneGate) loop(c PID2) func(int) complex128 {
+// setLoop makes c the design loopAt evaluates, keeping its samples when
+// c is unchanged.
+func (g *pidtuneGate) setLoop(c PID2) {
 	if g.loopK == nil || g.loopC != c {
 		g.loopC, g.loopK, g.loopN = c, g.sens.feedback(c), 0
 		if g.loopL == nil {
 			g.loopL = make([]complex128, len(g.sens.w))
 		}
 	}
-	return func(i int) complex128 {
-		for ; g.loopN <= i; g.loopN++ {
-			g.loopL[g.loopN] = g.sens.g[g.loopN] * g.loopK(g.loopN)
-		}
-		return g.loopL[i]
+}
+
+// loopAt returns L(sens.w[i]) for the setLoop design, computed once.
+func (g *pidtuneGate) loopAt(i int) complex128 {
+	if i >= g.loopN {
+		g.fillLoop(i)
 	}
+	return g.loopL[i]
+}
+
+func (g *pidtuneGate) fillLoop(i int) {
+	end := min(max(i+1, g.loopN+64), len(g.loopL))
+	for k := g.loopN; k < end; k++ {
+		g.loopL[k] = g.sens.g[k] * g.loopK(k)
+	}
+	g.loopN = end
 }
 
 // sensitivityOver returns a sampled |S| above bound, or the largest sampled
@@ -1165,11 +1175,11 @@ func (g *pidtuneGate) loop(c PID2) func(int) complex128 {
 // bound are refined by golden section. Unevaluable samples are skipped.
 func (g *pidtuneGate) sensitivityOver(c PID2, bound float64) float64 {
 	refine := func(w float64) float64 { return 1 / cmplx.Abs(1+g.at(w)*pidTuningFeedback(c, w)) }
-	l := g.loop(c)
+	g.setLoop(c)
 	peak := 0.0
 	var v0, v1 float64
 	for i, w := range g.sens.w {
-		v := 1 / cmplx.Abs(1+l(i))
+		v := 1 / cmplx.Abs(1+g.loopAt(i))
 		if math.IsNaN(v) {
 			v0, v1 = 0, 0
 			continue
