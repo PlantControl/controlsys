@@ -129,23 +129,20 @@ func fzMgRatio(a, b *big.Rat) float64 {
 }
 
 type fzMgLoop struct {
-	discrete       bool
-	dt, tau        float64
-	n, deg         int
-	num, den       fzMgPoly // ascending in s or z; den carries z^k
-	numMag, denMag []float64
-	N, D           fzMgCPoly // on the boundary, in x
-	scale          float64   // lenient relative error of L, for soundness
-	sreq           float64   // structured coefficient rounding, for requirement
+	discrete bool
+	dt, tau  float64
+	n, deg   int
+	a, b, c  []float64
+	d, normA float64
+	num, den fzMgPoly  // ascending in s or z; den carries z^k
+	N, D     fzMgCPoly // on the boundary, in x
+	fast     []fzMgIEval
 }
 
 // fzMgNewLoop builds the exact loop of the SISO realization (a n×n, b, c, d)
 // with delay samples of discrete delay (dt > 0) or tau seconds of
-// continuous delay. Coefficient rounding is componentwise in the
-// coefficients (transfer-function data), or, when normwise, bounded by the
-// coefficient derivatives under a perturbation of eps·‖A‖_F, eps·‖b‖‖c‖ of
-// the realization.
-func fzMgNewLoop(n int, a, b, c []float64, d, dt float64, delay int, tau, condT float64, normwise bool) *fzMgLoop {
+// continuous delay.
+func fzMgNewLoop(n int, a, b, c []float64, d, dt float64, delay int, tau float64) *fzMgLoop {
 	den := fzCharPolyExact(a, n)
 	abc := make([]*big.Rat, n*n)
 	for i := range n {
@@ -154,36 +151,18 @@ func fzMgNewLoop(n int, a, b, c []float64, d, dt float64, delay int, tau, condT 
 		}
 	}
 	cp := fzCharPolyRat(abc, n)
-	l := &fzMgLoop{discrete: dt > 0, dt: dt, tau: tau, n: n}
+	l := &fzMgLoop{discrete: dt > 0, dt: dt, tau: tau, n: n, a: a, b: b, c: c, d: d, normA: math.Sqrt(fzMgSumSq(a))}
 	rd := fzRat(d)
-	normA := math.Sqrt(fzMgSumSq(a))
-	normBC := math.Sqrt(fzMgSumSq(b) * fzMgSumSq(c))
 	for k := n; k >= 0; k-- {
 		strict := new(big.Rat).Sub(den[k], cp[k])
-		dd := new(big.Rat).Mul(rd, den[k])
-		l.num = append(l.num, new(big.Rat).Add(dd, strict))
+		l.num = append(l.num, new(big.Rat).Add(new(big.Rat).Mul(rd, den[k]), strict))
 		l.den = append(l.den, new(big.Rat).Set(den[k]))
-		ms, _ := new(big.Rat).Abs(strict).Float64()
-		mden, _ := new(big.Rat).Abs(den[k]).Float64()
-		if normwise && k > 0 {
-			bk := 1.0
-			for i := range k {
-				bk = bk * float64(n-i) / float64(i+1)
-			}
-			mden = max(mden, bk*math.Pow(normA, float64(k)))
-			ms = max(ms, float64(k)*bk*normBC*math.Pow(normA, float64(k-1)))
-		}
-		l.numMag = append(l.numMag, ms+math.Abs(d)*mden)
-		l.denMag = append(l.denMag, mden)
 	}
 	if delay > 0 {
 		l.den = append(fzMgZeros(delay), l.den...)
-		l.denMag = append(make([]float64, delay), l.denMag...)
 	}
 	l.deg = len(l.den) - 1
 	l.N, l.D = l.boundary(l.num), l.boundary(l.den)
-	l.scale = 1e3 * float64(max(n, 1)) * 0x1p-52 * condT * condT
-	l.sreq = float64(n+1) * 0x1p-52
 	return l
 }
 
@@ -252,8 +231,49 @@ func (l *fzMgLoop) values(w float64) (nr, ni, dr, di *big.Rat) {
 		m1 := big.NewRat(-1, 1)
 		return fzMgEval(l.num, m1), new(big.Rat), fzMgEval(l.den, m1), new(big.Rat)
 	}
+	if l.fast == nil {
+		for _, p := range []fzMgPoly{l.N.re, l.N.im, l.D.re, l.D.im} {
+			l.fast = append(l.fast, fzMgNewIEval(p))
+		}
+	}
 	x := fzRat(l.xOf(w))
-	return fzMgEval(l.N.re, x), fzMgEval(l.N.im, x), fzMgEval(l.D.re, x), fzMgEval(l.D.im, x)
+	return l.fast[0].at(x), l.fast[1].at(x), l.fast[2].at(x), l.fast[3].at(x)
+}
+
+// fzMgIEval evaluates a rational polynomial as an integer one over a common
+// denominator, normalizing once per value.
+type fzMgIEval struct {
+	p   []*big.Int
+	den *big.Int
+}
+
+func fzMgNewIEval(p fzMgPoly) fzMgIEval {
+	l := big.NewInt(1)
+	for _, x := range p {
+		g := new(big.Int).GCD(nil, nil, l, x.Denom())
+		l.Mul(l, new(big.Int).Quo(x.Denom(), g))
+	}
+	out := make([]*big.Int, len(p))
+	for i, x := range p {
+		out[i] = new(big.Int).Mul(x.Num(), new(big.Int).Quo(l, x.Denom()))
+	}
+	return fzMgIEval{out, l}
+}
+
+func (e fzMgIEval) at(x *big.Rat) *big.Rat {
+	if len(e.p) == 0 {
+		return new(big.Rat)
+	}
+	num, den := x.Num(), x.Denom()
+	acc := new(big.Int).Set(e.p[len(e.p)-1])
+	dp := big.NewInt(1)
+	var t big.Int
+	for i := len(e.p) - 2; i >= 0; i-- {
+		dp.Mul(dp, den)
+		acc.Mul(acc, num)
+		acc.Add(acc, t.Mul(e.p[i], dp))
+	}
+	return new(big.Rat).SetFrac(acc, dp.Mul(dp, e.den))
 }
 
 func fzMgAbs2(re, im *big.Rat) *big.Rat {
@@ -304,50 +324,125 @@ func (l *fzMgLoop) loop(w float64) complex128 {
 	return cmplx.Rect(mag, l.phase(w))
 }
 
-// lnAbs is ln|P(boundary point)| from the x-domain values of P.
-func (l *fzMgLoop) lnAbs(w float64, re, im *big.Rat) float64 {
-	v := fzMgLn(fzMgAbs2(re, im)) / 2
-	if l.discrete && !l.atNyq(w) {
-		x := l.xOf(w)
-		v -= float64(l.deg) / 2 * math.Log1p(x*x)
+// resolvent returns x = R·b and y = c·R, R = (sI − A)⁻¹ at ω.
+func (l *fzMgLoop) resolvent(w float64) (x, y []complex128, ok bool) {
+	var s complex128
+	switch {
+	case l.atNyq(w):
+		s = -1
+	case l.discrete:
+		s = cmplx.Exp(complex(0, w*l.dt))
+	default:
+		s = complex(0, w)
 	}
-	return v
+	n := l.n
+	m := make([]complex128, n*n)
+	mt := make([]complex128, n*n)
+	for i := range n {
+		for j := range n {
+			m[i*n+j] = complex(-l.a[i*n+j], 0)
+			mt[j*n+i] = m[i*n+j]
+		}
+		m[i*n+i] += s
+		mt[i*n+i] += s
+	}
+	x, ok1 := fzMgSolve(m, fzLsC(l.b), n)
+	y, ok2 := fzMgSolve(mt, fzLsC(l.c), n)
+	return x, y, ok1 && ok2
 }
 
-func (l *fzMgLoop) lnMagSum(mag []float64, w float64) float64 {
-	lw := 0.0
-	if !l.discrete {
-		lw = math.Log(w)
+// budget bounds, generously, the relative error of L(jω) evaluated by a
+// backward-stable method on the realization (normwise eps perturbation):
+// 64(n+1)·eps·(‖A‖‖cR‖‖Rb‖ + ‖b‖‖cR‖ + ‖c‖‖Rb‖ + |d|)/|L|, plus the
+// rounding of e^{−jωτ}. It bounds reported values.
+func (l *fzMgLoop) budget(w float64) float64 {
+	const eps = 0x1p-52
+	x, y, ok := l.resolvent(w)
+	if !ok {
+		return math.Inf(1)
 	}
-	best := math.Inf(-1)
-	terms := make([]float64, 0, len(mag))
-	for k, m := range mag {
-		if m > 0 {
-			v := math.Log(m) + float64(k)*lw
-			terms = append(terms, v)
-			best = math.Max(best, v)
+	nx, ny := fzMgCNorm(x), fzMgCNorm(y)
+	nb, nc := math.Sqrt(fzMgSumSq(l.b)), math.Sqrt(fzMgSumSq(l.c))
+	e := eps * (l.normA*nx*ny + nb*ny + nc*nx + math.Abs(l.d)) / math.Exp(l.lnMag(w))
+	return 64*float64(l.n+1)*e + 4*eps*w*l.tau
+}
+
+// rsens returns 4(n+1)·eps times the first-order bounds on the change of
+// ln|L| and of arg L at ω when every given entry of A, b, c, d moves by eps
+// relative (real perturbations: δL = Σ y_i·δA_ij·x_j + y·δb + δc·x + δd).
+// A sign of ln|L| − ln γ or of the phase offset larger than these is
+// certain under rounding of the given data.
+func (l *fzMgLoop) rsens(w float64) (gain, phase float64) {
+	const eps = 0x1p-52
+	x, y, ok := l.resolvent(w)
+	if !ok {
+		return math.Inf(1), math.Inf(1)
+	}
+	L := l.loop(w) * cmplx.Exp(complex(0, w*l.tau))
+	if L == 0 || cmplx.IsInf(L) || cmplx.IsNaN(L) {
+		return math.Inf(1), math.Inf(1)
+	}
+	il := 1 / L
+	add := func(m float64, v complex128) {
+		v *= il
+		gain += m * math.Abs(real(v))
+		phase += m * math.Abs(imag(v))
+	}
+	n := l.n
+	add(math.Abs(l.d), 1)
+	for i := range n {
+		add(math.Abs(l.b[i]), y[i])
+		add(math.Abs(l.c[i]), x[i])
+		for j := range n {
+			add(math.Abs(l.a[i*n+j]), y[i]*x[j])
 		}
 	}
-	if math.IsInf(best, -1) {
-		return best
-	}
-	s := 0.0
-	for _, v := range terms {
-		s += math.Exp(v - best)
-	}
-	return best + math.Log(s)
+	c := 4 * float64(n+1) * eps
+	return c * gain, c*phase + 4*eps*w*l.tau
 }
 
-// budget bounds the relative error of L(jω) for any realization within
-// rounding of the float64 one.
-func (l *fzMgLoop) budget(w float64) float64 {
-	nr, ni, dr, di := l.values(w)
-	kn := math.Exp(l.lnMagSum(l.numMag, w) - l.lnAbs(w, nr, ni))
-	kd := math.Exp(l.lnMagSum(l.denMag, w) - l.lnAbs(w, dr, di))
-	if math.IsNaN(kn) {
-		kn = 0
+func fzMgCNorm(x []complex128) float64 {
+	s := 0.0
+	for _, v := range x {
+		s += real(v)*real(v) + imag(v)*imag(v)
 	}
-	return l.scale * (kn + kd)
+	return math.Sqrt(s)
+}
+
+// fzMgSolve solves the n×n complex m·x = b by Gaussian elimination with
+// partial pivoting; ok is false for an exactly singular pivot.
+func fzMgSolve(m, b []complex128, n int) ([]complex128, bool) {
+	m = append([]complex128(nil), m...)
+	b = append([]complex128(nil), b...)
+	for k := range n {
+		piv := k
+		for i := k + 1; i < n; i++ {
+			if cmplx.Abs(m[i*n+k]) > cmplx.Abs(m[piv*n+k]) {
+				piv = i
+			}
+		}
+		if m[piv*n+k] == 0 {
+			return nil, false
+		}
+		for j := range n {
+			m[k*n+j], m[piv*n+j] = m[piv*n+j], m[k*n+j]
+		}
+		b[k], b[piv] = b[piv], b[k]
+		for i := k + 1; i < n; i++ {
+			f := m[i*n+k] / m[k*n+k]
+			for j := k; j < n; j++ {
+				m[i*n+j] -= f * m[k*n+j]
+			}
+			b[i] -= f * b[k]
+		}
+	}
+	for k := n - 1; k >= 0; k-- {
+		for j := k + 1; j < n; j++ {
+			b[k] -= m[k*n+j] * b[j]
+		}
+		b[k] /= m[k*n+k]
+	}
+	return b, true
 }
 
 // ---- Sturm root isolation over big.Int ----
@@ -644,76 +739,27 @@ func (l *fzMgLoop) straddles(c *fzMgCross, f func(float64) float64, robust func(
 	return false
 }
 
-// cvals returns N, D and the coefficient basis Z_k (N = Σ n_k·Z_k) at ω on
-// the boundary, rounded to complex128.
-func (l *fzMgLoop) cvals(w float64) (n, d complex128, z []complex128) {
-	nr, ni, dr, di := l.values(w)
-	f := func(x *big.Rat) float64 { v, _ := x.Float64(); return v }
-	n, d = complex(f(nr), f(ni)), complex(f(dr), f(di))
-	z = make([]complex128, l.deg+1)
-	switch {
-	case l.atNyq(w):
-		for k := range z {
-			z[k] = complex(math.Pow(-1, float64(k)), 0)
-		}
-	case l.discrete:
-		x := l.xOf(w)
-		for k := range z {
-			z[k] = cmplx.Pow(complex(1, x), complex(float64(k), 0)) * cmplx.Pow(complex(1, -x), complex(float64(l.deg-k), 0))
-		}
-	default:
-		for k := range z {
-			z[k] = cmplx.Pow(complex(0, w), complex(float64(k), 0))
-		}
-	}
-	return n, d, z
-}
-
-// sigma returns componentwise first-order bounds on the change of
-// Re(N·conj D), Im(N·conj D) and |N|² − γ²|D|² per unit relative change of
-// every coefficient of N and D.
-func (l *fzMgLoop) sigma(w, gamma float64) (sr, si, sg float64) {
-	n, d, z := l.cvals(w)
-	for k, zk := range z {
-		var mn, md float64
-		if k < len(l.numMag) {
-			mn = l.numMag[k]
-		}
-		if k < len(l.denMag) {
-			md = l.denMag[k]
-		}
-		a, b := zk*cmplx.Conj(d), n*cmplx.Conj(zk)
-		sr += mn*math.Abs(real(a)) + md*math.Abs(real(b))
-		si += mn*math.Abs(imag(a)) + md*math.Abs(imag(b))
-		sg += 2 * (mn*math.Abs(real(n*cmplx.Conj(zk))) + gamma*gamma*md*math.Abs(real(d*cmplx.Conj(zk))))
-	}
-	return sr, si, sg
-}
-
-// gainRobust reports whether |L(jω)| − γ keeps its sign under coefficient
-// rounding and |ln|L| − ln γ| exceeds floor.
+// gainRobust reports whether the sign of ln|L| − ln γ at ω is certain and
+// exceeds floor.
 func (l *fzMgLoop) gainRobust(w, gamma, floor float64) bool {
-	if !(math.Abs(l.lnMag(w)-math.Log(gamma)) > floor) {
-		return false
-	}
-	nr, ni, dr, di := l.values(w)
-	g := new(big.Rat).Sub(fzMgAbs2(nr, ni), new(big.Rat).Mul(fzMgAbs2(dr, di), new(big.Rat).Mul(fzRat(gamma), fzRat(gamma))))
-	gv, _ := g.Float64()
-	_, _, sg := l.sigma(w, gamma)
-	return math.Abs(gv) > l.sreq*sg
+	g, _ := l.rsens(w)
+	return math.Abs(l.lnMag(w)-math.Log(gamma)) > floor+g
 }
 
-// phaseRobust reports whether Re L < 0 and the sign of Im L survive
-// coefficient rounding and the phase offset exceeds the floor.
+// phaseRobust reports whether Re L < 0 and the sign of Im L at ω are
+// certain and the phase offset exceeds the floor.
 func (l *fzMgLoop) phaseRobust(w float64) bool {
-	if !(math.Abs(l.phaseOff(w)) > fzMgPhaseTol) {
-		return false
-	}
-	re, im := l.reIm(w)
-	rv, _ := re.Float64()
-	iv, _ := im.Float64()
-	sr, si, _ := l.sigma(w, 1)
-	return rv < -l.sreq*sr && math.Abs(iv) > l.sreq*si
+	_, e := l.rsens(w)
+	f := math.Abs(l.phaseOff(w))
+	return f > fzMgPhaseTol+e && f < math.Pi/2-e
+}
+
+// finiteRobust reports whether L(jω) is finite and nonzero for every model
+// within rounding, so a sign change of Im(N·conj D) there is Im L passing
+// through 0, not a pole or zero on the boundary.
+func (l *fzMgLoop) finiteRobust(w float64) bool {
+	g, _ := l.rsens(w)
+	return g < 1
 }
 
 // gainCross returns the crossings of |L| = gamma; zero reports |L| ≡ gamma.
@@ -743,8 +789,11 @@ func (l *fzMgLoop) phaseCross() (cs []fzMgCross, zero, ok bool) {
 	if zero || !ok {
 		return nil, zero, ok
 	}
-	for _, r := range roots {
-		c := l.toCross(r)
+	all := make([]fzMgCross, len(roots))
+	for i, r := range roots {
+		all[i] = l.toCross(r)
+	}
+	for i, c := range all {
 		if l.discrete && c.w >= l.nyq()*(1-1e-15) {
 			continue
 		}
@@ -753,17 +802,22 @@ func (l *fzMgLoop) phaseCross() (cs []fzMgCross, zero, ok bool) {
 		if !neg && l.budget(c.w) < 1e-3 {
 			continue
 		}
-		c.required = neg && l.straddles(&c, l.phaseOff, l.phaseRobust)
+		// A sign change of the phase offset is a crossing, not a ±180° wrap,
+		// only if Re L < 0 is certain at the lone root of Im L in the bracket.
+		g, p := l.rsens(c.w)
+		c.required = neg && g < 1 && p < 0.1 && l.straddles(&c, l.phaseOff, l.phaseRobust)
+		for j, o := range all {
+			if c.required && j != i && o.hi >= c.lo*(1-c.tol/2) && o.lo <= c.hi*(1+c.tol/2) {
+				c.required = false
+			}
+		}
 		cs = append(cs, c)
 	}
 	if l.discrete {
 		w := l.nyq()
-		re, _ := l.reIm(w)
-		rv, _ := re.Float64()
-		sr, _, _ := l.sigma(w, 1)
-		if re.Sign() < 0 || l.budget(w) >= 0.5 {
+		if re, _ := l.reIm(w); re.Sign() < 0 || l.budget(w) >= 0.5 {
 			cs = append(cs, fzMgCross{w: w, lo: w, hi: w, odd: true, nyquist: true,
-				required: rv < -l.sreq*sr})
+				required: re.Sign() < 0 && l.finiteRobust(w) && l.nyqCoeffRobust() && l.phaseRobust(w*(1-1e-3))})
 		}
 	}
 	return cs, false, true
@@ -790,4 +844,20 @@ func fzMgSumSq(x []float64) float64 {
 		s += v * v
 	}
 	return s
+}
+
+// nyqCoeffRobust reports whether N(−1) and D(−1) exceed the rounding of
+// their coefficients, as AllMargin requires of a Nyquist crossover (L(−1)
+// above the noise of an ulp of the transfer-function coefficients).
+func (l *fzMgLoop) nyqCoeffRobust() bool {
+	ok := func(p fzMgPoly) bool {
+		v, _ := new(big.Rat).Abs(fzMgEval(p, big.NewRat(-1, 1))).Float64()
+		s := 0.0
+		for _, x := range p {
+			a, _ := new(big.Rat).Abs(x).Float64()
+			s += a
+		}
+		return v > 4*float64(len(p))*0x1p-52*s
+	}
+	return ok(l.num) && ok(l.den)
 }
