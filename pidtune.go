@@ -83,10 +83,11 @@ const (
 // without a continuous delay, when wc is the first such step below ten
 // times that frequency; not for an integrating or unstable plant with a
 // continuous delay), accepting the first that passes. When none passes, the
-// first design is returned if it passed the stability test, crosses 0 dB
-// and keeps |S| ≤ 4 (its margins unchecked), except for a
-// wc from a pole of a plant without bandwidth, which must pass the gate;
-// on a continuous plant with zero DC gain and no delay, a k·sᵐ high-pass
+// first design on a plant that is not stable is returned if it passed the
+// stability test, crosses 0 dB and keeps |S| ≤ 4 (its margins unchecked),
+// except for a wc from a pole of a plant without bandwidth, which must pass
+// the gate; a stable plant then gives ErrPIDTuningTargetUnattainable. On a
+// continuous plant with zero DC gain and no delay, a k·sᵐ high-pass
 // plant leaving no phase to back off into, a P, or a PD clamped short of
 // the margin at wc (with the default margin; an explicit one rejects it),
 // passes there when the pole test certifies it stable with |S| ≤ 4. On a
@@ -200,8 +201,11 @@ func (r *pidtuneRun) pipeline(sign float64) (*PID, error) {
 }
 
 // attempt is backedOff, then, unless levelCapped rejected a back-off step,
-// for a crossover from the plant's gain the design at r.wc gated only on
-// |S| and on crossing 0 dB (pidtuneGate.crossing), not on its margins.
+// for a crossover from the gain of a plant that is not stable the design at
+// r.wc gated only on |S| and on crossing 0 dB (pidtuneGate.crossing), not
+// on its margins: lowering the crossover of an unstable or integrating
+// plant takes away the bandwidth its stabilization needs. On a stable plant
+// it would be short of the margin at some crossover.
 func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 	pid, err := r.backedOff(sign)
 	if err == nil || !r.auto || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
@@ -210,7 +214,7 @@ func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 	if r.capErr != nil {
 		return nil, r.capErr
 	}
-	if r.src == pidtuneCrossGain || r.src == pidtuneCrossRolloff {
+	if (r.src == pidtuneCrossGain || r.src == pidtuneCrossRolloff) && !r.openStable() {
 		if pid, retryErr := r.design(r.wc, sign, false); retryErr == nil {
 			if _, gateErr := r.gateOf().crossing(pid, r.pidType, r.wc); gateErr == nil {
 				return pid, nil
