@@ -14,19 +14,55 @@ const (
 	poleStepFraction = 1e-5
 	poleResidueTol   = 1e-6
 	poleResidueFloor = 1e-10
+	poleRelativeTol  = 1e-3
+	poleClusterTol   = 1e-6
 )
 
-// evalWithPoleLimit sets dst to eval(pt), or to its pole limit when pt is a
-// numerical pole of the realization.
+// evalWithPoleLimit sets dst to eval(pt), or where eval fails to the
+// response there: at a numerical pole of the realization its pole limit
+// (see poleLimitInto), and off every pole the double-double response of the
+// delay-free realization (ddResponseInto). pt is a pole when a pole p lies
+// within poleRelativeTol of s relative to max(|s|, |p|), or, for s = 0,
+// within poleClusterTol of the spectral scale, the radius poleSpacing takes
+// as s itself: a computed integrator is of order eps·‖A‖ and a k-fold one
+// spreads by eps^{1/k}. Next to a pole cluster at the origin the double solve
+// fails at |s| of the cluster's size, where no pole is near s and the
+// response is large but finite.
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
+	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
+}
+
+// ddGate restricts the double-double fallback of evalWithPoleLimitGated off
+// a pole. With limit set the pole limit applies there too, for a caller
+// tuned to it: the rational margin search takes near-roots of an
+// asymptotically real L next to an origin cluster for crossings once that
+// region evaluates. Otherwise, where allow(w) reports false, eval's error is
+// returned; a nil allow allows the fallback.
+type ddGate struct {
+	limit bool
+	allow func(float64) bool
+	w     float64
+}
+
+// evalWithPoleLimitGated is evalWithPoleLimit with the fallback off a pole
+// restricted by gate.
+func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128, gate ddGate) error {
 	err := eval(pt, dst)
 	if err == nil {
 		return nil
 	}
 	s := pt.value()
-	rho, perr := poleSpacing(sys, s)
+	rho, near, perr := poleSpacing(sys, s)
 	if perr != nil {
 		return perr
+	}
+	if !near && !gate.limit && sys.internalDelayCount() == 0 {
+		if gate.allow != nil && !gate.allow(gate.w) {
+			return err
+		}
+		if ddResponseInto(sys, pt, dst) {
+			return nil
+		}
 	}
 	return poleLimitInto(eval, s, rho, dst, err)
 }
@@ -98,14 +134,13 @@ func poleLimitInto(eval func(frequencyPoint, []complex128) error, s complex128, 
 // poleSpacing returns the distance from s to the nearest pole of the
 // delay-free plant (A, E) that is distinct from s, bounded by the overall
 // spectral scale and, for continuous internal delays, by 1/τ, over which
-// e^{-sτ} varies.
-func poleSpacing(sys *System, s complex128) (float64, error) {
+// e^{-sτ} varies. near reports a pole at s as evalWithPoleLimit defines it.
+func poleSpacing(sys *System, s complex128) (rho float64, near bool, err error) {
 	n, _, _ := sys.Dims()
 	var poles []complex128
 	if n > 0 {
-		var err error
 		if poles, err = newDescriptorPolicy(sys).poles("pole limit", sys.A, n); err != nil {
-			return 0, err
+			return 0, false, err
 		}
 	}
 	scale := cmplx.Abs(s)
@@ -117,10 +152,14 @@ func poleSpacing(sys *System, s complex128) (float64, error) {
 	if scale == 0 {
 		scale = 1
 	}
-	rho := scale
+	rho = scale
 	for _, p := range poles {
-		if d := cmplx.Abs(p - s); d > 1e-6*scale && d < rho {
+		d := cmplx.Abs(p - s)
+		if d > poleClusterTol*scale && d < rho {
 			rho = d
+		}
+		if !cmplx.IsInf(p) {
+			near = near || d <= poleRelativeTol*max(cmplx.Abs(s), cmplx.Abs(p)) || s == 0 && d <= poleClusterTol*scale
 		}
 	}
 	if sys.IsContinuous() && sys.LFT != nil {
@@ -130,7 +169,96 @@ func poleSpacing(sys *System, s complex128) (float64, error) {
 			}
 		}
 	}
-	return rho, nil
+	return rho, near, nil
+}
+
+// ddResponseInto sets dst to the p×m response C(sE−A)⁻¹B + D of the
+// delay-free realization at pt as ddSISOResponse forms it, with the same
+// elimination for each input column. It reports false, leaving dst
+// unchanged, at a pivot below 2⁻¹⁰⁰ of the scale.
+func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
+	n, m, p := sys.Dims()
+	if n == 0 {
+		for i := range p {
+			for j := range m {
+				dst[i*m+j] = complex(sys.D.At(i, j), 0)
+			}
+		}
+		return true
+	}
+	ar, br, cr := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
+	pr, pi, qr, qi := real(pt.p), imag(pt.p), real(pt.q), imag(pt.q)
+	a := make([]ddComplex, n*n)
+	x := make([]ddComplex, n*m)
+	var aScale float64
+	for i := range n {
+		for j := range n {
+			av := ar.Data[i*ar.Stride+j]
+			var e float64
+			if sys.E != nil {
+				e = sys.E.At(i, j)
+			} else if i == j {
+				e = 1
+			}
+			a[i*n+j] = ddComplex{ddProd(pr, e).add(ddProd(qr, av)), ddProd(pi, e).add(ddProd(qi, av))}
+			aScale = max(aScale, a[i*n+j].abs1())
+		}
+		for j := range m {
+			x[i*m+j] = ddComplex{re: dd{br.Data[i*br.Stride+j], 0}}
+		}
+	}
+	tol := float64(n) * aScale * 0x1p-100
+	for k := range n {
+		piv, best := k, a[k*n+k].abs1()
+		for i := k + 1; i < n; i++ {
+			if v := a[i*n+k].abs1(); v > best {
+				piv, best = i, v
+			}
+		}
+		if !(best > tol) {
+			return false
+		}
+		if piv != k {
+			for j := range n {
+				a[k*n+j], a[piv*n+j] = a[piv*n+j], a[k*n+j]
+			}
+			for j := range m {
+				x[k*m+j], x[piv*m+j] = x[piv*m+j], x[k*m+j]
+			}
+		}
+		for i := k + 1; i < n; i++ {
+			if a[i*n+k].abs1() == 0 {
+				continue
+			}
+			f := a[i*n+k].div(a[k*n+k])
+			for j := k + 1; j < n; j++ {
+				a[i*n+j] = a[i*n+j].sub(f.mul(a[k*n+j]))
+			}
+			for j := range m {
+				x[i*m+j] = x[i*m+j].sub(f.mul(x[k*m+j]))
+			}
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		for c := range m {
+			v := x[i*m+c]
+			for j := i + 1; j < n; j++ {
+				v = v.sub(a[i*n+j].mul(x[j*m+c]))
+			}
+			x[i*m+c] = v.div(a[i*n+i])
+		}
+	}
+	q := ddComplex{dd{-qr, 0}, dd{-qi, 0}}
+	for r := range p {
+		for c := range m {
+			var y ddComplex
+			for i := n - 1; i >= 0; i-- {
+				y = y.add(ddComplex{re: dd{cr.Data[r*cr.Stride+i], 0}}.mul(x[i*m+c]))
+			}
+			dst[r*m+c] = y.mul(q).complex128() + complex(sys.D.At(r, c), 0)
+		}
+	}
+	return true
 }
 
 // evalFrLFTFrozenInto sets ws.g to G(s) by closing the delay channels with

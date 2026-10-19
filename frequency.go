@@ -141,9 +141,12 @@ func unwrapBodePhase(phase []float64, p, m, nw int) {
 // about 1e-12 relative accuracy (1e-9 at a repeated pole). A pole of the delay-free plant that an
 // internal delay loop moves, such as an integrator inside the loop, is not a
 // pole of the model and evaluates to its finite value. A pole is recognised
-// when the pencil is singular to working precision; a frequency merely near a
-// pole gives large finite values. ErrSingularTransform remains for models
-// singular at every frequency near omega, such as det(sE-A) ≡ 0.
+// when the pencil is singular to working precision within 1e-3 relative of a
+// computed pole (at s = 0, within 1e-6 of the largest pole magnitude);
+// singular elsewhere, as next to a pole cluster at the origin, the
+// delay-free response is solved in double-double arithmetic. A frequency
+// merely near a pole gives large finite values. ErrSingularTransform remains
+// for models singular at every frequency near omega, such as det(sE-A) ≡ 0.
 //
 // An empty omega returns ErrInvalidArgument. The result owns a copy of omega.
 func (sys *System) FreqResponse(omega []float64) (*FreqResponseMatrix, error) {

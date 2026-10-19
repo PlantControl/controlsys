@@ -425,3 +425,430 @@ func TestSigmaAndGainGoalsAtPole(t *testing.T) {
 		t.Errorf("Bandwidth of integrating delayed model = %v, %v; want ErrInvalidArgument (infinite DC gain)", bw, err)
 	}
 }
+
+func poleLimitAt(sys *System, w float64) (h complex128, raw, err error) {
+	eval := newFrequencyEvaluator(sys).pointSolver(math.MaxInt).evalInto
+	pt := newTimeDomain(sys.Dt).frequencyPoint(w)
+	dst := make([]complex128, 1)
+	raw = eval(pt, dst)
+	err = evalWithPoleLimit(eval, sys, pt, dst)
+	return dst[0], raw, err
+}
+
+// ergoOffOriginLoop is the ERG6ZB loop: H22 of Feedback(P, nil, −1) around
+// P = num/den·e^{−τs} has the poles {0, 0, 1.34e−7, −0.464} of den.
+var ergoOffOriginLoop = quasiLoop{
+	num: []float64{1.9188317375876882, 1.5083785090172463, 0.32156836056367194, 0.015658860719559062},
+	den: []float64{1, 0.46404121934763415, -6.209067747296065e-08, 0, 0},
+	tau: 0.001181949427158492,
+}
+
+// TestPoleLimitOffOriginCluster (ERG6ZB): at ω ≈ 4e−7 the double solve of
+// H22 is singular and the pole-limit samples, a step 4.6e−6 off, saw the
+// origin cluster as a pole at s and returned +Inf, nil, although |s−p| ≥
+// |s|/3 for every pole. Off a pole the response is the dd one, for the
+// singular-E twin too, so h22Det matches 1+L(jω) of the polynomials. The
+// gate of the delay loop's walk still decides: where it denies dd the
+// solve error stands. Oracle: the stored realization solved in big.Float.
+func TestPoleLimitOffOriginCluster(t *testing.T) {
+	q := ergoOffOriginLoop
+	p := makePlant(t, q.num, q.den)
+	if err := p.SetInputDelay([]float64{q.tau}); err != nil {
+		t.Fatal(err)
+	}
+	cl, err := Feedback(p, nil, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := newDelayLFT(cl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _, _ := e.h22sys.Dims()
+	a := mat.NewDense(n+1, n+1, nil)
+	a.Slice(0, n, 0, n).(*mat.Dense).Copy(e.h22sys.A)
+	a.Set(n, n, 1)
+	ed := mat.NewDense(n+1, n+1, nil)
+	b := mat.NewDense(n+1, 1, nil)
+	c := mat.NewDense(1, n+1, nil)
+	for i := range n {
+		ed.Set(i, i, 1)
+		b.Set(i, 0, e.h22sys.B.At(i, 0))
+		c.Set(0, i, e.h22sys.C.At(0, i))
+	}
+	infTwin, err := NewDescriptor(a, b, c, e.h22sys.D, ed, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := []float64{2e-8, 2e-7, 3.93e-7, 3.9339e-7, 4e-7, 1e-6}
+	for _, w := range ws {
+		for _, sys := range []*System{e.h22sys, infTwin} {
+			h, raw, err := poleLimitAt(sys, w)
+			if raw == nil {
+				t.Fatalf("ω=%g: double solve succeeded; case no longer exercises the pole limit", w)
+			}
+			want := frExactResponse(sys, frExactPoint(w, 0))[0]
+			if err != nil || cmplx.Abs(h-want) > 1e-12*cmplx.Abs(want) {
+				t.Errorf("ω=%g, descriptor %v: evalWithPoleLimit = %v, %v; want %v", w, sys.E != nil, h, err, want)
+			}
+		}
+		got, ok := e.h22Det(w)
+		if want := 1 + q.L(w); !ok || cmplx.Abs(got-want) > 1e-9*cmplx.Abs(want) {
+			t.Errorf("ω=%g: h22Det = %v, %v; want %v", w, got, ok, want)
+		}
+	}
+	eval := newFrequencyEvaluator(e.h22sys).pointSolver(math.MaxInt).evalInto
+	pt := newTimeDomain(0).frequencyPoint(3.93e-7)
+	dst := make([]complex128, 1)
+	deny := func(float64) bool { return false }
+	if err := evalWithPoleLimitGated(eval, e.h22sys, pt, dst, ddGate{allow: deny, w: 3.93e-7}); !errors.Is(err, ErrSingularTransform) {
+		t.Errorf("dd denied: evalWithPoleLimitGated = %v, %v; want ErrSingularTransform", dst[0], err)
+	}
+	l := e.loop(false)
+	for _, w := range ws {
+		if !l.ddAllowed(w) {
+			t.Fatalf("ddAllowed(%g) = false; nearest pole is the boundary integrator", w)
+		}
+		got, ok := e.h22Det(w)
+		if want := 1 + q.L(w); !ok || cmplx.Abs(got-want) > 1e-9*cmplx.Abs(want) {
+			t.Errorf("gated ω=%g: h22Det = %v, %v; want %v", w, got, ok, want)
+		}
+	}
+	if st, err := cl.IsStable(); err != nil || !st {
+		t.Errorf("IsStable = %v, %v; want true", st, err)
+	}
+}
+
+// TestPoleLimitOffOriginClusterMIMO (ERG6ZB): a 1×2 model with the cluster of
+// TestPoleLimitOffOriginCluster in both channels got +Inf, nil away from any
+// pole; the dd fallback covers every channel. Oracle: big.Float solve of the
+// stored realization.
+func TestPoleLimitOffOriginClusterMIMO(t *testing.T) {
+	q := ergoOffOriginLoop
+	half := make([]float64, len(q.num))
+	for i, v := range q.num {
+		half[i] = 0.5 * v
+	}
+	r, err := (&TransferFunc{Num: [][][]float64{{q.num, half}}, Den: [][]float64{q.den}}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := r.Sys
+	ws := []float64{3.93e-7, 3.9339e-7, 4e-7}
+	check := func(api string, w float64, got []complex128) {
+		t.Helper()
+		want := frExactResponse(sys, frExactPoint(w, 0))
+		for j := range want {
+			if cmplx.Abs(got[j]-want[j]) > 1e-12*cmplx.Abs(want[j]) {
+				t.Errorf("%s(%g)[%d] = %v; want %v", api, w, j, got[j], want[j])
+			}
+		}
+	}
+	for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+		"FreqResponse":          sys.FreqResponse,
+		"FreqResponsePointwise": sys.FreqResponsePointwise,
+	} {
+		fr, err := f(ws)
+		if err != nil {
+			t.Fatalf("%s: %v", api, err)
+		}
+		for k, w := range ws {
+			check(api, w, []complex128{fr.At(k, 0, 0), fr.At(k, 0, 1)})
+		}
+	}
+	for _, w := range ws {
+		h, err := sys.EvalFr(complex(0, w))
+		if err != nil {
+			t.Fatalf("EvalFr(%g): %v", w, err)
+		}
+		check("EvalFr", w, h[0])
+	}
+}
+
+// TestPoleLimitOriginClusterNoWindow (ERG6ZB): s(s²+2.31s−2.5e−11) has poles
+// {0, 1.1e−11, −2.31}. An |s| ≤ 1e−9·scale origin window took the cluster for
+// a pole at s, leaving +Inf where the response is finite, and AllMargin of
+// the delayed loop read the Inf-to-finite jump at its edge as a phase
+// crossover. On the axis no pole is within 1e−3 relative of jω > 0, so every
+// such ω the dd solve resolves is finite, and the margins are those of
+// L = num/den·e^{−τs}.
+func TestPoleLimitOriginClusterNoWindow(t *testing.T) {
+	q := quasiLoop{
+		num: []float64{0.759396090035918, 0.10333370680260914},
+		den: []float64{1, 2.3119684689572186, -2.533779851794843e-11, 0},
+		tau: 0.0004936910785846063,
+	}
+	sys := makePlant(t, q.num, q.den)
+	edge := 1e-9 * 2.3119684689681783
+	ws := []float64{6.6e-12, 1.0255865427292543e-10, 1.8e-10, 2.3e-9, edge * (1 - 1e-12), edge, edge * (1 + 1e-12)}
+	for e := -18.0; e <= -5; e += 0.05 {
+		ws = append(ws, math.Pow(10, e))
+	}
+	if _, raw, _ := poleLimitAt(sys, 1.0255865427292543e-10); raw == nil {
+		t.Fatal("double solve succeeded; case no longer exercises the pole limit")
+	}
+	closeTo := func(got, want complex128) bool { return cmplx.Abs(got-want) <= 1e-10*cmplx.Abs(want) }
+	for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+		"FreqResponse":          sys.FreqResponse,
+		"FreqResponsePointwise": sys.FreqResponsePointwise,
+	} {
+		fr, err := f(ws)
+		if err != nil {
+			t.Fatalf("%s: %v", api, err)
+		}
+		for k, w := range ws {
+			if want := frExactResponse(sys, frExactPoint(w, 0))[0]; !closeTo(fr.At(k, 0, 0), want) {
+				t.Errorf("%s(%.17g) = %v; want %v", api, w, fr.At(k, 0, 0), want)
+			}
+		}
+	}
+	for _, w := range ws[:7] {
+		h, err := sys.EvalFr(complex(0, w))
+		if want := frExactResponse(sys, frExactPoint(w, 0))[0]; err != nil || !closeTo(h[0][0], want) {
+			t.Errorf("EvalFr(j%.17g) = %v, %v; want %v", w, h, err, want)
+		}
+	}
+	if h, err := sys.EvalFr(0); err != nil || !cmplx.IsInf(h[0][0]) {
+		t.Errorf("EvalFr(0) = %v, %v; want +Inf", h, err)
+	}
+
+	if err := sys.SetInputDelay([]float64{q.tau}); err != nil {
+		t.Fatal(err)
+	}
+	am, err := AllMargin(sys)
+	if err != nil {
+		t.Fatalf("AllMargin: %v", err)
+	}
+	if len(am.PhaseCrossFreqs) != 3 || len(am.GainMargins) != 3 || len(am.GainCrossFreqs) != 1 {
+		t.Fatalf("AllMargin = %+v; want 3 phase and 1 gain crossovers", am)
+	}
+	for i, w := range am.PhaseCrossFreqs {
+		l := q.L(w)
+		if math.Abs(imag(l)) > 1e-7*cmplx.Abs(l) || real(l) >= 0 {
+			t.Errorf("phase crossover %v: L = %v; want negative real", w, l)
+		}
+		if want := -20 * math.Log10(cmplx.Abs(l)); math.Abs(am.GainMargins[i]-want) > 1e-6 {
+			t.Errorf("GM at %v = %v dB; want %v", w, am.GainMargins[i], want)
+		}
+	}
+	if wc := am.GainCrossFreqs[0]; math.Abs(cmplx.Abs(q.L(wc))-1) > 1e-9 {
+		t.Errorf("gain crossover %v: |L| = %v; want 1", wc, cmplx.Abs(q.L(wc)))
+	}
+}
+
+// TestPoleLimitAtPoleKeepsInf: where s is a pole to relative precision the
+// limit stays +Inf: a near-double axis pair at its frequency, and a double
+// integrator at ω = 0.
+func TestPoleLimitAtPoleKeepsInf(t *testing.T) {
+	w2 := 1 + 1e-8
+	pair := polyMul([]float64{1, 2e-9, 1}, []float64{1, 2e-9 * w2, w2 * w2})
+	for _, c := range []struct {
+		name string
+		den  []float64
+		w    float64
+	}{
+		{"near-double pair", polyMul(pair, []float64{1, 2}), 1},
+		{"s²(s+1)", []float64{1, 1, 0, 0}, 0},
+	} {
+		sys := makePlant(t, []float64{1, 3, 1}, c.den)
+		h, raw, err := poleLimitAt(sys, c.w)
+		if raw == nil {
+			t.Fatalf("%s: double solve succeeded; case no longer exercises the pole limit", c.name)
+		}
+		if err != nil || !cmplx.IsInf(h) {
+			t.Errorf("%s: evalWithPoleLimit = %v, %v; want +Inf, nil", c.name, h, err)
+		}
+	}
+}
+
+// realSolveResponse returns C(jωI−A)⁻¹B + D of a SISO model through the real
+// 2n system [−A, −ωI; ωI, −A][x_r; x_i] = [B; 0].
+func realSolveResponse(t *testing.T, sys *System, w float64) complex128 {
+	t.Helper()
+	n, _, _ := sys.Dims()
+	m := mat.NewDense(2*n, 2*n, nil)
+	rhs := mat.NewDense(2*n, 1, nil)
+	for i := range n {
+		for j := range n {
+			m.Set(i, j, -sys.A.At(i, j))
+			m.Set(n+i, n+j, -sys.A.At(i, j))
+		}
+		m.Set(i, n+i, -w)
+		m.Set(n+i, i, w)
+		rhs.Set(i, 0, sys.B.At(i, 0))
+	}
+	var x mat.Dense
+	if err := x.Solve(m, rhs); err != nil {
+		t.Fatal(err)
+	}
+	g := complex(sys.D.At(0, 0), 0)
+	for i := range n {
+		g += complex(sys.C.At(0, i), 0) * complex(x.At(i, 0), x.At(n+i, 0))
+	}
+	return g
+}
+
+// TestPoleLimitRotatedIntegratorKeepsInf: an integrator in a non-companion
+// realization has a computed eigenvalue of order eps·‖A‖, not 0, so at s = 0
+// the relative rule |p−s| ≤ 1e−3·|p| never held and the solve error replaced
+// +Inf. At the origin a pole within the cluster tolerance is a pole at s.
+func TestPoleLimitRotatedIntegratorKeepsInf(t *testing.T) {
+	tr := mat.NewDense(3, 3, []float64{1, 2, -0.5, 0.5, -1, 1, 0.3, 0.7, 2})
+	var ti mat.Dense
+	if err := ti.Inverse(tr); err != nil {
+		t.Fatal(err)
+	}
+	jordan := func(j []float64) *mat.Dense {
+		var a mat.Dense
+		a.Mul(tr, mat.NewDense(3, 3, j))
+		a.Mul(&a, &ti)
+		return &a
+	}
+	cases := []struct {
+		name string
+		a    *mat.Dense
+		b, c []float64
+	}{
+		{
+			"T·diag(0,−1,−2)·T⁻¹",
+			mat.NewDense(3, 3, []float64{-1.6248882522520376, -0.9719506377073485, 0.6405952553186043, -0.3477020896209262, -1.4618964782779869, 0.057624747347860814, -0.2992862221443891, -0.6715049195519469, 0.08678473053002438}),
+			[]float64{0.9953954176514858, 1.1800868278140295, 0.48194866225006905},
+			[]float64{-0.33415372880770317, -0.012405380534607158, 0.6578201082582456},
+		},
+		{"T·(J₂(0)⊕−1)·T⁻¹", jordan([]float64{0, 1, 0, 0, 0, 0, 0, 0, -1}), []float64{1, -0.4, 0.8}, []float64{0.6, 1.1, -0.9}},
+	}
+	for _, c := range cases {
+		sys, err := New(c.a, mat.NewDense(3, 1, c.b), mat.NewDense(1, 3, c.c), mat.NewDense(1, 1, nil), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, raw, _ := poleLimitAt(sys, 0); raw == nil {
+			t.Fatalf("%s: double solve succeeded at ω=0; case no longer exercises the pole limit", c.name)
+		}
+		want := realSolveResponse(t, sys, 1)
+		check := func(api string, h0, h1 complex128) {
+			t.Helper()
+			if !cmplx.IsInf(h0) {
+				t.Errorf("%s %s(0) = %v; want +Inf", c.name, api, h0)
+			}
+			if cmplx.Abs(h1-want) > 1e-10*cmplx.Abs(want) {
+				t.Errorf("%s %s(1) = %v; want %v", c.name, api, h1, want)
+			}
+		}
+		for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+			"FreqResponse":          sys.FreqResponse,
+			"FreqResponsePointwise": sys.FreqResponsePointwise,
+		} {
+			r, err := f([]float64{0, 1})
+			if err != nil {
+				t.Errorf("%s %s: %v", c.name, api, err)
+				continue
+			}
+			check(api, r.At(0, 0, 0), r.At(1, 0, 0))
+		}
+		h0, err0 := sys.EvalFr(0)
+		h1, err1 := sys.EvalFr(1i)
+		if err0 != nil || err1 != nil {
+			t.Errorf("%s EvalFr: %v, %v", c.name, err0, err1)
+		} else {
+			check("EvalFr", h0[0][0], h1[0][0])
+		}
+		bd, err := sys.Bode([]float64{0, 1}, 0)
+		if err != nil {
+			t.Errorf("%s Bode: %v", c.name, err)
+			continue
+		}
+		if !math.IsInf(bd.MagDBAt(0, 0, 0), 1) {
+			t.Errorf("%s Bode mag(0) = %v dB; want +Inf", c.name, bd.MagDBAt(0, 0, 0))
+		}
+		if wantDB := 20 * math.Log10(cmplx.Abs(want)); math.Abs(bd.MagDBAt(1, 0, 0)-wantDB) > 1e-8 {
+			t.Errorf("%s Bode mag(1) = %v dB; want %v", c.name, bd.MagDBAt(1, 0, 0), wantDB)
+		}
+	}
+}
+
+// TestPoleLimitOffOriginClusterPublicAPIs: s(s²+0.0954s+1.03e−10) has poles
+// {0, −1.07e−9, −0.0954}. Near ω ≈ 1e−10 the double solve is singular though
+// no pole is near s; the limit there must not fail the call, as it did for
+// Bode, FreqResponse and EvalFr, and AllMargin/Margin of the delayed loop on
+// its grid point ω = 1.07e−10. Off the pole the response is the dd one, and
+// matches the polynomial ratio.
+func TestPoleLimitOffOriginClusterPublicAPIs(t *testing.T) {
+	q := quasiLoop{
+		num: []float64{1.3174888794708708, -0.5268575342818054, -1.1928987103850879},
+		den: []float64{1, 0.09543133525017007, 1.0257621949288232e-10, 0},
+		tau: 2.895773588604179e-4,
+	}
+	sys := makePlant(t, q.num, q.den)
+	g := func(w float64) complex128 {
+		s := complex(0, w)
+		return polyEval(q.num, s) / polyEval(q.den, s)
+	}
+	const w0 = 1.0748693851901617e-10
+	if _, raw, _ := poleLimitAt(sys, w0); raw == nil {
+		t.Fatalf("double solve succeeded at ω=%g; case no longer exercises the pole limit", w0)
+	}
+	closeTo := func(got, want complex128, tol float64) bool {
+		return cmplx.Abs(got-want) <= tol*cmplx.Abs(want)
+	}
+	h, err := sys.EvalFr(complex(0, w0))
+	if err != nil || !closeTo(h[0][0], g(w0), 1e-9) {
+		t.Errorf("EvalFr(jω₀) = %v, %v; want %v", h, err, g(w0))
+	}
+	for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+		"FreqResponse":          sys.FreqResponse,
+		"FreqResponsePointwise": sys.FreqResponsePointwise,
+	} {
+		r, err := f([]float64{w0, 1})
+		if err != nil {
+			t.Errorf("%s: %v", api, err)
+			continue
+		}
+		for k, w := range []float64{w0, 1} {
+			if got := r.At(k, 0, 0); !closeTo(got, g(w), 1e-9) {
+				t.Errorf("%s(%g) = %v; want %v", api, w, got, g(w))
+			}
+		}
+	}
+	bd, err := sys.Bode(nil, 200)
+	if err != nil {
+		t.Fatalf("Bode: %v", err)
+	}
+	for k, w := range bd.Omega {
+		if want := 20 * math.Log10(cmplx.Abs(g(w))); math.Abs(bd.MagDBAt(k, 0, 0)-want) > 1e-8 {
+			t.Errorf("Bode mag(%g) = %v dB; want %v", w, bd.MagDBAt(k, 0, 0), want)
+		}
+	}
+
+	if err := sys.SetInputDelay([]float64{q.tau}); err != nil {
+		t.Fatal(err)
+	}
+	am, err := AllMargin(sys)
+	if err != nil {
+		t.Fatalf("AllMargin: %v", err)
+	}
+	if len(am.GainCrossFreqs) != 1 || len(am.PhaseCrossFreqs) != 2 || len(am.PhaseMargins) != 1 || len(am.GainMargins) != 2 {
+		t.Fatalf("AllMargin = %+v; want 1 gain and 2 phase crossovers", am)
+	}
+	wc := am.GainCrossFreqs[0]
+	pm := 180 + cmplx.Phase(q.L(wc))*180/math.Pi
+	if lc := q.L(wc); math.Abs(cmplx.Abs(lc)-1) > 1e-9 || math.Abs(am.PhaseMargins[0]-pm) > 1e-7 {
+		t.Errorf("gain crossover %v: |L| = %v, PM = %v; want |L| = 1, PM = %v", wc, cmplx.Abs(lc), am.PhaseMargins[0], pm)
+	}
+	for i, w := range am.PhaseCrossFreqs {
+		l := q.L(w)
+		if math.Abs(imag(l)) > 1e-9*cmplx.Abs(l) || real(l) >= 0 {
+			t.Errorf("phase crossover %v: L = %v; want negative real", w, l)
+		}
+		if want := -20 * math.Log10(cmplx.Abs(l)); math.Abs(am.GainMargins[i]-want) > 1e-7 {
+			t.Errorf("GM at %v = %v dB; want %v", w, am.GainMargins[i], want)
+		}
+	}
+	m, err := Margin(sys)
+	if err != nil {
+		t.Fatalf("Margin: %v", err)
+	}
+	if math.Abs(m.GainMargin-am.GainMargins[0]) > 1e-9 || math.Abs(m.PhaseMargin-am.PhaseMargins[0]) > 1e-9 {
+		t.Errorf("Margin = %+v; want GM %v, PM %v", m, am.GainMargins[0], am.PhaseMargins[0])
+	}
+}
