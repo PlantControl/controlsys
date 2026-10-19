@@ -456,8 +456,9 @@ func syDual(s *fzSpec) *fzSpec {
 
 // syRiccatiChecks verifies a returned Riccati solution x and gain k of the
 // regulator problem (s.A, s.B, q, r, sm) as FuzzRiccati does: symmetric,
-// gain and Riccati residuals to rounding, exactly stable A − BK and, for a
-// PSD joint cost, PSD x.
+// gain and Riccati residuals to rounding (mqRiccatiTol widened tenfold for
+// the rounding of the assembled Q̄, R̄, S and by the Q̄ cancellation
+// ratio), exactly stable A − BK and, for a PSD joint cost, PSD x.
 func syRiccatiChecks(t *testing.T, s *fzSpec, op string, q, r, sm, x, k []float64, rcnd float64, jointPSD bool) {
 	t.Helper()
 	n, m := s.N, s.M
@@ -478,7 +479,7 @@ func syRiccatiChecks(t *testing.T, s *fzSpec, op string, q, r, sm, x, k []float6
 	if !(ke <= 1e-10*kden) {
 		t.Fatalf("%s: gain residual %.3g (scale %.3g)\nX=%v\nK=%v\n%s", op, ke, kden, x, k, s)
 	}
-	if !(re <= tol*rden) {
+	if !(re <= 10*tol*syQbarRatio(q, r, sm, n, m)*rden) {
 		t.Fatalf("%s: Riccati residual %.3g (scale %.3g, rcnd %.3g)\nX=%v\nK=%v\n%s", op, re, rden, rcnd, x, k, s)
 	}
 	syRequireStableRat(t, s, op, acl, n, s.Discrete, fmt.Sprintf("X=%v K=%v", x, k))
@@ -495,6 +496,24 @@ func syRiccatiChecks(t *testing.T, s *fzSpec, op string, q, r, sm, x, k []float6
 // known followup); otherwise the
 // solution is accurate only relative to ‖SR⁻¹Sᵀ‖, so its residual and
 // sign structure at its own scale are below rounding.
+// syQbarRatio is max(1, ‖SR⁻¹Sᵀ‖/‖Q − SR⁻¹Sᵀ‖), the amplification of
+// data rounding by the cancellation in Q̄ (1 without S).
+func syQbarRatio(q, r, sm []float64, n, m int) float64 {
+	if sm == nil {
+		return 1
+	}
+	var ri mat.Dense
+	if err := ri.Inverse(mqDense(m, m, r)); err != nil {
+		return math.Inf(1)
+	}
+	srs := syMul(syMul(sm, mqRaw(&ri), n, m, m), mqTranspose(sm, n, m), n, m, n)
+	qb := make([]float64, n*n)
+	for i := range qb {
+		qb[i] = q[i] - srs[i]
+	}
+	return math.Max(1, mqFro(srs)/mqFro(qb))
+}
+
 func syQbarDigits(q, r, sm []float64, n, m int) bool {
 	if sm == nil {
 		return true
