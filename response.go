@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/cmplx"
 	"slices"
 
@@ -623,22 +624,66 @@ func (sys *System) dcGainByStructuralEntries() (*mat.Dense, bool, error) {
 // an entry's leading coefficient does not hinge on roundoff in
 // transfer-function coefficients. Given such a pole, a larger block that a
 // regular solve would reject has its eigenvalues nearest x0 deflated to x0
-// (deflateBlockAt). An entry is ±∞ by its most negative order coefficient
-// above 100·n·ε of its magnitude scale, else the σ⁰ coefficient. ok is
-// false with no exact pole at x0, a singular block, or a finite entry
-// without three correct digits, leaving those to the transfer limit.
+// (deflateBlockAt), but only once the expansion on the model as given has
+// declined: deflation moves poles by up to √ε·‖A_KK‖, which can raise the
+// pole order at x0 and flip an Inf sign the float model fixes. An exactly
+// singular block always goes to deflation. An entry is ±∞ by its most
+// negative order coefficient above 100·n·ε of its magnitude scale, else the
+// σ⁰ coefficient. The deflated model's magnitudes are first those of the
+// sums that formed it (laurentAbs); only if that cannot decide, and no
+// block was exactly singular (its exact cancellations would be misjudged),
+// are they taken as |entries|: an Inf sign may then rest on transform
+// roundoff, but the exact pole still makes the entry infinite. ok is false
+// with no exact pole at x0, a block deflation cannot settle, or a finite
+// entry without three correct digits, leaving those to the transfer limit.
 func (sys *System) dcGainByBlockLaurent() (*mat.Dense, bool) {
-	return sys.blockLaurentGain(sys.A, sys.B, sys.C, true)
+	for _, mode := range []laurentMode{laurentAsGiven, laurentDeflate, laurentDeflateLoose} {
+		if g, ok := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, mode); ok {
+			return g, true
+		}
+	}
+	return nil, false
 }
 
-func (sys *System) blockLaurentGain(A, B, C *mat.Dense, deflate bool) (*mat.Dense, bool) {
+type laurentMode int
+
+const (
+	laurentAsGiven laurentMode = iota
+	laurentDeflate
+	laurentDeflateLoose
+)
+
+// laurentAbs holds, per entry of a deflated model, the magnitude of the
+// terms summed to form it (|A|·|Z| and so on), so roundoff left by an exact
+// cancellation is weighed against what cancelled rather than against itself.
+type laurentAbs struct{ a, b, c *mat.Dense }
+
+func absDense(m *mat.Dense) *mat.Dense {
+	r := mat.DenseCopyOf(m)
+	raw := r.RawMatrix()
+	for i := range raw.Rows {
+		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		for j, v := range row {
+			row[j] = math.Abs(v)
+		}
+	}
+	return r
+}
+
+// blockLaurentGain takes abs nil for |A|, |B|, |C|.
+func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode laurentMode) (*mat.Dense, bool) {
+	deflate := mode != laurentAsGiven
 	n, m, p := sys.Dims()
 	x0 := 0.0
 	if sys.IsDiscrete() {
 		x0 = 1
 	}
 	aRaw := A.RawMatrix()
-	blocks := tarjanBlocks(aRaw, n)
+	topo := aRaw
+	if abs != nil {
+		topo = abs.a.RawMatrix()
+	}
+	blocks := tarjanBlocks(topo, n)
 	blockOf := make([]int, n)
 	ns := 0
 	for bi, blk := range blocks {
@@ -677,24 +722,33 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, deflate bool) (*mat.Dens
 		reg := &regular{}
 		reg.lu.Factorize(pk)
 		c := reg.lu.Cond()
-		if deflate && r > 1 && !(c <= mat.ConditionTolerance) {
+		singular := math.IsInf(c, 0) || math.IsNaN(c) ||
+			(!(c <= 1e12) && r <= exactDetMaxOrder && exactDetIsZero(pkRaw))
+		if singular && mode != laurentDeflate {
+			return nil, false
+		}
+		if singular || deflate && r > 1 && !(c <= mat.ConditionTolerance) {
 			illCond = append(illCond, blk)
 			continue
-		}
-		if math.IsInf(c, 0) || math.IsNaN(c) {
-			return nil, false
 		}
 		reg.invNrm = c / mat.Norm(pk, 1)
 		regs[bi] = reg
 	}
 	if len(illCond) > 0 {
 		A, B, C = mat.DenseCopyOf(A), mat.DenseCopyOf(B), mat.DenseCopyOf(C)
+		abs = &laurentAbs{absDense(A), absDense(B), absDense(C)}
 		for _, blk := range illCond {
-			if !deflateBlockAt(A, B, C, blk, x0) {
+			if !deflateBlockAt(A, B, C, abs, blk, x0) {
 				return nil, false
 			}
 		}
-		return sys.blockLaurentGain(A, B, C, false)
+		if mode == laurentDeflateLoose {
+			abs = nil
+		}
+		return sys.blockLaurentGain(A, B, C, abs, laurentAsGiven)
+	}
+	if deflate {
+		return nil, false
 	}
 
 	nord := 2*ns + 1
@@ -705,6 +759,10 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, deflate bool) (*mat.Dens
 		return s[o : o+m]
 	}
 	bRaw := B.RawMatrix()
+	absA, absB := aRaw, bRaw
+	if abs != nil {
+		absA, absB = abs.a.RawMatrix(), abs.b.RawMatrix()
+	}
 	var sol, tmp *mat.Dense
 	for bi, blk := range blocks {
 		r := len(blk)
@@ -715,19 +773,19 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, deflate bool) (*mat.Dens
 				row, mrow := rd[(t*r+ii)*m:(t*r+ii+1)*m], rm[(t*r+ii)*m:(t*r+ii+1)*m]
 				if ord == 0 {
 					for j := range m {
-						v := bRaw.Data[k*bRaw.Stride+j]
-						row[j], mrow[j] = v, math.Abs(v)
+						row[j] = bRaw.Data[k*bRaw.Stride+j]
+						mrow[j] = math.Abs(absB.Data[k*absB.Stride+j])
 					}
 				}
 				for l := range n {
-					a := aRaw.Data[k*aRaw.Stride+l]
-					if a == 0 || blockOf[l] == bi {
+					a, am := aRaw.Data[k*aRaw.Stride+l], math.Abs(absA.Data[k*absA.Stride+l])
+					if am == 0 || blockOf[l] == bi {
 						continue
 					}
 					wl, ml := at(w, ord, l), at(mag, ord, l)
 					for j := range m {
 						row[j] += a * wl[j]
-						mrow[j] += math.Abs(a) * ml[j]
+						mrow[j] += am * ml[j]
 					}
 				}
 			}
@@ -778,16 +836,21 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, deflate bool) (*mat.Dens
 
 	gain := denseCopySafe(sys.D, p, m)
 	cRaw := C.RawMatrix()
+	absC := cRaw
+	if abs != nil {
+		absC = abs.c.RawMatrix()
+	}
 	tol := 100 * float64(n) * eps()
 	for i := range p {
 		crow := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+n]
+		cmag := absC.Data[i*absC.Stride : i*absC.Stride+n]
 		for j := range m {
 			for ord := -ns; ord <= 0; ord++ {
 				g, bound := 0.0, 0.0
 				for k, c := range crow {
-					if c != 0 {
+					if cm := math.Abs(cmag[k]); cm != 0 {
 						g += c * at(w, ord, k)[j]
-						bound += math.Abs(c) * at(mag, ord, k)[j]
+						bound += cm * at(mag, ord, k)[j]
 					}
 				}
 				if ord == 0 {
@@ -808,12 +871,74 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, deflate bool) (*mat.Dens
 	return gain, true
 }
 
+// exactDetMaxOrder caps the blocks whose determinant exactDetIsZero
+// computes; larger ones keep the LU condition estimate alone.
+const exactDetMaxOrder = 16
+
+// exactDetIsZero reports whether the square matrix a is exactly singular,
+// by fraction-free (Bareiss) elimination over the integers its entries
+// become once scaled by a common power of two.
+func exactDetIsZero(a blas64.General) bool {
+	r := a.Rows
+	emin := math.MaxInt
+	for i := range r {
+		for _, v := range a.Data[i*a.Stride : i*a.Stride+r] {
+			if v != 0 {
+				_, e := math.Frexp(v)
+				emin = min(emin, e)
+			}
+		}
+	}
+	if emin == math.MaxInt {
+		return true
+	}
+	m := make([]*big.Int, r*r)
+	for i := range r {
+		for j, v := range a.Data[i*a.Stride : i*a.Stride+r] {
+			f, e := math.Frexp(v)
+			x := big.NewInt(int64(math.Ldexp(f, 53)))
+			m[i*r+j] = x.Lsh(x, uint(e-emin))
+		}
+	}
+	prev := big.NewInt(1)
+	t := new(big.Int)
+	for k := range r - 1 {
+		if m[k*r+k].Sign() == 0 {
+			piv := -1
+			for i := k + 1; i < r; i++ {
+				if m[i*r+k].Sign() != 0 {
+					piv = i
+					break
+				}
+			}
+			if piv < 0 {
+				return true
+			}
+			for j := range r {
+				m[k*r+j], m[piv*r+j] = m[piv*r+j], m[k*r+j]
+			}
+		}
+		for i := k + 1; i < r; i++ {
+			for j := k + 1; j < r; j++ {
+				x := m[i*r+j]
+				x.Mul(x, m[k*r+k])
+				x.Sub(x, t.Mul(m[i*r+k], m[k*r+j]))
+				x.Quo(x, prev)
+			}
+		}
+		prev = m[k*r+k]
+	}
+	return m[r*r-1].Sign() == 0
+}
+
 // deflateBlockAt applies x_K = Z·y to the states blk of (A, B, C), with
 // Z the real Schur vectors of A_KK ordered so the eigenvalues nearest x0
-// lead. The fewest leading eigenvalues, all within √ε·max(‖A_KK‖, 1) of
-// x0, are set to x0 exactly (their strictly lower part zeroed) such that
-// x0·I − T₁₁ on the rest is no worse conditioned than a regular solve.
-func deflateBlockAt(A, B, C *mat.Dense, blk []int, x0 float64) bool {
+// lead, and updates abs with the magnitudes of the sums it forms. Every
+// eigenvalue within guard = √ε·max(‖A_KK‖, 1) of x0 is set to x0 exactly,
+// its strictly lower part zeroed; false when a zeroed or shifted entry
+// exceeds guard (a 2×2 bump of a defective pair) or x0·I − T on the rest
+// is worse conditioned than a regular solve allows.
+func deflateBlockAt(A, B, C *mat.Dense, abs *laurentAbs, blk []int, x0 float64) bool {
 	r := len(blk)
 	_, m := B.Dims()
 	p, _ := C.Dims()
@@ -839,22 +964,21 @@ func deflateBlockAt(A, B, C *mat.Dense, blk []int, x0 float64) bool {
 	for i := range r {
 		dists[i] = cmplx.Abs(complex(wr[i]-x0, wi[i]))
 	}
-	slices.Sort(dists)
-	tc, zc := make([]float64, r*r), make([]float64, r*r)
-	d := 0
-	for _, lim := range dists {
-		if lim > guard {
-			return false
+	lim := -1.0
+	for _, v := range dists {
+		if v <= guard {
+			lim = max(lim, v)
 		}
-		copy(tc, t)
-		copy(zc, z)
-		var err error
-		if d, err = orderSchurGroupFirst(tc, zc, r, func(e complex128) bool { return cmplx.Abs(e-complex(x0, 0)) <= lim }); err != nil {
-			return false
-		}
-		if d == r {
-			break
-		}
+	}
+	if lim < 0 {
+		return false
+	}
+	tc, zc := slices.Clone(t), slices.Clone(z)
+	d, err := orderSchurGroupFirst(tc, zc, r, func(e complex128) bool { return cmplx.Abs(e-complex(x0, 0)) <= lim })
+	if err != nil {
+		return false
+	}
+	if d < r {
 		rest := mat.NewDense(r-d, r-d, nil)
 		rr := rest.RawMatrix()
 		for i := d; i < r; i++ {
@@ -868,75 +992,72 @@ func deflateBlockAt(A, B, C *mat.Dense, blk []int, x0 float64) bool {
 		}
 		var lu mat.LU
 		lu.Factorize(rest)
-		if lu.Cond() <= mat.ConditionTolerance {
-			break
+		if !(lu.Cond() <= mat.ConditionTolerance) {
+			return false
 		}
 	}
 	for i := range d {
-		for j := 0; j <= i; j++ {
+		for j := 0; j < i; j++ {
+			if math.Abs(tc[i*r+j]) > guard {
+				return false
+			}
 			tc[i*r+j] = 0
+		}
+		if math.Abs(tc[i*r+i]-x0) > guard {
+			return false
 		}
 		tc[i*r+i] = x0
 	}
+	absA, absB, absC := abs.a.RawMatrix(), abs.b.RawMatrix(), abs.c.RawMatrix()
 	for ii, k := range blk {
 		for jj, l := range blk {
 			aRaw.Data[k*aRaw.Stride+l] = tc[ii*r+jj]
+			absA.Data[k*absA.Stride+l] = math.Abs(tc[ii*r+jj])
 		}
 	}
 	inK := make([]bool, n)
 	for _, k := range blk {
 		inK[k] = true
 	}
-	buf := make([]float64, r)
+	buf, mbuf := make([]float64, r), make([]float64, r)
+	rowTimesZ := func(v, mv blas64.General, i int) {
+		for jj := range r {
+			s, ms := 0.0, 0.0
+			for ii, k := range blk {
+				s += v.Data[i*v.Stride+k] * zc[ii*r+jj]
+				ms += mv.Data[i*mv.Stride+k] * math.Abs(zc[ii*r+jj])
+			}
+			buf[jj], mbuf[jj] = s, ms
+		}
+		for jj, k := range blk {
+			v.Data[i*v.Stride+k], mv.Data[i*mv.Stride+k] = buf[jj], mbuf[jj]
+		}
+	}
+	ztTimesCol := func(v, mv blas64.General, j int) {
+		for ii := range r {
+			s, ms := 0.0, 0.0
+			for jj, k := range blk {
+				s += zc[jj*r+ii] * v.Data[k*v.Stride+j]
+				ms += math.Abs(zc[jj*r+ii]) * mv.Data[k*mv.Stride+j]
+			}
+			buf[ii], mbuf[ii] = s, ms
+		}
+		for ii, k := range blk {
+			v.Data[k*v.Stride+j], mv.Data[k*mv.Stride+j] = buf[ii], mbuf[ii]
+		}
+	}
 	for l := range n {
-		if inK[l] {
-			continue
-		}
-		for jj := range r {
-			s := 0.0
-			for ii, k := range blk {
-				s += aRaw.Data[l*aRaw.Stride+k] * zc[ii*r+jj]
-			}
-			buf[jj] = s
-		}
-		for jj, k := range blk {
-			aRaw.Data[l*aRaw.Stride+k] = buf[jj]
-		}
-		for ii := range r {
-			s := 0.0
-			for jj, k := range blk {
-				s += zc[jj*r+ii] * aRaw.Data[k*aRaw.Stride+l]
-			}
-			buf[ii] = s
-		}
-		for ii, k := range blk {
-			aRaw.Data[k*aRaw.Stride+l] = buf[ii]
+		if !inK[l] {
+			rowTimesZ(aRaw, absA, l)
+			ztTimesCol(aRaw, absA, l)
 		}
 	}
-	bRaw, cRaw := B.RawMatrix(), C.RawMatrix()
 	for j := range m {
-		for ii := range r {
-			s := 0.0
-			for jj, k := range blk {
-				s += zc[jj*r+ii] * bRaw.Data[k*bRaw.Stride+j]
-			}
-			buf[ii] = s
-		}
-		for ii, k := range blk {
-			bRaw.Data[k*bRaw.Stride+j] = buf[ii]
-		}
+		ztTimesCol(B.RawMatrix(), absB, j)
 	}
+	cRaw := C.RawMatrix()
 	for i := range p {
-		for jj := range r {
-			s := 0.0
-			for ii, k := range blk {
-				s += cRaw.Data[i*cRaw.Stride+k] * zc[ii*r+jj]
-			}
-			buf[jj] = s
-		}
-		for jj, k := range blk {
-			cRaw.Data[i*cRaw.Stride+k] = buf[jj]
-		}
+		rowTimesZ(cRaw, absC, i)
 	}
 	return true
 }

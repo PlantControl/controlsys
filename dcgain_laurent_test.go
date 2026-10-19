@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -192,6 +193,105 @@ func TestDCGain_SmallNumeratorBelowAbsoluteFloor(t *testing.T) {
 			} else if math.Abs(got-want) > 1e-8*math.Abs(want) {
 				t.Errorf("%s [0,%d]: DCGain = %v, want %v", tc.name, j, got, want)
 			}
+		}
+	}
+}
+
+// fzSISOExactLimit is the exact rational limit at s = 0 of C(sI−A)⁻¹B on
+// the float model.
+func fzSISOExactLimit(n int, a, b, c []float64) float64 {
+	num := fzPencilDetRat(n, 1, a, b, c, []float64{0})
+	return fzLimitAt(num, fzCharPolyExact(a, n), fzRat(0))
+}
+
+// E2AY73: deflating the {1,2,3} block's ±6.4e-8i pair to exact 0 made a
+// triple pole whose order −3 coefficient flipped the sign of the exact
+// integrator at state 0. The block is idle at order −1, so the expansion on
+// the model as given settles it without deflation.
+func TestDCGain_LaurentPrefersUndeflatedModel(t *testing.T) {
+	a := []float64{0, 0, 0, 0, 0, 0, 0, -12.696489978696855, 0, 1, 0, 0, 0, 0, -1.2788825566727037e-15, 4}
+	b := []float64{0.0007045326307198843, -0.0001380169790660376, -0.0005520679162641504, -0.00041405093719811285}
+	c := []float64{1.4342515182324627e-10, -2.8685030364649254e-10, -8.941142520710081e-12, 0}
+	want := fzSISOExactLimit(4, a, b, c)
+	if !math.IsInf(want, 1) {
+		t.Fatalf("oracle %v, want +Inf", want)
+	}
+	sys, err := NewFromSlices(4, 1, 1, a, b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.At(0, 0); got != want {
+		t.Errorf("DCGain = %v, exact limit %v", got, want)
+	}
+}
+
+// E2AY73 follow-ups, integer models with an exact integrator beside a
+// singular 2×2 or 3×3 block, where the deflated Laurent gave the wrong Inf
+// sign (base 2e4a07d was right):
+//   - nilpotent: Schur roundoff (1e-16) in a coupling that cancels exactly
+//     was weighed against itself and decided an order −3 coefficient;
+//   - bump: Dgees returned the nilpotent block as a 2×2 standardized bump,
+//     and zeroing its strictly lower part dropped the entry 8;
+//   - rowsum: an exactly singular 3×3 block (zero row sums) passed as
+//     regular on its roundoff LU pivot, hiding a pole at 0;
+//   - cancel: the integrator's input x1 − x2 cancels exactly, so G(0) = 0;
+//     |entries| as magnitudes let transform roundoff decide +Inf.
+func TestDCGain_LaurentSingularBlocks(t *testing.T) {
+	cases := []struct {
+		name    string
+		n       int
+		a, b, c []float64
+	}{
+		{"nilpotent", 4, []float64{4, 0, 0, -4, -1, 0, 0, 1, 0, -4, -1, 5, 4, 0, 0, -4}, []float64{0, -1, 1, -1}, []float64{-2, 0, 1, 2}},
+		{"bump", 3, []float64{-4, 0, 4, 1, 0, -1, -4, 0, 4}, []float64{1, -2, -2}, []float64{1, -2, 0}},
+		{"rowsum", 4, []float64{4, -2, 0, -2, 0, 3, 0, -3, 0, 0, 0, 0, 4, 2, 0, -6}, []float64{1, -1, 1, -2}, []float64{-1, -1, 1, 0}},
+		{"cancel", 3, []float64{0, 1, -1, 0, -3, 3, 0, -1, 1}, []float64{1, 1, 1}, []float64{2, 0, -2}},
+	}
+	for _, tc := range cases {
+		for _, sc := range []float64{1, 0x1p-14} {
+			a := make([]float64, len(tc.a))
+			for i, v := range tc.a {
+				a[i] = sc * v
+			}
+			want := fzSISOExactLimit(tc.n, a, tc.b, tc.c)
+			if math.IsInf(want, 0) == (tc.name == "cancel") {
+				t.Fatalf("%s: oracle %v", tc.name, want)
+			}
+			sys, err := NewFromSlices(tc.n, 1, 1, a, tc.b, tc.c, []float64{0}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			g, err := sys.DCGain()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := g.At(0, 0); got != want && !(math.Abs(got-want) <= 1e-9*math.Max(math.Abs(want), 1)) {
+				t.Errorf("%s ×%g: DCGain = %v, exact limit %v", tc.name, sc, got, want)
+			}
+		}
+	}
+}
+
+func TestExactDetIsZero(t *testing.T) {
+	cases := []struct {
+		a    []float64
+		want bool
+	}{
+		{[]float64{4, -2, -2, 0, 3, -3, 4, 2, -6}, true},
+		{[]float64{0, 0, 12.696489978696855, -1, 0, 0, 0, 1.2788825566727037e-15, -4}, false},
+		{[]float64{0, 1, 1, 0}, false},
+		{[]float64{0, 0, 0, 0}, true},
+		{[]float64{1e-300, 1e300, 1e-300, 1e300}, true},
+		{[]float64{1e-300, 1e300, 1e-300, math.Nextafter(1e300, 0)}, false},
+	}
+	for _, tc := range cases {
+		r := int(math.Sqrt(float64(len(tc.a))))
+		if got := exactDetIsZero(blas64.General{Rows: r, Cols: r, Stride: r, Data: tc.a}); got != tc.want {
+			t.Errorf("%v: exactDetIsZero = %v, want %v", tc.a, got, tc.want)
 		}
 	}
 }
