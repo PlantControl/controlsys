@@ -218,7 +218,10 @@ func poleSpacing(sys *System, s complex128) (rho, wide float64, near bool, err e
 // ddResponseInto sets dst to the p×m response C(sE−A)⁻¹B + D of the
 // delay-free realization at pt as ddSISOResponse forms it, with the same
 // elimination for each input column. It reports false, leaving dst
-// unchanged, at a pivot below 2⁻¹⁰⁰ of the scale.
+// unchanged, at a pivot below 2⁻¹⁰⁰ of the magnitudes it was formed from,
+// where it is cancellation noise. A pivot small against the whole pencil but
+// not against its own terms is accurate, as is a companion form's last pivot
+// next to an exact origin pole.
 func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 	n, m, p := sys.Dims()
 	if n == 0 {
@@ -233,7 +236,7 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 	pr, pi, qr, qi := real(pt.p), imag(pt.p), real(pt.q), imag(pt.q)
 	a := make([]ddComplex, n*n)
 	x := make([]ddComplex, n*m)
-	var aScale float64
+	mag := make([]float64, n*n)
 	for i := range n {
 		for j := range n {
 			av := ar.Data[i*ar.Stride+j]
@@ -244,13 +247,13 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 				e = 1
 			}
 			a[i*n+j] = ddComplex{ddProd(pr, e).add(ddProd(qr, av)), ddProd(pi, e).add(ddProd(qi, av))}
-			aScale = max(aScale, a[i*n+j].abs1())
+			mag[i*n+j] = math.Abs(pr*e) + math.Abs(qr*av) + math.Abs(pi*e) + math.Abs(qi*av)
 		}
 		for j := range m {
 			x[i*m+j] = ddComplex{re: dd{br.Data[i*br.Stride+j], 0}}
 		}
 	}
-	tol := float64(n) * aScale * 0x1p-100
+	tol := float64(n) * 0x1p-100
 	for k := range n {
 		piv, best := k, a[k*n+k].abs1()
 		for i := k + 1; i < n; i++ {
@@ -258,12 +261,13 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 				piv, best = i, v
 			}
 		}
-		if !(best > tol) {
+		if !(best > tol*mag[piv*n+k]) {
 			return false
 		}
 		if piv != k {
 			for j := range n {
 				a[k*n+j], a[piv*n+j] = a[piv*n+j], a[k*n+j]
+				mag[k*n+j], mag[piv*n+j] = mag[piv*n+j], mag[k*n+j]
 			}
 			for j := range m {
 				x[k*m+j], x[piv*m+j] = x[piv*m+j], x[k*m+j]
@@ -274,8 +278,10 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 				continue
 			}
 			f := a[i*n+k].div(a[k*n+k])
+			fm := f.abs1()
 			for j := k + 1; j < n; j++ {
 				a[i*n+j] = a[i*n+j].sub(f.mul(a[k*n+j]))
+				mag[i*n+j] += fm * mag[k*n+j]
 			}
 			for j := range m {
 				x[i*m+j] = x[i*m+j].sub(f.mul(x[k*m+j]))

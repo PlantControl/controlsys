@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -860,11 +861,12 @@ func TestPoleLimitOffOriginClusterPublicAPIs(t *testing.T) {
 
 // TestPoleLimitSamplesBesideOriginCluster (D4OV3H): the pole-limit samples
 // s+kδ hit the singular double solve beside a cluster at the pole, and the
-// solve error replaced +Inf: s²(s+1)(s+1e−9) at ω = 0 and 1e−14 (dd-singular
-// too), and (z−1)³, whose computed poles spread by eps^{1/3}, so δ was a
-// fraction of 7e−6. Ungated, the samples fall back to dd and, if still
-// singular, δ steps past the cluster. A gated caller keeps the double
-// failure. Oracle: big.Float solve of the stored realization.
+// solve error replaced +Inf: s²(s+1)(s+1e−9) at ω = 0, and (z−1)³, whose
+// computed poles spread by eps^{1/3}, so δ was a fraction of 7e−6. Ungated,
+// the samples fall back to dd and, if still singular, δ steps past the
+// cluster. At ω = 1e−14 the stored response is finite and dd resolves it. A
+// gated caller keeps the double failure. Oracle: big.Float solve of the
+// stored realization.
 func TestPoleLimitSamplesBesideOriginCluster(t *testing.T) {
 	cont := makePlant(t, []float64{1, 3, 1}, []float64{1, 1 + 1e-9, 1e-9, 0, 0})
 	disc := makeDiscretePlant(t, []float64{0.2376376495436092, -0.22623825681198792}, []float64{1, -3, 3, -1}, 0.0411986772067474)
@@ -874,7 +876,7 @@ func TestPoleLimitSamplesBesideOriginCluster(t *testing.T) {
 		inf, fin  []float64
 		finiteTol float64
 	}{
-		{"s²(s+1)(s+1e-9)", cont, []float64{0, 1e-14}, []float64{1e-10, 1e-3}, 1e-9},
+		{"s²(s+1)(s+1e-9)", cont, []float64{0}, []float64{1e-14, 1e-10, 1e-3}, 1e-9},
 		{"(z-1)³", disc, []float64{0, 1e-9}, []float64{1e-5, 1e-4, 1e-3}, 1e-8},
 	} {
 		if _, raw, _ := poleLimitAt(c.sys, 0); raw == nil {
@@ -1095,5 +1097,117 @@ func TestPoleLimitLightlyDampedDiscretePair(t *testing.T) {
 			t.Fatalf("EvalFr(e^{j%g}): %v", w, err)
 		}
 		check("EvalFr", w, frBigC(z), h[0])
+	}
+}
+
+// TestPoleLimitExactOriginPoleFamily (D4OV3H): s^k(s²+as+b), k = 2, 3, with
+// |b| ≤ 1e−10 in companion form keeps its k origin poles exact, so at small
+// ω > 0 the response is large but finite. The double solve fails there and
+// dd rejected its last pivot, the characteristic polynomial, as below 2⁻¹⁰⁰
+// of the pencil scale though formed from its own small terms without
+// cancellation; FreqResponse returned ErrSingularTransform. Two fixed
+// realizations from the report and a random sweep in SISO, 1×2 and
+// descriptor form, including E = diag(I, 0) with an infinite pole. Oracle: big.Float solve of the stored realization.
+func TestPoleLimitExactOriginPoleFamily(t *testing.T) {
+	ws := make([]float64, 0, 81)
+	for e := -16.0; e <= 0; e += 0.2 {
+		ws = append(ws, math.Pow(10, e))
+	}
+	ws = append(ws, 1.0054166766090156e-10)
+	check := func(label string, sys *System) {
+		t.Helper()
+		_, m, p := sys.Dims()
+		want := make([][]complex128, len(ws))
+		for k, w := range ws {
+			want[k] = frExactResponse(sys, frExactPoint(w, 0))
+		}
+		for api, f := range map[string]func([]float64) (*FreqResponseMatrix, error){
+			"FreqResponse":          sys.FreqResponse,
+			"FreqResponsePointwise": sys.FreqResponsePointwise,
+		} {
+			fr, err := f(ws)
+			if err != nil {
+				t.Errorf("%s %s: %v", label, api, err)
+				continue
+			}
+			for k, w := range ws {
+				for i := range p {
+					for j := range m {
+						if got, g := fr.At(k, i, j), want[k][i*m+j]; cmplx.Abs(got-g) > 1e-9*cmplx.Abs(g) {
+							t.Errorf("%s %s(%g)[%d,%d] = %v; want %v", label, api, w, i, j, got, g)
+						}
+					}
+				}
+			}
+		}
+	}
+	companion := func(a, b []float64) *System {
+		n := len(b)
+		c := make([]float64, n)
+		c[n-1] = 1
+		return poleSys(t, n, 1, 1, a, b, c, []float64{0}, 0)
+	}
+	infTwin := func(sys *System) *System {
+		n, m, p := sys.Dims()
+		a := mat.NewDense(n+1, n+1, nil)
+		a.Slice(0, n, 0, n).(*mat.Dense).Copy(sys.A)
+		a.Set(n, n, 1)
+		e := mat.NewDense(n+1, n+1, nil)
+		b := mat.NewDense(n+1, m, nil)
+		c := mat.NewDense(p, n+1, nil)
+		b.Slice(0, n, 0, m).(*mat.Dense).Copy(sys.B)
+		c.Slice(0, p, 0, n).(*mat.Dense).Copy(sys.C)
+		for i := range n {
+			e.Set(i, i, 1)
+		}
+		twin, err := NewDescriptor(a, b, c, sys.D, e, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return twin
+	}
+	for name, sys := range map[string]*System{
+		"double": companion(
+			[]float64{0, 0, 0, -0, 1, 0, 0, -0, 0, 1, 0, 2.2702318530740966e-10, 0, 0, 1, -0.0006739302865839005},
+			[]float64{0.09173182574148675, -0.9583106107971275, -2.6790649922210594, -0.009260826722141069}),
+		"triple": companion(
+			[]float64{0, 0, 0, 0, -0, 1, 0, 0, 0, -0, 0, 1, 0, 0, -0, 0, 0, 1, 0, -3.949450574200987e-11, 0, 0, 0, 1, -0.0002672106221559042},
+			[]float64{-1.7559471126269988, -0.22991682993005003, 0, 0, 0}),
+	} {
+		check(name, sys)
+		check(name+" E=diag(I,0)", infTwin(sys))
+	}
+
+	rng := rand.New(rand.NewPCG(4, 0xd40))
+	exercised := 0
+	for trial := range 30 {
+		k := 2 + trial%2
+		a := math.Pow(10, -4+3*rng.Float64())
+		b := math.Pow(10, -16+6*rng.Float64())
+		if rng.IntN(2) == 0 {
+			b = -b
+		}
+		den := append([]float64{1, a, b}, make([]float64, k)...)
+		num := []float64{rng.NormFloat64(), rng.NormFloat64(), rng.NormFloat64()}
+		half := []float64{0.5 * num[0], -num[1], 2 * num[2]}
+		r, err := (&TransferFunc{Num: [][][]float64{{num, half}}, Den: [][]float64{den}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		siso := makePlant(t, num, den)
+		for _, w := range ws {
+			if _, raw, _ := poleLimitAt(siso, w); raw != nil {
+				exercised++
+				break
+			}
+		}
+		label := func(form string) string { return fmt.Sprintf("trial %d %s %v/%v", trial, form, num, den) }
+		check(label("SISO"), siso)
+		check(label("1×2"), r.Sys)
+		check(label("descriptor"), poleDescriptorTwin(t, siso))
+		check(label("E=diag(I,0)"), infTwin(r.Sys))
+	}
+	if exercised < 20 {
+		t.Errorf("%d of 30 plants exercise the pole limit; want ≥ 20", exercised)
 	}
 }
