@@ -1548,8 +1548,12 @@ func (l *delayLoop) buildClusters(ws []float64, required []bool, dd bool) ([]axi
 	return axis, len(axis) > 0
 }
 
-// formCluster finds the smallest k such that the k poles nearest to jw0
-// fit a disk whose circle verifies.
+// formCluster finds the smallest k, or with dd the largest, such that the
+// k poles nearest to jw0 fit a disk whose circle verifies. Every verified
+// circle certifies its disk; dd circles verify far tighter, as within 1e-7
+// of an integrator triple with a real pole at 4e-10, and the walk from such
+// a circle crosses the band out to the next pole, 5e-6, where the reach of
+// the double model of 1+L falls to ~1e-12 and the walk exceeds its budget.
 func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 	c := complex(0, w0)
 	ds := make([]float64, len(l.poles))
@@ -1558,7 +1562,11 @@ func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 	}
 	slices.Sort(ds)
 	scale := max(1, w0)
-	for k := 1; k <= len(ds); k++ {
+	for i := range ds {
+		k := i + 1
+		if dd {
+			k = len(ds) - i
+		}
 		dn := math.Inf(1)
 		if k < len(ds) {
 			dn = ds[k]
@@ -1567,9 +1575,6 @@ func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 		hi := min(dn/clusterMargin, scale)
 		if w0 > 0 {
 			hi = min(hi, w0/clusterMargin)
-		}
-		if lo > scale {
-			break
 		}
 		if !(lo <= hi) {
 			continue
