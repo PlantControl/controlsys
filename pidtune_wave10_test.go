@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 	"time"
@@ -139,7 +140,7 @@ func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 	run(Poly{0.012075199185333292, 0, 0}, Poly{1, 3.9182743506554067, 0.27016515117488543, 0.047907185397301336}, 0.11879022516031652, []PidtuneType{PidtunePDF}, 0, 41, 3)
 	run(Poly{0.1043562311628774, 0}, Poly{1, 2.157756223719102, 12.93308866944033}, 0.06098188011777296, []PidtuneType{PidtunePDF}, 72, 110, 4)
 	t.Logf("BIAA3G plants: %d wound, %d checked, %d gate-passing", wound, checked, passed)
-	if passed < 8 {
+	if passed < 7 {
 		t.Errorf("BIAA3G plants: %d gate-passing designs wind, want the back-off's", passed)
 	}
 	onlyPassing = false
@@ -290,7 +291,8 @@ func TestPidtuneZeroDCDelayBackoffCost(t *testing.T) {
 }
 
 // The gate's cached |S| scan above its band matches pidTuningSensitivityPeak
-// bit for bit, over designs whose tail bound extends the scan.
+// bit for bit, over designs whose tail bound extends the scan within
+// pidTuningTailReach times the band's top.
 func TestPidtuneGateTailPeakMatchesScan(t *testing.T) {
 	extended := 0
 	for _, c := range []struct {
@@ -329,13 +331,14 @@ func TestPidtuneGateTailPeakMatchesScan(t *testing.T) {
 					continue
 				}
 				ctrl := pidtuneGateController(pid)
-				if gate.beyond(&ctrl) == nil {
+				above, level := gate.beyond(&ctrl)
+				if above == nil || level != 0 || above[len(above)-1] > gate.p.high*pidTuningTailReach {
 					continue
 				}
 				extended++
 				q := gate.p
 				q.low, q.loopTail = q.high, gate.tail
-				if got, want := gate.tailPeak(ctrl), pidTuningSensitivityPeak(q, ctrl); got != want && !(math.IsNaN(got) && math.IsNaN(want)) {
+				if got, want := gate.tailPeak(ctrl, above[len(above)-1]), pidTuningSensitivityPeak(q, ctrl); got != want && !(math.IsNaN(got) && math.IsNaN(want)) {
 					t.Errorf("%s %v/%v at wc=%g: tailPeak %v, scan %v", c.f, c.num, c.den, w, got, want)
 				}
 			}
@@ -343,5 +346,116 @@ func TestPidtuneGateTailPeakMatchesScan(t *testing.T) {
 	}
 	if extended < 20 {
 		t.Errorf("%d designs extend the scan", extended)
+	}
+}
+
+// ZON57P: the gate's scans above its band end where the design's own tail
+// bound, or leveling-off asymptote, rules out a crossover or |S| excess
+// further up. Before, a fixed 1e4 times the band's top left PDF Kp 8.85e13,
+// Kd 6.3e18 crossing at 1.04e7 rad/s (top 714) with PM 1e-4° and |S| 8.9e3
+// unchecked, and a biproper plant's PD |S| → 15.6 as ω → ∞ unseen by a
+// band below the plant's dynamics. Oracles: exact Routh test, and margins
+// and |S| of the directly evaluated loop up to 1e9 rad/s; for the limit,
+// 1/|1+L| and, with a delay, 1/(1−|L|) at 1e9 rad/s.
+func TestPidtuneGateBandFromDesign(t *testing.T) {
+	gateOf := func(p *System) (*pidtuneGate, float64) {
+		t.Helper()
+		wc, fromPole, err := autoCrossoverFreq(p, 0, 60)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eval, err := newSISOEval(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		screen, err := newPIDStabilityScreen(p, eval, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		floor := pidtuneBackoffFloor(p, wc)
+		if fromPole {
+			floor = wc * math.Pow(10, -pidtuneBackoffMaxDecade)
+		}
+		return newPidtuneGate(p, screen.model, eval, wc, floor), wc
+	}
+	robust := func(name string, f PidtuneType, pid *PID, num, den Poly) {
+		t.Helper()
+		if !pidtuneExactHurwitz(pid, num, den) {
+			t.Errorf("%s: %+v closed loop not Hurwitz", name, pid)
+			return
+		}
+		pm, ms := pidtuneLoopMarginBand(pidtuneOracleLoop(pid, num, den, 0, 0), 1e-10, 1e9, 1.001)
+		if ms > 4.05 || f != PidtuneP && f != PidtunePD && pm < 58.5 {
+			t.Errorf("%s: %+v phase margin %.3g, |S| %.3g", name, pid, pm, ms)
+		}
+	}
+
+	num, den := Poly{0.8046831541982362, 2.6069650473739415e-06, 1.9527181787498443e-12}, Poly{1, 17.41109423258768, 107.8941773307406, 272.26498377608243, 215.3214628532836}
+	p := pidtuneBackoffPlant(t, num, den, 0, 0)
+	gate, wc := gateOf(p)
+	if err := gate.check(&PID{Kp: 8.851326453946484e+13, Kd: 6.297043913126736e+18, Tf: 140054.19513783758}, PidtunePDF, wc, 60, true); err == nil {
+		t.Errorf("PDF crossing at 1.04e7 rad/s passes the gate")
+	}
+	for _, f := range []PidtuneType{PidtunePDF, PidtunePIDF} {
+		pid, err := Pidtune(p, f, 0, nil)
+		if err != nil {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s: %v", f, err)
+			}
+			continue
+		}
+		robust(string(f), f, pid, num, den)
+	}
+
+	num = Poly{1.9355458998154456, 8.521119088466584, 10.888552438038644, 4.287024002086385, 7.201380557549947e-06}
+	den = Poly{1, 4.131322890232889, 4.352348907079097, 0.6684842552460563, -0.0031624264514338862}
+	p = pidtuneBackoffPlant(t, num, den, 0, 0)
+	gate, wc = gateOf(p)
+	old := &PID{Kp: -0.049979169270678435, Kd: -1336.3280290281982, Tf: 2673.7699896348404}
+	if err := gate.sensitive(old, PidtunePD, wc); err == nil {
+		t.Errorf("PD %+v: |S| → %.3g passes the gate", old, 1/cmplx.Abs(1+pidtuneOracleLoop(old, num, den, 0, 0)(1e9)))
+	}
+	for _, c := range []*PID{old, {Kp: 0.5}, {Kp: -0.45, Ki: 0.1}, {Kp: 0.1, Kd: 2, Tf: 0.5}} {
+		ctrl := pidtuneGateController(c)
+		_, level := gate.beyond(&ctrl)
+		if want := 1 / cmplx.Abs(1+pidtuneOracleLoop(c, num, den, 0, 0)(1e9)); math.Abs(level-want) > 1e-6*want {
+			t.Errorf("%+v: limit |S| %v, want %v", c, level, want)
+		}
+	}
+	pid, err := Pidtune(p, PidtunePD, 0, nil)
+	if err != nil {
+		t.Fatalf("PD: %v", err)
+	}
+	robust("PD", PidtunePD, pid, num, den)
+
+	num, den = Poly{0.9651311017405639, -0.3643799158344094}, Poly{1, -0.2215211283042633, 0.010177292879074453}
+	gate, wc = gateOf(pidtuneBackoffPlant(t, num, den, 0, 0))
+	ideal := &PID{Kp: -0.049979169270678414, Ki: -0.010151516877036266, Kd: -0.9932760277364697}
+	want := func(c *PID) float64 { return 1 / cmplx.Abs(1+pidtuneOracleLoop(c, num, den, 0, 0)(1e9)) }
+	c1 := pidtuneGateController(ideal)
+	if _, level := gate.beyond(&c1); math.Abs(level-want(ideal)) > 1e-6*want(ideal) {
+		t.Errorf("ideal-D PID %+v: limit |S| %v, want %v", ideal, level, want(ideal))
+	}
+	if err := gate.sensitive(ideal, PidtunePID, wc); err == nil {
+		t.Errorf("ideal-D PID %+v passes the gate", ideal)
+	}
+	num = Poly{1.9355458998154456, 8.521119088466584, 10.888552438038644, 4.287024002086385, 7.201380557549947e-06}
+	den = Poly{1, 4.131322890232889, 4.352348907079097, 0.6684842552460563, -0.0031624264514338862}
+
+	const delay = 0.1
+	pd :=pidtuneBackoffPlant(t, num, den, 0, delay)
+	gate, wc = gateOf(pd)
+	ctrl := &PID{Kp: 0.8 / num[0]}
+	l := pidtuneOracleLoop(ctrl, num, den, 0, delay)
+	peak := 0.0
+	for w := 1e3; w < 1e3+4*math.Pi/delay; w += 1e-3 / delay {
+		peak = math.Max(peak, 1/cmplx.Abs(1+l(w)))
+	}
+	c2 := pidtuneGateController(ctrl)
+	if _, level := gate.beyond(&c2); math.Abs(level-peak) > 1e-3*peak || peak <= pidTuningMaxSensitivity {
+		t.Errorf("delayed P %+v: limit |S| %v, oracle %v", ctrl, level, peak)
+	}
+	if err := gate.sensitive(ctrl, PidtuneP, wc); err == nil {
+		t.Errorf("delayed P %+v: |S| → %.3g passes the gate", ctrl, peak)
 	}
 }

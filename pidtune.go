@@ -638,6 +638,7 @@ type pidtuneGate struct {
 	// tail bounds |L| above the band (pidTuningLoopTail), built on first use.
 	plant    *System
 	tail     func(*PID2, float64) float64
+	markov   *pidMarkovTail
 	tailDone bool
 	// rootSum and rootMax are the sum and largest of the plant's pole and
 	// zero magnitudes, built by rotates on first use (NaN when unknown).
@@ -771,7 +772,7 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 		_, m := pidTuningCrossingsOn(g.p, c, []float64{g.cross.w[i-1], wc, g.cross.w[i]}, wc, nil)
 		margins = append(margins, m[1:]...)
 	}
-	if above := g.beyond(&c); above != nil {
+	if above, _ := g.beyond(&c); above != nil {
 		_, m := pidTuningCrossingsOn(g.p, c, above, wc, nil)
 		margins = append(margins, m[1:]...)
 	}
@@ -843,8 +844,8 @@ func (g *pidtuneGate) winds(c PID2) bool {
 			return false
 		}
 	}
-	above := g.beyond(&c)
-	if g.tail != nil && (above != nil || g.tail(&c, g.p.high) <= 1-1/g.p.maxSensitivity) {
+	above, level := g.beyond(&c)
+	if g.tail != nil && level == 0 && (above != nil || g.tail(&c, g.p.high) <= 1-1/g.p.maxSensitivity) {
 		for _, w := range above {
 			if !step(1 + g.p.at(w)*pidTuningFeedback(c, w)) {
 				return false
@@ -904,13 +905,14 @@ func (g *pidtuneGate) rotates(c PID2) bool {
 // margin 180° − |∠L| holds.
 var errPidtuneReflected = fmt.Errorf("classical margin met at every gain crossover: %w", ErrPIDTuningTargetUnattainable)
 
-// sensitive rejects pid when |S| exceeds the bound, on the band and above
-// it as far as beyond reaches.
+// sensitive rejects pid when |S| exceeds the bound, on the band, above it
+// as far as beyond reaches, or as ω → ∞ on a loop whose gain levels off.
 func (g *pidtuneGate) sensitive(pid *PID, pidType PidtuneType, wc float64) error {
 	c := pidtuneGateController(pid)
-	ms := g.sensitivityOver(c, g.p.maxSensitivity)
-	if above := g.beyond(&c); above != nil && ms <= g.p.maxSensitivity {
-		ms = g.tailPeak(c)
+	above, level := g.beyond(&c)
+	ms := max(g.sensitivityOver(c, g.p.maxSensitivity), level)
+	if above != nil && ms <= g.p.maxSensitivity {
+		ms = max(ms, g.tailPeak(c, above[len(above)-1]))
 	}
 	if ms > g.p.maxSensitivity {
 		return fmt.Errorf("%s design at wc=%g has sensitivity peak %.3g: %w", pidType, wc, ms, ErrPIDTuningTargetUnattainable)
@@ -919,12 +921,13 @@ func (g *pidtuneGate) sensitive(pid *PID, pidType PidtuneType, wc float64) error
 }
 
 // tailPeak is pidTuningSensitivityPeak from the band's top with the tail
-// bound, bit for bit, sampling the plant on its grid once for all designs:
-// the grid does not depend on c, only where the scan stops.
-func (g *pidtuneGate) tailPeak(c PID2) float64 {
+// bound, stopping by reach instead of pidTuningTailReach times the top (bit
+// for bit when both stop by the bound), sampling the plant on its grid once
+// for all designs: the grid does not depend on c, only where the scan stops.
+func (g *pidtuneGate) tailPeak(c PID2, reach float64) float64 {
 	s := func(gw complex128, w float64) float64 { return 1 / cmplx.Abs(1+gw*pidTuningFeedback(c, w)) }
 	refine := func(w float64) float64 { return s(g.at(w), w) }
-	bound, reach := 1-1/g.p.maxSensitivity, g.p.high*pidTuningTailReach
+	bound := 1 - 1/g.p.maxSensitivity
 	peak := 0.
 	var w0, v0, w1, v1 float64
 	for k := 0; ; k++ {
@@ -956,7 +959,7 @@ func (g *pidtuneGate) tailGrid(k int) {
 		} else {
 			w = g.tailW[n-1]
 			if g.tailTop[n-1] {
-				g.tailHigh = math.Min(2*w, p.high*pidTuningTailReach)
+				g.tailHigh = math.Min(2*w, p.high*pidtuneGateReach)
 			}
 			step := .01 * w
 			if p.tau > 0 {
@@ -972,15 +975,21 @@ func (g *pidtuneGate) tailGrid(k int) {
 	}
 }
 
+// pidtuneGateReach caps, as a multiple of the band's top, how far beyond
+// extends the gate's scans.
+const pidtuneGateReach = 1e12
+
 // beyond returns a log grid from the top of a continuous gate's band up to
-// where pidTuningLoopTail bounds |L| by 1 − 1/maxSensitivity, which rules
-// out a crossover or an |S| excess further up; nil when the bound holds at
-// the top, is unknown (discrete bands reach π/Dt), or does not hold within
-// pidTuningTailReach times the top, as for a loop gain that does not roll
-// off (a biproper plant, an ideal derivative), left to the band as before.
-// The band is set by the first crossover, and a large Kp, or Kd/Tf, at a
-// crossover backed off below it can cross 0 dB again above it.
-func (g *pidtuneGate) beyond(c *PID2) []float64 {
+// where no crossover or |S| excess lies further up, and, for a loop whose
+// gain levels off at L(j∞) ≠ 0, the limit of sup |S| as ω → ∞. A loop
+// rolling off ends where pidTuningLoopTail bounds |L| by 1 − 1/maxSensitivity,
+// however far a large Kp, or Kd/Tf, at a crossover backed off below the band
+// pushes it; one leveling off ends where asymptote keeps L within half the
+// distance its limit leaves to |L| = 1 and to |1+L| = 1/maxSensitivity. The
+// grid is nil when the top already ends it, the bound is unknown (discrete
+// bands reach π/Dt, ideal derivatives), or it does not end within
+// pidtuneGateReach times the top, left to the band as before.
+func (g *pidtuneGate) beyond(c *PID2) (grid []float64, level float64) {
 	if !g.tailDone {
 		g.tailDone = true
 		if g.plant.Dt == 0 {
@@ -989,21 +998,86 @@ func (g *pidtuneGate) beyond(c *PID2) []float64 {
 	}
 	top, bound := g.p.high, 1-1/g.p.maxSensitivity
 	if g.tail == nil || g.tail(c, top) <= bound {
-		return nil
+		return nil, 0
 	}
-	end := top
-	for end < top*pidTuningTailReach && g.tail(c, end) > bound {
-		end *= 2
-	}
-	if g.tail(c, end) > bound {
-		return nil
+	end, reach := top, top*pidtuneGateReach
+	if g.tail(c, math.Inf(1)) <= bound {
+		for end < reach && g.tail(c, end) > bound {
+			end *= 2
+		}
+		if g.tail(c, end) > bound {
+			return nil, 0
+		}
+	} else {
+		lim, dev, ok := g.asymptote(c)
+		if !ok {
+			return nil, 0
+		}
+		// Delay turns L(j∞) round the circle of radius |L(j∞)|.
+		dist := 1 - math.Abs(lim)
+		gap := dist - 1/g.p.maxSensitivity
+		if g.p.tau == 0 {
+			dist = math.Abs(1 + lim)
+			gap = min(math.Abs(math.Abs(lim)-1), dist-1/g.p.maxSensitivity)
+		}
+		level = math.Inf(1)
+		if dist > 0 {
+			level = 1 / dist
+		}
+		if dev == nil || !(gap > 0) {
+			return nil, level
+		}
+		for end < reach && !(dev(end) <= gap/2) {
+			end *= 2
+		}
+		if !(dev(end) <= gap/2) {
+			return nil, level
+		}
+		if end == top {
+			return nil, level
+		}
 	}
 	n := int(math.Ceil(math.Log10(end/top)*pidtuneGatePerDecade)) + 1
-	grid := make([]float64, n)
+	grid = make([]float64, n)
 	for i := range grid {
 		grid[i] = math.Min(top*math.Pow(10, float64(i)/pidtuneGatePerDecade), end)
 	}
-	return grid
+	return grid, level
+}
+
+// asymptote returns L(j∞) of a continuous loop with c leveling off, and
+// dev(ω) bounding |L(jω′) − L(j∞)| over ω′ ≥ ω: with C∞ = Kp + Kd/Tf and
+// r = (|Ki| + |Kd|/Tf²)/ω bounding |C − C∞|, |L − L∞| ≤ (|C∞| + r)·|G − D|
+// + r·|D|, |G − D| bounded by pidMarkovTail. An ideal derivative on a
+// strictly proper plant levels off at Kd·CB, with dev nil; ok is false for
+// one on a biproper plant, unbounded, or a descriptor plant.
+func (g *pidtuneGate) asymptote(c *PID2) (lim float64, dev func(float64) float64, ok bool) {
+	if g.plant.E != nil {
+		return 0, nil, false
+	}
+	if c.Kd != 0 && !(c.Tf > 0) {
+		if g.plant.D.At(0, 0) != 0 {
+			return 0, nil, false
+		}
+		n, _ := g.plant.A.Dims()
+		cb := 0.0
+		for i := range n {
+			cb += g.plant.C.At(0, i) * g.plant.B.At(i, 0)
+		}
+		return c.Kd * cb, nil, true
+	}
+	if g.markov == nil {
+		g.markov = newPIDMarkovTail(g.plant)
+	}
+	d, k, kr := g.plant.D.At(0, 0), c.Kp, math.Abs(c.Ki)
+	if c.Kd != 0 {
+		k += c.Kd / c.Tf
+		kr += math.Abs(c.Kd) / (c.Tf * c.Tf)
+	}
+	return k * d, func(w float64) float64 {
+		r := kr / w
+		return (math.Abs(k)+r)*g.markov.at(w, 0) + r*math.Abs(d)
+	}, true
 }
 
 func pidtuneGateController(pid *PID) PID2 {
