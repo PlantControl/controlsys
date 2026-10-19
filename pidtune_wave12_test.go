@@ -84,3 +84,27 @@ func TestPidtuneNoFragileRetry(t *testing.T) {
 		pidtuneCheckRobust(t, name, pid, c.num, c.den, 0, pidTuningMaxSensitivity)
 	}
 }
+
+// PS6S32: on zero-DC continuous plants the legacy PD rerun, clamped short of
+// the margin at its pole-derived wc, passed on |S| alone and returned
+// margins of 44.4° (|S| 1.9), 56.8° and 58.4° at its only crossover. Higher
+// crossovers keep the margin; lower ones, back-off, lose it. The legacy
+// rerun now also keeps pm − 1.5° at every crossover, so these return
+// ErrPIDTuningTargetUnattainable or a design robust per the oracle.
+func TestPidtuneZeroDCLegacyPDGated(t *testing.T) {
+	for _, c := range []struct{ num, den Poly }{
+		{Poly{0.4060949555907569, 0, 0}, Poly{1, 1.5349963623779264, 0.5521256684141752}},
+		{Poly{0.34666872878320376, 0, 0}, Poly{1, 3.9256001901459285, 3.843722834621563}},
+		{Poly{-0.7431680988546034, 0, 0}, Poly{1, 5.3495557727549565, 6.22597598141245, 2.052553524633182}},
+	} {
+		name := fmt.Sprintf("%v/%v", c.num, c.den)
+		pid, err := Pidtune(pidtuneBackoffPlant(t, c.num, c.den, 0, 0), PidtunePD, 0, nil)
+		if err != nil {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s: %v", name, err)
+			}
+			continue
+		}
+		pidtuneCheckRobust(t, name, pid, c.num, c.den, 0, pidTuningMaxSensitivity)
+	}
+}

@@ -90,7 +90,8 @@ const (
 // continuous plant with zero DC gain and no delay, a k·sᵐ high-pass
 // plant leaving no phase to back off into, a P, or a PD clamped short of
 // the margin at wc (with the default margin; an explicit one rejects it),
-// passes there when the pole test certifies it stable with |S| ≤ 4. On a
+// passes there when the pole test certifies it stable with |S| ≤ 4, the PD
+// also keeping pm − 1.5° at every gain crossover. On a
 // loop the pole test certifies stable, the margin at each gain crossover,
 // wc included (TunePID excludes wc), is the classical 180° − |∠L|. A
 // continuous delay is gated before its Nyquist test on the signed
@@ -500,10 +501,13 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 		return err
 	}
 	if gated && !gateFirst {
-		if r.unshaped(pid, wc) {
+		switch {
+		case !r.unshaped(pid, wc):
+			return r.gated(pid, wc, r.screened(wc))
+		case r.pidType == PidtuneP:
 			return r.gateOf().sensitive(pid, r.pidType, wc)
 		}
-		return r.gated(pid, wc, r.screened(wc))
+		return r.gateOf().check(pid, r.pidType, wc, r.pm-pidtuneLegacyPDMarginSlack, true)
 	}
 	return nil
 }
@@ -512,9 +516,11 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 // pole of a zero-DC plant that the pole test certifies stable and that
 // leaves the loop phase to the plant: a P, or a legacy PD clamped short of
 // the requested margin at wc. A k·sᵐ high-pass plant leads up to 180° below
-// its poles, where no back-off helps, so only |S| gates it. A placed PD
-// crosses over at wc, so its short margin there is the loop's: it takes the
-// full gate, then back-off and the legacy rerun.
+// its poles, where no back-off helps: only |S| gates the P, and the PD
+// takes the gate with pidtuneLegacyPDMarginSlack off the margin, as an |S|
+// gate alone returned 44° at its crossover with |S| 1.9 (PS6S32). A placed
+// PD crosses over at wc, so its short margin there is the loop's: it takes
+// the full gate, then back-off and the legacy rerun.
 func (r *pidtuneRun) unshaped(pid *PID, wc float64) bool {
 	if r.src != pidtuneCrossZeroDC || r.plant.Dt != 0 || wc != r.wc || r.loop == nil {
 		return false
@@ -527,6 +533,10 @@ func (r *pidtuneRun) unshaped(pid *PID, wc float64) bool {
 	}
 	return false
 }
+
+// pidtuneLegacyPDMarginSlack lowers the margin an unshaped legacy PD keeps
+// at every crossover to pm − 1.5°.
+const pidtuneLegacyPDMarginSlack = 1
 
 // openStable returns whether the plant is stable, computed once.
 func (r *pidtuneRun) openStable() bool {

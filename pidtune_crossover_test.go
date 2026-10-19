@@ -271,11 +271,14 @@ func TestPidtunePoleFallbackContinuousStable(t *testing.T) {
 // poles, so a P design, or a PD clamped at its phase limit, at the pole
 // crossover keeps a margin under pm at some crossover whatever the back-off.
 // The full first-design gate turned these stable designs into errors
-// (EU24XW); MATLAB returns them, so they pass when stable with |S| ≤ 4.
-// Oracle: Kp = 1/|G(jwc)| and closed-loop roots from num/den, |S| of the
-// directly evaluated loop; over a seeded population every P and PD whose
-// first design (gain sign +1, as for every stable plant without a DC
-// sign) is oracle-stable with |S| < 3.5 is returned.
+// (EU24XW); MATLAB returns them, so a P passes when stable with |S| ≤ 4. A
+// PD must also keep 58.5° at every crossover (PS6S32): the PD here, Kp
+// 0.9304 Kd 48.63, kept 30.2°.
+// Oracle: Kp = 1/|G(jwc)| and closed-loop roots from num/den, |S| and
+// signed margins of the directly evaluated loop; over a seeded population
+// every P whose first design (gain sign +1, as for every stable plant
+// without a DC sign) is oracle-stable with |S| < 3.5, and every such PD
+// keeping 59.5° at every crossover, is returned.
 func TestPidtunePoleFallbackUnshapedKept(t *testing.T) {
 	evalAt := func(p Poly, w float64) complex128 {
 		v := complex(0, 0)
@@ -284,13 +287,24 @@ func TestPidtunePoleFallbackUnshapedKept(t *testing.T) {
 		}
 		return v
 	}
+	worst := func(pms []float64) float64 {
+		m := math.Inf(1)
+		for _, v := range pms {
+			m = math.Min(m, math.Abs(v))
+		}
+		return m
+	}
 	robust := func(name string, pid *PID, num, den Poly) {
 		t.Helper()
 		if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, 0); !ok || !stable {
 			t.Errorf("%s: %+v unstable", name, pid)
 		}
-		if _, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, 0, 0), 1e-9, 1e9); ms > 4.5 {
+		pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, num, den, 0, 0), 1e-9, 1e9)
+		if ms > 4.5 {
 			t.Errorf("%s: %+v |S| peak %.3g", name, pid, ms)
+		}
+		if pid.Kd != 0 && !(worst(pms) >= 58.5) {
+			t.Errorf("%s: %+v margins %v", name, pid, pms)
 		}
 	}
 	num, den := Poly{0.9108330442863755, 0, 0}, Poly{1, 3.6385316848945637, 2.197552090147012}
@@ -308,13 +322,11 @@ func TestPidtunePoleFallbackUnshapedKept(t *testing.T) {
 	}
 	robust("P", pid, num, den)
 	pid, err = Pidtune(p, PidtunePD, 0, nil)
-	if err != nil {
-		t.Fatalf("PD: %v", err)
+	if err == nil {
+		robust("PD", pid, num, den)
+	} else if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Errorf("PD: %v", err)
 	}
-	if math.Abs(pid.Kp-0.9304) > 1e-3 || math.Abs(pid.Kd-48.63) > 1e-2 {
-		t.Errorf("PD: %+v, want Kp 0.9304 Kd 48.63", pid)
-	}
-	robust("PD", pid, num, den)
 
 	rng := rand.New(rand.NewPCG(5, 9))
 	plants, kept := 0, 0
@@ -347,8 +359,8 @@ func TestPidtunePoleFallbackUnshapedKept(t *testing.T) {
 				t.Fatalf("%s: %v", name, ferr)
 			}
 			stable, ok := pidtuneOracleStable(t, first, num, den, 0, 0)
-			_, ms := pidtuneSignedMargins(pidtuneOracleLoop(first, num, den, 0, 0), 1e-9, 1e9)
-			if ok && stable && ms < 3.5 {
+			pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(first, num, den, 0, 0), 1e-9, 1e9)
+			if ok && stable && ms < 3.5 && (f == PidtuneP || worst(pms) >= 59.5) {
 				t.Errorf("%s: first design %+v stable, |S| %.3g; got %v", name, first, ms, err)
 			}
 		}
