@@ -42,7 +42,10 @@ const (
 // wc = 0 picks the crossover from the plant, capped at (180°−PM)/(2τ) for a
 // loop delay τ so the delay lag leaves room for the margin; a negative or
 // non-finite wc, or a phase margin outside (0, 180), returns
-// ErrInvalidArgument. The loop crossover and phase margin are placed using
+// ErrInvalidArgument, as does a plant whose frequency response is
+// numerically singular where Pidtune evaluates it (the error also wraps
+// ErrSingularTransform), as for a high-order discrete realization with
+// poles clustered near z = 1 that rounding scatters. The loop crossover and phase margin are placed using
 // the realized controller response: discrete plants use the discrete PID
 // terms, a discrete PID without filter uses a backward-Euler derivative to
 // stay causal, and a discrete derivative whose forward-Euler filter pole
@@ -110,6 +113,14 @@ const (
 // the stability screen's tolerance of the boundary. TunePID offers bounded search with
 // achieved-target evidence.
 func Pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
+	pid, err := pidtune(plant, pidType, wc, opts)
+	if errors.Is(err, ErrSingularTransform) && !errors.Is(err, ErrInvalidArgument) {
+		return nil, fmt.Errorf("%w: plant realization too ill-conditioned to evaluate: %w", err, ErrInvalidArgument)
+	}
+	return pid, err
+}
+
+func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOptions) (*PID, error) {
 	if err := requireFiniteSystem("Pidtune", plant); err != nil {
 		return nil, err
 	}
@@ -1441,6 +1452,7 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 // needs the gain the bandwidth gives, which a crossover capped by its roots
 // cannot reach, and a delay's lag at the capped crossover leaves a PDF
 // needing phase lag where the delay-capped bandwidth has a robust design.
+// A DC gain rounded to 0 on a pidtuneRoundedIntegrator plant is infinite.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	wc, src, err := plantCrossoverSource(plant)
 	return wc, src != pidtuneCrossGain, err
@@ -1455,7 +1467,7 @@ func plantCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {
 		return all.GainCrossFreqs[0], pidtuneCrossGain, nil
 	}
 	dc, err := plant.DCGain()
-	if err == nil && math.IsInf(dc.At(0, 0), 0) {
+	if err == nil && (math.IsInf(dc.At(0, 0), 0) || dc.At(0, 0) == 0 && pidtuneRoundedIntegrator(plant)) {
 		wc, err := pidtuneIntegratingCrossover(plant)
 		return wc, pidtuneCrossGain, err
 	}
@@ -1645,6 +1657,32 @@ func pidtuneDisplacedIntegrator(plant *System, poles []complex128, at complex128
 		return near
 	}
 	return 0
+}
+
+// pidtuneRoundedIntegrator reports whether a discrete plant whose DCGain is
+// 0 is an integrating plant: no zero at the integrator and a pole displaced
+// from z = 1 beyond pidtuneIntegratorCluster but within
+// pidtuneDisplacedIntegrator. Its true DC gain is infinite; an
+// ill-conditioned (z−1)·∏(z−pᵢ) realization rounds C(I−A)⁻¹B to 0, and the
+// pole fallback would take the displaced pole as the slowest, a crossover
+// ~1e-8 where (zI−A) is singular. A clustered integrator is already
+// excluded there.
+func pidtuneRoundedIntegrator(plant *System) bool {
+	if plant.Dt == 0 || pidtuneZeroAtIntegrator(plant) {
+		return false
+	}
+	model, err := finiteDimensionalModel(plant, "Pidtune")
+	if err != nil {
+		return false
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return false
+	}
+	if _, tol := pidtuneIntegratorCluster(plant, poles); tol > 0 {
+		return false
+	}
+	return pidtuneDisplacedIntegrator(plant, poles, 1) > 0
 }
 
 // pidtuneClusterSize returns the largest m such that the m roots nearest at

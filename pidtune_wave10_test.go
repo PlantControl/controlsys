@@ -544,3 +544,104 @@ func TestPidtuneBackoffStaysInBand(t *testing.T) {
 		}
 	}
 }
+
+// OBRXEO review: an ill-conditioned (z−1)·∏(z−pᵢ) realization can round
+// DCGain to 0 instead of ∞ while the integrator pole moves ~1e-9 off z = 1;
+// the zero-DC pole fallback took that pole as the slowest, wc ~5e-8, where
+// (zI−A) is singular, and every family failed "singular complex matrix".
+// Plants whose clustered poles near z = 1 rounding scatters by up to 1e-2,
+// some outside the unit circle, have a frequency response singular over
+// decades on arm64 (not amd64, whose rounding differs) and return
+// ErrInvalidArgument. Oracle: for a computed pole within
+// 1.5e-6 of z = 1 the crossover is half the slowest generated pole's
+// |ln p|/Dt, capped at 0.1π/Dt, to 5% (clustered poles round); designs stable by the exact Schur–Cohn
+// test; failures only ErrPIDTuningTargetUnattainable or ErrInvalidArgument.
+func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
+	num := Poly{-8.70643320022765e-16, 2.9186581655941266e-16, 1.3545850066477854e-16}
+	den := Poly{1, -5.609886783435264, 13.099973168748164, -16.29841103348229, 11.394314088807377, -4.243853507030152, 0.6578640663921657}
+	p := pidtuneBackoffPlant(t, num, den, 0.01, 0)
+	wc, err := plantCrossoverFreq(p)
+	if want := 0.5 * math.Log(1/0.9881300295446963) / 0.01; err != nil || math.Abs(wc-want) > 1e-3*want {
+		t.Errorf("crossover %g, %v; want %g", wc, err, want)
+	}
+	pidtuneCheckDesigns(t, "repro", p, num, den, 0.01, []PidtuneType{PidtuneP, PidtunePI, PidtunePID, PidtunePIDF})
+
+	scatteredNum := Poly{2.929235722501006e-16}
+	scatteredDen := Poly{1, -6.606300338477126, 18.93640658504921, -30.736756689954774, 30.87235729206568, -19.6289794353736, 7.706575104770322, -1.7061947478678148, 0.16289222978811124}
+	scattered := pidtuneBackoffPlant(t, scatteredNum, scatteredDen, 0.01, 0)
+	for _, f := range pidtuneAllTypes {
+		for _, w := range []float64{0, 1e-3} {
+			pid, err := Pidtune(scattered, f, w, nil)
+			switch {
+			case err == nil:
+				if !pidtuneExactSchur(pid, scatteredNum, scatteredDen, 0.01) {
+					t.Errorf("scattered %s wc=%g: %+v unstable", f, w, pid)
+				}
+			case errors.Is(err, ErrSingularTransform):
+				if !errors.Is(err, ErrInvalidArgument) {
+					t.Errorf("scattered %s wc=%g: %v, want ErrInvalidArgument", f, w, err)
+				}
+			case !errors.Is(err, ErrPIDTuningTargetUnattainable):
+				t.Errorf("scattered %s wc=%g: %v", f, w, err)
+			}
+		}
+	}
+
+	skipSlowUnderRace(t)
+	rng := rand.New(rand.NewPCG(11, 3))
+	kept, displaced := 0, 0
+	for range 300 {
+		dt := []float64{0.01, 0.1, 1}[rng.IntN(3)]
+		num, den := Poly{math.Pow(10, -16+4*rng.Float64())}, Poly{1, -1}
+		slow := math.Inf(1)
+		for range 5 + rng.IntN(4) {
+			a := math.Pow(10, -1+3*rng.Float64())
+			slow = math.Min(slow, a)
+			den = den.Mul(Poly{1, -math.Exp(-a * dt)})
+		}
+		for range rng.IntN(3) {
+			num = num.Mul(Poly{1, -(rng.Float64()*1.8 - 0.9)})
+		}
+		p := pidtuneBackoffPlant(t, num, den, dt, 0)
+		am, err := AllMargin(p)
+		if err != nil || len(am.GainCrossFreqs) > 0 {
+			continue
+		}
+		dc, err := p.DCGain()
+		if err != nil || dc.At(0, 0) != 0 {
+			continue
+		}
+		kept++
+		poles, err := p.Poles()
+		if err != nil {
+			t.Fatal(err)
+		}
+		near := math.Inf(1)
+		for _, r := range poles {
+			near = math.Min(near, cmplx.Abs(r-1))
+		}
+		name := fmt.Sprintf("%v/%v dt=%g", num, den, dt)
+		if near > 100*0x1p-52 && near <= 1.5e-6 {
+			displaced++
+			want := math.Min(0.5*slow, 0.1*math.Pi/dt)
+			if wc, err := plantCrossoverFreq(p); err != nil || math.Abs(wc-want) > 5e-2*want {
+				t.Errorf("%s: crossover %g, %v; want %g", name, wc, err, want)
+			}
+		}
+		for _, f := range pidtuneAllTypes {
+			pid, err := Pidtune(p, f, 0, nil)
+			if err != nil {
+				if !errors.Is(err, ErrPIDTuningTargetUnattainable) && !errors.Is(err, ErrInvalidArgument) {
+					t.Errorf("%s %s: %v", name, f, err)
+				}
+				continue
+			}
+			if !pidtuneExactSchur(pid, num, den, dt) {
+				t.Errorf("%s %s: %+v unstable", name, f, pid)
+			}
+		}
+	}
+	if kept < 60 || displaced < 30 {
+		t.Fatalf("sweep kept %d plants, %d displaced", kept, displaced)
+	}
+}
