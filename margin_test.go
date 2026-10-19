@@ -2657,3 +2657,60 @@ func TestAllMargin_DelayedOriginCluster(t *testing.T) {
 		}
 	}
 }
+
+// G7VBK5: beside an origin cluster s(s²+as+b), tiny b, the pole limit's
+// sample is infinite; its arg paired with the next sample, within 0.004° of
+// −180°, read as a phase crossover near 1e-8 rad/s with GM ≈ −290 dB. The
+// Horner loop L = N/D·e^{-jωτ} keeps Im L > 0 below 1 rad/s, so none exists
+// there, and each reported crossover must be one of L.
+func TestAllMargin_DelayedOriginClusterNoSpuriousPhaseCross(t *testing.T) {
+	cases := []struct {
+		num, den []float64
+		tau      float64
+	}{
+		{[]float64{0.0007680601879021135}, []float64{1, 0.14526746770457066, -6.116659802505411e-14, 0}, 2.106358704800862e-4},
+		{[]float64{-0.16814527317369996, 0.06334006921202485}, []float64{1, 0.22457264863551227, -2.1709815581231326e-13, 0}, 0.02804950234669555},
+	}
+	for i, c := range cases {
+		loop := func(w float64) complex128 {
+			s := complex(0, w)
+			return polyEval(c.num, s) / polyEval(c.den, s) * cmplx.Exp(complex(0, -w*c.tau))
+		}
+		for _, lw := range linspace(-13, 0, 2001) {
+			if l := loop(math.Pow(10, lw)); !(imag(l) > 0) {
+				t.Fatalf("case %d: oracle Im L(j1e%v) = %v", i, lw, l)
+			}
+		}
+		sys := makePlant(t, c.num, c.den)
+		if err := sys.SetInputDelay([]float64{c.tau}); err != nil {
+			t.Fatal(err)
+		}
+		check := func(name string, ws []float64) {
+			t.Helper()
+			for _, w := range ws {
+				if l := loop(w); w < 1 || math.Abs(phaseOffsetDeg(l)) > 1e-3 {
+					t.Errorf("case %d %s: phase crossover %v, oracle L = %v", i, name, w, l)
+				}
+			}
+		}
+		r, err := AllMargin(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("AllMargin", r.PhaseCrossFreqs)
+		for k, w := range r.PhaseCrossFreqs {
+			if gm := -20 * math.Log10(cmplx.Abs(loop(w))); math.Abs(r.GainMargins[k]-gm) > 1e-6*max(1, math.Abs(gm)) {
+				t.Errorf("case %d: GM %v at %v, oracle %v", i, r.GainMargins[k], w, gm)
+			}
+		}
+		eval, err := newSISOEval(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, phase, err := gridMarginCrossings(sys, eval, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("pole-limit grid", phase)
+	}
+}

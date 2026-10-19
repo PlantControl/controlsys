@@ -518,7 +518,7 @@ func gridMarginCrossings(sys *System, eval *sisoEval, withGain bool) (gain, phas
 	phaseDeg := make([]float64, len(omega))
 	for k, h := range resp {
 		magDB[k] = 20 * math.Log10(cmplx.Abs(h))
-		phaseDeg[k] = cmplx.Phase(h) * 180 / math.Pi
+		phaseDeg[k] = finitePhaseDeg(h)
 	}
 	if withGain {
 		for _, c := range findCrossings(omega, magDB, 0.0) {
@@ -532,13 +532,23 @@ func gridMarginCrossings(sys *System, eval *sisoEval, withGain bool) (gain, phas
 	}
 	for _, c := range phaseCrossings(omega, phaseDeg, -180.0) {
 		w := refineCrossing(omega[c.idx], omega[c.idx+1], func(w float64) float64 {
-			return phaseOffsetDeg(eval.at(w))
+			return wrapDegrees(finitePhaseDeg(-eval.at(w)))
 		})
 		if math.Abs(phaseOffsetDeg(eval.at(w))) <= 1 {
 			phase = append(phase, w)
 		}
 	}
 	return gain, phase, nil
+}
+
+// finitePhaseDeg is arg h in degrees, or NaN where h is infinite: the pole
+// limit's sample beside an origin cluster has no phase, and its arg ±45° or
+// ±135° paired with a neighbour within 180° of it reads as a crossing (G7VBK5).
+func finitePhaseDeg(h complex128) float64 {
+	if cmplx.IsInf(h) {
+		return math.NaN()
+	}
+	return cmplx.Phase(h) * 180 / math.Pi
 }
 
 // Margin returns the gain margin closest to 0 dB and the phase margin
