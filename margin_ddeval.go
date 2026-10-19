@@ -1,6 +1,9 @@
 package controlsys
 
-import "math"
+import (
+	"math"
+	"math/cmplx"
+)
 
 // dd is an unevaluated double-double sum hi + lo, |lo| ≤ ulp(hi)/2.
 type dd struct{ hi, lo float64 }
@@ -74,15 +77,29 @@ func (x ddComplex) complex128() complex128 { return complex(x.re.hi+x.re.lo, x.i
 // as next to a pole cluster k/(z+1)ⁿ split by coefficient rounding, where
 // |L| still crosses 1. ok is false at a pivot below 2⁻¹⁰⁰ of the scale.
 func ddSISOResponse(sys *System, pt frequencyPoint) (h complex128, ok bool) {
+	h, _, _, ok = ddSISOResponseNoise(sys, pt)
+	return h, ok
+}
+
+// ddSISOResponseNoise is ddSISOResponse that also returns the |L| below
+// which L is indistinguishable from zero: solve, for this solve's error,
+// 2⁻⁹⁰ of |D| + |q|·‖C‖‖x‖ with x = (pE+qA)⁻¹B, which a cancellation of C·x
+// beyond double-double leaves, as beside a zero cluster k·(z+1)⁴; and
+// coeffs, for an ulp of each entry of the realization, the first-order bound
+// eps·(|D| + |q|·(|C||x| + |y|ᵀ|B| + |y|ᵀ(|p||E| + |q||A|)|x|)), yᵀ = C(pE+qA)⁻¹,
+// as of C = num − D·den rounded when D ≠ 0. coeffs is NaN when the double
+// transposed solve for y fails.
+func ddSISOResponseNoise(sys *System, pt frequencyPoint) (h complex128, solve, coeffs float64, ok bool) {
 	n, _ := sys.A.Dims()
+	d := sys.D.At(0, 0)
 	if n == 0 {
-		return complex(sys.D.At(0, 0), 0), true
+		return complex(d, 0), 0x1p-90 * math.Abs(d), eps() * math.Abs(d), true
 	}
 	ar, br, cr := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
 	pr, pi, qr, qi := real(pt.p), imag(pt.p), real(pt.q), imag(pt.q)
 	m := make([]ddComplex, n*n)
 	x := make([]ddComplex, n)
-	var scale float64
+	var mScale float64
 	for i := range n {
 		for j := range n {
 			a := ar.Data[i*ar.Stride+j]
@@ -93,11 +110,17 @@ func ddSISOResponse(sys *System, pt frequencyPoint) (h complex128, ok bool) {
 				e = 1
 			}
 			m[i*n+j] = ddComplex{ddProd(pr, e).add(ddProd(qr, a)), ddProd(pi, e).add(ddProd(qi, a))}
-			scale = max(scale, m[i*n+j].abs1())
+			mScale = max(mScale, m[i*n+j].abs1())
 		}
 		x[i] = ddComplex{re: dd{br.Data[i*br.Stride], 0}}
 	}
-	tol := float64(n) * scale * 0x1p-100
+	mt := make([]complex128, n*n)
+	for i := range n {
+		for j := range n {
+			mt[j*n+i] = m[i*n+j].complex128()
+		}
+	}
+	tol := float64(n) * mScale * 0x1p-100
 	for k := range n {
 		piv, best := k, m[k*n+k].abs1()
 		for i := k + 1; i < n; i++ {
@@ -106,7 +129,7 @@ func ddSISOResponse(sys *System, pt frequencyPoint) (h complex128, ok bool) {
 			}
 		}
 		if !(best > tol) {
-			return 0, false
+			return 0, 0, 0, false
 		}
 		if piv != k {
 			for j := range n {
@@ -135,9 +158,41 @@ func ddSISOResponse(sys *System, pt frequencyPoint) (h complex128, ok bool) {
 		y = y.add(ddComplex{re: dd{cr.Data[i], 0}}.mul(x[i]))
 	}
 	q := ddComplex{dd{-qr, 0}, dd{-qi, 0}}
-	h = y.mul(q).complex128() + complex(sys.D.At(0, 0), 0)
-	if math.IsNaN(real(h)) || math.IsInf(real(h), 0) || math.IsNaN(imag(h)) || math.IsInf(imag(h), 0) {
-		return 0, false
+	h = y.mul(q).complex128() + complex(d, 0)
+	ap, aq := cmplx.Abs(pt.p), cmplx.Abs(pt.q)
+	var cNorm, xNorm float64
+	for i := range n {
+		xi := x[i].complex128()
+		cNorm += cr.Data[i] * cr.Data[i]
+		xNorm += real(xi)*real(xi) + imag(xi)*imag(xi)
 	}
-	return h, true
+	solve = 0x1p-90 * (aq*math.Sqrt(cNorm*xNorm) + math.Abs(d))
+	coeffs = math.NaN()
+	piv := make([]int, n)
+	if cLUFactor(mt, piv, n) {
+		yt := make([]complex128, n)
+		for i := range n {
+			yt[i] = complex(cr.Data[i], 0)
+		}
+		cLUSolve(mt, piv, yt, n, 1)
+		var sum float64
+		for i := range n {
+			yi := cmplx.Abs(yt[i])
+			sum += math.Abs(cr.Data[i])*cmplx.Abs(x[i].complex128()) + yi*math.Abs(br.Data[i*br.Stride])
+			for j := range n {
+				var e float64
+				if sys.E != nil {
+					e = sys.E.At(i, j)
+				} else if i == j {
+					e = 1
+				}
+				sum += yi * (ap*math.Abs(e) + aq*math.Abs(ar.Data[i*ar.Stride+j])) * cmplx.Abs(x[j].complex128())
+			}
+		}
+		coeffs = eps() * (aq*sum + math.Abs(d))
+	}
+	if math.IsNaN(real(h)) || math.IsInf(real(h), 0) || math.IsNaN(imag(h)) || math.IsInf(imag(h), 0) || math.IsNaN(solve) {
+		return 0, 0, 0, false
+	}
+	return h, solve, coeffs, true
 }

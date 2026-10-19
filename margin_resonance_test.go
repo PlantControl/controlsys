@@ -454,3 +454,25 @@ func TestAllMarginPhaseCrossBesideRealUnitPolePair(t *testing.T) {
 		}
 	}
 }
+
+// WSF2HP scanned beside each real pole next to z = 1 in double-double, and
+// slow modes at Δt = 0.05 put dozens there: AllMargin of order 150 took
+// minutes. The scan shares one grid across them and keeps the double solve
+// where the phase is ≥ 1e-2° from −180°.
+func TestAllMarginRealUnitPoleScanCost(t *testing.T) {
+	for _, n := range []int{60, 100} {
+		r, err := newRationalLoop(marginRandomLoop(t, n, sweepWeakRows, 0.05, false, false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, reals := r.resonancePoles(); len(reals) < 5 {
+			t.Fatalf("n=%d: %d real poles next to z = 1, want ≥ 5", n, len(reals))
+		}
+		if _, err := r.phaseCrossings(); err != nil {
+			t.Fatal(err)
+		}
+		if r.eval.ddSolves > 400 {
+			t.Errorf("n=%d: %d double-double solves, want ≤ 400", n, r.eval.ddSolves)
+		}
+	}
+}

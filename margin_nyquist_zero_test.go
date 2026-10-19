@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
 	"slices"
@@ -101,6 +102,82 @@ func TestAllMarginPhaseCrossNyquistZeroCluster(t *testing.T) {
 	if nearNyquist < 10 {
 		t.Errorf("only %d cases cross within 1e-3 of Nyquist", nearNyquist)
 	}
+}
+
+// 6OPXWW: beside an exact zero cluster at z = −1 the scan towards Nyquist
+// took a sign change of rounding residue, |L| ~ 1e-41, for a crossover, and
+// L(−1) of ~1 ulp of |D| for one at Nyquist. Oracle: the coefficients in big
+// floats, whose phase at the reported crossover tends to 0°, not −180°, and
+// the crossovers below 3 found as before.
+func TestAllMarginNyquistZeroClusterNoise(t *testing.T) {
+	cases := []struct {
+		num, den, want []float64
+	}{
+		{
+			[]float64{0.004446950175721477, 0.01778780070288591, 0.026681701054328863, 0.01778780070288591, 0.004446950175721477},
+			[]float64{1, 0.5924323257687443, 0.17033971248001745, 0.08044852775749614, -0.13270444245004534, -0.27271221810899804, -0.1506786024130224, 0.012149078195984445, 0.007692746757699009},
+			[]float64{0.55129690992, 1.61388467294, 2.67343541852},
+		},
+		{
+			[]float64{-0.004387008771532378, -0.01735277121673983, -0.025736271196440508, -0.016962263828791034, -0.004191755077557978},
+			[]float64{1, 0.04447989509354311, -0.9820837702600874, -0.033079139783047384, 0.2251477532922962},
+			nil,
+		},
+		{
+			[]float64{-0.6955939875900586, -1.3911879751801173, -0.6955939875900586},
+			[]float64{1, -0.20632506540049872, -0.12389966592884397},
+			nil,
+		},
+	}
+	for i, c := range cases {
+		for _, d := range []float64{1e-6, 1e-8} {
+			if p := phaseOffsetDeg(bigHornerBeforeNyquist(c.num, d) / bigHornerBeforeNyquist(c.den, d)); math.Abs(math.Abs(p)-180) > 2 {
+				t.Fatalf("case %d: oracle phase offset %g° at π−%g, want ±180°", i, p, d)
+			}
+		}
+		r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: 1}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := AllMargin(r.Sys)
+		if err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		var got []float64
+		for _, w := range res.PhaseCrossFreqs {
+			if w > 3 {
+				t.Errorf("case %d: crossover %.17g (GM %g dB), want none above 3", i, w, res.GainMargins[len(got)])
+			} else {
+				got = append(got, w)
+			}
+		}
+		ok := len(got) == len(c.want)
+		for k := 0; ok && k < len(got); k++ {
+			ok = math.Abs(got[k]-c.want[k]) <= 1e-9*c.want[k]
+		}
+		if !ok {
+			t.Errorf("case %d: θpc %v, want %v", i, res.PhaseCrossFreqs, c.want)
+		}
+	}
+}
+
+// bigHornerBeforeNyquist is bigHorner at θ = π − d with z = −1 + 2sin²(d/2)
+// + j·sin d, which keeps z + 1 to full relative precision.
+func bigHornerBeforeNyquist(p []float64, d float64) complex128 {
+	nf := func(x float64) *big.Float { return new(big.Float).SetPrec(300).SetFloat64(x) }
+	sh := math.Sin(d / 2)
+	zr := nf(-1)
+	zr.Add(zr, nf(2*sh*sh))
+	zi := nf(math.Sin(d))
+	re, im, t1, t2 := nf(0), nf(0), nf(0), nf(0)
+	for _, c := range p {
+		nr := nf(0).Sub(t1.Mul(re, zr), t2.Mul(im, zi))
+		im.Add(t1.Mul(re, zi), t2.Mul(im, zr))
+		re.Add(nr, nf(c))
+	}
+	r, _ := re.Float64()
+	i, _ := im.Float64()
+	return complex(r, i)
 }
 
 // L real negative at Nyquist is a crossover unless L is real on the whole

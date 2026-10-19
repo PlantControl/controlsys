@@ -98,6 +98,8 @@ type sisoEval struct {
 	// double solve's phase is off by up to ~1e-5°, beyond the crossing
 	// tolerance; see resonanceCrossings.
 	exact bool
+	// ddSolves counts double-double solves.
+	ddSolves int
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -127,6 +129,7 @@ func (e *sisoEval) at(w float64) complex128 {
 		h, ok := complex(0, 0), false
 		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) {
 			h, ok = ddSISOResponse(e.sys, pt)
+			e.ddSolves++
 		}
 		if !ok {
 			return e.fail(w, err)
@@ -144,6 +147,7 @@ func (e *sisoEval) exactAt(pt frequencyPoint) (complex128, bool) {
 	if !e.exact || e.sys.internalDelayCount() > 0 {
 		return 0, false
 	}
+	e.ddSolves++
 	return ddSISOResponse(e.sys, pt)
 }
 
@@ -195,6 +199,11 @@ const (
 	// walkClearance is the relative distance either side of a crossing found
 	// next to a numerically singular band at which f must still change sign.
 	walkClearance = 1e-3
+	// realPoleDDBelow is the |phase offset| in degrees below which the scan
+	// beside real poles next to z = 1 re-evaluates in double-double; the
+	// double solve's phase error there is at most ~1e-7° in the WSF2HP
+	// tests and ~1e-15° for high-order loops with many slow real poles.
+	realPoleDDBelow = 1e-2
 )
 
 func marginLoopDelay(sys *System) float64 {
@@ -1199,7 +1208,7 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	out := r.polish(cands, f, 1e-7, true)
 	pairs, realPoles := r.resonancePoles()
 	out = r.dropRefuted(out, realPoles, f)
-	out = r.mergeResonanceCrossings(out, r.resonanceCrossings(append(pairs, realPoles...), f, 1e-7), f)
+	out = r.mergeResonanceCrossings(out, r.resonanceCrossings(pairs, realPoles, f, 1e-7), f)
 	return r.nyquistPhaseCrossings(out, f, 1e-7), nil
 }
 
@@ -1210,8 +1219,14 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // the double solve's phase there is off by more than tol. It scans in
 // double-double towards Nyquist, halving the distance, and keeps each sign
 // change that is no ±180° wrap and refines to ulpTol; L at Nyquist is real,
-// a crossover when negative unless L is real below it too. A pole at Nyquist, where rounding makes sign
-// changes beside the cluster, skips the scan.
+// a crossover when negative unless L is real below it too. A scan crossing
+// with |L| within the solve noise of ddSISOResponseNoise is rounding residue,
+// as of a cluster k·(z+1)⁴ at θ ~ π − 1e-10, |L| ~ 1e-41, where L → +0; L at
+// Nyquist must also exceed the coefficient noise, as L(−1) of an ulp of |D|.
+// The scan does not test the latter: crossings beside a cluster with exact
+// coefficients lie at |L| ~ that bound. A pole at
+// Nyquist, where rounding makes sign changes beside the cluster, skips the
+// scan.
 func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
 	if !r.discrete() {
 		return ws
@@ -1240,6 +1255,16 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 		}
 		return v
 	}
+	aboveNoise := func(w float64, coeffs bool) bool {
+		if r.eval.sys.internalDelayCount() > 0 {
+			return true
+		}
+		h, solve, round, ok := ddSISOResponseNoise(r.eval.sys, r.eval.td.frequencyPoint(w))
+		if coeffs {
+			solve = max(solve, round)
+		}
+		return !ok || !(cmplx.Abs(h) <= solve)
+	}
 	out := slices.Clone(below)
 	a, fa := t, ft(t)
 	for gap := (wTop - t) / 2; gap > 0; gap /= 2 {
@@ -1253,13 +1278,13 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 		}
 		if !math.IsNaN(fa) && fa*fb < 0 && math.Abs(fa-fb) < 180 {
 			c := refineCrossing(a, b, ft)
-			if math.Abs(ft(c)) <= ulpTol(c, ft, tol, 1e-3) && (len(out) == 0 || c > out[len(out)-1]*(1+1e-9)) {
+			if math.Abs(ft(c)) <= ulpTol(c, ft, tol, 1e-3) && (len(out) == 0 || c > out[len(out)-1]*(1+1e-9)) && aboveNoise(c, false) {
 				out = append(out, c)
 			}
 		}
 		a, fa = b, fb
 	}
-	if len(below) < len(ws) || math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol {
+	if len(below) < len(ws) || math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol && aboveNoise(wTop, true) {
 		out = append(out, wTop)
 	}
 	return out
@@ -1434,23 +1459,35 @@ func (r *rationalLoop) resonancePoles() (pairs, reals []float64) {
 // jump of 180° or 360° makes a sign change, and pairs down to ζ ~ 1e-14 cross
 // within ulps of the pole (BYP4ZM). A bracket end bisected to |f| = 90, as
 // beside such a pair, is the clearance bound there.
-func (r *rationalLoop) resonanceCrossings(poles []float64, f func(float64) float64, tol float64) []float64 {
+func (r *rationalLoop) resonanceCrossings(pairs, reals []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
 		wTop = r.nyquist()
 	}
+	ddBelow := math.Inf(1)
 	ft := func(w float64) float64 {
-		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		var v float64
+		ok := false
+		if ddBelow < math.Inf(1) {
+			r.eval.exact = false
+			v, ok = tryEval(r.eval, func() float64 { return f(w) })
+			ok = ok && math.Abs(v) >= ddBelow
+		}
+		if !ok {
+			r.eval.exact = true
+			v, ok = tryEval(r.eval, func() float64 { return f(w) })
+		}
 		if !ok || math.Abs(v) >= 90 {
 			return math.NaN()
 		}
 		return v
 	}
-	r.eval.extended, r.eval.exact = true, true
+	r.eval.extended = true
 	defer func() { r.eval.extended, r.eval.exact = false, false }()
 	const perDecade = 20
 	var out []float64
-	for _, wp := range poles {
+	var grids [][]float64
+	for _, wp := range pairs {
 		var grid []float64
 		for i := 3 * perDecade; i > 0; i-- {
 			grid = append(grid, wp*math.Pow(10, -1-float64(i)/perDecade))
@@ -1464,9 +1501,32 @@ func (r *rationalLoop) resonanceCrossings(poles []float64, f func(float64) float
 			}
 		}
 		slices.Sort(grid)
+		grids = append(grids, grid)
+	}
+	if len(reals) > 0 {
+		lo, hi := slices.Min(reals)*1e-4, min(slices.Max(reals)*10, wTop)
+		var grid []float64
+		for i := 0; ; i++ {
+			w := lo * math.Pow(10, float64(i)/(2*perDecade))
+			if w >= hi {
+				break
+			}
+			grid = append(grid, w)
+		}
+		grids = append(grids, grid)
+	}
+	for k, grid := range grids {
+		if k == len(pairs) {
+			ddBelow = realPoleDDBelow
+		}
+		next := math.NaN()
+		if len(grid) > 0 {
+			next = ft(grid[0])
+		}
 		for i := 1; i < len(grid); i++ {
 			a, b := grid[i-1], grid[i]
-			fa, fb := ft(a), ft(b)
+			fa, fb := next, ft(b)
+			next = fb
 			if math.IsNaN(fa) == math.IsNaN(fb) {
 				if math.IsNaN(fa) || fa*fb > 0 {
 					continue
