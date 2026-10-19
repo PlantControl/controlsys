@@ -109,9 +109,27 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	eval.extended, eval.ddAllow = true, l.ddAllowed
 	if sys.IsContinuous() {
 		l.atS = eval.atComplex
+		l.at = l.axisAt
 	}
 	l.addPoles(poles)
 	return l, nil
+}
+
+// axisAt is eval.at with the double-double fallback also where the double
+// solve fails at a point the pole limit mistakes for a pole: within 1e-6 of
+// a crowd of poles at the origin poleSpacing skips them all, so at a
+// non-pole ω ~ 4e-7 next to a double integrator and a real pole at 1.3e-7
+// it returns +Inf without an error, and refine reported an axis root there.
+// At a true pole the fallback fails and +Inf stands.
+func (l *delayLoop) axisAt(w float64) complex128 {
+	v := l.eval.at(w)
+	if finite(v) || l.failed() || !l.ddAllowed(w) {
+		return v
+	}
+	if h, ok := l.eval.atComplex(complex(0, w), true); ok && finite(h) {
+		return h
+	}
+	return v
 }
 
 // ddAllowed reports whether the double-double fallback may evaluate L(jω):
