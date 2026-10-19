@@ -59,7 +59,7 @@ const (
 // that, with wc = 0, keeps the margin at every gain crossover and |S| ≤ 4.
 // Every gain takes one sign: that of the DC
 // gain for a stable plant, and for an integrating or unstable plant the
-// sign stabilization forces, else that of the high-frequency gain
+// sign stabilization forces, else that of the numerator term largest at wc
 // (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G); where the force
 // lapses or there is none, as for an ideal derivative large enough to flip
 // the closed-loop polynomial's leading coefficient or a stable plant with
@@ -485,14 +485,15 @@ const (
 	// its characteristic polynomial's leading coefficient has the sign of
 	// a; mirrored when that coefficient may flip.
 	pidtuneSignForced
-	// pidtuneSignGuessed: the high-frequency gain sign, or 1; no rule.
+	// pidtuneSignGuessed: the sign of N/a's term largest at wc, or 1; no
+	// rule.
 	pidtuneSignGuessed
 )
 
 // pidtuneGainSign returns the sign of every Pidtune gain: that of the DC
 // gain of a stable plant, else of N(0)/a for the minimal G = N/D with D's
-// leading coefficient a (N(1)/a in z) when it is forced, else of the
-// high-frequency gain. The closed-loop polynomial P = D·Dc + N·Nc of a
+// leading coefficient a (N(1)/a in z) when it is forced, else of c/a for
+// N's term c·sᵏ largest at |s| = wc (c·zᵏ largest at |z| = 1). The closed-loop polynomial P = D·Dc + N·Nc of a
 // stable loop keeps the sign of its leading coefficient on [0, ∞) (z ≥ 1),
 // where P(0) is D(0) + K·N(0) for P/PD and K·N(0) under integral action.
 // When that leading coefficient has the sign of a, as for every loop whose
@@ -555,16 +556,16 @@ func pidtuneForcedSign(plant *System, wc float64, integral bool) (float64, pidtu
 		}
 		return math.Copysign(1, n0*a), pidtuneSignForced
 	}
-	scale := 0.0
+	dom, scale := 0.0, 0.0
 	for i, c := range num {
-		scale = math.Max(scale, math.Abs(c)*math.Pow(x, float64(len(num)-1-i)))
-	}
-	for i, c := range num {
-		if math.Abs(c)*math.Pow(x, float64(len(num)-1-i)) > 1e3*0x1p-52*scale {
-			return math.Copysign(1, c) * a, pidtuneSignGuessed
+		if v := math.Abs(c) * math.Pow(x, float64(len(num)-1-i)); v > scale {
+			dom, scale = c, v
 		}
 	}
-	return 1, pidtuneSignGuessed
+	if !finitePID(scale) || scale == 0 {
+		return 1, pidtuneSignGuessed
+	}
+	return math.Copysign(1, dom) * a, pidtuneSignGuessed
 }
 
 // pidtuneNearIntegrator returns whether plant has more poles than zeros
