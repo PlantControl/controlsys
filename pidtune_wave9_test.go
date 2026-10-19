@@ -272,6 +272,25 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 	}
 }
 
+// Wave 11 merge: next to an integrator displaced 1.3e-7 inside z = 1 (case
+// 0) FreqResponse at DC is finite while DCGain is +Inf, so pidTuningDCSign
+// took a DC sign and sampled 3 decades below wc, where the loop response
+// fails, and every family errored. Case 1's pole lies 3.4e-5 outside z = 1.
+// Oracle: exact Schur–Cohn test of every design.
+func TestPidtuneDisplacedIntegratorDCSign(t *testing.T) {
+	for _, c := range []struct {
+		num, den Poly
+		dt       float64
+		want     []PidtuneType
+	}{
+		{Poly{2.761969998249568e-16, 2.6332895798497864e-16, 6.196985260193668e-17}, Poly{1, -5.388323209156541, 12.045405202918547, -14.292531743733242, 9.488502158799133, -3.339413745774066, 0.486361336946173}, 0.01, []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF}},
+		{Poly{1.8748015424080903e-16}, Poly{1, -6.656527066165689, 18.974082402962605, -30.020939359334676, 28.473509438245436, -16.187809823253666, 5.1075991528389695, -0.6899147452929796}, 0.1, []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePID, PidtunePIDF}},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
+		pidtuneCheckDesigns(t, fmt.Sprintf("%v/%v", c.num, c.den), p, c.num, c.den, c.dt, c.want)
+	}
+}
+
 // SJ5QTW/TA526O review: unstable plants with a zero near the integrator keep
 // the -3 dB bandwidth crossover, where the PDF lag floor taken when only the
 // mirrored sign lagged gave PDF Kp −1.8e9 whose closed loop has a root near

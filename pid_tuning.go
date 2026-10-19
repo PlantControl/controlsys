@@ -226,17 +226,24 @@ func (*pidNonfiniteResponse) Unwrap() error { return ErrInvalidArgument }
 const pidTuningMaxSensitivity = 4
 
 // pidTuningDCSign returns the sign of the DC gain of a stable plant, or 0
-// when the plant is not known to be stable or its DC gain is zero relative
-// to the peak of |G| sampled over six decades around wc.
+// when the plant is not known to be stable, its DCGain is infinite, as for
+// an integrator displaced inside the unit circle, or its DC gain is zero
+// relative to the peak of |G| sampled over six decades around wc. A
+// frequency response at DC is no substitute: next to such an integrator it
+// can be finite, and the samples below wc then fail.
 func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) float64 {
 	if stable, err := plant.IsStable(); err != nil || !stable {
 		return 0
 	}
-	dc, err := evalPlantAt(plant, 0)
-	if err != nil || !pidFiniteComplex(dc) || math.Abs(imag(dc)) > 1e-9*cmplx.Abs(dc) {
+	g, err := plant.DCGain()
+	if err != nil {
 		return 0
 	}
-	peak := math.Abs(real(dc))
+	dc := g.At(0, 0)
+	if !finitePID(dc) {
+		return 0
+	}
+	peak := math.Abs(dc)
 	for k := -3; k <= 3; k++ {
 		w := wc * math.Pow(10, float64(k))
 		if plant.Dt > 0 && w >= math.Pi/plant.Dt {
@@ -246,10 +253,10 @@ func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) flo
 			peak = math.Max(peak, g)
 		}
 	}
-	if math.Abs(real(dc)) <= 1e3*0x1p-52*peak {
+	if math.Abs(dc) <= 1e3*0x1p-52*peak {
 		return 0
 	}
-	return math.Copysign(1, real(dc))
+	return math.Copysign(1, dc)
 }
 
 // pidStabilityScreen certifies closed-loop stability of PID candidates on a
