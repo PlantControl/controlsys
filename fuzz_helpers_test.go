@@ -466,10 +466,11 @@ func fzRat(x float64) *big.Rat {
 // fzCharPolyExact returns det(λI − A) exactly, descending, for the n×n
 // row-major float64 matrix a (Faddeev–LeVerrier over big.Rat).
 func fzCharPolyExact(a []float64, n int) []*big.Rat {
-	A := make([]*big.Rat, n*n)
-	for i, x := range a {
-		A[i] = fzRat(x)
-	}
+	return fzCharPolyRat(fzRatPoly(a), n)
+}
+
+// fzCharPolyRat is fzCharPolyExact for a rational matrix.
+func fzCharPolyRat(A []*big.Rat, n int) []*big.Rat {
 	c := make([]*big.Rat, n+1)
 	c[0] = big.NewRat(1, 1)
 	M := make([]*big.Rat, n*n)
