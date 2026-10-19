@@ -134,3 +134,30 @@ func TestPIDTuningIntegralZeroSign(t *testing.T) {
 		t.Errorf("I Ki 0.9 on zero +1e-10: IsStable %v %v, want true", stable, err)
 	}
 }
+
+func TestPIDTuningIntegralZeroRHPInsideBand(t *testing.T) {
+	plant := makePlant(t, Poly{1, -5e-11}, Poly{1, 1, 0.25})
+	if z, ok := pidTuningIntegralZero(plant, PidtunePI); ok {
+		t.Errorf("zero +5e-11: blocked at %g", z)
+	}
+	for _, n := range []Poly{{1, 0}, {2, 3, 0}} {
+		if _, ok := pidTuningIntegralZero(makePlant(t, n, Poly{1, 3, 3, 1}), PidtunePI); !ok {
+			t.Errorf("num %v: zero at 0 not blocked", n)
+		}
+	}
+	a := Poly{1, 1, 0.25, 0}.Add(Poly{-0.2499, 0.2499 * 5e-11})
+	if len(a) != 4 || a[0] <= 0 || a[1] <= 0 || a[2] <= 0 || a[3] <= 0 || a[1]*a[2] <= a[0]*a[3] {
+		t.Fatalf("I Ki -0.2499: characteristic %v not Hurwitz", a)
+	}
+	cs, err := (&PID{Ki: -0.2499}).System()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop, err := Feedback(plant, cs, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stable, err := loop.IsStable(); err != nil || !stable {
+		t.Errorf("I Ki -0.2499 on zero +5e-11: IsStable %v %v, want true", stable, err)
+	}
+}
