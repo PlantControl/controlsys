@@ -5,6 +5,8 @@ import (
 	"math/cmplx"
 	"slices"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/lapack"
 )
 
 // FuzzPoles: Poles of a delay-free model match the intended eigenvalues by
@@ -28,7 +30,7 @@ func FuzzPoles(f *testing.F) {
 		if !slices.Equal(dpoles, poles) {
 			t.Fatalf("Poles with I/O delays = %v, delay-free %v\n%s", dpoles, poles, s)
 		}
-		r := s.EigErr()
+		r := s.EigErr() * fzBalanceCond(s.A, s.N)
 		comp, wantComp, msg := fzMatchEig(poles, s.Eig, r)
 		if msg != "" {
 			t.Fatalf("Poles = %v: %s\n%s", poles, msg, s)
@@ -48,6 +50,23 @@ func FuzzPoles(f *testing.F) {
 			fzCheckDamp(t, s, i, d, comp[i], wantComp, r)
 		}
 	})
+}
+
+// fzBalanceCond is κ(D) of the LAPACK (dgebal) balancing A → D⁻¹AD that
+// eig, MATLAB pole included, applies first: the eigensolver's backward
+// error is small relative to the balanced matrix, so in A's coordinates it
+// can grow by κ(D).
+func fzBalanceCond(a []float64, n int) float64 {
+	if n == 0 {
+		return 1
+	}
+	sc := make([]float64, n)
+	ilo, ihi := impl.Dgebal(lapack.PermuteScale, n, slices.Clone(a), n, sc)
+	lo, hi := math.Inf(1), 0.0
+	for _, d := range sc[ilo : ihi+1] {
+		lo, hi = math.Min(lo, d), math.Max(hi, d)
+	}
+	return math.Max(1, hi/lo)
 }
 
 // fzCheckDamp bounds Damp entry d by the intended values of its Bauer–Fike
@@ -102,7 +121,8 @@ func fzCheckDamp(t *testing.T, s *fzSpec, i int, d DampInfo, comp int, wantComp 
 
 // fzPolesSeeds: the IsStable regressions plus integrators (exact and
 // rotated), a discrete model with poles near z = 0 and near the branch cut,
-// heavy damping, high Dt aliasing and repeated poles.
+// heavy damping, high Dt aliasing, repeated poles, and a z = 0 cluster
+// whose rows dgebal scales by 2⁻²¹ (eig error 5e-13, needs fzBalanceCond).
 func fzPolesSeeds() []fzSeed {
 	off := fzSeed{In: fzNoDelay, Out: fzNoDelay, IO: fzNoDelay, Tau: fzNoDelay, Shear: -10, Rot: 0.37}
 	with := func(f func(*fzSeed)) fzSeed {
@@ -124,5 +144,9 @@ func fzPolesSeeds() []fzSeed {
 		}),
 		with(func(s *fzSeed) { s.N, s.Mag, s.Damp = 6, [3]float64{0, 0, 0}, [3]float64{4, 4, 4} }),
 		with(func(s *fzSeed) { s.N, s.Mag, s.Damp, s.Shear = 4, [3]float64{3.5, -2}, [3]float64{-13, 0.3}, -1 }),
+		with(func(s *fzSeed) {
+			s.Discrete, s.LogDt, s.N, s.DScal = true, 1.5, 5, 0
+			s.Mag, s.Damp, s.Shear = [3]float64{-79.2, 0.5, 0}, [3]float64{3, 1.9, 0}, -1.25
+		}),
 	)
 }

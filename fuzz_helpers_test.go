@@ -1047,9 +1047,9 @@ func fzTrimRat(c []*big.Rat) []*big.Rat {
 func fzLimitAt(num, den []*big.Rat, x0 *big.Rat) float64 {
 	low := func(c []*big.Rat) (int, *big.Rat) {
 		a := fzTaylorShift(c, x0)
-		for k := len(a) - 1; k >= 0; k-- {
-			if a[k].Sign() != 0 {
-				return len(a) - 1 - k, a[k]
+		for k, v := range slices.Backward(a) {
+			if v.Sign() != 0 {
+				return len(a) - 1 - k, v
 			}
 		}
 		return -1, nil
