@@ -109,9 +109,27 @@ func delayLoopFromSystem(sys *System, context string) (*delayLoop, error) {
 	eval.extended, eval.ddAllow = true, l.ddAllowed
 	if sys.IsContinuous() {
 		l.atS = eval.atComplex
+		l.at = l.axisAt
 	}
 	l.addPoles(poles)
 	return l, nil
+}
+
+// axisAt is eval.at with the double-double fallback also where the double
+// solve fails at a point the pole limit mistakes for a pole: within 1e-6 of
+// a crowd of poles at the origin poleSpacing skips them all, so at a
+// non-pole ω ~ 4e-7 next to a double integrator and a real pole at 1.3e-7
+// it returns +Inf without an error, and refine reported an axis root there.
+// At a true pole the fallback fails and +Inf stands.
+func (l *delayLoop) axisAt(w float64) complex128 {
+	v := l.eval.at(w)
+	if finite(v) || l.failed() || !l.ddAllowed(w) {
+		return v
+	}
+	if h, ok := l.eval.atComplex(complex(0, w), true); ok && finite(h) {
+		return h
+	}
+	return v
 }
 
 // ddAllowed reports whether the double-double fallback may evaluate L(jω):
@@ -1548,8 +1566,12 @@ func (l *delayLoop) buildClusters(ws []float64, required []bool, dd bool) ([]axi
 	return axis, len(axis) > 0
 }
 
-// formCluster finds the smallest k such that the k poles nearest to jw0
-// fit a disk whose circle verifies.
+// formCluster finds the smallest k, or with dd the largest, such that the
+// k poles nearest to jw0 fit a disk whose circle verifies. Every verified
+// circle certifies its disk; dd circles verify far tighter, as within 1e-7
+// of an integrator triple with a real pole at 4e-10, and the walk from such
+// a circle crosses the band out to the next pole, 5e-6, where the reach of
+// the double model of 1+L falls to ~1e-12 and the walk exceeds its budget.
 func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 	c := complex(0, w0)
 	ds := make([]float64, len(l.poles))
@@ -1558,7 +1580,11 @@ func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 	}
 	slices.Sort(ds)
 	scale := max(1, w0)
-	for k := 1; k <= len(ds); k++ {
+	for i := range ds {
+		k := i + 1
+		if dd {
+			k = len(ds) - i
+		}
 		dn := math.Inf(1)
 		if k < len(ds) {
 			dn = ds[k]
@@ -1567,9 +1593,6 @@ func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 		hi := min(dn/clusterMargin, scale)
 		if w0 > 0 {
 			hi = min(hi, w0/clusterMargin)
-		}
-		if lo > scale {
-			break
 		}
 		if !(lo <= hi) {
 			continue

@@ -226,17 +226,24 @@ func (*pidNonfiniteResponse) Unwrap() error { return ErrInvalidArgument }
 const pidTuningMaxSensitivity = 4
 
 // pidTuningDCSign returns the sign of the DC gain of a stable plant, or 0
-// when the plant is not known to be stable or its DC gain is zero relative
-// to the peak of |G| sampled over six decades around wc.
+// when the plant is not known to be stable, its DCGain is infinite, as for
+// an integrator displaced inside the unit circle, or its DC gain is zero
+// relative to the peak of |G| sampled over six decades around wc. A
+// frequency response at DC is no substitute: next to such an integrator it
+// can be finite, and the samples below wc then fail.
 func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) float64 {
 	if stable, err := plant.IsStable(); err != nil || !stable {
 		return 0
 	}
-	dc, err := evalPlantAt(plant, 0)
-	if err != nil || !pidFiniteComplex(dc) || math.Abs(imag(dc)) > 1e-9*cmplx.Abs(dc) {
+	g, err := plant.DCGain()
+	if err != nil {
 		return 0
 	}
-	peak := math.Abs(real(dc))
+	dc := g.At(0, 0)
+	if !finitePID(dc) {
+		return 0
+	}
+	peak := math.Abs(dc)
 	for k := -3; k <= 3; k++ {
 		w := wc * math.Pow(10, float64(k))
 		if plant.Dt > 0 && w >= math.Pi/plant.Dt {
@@ -246,10 +253,10 @@ func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) flo
 			peak = math.Max(peak, g)
 		}
 	}
-	if math.Abs(real(dc)) <= 1e3*0x1p-52*peak {
+	if math.Abs(dc) <= 1e3*0x1p-52*peak {
 		return 0
 	}
-	return math.Copysign(1, real(dc))
+	return math.Copysign(1, dc)
 }
 
 // pidStabilityScreen certifies closed-loop stability of PID candidates on a
@@ -789,9 +796,9 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // passing that failed.
 //
 // A stable delay-free continuous plant with a real zero within the stability
-// tolerance of s = 0 leaves every I, PI or PIDF loop a closed-loop pole there
-// (pidTuningIntegralZero), so those families are searched only at the
-// requested or default crossover and fail with a warning naming the zero.
+// tolerance left of s = 0 leaves every I, PI, PID or PIDF loop a closed-loop
+// pole there (pidTuningIntegralZero), so those families are searched only at
+// the requested or default crossover and fail with a warning naming the zero.
 //
 // An unattainable target returns a *PIDTuningError (wrapping
 // ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
@@ -2479,7 +2486,7 @@ func pidTuningIdealStable(transfer *TransferFuncResult, c *PID2) (bool, error) {
 		return false, err
 	}
 	for _, pole := range poles {
-		if !pidFiniteComplex(pole) || c.Dt == 0 && real(pole) >= 0 || c.Dt > 0 && cmplx.Abs(pole) >= 1 {
+		if !pidFiniteComplex(pole) || !poleInsideStabilityBoundary(pole, c.Dt == 0, poleStabilityTolerance(pole)) {
 			return false, nil
 		}
 	}
@@ -2634,19 +2641,17 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 	return slices.Compact(out)
 }
 
-// pidTuningModes returns the plant poles and zeros σ+jω₀ with |σ| < 0.05·ω₀,
-// discrete ones mapped by s = ln(z)/dt, for the |S| grid; nil when unknown.
-// Better damped modes never cut its 1% step.
 // pidTuningIntegralZero returns a real zero z of a stable, strictly proper,
-// delay-free continuous plant with |z| <= poleStabilityTolerance(z), when
-// family is I, PI or PIDF. Under C = Nc/(s·Dc), Dc(s) = 1 or 1+Tf·s, the
+// delay-free continuous plant with −poleStabilityTolerance(z) <= z <= 0, when
+// family has an integral term. Under C = Nc/(s·Dc), Dc(s) = 1 or 1+Tf·s, the
 // characteristic s·Dc·Dp + Nc·Np, Dp monic, has a positive leading
-// coefficient and equals Ki·Np(0) at 0 and z·Dc(z)·Dp(z) ≤ 0 at z, so it
-// has a real root in [z, 0] when Ki takes the DC gain's sign and in (0, ∞)
-// otherwise: no such loop passes IsStable. PID's ideal-derivative screen is
-// not this pole test, so PID is left to the search.
+// coefficient (for ideal PID 1+Kd·CB, which the screen requires positive)
+// and equals Ki·Np(0) at 0 and z·Dc(z)·Dp(z) ≤ 0 at z, so it has a real root
+// in [z, 0] when Ki takes the DC gain's sign and in (0, ∞) otherwise: no such
+// loop passes IsStable. A zero just right of 0 gives no such sign change: an
+// I loop on (1e-10−s)/(s+1)² with Ki = 0.9 has its slow pole near −9e-10.
 func pidTuningIntegralZero(plant *System, family PidtuneType) (float64, bool) {
-	if _, hasI, hasD, filtered, ok := pidTuningTerms(family); !ok || !hasI || hasD && !filtered {
+	if _, hasI, _, _, ok := pidTuningTerms(family); !ok || !hasI {
 		return 0, false
 	}
 	if plant.Dt != 0 || plant.HasDelay() || plant.E != nil || plant.D.At(0, 0) != 0 {
@@ -2660,13 +2665,16 @@ func pidTuningIntegralZero(plant *System, family PidtuneType) (float64, bool) {
 		return 0, false
 	}
 	for _, z := range zeros {
-		if imag(z) == 0 && math.Abs(real(z)) <= poleStabilityTolerance(z) {
+		if imag(z) == 0 && real(z) <= 0 && -real(z) <= poleStabilityTolerance(z) {
 			return real(z), true
 		}
 	}
 	return 0, false
 }
 
+// pidTuningModes returns the plant poles and zeros σ+jω₀ with |σ| < 0.05·ω₀,
+// discrete ones mapped by s = ln(z)/dt, for the |S| grid; nil when unknown.
+// Better damped modes never cut its 1% step.
 func pidTuningModes(plant *System) []complex128 {
 	var modes []complex128
 	poles, err := plant.Poles()

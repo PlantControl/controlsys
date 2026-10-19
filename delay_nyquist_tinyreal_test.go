@@ -7,9 +7,9 @@ import (
 
 // TestDelayNyquistTinyRealPolesAtOrigin: den = s^m·q(s) with real roots of q
 // within ~1e-6 of the origin, off the axis, and one more pole near 1e-2 (RHP
-// in cases 0-4 but 3, where two are). Neither the solve nor the
-// double-double fallback evaluates L within ~1e-5, so indent fails and the
-// cluster at the origin must enclose the tiny poles; formCluster's three
+// in cases 0-4 but 3, where two are). The solve fails within ~1e-5 and
+// indent meets the tiny poles within its decade, so the cluster at the
+// origin must enclose them; formCluster's three
 // trial radii per pole count all fell outside the band where |L| dominates
 // without enclosing a zero of L (IsStable, HinfNorm, DiskMargin errored).
 // Oracles: argument principle on χ and a dense sweep of |T| and |S-1/2|.

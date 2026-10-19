@@ -466,10 +466,11 @@ func fzRat(x float64) *big.Rat {
 // fzCharPolyExact returns det(λI − A) exactly, descending, for the n×n
 // row-major float64 matrix a (Faddeev–LeVerrier over big.Rat).
 func fzCharPolyExact(a []float64, n int) []*big.Rat {
-	A := make([]*big.Rat, n*n)
-	for i, x := range a {
-		A[i] = fzRat(x)
-	}
+	return fzCharPolyRat(fzRatPoly(a), n)
+}
+
+// fzCharPolyRat is fzCharPolyExact for a rational matrix.
+func fzCharPolyRat(A []*big.Rat, n int) []*big.Rat {
 	c := make([]*big.Rat, n+1)
 	c[0] = big.NewRat(1, 1)
 	M := make([]*big.Rat, n*n)
@@ -935,5 +936,266 @@ func TestFzDecodeEigErr(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// fzPencilRat returns the row-major (n+p)×(n+m) Rosenbrock pencil
+// [xI−A, −B; C, D] of the float64 model at rational x.
+func fzPencilRat(n, m, p int, a, b, c, d []float64, x *big.Rat) []*big.Rat {
+	w := n + m
+	P := make([]*big.Rat, (n+p)*w)
+	for i := range n {
+		for j := range n {
+			v := new(big.Rat).Neg(fzRat(a[i*n+j]))
+			if i == j {
+				v.Add(v, x)
+			}
+			P[i*w+j] = v
+		}
+		for j := range m {
+			P[i*w+n+j] = new(big.Rat).Neg(fzRat(b[i*m+j]))
+		}
+	}
+	for i := range p {
+		for j := range n {
+			P[(n+i)*w+j] = fzRat(c[i*n+j])
+		}
+		for j := range m {
+			P[(n+i)*w+n+j] = fzRat(d[i*m+j])
+		}
+	}
+	return P
+}
+
+// fzRatElim row-reduces a copy of the r×c rational matrix and returns its
+// rank and, when square, its determinant (else 0).
+func fzRatElim(a []*big.Rat, r, c int) (rank int, det *big.Rat) {
+	M := make([]*big.Rat, len(a))
+	for i, x := range a {
+		M[i] = new(big.Rat).Set(x)
+	}
+	det = big.NewRat(1, 1)
+	var t big.Rat
+	for col := 0; col < c && rank < r; col++ {
+		piv := -1
+		for i := rank; i < r; i++ {
+			if M[i*c+col].Sign() != 0 {
+				piv = i
+				break
+			}
+		}
+		if piv < 0 {
+			continue
+		}
+		if piv != rank {
+			for j := range c {
+				M[piv*c+j], M[rank*c+j] = M[rank*c+j], M[piv*c+j]
+			}
+			det.Neg(det)
+		}
+		pv := M[rank*c+col]
+		det.Mul(det, pv)
+		for i := rank + 1; i < r; i++ {
+			if M[i*c+col].Sign() == 0 {
+				continue
+			}
+			f := new(big.Rat).Quo(M[i*c+col], pv)
+			for j := col; j < c; j++ {
+				M[i*c+j].Sub(M[i*c+j], t.Mul(f, M[rank*c+j]))
+			}
+		}
+		rank++
+	}
+	if rank < r || r != c {
+		det.SetInt64(0)
+	}
+	return rank, det
+}
+
+// fzPencilDetRat returns det [sI−A, −B; C, D] exactly, descending of
+// length n+1, for a square (m = p) model: Newton interpolation of exact
+// determinants at s = 0..n. For SISO this is the numerator of
+// D + C(sI−A)⁻¹B over det(sI−A), cancelled factors included.
+func fzPencilDetRat(n, m int, a, b, c, d []float64) []*big.Rat {
+	y := make([]*big.Rat, n+1)
+	for k := range y {
+		_, y[k] = fzRatElim(fzPencilRat(n, m, m, a, b, c, d, big.NewRat(int64(k), 1)), n+m, n+m)
+	}
+	for j := 1; j <= n; j++ {
+		for k := n; k >= j; k-- {
+			y[k] = new(big.Rat).Quo(new(big.Rat).Sub(y[k], y[k-1]), big.NewRat(int64(j), 1))
+		}
+	}
+	poly := []*big.Rat{new(big.Rat).Set(y[n])}
+	for k := n - 1; k >= 0; k-- {
+		poly = fzRatPolyMul(poly, []*big.Rat{big.NewRat(1, 1), big.NewRat(-int64(k), 1)})
+		poly[len(poly)-1].Add(poly[len(poly)-1], y[k])
+	}
+	return poly
+}
+
+// fzTrimRat drops exactly zero leading coefficients.
+func fzTrimRat(c []*big.Rat) []*big.Rat {
+	for len(c) > 0 && c[0].Sign() == 0 {
+		c = c[1:]
+	}
+	return c
+}
+
+// fzLimitAt returns lim_{s→x0} num/den of two exact descending polynomials
+// as ±Inf, 0 or the rounded finite ratio; den must not vanish identically.
+func fzLimitAt(num, den []*big.Rat, x0 *big.Rat) float64 {
+	low := func(c []*big.Rat) (int, *big.Rat) {
+		a := fzTaylorShift(c, x0)
+		for k, v := range slices.Backward(a) {
+			if v.Sign() != 0 {
+				return len(a) - 1 - k, v
+			}
+		}
+		return -1, nil
+	}
+	on, nv := low(num)
+	od, dv := low(den)
+	switch {
+	case on < 0 || on > od:
+		return 0
+	case on < od:
+		return math.Inf(nv.Sign() * dv.Sign())
+	}
+	r, _ := new(big.Rat).Quo(nv, dv).Float64()
+	return r
+}
+
+// fzComplexPencil returns the row-major float pencil [zI−A, −βB; γC, γβD].
+func fzComplexPencil(s *fzSpec, z complex128, beta, gamma float64) []complex128 {
+	n, m, p := s.N, s.M, s.P
+	w := n + m
+	P := make([]complex128, (n+p)*w)
+	for i := range n {
+		for j := range n {
+			P[i*w+j] = complex(-s.A[i*n+j], 0)
+		}
+		P[i*w+i] += z
+		for j := range m {
+			P[i*w+n+j] = complex(-beta*s.B[i*m+j], 0)
+		}
+	}
+	for i := range p {
+		for j := range n {
+			P[(n+i)*w+j] = complex(gamma*s.C[i*n+j], 0)
+		}
+		for j := range m {
+			P[(n+i)*w+n+j] = complex(gamma*beta*s.D[i*m+j], 0)
+		}
+	}
+	return P
+}
+
+// fzSingularValues returns the min(r,c) singular values of the r×c
+// complex g, descending, via the real embedding [Re −Im; Im Re].
+func fzSingularValues(g []complex128, r, c int) []float64 {
+	e := mat.NewDense(2*r, 2*c, nil)
+	for i := range r {
+		for j := range c {
+			re, im := real(g[i*c+j]), imag(g[i*c+j])
+			e.Set(i, j, re)
+			e.Set(i, c+j, -im)
+			e.Set(r+i, j, im)
+			e.Set(r+i, c+j, re)
+		}
+	}
+	var svd mat.SVD
+	if !svd.Factorize(e, mat.SVDNone) {
+		return nil
+	}
+	v := svd.Values(nil)
+	out := make([]float64, min(r, c))
+	for k := range out {
+		out[k] = v[2*k]
+	}
+	return out
+}
+
+// fzMatchEig checks got against the intended eigenvalues by Bauer–Fike:
+// disks of radius r about want merge into connected components, every got
+// value lies in one and each component holds as many got as want values.
+// comp[i] is the component of got[i]; wantComp[j] that of want[j]. msg is
+// empty on success.
+func fzMatchEig(got, want []complex128, r float64) (comp, wantComp []int, msg string) {
+	wantComp = make([]int, len(want))
+	for i := range wantComp {
+		wantComp[i] = i
+	}
+	var find func(int) int
+	find = func(i int) int {
+		if wantComp[i] != i {
+			wantComp[i] = find(wantComp[i])
+		}
+		return wantComp[i]
+	}
+	for i := range want {
+		for j := i + 1; j < len(want); j++ {
+			if cmplx.Abs(want[i]-want[j]) <= 2*r {
+				wantComp[find(i)] = find(j)
+			}
+		}
+	}
+	count := map[int]int{}
+	for j := range want {
+		wantComp[j] = find(j)
+		count[wantComp[j]]++
+	}
+	comp = make([]int, len(got))
+	for i, g := range got {
+		comp[i] = -1
+		best := math.Inf(1)
+		for j, w := range want {
+			if d := cmplx.Abs(g - w); d <= r && d < best {
+				best, comp[i] = d, wantComp[j]
+			}
+		}
+		if comp[i] < 0 {
+			return nil, nil, fmt.Sprintf("%v is farther than %g from every intended eigenvalue", g, r)
+		}
+		count[comp[i]]--
+	}
+	for c, k := range count {
+		if k != 0 {
+			return nil, nil, fmt.Sprintf("cluster of %v: %d more intended than returned", want[c], k)
+		}
+	}
+	return comp, wantComp, ""
+}
+
+func TestFzPencilOracles(t *testing.T) {
+	a := []float64{0, 1, -6, -5}
+	b := []float64{0, 1}
+	c := []float64{3, 1}
+	got := fzPencilDetRat(2, 1, a, b, c, []float64{2})
+	for i, w := range []int64{2, 11, 15} {
+		if got[i].Cmp(big.NewRat(w, 1)) != 0 {
+			t.Errorf("pencil det[%d] = %v, want %d", i, got[i], w)
+		}
+	}
+	if r, _ := fzRatElim(fzPencilRat(2, 1, 1, a, b, c, []float64{0}, big.NewRat(-3, 1)), 3, 3); r != 2 {
+		t.Errorf("rank at the zero -3 of the D=0 pencil = %d, want 2", r)
+	}
+	num := fzPencilDetRat(1, 1, []float64{0}, []float64{1}, []float64{-2}, []float64{0})
+	if l := fzLimitAt(num, fzCharPolyExact([]float64{0}, 1), new(big.Rat)); !math.IsInf(l, -1) {
+		t.Errorf("limit of -2/s = %v, want -Inf", l)
+	}
+	if l := fzLimitAt(got, fzCharPolyExact(a, 2), new(big.Rat)); math.Abs(l-2.5) > 1e-15 {
+		t.Errorf("limit at 0 = %v, want 2.5", l)
+	}
+	sv := fzSingularValues([]complex128{2i, 0, 0, 3}, 2, 2)
+	if math.Abs(sv[0]-3) > 1e-14 || math.Abs(sv[1]-2) > 1e-14 {
+		t.Errorf("singular values %v, want [3 2]", sv)
+	}
+	want := []complex128{1, 1 + 1e-3, 5}
+	if _, _, msg := fzMatchEig([]complex128{1.0004, 1.0006, 5}, want, 1e-3); msg != "" {
+		t.Error(msg)
+	}
+	if _, _, msg := fzMatchEig([]complex128{1, 5, 5}, want, 1e-4); msg == "" {
+		t.Error("cluster count mismatch not detected")
 	}
 }

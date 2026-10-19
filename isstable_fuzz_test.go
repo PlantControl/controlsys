@@ -22,8 +22,17 @@ func FuzzIsStableDelayFree(f *testing.F) {
 		dst, err := dsys.IsStable()
 		fzContract(t, s, "IsStable(delayed)", dst || err == nil, err)
 		fzErr(t, s, "IsStable(delayed)", err)
+		if dst != st {
+			t.Fatalf("IsStable with I/O delays = %v, delay-free %v\n%s", dst, st, s)
+		}
 		if !s.Decidable() {
-			fzSkip(t, "pole within error band of stability boundary")
+			if s.N > 0 && fzSurelyNotStable(s) {
+				if st {
+					t.Fatalf("IsStable = true, but the exact float64 A has a root on or beyond the library's boundary band\n%s", s)
+				}
+				return
+			}
+			fzSkip(t, "verdict unresolvable: pole within error band of stability boundary")
 		}
 		want := s.Unstable() == 0
 		if s.N > 0 {
@@ -45,10 +54,31 @@ func FuzzIsStableDelayFree(f *testing.F) {
 		if st != want {
 			t.Fatalf("IsStable = %v, want %v\n%s", st, want, s)
 		}
-		if dst != st {
-			t.Fatalf("IsStable with I/O delays = %v, delay-free %v\n%s", dst, st, s)
-		}
 	})
+}
+
+// fzSurelyNotStable reports whether the exact float64 A has a root that any
+// backward-stable eigensolver must place on or outside the library's
+// 1e-10·max(1,|p|) boundary band: a root right of (outside) the line
+// (circle) shifted 1e-10 − r into the stable region, r = 2n·EigErr bounding
+// computed-vs-exact distance within a Bauer–Fike disk cluster. A Hurwitz
+// polynomial has a positive Routh column, so a degenerate table also means a
+// root on or beyond the line.
+func fzSurelyNotStable(s *fzSpec) bool {
+	const band = 1e-10
+	r := 2 * float64(s.N) * s.EigErr()
+	if r >= band/2 {
+		return false
+	}
+	cp := fzCharPolyExact(s.A, s.N)
+	var k int
+	var ok bool
+	if s.Discrete {
+		k, ok = fzSchurCohnOutside(cp, 1-band+r)
+	} else {
+		k, ok = fzRouthRight(cp, r-band)
+	}
+	return !ok || k > 0
 }
 
 // fzIsStableSeeds: regressions from ss_test.go / stabsep_test.go

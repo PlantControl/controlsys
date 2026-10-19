@@ -61,9 +61,8 @@ func newRealizationCopy(sys *System, n, m, p int) balancedRealization {
 // pencil entries are rounded: next to a lightly damped pole at distance d
 // the slow mode keeps only about ε/d relative accuracy. A pivot below
 // 1/refineCondition of the pencil scale flags such a point; refine
-// refactors it and, unless a working-precision correction shows the
-// solution already accurate, refines against the exact pencil with
-// pencilResidual.
+// refactors it and, unless the first correction against the exact pencil
+// (pencilResidual) shows the solution already accurate, refines with it.
 type balancedDense struct {
 	balancedRealization
 	lastA  []int // last structural nonzero column in each row of sÊ-Â
@@ -80,8 +79,8 @@ type balancedDense struct {
 // refineCondition is the error amplification, relative to ε, above which
 // the frequency solvers refine against the exact pencil: balancedDense
 // checks points whose smallest GEPP pivot is below 1/refineCondition of the
-// pencil scale, and both solvers refine when a working-precision correction
-// exceeds refineCondition·ε relative.
+// pencil scale, and both solvers refine when the first correction exceeds
+// refineCondition·ε relative.
 const refineCondition = 1e3
 
 func newBalancedDense(sys *System, n, m, p int) *balancedDense {
@@ -301,13 +300,7 @@ func (bd *balancedDense) refine() {
 		return
 	}
 	ik := crecip(kappa)
-	for j := range m {
-		pencilResidualPlain(r[j:], x[j:], m, bd.a, bd.e, n, bd.b[j:], m, n, pt.p, pt.q, kappa)
-	}
-	if bd.correctionBelow(r, ik, refineCondition*eps()) {
-		return
-	}
-	for range maxRefineSteps {
+	for step := range maxRefineSteps {
 		for j := range m {
 			pencilResidual(r[j:], x[j:], m, bd.a, bd.e, n, bd.b[j:], m, n, pt.p, pt.q, kappa)
 		}
@@ -319,33 +312,24 @@ func (bd *balancedDense) refine() {
 		cLUSolve(bd.pencil, bd.piv, r, n, m)
 		var dMax, xMax float64
 		for i, v := range r {
-			x[i] += v
 			dMax = max(dMax, cabs1(v))
+			xMax = max(xMax, cabs1(x[i]))
+		}
+		// A working-precision residual cannot make this check: its
+		// rounding, ε|M||x|, is the error being measured, and where it
+		// rounds to zero an inaccurate x would pass.
+		if step == 0 && dMax <= refineCondition*eps()*xMax {
+			return
+		}
+		xMax = 0
+		for i, v := range r {
+			x[i] += v
 			xMax = max(xMax, cabs1(x[i]))
 		}
 		if dMax <= refineStop*xMax {
 			return
 		}
 	}
-}
-
-// correctionBelow solves for the correction r/κ with refine's factors,
-// in place, and reports whether it is below tol relative to bd.x
-// componentwise in the max norm: GEPP's solution is then accurate and
-// refinement would not change it.
-func (bd *balancedDense) correctionBelow(r []complex128, ik complex128, tol float64) bool {
-	if ik != 1 {
-		for i := range r {
-			r[i] *= ik
-		}
-	}
-	cLUSolve(bd.pencil, bd.piv, r, bd.n, bd.m)
-	var dMax, xMax float64
-	for i, v := range r {
-		dMax = max(dMax, cabs1(v))
-		xMax = max(xMax, cabs1(bd.x[i]))
-	}
-	return dMax <= tol*xMax
 }
 
 // hessenbergSweep evaluates C(sI-A)^{-1}B + D over many frequencies after one
@@ -738,24 +722,6 @@ func pencilResidual(r, x []complex128, inc int, a, e []float64, ld int, b []floa
 		im.addScaled(-qr, axi)
 		im.addScaled(-qi, axr)
 		r[i*inc] = complex(re.value(), im.value())
-	}
-}
-
-// pencilResidualPlain is pencilResidual in working precision.
-func pencilResidualPlain(r, x []complex128, inc int, a, e []float64, ld int, b []float64, bInc, n int, p, q, kappa complex128) {
-	for i := range n {
-		var ax complex128
-		for k, av := range a[i*ld : i*ld+n] {
-			ax += complex(av, 0) * x[k*inc]
-		}
-		ex := x[i*inc]
-		if e != nil {
-			ex = 0
-			for k, ev := range e[i*ld : i*ld+n] {
-				ex += complex(ev, 0) * x[k*inc]
-			}
-		}
-		r[i*inc] = kappa*complex(b[i*bInc], 0) - p*ex - q*ax
 	}
 }
 

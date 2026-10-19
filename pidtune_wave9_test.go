@@ -215,8 +215,9 @@ func pidtuneRolloffUnstableCase(t *testing.T, num, den Poly, want []PidtuneType,
 // displaced integrator was taken as the slowest pole, giving wc ~1e-9 and
 // "zero or infinite gain" or "singular complex matrix" errors. Oracle: the
 // crossover is half the slowest generated pole's |ln p|/Dt, capped at
-// 0.1π/Dt (poles near one another round by up to 1e-3 relative); every
-// design stable by the exact Schur–Cohn test.
+// 0.1π/Dt, to 5% (clustered poles round, 3% on amd64); every
+// design stable by the exact Schur–Cohn test. Integrators displaced beyond
+// pidtuneClusterRadius(2, 1) are TestPidtuneRoundedZeroDCIntegrator's.
 func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(5, 8))
@@ -242,7 +243,6 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 		if err != nil || !math.IsInf(dc.At(0, 0), 0) {
 			continue
 		}
-		kept++
 		poles, err := p.Poles()
 		if err != nil {
 			t.Fatal(err)
@@ -251,13 +251,17 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 		for _, r := range poles {
 			near = math.Min(near, cmplx.Abs(r-1))
 		}
+		if near > pidtuneClusterRadius(2, 1) {
+			continue
+		}
+		kept++
 		if near > 100*0x1p-52 {
 			displaced++
 		}
 		name := fmt.Sprintf("%v/%v dt=%g", num, den, dt)
 		want := math.Min(0.5*slow, 0.1*math.Pi/dt)
 		wc, err := plantCrossoverFreq(p)
-		if err != nil || math.Abs(wc-want) > 1e-2*want {
+		if err != nil || math.Abs(wc-want) > 5e-2*want {
 			t.Errorf("%s: crossover %g, %v; want %g", name, wc, err, want)
 			continue
 		}
@@ -265,6 +269,25 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 	}
 	if kept < 20 || displaced < 10 {
 		t.Fatalf("sweep kept %d plants, %d displaced", kept, displaced)
+	}
+}
+
+// Wave 11 merge: next to an integrator displaced 1.3e-7 inside z = 1 (case
+// 0) FreqResponse at DC is finite while DCGain is +Inf, so pidTuningDCSign
+// took a DC sign and sampled 3 decades below wc, where the loop response
+// fails, and every family errored. Case 1's pole lies 3.4e-5 outside z = 1.
+// Oracle: exact Schur–Cohn test of every design.
+func TestPidtuneDisplacedIntegratorDCSign(t *testing.T) {
+	for _, c := range []struct {
+		num, den Poly
+		dt       float64
+		want     []PidtuneType
+	}{
+		{Poly{2.761969998249568e-16, 2.6332895798497864e-16, 6.196985260193668e-17}, Poly{1, -5.388323209156541, 12.045405202918547, -14.292531743733242, 9.488502158799133, -3.339413745774066, 0.486361336946173}, 0.01, []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF}},
+		{Poly{1.8748015424080903e-16}, Poly{1, -6.656527066165689, 18.974082402962605, -30.020939359334676, 28.473509438245436, -16.187809823253666, 5.1075991528389695, -0.6899147452929796}, 0.1, []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePID, PidtunePIDF}},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
+		pidtuneCheckDesigns(t, fmt.Sprintf("%v/%v", c.num, c.den), p, c.num, c.den, c.dt, c.want)
 	}
 }
 

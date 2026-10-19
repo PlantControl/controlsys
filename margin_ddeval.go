@@ -68,14 +68,29 @@ func (x ddComplex) div(y ddComplex) ddComplex {
 
 func (x ddComplex) abs1() float64 { return math.Abs(x.re.hi) + math.Abs(x.im.hi) }
 
+func (x ddComplex) abs() float64 { return math.Hypot(x.re.hi, x.im.hi) }
+
 func (x ddComplex) complex128() complex128 { return complex(x.re.hi+x.re.lo, x.im.hi+x.im.lo) }
+
+const (
+	// ddOpErr bounds the relative error of one double-double operation,
+	// ~16× above its 2⁻¹⁰⁴.
+	ddOpErr = 0x1p-100
+	// ddPivotMargin is the pivot-to-error ratio a pivot below the
+	// normwise floor needs: 2⁹⁰, the relative accuracy solve assumes.
+	ddPivotMargin = 0x1p90
+)
 
 // ddSISOResponse evaluates the SISO response C(sE−A)⁻¹B + D of sys at pt in
 // double-double arithmetic, as (sE−A)⁻¹ = −q·(pE+qA)⁻¹, whose entries are
 // formed from the double p and q without rounding. It is the fallback where
 // the double solve is singular to working precision but the model is not,
 // as next to a pole cluster k/(z+1)ⁿ split by coefficient rounding, where
-// |L| still crosses 1. ok is false at a pivot below 2⁻¹⁰⁰ of the scale.
+// |L| still crosses 1. ok is false at a pivot below 2⁻¹⁰⁰ of the scale
+// unless it exceeds 2⁹⁰ times its running forward-error bound: beside an
+// integrator triple with sub-1e-6 real poles, det(sI−A) ~ 1e-31 at s = 1e-6j
+// is far below the floor yet exact to ~2⁻¹⁰⁰, while at a pole to dd
+// precision the pivot is within its bound.
 func ddSISOResponse(sys *System, pt frequencyPoint) (h complex128, ok bool) {
 	h, _, _, ok = ddSISOSolve(sys, pt, false)
 	return h, ok
@@ -102,6 +117,7 @@ func ddSISOSolve(sys *System, pt frequencyPoint, withNoise bool) (h complex128, 
 	ar, br, cr := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
 	pr, pi, qr, qi := real(pt.p), imag(pt.p), real(pt.q), imag(pt.q)
 	m := make([]ddComplex, n*n)
+	mErr := make([]float64, n*n)
 	x := make([]ddComplex, n)
 	var mScale float64
 	for i := range n {
@@ -115,6 +131,8 @@ func ddSISOSolve(sys *System, pt frequencyPoint, withNoise bool) (h complex128, 
 			}
 			m[i*n+j] = ddComplex{ddProd(pr, e).add(ddProd(qr, a)), ddProd(pi, e).add(ddProd(qi, a))}
 			mScale = max(mScale, m[i*n+j].abs1())
+			ae, aa := math.Abs(e), math.Abs(a)
+			mErr[i*n+j] = ddOpErr * ((math.Abs(pr)+math.Abs(pi))*ae + (math.Abs(qr)+math.Abs(qi))*aa)
 		}
 		x[i] = ddComplex{re: dd{br.Data[i*br.Stride], 0}}
 	}
@@ -135,17 +153,29 @@ func ddSISOSolve(sys *System, pt frequencyPoint, withNoise bool) (h complex128, 
 				piv, best = i, v
 			}
 		}
-		if !(best > tol) {
+		if !(best > tol || best > ddPivotMargin*mErr[piv*n+k]) {
 			return 0, 0, 0, false
 		}
 		if piv != k {
 			for j := range n {
 				m[k*n+j], m[piv*n+j] = m[piv*n+j], m[k*n+j]
+				mErr[k*n+j], mErr[piv*n+j] = mErr[piv*n+j], mErr[k*n+j]
 			}
 			x[k], x[piv] = x[piv], x[k]
 		}
+		pivMod := m[k*n+k].abs()
 		for i := k + 1; i < n; i++ {
-			if m[i*n+k].abs1() == 0 {
+			mik, eik := m[i*n+k].abs(), mErr[i*n+k]
+			if mik == 0 && eik == 0 {
+				continue
+			}
+			fa := mik / pivMod
+			fErr := (eik+fa*mErr[k*n+k])/pivMod + ddOpErr*fa
+			for j := k + 1; j < n; j++ {
+				mkj := m[k*n+j].abs1()
+				mErr[i*n+j] += fa*mErr[k*n+j] + fErr*mkj + ddOpErr*(m[i*n+j].abs1()+fa*mkj)
+			}
+			if mik == 0 {
 				continue
 			}
 			f := m[i*n+k].div(m[k*n+k])

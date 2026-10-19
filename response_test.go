@@ -224,6 +224,213 @@ func TestDCGain_CoupledSingularBlockFallsBackToTransferLimit(t *testing.T) {
 	}
 }
 
+// 5YRXMC: the transfer-limit fallback dropped a B of norm below n²·ε·‖A‖ as
+// uncontrollable, reporting 0 for an integrator. Oracle: G scales linearly
+// with each input and output, so the entries are those of the unit-scaled
+// model times the scale. The ergo plant's den(1) = 2.8e-15 exactly (rational
+// sum) is below the rounding level ε·Σ|dᵢ| ≈ 1.2e-14 of its coefficients,
+// num(1) = -4.4e-16 against Σ|nᵢ| = 1.3e-15 is not, and the other five poles
+// lie in (0, 1): −∞, as G·2⁶⁰ already gave.
+func TestDCGain_TinyInputScaleKeepsIntegrator(t *testing.T) {
+	tf := &TransferFunc{
+		Num: [][][]float64{{{-8.70643320022765e-16, 2.9186581655941266e-16, 1.3545850066477854e-16}}},
+		Den: [][]float64{{1, -5.609886783435264, 13.099973168748164, -16.29841103348229, 11.394314088807377, -4.243853507030152, 0.6578640663921657}},
+		Dt:  0.01,
+	}
+	for _, k := range []float64{1, 0x1p60} {
+		scaled := &TransferFunc{Num: [][][]float64{{Poly(tf.Num[0][0]).Scale(k)}}, Den: tf.Den, Dt: tf.Dt}
+		res, err := scaled.StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := res.Sys.DCGain()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !math.IsInf(g.At(0, 0), -1) {
+			t.Errorf("scale %g: DCGain = %v, want -Inf", k, g.At(0, 0))
+		}
+	}
+
+	sys, err := New(
+		mat.NewDense(3, 3, []float64{
+			0, 1, 0,
+			0, -1, 0,
+			0, 0, -2,
+		}),
+		mat.NewDense(3, 3, []float64{
+			0, 0, 0,
+			1e-18, 0, 0,
+			0, 3e-20, 0,
+		}),
+		mat.NewDense(2, 3, []float64{
+			1, 0, 0,
+			0, 0, 1,
+		}),
+		mat.NewDense(2, 3, []float64{
+			0, 7, 0,
+			0, 0, 0,
+		}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsInf(g.At(0, 0), 1) {
+		t.Errorf("DCGain[0,0] = %v, want +Inf", g.At(0, 0))
+	}
+	if g.At(0, 1) != 7 {
+		t.Errorf("DCGain[0,1] = %v, want 7", g.At(0, 1))
+	}
+	if want := 1.5e-20; math.Abs(g.At(1, 1)-want) > 1e-10*want {
+		t.Errorf("DCGain[1,1] = %v, want %v", g.At(1, 1), want)
+	}
+	for _, ij := range [][2]int{{1, 0}, {0, 2}, {1, 2}} {
+		if v := g.At(ij[0], ij[1]); v != 0 {
+			t.Errorf("DCGain[%d,%d] = %v, want 0", ij[0], ij[1], v)
+		}
+	}
+}
+
+// 5YRXMC review: the I/O rescale formed so·si, which overflows for B and C
+// entries below ~1e-154, so D was scaled by ∞ and the gain divided by ∞
+// (NaN). Oracle: x0 is an integrator with B[0] = 0 and no A entry feeding
+// it, so it is uncontrollable and G = D − c·b/(−1) = D (c·b underflows);
+// with B[0] ≠ 0 it is reached and G = +∞. The mixed-mode case has A's
+// zero mode on [1, 1] with B on the λ = −2 eigenvector [1, −1], so the
+// integrator is uncontrollable but not structurally: G = D + c·b/2 = D.
+func TestDCGain_TinyIOScaleNoOverflow(t *testing.T) {
+	cases := []struct {
+		name    string
+		a, b, c []float64
+		d       float64
+		want    float64
+	}{
+		{"1e-200", []float64{0, 0, 0, -1}, []float64{0, 1e-200}, []float64{1e-200, 1e-200}, 1, 1},
+		{"1e-160", []float64{0, 0, 0, -1}, []float64{0, 1e-160}, []float64{1e-160, 1e-160}, 3, 3},
+		{"1e-170 d=0", []float64{0, 0, 0, -1}, []float64{0, 1e-170}, []float64{1e-170, 1e-170}, 0, 0},
+		{"reached", []float64{0, 0, 0, -1}, []float64{1e-200, 1e-200}, []float64{1e-200, 1e-200}, 1, math.Inf(1)},
+		{"mixed", []float64{-1, 1, 1, -1}, []float64{1e-200, -1e-200}, []float64{1e-200, 0}, 2, 2},
+		{"mixed subnormal", []float64{-1, 1, 1, -1}, []float64{5e-324, -5e-324}, []float64{5e-324, 0}, 2, 2},
+	}
+	for _, tc := range cases {
+		sys, err := New(mat.NewDense(2, 2, tc.a), mat.NewDense(2, 1, tc.b), mat.NewDense(1, 2, tc.c), mat.NewDense(1, 1, []float64{tc.d}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := sys.DCGain()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := g.At(0, 0); got != tc.want {
+			t.Errorf("%s: DCGain = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// 5YRXMC review: rescaling tiny B/C pushed these models past the transfer
+// limit's absolute coefficient floor, so an integrator that cannot reach
+// the output gave ±∞. Oracle: states with an exactly zero A column and zero
+// C entries on that output are unobservable from it; deleting them leaves a
+// nonsingular A, solved directly for −C·A⁻¹·B + D.
+func TestDCGain_StructurallyHiddenIntegrator(t *testing.T) {
+	reducedGain := func(a, b, c []float64, d float64, keep []int, m, j, i int) float64 {
+		n := len(b) / m
+		r := len(keep)
+		ar := mat.NewDense(r, r, nil)
+		br := mat.NewDense(r, 1, nil)
+		cr := mat.NewDense(1, r, nil)
+		for ii, k := range keep {
+			for jj, l := range keep {
+				ar.Set(ii, jj, a[k*n+l])
+			}
+			br.Set(ii, 0, b[k*m+j])
+			cr.Set(0, ii, c[i*n+k])
+		}
+		var x, y mat.Dense
+		if err := x.Solve(ar, br); err != nil {
+			t.Fatal(err)
+		}
+		y.Mul(cr, &x)
+		return d - y.At(0, 0)
+	}
+
+	a207 := []float64{
+		-109.8096932023195, 0, 1.3754554000245272,
+		-5.825937935081849, 0, 28.228159487325104,
+		19.460580321614408, 0, -157.83606155278247,
+	}
+	b207 := []float64{
+		-0.2020107885658171, 2.372863006220885e-09,
+		0.16529077506966183, 6.317278123134304e-09,
+		0.5125093800957606, -3.5601366418529652e-09,
+	}
+	c207 := []float64{-0.44316646305585916, 0, 0.6365800807719106}
+	d207 := []float64{0.29337639058229814, 0}
+	sys, err := New(mat.NewDense(3, 3, a207), mat.NewDense(3, 2, b207), mat.NewDense(1, 3, c207), mat.NewDense(1, 2, d207), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for j := range 2 {
+		want := reducedGain(a207, b207, c207, d207[j], []int{0, 2}, 2, j, 0)
+		if got := g.At(0, j); math.Abs(got-want) > 1e-8*math.Abs(want) {
+			t.Errorf("207: DCGain[0,%d] = %v, want %v", j, got, want)
+		}
+	}
+
+	a1719 := []float64{
+		0, 0, -16.45998896279122, 7.434422166039277, 40.5375781079234,
+		0, 0, 0.8354920620781155, 17.33859155872041, 28.688176404226688,
+		0, 0, -5.2486805634331875, 60.50519563131114, 48.34108064954873,
+		0, 0, -45.43967713254626, -187.23754288916172, -13.128579590402955,
+		0, 0, -0.03609246982635501, -0.007523543652578066, -173.49049856765487,
+	}
+	b1719 := []float64{2.274585296043561, -1.2516666018242306, -2.287091213265864, 1.2765963750972218, 0.5595946486461056}
+	c1719 := []float64{
+		0, 0, 1.31380777316825e-07, 1.1746758065362695e-07, 6.281264136597675e-10,
+		-9.680876512622506e-05, 3.818621246767231e-05, 3.646267427979333e-05, -2.184488233840853e-05, 1.7515372591403867e-05,
+	}
+	d1719 := []float64{1.1472269043806276e-08, 7.391061795474444e-05}
+	sys, err = New(mat.NewDense(5, 5, a1719), mat.NewDense(5, 1, b1719), mat.NewDense(2, 5, c1719), mat.NewDense(2, 1, d1719), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err = sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := reducedGain(a1719, b1719, c1719, d1719[0], []int{2, 3, 4}, 1, 0, 0)
+	if got := g.At(0, 0); math.Abs(got-want) > 1e-8*math.Abs(want) {
+		t.Errorf("1719: DCGain[0,0] = %v, want %v", got, want)
+	}
+	if got := g.At(1, 0); !math.IsInf(got, -1) {
+		t.Errorf("1719: DCGain[1,0] = %v, want -Inf", got)
+	}
+
+	// Discrete: the z = 1 state drives x1 but no input reaches it, so
+	// G = D + 1·1/(1 − 0.5) = 3.
+	sys, err = New(mat.NewDense(2, 2, []float64{1, 0, 1, 0.5}), mat.NewDense(2, 1, []float64{0, 1}),
+		mat.NewDense(1, 2, []float64{1, 1}), mat.NewDense(1, 1, []float64{1}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err = sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := g.At(0, 0); math.Abs(got-3) > 1e-14 {
+		t.Errorf("discrete: DCGain = %v, want 3", got)
+	}
+}
+
 func TestDamp_ContinuousUnderdamped(t *testing.T) {
 	wn := 10.0
 	zeta := 0.3
