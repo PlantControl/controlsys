@@ -10,7 +10,8 @@ import (
 // C(x0·I − A)⁻¹B + D (x0 = 0, or 1 for discrete) within a conditioning
 // bound from the intended spectrum; when the float64 A has an exact pole at
 // x0, every entry whose exact limit n_ij/det(sI−A) diverges is that signed
-// infinity, as MATLAB dcgain. Poles within the eigenvalue error of x0, or
+// infinity, as MATLAB dcgain; its sign is free when further intended
+// poles lie within roundoff of x0 (a nearby model has them at x0 too). Poles within the eigenvalue error of x0, or
 // an ill-conditioned solve, are skipped. I/O delays never change the gain.
 func FuzzDCGain(f *testing.F) {
 	for _, s := range fzDCGainSeeds() {
@@ -51,7 +52,19 @@ func FuzzDCGain(f *testing.F) {
 		}
 		x0 := fzRat(x0f)
 		cp := fzCharPolyExact(s.A, n)
-		if fzTaylorShift(cp, x0)[n].Sign() == 0 {
+		if sh := fzTaylorShift(cp, x0); sh[n].Sign() == 0 {
+			ord := 0
+			for k := n; k >= 0 && sh[k].Sign() == 0; k-- {
+				ord++
+			}
+			band := math.Max(4*s.EigErr(), 1e-10*math.Max(1, s.NormJ))
+			near := 0
+			for _, e := range s.Eig {
+				if cmplx.Abs(e-complex(x0f, 0)) <= band {
+					near++
+				}
+			}
+			signFree := near > ord
 			finite := false
 			for i := range p {
 				for j := range m {
@@ -65,7 +78,11 @@ func FuzzDCGain(f *testing.F) {
 						finite = true
 						continue
 					}
-					if v := g.At(i, j); v != lim {
+					v := g.At(i, j)
+					if signFree && math.IsInf(v, 0) {
+						continue
+					}
+					if v != lim {
 						t.Fatalf("DCGain[%d,%d] = %v, exact limit at the integrator %v\n%s", i, j, v, lim, s)
 					}
 				}
@@ -112,7 +129,8 @@ func FuzzDCGain(f *testing.F) {
 
 // fzDCGainSeeds: exact integrators (unrotated J, single, double, discrete
 // z = 1, mixed with stable modes), a rotated near-integrator, poles close
-// to but clear of DC, MIMO, D = 0, large gain and static gains.
+// to but clear of DC, MIMO, D = 0, large gain, static gains, and exact
+// z = 1 integrators beside a pair 1.8e-15 from z = 1 (sign-free Inf).
 func fzDCGainSeeds() []fzSeed {
 	off := fzSeed{In: fzNoDelay, Out: fzNoDelay, IO: fzNoDelay, Tau: fzNoDelay, Shear: -10, Rot: 0.37, DScal: 0.5}
 	with := func(f func(*fzSeed)) fzSeed {
@@ -140,5 +158,9 @@ func fzDCGainSeeds() []fzSeed {
 		with(func(s *fzSeed) { s.N, s.Mag, s.DScal, s.Gain = 4, [3]float64{1, -1}, 0, 11 }),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.DScal = 0, 3, 2, 4 }),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.Mag, s.In, s.Out, s.IO = 3, 2, 2, [3]float64{0.2, 0.4}, 0, 0.3, 0.1 }),
+		with(func(s *fzSeed) {
+			s.Discrete, s.LogDt, s.N, s.M, s.P = true, -44, 6, 3, 3
+			s.Mag, s.Damp, s.Gain, s.Rot, s.Phase, s.IO = [3]float64{-40, -10.75}, [3]float64{34, 27.2}, 22, 0, 30.5, 88
+		}),
 	}
 }

@@ -56,6 +56,9 @@ func FuzzZeros(f *testing.F) {
 		if cd > 0 {
 			gamma = nA / cd
 		}
+		if beta*gamma > 1e8 || beta*gamma < 1e-8 || beta > 1e8 || beta < 1e-8 || gamma > 1e8 || gamma < 1e-8 {
+			beta, gamma = 1, 1
+		}
 		scale := fzFrob(fzComplexPencilFloat(s, 0, beta, gamma))
 		const tol = 1e-8
 		for _, z := range zeros {
@@ -132,7 +135,8 @@ func fzComplexPencilFloat(s *fzSpec, z complex128, beta, gamma float64) []float6
 
 // fzZerosSeeds: SISO, square and non-square MIMO, D = 0 (zeros at
 // infinity), nearly singular D, discrete, static gains, integrators and
-// I/O delays.
+// I/O delays, and a pole at z = 2.7e43 whose ‖A‖ swamps B and C (residual
+// falls back to the unscaled pencil).
 func fzZerosSeeds() []fzSeed {
 	off := fzSeed{In: fzNoDelay, Out: fzNoDelay, IO: fzNoDelay, Tau: fzNoDelay, Shear: -10, Rot: 0.37, DScal: 1}
 	with := func(f func(*fzSeed)) fzSeed {
@@ -144,7 +148,9 @@ func fzZerosSeeds() []fzSeed {
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.Damp[0] = 2, 1, 1, 2.5 }),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.Damp[0], s.DScal = 3, 1, 1, 1, 0 }),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.Mag, s.DScal, s.Shear = 5, 1, 1, [3]float64{0.2, -1, 1}, 0.3, -0.5 }),
-		with(func(s *fzSeed) { s.N, s.M, s.P, s.Mag, s.Damp, s.DScal = 4, 2, 2, [3]float64{0, 0.7}, [3]float64{1, -3}, 2 }),
+		with(func(s *fzSeed) {
+			s.N, s.M, s.P, s.Mag, s.Damp, s.DScal = 4, 2, 2, [3]float64{0, 0.7}, [3]float64{1, -3}, 2
+		}),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.Mag, s.DScal, s.Rot = 6, 2, 2, [3]float64{-0.5, 0.4, 1.2}, 0, 1.3 }),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.DScal, s.Phase = 4, 2, 2, 1e-6, 0.4 }),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.DScal = 3, 3, 3, 1 }),
@@ -162,5 +168,10 @@ func fzZerosSeeds() []fzSeed {
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.Mag[0], s.Rot, s.DScal = 2, 1, 1, -40, 0, 0 }),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.In, s.Out, s.IO = 3, 2, 2, 0, 0.5, 0.2 }),
 		with(func(s *fzSeed) { s.N, s.M, s.P, s.Gain, s.DScal = 4, 2, 2, -9, 300 }),
+		with(func(s *fzSeed) {
+			s.Discrete, s.LogDt, s.N, s.M, s.P, s.DScal = true, 86, 3, 3, 1, 0
+			s.Mag, s.Damp, s.Gain, s.Shear, s.Phase = [3]float64{60, 0, -44}, [3]float64{-21, -72, 0}, 98, -1.4285714285714286, 47
+			s.IO = -9
+		}),
 	}
 }
