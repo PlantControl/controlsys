@@ -153,6 +153,68 @@ func TestAllMargin_LightlyDampedPhaseCrossover(t *testing.T) {
 	}
 }
 
+// bigGainMarginDB returns −20·log10|N(jω)/D(jω)| from big.Float N·conj D and |D|².
+func bigGainMarginDB(num, den []float64, w float64) float64 {
+	re, im := bigLoopAt(num, den, w)
+	d2, _ := bigLoopAt(den, den, w)
+	r, _ := re.Float64()
+	i, _ := im.Float64()
+	d, _ := d2.Float64()
+	return -20 * math.Log10(math.Hypot(r, i)/d)
+}
+
+// BYP4ZM: beside a pair with ζ ~ 1e-12 the phase crossover lies within ulps
+// of the pole and f moves by ~0.1° per ulp; the scan held it to 1e-3° and to
+// clearance points rounded past the |f| = 90 bracket end, and missed it.
+// Oracle: as for TestAllMargin_LightlyDampedPhaseCrossover; GM from big.Float
+// |L| at the reported ω, since |L| moves by ~1e-4 per ulp there.
+func TestAllMarginPhaseCrossUltraLightResonance(t *testing.T) {
+	type tc struct {
+		num, den []float64
+		wn       float64
+	}
+	cases := []tc{
+		{[]float64{-14.58076267912999, 0.2780388291113343}, []float64{1, 1.7493356310572988e-11, 60.9821144190896}, math.Sqrt(60.9821144190896)},
+		{[]float64{-0.47065815665752997, -78.56895717226088}, []float64{1, 4.978584544201923, 349.09061740501886, 1737.9771496708024, 0.23425954438849886, 1.1653612415035386}, 18.6839488959572},
+		{[]float64{-10.117578176208571, -11.554653627263235}, []float64{1, 5.725929450921608e-13, 0.5811185290875198}, math.Sqrt(0.5811185290875198)},
+	}
+	rng := rand.New(rand.NewPCG(5, 11))
+	for range 300 {
+		wn := math.Pow(10, -1+2*rng.Float64())
+		zeta := math.Pow(10, -12.5+2.5*rng.Float64())
+		den := []float64{1, 2 * zeta * wn, wn * wn}
+		if rng.IntN(2) == 0 {
+			p := math.Pow(10, -1+2*rng.Float64())
+			den = []float64{1, den[1] + p, den[2] + p*den[1], p * den[2]}
+		}
+		num := []float64{10 * rng.NormFloat64()}
+		if rng.IntN(2) == 0 {
+			num = append(num, 10*rng.NormFloat64())
+		}
+		cases = append(cases, tc{num, den, wn})
+	}
+	for i, c := range cases {
+		res, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		all, err := AllMargin(res.Sys)
+		if err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		want, _ := bigPhaseCrossings(c.num, c.den, resonanceGrid(1e-4, 1e4, c.wn))
+		ok := len(all.PhaseCrossFreqs) == len(want)
+		for k := 0; ok && k < len(want); k++ {
+			w := all.PhaseCrossFreqs[k]
+			gm := bigGainMarginDB(c.num, c.den, w)
+			ok = math.Abs(w-want[k]) <= 1e-9*want[k] && math.Abs(all.GainMargins[k]-gm) <= 1e-6*max(1, math.Abs(gm))
+		}
+		if !ok {
+			t.Errorf("case %d num %v den %v: wpc %v GM %v, want %v", i, c.num, c.den, all.PhaseCrossFreqs, all.GainMargins, want)
+		}
+	}
+}
+
 // bigUnitCosSin returns cos θ and sin θ in big.Float: Taylor series at
 // θ/2¹⁰, then ten angle doublings.
 func bigUnitCosSin(th float64) (c, s *big.Float) {

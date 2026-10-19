@@ -393,16 +393,17 @@ func refineCrossing(wLo, wHi float64, evalFn func(float64) float64) float64 {
 
 // ulpTol widens tol for a bisected sign change of f at c to what one
 // rounding step of c moves f by, measured as four times the mean step over
-// ±64 ulps, capped at 1e-3. Beside a resonance with ζ ≲ 1e-7, f moves by more
-// than tol per ulp, so no float c meets tol; a jump of f, as across the ±180
-// wrap or an undamped pole, leaves |f| beyond the cap.
-func ulpTol(c float64, f func(float64) float64, tol float64) float64 {
+// ±64 ulps, capped at limit. Beside a resonance with ζ ≲ 1e-7, f moves by more
+// than tol per ulp, so no float c meets tol: about 8e-14/ζ degrees. A jump J
+// of f, as across the ±180 wrap or an undamped pole, gives J/32 whatever the
+// limit; a limit of 1e-3 rejects it, one above J/32 relies on |f| at the jump.
+func ulpTol(c float64, f func(float64) float64, tol, limit float64) float64 {
 	u := math.Nextafter(c, math.Inf(1)) - c
 	step := math.Abs(f(c+64*u)-f(c-64*u)) / 128
 	if !(step < math.Inf(1)) {
 		return tol
 	}
-	return max(tol, min(4*step, 1e-3))
+	return max(tol, min(4*step, limit))
 }
 
 func phaseMarginDeg(h complex128) float64 {
@@ -1365,8 +1366,11 @@ func (r *rationalLoop) resonancePoles() (pairs, reals []float64) {
 // ε, whose roots move by a root of the backward error. A sign change between
 // evaluable grid points with |f| < 90, the far side of the pole and the
 // ±180 wrap excluded, is kept when it refines to |f| ≤ tol and still holds
-// walkClearance either side, or as far as the grid spacing when closer;
-// tol widens to ulpTol where f moves by more than tol per ulp.
+// walkClearance either side, or to the bracket when closer; tol widens to
+// ulpTol, up to 30°, where f moves by more than tol per ulp: with |f| < 90 no
+// jump of 180° or 360° makes a sign change, and pairs down to ζ ~ 1e-14 cross
+// within ulps of the pole (BYP4ZM). A bracket end bisected to |f| = 90, as
+// beside such a pair, is the clearance bound there.
 func (r *rationalLoop) resonanceCrossings(poles []float64, f func(float64) float64, tol float64) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
@@ -1430,8 +1434,7 @@ func (r *rationalLoop) resonanceCrossings(poles []float64, f func(float64) float
 				}
 			}
 			c := refineCrossing(a, b, ft)
-			d := min(walkClearance, (c-a)/c, (b-c)/c)
-			if math.Abs(ft(c)) <= ulpTol(c, ft, tol) && ft(c*(1-d))*ft(c*(1+d)) < 0 {
+			if math.Abs(ft(c)) <= ulpTol(c, ft, tol, 30) && ft(max(a, c*(1-walkClearance)))*ft(min(b, c*(1+walkClearance))) < 0 {
 				out = append(out, c)
 			}
 		}
@@ -1479,7 +1482,7 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 	within := func(w float64) bool { return math.Abs(ft(w)) <= tol }
 	crossTol := func(c float64) float64 {
 		if steep {
-			return ulpTol(c, ft, tol)
+			return ulpTol(c, ft, tol, 1e-3)
 		}
 		return tol
 	}
