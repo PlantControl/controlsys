@@ -498,15 +498,88 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) 
 	return reduced.DCGain()
 }
 
+// dcGainByTransferFunctionLimit first rescales each input and output to the
+// norm of A: the singular-mode and controllability tolerances are relative
+// to ‖A‖, so a tiny but nonzero B or C would otherwise be dropped as
+// rounding and an integrator's infinite gain reported as 0.
 func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
-	if gain, ok := sys.dcGainByDecoupledSingularModes(); ok {
-		return gain, nil
+	scaled, inScale, outScale := sys.dcGainIOScaled()
+	gain, ok := scaled.dcGainByDecoupledSingularModes()
+	if !ok {
+		res, err := scaled.rationalTransferFunction(nil)
+		if err != nil {
+			return nil, fmt.Errorf("DCGain: %w", err)
+		}
+		gain = dcGainFromTransferFunction(res.TF)
 	}
-	res, err := sys.rationalTransferFunction(nil)
-	if err != nil {
-		return nil, fmt.Errorf("DCGain: %w", err)
+	raw := gain.RawMatrix()
+	for i, so := range outScale {
+		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		for j, si := range inScale {
+			row[j] /= so * si
+		}
 	}
-	return dcGainFromTransferFunction(res.TF), nil
+	return gain, nil
+}
+
+// dcGainIOScaled returns sys with column j of B and D scaled by inScale[j]
+// and row i of C and D by outScale[i], exact powers of two bringing each
+// nonzero column or row whose max-abs entry is below 2⁻²⁰·max(‖A‖, 1) up to
+// about max(‖A‖, 1). Above that a B·C product clears the 100·ε·max(‖A‖, 1)
+// and n²·ε·‖A‖ floors, so well-scaled models are left as they are.
+func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
+	n, m, p := sys.Dims()
+	scales := make([]float64, m+p)
+	inScale, outScale := scales[:m], scales[m:]
+	sbRaw, scRaw := sys.B.RawMatrix(), sys.C.RawMatrix()
+	for k := range n {
+		for j, v := range sbRaw.Data[k*sbRaw.Stride : k*sbRaw.Stride+m] {
+			inScale[j] = math.Max(inScale[j], math.Abs(v))
+		}
+	}
+	for i := range p {
+		for _, v := range scRaw.Data[i*scRaw.Stride : i*scRaw.Stride+n] {
+			outScale[i] = math.Max(outScale[i], math.Abs(v))
+		}
+	}
+	target := math.Max(denseNorm(sys.A), 1)
+	_, targetExp := math.Frexp(target)
+	finite := !math.IsInf(target, 0) && !math.IsNaN(target)
+	unit := true
+	for k, v := range scales {
+		scales[k] = 1
+		if finite && v != 0 && v < 0x1p-20*target {
+			_, e := math.Frexp(v)
+			scales[k] = math.Ldexp(1, targetExp-e)
+			unit = false
+		}
+	}
+	if unit {
+		return sys, inScale, outScale
+	}
+	b, c := mat.DenseCopyOf(sys.B), mat.DenseCopyOf(sys.C)
+	bRaw, cRaw := b.RawMatrix(), c.RawMatrix()
+	for k := range n {
+		row := bRaw.Data[k*bRaw.Stride : k*bRaw.Stride+m]
+		for j, s := range inScale {
+			row[j] *= s
+		}
+	}
+	for i, s := range outScale {
+		row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+n]
+		for k := range row {
+			row[k] *= s
+		}
+	}
+	d := denseCopySafe(sys.D, p, m)
+	dRaw := d.RawMatrix()
+	for i, so := range outScale {
+		row := dRaw.Data[i*dRaw.Stride : i*dRaw.Stride+m]
+		for j, si := range inScale {
+			row[j] *= so * si
+		}
+	}
+	return &System{A: sys.A, B: b, C: c, D: d, Dt: sys.Dt}, inScale, outScale
 }
 
 func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {

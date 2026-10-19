@@ -224,6 +224,78 @@ func TestDCGain_CoupledSingularBlockFallsBackToTransferLimit(t *testing.T) {
 	}
 }
 
+// 5YRXMC: the transfer-limit fallback dropped a B of norm below n²·ε·‖A‖ as
+// uncontrollable, reporting 0 for an integrator. Oracle: G scales linearly
+// with each input and output, so the entries are those of the unit-scaled
+// model times the scale. The ergo plant's den(1) = 2.8e-15 exactly (rational
+// sum) is below the rounding level ε·Σ|dᵢ| ≈ 1.2e-14 of its coefficients,
+// num(1) = -4.4e-16 against Σ|nᵢ| = 1.3e-15 is not, and the other five poles
+// lie in (0, 1): −∞, as G·2⁶⁰ already gave.
+func TestDCGain_TinyInputScaleKeepsIntegrator(t *testing.T) {
+	tf := &TransferFunc{
+		Num: [][][]float64{{{-8.70643320022765e-16, 2.9186581655941266e-16, 1.3545850066477854e-16}}},
+		Den: [][]float64{{1, -5.609886783435264, 13.099973168748164, -16.29841103348229, 11.394314088807377, -4.243853507030152, 0.6578640663921657}},
+		Dt:  0.01,
+	}
+	for _, k := range []float64{1, 0x1p60} {
+		scaled := &TransferFunc{Num: [][][]float64{{Poly(tf.Num[0][0]).Scale(k)}}, Den: tf.Den, Dt: tf.Dt}
+		res, err := scaled.StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, err := res.Sys.DCGain()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !math.IsInf(g.At(0, 0), -1) {
+			t.Errorf("scale %g: DCGain = %v, want -Inf", k, g.At(0, 0))
+		}
+	}
+
+	sys, err := New(
+		mat.NewDense(3, 3, []float64{
+			0, 1, 0,
+			0, -1, 0,
+			0, 0, -2,
+		}),
+		mat.NewDense(3, 3, []float64{
+			0, 0, 0,
+			1e-18, 0, 0,
+			0, 3e-20, 0,
+		}),
+		mat.NewDense(2, 3, []float64{
+			1, 0, 0,
+			0, 0, 1,
+		}),
+		mat.NewDense(2, 3, []float64{
+			0, 7, 0,
+			0, 0, 0,
+		}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsInf(g.At(0, 0), 1) {
+		t.Errorf("DCGain[0,0] = %v, want +Inf", g.At(0, 0))
+	}
+	if g.At(0, 1) != 7 {
+		t.Errorf("DCGain[0,1] = %v, want 7", g.At(0, 1))
+	}
+	if want := 1.5e-20; math.Abs(g.At(1, 1)-want) > 1e-10*want {
+		t.Errorf("DCGain[1,1] = %v, want %v", g.At(1, 1), want)
+	}
+	for _, ij := range [][2]int{{1, 0}, {0, 2}, {1, 2}} {
+		if v := g.At(ij[0], ij[1]); v != 0 {
+			t.Errorf("DCGain[%d,%d] = %v, want 0", ij[0], ij[1], v)
+		}
+	}
+}
+
 func TestDamp_ContinuousUnderdamped(t *testing.T) {
 	wn := 10.0
 	zeta := 0.3
