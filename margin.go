@@ -1199,7 +1199,70 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	out := r.polish(cands, f, 1e-7, true)
 	pairs, realPoles := r.resonancePoles()
 	out = r.dropRefuted(out, realPoles, f)
-	return r.mergeResonanceCrossings(out, r.resonanceCrossings(append(pairs, realPoles...), f, 1e-7), f), nil
+	out = r.mergeResonanceCrossings(out, r.resonanceCrossings(append(pairs, realPoles...), f, 1e-7), f)
+	return r.nyquistPhaseCrossings(out, f, 1e-7), nil
+}
+
+// nyquistPhaseCrossings adds the discrete phase crossings below Nyquist and
+// above the others in ws that the pencil missed: beside a zero cluster at
+// z = −1, as of k·(z+1)⁴, the pencil roots of L − L~ fall up to ~1e-4 off a
+// crossing that lies within that of Nyquist, beyond any polish bracket, and
+// the double solve's phase there is off by more than tol. It scans in
+// double-double towards Nyquist, halving the distance, and keeps each sign
+// change that is no ±180° wrap and refines to ulpTol; L at Nyquist is real,
+// a crossover when negative unless L is real below it too. A pole at Nyquist, where rounding makes sign
+// changes beside the cluster, skips the scan.
+func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
+	if !r.discrete() {
+		return ws
+	}
+	wTop := r.nyquist()
+	if h, ok := r.eval.try(wTop); !ok || cmplx.IsInf(h) || cmplx.IsNaN(h) {
+		return ws
+	}
+	below := ws
+	if n := len(ws); n > 0 && ws[n-1] >= wTop {
+		below = ws[:n-1]
+	}
+	t := wTop / 2
+	if len(below) > 0 {
+		t = below[len(below)-1] * (1 + 1e-6)
+	}
+	if t >= wTop {
+		return ws
+	}
+	r.eval.extended, r.eval.exact = true, true
+	defer func() { r.eval.extended, r.eval.exact = false, false }()
+	ft := func(w float64) float64 {
+		v, ok := tryEval(r.eval, func() float64 { return f(w) })
+		if !ok {
+			return math.NaN()
+		}
+		return v
+	}
+	out := slices.Clone(below)
+	a, fa := t, ft(t)
+	for gap := (wTop - t) / 2; gap > 0; gap /= 2 {
+		b := wTop - gap
+		if b <= a {
+			break
+		}
+		fb := ft(b)
+		if math.IsNaN(fb) {
+			break
+		}
+		if !math.IsNaN(fa) && fa*fb < 0 && math.Abs(fa-fb) < 180 {
+			c := refineCrossing(a, b, ft)
+			if math.Abs(ft(c)) <= ulpTol(c, ft, tol, 1e-3) && (len(out) == 0 || c > out[len(out)-1]*(1+1e-9)) {
+				out = append(out, c)
+			}
+		}
+		a, fa = b, fb
+	}
+	if len(below) < len(ws) || math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol {
+		out = append(out, wTop)
+	}
+	return out
 }
 
 // dropRefuted removes the polished ws inside the scan band of a real pole
