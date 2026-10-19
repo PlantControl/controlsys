@@ -84,9 +84,7 @@ const (
 // times that frequency; not for an integrating or unstable plant with a
 // continuous delay), accepting the first that passes. When none passes, the
 // first design on a plant that is not stable is returned if it passed the
-// stability test, crosses 0 dB and keeps |S| ≤ 4 (its margins unchecked),
-// except for a wc from a pole of a plant without bandwidth, which must pass
-// the gate; a stable plant then gives ErrPIDTuningTargetUnattainable. On a
+// stability test and the gate, else ErrPIDTuningTargetUnattainable. On a
 // continuous plant with zero DC gain and no delay, a k·sᵐ high-pass
 // plant leaving no phase to back off into, a P, or a PD clamped short of
 // the margin at wc (with the default margin; an explicit one rejects it),
@@ -202,11 +200,9 @@ func (r *pidtuneRun) pipeline(sign float64) (*PID, error) {
 }
 
 // attempt is backedOff, then, unless levelCapped rejected a back-off step,
-// for a crossover from the gain of a plant that is not stable the design at
-// r.wc gated only on |S| and on crossing 0 dB (pidtuneGate.crossing), not
-// on its margins: lowering the crossover of an unstable or integrating
-// plant takes away the bandwidth its stabilization needs. On a stable plant
-// it would be short of the margin at some crossover.
+// for a crossover from the gain of a plant that is not stable the ungated
+// design at r.wc if the full gate passes it. A gate on |S| and a crossover
+// alone returned PM 18° (P, |S| 3.2) and 15° (PI) on unstable plants.
 func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 	pid, err := r.backedOff(sign)
 	if err == nil || !r.auto || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
@@ -217,7 +213,7 @@ func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 	}
 	if (r.src == pidtuneCrossGain || r.src == pidtuneCrossRolloff) && !r.openStable() {
 		if pid, retryErr := r.design(r.wc, sign, false); retryErr == nil {
-			if _, gateErr := r.gateOf().crossing(pid, r.pidType, r.wc); gateErr == nil {
+			if r.gated(pid, r.wc, r.screened(r.wc)) == nil {
 				return pid, nil
 			}
 		}
@@ -865,14 +861,20 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 	// double solve is singular to working precision over decades beside a
 	// pole cluster at z = 1 that FreqResponse resolves, and NaN margins and
 	// |S| there failed every back-off step, leaving the retry gated only
-	// on those NaN samples to return the first design (PM 34° for P).
+	// on those NaN samples to return the first design (PM 34° for P). A
+	// non-finite sample takes a finite FreqResponse too: beside such a
+	// cluster eval snaps ω well off any pole to +Inf, and the scan paired
+	// that spike with a crossover of NaN margin (1.9e-5 rad/s for P at
+	// wc 6.1e-6, |G| 0.32 there).
 	at := func(w float64) complex128 {
 		saved := eval.err
 		eval.err = nil
 		g := eval.at(w)
 		if eval.err != nil {
 			g = cmplx.NaN()
-			if h, err := evalPlantAt(plant, w); err == nil {
+		}
+		if !pidFiniteComplex(g) {
+			if h, err := evalPlantAt(plant, w); err == nil && (pidFiniteComplex(h) || cmplx.IsNaN(g)) {
 				g = h
 			}
 		}

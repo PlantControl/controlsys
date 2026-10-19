@@ -124,10 +124,9 @@ func TestPidtuneZeroDCLegacyPDGated(t *testing.T) {
 // when the others lie 100 times farther and 2x below that (rounding also
 // scatters the slow poles); every design stable by the exact Schur–Cohn
 // test and, on every other plant for time, robust by extended-precision
-// Schur–Cohn, margins and |S| from the coefficients: margins ≥ 58.5°
-// unless den has a root outside the unit circle, where the retry owes
-// only |S| ≤ 4 and a crossover. Conjugate pairs or comparable distances
-// are scattered clusters this oracle does not describe.
+// Schur–Cohn, margins ≥ 58.5° and |S| from the coefficients. Conjugate
+// pairs or comparable distances are scattered clusters this oracle does
+// not describe.
 func TestPidtuneIsolatedDisplacedIntegrator(t *testing.T) {
 	num := Poly{1.353366909367569e-15}
 	den := Poly{1, -5.60431550709433, 13.063429504287544, -16.210023582131356, 11.292650985912374, -4.187371704674265, 0.6456303037000314}
@@ -199,10 +198,6 @@ func TestPidtuneIsolatedDisplacedIntegrator(t *testing.T) {
 		} else if err != nil || wc < want/2 || wc > 2*want {
 			t.Errorf("%s: crossover %g, %v; want %g within 2x", name, wc, err, want)
 		}
-		minPM := 58.5
-		if !pidDCSignSchurCohn(pidDCSignBig(den)) {
-			minPM = 0
-		}
 		for _, f := range pidtuneAllTypes {
 			pid, err := Pidtune(p, f, 0, nil)
 			if err != nil {
@@ -212,7 +207,7 @@ func TestPidtuneIsolatedDisplacedIntegrator(t *testing.T) {
 				continue
 			}
 			if kept%2 == 1 {
-				pidDCSignCheckRobust(t, fmt.Sprintf("%s %v", name, f), pid, num, den, dt, minPM)
+				pidDCSignCheckRobust(t, fmt.Sprintf("%s %v", name, f), pid, num, den, dt, 58.5)
 			} else if !pidtuneExactSchur(pid, num, den, dt) {
 				t.Errorf("%s %s: %+v unstable", name, f, pid)
 			}
@@ -220,5 +215,59 @@ func TestPidtuneIsolatedDisplacedIntegrator(t *testing.T) {
 	}
 	if kept < 20 || close < 10 {
 		t.Fatalf("sweep kept %d plants, %d with poles 100x farther", kept, close)
+	}
+}
+
+// Beside a pole cluster at z = 1 the gate's solve snapped ω = 1.9e-5,
+// where |G| is 0.32 and no pole lies, to +Inf without an error; the scan
+// paired that spike with a crossover of NaN margin and failed the P design
+// at the plant's own crossover (wc 6.1e-6, 9.9e-7) on every back-off step.
+// Oracle: extended-precision Schur–Cohn, margins and |S| from the
+// coefficients (one crossover, PM 90°, |S| 1).
+func TestPidtuneGateSnappedSample(t *testing.T) {
+	const dt = 0.01
+	for _, c := range []struct{ num, den Poly }{
+		{Poly{6.110773630519141e-14, 3.4198170787824316e-15}, Poly{1, -5.71016988999306, 13.887907770588715, -18.645468986193702, 14.92072833819654, -7.1153754170879235, 1.8719233030765783, -0.20954511858714697}},
+		{Poly{3.875422988056212e-15}, Poly{1, -4.667597493849348, 8.695671657313316, -8.081072724970674, 3.7455208432476796, -0.692522281740973}},
+	} {
+		name := fmt.Sprintf("%v/%v", c.num, c.den)
+		pid, err := Pidtune(pidtuneBackoffPlant(t, c.num, c.den, dt, 0), PidtuneP, 0, nil)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		pidDCSignCheckRobust(t, name, pid, c.num, c.den, dt, 58.5)
+	}
+}
+
+// On plants that are not stable the retry at the automatic wc was gated on
+// |S| and a crossover only, returning P with PM 18.1° (|S| 3.2) and PI with
+// 15.3° on an unstable plant, and PI with 18.6° (|S| 3.7) on an integrating
+// discrete one. It now takes the full gate, so these return
+// ErrPIDTuningTargetUnattainable or a design robust per the oracle
+// (extended precision for the discrete plant).
+func TestPidtuneUnstableRetryKeepsMargin(t *testing.T) {
+	for _, c := range []struct {
+		f        PidtuneType
+		num, den Poly
+		dt       float64
+	}{
+		{PidtuneP, Poly{2.645988078729179}, Poly{1, 0.6994623329224331, -1.129423843040615}, 0},
+		{PidtunePI, Poly{2.645988078729179}, Poly{1, 0.6994623329224331, -1.129423843040615}, 0},
+		{PidtunePI, Poly{1.9331897426073496e-15, -1.0091665836801221e-15}, Poly{1, -6.853180411596403, 20.125372937931182, -32.82904851475664, 32.126073810329295, -18.859953544489116, 6.150097496943598, -0.8593617743619164}, 0.01},
+	} {
+		name := fmt.Sprintf("%s %v/%v dt=%g", c.f, c.num, c.den, c.dt)
+		pid, err := Pidtune(pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0), c.f, 0, nil)
+		if err != nil {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s: %v", name, err)
+			}
+			continue
+		}
+		if c.dt > 0 {
+			pidDCSignCheckRobust(t, name, pid, c.num, c.den, c.dt, 58.5)
+		} else {
+			pidtuneCheckRobust(t, name, pid, c.num, c.den, 0, pidTuningMaxSensitivity)
+		}
 	}
 }

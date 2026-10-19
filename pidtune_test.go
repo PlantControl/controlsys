@@ -129,15 +129,20 @@ func TestPidtune_PI_Integrator(t *testing.T) {
 	assertStable(t, cl, "PI/int")
 }
 
+// On 1/(s−1) at wc ≈ 1, PM = atan ω + ∠C ≤ 45° for P and PI, short of the
+// default 60°; PID adds the lead and designs.
 func TestPidtune_PI_Unstable(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, -1})
-	pid, err := Pidtune(plant, PidtunePI, 0, nil)
+	for _, f := range []PidtuneType{PidtuneP, PidtunePI} {
+		if pid, err := Pidtune(plant, f, 0, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			t.Errorf("%s: %+v, %v; want unattainable", f, pid, err)
+		}
+	}
+	pid, err := Pidtune(plant, PidtunePID, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertFiniteGains(t, pid, "PI/unstable")
-	cl := pidClosedLoop(t, plant, pid)
-	assertStable(t, cl, "PI/unstable")
+	pidtuneCheckRobust(t, "PID/unstable", pid, Poly{1}, Poly{1, -1}, 0, pidTuningMaxSensitivity)
 }
 
 func TestPidtune_PI_CustomCrossover(t *testing.T) {

@@ -195,6 +195,8 @@ func TestPidtuneDelayedIdealPIDTail(t *testing.T) {
 
 // YVAIMU: Pidtune(−G) mirrors Pidtune(G) for integrating and unstable
 // plants too; −1/(s(s+1)), −1/(s−1) and −0.1/(z−1) need negative gains.
+// P and PI on 1/(s−1) keep at most 45° at wc ≈ 1 (PM = atan ω + ∠C) and
+// return ErrPIDTuningTargetUnattainable, mirrored.
 func TestPidtuneUnstableMirrorsPositive(t *testing.T) {
 	plants := []struct {
 		name     string
@@ -203,7 +205,7 @@ func TestPidtuneUnstableMirrorsPositive(t *testing.T) {
 		mustTune []PidtuneType
 	}{
 		{"integ", []float64{1}, []float64{1, 1, 0}, 0, []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePID, PidtunePIDF}},
-		{"unst", []float64{1}, []float64{1, -1}, 0, []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePID}},
+		{"unst", []float64{1}, []float64{1, -1}, 0, []PidtuneType{PidtunePD, PidtunePID}},
 		{"dinteg", []float64{.1}, []float64{1, -1}, .1, []PidtuneType{PidtuneP, PidtunePI}},
 		{"nmp", []float64{1, -3}, []float64{1, 1, -2}, 0, nil},
 		{"dbl", []float64{1, 2}, []float64{1, 1, 0, 0}, 0, nil},
