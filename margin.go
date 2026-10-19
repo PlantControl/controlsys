@@ -1244,9 +1244,6 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 	if len(below) > 0 {
 		t = below[len(below)-1] * (1 + 1e-6)
 	}
-	if t >= wTop {
-		return ws
-	}
 	r.eval.extended, r.eval.exact = true, true
 	defer func() { r.eval.extended, r.eval.exact = false, false }()
 	ft := func(w float64) float64 {
@@ -1267,7 +1264,10 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 		return !ok || !(cmplx.Abs(h) <= solve)
 	}
 	out := slices.Clone(below)
-	a, fa := t, ft(t)
+	a, fa := t, math.NaN()
+	if t < wTop {
+		fa = ft(t)
+	}
 	for gap := (wTop - t) / 2; gap > 0; gap /= 2 {
 		b := wTop - gap
 		if b <= a {
@@ -1285,7 +1285,7 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 		}
 		a, fa = b, fb
 	}
-	if len(below) < len(ws) || math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol && aboveNoise(wTop, true) {
+	if len(below) < len(ws) || math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol && aboveNoise(wTop, true) && (len(out) == 0 || wTop > out[len(out)-1]*(1+1e-9)) {
 		out = append(out, wTop)
 	}
 	return out
@@ -1590,7 +1590,9 @@ func (r *rationalLoop) resonanceCrossings(pairs, reals []float64, f func(float64
 // first sign change that refines to |f| ≤ tol and still holds walkClearance
 // either side. Rounding grows without bound towards the band, as eps/δ⁴
 // beside k/(z+1)⁴, and makes sign changes there that the loop lacks. When
-// steep, a refined sign change is held to ulpTol rather than tol.
+// steep, a refined sign change is held to ulpTol rather than tol, and one
+// that refines to a ±180° phase wrap, |f| > 90, as a wide bracket below the
+// crossing at Nyquist may span, leaves the candidate unbracketed.
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64, steep bool) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
@@ -1670,7 +1672,9 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 				}
 				fa, fb := ft(a), ft(b)
 				if fa*fb <= 0 {
-					best, bracketed = refineCrossing(a, b, ft), true
+					if c := refineCrossing(a, b, ft); !steep || math.Abs(ft(c)) <= 90 {
+						best, bracketed = c, true
+					}
 					break
 				}
 				unevaluable = unevaluable || math.IsNaN(fa) || math.IsNaN(fb)
