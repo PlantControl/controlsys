@@ -213,16 +213,17 @@ func TestPidtuneAutoFirstDesignGated(t *testing.T) {
 }
 
 // When no back-off crossover passes the gate, the automatic first design is
-// returned if it passed the stability screen: on this plant every PID from
-// the bandwidth crossover down to the floor keeps under 60° at a crossover
-// or |S| > 4, so Pidtune returns the design at the bandwidth, which is
-// stable. An unstable first design still errors.
+// returned only if it passed the stability screen, crosses 0 dB and keeps
+// |S| ≤ pidTuningMaxSensitivity (IBWZGV): on this plant every PID from the
+// bandwidth crossover down to the floor keeps under 60° at a crossover or
+// |S| > 4, and the design at the bandwidth, returned for that explicit wc,
+// has an ideal derivative with |S| 5.3 and −10.9° at a crossover, so the
+// automatic design errors. An unstable first design still errors.
 func TestPidtuneAutoFirstDesignFallback(t *testing.T) {
 	num, den := Poly{-1.8326830463596728, -4.165603628320087e-05}, Poly{1, 0.7334709862442443, 0.25518924748370436, 0.03900616993539339}
 	p := pidtuneBackoffPlant(t, num, den, 0, 0)
-	pid, err := Pidtune(p, PidtunePID, 0, nil)
-	if err != nil {
-		t.Fatalf("PID: %v", err)
+	if pid, err := Pidtune(p, PidtunePID, 0, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		t.Errorf("PID: %+v, %v; want ErrPIDTuningTargetUnattainable", pid, err)
 	}
 	wc, err := findCrossoverFreq(p, 0, 60)
 	if err != nil {
@@ -232,11 +233,11 @@ func TestPidtuneAutoFirstDesignFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PID at wc=%g: %v", wc, err)
 	}
-	if *pid != *first {
-		t.Errorf("PID %+v, want the first design %+v", pid, first)
+	if stable, ok := pidtuneOracleStable(t, first, num, den, 0, 0); !ok || !stable {
+		t.Errorf("PID %+v unstable", first)
 	}
-	if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, 0); !ok || !stable {
-		t.Errorf("PID %+v unstable", pid)
+	if _, ms := pidtuneSignedMargins(pidtuneOracleLoop(first, num, den, 0, 0), 1e-9, 1e6); ms <= 4.5 {
+		t.Errorf("PID at wc=%g: %+v |S| %.3g, want > 4.5 so the gate pins it", wc, first, ms)
 	}
 	for k := 1; k <= 60; k++ {
 		w := wc * math.Pow(10, -float64(k)/pidtuneBackoffPerDecade)

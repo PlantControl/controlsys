@@ -110,7 +110,9 @@ func scrambledPlant(t *testing.T, rng *rand.Rand, num, den Poly) *System {
 	return s
 }
 
-// The Pidtune PD design on (0.3s−1)/(s+1)⁴·e^{−5s} has a filter pole at
+// The Pidtune PD design on (0.3s−1)/(s+1)⁴·e^{−5s} at its automatic
+// crossover, given explicitly since the automatic design's |S| 7.6 makes it
+// error (IBWZGV), has a filter pole at
 // 1/Tf ≈ 42 rad/s. The Nyquist grid needs delay spacing only where |L| can
 // reach 1 (ω ≲ 2), so the screen certifies it within 2000 points; spacing to
 // the filter pole needs > 5000. Oracle: dense winding of 1+L on [0, 10³].
@@ -120,7 +122,11 @@ func TestPidtuneDelayedScreenGridBudget(t *testing.T) {
 	if err := q.SetInputDelay([]float64{5}); err != nil {
 		t.Fatal(err)
 	}
-	pid, err := Pidtune(q, PidtunePD, 0, nil)
+	wc, err := findCrossoverFreq(q, 0, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := Pidtune(q, PidtunePD, wc, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

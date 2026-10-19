@@ -83,7 +83,8 @@ const (
 // without a continuous delay, when wc is the first such step below ten
 // times that frequency; not for an integrating or unstable plant with a
 // continuous delay), accepting the first that passes. When none passes, the
-// first design is returned if it passed the stability test, except for a
+// first design is returned if it passed the stability test, crosses 0 dB
+// and keeps |S| ≤ 4 (its margins unchecked), except for a
 // wc from a pole of a plant without bandwidth, which must pass the gate;
 // on a continuous plant with zero DC gain and no delay, a k·sᵐ high-pass
 // plant leaving no phase to back off into, a P, or a PD clamped short of
@@ -199,7 +200,8 @@ func (r *pidtuneRun) pipeline(sign float64) (*PID, error) {
 }
 
 // attempt is backedOff, then, unless levelCapped rejected a back-off step,
-// for a crossover from the plant's gain the ungated design at r.wc.
+// for a crossover from the plant's gain the design at r.wc gated only on
+// |S| and on crossing 0 dB (pidtuneGate.crossing), not on its margins.
 func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 	pid, err := r.backedOff(sign)
 	if err == nil || !r.auto || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
@@ -209,8 +211,10 @@ func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 		return nil, r.capErr
 	}
 	if r.src == pidtuneCrossGain || r.src == pidtuneCrossRolloff {
-		if pid, err := r.design(r.wc, sign, false); err == nil {
-			return pid, nil
+		if pid, retryErr := r.design(r.wc, sign, false); retryErr == nil {
+			if _, gateErr := r.gateOf().crossing(pid, r.pidType, r.wc); gateErr == nil {
+				return pid, nil
+			}
 		}
 	}
 	return nil, err
@@ -895,29 +899,11 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 // when |L(wc)| = 1: a design clamped short of the gain there must cross
 // elsewhere.
 func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certified bool) error {
-	if err := g.sensitive(pid, pidType, wc); err != nil {
+	margins, err := g.crossing(pid, pidType, wc)
+	if err != nil {
 		return err
 	}
-	c := pidtuneGateController(pid)
-	_, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
-	// A back-off wc lies between grid points, where the scan cannot see a
-	// crossover paired with it; pidTuningCrossingsOn seeks one when wc is on
-	// the grid.
-	if i, ok := slices.BinarySearch(g.cross.w, wc); !ok && i > 0 && i < len(g.cross.w) {
-		_, m := pidTuningCrossingsOn(g.p, c, []float64{g.cross.w[i-1], wc, g.cross.w[i]}, wc, nil)
-		margins = append(margins, m[1:]...)
-	}
-	if above, _ := g.beyond(&c); above != nil {
-		_, m := pidTuningCrossingsOn(g.p, c, above, wc, nil)
-		margins = append(margins, m[1:]...)
-	}
 	floor := pm - pidtuneMarginTol
-	if math.Abs(cmplx.Abs(g.p.at(wc)*pidTuningFeedback(c, wc))-1) > 1e-6 {
-		margins = margins[1:]
-		if len(margins) == 0 {
-			return fmt.Errorf("%s design at wc=%g has no gain crossover: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
-		}
-	}
 	short := math.NaN()
 	for _, m := range margins {
 		if certified {
@@ -936,6 +922,34 @@ func (g *pidtuneGate) check(pid *PID, pidType PidtuneType, wc, pm float64, certi
 		return fmt.Errorf("%s design at wc=%g has phase margin %.3g° at a gain crossover: %w", pidType, wc, short, errPidtuneReflected)
 	}
 	return nil
+}
+
+// crossing rejects pid as sensitive does, or when its loop has no gain
+// crossover, and returns the signed margins at its crossovers.
+func (g *pidtuneGate) crossing(pid *PID, pidType PidtuneType, wc float64) ([]float64, error) {
+	if err := g.sensitive(pid, pidType, wc); err != nil {
+		return nil, err
+	}
+	c := pidtuneGateController(pid)
+	_, margins := pidTuningCrossingsOn(g.p, c, g.cross.w, wc, g.crossExcess(c))
+	// A back-off wc lies between grid points, where the scan cannot see a
+	// crossover paired with it; pidTuningCrossingsOn seeks one when wc is on
+	// the grid.
+	if i, ok := slices.BinarySearch(g.cross.w, wc); !ok && i > 0 && i < len(g.cross.w) {
+		_, m := pidTuningCrossingsOn(g.p, c, []float64{g.cross.w[i-1], wc, g.cross.w[i]}, wc, nil)
+		margins = append(margins, m[1:]...)
+	}
+	if above, _ := g.beyond(&c); above != nil {
+		_, m := pidTuningCrossingsOn(g.p, c, above, wc, nil)
+		margins = append(margins, m[1:]...)
+	}
+	if math.Abs(cmplx.Abs(g.p.at(wc)*pidTuningFeedback(c, wc))-1) > 1e-6 {
+		margins = margins[1:]
+		if len(margins) == 0 {
+			return nil, fmt.Errorf("%s design at wc=%g has no gain crossover: %w", pidType, wc, ErrPIDTuningTargetUnattainable)
+		}
+	}
+	return margins, nil
 }
 
 // winds reports whether the sampled Nyquist curve of a continuous loop
