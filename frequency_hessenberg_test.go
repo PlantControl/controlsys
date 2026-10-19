@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -355,7 +356,7 @@ func TestFreqResponseContinuousLightlyDampedPeaks(t *testing.T) {
 }
 
 // A small pivot that GEPP resolves exactly, as at an integrator's pole-limit
-// sample point, must not be refined: refine's working-precision check
+// sample point, must not be refined: refine's first-correction check
 // leaves x bit-identical.
 func TestBalancedDenseRefineLeavesAccurateSolution(t *testing.T) {
 	sys, err := New(
@@ -381,5 +382,68 @@ func TestBalancedDenseRefineLeavesAccurateSolution(t *testing.T) {
 	want := frExactResponse(sys, frBigC(1e-5))[0]
 	if e := cmplx.Abs(got[0]-want) / cmplx.Abs(want); e > 1e-15 {
 		t.Errorf("G(1e-5) = %v, exact %v, rel err %.3g", got[0], want, e)
+	}
+}
+
+// nearDoublePoleCases (PZMG3F) are companion realizations with a near-double
+// pole at z = 1 and a frequency where GEPP's solution was off.
+var nearDoublePoleCases = []struct {
+	num, den []float64
+	dt, w    float64
+}{
+	{[]float64{-1.726944008929345, -1.5131820042093045}, []float64{1, -2.4409333068225934, 1.5714018141979766, 0.1799962921160343, -0.3104647994843685}, 0.1, 4.913970576589073e-05},
+	{[]float64{1.5841368901875659, -1.4026199636681365}, []float64{1, -2.348244102065107, 1.6964882041386697, -0.3482441020680517}, 1, 3.1339155517751782e-06},
+}
+
+func nearDoublePoleSystem(tb testing.TB, i int) (*System, []float64) {
+	tb.Helper()
+	c := nearDoublePoleCases[i]
+	r, err := (&TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: c.dt}).StateSpace()
+	if err != nil {
+		tb.Fatal(err)
+	}
+	omega := []float64{c.w}
+	for k := -200; k <= 200; k++ {
+		omega = append(omega, c.w*(1+float64(k)*1e-14))
+	}
+	return r.Sys, omega
+}
+
+func BenchmarkFreqResponseNearDoublePole(b *testing.B) {
+	for i := range nearDoublePoleCases {
+		sys, omega := nearDoublePoleSystem(b, i)
+		b.Run(fmt.Sprintf("case%d", i), func(b *testing.B) {
+			for b.Loop() {
+				if _, err := sys.FreqResponse(omega); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// PZMG3F: next to a near-double pole on the unit circle a working-precision
+// residual of GEPP's solution can round to zero, and refine skipped
+// refinement with x off by 3e-4 relative (wrong Im sign) at isolated
+// frequencies. Oracle: the stored realization solved in big.Float.
+func TestBalancedDenseNearDoublePoleRefines(t *testing.T) {
+	for i, c := range nearDoublePoleCases {
+		sys, omega := nearDoublePoleSystem(t, i)
+		for _, pointwise := range []bool{false, true} {
+			eval := sys.FreqResponse
+			if pointwise {
+				eval = sys.FreqResponsePointwise
+			}
+			fr, err := eval(omega)
+			if err != nil {
+				t.Fatalf("case %d: %v", i, err)
+			}
+			for k, w := range omega {
+				want := frExactResponse(sys, frExactPoint(w, c.dt))[0]
+				if e := cmplx.Abs(fr.Data[k]-want) / cmplx.Abs(want); e > 1e-10 {
+					t.Errorf("case %d pointwise %v: G(%.17g) = %v, exact %v, rel err %.3g", i, pointwise, w, fr.Data[k], want, e)
+				}
+			}
+		}
 	}
 }

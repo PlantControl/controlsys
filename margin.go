@@ -125,7 +125,7 @@ func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
 	if h, ok := e.exactAt(pt); ok {
 		e.dst[0] = h
-	} else if err := evalWithPoleLimit(e.eval, e.sys, pt, e.dst); err != nil {
+	} else if err := evalWithPoleLimitGated(e.eval, e.sys, pt, e.dst, ddGate{limit: !e.extended, snap: true, allow: e.ddAllow, w: w}); err != nil {
 		h, ok := complex(0, 0), false
 		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) {
 			h, ok = ddSISOResponse(e.sys, pt)

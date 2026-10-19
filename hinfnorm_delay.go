@@ -229,7 +229,7 @@ func (e *delayLFT) char(w float64) complex128 {
 func (e *delayLFT) h22Det(w float64) (complex128, bool) {
 	pt := e.td.frequencyPoint(w)
 	if e.h22 != nil {
-		if err := evalWithPoleLimit(e.h22, e.h22sys, pt, e.hbuf); err != nil {
+		if err := evalWithPoleLimitGated(e.h22, e.h22sys, pt, e.hbuf, ddGate{allow: e.ddAllow, w: w}); err != nil {
 			h, ok := complex(0, 0), false
 			if len(e.hbuf) == 1 && (e.ddAllow == nil || e.ddAllow(w)) {
 				h, ok = ddSISOResponse(e.h22sys, pt)
