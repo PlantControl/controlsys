@@ -110,6 +110,15 @@ func FuzzCanon(f *testing.F) {
 		ac := fzDenseData(res.Sys.A)
 		normA := fzFrob(s.A) + fzFrob(ac)
 		tol := 1e4 * float64(n) * eps * condT * normA
+		if s.EigErr() > 1e-8*math.Max(s.NormJ, 1) {
+			for i, a := range s.Eig {
+				for _, b := range s.Eig[i+1:] {
+					if cmplx.Abs(a-b) <= 2*s.EigErr() {
+						fzSkip(t, "Canon modal: clustered eigenvalues with ill-determined eigenvectors")
+					}
+				}
+			}
+		}
 		ev, msg := fzQuasiBlocks(ac, n, tol)
 		if msg != "" {
 			t.Fatalf("Canon modal: %s (tol %.3g)\nAc=%v\n%s", msg, tol, ac, s)
