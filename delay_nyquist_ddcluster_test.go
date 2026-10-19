@@ -60,6 +60,9 @@ func denseLoopPeaks(q quasiLoop) (supT, supS float64) {
 	roots, _ := Poly(q.den).Roots()
 	for _, r := range roots {
 		w := math.Abs(imag(r))
+		if w == 0 {
+			continue
+		}
 		for d := 1e-12; d < 1e-1; d *= 1.05 {
 			ws = append(ws, w*(1+d), w*(1-d))
 		}
