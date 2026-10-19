@@ -67,8 +67,9 @@ func TestPidtuneDelayReflectedCrossingClassical(t *testing.T) {
 // plant skips its Nyquist test agrees with the test: over seeded stable
 // delayed plants and designs (least-lead PDFs included) at crossovers down
 // to the back-off floor, the high-gain PDs on a zero-DC plant whose tail
-// bound is out of reach, and the gate-passing PDFs of the BIAA3G plants,
-// each loop winds reports unstable is unstable by pidTuningDelayStability.
+// bound is out of reach, and the PDFs of the BIAA3G plants the gate passes
+// or rejects for crossing over above the band (4G4ABV), each loop
+// winds reports unstable is unstable by pidTuningDelayStability.
 func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 	if raceEnabled {
 		t.Skip("slow under race")
@@ -108,7 +109,8 @@ func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 							continue
 						}
 						wound++
-						pass := gate.check(pid, f, w, 60, false) == nil
+						gerr := gate.check(pid, f, w, 60, false)
+						pass := gerr == nil || errors.Is(gerr, errPidtuneAboveBand)
 						if onlyPassing && !pass {
 							continue
 						}
@@ -443,7 +445,7 @@ func TestPidtuneGateBandFromDesign(t *testing.T) {
 	den = Poly{1, 4.131322890232889, 4.352348907079097, 0.6684842552460563, -0.0031624264514338862}
 
 	const delay = 0.1
-	pd :=pidtuneBackoffPlant(t, num, den, 0, delay)
+	pd := pidtuneBackoffPlant(t, num, den, 0, delay)
 	gate, wc = gateOf(pd)
 	ctrl := &PID{Kp: 0.8 / num[0]}
 	l := pidtuneOracleLoop(ctrl, num, den, 0, delay)
@@ -457,5 +459,88 @@ func TestPidtuneGateBandFromDesign(t *testing.T) {
 	}
 	if err := gate.sensitive(ctrl, PidtuneP, wc); err == nil {
 		t.Errorf("delayed P %+v: |S| → %.3g passes the gate", ctrl, peak)
+	}
+}
+
+// pidtuneOracleTopCrossing returns the highest ω in [1e-9, 1e9] where the
+// directly evaluated |L| crosses 1, or 0 when it never does.
+func pidtuneOracleTopCrossing(pid *PID, num, den Poly) float64 {
+	L := pidtuneOracleLoop(pid, num, den, 0, 0)
+	top, prev := 0.0, cmplx.Abs(L(1e-9))-1
+	for w := 1e-9 * 1.005; w <= 1e9; w *= 1.005 {
+		v := cmplx.Abs(L(w)) - 1
+		if v*prev <= 0 && v != prev {
+			top = w
+		}
+		prev = v
+	}
+	return top
+}
+
+// A back-off step on G = 0.001(s+1e-6)/(s²+0.01s+1) from the pole-fallback
+// crossover 0.5 it took before the rolloff crossover (0a2620b) passed the
+// gate with a PID Kp 2.67e7, Ki 844 crossing over again near 2.7e4, five
+// decades above 0.5, with margin to spare (4G4ABV): the gate now rejects a
+// back-off design crossing over above the first crossover's band. The PI at
+// 0.5, signed margin −93° at wc, passes on the classical margin, and the
+// automatic designs, now at the rolloff crossover 10, cross over within a
+// decade of it. Oracle: the directly evaluated loop and its closed-loop
+// roots.
+func TestPidtuneBackoffStaysInBand(t *testing.T) {
+	num, den := Poly{0.001, 1e-9}, Poly{1, 0.01, 1}
+	p := pidtuneBackoffPlant(t, num, den, 0, 0)
+	eval, err := newSISOEval(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	screen, err := newPIDStabilityScreen(p, eval, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wc = 0.5
+	gate := newPidtuneGate(p, screen.model, eval, wc, wc*math.Pow(10, -pidtuneBackoffMaxDecade))
+
+	w := wc * math.Pow(10, -110.0/pidtuneBackoffPerDecade)
+	pid, err := pidtuneGains(p, &pidtunePlantPoint{}, PidtunePID, w, 60, 1, true, false, pidtunePIDFIterate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if top := pidtuneOracleTopCrossing(pid, num, den); !(pid.Kp > 1e7) || !(top > 1e3*wc) {
+		t.Fatalf("PID at %g: %+v crosses over up to %g; want the 4G4ABV design above the band", w, pid, top)
+	}
+	if err := gate.check(pid, PidtunePID, w, 60, true); !errors.Is(err, errPidtuneAboveBand) {
+		t.Errorf("PID at %g: %+v gate %v; want rejected above the band", w, pid, err)
+	}
+
+	pi, err := pidtuneGains(p, &pidtunePlantPoint{}, PidtunePI, wc, 60, 1, true, false, pidtunePIDFIterate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gate.check(pi, PidtunePI, wc, 60, true); err != nil {
+		t.Errorf("PI at %g: %+v gate %v", wc, pi, err)
+	}
+	explicit, err := Pidtune(p, PidtunePI, wc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(explicit.Kp/1498.1586818949-1) > 1e-6 || math.Abs(explicit.Ki/37.48520992983-1) > 1e-6 {
+		t.Errorf("PI at explicit wc %g: %+v; want Kp 1498.16, Ki 37.485", wc, explicit)
+	}
+	pidtuneCheckRobust(t, "PI explicit", explicit, num, den, 0, 4.5)
+
+	auto, _, err := autoCrossoverSource(p, 0, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []PidtuneType{PidtunePI, PidtunePID, PidtunePIDF} {
+		pid, err := Pidtune(p, f, 0, nil)
+		if err != nil {
+			t.Errorf("%s: %v", f, err)
+			continue
+		}
+		pidtuneCheckRobust(t, string(f), pid, num, den, 0, 4.5)
+		if top := pidtuneOracleTopCrossing(pid, num, den); !(top > auto/10 && top < 10*auto) {
+			t.Errorf("%s: %+v crosses over up to %g, automatic wc %g", f, pid, top, auto)
+		}
 	}
 }
