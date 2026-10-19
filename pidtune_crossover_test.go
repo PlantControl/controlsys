@@ -91,13 +91,17 @@ func TestPidtunePoleFallbackBacksOffSixDecades(t *testing.T) {
 }
 
 // A crossover from the pole fallback is only a guess, so its first design is
-// gated like a back-off step: before, PI on the first plant returned PM
-// 0.65° and |S| 96, and on the second |S| 19, where the crossover before
-// TFE7I2 gave |S| ≤ 1.3. Over a seeded population of pole-fallback plants
-// every returned design is stable and keeps the margin at every crossover
-// and |S| ≤ 4.5. Oracle: closed-loop roots from num/den, and |S| and the
-// margin of the directly evaluated loop, counted as the distance of ∠L from
-// −1 since the roots certify stability.
+// gated like every automatic one, and with no fallback to it: before, PI on
+// the first plant returned PM 0.65° and |S| 96, and on the second |S| 19,
+// where the crossover before TFE7I2 gave |S| ≤ 1.3. The keep-first rule for
+// P and clamped PD (EU24XW) covers only zero-DC k·sᵐ plants (7RONX4): before,
+// on plants with a nonzero DC gain and no bandwidth, P on a stable one
+// returned PM 39.9°, and PD on an unstable one PM 18.5° with |S| 3.83.
+// Over a seeded population of pole-fallback plants every returned design is
+// stable and keeps the margin at every crossover and |S| ≤ 4.5. Oracle:
+// closed-loop roots from num/den, and |S| and the margin of the directly
+// evaluated loop, counted as the distance of ∠L from −1 since the roots
+// certify stability.
 func TestPidtunePoleFallbackFirstDesignGated(t *testing.T) {
 	robust := func(name string, pid *PID, num, den Poly, dt float64) {
 		t.Helper()
@@ -133,6 +137,26 @@ func TestPidtunePoleFallbackFirstDesignGated(t *testing.T) {
 			continue
 		}
 		robust(name, pid, c.num, c.den, c.dt)
+	}
+	for _, c := range []struct {
+		f        PidtuneType
+		num, den Poly
+		src      pidtuneCrossover
+	}{
+		{PidtuneP, Poly{-0.20029805788732397, -0.032588497683437787, -8.730269241365936e-10}, Poly{1, 15.674185099429454, 28.120045177542792}, pidtuneCrossPole},
+		{PidtunePD, Poly{0.018507331344365975, 0.009412563890440635, 1.5960285944590718e-07}, Poly{1, 0.6317501655870971, -0.17009008889471883}, pidtuneCrossPole},
+	} {
+		name := fmt.Sprintf("%s %v/%v", c.f, c.num, c.den)
+		p := pidtuneBackoffPlant(t, c.num, c.den, 0, 0)
+		if _, src, err := autoCrossoverSource(p, 0, 60); err != nil || src != c.src {
+			t.Fatalf("%s: crossover source %v, %v; want %v", name, src, err, c.src)
+		}
+		pid, err := Pidtune(p, c.f, 0, nil)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		pidtuneCheckRobust(t, name, pid, c.num, c.den, 0, 4.5)
 	}
 
 	fams := []PidtuneType{PidtuneP, PidtuneI, PidtunePI, PidtunePD, PidtunePDF, PidtunePID, PidtunePIDF}

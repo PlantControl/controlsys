@@ -85,3 +85,56 @@ func TestPidtuneExplicitWcFallbacksUngated(t *testing.T) {
 		}
 	}
 }
+
+// E4I7RE: an explicit-wc PD places |L(wc)| = 1, as MATLAB crosses over at
+// the given wc. The Td/10 filter used to be left out of the phase and gain,
+// so |L(wc)| was 0.49 at the upper phase clamp and 1.00025 at the lower one
+// (the plants here). The phase is now placed on the realized response: the
+// requested lead, else the lower clamp 0.05 rad, else the most lead of a
+// Td/10 PD (atan(1.1x) − atan(0.1x) at x = wc·Td = 1/√0.11, 56.44°, for a
+// continuous plant). When that design is unstable, the legacy Td with its
+// gain placed is taken (zero-DC s²/(s²+…)). Oracle: closed-loop roots and
+// L = C·num/den evaluated directly.
+func TestPidtuneExplicitWcPDCrossesAtWc(t *testing.T) {
+	x := 1 / math.Sqrt(0.11)
+	most := math.Atan(1.1*x) - math.Atan(0.1*x)
+	for _, c := range []struct {
+		name     string
+		num, den Poly
+		dt, wc   float64
+		form     PIDFormula
+		lead, td float64
+	}{
+		{"most lead", Poly{3.421208948435586}, Poly{1, 4.795098433458527, 6.9583681203155, 3.1763365569137942}, 0, 5.616593566028197, ForwardEuler, most, x / 5.616593566028197},
+		{"lower clamp", Poly{3.0280957501733172}, Poly{1, 4.64873917554455, 5.398081602694972}, 0, 1.0808388293067428, ForwardEuler, 0.05, 0},
+		{"lower clamp discrete", Poly{0.34196211973925655}, Poly{1, -0.8966232705508059}, 0.11555016600854891, 2.836482715451361, BackwardEuler, 0.05, 0},
+		{"legacy Td", Poly{0.9108330442863755, 0, 0}, Poly{1, 3.6385316848945637, 2.197552090147012}, 0, 0.3823341170934764, ForwardEuler, math.NaN(), 48.62872358299712 / 0.9303964644639571},
+	} {
+		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
+		pid, err := Pidtune(p, PidtunePD, c.wc, nil)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if stable, ok := pidtuneOracleStable(t, pid, c.num, c.den, c.dt, 0); !ok || !stable {
+			t.Errorf("%s: %+v unstable", c.name, pid)
+		}
+		if pid.DFormula != c.form || math.Abs(pid.Tf-pid.Kd/pid.Kp/10) > 1e-12*pid.Tf {
+			t.Errorf("%s: %+v, want %v and Tf = Td/10", c.name, pid, c.form)
+		}
+		l := pidtuneOracleLoop(pid, c.num, c.den, c.dt, 0)(c.wc)
+		if math.Abs(cmplx.Abs(l)-1) > 1e-9 {
+			t.Errorf("%s: |L(wc)| = %.12g, want 1", c.name, cmplx.Abs(l))
+		}
+		z := complex(0, c.wc)
+		if c.dt > 0 {
+			z = cmplx.Exp(complex(0, c.wc*c.dt))
+		}
+		if lead := cmplx.Phase(l / (c.num.Eval(z) / c.den.Eval(z))); !math.IsNaN(c.lead) && math.Abs(lead-c.lead) > 1e-6 {
+			t.Errorf("%s: ∠C(wc) = %.9g rad, want %.9g", c.name, lead, c.lead)
+		}
+		if td := pid.Kd / pid.Kp; c.td != 0 && math.Abs(td-c.td) > 1e-6*c.td {
+			t.Errorf("%s: Td %.9g, want %.9g", c.name, td, c.td)
+		}
+	}
+}
