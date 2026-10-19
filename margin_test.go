@@ -2560,3 +2560,100 @@ func BenchmarkDiskMargin_PIDExactDelay(b *testing.B) {
 		})
 	}
 }
+
+// SIYUND: an input-delayed loop with an origin cluster s^k(s²+as+b), tiny b,
+// fails the double solve at |s| of the cluster's size, where the grid scan
+// starts; it used to report the singular solve instead of margins. Each
+// crossover is checked against L = N/D·e^{-jωτ} by Horner, and the gain
+// crossovers and phase margins against the delay-free loop.
+func TestAllMargin_DelayedOriginCluster(t *testing.T) {
+	type plant struct{ num, den []float64 }
+	b := []float64{0.09173182574148675, -0.9583106107971275, -2.6790649922210594, -0.009260826722141069}
+	plants := []plant{
+		{[]float64{b[3], b[2], b[1], b[0]}, []float64{1, 0.0006739302865839005, -2.2702318530740966e-10, 0, 0}},
+		{[]float64{0.000981458736000713, 3.2248068492893614e-08}, []float64{1, 0.00012488736743101802, 4.7545448061524905e-14, 0}},
+		{[]float64{0.017332114011073613, 2.24690415570857e-07}, []float64{1, 0.00019618405528066743, 1.0432101813460174e-11, 0}},
+		{[]float64{-0.02096054831839438, 0.010129085748171583, 0.4822690608115575, 0.021078985054454224, 0.03413845630948969}, []float64{1, 0.6322585502604339, 0.06574629345200303, -9.271240476517249e-10, 0, 0}},
+		{[]float64{1.9188317375876882, 1.5083785090172463, 0.32156836056367194, 0.015658860719559062}, []float64{1, 0.46404121934763415, -6.209067747296065e-08, 0, 0}},
+		{[]float64{0.453673501927648, -8.932306915080126, -0.5965542838050257, -2.3715399508164405}, []float64{1, 0.005330172998644253, -5.269607835057311e-16, 0, 0}},
+	}
+	taus := []float64{1e-3, 0.0006026822651604253, 0.0018212703564542403, 0.0012014616935238694, 0.001181949427158492, 0.00025297229262921498}
+	rng := rand.New(rand.NewPCG(7, 11))
+	for range 40 {
+		den := []float64{1, math.Pow(10, -4*rng.Float64()), math.Pow(10, -16+8*rng.Float64())}
+		for range 2 + rng.IntN(2) {
+			den = append(den, 0)
+		}
+		num := make([]float64, 1+rng.IntN(len(den)-1))
+		for i := range num {
+			num[i] = rng.NormFloat64() * math.Pow(10, -3+3*rng.Float64())
+		}
+		plants = append(plants, plant{num, den})
+		taus = append(taus, math.Pow(10, -4+2*rng.Float64()))
+	}
+	sys0, err := New(
+		mat.NewDense(4, 4, []float64{0, 0, 0, -0, 1, 0, 0, -0, 0, 1, 0, 2.2702318530740966e-10, 0, 0, 1, -0.0006739302865839005}),
+		mat.NewDense(4, 1, b),
+		mat.NewDense(1, 4, []float64{0, 0, 0, 1}),
+		mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, p := range plants {
+		var sys *System
+		if i == 0 {
+			sys = sys0
+		} else {
+			sys = makePlant(t, p.num, p.den)
+		}
+		tau := taus[i]
+		loop := func(w float64) complex128 {
+			s := complex(0, w)
+			return polyEval(p.num, s) / polyEval(p.den, s) * cmplx.Exp(complex(0, -w*tau))
+		}
+		h, err := sys.EvalFr(complex(0, 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cmplx.Abs(h[0][0]-loop(1)*cmplx.Exp(complex(0, tau))) > 1e-9*cmplx.Abs(h[0][0]) {
+			t.Fatalf("plant %d: oracle L(j) = %v, realization %v", i, loop(1), h[0][0])
+		}
+		free, err := AllMargin(sys)
+		if err != nil {
+			t.Fatalf("plant %d delay-free: %v", i, err)
+		}
+		delayed := sys.Copy()
+		if err := delayed.SetInputDelay([]float64{tau}); err != nil {
+			t.Fatal(err)
+		}
+		r, err := AllMargin(delayed)
+		if err != nil {
+			t.Fatalf("plant %d, τ=%g: %v", i, tau, err)
+		}
+		if _, err := Margin(delayed); err != nil {
+			t.Fatalf("plant %d, τ=%g: Margin: %v", i, tau, err)
+		}
+		if len(r.GainCrossFreqs) != len(free.GainCrossFreqs) {
+			t.Fatalf("plant %d: gain crossovers %v, delay-free %v", i, r.GainCrossFreqs, free.GainCrossFreqs)
+		}
+		for k, w := range r.GainCrossFreqs {
+			if math.Abs(w-free.GainCrossFreqs[k]) > 1e-9*w {
+				t.Errorf("plant %d: wc %v, delay-free %v", i, w, free.GainCrossFreqs[k])
+			}
+			if want := free.PhaseMargins[k] - w*tau*180/math.Pi; math.Abs(wrapDegrees(r.PhaseMargins[k]-want)) > 1e-6 {
+				t.Errorf("plant %d: PM %v at %v, want %v", i, r.PhaseMargins[k], w, want)
+			}
+			l := loop(w)
+			if math.Abs(cmplx.Abs(l)-1) > 1e-6 || math.Abs(r.PhaseMargins[k]-phaseMarginDeg(l)) > 1e-3 {
+				t.Errorf("plant %d: oracle L(j%v) = %v, PM %v", i, w, l, r.PhaseMargins[k])
+			}
+		}
+		for k, w := range r.PhaseCrossFreqs {
+			l := loop(w)
+			gm := -20 * math.Log10(cmplx.Abs(l))
+			if math.Abs(phaseOffsetDeg(l)) > 1e-3 || math.Abs(r.GainMargins[k]-gm) > 1e-3*max(1, math.Abs(gm)) {
+				t.Errorf("plant %d: oracle L(j%v) = %v, GM %v", i, w, l, r.GainMargins[k])
+			}
+		}
+	}
+}

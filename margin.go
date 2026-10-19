@@ -90,8 +90,8 @@ type sisoEval struct {
 	skipped  error
 	resolved bool
 	// extended falls back to ddSISOResponse where the double solve fails;
-	// see rationalLoop.gainCrossings. ddAllow, when set, limits the
-	// fallback to the frequencies it accepts.
+	// see rationalLoop.gainCrossings and the delayed grid in allMargin.
+	// ddAllow, when set, limits the fallback to the frequencies it accepts.
 	extended bool
 	ddAllow  func(w float64) bool
 	// exact evaluates in double-double first: beside a pair 1 ± jε the
@@ -476,7 +476,10 @@ func allMargin(sys *System) (*AllMarginResult, error) {
 		return nil, err
 	}
 	if loop == nil || loop.delayed {
+		// The pole limit's samples fail next to an origin cluster too (SIYUND).
+		eval.extended = loop != nil
 		gain, phase, err := gridMarginCrossings(sys, eval, loop == nil)
+		eval.extended = false
 		if err != nil {
 			return nil, err
 		}
