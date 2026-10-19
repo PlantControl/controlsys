@@ -38,7 +38,11 @@ func FuzzH2Norm(f *testing.F) {
 			if !s.Discrete && !dZero {
 				want = math.Inf(1)
 			}
-			if h2 != want && math.Abs(h2-want) > 1e-14*want || nrm != h2 {
+			bad := math.Abs(h2-want) > 1e-14*want
+			if math.IsInf(want, 1) {
+				bad = !math.IsInf(h2, 1)
+			}
+			if bad || nrm != h2 {
 				t.Fatalf("H2Norm = %v, Norm(2) = %v, want %v\n%s", h2, nrm, want, s)
 			}
 			return

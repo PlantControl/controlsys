@@ -166,6 +166,11 @@ func FuzzSSToTF(f *testing.F) {
 
 		const eps = 0x1p-52
 		cp := fzRatFloats(fzCharPolyExact(s.A, n))
+		for _, c := range cp {
+			if math.IsInf(c, 0) {
+				fzSkip(t, "char poly overflows float64")
+			}
+		}
 		pts := fzConvPoints(s)
 		if s.Discrete {
 			pts = append(pts, 1)
@@ -177,7 +182,7 @@ func FuzzSSToTF(f *testing.F) {
 		checked := 0
 		for _, x := range pts {
 			cx := cmplx.Abs(fzBigPolyEval(cp, x))
-			if cx == 0 {
+			if cx == 0 || math.IsInf(cx, 0) {
 				continue
 			}
 			g, ok := fzExactResponse(n, m, p, s.A, s.B, s.C, s.D, x)
