@@ -1222,7 +1222,8 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 // a crossover when negative unless L is real below it too. A scan crossing
 // with |L| within the solve noise of ddSISOResponseNoise is rounding residue,
 // as of a cluster k·(z+1)⁴ at θ ~ π − 1e-10, |L| ~ 1e-41, where L → +0; L at
-// Nyquist must also exceed the coefficient noise, as L(−1) of an ulp of |D|.
+// Nyquist must also exceed the coefficient noise, as L(−1) of an ulp of |D|;
+// a NaN bound counts as above it.
 // The scan does not test the latter: crossings beside a cluster with exact
 // coefficients lie at |L| ~ that bound. A pole at
 // Nyquist, where rounding makes sign changes beside the cluster, skips the

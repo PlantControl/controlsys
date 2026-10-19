@@ -77,7 +77,7 @@ func (x ddComplex) complex128() complex128 { return complex(x.re.hi+x.re.lo, x.i
 // as next to a pole cluster k/(z+1)ⁿ split by coefficient rounding, where
 // |L| still crosses 1. ok is false at a pivot below 2⁻¹⁰⁰ of the scale.
 func ddSISOResponse(sys *System, pt frequencyPoint) (h complex128, ok bool) {
-	h, _, _, ok = ddSISOResponseNoise(sys, pt)
+	h, _, _, ok = ddSISOSolve(sys, pt, false)
 	return h, ok
 }
 
@@ -90,6 +90,10 @@ func ddSISOResponse(sys *System, pt frequencyPoint) (h complex128, ok bool) {
 // as of C = num − D·den rounded when D ≠ 0. coeffs is NaN when the double
 // transposed solve for y fails.
 func ddSISOResponseNoise(sys *System, pt frequencyPoint) (h complex128, solve, coeffs float64, ok bool) {
+	return ddSISOSolve(sys, pt, true)
+}
+
+func ddSISOSolve(sys *System, pt frequencyPoint, withNoise bool) (h complex128, solve, coeffs float64, ok bool) {
 	n, _ := sys.A.Dims()
 	d := sys.D.At(0, 0)
 	if n == 0 {
@@ -114,10 +118,13 @@ func ddSISOResponseNoise(sys *System, pt frequencyPoint) (h complex128, solve, c
 		}
 		x[i] = ddComplex{re: dd{br.Data[i*br.Stride], 0}}
 	}
-	mt := make([]complex128, n*n)
-	for i := range n {
-		for j := range n {
-			mt[j*n+i] = m[i*n+j].complex128()
+	var mt []complex128
+	if withNoise {
+		mt = make([]complex128, n*n)
+		for i := range n {
+			for j := range n {
+				mt[j*n+i] = m[i*n+j].complex128()
+			}
 		}
 	}
 	tol := float64(n) * mScale * 0x1p-100
@@ -169,7 +176,7 @@ func ddSISOResponseNoise(sys *System, pt frequencyPoint) (h complex128, solve, c
 	solve = 0x1p-90 * (aq*math.Sqrt(cNorm*xNorm) + math.Abs(d))
 	coeffs = math.NaN()
 	piv := make([]int, n)
-	if cLUFactor(mt, piv, n) {
+	if withNoise && cLUFactor(mt, piv, n) {
 		yt := make([]complex128, n)
 		for i := range n {
 			yt[i] = complex(cr.Data[i], 0)
