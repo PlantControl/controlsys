@@ -164,7 +164,7 @@ func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", err)
 	}
-	sign, rule := pidtuneGainSign(plant, eval.at, wc, hasI)
+	sign, rule := pidtuneGainSign(plant, eval.try, wc, hasI)
 	if eval.err != nil {
 		return nil, fmt.Errorf("Pidtune: %w", eval.err)
 	}
@@ -633,8 +633,8 @@ const (
 // with no DC sign and a pole at the integrator (pidtuneNearIntegrator) takes
 // this rule too; one without such a pole, a zero-DC plant, takes the same
 // signs under pidtuneSignStable, so −G gets −sign and either is mirrored.
-func pidtuneGainSign(plant *System, at func(float64) complex128, wc float64, integral bool) (float64, pidtuneSignRule) {
-	if s := pidTuningDCSign(plant, at, wc); s != 0 {
+func pidtuneGainSign(plant *System, try func(float64) (complex128, bool), wc float64, integral bool) (float64, pidtuneSignRule) {
+	if s := pidTuningDCSign(plant, try, wc); s != 0 {
 		return s, pidtuneSignFixed
 	}
 	stable, err := plant.IsStable()

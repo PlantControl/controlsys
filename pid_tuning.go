@@ -230,8 +230,9 @@ const pidTuningMaxSensitivity = 4
 // an integrator displaced inside the unit circle, or its DC gain is zero
 // relative to the peak of |G| sampled over six decades around wc. A
 // frequency response at DC is no substitute: next to such an integrator it
-// can be finite, and the samples below wc then fail.
-func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) float64 {
+// can be finite, and the samples below wc then fail. A sample try cannot
+// resolve is skipped, so it never fails the design.
+func pidTuningDCSign(plant *System, try func(float64) (complex128, bool), wc float64) float64 {
 	if stable, err := plant.IsStable(); err != nil || !stable {
 		return 0
 	}
@@ -249,8 +250,8 @@ func pidTuningDCSign(plant *System, at func(float64) complex128, wc float64) flo
 		if plant.Dt > 0 && w >= math.Pi/plant.Dt {
 			break
 		}
-		if g := cmplx.Abs(at(w)); finitePID(g) {
-			peak = math.Max(peak, g)
+		if h, ok := try(w); ok && finitePID(cmplx.Abs(h)) {
+			peak = math.Max(peak, cmplx.Abs(h))
 		}
 	}
 	if math.Abs(dc) <= 1e3*0x1p-52*peak {
@@ -1217,7 +1218,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return stamp(res, err)
 	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
-		gainSign := pidTuningDCSign(plant, eval.at, wc)
+		gainSign := pidTuningDCSign(plant, eval.try, wc)
 		if blocked {
 			return integralBlocked(wc, gainSign)
 		}
@@ -1233,7 +1234,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	gainSign := pidTuningDCSign(plant, eval.at, wc0)
+	gainSign := pidTuningDCSign(plant, eval.try, wc0)
 	if blocked {
 		return integralBlocked(wc0, gainSign)
 	}
