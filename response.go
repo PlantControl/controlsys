@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -514,6 +516,9 @@ func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
 		if gain, ok, err := sys.dcGainByStructuralEntries(); ok {
 			return gain, err
 		}
+		if gain, ok := sys.dcGainByBlockLaurent(); ok {
+			return gain, nil
+		}
 		res, err := scaled.rationalTransferFunction(nil)
 		if err != nil {
 			return nil, fmt.Errorf("DCGain: %w", err)
@@ -608,6 +613,398 @@ func (sys *System) dcGainByStructuralEntries() (*mat.Dense, bool, error) {
 		}
 	}
 	return gain, true, nil
+}
+
+// dcGainByBlockLaurent expands G(x0+σ) = D + C(σI + P)⁻¹B, P = x0·I − A,
+// in Laurent series by back-substitution over the strongly connected
+// components of A's exact sparsity, which put A in block triangular form.
+// A 1×1 component with A_kk = x0 exactly is a pole at x0 of the float
+// model, counted exactly; exactly zero couplings stay zero, so the sign of
+// an entry's leading coefficient does not hinge on roundoff in
+// transfer-function coefficients. Given such a pole, a larger block that a
+// regular solve would reject has its eigenvalues nearest x0 deflated to x0
+// (deflateBlockAt). An entry is ±∞ by its most negative order coefficient
+// above 100·n·ε of its magnitude scale, else the σ⁰ coefficient. ok is
+// false with no exact pole at x0, a singular block, or a finite entry
+// without three correct digits, leaving those to the transfer limit.
+func (sys *System) dcGainByBlockLaurent() (*mat.Dense, bool) {
+	return sys.blockLaurentGain(sys.A, sys.B, sys.C, true)
+}
+
+func (sys *System) blockLaurentGain(A, B, C *mat.Dense, deflate bool) (*mat.Dense, bool) {
+	n, m, p := sys.Dims()
+	x0 := 0.0
+	if sys.IsDiscrete() {
+		x0 = 1
+	}
+	aRaw := A.RawMatrix()
+	blocks := tarjanBlocks(aRaw, n)
+	blockOf := make([]int, n)
+	ns := 0
+	for bi, blk := range blocks {
+		for _, k := range blk {
+			blockOf[k] = bi
+		}
+		if len(blk) == 1 && aRaw.Data[blk[0]*aRaw.Stride+blk[0]] == x0 {
+			ns++
+		}
+	}
+	if ns == 0 {
+		return nil, false
+	}
+	type regular struct {
+		lu     mat.LU
+		invNrm float64
+	}
+	regs := make([]*regular, len(blocks))
+	var illCond [][]int
+	for bi, blk := range blocks {
+		r := len(blk)
+		if r == 1 && aRaw.Data[blk[0]*aRaw.Stride+blk[0]] == x0 {
+			continue
+		}
+		pk := mat.NewDense(r, r, nil)
+		pkRaw := pk.RawMatrix()
+		for ii, k := range blk {
+			for jj, l := range blk {
+				v := -aRaw.Data[k*aRaw.Stride+l]
+				if ii == jj {
+					v += x0
+				}
+				pkRaw.Data[ii*pkRaw.Stride+jj] = v
+			}
+		}
+		reg := &regular{}
+		reg.lu.Factorize(pk)
+		c := reg.lu.Cond()
+		if deflate && r > 1 && !(c <= mat.ConditionTolerance) {
+			illCond = append(illCond, blk)
+			continue
+		}
+		if math.IsInf(c, 0) || math.IsNaN(c) {
+			return nil, false
+		}
+		reg.invNrm = c / mat.Norm(pk, 1)
+		regs[bi] = reg
+	}
+	if len(illCond) > 0 {
+		A, B, C = mat.DenseCopyOf(A), mat.DenseCopyOf(B), mat.DenseCopyOf(C)
+		for _, blk := range illCond {
+			if !deflateBlockAt(A, B, C, blk, x0) {
+				return nil, false
+			}
+		}
+		return sys.blockLaurentGain(A, B, C, false)
+	}
+
+	nord := 2*ns + 1
+	w := make([]float64, 2*nord*n*m)
+	w, mag := w[:nord*n*m], w[nord*n*m:]
+	at := func(s []float64, ord, k int) []float64 {
+		o := ((ord+ns)*n + k) * m
+		return s[o : o+m]
+	}
+	bRaw := B.RawMatrix()
+	var sol, tmp *mat.Dense
+	for bi, blk := range blocks {
+		r := len(blk)
+		rd, rm := make([]float64, r*nord*m), make([]float64, r*nord*m)
+		for t := range nord {
+			ord := t - ns
+			for ii, k := range blk {
+				row, mrow := rd[(t*r+ii)*m:(t*r+ii+1)*m], rm[(t*r+ii)*m:(t*r+ii+1)*m]
+				if ord == 0 {
+					for j := range m {
+						v := bRaw.Data[k*bRaw.Stride+j]
+						row[j], mrow[j] = v, math.Abs(v)
+					}
+				}
+				for l := range n {
+					a := aRaw.Data[k*aRaw.Stride+l]
+					if a == 0 || blockOf[l] == bi {
+						continue
+					}
+					wl, ml := at(w, ord, l), at(mag, ord, l)
+					for j := range m {
+						row[j] += a * wl[j]
+						mrow[j] += math.Abs(a) * ml[j]
+					}
+				}
+			}
+		}
+		reg := regs[bi]
+		if reg == nil {
+			k := blk[0]
+			for t := range nord - 1 {
+				copy(at(w, t-ns, k), rd[(t+1)*m:(t+2)*m])
+				copy(at(mag, t-ns, k), rm[(t+1)*m:(t+2)*m])
+			}
+			continue
+		}
+		if sol == nil || sol.RawMatrix().Rows != r {
+			sol, tmp = mat.NewDense(r, m, nil), mat.NewDense(r, m, nil)
+		}
+		td := tmp.RawMatrix().Data
+		for t := range nord {
+			ord := t - ns
+			for ii, k := range blk {
+				copy(td[ii*m:(ii+1)*m], rd[(t*r+ii)*m:(t*r+ii+1)*m])
+				if t > 0 {
+					prev := at(w, ord-1, k)
+					for j := range m {
+						td[ii*m+j] -= prev[j]
+					}
+				}
+			}
+			_ = reg.lu.SolveTo(sol, false, tmp)
+			sd := sol.RawMatrix().Data
+			for j := range m {
+				bound := 0.0
+				for ii, k := range blk {
+					v := rm[(t*r+ii)*m+j]
+					if t > 0 {
+						v += at(mag, ord-1, k)[j]
+					}
+					bound = math.Max(bound, v)
+				}
+				bound *= reg.invNrm
+				for ii, k := range blk {
+					at(w, ord, k)[j] = sd[ii*m+j]
+					at(mag, ord, k)[j] = math.Abs(sd[ii*m+j]) + bound
+				}
+			}
+		}
+	}
+
+	gain := denseCopySafe(sys.D, p, m)
+	cRaw := C.RawMatrix()
+	tol := 100 * float64(n) * eps()
+	for i := range p {
+		crow := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+n]
+		for j := range m {
+			for ord := -ns; ord <= 0; ord++ {
+				g, bound := 0.0, 0.0
+				for k, c := range crow {
+					if c != 0 {
+						g += c * at(w, ord, k)[j]
+						bound += math.Abs(c) * at(mag, ord, k)[j]
+					}
+				}
+				if ord == 0 {
+					v := gain.At(i, j) + g
+					if tol*bound > 1e-3*math.Abs(v) {
+						return nil, false
+					}
+					gain.Set(i, j, v)
+					break
+				}
+				if math.Abs(g) > tol*bound {
+					gain.Set(i, j, math.Inf(signInt(g)))
+					break
+				}
+			}
+		}
+	}
+	return gain, true
+}
+
+// deflateBlockAt applies x_K = Z·y to the states blk of (A, B, C), with
+// Z the real Schur vectors of A_KK ordered so the eigenvalues nearest x0
+// lead. The fewest leading eigenvalues, all within √ε·max(‖A_KK‖, 1) of
+// x0, are set to x0 exactly (their strictly lower part zeroed) such that
+// x0·I − T₁₁ on the rest is no worse conditioned than a regular solve.
+func deflateBlockAt(A, B, C *mat.Dense, blk []int, x0 float64) bool {
+	r := len(blk)
+	_, m := B.Dims()
+	p, _ := C.Dims()
+	n, _ := A.Dims()
+	aRaw := A.RawMatrix()
+	t := make([]float64, r*r)
+	for ii, k := range blk {
+		for jj, l := range blk {
+			t[ii*r+jj] = aRaw.Data[k*aRaw.Stride+l]
+		}
+	}
+	guard := math.Sqrt(eps()) * math.Max(mat.Norm(mat.NewDense(r, r, t), math.Inf(1)), 1)
+	z := make([]float64, r*r)
+	wr, wi := make([]float64, r), make([]float64, r)
+	bwork := make([]bool, r)
+	query := make([]float64, 1)
+	impl.Dgees(lapack.SchurHess, lapack.SortNone, nil, r, t, r, wr, wi, z, r, query, -1, bwork)
+	work := make([]float64, int(query[0]))
+	if _, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil, r, t, r, wr, wi, z, r, work, len(work), bwork); !ok {
+		return false
+	}
+	dists := make([]float64, r)
+	for i := range r {
+		dists[i] = cmplx.Abs(complex(wr[i]-x0, wi[i]))
+	}
+	slices.Sort(dists)
+	tc, zc := make([]float64, r*r), make([]float64, r*r)
+	d := 0
+	for _, lim := range dists {
+		if lim > guard {
+			return false
+		}
+		copy(tc, t)
+		copy(zc, z)
+		var err error
+		if d, err = orderSchurGroupFirst(tc, zc, r, func(e complex128) bool { return cmplx.Abs(e-complex(x0, 0)) <= lim }); err != nil {
+			return false
+		}
+		if d == r {
+			break
+		}
+		rest := mat.NewDense(r-d, r-d, nil)
+		rr := rest.RawMatrix()
+		for i := d; i < r; i++ {
+			for j := d; j < r; j++ {
+				v := -tc[i*r+j]
+				if i == j {
+					v += x0
+				}
+				rr.Data[(i-d)*rr.Stride+j-d] = v
+			}
+		}
+		var lu mat.LU
+		lu.Factorize(rest)
+		if lu.Cond() <= mat.ConditionTolerance {
+			break
+		}
+	}
+	for i := range d {
+		for j := 0; j <= i; j++ {
+			tc[i*r+j] = 0
+		}
+		tc[i*r+i] = x0
+	}
+	for ii, k := range blk {
+		for jj, l := range blk {
+			aRaw.Data[k*aRaw.Stride+l] = tc[ii*r+jj]
+		}
+	}
+	inK := make([]bool, n)
+	for _, k := range blk {
+		inK[k] = true
+	}
+	buf := make([]float64, r)
+	for l := range n {
+		if inK[l] {
+			continue
+		}
+		for jj := range r {
+			s := 0.0
+			for ii, k := range blk {
+				s += aRaw.Data[l*aRaw.Stride+k] * zc[ii*r+jj]
+			}
+			buf[jj] = s
+		}
+		for jj, k := range blk {
+			aRaw.Data[l*aRaw.Stride+k] = buf[jj]
+		}
+		for ii := range r {
+			s := 0.0
+			for jj, k := range blk {
+				s += zc[jj*r+ii] * aRaw.Data[k*aRaw.Stride+l]
+			}
+			buf[ii] = s
+		}
+		for ii, k := range blk {
+			aRaw.Data[k*aRaw.Stride+l] = buf[ii]
+		}
+	}
+	bRaw, cRaw := B.RawMatrix(), C.RawMatrix()
+	for j := range m {
+		for ii := range r {
+			s := 0.0
+			for jj, k := range blk {
+				s += zc[jj*r+ii] * bRaw.Data[k*bRaw.Stride+j]
+			}
+			buf[ii] = s
+		}
+		for ii, k := range blk {
+			bRaw.Data[k*bRaw.Stride+j] = buf[ii]
+		}
+	}
+	for i := range p {
+		for jj := range r {
+			s := 0.0
+			for ii, k := range blk {
+				s += cRaw.Data[i*cRaw.Stride+k] * zc[ii*r+jj]
+			}
+			buf[jj] = s
+		}
+		for jj, k := range blk {
+			cRaw.Data[i*cRaw.Stride+k] = buf[jj]
+		}
+	}
+	return true
+}
+
+// tarjanBlocks returns the strongly connected components of the graph with
+// an edge k → l when A[k,l] ≠ 0 (x_l drives x_k), each emitted after every
+// component it depends on.
+func tarjanBlocks(a blas64.General, n int) [][]int {
+	index := make([]int, n)
+	low := make([]int, n)
+	onStack := make([]bool, n)
+	for i := range index {
+		index[i] = -1
+	}
+	var stack []int
+	var blocks [][]int
+	next := 0
+	type frame struct{ v, l int }
+	for root := range n {
+		if index[root] >= 0 {
+			continue
+		}
+		call := []frame{{root, 0}}
+		index[root], low[root] = next, next
+		next++
+		stack = append(stack, root)
+		onStack[root] = true
+		for len(call) > 0 {
+			f := &call[len(call)-1]
+			v := f.v
+			if f.l < n {
+				l := f.l
+				f.l++
+				if l == v || a.Data[v*a.Stride+l] == 0 {
+					continue
+				}
+				if index[l] < 0 {
+					index[l], low[l] = next, next
+					next++
+					stack = append(stack, l)
+					onStack[l] = true
+					call = append(call, frame{l, 0})
+				} else if onStack[l] {
+					low[v] = min(low[v], index[l])
+				}
+				continue
+			}
+			call = call[:len(call)-1]
+			if len(call) > 0 {
+				u := call[len(call)-1].v
+				low[u] = min(low[u], low[v])
+			}
+			if low[v] == index[v] {
+				var blk []int
+				for {
+					x := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					onStack[x] = false
+					blk = append(blk, x)
+					if x == v {
+						break
+					}
+				}
+				blocks = append(blocks, blk)
+			}
+		}
+	}
+	return blocks
 }
 
 // structuralClosure grows set to every state driven by a member through a
