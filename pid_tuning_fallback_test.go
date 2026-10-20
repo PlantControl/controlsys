@@ -13,7 +13,9 @@ import (
 // wc·1e-6) or the one-gain crossover sample reach, while FreqResponse
 // resolves them. TunePID failed every family with "loop response at ω=…:
 // singular complex matrix" or "plant gain (+Inf+0i)", where Pidtune designs.
-// Every family now returns a design. Oracle: exact Schur–Cohn test; the loop
+// Every family now returns a design; on the pidtuneIdealNearUnit plants,
+// PD and PID do (their I and PI stay unattainable, as no Pidtune I or PI
+// there meets the robustness bar). Oracle: exact Schur–Cohn test; the loop
 // with the plant in 256-bit arithmetic and the controller in z−1 form
 // (expanded polynomials in z lose it near z = 1) meets the reported margin
 // at the reported crossover, every crossover keeps at least it, and a free
