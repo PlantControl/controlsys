@@ -33,10 +33,18 @@ func fzDiscSeeds() []fzSeed {
 		with(func(s *fzSeed) {
 			s.N, s.M, s.P, s.Mag, s.Damp, s.In, s.Out, s.LogDt, s.Tau = 3, 2, 2, [3]float64{0.3, -0.2, 0}, [3]float64{1.7, 0, 0}, -0.9, -1.3, -1, -2.5
 		}),
-		with(func(s *fzSeed) { s.N, s.M, s.P, s.Mag, s.Damp, s.LogDt, s.IO = 1, 1, 1, [3]float64{0.5, 0, 0}, [3]float64{-2, 0, 0}, -0.5, 0.8 }),
-		with(func(s *fzSeed) { s.N, s.M, s.P, s.Mag, s.Damp, s.DScal, s.LogDt = 3, 1, 1, [3]float64{0, 0.4, 0}, [3]float64{1.6, 0, 0}, 0, -0.5 }),
-		with(func(s *fzSeed) { s.N, s.M, s.P, s.Mag, s.Damp, s.DScal, s.Rot = 2, 1, 1, [3]float64{0.2, 0, 0}, [3]float64{2.4, 0, 0}, 0, 1.1 }),
-		with(func(s *fzSeed) { s.N, s.M, s.P, s.Damp, s.LogDt, s.Tau, s.In, s.Phase = 2, 1, 1, [3]float64{1.8, 0, 0}, -1, -0.35, -0.62, 2 }),
+		with(func(s *fzSeed) {
+			s.N, s.M, s.P, s.Mag, s.Damp, s.LogDt, s.IO = 1, 1, 1, [3]float64{0.5, 0, 0}, [3]float64{-2, 0, 0}, -0.5, 0.8
+		}),
+		with(func(s *fzSeed) {
+			s.N, s.M, s.P, s.Mag, s.Damp, s.DScal, s.LogDt = 3, 1, 1, [3]float64{0, 0.4, 0}, [3]float64{1.6, 0, 0}, 0, -0.5
+		}),
+		with(func(s *fzSeed) {
+			s.N, s.M, s.P, s.Mag, s.Damp, s.DScal, s.Rot = 2, 1, 1, [3]float64{0.2, 0, 0}, [3]float64{2.4, 0, 0}, 0, 1.1
+		}),
+		with(func(s *fzSeed) {
+			s.N, s.M, s.P, s.Damp, s.LogDt, s.Tau, s.In, s.Phase = 2, 1, 1, [3]float64{1.8, 0, 0}, -1, -0.35, -0.62, 2
+		}),
 		with(func(s *fzSeed) {
 			s.N, s.M, s.P, s.Mag, s.Damp, s.LogDt, s.Tau, s.In, s.Out, s.IO = 3, 2, 2, [3]float64{0.1, -0.3, 0}, [3]float64{1.5, 0, 0}, -1, -0.83, -0.95, -0.77, 2.1
 		}),
@@ -1071,7 +1079,7 @@ func FuzzD2D(f *testing.F) {
 				continue
 			}
 			k2 := kk * kT1 * kT1 * kT2 * kT2
-			dz := 16 * eps * cmplx.Abs(z1) * (1 + cmplx.Abs(z2)/cmplx.Abs(z2+1)+cmplx.Abs(x)/cmplx.Abs(den)) * (1 + cmplx.Abs(z2)/cmplx.Abs(z2-1))
+			dz := 16 * eps * cmplx.Abs(z1) * (1 + cmplx.Abs(z2)/cmplx.Abs(z2+1) + cmplx.Abs(x)/cmplx.Abs(den)) * (1 + cmplx.Abs(z2)/cmplx.Abs(z2-1))
 			tol := orig.pert(z1, k2*eps*math.Max(1, nA)+dz, k2*eps*nB, k2*eps*nC, k2*eps*(nD+nB*nC))
 			fzCompare(t, s, "D2D(tustin) vs H₁(z₁)", z2, h2, h1, tol, "")
 		}
