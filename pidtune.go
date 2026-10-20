@@ -84,17 +84,18 @@ const (
 // times that frequency; not for an integrating or unstable plant with a
 // continuous delay), accepting the first that passes. When none passes, the
 // first design on a plant that is not stable is returned if it passed the
-// stability test and the gate, else ErrPIDTuningTargetUnattainable. On a
-// continuous plant with zero DC gain and no delay, a k·sᵐ high-pass
-// plant leaving no phase to back off into, a P, or a PD clamped short of
-// the margin at wc (with the default margin; an explicit one rejects it),
-// passes there when the pole test certifies it stable with |S| ≤ 4, the PD
-// also keeping pm − 1.5° at every gain crossover. On a
-// loop the pole test certifies stable, the margin at each gain crossover,
-// wc included (TunePID excludes wc), is the classical 180° − |∠L|. A
-// continuous delay is gated before its Nyquist test on the signed
-// 180° + ∠L; a design failing only at reflected crossings, signed margin at
-// most −(pm − 0.5°), with |S| ≤ 4 passes on the classical margin when the
+// stability test and the gate, keeping pm − 1.5° (pm − 0.5° with an
+// explicit margin) at every gain crossover, else
+// ErrPIDTuningTargetUnattainable. On a continuous plant with zero DC gain
+// and no delay, a k·sᵐ high-pass plant leaving no phase to back off into,
+// a P, or a PD clamped short of the margin at wc (with the default margin;
+// an explicit one rejects it), passes there when the pole test certifies it
+// stable with |S| ≤ 4, the PD also keeping pm − 1.5° at every gain
+// crossover. On a loop the pole test certifies stable, the margin at each
+// gain crossover, wc included (TunePID excludes wc), is the classical
+// 180° − |∠L|. A continuous delay is gated before its Nyquist test on the
+// signed 180° + ∠L; a design failing only at reflected crossings, signed
+// margin at most −(pm − 0.5°), with |S| ≤ 4 passes on the classical margin when the
 // Nyquist test then certifies it stable, and keeps the signed failure where
 // that test does not apply (as for an ideal derivative on a relative-degree-1
 // plant, or internal delays). With wc = 0 a PD is placed on its Td/10
@@ -201,8 +202,10 @@ func (r *pidtuneRun) pipeline(sign float64) (*PID, error) {
 
 // attempt is backedOff, then, unless levelCapped rejected a back-off step,
 // for a crossover from the gain of a plant that is not stable the ungated
-// design at r.wc if the full gate passes it. A gate on |S| and a crossover
-// alone returned PM 18° (P, |S| 3.2) and 15° (PI) on unstable plants.
+// design at r.wc if the gate passes it, with pidtuneMarginSlack off the
+// default margin. A gate on |S| and a crossover alone returned PM 18° (P,
+// |S| 3.2) and 15° (PI) on unstable plants; the full margin rejected a P
+// keeping 58.9° whose back-off steps lose phase.
 func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 	pid, err := r.backedOff(sign)
 	if err == nil || !r.auto || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
@@ -213,7 +216,11 @@ func (r *pidtuneRun) attempt(sign float64) (*PID, error) {
 	}
 	if (r.src == pidtuneCrossGain || r.src == pidtuneCrossRolloff) && !r.openStable() {
 		if pid, retryErr := r.design(r.wc, sign, false); retryErr == nil {
-			if r.gated(pid, r.wc, r.screened(r.wc)) == nil {
+			pm := r.pm
+			if !r.explicit {
+				pm -= pidtuneMarginSlack
+			}
+			if r.gateOf().check(pid, r.pidType, r.wc, pm, r.screened(r.wc)) == nil {
 				return pid, nil
 			}
 		}
@@ -503,7 +510,7 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 		case r.pidType == PidtuneP:
 			return r.gateOf().sensitive(pid, r.pidType, wc)
 		}
-		return r.gateOf().check(pid, r.pidType, wc, r.pm-pidtuneLegacyPDMarginSlack, true)
+		return r.gateOf().check(pid, r.pidType, wc, r.pm-pidtuneMarginSlack, true)
 	}
 	return nil
 }
@@ -513,7 +520,7 @@ func (r *pidtuneRun) check(pid *PID, wc float64, gated bool) error {
 // leaves the loop phase to the plant: a P, or a legacy PD clamped short of
 // the requested margin at wc. A k·sᵐ high-pass plant leads up to 180° below
 // its poles, where no back-off helps: only |S| gates the P, and the PD
-// takes the gate with pidtuneLegacyPDMarginSlack off the margin, as an |S|
+// takes the gate with pidtuneMarginSlack off the margin, as an |S|
 // gate alone returned 44° at its crossover with |S| 1.9 (PS6S32). A placed
 // PD crosses over at wc, so its short margin there is the loop's: it takes
 // the full gate, then back-off and the legacy rerun.
@@ -530,9 +537,10 @@ func (r *pidtuneRun) unshaped(pid *PID, wc float64) bool {
 	return false
 }
 
-// pidtuneLegacyPDMarginSlack lowers the margin an unshaped legacy PD keeps
-// at every crossover to pm − 1.5°.
-const pidtuneLegacyPDMarginSlack = 1
+// pidtuneMarginSlack lowers the default margin an unshaped legacy PD, or
+// the retry at the automatic wc of a plant that is not stable, keeps at
+// every crossover to pm − 1.5°.
+const pidtuneMarginSlack = 1
 
 // openStable returns whether the plant is stable, computed once.
 func (r *pidtuneRun) openStable() bool {

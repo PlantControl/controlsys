@@ -271,3 +271,19 @@ func TestPidtuneUnstableRetryKeepsMargin(t *testing.T) {
 		}
 	}
 }
+
+// The non-stable retry's full gate floored the margin at pm − 0.5°, so a P
+// at the automatic wc 3.9e-5 of this integrating discrete plant, PM 58.9°
+// at its one crossover, |S| 1.07, became unattainable; back-off loses phase
+// (56° at 0.9·wc). The retry keeps pm − 1.5°. Oracle: extended-precision
+// Schur–Cohn, margins and |S| from the coefficients.
+func TestPidtuneUnstableRetryMarginSlack(t *testing.T) {
+	const dt = 0.01
+	num := Poly{9.086858380437903e-15, -5.791919405607725e-15, 1.4667499867564151e-16}
+	den := Poly{1, -6.1841221951263785, 16.283637862682834, -23.64207337573077, 20.414839732703783, -10.466618593329219, 2.9435553564625145, -0.3492187876627648}
+	pid, err := Pidtune(pidtuneBackoffPlant(t, num, den, dt, 0), PidtuneP, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidDCSignCheckRobust(t, "P", pid, num, den, dt, 58.5)
+}
