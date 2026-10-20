@@ -651,9 +651,10 @@ func selectMargin(margins, freqs []float64) (m, w float64, ok bool) {
 // |L| = g, refined on the exact response; with them, the first crossing on
 // an adaptive frequency grid. It returns +Inf when the gain never drops that
 // far, as for a DC gain of 0 (MATLAB's high-pass result). An infinite DC
-// gain (an integrator), where python-control returns NaN, leaves the
-// bandwidth undefined and returns ErrInvalidArgument, as does a dbDrop that is not a
-// finite negative scalar; a model without inputs or outputs returns
+// gain (an integrator) puts the threshold at ∞, so the bandwidth is
+// undefined rather than +Inf; python-control returns NaN, which the Go error
+// rule maps to ErrInvalidArgument. A dbDrop that is not a finite negative
+// scalar also returns ErrInvalidArgument; a model without inputs or outputs returns
 // ErrDimensionMismatch and a MIMO model ErrNotSISO, as MATLAB rejects it.
 func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if dbDrop == 0 {

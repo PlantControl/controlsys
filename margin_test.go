@@ -824,7 +824,8 @@ func TestBandwidth_MIMO(t *testing.T) {
 	}
 }
 
-// Bandwidth of an integrator (infinite DC gain) is undefined; zero DC gain is +Inf.
+// Bandwidth of an integrator (infinite DC gain) is undefined (error, not a
+// NaN/Inf placeholder); zero DC gain is +Inf.
 func TestBandwidth_Integrator(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(1, 1, []float64{0}),
