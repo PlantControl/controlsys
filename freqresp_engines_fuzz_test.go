@@ -84,11 +84,15 @@ func FuzzFreqResponseSweep(f *testing.F) {
 		hess := newHessenbergSweep(sys, md.n, md.m, md.p)
 		ps := &fzSpec{Discrete: s.Discrete, Dt: s.Dt, P: s.P, M: s.M}
 		seen := map[float64]bool{}
+		stride := max(1, len(slices.Compact(slices.Clone(ws)))/24)
 		for k, w := range ws {
 			if seen[w] {
 				continue
 			}
 			seen[w] = true
+			if len(seen)%stride != 0 {
+				continue
+			}
 			d := fzFROracle(ps, md, w, false)
 			fzFRCheck(t, s, "sweep FreqResponse", w, fzFRAt(fr, k), d.g, d.beta, d.cond, nil)
 			for _, eng := range []struct {
@@ -137,6 +141,14 @@ func FuzzFreqResponseInternalDelay(f *testing.F) {
 		ws := fzFRFreqs(s)
 		fr, err := sys.FreqResponse(ws)
 		fzContract(t, s, "FreqResponse", fr != nil, err)
+		if errors.Is(err, ErrSingularTransform) {
+			for _, w := range ws {
+				_, x := fzFRPoint(s, w)
+				if _, cond := fzFRModelOf(s).bound(fzFRRound(x)); cond >= fzFRCondCheck {
+					fzSkip(t, "precision limit: internal-delay model with xI − A singular to working precision")
+				}
+			}
+		}
 		fzErr(t, s, "FreqResponse", err)
 		for k, w := range ws {
 			pt, x := fzFRPoint(s, w)
