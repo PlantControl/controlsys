@@ -90,7 +90,7 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	if P.IsDiscrete() {
 		d, err = hinfSynDiscrete(gp, P, nmeas, ncont)
 	} else {
-		d, err = hinfSynPartition(gp, "D12", "D21")
+		d, err = hinfSynScaled(gp.op, P, nmeas, ncont, "D12", "D21")
 	}
 	if err != nil {
 		return nil, err
@@ -173,6 +173,62 @@ func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string) (hinfDesig
 	return hinfDesign{gammaEdge: gamma, build: func(g float64) (*HinfSynResult, error) { return hinfSynD11Zero(gp, ric, g) }}, nil
 }
 
+// hinfSynScaled designs for the continuous P after balancing its states by
+// Ssbal, as MATLAB hinfsyn's default AutoScale does: the Riccati solutions of
+// a badly scaled realization (B huge, C tiny, as Tustin makes of a slow
+// discrete pole at fast sampling) lose all accuracy. K's transfer function
+// does not depend on the plant's state coordinates; X and Y are mapped back
+// to those of P.
+func hinfSynScaled(op string, P *System, nmeas, ncont int, d12, d21 string) (hinfDesign, error) {
+	bal, err := Ssbal(P)
+	if err != nil {
+		return hinfDesign{}, fmt.Errorf("%s: %w", op, err)
+	}
+	gp, err := partitionGeneralizedPlant(op, bal.Sys, nmeas, ncont)
+	if err != nil {
+		return hinfDesign{}, err
+	}
+	d, err := hinfSynPartition(gp, d12, d21)
+	if err != nil {
+		return hinfDesign{}, err
+	}
+	t := make([]float64, gp.n)
+	for i := range t {
+		t[i] = bal.T.At(i, i)
+	}
+	build := d.build
+	d.build = func(g float64) (*HinfSynResult, error) {
+		res, err := build(g)
+		if err != nil {
+			return nil, err
+		}
+		unscaleGram(res.X, t, false)
+		unscaleGram(res.Y, t, true)
+		return res, nil
+	}
+	return d, nil
+}
+
+// unscaleGram maps M of the coordinates x̂ = diag(t)·x back to x:
+// M_ij·t_i·t_j for a quadratic-form matrix (X), M_ij/(t_i·t_j) when inverse
+// (Y).
+func unscaleGram(M *mat.Dense, t []float64, inverse bool) {
+	if M == nil {
+		return
+	}
+	raw := M.RawMatrix()
+	for i := range raw.Rows {
+		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		for j := range row {
+			if inverse {
+				row[j] /= t[i] * t[j]
+			} else {
+				row[j] *= t[i] * t[j]
+			}
+		}
+	}
+}
+
 // hinfSynDiscrete designs for the discrete plant P through the Tustin map
 // z = (β+s)/(β−s), β = 2/Ts, or through z = −(β+s)/(β−s) applied to P(−z)
 // when I + A is worse conditioned than I − A (a mode at or near z = −1,
@@ -247,11 +303,7 @@ func hinfSynTustin(op string, P *System, nmeas, ncont int) (hinfDesign, error) {
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", op, err)
 	}
-	gp, err := partitionGeneralizedPlant(op, Pc, nmeas, ncont)
-	if err != nil {
-		return hinfDesign{}, err
-	}
-	d, err := hinfSynPartition(gp, "P12(z = "+point+")", "P21(z = "+point+")")
+	d, err := hinfSynScaled(op, Pc, nmeas, ncont, "P12(z = "+point+")", "P21(z = "+point+")")
 	if err != nil {
 		return hinfDesign{}, err
 	}

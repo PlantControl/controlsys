@@ -1036,3 +1036,45 @@ func TestMixsynReusesHinfSynClosedLoop(t *testing.T) {
 		})
 	}
 }
+
+// A slow discrete W1 pole at fast sampling becomes, under Tustin, a plant with
+// B ~ 1e4 and C ~ 1e-6; unbalanced, the Riccati test rejected every gamma or
+// stopped far above the optimum. G's rank-deficient output direction keeps
+// S = 1 there, so γ ≥ W1(1) = 100, which W1 = 0.5 on the rest attains.
+func TestMixsynDiscreteSlowWeightFastSampling(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		p, m int
+		d    []float64
+	}{
+		{"3x2", 3, 2, []float64{1.791152303441311, 1.996271392265902, -1.5262459503191588, -1.9090913878947715, 1.1726896315364728, 1.7110243499204902}},
+		{"3x3 singular", 3, 3, []float64{-295.5624313490308, -362.7394643253653, -372.64791180215923, 231.37253359097448, 328.52510561216616, 373.81078706911444, -153.7436700139788, -275.228803176164, -353.26136004934426}},
+	} {
+		for _, wb := range []float64{0.01, 1} {
+			t.Run(fmt.Sprintf("%s/wb=%g", tc.name, wb), func(t *testing.T) {
+				const dt = 1e-4
+				G, err := NewGain(mat.NewDense(tc.p, tc.m, tc.d), dt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a := math.Exp(-wb * 1e-2 * dt)
+				W1, err := New(mat.NewDense(1, 1, []float64{a}), mat.NewDense(1, 1, []float64{1}),
+					mat.NewDense(1, 1, []float64{99.5 * (1 - a)}), mat.NewDense(1, 1, []float64{0.5}), dt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				W2, err := NewGain(mat.NewDense(1, 1, []float64{0.01}), dt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := Mixsyn(G, W1, W2, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !(res.Gamma >= 100*(1-1e-6) && res.Gamma <= 100*(1+1e-3)) {
+					t.Fatalf("Gamma = %.10g, want 100", res.Gamma)
+				}
+			})
+		}
+	}
+}

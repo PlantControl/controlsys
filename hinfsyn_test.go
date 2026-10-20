@@ -1389,3 +1389,63 @@ func TestHinfSyn_ClosedLoopGammaPeak(t *testing.T) {
 		})
 	}
 }
+
+// X and Y are in P's state coordinates whatever its scaling: for
+// P' = (SAS⁻¹, SB, CS⁻¹) at the same gamma, X = S·X'·S and Y = S⁻¹·Y'·S⁻¹.
+func TestHinfSyn_XYStateCoordinatesUnderScaling(t *testing.T) {
+	simple := func(t testing.TB) *System {
+		return hinfD11Plant(t, 2, 3, 3, []float64{0, 1, -2, -3}, []float64{1, 0, 0, 0, 1, 1},
+			[]float64{1, 0, 0, 0, 1, 0}, []float64{0, 0, 0, 0, 0, 1, 0.1, 0.1, 0})
+	}
+	for _, tc := range []struct {
+		name  string
+		plant func(testing.TB) *System
+		s     []float64
+	}{
+		{"D11 zero", simple, []float64{1e3, 1e-3}},
+		{"general", func(t testing.TB) *System { return genericD11Plant(t, 0) }, []float64{1e4, 1, 1e-4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			P := tc.plant(t)
+			n, _, _ := P.Dims()
+			Ps := P.Copy()
+			for i := range n {
+				for j := range n {
+					Ps.A.Set(i, j, P.A.At(i, j)*tc.s[i]/tc.s[j])
+				}
+				for j := range Ps.B.RawMatrix().Cols {
+					Ps.B.Set(i, j, P.B.At(i, j)*tc.s[i])
+				}
+				for j := range Ps.C.RawMatrix().Rows {
+					Ps.C.Set(j, i, P.C.At(j, i)/tc.s[i])
+				}
+			}
+			d, err := hinfSynScaled("HinfSyn", P, 1, 1, "D12", "D21")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ds, err := hinfSynScaled("HinfSyn", Ps, 1, 1, "D12", "D21")
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := 2 * math.Max(d.gammaEdge, ds.gammaEdge)
+			r, err := d.build(g)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rs, err := ds.build(g)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range n {
+				for j := range n {
+					x, xs := r.X.At(i, j), rs.X.At(i, j)*tc.s[i]*tc.s[j]
+					y, ys := r.Y.At(i, j), rs.Y.At(i, j)/(tc.s[i]*tc.s[j])
+					if math.Abs(x-xs) > 1e-8*mat.Norm(r.X, 2) || math.Abs(y-ys) > 1e-8*mat.Norm(r.Y, 2) {
+						t.Fatalf("(%d,%d): X %g vs S·X'·S %g, Y %g vs S⁻¹·Y'·S⁻¹ %g", i, j, x, xs, y, ys)
+					}
+				}
+			}
+		})
+	}
+}
