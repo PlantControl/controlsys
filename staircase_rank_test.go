@@ -1,6 +1,9 @@
 package controlsys
 
 import (
+	"math"
+	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -75,5 +78,83 @@ func TestStaircaseSmallBlockNoiseNotRank(t *testing.T) {
 	}
 	if r.Order != 5 {
 		t.Errorf("ReduceUnobservable order %d, want 5", r.Order)
+	}
+}
+
+func reduceTestSys(t *testing.T, n, m, p int, a, b, c []float64, dt float64) *System {
+	t.Helper()
+	sys, err := NewFromSlices(n, m, p, a, b, c, make([]float64, p*m), dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// JBKTCQ: ‖B‖ ≈ 1e-15 against ‖A‖ ≈ 30 is a tiny but exact input gain of a
+// 6-state model; minreal must not drop it as uncontrollable. Oracle: the
+// transfer function it was realized from.
+func TestReduceKeepsTinyInputGain(t *testing.T) {
+	tf := &TransferFunc{
+		Num: [][][]float64{{{-8.70643320022765e-16, 2.9186581655941266e-16, 1.3545850066477854e-16}}},
+		Den: [][]float64{{1, -5.609886783435264, 13.099973168748164, -16.29841103348229, 11.394314088807377, -4.243853507030152, 0.6578640663921657}},
+		Dt:  0.01,
+	}
+	ss, err := tf.StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []int{0, -30, 30} {
+		b := mat.DenseCopyOf(ss.Sys.B)
+		b.Scale(math.Ldexp(1, k), b)
+		sys := reduceTestSys(t, 6, 1, 1, ss.Sys.A.RawMatrix().Data, b.RawMatrix().Data, ss.Sys.C.RawMatrix().Data, ss.Sys.Dt)
+		r, err := sys.MinimalRealization()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Order != 6 {
+			t.Fatalf("B·2^%d: order %d, want 6", k, r.Order)
+		}
+		for _, w := range []float64{0.1, 0.7, 2.0} {
+			z := cmplx.Exp(complex(0, w))
+			got, err := r.Sys.EvalFr(z)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := tf.Eval(z)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wv := want[0][0] * complex(math.Ldexp(1, k), 0)
+			if d := cmplx.Abs(got[0][0] - wv); d > 1e-8*cmplx.Abs(wv) {
+				t.Errorf("B·2^%d w=%g: got %v, want %v", k, w, got[0][0], wv)
+			}
+		}
+	}
+}
+
+// w13 review: states 1-2 are never driven and states 3-4 never reach the
+// output (exact zeros), so the minimal order is 1 with the stable pole
+// 0.868; the hidden poles 1.885 and -2.106 must not survive. Scaling B or C
+// by a large power of ten must not change that.
+func TestReduceExactKalmanStructureScaled(t *testing.T) {
+	a := []float64{0.8684323205674875, -0.6049616753433141, -0.817025610149589, 0, 0, 0, 0.5112361371882209, -1.665579513685, 0, 0, 0, 0.4426963353960824, 2.2287867502570378, 0, 0, 1.450755586734131, 0.5926180571361175, -1.003801815806515, -0.7392334214012152, 2.598303245115053, 0.019516845706728403, 0.7670269935617764, 2.019276442042413, 1.380736914734296, 0.5174218017098235}
+	b := []float64{0.7453432469816224, -0.1349637189736732, 0, 0, 0, 0, 0.2391746712711118, 1.270569808451821, -1.6807270924517255, 1.013393545638635}
+	c := []float64{0.10373234420450061, 1.1189760895011407, -0.6387064209174134, 0, 0, 0.010176619760267125, -0.40735317004013655, 0.15355429034927204, 0, 0}
+	for _, sc := range [][2]float64{{1, 1}, {1e8, 1}, {1, 1e8}, {1e-8, 1e8}} {
+		bs, cs := slices.Clone(b), slices.Clone(c)
+		for i := range bs {
+			bs[i] *= sc[0]
+		}
+		for i := range cs {
+			cs[i] *= sc[1]
+		}
+		sys := reduceTestSys(t, 5, 2, 2, a, bs, cs, 0.1)
+		r, err := sys.MinimalRealization()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Order != 1 || math.Abs(r.Sys.A.At(0, 0)-0.8684323205674875) > 1e-12 {
+			t.Errorf("B·%g C·%g: order %d A %v, want 1 [0.8684]", sc[0], sc[1], r.Order, mat.Formatted(r.Sys.A))
+		}
 	}
 }
