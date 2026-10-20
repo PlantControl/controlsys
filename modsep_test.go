@@ -115,22 +115,75 @@ func TestModsep_Discrete(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// MATLAB freqsep: ωn = |ln z|/Ts = 23.0, 6.93, 0.1005 rad/s.
 	res, err := Modsep(sys, 0.3)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	ns, _, _ := res.Slow.Dims()
-	nf, _, _ := res.Fast.Dims()
-
-	if ns != 1 {
-		t.Errorf("slow order = %d, want 1", ns)
-	}
-	if nf != 2 {
-		t.Errorf("fast order = %d, want 2", nf)
-	}
-
+	assertPolesMatch(t, "slow", res.Slow, []complex128{0.99}, 1e-12)
+	assertPolesMatch(t, "fast", res.Fast, []complex128{0.1, 0.5}, 1e-12)
 	checkAdditiveDecomposition(t, sys, res.Slow, res.Fast)
+
+	two, err := NewFromSlices(2, 1, 1, []float64{0.5, 0, 0, 0.99}, []float64{1, 1}, []float64{1, 1}, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = Modsep(two, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPolesMatch(t, "slow", res.Slow, []complex128{0.99}, 1e-12)
+	assertPolesMatch(t, "fast", res.Fast, []complex128{0.5}, 1e-12)
+	checkAdditiveDecomposition(t, two, res.Slow, res.Fast)
+}
+
+func TestModsep_DiscreteComplexAndOrigin(t *testing.T) {
+	// z = 0.9e^{±0.5i}: ωn = hypot(ln 0.9, 0.5)/0.1 = 5.11; z = 0 is infinitely
+	// fast; z = -0.95: ωn = hypot(ln 0.95, π)/0.1 = 31.4.
+	r, th := 0.9, 0.5
+	a, b := r*math.Cos(th), r*math.Sin(th)
+	sys, err := NewFromSlices(4, 1, 1,
+		[]float64{a, b, 0, 0, -b, a, 0, 0, 0, 0, 0, 0, 0, 0, 0, -0.95},
+		[]float64{1, 1, 1, 1}, []float64{1, 2, 1, 1}, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := []complex128{complex(a, b), complex(a, -b)}
+	for _, tc := range []struct {
+		cutoff     float64
+		slow, fast []complex128
+	}{
+		{5, nil, append(append([]complex128{}, pair...), 0, -0.95)},
+		{6, pair, []complex128{0, -0.95}},
+		{1e6, append(append([]complex128{}, pair...), -0.95), []complex128{0}},
+	} {
+		res, err := Modsep(sys, tc.cutoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertPolesMatch(t, "slow", res.Slow, tc.slow, 1e-12)
+		assertPolesMatch(t, "fast", res.Fast, tc.fast, 1e-12)
+		checkAdditiveDecomposition(t, sys, res.Slow, res.Fast)
+	}
+}
+
+// Near-defective double integrator ±1e-13 beside a pole at 100: Dtrexc used
+// to split the moved 2x2 block and leave one half in Fast (fixed in 68b37cc).
+func TestModsep_NearDefectivePair(t *testing.T) {
+	s := fzDecode(t, 0x6a, [fzNVals]float64{-27, 10.5, 2, -59.4, 0, -39, -16, -92, 0, 62, 0.8, -88, 51, 2, -1, -10})
+	sys := s.System(t, fzSysOpts{})
+	for _, cutoff := range []float64{3.16e-6, 1e-2} {
+		res, err := Modsep(sys, cutoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ns, _, _ := res.Slow.Dims()
+		if ns != 2 {
+			t.Fatalf("cutoff %g: slow order %d, want 2", cutoff, ns)
+		}
+		assertPolesMatch(t, "fast", res.Fast, []complex128{100}, 1e-9)
+		assertSplitSum(t, "Modsep near-defective", sys, res.Slow, res.Fast)
+	}
 }
 
 func TestModsep_InvalidCutoff(t *testing.T) {
@@ -193,11 +246,14 @@ func TestModsep_NonDiagonal(t *testing.T) {
 }
 
 func TestModsep_Descriptor(t *testing.T) {
-	for _, dt := range []float64{0, 0.1} {
+	for _, tc := range []struct{ dt, cutoff float64 }{{0, 1}, {0.1, 20}} {
+		dt, cutoff := tc.dt, tc.cutoff
 		sys := descriptorSplitFixture(t, dt)
-		cutoff := 1.0
 		wantSlow := 0
 		for _, ev := range generalizedEigOracle(t, sys.A, sys.E) {
+			if dt > 0 {
+				ev = complex(math.Hypot(math.Log(cmplx.Abs(ev)), cmplx.Phase(ev))/dt, 0)
+			}
 			if cmplx.Abs(ev) < cutoff {
 				wantSlow++
 			}
@@ -218,13 +274,13 @@ func TestModsep_Descriptor(t *testing.T) {
 
 func TestModsep_SingularDescriptor(t *testing.T) {
 	for _, tc := range []struct {
-		dt, slow, fast float64
+		dt, slow, fast, cutoff float64
 	}{
-		{0, -0.6, -2.5},
-		{0.1, 0.4, -1.7},
+		{0, -0.6, -2.5, 1},
+		{0.1, 0.4, -1.7, 20}, // ωn 9.16 and 31.9 rad/s
 	} {
 		sys, modal, poly := singularSplitFixture(t, tc.slow, tc.fast, tc.dt)
-		res, err := Modsep(sys, 1)
+		res, err := Modsep(sys, tc.cutoff)
 		if err != nil {
 			t.Fatalf("dt=%v: %v", tc.dt, err)
 		}
