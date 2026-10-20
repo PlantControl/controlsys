@@ -104,7 +104,11 @@ func TestAllMarginBesideNearIntegratorIP3XIC(t *testing.T) {
 // crossings there: Margin reported 232.6 dB for a loop whose first phase
 // crossover has 65.4 dB. Discrete delays are absorbed, so a 3-sample delay
 // takes the same search. The k(z−c)/((z−1)·∏(z−pᵢ)) loops miss a lower
-// crossover too. Oracle: the float64 coefficients evaluated exactly in
+// crossover too. Beside five poles near z = 1, some just outside, the
+// pencil root of L − L~ lies 3–39% above the crossing, past polish's 1%
+// brackets (wideBracket; "root 25% above" reported 257.35 dB for −56.0 dB),
+// or the double solve's phase noise leaves the bisected crossing at
+// |f| ≈ 2e-7°, above tol (exactCrossing). Oracle: the float64 coefficients evaluated exactly in
 // big.Float; each crossing is bisected on the sign of the phase offset
 // within 2% of the expected ω, and every reported crossing below Nyquist
 // must change that sign across ω(1 ± 1e-3).
@@ -120,6 +124,11 @@ func TestAllMarginPhaseCrossBesideUnresolvedBand(t *testing.T) {
 		{"cluster delay 3", []float64{1.1974308853542987e-16}, clusterDen, 3, 0.18009},
 		{"integrator zeros", []float64{4.172283466864154e-13, -1.0149106030767263e-13, -9.704345874936964e-14}, []float64{1, -8.658632958548061, 33.30994461652578, -74.7257981351094, 107.72944585819133, -103.5040112540225, 66.27293323893296, -27.269332855627272, 6.542921882949435, -0.6974703932922721}, 0, 3.4366},
 		{"integrator lags", []float64{2.52350687932804e-16}, []float64{1, -7.767315112326138, 26.384037379634194, -51.19029458648767, 62.04694508267318, -48.109553101453315, 23.30299133761263, -6.446649260641789, 0.779838260988911}, 0, 3.3429},
+		{"root 25% above", []float64{5.487360777769021e-12, 3.729811085540435e-13, -8.118722465765552e-13}, []float64{1, -4.981971570006486, 9.92797413773678, -9.892092933713297, 4.928149734253077, -0.9820593682700745}, 0, 0.0352279},
+		{"root 39% above", []float64{7.121922613723373e-09, -1.6095090078585384e-10, -2.424578746534387e-09}, []float64{1, -4.990857337380961, 9.96345770234538, -9.945229051503567, 4.963514345499375, -0.9908856589602281}, 0, 0.0401802},
+		{"root 20% above", []float64{1.1573500080461832e-13, -1.1957101653994626e-14, 2.967072567576043e-16}, []float64{1, -4.998431428203281, 9.993728499751846, -9.990596926776579, 4.993734067111801, -0.9984342118837876}, 0, 0.0673995},
+		{"root 3% above", []float64{1.7447480602492356e-08, 2.7085530777553863e-08, 9.913661534886364e-09}, []float64{1, -4.997272067895437, 9.989094639618557, -9.98365150105297, 4.989107354839763, -0.9972784255099109}, 0, 0.128026},
+		{"phase noise 2e-7°", []float64{5.773354020211484e-11, 3.4781882066641815e-11, 2.9150543617647506e-12}, []float64{1, -4.991306713692669, 9.965259791780475, -9.947939025509188, 4.9653255305209445, -0.9913395830995323}, 0, 0.15503},
 	}
 	const dt = 0.01
 	for _, c := range cases {
@@ -176,8 +185,9 @@ func TestAllMarginPhaseCrossBesideUnresolvedBand(t *testing.T) {
 // S2RNHI: sisoEval.at fails where the double solve is singular off every
 // pole (w12 #52) and snaps to +Inf next to a computed pole tens of times
 // slower than ω (#54); at keeps both for the searches tuned to them, and
-// resolve returns FreqResponse's value. Oracle: the float64 coefficients
-// evaluated exactly in big.Float.
+// resolve returns FreqResponse's value, leaving try's bookkeeping, which
+// the screens sharing pidtune's eval read, as it was. Oracle: the float64
+// coefficients evaluated exactly in big.Float.
 func TestSISOEvalResolvedBesideClusterAtOne(t *testing.T) {
 	const dt = 0.01
 	cases := []struct {
@@ -204,8 +214,8 @@ func TestSISOEvalResolvedBesideClusterAtOne(t *testing.T) {
 				t.Errorf("%v: resolve(%g) = %v, %v; FreqResponse %v, want %v", c.den, w, got, ok, fr.At(0, 0, 0), want)
 			}
 		}
-		if e.err != nil {
-			t.Errorf("%v: resolve left err %v", c.den, e.err)
+		if e.err != nil || e.skipped != nil || e.resolved {
+			t.Errorf("%v: resolve left err %v, skipped %v, resolved %v", c.den, e.err, e.skipped, e.resolved)
 		}
 	}
 }

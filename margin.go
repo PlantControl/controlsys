@@ -157,12 +157,14 @@ func (e *sisoEval) at(w float64) complex128 {
 // for the searches tuned to them: the gain search rejects brackets closing
 // on +Inf, so taking the response there adds crossings at |L| within
 // coefficient rounding of 1 next to an integrator, which pidtune would take
-// for its crossover.
+// for its crossover. pidtune's back-off gate samples through resolve where
+// at fails; it leaves skipped and resolved as they were, so checkSkipped
+// of the screens sharing e does not change.
 func (e *sisoEval) resolve(w float64) (h complex128, ok bool) {
-	saved := e.extended
+	saved, skipped, resolved := e.extended, e.skipped, e.resolved
 	e.extended = true
 	h, ok = e.try(w)
-	e.extended = saved
+	e.extended, e.skipped, e.resolved = saved, skipped, resolved
 	pt := e.td.frequencyPoint(w)
 	s := pt.value()
 	if !ok || !cmplx.IsInf(h) || e.sys.internalDelayCount() > 0 || s == 0 || !e.sys.IsContinuous() && s == 1 {
@@ -1286,9 +1288,11 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 // solve's phase at frequencyPoint(π/Dt). The candidates are polished with
 // the extended fallback: beside a pole cluster near z = 1 the double solve
 // fails over decades off every pole, and a crossing whose walk clearance
-// lies there was lost (S2RNHI). polish's origin-pole guard keeps the double
-// solve's failures, so near-roots of an asymptotically real L next to an
-// origin cluster stay rejected.
+// lies there was lost (S2RNHI); there the pencil roots also fall far off
+// the crossings and the double solve's phase is noisy, which polish's
+// wideBracket and exactCrossing take up. polish's origin-pole guard keeps
+// the double solve's failures, so near-roots of an asymptotically real L
+// next to an origin cluster stay rejected.
 func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	reals, err := r.realCandidates()
 	if err != nil {
@@ -1825,6 +1829,9 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 				}
 				unevaluable = unevaluable || math.IsNaN(fa) || math.IsNaN(fb)
 			}
+			if steep && !bracketed {
+				best, bracketed = r.wideBracket(w, lo, hi, wTop, tol, ft)
+			}
 		}
 		if !bracketed && unevaluable {
 			c, ok := walk(w, -min(lo, w/10))
@@ -1841,6 +1848,11 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		if bracketed {
 			vTol = crossTol(best)
 		}
+		if steep && bracketed && v > vTol && !r.eval.exact {
+			if c, ok := r.exactCrossing(best, wTop, ft, crossTol); ok {
+				best, v = c, 0
+			}
+		}
 		if _, ok := guard(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {
 			continue
 		}
@@ -1852,6 +1864,54 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		return nil
 	}
 	return out
+}
+
+// wideBracket looks for a phase crossing of a pencil root w, off it by more
+// than tol, that polish's symmetric brackets up to 1% missed, on one side of
+// w at a time, out to 10% and then to lo or hi. Beside a pole cluster near
+// z = 1 the roots of L − L~ fall up to ~25% off the crossing (S2RNHI), where
+// a symmetric bracket meets the next ±180° wrap before the crossing. A
+// bisection onto a wrap, |f| > 90, is no crossing, nor one without walk's
+// clearance below wTop: beside a cluster at z = −1 the wide bracket reaches
+// sign changes of L within its coefficient noise next to Nyquist.
+func (r *rationalLoop) wideBracket(w, lo, hi, wTop, tol float64, ft func(float64) float64) (float64, bool) {
+	fw := ft(w)
+	if !(math.Abs(fw) > tol) {
+		return w, false
+	}
+	for _, d := range [...]float64{0.1, 1} {
+		for _, x := range [...]float64{w - min(d*w, lo), w + min(d*w, hi)} {
+			if fx := ft(x); x == w || !(fx*fw <= 0) {
+				continue
+			}
+			c := refineCrossing(min(x, w), max(x, w), ft)
+			if hc := c * (1 + walkClearance); hc < wTop && math.Abs(ft(c)) <= 90 && ft(c*(1-walkClearance))*ft(hc) < 0 {
+				return c, true
+			}
+		}
+	}
+	return w, false
+}
+
+// exactCrossing re-bisects a bracketed phase crossing c that misses its
+// tolerance in double-double over c(1 ± 1e-6). Beside a pole cluster near
+// z = 1 the double solve's phase is off by ~1e-7°, so the bisected sign
+// change of a crossing several degrees per percent steep sits there at
+// |f| ~ 2e-7° (S2RNHI). It needs walk's clearance below wTop, as
+// wideBracket: next to Nyquist beside a cluster at z = −1 a sign change of
+// L within its coefficient noise refines in double-double too.
+func (r *rationalLoop) exactCrossing(c, wTop float64, ft, crossTol func(float64) float64) (float64, bool) {
+	if c*(1+walkClearance) >= wTop {
+		return c, false
+	}
+	r.eval.exact = true
+	defer func() { r.eval.exact = false }()
+	a, b := c*(1-1e-6), c*(1+1e-6)
+	if !(ft(a)*ft(b) <= 0) || !(ft(c*(1-walkClearance))*ft(c*(1+walkClearance)) < 0) {
+		return c, false
+	}
+	c = refineCrossing(a, b, ft)
+	return c, math.Abs(ft(c)) <= crossTol(c)
 }
 
 // flat reports whether within holds also between and beyond the crossings ws,
