@@ -255,3 +255,50 @@ func TestComplexSVDWorkspaceSmallSingularValuesAbsoluteAccuracy(t *testing.T) {
 		})
 	}
 }
+
+func TestSigmaSubnormalResponse(t *testing.T) {
+	const up = 0x1p1000
+	for _, d := range [][]float64{{1e-310, 0, 0, 2e-310}, {3e-309, 1e-309, 0, 2e-309}} {
+		sys, err := NewFromSlices(0, 2, 2, nil, nil, nil, d, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sv, err := sys.Sigma([]float64{0.5}, 0)
+		if err != nil {
+			t.Fatalf("D=%v: %v", d, err)
+		}
+		scaled := make([]complex128, len(d))
+		for i, v := range d {
+			scaled[i] = complex(v*up, 0)
+		}
+		want := gonumComplexSingularValues(t, scaled, 2, 2)
+		for i, w := range want {
+			if got := sv.At(0, i); !sameRelative(got, w/up, 1e-10) {
+				t.Fatalf("D=%v: σ%d = %g, want %g", d, i, got, w/up)
+			}
+		}
+	}
+}
+
+func TestComplexSVDWorkspaceSubnormalSingularValues(t *testing.T) {
+	p, m := 3, 2
+	data := []complex128{1e-310, 0, 0, 2e-310i, 0, 0}
+	ws := newComplexSVDWorkspace(p, m)
+	for _, wide := range []bool{false, true} {
+		rows, cols := p, m
+		in := data
+		if wide {
+			rows, cols = m, p
+			in = []complex128{1e-310, 0, 0, 0, 2e-310i, 0}
+		}
+		got := make([]float64, 2)
+		if err := ws.singularValuesFromFlat(got, in, 0, rows, cols); err != nil {
+			t.Fatal(err)
+		}
+		for i, w := range []float64{2e-310, 1e-310} {
+			if !sameRelative(got[i], w, 1e-10) {
+				t.Fatalf("wide=%v σ%d = %g, want %g", wide, i, got[i], w)
+			}
+		}
+	}
+}

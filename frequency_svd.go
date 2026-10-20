@@ -75,13 +75,13 @@ func (ws *complexSVDWorkspace) fillBidiag(at func(i, j int) complex128, p, m int
 	if ws.scale == 0 || math.IsInf(ws.scale, 1) || math.IsNaN(ws.scale) {
 		return
 	}
-	invScale := 1 / ws.scale
+	scale := ws.scale
 	a := ws.bidiag
 	if m <= p {
 		for i := range p {
 			for j := range m {
 				v := at(i, j)
-				a[i*m+j] = complex(real(v)*invScale, imag(v)*invScale)
+				a[i*m+j] = complex(real(v)/scale, imag(v)/scale)
 			}
 		}
 		return
@@ -89,7 +89,7 @@ func (ws *complexSVDWorkspace) fillBidiag(at func(i, j int) complex128, p, m int
 	for i := range p {
 		for j := range m {
 			v := at(i, j)
-			a[j*p+i] = complex(real(v)*invScale, -imag(v)*invScale)
+			a[j*p+i] = complex(real(v)/scale, -imag(v)/scale)
 		}
 	}
 }
