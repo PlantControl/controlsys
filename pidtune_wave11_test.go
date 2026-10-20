@@ -210,15 +210,13 @@ func pidtuneAutoPDPlant(rng *rand.Rand, trial int) (num, den Poly, dt, delay flo
 // |L(wc)| ≠ 1, and returned margins of 19–39.5° at its crossover wc (|S| up
 // to 3.6); on k·s/(s−a) the LegacyTd alternative did, with back-off never
 // run. A placed PD now takes the full gate, so these return the legacy
-// rerun's 44–104° or a back-off step's 59.6°. Oracles: closed-loop roots,
+// rerun's 60–104° or a back-off step's 59.6°; the legacy rerun's fragile
+// designs are TestPidtuneZeroDCLegacyPDGated's. Oracles: closed-loop roots,
 // signed margins at every crossover and |S| of the directly evaluated loop.
 func TestPidtuneAutoPDZeroDCMargin(t *testing.T) {
 	for _, c := range []struct{ num, den Poly }{
 		{Poly{0.31438023460704856, 0, 0}, Poly{1, 9.984259695481352, 33.150754545001654, 36.61131418704969}},
-		{Poly{0.34666872878320376, 0, 0}, Poly{1, 3.9256001901459285, 3.843722834621563}},
 		{Poly{-0.6942399140572066, 0, 0}, Poly{1, 6.1766223847865165, 11.121704195381426, 6.210344922964713}},
-		{Poly{-0.7431680988546034, 0, 0}, Poly{1, 5.3495557727549565, 6.22597598141245, 2.052553524633182}},
-		{Poly{0.4060949555907569, 0, 0}, Poly{1, 1.5349963623779264, 0.5521256684141752}},
 		{Poly{-0.448151330130774, 0, 0}, Poly{1, 7.846196339809167, 15.390522905362952}},
 		{Poly{0.024440635267234168, 0}, Poly{1, -0.07706021384803848}},
 		{Poly{0.5885531621061186, 0}, Poly{1, -0.6431887393348312}},
@@ -230,17 +228,6 @@ func TestPidtuneAutoPDZeroDCMargin(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 			continue
 		}
-		if stable, ok := pidtuneOracleStable(t, pid, c.num, c.den, 0, 0); !ok || !stable {
-			t.Errorf("%s: %+v unstable", name, pid)
-		}
-		pms, ms := pidtuneSignedMargins(pidtuneOracleLoop(pid, c.num, c.den, 0, 0), 1e-8, 1e7)
-		if len(pms) == 0 || ms > pidTuningMaxSensitivity+0.05 {
-			t.Errorf("%s: %+v crossovers %v, |S| %.3g", name, pid, pms, ms)
-		}
-		for _, m := range pms {
-			if math.Abs(m) < 42 {
-				t.Errorf("%s: %+v margin %.3g°", name, pid, m)
-			}
-		}
+		pidtuneCheckRobust(t, name, pid, c.num, c.den, 0, pidTuningMaxSensitivity+0.05)
 	}
 }

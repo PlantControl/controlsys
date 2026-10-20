@@ -130,15 +130,16 @@ func pidtuneCheckDesigns(t *testing.T, name string, p *System, num, den Poly, dt
 // zero near the integrator, whose stabilizing gain the bandwidth gives; the
 // capped crossover and its back-off never stabilize them, turning designs
 // into errors (P "unstable" at wc 90.7 for case 1). The crossover of an
-// unstable plant is its -3 dB bandwidth. Oracle: Bandwidth; exact Routh
-// test of every design.
+// unstable plant is its -3 dB bandwidth. I on case 1 and P on case 2 may
+// error (IBWZGV): their stable designs there kept PM 0.001° (|S| 1249) and
+// 1.4° (|S| 40). Oracle: Bandwidth; exact Routh test of every design.
 func TestPidtuneRolloffUnstableKeepsBandwidth(t *testing.T) {
 	for _, c := range []struct {
 		num, den Poly
 		want     []PidtuneType
 	}{
-		{Poly{0.27517413517840106, 3.6669924390083567e-05}, Poly{1, 6.391643798250351, -30.351456187775952}, []PidtuneType{PidtuneP, PidtuneI, PidtunePD, PidtunePDF}},
-		{Poly{3.24364602965127, 0.0021262777284359194}, Poly{1, 13.719866434906919, 22.960516396640905, -141.22246804852216}, []PidtuneType{PidtuneP}},
+		{Poly{0.27517413517840106, 3.6669924390083567e-05}, Poly{1, 6.391643798250351, -30.351456187775952}, []PidtuneType{PidtuneP, PidtunePD, PidtunePDF}},
+		{Poly{3.24364602965127, 0.0021262777284359194}, Poly{1, 13.719866434906919, 22.960516396640905, -141.22246804852216}, nil},
 		{Poly{0.15352054260394388, 2.4370462844322383e-06}, Poly{1, 9.545146152266515, -3.889305115757257}, []PidtuneType{PidtuneP, PidtunePD, PidtunePDF}},
 	} {
 		pidtuneRolloffUnstableCase(t, c.num, c.den, c.want, true)
@@ -217,7 +218,7 @@ func pidtuneRolloffUnstableCase(t *testing.T, num, den Poly, want []PidtuneType,
 // crossover is half the slowest generated pole's |ln p|/Dt, capped at
 // 0.1π/Dt, to 5% (clustered poles round, 3% on amd64); every
 // design stable by the exact Schur–Cohn test. Integrators displaced beyond
-// pidtuneClusterRadius(2, 1) are TestPidtuneRoundedZeroDCIntegrator's.
+// pidtuneClusterRadius(2, 1) are TestPidtuneIsolatedDisplacedIntegrator's.
 func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(5, 8))

@@ -371,7 +371,7 @@ func TestPidTuningDCSignIgnoresRoundingZero(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return pidTuningDCSign(p, eval.at, 10)
+		return pidTuningDCSign(p, eval.try, 10)
 	}
 	for _, k := range []float64{1, 3, 1.3, .9} {
 		if s := sign(0, k); s != 0 {

@@ -195,6 +195,8 @@ func TestPidtuneDelayedIdealPIDTail(t *testing.T) {
 
 // YVAIMU: Pidtune(−G) mirrors Pidtune(G) for integrating and unstable
 // plants too; −1/(s(s+1)), −1/(s−1) and −0.1/(z−1) need negative gains.
+// P and PI on 1/(s−1) keep at most 45° at wc ≈ 1 (PM = atan ω + ∠C) and
+// return ErrPIDTuningTargetUnattainable, mirrored.
 func TestPidtuneUnstableMirrorsPositive(t *testing.T) {
 	plants := []struct {
 		name     string
@@ -203,7 +205,7 @@ func TestPidtuneUnstableMirrorsPositive(t *testing.T) {
 		mustTune []PidtuneType
 	}{
 		{"integ", []float64{1}, []float64{1, 1, 0}, 0, []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePID, PidtunePIDF}},
-		{"unst", []float64{1}, []float64{1, -1}, 0, []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePID}},
+		{"unst", []float64{1}, []float64{1, -1}, 0, []PidtuneType{PidtunePD, PidtunePID}},
 		{"dinteg", []float64{.1}, []float64{1, -1}, .1, []PidtuneType{PidtuneP, PidtunePI}},
 		{"nmp", []float64{1, -3}, []float64{1, 1, -2}, 0, nil},
 		{"dbl", []float64{1, 2}, []float64{1, 1, 0, 0}, 0, nil},
@@ -294,7 +296,7 @@ func TestPidtuneGainSignMatchesStabilizingGains(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, integral := range []bool{false, true} {
-				want, _ := pidtuneGainSign(p, eval.at, 1, integral)
+				want, _ := pidtuneGainSign(p, eval.try, 1, integral)
 				kis := []float64{0}
 				if integral {
 					kis = gains
@@ -353,7 +355,7 @@ func TestPidtuneGainSignWithDerivative(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, integral := range []bool{false, true} {
-			want, rule := pidtuneGainSign(p, eval.at, 1, integral)
+			want, rule := pidtuneGainSign(p, eval.try, 1, integral)
 			kis := []float64{0}
 			if integral {
 				kis = gains
@@ -463,7 +465,7 @@ func TestPidtuneNearIntegratorMirrors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s := pidTuningDCSign(p, eval.at, 1); s != 0 {
+		if s := pidTuningDCSign(p, eval.try, 1); s != 0 {
 			t.Fatalf("precondition: DC sign %g", s)
 		}
 	}
@@ -576,7 +578,7 @@ func TestPidtuneGuessedSignDominantTerm(t *testing.T) {
 			t.Fatal(err)
 		}
 		const wc = 0.895762703582968
-		sign, rule := pidtuneGainSign(p, eval.at, wc, false)
+		sign, rule := pidtuneGainSign(p, eval.try, wc, false)
 		if rule != pidtuneSignStable {
 			t.Fatalf("rule %d, want pidtuneSignStable", rule)
 		}
@@ -590,7 +592,7 @@ func TestPidtuneGuessedSignDominantTerm(t *testing.T) {
 		if st, _ := pidtuneOracleStable(t, &PID{Kp: -sign * k}, n, den, 0, 0); st {
 			t.Errorf("flip=%g: Kp=%g stable", flip, -sign*k)
 		}
-		if s, _ := pidtuneGainSign(p, eval.at, 20, false); s != flip {
+		if s, _ := pidtuneGainSign(p, eval.try, 20, false); s != flip {
 			t.Errorf("flip=%g: sign %g at wc=20, want %g", flip, s, flip)
 		}
 	}
