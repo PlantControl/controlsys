@@ -650,8 +650,9 @@ func selectMargin(margins, freqs []float64) (m, w float64, ok bool) {
 // it is the smallest boundary eigenvalue of the Hamiltonian pencil of
 // |L| = g, refined on the exact response; with them, the first crossing on
 // an adaptive frequency grid. It returns +Inf when the gain never drops that
-// far. A DC gain that is 0 or infinite (an integrator) leaves the bandwidth
-// undefined and returns ErrInvalidArgument, as does a dbDrop that is not a
+// far, as for a DC gain of 0 (MATLAB's high-pass result). An infinite DC
+// gain (an integrator), where python-control returns NaN, leaves the
+// bandwidth undefined and returns ErrInvalidArgument, as does a dbDrop that is not a
 // finite negative scalar; a model without inputs or outputs returns
 // ErrDimensionMismatch and a MIMO model ErrNotSISO, as MATLAB rejects it.
 func Bandwidth(sys *System, dbDrop float64) (float64, error) {
@@ -683,7 +684,10 @@ func bandwidth(sys *System, dbDrop float64) (float64, error) {
 		return 0, err
 	}
 	dcMag := math.Abs(dcGain.At(0, 0))
-	if dcMag == 0 || math.IsNaN(dcMag) || math.IsInf(dcMag, 0) {
+	if dcMag == 0 {
+		return math.Inf(1), nil
+	}
+	if math.IsNaN(dcMag) || math.IsInf(dcMag, 0) {
 		return 0, fmt.Errorf("DC gain is %g, bandwidth undefined: %w", dcGain.At(0, 0), ErrInvalidArgument)
 	}
 	threshold := 20*math.Log10(dcMag) + dbDrop
