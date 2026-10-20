@@ -388,7 +388,7 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 // above it; when the probe is inconclusive, the upper-bound search may still
 // certify a raised peak, and bisection runs only if it does not. A
 // continuous peak approached only as ω → ∞ returns omega = +Inf. A higher
-// gain found by refinedPeak replaces the result and is certified in turn,
+// gain found by refinedPeak replaces the result, raised by certifyPeak probes,
 // so the result is never below that of the crossing search alone.
 func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err error) {
 	n, m, p := sys.Dims()
@@ -850,6 +850,10 @@ func (ws *hamiltonianWS) brentMax(peak, w, a, b float64, refine bool) (float64, 
 func (ws *hamiltonianWS) refinedPeak(poles []complex128, level, at float64) (peak, omega float64) {
 	sys := ws.sys
 	res := make([]refinedSeed, 0, 17*len(poles))
+	wmax := math.Inf(1)
+	if sys.IsDiscrete() {
+		wmax = math.Pi / sys.Dt
+	}
 	for _, pole := range poles {
 		if sys.IsDiscrete() {
 			pole = cmplx.Log(pole) / complex(sys.Dt, 0)
@@ -860,8 +864,8 @@ func (ws *hamiltonianWS) refinedPeak(poles []complex128, level, at float64) (pea
 		}
 		for k := -8; k <= 8; k++ {
 			w := wc + float64(k)*h
-			if w > 0 && (sys.IsContinuous() || w < math.Pi/sys.Dt) {
-				res = append(res, refinedSeed{w: w, a: math.Max(w-h, 0), b: w + h})
+			if w > 0 && w < wmax {
+				res = append(res, refinedSeed{w: w, a: math.Max(w-h, 0), b: math.Min(w+h, wmax)})
 			}
 		}
 	}
