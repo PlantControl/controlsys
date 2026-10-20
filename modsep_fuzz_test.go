@@ -11,13 +11,12 @@ import (
 
 // FuzzModsep: on delay-free models Modsep(sys, cutoff) returns Slow + Fast
 // with the original exact response (bound scaled by the separation
-// conditioning), Slow.D = 0 and Fast.D = D. Continuous models also split
-// as the intended natural frequencies do: Slow has exactly the poles with
-// |s| < cutoff (Bauer–Fike radius). cutoff lies between distinct sorted
-// intended |s|: index ⌊clamp((v[14]+3)/6,0,1)·(n+1)⌋, geometric mean of the
-// neighbours (÷10 / ×10 at the ends). Discrete splits are not checked: the
-// library compares |z| with cutoff where MATLAB freqsep uses |ln z|/Ts
-// (followup).
+// conditioning), Slow.D = 0 and Fast.D = D. Models also split as the
+// intended natural frequencies ωn do (|s|, or |ln z|/Ts as MATLAB freqsep):
+// Slow has exactly the poles with ωn < cutoff (Bauer–Fike radius, mapped
+// through ln for discrete). cutoff lies between distinct sorted intended ωn:
+// index ⌊clamp((v[14]+3)/6,0,1)·(n+1)⌋, geometric mean of the neighbours
+// (÷10 / ×10 at the ends).
 func FuzzModsep(f *testing.F) {
 	for _, s := range fzBalredSeeds() {
 		fzAddSeed(f, s)
@@ -25,9 +24,15 @@ func FuzzModsep(f *testing.F) {
 	fzFuzz(f, func(t *testing.T, s *fzSpec) {
 		const eps = 0x1p-52
 		n := s.N
+		wn := func(e complex128) float64 {
+			if s.Discrete {
+				return math.Hypot(math.Log(cmplx.Abs(e)), cmplx.Phase(e)) / s.Dt
+			}
+			return cmplx.Abs(e)
+		}
 		ws := make([]float64, n)
-		for k, p := range s.S {
-			ws[k] = cmplx.Abs(p)
+		for k, e := range s.Eig {
+			ws[k] = wn(e)
 		}
 		slices.Sort(ws)
 		ws = slices.Compact(ws)
@@ -73,14 +78,14 @@ func FuzzModsep(f *testing.F) {
 			return
 		}
 		r := s.EigErr()
-		if s.Discrete {
-			fzModsepAdditive(t, s, res, math.Inf(1), r)
-			return
-		}
 		var slow, fast []complex128
 		for _, e := range s.Eig {
-			a := cmplx.Abs(e)
-			if math.Abs(a-cutoff) <= 4*(r+1e-10*math.Max(1, a)) {
+			a := wn(e)
+			ra := r
+			if s.Discrete {
+				ra = r / (math.Max(cmplx.Abs(e)-r, 0) * s.Dt)
+			}
+			if !(math.Abs(a-cutoff) > 4*(ra+1e-10*math.Max(1, a))) {
 				fzSkip(t, "pole within error band of the cutoff")
 			}
 			if a < cutoff {
@@ -90,7 +95,7 @@ func FuzzModsep(f *testing.F) {
 			}
 		}
 		if ns != len(slow) {
-			t.Fatalf("Modsep(cutoff %v) Slow has %d states, %d intended poles have |s| < cutoff\n%s", cutoff, ns, len(slow), s)
+			t.Fatalf("Modsep(cutoff %v) Slow has %d states, %d intended poles have ωn < cutoff\n%s", cutoff, ns, len(slow), s)
 		}
 		gap := math.Inf(1)
 		for _, a := range slow {
