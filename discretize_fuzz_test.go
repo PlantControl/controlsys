@@ -717,7 +717,13 @@ func FuzzC2DMatched(f *testing.F) {
 			tol := (relz + rel1 + ke) * cmplx.Abs(want) * 8
 			fzCompare(t, s, "C2D(matched) vs pole-zero map", z, hg, []complex128{want}, tol, known)
 		}
-		if known == "" && s.Decidable() && fzDiscClear(dp, 1e-6) {
+		clear := known == "" && s.Decidable()
+		for i, p := range dp {
+			if !(math.Abs(cmplx.Abs(p)-1) > 1e-6+8*wilk(dp, i)) {
+				clear = false
+			}
+		}
+		if clear {
 			fzDiscVerdict(t, s, "C2D(matched)", sd, s.Unstable())
 		}
 	})
