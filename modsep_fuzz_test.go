@@ -60,10 +60,10 @@ func FuzzModsep(f *testing.F) {
 			t.Fatalf("Modsep orders %d+%d, want %d\n%s", ns, nf, n, s)
 		}
 		zero := make([]float64, s.P*s.M)
-		if g := fzDenseData(res.Slow.D); !slices.Equal(g, zero) {
+		if g := fzDenseClone(res.Slow.D); !slices.Equal(g, zero) {
 			t.Fatalf("Modsep Slow.D = %v, want 0\n%s", g, s)
 		}
-		if g := fzDenseData(res.Fast.D); !slices.Equal(g, s.D) {
+		if g := fzDenseClone(res.Fast.D); !slices.Equal(g, s.D) {
 			t.Fatalf("Modsep Fast.D = %v, want %v\n%s", g, s.D, s)
 		}
 		if res.Slow.Dt != s.Dt || res.Fast.Dt != s.Dt {

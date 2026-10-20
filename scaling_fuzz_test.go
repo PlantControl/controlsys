@@ -25,7 +25,7 @@ func fzScaledEqual(got, x float64, k int) (eq, skip bool) {
 	return got == want, false
 }
 
-func fzDenseData(d *mat.Dense) []float64 {
+func fzDenseClone(d *mat.Dense) []float64 {
 	if d == nil || d.IsEmpty() {
 		return nil
 	}
@@ -42,7 +42,7 @@ func fzCheckDiagScaled(t *testing.T, s *fzSpec, op string, sys, got *System, l, 
 		t.Fatalf("%s: dims %d,%d,%d dt=%v, want %d,%d,%d dt=%v\n%s", op, gn, gm, gp, got.Dt, n, m, p, sys.Dt, s)
 	}
 	chk := func(name string, gotM, wantM *mat.Dense, row, col func(i, j int) int) {
-		gd, wd := fzDenseData(gotM), fzDenseData(wantM)
+		gd, wd := fzDenseClone(gotM), fzDenseClone(wantM)
 		if len(gd) != len(wd) {
 			t.Fatalf("%s: %s has %d entries, want %d\n%s", op, name, len(gd), len(wd), s)
 		}
@@ -69,7 +69,7 @@ func fzCheckDiagScaled(t *testing.T, s *fzSpec, op string, sys, got *System, l, 
 	chk("C", got.C, sys.C, zero, rj)
 	chk("D", got.D, sys.D, zero, zero)
 	if !slices.Equal(got.InputDelay, sys.InputDelay) || !slices.Equal(got.OutputDelay, sys.OutputDelay) ||
-		!slices.Equal(fzDenseData(got.Delay), fzDenseData(sys.Delay)) {
+		!slices.Equal(fzDenseClone(got.Delay), fzDenseClone(sys.Delay)) {
 		t.Fatalf("%s: I/O delays changed\n%s", op, s)
 	}
 	if (got.LFT == nil) != (sys.LFT == nil) {
@@ -92,7 +92,7 @@ func fzCheckDiagScaled(t *testing.T, s *fzSpec, op string, sys, got *System, l, 
 func fzOffDiagSum(sys *System) float64 {
 	n, _, _ := sys.Dims()
 	var sum float64
-	a := fzDenseData(sys.A)
+	a := fzDenseClone(sys.A)
 	for i := range n {
 		for j := range n {
 			if i != j {
@@ -105,7 +105,7 @@ func fzOffDiagSum(sys *System) float64 {
 		mats = append(mats, sys.LFT.B2, sys.LFT.C2)
 	}
 	for _, d := range mats {
-		for _, x := range fzDenseData(d) {
+		for _, x := range fzDenseClone(d) {
 			sum += math.Abs(x)
 		}
 	}
@@ -200,7 +200,7 @@ func FuzzPrescale(f *testing.F) {
 		if n == 0 {
 			fzSkip(t, "Prescale: static gain returns unit I/O scales, not 1/max|D| (followup)")
 		}
-		bs, cs, d := fzDenseData(res.Sys.B), fzDenseData(res.Sys.C), s.D
+		bs, cs, d := fzDenseClone(res.Sys.B), fzDenseClone(res.Sys.C), s.D
 		for j := range m {
 			mx := 0.0
 			for i := range n {
@@ -253,10 +253,10 @@ func FuzzAugstate(f *testing.F) {
 		if gn != n || gm != m || gp != p+n || got.Dt != s.Dt {
 			t.Fatalf("Augstate dims %d,%d,%d, want %d,%d,%d\n%s", gn, gm, gp, n, m, p+n, s)
 		}
-		if !slices.Equal(fzDenseData(got.A), s.A) || !slices.Equal(fzDenseData(got.B), s.B) {
+		if !slices.Equal(fzDenseClone(got.A), s.A) || !slices.Equal(fzDenseClone(got.B), s.B) {
 			t.Fatalf("Augstate changed A or B\n%s", s)
 		}
-		c, d := fzDenseData(got.C), fzDenseData(got.D)
+		c, d := fzDenseClone(got.C), fzDenseClone(got.D)
 		for i := range p + n {
 			for j := range n {
 				want := 0.0
@@ -303,19 +303,19 @@ func FuzzAugstate(f *testing.F) {
 			}
 		}
 		pad("OutputDelay", got.OutputDelay, sys.OutputDelay, p, 1)
-		pad("IODelay", fzDenseData(got.Delay), fzDenseData(sys.Delay), p, m)
+		pad("IODelay", fzDenseClone(got.Delay), fzDenseClone(sys.Delay), p, m)
 		if (got.LFT == nil) != (sys.LFT == nil) {
 			t.Fatalf("Augstate dropped or added internal delays\n%s", s)
 		}
 		if sys.LFT != nil {
 			nd := len(sys.LFT.Tau)
-			if !slices.Equal(got.LFT.Tau, sys.LFT.Tau) || !slices.Equal(fzDenseData(got.LFT.B2), fzDenseData(sys.LFT.B2)) ||
-				!slices.Equal(fzDenseData(got.LFT.C2), fzDenseData(sys.LFT.C2)) ||
-				!slices.Equal(fzDenseData(got.LFT.D21), fzDenseData(sys.LFT.D21)) ||
-				!slices.Equal(fzDenseData(got.LFT.D22), fzDenseData(sys.LFT.D22)) {
+			if !slices.Equal(got.LFT.Tau, sys.LFT.Tau) || !slices.Equal(fzDenseClone(got.LFT.B2), fzDenseClone(sys.LFT.B2)) ||
+				!slices.Equal(fzDenseClone(got.LFT.C2), fzDenseClone(sys.LFT.C2)) ||
+				!slices.Equal(fzDenseClone(got.LFT.D21), fzDenseClone(sys.LFT.D21)) ||
+				!slices.Equal(fzDenseClone(got.LFT.D22), fzDenseClone(sys.LFT.D22)) {
 				t.Fatalf("Augstate changed the internal-delay channels\n%s", s)
 			}
-			pad("D12", fzDenseData(got.LFT.D12), fzDenseData(sys.LFT.D12), p, nd)
+			pad("D12", fzDenseClone(got.LFT.D12), fzDenseClone(sys.LFT.D12), p, nd)
 		}
 	})
 }

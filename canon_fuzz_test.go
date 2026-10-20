@@ -76,7 +76,7 @@ func fzCheckSimilar(t *testing.T, s *fzSpec, op string, T *mat.Dense, got *Syste
 	resid("Bc − T·B", got.B, &tb, nT*mat.Norm(B, 2))
 	ct.Mul(got.C, T)
 	resid("Cc·T − C", &ct, C, mat.Norm(got.C, 2)*nT+mat.Norm(C, 2))
-	if !slices.Equal(fzDenseData(got.D), s.D) {
+	if !slices.Equal(fzDenseClone(got.D), s.D) {
 		t.Fatalf("%s: D changed\n%s", op, s)
 	}
 	return condT
@@ -144,7 +144,7 @@ func FuzzCanon(f *testing.F) {
 		}
 		fzErr(t, s, "Canon modal", err)
 		condT := fzCheckSimilar(t, s, "Canon modal", res.T, res.Sys)
-		ac := fzDenseData(res.Sys.A)
+		ac := fzDenseClone(res.Sys.A)
 		normA := fzFrob(s.A) + fzFrob(ac)
 		normAb, condW := fzBalancedBasis(s.A, n, res.T)
 		tol := 1e4 * float64(n) * eps * math.Max(condT*normA, condW*(normAb+fzFrob(ac)))
@@ -202,7 +202,7 @@ func FuzzCanon(f *testing.F) {
 		}
 		cn := math.Max(fzFrob(coef), 1)
 		ctol := 1e3 * float64(n) * eps * kc * cn
-		a := fzDenseData(cr.Sys.A)
+		a := fzDenseClone(cr.Sys.A)
 		for i := range n {
 			for j := range n - 1 {
 				want := 0.0
