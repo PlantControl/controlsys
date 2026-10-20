@@ -256,6 +256,14 @@ const (
 	// double solve's phase error there is at most ~1e-7° in the WSF2HP
 	// tests and ~1e-15° for high-order loops with many slow real poles.
 	realPoleDDBelow = 1e-2
+	// clusterRadius is the distance from z = 1 within which complex poles
+	// off the resonance band join the scan beside real poles there; the
+	// pairs of rings of five to eight poles around z = 1 whose crossings the
+	// pencil lost lie up to 1.6e-2 from it (S2RNHI).
+	clusterRadius = 5e-2
+	// strayRootDeg is the angle of L off the real axis, in degrees, past
+	// which a pencil root of L − L~ is off the root of L it stands for.
+	strayRootDeg = 1e-2
 	// nyquistScanDDAbove is the distance of L from the negative real axis,
 	// |L|·min(|f|, 1) with f the phase offset in radians, over the coefficient
 	// noise above which the scan towards Nyquist keeps the double solve. In the
@@ -1297,7 +1305,10 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 // the crossings and the double solve's phase is noisy, which polish's
 // wideBracket and exactCrossing take up. polish's origin-pole guard keeps
 // the double solve's failures, so near-roots of an asymptotically real L
-// next to an origin cluster stay rejected.
+// next to an origin cluster stay rejected. Beside a ring of poles around
+// z = 1 the roots fall up to 6× off, or are missing, beyond any bracket;
+// when a root is unevaluable, off the real axis by strayRootDeg, or fails
+// polish, the scan beside real poles next to z = 1 takes in the ring too.
 func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	reals, err := r.realCandidates()
 	if err != nil {
@@ -1305,18 +1316,25 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	}
 	r.eval.extended = true
 	var cands []float64
+	stray := false
 	for _, w := range reals {
 		if r.discrete() && w >= r.nyquist() {
 			continue
 		}
-		if h, ok := r.eval.try(w); !ok || math.Abs(phaseOffsetDeg(h)) < 90 {
+		h, ok := r.eval.try(w)
+		off := math.Abs(phaseOffsetDeg(h))
+		stray = stray || !ok || min(off, 180-off) > strayRootDeg
+		if !ok || off < 90 {
 			cands = append(cands, w)
 		}
 	}
 	f := func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }
 	out := r.polish(cands, f, 1e-7, true)
 	r.eval.extended = false
-	pairs, realPoles := r.resonancePoles()
+	pairs, realPoles, cluster := r.resonancePoles()
+	if len(cluster) > 0 && (stray || len(out) < len(cands)) {
+		realPoles = cluster
+	}
 	out = r.dropRefuted(out, realPoles, f)
 	out = r.mergeResonanceCrossings(out, r.resonanceCrossings(pairs, realPoles, f, 1e-7), f)
 	return r.nyquistPhaseCrossings(out, f, 1e-7), nil
@@ -1512,11 +1530,14 @@ func (r *rationalLoop) mergeResonanceCrossings(ws, cs []float64, f func(float64)
 // A pole whose first-order perturbation bound
 // cond(p)·eps·(‖A‖ + |p|·‖E‖) exceeds 1e-3 of its frequency is left out: a
 // double or quadruple real pole, as of an integrator squared, splits by
-// rounding into such poles, whose crossings the loop lacks.
-func (r *rationalLoop) resonancePoles() (pairs, reals []float64) {
+// rounding into such poles, whose crossings the loop lacks. Discrete,
+// cluster holds |ln p|/Δt for the other pairs within clusterRadius of z = 1,
+// with the real poles of reals however many lie there, or nothing without
+// such a pair.
+func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 	n := r.n
 	if n == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	a, e := slices.Clone(r.a), slices.Clone(r.e)
 	aNorm, eNorm := frobenius(a), frobenius(e)
@@ -1524,7 +1545,7 @@ func (r *rationalLoop) resonancePoles() (pairs, reals []float64) {
 	vl, vr := make([]float64, n*n), make([]float64, n*n)
 	work := make([]float64, max(8*n, 1))
 	if !impl.Dggev(lapack.LeftEVCompute, lapack.RightEVCompute, n, a, n, e, n, alphar, alphai, beta, vl, n, vr, n, work, len(work)) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	x, y := make([]complex128, n), make([]complex128, n)
 	resolved := func(p complex128, scale float64) bool {
@@ -1585,12 +1606,17 @@ func (r *rationalLoop) resonancePoles() (pairs, reals []float64) {
 		}
 		if dist <= 1e-2 {
 			ws = append(ws, w)
+		} else if r.discrete() && cmplx.Abs(p-1) <= clusterRadius {
+			cluster = append(cluster, cmplx.Abs(cmplx.Log(p))/r.dt)
 		}
+	}
+	if len(cluster) > 0 {
+		cluster = append(cluster, nearOne...)
 	}
 	if nOne < 2 {
 		nearOne = nil
 	}
-	return ws, nearOne
+	return ws, nearOne, cluster
 }
 
 // resonanceCrossings scans f, in double-double, beside each resonance pole
