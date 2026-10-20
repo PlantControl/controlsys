@@ -344,7 +344,7 @@ func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			return pidTuningIdealStable(transfer, c)
+			return pidTuningIdealStable(s.model, transfer, c)
 		}
 		return false, err
 	}
@@ -389,9 +389,23 @@ func pidTuningPolesStable(poles []complex128, a *mat.Dense, plant, c *System) bo
 	if len(poles) == 0 {
 		return true
 	}
-	continuous := plant.Dt == 0
+	stable, decided := pidTuningFloatVerdict(poles, plant.Dt == 0, mat.Norm(a, math.Inf(1)))
+	if decided {
+		return stable
+	}
+	exact, ok := pidTuningExactStable(plant, c)
+	if !ok {
+		return stable
+	}
+	return exact
+}
+
+// pidTuningFloatVerdict is the float half of pidTuningPolesStable for
+// poles of a matrix of norm anorm: decided is false when the exact test
+// must settle the verdict.
+func pidTuningFloatVerdict(poles []complex128, continuous bool, anorm float64) (stable, decided bool) {
 	stable, doubt := true, false
-	eta := pidTuningPoleErrorScale * float64(len(poles)) * 0x1p-52 * mat.Norm(a, math.Inf(1))
+	eta := pidTuningPoleErrorScale * float64(len(poles)) * 0x1p-52 * anorm
 	for i, p := range poles {
 		if poleInsideStabilityBoundary(p, continuous, poleStabilityTolerance(p)) {
 			margin := 1 - cmplx.Abs(p)
@@ -407,17 +421,10 @@ func pidTuningPolesStable(poles []complex128, a *mat.Dense, plant, c *System) bo
 			excess = real(p) + poleStabilityTolerance(p)
 		}
 		if excess > pidTuningPoleMarginSafety*eta && (continuous && cmplx.Abs(p) > 1 || excess > pidTuningExactBand) {
-			return false
+			return false, true
 		}
 	}
-	if stable && !doubt {
-		return true
-	}
-	exact, ok := pidTuningExactStable(plant, c)
-	if !ok {
-		return stable
-	}
-	return exact
+	return stable, stable && !doubt
 }
 
 const (
@@ -469,16 +476,22 @@ func pidTuningExactStable(plant, c *System) (stable, ok bool) {
 	if m == nil {
 		return false, false
 	}
-	p := intCharPoly(m)
+	return pidTuningExactRootsStable(intCharPoly(m), ln, ld, plant.Dt == 0), true
+}
+
+// pidTuningExactRootsStable reports whether every root of p·ln/ld, p
+// leading coefficient first and scaled in place, has Re s < −1e-10 or
+// |z| < 1−1e-10.
+func pidTuningExactRootsStable(p []*big.Int, ln, ld *big.Int, continuous bool) bool {
 	const tol = 1e-10
-	if plant.Dt == 0 {
+	if continuous {
 		t := new(big.Rat).SetFloat64(tol)
 		intScaleRoots(p, big.NewInt(1), new(big.Int).Mul(ld, t.Denom()))
-		return intHurwitz(intShift(p, new(big.Int).Neg(new(big.Int).Mul(ln, t.Num())))), true
+		return intHurwitz(intShift(p, new(big.Int).Neg(new(big.Int).Mul(ln, t.Num()))))
 	}
 	rho := new(big.Rat).SetFloat64(1 - tol)
 	intScaleRoots(p, new(big.Int).Mul(ln, rho.Num()), new(big.Int).Mul(ld, rho.Denom()))
-	return intSchur(p), true
+	return intSchur(p)
 }
 
 // intScaleRoots scales p, leading coefficient first, in place so that its
@@ -510,6 +523,8 @@ func newDyadic(x float64) dyadic {
 func (d dyadic) mul(o dyadic) dyadic { return dyadic{new(big.Int).Mul(d.m, o.m), d.e + o.e} }
 
 // sub returns d − o.
+func (d dyadic) add(o dyadic) dyadic { return d.sub(dyadic{new(big.Int).Neg(o.m), o.e}) }
+
 func (d dyadic) sub(o dyadic) dyadic {
 	if d.e <= o.e {
 		t := new(big.Int).Lsh(o.m, uint(o.e-d.e))
@@ -2467,7 +2482,7 @@ const pidTuningIdealReturnTol = 0x1p-26
 
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic directly.
-func pidTuningIdealStable(transfer *TransferFuncResult, c *PID2) (bool, error) {
+func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2) (bool, error) {
 	var ip, id, dn, dd Poly
 	if c.Ki == 0 {
 		ip, id = Poly{0}, Poly{1}
@@ -2516,11 +2531,167 @@ func pidTuningIdealStable(transfer *TransferFuncResult, c *PID2) (bool, error) {
 		return false, err
 	}
 	for _, pole := range poles {
-		if !pidFiniteComplex(pole) || !poleInsideStabilityBoundary(pole, c.Dt == 0, poleStabilityTolerance(pole)) {
+		if !pidFiniteComplex(pole) {
 			return false, nil
 		}
 	}
-	return true, nil
+	norm := 1.0
+	for _, v := range characteristic[1:] {
+		norm += math.Abs(v / characteristic[0])
+	}
+	stable, decided := pidTuningFloatVerdict(poles, c.Dt == 0, norm)
+	if decided {
+		return stable, nil
+	}
+	if exact, ok := pidTuningIdealExact(model, c); ok {
+		return exact, nil
+	}
+	return stable, nil
+}
+
+// pidTuningIdealExact is pidTuningIdealStable's exact test on model's
+// realization, in the scope of pidTuningExactStable: with Δ = det(λI−A),
+// det(λI−A+BC) = Δ·(1+C(λI−A)⁻¹B), so N = det(λI−A+BC) − Δ + D·Δ is the
+// plant numerator over Δ and the characteristic is Δ·den(c) + N·num(c).
+func pidTuningIdealExact(model *System, c *PID2) (stable, ok bool) {
+	n, m, p := model.Dims()
+	if model.E != nil || model.HasDelay() || m != 1 || p != 1 || n > pidTuningExactOrder {
+		return false, false
+	}
+	for _, a := range []*mat.Dense{model.A, model.B, model.C, model.D} {
+		if a != nil && requireFiniteDense("", "", a) != nil {
+			return false, false
+		}
+	}
+	for _, v := range []float64{c.Kp, c.Ki, c.Kd, c.Dt} {
+		if !finitePID(v) {
+			return false, false
+		}
+	}
+	at := func(a *mat.Dense, i, j int) dyadic { return newDyadic(a.At(i, j)) }
+	a, abc := make([][]dyadic, n), make([][]dyadic, n)
+	for i := range n {
+		a[i], abc[i] = make([]dyadic, n), make([]dyadic, n)
+		for j := range n {
+			a[i][j] = at(model.A, i, j)
+			abc[i][j] = a[i][j].sub(at(model.B, i, 0).mul(at(model.C, 0, j)))
+		}
+	}
+	delta := dyadicCharPoly(a)
+	num := dyadicPolyAdd(dyadicCharPoly(abc), dyadicPolyScale(delta, at(model.D, 0, 0).sub(newDyadic(1))))
+
+	one, zero, dt := newDyadic(1), newDyadic(0), newDyadic(c.Dt)
+	minus := newDyadic(-1)
+	half := dyadic{big.NewInt(1), -1}
+	var ip, id, dn, dd []dyadic
+	if c.Ki == 0 {
+		ip, id = []dyadic{zero}, []dyadic{one}
+	} else if c.Dt == 0 {
+		ip, id = []dyadic{one}, []dyadic{one, zero}
+	} else {
+		id = []dyadic{one, minus}
+		switch c.IFormula {
+		case BackwardEuler:
+			ip = []dyadic{dt, zero}
+		case Trapezoidal:
+			ip = []dyadic{dt.mul(half), dt.mul(half)}
+		default:
+			ip = []dyadic{dt}
+		}
+	}
+	if c.Dt == 0 {
+		dn, dd = []dyadic{one, zero}, []dyadic{one}
+	} else {
+		switch c.DFormula {
+		case BackwardEuler:
+			dn, dd = []dyadic{one, minus}, []dyadic{dt, zero}
+		case Trapezoidal:
+			two := newDyadic(2)
+			dn, dd = []dyadic{two, two.mul(minus)}, []dyadic{dt, dt}
+		default:
+			dn, dd = []dyadic{one, minus}, []dyadic{dt}
+		}
+	}
+	den := dyadicPolyMul(id, dd)
+	ctrl := dyadicPolyAdd(dyadicPolyAdd(dyadicPolyScale(den, newDyadic(c.Kp)), dyadicPolyScale(dyadicPolyMul(ip, dd), newDyadic(c.Ki))), dyadicPolyScale(dyadicPolyMul(dn, id), newDyadic(c.Kd)))
+	ch := dyadicPolyAdd(dyadicPolyMul(delta, den), dyadicPolyMul(num, ctrl))
+	for len(ch) > 0 && ch[0].m.Sign() == 0 {
+		ch = ch[1:]
+	}
+	if len(ch) == 0 {
+		return false, true
+	}
+	emin := ch[0].e
+	for _, v := range ch {
+		emin = min(emin, v.e)
+	}
+	ints := make([]*big.Int, len(ch))
+	for i, v := range ch {
+		ints[i] = new(big.Int).Lsh(v.m, uint(v.e-emin))
+	}
+	return pidTuningExactRootsStable(ints, big.NewInt(1), big.NewInt(1), c.Dt == 0), true
+}
+
+// dyadicCharPoly returns det(λI−a), leading coefficient first: with
+// a = m·2^e for an integer m, its λ^(n−k) coefficient is 2^(k·e) times m's.
+func dyadicCharPoly(a [][]dyadic) []dyadic {
+	if len(a) == 0 {
+		return []dyadic{newDyadic(1)}
+	}
+	e := a[0][0].e
+	for _, row := range a {
+		for _, v := range row {
+			e = min(e, v.e)
+		}
+	}
+	m := make([][]*big.Int, len(a))
+	for i, row := range a {
+		m[i] = make([]*big.Int, len(row))
+		for j, v := range row {
+			m[i][j] = new(big.Int).Lsh(v.m, uint(v.e-e))
+		}
+	}
+	c := intCharPoly(m)
+	out := make([]dyadic, len(c))
+	for k, v := range c {
+		out[k] = dyadic{v, k * e}
+	}
+	return out
+}
+
+// dyadicPolyMul returns a·b, leading coefficients first.
+func dyadicPolyMul(a, b []dyadic) []dyadic {
+	out := make([]dyadic, len(a)+len(b)-1)
+	for i := range out {
+		out[i] = newDyadic(0)
+	}
+	for i, x := range a {
+		for j, y := range b {
+			out[i+j] = out[i+j].add(x.mul(y))
+		}
+	}
+	return out
+}
+
+// dyadicPolyAdd returns a+b, leading coefficients first.
+func dyadicPolyAdd(a, b []dyadic) []dyadic {
+	if len(a) < len(b) {
+		a, b = b, a
+	}
+	out := slices.Clone(a)
+	for i, v := range b {
+		k := i + len(a) - len(b)
+		out[k] = out[k].add(v)
+	}
+	return out
+}
+
+func dyadicPolyScale(a []dyadic, k dyadic) []dyadic {
+	out := make([]dyadic, len(a))
+	for i, v := range a {
+		out[i] = v.mul(k)
+	}
+	return out
 }
 
 // pidTuningDynamicsSpan returns the least and greatest |s| over the plant

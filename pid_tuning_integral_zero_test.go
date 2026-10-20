@@ -97,11 +97,12 @@ func TestPIDTuningIdealStableBand(t *testing.T) {
 		if slow >= 0 || (slow > -1e-10) == tc.want || math.Abs(real(ch.Eval(complex(slow, 0)))) > 1e-6*ch[3] {
 			t.Fatalf("z %g: characteristic %v slow root %g", tc.z, ch, slow)
 		}
-		tf, err := makePlant(t, num, den).rationalTransferFunction(nil)
+		plant := makePlant(t, num, den)
+		tf, err := plant.rationalTransferFunction(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, err := pidTuningIdealStable(tf, c); err != nil || got != tc.want {
+		if got, err := pidTuningIdealStable(plant, tf, c); err != nil || got != tc.want {
 			t.Errorf("z %g: pidTuningIdealStable %v %v, want %v (slow root %g)", tc.z, got, err, tc.want, slow)
 		}
 	}
