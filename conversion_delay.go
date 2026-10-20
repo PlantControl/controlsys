@@ -183,45 +183,61 @@ func discretizeZOHExternal(cont, disc *System, dt float64) (*System, error) {
 	}
 	for i := range p {
 		rho := outputResidual[i]
-		var backA, backB *mat.Dense
+		if rho == 0 {
+			for k := range n {
+				out.C.Set(i, k, cont.C.At(i, k))
+			}
+			for j := range m {
+				if inputResidual[j] == 0 {
+					out.D.Set(i, j, cont.D.At(i, j))
+				} else {
+					oldD.Set(i, j, cont.D.At(i, j))
+				}
+			}
+			continue
+		}
+		// x(t−ρ) is propagated forward from the previous sample over
+		// h = dt−ρ (one extra whole output sample): the backward e^{−Aρ}
+		// amplifies roundoff by e^{|stiff mode|·ρ}.
+		out.OutputDelay[i]++
+		h := dt - rho
+		var forwardA, forwardB *mat.Dense
 		if n > 0 {
-			backA, backB = conversionZOHKernel(cont.A, cont.B, -rho)
+			forwardA, forwardB = conversionZOHKernel(cont.A, cont.B, h)
 			for k := range n {
 				v := 0.
 				for l := range n {
-					v += cont.C.At(i, l) * backA.At(l, k)
+					v += cont.C.At(i, l) * forwardA.At(l, k)
 				}
 				out.C.Set(i, k, v)
 			}
 		}
 		for j := range m {
-			total := rho + inputResidual[j]
-			if total == 0 {
-				out.D.Set(i, j, cont.D.At(i, j))
-				continue
-			}
-			oldPart := 0.
-			olderPart := 0.
+			sigma := inputResidual[j]
+			whole, part := 0., 0.
 			if n > 0 {
-				limited := backB
-				if total > dt {
-					_, forward := conversionZOHKernel(cont.A, cont.B, dt-inputResidual[j])
-					limited = newDense(n, m)
-					limited.Mul(backA, forward)
-					limited.Scale(-1, limited)
-				}
 				for k := range n {
-					oldPart += cont.C.At(i, k) * limited.At(k, j)
-					olderPart += cont.C.At(i, k) * (backB.At(k, j) - limited.At(k, j))
+					whole += cont.C.At(i, k) * forwardB.At(k, j)
+				}
+				if sigma == 0 {
+					part = whole
+				} else if sigma < h {
+					column := newDense(n, 1)
+					for k := range n {
+						column.Set(k, 0, cont.B.At(k, j))
+					}
+					_, current := conversionZOHKernel(cont.A, column, h-sigma)
+					for k := range n {
+						part += cont.C.At(i, k) * current.At(k, 0)
+					}
 				}
 			}
-			if total <= dt {
-				oldPart += cont.D.At(i, j)
+			if sigma <= h {
+				out.D.Set(i, j, part+cont.D.At(i, j))
+				oldD.Set(i, j, whole-part)
 			} else {
-				olderPart += cont.D.At(i, j)
+				oldD.Set(i, j, whole+cont.D.At(i, j))
 			}
-			oldD.Set(i, j, oldPart)
-			newerD.Set(i, j, olderPart)
 		}
 	}
 	return attachConversionInputHistory(out, oldB, oldD, newerD), nil

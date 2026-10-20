@@ -1148,14 +1148,16 @@ func TestC2DDelayModelingInternalOutputDelay(t *testing.T) {
 	if n != 1 {
 		t.Errorf("state dim = %d, want 1 (no state augmentation)", n)
 	}
-	if len(disc.LFT.Tau) != 1 {
-		t.Fatalf("InternalDelay len = %d, want 1", len(disc.LFT.Tau))
+	if disc.LFT != nil {
+		t.Errorf("InternalDelay = %v, want none (x(t-ρ) sampled forward)", disc.LFT.Tau)
 	}
-	if math.Abs(disc.LFT.Tau[0]-1) > 1e-9 {
-		t.Errorf("InternalDelay[0] = %v, want 1", disc.LFT.Tau[0])
+	if len(disc.OutputDelay) != 1 || disc.OutputDelay[0] != 4 {
+		t.Errorf("OutputDelay = %v, want [4]", disc.OutputDelay)
 	}
-	if len(disc.OutputDelay) != 1 || disc.OutputDelay[0] != 3 {
-		t.Errorf("OutputDelay = %v, want [3]", disc.OutputDelay)
+	h := dt - 0.05
+	wantC, wantD := math.Exp(-h), 1-math.Exp(-h)
+	if math.Abs(disc.C.At(0, 0)-wantC) > 1e-14 || math.Abs(disc.D.At(0, 0)-wantD) > 1e-14 {
+		t.Errorf("C,D = %v,%v, want e^{-h},1-e^{-h} = %v,%v", disc.C.At(0, 0), disc.D.At(0, 0), wantC, wantD)
 	}
 }
 

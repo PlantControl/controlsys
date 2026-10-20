@@ -522,3 +522,82 @@ func TestD2CMapInternalDelayHold(t *testing.T) {
 		assertMatClose(t, string(method)+" forward∘inverse input columns", &sum, mat.NewDense(3, 4, nil), 1e-12)
 	}
 }
+
+// mercatorZOHLog returns log(I+N) and Σ(−N)^{k−1}/k·Bd, the blocks of the
+// augmented logarithm, for N = Ad − I small.
+func mercatorZOHLog(ad, bd *mat.Dense) (*mat.Dense, *mat.Dense) {
+	n, _ := ad.Dims()
+	nm := denseCopy(ad)
+	for i := range n {
+		nm.Set(i, i, nm.At(i, i)-1)
+	}
+	pa, pb := denseCopy(nm), denseCopy(bd)
+	ac, bc := denseCopy(nm), denseCopy(bd)
+	for k := 2; k < 40; k++ {
+		sign := 1 / float64(k)
+		if k%2 == 0 {
+			sign = -sign
+		}
+		var ta, tb mat.Dense
+		ta.Mul(nm, pa)
+		tb.Mul(nm, pb)
+		pa, pb = &ta, &tb
+		var sa, sb mat.Dense
+		sa.Scale(sign, pa)
+		sb.Scale(sign, pb)
+		ac.Add(ac, &sa)
+		bc.Add(bc, &sb)
+	}
+	return ac, bc
+}
+
+func TestD2CZOHNearIdentityNonNormal(t *testing.T) {
+	for _, off := range []float64{1e-16, 1e-14, 1e-12, 1e-9, 1e-7} {
+		sys, err := NewFromSlices(2, 1, 1, []float64{1 - 1e-16 - off, -2 * off, off, 1 + off/3}, []float64{1, 1}, []float64{1, 0}, []float64{0}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sys.d2cZOHFast(); !errors.Is(err, ErrSingularTransform) {
+			t.Errorf("off=%g: fast path err = %v, want ErrSingularTransform", off, err)
+		}
+		cont, err := sys.D2C(D2COptions{})
+		if err != nil {
+			t.Fatalf("off=%g: %v", off, err)
+		}
+		ac, bc := mercatorZOHLog(sys.A, sys.B)
+		assertMatClose(t, "Ac", cont.A, ac, 64*eps())
+		assertMatClose(t, "Bc", cont.B, bc, 1e-13)
+		back, err := cont.C2D(1, C2DOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := back.EvalFr(2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := sys.EvalFr(2)
+		if d := cmplx.Abs(got[0][0] - want[0][0]); d > 1e-13 {
+			t.Errorf("off=%g: C2D(D2C) at z=2 = %v, want %v", off, got[0][0], want[0][0])
+		}
+	}
+}
+
+func TestD2CZOHNearUnitWithComplexNearBranchCut(t *testing.T) {
+	for _, im := range []float64{1e-2, 1e-4, 1e-6} {
+		ad := []float64{1 - 1e-10, 0.3, 0.2, 0, -0.9, im, 0, -im, -0.9}
+		sys, err := NewFromSlices(3, 1, 1, ad, []float64{1, 0.5, -1}, []float64{1, 1, 1}, []float64{0}, 0.1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cont, err := sys.D2C(D2COptions{})
+		if err != nil {
+			t.Fatalf("im=%g: %v", im, err)
+		}
+		back, err := cont.C2D(0.1, C2DOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertMatClose(t, "Ad", back.A, sys.A, 1e-13)
+		assertMatClose(t, "Bd", back.B, sys.B, 1e-13)
+	}
+}
