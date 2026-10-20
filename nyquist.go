@@ -6,6 +6,8 @@ import (
 	"math/cmplx"
 	"slices"
 	"sort"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // NyquistResult is the Nyquist response and stability count of a SISO loop;
@@ -39,7 +41,9 @@ type NyquistResult struct {
 // inside the indentation around a boundary pole are not resolved. The counts
 // never depend on omega. When 1+L vanishes on the contour (closed-loop poles
 // on the stability boundary) the count is undefined and Nyquist returns
-// ErrSingularTransform.
+// ErrSingularTransform. A delay loop whose winding needs more than 2^21
+// samples (|L| > 1 out to ω with ωτ in the millions) returns
+// ErrDelayUnsupported.
 //
 // omega nil selects the auto grid with nPoints samples (0 means 500); a
 // non-nil omega must be non-empty, finite, non-negative and, for discrete
@@ -401,6 +405,14 @@ type nyquistPath struct {
 	buf   []complex128
 	vals  []complex128
 	seeds []float64
+	// tau is the total loop delay; delayAliases splits steps below wDelay.
+	tau, wDelay float64
+	// envelope bounds |L| at the last sample over all delay values, from
+	// the delay-free channels; nil means |L|, exact for I/O delays.
+	envelope func() float64
+	env      float64 // envelope at the last sample
+	samples  int     // evaluations, capped at delayNyquistMaxPoints for delay loops
+	ioDelay  *mat.Dense
 	// onContour records that 1+L vanished on the contour: a sample came
 	// within nyquistOnContourTol of -1 or bisection could not resolve arg(1+L) at nyquistMaxDepth.
 	onContour bool
@@ -443,10 +455,20 @@ func (p *nyquistPath) withSeeds(ts []float64, a, b float64, toT func(float64) fl
 }
 
 func (p *nyquistPath) at(s complex128) (complex128, error) {
+	if p.samples++; p.tau > 0 && p.samples > delayNyquistMaxPoints {
+		return 0, fmt.Errorf("delay loop winding needs more than %d samples: %w", delayNyquistMaxPoints, ErrDelayUnsupported)
+	}
 	if err := p.eval(pointAt(s), p.buf); err != nil {
 		return 0, err
 	}
-	applyIODelayAtS(p.sys, pointAt(s), p.buf, 1, 1, true)
+	if p.ioDelay != nil {
+		applyIODelayMatrixAtS(p.sys, pointAt(s), p.buf, 1, 1, p.ioDelay)
+	}
+	if p.envelope != nil {
+		p.env = p.envelope()
+	} else {
+		p.env = cmplx.Abs(p.buf[0])
+	}
 	if v := p.buf[0]; cmplx.Abs(1+v) <= nyquistOnContourTol*math.Max(1, cmplx.Abs(v)) {
 		p.onContour = true
 	}
@@ -460,39 +482,149 @@ func (p *nyquistPath) piece(f func(float64) complex128, ts []float64) error {
 	if err != nil {
 		return err
 	}
+	prevE := p.env
 	p.vals = append(p.vals, prev)
 	for _, t := range ts[1:] {
 		v, err := p.at(f(t))
 		if err != nil {
 			return err
 		}
-		if err := p.refine(f, prevT, prev, t, v, 0); err != nil {
+		e := p.env
+		if err := p.refine(f, nyquistSample{prevT, prev, prevE}, nyquistSample{t, v, e}, 0); err != nil {
 			return err
 		}
 		p.vals = append(p.vals, v)
-		prevT, prev = t, v
+		prevT, prev, prevE = t, v, e
 	}
 	return nil
 }
 
-func (p *nyquistPath) refine(f func(float64) complex128, ta float64, va complex128, tb float64, vb complex128, depth int) error {
-	if !(phaseStep(1+va, 1+vb) > nyquistMaxPhaseStep) {
+// nyquistSample is a contour parameter t with L and its envelope there.
+type nyquistSample struct {
+	t   float64
+	v   complex128
+	env float64
+}
+
+func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, depth int) error {
+	rot := p.tau > 0 && p.delayAliases(f(a.t), f(b.t), max(a.env, b.env))
+	if !rot && !(phaseStep(1+a.v, 1+b.v) > nyquistMaxPhaseStep) {
 		return nil
 	}
-	if depth >= nyquistMaxDepth {
+	if depth >= nyquistMaxDepth && !rot || depth >= 2*nyquistMaxDepth {
 		p.onContour = true
 		return nil
 	}
-	tm := (ta + tb) / 2
+	tm := (a.t + b.t) / 2
 	vm, err := p.at(f(tm))
 	if err != nil {
 		return err
 	}
-	if err := p.refine(f, ta, va, tm, vm, depth+1); err != nil {
+	m := nyquistSample{tm, vm, p.env}
+	if err := p.refine(f, a, m, depth+1); err != nil {
 		return err
 	}
 	p.vals = append(p.vals, vm)
-	return p.refine(f, tm, vm, tb, vb, depth+1)
+	return p.refine(f, m, b, depth+1)
+}
+
+// delayAliases reports a step from sa to sb along which e^{-sτ} turns by
+// more than nyquistMaxPhaseStep while |L| may reach 1: there arg(1+L) can
+// turn by π or more between the samples, which phaseStep would alias. Where
+// |L| < 1, 1+L stays in the right half-plane and cannot wind. The envelope
+// env of |L| depends only on delay-free magnitudes, smooth on the seeded base
+// grid, so endpoint values below 1/2 rule it out; |L| itself ripples on the
+// scale 1/τ with internal delays. Beyond wDelay the tail bound rules it out.
+func (p *nyquistPath) delayAliases(sa, sb complex128, env float64) bool {
+	if !(cmplx.Abs(sb-sa)*p.tau > nyquistMaxPhaseStep) {
+		return false
+	}
+	if math.Min(math.Abs(imag(sa)), math.Abs(imag(sb))) >= p.wDelay {
+		return false
+	}
+	return !(env < 0.5)
+}
+
+// lftEnvelope bounds |L(s)| over |Δ| <= 1 by |H11| + |H12|·Σ_k |H22|^k·|H21|
+// from the delay-free channels H at the last evaluation, for an acyclic delay
+// network with nd delays (H22 nilpotent), or +Inf when H was not formed.
+func lftEnvelope(ws *lftWorkspace, nd int) func() float64 {
+	k := 1 + nd
+	sum := make([]float64, nd*nd)
+	pow := make([]float64, nd*nd)
+	next := make([]float64, nd*nd)
+	h22 := make([]float64, nd*nd)
+	return func() float64 {
+		if !ws.hOK {
+			return math.Inf(1)
+		}
+		h := ws.h
+		for i := range nd {
+			for j := range nd {
+				h22[i*nd+j] = cmplx.Abs(h[(1+i)*k+1+j])
+			}
+		}
+		clear(sum)
+		clear(pow)
+		for i := range nd {
+			sum[i*nd+i], pow[i*nd+i] = 1, 1
+		}
+		for range nd - 1 {
+			clear(next)
+			for i := range nd {
+				for l := range nd {
+					if q := pow[i*nd+l]; q != 0 {
+						for j := range nd {
+							next[i*nd+j] += q * h22[l*nd+j]
+						}
+					}
+				}
+			}
+			pow, next = next, pow
+			for i := range sum {
+				sum[i] += pow[i]
+			}
+		}
+		bound := cmplx.Abs(h[0])
+		for i := range nd {
+			for j := range nd {
+				bound += cmplx.Abs(h[1+i]) * sum[i*nd+j] * cmplx.Abs(h[(1+j)*k])
+			}
+		}
+		return bound
+	}
+}
+
+// delayTailFreq returns a frequency beyond which the rational tail bound
+// certifies |L(s)| <= (1+|L(j∞)|)/2 < 1 on the closed right half-plane, or
+// +Inf when it cannot.
+func delayTailFreq(sys *System) float64 {
+	bound, err := newRationalTailBound(sys)
+	if err != nil {
+		return math.Inf(1)
+	}
+	lim := bound.at(math.Inf(1))
+	if !(lim < 1) {
+		return math.Inf(1)
+	}
+	target := (1 + lim) / 2
+	hi := 1.0
+	for hi < math.MaxFloat64 && !(bound.at(hi) <= target) {
+		hi *= 2
+	}
+	if !(bound.at(hi) <= target) {
+		return math.Inf(1)
+	}
+	lo := hi / 2
+	for range 10 {
+		mid := (lo + hi) / 2
+		if bound.at(mid) <= target {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	return hi
 }
 
 func phaseStep(a, b complex128) float64 {
@@ -529,11 +661,26 @@ func nyquistEncirclements(sys *System, poles []complex128, bd nyquistBoundary) (
 	if err != nil {
 		return 0, err
 	}
-	path := &nyquistPath{sys: sys, eval: e.pointEval(), buf: make([]complex128, 1)}
+	path := &nyquistPath{sys: sys, eval: e.pointEval(), buf: make([]complex128, 1), ioDelay: effectiveIODelayMatrix(sys, 1, 1, true)}
 	path.seedResonances(poles, sys.IsContinuous())
 
 	var closure complex128
 	if sys.IsContinuous() {
+		if path.tau = sisoLoopDelay(sys); path.tau > 0 {
+			path.wDelay = delayTailFreq(sys)
+			if n, _, _ := sys.Dims(); sys.HasInternalDelay() && lftDelayLoopAcyclic(sys, n) {
+				nd := sys.internalDelayCount()
+				ws := newLFTWorkspace(sys, n, nd, 1, 1)
+				path.eval = func(pt frequencyPoint, dst []complex128) error {
+					if err := evalFrLFTInto(ws, sys, pt, nd, 1, 1); err != nil {
+						return err
+					}
+					dst[0] = ws.g[0]
+					return nil
+				}
+				path.envelope = lftEnvelope(ws, nd)
+			}
+		}
 		closure = complex(sys.D.At(0, 0), 0)
 		err = path.continuousHalf(poles, bd, closure)
 	} else {
@@ -622,6 +769,9 @@ func (p *nyquistPath) continuousHalf(poles []complex128, bd nyquistBoundary, clo
 	}
 
 	if p.sys.HasDelay() && closure != 0 {
+		if w1 := p.wDelay; w1 > wHi && !math.IsInf(w1, 1) {
+			return segment(wHi, w1)
+		}
 		return nil
 	}
 	target := nyquistTailRatio * math.Max(cmplx.Abs(1+closure), eps())

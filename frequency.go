@@ -726,6 +726,7 @@ type lftWorkspace struct {
 	absorbedErr error
 	closed      []complex128 // closedLoopInto's result, allocated on first use
 	frozen      []complex128 // evalFrLFTFrozenInto's buffers, allocated on first use
+	hOK         bool         // h holds H at the last evalFrLFTInto point
 }
 
 // newLFTWorkspace balances the augmented plant [|A|+|E| B B2; C C2 ·] so
@@ -786,9 +787,11 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, pt frequencyPoint, N, p, m int
 		}
 	}
 	h := ws.h
+	ws.hOK = false
 	if err := ws.bd.evalInto(pt, h); err != nil {
 		return evalFrLFTFrozenInto(ws, pt, N, p, m)
 	}
+	ws.hOK = true
 	mN := m + N
 	var loopMax, rhsMax float64
 	for i := range N {
