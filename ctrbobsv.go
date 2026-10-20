@@ -109,9 +109,10 @@ type StaircaseForm struct {
 //	Abar = [Anc 0; A21 Ac], Bbar = [0; Bc], Cbar = [Cnc Cc]
 //
 // with the nc = sum(K) controllable states last. A singular value of a
-// staircase step counts as rank above tol·max(σ₁(step), ‖A‖_F), so like
-// MATLAB's absolute default, rounding noise in a block small against ‖A‖
-// is not rank; 0 selects tol = n²·eps. Nil, non-finite or
+// staircase step counts as rank above tol·max(σ₁(step), ‖A‖_F), so rounding
+// noise in a block small against ‖A‖ is not rank. tol = 0 selects n²·eps
+// with the floor raised to MATLAB's absolute default 10·n·‖A‖₁·eps.
+// Nil, non-finite or
 // mismatched matrices, a negative or NaN tol and a model with no states
 // return an error.
 func CtrbF(A, B, C *mat.Dense, tol float64) (*StaircaseForm, error) {
@@ -184,7 +185,7 @@ func requireStaircaseArgs(op string, A, B, C *mat.Dense, tol float64) (int, erro
 // and reverses the state order to MATLAB's layout with the controllable
 // states last.
 func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) (*StaircaseForm, error) {
-	st, err := controllabilityStaircase(A, B, C, tol, true)
+	st, err := controllabilityStaircaseFloor(A, B, C, tol, ctrbfFloor(A, tol), true)
 	if err != nil {
 		return nil, err
 	}

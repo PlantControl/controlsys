@@ -22,8 +22,9 @@ const (
 // ReduceOpts configures Reduce; the zero value is MATLAB minreal(sys).
 type ReduceOpts struct {
 	Mode ReduceMode
-	// Tol is the staircase rank tolerance (MATLAB minreal tol); 0 selects
-	// n²·eps relative to the data.
+	// Tol is the staircase rank tolerance (MATLAB minreal tol): a singular
+	// value of a step counts as rank above Tol·max(σ₁(step), ‖A‖_F), ‖A‖
+	// of the full model in both stages; 0 selects n²·eps.
 	Tol float64
 	// Equalize balances A, B, C before the staircase reductions.
 	Equalize bool
@@ -87,6 +88,7 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	}
 
 	ncont := n
+	floor := staircaseFloor(A, opts.Tol)
 
 	if opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable {
 		res, err := controllabilityStaircase(A, B, C, opts.Tol, false)
@@ -114,7 +116,7 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 			ccT := transposeDenseInto(slab1[ncont*ncont:ncont*ncont+ncont*p], cc)
 			bcT := transposeDenseInto(slab1[ncont*ncont+ncont*p:], bc)
 
-			dualRes, err := controllabilityStaircase(acT, ccT, bcT, opts.Tol, false)
+			dualRes, err := controllabilityStaircaseFloor(acT, ccT, bcT, opts.Tol, floor, false)
 			if err != nil {
 				return nil, fmt.Errorf("Reduce: %w", err)
 			}
