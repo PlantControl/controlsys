@@ -834,20 +834,22 @@ func (ws *hamiltonianWS) brentMax(peak, w, a, b float64, refine bool) (float64, 
 	return peak, w
 }
 
-// refinedPeak climbs σ_max on refined gains from the local maxima, within
-// 1e-4 of level or above it, of two sample sets: the seed grid of
-// lowerBound, each on the bracket of its neighbours, and samples
-// ω₀ + k·|σ|/4, |k| ≤ 8, around each lightly damped pole σ + jω₀
-// (|σ| < 0.1·ω₀; ln z/T for discrete models), each on ±|σ|/4. It returns the
-// highest gain found and where, or 0. It backs up the crossing search on
-// near-optimal H∞ loops, whose σ_max is flat to 1e-8 to 1e-3 over decades:
-// QZ scatters the γ-crossings of their near-coincident lightly damped pole
-// pairs, so neither the seed grid nor the crossing midpoints need land on the
-// highest hump, and GEPP noise of 1e-8 picks the wrong seed of a broad hump
-// and stalls its climb.
+// refinedPeak backs up the crossing search on near-optimal H∞ loops, whose
+// σ_max is flat to 1e-8 to 1e-3 over decades: QZ scatters the γ-crossings of
+// their near-coincident lightly damped pole pairs, so neither the seed grid
+// nor the crossing midpoints need land on the highest hump, and GEPP noise
+// of 1e-8 picks the wrong seed of a broad hump and stalls its climb. It
+// refines the eight highest samples within 1e-4 of level, or above it, of
+// two sets: the seed grid of lowerBound, each bracketed by its neighbours,
+// and ω₀ + k·|σ|/4, |k| ≤ 8, around each lightly damped pole σ + jω₀
+// (|σ| < 0.1·ω₀; ln z/T for discrete models), each bracketed by ±|σ|/4.
+// From each refined local maximum it climbs on refined gains when
+// refinedRise sees the gain rise, tested at at (where the crossing search
+// ended) when the bracket holds it. It returns the highest gain found and
+// where, or 0.
 func (ws *hamiltonianWS) refinedPeak(poles []complex128, level, at float64) (peak, omega float64) {
 	sys := ws.sys
-	var res []refinedSeed
+	res := make([]refinedSeed, 0, 17*len(poles))
 	for _, pole := range poles {
 		if sys.IsDiscrete() {
 			pole = cmplx.Log(pole) / complex(sys.Dt, 0)
@@ -864,8 +866,8 @@ func (ws *hamiltonianWS) refinedPeak(poles []complex128, level, at float64) (pea
 		}
 	}
 	slices.SortFunc(res, func(x, y refinedSeed) int { return cmp.Compare(x.w, y.w) })
-	var starts []refinedSeed
-	var top []int
+	starts := make([]refinedSeed, 0, 16)
+	top := make([]int, 0, max(len(ws.seeds), len(res)))
 	for k, set := range [2][]refinedSeed{ws.seeds, res} {
 		top = top[:0]
 		for i := range set {
@@ -994,7 +996,7 @@ func (ws *hamiltonianWS) seedFreqs(poles []complex128, freqs []float64) []float6
 func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak float64) {
 	freqs := ws.seedFreqs(poles, ws.freqs[:0])
 	ws.freqs = freqs
-	ws.seeds = ws.seeds[:0]
+	ws.seeds = slices.Grow(ws.seeds[:0], len(freqs))
 	peak, w, err := ws.eval.peak(freqs, 0)
 	if err != nil {
 		return 0, 0
