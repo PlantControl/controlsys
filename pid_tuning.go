@@ -226,13 +226,16 @@ func (*pidNonfiniteResponse) Unwrap() error { return ErrInvalidArgument }
 const pidTuningMaxSensitivity = 4
 
 // pidTuningDCSign returns the sign of the DC gain of a stable plant, or 0
-// when the plant is not known to be stable, its integratingDCGain is
-// infinite, as for an integrator displaced inside the unit circle (whose
-// DCGain is finite), or its DC gain is zero
-// relative to the peak of |G| sampled over six decades around wc. A
-// frequency response at DC is no substitute: next to such an integrator it
-// can be finite, and the samples below wc then fail. A sample try cannot
-// resolve is skipped, so it never fails the design.
+// when the plant is not known to be stable, Pidtune recognises an
+// integrator, or its DC gain is zero relative to the peak of |G| sampled
+// over six decades around wc. Pidtune recognises an integrator itself, by
+// integratingDCGain, whose transfer limit takes a DC gain at coefficient
+// rounding for infinite: DCGain, like MATLAB dcgain, is finite for an
+// integrator rounded inside the unit circle. A pole radius alone cannot
+// tell: rounded integrators lie up to 3e-4 from z = 1, beside genuine slow
+// poles. A frequency response at DC is no substitute either: next to such
+// an integrator it is finite, and the samples below wc then fail. A sample
+// try cannot resolve is skipped, so it never fails the design.
 func pidTuningDCSign(plant *System, try func(float64) (complex128, bool), wc float64) float64 {
 	if stable, err := plant.IsStable(); err != nil || !stable {
 		return 0
@@ -341,7 +344,7 @@ func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			return pidTuningIdealStable(transfer, c)
+			return pidTuningIdealStable(s.model, transfer, c)
 		}
 		return false, err
 	}
@@ -386,9 +389,23 @@ func pidTuningPolesStable(poles []complex128, a *mat.Dense, plant, c *System) bo
 	if len(poles) == 0 {
 		return true
 	}
-	continuous := plant.Dt == 0
+	stable, decided := pidTuningFloatVerdict(poles, plant.Dt == 0, mat.Norm(a, math.Inf(1)))
+	if decided {
+		return stable
+	}
+	exact, ok := pidTuningExactStable(plant, c)
+	if !ok {
+		return stable
+	}
+	return exact
+}
+
+// pidTuningFloatVerdict is the float half of pidTuningPolesStable for
+// poles of a matrix of norm anorm: decided is false when the exact test
+// must settle the verdict.
+func pidTuningFloatVerdict(poles []complex128, continuous bool, anorm float64) (stable, decided bool) {
 	stable, doubt := true, false
-	eta := pidTuningPoleErrorScale * float64(len(poles)) * 0x1p-52 * mat.Norm(a, math.Inf(1))
+	eta := pidTuningPoleErrorScale * float64(len(poles)) * 0x1p-52 * anorm
 	for i, p := range poles {
 		if poleInsideStabilityBoundary(p, continuous, poleStabilityTolerance(p)) {
 			margin := 1 - cmplx.Abs(p)
@@ -404,17 +421,10 @@ func pidTuningPolesStable(poles []complex128, a *mat.Dense, plant, c *System) bo
 			excess = real(p) + poleStabilityTolerance(p)
 		}
 		if excess > pidTuningPoleMarginSafety*eta && (continuous && cmplx.Abs(p) > 1 || excess > pidTuningExactBand) {
-			return false
+			return false, true
 		}
 	}
-	if stable && !doubt {
-		return true
-	}
-	exact, ok := pidTuningExactStable(plant, c)
-	if !ok {
-		return stable
-	}
-	return exact
+	return stable, stable && !doubt
 }
 
 const (
@@ -466,16 +476,22 @@ func pidTuningExactStable(plant, c *System) (stable, ok bool) {
 	if m == nil {
 		return false, false
 	}
-	p := intCharPoly(m)
+	return pidTuningExactRootsStable(intCharPoly(m), ln, ld, plant.Dt == 0), true
+}
+
+// pidTuningExactRootsStable reports whether every root of p·ln/ld, p
+// leading coefficient first and scaled in place, has Re s < −1e-10 or
+// |z| < 1−1e-10.
+func pidTuningExactRootsStable(p []*big.Int, ln, ld *big.Int, continuous bool) bool {
 	const tol = 1e-10
-	if plant.Dt == 0 {
+	if continuous {
 		t := new(big.Rat).SetFloat64(tol)
 		intScaleRoots(p, big.NewInt(1), new(big.Int).Mul(ld, t.Denom()))
-		return intHurwitz(intShift(p, new(big.Int).Neg(new(big.Int).Mul(ln, t.Num())))), true
+		return intHurwitz(intShift(p, new(big.Int).Neg(new(big.Int).Mul(ln, t.Num()))))
 	}
 	rho := new(big.Rat).SetFloat64(1 - tol)
 	intScaleRoots(p, new(big.Int).Mul(ln, rho.Num()), new(big.Int).Mul(ld, rho.Denom()))
-	return intSchur(p), true
+	return intSchur(p)
 }
 
 // intScaleRoots scales p, leading coefficient first, in place so that its
@@ -507,6 +523,8 @@ func newDyadic(x float64) dyadic {
 func (d dyadic) mul(o dyadic) dyadic { return dyadic{new(big.Int).Mul(d.m, o.m), d.e + o.e} }
 
 // sub returns d − o.
+func (d dyadic) add(o dyadic) dyadic { return d.sub(dyadic{new(big.Int).Neg(o.m), o.e}) }
+
 func (d dyadic) sub(o dyadic) dyadic {
 	if d.e <= o.e {
 		t := new(big.Int).Lsh(o.m, uint(o.e-d.e))
@@ -830,6 +848,28 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
+	// resp falls back to FreqResponse's solve where eval's fails or is not
+	// finite, as beside rounded multiple poles at z = 1 or s = 0 where it
+	// resolves the response over decades eval cannot; only a sample neither
+	// resolves fails eval. fellBack records a fallback sample: a search
+	// failing with one tells nothing of its depth, which stays blind.
+	pp := &pidtunePlantPoint{}
+	fellBack := false
+	resp := func(w float64) complex128 {
+		saved := eval.err
+		eval.err = nil
+		g := eval.at(w)
+		if eval.err != nil || !pidFiniteComplex(g) {
+			if h, err := pp.at(plant, w); err == nil && pidFiniteComplex(h) {
+				g, eval.err, fellBack = h, nil, true
+			}
+		}
+		if saved != nil {
+			eval.err = saved
+		}
+		return g
+	}
+	tryResp := func(w float64) (complex128, bool) { return tryEval(eval, func() complex128 { return resp(w) }) }
 	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(screen.model) })
 	loopTail := sync.OnceValue(func() func(*PID2, float64) float64 { return pidTuningLoopTail(plant) })
 	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(screen.model) })
@@ -846,12 +886,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// the solve cannot resolve.
 	used, minHigh, sRejected, probing, resolveFloor := 0, 0., false, false, false
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
-		opts.CrossoverFrequency = wc
+		opts.CrossoverFrequency, fellBack = wc, false
 		low := wc / 100
 		if resolveFloor {
-			low = pidTuningResolvedFloor(eval.try, low, wc)
+			low = pidTuningResolvedFloor(tryResp, low, wc)
 		}
-		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: eval.at, try: eval.try, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
+		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
 		if robust {
 			p.maxSensitivity = pidTuningMaxSensitivity
 			p.loopTail = loopTail()
@@ -936,7 +976,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	// evalFailed clears an evaluation failure off wc0, as near rounded
 	// multiple poles at z = 1 or s = 0, so a moved crossover is skipped;
-	// skipped also counts a moved crossover whose band is not finite.
+	// skipped also counts a moved crossover whose band is not finite or
+	// whose failed search read a fallback sample.
 	evalFailed := func() bool {
 		if eval.err == nil {
 			return false
@@ -945,7 +986,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return true
 	}
 	skipped := func(err error) bool {
-		return evalFailed() || errors.As(err, new(*pidNonfiniteResponse))
+		blind := err != nil && fellBack
+		fellBack = false
+		return evalFailed() || blind || errors.As(err, new(*pidNonfiniteResponse))
 	}
 	// stamp reports the whole call's evaluations on the returned evidence.
 	stamp := func(res *PIDTuningResult, err error) (*PIDTuningResult, error) {
@@ -1000,12 +1043,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		design := func(j int) (*PIDTuningResult, error) {
 			o := opts
 			o.CrossoverFrequency = at(j)
-			p := pidTuningPlant{dt: plant.Dt, at: eval.at, gainSign: gainSign}
+			p := pidTuningPlant{dt: plant.Dt, at: resp, gainSign: gainSign}
 			// A walk failing on rounded poles at z = 1 or s = 0 leaves the
 			// phase unknown; the depth is still tried.
 			phase := math.NaN()
 			if gainSign != 0 {
-				phase = pidTuningUnwrappedPhase(eval.at, gainSign, at(j), tau)
+				phase = pidTuningUnwrappedPhase(resp, gainSign, at(j), tau)
 				evalFailed()
 			}
 			reachable := pidTuningReachable(p, family, o, pm, phase)
@@ -1104,7 +1147,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		} else {
 			unit.Kp = 1
 		}
-		atUnit := func(w float64) complex128 { return eval.at(w) * pidTuningFeedback(unit, w) }
+		atUnit := func(w float64) complex128 { return resp(w) * pidTuningFeedback(unit, w) }
 		signs := []float64{gainSign}
 		if gainSign == 0 {
 			signs = []float64{1, -1}
@@ -1219,7 +1262,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return stamp(res, err)
 	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
-		gainSign := pidTuningDCSign(plant, eval.try, wc)
+		gainSign := pidTuningDCSign(plant, tryResp, wc)
 		if blocked {
 			return integralBlocked(wc, gainSign)
 		}
@@ -1235,7 +1278,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	gainSign := pidTuningDCSign(plant, eval.try, wc0)
+	gainSign := pidTuningDCSign(plant, tryResp, wc0)
 	if blocked {
 		return integralBlocked(wc0, gainSign)
 	}
@@ -1274,7 +1317,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		for _, lag := range []float64{15, 30, 45, 60} {
 			for _, sign := range signs {
-				wc, ok := pidTuningNearestPhase(eval.at, sign, -180+pm+lag, wc0, wLo, wHi, tau)
+				wc, ok := pidTuningNearestPhase(resp, sign, -180+pm+lag, wc0, wLo, wHi, tau)
 				if evalFailed() || !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
 					continue
 				}
@@ -1323,7 +1366,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// damped mode.
 	move := func(resonant bool, leads ...float64) (*PIDTuningResult, error) {
 		for _, lead := range leads {
-			wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
+			wc, ok := pidTuningPhaseCrossing(resp, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
 			if evalFailed() || !ok || wc == wc0 {
 				continue
 			}
@@ -2439,7 +2482,7 @@ const pidTuningIdealReturnTol = 0x1p-26
 
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic directly.
-func pidTuningIdealStable(transfer *TransferFuncResult, c *PID2) (bool, error) {
+func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2) (bool, error) {
 	var ip, id, dn, dd Poly
 	if c.Ki == 0 {
 		ip, id = Poly{0}, Poly{1}
@@ -2488,11 +2531,167 @@ func pidTuningIdealStable(transfer *TransferFuncResult, c *PID2) (bool, error) {
 		return false, err
 	}
 	for _, pole := range poles {
-		if !pidFiniteComplex(pole) || !poleInsideStabilityBoundary(pole, c.Dt == 0, poleStabilityTolerance(pole)) {
+		if !pidFiniteComplex(pole) {
 			return false, nil
 		}
 	}
-	return true, nil
+	norm := 1.0
+	for _, v := range characteristic[1:] {
+		norm += math.Abs(v / characteristic[0])
+	}
+	stable, decided := pidTuningFloatVerdict(poles, c.Dt == 0, norm)
+	if decided {
+		return stable, nil
+	}
+	if exact, ok := pidTuningIdealExact(model, c); ok {
+		return exact, nil
+	}
+	return stable, nil
+}
+
+// pidTuningIdealExact is pidTuningIdealStable's exact test on model's
+// realization, in the scope of pidTuningExactStable: with Δ = det(λI−A),
+// det(λI−A+BC) = Δ·(1+C(λI−A)⁻¹B), so N = det(λI−A+BC) − Δ + D·Δ is the
+// plant numerator over Δ and the characteristic is Δ·den(c) + N·num(c).
+func pidTuningIdealExact(model *System, c *PID2) (stable, ok bool) {
+	n, m, p := model.Dims()
+	if model.E != nil || model.HasDelay() || m != 1 || p != 1 || n > pidTuningExactOrder {
+		return false, false
+	}
+	for _, a := range []*mat.Dense{model.A, model.B, model.C, model.D} {
+		if a != nil && requireFiniteDense("", "", a) != nil {
+			return false, false
+		}
+	}
+	for _, v := range []float64{c.Kp, c.Ki, c.Kd, c.Dt} {
+		if !finitePID(v) {
+			return false, false
+		}
+	}
+	at := func(a *mat.Dense, i, j int) dyadic { return newDyadic(a.At(i, j)) }
+	a, abc := make([][]dyadic, n), make([][]dyadic, n)
+	for i := range n {
+		a[i], abc[i] = make([]dyadic, n), make([]dyadic, n)
+		for j := range n {
+			a[i][j] = at(model.A, i, j)
+			abc[i][j] = a[i][j].sub(at(model.B, i, 0).mul(at(model.C, 0, j)))
+		}
+	}
+	delta := dyadicCharPoly(a)
+	num := dyadicPolyAdd(dyadicCharPoly(abc), dyadicPolyScale(delta, at(model.D, 0, 0).sub(newDyadic(1))))
+
+	one, zero, dt := newDyadic(1), newDyadic(0), newDyadic(c.Dt)
+	minus := newDyadic(-1)
+	half := dyadic{big.NewInt(1), -1}
+	var ip, id, dn, dd []dyadic
+	if c.Ki == 0 {
+		ip, id = []dyadic{zero}, []dyadic{one}
+	} else if c.Dt == 0 {
+		ip, id = []dyadic{one}, []dyadic{one, zero}
+	} else {
+		id = []dyadic{one, minus}
+		switch c.IFormula {
+		case BackwardEuler:
+			ip = []dyadic{dt, zero}
+		case Trapezoidal:
+			ip = []dyadic{dt.mul(half), dt.mul(half)}
+		default:
+			ip = []dyadic{dt}
+		}
+	}
+	if c.Dt == 0 {
+		dn, dd = []dyadic{one, zero}, []dyadic{one}
+	} else {
+		switch c.DFormula {
+		case BackwardEuler:
+			dn, dd = []dyadic{one, minus}, []dyadic{dt, zero}
+		case Trapezoidal:
+			two := newDyadic(2)
+			dn, dd = []dyadic{two, two.mul(minus)}, []dyadic{dt, dt}
+		default:
+			dn, dd = []dyadic{one, minus}, []dyadic{dt}
+		}
+	}
+	den := dyadicPolyMul(id, dd)
+	ctrl := dyadicPolyAdd(dyadicPolyAdd(dyadicPolyScale(den, newDyadic(c.Kp)), dyadicPolyScale(dyadicPolyMul(ip, dd), newDyadic(c.Ki))), dyadicPolyScale(dyadicPolyMul(dn, id), newDyadic(c.Kd)))
+	ch := dyadicPolyAdd(dyadicPolyMul(delta, den), dyadicPolyMul(num, ctrl))
+	for len(ch) > 0 && ch[0].m.Sign() == 0 {
+		ch = ch[1:]
+	}
+	if len(ch) == 0 {
+		return false, true
+	}
+	emin := ch[0].e
+	for _, v := range ch {
+		emin = min(emin, v.e)
+	}
+	ints := make([]*big.Int, len(ch))
+	for i, v := range ch {
+		ints[i] = new(big.Int).Lsh(v.m, uint(v.e-emin))
+	}
+	return pidTuningExactRootsStable(ints, big.NewInt(1), big.NewInt(1), c.Dt == 0), true
+}
+
+// dyadicCharPoly returns det(λI−a), leading coefficient first: with
+// a = m·2^e for an integer m, its λ^(n−k) coefficient is 2^(k·e) times m's.
+func dyadicCharPoly(a [][]dyadic) []dyadic {
+	if len(a) == 0 {
+		return []dyadic{newDyadic(1)}
+	}
+	e := a[0][0].e
+	for _, row := range a {
+		for _, v := range row {
+			e = min(e, v.e)
+		}
+	}
+	m := make([][]*big.Int, len(a))
+	for i, row := range a {
+		m[i] = make([]*big.Int, len(row))
+		for j, v := range row {
+			m[i][j] = new(big.Int).Lsh(v.m, uint(v.e-e))
+		}
+	}
+	c := intCharPoly(m)
+	out := make([]dyadic, len(c))
+	for k, v := range c {
+		out[k] = dyadic{v, k * e}
+	}
+	return out
+}
+
+// dyadicPolyMul returns a·b, leading coefficients first.
+func dyadicPolyMul(a, b []dyadic) []dyadic {
+	out := make([]dyadic, len(a)+len(b)-1)
+	for i := range out {
+		out[i] = newDyadic(0)
+	}
+	for i, x := range a {
+		for j, y := range b {
+			out[i+j] = out[i+j].add(x.mul(y))
+		}
+	}
+	return out
+}
+
+// dyadicPolyAdd returns a+b, leading coefficients first.
+func dyadicPolyAdd(a, b []dyadic) []dyadic {
+	if len(a) < len(b) {
+		a, b = b, a
+	}
+	out := slices.Clone(a)
+	for i, v := range b {
+		k := i + len(a) - len(b)
+		out[k] = out[k].add(v)
+	}
+	return out
+}
+
+func dyadicPolyScale(a []dyadic, k dyadic) []dyadic {
+	out := make([]dyadic, len(a))
+	for i, v := range a {
+		out[i] = v.mul(k)
+	}
+	return out
 }
 
 // pidTuningDynamicsSpan returns the least and greatest |s| over the plant

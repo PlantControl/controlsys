@@ -130,19 +130,26 @@ func TestPidtune_PI_Integrator(t *testing.T) {
 }
 
 // On 1/(s−1) at wc ≈ 1, PM = atan ω + ∠C ≤ 45° for P and PI, short of the
-// default 60°; PID adds the lead and designs.
+// default 60°, and back-off lowers it; the upward search (OQWQKF) reaches
+// ω ≥ √3, where P keeps 60° at Kp = |jω − 1| = 2, as MATLAB designs. PID adds
+// the lead at wc. Oracle: PM = atan ω − ∠C analytically, closed-loop roots
+// and the directly evaluated loop.
 func TestPidtune_PI_Unstable(t *testing.T) {
 	plant := makePlant(t, []float64{1}, []float64{1, -1})
-	for _, f := range []PidtuneType{PidtuneP, PidtunePI} {
-		if pid, err := Pidtune(plant, f, 0, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-			t.Errorf("%s: %+v, %v; want unattainable", f, pid, err)
+	for _, f := range []PidtuneType{PidtuneP, PidtunePI, PidtunePID} {
+		pid, err := Pidtune(plant, f, 0, nil)
+		if err != nil {
+			t.Errorf("%s: %v", f, err)
+			continue
+		}
+		pidtuneCheckRobust(t, string(f)+"/unstable", pid, Poly{1}, Poly{1, -1}, 0, pidTuningMaxSensitivity)
+		if f == PidtuneP {
+			w := math.Sqrt(pid.Kp*pid.Kp - 1)
+			if pm := math.Atan(w) * 180 / math.Pi; !(pid.Kp > 1.99 && pid.Kp < 2.1) || pm < 58.5 || pm > 62 {
+				t.Errorf("P: Kp %g, PM %.4g° at ω %.4g; want Kp ≈ 2, PM ≈ 60°", pid.Kp, pm, w)
+			}
 		}
 	}
-	pid, err := Pidtune(plant, PidtunePID, 0, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pidtuneCheckRobust(t, "PID/unstable", pid, Poly{1}, Poly{1, -1}, 0, pidTuningMaxSensitivity)
 }
 
 func TestPidtune_PI_CustomCrossover(t *testing.T) {

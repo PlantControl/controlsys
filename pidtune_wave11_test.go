@@ -100,9 +100,9 @@ func pidtuneLevelOracle(pid *PID, num, den Poly) float64 {
 // population of stable, unstable, discrete, zero-DC and delayed plants,
 // every return is oracle-stable (closed-loop roots, or the Nyquist winding
 // with a delay) and has |L| = 1 within 1e-6 at a back-off step
-// wc·10^(−k/20), on its realized response (placed, |S| ≤ 4 as the gate)
-// or on its ideal derivative (legacy); most are placed. A placed return
-// keeps the 60° margin (58.5° with oracle slack) at every crossover.
+// wc·10^(−k/20), k ≥ −60 for the upward search (OQWQKF), on its realized
+// response (placed, |S| ≤ 4 as the gate) or on its ideal derivative
+// (legacy); most are placed. Every return keeps 58.5° at every crossover.
 func TestPidtuneAutoPDPlaced(t *testing.T) {
 	rng := rand.New(rand.NewPCG(11, 13))
 	placed, legacy := 0, 0
@@ -128,7 +128,7 @@ func TestPidtuneAutoPDPlaced(t *testing.T) {
 		ideal.Tf = 0
 		L, Li := pidtuneOracleLoop(pid, num, den, dt, delay), pidtuneOracleLoop(&ideal, num, den, dt, delay)
 		kind := ""
-		for k := 0; k <= 20*pidtuneBackoffMaxDecade && kind == ""; k++ {
+		for k := -pidtuneBackoffPerDecade * pidtuneRaiseDecades; k <= 20*pidtuneBackoffMaxDecade && kind == ""; k++ {
 			w := wc * math.Pow(10, -float64(k)/pidtuneBackoffPerDecade)
 			switch {
 			case math.Abs(cmplx.Abs(L(w))-1) < 1e-6:
@@ -137,26 +137,26 @@ func TestPidtuneAutoPDPlaced(t *testing.T) {
 				kind = "legacy"
 			}
 		}
+		wMax := 1e6
+		if dt > 0 {
+			wMax = math.Pi / dt
+		}
+		pms, _ := pidtuneSignedMargins(L, 1e-7, wMax)
+		for _, m := range pms {
+			if math.Abs(m) < 58.5 {
+				t.Errorf("%s: %s %+v margin %.3g°", name, kind, pid, m)
+			}
+		}
 		switch kind {
 		case "placed":
 			placed++
-			wMax := 1e6
-			if dt > 0 {
-				wMax = math.Pi / dt
-			}
-			pms, ms := pidtuneSignedMargins(L, 1e-7, wMax)
-			if ms > pidTuningMaxSensitivity+0.05 {
+			if _, ms := pidtuneSignedMargins(L, 1e-7, wMax); ms > pidTuningMaxSensitivity+0.05 {
 				t.Errorf("%s: placed %+v |S| peak %.3g", name, pid, ms)
-			}
-			for _, m := range pms {
-				if math.Abs(m) < 58.5 {
-					t.Errorf("%s: placed %+v margin %.3g°", name, pid, m)
-				}
 			}
 		case "legacy":
 			legacy++
 		default:
-			t.Errorf("%s: %+v has |L| ≠ 1 at every back-off step", name, pid)
+			t.Errorf("%s: %+v has |L| ≠ 1 at every search step", name, pid)
 		}
 	}
 	t.Logf("placed %d, legacy %d", placed, legacy)
