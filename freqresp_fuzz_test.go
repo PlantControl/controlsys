@@ -83,8 +83,7 @@ func (md *fzFRModel) exact(x *fzCRat) ([]complex128, bool) {
 	}
 	X := make([]*fzCRat, n*m)
 	end := n
-	for bi := len(blk) - 1; bi >= 0; bi-- {
-		k := blk[bi]
+	for _, k := range slices.Backward(blk) {
 		lo := end - k
 		M := make([]*fzCRat, k*k)
 		rhs := make([]*fzCRat, k*m)
@@ -558,10 +557,8 @@ func fzFRCheckDescriptor(t *testing.T, s *fzSpec, ws []float64, pts []fzFRPointD
 			B.Set(i, j, e*s.B[r*s.M+j])
 		}
 	}
-	for _, x := range slices.Concat(A.RawMatrix().Data, B.RawMatrix().Data) {
-		if fzBadFloat(x) {
-			return
-		}
+	if slices.ContainsFunc(slices.Concat(A.RawMatrix().Data, B.RawMatrix().Data), fzBadFloat) {
+		return
 	}
 	ds, err := NewDescriptor(A, B, mat.NewDense(s.P, n, slices.Clone(s.C)), mat.NewDense(s.P, s.M, slices.Clone(s.D)), E, s.Dt)
 	if err != nil {
@@ -588,10 +585,8 @@ func fzFRCheckFRD(t *testing.T, s *fzSpec, sys *System, ws []float64, fr *FreqRe
 	F, err := sys.FRD(ws)
 	if err != nil {
 		for k := range ws {
-			for _, g := range fzFRAt(fr, k) {
-				if cmplx.IsInf(g) {
-					return
-				}
+			if slices.ContainsFunc(fzFRAt(fr, k), cmplx.IsInf) {
+				return
 			}
 		}
 		t.Fatalf("FRD: %v\n%s", err, s)
