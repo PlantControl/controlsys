@@ -8,12 +8,15 @@ import (
 
 // StepInfoOptions holds the optional arguments of StepInfo, as MATLAB
 // stepinfo name-value pairs. Zero values select the defaults:
-// RiseTimeLimits [0.1 0.9], SettlingThreshold 0.02 and SteadyStateValue the
-// last sample of each row.
+// RiseTimeLimits [0.1 0.9], SettlingThreshold 0.02, SteadyStateValue the
+// last sample of each row and InitialValue 0 for every row (MATLAB yinit).
+// Rise levels, overshoot and undershoot normalization and the settling band
+// are relative to the step from InitialValue to SteadyStateValue.
 type StepInfoOptions struct {
 	RiseTimeLimits    [2]float64
 	SettlingThreshold float64
 	SteadyStateValue  []float64
+	InitialValue      []float64
 }
 
 // StepInfoResult holds one StepMetric per response row, in the row order of
@@ -152,15 +155,22 @@ func (cfg StepInfoOptions) validate(rows int) error {
 	if !(cfg.SettlingThreshold > 0 && cfg.SettlingThreshold < 1) {
 		return fmt.Errorf("StepInfo: settling threshold must be in (0, 1), got %g: %w", cfg.SettlingThreshold, ErrInvalidArgument)
 	}
-	if cfg.SteadyStateValue == nil {
+	if err := validateStepInfoRowValues("steady-state", cfg.SteadyStateValue, rows); err != nil {
+		return err
+	}
+	return validateStepInfoRowValues("initial", cfg.InitialValue, rows)
+}
+
+func validateStepInfoRowValues(name string, v []float64, rows int) error {
+	if v == nil {
 		return nil
 	}
-	if len(cfg.SteadyStateValue) != rows {
-		return fmt.Errorf("StepInfo: steady-state values length %d does not match response rows %d: %w", len(cfg.SteadyStateValue), rows, ErrDimensionMismatch)
+	if len(v) != rows {
+		return fmt.Errorf("StepInfo: %s values length %d does not match response rows %d: %w", name, len(v), rows, ErrDimensionMismatch)
 	}
-	for row, v := range cfg.SteadyStateValue {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return fmt.Errorf("StepInfo: steady-state value %d must be finite, got %g: %w", row, v, ErrInvalidArgument)
+	for row, x := range v {
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return fmt.Errorf("StepInfo: %s value %d must be finite, got %g: %w", name, row, x, ErrInvalidArgument)
 		}
 	}
 	return nil
@@ -177,7 +187,10 @@ func validateStepInfoTime(t []float64) error {
 
 func stepMetricForRow(resp *TimeResponse, row int, cfg StepInfoOptions) StepMetric {
 	_, cols := resp.Y.Dims()
-	initial := resp.Y.At(row, 0)
+	initial := 0.0
+	if cfg.InitialValue != nil {
+		initial = cfg.InitialValue[row]
+	}
 	final := resp.Y.At(row, cols-1)
 	if cfg.SteadyStateValue != nil {
 		final = cfg.SteadyStateValue[row]
@@ -245,6 +258,9 @@ func directionalPeak(resp *TimeResponse, row int, direction float64) (float64, f
 func crossingTime(resp *TimeResponse, row int, level, direction float64) (float64, bool) {
 	_, cols := resp.Y.Dims()
 	prev := resp.Y.At(row, 0)
+	if direction*(prev-level) >= 0 {
+		return resp.T[0], true
+	}
 	for k := 1; k < cols; k++ {
 		curr := resp.Y.At(row, k)
 		if direction*(curr-level) >= 0 && direction*(prev-level) < 0 {

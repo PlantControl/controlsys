@@ -395,7 +395,7 @@ type fzMetric struct {
 
 func fzStepMetric(T, y []float64, final float64, useFinal bool, lims [2]float64, thr float64) fzMetric {
 	K := len(y)
-	y0 := y[0]
+	y0 := 0.0
 	if !useFinal {
 		final = y[K-1]
 	}
@@ -408,7 +408,7 @@ func fzStepMetric(T, y []float64, final float64, useFinal bool, lims [2]float64,
 	if delta < 0 {
 		dir = -1
 	}
-	m := fzMetric{final: final, peak: y0, peakT: T[0], lastOut: -1}
+	m := fzMetric{final: final, peak: y[0], peakT: T[0], lastOut: -1}
 	worst := 0.0
 	for k := range K {
 		if dir*y[k] > dir*m.peak {
@@ -424,6 +424,9 @@ func fzStepMetric(T, y []float64, final float64, useFinal bool, lims [2]float64,
 	}
 	m.under = 100 * worst / scale
 	cross := func(lev float64) (float64, bool) {
+		if dir*(y[0]-lev) >= 0 {
+			return T[0], true
+		}
 		for k := 1; k < K; k++ {
 			if dir*(y[k]-lev) >= 0 {
 				if y[k] == y[k-1] {
@@ -590,11 +593,10 @@ func fzStepInfoSystem(t *testing.T, s *fzSpec, md *fzModal, sys *System, resp *T
 				run = math.Max(run, mag[k])
 			}
 			tol := fzTRTol(s, K, resp.T[1], resp.T[K-1])*run + 1e-300
-			y0 := want[0]
-			if math.IsNaN(y0) {
+			if math.IsNaN(want[0]) {
 				continue
 			}
-			scale := math.Abs(ss[row] - y0)
+			scale := math.Abs(ss[row])
 			if scale <= 10*tol {
 				continue
 			}
