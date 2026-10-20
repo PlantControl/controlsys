@@ -154,19 +154,20 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 //
 // Each output row is converted from the states it structurally sees, as
 // MATLAB tf(ss) applies sminreal per channel, so exactly decoupled states
-// never enter its denominator. [A B; C ·] is then balanced by an exact power-of-two state similarity,
-// and each input and output scaled by a power of two toward ‖A‖, which
-// removes accuracy loss caused by poor state or I/O scaling (a tiny but
-// nonzero B or C is not dropped as uncontrollable) and makes the orders
-// invariant to I/O scaling, TF(k·sys) = k·TF(sys). When that scaling
-// overflows a coefficient the unscaled realization is used, and when
-// coefficients overflow float64 regardless the error is ErrOverflow.
-// The polynomial form itself
-// stays ill-conditioned for high order or wide dynamic range: coefficients
-// of e.g. a 30-state chain spanning 1e-3..1e3 rad/s, or a discrete model
-// with poles clustered near z = 1, can evaluate with O(1) relative error.
-// As MATLAB advises ("Using the Right Model Representation"), evaluate
-// such models with EvalFr/FreqResponse on the state-space form instead.
+// never enter its denominator. [A B; C ·] is then balanced by an exact
+// power-of-two state similarity, and each input and output scaled by a
+// power of two toward ‖A‖, which removes accuracy loss caused by poor state
+// or I/O scaling (a tiny but nonzero B or C is not dropped as
+// uncontrollable) and makes the orders nearly independent of I/O scaling
+// (rounding noise near the rank floor aside). When that scaling overflows
+// a coefficient the unscaled realization is used, and when coefficients
+// overflow float64 regardless the error is ErrOverflow. The polynomial form
+// itself stays ill-conditioned for high order or wide dynamic range:
+// coefficients of e.g. a 30-state chain spanning 1e-3..1e3 rad/s, or a
+// discrete model with poles clustered near z = 1, can evaluate with O(1)
+// relative error. As MATLAB advises ("Using the Right Model
+// Representation"), evaluate such models with EvalFr/FreqResponse on the
+// state-space form instead.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
 	res, err := sys.rationalTransferFunction(opts)
 	if err != nil {
