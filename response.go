@@ -397,10 +397,25 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // DCGain returns the steady-state gain G(0) (G(1) for discrete models). Like
 // MATLAB dcgain, entries reached by an integrator (a pole at s = 0 or z = 1)
 // are infinite rather than an error, for every realization; internal delays are
-// unity at DC.
+// unity at DC. Where I−A (A) is singular to working precision but no computed
+// pole is near DC, the gain is solved in double-double as FreqResponse
+// evaluates it, so a pencil ill-conditioned by poles merely close to DC keeps
+// its finite gain.
 // A model with no inputs or no outputs has an empty gain, which a
 // *mat.Dense cannot hold, so it returns ErrDimensionMismatch.
 func (sys *System) DCGain() (*mat.Dense, error) {
+	return sys.dcGain(true)
+}
+
+// integratingDCGain is DCGain with an ill-conditioned DC solve always
+// resolved by the transfer limit, whose coefficient tolerance takes a pole
+// rounded off DC for the integrator it stands for; Pidtune's integrator
+// classification relies on it.
+func (sys *System) integratingDCGain() (*mat.Dense, error) {
+	return sys.dcGain(false)
+}
+
+func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 	if err := requireSystem("DCGain", sys); err != nil {
 		return nil, err
 	}
@@ -416,14 +431,14 @@ func (sys *System) DCGain() (*mat.Dense, error) {
 		if err == nil || !errors.Is(err, ErrSingularTransform) {
 			return gain, err
 		}
-		return sys.dcGainOfDelayFreeExplicit(err)
+		return sys.dcGainOfDelayFreeExplicit(err, offPole)
 	}
 
 	if sys.IsContinuous() {
 		var X mat.Dense
 		err := X.Solve(sys.A, sys.B)
 		if err != nil {
-			return sys.dcGainByTransferFunctionLimit()
+			return sys.dcGainOffPole(offPole, err)
 		}
 		gain := mat.NewDense(p, m, nil)
 		gain.Mul(sys.C, &X)
@@ -448,7 +463,7 @@ func (sys *System) DCGain() (*mat.Dense, error) {
 	var X mat.Dense
 	err := X.Solve(ImA, sys.B)
 	if err != nil {
-		return sys.dcGainByTransferFunctionLimit()
+		return sys.dcGainOffPole(offPole, err)
 	}
 	gain := mat.NewDense(p, m, nil)
 	gain.Mul(sys.C, &X)
@@ -456,6 +471,33 @@ func (sys *System) DCGain() (*mat.Dense, error) {
 		gain.Add(gain, sys.D)
 	}
 	return gain, nil
+}
+
+// dcGainOffPole resolves a delay-free explicit model whose DC solve failed.
+// With offPole set it does so as FreqResponse does: with no computed pole
+// near DC (poleSpacing) the double-double solve decides, so an
+// ill-conditioned but nonsingular pencil keeps its finite gain, even at an
+// exact zero pivot of the double LU. A zero row or column of A − s0·I is an
+// exact pole at DC and skips the pole search. Otherwise, or where the
+// double-double solve is singular too, the transfer limit finds the
+// integrators.
+func (sys *System) dcGainOffPole(offPole bool, solveErr error) (*mat.Dense, error) {
+	s0 := complex(0, 0)
+	if sys.IsDiscrete() {
+		s0 = 1
+	}
+	if _, ok := solveErr.(mat.Condition); offPole && ok && !hasZeroLine(sys.A, real(s0)) {
+		_, m, p := sys.Dims()
+		dst := make([]complex128, p*m)
+		if sp, err := poleSpacing(sys, s0); err == nil && !sp.near && ddResponseInto(sys, pointAt(s0), dst) {
+			data := make([]float64, p*m)
+			for k, v := range dst {
+				data[k] = real(v)
+			}
+			return mat.NewDense(p, m, data), nil
+		}
+	}
+	return sys.dcGainByTransferFunctionLimit(offPole)
 }
 
 // dcGainByEvaluation closes internal delays (unity at DC) and honours E,
@@ -486,7 +528,7 @@ func (sys *System) dcGainByEvaluation() (*mat.Dense, error) {
 // dcGainOfDelayFreeExplicit handles a pole at DC, where the pencil solve fails:
 // internal delays are unity at DC, so closing them (Δ=I) and removing E leaves
 // an explicit model whose fast path resolves singular A.
-func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) {
+func (sys *System) dcGainOfDelayFreeExplicit(evalErr error, offPole bool) (*mat.Dense, error) {
 	reduced, err := sys.ToExplicit()
 	if err != nil {
 		return nil, evalErr
@@ -496,7 +538,7 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) 
 			return nil, evalErr
 		}
 	}
-	return reduced.DCGain()
+	return reduced.dcGain(offPole)
 }
 
 // dcGainByTransferFunctionLimit rescales each input and output to the norm
@@ -507,11 +549,11 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) 
 // input or output: the limit's root tests use an absolute coefficient
 // floor, so an exact integrator–zero cancellation would otherwise hinge on
 // the scale of B and C.
-func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
+func (sys *System) dcGainByTransferFunctionLimit(offPole bool) (*mat.Dense, error) {
 	scaled, inScale, outScale := sys.dcGainIOScaled()
 	gain, ok := scaled.dcGainByDecoupledSingularModes()
 	if !ok {
-		if gain, ok, err := sys.dcGainByStructuralEntries(); ok {
+		if gain, ok, err := sys.dcGainByStructuralEntries(offPole); ok {
 			return gain, err
 		}
 		res, err := scaled.rationalTransferFunction(nil)
@@ -541,7 +583,7 @@ func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
 // from its input and observable from its output by the exact sparsity of A,
 // B and C (MATLAB sminreal per channel). ok is false when no entry loses a
 // state, so the reduced channels never recurse back into it.
-func (sys *System) dcGainByStructuralEntries() (*mat.Dense, bool, error) {
+func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, error) {
 	n, m, p := sys.Dims()
 	aRaw, bRaw, cRaw := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
 	reach := make([][]bool, m)
@@ -600,7 +642,7 @@ func (sys *System) dcGainByStructuralEntries() (*mat.Dense, bool, error) {
 				crData[ii] = cRaw.Data[i*cRaw.Stride+k]
 			}
 			sub := &System{A: ar, B: br, C: cr, D: mat.NewDense(1, 1, nil), Dt: sys.Dt}
-			g, err := sub.DCGain()
+			g, err := sub.dcGain(offPole)
 			if err != nil {
 				return nil, true, err
 			}
@@ -788,6 +830,28 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 		}
 	}
 	return gain, true
+}
+
+// hasZeroLine reports whether a − shift·I has an exactly zero row or column.
+func hasZeroLine(a *mat.Dense, shift float64) bool {
+	raw := a.RawMatrix()
+	n := raw.Rows
+	for k := range n {
+		row, col := true, true
+		for j := 0; j < n && (row || col); j++ {
+			r, c := raw.Data[k*raw.Stride+j], raw.Data[j*raw.Stride+k]
+			if j == k {
+				r -= shift
+				c = r
+			}
+			row = row && r == 0
+			col = col && c == 0
+		}
+		if row || col {
+			return true
+		}
+	}
+	return false
 }
 
 func rowColDecoupledAt(a *mat.Dense, k int, tol float64) bool {

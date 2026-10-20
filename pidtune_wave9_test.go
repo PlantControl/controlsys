@@ -273,7 +273,8 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 }
 
 // Wave 11 merge: next to an integrator displaced 1.3e-7 inside z = 1 (case
-// 0) FreqResponse at DC is finite while DCGain is +Inf, so pidTuningDCSign
+// 0) FreqResponse at DC is finite while integratingDCGain is +Inf (DCGain
+// is finite since 4M7RB3), so pidTuningDCSign
 // took a DC sign and sampled 3 decades below wc, where the loop response
 // fails, and every family errored. Case 1's pole lies 3.4e-5 outside z = 1.
 // Oracle: exact Schur–Cohn test of every design.

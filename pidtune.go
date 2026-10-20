@@ -1627,7 +1627,7 @@ func plantCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {
 	if len(all.GainCrossFreqs) > 0 {
 		return all.GainCrossFreqs[0], pidtuneCrossGain, nil
 	}
-	dc, err := plant.DCGain()
+	dc, err := plant.integratingDCGain()
 	if err == nil && (math.IsInf(dc.At(0, 0), 0) || dc.At(0, 0) == 0 && pidtuneRoundedIntegrator(plant)) {
 		wc, err := pidtuneIntegratingCrossover(plant)
 		return wc, pidtuneCrossGain, err

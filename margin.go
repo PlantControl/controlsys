@@ -480,8 +480,9 @@ func allMargin(sys *System) (*AllMarginResult, error) {
 		return nil, err
 	}
 	if loop == nil || loop.delayed {
-		// The pole limit's samples fail next to an origin cluster too (SIYUND).
-		eval.extended = loop != nil
+		// Next to an origin pole cluster the double solve fails off every
+		// pole; the grid walk needs the double-double response there.
+		eval.extended = true
 		gain, phase, err := gridMarginCrossings(sys, eval, loop == nil)
 		eval.extended = false
 		if err != nil {
