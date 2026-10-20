@@ -226,13 +226,16 @@ func (*pidNonfiniteResponse) Unwrap() error { return ErrInvalidArgument }
 const pidTuningMaxSensitivity = 4
 
 // pidTuningDCSign returns the sign of the DC gain of a stable plant, or 0
-// when the plant is not known to be stable, its integratingDCGain is
-// infinite, as for an integrator displaced inside the unit circle (whose
-// DCGain is finite), or its DC gain is zero
-// relative to the peak of |G| sampled over six decades around wc. A
-// frequency response at DC is no substitute: next to such an integrator it
-// can be finite, and the samples below wc then fail. A sample try cannot
-// resolve is skipped, so it never fails the design.
+// when the plant is not known to be stable, Pidtune recognises an
+// integrator, or its DC gain is zero relative to the peak of |G| sampled
+// over six decades around wc. Pidtune recognises an integrator itself, by
+// integratingDCGain, whose transfer limit takes a DC gain at coefficient
+// rounding for infinite: DCGain, like MATLAB dcgain, is finite for an
+// integrator rounded inside the unit circle. A pole radius alone cannot
+// tell: rounded integrators lie up to 3e-4 from z = 1, beside genuine slow
+// poles. A frequency response at DC is no substitute either: next to such
+// an integrator it is finite, and the samples below wc then fail. A sample
+// try cannot resolve is skipped, so it never fails the design.
 func pidTuningDCSign(plant *System, try func(float64) (complex128, bool), wc float64) float64 {
 	if stable, err := plant.IsStable(); err != nil || !stable {
 		return 0

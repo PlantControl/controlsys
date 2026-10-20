@@ -189,3 +189,50 @@ func TestPidtuneTangentCrossoverMeetsBar(t *testing.T) {
 		t.Errorf("%+v: min |L| %.9g at %g, margin %.3g°", pid, low, best, m)
 	}
 }
+
+// NWFI4Y: DCGain is finite next to an integrator rounded inside z = 1
+// (MATLAB dcgain = evalfr at z = 1), so pidTuningDCSign must recognise the
+// integrator itself: plain DCGain gave +1 for the first two plants (0.2084
+// and 34.9, exact for the stored coefficients; on amd64 the second's
+// computed pole rounds outside z = 1, so it is unstable there). A pole
+// radius rule (pidtuneRoundedIntegrator) instead gave 0 for the third,
+// GK5SUC's plant with finite DC gain 85 and a pole beside z = 1. Oracle:
+// exact D(1) of the stored coefficients is within ε/2·Σ|dᵢ|, the most
+// rounding each dᵢ to float64 moves it, only for the integrators (third
+// plant 4.1ε·Σ|dᵢ|); ordinary plants keep their DC sign.
+func TestPidtuneDCSignRecognisesRoundedIntegrator(t *testing.T) {
+	const dt = 0.01
+	noSample := func(float64) (complex128, bool) { return 0, false }
+	atRounding := func(den Poly) bool {
+		d1, mag := new(big.Float).SetPrec(256), 0.0
+		for _, c := range den {
+			d1.Add(d1, new(big.Float).SetPrec(256).SetFloat64(c))
+			mag += math.Abs(c)
+		}
+		v, _ := d1.Float64()
+		return math.Abs(v) <= 0x1p-53*mag
+	}
+	for _, c := range []struct {
+		num, den Poly
+		want     float64
+	}{
+		{Poly{2.761969998249568e-16, 2.6332895798497864e-16, 6.196985260193668e-17}, Poly{1, -5.388323209156541, 12.045405202918547, -14.292531743733242, 9.488502158799133, -3.339413745774066, 0.486361336946173}, 0},
+		{Poly{3.875422988056212e-15}, Poly{1, -4.667597493849348, 8.695671657313316, -8.081072724970674, 3.7455208432476796, -0.692522281740973}, 0},
+		{Poly{1.5379663637764417e-12, -3.387450861436736e-13}, Poly{1, -3.9146780141541093, 5.7453934609919255, -3.7467528452104566, 0.9160373983726545}, 1},
+		{Poly{1e-3}, Poly{1, -0.999}, 1},
+		{Poly{-2, 1}, Poly{1, -1.2, 0.35}, -1},
+	} {
+		name := fmt.Sprintf("%v/%v", c.num, c.den)
+		if atRounding(c.den) != (c.want == 0) {
+			t.Fatalf("%s: oracle D(1) at rounding = %v", name, c.want != 0)
+		}
+		p := pidtuneBackoffPlant(t, c.num, c.den, dt, 0)
+		dc, err := p.DCGain()
+		if err != nil {
+			t.Fatalf("%s: DCGain: %v", name, err)
+		}
+		if got := pidTuningDCSign(p, noSample, 1e-4); got != c.want {
+			t.Errorf("%s: pidTuningDCSign %g, want %g (DCGain %g)", name, got, c.want, dc.At(0, 0))
+		}
+	}
+}
