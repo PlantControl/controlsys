@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -386,11 +387,27 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 // first certified by one probe just
 // above it; when the probe is inconclusive, the upper-bound search may still
 // certify a raised peak, and bisection runs only if it does not. A
-// continuous peak approached only as ω → ∞ returns omega = +Inf.
+// continuous peak approached only as ω → ∞ returns omega = +Inf. A higher
+// gain found by refinedPeak replaces the result and is certified in turn,
+// so the result is never below that of the crossing search alone.
 func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err error) {
 	n, m, p := sys.Dims()
 	ws := newHamiltonianWS(sys, n, m, p)
+	norm, omega, err = ws.crossingPeak(poles)
+	if err != nil {
+		return 0, 0, err
+	}
+	if g, w := ws.refinedPeak(poles, norm); g > norm {
+		const tol = 1e-10
+		g, w, _ = ws.certifyPeak(g, w, tol)
+		return g * (1 + tol/2), w, nil
+	}
+	return norm, omega, nil
+}
 
+// crossingPeak is the γ-crossing search of peakGain.
+func (ws *hamiltonianWS) crossingPeak(poles []complex128) (norm float64, omega float64, err error) {
+	sys := ws.sys
 	gammaLow, omegaPeak := ws.lowerBound(poles)
 	if gammaLow > 0 {
 		gammaLow, omegaPeak = ws.climb(gammaLow, omegaPeak)
@@ -730,8 +747,15 @@ func (ws *hamiltonianWS) climb(peak, w float64) (float64, float64) {
 	if math.IsInf(a, 0) || math.IsInf(b, 0) {
 		return peak, w
 	}
+	return ws.brentMax(peak, w, a, b, false)
+}
+
+// brentMax maximises σ_max on [a, b] from w by Brent's method, on GEPP gains
+// or refined ones, and returns the larger of peak and the refined gain at
+// the maximiser.
+func (ws *hamiltonianWS) brentMax(peak, w, a, b float64, refine bool) (float64, float64) {
 	f := func(x float64) float64 {
-		sv, err := ws.eval.sigma(x, false)
+		sv, err := ws.eval.sigma(x, refine)
 		if err != nil || math.IsNaN(sv) {
 			return math.Inf(1)
 		}
@@ -809,12 +833,81 @@ func (ws *hamiltonianWS) climb(peak, w float64) (float64, float64) {
 	return peak, w
 }
 
-// lowerBound samples σ_max at ω = 0 and 50 log-spaced frequencies spanning
+// refinedPeak climbs σ_max on refined gains from the local maxima, within
+// 1e-4 of level or above it, of two sample sets: the seed grid of
+// lowerBound, each on the bracket of its neighbours, and samples
+// ω₀ + k·|σ|/4, |k| ≤ 8, around each lightly damped pole σ + jω₀
+// (|σ| < 0.1·ω₀; ln z/T for discrete models), each on ±|σ|/4. It returns the
+// highest gain found and where, or 0. It backs up the crossing search on
+// near-optimal H∞ loops, whose σ_max is flat to 1e-8 to 1e-3 over decades:
+// QZ scatters the γ-crossings of their near-coincident lightly damped pole
+// pairs, so neither the seed grid nor the crossing midpoints need land on the
+// highest hump, and GEPP noise of 1e-8 picks the wrong seed of a broad hump
+// and stalls its climb.
+func (ws *hamiltonianWS) refinedPeak(poles []complex128, level float64) (peak, omega float64) {
+	sys := ws.sys
+	grid := ws.seedFreqs(poles, nil)
+	seeds := make([]refinedSeed, len(grid))
+	for i, w := range grid {
+		seeds[i] = refinedSeed{w: w, a: grid[max(i-1, 0)], b: grid[min(i+1, len(grid)-1)]}
+	}
+	var res []refinedSeed
+	for _, pole := range poles {
+		if sys.IsDiscrete() {
+			pole = cmplx.Log(pole) / complex(sys.Dt, 0)
+		}
+		wc, h := imag(pole), math.Abs(real(pole))/4
+		if !(wc > 0) || !(h < 0.025*wc) {
+			continue
+		}
+		for k := -8; k <= 8; k++ {
+			w := wc + float64(k)*h
+			if w > 0 && (sys.IsContinuous() || w < math.Pi/sys.Dt) {
+				res = append(res, refinedSeed{w: w, a: math.Max(w-h, 0), b: w + h})
+			}
+		}
+	}
+	slices.SortFunc(res, func(x, y refinedSeed) int { return cmp.Compare(x.w, y.w) })
+	var starts []refinedSeed
+	for _, set := range [2][]refinedSeed{seeds, res} {
+		for i := range set {
+			v, err := ws.eval.sigma(set[i].w, false)
+			if err != nil || math.IsNaN(v) {
+				return 0, 0
+			}
+			if v >= level*(1-1e-4) {
+				if v, err = ws.eval.sigma(set[i].w, true); err != nil {
+					return 0, 0
+				}
+			}
+			set[i].v = v
+		}
+		for i, s := range set {
+			if s.v >= level*(1-1e-4) && (i == 0 || set[i-1].v <= s.v) && (i+1 == len(set) || set[i+1].v <= s.v) {
+				starts = append(starts, s)
+			}
+		}
+	}
+	slices.SortFunc(starts, func(x, y refinedSeed) int { return cmp.Compare(y.v, x.v) })
+	for _, s := range starts[:min(len(starts), 8)] {
+		v, w := s.v, s.w
+		if s.a < s.b {
+			v, w = ws.brentMax(v, w, s.a, s.b, true)
+		}
+		if v > peak {
+			peak, omega = v, w
+		}
+	}
+	return peak, omega
+}
+
+// refinedSeed is a start of refinedPeak: σ_max(w) = v, climbed on [a, b].
+type refinedSeed struct{ w, a, b, v float64 }
+
+// seedFreqs appends to freqs ω = 0 and 50 log-spaced frequencies spanning
 // the magnitudes of poles; discrete models use the magnitudes of their Tustin
 // equivalents, warped back to the unit circle, and add the Nyquist frequency.
-// It is only a seed: when a sample hits a singular resolvent it returns the
-// trivial bound 0, and the Hamiltonian search still finds the peak.
-func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak float64) {
+func (ws *hamiltonianWS) seedFreqs(poles []complex128, freqs []float64) []float64 {
 	sys := ws.sys
 	dt := sys.Dt
 	wmin, wmax := math.Inf(1), 0.0
@@ -834,7 +927,7 @@ func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak flo
 	wmin /= 10
 	wmax *= 10
 
-	freqs := append(ws.freqs[:0], 0)
+	freqs = append(freqs, 0)
 	for i := range 50 {
 		w := wmin * math.Pow(wmax/wmin, float64(i)/49)
 		if sys.IsDiscrete() {
@@ -845,6 +938,14 @@ func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak flo
 	if sys.IsDiscrete() {
 		freqs = append(freqs, math.Pi/dt)
 	}
+	return freqs
+}
+
+// lowerBound samples σ_max at the seedFreqs frequencies. It is only a seed:
+// when a sample hits a singular resolvent it returns the trivial bound 0, and
+// the Hamiltonian search still finds the peak.
+func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak float64) {
+	freqs := ws.seedFreqs(poles, ws.freqs[:0])
 	ws.freqs = freqs
 	if peak, w, err := ws.eval.peak(freqs, 0); err == nil {
 		gammaLow, omegaPeak = peak, w
