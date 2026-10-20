@@ -254,19 +254,131 @@ func hybridZeros(sys *System, zeros []complex128, scale, tol float64, failed int
 // balanced model zs. Balancing evens out the entries the rank decisions
 // compare with ε·‖[A B; C D]‖, which often recovers zeros the unbalanced
 // reduction loses, but it can also lift the roundoff in a block that is
-// exactly zero above that threshold. When a decision on zs came within
-// rankMarginMin of its threshold, the unscaled reduction of sys is used.
+// exactly zero above that threshold, or amplify it through a nearly
+// singular D and then clear the threshold by a wide margin. So the unscaled
+// reduction of sys is used when a decision on zs came within rankMarginMin
+// of its threshold. Within rankMarginTrust, unless zs is square of full
+// normal rank (whose zeros mimoZeros refines on the exact pencil), when the
+// two reductions disagree on the pencil order or normal rank, the set with
+// more zeros passing zeroBackwardOK on sys wins, ties going to the unscaled
+// one.
 func prescaledStaircaseZeros(sys, zs *System) ([]complex128, int, error) {
-	z, rank, margin, err := staircaseZeros(zs)
-	if err != nil || margin >= rankMarginMin || zs == sys {
-		return z, rank, err
+	pre := reduceStaircase(zs)
+	if zs == sys {
+		z, err := pre.zeros()
+		return z, pre.rank, err
 	}
-	z2, rank2, _, err := staircaseZeros(sys)
-	if err != nil {
-		return z, rank, nil
+	if pre.margin < rankMarginMin {
+		z, rank, _, err := staircaseZeros(sys)
+		if err == nil {
+			return z, rank, nil
+		}
+		z, err = pre.zeros()
+		return z, pre.rank, err
 	}
-	return z2, rank2, nil
+	_, m, p := sys.Dims()
+	if pre.margin >= rankMarginTrust || m == p && pre.rank == m {
+		z, err := pre.zeros()
+		return z, pre.rank, err
+	}
+	raw := reduceStaircase(sys)
+	if raw.nu == pre.nu && raw.rank == pre.rank {
+		z, err := pre.zeros()
+		return z, pre.rank, err
+	}
+	zr, errRaw := raw.zeros()
+	zp, errPre := pre.zeros()
+	switch {
+	case errRaw != nil && errPre != nil:
+		return nil, 0, errRaw
+	case errRaw != nil:
+		return zp, pre.rank, nil
+	case errPre != nil:
+		return zr, raw.rank, nil
+	}
+	rank := min(raw.rank, pre.rank)
+	if countBackwardOK(sys, zp, rank) > countBackwardOK(sys, zr, rank) {
+		return zp, pre.rank, nil
+	}
+	return zr, raw.rank, nil
 }
+
+// staircase is the reduced pencil s·bf − af of order nu from zerosStaircase.
+type staircase struct {
+	af, bf   []float64
+	nu, rank int
+	margin   float64
+}
+
+func reduceStaircase(sys *System) staircase {
+	n, m, p := sys.Dims()
+	af, bf, nu, rank, margin := zerosStaircase(sys.A, sys.B, sys.C, sys.D, n, m, p)
+	return staircase{af: af, bf: bf, nu: nu, rank: rank, margin: margin}
+}
+
+func countBackwardOK(sys *System, zeros []complex128, rank int) int {
+	var k int
+	for _, z := range zeros {
+		if zeroBackwardOK(sys, z, rank) {
+			k++
+		}
+	}
+	return k
+}
+
+// zeroBackwardTol bounds σ_{n+rank}(P(z))/σ₁(P(z)) in zeroBackwardOK, in
+// units of the staircase rank tolerance ε·√((n+p)(n+m)).
+const zeroBackwardTol = 1e3
+
+// zeroBackwardOK reports whether P(z) = [A−zI B; C D] lies within
+// zeroBackwardTol staircase tolerances of dropping below normal rank
+// n+rank. P(z) is embedded as the real [Re −Im; Im Re], whose singular
+// values are those of P(z), each twice.
+func zeroBackwardOK(sys *System, z complex128, rank int) bool {
+	n, m, p := sys.Dims()
+	r, c := n+p, n+m
+	k := n + rank
+	if k <= 0 || k > min(r, c) {
+		return false
+	}
+	R := mat.NewDense(2*r, 2*c, nil)
+	raw := R.RawMatrix()
+	set := func(i, j int, re, im float64) {
+		raw.Data[i*raw.Stride+j] = re
+		raw.Data[i*raw.Stride+j+c] = -im
+		raw.Data[(i+r)*raw.Stride+j] = im
+		raw.Data[(i+r)*raw.Stride+j+c] = re
+	}
+	a, b, cm, d := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix(), sys.D.RawMatrix()
+	for i := range n {
+		for j := range n {
+			set(i, j, a.Data[i*a.Stride+j], 0)
+		}
+		set(i, i, a.Data[i*a.Stride+i]-real(z), -imag(z))
+		for j := range m {
+			set(i, n+j, b.Data[i*b.Stride+j], 0)
+		}
+	}
+	for i := range p {
+		for j := range n {
+			set(n+i, j, cm.Data[i*cm.Stride+j], 0)
+		}
+		for j := range m {
+			set(n+i, n+j, d.Data[i*d.Stride+j], 0)
+		}
+	}
+	var svd mat.SVD
+	if !svd.Factorize(R, mat.SVDNone) {
+		return false
+	}
+	sv := svd.Values(nil)
+	return sv[2*k-1] <= zeroBackwardTol*math.Sqrt(float64(r*c))*eps()*sv[0]
+}
+
+// rankMarginTrust is the margin above which the balanced reduction is used
+// without comparing it with the unscaled one; the disagreements seen on
+// sweeps of nearly singular D came at margins up to about 1e4.
+const rankMarginTrust = 1e8
 
 // rankMarginMin is the factor by which every staircase rank decision on the
 // balanced model must clear its threshold for its result to be used.
@@ -279,10 +391,19 @@ const dInvCondMax = 1e12
 // staircaseZeros returns the finite eigenvalues of the staircase-reduced
 // pencil, the normal rank and the smallest rank-decision margin.
 func staircaseZeros(sys *System) ([]complex128, int, float64, error) {
-	n, m, p := sys.Dims()
-	afData, bfData, nu, rank, margin := zerosStaircase(sys.A, sys.B, sys.C, sys.D, n, m, p)
+	st := reduceStaircase(sys)
+	z, err := st.zeros()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return z, st.rank, st.margin, nil
+}
+
+// zeros returns the finite eigenvalues of the reduced pencil.
+func (st staircase) zeros() ([]complex128, error) {
+	afData, bfData, nu := st.af, st.bf, st.nu
 	if nu == 0 {
-		return nil, rank, margin, nil
+		return nil, nil
 	}
 
 	lwork := dggevEigenvaluesWorkLen(nu)
@@ -295,7 +416,7 @@ func staircaseZeros(sys *System) ([]complex128, int, float64, error) {
 		nil, 1, nil, 1,
 		work, lwork)
 	if !ok {
-		return nil, 0, 0, fmt.Errorf("QZ of the reduced pencil did not converge: %w", ErrSchurFailed)
+		return nil, fmt.Errorf("QZ of the reduced pencil did not converge: %w", ErrSchurFailed)
 	}
 
 	betaTol := float64(nu) * eps()
@@ -311,16 +432,21 @@ func staircaseZeros(sys *System) ([]complex128, int, float64, error) {
 		}
 		zeros = append(zeros, complex(re, im))
 	}
-	return zeros, rank, margin, nil
+	return zeros, nil
 }
 
 // zerosPrescale returns sys after the exact power-of-two state scaling of
 // the frequency solvers (balance, SLICOT TB01ID as AB08ND with EQUIL = 'S'
-// applies), which leaves the zeros unchanged.
+// applies), which leaves the zeros unchanged; sys itself when the scaling
+// is the identity.
 func zerosPrescale(sys *System) *System {
 	n, m, p := sys.Dims()
 	br := newBalancedRealization(sys, n, m, p)
-	return &System{A: mat.NewDense(n, n, br.a), B: mat.NewDense(n, m, br.b), C: mat.NewDense(p, n, br.c), D: sys.D, Dt: sys.Dt}
+	zs := &System{A: mat.NewDense(n, n, br.a), B: mat.NewDense(n, m, br.b), C: mat.NewDense(p, n, br.c), D: sys.D, Dt: sys.Dt}
+	if mat.Equal(zs.A, sys.A) && mat.Equal(zs.B, sys.B) && mat.Equal(zs.C, sys.C) {
+		return sys
+	}
+	return zs
 }
 
 // pencilNorm returns ‖[A B; C D]‖_F.

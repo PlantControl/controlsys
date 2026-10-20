@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"sort"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/lapack"
@@ -1491,5 +1492,140 @@ func TestZerosMatchExactPencilRoots(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestZerosNonSquareNoLossVsUnscaledStaircase rescales N1463 by B·α, C/α
+// (zeros unchanged): Zeros must never return fewer zeros than the unscaled
+// staircase, and when it finds all three the moderate ones must match the
+// exact ones (the −2.46e7 zero carries the staircase's up to 1e-4 error).
+func TestZerosNonSquareNoLossVsUnscaledStaircase(t *testing.T) {
+	exact := []complex128{-2.4645885181395255e7, -21.744896691779353, -7.648048437606871}
+	for e := -12; e <= 12; e += 2 {
+		al := math.Ldexp(1, e)
+		b := mat.NewDense(3, 2, []float64{276.10128900489735, -78.84692454909796, 127.82976523308767, 187.88740870711626, 321.2963935868809, 54.17661547127937})
+		c := mat.NewDense(3, 3, []float64{0.17250793681915383, -0.11797312052017801, 0.10637833423332513, 0.3356157358156948, 0.24897800377747303, -0.08465722682754247, 0.08625396840957691, -0.058986560260089006, 0.053189167116662564})
+		b.Scale(al, b)
+		c.Scale(1/al, c)
+		sys, err := New(mat.NewDense(3, 3, []float64{-2.8687132210778583, 1.2506740496003697, 1.1714746261684497, 0.14562856868484902, 1.061271822834533, 2.476186851807767, 0.6797388996832177, -2.2334341698308453, 1.1065143740965773}),
+			b, c, mat.NewDense(3, 2, []float64{0.6004904931149847, -1.1639933550034214, -0.25179754018380357, 0.48809541549347146, 0.30024524655749235, -0.5819966775017107}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := sys.Zeros()
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _, _, err := staircaseZeros(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) < len(raw) {
+			t.Errorf("α=2^%d: %d zeros %v, unscaled staircase %d %v", e, len(got), got, len(raw), raw)
+		}
+		if len(got) != len(exact) {
+			continue
+		}
+		sort.Slice(got, func(i, j int) bool { return cmplx.Abs(got[i]) > cmplx.Abs(got[j]) })
+		for i, z := range got[1:] {
+			i++
+			if r := cmplx.Abs(z-exact[i]) / cmplx.Abs(exact[i]); !(r <= 1e-9) {
+				t.Errorf("α=2^%d: zero %v, exact %v: relative error %.2g", e, z, exact[i], r)
+			}
+		}
+	}
+}
+
+// TestZerosNonSquareDependentOutputNoLoss sweeps seeded models shaped like
+// N1463 ([C D] with an exactly dependent row, nearly singular D, large B,
+// small C, and their duals): Zeros must return at least as many zeros
+// passing zeroBackwardOK as the unscaled staircase, and only such zeros.
+func TestZerosNonSquareDependentOutputNoLoss(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 9))
+	for id := range 1000 {
+		n, m, p := 2+rng.IntN(4), 2, 3
+		A := mat.NewDense(n, n, nil)
+		for i := range n {
+			for j := range n {
+				A.Set(i, j, rng.NormFloat64())
+			}
+		}
+		B := mat.NewDense(n, m, nil)
+		bs := math.Pow(10, rng.Float64()*4-1)
+		for i := range n {
+			for j := range m {
+				B.Set(i, j, bs*rng.NormFloat64())
+			}
+		}
+		C := mat.NewDense(p, n, nil)
+		cs := math.Pow(10, -rng.Float64()*3)
+		for i := range 2 {
+			for j := range n {
+				C.Set(i, j, cs*rng.NormFloat64())
+			}
+		}
+		D := mat.NewDense(p, m, nil)
+		u := []float64{rng.NormFloat64(), rng.NormFloat64()}
+		v := []float64{rng.NormFloat64(), rng.NormFloat64()}
+		del := math.Pow(10, -2-rng.Float64()*9)
+		for i := range 2 {
+			for j := range 2 {
+				D.Set(i, j, u[i]*v[j]+del*rng.NormFloat64())
+			}
+		}
+		k := float64(rng.IntN(5)-2) / 2
+		if k == 0 {
+			k = 0.5
+		}
+		for j := range n {
+			C.Set(2, j, k*C.At(0, j))
+		}
+		for j := range m {
+			D.Set(2, j, k*D.At(0, j))
+		}
+		sys := &System{A: A, B: B, C: C, D: D}
+		if id%2 == 1 {
+			sys = &System{A: mat.DenseCopyOf(A.T()), B: mat.DenseCopyOf(C.T()), C: mat.DenseCopyOf(B.T()), D: mat.DenseCopyOf(D.T())}
+		}
+		got, err := sys.Zeros()
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, rr, _, err := staircaseZeros(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, pr, _, err := staircaseZeros(zerosPrescale(sys))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := min(rr, pr)
+		ok := countBackwardOK(sys, got, r)
+		if ok < countBackwardOK(sys, raw, r) || ok < len(got) {
+			t.Errorf("id %d: %d zeros (%d backward-ok) %v; unscaled staircase %v", id, len(got), ok, got, raw)
+		}
+	}
+}
+
+// TestZeroBackwardOK pins the validator the staircase arbitration trusts:
+// N1463's exact zeros pass, nearby non-zeros (σ ratio 1e-6 and above) fail.
+func TestZeroBackwardOK(t *testing.T) {
+	sys, err := NewFromSlices(3, 2, 3,
+		[]float64{-2.8687132210778583, 1.2506740496003697, 1.1714746261684497, 0.14562856868484902, 1.061271822834533, 2.476186851807767, 0.6797388996832177, -2.2334341698308453, 1.1065143740965773},
+		[]float64{276.10128900489735, -78.84692454909796, 127.82976523308767, 187.88740870711626, 321.2963935868809, 54.17661547127937},
+		[]float64{0.17250793681915383, -0.11797312052017801, 0.10637833423332513, 0.3356157358156948, 0.24897800377747303, -0.08465722682754247, 0.08625396840957691, -0.058986560260089006, 0.053189167116662564},
+		[]float64{0.6004904931149847, -1.1639933550034214, -0.25179754018380357, 0.48809541549347146, 0.30024524655749235, -0.5819966775017107}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, z := range []complex128{-7.648048437606871, -21.744896691779353, -2.4645885181395255e7} {
+		if !zeroBackwardOK(sys, z, 2) {
+			t.Errorf("exact zero %v rejected", z)
+		}
+	}
+	for _, z := range []complex128{-7.6, 3, complex(1, 1), -21.7} {
+		if zeroBackwardOK(sys, z, 2) {
+			t.Errorf("non-zero %v accepted", z)
+		}
 	}
 }
