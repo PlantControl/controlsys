@@ -352,8 +352,11 @@ func squareDownZeros(sys, zs *System, r int) ([]complex128, error) {
 
 // rowDependentTol is the residual, relative to the largest row norm and in
 // units of (n+m)·ε, below which dependentRowBasis counts a row of [C D] as
-// a combination of the chosen ones.
-const rowDependentTol = 1e3
+// a combination of the chosen ones. Rows dependent up to the rounding of
+// their entries leave a residual below about 1.5 in these units; a looser
+// bound squares down models whose extra row is only nearly dependent and
+// returns zeros of the square model the tall pencil lacks.
+const rowDependentTol = 2
 
 // dependentRowBasis picks r rows of the p×(n+m) matrix [C D] by
 // Gram–Schmidt with largest-residual pivoting and returns them when every

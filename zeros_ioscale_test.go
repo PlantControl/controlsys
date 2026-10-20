@@ -152,16 +152,54 @@ func TestZerosNonSquareNoSpurious(t *testing.T) {
 			c:    []float64{0.27739590815468246, -24732.633573305244, 0.0003399947586760124, 6.574488244685939e-05, 8372.442626780909},
 			d:    []float64{0, 0},
 			want: []complex128{-0.8299681070969}},
+		{name: "nearDepRow", n: 1, m: 1, p: 2,
+			a: []float64{-0.701072291885586},
+			b: []float64{0.6319681003953592},
+			c: []float64{-1.037730676933334, -4.150922707734095},
+			d: []float64{-0.030168131825319747, -0.12067252730127899}},
+		{name: "nearDepCol", n: 1, m: 2, p: 1,
+			a: []float64{-0.701072291885586},
+			b: []float64{-1.037730676933334, -4.150922707734095},
+			c: []float64{0.6319681003953592},
+			d: []float64{-0.030168131825319747, -0.12067252730127899}},
+		{name: "nearDepRowD0", n: 2, m: 1, p: 2,
+			a: []float64{0.6540170680805857, 1.1125721293641633, -1.4644235834355248, 1.2708003694616787},
+			b: []float64{0.7610064633928397, 2.2199490567922213},
+			c: []float64{-0.15878141295721226, 0.560137695688259, -1.270251303657491, 4.481101565508152},
+			d: []float64{0, 0}},
 	}
 	for _, tc := range cases {
-		sys, err := NewFromSlices(tc.n, tc.m, tc.p, tc.a, tc.b, tc.c, tc.d, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := sys.Zeros()
-		if err != nil {
-			t.Fatal(err)
-		}
-		zerosCheckExact(t, tc.name, got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			sys, err := NewFromSlices(tc.n, tc.m, tc.p, tc.a, tc.b, tc.c, tc.d, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := sys.Zeros()
+			if err != nil {
+				t.Fatal(err)
+			}
+			zerosCheckExact(t, tc.name, got, tc.want)
+		})
 	}
+}
+
+// TestZerosDependentRowMixedScale: the third output is exactly
+// row1/2 + 4·row2 of [C D] with ‖C‖ ≈ 1e4, ‖D‖ ≈ 1 and D nearly singular,
+// so its Gram–Schmidt residual is roundoff of the large entries; the
+// dependency must still be recognised and the zeros (exact gcd of the
+// maximal minors) kept.
+func TestZerosDependentRowMixedScale(t *testing.T) {
+	sys, err := NewFromSlices(2, 2, 3,
+		[]float64{-1.25, 0.75, -2.5, -0.375},
+		[]float64{1.5, -0.5, 0.25, 2.0},
+		[]float64{12288.0, -3072.5, 20480.25, 8192.75, 88065.0, 31234.75},
+		[]float64{0.625, -1.125, 0.3125, -0.5624990463256836, 1.5625, -2.8124961853027344}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := sys.Zeros()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zerosCheckExact(t, "mixed", got, []complex128{-5.806574835274511e10, -14771.879890036555})
 }
