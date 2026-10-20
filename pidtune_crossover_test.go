@@ -271,6 +271,45 @@ func TestPidtunePoleFallbackContinuousStable(t *testing.T) {
 	}
 }
 
+// A stable k·s/den plant with a low gain crossover on its k·s rise: P there
+// kept 28° (18.4°) at a crossover and Pidtune returned
+// ErrPIDTuningTargetUnattainable, while a P one decade up keeps 132°
+// (OQWQKF: raise before unattainable). Oracle: closed-loop roots from
+// num/den, |S| and the classical margin at every crossover of the directly
+// evaluated loop; Kp places |L| = 1 at a raised step within a decade above
+// the automatic crossover.
+func TestPidtuneZeroDCGainCrossoverRaised(t *testing.T) {
+	for _, c := range []struct{ num, den Poly }{
+		{Poly{1.2068550428364524, 0}, Poly{1, 0.531907772903935, 0.09156771788999801, 0.005032522096312933}},
+		{Poly{4.181044888813423, 0}, Poly{1, 0.6532797762635361, 0.1149854495123011, 0.00611843129970814}},
+	} {
+		name := fmt.Sprintf("P %v/%v", c.num, c.den)
+		p := pidtuneBackoffPlant(t, c.num, c.den, 0, 0)
+		wc, src, err := autoCrossoverSource(p, 0, 60)
+		if err != nil || src != pidtuneCrossGain {
+			t.Fatalf("%s: crossover %g from %v, %v", name, wc, src, err)
+		}
+		pid, err := Pidtune(p, PidtuneP, 0, nil)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if !(pid.Kp > 0) {
+			t.Errorf("%s: Kp %g, want the sign of the numerator", name, pid.Kp)
+		}
+		pidtuneCheckRobust(t, name, pid, c.num, c.den, 0, 4)
+		g := pidtuneOracleLoop(&PID{Kp: 1}, c.num, c.den, 0, 0)
+		placed := false
+		for k := 1; k <= pidtuneBackoffPerDecade; k++ {
+			w := wc * math.Pow(10, float64(k)/pidtuneBackoffPerDecade)
+			placed = placed || math.Abs(pid.Kp*cmplx.Abs(g(w))-1) < 1e-6
+		}
+		if !placed {
+			t.Errorf("%s: Kp %g places no crossover within a decade above %g", name, pid.Kp, wc)
+		}
+	}
+}
+
 // A continuous k·sᵐ/den plant with |G| < 1 leads up to 180° below its
 // poles, so a P design, or a PD clamped at its phase limit, at the pole
 // crossover keeps a margin under pm at its low crossover whatever the

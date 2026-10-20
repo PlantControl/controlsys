@@ -83,8 +83,8 @@ const (
 // without a continuous delay, when wc is the first such step below ten
 // times that frequency; not for an integrating or unstable plant with a
 // continuous delay), accepting the first that passes. When none passes, on
-// a plant that is not stable, or whose wc came from a pole of a zero-DC
-// plant, and without a continuous delay, the crossover is raised the same
+// a plant that is not stable or has zero DC gain, and without a continuous
+// delay, the crossover is raised the same
 // way up to three decades, below the Nyquist frequency, as PM grows with ω
 // there (P on 1/(s−1) keeps 60° at Kp = 2, ω = √3, above wc ≈ 1), else the
 // result is ErrPIDTuningTargetUnattainable. An automatic PD runs both
@@ -253,13 +253,13 @@ func (r *pidtuneRun) backedOff(sign float64) (*PID, error) {
 // raised designs, gated, at automatic crossovers raised geometrically from
 // r.wc, pidtuneBackoffPerDecade steps a decade, up to pidtuneRaiseDecades
 // above it and below the Nyquist frequency, returning the first that
-// passes. It runs for a plant that is not stable or whose wc came from a
-// pole of a zero-DC plant: PM = atan ω for P on 1/(s−1), 60° at Kp = 2,
-// ω = √3, above wc ≈ 1 where back-off loses phase; a P on k·sᵐ/D(s)
-// crosses near its |G| peak above the pole wc with the most margin. Not for
-// a continuous delay, whose lag grows with ω.
+// passes. It runs for a plant that is not stable or has zero DC gain:
+// PM = atan ω for P on 1/(s−1), 60° at Kp = 2, ω = √3, above wc ≈ 1 where
+// back-off loses phase; a P on k·sᵐ/D(s) crosses near its |G| peak above
+// the pole wc, or above a low-frequency gain crossover on the k·sᵐ rise,
+// with the most margin. Not for a continuous delay, whose lag grows with ω.
 func (r *pidtuneRun) raised(sign float64) (*PID, bool) {
-	if r.plant.Dt == 0 && r.plant.HasDelay() || r.openStable() && r.src != pidtuneCrossZeroDC {
+	if r.plant.Dt == 0 && r.plant.HasDelay() || r.openStable() && r.src != pidtuneCrossZeroDC && !pidtuneZeroDC(r.plant) {
 		return nil, false
 	}
 	steps := pidtuneBackoffPerDecade * pidtuneRaiseDecades
@@ -773,6 +773,14 @@ func pidtuneZeroAtIntegrator(plant *System) bool {
 		}
 	}
 	return pidtuneClusterSize(zeros, at, scale) > pidtuneClusterSize(poles, at, scale)
+}
+
+// pidtuneZeroDC reports whether plant has zero DC gain: exactly, or by a
+// zero at the integrator up to rounding, as plantCrossoverSource tells a
+// zero-DC plant.
+func pidtuneZeroDC(plant *System) bool {
+	dc, err := plant.integratingDCGain()
+	return err == nil && (dc.At(0, 0) == 0 || pidtuneZeroAtIntegrator(plant))
 }
 
 // pidtuneGate checks a backed-off design over the whole back-off band with
