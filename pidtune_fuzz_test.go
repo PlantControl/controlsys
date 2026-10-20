@@ -714,9 +714,6 @@ func fzPidCheckTune(t *testing.T, s *fzSpec, sys *System, family PidtuneType, wc
 	fzPidCheckEvidence(t, name, pl, pl.respExact, pl.respHorner, nil, "", c, res.Evidence)
 	switch res.Evidence.Stability {
 	case PIDStabilityClosedLoopPoles, PIDStabilityNyquist:
-		if v, _ := fzPidClosedLoop(pl, c); v == fzPidUnstable && pl.lag >= 3 && c.kd != 0 && c.tf == 0 {
-			fzSkip(t, name+": ideal-derivative screen on a delay-absorbed discrete plant uses a collapsed TransferFunction (followup)")
-		}
 		fzPidCheckStable(t, name, pl, c)
 	case PIDStabilitySampledOnly:
 	default:

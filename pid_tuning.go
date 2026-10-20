@@ -274,29 +274,43 @@ type pidStabilityScreen struct {
 	eval         *sisoEval
 	hiddenStable func() (bool, error)
 	maxTail      float64
-	// transferRes caches model's rational transfer function for
-	// ideal-derivative screens; transferErr its failure.
+	// rational is model, or for a discrete plant with only external
+	// delays the undelayed plant, whose loop is model's with the delay
+	// z^-lag factored out: the shift chain AbsorbDelay adds defeats
+	// TransferFunction and the exact test's order cap.
+	rational *System
+	lag      int
+	// transferRes caches rational's transfer function for ideal-derivative
+	// screens; transferErr its failure.
 	transferRes *TransferFuncResult
 	transferErr error
 }
 
 func (s *pidStabilityScreen) transfer() (*TransferFuncResult, error) {
 	if s.transferRes == nil && s.transferErr == nil {
-		s.transferRes, s.transferErr = s.model.rationalTransferFunction(nil)
+		s.transferRes, s.transferErr = s.rational.rationalTransferFunction(nil)
 	}
 	return s.transferRes, s.transferErr
 }
 
 func newPIDStabilityScreen(plant *System, eval *sisoEval, maxTail float64) (*pidStabilityScreen, error) {
-	model := plant
+	model, rational, lag := plant, plant, 0
 	if plant.Dt > 0 && plant.HasDelay() {
 		var err error
 		if model, err = plant.AbsorbDelay(AbsorbAll); err != nil {
 			return nil, err
 		}
+		rational = model
+		if !plant.HasInternalDelay() {
+			rational = plant.Copy()
+			rational.Delay, rational.InputDelay, rational.OutputDelay = nil, nil, nil
+			n, _, _ := model.Dims()
+			n0, _, _ := plant.Dims()
+			lag = n - n0
+		}
 	}
 	return &pidStabilityScreen{
-		plant: plant, model: model, eval: eval, maxTail: maxTail,
+		plant: plant, model: model, rational: rational, lag: lag, eval: eval, maxTail: maxTail,
 		hiddenStable: sync.OnceValues(func() (bool, error) { return pidTuningHiddenModesStable(model) }),
 	}, nil
 }
@@ -344,7 +358,7 @@ func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			return pidTuningIdealStable(s.model, transfer, c)
+			return pidTuningIdealStable(s.rational, transfer, c, s.lag)
 		}
 		return false, err
 	}
@@ -368,6 +382,11 @@ const (
 	pidTuningExactBand = 1e-3
 	// pidTuningExactOrder caps the closed-loop order tested exactly.
 	pidTuningExactOrder = 16
+	// pidTuningExactLagOrder caps plant order plus absorbed delay samples
+	// of an ideal-derivative loop tested exactly: the delay's states need
+	// no characteristic-polynomial expansion, only the Schur–Cohn
+	// recursion.
+	pidTuningExactLagOrder = 64
 )
 
 // pidTuningPolesStable decides stability of the negative-feedback loop of
@@ -2481,8 +2500,10 @@ func pidTuningIdealReturn(model *System, kd float64) float64 {
 const pidTuningIdealReturnTol = 0x1p-26
 
 // Ideal derivative controllers may be improper on their own while their
-// closed-loop characteristic is well-defined. Test the characteristic directly.
-func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2) (bool, error) {
+// closed-loop characteristic is well-defined. Test the characteristic
+// directly, of the loop with model, transfer its transfer function, delayed
+// by lag samples.
+func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2, lag int) (bool, error) {
 	var ip, id, dn, dd Poly
 	if c.Ki == 0 {
 		ip, id = Poly{0}, Poly{1}
@@ -2519,7 +2540,7 @@ func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2) 
 	}
 	denominator := id.Mul(dd)
 	numerator := scale(denominator, c.Kp).Add(scale(ip.Mul(dd), c.Ki)).Add(scale(dn.Mul(id), c.Kd))
-	characteristic := Poly(transfer.TF.Den[0]).Mul(denominator).Add(Poly(transfer.TF.Num[0][0]).Mul(numerator))
+	characteristic := slices.Concat(Poly(transfer.TF.Den[0]).Mul(denominator), make(Poly, lag)).Add(Poly(transfer.TF.Num[0][0]).Mul(numerator))
 	for len(characteristic) > 1 && characteristic[0] == 0 {
 		characteristic = characteristic[1:]
 	}
@@ -2543,7 +2564,7 @@ func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2) 
 	if decided {
 		return stable, nil
 	}
-	if exact, ok := pidTuningIdealExact(model, c); ok {
+	if exact, ok := pidTuningIdealExact(model, c, lag); ok {
 		return exact, nil
 	}
 	return stable, nil
@@ -2552,10 +2573,10 @@ func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2) 
 // pidTuningIdealExact is pidTuningIdealStable's exact test on model's
 // realization, in the scope of pidTuningExactStable: with Δ = det(λI−A),
 // det(λI−A+BC) = Δ·(1+C(λI−A)⁻¹B), so N = det(λI−A+BC) − Δ + D·Δ is the
-// plant numerator over Δ and the characteristic is Δ·den(c) + N·num(c).
-func pidTuningIdealExact(model *System, c *PID2) (stable, ok bool) {
+// plant numerator over Δ and the characteristic is Δ·λ^lag·den(c) + N·num(c).
+func pidTuningIdealExact(model *System, c *PID2, lag int) (stable, ok bool) {
 	n, m, p := model.Dims()
-	if model.E != nil || model.HasDelay() || m != 1 || p != 1 || n > pidTuningExactOrder {
+	if model.E != nil || model.HasDelay() || m != 1 || p != 1 || n > pidTuningExactOrder || n+lag > pidTuningExactLagOrder {
 		return false, false
 	}
 	for _, a := range []*mat.Dense{model.A, model.B, model.C, model.D} {
@@ -2614,7 +2635,11 @@ func pidTuningIdealExact(model *System, c *PID2) (stable, ok bool) {
 	}
 	den := dyadicPolyMul(id, dd)
 	ctrl := dyadicPolyAdd(dyadicPolyAdd(dyadicPolyScale(den, newDyadic(c.Kp)), dyadicPolyScale(dyadicPolyMul(ip, dd), newDyadic(c.Ki))), dyadicPolyScale(dyadicPolyMul(dn, id), newDyadic(c.Kd)))
-	ch := dyadicPolyAdd(dyadicPolyMul(delta, den), dyadicPolyMul(num, ctrl))
+	shifted := dyadicPolyMul(delta, den)
+	for range lag {
+		shifted = append(shifted, zero)
+	}
+	ch := dyadicPolyAdd(shifted, dyadicPolyMul(num, ctrl))
 	for len(ch) > 0 && ch[0].m.Sign() == 0 {
 		ch = ch[1:]
 	}
