@@ -618,14 +618,21 @@ func copyRealMatrixToComplex(dst []complex128, src []float64, stride, rows, cols
 }
 
 func cSolveInPlace(a, b []complex128, n, nrhs int) error {
+	_, err := cSolveGrowthInPlace(a, b, n, nrhs)
+	return err
+}
+
+// cSolveGrowthInPlace is cSolveInPlace that also returns the ratio of the
+// largest entry of a to its smallest GEPP pivot.
+func cSolveGrowthInPlace(a, b []complex128, n, nrhs int) (float64, error) {
 	if n == 1 {
 		if a[0] == 0 {
-			return fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+			return 0, fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 		}
 		for j := range nrhs {
 			b[j] /= a[0]
 		}
-		return nil
+		return 1, nil
 	}
 
 	maxAbs := 0.0
@@ -639,6 +646,7 @@ func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 		tol = 1e-15
 	}
 
+	minPivot := math.Inf(1)
 	for k := range n {
 		pivot := k
 		best := cmplx.Abs(a[k*n+k])
@@ -649,8 +657,9 @@ func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 			}
 		}
 		if best < tol {
-			return fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+			return 0, fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 		}
+		minPivot = min(minPivot, best)
 		if pivot != k {
 			for j := range n {
 				a[k*n+j], a[pivot*n+j] = a[pivot*n+j], a[k*n+j]
@@ -690,7 +699,7 @@ func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 			b[i*nrhs+j] /= diag
 		}
 	}
-	return nil
+	return maxAbs / minPivot, nil
 }
 
 // complexFlatToGrid returns the rows of the row-major p×m data, aliasing it.
@@ -724,9 +733,11 @@ type lftWorkspace struct {
 
 	absorbed    *balancedDense // discrete delays as states, built on first use
 	absorbedErr error
-	closed      []complex128 // closedLoopInto's result, allocated on first use
-	frozen      []complex128 // evalFrLFTFrozenInto's buffers, allocated on first use
-	hOK         bool         // h holds H at the last evalFrLFTInto point
+	closed      []complex128         // closedLoopInto's result, allocated on first use
+	frozen      []complex128         // evalFrLFTFrozenInto's buffers, allocated on first use
+	frozenPiv   []int                // frozenRefine's pivots, allocated on first use
+	frozenLoop  []compensatedComplex // frozenResidual's loop sums
+	hOK         bool                 // h holds H at the last evalFrLFTInto point
 }
 
 // newLFTWorkspace balances the augmented plant [|A|+|E| B B2; C C2 ·] so

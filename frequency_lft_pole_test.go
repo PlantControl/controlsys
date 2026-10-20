@@ -2,6 +2,8 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
+	"math/cmplx"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -63,6 +65,71 @@ func TestFreqResponseInternalDelayMovedPole(t *testing.T) {
 				fzFRCheck(t, s, "internal-delay FreqResponse", w, fzFRAt(fr, k), d.gd, d.beta, d.cond, d.slack)
 			}
 		})
+	}
+}
+
+// TestFreqResponseInternalDelayLFTCancelIllConditionedLoop: at DC of a
+// near double integrator whose rank-one delay loop leaves a closed-loop pole
+// near zero, the LFT cancels terms 844 times |G|, so FreqResponse closes the
+// loop; the frozen pencil, formed with B2·K·C2 rounded, has condition 2e7
+// and must refine against the factored loop to beat the LFT. The oracle is
+// the exact rational DC gain D − C·A⁻¹·B of the closed loop, K = (I − D22)⁻¹.
+func TestFreqResponseInternalDelayLFTCancelIllConditionedLoop(t *testing.T) {
+	a := []float64{9.665897930709342e-10, 3.5454187419198177e-09, -2.8732459853766166e-09, -9.993271397365217e-09}
+	b1 := []float64{-1.0099020293585714, 0.8018895307913069}
+	c1 := []float64{0.513357336126502, -0.7071007175520982}
+	d11 := []float64{0.7341173575892297}
+	b2 := []float64{-1.1137638255969695, 0.5261995246483373, 0.5268159819473245, -0.2439597733455373}
+	c2 := []float64{0.040375852407838364, -0.1558650336068202, 0, 0}
+	d21 := []float64{0.2819466415364478, 0}
+	d22 := []float64{0, 0, -0.2710131635019522, 0}
+	tau := []float64{0.2163537165520414, 0.010908457936042327}
+	rat := func(v []float64) []*big.Rat {
+		out := make([]*big.Rat, len(v))
+		for i, x := range v {
+			out[i] = new(big.Rat).SetFloat64(x)
+		}
+		return out
+	}
+	add := func(x, y []*big.Rat) []*big.Rat {
+		out := make([]*big.Rat, len(x))
+		for i := range x {
+			out[i] = new(big.Rat).Add(x[i], y[i])
+		}
+		return out
+	}
+	for _, scale := range []float64{1, 1e2} {
+		as := make([]float64, len(a))
+		for i, v := range a {
+			as[i] = v * scale
+		}
+		sys, err := New(mat.NewDense(2, 2, as), mat.NewDense(2, 1, b1), mat.NewDense(1, 2, c1), mat.NewDense(1, 1, d11), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sys.SetInternalDelay(tau, mat.NewDense(2, 2, b2), mat.NewDense(2, 2, c2), mat.NewDense(1, 2, nil),
+			mat.NewDense(2, 1, d21), mat.NewDense(2, 2, d22)); err != nil {
+			t.Fatal(err)
+		}
+		fr, err := sys.FreqResponse([]float64{0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		imd := rat([]float64{1, 0, 0, 1})
+		for i, v := range rat(d22) {
+			imd[i].Sub(imd[i], v)
+		}
+		k := fzRatInv(imd, 2)
+		b2k := fzRatMul(rat(b2), k, 2, 2, 2)
+		acl := add(rat(as), fzRatMul(b2k, rat(c2), 2, 2, 2))
+		bcl := add(rat(b1), fzRatMul(b2k, rat(d21), 2, 2, 1))
+		x := fzRatMul(fzRatInv(acl, 2), bcl, 2, 2, 1)
+		g := new(big.Rat).Sub(rat(d11)[0], fzRatMul(rat(c1), x, 1, 2, 1)[0])
+		want, _ := g.Float64()
+		got := fr.At(0, 0, 0)
+		if rel := cmplx.Abs(got-complex(want, 0)) / math.Abs(want); rel > 1e-12 {
+			t.Errorf("A×%g: G(0) = %.17g, want %.17g (rel err %.3g)", scale, got, want, rel)
+		}
 	}
 }
 
