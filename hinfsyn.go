@@ -231,8 +231,8 @@ func unscaleGram(M *mat.Dense, t []float64, inverse bool) {
 
 // hinfSynDiscrete designs for the discrete plant P through the Tustin map
 // z = (β+s)/(β−s), β = 2/Ts, or through z = −(β+s)/(β−s) applied to P(−z)
-// when I + A is worse conditioned than I − A (a mode at or near z = −1,
-// which the plain map sends to s = ∞). Both maps take the unit circle onto
+// when ‖(I + A)⁻¹‖ exceeds ‖(I − A)⁻¹‖ (a mode nearer z = −1, which the
+// plain map sends to s = ∞; conditioning cannot tell, a scalar's being 1). Both maps take the unit circle onto
 // the imaginary axis and the open unit disk onto the open left half-plane.
 // When both I + A and I − A are ill-conditioned (modes at or near both
 // z = 1 and z = −1, or a strongly non-normal A) it first closes a static output feedback u = D0·y + v,
@@ -288,7 +288,7 @@ func hinfSynTustin(op string, P *System, nmeas, ncont int) (hinfDesign, error) {
 	ImA.Sub(ImA, P.A)
 	plus.Factorize(IpA)
 	minus.Factorize(ImA)
-	reflect := plus.Cond() > minus.Cond()
+	reflect := plus.Cond()/mat.Norm(IpA, 1) > minus.Cond()/mat.Norm(ImA, 1)
 	Pd, point := P, "-1"
 	if reflect {
 		Pd = P.Copy()
@@ -313,7 +313,13 @@ func hinfSynTustin(op string, P *System, nmeas, ncont int) (hinfDesign, error) {
 		if err != nil {
 			return nil, err
 		}
-		K, err := res.K.discretizeTustin(P.Dt, 0)
+		Kc := res.K
+		if nk, _, _ := Kc.Dims(); nk > 0 {
+			if bal, err := Ssbal(Kc); err == nil {
+				Kc = bal.Sys
+			}
+		}
+		K, err := Kc.discretizeTustin(P.Dt, 0)
 		if err != nil {
 			return nil, fmt.Errorf("%s: mapping the controller back to discrete time: %w", op, err)
 		}

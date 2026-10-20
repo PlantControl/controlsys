@@ -1298,9 +1298,6 @@ func FuzzMixsyn(f *testing.F) {
 		res, err := Mixsyn(s.System(t, fzSysOpts{}), W1, W2, W3)
 		fzContract(t, s, "Mixsyn", res != nil, err)
 		solvable := syRegSolvable(s) && syClear(s, 1e-4) && !syNumericallySingularD(s) && !syUnstableWithRHPZeros(s)
-		if s.Discrete && 1-aw < 1e-6 {
-			solvable = false // known followup: slow discrete W1 pole fails on non-square or singular G
-		}
 		if err != nil {
 			if solvable {
 				t.Fatalf("Mixsyn: %v on a robustly stabilizable and detectable G with no boundary poles (W1 a=%g c=%g d=%g, ρ=%g, W3=%g)\n%s", err, aw, cw, dw, rho, w3, s)

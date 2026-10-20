@@ -1449,3 +1449,54 @@ func TestHinfSyn_XYStateCoordinatesUnderScaling(t *testing.T) {
 		})
 	}
 }
+
+// A scalar A has cond(I ± A) = 1, so the Tustin map must be chosen by
+// ‖(I ∓ A)⁻¹‖: a slow mode at z = 1 − 1.4e-6 tied on conditioning and,
+// reflected, landed at s ≈ −2.9e6, missing the optimum by 3500x. GammaOpt
+// equals the continuous design on the Tustin equivalent, below the H∞ norm
+// of the H2Syn controller.
+func TestHinfSyn_DiscreteSlowModeTustinChoice(t *testing.T) {
+	const rho, sig = 3.1622776601683795, 0.01
+	D := mat.NewDense(6, 6, nil)
+	D.Set(1, 4, rho)
+	D.Set(2, 5, rho)
+	for i := range 3 {
+		D.Set(3+i, 1+i, sig)
+	}
+	P, err := New(mat.NewDense(1, 1, []float64{0.9999986054177232}),
+		mat.NewDense(1, 6, []float64{1, 0, 0, 0, -0.9667981925794609, 0.70866977429126}),
+		mat.NewDense(6, 1, []float64{1, 0, 0, -1.0153621182995027, -1.1701046921324967, -0.7745287458654209}), D, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := HinfSyn(P, 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	Pc, err := P.D2C(D2COptions{Method: C2DMethodTustin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := HinfSyn(Pc, 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(res.GammaOpt-rc.GammaOpt) > 1e-5*rc.GammaOpt {
+		t.Fatalf("GammaOpt = %.10g, continuous Tustin design %.10g", res.GammaOpt, rc.GammaOpt)
+	}
+	h2, err := H2Syn(P, 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl, err := LFT(P, h2.K, LFTFeedback{Nu: 2, Ny: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc, _, err := HinfNorm(cl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(res.GammaOpt <= hc) {
+		t.Fatalf("GammaOpt = %.10g above the H2Syn controller's %.10g", res.GammaOpt, hc)
+	}
+}
