@@ -77,7 +77,9 @@ func (r *DiskMarginResult) PeakFreq() (w float64, ok bool) { return r.peakFreq, 
 // fails, at takes the pole limit in double (ddGate.limit) instead of
 // FreqResponse's double-double response, and a failure there stands: the
 // rational margin search and the PID screens read it as unresolved, as next
-// to an origin or Nyquist cluster or multiple poles at z = 1.
+// to an origin or Nyquist cluster or multiple poles at z = 1. resolve
+// returns the response as FreqResponse resolves it, for a caller that needs
+// it rather than that unresolved state.
 //
 // at keeps the signature func(float64) complex128 so it can be passed as a
 // response function; a failed evaluation returns NaN and is kept in err,
@@ -147,6 +149,40 @@ func (e *sisoEval) at(w float64) complex128 {
 	return e.dst[0]
 }
 
+// resolve is L(jω) as FreqResponse resolves it, ok false where that
+// fails too: try with the extended fallback, and where at snaps a computed
+// pole near ω to +Inf, the double-double response unless that is singular or
+// ddAtPole puts the pole at ω. Beside a cluster at z = 1 the snap reaches ω
+// tens of times off the pole (S2RNHI). at keeps the snap and its failures
+// for the searches tuned to them: the gain search rejects brackets closing
+// on +Inf, so taking the response there adds crossings at |L| within
+// coefficient rounding of 1 next to an integrator, which pidtune would take
+// for its crossover.
+func (e *sisoEval) resolve(w float64) (h complex128, ok bool) {
+	saved := e.extended
+	e.extended = true
+	h, ok = e.try(w)
+	e.extended = saved
+	pt := e.td.frequencyPoint(w)
+	s := pt.value()
+	if !ok || !cmplx.IsInf(h) || e.sys.internalDelayCount() > 0 || s == 0 || !e.sys.IsContinuous() && s == 1 {
+		return h, ok
+	}
+	sp, err := poleSpacing(e.sys, s)
+	if err != nil {
+		return h, ok
+	}
+	g := []complex128{0}
+	e.ddSolves++
+	if !ddResponseInto(e.sys, pt, g) || ddAtPole(e.sys, s, sp, g) {
+		return h, ok
+	}
+	if e.delay != nil {
+		applyIODelayMatrixAtS(e.sys, pt, g, 1, 1, e.delay)
+	}
+	return g[0], true
+}
+
 func (e *sisoEval) exactAt(pt frequencyPoint) (complex128, bool) {
 	if !e.exact || e.sys.internalDelayCount() > 0 {
 		return 0, false
@@ -160,6 +196,16 @@ func (e *sisoEval) exactAt(pt frequencyPoint) (complex128, bool) {
 // integrator; ok is false where at would fail.
 func (e *sisoEval) try(w float64) (h complex128, ok bool) {
 	return tryEval(e, func() complex128 { return e.at(w) })
+}
+
+// tryDouble is try without the extended fallback, for a check tuned to
+// where the double solve and its pole limit fail.
+func (e *sisoEval) tryDouble(w float64) (h complex128, ok bool) {
+	saved := e.extended
+	e.extended = false
+	h, ok = e.try(w)
+	e.extended = saved
+	return h, ok
 }
 
 // tryEval runs g, which evaluates through e, with try's failure handling.
@@ -1120,11 +1166,11 @@ func frobenius(a []float64) float64 {
 // Where the double solve is singular it evaluates in double-double: beside
 // a cluster k/(z+1)⁴ with tiny k, |L| reaches gamma where the pivot of
 // zI − A is below n·eps·‖A‖, yet the model is resolved there. Phase
-// crossings keep the double solve beside such a cluster, where the phase of
-// the model as rounded departs from that of its factored form; only
-// resonanceCrossings evaluates phase in double-double, beside pairs that
-// pass the conditioning bound of resonancePoles. Margins at any verified
-// crossover use it too.
+// crossings keep the double solve wherever it resolves, as beside such a
+// cluster, where the phase of the model as rounded departs from that of its
+// factored form; only resonanceCrossings evaluates phase in double-double
+// first, beside pairs that pass the conditioning bound of resonancePoles.
+// Margins at any verified crossover use it too.
 func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	cands, err := r.gainCandidates(gamma)
 	if err != nil {
@@ -1237,12 +1283,18 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 // phaseCrossings returns the verified ω > 0 where L(jω) is real and negative,
 // ascending. The pencil root L − L~ always has at Nyquist, where L is real,
 // is left to nyquistPhaseCrossings: polish would judge it on the double
-// solve's phase at frequencyPoint(π/Dt).
+// solve's phase at frequencyPoint(π/Dt). The candidates are polished with
+// the extended fallback: beside a pole cluster near z = 1 the double solve
+// fails over decades off every pole, and a crossing whose walk clearance
+// lies there was lost (S2RNHI). polish's origin-pole guard keeps the double
+// solve's failures, so near-roots of an asymptotically real L next to an
+// origin cluster stay rejected.
 func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	reals, err := r.realCandidates()
 	if err != nil {
 		return nil, err
 	}
+	r.eval.extended = true
 	var cands []float64
 	for _, w := range reals {
 		if r.discrete() && w >= r.nyquist() {
@@ -1254,6 +1306,7 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	}
 	f := func(w float64) float64 { return phaseOffsetDeg(r.eval.at(w)) }
 	out := r.polish(cands, f, 1e-7, true)
+	r.eval.extended = false
 	pairs, realPoles := r.resonancePoles()
 	out = r.dropRefuted(out, realPoles, f)
 	out = r.mergeResonanceCrossings(out, r.resonanceCrossings(pairs, realPoles, f, 1e-7), f)
@@ -1698,6 +1751,13 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		}
 		return tol
 	}
+	// The phase search evaluates extended, but its guard against roots next
+	// to an origin pole reads the double solve's failures: there only they
+	// mark near-roots of an asymptotically real L.
+	guard := r.eval.try
+	if steep {
+		guard = r.eval.tryDouble
+	}
 	h0, ok := r.eval.try(0)
 	pole0 := !ok || cmplx.IsInf(h0)
 	zeroRoot := !pole0 && math.Abs(f(0)) <= tol
@@ -1781,7 +1841,7 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		if bracketed {
 			vTol = crossTol(best)
 		}
-		if _, ok := r.eval.try(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {
+		if _, ok := guard(best / 2); zeroRoot && len(out) == 0 && within(best/2) || pole0 && !ok {
 			continue
 		}
 		if v <= vTol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
