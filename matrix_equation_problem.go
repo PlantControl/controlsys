@@ -19,6 +19,15 @@ type riccatiProblem struct {
 	m  int
 	// t is the state scaling x̂ = diag(t)·x of A, B, Q, S, E, or nil.
 	t []float64
+	// costScaling enables the cost scaling of rescaleCost; sigma is its
+	// current σ (1 when unset) and balanced selects the S-free, input
+	// balanced extended pencil of riccatiProblem.pencil.
+	costScaling bool
+	balanced    bool
+	sigma       float64
+	// rescueErr is the error of a failed first pencil solve that
+	// pencilSolution rescued.
+	rescueErr error
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -72,7 +81,7 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 		ws = NewRiccatiWorkspace(na, m)
 	}
 
-	return riccatiProblem{A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws, n: na, m: m}, nil
+	return riccatiProblem{A: A, B: B, Q: Q, R: R, S: S, E: E, ws: ws, n: na, m: m, sigma: 1}, nil
 }
 
 // riccatiDescriptor returns opts.E, or nil when it is absent or the identity.
@@ -132,6 +141,7 @@ func (problem *riccatiProblem) scale(opts *RiccatiOpts) {
 	if opts != nil && opts.NoScaling {
 		return
 	}
+	problem.costScaling = true
 	n, m, ws := problem.n, problem.m, problem.ws
 	p := 1
 	if problem.S != nil {
