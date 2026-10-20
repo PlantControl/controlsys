@@ -737,8 +737,18 @@ func mqRiccatiSep(s *fzSpec, acl, q, r []float64) (sep, h float64) {
 // accuracy of the Schur method: Care/Dare then return X with no correct
 // digits although X is well determined by the data (known followup).
 func mqRiccatiBelowSchurAccuracy(s *fzSpec, acl, q, r, x []float64) bool {
+	return mqRiccatiSchurRelErr(s, acl, q, r, x) > 1
+}
+
+// mqRiccatiSchurRelErr returns eps·h/(sep·‖X‖), the relative accuracy of
+// the unscaled Schur method: for ‖X‖ ≪ h (e.g. Q ≈ 1e-12 against ‖A‖ ≈ 1)
+// X keeps only that many digits (known followup: no cost scaling).
+func mqRiccatiSchurRelErr(s *fzSpec, acl, q, r, x []float64) float64 {
 	sep, h := mqRiccatiSep(s, acl, q, r)
-	return sep > 0 && mqFro(x)*sep < 0x1p-52*h
+	if !(sep > 0) {
+		return 0
+	}
+	return 0x1p-52 * h / (sep * mqFro(x))
 }
 
 // FuzzRiccati: Care (continuous spec) or Dare (discrete) with A, B from
@@ -805,9 +815,6 @@ func FuzzRiccati(f *testing.F) {
 				fzSkip(t, op+": Q = CᵀC numerically semidefinite rejected")
 			case errors.Is(err, ErrSingularR):
 				if me := mqMinEigSym(r, m); me >= 1e-10*mqFro(r) {
-					if s.Discrete && !(jointPSD && mqRiccatiExists(s, q, r, sm)) {
-						fzSkip(t, "Dare: R+BᵀXB not PD on a not provably solvable problem")
-					}
 					t.Fatalf("%s: ErrSingularR for R with min eig %.3g\n%s", op, me, s)
 				}
 				fzSkip(t, op+": R near singular")
@@ -839,11 +846,8 @@ func FuzzRiccati(f *testing.F) {
 			t.Fatalf("%s: gain residual %.3g (scale %.3g)\nX=%v\nK=%v\n%s", op, ke, kden, x, k, s)
 		}
 		tinyX := mqRiccatiBelowSchurAccuracy(s, ad, q, r, x)
-		resFail := !(re <= tol*rden)
+		resFail := !(re <= math.Max(tol, 1e2*mqRiccatiSchurRelErr(s, ad, q, r, x))*rden)
 		if resFail && !tinyX {
-			if syNearZeroDiscreteEig(s, 1e-4) {
-				fzSkip(t, op+": Dare residual with a nonzero eigenvalue below 1e-4 (known followup)")
-			}
 			t.Fatalf("%s: Riccati residual %.3g (scale %.3g, rcnd %.3g)\nX=%v\nK=%v\n%s", op, re, rden, res.Rcnd, x, k, s)
 		}
 		cp := fzCharPolyExact(ad, n)
@@ -890,9 +894,6 @@ func FuzzRiccati(f *testing.F) {
 			if me := mqMinEigSym(x, n); !(me >= -1e-8*mqFro(x)) {
 				if tinyX {
 					fzSkip(t, op+tinyMsg)
-				}
-				if syNearZeroDiscreteEig(s, 1e-4) {
-					fzSkip(t, op+": Dare PSD loss with a nonzero eigenvalue below 1e-4 (known followup)")
 				}
 				t.Fatalf("%s: PSD cost but min eig(X) = %.3g\nX=%v\n%s", op, me, x, s)
 			}

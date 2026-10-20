@@ -369,6 +369,10 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // singular E returns ErrDescriptorSingular. Nil or NaN/Inf arguments return
 // ErrInvalidArgument.
 //
+// Dare always deflates the extended pencil, as MATLAB idare does, so A may
+// be singular or have near-zero eigenvalues. A solution with R+B'XB not
+// positive definite returns ErrNoStabilizing.
+//
 // Dare scales the states as Care does (MATLAB idare); opts.NoScaling
 // disables it.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -405,7 +409,7 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	aRaw := A.RawMatrix()
 	bRaw := B.RawMatrix()
 
-	subspace, err := problem.discreteStableSubspace()
+	subspace, err := problem.generalizedStableSubspace(false)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +439,7 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		1, blas64.General{Rows: m, Cols: m, Data: rbar, Stride: m})
 
 	if !impl.Dpotrf(blas.Upper, m, rbar, m) {
-		return nil, ErrSingularR
+		return nil, ErrNoStabilizing
 	}
 
 	// BtXA = BtX * A (m×n)
@@ -543,154 +547,6 @@ type riccatiSubspace struct {
 	alphaR  []float64
 	alphaI  []float64
 	beta    []float64
-}
-
-func (problem riccatiProblem) discreteStableSubspace() (riccatiSubspace, error) {
-	if problem.E != nil {
-		return problem.generalizedStableSubspace(false)
-	}
-	if subspace, suitable, err := problem.regularDiscreteStableSubspace(); suitable || err != nil {
-		return subspace, err
-	}
-	return problem.generalizedStableSubspace(false)
-}
-
-// regularDiscreteStableSubspace orders the symplectic matrix built from
-// A⁻ᵀ. suitable false (nil error) means A is too ill-conditioned for that
-// form and the caller uses the extended pencil instead; a non-nil error is
-// a failure of the suitable path.
-func (problem riccatiProblem) regularDiscreteStableSubspace() (subspace riccatiSubspace, suitable bool, err error) {
-	n, m, ws := problem.n, problem.m, problem.ws
-	nn := 2 * n
-	aRaw := problem.A.RawMatrix()
-	bRaw := problem.B.RawMatrix()
-
-	aWork := ws.aWork[:n*n]
-	copyStrided(aWork, n, aRaw.Data, aRaw.Stride, n, n)
-	qWork := ws.qWork[:n*n]
-	qRaw := problem.Q.RawMatrix()
-	copyStrided(qWork, n, qRaw.Data, qRaw.Stride, n, n)
-
-	rinvBt := ws.rinvBt[:m*n]
-	for i := range n {
-		for j := range m {
-			rinvBt[j*n+i] = bRaw.Data[i*bRaw.Stride+j]
-		}
-	}
-	impl.Dpotrs(blas.Upper, m, n, ws.rChol[:m*m], m, rinvBt, n)
-
-	if problem.S != nil {
-		rinvSt := ws.rinvSt[:m*n]
-		sRaw := problem.S.RawMatrix()
-		for i := range n {
-			for j := range m {
-				rinvSt[j*n+i] = sRaw.Data[i*sRaw.Stride+j]
-			}
-		}
-		impl.Dpotrs(blas.Upper, m, n, ws.rChol[:m*m], m, rinvSt, n)
-
-		blas64.Gemm(blas.NoTrans, blas.NoTrans,
-			-1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
-			blas64.General{Rows: m, Cols: n, Data: rinvSt, Stride: n},
-			1, blas64.General{Rows: n, Cols: n, Data: aWork, Stride: n})
-		blas64.Gemm(blas.NoTrans, blas.NoTrans,
-			-1, blas64.General{Rows: n, Cols: m, Data: sRaw.Data, Stride: sRaw.Stride},
-			blas64.General{Rows: m, Cols: n, Data: rinvSt, Stride: n},
-			1, blas64.General{Rows: n, Cols: n, Data: qWork, Stride: n})
-		symmetrize(qWork, n, n)
-	}
-
-	g := ws.g[:n*n]
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
-		blas64.General{Rows: m, Cols: n, Data: rinvBt, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: g, Stride: n})
-	symmetrize(g, n, n)
-
-	scratch := ws.pencilH
-	ait := scratch[:n*n]
-	aitq := scratch[n*n : 2*n*n]
-	gait := scratch[2*n*n : 3*n*n]
-	gaitq := scratch[3*n*n : 4*n*n]
-	for i := range n {
-		for j := range n {
-			ait[i*n+j] = aWork[j*n+i]
-		}
-	}
-	work := ws.work
-	anorm := impl.Dlange(lapack.MaxColumnSum, n, n, ait, n, work[:n])
-	ipiv := ws.ipiv[:n]
-	if !impl.Dgetrf(n, n, ait, n, ipiv) {
-		return riccatiSubspace{}, false, nil
-	}
-	rcnd := impl.Dgecon(lapack.MaxColumnSum, n, ait, n, anorm, work[:4*n], ws.iwork[:n])
-	if rcnd < math.Sqrt(eps()) {
-		return riccatiSubspace{}, false, nil
-	}
-	var inverseQuery [1]float64
-	impl.Dgetri(n, ait, n, ipiv, inverseQuery[:], -1)
-	lwork := int(inverseQuery[0])
-	if len(ws.work) < lwork {
-		ws.work = make([]float64, lwork)
-	}
-	impl.Dgetri(n, ait, n, ipiv, ws.work, lwork)
-
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: n, Data: ait, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: qWork, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: aitq, Stride: n})
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: n, Data: g, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: ait, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: gait, Stride: n})
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: n, Data: gait, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: qWork, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: gaitq, Stride: n})
-
-	z := ws.z[:nn*nn]
-	for i := range n {
-		for j := range n {
-			z[i*nn+j] = aWork[i*n+j] + gaitq[i*n+j]
-			z[i*nn+n+j] = -gait[i*n+j]
-			z[(n+i)*nn+j] = -aitq[i*n+j]
-			z[(n+i)*nn+n+j] = ait[i*n+j]
-		}
-	}
-
-	alphaR := ws.wr[:nn]
-	alphaI := ws.wi[:nn]
-	beta := ws.beta[:nn]
-	vectors := ws.vs[:nn*nn]
-	bwork := ws.bwork[:nn]
-	insideUnitCircle := func(real, imag float64) bool {
-		return math.Hypot(real, imag) < 1
-	}
-
-	var workQuery [1]float64
-	impl.Dgees(lapack.SchurHess, lapack.SortSelected, insideUnitCircle,
-		nn, z, nn, alphaR, alphaI, vectors, nn, workQuery[:], -1, bwork)
-	lwork = int(workQuery[0])
-	if len(ws.work) < lwork {
-		ws.work = make([]float64, lwork)
-	}
-	sdim, ok := impl.Dgees(lapack.SchurHess, lapack.SortSelected, insideUnitCircle,
-		nn, z, nn, alphaR, alphaI, vectors, nn, ws.work, lwork, bwork)
-	if !ok {
-		return riccatiSubspace{}, true, ErrSchurFailed
-	}
-	if sdim != n {
-		return riccatiSubspace{}, true, ErrNoStabilizing
-	}
-	for i := range nn {
-		beta[i] = 1
-	}
-	return riccatiSubspace{
-		vectors: vectors,
-		alphaR:  alphaR,
-		alphaI:  alphaI,
-		beta:    beta,
-	}, true, nil
 }
 
 // generalizedStableSubspace deflates the extended pencil
