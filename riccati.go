@@ -117,7 +117,8 @@ type RiccatiOpts struct {
 	// NoScaling disables the default power-of-two state and cost scaling,
 	// as the MATLAB icare/idare 'noscaling' option. A pencil solve (Dare,
 	// or Care with E) that fails, or leaves a Riccati residual above 1e-12
-	// of its terms, is still retried with cost scaling.
+	// of its terms, is still retried with cost scaling; so is a plain Care
+	// solve that fails or leaves a residual above 1e-6 of its terms.
 	NoScaling bool
 }
 
