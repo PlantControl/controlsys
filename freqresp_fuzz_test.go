@@ -395,6 +395,7 @@ func FuzzFreqResponse(f *testing.F) {
 		fzFRCheckDescriptor(t, s, ws, pts)
 		fzFRCheckFRD(t, s, sys, ws, fr)
 		fzFRCheckSigma(t, s, sys, ws, pts)
+		fzFRCheckNyquist(t, s, sys, ws, fr)
 	})
 }
 
@@ -760,5 +761,17 @@ func fzFRSeeds() []fzSeed {
 			s.N, s.M, s.P = 2, 1, 1
 			s.Mag[0], s.Damp[0] = -3, 13
 		}),
+		with(func(s *fzSeed) { s.N, s.Mag[0], s.Damp[0], s.Gain = 2, 0, -3, 6.5 }),
+		with(func(s *fzSeed) { s.N, s.Mag, s.Damp, s.Gain = 3, [3]float64{0, 0}, [3]float64{2, 0}, -8.5 }),
+		with(func(s *fzSeed) { s.N, s.Mag[0], s.Damp[0], s.Gain, s.In = 2, 0, 3, 6.6, 0 }),
+		with(func(s *fzSeed) {
+			s.Discrete, s.LogDt = true, -1
+			s.N, s.Mag[0], s.Damp[0], s.Gain, s.In = 2, 0, 2, 6.5, 0.5
+		}),
+		with(func(s *fzSeed) {
+			s.Discrete, s.LogDt = true, -1
+			s.N, s.Mag[0], s.Damp[0], s.Gain = 2, 0.3, -2.5, 5.5
+		}),
+		with(func(s *fzSeed) { s.N, s.Mag[0], s.Damp[0], s.Gain, s.In = 1, 0, 3, 7.78, 0 }),
 	}
 }
