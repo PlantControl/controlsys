@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"slices"
 	"strings"
 	"testing"
 
@@ -784,14 +785,10 @@ func TestTransferFunctionBalancesBadlyScaledA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d0, d1 := res.TF.Den[0], res.TF.Den[1]
-	if len(d0) != len(d1) {
-		t.Fatalf("den degrees %d, %d differ", len(d0)-1, len(d1)-1)
-	}
-	for k := range d0 {
-		if d := math.Abs(d0[k] - d1[k]); d > 1e-11*math.Abs(d0[k]) {
-			t.Fatalf("den[%d]: %g vs %g", k, d0[k], d1[k])
-		}
+	// Output 0 does not see output 1's 5 Padé states (Sminreal and
+	// MinimalRealization of row 0 both give 13).
+	if !slices.Equal(res.RowDegrees, []int{13, 18}) {
+		t.Fatalf("RowDegrees %v, want [13 18]", res.RowDegrees)
 	}
 }
 

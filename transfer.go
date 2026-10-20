@@ -152,7 +152,9 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // delay (IODelay, InputDelay, OutputDelay) folded into TransferFunc.Delay.
 // Internal (LFT) delays have no TransferFunc form and are rejected.
 //
-// [A B; C ·] is first balanced by an exact power-of-two state similarity,
+// Each output row is converted from the states it structurally sees, as
+// MATLAB tf(ss) applies sminreal per channel, so exactly decoupled states
+// never enter its denominator. [A B; C ·] is then balanced by an exact power-of-two state similarity,
 // and each input and output scaled by a power of two toward ‖A‖, which
 // removes accuracy loss caused by poor state or I/O scaling (a tiny but
 // nonzero B or C is not dropped as uncontrollable) and makes the orders
@@ -232,6 +234,9 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return c.result(0), nil
 	}
 
+	if groups := c.structuralRowGroups(); groups != nil {
+		return c.convertRowGroups(groups)
+	}
 	order, err := c.convertFrom(false)
 	if err != nil {
 		return nil, err
@@ -253,6 +258,143 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return alt.result(altOrder), nil
 	}
 	return c.result(order), nil
+}
+
+// rowGroup is a set of output rows that structurally see the same states.
+type rowGroup struct {
+	rows, states []int
+}
+
+// structuralRowGroups groups the output rows by the states each sees
+// structurally: reachable from B and reaching that row of C through the
+// sparsity pattern of A, as MATLAB tf(ss) applies sminreal per channel.
+// Exactly decoupled states are then never left to the rank decisions,
+// whose rotations turn their zeros into noise. It returns nil when every
+// row sees all n states.
+func (c rowRealizationConverter) structuralRowGroups() []rowGroup {
+	n := c.n
+	aRaw, bRaw, cRaw := c.sys.A.RawMatrix(), c.sys.B.RawMatrix(), c.sys.C.RawMatrix()
+	reach := make([]bool, n)
+	queue := make([]int, 0, n)
+	for i := range n {
+		for _, v := range bRaw.Data[i*bRaw.Stride : i*bRaw.Stride+c.m] {
+			if v != 0 {
+				reach[i] = true
+				queue = append(queue, i)
+				break
+			}
+		}
+	}
+	for len(queue) > 0 {
+		j := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		for i := range n {
+			if !reach[i] && aRaw.Data[i*aRaw.Stride+j] != 0 {
+				reach[i] = true
+				queue = append(queue, i)
+			}
+		}
+	}
+	seen := make([]bool, n*c.p)
+	full := true
+	for k := range c.p {
+		obs := seen[k*n : (k+1)*n]
+		for j, v := range cRaw.Data[k*cRaw.Stride : k*cRaw.Stride+n] {
+			if v != 0 {
+				obs[j] = true
+				queue = append(queue, j)
+			}
+		}
+		for len(queue) > 0 {
+			i := queue[len(queue)-1]
+			queue = queue[:len(queue)-1]
+			for j, v := range aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+n] {
+				if !obs[j] && v != 0 {
+					obs[j] = true
+					queue = append(queue, j)
+				}
+			}
+		}
+		for j := range n {
+			obs[j] = obs[j] && reach[j]
+			full = full && obs[j]
+		}
+	}
+	if full {
+		return nil
+	}
+	var groups []rowGroup
+rows:
+	for k := range c.p {
+		obs := seen[k*n : (k+1)*n]
+		for g := range groups {
+			if slices.Equal(obs, seen[groups[g].rows[0]*n:(groups[g].rows[0]+1)*n]) {
+				groups[g].rows = append(groups[g].rows, k)
+				continue rows
+			}
+		}
+		var states []int
+		for j, v := range obs {
+			if v {
+				states = append(states, j)
+			}
+		}
+		groups = append(groups, rowGroup{rows: []int{k}, states: states})
+	}
+	return groups
+}
+
+// convertRowGroups converts each row group from the subsystem of the
+// states it sees.
+func (c rowRealizationConverter) convertRowGroups(groups []rowGroup) (*TransferFuncResult, error) {
+	aRaw, bRaw, cRaw := c.sys.A.RawMatrix(), c.sys.B.RawMatrix(), c.sys.C.RawMatrix()
+	total := 0
+	for _, g := range groups {
+		r, q := len(g.states), len(g.rows)
+		if r == 0 {
+			for _, k := range g.rows {
+				c.tf.Den[k] = []float64{1}
+				c.tf.Num[k] = make([][]float64, c.m)
+				for j := range c.m {
+					c.tf.Num[k][j] = []float64{c.dRaw.Data[k*c.dRaw.Stride+j]}
+				}
+				c.rows[k] = 0
+			}
+			continue
+		}
+		a, b, cm, d := newDense(r, r), newDense(r, c.m), newDense(q, r), newDense(q, c.m)
+		for ii, i := range g.states {
+			for jj, j := range g.states {
+				a.Set(ii, jj, aRaw.Data[i*aRaw.Stride+j])
+			}
+			for j := range c.m {
+				b.Set(ii, j, bRaw.Data[i*bRaw.Stride+j])
+			}
+		}
+		for kk, k := range g.rows {
+			for jj, j := range g.states {
+				cm.Set(kk, jj, cRaw.Data[k*cRaw.Stride+j])
+			}
+			for j := range c.m {
+				d.Set(kk, j, c.dRaw.Data[k*c.dRaw.Stride+j])
+			}
+		}
+		sub, err := newNoCopy(a, b, cm, d, c.sys.Dt)
+		if err != nil {
+			return nil, err
+		}
+		res, err := newRowRealizationConverter(sub, c.opts).convert()
+		if err != nil {
+			return nil, err
+		}
+		for kk, k := range g.rows {
+			c.tf.Num[k] = res.TF.Num[kk]
+			c.tf.Den[k] = res.TF.Den[kk]
+			c.rows[k] = res.RowDegrees[kk]
+		}
+		total += res.MinimalOrder
+	}
+	return c.result(total), nil
 }
 
 // convertFrom fills the rows from the Dgebal or, with osborne, the
