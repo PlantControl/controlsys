@@ -241,7 +241,7 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !c.hasZeroDiagonal() {
+	if !c.hasZeroDiagonal() && slices.Min(c.rows) == c.n {
 		return c.result(order), nil
 	}
 	check := newTFCheck(c.sys, c.n, c.m, c.p)
@@ -555,8 +555,10 @@ func (c rowRealizationConverter) finiteCoeffs() bool {
 // chain's couplings below the staircase floor. So when states are lost
 // convertBalanced takes the osborne realization if it is fully
 // controllable (a partial count from either is equally ambiguous), and
-// when A has a zero diagonal entry (the cost gate) and the Dgebal result
-// misses the state-space response at a few sample points by more than
+// when A has a zero diagonal entry or a row lost states (the cost gate:
+// Dgebal can also inflate B or C by ~1e13 past a state whose A row is
+// diagonal-only, E2AY73) and the Dgebal result misses the state-space
+// response at a few sample points by more than
 // 1e3·n·eps, convert keeps whichever result misses it less. MATLAB tf(ss)
 // removes only structurally disconnected states, so keeping states that
 // are controllable in some exact scaling is on MATLAB's side.

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -152,5 +153,20 @@ func TestTransferFunctionRowFloorRotatedKalman(t *testing.T) {
 	}
 	if over > 5 {
 		t.Errorf("%d of 40 variants keep hidden states (≤5)", over)
+	}
+}
+
+func BenchmarkTransferFunctionNonMinimal(b *testing.B) {
+	for _, id := range []int{26, 175} {
+		rng := rand.New(rand.NewPCG(uint64(id), 0x9e3779b97f4a7c15))
+		sys := newKalmanCase(rng).sys
+		b.Run(fmt.Sprint(id), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := sys.TransferFunction(nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
