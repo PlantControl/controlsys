@@ -113,7 +113,8 @@ func TestPidtuneZeroDCLegacyPDGated(t *testing.T) {
 }
 
 // FI3ZIB: rounding moves a simple integrator of (z−1)·∏(z−pᵢ), pᵢ near 1,
-// beyond pidtuneClusterRadius(2, 1) while DCGain stays infinite; taking it
+// beyond pidtuneClusterRadius(2, 1) while the true DC gain stays infinite
+// (DCGain resolves the rounded pencil finite, like evalfr); taking it
 // as the slowest pole put the crossover ~600x below half the slowest
 // generated pole (1.46e-4 for the repro, its integrator 2.9e-6 off z = 1).
 // At the corrected crossover the gate's double solve was singular over the
@@ -164,10 +165,6 @@ func TestPidtuneIsolatedDisplacedIntegrator(t *testing.T) {
 		p := pidtuneBackoffPlant(t, num, den, dt, 0)
 		am, err := AllMargin(p)
 		if err != nil || len(am.GainCrossFreqs) > 0 {
-			continue
-		}
-		dc, err := p.DCGain()
-		if err != nil || !math.IsInf(dc.At(0, 0), 0) {
 			continue
 		}
 		poles, err := p.Poles()
