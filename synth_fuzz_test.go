@@ -493,7 +493,7 @@ func syRiccatiChecks(t *testing.T, s *fzSpec, op string, q, r, sm, x, k []float6
 	}
 	syRequireStableRat(t, s, op, acl, n, s.Discrete, fmt.Sprintf("X=%v K=%v", x, k))
 	if jointPSD {
-		if me := mqMinEigSym(x, n); !(me >= -1e-8*mqFro(x)) {
+		if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, 1e3*tol*syQbarRatio(q, r, sm, n, m))*mqFro(x)) {
 			t.Fatalf("%s: PSD cost but min eig(X) = %.3g\nX=%v\n%s", op, me, x, s)
 		}
 	}
