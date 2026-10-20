@@ -830,6 +830,28 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
+	// resp falls back to FreqResponse's solve where eval's fails or is not
+	// finite, as beside rounded multiple poles at z = 1 or s = 0 where it
+	// resolves the response over decades eval cannot; only a sample neither
+	// resolves fails eval. fellBack records a fallback sample: a search
+	// failing with one tells nothing of its depth, which stays blind.
+	pp := &pidtunePlantPoint{}
+	fellBack := false
+	resp := func(w float64) complex128 {
+		saved := eval.err
+		eval.err = nil
+		g := eval.at(w)
+		if eval.err != nil || !pidFiniteComplex(g) {
+			if h, err := pp.at(plant, w); err == nil && pidFiniteComplex(h) {
+				g, eval.err, fellBack = h, nil, true
+			}
+		}
+		if saved != nil {
+			eval.err = saved
+		}
+		return g
+	}
+	tryResp := func(w float64) (complex128, bool) { return tryEval(eval, func() complex128 { return resp(w) }) }
 	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(screen.model) })
 	loopTail := sync.OnceValue(func() func(*PID2, float64) float64 { return pidTuningLoopTail(plant) })
 	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(screen.model) })
@@ -846,12 +868,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// the solve cannot resolve.
 	used, minHigh, sRejected, probing, resolveFloor := 0, 0., false, false, false
 	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
-		opts.CrossoverFrequency = wc
+		opts.CrossoverFrequency, fellBack = wc, false
 		low := wc / 100
 		if resolveFloor {
-			low = pidTuningResolvedFloor(eval.try, low, wc)
+			low = pidTuningResolvedFloor(tryResp, low, wc)
 		}
-		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: eval.at, try: eval.try, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
+		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
 		if robust {
 			p.maxSensitivity = pidTuningMaxSensitivity
 			p.loopTail = loopTail()
@@ -936,7 +958,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	// evalFailed clears an evaluation failure off wc0, as near rounded
 	// multiple poles at z = 1 or s = 0, so a moved crossover is skipped;
-	// skipped also counts a moved crossover whose band is not finite.
+	// skipped also counts a moved crossover whose band is not finite or
+	// whose failed search read a fallback sample.
 	evalFailed := func() bool {
 		if eval.err == nil {
 			return false
@@ -945,7 +968,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return true
 	}
 	skipped := func(err error) bool {
-		return evalFailed() || errors.As(err, new(*pidNonfiniteResponse))
+		blind := err != nil && fellBack
+		fellBack = false
+		return evalFailed() || blind || errors.As(err, new(*pidNonfiniteResponse))
 	}
 	// stamp reports the whole call's evaluations on the returned evidence.
 	stamp := func(res *PIDTuningResult, err error) (*PIDTuningResult, error) {
@@ -1000,12 +1025,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		design := func(j int) (*PIDTuningResult, error) {
 			o := opts
 			o.CrossoverFrequency = at(j)
-			p := pidTuningPlant{dt: plant.Dt, at: eval.at, gainSign: gainSign}
+			p := pidTuningPlant{dt: plant.Dt, at: resp, gainSign: gainSign}
 			// A walk failing on rounded poles at z = 1 or s = 0 leaves the
 			// phase unknown; the depth is still tried.
 			phase := math.NaN()
 			if gainSign != 0 {
-				phase = pidTuningUnwrappedPhase(eval.at, gainSign, at(j), tau)
+				phase = pidTuningUnwrappedPhase(resp, gainSign, at(j), tau)
 				evalFailed()
 			}
 			reachable := pidTuningReachable(p, family, o, pm, phase)
@@ -1104,7 +1129,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		} else {
 			unit.Kp = 1
 		}
-		atUnit := func(w float64) complex128 { return eval.at(w) * pidTuningFeedback(unit, w) }
+		atUnit := func(w float64) complex128 { return resp(w) * pidTuningFeedback(unit, w) }
 		signs := []float64{gainSign}
 		if gainSign == 0 {
 			signs = []float64{1, -1}
@@ -1219,7 +1244,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return stamp(res, err)
 	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
-		gainSign := pidTuningDCSign(plant, eval.try, wc)
+		gainSign := pidTuningDCSign(plant, tryResp, wc)
 		if blocked {
 			return integralBlocked(wc, gainSign)
 		}
@@ -1235,7 +1260,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if err != nil {
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
-	gainSign := pidTuningDCSign(plant, eval.try, wc0)
+	gainSign := pidTuningDCSign(plant, tryResp, wc0)
 	if blocked {
 		return integralBlocked(wc0, gainSign)
 	}
@@ -1274,7 +1299,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		for _, lag := range []float64{15, 30, 45, 60} {
 			for _, sign := range signs {
-				wc, ok := pidTuningNearestPhase(eval.at, sign, -180+pm+lag, wc0, wLo, wHi, tau)
+				wc, ok := pidTuningNearestPhase(resp, sign, -180+pm+lag, wc0, wLo, wHi, tau)
 				if evalFailed() || !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
 					continue
 				}
@@ -1323,7 +1348,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// damped mode.
 	move := func(resonant bool, leads ...float64) (*PIDTuningResult, error) {
 		for _, lead := range leads {
-			wc, ok := pidTuningPhaseCrossing(eval.at, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
+			wc, ok := pidTuningPhaseCrossing(resp, gainSign, -180+pm-lead, wc0*1e-6, wMax, tau)
 			if evalFailed() || !ok || wc == wc0 {
 				continue
 			}
