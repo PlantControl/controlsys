@@ -107,6 +107,27 @@ func TestPullDelaysToLFTStaticMixedDelays(t *testing.T) {
 	}
 }
 
+func TestPullDelaysToLFTStaticMixedDelaysDiscrete(t *testing.T) {
+	g, err := NewGain(mat.NewDense(2, 2, []float64{0.03, -0.24, -0.47, -0.19}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		in, out []float64
+		io      []float64
+	}{
+		{[]float64{0, 1}, []float64{1, 0}, []float64{1, 0, 0, 0}},
+		{[]float64{1, 0}, []float64{1, 0}, []float64{0, 1, 0, 0}},
+	} {
+		sys := withDelays(t, g, c.in, c.out, mat.NewDense(2, 2, c.io))
+		pl, err := sys.PullDelaysToLFT()
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertMatchesOracle(t, "static discrete", pl, sys)
+	}
+}
+
 func TestLFTStaticBlocksWithMixedDelays(t *testing.T) {
 	m, err := NewGain(mat.NewDense(2, 3, []float64{0.8, -0.35, 0.6, 0.45, 1.2, -0.3}), 0)
 	if err != nil {
