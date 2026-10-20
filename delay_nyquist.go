@@ -564,7 +564,7 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 	if (err == nil && !res.axisRoot && !l.failed()) || l.atS == nil || pre {
 		return res, err
 	}
-	if alt, ok := l.clusterWinding(R, w1, res); ok {
+	if alt, ok := l.clusterWinding(R, w1, res, err != nil); ok {
 		return alt, nil
 	}
 	return res, err
@@ -1515,7 +1515,10 @@ func (l *delayLoop) failed() bool {
 // a near-double lightly damped pair, where no cluster fits (hi <=
 // w0/clusterMargin); both passes then repeat with the origin as a further
 // candidate, whose verified disk may enclose the failure point and the poles.
-func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyquist, bool) {
+// So do they after a failed walk: from the indentation enclosing three
+// lightly damped pairs at 1.25e-5..1.28e-5 the walk exceeds its budget, and
+// only the disk at the origin around all six poles verifies.
+func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist, failed bool) (delayNyquist, bool) {
 	ws, required := l.clusterCandidates(base)
 	if len(ws) == 0 {
 		return delayNyquist{}, false
@@ -1531,7 +1534,7 @@ func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyqui
 			return res, true
 		}
 	}
-	if base.axisRoot && base.axisW > 0 && !slices.Contains(ws, 0) {
+	if (failed || base.axisRoot && base.axisW > 0) && !slices.Contains(ws, 0) {
 		ws, required = append([]float64{0}, ws...), append([]bool{false}, required...)
 		for _, dd := range []bool{false, true} {
 			if res, ok := l.clusterAttempt(R, w1, slices.Clone(ws), slices.Clone(required), dd); ok {
