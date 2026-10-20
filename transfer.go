@@ -494,13 +494,13 @@ func (ck tfCheck) relErr(tf *TransferFunc) (worst float64, ok bool) {
 // finite without it.
 func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order int, scaled bool, err error) {
 	a, b, cm, inExp, outExp := c.balancedABC(osborne, ioScale)
-	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+	stair, err := controllabilityStaircaseFloor(a, b, cm, c.opts.ControllabilityTol, ctrbfFloor(a, c.opts.ControllabilityTol), false)
 	if err != nil {
 		return 0, false, err
 	}
 	if stair.NCont < c.n && !osborne {
 		a, b, cm, inExp2, outExp2 := c.balancedABC(true, ioScale)
-		alt, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+		alt, err := controllabilityStaircaseFloor(a, b, cm, c.opts.ControllabilityTol, ctrbfFloor(a, c.opts.ControllabilityTol), false)
 		if err != nil {
 			return 0, false, err
 		}
@@ -516,6 +516,12 @@ func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order i
 		return 0, scaled, nil
 	}
 	floor := ctrbfFloor(stair.A, c.opts.ControllabilityTol)
+	if c.opts.ControllabilityTol == 0 {
+		// The staircase rotations plus the row's Hessenberg reduction leave
+		// up to ~200·eps·‖A‖ in the subdiagonal of a hidden state, above
+		// 10·n·eps·‖A‖₁ for small n.
+		floor *= 10
+	}
 	return c.convertDynamicRows(stair, stair.NCont, floor, inExp, outExp), scaled, nil
 }
 
@@ -696,7 +702,7 @@ func formDualSIMO(Ac, Bc, Cc *mat.Dense, row, n, m int, ws *tfWorkspace) {
 // observabilityReduction reduces the dual single-input pair (Aᵀ, cᵀ) of one
 // output row to Hessenberg form and returns its observable order. c is zero
 // at n·eps·max(‖A‖_F, ‖c‖₁) (or obsTol). A Hessenberg subdiagonal is zero at
-// max(obsTol, floor), floor being the staircase floor of the full model
+// max(obsTol, floor), floor being 10× the ctrbf floor of the full model
 // whose rotations left the rounding noise; it is never judged against ‖c‖,
 // so the order does not depend on the output scale.
 func observabilityReduction(n, m int, ws *tfWorkspace, obsTol, floor float64) (nobs int, b1, scaleB float64) {

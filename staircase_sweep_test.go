@@ -349,8 +349,8 @@ func TestKalmanStructuredSweep(t *testing.T) {
 	}
 	// Base 0c02feb over-counted 59 Reduce, 20 CtrbF, 24 ObsvF and 67 TF of
 	// the default 300 by keeping rounding noise as rank.
-	if n == 300 && decades == 0 && (tally.raOver > 36 || tally.cfWrong > 17 || tally.ofWrong > 20 || tally.tfOver > 60) {
-		t.Errorf("noise counted as rank: Reduce over %d (≤36), CtrbF %d (≤17), ObsvF %d (≤20), TF over %d (≤60)",
+	if n == 300 && decades == 0 && (tally.raOver > 36 || tally.cfWrong > 17 || tally.ofWrong > 20 || tally.tfOver > 30) {
+		t.Errorf("noise counted as rank: Reduce over %d (≤36), CtrbF %d (≤17), ObsvF %d (≤20), TF over %d (≤30)",
 			tally.raOver, tally.cfWrong, tally.ofWrong, tally.tfOver)
 	}
 	if len(tally.failed) > 0 && os.Getenv("KALMAN_SWEEP_N") != "" {

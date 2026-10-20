@@ -116,3 +116,41 @@ func TestTransferFunctionStructuralKalmanRows(t *testing.T) {
 		t.Fatalf("only %d unrotated cases", cases)
 	}
 }
+
+// Rotated Kalman-form models: the staircase rotations and the row's
+// Hessenberg reduction leave ~100-200·eps·‖A‖ in a hidden state's
+// subdiagonal, which the row stage kept as an unstable pole at the plain
+// ctrbf floor, depending on the output scale. The margin is a few times
+// eps·‖A‖, so a handful of the 40 variants may still flip with platform
+// rounding (amd64 2, arm64 0; 33 of 40 before).
+func TestTransferFunctionRowFloorRotatedKalman(t *testing.T) {
+	over := 0
+	for _, id := range []int{26, 34, 72, 82, 103, 124, 162, 165} {
+		rng := rand.New(rand.NewPCG(uint64(id), 0x9e3779b97f4a7c15))
+		kc := newKalmanCase(rng)
+		for _, k := range []float64{-8, -4, 0, 4, 8} {
+			sys := kc.sys.Copy()
+			sys.C.Scale(math.Pow(10, k), sys.C)
+			res, err := sys.TransferFunction(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range res.RowDegrees {
+				if d < kc.r {
+					t.Errorf("id %d, C×1e%g: RowDegrees %v below %d", id, k, res.RowDegrees, kc.r)
+				}
+				if d > kc.r {
+					over++
+					t.Logf("id %d, C×1e%g: RowDegrees %v, want all %d", id, k, res.RowDegrees, kc.r)
+					break
+				}
+			}
+			if e := kalmanRespErr(sys, res.TF.Eval); e > 1e-6 {
+				t.Errorf("id %d, C×1e%g: response rel err %g", id, k, e)
+			}
+		}
+	}
+	if over > 5 {
+		t.Errorf("%d of 40 variants keep hidden states (≤5)", over)
+	}
+}
