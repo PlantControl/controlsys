@@ -56,6 +56,9 @@ type axisPole struct {
 	// the origin from gap to j·gap, where 1+L has phase arcStart.
 	arcSet        bool
 	arc, arcStart float64
+	// lo, hi span the frequencies of the poles merged by addAxisPole; indent
+	// widens the indentation to enclose them all.
+	lo, hi float64
 }
 
 func (a axisPole) poles() int {
@@ -216,12 +219,13 @@ func (l *delayLoop) addAxisPole(w float64, mult int) {
 		w = 0
 	}
 	for i := range l.axis {
-		if math.Abs(l.axis[i].w-w) <= 1e-6*max(1, w) {
-			l.axis[i].mult += mult
+		if a := &l.axis[i]; math.Abs(a.w-w) <= 1e-6*max(1, w) {
+			a.mult += mult
+			a.lo, a.hi = min(a.lo, w), max(a.hi, w)
 			return
 		}
 	}
-	l.axis = append(l.axis, axisPole{w: w, mult: mult})
+	l.axis = append(l.axis, axisPole{w: w, mult: mult, lo: w, hi: w})
 }
 
 // rationalTailBound bounds |L(s)| for Re s >= 0 and |s| >= w from the
@@ -560,7 +564,7 @@ func (l *delayLoop) nyquistGrid(frac, lin float64) (delayNyquist, error) {
 	if (err == nil && !res.axisRoot && !l.failed()) || l.atS == nil || pre {
 		return res, err
 	}
-	if alt, ok := l.clusterWinding(R, w1, res); ok {
+	if alt, ok := l.clusterWinding(R, w1, res, err != nil); ok {
 		return alt, nil
 	}
 	return res, err
@@ -648,6 +652,24 @@ func wrapPi(a float64) float64 {
 }
 
 func (l *delayLoop) axisGap(w float64) float64 { return 1e-7 * max(1, w) }
+
+// span returns the centre of the poles merged into a and the largest
+// distance of one from it; the origin stays the centre of a span reaching it.
+func (a axisPole) span() (c, h float64) {
+	switch {
+	case !(a.hi > a.lo):
+		return a.w, 0
+	case a.lo == 0:
+		return 0, a.hi
+	}
+	return (a.lo + a.hi) / 2, (a.hi - a.lo) / 2
+}
+
+// axisSpanMargin is the indentation radius over the span of the merged
+// poles: around a pair at ±g/2 off its centre the indentation still turns
+// the phase of L by mult·π, and |L| grows by log10(133) ≈ 2.1 decades over
+// [g, 10g], which rounds to mult.
+const axisSpanMargin = 2
 
 func (a axisPole) radius(l *delayLoop) float64 {
 	if a.gap > 0 {
@@ -765,7 +787,14 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 // indent sets the indentation radius of each imaginary-axis pole and
 // returns an imaginary-axis eigenvalue that is not a pole of L of its full
 // multiplicity, judged from the growth of |L| over the decade outside the
-// indentation; χ vanishes there. The radius starts at axisGap; where L
+// indentation; χ vanishes there. The radius starts at axisGap, or at
+// axisSpanMargin times the span of the poles merged by addAxisPole around
+// their centre, which then needs the dominance below: poles 1.4e-7 apart
+// merged into a double pole indented by 1e-7, and the walk passed the
+// outer one at 1e-11, so the count was off by two. That radius is tried
+// even beyond indentLimit, as axisGap is: near a low-frequency pair the
+// conjugate lies within 1e2 of it. A growth there that does not match mult
+// reports a root only for clusterWinding to verify. Where L
 // cannot be evaluated there, as next to a multiple pole whose pencil the
 // solver deems singular, it grows up to indentLimit, so that the decade
 // stays within a tenth of the other poles and of the delay scale. An
@@ -780,6 +809,10 @@ func (l *delayLoop) indent() (float64, bool, error) {
 		a := &l.axis[i]
 		a.order, a.inner = 0, 0
 		g0 := l.axisGap(a.w)
+		widened := false
+		if c, h := a.span(); axisSpanMargin*h > g0 {
+			a.w, g0, widened = c, axisSpanMargin*h, true
+		}
 		gmax := l.indentLimit(a.w)
 		found := false
 		for k := 0; k == 0 || g0*math.Pow(10, float64(k)/2) <= gmax; k++ {
@@ -789,7 +822,7 @@ func (l *delayLoop) indent() (float64, bool, error) {
 			if !ok1 || !ok2 {
 				continue
 			}
-			if k > 0 && near > 0 && !(far >= 1e3) {
+			if (k > 0 || widened) && near > 0 && !(far >= 1e3) {
 				return 0, false, fmt.Errorf("|L| = %g is not dominant at the indentation of ω=%g: %w", far, a.w, errDelayLoopUnsupported)
 			}
 			if l.poleNear(a.w, 10*g) {
@@ -1482,7 +1515,10 @@ func (l *delayLoop) failed() bool {
 // a near-double lightly damped pair, where no cluster fits (hi <=
 // w0/clusterMargin); both passes then repeat with the origin as a further
 // candidate, whose verified disk may enclose the failure point and the poles.
-func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyquist, bool) {
+// So do they after a failed walk: from the indentation enclosing three
+// lightly damped pairs at 1.25e-5..1.28e-5 the walk exceeds its budget, and
+// only the disk at the origin around all six poles verifies.
+func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist, failed bool) (delayNyquist, bool) {
 	ws, required := l.clusterCandidates(base)
 	if len(ws) == 0 {
 		return delayNyquist{}, false
@@ -1498,7 +1534,7 @@ func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyqui
 			return res, true
 		}
 	}
-	if base.axisRoot && base.axisW > 0 && !slices.Contains(ws, 0) {
+	if (failed || base.axisRoot && base.axisW > 0) && !slices.Contains(ws, 0) {
 		ws, required = append([]float64{0}, ws...), append([]bool{false}, required...)
 		for _, dd := range []bool{false, true} {
 			if res, ok := l.clusterAttempt(R, w1, slices.Clone(ws), slices.Clone(required), dd); ok {
