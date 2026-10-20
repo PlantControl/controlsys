@@ -2019,6 +2019,32 @@ func TestMaxSingularValueMatchesSVD(t *testing.T) {
 	}
 }
 
+// TestHinfNorm_BadlyScaledIOMatchesExactOracle (5YUZIK): models with
+// ‖C‖ ≈ 1e-6·‖B‖ and poles spread over up to 13 decades. Their crossings
+// were lost in the rounding of the pencil's x–z coupling, so the probe above
+// a coarse sample certified it: 30% low on a 1e-8 rad/s resonance next to a
+// pole at −1e4, 1e-3 and 6e-5 low on broad maxima.
+func TestHinfNorm_BadlyScaledIOMatchesExactOracle(t *testing.T) {
+	slow := fzSeed{N: 3, M: 1, P: 1, Mag: [3]float64{-8, 4}, Damp: [3]float64{2.5, 1}, Shear: -10, Rot: 0.37,
+		In: fzNoDelay, Out: fzNoDelay, IO: fzNoDelay, Tau: fzNoDelay}
+	slowDisc := slow
+	slowDisc.Discrete, slowDisc.LogDt, slowDisc.Mag[0] = true, -4, -4
+	ks, vs := slow.encode()
+	kd, vd := slowDisc.encode()
+	for _, tc := range []struct {
+		name string
+		s    *fzSpec
+	}{
+		{"slow resonance", fzDecode(t, ks, vs)},
+		{"slow resonance discrete", fzDecode(t, kd, vd)},
+		{"broad maximum", fzDecode(t, 0xc0, [fzNVals]float64{61, 0, 0.3, 0, -0.2, 0, 0, 0, 0, 0.05555555555555555, 80.5, -29, -0.20833333333333334, -10, -35, -86})},
+		{"broad maximum n=6", fzDecode(t, 0xc0, [fzNVals]float64{0, 0, 2.6999999999999997, 0, -0.2, 0, 0, 0, 21, -7.5, 2.5, -56, -10, -10, -10, -10})},
+	} {
+		sys := tc.s.System(t, fzSysOpts{})
+		assertHinfNormMatchesOracle(t, tc.name, sys, func(w float64) float64 { return exactSigmaMax(sys, w) })
+	}
+}
+
 func maxSVDense(D *mat.Dense, _, _ int) float64 {
 	sv, err := maxSingularValue(D)
 	if err != nil {
