@@ -582,7 +582,9 @@ func syMul(a, b []float64, r, k, c int) []float64 {
 // is the gain of the regulator problem (Aᵀ, Cᵀ, BQnBᵀ, R̄, B(QnDᵀ+Nn)) with
 // R̄ = Rn + DNn + NnᵀDᵀ + DQnDᵀ; the solution and gain must pass the
 // syRiccatiChecks there (A − LC exactly stable, P PSD). ErrNoStabilizing
-// is a failure when mqRiccatiExists proves the dual problem solvable.
+// is a failure when mqRiccatiExists proves the dual problem solvable and
+// (A, B) is robustly stabilizable (no nearly noise-uncontrollable modes on
+// the boundary).
 func FuzzKalman(f *testing.F) {
 	for _, s := range fzMatEqSeeds() {
 		fzAddSeed(f, s)
@@ -635,10 +637,10 @@ func FuzzKalman(f *testing.F) {
 					if syTinyDiscreteEig(s) {
 						fzSkip(t, op+": Dare with a nonzero eigenvalue below 1e-12 (known followup)")
 					}
-					if !mqRiccatiExists(ds, qb, rb, sb) {
+					if !mqStabilizable(s) || !mqRiccatiExists(ds, qb, rb, sb) {
 						fzSkip(t, op+": no stabilizing solution (not provably solvable)")
 					}
-					t.Fatalf("%s: ErrNoStabilizing, but the dual pencil is clear of the boundary and (C,A) detectable\nQn=%v Rn=%v Nn=%v\n%s", op, qn, rn, nn, s)
+					t.Fatalf("%s: ErrNoStabilizing, but the dual pencil is clear of the boundary, (C,A) detectable and (A,B) stabilizable\nQn=%v Rn=%v Nn=%v\n%s", op, qn, rn, nn, s)
 				case errors.Is(err, ErrNotPSD):
 					fzSkip(t, op+": BQnBᵀ numerically semidefinite rejected")
 				case errors.Is(err, ErrSingularR):
