@@ -225,6 +225,20 @@ func (*pidNonfiniteResponse) Unwrap() error { return ErrInvalidArgument }
 // |L| ≈ 1 where the delay phase passes −180° or the lead fades.
 const pidTuningMaxSensitivity = 4
 
+// pidSBound selects how TunePID's search bounds |S| by
+// pidTuningMaxSensitivity.
+type pidSBound int
+
+const (
+	pidSFree pidSBound = iota
+	// pidSSearch rejects every candidate over the bound.
+	pidSSearch
+	// pidSCheck searches unbounded and, when the design exceeds the bound,
+	// searches again as pidSSearch: the unbounded search is cheaper and
+	// keeps every design within the bound.
+	pidSCheck
+)
+
 // pidTuningDCSign returns the sign of the DC gain of a stable plant, or 0
 // when the plant is not known to be stable, Pidtune recognises an
 // integrator, or its DC gain is zero relative to the peak of |G| sampled
@@ -786,11 +800,11 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // unknown gain sign, of either sign·G); this is how an unstable or
 // integrating plant needing lead at its own crossover gets a PI design that
 // still meets PM±3°, where Pidtune keeps the crossover and gives up margin.
-// A default design on a delayed
-// plant, or at a moved crossover, must keep |S| <= 4 (2.5 dB gain margin)
-// at every sampled frequency, since a margin met at the crossover alone does
-// not bound it there; for a continuous plant without internal delays the
-// samples run past 100·wc until a Markov-parameter bound gives |L| <= ¾. Only when neither the default nor the moved crossovers
+// A default or moved-crossover design must keep |S| <= 4 (2.5 dB gain
+// margin) at every sampled frequency, since a margin met at the crossover
+// alone does not bound it there; an undelayed plant's default design is
+// searched unbounded first and under the bound only when it exceeds it.
+// For a continuous plant without internal delays the samples run past 100·wc until a Markov-parameter bound gives |L| <= ¾. Only when neither the default nor the moved crossovers
 // meet PM±3° does the margin become a floor at the original crossover, as in
 // pidtune: the design takes the nearest feasible 6° band above PM, with
 // PM−3° at every crossover over the plant's dynamics. Bands whose phase is
@@ -904,14 +918,15 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// resolveFloor raises an explicit crossover's band floor off samples
 	// the solve cannot resolve.
 	used, minHigh, sRejected, probing, resolveFloor := 0, 0., false, false, false
-	tuneAt := func(wc, gainSign float64, robust, floor bool) (*PIDTuningResult, error) {
+	var tuneAt func(wc, gainSign float64, bound pidSBound, floor bool) (*PIDTuningResult, error)
+	tuneAt = func(wc, gainSign float64, bound pidSBound, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency, fellBack = wc, false
 		low := wc / 100
 		if resolveFloor {
 			low = pidTuningResolvedFloor(tryResp, low, wc)
 		}
 		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
-		if robust {
+		if bound == pidSSearch {
 			p.maxSensitivity = pidTuningMaxSensitivity
 			p.loopTail = loopTail()
 		}
@@ -991,6 +1006,12 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		} else if err == nil {
 			used += res.Evidence.Evaluations
 		}
+		if bound == pidSCheck && err == nil {
+			p.maxSensitivity, p.loopTail = pidTuningMaxSensitivity, loopTail()
+			if pidTuningSensitivityPeak(p, *res.Controller) > pidTuningMaxSensitivity {
+				return tuneAt(wc, gainSign, pidSSearch, floor)
+			}
+		}
 		return res, err
 	}
 	// evalFailed clears an evaluation failure off wc0, as near rounded
@@ -1023,12 +1044,21 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return res, err
 	}
 	// The ±3° band is tried first; failing that, the margin is a floor.
-	withFloor := func(wc, gainSign float64, robust bool, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
+	withFloor := func(wc, gainSign float64, bound pidSBound, res *PIDTuningResult, err error) (*PIDTuningResult, error) {
 		if !errors.As(err, new(*PIDTuningError)) {
 			return stamp(res, err)
 		}
-		r, e := tuneAt(wc, gainSign, robust, true)
-		if errors.As(e, new(*PIDTuningError)) {
+		r, e := tuneAt(wc, gainSign, bound, true)
+		if fe, ok := errors.AsType[*PIDTuningError](e); ok {
+			// A floor design rejected over the |S| bound says why the
+			// target failed, so its warning is kept.
+			if te, ok := errors.AsType[*PIDTuningError](err); ok && fe.excess > 0 {
+				for _, w := range fe.Evidence.Warnings {
+					if strings.Contains(w, "sensitivity peak") && !slices.Contains(te.Evidence.Warnings, w) {
+						te.Evidence.Warnings = append(te.Evidence.Warnings, w)
+					}
+				}
+			}
 			return stamp(res, err)
 		}
 		return stamp(r, e)
@@ -1076,7 +1106,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 					continue
 				}
 				opts.MaxEvaluations = budget - (used - start)
-				r, e := tuneAt(at(j), gainSign, true, floor)
+				r, e := tuneAt(at(j), gainSign, pidSSearch, floor)
 				if skipped(e) {
 					blind = true
 					continue
@@ -1155,8 +1185,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		for _, m := range modes() {
 			minHigh = math.Max(minHigh, 10*imag(m))
 		}
-		res, err := tuneAt(wc0, gainSign, true, false)
-		res, err = withFloor(wc0, gainSign, true, res, err)
+		res, err := tuneAt(wc0, gainSign, pidSSearch, false)
+		res, err = withFloor(wc0, gainSign, pidSSearch, res, err)
 		if !errors.As(err, new(*PIDTuningError)) {
 			return res, err
 		}
@@ -1186,7 +1216,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			if evalFailed() || !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
 				continue
 			}
-			r, e := tuneAt(wc, gainSign, true, false)
+			r, e := tuneAt(wc, gainSign, pidSSearch, false)
 			if skipped(e) {
 				continue
 			}
@@ -1221,7 +1251,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				}
 				hiTried, loTried = math.Max(hiTried, wc), wc
 				opts.MaxEvaluations = budget - (used - start)
-				r, e := tuneAt(wc, gainSign, true, false)
+				r, e := tuneAt(wc, gainSign, pidSSearch, false)
 				if skipped(e) {
 					continue
 				}
@@ -1253,7 +1283,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			wc := wc0 * math.Pow(2, -float64(j)/2)
 			lowest = wc
 			opts.MaxEvaluations = budget - (used - start)
-			r, e := tuneAt(wc, gainSign, true, false)
+			r, e := tuneAt(wc, gainSign, pidSSearch, false)
 			if skipped(e) {
 				continue
 			}
@@ -1274,7 +1304,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	zero, blocked := pidTuningIntegralZero(screen.model, fam)
 	// integralBlocked tunes once at wc, as the full search finds nothing.
 	integralBlocked := func(wc, gainSign float64) (*PIDTuningResult, error) {
-		res, err := tuneAt(wc, gainSign, false, false)
+		res, err := tuneAt(wc, gainSign, pidSFree, false)
 		if te, ok := errors.AsType[*PIDTuningError](err); ok {
 			te.Evidence.Warnings = append(te.Evidence.Warnings, fmt.Sprintf("Plant zero %.4g is within the stability tolerance of s = 0: every %s loop keeps a closed-loop pole between it and 0, so none is certified stable.", zero, fam))
 		}
@@ -1286,8 +1316,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			return integralBlocked(wc, gainSign)
 		}
 		resolveFloor = true
-		res, err := tuneAt(wc, gainSign, false, false)
-		return withFloor(wc, gainSign, false, res, err)
+		res, err := tuneAt(wc, gainSign, pidSFree, false)
+		return withFloor(wc, gainSign, pidSFree, res, err)
 	}
 	pm := opts.PhaseMargin
 	if pm <= 0 || pm >= 180 || !finitePID(pm) {
@@ -1304,9 +1334,13 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if (fam == PidtuneP || fam == PidtuneI) && opts.PhaseMargin == 0 {
 		return tuneOneGain(wc0, gainSign, pm)
 	}
-	res, err := tuneAt(wc0, gainSign, tau > 0, false)
+	defaultBound := pidSSearch
+	if tau == 0 {
+		defaultBound = pidSCheck
+	}
+	res, err := tuneAt(wc0, gainSign, defaultBound, false)
 	if _, hasI, _, _, _ := pidTuningTerms(fam); hasI && fam != PidtuneI && gainSign != 0 && tau > 0 {
-		res, err = withFloor(wc0, gainSign, true, res, err)
+		res, err = withFloor(wc0, gainSign, pidSSearch, res, err)
 		if !errors.As(err, new(*PIDTuningError)) {
 			return res, err
 		}
@@ -1319,7 +1353,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return backOff(wc0, gainSign, pm, res, err)
 	}
 	if fam == PidtunePI {
-		res, err = withFloor(wc0, gainSign, tau > 0, res, err)
+		res, err = withFloor(wc0, gainSign, defaultBound, res, err)
 		if !errors.As(err, new(*PIDTuningError)) {
 			return res, err
 		}
@@ -1340,7 +1374,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				if evalFailed() || !ok || math.Abs(math.Log(wc/wc0)) < 1e-9 {
 					continue
 				}
-				r, e := tuneAt(wc, gainSign, true, false)
+				r, e := tuneAt(wc, gainSign, pidSSearch, false)
 				if skipped(e) {
 					continue
 				}
@@ -1369,7 +1403,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return backOff(wc0, gainSign, pm, res, err)
 	}
 	if gainSign == 0 || fam != PidtunePD && fam != PidtunePDF || !errors.As(err, new(*PIDTuningError)) {
-		return undelayed(withFloor(wc0, gainSign, tau > 0, res, err))
+		return undelayed(withFloor(wc0, gainSign, defaultBound, res, err))
 	}
 	// Same-sign PD gains add lead in (0°, 90°) only, so retry where the
 	// plant phase leaves a moderate lead to supply.
@@ -1392,7 +1426,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			if resonant && !slices.ContainsFunc(modes(), func(m complex128) bool { return imag(m) > wc/2 && imag(m) < wc*2 }) {
 				continue
 			}
-			r, e := tuneAt(wc, gainSign, true, false)
+			r, e := tuneAt(wc, gainSign, pidSSearch, false)
 			if skipped(e) {
 				continue
 			}
@@ -1417,7 +1451,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if r, e := move(false, 15, 30, 45, 60); r != nil || e != nil {
 		return r, e
 	}
-	res, err = withFloor(wc0, gainSign, tau > 0, res, err)
+	res, err = withFloor(wc0, gainSign, defaultBound, res, err)
 	if !errors.As(err, new(*PIDTuningError)) {
 		return res, err
 	}
