@@ -558,7 +558,10 @@ func FuzzDiskMargin(f *testing.F) {
 		w, ok = dm.PeakFreq()
 		l.checkPeak(t, "|S|", dm.PeakSensitivity, w, ok, 0, ctx)
 		a := dm.Alpha
-		lo, hi := max((2-a)/(2+a), 0), math.Inf(1)
+		lo, hi := 0.0, math.Inf(1)
+		if !math.IsInf(a, 1) {
+			lo = max((2-a)/(2+a), 0)
+		}
 		if a < 2 {
 			hi = (2 + a) / (2 - a)
 		}

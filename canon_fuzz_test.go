@@ -8,8 +8,45 @@ import (
 	"slices"
 	"testing"
 
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
+
+// fzBalancedBasis returns ‖Ab‖_F and κ(W) for the dgebal balancing
+// Ab = D⁻¹PᵀAPD that eig applies before computing eigenvectors: with
+// V = T⁻¹ and W = D⁻¹PᵀV, T·A·T⁻¹ = W⁻¹·Ab·W, so the eigensolver's
+// backward error (small relative to Ab) reaches Ac scaled by κ(W), not κ(T).
+func fzBalancedBasis(a []float64, n int, T *mat.Dense) (normAb, condW float64) {
+	ab := slices.Clone(a)
+	sc := make([]float64, n)
+	ilo, ihi := impl.Dgebal(lapack.PermuteScale, n, ab, n, sc)
+	var V mat.Dense
+	if err := V.Inverse(T); err != nil {
+		return fzFrob(ab), math.Inf(1)
+	}
+	w := V.RawMatrix()
+	swap := func(i int) {
+		if k := int(sc[i]); k != i {
+			for j := range n {
+				w.Data[i*w.Stride+j], w.Data[k*w.Stride+j] = w.Data[k*w.Stride+j], w.Data[i*w.Stride+j]
+			}
+		}
+	}
+	for i := n - 1; i > ihi; i-- {
+		swap(i)
+	}
+	for i := range ilo {
+		swap(i)
+	}
+	if ilo != ihi {
+		for i := ilo; i <= ihi; i++ {
+			for j := range n {
+				w.Data[i*w.Stride+j] /= sc[i]
+			}
+		}
+	}
+	return fzFrob(ab), mat.Cond(&V, 2)
+}
 
 // fzCheckSimilar checks xc = T·x: T·A ≈ Ac·T, Bc ≈ T·B, Cc·T ≈ C within
 // a backward bound scaled by cond(T), and D unchanged; it returns cond(T).
@@ -109,7 +146,8 @@ func FuzzCanon(f *testing.F) {
 		condT := fzCheckSimilar(t, s, "Canon modal", res.T, res.Sys)
 		ac := fzDenseData(res.Sys.A)
 		normA := fzFrob(s.A) + fzFrob(ac)
-		tol := 1e4 * float64(n) * eps * condT * normA
+		normAb, condW := fzBalancedBasis(s.A, n, res.T)
+		tol := 1e4 * float64(n) * eps * math.Max(condT*normA, condW*(normAb+fzFrob(ac)))
 		for i, a := range s.Eig {
 			for _, b := range s.Eig[i+1:] {
 				if cmplx.Abs(a-b) <= 2*s.EigErr() {
