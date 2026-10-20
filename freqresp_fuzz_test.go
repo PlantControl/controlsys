@@ -241,13 +241,15 @@ func fzFRFreqs(s *fzSpec) []float64 {
 // slack[e] adds rounding of the delay phase.
 func fzFRCheck(t *testing.T, s *fzSpec, op string, w float64, got, want []complex128, beta []float64, cond float64, slack []float64) {
 	t.Helper()
-	fzFRCheckKnown(t, s, op, w, got, want, beta, cond, slack, nil, "")
+	fzFRCheckKnown(t, s, op, w, got, want, beta, cond, slack, nil)
 }
 
-// fzFRCheckKnown is fzFRCheck where a finite miss within tolerance plus
-// known[e] is the documented defect reason, a counted skip.
-func fzFRCheckKnown(t *testing.T, s *fzSpec, op string, w float64, got, want []complex128, beta []float64, cond float64, slack, known []float64, reason string) {
+// fzFRCheckKnown is fzFRCheck that reports whether a finite miss fell within
+// tolerance plus known[e], a documented defect the caller counts as a skip
+// after checking its remaining points.
+func fzFRCheckKnown(t *testing.T, s *fzSpec, op string, w float64, got, want []complex128, beta []float64, cond float64, slack, known []float64) bool {
 	t.Helper()
+	hit := false
 	for e, g := range got {
 		if cmplx.IsNaN(g) {
 			t.Fatalf("%s at ω=%g: [%d] = NaN\n%s", op, w, e, s)
@@ -273,12 +275,18 @@ func fzFRCheckKnown(t *testing.T, s *fzSpec, op string, w float64, got, want []c
 			continue
 		}
 		if d := cmplx.Abs(g - h); !(d <= tol) {
-			if known != nil && d <= tol+known[e] {
-				fzSkip(t, reason)
+			kn := 0.0
+			if known != nil {
+				kn = known[e]
 			}
-			t.Fatalf("%s at ω=%g: [%d] = %v, exact %v (|Δ| %.3g, bound %.3g, rel %.3g, cond %.3g)\n%s", op, w, e, g, h, d, tol, d/cmplx.Abs(h), cond, s)
+			if d <= tol+kn {
+				hit = true
+				continue
+			}
+			t.Fatalf("%s at ω=%g: [%d] = %v, exact %v (|Δ| %.3g, bound %.3g, known %.3g, rel %.3g, cond %.3g)\n%s", op, w, e, g, h, d, tol, kn, d/cmplx.Abs(h), cond, s)
 		}
 	}
+	return hit
 }
 
 // fzFRPointData is the oracle at one frequency.
