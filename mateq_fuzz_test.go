@@ -733,6 +733,22 @@ func mqRiccatiSep(s *fzSpec, acl, q, r []float64) (sep, h float64) {
 	return math.Max(0, 2*margin/h), h
 }
 
+// mqRiccatiGainCond returns 64·eps·cond₂(R̄), R̄ = R + BᵀXB (discrete) or
+// R: the rounding of the residual's R̄⁻¹ term, and the data sensitivity of
+// X through G = BR⁻¹Bᵀ, both relative to the residual scale.
+func mqRiccatiGainCond(s *fzSpec, r, x []float64) float64 {
+	n, m := s.N, s.M
+	rbar := mqDense(m, m, r)
+	if s.Discrete {
+		B := mqDense(n, m, s.B)
+		var bx, bxb mat.Dense
+		bx.Mul(B.T(), mqDense(n, n, x))
+		bxb.Mul(&bx, B)
+		rbar.Add(rbar, &bxb)
+	}
+	return 64 * 0x1p-52 * mat.Cond(rbar, 2)
+}
+
 // mqRiccatiSchurRelErr returns eps·ĥ/(sep·h/2), the relative accuracy of
 // the cost-scaled Schur method (Care/Dare rescale Q, R, S by about ‖X‖):
 // ĥ = max(‖A‖, ‖X‖·‖BR⁻¹Bᵀ‖, ‖Q‖/‖X‖) (at least 1 for discrete) is the
@@ -853,9 +869,7 @@ func FuzzRiccati(f *testing.F) {
 		if !(ke <= 1e-10*kden) {
 			t.Fatalf("%s: gain residual %.3g (scale %.3g)\nX=%v\nK=%v\n%s", op, ke, kden, x, k, s)
 		}
-		illR := mat.Cond(mqDense(m, m, r), 2) > 1e6
-		resFail := !(re <= math.Max(tol, mqRiccatiSchurRelErr(s, ad, q, r, x))*rden)
-		if resFail && !illR {
+		if !(re <= math.Max(math.Max(tol, mqRiccatiGainCond(s, r, x)), mqRiccatiSchurRelErr(s, ad, q, r, x))*rden) {
 			t.Fatalf("%s: Riccati residual %.3g (scale %.3g, rcnd %.3g)\nX=%v\nK=%v\n%s", op, re, rden, res.Rcnd, x, k, s)
 		}
 		cp := fzCharPolyExact(ad, n)
@@ -891,23 +905,13 @@ func FuzzRiccati(f *testing.F) {
 			nb := mqFro(s.B)
 			hs = mqFro(q) + nb*nb/rr
 		}
-		const illRMsg = ": R ill-conditioned, extended pencil loses digits (known followup)"
 		if d := cmplx.Abs(tr - complex(trA, 0)); !(d <= 1e-6*float64(n)*(mqFro(s.A)+mqFro(mqRaw(&bk))+1e-6*hs)) {
-			if illR {
-				fzSkip(t, op+illRMsg)
-			}
 			t.Fatalf("%s: Σ Eig = %v, trace(A−BK) = %v\nEig=%v\n%s", op, tr, trA, res.Eig, s)
 		}
 		if jointPSD {
 			if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, mqRiccatiSchurRelErr(s, ad, q, r, x))*mqFro(x)) {
-				if illR {
-					fzSkip(t, op+illRMsg)
-				}
 				t.Fatalf("%s: PSD cost but min eig(X) = %.3g\nX=%v\n%s", op, me, x, s)
 			}
-		}
-		if resFail {
-			fzSkip(t, op+illRMsg)
 		}
 	})
 }

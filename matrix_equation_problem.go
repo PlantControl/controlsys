@@ -25,6 +25,9 @@ type riccatiProblem struct {
 	costScaling bool
 	balanced    bool
 	sigma       float64
+	// rescueErr is the error of a failed first pencil solve that
+	// pencilSolution rescued.
+	rescueErr error
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
