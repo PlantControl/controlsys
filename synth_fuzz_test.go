@@ -414,27 +414,6 @@ func syNormC(s *fzSpec) *fzSpec {
 	return &d
 }
 
-// syTinyDiscreteEig reports a discrete spec with a nonzero eigenvalue
-// below 1e-12·max(1, ‖J‖), on which Dare wrongly reports ErrNoStabilizing
-// (e.g. Dare(3e-17, -0.92, 1, 1)); filed as a followup.
-func syTinyDiscreteEig(s *fzSpec) bool { return syNearZeroDiscreteEig(s, 1e-12) }
-
-// syNearZeroDiscreteEig reports a discrete spec with a nonzero eigenvalue
-// below rel·max(1, ‖J‖): Dare then also loses about seven digits on
-// well-conditioned problems (|λ| ≈ 3e-6, Hewer–Lyapunov condition 21);
-// filed with the ErrNoStabilizing followup.
-func syNearZeroDiscreteEig(s *fzSpec, rel float64) bool {
-	if !s.Discrete {
-		return false
-	}
-	for _, e := range s.Eig {
-		if e != 0 && cmplx.Abs(e) < rel*math.Max(1, s.NormJ) {
-			return true
-		}
-	}
-	return false
-}
-
 // syNearUnitPole reports a discrete spec with a pole within 1e-12 of, but
 // not at, z = ±1, on which HinfSyn wrongly reports a rank-deficient
 // P21(z = 1); filed as a followup.
@@ -463,8 +442,8 @@ func syDual(s *fzSpec) *fzSpec {
 // syRiccatiChecks verifies a returned Riccati solution x and gain k of the
 // regulator problem (s.A, s.B, q, r, sm) as FuzzRiccati does: symmetric,
 // gain and Riccati residuals to rounding (mqRiccatiTol widened tenfold for
-// the rounding of the assembled Q̄, R̄, S and by the Q̄ cancellation
-// ratio), exactly stable A − BK and, for a PSD joint cost, PSD x.
+// the rounding of the assembled Q̄, R̄, S), exactly stable A − BK and, for
+// a PSD joint cost, PSD x.
 func syRiccatiChecks(t *testing.T, s *fzSpec, op string, q, r, sm, x, k []float64, rcnd float64, jointPSD bool) {
 	t.Helper()
 	n, m := s.N, s.M
@@ -477,67 +456,19 @@ func syRiccatiChecks(t *testing.T, s *fzSpec, op string, q, r, sm, x, k []float6
 	if tol > 1e-4 {
 		fzSkip(t, op+": ill-conditioned stable subspace")
 	}
-	if !syQbarDigits(q, r, sm, n, m) {
-		syRequireStableRat(t, s, op, acl, n, s.Discrete, fmt.Sprintf("X=%v K=%v", x, k))
-		fzSkip(t, op+": Q − SR⁻¹Sᵀ keeps under six digits; residual checks below rounding")
-	}
 	ke, kden, re, rden := mqRiccatiResiduals(s, q, r, sm, x, k)
 	if !(ke <= 1e-10*kden) {
 		t.Fatalf("%s: gain residual %.3g (scale %.3g)\nX=%v\nK=%v\n%s", op, ke, kden, x, k, s)
 	}
-	if !(re <= 10*tol*syQbarRatio(q, r, sm, n, m)*rden) {
-		if syNearZeroDiscreteEig(s, 1e-4) {
-			fzSkip(t, op+": Dare residual with a nonzero eigenvalue below 1e-4 (known followup)")
-		}
+	if !(re <= 10*tol*rden) {
 		t.Fatalf("%s: Riccati residual %.3g (scale %.3g, rcnd %.3g)\nX=%v\nK=%v\n%s", op, re, rden, rcnd, x, k, s)
 	}
 	syRequireStableRat(t, s, op, acl, n, s.Discrete, fmt.Sprintf("X=%v K=%v", x, k))
 	if jointPSD {
-		if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, 1e3*tol*syQbarRatio(q, r, sm, n, m))*mqFro(x)) {
+		if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, 1e3*tol)*mqFro(x)) {
 			t.Fatalf("%s: PSD cost but min eig(X) = %.3g\nX=%v\n%s", op, me, x, s)
 		}
 	}
-}
-
-// syQbarDigits reports whether Q − S·R⁻¹·Sᵀ keeps more than six digits
-// after cancellation (eps·cond(R)·‖SR⁻¹Sᵀ‖ ≤ 1e-6·‖Q − SR⁻¹Sᵀ‖) and
-// cancels at most three (Care then loses digits beyond its conditioning:
-// known followup); otherwise the
-// solution is accurate only relative to ‖SR⁻¹Sᵀ‖, so its residual and
-// sign structure at its own scale are below rounding.
-// syQbarRatio is max(1, ‖SR⁻¹Sᵀ‖/‖Q − SR⁻¹Sᵀ‖), the amplification of
-// data rounding by the cancellation in Q̄ (1 without S).
-func syQbarRatio(q, r, sm []float64, n, m int) float64 {
-	if sm == nil {
-		return 1
-	}
-	var ri mat.Dense
-	if err := ri.Inverse(mqDense(m, m, r)); err != nil {
-		return math.Inf(1)
-	}
-	srs := syMul(syMul(sm, mqRaw(&ri), n, m, m), mqTranspose(sm, n, m), n, m, n)
-	qb := make([]float64, n*n)
-	for i := range qb {
-		qb[i] = q[i] - srs[i]
-	}
-	return math.Max(1, mqFro(srs)/mqFro(qb))
-}
-
-func syQbarDigits(q, r, sm []float64, n, m int) bool {
-	if sm == nil {
-		return true
-	}
-	var ri mat.Dense
-	if err := ri.Inverse(mqDense(m, m, r)); err != nil {
-		return false
-	}
-	srs := syMul(syMul(sm, mqRaw(&ri), n, m, m), mqTranspose(sm, n, m), n, m, n)
-	qb := make([]float64, n*n)
-	for i := range qb {
-		qb[i] = q[i] - srs[i]
-	}
-	nq := mqFro(qb)
-	return 0x1p-52*mat.Cond(mqDense(m, m, r), 2)*mqFro(srs) <= 1e-6*nq && mqFro(srs) <= 1e3*nq
 }
 
 // syNoise returns Qn = q·I (m×m), Rn = r·I (p×p) with q, r = 10^clamp(v,-3,3)
@@ -634,9 +565,6 @@ func FuzzKalman(f *testing.F) {
 			if err != nil {
 				switch {
 				case errors.Is(err, ErrNoStabilizing):
-					if syTinyDiscreteEig(s) {
-						fzSkip(t, op+": Dare with a nonzero eigenvalue below 1e-12 (known followup)")
-					}
 					if !mqStabilizable(s) || !mqRiccatiExists(ds, qb, rb, sb) {
 						fzSkip(t, op+": no stabilizing solution (not provably solvable)")
 					}
@@ -1022,9 +950,6 @@ func FuzzH2Syn(f *testing.F) {
 		fzContract(t, s, "H2Syn", res != nil, err)
 		solvable := syRegSolvable(s)
 		if err != nil {
-			if errors.Is(err, ErrNoStabilizing) && syTinyDiscreteEig(s) {
-				fzSkip(t, "H2Syn: Dare with a nonzero eigenvalue below 1e-12 (known followup)")
-			}
 			if solvable {
 				t.Fatalf("H2Syn: %v on a robustly stabilizable and detectable plant (ρ=%g σ=%g)\n%s", err, rho, sig, s)
 			}
@@ -1178,9 +1103,6 @@ func FuzzLqg(f *testing.F) {
 		res, err := Lqg(s.System(t, fzSysOpts{}), mqDense(n+m, n+m, blk(qx, ru, n, m)), mqDense(n+p, n+p, blk(qw, rv, n, p)), &LqgOpts{Current: current})
 		fzContract(t, s, "Lqg", res != nil, err)
 		if err != nil {
-			if errors.Is(err, ErrNoStabilizing) && syTinyDiscreteEig(s) {
-				fzSkip(t, "Lqg: Dare with a nonzero eigenvalue below 1e-12 (known followup)")
-			}
 			if !errors.Is(err, ErrAlgebraicLoop) && mqRiccatiExists(s, qx, ru, nil) && mqRiccatiExists(syDual(s), qw, rv, nil) {
 				t.Fatalf("Lqg: %v with both Riccati problems provably solvable\n%s", err, s)
 			}
@@ -1376,9 +1298,6 @@ func FuzzMixsyn(f *testing.F) {
 		res, err := Mixsyn(s.System(t, fzSysOpts{}), W1, W2, W3)
 		fzContract(t, s, "Mixsyn", res != nil, err)
 		solvable := syRegSolvable(s) && syClear(s, 1e-4) && !syNumericallySingularD(s) && !syUnstableWithRHPZeros(s)
-		if s.Discrete && 1-aw < 1e-6 {
-			solvable = false // known followup: slow discrete W1 pole fails on non-square or singular G
-		}
 		if err != nil {
 			if solvable {
 				t.Fatalf("Mixsyn: %v on a robustly stabilizable and detectable G with no boundary poles (W1 a=%g c=%g d=%g, ρ=%g, W3=%g)\n%s", err, aw, cw, dw, rho, w3, s)

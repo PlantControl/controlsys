@@ -355,6 +355,12 @@ func fzMgCheckBandwidth(t *testing.T, l *fzMgLoop, sys *System, dbDrop float64, 
 		if err == nil && multiInt {
 			fzSkip(t, "Bandwidth: exact DC 0/∞ beside an integrator cluster")
 		}
+		if num.Sign() == 0 {
+			if err != nil || !math.IsInf(bw, 1) {
+				t.Fatalf("Bandwidth = %v, %v for DC gain 0, want +Inf\n%s", bw, err, ctx)
+			}
+			return
+		}
 		if !errors.Is(err, ErrInvalidArgument) {
 			t.Fatalf("Bandwidth = %v, %v for DC gain %v/%v, want ErrInvalidArgument\n%s", bw, err, num, den, ctx)
 		}
@@ -397,8 +403,8 @@ func fzMgCheckBandwidth(t *testing.T, l *fzMgLoop, sys *System, dbDrop float64, 
 }
 
 // FuzzBandwidth: Bandwidth is the first robust exact crossing of the DC gain
-// lowered by dbDrop (v[15]; −3 dB below −3), +Inf when there is none, and
-// ErrInvalidArgument for an exact DC gain of 0 or ∞.
+// lowered by dbDrop (v[15]; −3 dB below −3), +Inf when there is none or the
+// exact DC gain is 0, and ErrInvalidArgument for an exact DC gain of ∞.
 func FuzzBandwidth(f *testing.F) {
 	for _, s := range fzMgSeeds() {
 		fzAddSeed(f, s)

@@ -251,6 +251,18 @@ func fohInputIntegrals(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Den
 	return ad, gamma0, gamma1
 }
 
+// d2cZOHFastMaxAmplification bounds ‖(Ad−I)⁻¹‖·max(1,‖Ad‖), the factor by
+// which the fast path's absolute log(Ad) rounding (≈ eps·‖Ad‖) is amplified
+// in Bc = (Ad−I)⁻¹·log(Ad)·Bd; beyond it the augmented logarithm is used.
+const d2cZOHFastMaxAmplification = 1e6
+
+func zohUnitAmplification(cond, gapNorm, adNorm float64) float64 {
+	if gapNorm == 0 {
+		return math.Inf(1)
+	}
+	return cond / gapNorm * math.Max(1, adNorm)
+}
+
 func (sys *System) d2cZOHFast() (*System, error) {
 	n, m, _ := sys.Dims()
 	var lu mat.LU
@@ -260,8 +272,10 @@ func (sys *System) d2cZOHFast() (*System, error) {
 		for i := range n {
 			raw.Data[i*raw.Stride+i] -= 1
 		}
+		gapNorm := mat.Norm(minus, 1)
 		lu.Factorize(minus)
-		if luNearSingular(&lu) {
+		cond := lu.Cond()
+		if nearSingularCondition(cond) || zohUnitAmplification(cond, gapNorm, mat.Norm(sys.A, 1)) > d2cZOHFastMaxAmplification {
 			return nil, ErrSingularTransform
 		}
 	}

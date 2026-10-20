@@ -824,7 +824,8 @@ func TestBandwidth_MIMO(t *testing.T) {
 	}
 }
 
-// Bandwidth with integrator (no DC gain) should return 0
+// Bandwidth of an integrator (infinite DC gain) is undefined (error, not a
+// NaN/Inf placeholder); zero DC gain is +Inf.
 func TestBandwidth_Integrator(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(1, 1, []float64{0}),
@@ -840,8 +841,30 @@ func TestBandwidth_Integrator(t *testing.T) {
 	}
 	zero := makeSISO(-1, 1, 1, 0)
 	zero.C.Set(0, 0, 0)
-	if bw, err := Bandwidth(zero, 0); !errors.Is(err, ErrInvalidArgument) {
-		t.Errorf("zero-gain bandwidth = %v, %v; want ErrInvalidArgument", bw, err)
+	if bw, err := Bandwidth(zero, 0); err != nil || !math.IsInf(bw, 1) {
+		t.Errorf("zero-gain bandwidth = %v, %v; want +Inf", bw, err)
+	}
+	q := ergoOffOriginLoop
+	if bw, err := Bandwidth(makePlant(t, q.num, q.den), -3); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("double-integrator loop bandwidth = %v, %v; want ErrInvalidArgument (infinite DC gain)", bw, err)
+	}
+}
+
+// TestBandwidth_ZeroDCGain (Z53QQM): a zero DC gain puts the threshold at 0,
+// which the gain never drops below, so MATLAB bandwidth returns Inf (MATLAB
+// Answers 1463799: H = 0.05(1−z)/(1−0.9z), Ts = 0.1, gives fb = Inf).
+func TestBandwidth_ZeroDCGain(t *testing.T) {
+	res, err := (&TransferFunc{Num: [][][]float64{{{-0.05, 0.05}}}, Den: [][]float64{{-0.9, 1}}, Dt: 0.1}).StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hp := res.Sys
+	if bw, err := Bandwidth(hp, -3); err != nil || !math.IsInf(bw, 1) {
+		t.Errorf("discrete high-pass bandwidth = %v, %v; want +Inf", bw, err)
+	}
+	d := makePlant(t, []float64{1, 0}, []float64{1, 2})
+	if bw, err := Bandwidth(d, -3); err != nil || !math.IsInf(bw, 1) {
+		t.Errorf("s/(s+2) bandwidth = %v, %v; want +Inf", bw, err)
 	}
 }
 

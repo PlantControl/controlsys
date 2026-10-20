@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/cmplx"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -113,8 +114,10 @@ type RiccatiOpts struct {
 	// until the next call that reuses the same workspace, and it must not be
 	// shared across goroutines.
 	Workspace *RiccatiWorkspace
-	// NoScaling disables the default power-of-two state scaling, as the
-	// MATLAB icare/idare 'noscaling' option.
+	// NoScaling disables the default power-of-two state and cost scaling,
+	// as the MATLAB icare/idare 'noscaling' option. A pencil solve (Dare,
+	// or Care with E) that fails, or leaves a Riccati residual above 1e-12
+	// of its terms, is still retried with cost scaling.
 	NoScaling bool
 }
 
@@ -128,8 +131,8 @@ type RiccatiResult struct {
 	Eig []complex128
 	// Rcnd is the reciprocal 1-norm condition estimate of U11, where
 	// [U11; U21] spans the stable invariant subspace and X = U21·U11⁻¹. A
-	// tiny Rcnd means X may be inaccurate. Unless opts.NoScaling is set, U11
-	// is that of the state-scaled problem.
+	// tiny Rcnd means X may be inaccurate. U11 is that of the state- and
+	// cost-scaled problem actually solved.
 	Rcnd float64
 }
 
@@ -189,8 +192,11 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // ErrInvalidArgument.
 //
 // As MATLAB icare, Care first balances the states by an exact power-of-two
-// diagonal scaling, so X, K and Eig do not depend on the units of x;
-// opts.NoScaling disables it.
+// diagonal scaling, so X, K and Eig do not depend on the units of x. When
+// ‖X‖ is far from the scale of the Hamiltonian (for example a cost Q, R
+// tiny against A), Care solves again with Q, R, S divided by a power of
+// two near ‖X‖, which keeps the relative accuracy of X. opts.NoScaling
+// disables both.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -277,48 +283,67 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		0, blas64.General{Rows: n, Cols: n, Data: g, Stride: n})
 	symmetrize(g, n, n)
 
-	// Form 2n×2n Hamiltonian: H = [[A, -G], [-Q, -A']]
 	nn := 2 * n
-	h := ws.h[:nn*nn]
-	for i := range n {
-		for j := range n {
-			h[i*nn+j] = aWork[i*n+j]
-			h[i*nn+n+j] = -g[i*n+j]
-			h[(n+i)*nn+j] = -qWork[i*n+j]
-			h[(n+i)*nn+n+j] = -aWork[j*n+i]
-		}
-	}
-
-	// Schur decomposition with sorting: Re(λ) < 0 to top-left
 	wr := ws.wr[:nn]
 	wi := ws.wi[:nn]
 	vs := ws.vs[:nn*nn]
 	bwork := ws.bwork[:nn]
-
 	selctg := func(wr, wi float64) bool { return wr < 0 }
+	var norms riccatiNorms
+	var prev *riccatiPass
+	var X *mat.Dense
+	var xData []float64
+	var rcnd float64
+	for {
+		// Hamiltonian of the cost-scaled problem: H = [[A, -σG], [-Q/σ, -A']]
+		sigma, isigma := problem.sigma, 1/problem.sigma
+		h := ws.h[:nn*nn]
+		for i := range n {
+			for j := range n {
+				h[i*nn+j] = aWork[i*n+j]
+				h[i*nn+n+j] = -sigma * g[i*n+j]
+				h[(n+i)*nn+j] = -isigma * qWork[i*n+j]
+				h[(n+i)*nn+n+j] = -aWork[j*n+i]
+			}
+		}
 
-	var workQuery [1]float64
-	impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
-		nn, h, nn, wr, wi, vs, nn, workQuery[:], -1, bwork)
-	lwork := int(workQuery[0])
-	work := ws.work
-	if len(work) < lwork {
-		work = make([]float64, lwork)
-		ws.work = work
-	}
-
-	sdim, ok := impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
-		nn, h, nn, wr, wi, vs, nn, work, lwork, bwork)
-	if !ok {
-		return nil, ErrSchurFailed
-	}
-	if sdim != n {
-		return nil, ErrNoStabilizing
-	}
-
-	X, xData, rcnd, err := problem.stabilizingSolution(vs)
-	if err != nil {
-		return nil, err
+		var workQuery [1]float64
+		impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
+			nn, h, nn, wr, wi, vs, nn, workQuery[:], -1, bwork)
+		lwork := int(workQuery[0])
+		if len(ws.work) < lwork {
+			ws.work = make([]float64, lwork)
+		}
+		sdim, ok := impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
+			nn, h, nn, wr, wi, vs, nn, ws.work, lwork, bwork)
+		err := ErrSchurFailed
+		if ok {
+			err = ErrNoStabilizing
+			if sdim == n {
+				X, xData, rcnd, err = problem.stabilizingSolution(vs)
+			}
+		}
+		if err != nil || (prev != nil && !finiteSlice(xData)) {
+			if prev == nil {
+				return nil, err
+			}
+			X, xData, rcnd = problem.restorePass(prev)
+			break
+		}
+		if prev == nil && problem.costScaling {
+			norms = riccatiNorms{
+				a:     impl.Dlange(lapack.Frobenius, n, n, aWork, n, nil),
+				q:     impl.Dlange(lapack.Frobenius, n, n, qWork, n, nil),
+				g:     impl.Dlange(lapack.Frobenius, n, n, g, n, nil),
+				kappa: 1,
+			}
+		}
+		if !problem.rescaleCost(true, norms, xData, &prev, rcnd) {
+			if problem.keepBest(true, prev, xData) {
+				X, xData, rcnd = problem.restorePass(prev)
+			}
+			break
+		}
 	}
 
 	// Closed-loop eigenvalues
@@ -369,8 +394,13 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // singular E returns ErrDescriptorSingular. Nil or NaN/Inf arguments return
 // ErrInvalidArgument.
 //
-// Dare scales the states as Care does (MATLAB idare); opts.NoScaling
-// disables it.
+// Dare always deflates the extended pencil, as MATLAB idare does, so A may
+// be singular or have near-zero eigenvalues. A solution with R+B'XB not
+// positive definite returns ErrNoStabilizing.
+//
+// Dare scales the states and the cost as Care does (MATLAB idare);
+// opts.NoScaling disables it. An unscaled pencil that fails QZ or the
+// stable split is solved again cost-scaled before an error is returned.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -405,11 +435,7 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	aRaw := A.RawMatrix()
 	bRaw := B.RawMatrix()
 
-	subspace, err := problem.discreteStableSubspace()
-	if err != nil {
-		return nil, err
-	}
-	X, xData, rcnd, err := problem.stabilizingSolution(subspace.vectors)
+	subspace, X, xData, rcnd, err := problem.pencilSolution(false)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +461,7 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		1, blas64.General{Rows: m, Cols: m, Data: rbar, Stride: m})
 
 	if !impl.Dpotrf(blas.Upper, m, rbar, m) {
-		return nil, ErrSingularR
+		return nil, ErrNoStabilizing
 	}
 
 	// BtXA = BtX * A (m×n)
@@ -455,13 +481,426 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	}
 	impl.Dpotrs(blas.Upper, m, n, rbar, m, kData, n)
 	K := mat.NewDense(m, n, kData)
-
+	if err := problem.rescued(false, K); err != nil {
+		return nil, err
+	}
 	return problem.result(X, K, eig, rcnd), nil
 }
 
-// stabilizingSolution returns X = U21*(E*U11)⁻¹ from the stable subspace
-// basis [U11; U21] of a pencil with 2n columns.
-func (problem riccatiProblem) stabilizingSolution(vs []float64) (X *mat.Dense, xData []float64, rcnd float64, err error) {
+// riccatiNorms are the Frobenius norms of the pencil blocks that cost
+// scaling balances: a of A, Ā = A − BR⁻¹Sᵀ (and E), q of Q̄ = Q − SR⁻¹Sᵀ,
+// g of G = BR⁻¹Bᵀ. kappa is the error amplification of the given pencil's
+// input columns [B; −S; R] in its QR, max(‖B‖, ‖S‖, ‖R‖)/min(‖B‖, ‖R‖)
+// (1 for the Hamiltonian, which forms G).
+type riccatiNorms struct{ a, q, g, kappa float64 }
+
+// cost is the predicted error amplification eps·cost/sep of X, of norm x,
+// for the cost scale sigma (see rescaleCost).
+func (norms riccatiNorms) cost(x, sigma float64) float64 {
+	return max(norms.a, sigma*norms.g, norms.q/sigma) * (x/sigma + sigma/x)
+}
+
+// candidates returns the cost scales near x and √(q/g), 0 when undefined.
+func (norms riccatiNorms) candidates(x float64) [2]float64 {
+	var c [2]float64
+	if x > 0 && !math.IsInf(x, 0) {
+		c[0] = pow2Near(x)
+	}
+	if norms.q > 0 && norms.g > 0 {
+		c[1] = pow2Near(math.Sqrt(norms.q) / math.Sqrt(norms.g))
+	}
+	return c
+}
+
+// firstSigma returns the cost scale for a retry without a solution:
+// √(q/g) (SLICOT SB02MD SCAL='G'), which minimizes max(σg, q/σ) and, when
+// q·g ≤ a², is the geometric middle of the σ range where the pencil is
+// balanced; 1 when undefined.
+func (norms riccatiNorms) firstSigma() float64 {
+	if c := norms.candidates(0)[1]; c > 0 {
+		return c
+	}
+	return 1
+}
+
+// riccatiPass is a saved solution of an earlier cost scale.
+type riccatiPass struct {
+	x, wr, wi, beta  []float64
+	rcnd, sigma, res float64
+	solves           int
+}
+
+// rescaleCost picks the cost scale σ for another solve from the solution
+// xData of this one, saving it in *prev. The problem (Q/σ, R/σ, S/σ) has
+// the solution X/σ and the same K. The Schur method's relative error in X
+// is about eps·max(a, σg, q/σ)·(‖X‖/σ + σ/‖X‖)·kappa/sep, smallest near
+// σ = ‖X‖ (SLICOT SB02MD SCAL='G' uses σ = √(q/g), right only when
+// X ≈ √(q/g)), so X keeps its relative accuracy when ‖X‖ is far below (or
+// above) the Hamiltonian scale. A zero first X is below accuracy and
+// estimated by q/a. Later solves use the balanced pencil (kappa 1). It
+// reports false, leaving σ, when the predicted gain is under 1024 or after
+// three solves. The estimate can overrate the gain (an ill-conditioned R),
+// so *prev keeps the saved solution of smallest Riccati residual, which
+// keepBest weighs against the last.
+func (problem *riccatiProblem) rescaleCost(continuous bool, norms riccatiNorms, xData []float64, prev **riccatiPass, rcnd float64) bool {
+	if !problem.costScaling || (*prev != nil && (*prev).solves >= 2) {
+		return false
+	}
+	n := problem.n
+	x := impl.Dlange(lapack.Frobenius, n, n, xData, n, nil)
+	if x == 0 && *prev == nil {
+		x = norms.q / norms.a
+	}
+	if !(x > 0) || math.IsInf(x, 0) {
+		return false
+	}
+	cost := func(sigma float64) float64 { return norms.cost(x, sigma) }
+	cur := problem.sigma
+	best, bestCost := cur, cost(cur)
+	curCost := bestCost
+	if !problem.balanced {
+		curCost *= norms.kappa
+	}
+	for _, c := range norms.candidates(x) {
+		if c > 0 {
+			if v := cost(c); v < bestCost {
+				best, bestCost = c, v
+			}
+		}
+	}
+	if !(curCost >= 1024*bestCost) {
+		return false
+	}
+	problem.savePass(prev, xData, rcnd, problem.residual(continuous, xData))
+	problem.sigma, problem.balanced = best, true
+	return true
+}
+
+// savePass counts a solve in *prev and saves its solution xData there
+// unless the saved one has a smaller Riccati residual than res.
+func (problem *riccatiProblem) savePass(prev **riccatiPass, xData []float64, rcnd, res float64) {
+	if *prev == nil {
+		*prev = &riccatiPass{}
+	}
+	p, ws, n := *prev, problem.ws, problem.n
+	p.solves++
+	if p.solves > 1 && !(res < p.res) {
+		return
+	}
+	p.res = res
+	p.x = append(p.x[:0], xData...)
+	p.wr = append(p.wr[:0], ws.wr[:n]...)
+	p.wi = append(p.wi[:0], ws.wi[:n]...)
+	p.beta = append(p.beta[:0], ws.beta[:n]...)
+	p.rcnd, p.sigma = rcnd, problem.sigma
+}
+
+// keepBest reports whether the saved pass prev has a smaller Riccati
+// residual than xData, the last solution.
+func (problem *riccatiProblem) keepBest(continuous bool, prev *riccatiPass, xData []float64) bool {
+	return prev != nil && !(problem.residual(continuous, xData) < prev.res)
+}
+
+// residual returns the Riccati residual of residualTerms.
+func (problem *riccatiProblem) residual(continuous bool, xData []float64) float64 {
+	res, _ := problem.residualTerms(continuous, xData)
+	return res
+}
+
+// residualTerms returns ‖Ric(X)‖_F of the state-scaled problem
+//
+//	continuous: AᵀXE + EᵀXA − (EᵀXB + S)R⁻¹(BᵀXE + Sᵀ) + Q
+//	discrete:   AᵀXA − EᵀXE − (AᵀXB + S)(R + BᵀXB)⁻¹(BᵀXA + Sᵀ) + Q
+//
+// and the sum of the Frobenius norms of its four terms.
+func (problem *riccatiProblem) residualTerms(continuous bool, xData []float64) (res, scale float64) {
+	n := problem.n
+	X := mat.NewDense(n, n, xData)
+	var E mat.Matrix = eyeDense(n)
+	if problem.E != nil {
+		E = problem.E
+	}
+	A, B := problem.A, problem.B
+	var xe, xa, ric, t, m, w mat.Dense
+	xe.Mul(X, E)
+	xa.Mul(X, A)
+	r := mat.DenseCopyOf(problem.R)
+	if continuous {
+		ric.Mul(A.T(), &xe)
+		t.Mul(E.T(), &xa)
+		scale = mat.Norm(&ric, 2) + mat.Norm(&t, 2)
+		ric.Add(&ric, &t)
+		m.Mul(xe.T(), B)
+	} else {
+		ric.Mul(A.T(), &xa)
+		t.Mul(E.T(), &xe)
+		scale = mat.Norm(&ric, 2) + mat.Norm(&t, 2)
+		ric.Sub(&ric, &t)
+		m.Mul(xa.T(), B)
+		var bxb, xb mat.Dense
+		xb.Mul(X, B)
+		bxb.Mul(B.T(), &xb)
+		r.Add(r, &bxb)
+	}
+	if problem.S != nil {
+		m.Add(&m, problem.S)
+	}
+	if err := w.Solve(r, m.T()); err != nil {
+		return math.Inf(1), math.Inf(1)
+	}
+	var mw mat.Dense
+	mw.Mul(&m, &w)
+	scale += mat.Norm(&mw, 2) + mat.Norm(problem.Q, 2)
+	ric.Sub(&ric, &mw)
+	ric.Add(&ric, problem.Q)
+	return mat.Norm(&ric, 2), scale
+}
+
+// restorePass restores the solution saved by rescaleCost.
+func (problem *riccatiProblem) restorePass(p *riccatiPass) (*mat.Dense, []float64, float64) {
+	n, ws := problem.n, problem.ws
+	xData := ws.xData[:n*n]
+	copy(xData, p.x)
+	copy(ws.wr[:n], p.wr)
+	copy(ws.wi[:n], p.wi)
+	copy(ws.beta[:n], p.beta)
+	problem.sigma, problem.balanced = p.sigma, false
+	return mat.NewDense(n, n, xData), xData, p.rcnd
+}
+
+// pow2Near returns the power of two nearest v within [2⁻⁵⁰⁰, 2⁵⁰⁰].
+func pow2Near(v float64) float64 {
+	frac, e := math.Frexp(v)
+	if frac < math.Sqrt2/2 {
+		e--
+	}
+	return math.Ldexp(1, min(max(e, -500), 500))
+}
+
+func finiteSlice(v []float64) bool {
+	for _, x := range v {
+		if !isFinite(x) {
+			return false
+		}
+	}
+	return true
+}
+
+// pencilNorms returns the riccatiNorms of the extended pencil, with
+// ‖U⁻ᵀBᵀ‖_F² ≥ ‖G‖₂ for g (R = UᵀU in ws.rChol, U⁻ᵀBᵀ in ws.rinvBt), and
+// with S forms Ā in ws.g and Q̄ in ws.qWork.
+func (problem *riccatiProblem) pencilNorms() riccatiNorms {
+	n, m, ws := problem.n, problem.m, problem.ws
+	aRaw := problem.A.RawMatrix()
+	norms := riccatiNorms{a: impl.Dlange(lapack.Frobenius, n, n, aRaw.Data, aRaw.Stride, nil)}
+	if problem.E != nil {
+		eRaw := problem.E.RawMatrix()
+		norms.a = max(norms.a, impl.Dlange(lapack.Frobenius, n, n, eRaw.Data, eRaw.Stride, nil))
+	} else {
+		norms.a = max(norms.a, math.Sqrt(float64(n)))
+	}
+	rChol := ws.rChol[:m*m]
+	upper := blas64.Triangular{Uplo: blas.Upper, Diag: blas.NonUnit, N: m, Data: rChol, Stride: m}
+	w := ws.rinvBt[:m*n]
+	bRaw := problem.B.RawMatrix()
+	for i := range n {
+		for j := range m {
+			w[j*n+i] = bRaw.Data[i*bRaw.Stride+j]
+		}
+	}
+	blas64.Trsm(blas.Left, blas.Trans, 1, upper, blas64.General{Rows: m, Cols: n, Data: w, Stride: n})
+	gn := impl.Dlange(lapack.Frobenius, m, n, w, n, nil)
+	norms.g = gn * gn
+	rRaw := problem.R.RawMatrix()
+	bn := impl.Dlange(lapack.Frobenius, n, m, bRaw.Data, bRaw.Stride, nil)
+	rn := impl.Dlange(lapack.Frobenius, m, m, rRaw.Data, rRaw.Stride, nil)
+	norms.kappa = max(bn, rn) / min(bn, rn)
+	qRaw := problem.Q.RawMatrix()
+	if !(norms.kappa >= 1) || math.IsInf(norms.kappa, 0) {
+		norms.kappa = 1
+	}
+	if problem.S == nil {
+		norms.q = impl.Dlange(lapack.Frobenius, n, n, qRaw.Data, qRaw.Stride, nil)
+		return norms
+	}
+	v := ws.rinvSt[:m*n]
+	sRaw := problem.S.RawMatrix()
+	for i := range n {
+		for j := range m {
+			v[j*n+i] = sRaw.Data[i*sRaw.Stride+j]
+		}
+	}
+	blas64.Trsm(blas.Left, blas.Trans, 1, upper, blas64.General{Rows: m, Cols: n, Data: v, Stride: n})
+	qbar := ws.qWork[:n*n]
+	copyStrided(qbar, n, qRaw.Data, qRaw.Stride, n, n)
+	blas64.Gemm(blas.Trans, blas.NoTrans,
+		-1, blas64.General{Rows: m, Cols: n, Data: v, Stride: n},
+		blas64.General{Rows: m, Cols: n, Data: v, Stride: n},
+		1, blas64.General{Rows: n, Cols: n, Data: qbar, Stride: n})
+	norms.q = impl.Dlange(lapack.Frobenius, n, n, qbar, n, nil)
+	blas64.Trsm(blas.Left, blas.NoTrans, 1, upper, blas64.General{Rows: m, Cols: n, Data: v, Stride: n})
+	abar := ws.g[:n*n]
+	copyStrided(abar, n, aRaw.Data, aRaw.Stride, n, n)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans,
+		-1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
+		blas64.General{Rows: m, Cols: n, Data: v, Stride: n},
+		1, blas64.General{Rows: n, Cols: n, Data: abar, Stride: n})
+	norms.a = max(norms.a, impl.Dlange(lapack.Frobenius, n, n, abar, n, nil))
+	norms.kappa = max(norms.kappa, impl.Dlange(lapack.Frobenius, n, m, sRaw.Data, sRaw.Stride, nil)/min(bn, rn))
+	return norms
+}
+
+// riccatiPencil is the data of the extended pencil of
+// generalizedStableSubspace: A, Q and S (S.Data nil for none), with Q and S
+// divided by σ = 1/isigma and the input row [S' (B') R] multiplied by mu.
+// A non-nil bt (m×n) replaces B and R by B̃ = btᵀ and I, the inputs ũ = Uu
+// of R = UᵀU, which leaves the deflation of R well-conditioned.
+type riccatiPencil struct {
+	a, q, s    blas64.General
+	bt         []float64
+	isigma, mu float64
+}
+
+// pencil returns the pencil data: the given A, Q, S at first, else for
+// the cost scale σ Ā, Q̄ of pencilNorms and no S, so that S/σ does not
+// swamp B in the input columns, the normalized inputs B̃ = BU⁻¹ of
+// pencilNorms, and the power of two mu ≈ ‖B̃‖/‖I‖ balancing μI against B̃.
+func (problem *riccatiProblem) pencil() riccatiPencil {
+	d := riccatiPencil{a: problem.A.RawMatrix(), q: problem.Q.RawMatrix(), isigma: 1, mu: 1}
+	if !problem.balanced {
+		if problem.S != nil {
+			d.s = problem.S.RawMatrix()
+		}
+		return d
+	}
+	n, ws := problem.n, problem.ws
+	d.isigma = 1 / problem.sigma
+	if problem.S != nil {
+		d.a = blas64.General{Rows: n, Cols: n, Data: ws.g[:n*n], Stride: n}
+		d.q = blas64.General{Rows: n, Cols: n, Data: ws.qWork[:n*n], Stride: n}
+	}
+	m := problem.m
+	d.bt = ws.rinvBt[:m*n]
+	if bn := impl.Dlange(lapack.Frobenius, m, n, d.bt, n, nil); bn > 0 {
+		d.mu = pow2Near(bn / math.Sqrt(float64(m)))
+	}
+	return d
+}
+
+// pencilSolution deflates the extended pencil and returns its stabilizing
+// solution, solving again with a cost scale when rescaleCost predicts a
+// more accurate X; a failed later solve keeps the earlier one.
+//
+// The given pencil can fail QZ or misplace eigenvalues at extreme cost
+// scales, so a failed first solve is rescued, also under NoScaling, by
+// solves from the cost scale of firstSigma. The rescued X is kept only
+// with a Riccati residual within rescueTol of its terms (and, see
+// rescued, a stable closed loop), else the first error is returned. Under
+// NoScaling a first X with a residual above noScalingTol of its terms is
+// rescued too, keeping the solution of smallest residual.
+func (problem *riccatiProblem) pencilSolution(continuous bool) (subspace riccatiSubspace, X *mat.Dense, xData []float64, rcnd float64, err error) {
+	var norms riccatiNorms
+	var prev *riccatiPass
+	rescue := func() {
+		problem.costScaling = true
+		norms = problem.pencilNorms()
+		problem.sigma, problem.balanced = norms.firstSigma(), true
+	}
+	for {
+		subspace, err = problem.generalizedStableSubspace(continuous, problem.pencil())
+		if err == nil {
+			X, xData, rcnd, err = problem.stabilizingSolution(subspace.vectors)
+		}
+		if err == nil && !finiteSlice(xData) {
+			err = ErrNoStabilizing
+		}
+		if err != nil && prev == nil {
+			if problem.rescueErr != nil {
+				return riccatiSubspace{}, nil, nil, 0, problem.rescueErr
+			}
+			problem.rescueErr = err
+			rescue()
+			continue
+		}
+		if err == nil && prev == nil && problem.rescueErr == nil {
+			if !problem.costScaling {
+				res, scale := problem.residualTerms(continuous, xData)
+				if res <= noScalingTol*scale {
+					return subspace, X, xData, rcnd, nil
+				}
+				problem.savePass(&prev, xData, rcnd, res)
+				rescue()
+				continue
+			}
+			norms = problem.pencilNorms()
+		}
+		if err == nil && problem.rescaleCost(continuous, norms, xData, &prev, rcnd) {
+			continue
+		}
+		if err != nil || problem.keepBest(continuous, prev, xData) {
+			subspace, X, xData, rcnd = problem.restoredSolution(prev)
+		}
+		if problem.rescueErr != nil {
+			if res, scale := problem.residualTerms(continuous, xData); !(res <= rescueTol*scale) {
+				return riccatiSubspace{}, nil, nil, 0, problem.rescueErr
+			}
+		}
+		return subspace, X, xData, rcnd, nil
+	}
+}
+
+// rescueTol and noScalingTol bound the Riccati residual of pencilSolution
+// relative to the sum of its terms: a rescued solution above rescueTol is
+// rejected, and an unscaled one above noScalingTol is rescued.
+const (
+	rescueTol    = 1e-6
+	noScalingTol = 1e-12
+)
+
+// rescued returns problem.rescueErr when pencilSolution rescued a failed
+// first solve and A − BK (with E: E⁻¹(A − BK)) is not stable, nil
+// otherwise.
+func (problem *riccatiProblem) rescued(continuous bool, K *mat.Dense) error {
+	if problem.rescueErr == nil {
+		return nil
+	}
+	var bk, ea mat.Dense
+	bk.Mul(problem.B, K)
+	acl := mat.NewDense(problem.n, problem.n, nil)
+	acl.Sub(problem.A, &bk)
+	if problem.E != nil {
+		var lu mat.LU
+		lu.Factorize(problem.E)
+		if err := lu.SolveTo(&ea, false, acl); err != nil {
+			if _, ok := err.(mat.Condition); !ok {
+				return problem.rescueErr
+			}
+		}
+		acl = &ea
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(acl, mat.EigenNone) {
+		return problem.rescueErr
+	}
+	for _, v := range eig.Values(nil) {
+		if continuous && !(real(v) < 0) || !continuous && !(cmplx.Abs(v) < 1) {
+			return problem.rescueErr
+		}
+	}
+	return nil
+}
+
+// restoredSolution restores the saved pass prev as pencilSolution returns
+// it.
+func (problem *riccatiProblem) restoredSolution(prev *riccatiPass) (riccatiSubspace, *mat.Dense, []float64, float64) {
+	X, xData, rcnd := problem.restorePass(prev)
+	ws, nn := problem.ws, 2*problem.n
+	return riccatiSubspace{alphaR: ws.wr[:nn], alphaI: ws.wi[:nn], beta: ws.beta[:nn]}, X, xData, rcnd
+}
+
+// stabilizingSolution returns X = σ·U21*(E*U11)⁻¹ from the stable subspace
+// basis [U11; U21] of a pencil with 2n columns and cost scale σ.
+func (problem *riccatiProblem) stabilizingSolution(vs []float64) (X *mat.Dense, xData []float64, rcnd float64, err error) {
 	n, ws := problem.n, problem.ws
 	u11 := ws.u11[:n*n]
 	u21 := ws.u21[:n*n]
@@ -492,19 +931,20 @@ func (problem riccatiProblem) stabilizingSolution(vs []float64) (X *mat.Dense, x
 		}
 	}
 	impl.Dgetrs(blas.Trans, n, n, u11, n, ipiv, xData, n)
+	if problem.sigma != 1 {
+		for i := range xData {
+			xData[i] *= problem.sigma
+		}
+	}
 	symmetrize(xData, n, n)
 	return mat.NewDense(n, n, xData), xData, rcnd, nil
 }
 
 // descriptorCare solves the generalized continuous Riccati equation; R is
 // already Cholesky-factored in ws.rChol.
-func (problem riccatiProblem) descriptorCare() (*RiccatiResult, error) {
+func (problem *riccatiProblem) descriptorCare() (*RiccatiResult, error) {
 	n, m, ws := problem.n, problem.m, problem.ws
-	subspace, err := problem.generalizedStableSubspace(true)
-	if err != nil {
-		return nil, err
-	}
-	X, xData, rcnd, err := problem.stabilizingSolution(subspace.vectors)
+	subspace, X, xData, rcnd, err := problem.pencilSolution(true)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +975,11 @@ func (problem riccatiProblem) descriptorCare() (*RiccatiResult, error) {
 		}
 	}
 	impl.Dpotrs(blas.Upper, m, n, ws.rChol[:m*m], m, kData, n)
-	return problem.result(X, mat.NewDense(m, n, kData), eig, rcnd), nil
+	K := mat.NewDense(m, n, kData)
+	if err := problem.rescued(true, K); err != nil {
+		return nil, err
+	}
+	return problem.result(X, K, eig, rcnd), nil
 }
 
 type riccatiSubspace struct {
@@ -545,165 +989,21 @@ type riccatiSubspace struct {
 	beta    []float64
 }
 
-func (problem riccatiProblem) discreteStableSubspace() (riccatiSubspace, error) {
-	if problem.E != nil {
-		return problem.generalizedStableSubspace(false)
-	}
-	if subspace, suitable, err := problem.regularDiscreteStableSubspace(); suitable || err != nil {
-		return subspace, err
-	}
-	return problem.generalizedStableSubspace(false)
-}
-
-// regularDiscreteStableSubspace orders the symplectic matrix built from
-// A⁻ᵀ. suitable false (nil error) means A is too ill-conditioned for that
-// form and the caller uses the extended pencil instead; a non-nil error is
-// a failure of the suitable path.
-func (problem riccatiProblem) regularDiscreteStableSubspace() (subspace riccatiSubspace, suitable bool, err error) {
-	n, m, ws := problem.n, problem.m, problem.ws
-	nn := 2 * n
-	aRaw := problem.A.RawMatrix()
-	bRaw := problem.B.RawMatrix()
-
-	aWork := ws.aWork[:n*n]
-	copyStrided(aWork, n, aRaw.Data, aRaw.Stride, n, n)
-	qWork := ws.qWork[:n*n]
-	qRaw := problem.Q.RawMatrix()
-	copyStrided(qWork, n, qRaw.Data, qRaw.Stride, n, n)
-
-	rinvBt := ws.rinvBt[:m*n]
-	for i := range n {
-		for j := range m {
-			rinvBt[j*n+i] = bRaw.Data[i*bRaw.Stride+j]
-		}
-	}
-	impl.Dpotrs(blas.Upper, m, n, ws.rChol[:m*m], m, rinvBt, n)
-
-	if problem.S != nil {
-		rinvSt := ws.rinvSt[:m*n]
-		sRaw := problem.S.RawMatrix()
-		for i := range n {
-			for j := range m {
-				rinvSt[j*n+i] = sRaw.Data[i*sRaw.Stride+j]
-			}
-		}
-		impl.Dpotrs(blas.Upper, m, n, ws.rChol[:m*m], m, rinvSt, n)
-
-		blas64.Gemm(blas.NoTrans, blas.NoTrans,
-			-1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
-			blas64.General{Rows: m, Cols: n, Data: rinvSt, Stride: n},
-			1, blas64.General{Rows: n, Cols: n, Data: aWork, Stride: n})
-		blas64.Gemm(blas.NoTrans, blas.NoTrans,
-			-1, blas64.General{Rows: n, Cols: m, Data: sRaw.Data, Stride: sRaw.Stride},
-			blas64.General{Rows: m, Cols: n, Data: rinvSt, Stride: n},
-			1, blas64.General{Rows: n, Cols: n, Data: qWork, Stride: n})
-		symmetrize(qWork, n, n)
-	}
-
-	g := ws.g[:n*n]
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
-		blas64.General{Rows: m, Cols: n, Data: rinvBt, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: g, Stride: n})
-	symmetrize(g, n, n)
-
-	scratch := ws.pencilH
-	ait := scratch[:n*n]
-	aitq := scratch[n*n : 2*n*n]
-	gait := scratch[2*n*n : 3*n*n]
-	gaitq := scratch[3*n*n : 4*n*n]
-	for i := range n {
-		for j := range n {
-			ait[i*n+j] = aWork[j*n+i]
-		}
-	}
-	work := ws.work
-	anorm := impl.Dlange(lapack.MaxColumnSum, n, n, ait, n, work[:n])
-	ipiv := ws.ipiv[:n]
-	if !impl.Dgetrf(n, n, ait, n, ipiv) {
-		return riccatiSubspace{}, false, nil
-	}
-	rcnd := impl.Dgecon(lapack.MaxColumnSum, n, ait, n, anorm, work[:4*n], ws.iwork[:n])
-	if rcnd < math.Sqrt(eps()) {
-		return riccatiSubspace{}, false, nil
-	}
-	var inverseQuery [1]float64
-	impl.Dgetri(n, ait, n, ipiv, inverseQuery[:], -1)
-	lwork := int(inverseQuery[0])
-	if len(ws.work) < lwork {
-		ws.work = make([]float64, lwork)
-	}
-	impl.Dgetri(n, ait, n, ipiv, ws.work, lwork)
-
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: n, Data: ait, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: qWork, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: aitq, Stride: n})
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: n, Data: g, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: ait, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: gait, Stride: n})
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: n, Data: gait, Stride: n},
-		blas64.General{Rows: n, Cols: n, Data: qWork, Stride: n},
-		0, blas64.General{Rows: n, Cols: n, Data: gaitq, Stride: n})
-
-	z := ws.z[:nn*nn]
-	for i := range n {
-		for j := range n {
-			z[i*nn+j] = aWork[i*n+j] + gaitq[i*n+j]
-			z[i*nn+n+j] = -gait[i*n+j]
-			z[(n+i)*nn+j] = -aitq[i*n+j]
-			z[(n+i)*nn+n+j] = ait[i*n+j]
-		}
-	}
-
-	alphaR := ws.wr[:nn]
-	alphaI := ws.wi[:nn]
-	beta := ws.beta[:nn]
-	vectors := ws.vs[:nn*nn]
-	bwork := ws.bwork[:nn]
-	insideUnitCircle := func(real, imag float64) bool {
-		return math.Hypot(real, imag) < 1
-	}
-
-	var workQuery [1]float64
-	impl.Dgees(lapack.SchurHess, lapack.SortSelected, insideUnitCircle,
-		nn, z, nn, alphaR, alphaI, vectors, nn, workQuery[:], -1, bwork)
-	lwork = int(workQuery[0])
-	if len(ws.work) < lwork {
-		ws.work = make([]float64, lwork)
-	}
-	sdim, ok := impl.Dgees(lapack.SchurHess, lapack.SortSelected, insideUnitCircle,
-		nn, z, nn, alphaR, alphaI, vectors, nn, ws.work, lwork, bwork)
-	if !ok {
-		return riccatiSubspace{}, true, ErrSchurFailed
-	}
-	if sdim != n {
-		return riccatiSubspace{}, true, ErrNoStabilizing
-	}
-	for i := range nn {
-		beta[i] = 1
-	}
-	return riccatiSubspace{
-		vectors: vectors,
-		alphaR:  alphaR,
-		alphaI:  alphaI,
-		beta:    beta,
-	}, true, nil
-}
-
 // generalizedStableSubspace deflates the extended pencil
 //
 //	continuous: [A 0 B; -Q -A' -S; S' B' R] - λ[E 0 0; 0 E' 0; 0 0 0]
 //	discrete:   [A 0 B; -Q E' -S; S' 0 R]   - λ[E 0 0; 0 A' 0; 0 -B' 0]
 //
 // to 2n×2n by a QR of its input columns and orders the stable eigenvalues
-// first. E nil means I.
-func (problem riccatiProblem) generalizedStableSubspace(continuous bool) (riccatiSubspace, error) {
+// first. E nil means I. With the cost scale of d it deflates the
+// equivalent pencil diag(I, I/σ, μ)·(H − λJ)·diag(I, σI, I), and with d.bt
+// that of the inputs ũ = Uu, diag(I, I, U⁻ᵀ)·(H − λJ)·diag(I, I, U⁻¹).
+func (problem *riccatiProblem) generalizedStableSubspace(continuous bool, d riccatiPencil) (riccatiSubspace, error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	nn := 2 * n
 	rows := nn + m
+	isigma, mu := d.isigma, d.mu
+	muSigma := mu / isigma
 
 	hLeft := ws.pencilH[:rows*nn]
 	jLeft := ws.pencilJ[:rows*nn]
@@ -712,13 +1012,13 @@ func (problem riccatiProblem) generalizedStableSubspace(continuous bool) (riccat
 	clear(jLeft)
 	clear(input)
 
-	aRaw := problem.A.RawMatrix()
+	aRaw, qRaw, sRaw := d.a, d.q, d.s
 	bRaw := problem.B.RawMatrix()
-	qRaw := problem.Q.RawMatrix()
 	rRaw := problem.R.RawMatrix()
-	var sRaw blas64.General
-	if problem.S != nil {
-		sRaw = problem.S.RawMatrix()
+	hasS := sRaw.Data != nil
+	b := func(i, j int) float64 { return bRaw.Data[i*bRaw.Stride+j] }
+	if d.bt != nil {
+		b = func(i, j int) float64 { return d.bt[j*n+i] }
 	}
 
 	var eRaw blas64.General
@@ -737,7 +1037,7 @@ func (problem riccatiProblem) generalizedStableSubspace(continuous bool) (riccat
 	for i := range n {
 		for j := range n {
 			hLeft[i*nn+j] = aRaw.Data[i*aRaw.Stride+j]
-			hLeft[(n+i)*nn+j] = -qRaw.Data[i*qRaw.Stride+j]
+			hLeft[(n+i)*nn+j] = -isigma * qRaw.Data[i*qRaw.Stride+j]
 			jLeft[i*nn+j] = e(i, j)
 			if continuous {
 				hLeft[(n+i)*nn+n+j] = -aRaw.Data[j*aRaw.Stride+i]
@@ -749,21 +1049,26 @@ func (problem riccatiProblem) generalizedStableSubspace(continuous bool) (riccat
 		}
 
 		for j := range m {
-			input[i*m+j] = bRaw.Data[i*bRaw.Stride+j]
-			if problem.S != nil {
-				input[(n+i)*m+j] = -sRaw.Data[i*sRaw.Stride+j]
-				hLeft[(nn+j)*nn+i] = sRaw.Data[i*sRaw.Stride+j]
+			bij := b(i, j)
+			input[i*m+j] = bij
+			if hasS {
+				input[(n+i)*m+j] = -isigma * sRaw.Data[i*sRaw.Stride+j]
+				hLeft[(nn+j)*nn+i] = mu * sRaw.Data[i*sRaw.Stride+j]
 			}
 			if continuous {
-				hLeft[(nn+j)*nn+n+i] = bRaw.Data[i*bRaw.Stride+j]
+				hLeft[(nn+j)*nn+n+i] = muSigma * bij
 			} else {
-				jLeft[(nn+j)*nn+n+i] = -bRaw.Data[i*bRaw.Stride+j]
+				jLeft[(nn+j)*nn+n+i] = -muSigma * bij
 			}
 		}
 	}
 	for i := range m {
+		if d.bt != nil {
+			input[(nn+i)*m+i] = mu
+			continue
+		}
 		for j := range m {
-			input[(nn+i)*m+j] = rRaw.Data[i*rRaw.Stride+j]
+			input[(nn+i)*m+j] = mu * rRaw.Data[i*rRaw.Stride+j]
 		}
 	}
 

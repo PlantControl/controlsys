@@ -279,7 +279,7 @@ func TestStepInfoRejectsInvalidOptions(t *testing.T) {
 
 func TestStepInfoUndefinedRiseAndSentinels(t *testing.T) {
 	resp := &TimeResponse{T: []float64{0, 1, 2}, Y: mat.NewDense(2, 3, []float64{1, 1, 1, 0, 0.05, 0.08})}
-	info, err := StepInfo(resp, &StepInfoOptions{SteadyStateValue: []float64{1, 1}})
+	info, err := StepInfo(resp, &StepInfoOptions{SteadyStateValue: []float64{1, 1}, InitialValue: []float64{1, 0}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,4 +313,110 @@ func TestStepInfoUndefinedRiseAndSentinels(t *testing.T) {
 	}
 	_, err = StepInfoForSystem(nil, 1, nil)
 	wantErr(t, "StepInfoForSystem nil", err, ErrInvalidArgument, "StepInfoForSystem")
+}
+
+func sampledStepInfoResponse(dt, tf float64, f func(float64) float64) *TimeResponse {
+	n := int(math.Round(tf/dt)) + 1
+	T := make([]float64, n)
+	y := make([]float64, n)
+	for k := range n {
+		T[k] = float64(k) * dt
+		y[k] = f(T[k])
+	}
+	return &TimeResponse{T: T, Y: mat.NewDense(1, n, y)}
+}
+
+func checkSettlingWithin(t *testing.T, m StepMetric, want, step float64) {
+	t.Helper()
+	st, ok := m.SettlingTime()
+	if !ok || st < want-1e-12 || st > want+step+1e-12 {
+		t.Errorf("settling = %g, %v, want first sample after %g", st, ok, want)
+	}
+}
+
+func TestStepInfoFeedthroughUsesZeroInitialValue(t *testing.T) {
+	const dt = 1e-3
+	resp := sampledStepInfoResponse(dt, 20, func(t float64) float64 { return 2 - math.Exp(-t) })
+	ss := []float64{2}
+	info, err := StepInfo(resp, &StepInfoOptions{SteadyStateValue: ss})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := info.Metrics[0]
+	if rt, ok := m.RiseTime(); !ok || math.Abs(rt-math.Log(5)) > 1e-5 {
+		t.Errorf("rise = %g, %v, want ln5 (10%% level met at t=0)", rt, ok)
+	}
+	checkSettlingWithin(t, m, math.Log(25), dt)
+	if m.Overshoot != 0 || m.Undershoot != 0 {
+		t.Errorf("overshoot %g undershoot %g, want 0", m.Overshoot, m.Undershoot)
+	}
+
+	info, err = StepInfo(resp, &StepInfoOptions{SteadyStateValue: ss, InitialValue: []float64{1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = info.Metrics[0]
+	if rt, ok := m.RiseTime(); !ok || math.Abs(rt-math.Log(9)) > 1e-5 {
+		t.Errorf("yinit=1 rise = %g, %v, want ln9", rt, ok)
+	}
+	checkSettlingWithin(t, m, math.Log(50), dt)
+}
+
+func TestStepInfoForSystemFeedthroughMatchesMATLAB(t *testing.T) {
+	sys, err := NewFromSlices(1, 1, 1, []float64{-1}, []float64{1}, []float64{1}, []float64{1}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := StepInfoForSystem(sys, 20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := info.Metrics[0]
+	if rt, ok := m.RiseTime(); !ok || math.Abs(rt-math.Log(5)) > 0.01 {
+		t.Errorf("rise = %g, %v, want ln5", rt, ok)
+	}
+	checkSettlingWithin(t, m, math.Log(25), 0.1)
+
+	// (1-s)/(s+1): y = 1 - 2e^{-t} starts at -1, a 100% undershoot of the 0->1 step.
+	sys, err = NewFromSlices(1, 1, 1, []float64{-1}, []float64{1}, []float64{2}, []float64{-1}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err = StepInfoForSystem(sys, 20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = info.Metrics[0]
+	if math.Abs(m.Undershoot-100) > 1e-9 {
+		t.Errorf("undershoot = %g, want 100", m.Undershoot)
+	}
+	if rt, ok := m.RiseTime(); !ok || math.Abs(rt-math.Log(9)) > 0.01 {
+		t.Errorf("rise = %g, %v, want ln20-ln(2/0.9) = ln9", rt, ok)
+	}
+	checkSettlingWithin(t, m, math.Log(100), 0.1)
+}
+
+func TestStepInfoRiseWhenInitialSampleExceedsBothLimits(t *testing.T) {
+	resp := &TimeResponse{T: []float64{0, 1, 2}, Y: mat.NewDense(1, 3, []float64{1, 1, 1})}
+	info, err := StepInfo(resp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := info.Metrics[0]
+	if rt, ok := m.RiseTime(); !ok || rt != 0 {
+		t.Errorf("rise = %g, %v, want 0", rt, ok)
+	}
+	if st, ok := m.SettlingTime(); !ok || st != 0 {
+		t.Errorf("settling = %g, %v, want 0", st, ok)
+	}
+}
+
+func TestStepInfoRejectsInvalidInitialValue(t *testing.T) {
+	resp := &TimeResponse{T: []float64{0, 1}, Y: mat.NewDense(1, 2, []float64{0, 1})}
+	if _, err := StepInfo(resp, &StepInfoOptions{InitialValue: []float64{0, 0}}); !errors.Is(err, ErrDimensionMismatch) {
+		t.Errorf("length mismatch err = %v", err)
+	}
+	if _, err := StepInfo(resp, &StepInfoOptions{InitialValue: []float64{math.NaN()}}); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("NaN err = %v", err)
+	}
 }

@@ -79,7 +79,7 @@ func (t interconnectionTopology) parallelDelayPlan() interconnectionDelayPlan {
 	td1 := t.totalDelayOrZero(plan.sys1)
 	td2 := t.totalDelayOrZero(plan.sys2)
 	if td1 == nil && td2 == nil {
-		inDel, outDel, ioDelay := parallelInputOutputDelay(plan.sys1, plan.sys2, plan.m1, plan.p1, nil)
+		inDel, outDel, ioDelay := parallelInputOutputDelay(plan.sys1, plan.sys2, plan.m1, plan.p1)
 		return interconnectionDelayPlan{inputDelay: inDel, outputDelay: outDel, ioDelay: ioDelay}
 	}
 	if td1 == nil {
@@ -91,8 +91,7 @@ func (t interconnectionTopology) parallelDelayPlan() interconnectionDelayPlan {
 	if !mat.Equal(td1, td2) {
 		return interconnectionDelayPlan{requiresLFT: true}
 	}
-	ioDelay := parallelDelay(plan.sys1, plan.sys2)
-	inDel, outDel, ioDelay := parallelInputOutputDelay(plan.sys1, plan.sys2, plan.m1, plan.p1, ioDelay)
+	inDel, outDel, ioDelay := parallelInputOutputDelay(plan.sys1, plan.sys2, plan.m1, plan.p1)
 	return interconnectionDelayPlan{inputDelay: inDel, outputDelay: outDel, ioDelay: ioDelay}
 }
 

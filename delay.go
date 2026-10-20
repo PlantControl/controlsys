@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
@@ -1386,6 +1387,46 @@ func (sys *System) splitIODelayForInitialState(x0 *mat.VecDense) (*System, error
 	return cp, nil
 }
 
+// foldStaticResidual moves each input (output) delay into the residual of its
+// column (row) when that column (row) has residual delay, repeating until no
+// remaining input/output delay touches a residual cell. One fold can create
+// residual in another channel, so a single pass is not enough.
+func foldStaticResidual(residual *mat.Dense, in, out []float64) {
+	r := residual.RawMatrix()
+	p, m := r.Rows, r.Cols
+	for changed := true; changed; {
+		changed = false
+		for j := range m {
+			if in[j] == 0 {
+				continue
+			}
+			for i := range p {
+				if r.Data[i*r.Stride+j] > 0 {
+					for k := range p {
+						r.Data[k*r.Stride+j] += in[j]
+					}
+					in[j] = 0
+					changed = true
+					break
+				}
+			}
+		}
+		for i := range p {
+			if out[i] == 0 {
+				continue
+			}
+			row := r.Data[i*r.Stride : i*r.Stride+m]
+			if slices.ContainsFunc(row, func(v float64) bool { return v > 0 }) {
+				for k := range row {
+					row[k] += out[i]
+				}
+				out[i] = 0
+				changed = true
+			}
+		}
+	}
+}
+
 type delayEntry struct {
 	row, col int
 	tau      float64
@@ -1427,51 +1468,7 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 			return newResidualDelaySplit(sys).apply(sys, (*System).PullDelaysToLFT)
 		}
 		if hasResidual {
-			// Only static systems without internal delays reach here: merge
-			// InputDelay/OutputDelay into the residual for overlapping channels
-			// to avoid parallel double-counting of feedthrough gains.
-			resRaw := residual.RawMatrix()
-			if n == 0 && cur.InputDelay != nil {
-				for j := range m {
-					if cur.InputDelay[j] == 0 {
-						continue
-					}
-					colHasRes := false
-					for i := range p {
-						if resRaw.Data[i*resRaw.Stride+j] > 0 {
-							colHasRes = true
-							break
-						}
-					}
-					if colHasRes {
-						for i := range p {
-							resRaw.Data[i*resRaw.Stride+j] += cur.InputDelay[j]
-						}
-						cur.InputDelay[j] = 0
-					}
-				}
-			}
-			if n == 0 && cur.OutputDelay != nil {
-				for i := range p {
-					if cur.OutputDelay[i] == 0 {
-						continue
-					}
-					rowHasRes := false
-					row := resRaw.Data[i*resRaw.Stride : i*resRaw.Stride+m]
-					for _, v := range row {
-						if v > 0 {
-							rowHasRes = true
-							break
-						}
-					}
-					if rowHasRes {
-						for j := range row {
-							row[j] += cur.OutputDelay[i]
-						}
-						cur.OutputDelay[i] = 0
-					}
-				}
-			}
+			foldStaticResidual(residual, cur.InputDelay, cur.OutputDelay)
 			cur.Delay = residual
 		} else {
 			cur.Delay = nil
