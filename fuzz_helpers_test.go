@@ -469,38 +469,55 @@ func fzCharPolyExact(a []float64, n int) []*big.Rat {
 	return fzCharPolyRat(fzRatPoly(a), n)
 }
 
-// fzCharPolyRat is fzCharPolyExact for a rational matrix.
+// fzCharPolyRat is fzCharPolyExact for a rational matrix. It runs
+// Faddeev–LeVerrier fraction-free on L·A, L the lcm of the denominators
+// (exact /k over the integers), and returns c'_k / L^k; big.Rat
+// normalisation per product dominated the cost.
 func fzCharPolyRat(A []*big.Rat, n int) []*big.Rat {
+	L := big.NewInt(1)
+	var g big.Int
+	for _, x := range A {
+		d := x.Denom()
+		g.GCD(nil, nil, L, d)
+		L.Mul(L, new(big.Int).Quo(d, &g))
+	}
+	Ai := make([]*big.Int, n*n)
+	for i, x := range A {
+		v := new(big.Int).Mul(x.Num(), L)
+		Ai[i] = v.Quo(v, x.Denom())
+	}
+	M := make([]*big.Int, n*n)
+	AM := make([]*big.Int, n*n)
+	for i := range M {
+		M[i], AM[i] = new(big.Int), new(big.Int)
+	}
+	ck := big.NewInt(1)
+	Lk := big.NewInt(1)
 	c := make([]*big.Rat, n+1)
 	c[0] = big.NewRat(1, 1)
-	M := make([]*big.Rat, n*n)
-	for i := range M {
-		M[i] = new(big.Rat)
-	}
+	var t, tr big.Int
 	for k := 1; k <= n; k++ {
-		AM := make([]*big.Rat, n*n)
-		var tr big.Rat
 		for i := range n {
 			for j := range n {
-				v := new(big.Rat)
-				var t big.Rat
+				v := AM[i*n+j].SetInt64(0)
 				for l := range n {
-					v.Add(v, t.Mul(A[i*n+l], M[l*n+j]))
+					v.Add(v, t.Mul(Ai[i*n+l], M[l*n+j]))
 				}
 				if i == j {
-					v.Add(v, c[k-1])
+					v.Add(v, ck)
 				}
-				AM[i*n+j] = v
 			}
 		}
-		M = AM
+		M, AM = AM, M
+		tr.SetInt64(0)
 		for i := range n {
-			var t big.Rat
 			for l := range n {
-				tr.Add(&tr, t.Mul(A[i*n+l], M[l*n+i]))
+				tr.Add(&tr, t.Mul(Ai[i*n+l], M[l*n+i]))
 			}
 		}
-		c[k] = new(big.Rat).Mul(&tr, big.NewRat(-1, int64(k)))
+		ck = new(big.Int).Quo(&tr, big.NewInt(int64(-k)))
+		Lk.Mul(Lk, L)
+		c[k] = new(big.Rat).SetFrac(ck, Lk)
 	}
 	return c
 }
@@ -875,6 +892,12 @@ func TestFzOracles(t *testing.T) {
 	for i, w := range []int64{1, -5, -2} {
 		if cp[i].Cmp(big.NewRat(w, 1)) != 0 {
 			t.Errorf("char poly[%d] = %v, want %d", i, cp[i], w)
+		}
+	}
+	cp = fzCharPolyRat([]*big.Rat{big.NewRat(1, 3), big.NewRat(1, 2), big.NewRat(2, 5), big.NewRat(-1, 1)}, 2)
+	for i, w := range []*big.Rat{big.NewRat(1, 1), big.NewRat(2, 3), big.NewRat(-8, 15)} {
+		if cp[i].Cmp(w) != 0 {
+			t.Errorf("rational char poly[%d] = %v, want %v", i, cp[i], w)
 		}
 	}
 	s := complex(1, 2)

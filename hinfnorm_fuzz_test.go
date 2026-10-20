@@ -10,9 +10,10 @@ import (
 
 // FuzzHinfNorm: on decidable delay-free models HinfNorm is +Inf exactly when
 // an intended pole is unstable; otherwise the norm is attained at the
-// returned frequency and no frequency of a pole-clustered sweep
+// returned frequency, no frequency of a pole-clustered sweep
 // (fzFreqGrid + fzSweepMax) exceeds it, both confirmed by the exact
-// rational response.
+// rational response, and the exact γ-crossing test certifies it from above
+// (fzCheckPeak).
 func FuzzHinfNorm(f *testing.F) {
 	for _, s := range fzHinfNormSeeds() {
 		fzAddSeed(f, s)
@@ -21,6 +22,10 @@ func FuzzHinfNorm(f *testing.F) {
 		sys := s.System(t, fzSysOpts{})
 		norm, omega, err := HinfNorm(sys)
 		fzErr(t, s, "HinfNorm", err)
+		fzDescriptorNorm(t, s, "HinfNorm", func(d *System) (float64, error) {
+			v, _, err := HinfNorm(d)
+			return v, err
+		}, norm, err)
 		if math.IsNaN(norm) || math.IsNaN(omega) || norm < 0 {
 			t.Fatalf("HinfNorm = %v at %v\n%s", norm, omega, s)
 		}
@@ -42,46 +47,7 @@ func FuzzHinfNorm(f *testing.F) {
 		if math.IsInf(norm, 0) {
 			t.Fatalf("HinfNorm = %v for a stable model\n%s", norm, s)
 		}
-		const tol = 1e-6
-		if s.N == 0 {
-			if want := fzSigmaMax(fzComplexD(s), s.P, s.M); math.Abs(norm-want) > tol*want {
-				t.Fatalf("HinfNorm = %v, want σmax(D) = %v\n%s", norm, want, s)
-			}
-			return
-		}
-		at := func(w float64) float64 {
-			g, ok := fzExactResponse(s.N, s.M, s.P, s.A, s.B, s.C, s.D, fzFreqPoint(s, w))
-			if !ok {
-				fzSkip(t, "frequency hits an exact pole")
-			}
-			return fzSigmaMax(g, s.P, s.M)
-		}
-		var got float64
-		if math.IsInf(omega, 1) {
-			if s.Discrete {
-				t.Fatalf("HinfNorm omega = +Inf for a discrete model\n%s", s)
-			}
-			got = fzSigmaMax(fzComplexD(s), s.P, s.M)
-		} else {
-			if omega < 0 || s.Discrete && omega > math.Pi/s.Dt*(1+1e-12) {
-				t.Fatalf("HinfNorm omega = %v outside [0, Nyquist]\n%s", omega, s)
-			}
-			got = at(omega)
-		}
-		if got < norm*(1-tol) {
-			t.Fatalf("HinfNorm = %v at ω=%v, but exact σmax there is %v\n%s", norm, omega, got, s)
-		}
-		wbest, _ := fzSweepMax(func(w float64) float64 {
-			return fzSigmaMax(fzResponseFloat(s, fzFreqPoint(s, w)), s.P, s.M)
-		}, fzFreqGrid(s.S, s.Dt, 60), 2)
-		if peak := at(wbest); norm < peak*(1-tol) {
-			t.Fatalf("HinfNorm = %v at ω=%v, but exact σmax at ω=%v is %v\n%s", norm, omega, wbest, peak, s)
-		}
-		if !s.Discrete {
-			if d := fzSigmaMax(fzComplexD(s), s.P, s.M); norm < d*(1-tol) {
-				t.Fatalf("HinfNorm = %v below σmax(D) = %v\n%s", norm, d, s)
-			}
-		}
+		fzCheckPeak(t, s, "HinfNorm", norm, omega)
 	})
 }
 

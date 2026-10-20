@@ -380,8 +380,10 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 
 // peakGain computes sup_ω σ_max(G(jω)) (G(e^{jωT}) for discrete models) of a
 // model with no poles on the stability boundary from the γ-crossings of its
-// extended pencil; stability is not required. A sampled peak, or σ_max(D)
-// at ω = ∞ for continuous models, is first certified by one probe just
+// extended pencil; stability is not required. A sampled peak, climbed to
+// its local maximum since on stiff models QZ can push the crossings near it
+// out of the near-axis band, or σ_max(D) at ω = ∞ for continuous models, is
+// first certified by one probe just
 // above it; when the probe is inconclusive, the upper-bound search may still
 // certify a raised peak, and bisection runs only if it does not. A
 // continuous peak approached only as ω → ∞ returns omega = +Inf.
@@ -390,6 +392,9 @@ func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err
 	ws := newHamiltonianWS(sys, n, m, p)
 
 	gammaLow, omegaPeak := ws.lowerBound(poles)
+	if gammaLow > 0 {
+		gammaLow, omegaPeak = ws.climb(gammaLow, omegaPeak)
+	}
 	if sys.IsContinuous() {
 		sd, err := maxSingularValue(sys.D)
 		if err != nil {
