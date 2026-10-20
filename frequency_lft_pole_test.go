@@ -3,6 +3,8 @@ package controlsys
 import (
 	"math"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // TestFreqResponseInternalDelayMovedPole: at an open-loop plant pole that
@@ -61,5 +63,32 @@ func TestFreqResponseInternalDelayMovedPole(t *testing.T) {
 				fzFRCheck(t, s, "internal-delay FreqResponse", w, fzFRAt(fr, k), d.gd, d.beta, d.cond, d.slack)
 			}
 		})
+	}
+}
+
+// BenchmarkFreqResponseLFTCancel: in P(s)·(1 − e^{−sτ}), P = 1/(s+1), the
+// LFT sums ±P to a response ωτ smaller, so every point with ωτ < 1/8 takes
+// the closed-loop fallback, its worst case.
+func BenchmarkFreqResponseLFTCancel(b *testing.B) {
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-1, 0, 0, -1}),
+		mat.NewDense(2, 1, []float64{1, 0}),
+		mat.NewDense(1, 2, []float64{1, -1}),
+		mat.NewDense(1, 1, nil),
+		0,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := sys.SetInternalDelay([]float64{0.01}, mat.NewDense(2, 1, []float64{0, 1}), mat.NewDense(1, 2, nil),
+		mat.NewDense(1, 1, nil), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil)); err != nil {
+		b.Fatal(err)
+	}
+	omega := logspace(-3, 3, 200)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := sys.FreqResponse(omega); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

@@ -725,6 +725,7 @@ type lftWorkspace struct {
 	absorbed    *balancedDense // discrete delays as states, built on first use
 	absorbedErr error
 	closed      []complex128 // closedLoopInto's result, allocated on first use
+	frozen      []complex128 // evalFrLFTFrozenInto's buffers, allocated on first use
 }
 
 // newLFTWorkspace balances the augmented plant [|A|+|E| B B2; C C2 ·] so

@@ -372,8 +372,18 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error {
 	br := &ws.bd.balancedRealization
 	n, mN := br.n, m+N
-	K := make([]complex128, N*N)
-	lhs := make([]complex128, N*N)
+	nm := n + m
+	if ws.frozen == nil {
+		ws.frozen = make([]complex128, 2*N*N+N*nm+n*n+n*m)
+	}
+	buf := ws.frozen
+	clear(buf)
+	take := func(k int) []complex128 {
+		out := buf[:k:k]
+		buf = buf[k:]
+		return out
+	}
+	K, lhs, T, pencil, x := take(N*N), take(N*N), take(N*nm), take(n*n), take(n*m)
 	for i := range N {
 		K[i*N+i] = ws.delta[i]
 		for j := range N {
@@ -384,8 +394,6 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error
 	if err := cSolveInPlace(lhs, K, N, N); err != nil {
 		return err
 	}
-	nm := n + m
-	T := make([]complex128, N*nm)
 	for i := range N {
 		for k := range N {
 			kik := K[i*N+k]
@@ -402,8 +410,6 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error
 		}
 	}
 	scaled := !pt.isPlain() && br.e != nil
-	pencil := make([]complex128, n*n)
-	x := make([]complex128, n*m)
 	for i := range n {
 		for j := range n {
 			a := br.a[i*n+j]
