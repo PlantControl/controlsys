@@ -337,7 +337,7 @@ func FuzzC2DExpm(f *testing.F) {
 		}{
 			{"C2D(zoh)", sys, C2DOptions{}, fzMats{n, m, p, phiF, fzDiscRound(gam), s.C, s.D}, delta, 0},
 			{"C2D(foh)", sys, C2DOptions{Method: C2DMethodFOH}, fzMats{n, m, p, phiF, fzDiscRound(bo), s.C, fzDiscRound(do)}, 3 * delta * (1 + nPhi), 2 * nC * delta},
-			{"C2D(impulse)", zsys, C2DOptions{Method: C2DMethodImpulse}, fzMats{n, m, p, phiF, imB, s.C, imD}, dt * delta * (1 + fzFrob(s.B)), dt * nC * fzFrob(s.B) * 4 * eps},
+			{"C2D(impulse)", zsys, C2DOptions{Method: C2DMethodImpulse}, fzMats{n, m, p, phiF, imB, s.C, imD}, dt * delta * (1 + fzFrob(s.B)), kk * eps * dt * nC * fzFrob(s.B)},
 		}
 		for _, c := range cases {
 			sd, err := c.src.C2D(dt, c.opts)
