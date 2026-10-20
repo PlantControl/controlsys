@@ -209,8 +209,9 @@ func ioDelayOrZero(delay *mat.Dense, p, m int) *mat.Dense {
 // Parallel sums sys1 and sys2 driven by the same input (y = (sys1+sys2)·u),
 // as MATLAB parallel(sys1,sys2); see
 // https://www.mathworks.com/help/control/ref/dynamicsystem.parallel.html.
-// Delays common to both are kept at the boundary and the rest become
-// internal delays. Errors follow Series.
+// Delays common to both are kept at the boundary; when both have equal
+// total delay per channel the rest goes to the I/O delay matrix, otherwise
+// to internal delays. Errors follow Series.
 func Parallel(sys1, sys2 *System) (*System, error) {
 	if err := requireSystems("Parallel", sys1, sys2); err != nil {
 		return nil, err
@@ -280,61 +281,42 @@ func parallelSimple(sys1, sys2 *System, delayPlan interconnectionDelayPlan) (*Sy
 	return buildParallel(A, B, C, addDims(p, m, sys1.D, sys2.D))
 }
 
-func parallelDelay(sys1, sys2 *System) *mat.Dense {
-	if sys1.Delay == nil && sys2.Delay == nil {
-		return nil
-	}
-	_, m, p := sys1.Dims()
-	d1 := ioDelayOrZero(sys1.Delay, p, m)
-	d2 := ioDelayOrZero(sys2.Delay, p, m)
-	if mat.Equal(d1, d2) {
-		return mat.DenseCopyOf(d1)
-	}
-	return nil
-}
-
-func parallelInputOutputDelay(sys1, sys2 *System, m, p int, ioDelay *mat.Dense) (inputDelay, outputDelay []float64, resultIO *mat.Dense) {
-	resultIO = ioDelay
+// parallelInputOutputDelay keeps the per-channel minimum input/output delays
+// at the boundary and moves the rest of sys1's total delay into the I/O delay
+// matrix. Both systems must have equal total delays.
+func parallelInputOutputDelay(sys1, sys2 *System, m, p int) (inputDelay, outputDelay []float64, resultIO *mat.Dense) {
 	inputDelay = mergeParallelDelay(sys1.InputDelay, sys2.InputDelay, m)
 	outputDelay = mergeParallelDelay(sys1.OutputDelay, sys2.OutputDelay, p)
 
 	in1 := sliceOrZeros(sys1.InputDelay, m)
-	in2 := sliceOrZeros(sys2.InputDelay, m)
 	out1 := sliceOrZeros(sys1.OutputDelay, p)
-	out2 := sliceOrZeros(sys2.OutputDelay, p)
-
 	commonIn := sliceOrZeros(inputDelay, m)
 	commonOut := sliceOrZeros(outputDelay, p)
 
-	hasResidual := false
-	residual1 := mat.NewDense(p, m, nil)
-	residual2 := mat.NewDense(p, m, nil)
-	r1Raw := residual1.RawMatrix()
-	r2Raw := residual2.RawMatrix()
+	var d1 []float64
+	var d1Stride int
+	if sys1.Delay != nil {
+		raw := sys1.Delay.RawMatrix()
+		d1, d1Stride = raw.Data, raw.Stride
+	}
+	var data []float64
 	for i := range p {
 		for j := range m {
-			v1 := (in1[j] - commonIn[j]) + (out1[i] - commonOut[i])
-			v2 := (in2[j] - commonIn[j]) + (out2[i] - commonOut[i])
-			r1Raw.Data[i*r1Raw.Stride+j] = v1
-			r2Raw.Data[i*r2Raw.Stride+j] = v2
-			if v1 != 0 || v2 != 0 {
-				hasResidual = true
+			v := (in1[j] - commonIn[j]) + (out1[i] - commonOut[i])
+			if d1 != nil {
+				v += d1[i*d1Stride+j]
+			}
+			if v > 0 {
+				if data == nil {
+					data = make([]float64, p*m)
+				}
+				data[i*m+j] = v
 			}
 		}
 	}
-
-	if !hasResidual {
-		return
+	if data != nil {
+		resultIO = mat.NewDense(p, m, data)
 	}
-
-	if !mat.Equal(residual1, residual2) {
-		if resultIO == nil {
-			resultIO = mat.NewDense(p, m, nil)
-		} else {
-			resultIO = mat.DenseCopyOf(resultIO)
-		}
-	}
-
 	return
 }
 
