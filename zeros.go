@@ -244,9 +244,7 @@ func hybridZeros(sys *System, zeros []complex128, scale, tol float64, failed int
 		return zeros
 	}
 	cand = append(cand, low...)
-	f := refineZeros(sys, cand, scale, func(az float64) bool { return az < tol })
-	switch {
-	case f < failed, pencilNorm(sys) < scale:
+	if f := refineZeros(sys, cand, scale, func(az float64) bool { return az < tol }); f < failed || pencilNorm(sys) < scale {
 		return cand
 	}
 	return zeros
