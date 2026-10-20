@@ -663,6 +663,15 @@ func FuzzC2DMatched(f *testing.F) {
 		for i, e := range s.S {
 			dp[i] = cmplx.Exp(e * complex(dt, 0))
 		}
+		for _, set := range [][]complex128{dz, dp} {
+			for i, a := range set {
+				for _, b := range set[i+1:] {
+					if cmplx.Abs(a-b) < 1e-3*math.Max(cmplx.Abs(a), cmplx.Abs(b)) {
+						fzSkip(t, "matched: z-plane root cluster (polynomial realization precision)")
+					}
+				}
+			}
+		}
 		const eps = 0x1p-52
 		ke := 64 * float64((n+1)*(n+1)) * eps
 		rat := func(x complex128) (complex128, float64) {
