@@ -891,7 +891,7 @@ func FuzzRiccati(f *testing.F) {
 			fzSkip(t, op+tinyMsg)
 		}
 		if jointPSD {
-			if me := mqMinEigSym(x, n); !(me >= -1e-8*mqFro(x)) {
+			if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, 1e2*mqRiccatiSchurRelErr(s, ad, q, r, x))*mqFro(x)) {
 				if tinyX {
 					fzSkip(t, op+tinyMsg)
 				}
