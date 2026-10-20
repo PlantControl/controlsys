@@ -791,7 +791,10 @@ func (l *delayLoop) segments(grid []float64, R float64) []nyquistSegment {
 // axisSpanMargin times the span of the poles merged by addAxisPole around
 // their centre, which then needs the dominance below: poles 1.4e-7 apart
 // merged into a double pole indented by 1e-7, and the walk passed the
-// outer one at 1e-11, so the count was off by two. Where L
+// outer one at 1e-11, so the count was off by two. That radius is tried
+// even beyond indentLimit, as axisGap is: near a low-frequency pair the
+// conjugate lies within 1e2 of it. A growth there that does not match mult
+// reports a root only for clusterWinding to verify. Where L
 // cannot be evaluated there, as next to a multiple pole whose pencil the
 // solver deems singular, it grows up to indentLimit, so that the decade
 // stays within a tenth of the other poles and of the delay scale. An
@@ -812,7 +815,7 @@ func (l *delayLoop) indent() (float64, bool, error) {
 		}
 		gmax := l.indentLimit(a.w)
 		found := false
-		for k := 0; (k == 0 && !widened) || g0*math.Pow(10, float64(k)/2) <= gmax; k++ {
+		for k := 0; k == 0 || g0*math.Pow(10, float64(k)/2) <= gmax; k++ {
 			g := g0 * math.Pow(10, float64(k)/2)
 			near, ok1 := l.sample(a.w + g)
 			far, ok2 := l.sample(a.w + 10*g)
