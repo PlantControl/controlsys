@@ -440,12 +440,7 @@ func (s *fzSpec) System(t *testing.T, o fzSysOpts) *System {
 		}
 	}
 	if o.Internal && s.Tau > 0 && s.N > 0 {
-		b2 := make([]float64, s.N)
-		c2 := make([]float64, s.N)
-		for i := range s.N {
-			b2[i] = s.B[i*s.M]
-			c2[i] = 0.5 * math.Sin(float64(i)+s.Vals[11])
-		}
+		b2, c2 := fzFRInternalLoop(s)
 		err := sys.SetInternalDelay([]float64{s.Tau}, mat.NewDense(s.N, 1, b2), mat.NewDense(1, s.N, c2),
 			mat.NewDense(s.P, 1, nil), mat.NewDense(1, s.M, nil), mat.NewDense(1, 1, nil))
 		if err != nil {
