@@ -663,32 +663,41 @@ func FuzzC2DMatched(f *testing.F) {
 		for i, e := range s.S {
 			dp[i] = cmplx.Exp(e * complex(dt, 0))
 		}
-		for _, set := range [][]complex128{dz, dp} {
-			for i, a := range set {
-				for _, b := range set[i+1:] {
-					if cmplx.Abs(a-b) < 1e-3*math.Max(cmplx.Abs(a), cmplx.Abs(b)) {
-						fzSkip(t, "matched: z-plane root cluster (polynomial realization precision)")
-					}
-				}
-			}
-		}
 		const eps = 0x1p-52
 		ke := 64 * float64((n+1)*(n+1)) * eps
+		numRoots := slices.Clone(dz)
+		for range r {
+			numRoots = append(numRoots, -1)
+		}
+		// Wilkinson root condition of a polynomial realization: the library
+		// realizes the discrete ZPK through monic polynomials.
+		wilk := func(set []complex128, i int) float64 {
+			c := ke * 2 * cmplx.Abs(set[i])
+			for j, b := range set {
+				if j != i {
+					c *= (cmplx.Abs(set[i]) + cmplx.Abs(b)) / cmplx.Abs(set[i]-b)
+				}
+			}
+			return c
+		}
 		rat := func(x complex128) (complex128, float64) {
 			v, rel, mag := complex(1, 0), 0.0, 1.0
 			for i, z := range dz {
 				v *= x - z
 				mag *= cmplx.Abs(x) + cmplx.Abs(z)
-				rel += (1e-8*cmplx.Abs(zc[i]) + 1e-12/dt) * dt * cmplx.Abs(z) / cmplx.Abs(x-z)
+				rel += ((1e-8*cmplx.Abs(zc[i])+1e-12/dt)*dt*cmplx.Abs(z) + wilk(numRoots, i)) / cmplx.Abs(x-z)
 			}
-			for range r {
+			for k := range r {
 				v *= x + 1
 				mag *= cmplx.Abs(x) + 1
+				if cmplx.Abs(x+1) > 0 {
+					rel += wilk(numRoots, len(dz)+k) / cmplx.Abs(x+1)
+				}
 			}
 			for i, p := range dp {
 				v /= x - p
 				mag /= cmplx.Abs(x - p)
-				rel += (1e-8*cmplx.Abs(s.S[i]) + s.EigErr()) * dt * cmplx.Abs(p) / cmplx.Abs(x-p)
+				rel += ((1e-8*cmplx.Abs(s.S[i])+s.EigErr())*dt*cmplx.Abs(p) + wilk(dp, i)) / cmplx.Abs(x-p)
 			}
 			return v, rel + ke*mag/cmplx.Abs(v)
 		}
