@@ -397,7 +397,7 @@ func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err
 	if err != nil {
 		return 0, 0, err
 	}
-	if g, w := ws.refinedPeak(poles, norm); g > norm {
+	if g, w := ws.refinedPeak(poles, norm, omega); g > norm {
 		const tol = 1e-10
 		g, w, _ = ws.certifyPeak(g, w, tol)
 		return g * (1 + tol/2), w, nil
@@ -553,6 +553,7 @@ type hamiltonianWS struct {
 
 	cands []float64
 	freqs []float64
+	seeds []refinedSeed // the samples of lowerBound
 	eval  *sigmaEvaluator
 }
 
@@ -844,13 +845,8 @@ func (ws *hamiltonianWS) brentMax(peak, w, a, b float64, refine bool) (float64, 
 // pairs, so neither the seed grid nor the crossing midpoints need land on the
 // highest hump, and GEPP noise of 1e-8 picks the wrong seed of a broad hump
 // and stalls its climb.
-func (ws *hamiltonianWS) refinedPeak(poles []complex128, level float64) (peak, omega float64) {
+func (ws *hamiltonianWS) refinedPeak(poles []complex128, level, at float64) (peak, omega float64) {
 	sys := ws.sys
-	grid := ws.seedFreqs(poles, nil)
-	seeds := make([]refinedSeed, len(grid))
-	for i, w := range grid {
-		seeds[i] = refinedSeed{w: w, a: grid[max(i-1, 0)], b: grid[min(i+1, len(grid)-1)]}
-	}
 	var res []refinedSeed
 	for _, pole := range poles {
 		if sys.IsDiscrete() {
@@ -869,21 +865,41 @@ func (ws *hamiltonianWS) refinedPeak(poles []complex128, level float64) (peak, o
 	}
 	slices.SortFunc(res, func(x, y refinedSeed) int { return cmp.Compare(x.w, y.w) })
 	var starts []refinedSeed
-	for _, set := range [2][]refinedSeed{seeds, res} {
+	var top []int
+	for k, set := range [2][]refinedSeed{ws.seeds, res} {
+		top = top[:0]
 		for i := range set {
-			v, err := ws.eval.sigma(set[i].w, false)
-			if err != nil || math.IsNaN(v) {
-				return 0, 0
-			}
-			if v >= level*(1-1e-4) {
-				if v, err = ws.eval.sigma(set[i].w, true); err != nil {
+			if k == 1 {
+				v, err := ws.eval.sigma(set[i].w, false)
+				if err != nil || math.IsNaN(v) {
 					return 0, 0
 				}
+				set[i].v = v
 			}
-			set[i].v = v
+			set[i].refined = false
+			if set[i].v >= level*(1-1e-4) {
+				top = append(top, i)
+			}
+		}
+		slices.SortFunc(top, func(i, j int) int { return cmp.Compare(set[j].v, set[i].v) })
+		for _, i := range top[:min(len(top), 8)] {
+			v, err := ws.eval.sigma(set[i].w, true)
+			if err != nil {
+				return 0, 0
+			}
+			set[i].v, set[i].refined = v, true
+		}
+		below := func(j int, v float64) bool {
+			if j < 0 || j == len(set) {
+				return true
+			}
+			if set[j].refined {
+				return set[j].v <= v
+			}
+			return set[j].v <= v*(1+1e-6)
 		}
 		for i, s := range set {
-			if s.v >= level*(1-1e-4) && (i == 0 || set[i-1].v <= s.v) && (i+1 == len(set) || set[i+1].v <= s.v) {
+			if s.refined && below(i-1, s.v) && below(i+1, s.v) {
 				starts = append(starts, s)
 			}
 		}
@@ -891,7 +907,11 @@ func (ws *hamiltonianWS) refinedPeak(poles []complex128, level float64) (peak, o
 	slices.SortFunc(starts, func(x, y refinedSeed) int { return cmp.Compare(y.v, x.v) })
 	for _, s := range starts[:min(len(starts), 8)] {
 		v, w := s.v, s.w
-		if s.a < s.b {
+		x := s.w
+		if s.a <= at && at <= s.b {
+			x = at
+		}
+		if s.a < s.b && ws.refinedRise(s.a, s.b, x) {
 			v, w = ws.brentMax(v, w, s.a, s.b, true)
 		}
 		if v > peak {
@@ -901,8 +921,35 @@ func (ws *hamiltonianWS) refinedPeak(poles []complex128, level float64) (peak, o
 	return peak, omega
 }
 
-// refinedSeed is a start of refinedPeak: σ_max(w) = v, climbed on [a, b].
-type refinedSeed struct{ w, a, b, v float64 }
+// refinedRise reports whether the refined gain rises by more than 1e-13
+// relative from σ_max(x) at x ± h, h = 1e-6·(b − a) or 1e-3·(b − a): whether
+// the climb that ended at x may have stalled short of the local maximum on
+// GEPP noise, next to a sharp peak or on a broad hump.
+func (ws *hamiltonianWS) refinedRise(a, b, x float64) bool {
+	sv, err := ws.eval.sigma(x, true)
+	if err != nil {
+		return true
+	}
+	for _, rel := range [2]float64{1e-6, 1e-3} {
+		h := rel * (b - a)
+		for _, u := range [2]float64{x - h, x + h} {
+			if u < a || u > b || u < 0 {
+				continue
+			}
+			if s, err := ws.eval.sigma(u, true); err != nil || s > sv*(1+1e-13) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// refinedSeed is a start of refinedPeak: σ_max(w) = v, refined or by GEPP
+// alone, climbed on [a, b].
+type refinedSeed struct {
+	w, a, b, v float64
+	refined    bool
+}
 
 // seedFreqs appends to freqs ω = 0 and 50 log-spaced frequencies spanning
 // the magnitudes of poles; discrete models use the magnitudes of their Tustin
@@ -947,10 +994,15 @@ func (ws *hamiltonianWS) seedFreqs(poles []complex128, freqs []float64) []float6
 func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak float64) {
 	freqs := ws.seedFreqs(poles, ws.freqs[:0])
 	ws.freqs = freqs
-	if peak, w, err := ws.eval.peak(freqs, 0); err == nil {
-		gammaLow, omegaPeak = peak, w
+	ws.seeds = ws.seeds[:0]
+	peak, w, err := ws.eval.peak(freqs, 0)
+	if err != nil {
+		return 0, 0
 	}
-	return gammaLow, omegaPeak
+	for i, f := range freqs {
+		ws.seeds = append(ws.seeds, refinedSeed{w: f, a: freqs[max(i-1, 0)], b: freqs[min(i+1, len(freqs)-1)], v: ws.eval.vals[i]})
+	}
+	return peak, w
 }
 
 // sigmaEvaluator computes σ_max(G) at single frequencies to near working
