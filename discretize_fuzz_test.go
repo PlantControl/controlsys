@@ -681,7 +681,7 @@ func FuzzC2DMatched(f *testing.F) {
 			return c
 		}
 		rat := func(x complex128) (complex128, float64) {
-			v, rel, mag := complex(1, 0), 0.0, 1.0
+			v, rel, mag, pmag := complex(1, 0), 0.0, 1.0, 1.0
 			for i, z := range dz {
 				v *= x - z
 				mag *= cmplx.Abs(x) + cmplx.Abs(z)
@@ -697,9 +697,10 @@ func FuzzC2DMatched(f *testing.F) {
 			for i, p := range dp {
 				v /= x - p
 				mag /= cmplx.Abs(x - p)
+				pmag *= (cmplx.Abs(x) + cmplx.Abs(p)) / cmplx.Abs(x-p)
 				rel += ((1e-8*cmplx.Abs(s.S[i])+s.EigErr())*dt*cmplx.Abs(p) + wilk(dp, i)) / cmplx.Abs(x-p)
 			}
-			return v, rel + ke*mag/cmplx.Abs(v)
+			return v, rel + ke*(mag+pmag)/cmplx.Abs(v)
 		}
 		v1, rel1 := rat(1)
 		K := hc0[0] / v1
