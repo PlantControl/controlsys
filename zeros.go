@@ -220,8 +220,9 @@ func eigZeros(sys *System, DinvC *mat.Dense) ([]complex128, error) {
 }
 
 // hybridZeros replaces the eig zeros below tol by the staircase zeros below
-// tol when both sets have the same size and the staircase seeds refine with
-// fewer failures.
+// tol when both sets have the same size and either the staircase seeds
+// refine with fewer failures or their a priori error ε·‖[A B; C D]‖ is below
+// the eig one ε·scale (a near-multiple zero fails refinement either way).
 func hybridZeros(sys *System, zeros []complex128, scale, tol float64, failed int) []complex128 {
 	st, _, err := prescaledStaircaseZeros(sys, zerosPrescale(sys))
 	if err != nil {
@@ -243,10 +244,12 @@ func hybridZeros(sys *System, zeros []complex128, scale, tol float64, failed int
 		return zeros
 	}
 	cand = append(cand, low...)
-	if refineZeros(sys, cand, scale, func(az float64) bool { return az < tol }) >= failed {
-		return zeros
+	f := refineZeros(sys, cand, scale, func(az float64) bool { return az < tol })
+	switch {
+	case f < failed, pencilNorm(sys) < scale:
+		return cand
 	}
-	return cand
+	return zeros
 }
 
 // prescaledStaircaseZeros returns the staircase zeros and normal rank of the
