@@ -733,22 +733,30 @@ func mqRiccatiSep(s *fzSpec, acl, q, r []float64) (sep, h float64) {
 	return math.Max(0, 2*margin/h), h
 }
 
-// mqRiccatiBelowSchurAccuracy reports ‖X‖ below eps·h/sep, the absolute
-// accuracy of the Schur method: Care/Dare then return X with no correct
-// digits although X is well determined by the data (known followup).
-func mqRiccatiBelowSchurAccuracy(s *fzSpec, acl, q, r, x []float64) bool {
-	return mqRiccatiSchurRelErr(s, acl, q, r, x) > 1
-}
-
-// mqRiccatiSchurRelErr returns eps·h/(sep·‖X‖), the relative accuracy of
-// the unscaled Schur method: for ‖X‖ ≪ h (e.g. Q ≈ 1e-12 against ‖A‖ ≈ 1)
-// X keeps only that many digits (known followup: no cost scaling).
+// mqRiccatiSchurRelErr returns eps·ĥ/(sep·h/2), the relative accuracy of
+// the cost-scaled Schur method (Care/Dare rescale Q, R, S by about ‖X‖):
+// ĥ = max(‖A‖, ‖X‖·‖BR⁻¹Bᵀ‖, ‖Q‖/‖X‖) (at least 1 for discrete) is the
+// scaled pencil and sep·h/2 the closed-loop margin, times the 2048 the
+// rescale threshold leaves.
 func mqRiccatiSchurRelErr(s *fzSpec, acl, q, r, x []float64) float64 {
 	sep, h := mqRiccatiSep(s, acl, q, r)
-	if !(sep > 0) {
+	nx := mqFro(x)
+	if !(sep > 0) || !(nx > 0) {
 		return 0
 	}
-	return 0x1p-52 * h / (sep * mqFro(x))
+	n, m := s.N, s.M
+	var ri, g, bri mat.Dense
+	if err := ri.Inverse(mqDense(m, m, r)); err != nil {
+		return 0
+	}
+	B := mqDense(n, m, s.B)
+	bri.Mul(B, &ri)
+	g.Mul(&bri, B.T())
+	hs := math.Max(mqFro(s.A), math.Max(nx*mqFro(mqRaw(&g)), mqFro(q)/nx))
+	if s.Discrete {
+		hs = math.Max(hs, 1)
+	}
+	return 2048 * 0x1p-52 * hs / (sep * h / 2)
 }
 
 // FuzzRiccati: Care (continuous spec) or Dare (discrete) with A, B from
@@ -845,9 +853,9 @@ func FuzzRiccati(f *testing.F) {
 		if !(ke <= 1e-10*kden) {
 			t.Fatalf("%s: gain residual %.3g (scale %.3g)\nX=%v\nK=%v\n%s", op, ke, kden, x, k, s)
 		}
-		tinyX := mqRiccatiBelowSchurAccuracy(s, ad, q, r, x)
-		resFail := !(re <= math.Max(tol, 1e2*mqRiccatiSchurRelErr(s, ad, q, r, x))*rden)
-		if resFail && !tinyX {
+		illR := mat.Cond(mqDense(m, m, r), 2) > 1e6
+		resFail := !(re <= math.Max(tol, mqRiccatiSchurRelErr(s, ad, q, r, x))*rden)
+		if resFail && !illR {
 			t.Fatalf("%s: Riccati residual %.3g (scale %.3g, rcnd %.3g)\nX=%v\nK=%v\n%s", op, re, rden, res.Rcnd, x, k, s)
 		}
 		cp := fzCharPolyExact(ad, n)
@@ -883,20 +891,23 @@ func FuzzRiccati(f *testing.F) {
 			nb := mqFro(s.B)
 			hs = mqFro(q) + nb*nb/rr
 		}
+		const illRMsg = ": R ill-conditioned, extended pencil loses digits (known followup)"
 		if d := cmplx.Abs(tr - complex(trA, 0)); !(d <= 1e-6*float64(n)*(mqFro(s.A)+mqFro(mqRaw(&bk))+1e-6*hs)) {
+			if illR {
+				fzSkip(t, op+illRMsg)
+			}
 			t.Fatalf("%s: Σ Eig = %v, trace(A−BK) = %v\nEig=%v\n%s", op, tr, trA, res.Eig, s)
 		}
-		const tinyMsg = ": ‖X‖ below Schur-method accuracy eps·h/sep, X inaccurate (known followup)"
-		if resFail {
-			fzSkip(t, op+tinyMsg)
-		}
 		if jointPSD {
-			if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, 1e2*mqRiccatiSchurRelErr(s, ad, q, r, x))*mqFro(x)) {
-				if tinyX {
-					fzSkip(t, op+tinyMsg)
+			if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, mqRiccatiSchurRelErr(s, ad, q, r, x))*mqFro(x)) {
+				if illR {
+					fzSkip(t, op+illRMsg)
 				}
 				t.Fatalf("%s: PSD cost but min eig(X) = %.3g\nX=%v\n%s", op, me, x, s)
 			}
+		}
+		if resFail {
+			fzSkip(t, op+illRMsg)
 		}
 	})
 }
