@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
+	"math/cmplx"
 	"testing"
 )
 
@@ -83,5 +85,107 @@ func TestPidtuneZeroDCUnstablePUnattainable(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// X46RST: on a discrete plant with a pole cluster at z = 1, the gate before
+// e3d0a6d/49041a9 read NaN plant samples, rejecting every family with
+// "phase margin NaN°" (amd64) or returning PM 0.84° (arm64). Every design
+// now keeps 58.5° at every crossover with |S| ≤ 4. Oracle: exact Schur–Cohn
+// test (float closed-loop roots cannot resolve PI/PID/PIDF here), signed
+// margins and |S| of the loop with the plant evaluated in 256-bit arithmetic:
+// float64 Horner on den loses |G| below ω ≈ 1e-4 (I: 307 spurious crossovers,
+// |S| 232; true PM 58.7°, |S| 1.36).
+func TestPidtuneDisplacedIntegratorMeetsBar(t *testing.T) {
+	num := Poly{1.8748015424080903e-16}
+	den := Poly{1, -6.656527066165689, 18.974082402962605, -30.020939359334676, 28.473509438245436, -16.187809823253666, 5.1075991528389695, -0.6899147452929796}
+	const dt = 0.1
+	p := pidtuneBackoffPlant(t, num, den, dt, 0)
+	for _, f := range pidtuneAllTypes {
+		pid, err := Pidtune(p, f, 0, nil)
+		if err != nil {
+			if f == PidtuneI && errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				continue
+			}
+			t.Errorf("%s: %v", f, err)
+			continue
+		}
+		if !pidtuneExactSchur(pid, num, den, dt) {
+			t.Errorf("%s: %+v unstable", f, pid)
+		}
+		numC, denC := pidtuneOracleController(pid, dt)
+		L := func(w float64) complex128 {
+			z := cmplx.Exp(complex(0, w*dt))
+			return numC.Eval(z) / denC.Eval(z) * pidtuneBigEval(num, z) / pidtuneBigEval(den, z)
+		}
+		pms, ms := pidtuneSignedMargins(L, 1e-8, math.Pi/dt)
+		if len(pms) == 0 || ms > pidTuningMaxSensitivity+0.05 {
+			t.Errorf("%s: %+v crossovers %v, |S| %.3g", f, pid, pms, ms)
+		}
+		for _, m := range pms {
+			if math.Abs(m) < 58.5 {
+				t.Errorf("%s: %+v margin %.3g°", f, pid, m)
+			}
+		}
+	}
+}
+
+// pidtuneBigEval returns p(z) by Horner's rule in 256-bit arithmetic,
+// exact for the float64 z and coefficients up to the final rounding.
+func pidtuneBigEval(p Poly, z complex128) complex128 {
+	const prec = 256
+	f := func(v float64) *big.Float { return new(big.Float).SetPrec(prec).SetFloat64(v) }
+	zr, zi := f(real(z)), f(imag(z))
+	re, im, nr, ni, x, c := f(0), f(0), f(0), f(0), f(0), f(0)
+	for _, v := range p {
+		nr.Mul(re, zr)
+		nr.Sub(nr, x.Mul(im, zi))
+		ni.Mul(re, zi)
+		ni.Add(ni, x.Mul(im, zr))
+		nr.Add(nr, c.SetFloat64(v))
+		re, nr, im, ni = nr, re, ni, im
+	}
+	a, _ := re.Float64()
+	b, _ := im.Float64()
+	return complex(a, b)
+}
+
+// X46RST: auto PID on this unstable biproper plant returns Kd = 0 with
+// |L(wc)| = 1 at the minimum of |L|, ∠L = −120° there; |L| ≥ 1 elsewhere
+// (6.3 at 1e-7, 1.31 plateau, 2.24 at ∞), so a sign-change scan sees no
+// crossover. Not spurious: the touch keeps 60° and |S| 3.31. The touch is
+// fragile, outside the bar: gains ×0.99 cross at 49.9° and 70.0°, ×0.9 at
+// 26.5° with |S| 5.7. Oracle: exact Routh test, |S| and signed margins of
+// the directly evaluated loop, and its |L| minimum on a dense log grid.
+func TestPidtuneTangentCrossoverMeetsBar(t *testing.T) {
+	num := Poly{1.7837475641504483, 0.7946993866758785, 1.4552772148607651, 6.888693123877885e-07}
+	den := Poly{1, 0.1506135003142426, 1.3911883292147762, 0.612642264165268}
+	pid, err := Pidtune(pidtuneBackoffPlant(t, num, den, 0, 0), PidtunePID, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pidtuneExactHurwitz(pid, num, den) {
+		t.Errorf("%+v unstable", pid)
+	}
+	L := pidtuneOracleLoop(pid, num, den, 0, 0)
+	pms, ms := pidtuneSignedMargins(L, 1e-9, 1e6)
+	if ms > pidTuningMaxSensitivity {
+		t.Errorf("%+v |S| %.3g", pid, ms)
+	}
+	for _, m := range pms {
+		if math.Abs(m) < 58.5 {
+			t.Errorf("%+v margin %.3g°", pid, m)
+		}
+	}
+	best, low := 0.0, math.Inf(1)
+	for e := -1.0; e <= 1; e += 1e-5 {
+		w := math.Pow(10, e)
+		if a := cmplx.Abs(L(w)); a < low {
+			best, low = w, a
+		}
+	}
+	m := 180 - math.Abs(cmplx.Phase(L(best)))*180/math.Pi
+	if math.Abs(low-1) > 1e-6 || m < 58.5 {
+		t.Errorf("%+v: min |L| %.9g at %g, margin %.3g°", pid, low, best, m)
 	}
 }
