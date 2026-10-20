@@ -19,7 +19,6 @@ type complexSVDWorkspace struct {
 	super  []float64
 	qwork  []float64
 	scale  float64
-	nSV    int
 	gramN  int
 	blockN int
 	useCol bool
@@ -41,7 +40,6 @@ func newComplexSVDWorkspace(p, m int) *complexSVDWorkspace {
 		diag:   make([]float64, gramN),
 		super:  make([]float64, gramN),
 		qwork:  make([]float64, 4*gramN),
-		nSV:    gramN,
 		gramN:  gramN,
 		blockN: blockN,
 		useCol: m <= p,
