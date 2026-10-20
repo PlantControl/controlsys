@@ -224,3 +224,44 @@ func TestDare_NoScalingInaccurateRescued(t *testing.T) {
 		}
 	}
 }
+
+// TestCare_FirstPassFailureRescued: Q ≈ 1e-11, R ≈ 1e-13 against ‖A‖ ≈ 1e3
+// made the unscaled Hamiltonian's Schur form fail (ErrSchurFailed) while Q
+// and R scaled by 1.26e11 solved; plain Care now retries at the cost scale
+// of firstSigma, as the pencil path does. X/σ of the scaled problem and
+// Newton–Kleinman agree.
+func TestCare_FirstPassFailureRescued(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{-150.1254541058614, 861.8876560705226, -154.196747075072, -596.3080862186198, 174.50657660928363, -79.14413749733106, 43.468189671386725, 169.51587228776938, -24.147067707965693})
+	B := mat.NewDense(3, 1, []float64{-0.032538605969929794, -0.1146638523470365, -0.032744100134825364})
+	Q := mat.NewDense(3, 3, []float64{1.6648464612954922e-11, -1.8919379138824958e-11, -5.662071014148134e-12, -1.8919379138824958e-11, 2.1890546288811565e-11, 8.549214239938527e-12, -5.662071014148134e-12, 8.549214239938527e-12, 1.3379022870767825e-11})
+	R := mat.NewDense(1, 1, []float64{1.1838247062205125e-13})
+	const f = 1.26e11
+	var Qs, Rs mat.Dense
+	Qs.Scale(f, Q)
+	Rs.Scale(f, R)
+	ref, err := Care(A, B, &Qs, &Rs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref.X.Scale(1/f, ref.X)
+	want := newtonCare(t, A, B, Q, R, ref.K)
+	if e := relErr(ref.X, want); !(e <= 1e-10) {
+		t.Fatalf("oracles disagree: rel err %g", e)
+	}
+	for _, noScaling := range []bool{false, true} {
+		t.Run(fmt.Sprintf("NoScaling=%v", noScaling), func(t *testing.T) {
+			res, err := Care(A, B, Q, R, &RiccatiOpts{NoScaling: noScaling})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e := relErr(res.X, want); !(e <= 1e-10) {
+				t.Errorf("X rel err %g against Newton–Kleinman", e)
+			}
+			for _, v := range res.Eig {
+				if !(real(v) < 0) {
+					t.Errorf("closed-loop eigenvalue %v not stable", v)
+				}
+			}
+		})
+	}
+}

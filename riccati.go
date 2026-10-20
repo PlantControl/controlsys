@@ -196,7 +196,10 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // ‖X‖ is far from the scale of the Hamiltonian (for example a cost Q, R
 // tiny against A), Care solves again with Q, R, S divided by a power of
 // two near ‖X‖, which keeps the relative accuracy of X. opts.NoScaling
-// disables both.
+// disables both. A failed first solve (Schur failure, no stabilizing
+// subspace) is retried, also under NoScaling, at the cost scale
+// √(‖Q̄‖/‖G‖); the retry's X is kept only with a Riccati residual within
+// 1e-6 of its terms and a stable A − BK, else the first error is returned.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -323,26 +326,35 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 				X, xData, rcnd, err = problem.stabilizingSolution(vs)
 			}
 		}
-		if err != nil || (prev != nil && !finiteSlice(xData)) {
-			if prev == nil {
-				return nil, err
-			}
-			X, xData, rcnd = problem.restorePass(prev)
-			break
+		if err == nil && !finiteSlice(xData) {
+			err = ErrNoStabilizing
 		}
-		if prev == nil && problem.costScaling {
-			norms = riccatiNorms{
-				a:     impl.Dlange(lapack.Frobenius, n, n, aWork, n, nil),
-				q:     impl.Dlange(lapack.Frobenius, n, n, qWork, n, nil),
-				g:     impl.Dlange(lapack.Frobenius, n, n, g, n, nil),
-				kappa: 1,
+		if err != nil {
+			if prev != nil {
+				X, xData, rcnd = problem.restorePass(prev)
+				break
 			}
+			if problem.rescueErr != nil {
+				return nil, problem.rescueErr
+			}
+			problem.rescueErr, problem.costScaling = err, true
+			norms = hamiltonianNorms(n, aWork, qWork, g)
+			problem.sigma, problem.balanced = norms.firstSigma(), true
+			continue
+		}
+		if prev == nil && problem.costScaling && problem.rescueErr == nil {
+			norms = hamiltonianNorms(n, aWork, qWork, g)
 		}
 		if !problem.rescaleCost(true, norms, xData, &prev, rcnd) {
 			if problem.keepBest(true, prev, xData) {
 				X, xData, rcnd = problem.restorePass(prev)
 			}
 			break
+		}
+	}
+	if problem.rescueErr != nil {
+		if res, scale := problem.residualTerms(true, xData); !(res <= rescueTol*scale) {
+			return nil, problem.rescueErr
 		}
 	}
 
@@ -370,8 +382,21 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	}
 	impl.Dpotrs(blas.Upper, m, n, rChol, m, kData, n)
 	K := mat.NewDense(m, n, kData)
-
+	if err := problem.rescued(true, K); err != nil {
+		return nil, err
+	}
 	return problem.result(X, K, eig, rcnd), nil
+}
+
+// hamiltonianNorms returns the riccatiNorms of care's Hamiltonian blocks
+// Ā, Q̄ and G (n×n, row-major).
+func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
+	return riccatiNorms{
+		a:     impl.Dlange(lapack.Frobenius, n, n, a, n, nil),
+		q:     impl.Dlange(lapack.Frobenius, n, n, q, n, nil),
+		g:     impl.Dlange(lapack.Frobenius, n, n, g, n, nil),
+		kappa: 1,
+	}
 }
 
 // Dare solves the discrete algebraic Riccati equation:
