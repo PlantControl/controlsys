@@ -201,7 +201,7 @@ func fzTRTol(s *fzSpec, k int, dt, tk float64) float64 {
 // zero head of a delayed channel); nil want samples (NaN) are not compared.
 func fzTRCompare(t *testing.T, s *fzSpec, op string, row int, T, got, want, mag []float64) {
 	t.Helper()
-	fzTROverflow(t, s, op, T)
+	fzTROverflow(t, s, T)
 	dt := 0.0
 	if len(T) > 1 {
 		dt = T[1] - T[0]
@@ -230,7 +230,7 @@ func fzTRCompare(t *testing.T, s *fzSpec, op string, row int, T, got, want, mag 
 // fzTROverflow skips horizons over which an unstable mode overflows the
 // state: delayed outputs then read Inf·0 = NaN where the exact response is
 // still zero or finite.
-func fzTROverflow(t *testing.T, s *fzSpec, op string, T []float64) {
+func fzTROverflow(t *testing.T, s *fzSpec, T []float64) {
 	t.Helper()
 	grow := 0.0
 	for k, e := range s.Eig {
@@ -242,18 +242,6 @@ func fzTROverflow(t *testing.T, s *fzSpec, op string, T []float64) {
 	}
 	if grow > 600 {
 		fzSkip(t, "unstable state overflows on the horizon")
-	}
-	// Known defect (followup): ZOH C2D realizes a fractional output delay ρ
-	// as C·e^{−Aρ} applied to the next sample, which amplifies roundoff by
-	// up to e^{(max Re s − min Re s)ρ} (0 included: the input level).
-	if op != "Initial" && !s.Discrete && (s.Out != nil || s.IO != nil) && len(T) > 1 {
-		hi, lo := 0.0, 0.0
-		for _, e := range s.S {
-			hi, lo = math.Max(hi, real(e)), math.Min(lo, real(e))
-		}
-		if (hi-lo)*(T[1]-T[0]) > 5 {
-			fzSkip(t, "stiff mode with fractional output delay (C·e^{−Aρ})")
-		}
 	}
 }
 
