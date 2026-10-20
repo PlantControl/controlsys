@@ -26,7 +26,7 @@ func TestTunePIDSkipsStabilityForLosingCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sign := pidTuningDCSign(plant, eval.at, wc0)
+	sign := pidTuningDCSign(plant, eval.try, wc0)
 	wc, ok := pidTuningPhaseCrossing(eval.at, sign, -180+60-15, wc0*1e-6, wc0*1e4, tau)
 	if !ok {
 		t.Fatal("no moved crossover")

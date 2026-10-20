@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -122,8 +123,8 @@ func (tf *TransferFunc) EvalMulti(freqs []complex128) ([][][]complex128, error) 
 	return result, nil
 }
 
-// TransferFuncOpts tolerances are absolute and apply to the balanced
-// realization (see TransferFunction); zero selects a norm-relative default.
+// TransferFuncOpts tolerances are absolute and apply to the balanced,
+// I/O-scaled realization (see TransferFunction); zero selects a norm-relative default.
 type TransferFuncOpts struct {
 	ControllabilityTol float64
 	ObservabilityTol   float64
@@ -151,8 +152,13 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // delay (IODelay, InputDelay, OutputDelay) folded into TransferFunc.Delay.
 // Internal (LFT) delays have no TransferFunc form and are rejected.
 //
-// A is first balanced by an exact power-of-two similarity, which removes
-// accuracy loss caused by poor state scaling. The polynomial form itself
+// [A B; C ·] is first balanced by an exact power-of-two state similarity,
+// and each input and output scaled by a power of two toward ‖A‖, which
+// removes accuracy loss caused by poor state or I/O scaling (a tiny but
+// nonzero B or C is not dropped as uncontrollable). When that scaling
+// overflows a coefficient the unscaled realization is used, and when
+// coefficients overflow float64 regardless the error is ErrOverflow.
+// The polynomial form itself
 // stays ill-conditioned for high order or wide dynamic range: coefficients
 // of e.g. a 30-state chain spanning 1e-3..1e3 rad/s, or a discrete model
 // with poles clustered near z = 1, can evaluate with O(1) relative error.
@@ -225,55 +231,123 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return c.result(0), nil
 	}
 
-	a, b, cm := c.balancedABC()
-	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+	order, scaled, err := c.convertBalanced(true)
 	if err != nil {
 		return nil, err
 	}
-	ncont := stair.NCont
+	if scaled && !c.finiteCoeffs() {
+		if order, _, err = c.convertBalanced(false); err != nil {
+			return nil, err
+		}
+	}
+	if !c.finiteCoeffs() {
+		return nil, fmt.Errorf("TransferFunction: %w", ErrOverflow)
+	}
+	return c.result(order), nil
+}
 
-	if ncont == 0 {
+// convertBalanced fills the rows from the balanced realization, I/O-scaled
+// when ioScale; scaled reports whether any I/O scale was not 1. Scaling a
+// tiny B or C up toward a huge ‖A‖ can overflow coefficients that are
+// finite without it.
+func (c rowRealizationConverter) convertBalanced(ioScale bool) (order int, scaled bool, err error) {
+	a, b, cm, inExp, outExp := c.balancedABC(false, ioScale)
+	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+	if err != nil {
+		return 0, false, err
+	}
+	if stair.NCont < c.n {
+		a, b, cm, inExp2, outExp2 := c.balancedABC(true, ioScale)
+		alt, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+		if err != nil {
+			return 0, false, err
+		}
+		if alt.NCont == c.n {
+			stair, inExp, outExp = alt, inExp2, outExp2
+		}
+	}
+	scaled = slices.ContainsFunc(inExp, func(e int) bool { return e != 0 }) ||
+		slices.ContainsFunc(outExp, func(e int) bool { return e != 0 })
+	if stair.NCont == 0 {
+		clear(c.rows)
 		c.fillStaticRows()
-		return c.result(0), nil
+		return 0, scaled, nil
 	}
-
-	totalOrder := c.convertDynamicRows(stair, ncont)
-	return c.result(totalOrder), nil
+	return c.convertDynamicRows(stair, stair.NCont, inExp, outExp), scaled, nil
 }
 
-// balancedABC returns D⁻¹AD, D⁻¹B, CD for the exact power-of-two scaling D
-// from Dgebal. The transfer function is unchanged, but the orthogonal
-// staircase and Hessenberg reductions are only normwise backward stable, so
-// without it small entries of badly scaled A (Padé cascades, stiff chains)
-// are swamped and coefficients lose most of their digits.
-func (c rowRealizationConverter) balancedABC() (a, b, cm *mat.Dense) {
+func (c rowRealizationConverter) finiteCoeffs() bool {
+	bad := func(x float64) bool { return math.IsInf(x, 0) || math.IsNaN(x) }
+	for i := range c.p {
+		if slices.ContainsFunc(c.tf.Den[i], bad) {
+			return false
+		}
+		for _, num := range c.tf.Num[i] {
+			if slices.ContainsFunc(num, bad) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// balancedABC returns D⁻¹AD, D⁻¹B·diag(2^inExp), diag(2^outExp)·CD for an
+// exact power-of-two state scaling D, followed by power-of-two I/O scales
+// (ioPow2Scales), so entry (i, j) of the transfer matrix is only scaled by
+// 2^(inExp[j]+outExp[i]). The staircase floor and the orthogonal reductions
+// are relative to ‖A‖: without them a tiny but nonzero B or C is dropped as
+// uncontrollable, and badly scaled A (Padé cascades, stiff chains) loses most
+// of its digits. D is from Dgebal on A, or with osborne from the balance of
+// [A B; C ·] (SLICOT TB01ID); Dgebal is more accurate on the cascades but can
+// shrink a companion chain's couplings below the staircase floor, so when
+// states are lost convert takes the osborne realization if it is fully
+// controllable (a partial count from either is equally ambiguous). MATLAB
+// tf(ss) removes only structurally disconnected states, so keeping states
+// that are controllable in some exact scaling is on MATLAB's side.
+func (c rowRealizationConverter) balancedABC(osborne, ioScale bool) (a, b, cm *mat.Dense, inExp, outExp []int) {
 	n, m, p := c.n, c.m, c.p
-	aData := make([]float64, n*n)
-	raw := c.sys.A.RawMatrix()
-	copyStrided(aData, n, raw.Data, raw.Stride, n, n)
-	scale := make([]float64, n)
-	impl.Dgebal(lapack.Scale, n, aData, n, scale)
-	b = mat.NewDense(n, m, nil)
-	b.Copy(c.sys.B)
-	cm = mat.NewDense(p, n, nil)
-	cm.Copy(c.sys.C)
-	bRaw, cRaw := b.RawMatrix(), cm.RawMatrix()
-	for i, d := range scale {
-		if d == 1 {
-			continue
-		}
-		inv := 1 / d
-		for j := range m {
-			bRaw.Data[i*bRaw.Stride+j] *= inv
-		}
-		for r := range p {
-			cRaw.Data[r*cRaw.Stride+i] *= d
+	br := newRealizationCopy(c.sys, n, m, p)
+	if osborne {
+		br.balance(nil)
+	} else {
+		scale := make([]float64, n)
+		impl.Dgebal(lapack.Scale, n, br.a, n, scale)
+		for i, d := range scale {
+			if d == 1 {
+				continue
+			}
+			inv := 1 / d
+			for j := range m {
+				br.b[i*m+j] *= inv
+			}
+			for r := range p {
+				br.c[r*n+i] *= d
+			}
 		}
 	}
-	return mat.NewDense(n, n, aData), b, cm
+	a, b, cm = mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c)
+	exps := make([]int, m+p)
+	inExp, outExp = exps[:m], exps[m:]
+	if !ioScale {
+		return a, b, cm, inExp, outExp
+	}
+	in, out, unit := ioPow2Scales(a, b, cm)
+	if unit {
+		return a, b, cm, inExp, outExp
+	}
+	applyIOScales(b, cm, in, out)
+	for j, s := range in {
+		_, e := math.Frexp(s)
+		inExp[j] = e - 1
+	}
+	for i, s := range out {
+		_, e := math.Frexp(s)
+		outExp[i] = e - 1
+	}
+	return a, b, cm, inExp, outExp
 }
 
-func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int) int {
+func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int, inExp, outExp []int) int {
 	Ac := extractSubmatrix(stair.A, 0, ncont, 0, ncont)
 	Bc := extractSubmatrix(stair.B, 0, ncont, 0, c.m)
 	Cc := extractSubmatrix(stair.C, 0, c.p, 0, ncont)
@@ -292,6 +366,11 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 		c.tf.Num[i] = make([][]float64, c.m)
 		for j := 0; j < c.m; j++ {
 			num := numCoeffs[j]
+			if e := inExp[j] + outExp[i]; e != 0 {
+				for k := range num {
+					num[k] = math.Ldexp(num[k], -e)
+				}
+			}
 			dij := c.dRaw.Data[i*c.dRaw.Stride+j]
 			if dij != 0 {
 				numWithD := Poly(num).Add(Poly(den).Scale(dij))

@@ -72,8 +72,12 @@ func (r *DiskMarginResult) PeakFreq() (w float64, ok bool) { return r.peakFreq, 
 // sisoEval evaluates a SISO loop on the boundary of the stability region.
 // It reuses one point evaluator, the state-space solver or the internal-delay
 // LFT workspace, so refinement loops pay its setup once and high-order loops
-// keep state-space accuracy. Unless extended or exact, each value is
-// bit-identical to FreqResponse at the same ω.
+// keep state-space accuracy. Unless extended or exact, each value the double
+// solve resolves is bit-identical to FreqResponse at the same ω. Where it
+// fails, at takes the pole limit in double (ddGate.limit) instead of
+// FreqResponse's double-double response, and a failure there stands: the
+// rational margin search and the PID screens read it as unresolved, as next
+// to an origin or Nyquist cluster or multiple poles at z = 1.
 //
 // at keeps the signature func(float64) complex128 so it can be passed as a
 // response function; a failed evaluation returns NaN and is kept in err,
@@ -90,8 +94,8 @@ type sisoEval struct {
 	skipped  error
 	resolved bool
 	// extended falls back to ddSISOResponse where the double solve fails;
-	// see rationalLoop.gainCrossings. ddAllow, when set, limits the
-	// fallback to the frequencies it accepts.
+	// see rationalLoop.gainCrossings and the delayed grid in allMargin.
+	// ddAllow, when set, limits the fallback to the frequencies it accepts.
 	extended bool
 	ddAllow  func(w float64) bool
 	// exact evaluates in double-double first: beside a pair 1 ± jε the
@@ -476,7 +480,11 @@ func allMargin(sys *System) (*AllMarginResult, error) {
 		return nil, err
 	}
 	if loop == nil || loop.delayed {
+		// Next to an origin pole cluster the double solve fails off every
+		// pole; the grid walk needs the double-double response there.
+		eval.extended = true
 		gain, phase, err := gridMarginCrossings(sys, eval, loop == nil)
+		eval.extended = false
 		if err != nil {
 			return nil, err
 		}
@@ -491,7 +499,13 @@ func allMargin(sys *System) (*AllMarginResult, error) {
 		res.PhaseMargins = append(res.PhaseMargins, phaseMarginDeg(eval.at(w)))
 	}
 	for _, w := range res.PhaseCrossFreqs {
-		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(eval.at(w))))
+		h := eval.at(w)
+		if loop != nil && loop.discrete() && w == loop.nyquist() {
+			if hn, _, _, ok := loop.nyquistResponse(); ok {
+				h = hn
+			}
+		}
+		res.GainMargins = append(res.GainMargins, -20*math.Log10(cmplx.Abs(h)))
 	}
 	eval.extended, eval.exact = false, false
 	if err := eval.checkSkipped(); err != nil {
@@ -511,7 +525,7 @@ func gridMarginCrossings(sys *System, eval *sisoEval, withGain bool) (gain, phas
 	phaseDeg := make([]float64, len(omega))
 	for k, h := range resp {
 		magDB[k] = 20 * math.Log10(cmplx.Abs(h))
-		phaseDeg[k] = cmplx.Phase(h) * 180 / math.Pi
+		phaseDeg[k] = finitePhaseDeg(h)
 	}
 	if withGain {
 		for _, c := range findCrossings(omega, magDB, 0.0) {
@@ -525,13 +539,23 @@ func gridMarginCrossings(sys *System, eval *sisoEval, withGain bool) (gain, phas
 	}
 	for _, c := range phaseCrossings(omega, phaseDeg, -180.0) {
 		w := refineCrossing(omega[c.idx], omega[c.idx+1], func(w float64) float64 {
-			return phaseOffsetDeg(eval.at(w))
+			return wrapDegrees(finitePhaseDeg(-eval.at(w)))
 		})
 		if math.Abs(phaseOffsetDeg(eval.at(w))) <= 1 {
 			phase = append(phase, w)
 		}
 	}
 	return gain, phase, nil
+}
+
+// finitePhaseDeg is arg h in degrees, or NaN where h is infinite: the pole
+// limit's sample beside an origin cluster has no phase, and its arg ±45° or
+// ±135° paired with a neighbour within 180° of it reads as a crossing (G7VBK5).
+func finitePhaseDeg(h complex128) float64 {
+	if cmplx.IsInf(h) {
+		return math.NaN()
+	}
+	return cmplx.Phase(h) * 180 / math.Pi
 }
 
 // Margin returns the gain margin closest to 0 dB and the phase margin
@@ -850,6 +874,9 @@ type rationalLoop struct {
 	dt         float64
 	delayed    bool
 	eval       *sisoEval
+	// absorbed is the discrete loop with its delays absorbed as states, for
+	// L at z = −1, where e^{−jkπ} = (−1)^k sets the sign.
+	absorbed *System
 }
 
 // newRationalLoop fails with ErrContinuousInternalDelay when sys has
@@ -868,6 +895,7 @@ func newRationalLoop(sys *System) (*rationalLoop, error) {
 		if fd, err = fsys.AbsorbDelay(); err != nil {
 			return nil, err
 		}
+		r.absorbed = fd
 	} else {
 		r.delayed = ioDelayTotal(fsys, 0, 0) != 0
 	}
@@ -887,6 +915,15 @@ func newRationalLoop(sys *System) (*rationalLoop, error) {
 func (r *rationalLoop) discrete() bool { return r.dt > 0 }
 
 func (r *rationalLoop) nyquist() float64 { return math.Pi / r.dt }
+
+// nyquistResponse is L at z = −1 exactly, in double-double, with the noise
+// bounds of ddSISOResponseNoise. frequencyPoint(π/Dt) lies at z = −1 +
+// 1.2e-16j, where L′(−1)·1.2e-16j outweighs an L(−1) ≲ 1e-16·|L′(−1)|, as
+// beside a (z+1) cluster, and sets both phase and |L|.
+func (r *rationalLoop) nyquistResponse() (h complex128, solve, coeffs float64, ok bool) {
+	r.eval.ddSolves++
+	return ddSISOResponseNoise(r.absorbed, pointAt(-1))
+}
 
 // gainCandidates returns approximate ω > 0 where |L| = gamma: boundary
 // eigenvalues of the system pencil of L~·L/γ² − 1, with L~(s) = L(−s)ᵀ, or
@@ -1198,7 +1235,9 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 }
 
 // phaseCrossings returns the verified ω > 0 where L(jω) is real and negative,
-// ascending.
+// ascending. The pencil root L − L~ always has at Nyquist, where L is real,
+// is left to nyquistPhaseCrossings: polish would judge it on the double
+// solve's phase at frequencyPoint(π/Dt).
 func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	reals, err := r.realCandidates()
 	if err != nil {
@@ -1206,6 +1245,9 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	}
 	var cands []float64
 	for _, w := range reals {
+		if r.discrete() && w >= r.nyquist() {
+			continue
+		}
 		if h, ok := r.eval.try(w); !ok || math.Abs(phaseOffsetDeg(h)) < 90 {
 			cands = append(cands, w)
 		}
@@ -1219,28 +1261,29 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 }
 
 // nyquistPhaseCrossings adds the discrete phase crossings below Nyquist and
-// above the others in ws that the pencil missed: beside a zero cluster at
-// z = −1, as of k·(z+1)⁴, the pencil roots of L − L~ fall up to ~1e-4 off a
-// crossing that lies within that of Nyquist, beyond any polish bracket, and
-// the double solve's phase there is off by more than tol. It scans in
-// double-double towards Nyquist, halving the distance, and keeps each sign
-// change that is no ±180° wrap and refines to ulpTol; L at Nyquist is real,
-// a crossover when negative unless L is real below it too. A scan crossing
-// with |L| within the solve noise of ddSISOResponseNoise is rounding residue,
-// as of a cluster k·(z+1)⁴ at θ ~ π − 1e-10, |L| ~ 1e-41, where L → +0; L at
-// Nyquist must also exceed the coefficient noise, as L(−1) of an ulp of |D|;
-// a NaN bound counts as above it.
-// The scan does not test the latter: crossings beside a cluster with exact
-// coefficients lie at |L| ~ that bound. A pole at
-// Nyquist, where rounding makes sign changes beside the cluster, skips the
-// scan. f must be phaseOffsetDeg of r.eval.at: a point keeps the double
-// solve while L lies more than nyquistScanDDAbove times the larger
-// coefficient noise at the scan's ends off the negative real axis, so a
-// sign of f there is no rounding; a high-order loop pays two noise solves
-// rather than ~50 double-double solves. Next to the ±180° wrap the sign
-// of f needs no test: a sign change there is a wrap the scan skips. The
-// noise at the ends stands for the band's: crossings beside poles on the
-// arc there are the resonance scan's.
+// above the others in ws that the pencil missed, then Nyquist itself as
+// nyquistCrossover decides; ws holds none at Nyquist. Beside a zero cluster
+// at z = −1, as of k·(z+1)⁴, the pencil roots of L − L~ fall up to ~1e-4
+// off a crossing that lies within that of Nyquist, beyond any polish
+// bracket, and the double solve's phase there is off by more than tol. It
+// scans in double-double towards Nyquist, halving the distance, and keeps
+// each sign change that refines to ulpTol; a ±180° wrap refines to |f| ~ 180
+// and fails it. A sign change is skipped unrefined only when f jumps by 180°
+// or more with both ends past ±90°: beside the cluster L can run from ~0°
+// to near +0, −180° off, between scan points. A scan crossing with |L|
+// within the solve noise of ddSISOResponseNoise is rounding residue, as of a
+// cluster k·(z+1)⁴ at θ ~ π − 1e-10, |L| ~ 1e-41, where L → +0; with D ≠ 0
+// it must also exceed the coefficient noise, of C = num − D·den rounded,
+// as nyquistCrossover's L(−1); a NaN bound counts as above it. With D = 0 a
+// companion realization keeps num as given, and crossings beside a cluster
+// lie at |L| ~ that bound. A pole at Nyquist, where rounding makes sign
+// changes beside the cluster, skips the scan. f must be phaseOffsetDeg of
+// r.eval.at: a point keeps the double solve while L lies more than
+// nyquistScanDDAbove times the larger coefficient noise at the scan's ends
+// off the negative real axis, so a sign of f there is no rounding; a
+// high-order loop pays two noise solves rather than ~50 double-double
+// solves. The noise at the ends stands for the band's: crossings beside
+// poles on the arc there are the resonance scan's.
 func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float64, tol float64) []float64 {
 	if !r.discrete() {
 		return ws
@@ -1249,13 +1292,9 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 	if h, ok := r.eval.try(wTop); !ok || cmplx.IsInf(h) || cmplx.IsNaN(h) {
 		return ws
 	}
-	below := ws
-	if n := len(ws); n > 0 && ws[n-1] >= wTop {
-		below = ws[:n-1]
-	}
 	t := wTop / 2
-	if len(below) > 0 {
-		t = below[len(below)-1] * (1 + 1e-6)
+	if len(ws) > 0 {
+		t = ws[len(ws)-1] * (1 + 1e-6)
 	}
 	floor := math.Inf(1)
 	if t < wTop && r.eval.sys.internalDelayCount() == 0 {
@@ -1291,7 +1330,8 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 		}
 		return !ok || !(cmplx.Abs(h) <= solve)
 	}
-	out := slices.Clone(below)
+	biproper := r.eval.sys.D.At(0, 0) != 0
+	out := slices.Clone(ws)
 	a, fa := t, math.NaN()
 	if t < wTop {
 		fa = ft(t)
@@ -1305,18 +1345,36 @@ func (r *rationalLoop) nyquistPhaseCrossings(ws []float64, f func(float64) float
 		if math.IsNaN(fb) {
 			break
 		}
-		if !math.IsNaN(fa) && fa*fb < 0 && math.Abs(fa-fb) < 180 {
+		if !math.IsNaN(fa) && fa*fb < 0 && (math.Abs(fa-fb) < 180 || min(math.Abs(fa), math.Abs(fb)) < 90) {
 			c := refineCrossing(a, b, ft)
-			if math.Abs(ft(c)) <= ulpTol(c, ft, tol, 1e-3) && (len(out) == 0 || c > out[len(out)-1]*(1+1e-9)) && aboveNoise(c, false) {
+			if math.Abs(ft(c)) <= ulpTol(c, ft, tol, 1e-3) && (len(out) == 0 || c > out[len(out)-1]*(1+1e-9)) && aboveNoise(c, biproper) {
 				out = append(out, c)
 			}
 		}
 		a, fa = b, fb
 	}
-	if len(below) < len(ws) || math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol && aboveNoise(wTop, true) && (len(out) == 0 || wTop > out[len(out)-1]*(1+1e-9)) {
+	if (len(out) == 0 || wTop > out[len(out)-1]*(1+1e-9)) && r.nyquistCrossover(ft, tol, aboveNoise) {
 		out = append(out, wTop)
 	}
 	return out
+}
+
+// nyquistCrossover reports whether L(−1) of the loop as given is a phase
+// crossover: real and negative beyond the solve noise, and, with D ≠ 0,
+// beyond the coefficient noise, as L(−1) of an ulp of |D| from C = num −
+// D·den rounded; a NaN bound counts as above it. L real below Nyquist too has
+// no isolated crossing there. Where the solve at z = −1 fails, the phase at
+// frequencyPoint(π/Dt) decides, gated on both bounds there.
+func (r *rationalLoop) nyquistCrossover(ft func(float64) float64, tol float64, aboveNoise func(float64, bool) bool) bool {
+	wTop := r.nyquist()
+	h, solve, coeffs, ok := r.nyquistResponse()
+	if !ok {
+		return math.Abs(ft(wTop)) <= tol && math.Abs(ft(wTop*(1-1e-3))) > tol && aboveNoise(wTop, true)
+	}
+	if r.eval.sys.D.At(0, 0) != 0 {
+		solve = max(solve, coeffs)
+	}
+	return real(h) < 0 && !(-real(h) <= solve) && math.Abs(ft(wTop*(1-1e-3))) > tol
 }
 
 // dropRefuted removes the polished ws inside the scan band of a real pole

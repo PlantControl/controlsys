@@ -231,7 +231,7 @@ func orderSchurGroupFirst(t, z []float64, n int, inGroup func(complex128) bool) 
 	placed := 0
 	for i := 0; i < n; {
 		size := schurBlockSize(t, n, i)
-		if !inGroup(schurEigenvaluesRaw(t, n)[i]) {
+		if !inGroup(schurBlockEigenvalue(t, n, i)) {
 			i += size
 			continue
 		}
@@ -240,11 +240,31 @@ func orderSchurGroupFirst(t, z []float64, n int, inGroup func(complex128) bool) 
 				return 0, fmt.Errorf("reordering the Schur form: %w", ErrSchurFailed)
 			}
 		}
-		size = schurBlockSize(t, n, placed)
-		placed += size
+		// Dtrexc may split a moved 2x2 block (e.g. a double real pole stored as
+		// a ±1e-16i pair) into two 1x1 blocks; classify each part.
+		end := placed + size
+		for j := placed; j < end; {
+			bs := schurBlockSize(t, n, j)
+			if inGroup(schurBlockEigenvalue(t, n, j)) {
+				if j != placed {
+					if _, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, j, placed, work); !ok {
+						return 0, fmt.Errorf("reordering the Schur form: %w", ErrSchurFailed)
+					}
+				}
+				placed += bs
+			}
+			j += bs
+		}
 		i += size
 	}
 	return placed, nil
+}
+
+func schurBlockEigenvalue(t []float64, n, i int) complex128 {
+	if schurBlockSize(t, n, i) == 2 {
+		return schurBlock2x2Eig(t, n, i)
+	}
+	return complex(t[i*n+i], 0)
 }
 
 func schurEigenvaluesRaw(t []float64, n int) []complex128 {

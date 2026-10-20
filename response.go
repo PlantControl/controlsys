@@ -4,9 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -397,10 +400,25 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // DCGain returns the steady-state gain G(0) (G(1) for discrete models). Like
 // MATLAB dcgain, entries reached by an integrator (a pole at s = 0 or z = 1)
 // are infinite rather than an error, for every realization; internal delays are
-// unity at DC.
+// unity at DC. Where I−A (A) is singular to working precision but no computed
+// pole is near DC, the gain is solved in double-double as FreqResponse
+// evaluates it, so a pencil ill-conditioned by poles merely close to DC keeps
+// its finite gain.
 // A model with no inputs or no outputs has an empty gain, which a
 // *mat.Dense cannot hold, so it returns ErrDimensionMismatch.
 func (sys *System) DCGain() (*mat.Dense, error) {
+	return sys.dcGain(true)
+}
+
+// integratingDCGain is DCGain with an ill-conditioned DC solve always
+// resolved by the transfer limit, whose coefficient tolerance takes a pole
+// rounded off DC for the integrator it stands for; Pidtune's integrator
+// classification relies on it.
+func (sys *System) integratingDCGain() (*mat.Dense, error) {
+	return sys.dcGain(false)
+}
+
+func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 	if err := requireSystem("DCGain", sys); err != nil {
 		return nil, err
 	}
@@ -416,14 +434,14 @@ func (sys *System) DCGain() (*mat.Dense, error) {
 		if err == nil || !errors.Is(err, ErrSingularTransform) {
 			return gain, err
 		}
-		return sys.dcGainOfDelayFreeExplicit(err)
+		return sys.dcGainOfDelayFreeExplicit(err, offPole)
 	}
 
 	if sys.IsContinuous() {
 		var X mat.Dense
 		err := X.Solve(sys.A, sys.B)
 		if err != nil {
-			return sys.dcGainByTransferFunctionLimit()
+			return sys.dcGainOffPole(offPole, err)
 		}
 		gain := mat.NewDense(p, m, nil)
 		gain.Mul(sys.C, &X)
@@ -448,7 +466,7 @@ func (sys *System) DCGain() (*mat.Dense, error) {
 	var X mat.Dense
 	err := X.Solve(ImA, sys.B)
 	if err != nil {
-		return sys.dcGainByTransferFunctionLimit()
+		return sys.dcGainOffPole(offPole, err)
 	}
 	gain := mat.NewDense(p, m, nil)
 	gain.Mul(sys.C, &X)
@@ -456,6 +474,33 @@ func (sys *System) DCGain() (*mat.Dense, error) {
 		gain.Add(gain, sys.D)
 	}
 	return gain, nil
+}
+
+// dcGainOffPole resolves a delay-free explicit model whose DC solve failed.
+// With offPole set it does so as FreqResponse does: with no computed pole
+// near DC (poleSpacing) the double-double solve decides, so an
+// ill-conditioned but nonsingular pencil keeps its finite gain, even at an
+// exact zero pivot of the double LU. A zero row or column of A − s0·I is an
+// exact pole at DC and skips the pole search. Otherwise, or where the
+// double-double solve is singular too, the transfer limit finds the
+// integrators.
+func (sys *System) dcGainOffPole(offPole bool, solveErr error) (*mat.Dense, error) {
+	s0 := complex(0, 0)
+	if sys.IsDiscrete() {
+		s0 = 1
+	}
+	if _, ok := solveErr.(mat.Condition); offPole && ok && !hasZeroLine(sys.A, real(s0)) {
+		_, m, p := sys.Dims()
+		dst := make([]complex128, p*m)
+		if sp, err := poleSpacing(sys, s0); err == nil && !sp.near && ddResponseInto(sys, pointAt(s0), dst) {
+			data := make([]float64, p*m)
+			for k, v := range dst {
+				data[k] = real(v)
+			}
+			return mat.NewDense(p, m, data), nil
+		}
+	}
+	return sys.dcGainByTransferFunctionLimit(offPole)
 }
 
 // dcGainByEvaluation closes internal delays (unity at DC) and honours E,
@@ -486,7 +531,7 @@ func (sys *System) dcGainByEvaluation() (*mat.Dense, error) {
 // dcGainOfDelayFreeExplicit handles a pole at DC, where the pencil solve fails:
 // internal delays are unity at DC, so closing them (Δ=I) and removing E leaves
 // an explicit model whose fast path resolves singular A.
-func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) {
+func (sys *System) dcGainOfDelayFreeExplicit(evalErr error, offPole bool) (*mat.Dense, error) {
 	reduced, err := sys.ToExplicit()
 	if err != nil {
 		return nil, evalErr
@@ -496,7 +541,7 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) 
 			return nil, evalErr
 		}
 	}
-	return reduced.DCGain()
+	return reduced.dcGain(offPole)
 }
 
 // dcGainByTransferFunctionLimit rescales each input and output to the norm
@@ -507,12 +552,18 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error) (*mat.Dense, error) 
 // input or output: the limit's root tests use an absolute coefficient
 // floor, so an exact integrator–zero cancellation would otherwise hinge on
 // the scale of B and C.
-func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
+func (sys *System) dcGainByTransferFunctionLimit(offPole bool) (*mat.Dense, error) {
+	if gain, ok := sys.dcGainTimeScaled(offPole); ok {
+		return gain, nil
+	}
 	scaled, inScale, outScale := sys.dcGainIOScaled()
 	gain, ok := scaled.dcGainByDecoupledSingularModes()
 	if !ok {
-		if gain, ok, err := sys.dcGainByStructuralEntries(); ok {
+		if gain, ok, err := sys.dcGainByStructuralEntries(offPole); ok {
 			return gain, err
+		}
+		if gain, ok := sys.dcGainByBlockLaurent(); ok {
+			return gain, nil
 		}
 		res, err := scaled.rationalTransferFunction(nil)
 		if err != nil {
@@ -537,11 +588,42 @@ func (sys *System) dcGainByTransferFunctionLimit() (*mat.Dense, error) {
 	return gain, nil
 }
 
+// dcGainTimeScaled returns, for a continuous sys with ‖A‖ < 1/2, the
+// gain of (2ᵏA, B, C, 0), ‖2ᵏA‖ in [1/2, 1), times 2ᵏ plus D: an exact
+// rescaling of s that keeps pole orders at 0 and Inf signs, where the
+// transfer limit's absolute coefficient floor of 1 would otherwise swamp
+// numerators of order ‖A‖ⁿ. B stays as given so roundoff in the transfer
+// numerator keeps its scale. A discrete pole at z = 1 forces ‖A‖ ≥ 1.
+func (sys *System) dcGainTimeScaled(offPole bool) (*mat.Dense, bool) {
+	if !sys.IsContinuous() {
+		return nil, false
+	}
+	na := denseNorm(sys.A)
+	if !(na > 0 && na < 0.5) {
+		return nil, false
+	}
+	_, m, p := sys.Dims()
+	_, e := math.Frexp(na)
+	f := math.Ldexp(1, -e)
+	a := mat.DenseCopyOf(sys.A)
+	a.Scale(f, a)
+	ts := &System{A: a, B: sys.B, C: sys.C, D: mat.NewDense(p, m, nil), Dt: sys.Dt}
+	gain, err := ts.dcGainByTransferFunctionLimit(offPole)
+	if err != nil {
+		return nil, false
+	}
+	gain.Scale(f, gain)
+	if sys.D != nil {
+		gain.Add(gain, sys.D)
+	}
+	return gain, true
+}
+
 // dcGainByStructuralEntries evaluates each entry on the states reachable
 // from its input and observable from its output by the exact sparsity of A,
 // B and C (MATLAB sminreal per channel). ok is false when no entry loses a
 // state, so the reduced channels never recurse back into it.
-func (sys *System) dcGainByStructuralEntries() (*mat.Dense, bool, error) {
+func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, error) {
 	n, m, p := sys.Dims()
 	aRaw, bRaw, cRaw := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
 	reach := make([][]bool, m)
@@ -600,7 +682,7 @@ func (sys *System) dcGainByStructuralEntries() (*mat.Dense, bool, error) {
 				crData[ii] = cRaw.Data[i*cRaw.Stride+k]
 			}
 			sub := &System{A: ar, B: br, C: cr, D: mat.NewDense(1, 1, nil), Dt: sys.Dt}
-			g, err := sub.DCGain()
+			g, err := sub.dcGain(offPole)
 			if err != nil {
 				return nil, true, err
 			}
@@ -608,6 +690,518 @@ func (sys *System) dcGainByStructuralEntries() (*mat.Dense, bool, error) {
 		}
 	}
 	return gain, true, nil
+}
+
+// dcGainByBlockLaurent expands G(x0+σ) = D + C(σI + P)⁻¹B, P = x0·I − A,
+// in Laurent series by back-substitution over the strongly connected
+// components of A's exact sparsity, which put A in block triangular form.
+// A 1×1 component with A_kk = x0 exactly is a pole at x0 of the float
+// model, counted exactly; exactly zero couplings stay zero, so the sign of
+// an entry's leading coefficient does not hinge on roundoff in
+// transfer-function coefficients. Given such a pole, a larger block that a
+// regular solve would reject has its eigenvalues nearest x0 deflated to x0
+// (deflateBlockAt), but only once the expansion on the model as given has
+// declined: deflation moves poles by up to √ε·‖A_KK‖, which can raise the
+// pole order at x0 and flip an Inf sign the float model fixes. An exactly
+// singular block always goes to deflation. An entry is ±∞ by its most
+// negative order coefficient above 100·n·ε of its magnitude scale, else the
+// σ⁰ coefficient. The deflated model's magnitudes are first those of the
+// sums that formed it (laurentAbs); only if that cannot decide, and no
+// block was exactly singular (its exact cancellations would be misjudged),
+// are they taken as |entries|: an Inf sign may then rest on transform
+// roundoff, but the exact pole still makes the entry infinite. ok is false
+// with no exact pole at x0, a block deflation cannot settle, or a finite
+// entry without three correct digits, leaving those to the transfer limit.
+func (sys *System) dcGainByBlockLaurent() (*mat.Dense, bool) {
+	for _, mode := range []laurentMode{laurentAsGiven, laurentDeflate, laurentDeflateLoose} {
+		if g, ok := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, mode); ok {
+			return g, true
+		}
+	}
+	return nil, false
+}
+
+type laurentMode int
+
+const (
+	laurentAsGiven laurentMode = iota
+	laurentDeflate
+	laurentDeflateLoose
+)
+
+// laurentAbs holds, per entry of a deflated model, the magnitude of the
+// terms summed to form it (|A|·|Z| and so on), so roundoff left by an exact
+// cancellation is weighed against what cancelled rather than against itself.
+type laurentAbs struct{ a, b, c *mat.Dense }
+
+func absDense(m *mat.Dense) *mat.Dense {
+	r := mat.DenseCopyOf(m)
+	raw := r.RawMatrix()
+	for i := range raw.Rows {
+		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		for j, v := range row {
+			row[j] = math.Abs(v)
+		}
+	}
+	return r
+}
+
+// blockLaurentGain takes abs nil for |A|, |B|, |C|.
+func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode laurentMode) (*mat.Dense, bool) {
+	deflate := mode != laurentAsGiven
+	n, m, p := sys.Dims()
+	x0 := 0.0
+	if sys.IsDiscrete() {
+		x0 = 1
+	}
+	aRaw := A.RawMatrix()
+	topo := aRaw
+	if abs != nil {
+		topo = abs.a.RawMatrix()
+	}
+	blocks := tarjanBlocks(topo, n)
+	blockOf := make([]int, n)
+	ns := 0
+	for bi, blk := range blocks {
+		for _, k := range blk {
+			blockOf[k] = bi
+		}
+		if len(blk) == 1 && aRaw.Data[blk[0]*aRaw.Stride+blk[0]] == x0 {
+			ns++
+		}
+	}
+	if ns == 0 {
+		return nil, false
+	}
+	type regular struct {
+		lu     mat.LU
+		invNrm float64
+	}
+	regs := make([]*regular, len(blocks))
+	var illCond [][]int
+	for bi, blk := range blocks {
+		r := len(blk)
+		if r == 1 && aRaw.Data[blk[0]*aRaw.Stride+blk[0]] == x0 {
+			continue
+		}
+		pk := mat.NewDense(r, r, nil)
+		pkRaw := pk.RawMatrix()
+		for ii, k := range blk {
+			for jj, l := range blk {
+				v := -aRaw.Data[k*aRaw.Stride+l]
+				if ii == jj {
+					v += x0
+				}
+				pkRaw.Data[ii*pkRaw.Stride+jj] = v
+			}
+		}
+		reg := &regular{}
+		reg.lu.Factorize(pk)
+		c := reg.lu.Cond()
+		singular := math.IsInf(c, 0) || math.IsNaN(c) ||
+			(!(c <= 1e12) && r <= exactDetMaxOrder && exactDetIsZero(pkRaw))
+		if singular && mode != laurentDeflate {
+			return nil, false
+		}
+		if singular || deflate && r > 1 && !(c <= mat.ConditionTolerance) {
+			illCond = append(illCond, blk)
+			continue
+		}
+		reg.invNrm = c / mat.Norm(pk, 1)
+		regs[bi] = reg
+	}
+	if len(illCond) > 0 {
+		A, B, C = mat.DenseCopyOf(A), mat.DenseCopyOf(B), mat.DenseCopyOf(C)
+		abs = &laurentAbs{absDense(A), absDense(B), absDense(C)}
+		for _, blk := range illCond {
+			if !deflateBlockAt(A, B, C, abs, blk, x0) {
+				return nil, false
+			}
+		}
+		if mode == laurentDeflateLoose {
+			abs = nil
+		}
+		return sys.blockLaurentGain(A, B, C, abs, laurentAsGiven)
+	}
+	if deflate {
+		return nil, false
+	}
+
+	nord := 2*ns + 1
+	w := make([]float64, 2*nord*n*m)
+	w, mag := w[:nord*n*m], w[nord*n*m:]
+	at := func(s []float64, ord, k int) []float64 {
+		o := ((ord+ns)*n + k) * m
+		return s[o : o+m]
+	}
+	bRaw := B.RawMatrix()
+	absA, absB := aRaw, bRaw
+	if abs != nil {
+		absA, absB = abs.a.RawMatrix(), abs.b.RawMatrix()
+	}
+	var sol, tmp *mat.Dense
+	for bi, blk := range blocks {
+		r := len(blk)
+		rd, rm := make([]float64, r*nord*m), make([]float64, r*nord*m)
+		for t := range nord {
+			ord := t - ns
+			for ii, k := range blk {
+				row, mrow := rd[(t*r+ii)*m:(t*r+ii+1)*m], rm[(t*r+ii)*m:(t*r+ii+1)*m]
+				if ord == 0 {
+					for j := range m {
+						row[j] = bRaw.Data[k*bRaw.Stride+j]
+						mrow[j] = math.Abs(absB.Data[k*absB.Stride+j])
+					}
+				}
+				for l := range n {
+					a, am := aRaw.Data[k*aRaw.Stride+l], math.Abs(absA.Data[k*absA.Stride+l])
+					if am == 0 || blockOf[l] == bi {
+						continue
+					}
+					wl, ml := at(w, ord, l), at(mag, ord, l)
+					for j := range m {
+						row[j] += a * wl[j]
+						mrow[j] += am * ml[j]
+					}
+				}
+			}
+		}
+		reg := regs[bi]
+		if reg == nil {
+			k := blk[0]
+			for t := range nord - 1 {
+				copy(at(w, t-ns, k), rd[(t+1)*m:(t+2)*m])
+				copy(at(mag, t-ns, k), rm[(t+1)*m:(t+2)*m])
+			}
+			continue
+		}
+		if sol == nil || sol.RawMatrix().Rows != r {
+			sol, tmp = mat.NewDense(r, m, nil), mat.NewDense(r, m, nil)
+		}
+		td := tmp.RawMatrix().Data
+		for t := range nord {
+			ord := t - ns
+			for ii, k := range blk {
+				copy(td[ii*m:(ii+1)*m], rd[(t*r+ii)*m:(t*r+ii+1)*m])
+				if t > 0 {
+					prev := at(w, ord-1, k)
+					for j := range m {
+						td[ii*m+j] -= prev[j]
+					}
+				}
+			}
+			_ = reg.lu.SolveTo(sol, false, tmp)
+			sd := sol.RawMatrix().Data
+			for j := range m {
+				bound := 0.0
+				for ii, k := range blk {
+					v := rm[(t*r+ii)*m+j]
+					if t > 0 {
+						v += at(mag, ord-1, k)[j]
+					}
+					bound = math.Max(bound, v)
+				}
+				bound *= reg.invNrm
+				for ii, k := range blk {
+					at(w, ord, k)[j] = sd[ii*m+j]
+					at(mag, ord, k)[j] = math.Abs(sd[ii*m+j]) + bound
+				}
+			}
+		}
+	}
+
+	gain := denseCopySafe(sys.D, p, m)
+	cRaw := C.RawMatrix()
+	absC := cRaw
+	if abs != nil {
+		absC = abs.c.RawMatrix()
+	}
+	tol := 100 * float64(n) * eps()
+	for i := range p {
+		crow := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+n]
+		cmag := absC.Data[i*absC.Stride : i*absC.Stride+n]
+		for j := range m {
+			for ord := -ns; ord <= 0; ord++ {
+				g, bound := 0.0, 0.0
+				for k, c := range crow {
+					if cm := math.Abs(cmag[k]); cm != 0 {
+						g += c * at(w, ord, k)[j]
+						bound += cm * at(mag, ord, k)[j]
+					}
+				}
+				if ord == 0 {
+					v := gain.At(i, j) + g
+					if tol*bound > 1e-3*math.Abs(v) {
+						return nil, false
+					}
+					gain.Set(i, j, v)
+					break
+				}
+				if math.Abs(g) > tol*bound {
+					gain.Set(i, j, math.Inf(signInt(g)))
+					break
+				}
+			}
+		}
+	}
+	return gain, true
+}
+
+// exactDetMaxOrder caps the blocks whose determinant exactDetIsZero
+// computes; larger ones keep the LU condition estimate alone.
+const exactDetMaxOrder = 16
+
+// exactDetIsZero reports whether the square matrix a is exactly singular,
+// by fraction-free (Bareiss) elimination over the integers its entries
+// become once scaled by a common power of two.
+func exactDetIsZero(a blas64.General) bool {
+	r := a.Rows
+	emin := math.MaxInt
+	for i := range r {
+		for _, v := range a.Data[i*a.Stride : i*a.Stride+r] {
+			if v != 0 {
+				_, e := math.Frexp(v)
+				emin = min(emin, e)
+			}
+		}
+	}
+	if emin == math.MaxInt {
+		return true
+	}
+	m := make([]*big.Int, r*r)
+	for i := range r {
+		for j, v := range a.Data[i*a.Stride : i*a.Stride+r] {
+			f, e := math.Frexp(v)
+			x := big.NewInt(int64(math.Ldexp(f, 53)))
+			m[i*r+j] = x.Lsh(x, uint(e-emin))
+		}
+	}
+	prev := big.NewInt(1)
+	t := new(big.Int)
+	for k := range r - 1 {
+		if m[k*r+k].Sign() == 0 {
+			piv := -1
+			for i := k + 1; i < r; i++ {
+				if m[i*r+k].Sign() != 0 {
+					piv = i
+					break
+				}
+			}
+			if piv < 0 {
+				return true
+			}
+			for j := range r {
+				m[k*r+j], m[piv*r+j] = m[piv*r+j], m[k*r+j]
+			}
+		}
+		for i := k + 1; i < r; i++ {
+			for j := k + 1; j < r; j++ {
+				x := m[i*r+j]
+				x.Mul(x, m[k*r+k])
+				x.Sub(x, t.Mul(m[i*r+k], m[k*r+j]))
+				x.Quo(x, prev)
+			}
+		}
+		prev = m[k*r+k]
+	}
+	return m[r*r-1].Sign() == 0
+}
+
+// deflateBlockAt applies x_K = Z·y to the states blk of (A, B, C), with
+// Z the real Schur vectors of A_KK ordered so the eigenvalues nearest x0
+// lead, and updates abs with the magnitudes of the sums it forms. Every
+// eigenvalue within guard = √ε·max(‖A_KK‖, 1) of x0 is set to x0 exactly,
+// its strictly lower part zeroed; false when a zeroed or shifted entry
+// exceeds guard (a 2×2 bump of a defective pair) or x0·I − T on the rest
+// is worse conditioned than a regular solve allows.
+func deflateBlockAt(A, B, C *mat.Dense, abs *laurentAbs, blk []int, x0 float64) bool {
+	r := len(blk)
+	_, m := B.Dims()
+	p, _ := C.Dims()
+	n, _ := A.Dims()
+	aRaw := A.RawMatrix()
+	t := make([]float64, r*r)
+	for ii, k := range blk {
+		for jj, l := range blk {
+			t[ii*r+jj] = aRaw.Data[k*aRaw.Stride+l]
+		}
+	}
+	guard := math.Sqrt(eps()) * math.Max(mat.Norm(mat.NewDense(r, r, t), math.Inf(1)), 1)
+	z := make([]float64, r*r)
+	wr, wi := make([]float64, r), make([]float64, r)
+	bwork := make([]bool, r)
+	query := make([]float64, 1)
+	impl.Dgees(lapack.SchurHess, lapack.SortNone, nil, r, t, r, wr, wi, z, r, query, -1, bwork)
+	work := make([]float64, int(query[0]))
+	if _, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil, r, t, r, wr, wi, z, r, work, len(work), bwork); !ok {
+		return false
+	}
+	dists := make([]float64, r)
+	for i := range r {
+		dists[i] = cmplx.Abs(complex(wr[i]-x0, wi[i]))
+	}
+	lim := -1.0
+	for _, v := range dists {
+		if v <= guard {
+			lim = max(lim, v)
+		}
+	}
+	if lim < 0 {
+		return false
+	}
+	tc, zc := slices.Clone(t), slices.Clone(z)
+	d, err := orderSchurGroupFirst(tc, zc, r, func(e complex128) bool { return cmplx.Abs(e-complex(x0, 0)) <= lim })
+	if err != nil {
+		return false
+	}
+	if d < r {
+		rest := mat.NewDense(r-d, r-d, nil)
+		rr := rest.RawMatrix()
+		for i := d; i < r; i++ {
+			for j := d; j < r; j++ {
+				v := -tc[i*r+j]
+				if i == j {
+					v += x0
+				}
+				rr.Data[(i-d)*rr.Stride+j-d] = v
+			}
+		}
+		var lu mat.LU
+		lu.Factorize(rest)
+		if !(lu.Cond() <= mat.ConditionTolerance) {
+			return false
+		}
+	}
+	for i := range d {
+		for j := range i {
+			if math.Abs(tc[i*r+j]) > guard {
+				return false
+			}
+			tc[i*r+j] = 0
+		}
+		if math.Abs(tc[i*r+i]-x0) > guard {
+			return false
+		}
+		tc[i*r+i] = x0
+	}
+	absA, absB, absC := abs.a.RawMatrix(), abs.b.RawMatrix(), abs.c.RawMatrix()
+	for ii, k := range blk {
+		for jj, l := range blk {
+			aRaw.Data[k*aRaw.Stride+l] = tc[ii*r+jj]
+			absA.Data[k*absA.Stride+l] = math.Abs(tc[ii*r+jj])
+		}
+	}
+	inK := make([]bool, n)
+	for _, k := range blk {
+		inK[k] = true
+	}
+	buf, mbuf := make([]float64, r), make([]float64, r)
+	rowTimesZ := func(v, mv blas64.General, i int) {
+		for jj := range r {
+			s, ms := 0.0, 0.0
+			for ii, k := range blk {
+				s += v.Data[i*v.Stride+k] * zc[ii*r+jj]
+				ms += mv.Data[i*mv.Stride+k] * math.Abs(zc[ii*r+jj])
+			}
+			buf[jj], mbuf[jj] = s, ms
+		}
+		for jj, k := range blk {
+			v.Data[i*v.Stride+k], mv.Data[i*mv.Stride+k] = buf[jj], mbuf[jj]
+		}
+	}
+	ztTimesCol := func(v, mv blas64.General, j int) {
+		for ii := range r {
+			s, ms := 0.0, 0.0
+			for jj, k := range blk {
+				s += zc[jj*r+ii] * v.Data[k*v.Stride+j]
+				ms += math.Abs(zc[jj*r+ii]) * mv.Data[k*mv.Stride+j]
+			}
+			buf[ii], mbuf[ii] = s, ms
+		}
+		for ii, k := range blk {
+			v.Data[k*v.Stride+j], mv.Data[k*mv.Stride+j] = buf[ii], mbuf[ii]
+		}
+	}
+	for l := range n {
+		if !inK[l] {
+			rowTimesZ(aRaw, absA, l)
+			ztTimesCol(aRaw, absA, l)
+		}
+	}
+	for j := range m {
+		ztTimesCol(B.RawMatrix(), absB, j)
+	}
+	cRaw := C.RawMatrix()
+	for i := range p {
+		rowTimesZ(cRaw, absC, i)
+	}
+	return true
+}
+
+// tarjanBlocks returns the strongly connected components of the graph with
+// an edge k → l when A[k,l] ≠ 0 (x_l drives x_k), each emitted after every
+// component it depends on.
+func tarjanBlocks(a blas64.General, n int) [][]int {
+	index := make([]int, n)
+	low := make([]int, n)
+	onStack := make([]bool, n)
+	for i := range index {
+		index[i] = -1
+	}
+	var stack []int
+	var blocks [][]int
+	next := 0
+	type frame struct{ v, l int }
+	for root := range n {
+		if index[root] >= 0 {
+			continue
+		}
+		call := []frame{{root, 0}}
+		index[root], low[root] = next, next
+		next++
+		stack = append(stack, root)
+		onStack[root] = true
+		for len(call) > 0 {
+			f := &call[len(call)-1]
+			v := f.v
+			if f.l < n {
+				l := f.l
+				f.l++
+				if l == v || a.Data[v*a.Stride+l] == 0 {
+					continue
+				}
+				if index[l] < 0 {
+					index[l], low[l] = next, next
+					next++
+					stack = append(stack, l)
+					onStack[l] = true
+					call = append(call, frame{l, 0})
+				} else if onStack[l] {
+					low[v] = min(low[v], index[l])
+				}
+				continue
+			}
+			call = call[:len(call)-1]
+			if len(call) > 0 {
+				u := call[len(call)-1].v
+				low[u] = min(low[u], low[v])
+			}
+			if low[v] == index[v] {
+				var blk []int
+				for {
+					x := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					onStack[x] = false
+					blk = append(blk, x)
+					if x == v {
+						break
+					}
+				}
+				blocks = append(blocks, blk)
+			}
+		}
+	}
+	return blocks
 }
 
 // structuralClosure grows set to every state driven by a member through a
@@ -636,17 +1230,32 @@ func structuralClosure(a blas64.General, set []bool, reverse bool) {
 	}
 }
 
-// dcGainIOScaled returns sys with column j of B scaled by inScale[j], row i
-// of C by outScale[i] and D zeroed, exact powers of two (capped at 2¹⁰²³)
-// bringing each nonzero column or row whose max-abs entry is below
-// 2⁻²⁰·max(‖A‖, 1) up to about max(‖A‖, 1). Above that a B·C product clears
-// the 100·ε·max(‖A‖, 1) and n²·ε·‖A‖ floors, so well-scaled models are
-// returned as they are, D included.
+// dcGainIOScaled returns sys with B, C scaled by ioPow2Scales and D
+// zeroed; any smaller scale lets a small internal coupling push a transfer
+// numerator under the limit's absolute coefficient floor. Models already at
+// that scale are returned as they are, D included.
 func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
-	n, m, p := sys.Dims()
+	_, m, p := sys.Dims()
+	inScale, outScale, unit := ioPow2Scales(sys.A, sys.B, sys.C)
+	if unit {
+		return sys, inScale, outScale
+	}
+	b, c := mat.DenseCopyOf(sys.B), mat.DenseCopyOf(sys.C)
+	applyIOScales(b, c, inScale, outScale)
+	return &System{A: sys.A, B: b, C: c, D: mat.NewDense(p, m, nil), Dt: sys.Dt}, inScale, outScale
+}
+
+// ioPow2Scales returns exact powers of two (capped at 2¹⁰²³) for each
+// column j of B and row i of C, bringing each nonzero one whose max-abs
+// entry has a smaller binary exponent than max(‖A‖, 1) up to about
+// max(‖A‖, 1). unit reports that every scale is 1.
+func ioPow2Scales(a, b, c *mat.Dense) (inScale, outScale []float64, unit bool) {
+	n, _ := a.Dims()
+	_, m := b.Dims()
+	p, _ := c.Dims()
 	scales := make([]float64, m+p)
-	inScale, outScale := scales[:m], scales[m:]
-	sbRaw, scRaw := sys.B.RawMatrix(), sys.C.RawMatrix()
+	inScale, outScale = scales[:m], scales[m:]
+	sbRaw, scRaw := b.RawMatrix(), c.RawMatrix()
 	for k := range n {
 		for j, v := range sbRaw.Data[k*sbRaw.Stride : k*sbRaw.Stride+m] {
 			inScale[j] = math.Max(inScale[j], math.Abs(v))
@@ -657,36 +1266,39 @@ func (sys *System) dcGainIOScaled() (*System, []float64, []float64) {
 			outScale[i] = math.Max(outScale[i], math.Abs(v))
 		}
 	}
-	target := math.Max(denseNorm(sys.A), 1)
+	target := math.Max(denseNorm(a), 1)
 	_, targetExp := math.Frexp(target)
 	finite := !math.IsInf(target, 0) && !math.IsNaN(target)
-	unit := true
+	unit = true
 	for k, v := range scales {
 		scales[k] = 1
-		if finite && v != 0 && v < 0x1p-20*target {
-			_, e := math.Frexp(v)
+		if !finite || v == 0 || !(v < target) {
+			continue
+		}
+		if _, e := math.Frexp(v); e < targetExp {
 			scales[k] = math.Ldexp(1, min(targetExp-e, 1023))
 			unit = false
 		}
 	}
-	if unit {
-		return sys, inScale, outScale
-	}
-	b, c := mat.DenseCopyOf(sys.B), mat.DenseCopyOf(sys.C)
+	return inScale, outScale, unit
+}
+
+// applyIOScales scales column j of b by inScale[j] and row i of c by
+// outScale[i] in place.
+func applyIOScales(b, c *mat.Dense, inScale, outScale []float64) {
 	bRaw, cRaw := b.RawMatrix(), c.RawMatrix()
-	for k := range n {
-		row := bRaw.Data[k*bRaw.Stride : k*bRaw.Stride+m]
+	for k := range bRaw.Rows {
+		row := bRaw.Data[k*bRaw.Stride : k*bRaw.Stride+bRaw.Cols]
 		for j, s := range inScale {
 			row[j] *= s
 		}
 	}
 	for i, s := range outScale {
-		row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+n]
+		row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+cRaw.Cols]
 		for k := range row {
 			row[k] *= s
 		}
 	}
-	return &System{A: sys.A, B: b, C: c, D: mat.NewDense(p, m, nil), Dt: sys.Dt}, inScale, outScale
 }
 
 func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
@@ -788,6 +1400,28 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 		}
 	}
 	return gain, true
+}
+
+// hasZeroLine reports whether a − shift·I has an exactly zero row or column.
+func hasZeroLine(a *mat.Dense, shift float64) bool {
+	raw := a.RawMatrix()
+	n := raw.Rows
+	for k := range n {
+		row, col := true, true
+		for j := 0; j < n && (row || col); j++ {
+			r, c := raw.Data[k*raw.Stride+j], raw.Data[j*raw.Stride+k]
+			if j == k {
+				r -= shift
+				c = r
+			}
+			row = row && r == 0
+			col = col && c == 0
+		}
+		if row || col {
+			return true
+		}
+	}
+	return false
 }
 
 func rowColDecoupledAt(a *mat.Dense, k int, tol float64) bool {

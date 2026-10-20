@@ -133,22 +133,46 @@ func (l *delayLoop) axisAt(w float64) complex128 {
 }
 
 // ddAllowed reports whether the double-double fallback may evaluate L(jω):
-// only where a boundary pole is nearest, so the walk resolves indentations
-// next to crowded axis poles. Near any other pole a double failure must
-// stand, so that clusterWinding counts the roots: there the fallback would
-// let the uniform walk miss a phase turn between samples.
+// where a boundary pole is nearest, so the walk resolves indentations next
+// to crowded axis poles, and where no other pole q with |Re q| <
+// ddTrustRe·ρ lies within ddDenyReach·|Re q| of jω. There a double failure
+// must stand, so that clusterWinding counts the roots: the fallback would
+// let the uniform walk miss the phase turn of a pole that close to the axis. Farther out, as in
+// the wide band where a companion realization of a near-double lightly
+// damped pair is too ill-conditioned for the double solve, the fallback
+// evaluates L and the failure at the pole frequency still reaches
+// clusterWinding.
 func (l *delayLoop) ddAllowed(w float64) bool {
 	s := complex(0, w)
-	best, boundary := math.Inf(1), false
+	rho := 0.0
+	for _, p := range l.poles {
+		rho = max(rho, cmplx.Abs(p))
+	}
+	best, boundary, inReach := math.Inf(1), false, false
 	for _, p := range l.poles {
 		d := cmplx.Abs(p - s)
 		b := classifyPoleStability(p, true, poleStabilityTolerance(p)) == poleClassBoundary
 		if d < best || (d == best && !b) {
 			best, boundary = d, b
 		}
+		re := math.Abs(real(p))
+		inReach = inReach || !b && re < ddTrustRe*rho && d <= ddDenyReach*re
 	}
-	return boundary
+	return boundary || !inReach
 }
+
+// ddDenyReach: 2..10 cleared 2400 probed near-double-pair loops with no
+// wrong verdict; >= 100 left many errors standing.
+const ddDenyReach = 10
+
+// ddTrustRe exempts a pole q with |Re q| >= ddTrustRe·ρ, ρ the largest pole
+// modulus, from the denial: rounding moves a k-fold cluster by about
+// eps^(1/k)·ρ, below 0.1·ρ for k < 16, so the side of the axis q lies on is
+// not in doubt. Such a pole, as a real pole at 0.022 beside a crowded origin
+// cluster, otherwise denies the fallback over [0, 10|q|], where the double
+// solve fails, so the walk from a verified circle around the cluster could
+// not start.
+const ddTrustRe = 0.1
 
 func sisoLoopDelay(sys *System) float64 {
 	tau := 0.0
@@ -1453,7 +1477,11 @@ func (l *delayLoop) failed() bool {
 // fallback, as where the double solve is singular on every circle around
 // an integrator triple with sub-1e-6 real poles. The double pass comes
 // first: the fallback verifies tighter circles, which can start the walk
-// where it fails beside a real pole ~1e-7 off the origin.
+// where it fails beside a real pole ~1e-7 off the origin. A failure point
+// off the origin can lie at a non-pole ω, as within ddDenyReach·|Re q| below
+// a near-double lightly damped pair, where no cluster fits (hi <=
+// w0/clusterMargin); both passes then repeat with the origin as a further
+// candidate, whose verified disk may enclose the failure point and the poles.
 func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyquist, bool) {
 	ws, required := l.clusterCandidates(base)
 	if len(ws) == 0 {
@@ -1468,6 +1496,14 @@ func (l *delayLoop) clusterWinding(R, w1 float64, base delayNyquist) (delayNyqui
 	for _, dd := range []bool{false, true} {
 		if res, ok := l.clusterAttempt(R, w1, slices.Clone(ws), slices.Clone(required), dd); ok {
 			return res, true
+		}
+	}
+	if base.axisRoot && base.axisW > 0 && !slices.Contains(ws, 0) {
+		ws, required = append([]float64{0}, ws...), append([]bool{false}, required...)
+		for _, dd := range []bool{false, true} {
+			if res, ok := l.clusterAttempt(R, w1, slices.Clone(ws), slices.Clone(required), dd); ok {
+				return res, true
+			}
 		}
 	}
 	l.axis = savedAxis
@@ -1572,6 +1608,10 @@ func (l *delayLoop) buildClusters(ws []float64, required []bool, dd bool) ([]axi
 // of an integrator triple with a real pole at 4e-10, and the walk from such
 // a circle crosses the band out to the next pole, 5e-6, where the reach of
 // the double model of 1+L falls to ~1e-12 and the walk exceeds its budget.
+// For the same reason dd tries the outer radii first: past a k-fold
+// cluster at the origin |S| grows like ω^k, so the reach of its model
+// grows faster than ω, and a walk from 3.4e-4 that took 1.2e6 points
+// takes 2e3 from 3.4e-3.
 func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 	c := complex(0, w0)
 	ds := make([]float64, len(l.poles))
@@ -1597,7 +1637,11 @@ func (l *delayLoop) formCluster(w0 float64, dd bool) (axisPole, bool) {
 		if !(lo <= hi) {
 			continue
 		}
-		for _, t := range []float64{0.5, 0.25, 0.75} {
+		ts := []float64{0.5, 0.25, 0.75}
+		if dd {
+			ts = []float64{0.9, 0.75, 0.5, 0.25}
+		}
+		for _, t := range ts {
 			if a, ok := l.verifyCluster(w0, lo*math.Pow(hi/lo, t), k, dd); ok {
 				return a, true
 			}

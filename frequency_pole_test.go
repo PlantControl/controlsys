@@ -1337,3 +1337,76 @@ func TestPoleLimitExactOriginPoleFamily(t *testing.T) {
 		t.Errorf("%d of 30 plants exercise the pole limit; want ≥ 20", exercised)
 	}
 }
+
+// TestPoleLimitOffOriginClusterDelayedMargin (GWVQME): next to the poles
+// {0, 0, 1.34e−7} of ergoOffOriginLoop the double solve fails off every
+// pole, and EvalFr and FreqResponse take the dd response there. The margin
+// grid of the delayed loop kept the pole limit, which returned +Inf at
+// ω ≈ 3.93e−7 and the solve error at the grid start 1.34e−8, so AllMargin
+// and Margin failed. Oracle: num/den at jω in big.Float times e^{−jωτ}, its
+// crossovers by bisection.
+func TestPoleLimitOffOriginClusterDelayedMargin(t *testing.T) {
+	q := ergoOffOriginLoop
+	p := makePlant(t, q.num, q.den)
+	for _, w := range []float64{1.338e-8, 1e-7, 1.338e-7, 3e-7, 3.9298633264503444e-07, 5e-7, 8e-7, 1e-6} {
+		want := bigHornerJ(q.num, w) / bigHornerJ(q.den, w)
+		h, err := p.EvalFr(complex(0, w))
+		if err != nil || cmplx.Abs(h[0][0]-want) > 1e-8*cmplx.Abs(want) {
+			t.Errorf("EvalFr(j%g) = %v, %v; want %v", w, h, err, want)
+		}
+		fr, err := p.FreqResponse([]float64{w})
+		if err != nil || cmplx.Abs(fr.Data[0]-want) > 1e-8*cmplx.Abs(want) {
+			t.Errorf("FreqResponse(%g) = %v, %v; want %v", w, fr, err, want)
+		}
+	}
+
+	if err := p.SetInputDelay([]float64{q.tau}); err != nil {
+		t.Fatal(err)
+	}
+	L := func(w float64) complex128 {
+		return bigHornerJ(q.num, w) / bigHornerJ(q.den, w) * cmplx.Exp(complex(0, -w*q.tau))
+	}
+	bisect := func(lo, hi float64, f func(float64) float64) float64 {
+		flo := f(lo)
+		for range 200 {
+			mid := (lo + hi) / 2
+			if fm := f(mid); (fm < 0) == (flo < 0) {
+				lo, flo = mid, fm
+			} else {
+				hi = mid
+			}
+		}
+		return (lo + hi) / 2
+	}
+	wpc := bisect(0.1, 0.2, func(w float64) float64 { return imag(L(w)) })
+	wgc := bisect(1, 3, func(w float64) float64 { return cmplx.Abs(L(w)) - 1 })
+	gm := -20 * math.Log10(cmplx.Abs(L(wpc)))
+	pm := 180 + cmplx.Phase(L(wgc))*180/math.Pi
+
+	am, err := AllMargin(p)
+	if err != nil {
+		t.Fatalf("AllMargin: %v", err)
+	}
+	if len(am.GainCrossFreqs) != 1 || math.Abs(am.GainCrossFreqs[0]-wgc) > 1e-8*wgc || math.Abs(am.PhaseMargins[0]-pm) > 1e-6 {
+		t.Errorf("AllMargin gain crossovers %v, PM %v; want [%v], [%v]", am.GainCrossFreqs, am.PhaseMargins, wgc, pm)
+	}
+	if len(am.PhaseCrossFreqs) == 0 || math.Abs(am.PhaseCrossFreqs[0]-wpc) > 1e-8*wpc || math.Abs(am.GainMargins[0]-gm) > 1e-6 {
+		t.Fatalf("AllMargin phase crossovers %v, GM %v; want first %v, %v", am.PhaseCrossFreqs, am.GainMargins, wpc, gm)
+	}
+	for i, w := range am.PhaseCrossFreqs {
+		l := L(w)
+		if math.Abs(imag(l)) > 1e-6*cmplx.Abs(l) || real(l) >= 0 {
+			t.Errorf("phase crossover %v: L = %v; want negative real", w, l)
+		}
+		if want := -20 * math.Log10(cmplx.Abs(l)); math.Abs(am.GainMargins[i]-want) > 1e-6 {
+			t.Errorf("GM at %v = %v dB; want %v", w, am.GainMargins[i], want)
+		}
+	}
+	m, err := Margin(p)
+	if err != nil {
+		t.Fatalf("Margin: %v", err)
+	}
+	if math.Abs(m.GainMargin-gm) > 1e-6 || math.Abs(m.PhaseMargin-pm) > 1e-6 {
+		t.Errorf("Margin = %+v; want GM %v, PM %v", m, gm, pm)
+	}
+}

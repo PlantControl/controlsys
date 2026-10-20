@@ -380,8 +380,10 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 
 // peakGain computes sup_ω σ_max(G(jω)) (G(e^{jωT}) for discrete models) of a
 // model with no poles on the stability boundary from the γ-crossings of its
-// extended pencil; stability is not required. A sampled peak, or σ_max(D)
-// at ω = ∞ for continuous models, is first certified by one probe just
+// extended pencil; stability is not required. A sampled peak, climbed to
+// its local maximum since on stiff models QZ can push the crossings near it
+// out of the near-axis band, or σ_max(D) at ω = ∞ for continuous models, is
+// first certified by one probe just
 // above it; when the probe is inconclusive, the upper-bound search may still
 // certify a raised peak, and bisection runs only if it does not. A
 // continuous peak approached only as ω → ∞ returns omega = +Inf.
@@ -390,6 +392,9 @@ func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err
 	ws := newHamiltonianWS(sys, n, m, p)
 
 	gammaLow, omegaPeak := ws.lowerBound(poles)
+	if gammaLow > 0 {
+		gammaLow, omegaPeak = ws.climb(gammaLow, omegaPeak)
+	}
 	if sys.IsContinuous() {
 		sd, err := maxSingularValue(sys.D)
 		if err != nil {
@@ -548,11 +553,14 @@ func newHamiltonianWS(sys *System, n, m, p int) *hamiltonianWS {
 		eval: newSigmaEvaluator(sys, n, m, p),
 	}
 	a, b, c := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
+	alpha := pencilIOScale(b, c, n, m, p)
 	top, topE, bot := ws.top, ws.topE, ws.botInit
 	continuous := sys.IsContinuous()
 	for i := range n {
 		copy(top[i*nc:i*nc+n], a.Data[i*a.Stride:i*a.Stride+n])
-		copy(top[i*nc+nn:i*nc+nn+m], b.Data[i*b.Stride:i*b.Stride+m])
+		for j := range m {
+			top[i*nc+nn+j] = alpha * b.Data[i*b.Stride+j]
+		}
 		topE[i*nc+i] = 1
 		row := (n + i) * nc
 		if continuous {
@@ -568,15 +576,15 @@ func newHamiltonianWS(sys *System, n, m, p int) *hamiltonianWS {
 			dual[row+n+j] = sign * a.Data[j*a.Stride+i]
 		}
 		for j := range p {
-			dual[row+nn+m+j] = sign * c.Data[j*c.Stride+i]
+			dual[row+nn+m+j] = sign * c.Data[j*c.Stride+i] / alpha
 		}
 		for j := range m {
-			bot[(n+i)*k+p+j] = b.Data[i*b.Stride+j]
+			bot[(n+i)*k+p+j] = alpha * b.Data[i*b.Stride+j]
 		}
 	}
 	for q := range p {
 		for j := range n {
-			bot[j*k+q] = c.Data[q*c.Stride+j]
+			bot[j*k+q] = c.Data[q*c.Stride+j] / alpha
 		}
 	}
 	if sys.D != nil {
@@ -591,6 +599,32 @@ func newHamiltonianWS(sys *System, n, m, p int) *hamiltonianWS {
 
 	ws.work = make([]float64, 8*nn)
 	return ws
+}
+
+// pencilIOScale returns the power of two α for the state scaling x̂ = αx
+// (B̂ = αB, Ĉ = C/α) that brings ‖B̂‖_F and ‖Ĉ‖_F within a factor 4 of each
+// other. The transfer function is unchanged, but the crossings of a model
+// with ‖C‖ ≪ ‖B‖ are otherwise lost in the rounding of the x–z coupling: a
+// slow resonance next to a fast pole drops out of the near-axis band and the
+// peak is certified 30% low.
+func pencilIOScale(b, c blas64.General, n, m, p int) float64 {
+	var sb, sc float64
+	for i := range n {
+		for _, v := range b.Data[i*b.Stride : i*b.Stride+m] {
+			sb = math.Hypot(sb, v)
+		}
+	}
+	for i := range p {
+		for _, v := range c.Data[i*c.Stride : i*c.Stride+n] {
+			sc = math.Hypot(sc, v)
+		}
+	}
+	if !(sb > 0) || !(sc > 0) || math.IsInf(sb, 0) || math.IsInf(sc, 0) {
+		return 1
+	}
+	_, eb := math.Frexp(sb)
+	_, ec := math.Frexp(sc)
+	return math.Ldexp(1, (ec-eb)/2)
 }
 
 // hamiltonianEvals counts hasImagEigs calls, one QZ decomposition each.
