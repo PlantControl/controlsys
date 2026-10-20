@@ -793,11 +793,12 @@ func fzPidCheckFRD(t *testing.T, s *fzSpec, sys *System, family PidtuneType, wc,
 		t.Fatalf("%s: bad controller %+v", name, res.Controller)
 	}
 	g := fzPidInterp(frd)
-	missedSkip := ""
-	if hasP, hasI, hasD, _, _ := pidTuningTerms(PidtuneType(strings.ToUpper(string(family)))); pm == 0 && !hasD && hasP != hasI {
-		missedSkip = "free one-gain TunePIDFRD keeps the grid crossing set, missing crossings the samples resolve (followup)"
+	fzPidCheckEvidence(t, name, pl, g, g, frd.Omega, "", c, res.Evidence)
+	for i, m := range res.Evidence.PhaseMargins {
+		if res.Evidence.AchievedPhaseMargin > m+1e-9 {
+			t.Fatalf("%s: achieved margin %.9g above %.9g at crossing %g", name, res.Evidence.AchievedPhaseMargin, m, res.Evidence.GainCrossovers[i])
+		}
 	}
-	fzPidCheckEvidence(t, name, pl, g, g, frd.Omega, missedSkip, c, res.Evidence)
 }
 
 func FuzzPidtune(f *testing.F) {

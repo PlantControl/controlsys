@@ -192,11 +192,11 @@ const (
 	pidCrossAuto pidCrossScan = iota
 	pidCrossCoarse
 	pidCrossRefined
-	// pidCrossGrid scans the grid only for search, check and evidence.
-	// Free one-gain designs on sampled data keep it: without a stability
-	// certificate a crossing the refined scan adds on −1's far side can be
-	// neither counted the far way round nor rejected without losing the
-	// robust designs this scan returns.
+	// pidCrossGrid scans the refined grid, which holds sampled data's
+	// samples, for sign changes of |L| − 1 only, for search, check and
+	// evidence. Free one-gain designs on sampled data use it: their single
+	// candidate needs no second search, and a crossing the samples resolve
+	// between grid points keeps its wrapped margin against the floor.
 	pidCrossGrid
 )
 
@@ -1837,11 +1837,11 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	plant[mid] = h
 	refinedOmega := pidTuningCrossGrid(p, omega)
 	crossOmega, crossings := refinedOmega, pidTuningCrossings
-	if p.crossScan == pidCrossCoarse || p.crossScan == pidCrossGrid {
+	if p.crossScan == pidCrossCoarse {
 		crossOmega, crossings = omega, pidTuningCoarseCrossings
 	}
 	if p.crossScan == pidCrossGrid {
-		refinedOmega = omega
+		crossings = pidTuningCoarseCrossings
 	}
 	// gridFor gives a candidate's crossing grid and q the plant that scans
 	// it, reusing samples below the band across candidates. Below the band
@@ -1924,7 +1924,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	// with a model-based stability certificate it needs only positive
 	// margins, as pidTuningCrossingMargin evaluates them, and reports its
 	// lowest. Sampled responses keep the floor, since their wrapped phase
-	// can hide a negative margin, and check only the grid's crossings
+	// can hide a negative margin, at every crossing the samples resolve
 	// (pidCrossGrid).
 	relaxed := oneGain && p.stable != nil
 	floor := o.PhaseMargin - 3
