@@ -127,7 +127,7 @@ func TestFreqResponseInternalDelayLFTCancelIllConditionedLoop(t *testing.T) {
 		g := new(big.Rat).Sub(rat(d11)[0], fzRatMul(rat(c1), x, 1, 2, 1)[0])
 		want, _ := g.Float64()
 		got := fr.At(0, 0, 0)
-		if rel := cmplx.Abs(got-complex(want, 0)) / math.Abs(want); rel > 1e-12 {
+		if rel := cmplx.Abs(got-complex(want, 0)) / math.Abs(want); rel > 1e-13 {
 			t.Errorf("A×%g: G(0) = %.17g, want %.17g (rel err %.3g)", scale, got, want, rel)
 		}
 	}
