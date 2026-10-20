@@ -202,8 +202,10 @@ func TestPidtunePoleFallbackFirstDesignGated(t *testing.T) {
 // rounding noise and an RHP pair passed the pole test, and where the
 // realization's split double zero at s = 0 hid the integrator it cancels
 // (TFE7I2 review); an integral term on a plant zero at the integrator is
-// never asymptotically stable. Oracle: closed-loop roots from num/den;
-// over a seeded population every returned design is stable.
+// never asymptotically stable. The P and PDF there now design at raised
+// crossovers (OQWQKF), robust per the oracle; the I stays unattainable.
+// Oracle: closed-loop roots from num/den; over a seeded population every
+// returned design is stable.
 func TestPidtunePoleFallbackContinuousStable(t *testing.T) {
 	for _, c := range []struct {
 		f        PidtuneType
