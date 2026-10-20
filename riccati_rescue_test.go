@@ -265,3 +265,44 @@ func TestCare_FirstPassFailureRescued(t *testing.T) {
 		})
 	}
 }
+
+// TestCare_GarbageFirstPassRescued: R ≈ 7.5e-17 against B ≈ 0.1, A
+// unstable. The unscaled Schur split returned, without error, an X 1.5e7
+// times the true one (Riccati residual ≈ the sum of its terms) and the
+// cost-scaled re-solve failed. A first X with residual above 1e-6 of its
+// terms is now re-solved at firstSigma and kept only when more accurate.
+func TestCare_GarbageFirstPassRescued(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{96.36758671666792, 0.9588728987457393, 62.85981384361142, 21.827959705408684, 44.27011328904998, 62.11146160989517, -67.80386342423793, 38.71178367598355, 81.4545331703082})
+	B := mat.NewDense(3, 1, []float64{-0.04160541477814791, -0.17715872321318224, -0.05142743181332761})
+	Q := mat.NewDense(3, 3, []float64{4.192814747728362e-13, -1.4573612006267457e-13, -8.411273813530952e-14, -1.4573612006267457e-13, 2.300446620024366e-13, 1.528209332552778e-13, -8.411273813530952e-14, 1.528209332552778e-13, 1.2197388893961272e-13})
+	R := mat.NewDense(1, 1, []float64{7.531183056095823e-17})
+	const f = 0x1p43
+	var Qs, Rs mat.Dense
+	Qs.Scale(f, Q)
+	Rs.Scale(f, R)
+	ref, err := Care(A, B, &Qs, &Rs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref.X.Scale(1/f, ref.X)
+	want := newtonCare(t, A, B, Q, R, ref.K)
+	if e := relErr(ref.X, want); !(e <= 1e-10) {
+		t.Fatalf("oracles disagree: rel err %g", e)
+	}
+	for _, noScaling := range []bool{false, true} {
+		t.Run(fmt.Sprintf("NoScaling=%v", noScaling), func(t *testing.T) {
+			res, err := Care(A, B, Q, R, &RiccatiOpts{NoScaling: noScaling})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e := relErr(res.X, want); !(e <= 1e-10) {
+				t.Errorf("X rel err %g against Newton–Kleinman", e)
+			}
+			for _, v := range res.Eig {
+				if !(real(v) < 0) || math.Abs(imag(v)) > 1e3 {
+					t.Errorf("closed-loop eigenvalue %v", v)
+				}
+			}
+		})
+	}
+}

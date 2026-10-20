@@ -200,6 +200,8 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // subspace) is retried, also under NoScaling, at the cost scale
 // √(‖Q̄‖/‖G‖); the retry's X is kept only with a Riccati residual within
 // 1e-6 of its terms and a stable A − BK, else the first error is returned.
+// A solution with a residual above 1e-6 of its terms is likewise re-solved
+// at that cost scale, and the more accurate of the two is kept.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -293,10 +295,11 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	bwork := ws.bwork[:nn]
 	selctg := func(wr, wi float64) bool { return wr < 0 }
 	var norms riccatiNorms
-	var prev *riccatiPass
+	var prev, orig *riccatiPass
 	var X *mat.Dense
 	var xData []float64
 	var rcnd float64
+solve:
 	for {
 		// Hamiltonian of the cost-scaled problem: H = [[A, -σG], [-Q/σ, -A']]
 		sigma, isigma := problem.sigma, 1/problem.sigma
@@ -330,32 +333,51 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 			err = ErrNoStabilizing
 		}
 		if err != nil {
-			if prev != nil {
+			switch {
+			case prev != nil:
 				X, xData, rcnd = problem.restorePass(prev)
-				break
-			}
-			if problem.rescueErr != nil {
+			case orig != nil:
+				X, xData, rcnd = problem.restorePass(orig)
+				break solve
+			case problem.rescueErr != nil:
 				return nil, problem.rescueErr
+			default:
+				problem.rescueErr, problem.costScaling = err, true
+				norms = hamiltonianNorms(n, aWork, qWork, g)
+				problem.sigma, problem.balanced = norms.firstSigma(), true
+				continue
 			}
-			problem.rescueErr, problem.costScaling = err, true
-			norms = hamiltonianNorms(n, aWork, qWork, g)
-			problem.sigma, problem.balanced = norms.firstSigma(), true
-			continue
-		}
-		if prev == nil && problem.costScaling && problem.rescueErr == nil {
-			norms = hamiltonianNorms(n, aWork, qWork, g)
-		}
-		if !problem.rescaleCost(true, norms, xData, &prev, rcnd) {
+		} else {
+			if prev == nil && problem.costScaling && problem.rescueErr == nil && orig == nil {
+				norms = hamiltonianNorms(n, aWork, qWork, g)
+			}
+			if problem.rescaleCost(true, norms, xData, &prev, rcnd) {
+				continue
+			}
 			if problem.keepBest(true, prev, xData) {
 				X, xData, rcnd = problem.restorePass(prev)
 			}
+		}
+		res, scale := hamiltonianResidual(n, aWork, qWork, g, xData, ws.h[:nn*nn])
+		if problem.rescueErr != nil {
+			if !(res <= rescueTol*scale) {
+				return nil, problem.rescueErr
+			}
 			break
 		}
-	}
-	if problem.rescueErr != nil {
-		if res, scale := problem.residualTerms(true, xData); !(res <= rescueTol*scale) {
-			return nil, problem.rescueErr
+		if orig != nil {
+			if !(res <= rescueTol*scale && res < orig.res) {
+				X, xData, rcnd = problem.restorePass(orig)
+			}
+			break
 		}
+		if res <= rescueTol*scale {
+			break
+		}
+		problem.savePass(&orig, xData, rcnd, res)
+		prev, problem.costScaling = nil, true
+		norms = hamiltonianNorms(n, aWork, qWork, g)
+		problem.sigma, problem.balanced = norms.firstSigma(), true
 	}
 
 	// Closed-loop eigenvalues
@@ -386,6 +408,26 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	return problem.result(X, K, eig, rcnd), nil
+}
+
+// hamiltonianResidual returns ‖ĀᵀX + XĀ − XGX + Q̄‖_F of care's
+// Hamiltonian blocks and the sum of the Frobenius norms of its terms, using
+// work (≥ 3n²) as scratch.
+func hamiltonianResidual(n int, a, q, g, x, work []float64) (res, scale float64) {
+	gen := func(d []float64) blas64.General { return blas64.General{Rows: n, Cols: n, Data: d, Stride: n} }
+	xa, gx, xgx := work[:n*n], work[n*n:2*n*n], work[2*n*n:3*n*n]
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(x), gen(a), 0, gen(xa))
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(g), gen(x), 0, gen(gx))
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(x), gen(gx), 0, gen(xgx))
+	scale = 2*impl.Dlange(lapack.Frobenius, n, n, xa, n, nil) +
+		impl.Dlange(lapack.Frobenius, n, n, xgx, n, nil) +
+		impl.Dlange(lapack.Frobenius, n, n, q, n, nil)
+	for i := range n {
+		for j := range n {
+			gx[i*n+j] = xa[i*n+j] + xa[j*n+i] - xgx[i*n+j] + q[i*n+j]
+		}
+	}
+	return impl.Dlange(lapack.Frobenius, n, n, gx, n, nil), scale
 }
 
 // hamiltonianNorms returns the riccatiNorms of care's Hamiltonian blocks
