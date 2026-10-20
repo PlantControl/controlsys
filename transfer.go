@@ -232,32 +232,131 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return c.result(0), nil
 	}
 
-	order, scaled, err := c.convertBalanced(true)
+	order, err := c.convertFrom(false)
 	if err != nil {
 		return nil, err
 	}
+	if !c.hasZeroDiagonal() {
+		return c.result(order), nil
+	}
+	check := newTFCheck(c.sys, c.n, c.m, c.p)
+	e0, ok := check.relErr(c.tf)
+	if !ok || e0 <= 1e3*float64(c.n)*eps() {
+		return c.result(order), nil
+	}
+	alt := newRowRealizationConverter(c.sys, c.opts)
+	altOrder, err := alt.convertFrom(true)
+	if err != nil {
+		return c.result(order), nil
+	}
+	if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
+		return alt.result(altOrder), nil
+	}
+	return c.result(order), nil
+}
+
+// convertFrom fills the rows from the Dgebal or, with osborne, the
+// [A B; C ·]-balanced realization (see balancedABC).
+func (c rowRealizationConverter) convertFrom(osborne bool) (int, error) {
+	order, scaled, err := c.convertBalanced(osborne, true)
+	if err != nil {
+		return 0, err
+	}
 	if scaled && !c.finiteCoeffs() {
-		if order, _, err = c.convertBalanced(false); err != nil {
-			return nil, err
+		if order, _, err = c.convertBalanced(osborne, false); err != nil {
+			return 0, err
 		}
 	}
 	if !c.finiteCoeffs() {
-		return nil, fmt.Errorf("TransferFunction: %w", ErrOverflow)
+		return 0, fmt.Errorf("TransferFunction: %w", ErrOverflow)
 	}
-	return c.result(order), nil
+	return order, nil
+}
+
+func (c rowRealizationConverter) hasZeroDiagonal() bool {
+	raw := c.sys.A.RawMatrix()
+	for i := range c.n {
+		if raw.Data[i*raw.Stride+i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// tfCheck holds reference responses of the state-space model at a few
+// points, from the balanced dense solve behind EvalFr.
+type tfCheck struct {
+	s   []complex128
+	ref [][]complex128
+	mag []float64
+}
+
+// newTFCheck samples the delay-free response at e^{jθ}, θ ∈ {0.7, 1.9, 2.8},
+// or jω, ω ∈ ‖A‖_F·{1e-2, 1, 1e2}, skipping poles and zero responses.
+func newTFCheck(sys *System, n, m, p int) tfCheck {
+	var pts []complex128
+	if sys.IsContinuous() {
+		rho := frobNorm(sys.A)
+		if rho == 0 || math.IsInf(rho, 0) {
+			rho = 1
+		}
+		for _, w := range []float64{1e-2, 1, 1e2} {
+			pts = append(pts, complex(0, rho*w))
+		}
+	} else {
+		for _, th := range []float64{0.7, 1.9, 2.8} {
+			pts = append(pts, cmplx.Rect(1, th))
+		}
+	}
+	bd := newBalancedDense(sys, n, m, p)
+	var ck tfCheck
+	for _, s := range pts {
+		dst := make([]complex128, p*m)
+		if bd.evalInto(pointAt(s), dst) != nil {
+			continue
+		}
+		mag := 0.0
+		for _, v := range dst {
+			mag = max(mag, cmplx.Abs(v))
+		}
+		if mag == 0 || math.IsInf(mag, 0) || math.IsNaN(mag) {
+			continue
+		}
+		ck.s, ck.ref, ck.mag = append(ck.s, s), append(ck.ref, dst), append(ck.mag, mag)
+	}
+	return ck
+}
+
+// relErr is the worst max-entry error of tf relative to the max-entry
+// reference over the points; ok is false without a usable point.
+func (ck tfCheck) relErr(tf *TransferFunc) (worst float64, ok bool) {
+	for k, s := range ck.s {
+		got := tf.eval(s)
+		m := len(got[0])
+		for i, row := range got {
+			for j, v := range row {
+				e := cmplx.Abs(v-ck.ref[k][i*m+j]) / ck.mag[k]
+				if math.IsNaN(e) {
+					e = math.Inf(1)
+				}
+				worst = max(worst, e)
+			}
+		}
+	}
+	return worst, len(ck.s) > 0
 }
 
 // convertBalanced fills the rows from the balanced realization, I/O-scaled
 // when ioScale; scaled reports whether any I/O scale was not 1. Scaling a
 // tiny B or C up toward a huge ‖A‖ can overflow coefficients that are
 // finite without it.
-func (c rowRealizationConverter) convertBalanced(ioScale bool) (order int, scaled bool, err error) {
-	a, b, cm, inExp, outExp := c.balancedABC(false, ioScale)
+func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order int, scaled bool, err error) {
+	a, b, cm, inExp, outExp := c.balancedABC(osborne, ioScale)
 	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
 	if err != nil {
 		return 0, false, err
 	}
-	if stair.NCont < c.n {
+	if stair.NCont < c.n && !osborne {
 		a, b, cm, inExp2, outExp2 := c.balancedABC(true, ioScale)
 		alt, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
 		if err != nil {
@@ -300,13 +399,19 @@ func (c rowRealizationConverter) finiteCoeffs() bool {
 // floor and the orthogonal reductions are relative to ‖A‖: without them a
 // tiny but nonzero B or C is dropped as uncontrollable, and badly scaled A
 // (Padé cascades, stiff chains) loses most of its digits. D is from Dgebal
-// on A, or with osborne from the balance of [A B; C ·] (SLICOT TB01ID);
-// Dgebal is more accurate on the cascades but can shrink a companion
-// chain's couplings below the staircase floor, so when states are lost
-// convert takes the osborne realization if it is fully controllable (a
-// partial count from either is equally ambiguous). MATLAB tf(ss) removes
-// only structurally disconnected states, so keeping states that are
-// controllable in some exact scaling is on MATLAB's side.
+// on A, or with osborne from the balance of [A B; C ·] (SLICOT TB01ID).
+// Dgebal is far more accurate on stiff chains but, counting the diagonal
+// in its norms, grades a chain of zero-diagonal states (shift registers,
+// integrator and companion chains) toward a small diagonal entry, so the
+// coefficients lose up to all digits; it can also shrink a companion
+// chain's couplings below the staircase floor. So when states are lost
+// convertBalanced takes the osborne realization if it is fully
+// controllable (a partial count from either is equally ambiguous), and
+// when A has a zero diagonal entry (the cost gate) and the Dgebal result
+// misses the state-space response at a few sample points by more than
+// 1e3·n·eps, convert keeps whichever result misses it less. MATLAB tf(ss)
+// removes only structurally disconnected states, so keeping states that
+// are controllable in some exact scaling is on MATLAB's side.
 func (c rowRealizationConverter) balancedABC(osborne, ioScale bool) (a, b, cm *mat.Dense, inExp, outExp []int) {
 	n, m, p := c.n, c.m, c.p
 	br := newRealizationCopy(c.sys, n, m, p)
