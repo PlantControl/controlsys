@@ -277,6 +277,26 @@ func TestSigmaSubnormalResponse(t *testing.T) {
 				t.Fatalf("D=%v: σ%d = %g, want %g", d, i, got, w/up)
 			}
 		}
+		f, err := sys.FRD([]float64{0.5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fsv, err := f.Sigma()
+		if err != nil {
+			t.Fatalf("D=%v FRD.Sigma: %v", d, err)
+		}
+		for i, w := range want {
+			if got := fsv.At(0, i); !sameRelative(got, w/up, 1e-10) {
+				t.Fatalf("D=%v: FRD σ%d = %g, want %g", d, i, got, w/up)
+			}
+		}
+		pk, err := f.PeakGain()
+		if err != nil {
+			t.Fatalf("D=%v FRD.PeakGain: %v", d, err)
+		}
+		if !sameRelative(pk.Gain, want[0]/up, 1e-10) {
+			t.Fatalf("D=%v: FRD peak = %g, want %g", d, pk.Gain, want[0]/up)
+		}
 	}
 }
 
