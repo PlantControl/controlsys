@@ -234,7 +234,7 @@ func (k *kalmanTally) run(id int, kc kalmanCase) {
 			}
 		}()
 	}
-	line := strconv.Itoa(id)
+	line := strconv.Itoa(id) + " kB=" + strconv.Itoa(kc.kB) + " kC=" + strconv.Itoa(kc.kC) + " rot=" + strconv.FormatBool(kc.rotated)
 	defer func() { k.lines = append(k.lines, line) }()
 	if red, err := sys.Reduce(nil); err == nil {
 		line += " ra=" + strconv.Itoa(red.Order-kc.r)
@@ -347,10 +347,11 @@ func TestKalmanStructuredSweep(t *testing.T) {
 		t.Errorf("dropped needed states or wrong response: Reduce under %d resp %d, TF under %d resp %d",
 			tally.raUnder, tally.raResp, tally.tfUnder, tally.tfResp)
 	}
-	// Base 0c02feb over-counted 59 Reduce, 20 CtrbF and 24 ObsvF of the
-	// default 300 by keeping rounding noise as rank.
-	if n == 300 && decades == 0 && (tally.raOver > 50 || tally.cfWrong > 17 || tally.ofWrong > 20) {
-		t.Errorf("noise counted as rank: Reduce over %d (≤50), CtrbF %d (≤17), ObsvF %d (≤20)", tally.raOver, tally.cfWrong, tally.ofWrong)
+	// Base 0c02feb over-counted 59 Reduce, 20 CtrbF, 24 ObsvF and 67 TF of
+	// the default 300 by keeping rounding noise as rank.
+	if n == 300 && decades == 0 && (tally.raOver > 50 || tally.cfWrong > 17 || tally.ofWrong > 20 || tally.tfOver > 60) {
+		t.Errorf("noise counted as rank: Reduce over %d (≤50), CtrbF %d (≤17), ObsvF %d (≤20), TF over %d (≤60)",
+			tally.raOver, tally.cfWrong, tally.ofWrong, tally.tfOver)
 	}
 	if len(tally.failed) > 0 && os.Getenv("KALMAN_SWEEP_N") != "" {
 		t.Logf("failed ids %v", tally.failed[:min(len(tally.failed), 60)])

@@ -40,7 +40,33 @@ func staircaseFloor(A *mat.Dense, tol float64) float64 {
 	if tol == 0 {
 		tol = float64(n*n) * eps()
 	}
-	return tol * denseNorm(A)
+	return tol * frobNorm(A)
+}
+
+// frobNorm is the Frobenius norm, finite when the plain sum of squares
+// overflows (‖A‖ ≈ 1e155).
+func frobNorm(m *mat.Dense) float64 {
+	f := denseNorm(m)
+	if !math.IsInf(f, 1) {
+		return f
+	}
+	raw := m.RawMatrix()
+	mx := 0.0
+	for i := range raw.Rows {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols] {
+			mx = math.Max(mx, math.Abs(v))
+		}
+	}
+	if math.IsInf(mx, 0) || math.IsNaN(mx) {
+		return f
+	}
+	sum := 0.0
+	for i := range raw.Rows {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols] {
+			sum += (v / mx) * (v / mx)
+		}
+	}
+	return mx * math.Sqrt(sum)
 }
 
 // ctrbfFloor is staircaseFloor raised to at least MATLAB ctrbf/obsvf's
@@ -149,7 +175,7 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 			break
 		}
 
-		if denseNorm(block) <= absFloor {
+		if frobNorm(block) <= absFloor {
 			break
 		}
 		if !svd.Factorize(block, mat.SVDFull) {

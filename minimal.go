@@ -232,7 +232,7 @@ func (sys *System) MinimalRealization() (*ReduceResult, error) {
 func reduceIOExponents(A, B, C *mat.Dense) (inExp, outExp []int) {
 	_, m := B.Dims()
 	p, _ := C.Dims()
-	target := denseNorm(A)
+	target := frobNorm(A)
 	if target == 0 {
 		target = 1
 	}
