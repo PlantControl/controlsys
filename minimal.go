@@ -24,7 +24,11 @@ type ReduceOpts struct {
 	Mode ReduceMode
 	// Tol is the staircase rank tolerance (MATLAB minreal tol): a singular
 	// value of a step counts as rank above Tol·max(σ₁(step), ‖A‖_F), ‖A‖
-	// of the full model in both stages; 0 selects n²·eps.
+	// of the full model in both stages; 0 selects n²·eps with the floor
+	// raised to MATLAB ctrbf/obsvf's 10·n·‖A‖₁·eps, the rule CtrbF and
+	// ObsvF use. MATLAB minreal's documented default sqrt(eps) is not
+	// used: against ‖A‖ it drops weakly coupled states that carry the
+	// response (a slow plant in a PI loop, diagonally scaled models).
 	Tol float64
 	// Equalize balances A, B, C before the staircase reductions. Badly
 	// scaled models (state scales spanning many decades) need it, as
@@ -97,10 +101,10 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	ldexpIO(B, C, inExp, outExp, 1)
 
 	ncont := n
-	floor := staircaseFloor(A, opts.Tol)
+	floor := ctrbfFloor(A, opts.Tol)
 
 	if opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable {
-		res, err := controllabilityStaircase(A, B, C, opts.Tol, false)
+		res, err := controllabilityStaircaseFloor(A, B, C, opts.Tol, floor, false)
 		if err != nil {
 			return nil, fmt.Errorf("Reduce: %w", err)
 		}

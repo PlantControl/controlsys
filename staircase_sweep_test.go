@@ -349,11 +349,50 @@ func TestKalmanStructuredSweep(t *testing.T) {
 	}
 	// Base 0c02feb over-counted 59 Reduce, 20 CtrbF, 24 ObsvF and 67 TF of
 	// the default 300 by keeping rounding noise as rank.
-	if n == 300 && decades == 0 && (tally.raOver > 52 || tally.cfWrong > 17 || tally.ofWrong > 20 || tally.tfOver > 60) {
-		t.Errorf("noise counted as rank: Reduce over %d (≤52), CtrbF %d (≤17), ObsvF %d (≤20), TF over %d (≤60)",
+	if n == 300 && decades == 0 && (tally.raOver > 36 || tally.cfWrong > 17 || tally.ofWrong > 20 || tally.tfOver > 60) {
+		t.Errorf("noise counted as rank: Reduce over %d (≤36), CtrbF %d (≤17), ObsvF %d (≤20), TF over %d (≤60)",
 			tally.raOver, tally.cfWrong, tally.ofWrong, tally.tfOver)
 	}
 	if len(tally.failed) > 0 && os.Getenv("KALMAN_SWEEP_N") != "" {
 		t.Logf("failed ids %v", tally.failed[:min(len(tally.failed), 60)])
+	}
+}
+
+// TestReduceStagesMatchCtrbObsvF checks that Reduce's stages use the same
+// default rank rule as CtrbF/ObsvF (floor 10·n·‖A‖₁·eps), so the one-sided
+// reductions agree with their counts. With n²·eps·‖A‖_F in Reduce they
+// kept noise states CtrbF/ObsvF dropped (49 and 73 of 2400 seeds).
+func TestReduceStagesMatchCtrbObsvF(t *testing.T) {
+	var cu, ou int
+	const n = 600
+	for id := range n {
+		rng := rand.New(rand.NewPCG(uint64(id), 0x9e3779b97f4a7c15))
+		sys := newKalmanCase(rng).sys
+		ru, err := sys.Reduce(&ReduceOpts{Mode: ReduceUncontrollable})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ro, err := sys.Reduce(&ReduceOpts{Mode: ReduceUnobservable})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cf, err := CtrbF(sys.A, sys.B, sys.C, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		of, err := ObsvF(sys.A, sys.B, sys.C, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sumInts(cf.K) != ru.Order {
+			cu++
+		}
+		if sumInts(of.K) != ro.Order {
+			ou++
+		}
+	}
+	t.Logf("Reduce stage vs CtrbF/ObsvF mismatches: controllable %d, observable %d of %d", cu, ou, n)
+	if cu > 3 || ou > 8 {
+		t.Errorf("Reduce stage vs CtrbF/ObsvF count mismatches: controllable %d (≤3), observable %d (≤8) of %d", cu, ou, n)
 	}
 }
