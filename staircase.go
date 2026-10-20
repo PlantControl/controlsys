@@ -24,8 +24,11 @@ type staircaseResult struct {
 
 // controllabilityStaircase reduces (A, B, C) to controllability staircase
 // form by orthogonal transformations. C may be nil when the transformed C is
-// not needed; tol = 0 selects n²·eps, relative to each block's norm. wantT
-// accumulates the transformation into the result's T.
+// not needed. A singular value of a step counts as rank above
+// tol·max(σ₁(step), ‖A‖_F), as SLICOT MB03OY with SVLMAX = ‖A‖: absolute in
+// ‖A‖ like MATLAB ctrbf, so rounding noise in a small later block is not
+// rank. tol = 0 selects n²·eps. wantT accumulates the transformation into
+// the result's T.
 func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*staircaseResult, error) {
 	if A == nil || B == nil {
 		return nil, fmt.Errorf("A or B is nil: %w", ErrInvalidArgument)
@@ -107,16 +110,14 @@ func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*sta
 			break
 		}
 
-		fnorm := denseNorm(block)
-		if fnorm <= absFloor {
+		if denseNorm(block) <= absFloor {
 			break
 		}
-		threshold := tol * fnorm
-
 		if !svd.Factorize(block, mat.SVDFull) {
 			return nil, fmt.Errorf("SVD of staircase block %d did not converge: %w", len(blockSizes)+1, ErrSchurFailed)
 		}
 		vals := svd.Values(nil)
+		threshold := math.Max(tol*vals[0], absFloor)
 
 		rank := 0
 		for _, v := range vals {

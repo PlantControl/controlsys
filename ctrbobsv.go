@@ -108,9 +108,10 @@ type StaircaseForm struct {
 //
 //	Abar = [Anc 0; A21 Ac], Bbar = [0; Bc], Cbar = [Cnc Cc]
 //
-// with the nc = sum(K) controllable states last. tol is the relative rank
-// tolerance of each staircase step; 0 selects n²·eps. Unlike MATLAB's absolute
-// default, it scales with the size of each block. Nil, non-finite or
+// with the nc = sum(K) controllable states last. A singular value of a
+// staircase step counts as rank above tol·max(σ₁(step), ‖A‖_F), so like
+// MATLAB's absolute default, rounding noise in a block small against ‖A‖
+// is not rank; 0 selects tol = n²·eps. Nil, non-finite or
 // mismatched matrices, a negative or NaN tol and a model with no states
 // return an error.
 func CtrbF(A, B, C *mat.Dense, tol float64) (*StaircaseForm, error) {
