@@ -662,7 +662,8 @@ func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
 // wc 0.526, with phase margin 90°. Rejecting every back-off design crossing
 // over above the first wc's band (4G4ABV, reverted) made both error; they
 // return the base designs. Oracle: closed-loop roots, margins at every
-// crossover over [1e-6, 1e6] and |S|. The PD is the placed design (PBXZCH).
+// crossover over [1e-6, 1e6] and |S|. The PD is the placed design (PBXZCH),
+// an earlier back-off step under the 58.5° acceptance floor (OQWQKF).
 func TestPidtuneZeroDCBackoffCrossesAboveBand(t *testing.T) {
 	num := Poly{-0.5711694594945204, -0.12792302726028815, -0.07166383720659307, 0}
 	den := Poly{1, 6.286397495546808, 16.55207466253316, 23.123442417235935, 12.100970259959752}
@@ -670,7 +671,7 @@ func TestPidtuneZeroDCBackoffCrossesAboveBand(t *testing.T) {
 	for _, c := range []struct {
 		f      PidtuneType
 		kp, kd float64
-	}{{PidtuneP, -975.13, 0}, {PidtunePD, -117.34, -12566}} {
+	}{{PidtuneP, -975.13, 0}, {PidtunePD, -111.33, -10626}} {
 		pid, err := Pidtune(p, c.f, 0, nil)
 		if err != nil {
 			t.Errorf("%s: %v", c.f, err)

@@ -34,15 +34,30 @@ func pidtuneLoopMargin(L func(float64) complex128, wMax float64) (pm, ms float64
 
 func pidtuneLoopMarginBand(L func(float64) complex128, wMin, wMax, ratio float64) (pm, ms float64) {
 	pm = math.Inf(1)
-	prev := cmplx.Abs(L(wMin))
+	prevW, prev := wMin, cmplx.Abs(L(wMin))
 	for w := wMin; w <= wMax; w *= ratio {
 		l := L(w)
 		a := cmplx.Abs(l)
 		ms = math.Max(ms, 1/cmplx.Abs(1+l))
 		if (a-1)*(prev-1) <= 0 {
-			pm = math.Min(pm, 180-math.Abs(cmplx.Phase(l))*180/math.Pi)
+			lo, hi := prevW, w
+			for range 60 {
+				mid := math.Sqrt(lo * hi)
+				if (cmplx.Abs(L(lo))-1)*(cmplx.Abs(L(mid))-1) <= 0 {
+					hi = mid
+				} else {
+					lo = mid
+				}
+			}
+			x := l
+			for _, v := range []complex128{L(lo), L(hi)} {
+				if math.Abs(cmplx.Abs(v)-1) <= math.Abs(cmplx.Abs(x)-1) {
+					x = v
+				}
+			}
+			pm = math.Min(pm, 180-math.Abs(cmplx.Phase(x))*180/math.Pi)
 		}
-		prev = a
+		prevW, prev = w, a
 	}
 	return pm, ms
 }
@@ -214,7 +229,7 @@ func TestPidtuneAutoCrossoverBacksOffToStable(t *testing.T) {
 			}
 		}
 		pm, ms := pidtuneLoopMargin(func(w float64) complex128 { s := complex(0, w); return cs(s) * g(s) }, 1e3)
-		if pm < c.minMargin-1 || ms > 4.5 {
+		if pm < c.minMargin-1.5 || ms > 4.5 {
 			t.Errorf("%s: %+v phase margin %g (want ≥ %g), Ms %g", c.name, pid, pm, c.minMargin, ms)
 		}
 		wc, err := findCrossoverFreq(p, 0, 60)
