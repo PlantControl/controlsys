@@ -213,6 +213,8 @@ func TestComplexSVDWorkspaceSmallSingularValuesAbsoluteAccuracy(t *testing.T) {
 		{"Wide2x5", 2, 5, []float64{1e5, 7e-7}},
 		{"Square3x3Graded", 3, 3, []float64{1, 1e-6, 1e-11}},
 		{"Tiny2x2", 2, 2, []float64{3e-200, 1e-209}},
+		{"Wide3x5", 3, 5, []float64{40, 3e-5, 2e-10}},
+		{"Square5x5", 5, 5, []float64{1e4, 2e3, 1e-3, 1e-7, 3e-11}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
