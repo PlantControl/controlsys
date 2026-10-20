@@ -868,12 +868,12 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 	}
 	// at leaves eval.err as it was, so a failed sample cannot fail the
 	// stability screens that share eval. A failed sample takes the response
-	// the gains were designed from (evalPlantAt), else reads NaN: eval's
+	// as FreqResponse resolves it (eval.resolve), else reads NaN: eval's
 	// double solve is singular to working precision over decades beside a
 	// pole cluster at z = 1 that FreqResponse resolves, and NaN margins and
 	// |S| there failed every back-off step, leaving the retry gated only
 	// on those NaN samples to return the first design (PM 34° for P). A
-	// non-finite sample takes a finite FreqResponse too: beside such a
+	// non-finite sample takes a finite resolved response too: beside such a
 	// cluster eval snaps ω well off any pole to +Inf, and the scan paired
 	// that spike with a crossover of NaN margin (1.9e-5 rad/s for P at
 	// wc 6.1e-6, |G| 0.32 there).
@@ -885,7 +885,7 @@ func newPidtuneGate(plant, model *System, eval *sisoEval, wc, floor float64) *pi
 			g = cmplx.NaN()
 		}
 		if !pidFiniteComplex(g) {
-			if h, err := evalPlantAt(plant, w); err == nil && (pidFiniteComplex(h) || cmplx.IsNaN(g)) {
+			if h, ok := eval.resolve(w); ok && (pidFiniteComplex(h) || cmplx.IsNaN(g)) {
 				g = h
 			}
 		}
