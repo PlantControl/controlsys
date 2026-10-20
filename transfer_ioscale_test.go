@@ -3,7 +3,10 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func polyDiffRel(got, want []float64) float64 {
@@ -104,5 +107,28 @@ func TestTransferFunctionCompanionTinyTrailingDen(t *testing.T) {
 	}
 	if v := g.At(0, 0); !(math.Abs(v) >= 0.1) {
 		t.Errorf("DCGain %g, want |gain| ≥ 0.1 or ±Inf", v)
+	}
+}
+
+// AULHZC: with ‖A‖ ≈ 1e115 the I/O scaling raised B toward ‖A‖ and the
+// numerator overflowed to -Inf with a nil error. The unscaled realization
+// keeps every coefficient finite.
+func TestTransferFunctionIOScaleOverflowFallsBack(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{-4.523120090985102e+114, 1.1661638789502949e+115, -1.3698650907442912e+115, 9.209019595325494e+114, -6.55150724271455e+114, 1.6891285098448462e+115, -1.984179257464382e+115, 1.3338792108863754e+115, -4.8693439529676823e+114, 1.255428314506509e+115, -1.474721909173207e+115, 9.913927328313068e+114, -7.06511053315387e+114, 1.8215471928274391e+115, -2.1397283483378446e+115, 1.4384482400241634e+115})
+	B := mat.NewDense(4, 1, []float64{-0.9667981925794609, -0.01238866346289056, 0.9601702866503661, 0.5260775173811046})
+	C := mat.NewDense(1, 4, []float64{-856888.7533689471, -210795.79943077973, 993184.9187581927, -431376.8449706192})
+	D := mat.NewDense(1, 1, []float64{-0.987479769908865})
+	sys, err := New(A, B, C, D, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := sys.TransferFunction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range append(slices.Clone(res.TF.Den[0]), res.TF.Num[0][0]...) {
+		if math.IsInf(c, 0) || math.IsNaN(c) {
+			t.Fatalf("non-finite coefficient: %v / %v", res.TF.Num, res.TF.Den)
+		}
 	}
 }

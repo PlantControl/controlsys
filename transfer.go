@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -154,7 +155,10 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // [A B; C ·] is first balanced by an exact power-of-two state similarity,
 // and each input and output scaled by a power of two toward ‖A‖, which
 // removes accuracy loss caused by poor state or I/O scaling (a tiny but
-// nonzero B or C is not dropped as uncontrollable). The polynomial form itself
+// nonzero B or C is not dropped as uncontrollable). When that scaling
+// overflows a coefficient the unscaled realization is used, and when
+// coefficients overflow float64 regardless the error is ErrOverflow.
+// The polynomial form itself
 // stays ill-conditioned for high order or wide dynamic range: coefficients
 // of e.g. a 30-state chain spanning 1e-3..1e3 rad/s, or a discrete model
 // with poles clustered near z = 1, can evaluate with O(1) relative error.
@@ -227,30 +231,64 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return c.result(0), nil
 	}
 
-	a, b, cm, inExp, outExp := c.balancedABC(false)
-	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+	order, scaled, err := c.convertBalanced(true)
 	if err != nil {
 		return nil, err
 	}
+	if scaled && !c.finiteCoeffs() {
+		if order, _, err = c.convertBalanced(false); err != nil {
+			return nil, err
+		}
+	}
+	if !c.finiteCoeffs() {
+		return nil, fmt.Errorf("TransferFunction: %w", ErrOverflow)
+	}
+	return c.result(order), nil
+}
+
+// convertBalanced fills the rows from the balanced realization, I/O-scaled
+// when ioScale; scaled reports whether any I/O scale was not 1. Scaling a
+// tiny B or C up toward a huge ‖A‖ can overflow coefficients that are
+// finite without it.
+func (c rowRealizationConverter) convertBalanced(ioScale bool) (order int, scaled bool, err error) {
+	a, b, cm, inExp, outExp := c.balancedABC(false, ioScale)
+	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+	if err != nil {
+		return 0, false, err
+	}
 	if stair.NCont < c.n {
-		a, b, cm, inExp2, outExp2 := c.balancedABC(true)
+		a, b, cm, inExp2, outExp2 := c.balancedABC(true, ioScale)
 		alt, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
 		if err != nil {
-			return nil, err
+			return 0, false, err
 		}
 		if alt.NCont == c.n {
 			stair, inExp, outExp = alt, inExp2, outExp2
 		}
 	}
-	ncont := stair.NCont
-
-	if ncont == 0 {
+	scaled = slices.ContainsFunc(inExp, func(e int) bool { return e != 0 }) ||
+		slices.ContainsFunc(outExp, func(e int) bool { return e != 0 })
+	if stair.NCont == 0 {
+		clear(c.rows)
 		c.fillStaticRows()
-		return c.result(0), nil
+		return 0, scaled, nil
 	}
+	return c.convertDynamicRows(stair, stair.NCont, inExp, outExp), scaled, nil
+}
 
-	totalOrder := c.convertDynamicRows(stair, ncont, inExp, outExp)
-	return c.result(totalOrder), nil
+func (c rowRealizationConverter) finiteCoeffs() bool {
+	bad := func(x float64) bool { return math.IsInf(x, 0) || math.IsNaN(x) }
+	for i := range c.p {
+		if slices.ContainsFunc(c.tf.Den[i], bad) {
+			return false
+		}
+		for _, num := range c.tf.Num[i] {
+			if slices.ContainsFunc(num, bad) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // balancedABC returns D⁻¹AD, D⁻¹B·diag(2^inExp), diag(2^outExp)·CD for an
@@ -266,7 +304,7 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 // controllable (a partial count from either is equally ambiguous). MATLAB
 // tf(ss) removes only structurally disconnected states, so keeping states
 // that are controllable in some exact scaling is on MATLAB's side.
-func (c rowRealizationConverter) balancedABC(osborne bool) (a, b, cm *mat.Dense, inExp, outExp []int) {
+func (c rowRealizationConverter) balancedABC(osborne, ioScale bool) (a, b, cm *mat.Dense, inExp, outExp []int) {
 	n, m, p := c.n, c.m, c.p
 	br := newRealizationCopy(c.sys, n, m, p)
 	if osborne {
@@ -290,6 +328,9 @@ func (c rowRealizationConverter) balancedABC(osborne bool) (a, b, cm *mat.Dense,
 	a, b, cm = mat.NewDense(n, n, br.a), mat.NewDense(n, m, br.b), mat.NewDense(p, n, br.c)
 	exps := make([]int, m+p)
 	inExp, outExp = exps[:m], exps[m:]
+	if !ioScale {
+		return a, b, cm, inExp, outExp
+	}
 	in, out, unit := ioPow2Scales(a, b, cm)
 	if unit {
 		return a, b, cm, inExp, outExp

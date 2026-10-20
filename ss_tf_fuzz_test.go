@@ -31,7 +31,7 @@ func FuzzSSToTF(f *testing.F) {
 		sys := s.System(t, fzSysOpts{})
 		res, err := sys.TransferFunction(nil)
 		fzContract(t, s, "TransferFunction", res != nil, err)
-		fzErr(t, s, "TransferFunction", err)
+		fzErr(t, s, "TransferFunction", err, ErrOverflow)
 		tf := res.TF
 		if len(tf.Den) != p || len(tf.Num) != p || tf.Dt != s.Dt || len(res.RowDegrees) != p {
 			t.Fatalf("TF shape rows=%d/%d dt=%g, want %d, %g\n%s", len(tf.Den), len(tf.Num), tf.Dt, p, s.Dt, s)
@@ -62,7 +62,7 @@ func FuzzSSToTF(f *testing.F) {
 		dsys := s.System(t, fzSysOpts{Delays: true})
 		dres, err := dsys.TransferFunction(nil)
 		fzContract(t, s, "TransferFunction(delayed)", dres != nil, err)
-		fzErr(t, s, "TransferFunction(delayed)", err)
+		fzErr(t, s, "TransferFunction(delayed)", err, ErrOverflow)
 		for i := range p {
 			for j := range m {
 				if !slices.Equal(dres.TF.Num[i][j], tf.Num[i][j]) || !slices.Equal(dres.TF.Den[i], tf.Den[i]) {
