@@ -2,8 +2,10 @@ package controlsys
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -125,6 +127,59 @@ func TestTunePIDFRDFreePKeepsRobustDesign(t *testing.T) {
 			w := r.Evidence.GainCrossovers[i]
 			if want := 180 + cmplx.Phase(g(w)*complex(k.Kp, 0))*180/math.Pi; math.Abs(math.Remainder(m-want, 360)) > .5 || m < 57 {
 				t.Errorf("%v/%v: evidence margin %g at %g, want %g", c.num, c.den, m, w, want)
+			}
+		}
+	}
+}
+
+// TunePIDFRD scans for gain crossings on the measured samples too, since its
+// log-linear interpolant can cross 0 dB between the 241-point crossover
+// grid's points. A lightly damped mode near 2 rad/s, sampled 600 times on
+// [1e-3, 1e3], put |L| over 1 between grid points: PID at wc 0.1623
+// reported only wc and 63° while samples straddled |L| = 1 near 1.95 and
+// 2.0 (ζ = 1e-2, a graze peaking at |L| 1.0000025, ∠L 24°) or four times
+// over 1.93–2.06 (ζ = 1e-3, ζ = 0, PID and PIDF), with ∠L near +24° there,
+// a wrapped margin near −156°. Oracles: sign changes of |L| − 1 over
+// adjacent samples of the documented interpolant, and closed-loop roots of
+// the exact plant.
+func TestTunePIDFRDCrossingsBetweenGridPoints(t *testing.T) {
+	zeta2 := [2][]float64{{6.335797216731407, 24.391227797024047, 54.72113901759225, 74.15735471976932, 17.515790582716292}, {1, 6.680688332652979, 7.2460737902166565, 26.873377152592504, 11.955834263494538, 1.258925411794167}}
+	zeta3 := [2][]float64{{6.335797216731407, 24.176553599151454, 54.076453749896416, 73.97279314928015, 17.511839053168945}, {1, 6.6447736109835365, 7.007571914003141, 26.76563298758415, 11.944477031293877, 1.2589254117941655}}
+	zeta0 := [2][]float64{{6.335797216731407, 24.152681801253724, 54.004695153133355, 73.95222898037906, 17.51139395145642}, {1, 6.640783086353598, 6.981071705534972, 26.75366141369434, 11.943215116604915, 1.258925411794167}}
+	for i, c := range []struct {
+		plant  [2][]float64
+		family PidtuneType
+	}{{zeta2, PidtunePID}, {zeta3, PidtunePID}, {zeta3, PidtunePIDF}, {zeta0, PidtunePID}} {
+		num, den := c.plant[0], c.plant[1]
+		name := fmt.Sprintf("case %d %s", i, c.family)
+		frd := pidExactFRD(t, num, den, 1e-3, 1e3, 600)
+		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: 0.1623})
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		k, ev := *r.Controller, r.Evidence
+		if re := pidClosedLoopMaxRe(num, den, k); re >= 0 {
+			t.Errorf("%s: %+v closed-loop root at Re %g", name, k, re)
+		}
+		g, ctrl := fzPidInterp(frd), fzPidCtrlOf2(&k)
+		excess := func(w float64) float64 {
+			v, _ := g(w)
+			return cmplx.Abs(v*ctrl.resp(w)) - 1
+		}
+		for j := 1; j < len(frd.Omega); j++ {
+			lo, hi := frd.Omega[j-1], frd.Omega[j]
+			if excess(lo)*excess(hi) >= 0 {
+				continue
+			}
+			if !slices.ContainsFunc(ev.GainCrossovers, func(w float64) bool { return w >= lo*(1-1e-12) && w <= hi*(1+1e-12) }) {
+				t.Errorf("%s: |L| crosses 1 in [%.9g, %.9g], reported %v", name, lo, hi, ev.GainCrossovers)
+			}
+		}
+		fzPidCheckMissed(t, name, g, g, frd.Omega, "", ctrl, ev)
+		for j, m := range ev.PhaseMargins {
+			if ev.AchievedPhaseMargin > m+1e-9 {
+				t.Errorf("%s: achieved margin %g above %g at %g", name, ev.AchievedPhaseMargin, m, ev.GainCrossovers[j])
 			}
 		}
 	}

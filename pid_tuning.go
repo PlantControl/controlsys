@@ -150,6 +150,9 @@ type pidTuningPlant struct {
 	// refine that grid and the crossover grid near lightly damped
 	// resonances.
 	modes []complex128
+	// samples are the measured frequencies of sampled data, whose
+	// interpolant can cross 0 dB between the crossover grid's points.
+	samples []float64
 	// crossFloor, when hasCrossFloor, is the margin floor at the other gain
 	// crossovers once the wc target is raised above the requested margin.
 	crossFloor    float64
@@ -2787,11 +2790,11 @@ func pidTuningDynamicsSpan(plant *System) (lo, hi float64) {
 
 // pidTuningCrossGrid extends the log grid omega at its own step over
 // [p.crossLow, p.crossHigh] under the floor and adds points within 4|σ| of
-// each lightly damped mode σ+jω₀, so a crossover pair at a resonance is not
-// stepped over. Added points where p.try fails or is not finite are
-// dropped, as near rounded multiple poles at z = 1 or s = 0 under the band,
-// where the solve cannot resolve the response and the integrators keep
-// |L| ≫ 1.
+// each lightly damped mode σ+jω₀, and p.samples, so a crossover pair at a
+// resonance is not stepped over. Added points where p.try fails or is not
+// finite are dropped, as near rounded multiple poles at z = 1 or s = 0 under
+// the band, where the solve cannot resolve the response and the integrators
+// keep |L| ≫ 1.
 func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 	n := len(omega)
 	step := math.Log(omega[n-1]/omega[0]) / float64(n-1)
@@ -2814,6 +2817,11 @@ func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 			if w := imag(m) + k*d/2; w > lo && w < hi {
 				grid = append(grid, w)
 			}
+		}
+	}
+	for _, w := range p.samples {
+		if w > lo && w < hi {
+			grid = append(grid, w)
 		}
 	}
 	slices.Sort(grid)
