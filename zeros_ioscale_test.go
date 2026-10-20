@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 	"math/cmplx"
 	"strconv"
 	"testing"
@@ -202,4 +203,120 @@ func TestZerosDependentRowMixedScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	zerosCheckExact(t, "mixed", got, []complex128{-5.806574835274511e10, -14771.879890036555})
+}
+
+// TestZerosScaledSquareRefined: square model with nearly singular D (so the
+// staircase path) whose I/O scaling shrinks ‖[A B; C D]‖ from 1.4e5 to 6;
+// the refinement threshold must still cover the zeros, of entrywise 1-ulp
+// sensitivity ≤ 4e-14, at every exactly zero-preserving B·2^e, C·2^-e.
+// Exact roots of det P(s) (big.Rat), each bracketed by a sign change.
+func TestZerosScaledSquareRefined(t *testing.T) {
+	a := []float64{1.3554877670069594, -3.633764730386259, -2302.6971590529843, -0.20868148341205206, -0.14066075783141757, -1.2673850296477662, -1234.2093141436703, -0.01632021365675509, -0.00011986927238098787, 0.00010768199454390479, -0.22560427971723207, 4.588483639337091e-05, 0.015050991535433544, 16.752533544640333, 11093.670407761474, -1.1117141209668198}
+	b := []float64{0.024221199282688677, 0.19352894549112065, 98564.16380067778, 0.006837941522563402, 0.28674456183228414, 23498.70590149646, 3.392786466531403e-06, 0.00028885695706667275, -2.534864893546679, 0.03870599754813482, -2.8035601160549164, -63726.73510443856}
+	c := []float64{-1.3445716724182244, -1.9154487072989506, 307.5575508850005, 0.10284034441549594, -0.0003995087848939206, 0.004753020787533528, 1.316365399393171, 0.00013498582091764317, 0.00010978313572977657, -0.0019202902520464582, 0.25030842698889344, -0.00012338352903634283}
+	d := []float64{-0.27158561407239074, -1.9458299598524795, -142389.0784307856, -1.9618303034088424e-05, -0.0010775723105780565, -10.285640861136152, 4.390734024995e-05, -0.0009008948355075159, 23.020091604965785}
+	want := []float64{2.7155495183828733, -1.7103487314512633, -0.0051847513214708894}
+	poly := fzZeroPolyRat(4, 3, 3, a, b, c, d)
+	for _, w := range want {
+		lo, hi := new(big.Rat).SetFloat64(w*(1-1e-15)), new(big.Rat).SetFloat64(w*(1+1e-15))
+		if fzPolyEvalRat(poly, lo).Sign()*fzPolyEvalRat(poly, hi).Sign() >= 0 {
+			t.Fatalf("oracle %v: no sign change of det P(s)", w)
+		}
+	}
+	for e := -12; e <= 12; e++ {
+		B := append([]float64(nil), b...)
+		C := append([]float64(nil), c...)
+		for i := range B {
+			B[i] = math.Ldexp(B[i], e)
+		}
+		for i := range C {
+			C[i] = math.Ldexp(C[i], -e)
+		}
+		sys, err := NewFromSlices(4, 3, 3, a, B, C, d, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := sys.Zeros()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("e=%d: zeros %v, want %v", e, got, want)
+		}
+		for _, w := range want {
+			best := math.Inf(1)
+			for _, z := range got {
+				best = math.Min(best, cmplx.Abs(z-complex(w, 0))/math.Abs(w))
+			}
+			if !(best <= 1e-12) {
+				t.Errorf("e=%d: zero %v relative error %.2g > 1e-12\nzeros=%v", e, w, best, got)
+			}
+		}
+	}
+}
+
+// TestZerosScaledSquareMidRefined: I/O scaling shrinks ‖[A B; C D]‖ from
+// 5.6e3 to 5.5 and leaves the staircase pair 0.53±1.22i, of modulus above
+// any ε·‖·‖/zeroRefineTol threshold, with relative error 4e-11 (base 1e-15):
+// every staircase zero of a square model must be refined. Oracle: the
+// big.Float Newton step on det P(s) (big.Rat) from each zero.
+func TestZerosScaledSquareMidRefined(t *testing.T) {
+	a := []float64{-0.770029571783819, -0.0007913196561441765, -4.271644296139483, 0.050365734734622025, 2.2875498268309773, 3333.7313230971845, 1.4828545510423157, 4392.171398094697, 28.83916505824172, -395.56316516111474, -0.10690326002839659, 6.649202090416916e-05, -1.6674458548443705, -0.007412492824969434, -0.32456373549895345, 17.45792321363927, 0.0025650653316172806, -6.753768358592318, 0.48875756530873904, 95.29410635698503, 0.2566160121951959, -6.597623568260576e-05, 0.2205144167322186, 0.00940322729271148, -0.5170404777699744}
+	b := []float64{0.00839698260522784, 1.8724596214771585, -3.9695732367354157, 595.2718630556319, 0.0028436129893132326, 0.6373811019360747, -0.0211193382739083, 73.71718792310234, -0.0009698812701394, -0.4101010704518105}
+	c := []float64{-47.310375195142, 0.0832723506401385, 668.7647859103607, 6.923295611311023, -445.13706547053687, 0.1272016650146747, 7.487490645982214e-05, 0.32122882754708837, 0.0023412416884003324, -0.45619465544117066}
+	d := []float64{-0.9532654819900053, 163.75406503270034, -0.23831637049750132, 40.938516258175085}
+	poly := fzTrimRat(fzPencilDetRat(5, 2, a, b, c, d))
+	sys, err := NewFromSlices(5, 2, 2, a, b, c, d, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := sys.Zeros()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(poly)-1 {
+		t.Fatalf("zeros %v, want %d", got, len(poly)-1)
+	}
+	for _, z := range got {
+		if e := fzNewtonRelRat(poly, z); !(e <= 1e-13) {
+			t.Errorf("zero %v: relative error %.2g > 1e-13\nzeros=%v", z, e, got)
+		}
+	}
+}
+
+// fzNewtonRelRat returns |p(z)/p'(z)|/|z| in 400-bit arithmetic for the
+// descending exact polynomial p: the relative distance from z to the
+// nearest root when that root is simple and z is close to it.
+func fzNewtonRelRat(p []*big.Rat, z complex128) float64 {
+	const prec = 400
+	nf := func() *big.Float { return new(big.Float).SetPrec(prec) }
+	cmul := func(ar, ai, br, bi *big.Float) (*big.Float, *big.Float) {
+		return nf().Sub(nf().Mul(ar, br), nf().Mul(ai, bi)), nf().Add(nf().Mul(ar, bi), nf().Mul(ai, br))
+	}
+	zr, zi := nf().SetFloat64(real(z)), nf().SetFloat64(imag(z))
+	vr, vi, dr, di := nf(), nf(), nf(), nf()
+	for _, c := range p {
+		dr, di = cmul(dr, di, zr, zi)
+		dr.Add(dr, vr)
+		di.Add(di, vi)
+		vr, vi = cmul(vr, vi, zr, zi)
+		vr.Add(vr, nf().SetRat(c))
+	}
+	num := nf().Add(nf().Mul(vr, vr), nf().Mul(vi, vi))
+	den := nf().Add(nf().Mul(dr, dr), nf().Mul(di, di))
+	if den.Sign() == 0 {
+		return math.Inf(1)
+	}
+	q, _ := nf().Quo(num, den).Float64()
+	return math.Sqrt(q) / math.Max(cmplx.Abs(z), math.SmallestNonzeroFloat64)
+}
+
+// fzPolyEvalRat evaluates the descending polynomial p at x.
+func fzPolyEvalRat(p []*big.Rat, x *big.Rat) *big.Rat {
+	v := new(big.Rat)
+	for _, c := range p {
+		v.Mul(v, x)
+		v.Add(v, c)
+	}
+	return v
 }

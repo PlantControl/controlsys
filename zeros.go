@@ -164,7 +164,10 @@ func descriptorZeros(sys *System) (*ZerosResult, error) {
 // else the finite eigenvalues of the staircase-reduced pencil of the
 // balanced model (prescaledStaircaseZeros). For square models the zeros
 // those may have computed inaccurately are then refined against the exact
-// pencil (refineZeros); for non-square ones with outputs (inputs) dependent
+// pencil (refineZeros): those below ε·max(‖zs‖, ‖sys‖)/zeroRefineTol, and
+// all of them when the scaling shrank the pencil norm by more than
+// zeroRefineAllRatio, since that leaves zeros of any modulus with errors
+// well above ε·‖sys‖; for non-square ones with outputs (inputs) dependent
 // to rounding, the zeros of the square model without them replace the
 // staircase ones when at least as many pass zeroBackwardOK
 // (squareDownZeros). eig(A − B·D⁻¹·C) is backward stable for
@@ -195,10 +198,11 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 		return nil, err
 	}
 	if m == p && rank == m && len(zeros) > 0 {
-		scale := pencilNorm(zs)
-		tol := eps() * scale / zeroRefineTol
-		huge := math.Min(scale, pencilNorm(sys))
-		refineZeros(zs, zeros, scale, func(az float64) bool { return az < tol || az > huge })
+		scale, raw := pencilNorm(zs), pencilNorm(sys)
+		tol := eps() * math.Max(scale, raw) / zeroRefineTol
+		huge := math.Min(scale, raw)
+		all := raw > zeroRefineAllRatio*scale
+		refineZeros(zs, zeros, scale, func(az float64) bool { return all || az < tol || az > huge })
 	}
 	if m != p && rank == min(m, p) {
 		if sq, err := squareDownZeros(sys, zs, rank); err == nil && len(sq) > 0 && len(sq) >= countBackwardOK(zs, zeros, rank) {
@@ -778,6 +782,13 @@ func refineZeros(sys *System, zeros []complex128, scale float64, sel func(az flo
 // zeroRefineTol is the estimated relative error above which
 // refineZeros polishes a zero.
 const zeroRefineTol = 1e-12
+
+// zeroRefineAllRatio is the ‖sys‖/‖zs‖ above which mimoZeros refines every
+// staircase zero of a square model. In sweeps of strongly scaled square
+// models, unrefined zeros at ratios down to 256 came out 100× less accurate
+// than without I/O scaling, none below 64; well-scaled models skip the
+// extra cost.
+const zeroRefineAllRatio = 16
 
 // zeroRefiner runs Newton's method on P(s)w = 0, P(s) = [sI−A −B; C D],
 // with w_k = 1 for the largest entry of the initial inverse-iteration
