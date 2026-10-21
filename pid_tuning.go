@@ -143,6 +143,11 @@ type pidTuningPlant struct {
 	// gainSign is the sign every nonzero gain must take: that of the DC gain
 	// of a stable plant, or 0 when unknown.
 	gainSign float64
+	// residueSign, when gainSign is 0, is the sign every nonzero gain must
+	// take on an integrating plant (pidTuningIntegratorSign), or 0. The
+	// phase heuristics keyed on gainSign assume sign·G starts near 0°,
+	// which −90° per integrator breaks, so it is kept apart.
+	residueSign float64
 	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
 	// 0 for none; tau is the loop delay in seconds that sets its grid step.
 	maxSensitivity, tau float64
@@ -281,6 +286,37 @@ func pidTuningDCSign(plant *System, try func(float64) (complex128, bool), wc flo
 		return 0
 	}
 	return math.Copysign(1, dc)
+}
+
+// pidTuningIntegratorSign returns, for a plant whose DC gain
+// integratingDCGain finds infinite and whose poles off the integrator
+// (pidtuneIntegratorTol) are all stable, the sign of that gain: the sign of
+// the integrator's residue, which MATLAB pidtune gives every gain. Other
+// plants return 0: on 1/(s(s−1)) the residue is −1 but every stabilising PD
+// has positive gains.
+func pidTuningIntegratorSign(plant *System, wc float64) float64 {
+	g, err := plant.integratingDCGain()
+	if err != nil || !math.IsInf(g.At(0, 0), 0) {
+		return 0
+	}
+	model, err := finiteDimensionalModel(plant, "TunePID")
+	if err != nil {
+		return 0
+	}
+	poles, err := model.Poles()
+	if err != nil {
+		return 0
+	}
+	at, tol := pidtuneIntegratorTol(plant, poles, wc)
+	for _, p := range poles {
+		if cmplx.Abs(p-at) <= tol {
+			continue
+		}
+		if plant.Dt > 0 && !(cmplx.Abs(p) < 1) || plant.Dt == 0 && !(real(p) < 0) {
+			return 0
+		}
+	}
+	return math.Copysign(1, g.At(0, 0))
 }
 
 // pidStabilityScreen certifies closed-loop stability of PID candidates on a
@@ -770,6 +806,14 @@ func intSchur(p []*big.Int) bool {
 	return true
 }
 
+// wantSign returns the sign every nonzero gain must take, or 0 for any.
+func (p pidTuningPlant) wantSign() float64 {
+	if p.gainSign != 0 {
+		return p.gainSign
+	}
+	return p.residueSign
+}
+
 // pidTuningSignConsistent reports whether every nonzero gain of c has sign
 // want; want = 0 accepts any signs. Other signs on a stable plant come from
 // the wrapped-phase branch of the crossover equations.
@@ -790,7 +834,9 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // bounded computation and explicit achieved-target/stability evidence.
 //
 // A zero CrossoverFrequency is capped by the loop delay τ at (180°−PM)/(2τ),
-// as Pidtune. For a stable plant every nonzero gain takes the sign of its DC
+// as Pidtune. On a plant stable but for integrators every nonzero gain takes
+// the sign of their residue, as in MATLAB pidtune.
+// For a stable plant every nonzero gain takes the sign of its DC
 // gain; when that leaves a default-crossover PD or PDF design infeasible, the
 // crossover moves to where the plant phase is 15°, 30°, 45° or 60° below
 // −180°+PM, the lead same-sign gains supply; when those and the margin floor
@@ -923,6 +969,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// resolveFloor raises an explicit crossover's band floor off samples
 	// the solve cannot resolve.
 	used, minHigh, sRejected, probing, resolveFloor := 0, 0., false, false, false
+	residueSign := 0.
 	var tuneAt func(wc, gainSign float64, bound pidSBound, floor bool) (*PIDTuningResult, error)
 	tuneAt = func(wc, gainSign float64, bound pidSBound, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency, fellBack = wc, false
@@ -930,7 +977,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if resolveFloor {
 			low = pidTuningResolvedFloor(tryResp, low, wc)
 		}
-		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, tau: tau, zeroScan: true}
+		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, residueSign: residueSign, tau: tau, zeroScan: true}
 		if bound == pidSSearch {
 			p.maxSensitivity = pidTuningMaxSensitivity
 			p.loopTail = loopTail()
@@ -1317,6 +1364,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	}
 	if wc := opts.CrossoverFrequency; wc != 0 {
 		gainSign := pidTuningDCSign(plant, tryResp, wc)
+		if gainSign == 0 {
+			residueSign = pidTuningIntegratorSign(plant, wc)
+		}
 		if blocked {
 			return integralBlocked(wc, gainSign)
 		}
@@ -1333,6 +1383,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return nil, fmt.Errorf("TunePID: %w", err)
 	}
 	gainSign := pidTuningDCSign(plant, tryResp, wc0)
+	if gainSign == 0 {
+		residueSign = pidTuningIntegratorSign(plant, wc0)
+	}
 	if blocked {
 		return integralBlocked(wc0, gainSign)
 	}
@@ -1774,6 +1827,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		o.PhaseMargin = margin
 	}
 	target := cmplx.Rect(1, (-180+o.PhaseMargin)*math.Pi/180) / h
+	s := p.wantSign()
 	// seedAt puts a controller with filter tf on the target.
 	seedAt := func(tf float64) (c PID2, ib, db complex128) {
 		c = PID2{Tf: tf, Dt: p.dt, IFormula: o.IFormula, DFormula: o.DFormula, B: 1, C: 1}
@@ -1789,8 +1843,8 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			// seed then has Kp of the wrong sign, and the feasible sliver
 			// along that edge can fall between pattern steps, so seed on it.
 			// The proportional edge would drop integral action.
-			if !hasD && p.gainSign != 0 && c.Kp != 0 && math.Copysign(1, c.Kp) != p.gainSign && math.Copysign(1, c.Ki) == p.gainSign {
-				c.Kp, c.Ki = 0, p.gainSign*cmplx.Abs(target)/cmplx.Abs(ib)
+			if !hasD && s != 0 && c.Kp != 0 && math.Copysign(1, c.Kp) != s && math.Copysign(1, c.Ki) == s {
+				c.Kp, c.Ki = 0, s*cmplx.Abs(target)/cmplx.Abs(ib)
 			}
 		} else if hasP && hasD {
 			c.Kd = imag(target) / imag(db)
@@ -1805,8 +1859,8 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			a := c
 			a.Kp = -a.Kp
 			a.Ki = -a.Ki
-			if p.gainSign != 0 {
-				if math.Copysign(1, c.Kp+c.Ki) != p.gainSign {
+			if s != 0 {
+				if math.Copysign(1, c.Kp+c.Ki) != s {
 					c = a
 				}
 			} else if pidPhaseDistance(p.at(wc)*pidTuningFeedback(a, wc), o.PhaseMargin) < pidPhaseDistance(p.at(wc)*pidTuningFeedback(c, wc), o.PhaseMargin) {
@@ -1978,7 +2032,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		if filtered && (candidate.Tf < math.Max(.001/wc, p.dt*.51) || candidate.Tf > 10/wc) {
 			return nil
 		}
-		if !pidTuningSignConsistent(candidate, p.gainSign) {
+		if !pidTuningSignConsistent(candidate, p.wantSign()) {
 			signRejected = true
 			return nil
 		}
@@ -2192,7 +2246,9 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		}
 	}
 	if !finitePID(bestScore) {
-		if signRejected {
+		if signRejected && p.gainSign == 0 {
+			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target needed a gain of sign opposite to the integrator's residue; such designs are rejected.")
+		} else if signRejected {
 			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target needed a gain of sign opposite to the stable plant's DC gain; such designs are rejected.")
 		}
 		if returnRejected {
@@ -2268,7 +2324,8 @@ func pidTuningTerms(family PidtuneType) (hasP, hasI, hasD, filtered, ok bool) {
 // proportional one, so its smallest admissible Tf bounds the cone. Unknown
 // gain sign reaches every phase.
 //
-// phase is the unwrapped phase of gainSign·G(jwc) in degrees, or NaN. The
+// phase is the unwrapped phase of gainSign·G(jwc) in degrees, or NaN, as
+// always under residueSign, whose integrators leave the walk unanchored. The
 // loop phase starts within ±90° at low frequency, so if |L| ≥ 1 below wc,
 // a stable loop needs its unwrapped phase at wc above −180°; with phase
 // known the band is judged unwrapped. This excludes designs whose |L|
@@ -2276,7 +2333,7 @@ func pidTuningTerms(family PidtuneType) (hasP, hasI, hasD, filtered, ok bool) {
 // half-plane reaches every phase.
 func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions, pm, phase float64) bool {
 	hasP, hasI, hasD, filtered, ok := pidTuningTerms(family)
-	if !ok || p.gainSign == 0 {
+	if !ok || p.wantSign() == 0 {
 		return true
 	}
 	wc := o.CrossoverFrequency
@@ -2302,7 +2359,7 @@ func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions
 	if hi-lo >= 180 {
 		return true
 	}
-	want -= cmplx.Phase(complex(p.gainSign, 0)*p.at(wc)) * 180 / math.Pi
+	want -= cmplx.Phase(complex(p.wantSign(), 0)*p.at(wc)) * 180 / math.Pi
 	return !(math.Abs(math.Remainder(want-(lo+hi)/2, 360)) > (hi-lo)/2+3+1e-9)
 }
 

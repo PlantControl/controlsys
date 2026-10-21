@@ -156,8 +156,9 @@ func TestTunePIDMovedCrossoverGetsOwnBudget(t *testing.T) {
 
 // A floor band whose candidates meet the margins but all fail the stability
 // check ends the floor: on delayed plants each check is a Nyquist sweep, and
-// searching every band took 50 s on the PD plant (gain sign unknown, so no
-// band is skipped) where the ±3° search fails in milliseconds.
+// searching every band took 50 s on a PD plant with unknown gain sign
+// (now TestTunePIDIntegratorResidueSignDelayedFloor) where the ±3° search
+// fails in milliseconds.
 func TestTunePIDFloorStopsAtUnstableBandDelayed(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -166,7 +167,6 @@ func TestTunePIDFloorStopsAtUnstableBandDelayed(t *testing.T) {
 		family   PidtuneType
 		o        PIDTuningOptions
 	}{
-		{"-31.29(s+0.09685)/(s(s²+14.84s+367.9)(s²+7.963s+36.18))e^-0.5042s", pidPoly(-31.29, []float64{1, .09685}), pidPoly(1, []float64{1, 0}, []float64{1, 14.84, 367.9}, []float64{1, 7.963, 36.18}), .5042, PidtunePD, PIDTuningOptions{PhaseMargin: 36.78}},
 		{"-7.184/((s²+2.717s+114.2)s(s-0.1382))e^-0.07239s", pidPoly(-7.184), pidPoly(1, []float64{1, 2.717, 114.2}, []float64{1, 0}, []float64{1, -.1382}), .07239, PidtunePI, PIDTuningOptions{CrossoverFrequency: 15.15}},
 	}
 	for _, c := range cases {
