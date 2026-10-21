@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -42,8 +43,14 @@ type NyquistResult struct {
 // never depend on omega. When 1+L vanishes on the contour (closed-loop poles
 // on the stability boundary) the count is undefined and Nyquist returns
 // ErrSingularTransform. A delay loop whose winding needs more than 2^21
-// samples (|L| > 1 out to ω with ωτ in the millions) returns
-// ErrDelayUnsupported.
+// samples (|L| > 1 out to ω with ωτ in the millions), or where 1+L vanishes
+// within tolerance past ωτ = 1e5 (closed-loop roots closer to the axis than
+// the response resolves), returns ErrDelayUnsupported. A neutral delay loop, whose high-frequency gain may
+// reach 1, is counted by the closed-loop delay Nyquist test when its
+// difference operator 1 + L∞ is certified free of zeros in Re s >= 0
+// (d1·e^{−s} + d2·e^{−2s} with 1 + d1·z + d2·z² nonzero on |z| <= 1), and
+// otherwise returns ErrDelayUnsupported: for |D| >= 1 with I/O delays the
+// closed loop has infinitely many roots near Re s = ln|D|/τ.
 //
 // omega nil selects the auto grid with nPoints samples (0 means 500); a
 // non-nil omega must be non-empty, finite, non-negative and, for discrete
@@ -94,6 +101,13 @@ func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error)
 	}
 
 	enc, err := nyquistEncirclements(sys, poles, bd)
+	if errors.Is(err, errNeutralDelayTail) {
+		if z, zerr := neutralLoopRoots(sys); zerr == nil {
+			enc, err = z-rhpPoles, nil
+		} else if !errors.Is(zerr, errNeutralDelayTail) {
+			err = zerr
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("Nyquist: %w", err)
 	}
@@ -363,6 +377,8 @@ func autoNyquistFreqs(sys *System, poles []complex128, bd nyquistBoundary, nPoin
 	return filtered
 }
 
+var errNeutralDelayTail = fmt.Errorf("delay loop tail |L(jω)| < 1 not certified (neutral, |L(j∞)| may reach 1): %w", errDelayLoopUnsupported)
+
 var errNyquistIndent = fmt.Errorf("boundary poles too close to indent separately: %w", ErrSingularTransform)
 
 func validateNyquistGrid(sys *System, omega []float64, nPoints int) error {
@@ -394,6 +410,10 @@ const (
 	nyquistTailRatio    = 0.1
 	nyquistMaxFreq      = 1e15
 	nyquistOnContourTol = 1e-12
+	// nyquistDelayResolution is the ωτ past which a delay loop's closed-loop
+	// roots near the axis, at Re s ~ 2π/(ωτ²) for a high-gain loop, fall
+	// within the on-contour tolerance of 1+L.
+	nyquistDelayResolution = 1e5
 )
 
 // nyquistPath samples the loop response along the positive-frequency half of
@@ -416,6 +436,7 @@ type nyquistPath struct {
 	// onContour records that 1+L vanished on the contour: a sample came
 	// within nyquistOnContourTol of -1 or bisection could not resolve arg(1+L) at nyquistMaxDepth.
 	onContour bool
+	contourW  float64 // smallest |ω| where onContour was set
 }
 
 // seedResonances adds contour parameters (ω, or θ = ωdt for discrete models)
@@ -454,6 +475,14 @@ func (p *nyquistPath) withSeeds(ts []float64, a, b float64, toT func(float64) fl
 	return ts
 }
 
+func (p *nyquistPath) markOnContour(s complex128) {
+	w := math.Abs(imag(s))
+	if p.onContour {
+		w = min(w, p.contourW)
+	}
+	p.onContour, p.contourW = true, w
+}
+
 func (p *nyquistPath) at(s complex128) (complex128, error) {
 	if p.samples++; p.tau > 0 && p.samples > delayNyquistMaxPoints {
 		return 0, fmt.Errorf("delay loop winding needs more than %d samples: %w", delayNyquistMaxPoints, ErrDelayUnsupported)
@@ -470,7 +499,7 @@ func (p *nyquistPath) at(s complex128) (complex128, error) {
 		p.env = cmplx.Abs(p.buf[0])
 	}
 	if v := p.buf[0]; cmplx.Abs(1+v) <= nyquistOnContourTol*math.Max(1, cmplx.Abs(v)) {
-		p.onContour = true
+		p.markOnContour(s)
 	}
 	return p.buf[0], nil
 }
@@ -518,7 +547,7 @@ func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, dep
 		return nil
 	}
 	if depth >= nyquistMaxDepth && !rot || depth >= 2*nyquistMaxDepth {
-		p.onContour = true
+		p.markOnContour(f(a.t))
 		return nil
 	}
 	tm := (a.t + b.t) / 2
@@ -671,6 +700,35 @@ func (p *nyquistPath) arc(center complex128, eps, phi0, phi1 float64, discrete b
 	}, linspace(phi0, phi1, 33))
 }
 
+// neutralLoopRoots counts the closed-loop RHP roots of a neutral delay loop
+// by the delay Nyquist test of 1/(1+L), normalized by its difference
+// operator 1 + L∞: with that operator certified free of zeros in Re s >= 0
+// (for L = d1·e^{−s} + d2·e^{−2s}, the roots of 1 + d1·z + d2·z² outside
+// the closed unit disk, as for d1 = d2 = 0.6 although |d1| + |d2| > 1), χ
+// has finitely many RHP roots. Otherwise it returns errNeutralDelayTail.
+func neutralLoopRoots(sys *System) (int, error) {
+	eye, err := NewGain(mat.NewDense(1, 1, []float64{1}), sys.Dt)
+	if err != nil {
+		return 0, err
+	}
+	cl, err := Feedback(eye, sys, -1)
+	if err != nil || cl.LFT == nil {
+		return 0, errNeutralDelayTail
+	}
+	e, err := newDelayLFT(cl)
+	if err != nil || e.unstableDifferenceOperator() || math.IsInf(e.difference().rhp, 1) {
+		return 0, errNeutralDelayTail
+	}
+	_, res, err := e.stability()
+	if err != nil {
+		return 0, err
+	}
+	if res.axisRoot {
+		return 0, fmt.Errorf("closed loop has poles on the stability boundary (1+L = 0 on the contour): %w", ErrSingularTransform)
+	}
+	return res.roots, nil
+}
+
 func nyquistEncirclements(sys *System, poles []complex128, bd nyquistBoundary) (int, error) {
 	e, err := validFrequencyEvaluator(sys, "Nyquist")
 	if err != nil {
@@ -703,6 +761,9 @@ func nyquistEncirclements(sys *System, poles []complex128, bd nyquistBoundary) (
 	}
 	if err != nil {
 		return 0, err
+	}
+	if path.onContour && path.tau > 0 && path.contourW*path.tau > nyquistDelayResolution {
+		return 0, fmt.Errorf("delay loop closed-loop roots within resolution of the axis at ωτ = %.3g: %w", path.contourW*path.tau, errDelayLoopUnsupported)
 	}
 	if path.onContour {
 		return 0, fmt.Errorf("closed loop has poles on the stability boundary (1+L = 0 on the contour): %w", ErrSingularTransform)
@@ -783,8 +844,14 @@ func (p *nyquistPath) continuousHalf(poles []complex128, bd nyquistBoundary, clo
 		return err
 	}
 
+	// With at most one internal delay the tail bound's limit is the exact
+	// limsup |L(jω)|; with more it can exceed it, so only a nonzero closure
+	// rules out the rational tail below.
+	if p.sys.HasDelay() && math.IsInf(p.wDelay, 1) && (closure != 0 || p.sys.internalDelayCount() <= 1) {
+		return errNeutralDelayTail
+	}
 	if p.sys.HasDelay() && closure != 0 {
-		if w1 := p.wDelay; w1 > wHi && !math.IsInf(w1, 1) {
+		if w1 := p.wDelay; w1 > wHi {
 			return segment(wHi, w1)
 		}
 		return nil
