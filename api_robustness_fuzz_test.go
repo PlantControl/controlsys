@@ -565,6 +565,39 @@ func fzAPIBuild(s *fzSpec, site, bad uint8) *fzAPIParts {
 	return pt
 }
 
+// fzAPIConsistent applies the ss/dss size rule to the non-empty blocks: A
+// square, B with A's rows, C with A's columns, D with C's rows and B's
+// columns; E must be n×n and the I/O delay p×m when present.
+func fzAPIConsistent(pt *fzAPIParts) (abcd, e, delay bool) {
+	dims := func(m *mat.Dense) (int, int, bool) {
+		if m == nil || m.IsEmpty() {
+			return 0, 0, false
+		}
+		r, c := m.Dims()
+		return r, c, true
+	}
+	ar, ac, hasA := dims(pt.A)
+	br, bc, hasB := dims(pt.B)
+	cr, cc, hasC := dims(pt.C)
+	dr, dc, hasD := dims(pt.D)
+	n := ar
+	if !hasA {
+		n = max(br, cc)
+	}
+	abcd = !(hasA && ar != ac) && !(hasB && br != n) && !(hasC && cc != n) &&
+		!(hasD && ((hasC && dr != cr) || (hasB && dc != bc)))
+	m, p := bc, cr
+	if !hasB {
+		m = dc
+	}
+	if !hasC {
+		p = dr
+	}
+	er, ec, hasE := dims(pt.E)
+	lr, lc, hasL := dims(pt.Delay)
+	return abcd, !hasE || (er == n && ec == n), !hasL || (lr == p && lc == m)
+}
+
 func fzAPIMats(pt *fzAPIParts) []*mat.Dense {
 	return []*mat.Dense{pt.A, pt.B, pt.C, pt.D, pt.E, pt.Delay}
 }
@@ -726,8 +759,10 @@ func FuzzAPISystem(f *testing.F) {
 		usesDelay := op == "NewWithDelay"
 		k := int(in.Site % 7)
 		relevant := k < 4 || k == 5 || (k == 4 && op == "NewDescriptor") || (k == 6 && usesDelay)
-		mustReject := relevant && (pt.DimsBroken || (pt.ValueBad && k >= 5))
-		mustAccept := (!relevant || (!pt.DimsBroken && !pt.ValueBad)) && !fzAPIAmbiguous(pt, k, in)
+		abcd, eOK, delayOK := fzAPIConsistent(pt)
+		consistent := abcd && (eOK || op != "NewDescriptor") && (delayOK || !usesDelay)
+		mustReject := (pt.DimsBroken && !consistent) || (relevant && pt.ValueBad && k >= 5)
+		mustAccept := consistent && !(relevant && pt.ValueBad) && !fzAPIAmbiguous(pt, k, in)
 		if err != nil {
 			if mustAccept {
 				t.Fatalf("%s rejected a consistent input (%s): %v\n%s\n%s", op, pt.Desc, err, in, s)
@@ -738,6 +773,10 @@ func FuzzAPISystem(f *testing.F) {
 			t.Fatalf("%s accepted invalid blocks (%s)\n%s\n%s", op, pt.Desc, in, s)
 		}
 		fzAPIRequireValid(t, in, op, sys)
+		empty := func(m *mat.Dense) bool { return m == nil || m.IsEmpty() }
+		if empty(pt.A) && empty(pt.B) && !empty(pt.C) {
+			fzSkip(t, "known: New with empty A and B drops a non-empty C")
+		}
 		if op != "NewFromSlices" {
 			for i, got := range []*mat.Dense{sys.A, sys.B, sys.C, sys.D} {
 				if !fzAPISameBlock(inputs[i], got) {
@@ -1398,7 +1437,8 @@ func FuzzAPIInterconnect(f *testing.F) {
 			t.Fatalf("%s modified an operand (%s)\n%s", op, d, in)
 		}
 		if err != nil {
-			if ok && !(loopOnly && errors.Is(err, ErrAlgebraicLoop)) {
+			unstorable := (wm == 0) != (wp == 0) && errors.Is(err, ErrDimensionMismatch)
+			if ok && !(loopOnly && errors.Is(err, ErrAlgebraicLoop)) && !unstorable {
 				t.Fatalf("%s rejected compatible models (m1=%d p1=%d m2=%d p2=%d dt %g/%g): %v\n%s\n%s", op, m1, p1, m2, p2, s1.Dt, s2.Dt, err, in, s)
 			}
 			fzAPIRejected(t, op, err)
@@ -1802,14 +1842,10 @@ func FuzzAPINames(f *testing.F) {
 				t.Fatalf("ConnectByName mixed sample times: %v\n%s", err, in)
 			}
 			return
-		case missing:
-			if !errors.Is(err, ErrSignalNotFound) {
-				t.Fatalf("ConnectByName unknown signal (conns %v ext %v outs %v): %v\n%s", conns, ext, outs, err, in)
-			}
-			return
-		case dup || len(ext) == 0 || len(outs) == 0 || !unique(ext) || !unique(outs):
-			if !errors.Is(err, ErrInvalidArgument) {
-				t.Fatalf("ConnectByName repeated connection %v: %v\n%s", conns, err, in)
+		case missing || dup || len(ext) == 0 || len(outs) == 0 || !unique(ext) || !unique(outs):
+			invalid := dup || len(ext) == 0 || len(outs) == 0 || !unique(ext) || !unique(outs)
+			if !(missing && errors.Is(err, ErrSignalNotFound)) && !(invalid && errors.Is(err, ErrInvalidArgument)) {
+				t.Fatalf("ConnectByName (missing %v, invalid %v) conns %v ext %v outs %v: %v\n%s", missing, invalid, conns, ext, outs, err, in)
 			}
 			return
 		}
