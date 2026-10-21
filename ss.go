@@ -288,7 +288,7 @@ func validateDims(A, B, C, D *mat.Dense, dt float64) (n, m, p int, err error) {
 		if A != nil && cc != n {
 			return 0, 0, 0, fmt.Errorf("columns of C (%d) != columns of A (%d): %w", cc, n, ErrDimensionMismatch)
 		}
-		if A == nil && B != nil && cc != n {
+		if A == nil && cc != n {
 			return 0, 0, 0, fmt.Errorf("columns of C (%d) != state dimension %d: %w", cc, n, ErrDimensionMismatch)
 		}
 	}

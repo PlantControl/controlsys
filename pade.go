@@ -125,7 +125,9 @@ func validatePadeOrder(order int) error {
 // PadeDelay returns the order-th order Padé approximant of e^{-tau·s} as a
 // SISO continuous model, as MATLAB [num,den] = pade(tau, N)
 // (https://www.mathworks.com/help/control/ref/dynamicsystem.pade.html).
-// tau must be finite and non-negative; order must be in 1..10.
+// tau must be finite and non-negative; order must be in 1..10. A tau so
+// small or large that the time-scaled realization leaves float64 range
+// returns ErrOverflow.
 func PadeDelay(tau float64, order int) (*System, error) {
 	if err := validateDelayValue(tau, 0); err != nil {
 		return nil, fmt.Errorf("PadeDelay: %w", err)
@@ -139,26 +141,22 @@ func PadeDelay(tau float64, order int) (*System, error) {
 
 	n := order
 
-	// q_k = (2n-k)! * n! / ((2n)! * k! * (n-k)!)
-	// Recurrence: q_k = q_{k-1} * (n-k+1) / (k * (2n-k+1))
-	q := make([]float64, n+1)
-	q[0] = 1.0
-	for k := 1; k <= n; k++ {
-		q[k] = q[k-1] * float64(n-k+1) / float64(k*(2*n-k+1))
-	}
-
-	// den(s) = sum_{k=0}^n q_k * (tau*s)^k, descending order
-	// num(s) = sum_{k=0}^n (-1)^k * q_k * (tau*s)^k, descending order
+	// Realize the tau = 1 approximant, whose monic coefficients
+	// c_{k-1} = c_k * k(2n-k+1)/(n-k+1) are well scaled, then time-scale it:
+	// G(s) = G1(tau*s) has A = A1/tau, B = B1/tau. A companion form built at
+	// tau would span tau^n decades and defeat the frequency solvers.
 	den := make([]float64, n+1)
 	num := make([]float64, n+1)
-	for k := 0; k <= n; k++ {
-		tauPow := math.Pow(tau, float64(k))
-		den[n-k] = q[k] * tauPow
-		sign := 1.0
-		if k%2 != 0 {
-			sign = -1.0
+	c := 1.0
+	for k := n; k >= 0; k-- {
+		if k < n {
+			c *= float64((k+1)*(2*n-k)) / float64(n-k)
 		}
-		num[n-k] = sign * q[k] * tauPow
+		den[n-k] = c
+		num[n-k] = c
+		if k%2 != 0 {
+			num[n-k] = -c
+		}
 	}
 
 	tf := &TransferFunc{
@@ -171,5 +169,22 @@ func PadeDelay(tau float64, order int) (*System, error) {
 	if err != nil {
 		return nil, fmt.Errorf("PadeDelay: %w", err)
 	}
-	return result.Sys, nil
+	sys := result.Sys
+	for _, m := range []*mat.Dense{sys.A, sys.B} {
+		raw := m.RawMatrix()
+		for i := range raw.Rows {
+			row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+			for j, v := range row {
+				if v == 0 {
+					continue
+				}
+				v /= tau
+				if math.Abs(v) < 0x1p-1022 || math.IsInf(v, 0) {
+					return nil, fmt.Errorf("PadeDelay: tau=%g order %d scales coefficients out of float64 range: %w", tau, order, ErrOverflow)
+				}
+				row[j] = v
+			}
+		}
+	}
+	return sys, nil
 }

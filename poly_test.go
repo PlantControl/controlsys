@@ -139,6 +139,29 @@ func TestPolyEqual(t *testing.T) {
 	}
 }
 
+func TestPolyEqualNonFinite(t *testing.T) {
+	nan, inf := math.NaN(), math.Inf(1)
+	cases := []struct {
+		p, q Poly
+		tol  float64
+		want bool
+	}{
+		{Poly{nan}, Poly{5}, 0, false},
+		{Poly{nan}, Poly{1}, 1e-9, false},
+		{Poly{1, nan}, Poly{1, nan}, inf, false},
+		{Poly{1}, Poly{2}, nan, false},
+		{Poly{1, 2}, Poly{1, 2}, nan, true},
+		{Poly{inf, 1}, Poly{inf, 1}, 0, true},
+		{Poly{inf}, Poly{-inf}, 1e300, false},
+		{Poly{1}, Poly{2}, inf, true},
+	}
+	for _, c := range cases {
+		if got := c.p.Equal(c.q, c.tol); got != c.want {
+			t.Errorf("%v.Equal(%v, %g) = %v, want %v", c.p, c.q, c.tol, got, c.want)
+		}
+	}
+}
+
 func TestPolyEvalEmpty(t *testing.T) {
 	empty := Poly{}
 	got := empty.Eval(5)

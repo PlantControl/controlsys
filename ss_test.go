@@ -75,6 +75,31 @@ func TestNewDimensionMismatch(t *testing.T) {
 	}
 }
 
+func TestNewRejectsStatefulCWithoutStates(t *testing.T) {
+	C := mat.NewDense(1, 2, []float64{1, 2})
+	for _, tc := range []struct {
+		name string
+		A, B *mat.Dense
+		D    *mat.Dense
+	}{
+		{"nil A B D", nil, nil, nil},
+		{"nil A B", nil, nil, mat.NewDense(1, 1, []float64{3})},
+		{"empty A B", &mat.Dense{}, &mat.Dense{}, mat.NewDense(1, 1, []float64{3})},
+	} {
+		sys, err := New(tc.A, tc.B, C, tc.D, 0)
+		if !errors.Is(err, ErrDimensionMismatch) || sys != nil {
+			t.Errorf("%s: New = %v, %v; want nil, ErrDimensionMismatch", tc.name, sys, err)
+		}
+	}
+	sys, err := New(nil, nil, nil, mat.NewDense(1, 2, []float64{1, 2}), 0)
+	if err != nil {
+		t.Fatalf("static D only: %v", err)
+	}
+	if n, m, p := sys.Dims(); n != 0 || m != 2 || p != 1 {
+		t.Fatalf("Dims = (%d,%d,%d), want (0,2,1)", n, m, p)
+	}
+}
+
 func TestNewNonSquareA(t *testing.T) {
 	_, err := New(mat.NewDense(2, 3, nil), nil, nil, nil, 0)
 	if !errors.Is(err, ErrDimensionMismatch) {

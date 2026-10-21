@@ -2,7 +2,9 @@ package controlsys
 
 import (
 	"fmt"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -200,19 +202,6 @@ func (sys *System) String() string {
 
 	var b strings.Builder
 
-	maxColW := func(labels []string) int {
-		w := 0
-		for _, l := range labels {
-			if len(l) > w {
-				w = len(l)
-			}
-		}
-		if w < 8 {
-			w = 8
-		}
-		return w
-	}
-
 	writeMatrix := func(name string, mat *mat.Dense, rowLabels, colLabels []string) {
 		if mat == nil {
 			return
@@ -222,28 +211,34 @@ func (sys *System) String() string {
 			return
 		}
 
-		colW := maxColW(colLabels)
-		rowW := 0
-		for _, l := range rowLabels {
-			if len(l) > rowW {
-				rowW = len(l)
+		raw := mat.RawMatrix()
+		cells := make([]string, r*c)
+		colW := make([]int, c)
+		for j, l := range colLabels {
+			colW[j] = len(l)
+		}
+		for i := range r {
+			for j := range c {
+				s := formatDisplayValue(raw.Data[i*raw.Stride+j])
+				cells[i*c+j] = s
+				colW[j] = max(colW[j], len(s))
 			}
 		}
-		if rowW < 4 {
-			rowW = 4
+		rowW := 0
+		for _, l := range rowLabels {
+			rowW = max(rowW, len(l))
 		}
 
 		fmt.Fprintf(&b, "%s =\n", name)
-		fmt.Fprintf(&b, "%*s", rowW+2, "")
-		for _, l := range colLabels {
-			fmt.Fprintf(&b, "%*s", colW+1, l)
+		fmt.Fprintf(&b, "  %*s", rowW, "")
+		for j, l := range colLabels {
+			fmt.Fprintf(&b, "  %*s", colW[j], l)
 		}
 		b.WriteString("\n")
-		raw := mat.RawMatrix()
 		for i := range r {
-			fmt.Fprintf(&b, "  %*s", rowW, rowLabels[i])
+			fmt.Fprintf(&b, "  %-*s", rowW, rowLabels[i])
 			for j := range c {
-				fmt.Fprintf(&b, "%*g", colW+1, raw.Data[i*raw.Stride+j])
+				fmt.Fprintf(&b, "  %*s", colW[j], cells[i*c+j])
 			}
 			b.WriteString("\n")
 		}
@@ -432,4 +427,20 @@ func ConnectByName(systems []*System, connections []Connection, inputs, outputs 
 		return nil, withAlgebraicLoopSignals(err, aug.InputName, aug.OutputName)
 	}
 	return result, nil
+}
+
+// formatDisplayValue renders v with 4 significant digits, like MATLAB's
+// short display of ss matrices.
+func formatDisplayValue(v float64) string {
+	switch {
+	case math.IsNaN(v):
+		return "NaN"
+	case math.IsInf(v, 1):
+		return "Inf"
+	case math.IsInf(v, -1):
+		return "-Inf"
+	case v == 0:
+		return "0"
+	}
+	return strconv.FormatFloat(v, 'g', 4, 64)
 }

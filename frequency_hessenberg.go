@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/cmplx"
 
 	"plantcontrol.org/v1/gonum/blas"
 )
@@ -24,6 +25,22 @@ func newBalancedRealization(sys *System, n, m, p int) balancedRealization {
 	br := newRealizationCopy(sys, n, m, p)
 	br.balance(nil)
 	return br
+}
+
+// finite reports whether every realization entry is finite.
+func (br *balancedRealization) finite() bool {
+	if !finiteSlice(br.a) || !finiteSlice(br.b) || !finiteSlice(br.c) || br.e != nil && !finiteSlice(br.e) {
+		return false
+	}
+	if br.d == nil {
+		return true
+	}
+	for i := range br.p {
+		if !finiteSlice(br.d[i*br.dStride : i*br.dStride+br.m]) {
+			return false
+		}
+	}
+	return true
 }
 
 // newRealizationCopy copies the realization into one fresh buffer, unscaled.
@@ -74,6 +91,8 @@ type balancedDense struct {
 	r      []complex128   // row-major n×m, refine's residual
 	pt     frequencyPoint // the point evalInto last factored, for refine
 	tol    float64
+	// nonFinite marks a NaN or Inf realization entry.
+	nonFinite bool
 }
 
 // refineCondition is the error amplification, relative to ε, above which
@@ -106,6 +125,7 @@ func newBalancedDenseOf(br balancedRealization) *balancedDense {
 		}
 		bd.lastA[i] = last
 	}
+	bd.nonFinite = !br.finite()
 	return bd
 }
 
@@ -167,6 +187,9 @@ func (bd *balancedDense) fillPencilAt(pt frequencyPoint) (float64, complex128) {
 
 func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 	n, m, p := bd.n, bd.m, bd.p
+	if bd.nonFinite || cmplx.IsNaN(pt.value()) {
+		return errNonFinitePencil
+	}
 	if n == 0 {
 		copyRealMatrixToComplex(dst, bd.d, bd.dStride, p, m)
 		return nil
@@ -354,6 +377,8 @@ type hessenbergSweep struct {
 	y       []complex128 // column-major n×m, Hessenberg coordinates
 	x       []complex128 // column-major n×m, balanced coordinates
 	r       []complex128 // column-major n×m
+	// nonFinite marks a NaN or Inf realization entry.
+	nonFinite bool
 }
 
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
@@ -375,7 +400,8 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	hs.u, hs.inv, hs.mult, hs.shift = ctake(nn), ctake(n), ctake(n), ctake(n)
 	hs.y, hs.x, hs.r = ctake(n*m), ctake(n*m), ctake(n*m)
 	hs.swapped = make([]bool, n)
-	if n == 0 {
+	hs.nonFinite = !hs.finite()
+	if n == 0 || hs.nonFinite {
 		return hs
 	}
 	copy(hs.h, hs.a)
@@ -610,6 +636,9 @@ func (hs *hessenbergSweep) exactResidual(pt frequencyPoint) {
 
 func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 	n, m, p := hs.n, hs.m, hs.p
+	if hs.nonFinite || cmplx.IsNaN(pt.value()) {
+		return errNonFinitePencil
+	}
 	if n == 0 {
 		copyRealMatrixToComplex(dst, hs.d, hs.dStride, p, m)
 		return nil
@@ -793,6 +822,10 @@ func cLUSolve(lu []complex128, piv []int, x []complex128, n, m int) {
 }
 
 var errSingularPencil = fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+
+// errNonFinitePencil rejects a NaN point or non-finite realization: NaN
+// comparisons defeat GEPP's pivot and structure bookkeeping.
+var errNonFinitePencil = fmt.Errorf("non-finite complex matrix: %w", ErrInvalidArgument)
 
 // balance applies an exact power-of-two state scaling x = D x̂ chosen to
 // balance the rows and columns of [|A|+|E| B; C ·] (Osborne iteration as in

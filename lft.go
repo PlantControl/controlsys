@@ -32,7 +32,9 @@ type LFTFeedback struct {
 // Delays are kept through an internal-delay realization. A nil model, a
 // negative count or more than one fb returns ErrInvalidArgument, counts that
 // do not fit either model ErrDimensionMismatch, mixed domains
-// ErrDomainMismatch and an ill-posed loop ErrAlgebraicLoop.
+// ErrDomainMismatch and an ill-posed loop ErrAlgebraicLoop. A result with no
+// states and exactly one of inputs and outputs zero, with or without delays,
+// cannot be stored (MATLAB returns an empty gain): ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/inputoutputmodel.lft.html.
 func LFT(sys1, sys2 *System, fb ...LFTFeedback) (*System, error) {
 	if err := requireSystems("LFT", sys1, sys2); err != nil {
@@ -340,6 +342,11 @@ func lftWithDelay(M, Delta *System, nw, nz int) (*System, error) {
 	w := pM - nz
 	z := mM - nw
 	n := nM + nD
+	if n == 0 {
+		if err := lftGainDims(nz, nw); err != nil {
+			return nil, err
+		}
+	}
 	mTotal := nw + N
 	pTotal := nz + N
 
@@ -415,9 +422,6 @@ func lftWithDelay(M, Delta *System, nw, nz int) (*System, error) {
 
 	if N == 0 {
 		if n == 0 {
-			if err := lftGainDims(nz, nw); err != nil {
-				return nil, err
-			}
 			Acl = &mat.Dense{}
 		} else {
 			Acl = resizeDense(Acl, n, n)

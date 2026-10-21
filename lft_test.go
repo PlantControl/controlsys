@@ -865,6 +865,55 @@ func TestLFTZeroWidthStaticGain(t *testing.T) {
 	}
 }
 
+func TestLFTDelayedStaticOneSidedEmptyRejected(t *testing.T) {
+	gain := func(r, c int, data []float64, dt float64) *System {
+		t.Helper()
+		g, err := NewGain(mat.NewDense(r, c, data), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	for _, dt := range []float64{0, 0.1} {
+		cases := []struct {
+			name       string
+			sys1, sys2 func() *System
+			delayed    func(*System)
+		}{
+			{
+				name:    "no outputs, input delay",
+				sys1:    func() *System { return gain(1, 2, []float64{0, 0}, dt) },
+				sys2:    func() *System { return gain(2, 3, []float64{1, 2, 3, 4, 5, 6}, dt) },
+				delayed: func(s *System) { s.InputDelay = []float64{2, 4} },
+			},
+			{
+				name:    "no inputs, output delay",
+				sys1:    func() *System { return gain(3, 2, []float64{1, 2, 3, 4, 5, 6}, dt) },
+				sys2:    func() *System { return gain(2, 1, []float64{1, 2}, dt) },
+				delayed: func(s *System) { s.OutputDelay = []float64{1, 2, 3} },
+			},
+		}
+		for _, tc := range cases {
+			t.Run(fmt.Sprintf("%s/dt=%g", tc.name, dt), func(t *testing.T) {
+				_, oracle := LFT(tc.sys1(), tc.sys2())
+				if !errors.Is(oracle, ErrDimensionMismatch) {
+					t.Fatalf("undelayed LFT err = %v, want ErrDimensionMismatch", oracle)
+				}
+				s1 := tc.sys1()
+				tc.delayed(s1)
+				res, err := LFT(s1, tc.sys2())
+				if !errors.Is(err, ErrDimensionMismatch) || res != nil {
+					var verr error
+					if res != nil {
+						verr = res.Validate()
+					}
+					t.Fatalf("delayed LFT = (%v, %v), Validate %v; want nil, ErrDimensionMismatch", res, err, verr)
+				}
+			})
+		}
+	}
+}
+
 // TestLFTZeroWidthDelayedDeltaMatchesFullPartition checks the internal-delay
 // LFT path: closing the loop with no external inputs (outputs) must reproduce the full
 // partition's free response (state trajectory) with the upper inputs zeroed

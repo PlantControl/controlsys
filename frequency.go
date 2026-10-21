@@ -223,9 +223,10 @@ type frequencyEvaluator struct {
 }
 
 // validFrequencyEvaluator rejects hand-built systems whose exported fields
-// disagree in shape; the kernels index them unchecked.
+// disagree in shape, which the kernels index unchecked, and non-finite
+// models, whose response would be NaN.
 func validFrequencyEvaluator(sys *System, op string) (frequencyEvaluator, error) {
-	if err := requireSystem(op, sys); err != nil {
+	if err := requireFiniteSystem(op, sys); err != nil {
 		return frequencyEvaluator{}, err
 	}
 	return newFrequencyEvaluator(sys), nil
