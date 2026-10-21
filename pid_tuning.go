@@ -830,9 +830,10 @@ func (p pidTuningPlant) wantSign() float64 {
 // integral action, else of 1 + Kp·dc. 1 + L(∞) is read off the top sample
 // wHi of response gHi: positive where the loop has rolled off, |L| < 1;
 // else, continuous only, that of 1 + Re L where L lies within 30° of the
-// real axis and clear of −1, as an ideal derivative on a relative-degree-
-// one plant leaves it. The discrete top sample is z = −1, not +∞. Otherwise
-// 1 + L(∞) is unknown, which accepts c, as does dc = 0.
+// real axis, as an ideal derivative on a relative-degree-one plant leaves
+// it. There |1 + L| < 0.1 rejects c: its sign is unresolved and |S| > 10.
+// The discrete top sample is z = −1, not +∞. Otherwise 1 + L(∞) is
+// unknown, which accepts c, as does dc = 0.
 func pidTuningDCAdmissible(c PID2, dc, wHi float64, gHi complex128) bool {
 	if dc == 0 {
 		return true
@@ -840,8 +841,11 @@ func pidTuningDCAdmissible(c PID2, dc, wHi float64, gHi complex128) bool {
 	l := gHi * pidTuningFeedback(c, wHi)
 	inf := 1.
 	if !(cmplx.Abs(l) < 1) {
-		if c.Dt > 0 || !(math.Abs(imag(l)) <= .5*cmplx.Abs(l) && math.Abs(1+real(l)) >= .1) {
+		if c.Dt > 0 || !(math.Abs(imag(l)) <= .5*cmplx.Abs(l)) {
 			return true
+		}
+		if cmplx.Abs(1+l) < .1 {
+			return false
 		}
 		inf = 1 + real(l)
 	}

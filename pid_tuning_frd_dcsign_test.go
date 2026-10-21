@@ -16,9 +16,10 @@ import (
 // real root in the right half plane. Base returned such designs with
 // positive reported margins: Ki opposite the DC gain (PI, PID, PIDF, I),
 // or Kp·G(0) < −1 without Ki (PD, PDF), or 1 + Kd·CB < 0 under an ideal
-// derivative on relative-degree-one plants. The fixed search rejects them:
-// a design of the right DC sign or an error. Oracle: closed-loop roots of
-// the exact characteristic polynomial.
+// derivative on relative-degree-one plants, including 1 + Kd·CB just below
+// 0 where L(∞) sits next to −1. The fixed search rejects them: a design of
+// the right DC sign or an error. Oracle: closed-loop roots of the exact
+// characteristic polynomial.
 func TestTunePIDFRDStablePlantDCSign(t *testing.T) {
 	for i, c := range []struct {
 		num, den []float64
@@ -38,6 +39,9 @@ func TestTunePIDFRDStablePlantDCSign(t *testing.T) {
 		{[]float64{20.876293292202146}, []float64{1, 0.10946545138033435, 0.056242258056678665}, 600, PidtunePID, 0, true},
 		{[]float64{5.998024318626204}, []float64{1, 3.2754824697813687}, 600, PidtunePD, 0, false},
 		{[]float64{1.7146661983250227}, []float64{1, 2.927179851338206}, 300, PidtunePD, 45, false},
+		{[]float64{-0.4683988494422861}, []float64{1, 0.7032911471041147}, 600, PidtunePD, 60, false},
+		{[]float64{-0.4683988494422861}, []float64{1, 0.7032911471041147}, 100, PidtunePD, 60, false},
+		{[]float64{0.016084374962596817, 0.009220509586651611}, []float64{1, 1.2321898832719733, 0.257977790095751}, 100, PidtunePD, 60, false},
 	} {
 		name := fmt.Sprintf("case %d %s", i, c.family)
 		frd := pidExactFRD(t, c.num, c.den, 1e-3, 1e3, c.n)
