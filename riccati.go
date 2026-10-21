@@ -858,13 +858,17 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense, xData [
 				}
 			}
 		}
+		mk := ws.h[n*n : 2*n*n]
+		blas64.Gemm(blas.Trans, blas.NoTrans,
+			1, blas64.General{Rows: m, Cols: n, Data: rk, Stride: n},
+			blas64.General{Rows: m, Cols: n, Data: kData, Stride: n},
+			0, blas64.General{Rows: n, Cols: n, Data: mk, Stride: n})
 		terms := impl.Dlange(lapack.Frobenius, n, n, qRaw.Data, qRaw.Stride, nil) +
 			2*impl.Dlange(lapack.Frobenius, n, n, xa, n, nil) +
-			impl.Dlange(lapack.Frobenius, m, n, rk, n, nil)*impl.Dlange(lapack.Frobenius, m, n, kData, n, nil)
-		blas64.Gemm(blas.Trans, blas.NoTrans,
-			-1, blas64.General{Rows: m, Cols: n, Data: rk, Stride: n},
-			blas64.General{Rows: m, Cols: n, Data: kData, Stride: n},
-			1, blas64.General{Rows: n, Cols: n, Data: qk, Stride: n})
+			impl.Dlange(lapack.Frobenius, n, n, mk, n, nil)
+		for i, v := range mk {
+			qk[i] -= v
+		}
 		exact = impl.Dlange(lapack.Frobenius, n, n, qk, n, nil) <= 8*float64(n)*eps()*terms
 	} else {
 		blas64.Gemm(blas.NoTrans, blas.NoTrans,
