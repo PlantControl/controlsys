@@ -132,7 +132,7 @@ func TestTunePIDIntegratorResidueSignDelayedFloor(t *testing.T) {
 	num := pidPoly(-31.29, []float64{1, .09685})
 	den := pidPoly(1, []float64{1, 0}, []float64{1, 14.84, 367.9}, []float64{1, 7.963, 36.18})
 	const tau = .5042
-	r, err := TunePID(context.Background(),pidPlantDelayed(t, num, den, tau), PidtunePD, PIDTuningOptions{PhaseMargin: 36.78})
+	r, err := TunePID(context.Background(), pidPlantDelayed(t, num, den, tau), PidtunePD, PIDTuningOptions{PhaseMargin: 36.78})
 	if err != nil {
 		t.Fatal(err)
 	}

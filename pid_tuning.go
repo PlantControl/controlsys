@@ -164,7 +164,8 @@ type pidTuningPlant struct {
 	hasCrossFloor bool
 	// crossLow and crossHigh widen the band in which the floor finds the
 	// other crossovers to the plant's dynamics, since a floor design's
-	// high gain can cross 0 dB near a mode outside the band.
+	// high gain can cross 0 dB near a mode outside the band. The |S| scan
+	// also reaches crossHigh, the reported band's top.
 	crossLow, crossHigh float64
 	// zeroScan checks the returned design's crossings down to its
 	// controller zeros (pidTuningZeroGrid) and fails with pidZeroRejected
@@ -3079,10 +3080,10 @@ func pidTuningModes(plant *System) []complex128 {
 	return modes
 }
 
-// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [p.low, p.high],
-// extended, by at most pidTuningTailPoints samples up to
-// pidTuningTailReach·p.high, while p.loopTail admits |L| > 1 − 1/p.maxSensitivity
-// beyond, since a large derivative gain can cross 0 dB again far above the
+// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [p.low, top],
+// top = max(p.high, p.crossHigh), the reported band's top, extended, by at
+// most pidTuningTailPoints samples up to pidTuningTailReach·top, while
+// p.loopTail admits |L| > 1 − 1/p.maxSensitivity beyond, since a large derivative gain can cross 0 dB again far above the
 // crossover.
 // The grid step turns the delay phase by at most π/16 and, near a plant mode
 // σ+jω₀, is at most max(|σ|, |ω−ω₀|)/4, so a lightly damped mode's narrow
@@ -3092,10 +3093,11 @@ func pidTuningModes(plant *System) []complex128 {
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 	s := func(w float64) float64 { return 1 / cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)) }
 	peak := 0.
-	high, extend, inBand := p.high, p.loopTail != nil && p.maxSensitivity > 1, 0
+	top := math.Max(p.high, p.crossHigh)
+	high, extend, inBand := top, p.loopTail != nil && p.maxSensitivity > 1, 0
 	var w0, v0, w1, v1 float64
 	for k, w := 0, p.low; ; k++ {
-		if w <= p.high {
+		if w <= top {
 			inBand = k
 		}
 		v := s(w)
@@ -3109,10 +3111,10 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 			return peak
 		}
 		if w >= high {
-			if !extend || w >= p.high*pidTuningTailReach || p.loopTail(&c, w) <= 1-1/p.maxSensitivity {
+			if !extend || w >= top*pidTuningTailReach || p.loopTail(&c, w) <= 1-1/p.maxSensitivity {
 				return peak
 			}
-			high = math.Min(2*w, p.high*pidTuningTailReach)
+			high = math.Min(2*w, top*pidTuningTailReach)
 		}
 		step := .01 * w
 		if p.tau > 0 {
