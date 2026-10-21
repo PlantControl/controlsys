@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -99,6 +100,8 @@ func TestDiskMarginDelayedFeedthroughLimitSet(t *testing.T) {
 		{"static k=5", delayLimitLoop{d: 0.3, tau1: 0.5, d2: -0.25, tau2: 2.5}, false},
 		{"static k=2", delayLimitLoop{d: 0.3, tau1: 0.5, d2: -0.25, tau2: 1}, false},
 		{"fuzz PN4IYP", delayLimitLoop{d: 0.29732546154427597, tau1: h, d2: -0.25, tau2: 3 * h}, false},
+		{"static -0.3 k=3", delayLimitLoop{d: -0.3, tau1: 1, d2: 0.33, tau2: 3}, false},
+		{"static -0.5 k=3", delayLimitLoop{d: -0.5, tau1: 1, d2: 0.1, tau2: 3}, false},
 		{"constant plus delay", delayLimitLoop{d: 0.3, tau1: 0, d2: 0.2, tau2: 1}, false},
 		{"rational k=3", delayLimitLoop{a: -1, c: 0.1, d: 0.3, tau1: 0.5, d2: -0.25, tau2: 1.5}, true},
 		{"rational k=5", delayLimitLoop{a: -1, c: 0.1, d: 0.3, tau1: 0.5, d2: -0.25, tau2: 2.5}, true},
@@ -137,6 +140,33 @@ func TestDiskMarginDelayedFeedthroughLimitSet(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDiskMarginStaticDelayLimitSweep checks the peaks of seeded static
+// loops d·e^{−s} + d2·e^{−rs}, |d| + |d2| < 0.9, against a dense sweep of
+// the periodic response. Where the grid sample already matched the limit
+// sup, the delay H∞ peak used to refuse and the disk bound at tailLimit was
+// kept at +Inf (2.70 for d = −0.3, d2 = 0.33, r = 3, exact 1.91).
+func TestDiskMarginStaticDelayLimitSweep(t *testing.T) {
+	rng := rand.New(rand.NewPCG(15, 4))
+	ratios := []float64{2, 3, 4, 5, 1.5, 2.5}
+	for i := range 60 {
+		r := ratios[i%len(ratios)]
+		d := 1.2*rng.Float64() - 0.6
+		d2 := (0.9 - math.Abs(d)) * (2*rng.Float64() - 1)
+		l := delayLimitLoop{d: d, tau1: 1, d2: d2, tau2: r}
+		res, err := DiskMargin(l.system(t))
+		if err != nil {
+			t.Errorf("%+v: %v", l, err)
+			continue
+		}
+		for _, sh := range []struct{ c, got float64 }{{-0.5, 1 / res.Alpha}, {0, res.PeakSensitivity}} {
+			want, _ := delayLimitSup(l.limitAt, sh.c, 4*math.Pi, 400000)
+			if math.Abs(sh.got-want) > 1e-6*want {
+				t.Errorf("%+v c=%g: ‖S+c‖∞ = %.12g, want %.12g", l, sh.c, sh.got, want)
+			}
+		}
 	}
 }
 
