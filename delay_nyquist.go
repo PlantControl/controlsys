@@ -1298,7 +1298,7 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 		if S == nil {
 			S = l.closedLoopSensitivity()
 		}
-		if p, ok := shiftedSensitivityPeak(S, c); ok && p.peak < inf {
+		if p, ok := shiftedSensitivityPeak(S, c, inf); ok && p.peak < inf {
 			if p.peak > peaks[i].peak {
 				peaks[i] = p
 			}
@@ -1329,8 +1329,10 @@ func (l *delayLoop) closedLoopSensitivity() *System {
 // high-frequency limit is the sup over the limit set of L, where diskBound
 // at tailLimit assumes L reaches −tailLimit: for L = 0.3 + 0.2e^{−s} it
 // gives 1.5 for c = −1/2, the exact sup 0.409. ok is false when the peak is
-// not certified.
-func shiftedSensitivityPeak(S *System, c float64) (sensitivityPeak, bool) {
+// not certified. bound is diskBound at tailLimit, an upper bound past the
+// certified band, kept when the limit set reaches it, as it does for one
+// I/O delay or independent phases.
+func shiftedSensitivityPeak(S *System, c, bound float64) (sensitivityPeak, bool) {
 	if S == nil {
 		return sensitivityPeak{}, false
 	}
@@ -1339,11 +1341,36 @@ func shiftedSensitivityPeak(S *System, c float64) (sensitivityPeak, bool) {
 		Sc = S.Copy()
 		Sc.D.Set(0, 0, Sc.D.At(0, 0)+c)
 	}
+	if limitSetReaches(Sc, bound) {
+		return sensitivityPeak{bound, math.Inf(1)}, true
+	}
 	norm, w, stable, err := hinfNormDelayed(Sc)
 	if err != nil || !stable || !(norm < math.Inf(1)) {
 		return sensitivityPeak{}, false
 	}
 	return sensitivityPeak{norm, w}, true
+}
+
+// limitSetReaches reports whether |S∞ + c| reaches bound on the phase circle
+// or torus of the high-frequency limit of Sc = S + c, up to 1e-9 relative,
+// by the sup for one phase and Newton ascent from the largest torus cells.
+func limitSetReaches(Sc *System, bound float64) bool {
+	if Sc.LFT == nil || len(Sc.LFT.Tau) == 0 {
+		return false
+	}
+	e, err := newDelayLFT(Sc)
+	if err != nil {
+		return false
+	}
+	hf := newHighFrequencyGain(e)
+	est := math.Inf(-1)
+	if hf.dim == 1 {
+		est = hf.onePhaseSup()
+	} else if ms := torusMaxima(hf); len(ms) > 0 {
+		snapFixedPoints(hf, ms)
+		est = ms[0].value
+	}
+	return est >= bound*(1-1e-9)
 }
 
 // certifyPeaks raises each sensitivity peak to within peakCertTol of

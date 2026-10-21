@@ -149,3 +149,29 @@ func BenchmarkDiskMargin_DelayFeedthroughLimitSet(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkDiskMargin_DelayFeedthroughIO(b *testing.B) {
+	L, err := NewFromSlices(1, 1, 1, []float64{-1}, []float64{1}, []float64{-0.1}, []float64{0.5}, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := L.SetInputDelay([]float64{0.2}); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := DiskMargin(L); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkDiskMargin_DelayFeedthroughIncommensurate(b *testing.B) {
+	L := delayLimitLoop{a: -1, c: 0.1, d: 0.3, tau1: 0.5, d2: -0.25, tau2: 0.5 * math.Sqrt2}.system(b)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := DiskMargin(L); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
