@@ -75,16 +75,17 @@ func TestTunePIDEvaluationBudgetPerSearch(t *testing.T) {
 }
 
 // On 1/(s(s+1)) a PI controller adds phase lead at wc only with Ki < 0, and
-// s³ + s² + Kp s + Ki then fails Routh. The ±3° search is followed by the
-// floor, whose first band is all unstable too, which ends the floor.
+// s³ + s² + Kp s + Ki then fails Routh. Gains take the integrator's residue
+// sign (6KBA3T), whose PI cone puts the loop phase at wc in [−225°, −135°],
+// so after the ±3° search the floor skips every band above 75° unsearched.
 func TestTunePIDFloorStopsAtUnstableBand(t *testing.T) {
 	p := makePlant(t, []float64{1}, []float64{1, 1, 0})
 	_, ev, searches, err := pidTuneCounted(t, p, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 75})
 	if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		t.Fatalf("err %v", err)
 	}
-	if searches != 2 || ev.Evaluations == 0 {
-		t.Fatalf("%d searches, %d evaluations; want the ±3° search and one floor band", searches, ev.Evaluations)
+	if searches != 1 || ev.Evaluations == 0 {
+		t.Fatalf("%d searches, %d evaluations; want the ±3° search alone", searches, ev.Evaluations)
 	}
 }
 

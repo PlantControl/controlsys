@@ -749,30 +749,52 @@ func mqRiccatiGainCond(s *fzSpec, r, x []float64) float64 {
 	return 64 * 0x1p-52 * mat.Cond(rbar, 2)
 }
 
-// mqRiccatiSchurRelErr returns eps·ĥ/(sep·h/2), the relative accuracy of
-// the cost-scaled Schur method (Care/Dare rescale Q, R, S by about ‖X‖):
-// ĥ = max(‖A‖, ‖X‖·‖BR⁻¹Bᵀ‖, ‖Q‖/‖X‖) (at least 1 for discrete) is the
-// scaled pencil and sep·h/2 the closed-loop margin, times the 2048 the
-// rescale threshold leaves.
-func mqRiccatiSchurRelErr(s *fzSpec, acl, q, r, x []float64) float64 {
-	sep, h := mqRiccatiSep(s, acl, q, r)
-	nx := mqFro(x)
+// mqLyapOp returns the n²×n² row-major Kronecker matrix of the closed-loop
+// Lyapunov operator X ↦ AₖᵀX + XAₖ (continuous) or AₖᵀXAₖ − X (discrete).
+func mqLyapOp(acl []float64, n int, discrete bool) []float64 {
+	nn := n * n
+	op := make([]float64, nn*nn)
+	for i := range n {
+		for j := range n {
+			for k := range n {
+				for l := range n {
+					var v float64
+					if discrete {
+						v = acl[k*n+i] * acl[l*n+j]
+						if i == k && j == l {
+							v--
+						}
+					} else {
+						if j == l {
+							v += acl[k*n+i]
+						}
+						if i == k {
+							v += acl[l*n+j]
+						}
+					}
+					op[(i*n+j)*nn+k*n+l] = v
+				}
+			}
+		}
+	}
+	return op
+}
+
+// mqRiccatiForwardErr returns 16·eps·den/(sep·‖X‖), the first-order
+// relative forward error of a backward-stable X: den is the residual's term
+// sum and sep = σ_min(mqLyapOp). It is 0 when sep or ‖X‖ is not positive.
+func mqRiccatiForwardErr(s *fzSpec, acl, x []float64, den float64) float64 {
+	n := s.N
+	var svd mat.SVD
+	if !svd.Factorize(mqDense(n*n, n*n, mqLyapOp(acl, n, s.Discrete)), mat.SVDNone) {
+		return 0
+	}
+	sv := svd.Values(nil)
+	sep, nx := sv[len(sv)-1], mqFro(x)
 	if !(sep > 0) || !(nx > 0) {
 		return 0
 	}
-	n, m := s.N, s.M
-	var ri, g, bri mat.Dense
-	if err := ri.Inverse(mqDense(m, m, r)); err != nil {
-		return 0
-	}
-	B := mqDense(n, m, s.B)
-	bri.Mul(B, &ri)
-	g.Mul(&bri, B.T())
-	hs := math.Max(mqFro(s.A), math.Max(nx*mqFro(mqRaw(&g)), mqFro(q)/nx))
-	if s.Discrete {
-		hs = math.Max(hs, 1)
-	}
-	return 2048 * 0x1p-52 * hs / (sep * h / 2)
+	return 16 * 0x1p-52 * den / (sep * nx)
 }
 
 // FuzzRiccati: Care (continuous spec) or Dare (discrete) with A, B from
@@ -869,7 +891,7 @@ func FuzzRiccati(f *testing.F) {
 		if !(ke <= 1e-10*kden) {
 			t.Fatalf("%s: gain residual %.3g (scale %.3g)\nX=%v\nK=%v\n%s", op, ke, kden, x, k, s)
 		}
-		if !(re <= math.Max(math.Max(tol, mqRiccatiGainCond(s, r, x)), mqRiccatiSchurRelErr(s, ad, q, r, x))*rden) {
+		if !(re <= math.Max(tol, mqRiccatiGainCond(s, r, x))*rden) {
 			t.Fatalf("%s: Riccati residual %.3g (scale %.3g, rcnd %.3g)\nX=%v\nK=%v\n%s", op, re, rden, res.Rcnd, x, k, s)
 		}
 		cp := fzCharPolyExact(ad, n)
@@ -909,7 +931,7 @@ func FuzzRiccati(f *testing.F) {
 			t.Fatalf("%s: Σ Eig = %v, trace(A−BK) = %v\nEig=%v\n%s", op, tr, trA, res.Eig, s)
 		}
 		if jointPSD {
-			if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, mqRiccatiSchurRelErr(s, ad, q, r, x))*mqFro(x)) {
+			if me := mqMinEigSym(x, n); !(me >= -math.Max(1e-8, mqRiccatiForwardErr(s, ad, x, rden))*mqFro(x)) {
 				t.Fatalf("%s: PSD cost but min eig(X) = %.3g\nX=%v\n%s", op, me, x, s)
 			}
 		}

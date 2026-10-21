@@ -218,6 +218,7 @@ type kalmanTally struct {
 	failed                                 []int
 	lines                                  []string
 	plain, plainBad                        int
+	equalize                               bool
 }
 
 func (k *kalmanTally) run(id int, kc kalmanCase) {
@@ -236,7 +237,7 @@ func (k *kalmanTally) run(id int, kc kalmanCase) {
 	}
 	line := strconv.Itoa(id) + " kB=" + strconv.Itoa(kc.kB) + " kC=" + strconv.Itoa(kc.kC) + " rot=" + strconv.FormatBool(kc.rotated)
 	defer func() { k.lines = append(k.lines, line) }()
-	if red, err := sys.Reduce(nil); err == nil {
+	if red, err := sys.Reduce(&ReduceOpts{Equalize: k.equalize}); err == nil {
 		line += " ra=" + strconv.Itoa(red.Order-kc.r)
 		if red.Order != kc.r {
 			plainBad = true
@@ -319,13 +320,14 @@ func (k *kalmanTally) run(id int, kc kalmanCase) {
 // TestKalmanStructuredSweep checks Reduce, CtrbF, ObsvF and TransferFunction
 // against the structural orders of seeded Kalman-form models. Env:
 // KALMAN_SWEEP_N (cases), KALMAN_SWEEP_DIAG (diagonal state scaling
-// decades), KALMAN_SWEEP_OUT (per-case results file for base comparisons).
+// decades), KALMAN_SWEEP_OUT (per-case results file for base comparisons),
+// KALMAN_SWEEP_EQUALIZE=1 (Reduce with Equalize).
 func TestKalmanStructuredSweep(t *testing.T) {
 	n := 300
 	if s := os.Getenv("KALMAN_SWEEP_N"); s != "" {
 		n, _ = strconv.Atoi(s)
 	}
-	var tally kalmanTally
+	tally := kalmanTally{equalize: os.Getenv("KALMAN_SWEEP_EQUALIZE") == "1"}
 	decades := 0.0
 	if s := os.Getenv("KALMAN_SWEEP_DIAG"); s != "" {
 		decades, _ = strconv.ParseFloat(s, 64)

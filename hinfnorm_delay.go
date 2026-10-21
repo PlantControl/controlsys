@@ -1458,7 +1458,7 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		switch {
 		case ok:
 			lim = level
-		case hf.dim == 1 && est > best*(1+tol):
+		case hf.dim == 1:
 			lim = est
 		case hf.dim > 1:
 			torus = hf
