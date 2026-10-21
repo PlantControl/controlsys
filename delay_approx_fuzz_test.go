@@ -287,6 +287,20 @@ func fzApxEval(sys *System, pt fzApxPt, delta, ext fzApxFn) (h []complex128, bou
 	}
 	sq := math.Sqrt
 	bound = 16 * float64(q+1) * eps * (sq(nCf)*sq(nInv)*(sq(nM)*sq(nX)+sq(nR)) + sq(nD))
+	// Backward error of the routine that built sys: a perturbation of
+	// eps·‖[A B B2; C D D12; C2 D21 D22]‖ in any entry.
+	data := 0.0
+	for _, g := range []struct {
+		f    func(i, j int) float64
+		r, c int
+	}{{A, n, n}, {B, n, m}, {C, p, n}, {D, p, m}, {B2, n, N}, {C2, N, n}, {D12, p, N}, {D21, N, m}, {D22, N, N}} {
+		for i := range g.r {
+			for j := range g.c {
+				data += g.f(i, j) * g.f(i, j)
+			}
+		}
+	}
+	bound += 64 * eps * sq(data) * ((sq(nCf)+1)*sq(nInv)*(sq(nX)+1) + sq(nX) + 1)
 	for _, v := range h {
 		if cmplx.IsNaN(v) || cmplx.IsInf(v) {
 			return nil, 0, false
