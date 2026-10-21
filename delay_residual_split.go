@@ -23,13 +23,14 @@ type residualDelayGroup struct {
 }
 
 // newResidualDelaySplit groups inputs (or outputs, when that needs fewer
-// added states) whose total-delay columns (rows) differ by a constant.
+// added states) whose total-delay columns (rows) differ by a constant. Every
+// piece copies the internal delays, so a tie goes to fewer pieces.
 func newResidualDelaySplit(sys *System) residualDelaySplit {
 	n, _, _ := sys.Dims()
 	total := newDelayTopology(sys).totalExternal(true)
 	cols, colCost := residualDelayGroups(total, false, n)
 	rows, rowCost := residualDelayGroups(total, true, n)
-	if rowCost < colCost {
+	if rowCost < colCost || rowCost == colCost && sys.internalDelayCount() > 0 && len(rows) < len(cols) {
 		return residualDelaySplit{byRow: true, n: n, groups: rows}
 	}
 	return residualDelaySplit{n: n, groups: cols}
