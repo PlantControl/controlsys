@@ -196,6 +196,11 @@ type pidTuningPlant struct {
 	// loopTail, if set, bounds |L(jω')| over ω' ≥ ω for a candidate, so the
 	// |S| scan runs past high until |S| <= maxSensitivity is certain.
 	loopTail func(c *PID2, w float64) float64
+	// dcEdge and nyquistEdge, if finite and nonzero, are G at ω = 0 and,
+	// discrete, at z = −1, the ends the |S| scan's band stops short of: a
+	// design whose closed-loop root sits near s = 0 or z = −1 hides its
+	// |S| peak there.
+	dcEdge, nyquistEdge complex128
 }
 
 type pidCrossScan int
@@ -1001,6 +1006,15 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return g
 	}
 	tryResp := func(w float64) (complex128, bool) { return tryEval(eval, func() complex128 { return resp(w) }) }
+	var dcEdge, nyquistEdge complex128
+	if g, ok := eval.resolve(0); ok {
+		dcEdge = g
+	}
+	if plant.Dt > 0 {
+		if g, ok := eval.resolve(math.Pi / plant.Dt); ok {
+			nyquistEdge = g
+		}
+	}
 	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(screen.model) })
 	loopTail := sync.OnceValue(func() func(*PID2, float64) float64 { return pidTuningLoopTail(plant) })
 	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(screen.model) })
@@ -1027,7 +1041,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if resolveFloor {
 			low = pidTuningResolvedFloor(tryResp, low, wc)
 		}
-		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, residueSign: residueSign, tau: tau, zeroScan: true}
+		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, residueSign: residueSign, tau: tau, zeroScan: true, dcEdge: dcEdge, nyquistEdge: nyquistEdge}
 		if bound == pidSSearch {
 			p.maxSensitivity = pidTuningMaxSensitivity
 			p.loopTail = loopTail()
@@ -3253,10 +3267,10 @@ func pidTuningModes(plant *System) []complex128 {
 // σ+jω₀, is at most max(|σ|, |ω−ω₀|)/4, so a lightly damped mode's narrow
 // peak is bracketed. Grid maxima within 0.8 of the running peak are then
 // refined by golden section on log ω, since a delay ripple can sit between
-// samples and read ~10% low.
+// samples and read ~10% low. |S| at p.dcEdge and p.nyquistEdge counts too.
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 	s := func(w float64) float64 { return 1 / cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)) }
-	peak := 0.
+	peak := pidTuningEdgeSensitivity(p, c)
 	top := math.Max(p.high, p.crossHigh)
 	high, extend, inBand := top, p.loopTail != nil && p.maxSensitivity > 1, 0
 	var w0, v0, w1, v1 float64
@@ -3289,6 +3303,36 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 		}
 		w = math.Min(w+step, high)
 	}
+}
+
+// pidTuningEdgeSensitivity returns the larger |S| at p.dcEdge and
+// p.nyquistEdge, 0 where unset. Without integral action L(0) = Kp·G(0),
+// since every derivative term vanishes there; with it |L(0)| is infinite.
+// At z = −1 each integrator dt·(1/(z−1) + w), w its formula's weight, is
+// dt·(w − ½), so the derivative term is Kd/(Tf + dt·(w − ½)), infinite
+// when that is 0.
+func pidTuningEdgeSensitivity(p pidTuningPlant, c PID2) float64 {
+	peak := 0.
+	s := func(l complex128) {
+		if v := 1 / cmplx.Abs(1+l); !math.IsNaN(v) {
+			peak = math.Max(peak, v)
+		}
+	}
+	if g := p.dcEdge; g != 0 && pidFiniteComplex(g) && c.Ki == 0 {
+		s(g * complex(c.Kp, 0))
+	}
+	if g := p.nyquistEdge; g != 0 && pidFiniteComplex(g) && c.Dt > 0 {
+		k := c.Kp + c.Ki*c.Dt*(pidFormulaWeight(c.IFormula)-.5)
+		if c.Kd != 0 {
+			d := c.Tf + c.Dt*(pidFormulaWeight(c.DFormula)-.5)
+			if d == 0 {
+				return peak
+			}
+			k += c.Kd / d
+		}
+		s(g * complex(k, 0))
+	}
+	return peak
 }
 
 // pidTuningTailReach and pidTuningTailPoints cap the |S| scan's extension

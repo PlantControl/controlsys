@@ -140,6 +140,7 @@ func pidTuningFRDPlant(data *FRD, unstablePoles *int) pidTuningPlant {
 	}}
 	if unstablePoles == nil || *unstablePoles == 0 {
 		p.dcGain, p.highGain = pidTuningFRDDCGain(data, p.at), p.at(high)
+		p.dcEdge = complex(p.dcGain, 0)
 	}
 	return p
 }
@@ -183,7 +184,11 @@ func pidTuningFRDDCGain(data *FRD, at func(float64) complex128) float64 {
 // 10% of Nyquist with G within 30° of the real axis, |L| >= 2, and the
 // derivative term at least twice the rest of c, all at the top sample; then
 // 1 + L heads to j·s·∞, s the sign of Kd·Re G, and the indentation turns it
-// by −π/2 to s·∞ on the real axis. Below the band G runs
+// by −π/2 to s·∞ on the real axis. Without integral action c is rejected
+// unless |1 + Kp·dcGain| exceeds |Kp| times the change in Re G over the
+// lowest quarter decade, which bounds the gap between the lowest sample's
+// real part and the DC gain; nearer, the loop's real root at s ≈ 0 takes
+// the sign that gap leaves unknown. Below the band G runs
 // linearly from the DC gain to the lowest sample, between samples along
 // their interpolant, each step bisected until 1 + L turns by under 90°; one
 // that cannot be rejects c, as its |S| is unbounded. Above the band 1 + L
@@ -268,6 +273,9 @@ func pidTuningFRDNyquistCount(c PID2, p pidTuningPlant) (stable, known bool) {
 		w0 = 1e-3 * math.Min(p.low, math.Abs(c.Ki*p.dcGain)/(1+math.Abs(c.Kp*p.dcGain)))
 	}
 	if start == 0 || !(w0 > 0) {
+		return false, true
+	}
+	if c.Ki == 0 && !(math.Abs(real(start)) > math.Abs(c.Kp)*math.Abs(real(p.at(math.Min(p.low*math.Pow(10, .25), p.high)))-p.dcGain)) {
 		return false, true
 	}
 	turn := func(a, b complex128) float64 { return cmplx.Phase(b / a) }
