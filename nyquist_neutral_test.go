@@ -267,3 +267,29 @@ func TestNyquistNeutralTwoGainSweep(t *testing.T) {
 		t.Fatalf("sweep covered %d finite, %d infinite cases", finite, infinite)
 	}
 }
+
+// TestNyquistDelayRootsBelowResolution: 33894/(s+18.92)·e^{−5.23s} has
+// about 5.6e4 RHP roots, those near |s| ~ k within 2π/(kτ²) ~ 7e-6 of the
+// axis, inside the on-contour tolerance; it returned ErrSingularTransform as
+// if the closed loop had axis poles. A delayed loop with a true axis root at
+// ωτ ~ 2 still does.
+func TestNyquistDelayRootsBelowResolution(t *testing.T) {
+	loop := func(k, a, tau float64) *System {
+		sys, err := NewFromSlices(1, 1, 1, []float64{-a}, []float64{1}, []float64{k}, []float64{0}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sys.SetInputDelay([]float64{tau}); err != nil {
+			t.Fatal(err)
+		}
+		return sys
+	}
+	_, err := loop(33894, 18.92, 5.23).Nyquist(nil, 0)
+	if !errors.Is(err, ErrDelayUnsupported) || errors.Is(err, ErrSingularTransform) {
+		t.Errorf("ωτ ~ 1.8e5: err %v, want ErrDelayUnsupported", err)
+	}
+	_, err = loop(2, 1, 2*math.Pi/(3*math.Sqrt(3))).Nyquist(nil, 0)
+	if !errors.Is(err, ErrSingularTransform) {
+		t.Errorf("axis root at ω = √3: err %v, want ErrSingularTransform", err)
+	}
+}

@@ -43,8 +43,9 @@ type NyquistResult struct {
 // never depend on omega. When 1+L vanishes on the contour (closed-loop poles
 // on the stability boundary) the count is undefined and Nyquist returns
 // ErrSingularTransform. A delay loop whose winding needs more than 2^21
-// samples (|L| > 1 out to ω with ωτ in the millions) returns
-// ErrDelayUnsupported. A neutral delay loop, whose high-frequency gain may
+// samples (|L| > 1 out to ω with ωτ in the millions), or where 1+L vanishes
+// within tolerance past ωτ = 1e5 (closed-loop roots closer to the axis than
+// the response resolves), returns ErrDelayUnsupported. A neutral delay loop, whose high-frequency gain may
 // reach 1, is counted by the closed-loop delay Nyquist test when its
 // difference operator 1 + L∞ is certified free of zeros in Re s >= 0
 // (d1·e^{−s} + d2·e^{−2s} with 1 + d1·z + d2·z² nonzero on |z| <= 1), and
@@ -409,6 +410,10 @@ const (
 	nyquistTailRatio    = 0.1
 	nyquistMaxFreq      = 1e15
 	nyquistOnContourTol = 1e-12
+	// nyquistDelayResolution is the ωτ past which a delay loop's closed-loop
+	// roots near the axis, at Re s ~ 2π/(ωτ²) for a high-gain loop, fall
+	// within the on-contour tolerance of 1+L.
+	nyquistDelayResolution = 1e5
 )
 
 // nyquistPath samples the loop response along the positive-frequency half of
@@ -431,6 +436,7 @@ type nyquistPath struct {
 	// onContour records that 1+L vanished on the contour: a sample came
 	// within nyquistOnContourTol of -1 or bisection could not resolve arg(1+L) at nyquistMaxDepth.
 	onContour bool
+	contourW  float64 // largest |ω| where onContour was set
 }
 
 // seedResonances adds contour parameters (ω, or θ = ωdt for discrete models)
@@ -469,6 +475,11 @@ func (p *nyquistPath) withSeeds(ts []float64, a, b float64, toT func(float64) fl
 	return ts
 }
 
+func (p *nyquistPath) markOnContour(s complex128) {
+	p.onContour = true
+	p.contourW = max(p.contourW, math.Abs(imag(s)))
+}
+
 func (p *nyquistPath) at(s complex128) (complex128, error) {
 	if p.samples++; p.tau > 0 && p.samples > delayNyquistMaxPoints {
 		return 0, fmt.Errorf("delay loop winding needs more than %d samples: %w", delayNyquistMaxPoints, ErrDelayUnsupported)
@@ -485,7 +496,7 @@ func (p *nyquistPath) at(s complex128) (complex128, error) {
 		p.env = cmplx.Abs(p.buf[0])
 	}
 	if v := p.buf[0]; cmplx.Abs(1+v) <= nyquistOnContourTol*math.Max(1, cmplx.Abs(v)) {
-		p.onContour = true
+		p.markOnContour(s)
 	}
 	return p.buf[0], nil
 }
@@ -533,7 +544,7 @@ func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, dep
 		return nil
 	}
 	if depth >= nyquistMaxDepth && !rot || depth >= 2*nyquistMaxDepth {
-		p.onContour = true
+		p.markOnContour(f(a.t))
 		return nil
 	}
 	tm := (a.t + b.t) / 2
@@ -747,6 +758,9 @@ func nyquistEncirclements(sys *System, poles []complex128, bd nyquistBoundary) (
 	}
 	if err != nil {
 		return 0, err
+	}
+	if path.onContour && path.tau > 0 && path.contourW*path.tau > nyquistDelayResolution {
+		return 0, fmt.Errorf("delay loop closed-loop roots within resolution of the axis at ωτ = %.3g: %w", path.contourW*path.tau, errDelayLoopUnsupported)
 	}
 	if path.onContour {
 		return 0, fmt.Errorf("closed loop has poles on the stability boundary (1+L = 0 on the contour): %w", ErrSingularTransform)
