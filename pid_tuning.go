@@ -2722,20 +2722,23 @@ const pidTuningIdealReturnTol = 0x1p-26
 // directly, of the loop with model, transfer its transfer function, delayed
 // by lag samples. For a delayed loop, or one whose transfer is of lower
 // degree than model, the characteristic is built exactly from model's
-// realization when in scope, since TransferFunction drops or corrupts
+// realization when in scope (n within pidTuningExactLagOrder; above
+// pidTuningExactOrder only for a transfer of lower degree or one that
+// fails, as the build grows with n), since TransferFunction drops or corrupts
 // near-zero poles and zeros and the float verdict on its characteristic then
 // decides confidently wrong; the float verdict on the rounded exact
 // characteristic decides, and exact Schur–Cohn only when it is in doubt and
 // n+lag is within pidTuningExactLagOrder, as that recursion at order n+lag
 // is slow; beyond it the float verdict stands. transfer is called only when
-// the exact characteristic is out of scope, the loop is undelayed, or the
-// rounded characteristic overflows beyond that cap; an undelayed failure
-// leaves the exact characteristic to decide when in scope.
+// the exact characteristic is out of scope, the loop is undelayed, n
+// exceeds pidTuningExactOrder, or the rounded characteristic overflows
+// beyond that cap; a failure before the build leaves the exact
+// characteristic to decide when in scope.
 func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, error), c *PID2, lag int) (bool, error) {
 	n, _, _ := model.Dims()
 	inScope := pidTuningIdealInScope(model, c)
 	var tr *TransferFuncResult
-	if !inScope || lag == 0 {
+	if !inScope || lag == 0 || n > pidTuningExactOrder {
 		var err error
 		if tr, err = transfer(); err != nil && !inScope {
 			return false, err
@@ -2859,7 +2862,7 @@ func pidTuningIdealCharacteristic(model *System, c *PID2, lag int) (ch []dyadic,
 // build the characteristic of model and c.
 func pidTuningIdealInScope(model *System, c *PID2) bool {
 	n, m, p := model.Dims()
-	if model.E != nil || model.HasDelay() || m != 1 || p != 1 || n > pidTuningExactOrder {
+	if model.E != nil || model.HasDelay() || m != 1 || p != 1 || n > pidTuningExactLagOrder {
 		return false
 	}
 	for _, a := range []*mat.Dense{model.A, model.B, model.C, model.D} {

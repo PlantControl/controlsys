@@ -202,6 +202,49 @@ func TestPIDTuningIdealStableCollapsedTransferLongLag(t *testing.T) {
 	}
 }
 
+// H2RXWD: above pidTuningExactOrder the screen took the float verdict on
+// the transfer's characteristic, so the collapsed transfer of
+// TestPIDTuningIdealStableCollapsedTransfer, in series with 16 stable
+// pole-zero pairs (n = 18), certified unstable loops, and a failed transfer
+// aborted. A transfer of lower degree than n, or a failure, now leaves the
+// exact characteristic to decide. Oracle: exact Schur–Cohn with z^15.
+func TestPIDTuningIdealStableCollapsedTransferHighOrder(t *testing.T) {
+	const dt, lag = 0.1, 15
+	numG, denG := Poly{0.05508874359571571, 1.4671058437019866, -0.6931435149725129}, Poly{1, 2.0625805448700525e-30, 4.842253744153856e-61}
+	numH, denH := Poly{1}, Poly{1}
+	for i := range 16 {
+		b := 0.1 + 0.03*float64(i)
+		numH, denH = numH.Mul(Poly{1, -(b + 0.005)}), denH.Mul(Poly{1, -b})
+	}
+	num, den := numG.Mul(numH), denG.Mul(denH)
+	plant := pidtuneBackoffPlant(t, num, den, dt, 0)
+	if n, _, _ := plant.Dims(); n <= pidTuningExactOrder {
+		t.Fatalf("order %d within pidTuningExactOrder", n)
+	}
+	collapsed := &TransferFuncResult{TF: &TransferFunc{Num: [][][]float64{{Poly{0.05508874359571571, 1.1e-31}.Mul(numH)}}, Den: [][]float64{Poly{1, 2.0625805448700525e-30}.Mul(denH)}, Dt: dt}}
+	for _, tc := range []struct {
+		k    PID2
+		want bool
+	}{
+		{PID2{Kp: 0.5706220540940695, Ki: 1.0390660705947083, Kd: 0.3000376123041945}, false},
+		{PID2{Kp: 0.02, Ki: 0.01, Kd: 0.005}, true},
+	} {
+		k := tc.k
+		k.B, k.C, k.Dt = 1, 1, dt
+		if pidtuneExactSchurStableLag(t, &PID{Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Dt: dt}, num, den, dt, 1, lag) != tc.want {
+			t.Fatalf("%+v: oracle not %v", k, tc.want)
+		}
+		for name, transfer := range map[string]func() (*TransferFuncResult, error){
+			"collapsed": func() (*TransferFuncResult, error) { return collapsed, nil },
+			"failed":    func() (*TransferFuncResult, error) { return nil, ErrOverflow },
+		} {
+			if got, err := pidTuningIdealStable(plant, transfer, &k, lag); err != nil || got != tc.want {
+				t.Errorf("%s %+v: stable %v %v, oracle %v", name, k, got, err, tc.want)
+			}
+		}
+	}
+}
+
 // H2RXWD: closedLoopPoles extracted the transfer function before the ideal
 // test and returned its error, even where the exact characteristic decides.
 // Oracles: exact Schur–Cohn with z^15 for the delayed plant; for the
