@@ -465,7 +465,7 @@ func TestAllMarginRealUnitPoleScanCost(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, reals := r.resonancePoles(); len(reals) < 5 {
+		if _, reals, _ := r.resonancePoles(); len(reals) < 5 {
 			t.Fatalf("n=%d: %d real poles next to z = 1, want ≥ 5", n, len(reals))
 		}
 		if _, err := r.phaseCrossings(); err != nil {

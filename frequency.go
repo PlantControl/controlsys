@@ -618,14 +618,21 @@ func copyRealMatrixToComplex(dst []complex128, src []float64, stride, rows, cols
 }
 
 func cSolveInPlace(a, b []complex128, n, nrhs int) error {
+	_, err := cSolveGrowthInPlace(a, b, n, nrhs)
+	return err
+}
+
+// cSolveGrowthInPlace is cSolveInPlace that also returns the ratio of the
+// largest entry of a to its smallest GEPP pivot.
+func cSolveGrowthInPlace(a, b []complex128, n, nrhs int) (float64, error) {
 	if n == 1 {
 		if a[0] == 0 {
-			return fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+			return 0, fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 		}
 		for j := range nrhs {
 			b[j] /= a[0]
 		}
-		return nil
+		return 1, nil
 	}
 
 	maxAbs := 0.0
@@ -639,6 +646,7 @@ func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 		tol = 1e-15
 	}
 
+	minPivot := math.Inf(1)
 	for k := range n {
 		pivot := k
 		best := cmplx.Abs(a[k*n+k])
@@ -649,8 +657,9 @@ func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 			}
 		}
 		if best < tol {
-			return fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+			return 0, fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 		}
+		minPivot = min(minPivot, best)
 		if pivot != k {
 			for j := range n {
 				a[k*n+j], a[pivot*n+j] = a[pivot*n+j], a[k*n+j]
@@ -690,7 +699,7 @@ func cSolveInPlace(a, b []complex128, n, nrhs int) error {
 			b[i*nrhs+j] /= diag
 		}
 	}
-	return nil
+	return maxAbs / minPivot, nil
 }
 
 // complexFlatToGrid returns the rows of the row-major p×m data, aliasing it.
@@ -724,6 +733,11 @@ type lftWorkspace struct {
 
 	absorbed    *balancedDense // discrete delays as states, built on first use
 	absorbedErr error
+	closed      []complex128         // closedLoopInto's result, allocated on first use
+	frozen      []complex128         // evalFrLFTFrozenInto's buffers, allocated on first use
+	frozenPiv   []int                // frozenRefine's pivots, allocated on first use
+	frozenLoop  []compensatedComplex // frozenResidual's loop sums
+	hOK         bool                 // h holds H at the last evalFrLFTInto point
 }
 
 // newLFTWorkspace balances the augmented plant [|A|+|E| B B2; C C2 ·] so
@@ -771,7 +785,8 @@ func newLFTWorkspace(sys *System, n, N, p, m int) *lftWorkspace {
 
 // evalFrLFTInto sets ws.g to G = H11 + H12·Δ·(I - H22·Δ)⁻¹·H21, or, where H
 // or I - H22·Δ is singular, to the frozen-delay closed loop at s. Where a
-// discrete I - H22·Δ is ill-conditioned it evaluates ws.absorbedSolver.
+// discrete I - H22·Δ is ill-conditioned, or an entry of G cancels terms over
+// lftCancelLimit times its size, it takes closedLoopInto's response.
 func evalFrLFTInto(ws *lftWorkspace, sys *System, pt frequencyPoint, N, p, m int) error {
 	s := pt.value()
 	cont := sys.IsContinuous()
@@ -783,9 +798,11 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, pt frequencyPoint, N, p, m int
 		}
 	}
 	h := ws.h
+	ws.hOK = false
 	if err := ws.bd.evalInto(pt, h); err != nil {
 		return evalFrLFTFrozenInto(ws, pt, N, p, m)
 	}
+	ws.hOK = true
 	mN := m + N
 	var loopMax, rhsMax float64
 	for i := range N {
@@ -817,17 +834,56 @@ func evalFrLFTInto(ws *lftWorkspace, sys *System, pt frequencyPoint, N, p, m int
 			}
 		}
 	}
+	cancels := false
 	for i := range p {
 		hRow := h[i*mN:]
 		for j := range m {
 			v := hRow[j]
+			terms := cabs1(v)
 			for k := range N {
-				v += hRow[m+k] * ws.delta[k] * ws.x[k*m+j]
+				t := hRow[m+k] * ws.delta[k] * ws.x[k*m+j]
+				v += t
+				terms += cabs1(t)
 			}
 			ws.g[i*m+j] = v
+			cancels = cancels || terms > lftCancelLimit*cabs1(v)
 		}
 	}
+	if cancels {
+		ws.closedLoopInto(sys, pt, N, p, m)
+	}
 	return nil
+}
+
+// lftCancelLimit is the ratio of the magnitudes summed into an entry of the
+// LFT to the entry above which the sum's rounding exceeds the closed loop's.
+const lftCancelLimit = 16
+
+// closedLoopInto replaces ws.g, the LFT of the open-loop H, with the
+// closed-loop response at pt where that evaluates, else leaves it: the
+// absorbed realization for discrete delays, the frozen-delay closed loop
+// otherwise. Next to an open-loop pole that the delay loop moves, H is of
+// order 1/d and the LFT cancels it to the closed-loop response, losing ε/d
+// relative accuracy however accurately H is solved; the rounding of Δ
+// alone, times H22, costs that much.
+func (ws *lftWorkspace) closedLoopInto(sys *System, pt frequencyPoint, N, p, m int) {
+	lft := ws.g
+	if ws.closed == nil {
+		ws.closed = make([]complex128, len(lft))
+	}
+	g := ws.closed
+	if !sys.IsContinuous() {
+		if bd := ws.absorbedSolver(sys); bd != nil && bd.evalInto(pt, g) == nil {
+			copy(lft, g)
+			return
+		}
+	}
+	ws.g = g
+	err := evalFrLFTFrozenInto(ws, pt, N, p, m)
+	ws.g = lft
+	if err == nil {
+		copy(lft, g)
+	}
 }
 
 // maxAbsorbedStates bounds the states of the absorbed realization, whose
@@ -836,12 +892,12 @@ const maxAbsorbedStates = 256
 
 // absorbedSolver returns the solver of sys with its discrete internal delays
 // absorbed as shift states, or nil when they cannot be or would need more
-// than maxAbsorbedStates states. Near a lightly
-// damped pole of the delay loop, I − H22·Δ is nearly singular and the
-// rounding of H and of Δ = z^{-k}, which no complex128 holds on the unit
-// circle, costs about kε/d relative accuracy at distance d; the absorbed
-// pencil holds the delays exactly and its solver refines to the exact
-// response.
+// than maxAbsorbedStates states. Near a lightly damped pole of the delay
+// loop, I − H22·Δ is nearly singular, and near an open-loop pole that the
+// loop moves, H is large; either way the rounding of H and of Δ = z^{-k},
+// which no complex128 holds on the unit circle, costs about kε/d relative
+// accuracy at distance d. The absorbed pencil holds the delays exactly and
+// its solver refines to the exact response.
 func (ws *lftWorkspace) absorbedSolver(sys *System) *balancedDense {
 	if ws.absorbed == nil && ws.absorbedErr == nil {
 		n, _, _ := sys.Dims()

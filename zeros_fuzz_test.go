@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 	"math/cmplx"
 	"slices"
 	"testing"
@@ -11,10 +12,14 @@ import (
 // makes the I/O-scaled Rosenbrock pencil [zI−A, −βB; γC, γβD] numerically
 // rank deficient (backward-error residual, insensitive to zero
 // conditioning). When the pencil is clearly of full normal rank,
-// ZerosDetail.Rank is min(m, p), and for square models the number of zeros
-// inside a root-free annulus radius R equals the exact count of roots of
-// det P(s) (big.Rat interpolation, Schur–Cohn) inside R; zeros near
-// infinity are excluded by R. I/O delays never change the result.
+// ZerosDetail.Rank is min(m, p), and the number of zeros inside a
+// root-free annulus radius R equals the exact count of roots inside R
+// (Schur–Cohn) of det P(s) for square models, of the gcd of the maximal
+// minors of P(s) for non-square ones (both big.Rat interpolation); zeros
+// near infinity are excluded by R. Non-square zeros are non-generic, so
+// rounding-level near-structure gives zeros the exact pencil lacks (the
+// backward-error check above bounds them): there the count is only a
+// lower bound. I/O delays never change the result.
 func FuzzZeros(f *testing.F) {
 	for _, s := range fzZerosSeeds() {
 		fzAddSeed(f, s)
@@ -78,12 +83,17 @@ func FuzzZeros(f *testing.F) {
 		if det.Rank != min(m, p) {
 			t.Fatalf("ZerosDetail.Rank = %d, want %d (pencil σ = %v)\n%s", det.Rank, min(m, p), sv, s)
 		}
-		if m != p || n == 0 {
+		if n == 0 {
 			return
 		}
-		dp := fzTrimRat(fzPencilDetRat(n, m, s.A, s.B, s.C, s.D))
+		var dp []*big.Rat
+		if m == p {
+			dp = fzTrimRat(fzPencilDetRat(n, m, s.A, s.B, s.C, s.D))
+		} else {
+			dp = fzZeroPolyRat(n, m, p, s.A, s.B, s.C, s.D)
+		}
 		if len(dp) == 0 {
-			t.Fatalf("exact det P(s) ≡ 0 but pencil σ = %v\n%s", sv, s)
+			t.Fatalf("exact zero polynomial ≡ 0 but pencil σ = %v\n%s", sv, s)
 		}
 		deg := len(dp) - 1
 		for k := 2; k >= -3; k-- {
@@ -107,13 +117,111 @@ func FuzzZeros(f *testing.F) {
 			if !clear {
 				continue
 			}
-			if want := deg - hi; inside != want {
+			if want := deg - hi; inside != want && (m == p || inside < want) {
 				t.Fatalf("%d zeros inside |s| < %g, exact det P(s) has %d (degree %d)\nzeros=%v\n%s", inside, R, want, deg, zeros, s)
 			}
 			return
 		}
 		fzSkip(t, "no root-free annulus for the zero count")
 	})
+}
+
+// fzZeroPolyRat returns the monic gcd of all maximal minors of the
+// Rosenbrock pencil of a non-square model (exact, big.Rat): its roots are
+// the invariant zeros when the normal rank is n+min(m, p). Empty when every
+// maximal minor vanishes identically.
+func fzZeroPolyRat(n, m, p int, a, b, c, d []float64) []*big.Rat {
+	k := n + min(m, p)
+	rows, cols := fzCombos(n+p, k), fzCombos(n+m, k)
+	if p > m {
+		cols = cols[:1]
+	} else {
+		rows = rows[:1]
+	}
+	var g []*big.Rat
+	for _, rs := range rows {
+		for _, cs := range cols {
+			g = fzPolyGcdRat(g, fzMinorPolyRat(n, m, p, a, b, c, d, rs, cs))
+			if len(g) == 1 {
+				return g
+			}
+		}
+	}
+	return g
+}
+
+// fzMinorPolyRat returns the determinant of the rows rs, columns cs of
+// [sI−A, −B; C, D], descending, by Newton interpolation at s = 0..n.
+func fzMinorPolyRat(n, m, p int, a, b, c, d []float64, rs, cs []int) []*big.Rat {
+	k, w := len(rs), n+m
+	y := make([]*big.Rat, n+1)
+	for x := range y {
+		P := fzPencilRat(n, m, p, a, b, c, d, big.NewRat(int64(x), 1))
+		S := make([]*big.Rat, k*k)
+		for i, r := range rs {
+			for j, cc := range cs {
+				S[i*k+j] = P[r*w+cc]
+			}
+		}
+		_, y[x] = fzRatElim(S, k, k)
+	}
+	for j := 1; j <= n; j++ {
+		for x := n; x >= j; x-- {
+			y[x] = new(big.Rat).Quo(new(big.Rat).Sub(y[x], y[x-1]), big.NewRat(int64(j), 1))
+		}
+	}
+	poly := []*big.Rat{new(big.Rat).Set(y[n])}
+	for x := n - 1; x >= 0; x-- {
+		poly = fzRatPolyMul(poly, []*big.Rat{big.NewRat(1, 1), big.NewRat(-int64(x), 1)})
+		poly[len(poly)-1].Add(poly[len(poly)-1], y[x])
+	}
+	return fzTrimRat(poly)
+}
+
+// fzPolyGcdRat returns the monic gcd of descending polynomials a and b.
+func fzPolyGcdRat(a, b []*big.Rat) []*big.Rat {
+	if len(a) == 0 {
+		return b
+	}
+	var t big.Rat
+	for len(b) > 0 {
+		r := make([]*big.Rat, len(a))
+		for i := range a {
+			r[i] = new(big.Rat).Set(a[i])
+		}
+		for len(r) >= len(b) {
+			f := new(big.Rat).Quo(r[0], b[0])
+			for i := range b {
+				r[i].Sub(r[i], t.Mul(f, b[i]))
+			}
+			r = fzTrimRat(r[1:])
+		}
+		a, b = b, r
+	}
+	out := make([]*big.Rat, len(a))
+	for i := range a {
+		out[i] = new(big.Rat).Quo(a[i], a[0])
+	}
+	return out
+}
+
+func fzCombos(n, k int) [][]int {
+	var out [][]int
+	cur := make([]int, 0, k)
+	var rec func(s int)
+	rec = func(s int) {
+		if len(cur) == k {
+			out = append(out, slices.Clone(cur))
+			return
+		}
+		for i := s; i < n; i++ {
+			cur = append(cur, i)
+			rec(i + 1)
+			cur = cur[:len(cur)-1]
+		}
+	}
+	rec(0)
+	return out
 }
 
 func fzFrob(x []float64) float64 {

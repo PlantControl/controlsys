@@ -782,6 +782,14 @@ func pidtuneExactSchurStable(t *testing.T, pid *PID, num, den Poly, dt float64) 
 // strictly inside |z| = rho.
 func pidtuneExactSchurStableRadius(t *testing.T, pid *PID, num, den Poly, dt, rho float64) bool {
 	t.Helper()
+	return pidtuneExactSchurStableLag(t, pid, num, den, dt, rho, 0)
+}
+
+// pidtuneExactSchurStableLag is pidtuneExactSchurStableRadius for the plant
+// num/den delayed by lag samples.
+func pidtuneExactSchurStableLag(t *testing.T, pid *PID, num, den Poly, dt, rho float64, lag int) bool {
+	t.Helper()
+	den = append(slices.Clone(den), make(Poly, lag)...)
 	if pid.IFormula != ForwardEuler {
 		t.Fatalf("oracle needs a forward-Euler integral, got %v", pid.IFormula)
 	}
@@ -852,6 +860,9 @@ func pidtuneExactSchurStableRadius(t *testing.T, pid *PID, num, den Poly, dt, rh
 		q := make([]*big.Rat, n)
 		for i := range q {
 			q[i] = new(big.Rat).Sub(new(big.Rat).Mul(c[0], c[i]), new(big.Rat).Mul(c[n], c[n-i]))
+		}
+		for _, v := range slices.Backward(q) {
+			v.Quo(v, q[0])
 		}
 		c = q
 	}

@@ -18,9 +18,9 @@ import (
 // there meets the robustness bar). Oracle: exact Schur–Cohn test; the loop
 // with the plant in 256-bit arithmetic and the controller in z−1 form
 // (expanded polynomials in z lose it near z = 1) meets the reported margin
-// at the reported crossover, every crossover keeps at least it, and a free
-// P or I, whose search bounds |S| on an undelayed plant, keeps |S| ≤ 4 over
-// the reported band.
+// at the reported crossover, every crossover keeps at least it, and every
+// family keeps |S| ≤ 4 over the reported band (SIVH4J: PD returned |S| 16.9
+// on IP3XIC k=10 and 6.3 on nearunit).
 func TestTunePIDNearUnitPolesFallBackToFreqResponse(t *testing.T) {
 	skipSlowUnderRace(t)
 	const dt = 0.01
@@ -32,11 +32,13 @@ func TestTunePIDNearUnitPolesFallBackToFreqResponse(t *testing.T) {
 		fams     []PidtuneType
 	}{
 		{"IP3XIC k=100", Poly{2.761969998249568e-14, 2.6332895798497864e-14, 6.196985260193668e-15}, ip3, nil},
+		{"IP3XIC k=1", Poly{2.761969998249568e-16, 2.6332895798497864e-16, 6.196985260193668e-17}, ip3, nil},
 		{"IP3XIC k=10", Poly{2.761969998249568e-15, 2.6332895798497864e-15, 6.196985260193668e-16}, ip3, nil},
 		{"GK5SUC A", Poly{1.5379663637764417e-12, -3.387450861436736e-13}, Poly{1, -3.9146780141541093, 5.7453934609919255, -3.7467528452104566, 0.9160373983726545}, nil},
 		{"GK5SUC B", Poly{1.7295311989236164e-12}, Poly{1, -2.999890083275418, 2.999780168026009, -0.999890084750586}, nil},
 		{"review1", Poly{1.1201261000572445e-12, 7.985425046796576e-13}, Poly{1, -4.956471969268471, 9.826418031565801, -9.740421021787181, 4.827475826360807, -0.95700086687092}, nil},
 		{"review2 a", Poly{1.6478992314667082e-12}, Poly{1, -3.9988962961964294, 5.996689296298131, -3.9966897039442033, 0.998896703842506}, nil},
+		{"nearunit", Poly{-5.917373360562065e-16, -3.1176768703785916e-16}, Poly{1, -3.9985941793495767, 5.995783163531163, -3.99578378890103, 0.9985948047194504}, nil},
 		{"review2 b", Poly{8.58763892349696e-12, -2.307232265714587e-12}, Poly{1, -3.997506422481467, 5.9925206599047645, -3.992522052100717, 0.9975078146774358}, nil},
 		{"ideal a", pidtuneIdealNearUnit[0].num, pidtuneIdealNearUnit[0].den, ideal},
 		{"ideal b", pidtuneIdealNearUnit[1].num, pidtuneIdealNearUnit[1].den, ideal},
@@ -80,9 +82,6 @@ func TestTunePIDNearUnitPolesFallBackToFreqResponse(t *testing.T) {
 				if math.Abs(m) < ev.AchievedPhaseMargin-.5 {
 					t.Errorf("%s: crossover margin %.4g below reported %.4g", name, m, ev.AchievedPhaseMargin)
 				}
-			}
-			if f != PidtuneP && f != PidtuneI {
-				continue
 			}
 			if _, ms := pidtuneSignedMargins(L, ev.FrequencyBand[0], ev.FrequencyBand[1]); ms > pidTuningMaxSensitivity*1.01 {
 				t.Errorf("%s: |S| %.4g over band %v", name, ms, ev.FrequencyBand)

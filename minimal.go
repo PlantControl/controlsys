@@ -22,10 +22,18 @@ const (
 // ReduceOpts configures Reduce; the zero value is MATLAB minreal(sys).
 type ReduceOpts struct {
 	Mode ReduceMode
-	// Tol is the staircase rank tolerance (MATLAB minreal tol); 0 selects
-	// n²·eps relative to the data.
+	// Tol is the staircase rank tolerance (MATLAB minreal tol): a singular
+	// value of a step counts as rank above Tol·max(σ₁(step), ‖A‖_F), ‖A‖
+	// of the full model in both stages; 0 selects n²·eps with the floor
+	// raised to MATLAB ctrbf/obsvf's 10·n·‖A‖₁·eps, the rule CtrbF and
+	// ObsvF use. MATLAB minreal's documented default sqrt(eps) is not
+	// used: against ‖A‖ it drops weakly coupled states that carry the
+	// response (a slow plant in a PI loop, diagonally scaled models).
 	Tol float64
-	// Equalize balances A, B, C before the staircase reductions.
+	// Equalize balances A, B, C before the staircase reductions. Badly
+	// scaled models (state scales spanning many decades) need it, as
+	// MATLAB minreal prescales: an orthogonal staircase judges couplings
+	// against ‖A‖.
 	Equalize bool
 }
 
@@ -37,7 +45,10 @@ type ReduceResult struct {
 
 // Reduce removes uncontrollable and/or unobservable states of sys by
 // orthogonal staircase reductions, like MATLAB minreal(sys,tol); the result
-// has the same transfer function and keeps D and the delays. A nil
+// has the same transfer function and keeps D and the delays. Each input and
+// output is first scaled by a power of two toward ‖A‖ (undone on the
+// result), so the order does not depend on I/O scaling and a tiny but
+// nonzero B or C is kept. A nil
 // opts is ReduceAll with the default tolerance. A descriptor model returns
 // ErrDescriptorUnsupported; an unknown Mode, a negative or non-finite Tol,
 // and a nil or non-finite model return ErrInvalidArgument.
@@ -86,17 +97,25 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 		equalize(A, B, C, n, m, p)
 	}
 
+	inExp, outExp := reduceIOExponents(A, B, C)
+	ldexpIO(B, C, inExp, outExp, 1)
+
 	ncont := n
+	floor := ctrbfFloor(A, opts.Tol)
 
 	if opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable {
-		res, err := controllabilityStaircase(A, B, C, opts.Tol, false)
+		res, err := controllabilityStaircaseFloor(A, B, C, opts.Tol, floor, false)
 		if err != nil {
 			return nil, fmt.Errorf("Reduce: %w", err)
 		}
-		A = res.A
-		B = res.B
-		C = res.C
 		ncont = res.NCont
+		// Nothing removed: the rotation would only turn exact zeros the
+		// observability stage needs into rounding noise.
+		if ncont < n || opts.Mode == ReduceUncontrollable {
+			A = res.A
+			B = res.B
+			C = res.C
+		}
 	}
 
 	nr := ncont
@@ -114,7 +133,7 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 			ccT := transposeDenseInto(slab1[ncont*ncont:ncont*ncont+ncont*p], cc)
 			bcT := transposeDenseInto(slab1[ncont*ncont+ncont*p:], bc)
 
-			dualRes, err := controllabilityStaircase(acT, ccT, bcT, opts.Tol, false)
+			dualRes, err := controllabilityStaircaseFloor(acT, ccT, bcT, opts.Tol, floor, false)
 			if err != nil {
 				return nil, fmt.Errorf("Reduce: %w", err)
 			}
@@ -150,6 +169,7 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	ar := extractSubmatrix(A, 0, nr, 0, nr)
 	br := extractSubmatrix(B, 0, nr, 0, m)
 	cr := extractSubmatrix(C, 0, p, 0, nr)
+	ldexpIO(br, cr, inExp, outExp, -1)
 	dr := denseCopySafe(sys.D, p, m)
 
 	reduced, err := policy.result(ar, br, cr, dr)
@@ -205,6 +225,76 @@ func reduceInternalDelay(sys *System, policy realizationTransformPolicy, opts *R
 // tolerance; use Reduce to set Tol.
 func (sys *System) MinimalRealization() (*ReduceResult, error) {
 	return sys.Reduce(nil)
+}
+
+// reduceIOExponents returns power-of-two exponents for each column of B
+// and row of C that bring its max-abs entry to the binary exponent of
+// ‖A‖_F (of 1 when A = 0). Input and output scaling leave the reachable
+// and unobservable subspaces unchanged, so the rank decisions become
+// invariant to it and a tiny but nonzero B or C is not dropped against ‖A‖.
+// Only the raw model is scaled: a rotated remnant's small column is noise.
+func reduceIOExponents(A, B, C *mat.Dense) (inExp, outExp []int) {
+	_, m := B.Dims()
+	p, _ := C.Dims()
+	target := frobNorm(A)
+	if target == 0 {
+		target = 1
+	}
+	if math.IsInf(target, 0) || math.IsNaN(target) {
+		return nil, nil
+	}
+	_, te := math.Frexp(target)
+	exps := make([]int, m+p)
+	inExp, outExp = exps[:m], exps[m:]
+	shift := func(mx float64) int {
+		if mx == 0 {
+			return 0
+		}
+		_, e := math.Frexp(mx)
+		return min(te, 1000) - e
+	}
+	bRaw, cRaw := B.RawMatrix(), C.RawMatrix()
+	for j := range m {
+		mx := 0.0
+		for i := range bRaw.Rows {
+			mx = math.Max(mx, math.Abs(bRaw.Data[i*bRaw.Stride+j]))
+		}
+		inExp[j] = shift(mx)
+	}
+	for i := range p {
+		mx := 0.0
+		for _, v := range cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+cRaw.Cols] {
+			mx = math.Max(mx, math.Abs(v))
+		}
+		outExp[i] = shift(mx)
+	}
+	return inExp, outExp
+}
+
+// ldexpIO scales column j of B by 2^(sign·inExp[j]) and row i of C by
+// 2^(sign·outExp[i]) in place.
+func ldexpIO(B, C *mat.Dense, inExp, outExp []int, sign int) {
+	if inExp == nil {
+		return
+	}
+	bRaw, cRaw := B.RawMatrix(), C.RawMatrix()
+	for i := range bRaw.Rows {
+		row := bRaw.Data[i*bRaw.Stride : i*bRaw.Stride+bRaw.Cols]
+		for j, e := range inExp {
+			if e != 0 {
+				row[j] = math.Ldexp(row[j], sign*e)
+			}
+		}
+	}
+	for i, e := range outExp {
+		if e == 0 {
+			continue
+		}
+		row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+cRaw.Cols]
+		for k := range row {
+			row[k] = math.Ldexp(row[k], sign*e)
+		}
+	}
 }
 
 func zeroOrderResult(sys *System) (*ReduceResult, error) {

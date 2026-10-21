@@ -164,7 +164,13 @@ func descriptorZeros(sys *System) (*ZerosResult, error) {
 // else the finite eigenvalues of the staircase-reduced pencil of the
 // balanced model (prescaledStaircaseZeros). For square models the zeros
 // those may have computed inaccurately are then refined against the exact
-// pencil (refineZeros). eig(A − B·D⁻¹·C) is backward stable for
+// pencil (refineZeros): those below ε·max(‖zs‖, ‖sys‖)/zeroRefineTol, and
+// all of them when the scaling shrank the pencil norm by more than
+// zeroRefineAllRatio, since that leaves zeros of any modulus with errors
+// well above ε·‖sys‖; for non-square ones with outputs (inputs) dependent
+// to rounding, the zeros of the square model without them replace the
+// staircase ones when at least as many pass zeroBackwardOK
+// (squareDownZeros). eig(A − B·D⁻¹·C) is backward stable for
 // M = A − B·D⁻¹·C, so its zeros carry an absolute error of about
 // ε·(‖A‖ + ‖B‖‖D⁻¹C‖), which swamps zeros small against ‖B·D⁻¹·C‖; when such
 // a zero cannot be refined, the staircase zeros of that size, accurate to
@@ -192,9 +198,16 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 		return nil, err
 	}
 	if m == p && rank == m && len(zeros) > 0 {
-		scale := pencilNorm(zs)
-		tol := eps() * scale / zeroRefineTol
-		refineZeros(zs, zeros, scale, func(az float64) bool { return az < tol || az > scale })
+		scale, raw := pencilNorm(zs), pencilNorm(sys)
+		tol := eps() * math.Max(scale, raw) / zeroRefineTol
+		huge := math.Min(scale, raw)
+		all := raw > zeroRefineAllRatio*scale
+		refineZeros(zs, zeros, scale, func(az float64) bool { return all || az < tol || az > huge })
+	}
+	if m != p && rank == min(m, p) {
+		if sq, err := squareDownZeros(sys, zs, rank); err == nil && len(sq) > 0 && len(sq) >= countBackwardOK(zs, zeros, rank) {
+			zeros = sq
+		}
 	}
 	sortZeros(zeros)
 	return &ZerosResult{Zeros: zeros, Rank: rank}, nil
@@ -255,34 +268,31 @@ func hybridZeros(sys *System, zeros []complex128, scale, tol float64, failed int
 // compare with ε·‖[A B; C D]‖, which often recovers zeros the unbalanced
 // reduction loses, but it can also lift the roundoff in a block that is
 // exactly zero above that threshold, or amplify it through a nearly
-// singular D and then clear the threshold by a wide margin. So the unscaled
-// reduction of sys is used when a decision on zs came within rankMarginMin
-// of its threshold. Within rankMarginTrust, unless zs is square of full
-// normal rank (whose zeros mimoZeros refines on the exact pencil), when the
-// two reductions disagree on the pencil order or normal rank, the set with
-// more zeros passing zeroBackwardOK on sys wins, ties going to the unscaled
-// one.
+// singular D and then clear the threshold by a wide margin. So when a
+// decision on zs came within rankMarginMin of its threshold, or within
+// rankMarginTrust and the reductions disagree on the pencil order or
+// normal rank (unless zs is square of full normal rank, whose zeros
+// mimoZeros refines on the exact pencil), the unscaled reduction of sys
+// competes: the set with more zeros passing zeroBackwardOK on zs wins, then
+// the one with fewer clearly not zeros (classifyBackward), then the
+// unscaled one unless its smallest margin is below that of zs. The test
+// uses the larger of the two normal ranks unless the pencil at a generic
+// point already passes it.
 func prescaledStaircaseZeros(sys, zs *System) ([]complex128, int, error) {
 	pre := reduceStaircase(zs)
 	if zs == sys {
 		z, err := pre.zeros()
 		return z, pre.rank, err
 	}
-	if pre.margin < rankMarginMin {
-		z, rank, _, err := staircaseZeros(sys)
-		if err == nil {
-			return z, rank, nil
-		}
-		z, err = pre.zeros()
-		return z, pre.rank, err
-	}
 	_, m, p := sys.Dims()
-	if pre.margin >= rankMarginTrust || m == p && pre.rank == m {
+	low := pre.margin < rankMarginMin
+	if !low && (pre.margin >= rankMarginTrust || m == p && pre.rank == m) {
 		z, err := pre.zeros()
 		return z, pre.rank, err
 	}
 	raw := reduceStaircase(sys)
-	if raw.nu == pre.nu && raw.rank == pre.rank {
+	preferRaw := !low || raw.margin >= pre.margin
+	if !low && raw.nu == pre.nu && raw.rank == pre.rank {
 		z, err := pre.zeros()
 		return z, pre.rank, err
 	}
@@ -296,11 +306,107 @@ func prescaledStaircaseZeros(sys, zs *System) ([]complex128, int, error) {
 	case errPre != nil:
 		return zr, raw.rank, nil
 	}
-	rank := min(raw.rank, pre.rank)
-	if countBackwardOK(sys, zp, rank) > countBackwardOK(sys, zr, rank) {
+	rank := max(raw.rank, pre.rank)
+	if zeroBackwardOK(zs, complex(0.31, 0.83)*complex(pencilNorm(zs), 0), rank) {
+		rank = min(raw.rank, pre.rank)
+	}
+	okP, badP := classifyBackward(zs, zp, rank)
+	okR, badR := classifyBackward(zs, zr, rank)
+	if okP > okR || okP == okR && (badP < badR || badP == badR && !preferRaw) {
 		return zp, pre.rank, nil
 	}
 	return zr, raw.rank, nil
+}
+
+// squareDownZeros returns, when all but r rows of the I/O-scaled [C D] of
+// zs (columns of [B; D] when m > p) are combinations of the other r to
+// within rounding, the zeros of the square model keeping those r that pass
+// zeroBackwardOK on zs. The tall pencil then has the zeros of the square
+// one, and selecting rows rounds nothing, so an exactly dependent output
+// (input) costs no accuracy, unlike the staircase's elimination of it
+// through a nearly singular D.
+func squareDownZeros(sys, zs *System, r int) ([]complex128, error) {
+	n, m, p := zs.Dims()
+	a, b, c, d := zs.A, zs.B, zs.C, zs.D
+	if m > p {
+		a, b, c, d = mat.DenseCopyOf(a.T()), mat.DenseCopyOf(c.T()), mat.DenseCopyOf(b.T()), mat.DenseCopyOf(d.T())
+		m, p = p, m
+	}
+	rows := dependentRowBasis(c, d, n, m, p, r)
+	if rows == nil {
+		return nil, nil
+	}
+	cs, ds := mat.NewDense(r, n, nil), mat.NewDense(r, m, nil)
+	for k, i := range rows {
+		cs.SetRow(k, c.RawRowView(i))
+		ds.SetRow(k, d.RawRowView(i))
+	}
+	res, err := mimoZeros(&System{A: a, B: b, C: cs, D: ds, Dt: sys.Dt})
+	if err != nil || res.Rank != r {
+		return nil, err
+	}
+	var out []complex128
+	for _, z := range res.Zeros {
+		if zeroBackwardOK(zs, z, r) {
+			out = append(out, z)
+		}
+	}
+	return out, nil
+}
+
+// rowDependentTol is the residual, relative to the largest row norm and in
+// units of (n+m)·ε, below which dependentRowBasis counts a row of [C D] as
+// a combination of the chosen ones. Rows dependent up to the rounding of
+// their entries leave a residual below about 1.5 in these units; a looser
+// bound squares down models whose extra row is only nearly dependent and
+// returns zeros of the square model the tall pencil lacks.
+const rowDependentTol = 2
+
+// dependentRowBasis picks r rows of the p×(n+m) matrix [C D] by
+// Gram–Schmidt with largest-residual pivoting and returns them when every
+// other row's residual is within rowDependentTol, else nil.
+func dependentRowBasis(c, d *mat.Dense, n, m, p, r int) []int {
+	w := n + m
+	q := make([]float64, p*w)
+	var nmax float64
+	bl := blas64.Implementation()
+	for i := range p {
+		copy(q[i*w:i*w+n], c.RawRowView(i))
+		copy(q[i*w+n:(i+1)*w], d.RawRowView(i))
+		nmax = math.Max(nmax, bl.Dnrm2(w, q[i*w:(i+1)*w], 1))
+	}
+	tol := rowDependentTol * float64(w) * eps() * nmax
+	used := make([]bool, p)
+	rows := make([]int, 0, r)
+	for k := 0; k <= r; k++ {
+		best, bn := -1, 0.0
+		for i := range p {
+			if !used[i] {
+				if v := bl.Dnrm2(w, q[i*w:(i+1)*w], 1); v > bn {
+					best, bn = i, v
+				}
+			}
+		}
+		if k == r {
+			if bn > tol {
+				return nil
+			}
+			return rows
+		}
+		if !(bn > tol) {
+			return nil
+		}
+		used[best] = true
+		rows = append(rows, best)
+		qb := q[best*w : (best+1)*w]
+		for i := range p {
+			if !used[i] {
+				qi := q[i*w : (i+1)*w]
+				bl.Daxpy(w, -bl.Ddot(w, qi, 1, qb, 1)/(bn*bn), qb, 1, qi, 1)
+			}
+		}
+	}
+	return rows
 }
 
 // staircase is the reduced pencil s·bf − af of order nu from zerosStaircase.
@@ -317,13 +423,24 @@ func reduceStaircase(sys *System) staircase {
 }
 
 func countBackwardOK(sys *System, zeros []complex128, rank int) int {
-	var k int
+	ok, _ := classifyBackward(sys, zeros, rank)
+	return ok
+}
+
+// classifyBackward counts the zeros passing zeroBackwardOK and those
+// clearly not zeros (ratio above zeroNotZeroRatio).
+func classifyBackward(sys *System, zeros []complex128, rank int) (ok, bad int) {
+	n, m, p := sys.Dims()
+	tol := zeroBackwardTol * math.Sqrt(float64((n+p)*(n+m))) * eps()
 	for _, z := range zeros {
-		if zeroBackwardOK(sys, z, rank) {
-			k++
+		switch r := zeroBackwardRatio(sys, z, rank); {
+		case r <= tol:
+			ok++
+		case r > zeroNotZeroRatio:
+			bad++
 		}
 	}
-	return k
+	return ok, bad
 }
 
 // zeroBackwardTol bounds σ_{n+rank}(P(z))/σ₁(P(z)) in zeroBackwardOK, in
@@ -336,10 +453,21 @@ const zeroBackwardTol = 1e3
 // values are those of P(z), each twice.
 func zeroBackwardOK(sys *System, z complex128, rank int) bool {
 	n, m, p := sys.Dims()
+	return zeroBackwardRatio(sys, z, rank) <= zeroBackwardTol*math.Sqrt(float64((n+p)*(n+m)))*eps()
+}
+
+// zeroNotZeroRatio is the σ_{n+rank}(P(z))/σ₁(P(z)) above which z is
+// clearly not a zero, whatever its conditioning.
+const zeroNotZeroRatio = 1e-6
+
+// zeroBackwardRatio returns σ_{n+rank}(P(z))/σ₁(P(z)), +Inf when the rank
+// is out of range or the SVD fails.
+func zeroBackwardRatio(sys *System, z complex128, rank int) float64 {
+	n, m, p := sys.Dims()
 	r, c := n+p, n+m
 	k := n + rank
 	if k <= 0 || k > min(r, c) {
-		return false
+		return math.Inf(1)
 	}
 	R := mat.NewDense(2*r, 2*c, nil)
 	raw := R.RawMatrix()
@@ -369,10 +497,13 @@ func zeroBackwardOK(sys *System, z complex128, rank int) bool {
 	}
 	var svd mat.SVD
 	if !svd.Factorize(R, mat.SVDNone) {
-		return false
+		return math.Inf(1)
 	}
 	sv := svd.Values(nil)
-	return sv[2*k-1] <= zeroBackwardTol*math.Sqrt(float64(r*c))*eps()*sv[0]
+	if !(sv[0] > 0) {
+		return math.Inf(1)
+	}
+	return sv[2*k-1] / sv[0]
 }
 
 // rankMarginTrust is the margin above which the balanced reduction is used
@@ -437,16 +568,120 @@ func (st staircase) zeros() ([]complex128, error) {
 
 // zerosPrescale returns sys after the exact power-of-two state scaling of
 // the frequency solvers (balance, SLICOT TB01ID as AB08ND with EQUIL = 'S'
-// applies), which leaves the zeros unchanged; sys itself when the scaling
-// is the identity.
+// applies) alternated with power-of-two input and output scaling
+// (scaleIO), all of which leave the zeros unchanged; sys itself when the
+// scaling is the identity. Without the I/O scaling a model with ‖B‖ small
+// and ‖C‖ large (or a D swamped by them) keeps blocks below the staircase
+// rank tolerance ε·‖[A B; C D]‖ however its states are scaled.
 func zerosPrescale(sys *System) *System {
 	n, m, p := sys.Dims()
 	br := newBalancedRealization(sys, n, m, p)
-	zs := &System{A: mat.NewDense(n, n, br.a), B: mat.NewDense(n, m, br.b), C: mat.NewDense(p, n, br.c), D: sys.D, Dt: sys.Dt}
-	if mat.Equal(zs.A, sys.A) && mat.Equal(zs.B, sys.B) && mat.Equal(zs.C, sys.C) {
+	D := sys.D
+	if n > 0 && m > 0 && p > 0 {
+		d := make([]float64, p*m)
+		raw := sys.D.RawMatrix()
+		copyStrided(d, m, raw.Data, raw.Stride, p, m)
+		for range 4 {
+			if !scaleIO(&br, d) {
+				break
+			}
+			br.balance(nil)
+		}
+		D = mat.NewDense(p, m, d)
+	}
+	zs := &System{A: mat.NewDense(n, n, br.a), B: mat.NewDense(n, m, br.b), C: mat.NewDense(p, n, br.c), D: D, Dt: sys.Dt}
+	if mat.Equal(zs.A, sys.A) && mat.Equal(zs.B, sys.B) && mat.Equal(zs.C, sys.C) && mat.Equal(zs.D, sys.D) {
 		return sys
 	}
 	return zs
+}
+
+// scaleIO scales each input column of [B; D] (output row of [C D]) by the
+// power of two bringing its largest entry nearest the geometric mean of
+// those of the state columns of [A; C] (rows of [A B]), and reports
+// whether any factor differed from 1.
+func scaleIO(br *balancedRealization, d []float64) bool {
+	n, m, p := br.n, br.m, br.p
+	var colSum, rowSum, nc, nr int
+	for k := range n {
+		var cs, rs float64
+		for i := range n {
+			cs = math.Max(cs, math.Abs(br.a[i*n+k]))
+			rs = math.Max(rs, math.Abs(br.a[k*n+i]))
+		}
+		for i := range p {
+			cs = math.Max(cs, math.Abs(br.c[i*n+k]))
+		}
+		for j := range m {
+			rs = math.Max(rs, math.Abs(br.b[k*m+j]))
+		}
+		if e, ok := binaryExp(cs); ok {
+			colSum += e
+			nc++
+		}
+		if e, ok := binaryExp(rs); ok {
+			rowSum += e
+			nr++
+		}
+	}
+	if nc == 0 || nr == 0 {
+		return false
+	}
+	changed := false
+	colT, rowT := colSum/nc, rowSum/nr
+	for j := range m {
+		var s float64
+		for i := range n {
+			s = math.Max(s, math.Abs(br.b[i*m+j]))
+		}
+		for i := range p {
+			s = math.Max(s, math.Abs(d[i*m+j]))
+		}
+		e, ok := binaryExp(s)
+		if !ok || e == colT {
+			continue
+		}
+		changed = true
+		f := math.Ldexp(1, max(-500, min(500, colT-e)))
+		for i := range n {
+			br.b[i*m+j] *= f
+		}
+		for i := range p {
+			d[i*m+j] *= f
+		}
+	}
+	for i := range p {
+		var s float64
+		for j := range n {
+			s = math.Max(s, math.Abs(br.c[i*n+j]))
+		}
+		for j := range m {
+			s = math.Max(s, math.Abs(d[i*m+j]))
+		}
+		e, ok := binaryExp(s)
+		if !ok || e == rowT {
+			continue
+		}
+		changed = true
+		f := math.Ldexp(1, max(-500, min(500, rowT-e)))
+		for j := range n {
+			br.c[i*n+j] *= f
+		}
+		for j := range m {
+			d[i*m+j] *= f
+		}
+	}
+	return changed
+}
+
+// binaryExp returns the exponent e with x in [2^(e-1), 2^e) for finite
+// positive x.
+func binaryExp(x float64) (int, bool) {
+	if !(x > 0) || math.IsInf(x, 0) {
+		return 0, false
+	}
+	_, e := math.Frexp(x)
+	return e, true
 }
 
 // pencilNorm returns ‖[A B; C D]‖_F.
@@ -547,6 +782,13 @@ func refineZeros(sys *System, zeros []complex128, scale float64, sel func(az flo
 // zeroRefineTol is the estimated relative error above which
 // refineZeros polishes a zero.
 const zeroRefineTol = 1e-12
+
+// zeroRefineAllRatio is the ‖sys‖/‖zs‖ above which mimoZeros refines every
+// staircase zero of a square model. In sweeps of strongly scaled square
+// models, unrefined zeros at ratios down to 256 came out 100× less accurate
+// than without I/O scaling, none below 64; well-scaled models skip the
+// extra cost.
+const zeroRefineAllRatio = 16
 
 // zeroRefiner runs Newton's method on P(s)w = 0, P(s) = [sI−A −B; C D],
 // with w_k = 1 for the largest entry of the initial inverse-iteration

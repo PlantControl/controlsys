@@ -714,9 +714,6 @@ func fzPidCheckTune(t *testing.T, s *fzSpec, sys *System, family PidtuneType, wc
 	fzPidCheckEvidence(t, name, pl, pl.respExact, pl.respHorner, nil, "", c, res.Evidence)
 	switch res.Evidence.Stability {
 	case PIDStabilityClosedLoopPoles, PIDStabilityNyquist:
-		if v, _ := fzPidClosedLoop(pl, c); v == fzPidUnstable && pl.lag >= 3 && c.kd != 0 && c.tf == 0 {
-			fzSkip(t, name+": ideal-derivative screen on a delay-absorbed discrete plant uses a collapsed TransferFunction (followup)")
-		}
 		fzPidCheckStable(t, name, pl, c)
 	case PIDStabilitySampledOnly:
 	default:
@@ -796,7 +793,12 @@ func fzPidCheckFRD(t *testing.T, s *fzSpec, sys *System, family PidtuneType, wc,
 		t.Fatalf("%s: bad controller %+v", name, res.Controller)
 	}
 	g := fzPidInterp(frd)
-	fzPidCheckEvidence(t, name, pl, g, g, frd.Omega, "TunePIDFRD evidence misses a crossing the samples resolve (followup)", c, res.Evidence)
+	fzPidCheckEvidence(t, name, pl, g, g, frd.Omega, "", c, res.Evidence)
+	for i, m := range res.Evidence.PhaseMargins {
+		if res.Evidence.AchievedPhaseMargin > m+1e-9 {
+			t.Fatalf("%s: achieved margin %.9g above %.9g at crossing %g", name, res.Evidence.AchievedPhaseMargin, m, res.Evidence.GainCrossovers[i])
+		}
+	}
 }
 
 func FuzzPidtune(f *testing.F) {
