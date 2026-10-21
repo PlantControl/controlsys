@@ -30,6 +30,11 @@ const NormH2 = 2
 // peak is computed as HinfNorm describes, stable or not; it is +Inf when the
 // characteristic function det(sI−A)·det(I − H22(s)Δ(s)) has a root on the
 // imaginary axis, which like the rational case counts hidden modes.
+//
+// A descriptor model with nonsingular E is reduced to (E⁻¹A, E⁻¹B, C, D),
+// which has the same transfer function and poles. Singular E, or E whose
+// condition estimate exceeds 1/√eps, returns ErrDescriptorUnsupported
+// wrapping ErrDescriptorSingular. The same holds for H2Norm and HinfNorm.
 func Norm(sys *System, normType float64) (float64, error) {
 	if err := requireSystem("Norm", sys); err != nil {
 		return 0, err
@@ -54,19 +59,20 @@ func Norm(sys *System, normType float64) (float64, error) {
 // through internal delays, the H2 norm is infinite. Input, output and I/O
 // delays do not change the H2 norm. Discrete internal delays are absorbed
 // exactly; continuous strictly proper internal-delay models return
-// ErrContinuousInternalDelay.
+// ErrContinuousInternalDelay. Descriptor models are handled as in Norm.
 func H2Norm(sys *System) (float64, error) {
 	if err := requireSystem("H2Norm", sys); err != nil {
 		return 0, err
 	}
-	if err := newDescriptorPolicy(sys).requireStandard("H2Norm"); err != nil {
+	sys, err := normExplicitForm(sys, "H2Norm")
+	if err != nil {
 		return 0, err
 	}
 	if sys.HasInternalDelay() && sys.IsContinuous() &&
 		(!allZeroDense(sys.D) || lftHasDirectFeedthrough(sys.LFT)) {
 		return math.Inf(1), nil
 	}
-	sys, err := finiteDimensionalModel(sys, "H2Norm")
+	sys, err = finiteDimensionalModel(sys, "H2Norm")
 	if err != nil {
 		return 0, err
 	}
@@ -259,7 +265,7 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 // model.
 //
 // Input, output and I/O delays do not change the norm. Discrete internal
-// delays are absorbed exactly.
+// delays are absorbed exactly. Descriptor models are handled as in Norm.
 //
 // Continuous internal delays leave infinitely many poles, the roots of the
 // entire function χ(s) = det(sI−A)·det(I − H22(s)Δ(s)), with
@@ -292,7 +298,8 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 	if err := requireSystem("HinfNorm", sys); err != nil {
 		return 0, 0, err
 	}
-	if err := newDescriptorPolicy(sys).requireStandard("HinfNorm"); err != nil {
+	sys, err = normExplicitForm(sys, "HinfNorm")
+	if err != nil {
 		return 0, 0, err
 	}
 	if sys.IsContinuous() && sys.HasInternalDelay() {
@@ -337,7 +344,8 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 // frequency at which it occurs. Poles on the stability boundary give +Inf at
 // the frequency of that pole.
 func linfNorm(sys *System) (norm float64, omega float64, err error) {
-	if err := newDescriptorPolicy(sys).requireStandard("Norm"); err != nil {
+	sys, err = normExplicitForm(sys, "Norm")
+	if err != nil {
 		return 0, 0, err
 	}
 	if sys.IsContinuous() && sys.HasInternalDelay() {

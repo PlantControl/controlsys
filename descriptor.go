@@ -73,6 +73,35 @@ func (p descriptorPolicy) requireStandard(context string) error {
 	return fmt.Errorf("%s: %w", context, ErrDescriptorUnsupported)
 }
 
+// normDescriptorCondLimit is the largest 1-norm condition estimate of E for
+// which the norm routines fold E into the state equation; beyond 1/√eps the
+// explicit model E⁻¹A, E⁻¹B can lose half the significant digits.
+var normDescriptorCondLimit = 1 / math.Sqrt(eps())
+
+// normExplicitForm returns sys with a nonsingular E folded in, (E⁻¹A, E⁻¹B,
+// C, D), which keeps the transfer function and the poles. Singular E and E
+// with condition above normDescriptorCondLimit return ErrDescriptorUnsupported
+// wrapping ErrDescriptorSingular.
+func normExplicitForm(sys *System, context string) (*System, error) {
+	if !sys.IsDescriptor() {
+		return sys, nil
+	}
+	if err := requireFiniteDense(context, "E", sys.E); err != nil {
+		return nil, err
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	if cond := lu.Cond(); luNearSingular(&lu) || !(cond <= normDescriptorCondLimit) {
+		return nil, fmt.Errorf("%s: cond(E) ≈ %.3g exceeds %.3g: %w: %w",
+			context, cond, normDescriptorCondLimit, ErrDescriptorUnsupported, ErrDescriptorSingular)
+	}
+	out, err := sys.ToExplicit()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
+	}
+	return out, nil
+}
+
 // requireNonsingular rejects a singular E, as MATLAB lqr, lqi, icare and
 // idare require nonsingular E.
 func (p descriptorPolicy) requireNonsingular(context string) error {
