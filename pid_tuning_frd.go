@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -63,7 +64,54 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 	}
 	p := pidTuningFRDPlant(data, o.UnstablePoles)
 	p.warnings = warnings
-	return tunePID(ctx, "TunePIDFRD", p, family, o)
+	res, err := tunePID(ctx, "TunePIDFRD", p, family, o)
+	if err != nil {
+		return res, err
+	}
+	return pidTuningFRDBounded(ctx, p, family, o, res), nil
+}
+
+// pidTuningFRDBounded returns res, or, when its sampled |S| peak exceeds
+// pidTuningMaxSensitivity on data the Nyquist count certifies (p.dcGain
+// nonzero), the design of a search under that bound, first at the target
+// band and then with the margin as a floor, as TunePID's. When neither
+// finds one within the evaluations left, res is kept with a warning: a
+// hard bound turns stable designs into errors. The floor's crossing band
+// is the measured one, as the data have no model beyond it.
+func pidTuningFRDBounded(ctx context.Context, p pidTuningPlant, family PidtuneType, o PIDTuningOptions, res *PIDTuningResult) *PIDTuningResult {
+	p.maxSensitivity = pidTuningMaxSensitivity
+	p.crossLow, p.crossHigh = p.low, p.high
+	peak := pidTuningSensitivityPeak(p, *res.Controller)
+	if !(peak > pidTuningMaxSensitivity) {
+		return res
+	}
+	budget := o.MaxEvaluations
+	if budget == 0 {
+		budget = 4096
+	}
+	used := res.Evidence.Evaluations
+	if p.dcGain != 0 {
+		for _, tune := range []func(context.Context, string, pidTuningPlant, PidtuneType, PIDTuningOptions) (*PIDTuningResult, error){tunePID, tunePIDFloor} {
+			if used >= budget {
+				break
+			}
+			q := o
+			q.MaxEvaluations = budget - used
+			r, err := tune(ctx, "TunePIDFRD", p, family, q)
+			if err == nil {
+				r.Evidence.Evaluations += used
+				return r
+			}
+			te, ok := errors.AsType[*PIDTuningError](err)
+			if !ok {
+				break
+			}
+			used += te.Evidence.Evaluations
+		}
+	}
+	res.Evidence.Evaluations = used
+	res.Evidence.Warnings = append(res.Evidence.Warnings, fmt.Sprintf("Sampled sensitivity peak %.4g exceeds %g; no design within that bound was found at the target or with the margin as a floor.", peak, float64(pidTuningMaxSensitivity)))
+	return res
 }
 
 // pidTuningFRDPlant is the tuning plant of sampled data it owns.
