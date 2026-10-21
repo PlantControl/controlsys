@@ -13,7 +13,9 @@ import (
 // interpolates complex responses in log frequency and never extrapolates or
 // invents a time-domain realization. Pole knowledge is recorded, not treated as
 // sufficient evidence for global stability outside the measured frequency band.
-// Errors follow TunePID.
+// A design whose sampled |S| peak exceeds 4 is searched for again under that
+// bound when the sampled Nyquist count certifies candidates, and is otherwise
+// kept with a warning. Errors follow TunePID.
 func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("TunePIDFRD: nil context: %w", ErrInvalidArgument)
@@ -110,7 +112,11 @@ func pidTuningFRDBounded(ctx context.Context, p pidTuningPlant, family PidtuneTy
 		}
 	}
 	res.Evidence.Evaluations = used
-	res.Evidence.Warnings = append(res.Evidence.Warnings, fmt.Sprintf("Sampled sensitivity peak %.4g exceeds %g; no design within that bound was found at the target or with the margin as a floor.", peak, float64(pidTuningMaxSensitivity)))
+	why := "no design within that bound was found at the target or with the margin as a floor"
+	if p.dcGain == 0 {
+		why = "the sampled Nyquist count cannot certify designs on these data, so no bounded search was made"
+	}
+	res.Evidence.Warnings = append(res.Evidence.Warnings, fmt.Sprintf("Sampled sensitivity peak %.4g exceeds %g; %s.", peak, float64(pidTuningMaxSensitivity), why))
 	return res
 }
 
