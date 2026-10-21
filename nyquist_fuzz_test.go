@@ -132,6 +132,9 @@ func fzFRCheckNyquist(t *testing.T, s *fzSpec, sys *System, ws []float64, fr *Fr
 		if errors.Is(err, ErrSingularTransform) && !decided {
 			fzSkip(t, "Nyquist: closed loop or poles on the stability boundary")
 		}
+		if errors.Is(err, ErrDelayUnsupported) && !decided {
+			fzSkip(t, "Nyquist: delay winding beyond the sample budget")
+		}
 		t.Fatalf("Nyquist: %v (closed-loop count %d decided)\n%s", err, z, s)
 	}
 	if !fzFRBitEqual(res.Contour, fr.Data) {
@@ -189,9 +192,6 @@ func fzFRCheckNyquist(t *testing.T, s *fzSpec, sys *System, ws []float64, fr *Fr
 		return
 	}
 	if res.RHPZerosCL != z {
-		if pl.dt == 0 && pl.tau > 0 && pl.tau*fzNyqGainRadius(fzPidRatFloats(pl.num), fzPidRatFloats(pl.den), 1) > 12 {
-			fzSkip(t, "known: Nyquist aliases delay windings where |L| > 1 and ωτ grows past the log-grid step")
-		}
 		t.Fatalf("Nyquist RHPZerosCL %d (Encirclements %d, RHPPoles %d), exact closed-loop count %d\n%s", res.RHPZerosCL, res.Encirclements, res.RHPPoles, z, s)
 	}
 }

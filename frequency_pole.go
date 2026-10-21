@@ -368,12 +368,25 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 // once; descriptor models off the plain point solve it as
 // c·(pE + qA − c·B2·K·C2)⁻¹, c = −q, with the point's exact p and q. Unlike
 // the H-then-LFT form it stays regular at poles of the delay-free plant that
-// the delay loop moves, such as an integrator inside it.
+// the delay loop moves, such as an integrator inside it. Where a pivot of
+// the solve is below 1/refineCondition of the pencil, frozenRefine refines
+// it against the factored loop.
 func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error {
 	br := &ws.bd.balancedRealization
 	n, mN := br.n, m+N
-	K := make([]complex128, N*N)
-	lhs := make([]complex128, N*N)
+	nm := n + m
+	if ws.frozen == nil {
+		ws.frozen = make([]complex128, 2*N*N+N*nm+2*n*n+2*n*m)
+	}
+	buf := ws.frozen
+	clear(buf)
+	take := func(k int) []complex128 {
+		out := buf[:k:k]
+		buf = buf[k:]
+		return out
+	}
+	K, lhs, T, pencil, x := take(N*N), take(N*N), take(N*nm), take(n*n), take(n*m)
+	lu, r := take(n*n), take(n*m)
 	for i := range N {
 		K[i*N+i] = ws.delta[i]
 		for j := range N {
@@ -384,8 +397,6 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error
 	if err := cSolveInPlace(lhs, K, N, N); err != nil {
 		return err
 	}
-	nm := n + m
-	T := make([]complex128, N*nm)
 	for i := range N {
 		for k := range N {
 			kik := K[i*N+k]
@@ -402,8 +413,6 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error
 		}
 	}
 	scaled := !pt.isPlain() && br.e != nil
-	pencil := make([]complex128, n*n)
-	x := make([]complex128, n*m)
 	for i := range n {
 		for j := range n {
 			a := br.a[i*n+j]
@@ -445,8 +454,13 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error
 		}
 	}
 	if n > 0 {
-		if err := cSolveInPlace(pencil, x, n, m); err != nil {
+		copy(lu, pencil)
+		growth, err := cSolveGrowthInPlace(pencil, x, n, m)
+		if err != nil {
 			return err
+		}
+		if growth > refineCondition {
+			ws.frozenRefine(pt, K, lu, x, r, n, p, m, N, scaled)
 		}
 		if scaled {
 			for i := range x {
@@ -471,4 +485,121 @@ func evalFrLFTFrozenInto(ws *lftWorkspace, pt frequencyPoint, N, p, m int) error
 		}
 	}
 	return nil
+}
+
+// frozenRefine refines x, evalFrLFTFrozenInto's solve at pt, against its
+// closed-loop pencil with the loop B2·K·C2 kept factored, given lu, the
+// pencil as formed, to factor. Forming B2·K·C2 rounds the pencil by
+// ε|B2||K||C2|, which next to a closed-loop pole costs ε/d relative accuracy
+// at distance d, where the rank-N loop that the LFT keeps does not.
+func (ws *lftWorkspace) frozenRefine(pt frequencyPoint, K, lu, x, r []complex128, n, p, m, N int, scaled bool) {
+	if ws.frozenPiv == nil {
+		ws.frozenPiv = make([]int, n)
+		ws.frozenLoop = make([]compensatedComplex, 2*N)
+	}
+	piv := ws.frozenPiv
+	if !cLUFactor(lu, piv, n) {
+		return
+	}
+	kappa, mu := complex(1, 0), complex(1, 0)
+	switch {
+	case scaled:
+		mu = pt.scale()
+	case !pt.isPlain() && ws.bd.e == nil:
+		kappa, mu = pt.scale(), pt.scale()
+	}
+	ik := crecip(kappa)
+	for step := range maxRefineSteps {
+		ws.frozenResidual(pt, K, x, r, n, p, m, N, kappa, mu)
+		if kappa != 1 {
+			for i := range r {
+				r[i] *= ik
+			}
+		}
+		cLUSolve(lu, piv, r, n, m)
+		var dMax, xMax float64
+		for i, v := range r {
+			dMax = max(dMax, cabs1(v))
+			xMax = max(xMax, cabs1(x[i]))
+		}
+		if step == 0 && dMax <= refineCondition*eps()*xMax {
+			return
+		}
+		xMax = 0
+		for i, v := range r {
+			x[i] += v
+			xMax = max(xMax, cabs1(x[i]))
+		}
+		if dMax <= refineStop*xMax {
+			return
+		}
+	}
+}
+
+// frozenResidual sets r = κ·B1 − (pE + qA)·x + B2·K·(κ·D21 + μ·C2·x) in
+// compensated arithmetic, κ·r being the residual of evalFrLFTFrozenInto's
+// pencil times κ.
+func (ws *lftWorkspace) frozenResidual(pt frequencyPoint, K, x, r []complex128, n, p, m, N int, kappa, mu complex128) {
+	br := &ws.bd.balancedRealization
+	mN := m + N
+	v, w := ws.frozenLoop[:N], ws.frozenLoop[N:]
+	for j := range m {
+		for l := range N {
+			var cx compensatedComplex
+			for k, c := range br.c[(p+l)*n : (p+l+1)*n] {
+				cx.addProd(complex(c, 0), x[k*m+j])
+			}
+			v[l] = compensatedComplex{}
+			v[l].addScaled(mu, cx)
+			v[l].addProd(kappa, complex(br.d[(p+l)*br.dStride+j], 0))
+		}
+		for k := range N {
+			w[k] = compensatedComplex{}
+			for l := range N {
+				w[k].addScaled(K[k*N+l], v[l])
+			}
+		}
+		for i := range n {
+			var ax, ex compensatedComplex
+			for k, av := range br.a[i*n : (i+1)*n] {
+				ax.addProd(complex(av, 0), x[k*m+j])
+			}
+			if br.e == nil {
+				ex.re.s, ex.im.s = real(x[i*m+j]), imag(x[i*m+j])
+			} else {
+				for k, ev := range br.e[i*n : (i+1)*n] {
+					ex.addProd(complex(ev, 0), x[k*m+j])
+				}
+			}
+			var res compensatedComplex
+			res.addProd(kappa, complex(br.b[i*mN+j], 0))
+			res.addScaled(-pt.p, ex)
+			res.addScaled(-pt.q, ax)
+			for k := range N {
+				if b2 := br.b[i*mN+m+k]; b2 != 0 {
+					res.re.addScaled(b2, w[k].re)
+					res.im.addScaled(b2, w[k].im)
+				}
+			}
+			r[i*m+j] = complex(res.re.value(), res.im.value())
+		}
+	}
+}
+
+// compensatedComplex is a complex compensatedSum.
+type compensatedComplex struct{ re, im compensatedSum }
+
+func (z *compensatedComplex) addProd(a, b complex128) {
+	z.re.addProd(real(a), real(b))
+	z.re.addProd(-imag(a), imag(b))
+	z.im.addProd(real(a), imag(b))
+	z.im.addProd(imag(a), real(b))
+}
+
+// addScaled adds a times the unrounded value of b.
+func (z *compensatedComplex) addScaled(a complex128, b compensatedComplex) {
+	z.re.addScaled(real(a), b.re)
+	z.re.addScaled(-imag(a), b.im)
+	z.im.addScaled(real(a), b.im)
+	z.im.addScaled(imag(a), b.re)
 }
