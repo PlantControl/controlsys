@@ -117,8 +117,9 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 		}
 		ncont = res.NCont
 		// Nothing removed: the rotation would only turn exact zeros the
-		// observability stage needs into rounding noise.
-		if ncont < n || opts.Mode == ReduceUncontrollable {
+		// observability stage needs into rounding noise, and can move
+		// ill-conditioned eigenvalues of a nonnormal A.
+		if ncont < n {
 			A = res.A
 			B = res.B
 			C = res.C

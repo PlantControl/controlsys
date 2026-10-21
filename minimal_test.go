@@ -727,3 +727,52 @@ func TestReduceAllNothingUnobservableKeepsControllableStage(t *testing.T) {
 	}
 	checkMarkovEqual(t, sys, r.Sys, 6, 1e-12)
 }
+
+func TestReduceNothingUncontrollableKeepsModel(t *testing.T) {
+	// 7W5SMD: dual of the SKMDXH model; the controllability rotation alone
+	// moved a pole to +0.94 although no state was removed.
+	A := mat.NewDense(6, 6, []float64{
+		-0.5087841153144836, 1215.225830078125, 45706.16015625, -492944.78125, 4.347984e+06, 1.99592576e+08,
+		0, -4.312069416046143, -43.24891662597656, 268.5675354003906, -3691.8095703125, -125984.5859375,
+		0, 0, -3.1144988536834717, -16.492218017578125, 14.955827713012695, 5161.3505859375,
+		0, 0, 0, -5.1438069343566895, 11.628840446472168, 1188.2021484375,
+		0, 0, 0, 0, -2.0806221961975098, -7.053487777709961,
+		0, 0, 0, 0, 0, -1.6027864217758179,
+	})
+	B := mat.NewDense(6, 1, []float64{0.6, 0.4, -0.9, 1.9, 1, -0.4})
+	C := mat.NewDense(1, 6, []float64{-1.8, -0.5, -0.6, -0.6, -1, 1.9})
+	primal, err := New(A, B, C, mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dual, err := New(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), mat.DenseCopyOf(B.T()), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		sys  *System
+	}{{"primal", primal}, {"dual", dual}} {
+		for _, mode := range []ReduceMode{ReduceAll, ReduceUncontrollable} {
+			res, err := c.sys.Reduce(&ReduceOpts{Mode: mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Order != 6 {
+				t.Fatalf("%s mode %d: order %d, want 6", c.name, mode, res.Order)
+			}
+			if !mat.Equal(res.Sys.A, c.sys.A) || !mat.Equal(res.Sys.B, c.sys.B) || !mat.Equal(res.Sys.C, c.sys.C) {
+				t.Errorf("%s mode %d: minimal model was transformed", c.name, mode)
+			}
+			p, err := res.Sys.Poles()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range p {
+				if real(v) >= 0 {
+					t.Errorf("%s mode %d: pole %v, want diag(A) < 0", c.name, mode, v)
+				}
+			}
+		}
+	}
+}
