@@ -152,7 +152,8 @@ type pidTuningPlant struct {
 	// gain signs are otherwise free, as sampled data's under MATLAB's
 	// default of no unstable poles; highGain is its response at high.
 	// pidTuningDCAdmissible rejects candidates with a real unstable
-	// closed-loop root they imply.
+	// closed-loop root they imply, pidTuningFRDNyquist those the sampled
+	// Nyquist count finds or cannot certify stable.
 	dcGain   float64
 	highGain complex128
 	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
@@ -2108,7 +2109,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	}
 	// crossingAt and crossingMargin describe nearest's worst crossing.
 	var crossingAt, crossingMargin float64
-	returnRejected, dcRejected := false, false
+	returnRejected, dcRejected, nyquistRejected := false, false, false
 	sampledExcess := func(c PID2, returnExcess float64) float64 {
 		if p.maxSensitivity > 0 {
 			return math.Max(returnExcess, pidTuningSensitivityPeak(p, c)-p.maxSensitivity)
@@ -2212,9 +2213,19 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		if !peaked {
 			excess = sampledExcess(candidate, returnExcess)
 		}
-		leastExcess = math.Min(leastExcess, excess)
+		// A loop the sampled Nyquist count finds unstable still moves the
+		// search, as one over the sensitivity bound does, so the path to a
+		// stable optimum through it is kept.
+		nyquist := pidTuningFRDNyquist(candidate, p)
+		if nyquist {
+			leastExcess = math.Min(leastExcess, excess)
+		}
 		if beats() {
 			incumbent, incumbentScore, incumbentExcess = candidate, j, excess
+		}
+		if !nyquist {
+			nyquistRejected = true
+			return nil
 		}
 		if excess > 0 {
 			sensitivityRejected = true
@@ -2351,6 +2362,9 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		}
 		if dcRejected {
 			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target had a real unstable closed-loop root on the stable plant the data are taken to come from (no unstable poles given); such designs are rejected.")
+		}
+		if nyquistRejected {
+			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target encircled −1 on the sampled Nyquist plot, or had not rolled off where the data stop, so the sampled Nyquist count could not certify a stable loop on the stable plant the data are taken to come from (no unstable poles given); such designs are rejected.")
 		}
 		if returnRejected {
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a high-frequency sensitivity 1/(1+Kd·CB) above %g with the ideal derivative; such designs are rejected.", p.maxReturnSensitivity))

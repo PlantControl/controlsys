@@ -45,8 +45,8 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 	}
 	// Own the sampled snapshot while evaluating; callers may reuse their source.
 	data := frd.Copy()
-	low, high := data.Omega[0], data.Omega[len(data.Omega)-1]
 	if o.CrossoverFrequency == 0 {
+		low, high := data.Omega[0], data.Omega[len(data.Omega)-1]
 		o.CrossoverFrequency = math.Exp((math.Log(low) + math.Log(high)) / 2)
 	}
 	warnings := []string{"Finite measured frequency coverage cannot certify global closed-loop stability or provide time responses."}
@@ -61,7 +61,15 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 			break
 		}
 	}
-	p := pidTuningPlant{dt: data.Dt, low: low, high: high, samples: data.Omega, stability: PIDStabilitySampledOnly, warnings: warnings, at: func(w float64) complex128 {
+	p := pidTuningFRDPlant(data, o.UnstablePoles)
+	p.warnings = warnings
+	return tunePID(ctx, "TunePIDFRD", p, family, o)
+}
+
+// pidTuningFRDPlant is the tuning plant of sampled data it owns.
+func pidTuningFRDPlant(data *FRD, unstablePoles *int) pidTuningPlant {
+	low, high := data.Omega[0], data.Omega[len(data.Omega)-1]
+	p := pidTuningPlant{dt: data.Dt, low: low, high: high, samples: data.Omega, stability: PIDStabilitySampledOnly, at: func(w float64) complex128 {
 		// Core-generated endpoints may differ by a few ulps after exp(log(endpoint)).
 		if w <= low {
 			return data.Response[0][0][0]
@@ -76,10 +84,10 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 		alpha := math.Log(w/data.Omega[k-1]) / math.Log(data.Omega[k]/data.Omega[k-1])
 		return complex(1-alpha, 0)*data.Response[k-1][0][0] + complex(alpha, 0)*data.Response[k][0][0]
 	}}
-	if o.UnstablePoles == nil || *o.UnstablePoles == 0 {
+	if unstablePoles == nil || *unstablePoles == 0 {
 		p.dcGain, p.highGain = pidTuningFRDDCGain(data, p.at), p.at(high)
 	}
-	return tunePID(ctx, "TunePIDFRD", p, family, o)
+	return p
 }
 
 // pidTuningFRDDCGain returns the DC gain that sampled data shows, its lowest
@@ -106,4 +114,128 @@ func pidTuningFRDDCGain(data *FRD, at func(float64) complex128) float64 {
 		}
 	}
 	return real(g0)
+}
+
+// pidTuningFRDNyquist reports whether c closes a stable loop on sampled data
+// of a stable plant (p.dcGain nonzero) by the Nyquist count MATLAB pidtune
+// makes with NumUnstablePoles 0, and accepts every c on other data. With no
+// unstable open-loop poles the number of unstable closed-loop roots is
+// −Δ/π, plus ½ with integral action for its indentation at s = 0 (z = 1),
+// where Δ is the phase change of 1 + L along ω from 0⁺ to +∞ (z = −1). The
+// continuous derivative filter pole and the discrete ones (Tf > Dt/2 for
+// forward Euler) are stable, so they add none. Below the band G runs
+// linearly from the DC gain to the lowest sample, between samples along
+// their interpolant, each step bisected until 1 + L turns by under 90°; one
+// that cannot be rejects c, as its |S| is unbounded. Above the band 1 + L
+// ends at 1 once |L| < 1 at the top sample. A discrete top sample within
+// 10% of Nyquist with L within 30° of the real axis instead ends it at
+// 1 + L(z = −1), which is real; Re L is extrapolated there as even in the
+// distance to Nyquist from the top two samples, and an estimate whose sign
+// that step leaves unresolved rejects c. Otherwise |L| >= 1 at the top: a
+// continuous L within 30° of the real axis, as an ideal derivative on a
+// relative-degree-one plant leaves it, ends at 1 + Re L, rejecting c when
+// |1 + L| < 0.1 there; any other end is unknown and rejects c, since the
+// loop has not rolled off where the data stop.
+func pidTuningFRDNyquist(c PID2, p pidTuningPlant) bool {
+	stable, known := pidTuningFRDNyquistCount(c, p)
+	return stable && known || p.dcGain == 0
+}
+
+// pidTuningFRDNyquistCount is pidTuningFRDNyquist with known false where
+// the data leave the end of 1 + L above the band unknown or p.dcGain is 0.
+func pidTuningFRDNyquistCount(c PID2, p pidTuningPlant) (stable, known bool) {
+	if p.dcGain == 0 {
+		return true, false
+	}
+	dc := complex(p.dcGain, 0)
+	gLow := p.at(p.low)
+	at := func(w float64) complex128 {
+		g := gLow
+		if w < p.low {
+			g = dc + (gLow-dc)*complex(w/p.low, 0)
+		} else if w > p.low {
+			g = p.at(w)
+		}
+		return 1 + g*pidTuningFeedback(c, w)
+	}
+	l := p.highGain * pidTuningFeedback(c, p.high)
+	end := complex128(1)
+	nearReal := math.Abs(imag(l)) <= .5*cmplx.Abs(l)
+	nyquist := c.Dt > 0 && p.high*c.Dt >= .9*math.Pi
+	switch {
+	case nyquist && nearReal:
+		w2 := p.samples[len(p.samples)-2]
+		e1, e2 := math.Pi/c.Dt-p.high, math.Pi/c.Dt-w2
+		r1, r2 := real(l), real(p.at(w2)*pidTuningFeedback(c, w2))
+		r0 := (r1*e2*e2 - r2*e1*e1) / (e2*e2 - e1*e1)
+		if !(math.Abs(1+r0) > .5*math.Abs(r0-r1)) {
+			return false, true
+		}
+		end = complex(1+r0, 0)
+	case cmplx.Abs(l) < 1:
+	case !nearReal || c.Dt > 0:
+		return true, false
+	case cmplx.Abs(1+l) < .1:
+		return false, true
+	default:
+		end = complex(1+real(l), 0)
+	}
+	start, expected := complex(1+c.Kp*p.dcGain, 0), 0.
+	w0 := 1e-6 * p.low
+	if c.Ki != 0 {
+		start, expected = complex(0, -c.Ki*p.dcGain), math.Pi/2
+		w0 = 1e-3 * math.Min(p.low, math.Abs(c.Ki*p.dcGain)/(1+math.Abs(c.Kp*p.dcGain)))
+	}
+	if start == 0 || !(w0 > 0) {
+		return false, true
+	}
+	turn := func(a, b complex128) float64 { return cmplx.Phase(b / a) }
+	var walk func(wa, wb float64, fa, fb complex128, depth int) (float64, bool)
+	walk = func(wa, wb float64, fa, fb complex128, depth int) (float64, bool) {
+		if fa == 0 || fb == 0 || !pidFiniteComplex(fa) || !pidFiniteComplex(fb) {
+			return 0, false
+		}
+		d := turn(fa, fb)
+		if math.Abs(d) <= math.Pi/2 {
+			return d, true
+		}
+		if depth == 30 {
+			return 0, false
+		}
+		wm := math.Sqrt(wa * wb)
+		fm := at(wm)
+		d1, ok := walk(wa, wm, fa, fm, depth+1)
+		if !ok {
+			return 0, false
+		}
+		d2, ok := walk(wm, wb, fm, fb, depth+1)
+		return d1 + d2, ok
+	}
+	wPrev, fPrev := w0, at(w0)
+	total := turn(start, fPrev)
+	if !(math.Abs(total) < math.Pi/2) {
+		return false, true
+	}
+	step := func(w float64) bool {
+		f := at(w)
+		d, ok := walk(wPrev, w, fPrev, f, 0)
+		total += d
+		wPrev, fPrev = w, f
+		return ok
+	}
+	for w := w0 * math.Sqrt(10); w < p.low; w *= math.Sqrt(10) {
+		if !step(w) {
+			return false, true
+		}
+	}
+	for _, w := range p.samples {
+		if w > wPrev && !step(w) {
+			return false, true
+		}
+	}
+	if fPrev == 0 {
+		return false, true
+	}
+	total += turn(fPrev, end)
+	return math.Abs(expected-total) < math.Pi/2, true
 }
