@@ -638,17 +638,8 @@ func FuzzC2DMatched(f *testing.F) {
 				}
 			}
 		}
-		known := ""
-		for _, a := range roots {
-			if imag(a) != 0 && math.Sin(math.Abs(imag(a))*dt) < 0 {
-				known = "matched: aliased complex root maps to negative-imag-first pair (ZPK conjugate ordering defect)"
-			}
-		}
 		sd, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
 		fzContract(t, s, "C2D(matched)", sd != nil, err)
-		if err != nil && known != "" {
-			fzSkip(t, known)
-		}
 		fzErr(t, s, "C2D(matched)", err)
 		hc0, ok := fzMats{n, 1, 1, s.A, s.B, s.C, s.D}.resp(0)
 		if !ok {
@@ -716,9 +707,9 @@ func FuzzC2DMatched(f *testing.F) {
 			}
 			want := K * vz
 			tol := (relz + rel1 + ke) * cmplx.Abs(want) * 8
-			fzCompare(t, s, "C2D(matched) vs pole-zero map", z, hg, []complex128{want}, tol, known)
+			fzCompare(t, s, "C2D(matched) vs pole-zero map", z, hg, []complex128{want}, tol, "")
 		}
-		clear := known == "" && s.Decidable()
+		clear := s.Decidable()
 		for i, p := range dp {
 			if !(math.Abs(cmplx.Abs(p)-1) > 1e-6+8*wilk(dp, i)) {
 				clear = false

@@ -343,14 +343,15 @@ func sortConjugatePairs(roots []complex128) []complex128 {
 		if used[i] {
 			continue
 		}
+		partner := cmplx.Conj(r)
 		if imag(r) < 0 {
-			r = cmplx.Conj(r)
+			r = partner
 		}
 		conjR := cmplx.Conj(r)
 		tol := machTol * (1 + cmplx.Abs(r))
 		matched := false
 		for k := i + 1; k < len(cmplx_); k++ {
-			if !used[k] && cmplx.Abs(cmplx_[k]-conjR) < tol {
+			if !used[k] && cmplx.Abs(cmplx_[k]-partner) < tol {
 				used[i] = true
 				used[k] = true
 				matched = true
