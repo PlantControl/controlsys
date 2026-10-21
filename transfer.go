@@ -152,18 +152,22 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // delay (IODelay, InputDelay, OutputDelay) folded into TransferFunc.Delay.
 // Internal (LFT) delays have no TransferFunc form and are rejected.
 //
-// [A B; C ·] is first balanced by an exact power-of-two state similarity,
-// and each input and output scaled by a power of two toward ‖A‖, which
-// removes accuracy loss caused by poor state or I/O scaling (a tiny but
-// nonzero B or C is not dropped as uncontrollable). When that scaling
-// overflows a coefficient the unscaled realization is used, and when
-// coefficients overflow float64 regardless the error is ErrOverflow.
-// The polynomial form itself
-// stays ill-conditioned for high order or wide dynamic range: coefficients
-// of e.g. a 30-state chain spanning 1e-3..1e3 rad/s, or a discrete model
-// with poles clustered near z = 1, can evaluate with O(1) relative error.
-// As MATLAB advises ("Using the Right Model Representation"), evaluate
-// such models with EvalFr/FreqResponse on the state-space form instead.
+// Each output row is converted from the states it structurally sees, as
+// MATLAB tf(ss) applies sminreal per channel, so exactly decoupled states
+// never enter its denominator. [A B; C ·] is then balanced by an exact
+// power-of-two state similarity, and each input and output scaled by a
+// power of two toward ‖A‖, which removes accuracy loss caused by poor state
+// or I/O scaling (a tiny but nonzero B or C is not dropped as
+// uncontrollable) and makes the orders nearly independent of I/O scaling
+// (rounding noise near the rank floor aside). When that scaling overflows
+// a coefficient the unscaled realization is used, and when coefficients
+// overflow float64 regardless the error is ErrOverflow. The polynomial form
+// itself stays ill-conditioned for high order or wide dynamic range:
+// coefficients of e.g. a 30-state chain spanning 1e-3..1e3 rad/s, or a
+// discrete model with poles clustered near z = 1, can evaluate with O(1)
+// relative error. As MATLAB advises ("Using the Right Model
+// Representation"), evaluate such models with EvalFr/FreqResponse on the
+// state-space form instead.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
 	res, err := sys.rationalTransferFunction(opts)
 	if err != nil {
@@ -231,34 +235,273 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return c.result(0), nil
 	}
 
-	order, scaled, err := c.convertBalanced(true)
+	if groups := c.structuralRowGroups(); groups != nil {
+		return c.convertRowGroups(groups)
+	}
+	order, err := c.convertFrom(false)
 	if err != nil {
 		return nil, err
 	}
-	if scaled && !c.finiteCoeffs() {
-		if order, _, err = c.convertBalanced(false); err != nil {
+	if !c.hasZeroDiagonal() && slices.Min(c.rows) == c.n {
+		return c.result(order), nil
+	}
+	check := newTFCheck(c.sys, c.n, c.m, c.p)
+	e0, ok := check.relErr(c.tf)
+	if !ok || e0 <= 1e3*float64(c.n)*eps() {
+		return c.result(order), nil
+	}
+	alt := newRowRealizationConverter(c.sys, c.opts)
+	altOrder, err := alt.convertFrom(true)
+	if err != nil {
+		return c.result(order), nil
+	}
+	if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
+		return alt.result(altOrder), nil
+	}
+	return c.result(order), nil
+}
+
+// rowGroup is a set of output rows that structurally see the same states.
+type rowGroup struct {
+	rows, states []int
+}
+
+// structuralRowGroups groups the output rows by the states each sees
+// structurally: reachable from B and reaching that row of C through the
+// sparsity pattern of A, as MATLAB tf(ss) applies sminreal per channel.
+// Exactly decoupled states are then never left to the rank decisions,
+// whose rotations turn their zeros into noise. It returns nil when every
+// row sees all n states.
+func (c rowRealizationConverter) structuralRowGroups() []rowGroup {
+	n := c.n
+	aRaw, bRaw, cRaw := c.sys.A.RawMatrix(), c.sys.B.RawMatrix(), c.sys.C.RawMatrix()
+	reach := make([]bool, n)
+	queue := make([]int, 0, n)
+	for i := range n {
+		for _, v := range bRaw.Data[i*bRaw.Stride : i*bRaw.Stride+c.m] {
+			if v != 0 {
+				reach[i] = true
+				queue = append(queue, i)
+				break
+			}
+		}
+	}
+	for len(queue) > 0 {
+		j := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		for i := range n {
+			if !reach[i] && aRaw.Data[i*aRaw.Stride+j] != 0 {
+				reach[i] = true
+				queue = append(queue, i)
+			}
+		}
+	}
+	seen := make([]bool, n*c.p)
+	full := true
+	for k := range c.p {
+		obs := seen[k*n : (k+1)*n]
+		for j, v := range cRaw.Data[k*cRaw.Stride : k*cRaw.Stride+n] {
+			if v != 0 {
+				obs[j] = true
+				queue = append(queue, j)
+			}
+		}
+		for len(queue) > 0 {
+			i := queue[len(queue)-1]
+			queue = queue[:len(queue)-1]
+			for j, v := range aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+n] {
+				if !obs[j] && v != 0 {
+					obs[j] = true
+					queue = append(queue, j)
+				}
+			}
+		}
+		for j := range n {
+			obs[j] = obs[j] && reach[j]
+			full = full && obs[j]
+		}
+	}
+	if full {
+		return nil
+	}
+	var groups []rowGroup
+rows:
+	for k := range c.p {
+		obs := seen[k*n : (k+1)*n]
+		for g := range groups {
+			if slices.Equal(obs, seen[groups[g].rows[0]*n:(groups[g].rows[0]+1)*n]) {
+				groups[g].rows = append(groups[g].rows, k)
+				continue rows
+			}
+		}
+		var states []int
+		for j, v := range obs {
+			if v {
+				states = append(states, j)
+			}
+		}
+		groups = append(groups, rowGroup{rows: []int{k}, states: states})
+	}
+	return groups
+}
+
+// convertRowGroups converts each row group from the subsystem of the
+// states it sees.
+func (c rowRealizationConverter) convertRowGroups(groups []rowGroup) (*TransferFuncResult, error) {
+	aRaw, bRaw, cRaw := c.sys.A.RawMatrix(), c.sys.B.RawMatrix(), c.sys.C.RawMatrix()
+	total := 0
+	for _, g := range groups {
+		r, q := len(g.states), len(g.rows)
+		if r == 0 {
+			for _, k := range g.rows {
+				c.tf.Den[k] = []float64{1}
+				c.tf.Num[k] = make([][]float64, c.m)
+				for j := range c.m {
+					c.tf.Num[k][j] = []float64{c.dRaw.Data[k*c.dRaw.Stride+j]}
+				}
+				c.rows[k] = 0
+			}
+			continue
+		}
+		a, b, cm, d := newDense(r, r), newDense(r, c.m), newDense(q, r), newDense(q, c.m)
+		for ii, i := range g.states {
+			for jj, j := range g.states {
+				a.Set(ii, jj, aRaw.Data[i*aRaw.Stride+j])
+			}
+			for j := range c.m {
+				b.Set(ii, j, bRaw.Data[i*bRaw.Stride+j])
+			}
+		}
+		for kk, k := range g.rows {
+			for jj, j := range g.states {
+				cm.Set(kk, jj, cRaw.Data[k*cRaw.Stride+j])
+			}
+			for j := range c.m {
+				d.Set(kk, j, c.dRaw.Data[k*c.dRaw.Stride+j])
+			}
+		}
+		sub, err := newNoCopy(a, b, cm, d, c.sys.Dt)
+		if err != nil {
 			return nil, err
+		}
+		res, err := newRowRealizationConverter(sub, c.opts).convert()
+		if err != nil {
+			return nil, err
+		}
+		for kk, k := range g.rows {
+			c.tf.Num[k] = res.TF.Num[kk]
+			c.tf.Den[k] = res.TF.Den[kk]
+			c.rows[k] = res.RowDegrees[kk]
+		}
+		total += res.MinimalOrder
+	}
+	return c.result(total), nil
+}
+
+// convertFrom fills the rows from the Dgebal or, with osborne, the
+// [A B; C ·]-balanced realization (see balancedABC).
+func (c rowRealizationConverter) convertFrom(osborne bool) (int, error) {
+	order, scaled, err := c.convertBalanced(osborne, true)
+	if err != nil {
+		return 0, err
+	}
+	if scaled && !c.finiteCoeffs() {
+		if order, _, err = c.convertBalanced(osborne, false); err != nil {
+			return 0, err
 		}
 	}
 	if !c.finiteCoeffs() {
-		return nil, fmt.Errorf("TransferFunction: %w", ErrOverflow)
+		return 0, fmt.Errorf("TransferFunction: %w", ErrOverflow)
 	}
-	return c.result(order), nil
+	return order, nil
+}
+
+func (c rowRealizationConverter) hasZeroDiagonal() bool {
+	raw := c.sys.A.RawMatrix()
+	for i := range c.n {
+		if raw.Data[i*raw.Stride+i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// tfCheck holds reference responses of the state-space model at a few
+// points, from the balanced dense solve behind EvalFr.
+type tfCheck struct {
+	s   []complex128
+	ref [][]complex128
+	mag []float64
+}
+
+// newTFCheck samples the delay-free response at e^{jθ}, θ ∈ {0.7, 1.9, 2.8},
+// or jω, ω ∈ ‖A‖_F·{1e-2, 1, 1e2}, skipping poles and zero responses.
+func newTFCheck(sys *System, n, m, p int) tfCheck {
+	var pts []complex128
+	if sys.IsContinuous() {
+		rho := frobNorm(sys.A)
+		if rho == 0 || math.IsInf(rho, 0) {
+			rho = 1
+		}
+		for _, w := range []float64{1e-2, 1, 1e2} {
+			pts = append(pts, complex(0, rho*w))
+		}
+	} else {
+		for _, th := range []float64{0.7, 1.9, 2.8} {
+			pts = append(pts, cmplx.Rect(1, th))
+		}
+	}
+	bd := newBalancedDense(sys, n, m, p)
+	var ck tfCheck
+	for _, s := range pts {
+		dst := make([]complex128, p*m)
+		if bd.evalInto(pointAt(s), dst) != nil {
+			continue
+		}
+		mag := 0.0
+		for _, v := range dst {
+			mag = max(mag, cmplx.Abs(v))
+		}
+		if mag == 0 || math.IsInf(mag, 0) || math.IsNaN(mag) {
+			continue
+		}
+		ck.s, ck.ref, ck.mag = append(ck.s, s), append(ck.ref, dst), append(ck.mag, mag)
+	}
+	return ck
+}
+
+// relErr is the worst max-entry error of tf relative to the max-entry
+// reference over the points; ok is false without a usable point.
+func (ck tfCheck) relErr(tf *TransferFunc) (worst float64, ok bool) {
+	for k, s := range ck.s {
+		got := tf.eval(s)
+		m := len(got[0])
+		for i, row := range got {
+			for j, v := range row {
+				e := cmplx.Abs(v-ck.ref[k][i*m+j]) / ck.mag[k]
+				if math.IsNaN(e) {
+					e = math.Inf(1)
+				}
+				worst = max(worst, e)
+			}
+		}
+	}
+	return worst, len(ck.s) > 0
 }
 
 // convertBalanced fills the rows from the balanced realization, I/O-scaled
 // when ioScale; scaled reports whether any I/O scale was not 1. Scaling a
 // tiny B or C up toward a huge ‖A‖ can overflow coefficients that are
 // finite without it.
-func (c rowRealizationConverter) convertBalanced(ioScale bool) (order int, scaled bool, err error) {
-	a, b, cm, inExp, outExp := c.balancedABC(false, ioScale)
-	stair, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order int, scaled bool, err error) {
+	a, b, cm, inExp, outExp := c.balancedABC(osborne, ioScale)
+	stair, err := controllabilityStaircaseFloor(a, b, cm, c.opts.ControllabilityTol, ctrbfFloor(a, c.opts.ControllabilityTol), false)
 	if err != nil {
 		return 0, false, err
 	}
-	if stair.NCont < c.n {
+	if stair.NCont < c.n && !osborne {
 		a, b, cm, inExp2, outExp2 := c.balancedABC(true, ioScale)
-		alt, err := controllabilityStaircase(a, b, cm, c.opts.ControllabilityTol, false)
+		alt, err := controllabilityStaircaseFloor(a, b, cm, c.opts.ControllabilityTol, ctrbfFloor(a, c.opts.ControllabilityTol), false)
 		if err != nil {
 			return 0, false, err
 		}
@@ -273,7 +516,14 @@ func (c rowRealizationConverter) convertBalanced(ioScale bool) (order int, scale
 		c.fillStaticRows()
 		return 0, scaled, nil
 	}
-	return c.convertDynamicRows(stair, stair.NCont, inExp, outExp), scaled, nil
+	floor := ctrbfFloor(stair.A, c.opts.ControllabilityTol)
+	if c.opts.ControllabilityTol == 0 {
+		// The staircase rotations plus the row's Hessenberg reduction leave
+		// up to ~200·eps·‖A‖ in the subdiagonal of a hidden state, above
+		// 10·n·eps·‖A‖₁ for small n.
+		floor *= 10
+	}
+	return c.convertDynamicRows(stair, stair.NCont, floor, inExp, outExp), scaled, nil
 }
 
 func (c rowRealizationConverter) finiteCoeffs() bool {
@@ -293,17 +543,26 @@ func (c rowRealizationConverter) finiteCoeffs() bool {
 
 // balancedABC returns D⁻¹AD, D⁻¹B·diag(2^inExp), diag(2^outExp)·CD for an
 // exact power-of-two state scaling D, followed by power-of-two I/O scales
-// (ioPow2Scales), so entry (i, j) of the transfer matrix is only scaled by
-// 2^(inExp[j]+outExp[i]). The staircase floor and the orthogonal reductions
-// are relative to ‖A‖: without them a tiny but nonzero B or C is dropped as
-// uncontrollable, and badly scaled A (Padé cascades, stiff chains) loses most
-// of its digits. D is from Dgebal on A, or with osborne from the balance of
-// [A B; C ·] (SLICOT TB01ID); Dgebal is more accurate on the cascades but can
-// shrink a companion chain's couplings below the staircase floor, so when
-// states are lost convert takes the osborne realization if it is fully
-// controllable (a partial count from either is equally ambiguous). MATLAB
-// tf(ss) removes only structurally disconnected states, so keeping states
-// that are controllable in some exact scaling is on MATLAB's side.
+// toward ‖A‖ (reduceIOExponents, up or down), so entry (i, j) of the
+// transfer matrix is only scaled by 2^(inExp[j]+outExp[i]). The staircase
+// floor and the orthogonal reductions are relative to ‖A‖: without them a
+// tiny but nonzero B or C is dropped as uncontrollable, and badly scaled A
+// (Padé cascades, stiff chains) loses most of its digits. D is from Dgebal
+// on A, or with osborne from the balance of [A B; C ·] (SLICOT TB01ID).
+// Dgebal is far more accurate on stiff chains but, counting the diagonal
+// in its norms, grades a chain of zero-diagonal states (shift registers,
+// integrator and companion chains) toward a small diagonal entry, so the
+// coefficients lose up to all digits; it can also shrink a companion
+// chain's couplings below the staircase floor. So when states are lost
+// convertBalanced takes the osborne realization if it is fully
+// controllable (a partial count from either is equally ambiguous), and
+// when A has a zero diagonal entry or a row lost states (the cost gate:
+// Dgebal can also inflate B or C by ~1e13 past a state whose A row is
+// diagonal-only, E2AY73) and the Dgebal result misses the state-space
+// response at a few sample points by more than
+// 1e3·n·eps, convert keeps whichever result misses it less. MATLAB tf(ss)
+// removes only structurally disconnected states, so keeping states that
+// are controllable in some exact scaling is on MATLAB's side.
 func (c rowRealizationConverter) balancedABC(osborne, ioScale bool) (a, b, cm *mat.Dense, inExp, outExp []int) {
 	n, m, p := c.n, c.m, c.p
 	br := newRealizationCopy(c.sys, n, m, p)
@@ -331,23 +590,15 @@ func (c rowRealizationConverter) balancedABC(osborne, ioScale bool) (a, b, cm *m
 	if !ioScale {
 		return a, b, cm, inExp, outExp
 	}
-	in, out, unit := ioPow2Scales(a, b, cm)
-	if unit {
-		return a, b, cm, inExp, outExp
-	}
-	applyIOScales(b, cm, in, out)
-	for j, s := range in {
-		_, e := math.Frexp(s)
-		inExp[j] = e - 1
-	}
-	for i, s := range out {
-		_, e := math.Frexp(s)
-		outExp[i] = e - 1
+	if in, out := reduceIOExponents(a, b, cm); in != nil {
+		copy(inExp, in)
+		copy(outExp, out)
+		ldexpIO(b, cm, inExp, outExp, 1)
 	}
 	return a, b, cm, inExp, outExp
 }
 
-func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int, inExp, outExp []int) int {
+func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int, floor float64, inExp, outExp []int) int {
 	Ac := extractSubmatrix(stair.A, 0, ncont, 0, ncont)
 	Bc := extractSubmatrix(stair.B, 0, ncont, 0, c.m)
 	Cc := extractSubmatrix(stair.C, 0, c.p, 0, ncont)
@@ -358,7 +609,7 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 
 	totalOrder := 0
 	for i := 0; i < c.p; i++ {
-		nobs, den, numCoeffs := ssToTFRow(Ac, Bc, Cc, i, ncont, c.m, c.opts.ObservabilityTol, ws)
+		nobs, den, numCoeffs := ssToTFRow(Ac, Bc, Cc, i, ncont, c.m, c.opts.ObservabilityTol, floor, inExp, outExp[i], ws)
 		c.rows[i] = nobs
 		totalOrder += nobs
 
@@ -366,11 +617,6 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 		c.tf.Num[i] = make([][]float64, c.m)
 		for j := 0; j < c.m; j++ {
 			num := numCoeffs[j]
-			if e := inExp[j] + outExp[i]; e != 0 {
-				for k := range num {
-					num[k] = math.Ldexp(num[k], -e)
-				}
-			}
 			dij := c.dRaw.Data[i*c.dRaw.Stride+j]
 			if dij != 0 {
 				numWithD := Poly(num).Add(Poly(den).Scale(dij))
@@ -456,7 +702,13 @@ func formDualSIMO(Ac, Bc, Cc *mat.Dense, row, n, m int, ws *tfWorkspace) {
 	}
 }
 
-func observabilityReduction(n, m int, ws *tfWorkspace, obsTol float64) (nobs int, b1, scaleB float64) {
+// observabilityReduction reduces the dual single-input pair (Aᵀ, cᵀ) of one
+// output row to Hessenberg form and returns its observable order. c is zero
+// at n·eps·max(‖A‖_F, ‖c‖₁) (or obsTol). A Hessenberg subdiagonal is zero at
+// max(obsTol, floor), floor being 10× the ctrbf floor of the full model
+// whose rotations left the rounding noise; it is never judged against ‖c‖,
+// so the order does not depend on the output scale.
+func observabilityReduction(n, m int, ws *tfWorkspace, obsTol, floor float64) (nobs int, b1, scaleB float64) {
 	aData := ws.aData
 	bsimo := ws.bsimo
 	cData := ws.cData
@@ -505,12 +757,6 @@ func observabilityReduction(n, m int, ws *tfWorkspace, obsTol float64) (nobs int
 		}
 	}
 
-	frobA := 0.0
-	for _, v := range aData[:n*n] {
-		frobA += v * v
-	}
-	frobA = math.Sqrt(frobA)
-
 	norm1B := 0.0
 	for _, v := range bsimo[:n] {
 		norm1B += math.Abs(v)
@@ -518,6 +764,14 @@ func observabilityReduction(n, m int, ws *tfWorkspace, obsTol float64) (nobs int
 
 	tol := obsTol
 	if tol == 0 {
+		frobA := 0.0
+		for _, v := range aData[:n*n] {
+			frobA += v * v
+		}
+		frobA = math.Sqrt(frobA)
+		if math.IsInf(frobA, 1) {
+			frobA = frobNorm(mat.NewDense(n, n, aData[:n*n]))
+		}
 		tol = float64(n) * eps() * math.Max(frobA, norm1B)
 	}
 
@@ -550,7 +804,7 @@ func observabilityReduction(n, m int, ws *tfWorkspace, obsTol float64) (nobs int
 		}
 	}
 
-	tolScan := math.Max(tol, float64(n)*eps()*math.Max(frobA, math.Abs(b1/scaleB)*scaleB))
+	tolScan := math.Max(obsTol, floor*scaleA)
 	nobs = n
 	for j := 0; j < n-1; j++ {
 		subdiag := aData[(j+1)*n+j]
@@ -608,14 +862,14 @@ func vPolyRecurrence(aData []float64, n, nobs int) []Poly {
 	return wPolys
 }
 
-func computeNumerators(cData []float64, n, nobs, m int, scale []float64, wPolys []Poly) [][]float64 {
+func computeNumerators(cData []float64, n, nobs, m int, scale []float64, inExp []int, wPolys []Poly) [][]float64 {
 	nums := make([][]float64, m)
 	scaleBuf := make(Poly, 0, nobs+1)
 	addBuf := make(Poly, 0, nobs+2)
 	for j := range m {
 		var num Poly
 		for k := range nobs {
-			coeff := cData[j*n+k] * scale[k]
+			coeff := math.Ldexp(cData[j*n+k], -inExp[j]) * scale[k]
 			if coeff != 0 {
 				scaleBuf = wPolys[nobs-1-k].ScaleTo(scaleBuf, coeff)
 				if len(num) == 0 {
@@ -635,7 +889,11 @@ func computeNumerators(cData []float64, n, nobs, m int, scale []float64, wPolys 
 	return nums
 }
 
-func ssToTFRow(Ac, Bc, Cc *mat.Dense, row, ncont, m int, obsTol float64, ws *tfWorkspace) (int, []float64, [][]float64) {
+// ssToTFRow returns the observable order, denominator and numerators of
+// output row; the numerators undo the I/O scales 2^inExp[j]·2^outExp before
+// their products are formed, so they do not overflow when the unscaled
+// coefficients are finite.
+func ssToTFRow(Ac, Bc, Cc *mat.Dense, row, ncont, m int, obsTol, floor float64, inExp []int, outExp int, ws *tfWorkspace) (int, []float64, [][]float64) {
 	zeroReturn := func() (int, []float64, [][]float64) {
 		den := []float64{1}
 		nums := make([][]float64, m)
@@ -653,7 +911,7 @@ func ssToTFRow(Ac, Bc, Cc *mat.Dense, row, ncont, m int, obsTol float64, ws *tfW
 
 	formDualSIMO(Ac, Bc, Cc, row, n, m, ws)
 
-	nobs, b1, _ := observabilityReduction(n, m, ws, obsTol)
+	nobs, b1, _ := observabilityReduction(n, m, ws, obsTol, floor)
 	if nobs == 0 {
 		return zeroReturn()
 	}
@@ -661,7 +919,7 @@ func ssToTFRow(Ac, Bc, Cc *mat.Dense, row, ncont, m int, obsTol float64, ws *tfW
 	aData := ws.aData
 
 	scale := make([]float64, nobs)
-	scale[0] = b1
+	scale[0] = math.Ldexp(b1, -outExp)
 	for k := 1; k < nobs; k++ {
 		scale[k] = scale[k-1] * aData[k*n+(k-1)]
 	}
@@ -675,7 +933,7 @@ func ssToTFRow(Ac, Bc, Cc *mat.Dense, row, ncont, m int, obsTol float64, ws *tfW
 
 	wPolys := vPolyRecurrence(aData, n, nobs)
 	den := []float64(wPolys[nobs])
-	nums := computeNumerators(ws.cData, n, nobs, m, scale, wPolys)
+	nums := computeNumerators(ws.cData, n, nobs, m, scale, inExp, wPolys)
 
 	return nobs, den, nums
 }

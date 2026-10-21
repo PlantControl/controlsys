@@ -24,9 +24,75 @@ type staircaseResult struct {
 
 // controllabilityStaircase reduces (A, B, C) to controllability staircase
 // form by orthogonal transformations. C may be nil when the transformed C is
-// not needed; tol = 0 selects n²·eps, relative to each block's norm. wantT
-// accumulates the transformation into the result's T.
+// not needed. A singular value of a step counts as rank above
+// max(tol·σ₁(step), tol·‖A‖_F), as SLICOT MB03OY with SVLMAX = ‖A‖: the
+// absolute term keeps rounding noise in a block small against ‖A‖ from
+// counting as rank. tol = 0 selects n²·eps. wantT accumulates the
+// transformation into the result's T.
 func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*staircaseResult, error) {
+	return controllabilityStaircaseFloor(A, B, C, tol, -1, wantT)
+}
+
+// staircaseFloor is the absolute rank floor tol·‖A‖_F, tol = 0 selecting
+// n²·eps.
+func staircaseFloor(A *mat.Dense, tol float64) float64 {
+	n, _ := A.Dims()
+	if tol == 0 {
+		tol = float64(n*n) * eps()
+	}
+	return tol * frobNorm(A)
+}
+
+// frobNorm is the Frobenius norm, finite when the plain sum of squares
+// overflows (‖A‖ ≈ 1e155).
+func frobNorm(m *mat.Dense) float64 {
+	f := denseNorm(m)
+	if !math.IsInf(f, 1) {
+		return f
+	}
+	raw := m.RawMatrix()
+	mx := 0.0
+	for i := range raw.Rows {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols] {
+			mx = math.Max(mx, math.Abs(v))
+		}
+	}
+	if math.IsInf(mx, 0) || math.IsNaN(mx) {
+		return f
+	}
+	sum := 0.0
+	for i := range raw.Rows {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols] {
+			sum += (v / mx) * (v / mx)
+		}
+	}
+	return mx * math.Sqrt(sum)
+}
+
+// ctrbfFloor is staircaseFloor raised to at least MATLAB ctrbf/obsvf's
+// default absolute tolerance 10·n·‖A‖₁·eps when tol = 0.
+func ctrbfFloor(A *mat.Dense, tol float64) float64 {
+	f := staircaseFloor(A, tol)
+	if tol != 0 {
+		return f
+	}
+	raw := A.RawMatrix()
+	norm1 := 0.0
+	for j := range raw.Cols {
+		s := 0.0
+		for i := range raw.Rows {
+			s += math.Abs(raw.Data[i*raw.Stride+j])
+		}
+		norm1 = math.Max(norm1, s)
+	}
+	return math.Max(f, 10*float64(raw.Rows)*eps()*norm1)
+}
+
+// controllabilityStaircaseFloor is controllabilityStaircase with the
+// absolute floor given; floor < 0 selects staircaseFloor(A, tol). A reduced
+// subsystem passes the floor of the model it came from, whose rotations
+// left the rounding noise.
+func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT bool) (*staircaseResult, error) {
 	if A == nil || B == nil {
 		return nil, fmt.Errorf("A or B is nil: %w", ErrInvalidArgument)
 	}
@@ -63,6 +129,10 @@ func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*sta
 		}, nil
 	}
 
+	absFloor := floor
+	if absFloor < 0 {
+		absFloor = staircaseFloor(A, tol)
+	}
 	if tol == 0 {
 		tol = float64(n*n) * eps()
 	}
@@ -96,8 +166,6 @@ func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*sta
 	copyBlock(blockBuf, m, 0, 0, bRawInit.Data, bRawInit.Stride, 0, 0, n, m)
 	block := mat.NewDense(n, m, blockBuf[:n*m])
 
-	absFloor := tol * denseNorm(aWork)
-
 	var svd mat.SVD
 	var uFull mat.Dense
 
@@ -107,16 +175,14 @@ func controllabilityStaircase(A, B, C *mat.Dense, tol float64, wantT bool) (*sta
 			break
 		}
 
-		fnorm := denseNorm(block)
-		if fnorm <= absFloor {
+		if frobNorm(block) <= absFloor {
 			break
 		}
-		threshold := tol * fnorm
-
 		if !svd.Factorize(block, mat.SVDFull) {
 			return nil, fmt.Errorf("SVD of staircase block %d did not converge: %w", len(blockSizes)+1, ErrSchurFailed)
 		}
 		vals := svd.Values(nil)
+		threshold := math.Max(tol*vals[0], absFloor)
 
 		rank := 0
 		for _, v := range vals {
