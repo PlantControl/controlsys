@@ -94,3 +94,76 @@ func TestPIDStabilityScreenIdealIP3XICUnit(t *testing.T) {
 		t.Errorf("screen stable %v %v, oracle unstable", got, err)
 	}
 }
+
+// 5LB3LS: delayed discrete plants with near-zero poles. The undelayed
+// plant's TransferFunction drops or corrupts the tiny-pole terms (#3089:
+// 0.0551(z+2e-30)/(z+2e-30) for a degree-2 plant), so the float screen on
+// it certified unstable PD/PID designs as closed-loop-poles stable and
+// rejected stable ones (#3018). Oracle: exact Schur–Cohn with z^lag.
+func TestPIDStabilityScreenIdealDelayTinyPoles(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dt       float64
+		lag      int
+		num, den Poly
+		f        PidtuneType
+		pm       float64
+		stable   *PID2
+	}{
+		{"3089", 0.1, 15, Poly{0.05508874359571571, 1.4671058437019866, -0.6931435149725129}, Poly{1, 2.0625805448700525e-30, 4.842253744153856e-61}, PidtunePID, 45, nil},
+		{"3036", 0.1, 35, Poly{-0.014784959385975079, -1.8019347038001476, 0.11477038906105119, -1.8748869417529457}, Poly{1, -5.00447263254577e-10, 1.5650841538727049e-31, -1.0087484683502245e-60}, PidtunePID, 45, nil},
+		{"3078", 0.1, 49, Poly{0.09812833503587619, 1.650140140621783, 0.1979807726277072, 1.2158999453157313}, Poly{1, -9.011102747110696e-30, -1.5166629168579831e-64, -8.978278833426846e-102}, PidtunePD, 45, nil},
+		{"3018", 1, 11, Poly{0.263564432656593, -0.2987087982355384, 0.7955358290524017, 0.16793332407135853}, Poly{1, -0.9332191934662787, 1.974877418821016e-13, 1.6307831686022736e-31}, PidtunePD, 0, &PID2{Kp: 0.12300171178088162, Kd: 0.11028146728202622}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := pidtuneBackoffPlant(t, tc.num, tc.den, tc.dt, float64(tc.lag))
+			if k := tc.stable; k != nil {
+				k.B, k.C, k.Dt = 1, 1, tc.dt
+				if !pidtuneExactSchurStableLag(t, &PID{Kp: k.Kp, Kd: k.Kd, Dt: tc.dt}, tc.num, tc.den, tc.dt, 1, tc.lag) {
+					t.Fatal("oracle unstable")
+				}
+				screen, err := newPIDStabilityScreen(p, nil, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, err := screen.closedLoopPoles(k); err != nil || !got {
+					t.Errorf("screen stable %v %v, oracle stable", got, err)
+				}
+			}
+			r, err := TunePID(context.Background(), p, tc.f, PIDTuningOptions{PhaseMargin: tc.pm})
+			if errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				if tc.stable != nil {
+					t.Errorf("unattainable, stable %+v exists", *tc.stable)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			k := r.Controller
+			if r.Evidence.Stability == PIDStabilitySampledOnly {
+				return
+			}
+			if !pidtuneExactSchurStableLag(t, &PID{Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Tf: k.Tf, Dt: k.Dt, IFormula: k.IFormula, DFormula: k.DFormula}, tc.num, tc.den, tc.dt, 1, tc.lag) {
+				t.Errorf("%+v certified %s, unstable", *k, r.Evidence.Stability)
+			}
+		})
+	}
+}
+
+// 5LB3LS #3089: the collapsed transfer function TransferFunction returned
+// for the undelayed degree-2 plant, 0.0551(z+2e-30)/(z+2e-30), made the
+// float screen certify these gains, whose loop has a root at |z| ≈ 1.17.
+func TestPIDTuningIdealStableCollapsedTransfer(t *testing.T) {
+	const dt, lag = 0.1, 15
+	num, den := Poly{0.05508874359571571, 1.4671058437019866, -0.6931435149725129}, Poly{1, 2.0625805448700525e-30, 4.842253744153856e-61}
+	plant := pidtuneBackoffPlant(t, num, den, dt, 0)
+	transfer := &TransferFuncResult{TF: &TransferFunc{Num: [][][]float64{{{0.05508874359571571, 1.1e-31}}}, Den: [][]float64{{1, 2.0625805448700525e-30}}, Dt: dt}}
+	k := PID2{Kp: 0.5706220540940695, Ki: 1.0390660705947083, Kd: 0.3000376123041945, B: 1, C: 1, Dt: dt}
+	if pidtuneExactSchurStableLag(t, &PID{Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Dt: dt}, num, den, dt, 1, lag) {
+		t.Fatal("oracle stable")
+	}
+	if got, err := pidTuningIdealStable(plant, transfer, &k, lag); err != nil || got {
+		t.Errorf("stable %v %v, oracle unstable", got, err)
+	}
+}

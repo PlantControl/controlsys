@@ -2537,8 +2537,24 @@ const pidTuningIdealReturnTol = 0x1p-26
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic
 // directly, of the loop with model, transfer its transfer function, delayed
-// by lag samples.
+// by lag samples. For a delayed loop, or one whose transfer is of lower
+// degree than model, the characteristic is built exactly from model's
+// realization when in scope, since TransferFunction drops or corrupts
+// near-zero poles and zeros and the float verdict on its characteristic then
+// decides confidently wrong; the float verdict on the rounded exact
+// characteristic decides, and exact Schur–Cohn only when it is in doubt, as
+// that recursion at order n+lag is slow.
 func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2, lag int) (bool, error) {
+	if n, _, _ := model.Dims(); lag > 0 || len(transfer.TF.Den[0]) <= n {
+		if ch, ok := pidTuningIdealCharacteristic(model, c, lag); ok {
+			if f, ok := dyadicPolyFloat(ch); ok {
+				if stable, decided, err := pidTuningIdealFloat(f, c.Dt == 0); err != nil || decided {
+					return stable, err
+				}
+			}
+			return pidTuningDyadicStable(ch, c.Dt == 0), nil
+		}
+	}
 	var ip, id, dn, dd Poly
 	if c.Ki == 0 {
 		ip, id = Poly{0}, Poly{1}
@@ -2576,28 +2592,9 @@ func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2, 
 	denominator := id.Mul(dd)
 	numerator := scale(denominator, c.Kp).Add(scale(ip.Mul(dd), c.Ki)).Add(scale(dn.Mul(id), c.Kd))
 	characteristic := slices.Concat(Poly(transfer.TF.Den[0]).Mul(denominator), make(Poly, lag)).Add(Poly(transfer.TF.Num[0][0]).Mul(numerator))
-	for len(characteristic) > 1 && characteristic[0] == 0 {
-		characteristic = characteristic[1:]
-	}
-	if len(characteristic) == 0 || characteristic[0] == 0 {
-		return false, nil
-	}
-	poles, err := characteristic.Roots()
-	if err != nil {
-		return false, err
-	}
-	for _, pole := range poles {
-		if !pidFiniteComplex(pole) {
-			return false, nil
-		}
-	}
-	norm := 1.0
-	for _, v := range characteristic[1:] {
-		norm += math.Abs(v / characteristic[0])
-	}
-	stable, decided := pidTuningFloatVerdict(poles, c.Dt == 0, norm)
-	if decided {
-		return stable, nil
+	stable, decided, err := pidTuningIdealFloat(characteristic, c.Dt == 0)
+	if err != nil || decided {
+		return stable, err
 	}
 	if exact, ok := pidTuningIdealExact(model, c, lag); ok {
 		return exact, nil
@@ -2605,23 +2602,61 @@ func pidTuningIdealStable(model *System, transfer *TransferFuncResult, c *PID2, 
 	return stable, nil
 }
 
+// pidTuningIdealFloat is the float verdict of pidTuningIdealStable on
+// characteristic, leading coefficient first; decided is false when the
+// exact test must settle it.
+func pidTuningIdealFloat(characteristic Poly, continuous bool) (stable, decided bool, err error) {
+	for len(characteristic) > 1 && characteristic[0] == 0 {
+		characteristic = characteristic[1:]
+	}
+	if len(characteristic) == 0 || characteristic[0] == 0 {
+		return false, true, nil
+	}
+	poles, err := characteristic.Roots()
+	if err != nil {
+		return false, true, err
+	}
+	for _, pole := range poles {
+		if !pidFiniteComplex(pole) {
+			return false, true, nil
+		}
+	}
+	norm := 1.0
+	for _, v := range characteristic[1:] {
+		norm += math.Abs(v / characteristic[0])
+	}
+	stable, decided = pidTuningFloatVerdict(poles, continuous, norm)
+	return stable, decided, nil
+}
+
 // pidTuningIdealExact is pidTuningIdealStable's exact test on model's
 // realization, in the scope of pidTuningExactStable: with Δ = det(λI−A),
 // det(λI−A+BC) = Δ·(1+C(λI−A)⁻¹B), so N = det(λI−A+BC) − Δ + D·Δ is the
 // plant numerator over Δ and the characteristic is Δ·λ^lag·den(c) + N·num(c).
 func pidTuningIdealExact(model *System, c *PID2, lag int) (stable, ok bool) {
+	ch, ok := pidTuningIdealCharacteristic(model, c, lag)
+	if !ok {
+		return false, false
+	}
+	return pidTuningDyadicStable(ch, c.Dt == 0), true
+}
+
+// pidTuningIdealCharacteristic returns pidTuningIdealExact's characteristic,
+// leading coefficient first and nonzero, or empty when it vanishes; ok is
+// false out of scope.
+func pidTuningIdealCharacteristic(model *System, c *PID2, lag int) (ch []dyadic, ok bool) {
 	n, m, p := model.Dims()
 	if model.E != nil || model.HasDelay() || m != 1 || p != 1 || n > pidTuningExactOrder || n+lag > pidTuningExactLagOrder {
-		return false, false
+		return nil, false
 	}
 	for _, a := range []*mat.Dense{model.A, model.B, model.C, model.D} {
 		if a != nil && requireFiniteDense("", "", a) != nil {
-			return false, false
+			return nil, false
 		}
 	}
 	for _, v := range []float64{c.Kp, c.Ki, c.Kd, c.Dt} {
 		if !finitePID(v) {
-			return false, false
+			return nil, false
 		}
 	}
 	at := func(a *mat.Dense, i, j int) dyadic { return newDyadic(a.At(i, j)) }
@@ -2674,12 +2709,18 @@ func pidTuningIdealExact(model *System, c *PID2, lag int) (stable, ok bool) {
 	for range lag {
 		shifted = append(shifted, zero)
 	}
-	ch := dyadicPolyAdd(shifted, dyadicPolyMul(num, ctrl))
+	ch = dyadicPolyAdd(shifted, dyadicPolyMul(num, ctrl))
 	for len(ch) > 0 && ch[0].m.Sign() == 0 {
 		ch = ch[1:]
 	}
+	return ch, true
+}
+
+// pidTuningDyadicStable reports whether every root of ch, leading
+// coefficient first, passes pidTuningExactRootsStable; an empty ch fails.
+func pidTuningDyadicStable(ch []dyadic, continuous bool) bool {
 	if len(ch) == 0 {
-		return false, true
+		return false
 	}
 	emin := ch[0].e
 	for _, v := range ch {
@@ -2689,7 +2730,26 @@ func pidTuningIdealExact(model *System, c *PID2, lag int) (stable, ok bool) {
 	for i, v := range ch {
 		ints[i] = new(big.Int).Lsh(v.m, uint(v.e-emin))
 	}
-	return pidTuningExactRootsStable(ints, big.NewInt(1), big.NewInt(1), c.Dt == 0), true
+	return pidTuningExactRootsStable(ints, big.NewInt(1), big.NewInt(1), continuous)
+}
+
+// dyadicPolyFloat returns p divided by its leading coefficient, rounded to
+// float64, with ok false when a coefficient overflows. Each coefficient
+// keeps its own relative accuracy, as tiny roots of p ask.
+func dyadicPolyFloat(p []dyadic) (Poly, bool) {
+	if len(p) == 0 {
+		return Poly{0}, true
+	}
+	shift := p[0].m.BitLen() + p[0].e
+	out := make(Poly, len(p))
+	for i, v := range p {
+		f := new(big.Float).SetInt(v.m)
+		out[i], _ = f.SetMantExp(f, v.e-shift).Float64()
+		if math.IsInf(out[i], 0) {
+			return nil, false
+		}
+	}
+	return out, true
 }
 
 // dyadicCharPoly returns det(λI−a), leading coefficient first: with
