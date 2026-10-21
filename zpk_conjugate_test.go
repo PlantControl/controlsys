@@ -80,3 +80,53 @@ func TestMatchedAliasedComplexPoles(t *testing.T) {
 		}
 	}
 }
+
+func TestZPKTransferFunctionNearbyRealAndComplexPoles(t *testing.T) {
+	cases := []struct {
+		name   string
+		poles  [][]complex128
+		denDeg int
+		pts    []complex128
+	}{
+		{"tiny", [][]complex128{{1e-14 + 1e-14i, 1e-14 - 1e-14i}, {1e-15}}, 3, []complex128{10, 2i, -3 + 1i}},
+		{"unit", [][]complex128{{1 + 1e-15i, 1 - 1e-15i}, {1}}, 3, []complex128{3, 2i, -3 + 1i}},
+		{"realFirst", [][]complex128{{1}, {1 - 1e-15i, 1 + 1e-15i}}, 3, []complex128{3, 2i}},
+		{"pairAndReal", [][]complex128{{1 + 1e-15i, 1 - 1e-15i, 1}, {1}}, 3, []complex128{3, 2i}},
+		{"shared",[][]complex128{{-1 + 2i, -1 - 2i}, {-3, -1 - 2i, -1 + 2i}}, 3, []complex128{1, 2i}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			z, err := NewZPKMIMO([][][]complex128{{nil, nil}}, [][][]complex128{c.poles}, [][]float64{{1, 2}}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tf, err := z.TransferFunction()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(tf.Den[0]) - 1; got != c.denDeg {
+				t.Fatalf("den %v degree %d, want %d", tf.Den[0], got, c.denDeg)
+			}
+			for j, num := range tf.Num[0] {
+				if len(num) > len(tf.Den[0]) {
+					t.Fatalf("num[%d] %v improper over den %v", j, num, tf.Den[0])
+				}
+			}
+			for _, s := range c.pts {
+				got, err := tf.Eval(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for j, ps := range c.poles {
+					want := complex(float64(j+1), 0)
+					for _, p := range ps {
+						want /= s - p
+					}
+					if d := cmplx.Abs(got[0][j] - want); d > 1e-12*cmplx.Abs(want) {
+						t.Errorf("tf(%v)[%d] = %v, want %v", s, j, got[0][j], want)
+					}
+				}
+			}
+		})
+	}
+}
