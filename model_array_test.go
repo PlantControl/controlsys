@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -177,6 +178,63 @@ func TestModelArrayRejectsInvalidCompatibility(t *testing.T) {
 	}
 	if _, err := NewModelArray([]int{2, 2}, []*System{sys}); !errors.Is(err, ErrDimensionMismatch) {
 		t.Fatalf("shape/product mismatch err = %v, want ErrDimensionMismatch", err)
+	}
+}
+
+func TestModelArrayRejectsWrappedShapeProduct(t *testing.T) {
+	g, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, shape := range [][]int{
+		{3, 6148914691236517206},
+		{6148914691236517206, 3},
+		{2, 1 << 62, 4},
+		{math.MaxInt, math.MaxInt},
+	} {
+		arr, err := NewModelArray(shape, []*System{g, g})
+		if !errors.Is(err, ErrDimensionMismatch) || arr != nil {
+			t.Fatalf("NewModelArray(%v, 2 models) = %v, %v; want ErrDimensionMismatch", shape, arr, err)
+		}
+	}
+	arr, err := NewModelArray([]int{1, 2, 1}, []*System{g, g})
+	if err != nil || arr.Len() != 2 {
+		t.Fatalf("NewModelArray([1 2 1]) = %v, %v", arr, err)
+	}
+}
+
+func TestModelArrayRejectsNamesConflictingPastFirstModel(t *testing.T) {
+	g, err := NewGain(mat.NewDense(1, 1, []float64{1}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := g.Copy()
+	a.InputName = []string{"a"}
+	b := g.Copy()
+	b.InputName = []string{"b"}
+	y := g.Copy()
+	y.OutputName = []string{"y"}
+	z := g.Copy()
+	z.OutputName = []string{"z"}
+	for name, models := range map[string][]*System{
+		"input":  {g, a, b},
+		"void":   {nil, g, a, nil, b},
+		"output": {g, y, z},
+	} {
+		if arr, err := NewModelArray([]int{len(models)}, models); !errors.Is(err, ErrInvalidArgument) || arr != nil {
+			t.Fatalf("%s: NewModelArray = %v, %v; want ErrInvalidArgument", name, arr, err)
+		}
+	}
+
+	arr, err := NewModelArray([]int{4}, []*System{g, a, g, a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := arr.InputName(); !sameStrings(got, []string{"a"}) {
+		t.Fatalf("InputName() = %v, want [a]", got)
+	}
+	if _, err := arr.SelectFlat(0, 1, 2, 3); err != nil {
+		t.Fatalf("SelectFlat all: %v", err)
 	}
 }
 
