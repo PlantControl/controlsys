@@ -4,7 +4,10 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // neutralChainRoot refines a root of χ(s) = den + num·e^{-sτ} from the
@@ -92,5 +95,175 @@ func TestNyquistSubunitFeedthroughDelayLoopCounts(t *testing.T) {
 	}
 	if res.RHPZerosCL != want {
 		t.Errorf("RHPZerosCL = %d, want %d", res.RHPZerosCL, want)
+	}
+}
+
+type neutralBranch struct {
+	d, tau float64
+	a, c   float64 // rational part c/(s − a) when c != 0
+}
+
+func (b neutralBranch) system(t *testing.T) *System {
+	t.Helper()
+	var sys *System
+	var err error
+	if b.c != 0 {
+		sys, err = NewFromSlices(1, 1, 1, []float64{b.a}, []float64{1}, []float64{b.c}, []float64{b.d}, 0)
+	} else {
+		sys, err = NewGain(mat.NewDense(1, 1, []float64{b.d}), 0)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetInputDelay([]float64{b.tau}); err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func neutralParallel(t *testing.T, bs []neutralBranch) *System {
+	t.Helper()
+	L := bs[0].system(t)
+	for _, b := range bs[1:] {
+		var err error
+		if L, err = Parallel(L, b.system(t)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return L
+}
+
+// neutralChi is Π(s − a)·(1 + L(s)) over the rational branches, entire.
+func neutralChi(bs []neutralBranch, s complex128) complex128 {
+	den := complex(1, 0)
+	for _, b := range bs {
+		if b.c != 0 {
+			den *= s - complex(b.a, 0)
+		}
+	}
+	f := den
+	for _, b := range bs {
+		g := den * complex(b.d, 0)
+		if b.c != 0 {
+			g += den / (s - complex(b.a, 0)) * complex(b.c, 0)
+		}
+		f += g * cmplx.Exp(-s*complex(b.tau, 0))
+	}
+	return f
+}
+
+// rectRoots counts the zeros of f in (0, x)×(−y, y) by the argument
+// principle, bisecting wherever arg f moves by more than 0.2.
+func rectRoots(f func(complex128) complex128, x, y float64) (int, bool) {
+	corners := []complex128{complex(1e-9, -y), complex(x, -y), complex(x, y), complex(1e-9, y), complex(1e-9, -y)}
+	total, ok := 0.0, true
+	var walk func(a, b, fa, fb complex128, depth int)
+	walk = func(a, b, fa, fb complex128, depth int) {
+		if d := cmplx.Phase(fb / fa); math.Abs(d) <= 0.2 {
+			total += d
+			return
+		}
+		if depth > 40 {
+			ok = false
+			return
+		}
+		m := (a + b) / 2
+		fm := f(m)
+		walk(a, m, fa, fm, depth+1)
+		walk(m, b, fm, fb, depth+1)
+	}
+	const n = 20000
+	for i := range 4 {
+		a, b := corners[i], corners[i+1]
+		pa, fa := a, f(a)
+		for k := 1; k <= n; k++ {
+			p := a + (b-a)*complex(float64(k)/n, 0)
+			fp := f(p)
+			walk(pa, p, fa, fp, 0)
+			pa, fa = p, fp
+		}
+	}
+	z := total / (2 * math.Pi)
+	return int(math.Round(z)), ok && math.Abs(z-math.Round(z)) < 1e-6
+}
+
+// Stable difference operators (all roots of 1 + Σd_k·z^{τ_k} outside the
+// unit disk) with Σ|d_k| >= 1: χ has finitely many RHP roots, counted; the
+// tail guard returned ErrDelayUnsupported for them.
+func TestNyquistNeutralStableDifferenceCounts(t *testing.T) {
+	cases := [][]neutralBranch{
+		{{d: 0.6, tau: 1}, {d: 0.6, tau: 2}},
+		{{d: -0.6, tau: 1}, {d: 0.5, tau: 2}},
+		{{d: 0.796, tau: 0.966}, {d: 0.364, tau: 1.932}},
+		{{d: 0.6, tau: 1, a: -1, c: 0.2}, {d: 0.6, tau: 2}},
+		{{d: 0.6, tau: 1, a: 0.5, c: 0.2}, {d: 0.6, tau: 2}},
+		{{d: 0.6, tau: 1, a: 0.5, c: 1.5}, {d: 0.6, tau: 2}},
+		{{d: 0.6, tau: 1}, {d: 0.6, tau: 2}, {d: 0.3, tau: 3}},
+		{{d: 0.5, tau: 1}, {d: 0.5, tau: 2}, {d: 0.5, tau: 3}},
+	}
+	for _, bs := range cases {
+		want, ok := rectRoots(func(s complex128) complex128 { return neutralChi(bs, s) }, 20, 400)
+		if !ok {
+			t.Fatalf("%v: oracle undecided", bs)
+		}
+		L := neutralParallel(t, bs)
+		for _, n := range []int{50, 500, 3000} {
+			res, err := L.Nyquist(nil, n)
+			if err != nil {
+				t.Errorf("%v n=%d: %v, want RHPZerosCL %d", bs, n, err, want)
+				continue
+			}
+			if res.RHPZerosCL != want {
+				t.Errorf("%v n=%d: RHPZerosCL %d, want %d", bs, n, res.RHPZerosCL, want)
+			}
+		}
+	}
+}
+
+// Seeded sweep of d1·e^{−s} + d2·e^{−ks}: Z = 0 when every root of
+// 1 + d1·z + d2·z^k lies outside the unit disk, else infinitely many RHP
+// roots and ErrDelayUnsupported.
+func TestNyquistNeutralTwoGainSweep(t *testing.T) {
+	rng := rand.New(rand.NewPCG(15, 41))
+	finite, infinite := 0, 0
+	for range 200 {
+		k := 2 + rng.IntN(2)
+		d1, d2 := 2*rng.Float64()-1, 2*rng.Float64()-1
+		if math.Abs(d1)+math.Abs(d2) < 1 {
+			continue
+		}
+		comp := mat.NewDense(k, k, nil)
+		for i := range k - 1 {
+			comp.Set(i+1, i, 1)
+		}
+		comp.Set(0, k-1, -1/d2)
+		comp.Set(1, k-1, comp.At(1, k-1)-d1/d2)
+		var eig mat.Eigen
+		if !eig.Factorize(comp, mat.EigenNone) {
+			t.Fatal("eigen")
+		}
+		rmin := math.Inf(1)
+		for _, z := range eig.Values(nil) {
+			rmin = min(rmin, cmplx.Abs(z))
+		}
+		if math.Abs(rmin-1) < 1e-3 {
+			continue
+		}
+		L := neutralParallel(t, []neutralBranch{{d: d1, tau: 1}, {d: d2, tau: float64(k)}})
+		res, err := L.Nyquist(nil, 200)
+		if rmin > 1 {
+			finite++
+			if err != nil || res.RHPZerosCL != 0 {
+				t.Errorf("d1=%g d2=%g k=%d |z|min=%g: %v, want RHPZerosCL 0", d1, d2, k, rmin, err)
+			}
+		} else {
+			infinite++
+			if !errors.Is(err, ErrDelayUnsupported) {
+				t.Errorf("d1=%g d2=%g k=%d |z|min=%g: err %v, want ErrDelayUnsupported", d1, d2, k, rmin, err)
+			}
+		}
+	}
+	if finite < 10 || infinite < 10 {
+		t.Fatalf("sweep covered %d finite, %d infinite cases", finite, infinite)
 	}
 }
