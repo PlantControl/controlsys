@@ -28,6 +28,10 @@ type riccatiProblem struct {
 	// rescueErr is the error of a failed first pencil solve that
 	// pencilSolution rescued.
 	rescueErr error
+	// resolved reports that pencilSolution solved more than one pencil;
+	// with collecting, candidates holds the solutions it did not return.
+	resolved, collecting bool
+	candidates           []riccatiPass
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
