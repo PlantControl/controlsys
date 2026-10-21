@@ -702,15 +702,19 @@ func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 //	continuous: A_KᵀX₁ + X₁A_K + Q_K = 0
 //	discrete:   A_KᵀX₁A_K − X₁ + Q_K = 0
 //
-// with A_K = A − BK, Q_K = Q + KᵀRK − SK − KᵀSᵀ, must be within newtonTol
-// of X with A_K stable. The Riccati residual cannot tell a few lost digits
-// from none (R⁻¹ or (R + BᵀXB)⁻¹ round it), and a Schur split that is
-// wrong at extreme cost scales can still give a stable A_K. A larger step
-// is iterated, up to newtonSteps solves, and the converged iterate, its K
-// and Eig replace the given ones. Two weaker exits keep a solution whose
-// error is still bounded by a Newton step: an iteration that stalls at its
-// rounding level keeps its iterate of smallest step when that is within
-// newtonStallTol, and one whose Lyapunov equation turns numerically
+// with A_K = A − BK, Q_K = Q + KᵀRK − SK − KᵀSᵀ (newtonCost gives the
+// form Care solves), must be within newtonTol of X with A_K stable. The
+// Riccati residual cannot tell a few lost digits from none (R⁻¹ or
+// (R + BᵀXB)⁻¹ round it), and a Schur split that is wrong at extreme cost
+// scales can still give a stable A_K. A larger step is iterated, up to
+// newtonSteps solves, and the converged iterate, its K and Eig replace the
+// given ones. Weaker exits keep a solution whose error is still bounded by
+// a Newton step. An iteration that stalls at its rounding level without
+// contracting (no step below 1/newtonContraction of the first) keeps, for
+// Care, the given X when its step was within newtonLooseTol, as the steps
+// then measure the rounding of the residual, not the error of X; otherwise
+// a stalled iteration keeps its iterate of smallest step when that is
+// within newtonStallTol. One whose Lyapunov equation turns numerically
 // singular keeps the last cost X₁ when the step to it was within
 // newtonLooseTol. A lone first solve whose Lyapunov equation is singular
 // is kept with a residual within rescueTol of its terms and a stable
@@ -722,11 +726,13 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		fail = ErrNoStabilizing
 	}
 	xData := X.RawMatrix().Data
-	var best []float64
-	bestStep, step, stalls := math.Inf(1), math.Inf(1), 0
+	var best, x0 []float64
+	bestStep, step, first, stalls := math.Inf(1), math.Inf(1), math.Inf(1), 0
+	stalled := true
 	for it := range newtonSteps {
-		x1, err := problem.newtonCost(continuous, K)
+		x1, exact, err := problem.newtonCost(continuous, K, xData)
 		if err != nil {
+			stalled = false
 			if errors.Is(err, ErrNoStabilizing) {
 				break
 			}
@@ -746,7 +752,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			d += (v - xData[i]) * (v - xData[i])
 			x1n += v * v
 		}
-		if d <= newtonTol*newtonTol*x1n {
+		if exact || d <= newtonTol*newtonTol*x1n {
 			if it > 0 {
 				copy(xData, x1)
 				if K, err = problem.gain(continuous, xData); err != nil {
@@ -757,6 +763,9 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			return K, nil
 		}
 		step = math.Sqrt(d / x1n)
+		if it == 0 {
+			first, x0 = step, append(x0, xData...)
+		}
 		if step < bestStep {
 			best, bestStep, stalls = append(best[:0], xData...), step, 0
 		} else if stalls++; stalls == 3 {
@@ -764,18 +773,23 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		}
 		copy(xData, x1)
 		if K, err = problem.gain(continuous, xData); err != nil {
+			stalled = false
 			break
 		}
 	}
-	if !(bestStep <= newtonStallTol) {
+	switch {
+	case continuous && stalled && first <= newtonLooseTol && !(newtonContraction*bestStep <= first):
+		copy(xData, x0)
+	case bestStep <= newtonStallTol:
+		copy(xData, best)
+	default:
 		return nil, fail
 	}
-	copy(xData, best)
 	K, err := problem.gain(continuous, xData)
 	if err != nil {
 		return nil, fail
 	}
-	if _, err := problem.newtonCost(continuous, K); err != nil {
+	if _, _, err := problem.newtonCost(continuous, K, xData); err != nil {
 		return nil, fail
 	}
 	problem.closedLoopEig(eig)
@@ -793,8 +807,14 @@ func (problem *riccatiProblem) closedLoopEig(eig []complex128) {
 
 // newtonCost returns the cost X₁ of the gain K of verifyRiccati, with the
 // eigenvalues of A − BK in ws.lyap.wr, ws.lyap.wi; ErrNoStabilizing when
-// A − BK is not stable, or the error of the Lyapunov solve.
-func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense) ([]float64, error) {
+// A − BK is not stable, or the error of the Lyapunov solve. Care's X₁ is
+// X + Δ, A_KᵀΔ + ΔA_K + Ric(X) = 0 for the iterate X (xData) of gain K,
+// Ric(X) = AᵀX + XA − (XB + S)K + Q: under cheap control A_K = A − BK
+// rounds A away, which floors a direct solve far above the accuracy of X,
+// while the residual keeps A and Δ's rounding is relative to the small ‖Δ‖.
+// exact reports a Care residual at the rounding of its terms (X ≈ 0 when
+// Q̄ = 0, where the relative step is all noise); X is then kept.
+func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense, xData []float64) (x1 []float64, exact bool, err error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	if ws.lyap == nil {
 		ws.lyap = &LyapunovWorkspace{}
@@ -815,22 +835,55 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense) ([]floa
 	qk := ws.z[:n*n]
 	copyStrided(qk, n, qRaw.Data, qRaw.Stride, n, n)
 	rk := ws.btx[:m*n]
-	blas64.Gemm(blas.NoTrans, blas.NoTrans,
-		1, blas64.General{Rows: m, Cols: m, Data: rRaw.Data, Stride: rRaw.Stride},
-		blas64.General{Rows: m, Cols: n, Data: kData, Stride: n},
-		0, blas64.General{Rows: m, Cols: n, Data: rk, Stride: n})
-	if problem.S != nil {
-		sRaw := problem.S.RawMatrix()
-		for i := range m {
+	if continuous {
+		xa := ws.h[:n*n]
+		blas64.Gemm(blas.NoTrans, blas.NoTrans,
+			1, blas64.General{Rows: n, Cols: n, Data: xData, Stride: n},
+			blas64.General{Rows: n, Cols: n, Data: aRaw.Data, Stride: aRaw.Stride},
+			0, blas64.General{Rows: n, Cols: n, Data: xa, Stride: n})
+		for i := range n {
 			for j := range n {
-				rk[i*n+j] -= 2 * sRaw.Data[j*sRaw.Stride+i]
+				qk[i*n+j] += xa[i*n+j] + xa[j*n+i]
 			}
 		}
+		blas64.Gemm(blas.Trans, blas.NoTrans,
+			1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
+			blas64.General{Rows: n, Cols: n, Data: xData, Stride: n},
+			0, blas64.General{Rows: m, Cols: n, Data: rk, Stride: n})
+		if problem.S != nil {
+			sRaw := problem.S.RawMatrix()
+			for i := range m {
+				for j := range n {
+					rk[i*n+j] += sRaw.Data[j*sRaw.Stride+i]
+				}
+			}
+		}
+		terms := impl.Dlange(lapack.Frobenius, n, n, qRaw.Data, qRaw.Stride, nil) +
+			2*impl.Dlange(lapack.Frobenius, n, n, xa, n, nil) +
+			impl.Dlange(lapack.Frobenius, m, n, rk, n, nil)*impl.Dlange(lapack.Frobenius, m, n, kData, n, nil)
+		blas64.Gemm(blas.Trans, blas.NoTrans,
+			-1, blas64.General{Rows: m, Cols: n, Data: rk, Stride: n},
+			blas64.General{Rows: m, Cols: n, Data: kData, Stride: n},
+			1, blas64.General{Rows: n, Cols: n, Data: qk, Stride: n})
+		exact = impl.Dlange(lapack.Frobenius, n, n, qk, n, nil) <= 8*float64(n)*eps()*terms
+	} else {
+		blas64.Gemm(blas.NoTrans, blas.NoTrans,
+			1, blas64.General{Rows: m, Cols: m, Data: rRaw.Data, Stride: rRaw.Stride},
+			blas64.General{Rows: m, Cols: n, Data: kData, Stride: n},
+			0, blas64.General{Rows: m, Cols: n, Data: rk, Stride: n})
+		if problem.S != nil {
+			sRaw := problem.S.RawMatrix()
+			for i := range m {
+				for j := range n {
+					rk[i*n+j] -= 2 * sRaw.Data[j*sRaw.Stride+i]
+				}
+			}
+		}
+		blas64.Gemm(blas.Trans, blas.NoTrans,
+			1, blas64.General{Rows: m, Cols: n, Data: kData, Stride: n},
+			blas64.General{Rows: m, Cols: n, Data: rk, Stride: n},
+			1, blas64.General{Rows: n, Cols: n, Data: qk, Stride: n})
 	}
-	blas64.Gemm(blas.Trans, blas.NoTrans,
-		1, blas64.General{Rows: m, Cols: n, Data: kData, Stride: n},
-		blas64.General{Rows: m, Cols: n, Data: rk, Stride: n},
-		1, blas64.General{Rows: n, Cols: n, Data: qk, Stride: n})
 	symmetrize(qk, n, n)
 
 	solve, stable := dlyap, func(wr, wi float64) bool { return math.Hypot(wr, wi) < 1 }
@@ -839,22 +892,27 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense) ([]floa
 	}
 	X1, err := solve(mat.NewDense(n, n, aclT), mat.NewDense(n, n, qk), &LyapunovOpts{Workspace: ws.lyap})
 	if err != nil && !errors.Is(err, ErrSingularEquation) {
-		return nil, err
+		return nil, false, err
 	}
 	lw := ws.lyap
 	for i := range n {
 		if !stable(lw.wr[i], lw.wi[i]) {
-			return nil, ErrNoStabilizing
+			return nil, false, ErrNoStabilizing
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	x1 := X1.RawMatrix().Data[:n*n]
+	x1 = X1.RawMatrix().Data[:n*n]
+	if continuous {
+		for i, v := range xData {
+			x1[i] += v
+		}
+	}
 	if !finiteSlice(x1) {
-		return nil, ErrSingularEquation
+		return nil, false, ErrSingularEquation
 	}
-	return x1, nil
+	return x1, exact, nil
 }
 
 // newtonTol and newtonSteps bound the Newton check of verifyRiccati;
@@ -866,6 +924,9 @@ const (
 	newtonLooseTol = 1e-5
 	newtonStallTol = 1e-6
 	newtonSteps    = 30
+	// newtonContraction is the reduction of the first Newton step that
+	// marks a converging iteration; steps that stay within it are noise.
+	newtonContraction = 16
 )
 
 // riccatiNorms are the Frobenius norms of the pencil blocks that cost
