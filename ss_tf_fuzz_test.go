@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strconv"
 	"testing"
-
-	"plantcontrol.org/v1/gonum/lapack"
 )
 
 // FuzzSSToTF: System.TransferFunction matches the exact rational
@@ -203,9 +201,6 @@ func FuzzSSToTF(f *testing.F) {
 					hp := fzBigPolyEval(tf.Num[i][j], x) / fzBigPolyEval(tf.Den[i], x)
 					tol := kk * eps * kap * (cmplx.Abs(h) + math.Abs(s.D[i*m+j]) + nC*nB/nu)
 					if d := cmplx.Abs(hp - h); !(d <= tol) {
-						if fzBalanceSpread(s.A, n) > 1e6 {
-							fzSkip(t, "TransferFunction: Dgebal scaling of A alone inflates B or C (followup)")
-						}
 						t.Fatalf("TF(%v)[%d,%d] = %v, exact %v (|Δ| %g, tol %g, κ %g)\nnum=%v den=%v\n%s", x, i, j, hp, h, d, tol, kap, tf.Num[i][j], tf.Den[i], s)
 					}
 				}
@@ -266,17 +261,4 @@ func fzSSToTFSeeds() []fzSeed {
 		seeds = append(seeds, s)
 	}
 	return seeds
-}
-
-// fzBalanceSpread is max/min of the Dgebal scaling of A, which
-// TransferFunction applies to A, B and C before its staircase.
-func fzBalanceSpread(a []float64, n int) float64 {
-	ab := slices.Clone(a)
-	sc := make([]float64, n)
-	impl.Dgebal(lapack.Scale, n, ab, n, sc)
-	lo, hi := math.Inf(1), 0.0
-	for _, d := range sc {
-		lo, hi = math.Min(lo, d), math.Max(hi, d)
-	}
-	return hi / lo
 }
