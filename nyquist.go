@@ -427,6 +427,7 @@ type nyquistPath struct {
 	seeds []float64
 	// tau is the total loop delay; delayAliases splits steps below wDelay.
 	tau, wDelay float64
+	tailLim     float64 // tail bound on limsup |L(jω)|, > 0 with LFT feedthrough D12·D21 even when D11 = 0
 	// envelope bounds |L| at the last sample over all delay values, from
 	// the delay-free channels; nil means |L|, exact for I/O delays.
 	envelope func() float64
@@ -641,15 +642,15 @@ func lftEnvelope(ws *lftWorkspace, nd int) func() float64 {
 
 // delayTailFreq returns a frequency beyond which the rational tail bound
 // certifies |L(s)| <= (1+|L(j∞)|)/2 < 1 on the closed right half-plane, or
-// +Inf when it cannot.
-func delayTailFreq(sys *System) float64 {
+// +Inf when it cannot, and the bound's limit lim at j∞ (+Inf when unknown).
+func delayTailFreq(sys *System) (w, lim float64) {
 	bound, err := newRationalTailBound(sys)
 	if err != nil {
-		return math.Inf(1)
+		return math.Inf(1), math.Inf(1)
 	}
-	lim := bound.at(math.Inf(1))
+	lim = bound.at(math.Inf(1))
 	if !(lim < 1) {
-		return math.Inf(1)
+		return math.Inf(1), lim
 	}
 	target := (1 + lim) / 2
 	hi := 1.0
@@ -657,7 +658,7 @@ func delayTailFreq(sys *System) float64 {
 		hi *= 2
 	}
 	if !(bound.at(hi) <= target) {
-		return math.Inf(1)
+		return math.Inf(1), lim
 	}
 	lo := hi / 2
 	for range 10 {
@@ -668,7 +669,7 @@ func delayTailFreq(sys *System) float64 {
 			lo = mid
 		}
 	}
-	return hi
+	return hi, lim
 }
 
 func phaseStep(a, b complex128) float64 {
@@ -740,7 +741,7 @@ func nyquistEncirclements(sys *System, poles []complex128, bd nyquistBoundary) (
 	var closure complex128
 	if sys.IsContinuous() {
 		if path.tau = sisoLoopDelay(sys); path.tau > 0 {
-			path.wDelay = delayTailFreq(sys)
+			path.wDelay, path.tailLim = delayTailFreq(sys)
 			if n, _, _ := sys.Dims(); sys.HasInternalDelay() && lftDelayLoopAcyclic(sys, n) {
 				nd := sys.internalDelayCount()
 				ws := newLFTWorkspace(sys, n, nd, 1, 1)
@@ -850,7 +851,7 @@ func (p *nyquistPath) continuousHalf(poles []complex128, bd nyquistBoundary, clo
 	if p.sys.HasDelay() && math.IsInf(p.wDelay, 1) && (closure != 0 || p.sys.internalDelayCount() <= 1) {
 		return errNeutralDelayTail
 	}
-	if p.sys.HasDelay() && closure != 0 {
+	if p.sys.HasDelay() && (closure != 0 || p.tailLim > 0 && !math.IsInf(p.wDelay, 1)) {
 		if w1 := p.wDelay; w1 > wHi {
 			return segment(wHi, w1)
 		}
