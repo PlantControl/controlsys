@@ -697,8 +697,11 @@ func fzApxCheckClasses(t *testing.T, s *fzSpec, op string, orig, res *System, c 
 		t.Fatalf("%s: output delay %v left\n%s", op, res.OutputDelay, s)
 	case c.io && res.Delay != nil && delayMatrixHasNonzero(res.Delay):
 		t.Fatalf("%s: I/O delay %v left\n%s", op, mat.Formatted(res.Delay), s)
-	case c.internal && res.HasInternalDelay() && !fzApxKeptIOAsInternal(orig, c):
+	case c.internal && res.HasInternalDelay():
 		t.Fatalf("%s: internal delays %v left\n%s", op, res.LFT.Tau, s)
+	}
+	if !c.io && orig.Delay != nil && delayMatrixHasNonzero(orig.Delay) && (res.Delay == nil || !mat.Equal(res.Delay, orig.Delay)) {
+		t.Fatalf("%s: kept I/O delay %v became %v\n%s", op, mat.Formatted(orig.Delay), res.Delay, s)
 	}
 	if !c.internal && orig.HasInternalDelay() {
 		if !res.HasInternalDelay() {
@@ -710,15 +713,6 @@ func fzApxCheckClasses(t *testing.T, s *fzSpec, op string, orig, res *System, c 
 			}
 		}
 	}
-}
-
-// fzApxKeptIOAsInternal reports the known case where continuous
-// AbsorbInput/AbsorbOutput turns a kept I/O-delay matrix into internal
-// delays (Series pulls it into the LFT), so AbsorbInternal in the same
-// call still leaves internal delays (BAY5BF followup). The response is
-// still checked.
-func fzApxKeptIOAsInternal(orig *System, c fzApxClasses) bool {
-	return orig.IsContinuous() && !c.io && (c.in || c.out) && orig.Delay != nil && delayMatrixHasNonzero(orig.Delay)
 }
 
 func fzApxSum(v []float64) float64 {

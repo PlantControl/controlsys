@@ -44,8 +44,8 @@ type NyquistResult struct {
 // on the stability boundary) the count is undefined and Nyquist returns
 // ErrSingularTransform. A delay loop whose winding needs more than 2^21
 // samples (|L| > 1 out to ω with ωτ in the millions), or where 1+L vanishes
-// within tolerance past ωτ = 1e5 (closed-loop roots closer to the axis than
-// the response resolves), returns ErrDelayUnsupported. A neutral delay loop, whose high-frequency gain may
+// within tolerance or float resolution of ω past ωτ = 1e5 (closed-loop roots
+// closer to the axis than the response resolves), returns ErrDelayUnsupported. A neutral delay loop, whose high-frequency gain may
 // reach 1, is counted by the closed-loop delay Nyquist test when its
 // difference operator 1 + L∞ is certified free of zeros in Re s >= 0
 // (d1·e^{−s} + d2·e^{−2s} with 1 + d1·z + d2·z² nonzero on |z| <= 1), and
@@ -427,6 +427,7 @@ type nyquistPath struct {
 	seeds []float64
 	// tau is the total loop delay; delayAliases splits steps below wDelay.
 	tau, wDelay float64
+	tailLim     float64 // tail bound on limsup |L(jω)|, > 0 with LFT feedthrough D12·D21 even when D11 = 0
 	// envelope bounds |L| at the last sample over all delay values, from
 	// the delay-free channels; nil means |L|, exact for I/O delays.
 	envelope func() float64
@@ -546,7 +547,7 @@ func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, dep
 	if !rot && !(phaseStep(1+a.v, 1+b.v) > nyquistMaxPhaseStep) {
 		return nil
 	}
-	if depth >= nyquistMaxDepth && !rot || depth >= 2*nyquistMaxDepth {
+	if depth >= nyquistMaxDepth && !rot && p.atFloor(f(a.t), f(b.t)) || depth >= 2*nyquistMaxDepth {
 		p.markOnContour(f(a.t))
 		return nil
 	}
@@ -561,6 +562,14 @@ func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, dep
 	}
 	p.vals = append(p.vals, vm)
 	return p.refine(f, m, b, depth+1)
+}
+
+// atFloor reports that bisection past nyquistMaxDepth cannot resolve arg(1+L)
+// between sa and sb. Delay loops keep bisecting down to float resolution of
+// s: their closed-loop roots near ω sit within ~π/(ωτ²) of the axis, below
+// the depth-30 width for ωτ near 1e5, and are not on the contour.
+func (p *nyquistPath) atFloor(sa, sb complex128) bool {
+	return p.tau == 0 || !(cmplx.Abs(sb-sa) > 4*eps()*math.Max(cmplx.Abs(sa), cmplx.Abs(sb)))
 }
 
 // delayAliases reports a step from sa to sb along which e^{-sτ} turns by
@@ -641,15 +650,15 @@ func lftEnvelope(ws *lftWorkspace, nd int) func() float64 {
 
 // delayTailFreq returns a frequency beyond which the rational tail bound
 // certifies |L(s)| <= (1+|L(j∞)|)/2 < 1 on the closed right half-plane, or
-// +Inf when it cannot.
-func delayTailFreq(sys *System) float64 {
+// +Inf when it cannot, and the bound's limit lim at j∞ (+Inf when unknown).
+func delayTailFreq(sys *System) (w, lim float64) {
 	bound, err := newRationalTailBound(sys)
 	if err != nil {
-		return math.Inf(1)
+		return math.Inf(1), math.Inf(1)
 	}
-	lim := bound.at(math.Inf(1))
+	lim = bound.at(math.Inf(1))
 	if !(lim < 1) {
-		return math.Inf(1)
+		return math.Inf(1), lim
 	}
 	target := (1 + lim) / 2
 	hi := 1.0
@@ -657,7 +666,7 @@ func delayTailFreq(sys *System) float64 {
 		hi *= 2
 	}
 	if !(bound.at(hi) <= target) {
-		return math.Inf(1)
+		return math.Inf(1), lim
 	}
 	lo := hi / 2
 	for range 10 {
@@ -668,7 +677,7 @@ func delayTailFreq(sys *System) float64 {
 			lo = mid
 		}
 	}
-	return hi
+	return hi, lim
 }
 
 func phaseStep(a, b complex128) float64 {
@@ -740,7 +749,7 @@ func nyquistEncirclements(sys *System, poles []complex128, bd nyquistBoundary) (
 	var closure complex128
 	if sys.IsContinuous() {
 		if path.tau = sisoLoopDelay(sys); path.tau > 0 {
-			path.wDelay = delayTailFreq(sys)
+			path.wDelay, path.tailLim = delayTailFreq(sys)
 			if n, _, _ := sys.Dims(); sys.HasInternalDelay() && lftDelayLoopAcyclic(sys, n) {
 				nd := sys.internalDelayCount()
 				ws := newLFTWorkspace(sys, n, nd, 1, 1)
@@ -850,7 +859,9 @@ func (p *nyquistPath) continuousHalf(poles []complex128, bd nyquistBoundary, clo
 	if p.sys.HasDelay() && math.IsInf(p.wDelay, 1) && (closure != 0 || p.sys.internalDelayCount() <= 1) {
 		return errNeutralDelayTail
 	}
-	if p.sys.HasDelay() && closure != 0 {
+	// LFT feedthrough D12·D21 keeps limsup |L(jω)| > 0 with D = 0, so the
+	// rational tail below never settles; the certified wDelay ends it instead.
+	if p.sys.HasDelay() && (closure != 0 || p.tailLim > 0 && !math.IsInf(p.wDelay, 1)) {
 		if w1 := p.wDelay; w1 > wHi {
 			return segment(wHi, w1)
 		}
