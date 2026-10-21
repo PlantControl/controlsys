@@ -1734,6 +1734,11 @@ func SetDelayModel(H *System, tau []float64) (*System, error) {
 	}
 	m := mN - N
 	p := pN - N
+	if n == 0 {
+		if err := storableStaticGain("SetDelayModel", p, m); err != nil {
+			return nil, err
+		}
+	}
 
 	var aMat *mat.Dense
 	if n > 0 {
