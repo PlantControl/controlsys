@@ -3319,7 +3319,8 @@ func pidTuningDynamicsSpan(plant *System) (lo, hi float64) {
 }
 
 // pidTuningCrossGrid extends the log grid omega at its own step over
-// [p.crossLow, p.crossHigh] under the floor and adds points within 4|σ| of
+// [p.crossLow, p.crossHigh] under the floor, a bound unset (≤ 0 or +Inf)
+// widening nothing, and adds points within 4|σ| of
 // each lightly damped mode σ+jω₀, and p.samples, so a crossover pair at a
 // resonance is not stepped over. Added points where p.try fails or is not
 // finite are dropped, as near rounded multiple poles at z = 1 or s = 0 under
@@ -3328,17 +3329,22 @@ func pidTuningDynamicsSpan(plant *System) (lo, hi float64) {
 func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 	n := len(omega)
 	step := math.Log(omega[n-1]/omega[0]) / float64(n-1)
-	var grid []float64
-	if p.hasCrossFloor {
-		for k := math.Ceil(math.Log(omega[0]/p.crossLow) / step); k >= 1; k-- {
-			grid = append(grid, omega[0]*math.Exp(-k*step))
+	below, above := 0., 0.
+	if p.hasCrossFloor && step > 0 && !math.IsInf(step, 0) {
+		if p.crossLow > 0 {
+			below = math.Ceil(math.Log(omega[0]/p.crossLow) / step)
+		}
+		if p.crossHigh < math.Inf(1) {
+			above = math.Ceil(math.Log(p.crossHigh/omega[n-1]) / step)
 		}
 	}
+	var grid []float64
+	for k := below; k >= 1; k-- {
+		grid = append(grid, omega[0]*math.Exp(-k*step))
+	}
 	grid = append(grid, omega...)
-	if p.hasCrossFloor {
-		for k := 1.; k <= math.Ceil(math.Log(p.crossHigh/omega[n-1])/step); k++ {
-			grid = append(grid, math.Min(omega[n-1]*math.Exp(k*step), p.crossHigh))
-		}
+	for k := 1.; k <= above; k++ {
+		grid = append(grid, math.Min(omega[n-1]*math.Exp(k*step), p.crossHigh))
 	}
 	lo, hi := grid[0], grid[len(grid)-1]
 	for _, m := range p.modes {
