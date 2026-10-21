@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -17,8 +18,8 @@ import (
 // float64 matrices. Row denominators are monic of the common-pole degree,
 // and TransferFunc.ZPK recovers the gains exactly and the roots within a
 // Rouché radius from a backward-error bound on the polynomial roots.
-// Rows with distinct poles inside the library's pole-merge window are
-// skipped (merging breaks conjugate pairs; followup).
+// Rows with distinct same-kind poles inside the library's pole-merge window
+// are skipped: merging them is a rounding-level change the bounds ignore.
 func FuzzZPKToTF(f *testing.F) {
 	for _, s := range fzConvSeeds() {
 		fzAddSeed(f, s)
@@ -36,7 +37,7 @@ func FuzzZPKToTF(f *testing.F) {
 		}
 		for i := range p {
 			if fzNearMerge(fzRowLCM(ch[i], false)) {
-				fzSkip(t, "distinct row poles within the ZPK pole-merge tolerance (merge breaks conjugate pairs)")
+				fzSkip(t, "distinct same-kind row poles within the ZPK pole-merge tolerance")
 			}
 		}
 		z, err := NewZPKMIMO(zs, ps, gs, s.Dt)
@@ -270,11 +271,16 @@ func fzConvDistinct(v []complex128) bool {
 	return true
 }
 
-// fzNearMerge reports unequal values within the 100·eps·(1+|p|) window
-// that commonDenomPoles and poleSetDifference treat as one pole.
+// fzNearMerge reports unequal same-kind values (real, upper or lower
+// half-plane) within the 100·eps·(1+|p|) window that commonDenomPoles and
+// poleSetDifference treat as one pole.
 func fzNearMerge(v []complex128) bool {
+	kind := func(c complex128) int { return cmp.Compare(imag(c), 0) }
 	for i := range v {
 		for j := i + 1; j < len(v); j++ {
+			if kind(v[i]) != kind(v[j]) {
+				continue
+			}
 			if d := cmplx.Abs(v[i] - v[j]); d != 0 && d < 400*0x1p-52*(1+math.Max(cmplx.Abs(v[i]), cmplx.Abs(v[j]))) {
 				return true
 			}

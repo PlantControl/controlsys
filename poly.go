@@ -283,13 +283,15 @@ func (p Poly) Derivative() Poly {
 }
 
 // Equal reports whether p and q have the same length and every coefficient
-// pair differs by at most tol. It does not trim leading zeros.
+// pair is identical (including infinities) or differs by at most tol. NaN
+// coefficients never match; a NaN tol matches only identical pairs. It does
+// not trim leading zeros.
 func (p Poly) Equal(q Poly, tol float64) bool {
 	if len(p) != len(q) {
 		return false
 	}
 	for i := range p {
-		if math.Abs(p[i]-q[i]) > tol {
+		if p[i] != q[i] && !(math.Abs(p[i]-q[i]) <= tol) {
 			return false
 		}
 	}

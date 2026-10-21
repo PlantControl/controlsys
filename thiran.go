@@ -13,7 +13,8 @@ import (
 // for D = 0); otherwise the filter order is N = ceil(D), which keeps the
 // filter stable. The system is SISO. A negative or non-finite tau returns
 // ErrNegativeDelay, a non-positive or non-finite dt ErrInvalidSampleTime, and
-// a filter needing more than MaxAbsorbedDelayStates states ErrInvalidArgument.
+// a filter needing more than MaxAbsorbedDelayStates states ErrInvalidArgument,
+// and non-finite coefficients ErrOverflow.
 // See https://www.mathworks.com/help/control/ref/thiran.html.
 func ThiranDelay(tau, dt float64) (*System, error) {
 	if err := validateThiranArgs(tau, dt); err != nil {
@@ -50,6 +51,11 @@ func validateThiranArgs(tau, dt float64) error {
 // thiranFilter realizes the order-N Thiran allpass filter for D samples.
 func thiranFilter(D float64, N int, dt float64) (*System, error) {
 	a := thiranCoeffs(D, N)
+	for _, v := range a {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("thiran coefficients overflow: %w", ErrOverflow)
+		}
+	}
 
 	// Transfer function in descending powers of z:
 	// den = [1, a_1, a_2, ..., a_N]
@@ -74,40 +80,19 @@ func thiranFilter(D float64, N int, dt float64) (*System, error) {
 	return result.Sys, nil
 }
 
-// thiranCoeffs computes Thiran allpass filter coefficients.
+// thiranCoeffs computes Thiran allpass filter coefficients
 // a_k = (-1)^k * C(N,k) * prod_{n=0}^{N} (D-N+n)/(D-N+k+n) for k=0..N
+// by the ratio a_k/a_{k-1} = -(N-k+1)/k * (D-N+k-1)/(D+k), which avoids
+// overflowing C(N,k) for large N.
 func thiranCoeffs(D float64, N int) []float64 {
 	a := make([]float64, N+1)
-	for k := 0; k <= N; k++ {
-		sign := 1.0
-		if k%2 != 0 {
-			sign = -1.0
-		}
-		binom := binomial(N, k)
-		prod := 1.0
-		for n := 0; n <= N; n++ {
-			prod *= (D - float64(N) + float64(n)) / (D - float64(N) + float64(k) + float64(n))
-		}
-		a[k] = sign * binom * prod
+	a[0] = 1
+	fN := float64(N)
+	for k := 1; k <= N; k++ {
+		fk := float64(k)
+		a[k] = -a[k-1] * ((fN - fk + 1) / fk) * ((D - fN + fk - 1) / (D + fk))
 	}
 	return a
-}
-
-func binomial(n, k int) float64 {
-	if k < 0 || k > n {
-		return 0
-	}
-	if k == 0 || k == n {
-		return 1
-	}
-	if k > n-k {
-		k = n - k
-	}
-	result := 1.0
-	for i := 0; i < k; i++ {
-		result *= float64(n-i) / float64(i+1)
-	}
-	return result
 }
 
 // integerDelaySS returns a discrete state-space system implementing z^{-d}

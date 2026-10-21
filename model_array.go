@@ -77,6 +77,9 @@ func NewModelArray(shape []int, models []*System) (*ModelArray, error) {
 		if dim <= 0 {
 			return nil, fmt.Errorf("NewModelArray: invalid shape dimension %d: %w", dim, ErrInvalidArgument)
 		}
+		if dim > len(models)/total {
+			return nil, fmt.Errorf("NewModelArray: shape %v product exceeds %d models: %w", shape, len(models), ErrDimensionMismatch)
+		}
 		total *= dim
 	}
 	if total != len(models) {
@@ -105,6 +108,15 @@ func NewModelArray(shape []int, models []*System) (*ModelArray, error) {
 		}
 		if err := validateModelArrayCompatible(ref, sys); err != nil {
 			return nil, fmt.Errorf("NewModelArray: %w", err)
+		}
+		if !stringSlicesCompatible(arr.inputName, sys.InputName) || !stringSlicesCompatible(arr.outputName, sys.OutputName) {
+			return nil, fmt.Errorf("NewModelArray: signal names differ: %w", ErrInvalidArgument)
+		}
+		if len(arr.inputName) == 0 {
+			arr.inputName = copyStringSlice(sys.InputName)
+		}
+		if len(arr.outputName) == 0 {
+			arr.outputName = copyStringSlice(sys.OutputName)
 		}
 	}
 	if ref == nil {
@@ -366,9 +378,6 @@ func validateModelArrayCompatible(ref, sys *System) error {
 	}
 	if ref.Dt != sys.Dt {
 		return fmt.Errorf("sample time %g != %g: %w", sys.Dt, ref.Dt, ErrDomainMismatch)
-	}
-	if !stringSlicesCompatible(ref.InputName, sys.InputName) || !stringSlicesCompatible(ref.OutputName, sys.OutputName) {
-		return fmt.Errorf("signal names differ: %w", ErrInvalidArgument)
 	}
 	return nil
 }

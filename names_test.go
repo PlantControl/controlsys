@@ -1015,3 +1015,71 @@ func TestConnectByNameRejectsDuplicateConnection(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidArgument", err)
 	}
 }
+
+func TestSystem_String_WideEntries(t *testing.T) {
+	g, err := NewGain(mat.NewDense(1, 1, []float64{0.123456789}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantG := "D =\n" +
+		"          u1\n" +
+		"  y1  0.1235\n" +
+		"\n" +
+		"Continuous-time state-space model.\n"
+	if got := g.String(); got != wantG {
+		t.Errorf("gain String =\n%s\nwant\n%s", got, wantG)
+	}
+
+	sys, err := New(
+		mat.NewDense(2, 2, []float64{-123456.7, 1e-7, -2.5, 10}),
+		mat.NewDense(2, 1, []float64{-0.5, math.Copysign(0, -1)}),
+		mat.NewDense(1, 2, []float64{1, 2}),
+		mat.NewDense(1, 1, []float64{3}),
+		0.1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys.StateName = []string{"position", "v"}
+	want := "A =\n" +
+		"              position      v\n" +
+		"  position  -1.235e+05  1e-07\n" +
+		"  v               -2.5     10\n" +
+		"\n" +
+		"B =\n" +
+		"              u1\n" +
+		"  position  -0.5\n" +
+		"  v            0\n" +
+		"\n" +
+		"C =\n" +
+		"      position  v\n" +
+		"  y1         1  2\n" +
+		"\n" +
+		"D =\n" +
+		"      u1\n" +
+		"  y1   3\n" +
+		"\n" +
+		"Discrete-time state-space model (Dt = 0.1).\n"
+	if got := sys.String(); got != want {
+		t.Errorf("String =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestFormatDisplayValue(t *testing.T) {
+	for _, tc := range []struct {
+		v    float64
+		want string
+	}{
+		{0.123456789, "0.1235"},
+		{math.Copysign(0, -1), "0"},
+		{math.NaN(), "NaN"},
+		{math.Inf(1), "Inf"},
+		{math.Inf(-1), "-Inf"},
+		{-1, "-1"},
+		{1e5, "1e+05"},
+	} {
+		if got := formatDisplayValue(tc.v); got != tc.want {
+			t.Errorf("formatDisplayValue(%v) = %q, want %q", tc.v, got, tc.want)
+		}
+	}
+}

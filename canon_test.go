@@ -337,6 +337,35 @@ func TestCanonRejectsInvalidSystem(t *testing.T) {
 	}
 }
 
+func TestCanonModalInaccurateEigenvectorsFallBackToSchur(t *testing.T) {
+	s := fzDecode(t, 0x7f, [fzNVals]float64{0.1, 0.3, 2.4000000000000004, 0.2, -10.625, 75, 86, 0, -0.23299000144533957, 41, 0.015416666666666667, 550, -10, -1, 9, -10})
+	sys := s.System(t, fzSysOpts{})
+	res, err := Canon(sys, CanonModal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _, _ := sys.Dims()
+	normA := mat.Norm(sys.A, 1)
+	tol := 1e-12 * normA
+	ac := res.Sys.A
+	for i := 1; i < n; i++ {
+		for j := range i {
+			if math.Abs(ac.At(i, j)) > tol {
+				t.Fatalf("Ac[%d,%d] = %g, want upper triangular for real eigenvalues (‖A‖₁ %g):\n%v", i, j, ac.At(i, j), normA, mat.Formatted(ac))
+			}
+		}
+	}
+	if tr := mat.Trace(sys.A); math.Abs(ac.At(n-1, n-1)-tr) > tol {
+		t.Errorf("dominant eigenvalue Ac[%d,%d] = %v, want trace %v", n-1, n-1, ac.At(n-1, n-1), tr)
+	}
+	for i := range n - 1 {
+		if math.Abs(ac.At(i, i)) > tol {
+			t.Errorf("Ac[%d,%d] = %g, want ≈ 0 (rank-1 A)", i, i, ac.At(i, i))
+		}
+	}
+	checkCanonT(t, sys, res, tol)
+}
+
 func TestCanonModalTransformConvention(t *testing.T) {
 	for name, A := range map[string]*mat.Dense{
 		"eig":   mat.NewDense(3, 3, []float64{-1, 4, 0, -2, -1, 1, 0, 0.5, -3}),

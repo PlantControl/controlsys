@@ -8,7 +8,7 @@ import (
 )
 
 // SsbalResult is the result of Ssbal: the balanced model Sys and the
-// diagonal transformation T with Sys = (T⁻¹AT, T⁻¹B, CT, D).
+// diagonal transformation T with Sys = (T·A/T, T·B, C/T, D).
 type SsbalResult struct {
 	Sys *System
 	T   *mat.Dense

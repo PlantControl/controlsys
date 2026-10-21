@@ -328,19 +328,17 @@ func fzAPICheckEqual(t *testing.T, in *fzAPIIn, p, q Poly, tol float64) {
 	want := len(p) == len(q)
 	if want {
 		for i := range p {
-			if !(math.Abs(p[i]-q[i]) <= tol) {
+			a, b := p[i], q[i]
+			if math.IsNaN(a) || math.IsNaN(b) || (a != b && !(math.Abs(a-b) <= tol)) {
 				want = false
 			}
 		}
 	}
 	got := p.Equal(q, tol)
 	if got != want {
-		if got && (!fzAPIFinite(p...) || !fzAPIFinite(q...) || math.IsNaN(tol)) {
-			fzSkip(t, "known: Poly.Equal treats NaN differences as equal")
-		}
 		t.Fatalf("Equal(%v, %v, %g) = %v, want %v\n%s", p, q, tol, got, want, in)
 	}
-	if !p.Equal(slices.Clone(p), 0) && fzAPIFinite(p...) {
+	if !p.Equal(slices.Clone(p), 0) && !slices.ContainsFunc(p, math.IsNaN) {
 		t.Fatalf("finite %v not Equal to its copy\n%s", p, in)
 	}
 }
@@ -773,10 +771,6 @@ func FuzzAPISystem(f *testing.F) {
 			t.Fatalf("%s accepted invalid blocks (%s)\n%s\n%s", op, pt.Desc, in, s)
 		}
 		fzAPIRequireValid(t, in, op, sys)
-		empty := func(m *mat.Dense) bool { return m == nil || m.IsEmpty() }
-		if empty(pt.A) && empty(pt.B) && !empty(pt.C) {
-			fzSkip(t, "known: New with empty A and B drops a non-empty C")
-		}
 		if op != "NewFromSlices" {
 			for i, got := range []*mat.Dense{sys.A, sys.B, sys.C, sys.D} {
 				if !fzAPISameBlock(inputs[i], got) {
@@ -1095,14 +1089,17 @@ func FuzzAPIModelArray(f *testing.F) {
 		prod, positive := fzAPIShapeProduct(shape)
 		var ref *System
 		compatible := true
-		for _, sys := range models {
+		for i, sys := range models {
 			if sys == nil {
 				continue
 			}
 			if ref == nil {
 				ref = sys
-			} else if !fzAPICompatible(ref, sys) {
-				compatible = false
+			}
+			for _, other := range models[:i] {
+				if other != nil && !fzAPICompatible(other, sys) {
+					compatible = false
+				}
 			}
 		}
 		exact := prod.IsInt64() && prod.Int64() == int64(count)
@@ -1117,20 +1114,10 @@ func FuzzAPIModelArray(f *testing.F) {
 		arr, err := NewModelArray(shape, models)
 		fzAPIContract(t, in, "NewModelArray", arr != nil, err)
 		if (err == nil) != want {
-			if err == nil && positive && !exact {
-				fzAPIModelArrayOverflow(t, arr, shape)
-			}
 			t.Fatalf("NewModelArray(%v, %d models, compatible %v): err %v, want ok %v\n%s", shape, count, compatible, err, want, in)
 		}
 		if err != nil {
 			fzAPIRejected(t, "NewModelArray", err)
-		}
-		for i, a := range snaps {
-			for _, b := range snaps[:i] {
-				if a != nil && b != nil && !fzAPICompatible(a, b) {
-					fzSkip(t, "known: NewModelArray checks names only against the first model")
-				}
-			}
 		}
 		for i, sys := range models {
 			if sys != nil {
@@ -1222,25 +1209,6 @@ func FuzzAPIModelArray(f *testing.F) {
 			}
 		}
 	})
-}
-
-// fzAPIModelArrayOverflow handles an array accepted with a shape whose
-// exact product differs from its model count (int wrap-around).
-func fzAPIModelArrayOverflow(t *testing.T, arr *ModelArray, shape []int) {
-	t.Helper()
-	idx := make([]int, len(shape))
-	for i, d := range shape {
-		idx[i] = d - 1
-	}
-	panicked := func() (p bool) {
-		defer func() { p = recover() != nil }()
-		_, _ = arr.IsVoid(idx...)
-		return false
-	}()
-	if panicked {
-		fzSkip(t, "known: NewModelArray accepts wrapped shape product; IsVoid panics")
-	}
-	fzSkip(t, "known: NewModelArray accepts wrapped shape product")
 }
 
 func fzAPINilModelArray(t *testing.T, in *fzAPIIn) {

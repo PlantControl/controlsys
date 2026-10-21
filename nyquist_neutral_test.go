@@ -270,11 +270,44 @@ func TestNyquistNeutralTwoGainSweep(t *testing.T) {
 	}
 }
 
-// TestNyquistDelayRootsBelowResolution: 33894/(s+18.92)·e^{−5.23s} has
-// about 5.6e4 RHP roots, those near |s| ~ k within 2π/(kτ²) ~ 7e-6 of the
-// axis, inside the on-contour tolerance; it returned ErrSingularTransform as
-// if the closed loop had axis poles. A delayed loop with a true axis root at
-// ωτ ~ 2 still does.
+// firstOrderDelayRHPRoots counts the roots of s + a + k·e^{−sτ} in Re s > 0
+// from the Lambert-W branches z_n = W_n(−kτ·e^{aτ}), s = z/τ − a, each
+// solved by Newton on z + Log z = Log x + 2πjn.
+func firstOrderDelayRHPRoots(k, a, tau float64) int {
+	lx := complex(math.Log(k*tau)+a*tau, math.Pi)
+	nb := int(k*tau/(2*math.Pi)) + 200
+	seen := make(map[[2]float64]bool)
+	count := 0
+	for n := -nb - 1; n <= nb; n++ {
+		l := lx + complex(0, 2*math.Pi*float64(n))
+		w := l - cmplx.Log(l)
+		for range 100 {
+			w2 := w - (w+cmplx.Log(w)-l)/(1+1/w)
+			done := cmplx.Abs(w2-w) < 1e-15*cmplx.Abs(w)
+			w = w2
+			if done {
+				break
+			}
+		}
+		s := w/complex(tau, 0) - complex(a, 0)
+		key := [2]float64{math.Round(real(s) * 1e9), math.Round(imag(s) * 1e6)}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if real(s) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
+// TestNyquistDelayRootsBelowResolution: k/(s+a)·e^{−sτ} with kτ ~ 1e5 has
+// closed-loop roots near |s| ~ k within ~π/(kτ²) of the axis, below the
+// depth-30 bisection width; Nyquist returned ErrSingularTransform (ωτ ~ 1e5)
+// or ErrDelayUnsupported (33894/(s+18.92)·e^{−5.23s}) as if they were on the
+// axis. A delayed loop with a true axis root at ωτ ~ 2 still returns
+// ErrSingularTransform.
 func TestNyquistDelayRootsBelowResolution(t *testing.T) {
 	loop := func(k, a, tau float64) *System {
 		sys, err := NewFromSlices(1, 1, 1, []float64{-a}, []float64{1}, []float64{k}, []float64{0}, 0)
@@ -286,11 +319,21 @@ func TestNyquistDelayRootsBelowResolution(t *testing.T) {
 		}
 		return sys
 	}
-	_, err := loop(33894, 18.92, 5.23).Nyquist(nil, 0)
-	if !errors.Is(err, ErrDelayUnsupported) || errors.Is(err, ErrSingularTransform) {
-		t.Errorf("ωτ ~ 1.8e5: err %v, want ErrDelayUnsupported", err)
+	for _, tc := range []struct{ k, a, tau float64 }{
+		{33894, 18.92, 5.23},
+		{1e5, 18.92, 1},
+		{1e4, 18.92, 30},
+	} {
+		res, err := loop(tc.k, tc.a, tc.tau).Nyquist(nil, 0)
+		if err != nil {
+			t.Errorf("k=%g τ=%g: %v", tc.k, tc.tau, err)
+			continue
+		}
+		if want := firstOrderDelayRHPRoots(tc.k, tc.a, tc.tau); res.RHPZerosCL != want {
+			t.Errorf("k=%g τ=%g: RHPZerosCL %d, want %d", tc.k, tc.tau, res.RHPZerosCL, want)
+		}
 	}
-	_, err = loop(2, 1, 2*math.Pi/(3*math.Sqrt(3))).Nyquist(nil, 0)
+	_, err := loop(2, 1, 2*math.Pi/(3*math.Sqrt(3))).Nyquist(nil, 0)
 	if !errors.Is(err, ErrSingularTransform) {
 		t.Errorf("axis root at ω = √3: err %v, want ErrSingularTransform", err)
 	}

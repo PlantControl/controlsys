@@ -1094,13 +1094,13 @@ func absorbInputDelayContinuous(sys *System, order int) (*System, error) {
 
 	plant := sys.Copy()
 	plant.InputDelay = nil
+	plant.Delay = nil
 
 	result, err := Series(bank, plant)
 	if err != nil {
 		return nil, fmt.Errorf("absorbInputDelayContinuous: %w", err)
 	}
-
-	return result, nil
+	return keepIODelay(result, sys.Delay), nil
 }
 
 func absorbOutputDelayContinuous(sys *System, order int) (*System, error) {
@@ -1126,13 +1126,23 @@ func absorbOutputDelayContinuous(sys *System, order int) (*System, error) {
 
 	plant := sys.Copy()
 	plant.OutputDelay = nil
+	plant.Delay = nil
 
 	result, err := Series(plant, bank)
 	if err != nil {
 		return nil, fmt.Errorf("absorbOutputDelayContinuous: %w", err)
 	}
+	return keepIODelay(result, sys.Delay), nil
+}
 
-	return result, nil
+// keepIODelay restores the I/O-delay matrix of a plant wrapped by a diagonal
+// Padé bank: each bank channel scales one input (or output), so delay (i,j)
+// still sits on path (i,j) of the result.
+func keepIODelay(result *System, delay *mat.Dense) *System {
+	if delay != nil && delayMatrixHasNonzero(delay) {
+		result.Delay = mat.DenseCopyOf(delay)
+	}
+	return result
 }
 
 func absorbIODelayContinuous(sys *System, order int) (*System, error) {

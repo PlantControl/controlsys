@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math/cmplx"
+	"slices"
 	"sort"
 )
 
@@ -367,6 +368,9 @@ func sortConjugatePairs(roots []complex128) []complex128 {
 	return result
 }
 
+// commonDenomPoles merges the channel pole sets of one row, treating poles
+// within 100·eps·(1+|p|) as equal. Real poles match only real poles and a
+// complex pair matches only a complex pair, so the result stays conjugate-closed.
 func commonDenomPoles(channelPoles [][]complex128) []complex128 {
 	if len(channelPoles) == 0 {
 		return nil
@@ -375,22 +379,20 @@ func commonDenomPoles(channelPoles [][]complex128) []complex128 {
 		return copyComplex(channelPoles[0])
 	}
 
-	tol := 100 * eps()
 	result := copyComplex(channelPoles[0])
 	for j := 1; j < len(channelPoles); j++ {
 		avail := copyComplex(result)
 		for _, p := range channelPoles[j] {
-			found := false
-			matchTol := tol * (1 + cmplx.Abs(p))
-			for k := 0; k < len(avail); k++ {
-				if cmplx.Abs(avail[k]-p) < matchTol {
-					avail = append(avail[:k], avail[k+1:]...)
-					found = true
-					break
-				}
+			if imag(p) < 0 {
+				continue
 			}
+			var found bool
+			avail, found = removeMatchingPole(avail, p)
 			if !found {
 				result = append(result, p)
+				if imag(p) > 0 {
+					result = append(result, cmplx.Conj(p))
+				}
 			}
 		}
 	}
@@ -398,16 +400,45 @@ func commonDenomPoles(channelPoles [][]complex128) []complex128 {
 }
 
 func poleSetDifference(all, subset []complex128) []complex128 {
-	tol := 100 * eps()
 	remaining := copyComplex(all)
 	for _, p := range subset {
-		matchTol := tol * (1 + cmplx.Abs(p))
-		for k := 0; k < len(remaining); k++ {
-			if cmplx.Abs(remaining[k]-p) < matchTol {
-				remaining = append(remaining[:k], remaining[k+1:]...)
-				break
-			}
+		if imag(p) >= 0 {
+			remaining, _ = removeMatchingPole(remaining, p)
 		}
 	}
 	return remaining
+}
+
+// removeMatchingPole removes from set the first pole of p's kind (real or
+// upper half-plane) within 100·eps·(1+|p|) of p, with its nearest lower
+// half-plane partner within the same tolerance of conj(q).
+func removeMatchingPole(set []complex128, p complex128) ([]complex128, bool) {
+	tol := 100 * eps() * (1 + cmplx.Abs(p))
+	for k, q := range set {
+		if (imag(q) > 0) != (imag(p) > 0) || imag(q) < 0 || cmplx.Abs(q-p) >= tol {
+			continue
+		}
+		set = slices.Delete(set, k, k+1)
+		if imag(q) > 0 {
+			cq := cmplx.Conj(q)
+			qtol := 100 * eps() * (1 + cmplx.Abs(q))
+			best, bestD := -1, qtol
+			for c, r := range set {
+				if imag(r) >= 0 {
+					continue
+				}
+				if d := cmplx.Abs(r - cq); d < bestD {
+					best, bestD = c, d
+					if d == 0 {
+						break
+					}
+				}
+			}
+			if best >= 0 {
+				set = slices.Delete(set, best, best+1)
+			}
+		}
+		return set, true
+	}
+	return set, false
 }
