@@ -131,4 +131,16 @@ func TestTransferFunctionIOScaleOverflowFallsBack(t *testing.T) {
 			t.Fatalf("non-finite coefficient: %v / %v", res.TF.Num, res.TF.Den)
 		}
 	}
+	// HCARIK: the fallback once returned D only, dropping the eigenvalue
+	// trace(A) ≈ 1.2e115 that the data resolves. The other eigenvalues sum to
+	// ~eps·‖A‖ and move between platforms, so only den(1) = -trace(A) is
+	// checked.
+	if res.MinimalOrder < 1 || len(res.TF.Den[0]) < 2 {
+		t.Fatalf("MinimalOrder %d, den %v: lost the 1.2e115 pole", res.MinimalOrder, res.TF.Den[0])
+	}
+	tr := mat.Trace(A)
+	if d := math.Abs(res.TF.Den[0][1]+tr) / math.Abs(tr); d > 1e-12 {
+		t.Errorf("den(1) %g, want -trace(A) = %g", res.TF.Den[0][1], -tr)
+	}
+	checkTFMatchesSS(t, sys, res)
 }
