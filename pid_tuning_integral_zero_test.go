@@ -102,7 +102,7 @@ func TestPIDTuningIdealStableBand(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got, err := pidTuningIdealStable(plant, tf, c); err != nil || got != tc.want {
+		if got, err := pidTuningIdealStable(plant, tf, c, 0); err != nil || got != tc.want {
 			t.Errorf("z %g: pidTuningIdealStable %v %v, want %v (slow root %g)", tc.z, got, err, tc.want, slow)
 		}
 	}

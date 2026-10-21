@@ -60,7 +60,7 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 			break
 		}
 	}
-	p := pidTuningPlant{dt: data.Dt, low: low, high: high, stability: PIDStabilitySampledOnly, warnings: warnings, at: func(w float64) complex128 {
+	p := pidTuningPlant{dt: data.Dt, low: low, high: high, samples: data.Omega, stability: PIDStabilitySampledOnly, warnings: warnings, at: func(w float64) complex128 {
 		// Core-generated endpoints may differ by a few ulps after exp(log(endpoint)).
 		if w <= low {
 			return data.Response[0][0][0]
