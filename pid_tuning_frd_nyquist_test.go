@@ -54,6 +54,7 @@ func pidRandomStableTest(rng *rand.Rand, discrete bool, mLo, mHi float64) (num, 
 // pidRandomControllerTest returns a random PID2 of random gain signs and
 // scales, filtered and discrete formulas as a tuning candidate may have
 // them: a discrete forward-Euler filter pole stays inside the unit circle.
+// An unfiltered trapezoidal derivative, whose pole is z = −1, is kept.
 func pidRandomControllerTest(rng *rand.Rand, dt float64) PID2 {
 	gain := func() float64 {
 		if rng.IntN(3) == 0 {
@@ -71,7 +72,7 @@ func pidRandomControllerTest(rng *rand.Rand, dt float64) PID2 {
 	}
 	if dt > 0 {
 		c.IFormula, c.DFormula = PIDFormula(rng.IntN(3)), PIDFormula(rng.IntN(3))
-		if c.Kd != 0 && (c.DFormula == Trapezoidal || c.DFormula == ForwardEuler) {
+		if c.Kd != 0 && (c.DFormula == ForwardEuler || c.DFormula == Trapezoidal && (c.Tf != 0 || rng.IntN(2) == 0)) {
 			c.Tf = math.Max(c.Tf, .51*dt+rng.Float64()*dt)
 		}
 	}
@@ -142,8 +143,16 @@ func TestPIDTuningFRDNyquistMatchesClosedLoopRoots(t *testing.T) {
 				}
 				truth = re < 0
 			}
+			circle := discrete && c.DFormula == Trapezoidal && c.Kd != 0 && c.Tf == 0
 			if stable == truth {
 				counts[fmt.Sprint("agree ", truth)]++
+				if circle {
+					counts[fmt.Sprint("circle agree ", truth)]++
+				}
+				continue
+			}
+			if circle && !stable {
+				counts["circle conservative"]++
 				continue
 			}
 			peak, coarse := 0., false
@@ -199,6 +208,8 @@ func TestTunePIDFRDNyquistRejectsUnstable(t *testing.T) {
 		{[]float64{0.3, 0.1}, []float64{1, -1.2, 0.5}, 0.1, .99 * math.Pi / .1, 400, PidtunePD, PIDTuningOptions{}},
 		{[]float64{-0.4}, []float64{1, -1, 0.21}, 0.1, .99 * math.Pi / .1, 400, PidtunePDF, PIDTuningOptions{}},
 		{[]float64{-0.2663672599168507}, []float64{1, 0.11429480673807586}, 1, .99 * math.Pi, 300, PidtunePD, PIDTuningOptions{PhaseMargin: 30}},
+		{[]float64{-1.5922915627578975}, []float64{1, 0.48084657842224776, -0.229647666493918, -0.24499938323157466}, .1, .95 * math.Pi / .1, 100, PidtunePIDF, PIDTuningOptions{PhaseMargin: 60, IFormula: Trapezoidal, DFormula: ForwardEuler}},
+		{[]float64{0.1414054834811695}, []float64{1, 0.339647109509878}, .1, .95 * math.Pi / .1, 300, PidtunePID, PIDTuningOptions{IFormula: BackwardEuler, DFormula: Trapezoidal}},
 	} {
 		name := fmt.Sprintf("case %d %s", i, c.family)
 		frd := pidExactFRD(t, c.num, c.den, 1e-3, c.top, c.n)
@@ -223,6 +234,41 @@ func TestTunePIDFRDNyquistRejectsUnstable(t *testing.T) {
 			}
 		} else if re := pidClosedLoopMaxRe(c.num, c.den, k); re >= 0 {
 			t.Errorf("%s: %+v closed-loop root at Re %g, reported margin %g", name, k, re, r.Evidence.AchievedPhaseMargin)
+		}
+	}
+}
+
+// PHCKA5: the count passed both loops, unstable by exact Schur–Cohn. Near
+// Nyquist the first ends at L(top) ≈ −1.17−0.71i, off the real axis, with
+// |L| < 2 and falling, and was taken to roll off to 1, but a discrete L ends
+// at the real L(z = −1) ≈ −1.35. The second's unfiltered trapezoidal
+// derivative has a pole at z = −1, where L is infinite; the count now
+// indents around it when the data reach Nyquist, and rejects it otherwise.
+func TestPIDTuningFRDNyquistCountDiscreteEnd(t *testing.T) {
+	for i, c := range []struct {
+		num, den []float64
+		top      float64
+		n        int
+		k        PID2
+	}{
+		{[]float64{-1.5922915627578975}, []float64{1, 0.48084657842224776, -0.229647666493918, -0.24499938323157466}, .95, 100, PID2{IFormula: Trapezoidal, DFormula: ForwardEuler, Kp: 0.25896778699491796, Ki: -0.11375686811654179, Kd: -0.45651873292666056, Tf: 0.6923550298018075}},
+		{[]float64{0.1414054834811695}, []float64{1, 0.339647109509878}, .95, 300, PID2{IFormula: BackwardEuler, DFormula: Trapezoidal, Kp: -4.26539128402222, Ki: 1.468112459608114, Kd: 0.013388731061589365}},
+		{[]float64{0.1414054834811695}, []float64{1, 0.339647109509878}, .3, 300, PID2{IFormula: BackwardEuler, DFormula: Trapezoidal, Kp: -4.26539128402222, Ki: 1.468112459608114, Kd: 0.013388731061589365}},
+	} {
+		const dt = .1
+		k := c.k
+		k.B, k.C, k.Dt = 1, 1, dt
+		if pidtuneExactSchur(&PID{IFormula: k.IFormula, DFormula: k.DFormula, Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Tf: k.Tf, Dt: dt}, c.num, c.den, dt) {
+			t.Fatalf("case %d: oracle stable", i)
+		}
+		frd := pidExactFRD(t, c.num, c.den, 1e-3, c.top*math.Pi/dt, c.n)
+		for j, w := range frd.Omega {
+			z := cmplx.Exp(complex(0, w*dt))
+			frd.Response[j][0][0] = pidPolyAt(c.num, z) / pidPolyAt(c.den, z)
+		}
+		frd.Dt = dt
+		if stable, known := pidTuningFRDNyquistCount(k, pidTuningFRDPlant(frd, nil)); stable && known {
+			t.Errorf("case %d: count certifies an unstable loop", i)
 		}
 	}
 }

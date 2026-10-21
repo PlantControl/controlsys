@@ -176,8 +176,14 @@ func pidTuningFRDDCGain(data *FRD, at func(float64) complex128) float64 {
 // unstable open-loop poles the number of unstable closed-loop roots is
 // −Δ/π, plus ½ with integral action for its indentation at s = 0 (z = 1),
 // where Δ is the phase change of 1 + L along ω from 0⁺ to +∞ (z = −1). The
-// continuous derivative filter pole and the discrete ones (Tf > Dt/2 for
-// forward Euler) are stable, so they add none. Below the band G runs
+// continuous derivative filter pole is stable, so it adds none; a discrete
+// one, 1 − Dt/(Tf + w·Dt) for the derivative formula's weight w, outside
+// the unit circle rejects c. On it, at z = −1 (an unfiltered trapezoidal
+// derivative), L is infinite: c is rejected unless the data reach within
+// 10% of Nyquist with G within 30° of the real axis, |L| >= 2, and the
+// derivative term at least twice the rest of c, all at the top sample; then
+// 1 + L heads to j·s·∞, s the sign of Kd·Re G, and the indentation turns it
+// by −π/2 to s·∞ on the real axis. Below the band G runs
 // linearly from the DC gain to the lowest sample, between samples along
 // their interpolant, each step bisected until 1 + L turns by under 90°; one
 // that cannot be rejects c, as its |S| is unbounded. Above the band 1 + L
@@ -185,7 +191,9 @@ func pidTuningFRDDCGain(data *FRD, at func(float64) complex128) float64 {
 // 10% of Nyquist with L within 30° of the real axis instead ends it at
 // 1 + L(z = −1), which is real; Re L is extrapolated there as even in the
 // distance to Nyquist from the top two samples, and an estimate whose sign
-// that step leaves unresolved rejects c. Otherwise |L| >= 1 at the top: a
+// that step leaves unresolved rejects c; any other L there with |L| >= 1
+// rejects c, as a discrete L ends at the real L(z = −1), not 0. Otherwise
+// |L| >= 1 at the top: a
 // continuous L within 30° of the real axis, as an ideal derivative on a
 // relative-degree-one plant leaves it, ends at 1 + Re L, rejecting c when
 // |1 + L| < 0.1 there; any other L below 2 and falling from the sample
@@ -202,6 +210,11 @@ func pidTuningFRDNyquistCount(c PID2, p pidTuningPlant) (stable, known bool) {
 	if p.dcGain == 0 {
 		return true, false
 	}
+	k := c.Tf + c.Dt*pidFormulaWeight(c.DFormula)
+	if c.Dt > 0 && c.Kd != 0 && k != 0 && k < c.Dt/2 {
+		return false, true
+	}
+	circle := c.Dt > 0 && c.Kd != 0 && k == c.Dt/2
 	dc := complex(p.dcGain, 0)
 	gLow := p.at(p.low)
 	at := func(w float64) complex128 {
@@ -214,10 +227,17 @@ func pidTuningFRDNyquistCount(c PID2, p pidTuningPlant) (stable, known bool) {
 		return 1 + g*pidTuningFeedback(c, w)
 	}
 	l := p.highGain * pidTuningFeedback(c, p.high)
-	end := complex128(1)
+	end, bump := complex128(1), 0.
 	nearReal := math.Abs(imag(l)) <= .5*cmplx.Abs(l)
 	nyquist := c.Dt > 0 && p.high*c.Dt >= .9*math.Pi
 	switch {
+	case circle:
+		i, d := pidTuningBasis(c, p.high)
+		g, s := p.highGain, math.Copysign(1, c.Kd*real(p.highGain))
+		if !nyquist || !(math.Abs(imag(g)) <= .5*cmplx.Abs(g)) || !(cmplx.Abs(complex(c.Kd, 0)*d) >= 2*cmplx.Abs(complex(c.Kp, 0)+complex(c.Ki, 0)*i)) || !(cmplx.Abs(l) >= 2) || s*imag(l) <= 0 {
+			return false, true
+		}
+		end, bump = complex(0, s), -math.Pi/2
 	case nyquist && nearReal:
 		w2 := p.samples[len(p.samples)-2]
 		e1, e2 := math.Pi/c.Dt-p.high, math.Pi/c.Dt-w2
@@ -228,6 +248,8 @@ func pidTuningFRDNyquistCount(c PID2, p pidTuningPlant) (stable, known bool) {
 		}
 		end = complex(1+r0, 0)
 	case cmplx.Abs(l) < 1:
+	case nyquist:
+		return true, false
 	case !nearReal || c.Dt > 0:
 		w2 := p.samples[len(p.samples)-2]
 		dec := cmplx.Abs(p.at(w2)*pidTuningFeedback(c, w2)) > cmplx.Abs(l)
@@ -295,6 +317,6 @@ func pidTuningFRDNyquistCount(c PID2, p pidTuningPlant) (stable, known bool) {
 	if fPrev == 0 {
 		return false, true
 	}
-	total += turn(fPrev, end)
+	total += turn(fPrev, end) + bump
 	return math.Abs(expected-total) < math.Pi/2, true
 }
