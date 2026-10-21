@@ -330,27 +330,30 @@ func orderedQZ(n int, a, e blas64.General, selct func(ar, ai, b float64) bool,
 	copy(first, alphar)
 	copy(first[n:], alphai)
 	copy(first[2*n:], beta)
-	toLambda := func(ar, ai, b float64) (float64, float64, float64) {
-		mod := math.Hypot(ar, ai)
-		if mod == 0 {
-			return b, 0, 0
-		}
-		return b * (ar / mod), -b * (ai / mod), mod
-	}
 	reciprocal := func(ar, ai, b float64) bool {
-		return selct(toLambda(ar, ai, b))
+		return selct(qzReciprocal(ar, ai, b))
 	}
 	copyStrided(s, n, a.Data, a.Stride, n, n)
 	copyStrided(t, n, e.Data, e.Stride, n, n)
 	n1r, okr := impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, reciprocal, n, t, n, s, n,
 		alphar, alphai, beta, q, n, z, n, work, len(work), bwork)
 	for i := range n {
-		alphar[i], alphai[i], beta[i] = toLambda(alphar[i], alphai[i], beta[i])
+		alphar[i], alphai[i], beta[i] = qzReciprocal(alphar[i], alphai[i], beta[i])
 	}
 	if !okr || n1r != n1 || !qzRetryConsistent(first, alphar, alphai, beta, selct) {
 		return n1, false, false
 	}
 	return n1, true, true
+}
+
+// qzReciprocal maps an eigenvalue μ = (α_r + iα_i)/β of the reciprocal
+// pencil (E, A) to λ = 1/μ of (A, E), as (α_r, α_i, β) with β ≥ 0.
+func qzReciprocal(ar, ai, b float64) (float64, float64, float64) {
+	mod := math.Hypot(ar, ai)
+	if mod == 0 {
+		return b, 0, 0
+	}
+	return b * (ar / mod), -b * (ai / mod), mod
 }
 
 // qzSylvester solves S11·R − L·S22 = scale·C, T11·R − L·T22 = scale·F for

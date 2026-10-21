@@ -1753,16 +1753,7 @@ func (problem *riccatiProblem) generalizedStableSubspace(continuous bool, d ricc
 		}
 	}
 
-	var workQuery [1]float64
-	impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, stable,
-		nn, h, nn, j, nn, alphaR, alphaI, beta, nil, 1, vectors, nn, workQuery[:], -1, bwork)
-	lwork := int(workQuery[0])
-	if len(ws.work) < lwork {
-		ws.work = make([]float64, lwork)
-	}
-
-	sdim, ok := impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, stable,
-		nn, h, nn, j, nn, alphaR, alphaI, beta, nil, 1, vectors, nn, ws.work, lwork, bwork)
+	sdim, ok := stableDeflatingQZ(nn, h, j, hLeft[m*nn:], jLeft[m*nn:], stable, alphaR, alphaI, beta, vectors, &ws.work, bwork)
 	if !ok {
 		return riccatiSubspace{}, ErrSchurFailed
 	}
@@ -1781,4 +1772,41 @@ func (problem *riccatiProblem) generalizedStableSubspace(continuous bool, d ricc
 		alphaI:  alphaI,
 		beta:    beta,
 	}, nil
+}
+
+// stableDeflatingQZ writes to vectors the right Schur vectors Z of the
+// generalized Schur form of the nn×nn pencil (h, j), a copy of (h0, j0),
+// ordered so that the sdim eigenvalues selected by stable lead, with the
+// eigenvalues in alphaR, alphaI, beta; h and j are overwritten. A reorder
+// that Dgges rejects (a borderline swap, Netlib DTGEX2 parity) is retried
+// on the reciprocal pencil (j, h), whose deflating subspaces are the same,
+// and kept only when its eigenvalues match the first run's one to one
+// (qzRetryConsistent); ok is false otherwise.
+func stableDeflatingQZ(nn int, h, j, h0, j0 []float64, stable func(ar, ai, b float64) bool,
+	alphaR, alphaI, beta, vectors []float64, work *[]float64, bwork []bool) (sdim int, ok bool) {
+	var workQuery [1]float64
+	impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, stable,
+		nn, h, nn, j, nn, alphaR, alphaI, beta, nil, 1, vectors, nn, workQuery[:], -1, bwork)
+	lwork := int(workQuery[0])
+	if len(*work) < lwork {
+		*work = make([]float64, lwork)
+	}
+	sdim, ok = impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, stable,
+		nn, h, nn, j, nn, alphaR, alphaI, beta, nil, 1, vectors, nn, *work, lwork, bwork)
+	if ok {
+		return sdim, true
+	}
+	first := make([]float64, 3*nn)
+	copy(first, alphaR)
+	copy(first[nn:], alphaI)
+	copy(first[2*nn:], beta)
+	copy(h, h0)
+	copy(j, j0)
+	reciprocal := func(ar, ai, b float64) bool { return stable(qzReciprocal(ar, ai, b)) }
+	sdim, ok = impl.Dgges(lapack.SchurNone, lapack.SchurHess, lapack.SortSelected, reciprocal,
+		nn, j, nn, h, nn, alphaR, alphaI, beta, nil, 1, vectors, nn, *work, lwork, bwork)
+	for i := range nn {
+		alphaR[i], alphaI[i], beta[i] = qzReciprocal(alphaR[i], alphaI[i], beta[i])
+	}
+	return sdim, ok && qzRetryConsistent(first, alphaR, alphaI, beta, stable)
 }
