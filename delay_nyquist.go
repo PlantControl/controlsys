@@ -1289,12 +1289,61 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 	if err := l.certifyPeaks(res, shifts, peaks); err != nil {
 		return false, nil, err
 	}
+	var S *System
 	for i, c := range shifts {
-		if inf := diskBound(l.tailLimit, c); inf > peaks[i].peak {
-			peaks[i] = sensitivityPeak{inf, math.Inf(1)}
+		inf := diskBound(l.tailLimit, c)
+		if !(inf > peaks[i].peak) {
+			continue
 		}
+		if S == nil {
+			S = l.closedLoopSensitivity()
+		}
+		if p, ok := shiftedSensitivityPeak(S, c); ok && p.peak < inf {
+			if p.peak > peaks[i].peak {
+				peaks[i] = p
+			}
+			continue
+		}
+		peaks[i] = sensitivityPeak{inf, math.Inf(1)}
 	}
 	return true, peaks, nil
+}
+
+// closedLoopSensitivity returns S = 1/(1+L) as a delay model, or nil.
+func (l *delayLoop) closedLoopSensitivity() *System {
+	if l.sys == nil {
+		return nil
+	}
+	eye, err := NewGain(mat.NewDense(1, 1, []float64{1}), l.sys.Dt)
+	if err != nil {
+		return nil
+	}
+	S, err := Feedback(eye, l.sys, -1)
+	if err != nil {
+		return nil
+	}
+	return S
+}
+
+// shiftedSensitivityPeak returns ‖S + c‖∞ by the delay H∞ peak, whose
+// high-frequency limit is the sup over the limit set of L, where diskBound
+// at tailLimit assumes L reaches −tailLimit: for L = 0.3 + 0.2e^{−s} it
+// gives 1.5 for c = −1/2, the exact sup 0.409. ok is false when the peak is
+// not certified.
+func shiftedSensitivityPeak(S *System, c float64) (sensitivityPeak, bool) {
+	if S == nil {
+		return sensitivityPeak{}, false
+	}
+	Sc := S
+	if c != 0 {
+		Sc = S.Copy()
+		Sc.D.Set(0, 0, Sc.D.At(0, 0)+c)
+	}
+	norm, w, stable, err := hinfNormDelayed(Sc)
+	if err != nil || !stable || !(norm < math.Inf(1)) {
+		return sensitivityPeak{}, false
+	}
+	return sensitivityPeak{norm, w}, true
 }
 
 // certifyPeaks raises each sensitivity peak to within peakCertTol of
