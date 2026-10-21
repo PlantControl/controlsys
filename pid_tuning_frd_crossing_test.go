@@ -2,7 +2,6 @@ package controlsys
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -147,44 +146,60 @@ func TestTunePIDFRDCrossingsBetweenGridPoints(t *testing.T) {
 	}
 }
 
-// A free one-gain design on sampled data scans the samples for crossings
-// too, holding each wrapped margin to the floor of the plant's own margin
-// at wc less 3°. Base scanned the 241-point grid only and reported wc
-// alone: I at wc 0.0262 (ζ = 1.9e-3 mode at 0.544) and 0.0624 (undamped
-// mode at 0.536) claimed PM 90.2° and 51.4° while the samples cross 0 dB
-// twice near the mode at wrapped margins −80° and −39° (the first loop is
-// unstable, root at Re +0.012); free P with wc on a lightly damped mode
-// claimed 152° and 148° while the samples cross at 106° and 76°. Each
-// design now fails as unattainable, or returns with every crossing
-// reported and the achieved margin their least. Oracles: closed-loop roots
-// of the exact plant and sign changes of |L| − 1 over adjacent samples of
-// the documented interpolant.
-func TestTunePIDFRDFreeOneGainScansSamples(t *testing.T) {
+// A free one-gain design on sampled data keeps base's design, held to the
+// floor at the grid's crossings, and reports every crossing the samples
+// resolve, the achieved margin their least. Base reported wc alone; holding
+// the sampled crossings to the floor of the plant's own margin at wc less
+// 3° instead rejected robust designs: P on two resonant plants (|S| 1.04,
+// 1.08), P at wc 0.119 (|S| 1.33) and 7.58 (|S| 1.0), and I at wc 0.401
+// (|S| 2.47) and 0.0624 (|S| 1.60), whose extra crossings sit at wrapped
+// margins down to −172° on −1's far side. The I design at wc 0.0262 is
+// unstable (root at Re +0.012) and is now returned with its −80° crossing
+// as the achieved margin, not the 90.2° at wc. Oracles: closed-loop roots
+// and a dense |S| sweep of the exact plant, and sign changes of |L| − 1
+// and wrapped phases of the documented interpolant.
+func TestTunePIDFRDFreeOneGainReportsSampledCrossings(t *testing.T) {
 	for i, c := range []struct {
 		num, den []float64
 		lo, hi   float64
 		n        int
 		family   PidtuneType
 		wc       float64
+		maxS     float64
+		stable   bool
 	}{
-		{[]float64{0.017257967204262814, 0.1192876907101629}, []float64{1, 0.002049203028195259, 0.2955636770772375}, 1e-3, 1e3, 200, PidtuneI, 0.026179536491585137},
-		{[]float64{0.1004901079990616, 0.3496524855798061}, []float64{1, 0.4227702150952549, 0.3232980277536846, 0.12154095272876622, 0.010295197850730308}, 1e-3, 1e3, 2000, PidtuneI, 0.062406911627341584},
-		{[]float64{0.7939620977398079, 0.13791298408186412}, []float64{1, 0.010682696869646655, 0.10582524497554917}, .01084, 9.759, 600, PidtuneP, 0},
-		{[]float64{0.3159448471911536, 0.5458028650195357}, []float64{1, 0.030629362065009907, 7.396247920990802}, .09065, 81.59, 600, PidtuneP, 0},
+		{[]float64{0.7939620977398079, 0.13791298408186412}, []float64{1, 0.010682696869646655, 0.10582524497554917}, .01084, 9.759, 600, PidtuneP, 0, 1.1, true},
+		{[]float64{0.3159448471911536, 0.5458028650195357}, []float64{1, 0.030629362065009907, 7.396247920990802}, .09065, 81.59, 600, PidtuneP, 0, 1.15, true},
+		{[]float64{1.5903543306381103}, []float64{1, 0.11318929931127387, 0.020361548600023264}, 1e-3, 1e3, 300, PidtuneP, 0.119026, 1.4, true},
+		{[]float64{-0.0019483147102757746, -0.00258257825573115, -0.016970841926992237}, []float64{1, 0.9091916613710589, 5.752828019275366, 4.8374031348092545, 2.0260560018589606}, 1e-3, 1e3, 600, PidtuneI, 0.400602, 2.6, true},
+		{[]float64{0.05717012722456311, 0.04140408783392416}, []float64{1, 0.42065340344555174, 49.67277713267589}, 1e-3, 1e3, 100, PidtuneP, 7.5756, 1.1, true},
+		{[]float64{0.1004901079990616, 0.3496524855798061}, []float64{1, 0.4227702150952549, 0.3232980277536846, 0.12154095272876622, 0.010295197850730308}, 1e-3, 1e3, 2000, PidtuneI, 0.062406911627341584, 1.7, true},
+		{[]float64{0.017257967204262814, 0.1192876907101629}, []float64{1, 0.002049203028195259, 0.2955636770772375}, 1e-3, 1e3, 200, PidtuneI, 0.026179536491585137, 0, false},
 	} {
 		frd := pidExactFRD(t, c.num, c.den, c.lo, c.hi, c.n)
 		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: c.wc})
 		if err != nil {
-			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-				t.Errorf("case %d: %v", i, err)
-			}
+			t.Errorf("case %d: %v", i, err)
 			continue
 		}
 		k, ev := *r.Controller, r.Evidence
-		if re := pidClosedLoopMaxRe(c.num, c.den, k); re >= 0 {
-			t.Errorf("case %d: %+v closed-loop root at Re %g", i, k, re)
+		exact := func(w float64) complex128 {
+			s := complex(0, w)
+			return pidPolyAt(c.num, s) / pidPolyAt(c.den, s)
+		}
+		re := pidClosedLoopMaxRe(c.num, c.den, k)
+		if c.stable {
+			if re >= 0 {
+				t.Errorf("case %d: %+v closed-loop root at Re %g", i, k, re)
+			}
+			if peak, at := pidDenseSensitivity(k, exact, c.lo, c.hi); peak > c.maxS {
+				t.Errorf("case %d: %+v |S| %g at ω=%g", i, k, peak, at)
+			}
+		} else if re <= 0 || ev.AchievedPhaseMargin >= 0 {
+			t.Errorf("case %d: %+v root at Re %g, achieved margin %g, want an unstable loop reported below 0°", i, k, re, ev.AchievedPhaseMargin)
 		}
 		g, ctrl := fzPidInterp(frd), fzPidCtrlOf2(&k)
+		crossings := 0
 		for j := 1; j < len(frd.Omega); j++ {
 			lo, hi := frd.Omega[j-1], frd.Omega[j]
 			a, _ := g(lo)
@@ -192,14 +207,25 @@ func TestTunePIDFRDFreeOneGainScansSamples(t *testing.T) {
 			if (cmplx.Abs(a*ctrl.resp(lo))-1)*(cmplx.Abs(b*ctrl.resp(hi))-1) >= 0 {
 				continue
 			}
+			crossings++
 			if !slices.ContainsFunc(ev.GainCrossovers, func(w float64) bool { return w >= lo*(1-1e-12) && w <= hi*(1+1e-12) }) {
 				t.Errorf("case %d: |L| crosses 1 in [%.9g, %.9g], reported %v", i, lo, hi, ev.GainCrossovers)
 			}
 		}
+		if crossings < 2 {
+			t.Errorf("case %d: %d sampled crossings, want the extra ones this case pins", i, crossings)
+		}
+		least := math.Inf(1)
 		for j, m := range ev.PhaseMargins {
-			if ev.AchievedPhaseMargin > m+1e-9 {
-				t.Errorf("case %d: achieved margin %g above %g at %g", i, ev.AchievedPhaseMargin, m, ev.GainCrossovers[j])
+			w := ev.GainCrossovers[j]
+			l, _ := g(w)
+			if want := fzPidWrap(180 + cmplx.Phase(l*ctrl.resp(w))*180/math.Pi); math.Abs(math.Remainder(m-want, 360)) > .5 {
+				t.Errorf("case %d: margin %g at %g, interpolant gives %g", i, m, w, want)
 			}
+			least = math.Min(least, m)
+		}
+		if math.Abs(ev.AchievedPhaseMargin-least) > 1e-9 {
+			t.Errorf("case %d: achieved margin %g, least crossing margin %g", i, ev.AchievedPhaseMargin, least)
 		}
 	}
 }
