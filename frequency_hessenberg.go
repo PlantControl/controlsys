@@ -74,6 +74,8 @@ type balancedDense struct {
 	r      []complex128   // row-major n×m, refine's residual
 	pt     frequencyPoint // the point evalInto last factored, for refine
 	tol    float64
+	// nonFinite marks a NaN or Inf entry of Â or Ê.
+	nonFinite bool
 }
 
 // refineCondition is the error amplification, relative to ε, above which
@@ -106,6 +108,7 @@ func newBalancedDenseOf(br balancedRealization) *balancedDense {
 		}
 		bd.lastA[i] = last
 	}
+	bd.nonFinite = !finiteSlice(bd.a) || bd.e != nil && !finiteSlice(bd.e)
 	return bd
 }
 
@@ -177,6 +180,9 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 		scale = bd.fillPencil(pt.value())
 	} else {
 		scale, gs = bd.fillPencilAt(pt)
+	}
+	if bd.nonFinite || math.IsNaN(scale) {
+		return errNonFinitePencil
 	}
 	for i, v := range bd.b {
 		x[i] = complex(v, 0)
@@ -793,6 +799,10 @@ func cLUSolve(lu []complex128, piv []int, x []complex128, n, m int) {
 }
 
 var errSingularPencil = fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+
+// errNonFinitePencil guards GEPP, whose pivot and structure bookkeeping NaN
+// comparisons defeat.
+var errNonFinitePencil = fmt.Errorf("non-finite complex matrix: %w", ErrInvalidArgument)
 
 // balance applies an exact power-of-two state scaling x = D x̂ chosen to
 // balance the rows and columns of [|A|+|E| B; C ·] (Osborne iteration as in
