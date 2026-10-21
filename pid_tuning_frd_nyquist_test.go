@@ -226,3 +226,29 @@ func TestTunePIDFRDNyquistRejectsUnstable(t *testing.T) {
 		}
 	}
 }
+
+// Data that stop at 0.3π/Dt leave this PI loop at |L| ≈ 1.005 and falling
+// at the top sample. Taking the loop to roll off there keeps base's stable
+// design (|S| about 2.9); treating the end as unknown rejected it.
+// Oracle: exact Schur–Cohn.
+func TestTunePIDFRDNyquistKeepsFallingTop(t *testing.T) {
+	num, den := []float64{0.9023903264994049}, []float64{1, -0.8012602517942834, 0.42575814095814646, 0.03842946865883065, 0.0055779329529266905}
+	dt := .1
+	frd := pidExactFRD(t, num, den, 1e-3, .3*math.Pi/dt, 100)
+	for k, w := range frd.Omega {
+		z := cmplx.Exp(complex(0, w*dt))
+		frd.Response[k][0][0] = pidPolyAt(num, z) / pidPolyAt(den, z)
+	}
+	frd.Dt = dt
+	r, err := TunePIDFRD(context.Background(), frd, PidtunePI, PIDTuningOptions{PhaseMargin: 45})
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := *r.Controller
+	if !pidtuneExactSchur(&PID{IFormula: k.IFormula, DFormula: k.DFormula, Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Tf: k.Tf, Dt: k.Dt}, num, den, dt) {
+		t.Errorf("%+v unstable", k)
+	}
+	if r.Evidence.AchievedPhaseMargin < 42-1e-6 {
+		t.Errorf("achieved margin %g", r.Evidence.AchievedPhaseMargin)
+	}
+}

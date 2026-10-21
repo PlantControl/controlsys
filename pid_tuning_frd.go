@@ -134,8 +134,9 @@ func pidTuningFRDDCGain(data *FRD, at func(float64) complex128) float64 {
 // that step leaves unresolved rejects c. Otherwise |L| >= 1 at the top: a
 // continuous L within 30° of the real axis, as an ideal derivative on a
 // relative-degree-one plant leaves it, ends at 1 + Re L, rejecting c when
-// |1 + L| < 0.1 there; any other end is unknown and rejects c, since the
-// loop has not rolled off where the data stop.
+// |1 + L| < 0.1 there; any other L below 2 and falling from the sample
+// before is taken to roll off and ends at 1. Any other end is unknown and
+// rejects c, since the loop has not rolled off where the data stop.
 func pidTuningFRDNyquist(c PID2, p pidTuningPlant) bool {
 	stable, known := pidTuningFRDNyquistCount(c, p)
 	return stable && known || p.dcGain == 0
@@ -174,7 +175,11 @@ func pidTuningFRDNyquistCount(c PID2, p pidTuningPlant) (stable, known bool) {
 		end = complex(1+r0, 0)
 	case cmplx.Abs(l) < 1:
 	case !nearReal || c.Dt > 0:
-		return true, false
+		w2 := p.samples[len(p.samples)-2]
+		dec := cmplx.Abs(p.at(w2)*pidTuningFeedback(c, w2)) > cmplx.Abs(l)
+		if !dec || !(cmplx.Abs(l) < 2) {
+			return true, false
+		}
 	case cmplx.Abs(1+l) < .1:
 		return false, true
 	default:
