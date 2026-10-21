@@ -170,9 +170,6 @@ func fzProcBuild(t *testing.T, s *fzSpec) *fzProcCase {
 			}
 		}
 	}
-	if cs.fast > 1e3 || cs.slow < 1e-3 {
-		fzSkip(t, "known defect: companion realization loses accuracy at extreme time units")
-	}
 	if cs.fast/cs.slow > 100 {
 		fzSkip(t, "time-scale spread beyond the record length")
 	}
@@ -293,8 +290,7 @@ func FuzzIdentProcess(f *testing.F) {
 }
 
 // fzProcRegular reports whether fitted parameters stay in the regime the
-// truth was drawn from: rates in [1e-3, 1e3], spread at most 100, poles
-// 1% apart.
+// truth was drawn from: spread at most 100, poles 1% apart.
 func fzProcRegular(st ProcessStructure, p ProcessParameters) bool {
 	lambda, _, _ := fzProcModal(st, p)
 	fast, slow := 0.0, math.Inf(1)
@@ -315,7 +311,7 @@ func fzProcRegular(st ProcessStructure, p ProcessParameters) bool {
 			}
 		}
 	}
-	return fast <= 1e3 && slow >= 1e-3 && fast/slow <= 100
+	return fast/slow <= 100
 }
 
 func fzProcSeeds() []fzSeed {

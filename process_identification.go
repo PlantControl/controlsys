@@ -230,27 +230,35 @@ func processSystem(s ProcessStructure, p ProcessParameters) (*System, error) {
 	if s.Zero {
 		num = []float64{p.ZeroTime, 1}
 	}
+	// Realize G(s) = G'(sT) with G' in time units of T, a power of two near
+	// the geometric mean time constant: (A'/T, B'/T, C', D) keeps A·dt and
+	// the state magnitudes independent of the absolute time unit.
 	n := len(den) - 1
+	_, e := math.Frexp(math.Pow(den[0], 1/float64(s.Poles)))
+	unit := math.Ldexp(1, e)
 	scale := den[0]
+	power := 1.0
 	for i := range den {
-		den[i] /= scale
+		den[i] *= power / scale
+		power *= unit
 	}
 	padded := make([]float64, n+1)
+	offset := n + 1 - len(num)
 	for i, v := range num {
-		padded[n+1-len(num)+i] = v / scale
+		padded[offset+i] = v * math.Pow(unit, float64(offset+i)) / scale
 	}
 	a := mat.NewDense(n, n, nil)
 	b := mat.NewDense(n, 1, nil)
 	c := mat.NewDense(1, n, nil)
 	d := mat.NewDense(1, 1, []float64{padded[0]})
 	for j := range n {
-		a.Set(0, j, -den[j+1])
+		a.Set(0, j, -den[j+1]/unit)
 		c.Set(0, j, padded[j+1]-padded[0]*den[j+1])
 		if j > 0 {
-			a.Set(j, j-1, 1)
+			a.Set(j, j-1, 1/unit)
 		}
 	}
-	b.Set(0, 0, 1)
+	b.Set(0, 0, 1/unit)
 	return New(a, b, c, d, 0)
 }
 
