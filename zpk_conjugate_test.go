@@ -92,7 +92,7 @@ func TestZPKTransferFunctionNearbyRealAndComplexPoles(t *testing.T) {
 		{"unit", [][]complex128{{1 + 1e-15i, 1 - 1e-15i}, {1}}, 3, []complex128{3, 2i, -3 + 1i}},
 		{"realFirst", [][]complex128{{1}, {1 - 1e-15i, 1 + 1e-15i}}, 3, []complex128{3, 2i}},
 		{"pairAndReal", [][]complex128{{1 + 1e-15i, 1 - 1e-15i, 1}, {1}}, 3, []complex128{3, 2i}},
-		{"shared",[][]complex128{{-1 + 2i, -1 - 2i}, {-3, -1 - 2i, -1 + 2i}}, 3, []complex128{1, 2i}},
+		{"shared", [][]complex128{{-1 + 2i, -1 - 2i}, {-3, -1 - 2i, -1 + 2i}}, 3, []complex128{1, 2i}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -124,6 +124,59 @@ func TestZPKTransferFunctionNearbyRealAndComplexPoles(t *testing.T) {
 					}
 					if d := cmplx.Abs(got[0][j] - want); d > 1e-12*cmplx.Abs(want) {
 						t.Errorf("tf(%v)[%d] = %v, want %v", s, j, got[0][j], want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestZPKInexactConjugatePartner(t *testing.T) {
+	up := math.Nextafter(2, 3)
+	cases := []struct {
+		name  string
+		poles [][][]complex128
+		pts   []complex128
+	}{
+		{"siso", [][][]complex128{{{-1 + 2i, complex(-1, -up)}}}, []complex128{1i, 2, -3 + 1i}},
+		{"mimo", [][][]complex128{{{1 + 2i, complex(1, -up)}, {1 + 2i, 1 - 2i}}}, []complex128{3, 2i, -1 + 1i}},
+		{"mimoSecond", [][][]complex128{{{1 + 2i, 1 - 2i}, {1 + 2i, complex(1, -up)}}}, []complex128{3, 2i}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := len(c.poles[0])
+			gain := [][]float64{make([]float64, m)}
+			for j := range gain[0] {
+				gain[0][j] = float64(j + 1)
+			}
+			z := &ZPK{Zeros: [][][]complex128{make([][]complex128, m)}, Poles: c.poles, Gain: gain}
+			tf, err := z.TransferFunction()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ss, err := z.StateSpace()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range c.pts {
+				got, err := tf.Eval(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotSS, err := ss.Sys.EvalFr(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for j, ps := range c.poles[0] {
+					want := complex(gain[0][j], 0)
+					for _, p := range ps {
+						want /= s - p
+					}
+					if d := cmplx.Abs(got[0][j] - want); d > 1e-12*cmplx.Abs(want) {
+						t.Errorf("tf(%v)[%d] = %v, want %v", s, j, got[0][j], want)
+					}
+					if d := cmplx.Abs(gotSS[0][j] - want); d > 1e-10*cmplx.Abs(want) {
+						t.Errorf("ss(%v)[%d] = %v, want %v", s, j, gotSS[0][j], want)
 					}
 				}
 			}

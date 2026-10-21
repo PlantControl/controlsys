@@ -410,7 +410,8 @@ func poleSetDifference(all, subset []complex128) []complex128 {
 }
 
 // removeMatchingPole removes from set the first pole of p's kind (real or
-// upper half-plane) within 100·eps·(1+|p|) of p, with its exact conjugate.
+// upper half-plane) within 100·eps·(1+|p|) of p, with its nearest lower
+// half-plane partner within the same tolerance of conj(q).
 func removeMatchingPole(set []complex128, p complex128) ([]complex128, bool) {
 	tol := 100 * eps() * (1 + cmplx.Abs(p))
 	for k, q := range set {
@@ -419,8 +420,22 @@ func removeMatchingPole(set []complex128, p complex128) ([]complex128, bool) {
 		}
 		set = slices.Delete(set, k, k+1)
 		if imag(q) > 0 {
-			if c := slices.Index(set, cmplx.Conj(q)); c >= 0 {
-				set = slices.Delete(set, c, c+1)
+			cq := cmplx.Conj(q)
+			qtol := 100 * eps() * (1 + cmplx.Abs(q))
+			best, bestD := -1, qtol
+			for c, r := range set {
+				if imag(r) >= 0 {
+					continue
+				}
+				if d := cmplx.Abs(r - cq); d < bestD {
+					best, bestD = c, d
+					if d == 0 {
+						break
+					}
+				}
+			}
+			if best >= 0 {
+				set = slices.Delete(set, best, best+1)
 			}
 		}
 		return set, true
