@@ -5,8 +5,8 @@ package controlsys
 // metadata and container operations. Failures: panic, Go error-contract
 // breach (fzContract), an accepted value that fails Validate or differs
 // from the exact expectation, aliasing of inputs, and value->error on
-// inputs the documented rules accept. Any other error is counted
-// (fzAPIRejected), never a failure.
+// inputs the documented rules accept. Errors on inputs those rules do not
+// decide are counted (fzAPIRejected).
 //
 // The input is the canonical tuple plus three bytes: op selects the entry
 // point, site the corrupted block and bad the corruption (fzAPICorrupt). v
@@ -1437,7 +1437,9 @@ func FuzzAPIInterconnect(f *testing.F) {
 			t.Fatalf("%s modified an operand (%s)\n%s", op, d, in)
 		}
 		if err != nil {
-			unstorable := (wm == 0) != (wp == 0) && errors.Is(err, ErrDimensionMismatch)
+			n1, _, _ := s1.Dims()
+			n2, _, _ := s2.Dims()
+			unstorable := n1 == 0 && n2 == 0 && (wm == 0) != (wp == 0) && errors.Is(err, ErrDimensionMismatch)
 			if ok && !(loopOnly && errors.Is(err, ErrAlgebraicLoop)) && !unstorable {
 				t.Fatalf("%s rejected compatible models (m1=%d p1=%d m2=%d p2=%d dt %g/%g): %v\n%s\n%s", op, m1, p1, m2, p2, s1.Dt, s2.Dt, err, in, s)
 			}
