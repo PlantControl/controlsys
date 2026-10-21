@@ -25,6 +25,7 @@ func BenchmarkNyquistDelay(b *testing.B) {
 		{"io/k=0.5", mk(-1, 0.5, 0, 1, false)},
 		{"io/k=50", mk(-1, 50, 0, 1, false)},
 		{"io/D=0.5", mk(-1, 0.5*99, 0.5, 1, false)},
+		{"io/fast-small-gain", mk(-1e6, 9e5, 0, 1, false)},
 		{"lft/k=0.5", mk(-1, 0.5, 0, 1, true)},
 		{"lft/k=50", mk(-1, 50, 0, 1, true)},
 		{"lft/fast", mk(-1e3, 500, 0, 1, true)},

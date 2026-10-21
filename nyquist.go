@@ -507,7 +507,13 @@ type nyquistSample struct {
 }
 
 func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, depth int) error {
-	rot := p.tau > 0 && p.delayAliases(f(a.t), f(b.t), max(a.env, b.env))
+	var rot bool
+	if p.tau > 0 {
+		var subunit bool
+		if rot, subunit = p.delayAliases(f(a.t), f(b.t), a.env, b.env); subunit {
+			return nil
+		}
+	}
 	if !rot && !(phaseStep(1+a.v, 1+b.v) > nyquistMaxPhaseStep) {
 		return nil
 	}
@@ -531,18 +537,27 @@ func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, dep
 // delayAliases reports a step from sa to sb along which e^{-sτ} turns by
 // more than nyquistMaxPhaseStep while |L| may reach 1: there arg(1+L) can
 // turn by π or more between the samples, which phaseStep would alias. Where
-// |L| < 1, 1+L stays in the right half-plane and cannot wind. The envelope
-// env of |L| depends only on delay-free magnitudes, smooth on the seeded base
-// grid, so endpoint values below 1/2 rule it out; |L| itself ripples on the
+// |L| < 1, 1+L stays in the right half-plane and cannot wind; subunit reports
+// such a turning step, whose endpoints then give the exact arg(1+L) change.
+// The envelope ea, eb of |L| at the endpoints depends only on delay-free
+// magnitudes, smooth on the seeded base grid, so max(ea, eb) < 1/2, or
+// < 1 by more than |eb-ea|, rules |L| >= 1 out; |L| itself ripples on the
 // scale 1/τ with internal delays. Beyond wDelay the tail bound rules it out.
-func (p *nyquistPath) delayAliases(sa, sb complex128, env float64) bool {
+func (p *nyquistPath) delayAliases(sa, sb complex128, ea, eb float64) (rot, subunit bool) {
 	if !(cmplx.Abs(sb-sa)*p.tau > nyquistMaxPhaseStep) {
-		return false
+		return false, false
 	}
 	if math.Min(math.Abs(imag(sa)), math.Abs(imag(sb))) >= p.wDelay {
-		return false
+		return false, false
 	}
-	return !(env < 0.5)
+	hi := max(ea, eb)
+	if hi < 0.5 {
+		return false, false
+	}
+	if hi+math.Abs(eb-ea) < 1 {
+		return false, true
+	}
+	return true, false
 }
 
 // lftEnvelope bounds |L(s)| over |Δ| <= 1 by |H11| + |H12|·Σ_k |H22|^k·|H21|

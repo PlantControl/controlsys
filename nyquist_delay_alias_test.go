@@ -139,3 +139,39 @@ func TestNyquistDelayBudget(t *testing.T) {
 		t.Fatalf("err %v, want ErrDelayUnsupported", err)
 	}
 }
+
+// TestNyquistDelaySmallGain covers small-gain loops with a fast pole: |L| < 1
+// on Re s >= 0 (Rouché: no closed-loop RHP roots), but |L| >= 1/2 out to
+// ω ≈ p with pτ >= 1e5, so resolving e^{-sτ} there would exceed the budget.
+func TestNyquistDelaySmallGain(t *testing.T) {
+	cases := []quasiLoop{
+		{name: "p=1e6", num: []float64{9e5}, den: []float64{1, 1e6}, tau: 1},
+		{name: "p=1e7", num: []float64{9e6}, den: []float64{1, 1e7}, tau: 1},
+		{name: "p=1e5 tau=10", num: []float64{9e4}, den: []float64{1, 1e5}, tau: 10},
+		{name: "D=0.6", num: []float64{0.6, 9e6}, den: []float64{1, 1e7}, tau: 1},
+		{name: "sweep1", num: []float64{414034.1}, den: []float64{1, 427103.1}, tau: 1.58},
+		{name: "sweep2", num: []float64{848522.9}, den: []float64{1, 897705.5}, tau: 3.21},
+		{name: "sweep3", num: []float64{1.1295e6}, den: []float64{1, 1.3847e6}, tau: 0.60},
+	}
+	for _, q := range cases {
+		t.Run(q.name, func(t *testing.T) {
+			if want := halfDiskRoots(t, q.chi, q.tau, 10); want != 0 {
+				t.Fatalf("argument principle %d, want 0", want)
+			}
+			sys := q.system(t)
+			lft, err := sys.PullDelaysToLFT()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range []*System{sys, lft} {
+				res, err := s.Nyquist(nil, 0)
+				if err != nil {
+					t.Fatalf("internal=%v: %v", s.HasInternalDelay(), err)
+				}
+				if res.RHPPoles != 0 || res.RHPZerosCL != 0 {
+					t.Fatalf("internal=%v: RHPZerosCL %d (RHPPoles %d), want 0", s.HasInternalDelay(), res.RHPZerosCL, res.RHPPoles)
+				}
+			}
+		})
+	}
+}
