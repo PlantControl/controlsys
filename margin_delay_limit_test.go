@@ -205,3 +205,13 @@ func BenchmarkDiskMargin_DelayFeedthroughIncommensurate(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkDiskMargin_DelayFeedthroughStaticOdd(b *testing.B) {
+	L := delayLimitLoop{d: -0.3, tau1: 1, d2: 0.33, tau2: 3}.system(b)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := DiskMargin(L); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

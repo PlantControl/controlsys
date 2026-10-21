@@ -198,6 +198,8 @@ func TestNyquistNeutralStableDifferenceCounts(t *testing.T) {
 		{{d: 0.6, tau: 1, a: -1, c: 0.2}, {d: 0.6, tau: 2}},
 		{{d: 0.6, tau: 1, a: 0.5, c: 0.2}, {d: 0.6, tau: 2}},
 		{{d: 0.6, tau: 1, a: 0.5, c: 1.5}, {d: 0.6, tau: 2}},
+		{{d: 0.6, tau: 1, a: 0, c: 0.2}, {d: 0.6, tau: 2}},
+		{{d: 0.6, tau: 1, a: 0, c: -0.2}, {d: 0.6, tau: 2}},
 		{{d: 0.6, tau: 1}, {d: 0.6, tau: 2}, {d: 0.3, tau: 3}},
 		{{d: 0.5, tau: 1}, {d: 0.5, tau: 2}, {d: 0.5, tau: 3}},
 	}

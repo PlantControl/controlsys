@@ -436,7 +436,7 @@ type nyquistPath struct {
 	// onContour records that 1+L vanished on the contour: a sample came
 	// within nyquistOnContourTol of -1 or bisection could not resolve arg(1+L) at nyquistMaxDepth.
 	onContour bool
-	contourW  float64 // largest |ω| where onContour was set
+	contourW  float64 // smallest |ω| where onContour was set
 }
 
 // seedResonances adds contour parameters (ω, or θ = ωdt for discrete models)
@@ -476,8 +476,11 @@ func (p *nyquistPath) withSeeds(ts []float64, a, b float64, toT func(float64) fl
 }
 
 func (p *nyquistPath) markOnContour(s complex128) {
-	p.onContour = true
-	p.contourW = max(p.contourW, math.Abs(imag(s)))
+	w := math.Abs(imag(s))
+	if p.onContour {
+		w = min(w, p.contourW)
+	}
+	p.onContour, p.contourW = true, w
 }
 
 func (p *nyquistPath) at(s complex128) (complex128, error) {
