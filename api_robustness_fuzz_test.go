@@ -328,19 +328,17 @@ func fzAPICheckEqual(t *testing.T, in *fzAPIIn, p, q Poly, tol float64) {
 	want := len(p) == len(q)
 	if want {
 		for i := range p {
-			if !(math.Abs(p[i]-q[i]) <= tol) {
+			a, b := p[i], q[i]
+			if math.IsNaN(a) || math.IsNaN(b) || (a != b && !(math.Abs(a-b) <= tol)) {
 				want = false
 			}
 		}
 	}
 	got := p.Equal(q, tol)
 	if got != want {
-		if got && (!fzAPIFinite(p...) || !fzAPIFinite(q...) || math.IsNaN(tol)) {
-			fzSkip(t, "known: Poly.Equal treats NaN differences as equal")
-		}
 		t.Fatalf("Equal(%v, %v, %g) = %v, want %v\n%s", p, q, tol, got, want, in)
 	}
-	if !p.Equal(slices.Clone(p), 0) && fzAPIFinite(p...) {
+	if !p.Equal(slices.Clone(p), 0) && !slices.ContainsFunc(p, math.IsNaN) {
 		t.Fatalf("finite %v not Equal to its copy\n%s", p, in)
 	}
 }
