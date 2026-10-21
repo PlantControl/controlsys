@@ -433,10 +433,17 @@ func solveDiscreteSchurLyap(n int, t []float64, ldt int, c []float64, ldc int, w
 // C is stored in the matrix c at position (r,r) with stride ldc.
 // Exploits symmetry: 3 unknowns (y11, y12, y22) → 3×3 system.
 func solveDiscrLyap2(t11, t12, t21, t22 float64, c []float64, r, ldc int) (float64, error) {
-	// Extract C (symmetric)
+	// Balance the block by D = diag(1, d), d a power of two near √|t21/t12|:
+	// a non-normal block (|t12| ≫ |t21|) otherwise gives a 3×3 system whose
+	// scaling, not its conditioning, trips Dgetc2's perturbed-pivot test.
+	d := 1.0
+	if t12 != 0 && t21 != 0 {
+		d = pow2Near(math.Sqrt(math.Abs(t21)) / math.Sqrt(math.Abs(t12)))
+		t12, t21 = t12*d, t21/d
+	}
 	c11 := c[r*ldc+r]
-	c12 := c[r*ldc+r+1]
-	c22 := c[(r+1)*ldc+r+1]
+	c12 := c[r*ldc+r+1] / d
+	c22 := c[(r+1)*ldc+r+1] / (d * d)
 
 	// Build 3×3 system M*[y11, y12, y22]' = [c11, c12, c22]'
 	// From T*Y*T' - Y = C, with Y symmetric (3 unknowns):
@@ -457,9 +464,9 @@ func solveDiscrLyap2(t11, t12, t21, t22 float64, c []float64, r, ldc int) (float
 	scale := impl.Dgesc2(3, m[:], 3, rhs[:], ipiv[:], jpiv[:])
 
 	c[r*ldc+r] = rhs[0]
-	c[r*ldc+r+1] = rhs[1]
-	c[(r+1)*ldc+r] = rhs[1]
-	c[(r+1)*ldc+r+1] = rhs[2]
+	c[r*ldc+r+1] = rhs[1] * d
+	c[(r+1)*ldc+r] = rhs[1] * d
+	c[(r+1)*ldc+r+1] = rhs[2] * d * d
 
 	if scale == 0 {
 		return 1, ErrSingularEquation

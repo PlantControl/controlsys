@@ -186,8 +186,15 @@ func TestRiccati_NoScalingReachesWrappers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := cmplxDist(raw.Eig, ref.Eig); d < 1e-8 {
-		t.Errorf("NoScaling Lqr poles match to %g; want the unscaled solver's error", d)
+	scaled, err := Lqr(As, Bs, gram(Cs), R, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relErr(raw.K, scaled.K) == 0 {
+		t.Error("Lqr ignored NoScaling")
+	}
+	if d := cmplxDist(raw.Eig, ref.Eig); !(d <= 1e-8*cmplxDist(ref.Eig, []complex128{0})) {
+		t.Errorf("NoScaling Lqr poles off by %g after the Newton check", d)
 	}
 	sys, err := New(As, Bs, Cs, mat.NewDense(1, 1, nil), 0)
 	if err != nil {
