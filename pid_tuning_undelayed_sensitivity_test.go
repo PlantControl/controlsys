@@ -17,7 +17,9 @@ import (
 // family now keeps |S| <= 4 there, as on a delayed plant, or fails with the
 // delayed path's error. Oracle: the loop evaluated directly from the
 // coefficients, closed-loop stability by exact Schur–Cohn or Routh, and
-// the reported margin at the reported crossover.
+// the reported margin at the reported crossover. 6KBA3T: the integrator
+// rows returned mixed-sign PD gains (Kp 0.0273, Kd −0.0036 on 8.2/(z−1));
+// every row now has gains of one sign, as MATLAB pidtune.
 func TestTunePIDUndelayedSensitivityBound(t *testing.T) {
 	skipSlowUnderRace(t)
 	for _, c := range []struct {
@@ -45,6 +47,9 @@ func TestTunePIDUndelayedSensitivityBound(t *testing.T) {
 		pid := &PID{Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Tf: k.Tf, Dt: k.Dt, IFormula: k.IFormula, DFormula: k.DFormula}
 		if c.dt > 0 && !pidtuneExactSchurStable(t, pid, c.num, c.den, c.dt) || c.dt == 0 && !pidtuneExactHurwitz(pid, c.num, c.den) {
 			t.Errorf("%s: %+v unstable", c.name, *k)
+		}
+		if !pidGainsOneSign(*k) {
+			t.Errorf("%s: %+v mixed-sign gains", c.name, *k)
 		}
 		L := pidtuneUndelayedLoop(k, c.num, c.den, c.dt)
 		ev := r.Evidence
