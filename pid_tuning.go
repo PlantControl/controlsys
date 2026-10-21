@@ -148,6 +148,13 @@ type pidTuningPlant struct {
 	// phase heuristics keyed on gainSign assume sign·G starts near 0°,
 	// which −90° per integrator breaks, so it is kept apart.
 	residueSign float64
+	// dcGain, if nonzero, is the DC gain of a plant assumed stable whose
+	// gain signs are otherwise free, as sampled data's under MATLAB's
+	// default of no unstable poles; highGain is its response at high.
+	// pidTuningDCAdmissible rejects candidates with a real unstable
+	// closed-loop root they imply.
+	dcGain   float64
+	highGain complex128
 	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
 	// 0 for none; tau is the loop delay in seconds that sets its grid step.
 	maxSensitivity, tau float64
@@ -813,6 +820,36 @@ func (p pidTuningPlant) wantSign() float64 {
 		return p.gainSign
 	}
 	return p.residueSign
+}
+
+// pidTuningDCAdmissible reports whether c leaves the characteristic
+// polynomial of the loop with a stable plant of DC gain dc the same sign at
+// s = 0 (z = 1) as at +∞, where it has the signs of 1 + L(0⁺) and of
+// 1 + L(∞). A sign change puts a real closed-loop root in the right half
+// plane (outside the unit circle). 1 + L(0⁺) has the sign of Ki·dc with
+// integral action, else of 1 + Kp·dc. 1 + L(∞) is read off the top sample
+// wHi of response gHi: positive where the loop has rolled off, |L| < 1;
+// else, continuous only, that of 1 + Re L where L lies within 30° of the
+// real axis and clear of −1, as an ideal derivative on a relative-degree-
+// one plant leaves it. The discrete top sample is z = −1, not +∞. Otherwise
+// 1 + L(∞) is unknown, which accepts c, as does dc = 0.
+func pidTuningDCAdmissible(c PID2, dc, wHi float64, gHi complex128) bool {
+	if dc == 0 {
+		return true
+	}
+	l := gHi * pidTuningFeedback(c, wHi)
+	inf := 1.
+	if !(cmplx.Abs(l) < 1) {
+		if c.Dt > 0 || !(math.Abs(imag(l)) <= .5*cmplx.Abs(l) && math.Abs(1+real(l)) >= .1) {
+			return true
+		}
+		inf = 1 + real(l)
+	}
+	zero := 1 + c.Kp*dc
+	if c.Ki != 0 {
+		zero = c.Ki * dc
+	}
+	return zero*inf > 0
 }
 
 // pidTuningSignConsistent reports whether every nonzero gain of c has sign
@@ -2015,7 +2052,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 	}
 	// crossingAt and crossingMargin describe nearest's worst crossing.
 	var crossingAt, crossingMargin float64
-	returnRejected := false
+	returnRejected, dcRejected := false, false
 	sampledExcess := func(c PID2, returnExcess float64) float64 {
 		if p.maxSensitivity > 0 {
 			return math.Max(returnExcess, pidTuningSensitivityPeak(p, c)-p.maxSensitivity)
@@ -2045,6 +2082,10 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		candidate.Ki /= mag
 		candidate.Kd /= mag
 		if pidPhaseDistance(h*pidTuningFeedback(candidate, wc), o.PhaseMargin) > 3 {
+			return nil
+		}
+		if !pidTuningDCAdmissible(candidate, p.dcGain, p.high, p.highGain) {
+			dcRejected = true
 			return nil
 		}
 		returnExcess := 0.
@@ -2251,6 +2292,9 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target needed a gain of sign opposite to the integrator's residue; such designs are rejected.")
 		} else if signRejected {
 			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target needed a gain of sign opposite to the stable plant's DC gain; such designs are rejected.")
+		}
+		if dcRejected {
+			evidence.Warnings = append(evidence.Warnings, "Candidates meeting the phase target had a real unstable closed-loop root on the stable plant the data are taken to come from (no unstable poles given); such designs are rejected.")
 		}
 		if returnRejected {
 			evidence.Warnings = append(evidence.Warnings, fmt.Sprintf("Candidates meeting the phase target had a high-frequency sensitivity 1/(1+Kd·CB) above %g with the ideal derivative; such designs are rejected.", p.maxReturnSensitivity))

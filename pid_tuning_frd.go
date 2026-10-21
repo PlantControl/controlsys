@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/cmplx"
 	"sort"
 )
 
@@ -75,5 +76,34 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 		alpha := math.Log(w/data.Omega[k-1]) / math.Log(data.Omega[k]/data.Omega[k-1])
 		return complex(1-alpha, 0)*data.Response[k-1][0][0] + complex(alpha, 0)*data.Response[k][0][0]
 	}}
+	if o.UnstablePoles == nil || *o.UnstablePoles == 0 {
+		p.dcGain, p.highGain = pidTuningFRDDCGain(data, p.at), p.at(high)
+	}
 	return tunePID(ctx, "TunePIDFRD", p, family, o)
+}
+
+// pidTuningFRDDCGain returns the DC gain that sampled data shows, its lowest
+// sample's real part, or 0 when its low end is not a flat, nonzero real
+// gain: from the lowest sample up half a decade sign·G must stay within 45°
+// of the positive real axis and |G| within a factor 1.4 of the lowest
+// sample's, so a rotated, integrating or resonant low end is not taken for
+// DC. A gain at rounding of the sampled peak, as for TunePID, is zero.
+func pidTuningFRDDCGain(data *FRD, at func(float64) complex128) float64 {
+	low, high := data.Omega[0], data.Omega[len(data.Omega)-1]
+	g0 := data.Response[0][0][0]
+	peak := 0.
+	for _, r := range data.Response {
+		peak = math.Max(peak, cmplx.Abs(r[0][0]))
+	}
+	if cmplx.Abs(g0) <= 1e3*0x1p-52*peak {
+		return 0
+	}
+	sign := complex(math.Copysign(1, real(g0)), 0)
+	for _, w := range []float64{low, low * math.Pow(10, .25), low * math.Sqrt(10)} {
+		g := sign * at(math.Min(w, high))
+		if r := cmplx.Abs(g) / cmplx.Abs(g0); !(r >= .7 && r <= 1.4) || math.Abs(cmplx.Phase(g)) > math.Pi/4 {
+			return 0
+		}
+	}
+	return real(g0)
 }
