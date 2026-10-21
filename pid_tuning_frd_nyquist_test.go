@@ -86,7 +86,10 @@ func pidRandomControllerTest(rng *rand.Rand, dt float64) PID2 {
 // one the samples do not resolve, is not compared: its dense |S| exceeds
 // 1e3, or between two samples the interpolant's error in L exceeds half
 // the distance of the exact 1 + L from 0. Where 1 + L ends unresolved, near
-// 0 at the top sample, the count may reject a stable loop of |S| > 20.
+// 0 at the top sample, the count may reject a stable loop of |S| > 20. It
+// may reject any stable loop of an unfiltered trapezoidal derivative, whose
+// pole at z = −1 it indents around only under top-sample conditions; some
+// such loops must still be accepted.
 func TestPIDTuningFRDNyquistMatchesClosedLoopRoots(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 13))
 	counts := map[string]int{}
@@ -177,7 +180,7 @@ func TestPIDTuningFRDNyquistMatchesClosedLoopRoots(t *testing.T) {
 			t.Errorf("trial %d: %v/%v dt %g %+v: count says stable=%v, roots say %v (|S| peak %g)", trial, num, den, dt, c, stable, truth, peak)
 		}
 	}
-	if counts["agree true"] < 300 || counts["agree false"] < 300 {
+	if counts["agree true"] < 300 || counts["agree false"] < 300 || counts["circle agree true"] < 5 {
 		t.Errorf("too few decided loops: %v", counts)
 	}
 	t.Log(counts)
