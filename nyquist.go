@@ -44,8 +44,8 @@ type NyquistResult struct {
 // on the stability boundary) the count is undefined and Nyquist returns
 // ErrSingularTransform. A delay loop whose winding needs more than 2^21
 // samples (|L| > 1 out to ω with ωτ in the millions), or where 1+L vanishes
-// within tolerance past ωτ = 1e5 (closed-loop roots closer to the axis than
-// the response resolves), returns ErrDelayUnsupported. A neutral delay loop, whose high-frequency gain may
+// within tolerance or float resolution of ω past ωτ = 1e5 (closed-loop roots
+// closer to the axis than the response resolves), returns ErrDelayUnsupported. A neutral delay loop, whose high-frequency gain may
 // reach 1, is counted by the closed-loop delay Nyquist test when its
 // difference operator 1 + L∞ is certified free of zeros in Re s >= 0
 // (d1·e^{−s} + d2·e^{−2s} with 1 + d1·z + d2·z² nonzero on |z| <= 1), and
@@ -547,7 +547,7 @@ func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, dep
 	if !rot && !(phaseStep(1+a.v, 1+b.v) > nyquistMaxPhaseStep) {
 		return nil
 	}
-	if depth >= nyquistMaxDepth && !rot || depth >= 2*nyquistMaxDepth {
+	if depth >= nyquistMaxDepth && !rot && p.atFloor(f(a.t), f(b.t)) || depth >= 2*nyquistMaxDepth {
 		p.markOnContour(f(a.t))
 		return nil
 	}
@@ -562,6 +562,14 @@ func (p *nyquistPath) refine(f func(float64) complex128, a, b nyquistSample, dep
 	}
 	p.vals = append(p.vals, vm)
 	return p.refine(f, m, b, depth+1)
+}
+
+// atFloor reports that bisection past nyquistMaxDepth cannot resolve arg(1+L)
+// between sa and sb. Delay loops keep bisecting down to float resolution of
+// s: their closed-loop roots near ω sit within ~π/(ωτ²) of the axis, below
+// the depth-30 width for ωτ near 1e5, and are not on the contour.
+func (p *nyquistPath) atFloor(sa, sb complex128) bool {
+	return p.tau == 0 || !(cmplx.Abs(sb-sa) > 4*eps()*math.Max(cmplx.Abs(sa), cmplx.Abs(sb)))
 }
 
 // delayAliases reports a step from sa to sb along which e^{-sτ} turns by
