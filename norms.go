@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -386,11 +387,27 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 // first certified by one probe just
 // above it; when the probe is inconclusive, the upper-bound search may still
 // certify a raised peak, and bisection runs only if it does not. A
-// continuous peak approached only as ω → ∞ returns omega = +Inf.
+// continuous peak approached only as ω → ∞ returns omega = +Inf. A higher
+// gain found by refinedPeak replaces the result, raised by certifyPeak probes,
+// so the result is never below that of the crossing search alone.
 func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err error) {
 	n, m, p := sys.Dims()
 	ws := newHamiltonianWS(sys, n, m, p)
+	norm, omega, err = ws.crossingPeak(poles)
+	if err != nil {
+		return 0, 0, err
+	}
+	if g, w := ws.refinedPeak(poles, norm, omega); g > norm {
+		const tol = 1e-10
+		g, w, _ = ws.certifyPeak(g, w, tol)
+		return g * (1 + tol/2), w, nil
+	}
+	return norm, omega, nil
+}
 
+// crossingPeak is the γ-crossing search of peakGain.
+func (ws *hamiltonianWS) crossingPeak(poles []complex128) (norm float64, omega float64, err error) {
+	sys := ws.sys
 	gammaLow, omegaPeak := ws.lowerBound(poles)
 	if gammaLow > 0 {
 		gammaLow, omegaPeak = ws.climb(gammaLow, omegaPeak)
@@ -536,6 +553,7 @@ type hamiltonianWS struct {
 
 	cands []float64
 	freqs []float64
+	seeds []refinedSeed // the samples of lowerBound
 	eval  *sigmaEvaluator
 }
 
@@ -730,8 +748,15 @@ func (ws *hamiltonianWS) climb(peak, w float64) (float64, float64) {
 	if math.IsInf(a, 0) || math.IsInf(b, 0) {
 		return peak, w
 	}
+	return ws.brentMax(peak, w, a, b, false)
+}
+
+// brentMax maximises σ_max on [a, b] from w by Brent's method, on GEPP gains
+// or refined ones, and returns the larger of peak and the refined gain at
+// the maximiser.
+func (ws *hamiltonianWS) brentMax(peak, w, a, b float64, refine bool) (float64, float64) {
 	f := func(x float64) float64 {
-		sv, err := ws.eval.sigma(x, false)
+		sv, err := ws.eval.sigma(x, refine)
 		if err != nil || math.IsNaN(sv) {
 			return math.Inf(1)
 		}
@@ -809,12 +834,133 @@ func (ws *hamiltonianWS) climb(peak, w float64) (float64, float64) {
 	return peak, w
 }
 
-// lowerBound samples σ_max at ω = 0 and 50 log-spaced frequencies spanning
+// refinedPeak backs up the crossing search on near-optimal H∞ loops, whose
+// σ_max is flat to 1e-8 to 1e-3 over decades: QZ scatters the γ-crossings of
+// their near-coincident lightly damped pole pairs, so neither the seed grid
+// nor the crossing midpoints need land on the highest hump, and GEPP noise
+// of 1e-8 picks the wrong seed of a broad hump and stalls its climb. It
+// refines the eight highest samples within 1e-4 of level, or above it, of
+// two sets: the seed grid of lowerBound, each bracketed by its neighbours,
+// and ω₀ + k·|σ|/4, |k| ≤ 8, around each lightly damped pole σ + jω₀
+// (|σ| < 0.1·ω₀; ln z/T for discrete models), each bracketed by ±|σ|/4.
+// From each refined local maximum it climbs on refined gains when
+// refinedRise sees the gain rise, tested at at (where the crossing search
+// ended) when the bracket holds it. It returns the highest gain found and
+// where, or 0.
+func (ws *hamiltonianWS) refinedPeak(poles []complex128, level, at float64) (peak, omega float64) {
+	sys := ws.sys
+	res := make([]refinedSeed, 0, 17*len(poles))
+	wmax := math.Inf(1)
+	if sys.IsDiscrete() {
+		wmax = math.Pi / sys.Dt
+	}
+	for _, pole := range poles {
+		if sys.IsDiscrete() {
+			pole = cmplx.Log(pole) / complex(sys.Dt, 0)
+		}
+		wc, h := imag(pole), math.Abs(real(pole))/4
+		if !(wc > 0) || !(h < 0.025*wc) {
+			continue
+		}
+		for k := -8; k <= 8; k++ {
+			w := wc + float64(k)*h
+			if w > 0 && w < wmax {
+				res = append(res, refinedSeed{w: w, a: math.Max(w-h, 0), b: math.Min(w+h, wmax)})
+			}
+		}
+	}
+	slices.SortFunc(res, func(x, y refinedSeed) int { return cmp.Compare(x.w, y.w) })
+	starts := make([]refinedSeed, 0, 16)
+	top := make([]int, 0, max(len(ws.seeds), len(res)))
+	for k, set := range [2][]refinedSeed{ws.seeds, res} {
+		top = top[:0]
+		for i := range set {
+			if k == 1 {
+				v, err := ws.eval.sigma(set[i].w, false)
+				if err != nil || math.IsNaN(v) {
+					return 0, 0
+				}
+				set[i].v = v
+			}
+			set[i].refined = false
+			if set[i].v >= level*(1-1e-4) {
+				top = append(top, i)
+			}
+		}
+		slices.SortFunc(top, func(i, j int) int { return cmp.Compare(set[j].v, set[i].v) })
+		for _, i := range top[:min(len(top), 8)] {
+			v, err := ws.eval.sigma(set[i].w, true)
+			if err != nil {
+				return 0, 0
+			}
+			set[i].v, set[i].refined = v, true
+		}
+		below := func(j int, v float64) bool {
+			if j < 0 || j == len(set) {
+				return true
+			}
+			if set[j].refined {
+				return set[j].v <= v
+			}
+			return set[j].v <= v*(1+1e-6)
+		}
+		for i, s := range set {
+			if s.refined && below(i-1, s.v) && below(i+1, s.v) {
+				starts = append(starts, s)
+			}
+		}
+	}
+	slices.SortFunc(starts, func(x, y refinedSeed) int { return cmp.Compare(y.v, x.v) })
+	for _, s := range starts[:min(len(starts), 8)] {
+		v, w := s.v, s.w
+		x := s.w
+		if s.a <= at && at <= s.b {
+			x = at
+		}
+		if s.a < s.b && ws.refinedRise(s.a, s.b, x) {
+			v, w = ws.brentMax(v, w, s.a, s.b, true)
+		}
+		if v > peak {
+			peak, omega = v, w
+		}
+	}
+	return peak, omega
+}
+
+// refinedRise reports whether the refined gain rises by more than 1e-13
+// relative from σ_max(x) at x ± h, h = 1e-6·(b − a) or 1e-3·(b − a): whether
+// the climb that ended at x may have stalled short of the local maximum on
+// GEPP noise, next to a sharp peak or on a broad hump.
+func (ws *hamiltonianWS) refinedRise(a, b, x float64) bool {
+	sv, err := ws.eval.sigma(x, true)
+	if err != nil {
+		return true
+	}
+	for _, rel := range [2]float64{1e-6, 1e-3} {
+		h := rel * (b - a)
+		for _, u := range [2]float64{x - h, x + h} {
+			if u < a || u > b || u < 0 {
+				continue
+			}
+			if s, err := ws.eval.sigma(u, true); err != nil || s > sv*(1+1e-13) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// refinedSeed is a start of refinedPeak: σ_max(w) = v, refined or by GEPP
+// alone, climbed on [a, b].
+type refinedSeed struct {
+	w, a, b, v float64
+	refined    bool
+}
+
+// seedFreqs appends to freqs ω = 0 and 50 log-spaced frequencies spanning
 // the magnitudes of poles; discrete models use the magnitudes of their Tustin
 // equivalents, warped back to the unit circle, and add the Nyquist frequency.
-// It is only a seed: when a sample hits a singular resolvent it returns the
-// trivial bound 0, and the Hamiltonian search still finds the peak.
-func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak float64) {
+func (ws *hamiltonianWS) seedFreqs(poles []complex128, freqs []float64) []float64 {
 	sys := ws.sys
 	dt := sys.Dt
 	wmin, wmax := math.Inf(1), 0.0
@@ -834,7 +980,7 @@ func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak flo
 	wmin /= 10
 	wmax *= 10
 
-	freqs := append(ws.freqs[:0], 0)
+	freqs = append(freqs, 0)
 	for i := range 50 {
 		w := wmin * math.Pow(wmax/wmin, float64(i)/49)
 		if sys.IsDiscrete() {
@@ -845,11 +991,24 @@ func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak flo
 	if sys.IsDiscrete() {
 		freqs = append(freqs, math.Pi/dt)
 	}
+	return freqs
+}
+
+// lowerBound samples σ_max at the seedFreqs frequencies. It is only a seed:
+// when a sample hits a singular resolvent it returns the trivial bound 0, and
+// the Hamiltonian search still finds the peak.
+func (ws *hamiltonianWS) lowerBound(poles []complex128) (gammaLow, omegaPeak float64) {
+	freqs := ws.seedFreqs(poles, ws.freqs[:0])
 	ws.freqs = freqs
-	if peak, w, err := ws.eval.peak(freqs, 0); err == nil {
-		gammaLow, omegaPeak = peak, w
+	ws.seeds = slices.Grow(ws.seeds[:0], len(freqs))
+	peak, w, err := ws.eval.peak(freqs, 0)
+	if err != nil {
+		return 0, 0
 	}
-	return gammaLow, omegaPeak
+	for i, f := range freqs {
+		ws.seeds = append(ws.seeds, refinedSeed{w: f, a: freqs[max(i-1, 0)], b: freqs[min(i+1, len(freqs)-1)], v: ws.eval.vals[i]})
+	}
+	return peak, w
 }
 
 // sigmaEvaluator computes σ_max(G) at single frequencies to near working

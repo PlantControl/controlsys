@@ -170,3 +170,155 @@ func TestFRDPeakGainAtPoleIsInf(t *testing.T) {
 		t.Fatalf("FRD Sigma at pole err = %v, want ErrInvalidArgument", err)
 	}
 }
+
+func testUnitary(n int, seed float64) [][]complex128 {
+	q := make([][]complex128, n)
+	for i := range q {
+		q[i] = make([]complex128, n)
+		for j := range n {
+			q[i][j] = complex(math.Sin(seed*float64(3*i+j+1)), math.Cos(seed*float64(i+5*j+2)))
+		}
+	}
+	for range 2 {
+		for j := range n {
+			for k := range j {
+				var dot complex128
+				for i := range n {
+					dot += cmplx.Conj(q[i][k]) * q[i][j]
+				}
+				for i := range n {
+					q[i][j] -= dot * q[i][k]
+				}
+			}
+			var norm float64
+			for i := range n {
+				norm = math.Hypot(norm, cmplx.Abs(q[i][j]))
+			}
+			for i := range n {
+				q[i][j] /= complex(norm, 0)
+			}
+		}
+	}
+	return q
+}
+
+func TestComplexSVDWorkspaceSmallSingularValuesAbsoluteAccuracy(t *testing.T) {
+	tests := []struct {
+		name  string
+		p, m  int
+		sigma []float64
+	}{
+		{"Square2x2", 2, 2, []float64{224.9, 1.2382e-6}},
+		{"Tall4x3", 4, 3, []float64{3e3, 2.5e-4, 1e-9}},
+		{"Wide2x5", 2, 5, []float64{1e5, 7e-7}},
+		{"Square3x3Graded", 3, 3, []float64{1, 1e-6, 1e-11}},
+		{"Tiny2x2", 2, 2, []float64{3e-200, 1e-209}},
+		{"Wide3x5", 3, 5, []float64{40, 3e-5, 2e-10}},
+		{"Square5x5", 5, 5, []float64{1e4, 2e3, 1e-3, 1e-7, 3e-11}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			u := testUnitary(test.p, 0.37)
+			v := testUnitary(test.m, 1.13)
+			data := make([]complex128, test.p*test.m)
+			nested := make([][]complex128, test.p)
+			for i := range test.p {
+				nested[i] = data[i*test.m : (i+1)*test.m]
+				for j := range test.m {
+					var g complex128
+					for k, s := range test.sigma {
+						g += u[i][k] * complex(s, 0) * cmplx.Conj(v[j][k])
+					}
+					data[i*test.m+j] = g
+				}
+			}
+			gonum := gonumComplexSingularValues(t, data, test.p, test.m)
+			tol := 16 * float64(test.p+test.m) * eps() * test.sigma[0]
+			ws := newComplexSVDWorkspace(test.p, test.m)
+			for _, nestedForm := range []bool{false, true} {
+				got := make([]float64, len(test.sigma))
+				var err error
+				if nestedForm {
+					err = ws.singularValuesFromNested(got, nested, test.p, test.m)
+				} else {
+					err = ws.singularValuesFromFlat(got, data, 0, test.p, test.m)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i, s := range test.sigma {
+					if math.Abs(got[i]-s) > tol || math.Abs(got[i]-gonum[i]) > tol {
+						t.Fatalf("nested=%v σ%d = %.17g, constructed %.17g, gonum %.17g (tol %.3g)", nestedForm, i, got[i], s, gonum[i], tol)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSigmaSubnormalResponse(t *testing.T) {
+	const up = 0x1p1000
+	for _, d := range [][]float64{{1e-310, 0, 0, 2e-310}, {3e-309, 1e-309, 0, 2e-309}} {
+		sys, err := NewFromSlices(0, 2, 2, nil, nil, nil, d, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sv, err := sys.Sigma([]float64{0.5}, 0)
+		if err != nil {
+			t.Fatalf("D=%v: %v", d, err)
+		}
+		scaled := make([]complex128, len(d))
+		for i, v := range d {
+			scaled[i] = complex(v*up, 0)
+		}
+		want := gonumComplexSingularValues(t, scaled, 2, 2)
+		for i, w := range want {
+			if got := sv.At(0, i); !sameRelative(got, w/up, 1e-10) {
+				t.Fatalf("D=%v: σ%d = %g, want %g", d, i, got, w/up)
+			}
+		}
+		f, err := sys.FRD([]float64{0.5})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fsv, err := f.Sigma()
+		if err != nil {
+			t.Fatalf("D=%v FRD.Sigma: %v", d, err)
+		}
+		for i, w := range want {
+			if got := fsv.At(0, i); !sameRelative(got, w/up, 1e-10) {
+				t.Fatalf("D=%v: FRD σ%d = %g, want %g", d, i, got, w/up)
+			}
+		}
+		pk, err := f.PeakGain()
+		if err != nil {
+			t.Fatalf("D=%v FRD.PeakGain: %v", d, err)
+		}
+		if !sameRelative(pk.Gain, want[0]/up, 1e-10) {
+			t.Fatalf("D=%v: FRD peak = %g, want %g", d, pk.Gain, want[0]/up)
+		}
+	}
+}
+
+func TestComplexSVDWorkspaceSubnormalSingularValues(t *testing.T) {
+	p, m := 3, 2
+	data := []complex128{1e-310, 0, 0, 2e-310i, 0, 0}
+	ws := newComplexSVDWorkspace(p, m)
+	for _, wide := range []bool{false, true} {
+		rows, cols := p, m
+		in := data
+		if wide {
+			rows, cols = m, p
+			in = []complex128{1e-310, 0, 0, 0, 2e-310i, 0}
+		}
+		got := make([]float64, 2)
+		if err := ws.singularValuesFromFlat(got, in, 0, rows, cols); err != nil {
+			t.Fatal(err)
+		}
+		for i, w := range []float64{2e-310, 1e-310} {
+			if !sameRelative(got[i], w, 1e-10) {
+				t.Fatalf("wide=%v σ%d = %g, want %g", wide, i, got[i], w)
+			}
+		}
+	}
+}

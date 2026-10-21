@@ -14,8 +14,11 @@ type complexSVDWorkspace struct {
 	block  []float64
 	eig    []float64
 	work   []float64
+	bidiag []complex128
+	diag   []float64
+	super  []float64
+	qwork  []float64
 	scale  float64
-	nSV    int
 	gramN  int
 	blockN int
 	useCol bool
@@ -33,7 +36,10 @@ func newComplexSVDWorkspace(p, m int) *complexSVDWorkspace {
 		block:  block,
 		eig:    eig,
 		work:   work,
-		nSV:    gramN,
+		bidiag: make([]complex128, p*m),
+		diag:   make([]float64, gramN),
+		super:  make([]float64, gramN),
+		qwork:  make([]float64, 4*gramN),
 		gramN:  gramN,
 		blockN: blockN,
 		useCol: m <= p,
@@ -41,17 +47,130 @@ func newComplexSVDWorkspace(p, m int) *complexSVDWorkspace {
 }
 
 func (ws *complexSVDWorkspace) singularValuesFromFlat(dst []float64, data []complex128, base, p, m int) error {
-	ws.fillBlock(func(i, j int) complex128 {
+	ws.fillBidiag(func(i, j int) complex128 {
 		return data[base+i*m+j]
 	}, p, m)
-	return ws.singularValues(dst)
+	return ws.singularValues(dst, p, m)
 }
 
 func (ws *complexSVDWorkspace) singularValuesFromNested(dst []float64, data [][]complex128, p, m int) error {
-	ws.fillBlock(func(i, j int) complex128 {
+	ws.fillBidiag(func(i, j int) complex128 {
 		return data[i][j]
 	}, p, m)
-	return ws.singularValues(dst)
+	return ws.singularValues(dst, p, m)
+}
+
+// fillBidiag stores G/‖G‖_max, or its conjugate transpose when p < m, so
+// the stored matrix is rows×cols with rows ≥ cols.
+func (ws *complexSVDWorkspace) fillBidiag(at func(i, j int) complex128, p, m int) {
+	ws.scale = 0
+	for i := range p {
+		for j := range m {
+			magnitude := cmplx.Abs(at(i, j))
+			if math.IsNaN(magnitude) || magnitude > ws.scale {
+				ws.scale = magnitude
+			}
+		}
+	}
+	if ws.scale == 0 || math.IsInf(ws.scale, 1) || math.IsNaN(ws.scale) {
+		return
+	}
+	scale := ws.scale
+	a := ws.bidiag
+	if m <= p {
+		for i := range p {
+			for j := range m {
+				v := at(i, j)
+				a[i*m+j] = complex(real(v)/scale, imag(v)/scale)
+			}
+		}
+		return
+	}
+	for i := range p {
+		for j := range m {
+			v := at(i, j)
+			a[j*p+i] = complex(real(v)/scale, -imag(v)/scale)
+		}
+	}
+}
+
+// bidiagonalize reduces the stored rows×cols matrix by complex Householder
+// reflections to upper bidiagonal form and keeps the moduli of its entries.
+// A bidiagonal matrix has the singular values of its entrywise modulus, and
+// the reduction is backward stable, so σᵢ get absolute error O(eps·σ₁)
+// rather than the O(√eps·σ₁) of Gram eigenvalues.
+func (ws *complexSVDWorkspace) bidiagonalize(rows, cols int) {
+	a := ws.bidiag
+	for k := range cols {
+		ws.diag[k] = householderColumn(a, rows, cols, k)
+		if k+1 < cols {
+			ws.super[k] = householderRow(a, rows, cols, k)
+		}
+	}
+}
+
+// householderColumn annihilates a[k+1:, k], applies the reflection to
+// a[k:, k+1:] and returns the modulus of the new a[k,k].
+func householderColumn(a []complex128, rows, cols, k int) float64 {
+	alpha := a[k*cols+k]
+	var sumSq float64
+	for i := k + 1; i < rows; i++ {
+		sumSq += complexMagnitudeSquared(a[i*cols+k])
+	}
+	if sumSq == 0 {
+		return cmplx.Abs(alpha)
+	}
+	beta := complex(-math.Copysign(math.Sqrt(complexMagnitudeSquared(alpha)+sumSq), real(alpha)), 0)
+	tau := cmplx.Conj((beta - alpha) / beta)
+	inv := 1 / (alpha - beta)
+	a[k*cols+k] = 1
+	for i := k + 1; i < rows; i++ {
+		a[i*cols+k] *= inv
+	}
+	for j := k + 1; j < cols; j++ {
+		var w complex128
+		for i := k; i < rows; i++ {
+			w += cmplx.Conj(a[i*cols+k]) * a[i*cols+j]
+		}
+		w *= tau
+		for i := k; i < rows; i++ {
+			a[i*cols+j] -= a[i*cols+k] * w
+		}
+	}
+	return math.Abs(real(beta))
+}
+
+// householderRow annihilates a[k, k+2:], applies the reflection to
+// a[k+1:, k+1:] and returns the modulus of the new a[k,k+1].
+func householderRow(a []complex128, rows, cols, k int) float64 {
+	row := a[k*cols : (k+1)*cols]
+	alpha := row[k+1]
+	var sumSq float64
+	for j := k + 2; j < cols; j++ {
+		sumSq += complexMagnitudeSquared(row[j])
+	}
+	if sumSq == 0 {
+		return cmplx.Abs(alpha)
+	}
+	beta := complex(-math.Copysign(math.Sqrt(complexMagnitudeSquared(alpha)+sumSq), real(alpha)), 0)
+	tau := cmplx.Conj((beta - alpha) / beta)
+	inv := 1 / (alpha - beta)
+	row[k+1] = 1
+	for j := k + 2; j < cols; j++ {
+		row[j] *= inv
+	}
+	for i := k + 1; i < rows; i++ {
+		r := a[i*cols : (i+1)*cols]
+		var w complex128
+		for j := k + 1; j < cols; j++ {
+			w += r[j] * cmplx.Conj(row[j])
+		}
+		w *= tau
+		for j := k + 1; j < cols; j++ {
+			r[j] -= w * row[j]
+		}
+	}
+	return math.Abs(real(beta))
 }
 
 func (ws *complexSVDWorkspace) fillBlock(at func(i, j int) complex128, p, m int) {
@@ -102,7 +221,7 @@ func (ws *complexSVDWorkspace) fillBlock(at func(i, j int) complex128, p, m int)
 // an infinite entry, a response at a pole, has σ₁ = +Inf, but σ₂, … depend on
 // the pole's residue and are not determined by the sampled response, so
 // asking for more than σ₁ there returns ErrInvalidArgument.
-func (ws *complexSVDWorkspace) singularValues(dst []float64) error {
+func (ws *complexSVDWorkspace) singularValues(dst []float64, p, m int) error {
 	if math.IsInf(ws.scale, 1) {
 		if len(dst) > 1 {
 			return fmt.Errorf("response is infinite (frequency at a pole), singular values below the largest are undetermined: %w", ErrInvalidArgument)
@@ -110,16 +229,20 @@ func (ws *complexSVDWorkspace) singularValues(dst []float64) error {
 		dst[0] = math.Inf(1)
 		return nil
 	}
-	if !ws.factorize() {
-		return fmt.Errorf("singular values: eigenvalue iteration did not converge: %w", ErrSchurFailed)
+	if ws.scale == 0 {
+		clear(dst)
+		return nil
 	}
-	scale := 1.0
-	for _, lambda := range ws.eig {
-		scale = max(scale, math.Abs(lambda))
+	if math.IsNaN(ws.scale) {
+		return fmt.Errorf("singular values: response is NaN: %w", ErrSchurFailed)
+	}
+	cols := min(p, m)
+	ws.bidiagonalize(max(p, m), cols)
+	if impl.Dlasq1(cols, ws.diag, ws.super, ws.qwork) != 0 {
+		return fmt.Errorf("singular values: bidiagonal SVD did not converge: %w", ErrSchurFailed)
 	}
 	for i := range dst {
-		lambda := nonnegativeGramEigenvalue(ws.eig[ws.blockN-1-2*i], scale)
-		dst[i] = ws.scale * math.Sqrt(lambda)
+		dst[i] = ws.scale * ws.diag[i]
 	}
 	return nil
 }

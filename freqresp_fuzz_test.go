@@ -511,25 +511,17 @@ func fzFRCheckSigma(t *testing.T, s *fzSpec, sys *System, ws []float64, pts []fz
 		}
 		want := fzSingularValues(d.gd, s.P, s.M)
 		for i, v := range want {
-			fzFRCheckSV(t, s, "Sigma", d.w, i, sg.At(k, i), v, want[0], e+1e-13*want[0])
+			fzFRCheckSV(t, s, "Sigma", d.w, i, sg.At(k, i), v, e+1e-13*want[0])
 		}
 	}
 }
 
-// fzFRCheckSV checks σᵢ against the exact v within tol. A miss inside the
-// accuracy of eigenvalues of the Gram matrix GᴴG, which Sigma uses
-// (frequency_svd.go: |σ̂² − σ²| ~ eps·σ₁²), is the known small-σ defect
-// (followup), not a new failure.
-func fzFRCheckSV(t *testing.T, s *fzSpec, op string, w float64, i int, got, v, s1, tol float64) {
+// fzFRCheckSV checks σᵢ against the exact v within tol.
+func fzFRCheckSV(t *testing.T, s *fzSpec, op string, w float64, i int, got, v, tol float64) {
 	t.Helper()
-	const eps = 0x1p-52
 	d := math.Abs(got - v)
 	if d <= tol {
 		return
-	}
-	c := 64 * float64(s.P+s.M) * eps
-	if gram := c * s1 * s1 / math.Max(got+v, math.Sqrt(c)*s1); d <= tol+gram {
-		fzSkip(t, "known: Sigma small singular values from Gram eigenvalues")
 	}
 	t.Fatalf("%s at ω=%g: σ%d = %g, exact %g (|Δ| %.3g, bound %.3g)\n%s", op, w, i, got, v, d, tol, s)
 }
@@ -698,7 +690,7 @@ func fzFRCheckFRD(t *testing.T, s *fzSpec, sys *System, ws []float64, fr *FreqRe
 		g := fzFRAt(fr, k)
 		want := fzSingularValues(g, p, m)
 		for i, v := range want {
-			fzFRCheckSV(t, s, "FRD.Sigma", ws[k], i, sg.At(k, i), v, want[0], 64*eps*fzCFrob(g))
+			fzFRCheckSV(t, s, "FRD.Sigma", ws[k], i, sg.At(k, i), v, 64*eps*fzCFrob(g))
 		}
 	}
 }
