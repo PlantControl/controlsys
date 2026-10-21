@@ -40,8 +40,8 @@ type CanonResult struct {
 // canon; see https://www.mathworks.com/help/control/ref/dynamicsystem.canon.html.
 // The modal form uses an eigenvector basis and falls back to an ordered real
 // Schur form (quasi-triangular, not block diagonal) when the eigenvectors
-// are ill-conditioned. The companion form returns ErrSingularTransform when
-// sys is not controllable from its first input. Descriptor and delayed
+// are ill-conditioned or inaccurate. The companion form returns
+// ErrSingularTransform when sys is not controllable from its first input. Descriptor and delayed
 // models are rejected; a model with no states returns ErrDimensionMismatch.
 func Canon(sys *System, form CanonForm) (*CanonResult, error) {
 	if err := requireFiniteSystem("Canon", sys); err != nil {
@@ -84,7 +84,8 @@ func canonModal(sys *System) (*CanonResult, error) {
 }
 
 // canonModalEig attempts the eigendecomposition-based modal form.
-// Returns error if eigenvector matrix is too ill-conditioned.
+// Returns error if the eigenvector matrix is too ill-conditioned or its
+// eigen-residual exceeds rounding level.
 func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult, error) {
 	n, m, p := policy.n, policy.m, policy.p
 	var eig mat.Eigen
@@ -170,6 +171,9 @@ func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult
 
 	AT := mat.NewDense(n, n, nil)
 	AT.Mul(sys.A, T)
+	if res := modalEigResidual(AT, tData, vals, blocks, n); res > modalEigResidualTol*mat.Norm(sys.A, 1) {
+		return nil, fmt.Errorf("eigenvector residual %.1e too large: %w", res, ErrSingularTransform)
+	}
 	Anew := mat.NewDense(n, n, nil)
 	if err := lu.SolveTo(Anew, false, AT); err != nil {
 		return nil, fmt.Errorf("Canon: eigenvector basis solve failed: %w", ErrSingularTransform)
@@ -193,6 +197,44 @@ func canonModalEig(sys *System, policy realizationTransformPolicy) (*CanonResult
 		return nil, fmt.Errorf("Canon: eigenvector basis solve failed: %w", ErrSingularTransform)
 	}
 	return &CanonResult{Sys: newSys, T: Tinv}, nil
+}
+
+const modalEigResidualTol = 1e-10
+
+// modalEigResidual returns the largest relative column-block residual
+// ‖A·t − t·Λ‖₁/‖t‖₁ of the real eigenvector basis t (row-major, n×n), where
+// at = A·t and Λ is the real block-diagonal eigenvalue matrix in block order.
+func modalEigResidual(at *mat.Dense, t []float64, vals []complex128, blocks []eigBlock, n int) float64 {
+	raw := at.RawMatrix()
+	worst := 0.0
+	col := 0
+	for _, blk := range blocks {
+		lam := vals[blk.idx]
+		re, im := real(lam), imag(lam)
+		var rn, tn float64
+		if blk.imag1 == 0 {
+			for row := range n {
+				x := t[row*n+col]
+				rn += math.Abs(raw.Data[row*raw.Stride+col] - re*x)
+				tn += math.Abs(x)
+			}
+			col++
+		} else {
+			for row := range n {
+				x, y := t[row*n+col], t[row*n+col+1]
+				rn += math.Abs(raw.Data[row*raw.Stride+col]-(re*x-im*y)) +
+					math.Abs(raw.Data[row*raw.Stride+col+1]-(im*x+re*y))
+				tn += math.Abs(x) + math.Abs(y)
+			}
+			col += 2
+		}
+		if tn > 0 {
+			worst = math.Max(worst, rn/tn)
+		} else {
+			worst = math.Inf(1)
+		}
+	}
+	return worst
 }
 
 // canonModalSchur computes a quasi-modal form via ordered real Schur decomposition.

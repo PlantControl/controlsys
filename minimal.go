@@ -146,9 +146,11 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 			}
 			nobs := dualRes.NCont
 
+			// nobs == ncont keeps the stage input: the rotation alone can
+			// move ill-conditioned eigenvalues of a nonnormal A.
 			if nobs == 0 {
 				nr = 0
-			} else {
+			} else if nobs < ncont {
 				nr = nobs
 
 				aObsDual := extractSubmatrix(dualRes.A, 0, nobs, 0, nobs)

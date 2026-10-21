@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -88,6 +89,38 @@ func TestPrescale_PureGain(t *testing.T) {
 	n, _, _ := pr.Sys.Dims()
 	if n != 0 {
 		t.Errorf("expected pure gain, got n=%d", n)
+	}
+}
+
+func TestPrescale_StaticGainIOScales(t *testing.T) {
+	sys, err := NewGain(mat.NewDense(2, 3, []float64{
+		-3.95, -3.39, -2.30,
+		3.99, 3.80, 3.02,
+	}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := Prescale(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recip := func(v float64) float64 { return 1 / v }
+	wantIn := []float64{recip(3.99), recip(3.80), recip(3.02)}
+	wantOut := []float64{recip(3.95), recip(3.99)}
+	if !slices.Equal(pr.Info.InputScale, wantIn) || !slices.Equal(pr.Info.OutputScale, wantOut) {
+		t.Fatalf("scales %v / %v, want %v / %v", pr.Info.InputScale, pr.Info.OutputScale, wantIn, wantOut)
+	}
+
+	zero, err := NewGain(mat.NewDense(1, 2, []float64{0, -4}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err = Prescale(zero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(pr.Info.InputScale, []float64{1, 0.25}) || !slices.Equal(pr.Info.OutputScale, []float64{0.25}) {
+		t.Fatalf("zero-column scales %v / %v", pr.Info.InputScale, pr.Info.OutputScale)
 	}
 }
 

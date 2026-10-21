@@ -51,8 +51,7 @@ func Prescale(sys *System) (*PrescaleResult, error) {
 
 	if n == 0 {
 		result := &PrescaleResult{Sys: policy.zeroOrderCopy()}
-		result.Info.InputScale = ones(m)
-		result.Info.OutputScale = ones(p)
+		result.Info.InputScale, result.Info.OutputScale = prescaleIOScales(nil, nil, sys.D, 0, m, p)
 		return result, nil
 	}
 
@@ -94,46 +93,7 @@ func Prescale(sys *System) (*PrescaleResult, error) {
 	}
 
 	Db := denseCopy(sys.D)
-
-	inputScale := make([]float64, m)
-	for j := range m {
-		maxVal := 0.0
-		for i := range n {
-			if v := math.Abs(Bb.At(i, j)); v > maxVal {
-				maxVal = v
-			}
-		}
-		for i := range p {
-			if v := math.Abs(Db.At(i, j)); v > maxVal {
-				maxVal = v
-			}
-		}
-		if maxVal > 0 {
-			inputScale[j] = 1.0 / maxVal
-		} else {
-			inputScale[j] = 1.0
-		}
-	}
-
-	outputScale := make([]float64, p)
-	for i := range p {
-		maxVal := 0.0
-		for j := range n {
-			if v := math.Abs(Cb.At(i, j)); v > maxVal {
-				maxVal = v
-			}
-		}
-		for j := range m {
-			if v := math.Abs(Db.At(i, j)); v > maxVal {
-				maxVal = v
-			}
-		}
-		if maxVal > 0 {
-			outputScale[i] = 1.0 / maxVal
-		} else {
-			outputScale[i] = 1.0
-		}
-	}
+	inputScale, outputScale := prescaleIOScales(Bb, Cb, sys.D, n, m, p)
 
 	var scaled *System
 	var err error
@@ -161,10 +121,50 @@ func Prescale(sys *System) (*PrescaleResult, error) {
 	return result, nil
 }
 
-func ones(n int) []float64 {
-	s := make([]float64, n)
-	for i := range s {
-		s[i] = 1.0
+// prescaleIOScales returns the reciprocal column maxima of [B; D] and row
+// maxima of [C D], 1 for an all-zero column or row.
+func prescaleIOScales(b, c, d *mat.Dense, n, m, p int) (in, out []float64) {
+	in = make([]float64, m)
+	out = make([]float64, p)
+	if n > 0 && m > 0 {
+		raw := b.RawMatrix()
+		for i := range n {
+			row := raw.Data[i*raw.Stride : i*raw.Stride+m]
+			for j, v := range row {
+				in[j] = math.Max(in[j], math.Abs(v))
+			}
+		}
 	}
-	return s
+	if n > 0 && p > 0 {
+		raw := c.RawMatrix()
+		for i := range p {
+			for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
+				out[i] = math.Max(out[i], math.Abs(v))
+			}
+		}
+	}
+	if m > 0 && p > 0 {
+		raw := d.RawMatrix()
+		for i := range p {
+			for j, v := range raw.Data[i*raw.Stride : i*raw.Stride+m] {
+				a := math.Abs(v)
+				in[j] = math.Max(in[j], a)
+				out[i] = math.Max(out[i], a)
+			}
+		}
+	}
+	for j, v := range in {
+		in[j] = prescaleRecip(v)
+	}
+	for i, v := range out {
+		out[i] = prescaleRecip(v)
+	}
+	return in, out
+}
+
+func prescaleRecip(v float64) float64 {
+	if v > 0 {
+		return 1 / v
+	}
+	return 1
 }
