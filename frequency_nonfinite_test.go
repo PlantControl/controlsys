@@ -76,16 +76,44 @@ func TestFrequencyNonFiniteModelErrors(t *testing.T) {
 	}
 }
 
-func TestBalancedDenseNonFinitePencilNoPanic(t *testing.T) {
-	sys := nonFiniteShiftModel(t, 10, math.NaN())
-	bd := newBalancedDense(sys, 10, 1, 1)
-	dst := make([]complex128, 1)
-	pt := pointAt(complex(0, 1e-36))
-	if err := bd.evalInto(pt, dst); !errors.Is(err, errNonFinitePencil) {
-		t.Fatalf("evalInto = %v; want errNonFinitePencil", err)
+func TestFrequencySolversNonFiniteNoPanic(t *testing.T) {
+	nanB := nonFiniteShiftModel(t, 10, 0)
+	nanB.B.Set(3, 0, math.NaN())
+	nanD, err := NewGain(mat.NewDense(1, 1, []float64{math.NaN()}), 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := evalWithPoleLimit(bd.evalInto, sys, pt, dst); err == nil {
-		t.Fatalf("evalWithPoleLimit = %v, nil error", dst)
+	finite := nonFiniteShiftModel(t, 10, -1)
+	cases := []struct {
+		name string
+		sys  *System
+		s    complex128
+		// The pole-limit fallback of a finite A propagates NaN in B, C or
+		// D; validFrequencyEvaluator rejects those models first.
+		limitErr bool
+	}{
+		{"NaN A", nonFiniteShiftModel(t, 10, math.NaN()), complex(0, 1e-36), true},
+		{"Inf A", nonFiniteShiftModel(t, 10, math.Inf(-1)), complex(0, 1), true},
+		{"NaN B", nanB, complex(0, 1), false},
+		{"NaN D n=0", nanD, complex(0, 1), false},
+		{"NaN s", finite, complex(math.NaN(), 1), true},
+	}
+	for _, tc := range cases {
+		n, m, p := tc.sys.Dims()
+		pt := pointAt(tc.s)
+		dst := make([]complex128, p*m)
+		solvers := map[string]frequencyPointSolver{
+			"dense":      newBalancedDense(tc.sys, n, m, p),
+			"hessenberg": newHessenbergSweep(tc.sys, n, m, p),
+		}
+		for sname, solver := range solvers {
+			if err := solver.evalInto(pt, dst); !errors.Is(err, errNonFinitePencil) {
+				t.Errorf("%s %s: evalInto = %v, %v; want errNonFinitePencil", tc.name, sname, dst, err)
+			}
+			if err := evalWithPoleLimit(solver.evalInto, tc.sys, pt, dst); tc.limitErr && err == nil {
+				t.Errorf("%s %s: evalWithPoleLimit = %v, nil error", tc.name, sname, dst)
+			}
+		}
 	}
 }
 
