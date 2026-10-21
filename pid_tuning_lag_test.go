@@ -163,7 +163,79 @@ func TestPIDTuningIdealStableCollapsedTransfer(t *testing.T) {
 	if pidtuneExactSchurStableLag(t, &PID{Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Dt: dt}, num, den, dt, 1, lag) {
 		t.Fatal("oracle stable")
 	}
-	if got, err := pidTuningIdealStable(plant, transfer, &k, lag); err != nil || got {
+	if got, err := pidTuningIdealStable(plant, func() (*TransferFuncResult, error) { return transfer, nil }, &k, lag); err != nil || got {
 		t.Errorf("stable %v %v, oracle unstable", got, err)
+	}
+}
+
+// H2RXWD: at lag 70, n+lag exceeds pidTuningExactLagOrder, and the screen
+// tested the collapsed transfer of TestPIDTuningIdealStableCollapsedTransfer
+// in float, certifying loops with roots outside the unit circle. The exact
+// characteristic is now built at any lag, its float verdict deciding; the
+// transfer function is not consulted, so its failure does not matter.
+// Oracle: exact Schur–Cohn with z^70.
+func TestPIDTuningIdealStableCollapsedTransferLongLag(t *testing.T) {
+	const dt, lag = 0.1, 70
+	num, den := Poly{0.05508874359571571, 1.4671058437019866, -0.6931435149725129}, Poly{1, 2.0625805448700525e-30, 4.842253744153856e-61}
+	plant := pidtuneBackoffPlant(t, num, den, dt, 0)
+	collapsed := &TransferFuncResult{TF: &TransferFunc{Num: [][][]float64{{{0.05508874359571571, 1.1e-31}}}, Den: [][]float64{{1, 2.0625805448700525e-30}}, Dt: dt}}
+	for _, tc := range []struct {
+		k    PID2
+		want bool
+	}{
+		{PID2{Kp: 0.5706220540940695, Ki: 1.0390660705947083, Kd: 0.3000376123041945}, false},
+		{PID2{Kp: 0.02, Ki: 0.01, Kd: 0.005}, true},
+	} {
+		k := tc.k
+		k.B, k.C, k.Dt = 1, 1, dt
+		if pidtuneExactSchurStableLag(t, &PID{Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Dt: dt}, num, den, dt, 1, lag) != tc.want {
+			t.Fatalf("%+v: oracle not %v", k, tc.want)
+		}
+		for name, transfer := range map[string]func() (*TransferFuncResult, error){
+			"collapsed": func() (*TransferFuncResult, error) { return collapsed, nil },
+			"failed":    func() (*TransferFuncResult, error) { return nil, ErrOverflow },
+		} {
+			if got, err := pidTuningIdealStable(plant, transfer, &k, lag); err != nil || got != tc.want {
+				t.Errorf("%s %+v: stable %v %v, oracle %v", name, k, got, err, tc.want)
+			}
+		}
+	}
+}
+
+// H2RXWD: closedLoopPoles extracted the transfer function before the ideal
+// test and returned its error, even where the exact characteristic decides.
+// Oracles: exact Schur–Cohn with z^15 for the delayed plant; for the
+// undelayed one, the slow-root analysis of TestPIDTuningIdealStableBand.
+func TestPIDStabilityScreenIdealTransferError(t *testing.T) {
+	const dt, lag = 0.1, 15
+	num, den := Poly{0.05508874359571571, 1.4671058437019866, -0.6931435149725129}, Poly{1, 2.0625805448700525e-30, 4.842253744153856e-61}
+	delayed := pidtuneBackoffPlant(t, num, den, dt, lag)
+	for _, k := range []PID2{
+		{Kp: 0.5706220540940695, Ki: 1.0390660705947083, Kd: 0.3000376123041945, B: 1, C: 1, Dt: dt},
+		{Kp: 0.005, Ki: 0.001, Kd: 0.003, B: 1, C: 1, Dt: dt},
+	} {
+		want := pidtuneExactSchurStableLag(t, &PID{Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Dt: dt}, num, den, dt, 1, lag)
+		screen, err := newPIDStabilityScreen(delayed, nil, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		screen.transferErr = ErrOverflow
+		if got, err := screen.closedLoopPoles(&k); err != nil || got != want {
+			t.Errorf("lag %d %+v: stable %v %v, oracle %v", lag, k, got, err, want)
+		}
+	}
+	c := &PID2{Kp: 7.954440137905823, Ki: 121.18255736538495, Kd: 1.2450662060726023, B: 1, C: 1}
+	for _, tc := range []struct {
+		z    float64
+		want bool
+	}{{1e-10, false}, {1e-8, true}} {
+		screen, err := newPIDStabilityScreen(makePlant(t, Poly{0.8296, 0.8296 * tc.z}, Poly{1, 0.999, 0.1257}), nil, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		screen.transferErr = ErrOverflow
+		if got, err := screen.closedLoopPoles(c); err != nil || got != tc.want {
+			t.Errorf("z %g: stable %v %v, want %v", tc.z, got, err, tc.want)
+		}
 	}
 }
