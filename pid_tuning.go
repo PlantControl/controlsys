@@ -896,7 +896,8 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // still meets PM±3°, where Pidtune keeps the crossover and gives up margin.
 // A default or moved-crossover design must keep |S| <= 4 (2.5 dB gain
 // margin) at every sampled frequency, since a margin met at the crossover
-// alone does not bound it there; an undelayed plant's default design is
+// alone does not bound it there; an explicit-crossover design is not bound
+// but carries a warning when its sampled |S| exceeds 4; an undelayed plant's default design is
 // searched unbounded first and under the bound only when it exceeds it.
 // For a continuous plant without internal delays the samples run past 100·wc until a Markov-parameter bound gives |L| <= ¾. Only when neither the default nor the moved crossovers
 // meet PM±3° does the margin become a floor at the original crossover, as in
@@ -1019,6 +1020,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	// the solve cannot resolve.
 	used, minHigh, sRejected, probing, resolveFloor := 0, 0., false, false, false
 	residueSign := 0.
+	// lastPlant is the last search's plant, for the explicit-crossover
+	// |S| warning.
+	var lastPlant pidTuningPlant
 	var tuneAt func(wc, gainSign float64, bound pidSBound, floor bool) (*PIDTuningResult, error)
 	tuneAt = func(wc, gainSign float64, bound pidSBound, floor bool) (*PIDTuningResult, error) {
 		opts.CrossoverFrequency, fellBack = wc, false
@@ -1056,6 +1060,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if floor {
 			tune = tunePIDFloor
 		}
+		lastPlant = p
 		res, err := tune(ctx, "TunePID", p, family, opts)
 		if eval.err != nil {
 			return nil, fmt.Errorf("TunePID: %w", eval.err)
@@ -1430,7 +1435,16 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 		resolveFloor = true
 		res, err := tuneAt(wc, gainSign, pidSFree, false)
-		return withFloor(wc, gainSign, pidSFree, res, err)
+		res, err = withFloor(wc, gainSign, pidSFree, res, err)
+		if err == nil {
+			q := lastPlant
+			q.maxSensitivity, q.loopTail = pidTuningMaxSensitivity, loopTail()
+			if peak := pidTuningSensitivityPeak(q, *res.Controller); peak > pidTuningMaxSensitivity {
+				res.Evidence.Warnings = append(res.Evidence.Warnings, fmt.Sprintf("Sampled |S| peaks at %.3g, above %d (2.5 dB gain margin); an explicit crossover does not bound it.", peak, pidTuningMaxSensitivity))
+			}
+			eval.err = nil
+		}
+		return res, err
 	}
 	pm := opts.PhaseMargin
 	if pm <= 0 || pm >= 180 || !finitePID(pm) {
