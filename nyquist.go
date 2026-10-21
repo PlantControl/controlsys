@@ -43,7 +43,9 @@ type NyquistResult struct {
 // on the stability boundary) the count is undefined and Nyquist returns
 // ErrSingularTransform. A delay loop whose winding needs more than 2^21
 // samples (|L| > 1 out to ω with ωτ in the millions) returns
-// ErrDelayUnsupported.
+// ErrDelayUnsupported, as does a neutral delay loop whose high-frequency gain
+// may reach 1 (|D| >= 1 with I/O delays): its closed loop has infinitely many
+// roots near Re s = ln|D|/τ.
 //
 // omega nil selects the auto grid with nPoints samples (0 means 500); a
 // non-nil omega must be non-empty, finite, non-negative and, for discrete
@@ -783,8 +785,14 @@ func (p *nyquistPath) continuousHalf(poles []complex128, bd nyquistBoundary, clo
 		return err
 	}
 
+	// With at most one internal delay the tail bound's limit is the exact
+	// limsup |L(jω)|; with more it can exceed it, so only a nonzero closure
+	// rules out the rational tail below.
+	if p.sys.HasDelay() && math.IsInf(p.wDelay, 1) && (closure != 0 || p.sys.internalDelayCount() <= 1) {
+		return fmt.Errorf("delay loop tail |L(jω)| < 1 not certified (neutral, |L(j∞)| may reach 1): %w", errDelayLoopUnsupported)
+	}
 	if p.sys.HasDelay() && closure != 0 {
-		if w1 := p.wDelay; w1 > wHi && !math.IsInf(w1, 1) {
+		if w1 := p.wDelay; w1 > wHi {
 			return segment(wHi, w1)
 		}
 		return nil
