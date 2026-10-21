@@ -296,7 +296,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re, im)
 		}
 	}
-	return nil
+	return finiteResponse(dst)
 }
 
 // refine improves bd.x against the exact pencil at pt, M = (pÊ + qÂ)/κ with
@@ -703,7 +703,7 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
-	return nil
+	return finiteResponse(dst)
 }
 
 // pencilResidual sets r = κ·b − p·E·x − q·A·x for one right-hand side in
@@ -822,6 +822,18 @@ func cLUSolve(lu []complex128, piv []int, x []complex128, n, m int) {
 }
 
 var errSingularPencil = fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+
+// finiteResponse reports errSingularPencil for a non-finite response of a
+// finite realization: the solve overflowed or underflowed, as next to a pole
+// at extreme scale, so the pole limit's double-double fallback takes over.
+func finiteResponse(dst []complex128) error {
+	for _, v := range dst {
+		if math.IsNaN(real(v)) || math.IsNaN(imag(v)) || math.IsInf(real(v), 0) || math.IsInf(imag(v), 0) {
+			return errSingularPencil
+		}
+	}
+	return nil
+}
 
 // errNonFinitePencil rejects a NaN point or non-finite realization: NaN
 // comparisons defeat GEPP's pivot and structure bookkeeping.

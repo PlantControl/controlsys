@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/cmplx"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // padeUnitResponse evaluates the order-n Padé approximant of e^{-x} at x
@@ -120,6 +122,74 @@ func TestBalanceKeepsEntriesNormal(t *testing.T) {
 		want, _ := math.Frexp(raw[i])
 		if got != want {
 			t.Errorf("balanced a[%d] = %g is not a power-of-two scaling of %g", i, v, raw[i])
+		}
+	}
+}
+
+// 2^k·(A, B) at 2^k·s has exactly the response of (A, B) at s, so the unit
+// model is the oracle next to each real pole, where the double solve of the
+// scaled one overflows or underflows to NaN.
+func TestEvalFrExtremeScaleNearPole(t *testing.T) {
+	a := []float64{-1, 2, 0.5, 0, -3, 1, 0.3, 0.2, -2}
+	b := []float64{1, 0.5, -1}
+	build := func(sc float64) *System {
+		as, bs := make([]float64, len(a)), make([]float64, len(b))
+		for i, v := range a {
+			as[i] = sc * v
+		}
+		for i, v := range b {
+			bs[i] = sc * v
+		}
+		sys, err := New(mat.NewDense(3, 3, as), mat.NewDense(3, 1, bs),
+			mat.NewDense(1, 3, []float64{1, 1, 0.5}), mat.NewDense(1, 1, []float64{0}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sys
+	}
+	unit := build(1)
+	var eig mat.Eigen
+	if !eig.Factorize(unit.A, mat.EigenNone) {
+		t.Fatal("eigen failed")
+	}
+	for _, k := range []int{990, -996} {
+		sc := math.Ldexp(1, k)
+		sys := build(sc)
+		n, m, p := sys.Dims()
+		for _, l := range eig.Values(nil) {
+			if imag(l) != 0 {
+				continue
+			}
+			s := complex(real(l)*(1-1e-10), 0)
+			ref, err := unit.EvalFr(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ref[0][0]
+			check := func(name string, got complex128, err error) {
+				t.Helper()
+				if err != nil {
+					t.Errorf("2^%d λ=%g %s: %v", k, real(l), name, err)
+				} else if e := cmplx.Abs(got-want) / cmplx.Abs(want); !(e < 1e-5) {
+					t.Errorf("2^%d λ=%g %s = %v, want %v (rel err %g)", k, real(l), name, got, want, e)
+				}
+			}
+			ss := s * complex(sc, 0)
+			var g00 complex128
+			g, err := sys.EvalFr(ss)
+			if err == nil {
+				g00 = g[0][0]
+			}
+			check("EvalFr", g00, err)
+			solvers := map[string]frequencyPointSolver{
+				"dense":      newBalancedDense(sys, n, m, p),
+				"hessenberg": newHessenbergSweep(sys, n, m, p),
+			}
+			for name, solver := range solvers {
+				dst := make([]complex128, 1)
+				err := evalWithPoleLimit(solver.evalInto, sys, pointAt(ss), dst)
+				check(name, dst[0], err)
+			}
 		}
 	}
 }
