@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"slices"
@@ -45,6 +46,7 @@ const (
 // as well the step is taken past the cluster at s (poleSpacing's wide).
 // An internal-delay model always takes the pole limit; a failed sample is
 // the LFT of its delay-free plant solved in double-double (ddLFTSampler).
+// A non-finite realization or NaN point (errNonFinitePencil) fails at once.
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
 }
@@ -71,8 +73,8 @@ type ddGate struct {
 // restricted by gate.
 func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128, gate ddGate) error {
 	err := eval(pt, dst)
-	if err == nil {
-		return nil
+	if err == nil || errors.Is(err, errNonFinitePencil) {
+		return err
 	}
 	s := pt.value()
 	sp, perr := poleSpacing(sys, s)
