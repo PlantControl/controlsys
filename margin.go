@@ -797,7 +797,9 @@ func DiskMargin(sys *System) (*DiskMarginResult, error) {
 // closed-loop stability comes from a Nyquist encirclement count of 1+L on a
 // delay-aware adaptive frequency grid, and the peaks from the exact frequency
 // response, certified between grid samples to 1e-9 relative; see
-// delayLoop.nyquist for the resolution limits. Loops whose internal delays
+// delayLoop.nyquist for the resolution limits. With direct feedthrough the
+// limit as ω → ∞ is the sup over the high-frequency limit set of L, from the
+// delay H∞ peak of S + c. Loops whose internal delays
 // form a feedback cycle return ErrContinuousInternalDelay; loops whose
 // high-frequency gain may reach 1 (neutral type), whose delay grid or peak
 // certification would exceed 2^21 points, or whose encirclement count does
