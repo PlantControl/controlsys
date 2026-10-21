@@ -203,6 +203,9 @@ type rowRealizationConverter struct {
 	tf   *TransferFunc
 	rows []int
 	dRaw blas64.General
+	// trims[i*m+j] holds the Markov trim candidates of entry (i, j), most
+	// trimmed first; trimRows applies them after the realization is chosen.
+	trims [][][]float64
 }
 
 func newRowRealizationConverter(sys *System, opts *TransferFuncOpts) rowRealizationConverter {
@@ -218,14 +221,15 @@ func newRowRealizationConverter(sys *System, opts *TransferFuncOpts) rowRealizat
 		dRaw = sys.D.RawMatrix()
 	}
 	return rowRealizationConverter{
-		sys:  sys,
-		opts: opts,
-		n:    n,
-		m:    m,
-		p:    p,
-		tf:   tf,
-		rows: make([]int, p),
-		dRaw: dRaw,
+		sys:   sys,
+		opts:  opts,
+		n:     n,
+		m:     m,
+		p:     p,
+		tf:    tf,
+		rows:  make([]int, p),
+		dRaw:  dRaw,
+		trims: make([][][]float64, p*m),
 	}
 }
 
@@ -454,10 +458,10 @@ func newTFCheck(sys *System, n, m, p int) tfCheck {
 	return sampleTFCheck(newBalancedDense(sys, n, m, p), pts, m, p)
 }
 
-// trimCheckPoints adds jω, ω log-spaced over [r, R], to the continuous
+// trimCheckPoints adds jω, ω log-spaced over [r, R] and r/10, to the continuous
 // points of newTFCheck, r and R estimating the smallest and largest root
-// moduli of the monic den (of the first row checked: the model's poles less
-// hidden ones), so that a trim is also checked in the band of the poles.
+// moduli of the row's monic den, so that a trim is also checked in and below
+// the band of that row's poles.
 func trimCheckPoints(sys *System, den []float64) []complex128 {
 	var pts []complex128
 	if !sys.IsContinuous() {
@@ -490,6 +494,7 @@ func trimCheckPoints(sys *System, den []float64) []complex128 {
 		for w := range nb {
 			pts = append(pts, complex(0, r*math.Pow(ratio, float64(w))))
 		}
+		pts = append(pts, complex(0, r/10))
 	}
 	return pts
 }
@@ -673,7 +678,6 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 	}
 
 	markov := newMarkovTrim(c.sys)
-	var check *tfCheck
 	totalOrder := 0
 	for i := 0; i < c.p; i++ {
 		nobs, den, numCoeffs := ssToTFRow(Ac, Bc, Cc, i, ncont, c.m, c.opts.ObservabilityTol, floor, inExp, outExp[i], ws)
@@ -694,11 +698,45 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 			if nobs > 0 {
 				bh = ws.cData[j*ncont : j*ncont+nobs]
 			}
-			cands := markov.trim(i, j, nobs, numCoeffs[j], bh)
+			c.trims[i*c.m+j] = nil
+			if cands := markov.trim(i, j, nobs, numCoeffs[j], bh); len(cands) > 1 || len(cands[0]) != len(numCoeffs[j]) {
+				c.trims[i*c.m+j] = cands
+			}
+			c.tf.Num[i][j] = withD(numCoeffs[j])
+		}
+	}
+	return totalOrder
+}
+
+// trimRows replaces each numerator that has Markov trim candidates by the
+// most trimmed one that passes trimOK against a check sampled in the band of
+// that row's den, else by the last candidate. It runs on the chosen
+// realization only, so the choice sees the untrimmed numerators.
+func (c rowRealizationConverter) trimRows() {
+	var bd *balancedDense
+	for i := range c.p {
+		var check *tfCheck
+		den := c.tf.Den[i]
+		for j := range c.m {
+			cands := c.trims[i*c.m+j]
+			if cands == nil {
+				continue
+			}
+			c.trims[i*c.m+j] = nil
+			dij := c.dRaw.Data[i*c.dRaw.Stride+j]
+			withD := func(num []float64) []float64 {
+				if dij == 0 {
+					return num
+				}
+				return Poly(num).Add(Poly(den).Scale(dij))
+			}
 			num := cands[len(cands)-1]
 			for _, cand := range cands[:len(cands)-1] {
 				if check == nil {
-					ck := sampleTFCheck(newBalancedDense(c.sys, c.n, c.m, c.p), trimCheckPoints(c.sys, den), c.m, c.p)
+					if bd == nil {
+						bd = newBalancedDense(c.sys, c.n, c.m, c.p)
+					}
+					ck := sampleTFCheck(bd, trimCheckPoints(c.sys, den), c.m, c.p)
 					check = &ck
 				}
 				if check.trimOK(i, j, c.m, c.n, withD(cand), withD(num), den) {
@@ -709,7 +747,6 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 			c.tf.Num[i][j] = withD(num)
 		}
 	}
-	return totalOrder
 }
 
 // markovTrim drops leading numerator coefficients that are zero within the
@@ -823,6 +860,7 @@ func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
 }
 
 func (c rowRealizationConverter) fillStaticRows() {
+	clear(c.trims)
 	for i := 0; i < c.p; i++ {
 		c.tf.Den[i] = []float64{1}
 		c.tf.Num[i] = make([][]float64, c.m)
@@ -837,6 +875,7 @@ func (c rowRealizationConverter) fillStaticRows() {
 }
 
 func (c rowRealizationConverter) result(order int) *TransferFuncResult {
+	c.trimRows()
 	c.tf.InputName = copyStringSlice(c.sys.InputName)
 	c.tf.OutputName = copyStringSlice(c.sys.OutputName)
 	return &TransferFuncResult{TF: c.tf, MinimalOrder: order, RowDegrees: c.rows}
