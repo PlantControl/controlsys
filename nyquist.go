@@ -851,6 +851,8 @@ func (p *nyquistPath) continuousHalf(poles []complex128, bd nyquistBoundary, clo
 	if p.sys.HasDelay() && math.IsInf(p.wDelay, 1) && (closure != 0 || p.sys.internalDelayCount() <= 1) {
 		return errNeutralDelayTail
 	}
+	// LFT feedthrough D12·D21 keeps limsup |L(jω)| > 0 with D = 0, so the
+	// rational tail below never settles; the certified wDelay ends it instead.
 	if p.sys.HasDelay() && (closure != 0 || p.tailLim > 0 && !math.IsInf(p.wDelay, 1)) {
 		if w1 := p.wDelay; w1 > wHi {
 			return segment(wHi, w1)

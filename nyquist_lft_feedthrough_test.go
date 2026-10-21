@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// lftFeedthroughCases: L = (b0·s + b1)/(s + a)·e^{-sτ} with |b0| in (0.77, 1).
+// lftFeedthroughCases: L = (b0·s + b1)/(s + a)·e^{-sτ}, mostly |b0| in (0.77, 1).
 // PullDelaysToLFT moves b0 into D12·D21 with D = 0, so L(jω) does not settle
 // toward D; the first two are the wave-15 repros (A249 flipped on amd64).
 func lftFeedthroughCases() []quasiLoop {
@@ -18,8 +18,11 @@ func lftFeedthroughCases() []quasiLoop {
 		{name: "D=-0.99", num: []float64{-0.99, 0.5}, den: []float64{1, 1}, tau: 0.3},
 	}
 	rng := rand.New(rand.NewPCG(16, 7))
-	for range 40 {
+	for i := range 60 {
 		d := 0.77 + 0.22*rng.Float64()
+		if i%3 == 0 {
+			d = 1e-3 + 0.769*rng.Float64()
+		}
 		if rng.IntN(2) == 0 {
 			d = -d
 		}
