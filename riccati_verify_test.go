@@ -26,7 +26,7 @@ import (
 //	            2e-5 (residual 5e-7 of its terms), as the Stein solve of the
 //	            Newton check flagged a non-normal 2×2 block singular. Its
 //	            float64 Newton stalls at 1e-7 (arm64 3e-8, amd64 2e-7), so
-//	            the bound is dareStallTol.
+//	            the bound is newtonStallTol.
 func TestDare_NewtonVerified(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -93,7 +93,7 @@ func TestDare_NewtonVerified(t *testing.T) {
 				}
 				tol := 1e-8
 				if tc.name == "fastSampled" {
-					tol = dareStallTol
+					tol = newtonStallTol
 				}
 				if e := relErr(res.X, want); !(e <= tol) {
 					t.Errorf("X rel err %g against 320-bit Hewer", e)

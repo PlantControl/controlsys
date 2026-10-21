@@ -205,6 +205,16 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // 1e-6 of its terms and a stable A − BK, else the first error is returned.
 // A solution with a residual above 1e-6 of its terms is likewise re-solved
 // at that cost scale, and the more accurate of the two is kept.
+//
+// Without E, Care checks X by a Newton–Kleinman step from its gain (one
+// Lyapunov solve), as Dare does with Hewer's step: the Hamiltonian forms
+// BR⁻¹Bᵀ, which under cheap control (R ≪ BᵀXB) swamps A and loses digits
+// the Riccati residual does not show. An X the step moves by more than
+// 1e-8 relative is refined by Newton's method; when that fails (or A − BK
+// is unstable, or the Hamiltonian solve fails) Care solves the extended
+// pencil of MATLAB icare, verified the same way, and with no confirmed
+// solution returns ErrNoStabilizing (or the Hamiltonian's error) rather
+// than an inaccurate X.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -291,6 +301,30 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		0, blas64.General{Rows: n, Cols: n, Data: g, Stride: n})
 	symmetrize(g, n, n)
 
+	eig := ws.eig[:n]
+	costScaling := problem.costScaling
+	X, rcnd, err := problem.hamiltonianSolution(aWork, qWork, g, eig)
+	var K *mat.Dense
+	if err == nil {
+		K, err = problem.acceptRiccati(true, X, eig)
+	}
+	if err != nil {
+		first := err
+		problem.costScaling, problem.balanced, problem.sigma = costScaling, false, 1
+		problem.rescueErr, problem.resolved, problem.candidates = nil, false, problem.candidates[:0]
+		if X, K, rcnd, err = problem.pencilRiccati(true); err != nil {
+			return nil, first
+		}
+	}
+	return problem.result(X, K, eig, rcnd), nil
+}
+
+// hamiltonianSolution returns the stabilizing solution X of care's
+// Hamiltonian [[Ā, −G], [−Q̄, −Āᵀ]] (n×n blocks a, q, g) and rcnd, with the
+// closed-loop eigenvalues in eig, cost-scaled and re-solved as Care
+// describes.
+func (problem *riccatiProblem) hamiltonianSolution(aWork, qWork, g []float64, eig []complex128) (*mat.Dense, float64, error) {
+	n, ws := problem.n, problem.ws
 	nn := 2 * n
 	wr := ws.wr[:nn]
 	wi := ws.wi[:nn]
@@ -343,9 +377,9 @@ solve:
 				X, xData, rcnd = problem.restorePass(orig)
 				break solve
 			case problem.rescueErr != nil:
-				return nil, problem.rescueErr
+				return nil, 0, problem.rescueErr
 			default:
-				problem.rescueErr, problem.costScaling = err, true
+				problem.rescueErr, problem.costScaling, problem.resolved = err, true, true
 				norms = hamiltonianNorms(n, aWork, qWork, g)
 				problem.sigma, problem.balanced = norms.firstSigma(), true
 				continue
@@ -355,6 +389,7 @@ solve:
 				norms = hamiltonianNorms(n, aWork, qWork, g)
 			}
 			if problem.rescaleCost(true, norms, xData, &prev, rcnd) {
+				problem.resolved = true
 				continue
 			}
 			if problem.keepBest(true, prev, xData) {
@@ -364,7 +399,7 @@ solve:
 		res, scale := hamiltonianResidual(n, aWork, qWork, g, xData, ws.h[:nn*nn])
 		if problem.rescueErr != nil {
 			if !(res <= rescueTol*scale) {
-				return nil, problem.rescueErr
+				return nil, 0, problem.rescueErr
 			}
 			break
 		}
@@ -378,39 +413,15 @@ solve:
 			break
 		}
 		problem.savePass(&orig, xData, rcnd, res)
-		prev, problem.costScaling = nil, true
+		prev, problem.costScaling, problem.resolved = nil, true, true
 		norms = hamiltonianNorms(n, aWork, qWork, g)
 		problem.sigma, problem.balanced = norms.firstSigma(), true
 	}
 
-	// Closed-loop eigenvalues
-	eig := ws.eig[:n]
 	for i := range n {
 		eig[i] = complex(wr[i], wi[i])
 	}
-
-	// Gain K = R⁻¹ * (B'X + S')
-	// kData = B'*X (m×n)
-	kData := ws.kData[:m*n]
-	blas64.Gemm(blas.Trans, blas.NoTrans,
-		1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
-		blas64.General{Rows: n, Cols: n, Data: xData, Stride: n},
-		0, blas64.General{Rows: m, Cols: n, Data: kData, Stride: n})
-	if S != nil {
-		sRaw := S.RawMatrix()
-		for j := range m {
-			row := kData[j*n:]
-			for i := range n {
-				row[i] += sRaw.Data[i*sRaw.Stride+j]
-			}
-		}
-	}
-	impl.Dpotrs(blas.Upper, m, n, rChol, m, kData, n)
-	K := mat.NewDense(m, n, kData)
-	if err := problem.rescued(true, K); err != nil {
-		return nil, err
-	}
-	return problem.result(X, K, eig, rcnd), nil
+	return X, rcnd, nil
 }
 
 // hamiltonianResidual returns ‖ĀᵀX + XĀ − XGX + Q̄‖_F of care's
@@ -510,15 +521,28 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, ErrSingularR
 	}
 
+	X, K, rcnd, err := problem.pencilRiccati(false)
+	if err != nil {
+		return nil, err
+	}
+	return problem.result(X, K, ws.eig[:n], rcnd), nil
+}
+
+// pencilRiccati solves the Riccati equation from the extended pencil
+// (pencilSolution) and returns X, K and rcnd with Eig in ws.eig. Without E
+// a solution acceptRiccati rejects is replaced by the first accepted one
+// of the other passes' solutions and then of lastResort.
+func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.Dense, float64, error) {
+	n := problem.n
 	problem.collecting = problem.E == nil
-	subspace, X, _, rcnd, err := problem.pencilSolution(false)
-	eig := ws.eig[:n]
+	subspace, X, _, rcnd, err := problem.pencilSolution(continuous)
+	eig := problem.ws.eig[:n]
 	var K *mat.Dense
 	if err == nil {
 		for i := range n {
 			eig[i] = complex(subspace.alphaR[i]/subspace.beta[i], subspace.alphaI[i]/subspace.beta[i])
 		}
-		K, err = problem.acceptDare(X, eig)
+		K, err = problem.acceptRiccati(continuous, X, eig)
 	}
 	if err != nil {
 		for i := range problem.candidates {
@@ -527,27 +551,27 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 			for j := range n {
 				eig[j] = complex(c.wr[j]/c.beta[j], c.wi[j]/c.beta[j])
 			}
-			if k, cerr := problem.acceptDare(X, eig); cerr == nil {
+			if k, cerr := problem.acceptRiccati(continuous, X, eig); cerr == nil {
 				K, err = k, nil
 				break
 			}
 		}
 	}
 	if err != nil && problem.E == nil {
-		if x, k, rc, cerr := problem.dareLastResort(eig); cerr == nil {
+		if x, k, rc, cerr := problem.lastResort(continuous, eig); cerr == nil {
 			X, K, rcnd, err = x, k, rc, nil
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, err
 	}
-	return problem.result(X, K, eig, rcnd), nil
+	return X, K, rcnd, nil
 }
 
-// dareLastResort solves the cost-balanced pencil at the cost scales of
+// lastResort solves the cost-balanced pencil at the cost scales of
 // riccatiNorms.candidates not yet tried and returns the first solution
-// verifyDare accepts.
-func (problem *riccatiProblem) dareLastResort(eig []complex128) (*mat.Dense, *mat.Dense, float64, error) {
+// verifyRiccati accepts.
+func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*mat.Dense, *mat.Dense, float64, error) {
 	problem.resolved = true
 	tried := func(sigma float64) bool {
 		for _, c := range problem.candidates {
@@ -566,7 +590,7 @@ func (problem *riccatiProblem) dareLastResort(eig []complex128) (*mat.Dense, *ma
 		}
 		problem.pencilNorms()
 		problem.sigma, problem.balanced = sigma, true
-		subspace, err := problem.generalizedStableSubspace(false, problem.pencil())
+		subspace, err := problem.generalizedStableSubspace(continuous, problem.pencil())
 		if err != nil {
 			continue
 		}
@@ -577,7 +601,7 @@ func (problem *riccatiProblem) dareLastResort(eig []complex128) (*mat.Dense, *ma
 		for i := range eig {
 			eig[i] = complex(subspace.alphaR[i]/subspace.beta[i], subspace.alphaI[i]/subspace.beta[i])
 		}
-		if K, err := problem.acceptDare(X, eig); err == nil {
+		if K, err := problem.acceptRiccati(continuous, X, eig); err == nil {
 			return X, K, rcnd, nil
 		}
 		problem.candidates = append(problem.candidates, riccatiPass{sigma: sigma})
@@ -585,20 +609,51 @@ func (problem *riccatiProblem) dareLastResort(eig []complex128) (*mat.Dense, *ma
 	return nil, nil, 0, ErrNoStabilizing
 }
 
-// acceptDare returns the gain of the Dare solution X, which it verifies
-// (verifyDare) unless E is given; X and eig may be refined in place.
-func (problem *riccatiProblem) acceptDare(X *mat.Dense, eig []complex128) (*mat.Dense, error) {
-	K, err := problem.dareGain(X.RawMatrix().Data)
+// acceptRiccati returns the gain of the solution X, which it verifies
+// (verifyRiccati) unless E is given; X and eig may be refined in place.
+func (problem *riccatiProblem) acceptRiccati(continuous bool, X *mat.Dense, eig []complex128) (*mat.Dense, error) {
+	K, err := problem.gain(continuous, X.RawMatrix().Data)
 	if err != nil {
 		return nil, err
 	}
 	if problem.E != nil {
-		if err := problem.rescued(false, K); err != nil {
+		if err := problem.rescued(continuous, K); err != nil {
 			return nil, err
 		}
 		return K, nil
 	}
-	return problem.verifyDare(X, K, eig)
+	return problem.verifyRiccati(continuous, X, K, eig)
+}
+
+// gain returns the gain of X: careGain or dareGain.
+func (problem *riccatiProblem) gain(continuous bool, xData []float64) (*mat.Dense, error) {
+	if continuous {
+		return problem.careGain(xData), nil
+	}
+	return problem.dareGain(xData)
+}
+
+// careGain returns K = R⁻¹(BᵀX + Sᵀ) in ws.kData; R is Cholesky-factored
+// in ws.rChol.
+func (problem *riccatiProblem) careGain(xData []float64) *mat.Dense {
+	n, m, ws := problem.n, problem.m, problem.ws
+	bRaw := problem.B.RawMatrix()
+	kData := ws.kData[:m*n]
+	blas64.Gemm(blas.Trans, blas.NoTrans,
+		1, blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
+		blas64.General{Rows: n, Cols: n, Data: xData, Stride: n},
+		0, blas64.General{Rows: m, Cols: n, Data: kData, Stride: n})
+	if problem.S != nil {
+		sRaw := problem.S.RawMatrix()
+		for j := range m {
+			row := kData[j*n:]
+			for i := range n {
+				row[i] += sRaw.Data[i*sRaw.Stride+j]
+			}
+		}
+	}
+	impl.Dpotrs(blas.Upper, m, n, ws.rChol[:m*m], m, kData, n)
+	return mat.NewDense(m, n, kData)
 }
 
 // dareGain returns K = (R + BᵀXB)⁻¹(BᵀXA + Sᵀ) in ws.kData, or
@@ -640,25 +695,28 @@ func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 	return mat.NewDense(m, n, kData), nil
 }
 
-// verifyDare returns the gain of the pencil solution X of Dare (gain K)
-// once Newton's method (Hewer's iteration) confirms it: the cost X₁ of K,
+// verifyRiccati returns the gain of the solution X (gain K) once a Newton
+// step confirms it: the cost X₁ of K (Newton–Kleinman for Care, Hewer for
+// Dare),
 //
-//	A_Kᵀ X₁ A_K − X₁ + Q_K = 0,  A_K = A − BK,  Q_K = Q + KᵀRK − SK − KᵀSᵀ,
+//	continuous: A_KᵀX₁ + X₁A_K + Q_K = 0
+//	discrete:   A_KᵀX₁A_K − X₁ + Q_K = 0
 //
-// must be within dareNewtonTol of X with A_K stable. The Riccati residual
-// cannot tell a few lost digits from none (R + BᵀXB rounds it), and a
-// pencil split that is wrong at extreme cost scales can still give a
-// stable A_K. A larger step is iterated, up to dareNewtonSteps solves, and
-// the converged iterate, its K and Eig replace the pencil's. Two weaker
-// exits keep a solution whose error is still bounded by a Newton step: an
-// iteration that stalls at its rounding level keeps its iterate of
-// smallest step when that is within dareStallTol, and one whose Stein
-// equation turns numerically singular keeps the last cost X₁ when the
-// step to it was within dareLooseTol. A lone first
-// pencil solve whose Stein equation is singular is kept with a residual
-// within rescueTol of its terms and a stable A − BK. Otherwise it returns
-// problem.rescueErr, or ErrNoStabilizing. X and eig are updated in place.
-func (problem *riccatiProblem) verifyDare(X, K *mat.Dense, eig []complex128) (*mat.Dense, error) {
+// with A_K = A − BK, Q_K = Q + KᵀRK − SK − KᵀSᵀ, must be within newtonTol
+// of X with A_K stable. The Riccati residual cannot tell a few lost digits
+// from none (R⁻¹ or (R + BᵀXB)⁻¹ round it), and a Schur split that is
+// wrong at extreme cost scales can still give a stable A_K. A larger step
+// is iterated, up to newtonSteps solves, and the converged iterate, its K
+// and Eig replace the given ones. Two weaker exits keep a solution whose
+// error is still bounded by a Newton step: an iteration that stalls at its
+// rounding level keeps its iterate of smallest step when that is within
+// newtonStallTol, and one whose Lyapunov equation turns numerically
+// singular keeps the last cost X₁ when the step to it was within
+// newtonLooseTol. A lone first solve whose Lyapunov equation is singular
+// is kept with a residual within rescueTol of its terms and a stable
+// A − BK. Otherwise it returns problem.rescueErr, or ErrNoStabilizing. X
+// and eig are updated in place.
+func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, eig []complex128) (*mat.Dense, error) {
 	fail := problem.rescueErr
 	if fail == nil {
 		fail = ErrNoStabilizing
@@ -666,18 +724,18 @@ func (problem *riccatiProblem) verifyDare(X, K *mat.Dense, eig []complex128) (*m
 	xData := X.RawMatrix().Data
 	var best []float64
 	bestStep, step, stalls := math.Inf(1), math.Inf(1), 0
-	for it := range dareNewtonSteps {
-		x1, err := problem.dareStein(K)
+	for it := range newtonSteps {
+		x1, err := problem.newtonCost(continuous, K)
 		if err != nil {
 			if errors.Is(err, ErrNoStabilizing) {
 				break
 			}
-			if step <= dareLooseTol {
+			if step <= newtonLooseTol {
 				problem.closedLoopEig(eig)
 				return K, nil
 			}
 			if it == 0 && !problem.resolved {
-				if res, scale := problem.residualTerms(false, xData); res <= rescueTol*scale && problem.stableGain(false, K) {
+				if res, scale := problem.residualTerms(continuous, xData); res <= rescueTol*scale && problem.stableGain(continuous, K) {
 					return K, nil
 				}
 			}
@@ -688,8 +746,12 @@ func (problem *riccatiProblem) verifyDare(X, K *mat.Dense, eig []complex128) (*m
 			d += (v - xData[i]) * (v - xData[i])
 			x1n += v * v
 		}
-		if d <= dareNewtonTol*dareNewtonTol*x1n {
+		if d <= newtonTol*newtonTol*x1n {
 			if it > 0 {
+				copy(xData, x1)
+				if K, err = problem.gain(continuous, xData); err != nil {
+					break
+				}
 				problem.closedLoopEig(eig)
 			}
 			return K, nil
@@ -701,27 +763,27 @@ func (problem *riccatiProblem) verifyDare(X, K *mat.Dense, eig []complex128) (*m
 			break
 		}
 		copy(xData, x1)
-		if K, err = problem.dareGain(xData); err != nil {
+		if K, err = problem.gain(continuous, xData); err != nil {
 			break
 		}
 	}
-	if !(bestStep <= dareStallTol) {
+	if !(bestStep <= newtonStallTol) {
 		return nil, fail
 	}
 	copy(xData, best)
-	K, err := problem.dareGain(xData)
+	K, err := problem.gain(continuous, xData)
 	if err != nil {
 		return nil, fail
 	}
-	if _, err := problem.dareStein(K); err != nil {
+	if _, err := problem.newtonCost(continuous, K); err != nil {
 		return nil, fail
 	}
 	problem.closedLoopEig(eig)
 	return K, nil
 }
 
-// closedLoopEig copies the eigenvalues of A − BK of the last dareStein to
-// eig.
+// closedLoopEig copies the eigenvalues of A − BK of the last newtonCost
+// to eig.
 func (problem *riccatiProblem) closedLoopEig(eig []complex128) {
 	lw := problem.ws.lyap
 	for i := range eig {
@@ -729,10 +791,10 @@ func (problem *riccatiProblem) closedLoopEig(eig []complex128) {
 	}
 }
 
-// dareStein returns the cost X₁ of the gain K of verifyDare, with the
+// newtonCost returns the cost X₁ of the gain K of verifyRiccati, with the
 // eigenvalues of A − BK in ws.lyap.wr, ws.lyap.wi; ErrNoStabilizing when
-// A − BK is not stable, or the error of the Stein solve.
-func (problem *riccatiProblem) dareStein(K *mat.Dense) ([]float64, error) {
+// A − BK is not stable, or the error of the Lyapunov solve.
+func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense) ([]float64, error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	if ws.lyap == nil {
 		ws.lyap = &LyapunovWorkspace{}
@@ -771,13 +833,17 @@ func (problem *riccatiProblem) dareStein(K *mat.Dense) ([]float64, error) {
 		1, blas64.General{Rows: n, Cols: n, Data: qk, Stride: n})
 	symmetrize(qk, n, n)
 
-	X1, err := dlyap(mat.NewDense(n, n, aclT), mat.NewDense(n, n, qk), &LyapunovOpts{Workspace: ws.lyap})
+	solve, stable := dlyap, func(wr, wi float64) bool { return math.Hypot(wr, wi) < 1 }
+	if continuous {
+		solve, stable = lyap, func(wr, _ float64) bool { return wr < 0 }
+	}
+	X1, err := solve(mat.NewDense(n, n, aclT), mat.NewDense(n, n, qk), &LyapunovOpts{Workspace: ws.lyap})
 	if err != nil && !errors.Is(err, ErrSingularEquation) {
 		return nil, err
 	}
 	lw := ws.lyap
 	for i := range n {
-		if !(math.Hypot(lw.wr[i], lw.wi[i]) < 1) {
+		if !stable(lw.wr[i], lw.wi[i]) {
 			return nil, ErrNoStabilizing
 		}
 	}
@@ -791,15 +857,15 @@ func (problem *riccatiProblem) dareStein(K *mat.Dense) ([]float64, error) {
 	return x1, nil
 }
 
-// dareNewtonTol and dareNewtonSteps bound the Newton check of verifyDare;
-// dareLooseTol bounds the last Newton step before an unsolvable Stein
-// equation, and dareStallTol the smallest step of an iteration stalled at
+// newtonTol and newtonSteps bound the Newton check of verifyRiccati;
+// newtonLooseTol bounds the last Newton step before an unsolvable
+// Lyapunov equation, and newtonStallTol the smallest step of an iteration stalled at
 // its rounding level.
 const (
-	dareNewtonTol   = 1e-8
-	dareLooseTol    = 1e-5
-	dareStallTol    = 1e-6
-	dareNewtonSteps = 30
+	newtonTol      = 1e-8
+	newtonLooseTol = 1e-5
+	newtonStallTol = 1e-6
+	newtonSteps    = 30
 )
 
 // riccatiNorms are the Frobenius norms of the pencil blocks that cost
