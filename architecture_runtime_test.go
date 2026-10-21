@@ -174,16 +174,8 @@ func TestRuntimeArchitectureEnergyAnalysisRejectsDescriptorWorkflows(t *testing.
 			_, err := Gram(sys, GramControllability)
 			return err
 		}},
-		{name: "H2Norm", run: func() error {
-			_, err := H2Norm(sys)
-			return err
-		}},
 		{name: "HSV", run: func() error {
 			_, err := HSV(sys)
-			return err
-		}},
-		{name: "HinfNorm", run: func() error {
-			_, _, err := HinfNorm(sys)
 			return err
 		}},
 	}

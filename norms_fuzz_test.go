@@ -198,9 +198,9 @@ func fzNormTol(s *fzSpec) float64 {
 	return 1e-9 + s.EigErr()/m
 }
 
-// fzDescriptorNorm checks the descriptor contract of a norm routine: E = I
-// gives the explicit result, a nonsingular diagonal E with A, B scaled to
-// the same transfer function returns ErrDescriptorUnsupported.
+// fzDescriptorNorm checks the descriptor contract of a norm routine: E = I,
+// and a power-of-two diagonal E with A, B scaled to the same transfer
+// function (so E⁻¹A, E⁻¹B are exact), give the explicit result.
 func fzDescriptorNorm(t *testing.T, s *fzSpec, op string, norm func(*System) (float64, error), want float64, wantErr error) {
 	t.Helper()
 	if s.N == 0 {
@@ -234,8 +234,9 @@ func fzDescriptorNorm(t *testing.T, s *fzSpec, op string, norm func(*System) (fl
 	if err != nil {
 		t.Fatalf("NewDescriptor: %v\n%s", err, s)
 	}
-	if v, err := norm(ds); !errors.Is(err, ErrDescriptorUnsupported) {
-		t.Fatalf("%s of a descriptor model = %v, %v, want ErrDescriptorUnsupported\n%s", op, v, err, s)
+	got, err = norm(ds)
+	if (err == nil) != (wantErr == nil) || err == nil && got != want && !(math.IsNaN(got) && math.IsNaN(want)) {
+		t.Fatalf("%s with diagonal E: %v, %v; explicit %v, %v\n%s", op, got, err, want, wantErr, s)
 	}
 }
 
