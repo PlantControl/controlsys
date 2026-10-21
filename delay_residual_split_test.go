@@ -365,6 +365,17 @@ func TestAbsorbIOResidualTieKeepsFewerInternalDelayCopies(t *testing.T) {
 	}
 	assertMatchesOracle(t, "io", abs, sys)
 
+	n, _, _ := sys.Dims()
+	cols, _ := residualDelayGroups(newDelayTopology(sys).totalExternal(true), false, n)
+	colAbs, err := residualDelaySplit{n: n, groups: cols}.apply(sys, absorbDecomposedDelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn, _, _ := colAbs.Dims(); cn != 7 || colAbs.internalDelayCount() != 6 {
+		t.Fatalf("column split states %d, internal delays %d, want 7 and 6", cn, colAbs.internalDelayCount())
+	}
+	assertMatchesOracle(t, "io-cols", colAbs, sys)
+
 	lft, err := sys.PullDelaysToLFT()
 	if err != nil {
 		t.Fatal(err)

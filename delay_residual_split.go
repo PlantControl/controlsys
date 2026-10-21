@@ -9,7 +9,8 @@ import (
 
 // residualDelaySplit realizes a system whose total IO delay has no
 // input+output decomposition as a column sum or row stack of copies whose
-// delay sub-blocks decompose exactly.
+// delay sub-blocks decompose exactly. Each copy holds its own states and
+// internal delays, since every group's response is delayed differently.
 type residualDelaySplit struct {
 	byRow  bool
 	n      int
