@@ -2728,8 +2728,9 @@ const pidTuningIdealReturnTol = 0x1p-26
 // characteristic decides, and exact Schur–Cohn only when it is in doubt and
 // n+lag is within pidTuningExactLagOrder, as that recursion at order n+lag
 // is slow; beyond it the float verdict stands. transfer is called only when
-// the exact characteristic is out of scope or the loop is undelayed; a
-// failure leaves the exact characteristic to decide when in scope.
+// the exact characteristic is out of scope, the loop is undelayed, or the
+// rounded characteristic overflows beyond that cap; an undelayed failure
+// leaves the exact characteristic to decide when in scope.
 func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, error), c *PID2, lag int) (bool, error) {
 	n, _, _ := model.Dims()
 	inScope := pidTuningIdealInScope(model, c)
