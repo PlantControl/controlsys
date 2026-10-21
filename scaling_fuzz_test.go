@@ -197,9 +197,6 @@ func FuzzPrescale(f *testing.F) {
 			l[i], r[i] = el, er
 		}
 		fzCheckDiagScaled(t, s, "Prescale", sys, res.Sys, l, r)
-		if n == 0 {
-			fzSkip(t, "Prescale: static gain returns unit I/O scales, not 1/max|D| (followup)")
-		}
 		bs, cs, d := fzDenseClone(res.Sys.B), fzDenseClone(res.Sys.C), s.D
 		for j := range m {
 			mx := 0.0
