@@ -27,13 +27,20 @@ type ReduceOpts struct {
 	// of the full model in both stages; 0 selects n²·eps with the floor
 	// raised to MATLAB ctrbf/obsvf's 10·n·‖A‖₁·eps, the rule CtrbF and
 	// ObsvF use. MATLAB minreal's documented default sqrt(eps) is not
-	// used: against ‖A‖ it drops weakly coupled states that carry the
-	// response (a slow plant in a PI loop, diagonally scaled models).
+	// copied: it is a pole-zero matching tolerance of its zpk algorithm,
+	// not a staircase rank tolerance, and against ‖A‖ it drops weakly
+	// coupled states that carry the response (a slow plant in a PI loop
+	// drops to order 1; the 10^±3 diagonally scaled Kalman sweep gives 174
+	// under-counts and 277 response errors).
 	Tol float64
-	// Equalize balances A, B, C before the staircase reductions. Badly
-	// scaled models (state scales spanning many decades) need it, as
-	// MATLAB minreal prescales: an orthogonal staircase judges couplings
-	// against ‖A‖.
+	// Equalize balances A, B, C before the staircase reductions. Set it
+	// for badly scaled models (state scales spanning many decades): an
+	// orthogonal staircase judges couplings against ‖A‖. It is off by
+	// default since it is not uniformly better: on the 4000-case Kalman
+	// sweep (KALMAN_SWEEP_EQUALIZE=1) with 10^±4 state scales it fixes
+	// all 73 response errors and 265 over-counts but adds 202 other
+	// over-counts (kept hidden unstable states) and 1 response error,
+	// and without scaling it adds 54 over-counts while fixing 66.
 	Equalize bool
 }
 
