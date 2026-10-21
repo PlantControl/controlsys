@@ -90,7 +90,7 @@ type PIDTuningOptions struct {
 	// MaxEvaluations bounds candidate evaluations of each TunePID search,
 	// 1..4096; 0 means 4096. The ±3° attempt and each moved crossover are
 	// searches; the floor bands at one crossover share one, as do all
-	// backed-off crossovers. A search that verifies its design under the
+	// backed-off crossovers, and all raised ones. A search that verifies its design under the
 	// refined crossing check and searches again spends one budget. Evidence
 	// counts the whole call.
 	MaxEvaluations int
@@ -923,7 +923,13 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // the shallow pair and the first that succeeded are scanned shallowest first
 // and the first design is returned, or that one if the budget runs out: a
 // lightly damped resonance near the delay cap can leave only a low-bandwidth
-// design, as pidtune returns.
+// design, as pidtune returns. A default-crossover PD, PDF, PID or PIDF
+// design on a delay-free plant backs off the same way when it fails; on a
+// plant that is not stable or has zero DC gain, a failed back-off then
+// raises the crossover in half octaves up to 1024× the default, below the
+// Nyquist frequency, within one more budget, and returns the first design,
+// as Pidtune does: an unstable pole above the default, as on 1/(s(s−1)),
+// needs crossovers past it.
 //
 // Another gain crossover whose wrapped margin is −floor or below has ∠L in
 // (0°, 180° − floor], at least the floor from −1 the other way round: it

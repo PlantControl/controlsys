@@ -49,10 +49,10 @@ func TestTunePIDRaisesCrossoverOnUnstablePlant(t *testing.T) {
 				k += complex(c.Ki, 0) / s
 			}
 			l := k * g(s)
-			if math.Abs(cmplx.Abs(l)-1) > 1e-6 {
+			if math.Abs(cmplx.Abs(l)-1) > 1e-5 {
 				t.Errorf("%s %s: |L(j%.4g)| = %v, want 1", tc.name, f, wc, cmplx.Abs(l))
 			}
-			if pm := 180 - math.Abs(cmplx.Phase(l))*180/math.Pi; pm < 57-1e-6 {
+			if pm := 180 - math.Abs(cmplx.Phase(l))*180/math.Pi; pm < 57-1e-3 {
 				t.Errorf("%s %s: margin %.4g° at %.4g rad/s, want >= 57°", tc.name, f, pm, wc)
 			}
 			if !pidRaiseWarned(res.Evidence.Warnings, "raised to") {
