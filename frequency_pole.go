@@ -43,6 +43,8 @@ const (
 // finite. The pole limit's samples fail there too;
 // each failed sample is solved in double-double, and where that is singular
 // as well the step is taken past the cluster at s (poleSpacing's wide).
+// An internal-delay model always takes the pole limit; a failed sample is
+// the LFT of its delay-free plant solved in double-double (ddLFTSampler).
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
 }
@@ -56,7 +58,8 @@ func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syste
 // computed pole is a pole at pt as at DC, without the double-double check;
 // the margin search keeps the pole limit's +Inf there. allow and limit also
 // keep the pole limit's samples in double, so its errors stand for the
-// caller.
+// caller; for an internal-delay model so does snap, and only the zero gate
+// solves failed samples in double-double.
 type ddGate struct {
 	limit bool
 	snap  bool
@@ -86,6 +89,16 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		if ddResponseInto(sys, pt, dst) && (!sp.near || !ddAtPole(sys, s, sp, dst)) {
 			return nil
 		}
+	}
+	if !delayFree && !gate.limit && !gate.snap && gate.allow == nil {
+		dd := newDDLFTSampler(sys)
+		sample := func(pt frequencyPoint, dst []complex128) error {
+			if err := eval(pt, dst); err == nil || !dd.responseInto(pt, dst) {
+				return err
+			}
+			return nil
+		}
+		return poleLimitInto(sample, s, rho, dst, err)
 	}
 	if !delayFree || gate.limit || gate.allow != nil {
 		return poleLimitInto(eval, s, rho, dst, err)
@@ -164,6 +177,94 @@ func poleLimitInto(eval func(frequencyPoint, []complex128) error, s complex128, 
 		dst[j] = v
 	}
 	return nil
+}
+
+// ddLFTSampler evaluates an internal-delay model where its double solve
+// fails off a pole, as next to a pole cluster at the origin far below ‖A‖:
+// the delay-free plant H in double-double (ddResponseInto), closed by Δ in
+// double. It builds H on first use.
+type ddLFTSampler struct {
+	sys  *System
+	h    *System
+	hv   []complex128
+	work []complex128
+}
+
+func newDDLFTSampler(sys *System) *ddLFTSampler { return &ddLFTSampler{sys: sys} }
+
+// responseInto sets dst to the LFT of H at pt. It reports false where H is
+// singular in double-double, I − H22·Δ is singular, or an entry cancels
+// terms over lftCancelLimit times its size: there the loop moves a pole of
+// H, and H's rounding of order 1/d leaves the LFT no correct digits.
+func (d *ddLFTSampler) responseInto(pt frequencyPoint, dst []complex128) bool {
+	sys := d.sys
+	n, m, p := sys.Dims()
+	lft := sys.LFT
+	N := len(lft.Tau)
+	mN, pN := m+N, p+N
+	if d.h == nil {
+		d.h = &System{
+			A:  sys.A,
+			B:  newDense(n, mN),
+			C:  newDense(pN, n),
+			D:  newDense(pN, mN),
+			E:  sys.E,
+			Dt: sys.Dt,
+		}
+		if n > 0 {
+			setBlock(d.h.B, 0, 0, sys.B)
+			setBlock(d.h.B, 0, m, lft.B2)
+			setBlock(d.h.C, 0, 0, sys.C)
+			setBlock(d.h.C, p, 0, lft.C2)
+		}
+		setBlock(d.h.D, 0, 0, sys.D)
+		setBlock(d.h.D, 0, m, lft.D12)
+		setBlock(d.h.D, p, 0, lft.D21)
+		setBlock(d.h.D, p, m, lft.D22)
+		d.hv = make([]complex128, pN*mN)
+		d.work = make([]complex128, N+N*N+N*m)
+	}
+	h := d.hv
+	if !ddResponseInto(d.h, pt, h) {
+		return false
+	}
+	delta, lhs, x := d.work[:N], d.work[N:N+N*N], d.work[N+N*N:]
+	s := pt.value()
+	for j, tau := range lft.Tau {
+		if sys.IsContinuous() {
+			delta[j] = cmplx.Exp(-s * complex(tau, 0))
+		} else {
+			delta[j] = pt.delayFactor(tau)
+		}
+	}
+	for i := range N {
+		row := h[(p+i)*mN:]
+		for j := range N {
+			lhs[i*N+j] = -row[m+j] * delta[j]
+		}
+		lhs[i*N+i] += 1
+		copy(x[i*m:(i+1)*m], row[:m])
+	}
+	if cSolveInPlace(lhs, x, N, m) != nil {
+		return false
+	}
+	for i := range p {
+		row := h[i*mN:]
+		for j := range m {
+			v := row[j]
+			terms := cabs1(v)
+			for k := range N {
+				t := row[m+k] * delta[k] * x[k*m+j]
+				v += t
+				terms += cabs1(t)
+			}
+			if !finiteComplex(v) || terms > lftCancelLimit*cabs1(v) {
+				return false
+			}
+			dst[i*m+j] = v
+		}
+	}
+	return true
 }
 
 // ddAtPole reports whether g, the double-double response at s next to a
