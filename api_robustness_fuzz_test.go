@@ -771,10 +771,6 @@ func FuzzAPISystem(f *testing.F) {
 			t.Fatalf("%s accepted invalid blocks (%s)\n%s\n%s", op, pt.Desc, in, s)
 		}
 		fzAPIRequireValid(t, in, op, sys)
-		empty := func(m *mat.Dense) bool { return m == nil || m.IsEmpty() }
-		if empty(pt.A) && empty(pt.B) && !empty(pt.C) {
-			fzSkip(t, "known: New with empty A and B drops a non-empty C")
-		}
 		if op != "NewFromSlices" {
 			for i, got := range []*mat.Dense{sys.A, sys.B, sys.C, sys.D} {
 				if !fzAPISameBlock(inputs[i], got) {
