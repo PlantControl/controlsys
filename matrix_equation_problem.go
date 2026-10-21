@@ -32,6 +32,8 @@ type riccatiProblem struct {
 	// with collecting, candidates holds the solutions it did not return.
 	resolved, collecting bool
 	candidates           []riccatiPass
+	// eFactored reports that ws.eLU holds the LU factors of E.
+	eFactored bool
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
