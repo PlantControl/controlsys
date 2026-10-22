@@ -274,12 +274,10 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	if err != nil {
 		return c.result(order), nil
 	}
-	if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
-		return alt.result(altOrder), nil
-	}
-	// Far above the poles the untrimmed Markov noise of a correct alt can
-	// exceed even a Dgebal result that lost every state (WGMRIE), so compare
-	// trimmed results too.
+	// Far above the poles the untrimmed Markov noise of either result can
+	// exceed the error of one that lost states, which barely shows there
+	// (WGMRIE; U3H63X: an exact Dgebal slow companion against an Osborne
+	// one missing a state), so only the trimmed results are compared.
 	c.trimRows()
 	alt.trimRows()
 	if e0, _ = check.relErr(c.tf); e0 > gate {
