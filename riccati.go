@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -151,8 +152,9 @@ type RiccatiResult struct {
 	// Hamiltonian or pencil solution (A − BK stable in float64 arithmetic)
 	// that no Newton step certifies, so X may be inaccurate and, near the
 	// stability boundary, A − BK only rounded to stable; check it before
-	// use. A non-finite X or no
-	// stabilizing solution (Report 2, 3) is an error, not a result.
+	// use. A non-finite X or no stabilizing solution (Report 2, 3) is an
+	// error, not a result, as is an X with an unstabilizable mode of (A, B)
+	// on the boundary to within √eps relative (PBH).
 	Accuracy int
 }
 
@@ -248,7 +250,10 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // X whose Lyapunov equation is singular) with Accuracy 1, unrefined:
 // under cheap control with weak actuation Newton has no quadratic region
 // (its first step from an X accurate to 1e-11 can be 1e-6), and such an
-// X may be accurate or off by far more than its step. An X whose U11 has
+// X may be accurate or off by far more than its step; when (A, B) has a
+// mode on the boundary (to √eps relative) that fails the PBH rank test,
+// no stabilizing solution exists and Care returns ErrNoStabilizing
+// instead. An X whose U11 has
 // rcnd below eps is not finite (icare Report 2) and is never returned.
 // A solve that finds no stabilizing solution is retried with NoScaling
 // flipped; with none in either mode Care returns ErrNoStabilizing (or the
@@ -552,8 +557,8 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // Newton's method until a step is within 1e-10; if that does not
 // converge, the other cost scales' solutions are tried. A certified X has
 // Accuracy 0; with none certified Dare returns the stabilizing solution of
-// smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care),
-// and with no stabilizing solution in either NoScaling mode (Care's
+// smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care,
+// including its PBH check of boundary modes), and with no stabilizing solution in either NoScaling mode (Care's
 // retry) ErrNoStabilizing.
 //
 // Dare scales the states and the cost as Care does (MATLAB idare);
@@ -635,6 +640,9 @@ func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.
 	if err != nil {
 		if problem.poor == nil {
 			return nil, nil, 0, 0, err
+		}
+		if problem.boundaryUnstabilizable(continuous) {
+			return nil, nil, 0, 0, ErrNoStabilizing
 		}
 		X, K, rcnd = problem.poorSolution(eig)
 		return X, K, rcnd, 1, nil
@@ -725,6 +733,72 @@ func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []com
 		problem.closedLoopEig(p.eig)
 	}
 	p.rcnd, p.step = rcnd, step
+}
+
+// boundaryUnstabilizable reports a finite eigenvalue λ of (A, E) on, beyond
+// or within √eps·|λ| of the stability boundary (the split of a double root
+// on it) at which [A − λE, B] has rank below n by the PBH test,
+// σmin ≤ n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖: no stabilizing solution exists
+// (icare/idare Report 3), and an Accuracy 1 X would be stable only to
+// rounding, its exact closed loop unstable (K72KOR). The band is relative,
+// so a mode at −1e-14 of a continuous A stays stable (BWUCB5).
+func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
+	n, m := problem.n, problem.m
+	aRaw, bRaw := problem.A.RawMatrix(), problem.B.RawMatrix()
+	a := make([]float64, n*n)
+	copyStrided(a, n, aRaw.Data, aRaw.Stride, n, n)
+	e := make([]float64, n*n)
+	for i := range n {
+		e[i*n+i] = 1
+	}
+	if problem.E != nil {
+		eRaw := problem.E.RawMatrix()
+		copyStrided(e, n, eRaw.Data, eRaw.Stride, n, n)
+	}
+	an, en := frobenius(a), frobenius(e)
+	bn := impl.Dlange(lapack.Frobenius, n, m, bRaw.Data, bRaw.Stride, nil)
+	ac, ec := slices.Clone(a), slices.Clone(e)
+	wr, wi, beta := make([]float64, n), make([]float64, n), make([]float64, n)
+	work := make([]float64, dggevEigenvaluesWorkLen(n))
+	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, n, ac, n, ec, n, wr, wi, beta, nil, 1, nil, 1, work, len(work)) {
+		return false
+	}
+	nf, ep := float64(n), eps()
+	g := mat.NewDense(2*n, 2*(n+m), nil)
+	var svd mat.SVD
+	for k := range n {
+		if !(math.Abs(beta[k]) > 0) {
+			continue
+		}
+		lr, li := wr[k]/beta[k], wi[k]/beta[k]
+		mod := math.Hypot(lr, li)
+		tol := math.Sqrt(ep) * mod
+		if continuous && lr < -tol || !continuous && mod < 1-tol {
+			continue
+		}
+		for i := range n {
+			for j := range n {
+				re, im := a[i*n+j]-lr*e[i*n+j], -li*e[i*n+j]
+				g.Set(i, j, re)
+				g.Set(i, n+m+j, -im)
+				g.Set(n+i, j, im)
+				g.Set(n+i, n+m+j, re)
+			}
+			for j := range m {
+				b := bRaw.Data[i*bRaw.Stride+j]
+				g.Set(i, n+j, b)
+				g.Set(n+i, n+m+n+j, b)
+			}
+		}
+		if !svd.Factorize(g, mat.SVDNone) {
+			continue
+		}
+		sv := svd.Values(nil)
+		if sv[2*n-1] <= nf*ep*math.Hypot(an+mod*en, bn) {
+			return true
+		}
+	}
+	return false
 }
 
 // poorSolution restores problem.poor to ws.xData, ws.kData and eig.

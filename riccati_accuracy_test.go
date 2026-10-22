@@ -300,3 +300,69 @@ func TestCare_LyapunovSingularRescue(t *testing.T) {
 		})
 	}
 }
+
+// TestKalman_BoundaryUndetectableNoStabilizing (K72KOR): FuzzKalman inputs
+// whose (C, A) has an undetectable mode at z = 1 (two poles there with one
+// output; four). Base returned Accuracy 1 with A − LC stable in float64
+// but, by the exact rational char poly of the returned gain, a root
+// outside the unit circle: the first in the default build, the second
+// under FMA rounding (-gcflags=all=-d=libfuzzer). No stabilizing solution
+// exists (MATLAB idare Report 3), so Kalman returns ErrNoStabilizing.
+func TestKalman_BoundaryUndetectableNoStabilizing(t *testing.T) {
+	cases := []struct {
+		name string
+		kind uint8
+		v    [fzNVals]float64
+	}{
+		{"double", 0xa7, [fzNVals]float64{-0.3010299956639812, 45.6, -68, 1, 0, -6, -30, 156, 1.2, 23.7824, 135.4, 48, -10, -2, 47, -1.1111}},
+		{"quad", 0xa7, [fzNVals]float64{-69.301, 45.6, -68, 1, 0, -0.6, -30, 192, 1.2, 23.7824, 135.4, 48, -10, -2, 47, -1.1111}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := syKalmanSpec(fzDecode(t, tc.kind, tc.v))
+			m, p := s.M, s.P
+			qn, rn, nn := syNoise(s, m, p)
+			var nnD *mat.Dense
+			if nn != nil {
+				nnD = mqDense(m, p, nn)
+			}
+			res, err := Kalman(s.System(t, fzSysOpts{}), mqDense(m, m, qn), mqDense(p, p, rn), nnD, nil)
+			if !errors.Is(err, ErrNoStabilizing) {
+				t.Fatalf("got %v (result %v), want ErrNoStabilizing", err, res != nil)
+			}
+			if ok, derr := IsDetectable(mqDense(s.N, s.N, s.A), mqDense(p, s.N, s.C), false); derr != nil || ok {
+				t.Fatalf("IsDetectable = %v, %v; want false", ok, derr)
+			}
+		})
+	}
+}
+
+// TestKalman_WeaklyDetectableUnitPolesNotCertified (K72KOR, FuzzKalman
+// dare_unit_poles_weakly_detectable_fma): two poles at z = 1 and a pair on
+// the unit circle, detectable (PBH σmin ≈ 5e-3 against ‖C‖ = √2, 6.5e5
+// times n·eps·‖[A C]‖, ‖A‖ ≈ 5.7e6 from a pole at 48041). ‖X‖ ≈ 1e10, so
+// under FMA rounding the exact closed loop of the returned L is unstable
+// within the rounding of forming A − LC. Whether MATLAB idare reports 1 or
+// 3 here is open; X must never be certified.
+func TestKalman_WeaklyDetectableUnitPolesNotCertified(t *testing.T) {
+	v := [fzNVals]float64{0.26667, -1.5, 0.16667, 14, -35.4, 4, 89, -90, -0.0238, 91, 5.2, -73, 100, -58, 4.5, -170}
+	s := syKalmanSpec(fzDecode(t, 0xe9, v))
+	m, p := s.M, s.P
+	qn, rn, nn := syNoise(s, m, p)
+	var nnD *mat.Dense
+	if nn != nil {
+		nnD = mqDense(m, p, nn)
+	}
+	for _, ns := range []bool{false, true} {
+		res, err := Kalman(s.System(t, fzSysOpts{}), mqDense(m, m, qn), mqDense(p, p, rn), nnD, &RiccatiOpts{NoScaling: ns})
+		if err != nil {
+			if !errors.Is(err, ErrNoStabilizing) {
+				t.Fatalf("NoScaling %v: %v", ns, err)
+			}
+			continue
+		}
+		if res.Accuracy == 0 {
+			t.Fatalf("NoScaling %v: Accuracy 0", ns)
+		}
+	}
+}
