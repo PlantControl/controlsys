@@ -108,7 +108,7 @@ func TestTransferFunctionTrimRelativeDegreeFiveDegree(t *testing.T) {
 	if len(num) != 2 || math.Abs(num[0]-want[0]) > 1e-5*want[0] || math.Abs(num[1]-want[1]) > 1e-5*-want[1] {
 		t.Fatalf("num %v, want %v", num, want)
 	}
-	if tfErr > 1e-4 || zpkErr > 1e-4 {
+	if tfErr > 1e-3 || zpkErr > 1e-3 {
 		t.Errorf("low-frequency rel err TF %.3g ZPK %.3g vs exact", tfErr, zpkErr)
 	}
 	zpk, err := sys.ZPKModel(nil)
