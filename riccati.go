@@ -130,8 +130,12 @@ type RiccatiOpts struct {
 	// of its terms, is still retried with cost scaling; so is a plain Care
 	// solve that fails or leaves a residual above 1e-6 of its terms. A
 	// solve in either mode that finds no stabilizing solution, or one no
-	// Newton step certifies (Accuracy 1), is retried once in the other.
+	// Newton step certifies (Accuracy 1), is retried once in the other,
+	// and Care's then state-scaled ignoring R.
 	NoScaling bool
+	// plainScaling balances Care's state scaling with B in place of its
+	// cost proxy (scale): otherScaling's last resort.
+	plainScaling bool
 }
 
 // RiccatiResult is the stabilizing solution of Care or Dare.
@@ -216,7 +220,8 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // ErrInvalidArgument.
 //
 // As MATLAB icare, Care first balances the states by an exact power-of-two
-// diagonal scaling, so X, K and Eig do not depend on the units of x. When
+// diagonal scaling, so X, K and Eig do not depend on the units of x; the
+// balance is that of the Hamiltonian, with BR⁻¹Bᵀ weighed as Q. When
 // ‖X‖ is far from the scale of the Hamiltonian (for example a cost Q, R
 // tiny against A), Care solves again with Q, R, S divided by a power of
 // two near ‖X‖, which keeps the relative accuracy of X. opts.NoScaling
@@ -244,20 +249,20 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // under cheap control with weak actuation Newton has no quadratic region
 // (its first step from an X accurate to 1e-11 can be 1e-6), and such an
 // X may be accurate or off by far more than its step; when (A, B) has a
-// mode on the boundary (to rounding) that fails the PBH rank test,
-// no stabilizing solution exists and Care returns ErrNoStabilizing
-// instead. An X whose U11 has
+// mode on the boundary (to its eigenvalue's rounding error) that fails
+// the PBH rank test, no stabilizing solution exists and Care returns
+// ErrNoStabilizing instead, in either mode. An X whose U11 has
 // rcnd below eps is not finite (icare Report 2) and is never returned.
 // A solve that finds no stabilizing solution, or only an Accuracy 1 one,
-// is retried with NoScaling flipped: a certified X of either mode is
-// returned, else the Accuracy 1 X of smaller first Newton step; with none
-// in either mode Care returns ErrNoStabilizing (or the Hamiltonian's
-// error) of the first.
+// is retried with NoScaling flipped and then state-scaled balancing B in
+// place of BR⁻¹Bᵀ: the first certified X is returned, else the Accuracy
+// 1 X of smallest first Newton step; with none Care returns
+// ErrNoStabilizing (or the Hamiltonian's error) of the first.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
-	res, err := otherScaling(care, A, B, Q, R, opts)
+	res, err := otherScaling(care, true, A, B, Q, R, opts)
 	if err != nil {
 		return nil, fmt.Errorf("Care: %w", err)
 	}
@@ -266,38 +271,54 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 
 // otherScaling solves by solve and, when that finds no stabilizing
 // solution (ErrNoStabilizing or ErrSchurFailed) or one no Newton step
-// certifies (Accuracy 1), once more with opts.NoScaling flipped. State
-// scaling can push a cheap-control pencil (R ≪ BᵀXB) to where no cost
-// scale deflates it while the unscaled one solves (w17 #8), and the
-// reverse; either solution passes the same Newton verification. A
-// certified result of either mode is kept; of two Accuracy 1 results the
-// one of smaller first Newton step (the first on a tie), and with both
-// failing the first error. An Accuracy 1 first result lives in
-// opts.Workspace, so its retry solves without it.
-func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+// certifies (Accuracy 1), once more with opts.NoScaling flipped, and then,
+// with plainRetry (Care), state-scaled with B in place of its cost proxy
+// (opts.plainScaling).
+// State scaling can push a cheap-control pencil (R ≪ BᵀXB) to where no
+// cost scale deflates it while the unscaled one solves (w17 #8), and the
+// reverse; each solution passes the same Newton verification. The first
+// certified result is kept; else of Accuracy 1 results the one of
+// smallest first Newton step (the first on a tie), and with all failing
+// the first error. An unstabilizable boundary mode
+// (errBoundaryUnstabilizable) is structural and returned at once. A kept
+// Accuracy 1 result lives in opts.Workspace, so later solves run
+// without it.
+func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), plainRetry bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := solve(A, B, Q, R, opts)
-	if err == nil && res.Accuracy == 0 || err != nil && !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+	if err == nil && res.Accuracy == 0 || errors.Is(err, errBoundaryUnstabilizable) ||
+		err != nil && !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
 		return res, err
 	}
-	flipped := RiccatiOpts{NoScaling: true}
+	var base RiccatiOpts
 	if opts != nil {
-		flipped = *opts
-		flipped.NoScaling = !opts.NoScaling
+		base = *opts
 	}
-	if err == nil {
-		flipped.Workspace = nil
+	flipped, plain := base, base
+	flipped.NoScaling = !base.NoScaling
+	plain.NoScaling, plain.plainScaling = false, true
+	retries := []RiccatiOpts{flipped, plain}
+	if !plainRetry {
+		retries = retries[:1]
 	}
-	res2, err2 := solve(A, B, Q, R, &flipped)
-	switch {
-	case err2 != nil:
-		if err == nil {
-			return res, nil
+	for _, o := range retries {
+		if res != nil {
+			o.Workspace = nil
 		}
-		return nil, err
-	case err != nil, res2.Accuracy == 0, res2.step < res.step:
-		return res2, nil
+		r, e := solve(A, B, Q, R, &o)
+		switch {
+		case errors.Is(e, errBoundaryUnstabilizable):
+			return nil, e
+		case e != nil:
+		case r.Accuracy == 0:
+			return r, nil
+		case res == nil || r.step < res.step:
+			res = r
+		}
 	}
-	return res, nil
+	if res != nil {
+		return res, nil
+	}
+	return nil, err
 }
 
 func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -309,7 +330,7 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := problem.ws.fits(n, m); err != nil {
 		return nil, err
 	}
-	problem.scale(opts)
+	problem.scale(opts, opts == nil || !opts.plainScaling)
 	A, B, Q, S, ws := problem.A, problem.B, problem.Q, problem.S, problem.ws
 
 	// Cholesky factor R
@@ -392,6 +413,9 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		problem.costScaling, problem.balanced, problem.sigma = costScaling, false, 1
 		problem.rescueErr, problem.resolved, problem.candidates = nil, false, problem.candidates[:0]
 		if X, K, rcnd, accuracy, err = problem.pencilRiccati(true); err != nil {
+			if errors.Is(err, errBoundaryUnstabilizable) {
+				return nil, err
+			}
 			return nil, first
 		}
 	}
@@ -571,14 +595,16 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // NoScaling mode), and with no stabilizing solution in either mode
 // ErrNoStabilizing.
 //
-// Dare scales the states and the cost as Care does (MATLAB idare);
+// Dare scales the states and the cost as Care does (MATLAB idare), its
+// state scaling balanced with B (the cost proxy of Care brought no
+// certification on cheap-control sweeps and cost 10-20% time);
 // opts.NoScaling disables it. An unscaled pencil that fails QZ or the
 // stable split is solved again cost-scaled before an error is returned.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
-	res, err := otherScaling(dare, A, B, Q, R, opts)
+	res, err := otherScaling(dare, false, A, B, Q, R, opts)
 	if err != nil {
 		return nil, fmt.Errorf("Dare: %w", err)
 	}
@@ -594,7 +620,7 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := problem.ws.fits(n, m); err != nil {
 		return nil, err
 	}
-	problem.scale(opts)
+	problem.scale(opts, false)
 	ws := problem.ws
 
 	// Cholesky factor R
@@ -652,7 +678,7 @@ func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.
 			return nil, nil, 0, 0, err
 		}
 		if problem.boundaryUnstabilizable(continuous) {
-			return nil, nil, 0, 0, ErrNoStabilizing
+			return nil, nil, 0, 0, errBoundaryUnstabilizable
 		}
 		X, K, rcnd = problem.poorSolution(eig)
 		return X, K, rcnd, 1, nil
@@ -745,16 +771,25 @@ func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []com
 	p.rcnd, p.step = rcnd, step
 }
 
+// errBoundaryUnstabilizable is the ErrNoStabilizing of
+// boundaryUnstabilizable: structural, so it holds in either scaling mode.
+var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on the stability boundary is unstabilizable", ErrNoStabilizing)
+
 // boundaryUnstabilizable reports a finite eigenvalue λ of (A, E) on or
 // beyond the stability boundary, or within rounding of it, at which
-// [A − λE, B] has rank below n by the PBH test, σmin ≤ n·eps·‖[‖A‖ +
-// |λ|‖E‖, ‖B‖]‖: no stabilizing solution exists (icare/idare Report 3),
-// and an Accuracy 1 X would be stable only to rounding, its exact closed
-// loop unstable (K72KOR). A double root on the boundary that rounding
-// splits leaves a root on or beyond it, or a complex pair as close to it
-// as the rounding of A, so the band is n·eps·(‖A‖ + |λ|‖E‖) for a complex
-// λ and n·eps·|λ| for a real one: a lightly damped mode at −3e-7 ± 100i
-// stays stable, as does a real mode at −3e-16 of a continuous A (BWUCB5).
+// [A − λE, B] has rank below n by the PBH test: no stabilizing solution
+// exists (icare/idare Report 3), and an Accuracy 1 X would be stable only
+// to rounding, its exact closed loop unstable (K72KOR). Within rounding
+// is 10× the componentwise first-order bound τ = n·eps·(|y|ᵀ|A||x| +
+// |λ|·|y|ᵀ|E||x|)/|yᴴEx| of λ's error (x, y its right and left
+// eigenvectors): an exact mode at 0 or 1 of a dense A, computed eps·‖A‖·κ
+// off, is tested, while a mode at −3e-16 that is an exact diagonal entry
+// of a triangular A is known to relative eps and stays stable (BWUCB5),
+// as does a lightly damped mode at −3e-9 ± i. PBH rank is σmin ≤
+// n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖ + τ‖E‖. A boundary mode in a Jordan block
+// with a controllable one splits by √(eps)·‖A‖ beyond first order; the
+// mean of the eigenvalues within that of λ, accurate to rounding, is
+// tested too.
 func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 	n, m := problem.n, problem.m
 	aRaw, bRaw := problem.A.RawMatrix(), problem.B.RawMatrix()
@@ -772,26 +807,22 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 	bn := impl.Dlange(lapack.Frobenius, n, m, bRaw.Data, bRaw.Stride, nil)
 	ac, ec := slices.Clone(a), slices.Clone(e)
 	wr, wi, beta := make([]float64, n), make([]float64, n), make([]float64, n)
-	work := make([]float64, dggevEigenvaluesWorkLen(n))
-	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, n, ac, n, ec, n, wr, wi, beta, nil, 1, nil, 1, work, len(work)) {
+	vl, vr := make([]float64, n*n), make([]float64, n*n)
+	work := make([]float64, max(1, 8*n))
+	if !impl.Dggev(lapack.LeftEVCompute, lapack.RightEVCompute, n, ac, n, ec, n, wr, wi, beta, vl, n, vr, n, work, len(work)) {
 		return false
 	}
 	nf, ep := float64(n), eps()
+	inBand := func(lam complex128, tol float64) bool {
+		if continuous {
+			return real(lam) >= -tol
+		}
+		return cmplx.Abs(lam) >= 1-tol
+	}
 	g := mat.NewDense(2*n, 2*(n+m), nil)
 	var svd mat.SVD
-	for k := range n {
-		if !(math.Abs(beta[k]) > 0) {
-			continue
-		}
-		lr, li := wr[k]/beta[k], wi[k]/beta[k]
-		mod := math.Hypot(lr, li)
-		tol := nf * ep * mod
-		if li != 0 {
-			tol = nf * ep * (an + mod*en)
-		}
-		if continuous && lr < -tol || !continuous && mod < 1-tol {
-			continue
-		}
+	pbhDeficient := func(lam complex128, tol float64) bool {
+		lr, li := real(lam), imag(lam)
 		for i := range n {
 			for j := range n {
 				re, im := a[i*n+j]-lr*e[i*n+j], -li*e[i*n+j]
@@ -807,10 +838,70 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 			}
 		}
 		if !svd.Factorize(g, mat.SVDNone) {
-			continue
+			return false
 		}
 		sv := svd.Values(nil)
-		if sv[2*n-1] <= nf*ep*math.Hypot(an+mod*en, bn) {
+		return sv[2*n-1] <= nf*ep*math.Hypot(an+cmplx.Abs(lam)*en, bn)+tol*en
+	}
+	lams := make([]complex128, n)
+	finite := make([]bool, n)
+	for k := range n {
+		if finite[k] = math.Abs(beta[k]) > 0; finite[k] {
+			lams[k] = complex(wr[k]/beta[k], wi[k]/beta[k])
+		}
+	}
+	x, y := make([]complex128, n), make([]complex128, n)
+	for k := 0; k < n; k++ {
+		kk := k
+		if wi[k] != 0 {
+			k++
+		}
+		if !finite[kk] {
+			continue
+		}
+		lam := lams[kk]
+		for i := range n {
+			if imag(lam) == 0 {
+				x[i], y[i] = complex(vr[i*n+kk], 0), complex(vl[i*n+kk], 0)
+			} else {
+				x[i], y[i] = complex(vr[i*n+kk], vr[i*n+kk+1]), complex(vl[i*n+kk], vl[i*n+kk+1])
+			}
+		}
+		var ya, ye float64
+		var yex complex128
+		for i := range n {
+			var ra, re float64
+			var ex complex128
+			for j := range n {
+				ra += math.Abs(a[i*n+j]) * cmplx.Abs(x[j])
+				re += math.Abs(e[i*n+j]) * cmplx.Abs(x[j])
+				ex += complex(e[i*n+j], 0) * x[j]
+			}
+			ay := cmplx.Abs(y[i])
+			ya += ay * ra
+			ye += ay * re
+			yex += cmplx.Conj(y[i]) * ex
+		}
+		mod := cmplx.Abs(lam)
+		tol := 10 * nf * ep * (ya + mod*ye) / cmplx.Abs(yex)
+		if inBand(lam, tol) && pbhDeficient(lam, tol) {
+			return true
+		}
+		rho := math.Sqrt(ep) * (an + mod*en)
+		var mean complex128
+		count := 0
+		for j := range n {
+			if finite[j] && cmplx.Abs(lams[j]-lam) <= rho {
+				mean += lams[j]
+				count++
+			}
+		}
+		if count < 2 {
+			continue
+		}
+		mean /= complex(float64(count), 0)
+		tol = 10 * nf * ep * (an + cmplx.Abs(mean)*en)
+		if inBand(mean, tol) && pbhDeficient(mean, tol) {
 			return true
 		}
 	}

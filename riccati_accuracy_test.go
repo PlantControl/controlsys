@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -157,56 +158,70 @@ func lqgH2SynAccuracy(t *testing.T, name string) {
 }
 
 // TestRiccati_OtherScalingAccuracy: an Accuracy 1 result is retried in
-// the other scaling mode without the workspace that holds it (MQM2E7); a
-// certified retry replaces it, an Accuracy 1 retry only with a smaller
-// first Newton step, and a failed retry never turns it into an error.
+// the other scaling mode and then state-scaled with B (plainScaling,
+// 3CVH7I), without the workspace that holds it (MQM2E7); a certified
+// retry replaces it, an Accuracy 1 retry only with a smaller first Newton
+// step, and a failed retry never turns it into an error. An
+// unstabilizable boundary mode in any mode is ErrNoStabilizing (K72KOR).
 func TestRiccati_OtherScalingAccuracy(t *testing.T) {
 	ws := NewRiccatiWorkspace(1, 1)
 	poor := &RiccatiResult{Accuracy: 1, step: 1e-6}
+	acc1 := func(step float64) *RiccatiResult { return &RiccatiResult{Accuracy: 1, step: step} }
+	certified := &RiccatiResult{}
+	type out struct {
+		res *RiccatiResult
+		err error
+	}
 	for _, tc := range []struct {
-		name   string
-		second *RiccatiResult
-		err    error
-		keep   bool
+		name          string
+		second, third out
+		want          int
+		calls         int
+		err           error
 	}{
-		{"retry certified", &RiccatiResult{}, nil, false},
-		{"retry smaller step", &RiccatiResult{Accuracy: 1, step: 1e-7}, nil, false},
-		{"retry larger step", &RiccatiResult{Accuracy: 1, step: 1e-5}, nil, true},
-		{"retry equal step", &RiccatiResult{Accuracy: 1, step: 1e-6}, nil, true},
-		{"retry Inf step", &RiccatiResult{Accuracy: 1, step: math.Inf(1)}, nil, true},
-		{"retry fails", nil, ErrNoStabilizing, true},
+		{"retry certified", out{certified, nil}, out{}, 1, 2, nil},
+		{"retry smaller step", out{acc1(1e-7), nil}, out{acc1(1e-7), nil}, 1, 3, nil},
+		{"retry larger step", out{acc1(1e-5), nil}, out{acc1(1e-5), nil}, 0, 3, nil},
+		{"retry equal step", out{acc1(1e-6), nil}, out{acc1(1e-6), nil}, 0, 3, nil},
+		{"retry Inf step", out{acc1(math.Inf(1)), nil}, out{nil, ErrNoStabilizing}, 0, 3, nil},
+		{"retry fails", out{nil, ErrNoStabilizing}, out{nil, ErrSchurFailed}, 0, 3, nil},
+		{"plain certified", out{acc1(1e-7), nil}, out{certified, nil}, 2, 3, nil},
+		{"plain smaller step", out{nil, ErrNoStabilizing}, out{acc1(1e-7), nil}, 2, 3, nil},
+		{"boundary", out{nil, errBoundaryUnstabilizable}, out{}, -1, 2, errBoundaryUnstabilizable},
+		{"plain boundary", out{acc1(1e-7), nil}, out{nil, errBoundaryUnstabilizable}, -1, 3, errBoundaryUnstabilizable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var calls []*RiccatiOpts
+			var calls []RiccatiOpts
 			solve := func(_, _, _, _ *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-				calls = append(calls, opts)
-				if len(calls) == 1 {
+				calls = append(calls, *opts)
+				switch len(calls) {
+				case 1:
 					return poor, nil
+				case 2:
+					return tc.second.res, tc.second.err
 				}
-				return tc.second, tc.err
+				return tc.third.res, tc.third.err
 			}
-			res, err := otherScaling(solve, nil, nil, nil, nil, &RiccatiOpts{Workspace: ws})
-			if err != nil {
-				t.Fatal(err)
+			res, err := otherScaling(solve, true, nil, nil, nil, nil, &RiccatiOpts{Workspace: ws})
+			if err != tc.err {
+				t.Fatalf("err %v, want %v", err, tc.err)
 			}
-			if len(calls) != 2 || !calls[1].NoScaling || calls[1].Workspace != nil || calls[0].Workspace != ws {
+			if len(calls) != tc.calls || calls[0].Workspace != ws ||
+				!calls[1].NoScaling || calls[1].plainScaling || calls[1].Workspace != nil ||
+				len(calls) > 2 && (calls[2].NoScaling || !calls[2].plainScaling || calls[2].Workspace != nil) {
 				t.Fatalf("calls %+v", calls)
 			}
-			want := tc.second
-			if tc.keep {
-				want = poor
-			}
-			if res != want {
-				t.Errorf("got %+v, want %+v", res, want)
+			want := []*RiccatiResult{poor, tc.second.res, tc.third.res}
+			if tc.want < 0 && res != nil || tc.want >= 0 && res != want[tc.want] {
+				t.Errorf("got %+v, want %d", res, tc.want)
 			}
 		})
 	}
 	calls := 0
-	certified := &RiccatiResult{}
 	res, err := otherScaling(func(_, _, _, _ *mat.Dense, _ *RiccatiOpts) (*RiccatiResult, error) {
 		calls++
 		return certified, nil
-	}, nil, nil, nil, nil, nil)
+	}, true, nil, nil, nil, nil, nil)
 	if err != nil || res != certified || calls != 1 {
 		t.Errorf("certified first: %v %v, %d calls", res, err, calls)
 	}
@@ -242,10 +257,11 @@ func TestRiccatiAccuracy_SingularU11Rejected(t *testing.T) {
 }
 
 // TestRiccati_OtherScaling: a solve that finds no stabilizing solution
-// in one scaling mode is retried once in the other, keeping the other
-// options (INY4MG: Care "modeOnly" failed by default, solved with
-// NoScaling); other errors are not retried, and with both modes failing
-// the first error is returned.
+// in one scaling mode is retried in the other and then state-scaled with
+// B, keeping the other options (INY4MG: Care "modeOnly" failed by
+// default, solved with NoScaling), the last for Care only; other first
+// errors are not retried, and with all failing the first error is
+// returned.
 func TestRiccati_OtherScaling(t *testing.T) {
 	S := mat.NewDense(1, 1, []float64{2})
 	first := fmt.Errorf("first: %w", ErrSchurFailed)
@@ -259,7 +275,8 @@ func TestRiccati_OtherScaling(t *testing.T) {
 	}{
 		{"default fails", nil, map[bool]error{false: ErrNoStabilizing}, []bool{false, true}, true, nil},
 		{"NoScaling fails", &RiccatiOpts{S: S, NoScaling: true}, map[bool]error{true: first}, []bool{true, false}, true, nil},
-		{"both fail", &RiccatiOpts{S: S}, map[bool]error{false: first, true: ErrNoStabilizing}, []bool{false, true}, false, first},
+		{"both fail", &RiccatiOpts{S: S}, map[bool]error{false: first, true: ErrNoStabilizing}, []bool{false, true, false}, false, first},
+		{"both fail, Dare", &RiccatiOpts{S: S}, map[bool]error{false: first, true: ErrNoStabilizing}, []bool{false, true}, false, first},
 		{"singular R", nil, map[bool]error{false: ErrSingularR}, []bool{false}, false, ErrSingularR},
 		{"solves", nil, nil, []bool{false}, true, nil},
 	} {
@@ -276,7 +293,7 @@ func TestRiccati_OtherScaling(t *testing.T) {
 				}
 				return &RiccatiResult{}, nil
 			}
-			res, err := otherScaling(solve, nil, nil, nil, nil, tc.opts)
+			res, err := otherScaling(solve, !strings.HasSuffix(tc.name, "Dare"), nil, nil, nil, nil, tc.opts)
 			if fmt.Sprint(calls) != fmt.Sprint(tc.want) {
 				t.Errorf("NoScaling calls %v, want %v", calls, tc.want)
 			}
@@ -707,32 +724,37 @@ func TestKalman_BoundaryUndetectableNoStabilizing(t *testing.T) {
 }
 
 // TestKalman_WeaklyDetectableUnitPolesNotCertified (K72KOR, FuzzKalman
-// dare_unit_poles_weakly_detectable_fma): two poles at z = 1 and a pair on
-// the unit circle, detectable (PBH σmin ≈ 5e-3 against ‖C‖ = √2, 6.5e5
-// times n·eps·‖[A C]‖, ‖A‖ ≈ 5.7e6 from a pole at 48041), so the PBH
-// check rightly passes it. ‖X‖ ≈ 1e10, so under FMA rounding and on amd64
-// (a root at 1 + 1.9e-5 by Schur–Cohn bisection) the exact closed loop of
-// the returned L is unstable within the rounding of forming A − LC. Whether MATLAB idare reports 1 or
-// 3 here is open; X must never be certified.
+// 72eefa39e2d17cab, vals[6] = 0: dare_unit_poles_weakly_detectable; and
+// its variant vals[6] = 89: dare_unit_poles_weakly_detectable_fma): two
+// poles at z = 1 and a pair on the unit circle, detectable (PBH σmin ≈
+// 5e-3 against ‖C‖ = √2, 6.5e5 times n·eps·‖[A C]‖, ‖A‖ ≈ 5.7e6 from a
+// pole at 48041), so the PBH check rightly passes it: that the task
+// repro is Report 3 was wrong. ‖X‖ ≈ 1e10; the task repro's exact closed
+// loop was unstable only under FMA rounding (-gcflags=all=-d=libfuzzer),
+// the variant's on amd64 too (a root at 1 + 1.9e-5 by Schur–Cohn
+// bisection), within the rounding of forming A − LC. Whether MATLAB idare
+// reports 1 or 3 here is open; X must never be certified.
 func TestKalman_WeaklyDetectableUnitPolesNotCertified(t *testing.T) {
-	v := [fzNVals]float64{0.26667, -1.5, 0.16667, 14, -35.4, 4, 89, -90, -0.0238, 91, 5.2, -73, 100, -58, 4.5, -170}
-	s := syKalmanSpec(fzDecode(t, 0xe9, v))
-	m, p := s.M, s.P
-	qn, rn, nn := syNoise(s, m, p)
-	var nnD *mat.Dense
-	if nn != nil {
-		nnD = mqDense(m, p, nn)
-	}
-	for _, ns := range []bool{false, true} {
-		res, err := Kalman(s.System(t, fzSysOpts{}), mqDense(m, m, qn), mqDense(p, p, rn), nnD, &RiccatiOpts{NoScaling: ns})
-		if err != nil {
-			if !errors.Is(err, ErrNoStabilizing) {
-				t.Fatalf("NoScaling %v: %v", ns, err)
-			}
-			continue
+	for _, v6 := range []float64{0, 89} {
+		v := [fzNVals]float64{0.26667, -1.5, 0.16667, 14, -35.4, 4, v6, -90, -0.0238, 91, 5.2, -73, 100, -58, 4.5, -170}
+		s := syKalmanSpec(fzDecode(t, 0xe9, v))
+		m, p := s.M, s.P
+		qn, rn, nn := syNoise(s, m, p)
+		var nnD *mat.Dense
+		if nn != nil {
+			nnD = mqDense(m, p, nn)
 		}
-		if res.Accuracy == 0 {
-			t.Fatalf("NoScaling %v: Accuracy 0", ns)
+		for _, ns := range []bool{false, true} {
+			res, err := Kalman(s.System(t, fzSysOpts{}), mqDense(m, m, qn), mqDense(p, p, rn), nnD, &RiccatiOpts{NoScaling: ns})
+			if err != nil {
+				if !errors.Is(err, ErrNoStabilizing) {
+					t.Fatalf("v6=%g NoScaling %v: %v", v6, ns, err)
+				}
+				continue
+			}
+			if res.Accuracy == 0 {
+				t.Fatalf("v6=%g NoScaling %v: Accuracy 0", v6, ns)
+			}
 		}
 	}
 }

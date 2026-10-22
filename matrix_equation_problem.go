@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"math"
 
+	"plantcontrol.org/v1/gonum/blas"
+	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/lapack"
+
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -144,10 +148,15 @@ func newLyapunovProblem(A, Q *mat.Dense, opts *LyapunovOpts) (lyapunovProblem, e
 }
 
 // scale replaces A, B, Q, S and E by their images under the exact
-// power-of-two state scaling x̂ = T·x that balances [|A|+|E| B; C ·], with
+// power-of-two state scaling x̂ = T·x that balances [|A|+|E| B̃; C ·], with
 // Q = C'C represented by the row √diag(Q) and S by S' (both transform like
 // C): Â = TAT⁻¹, Ê = TET⁻¹, B̂ = TB, Q̂ = T⁻¹QT⁻¹, Ŝ = T⁻¹S. R is unchanged.
-func (problem *riccatiProblem) scale(opts *RiccatiOpts) {
+// B̃ = B·U⁻¹ (R = UᵀU, so B̃B̃ᵀ = BR⁻¹Bᵀ) scaled to ‖C‖_F balances the
+// cost-scaled Hamiltonian [A, −σG; −Q/σ, −Aᵀ] at ‖σG‖ ≈ ‖Q/σ‖: B in place
+// of B̃ ignores R, and under cheap control (R ≪ BᵀXB) such a T leaves no
+// cost scale that deflates the pencil (3CVH7I). Without costProxy, or
+// with an R not positive definite or a zero C, it balances with B.
+func (problem *riccatiProblem) scale(opts *RiccatiOpts, costProxy bool) {
 	if opts != nil && opts.NoScaling {
 		return
 	}
@@ -180,11 +189,38 @@ func (problem *riccatiProblem) scale(opts *RiccatiOpts) {
 			}
 		}
 	}
+	if costProxy {
+		cn := impl.Dlange(lapack.Frobenius, p, n, br.c, n, nil)
+		rChol := ws.rChol[:m*m]
+		rRaw := problem.R.RawMatrix()
+		copyStrided(rChol, m, rRaw.Data, rRaw.Stride, m, m)
+		costProxy = cn > 0 && impl.Dpotrf(blas.Upper, m, rChol, m)
+		if costProxy {
+			bt := blas64.General{Rows: n, Cols: m, Data: br.b, Stride: m}
+			blas64.Trsm(blas.Right, blas.NoTrans, 1,
+				blas64.Triangular{Uplo: blas.Upper, Diag: blas.NonUnit, N: m, Data: rChol, Stride: m}, bt)
+			bn := impl.Dlange(lapack.Frobenius, n, m, br.b, m, nil)
+			costProxy = bn > 0 && !math.IsInf(bn, 0)
+			if costProxy {
+				blas64.Scal(cn/bn, blas64.Vector{N: n * m, Data: br.b, Inc: 1})
+			}
+		}
+		if !costProxy {
+			copyStrided(br.b, m, bRaw.Data, bRaw.Stride, n, m)
+		}
+	}
 	t := ws.scaleT[:n]
 	for i := range t {
 		t[i] = 1
 	}
 	br.balance(t)
+	if costProxy {
+		for i := range n {
+			for k := range m {
+				br.b[i*m+k] = bRaw.Data[i*bRaw.Stride+k] * t[i]
+			}
+		}
+	}
 	identity := true
 	for _, v := range t {
 		identity = identity && v == 1
