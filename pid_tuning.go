@@ -156,6 +156,18 @@ type pidTuningPlant struct {
 	// Nyquist count finds or cannot certify stable.
 	dcGain   float64
 	highGain complex128
+	// nyquistCount marks the strict count on sampled data under that
+	// default (pidTuningFRDStrictPlant), where a candidate the count
+	// cannot certify is rejected. When dcGain is 0, lowAnchor marks a low
+	// end G ≈ K·(jω)^lowOrder that anchors the count instead
+	// (pidTuningFRDLowOrder).
+	nyquistCount bool
+	lowAnchor    bool
+	lowOrder     int
+	// markov, if nonzero, is lim sG(s) that continuous sampled data show at
+	// their top (pidTuningFRDMarkov), and markovSpread its change over the
+	// top half decade.
+	markov, markovSpread float64
 	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
 	// 0 for none; tau is the loop delay in seconds that sets its grid step.
 	maxSensitivity, tau float64
@@ -3552,7 +3564,8 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 // since every derivative term vanishes there; with it |L(0)| is infinite.
 // At z = −1 each integrator dt·(1/(z−1) + w), w its formula's weight, is
 // dt·(w − ½), so the derivative term is Kd/(Tf + dt·(w − ½)), infinite
-// when that is 0.
+// when that is 0. An ideal derivative on continuous data showing
+// lim sG = p.markov ends at L(∞) = Kd·p.markov.
 func pidTuningEdgeSensitivity(p pidTuningPlant, c PID2) float64 {
 	peak := 0.
 	s := func(l complex128) {
@@ -3562,6 +3575,9 @@ func pidTuningEdgeSensitivity(p pidTuningPlant, c PID2) float64 {
 	}
 	if g := p.dcEdge; g != 0 && pidFiniteComplex(g) && c.Ki == 0 {
 		s(g * complex(c.Kp, 0))
+	}
+	if p.markov != 0 && c.Dt == 0 && c.Tf == 0 && c.Kd != 0 {
+		s(complex(c.Kd*p.markov, 0))
 	}
 	if g := p.nyquistEdge; g != 0 && pidFiniteComplex(g) && c.Dt > 0 {
 		k := c.Kp + c.Ki*c.Dt*(pidFormulaWeight(c.IFormula)-.5)
