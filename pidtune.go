@@ -66,7 +66,10 @@ const (
 // (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G); where the force
 // lapses or there is none, as for an ideal derivative large enough to flip
 // the closed-loop polynomial's leading coefficient or a stable plant with
-// zero DC gain, the other sign is tried when the first one fails. A
+// zero DC gain, the other sign is tried when the first one fails; one
+// against a force that holds there, 1 + L(∞) > 0 on a strictly proper
+// plant, is rejected as unstable (a real closed-loop root in [0, ∞), z ≥ 1,
+// which a Nyquist test can miss far below wc). A
 // design whose closed loop is unstable by its poles (delay absorbed for
 // discrete plants) or by a Nyquist test (continuous delays) is rejected;
 // loops outside both tests are not screened. With wc = 0 a design must
@@ -87,8 +90,7 @@ const (
 // delay, the crossover is raised the same
 // way up to three decades, below the Nyquist frequency, as PM grows with ω
 // there (P on 1/(s−1) keeps 60° at Kp = 2, ω = √3, above wc ≈ 1), else the
-// result is ErrPIDTuningTargetUnattainable. An automatic PD runs both
-// searches on the placed design before the legacy one. The gate accepts
+// result is ErrPIDTuningTargetUnattainable. The gate accepts
 // pm − 1.5° at every gain crossover, 58.5° for the default margin, an
 // explicit margin also holding to 0.5° at wc. On a loop the pole test
 // certifies stable, the margin at each
@@ -98,21 +100,24 @@ const (
 // margin at most −(pm − 1.5°), with |S| ≤ 4 passes on the classical margin when the
 // Nyquist test then certifies it stable, and keeps the signed failure where
 // that test does not apply (as for an ideal derivative on a relative-degree-1
-// plant, or internal delays). With wc = 0 a PD is placed on its Td/10
-// filtered response, |L(wc)| = 1 as MATLAB, falling back per step to the
-// legacy Td as for an explicit wc; when no step passes, the whole search
-// reruns with the legacy PD, which places phase and gain on the ideal
-// derivative (|L(wc)| ≠ 1), and when that fails too, with MATLAB's ideal PD
-// Kp + Kd·s (Tf = 0, backward-Euler derivative when discrete, so
-// PID.System returns ErrImproperModel for a continuous one), whose lead
-// reaches 90° where the Td/10 filter caps it at 56.4°. Otherwise the result
-// is ErrPIDTuningTargetUnattainable.
+// plant, or internal delays). A PD is MATLAB's ideal Kp + Kd·s (Tf = 0,
+// backward-Euler derivative when discrete; PID.System gives MATLAB's
+// descriptor model for a continuous one), whose lead, clamped to
+// [0.05 rad, π/2 − 0.05], is placed with |L(wc)| = 1; a back-off design
+// with an ideal derivative on a biproper plant, |L(j∞)| = ∞, fails the
+// level cap. When the whole search, or the design at an explicit wc, fails
+// with it, the result is that of the filtered PD: placed on its Td/10
+// filtered response, |L(wc)| = 1 as MATLAB, whose lead the filter caps at
+// 56.4°, falling back per step to the legacy Td; with wc = 0, when no step
+// passes, the whole search reruns with the legacy PD, which places phase
+// and gain on the ideal derivative (|L(wc)| ≠ 1). Otherwise the result is
+// ErrPIDTuningTargetUnattainable.
 // An explicit wc is honoured as in MATLAB: the design at wc is returned
 // whenever its closed loop passes the stability test (an unstable
-// forward-Euler filter aside), with |L(wc)| = 1 (a PD places its phase on
-// its Td/10 filtered response, clamped to [0.05 rad, its most lead], else,
-// when the most lead gives an unstable loop, keeps the Td of the automatic
-// design, which clamps phase on the ideal derivative), without back-off and
+// forward-Euler filter aside), with |L(wc)| = 1 (a filtered PD places its
+// phase on its Td/10 filtered response, clamped to [0.05 rad, its most
+// lead], else, when the most lead gives an unstable loop, keeps the Td of
+// the automatic design, which clamps phase on the ideal derivative), without back-off and
 // without checking the margin at other gain crossovers or |S| (the
 // achieved margins are the caller's to check, as with AllMargin); only an
 // unstable design, or an explicit phase margin unreachable at wc, returns
@@ -189,30 +194,28 @@ func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 
 // pipeline designs at r.wc, backing an automatic crossover off as
 // pidtuneBackoffPerDecade describes, then, when every step is
-// unattainable, raising it. An automatic PD runs both searches with
-// placedPD, |L(wc)| = 1 as MATLAB places the crossover, then with the
-// legacy design, whose gate keeps the designs placedPD cannot give; when
-// all of those are unattainable, both again with the ideal PD, returning
-// the filtered designs' error if it fails too.
+// unattainable, raising it. A PD first runs this with MATLAB's ideal PD
+// Kp + Kd·s; when that fails, it returns the filtered pipeline's result:
+// placedPD, |L(wc)| = 1 as MATLAB places the crossover, then the legacy
+// design, whose gate keeps the designs placedPD cannot give.
 func (r *pidtuneRun) pipeline(sign float64) (*PID, error) {
+	if r.pidType == PidtunePD {
+		if pid, err := r.searchedAll(sign, []pidtunePDMode{pidtunePDIdeal}); err == nil {
+			return pid, nil
+		}
+		return r.searchedAll(sign, []pidtunePDMode{pidtunePDPlaced, pidtunePDLegacy})
+	}
+	return r.searchedAll(sign, []pidtunePDMode{r.pd})
+}
+
+// searchedAll is searched for an automatic crossover and backedOff at the
+// first of modes otherwise.
+func (r *pidtuneRun) searchedAll(sign float64, modes []pidtunePDMode) (*PID, error) {
 	if !r.auto {
+		r.setPD(modes[0])
 		return r.backedOff(sign)
 	}
-	groups := [][]pidtunePDMode{{r.pd}}
-	if r.pidType == PidtunePD {
-		groups = [][]pidtunePDMode{{r.pd, pidtunePDLegacy}, {pidtunePDIdeal}}
-	}
-	var first error
-	for i, modes := range groups {
-		pid, err := r.searched(sign, modes)
-		if err == nil || i == 0 && !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-			return pid, err
-		}
-		if first == nil {
-			first = err
-		}
-	}
-	return nil, first
+	return r.searched(sign, modes)
 }
 
 // searched runs backedOff for each of modes, then raised for each.
@@ -395,8 +398,8 @@ type pidtuneRun struct {
 	fromPole bool
 	explicit bool
 	auto     bool
-	// pd is the PD design: placedPD, or the legacy one on pipeline's
-	// rerun.
+	// pd is the PD design: ideal, placedPD, or the legacy one on
+	// pipeline's rerun.
 	pd pidtunePDMode
 	// mirror tries the design against the chosen gain sign after the
 	// signed one fails.
@@ -442,12 +445,69 @@ func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (pid *PID,
 	lag = errors.Is(err, errPidtunePDFLag)
 	if r.mirror && errors.Is(err, ErrPIDTuningTargetUnattainable) && r.screened(wc) {
 		alt, altErr := r.signed(wc, -sign, gated, lagFloor)
+		if altErr == nil && r.mirrorUnstable(alt) {
+			altErr = &pidtuneUnstableError{pidType: r.pidType, wc: wc}
+		}
 		if altErr == nil {
 			return alt, false, nil
 		}
 		lag = lag || r.rule == pidtuneSignStable && errors.Is(altErr, errPidtunePDFLag)
 	}
 	return pid, lag, err
+}
+
+// mirrorUnstable returns whether pid, designed against a forced sign, is
+// certainly unstable. On a strictly proper plant without internal delays
+// the closed-loop characteristic P keeps the sign of a as s → +∞ (z → +∞)
+// when 1 + L(∞) > 0: always under a delay e^{−sτ}, a discrete loop or a
+// filtered derivative, and for a continuous delay-free ideal derivative when
+// 1 + Kd·CB > 0. When P(0)/a < 0 (Ki·N(0)/a, else (D(0) + Kp·N(0))/a, up
+// to a positive factor; z = 1 likewise), P has a real root in [0, ∞)
+// (z ≥ 1), delays e^{−sτ}, z^{−k} positive there; the Nyquist test can miss
+// one far below wc, as at a slow plant zero 5e-8 under a PI crossing at
+// 0.83. D(0) is used as computed, not as the forced sign's rounding test
+// saw it: Kp > 0 stabilizes G = (0.83s − 4.2e-8)/(s² + 4.6e-14) below
+// 1.1e-6, where Kp·N(0) cannot outweigh D(0).
+func (r *pidtuneRun) mirrorUnstable(pid *PID) bool {
+	p := r.plant
+	if r.rule != pidtuneSignForced || p.E != nil || p.HasInternalDelay() || p.D.At(0, 0) != 0 {
+		return false
+	}
+	if pid.Kd != 0 && pid.Tf == 0 && p.Dt == 0 && !p.HasDelay() {
+		n, _ := p.A.Dims()
+		cb := 0.0
+		for i := range n {
+			cb += p.C.At(0, i) * p.B.At(i, 0)
+		}
+		if !(1+pid.Kd*cb > 0) {
+			return false
+		}
+	}
+	res, err := p.rationalTransferFunction(nil)
+	if err != nil {
+		return false
+	}
+	num, den := res.TF.Num[0][0], res.TF.Den[0]
+	if len(num) == 0 || len(den) == 0 || den[0] == 0 {
+		return false
+	}
+	origin := func(q []float64) float64 {
+		if p.Dt == 0 {
+			return q[len(q)-1]
+		}
+		v := 0.0
+		for _, c := range q {
+			v += c
+		}
+		return v
+	}
+	n0, d0 := origin(num), origin(den)
+	p0, scale := pid.Ki*n0, math.Abs(pid.Ki*n0)
+	if pid.Ki == 0 {
+		p0, scale = d0+pid.Kp*n0, math.Abs(d0)+math.Abs(pid.Kp*n0)
+	}
+	p0 *= math.Copysign(1, den[0])
+	return finitePID(p0) && -p0 > 1e3*0x1p-52*scale
 }
 
 // screened returns whether checkPidtuneStability tests designs at wc: an
@@ -603,13 +663,17 @@ func (r *pidtuneRun) keepFirst(pid *PID, wc float64) {
 }
 
 // levelCapped rejects a continuous back-off design whose loop levels off at
-// |L(j∞)| above its cap, remembering the first rejection for Pidtune. L0 is
+// |L(j∞)| above its cap, an ideal derivative on a biproper plant's
+// unbounded one included, remembering the first rejection for Pidtune. L0 is
 // |D|/|G(j r.wc)| when no first gains exist or their level is unbounded, an
 // ideal derivative on a biproper plant.
 func (r *pidtuneRun) levelCapped(pid *PID, wc float64) error {
 	g := r.gateOf()
 	c := pidtuneGateController(pid)
-	_, _, lim := g.beyondLevel(&c)
+	lim := math.Inf(1)
+	if !(c.Kd != 0 && !(c.Tf > 0) && r.plant.D.At(0, 0) != 0) {
+		_, _, lim = g.beyondLevel(&c)
+	}
 	if math.IsNaN(lim) {
 		return nil
 	}
@@ -1522,7 +1586,7 @@ func (l *pidtuneLoop) buffers(n2 int) *pidtuneLoopBuffers {
 // l's buffers.
 func (l *pidtuneLoop) controller(c *PID2) (*System, error) {
 	if c.Dt != 0 || c.Kd != 0 || validatePID(c.Kp, c.Ki, c.Kd, c.Tf, c.Dt, c.IFormula, c.DFormula) != nil {
-		return (&PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}).System()
+		return (&PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}).explicitSystem()
 	}
 	l.cd.Set(0, 0, c.Kp)
 	if c.Ki == 0 {
@@ -2064,8 +2128,8 @@ type pidtunePDMode int
 
 const (
 	// pidtunePDLegacy: phase and gain placed on the ideal derivative, the
-	// Td/10 filter then added, so |L(wc)| ≠ 1; the automatic PD's fallback
-	// when every placed step fails.
+	// Td/10 filter then added, so |L(wc)| ≠ 1; the automatic filtered PD's
+	// fallback when every placed step fails.
 	pidtunePDLegacy pidtunePDMode = iota
 	// pidtunePDPlaced: phase and gain placed on the realized Td/10 response
 	// (placedPD).
@@ -2074,8 +2138,8 @@ const (
 	// realized response.
 	pidtunePDLegacyTd
 	// pidtunePDIdeal: MATLAB's PD, Kp + Kd·s (Tf = 0, backward-Euler
-	// derivative when discrete), |L(wc)| = 1; the automatic PD's last
-	// fallback when both filtered designs fail.
+	// derivative when discrete), |L(wc)| = 1; Pidtune's first PD design,
+	// the filtered ones its fallback.
 	pidtunePDIdeal
 )
 

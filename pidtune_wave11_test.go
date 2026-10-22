@@ -102,10 +102,12 @@ func pidtuneLevelOracle(pid *PID, num, den Poly) float64 {
 // with a delay) and has |L| = 1 within 1e-6 at a back-off step
 // wc·10^(−k/20), k ≥ −60 for the upward search (OQWQKF), on its realized
 // response (placed, |S| ≤ 4 as the gate) or on its ideal derivative
-// (legacy); most are placed. Every return keeps 58.5° at every crossover.
+// (legacy); since G6APMO most are MATLAB's ideal Kp + Kd·s (Tf = 0), placed
+// with |S| ≤ 4 as the gate, the filtered designs their fallback. Every
+// return keeps 58.5° at every crossover.
 func TestPidtuneAutoPDPlaced(t *testing.T) {
 	rng := rand.New(rand.NewPCG(11, 13))
-	placed, legacy := 0, 0
+	ideals, placed, legacy := 0, 0, 0
 	for trial := range 600 {
 		num, den, dt, delay := pidtuneAutoPDPlant(rng, trial)
 		p := pidtuneBackoffPlant(t, num, den, dt, delay)
@@ -131,6 +133,8 @@ func TestPidtuneAutoPDPlaced(t *testing.T) {
 		for k := -pidtuneBackoffPerDecade * pidtuneRaiseDecades; k <= 20*pidtuneBackoffMaxDecade && kind == ""; k++ {
 			w := wc * math.Pow(10, -float64(k)/pidtuneBackoffPerDecade)
 			switch {
+			case math.Abs(cmplx.Abs(L(w))-1) < 1e-6 && pid.Tf == 0:
+				kind = "ideal"
 			case math.Abs(cmplx.Abs(L(w))-1) < 1e-6:
 				kind = "placed"
 			case math.Abs(cmplx.Abs(Li(w))-1) < 1e-6:
@@ -148,8 +152,12 @@ func TestPidtuneAutoPDPlaced(t *testing.T) {
 			}
 		}
 		switch kind {
-		case "placed":
-			placed++
+		case "ideal", "placed":
+			if kind == "ideal" {
+				ideals++
+			} else {
+				placed++
+			}
 			if _, ms := pidtuneSignedMargins(L, 1e-7, wMax); ms > pidTuningMaxSensitivity+0.05 {
 				t.Errorf("%s: placed %+v |S| peak %.3g", name, pid, ms)
 			}
@@ -159,9 +167,9 @@ func TestPidtuneAutoPDPlaced(t *testing.T) {
 			t.Errorf("%s: %+v has |L| ≠ 1 at every search step", name, pid)
 		}
 	}
-	t.Logf("placed %d, legacy %d", placed, legacy)
-	if placed < 300 || legacy == 0 || placed < 4*legacy {
-		t.Errorf("placed %d, legacy %d", placed, legacy)
+	t.Logf("ideal %d, placed %d, legacy %d", ideals, placed, legacy)
+	if ideals < 300 || placed == 0 || ideals < 2*(placed+legacy) {
+		t.Errorf("ideal %d, placed %d, legacy %d", ideals, placed, legacy)
 	}
 }
 

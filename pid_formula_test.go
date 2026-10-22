@@ -91,8 +91,8 @@ func TestPIDIdealDerivativeAndValidation(t *testing.T) {
 			t.Fatalf("ideal derivative %v != %v", h.At(0, 0, 0), want)
 		}
 	}
-	if _, err := mustPID(t, 1, 0, 1, 0, 0).System(); err == nil {
-		t.Fatal("continuous ideal derivative must be explicit improper error")
+	if _, err := mustPID(t, 1, 0, 1, 0, 0).explicitSystem(); !errors.Is(err, ErrImproperModel) {
+		t.Fatal("continuous ideal derivative must be an explicit-realization improper error")
 	}
 	for _, p := range []*PID{{Kp: math.NaN()}, {Kp: 1, Dt: -1}, {Kp: 1, Tf: -1}, {Kp: 1, IFormula: 7}} {
 		if _, err := p.System(); !errors.Is(err, ErrInvalidArgument) {
