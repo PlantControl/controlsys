@@ -95,6 +95,9 @@ func exactBoundaryUncontrollable(rng *rand.Rand, jb [][]int64) (A, B, Q *mat.Den
 // band of n·eps·|λ| missed (Accuracy 1 X on about a quarter of these, its
 // exact closed loop not stable); the componentwise eigenvalue error band
 // and the Jordan cluster mean catch them. The two review repros are named.
+// boundaryUnstabilizable is asserted directly too: whether Care reaches it
+// depends on rounding (zero1 returned Accuracy 1 under -race on amd64
+// CI), and its verdict must not.
 func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 	type tcase struct {
 		name       string
@@ -141,6 +144,11 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 				res, err = Care(tc.A, tc.B, tc.Q, R, opts)
 			} else {
 				res, err = Dare(tc.A, tc.B, tc.Q, R, opts)
+			}
+			if problem, perr := newRiccatiProblem(tc.A, tc.B, tc.Q, R, opts); perr != nil {
+				t.Errorf("%s NoScaling %v: %v", tc.name, ns, perr)
+			} else if !problem.boundaryUnstabilizable(tc.continuous) {
+				t.Errorf("%s NoScaling %v: boundaryUnstabilizable false", tc.name, ns)
 			}
 			if err == nil {
 				t.Errorf("%s NoScaling %v: Accuracy %d X, want ErrNoStabilizing", tc.name, ns, res.Accuracy)

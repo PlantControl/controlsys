@@ -780,10 +780,11 @@ var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on the stability boundary
 // [A − λE, B] has rank below n by the PBH test: no stabilizing solution
 // exists (icare/idare Report 3), and an Accuracy 1 X would be stable only
 // to rounding, its exact closed loop unstable (K72KOR). Within rounding
-// is 10× the componentwise first-order bound τ = n·eps·(|y|ᵀ|A||x| +
-// |λ|·|y|ᵀ|E||x|)/|yᴴEx| of λ's error (x, y its right and left
-// eigenvectors): an exact mode at 0 or 1 of a dense A, computed eps·‖A‖·κ
-// off, is tested, while a mode at −3e-16 that is an exact diagonal entry
+// is 10× the first-order bound τ = (n·eps·(|y|ᵀ|A||x| + |λ|·|y|ᵀ|E||x|)
+// + |y|ᵀ|(A − λE)x|)/|yᴴEx| of λ's error (x, y its right and left
+// eigenvectors): componentwise rounding plus the residual, which carries
+// QZ's backward error, so an exact mode at 0 or 1 of a dense A, computed
+// eps·‖A‖·κ off, is tested whatever the rounding (zero1 under -race), while a mode at −3e-16 that is an exact diagonal entry
 // of a triangular A is known to relative eps and stays stable (BWUCB5),
 // as does a lightly damped mode at −3e-9 ± i. PBH rank is σmin ≤
 // n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖ + τ‖E‖. A mode in a Jordan block with a
@@ -869,23 +870,25 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 				x[i], y[i] = complex(vr[i*n+kk], vr[i*n+kk+1]), complex(vl[i*n+kk], vl[i*n+kk+1])
 			}
 		}
-		var ya, ye float64
+		var ya, ye, yr float64
 		var yex complex128
 		for i := range n {
 			var ra, re float64
-			var ex complex128
+			var ax, ex complex128
 			for j := range n {
 				ra += math.Abs(a[i*n+j]) * cmplx.Abs(x[j])
 				re += math.Abs(e[i*n+j]) * cmplx.Abs(x[j])
+				ax += complex(a[i*n+j], 0) * x[j]
 				ex += complex(e[i*n+j], 0) * x[j]
 			}
 			ay := cmplx.Abs(y[i])
 			ya += ay * ra
 			ye += ay * re
+			yr += ay * cmplx.Abs(ax-lam*ex)
 			yex += cmplx.Conj(y[i]) * ex
 		}
 		mod := cmplx.Abs(lam)
-		tol := 10 * nf * ep * (ya + mod*ye) / cmplx.Abs(yex)
+		tol := 10 * (nf*ep*(ya+mod*ye) + yr) / cmplx.Abs(yex)
 		rho := max(math.Sqrt(ep)*(an+mod*en), tol)
 		var mean complex128
 		count, gap := 0, math.Inf(1)
