@@ -530,8 +530,10 @@ func TestPoles_SingularEStiffFinitePole(t *testing.T) {
 // rounding of the infinite one. deflateInfinite and certifyFiniteRetained
 // counted it infinite and Poles dropped it, flipping IsStable to true
 // (seed 133: 5.815e9, σ(E) = [5.33 2.40 0.811 4.47e-12 4.2e-17]), though QZ
-// resolves it. The oracle is fd[i]/wd[i] of A = U·diag(fd)·V,
-// E = U·diag(wd)·V, cross-checked by eig(A⁻¹E). IOAGOI, 7YDREH.
+// resolves it (to ~ε·σ₁/σ₄ = 2.6e-4 relative, so 1e-3). The oracle is
+// fd[i]/wd[i] of A = U·diag(fd)·V, E = U·diag(wd)·V, cross-checked by
+// eig(A⁻¹E). The sweep skips draws whose σ_{n−1}(E) is within 1e3 of the
+// rounding-level σ_n, which platform rounding cannot resolve. IOAGOI, 7YDREH.
 func TestPoles_SingularEStiffPoleBelowRankTol(t *testing.T) {
 	A := mat.NewDense(5, 5, []float64{
 		0.4675311111576671, -0.5931120945789171, 1.433070852940676, 0.1599723399916213, 0.861136527451669,
@@ -562,7 +564,7 @@ func TestPoles_SingularEStiffPoleBelowRankTol(t *testing.T) {
 			want = append(want, 1/mu)
 		}
 	}
-	assertEigSetNear(t, "oracle eig(A⁻¹E)", want, []complex128{stiff, -0.28865, -0.57522, -0.76151}, 1e-4)
+	assertEigSetNear(t, "oracle eig(A⁻¹E)", want, []complex128{stiff, -0.28865, -0.57522, -0.76151}, 1e-3)
 	sys, err := NewDescriptor(A, mat.NewDense(5, 1, nil), mat.NewDense(1, 5, nil), mat.NewDense(1, 1, nil), E, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -571,7 +573,7 @@ func TestPoles_SingularEStiffPoleBelowRankTol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertEigSetNear(t, "seed 133", poles, want, 1e-4)
+	assertEigSetNear(t, "seed 133", poles, want, 1e-3)
 	if st, err := sys.IsStable(); err != nil || st {
 		t.Errorf("seed 133: IsStable = %v, %v, want false", st, err)
 	}
@@ -582,7 +584,7 @@ func TestPoles_SingularEStiffPoleBelowRankTol(t *testing.T) {
 	if poles, err = res.Unstable.Poles(); err != nil {
 		t.Fatal(err)
 	}
-	assertEigSetNear(t, "seed 133 unstable", poles, []complex128{want[slices.IndexFunc(want, func(p complex128) bool { return real(p) > 0 })]}, 1e-4)
+	assertEigSetNear(t, "seed 133 unstable", poles, []complex128{want[slices.IndexFunc(want, func(p complex128) bool { return real(p) > 0 })]}, 1e-3)
 
 	for seed := range uint64(300) {
 		rng := rand.New(rand.NewPCG(seed, 8))
@@ -615,7 +617,10 @@ func TestPoles_SingularEStiffPoleBelowRankTol(t *testing.T) {
 			t.Fatal("svd failed")
 		}
 		sv := svd.Values(nil)
-		tol := math.Max(1e-7, 100*eps()*sv[0]/sv[n-2])
+		if sv[n-2] < 1e3*sv[n-1] {
+			continue
+		}
+		tol := math.Max(1e-6, 1e3*eps()*sv[0]/sv[n-2])
 		sys, err := NewDescriptor(&A, mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil), mat.NewDense(1, 1, nil), &E, 0)
 		if err != nil {
 			t.Fatal(err)
