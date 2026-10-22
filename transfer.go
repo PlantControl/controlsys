@@ -62,6 +62,20 @@ func (tf *TransferFunc) validateShape() (p, m int, err error) {
 	return p, m, nil
 }
 
+func (tf *TransferFunc) validateFiniteCoeffs() error {
+	for i, den := range tf.Den {
+		if !finiteSlice(den) {
+			return fmt.Errorf("denominator %d has non-finite coefficients: %w", i, ErrInvalidArgument)
+		}
+		for j, num := range tf.Num[i] {
+			if !finiteSlice(num) {
+				return fmt.Errorf("numerator (%d,%d) has non-finite coefficients: %w", i, j, ErrInvalidArgument)
+			}
+		}
+	}
+	return nil
+}
+
 // Eval evaluates the frequency response H(s) at the complex point s, as
 // MATLAB evalfr(sys, s). Delays contribute exp(-s·tau) (continuous) or
 // s^-tau (discrete, tau whole samples). A malformed model returns an error.
@@ -1303,8 +1317,9 @@ type StateSpaceResult struct {
 // StateSpace returns an observable-companion realization with one block per
 // output row, as MATLAB ss(tf) (SLICOT TD04AD); like MATLAB it is not
 // reduced to minimal order. A malformed or empty model returns
-// ErrDimensionMismatch, an improper one ErrImproperTF and a zero leading
-// denominator coefficient ErrSingularDenom.
+// ErrDimensionMismatch, a NaN or Inf coefficient ErrInvalidArgument, an
+// improper one ErrImproperTF and a zero leading denominator coefficient
+// ErrSingularDenom.
 func (tf *TransferFunc) StateSpace() (*StateSpaceResult, error) {
 	res, err := tf.stateSpace()
 	if err != nil {
@@ -1320,6 +1335,9 @@ func (tf *TransferFunc) stateSpace() (*StateSpaceResult, error) {
 	}
 	if p == 0 || m == 0 {
 		return nil, fmt.Errorf("model has %d outputs and %d inputs: %w", p, m, ErrDimensionMismatch)
+	}
+	if err := tf.validateFiniteCoeffs(); err != nil {
+		return nil, err
 	}
 	if !tf.isProper() {
 		return nil, ErrImproperTF

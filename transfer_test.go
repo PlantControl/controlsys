@@ -863,6 +863,11 @@ func TestTransferFuncStateSpaceInvalidModels(t *testing.T) {
 		{"empty", &TransferFunc{}, ErrDimensionMismatch},
 		{"ragged", &TransferFunc{Num: [][][]float64{{{1}, {1}}}, Den: [][]float64{{1, 1}, {1, 2}}}, ErrDimensionMismatch},
 		{"nil", nil, ErrInvalidArgument},
+		{"Inf num and den lead", &TransferFunc{Num: [][][]float64{{{math.Inf(1), 1}}}, Den: [][]float64{{math.Inf(1), 1}}}, ErrInvalidArgument},
+		{"Inf den lead", &TransferFunc{Num: [][][]float64{{{1, 2, 1}}}, Den: [][]float64{{math.Inf(1), 1, 1}}}, ErrInvalidArgument},
+		{"NaN den tail", &TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{1, math.NaN()}}}, ErrInvalidArgument},
+		{"-Inf num MIMO", &TransferFunc{Num: [][][]float64{{{1}, {math.Inf(-1), 2}}}, Den: [][]float64{{1, 3}}}, ErrInvalidArgument},
+		{"NaN static", &TransferFunc{Num: [][][]float64{{{math.NaN()}}}, Den: [][]float64{{1}}}, ErrInvalidArgument},
 	}
 	for _, tc := range cases {
 		_, err := tc.tf.StateSpace()
