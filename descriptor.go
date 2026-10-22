@@ -161,8 +161,14 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 }
 
 // generalizedPoles computes the finite eigenvalues of the pencil (A, E)
-// via the QZ algorithm (DGGES). Infinite eigenvalues (beta=0) are excluded.
+// via the QZ algorithm (DGGES), leaving out the infinite ones as MATLAB pole
+// does. QZ returns those with rounding-level β rather than 0, so the
+// Stabsep test |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ decides them. A large remaining
+// pole is dropped as well when certifyFiniteRetained proves it one of the
+// n − rank(E) infinite eigenvalues of an index-1 pencil; one it cannot
+// classify is kept.
 func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
+	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
 	aData := make([]float64, n*n)
 	eData := make([]float64, n*n)
 	aRaw := A.RawMatrix()
@@ -187,14 +193,55 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
 	}
 
+	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
+	if tol := finitePoleInfTol(A, E, n, alphar, alphai, beta, infTol, normA, normE); tol > 0 {
+		infTol = tol
+	}
 	poles := make([]complex128, 0, n)
 	for i := range n {
-		if beta[i] == 0 {
+		if qzInfinite(alphar[i], alphai[i], beta[i], infTol) {
 			continue
 		}
 		poles = append(poles, complex(alphar[i]/beta[i], alphai[i]/beta[i]))
 	}
 	return poles, nil
+}
+
+// finitePoleInfTol returns the |β|/|α| bound of certifyFiniteRetained when
+// an eigenvalue that infTol keeps is large and certified infinite, else 0.
+func finitePoleInfTol(A, E *mat.Dense, n int, alphar, alphai, beta []float64, infTol, normA, normE float64) float64 {
+	largeTol := qzInfiniteTol(qzLargeRatio, normA, normE)
+	large := false
+	ninf := 0
+	for i := range n {
+		switch {
+		case qzInfinite(alphar[i], alphai[i], beta[i], infTol):
+			ninf++
+		case qzInfinite(alphar[i], alphai[i], beta[i], largeTol):
+			large = true
+		}
+	}
+	if !large {
+		return 0
+	}
+	buf := make([]float64, 3*n)
+	ar, ai, b := buf[:n], buf[n:2*n], buf[2*n:]
+	front, back := 0, n-ninf
+	for i := range n {
+		j := front
+		if qzInfinite(alphar[i], alphai[i], beta[i], infTol) {
+			j = back
+			back++
+		} else {
+			front++
+		}
+		ar[j], ai[j], b[j] = alphar[i], alphai[i], beta[i]
+	}
+	tol, err := certifyFiniteRetained(A, E, n, n-ninf, ninf, ar, ai, b, largeTol, normA)
+	if err != nil {
+		return 0
+	}
+	return tol
 }
 
 // blkDiagDescriptorE returns the descriptor matrix of parts whose states are

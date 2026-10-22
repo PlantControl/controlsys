@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -145,13 +146,11 @@ func assertStabsepMatchesFinite(t *testing.T, label string, w weierstrassDescrip
 	}
 }
 
-// TestStabsep_SingularERoundingBetaInfinite: for a continuous descriptor
-// with E = U·blkdiag(J, 0)·V (σ_min(E) = 9.3e-18), QZ returned the
-// infinite eigenvalue with a rounding-level β instead of 0, and Stabsep
-// kept it as the stable pole −2.67e32: Stable(0.3+0.7i) = −8.86e15, true
-// G = −2.34−0.92i. MATLAB treats |β| ≤ tol·|α| as infinite. The oracle is
-// eig(J⁻¹H) = {−0.744±1.438i, 2.063±0.851i} and (sE − A)⁻¹. 4U3MDS.
-func TestStabsep_SingularERoundingBetaInfinite(t *testing.T) {
+// roundingBetaDescriptor returns the 4U3MDS descriptor, E = U·blkdiag(J, 0)·V
+// with σ_min(E) = 9.3e-18, whose finite poles are eig(J⁻¹H) =
+// {−0.744±1.438i, 2.063±0.851i}.
+func roundingBetaDescriptor(t *testing.T) *System {
+	t.Helper()
 	A := mat.NewDense(5, 5, []float64{
 		0.026574501752449863, -1.5203787643976214, 0.501363382935057, 1.002190557270059, -0.0485236295158988,
 		1.3961142690519968, -0.6126382415079216, -1.0129535006412997, -0.006343432541636995, 0.10365788307260332,
@@ -172,6 +171,17 @@ func TestStabsep_SingularERoundingBetaInfinite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return sys
+}
+
+// TestStabsep_SingularERoundingBetaInfinite: for a continuous descriptor
+// with E = U·blkdiag(J, 0)·V (σ_min(E) = 9.3e-18), QZ returned the
+// infinite eigenvalue with a rounding-level β instead of 0, and Stabsep
+// kept it as the stable pole −2.67e32: Stable(0.3+0.7i) = −8.86e15, true
+// G = −2.34−0.92i. MATLAB treats |β| ≤ tol·|α| as infinite. The oracle is
+// eig(J⁻¹H) = {−0.744±1.438i, 2.063±0.851i} and (sE − A)⁻¹. 4U3MDS.
+func TestStabsep_SingularERoundingBetaInfinite(t *testing.T) {
+	sys := roundingBetaDescriptor(t)
 	res, err := Stabsep(sys)
 	if err != nil {
 		t.Fatal(err)
@@ -296,5 +306,93 @@ func TestStabsep_SingularEStiffFinitePole(t *testing.T) {
 				t.Fatalf("seed %d: sum(%v) = %v, want %v", seed, s, got, want)
 			}
 		}
+	}
+}
+
+// TestPoles_SingularERoundingBetaInfinite: Poles and IsStable of
+// singular-E descriptors whose infinite eigenvalues QZ returns with
+// rounding-level β. Poles skipped only β == 0 and listed them as finite
+// poles such as 3.94e15 (seed 5) or 1e12–1e13 (general U, V); MATLAB pole
+// leaves infinite poles out. The oracle is eig(J⁻¹H) of the Weierstrass
+// form. IOAGOI.
+func TestPoles_SingularERoundingBetaInfinite(t *testing.T) {
+	sys := roundingBetaDescriptor(t)
+	poles, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEigSetNear(t, "4U3MDS", poles, []complex128{
+		complex(-0.743589820135963, 1.4379014276730409), complex(-0.743589820135963, -1.4379014276730409),
+		complex(2.063, 0.851), complex(2.063, -0.851),
+	}, 2e-3)
+	res, err := Stabsep(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poles, err = res.Unstable.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEigSetNear(t, "4U3MDS unstable", poles, []complex128{complex(2.063, 0.851), complex(2.063, -0.851)}, 2e-3)
+
+	for _, orth := range []bool{true, false} {
+		for seed := range uint64(400) {
+			rng := rand.New(rand.NewPCG(seed, 5))
+			r, d := 2+rng.IntN(5), 1+rng.IntN(3)
+			w := newWeierstrassDescriptor(seed, r, d, false, orth)
+			if _, err := w.sys.ToExplicit(); err == nil {
+				continue
+			}
+			var eig mat.Eigen
+			if !eig.Factorize(w.finite.A, mat.EigenNone) {
+				t.Fatal("eig failed")
+			}
+			want := eig.Values(nil)
+			poles, err := w.sys.Poles()
+			if err != nil {
+				t.Fatalf("orth %v seed %d: %v", orth, seed, err)
+			}
+			assertEigSetNear(t, fmt.Sprintf("orth %v seed %d", orth, seed), poles, want, 1e-6)
+			stable := true
+			for _, p := range want {
+				stable = stable && real(p) < 0
+			}
+			got, err := w.sys.IsStable()
+			if err != nil || got != stable {
+				t.Fatalf("orth %v seed %d: IsStable = %v, %v, want %v", orth, seed, got, err, stable)
+			}
+		}
+	}
+}
+
+// TestPoles_SingularEStiffFinitePole: a genuine finite pole of norm-scaled
+// modulus 1e6 beside an index-1 infinite mode stays a pole.
+func TestPoles_SingularEStiffFinitePole(t *testing.T) {
+	for seed := range uint64(20) {
+		rng := rand.New(rand.NewPCG(seed, 7))
+		n := 5
+		F := mat.NewDiagDense(n, []float64{-1, -2, 0.5, 3, 1})
+		W := mat.NewDiagDense(n, []float64{1e-6, 1, 1, 1, 0})
+		U, V := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+		for i := range n {
+			for j := range n {
+				U.Set(i, j, rng.NormFloat64())
+				V.Set(i, j, rng.NormFloat64())
+			}
+		}
+		var T, A, E mat.Dense
+		T.Mul(U, F)
+		A.Mul(&T, V)
+		T.Mul(U, W)
+		E.Mul(&T, V)
+		sys, err := NewDescriptor(&A, mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil), mat.NewDense(1, 1, nil), &E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		poles, err := sys.Poles()
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEigSetNear(t, fmt.Sprintf("seed %d", seed), poles, []complex128{-1e6, -2, 0.5, 3}, 1e-6)
 	}
 }
