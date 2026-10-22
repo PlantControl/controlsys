@@ -164,6 +164,14 @@ type pidTuningPlant struct {
 	nyquistCount bool
 	lowAnchor    bool
 	lowOrder     int
+	// lowAnchored marks a dcGain sampled at ω = 0 rather than extrapolated
+	// from the band; topOrder, when topAnchored, is the order n of a high
+	// end G ≈ K·(jω)^n that continuous data establish
+	// (pidTuningFRDTopOrder). The strict count certifies only loops whose
+	// ends both anchor so.
+	lowAnchored bool
+	topOrder    int
+	topAnchored bool
 	// markov, if nonzero, is lim sG(s) that continuous sampled data show at
 	// their top (pidTuningFRDMarkov), and markovSpread its change over the
 	// top half decade.

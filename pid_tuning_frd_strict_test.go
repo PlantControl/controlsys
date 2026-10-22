@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -27,6 +28,21 @@ func pidFRDStrictData(t *testing.T, num, den []float64, dt, lo, hi float64, n in
 		t.Fatal(err)
 	}
 	return frd
+}
+
+// pidFRDStrictWithDC is frd with the exact sample of num/den at ω = 0
+// prepended.
+func pidFRDStrictWithDC(t *testing.T, frd *FRD, num, den []float64) *FRD {
+	t.Helper()
+	x := complex128(0)
+	if frd.Dt > 0 {
+		x = 1
+	}
+	out, err := NewFRD(append([][][]complex128{{{pidPolyAt(num, x) / pidPolyAt(den, x)}}}, frd.Response...), append([]float64{0}, frd.Omega...), frd.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // pidFRDStrictStable is the exact closed-loop stability of c on num/den:
@@ -62,7 +78,10 @@ type pidFRDStrictCase struct {
 // −0.82 that lifts |L| above 1 before Nyquist; an ideal derivative on
 // continuous data stopping a decade below a far zero; and forward-Euler
 // ideal derivatives on biproper discrete plants, whose pole at z = ∞ the
-// data cannot show. The strict count must not certify any of them; each
+// data cannot show; an ideal PD on an integrator behind a nonminimum-phase
+// zero 80 times below the band, whose flat look was taken for a DC gain
+// (#11); and a PIDF on data stopping 1.5 times below a zero, whose top was
+// taken to roll off (#12). The strict count must not certify any of them; each
 // may still be returned, uncertified and so warned, as the looser count
 // did. Oracles: companion roots and exact Schur–Cohn.
 func TestPIDTuningFRDStrictCountRejectsUnknownEnds(t *testing.T) {
@@ -77,6 +96,8 @@ func TestPIDTuningFRDStrictCountRejectsUnknownEnds(t *testing.T) {
 		{"ideal derivative below a far zero", []float64{-0.9043089425627748, -1256.883521757146, -389.6467771092301}, []float64{1, 6.820830968278832, 34.526396140064016}, 0, 1.3086639769123847, 147.87950751653452, 271, PidtunePD, PIDTuningOptions{PhaseMargin: 30}, PID2{Kp: -0.000531, Kd: 0.00076}},
 		{"forward-Euler ideal PD", []float64{3.393044303813305, -0.27295347658179514, -3.3082691822417116, 0.16753894363629457}, []float64{1, -1.6457107028224587, 0.3553134944360514, 0.29046578031903075}, 0.1, 0.2162, 11.67, 365, PidtunePD, PIDTuningOptions{PhaseMargin: 45, IFormula: Trapezoidal}, PID2{Kp: 0.012539442669882746, Kd: -0.018758771811151466, Dt: 0.1, IFormula: Trapezoidal}},
 		{"forward-Euler ideal PID", []float64{1.1165872865935105, -0.8967939326027657, 0.05725857765328797}, []float64{1, -1.099536361782705, 0.16610723397810698}, 1, 0.0013434142960855107, 3.0216239262734725, 218, PidtunePID, PIDTuningOptions{}, PID2{Kp: 0.002589, Ki: 0.018529, Kd: -0.059611, Dt: 1}},
+		pidFRDHiddenNMPIntegrator,
+		pidFRDShortTop,
 	} {
 		frd := pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n)
 		k := c.k
@@ -157,30 +178,109 @@ func pidFRDStrictPeak(num, den []float64, dt float64, c PID2, lo float64) float6
 	return peak
 }
 
-// On these data the looser count returned unstable loops; the strict count
-// certifies stable designs instead: a forward-Euler derivative pole near
-// z = −1 that lifts |L| past the data (base returned Kp −0.139 unstable)
-// and a biproper discrete plant on which base returned a forward-Euler
-// ideal PID with a closed-loop root at z = 15.8. Oracle: exact
-// Schur–Cohn.
-func TestTunePIDFRDStrictCertifiesStableDesigns(t *testing.T) {
+// #11 and #12: data on which the strict count certified unstable loops.
+var (
+	pidFRDHiddenNMPIntegrator = pidFRDStrictCase{"hidden NMP integrator", []float64{5.887909685908595, -0.22177996919354104}, []float64{1, 19.084760080327086, 0}, 0, 2.9975772244616192, 110.92050700065798, 141, PidtunePD, PIDTuningOptions{}, PID2{Kp: 3.597588165638652, Kd: -0.11915608313294526}}
+	pidFRDShortTop            = pidFRDStrictCase{"top short of a zero", []float64{-0.4156058126006063, -0.7551548371911957}, []float64{1, 114.20727027161044, 4604.154939900912}, 0, 0.01042111217302736, 1.1785809567972114, 300, PidtunePIDF, PIDTuningOptions{}, PID2{Kp: 3347.8068011369137, Ki: -672.1489827804135, Kd: -8158.033287328667, Tf: 2.9586115757568936}}
+)
+
+// Certification needs anchored ends: a DC gain sampled at ω = 0, not
+// extrapolated from the band, and data reaching the loop's end above it.
+// #11's integrator has no finite DC sample, and #12 stops below its zero
+// with or without one, so neither may come back certified; a design they
+// return carries the warning, or the call fails. Oracle: companion roots.
+func TestTunePIDFRDCertificationNeedsAnchoredEnds(t *testing.T) {
+	for _, c := range []pidFRDStrictCase{pidFRDHiddenNMPIntegrator, pidFRDShortTop} {
+		frds := []*FRD{pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n)}
+		if c.den[len(c.den)-1] != 0 {
+			frds = append(frds, pidFRDStrictWithDC(t, frds[0], c.num, c.den))
+		}
+		for i, frd := range frds {
+			k := c.k
+			k.B, k.C = 1, 1
+			p, _ := pidTuningFRDStrictPlant(frd, nil)
+			if p.lowAnchored != (i == 1) {
+				t.Errorf("%s %d: low anchored %v", c.name, i, p.lowAnchored)
+			}
+			if stable, known := pidTuningFRDNyquistCount(k, p); stable && known {
+				t.Errorf("%s %d: strict count certifies unstable %+v", c.name, i, k)
+			}
+			r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+			if err != nil {
+				continue
+			}
+			got := *r.Controller
+			stable, known := pidTuningFRDNyquistCount(got, p)
+			if !pidHasWarning(r, "not certified") != (stable && known) {
+				t.Errorf("%s %d: count %v %v, warnings %q", c.name, i, stable, known, r.Evidence.Warnings)
+			}
+			if !pidHasWarning(r, "not certified") && !pidFRDStrictStable(c.num, c.den, got) {
+				t.Errorf("%s %d: unstable %+v returned as certified", c.name, i, got)
+			}
+		}
+	}
+}
+
+// The looser count's designs here, which base returned, the strict count
+// finds unstable, and certifies none: a PD on a stable fourth-order plant
+// and a PI on an integrator. The call fails rather than return them
+// warned. Oracle: companion roots.
+func TestTunePIDFRDFailsProvenUnstableFallback(t *testing.T) {
 	for _, c := range []pidFRDStrictCase{
-		{"derivative pole near −1", []float64{-1.3448981227532175}, []float64{1, -1.5811862552962634, 0.8405266355392914, -0.2593403802430281}, 0.1, 0.5184154210153508, 17.34960121464623, 422, PidtunePIDF, PIDTuningOptions{PhaseMargin: 60, IFormula: BackwardEuler}, PID2{}},
-		{"biproper PID", []float64{1.1165872865935105, -0.8967939326027657, 0.05725857765328797}, []float64{1, -1.099536361782705, 0.16610723397810698}, 1, 0.0013434142960855107, 3.0216239262734725, 218, PidtunePID, PIDTuningOptions{}, PID2{}},
+		{"stable PD", []float64{1.9069932277433254e-05}, []float64{1, 0.025199971874419462, 0.0011256420978643122, 1.0718595210231957e-05, 1.8479606353999822e-07}, 0, 0.0031957940883252326, 0.7111971289538478, 131, PidtunePD, PIDTuningOptions{}, PID2{Kp: -0.17017809052904345, Kd: -1.628104076156004}},
+		{"integrator PI", []float64{572.2142240918271}, []float64{1, 60.73564696214835, 0}, 0, 3.267325748040892, 567.6764400557765, 162, PidtunePI, PIDTuningOptions{PhaseMargin: 60}, PID2{Kp: 5.543879041148438, Ki: -34.96722874113392}},
 	} {
-		frd := pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
-		if err != nil {
-			t.Errorf("%s: %v", c.name, err)
-			continue
+		k := c.k
+		k.B, k.C = 1, 1
+		if pidFRDStrictStable(c.num, c.den, k) {
+			t.Fatalf("%s: oracle finds %+v stable", c.name, k)
 		}
-		k := *r.Controller
-		p, _ := pidTuningFRDStrictPlant(frd, nil)
-		if stable, known := pidTuningFRDNyquistCount(k, p); !stable || !known || pidHasWarning(r, "not certified") {
-			t.Errorf("%s: %+v not certified: %v %v", c.name, k, stable, known)
+		r, err := TunePIDFRD(context.Background(), pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.family, c.o)
+		if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			t.Errorf("%s: %v, %v; want ErrPIDTuningTargetUnattainable", c.name, r, err)
 		}
-		if !pidFRDStrictStable(c.num, c.den, k) {
-			t.Errorf("%s: %+v unstable", c.name, k)
+	}
+}
+
+// On these data the looser count returned unstable loops; the strict
+// count's designs are stable: a forward-Euler derivative pole near z = −1
+// that lifts |L| past the data (base returned Kp −0.139 unstable) and a
+// biproper discrete plant on which base returned a forward-Euler ideal PID
+// with a closed-loop root at z = 15.8. Without a DC sample they come back
+// warned; with one, the PID, whose data reach 0.96π, is certified, as is
+// a PI on a continuous plant whose data show its −2 slope. The first
+// plant integrates (a pole at z = 1 to rounding), so it has no DC sample.
+// Oracle: exact Schur–Cohn and companion roots.
+func TestTunePIDFRDStrictCertifiesStableDesigns(t *testing.T) {
+	for _, c := range []struct {
+		pidFRDStrictCase
+		certified bool
+	}{
+		{pidFRDStrictCase{"derivative pole near −1", []float64{-1.3448981227532175}, []float64{1, -1.5811862552962634, 0.8405266355392914, -0.2593403802430281}, 0.1, 0.5184154210153508, 17.34960121464623, 422, PidtunePIDF, PIDTuningOptions{PhaseMargin: 60, IFormula: BackwardEuler}, PID2{}}, false},
+		{pidFRDStrictCase{"biproper PID", []float64{1.1165872865935105, -0.8967939326027657, 0.05725857765328797}, []float64{1, -1.099536361782705, 0.16610723397810698}, 1, 0.0013434142960855107, 3.0216239262734725, 218, PidtunePID, PIDTuningOptions{}, PID2{}}, true},
+		{pidFRDStrictCase{"continuous PI", []float64{1}, []float64{1, 2, 1}, 0, 1e-2, 1e2, 200, PidtunePI, PIDTuningOptions{}, PID2{}}, true},
+	} {
+		sampled := pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n)
+		frds := []*FRD{sampled}
+		if c.certified {
+			frds = append(frds, pidFRDStrictWithDC(t, sampled, c.num, c.den))
+		}
+		for i, frd := range frds {
+			r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+			if err != nil {
+				t.Errorf("%s %d: %v", c.name, i, err)
+				continue
+			}
+			k := *r.Controller
+			p, _ := pidTuningFRDStrictPlant(frd, nil)
+			stable, known := pidTuningFRDNyquistCount(k, p)
+			want := i == 1 && c.certified
+			if (stable && known) != want || pidHasWarning(r, "not certified") == want {
+				t.Errorf("%s %d: %+v count %v %v, warnings %q; want certified %v", c.name, i, k, stable, known, r.Evidence.Warnings, want)
+			}
+			if !pidFRDStrictStable(c.num, c.den, k) {
+				t.Errorf("%s %d: %+v unstable", c.name, i, k)
+			}
 		}
 	}
 }
@@ -286,8 +386,8 @@ func pidFRDStrictSweepCase(r *rand.Rand) pidFRDStrictCase {
 }
 
 // Tripwire for the strict count: on random stable plants (no integrators,
-// whose cancellation by a zero below the band the data cannot show), every
-// design TunePIDFRD returns as certified is stable, and every design kept
+// whose cancellation by a zero below the band the data cannot show) with
+// their DC sample, every design TunePIDFRD returns as certified is stable, and every design kept
 // from the looser count says so; the floor on certified designs guards
 // against a strict count that certifies nothing. Oracles: companion roots
 // and exact Schur–Cohn.
@@ -300,7 +400,7 @@ func TestTunePIDFRDCertifiedDesignsStable(t *testing.T) {
 	certified := 0
 	for i := range n {
 		c := pidFRDStrictSweepCase(r)
-		frd := pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n)
+		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
 		res, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
 		if err != nil {
 			continue
@@ -320,7 +420,7 @@ func TestTunePIDFRDCertifiedDesignsStable(t *testing.T) {
 			t.Errorf("case %d %s num %v den %v dt %v band [%v, %v] n %d %+v: certified %+v unstable", i, c.family, c.num, c.den, c.dt, c.lo, c.hi, c.n, c.o, k)
 		}
 	}
-	if certified < n/3 {
+	if certified < n/12 {
 		t.Errorf("only %d of %d designs certified", certified, n)
 	}
 }
