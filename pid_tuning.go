@@ -3216,10 +3216,11 @@ func pidTuningIdealInScope(model *System, c *PID2) bool {
 }
 
 // pidTuningIdealRealizable reports whether model and c are a finite SISO
-// standard delay-free loop, as pidTuningIdealRealizationFloat asks.
+// standard delay-free loop, as pidTuningIdealRealizationFloat asks; E = I
+// is standard.
 func pidTuningIdealRealizable(model *System, c *PID2) bool {
 	_, m, p := model.Dims()
-	if model.E != nil || model.HasDelay() || m != 1 || p != 1 {
+	if newDescriptorPolicy(model).isDescriptor() || model.HasDelay() || m != 1 || p != 1 {
 		return false
 	}
 	for _, a := range []*mat.Dense{model.A, model.B, model.C, model.D} {
