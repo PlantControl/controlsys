@@ -162,14 +162,18 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 }
 
 // generalizedPoles computes the finite eigenvalues of the pencil (A, E),
-// leaving out the infinite ones as MATLAB pole does. The infinite structure
+// leaving out the infinite ones as MATLAB pole does. A nonsingular E (MATLAB
+// rank) keeps every eigenvalue with β ≠ 0. Otherwise the infinite structure
 // is deflated first (deflateInfinite), since QZ resolves an infinite
 // Jordan chain of length k only to |β|/|α| ~ ε^(1/k), and the poles are the
-// QZ eigenvalues of the finite block. When the deflation is ambiguous, QZ
-// runs on the whole pencil: |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ is infinite, and a
-// large remaining pole is dropped as well when certifyFiniteRetained proves
-// it one of the n − rank(E) infinite eigenvalues of an index-1 pencil; one
-// it cannot classify is kept.
+// QZ eigenvalues of the finite block. When E has a stiff singular value
+// just above the rounding, QZ runs on the whole pencil and the n − rank(E)
+// eigenvalues of least |β|/|α| are infinite if a gap separates them; if
+// none does, only β = 0 is. When the deflation is ambiguous, QZ runs on
+// the whole pencil: |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ is infinite, and a large
+// remaining pole is dropped as well when certifyFiniteRetained proves it one
+// of the n − rank(E) infinite eigenvalues of an index-1 pencil; one it
+// cannot classify is kept.
 func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	a, e, _, _, nf, stiff, ok := deflateInfinite(A, E, false)
 	if ok && !stiff {
@@ -182,9 +186,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
 	}
 	if ok {
-		if tol, sep := leastRatioInfTol(alphar, alphai, beta, n-nf); sep {
-			return finitePoles(alphar, alphai, beta, tol), nil
-		}
+		return finitePoles(alphar, alphai, beta, leastRatioInfTol(alphar, alphai, beta, n-nf)), nil
 	}
 	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
 	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
@@ -195,16 +197,15 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 }
 
 // leastRatioInfTol returns the |β|/|α| bound that selects the d
-// eigenvalues of least |β|/|α| as infinite, and whether a factor
-// stiffRatioGap separates them from the rest. An index-1 pencil whose E has
-// a stiff singular value just above the rounding has exactly d = n − rank(E)
-// infinite eigenvalues; QZ on the whole pencil resolves the stiff finite one
-// better than the staircase, whose deflated blocks can mix it with the null
-// space of E.
-func leastRatioInfTol(alphar, alphai, beta []float64, d int) (float64, bool) {
+// eigenvalues of least |β|/|α| as infinite when a factor stiffRatioGap
+// separates them from the rest, else 0 (only β = 0 is infinite). An index-1 pencil whose E has a stiff singular
+// value just above the rounding has d = n − rank(E) infinite eigenvalues,
+// and QZ on the whole pencil resolves the stiff finite one better than the
+// staircase, whose deflated blocks can mix it with the null space of E.
+func leastRatioInfTol(alphar, alphai, beta []float64, d int) float64 {
 	n := len(beta)
 	if d == 0 {
-		return 0, true
+		return 0
 	}
 	ratio := make([]float64, n)
 	for i := range n {
@@ -212,15 +213,15 @@ func leastRatioInfTol(alphar, alphai, beta []float64, d int) (float64, bool) {
 	}
 	slices.Sort(ratio)
 	if d < n && !(ratio[d] > stiffRatioGap*ratio[d-1]) {
-		return 0, false
+		return 0
 	}
-	return ratio[d-1] * math.Sqrt(stiffRatioGap), true
+	return ratio[d-1] * math.Sqrt(stiffRatioGap)
 }
 
 // stiffRatioGap is the least factor between the |β|/|α| of a stiff finite
 // eigenvalue and of the infinite ones for leastRatioInfTol to tell them
 // apart.
-const stiffRatioGap = 10
+const stiffRatioGap = 100
 
 func qzFinitePoles(n int, a []float64, lda int, e []float64, lde int, infTol float64) ([]complex128, error) {
 	alphar, alphai, beta, ok := qzEigenvalues(n, a, lda, e, lde)
