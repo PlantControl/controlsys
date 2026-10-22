@@ -524,3 +524,113 @@ func TestPoles_SingularEStiffFinitePole(t *testing.T) {
 		assertEigSetNear(t, fmt.Sprintf("seed %d", seed), poles, []complex128{-1e6, -2, 0.5, 3}, 1e-6)
 	}
 }
+
+// TestPoles_SingularEStiffPoleBelowRankTol: a finite pole whose E singular
+// value lies below the rank tolerance 1e3·n·ε·σ₁(E) but far above the
+// rounding of the infinite one. deflateInfinite and certifyFiniteRetained
+// counted it infinite and Poles dropped it, flipping IsStable to true
+// (seed 133: 5.815e9, σ(E) = [5.33 2.40 0.811 4.47e-12 4.2e-17]), though QZ
+// resolves it. The oracle is fd[i]/wd[i] of A = U·diag(fd)·V,
+// E = U·diag(wd)·V, cross-checked by eig(A⁻¹E). IOAGOI, 7YDREH.
+func TestPoles_SingularEStiffPoleBelowRankTol(t *testing.T) {
+	A := mat.NewDense(5, 5, []float64{
+		0.4675311111576671, -0.5931120945789171, 1.433070852940676, 0.1599723399916213, 0.861136527451669,
+		1.6352063247557849, -0.9683737719009198, 2.1193472846475405, 0.6573055505333013, 1.0849828078542776,
+		-0.4582168133139081, 0.24938782876798804, 0.512797608413036, -0.047216579191975756, 0.621796155595045,
+		-0.528638042772846, -0.18190142662198355, 0.9510027209705484, 0.06267146822961102, 0.3318163694180108,
+		0.450999417284289, 0.2354561270829867, -2.9545951805571185, -0.8140366517694367, -1.3981179954251652,
+	})
+	E := mat.NewDense(5, 5, []float64{
+		0.10822572640865866, 0.6256082028767068, -1.551568497376001, 0.05930457860983998, -0.8799335254261825,
+		0.6338462278748703, 0.1681541812354693, -2.1407771510758358, -0.7581205224550747, -0.5450067172122531,
+		0.44875283688853046, -0.7197506258939729, -0.24774501650033998, -0.10615370437512732, -0.7452135834498379,
+		0.3865125061448476, 0.19130347413302976, -1.5155485762708192, -0.37534225046292763, -0.5733384788291965,
+		-2.1528618241890443, 2.362660882368117, 2.3373397635622486, 1.939974714409084, 1.273979918392783,
+	})
+	stiff := complex(0.053124123238317056/9.135828814566052e-12, 0)
+	var ae mat.Dense
+	if err := ae.Solve(A, E); err != nil {
+		t.Fatal(err)
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(&ae, mat.EigenNone) {
+		t.Fatal("eig failed")
+	}
+	var want []complex128
+	for _, mu := range eig.Values(nil) {
+		if cmplx.Abs(mu) > 1e-13 {
+			want = append(want, 1/mu)
+		}
+	}
+	assertEigSetNear(t, "oracle eig(A⁻¹E)", want, []complex128{stiff, -0.28865, -0.57522, -0.76151}, 1e-4)
+	sys, err := NewDescriptor(A, mat.NewDense(5, 1, nil), mat.NewDense(1, 5, nil), mat.NewDense(1, 1, nil), E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poles, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEigSetNear(t, "seed 133", poles, want, 1e-4)
+	if st, err := sys.IsStable(); err != nil || st {
+		t.Errorf("seed 133: IsStable = %v, %v, want false", st, err)
+	}
+	res, err := Stabsep(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if poles, err = res.Unstable.Poles(); err != nil {
+		t.Fatal(err)
+	}
+	assertEigSetNear(t, "seed 133 unstable", poles, []complex128{want[slices.IndexFunc(want, func(p complex128) bool { return real(p) > 0 })]}, 1e-4)
+
+	for seed := range uint64(300) {
+		rng := rand.New(rand.NewPCG(seed, 8))
+		n := 3 + rng.IntN(3)
+		fd, wd := make([]float64, n), make([]float64, n)
+		for i := range n {
+			fd[i], wd[i] = rng.NormFloat64(), rng.NormFloat64()
+		}
+		wd[0], wd[n-1] = math.Pow(10, -12+3*rng.Float64()), 0
+		U, V := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+		for i := range n {
+			for j := range n {
+				U.Set(i, j, rng.NormFloat64())
+				V.Set(i, j, rng.NormFloat64())
+			}
+		}
+		var T, A, E mat.Dense
+		T.Mul(U, mat.NewDiagDense(n, fd))
+		A.Mul(&T, V)
+		T.Mul(U, mat.NewDiagDense(n, wd))
+		E.Mul(&T, V)
+		want := make([]complex128, n-1)
+		stable := true
+		for i := range n - 1 {
+			want[i] = complex(fd[i]/wd[i], 0)
+			stable = stable && fd[i]/wd[i] < 0
+		}
+		var svd mat.SVD
+		if !svd.Factorize(&E, mat.SVDNone) {
+			t.Fatal("svd failed")
+		}
+		sv := svd.Values(nil)
+		tol := math.Max(1e-7, 100*eps()*sv[0]/sv[n-2])
+		sys, err := NewDescriptor(&A, mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil), mat.NewDense(1, 1, nil), &E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		poles, err := sys.Poles()
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		label := fmt.Sprintf("seed %d (σ(E) %.3g)", seed, sv)
+		assertEigSetNear(t, label, poles, want, tol)
+		if st, err := sys.IsStable(); err != nil || st != stable {
+			t.Errorf("%s: IsStable = %v, %v, want %v", label, st, err, stable)
+		}
+		if t.Failed() {
+			t.FailNow()
+		}
+	}
+}
