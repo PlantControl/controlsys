@@ -38,8 +38,10 @@ const (
 
 // IOStateSpaceOptions identifies SISO models from arbitrary sampled input/output.
 // Order excludes explicit input-delay states. Validation never fits dynamics.
-// Estimated InitialHistory holds Order pre-record outputs then InputDelay
-// pre-record inputs.
+// Estimated InitialHistory holds Order free-response offsets, the pre-record
+// contribution to each of the first Order outputs not carried by the
+// pre-record inputs (the observer-canonical initial state of the fitted
+// polynomials), then InputDelay pre-record inputs.
 //
 // MATLAB mapping: ssest(data, nx, 'InputDelay', nk, 'Feedthrough', tf) with
 // Order = nx (or MinOrder:MaxOrder for an order scan), InputDelay = nk,
@@ -352,24 +354,19 @@ func ioPredict(theta, u []float64, n, nb, nk int, jacobian bool) ([]float64, *ma
 	}
 	for k := range u {
 		value := 0.
-		for lag := range n {
-			index := k - lag - 1
-			previous := 0.
-			if index >= 0 {
-				previous = y[index]
-			} else if dynamics-index-1 < len(theta) {
-				previous = theta[dynamics-index-1]
-			}
-			value += theta[lag] * previous
+		if c := dynamics + k; k < n && c < len(theta) {
+			value += theta[c]
 			if jacobian {
-				j.Set(k, lag, j.At(k, lag)+previous)
-				if index >= 0 {
-					for c := range columns {
-						j.Set(k, c, j.At(k, c)+theta[lag]*j.At(index, c))
-					}
-				} else if dynamics-index-1 < len(theta) {
-					c := dynamics - index - 1
-					j.Set(k, c, j.At(k, c)+theta[lag])
+				j.Set(k, c, 1)
+			}
+		}
+		for lag := range min(n, k) {
+			index := k - lag - 1
+			value += theta[lag] * y[index]
+			if jacobian {
+				j.Set(k, lag, j.At(k, lag)+y[index])
+				for c := range columns {
+					j.Set(k, c, j.At(k, c)+theta[lag]*j.At(index, c))
 				}
 			}
 		}
@@ -415,6 +412,20 @@ func ioEstimateHistory(theta, u, y []float64, n, nb, nk int) ([]float64, error) 
 			h.Set(k, c, j.At(k, n+nb+c))
 		}
 	}
+	scales := make([]float64, unknowns)
+	for c := range unknowns {
+		sum := 0.
+		for k := range u {
+			sum += h.At(k, c) * h.At(k, c)
+		}
+		scales[c] = math.Sqrt(sum)
+		if scales[c] == 0 {
+			scales[c] = 1
+		}
+		for k := range u {
+			h.Set(k, c, h.At(k, c)/scales[c])
+		}
+	}
 	var svd mat.SVD
 	if !svd.Factorize(h, mat.SVDThin) {
 		return nil, fmt.Errorf("initial-state least squares: %w", ErrSingularTransform)
@@ -427,7 +438,7 @@ func ioEstimateHistory(theta, u, y []float64, n, nb, nk int) ([]float64, error) 
 	var solved mat.Dense
 	svd.SolveTo(&solved, target, rank)
 	for j := range history {
-		history[j] = solved.At(j, 0)
+		history[j] = solved.At(j, 0) / scales[j]
 	}
 	return history, nil
 }
