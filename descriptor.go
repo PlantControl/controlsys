@@ -163,32 +163,48 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 
 // generalizedPoles computes the finite eigenvalues of the pencil (A, E),
 // leaving out the infinite ones as MATLAB pole does. A nonsingular E (MATLAB
-// rank) keeps every eigenvalue with β ≠ 0. Otherwise the infinite structure
-// is deflated first (deflateInfinite), since QZ resolves an infinite
-// Jordan chain of length k only to |β|/|α| ~ ε^(1/k), and the poles are the
-// QZ eigenvalues of the finite block. When E has a stiff singular value
-// just above the rounding, QZ runs on the whole pencil and the n − rank(E)
-// eigenvalues of least |β|/|α| are infinite if a gap separates them; if
-// none does, only β = 0 is. When the deflation is ambiguous, QZ runs on
-// the whole pencil: |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ is infinite, and a large
-// remaining pole is dropped as well when certifyFiniteRetained proves it one
-// of the n − rank(E) infinite eigenvalues of an index-1 pencil; one it
-// cannot classify is kept.
+// rank) keeps every eigenvalue with β ≠ 0. For a singular E of rank r the
+// n − r eigenvalues of least |β|/|α| of the whole-pencil QZ are infinite
+// when a gap separates them (leastRatioInfTol) and no large one remains
+// (index 1); when E has a stiff singular value just above the rounding
+// this is the classification, with β = 0 alone infinite if no gap shows.
+// Otherwise the infinite structure is deflated first (deflateInfinite),
+// since QZ resolves an infinite Jordan chain of length k only to
+// |β|/|α| ~ ε^(1/k), and the poles are the QZ eigenvalues of the finite
+// block. When the deflation is ambiguous, |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ is
+// infinite, and a large remaining pole is dropped as well when
+// certifyFiniteRetained proves it one of the n − rank(E) infinite
+// eigenvalues of an index-1 pencil; one it cannot classify is kept.
 func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
-	a, e, _, _, nf, stiff, ok := deflateInfinite(A, E, false)
-	if ok && stiff == 0 {
+	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
+	alphar, alphai, beta, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
+	if !ok {
+		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
+	}
+	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
+	if n == 0 || clearlyNonsingular(eRaw.Data, eRaw.Stride, n, make([]float64, n*n), qzInfiniteGap*1e3*float64(n)*eps()*normE) {
+		return finitePoles(alphar, alphai, beta, 0), nil
+	}
+	var svd mat.SVD
+	if svd.Factorize(E, mat.SVDNone) {
+		sv := svd.Values(nil)
+		r, stiff, _ := descriptorRank(sv, sv[0], n, true)
+		if r == n {
+			return finitePoles(alphar, alphai, beta, 0), nil
+		}
+		margin := 0.0
+		if stiff {
+			margin = sv[r-1] / (float64(n) * eps() * sv[0])
+		}
+		tol, sep := leastRatioInfTol(alphar, alphai, beta, n-r, margin)
+		if stiff || sep && !largeRetained(alphar, alphai, beta, tol, qzInfiniteTol(qzLargeRatio, normA, normE)) {
+			return finitePoles(alphar, alphai, beta, tol), nil
+		}
+	}
+	if a, e, _, _, nf, stiff, ok := deflateInfinite(A, E, false); ok && !stiff {
 		ad, ed := a.RawMatrix(), e.RawMatrix()
 		return qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
 	}
-	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
-	alphar, alphai, beta, qzOK := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
-	if !qzOK {
-		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
-	}
-	if ok {
-		return finitePoles(alphar, alphai, beta, leastRatioInfTol(alphar, alphai, beta, n-nf, stiff)), nil
-	}
-	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
 	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
 	if tol := finitePoleInfTol(A, E, n, alphar, alphai, beta, infTol, normA, normE); tol > 0 {
 		infTol = tol
@@ -196,22 +212,34 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	return finitePoles(alphar, alphai, beta, infTol), nil
 }
 
-// leastRatioInfTol returns the |β|/|α| bound that selects the d
-// eigenvalues of least |β|/|α| as infinite when a factor stiffRatioGap
-// (marginalRatioGap for stiff < stiffMarginal, the stiff of
-// deflateInfinite) separates them from the rest, else 0 (only β = 0 is
-// infinite). An index-1 pencil whose E has a stiff singular
-// value just above the rounding has d = n − rank(E) infinite eigenvalues,
-// and QZ on the whole pencil resolves the stiff finite one better than the
-// staircase, whose deflated blocks can mix it with the null space of E.
-func leastRatioInfTol(alphar, alphai, beta []float64, d int, stiff float64) float64 {
-	n := len(beta)
-	gap := stiffRatioGap
-	if stiff < stiffMarginal {
-		gap = marginalRatioGap
+// largeRetained reports whether an eigenvalue that infTol keeps is large,
+// |β| ≤ largeTol·|α|, a possible member of an infinite Jordan chain.
+func largeRetained(alphar, alphai, beta []float64, infTol, largeTol float64) bool {
+	for i := range beta {
+		if !qzInfinite(alphar[i], alphai[i], beta[i], infTol) && qzInfinite(alphar[i], alphai[i], beta[i], largeTol) {
+			return true
+		}
 	}
+	return false
+}
+
+// leastRatioInfTol returns the |β|/|α| bound that selects the d
+// eigenvalues of least |β|/|α| as infinite, and whether a factor
+// stiffRatioGap separates them from the rest (marginalRatioGap when the
+// stiff singular value of E lies within stiffMarginal of the rounding
+// n·ε·σ₁(E), margin their ratio); without one the bound is 0, so only
+// β = 0 is infinite. An index-1 pencil has exactly d = n − rank(E)
+// infinite eigenvalues, and QZ on the whole pencil resolves a stiff finite
+// one better than the staircase, whose deflated blocks can mix it with the
+// null space of E.
+func leastRatioInfTol(alphar, alphai, beta []float64, d int, margin float64) (float64, bool) {
+	n := len(beta)
 	if d == 0 {
-		return 0
+		return 0, true
+	}
+	gap := stiffRatioGap
+	if margin > 0 && margin < stiffMarginal {
+		gap = marginalRatioGap
 	}
 	ratio := make([]float64, n)
 	for i := range n {
@@ -219,9 +247,9 @@ func leastRatioInfTol(alphar, alphai, beta []float64, d int, stiff float64) floa
 	}
 	slices.Sort(ratio)
 	if d < n && !(ratio[d] > gap*ratio[d-1]) {
-		return 0
+		return 0, false
 	}
-	return ratio[d-1] * math.Sqrt(gap)
+	return ratio[d-1] * math.Sqrt(gap), true
 }
 
 // stiffRatioGap is the least factor between the |β|/|α| of a stiff finite
