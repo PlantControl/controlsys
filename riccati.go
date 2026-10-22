@@ -786,10 +786,12 @@ var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on the stability boundary
 // off, is tested, while a mode at −3e-16 that is an exact diagonal entry
 // of a triangular A is known to relative eps and stays stable (BWUCB5),
 // as does a lightly damped mode at −3e-9 ± i. PBH rank is σmin ≤
-// n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖ + τ‖E‖. A boundary mode in a Jordan block
-// with a controllable one splits by √(eps)·‖A‖ beyond first order; the
-// mean of the eigenvalues within that of λ, accurate to rounding, is
-// tested too.
+// n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖ + τ‖E‖. A mode in a Jordan block with a
+// controllable one splits by √(eps·κ)·‖A‖ beyond first order: x ⊥ y
+// there, and τ, past the split, would swallow a stable mode at −1e-5. λ is
+// tested alone only when τ is below its distance to every other
+// eigenvalue; the mean of the eigenvalues within max(√eps·(‖A‖ +
+// |λ|‖E‖), τ) of λ, accurate to rounding, is tested too.
 func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 	n, m := problem.n, problem.m
 	aRaw, bRaw := problem.A.RawMatrix(), problem.B.RawMatrix()
@@ -884,17 +886,24 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 		}
 		mod := cmplx.Abs(lam)
 		tol := 10 * nf * ep * (ya + mod*ye) / cmplx.Abs(yex)
-		if inBand(lam, tol) && pbhDeficient(lam, tol) {
-			return true
-		}
-		rho := math.Sqrt(ep) * (an + mod*en)
+		rho := max(math.Sqrt(ep)*(an+mod*en), tol)
 		var mean complex128
-		count := 0
+		count, gap := 0, math.Inf(1)
 		for j := range n {
-			if finite[j] && cmplx.Abs(lams[j]-lam) <= rho {
+			if !finite[j] {
+				continue
+			}
+			d := cmplx.Abs(lams[j] - lam)
+			if j != kk {
+				gap = min(gap, d)
+			}
+			if d <= rho {
 				mean += lams[j]
 				count++
 			}
+		}
+		if tol < gap && inBand(lam, tol) && pbhDeficient(lam, tol) {
+			return true
 		}
 		if count < 2 {
 			continue

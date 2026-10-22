@@ -150,3 +150,46 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 		}
 	}
 }
+
+// TestCare_StableJordanUncontrollableMode (gonum v0.20.9 bump sweep): A =
+// P·J·P⁻¹ with an uncontrollable mode at −1.2e-5 or −6.7e-7 in a Jordan
+// block with a controllable one, cheap control. Correct Dggev eigenvectors
+// put x ⊥ y there, so the first-order band τ (1.6e-5) swallowed the mode
+// and Care returned ErrNoStabilizing; the computed pair's split, not τ,
+// bounds it, and its mean is resolved as stable. X is within 1e-4 of the
+// 256-bit Newton oracle.
+func TestCare_StableJordanUncontrollableMode(t *testing.T) {
+	cases := []struct {
+		name    string
+		a, b, q []float64
+		r       float64
+	}{
+		{"delta=-1.2e-5",
+			[]float64{-1.4453226759754887, 2.779361002952737, -2.5272690637142685, -1.456422025518266, -3.981815825286485, 4.839842889751445, -6.963577168239024, -2.3966507695570507, -1.5250997781990823, 2.178132112704622, -3.3469016433967123, -0.6822586821517838, -4.2409578277559055, 2.6881957904403624, -5.240518209479649, -2.488539344996856},
+			[]float64{0.21300832558460095, -6.1748980397572275, -4.376807008123427, -3.5613792332682905},
+			[]float64{3.7034555093118704, -0.8456430331679469, 1.3922707856469327, -2.2588290036849514, -0.8456430331679469, 2.207555796595078, -0.7000977282621735, 0.19949110621559002, 1.3922707856469327, -0.7000977282621735, 4.245015893090951, -1.273159328382354, -2.2588290036849514, 0.19949110621559002, -1.273159328382354, 3.5243518782749126},
+			3.911826880790316e-12},
+		{"delta=-6.7e-7",
+			[]float64{-1.119439515984305, 0.5406937956029283, 0.890471322925628, 0.20116639948390957, 1.6979453898656534, -0.23517482400293632, -0.6022666161659568, -0.5996275654081964, 0.04017216223750807, -0.08310823387680955, -0.0980079908217437, 0.5747377816786886, -1.8926930615264648, 1.1476767230873344, 1.8061774070463725, 0.2890975492568851},
+			[]float64{0.9143324096042801, 1.5564909335724222, -2.205031022108274, 2.4967841798835244},
+			[]float64{3.7215406257608903, 2.3297165035539353, -3.412908189188079, 1.1675675327551236, 2.3297165035539353, 7.73480995686668, -0.2681220056133864, 2.12772689645334, -3.412908189188079, -0.2681220056133864, 7.046441196696745, -0.6235613597168616, 1.1675675327551236, 2.12772689645334, -0.6235613597168616, 2.092852213281822},
+			5.377188308450666e-12},
+	}
+	for _, tc := range cases {
+		for _, ns := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/NoScaling=%v", tc.name, ns), func(t *testing.T) {
+				A, B, Q := mat.NewDense(4, 4, tc.a), mat.NewDense(4, 1, tc.b), mat.NewDense(4, 4, tc.q)
+				res, err := Care(A, B, Q, mat.NewDense(1, 1, []float64{tc.r}), &RiccatiOpts{NoScaling: ns})
+				if err != nil {
+					t.Fatal(err)
+				}
+				Xo := bigRiccatiNewton(t, true, A, B, Q, tc.r, res.X)
+				var d mat.Dense
+				d.Sub(res.X, Xo)
+				if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= 1e-4) {
+					t.Errorf("Accuracy %d X off the oracle by %.3g relative", res.Accuracy, rel)
+				}
+			})
+		}
+	}
+}
