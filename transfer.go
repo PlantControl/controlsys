@@ -250,8 +250,9 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return c.result(order), nil
 	}
 	check := newTFCheck(c.sys, c.n, c.m, c.p)
+	gate := 1e3 * float64(c.n) * eps()
 	e0, ok := check.relErr(c.tf)
-	if !ok || e0 <= 1e3*float64(c.n)*eps() {
+	if !ok || e0 <= gate {
 		return c.result(order), nil
 	}
 	alt := newRowRealizationConverter(c.sys, c.opts)
@@ -261,6 +262,16 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	}
 	if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
 		return alt.result(altOrder), nil
+	}
+	// Far above the poles the untrimmed Markov noise of a correct alt can
+	// exceed even a Dgebal result that lost every state (WGMRIE), so compare
+	// trimmed results too.
+	c.trimRows()
+	alt.trimRows()
+	if e0, _ = check.relErr(c.tf); e0 > gate {
+		if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
+			return alt.result(altOrder), nil
+		}
 	}
 	return c.result(order), nil
 }
@@ -819,7 +830,8 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 // trimRows replaces each numerator that has Markov trim candidates by the
 // most trimmed one that passes trimOK against a check sampled in the band of
 // that row's den, else by the last candidate. It runs on the chosen
-// realization only, so the choice sees the untrimmed numerators.
+// realization, or on both candidates once the untrimmed comparison in convert
+// has kept Dgebal.
 func (c rowRealizationConverter) trimRows() {
 	var bd *balancedDense
 	for i := range c.p {
