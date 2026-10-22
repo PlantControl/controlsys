@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -286,71 +287,215 @@ func TestRiccati_OtherScaling(t *testing.T) {
 	}
 }
 
-// decoupledCareOracle returns the Care solution of A = [[a, 0], [c, F]],
-// B = [0; g], diagonal Q and scalar R by blocks: Z of the (n−1)-state
-// Care of (F, g), w of (F − gKᵀ + aI)ᵀw = −Zc and the scalar x₁₁, none of
-// which sees the near-singular closed-loop mode a.
-func decoupledCareOracle(t *testing.T, A, B, Q *mat.Dense, r float64) *mat.Dense {
+// bigRiccatiNewton refines x0 to the Riccati solution of single-input
+// (A, B, Q, r) by Newton–Kleinman (continuous) or Hewer (discrete)
+// steps in 256-bit arithmetic, each Lyapunov (Stein) equation solved
+// exactly by Gaussian elimination on its n(n+1)/2 symmetric unknowns.
+// The inputs are exact float64 values, so a closed-loop mode near the
+// boundary only scales its equations; started near the stabilizing
+// solution it converges quadratically there.
+func bigRiccatiNewton(t *testing.T, continuous bool, A, B, Q *mat.Dense, r float64, x0 *mat.Dense) *mat.Dense {
 	t.Helper()
+	const prec = 256
 	n, _ := A.Dims()
-	m := n - 1
-	F := mat.DenseCopyOf(A.Slice(1, n, 1, n))
-	g := mat.DenseCopyOf(B.Slice(1, n, 0, 1))
-	c := mat.DenseCopyOf(A.Slice(1, n, 0, 1))
-	zr, err := Care(F, g, mat.DenseCopyOf(Q.Slice(1, n, 1, n)), mat.NewDense(1, 1, []float64{r}), nil)
-	if err != nil || zr.Accuracy != 0 {
-		t.Fatalf("oracle Care: %v", err)
+	nb := func(v float64) *big.Float { return new(big.Float).SetPrec(prec).SetFloat64(v) }
+	zero := func() *big.Float { return new(big.Float).SetPrec(prec) }
+	mul := func(a, b *big.Float) *big.Float { return zero().Mul(a, b) }
+	add := func(a, b *big.Float) *big.Float { return zero().Add(a, b) }
+	grid := func(m *mat.Dense) [][]*big.Float {
+		g := make([][]*big.Float, n)
+		for i := range n {
+			g[i] = make([]*big.Float, n)
+			for j := range n {
+				g[i][j] = nb(m.At(i, j))
+			}
+		}
+		return g
 	}
-	Z := zr.X
-	var gz, fk mat.Dense
-	gz.Mul(g.T(), Z)
-	fk.Mul(g, &gz)
-	fk.Scale(-1/r, &fk)
-	fk.Add(F, &fk)
-	M := mat.DenseCopyOf(fk.T())
-	for i := range m {
-		M.Set(i, i, M.At(i, i)+A.At(0, 0))
+	a, q, x := grid(A), grid(Q), grid(x0)
+	b := make([]*big.Float, n)
+	for i := range n {
+		b[i] = nb(B.At(i, 0))
 	}
-	var rhs, w mat.Dense
-	rhs.Mul(Z, c)
-	rhs.Scale(-1, &rhs)
-	if err := w.Solve(M, &rhs); err != nil {
-		t.Fatal(err)
-	}
-	cw, gw := 0.0, 0.0
-	for i := range m {
-		cw += c.At(i, 0) * w.At(i, 0)
-		gw += g.At(i, 0) * w.At(i, 0)
-	}
-	X := mat.NewDense(n, n, nil)
-	X.Set(0, 0, (Q.At(0, 0)+2*cw-gw*gw/r)/(-2*A.At(0, 0)))
-	for i := range m {
-		X.Set(0, i+1, w.At(i, 0))
-		X.Set(i+1, 0, w.At(i, 0))
-		for j := range m {
-			X.Set(i+1, j+1, Z.At(i, j))
+	rb := nb(r)
+	type idx struct{ i, j int }
+	var vars []idx
+	pos := map[idx]int{}
+	for i := range n {
+		for j := i; j < n; j++ {
+			pos[idx{i, j}] = len(vars)
+			vars = append(vars, idx{i, j})
 		}
 	}
-	return X
+	v := func(i, j int) int { return pos[idx{min(i, j), max(i, j)}] }
+	nv := len(vars)
+	tiny := new(big.Float).SetMantExp(big.NewFloat(1), -200)
+	for it := range 40 {
+		bx := make([]*big.Float, n)
+		for j := range n {
+			bx[j] = zero()
+			for i := range n {
+				bx[j] = add(bx[j], mul(b[i], x[i][j]))
+			}
+		}
+		den := rb
+		k := make([]*big.Float, n)
+		if continuous {
+			for j := range n {
+				k[j] = zero().Quo(bx[j], den)
+			}
+		} else {
+			den = zero().Set(rb)
+			for i := range n {
+				den = add(den, mul(bx[i], b[i]))
+			}
+			for j := range n {
+				s := zero()
+				for l := range n {
+					s = add(s, mul(bx[l], a[l][j]))
+				}
+				k[j] = zero().Quo(s, den)
+			}
+		}
+		acl := make([][]*big.Float, n)
+		for i := range n {
+			acl[i] = make([]*big.Float, n)
+			for j := range n {
+				acl[i][j] = zero().Sub(a[i][j], mul(b[i], k[j]))
+			}
+		}
+		m := make([][]*big.Float, nv)
+		for e, p := range vars {
+			m[e] = make([]*big.Float, nv+1)
+			for c := range nv + 1 {
+				m[e][c] = zero()
+			}
+			i, j := p.i, p.j
+			if continuous {
+				for l := range n {
+					m[e][v(l, j)] = add(m[e][v(l, j)], acl[l][i])
+					m[e][v(i, l)] = add(m[e][v(i, l)], acl[l][j])
+				}
+			} else {
+				for l := range n {
+					for h := range n {
+						m[e][v(l, h)] = add(m[e][v(l, h)], mul(acl[l][i], acl[h][j]))
+					}
+				}
+				m[e][v(i, j)] = zero().Sub(m[e][v(i, j)], nb(1))
+			}
+			rhs := add(q[i][j], mul(mul(k[i], rb), k[j]))
+			m[e][nv] = zero().Neg(rhs)
+		}
+		for c := range nv {
+			p := c
+			for r := c + 1; r < nv; r++ {
+				if zero().Abs(m[r][c]).Cmp(zero().Abs(m[p][c])) > 0 {
+					p = r
+				}
+			}
+			m[c], m[p] = m[p], m[c]
+			if m[c][c].Sign() == 0 {
+				t.Fatal("bigRiccatiNewton: singular Lyapunov equation")
+			}
+			for r := c + 1; r < nv; r++ {
+				f := zero().Quo(m[r][c], m[c][c])
+				for h := c; h <= nv; h++ {
+					m[r][h] = zero().Sub(m[r][h], mul(f, m[c][h]))
+				}
+			}
+		}
+		sol := make([]*big.Float, nv)
+		for r := nv - 1; r >= 0; r-- {
+			s := zero().Set(m[r][nv])
+			for h := r + 1; h < nv; h++ {
+				s = zero().Sub(s, mul(m[r][h], sol[h]))
+			}
+			sol[r] = zero().Quo(s, m[r][r])
+		}
+		diff, xn := zero(), zero()
+		for i := range n {
+			for j := range n {
+				nx := sol[v(i, j)]
+				d := zero().Sub(nx, x[i][j])
+				diff = add(diff, mul(d, d))
+				xn = add(xn, mul(nx, nx))
+				x[i][j] = nx
+			}
+		}
+		if it > 0 && diff.Cmp(mul(mul(tiny, tiny), xn)) <= 0 {
+			X := mat.NewDense(n, n, nil)
+			for i := range n {
+				for j := range n {
+					f, _ := x[i][j].Float64()
+					X.Set(i, j, f)
+				}
+			}
+			return X
+		}
+	}
+	t.Fatal("bigRiccatiNewton: no convergence")
+	return nil
 }
 
-// TestCare_LyapunovSingularRescue (BWUCB5): an uncontrollable mode at
-// −1e-14..−1e-16 makes the first Newton solve's Lyapunov equation
-// singular, so verifyRiccati keeps X on its Riccati residual alone (within
-// rescueTol). That is no certificate: "wrong" is off by 0.11 at a residual
-// below 1e-6. Such an X is returned with Accuracy 1 (MATLAB icare Report
-// 1), never as certified; an accurate one ("right") is still returned, not
-// an error.
+// TestCare_NearZeroModeCertified (FD55OF, sweep trial 15411): an
+// uncontrollable mode at −4.9e-14 puts x₁₁ at 1.1e14. Care's Accuracy 0
+// X is accurate to rounding by the 256-bit Newton oracle; the 1.06e-5
+// "error" seen in wave 18 was its block oracle's, whose x₁₁ = (q₁₁ +
+// 2cᵀw − (gᵀw)²/r)/(−2a) cancels terms of 1e6 down to 10, amplifying the
+// rounding of w by 1e5.
+func TestCare_NearZeroModeCertified(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{-4.8886081920856386e-14, 0, 0, 0,
+		-0.2861586449992375, 0.06606670596086822, 0.574760111137941, -0.7235675955669786,
+		-2.6179030009302813, 0.6720012532378372, 1.365927429041818, 0.3365883674792016,
+		1.880986207556907, -2.3818877413028474, 1.2587313452390165, -0.012608645067475499})
+	B := mat.NewDense(4, 1, []float64{0, 0.30354268565747744, -2.012261693667556, -0.31391235859071565})
+	Q := mat.NewDiagDense(4, []float64{0.28040849362468895, 0.7244457884686082, 0.01152886251304561, 94.43110253034001})
+	const r = 54.32991215802281
+	Qd := mat.DenseCopyOf(Q)
+	for _, ns := range []bool{false, true} {
+		res, err := Care(A, B, Qd, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns})
+		if err != nil {
+			t.Fatalf("NoScaling %v: %v", ns, err)
+		}
+		if res.Accuracy != 0 {
+			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
+		}
+		Xo := bigRiccatiNewton(t, true, A, B, Qd, r, res.X)
+		var d mat.Dense
+		d.Sub(res.X, Xo)
+		if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= 1e-12) {
+			t.Errorf("NoScaling %v: relative error %.3g", ns, rel)
+		}
+	}
+}
+
+// TestCare_LyapunovSingularRescue (BWUCB5, FD55OF): a closed-loop mode a
+// at −1e-14..−1e-17 makes the first Newton solve's Lyapunov equation
+// singular (2a within the eps·‖T‖ perturbation of Dtrsyl), so no step
+// measures X: verifyRiccati keeps it, on its Riccati residual alone, as
+// an Accuracy 1 candidate (step +Inf), never as certified (MATLAB icare
+// Report 1). The first two have an uncontrollable mode, the decoupled
+// ones a controllable mode of zero cost (exact X = diag(0, Z)). The
+// 256-bit Newton oracle shows each X accurate; the 0.11 error once
+// reported for "uncontrollable" was that of a block oracle whose x₁₁
+// cancels (TestCare_NearZeroModeCertified).
 func TestCare_LyapunovSingularRescue(t *testing.T) {
+	decoupled := func(a float64) []float64 {
+		return []float64{a, 0, 0, 0,
+			0, 0.06606670596086822, 0.574760111137941, -0.7235675955669786,
+			0, 0.6720012532378372, 1.365927429041818, 0.3365883674792016,
+			0, -2.3818877413028474, 1.2587313452390165, -0.012608645067475499}
+	}
+	dB := []float64{0.7, 0.30354268565747744, -2.012261693667556, -0.31391235859071565}
+	dQ := []float64{0, 0, 0, 0, 0, 0.72, 0, 0, 0, 0, 0.0115, 0, 0, 0, 0, 94.4}
 	cases := []struct {
-		name      string
-		a, b, q   []float64
-		r         float64
-		noScaling bool
-		wantTol   float64
+		name    string
+		a, b, q []float64
+		r       float64
 	}{
 		{
-			name: "wrong",
+			name: "uncontrollable",
 			a: []float64{-7.295994576490059e-14, 0, 0, 0,
 				0.5373416551501615, 1.2194221167525805, -0.8329644073802775, 0.30297255018420743,
 				-1.1406539062241194, 0.6682865141940897, 0.16960245948631908, -0.31201750782666604,
@@ -361,53 +506,101 @@ func TestCare_LyapunovSingularRescue(t *testing.T) {
 			r: 32.07665464756477,
 		},
 		{
-			name:      "right",
-			a:         []float64{-2.9889744621332566e-16, 0, 0.6967271130867092, -1.9887231533259282},
-			b:         []float64{0, -1.971948704093606},
-			q:         []float64{0.20656946223998846, 0, 0, 0.027864401791373995},
-			r:         0.013447720841695682,
-			noScaling: true,
-			wantTol:   1e-10,
+			name: "uncontrollable2",
+			a:    []float64{-2.9889744621332566e-16, 0, 0.6967271130867092, -1.9887231533259282},
+			b:    []float64{0, -1.971948704093606},
+			q:    []float64{0.20656946223998846, 0, 0, 0.027864401791373995},
+			r:    0.013447720841695682,
 		},
+		{name: "decoupled1e-14", a: decoupled(-1e-14), b: dB, q: dQ, r: 54.3},
+		{name: "decoupled1e-17", a: decoupled(-1e-17), b: dB, q: dQ, r: 54.3},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			n := len(tc.b)
-			A := mat.NewDense(n, n, tc.a)
-			B := mat.NewDense(n, 1, tc.b)
-			Q := mat.NewDense(n, n, tc.q)
-			res, err := Care(A, B, Q, mat.NewDense(1, 1, []float64{tc.r}), &RiccatiOpts{NoScaling: tc.noScaling})
-			if err != nil {
-				t.Fatal(err)
-			}
-			Xo := decoupledCareOracle(t, A, B, Q, tc.r)
-			var d mat.Dense
-			d.Sub(res.X, Xo)
-			rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2)
-			if res.Accuracy == 0 && !(rel <= 1e-8) {
-				t.Errorf("Accuracy 0 with relative error %.3g", rel)
-			}
-			if tc.wantTol > 0 && !(rel <= tc.wantTol) {
-				t.Errorf("relative error %.3g, want ≤ %g", rel, tc.wantTol)
-			}
-			var bk, acl mat.Dense
-			bk.Mul(B, res.K)
-			acl.Sub(A, &bk)
-			for j := 1; j < n; j++ {
-				if acl.At(0, j) != 0 {
-					t.Fatalf("A − BK couples the uncontrollable mode: %v", acl.At(0, j))
+		for _, ns := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/NoScaling=%v", tc.name, ns), func(t *testing.T) {
+				n := len(tc.b)
+				A := mat.NewDense(n, n, tc.a)
+				B := mat.NewDense(n, 1, tc.b)
+				Q := mat.NewDense(n, n, tc.q)
+				res, err := Care(A, B, Q, mat.NewDense(1, 1, []float64{tc.r}), &RiccatiOpts{NoScaling: ns})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if res.Accuracy != 1 || !math.IsInf(res.step, 1) {
+					t.Errorf("Accuracy %d, step %g; want the Lyapunov-singular candidate (1, +Inf)", res.Accuracy, res.step)
+				}
+				Xo := bigRiccatiNewton(t, true, A, B, Q, tc.r, res.X)
+				var d mat.Dense
+				d.Sub(res.X, Xo)
+				if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= 1e-9) {
+					t.Errorf("relative error %.3g", rel)
+				}
+				var bk, acl mat.Dense
+				bk.Mul(B, res.K)
+				acl.Sub(A, &bk)
+				a := tc.a[0]
+				for j := 1; j < n; j++ {
+					if math.Abs(acl.At(0, j))*math.Abs(acl.At(j, 0)) > 1e-3*math.Abs(a) {
+						t.Fatalf("A − BK couples the mode at %g: %v, %v", a, acl.At(0, j), acl.At(j, 0))
+					}
+				}
+				if !(acl.At(0, 0) < 0) {
+					t.Errorf("closed-loop mode %v", acl.At(0, 0))
+				}
+				var eig mat.Eigen
+				if !eig.Factorize(acl.Slice(1, n, 1, n), mat.EigenNone) {
+					t.Fatal("Eigen failed")
+				}
+				for _, v := range eig.Values(nil) {
+					if !(real(v) < 0) || math.IsNaN(imag(v)) {
+						t.Errorf("closed-loop eigenvalue %v", v)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestDare_NearCircleZeroCostMode: a controllable mode of zero cost at
+// |λ| = 1 − 5e-13 under a non-normal block (t₁₂ = −1024) stays in the
+// closed loop, so the Stein equation of the Hewer step pairs λ with λ̄
+// at 1 − |λ|² = 1e-12. The step still resolves it: X = diag(0, Z) is
+// certified and accurate by the 256-bit Hewer oracle in both modes.
+func TestDare_NearCircleZeroCostMode(t *testing.T) {
+	const bb = 1024
+	A := mat.NewDense(5, 5, []float64{
+		0.5, -bb, 0, 0, 0,
+		(0.75 - 1e-12) / bb, 0.5, 0, 0, 0,
+		0, 0, 0.5, 0.2, -0.1,
+		0, 0, 0.3, 0.9, 0.4,
+		0, 0, -0.6, 0.1, 1.1})
+	B := mat.NewDense(5, 1, []float64{0.7, -0.3, 0.5, 1.2, -0.8})
+	Q := mat.NewDense(5, 5, nil)
+	Q.Set(2, 2, 1)
+	Q.Set(3, 3, 0.5)
+	Q.Set(4, 4, 2)
+	const r = 0.8
+	for _, ns := range []bool{false, true} {
+		res, err := Dare(A, B, Q, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns})
+		if err != nil {
+			t.Fatalf("NoScaling %v: %v", ns, err)
+		}
+		if res.Accuracy != 0 {
+			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
+		}
+		Xo := bigRiccatiNewton(t, false, A, B, Q, r, res.X)
+		var d mat.Dense
+		d.Sub(res.X, Xo)
+		if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= 1e-10) {
+			t.Errorf("NoScaling %v: relative error %.3g", ns, rel)
+		}
+		for i := range 2 {
+			for j := range 5 {
+				if v := Xo.At(i, j); !(math.Abs(v) <= 1e-30) {
+					t.Fatalf("oracle X[%d,%d] = %g, want 0", i, j, v)
 				}
 			}
-			var eig mat.Eigen
-			if !eig.Factorize(acl.Slice(1, n, 1, n), mat.EigenNone) {
-				t.Fatal("Eigen failed")
-			}
-			for _, v := range eig.Values(nil) {
-				if !(real(v) < 0) || math.IsNaN(imag(v)) {
-					t.Errorf("closed-loop eigenvalue %v", v)
-				}
-			}
-		})
+		}
 	}
 }
 
