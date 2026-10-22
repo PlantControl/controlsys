@@ -175,6 +175,7 @@ func TestRiccati_OtherScaling(t *testing.T) {
 		})
 	}
 }
+
 // decoupledCareOracle returns the Care solution of A = [[a, 0], [c, F]],
 // B = [0; g], diagonal Q and scalar R by blocks: Z of the (n−1)-state
 // Care of (F, g), w of (F − gKᵀ + aI)ᵀw = −Zc and the scalar x₁₁, none of
