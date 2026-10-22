@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
@@ -170,22 +171,56 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 // it one of the n − rank(E) infinite eigenvalues of an index-1 pencil; one
 // it cannot classify is kept.
 func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
-	if a, e, _, _, nf, ok := deflateInfinite(A, E, false); ok {
+	a, e, _, _, nf, stiff, ok := deflateInfinite(A, E, false)
+	if ok && !stiff {
 		ad, ed := a.RawMatrix(), e.RawMatrix()
 		return qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
 	}
 	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
-	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
-	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
-	alphar, alphai, beta, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
-	if !ok {
+	alphar, alphai, beta, qzOK := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
+	if !qzOK {
 		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
 	}
+	if ok {
+		if tol, sep := leastRatioInfTol(alphar, alphai, beta, n-nf); sep {
+			return finitePoles(alphar, alphai, beta, tol), nil
+		}
+	}
+	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
+	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
 	if tol := finitePoleInfTol(A, E, n, alphar, alphai, beta, infTol, normA, normE); tol > 0 {
 		infTol = tol
 	}
 	return finitePoles(alphar, alphai, beta, infTol), nil
 }
+
+// leastRatioInfTol returns the |β|/|α| bound that selects the d
+// eigenvalues of least |β|/|α| as infinite, and whether a factor
+// stiffRatioGap separates them from the rest. An index-1 pencil whose E has
+// a stiff singular value just above the rounding has exactly d = n − rank(E)
+// infinite eigenvalues; QZ on the whole pencil resolves the stiff finite one
+// better than the staircase, whose deflated blocks can mix it with the null
+// space of E.
+func leastRatioInfTol(alphar, alphai, beta []float64, d int) (float64, bool) {
+	n := len(beta)
+	if d == 0 {
+		return 0, true
+	}
+	ratio := make([]float64, n)
+	for i := range n {
+		ratio[i] = math.Abs(beta[i]) / math.Hypot(alphar[i], alphai[i])
+	}
+	slices.Sort(ratio)
+	if d < n && !(ratio[d] > stiffRatioGap*ratio[d-1]) {
+		return 0, false
+	}
+	return ratio[d-1] * math.Sqrt(stiffRatioGap), true
+}
+
+// stiffRatioGap is the least factor between the |β|/|α| of a stiff finite
+// eigenvalue and of the infinite ones for leastRatioInfTol to tell them
+// apart.
+const stiffRatioGap = 10
 
 func qzFinitePoles(n int, a []float64, lda int, e []float64, lde int, infTol float64) ([]complex128, error) {
 	alphar, alphai, beta, ok := qzEigenvalues(n, a, lda, e, lde)

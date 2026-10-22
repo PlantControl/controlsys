@@ -127,7 +127,7 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 // When the rank decisions are ambiguous the whole pencil goes to QZ
 // instead (decomposeGeneralizedQZ).
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
-	a, e, qd, zd, nf, ok := deflateInfinite(sys.A, sys.E, true)
+	a, e, qd, zd, nf, _, ok := deflateInfinite(sys.A, sys.E, true)
 	if !ok {
 		return decomposeGeneralizedQZ(sys, isGroup1)
 	}
@@ -219,14 +219,16 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 // with the staircase of Van Dooren: compress the rows of E to expose its
 // null space, compress the matching rows of A onto the trailing columns,
 // and repeat on the leading block until its E is nonsingular. The rank of
-// E is that of descriptorRank; when it finds a stiff finite pole, only
-// singular values at the rounding level n·ε·σ₁(E) count as zero in the
-// deflated blocks, which then hold that pole. An ambiguous rank, or a near
-// rank-deficient row block of A (a nearly singular pencil), sets ok false.
-func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, ok bool) {
+// E is that of descriptorRank; a nonsingular E deflates nothing (nf = n).
+// When it reports stiff, only the null space of E is deflated (index 1 is
+// assumed) and stiff is returned: the deflated block can mix the stiff
+// finite pole with that null space, so callers that can should classify on
+// the whole pencil. An ambiguous rank, or a near rank-deficient row block
+// of A (a nearly singular pencil), sets ok false.
+func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff, ok bool) {
 	n, _ := A.Dims()
 	if n == 0 {
-		return nil, nil, nil, nil, 0, false
+		return nil, nil, nil, nil, 0, false, false
 	}
 	buf := make([]float64, 6*n*n+n)
 	ad, ed, ud, vtd, sd, td := buf[:n*n], buf[n*n:2*n*n], buf[2*n*n:3*n*n], buf[3*n*n:4*n*n], buf[4*n*n:5*n*n], buf[5*n*n:6*n*n]
@@ -264,31 +266,22 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 	tolA := ratio * mat.Norm(A, 2)
 	scaleE := mat.Norm(E, 2)
 	k := n
-	stiff := false
-	for k > 0 {
+	for k > 0 && !stiff {
 		if clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*ratio*scaleE) {
 			break
 		}
 		copyStrided(sd, k, ed, n, k, k)
 		if !svd(lapack.SVDAll, lapack.SVDNone, k, k) {
-			return nil, nil, nil, nil, 0, false
+			return nil, nil, nil, nil, 0, false, false
 		}
 		if k == n {
 			scaleE = sv[0]
 		}
-		var r int
-		if stiff {
-			for _, s := range sv[:k] {
-				if s > float64(n)*eps()*scaleE {
-					r++
-				}
-			}
-		} else {
-			var ok bool
-			if r, stiff, ok = descriptorRank(sv[:k], scaleE, n, k == n); !ok {
-				return nil, nil, nil, nil, 0, false
-			}
+		r, st, ok := descriptorRank(sv[:k], scaleE, n, k == n)
+		if !ok {
+			return nil, nil, nil, nil, 0, false, false
 		}
+		stiff = st
 		d := k - r
 		if d == 0 {
 			break
@@ -321,7 +314,7 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		}
 		impl.Dorgqr(k, k, d, ud, k, tau, work, len(work))
 		if !svd(lapack.SVDNone, lapack.SVDNone, d, d) || sv[d-1] <= qzInfiniteGap*tolA {
-			return nil, nil, nil, nil, 0, false
+			return nil, nil, nil, nil, 0, false, false
 		}
 		zk := vtd[:k*k]
 		for i := range k {
@@ -341,7 +334,7 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		}
 		k = r
 	}
-	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, true
+	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, stiff, true
 }
 
 // clearlyNonsingular reports whether the leading k×k block of e (stride
@@ -676,15 +669,7 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 		return 0, leak
 	}
 	sv := svd.Values(nil)
-	rank, _, ok := descriptorRank(sv, sv[0], n, true)
-	if !ok {
-		rank = 0
-		for _, v := range sv {
-			if v > 1e3*float64(n)*eps()*sv[0] {
-				rank++
-			}
-		}
-	}
+	rank, _, _ := descriptorRank(sv, sv[0], n, true)
 	d := n - rank
 	if d == 0 {
 		return 0, nil
@@ -726,14 +711,15 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 const qzInfiniteGap = 1e4
 
 // descriptorRank returns the rank of E from its descending singular values
-// sv, n the order of the pencil and scale ≈ σ_max(E). A singular value at
-// most tol = 1e3·n·ε·scale is zero, one above qzInfiniteGap·tol is nonzero
-// and one in between is ambiguous (ok false). A singular value at most
-// qzInfiniteGap·tol that lies a factor descriptorRankGap above the next,
-// itself at most n·ε·scale, is nonzero too and sets stiff: a stiff finite
-// pole beside the rounding of an infinite one, which QZ resolves. full
-// marks sv as those of the whole E; the deflated blocks of the staircase
-// carry more rounding, so the stiff rule does not apply to them.
+// sv, n the order of the pencil and scale ≈ σ_max(E), with floor = n·ε·scale
+// and tol = 1e3·floor. For the whole E (full) the rank is MATLAB's: the
+// singular values above floor. A nonsingular E thus has no infinite modes,
+// however stiff its poles, and one in (floor, qzInfiniteGap·tol] of a
+// singular E sets stiff: a stiff finite pole beside the rounding of an
+// infinite one, which the staircase cannot separate reliably. The deflated
+// blocks of the staircase carry more rounding: a singular value at most tol
+// is zero, one above qzInfiniteGap·tol is nonzero and one in between is
+// ambiguous (ok false).
 func descriptorRank(sv []float64, scale float64, n int, full bool) (rank int, stiff, ok bool) {
 	floor := float64(n) * eps() * scale
 	tol := 1e3 * floor
@@ -742,20 +728,16 @@ func descriptorRank(sv []float64, scale float64, n int, full bool) (rank int, st
 		case s <= floor:
 			return j, stiff, true
 		case s > qzInfiniteGap*tol:
-		case full && j+1 < len(sv) && sv[j+1] <= floor && s >= descriptorRankGap*sv[j+1]:
+		case full:
 			stiff = true
 		case s <= tol:
-			return j, stiff, true
+			return j, false, true
 		default:
 			return 0, false, false
 		}
 	}
-	return len(sv), stiff, true
+	return len(sv), false, true
 }
-
-// descriptorRankGap is the least factor between an E singular value below
-// the rank tolerance and the next for descriptorRank to call it nonzero.
-const descriptorRankGap = 100
 
 // qzSylvester solves S11·R − L·S22 = scale·C, T11·R − L·T22 = scale·F for
 // the n1-leading split of the generalized Schur form (s, t) of orderedQZ,
