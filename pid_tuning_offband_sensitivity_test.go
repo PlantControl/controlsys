@@ -103,6 +103,7 @@ func TestTunePIDOffbandSensitivity(t *testing.T) {
 // ≈ [43.3, 58.0], and every such Kp keeps |S| > 4 somewhere below Nyquist,
 // so its default design must fail rather than claim the bound.
 func TestTunePIDOffbandP40Infeasible(t *testing.T) {
+	skipSlowUnderRace(t)
 	num, den, dt := Poly{0.019742253670921476}, Poly{1, -0.14539455905586565}, 0.10463990694240013
 	lo, hi := 1/cmplx.Abs(num.Eval(1)/den.Eval(1)), 1/cmplx.Abs(num.Eval(-1)/den.Eval(-1))
 	for kp := lo; kp <= hi; kp += (hi - lo) / 200 {

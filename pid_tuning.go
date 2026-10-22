@@ -1104,12 +1104,21 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		res, err := pidTuningSearch(ctx, p, family, opts, floor, wc, eval)
 		if bound == pidSSearch && err == nil && pidTuningSensitivityPeak(wide, *res.Controller) > pidTuningMaxSensitivity {
 			sRejected = true
-			first := res.Evidence.Evaluations
-			res, err = pidTuningSearch(ctx, wide, family, opts, floor, wc, eval)
-			if te, ok := errors.AsType[*PIDTuningError](err); ok {
-				te.Evidence.Evaluations += first
-			} else if err == nil {
-				res.Evidence.Evaluations += first
+			budget, first := opts.MaxEvaluations, res.Evidence.Evaluations
+			if budget == 0 {
+				budget = 4096
+			}
+			if first >= budget {
+				res, err = nil, &PIDTuningError{Op: "TunePID", Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: opts.PhaseMargin, Evaluations: first, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
+			} else {
+				o := opts
+				o.MaxEvaluations = budget - first
+				res, err = pidTuningSearch(ctx, wide, family, o, floor, wc, eval)
+				if te, ok := errors.AsType[*PIDTuningError](err); ok {
+					te.Evidence.Evaluations += first
+				} else if err == nil {
+					res.Evidence.Evaluations += first
+				}
 			}
 		}
 		if te, ok := errors.AsType[*PIDTuningError](err); ok {
@@ -3608,9 +3617,9 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 	}
 	outside := func(w float64) bool { return p.try != nil && (w < p.low || w > band && w <= p.sensHigh) }
 	sample := func(w float64, cached bool) float64 {
-		g, ok := complex128(0), true
+		g, ok, in := complex128(0), true, !outside(w)
 		switch {
-		case !outside(w):
+		case in:
 			g = p.at(w)
 		case cached && p.sensCache != nil:
 			if g, ok = p.sensCache[w]; !ok {
@@ -3625,7 +3634,7 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 			g, ok = p.try(w)
 		}
 		v := 1 / cmplx.Abs(1+g*pidTuningFeedback(c, w))
-		if !ok || math.IsNaN(v) {
+		if !in && (!ok || math.IsNaN(v)) {
 			return 0
 		}
 		return v
