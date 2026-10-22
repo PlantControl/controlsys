@@ -102,6 +102,7 @@ func resonanceGrid(lo, hi, wn float64) []float64 {
 // accepted on its bisected sign change. Oracle: float64 coefficients
 // evaluated in big.Float and bisected for Im L = 0, Re L < 0.
 func TestAllMargin_LightlyDampedPhaseCrossover(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		num, den []float64
 		wn       float64
@@ -169,6 +170,7 @@ func bigGainMarginDB(num, den []float64, w float64) float64 {
 // Oracle: as for TestAllMargin_LightlyDampedPhaseCrossover; GM from big.Float
 // |L| at the reported ω, since |L| moves by ~1e-4 per ulp there.
 func TestAllMarginPhaseCrossUltraLightResonance(t *testing.T) {
+	skipSlowUnderRace(t)
 	type tc struct {
 		num, den []float64
 		wn       float64
@@ -333,6 +335,7 @@ func bigUnitPhaseCrossings(num, den []float64, thp float64) []float64 {
 // the phase is that flat, arg L + 180° rounded to ulp(360) moved the
 // crossing by up to 1e-5 relative (XRXQ4I); crossings must match to 1e-7.
 func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
+	skipSlowUnderRace(t)
 	type tc struct {
 		num, den []float64
 		dt       float64
@@ -392,6 +395,7 @@ func TestAllMarginPhaseCrossBesideUnitPolePair(t *testing.T) {
 // a few percent off (case 1). Oracle: as for
 // TestAllMarginPhaseCrossBesideUnitPolePair.
 func TestAllMarginPhaseCrossBesideRealUnitPolePair(t *testing.T) {
+	skipSlowUnderRace(t)
 	type tc struct {
 		num, den []float64
 		eps      float64

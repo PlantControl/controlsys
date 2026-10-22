@@ -1667,6 +1667,7 @@ func marginTimeScale(sys *System, k float64) *System {
 }
 
 func TestAllMargin_CrossoverContract(t *testing.T) {
+	skipSlowUnderRace(t)
 	chain5 := func(k float64) *System {
 		A := mat.NewDense(5, 5, nil)
 		for i := range 5 {
@@ -2033,6 +2034,7 @@ func TestMargin_ClosestToZeroSelection(t *testing.T) {
 // delay Nyquist test is held to the refined-dense oracle on high-order loops,
 // where evaluating the converted transfer-function polynomials lost 6%.
 func TestSISOEvalHighOrderMatchesOracle(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, n := range []int{60, 100} {
 		for _, dt := range []float64{0, 0.05} {
 			for _, delay := range []float64{0, 2} {

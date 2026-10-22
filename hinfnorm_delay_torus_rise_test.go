@@ -242,6 +242,8 @@ func (z torusRiseCase) torusSup() float64 {
 // closed-form response to ω = 1e5 above it by more than peakCertTol. The
 // search for a finite sample above S* used to give up unsupported.
 func TestHinfNormTorusFixedPointRise(t *testing.T) {
+	t.Parallel()
+	skipSlowUnderRace(t)
 	type tc struct {
 		name  string
 		sys   *System

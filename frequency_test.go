@@ -1927,6 +1927,7 @@ func lightlyDampedDiscreteSys(t *testing.T, rng *rand.Rand, thetas []float64, ga
 // rows, and the n = 32 model a long sweep evaluates by the Hessenberg
 // kernel, at small ωT, mid-band and near Nyquist.
 func TestFreqResponseDiscreteLightlyDampedPeaks(t *testing.T) {
+	skipSlowUnderRace(t)
 	const (
 		dt  = 0.1
 		gap = 1e-9

@@ -14,6 +14,7 @@ import (
 // the pencil solution itself is checked, against Hewer's iteration from
 // K = 0 (A is stable).
 func TestDare_BlockedQZSizes(t *testing.T) {
+	skipSlowUnderRace(t)
 	const m = 5
 	for _, n := range []int{65, 69, 70, 130} {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {

@@ -106,6 +106,8 @@ func pidtuneLevelOracle(pid *PID, num, den Poly) float64 {
 // with |S| ≤ 4 as the gate, the filtered designs their fallback. Every
 // return keeps 58.5° at every crossover.
 func TestPidtuneAutoPDPlaced(t *testing.T) {
+	t.Parallel()
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(11, 13))
 	ideals, placed, legacy := 0, 0, 0
 	for trial := range 600 {

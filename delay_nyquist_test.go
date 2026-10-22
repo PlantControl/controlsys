@@ -682,6 +682,7 @@ func delayStabilityCases() []quasiLoop {
 // dense sweep, for loops with |L| near 1 in the tail, high-frequency
 // resonances and several imaginary-axis poles.
 func TestDelayLoopEncirclementsMatchRootOracle(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, q := range delayStabilityCases() {
 		t.Run(q.name, func(t *testing.T) {
 			want := oracleRHPRoots(t, q.chi, max(q.box, 1), q.den, q.num)

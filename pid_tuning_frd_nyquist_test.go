@@ -193,6 +193,8 @@ func TestPIDTuningFRDNyquistMatchesClosedLoopRoots(t *testing.T) {
 // Nyquist count rejects them; each case now errors or returns a stable
 // loop. Oracles: companion roots (pidClosedLoopMaxRe), exact Schur–Cohn.
 func TestTunePIDFRDNyquistRejectsUnstable(t *testing.T) {
+	t.Parallel()
+	skipSlowUnderRace(t)
 	for i, c := range []struct {
 		num, den []float64
 		dt, top  float64

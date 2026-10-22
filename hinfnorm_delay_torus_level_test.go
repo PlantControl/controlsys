@@ -16,6 +16,7 @@ import (
 // gain, refined by golden section, past the peak HinfNorm reports, and the
 // torus sup of |G∞| from a grid search.
 func TestHinfNormTorusLevelTail(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	for _, tc := range []struct {
 		ci    int

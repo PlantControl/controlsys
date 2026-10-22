@@ -393,6 +393,7 @@ func pidSensitivityRejected(err error) bool {
 // PD leaves |L| ≈ 1 where the delay phase passes −180°. Such designs have
 // |S| peaks of 10–100 despite healthy margins at wc and must be rejected.
 func TestTunePIDDefaultDelayBoundsSensitivity(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, tc := range []struct {
 		a, tau float64
 		family PidtuneType

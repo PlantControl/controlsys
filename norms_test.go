@@ -2062,6 +2062,8 @@ func TestHinfNorm_BadlyScaledIOMatchesExactOracle(t *testing.T) {
 // the climb 4.6e-9 low and picked a seed whose bracket missed the top
 // (5.8e-8 low).
 func TestHinfNorm_FlatHinfSynLoopsMatchExactOracle(t *testing.T) {
+	t.Parallel()
+	skipSlowUnderRace(t)
 	for _, tc := range []struct {
 		name       string
 		n, m, p    int

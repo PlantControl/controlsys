@@ -20,6 +20,7 @@ import (
 // grid graded to Nyquist; the repro and a seeded sweep of perturbed
 // k·(z+1)⁴ over stable fifth-order denominators.
 func TestAllMarginPhaseCrossNyquistZeroCluster(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	type tc struct{ num, den []float64 }
 	cases := []tc{{
@@ -302,6 +303,7 @@ func bigNyquistPhaseCrossings(num, den []float64, k float64) []float64 {
 // runs from ~0° to −180° between scan points was taken for a wrap. Oracle:
 // the coefficients in big floats, L(−1) exactly and the crossings bisected.
 func TestAllMarginNyquistExactSign(t *testing.T) {
+	skipSlowUnderRace(t)
 	c730n := []float64{-0.011204978782742445, -0.05984870582771428, -0.1273450360277268, -0.13499266094431892, -0.07132014320260238, -0.015028791241038416}
 	c730d := []float64{1, -0.21579742457949225, -0.6185444651785603, 0.005936187798701448, -0.0008252966705985937, 0.09760593278156476, 0.0066096485407187225, -0.017048862169604856}
 	cases := []struct {

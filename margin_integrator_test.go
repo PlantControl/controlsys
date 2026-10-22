@@ -35,6 +35,7 @@ func TestAllMarginLeadDoubleIntegratorPencilRootAtZero(t *testing.T) {
 // crossovers match a dense log grid of the ratio, with z−1 = 2j·sin(θ/2)·e^{jθ/2}
 // so the discrete oracle keeps its accuracy near z = 1.
 func TestAllMarginLeadIntegratorSweep(t *testing.T) {
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(7, 11))
 	for trial := range 400 {
 		k := (2*rng.Float64() - 1) * math.Pow(10, 4*rng.Float64()-2)
@@ -432,6 +433,7 @@ func TestAllMarginNegativeGainDelayHarmonics(t *testing.T) {
 // crossover at ω ≈ 8.27e-6, |L| ≈ 5.5e13, lies where the state-space solve
 // is singular in double, as at every ω ≤ 1e-4, so only ω ≥ 1e-3 is checked.
 func TestAllMarginRoundedUnitPolePair(t *testing.T) {
+	skipSlowUnderRace(t)
 	num := []float64{0.5296264797589852, -0.49398687205654906}
 	den := []float64{1, -3.927287723431127, 5.782240810121571, -3.7826184499497617, 0.9276653632593171}
 	dt := 0.0422252269048428
@@ -728,6 +730,7 @@ func bigHorner(p []float64, th float64) complex128 {
 // expanded (z+1)⁴ is O(1) relative there. A seeded sweep of |k| in
 // [1e-15, 1e-11] with an optional zero and lag follows the repros.
 func TestAllMarginPhaseCrossTinyGainNyquistCluster(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		k, dt  float64
 		zs, ps []float64
@@ -988,6 +991,7 @@ func TestBandwidthSmallDCGain(t *testing.T) {
 // Realization rounding moves ε² by ~eps, so θ is held to 50·eps/ε² relative
 // (1-ulp coefficient perturbations move it by up to ~10·eps/ε²).
 func TestAllMarginPhaseCrossPolePairSweep(t *testing.T) {
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(21, 23))
 	dts := []float64{1, 0.1, 0.79}
 	for it := range 90 {
@@ -1054,6 +1058,7 @@ func TestAllMarginPhaseCrossPolePairSweep(t *testing.T) {
 // add only crossovers the loop has. Oracle: the expanded coefficients at jω
 // in big.Float, bisected on a log grid refined around the pair.
 func TestAllMarginPhaseCrossLightlyDampedSweep(t *testing.T) {
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(31, 37))
 	for it := range 60 {
 		k := math.Copysign(math.Pow(10, -2+4*rng.Float64()), rng.Float64()-0.5)

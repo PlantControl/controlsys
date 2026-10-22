@@ -118,6 +118,8 @@ func torusTop(t *testing.T, sys *System) (*highFrequencyExpansion, []torusMaximu
 // sup of |G∞| from an independent grid search at ω = +Inf, above every
 // finite peak of a dense ω scan.
 func TestHinfNormTorusClusterFixedPoint(t *testing.T) {
+	t.Parallel()
+	skipSlowUnderRace(t)
 	for _, c := range expansionFinite {
 		for ri, rot := range rotations {
 			t.Run(c.name+map[int]string{0: "/diag", 1: "/rot"}[ri], func(t *testing.T) {

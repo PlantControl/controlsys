@@ -17,6 +17,7 @@ import (
 // principle on χ at two box sizes, the sweep oracle, and the parity of the
 // real RHP roots from the sign of χ(0).
 func TestDelayNyquistDDTrustCrowdedIntegrators(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		q     quasiLoop
 		roots int

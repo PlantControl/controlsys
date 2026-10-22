@@ -130,6 +130,7 @@ func TestTorusCellBound(t *testing.T) {
 // G = D11 + C1(sI−A)⁻¹(B1 + B2·Δ(I − D22Δ)⁻¹·D21), C2 = 0, D12 = 0, with
 // incommensurate delays, strongly stable only through torusCellBound.
 func TestNeutralFourDelayCellCertificate(t *testing.T) {
+	skipSlowUnderRace(t)
 	a := []float64{-1, 2, -0.7, -3}
 	b1 := []float64{1, 0.5}
 	b2 := []float64{0.3, 0, 0.1, 0, 0, 0.2, 0, 0.1}

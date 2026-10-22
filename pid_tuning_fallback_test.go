@@ -22,6 +22,7 @@ import (
 // family keeps |S| ≤ 4 over the reported band (SIVH4J: PD returned |S| 16.9
 // on IP3XIC k=10 and 6.3 on nearunit).
 func TestTunePIDNearUnitPolesFallBackToFreqResponse(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	const dt = 0.01
 	ideal := []PidtuneType{PidtunePD, PidtunePID}
