@@ -10,27 +10,28 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// AMWRJU: Pidtune's PD is C = Kp(1 + Td·s/(Td/10·s + 1)), a lead of ratio
-// 11 whose phase never exceeds asin(10/12) = 56.44°. On 1/(s(s−1)) and
-// 1/(s²−0.5s+1) the plant phase tends to −180° only as ω → ∞, so no PD of
-// that family keeps 58.5° at a gain crossover; P on 1/((s+5)(s−1)) peaks at
-// atan√5 − atan(√5/5) = 41.8°, and the discrete PD on 1/((z−1)(z−1.1)) at
-// about 30°. TunePID's PD reaches 57° on the first two only because it is
-// ideal (Tf = 0). Pidtune fails closed; PDF, with Tf = 0.1/wc, is robust on
-// the continuous two. Oracle: the best smallest margin over a (K, Td) grid of
-// loops stable by companion-matrix closed-loop roots stays below 58.5°.
+// AMWRJU: MATLAB pidtune's PD is Kp + Kd·s; the Td/10-filtered PD
+// C = Kp(1 + Td·s/(Td/10·s + 1)) is a lead of ratio 11 whose phase never
+// exceeds asin(10/12) = 56.44°. On 1/(s(s−1)) and 1/(s²−0.5s+1) the plant
+// phase tends to −180° only as ω → ∞, so no filtered PD keeps 58.5° at a
+// gain crossover and Pidtune returned ErrPIDTuningTargetUnattainable; the
+// ideal PD, Pidtune's last fallback, reaches it. P on 1/((s+5)(s−1)) peaks
+// at atan√5 − atan(√5/5) = 41.8°, and either PD on 1/((z−1)(z−1.1)) below
+// 58.5°, so those fail closed. PDF, with Tf = 0.1/wc, is robust on the
+// continuous two. Oracle: the best smallest margin over a (K, Td) grid of
+// loops stable by companion-matrix closed-loop roots.
 func TestPidtuneFilteredPDUnattainable(t *testing.T) {
-	if best := pidtuneFamilyBestMargin(t, Poly{1}, Poly{1, -1}, 0, false); !(best > 58.5) {
+	if best := pidtuneFamilyBestMargin(t, Poly{1}, Poly{1, -1}, 0, pidtuneOracleP); !(best > 58.5) {
 		t.Fatalf("oracle: P on 1/(s−1) reaches %.2f°, want ≈ 90°", best)
 	}
-	if best := pidtuneFamilyBestMargin(t, Poly{1}, Poly{1, 1, 0}, 0, true); !(best > 58.5) {
+	if best := pidtuneFamilyBestMargin(t, Poly{1}, Poly{1, 1, 0}, 0, pidtuneOracleFilteredPD); !(best > 58.5) {
 		t.Fatalf("oracle: PD on 1/(s(s+1)) reaches %.2f°, want > 58.5°", best)
 	}
 	for _, c := range []struct {
 		num, den Poly
 		dt       float64
 		typ      PidtuneType
-		pdf      bool
+		ideal    bool
 	}{
 		{Poly{1}, Poly{1, -1, 0}, 0, PidtunePD, true},
 		{Poly{1}, Poly{1, -0.5, 1}, 0, PidtunePD, true},
@@ -39,16 +40,32 @@ func TestPidtuneFilteredPDUnattainable(t *testing.T) {
 	} {
 		name := fmt.Sprintf("%s %v/%v dt=%g", c.typ, c.num, c.den, c.dt)
 		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
-		if best := pidtuneFamilyBestMargin(t, c.num, c.den, c.dt, c.typ == PidtunePD); !(best < 58.5) {
-			t.Fatalf("%s: oracle reaches %.2f°", name, best)
+		fams := []pidtuneOracleFamily{pidtuneOracleP}
+		if c.typ == PidtunePD {
+			fams = []pidtuneOracleFamily{pidtuneOracleFilteredPD, pidtuneOracleIdealPD}
 		}
-		if pid, err := Pidtune(p, c.typ, 0, nil); !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-			t.Errorf("%s: got %+v, %v; want ErrPIDTuningTargetUnattainable", name, pid, err)
+		for _, f := range fams {
+			best := pidtuneFamilyBestMargin(t, c.num, c.den, c.dt, f)
+			if want := f == pidtuneOracleIdealPD && c.ideal; best > 58.5 != want {
+				t.Fatalf("%s: oracle family %d reaches %.2f°", name, f, best)
+			}
 		}
-		if !c.pdf {
+		pid, err := Pidtune(p, c.typ, 0, nil)
+		if !c.ideal {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s: got %+v, %v; want ErrPIDTuningTargetUnattainable", name, pid, err)
+			}
 			continue
 		}
-		pid, err := Pidtune(p, PidtunePDF, 0, nil)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		} else {
+			if pid.Tf != 0 {
+				t.Errorf("%s: %+v, want ideal PD", name, pid)
+			}
+			pidtuneCheckRobust(t, name, pid, c.num, c.den, c.dt, pidTuningMaxSensitivity)
+		}
+		pid, err = Pidtune(p, PidtunePDF, 0, nil)
 		if err != nil {
 			t.Errorf("%s PDF: %v", name, err)
 			continue
@@ -57,11 +74,19 @@ func TestPidtuneFilteredPDUnattainable(t *testing.T) {
 	}
 }
 
+type pidtuneOracleFamily int
+
+const (
+	pidtuneOracleP pidtuneOracleFamily = iota
+	pidtuneOracleFilteredPD
+	pidtuneOracleIdealPD
+)
+
 // pidtuneFamilyBestMargin returns the largest smallest gain-crossover margin
-// 180° − |∠L| over a log grid of K (either sign) and, for pd, Td with
-// Tf = Td/10 (forward-Euler derivative in z), among loops whose closed-loop
-// roots lie in the stability region.
-func pidtuneFamilyBestMargin(t *testing.T, num, den Poly, dt float64, pd bool) float64 {
+// 180° − |∠L| over a log grid of K (either sign) and, for a PD, Td with
+// Tf = Td/10 (forward-Euler derivative in z) or Tf = 0 (backward Euler in
+// z), among loops whose closed-loop roots lie in the stability region.
+func pidtuneFamilyBestMargin(t *testing.T, num, den Poly, dt float64, fam pidtuneOracleFamily) float64 {
 	t.Helper()
 	wmax := 1e3
 	if dt > 0 {
@@ -77,7 +102,7 @@ func pidtuneFamilyBestMargin(t *testing.T, num, den Poly, dt float64, pd bool) f
 		xs = append(xs, x)
 	}
 	tds := []float64{0}
-	if pd {
+	if fam != pidtuneOracleP {
 		tds = tds[:0]
 		for lt := -3.0; lt <= 3; lt += 0.05 {
 			tds = append(tds, math.Pow(10, lt))
@@ -86,12 +111,17 @@ func pidtuneFamilyBestMargin(t *testing.T, num, den Poly, dt float64, pd bool) f
 	best := math.Inf(-1)
 	for _, td := range tds {
 		nc, dc := Poly{1}, Poly{1}
-		if td > 0 {
+		switch {
+		case fam == pidtuneOracleFilteredPD && dt == 0:
 			tf := td / 10
 			nc, dc = Poly{tf + td, 1}, Poly{tf, 1}
-			if dt > 0 {
-				nc, dc = Poly{tf + td, dt - tf - td}, Poly{tf, dt - tf}
-			}
+		case fam == pidtuneOracleFilteredPD:
+			tf := td / 10
+			nc, dc = Poly{tf + td, dt - tf - td}, Poly{tf, dt - tf}
+		case fam == pidtuneOracleIdealPD && dt == 0:
+			nc = Poly{td, 1}
+		case fam == pidtuneOracleIdealPD:
+			nc, dc = Poly{dt + td, -td}, Poly{dt, 0}
 		}
 		for _, s := range []float64{1, -1} {
 			for lk := -3.0; lk <= 3; lk += 0.02 {

@@ -110,7 +110,7 @@ func pidtuneOracleLoop(pid *PID, num, den Poly, dt, delay float64) func(float64)
 // pidtuneBackedOff reports whether Pidtune(p, f, 0, opts), returning pid,
 // had to lower the automatic crossover: the design at that crossover itself
 // is rejected. A PD is compared with each first design the automatic
-// pipeline can return at that crossover (placed, legacy-Td, legacy).
+// pipeline can return at that crossover (placed, legacy-Td, legacy, ideal).
 func pidtuneBackedOff(t *testing.T, p *System, f PidtuneType, opts *PidtuneOptions, pid *PID) bool {
 	t.Helper()
 	pm := 60.0
@@ -124,7 +124,7 @@ func pidtuneBackedOff(t *testing.T, p *System, f PidtuneType, opts *PidtuneOptio
 	if f == PidtunePD && pid != nil {
 		for _, sign := range []float64{1, -1} {
 			for _, sf := range []bool{true, false} {
-				for _, mode := range []pidtunePDMode{pidtunePDPlaced, pidtunePDLegacyTd, pidtunePDLegacy} {
+				for _, mode := range []pidtunePDMode{pidtunePDPlaced, pidtunePDLegacyTd, pidtunePDLegacy, pidtunePDIdeal} {
 					first, err := pidtuneGains(p, &pidtunePlantPoint{}, f, wc, pm, sign, sf, false, mode, pidtunePIDFIterate)
 					if err == nil && *first == *pid {
 						return false
