@@ -62,6 +62,20 @@ func (tf *TransferFunc) validateShape() (p, m int, err error) {
 	return p, m, nil
 }
 
+func (tf *TransferFunc) validateFiniteCoeffs() error {
+	for i, den := range tf.Den {
+		if !finiteSlice(den) {
+			return fmt.Errorf("denominator %d has non-finite coefficients: %w", i, ErrInvalidArgument)
+		}
+		for j, num := range tf.Num[i] {
+			if !finiteSlice(num) {
+				return fmt.Errorf("numerator (%d,%d) has non-finite coefficients: %w", i, j, ErrInvalidArgument)
+			}
+		}
+	}
+	return nil
+}
+
 // Eval evaluates the frequency response H(s) at the complex point s, as
 // MATLAB evalfr(sys, s). Delays contribute exp(-s·tau) (continuous) or
 // s^-tau (discrete, tau whole samples). A malformed model returns an error.
@@ -250,8 +264,9 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 		return c.result(order), nil
 	}
 	check := newTFCheck(c.sys, c.n, c.m, c.p)
+	gate := 1e3 * float64(c.n) * eps()
 	e0, ok := check.relErr(c.tf)
-	if !ok || e0 <= 1e3*float64(c.n)*eps() {
+	if !ok || e0 <= gate {
 		return c.result(order), nil
 	}
 	alt := newRowRealizationConverter(c.sys, c.opts)
@@ -261,6 +276,16 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	}
 	if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
 		return alt.result(altOrder), nil
+	}
+	// Far above the poles the untrimmed Markov noise of a correct alt can
+	// exceed even a Dgebal result that lost every state (WGMRIE), so compare
+	// trimmed results too.
+	c.trimRows()
+	alt.trimRows()
+	if e0, _ = check.relErr(c.tf); e0 > gate {
+		if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
+			return alt.result(altOrder), nil
+		}
 	}
 	return c.result(order), nil
 }
@@ -436,6 +461,9 @@ type tfCheck struct {
 	s   []complex128
 	ref [][]complex128
 	mag []float64
+	// sens, when set, bounds per entry the first-order change of ref under
+	// relative perturbations of eps in each entry of A, B, C and D.
+	sens [][]float64
 }
 
 // newTFCheck samples the delay-free response at e^{jθ}, θ ∈ {0.7, 1.9, 2.8},
@@ -500,7 +528,18 @@ func trimCheckPoints(sys *System, den []float64) []complex128 {
 }
 
 func sampleTFCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
+	return sampleCheck(bd, pts, m, p, false)
+}
+
+// sampleTrimCheck is sampleTFCheck with sens, the trim gate's per-point
+// resolution of the response.
+func sampleTrimCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
+	return sampleCheck(bd, pts, m, p, bd.e == nil)
+}
+
+func sampleCheck(bd *balancedDense, pts []complex128, m, p int, sens bool) tfCheck {
 	var ck tfCheck
+	var sw *sensWork
 	for _, s := range pts {
 		dst := make([]complex128, p*m)
 		if bd.evalInto(pointAt(s), dst) != nil {
@@ -514,8 +553,76 @@ func sampleTFCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
 			continue
 		}
 		ck.s, ck.ref, ck.mag = append(ck.s, s), append(ck.ref, dst), append(ck.mag, mag)
+		if sens {
+			if sw == nil {
+				sw = newSensWork(bd.n, m, p)
+			}
+			ck.sens = append(ck.sens, sw.bound(bd, s))
+		}
 	}
 	return ck
+}
+
+type sensWork struct {
+	lu  []complex128
+	y   []complex128 // row-major n×p
+	u   []float64    // row-major n×m
+	piv []int
+}
+
+func newSensWork(n, m, p int) *sensWork {
+	return &sensWork{lu: make([]complex128, n*n), y: make([]complex128, n*p), u: make([]float64, n*m), piv: make([]int, n)}
+}
+
+// bound returns eps·(|y_i|ᵀ|Â||x_j| + |y_i|ᵀ|b̂_j| + |ĉ_i||x_j| + |d_ij|) per
+// entry, x = (sI−Â)⁻¹B̂ from the solve evalInto just made at s and
+// yᵢ = (sI−Â)⁻ᵀĉᵢᵀ: the first-order componentwise condition of G(s), the same
+// in every diagonal state scaling. Where it is near |G(s)| the given
+// coefficients do not determine the response at s. The result is nil when
+// the transposed pencil is singular.
+func (sw *sensWork) bound(bd *balancedDense, s complex128) []float64 {
+	n, m, p := bd.n, bd.m, bd.p
+	a, x := bd.a, bd.x
+	for i := range n {
+		for j := range n {
+			sw.lu[i*n+j] = complex(-a[j*n+i], 0)
+		}
+		sw.lu[i*n+i] += s
+	}
+	if !cLUFactor(sw.lu, sw.piv, n) {
+		return nil
+	}
+	for k := range n {
+		for i := range p {
+			sw.y[k*p+i] = complex(bd.c[i*n+k], 0)
+		}
+	}
+	cLUSolve(sw.lu, sw.piv, sw.y, n, p)
+	for k := range n {
+		row := a[k*n : (k+1)*n]
+		for j := range m {
+			v := math.Abs(bd.b[k*m+j])
+			for l, al := range row {
+				v += math.Abs(al) * cmplx.Abs(x[l*m+j])
+			}
+			sw.u[k*m+j] = v
+		}
+	}
+	out := make([]float64, p*m)
+	for i := range p {
+		ci := bd.c[i*n : (i+1)*n]
+		for j := range m {
+			v := 0.0
+			for k := range n {
+				v += cmplx.Abs(sw.y[k*p+i])*sw.u[k*m+j] + math.Abs(ci[k])*cmplx.Abs(x[k*m+j])
+			}
+			if bd.d != nil {
+				v += math.Abs(bd.d[i*bd.dStride+j])
+			}
+			out[i*m+j] = v * eps()
+		}
+	}
+	return out
 }
 
 // relErr is the worst max-entry error of tf relative to the max-entry
@@ -540,19 +647,45 @@ func (ck tfCheck) relErr(tf *TransferFunc) (worst float64, ok bool) {
 // trimOK reports whether numerator trimmed over den matches entry (i, j) of
 // an m-input model at every point to within twice the error of numerator
 // full at that point, or 1e3·n·eps, relative to the entry. A point where
-// full is inaccurate gives no slack at another.
+// full is inaccurate gives no slack at another. With sens, a point where
+// the entry is unresolved (sens ≥ |ref|) also allows sens/|ref|, as long as
+// some point resolves the entry to 10%: a fast mode in a dense basis leaves
+// the response at and above its band undetermined by the given
+// coefficients, where only a noise numerator can match it. Resolved points
+// keep the 2× rule, so a trim never costs accuracy the data determine.
 func (ck tfCheck) trimOK(i, j, m, n int, trimmed, full, den []float64) bool {
 	if len(ck.s) == 0 {
 		return false
 	}
 	floor := 1e3 * float64(n) * eps()
+	sens := func(int, float64) float64 { return 0 }
+	if len(ck.sens) == len(ck.s) {
+		resolved := false
+		for k := range ck.s {
+			if ck.sens[k] != nil {
+				ref := ck.ref[k][i*m+j]
+				resolved = resolved || ck.sens[k][i*m+j] < 0.1*max(cmplx.Abs(ref), eps()*ck.mag[k])
+			}
+		}
+		if resolved {
+			sens = func(k int, scale float64) float64 {
+				if ck.sens[k] == nil {
+					return 0
+				}
+				if r := ck.sens[k][i*m+j] / scale; r >= 1 {
+					return r
+				}
+				return 0
+			}
+		}
+	}
 	for k, s := range ck.s {
 		ref := ck.ref[k][i*m+j]
 		scale := max(cmplx.Abs(ref), eps()*ck.mag[k])
 		d := Poly(den).Eval(s)
 		eT := cmplx.Abs(Poly(trimmed).Eval(s)/d-ref) / scale
 		eF := cmplx.Abs(Poly(full).Eval(s)/d-ref) / scale
-		if !(eT <= max(2*eF, floor)) {
+		if !(eT <= max(2*eF, floor, sens(k, scale))) {
 			return false
 		}
 	}
@@ -711,7 +844,8 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 // trimRows replaces each numerator that has Markov trim candidates by the
 // most trimmed one that passes trimOK against a check sampled in the band of
 // that row's den, else by the last candidate. It runs on the chosen
-// realization only, so the choice sees the untrimmed numerators.
+// realization, or on both candidates once the untrimmed comparison in convert
+// has kept Dgebal.
 func (c rowRealizationConverter) trimRows() {
 	var bd *balancedDense
 	for i := range c.p {
@@ -736,7 +870,7 @@ func (c rowRealizationConverter) trimRows() {
 					if bd == nil {
 						bd = newBalancedDense(c.sys, c.n, c.m, c.p)
 					}
-					ck := sampleTFCheck(bd, trimCheckPoints(c.sys, den), c.m, c.p)
+					ck := sampleTrimCheck(bd, trimCheckPoints(c.sys, den), c.m, c.p)
 					check = &ck
 				}
 				if check.trimOK(i, j, c.m, c.n, withD(cand), withD(num), den) {
@@ -829,9 +963,9 @@ func (t *markovTrim) negligible(row, j, k int) bool {
 }
 
 // trim returns the trimmed candidates for num over a monic denominator of
-// degree deg, most trimmed first; the last, dropping at most a negligible
-// C·B, needs no check. bh is input j in the row's observability-Hessenberg
-// basis.
+// degree deg, most trimmed first, every trim from the larger of the two
+// counts down; the last, dropping at most a negligible C·B, needs no check.
+// bh is input j in the row's observability-Hessenberg basis.
 func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
 	if len(num) < 2 || len(num) > deg || len(bh) != deg || !t.negligible(row, j, 0) {
 		return [][]float64{num}
@@ -851,10 +985,8 @@ func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
 		r++
 	}
 	var cands [][]float64
-	for _, k := range []int{max(lead, r-off), min(lead, r-off)} {
-		if k > len(num)-len(safe) && k < len(num) && (len(cands) == 0 || len(cands[len(cands)-1]) != len(num)-k) {
-			cands = append(cands, num[k:])
-		}
+	for k := min(max(lead, r-off), len(num)-1); k > len(num)-len(safe); k-- {
+		cands = append(cands, num[k:])
 	}
 	return append(cands, safe)
 }
@@ -1185,8 +1317,9 @@ type StateSpaceResult struct {
 // StateSpace returns an observable-companion realization with one block per
 // output row, as MATLAB ss(tf) (SLICOT TD04AD); like MATLAB it is not
 // reduced to minimal order. A malformed or empty model returns
-// ErrDimensionMismatch, an improper one ErrImproperTF and a zero leading
-// denominator coefficient ErrSingularDenom.
+// ErrDimensionMismatch, a NaN or Inf coefficient ErrInvalidArgument, an
+// improper one ErrImproperTF and a zero leading denominator coefficient
+// ErrSingularDenom.
 func (tf *TransferFunc) StateSpace() (*StateSpaceResult, error) {
 	res, err := tf.stateSpace()
 	if err != nil {
@@ -1202,6 +1335,9 @@ func (tf *TransferFunc) stateSpace() (*StateSpaceResult, error) {
 	}
 	if p == 0 || m == 0 {
 		return nil, fmt.Errorf("model has %d outputs and %d inputs: %w", p, m, ErrDimensionMismatch)
+	}
+	if err := tf.validateFiniteCoeffs(); err != nil {
+		return nil, err
 	}
 	if !tf.isProper() {
 		return nil, ErrImproperTF
