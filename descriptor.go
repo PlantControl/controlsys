@@ -505,6 +505,7 @@ func (sys *System) properExplicitForm() (*System, error) {
 
 	b1 := extractBlock(&bq, 0, 0, nf, mi)
 	c2 := extractBlock(&cz, 0, nf, pi, ni)
+	cScale := denseNorm(cAug)
 	if nf > 0 && ni > 0 {
 		r := denseCopy(extractBlock(S, 0, nf, nf, ni))
 		l := denseCopy(extractBlock(T, 0, nf, nf, ni))
@@ -526,10 +527,12 @@ func (sys *System) properExplicitForm() (*System, error) {
 	dRed := mat.DenseCopyOf(dAug)
 	if ni > 0 {
 		var lu mat.LU
-		lu.Factorize(extractBlock(S, nf, nf, ni, ni))
+		s22 := extractBlock(S, nf, nf, ni, ni)
+		lu.Factorize(s22)
 		if luNearSingular(&lu) {
 			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
+		bScale := denseNorm(bAug) / denseNorm(s22)
 		var b, nilpotent mat.Dense
 		if err := lu.SolveTo(&b, false, extractBlock(&bq, nf, 0, ni, mi)); err != nil {
 			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
@@ -544,7 +547,7 @@ func (sys *System) properExplicitForm() (*System, error) {
 		if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
 			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
-		if !algebraicPartStatic(c2, &nilpotent, &b) {
+		if !algebraicPartStatic(c2, &nilpotent, &b, cScale, bScale) {
 			return nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 		}
 		var cb mat.Dense
@@ -587,12 +590,15 @@ func (sys *System) properExplicitForm() (*System, error) {
 
 // algebraicPartStatic reports whether c·N^k·b vanishes for k ≥ 1, i.e. the
 // algebraic part contributes no polynomial (impulsive or anticipative) term.
-func algebraicPartStatic(c, nilpotent, b *mat.Dense) bool {
+// cScale and bScale are the data scales of c and b, ‖C‖ and ‖B‖/‖A∞‖:
+// an impulsive mode that is unobservable or uncontrollable leaves c or b at
+// rounding level, which must not set the bound itself.
+func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale float64) bool {
 	ni, _ := nilpotent.Dims()
-	cNorm, nNorm, bNorm := denseNorm(c), denseNorm(nilpotent), denseNorm(b)
+	nNorm := denseNorm(nilpotent)
 	v := mat.DenseCopyOf(b)
 	var next, term mat.Dense
-	bound := cNorm * bNorm
+	bound := max(denseNorm(c), cScale) * max(denseNorm(b), bScale)
 	for range ni - 1 {
 		next.Mul(nilpotent, v)
 		v.Copy(&next)

@@ -182,8 +182,17 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // relative error. As MATLAB advises ("Using the Right Model
 // Representation"), evaluate such models with EvalFr/FreqResponse on the
 // state-space form instead.
+//
+// A descriptor model is first reduced to explicit form as MATLAB tf(dss)
+// does: nonsingular E is folded in, and singular E is reduced by eliminating
+// the algebraic states (dss2ss). Improper models are rejected with
+// ErrDescriptorUnsupported wrapping ErrImproperModel.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
-	res, err := sys.rationalTransferFunction(opts)
+	std, _, err := conversionStandardForm(sys, "TransferFunction")
+	if err != nil {
+		return nil, err
+	}
+	res, err := std.rationalTransferFunction(opts)
 	if err != nil {
 		return nil, err
 	}
