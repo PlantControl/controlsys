@@ -295,9 +295,6 @@ func fzRlocCheckBreakaway(t *testing.T, s *fzSpec, sys *System, bp []complex128,
 		if K > 0 {
 			continue
 		}
-		if fzRlocAbsThreshold(t, s, sys, L) {
-			fzSkip(t, "rlocus: absolute real-axis thresholds (followup O5FYRC-2)")
-		}
 		t.Fatalf("Breakaway %v needs gain K=%g, not on the K>0 locus\nden=%v num=%v L=%d\n%s", z, K, den, num, L, s)
 	}
 }
@@ -305,13 +302,16 @@ func fzRlocCheckBreakaway(t *testing.T, s *fzSpec, sys *System, bp []complex128,
 // fzRlocNearRoot reports whether x is a root of the exact q to working
 // precision: |q(x)| ≤ 1e-6·Σ|qᵢ|·r^(deg−i) with r = max(|x|, δ), or a sign
 // change of q within δ of x; δ = 1e-6·max(|x|, root bound) covers root
-// clusters near the origin.
+// clusters near the origin. It is false when the root bound overflows.
 func fzRlocNearRoot(q []*big.Rat, x float64, eval func([]*big.Rat, float64) (float64, float64)) bool {
 	q = fzTrimRat(q)
 	if len(q) == 0 {
 		return true
 	}
 	d := 1e-6 * math.Max(math.Abs(x), fzPidFujiwara(fzPidRatFloats(q)))
+	if math.IsInf(d, 0) || math.IsNaN(d) {
+		return false
+	}
 	v, _ := eval(q, x)
 	if _, m := eval(q, math.Max(math.Abs(x), d)); math.Abs(v) <= 1e-6*m {
 		return true
@@ -319,29 +319,6 @@ func fzRlocNearRoot(q []*big.Rat, x float64, eval func([]*big.Rat, float64) (flo
 	a, _ := eval(q, x-d)
 	b, _ := eval(q, x+d)
 	return a*b <= 0
-}
-
-// fzRlocAbsThreshold reports whether a pole (delay poles at z = 0 included)
-// or zero of the loop is complex
-// with |Im| < 2e-6, or two distinct real ones lie within 2e-4 (twice the
-// absolute cut-offs of isOnRealAxisSegment / isNearRepeatedReal, which then
-// misclassify them).
-func fzRlocAbsThreshold(t *testing.T, s *fzSpec, sys *System, L int) bool {
-	t.Helper()
-	zeros, err := sys.Zeros()
-	fzErr(t, s, "Zeros", err)
-	roots := slices.Concat(s.Eig, zeros, make([]complex128, L))
-	for i, r := range roots {
-		if imag(r) != 0 && math.Abs(imag(r)) < 2e-6 {
-			return true
-		}
-		for _, q := range roots[i+1:] {
-			if imag(r) == 0 && imag(q) == 0 && r != q && math.Abs(real(r-q)) < 2e-4 {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func fzRlocSeeds() []fzSeed {

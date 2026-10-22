@@ -49,6 +49,13 @@ func rlpRotatedCompanion(den, num []float64, seed int) (a, b, c []float64) {
 		}
 	}
 	b[n-1] = 1
+	rlpRotate(n, a, b, c, seed)
+	return a, b, c
+}
+
+// rlpRotate applies n+1 exact-rational Givens similarities chosen by seed
+// to (A, B, C) in place.
+func rlpRotate(n int, a, b, c []float64, seed int) {
 	for r := range n + 1 {
 		i, j := (r+seed)%n, (2*r+seed+1)%n
 		if i == j {
@@ -69,7 +76,6 @@ func rlpRotatedCompanion(den, num []float64, seed int) (a, b, c []float64) {
 		b[i], b[j] = rot(b[i], b[j])
 		c[i], c[j] = rot(c[i], c[j])
 	}
-	return a, b, c
 }
 
 func rlpAngles(t *testing.T, name string, got, want []float64) {
