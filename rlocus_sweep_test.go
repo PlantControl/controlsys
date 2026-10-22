@@ -15,9 +15,10 @@ import (
 
 // Frozen RootLocus regression sweep (track rlocus, wave 19). The generator
 // and the verdict rules below are frozen: testdata/rlocus_sweep_base.json
-// holds the verdicts of base ca89d74 (AND of arm64 and GOARCH=amd64 runs)
+// holds the verdicts of base 03edce8 (AND of arm64 and GOARCH=amd64 runs)
 // and every later revision must keep each verdict base got right.
 // Regenerate the file only with base code: RLOCUS_SWEEP_WRITE=<path>.
+// rlocus_sweep_ext_test.go adds a second frozen set of harder families.
 //
 // Each case is a SISO loop k·Z(s)/P(s) (+D) with dyadic poles, zeros and
 // gain, realized as a companion form, a Givens-rotated companion or a
@@ -581,14 +582,15 @@ func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
 	return oInt, oFlt
 }
 
+const rlswBaseRev = "03edce8"
+
 type rlswGolden struct {
 	Base  string `json:"base"`
 	OK    string `json:"ok"`
 	Posed string `json:"posed"`
 }
 
-func rlswRun(t *testing.T) (ok, posed []int) {
-	cases := rlswGenerate()
+func rlswRun(t *testing.T, cases []rlswCase) (ok, posed []int) {
 	ok, posed = make([]int, len(cases)), make([]int, len(cases))
 	for i := range cases {
 		oi, of := cases[i].oracles()
@@ -621,15 +623,13 @@ func rlswUnhex(s string) ([]int, error) {
 	return out, nil
 }
 
-// TestRootLocusSweepNoRegression fails when a component that base ca89d74
-// got right on the frozen 2000-case sweep is now wrong (or errors).
-func TestRootLocusSweepNoRegression(t *testing.T) {
-	if testing.Short() {
-		t.Skip("frozen 2000-case sweep")
-	}
-	ok, posed := rlswRun(t)
-	if path := os.Getenv("RLOCUS_SWEEP_WRITE"); path != "" {
-		data, err := json.Marshal(rlswGolden{Base: "ca89d74", OK: rlswHex(ok), Posed: rlswHex(posed)})
+// rlswCheck fails when a component that base got right on cases (golden
+// file golden) is now wrong or errors; env names the regenerate variable.
+func rlswCheck(t *testing.T, cases []rlswCase, golden, env string) {
+	t.Helper()
+	ok, posed := rlswRun(t, cases)
+	if path := os.Getenv(env); path != "" {
+		data, err := json.Marshal(rlswGolden{Base: rlswBaseRev, OK: rlswHex(ok), Posed: rlswHex(posed)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -650,7 +650,7 @@ func TestRootLocusSweepNoRegression(t *testing.T) {
 		}
 		return
 	}
-	data, err := os.ReadFile("testdata/rlocus_sweep_base.json")
+	data, err := os.ReadFile(golden)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +662,6 @@ func TestRootLocusSweepNoRegression(t *testing.T) {
 	if err != nil || len(base) != len(ok) {
 		t.Fatalf("golden has %d cases, sweep %d (%v)", len(base), len(ok), err)
 	}
-	cases := rlswGenerate()
 	names := map[int]string{rlswBreak: "Breakaway", rlswAsym: "Asymptotes", rlswDepart: "DepartureAngles", rlswArrive: "ArrivalAngles count"}
 	var fixed, regressed [4]int
 	for i := range ok {
@@ -685,4 +684,14 @@ func TestRootLocusSweepNoRegression(t *testing.T) {
 		}
 	}
 	t.Logf("fixed vs base: break %d asym %d depart %d arrive %d; regressed: %v", fixed[0], fixed[1], fixed[2], fixed[3], regressed)
+}
+
+// TestRootLocusSweepNoRegression fails when a component that base got
+// right on the frozen 2000-case sweep is now wrong (or errors).
+func TestRootLocusSweepNoRegression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("frozen 2000-case sweep")
+	}
+	skipSlowUnderRace(t)
+	rlswCheck(t, rlswGenerate(), "testdata/rlocus_sweep_base.json", "RLOCUS_SWEEP_WRITE")
 }
