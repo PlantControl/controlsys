@@ -1,11 +1,11 @@
 package controlsys
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -22,7 +22,25 @@ type weierstrassDescriptor struct {
 }
 
 func newWeierstrassDescriptor(seed uint64, r, d int, chain, orth bool) weierstrassDescriptor {
+	chains := []int{d}
+	if !chain {
+		chains = make([]int, d)
+		for i := range chains {
+			chains[i] = 1
+		}
+	}
+	return newWeierstrassChains(seed, r, chains, orth)
+}
+
+// newWeierstrassChains is newWeierstrassDescriptor with N the block
+// diagonal of nilpotent shifts of the sizes in chains (infinite Jordan
+// chains of those lengths).
+func newWeierstrassChains(seed uint64, r int, chains []int, orth bool) weierstrassDescriptor {
 	rng := rand.New(rand.NewPCG(seed, 91))
+	d := 0
+	for _, k := range chains {
+		d += k
+	}
 	n := r + d
 	F := mat.NewDense(n, n, nil)
 	W := mat.NewDense(n, n, nil)
@@ -34,11 +52,15 @@ func newWeierstrassDescriptor(seed uint64, r, d int, chain, orth bool) weierstra
 			H.Set(i, j, rng.NormFloat64())
 		}
 	}
-	for i := r; i < n; i++ {
-		F.Set(i, i, 1)
-		if chain && i+1 < n {
-			W.Set(i, i+1, 1)
+	i := r
+	for _, k := range chains {
+		for j := range k {
+			F.Set(i+j, i+j, 1)
+			if j+1 < k {
+				W.Set(i+j, i+j+1, 1)
+			}
 		}
+		i += k
 	}
 	randMat := func() *mat.Dense {
 		M := mat.NewDense(n, n, nil)
@@ -110,8 +132,9 @@ func BenchmarkStabsep_SingularE_N20(b *testing.B) {
 // assertStabsepMatchesFinite checks Stabsep of w.sys against oracles
 // independent of the generalized Schur path: the stable poles against the
 // eigenvalues of J⁻¹H, Stable against the real-Schur Stabsep of the
-// explicit finite part, and Stable + Unstable against (sE − A)⁻¹ solves.
-func assertStabsepMatchesFinite(t *testing.T, label string, w weierstrassDescriptor, res *StabsepResult) {
+// explicit finite part, and Stable + Unstable against (sE − A)⁻¹ solves,
+// the responses within relTol.
+func assertStabsepMatchesFinite(t *testing.T, label string, w weierstrassDescriptor, res *StabsepResult, relTol float64) {
 	t.Helper()
 	var eig mat.Eigen
 	if !eig.Factorize(w.finite.A, mat.EigenNone) {
@@ -135,12 +158,12 @@ func assertStabsepMatchesFinite(t *testing.T, label string, w weierstrassDescrip
 	for _, s := range []complex128{complex(0.3, 0.7), complex(-0.2, 2.5), complex(1.7, -0.4)} {
 		g := pencilResponse(t, res.Stable, s)[0][0]
 		o := pencilResponse(t, oracle.Stable, s)[0][0]
-		if d := cmplx.Abs(g - o); !(d <= 1e-7*(1+cmplx.Abs(o))) {
+		if d := cmplx.Abs(g - o); !(d <= relTol*(1+cmplx.Abs(o))) {
 			t.Errorf("%s: Stable(%v) = %v, want %v", label, s, g, o)
 		}
 		sum := g + pencilResponse(t, res.Unstable, s)[0][0]
 		full := pencilResponse(t, w.sys, s)[0][0]
-		if d := cmplx.Abs(sum - full); !(d <= 1e-7*(1+cmplx.Abs(full))) {
+		if d := cmplx.Abs(sum - full); !(d <= relTol*(1+cmplx.Abs(full))) {
 			t.Errorf("%s: Stable+Unstable(%v) = %v, want %v", label, s, sum, full)
 		}
 	}
@@ -215,7 +238,7 @@ func TestStabsep_SingularEIndexOne(t *testing.T) {
 			if err != nil {
 				t.Fatalf("orth %v seed %d: %v", orth, seed, err)
 			}
-			assertStabsepMatchesFinite(t, "index 1", w, res)
+			assertStabsepMatchesFinite(t, "index 1", w, res, 1e-7)
 			if t.Failed() {
 				t.Fatalf("orth %v seed %d", orth, seed)
 			}
@@ -223,39 +246,144 @@ func TestStabsep_SingularEIndexOne(t *testing.T) {
 	}
 }
 
-// TestStabsep_SingularEHigherIndexFailsClosed: an infinite Jordan chain of
-// length 2 is resolved by QZ only to |β|/|α| ~ √ε, so its members look
-// like finite poles of modulus ~1e7. Stabsep kept them in Stable, wrong
-// by up to 1e8 relative, for 34% of these descriptors. It must now return
-// the split correctly or fail closed with ErrSchurFailed.
-func TestStabsep_SingularEHigherIndexFailsClosed(t *testing.T) {
-	var failed, total int
-	for _, orth := range []bool{true, false} {
-		for seed := range uint64(300) {
-			rng := rand.New(rand.NewPCG(seed, 6))
-			r := 2 + rng.IntN(5)
-			w := newWeierstrassDescriptor(seed, r, 2, true, orth)
-			if _, err := w.sys.ToExplicit(); err == nil {
-				continue
-			}
-			total++
-			res, err := Stabsep(w.sys)
-			if err != nil {
-				if !errors.Is(err, ErrSchurFailed) {
-					t.Fatalf("orth %v seed %d: %v", orth, seed, err)
+// higherIndexChains are the infinite Jordan structures of the index ≥ 2
+// tests: chain lengths of N.
+var higherIndexChains = [][]int{{2}, {3}, {4}, {2, 1}, {3, 2}, {2, 2, 1}}
+
+// higherIndexTol is the relative accuracy of the finite part of a
+// descriptor whose longest infinite chain has length k and whose finite
+// spectral radius is rho: a rounding-level perturbation splits the chain
+// into finite eigenvalues of modulus ~ε^(−1/k), so separating a finite
+// pole λ from it is conditioned like |λ|^(k−1).
+func higherIndexTol(w weierstrassDescriptor, k int) float64 {
+	var eig mat.Eigen
+	if !eig.Factorize(w.finite.A, mat.EigenNone) {
+		panic("eig failed")
+	}
+	rho := 0.0
+	for _, v := range eig.Values(nil) {
+		rho = math.Max(rho, cmplx.Abs(v))
+	}
+	return math.Max(1e-7, 1e6*eps()*math.Pow(math.Max(rho, 1), float64(k-1)))
+}
+
+// TestStabsep_SingularEHigherIndex: an infinite Jordan chain of length k
+// is resolved by QZ only to |β|/|α| ~ ε^(1/k), so its members looked like
+// finite poles of modulus ~1e5–1e7. Stabsep kept them in Stable (wrong by
+// up to 1e8 relative, 34% of index-2 cases), and once that failed closed,
+// returned ErrSchurFailed for 5–84% of these descriptors (index 2–4) and
+// still kept a few wrong. The infinite structure is now deflated before
+// QZ (staircase on E, then on the matching rows of A), as MATLAB stabsep
+// splits any regular descriptor. The oracle is eig(J⁻¹H), the real-Schur
+// Stabsep of the explicit finite part and (sE − A)⁻¹. 7YDREH.
+func TestStabsep_SingularEHigherIndex(t *testing.T) {
+	for _, chains := range higherIndexChains {
+		k := slices.Max(chains)
+		for _, orth := range []bool{true, false} {
+			for seed := range uint64(120) {
+				rng := rand.New(rand.NewPCG(seed, 6))
+				w := newWeierstrassChains(seed, 2+rng.IntN(5), chains, orth)
+				label := fmt.Sprintf("chains %v orth %v seed %d", chains, orth, seed)
+				res, err := Stabsep(w.sys)
+				if err != nil {
+					t.Fatalf("%s: %v", label, err)
 				}
-				failed++
-				continue
-			}
-			assertStabsepMatchesFinite(t, "index 2", w, res)
-			if t.Failed() {
-				t.Fatalf("orth %v seed %d", orth, seed)
+				assertStabsepMatchesFinite(t, label, w, res, higherIndexTol(w, k))
+				if t.Failed() {
+					t.FailNow()
+				}
 			}
 		}
 	}
-	if failed > total/2 {
-		t.Errorf("%d of %d failed closed", failed, total)
+}
+
+// TestModsep_SingularEHigherIndex: Modsep of index ≥ 2 descriptors keeps
+// the finite modes below the cutoff in Slow and the infinite chains in
+// Fast. With cutoff 1e10 every finite mode is slow, and the chain members
+// QZ left at moduli ~1e5–1e8 were retained too, failing closed. Oracle:
+// eig(J⁻¹H) and (sE − A)⁻¹. 7YDREH.
+func TestModsep_SingularEHigherIndex(t *testing.T) {
+	for _, chains := range higherIndexChains {
+		for _, orth := range []bool{true, false} {
+			for seed := range uint64(40) {
+				rng := rand.New(rand.NewPCG(seed, 6))
+				w := newWeierstrassChains(seed, 2+rng.IntN(5), chains, orth)
+				var eig mat.Eigen
+				if !eig.Factorize(w.finite.A, mat.EigenNone) {
+					t.Fatal("eig failed")
+				}
+				tol := higherIndexTol(w, slices.Max(chains))
+				for _, cutoff := range []float64{1, 1e10} {
+					label := fmt.Sprintf("chains %v orth %v seed %d cutoff %g", chains, orth, seed, cutoff)
+					var want []complex128
+					for _, v := range eig.Values(nil) {
+						if cmplx.Abs(v) < cutoff {
+							want = append(want, v)
+						}
+					}
+					res, err := Modsep(w.sys, cutoff)
+					if err != nil {
+						t.Fatalf("%s: %v", label, err)
+					}
+					poles, err := res.Slow.Poles()
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertEigSetNear(t, label+" slow poles", poles, want, 1e-6)
+					for _, s := range []complex128{complex(0.3, 0.7), complex(-0.2, 2.5)} {
+						got := pencilResponse(t, res.Slow, s)[0][0] + pencilResponse(t, res.Fast, s)[0][0]
+						full := pencilResponse(t, w.sys, s)[0][0]
+						if d := cmplx.Abs(got - full); !(d <= tol*(1+cmplx.Abs(full))) {
+							t.Fatalf("%s: Slow+Fast(%v) = %v, want %v", label, s, got, full)
+						}
+					}
+				}
+			}
+		}
 	}
+}
+
+// TestPoles_SingularEHigherIndex: Poles and IsStable of index ≥ 2
+// descriptors. QZ leaves the members of an infinite chain of length k at
+// |β|/|α| ~ ε^(1/k), and Poles listed them as finite poles such as
+// 1.19±7.03e7i (chain 3, seed 952) or −2.56e5 (seed 549); MATLAB pole
+// leaves infinite poles out. Oracle: eig(J⁻¹H). 7YDREH.
+func TestPoles_SingularEHigherIndex(t *testing.T) {
+	for _, chains := range higherIndexChains {
+		for _, orth := range []bool{true, false} {
+			for _, seed := range append([]uint64{549, 920, 952}, rangeSeeds(150)...) {
+				rng := rand.New(rand.NewPCG(seed, 6))
+				w := newWeierstrassChains(seed, 2+rng.IntN(5), chains, orth)
+				label := fmt.Sprintf("chains %v orth %v seed %d", chains, orth, seed)
+				var eig mat.Eigen
+				if !eig.Factorize(w.finite.A, mat.EigenNone) {
+					t.Fatal("eig failed")
+				}
+				want := eig.Values(nil)
+				poles, err := w.sys.Poles()
+				if err != nil {
+					t.Fatalf("%s: %v", label, err)
+				}
+				assertEigSetNear(t, label, poles, want, 1e-6)
+				stable := true
+				for _, p := range want {
+					stable = stable && real(p) < 0
+				}
+				got, err := w.sys.IsStable()
+				if err != nil || got != stable {
+					t.Fatalf("%s: IsStable = %v, %v, want %v", label, got, err, stable)
+				}
+			}
+		}
+	}
+}
+
+func rangeSeeds(n int) []uint64 {
+	s := make([]uint64, n)
+	for i := range s {
+		s[i] = uint64(i)
+	}
+	return s
 }
 
 // TestStabsep_SingularEStiffFinitePole: a genuine finite pole of

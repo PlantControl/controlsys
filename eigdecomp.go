@@ -121,12 +121,252 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 // generalized Schur form Qᵀ(A, E)Z = (S, T), selected finite eigenvalues
 // leading, then removes the coupling blocks with the generalized Sylvester
 // equation S11 R - L S22 = -S12, T11 R - L T22 = -T12. G1 is returned explicit
-// (T11 is nonsingular); G2 keeps E = T22. Eigenvalues with
-// |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ are infinite; a large retained one that
-// certifyFiniteRetained cannot certify finite fails closed.
+// (T11 is nonsingular); G2 keeps E = T22. The infinite structure is deflated
+// to the trailing block first (deflateInfinite), so QZ never has to resolve
+// an infinite Jordan chain, which it does only to |β|/|α| ~ ε^(1/k).
+// When the rank decisions are ambiguous the whole pencil goes to QZ
+// instead (decomposeGeneralizedQZ).
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
+	a, e, qd, zd, nf, ok := deflateInfinite(sys.A, sys.E, true)
+	if !ok {
+		return decomposeGeneralizedQZ(sys, isGroup1)
+	}
 	policy := newRealizationTransformPolicy(sys)
-	n, m, p := sys.Dims()
+	n := sys.A.RawMatrix().Rows
+	if nf == 0 {
+		return modesAllInGroup2(policy, sys)
+	}
+	ninf := n - nf
+	sf := make([]float64, nf*nf)
+	tf := make([]float64, nf*nf)
+	qf := make([]float64, nf*nf)
+	zf := make([]float64, nf*nf)
+	alphar := make([]float64, n)
+	alphai := make([]float64, n)
+	beta := make([]float64, n)
+	aRaw, eRaw := a.RawMatrix(), e.RawMatrix()
+	selct := func(ar, ai, b float64) bool {
+		return b != 0 && isGroup1(complex(ar/b, ai/b))
+	}
+	n1, recip, ok := orderedQZ(nf, blas64.General{Rows: nf, Cols: nf, Stride: aRaw.Stride, Data: aRaw.Data},
+		blas64.General{Rows: nf, Cols: nf, Stride: eRaw.Stride, Data: eRaw.Data}, selct, sf, tf, qf, zf, alphar[:nf], alphai[:nf], beta[:nf])
+	if !ok {
+		return nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+	}
+	if n1 == 0 {
+		return modesAllInGroup2(policy, sys)
+	}
+
+	s := make([]float64, n*n)
+	t := make([]float64, n*n)
+	q := make([]float64, n*n)
+	z := make([]float64, n*n)
+	copyStrided(s, n, sf, nf, nf, nf)
+	copyStrided(t, n, tf, nf, nf, nf)
+	qfGen := blas64.General{Rows: nf, Cols: nf, Stride: nf, Data: qf}
+	zfGen := blas64.General{Rows: nf, Cols: nf, Stride: nf, Data: zf}
+	qdRaw, zdRaw := qd.RawMatrix(), zd.RawMatrix()
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: nf, Stride: qdRaw.Stride, Data: qdRaw.Data}, qfGen,
+		0, blas64.General{Rows: n, Cols: nf, Stride: n, Data: q})
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: nf, Stride: zdRaw.Stride, Data: zdRaw.Data}, zfGen,
+		0, blas64.General{Rows: n, Cols: nf, Stride: n, Data: z})
+	if ninf > 0 {
+		si := make([]float64, ninf*ninf)
+		ti := make([]float64, ninf*ninf)
+		qi := make([]float64, ninf*ninf)
+		zi := make([]float64, ninf*ninf)
+		copyStrided(si, ninf, aRaw.Data[nf*aRaw.Stride+nf:], aRaw.Stride, ninf, ninf)
+		copyStrided(ti, ninf, eRaw.Data[nf*eRaw.Stride+nf:], eRaw.Stride, ninf, ninf)
+		first, second := si, ti
+		if recip {
+			first, second = ti, si
+		}
+		bwork := make([]bool, ninf)
+		var query [1]float64
+		ar, ai, b := alphar[nf:], alphai[nf:], beta[nf:]
+		impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortNone, nil, ninf, first, ninf, second, ninf,
+			ar, ai, b, qi, ninf, zi, ninf, query[:], -1, bwork)
+		work := make([]float64, int(query[0]))
+		if _, ok := impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortNone, nil, ninf, first, ninf, second, ninf,
+			ar, ai, b, qi, ninf, zi, ninf, work, len(work), bwork); !ok {
+			return nil, nil, fmt.Errorf("generalized Schur of the infinite part failed: %w", ErrSchurFailed)
+		}
+		copyStrided(s[nf*n+nf:], n, si, ninf, ninf, ninf)
+		copyStrided(t[nf*n+nf:], n, ti, ninf, ninf, ninf)
+		qiGen := blas64.General{Rows: ninf, Cols: ninf, Stride: ninf, Data: qi}
+		ziGen := blas64.General{Rows: ninf, Cols: ninf, Stride: ninf, Data: zi}
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: ninf, Stride: qdRaw.Stride, Data: qdRaw.Data[nf:]}, qiGen,
+			0, blas64.General{Rows: n, Cols: ninf, Stride: n, Data: q[nf:]})
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: ninf, Stride: zdRaw.Stride, Data: zdRaw.Data[nf:]}, ziGen,
+			0, blas64.General{Rows: n, Cols: ninf, Stride: n, Data: z[nf:]})
+		tmp := make([]float64, nf*ninf)
+		tmpGen := blas64.General{Rows: nf, Cols: ninf, Stride: ninf, Data: tmp}
+		for _, pair := range [2]struct {
+			src blas64.General
+			dst []float64
+		}{{blas64.General{Rows: nf, Cols: ninf, Stride: aRaw.Stride, Data: aRaw.Data[nf:]}, s[nf:]},
+			{blas64.General{Rows: nf, Cols: ninf, Stride: eRaw.Stride, Data: eRaw.Data[nf:]}, t[nf:]}} {
+			blas64.Gemm(blas.Trans, blas.NoTrans, 1, qfGen, pair.src, 0, tmpGen)
+			blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, tmpGen, ziGen, 0, blas64.General{Rows: nf, Cols: ninf, Stride: n, Data: pair.dst})
+		}
+	}
+	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+}
+
+// deflateInfinite reduces the regular pencil (A, E) by orthogonal Q, Z to
+// Qᵀ(A, E)Z = ([Af Ax; 0 A∞], [Ef Ex; 0 N]), Ef nonsingular and the
+// trailing n − nf eigenvalues all infinite (A∞ nonsingular, N nilpotent),
+// with the staircase of Van Dooren: compress the rows of E to expose its
+// null space, compress the matching rows of A onto the trailing columns,
+// and repeat on the leading block until its E is nonsingular. A singular
+// value of E within a factor qzInfiniteGap above the rank tolerance, or a
+// near rank-deficient row block of A (a nearly singular pencil), is
+// ambiguous and ok is false.
+func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, ok bool) {
+	n, _ := A.Dims()
+	if n == 0 {
+		return nil, nil, nil, nil, 0, false
+	}
+	buf := make([]float64, 6*n*n+n)
+	ad, ed, ud, vtd, sd, td := buf[:n*n], buf[n*n:2*n*n], buf[2*n*n:3*n*n], buf[3*n*n:4*n*n], buf[4*n*n:5*n*n], buf[5*n*n:6*n*n]
+	sv := buf[6*n*n:]
+	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
+	copyStrided(ad, n, aRaw.Data, aRaw.Stride, n, n)
+	copyStrided(ed, n, eRaw.Data, eRaw.Stride, n, n)
+	var qd, zd []float64
+	if wantQZ {
+		qd, zd = make([]float64, n*n), make([]float64, n*n)
+		for i := range n {
+			qd[i*n+i], zd[i*n+i] = 1, 1
+		}
+	}
+	gen := func(data []float64, r, c, stride int) blas64.General {
+		return blas64.General{Rows: r, Cols: c, Stride: stride, Data: data}
+	}
+	var work []float64
+	grow := func(lw float64) {
+		if len(work) < int(lw) {
+			work = make([]float64, int(lw))
+		}
+	}
+	svd := func(jobU, jobVT lapack.SVDJob, m, k int) bool {
+		var query [1]float64
+		impl.Dgesvd(jobU, jobVT, m, k, sd, k, sv, ud, max(1, m), vtd, k, query[:], -1)
+		grow(query[0])
+		return impl.Dgesvd(jobU, jobVT, m, k, sd, k, sv, ud, max(1, m), vtd, k, work, len(work))
+	}
+	mulInto := func(dst []float64, stride, rows, cols int, x, y blas64.General, tx blas.Transpose) {
+		blas64.Gemm(tx, blas.NoTrans, 1, x, y, 0, gen(td, rows, cols, cols))
+		copyStrided(dst, stride, td, cols, rows, cols)
+	}
+	ratio := 1e3 * float64(n) * eps()
+	tolA := ratio * mat.Norm(A, 2)
+	tolE := ratio * mat.Norm(E, 2)
+	k := n
+	for k > 0 {
+		if clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*tolE) {
+			break
+		}
+		copyStrided(sd, k, ed, n, k, k)
+		if !svd(lapack.SVDAll, lapack.SVDNone, k, k) {
+			return nil, nil, nil, nil, 0, false
+		}
+		if k == n {
+			tolE = ratio * sv[0]
+		}
+		r := 0
+		for _, s := range sv[:k] {
+			if s > tolE {
+				if s <= qzInfiniteGap*tolE {
+					return nil, nil, nil, nil, 0, false
+				}
+				r++
+			}
+		}
+		d := k - r
+		if d == 0 {
+			break
+		}
+		u := gen(ud, k, k, k)
+		mulInto(ad, n, k, n, u, gen(ad, k, n, n), blas.Trans)
+		mulInto(ed, n, k, n, u, gen(ed, k, n, n), blas.Trans)
+		if wantQZ {
+			blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(qd, n, k, n), u, 0, gen(td, n, k, k))
+			copyStrided(qd, n, td, k, n, k)
+		}
+		for i := r; i < k; i++ {
+			clear(ed[i*n : i*n+k])
+		}
+
+		for i := range k {
+			for j := range d {
+				ud[i*k+j] = ad[(r+j)*n+i]
+			}
+		}
+		tau := sv[:d]
+		var query [2]float64
+		impl.Dgeqrf(k, d, ud, k, tau, query[:], -1)
+		impl.Dorgqr(k, k, d, ud, k, tau, query[1:], -1)
+		grow(max(query[0], query[1]))
+		impl.Dgeqrf(k, d, ud, k, tau, work, len(work))
+		clear(sd[:d*d])
+		for i := range d {
+			copy(sd[i*d+i:i*d+d], ud[i*k+i:i*k+d])
+		}
+		impl.Dorgqr(k, k, d, ud, k, tau, work, len(work))
+		if !svd(lapack.SVDNone, lapack.SVDNone, d, d) || sv[d-1] <= qzInfiniteGap*tolA {
+			return nil, nil, nil, nil, 0, false
+		}
+		zk := vtd[:k*k]
+		for i := range k {
+			for j := range k {
+				zk[i*k+(j+r)%k] = ud[i*k+j]
+			}
+		}
+		zg := gen(zk, k, k, k)
+		mulInto(ad, n, k, k, gen(ad, k, k, n), zg, blas.NoTrans)
+		mulInto(ed, n, k, k, gen(ed, k, k, n), zg, blas.NoTrans)
+		if wantQZ {
+			blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(zd, n, k, n), zg, 0, gen(td, n, k, k))
+			copyStrided(zd, n, td, k, n, k)
+		}
+		for i := r; i < k; i++ {
+			clear(ad[i*n : i*n+r])
+		}
+		k = r
+	}
+	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, true
+}
+
+// clearlyNonsingular reports whether the leading k×k block of e (stride
+// lde) has σ_min > 10·bound, from its LU and estimated 1-norm reciprocal
+// condition number: σ_min ≥ rcond·‖B‖₁/√k, with a factor 10 for an
+// estimate too large. scratch (k×k) is overwritten.
+func clearlyNonsingular(e []float64, lde, k int, scratch []float64, bound float64) bool {
+	copyStrided(scratch, k, e, lde, k, k)
+	work := make([]float64, 4*k)
+	iwork := make([]int, k)
+	anorm := impl.Dlange(lapack.MaxColumnSum, k, k, scratch, k, work)
+	if anorm == 0 || !impl.Dgetrf(k, k, scratch, k, iwork) {
+		return false
+	}
+	rcond := impl.Dgecon(lapack.MaxColumnSum, k, scratch, k, anorm, work, iwork)
+	return rcond*anorm/math.Sqrt(float64(k)) > 10*bound
+}
+
+func denseOrNil(d []float64, n int) *mat.Dense {
+	if d == nil {
+		return nil
+	}
+	return mat.NewDense(n, n, d)
+}
+
+// decomposeGeneralizedQZ is decomposeGeneralized on the whole pencil:
+// eigenvalues with |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ are infinite; a large retained
+// one that certifyFiniteRetained cannot certify finite fails closed.
+func decomposeGeneralizedQZ(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
+	policy := newRealizationTransformPolicy(sys)
+	n, _, _ := sys.Dims()
 	s := make([]float64, n*n)
 	t := make([]float64, n*n)
 	q := make([]float64, n*n)
@@ -168,6 +408,14 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	if n1 == 0 {
 		return modesAllInGroup2(policy, sys)
 	}
+	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+}
+
+// splitGeneralizedSchur decouples the n1 leading modes of the generalized
+// Schur form Qᵀ(A, E)Z = (S, T) of orderedQZ (recip as it returns) from the
+// rest; see decomposeGeneralized.
+func splitGeneralizedSchur(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, n1 int, recip bool) (group1, group2 *System, err error) {
+	n, m, p := sys.Dims()
 	n2 := n - n1
 
 	bq := make([]float64, n*m)
@@ -433,7 +681,9 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 		return 0, nil
 	}
 	var u, v mat.Dense
+	u.Reset()
 	svd.UTo(&u)
+	v.Reset()
 	svd.VTo(&v)
 	var av, a22 mat.Dense
 	av.Mul(a, v.Slice(0, n, rank, n))

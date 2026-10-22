@@ -160,51 +160,71 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 	return true
 }
 
-// generalizedPoles computes the finite eigenvalues of the pencil (A, E)
-// via the QZ algorithm (DGGES), leaving out the infinite ones as MATLAB pole
-// does. QZ returns those with rounding-level β rather than 0, so the
-// Stabsep test |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ decides them. A large remaining
-// pole is dropped as well when certifyFiniteRetained proves it one of the
-// n − rank(E) infinite eigenvalues of an index-1 pencil; one it cannot
-// classify is kept.
+// generalizedPoles computes the finite eigenvalues of the pencil (A, E),
+// leaving out the infinite ones as MATLAB pole does. The infinite structure
+// is deflated first (deflateInfinite), since QZ resolves an infinite
+// Jordan chain of length k only to |β|/|α| ~ ε^(1/k), and the poles are the
+// QZ eigenvalues of the finite block. When the deflation is ambiguous, QZ
+// runs on the whole pencil: |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ is infinite, and a
+// large remaining pole is dropped as well when certifyFiniteRetained proves
+// it one of the n − rank(E) infinite eigenvalues of an index-1 pencil; one
+// it cannot classify is kept.
 func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
+	if a, e, _, _, nf, ok := deflateInfinite(A, E, false); ok {
+		ad, ed := a.RawMatrix(), e.RawMatrix()
+		return qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
+	}
+	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
 	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
-	aData := make([]float64, n*n)
-	eData := make([]float64, n*n)
-	aRaw := A.RawMatrix()
-	eRaw := E.RawMatrix()
-	copyStrided(aData, n, aRaw.Data, aRaw.Stride, n, n)
-	copyStrided(eData, n, eRaw.Data, eRaw.Stride, n, n)
-
-	alphar := make([]float64, n)
-	alphai := make([]float64, n)
-	beta := make([]float64, n)
-	vsl := make([]float64, n*n)
-	vsr := make([]float64, n*n)
-
-	var workQuery [1]float64
-	impl.Dgges(lapack.SchurNone, lapack.SchurNone, lapack.SortNone, nil,
-		n, aData, n, eData, n, alphar, alphai, beta, vsl, n, vsr, n, workQuery[:], -1, nil)
-	lwork := int(workQuery[0])
-	work := make([]float64, lwork)
-	_, ok := impl.Dgges(lapack.SchurNone, lapack.SchurNone, lapack.SortNone, nil,
-		n, aData, n, eData, n, alphar, alphai, beta, vsl, n, vsr, n, work, lwork, nil)
+	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
+	alphar, alphai, beta, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
 	if !ok {
 		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
 	}
-
-	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
 	if tol := finitePoleInfTol(A, E, n, alphar, alphai, beta, infTol, normA, normE); tol > 0 {
 		infTol = tol
 	}
-	poles := make([]complex128, 0, n)
-	for i := range n {
+	return finitePoles(alphar, alphai, beta, infTol), nil
+}
+
+func qzFinitePoles(n int, a []float64, lda int, e []float64, lde int, infTol float64) ([]complex128, error) {
+	alphar, alphai, beta, ok := qzEigenvalues(n, a, lda, e, lde)
+	if !ok {
+		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
+	}
+	return finitePoles(alphar, alphai, beta, infTol), nil
+}
+
+// finitePoles returns (α_r + iα_i)/β for the eigenvalues that are not
+// infinite at infTol.
+func finitePoles(alphar, alphai, beta []float64, infTol float64) []complex128 {
+	poles := make([]complex128, 0, len(beta))
+	for i := range beta {
 		if qzInfinite(alphar[i], alphai[i], beta[i], infTol) {
 			continue
 		}
 		poles = append(poles, complex(alphar[i]/beta[i], alphai[i]/beta[i]))
 	}
-	return poles, nil
+	return poles
+}
+
+// qzEigenvalues returns the generalized eigenvalues (α_r + iα_i)/β of the
+// leading n×n pencil of (a, e), row-major with strides lda, lde.
+func qzEigenvalues(n int, a []float64, lda int, e []float64, lde int) (alphar, alphai, beta []float64, ok bool) {
+	aData := make([]float64, n*n)
+	eData := make([]float64, n*n)
+	copyStrided(aData, n, a, lda, n, n)
+	copyStrided(eData, n, e, lde, n, n)
+	buf := make([]float64, 3*n)
+	alphar, alphai, beta = buf[:n], buf[n:2*n], buf[2*n:]
+	var vsl, vsr [1]float64
+	var workQuery [1]float64
+	impl.Dgges(lapack.SchurNone, lapack.SchurNone, lapack.SortNone, nil,
+		n, aData, max(1, n), eData, max(1, n), alphar, alphai, beta, vsl[:], 1, vsr[:], 1, workQuery[:], -1, nil)
+	work := make([]float64, int(workQuery[0]))
+	_, ok = impl.Dgges(lapack.SchurNone, lapack.SchurNone, lapack.SortNone, nil,
+		n, aData, max(1, n), eData, max(1, n), alphar, alphai, beta, vsl[:], 1, vsr[:], 1, work, len(work), nil)
+	return alphar, alphai, beta, ok
 }
 
 // finitePoleInfTol returns the |β|/|α| bound of certifyFiniteRetained when
