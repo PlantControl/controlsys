@@ -3719,7 +3719,6 @@ const (
 // short of a pole at z = −1 that p.nyquistEdge resolves.
 const pidTuningSensNyquist = .9999
 
-
 // pidTuningLoopTail returns a bound on |C(jω')·P(jω')| over ω' ≥ ω for a
 // continuous plant without internal delays, or nil; see pidMarkovTail.
 func pidTuningLoopTail(plant *System) func(*PID2, float64) float64 {
