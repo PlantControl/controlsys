@@ -2540,9 +2540,12 @@ func pidTuningTerms(family PidtuneType) (hasP, hasI, hasD, filtered, ok bool) {
 // always under residueSign, whose integrators leave the walk unanchored. The
 // loop phase starts within ±90° at low frequency, so if |L| ≥ 1 below wc,
 // a stable loop needs its unwrapped phase at wc above −180°; with phase
-// known the band is judged unwrapped. This excludes designs whose |L|
-// dips below 1 and recovers below wc. Otherwise a cone wider than a
-// half-plane reaches every phase.
+// known and an integral term, which puts |L| above 1 near DC, the band is
+// judged unwrapped. This excludes designs whose |L| dips below 1 and
+// recovers below wc. Without one, |L(0)| = |Kp·G(0)| can be below 1, and
+// a loop crossing −180° there can be stable at any wrapped phase, so the
+// band is judged wrapped, as when phase is NaN; wrapped, a cone wider than
+// a half-plane reaches every phase.
 func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions, pm, phase float64) bool {
 	hasP, hasI, hasD, filtered, ok := pidTuningTerms(family)
 	if !ok || p.wantSign() == 0 {
@@ -2565,7 +2568,7 @@ func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions
 		}
 	}
 	want := -180 + pm
-	if !math.IsNaN(phase) {
+	if hasI && !math.IsNaN(phase) {
 		return want >= phase+lo-3-1e-9 && want <= phase+hi+3+1e-9
 	}
 	if hi-lo >= 180 {
