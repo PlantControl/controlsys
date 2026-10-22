@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 
@@ -126,5 +127,51 @@ func TestRiccatiAccuracy_SingularU11Rejected(t *testing.T) {
 	problem.keepPoor(x, K, eig, 8e-15, 0.03)
 	if problem.poor == nil {
 		t.Fatal("rcnd 8e-15 rejected")
+	}
+}
+
+// TestRiccati_OtherScaling: a solve that finds no stabilizing solution
+// in one scaling mode is retried once in the other, keeping the other
+// options (INY4MG: Care "modeOnly" failed by default, solved with
+// NoScaling); other errors are not retried, and with both modes failing
+// the first error is returned.
+func TestRiccati_OtherScaling(t *testing.T) {
+	S := mat.NewDense(1, 1, []float64{2})
+	first := fmt.Errorf("first: %w", ErrSchurFailed)
+	for _, tc := range []struct {
+		name   string
+		opts   *RiccatiOpts
+		errs   map[bool]error
+		want   []bool
+		wantOK bool
+		err    error
+	}{
+		{"default fails", nil, map[bool]error{false: ErrNoStabilizing}, []bool{false, true}, true, nil},
+		{"NoScaling fails", &RiccatiOpts{S: S, NoScaling: true}, map[bool]error{true: first}, []bool{true, false}, true, nil},
+		{"both fail", &RiccatiOpts{S: S}, map[bool]error{false: first, true: ErrNoStabilizing}, []bool{false, true}, false, first},
+		{"singular R", nil, map[bool]error{false: ErrSingularR}, []bool{false}, false, ErrSingularR},
+		{"solves", nil, nil, []bool{false}, true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []bool
+			solve := func(_, _, _, _ *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+				ns := opts != nil && opts.NoScaling
+				calls = append(calls, ns)
+				if opts != nil && tc.opts != nil && opts.S != tc.opts.S {
+					t.Error("options not kept")
+				}
+				if err := tc.errs[ns]; err != nil {
+					return nil, err
+				}
+				return &RiccatiResult{}, nil
+			}
+			res, err := otherScaling(solve, nil, nil, nil, nil, tc.opts)
+			if fmt.Sprint(calls) != fmt.Sprint(tc.want) {
+				t.Errorf("NoScaling calls %v, want %v", calls, tc.want)
+			}
+			if (res != nil) != tc.wantOK || err != tc.err {
+				t.Errorf("got %v, %v; want ok %v, err %v", res, err, tc.wantOK, tc.err)
+			}
+		})
 	}
 }
