@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/cmplx"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/lapack"
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // decomposeByEigenvalues splits sys additively, G = G1 + G2, where G1 holds the
@@ -124,24 +126,15 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	n, m, p := sys.Dims()
 	s := make([]float64, n*n)
 	t := make([]float64, n*n)
-	aRaw, eRaw := sys.A.RawMatrix(), sys.E.RawMatrix()
-	copyStrided(s, n, aRaw.Data, aRaw.Stride, n, n)
-	copyStrided(t, n, eRaw.Data, eRaw.Stride, n, n)
 	q := make([]float64, n*n)
 	z := make([]float64, n*n)
 	alphar := make([]float64, n)
 	alphai := make([]float64, n)
 	beta := make([]float64, n)
-	bwork := make([]bool, n)
 	selct := func(ar, ai, b float64) bool {
 		return b != 0 && isGroup1(complex(ar/b, ai/b))
 	}
-	var query [1]float64
-	impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, selct, n, s, n, t, n,
-		alphar, alphai, beta, q, n, z, n, query[:], -1, bwork)
-	work := make([]float64, int(query[0]))
-	n1, ok := impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, selct, n, s, n, t, n,
-		alphar, alphai, beta, q, n, z, n, work, len(work), bwork)
+	n1, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
 	if !ok {
 		return nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 	}
@@ -178,10 +171,7 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 				l[i*n2+j] = -t[i*n+n1+j]
 			}
 		}
-		iwork := make([]int, n+6)
-		impl.Dtgsyl(blas.NoTrans, 0, n1, n2, s, n, s[n1*n+n1:], n, r, n2, t, n, t[n1*n+n1:], n, l, n2, query[:], -1, iwork)
-		syl := make([]float64, max(1, int(query[0])))
-		scale, _, ok := impl.Dtgsyl(blas.NoTrans, 0, n1, n2, s, n, s[n1*n+n1:], n, r, n2, t, n, t[n1*n+n1:], n, l, n2, syl, len(syl), iwork)
+		scale, ok := qzSylvester(n, n1, recip, s, t, r, l)
 		if !ok || scale < 1e-12 {
 			return nil, nil, fmt.Errorf("retained and discarded modes cannot be separated reliably: %w", ErrSchurFailed)
 		}
@@ -203,10 +193,23 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 
 	A1 := extractModalBlock(s, n, 0, n1, 0, n1)
 	B1 := extractModalBlock(bq, m, 0, n1, 0, m)
-	t11 := blas64.Triangular{Uplo: blas.Upper, Diag: blas.NonUnit, N: n1, Stride: n, Data: t}
-	blas64.Trsm(blas.Left, blas.NoTrans, 1, t11, A1.RawMatrix())
-	if m > 0 {
-		blas64.Trsm(blas.Left, blas.NoTrans, 1, t11, B1.RawMatrix())
+	if recip {
+		var lu mat.LU
+		lu.Factorize(extractModalBlock(t, n, 0, n1, 0, n1))
+		if err := lu.SolveTo(A1, false, A1); err != nil {
+			return nil, nil, fmt.Errorf("retained modes: %w", ErrSchurFailed)
+		}
+		if m > 0 {
+			if err := lu.SolveTo(B1, false, B1); err != nil {
+				return nil, nil, fmt.Errorf("retained modes: %w", ErrSchurFailed)
+			}
+		}
+	} else {
+		t11 := blas64.Triangular{Uplo: blas.Upper, Diag: blas.NonUnit, N: n1, Stride: n, Data: t}
+		blas64.Trsm(blas.Left, blas.NoTrans, 1, t11, A1.RawMatrix())
+		if m > 0 {
+			blas64.Trsm(blas.Left, blas.NoTrans, 1, t11, B1.RawMatrix())
+		}
 	}
 	group1, err = policy.resultWithZeroFeedthrough(A1, B1, extractModalBlock(cz, n, 0, p, 0, n1))
 	if err != nil {
@@ -296,4 +299,112 @@ func schur2x2Eigenvalues(a, b, c, d float64) (complex128, complex128) {
 func isConjugate(a, b complex128) bool {
 	return math.Abs(real(a)-real(b)) < 1e-10*math.Max(1, math.Abs(real(a))) &&
 		math.Abs(imag(a)+imag(b)) < 1e-10*math.Max(1, math.Abs(imag(a)))
+}
+
+// orderedQZ writes the generalized Schur form Qᵀ(A, E)Z = (S, T) of the
+// n×n pencil (a, e) to s and t, Q to q and Z to z, with eigenvalues
+// (α_r + iα_i)/β, ordered so that the n1 selected by selct lead. Dgges,
+// like LAPACK DTGEX2, rejects a swap of blocks decided by rounding, also
+// for well-separated eigenvalues; the reorder is then retried on the
+// reciprocal pencil (E, A), which has the same deflating subspaces, and
+// recip is set: S is then upper triangular and T quasi-triangular. The
+// retry is kept only when its eigenvalues match the first run's one to
+// one within qzRetryTol (chordal), each selected alike; otherwise ok is
+// false.
+func orderedQZ(n int, a, e blas64.General, selct func(ar, ai, b float64) bool,
+	s, t, q, z, alphar, alphai, beta []float64) (n1 int, recip, ok bool) {
+	copyStrided(s, n, a.Data, a.Stride, n, n)
+	copyStrided(t, n, e.Data, e.Stride, n, n)
+	bwork := make([]bool, n)
+	var query [1]float64
+	impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, selct, n, s, n, t, n,
+		alphar, alphai, beta, q, n, z, n, query[:], -1, bwork)
+	work := make([]float64, int(query[0]))
+	n1, ok = impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, selct, n, s, n, t, n,
+		alphar, alphai, beta, q, n, z, n, work, len(work), bwork)
+	if ok || n1 == 0 {
+		return n1, false, ok
+	}
+
+	first := make([]float64, 3*n)
+	copy(first, alphar)
+	copy(first[n:], alphai)
+	copy(first[2*n:], beta)
+	reciprocal := func(ar, ai, b float64) bool {
+		return selct(qzReciprocal(ar, ai, b))
+	}
+	copyStrided(s, n, a.Data, a.Stride, n, n)
+	copyStrided(t, n, e.Data, e.Stride, n, n)
+	n1r, okr := impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, reciprocal, n, t, n, s, n,
+		alphar, alphai, beta, q, n, z, n, work, len(work), bwork)
+	for i := range n {
+		alphar[i], alphai[i], beta[i] = qzReciprocal(alphar[i], alphai[i], beta[i])
+	}
+	if !okr || n1r != n1 || !qzRetryConsistent(first, alphar, alphai, beta, selct) {
+		return n1, false, false
+	}
+	return n1, true, true
+}
+
+// qzReciprocal maps an eigenvalue μ = (α_r + iα_i)/β of the reciprocal
+// pencil (E, A) to λ = 1/μ of (A, E), as (α_r, α_i, β) with β ≥ 0.
+func qzReciprocal(ar, ai, b float64) (float64, float64, float64) {
+	mod := math.Hypot(ar, ai)
+	if mod == 0 {
+		return b, 0, 0
+	}
+	return b * (ar / mod), -b * (ai / mod), mod
+}
+
+// qzSylvester solves S11·R − L·S22 = scale·C, T11·R − L·T22 = scale·F for
+// the n1-leading split of the generalized Schur form (s, t) of orderedQZ,
+// with C, F given in r, l and overwritten by R, L.
+func qzSylvester(n, n1 int, recip bool, s, t, r, l []float64) (scale float64, ok bool) {
+	n2 := n - n1
+	if recip {
+		s, t = t, s
+		for i := range r {
+			r[i], l[i] = l[i], r[i]
+		}
+	}
+	iwork := make([]int, n+6)
+	var query [1]float64
+	impl.Dtgsyl(blas.NoTrans, 0, n1, n2, s, n, s[n1*n+n1:], n, r, n2, t, n, t[n1*n+n1:], n, l, n2, query[:], -1, iwork)
+	work := make([]float64, max(1, int(query[0])))
+	scale, _, ok = impl.Dtgsyl(blas.NoTrans, 0, n1, n2, s, n, s[n1*n+n1:], n, r, n2, t, n, t[n1*n+n1:], n, l, n2, work, len(work), iwork)
+	return scale, ok
+}
+
+// qzRetryTol bounds the chordal distance between the eigenvalues of the
+// first and the reciprocal QZ of orderedQZ.
+const qzRetryTol = 1e-8
+
+// qzRetryConsistent reports whether the eigenvalues (alphar, alphai, beta)
+// match those in first (α_r, α_i, β blocks) one to one within qzRetryTol,
+// each selected alike by selct.
+func qzRetryConsistent(first, alphar, alphai, beta []float64, selct func(ar, ai, b float64) bool) bool {
+	n := len(alphar)
+	used := make([]bool, n)
+	for i := range n {
+		ai := complex(alphar[i], alphai[i])
+		ni := math.Hypot(math.Hypot(alphar[i], alphai[i]), beta[i])
+		best, bestD := -1, math.Inf(1)
+		for j := range n {
+			if used[j] {
+				continue
+			}
+			aj := complex(first[j], first[n+j])
+			nj := math.Hypot(math.Hypot(first[j], first[n+j]), first[2*n+j])
+			d := cmplx.Abs(ai*complex(first[2*n+j], 0)-aj*complex(beta[i], 0)) / (ni * nj)
+			if d < bestD {
+				best, bestD = j, d
+			}
+		}
+		if !(bestD <= qzRetryTol) ||
+			selct(alphar[i], alphai[i], beta[i]) != selct(first[best], first[n+best], first[2*n+best]) {
+			return false
+		}
+		used[best] = true
+	}
+	return true
 }

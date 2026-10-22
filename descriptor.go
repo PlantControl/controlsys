@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 
-	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -334,8 +333,6 @@ func (sys *System) properExplicitForm() (*System, error) {
 
 	s := make([]float64, n*n)
 	t := make([]float64, n*n)
-	copyStrided(s, n, sys.A.RawMatrix().Data, sys.A.RawMatrix().Stride, n, n)
-	copyStrided(t, n, sys.E.RawMatrix().Data, sys.E.RawMatrix().Stride, n, n)
 	tol := 100 * float64(n) * eps() * denseNorm(sys.E)
 	finite := func(_, _, beta float64) bool { return math.Abs(beta) > tol }
 
@@ -344,13 +341,7 @@ func (sys *System) properExplicitForm() (*System, error) {
 	beta := make([]float64, n)
 	vsl := make([]float64, n*n)
 	vsr := make([]float64, n*n)
-	bwork := make([]bool, n)
-	var query [1]float64
-	impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, finite,
-		n, s, n, t, n, alphar, alphai, beta, vsl, n, vsr, n, query[:], -1, bwork)
-	work := make([]float64, int(query[0]))
-	nf, ok := impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortSelected, finite,
-		n, s, n, t, n, alphar, alphai, beta, vsl, n, vsr, n, work, len(work), bwork)
+	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
 	if !ok {
 		return nil, fmt.Errorf("generalized Schur decomposition failed: %w", ErrDescriptorSingular)
 	}
@@ -376,13 +367,7 @@ func (sys *System) properExplicitForm() (*System, error) {
 		l := denseCopy(extractBlock(T, 0, nf, nf, ni))
 		r.Scale(-1, r)
 		l.Scale(-1, l)
-		rRaw, lRaw := r.RawMatrix(), l.RawMatrix()
-		iwork := make([]int, n+6)
-		impl.Dtgsyl(blas.NoTrans, 0, nf, ni, s, n, s[nf*n+nf:], n, rRaw.Data, rRaw.Stride,
-			t, n, t[nf*n+nf:], n, lRaw.Data, lRaw.Stride, query[:], -1, iwork)
-		work = make([]float64, max(int(query[0]), 1))
-		scale, _, ok := impl.Dtgsyl(blas.NoTrans, 0, nf, ni, s, n, s[nf*n+nf:], n, rRaw.Data, rRaw.Stride,
-			t, n, t[nf*n+nf:], n, lRaw.Data, lRaw.Stride, work, len(work), iwork)
+		scale, ok := qzSylvester(n, nf, recip, s, t, r.RawMatrix().Data, l.RawMatrix().Data)
 		if !ok || scale == 0 {
 			return nil, fmt.Errorf("Weierstrass decoupling failed: %w", ErrDescriptorSingular)
 		}
