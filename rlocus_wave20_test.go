@@ -193,3 +193,43 @@ func TestRootLocus_RotatedOriginDoublePole(t *testing.T) {
 		t.Errorf("%d/600 rotated cases miss the origin breakaway", miss)
 	}
 }
+
+// TestRootLocus_MarkovZeroCountConsistent: zeros are dropped as rounding
+// noise only past the first Markov parameter no rounding can zero, and the
+// asymptote sign follows the Markov parameter of the degree Zeros() fixes.
+// Ext sweep 920: h₂ is 6.7·eps·sens (inside the 10× margin, yet cannot
+// vanish), so the zero −232 stays. Ext 1294: h₁ is resolved in the floats
+// but Zeros() reports none, so 2 asymptotes at the sign of h₂ > 0. Base
+// sweep 1692: no hₖ is resolved, so no zero is dropped.
+func TestRootLocus_MarkovZeroCountConsistent(t *testing.T) {
+	ext, base := rlsxGenerate(), rlswGenerate()
+	for _, tc := range []struct {
+		c       *rlswCase
+		name    string
+		asym    []float64
+		arrival int
+	}{
+		{&ext[920], "ext 920", []float64{math.Pi / 2, 3 * math.Pi / 2}, 4},
+		{&ext[1294], "ext 1294", []float64{math.Pi / 2, 3 * math.Pi / 2}, 0},
+		{&base[1692], "base 1692", []float64{0, math.Pi}, 3},
+	} {
+		sys, err := tc.c.system()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := RootLocus(sys, []float64{0, 1})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		rlpAngles(t, tc.name+" AsymptoteAngles", res.AsymptoteAngles, tc.asym)
+		if len(res.ArrivalAngles) != tc.arrival {
+			t.Errorf("%s: %d arrival angles, want %d", tc.name, len(res.ArrivalAngles), tc.arrival)
+		}
+		if tc.name == "ext 920" {
+			oi, _ := tc.c.oracles()
+			if !oi.accepts(res.Breakaway) {
+				t.Errorf("ext 920: Breakaway = %v, want %v", res.Breakaway, oi.required)
+			}
+		}
+	}
+}

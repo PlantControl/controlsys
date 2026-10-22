@@ -206,6 +206,18 @@ func rlsxGenerate() []rlswCase {
 	return cases
 }
 
+// rlsxPrecisionLimits: see rlswPrecisionLimits. All are rotated+similar
+// realizations whose eigenvalues eps-level entry changes move by O(1)
+// relative.
+var rlsxPrecisionLimits = map[int]string{
+	394:  "D=1.75, rotated triple pole 4.395e-3: float charpoly splits it into 4.37e-3±4.2e-5i, 4.44e-3, and the float TF has no breakaway there (oFlt [-7.3e-3]); amd64 eig resolves a near pair",
+	477:  "triple pole -15.25: float charpoly splits it by 2e-3 (complex pair); 1-ulp perturbations give [], unposed or a pair -15.25002/-15.24998",
+	885:  "D=-1.5, double pole -1.648e-3: float charpoly poles -1.53e-3±2.5e-4i, -1.94e-3; 1-ulp perturbations give [] or far pairs ±1.7e8..4.6e8",
+	1042: "poles ~1e-3: 1-ulp perturbations move the real pole 7.9e-4..9.3e-4 and give [], a far root -1.6e8..-2.6e8 or three near ones",
+	1647: "D=-1.25, poles ~1e-5: 1-ulp perturbations move the poles to ~1.5e-4 (10x) and leave the oracle unposed",
+	1766: "relative degree 6, poles ~5e-6: float charpoly poles ~2.3e-3; 1-ulp perturbations give [] or one root in -7.3e-4..-5.9e-4",
+}
+
 // TestRootLocusSweepExtNoRegression fails when a component that base got
 // right on the second frozen sweep is now wrong (or errors).
 func TestRootLocusSweepExtNoRegression(t *testing.T) {
@@ -213,5 +225,5 @@ func TestRootLocusSweepExtNoRegression(t *testing.T) {
 		t.Skip("frozen 2000-case sweep")
 	}
 	skipSlowUnderRace(t)
-	rlswCheck(t, rlsxGenerate(), "testdata/rlocus_sweep_ext_base.json", "RLOCUS_SWEEPX_WRITE")
+	rlswCheck(t, rlsxGenerate(), "testdata/rlocus_sweep_ext_base.json", "RLOCUS_SWEEPX_WRITE", rlsxPrecisionLimits)
 }
