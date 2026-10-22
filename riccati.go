@@ -154,7 +154,7 @@ type RiccatiResult struct {
 	// stability boundary, A − BK only rounded to stable; check it before
 	// use. A non-finite X or no stabilizing solution (Report 2, 3) is an
 	// error, not a result, as is an X with an unstabilizable mode of (A, B)
-	// on the boundary to within √eps relative (PBH).
+	// on the boundary to within rounding (PBH).
 	Accuracy int
 
 	step float64
@@ -244,7 +244,7 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // under cheap control with weak actuation Newton has no quadratic region
 // (its first step from an X accurate to 1e-11 can be 1e-6), and such an
 // X may be accurate or off by far more than its step; when (A, B) has a
-// mode on the boundary (to √eps relative) that fails the PBH rank test,
+// mode on the boundary (to rounding) that fails the PBH rank test,
 // no stabilizing solution exists and Care returns ErrNoStabilizing
 // instead. An X whose U11 has
 // rcnd below eps is not finite (icare Report 2) and is never returned.
@@ -745,13 +745,16 @@ func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []com
 	p.rcnd, p.step = rcnd, step
 }
 
-// boundaryUnstabilizable reports a finite eigenvalue λ of (A, E) on, beyond
-// or within √eps·|λ| of the stability boundary (the split of a double root
-// on it) at which [A − λE, B] has rank below n by the PBH test,
-// σmin ≤ n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖: no stabilizing solution exists
-// (icare/idare Report 3), and an Accuracy 1 X would be stable only to
-// rounding, its exact closed loop unstable (K72KOR). The band is relative,
-// so a mode at −1e-14 of a continuous A stays stable (BWUCB5).
+// boundaryUnstabilizable reports a finite eigenvalue λ of (A, E) on or
+// beyond the stability boundary, or within rounding of it, at which
+// [A − λE, B] has rank below n by the PBH test, σmin ≤ n·eps·‖[‖A‖ +
+// |λ|‖E‖, ‖B‖]‖: no stabilizing solution exists (icare/idare Report 3),
+// and an Accuracy 1 X would be stable only to rounding, its exact closed
+// loop unstable (K72KOR). A double root on the boundary that rounding
+// splits leaves a root on or beyond it, or a complex pair as close to it
+// as the rounding of A, so the band is n·eps·(‖A‖ + |λ|‖E‖) for a complex
+// λ and n·eps·|λ| for a real one: a lightly damped mode at −3e-7 ± 100i
+// stays stable, as does a real mode at −3e-16 of a continuous A (BWUCB5).
 func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 	n, m := problem.n, problem.m
 	aRaw, bRaw := problem.A.RawMatrix(), problem.B.RawMatrix()
@@ -782,7 +785,10 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 		}
 		lr, li := wr[k]/beta[k], wi[k]/beta[k]
 		mod := math.Hypot(lr, li)
-		tol := math.Sqrt(ep) * mod
+		tol := nf * ep * mod
+		if li != 0 {
+			tol = nf * ep * (an + mod*en)
+		}
 		if continuous && lr < -tol || !continuous && mod < 1-tol {
 			continue
 		}

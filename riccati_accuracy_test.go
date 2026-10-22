@@ -604,6 +604,72 @@ func TestDare_NearCircleZeroCostMode(t *testing.T) {
 	}
 }
 
+// TestDare_SteinSingularRescue (FD55OF #7): zero-cost uncontrollable modes
+// at 1 − δ and 1 − δ ± iε, the pair a non-normal block (t₁₂ ≫ t₂₁), stay
+// in the closed loop. Unscaled, the Stein equation of the first Hewer
+// step couples the real mode with the pair through a Kronecker block of
+// pivot ((2δ)² + ε²)/t₁₂ below eps·t₁₂, so it is singular: dare keeps
+// the pencil X as the Lyapunov-singular candidate (Accuracy 1, step +Inf).
+// The 256-bit Hewer oracle shows that candidate inaccurate (off by 1e-5
+// to 3e-3 relative here, by 1e2 at δ = 1e-8, its X₁₁ held only by the
+// residual); Dare's retry in the scaled mode, whose balancing makes the
+// pair normal, certifies an X accurate to the oracle, and is what both
+// modes return.
+func TestDare_SteinSingularRescue(t *testing.T) {
+	cases := []struct{ t12, delta, eps2 float64 }{
+		{64, 1e-10, 1.92e-13},
+		{256, 1e-10, 7.68e-12},
+		{256, 1e-9, 7.68e-12},
+	}
+	const r = 0.8
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("t12=%g/delta=%g/eps2=%g", tc.t12, tc.delta, tc.eps2), func(t *testing.T) {
+			A := mat.NewDense(6, 6, []float64{
+				1 - tc.delta, 0, 0, 0, 0, 0,
+				0, 1 - tc.delta, tc.t12, 0, 0, 0,
+				0, -tc.eps2 / tc.t12, 1 - tc.delta, 0, 0, 0,
+				0, 0, 0, 0.5, 0.2, -0.1,
+				0, 0, 0, 0.3, 0.9, 0.4,
+				0, 0, 0, -0.6, 0.1, 1.1})
+			B := mat.NewDense(6, 1, []float64{0, 0, 0, 1.2, -0.8, 0.5})
+			Q := mat.NewDense(6, 6, nil)
+			Q.Set(3, 3, 1)
+			Q.Set(4, 4, 0.5)
+			Q.Set(5, 5, 2)
+			R := mat.NewDense(1, 1, []float64{r})
+			cand, err := dare(A, B, Q, R, &RiccatiOpts{NoScaling: true})
+			if err != nil {
+				t.Fatalf("unscaled dare: %v", err)
+			}
+			if cand.Accuracy != 1 || !math.IsInf(cand.step, 1) {
+				t.Errorf("unscaled dare: Accuracy %d, step %g; want the Lyapunov-singular candidate (1, +Inf)", cand.Accuracy, cand.step)
+			}
+			for _, ns := range []bool{false, true} {
+				res, err := Dare(A, B, Q, R, &RiccatiOpts{NoScaling: ns})
+				if err != nil {
+					t.Fatalf("NoScaling %v: %v", ns, err)
+				}
+				if res.Accuracy != 0 {
+					t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
+				}
+				Xo := bigRiccatiNewton(t, false, A, B, Q, r, res.X)
+				var d mat.Dense
+				d.Sub(res.X, Xo)
+				if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= 1e-9) {
+					t.Errorf("NoScaling %v: relative error %.3g", ns, rel)
+				}
+				for i := range 3 {
+					for j := range 6 {
+						if v := Xo.At(i, j); !(math.Abs(v) <= 1e-30) {
+							t.Fatalf("oracle X[%d,%d] = %g, want 0", i, j, v)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestKalman_BoundaryUndetectableNoStabilizing (K72KOR): FuzzKalman inputs
 // whose (C, A) has an undetectable mode at z = 1 (two poles there with one
 // output; four). Base returned Accuracy 1 with A − LC stable in float64
@@ -643,9 +709,10 @@ func TestKalman_BoundaryUndetectableNoStabilizing(t *testing.T) {
 // TestKalman_WeaklyDetectableUnitPolesNotCertified (K72KOR, FuzzKalman
 // dare_unit_poles_weakly_detectable_fma): two poles at z = 1 and a pair on
 // the unit circle, detectable (PBH σmin ≈ 5e-3 against ‖C‖ = √2, 6.5e5
-// times n·eps·‖[A C]‖, ‖A‖ ≈ 5.7e6 from a pole at 48041). ‖X‖ ≈ 1e10, so
-// under FMA rounding the exact closed loop of the returned L is unstable
-// within the rounding of forming A − LC. Whether MATLAB idare reports 1 or
+// times n·eps·‖[A C]‖, ‖A‖ ≈ 5.7e6 from a pole at 48041), so the PBH
+// check rightly passes it. ‖X‖ ≈ 1e10, so under FMA rounding and on amd64
+// (a root at 1 + 1.9e-5 by Schur–Cohn bisection) the exact closed loop of
+// the returned L is unstable within the rounding of forming A − LC. Whether MATLAB idare reports 1 or
 // 3 here is open; X must never be certified.
 func TestKalman_WeaklyDetectableUnitPolesNotCertified(t *testing.T) {
 	v := [fzNVals]float64{0.26667, -1.5, 0.16667, 14, -35.4, 4, 89, -90, -0.0238, 91, 5.2, -73, 100, -58, 4.5, -170}
@@ -666,6 +733,64 @@ func TestKalman_WeaklyDetectableUnitPolesNotCertified(t *testing.T) {
 		}
 		if res.Accuracy == 0 {
 			t.Fatalf("NoScaling %v: Accuracy 0", ns)
+		}
+	}
+}
+
+// TestCare_LightlyDampedUncontrollableModeStable (K72KOR review): under
+// cheap control Care ends at Accuracy 1, and (A, B) has an exactly
+// uncontrollable mode at −δ ± iω, stable by δ ≫ n·eps·‖A‖. The PBH
+// boundary check must not reject it as Report 3 (icare returns X): a band
+// of √eps·|λ| (1.5e-6 at ω = 100) once did. X = diag(0, Z) is within 1e-5
+// of the 256-bit Newton oracle on arm64 and amd64 for these cases (an
+// Accuracy 1 X need not be: at δ = 3e-9, ω = 100 amd64 is off by 0.26);
+// A − BK is block lower triangular, so its modes are −δ ± iω and those of
+// A₂₂ − B₂K₂.
+func TestCare_LightlyDampedUncontrollableModeStable(t *testing.T) {
+	cases := []struct{ omega, delta float64 }{{100, 3e-7}, {100, 1e-8}, {1, 3e-9}}
+	z := []float64{856429.0639350016, -1065801.0616290835, 746125.9028657239,
+		-1065801.0616290835, 5877372.764982905, 1077549.257325759,
+		746125.9028657239, 1077549.257325759, 4766586.529900663}
+	const r = 3.78006200097873e-15
+	for _, tc := range cases {
+		for _, ns := range []bool{false, true} {
+			t.Run(fmt.Sprintf("omega=%g/delta=%g/NoScaling=%v", tc.omega, tc.delta, ns), func(t *testing.T) {
+				A := mat.NewDense(5, 5, []float64{
+					-tc.delta, tc.omega, 0, 0, 0,
+					-tc.omega, -tc.delta, 0, 0, 0,
+					0, 0, 0.27657708515800555, -0.3487414614536205, -0.05759508390159393,
+					0, 0, -0.185475044479898, 0.7254440051529344, -0.06988678228186773,
+					0, 0, 0.2823003271660112, 0.04502583137978022, 0.09058571535133608})
+				B := mat.NewDense(5, 1, []float64{0, 0, -0.4580242863432319, 0.8817080503903288, -0.15544484785480472})
+				Q := mat.NewDense(5, 5, nil)
+				for i := range 3 {
+					for j := range 3 {
+						Q.Set(2+i, 2+j, z[3*i+j])
+					}
+				}
+				res, err := Care(A, B, Q, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns})
+				if err != nil {
+					t.Fatal(err)
+				}
+				Xo := bigRiccatiNewton(t, true, A, B, Q, r, res.X)
+				var d mat.Dense
+				d.Sub(res.X, Xo)
+				if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= 1e-5) {
+					t.Errorf("Accuracy %d: relative error %.3g", res.Accuracy, rel)
+				}
+				var bk, acl mat.Dense
+				bk.Mul(B, res.K)
+				acl.Sub(A, &bk)
+				var eig mat.Eigen
+				if !eig.Factorize(acl.Slice(2, 5, 2, 5), mat.EigenNone) {
+					t.Fatal("Eigen failed")
+				}
+				for _, v := range eig.Values(nil) {
+					if !(real(v) < -1e-3) {
+						t.Errorf("closed-loop eigenvalue %v", v)
+					}
+				}
+			})
 		}
 	}
 }
