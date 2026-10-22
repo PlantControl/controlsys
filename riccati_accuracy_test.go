@@ -59,19 +59,65 @@ func TestRiccatiAccuracy_Propagated(t *testing.T) {
 	check("Lqe", res, err, At, Bt, true)
 }
 
-// TestRiccatiAccuracy_FailClosed: Lqg and H2Syn return controllers, which
-// cannot report the Accuracy of their Riccati solutions, so an X no Newton
-// step certifies (weakBStall) stays ErrNoStabilizing there.
-func TestRiccatiAccuracy_FailClosed(t *testing.T) {
-	A, B, Q, R, _ := careVerifyCaseNamed(t, "weakBStall").dense()
+// TestRiccatiAccuracy_LqgH2Syn: Lqg and H2Syn of ch360 and weakBStall,
+// whose regulator X no Newton step certifies, return the controller with
+// Accuracy 1, as MATLAB lqg and h2syn consume icare's X with a warning,
+// not ErrNoStabilizing (MQM2E7). The controller is checked by separation:
+// A + B·Cc and A − Bc·C stable, Ac = A + B·Cc − Bc·C. Their cheap-control
+// gains (weakBStall ‖K‖ = 8e8) leave the assembled closed loop unstable
+// in float64 (weakBStall: an eigenvalue +0.02 where those of A − BK lie
+// at −0.56 and below), so H2Norm, and with it H2Syn, fails; H2Syn keeps
+// base's ErrNoStabilizing alongside H2Norm's ErrUnstable.
+func TestRiccatiAccuracy_LqgH2Syn(t *testing.T) {
+	for _, name := range []string{"ch360", "weakBStall"} {
+		t.Run(name, func(t *testing.T) { lqgH2SynAccuracy(t, name) })
+	}
+}
+
+func lqgH2SynAccuracy(t *testing.T, name string) {
+	A, B, Q, R, _ := careVerifyCaseNamed(t, name).dense()
 	n, _ := A.Dims()
+	stable := func(name string, a mat.Matrix) {
+		t.Helper()
+		var eig mat.Eigen
+		if !eig.Factorize(a, mat.EigenNone) {
+			t.Fatalf("%s: Eigen failed", name)
+		}
+		for _, v := range eig.Values(nil) {
+			if !(real(v) < 0) {
+				t.Fatalf("%s: closed-loop eigenvalue %v", name, v)
+			}
+		}
+	}
+	separated := func(name string, ctrl *System, B, C *mat.Dense) {
+		t.Helper()
+		if !allZeroDense(ctrl.D) {
+			t.Fatalf("%s: controller D = %v", name, ctrl.D.RawMatrix().Data)
+		}
+		var bf, acl, lc, est, want mat.Dense
+		bf.Mul(B, ctrl.C)
+		acl.Add(A, &bf)
+		stable(name+" A + B·Cc", &acl)
+		lc.Mul(ctrl.B, C)
+		est.Sub(A, &lc)
+		stable(name+" A − Bc·C", &est)
+		want.Add(&est, &bf)
+		if e := relErr(ctrl.A, &want); !(e <= 1e-12) {
+			t.Fatalf("%s: Ac ≠ A + B·Cc − Bc·C (rel %g)", name, e)
+		}
+	}
 	sys, err := New(A, B, eyeDense(n), mat.NewDense(n, 1, nil), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Lqg(sys, blkdiagTest(Q, R), eyeDense(2*n), nil); !errors.Is(err, ErrNoStabilizing) {
-		t.Errorf("Lqg: err %v, want ErrNoStabilizing", err)
+	lqg, err := Lqg(sys, blkdiagTest(Q, R), eyeDense(2*n), nil)
+	if err != nil {
+		t.Fatalf("Lqg: %v", err)
 	}
+	if lqg.Accuracy != 1 {
+		t.Fatalf("Lqg: Accuracy %d, want 1", lqg.Accuracy)
+	}
+	separated("Lqg", lqg.Controller, B, sys.C)
 
 	var chol mat.Cholesky
 	if !chol.Factorize(mat.NewSymDense(n, mat.DenseCopyOf(Q).RawMatrix().Data)) {
@@ -96,8 +142,72 @@ func TestRiccatiAccuracy_FailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := H2Syn(P, n, 1); !errors.Is(err, ErrNoStabilizing) {
-		t.Errorf("H2Syn: err %v, want ErrNoStabilizing", err)
+	h2, err := h2Syn(P, n, 1)
+	if err != nil {
+		t.Fatalf("h2Syn: %v", err)
+	}
+	if h2.Accuracy != 1 {
+		t.Fatalf("h2Syn: Accuracy %d, want 1", h2.Accuracy)
+	}
+	separated("h2Syn", h2.K, B, mat.DenseCopyOf(Cp.Slice(n+1, 2*n+1, 0, n)))
+	if _, err := H2Syn(P, n, 1); !errors.Is(err, ErrUnstable) || !errors.Is(err, ErrNoStabilizing) {
+		t.Fatalf("H2Syn: err %v, want ErrUnstable and ErrNoStabilizing", err)
+	}
+}
+
+// TestRiccati_OtherScalingAccuracy: an Accuracy 1 result is retried in
+// the other scaling mode without the workspace that holds it (MQM2E7); a
+// certified retry replaces it, an Accuracy 1 retry only with a smaller
+// first Newton step, and a failed retry never turns it into an error.
+func TestRiccati_OtherScalingAccuracy(t *testing.T) {
+	ws := NewRiccatiWorkspace(1, 1)
+	poor := &RiccatiResult{Accuracy: 1, step: 1e-6}
+	for _, tc := range []struct {
+		name   string
+		second *RiccatiResult
+		err    error
+		keep   bool
+	}{
+		{"retry certified", &RiccatiResult{}, nil, false},
+		{"retry smaller step", &RiccatiResult{Accuracy: 1, step: 1e-7}, nil, false},
+		{"retry larger step", &RiccatiResult{Accuracy: 1, step: 1e-5}, nil, true},
+		{"retry equal step", &RiccatiResult{Accuracy: 1, step: 1e-6}, nil, true},
+		{"retry Inf step", &RiccatiResult{Accuracy: 1, step: math.Inf(1)}, nil, true},
+		{"retry fails", nil, ErrNoStabilizing, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []*RiccatiOpts
+			solve := func(_, _, _, _ *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+				calls = append(calls, opts)
+				if len(calls) == 1 {
+					return poor, nil
+				}
+				return tc.second, tc.err
+			}
+			res, err := otherScaling(solve, nil, nil, nil, nil, &RiccatiOpts{Workspace: ws})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(calls) != 2 || !calls[1].NoScaling || calls[1].Workspace != nil || calls[0].Workspace != ws {
+				t.Fatalf("calls %+v", calls)
+			}
+			want := tc.second
+			if tc.keep {
+				want = poor
+			}
+			if res != want {
+				t.Errorf("got %+v, want %+v", res, want)
+			}
+		})
+	}
+	calls := 0
+	certified := &RiccatiResult{}
+	res, err := otherScaling(func(_, _, _, _ *mat.Dense, _ *RiccatiOpts) (*RiccatiResult, error) {
+		calls++
+		return certified, nil
+	}, nil, nil, nil, nil, nil)
+	if err != nil || res != certified || calls != 1 {
+		t.Errorf("certified first: %v %v, %d calls", res, err, calls)
 	}
 }
 

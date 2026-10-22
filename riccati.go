@@ -129,8 +129,8 @@ type RiccatiOpts struct {
 	// or Care with E) that fails, or leaves a Riccati residual above 1e-12
 	// of its terms, is still retried with cost scaling; so is a plain Care
 	// solve that fails or leaves a residual above 1e-6 of its terms. A
-	// solve in either mode that finds no stabilizing solution is retried
-	// once in the other.
+	// solve in either mode that finds no stabilizing solution, or one no
+	// Newton step certifies (Accuracy 1), is retried once in the other.
 	NoScaling bool
 }
 
@@ -156,15 +156,8 @@ type RiccatiResult struct {
 	// error, not a result, as is an X with an unstabilizable mode of (A, B)
 	// on the boundary to within √eps relative (PBH).
 	Accuracy int
-}
 
-// certified returns ErrNoStabilizing for a result whose X no Newton step
-// certified (Accuracy ≠ 0), for callers that cannot report it.
-func (res *RiccatiResult) certified() error {
-	if res.Accuracy != 0 {
-		return fmt.Errorf("Riccati solution not certified (Accuracy %d): %w", res.Accuracy, ErrNoStabilizing)
-	}
-	return nil
+	step float64
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -255,9 +248,11 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // no stabilizing solution exists and Care returns ErrNoStabilizing
 // instead. An X whose U11 has
 // rcnd below eps is not finite (icare Report 2) and is never returned.
-// A solve that finds no stabilizing solution is retried with NoScaling
-// flipped; with none in either mode Care returns ErrNoStabilizing (or the
-// Hamiltonian's error) of the first.
+// A solve that finds no stabilizing solution, or only an Accuracy 1 one,
+// is retried with NoScaling flipped: a certified X of either mode is
+// returned, else the Accuracy 1 X of smaller first Newton step; with none
+// in either mode Care returns ErrNoStabilizing (or the Hamiltonian's
+// error) of the first.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -270,14 +265,18 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 }
 
 // otherScaling solves by solve and, when that finds no stabilizing
-// solution (ErrNoStabilizing or ErrSchurFailed), once more with
-// opts.NoScaling flipped, returning the first error if that fails too.
-// State scaling can push a cheap-control pencil (R ≪ BᵀXB) to where no
-// cost scale deflates it while the unscaled one solves (w17 #8), and the
-// reverse; either solution passes the same Newton verification.
+// solution (ErrNoStabilizing or ErrSchurFailed) or one no Newton step
+// certifies (Accuracy 1), once more with opts.NoScaling flipped. State
+// scaling can push a cheap-control pencil (R ≪ BᵀXB) to where no cost
+// scale deflates it while the unscaled one solves (w17 #8), and the
+// reverse; either solution passes the same Newton verification. A
+// certified result of either mode is kept; of two Accuracy 1 results the
+// one of smaller first Newton step (the first on a tie), and with both
+// failing the first error. An Accuracy 1 first result lives in
+// opts.Workspace, so its retry solves without it.
 func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := solve(A, B, Q, R, opts)
-	if err == nil || !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+	if err == nil && res.Accuracy == 0 || err != nil && !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
 		return res, err
 	}
 	flipped := RiccatiOpts{NoScaling: true}
@@ -285,10 +284,20 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 		flipped = *opts
 		flipped.NoScaling = !opts.NoScaling
 	}
-	if res, err2 := solve(A, B, Q, R, &flipped); err2 == nil {
-		return res, nil
+	if err == nil {
+		flipped.Workspace = nil
 	}
-	return nil, err
+	res2, err2 := solve(A, B, Q, R, &flipped)
+	switch {
+	case err2 != nil:
+		if err == nil {
+			return res, nil
+		}
+		return nil, err
+	case err != nil, res2.Accuracy == 0, res2.step < res.step:
+		return res2, nil
+	}
+	return res, nil
 }
 
 func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -558,8 +567,9 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // converge, the other cost scales' solutions are tried. A certified X has
 // Accuracy 0; with none certified Dare returns the stabilizing solution of
 // smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care,
-// including its PBH check of boundary modes), and with no stabilizing solution in either NoScaling mode (Care's
-// retry) ErrNoStabilizing.
+// including its PBH check of boundary modes, and its retry in the other
+// NoScaling mode), and with no stabilizing solution in either mode
+// ErrNoStabilizing.
 //
 // Dare scales the states and the cost as Care does (MATLAB idare);
 // opts.NoScaling disables it. An unscaled pencil that fails QZ or the

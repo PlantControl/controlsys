@@ -234,5 +234,9 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 			}
 		}
 	}
-	return &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy}
+	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy}
+	if accuracy != 0 && problem.poor != nil {
+		res.step = problem.poor.step
+	}
+	return res
 }
