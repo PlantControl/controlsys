@@ -4065,6 +4065,7 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 		return nil, false, nil
 	}
 	leastZero := sync.OnceValue(func() float64 { return pidTuningLeastZero(plant) })
+	origin := sync.OnceValue(func() pidTuningOrigin { return newPIDTuningOrigin(plant, wc) })
 	return func(c *PID2) (bool, error) {
 		if c.Ki != 0 && leastZero() <= 1e-9*wc {
 			return false, nil
@@ -4108,6 +4109,9 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 		default:
 			return false, nil
 		}
+		if l.tailLimit < 1 && origin().unstable(c) {
+			return false, nil
+		}
 		cert, err := pidLoopCertifier(plant, &cand)
 		if errors.Is(err, errDelayLoopUnsupported) {
 			return false, nil
@@ -4122,4 +4126,56 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 		}
 		return stable, err
 	}, true, nil
+}
+
+// pidTuningOrigin holds N(0) and D(0) of a continuous plant G = N/D without
+// internal delays, signed by D's leading coefficient, with their rounding
+// scales Σ|cₖ|·wcᵏ.
+type pidTuningOrigin struct {
+	n0, d0, nScale, dScale float64
+	ok                     bool
+}
+
+func newPIDTuningOrigin(plant *System, wc float64) pidTuningOrigin {
+	if plant.E != nil || plant.HasInternalDelay() || !plant.IsContinuous() {
+		return pidTuningOrigin{}
+	}
+	res, err := plant.rationalTransferFunction(nil)
+	if err != nil {
+		return pidTuningOrigin{}
+	}
+	num, den := res.TF.Num[0][0], res.TF.Den[0]
+	if len(num) == 0 || len(den) == 0 || den[0] == 0 {
+		return pidTuningOrigin{}
+	}
+	scale := func(q []float64) float64 {
+		v := 0.0
+		for i, c := range q {
+			v += math.Abs(c) * math.Pow(wc, float64(len(q)-1-i))
+		}
+		return v
+	}
+	a := math.Copysign(1, den[0])
+	o := pidTuningOrigin{n0: a * num[len(num)-1], d0: a * den[len(den)-1], nScale: scale(num), dScale: scale(den)}
+	o.ok = finitePID(o.n0) && finitePID(o.d0) && finitePID(o.nScale) && finitePID(o.dScale)
+	return o
+}
+
+// unstable reports a real closed-loop root in [0, ∞) by the sign of the
+// characteristic P(s) = s·D·(1+Tf·s) + ((Kp·s+Ki)(1+Tf·s) + Kd·s)·N·e^{−sτ}
+// (without the s and Kp·s factors when Ki = 0), real on the real axis.
+// When limsup |L| < 1 there, P/a > 0 as s → +∞, so P(0)/a = Ki·N(0)/a, or
+// (D(0) + Kp·N(0))/a, below its rounding is certainly unstable. The Nyquist
+// grid can miss such a root far below wc: an indentation merging the
+// integrator with a pair at 2.2e-7 enclosed the root 5e-8 that a zero at
+// +5e-8 leaves under a PI crossing at 0.83.
+func (o pidTuningOrigin) unstable(c *PID2) bool {
+	if !o.ok {
+		return false
+	}
+	p0, scale := c.Ki*o.n0, math.Abs(c.Ki)*o.nScale
+	if c.Ki == 0 {
+		p0, scale = o.d0+c.Kp*o.n0, o.dScale+math.Abs(c.Kp)*o.nScale
+	}
+	return finitePID(p0) && -p0 > 1e3*0x1p-52*scale
 }
