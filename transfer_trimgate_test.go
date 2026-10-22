@@ -55,20 +55,7 @@ func trimGateErr(t *testing.T, sys *System) (tfErr, zpkErr float64, num []float6
 // where the full numerator is noise-dominated must not let that pass where
 // the full numerator is accurate.
 func TestTransferFunctionTrimGateRelativeDegreeFive(t *testing.T) {
-	a := []float64{
-		-300734892.70644146, -169603079.72644186, -102398657.39304641, 35043396.78175046, 24847604.160978448, 25638473.582307182,
-		469891391.63049394, 265000933.37529042, 159995560.69834027, -54754506.75998623, -38823813.003935285, -40059528.622298926,
-		128266829.57902764, 72337630.51247229, 43674183.827863105, -14946403.463409953, -10597783.868360376, -10935097.803372044,
-		1332180095.5530968, 751299076.371342, 453600351.5940503, -155233454.90061352, -110068648.58390085, -113572002.34454507,
-		1900332076.7233894, 1071715257.1759673, 647053128.504293, -221437863.732548, -157011042.43979317, -162008515.4137372,
-		-3568546701.0851016, -2012525070.4448168, -1215071478.5461414, 415828037.053484, 294843855.88538533, 304228384.0178798,
-	}
-	b := []float64{0.02054774531485147, -0.03210538206432974, -0.008763845491471531, -0.09102135434842197, -0.12984040216310627, 0.24382135342581673}
-	c := []float64{5.331537793077032, 16.79308562255658, -1.788144065900889, -1.4599873790650553, 1.5258232006053158, 1.9651675032660865}
-	sys, err := NewFromSlices(6, 1, 1, a, b, c, []float64{0}, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sys := relDegreeFivePlant(t)
 	tfErr, zpkErr, num := trimGateErr(t, sys)
 	if len(num) < 2 || math.Abs(num[len(num)-2]-4.878425372003843) > 1e-5*4.878425372003843 {
 		t.Errorf("num %v lost the s coefficient 4.878", num)
@@ -78,12 +65,20 @@ func TestTransferFunctionTrimGateRelativeDegreeFive(t *testing.T) {
 	}
 }
 
-// The s⁴…s² coefficients of the same plant, −4.3e-9, −5.4e-8 and 3.4e-8 in
-// exact arithmetic on the float data, are below the rounding of its 1e9-sized
-// A (the response above the fast pole is undetermined by the coefficients),
-// so as in MATLAB tf(ss) the numerator is 4.878s − 2.094 with the single zero
-// 0.4293, not three spurious zeros near |s| ≈ 1e3.
-func TestTransferFunctionTrimRelativeDegreeFiveDegree(t *testing.T) {
+func BenchmarkTransferFunctionTrimFastMode(b *testing.B) {
+	sys := relDegreeFivePlant(b)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := sys.TransferFunction(nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// relDegreeFivePlant has poles −75840, −3, −3.51±4.74i, −9.88, −28.5, zero
+// 0.429 and gain 4.878 in a dense basis.
+func relDegreeFivePlant(tb testing.TB) *System {
+	tb.Helper()
 	a := []float64{
 		-300734892.70644146, -169603079.72644186, -102398657.39304641, 35043396.78175046, 24847604.160978448, 25638473.582307182,
 		469891391.63049394, 265000933.37529042, 159995560.69834027, -54754506.75998623, -38823813.003935285, -40059528.622298926,
@@ -96,8 +91,18 @@ func TestTransferFunctionTrimRelativeDegreeFiveDegree(t *testing.T) {
 	c := []float64{5.331537793077032, 16.79308562255658, -1.788144065900889, -1.4599873790650553, 1.5258232006053158, 1.9651675032660865}
 	sys, err := NewFromSlices(6, 1, 1, a, b, c, []float64{0}, 0)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
+	return sys
+}
+
+// The s⁴…s² coefficients of the same plant, −4.3e-9, −5.4e-8 and 3.4e-8 in
+// exact arithmetic on the float data, are below the rounding of its 1e9-sized
+// A (the response above the fast pole is undetermined by the coefficients),
+// so as in MATLAB tf(ss) the numerator is 4.878s − 2.094 with the single zero
+// 0.4293, not three spurious zeros near |s| ≈ 1e3.
+func TestTransferFunctionTrimRelativeDegreeFiveDegree(t *testing.T) {
+	sys := relDegreeFivePlant(t)
 	tfErr, zpkErr, num := trimGateErr(t, sys)
 	want := []float64{4.878425372003843, -2.0943814259188778}
 	if len(num) != 2 || math.Abs(num[0]-want[0]) > 1e-5*want[0] || math.Abs(num[1]-want[1]) > 1e-5*-want[1] {
