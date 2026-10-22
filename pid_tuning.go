@@ -213,6 +213,12 @@ type pidTuningPlant struct {
 	// design whose closed-loop root sits near s = 0 or z = −1 hides its
 	// |S| peak there.
 	dcEdge, nyquistEdge complex128
+	// sensLow and sensHigh, if set, widen the |S| scan below low and above
+	// its top, a peak there being away from both band and edges; samples
+	// there come from try, cached in sensCache, and count as 0 where it
+	// fails.
+	sensLow, sensHigh float64
+	sensCache         map[float64]complex128
 }
 
 type pidCrossScan int
@@ -913,7 +919,9 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // alone does not bound it there; an explicit-crossover design is not bound
 // but carries a warning when its sampled |S| exceeds 4; an undelayed plant's default design is
 // searched unbounded first and under the bound only when it exceeds it.
-// For a continuous plant without internal delays the samples run past 100·wc until a Markov-parameter bound gives |L| <= ¾. Only when neither the default nor the moved crossovers
+// For a continuous plant without internal delays the samples run past 100·wc until a Markov-parameter bound gives |L| <= ¾.
+// The samples also reach down to a tenth of the slowest plant pole or zero
+// and, discrete, up to π/Dt, where a peak off the band hides. Only when neither the default nor the moved crossovers
 // meet PM±3° does the margin become a floor at the original crossover, as in
 // pidtune: the design takes the nearest feasible 6° band above PM, with
 // PM−3° at every crossover over the plant's dynamics. Bands whose phase is
@@ -1030,6 +1038,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(screen.model) })
 	loopTail := sync.OnceValue(func() func(*PID2, float64) float64 { return pidTuningLoopTail(plant) })
 	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(screen.model) })
+	sensCache := map[float64]complex128{}
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
 		tau *= plant.Dt
@@ -1079,54 +1088,28 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if stable == nil {
 			p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 		}
-		tune := tunePID
-		if floor {
-			tune = tunePIDFloor
+		// wide scans |S| off the band too, down to a tenth of the slowest
+		// plant root and, discrete, up to π/Dt, where a peak shows neither
+		// in the band nor at its edges. A design passing the band's bound
+		// is checked there and, failing, searched for again under it.
+		wide := p
+		if plant.Dt > 0 {
+			wide.sensHigh = pidTuningSensNyquist * math.Pi / plant.Dt
 		}
-		lastPlant = p
-		res, err := tune(ctx, "TunePID", p, family, opts)
-		if eval.err != nil {
-			return nil, fmt.Errorf("TunePID: %w", eval.err)
+		if lo, _ := span(); lo/10 < p.low {
+			wide.sensLow = lo / 10
 		}
-		// A design whose controller zeros notch |L| through 1 below the
-		// band, as tiny Kp and Ki against Kd do, is searched for again with
-		// every candidate so checked, then, for a filtered family, from the
-		// least admissible Tf: the default Tf's lag can leave only such
-		// near-pure-D designs. Designs passing the check are unchanged.
-		if zr, ok := errors.AsType[*pidZeroRejected](err); ok {
-			budget := opts.MaxEvaluations
-			if budget == 0 {
-				budget = 4096
-			}
-			spent := zr.evaluations
-			p.zeroSearch = true
-			seeds := []bool{p.minTfSeed}
-			if _, _, _, filtered, _ := pidTuningTerms(PidtuneType(strings.ToUpper(string(family)))); filtered && !p.minTfSeed {
-				seeds = append(seeds, true)
-			}
-			for _, minTf := range seeds {
-				if spent >= budget {
-					break
-				}
-				o := opts
-				o.MaxEvaluations = budget - spent
-				p.minTfSeed = minTf
-				res, err = tune(ctx, "TunePID", p, family, o)
-				if eval.err != nil {
-					return nil, fmt.Errorf("TunePID: %w", eval.err)
-				}
-				te, ok := errors.AsType[*PIDTuningError](err)
-				if !ok {
-					break
-				}
-				spent += te.Evidence.Evaluations
-			}
+		wide.sensCache = sensCache
+		lastPlant = wide
+		res, err := pidTuningSearch(ctx, p, family, opts, floor, wc, eval)
+		if bound == pidSSearch && err == nil && pidTuningSensitivityPeak(wide, *res.Controller) > pidTuningMaxSensitivity {
+			sRejected = true
+			first := res.Evidence.Evaluations
+			res, err = pidTuningSearch(ctx, wide, family, opts, floor, wc, eval)
 			if te, ok := errors.AsType[*PIDTuningError](err); ok {
-				te.Evidence.Evaluations = spent
+				te.Evidence.Evaluations += first
 			} else if err == nil {
-				res.Evidence.Evaluations += spent
-			} else if errors.As(err, new(*pidZeroRejected)) {
-				res, err = nil, &PIDTuningError{Op: "TunePID", Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: opts.PhaseMargin, Evaluations: spent, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
+				res.Evidence.Evaluations += first
 			}
 		}
 		if te, ok := errors.AsType[*PIDTuningError](err); ok {
@@ -1136,8 +1119,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			used += res.Evidence.Evaluations
 		}
 		if bound == pidSCheck && err == nil {
-			p.maxSensitivity, p.loopTail = pidTuningMaxSensitivity, loopTail()
-			if pidTuningSensitivityPeak(p, *res.Controller) > pidTuningMaxSensitivity {
+			wide.maxSensitivity, wide.loopTail = pidTuningMaxSensitivity, loopTail()
+			if pidTuningSensitivityPeak(wide, *res.Controller) > pidTuningMaxSensitivity {
 				return tuneAt(wc, gainSign, pidSSearch, floor)
 			}
 		}
@@ -1238,7 +1221,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			if e == nil {
 				hi := math.Max(minHigh, wc*100)
 				if plant.Dt > 0 {
-					hi = math.Min(hi, .99*math.Pi/plant.Dt)
+					hi = math.Pi / plant.Dt
 				}
 				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g %s to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, verb, wc, pidTuningMaxSensitivity, hi))
 				return r, nil, blind
@@ -1426,7 +1409,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				continue
 			}
 			if e == nil {
-				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the one-gain integrator keeps sampled |S| <= %d up to %.4g rad/s.", wc0, wc, pidTuningMaxSensitivity, math.Max(wc*100, minHigh)))
+				hi := math.Max(wc*100, minHigh)
+				if plant.Dt > 0 {
+					hi = math.Pi / plant.Dt
+				}
+				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the one-gain integrator keeps sampled |S| <= %d up to %.4g rad/s.", wc0, wc, pidTuningMaxSensitivity, hi))
 				return stamp(r, nil)
 			}
 			if !errors.As(e, new(*PIDTuningError)) {
@@ -1660,6 +1647,62 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 	}
 	return undelayed(stamp(res, err))
+}
+
+// pidTuningSearch runs TunePID's search for p, the floor's when floor. A
+// design whose controller zeros notch |L| through 1 below the band, as tiny
+// Kp and Ki against Kd do, is searched for again with every candidate so
+// checked, then, for a filtered family, from the least admissible Tf: the
+// default Tf's lag can leave only such near-pure-D designs. Designs passing
+// the check are unchanged. An evaluation failure of eval aborts it.
+func pidTuningSearch(ctx context.Context, p pidTuningPlant, family PidtuneType, opts PIDTuningOptions, floor bool, wc float64, eval *sisoEval) (*PIDTuningResult, error) {
+	tune := tunePID
+	if floor {
+		tune = tunePIDFloor
+	}
+	res, err := tune(ctx, "TunePID", p, family, opts)
+	if eval.err != nil {
+		return nil, fmt.Errorf("TunePID: %w", eval.err)
+	}
+	zr, ok := errors.AsType[*pidZeroRejected](err)
+	if !ok {
+		return res, err
+	}
+	budget := opts.MaxEvaluations
+	if budget == 0 {
+		budget = 4096
+	}
+	spent := zr.evaluations
+	p.zeroSearch = true
+	seeds := []bool{p.minTfSeed}
+	if _, _, _, filtered, _ := pidTuningTerms(PidtuneType(strings.ToUpper(string(family)))); filtered && !p.minTfSeed {
+		seeds = append(seeds, true)
+	}
+	for _, minTf := range seeds {
+		if spent >= budget {
+			break
+		}
+		o := opts
+		o.MaxEvaluations = budget - spent
+		p.minTfSeed = minTf
+		res, err = tune(ctx, "TunePID", p, family, o)
+		if eval.err != nil {
+			return nil, fmt.Errorf("TunePID: %w", eval.err)
+		}
+		te, ok := errors.AsType[*PIDTuningError](err)
+		if !ok {
+			break
+		}
+		spent += te.Evidence.Evaluations
+	}
+	if te, ok := errors.AsType[*PIDTuningError](err); ok {
+		te.Evidence.Evaluations = spent
+	} else if err == nil {
+		res.Evidence.Evaluations += spent
+	} else if errors.As(err, new(*pidZeroRejected)) {
+		res, err = nil, &PIDTuningError{Op: "TunePID", Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: opts.PhaseMargin, Evaluations: spent, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
+	}
+	return res, err
 }
 
 // pidTuningResolvedFloor returns lo, or, when try fails or is not finite
@@ -3544,8 +3587,11 @@ func pidTuningModes(plant *System) []complex128 {
 	return modes
 }
 
-// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [p.low, top],
-// top = max(p.high, p.crossHigh), the reported band's top, extended, by at
+// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [min(p.low,
+// p.sensLow), top], top = max(p.high, p.crossHigh, p.sensHigh): the reported
+// band widened, by TunePID, to a tenth of the slowest plant root and,
+// discrete, π/Dt, since a peak there shows neither in the band nor at its
+// edges; extended, by at
 // most pidTuningTailPoints samples up to pidTuningTailReach·top, while
 // p.loopTail admits |L| > 1 − 1/p.maxSensitivity beyond, since a large derivative gain can cross 0 dB again far above the
 // crossover.
@@ -3555,16 +3601,44 @@ func pidTuningModes(plant *System) []complex128 {
 // refined by golden section on log ω, since a delay ripple can sit between
 // samples and read ~10% low. |S| at p.dcEdge and p.nyquistEdge counts too.
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
-	s := func(w float64) float64 { return 1 / cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)) }
+	band := math.Max(p.high, p.crossHigh)
+	top, start := math.Max(band, p.sensHigh), p.low
+	if p.sensLow > 0 {
+		start = math.Min(start, p.sensLow)
+	}
+	outside := func(w float64) bool { return p.try != nil && (w < p.low || w > band && w <= p.sensHigh) }
+	sample := func(w float64, cached bool) float64 {
+		g, ok := complex128(0), true
+		switch {
+		case !outside(w):
+			g = p.at(w)
+		case cached && p.sensCache != nil:
+			if g, ok = p.sensCache[w]; !ok {
+				g, ok = p.try(w)
+				if !ok || !pidFiniteComplex(g) {
+					g = cmplx.NaN()
+				}
+				p.sensCache[w] = g
+			}
+			ok = pidFiniteComplex(g)
+		default:
+			g, ok = p.try(w)
+		}
+		v := 1 / cmplx.Abs(1+g*pidTuningFeedback(c, w))
+		if !ok || math.IsNaN(v) {
+			return 0
+		}
+		return v
+	}
+	s := func(w float64) float64 { return sample(w, false) }
 	peak := pidTuningEdgeSensitivity(p, c)
-	top := math.Max(p.high, p.crossHigh)
 	high, extend, inBand := top, p.loopTail != nil && p.maxSensitivity > 1, 0
 	var w0, v0, w1, v1 float64
-	for k, w := 0, p.low; ; k++ {
+	for k, w := 0, start; ; k++ {
 		if w <= top {
 			inBand = k
 		}
-		v := s(w)
+		v := sample(w, true)
 		if k >= 2 && v1 >= v0 && v1 >= v && v1 >= .8*math.Max(peak, v) {
 			_, g := pidTuningGoldenMax(s, w0, w)
 			peak = math.Max(peak, g)
@@ -3631,6 +3705,11 @@ const (
 	pidTuningTailReach  = 1e4
 	pidTuningTailPoints = 4096
 )
+
+// pidTuningSensNyquist is the discrete |S| scan's top as a fraction of π/Dt,
+// short of a pole at z = −1 that p.nyquistEdge resolves.
+const pidTuningSensNyquist = .9999
+
 
 // pidTuningLoopTail returns a bound on |C(jω')·P(jω')| over ω' ≥ ω for a
 // continuous plant without internal delays, or nil; see pidMarkovTail.
