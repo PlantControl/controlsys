@@ -203,9 +203,9 @@ func (r *pidtuneRun) pipeline(sign float64) (*PID, error) {
 		groups = [][]pidtunePDMode{{r.pd, pidtunePDLegacy}, {pidtunePDIdeal}}
 	}
 	var first error
-	for _, modes := range groups {
+	for i, modes := range groups {
 		pid, err := r.searched(sign, modes)
-		if err == nil || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+		if err == nil || i == 0 && !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 			return pid, err
 		}
 		if first == nil {

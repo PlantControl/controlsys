@@ -17,8 +17,9 @@ import (
 // gain crossover and Pidtune returned ErrPIDTuningTargetUnattainable; the
 // ideal PD, Pidtune's last fallback, reaches it. P on 1/((s+5)(s−1)) peaks
 // at atan√5 − atan(√5/5) = 41.8°, and either PD on 1/((z−1)(z−1.1)) below
-// 58.5°, so those fail closed. PDF, with Tf = 0.1/wc, is robust on the
-// continuous two. Oracle: the best smallest margin over a (K, Td) grid of
+// 58.5°, so those fail closed; on 2.15/((z−1.006)(z−1.018)), Dt 0.01, only
+// the ideal (backward-Euler) PD does. PDF, with Tf = 0.1/wc, is robust on
+// the continuous two. Oracle: the best smallest margin over a (K, Td) grid of
 // loops stable by companion-matrix closed-loop roots.
 func TestPidtuneFilteredPDUnattainable(t *testing.T) {
 	if best := pidtuneFamilyBestMargin(t, Poly{1}, Poly{1, -1}, 0, pidtuneOracleP); !(best > 58.5) {
@@ -36,6 +37,7 @@ func TestPidtuneFilteredPDUnattainable(t *testing.T) {
 		{Poly{1}, Poly{1, -1, 0}, 0, PidtunePD, true},
 		{Poly{1}, Poly{1, -0.5, 1}, 0, PidtunePD, true},
 		{Poly{1}, Poly{1, -2.1, 1.1}, 0.1, PidtunePD, false},
+		{Poly{2.152560471847437}, Poly{1, -2.024624265088923, 1.0247399380515019}, 0.01, PidtunePD, true},
 		{Poly{1}, Poly{1, 4, -5}, 0, PidtuneP, false},
 	} {
 		name := fmt.Sprintf("%s %v/%v dt=%g", c.typ, c.num, c.den, c.dt)
@@ -64,6 +66,9 @@ func TestPidtuneFilteredPDUnattainable(t *testing.T) {
 				t.Errorf("%s: %+v, want ideal PD", name, pid)
 			}
 			pidtuneCheckRobust(t, name, pid, c.num, c.den, c.dt, pidTuningMaxSensitivity)
+		}
+		if c.dt > 0 {
+			continue
 		}
 		pid, err = Pidtune(p, PidtunePDF, 0, nil)
 		if err != nil {
