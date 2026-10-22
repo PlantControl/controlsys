@@ -1500,3 +1500,56 @@ func TestHinfSyn_DiscreteSlowModeTustinChoice(t *testing.T) {
 		t.Fatalf("GammaOpt = %.10g above the H2Syn controller's %.10g", res.GammaOpt, hc)
 	}
 }
+
+// A large optimal γ (≈ a²ρσ) made D1d'D1d − γ²diag(I, 0) look singular to
+// LU (cond ~ γ²), so HinfSyn found no feasible γ. Oracle: scaling z by k
+// scales the achievable γ by k exactly, and k = 1e-4 brings γ into the
+// well-conditioned range; the H2Syn controller bounds γ above.
+func TestHinfSyn_LargeGammaDiscreteScalar(t *testing.T) {
+	const a, k = 235.0, 1e-4
+	for _, rs := range []float64{60, 100} {
+		plant := func(zs float64) *System {
+			P, err := NewFromSlices(1, 3, 3, []float64{a}, []float64{1, 0, 1},
+				[]float64{zs, 0, 1}, []float64{0, 0, 0, 0, 0, zs * rs, 0, rs, 0}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return P
+		}
+		P := plant(1)
+		res, err := HinfSyn(P, 1, 1)
+		if err != nil {
+			t.Fatalf("ρ=σ=%g: %v", rs, err)
+		}
+		ref, err := HinfSyn(plant(k), 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := ref.GammaOpt / k; math.Abs(res.GammaOpt-want) > 1e-5*want {
+			t.Fatalf("ρ=σ=%g: GammaOpt = %.10g, scaled-z design %.10g", rs, res.GammaOpt, want)
+		}
+		if !(res.Gamma <= res.GammaOpt) {
+			t.Fatalf("Gamma %.10g > GammaOpt %.10g", res.Gamma, res.GammaOpt)
+		}
+		for _, p := range res.CLPoles {
+			if !(cmplx.Abs(p) < 1) {
+				t.Fatalf("closed-loop pole %v outside the unit disk", p)
+			}
+		}
+		h2, err := H2Syn(P, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl, err := LFT(P, h2.K, LFTFeedback{Nu: 1, Ny: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		hc, _, err := HinfNorm(cl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !(res.GammaOpt <= hc) {
+			t.Fatalf("GammaOpt = %.10g above the H2Syn controller's %.10g", res.GammaOpt, hc)
+		}
+	}
+}

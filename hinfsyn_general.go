@@ -168,7 +168,10 @@ func rotateColumns(M *mat.Dense, k int) *mat.Dense {
 	return out
 }
 
-// shiftedInverse returns (G - gamma^2 diag(I_k, 0))^-1.
+// shiftedInverse returns (G - gamma^2 diag(I_k, 0))^-1. R is inverted as
+// S R̃ S with R̃ = S R S, S = diag(|R_ii|^-1/2): at large γ the γ² diagonal
+// makes R's condition number ~γ², which LU rejects as singular, while R̃
+// stays well conditioned.
 func shiftedInverse(G *mat.Dense, k int, gamma float64) (*mat.Dense, error) {
 	R := denseCopy(G)
 	g2 := gamma * gamma
@@ -176,7 +179,30 @@ func shiftedInverse(G *mat.Dense, k int, gamma float64) (*mat.Dense, error) {
 		R.Set(i, i, R.At(i, i)-g2)
 	}
 	n, _ := R.Dims()
-	return invertSmall(R, n)
+	s := make([]float64, n)
+	raw := R.RawMatrix()
+	for i := range n {
+		s[i] = 1
+		if d := math.Abs(raw.Data[i*raw.Stride+i]); d > 0 {
+			s[i] = 1 / math.Sqrt(d)
+		}
+	}
+	scaleSym := func(M *mat.Dense) {
+		m := M.RawMatrix()
+		for i := range n {
+			row := m.Data[i*m.Stride : i*m.Stride+n]
+			for j := range row {
+				row[j] *= s[i] * s[j]
+			}
+		}
+	}
+	scaleSym(R)
+	Rinv, err := invertSmall(R, n)
+	if err != nil {
+		return nil, err
+	}
+	scaleSym(Rinv)
+	return Rinv, nil
 }
 
 // riccatis solves the general H-infinity Riccati equations at gamma and
