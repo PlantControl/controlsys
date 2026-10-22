@@ -273,7 +273,8 @@ func hybridZeros(sys *System, zeros []complex128, scale, tol float64, failed int
 // rankMarginTrust and the reductions disagree on the pencil order or
 // normal rank (unless zs is square of full normal rank, whose zeros
 // mimoZeros refines on the exact pencil), the unscaled reduction of sys
-// competes: the set with more zeros passing zeroBackwardOK on zs wins, then
+// competes: the set with more zeros passing zeroBackwardOK on zs, and
+// distinguishable there from points of the same modulus, wins, then
 // the one with fewer clearly not zeros (classifyBackward), then the
 // unscaled one unless its smallest margin is below that of zs. The test
 // uses the larger of the two normal ranks unless the pencil at a generic
@@ -310,8 +311,8 @@ func prescaledStaircaseZeros(sys, zs *System) ([]complex128, int, error) {
 	if zeroBackwardOK(zs, complex(0.31, 0.83)*complex(pencilNorm(zs), 0), rank) {
 		rank = min(raw.rank, pre.rank)
 	}
-	okP, badP := classifyBackward(zs, zp, rank)
-	okR, badR := classifyBackward(zs, zr, rank)
+	okP, badP := classifyBackward(zs, zp, rank, true)
+	okR, badR := classifyBackward(zs, zr, rank, true)
 	if okP > okR || okP == okR && (badP < badR || badP == badR && !preferRaw) {
 		return zp, pre.rank, nil
 	}
@@ -423,18 +424,27 @@ func reduceStaircase(sys *System) staircase {
 }
 
 func countBackwardOK(sys *System, zeros []complex128, rank int) int {
-	ok, _ := classifyBackward(sys, zeros, rank)
+	ok, _ := classifyBackward(sys, zeros, rank, false)
 	return ok
 }
 
 // classifyBackward counts the zeros passing zeroBackwardOK and those
-// clearly not zeros (ratio above zeroNotZeroRatio).
-func classifyBackward(sys *System, zeros []complex128, rank int) (ok, bad int) {
+// clearly not zeros (ratio above zeroNotZeroRatio). With distinct, a zero
+// passes only if P fails the test at a generic point of modulus
+// max(|z|, ‖sys‖): the ratio of a strictly proper model tends to 0 as |s|
+// grows, so far out every point passes, including the rounding-noise zeros
+// a rank decision on a vanishing Markov parameter leaves where the model
+// has infinite zeros (MATLAB tzero returns those as infinite).
+func classifyBackward(sys *System, zeros []complex128, rank int, distinct bool) (ok, bad int) {
 	n, m, p := sys.Dims()
 	tol := zeroBackwardTol * math.Sqrt(float64((n+p)*(n+m))) * eps()
+	norm := pencilNorm(sys)
 	for _, z := range zeros {
 		switch r := zeroBackwardRatio(sys, z, rank); {
 		case r <= tol:
+			if distinct && zeroBackwardRatio(sys, cmplx.Rect(math.Max(cmplx.Abs(z), norm), 1+cmplx.Phase(z)), rank) <= tol {
+				continue
+			}
 			ok++
 		case r > zeroNotZeroRatio:
 			bad++
