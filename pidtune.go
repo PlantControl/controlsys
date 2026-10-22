@@ -102,7 +102,11 @@ const (
 // filtered response, |L(wc)| = 1 as MATLAB, falling back per step to the
 // legacy Td as for an explicit wc; when no step passes, the whole search
 // reruns with the legacy PD, which places phase and gain on the ideal
-// derivative (|L(wc)| ≠ 1). Otherwise the result is ErrPIDTuningTargetUnattainable.
+// derivative (|L(wc)| ≠ 1), and when that fails too, with MATLAB's ideal PD
+// Kp + Kd·s (Tf = 0, backward-Euler derivative when discrete, so
+// PID.System returns ErrImproperModel for a continuous one), whose lead
+// reaches 90° where the Td/10 filter caps it at 56.4°. Otherwise the result
+// is ErrPIDTuningTargetUnattainable.
 // An explicit wc is honoured as in MATLAB: the design at wc is returned
 // whenever its closed loop passes the stability test (an unstable
 // forward-Euler filter aside), with |L(wc)| = 1 (a PD places its phase on
@@ -184,19 +188,35 @@ func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 }
 
 // pipeline designs at r.wc, backing an automatic crossover off as
-// pidtuneBackoffPerDecade describes. An automatic PD runs it with placedPD,
-// |L(wc)| = 1 as MATLAB places the crossover, then, when every step is
-// unattainable, reruns it with the legacy design, whose gate keeps the
-// designs placedPD cannot give. When every step of each is unattainable,
-// raised searches upward, in the same order.
+// pidtuneBackoffPerDecade describes, then, when every step is
+// unattainable, raising it. An automatic PD runs both searches with
+// placedPD, |L(wc)| = 1 as MATLAB places the crossover, then with the
+// legacy design, whose gate keeps the designs placedPD cannot give; when
+// all of those are unattainable, both again with the ideal PD, returning
+// the filtered designs' error if it fails too.
 func (r *pidtuneRun) pipeline(sign float64) (*PID, error) {
 	if !r.auto {
 		return r.backedOff(sign)
 	}
-	modes := []pidtunePDMode{r.pd}
+	groups := [][]pidtunePDMode{{r.pd}}
 	if r.pidType == PidtunePD {
-		modes = append(modes, pidtunePDLegacy)
+		groups = [][]pidtunePDMode{{r.pd, pidtunePDLegacy}, {pidtunePDIdeal}}
 	}
+	var first error
+	for i, modes := range groups {
+		pid, err := r.searched(sign, modes)
+		if err == nil || i == 0 && !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+			return pid, err
+		}
+		if first == nil {
+			first = err
+		}
+	}
+	return nil, first
+}
+
+// searched runs backedOff for each of modes, then raised for each.
+func (r *pidtuneRun) searched(sign float64, modes []pidtunePDMode) (*PID, error) {
 	var err error
 	for _, mode := range modes {
 		r.setPD(mode)
@@ -2053,6 +2073,10 @@ const (
 	// pidtunePDLegacyTd: the legacy Td, with Kp for |L(wc)| = 1 on the
 	// realized response.
 	pidtunePDLegacyTd
+	// pidtunePDIdeal: MATLAB's PD, Kp + Kd·s (Tf = 0, backward-Euler
+	// derivative when discrete), |L(wc)| = 1; the automatic PD's last
+	// fallback when both filtered designs fail.
+	pidtunePDIdeal
 )
 
 // pidtunePIDFMode selects computePIDF's design.
@@ -2134,7 +2158,7 @@ func computePIDGainsPositive(plant *System, at *pidtunePlantPoint, pidType Pidtu
 	}
 
 	dFormula := ForwardEuler
-	if plant.Dt > 0 && pidType == PidtunePID {
+	if plant.Dt > 0 && (pidType == PidtunePID || pidType == PidtunePD && pd == pidtunePDIdeal) {
 		dFormula = BackwardEuler
 	}
 	terms := pidtuneTerms{wc: wc, dt: plant.Dt, dFormula: dFormula, lagFloor: lagFloor, pd: pd, pidf: pidf}
@@ -2227,10 +2251,9 @@ func computePI(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	pid.Kp = real(target) - pid.Ki*real(i)
 }
 
-// computePD designs a Td/10-filtered PD as terms.pd selects; the legacy
-// design places phase and gain on the ideal derivative, leaving |L(wc)| ≠ 1
-// (≈ 0.49 at the upper clamp). Callers requesting an ideal PD must
-// explicitly set Tf=0.
+// computePD designs a PD as terms.pd selects: Td/10-filtered, the legacy
+// design placing phase and gain on the ideal derivative, leaving
+// |L(wc)| ≠ 1 (≈ 0.49 at the upper clamp), or ideal (Tf = 0).
 func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 	// C = Kp*(1 + Td*D), angle = arg(1 + Td*D)
 	phiCRad := phiC * math.Pi / 180
@@ -2255,6 +2278,11 @@ func computePD(pid *PID, terms pidtuneTerms, magP, phiC float64) {
 		Td = 0.1 / terms.wc
 	}
 
+	if terms.pd == pidtunePDIdeal {
+		pid.Kp = 1.0 / (magP * cmplx.Abs(1+complex(Td, 0)*d))
+		pid.Kd = pid.Kp * Td
+		return
+	}
 	pid.Tf = Td / 10
 	if terms.pd == pidtunePDLegacyTd {
 		d = terms.derivative(pid.Tf)
