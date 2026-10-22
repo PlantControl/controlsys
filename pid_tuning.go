@@ -388,6 +388,24 @@ func (s *pidStabilityScreen) transfer() (*TransferFuncResult, error) {
 	return s.transferRes, s.transferErr
 }
 
+// pidTuningExplicitPlant returns plant with E folded in when E is the
+// identity or well conditioned (normExplicitForm), else plant: the search,
+// screens and tails read A, B, C as an explicit realization.
+func pidTuningExplicitPlant(plant *System) *System {
+	if plant.E == nil {
+		return plant
+	}
+	if !plant.IsDescriptor() {
+		cp := plant.Copy()
+		cp.E = nil
+		return cp
+	}
+	if ex, err := normExplicitForm(plant, "TunePID"); err == nil {
+		return ex
+	}
+	return plant
+}
+
 func newPIDStabilityScreen(plant *System, eval *sisoEval, maxTail float64) (*pidStabilityScreen, error) {
 	model, rational, lag := plant, plant, 0
 	if plant.Dt > 0 && plant.HasDelay() {
@@ -570,7 +588,7 @@ func pidTuningPoleUncertain(poles []complex128, i int, e, eta float64) bool {
 // pidTuningExactStable is pidTuningPolesStable's exact test; ok is false
 // when the loop is outside its scope.
 func pidTuningExactStable(plant, c *System) (stable, ok bool) {
-	if plant.E != nil || c.E != nil || plant.HasDelay() || c.HasDelay() || c.Dt != plant.Dt {
+	if plant.IsDescriptor() || c.IsDescriptor() || plant.HasDelay() || c.HasDelay() || c.Dt != plant.Dt {
 		return false, false
 	}
 	n1, m1, p1 := plant.Dims()
@@ -1001,6 +1019,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if _, err := newSISOLoopModel(plant, "TunePID"); err != nil {
 		return nil, err
 	}
+	plant = pidTuningExplicitPlant(plant)
 	if opts.UnstablePoles != nil {
 		return nil, fmt.Errorf("TunePID: UnstablePoles applies only to TunePIDFRD: %w", ErrOptionUnsupported)
 	}
@@ -3614,7 +3633,7 @@ func pidTuningIntegralZero(plant *System, family PidtuneType) (float64, bool) {
 	if _, hasI, _, _, ok := pidTuningTerms(family); !ok || !hasI {
 		return 0, false
 	}
-	if plant.Dt != 0 || plant.HasDelay() || plant.E != nil || plant.D.At(0, 0) != 0 {
+	if plant.Dt != 0 || plant.HasDelay() || plant.IsDescriptor() || plant.D.At(0, 0) != 0 {
 		return 0, false
 	}
 	if stable, err := plant.IsStable(); err != nil || !stable {
