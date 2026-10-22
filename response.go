@@ -405,7 +405,8 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // evaluates it, so a pencil ill-conditioned by poles merely close to DC keeps
 // its finite gain.
 // A model with no inputs or no outputs has an empty gain, which a
-// *mat.Dense cannot hold, so it returns ErrDimensionMismatch.
+// *mat.Dense cannot hold, so it returns ErrDimensionMismatch; a NaN or Inf
+// model entry returns ErrInvalidArgument.
 func (sys *System) DCGain() (*mat.Dense, error) {
 	return sys.dcGain(true)
 }
@@ -419,7 +420,7 @@ func (sys *System) integratingDCGain() (*mat.Dense, error) {
 }
 
 func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
-	if err := requireSystem("DCGain", sys); err != nil {
+	if err := requireFiniteSystem("DCGain", sys); err != nil {
 		return nil, err
 	}
 	if err := requireInputsOutputs("DCGain", sys); err != nil {

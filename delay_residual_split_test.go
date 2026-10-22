@@ -332,3 +332,56 @@ func TestPullDelaysToLFTResidualContinuous(t *testing.T) {
 		t.Fatalf("continuous absorbInputDelay: %v", err)
 	}
 }
+
+// Column and row splits both need 7 states here; each piece copies the two
+// internal delays, so the 2-row split beats the 3-column one.
+func TestAbsorbIOResidualTieKeepsFewerInternalDelayCopies(t *testing.T) {
+	sys := residualPlant(t, 1, 3, 2, 1)
+	if err := sys.SetInternalDelay([]float64{3, 2},
+		mat.NewDense(1, 2, []float64{0.2, -0.3}),
+		mat.NewDense(2, 1, []float64{0.4, 0.1}),
+		mat.NewDense(2, 2, []float64{0.1, 0.2, -0.2, 0.3}),
+		mat.NewDense(2, 3, []float64{0.3, 0.1, 0, 0.2, 0, 0.4}),
+		mat.NewDense(2, 2, []float64{0, 0.1, 0, 0}),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := sys.SetDelay(mat.NewDense(2, 3, []float64{3, 1, 0, 1, 0, 0})); err != nil {
+		t.Fatal(err)
+	}
+
+	abs, err := sys.AbsorbDelay(AbsorbIO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abs.Delay != nil || abs.InputDelay != nil || abs.OutputDelay != nil {
+		t.Fatal("external delays left after AbsorbIO")
+	}
+	if n, _, _ := abs.Dims(); n != 7 {
+		t.Fatalf("states %d, want 7", n)
+	}
+	if q := abs.internalDelayCount(); q != 4 {
+		t.Fatalf("internal delays %d, want 4 (2 output pieces x 2)", q)
+	}
+	assertMatchesOracle(t, "io", abs, sys)
+
+	n, _, _ := sys.Dims()
+	cols, _ := residualDelayGroups(newDelayTopology(sys).totalExternal(true), false, n)
+	colAbs, err := residualDelaySplit{n: n, groups: cols}.apply(sys, absorbDecomposedDelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cn, _, _ := colAbs.Dims(); cn != 7 || colAbs.internalDelayCount() != 6 {
+		t.Fatalf("column split states %d, internal delays %d, want 7 and 6", cn, colAbs.internalDelayCount())
+	}
+	assertMatchesOracle(t, "io-cols", colAbs, sys)
+
+	lft, err := sys.PullDelaysToLFT()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _, _ := lft.Dims(); n != 2 || lft.internalDelayCount() != 7 {
+		t.Fatalf("LFT states %d, internal delays %d, want 2 and 7", n, lft.internalDelayCount())
+	}
+	assertMatchesOracle(t, "lft", lft, sys)
+}

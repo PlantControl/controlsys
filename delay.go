@@ -306,6 +306,10 @@ const MaxAbsorbedDelayStates = 10000
 // replaced by its Padé approximation of order DefaultPadeOrder; use Pade to
 // choose the order. An unknown scope, or a discrete absorption needing more
 // than MaxAbsorbedDelayStates states, returns ErrInvalidArgument.
+//
+// An I/O delay matrix with no input+output decomposition is realized as a sum
+// (or stack) of copies over groups of inputs (or outputs); each copy carries
+// its own states and its own copy of the internal delays.
 func (sys *System) AbsorbDelay(scopes ...AbsorbScope) (*System, error) {
 	if err := requireSystem("AbsorbDelay", sys); err != nil {
 		return nil, err
@@ -1734,6 +1738,11 @@ func SetDelayModel(H *System, tau []float64) (*System, error) {
 	}
 	m := mN - N
 	p := pN - N
+	if n == 0 {
+		if err := storableStaticGain("SetDelayModel", p, m); err != nil {
+			return nil, err
+		}
+	}
 
 	var aMat *mat.Dense
 	if n > 0 {

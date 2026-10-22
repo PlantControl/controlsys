@@ -296,7 +296,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re, im)
 		}
 	}
-	return nil
+	return finiteResponse(dst)
 }
 
 // refine improves bd.x against the exact pencil at pt, M = (pÊ + qÂ)/κ with
@@ -703,7 +703,7 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
-	return nil
+	return finiteResponse(dst)
 }
 
 // pencilResidual sets r = κ·b − p·E·x − q·A·x for one right-hand side in
@@ -823,6 +823,18 @@ func cLUSolve(lu []complex128, piv []int, x []complex128, n, m int) {
 
 var errSingularPencil = fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
 
+// finiteResponse reports errSingularPencil for a non-finite response of a
+// finite realization: the solve overflowed or underflowed, as next to a pole
+// at extreme scale, so the pole limit's double-double fallback takes over.
+func finiteResponse(dst []complex128) error {
+	for _, v := range dst {
+		if math.IsNaN(real(v)) || math.IsNaN(imag(v)) || math.IsInf(real(v), 0) || math.IsInf(imag(v), 0) {
+			return errSingularPencil
+		}
+	}
+	return nil
+}
+
 // errNonFinitePencil rejects a NaN point or non-finite realization: NaN
 // comparisons defeat GEPP's pivot and structure bookkeeping.
 var errNonFinitePencil = fmt.Errorf("non-finite complex matrix: %w", ErrInvalidArgument)
@@ -841,40 +853,57 @@ func (br *balancedRealization) balance(t []float64) {
 	)
 	n, m, p := br.n, br.m, br.p
 	h, e, b, c := br.a, br.e, br.b, br.c
+	var rowLo, rowHi, colLo, colHi float64
+	addRow := func(v float64) float64 {
+		if v = math.Abs(v); v != 0 {
+			rowLo, rowHi = min(rowLo, v), max(rowHi, v)
+		}
+		return v
+	}
+	addCol := func(v float64) float64 {
+		if v = math.Abs(v); v != 0 {
+			colLo, colHi = min(colLo, v), max(colHi, v)
+		}
+		return v
+	}
 	for range maxIt {
 		converged := true
 		for i := range n {
 			var col, row float64
+			rowLo, rowHi, colLo, colHi = math.Inf(1), 0, math.Inf(1), 0
 			for j := range n {
 				if j != i {
-					col += math.Abs(h[j*n+i])
-					row += math.Abs(h[i*n+j])
+					col += addCol(h[j*n+i])
+					row += addRow(h[i*n+j])
 				}
 			}
 			if e != nil {
 				for j := range n {
 					if j != i {
-						col += math.Abs(e[j*n+i])
-						row += math.Abs(e[i*n+j])
+						col += addCol(e[j*n+i])
+						row += addRow(e[i*n+j])
 					}
 				}
 			}
 			for k := range p {
-				col += math.Abs(c[k*n+i])
+				col += addCol(c[k*n+i])
 			}
 			for k := range m {
-				row += math.Abs(b[i*m+k])
+				row += addRow(b[i*m+k])
 			}
 			if col == 0 || row == 0 {
 				continue
 			}
+			// Keep every scaled entry normal, so the scaling stays exact.
+			fMax := min(0x1p500, rowLo/0x1p-1022, math.MaxFloat64/colHi)
+			fMin := max(0x1p-500, 0x1p-1022/colLo, rowHi/math.MaxFloat64)
 			f, sum := 1.0, col+row
-			for col < row/radix && f < 0x1p500 {
+			for col < row/radix && f*radix <= fMax {
 				f *= radix
 				col *= radix
 				row /= radix
 			}
-			for col >= row*radix && f > 0x1p-500 {
+			for col >= row*radix && f/radix >= fMin {
 				f /= radix
 				col /= radix
 				row *= radix
