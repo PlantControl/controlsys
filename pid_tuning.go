@@ -2746,28 +2746,36 @@ const pidTuningIdealReturnTol = 0x1p-26
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic
 // directly, of the loop with model, transfer its transfer function, delayed
-// by lag samples. TransferFunction drops or corrupts near-zero poles and
-// zeros, and the float verdict on its characteristic then decides
-// confidently wrong, so above pidTuningExactOrder the transfer is never
-// used: pidTuningIdealRealizationFloat decides, exact Schur–Cohn
-// (pidTuningIdealExact) when it is in doubt and n+lag is within
-// pidTuningExactLagOrder, and otherwise the loop fails closed as unstable.
-// Up to pidTuningExactOrder, a delayed loop, or one whose transfer is of
-// lower degree than model or fails, has its characteristic built exactly
-// from model's realization: the float verdict on the rounded exact
-// characteristic decides, and exact Schur–Cohn only when it is in doubt and
-// n+lag is within pidTuningExactLagOrder, as that recursion at order n+lag
-// is slow; beyond it the float verdict stands. transfer is called only for
-// loops out of both scopes, undelayed loops, or a rounded characteristic
-// that overflows beyond that cap.
+// by lag samples. Every loop takes one chain: a float verdict, exact
+// Schur–Cohn (pidTuningIdealExact) when it is in doubt and n+lag is within
+// pidTuningExactLagOrder, else pidTuningIdealRealizationFloat (whose
+// Bauer–Fike discs certify loops the polynomial error model leaves in
+// doubt), else the loop fails closed as unstable. TransferFunction drops or
+// corrupts near-zero poles and zeros, and the float verdict on its
+// characteristic then decides confidently wrong, so above
+// pidTuningExactOrder the transfer is never used and the realization's
+// float verdict comes first. Up to pidTuningExactOrder, a delayed loop, or
+// one whose transfer is of lower degree than model or fails, has its
+// characteristic built exactly from model's realization, and the float
+// verdict on the rounded exact characteristic comes first. transfer is
+// called only for loops out of both scopes, undelayed loops, or a rounded
+// characteristic that overflows beyond pidTuningExactLagOrder.
 func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, error), c *PID2, lag int) (bool, error) {
 	n, _, _ := model.Dims()
-	if n > pidTuningExactOrder && pidTuningIdealRealizable(model, c) {
+	realizable := pidTuningIdealRealizable(model, c)
+	if n > pidTuningExactOrder && realizable {
 		if stable, decided := pidTuningIdealRealizationFloat(model, c, lag); decided {
 			return stable, nil
 		}
 		exact, ok := pidTuningIdealExact(model, c, lag)
 		return exact && ok, nil
+	}
+	unresolved := func() bool {
+		stable, decided := false, false
+		if realizable {
+			stable, decided = pidTuningIdealRealizationFloat(model, c, lag)
+		}
+		return stable && decided
 	}
 	inScope := pidTuningIdealInScope(model, c)
 	var tr *TransferFuncResult
@@ -2782,12 +2790,15 @@ func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, e
 		f, ok := dyadicPolyFloat(ch)
 		if ok {
 			stable, decided, err := pidTuningIdealFloat(f, c.Dt == 0)
-			if err != nil || decided || n+lag > pidTuningExactLagOrder {
+			if err != nil || decided {
 				return stable, err
 			}
 		}
-		if ok || n+lag <= pidTuningExactLagOrder {
+		if n+lag <= pidTuningExactLagOrder {
 			return pidTuningDyadicStable(ch, c.Dt == 0), nil
+		}
+		if ok {
+			return unresolved(), nil
 		}
 		var err error
 		if tr, err = transfer(); err != nil {
@@ -2838,7 +2849,7 @@ func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, e
 	if exact, ok := pidTuningIdealExact(model, c, lag); ok {
 		return exact, nil
 	}
-	return stable, nil
+	return unresolved(), nil
 }
 
 // pidTuningIdealRealizationFloat is the float verdict of pidTuningIdealStable
@@ -3003,8 +3014,10 @@ func pidTuningIdealRealization(model *System, c *PID2, lag int) (a, abs *mat.Den
 // and s_i = |y_iᴴx_i| for unit left ones, κ(V) ≤ √(n·Σ1/s_i²), and every
 // eigenvalue of a matrix within eta of a in the 2-norm lies in a disc of
 // radius κ(V)·eta, padded by pidTuningPoleMarginSafety, about a computed
-// one. The discs must be pairwise disjoint, so each holds exactly one, and
-// each must lie wholly inside or outside the exact test's boundary
+// one. The computed pairs are exact for a + R·V⁻¹, R = aV − VΛ, so eta
+// grows by ‖R‖_F·‖V⁻¹‖_F ≤ ‖R‖_F·√(Σ1/s_i²). The discs must be pairwise
+// disjoint, so each holds exactly one, and each must lie wholly inside or
+// outside the exact test's boundary
 // (Re s < −1e-10, |z| < 1−1e-10; inside also within poleStabilityTolerance).
 func pidTuningEigenDiscVerdict(a *mat.Dense, continuous bool, eta float64) (stable, decided bool) {
 	var eig mat.Eigen
@@ -3016,7 +3029,23 @@ func pidTuningEigenDiscVerdict(a *mat.Dense, continuous bool, eta float64) (stab
 	eig.VectorsTo(&vr)
 	eig.LeftVectorsTo(&vl)
 	n := len(vals)
-	var sum float64
+	var sum, res float64
+	col := make([]complex128, n)
+	for i := range n {
+		var nr, ri float64
+		for k := range n {
+			col[k] = vr.At(k, i)
+			nr += real(col[k])*real(col[k]) + imag(col[k])*imag(col[k])
+		}
+		for k := range n {
+			d := -vals[i] * col[k]
+			for j, v := range a.RawRowView(k) {
+				d += complex(v, 0) * col[j]
+			}
+			ri += real(d)*real(d) + imag(d)*imag(d)
+		}
+		res += ri / nr
+	}
 	for i := range n {
 		var dot complex128
 		var nr, nl float64
@@ -3032,7 +3061,7 @@ func pidTuningEigenDiscVerdict(a *mat.Dense, continuous bool, eta float64) (stab
 		}
 		sum += 1 / (s * s)
 	}
-	r := pidTuningPoleMarginSafety * math.Sqrt(float64(n)*sum) * eta
+	r := pidTuningPoleMarginSafety * math.Sqrt(float64(n)*sum) * (eta + math.Sqrt(sum*res))
 	if !finitePID(r) {
 		return false, false
 	}
@@ -3096,8 +3125,11 @@ func pidTuningIdealFloat(characteristic Poly, continuous bool) (stable, decided 
 // plant numerator over Δ and the characteristic is Δ·λ^lag·den(c) + N·num(c).
 func pidTuningIdealExact(model *System, c *PID2, lag int) (stable, ok bool) {
 	n, _, _ := model.Dims()
+	if n+lag > pidTuningExactLagOrder {
+		return false, false
+	}
 	ch, ok := pidTuningIdealCharacteristic(model, c, lag)
-	if !ok || n+lag > pidTuningExactLagOrder {
+	if !ok {
 		return false, false
 	}
 	return pidTuningDyadicStable(ch, c.Dt == 0), true

@@ -278,3 +278,109 @@ func TestPIDTuningEigenDiscVerdictMatchesExact(t *testing.T) {
 		t.Errorf("disc verdict decided %d of %d, %d stable", disc, total, stables)
 	}
 }
+
+// HVXYLI: within pidTuningExactOrder, past pidTuningExactLagOrder, an
+// undecided float verdict on the exact characteristic stood, unlike every
+// other loop out of exact scope. A hidden mode at 1−9.99e-11, a root of the
+// characteristic outside |z| < 1−1e-10, passed as stable at lag 70; one at
+// 1−3e-10, which exact Schur–Cohn certifies at lag 10, passed unresolved.
+// Both now take the closed-loop realization's float and Bauer–Fike
+// verdicts, then fail closed. A robust mode at 0.9 keeps its verdict at
+// lag 70, whose oracle is the core's characteristic, as the modes are
+// uncontrollable.
+func TestPIDTuningIdealStableLowOrderLongLagFailClosed(t *testing.T) {
+	const dt = 0.1
+	num, den := Poly{0.3, 0.1}, Poly{1, -1.2, 0.5}
+	k := PID2{Kp: 0.05, Ki: 0.02, Kd: 0.005, B: 1, C: 1, Dt: dt}
+	failed := func() (*TransferFuncResult, error) { return nil, ErrOverflow }
+	core := map[int]bool{}
+	for _, tc := range []struct {
+		mode float64
+		lag  int
+		want bool
+	}{{1 - 9.99e-11, 70, false}, {1 - 3e-10, 10, true}, {1 - 3e-10, 70, false}, {0.9, 70, true}} {
+		plant := pidtuneHiddenModesPlant(t, num, den, dt, []complex128{complex(tc.mode, 0), 0.4, 0.6})
+		if n, _, _ := plant.Dims(); n > pidTuningExactOrder {
+			t.Fatalf("order %d above pidTuningExactOrder", n)
+		}
+		stable, ok := core[tc.lag]
+		if !ok {
+			stable = pidtuneExactSchurStableLag(t, &PID{Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Dt: dt}, num, den, dt, 1, tc.lag)
+			core[tc.lag] = stable
+		}
+		if !stable {
+			t.Fatalf("lag %d: core oracle unstable", tc.lag)
+		}
+		if got, err := pidTuningIdealStable(plant, failed, &k, tc.lag); err != nil || got != tc.want {
+			t.Errorf("mode %v lag %d: stable %v %v, want %v", tc.mode, tc.lag, got, err, tc.want)
+		}
+	}
+}
+
+// HVXYLI: pidTuningEigenDiscVerdict, now the second link of every chain
+// out of exact scope, never disagrees with exact Schur–Cohn or
+// Routh–Hurwitz on the dyadic characteristic where both decide, over random
+// non-symmetric plants of every order up to pidTuningExactOrder and beyond,
+// continuous and discrete, D ≠ 0 and lags.
+func TestPIDTuningEigenDiscVerdictMatchesExactLowOrder(t *testing.T) {
+	rng := rand.New(rand.NewPCG(97, 0x4f71))
+	disc, total, stables := 0, 0, 0
+	for trial := range 60 {
+		n := 2 + trial%19
+		dt, lag := 0.0, 0
+		if trial%3 != 0 {
+			dt, lag = 0.1, []int{0, 2, 9, 20}[trial%4]
+		}
+		a, b, c := mat.NewDense(n, n, nil), mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil)
+		for i := range n {
+			for j := range n {
+				a.Set(i, j, 0.3*rng.NormFloat64()/math.Sqrt(float64(n)))
+			}
+			if dt == 0 {
+				a.Set(i, i, a.At(i, i)-0.2-2*rng.Float64())
+			} else {
+				a.Set(i, i, a.At(i, i)+0.6*rng.Float64())
+			}
+			b.Set(i, 0, rng.NormFloat64())
+			c.Set(0, i, rng.NormFloat64())
+		}
+		d := 0.0
+		if trial%5 == 4 {
+			d = 0.3 * rng.NormFloat64()
+		}
+		plant, err := New(a, b, c, mat.NewDense(1, 1, []float64{d}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for g := range 4 {
+			k := PID2{Kp: math.Pow(10, -2+1.5*rng.Float64()), Kd: math.Pow(10, -3+1.5*rng.Float64()), B: 1, C: 1, Dt: dt, IFormula: PIDFormula(g % 3)}
+			if g != 3 {
+				k.Ki = math.Pow(10, -2+1.5*rng.Float64())
+			}
+			am, abs, ok := pidTuningIdealRealization(plant, &k, lag)
+			if !ok {
+				t.Fatalf("trial %d: realization failed", trial)
+			}
+			order, _ := am.Dims()
+			stable, decided := pidTuningEigenDiscVerdict(am, dt == 0, pidTuningPoleErrorScale*float64(order)*0x1p-52*mat.Norm(abs, 2))
+			total++
+			if !decided {
+				continue
+			}
+			disc++
+			if stable {
+				stables++
+			}
+			exact, inScope := pidTuningIdealExact(plant, &k, lag)
+			if !inScope {
+				t.Fatalf("trial %d: exact out of scope", trial)
+			}
+			if stable != exact {
+				t.Errorf("trial %d n %d dt %g lag %d d %g %+v: disc %v, exact %v", trial, n, dt, lag, d, k, stable, exact)
+			}
+		}
+	}
+	if disc < total/2 || stables == 0 || stables == disc {
+		t.Errorf("disc verdict decided %d of %d, %d stable", disc, total, stables)
+	}
+}
