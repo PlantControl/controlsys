@@ -273,8 +273,9 @@ func hybridZeros(sys *System, zeros []complex128, scale, tol float64, failed int
 // rankMarginTrust and the reductions disagree on the pencil order or
 // normal rank (unless zs is square of full normal rank, whose zeros
 // mimoZeros refines on the exact pencil), the unscaled reduction of sys
-// competes: the set with more zeros passing zeroBackwardOK on zs, and
-// distinguishable there from points of the same modulus, wins, then
+// competes: the set with more zeros passing zeroBackwardOK on zs, not
+// counting those beyond ‖zs‖ that a point of the same modulus matches
+// (classifyBackward), wins, then
 // the one with fewer clearly not zeros (classifyBackward), then the
 // unscaled one unless its smallest margin is below that of zs. The test
 // uses the larger of the two normal ranks unless the pencil at a generic
@@ -429,12 +430,16 @@ func countBackwardOK(sys *System, zeros []complex128, rank int) int {
 }
 
 // classifyBackward counts the zeros passing zeroBackwardOK and those
-// clearly not zeros (ratio above zeroNotZeroRatio). With distinct, a zero
-// passes only if P fails the test at a generic point of modulus
-// max(|z|, ‖sys‖): the ratio of a strictly proper model tends to 0 as |s|
-// grows, so far out every point passes, including the rounding-noise zeros
-// a rank decision on a vanishing Markov parameter leaves where the model
-// has infinite zeros (MATLAB tzero returns those as infinite).
+// clearly not zeros (ratio above zeroNotZeroRatio). With distinct, a
+// passing zero z with |z| > ‖sys‖ is not counted when a generic point w of
+// the same modulus passes too, with a ratio within zeroDistinctRatio of
+// that of z: the ratio of a strictly proper model tends to 0 as |s| grows,
+// so far out every point passes, including the rounding-noise zeros a rank
+// decision on a vanishing Markov parameter leaves where the model has
+// infinite zeros (MATLAB tzero returns those as infinite). But P(w) passes
+// beside true zeros beyond the pole band too, and ‖sys‖ grows with a large
+// C or B while the zeros stay put, so zeros inside ‖sys‖, or standing out
+// from w, count.
 func classifyBackward(sys *System, zeros []complex128, rank int, distinct bool) (ok, bad int) {
 	n, m, p := sys.Dims()
 	tol := zeroBackwardTol * math.Sqrt(float64((n+p)*(n+m))) * eps()
@@ -442,8 +447,10 @@ func classifyBackward(sys *System, zeros []complex128, rank int, distinct bool) 
 	for _, z := range zeros {
 		switch r := zeroBackwardRatio(sys, z, rank); {
 		case r <= tol:
-			if distinct && zeroBackwardRatio(sys, cmplx.Rect(math.Max(cmplx.Abs(z), norm), 1+cmplx.Phase(z)), rank) <= tol {
-				continue
+			if az := cmplx.Abs(z); distinct && az > norm {
+				if rw := zeroBackwardRatio(sys, cmplx.Rect(az, 1+cmplx.Phase(z)), rank); rw <= tol && rw <= zeroDistinctRatio*r {
+					continue
+				}
 			}
 			ok++
 		case r > zeroNotZeroRatio:
@@ -452,6 +459,12 @@ func classifyBackward(sys *System, zeros []complex128, rank int, distinct bool) 
 	}
 	return ok, bad
 }
+
+// zeroDistinctRatio is the factor within which the backward ratio at a
+// generic point of the same modulus marks a zero beyond ‖sys‖ as
+// indistinguishable. Rounding-noise zeros came within 5, true ones
+// beyond the pole band above 50; 4 to 64 lost no true zero in sweeps.
+const zeroDistinctRatio = 16
 
 // zeroBackwardTol bounds σ_{n+rank}(P(z))/σ₁(P(z)) in zeroBackwardOK, in
 // units of the staircase rank tolerance ε·√((n+p)(n+m)).
