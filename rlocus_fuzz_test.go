@@ -7,7 +7,6 @@ import (
 	"math/cmplx"
 	"slices"
 	"sort"
-	"strings"
 	"testing"
 )
 
@@ -86,9 +85,6 @@ func FuzzRootLocus(f *testing.F) {
 					fzSkip(t, "rlocus: 1+K·D = 0")
 				}
 			}
-		}
-		if errors.Is(err, ErrSchurFailed) && strings.Contains(err.Error(), "Poly.Roots") {
-			fzSkip(t, "rlocus: breakaway Poly.Roots non-convergence (followup O5FYRC-3)")
 		}
 		fzErr(t, s, "RootLocus", err)
 		want := slices.Clone(gains)
@@ -213,9 +209,8 @@ func fzRlocCheckCounts(t *testing.T, s *fzSpec, K float64, vals []complex128, P 
 
 // fzRlocCheckBreakaway requires every reported break point clear of the
 // poles, zeros and the root cluster at the origin to be a stationary point
-// of G with K(s₀) = −s₀^L·den(s₀)/num(s₀) > 0. A violation on a loop
-// whose high-frequency gain num/den is negative is the known followup
-// (O5FYRC-1: the real-axis rule ignores the loop gain sign) and skips.
+// of G with K(s₀) = −s₀^L·den(s₀)/num(s₀) > 0, for either sign of the
+// high-frequency gain.
 func fzRlocCheckBreakaway(t *testing.T, s *fzSpec, sys *System, bp []complex128, den, num []*big.Rat, L int) {
 	t.Helper()
 	evalAbs := func(p []*big.Rat, x float64) (v, mag float64) {
@@ -231,12 +226,6 @@ func fzRlocCheckBreakaway(t *testing.T, s *fzSpec, sys *System, bp []complex128,
 		v, _ = acc.Float64()
 		mag, _ = abs.Float64()
 		return v, mag
-	}
-	lead := 0
-	for _, ci := range num {
-		if lead = ci.Sign(); lead != 0 {
-			break
-		}
 	}
 	deriv := func(p []*big.Rat) []*big.Rat {
 		out := make([]*big.Rat, max(len(p)-1, 1))
@@ -305,9 +294,6 @@ func fzRlocCheckBreakaway(t *testing.T, s *fzSpec, sys *System, bp []complex128,
 		K := -dv / nv * math.Pow(x, float64(L))
 		if K > 0 {
 			continue
-		}
-		if lead < 0 {
-			fzSkip(t, "rlocus: negative-gain loop breakaway (followup O5FYRC-1)")
 		}
 		if fzRlocAbsThreshold(t, s, sys, L) {
 			fzSkip(t, "rlocus: absolute real-axis thresholds (followup O5FYRC-2)")
