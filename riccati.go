@@ -144,6 +144,23 @@ type RiccatiResult struct {
 	// tiny Rcnd means X may be inaccurate. U11 is that of the state- and
 	// cost-scaled problem actually solved.
 	Rcnd float64
+	// Accuracy is the Report of MATLAB icare/idare for X: 0 when a Newton
+	// step certifies X (to about 1e-8 relative), 1 when X is a stabilizing
+	// Hamiltonian or pencil solution (A − BK stable in float64 arithmetic)
+	// that no Newton step certifies, so X may be inaccurate and, near the
+	// stability boundary, A − BK only rounded to stable; check it before
+	// use. A non-finite X or no
+	// stabilizing solution (Report 2, 3) is an error, not a result.
+	Accuracy int
+}
+
+// certified returns ErrNoStabilizing for a result whose X no Newton step
+// certified (Accuracy ≠ 0), for callers that cannot report it.
+func (res *RiccatiResult) certified() error {
+	if res.Accuracy != 0 {
+		return fmt.Errorf("Riccati solution not certified (Accuracy %d): %w", res.Accuracy, ErrNoStabilizing)
+	}
+	return nil
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -222,12 +239,17 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // Newton's method, and an iterate is kept only once Newton has converged
 // (a step within 1e-10); when that fails (or A − BK is unstable, or the
 // Hamiltonian solve fails, or E is given) Care solves the extended pencil
-// of MATLAB icare, verified the same way at each of its cost scales, and with no confirmed solution returns
-// ErrNoStabilizing (or the Hamiltonian's error) rather than an
-// unverified X. Under cheap control with weak actuation Newton has no
-// quadratic region (its first step from an X accurate to 1e-11 can be
-// 1e-6), so such problems may return ErrNoStabilizing where MATLAB icare
-// returns its Schur X unverified.
+// of MATLAB icare, verified the same way at each of its cost scales. A
+// certified X has Accuracy 0. With none certified, Care returns, as
+// MATLAB icare with Report 1, the stabilizing solution (A − BK stable in
+// float64) of smallest first Newton step (or, without one, a stabilizing
+// X whose Lyapunov equation is singular) with Accuracy 1, unrefined:
+// under cheap control with weak actuation Newton has no quadratic region
+// (its first step from an X accurate to 1e-11 can be 1e-6), and such an
+// X may be accurate or off by far more than its step. An X whose U11 has
+// rcnd below eps is not finite (icare Report 2) and is never returned.
+// With no stabilizing solution Care returns ErrNoStabilizing (or the
+// Hamiltonian's error).
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -259,11 +281,11 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, ErrSingularR
 	}
 	if problem.E != nil {
-		X, K, rcnd, err := problem.pencilRiccati(true)
+		X, K, rcnd, accuracy, err := problem.pencilRiccati(true)
 		if err != nil {
 			return nil, err
 		}
-		return problem.result(X, K, ws.eig[:n], rcnd), nil
+		return problem.result(X, K, ws.eig[:n], rcnd, accuracy), nil
 	}
 
 	// Working copies of A and Q for cross-term transformation
@@ -323,17 +345,18 @@ func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	X, rcnd, err := problem.hamiltonianSolution(aWork, qWork, g, eig)
 	var K *mat.Dense
 	if err == nil {
-		K, err = problem.acceptRiccati(true, X, eig)
+		K, err = problem.acceptRiccati(true, X, eig, rcnd)
 	}
+	accuracy := 0
 	if err != nil {
 		first := err
 		problem.costScaling, problem.balanced, problem.sigma = costScaling, false, 1
 		problem.rescueErr, problem.resolved, problem.candidates = nil, false, problem.candidates[:0]
-		if X, K, rcnd, err = problem.pencilRiccati(true); err != nil {
+		if X, K, rcnd, accuracy, err = problem.pencilRiccati(true); err != nil {
 			return nil, first
 		}
 	}
-	return problem.result(X, K, eig, rcnd), nil
+	return problem.result(X, K, eig, rcnd, accuracy), nil
 }
 
 // hamiltonianSolution returns the stabilizing solution X of care's
@@ -502,8 +525,10 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // to the rounding of (R+B'XB)⁻¹ that hides lost digits from the residual
 // itself. An X the step moves by more than 1e-8 relative is refined by
 // Newton's method until a step is within 1e-10; if that does not
-// converge, the other cost scales' solutions are tried, and with none
-// confirmed Dare returns ErrNoStabilizing rather than an unverified X.
+// converge, the other cost scales' solutions are tried. A certified X has
+// Accuracy 0; with none certified Dare returns the stabilizing solution of
+// smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care),
+// and with no stabilizing solution ErrNoStabilizing.
 //
 // Dare scales the states and the cost as Care does (MATLAB idare);
 // opts.NoScaling disables it. An unscaled pencil that fails QZ or the
@@ -539,18 +564,19 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, ErrSingularR
 	}
 
-	X, K, rcnd, err := problem.pencilRiccati(false)
+	X, K, rcnd, accuracy, err := problem.pencilRiccati(false)
 	if err != nil {
 		return nil, err
 	}
-	return problem.result(X, K, ws.eig[:n], rcnd), nil
+	return problem.result(X, K, ws.eig[:n], rcnd, accuracy), nil
 }
 
 // pencilRiccati solves the Riccati equation from the extended pencil
-// (pencilSolution) and returns X, K and rcnd with Eig in ws.eig. A
-// solution acceptRiccati rejects is replaced by the first accepted one of
-// the other passes' solutions and then of lastResort.
-func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.Dense, float64, error) {
+// (pencilSolution) and returns X, K, rcnd and the Accuracy of X with Eig
+// in ws.eig. A solution acceptRiccati rejects is replaced by the first
+// accepted one of the other passes' solutions and then of lastResort;
+// with none accepted, by problem.poor (Accuracy 1).
+func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.Dense, float64, int, error) {
 	n := problem.n
 	problem.collecting = true
 	subspace, X, _, rcnd, err := problem.pencilSolution(continuous)
@@ -560,7 +586,7 @@ func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.
 		for i := range n {
 			eig[i] = complex(subspace.alphaR[i]/subspace.beta[i], subspace.alphaI[i]/subspace.beta[i])
 		}
-		K, err = problem.acceptRiccati(continuous, X, eig)
+		K, err = problem.acceptRiccati(continuous, X, eig, rcnd)
 	}
 	if err != nil {
 		for i := range problem.candidates {
@@ -569,7 +595,7 @@ func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.
 			for j := range n {
 				eig[j] = complex(c.wr[j]/c.beta[j], c.wi[j]/c.beta[j])
 			}
-			if k, cerr := problem.acceptRiccati(continuous, X, eig); cerr == nil {
+			if k, cerr := problem.acceptRiccati(continuous, X, eig, rcnd); cerr == nil {
 				K, err = k, nil
 				break
 			}
@@ -581,9 +607,13 @@ func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.
 		}
 	}
 	if err != nil {
-		return nil, nil, 0, err
+		if problem.poor == nil {
+			return nil, nil, 0, 0, err
+		}
+		X, K, rcnd = problem.poorSolution(eig)
+		return X, K, rcnd, 1, nil
 	}
-	return X, K, rcnd, nil
+	return X, K, rcnd, 0, nil
 }
 
 // lastResort solves the cost-balanced pencil at the cost scales of
@@ -619,7 +649,7 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 		for i := range eig {
 			eig[i] = complex(subspace.alphaR[i]/subspace.beta[i], subspace.alphaI[i]/subspace.beta[i])
 		}
-		if K, err := problem.acceptRiccati(continuous, X, eig); err == nil {
+		if K, err := problem.acceptRiccati(continuous, X, eig, rcnd); err == nil {
 			return X, K, rcnd, nil
 		}
 		problem.candidates = append(problem.candidates, riccatiPass{sigma: sigma})
@@ -627,14 +657,58 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 	return nil, nil, 0, ErrNoStabilizing
 }
 
-// acceptRiccati returns the gain of the solution X, which it verifies
-// (verifyRiccati); X and eig may be refined in place.
-func (problem *riccatiProblem) acceptRiccati(continuous bool, X *mat.Dense, eig []complex128) (*mat.Dense, error) {
+// acceptRiccati returns the gain of the solution X (with rcnd), which it
+// verifies (verifyRiccati); X and eig may be refined in place.
+func (problem *riccatiProblem) acceptRiccati(continuous bool, X *mat.Dense, eig []complex128, rcnd float64) (*mat.Dense, error) {
 	K, err := problem.gain(continuous, X.RawMatrix().Data)
 	if err != nil {
 		return nil, err
 	}
-	return problem.verifyRiccati(continuous, X, K, eig)
+	return problem.verifyRiccati(continuous, X, K, eig, rcnd)
+}
+
+// riccatiPoor is a stabilizing solution no Newton step certified: X, its
+// gain K, the eigenvalues of A − BK, rcnd and its first Newton step.
+type riccatiPoor struct {
+	x, k       []float64
+	eig        []complex128
+	rcnd, step float64
+}
+
+// keepPoor saves X (xData, gain K) in problem.poor with the eigenvalues
+// eig of A − BK (nil: those of the last newtonCost), unless the saved one
+// has a smaller first Newton step or rcnd is below poorRcnd.
+func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []complex128, rcnd, step float64) {
+	if !(rcnd >= poorRcnd) {
+		return
+	}
+	p := problem.poor
+	if p == nil {
+		p = &riccatiPoor{}
+		problem.poor = p
+	} else if !(step < p.step) {
+		return
+	}
+	n, m := problem.n, problem.m
+	p.x = append(p.x[:0], xData...)
+	p.k = append(p.k[:0], K.RawMatrix().Data[:m*n]...)
+	if eig != nil {
+		p.eig = append(p.eig[:0], eig...)
+	} else {
+		p.eig = append(p.eig[:0], make([]complex128, n)...)
+		problem.closedLoopEig(p.eig)
+	}
+	p.rcnd, p.step = rcnd, step
+}
+
+// poorSolution restores problem.poor to ws.xData, ws.kData and eig.
+func (problem *riccatiProblem) poorSolution(eig []complex128) (X, K *mat.Dense, rcnd float64) {
+	n, m, ws, p := problem.n, problem.m, problem.ws, problem.poor
+	xData, kData := ws.xData[:n*n], ws.kData[:m*n]
+	copy(xData, p.x)
+	copy(kData, p.k)
+	copy(eig, p.eig)
+	return mat.NewDense(n, n, xData), mat.NewDense(m, n, kData), p.rcnd
 }
 
 // gain returns the gain of X: careGain or dareGain.
@@ -739,10 +813,12 @@ func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 // converged to its rounding level; the iterate and its K then replace X
 // and K. Eig is that of A − BK for the returned K. A first solve whose
 // Lyapunov equation is singular is kept with a residual within rescueTol
-// of its terms and a stable A − BK. Otherwise verifyRiccati returns
-// problem.rescueErr, or ErrNoStabilizing: an X that no step certifies is
-// an error, not a solution. X and eig are updated in place.
-func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, eig []complex128) (*mat.Dense, error) {
+// of its terms and a stable A − BK as a candidate of problem.poor, as is
+// a stabilizing X whose first step exceeds newtonTol (keepPoor, before
+// any iterate overwrites it). Otherwise verifyRiccati returns
+// problem.rescueErr, or ErrNoStabilizing, and the caller falls back to
+// problem.poor with Accuracy 1. X and eig are updated in place.
+func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, eig []complex128, rcnd float64) (*mat.Dense, error) {
 	fail := problem.rescueErr
 	if fail == nil {
 		fail = ErrNoStabilizing
@@ -753,8 +829,10 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		x1, err := problem.newtonCost(continuous, K, xData)
 		if err != nil {
 			if it == 0 && !errors.Is(err, ErrNoStabilizing) && !problem.resolved {
-				if res, scale := problem.residualTerms(continuous, xData); res <= rescueTol*scale && problem.stableGain(continuous, K) {
-					return K, nil
+				if res, scale := problem.residualTerms(continuous, xData); res <= rescueTol*scale {
+					if vals, ok := problem.stableGain(continuous, K); ok {
+						problem.keepPoor(xData, K, vals, rcnd, math.Inf(1))
+					}
 				}
 			}
 			return nil, fail
@@ -764,9 +842,12 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		if d != 0 {
 			step = math.Sqrt(d / x1n)
 		}
-		if it == 0 && step <= newtonTol {
-			problem.closedLoopEig(eig)
-			return K, nil
+		if it == 0 {
+			if step <= newtonTol {
+				problem.closedLoopEig(eig)
+				return K, nil
+			}
+			problem.keepPoor(xData, K, nil, rcnd, step)
 		}
 		if it > 0 && step <= newtonRefineTol {
 			prev := append([]float64(nil), xData...)
@@ -1149,7 +1230,15 @@ func ddNormalize(hi, lo []float64) {
 // newtonSteps its solves. Three steps without a new smallest one end it
 // once within newtonGlobalTol; larger steps are Newton–Kleinman's global
 // phase, which need not decrease.
+//
+// poorRcnd = eps bounds the rcnd of U11 of an Accuracy 1 X from below:
+// under it U11 is numerically singular and X not finite (MATLAB
+// icare/idare Report 2), its K so large that a float64-stable A − BK
+// says nothing (Kalman fuzz e5d054af185f91b9 under FMA rounding: rcnd
+// 1.5e-17, three exact closed-loop roots outside the unit circle).
+// weakBStall's X has rcnd 8e-15.
 const (
+	poorRcnd        = 0x1p-52
 	newtonTol       = 1e-8
 	newtonRefineTol = 1e-10
 	newtonGlobalTol = 1e-5
@@ -1552,8 +1641,9 @@ const (
 	noScalingTol = 1e-12
 )
 
-// stableGain reports whether A − BK (with E: E⁻¹(A − BK)) is stable.
-func (problem *riccatiProblem) stableGain(continuous bool, K *mat.Dense) bool {
+// stableGain returns the eigenvalues of A − BK (with E: E⁻¹(A − BK)) and
+// reports whether they are stable.
+func (problem *riccatiProblem) stableGain(continuous bool, K *mat.Dense) ([]complex128, bool) {
 	var bk, ea mat.Dense
 	bk.Mul(problem.B, K)
 	acl := mat.NewDense(problem.n, problem.n, nil)
@@ -1563,21 +1653,22 @@ func (problem *riccatiProblem) stableGain(continuous bool, K *mat.Dense) bool {
 		lu.Factorize(problem.E)
 		if err := lu.SolveTo(&ea, false, acl); err != nil {
 			if _, ok := err.(mat.Condition); !ok {
-				return false
+				return nil, false
 			}
 		}
 		acl = &ea
 	}
 	var eig mat.Eigen
 	if !eig.Factorize(acl, mat.EigenNone) {
-		return false
+		return nil, false
 	}
-	for _, v := range eig.Values(nil) {
+	vals := eig.Values(nil)
+	for _, v := range vals {
 		if continuous && !(real(v) < 0) || !continuous && !(cmplx.Abs(v) < 1) {
-			return false
+			return nil, false
 		}
 	}
-	return true
+	return vals, true
 }
 
 // restoredSolution restores the saved pass prev as pencilSolution returns

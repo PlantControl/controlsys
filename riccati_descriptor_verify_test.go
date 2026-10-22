@@ -58,9 +58,10 @@ func descriptorExplicitGain(t *testing.T, continuous bool, A, B, Q, R, S, E *mat
 // X = E⁻ᵀYE⁻¹, with a stabilizing K and Eig the eigenvalues of
 // E⁻¹(A − BK), or an error; base returned these X silently wrong (1e-6 up
 // to 4e-2, some with an unstable K) because the E paths skipped the Newton
-// check. Every returned X is within 4e-9 (arm64, amd64, -race), so the
-// bar has margin; "care cheap stall 2" (1-ulp sensitivity 1e-14) is an
-// error, as no Newton step certifies its pencil X. MW6KWB (Dare), 7OUOQO
+// check. Every certified X (Accuracy 0) is within 4e-9 (arm64, amd64,
+// -race), so the bar has margin; an X no Newton step certifies ("care
+// cheap stall 2", 1-ulp sensitivity 1e-14, error up to 6.4e-7) must
+// report Accuracy 1 with a stabilizing K (PHWRNR). MW6KWB (Dare), 7OUOQO
 // (Care).
 func TestDescriptorRiccatiVerified(t *testing.T) {
 	cases := []descriptorRiccatiCase{
@@ -145,6 +146,12 @@ func TestDescriptorRiccatiVerified(t *testing.T) {
 				K0 = res.K
 			}
 			oracle := descriptorOracle(c.continuous, A, B, Q, R, S, E, K0, 12)
+			if res.Accuracy != 0 {
+				if c.wantX && noScaling == c.noScaling {
+					t.Errorf("%s NoScaling=%v: Accuracy %d", c.name, noScaling, res.Accuracy)
+				}
+				continue
+			}
 			if e := relErr(res.X, oracle); !(e <= 1e-7) {
 				t.Errorf("%s NoScaling=%v: X rel err %.3g, want ≤ 1e-7 or an error", c.name, noScaling, e)
 			}

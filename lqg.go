@@ -147,6 +147,9 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	} else {
 		kRes, err = Dare(Aa, Ba, Q, R, ropts)
 	}
+	if err == nil {
+		err = kRes.certified()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("Lqg: %w", err)
 	}
@@ -160,6 +163,9 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	lRes, err := kalmanGain("Lqg", continuous, sys.A, sys.E, eyeDense(n), sys.C, nil, Qn, Rn, Nn, nil)
 	if err != nil {
 		return nil, err
+	}
+	if err := lRes.certified(); err != nil {
+		return nil, fmt.Errorf("Lqg: %w", err)
 	}
 
 	xGen := kRes.X

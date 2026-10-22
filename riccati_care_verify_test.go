@@ -60,6 +60,17 @@ var careVerifyCases = []careVerifyCase{
 		[]float64{1.2011519929381188e-14}, nil},
 }
 
+// careVerifyPoor lists the cases whose X no Newton step certifies and that
+// must return it with Accuracy 1 (MATLAB icare Report 1), with the bound
+// on its error per NoScaling mode. On 376552c they returned
+// ErrNoStabilizing (PHWRNR): ch360 default has error 8.6e-12, NoScaling
+// 2.2e-9; weakBStall's pencil X is off by about 2e-2 (‖X‖ = 2.4e16), so
+// only Accuracy 1, never 0, is required of it.
+var careVerifyPoor = map[string][2]float64{
+	"weakBStall": {1, 1},
+	"ch360":      {1e-9, 1e-7},
+}
+
 func (tc careVerifyCase) dense() (A, B, Q, R, S *mat.Dense) {
 	A, B = mat.NewDense(tc.n, tc.n, tc.a), mat.NewDense(tc.n, tc.m, tc.b)
 	Q, R = mat.NewDense(tc.n, tc.n, tc.q), mat.NewDense(tc.m, tc.m, tc.r)
@@ -104,11 +115,15 @@ func TestCare_NewtonVerified(t *testing.T) {
 		for k, noScaling := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/NoScaling=%v", tc.name, noScaling), func(t *testing.T) {
 				res, err := Care(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling})
-				if errors.Is(err, ErrNoStabilizing) && !tc.mustSolve[k] {
+				poorTol, poor := careVerifyPoor[tc.name]
+				if errors.Is(err, ErrNoStabilizing) && !tc.mustSolve[k] && !poor {
 					return
 				}
 				if err != nil {
 					t.Fatal(err)
+				}
+				if poor && res.Accuracy != 1 || tc.mustSolve[k] && res.Accuracy != 0 {
+					t.Fatalf("Accuracy %d", res.Accuracy)
 				}
 				var bk, acl mat.Dense
 				bk.Mul(B, res.K)
@@ -127,6 +142,12 @@ func TestCare_NewtonVerified(t *testing.T) {
 					t.Fatalf("oracle not converged: %g", e)
 				}
 				tol := 1e-7
+				if res.Accuracy != 0 {
+					tol = math.Inf(1)
+					if poor {
+						tol = poorTol[k]
+					}
+				}
 				if e := relErr(res.X, want); !(e <= tol) {
 					t.Errorf("X rel err %g against 320-bit Newton–Kleinman", e)
 				}
