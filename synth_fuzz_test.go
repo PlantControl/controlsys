@@ -521,14 +521,7 @@ func FuzzKalman(f *testing.F) {
 		fzAddSeed(f, s)
 	}
 	fzFuzz(f, func(t *testing.T, s *fzSpec) {
-		s = syNormC(s)
-		if nd := mqFro(s.D); nd > 1 {
-			d := make([]float64, len(s.D))
-			for i, x := range s.D {
-				d[i] = x / nd
-			}
-			s.D = d
-		}
+		s = syKalmanSpec(s)
 		n, m, p := s.N, s.M, s.P
 		if n == 0 {
 			fzSkip(t, "Kalman: no states")
@@ -591,6 +584,11 @@ func FuzzKalman(f *testing.F) {
 						t.Fatalf("%s: Accuracy %d with closed-loop eigenvalue %v\n%s", op, res.Accuracy, v, s)
 					}
 				}
+				if !mqStabilizable(ds) {
+					fzSkip(t, op+": Accuracy 1, pair not robustly stabilizable")
+				}
+				kd := mqTranspose(mqRaw(res.K), n, p)
+				syRequireStableRat(t, ds, op, syClosedLoopA(ds.A, ds.B, kd, n, p), n, ds.Discrete, fmt.Sprintf("Accuracy %d X=%v K=%v", res.Accuracy, mqRaw(res.X), kd))
 				fzSkip(t, op+": X not certified (Accuracy 1)")
 			}
 			syRiccatiChecks(t, ds, op, qb, rb, sb, mqRaw(res.X), mqTranspose(mqRaw(res.K), n, p), res.Rcnd, true)
@@ -609,6 +607,20 @@ func FuzzKalman(f *testing.F) {
 			})
 		}
 	})
+}
+
+// syKalmanSpec returns s as FuzzKalman solves it: C normalized (syNormC)
+// and D scaled to Frobenius norm at most 1.
+func syKalmanSpec(s *fzSpec) *fzSpec {
+	s = syNormC(s)
+	if nd := mqFro(s.D); nd > 1 {
+		d := make([]float64, len(s.D))
+		for i, x := range s.D {
+			d[i] = x / nd
+		}
+		s.D = d
+	}
+	return s
 }
 
 func syPut(dst []*big.Rat, ld, r0, c0 int, src []*big.Rat, r, c int) {

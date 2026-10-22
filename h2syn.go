@@ -21,6 +21,11 @@ type H2SynResult struct {
 	X       *mat.Dense
 	Y       *mat.Dense
 	CLPoles []complex128
+	// Accuracy is the larger RiccatiResult.Accuracy of X and Y: 1 when no
+	// Newton step certifies one of them (MATLAB h2syn consumes such a
+	// solution with a warning), so K may be inaccurate and CL near the
+	// stability boundary only rounded to stable.
+	Accuracy int
 }
 
 // H2Syn computes the H2-optimal output-feedback controller for the
@@ -39,7 +44,10 @@ type H2SynResult struct {
 // control and filter DAREs.
 //
 // CL and Gamma cost one LFT and the Lyapunov solve of H2Norm on the
-// closed loop, of twice P's order.
+// closed loop, of twice P's order. With Accuracy 1 the gains can be so
+// large (cheap control) that the assembled CL is unstable in float64
+// though A + B2F and A − LC2 are stable; H2Syn then returns H2Norm's
+// ErrUnstable together with ErrNoStabilizing.
 func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	res, err := h2Syn(P, nmeas, ncont)
 	if err != nil {
@@ -49,6 +57,9 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 		return nil, fmt.Errorf("H2Syn: closing the loop: %w", err)
 	}
 	if res.Gamma, err = H2Norm(res.CL); err != nil {
+		if res.Accuracy != 0 {
+			return nil, fmt.Errorf("H2Syn: closed loop of an uncertified (Accuracy %d) Riccati solution: %w: %w", res.Accuracy, err, ErrNoStabilizing)
+		}
 		return nil, fmt.Errorf("H2Syn: %w", err)
 	}
 	return res, nil
@@ -90,9 +101,6 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	S1 := mulDense(mat.DenseCopyOf(C1.T()), D12)
 
 	resX, err := Care(A, B2, Q1, R1, &RiccatiOpts{S: S1})
-	if err == nil {
-		err = resX.certified()
-	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, err)
 	}
@@ -108,9 +116,6 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	S2 := mulDense(B1, mat.DenseCopyOf(D21.T()))
 
 	resY, err := Care(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C2.T()), Q2, R2, &RiccatiOpts{S: S2})
-	if err == nil {
-		err = resY.certified()
-	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: filter %w", gp.op, err)
 	}
@@ -141,7 +146,7 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 		return nil, err
 	}
 
-	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles}, nil
+	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, Accuracy: max(resX.Accuracy, resY.Accuracy)}, nil
 }
 
 // h2SynDiscrete returns the discrete H2-optimal controller u = F·x̂(k|k) +
@@ -159,9 +164,6 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 
 	R1 := mulDense(D12t, D12)
 	resX, err := Dare(A, B2, mulDense(mat.DenseCopyOf(C1.T()), C1), R1, &RiccatiOpts{S: mulDense(mat.DenseCopyOf(C1.T()), D12)})
-	if err == nil {
-		err = resX.certified()
-	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, err)
 	}
@@ -183,9 +185,6 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 
 	B1D21t := mulDense(B1, mat.DenseCopyOf(D21.T()))
 	resY, err := Dare(mat.DenseCopyOf(A.T()), C2t, mulDense(B1, mat.DenseCopyOf(B1.T())), mulDense(D21, mat.DenseCopyOf(D21.T())), &RiccatiOpts{S: B1D21t})
-	if err == nil {
-		err = resY.certified()
-	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: filter %w", gp.op, err)
 	}
@@ -220,5 +219,5 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles}, nil
+	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, Accuracy: max(resX.Accuracy, resY.Accuracy)}, nil
 }
