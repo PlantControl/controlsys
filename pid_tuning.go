@@ -3488,7 +3488,9 @@ func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 // |L| through 1 within a few |σ| of ω₀. It extends grid at step (in log ω)
 // down to a tenth of the slowest zero, at most four decades, and adds
 // points within 4|σ| of ω₀. Discrete controllers use the continuous zeros,
-// which match theirs well below Nyquist. Points where p.try fails are
+// which match theirs well below Nyquist. An integral-free c whose |L| − 1
+// changes sign between ω = 0 and lo walks further down
+// (pidTuningDCCrossingFloor). Points where p.try fails are
 // dropped; cache keeps the samples of the extension, whose points recur.
 func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, cache map[float64]complex128) []float64 {
 	a, b, k := c.Kp*c.Tf+c.Kd, c.Kp+c.Ki*c.Tf, c.Ki
@@ -3518,6 +3520,9 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 		}
 	}
 	floor := math.Max(slowest/10, lo*1e-4)
+	if w, ok := pidTuningDCCrossingFloor(p, c, lo, step, cache); ok {
+		floor = math.Min(floor, w)
+	}
 	for j := 1.; j <= math.Ceil(math.Log(lo/floor)/step); j++ {
 		extra = append(extra, lo*math.Exp(-j*step))
 	}
@@ -3551,6 +3556,49 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 	out := slices.Concat(grid, extra)
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// pidTuningDCCrossingFloor returns, for an integral-free c on a plant whose
+// DC gain p.dcEdge resolves, the first point of the grid lo·e^{−j·step} at
+// which |L| − 1 takes the sign of |Kp·G(0)| − 1, when |L(lo)| − 1 has the
+// other: an odd count of 0 dB crossings then lies below lo. It walks at most
+// six decades and stops at a sample p.try cannot resolve.
+func pidTuningDCCrossingFloor(p pidTuningPlant, c PID2, lo, step float64, cache map[float64]complex128) (float64, bool) {
+	g := p.dcEdge
+	if c.Ki != 0 || g == 0 || !pidFiniteComplex(g) || !(step > 0) {
+		return 0, false
+	}
+	dc := cmplx.Abs(complex(c.Kp, 0)*g) - 1
+	if dc == 0 || !finitePID(dc) {
+		return 0, false
+	}
+	excess := func(w float64, h complex128) float64 { return cmplx.Abs(h*pidTuningFeedback(c, w)) - 1 }
+	if v := excess(lo, p.at(lo)); dc*v >= 0 || !finitePID(v) {
+		return 0, false
+	}
+	for j := 1.; j <= math.Ceil(math.Log(1e6)/step); j++ {
+		w := lo * math.Exp(-j*step)
+		h, ok := cache[w]
+		if !ok {
+			if p.try != nil {
+				h, ok = p.try(w)
+			} else {
+				h, ok = p.at(w), true
+			}
+			if !ok {
+				h = cmplx.NaN()
+			}
+			cache[w] = h
+		}
+		v := excess(w, h)
+		if !finitePID(v) {
+			return 0, false
+		}
+		if dc*v > 0 {
+			return w, true
+		}
+	}
+	return 0, false
 }
 
 // pidTuningIntegralZero returns a real zero z of a stable, strictly proper,
