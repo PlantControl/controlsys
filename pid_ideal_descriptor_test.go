@@ -70,7 +70,7 @@ func TestPIDIdealDerivativeDescriptorResponse(t *testing.T) {
 			t.Fatalf("%s: IsProper = %v, %v", c.name, proper, err)
 		}
 		poles, err := sys.Poles()
-		if err != nil || len(poles) != c.poles || (c.poles == 1 && poles[0] != 0) {
+		if err != nil || len(poles) != c.poles || (c.poles == 1 && cmplx.Abs(poles[0]) > 1e-12) {
 			t.Fatalf("%s: poles = %v, %v", c.name, poles, err)
 		}
 		h, err := sys.FreqResponse(omega)

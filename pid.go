@@ -382,6 +382,9 @@ func (p *PID) continuousSystem() (*System, error) {
 // explicitSystem is System restricted to explicit realizations: a continuous
 // ideal derivative returns ErrImproperModel.
 func (p *PID) explicitSystem() (*System, error) {
+	if err := validatePID(p.Kp, p.Ki, p.Kd, p.Tf, p.Dt, p.IFormula, p.DFormula); err != nil {
+		return nil, err
+	}
 	if p.Dt == 0 && newPIDRealizationSpec(p.Ki, p.Kd, p.Tf).idealD {
 		return nil, pidIdealDerivativeError("PID derivative term")
 	}
@@ -389,6 +392,9 @@ func (p *PID) explicitSystem() (*System, error) {
 }
 
 func (p *PID2) explicitSystem() (*System, error) {
+	if err := validatePID(p.Kp, p.Ki, p.Kd, p.Tf, p.Dt, p.IFormula, p.DFormula); err != nil {
+		return nil, err
+	}
 	if p.Dt == 0 && newPIDRealizationSpec(p.Ki, p.Kd, p.Tf).idealD {
 		return nil, pidIdealDerivativeError("2-DOF PID derivative term")
 	}
