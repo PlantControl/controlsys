@@ -17,6 +17,7 @@ import (
 // cuts the point budget so that the failing walk ends early; the public
 // calls, each walking 2e6 points first (~6 min in all), run with NYQ_SLOW set.
 func TestDelayNyquistMergedAxisTriple(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		q     quasiLoop
 		roots int

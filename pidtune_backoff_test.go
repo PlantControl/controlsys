@@ -497,6 +497,7 @@ func pidtuneOracleStable(t *testing.T, pid *PID, num, den Poly, dt, delay float6
 // the crossover, is stable by the independent oracle; random continuous and
 // discrete plants, some unstable or delayed.
 func TestPidtuneAutoCrossoverRandomStable(t *testing.T) {
+	skipSlowUnderRace(t)
 	// e^{−s}/(s+1) under P: phase −180° at ω ≈ 2.029, |G| ≈ 0.442, so the
 	// loop is stable iff −1 < Kp < 2.26; Ki < 0 puts a real root in Re s > 0.
 	for _, c := range []struct {

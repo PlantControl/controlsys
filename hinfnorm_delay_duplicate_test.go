@@ -112,6 +112,7 @@ func TestHinfNormDelayDuplicatedLightlyDamped(t *testing.T) {
 // every closed-loop root to that multiplicity, so the replica is stable
 // exactly when the channel is and has its norm.
 func TestHinfNormDelayDuplicateSweep(t *testing.T) {
+	skipSlowUnderRace(t)
 	const seeds = 300
 	unstable := 0
 	for seed := range seeds {
@@ -298,6 +299,7 @@ func (p sisoDelayLoop) pair(t *testing.T, q sisoDelayLoop) *System {
 // Two channels whose d22 differ by 1e-7 split each double root into a close
 // pair.
 func TestHinfNormDelayNearNeutralReplica(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		name  string
 		p     sisoDelayLoop

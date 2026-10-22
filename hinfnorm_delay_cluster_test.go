@@ -409,6 +409,7 @@ func TestPencilSupNarrowBranch(t *testing.T) {
 // undecided, never finite, and HinfNorm is sup σ_max(G∞) at +Inf, as for
 // the 1×2 model.
 func TestLimitVerdictMatrixClusterSharp(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, d22 := range []float64{0.999, 0.99999} {
 		for ri, rot := range rotations {
 			t.Run(fmt.Sprint(d22)+map[int]string{0: "/diag", 1: "/rot"}[ri], func(t *testing.T) {

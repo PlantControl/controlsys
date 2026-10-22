@@ -20,6 +20,7 @@ import (
 // grid graded to Nyquist; the repro and a seeded sweep of perturbed
 // k·(z+1)⁴ over stable fifth-order denominators.
 func TestAllMarginPhaseCrossNyquistZeroCluster(t *testing.T) {
+	skipSlowUnderRace(t)
 	type tc struct{ num, den []float64 }
 	cases := []tc{{
 		[]float64{-0.0031586889782527225, -0.012630121036594033, -0.01893823083182162, -0.01262085446680662, -0.0031540556933263115},

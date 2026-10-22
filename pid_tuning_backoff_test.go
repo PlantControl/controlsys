@@ -26,6 +26,7 @@ import (
 // margins, dense |S| over the default and backed-off bands, and the winding of 1+L(jω), +90°
 // for a stable loop with one integrator.
 func TestTunePIDBacksOffResonantDelayedDefault(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		num, den []float64
 		tau      float64
