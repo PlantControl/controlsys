@@ -221,19 +221,26 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 // and repeat on the leading block until its E is nonsingular. The rank of
 // E is that of descriptorRank; a nonsingular E deflates nothing (nf = n).
 // When it reports stiff, only the null space of E is deflated (index 1 is
-// assumed) and stiff is returned: the deflated block can mix the stiff
-// finite pole with that null space, so callers that can should classify on
-// the whole pencil. An ambiguous rank, or a near rank-deficient row block
+// assumed) and stiff is the least nonzero singular value of E over the
+// rounding n·ε·σ₁(E) (else 0): the deflated block can mix the stiff finite
+// pole with that null space, so callers that can should classify on the
+// whole pencil. An ambiguous rank, or a near rank-deficient row block
 // of A (a nearly singular pencil), sets ok false.
-func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff, ok bool) {
+func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff float64, ok bool) {
 	n, _ := A.Dims()
 	if n == 0 {
-		return nil, nil, nil, nil, 0, false, false
+		return nil, nil, nil, nil, 0, 0, false
+	}
+	ratio := 1e3 * float64(n) * eps()
+	scaleE := mat.Norm(E, 2)
+	eRaw := E.RawMatrix()
+	if !wantQZ && clearlyNonsingular(eRaw.Data, eRaw.Stride, n, make([]float64, n*n), qzInfiniteGap*ratio*scaleE) {
+		return A, E, nil, nil, n, 0, true
 	}
 	buf := make([]float64, 6*n*n+n)
 	ad, ed, ud, vtd, sd, td := buf[:n*n], buf[n*n:2*n*n], buf[2*n*n:3*n*n], buf[3*n*n:4*n*n], buf[4*n*n:5*n*n], buf[5*n*n:6*n*n]
 	sv := buf[6*n*n:]
-	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
+	aRaw := A.RawMatrix()
 	copyStrided(ad, n, aRaw.Data, aRaw.Stride, n, n)
 	copyStrided(ed, n, eRaw.Data, eRaw.Stride, n, n)
 	var qd, zd []float64
@@ -262,29 +269,39 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		blas64.Gemm(tx, blas.NoTrans, 1, x, y, 0, gen(td, rows, cols, cols))
 		copyStrided(dst, stride, td, cols, rows, cols)
 	}
-	ratio := 1e3 * float64(n) * eps()
 	tolA := ratio * mat.Norm(A, 2)
-	scaleE := mat.Norm(E, 2)
 	k := n
-	for k > 0 && !stiff {
-		if clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*ratio*scaleE) {
+	for k > 0 && stiff == 0 {
+		if (k < n || wantQZ) && clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*ratio*scaleE) {
 			break
 		}
+		jobU := lapack.SVDAll
+		if k == n {
+			jobU = lapack.SVDNone
+		}
 		copyStrided(sd, k, ed, n, k, k)
-		if !svd(lapack.SVDAll, lapack.SVDNone, k, k) {
-			return nil, nil, nil, nil, 0, false, false
+		if !svd(jobU, lapack.SVDNone, k, k) {
+			return nil, nil, nil, nil, 0, 0, false
 		}
 		if k == n {
 			scaleE = sv[0]
 		}
 		r, st, ok := descriptorRank(sv[:k], scaleE, n, k == n)
 		if !ok {
-			return nil, nil, nil, nil, 0, false, false
+			return nil, nil, nil, nil, 0, 0, false
 		}
-		stiff = st
+		if st {
+			stiff = sv[r-1] / (float64(n) * eps() * scaleE)
+		}
 		d := k - r
 		if d == 0 {
 			break
+		}
+		if jobU == lapack.SVDNone {
+			copyStrided(sd, k, ed, n, k, k)
+			if !svd(lapack.SVDAll, lapack.SVDNone, k, k) {
+				return nil, nil, nil, nil, 0, 0, false
+			}
 		}
 		u := gen(ud, k, k, k)
 		mulInto(ad, n, k, n, u, gen(ad, k, n, n), blas.Trans)
@@ -314,7 +331,7 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		}
 		impl.Dorgqr(k, k, d, ud, k, tau, work, len(work))
 		if !svd(lapack.SVDNone, lapack.SVDNone, d, d) || sv[d-1] <= qzInfiniteGap*tolA {
-			return nil, nil, nil, nil, 0, false, false
+			return nil, nil, nil, nil, 0, 0, false
 		}
 		zk := vtd[:k*k]
 		for i := range k {

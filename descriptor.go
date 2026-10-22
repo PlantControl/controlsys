@@ -176,7 +176,7 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 // cannot classify is kept.
 func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	a, e, _, _, nf, stiff, ok := deflateInfinite(A, E, false)
-	if ok && !stiff {
+	if ok && stiff == 0 {
 		ad, ed := a.RawMatrix(), e.RawMatrix()
 		return qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
 	}
@@ -186,7 +186,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
 	}
 	if ok {
-		return finitePoles(alphar, alphai, beta, leastRatioInfTol(alphar, alphai, beta, n-nf)), nil
+		return finitePoles(alphar, alphai, beta, leastRatioInfTol(alphar, alphai, beta, n-nf, stiff)), nil
 	}
 	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
 	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
@@ -198,12 +198,18 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 
 // leastRatioInfTol returns the |β|/|α| bound that selects the d
 // eigenvalues of least |β|/|α| as infinite when a factor stiffRatioGap
-// separates them from the rest, else 0 (only β = 0 is infinite). An index-1 pencil whose E has a stiff singular
+// (marginalRatioGap for stiff < stiffMarginal, the stiff of
+// deflateInfinite) separates them from the rest, else 0 (only β = 0 is
+// infinite). An index-1 pencil whose E has a stiff singular
 // value just above the rounding has d = n − rank(E) infinite eigenvalues,
 // and QZ on the whole pencil resolves the stiff finite one better than the
 // staircase, whose deflated blocks can mix it with the null space of E.
-func leastRatioInfTol(alphar, alphai, beta []float64, d int) float64 {
+func leastRatioInfTol(alphar, alphai, beta []float64, d int, stiff float64) float64 {
 	n := len(beta)
+	gap := stiffRatioGap
+	if stiff < stiffMarginal {
+		gap = marginalRatioGap
+	}
 	if d == 0 {
 		return 0
 	}
@@ -212,16 +218,22 @@ func leastRatioInfTol(alphar, alphai, beta []float64, d int) float64 {
 		ratio[i] = math.Abs(beta[i]) / math.Hypot(alphar[i], alphai[i])
 	}
 	slices.Sort(ratio)
-	if d < n && !(ratio[d] > stiffRatioGap*ratio[d-1]) {
+	if d < n && !(ratio[d] > gap*ratio[d-1]) {
 		return 0
 	}
-	return ratio[d-1] * math.Sqrt(stiffRatioGap)
+	return ratio[d-1] * math.Sqrt(gap)
 }
 
 // stiffRatioGap is the least factor between the |β|/|α| of a stiff finite
 // eigenvalue and of the infinite ones for leastRatioInfTol to tell them
-// apart.
-const stiffRatioGap = 100
+// apart; marginalRatioGap applies when the stiff singular value of E is
+// within stiffMarginal of the rounding, where platform rounding can swap
+// the two.
+const (
+	stiffRatioGap    = 10.0
+	marginalRatioGap = 100.0
+	stiffMarginal    = 100.0
+)
 
 func qzFinitePoles(n int, a []float64, lda int, e []float64, lde int, infTol float64) ([]complex128, error) {
 	alphar, alphai, beta, ok := qzEigenvalues(n, a, lda, e, lde)
