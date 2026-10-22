@@ -115,7 +115,7 @@ func pidTuningFRDDesign(ctx context.Context, base, strict pidTuningPlant, certif
 		case certify:
 			r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count certified no design; this one passed only the looser count, which can accept unstable loops, so its closed-loop stability is not certified.")
 		default:
-			r.Evidence.Warnings = append(r.Evidence.Warnings, "The data's low end shows neither a DC gain nor an integrating or differentiating asymptote, so the sampled Nyquist count cannot run and closed-loop stability is not certified.")
+			r.Evidence.Warnings = append(r.Evidence.Warnings, "The data's low end fixes neither a DC gain nor an integrating or differentiating asymptote the strict sampled Nyquist count can anchor on, so this design passed only the looser count and its closed-loop stability is not certified.")
 		}
 		return r
 	}

@@ -288,8 +288,9 @@ func pidFRDStrictSweepCase(r *rand.Rand) pidFRDStrictCase {
 // Tripwire for the strict count: on random stable plants (no integrators,
 // whose cancellation by a zero below the band the data cannot show), every
 // design TunePIDFRD returns as certified is stable, and every design kept
-// from the looser count says so. Oracles: companion roots and exact
-// Schur–Cohn.
+// from the looser count says so; the floor on certified designs guards
+// against a strict count that certifies nothing. Oracles: companion roots
+// and exact Schur–Cohn.
 func TestTunePIDFRDCertifiedDesignsStable(t *testing.T) {
 	n := 150
 	if testing.Short() || raceEnabled {
