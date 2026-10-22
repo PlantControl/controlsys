@@ -1190,7 +1190,7 @@ func frobenius(a []float64) float64 {
 // crossings keep the double solve wherever it resolves, as beside such a
 // cluster, where the phase of the model as rounded departs from that of its
 // factored form; only resonanceCrossings evaluates phase in double-double
-// first, beside pairs that pass the conditioning bound of resonancePoles.
+// first, beside the resonance poles of resonancePoles.
 // Margins at any verified crossover use it too.
 func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	cands, err := r.gainCandidates(gamma)
@@ -1575,10 +1575,10 @@ func (r *rationalLoop) mergeResonanceCrossings(ws, cs []float64, f func(float64)
 // p within 1e-2 of z = 1 when at least two poles lie there: beside a real
 // pair 1 ± ε the phase can stay within ~1e-6 rad of −180° and cross it at θ
 // down to ~1e-2·ε, where the double solve's phase error is of that order.
-// A pole whose first-order perturbation bound
-// cond(p)·eps·(‖A‖ + |p|·‖E‖) exceeds 1e-3 of its frequency is left out: a
-// double or quadruple real pole, as of an integrator squared, splits by
-// rounding into such poles, whose crossings the loop lacks. Discrete,
+// No pole is left out by conditioning: a ring or cluster of poles, its
+// first-order bound past its frequency, needs the scan most, and a scan
+// beside a pole split by rounding only finds crossings double-double
+// verifies. Discrete,
 // cluster holds |ln p|/Δt for the other pairs within clusterRadius of z = 1,
 // with the real poles of reals however many lie there, or nothing without
 // such a pair.
@@ -1588,30 +1588,10 @@ func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 		return nil, nil, nil
 	}
 	a, e := slices.Clone(r.a), slices.Clone(r.e)
-	aNorm, eNorm := frobenius(a), frobenius(e)
 	alphar, alphai, beta := make([]float64, n), make([]float64, n), make([]float64, n)
-	vl, vr := make([]float64, n*n), make([]float64, n*n)
 	work := make([]float64, max(8*n, 1))
-	if !impl.Dggev(lapack.LeftEVCompute, lapack.RightEVCompute, n, a, n, e, n, alphar, alphai, beta, vl, n, vr, n, work, len(work)) {
+	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, n, a, n, e, n, alphar, alphai, beta, nil, 1, nil, 1, work, len(work)) {
 		return nil, nil, nil
-	}
-	x, y := make([]complex128, n), make([]complex128, n)
-	resolved := func(p complex128, scale float64) bool {
-		var nx, ny float64
-		for i := range n {
-			nx += real(x[i])*real(x[i]) + imag(x[i])*imag(x[i])
-			ny += real(y[i])*real(y[i]) + imag(y[i])*imag(y[i])
-		}
-		var yex complex128
-		for i := range n {
-			var ex complex128
-			for k := range n {
-				ex += complex(r.e[i*n+k], 0) * x[k]
-			}
-			yex += cmplx.Conj(y[i]) * ex
-		}
-		cond := math.Sqrt(nx*ny) / cmplx.Abs(yex)
-		return cond*eps()*(aNorm+cmplx.Abs(p)*eNorm) <= 1e-3*scale
 	}
 	var ws, nearOne []float64
 	nOne := 0
@@ -1625,10 +1605,7 @@ func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 				continue
 			}
 			nOne++
-			for i := range n {
-				x[i], y[i] = complex(vr[i*n+j], 0), complex(vl[i*n+j], 0)
-			}
-			if th := math.Abs(math.Log(p)); th > 0 && resolved(complex(p, 0), th) {
+			if th := math.Abs(math.Log(p)); th > 0 {
 				nearOne = append(nearOne, th/r.dt)
 			}
 			continue
@@ -1639,13 +1616,6 @@ func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 			continue
 		}
 		p := complex(alphar[jj]/beta[jj], alphai[jj]/beta[jj])
-		for i := range n {
-			x[i] = complex(vr[i*n+jj], vr[i*n+jj+1])
-			y[i] = complex(vl[i*n+jj], vl[i*n+jj+1])
-		}
-		if !resolved(p, imag(p)) {
-			continue
-		}
 		var w, dist float64
 		if r.discrete() {
 			w, dist = cmplx.Phase(p)/r.dt, math.Abs(cmplx.Abs(p)-1)/cmplx.Phase(p)
