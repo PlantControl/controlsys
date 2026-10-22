@@ -902,8 +902,8 @@ func TestFreqResponse_MixedInternalAndIODelay(t *testing.T) {
 	}
 
 	for k, w := range freqs {
-		got := respOrig.At(0, 0, k)
-		want := respMerged.At(0, 0, k)
+		got := respOrig.At(k, 0, 0)
+		want := respMerged.At(k, 0, 0)
 		if cmplx.Abs(got-want) > 1e-10 {
 			t.Errorf("w=%v: direct=%v, merged=%v, diff=%v", w, got, want, cmplx.Abs(got-want))
 		}

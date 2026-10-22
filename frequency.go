@@ -20,8 +20,10 @@ type FreqResponseMatrix struct {
 	OutputName []string
 }
 
-// At returns the response from input to output at Omega[freq].
+// At returns the response from input to output at Omega[freq]. It panics if
+// any index is out of range.
 func (f *FreqResponseMatrix) At(freq, output, input int) complex128 {
+	checkResponseIndex("FreqResponseMatrix.At", freq, output, input, f.NFreq, f.P, f.M)
 	return newSampledComplexResponse(f.Data, f.Omega, f.P, f.M).at(freq, output, input)
 }
 
@@ -52,14 +54,17 @@ type BodeResult struct {
 	OutputName []string
 }
 
-// MagDBAt returns the magnitude in dB from input to output at Omega[freq].
+// MagDBAt returns the magnitude in dB from input to output at Omega[freq]. It
+// panics if any index is out of range.
 func (b *BodeResult) MagDBAt(freq, output, input int) float64 {
+	checkResponseIndex("BodeResult.MagDBAt", freq, output, input, len(b.Omega), b.p, b.m)
 	return newSampledScalarResponse(b.magDB, b.Omega, b.p, b.m).at(freq, output, input)
 }
 
 // PhaseAt returns the unwrapped phase in degrees from input to output at
-// Omega[freq].
+// Omega[freq]. It panics if any index is out of range.
 func (b *BodeResult) PhaseAt(freq, output, input int) float64 {
+	checkResponseIndex("BodeResult.PhaseAt", freq, output, input, len(b.Omega), b.p, b.m)
 	return newSampledScalarResponse(b.phase, b.Omega, b.p, b.m).at(freq, output, input)
 }
 
@@ -1001,8 +1006,12 @@ type SigmaResult struct {
 	OutputName []string
 }
 
-// At returns the svIndex-th largest singular value at Omega[freq].
+// At returns the svIndex-th largest singular value at Omega[freq]. It panics
+// if either index is out of range.
 func (r *SigmaResult) At(freq, svIndex int) float64 {
+	if freq < 0 || freq >= len(r.Omega) || svIndex < 0 || svIndex >= r.nSV {
+		panic(fmt.Sprintf("controlsys: SigmaResult.At(%d, %d) index out of range [%d freqs, %d singular values]", freq, svIndex, len(r.Omega), r.nSV))
+	}
 	return r.sv[freq*r.nSV+svIndex]
 }
 
