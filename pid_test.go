@@ -207,22 +207,6 @@ func TestPID_PIDFiltered(t *testing.T) {
 	}
 }
 
-func TestPID_PDNoFilter_Error(t *testing.T) {
-	c := mustPID(t, 1, 0, 3, 0, 0)
-	_, err := c.System()
-	if err == nil {
-		t.Fatal("expected error for PD without filter")
-	}
-}
-
-func TestPID_UnfilteredDerivativeWithIntegral_Error(t *testing.T) {
-	c := mustPID(t, 1, 2, 3, 0, 0)
-	_, err := c.System()
-	if err == nil {
-		t.Fatal("expected error for unfiltered derivative term")
-	}
-}
-
 func TestPID_DiscretePI(t *testing.T) {
 	c := mustPID(t, 1, 2, 0, 0, 0.1)
 	sys, err := c.System()
@@ -565,10 +549,10 @@ func TestPIDStandardTimesCommaOk(t *testing.T) {
 	if _, err := mustPID(t, 0, 1, 0, 0, 0).Standard(); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("Standard err = %v", err)
 	}
-	if _, err := mustPID(t, 1, 0, 1, 0, 0).System(); !errors.Is(err, ErrImproperModel) || !strings.HasPrefix(err.Error(), "PID.System: ") {
-		t.Fatalf("ideal derivative err = %v, want ErrImproperModel", err)
+	if _, err := mustPID(t, 1, 0, 1, 0, 0).explicitSystem(); !errors.Is(err, ErrImproperModel) {
+		t.Fatalf("ideal derivative explicit err = %v, want ErrImproperModel", err)
 	}
-	if _, err := (&PID2{Kp: 1, Kd: 1, B: 1, C: 1}).System(); !errors.Is(err, ErrImproperModel) || !strings.HasPrefix(err.Error(), "PID2.System: ") {
-		t.Fatalf("PID2 ideal derivative err = %v", err)
+	if _, err := (&PID2{Kp: 1, Kd: 1, B: 1, C: 1}).explicitSystem(); !errors.Is(err, ErrImproperModel) {
+		t.Fatalf("PID2 ideal derivative explicit err = %v", err)
 	}
 }

@@ -226,22 +226,22 @@ func NewPID2(Kp, Ki, Kd, Tf, b, c, Ts float64, opts ...PIDOption) (*PID2, error)
 }
 
 type pidRealizationSpec struct {
-	hasI bool
-	hasD bool
+	hasI   bool
+	hasD   bool
+	idealD bool
 }
 
-func newPIDRealizationSpec(Ki, Kd, Tf float64, context string) (pidRealizationSpec, error) {
-	if Kd != 0 && Tf == 0 {
-		return pidRealizationSpec{}, fmt.Errorf("%s without filter (Tf=0) is improper; set Tf > 0: %w", context, ErrImproperModel)
-	}
-	return pidRealizationSpec{
-		hasI: Ki != 0,
-		hasD: Kd != 0,
-	}, nil
+func newPIDRealizationSpec(Ki, Kd, Tf float64) pidRealizationSpec {
+	return pidRealizationSpec{hasI: Ki != 0, hasD: Kd != 0, idealD: Kd != 0 && Tf == 0}
+}
+
+func pidIdealDerivativeError(context string) error {
+	return fmt.Errorf("%s without filter (Tf=0) is improper; set Tf > 0: %w", context, ErrImproperModel)
 }
 
 // System converts the 2-DOF PID to a 2-input (r,y) 1-output (u) state-space
-// model. A continuous ideal derivative (Kd ≠ 0, Tf = 0) or a noncausal
+// model. A continuous ideal derivative (Kd ≠ 0, Tf = 0) gives, as MATLAB
+// ss(pid2), an improper descriptor model with singular E; a noncausal
 // discrete one returns ErrImproperModel.
 func (p *PID2) System() (*System, error) {
 	sys, err := p.system()
@@ -261,9 +261,9 @@ func (p *PID2) system() (*System, error) {
 	if p.Dt > 0 {
 		return pidDiscrete(p.Kp, p.Ki, p.Kd, p.Tf, p.Dt, p.IFormula, p.DFormula, []float64{p.B, -1}, []float64{1, -1}, []float64{p.C, -1})
 	}
-	spec, err := newPIDRealizationSpec(p.Ki, p.Kd, p.Tf, "2-DOF PID derivative term")
-	if err != nil {
-		return nil, err
+	spec := newPIDRealizationSpec(p.Ki, p.Kd, p.Tf)
+	if spec.idealD {
+		return pidIdealDescriptor(p.Kp, p.Ki, p.Kd, []float64{p.B, -1}, []float64{1, -1}, []float64{p.C, -1})
 	}
 	hasI := spec.hasI
 	hasD := spec.hasD
@@ -315,8 +315,9 @@ func (p *PID2) system() (*System, error) {
 }
 
 // System returns the controller as a SISO state-space model. A continuous
-// ideal derivative (Kd ≠ 0, Tf = 0) or a noncausal discrete one returns
-// ErrImproperModel; invalid parameters return ErrInvalidArgument.
+// ideal derivative (Kd ≠ 0, Tf = 0) gives, as MATLAB ss(pid), an improper
+// descriptor model with singular E; a noncausal discrete one returns
+// ErrImproperModel and invalid parameters ErrInvalidArgument.
 func (p *PID) System() (*System, error) {
 	sys, err := p.system()
 	if err != nil {
@@ -336,9 +337,9 @@ func (p *PID) system() (*System, error) {
 }
 
 func (p *PID) continuousSystem() (*System, error) {
-	spec, err := newPIDRealizationSpec(p.Ki, p.Kd, p.Tf, "PID derivative term")
-	if err != nil {
-		return nil, err
+	spec := newPIDRealizationSpec(p.Ki, p.Kd, p.Tf)
+	if spec.idealD {
+		return pidIdealDescriptor(p.Kp, p.Ki, p.Kd, []float64{1}, []float64{1}, []float64{1})
 	}
 	hasI := spec.hasI
 	hasD := spec.hasD
@@ -376,6 +377,58 @@ func (p *PID) continuousSystem() (*System, error) {
 			0,
 		)
 	}
+}
+
+// explicitSystem is System restricted to explicit realizations: a continuous
+// ideal derivative returns ErrImproperModel.
+func (p *PID) explicitSystem() (*System, error) {
+	if p.Dt == 0 && newPIDRealizationSpec(p.Ki, p.Kd, p.Tf).idealD {
+		return nil, pidIdealDerivativeError("PID derivative term")
+	}
+	return p.system()
+}
+
+func (p *PID2) explicitSystem() (*System, error) {
+	if p.Dt == 0 && newPIDRealizationSpec(p.Ki, p.Kd, p.Tf).idealD {
+		return nil, pidIdealDerivativeError("2-DOF PID derivative term")
+	}
+	return p.system()
+}
+
+// pidIdealDescriptor realizes kp·pw·u + ki/s·iw·u + kd·s·dw·u as MATLAB
+// ss(pid(Kp,Ki,Kd)): an optional integrator state, then a derivative pair
+// with E = [0 1; 0 0] whose rows force x₃ = dw·u and x₂ = ẋ₃.
+func pidIdealDescriptor(kp, ki, kd float64, pw, iw, dw []float64) (*System, error) {
+	m := len(pw)
+	n := 2
+	if ki != 0 {
+		n++
+	}
+	a := mat.NewDense(n, n, nil)
+	b := mat.NewDense(n, m, nil)
+	c := mat.NewDense(1, n, nil)
+	d := mat.NewDense(1, m, nil)
+	e := mat.NewDense(n, n, nil)
+	for j, w := range pw {
+		d.Set(0, j, kp*w)
+	}
+	row := 0
+	if ki != 0 {
+		e.Set(0, 0, 1)
+		c.Set(0, 0, ki)
+		for j, w := range iw {
+			b.Set(0, j, w)
+		}
+		row++
+	}
+	a.Set(row, row, 1)
+	a.Set(row+1, row+1, 1)
+	e.Set(row, row+1, 1)
+	c.Set(0, row, kd)
+	for j, w := range dw {
+		b.Set(row+1, j, -w)
+	}
+	return NewDescriptor(a, b, c, d, e, 0)
 }
 
 func finitePID(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }

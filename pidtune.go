@@ -101,8 +101,8 @@ const (
 // Nyquist test then certifies it stable, and keeps the signed failure where
 // that test does not apply (as for an ideal derivative on a relative-degree-1
 // plant, or internal delays). A PD is MATLAB's ideal Kp + Kd·s (Tf = 0,
-// backward-Euler derivative when discrete, so PID.System returns
-// ErrImproperModel for a continuous one), whose lead, clamped to
+// backward-Euler derivative when discrete; PID.System gives MATLAB's
+// descriptor model for a continuous one), whose lead, clamped to
 // [0.05 rad, π/2 − 0.05], is placed with |L(wc)| = 1; a back-off design
 // with an ideal derivative on a biproper plant, |L(j∞)| = ∞, fails the
 // level cap. When the whole search, or the design at an explicit wc, fails
@@ -1586,7 +1586,7 @@ func (l *pidtuneLoop) buffers(n2 int) *pidtuneLoopBuffers {
 // l's buffers.
 func (l *pidtuneLoop) controller(c *PID2) (*System, error) {
 	if c.Dt != 0 || c.Kd != 0 || validatePID(c.Kp, c.Ki, c.Kd, c.Tf, c.Dt, c.IFormula, c.DFormula) != nil {
-		return (&PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}).System()
+		return (&PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}).explicitSystem()
 	}
 	l.cd.Set(0, 0, c.Kp)
 	if c.Ki == 0 {

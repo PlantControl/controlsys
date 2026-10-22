@@ -440,7 +440,7 @@ func (s *pidStabilityScreen) returnSensitivity(c *PID2) float64 {
 
 func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 	controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
-	cs, err := controller.System()
+	cs, err := controller.explicitSystem()
 	if err != nil {
 		if c.Kd != 0 && c.Tf == 0 {
 			if math.IsInf(s.returnSensitivity(c), 1) {
