@@ -155,7 +155,7 @@ func (e *sisoEval) at(w float64) complex128 {
 // ddAtPole puts the pole at ω. Beside a cluster at z = 1 the snap reaches ω
 // tens of times off the pole (S2RNHI). at keeps the snap and its failures
 // for the searches tuned to them: the gain search rejects brackets closing
-// on +Inf, so taking the response there adds crossings at |L| within
+// on +Inf next to DC (offDCPole), so taking the response there adds crossings at |L| within
 // coefficient rounding of 1 next to an integrator, which pidtune would take
 // for its crossover. pidtune's back-off gate samples through resolve where
 // at fails; it leaves skipped and resolved as they were, so checkSkipped
@@ -1180,7 +1180,11 @@ func frobenius(a []float64) float64 {
 }
 
 // gainCrossings returns the verified ω > 0 where |L(jω)| = gamma, ascending.
-// Where the double solve is singular it evaluates in double-double: beside
+// Where at snaps ω to a computed pole, it takes resolve's finite response:
+// beside a pair 1e-6 ± j of a realization with ‖A‖ ~ 1e7 the snap spans
+// 1e-3, past crossings 1e-6 off the pair (YEAQIK); resolve keeps +Inf where
+// ddAtPole puts the pole at ω. Where the double solve is singular it
+// evaluates in double-double: beside
 // a cluster k/(z+1)⁴ with tiny k, |L| reaches gamma where the pivot of
 // zI − A is below n·eps·‖A‖, yet the model is resolved there. Phase
 // crossings keep the double solve wherever it resolves, as beside such a
@@ -1194,16 +1198,27 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 		return nil, err
 	}
 	lg := math.Log(gamma)
-	f := func(w float64) float64 { return math.Log(cmplx.Abs(r.eval.at(w))) - lg }
+	f := func(w float64) float64 {
+		h := r.eval.at(w)
+		if cmplx.IsInf(h) && r.offDCPole(w) {
+			if g, ok := r.eval.resolve(w); ok {
+				h = g
+			}
+		}
+		return math.Log(cmplx.Abs(h)) - lg
+	}
 	r.eval.extended = true
 	defer func() { r.eval.extended = false }()
 	return r.endCrossings(r.polish(cands, f, 1e-9, false), f, 1e-9), nil
 }
 
 // endCrossings adds a crossing of f = log|L| − log γ that the pencil missed
-// below the first crossing ws[0], or, discrete, above the last: |L| → ∞ at a
-// pole, and else |L| at ω = 0 or Nyquist, fixes the sign of f there, and a
-// differing sign next to the outer crossing brackets one more. Pencil roots
+// below the first crossing ws[0], or above the last: |L| → ∞ at a pole, and
+// else |L| at ω = 0, at Nyquist or, continuous, at highFrequency, fixes the
+// sign of f there, and a differing sign next to the outer crossing brackets
+// one more. Continuous without pencil roots, highFrequency stands in for
+// ws[0], as for an integrator whose badly scaled realization loses the
+// crossover's roots (YEAQIK). Pencil roots
 // next to a pole cluster at z = 1 or −1, as of k/(z−1)ⁿ with tiny k, lose
 // accuracy beyond any polish bracket. log|L| is continuous on the boundary
 // away from its poles and zeros, where it does not change sign, so every
@@ -1277,6 +1292,9 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 		wTop = r.nyquist()
 	}
 	pLo, pHi := wTop/2, wTop/2
+	if !r.discrete() {
+		pLo = r.highFrequency()
+	}
 	if len(ws) > 0 {
 		pLo, pHi = ws[0]*(1-1e-6), ws[len(ws)-1]*(1+1e-6)
 	}
@@ -1294,7 +1312,35 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 			}
 		}
 	}
+	if wInf := r.highFrequency(); !r.discrete() && len(ws) > 0 && pHi < wInf {
+		if sInf, s := sgn(ft(wInf)), sgn(ft(pHi)); sInf != 0 && s != 0 && s != sInf {
+			if c, ok := scan(wInf/pHi, func(t float64) float64 { return wInf / t }, sInf); ok && c > ws[len(ws)-1]*(1+1e-9) {
+				ws = append(ws, c)
+			}
+		}
+	}
 	return ws
+}
+
+// offDCPole reports whether the computed pole nearest ω is within 1e-3 of
+// its distance from DC (s = 0, z = 1) of it: a resonance resolve may take
+// past the snap, not an integrator, whose snap keeps |L| within coefficient
+// rounding of γ from reading as crossings.
+func (r *rationalLoop) offDCPole(w float64) bool {
+	s := r.eval.td.frequencyPoint(w).value()
+	dc := complex(0, 0)
+	if r.discrete() {
+		dc = 1
+	}
+	sp, err := poleSpacing(r.eval.sys, s)
+	return err == nil && sp.gap <= 1e-3*cmplx.Abs(s-dc)
+}
+
+// highFrequency is an ω above the poles of a continuous loop, where |L|
+// has settled to its asymptote: endCrossings brackets a crossing the pencil
+// missed between it and the outer crossing, or ω = 0 when there is none.
+func (r *rationalLoop) highFrequency() float64 {
+	return 1e6 * max(1, frobenius(r.a))
 }
 
 // phaseCrossings returns the verified ω > 0 where L(jω) is real and negative,
@@ -1768,7 +1814,10 @@ func (r *rationalLoop) resonanceCrossings(pairs, reals []float64, f func(float64
 // beside k/(z+1)⁴, and makes sign changes there that the loop lacks. When
 // steep, a refined sign change is held to ulpTol rather than tol, and one
 // that refines to a ±180° phase wrap, |f| > 90, as a wide bracket below the
-// crossing at Nyquist may span, leaves the candidate unbracketed.
+// crossing at Nyquist may span, leaves the candidate unbracketed. Otherwise
+// a bracket whose ends agree in sign against the candidate's own holds a
+// crossing either side of it, both kept: beside a lightly damped pair two
+// gain crossings ~5e-6 apart get pencil roots off by as much (YEAQIK).
 func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol float64, steep bool) []float64 {
 	wTop := math.Inf(1)
 	if r.discrete() {
@@ -1845,9 +1894,14 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 			hi = min(hi, (cands[i+1]-w)/2)
 		}
 		best, bracketed, unevaluable := w, false, false
+		pair := math.NaN()
 		if _, ok := r.eval.try(w); !ok {
 			unevaluable = true
 		} else {
+			fw := math.NaN()
+			if !steep {
+				fw = ft(w)
+			}
 			for d := 1e-12; d <= 1e-2; d *= 100 {
 				a, b := w-min(d*w, lo), w+min(d*w, hi)
 				if a >= b {
@@ -1858,6 +1912,11 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 					if c := refineCrossing(a, b, ft); !steep || math.Abs(ft(c)) <= 90 {
 						best, bracketed = c, true
 					}
+					break
+				}
+				if fa*fw < 0 {
+					best, bracketed = refineCrossing(a, w, ft), true
+					pair = refineCrossing(w, b, ft)
 					break
 				}
 				unevaluable = unevaluable || math.IsNaN(fa) || math.IsNaN(fb)
@@ -1891,6 +1950,9 @@ func (r *rationalLoop) polish(cands []float64, f func(float64) float64, tol floa
 		}
 		if v <= vTol && (len(out) == 0 || best > out[len(out)-1]*(1+1e-12)) {
 			out = append(out, best)
+		}
+		if !math.IsNaN(pair) && math.Abs(ft(pair)) <= tol && (len(out) == 0 || pair > out[len(out)-1]*(1+1e-12)) {
+			out = append(out, pair)
 		}
 	}
 	if len(out) > 0 && r.flat(out, within, wTop) {
