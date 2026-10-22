@@ -175,3 +175,127 @@ func TestRiccati_OtherScaling(t *testing.T) {
 		})
 	}
 }
+// decoupledCareOracle returns the Care solution of A = [[a, 0], [c, F]],
+// B = [0; g], diagonal Q and scalar R by blocks: Z of the (n−1)-state
+// Care of (F, g), w of (F − gKᵀ + aI)ᵀw = −Zc and the scalar x₁₁, none of
+// which sees the near-singular closed-loop mode a.
+func decoupledCareOracle(t *testing.T, A, B, Q *mat.Dense, r float64) *mat.Dense {
+	t.Helper()
+	n, _ := A.Dims()
+	m := n - 1
+	F := mat.DenseCopyOf(A.Slice(1, n, 1, n))
+	g := mat.DenseCopyOf(B.Slice(1, n, 0, 1))
+	c := mat.DenseCopyOf(A.Slice(1, n, 0, 1))
+	zr, err := Care(F, g, mat.DenseCopyOf(Q.Slice(1, n, 1, n)), mat.NewDense(1, 1, []float64{r}), nil)
+	if err != nil || zr.Accuracy != 0 {
+		t.Fatalf("oracle Care: %v", err)
+	}
+	Z := zr.X
+	var gz, fk mat.Dense
+	gz.Mul(g.T(), Z)
+	fk.Mul(g, &gz)
+	fk.Scale(-1/r, &fk)
+	fk.Add(F, &fk)
+	M := mat.DenseCopyOf(fk.T())
+	for i := range m {
+		M.Set(i, i, M.At(i, i)+A.At(0, 0))
+	}
+	var rhs, w mat.Dense
+	rhs.Mul(Z, c)
+	rhs.Scale(-1, &rhs)
+	if err := w.Solve(M, &rhs); err != nil {
+		t.Fatal(err)
+	}
+	cw, gw := 0.0, 0.0
+	for i := range m {
+		cw += c.At(i, 0) * w.At(i, 0)
+		gw += g.At(i, 0) * w.At(i, 0)
+	}
+	X := mat.NewDense(n, n, nil)
+	X.Set(0, 0, (Q.At(0, 0)+2*cw-gw*gw/r)/(-2*A.At(0, 0)))
+	for i := range m {
+		X.Set(0, i+1, w.At(i, 0))
+		X.Set(i+1, 0, w.At(i, 0))
+		for j := range m {
+			X.Set(i+1, j+1, Z.At(i, j))
+		}
+	}
+	return X
+}
+
+// TestCare_LyapunovSingularRescue (BWUCB5): an uncontrollable mode at
+// −1e-14..−1e-16 makes the first Newton solve's Lyapunov equation
+// singular, so verifyRiccati keeps X on its Riccati residual alone (within
+// rescueTol). That is no certificate: "wrong" is off by 0.11 at a residual
+// below 1e-6. Such an X is returned with Accuracy 1 (MATLAB icare Report
+// 1), never as certified; an accurate one ("right") is still returned, not
+// an error.
+func TestCare_LyapunovSingularRescue(t *testing.T) {
+	cases := []struct {
+		name      string
+		a, b, q   []float64
+		r         float64
+		noScaling bool
+		wantTol   float64
+	}{
+		{
+			name: "wrong",
+			a: []float64{-7.295994576490059e-14, 0, 0, 0,
+				0.5373416551501615, 1.2194221167525805, -0.8329644073802775, 0.30297255018420743,
+				-1.1406539062241194, 0.6682865141940897, 0.16960245948631908, -0.31201750782666604,
+				-1.247658747000422, -0.07038377553086222, 0.7562133980924511, 1.8135932643301729},
+			b: []float64{0, 1.5255271270406408, -0.07293550823079031, -0.3862511290607623},
+			q: []float64{0.013473239362458653, 0, 0, 0, 0, 0.09943227100362198, 0, 0,
+				0, 0, 0.6345392749439289, 0, 0, 0, 0, 0.07249003024896149},
+			r: 32.07665464756477,
+		},
+		{
+			name:      "right",
+			a:         []float64{-2.9889744621332566e-16, 0, 0.6967271130867092, -1.9887231533259282},
+			b:         []float64{0, -1.971948704093606},
+			q:         []float64{0.20656946223998846, 0, 0, 0.027864401791373995},
+			r:         0.013447720841695682,
+			noScaling: true,
+			wantTol:   1e-10,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := len(tc.b)
+			A := mat.NewDense(n, n, tc.a)
+			B := mat.NewDense(n, 1, tc.b)
+			Q := mat.NewDense(n, n, tc.q)
+			res, err := Care(A, B, Q, mat.NewDense(1, 1, []float64{tc.r}), &RiccatiOpts{NoScaling: tc.noScaling})
+			if err != nil {
+				t.Fatal(err)
+			}
+			Xo := decoupledCareOracle(t, A, B, Q, tc.r)
+			var d mat.Dense
+			d.Sub(res.X, Xo)
+			rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2)
+			if res.Accuracy == 0 && !(rel <= 1e-8) {
+				t.Errorf("Accuracy 0 with relative error %.3g", rel)
+			}
+			if tc.wantTol > 0 && !(rel <= tc.wantTol) {
+				t.Errorf("relative error %.3g, want ≤ %g", rel, tc.wantTol)
+			}
+			var bk, acl mat.Dense
+			bk.Mul(B, res.K)
+			acl.Sub(A, &bk)
+			for j := 1; j < n; j++ {
+				if acl.At(0, j) != 0 {
+					t.Fatalf("A − BK couples the uncontrollable mode: %v", acl.At(0, j))
+				}
+			}
+			var eig mat.Eigen
+			if !eig.Factorize(acl.Slice(1, n, 1, n), mat.EigenNone) {
+				t.Fatal("Eigen failed")
+			}
+			for _, v := range eig.Values(nil) {
+				if !(real(v) < 0) || math.IsNaN(imag(v)) {
+					t.Errorf("closed-loop eigenvalue %v", v)
+				}
+			}
+		})
+	}
+}
