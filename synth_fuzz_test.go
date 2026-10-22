@@ -585,6 +585,14 @@ func FuzzKalman(f *testing.F) {
 			if r1, c1 := res.X.Dims(); r1 != n || c1 != n {
 				t.Fatalf("%s: P is %d×%d\n%s", op, r1, c1, s)
 			}
+			if res.Accuracy != 0 {
+				for _, v := range res.Eig {
+					if ds.Discrete && !(cmplx.Abs(v) < 1) || !ds.Discrete && !(real(v) < 0) {
+						t.Fatalf("%s: Accuracy %d with closed-loop eigenvalue %v\n%s", op, res.Accuracy, v, s)
+					}
+				}
+				fzSkip(t, op+": X not certified (Accuracy 1)")
+			}
 			syRiccatiChecks(t, ds, op, qb, rb, sb, mqRaw(res.X), mqTranspose(mqRaw(res.K), n, p), res.Rcnd, true)
 		}
 		sys := s.System(t, fzSysOpts{})

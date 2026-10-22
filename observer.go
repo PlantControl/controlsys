@@ -188,7 +188,7 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", context, err)
 	}
-	return &RiccatiResult{X: res.X, K: transposeGain(res.K), Eig: res.Eig, Rcnd: res.Rcnd}, nil
+	return &RiccatiResult{X: res.X, K: transposeGain(res.K), Eig: res.Eig, Rcnd: res.Rcnd, Accuracy: res.Accuracy}, nil
 }
 
 // Kalmd computes the discrete Kalman filter gain from a continuous plant
@@ -323,7 +323,7 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 
 	L := transposeGain(res.K)
 
-	return &RiccatiResult{X: res.X, K: L, Eig: res.Eig, Rcnd: res.Rcnd}, nil
+	return &RiccatiResult{X: res.X, K: L, Eig: res.Eig, Rcnd: res.Rcnd, Accuracy: res.Accuracy}, nil
 }
 
 // Estim constructs the state estimator of a plant with observer gain L, as

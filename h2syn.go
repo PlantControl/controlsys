@@ -90,6 +90,9 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	S1 := mulDense(mat.DenseCopyOf(C1.T()), D12)
 
 	resX, err := Care(A, B2, Q1, R1, &RiccatiOpts{S: S1})
+	if err == nil {
+		err = resX.certified()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, err)
 	}
@@ -105,6 +108,9 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	S2 := mulDense(B1, mat.DenseCopyOf(D21.T()))
 
 	resY, err := Care(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C2.T()), Q2, R2, &RiccatiOpts{S: S2})
+	if err == nil {
+		err = resY.certified()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: filter %w", gp.op, err)
 	}
@@ -153,6 +159,9 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 
 	R1 := mulDense(D12t, D12)
 	resX, err := Dare(A, B2, mulDense(mat.DenseCopyOf(C1.T()), C1), R1, &RiccatiOpts{S: mulDense(mat.DenseCopyOf(C1.T()), D12)})
+	if err == nil {
+		err = resX.certified()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, err)
 	}
@@ -174,6 +183,9 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 
 	B1D21t := mulDense(B1, mat.DenseCopyOf(D21.T()))
 	resY, err := Dare(mat.DenseCopyOf(A.T()), C2t, mulDense(B1, mat.DenseCopyOf(B1.T())), mulDense(D21, mat.DenseCopyOf(D21.T())), &RiccatiOpts{S: B1D21t})
+	if err == nil {
+		err = resY.certified()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: filter %w", gp.op, err)
 	}
