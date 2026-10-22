@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"slices"
@@ -45,6 +46,7 @@ const (
 // as well the step is taken past the cluster at s (poleSpacing's wide).
 // An internal-delay model always takes the pole limit; a failed sample is
 // the LFT of its delay-free plant solved in double-double (ddLFTSampler).
+// A non-finite realization or NaN point (errNonFinitePencil) fails at once.
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
 }
@@ -71,8 +73,8 @@ type ddGate struct {
 // restricted by gate.
 func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128, gate ddGate) error {
 	err := eval(pt, dst)
-	if err == nil {
-		return nil
+	if err == nil || errors.Is(err, errNonFinitePencil) {
+		return err
 	}
 	s := pt.value()
 	sp, perr := poleSpacing(sys, s)
@@ -374,7 +376,10 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 // unchanged, at a pivot below 2⁻¹⁰⁰ of the magnitudes it was formed from,
 // where it is cancellation noise. A pivot small against the whole pencil but
 // not against its own terms is accurate, as is a companion form's last pivot
-// next to an exact origin pole.
+// next to an exact origin pole. It solves the balanced realization scaled
+// by a power of two σ, ((p/σ)E + q(A/σ))⁻¹(B/σ), so that neither a graded
+// realization nor one far from unit scale overflows or underflows, and
+// reports false where the response is still not finite.
 func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 	n, m, p := sys.Dims()
 	if n == 0 {
@@ -385,17 +390,32 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 		}
 		return true
 	}
-	ar, br, cr := sys.A.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
-	pr, pi, qr, qi := real(pt.p), imag(pt.p), real(pt.q), imag(pt.q)
+	br := newBalancedRealization(sys, n, m, p)
+	maxA, maxE := 0.0, 1.0
+	for _, v := range br.a {
+		maxA = max(maxA, math.Abs(v))
+	}
+	if br.e != nil {
+		maxE = 0
+		for _, v := range br.e {
+			maxE = max(maxE, math.Abs(v))
+		}
+	}
+	sigma := 1.0
+	if scale := max(cabs1(pt.q)*maxA, cabs1(pt.p)*maxE); scale > 0 && !math.IsInf(scale, 0) {
+		_, k := math.Frexp(scale)
+		sigma = math.Ldexp(1, k)
+	}
+	pr, pi, qr, qi := real(pt.p)/sigma, imag(pt.p)/sigma, real(pt.q), imag(pt.q)
 	a := make([]ddComplex, n*n)
 	x := make([]ddComplex, n*m)
 	mag := make([]float64, n*n)
 	for i := range n {
 		for j := range n {
-			av := ar.Data[i*ar.Stride+j]
+			av := br.a[i*n+j] / sigma
 			var e float64
-			if sys.E != nil {
-				e = sys.E.At(i, j)
+			if br.e != nil {
+				e = br.e[i*n+j]
 			} else if i == j {
 				e = 1
 			}
@@ -403,7 +423,7 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 			mag[i*n+j] = math.Abs(pr*e) + math.Abs(qr*av) + math.Abs(pi*e) + math.Abs(qi*av)
 		}
 		for j := range m {
-			x[i*m+j] = ddComplex{re: dd{br.Data[i*br.Stride+j], 0}}
+			x[i*m+j] = ddComplex{re: dd{br.b[i*m+j] / sigma, 0}}
 		}
 	}
 	tol := float64(n) * 0x1p-100
@@ -451,15 +471,21 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 		}
 	}
 	q := ddComplex{dd{-qr, 0}, dd{-qi, 0}}
+	g := make([]complex128, p*m)
 	for r := range p {
 		for c := range m {
 			var y ddComplex
 			for i := n - 1; i >= 0; i-- {
-				y = y.add(ddComplex{re: dd{cr.Data[r*cr.Stride+i], 0}}.mul(x[i*m+c]))
+				y = y.add(ddComplex{re: dd{br.c[r*n+i], 0}}.mul(x[i*m+c]))
 			}
-			dst[r*m+c] = y.mul(q).complex128() + complex(sys.D.At(r, c), 0)
+			v := y.mul(q).complex128() + complex(sys.D.At(r, c), 0)
+			if !finiteComplex(v) {
+				return false
+			}
+			g[r*m+c] = v
 		}
 	}
+	copy(dst, g)
 	return true
 }
 

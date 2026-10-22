@@ -196,6 +196,11 @@ type pidTuningPlant struct {
 	// loopTail, if set, bounds |L(jω')| over ω' ≥ ω for a candidate, so the
 	// |S| scan runs past high until |S| <= maxSensitivity is certain.
 	loopTail func(c *PID2, w float64) float64
+	// dcEdge and nyquistEdge, if finite and nonzero, are G at ω = 0 and,
+	// discrete, at z = −1, the ends the |S| scan's band stops short of: a
+	// design whose closed-loop root sits near s = 0 or z = −1 hides its
+	// |S| peak there.
+	dcEdge, nyquistEdge complex128
 }
 
 type pidCrossScan int
@@ -1001,6 +1006,15 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		return g
 	}
 	tryResp := func(w float64) (complex128, bool) { return tryEval(eval, func() complex128 { return resp(w) }) }
+	var dcEdge, nyquistEdge complex128
+	if g, ok := eval.resolve(0); ok {
+		dcEdge = g
+	}
+	if plant.Dt > 0 {
+		if g, ok := eval.resolve(math.Pi / plant.Dt); ok {
+			nyquistEdge = g
+		}
+	}
 	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(screen.model) })
 	loopTail := sync.OnceValue(func() func(*PID2, float64) float64 { return pidTuningLoopTail(plant) })
 	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(screen.model) })
@@ -1027,7 +1041,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if resolveFloor {
 			low = pidTuningResolvedFloor(tryResp, low, wc)
 		}
-		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, residueSign: residueSign, tau: tau, zeroScan: true}
+		p := pidTuningPlant{dt: plant.Dt, low: low, high: math.Max(wc*100, minHigh), at: resp, try: tryResp, stability: PIDStabilitySampledOnly, gainSign: gainSign, residueSign: residueSign, tau: tau, zeroScan: true, dcEdge: dcEdge, nyquistEdge: nyquistEdge}
 		if bound == pidSSearch {
 			p.maxSensitivity = pidTuningMaxSensitivity
 			p.loopTail = loopTail()
@@ -2720,25 +2734,32 @@ const pidTuningIdealReturnTol = 0x1p-26
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic
 // directly, of the loop with model, transfer its transfer function, delayed
-// by lag samples. For a delayed loop, or one whose transfer is of lower
-// degree than model, the characteristic is built exactly from model's
-// realization when in scope (n within pidTuningExactLagOrder; above
-// pidTuningExactOrder only for a transfer of lower degree or one that
-// fails, as the build grows with n), since TransferFunction drops or corrupts
-// near-zero poles and zeros and the float verdict on its characteristic then
-// decides confidently wrong; the float verdict on the rounded exact
+// by lag samples. TransferFunction drops or corrupts near-zero poles and
+// zeros, and the float verdict on its characteristic then decides
+// confidently wrong, so above pidTuningExactOrder the transfer is never
+// used: pidTuningIdealRealizationFloat decides, exact Schur–Cohn
+// (pidTuningIdealExact) when it is in doubt and n+lag is within
+// pidTuningExactLagOrder, and otherwise the loop fails closed as unstable.
+// Up to pidTuningExactOrder, a delayed loop, or one whose transfer is of
+// lower degree than model or fails, has its characteristic built exactly
+// from model's realization: the float verdict on the rounded exact
 // characteristic decides, and exact Schur–Cohn only when it is in doubt and
 // n+lag is within pidTuningExactLagOrder, as that recursion at order n+lag
-// is slow; beyond it the float verdict stands. transfer is called only when
-// the exact characteristic is out of scope, the loop is undelayed, n
-// exceeds pidTuningExactOrder, or the rounded characteristic overflows
-// beyond that cap; a failure before the build leaves the exact
-// characteristic to decide when in scope.
+// is slow; beyond it the float verdict stands. transfer is called only for
+// loops out of both scopes, undelayed loops, or a rounded characteristic
+// that overflows beyond that cap.
 func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, error), c *PID2, lag int) (bool, error) {
 	n, _, _ := model.Dims()
+	if n > pidTuningExactOrder && pidTuningIdealRealizable(model, c) {
+		if stable, decided := pidTuningIdealRealizationFloat(model, c, lag); decided {
+			return stable, nil
+		}
+		exact, ok := pidTuningIdealExact(model, c, lag)
+		return exact && ok, nil
+	}
 	inScope := pidTuningIdealInScope(model, c)
 	var tr *TransferFuncResult
-	if !inScope || lag == 0 || n > pidTuningExactOrder {
+	if !inScope || lag == 0 {
 		var err error
 		if tr, err = transfer(); err != nil && !inScope {
 			return false, err
@@ -2808,6 +2829,228 @@ func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, e
 	return stable, nil
 }
 
+// pidTuningIdealRealizationFloat is the float verdict of pidTuningIdealStable
+// above pidTuningExactOrder: the eigenvalues of the closed-loop state matrix
+// of model, delayed by a lag-sample output shift chain, under the ideal
+// derivative kd·λ + k0 plus a one-state integrator, with u solved out of
+// u = −(kd·λy + …) when D' = 0 (dividing by r = 1+kd·C'B') or kept as a
+// state when D' ≠ 0 (dividing by kd·D). Its order is the degree of
+// pidTuningIdealExact's characteristic, so its eigenvalues are that
+// characteristic's roots. The error scale bounds the formed entries by
+// their absolute terms, as the elimination cancels. pidTuningFloatVerdict
+// decides first, then pidTuningEigenDiscVerdict; decided is false when
+// both are in doubt or the realization degenerates.
+func pidTuningIdealRealizationFloat(model *System, c *PID2, lag int) (stable, decided bool) {
+	am, absm, ok := pidTuningIdealRealization(model, c, lag)
+	if !ok {
+		return false, false
+	}
+	order, _ := am.Dims()
+	poles, err := descriptorPolicy{}.poles("", am, order)
+	if err != nil {
+		return false, false
+	}
+	for _, p := range poles {
+		if !pidFiniteComplex(p) {
+			return false, false
+		}
+	}
+	if stable, decided = pidTuningFloatVerdict(poles, c.Dt == 0, mat.Norm(absm, math.Inf(1))); decided {
+		return stable, true
+	}
+	return pidTuningEigenDiscVerdict(am, c.Dt == 0, pidTuningPoleErrorScale*float64(order)*0x1p-52*mat.Norm(absm, 2))
+}
+
+// pidTuningIdealRealization returns pidTuningIdealRealizationFloat's
+// closed-loop state matrix and the bound on its entries' absolute terms;
+// ok is false when it degenerates or overflows.
+func pidTuningIdealRealization(model *System, c *PID2, lag int) (a, abs *mat.Dense, ok bool) {
+	n, _, _ := model.Dims()
+	kd, k0, k0Abs := c.Kd, c.Kp, math.Abs(c.Kp)
+	nx, ax, cx, dx := 0, 0.0, 0.0, 0.0
+	if c.Ki != 0 {
+		nx, cx = 1, c.Ki
+	}
+	if c.Dt != 0 {
+		if c.DFormula != ForwardEuler {
+			return nil, nil, false
+		}
+		kd, k0, k0Abs = c.Kd/c.Dt, c.Kp-c.Kd/c.Dt, math.Abs(c.Kp)+math.Abs(c.Kd/c.Dt)
+		ax, cx = 1, c.Ki*c.Dt
+		switch c.IFormula {
+		case BackwardEuler:
+			dx = c.Ki * c.Dt
+		case Trapezoidal:
+			dx = c.Ki * c.Dt / 2
+		}
+	}
+	dc, dcAbs := k0+dx, k0Abs+math.Abs(dx)
+	np := n + lag
+	ap, bp, cp := make([]float64, np*np), make([]float64, np), make([]float64, np)
+	for i := range n {
+		copy(ap[i*np:i*np+n], model.A.RawRowView(i))
+		bp[i] = model.B.At(i, 0)
+	}
+	d := model.D.At(0, 0)
+	if lag == 0 {
+		copy(cp, model.C.RawRowView(0))
+	} else {
+		copy(ap[n*np:n*np+n], model.C.RawRowView(0))
+		bp[n] = d
+		for i := n + 1; i < np; i++ {
+			ap[i*np+i-1] = 1
+		}
+		cp[np-1], d = 1, 0
+	}
+	ca, caAbs := make([]float64, np), make([]float64, np)
+	var cb, cbAbs float64
+	for i, ci := range cp {
+		if ci == 0 {
+			continue
+		}
+		for j := range np {
+			ca[j] += ci * ap[i*np+j]
+			caAbs[j] += math.Abs(ci * ap[i*np+j])
+		}
+		cb += ci * bp[i]
+		cbAbs += math.Abs(ci * bp[i])
+	}
+	nu := 0
+	if d != 0 {
+		if kd == 0 {
+			return nil, nil, false
+		}
+		nu = 1
+	}
+	order := np + nx + nu
+	am, absm := make([]float64, order*order), make([]float64, order*order)
+	a, abs = mat.NewDense(order, order, am), mat.NewDense(order, order, absm)
+	for i := range np {
+		for j := range np {
+			am[i*order+j] = ap[i*np+j]
+			absm[i*order+j] = math.Abs(ap[i*np+j])
+		}
+	}
+	if nx == 1 {
+		for j := range np {
+			am[np*order+j], absm[np*order+j] = cp[j], math.Abs(cp[j])
+		}
+		am[np*order+np], absm[np*order+np] = ax, ax
+	}
+	// g·x + h·ξ + q·u is u (D' = 0) or λu (D' ≠ 0).
+	g, gAbs := make([]float64, np+nx+nu), make([]float64, np+nx+nu)
+	var den, denAbs float64
+	if nu == 0 {
+		den, denAbs = 1+kd*cb, 1+math.Abs(kd)*cbAbs
+	} else {
+		den, denAbs = kd*d, math.Abs(kd*d)
+		g[np+nx], gAbs[np+nx] = 1+kd*cb+dc*d, 1+math.Abs(kd)*cbAbs+dcAbs*math.Abs(d)
+	}
+	if den == 0 || !finitePID(den) {
+		return nil, nil, false
+	}
+	for j := range np {
+		g[j], gAbs[j] = kd*ca[j]+dc*cp[j], math.Abs(kd)*caAbs[j]+dcAbs*math.Abs(cp[j])
+	}
+	if nx == 1 {
+		g[np], gAbs[np] = cx, math.Abs(cx)
+	}
+	for j := range g {
+		v := -g[j] / den
+		g[j], gAbs[j] = v, gAbs[j]/math.Abs(den)+math.Abs(v)*denAbs/math.Abs(den)
+	}
+	if nu == 0 {
+		for i := range np {
+			for j := range np + nx {
+				am[i*order+j] += bp[i] * g[j]
+				absm[i*order+j] += math.Abs(bp[i]) * gAbs[j]
+			}
+		}
+	} else {
+		for i := range np {
+			am[i*order+np+nx], absm[i*order+np+nx] = bp[i], math.Abs(bp[i])
+		}
+		if nx == 1 {
+			am[np*order+np+nx], absm[np*order+np+nx] = d, math.Abs(d)
+		}
+		copy(am[(np+nx)*order:], g)
+		copy(absm[(np+nx)*order:], gAbs)
+	}
+	for _, v := range am {
+		if !finitePID(v) {
+			return nil, nil, false
+		}
+	}
+	return a, abs, true
+}
+
+// pidTuningEigenDiscVerdict decides stability of a's eigenvalues by the
+// Bauer–Fike theorem when pidTuningFloatVerdict's polynomial error model,
+// which treats every nearby eigenvalue as a root cluster, leaves a loop of
+// many well-separated modes in doubt: with V the unit right eigenvectors
+// and s_i = |y_iᴴx_i| for unit left ones, κ(V) ≤ √(n·Σ1/s_i²), and every
+// eigenvalue of a matrix within eta of a in the 2-norm lies in a disc of
+// radius κ(V)·eta, padded by pidTuningPoleMarginSafety, about a computed
+// one. The discs must be pairwise disjoint, so each holds exactly one, and
+// each must lie wholly inside or outside the exact test's boundary
+// (Re s < −1e-10, |z| < 1−1e-10; inside also within poleStabilityTolerance).
+func pidTuningEigenDiscVerdict(a *mat.Dense, continuous bool, eta float64) (stable, decided bool) {
+	var eig mat.Eigen
+	if !eig.Factorize(a, mat.EigenBoth) {
+		return false, false
+	}
+	vals := eig.Values(nil)
+	var vr, vl mat.CDense
+	eig.VectorsTo(&vr)
+	eig.LeftVectorsTo(&vl)
+	n := len(vals)
+	var sum float64
+	for i := range n {
+		var dot complex128
+		var nr, nl float64
+		for k := range n {
+			r, l := vr.At(k, i), vl.At(k, i)
+			dot += cmplx.Conj(l) * r
+			nr += real(r)*real(r) + imag(r)*imag(r)
+			nl += real(l)*real(l) + imag(l)*imag(l)
+		}
+		s := cmplx.Abs(dot) / math.Sqrt(nr*nl)
+		if !(s > 0) {
+			return false, false
+		}
+		sum += 1 / (s * s)
+	}
+	r := pidTuningPoleMarginSafety * math.Sqrt(float64(n)*sum) * eta
+	if !finitePID(r) {
+		return false, false
+	}
+	for i, p := range vals {
+		if !pidFiniteComplex(p) {
+			return false, false
+		}
+		for _, q := range vals[i+1:] {
+			if cmplx.Abs(p-q) <= 2*r {
+				return false, false
+			}
+		}
+	}
+	const tol = 1e-10
+	stable = true
+	for _, p := range vals {
+		lo, hi, inside := cmplx.Abs(p)-r, cmplx.Abs(p)+r, 1-tol
+		outside := inside
+		if continuous {
+			lo, hi, outside = real(p)-r, real(p)+r, -tol
+			inside = -tol * max(1, cmplx.Abs(p)+r)
+		}
+		if lo >= outside {
+			return false, true
+		}
+		stable = stable && hi < inside
+	}
+	return stable, stable
+}
+
 // pidTuningIdealFloat is the float verdict of pidTuningIdealStable on
 // characteristic, leading coefficient first; decided is false when the
 // exact test must settle it.
@@ -2861,8 +3104,15 @@ func pidTuningIdealCharacteristic(model *System, c *PID2, lag int) (ch []dyadic,
 // pidTuningIdealInScope reports whether pidTuningIdealCharacteristic can
 // build the characteristic of model and c.
 func pidTuningIdealInScope(model *System, c *PID2) bool {
-	n, m, p := model.Dims()
-	if model.E != nil || model.HasDelay() || m != 1 || p != 1 || n > pidTuningExactLagOrder {
+	n, _, _ := model.Dims()
+	return n <= pidTuningExactLagOrder && pidTuningIdealRealizable(model, c)
+}
+
+// pidTuningIdealRealizable reports whether model and c are a finite SISO
+// standard delay-free loop, as pidTuningIdealRealizationFloat asks.
+func pidTuningIdealRealizable(model *System, c *PID2) bool {
+	_, m, p := model.Dims()
+	if model.E != nil || model.HasDelay() || m != 1 || p != 1 {
 		return false
 	}
 	for _, a := range []*mat.Dense{model.A, model.B, model.C, model.D} {
@@ -3069,7 +3319,8 @@ func pidTuningDynamicsSpan(plant *System) (lo, hi float64) {
 }
 
 // pidTuningCrossGrid extends the log grid omega at its own step over
-// [p.crossLow, p.crossHigh] under the floor and adds points within 4|σ| of
+// [p.crossLow, p.crossHigh] under the floor, a bound unset (≤ 0 or +Inf)
+// widening nothing, and adds points within 4|σ| of
 // each lightly damped mode σ+jω₀, and p.samples, so a crossover pair at a
 // resonance is not stepped over. Added points where p.try fails or is not
 // finite are dropped, as near rounded multiple poles at z = 1 or s = 0 under
@@ -3078,17 +3329,22 @@ func pidTuningDynamicsSpan(plant *System) (lo, hi float64) {
 func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 	n := len(omega)
 	step := math.Log(omega[n-1]/omega[0]) / float64(n-1)
-	var grid []float64
-	if p.hasCrossFloor {
-		for k := math.Ceil(math.Log(omega[0]/p.crossLow) / step); k >= 1; k-- {
-			grid = append(grid, omega[0]*math.Exp(-k*step))
+	below, above := 0., 0.
+	if p.hasCrossFloor && step > 0 && !math.IsInf(step, 0) {
+		if p.crossLow > 0 {
+			below = math.Ceil(math.Log(omega[0]/p.crossLow) / step)
+		}
+		if p.crossHigh < math.Inf(1) {
+			above = math.Ceil(math.Log(p.crossHigh/omega[n-1]) / step)
 		}
 	}
+	var grid []float64
+	for k := below; k >= 1; k-- {
+		grid = append(grid, omega[0]*math.Exp(-k*step))
+	}
 	grid = append(grid, omega...)
-	if p.hasCrossFloor {
-		for k := 1.; k <= math.Ceil(math.Log(p.crossHigh/omega[n-1])/step); k++ {
-			grid = append(grid, math.Min(omega[n-1]*math.Exp(k*step), p.crossHigh))
-		}
+	for k := 1.; k <= above; k++ {
+		grid = append(grid, math.Min(omega[n-1]*math.Exp(k*step), p.crossHigh))
 	}
 	lo, hi := grid[0], grid[len(grid)-1]
 	for _, m := range p.modes {
@@ -3253,10 +3509,10 @@ func pidTuningModes(plant *System) []complex128 {
 // σ+jω₀, is at most max(|σ|, |ω−ω₀|)/4, so a lightly damped mode's narrow
 // peak is bracketed. Grid maxima within 0.8 of the running peak are then
 // refined by golden section on log ω, since a delay ripple can sit between
-// samples and read ~10% low.
+// samples and read ~10% low. |S| at p.dcEdge and p.nyquistEdge counts too.
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 	s := func(w float64) float64 { return 1 / cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)) }
-	peak := 0.
+	peak := pidTuningEdgeSensitivity(p, c)
 	top := math.Max(p.high, p.crossHigh)
 	high, extend, inBand := top, p.loopTail != nil && p.maxSensitivity > 1, 0
 	var w0, v0, w1, v1 float64
@@ -3289,6 +3545,36 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 		}
 		w = math.Min(w+step, high)
 	}
+}
+
+// pidTuningEdgeSensitivity returns the larger |S| at p.dcEdge and
+// p.nyquistEdge, 0 where unset. Without integral action L(0) = Kp·G(0),
+// since every derivative term vanishes there; with it |L(0)| is infinite.
+// At z = −1 each integrator dt·(1/(z−1) + w), w its formula's weight, is
+// dt·(w − ½), so the derivative term is Kd/(Tf + dt·(w − ½)), infinite
+// when that is 0.
+func pidTuningEdgeSensitivity(p pidTuningPlant, c PID2) float64 {
+	peak := 0.
+	s := func(l complex128) {
+		if v := 1 / cmplx.Abs(1+l); !math.IsNaN(v) {
+			peak = math.Max(peak, v)
+		}
+	}
+	if g := p.dcEdge; g != 0 && pidFiniteComplex(g) && c.Ki == 0 {
+		s(g * complex(c.Kp, 0))
+	}
+	if g := p.nyquistEdge; g != 0 && pidFiniteComplex(g) && c.Dt > 0 {
+		k := c.Kp + c.Ki*c.Dt*(pidFormulaWeight(c.IFormula)-.5)
+		if c.Kd != 0 {
+			d := c.Tf + c.Dt*(pidFormulaWeight(c.DFormula)-.5)
+			if d == 0 {
+				return peak
+			}
+			k += c.Kd / d
+		}
+		s(g * complex(k, 0))
+	}
+	return peak
 }
 
 // pidTuningTailReach and pidTuningTailPoints cap the |S| scan's extension

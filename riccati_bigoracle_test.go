@@ -114,14 +114,16 @@ func hbSolve(a, b hbMat) hbMat {
 // hewerDareBig is Hewer's iteration for the Dare in 320-bit arithmetic
 // from the stabilizing gain K0, with Kronecker Stein solves.
 func hewerDareBig(A, B, Q, R, S, K0 *mat.Dense, steps int) *mat.Dense {
-	a, b, q, r, k := hbFrom(A), hbFrom(B), hbFrom(Q), hbFrom(R), hbFrom(K0)
-	s := hbFrom(S)
+	return hbDense(hewerDareHB(hbFrom(A), hbFrom(B), hbFrom(Q), hbFrom(R), hbFrom(S), hbFrom(K0), steps))
+}
+
+func hewerDareHB(a, b, q, r, s, k hbMat, steps int) hbMat {
 	n := a.r
 	var x hbMat
 	for range steps {
 		acl := hbAdd(a, hbMul(b, k), -1)
 		qk := hbAdd(q, hbMul(hbMul(k.t(), r), k), 1)
-		if S != nil {
+		if s.r > 0 {
 			sk := hbMul(s, k)
 			qk = hbAdd(hbAdd(qk, sk, -1), sk.t(), -1)
 		}
@@ -151,19 +153,12 @@ func hewerDareBig(A, B, Q, R, S, K0 *mat.Dense, steps int) *mat.Dense {
 		btx := hbMul(b.t(), x)
 		rb := hbAdd(r, hbMul(btx, b), 1)
 		rh := hbMul(btx, a)
-		if S != nil {
+		if s.r > 0 {
 			rh = hbAdd(rh, s.t(), 1)
 		}
 		k = hbSolve(rb, rh)
 	}
-	o := mat.NewDense(n, n, nil)
-	for i := range n {
-		for j := range n {
-			v, _ := x.at(i, j).Float64()
-			o.Set(i, j, v)
-		}
-	}
-	return o
+	return x
 }
 
 func TestHewerDareBig_MatchesDare(t *testing.T) {
@@ -184,14 +179,16 @@ func TestHewerDareBig_MatchesDare(t *testing.T) {
 // kleinmanCareBig is Newton–Kleinman's iteration for the Care in 320-bit
 // arithmetic from the stabilizing gain K0, with Kronecker Lyapunov solves.
 func kleinmanCareBig(A, B, Q, R, S, K0 *mat.Dense, steps int) *mat.Dense {
-	a, b, q, r, k := hbFrom(A), hbFrom(B), hbFrom(Q), hbFrom(R), hbFrom(K0)
-	s := hbFrom(S)
+	return hbDense(kleinmanCareHB(hbFrom(A), hbFrom(B), hbFrom(Q), hbFrom(R), hbFrom(S), hbFrom(K0), steps))
+}
+
+func kleinmanCareHB(a, b, q, r, s, k hbMat, steps int) hbMat {
 	n := a.r
 	var x hbMat
 	for range steps {
 		acl := hbAdd(a, hbMul(b, k), -1)
 		qk := hbAdd(q, hbMul(hbMul(k.t(), r), k), 1)
-		if S != nil {
+		if s.r > 0 {
 			sk := hbMul(s, k)
 			qk = hbAdd(hbAdd(qk, sk, -1), sk.t(), -1)
 		}
@@ -215,19 +212,12 @@ func kleinmanCareBig(A, B, Q, R, S, K0 *mat.Dense, steps int) *mat.Dense {
 			x.d[i].Set(xv.d[i])
 		}
 		rh := hbMul(b.t(), x)
-		if S != nil {
+		if s.r > 0 {
 			rh = hbAdd(rh, s.t(), 1)
 		}
 		k = hbSolve(r, rh)
 	}
-	o := mat.NewDense(n, n, nil)
-	for i := range n {
-		for j := range n {
-			v, _ := x.at(i, j).Float64()
-			o.Set(i, j, v)
-		}
-	}
-	return o
+	return x
 }
 
 func TestKleinmanCareBig_MatchesCare(t *testing.T) {
@@ -243,4 +233,33 @@ func TestKleinmanCareBig_MatchesCare(t *testing.T) {
 	if e := relErr(kleinmanCareBig(A, B, Q, R, S, res.K, 8), res.X); !(e <= 1e-13) {
 		t.Errorf("rel err %g", e)
 	}
+}
+
+// hbDense rounds x to float64.
+func hbDense(x hbMat) *mat.Dense {
+	o := mat.NewDense(x.r, x.c, nil)
+	for i := range x.r {
+		for j := range x.c {
+			v, _ := x.at(i, j).Float64()
+			o.Set(i, j, v)
+		}
+	}
+	return o
+}
+
+// descriptorOracle returns the 320-bit solution X = E⁻ᵀYE⁻¹ of the
+// descriptor Riccati equation, Y the Newton (Kleinman or Hewer) limit of
+// the explicit model (E⁻¹A, E⁻¹B) from the stabilizing gain K0. E⁻¹A and
+// E⁻¹B are formed in 320 bits.
+func descriptorOracle(continuous bool, A, B, Q, R, S, E, K0 *mat.Dense, steps int) *mat.Dense {
+	e := hbFrom(E)
+	a, b := hbSolve(e, hbFrom(A)), hbSolve(e, hbFrom(B))
+	var y hbMat
+	if continuous {
+		y = kleinmanCareHB(a, b, hbFrom(Q), hbFrom(R), hbFrom(S), hbFrom(K0), steps)
+	} else {
+		y = hewerDareHB(a, b, hbFrom(Q), hbFrom(R), hbFrom(S), hbFrom(K0), steps)
+	}
+	z := hbSolve(e.t(), y)
+	return hbDense(hbSolve(e.t(), z.t()).t())
 }

@@ -4307,6 +4307,40 @@ func TestSetDelayModelZeroState(t *testing.T) {
 	}
 }
 
+func TestSetDelayModelZeroStateOneSideEmpty(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		for _, d := range []*mat.Dense{
+			mat.NewDense(1, 2, []float64{1, 2}),
+			mat.NewDense(2, 1, []float64{1, 2}),
+			mat.NewDense(1, 3, []float64{1, 2, 3}),
+		} {
+			H, err := NewGain(d, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sys, err := SetDelayModel(H, []float64{1})
+			if !errors.Is(err, ErrDimensionMismatch) {
+				var verr error
+				if sys != nil {
+					verr = sys.Validate()
+				}
+				t.Fatalf("dt=%v %v: err=%v validate=%v, want ErrDimensionMismatch", dt, d.RawMatrix(), err, verr)
+			}
+			if sys != nil {
+				t.Fatalf("dt=%v: non-nil system with error", dt)
+			}
+		}
+		H, _ := NewGain(mat.NewDense(1, 1, []float64{3}), dt)
+		sys, err := SetDelayModel(H, []float64{1})
+		if err != nil {
+			t.Fatalf("dt=%v 1x1: %v", dt, err)
+		}
+		if err := sys.Validate(); err != nil {
+			t.Fatalf("dt=%v 1x1 validate: %v", dt, err)
+		}
+	}
+}
+
 func TestZeroDelayApproxKeepsDescriptorAndZeroState(t *testing.T) {
 	noInternal := func(dt float64) delayFactorFunc {
 		exact := exactDelayFactor(dt)

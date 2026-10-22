@@ -185,7 +185,8 @@ func (p Poly) ScaleTo(dst Poly, s float64) Poly {
 	return dst
 }
 
-// Roots returns the roots of p, as MATLAB roots, after trimming leading zeros.
+// Roots returns the roots of p, as MATLAB roots (eigenvalues of compan(p),
+// coefficients in the first row), after trimming leading zeros.
 // A nonzero constant has no roots. NaN or Inf coefficients and the zero
 // polynomial (every s is a root) return ErrInvalidArgument.
 func (p Poly) Roots() ([]complex128, error) {
@@ -212,11 +213,11 @@ func (p Poly) Roots() ([]complex128, error) {
 
 	lead := p[0]
 	data := make([]float64, deg*deg)
-	for i := range deg {
-		data[i*deg+deg-1] = -p[deg-i] / lead
-		if i > 0 {
-			data[i*deg+i-1] = 1
-		}
+	for j := range deg {
+		data[j] = -p[j+1] / lead
+	}
+	for i := 1; i < deg; i++ {
+		data[i*deg+i-1] = 1
 	}
 	comp := mat.NewDense(deg, deg, data)
 

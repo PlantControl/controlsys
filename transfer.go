@@ -203,6 +203,9 @@ type rowRealizationConverter struct {
 	tf   *TransferFunc
 	rows []int
 	dRaw blas64.General
+	// trims[i*m+j] holds the Markov trim candidates of entry (i, j), most
+	// trimmed first; trimRows applies them after the realization is chosen.
+	trims [][][]float64
 }
 
 func newRowRealizationConverter(sys *System, opts *TransferFuncOpts) rowRealizationConverter {
@@ -218,14 +221,15 @@ func newRowRealizationConverter(sys *System, opts *TransferFuncOpts) rowRealizat
 		dRaw = sys.D.RawMatrix()
 	}
 	return rowRealizationConverter{
-		sys:  sys,
-		opts: opts,
-		n:    n,
-		m:    m,
-		p:    p,
-		tf:   tf,
-		rows: make([]int, p),
-		dRaw: dRaw,
+		sys:   sys,
+		opts:  opts,
+		n:     n,
+		m:     m,
+		p:     p,
+		tf:    tf,
+		rows:  make([]int, p),
+		dRaw:  dRaw,
+		trims: make([][][]float64, p*m),
 	}
 }
 
@@ -451,7 +455,51 @@ func newTFCheck(sys *System, n, m, p int) tfCheck {
 			pts = append(pts, cmplx.Rect(1, th))
 		}
 	}
-	bd := newBalancedDense(sys, n, m, p)
+	return sampleTFCheck(newBalancedDense(sys, n, m, p), pts, m, p)
+}
+
+// trimCheckPoints adds jω, ω log-spaced over [r, R] and r/10, to the continuous
+// points of newTFCheck, r and R estimating the smallest and largest root
+// moduli of the row's monic den, so that a trim is also checked in and below
+// the band of that row's poles.
+func trimCheckPoints(sys *System, den []float64) []complex128 {
+	var pts []complex128
+	if !sys.IsContinuous() {
+		for _, th := range []float64{0.05, 0.3, 0.7, 1.3, 1.9, 2.8} {
+			pts = append(pts, cmplx.Rect(1, th))
+		}
+		return pts
+	}
+	rho := frobNorm(sys.A)
+	if rho == 0 || math.IsInf(rho, 0) {
+		rho = 1
+	}
+	for _, w := range []float64{1e-2, 1, 1e2} {
+		pts = append(pts, complex(0, rho*w))
+	}
+	d := len(den) - 1
+	hi, lo := 0.0, 0.0
+	for k := 1; k <= d; k++ {
+		hi = max(hi, math.Pow(math.Abs(den[k]), 1/float64(k)))
+	}
+	if an := den[d]; an != 0 {
+		for k := 1; k <= d; k++ {
+			lo = max(lo, math.Pow(math.Abs(den[d-k]/an), 1/float64(k)))
+		}
+	}
+	if hi > 0 && lo > 0 && !math.IsInf(hi, 0) && !math.IsInf(lo, 0) {
+		const nb = 8
+		r := 1 / lo
+		ratio := math.Pow(hi/r, 1/float64(nb-1))
+		for w := range nb {
+			pts = append(pts, complex(0, r*math.Pow(ratio, float64(w))))
+		}
+		pts = append(pts, complex(0, r/10))
+	}
+	return pts
+}
+
+func sampleTFCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
 	var ck tfCheck
 	for _, s := range pts {
 		dst := make([]complex128, p*m)
@@ -487,6 +535,28 @@ func (ck tfCheck) relErr(tf *TransferFunc) (worst float64, ok bool) {
 		}
 	}
 	return worst, len(ck.s) > 0
+}
+
+// trimOK reports whether numerator trimmed over den matches entry (i, j) of
+// an m-input model at every point to within twice the error of numerator
+// full at that point, or 1e3·n·eps, relative to the entry. A point where
+// full is inaccurate gives no slack at another.
+func (ck tfCheck) trimOK(i, j, m, n int, trimmed, full, den []float64) bool {
+	if len(ck.s) == 0 {
+		return false
+	}
+	floor := 1e3 * float64(n) * eps()
+	for k, s := range ck.s {
+		ref := ck.ref[k][i*m+j]
+		scale := max(cmplx.Abs(ref), eps()*ck.mag[k])
+		d := Poly(den).Eval(s)
+		eT := cmplx.Abs(Poly(trimmed).Eval(s)/d-ref) / scale
+		eF := cmplx.Abs(Poly(full).Eval(s)/d-ref) / scale
+		if !(eT <= max(2*eF, floor)) {
+			return false
+		}
+	}
+	return true
 }
 
 // convertBalanced fills the rows from the balanced realization, I/O-scaled
@@ -607,6 +677,7 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 		ws = newTFWorkspace(ncont, c.m)
 	}
 
+	markov := newMarkovTrim(c.sys)
 	totalOrder := 0
 	for i := 0; i < c.p; i++ {
 		nobs, den, numCoeffs := ssToTFRow(Ac, Bc, Cc, i, ncont, c.m, c.opts.ObservabilityTol, floor, inExp, outExp[i], ws)
@@ -616,20 +687,180 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 		c.tf.Den[i] = den
 		c.tf.Num[i] = make([][]float64, c.m)
 		for j := 0; j < c.m; j++ {
-			num := numCoeffs[j]
 			dij := c.dRaw.Data[i*c.dRaw.Stride+j]
-			if dij != 0 {
-				numWithD := Poly(num).Add(Poly(den).Scale(dij))
-				c.tf.Num[i][j] = []float64(numWithD)
-			} else {
-				c.tf.Num[i][j] = num
+			withD := func(num []float64) []float64 {
+				if dij == 0 {
+					return num
+				}
+				return Poly(num).Add(Poly(den).Scale(dij))
 			}
+			var bh []float64
+			if nobs > 0 {
+				bh = ws.cData[j*ncont : j*ncont+nobs]
+			}
+			c.trims[i*c.m+j] = nil
+			if cands := markov.trim(i, j, nobs, numCoeffs[j], bh); len(cands) > 1 || len(cands[0]) != len(numCoeffs[j]) {
+				c.trims[i*c.m+j] = cands
+			}
+			c.tf.Num[i][j] = withD(numCoeffs[j])
 		}
 	}
 	return totalOrder
 }
 
+// trimRows replaces each numerator that has Markov trim candidates by the
+// most trimmed one that passes trimOK against a check sampled in the band of
+// that row's den, else by the last candidate. It runs on the chosen
+// realization only, so the choice sees the untrimmed numerators.
+func (c rowRealizationConverter) trimRows() {
+	var bd *balancedDense
+	for i := range c.p {
+		var check *tfCheck
+		den := c.tf.Den[i]
+		for j := range c.m {
+			cands := c.trims[i*c.m+j]
+			if cands == nil {
+				continue
+			}
+			c.trims[i*c.m+j] = nil
+			dij := c.dRaw.Data[i*c.dRaw.Stride+j]
+			withD := func(num []float64) []float64 {
+				if dij == 0 {
+					return num
+				}
+				return Poly(num).Add(Poly(den).Scale(dij))
+			}
+			num := cands[len(cands)-1]
+			for _, cand := range cands[:len(cands)-1] {
+				if check == nil {
+					if bd == nil {
+						bd = newBalancedDense(c.sys, c.n, c.m, c.p)
+					}
+					ck := sampleTFCheck(bd, trimCheckPoints(c.sys, den), c.m, c.p)
+					check = &ck
+				}
+				if check.trimOK(i, j, c.m, c.n, withD(cand), withD(num), den) {
+					num = cand
+					break
+				}
+			}
+			c.tf.Num[i][j] = withD(num)
+		}
+	}
+}
+
+// markovTrim drops leading numerator coefficients that are zero within the
+// rounding of the given A, B, C. The orthogonal reductions leave rounding
+// noise in such a coefficient instead of an exact zero, which gives TF.ZPK a
+// spurious huge zero and a tiny gain (MATLAB tf(ss) builds the numerators
+// from the zeros, so its degree is exact). Over a monic denominator the
+// leading coefficient is C·B, resolved only beyond 2·n·eps·|C|·|B|, and only
+// then are later ones trimmed. With the coefficients of s^(deg-1) … s^(deg-k)
+// zero, that of s^(deg-1-k) is the Markov parameter h_k = C·A^k·B, resolved
+// beyond (k+2)·n·eps·|C|·|A|^k·|B|; but with a fast mode in a dense basis
+// h_k, k ≥ 1, is dominated by the rounding of A while the coefficients, its
+// sums over the denominator, are resolved. So that count, and the leading
+// entries of the row's observability-Hessenberg b within n·eps·‖b‖ (which
+// misses noise the Hessenberg basis amplifies), are only candidates, each
+// kept if it matches the state-space response.
+type markovTrim struct {
+	a, b, c blas64.General
+	n, m    int
+	// krylov[j] holds A^k·b_j, |A|^k·|b_j| at [2kn, 2kn+2n) for k < count[j].
+	krylov [][]float64
+	count  []int
+}
+
+func newMarkovTrim(sys *System) markovTrim {
+	n, m, _ := sys.Dims()
+	return markovTrim{a: sys.A.RawMatrix(), b: sys.B.RawMatrix(), c: sys.C.RawMatrix(), n: n, m: m}
+}
+
+// vec returns A^k·b_j and |A|^k·|b_j|, k < n, computing them on demand.
+func (t *markovTrim) vec(j, k int) (v, u []float64) {
+	n := t.n
+	if t.krylov == nil {
+		t.krylov, t.count = make([][]float64, t.m), make([]int, t.m)
+	}
+	if t.krylov[j] == nil {
+		buf := make([]float64, 2*n*n)
+		for i := range n {
+			buf[i] = t.b.Data[i*t.b.Stride+j]
+			buf[n+i] = math.Abs(buf[i])
+		}
+		t.krylov[j], t.count[j] = buf, 1
+	}
+	buf := t.krylov[j]
+	for ; t.count[j] <= k; t.count[j]++ {
+		prev := buf[2*(t.count[j]-1)*n:]
+		next := buf[2*t.count[j]*n:]
+		for i := range n {
+			row := t.a.Data[i*t.a.Stride : i*t.a.Stride+n]
+			sv, su := 0.0, 0.0
+			for l, a := range row {
+				sv += a * prev[l]
+				su += math.Abs(a) * prev[n+l]
+			}
+			next[i], next[n+i] = sv, su
+		}
+	}
+	return buf[2*k*n : 2*k*n+n], buf[2*k*n+n : 2*k*n+2*n]
+}
+
+func (t *markovTrim) negligible(row, j, k int) bool {
+	n := t.n
+	crow := t.c.Data[row*t.c.Stride : row*t.c.Stride+n]
+	h, bound := 0.0, 0.0
+	if k == 0 {
+		for l, cv := range crow {
+			v := cv * t.b.Data[l*t.b.Stride+j]
+			h += v
+			bound += math.Abs(v)
+		}
+	} else {
+		v, u := t.vec(j, k)
+		for l, cv := range crow {
+			h += cv * v[l]
+			bound += math.Abs(cv) * u[l]
+		}
+	}
+	bound *= float64((k+2)*n) * eps()
+	return math.Abs(h) <= bound && !math.IsInf(bound, 0)
+}
+
+// trim returns the trimmed candidates for num over a monic denominator of
+// degree deg, most trimmed first; the last, dropping at most a negligible
+// C·B, needs no check. bh is input j in the row's observability-Hessenberg
+// basis.
+func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
+	if len(num) < 2 || len(num) > deg || len(bh) != deg || !t.negligible(row, j, 0) {
+		return [][]float64{num}
+	}
+	off := deg - len(num)
+	safe := num
+	if off == 0 {
+		safe = num[1:]
+	}
+	lead := max(0, 1-off)
+	for lead < len(num)-1 && t.negligible(row, j, off+lead) {
+		lead++
+	}
+	tol := float64(deg) * eps() * blas64.Implementation().Dnrm2(deg, bh, 1)
+	r := 0
+	for r < deg-1 && math.Abs(bh[r]) <= tol {
+		r++
+	}
+	var cands [][]float64
+	for _, k := range []int{max(lead, r-off), min(lead, r-off)} {
+		if k > len(num)-len(safe) && k < len(num) && (len(cands) == 0 || len(cands[len(cands)-1]) != len(num)-k) {
+			cands = append(cands, num[k:])
+		}
+	}
+	return append(cands, safe)
+}
+
 func (c rowRealizationConverter) fillStaticRows() {
+	clear(c.trims)
 	for i := 0; i < c.p; i++ {
 		c.tf.Den[i] = []float64{1}
 		c.tf.Num[i] = make([][]float64, c.m)
@@ -644,6 +875,7 @@ func (c rowRealizationConverter) fillStaticRows() {
 }
 
 func (c rowRealizationConverter) result(order int) *TransferFuncResult {
+	c.trimRows()
 	c.tf.InputName = copyStringSlice(c.sys.InputName)
 	c.tf.OutputName = copyStringSlice(c.sys.OutputName)
 	return &TransferFuncResult{TF: c.tf, MinimalOrder: order, RowDegrees: c.rows}

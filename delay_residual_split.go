@@ -9,7 +9,8 @@ import (
 
 // residualDelaySplit realizes a system whose total IO delay has no
 // input+output decomposition as a column sum or row stack of copies whose
-// delay sub-blocks decompose exactly.
+// delay sub-blocks decompose exactly. Each copy holds its own states and
+// internal delays, since every group's response is delayed differently.
 type residualDelaySplit struct {
 	byRow  bool
 	n      int
@@ -23,13 +24,14 @@ type residualDelayGroup struct {
 }
 
 // newResidualDelaySplit groups inputs (or outputs, when that needs fewer
-// added states) whose total-delay columns (rows) differ by a constant.
+// added states) whose total-delay columns (rows) differ by a constant. Every
+// piece copies the internal delays, so a tie goes to fewer pieces.
 func newResidualDelaySplit(sys *System) residualDelaySplit {
 	n, _, _ := sys.Dims()
 	total := newDelayTopology(sys).totalExternal(true)
 	cols, colCost := residualDelayGroups(total, false, n)
 	rows, rowCost := residualDelayGroups(total, true, n)
-	if rowCost < colCost {
+	if rowCost < colCost || rowCost == colCost && sys.internalDelayCount() > 0 && len(rows) < len(cols) {
 		return residualDelaySplit{byRow: true, n: n, groups: rows}
 	}
 	return residualDelaySplit{n: n, groups: cols}

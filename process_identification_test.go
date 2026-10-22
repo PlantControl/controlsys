@@ -410,3 +410,108 @@ func TestProcessFitErrorsAndUndefinedDiagnostics(t *testing.T) {
 		t.Fatalf("JSON round trip lost diagnostics: %+v", back)
 	}
 }
+
+func processScaled(p ProcessParameters, sc float64) ProcessParameters {
+	p.TimeConstants = append([]float64(nil), p.TimeConstants...)
+	for i := range p.TimeConstants {
+		p.TimeConstants[i] *= sc
+	}
+	p.NaturalFrequency /= sc
+	p.ZeroTime *= sc
+	p.Delay *= sc
+	return p
+}
+
+var processScaleCases = []struct {
+	name string
+	s    ProcessStructure
+	p    ProcessParameters
+}{
+	{"two-real", ProcessStructure{Poles: 2}, ProcessParameters{Gain: 1, TimeConstants: []float64{2.7, 37}}},
+	{"three-real-zero-delay", ProcessStructure{Poles: 3, Zero: true, Delay: true}, ProcessParameters{Gain: -2, TimeConstants: []float64{1.3, 4.1, 23}, ZeroTime: 3.2, Delay: 1.9}},
+	{"pair-real", ProcessStructure{Poles: 3, UnderdampedPair: true}, ProcessParameters{Gain: 3, TimeConstants: []float64{8}, NaturalFrequency: .6, Damping: .3}},
+	{"integrator-pair", ProcessStructure{Poles: 2, UnderdampedPair: true, Integrator: true}, ProcessParameters{Gain: .4, NaturalFrequency: .2, Damping: .5}},
+	{"integrator-real-zero", ProcessStructure{Poles: 1, Integrator: true, Zero: true}, ProcessParameters{Gain: 1.5, TimeConstants: []float64{5}, ZeroTime: -2}},
+}
+
+// Joint scaling of every time quantity by sc must leave the sampled model
+// unchanged; reference is the modal ZOH oracle of procest_fuzz_test.go.
+func TestProcessEvaluateTimeScaleInvariant(t *testing.T) {
+	u := processOracleInput(300)
+	clear(u[:10])
+	for _, tc := range processScaleCases {
+		for _, sc := range []float64{1e-12, 1e-9, 1e-6, 1e-3, 1, 1e3, 1e6, 1e9, 1e13} {
+			p := processScaled(tc.p, sc)
+			dt := .7 * sc
+			lambda, res, d := fzProcModal(tc.s, p)
+			y, scale := fzProcSimulate(lambda, res, d, p.Delay, dt, u)
+			ymax := 0.0
+			for _, v := range y {
+				ymax = math.Max(ymax, math.Abs(v))
+			}
+			tol := 1e-9 * math.Max(1, scale/ymax)
+			data := ProcessFitData{Input: u, Output: y, SampleTime: dt, TrainingSamples: 200}
+			for _, initial := range []bool{false, true} {
+				options := ProcessFitOptions{Structure: tc.s, EstimateInitialState: initial, EstimateOffset: initial && !tc.s.Integrator}
+				r, err := EvaluateProcess(context.Background(), data, options, p)
+				if err != nil {
+					t.Errorf("%s sc %g initial %v: %v", tc.name, sc, initial, err)
+					continue
+				}
+				if !(r.TrainingNRMSE <= tol) || !(r.ValidationNRMSE <= tol) {
+					t.Errorf("%s sc %g initial %v: NRMSE train %g validation %g > %g", tc.name, sc, initial, r.TrainingNRMSE, r.ValidationNRMSE, tol)
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkEvaluateProcess(b *testing.B) {
+	tc := processScaleCases[1]
+	u := processOracleInput(300)
+	lambda, res, d := fzProcModal(tc.s, tc.p)
+	y, _ := fzProcSimulate(lambda, res, d, tc.p.Delay, .7, u)
+	data := ProcessFitData{Input: u, Output: y, SampleTime: .7, TrainingSamples: 200}
+	options := ProcessFitOptions{Structure: tc.s, EstimateInitialState: true, EstimateOffset: true}
+	for b.Loop() {
+		if _, err := EvaluateProcess(context.Background(), data, options, tc.p); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestProcessFitTimeScaleInvariant(t *testing.T) {
+	u := processOracleInput(300)
+	close := func(a, b float64) bool { return math.Abs(a-b) <= 1e-4*math.Max(math.Abs(a), math.Abs(b)) }
+	for _, tc := range processScaleCases {
+		var reference *ProcessFitResult
+		for _, sc := range []float64{1, 1e-9, 1e-4, 1e5, 1e12} {
+			p := processScaled(tc.p, sc)
+			dt := .7 * sc
+			lambda, res, d := fzProcModal(tc.s, p)
+			y, _ := fzProcSimulate(lambda, res, d, p.Delay, dt, u)
+			data := ProcessFitData{Input: u, Output: y, SampleTime: dt, TrainingSamples: 200}
+			start := processScaled(tc.p, 1.1*sc)
+			start.NaturalFrequency = p.NaturalFrequency / 1.1
+			fit, err := FitProcess(context.Background(), data, ProcessFitOptions{Structure: tc.s, Initial: &start, Starts: 1, MaxEvaluations: 400})
+			if err != nil {
+				t.Fatalf("%s sc %g: %v", tc.name, sc, err)
+			}
+			if !(fit.TrainingNRMSE < 1e-2) {
+				t.Errorf("%s sc %g: training NRMSE %g", tc.name, sc, fit.TrainingNRMSE)
+			}
+			if reference == nil {
+				reference = fit
+				continue
+			}
+			got, want := processScaled(fit.Parameters, 1/sc), reference.Parameters
+			ok := close(got.Gain, want.Gain) && close(got.NaturalFrequency, want.NaturalFrequency) && close(got.Damping, want.Damping) && close(got.ZeroTime, want.ZeroTime) && close(got.Delay, want.Delay)
+			for i := range want.TimeConstants {
+				ok = ok && close(got.TimeConstants[i], want.TimeConstants[i])
+			}
+			if !ok {
+				t.Errorf("%s sc %g: unscaled fit %+v NRMSE %g, sc 1 fit %+v NRMSE %g", tc.name, sc, got, fit.TrainingNRMSE, want, reference.TrainingNRMSE)
+			}
+		}
+	}
+}

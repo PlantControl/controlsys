@@ -113,13 +113,6 @@ func fzIOBuild(t *testing.T, s *fzSpec) *fzIOCase {
 	for _, v := range mk {
 		cs.markov = append(cs.markov, v[0])
 	}
-	unit := 0.0
-	for _, v := range cs.markov {
-		unit = math.Max(unit, math.Abs(v))
-	}
-	if cs.estimate && cs.delay > 0 && (unit > 1e3 || unit < 1e-3) {
-		fzSkip(t, "known defect: estimated history with input delay depends on the output/input unit ratio")
-	}
 	sv := fzEraHankelSV(mk, n+1, 1, 1)
 	if sv == nil || sv[0] == 0 {
 		fzSkip(t, "zero SISO channel")
@@ -135,13 +128,6 @@ func fzIOBuild(t *testing.T, s *fzSpec) *fzIOCase {
 		}
 	}
 	cs.rho = rho
-	prod := 1.0
-	for _, e := range s.Eig {
-		prod *= cmplx.Abs(e)
-	}
-	if cs.estimate && math.Pow(prod, float64(n)) < 1e-3 {
-		fzSkip(t, "known defect: estimated output history ill-conditioned for small |a_n| = Π|z|")
-	}
 	dyn, minz := 0.0, math.Inf(1)
 	for _, v := range cs.markov[1:] {
 		dyn += math.Abs(v)
@@ -167,8 +153,7 @@ func fzIOBuild(t *testing.T, s *fzSpec) *fzIOCase {
 // regressions); its System matches the true Markov parameters and is
 // stable when every pole has |z| < 1−1e-4; an order scan 1..n+1 selects
 // the lowest order within max(1.01·best, 1e-8), at most n. Documented
-// excitation/instability errors skip only on ill-posed data; known defects
-// of the estimated output-history parameterization are counted skips.
+// excitation/instability errors skip only on ill-posed data.
 func FuzzIdentIOStateSpace(f *testing.F) {
 	for _, s := range fzIOSeeds() {
 		fzAddSeed(f, s)
