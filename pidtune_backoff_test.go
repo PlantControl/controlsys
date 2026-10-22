@@ -243,7 +243,9 @@ func TestPidtuneAutoCrossoverBacksOffToStable(t *testing.T) {
 // Q7GUKL: a discrete PD with a forward-Euler derivative and Tf = Td/10 < Dt
 // has the filter pole 1−Dt/Tf outside the unit circle. Pidtune then uses the
 // backward-Euler derivative, pole Tf/(Tf+Dt), and keeps forward Euler when
-// Tf > Dt/2.
+// Tf > Dt/2. Since G6APMO Pidtune first returns MATLAB's ideal PD, Tf = 0
+// with the backward-Euler derivative, here; the filtered designs, its
+// fallback, are checked directly.
 // Oracle: roots of den·z^d·denC + num·numC in z with
 // C = Kp + Kd(z−1)/((Tf+Dt)z − Tf).
 func TestPidtuneDiscretePDStableFilter(t *testing.T) {
@@ -264,24 +266,20 @@ func TestPidtuneDiscretePDStableFilter(t *testing.T) {
 			t.Errorf("%s: %v", c.name, err)
 			continue
 		}
-		if pid.DFormula != BackwardEuler || pid.Tf <= 0 || pid.Kd <= 0 {
-			t.Errorf("%s: %+v, want backward-Euler filtered PD", c.name, pid)
+		if pid.DFormula != BackwardEuler || pid.Tf != 0 || pid.Kd <= 0 {
+			t.Errorf("%s: %+v, want backward-Euler ideal PD", c.name, pid)
 		}
-		a := pid.Tf + dt
-		numC := Poly{pid.Kp*a + pid.Kd, -pid.Kp*pid.Tf - pid.Kd}
-		denC := Poly{a, -pid.Tf}
-		den := append(Poly{}, c.den...)
-		for range c.delay {
-			den = append(den, 0)
-		}
-		roots, err := den.Mul(denC).Add(c.num.Mul(numC)).Roots()
+		pidtuneDiscretePDRootsStable(t, c.name, pid, c.num, c.den, c.delay)
+		wc, err := findCrossoverFreq(p, 0, 60)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, r := range roots {
-			if cmplx.Abs(r) >= 1-1e-9 {
-				t.Errorf("%s: %+v closed-loop root %v", c.name, pid, r)
-			}
+		pid, err = pidtuneGains(p, nil, PidtunePD, wc, 60, 1, true, false, pidtunePDPlaced, pidtunePIDFIterate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pid.DFormula != BackwardEuler || pid.Tf <= 0 || pid.Tf > dt/2 || pid.Kd <= 0 {
+			t.Errorf("%s: filtered %+v, want backward-Euler filtered PD", c.name, pid)
 		}
 	}
 	p := pidtuneBackoffPlant(t, Poly{0.001}, Poly{1, -2.94, 2.8812, -0.941192}, 0.02, 0)
@@ -289,8 +287,36 @@ func TestPidtuneDiscretePDStableFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if pid.DFormula != BackwardEuler || pid.Tf != 0 {
+		t.Fatalf("%+v: want backward-Euler ideal PD", pid)
+	}
+	pidtuneDiscretePDRootsStable(t, "explicit wc", pid, Poly{0.001}, Poly{1, -2.94, 2.8812, -0.941192}, 0)
+	pid, err = pidtuneGains(p, nil, PidtunePD, 1, 60, 1, true, false, pidtunePDPlaced, pidtunePIDFIterate)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if pid.DFormula != ForwardEuler || pid.Tf <= 0.01 {
 		t.Fatalf("%+v: forward-Euler filter pole 1−Dt/Tf is stable, want it kept", pid)
+	}
+}
+
+func pidtuneDiscretePDRootsStable(t *testing.T, name string, pid *PID, num, den Poly, delay int) {
+	t.Helper()
+	a := pid.Tf + pid.Dt
+	numC := Poly{pid.Kp*a + pid.Kd, -pid.Kp*pid.Tf - pid.Kd}
+	denC := Poly{a, -pid.Tf}
+	den = append(Poly{}, den...)
+	for range delay {
+		den = append(den, 0)
+	}
+	roots, err := den.Mul(denC).Add(num.Mul(numC)).Roots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range roots {
+		if cmplx.Abs(r) >= 1-1e-9 {
+			t.Errorf("%s: %+v closed-loop root %v", name, pid, r)
+		}
 	}
 }
 
@@ -707,7 +733,9 @@ func TestPidtuneGateGridExact(t *testing.T) {
 
 // G = (0.1z+0.05)/((z−1)(z−0.999)²), Dt = 0.1: the double pole at ≈0.01 rad/s
 // lags P/PI/PD past −180° at every crossover within three decades of the
-// automatic 5.3 rad/s. Oracles: closed-loop roots of the polynomial loop,
+// automatic 5.3 rad/s. MATLAB's ideal PD (G6APMO), whose lead nears 90°,
+// crosses over just above the double pole, below 0.03 rad/s. Oracles:
+// closed-loop roots of the polynomial loop,
 // and the phase margin and peak |S| of L(e^{jωDt}) from the raw polynomials
 // on a dense grid.
 func TestPidtuneSlowPoleBackoff(t *testing.T) {
@@ -759,8 +787,12 @@ func TestPidtuneSlowPoleBackoff(t *testing.T) {
 				}
 				prev = m
 			}
-			if len(crosses) == 0 || crosses[0] < 1e-3 || crosses[0] > 1e-2 {
-				t.Errorf("%s: %+v gain crossovers %v, want first in [1e-3, 1e-2]", f, c.pid, crosses)
+			hi := 1e-2
+			if f == PidtunePD {
+				hi = 3e-2
+			}
+			if len(crosses) == 0 || crosses[0] < 1e-3 || crosses[0] > hi {
+				t.Errorf("%s: %+v gain crossovers %v, want first in [1e-3, %g]", f, c.pid, crosses, hi)
 			}
 			if ms > pidTuningMaxSensitivity*1.01 {
 				t.Errorf("%s: %+v peak |S| %.3g", f, c.pid, ms)

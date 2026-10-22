@@ -216,8 +216,10 @@ func TestPidtune_PD(t *testing.T) {
 	if pid.Ki != 0 {
 		t.Fatalf("PD type should have Ki=0, got %g", pid.Ki)
 	}
-	cl := pidClosedLoop(t, plant, pid)
-	assertStable(t, cl, "PD")
+	if pid.Tf != 0 || pid.Kd <= 0 {
+		t.Fatalf("PD %+v, want MATLAB's ideal Kp + Kd·s", pid)
+	}
+	pidtuneCheckRobust(t, "PD", pid, Poly{1}, Poly{1, 2, 1}, 0, pidTuningMaxSensitivity)
 }
 
 func TestPidtune_PIDF(t *testing.T) {

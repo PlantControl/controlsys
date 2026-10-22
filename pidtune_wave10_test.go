@@ -172,13 +172,15 @@ func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
 // PM 6.4° with |S| 28 (PD). An explicit wc stays ungated (V7UW3M): |S| 24
 // for the second PD; the first one's explicit-wc PD, placed at |L(wc)| = 1
 // since E4I7RE, is unstable for every Td/10 filtered PD of either sign
-// (oracle sweep), so it errors. Oracle: closed-loop roots, classical margin
-// at every crossover and |S|.
+// (oracle sweep), so it errored; MATLAB's ideal PD there (G6APMO) is stable,
+// its fast pole near −2033 as Kd·N lead ≈ −0.996 nearly cancels the leading
+// coefficient (|S| ≈ 230, ungated). Oracle: closed-loop roots, classical
+// margin at every crossover and |S|.
 func TestPidtuneAutoFirstDesignGated(t *testing.T) {
 	for _, c := range []struct {
 		f        PidtuneType
 		num, den Poly
-		unstable bool
+		ideal    bool
 	}{
 		{PidtuneI, Poly{0.8296, 0.008296}, Poly{1, 0.999, 0.1257}, false},
 		{PidtunePD, Poly{0.9259305881240456, -0.25001768378306766, -14.09549687784304, -4.875339983688054}, Poly{1, 10.913817523403575, 51.69190733555752, 143.2440252325901, 183.43503385908775}, true},
@@ -197,9 +199,11 @@ func TestPidtuneAutoFirstDesignGated(t *testing.T) {
 			t.Fatal(err)
 		}
 		first, err := Pidtune(p, c.f, wc, nil)
-		if c.unstable {
-			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
-				t.Errorf("%s at explicit wc=%g: %+v, %v; want ErrPIDTuningTargetUnattainable", name, wc, first, err)
+		if c.ideal {
+			if err != nil || first.Tf != 0 {
+				t.Errorf("%s at explicit wc=%g: %+v, %v; want the ideal PD", name, wc, first, err)
+			} else if stable, ok := pidtuneOracleStable(t, first, c.num, c.den, 0, 0); !ok || !stable {
+				t.Errorf("%s at explicit wc=%g: %+v unstable", name, wc, first)
 			}
 			continue
 		}
@@ -662,8 +666,8 @@ func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
 // wc 0.526, with phase margin 90°. Rejecting every back-off design crossing
 // over above the first wc's band (4G4ABV, reverted) made both error; they
 // return the base designs. Oracle: closed-loop roots, margins at every
-// crossover over [1e-6, 1e6] and |S|. The PD is the placed design (PBXZCH),
-// an earlier back-off step under the 58.5° acceptance floor (OQWQKF).
+// crossover over [1e-6, 1e6] and |S|. The PD is MATLAB's ideal Kp + Kd·s
+// (G6APMO), whose level Kd·CB ≈ 0.09 at high ω leaves no high crossover.
 func TestPidtuneZeroDCBackoffCrossesAboveBand(t *testing.T) {
 	num := Poly{-0.5711694594945204, -0.12792302726028815, -0.07166383720659307, 0}
 	den := Poly{1, 6.286397495546808, 16.55207466253316, 23.123442417235935, 12.100970259959752}
@@ -671,17 +675,17 @@ func TestPidtuneZeroDCBackoffCrossesAboveBand(t *testing.T) {
 	for _, c := range []struct {
 		f      PidtuneType
 		kp, kd float64
-	}{{PidtuneP, -975.13, 0}, {PidtunePD, -111.33, -10626}} {
+	}{{PidtuneP, -975.13, 0}, {PidtunePD, -7.6715, -0.16342}} {
 		pid, err := Pidtune(p, c.f, 0, nil)
 		if err != nil {
 			t.Errorf("%s: %v", c.f, err)
 			continue
 		}
-		if math.Abs(pid.Kp/c.kp-1) > 1e-3 || c.kd != 0 && math.Abs(pid.Kd/c.kd-1) > 1e-3 {
+		if math.Abs(pid.Kp/c.kp-1) > 1e-3 || c.kd != 0 && math.Abs(pid.Kd/c.kd-1) > 1e-3 || pid.Tf != 0 {
 			t.Errorf("%s: %+v; want Kp %g, Kd %g", c.f, pid, c.kp, c.kd)
 		}
 		pidtuneCheckRobust(t, string(c.f), pid, num, den, 0, 4.5)
-		if top := pidtuneOracleTopCrossing(pid, num, den); !(top > 300) {
+		if top := pidtuneOracleTopCrossing(pid, num, den); c.f == PidtuneP && !(top > 300) {
 			t.Errorf("%s: %+v crosses over up to %g; want the high crossover", c.f, pid, top)
 		}
 	}
