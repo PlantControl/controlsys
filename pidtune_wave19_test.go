@@ -1,9 +1,12 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // G6APMO: an explicit-wc PD tries MATLAB's ideal Kp + Kd·s first. On
@@ -35,6 +38,53 @@ func TestPidtuneExplicitWcIdealPD(t *testing.T) {
 		}
 		if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, 0); !ok || !stable {
 			t.Errorf("opts %+v: %+v unstable", opts, pid)
+		}
+	}
+}
+
+// 6RPB54: on G = C(sI−A)⁻¹B·e^{−0.00316s} with an undamped pair at
+// 2.15e-7 rad/s and a zero at +5.0e-8 (N(s) = 0.831s − 4.16e-8), the forced
+// sign is −1 and its PI fails; the mirrored PI (Kp 0.867, Ki 0.414) passed
+// the Nyquist test, which missed the closed-loop root near +5e-8 seven
+// decades below wc 0.83. Pidtune now returns a stable design or
+// ErrPIDTuningTargetUnattainable for every family. Oracle: the real-axis
+// characteristic P(s) = s·D(s) + (Kp·s + Ki)·N(s)·e^{−sτ} of the old PI
+// changes sign on [0, 1] (a real RHP root), and no returned design with
+// integral action does.
+func TestPidtuneMirroredForcedSignSlowZero(t *testing.T) {
+	a := []float64{-8.589e-24, 2.1544346900318827e-07, -2.1544346900318824e-07, -2.903e-23}
+	b := []float64{-0.9667981925794609, -0.01238866346289056}
+	c := []float64{-0.8568887533689471, -0.21079579943077972}
+	const tau = 0.0031622776601683785
+	p, err := New(mat.NewDense(2, 2, a), mat.NewDense(2, 1, b), mat.NewDense(1, 2, c), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetInputDelay([]float64{tau}); err != nil {
+		t.Fatal(err)
+	}
+	den := Poly{1, -(a[0] + a[3]), a[0]*a[3] - a[1]*a[2]}
+	num := Poly{c[0]*b[0] + c[1]*b[1], c[0]*(a[1]*b[1]-a[3]*b[0]) + c[1]*(a[2]*b[0]-a[0]*b[1])}
+	char := func(kp, ki, s float64) float64 {
+		x := complex(s, 0)
+		return s*real(den.Eval(x)) + (kp*s+ki)*real(num.Eval(x))*math.Exp(-s*tau)
+	}
+	if char(0.8673363870904787, 0.41363219216174363, 0)*char(0.8673363870904787, 0.41363219216174363, 1) >= 0 {
+		t.Fatal("oracle: the old PI has no real RHP root")
+	}
+	for _, f := range pidtuneAllTypes {
+		pid, err := Pidtune(p, f, 0, nil)
+		if err != nil {
+			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s: %v", f, err)
+			}
+			continue
+		}
+		if pid.Ki != 0 && char(pid.Kp, pid.Ki, 0)*char(pid.Kp, pid.Ki, 1) < 0 {
+			t.Errorf("%s: %+v has a real RHP closed-loop root", f, pid)
+		}
+		if stable, ok := pidtuneOracleStable(t, pid, num, den, 0, tau); ok && !stable {
+			t.Errorf("%s: %+v unstable", f, pid)
 		}
 	}
 }

@@ -66,7 +66,10 @@ const (
 // (see pidtuneGainSign), so Pidtune(−G) mirrors Pidtune(G); where the force
 // lapses or there is none, as for an ideal derivative large enough to flip
 // the closed-loop polynomial's leading coefficient or a stable plant with
-// zero DC gain, the other sign is tried when the first one fails. A
+// zero DC gain, the other sign is tried when the first one fails; one
+// against a force that holds there, 1 + L(∞) > 0 on a strictly proper
+// plant, is rejected as unstable (a real closed-loop root in [0, ∞), z ≥ 1,
+// which a Nyquist test can miss far below wc). A
 // design whose closed loop is unstable by its poles (delay absorbed for
 // discrete plants) or by a Nyquist test (continuous delays) is rejected;
 // loops outside both tests are not screened. With wc = 0 a design must
@@ -442,12 +445,40 @@ func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (pid *PID,
 	lag = errors.Is(err, errPidtunePDFLag)
 	if r.mirror && errors.Is(err, ErrPIDTuningTargetUnattainable) && r.screened(wc) {
 		alt, altErr := r.signed(wc, -sign, gated, lagFloor)
+		if altErr == nil && r.mirrorUnstable(alt) {
+			altErr = &pidtuneUnstableError{pidType: r.pidType, wc: wc}
+		}
 		if altErr == nil {
 			return alt, false, nil
 		}
 		lag = lag || r.rule == pidtuneSignStable && errors.Is(altErr, errPidtunePDFLag)
 	}
 	return pid, lag, err
+}
+
+// mirrorUnstable returns whether pid, designed against a forced sign, is
+// certainly unstable. On a strictly proper plant without internal delays
+// the closed-loop characteristic P keeps the sign of a as s → +∞ (z → +∞)
+// when 1 + L(∞) > 0: always under a delay e^{−sτ}, a discrete loop or a
+// filtered derivative, and for a continuous delay-free ideal derivative when
+// 1 + Kd·CB > 0. K·N(0)/a < 0 leaves P(0) the other sign, so P has a real
+// root in [0, ∞) (z ≥ 1), delays e^{−sτ}, z^{−k} positive there; the Nyquist
+// test can miss one far below wc, as at a slow plant zero 5e-8 under a PI
+// crossing at 0.83.
+func (r *pidtuneRun) mirrorUnstable(pid *PID) bool {
+	p := r.plant
+	if r.rule != pidtuneSignForced || p.E != nil || p.HasInternalDelay() || p.D.At(0, 0) != 0 {
+		return false
+	}
+	if pid.Kd == 0 || pid.Tf > 0 || p.Dt > 0 || p.HasDelay() {
+		return true
+	}
+	n, _ := p.A.Dims()
+	cb := 0.0
+	for i := range n {
+		cb += p.C.At(0, i) * p.B.At(i, 0)
+	}
+	return 1+pid.Kd*cb > 0
 }
 
 // screened returns whether checkPidtuneStability tests designs at wc: an
