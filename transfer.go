@@ -260,11 +260,23 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !c.hasZeroDiagonal() && slices.Min(c.rows) == c.n {
+	zero, tiny := c.diagonalZeros()
+	full := slices.Min(c.rows) == c.n
+	if !zero && !tiny && full {
 		return c.result(order), nil
 	}
 	check := newTFCheck(c.sys, c.n, c.m, c.p)
 	gate := 1e3 * float64(c.n) * eps()
+	// With only rotation noise on the diagonal Dgebal's grading costs
+	// digits (P6VF2M: a lost zero), but Osborne's often costs more in the
+	// low den coefficients the check points above the poles miss, so then
+	// only a gross Dgebal miss switches, and only to an Osborne result
+	// within 1e-10 of the response at those points: the right ones of a
+	// near-double integrator reach 2e-11, those with a wrong DC den 1e-9.
+	coarse := !zero && full
+	if coarse {
+		gate = 1e-6
+	}
 	e0, ok := check.relErr(c.tf)
 	if !ok || e0 <= gate {
 		return c.result(order), nil
@@ -278,12 +290,24 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	// exceed the error of one that lost states, which barely shows there
 	// (WGMRIE; U3H63X: an exact Dgebal slow companion against an Osborne
 	// one missing a state), so only the trimmed results are compared.
+	// Once trimmed, a Dgebal result within 1e3·n·eps can still carry
+	// 1e4·eps den errors on a graded zero-diagonal chain (P6VF2M), so then
+	// the trimmed errors are compared outright, by a 4× margin against ties.
 	c.trimRows()
 	alt.trimRows()
-	if e0, _ = check.relErr(c.tf); e0 > gate {
-		if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
-			return alt.result(altOrder), nil
-		}
+	e0, _ = check.relErr(c.tf)
+	e1, ok := check.relErr(alt.tf)
+	switch {
+	case !ok:
+	case coarse:
+		ok = e0 > gate && e1 < e0 && e1 <= 1e-10
+	case e0 > gate:
+		ok = e1 < e0
+	default:
+		ok = 4*e1 < e0
+	}
+	if ok {
+		return alt.result(altOrder), nil
 	}
 	return c.result(order), nil
 }
@@ -443,14 +467,18 @@ func (c rowRealizationConverter) convertFrom(osborne bool) (int, error) {
 	return order, nil
 }
 
-func (c rowRealizationConverter) hasZeroDiagonal() bool {
+// diagonalZeros reports whether A has an exactly zero diagonal entry, and
+// whether it has one within n·eps·‖A‖_F, the rounding a rotation leaves on
+// the diagonal of a zero-diagonal chain, which Dgebal grades like a zero.
+func (c rowRealizationConverter) diagonalZeros() (zero, tiny bool) {
 	raw := c.sys.A.RawMatrix()
+	tol := float64(c.n) * eps() * frobNorm(c.sys.A)
 	for i := range c.n {
-		if raw.Data[i*raw.Stride+i] == 0 {
-			return true
-		}
+		v := math.Abs(raw.Data[i*raw.Stride+i])
+		zero = zero || v == 0
+		tiny = tiny || v <= tol
 	}
-	return false
+	return zero, tiny
 }
 
 // tfCheck holds reference responses of the state-space model at a few
