@@ -88,3 +88,35 @@ func TestPidtuneMirroredForcedSignSlowZero(t *testing.T) {
 		}
 	}
 }
+
+// 6RPB54: mirrorUnstable certifies instability by the sign of P(0)/a with
+// D(0) as computed. On the delay-free plant of
+// TestPidtuneMirroredForcedSignSlowZero, D(0) = 4.64e-14 is below the forced
+// sign's rounding test at wc 0.83, so P is forced to −1, yet Kp > 0 below
+// 1.1e-6 is stable. Oracle (Routh): s² + 0.831·Kp·s + 4.64e-14 −
+// 4.16e-8·Kp has positive coefficients iff 0 < Kp < 1.116e-6.
+func TestPidtuneMirrorUnstableComputedOrigin(t *testing.T) {
+	a := []float64{-8.589e-24, 2.1544346900318827e-07, -2.1544346900318824e-07, -2.903e-23}
+	b := []float64{-0.9667981925794609, -0.01238866346289056}
+	c := []float64{-0.8568887533689471, -0.21079579943077972}
+	p, err := New(mat.NewDense(2, 2, a), mat.NewDense(2, 1, b), mat.NewDense(1, 2, c), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sign, rule := pidtuneForcedSign(p, 0.83, false)
+	if sign != -1 || rule != pidtuneSignForced {
+		t.Fatalf("forced sign %v rule %v, want −1 forced", sign, rule)
+	}
+	den0 := a[0]*a[3] - a[1]*a[2]
+	n0 := c[0]*(a[1]*b[1]-a[3]*b[0]) + c[1]*(a[2]*b[0]-a[0]*b[1])
+	r := &pidtuneRun{plant: p, rule: rule}
+	for _, kp := range []float64{1e-7, 3.9e-7, 1e-6, 1.2e-6, 1e-3, 1} {
+		stable := den0+kp*n0 > 0
+		if got := r.mirrorUnstable(&PID{Kp: kp}); got == stable {
+			t.Errorf("Kp %g: mirrorUnstable %v, oracle stable %v", kp, got, stable)
+		}
+	}
+	if !r.mirrorUnstable(&PID{Kp: 0.8673363870904787, Ki: 0.41363219216174363}) {
+		t.Error("PI of 6RPB54 not certified unstable")
+	}
+}

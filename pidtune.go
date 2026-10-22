@@ -461,24 +461,53 @@ func (r *pidtuneRun) mirrored(wc, sign float64, gated, lagFloor bool) (pid *PID,
 // the closed-loop characteristic P keeps the sign of a as s → +∞ (z → +∞)
 // when 1 + L(∞) > 0: always under a delay e^{−sτ}, a discrete loop or a
 // filtered derivative, and for a continuous delay-free ideal derivative when
-// 1 + Kd·CB > 0. K·N(0)/a < 0 leaves P(0) the other sign, so P has a real
-// root in [0, ∞) (z ≥ 1), delays e^{−sτ}, z^{−k} positive there; the Nyquist
-// test can miss one far below wc, as at a slow plant zero 5e-8 under a PI
-// crossing at 0.83.
+// 1 + Kd·CB > 0. When P(0)/a < 0 (Ki·N(0)/a, else (D(0) + Kp·N(0))/a, up
+// to a positive factor; z = 1 likewise), P has a real root in [0, ∞)
+// (z ≥ 1), delays e^{−sτ}, z^{−k} positive there; the Nyquist test can miss
+// one far below wc, as at a slow plant zero 5e-8 under a PI crossing at
+// 0.83. D(0) is used as computed, not as the forced sign's rounding test
+// saw it: Kp > 0 stabilizes G = (0.83s − 4.2e-8)/(s² + 4.6e-14) below
+// 1.1e-6, where Kp·N(0) cannot outweigh D(0).
 func (r *pidtuneRun) mirrorUnstable(pid *PID) bool {
 	p := r.plant
 	if r.rule != pidtuneSignForced || p.E != nil || p.HasInternalDelay() || p.D.At(0, 0) != 0 {
 		return false
 	}
-	if pid.Kd == 0 || pid.Tf > 0 || p.Dt > 0 || p.HasDelay() {
-		return true
+	if pid.Kd != 0 && pid.Tf == 0 && p.Dt == 0 && !p.HasDelay() {
+		n, _ := p.A.Dims()
+		cb := 0.0
+		for i := range n {
+			cb += p.C.At(0, i) * p.B.At(i, 0)
+		}
+		if !(1+pid.Kd*cb > 0) {
+			return false
+		}
 	}
-	n, _ := p.A.Dims()
-	cb := 0.0
-	for i := range n {
-		cb += p.C.At(0, i) * p.B.At(i, 0)
+	res, err := p.rationalTransferFunction(nil)
+	if err != nil {
+		return false
 	}
-	return 1+pid.Kd*cb > 0
+	num, den := res.TF.Num[0][0], res.TF.Den[0]
+	if len(num) == 0 || len(den) == 0 || den[0] == 0 {
+		return false
+	}
+	origin := func(q []float64) float64 {
+		if p.Dt == 0 {
+			return q[len(q)-1]
+		}
+		v := 0.0
+		for _, c := range q {
+			v += c
+		}
+		return v
+	}
+	n0, d0 := origin(num), origin(den)
+	p0, scale := pid.Ki*n0, math.Abs(pid.Ki*n0)
+	if pid.Ki == 0 {
+		p0, scale = d0+pid.Kp*n0, math.Abs(d0)+math.Abs(pid.Kp*n0)
+	}
+	p0 *= math.Copysign(1, den[0])
+	return finitePID(p0) && -p0 > 1e3*0x1p-52*scale
 }
 
 // screened returns whether checkPidtuneStability tests designs at wc: an
