@@ -69,11 +69,12 @@ var careVerifyCases = []careVerifyCase{
 // must return it with Accuracy 1 (MATLAB icare Report 1), with the bound
 // on its error per NoScaling mode. On 376552c they returned
 // ErrNoStabilizing (PHWRNR): ch360 default has error 8.6e-12, NoScaling
-// 2.2e-9; weakBStall's pencil X is off by about 2e-2 (‖X‖ = 2.4e16), so
-// only Accuracy 1, never 0, is required of it.
+// 2.2e-9, now replaced by the default X of smaller first step (MQM2E7);
+// weakBStall's pencil X is off by about 2e-2 (‖X‖ = 2.4e16), so only
+// Accuracy 1, never 0, is required of it.
 var careVerifyPoor = map[string][2]float64{
 	"weakBStall": {1, 1},
-	"ch360":      {1e-9, 1e-7},
+	"ch360":      {1e-9, 1e-9},
 }
 
 func (tc careVerifyCase) dense() (A, B, Q, R, S *mat.Dense) {

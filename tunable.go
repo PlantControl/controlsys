@@ -311,7 +311,9 @@ func (b *TunablePID) check(op string) error {
 // Name returns the block name.
 func (b *TunablePID) Name() string { return b.name }
 
-// CurrentSystem returns the PID controller at the current parameter values.
+// CurrentSystem returns the PID controller at the current parameter values;
+// unlike PID.System, a continuous ideal derivative (Kd ≠ 0, Tf = 0) returns
+// ErrImproperModel, since tuning needs an explicit realization.
 func (b *TunablePID) CurrentSystem() (*System, error) {
 	const op = "TunablePID.CurrentSystem"
 	v, err := tunableScalarValues(b.Kp, b.Ki, b.Kd, b.Tf)
@@ -319,7 +321,7 @@ func (b *TunablePID) CurrentSystem() (*System, error) {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	pid := &PID{Kp: v[0], Ki: v[1], Kd: v[2], Tf: v[3], Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}
-	sys, err := pid.System()
+	sys, err := pid.explicitSystem()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
@@ -432,7 +434,8 @@ func (b *TunablePID2) check(op string) error {
 func (b *TunablePID2) Name() string { return b.name }
 
 // CurrentSystem returns the 2-input (r, y), 1-output controller at the
-// current parameter values.
+// current parameter values; a continuous ideal derivative returns
+// ErrImproperModel as for TunablePID.
 func (b *TunablePID2) CurrentSystem() (*System, error) {
 	const op = "TunablePID2.CurrentSystem"
 	v, err := tunableScalarValues(b.Kp, b.Ki, b.Kd, b.Tf, b.B, b.C)
@@ -440,7 +443,7 @@ func (b *TunablePID2) CurrentSystem() (*System, error) {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 	pid := &PID2{Kp: v[0], Ki: v[1], Kd: v[2], Tf: v[3], B: v[4], C: v[5], Dt: b.Dt, IFormula: b.IFormula, DFormula: b.DFormula}
-	sys, err := pid.system()
+	sys, err := pid.explicitSystem()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}

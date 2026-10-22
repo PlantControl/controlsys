@@ -93,22 +93,25 @@ func TestPidtuneExplicitWcFallbacksUngated(t *testing.T) {
 // requested lead, else the lower clamp 0.05 rad, else the most lead of a
 // Td/10 PD (atan(1.1x) − atan(0.1x) at x = wc·Td = 1/√0.11, 56.44°, for a
 // continuous plant). When that design is unstable, the legacy Td with its
-// gain placed is taken (zero-DC s²/(s²+…)). Oracle: closed-loop roots and
+// gain placed is taken (zero-DC s²/(s²+…)). Since G6APMO MATLAB's ideal PD
+// Kp + Kd·s is tried first: its lead, clamped to [0.05, π/2 − 0.05] rad,
+// is Td·wc = tan(lead) (backward-Euler derivative when discrete); the
+// zero-DC plant, whose ideal PD is unstable, keeps the filtered fallback.
+// Oracle: closed-loop roots and
 // L = C·num/den evaluated directly.
 func TestPidtuneExplicitWcPDCrossesAtWc(t *testing.T) {
-	x := 1 / math.Sqrt(0.11)
-	most := math.Atan(1.1*x) - math.Atan(0.1*x)
 	for _, c := range []struct {
 		name     string
 		num, den Poly
 		dt, wc   float64
 		form     PIDFormula
 		lead, td float64
+		ideal    bool
 	}{
-		{"most lead", Poly{3.421208948435586}, Poly{1, 4.795098433458527, 6.9583681203155, 3.1763365569137942}, 0, 5.616593566028197, ForwardEuler, most, x / 5.616593566028197},
-		{"lower clamp", Poly{3.0280957501733172}, Poly{1, 4.64873917554455, 5.398081602694972}, 0, 1.0808388293067428, ForwardEuler, 0.05, 0},
-		{"lower clamp discrete", Poly{0.34196211973925655}, Poly{1, -0.8966232705508059}, 0.11555016600854891, 2.836482715451361, BackwardEuler, 0.05, 0},
-		{"legacy Td", Poly{0.9108330442863755, 0, 0}, Poly{1, 3.6385316848945637, 2.197552090147012}, 0, 0.3823341170934764, ForwardEuler, math.NaN(), 48.62872358299712 / 0.9303964644639571},
+		{"most lead", Poly{3.421208948435586}, Poly{1, 4.795098433458527, 6.9583681203155, 3.1763365569137942}, 0, 5.616593566028197, ForwardEuler, math.Pi/2 - 0.05, math.Tan(math.Pi/2-0.05) / 5.616593566028197, true},
+		{"lower clamp", Poly{3.0280957501733172}, Poly{1, 4.64873917554455, 5.398081602694972}, 0, 1.0808388293067428, ForwardEuler, 0.05, math.Tan(0.05) / 1.0808388293067428, true},
+		{"lower clamp discrete", Poly{0.34196211973925655}, Poly{1, -0.8966232705508059}, 0.11555016600854891, 2.836482715451361, BackwardEuler, 0.05, 0, true},
+		{"legacy Td", Poly{0.9108330442863755, 0, 0}, Poly{1, 3.6385316848945637, 2.197552090147012}, 0, 0.3823341170934764, ForwardEuler, math.NaN(), 48.62872358299712 / 0.9303964644639571, false},
 	} {
 		p := pidtuneBackoffPlant(t, c.num, c.den, c.dt, 0)
 		pid, err := Pidtune(p, PidtunePD, c.wc, nil)
@@ -119,8 +122,12 @@ func TestPidtuneExplicitWcPDCrossesAtWc(t *testing.T) {
 		if stable, ok := pidtuneOracleStable(t, pid, c.num, c.den, c.dt, 0); !ok || !stable {
 			t.Errorf("%s: %+v unstable", c.name, pid)
 		}
-		if pid.DFormula != c.form || math.Abs(pid.Tf-pid.Kd/pid.Kp/10) > 1e-12*pid.Tf {
-			t.Errorf("%s: %+v, want %v and Tf = Td/10", c.name, pid, c.form)
+		tf := pid.Kd / pid.Kp / 10
+		if c.ideal {
+			tf = 0
+		}
+		if pid.DFormula != c.form || math.Abs(pid.Tf-tf) > 1e-12*tf {
+			t.Errorf("%s: %+v, want %v and Tf %g", c.name, pid, c.form, tf)
 		}
 		l := pidtuneOracleLoop(pid, c.num, c.den, c.dt, 0)(c.wc)
 		if math.Abs(cmplx.Abs(l)-1) > 1e-9 {

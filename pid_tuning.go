@@ -440,7 +440,7 @@ func (s *pidStabilityScreen) returnSensitivity(c *PID2) float64 {
 
 func (s *pidStabilityScreen) closedLoopPoles(c *PID2) (bool, error) {
 	controller := &PID{Kp: c.Kp, Ki: c.Ki, Kd: c.Kd, Tf: c.Tf, Dt: c.Dt, IFormula: c.IFormula, DFormula: c.DFormula}
-	cs, err := controller.System()
+	cs, err := controller.explicitSystem()
 	if err != nil {
 		if c.Kd != 0 && c.Tf == 0 {
 			if math.IsInf(s.returnSensitivity(c), 1) {
@@ -2540,9 +2540,12 @@ func pidTuningTerms(family PidtuneType) (hasP, hasI, hasD, filtered, ok bool) {
 // always under residueSign, whose integrators leave the walk unanchored. The
 // loop phase starts within ±90° at low frequency, so if |L| ≥ 1 below wc,
 // a stable loop needs its unwrapped phase at wc above −180°; with phase
-// known the band is judged unwrapped. This excludes designs whose |L|
-// dips below 1 and recovers below wc. Otherwise a cone wider than a
-// half-plane reaches every phase.
+// known and an integral term, which puts |L| above 1 near DC, the band is
+// judged unwrapped. This excludes designs whose |L| dips below 1 and
+// recovers below wc. Without one, |L(0)| = |Kp·G(0)| can be below 1, and
+// a loop crossing −180° there can be stable at any wrapped phase, so the
+// band is judged wrapped, as when phase is NaN; wrapped, a cone wider than
+// a half-plane reaches every phase.
 func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions, pm, phase float64) bool {
 	hasP, hasI, hasD, filtered, ok := pidTuningTerms(family)
 	if !ok || p.wantSign() == 0 {
@@ -2565,7 +2568,7 @@ func pidTuningReachable(p pidTuningPlant, family PidtuneType, o PIDTuningOptions
 		}
 	}
 	want := -180 + pm
-	if !math.IsNaN(phase) {
+	if hasI && !math.IsNaN(phase) {
 		return want >= phase+lo-3-1e-9 && want <= phase+hi+3+1e-9
 	}
 	if hi-lo >= 180 {
@@ -3213,10 +3216,11 @@ func pidTuningIdealInScope(model *System, c *PID2) bool {
 }
 
 // pidTuningIdealRealizable reports whether model and c are a finite SISO
-// standard delay-free loop, as pidTuningIdealRealizationFloat asks.
+// standard delay-free loop, as pidTuningIdealRealizationFloat asks; E = I
+// is standard.
 func pidTuningIdealRealizable(model *System, c *PID2) bool {
 	_, m, p := model.Dims()
-	if model.E != nil || model.HasDelay() || m != 1 || p != 1 {
+	if newDescriptorPolicy(model).isDescriptor() || model.HasDelay() || m != 1 || p != 1 {
 		return false
 	}
 	for _, a := range []*mat.Dense{model.A, model.B, model.C, model.D} {

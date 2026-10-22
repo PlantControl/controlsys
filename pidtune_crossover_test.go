@@ -475,7 +475,9 @@ func TestPidtuneGateClassicalMargin(t *testing.T) {
 // Td·wc = 1/√0.11, the lead maximum of 1 + jx/(1 + jx/10), Tf = Td/10 and
 // Kp = 1/(|G(jwc)|·|1 + jx/(1 + jx/10)|) from k and a; closed-loop root,
 // the classical margin at every crossover and |S| of the directly
-// evaluated loop.
+// evaluated loop. MATLAB's ideal PD, tried first since G6APMO, levels off
+// at |L(j∞)| = ∞ on this biproper plant, which the back-off level cap
+// rejects, so the placed design is the fallback kept.
 func TestPidtunePoleFallbackPDHighPass(t *testing.T) {
 	for _, c := range []struct {
 		k, a       float64
