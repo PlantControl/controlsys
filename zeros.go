@@ -370,6 +370,15 @@ func sisoRelativeDegree(sys *System) (int, bool) {
 	if n == 0 || sys.D.At(0, 0) != 0 {
 		return 0, false
 	}
+	var h1, beta1 float64
+	for i := range n {
+		b, c := sys.B.At(i, 0), sys.C.At(0, i)
+		h1 += c * b
+		beta1 += 2 * math.Abs(c*b)
+	}
+	if math.Abs(h1) > markovSignificantTol*eps()*beta1 {
+		return 1, true
+	}
 	ar := sys.A.RawMatrix()
 	nn := n * n
 	buf := make([]float64, 4*nn+5*n)
@@ -391,7 +400,8 @@ func sisoRelativeDegree(sys *System) (int, bool) {
 	for i := range n {
 		absB[i], absC[i] = math.Abs(v[i]), math.Abs(c[i])
 	}
-	ev, ew := make([]int, n), make([]int, n)
+	e := make([]int, 2*n)
+	ev, ew := e[:n], e[n:]
 	bl := blas64.Implementation()
 	for k := 1; k <= n; k++ {
 		if k > 1 {
