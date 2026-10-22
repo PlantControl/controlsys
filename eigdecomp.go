@@ -711,7 +711,9 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 }
 
 // qzInfiniteGap is the least factor between the |β|/|α| of the infinite
-// and of the finite eigenvalues for certifyFiniteRetained to tell them apart.
+// and of the finite eigenvalues for certifyFiniteRetained to tell them apart,
+// and the least factor above a rank tolerance for deflateInfinite to call a
+// singular value nonzero.
 const qzInfiniteGap = 1e4
 
 // qzSylvester solves S11·R − L·S22 = scale·C, T11·R − L·T22 = scale·F for
