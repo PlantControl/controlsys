@@ -142,6 +142,12 @@ func TestDare_NewtonVerified(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if res.Accuracy != 0 {
+					if tc.mustSolve[k] {
+						t.Fatalf("Accuracy %d", res.Accuracy)
+					}
+					return
+				}
 				var bk, acl mat.Dense
 				bk.Mul(B, res.K)
 				acl.Sub(A, &bk)

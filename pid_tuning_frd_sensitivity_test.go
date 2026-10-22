@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -32,21 +33,31 @@ func pidSensitivityWarned(r *PIDTuningResult) bool {
 
 // PD designs parked where Kd·CB is just past −1 are stable but have |S| of
 // 47 and 139. Under the |S| bound the first finds a design within it on a
-// floor band; the second's PD bands have none, so its design is kept with a
-// warning rather than turned into an error. Oracles: closed-loop roots and
+// floor band; the second's PD bands have none at the default crossover or
+// any lowered or raised one, and as the true peak is at least the sampled
+// one the call fails (JW7LKX) rather than keep it with a warning; at an
+// explicit crossover it is kept with one. Oracles: closed-loop roots and
 // dense exact |S|.
 func TestTunePIDFRDBoundsFragileSensitivity(t *testing.T) {
 	for i, c := range []struct {
 		num, den []float64
 		n        int
-		pm       float64
+		pm, wc   float64
 		bounded  bool
 	}{
-		{[]float64{17.66332276886301}, []float64{1, 0.4166065677430895}, 600, 45, true},
-		{[]float64{0.06711826191147859, -0.009292143346332136}, []float64{1, 0.580742570603219, 0.08335532261816535}, 100, 60, false},
+		{[]float64{17.66332276886301}, []float64{1, 0.4166065677430895}, 600, 45, 0, true},
+		{[]float64{0.06711826191147859, -0.009292143346332136}, []float64{1, 0.580742570603219, 0.08335532261816535}, 100, 60, 0, false},
+		{[]float64{0.06711826191147859, -0.009292143346332136}, []float64{1, 0.580742570603219, 0.08335532261816535}, 100, 60, 1, false},
 	} {
 		frd := pidExactFRD(t, c.num, c.den, 1e-3, 1e3, c.n)
-		r, err := TunePIDFRD(context.Background(), frd, PidtunePD, PIDTuningOptions{PhaseMargin: c.pm})
+		r, err := TunePIDFRD(context.Background(), frd, PidtunePD, PIDTuningOptions{PhaseMargin: c.pm, CrossoverFrequency: c.wc})
+		if !c.bounded && c.wc == 0 {
+			te, ok := errors.AsType[*PIDTuningError](err)
+			if !ok || !slices.ContainsFunc(te.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "the true peak is at least the sampled one") }) {
+				t.Errorf("case %d: want unattainable over the |S| bound, got %v", i, err)
+			}
+			continue
+		}
 		if err != nil {
 			t.Errorf("case %d: %v", i, err)
 			continue
@@ -72,6 +83,7 @@ func TestTunePIDFRDBoundsFragileSensitivity(t *testing.T) {
 // replaces a design over the bound by one within it. Oracles: closed-loop
 // roots and dense exact |S|.
 func TestTunePIDFRDSensitivityBoundKeepsDesigns(t *testing.T) {
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(16, 0xffc3d6))
 	n := 300
 	if testing.Short() {

@@ -58,6 +58,22 @@ var careVerifyCases = []careVerifyCase{
 		[]float64{-0.39929376054462906, 1.8236492076749957, 1.6584990744229915, 1.047614076273336, -0.8124378134960828, -1.6978375851167193},
 		[]float64{1035.5668320508973, 668.8248075177886, 269.6252964726332, -882.7048016716345, 425.2679277650688, 60.8927845926102, 668.8248075177886, 991.5270940866561, 377.0540975872218, -711.7969152891806, 524.9660056450215, -438.7037350782592, 269.6252964726332, 377.0540975872218, 875.3463469004839, 162.82225273841445, 146.85092604097818, -59.39093105321123, -882.7048016716345, -711.7969152891806, 162.82225273841445, 1352.9141819816607, -629.3597431278994, 68.19518170851981, 425.2679277650688, 524.9660056450215, 146.85092604097818, -629.3597431278994, 535.7002756816571, -327.92861560627034, 60.8927845926102, -438.7037350782592, -59.39093105321123, 68.19518170851981, -327.92861560627034, 633.2730481798916},
 		[]float64{1.2011519929381188e-14}, nil},
+	{"modeOnly", 5, 2, [2]bool{true, true},
+		[]float64{-0.7192397278942538, -0.5117432073987831, 0.715153265422858, 0.1555422392766848, -0.023243401494407515, 0.652335246799636, -0.2802145812233622, 0.12910007982562624, 0.3456023287356067, 0.1873262940472603, 0.14583471722085165, -0.046638275216466483, 0.32479600466386, 0.4726185367730906, 0.3122724914213278, 0.3678167565357798, 0.3971828243742505, -0.3553900576309855, 0.418547016725591, 0.2370622860003412, 0.1815575845671638, 0.8744588608107252, -0.5143575795685132, -0.307297421513629, 0.02879497674158437},
+		[]float64{-0.7589408563065089, -0.8714048851028153, -1.0514642538616048, 1.2763938281677454, -1.2518582890066186, -1.257994184057598, -0.5477826537633128, -0.2975112446478909, -0.9041478523802757, -1.0093855710661495},
+		[]float64{46510.98332333419, -52252.953800741525, 73171.77337880274, 55391.90999716641, 58138.41496845004, -52252.953800741525, 610074.8312595437, -53175.49613792554, -81180.85864628368, -84250.61280524603, 73171.77337880274, -53175.49613792554, 237690.802847671, 175510.7925707046, 150280.82220333343, 55391.90999716641, -81180.85864628368, 175510.7925707046, 247668.17163805926, 62304.04256834909, 58138.41496845004, -84250.61280524603, 150280.82220333343, 62304.04256834909, 132795.93571990327},
+		[]float64{1.6804974657108159e-13, -1.1715519041486096e-13, -1.1715519041486096e-13, 8.210420646739227e-14}, nil},
+}
+
+// careVerifyPoor lists the cases whose X no Newton step certifies and that
+// must return it with Accuracy 1 (MATLAB icare Report 1), with the bound
+// on its error per NoScaling mode. On 376552c they returned
+// ErrNoStabilizing (PHWRNR): ch360 default has error 8.6e-12, NoScaling
+// 2.2e-9; weakBStall's pencil X is off by about 2e-2 (‖X‖ = 2.4e16), so
+// only Accuracy 1, never 0, is required of it.
+var careVerifyPoor = map[string][2]float64{
+	"weakBStall": {1, 1},
+	"ch360":      {1e-9, 1e-7},
 }
 
 func (tc careVerifyCase) dense() (A, B, Q, R, S *mat.Dense) {
@@ -95,6 +111,9 @@ func (tc careVerifyCase) dense() (A, B, Q, R, S *mat.Dense) {
 //	         Newton–Kleinman drifts to 1e-7..1e-6 from it), default
 //	         8.6e-12. Newton cannot certify either (its first step from the
 //	         8.6e-12 X is 8e-7, in any precision), so both are errors.
+//	"modeOnly" w17 #8 (INY4MG), R ≈ 1e-13, poles −1e11, −2.4e9: base
+//	         default ErrNoStabilizing (no cost scale of the state-scaled
+//	         Hamiltonian or pencil deflates it), NoScaling rel err 6e-11.
 //	"cheapR"  wave-15 review (fuzz ea26aa6cfc30d856): cond(R) = 6.4e7,
 //	         Q ≈ 1e-13, A ≈ I. Newton refined X in one step and returned
 //	         the Eig of the previous iterate's K (Σ Eig off by 0.057).
@@ -104,11 +123,15 @@ func TestCare_NewtonVerified(t *testing.T) {
 		for k, noScaling := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/NoScaling=%v", tc.name, noScaling), func(t *testing.T) {
 				res, err := Care(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling})
-				if errors.Is(err, ErrNoStabilizing) && !tc.mustSolve[k] {
+				poorTol, poor := careVerifyPoor[tc.name]
+				if errors.Is(err, ErrNoStabilizing) && !tc.mustSolve[k] && !poor {
 					return
 				}
 				if err != nil {
 					t.Fatal(err)
+				}
+				if poor && res.Accuracy != 1 || tc.mustSolve[k] && res.Accuracy != 0 {
+					t.Fatalf("Accuracy %d", res.Accuracy)
 				}
 				var bk, acl mat.Dense
 				bk.Mul(B, res.K)
@@ -127,6 +150,12 @@ func TestCare_NewtonVerified(t *testing.T) {
 					t.Fatalf("oracle not converged: %g", e)
 				}
 				tol := 1e-7
+				if res.Accuracy != 0 {
+					tol = math.Inf(1)
+					if poor {
+						tol = poorTol[k]
+					}
+				}
 				if e := relErr(res.X, want); !(e <= tol) {
 					t.Errorf("X rel err %g against 320-bit Newton–Kleinman", e)
 				}

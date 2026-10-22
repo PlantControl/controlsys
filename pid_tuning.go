@@ -156,6 +156,26 @@ type pidTuningPlant struct {
 	// Nyquist count finds or cannot certify stable.
 	dcGain   float64
 	highGain complex128
+	// nyquistCount marks the strict count on sampled data under that
+	// default (pidTuningFRDStrictPlant), where a candidate the count
+	// cannot certify is rejected. When dcGain is 0, lowAnchor marks a low
+	// end G ≈ K·(jω)^lowOrder that anchors the count instead
+	// (pidTuningFRDLowOrder).
+	nyquistCount bool
+	lowAnchor    bool
+	lowOrder     int
+	// lowAnchored marks a dcGain sampled at ω = 0 rather than extrapolated
+	// from the band; topOrder, when topAnchored, is the order n of a high
+	// end G ≈ K·(jω)^n that continuous data establish
+	// (pidTuningFRDTopOrder). The strict count certifies only loops whose
+	// ends both anchor so.
+	lowAnchored bool
+	topOrder    int
+	topAnchored bool
+	// markov, if nonzero, is lim sG(s) that continuous sampled data show at
+	// their top (pidTuningFRDMarkov), and markovSpread its change over the
+	// top half decade.
+	markov, markovSpread float64
 	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
 	// 0 for none; tau is the loop delay in seconds that sets its grid step.
 	maxSensitivity, tau float64
@@ -201,6 +221,12 @@ type pidTuningPlant struct {
 	// design whose closed-loop root sits near s = 0 or z = −1 hides its
 	// |S| peak there.
 	dcEdge, nyquistEdge complex128
+	// sensLow and sensHigh, if set, widen the |S| scan below low and above
+	// its top, a peak there being away from both band and edges; samples
+	// there come from try, cached in sensCache, and count as 0 where it
+	// fails.
+	sensLow, sensHigh float64
+	sensCache         map[float64]complex128
 }
 
 type pidCrossScan int
@@ -901,7 +927,9 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // alone does not bound it there; an explicit-crossover design is not bound
 // but carries a warning when its sampled |S| exceeds 4; an undelayed plant's default design is
 // searched unbounded first and under the bound only when it exceeds it.
-// For a continuous plant without internal delays the samples run past 100·wc until a Markov-parameter bound gives |L| <= ¾. Only when neither the default nor the moved crossovers
+// For a continuous plant without internal delays the samples run past 100·wc until a Markov-parameter bound gives |L| <= ¾.
+// The samples also reach down to a tenth of the slowest plant pole or zero
+// and, discrete, up to π/Dt, where a peak off the band hides. Only when neither the default nor the moved crossovers
 // meet PM±3° does the margin become a floor at the original crossover, as in
 // pidtune: the design takes the nearest feasible 6° band above PM, with
 // PM−3° at every crossover over the plant's dynamics. Bands whose phase is
@@ -1018,6 +1046,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	modes := sync.OnceValue(func() []complex128 { return pidTuningModes(screen.model) })
 	loopTail := sync.OnceValue(func() func(*PID2, float64) float64 { return pidTuningLoopTail(plant) })
 	span := sync.OnceValues(func() (float64, float64) { return pidTuningDynamicsSpan(screen.model) })
+	sensCache := map[float64]complex128{}
 	tau := sisoLoopDelay(plant)
 	if plant.Dt > 0 {
 		tau *= plant.Dt
@@ -1067,54 +1096,37 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		if stable == nil {
 			p.warnings = []string{"Exact delay retained; finite frequency samples do not certify global closed-loop stability."}
 		}
-		tune := tunePID
-		if floor {
-			tune = tunePIDFloor
+		// wide scans |S| off the band too, down to a tenth of the slowest
+		// plant root and, discrete, up to π/Dt, where a peak shows neither
+		// in the band nor at its edges. A design passing the band's bound
+		// is checked there and, failing, searched for again under it.
+		wide := p
+		if plant.Dt > 0 {
+			wide.sensHigh = pidTuningSensNyquist * math.Pi / plant.Dt
 		}
-		lastPlant = p
-		res, err := tune(ctx, "TunePID", p, family, opts)
-		if eval.err != nil {
-			return nil, fmt.Errorf("TunePID: %w", eval.err)
+		if lo, _ := span(); lo/10 < p.low {
+			wide.sensLow = lo / 10
 		}
-		// A design whose controller zeros notch |L| through 1 below the
-		// band, as tiny Kp and Ki against Kd do, is searched for again with
-		// every candidate so checked, then, for a filtered family, from the
-		// least admissible Tf: the default Tf's lag can leave only such
-		// near-pure-D designs. Designs passing the check are unchanged.
-		if zr, ok := errors.AsType[*pidZeroRejected](err); ok {
-			budget := opts.MaxEvaluations
+		wide.sensCache = sensCache
+		lastPlant = wide
+		res, err := pidTuningSearch(ctx, p, family, opts, floor, wc, eval)
+		if bound == pidSSearch && err == nil && pidTuningSensitivityPeak(wide, *res.Controller) > pidTuningMaxSensitivity {
+			sRejected = true
+			budget, first := opts.MaxEvaluations, res.Evidence.Evaluations
 			if budget == 0 {
 				budget = 4096
 			}
-			spent := zr.evaluations
-			p.zeroSearch = true
-			seeds := []bool{p.minTfSeed}
-			if _, _, _, filtered, _ := pidTuningTerms(PidtuneType(strings.ToUpper(string(family)))); filtered && !p.minTfSeed {
-				seeds = append(seeds, true)
-			}
-			for _, minTf := range seeds {
-				if spent >= budget {
-					break
-				}
+			if first >= budget {
+				res, err = nil, &PIDTuningError{Op: "TunePID", Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: opts.PhaseMargin, Evaluations: first, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
+			} else {
 				o := opts
-				o.MaxEvaluations = budget - spent
-				p.minTfSeed = minTf
-				res, err = tune(ctx, "TunePID", p, family, o)
-				if eval.err != nil {
-					return nil, fmt.Errorf("TunePID: %w", eval.err)
+				o.MaxEvaluations = budget - first
+				res, err = pidTuningSearch(ctx, wide, family, o, floor, wc, eval)
+				if te, ok := errors.AsType[*PIDTuningError](err); ok {
+					te.Evidence.Evaluations += first
+				} else if err == nil {
+					res.Evidence.Evaluations += first
 				}
-				te, ok := errors.AsType[*PIDTuningError](err)
-				if !ok {
-					break
-				}
-				spent += te.Evidence.Evaluations
-			}
-			if te, ok := errors.AsType[*PIDTuningError](err); ok {
-				te.Evidence.Evaluations = spent
-			} else if err == nil {
-				res.Evidence.Evaluations += spent
-			} else if errors.As(err, new(*pidZeroRejected)) {
-				res, err = nil, &PIDTuningError{Op: "TunePID", Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: opts.PhaseMargin, Evaluations: spent, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
 			}
 		}
 		if te, ok := errors.AsType[*PIDTuningError](err); ok {
@@ -1124,8 +1136,8 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			used += res.Evidence.Evaluations
 		}
 		if bound == pidSCheck && err == nil {
-			p.maxSensitivity, p.loopTail = pidTuningMaxSensitivity, loopTail()
-			if pidTuningSensitivityPeak(p, *res.Controller) > pidTuningMaxSensitivity {
+			wide.maxSensitivity, wide.loopTail = pidTuningMaxSensitivity, loopTail()
+			if pidTuningSensitivityPeak(wide, *res.Controller) > pidTuningMaxSensitivity {
 				return tuneAt(wc, gainSign, pidSSearch, floor)
 			}
 		}
@@ -1226,7 +1238,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			if e == nil {
 				hi := math.Max(minHigh, wc*100)
 				if plant.Dt > 0 {
-					hi = math.Min(hi, .99*math.Pi/plant.Dt)
+					hi = math.Pi / plant.Dt
 				}
 				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g %s to %.4g rad/s, where the design keeps sampled |S| <= %d up to %.4g rad/s.", wc0, verb, wc, pidTuningMaxSensitivity, hi))
 				return r, nil, blind
@@ -1414,7 +1426,11 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 				continue
 			}
 			if e == nil {
-				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the one-gain integrator keeps sampled |S| <= %d up to %.4g rad/s.", wc0, wc, pidTuningMaxSensitivity, math.Max(wc*100, minHigh)))
+				hi := math.Max(wc*100, minHigh)
+				if plant.Dt > 0 {
+					hi = math.Pi / plant.Dt
+				}
+				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("Default crossover %.4g lowered to %.4g rad/s, where the one-gain integrator keeps sampled |S| <= %d up to %.4g rad/s.", wc0, wc, pidTuningMaxSensitivity, hi))
 				return stamp(r, nil)
 			}
 			if !errors.As(e, new(*PIDTuningError)) {
@@ -1648,6 +1664,62 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 		}
 	}
 	return undelayed(stamp(res, err))
+}
+
+// pidTuningSearch runs TunePID's search for p, the floor's when floor. A
+// design whose controller zeros notch |L| through 1 below the band, as tiny
+// Kp and Ki against Kd do, is searched for again with every candidate so
+// checked, then, for a filtered family, from the least admissible Tf: the
+// default Tf's lag can leave only such near-pure-D designs. Designs passing
+// the check are unchanged. An evaluation failure of eval aborts it.
+func pidTuningSearch(ctx context.Context, p pidTuningPlant, family PidtuneType, opts PIDTuningOptions, floor bool, wc float64, eval *sisoEval) (*PIDTuningResult, error) {
+	tune := tunePID
+	if floor {
+		tune = tunePIDFloor
+	}
+	res, err := tune(ctx, "TunePID", p, family, opts)
+	if eval.err != nil {
+		return nil, fmt.Errorf("TunePID: %w", eval.err)
+	}
+	zr, ok := errors.AsType[*pidZeroRejected](err)
+	if !ok {
+		return res, err
+	}
+	budget := opts.MaxEvaluations
+	if budget == 0 {
+		budget = 4096
+	}
+	spent := zr.evaluations
+	p.zeroSearch = true
+	seeds := []bool{p.minTfSeed}
+	if _, _, _, filtered, _ := pidTuningTerms(PidtuneType(strings.ToUpper(string(family)))); filtered && !p.minTfSeed {
+		seeds = append(seeds, true)
+	}
+	for _, minTf := range seeds {
+		if spent >= budget {
+			break
+		}
+		o := opts
+		o.MaxEvaluations = budget - spent
+		p.minTfSeed = minTf
+		res, err = tune(ctx, "TunePID", p, family, o)
+		if eval.err != nil {
+			return nil, fmt.Errorf("TunePID: %w", eval.err)
+		}
+		te, ok := errors.AsType[*PIDTuningError](err)
+		if !ok {
+			break
+		}
+		spent += te.Evidence.Evaluations
+	}
+	if te, ok := errors.AsType[*PIDTuningError](err); ok {
+		te.Evidence.Evaluations = spent
+	} else if err == nil {
+		res.Evidence.Evaluations += spent
+	} else if errors.As(err, new(*pidZeroRejected)) {
+		res, err = nil, &PIDTuningError{Op: "TunePID", Evidence: PIDTuningEvidence{RequestedCrossover: wc, RequestedPhaseMargin: opts.PhaseMargin, Evaluations: spent, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
+	}
+	return res, err
 }
 
 // pidTuningResolvedFloor returns lo, or, when try fails or is not finite
@@ -2734,28 +2806,36 @@ const pidTuningIdealReturnTol = 0x1p-26
 // Ideal derivative controllers may be improper on their own while their
 // closed-loop characteristic is well-defined. Test the characteristic
 // directly, of the loop with model, transfer its transfer function, delayed
-// by lag samples. TransferFunction drops or corrupts near-zero poles and
-// zeros, and the float verdict on its characteristic then decides
-// confidently wrong, so above pidTuningExactOrder the transfer is never
-// used: pidTuningIdealRealizationFloat decides, exact Schur–Cohn
-// (pidTuningIdealExact) when it is in doubt and n+lag is within
-// pidTuningExactLagOrder, and otherwise the loop fails closed as unstable.
-// Up to pidTuningExactOrder, a delayed loop, or one whose transfer is of
-// lower degree than model or fails, has its characteristic built exactly
-// from model's realization: the float verdict on the rounded exact
-// characteristic decides, and exact Schur–Cohn only when it is in doubt and
-// n+lag is within pidTuningExactLagOrder, as that recursion at order n+lag
-// is slow; beyond it the float verdict stands. transfer is called only for
-// loops out of both scopes, undelayed loops, or a rounded characteristic
-// that overflows beyond that cap.
+// by lag samples. Every loop takes one chain: a float verdict, exact
+// Schur–Cohn (pidTuningIdealExact) when it is in doubt and n+lag is within
+// pidTuningExactLagOrder, else pidTuningIdealRealizationFloat (whose
+// Bauer–Fike discs certify loops the polynomial error model leaves in
+// doubt), else the loop fails closed as unstable. TransferFunction drops or
+// corrupts near-zero poles and zeros, and the float verdict on its
+// characteristic then decides confidently wrong, so above
+// pidTuningExactOrder the transfer is never used and the realization's
+// float verdict comes first. Up to pidTuningExactOrder, a delayed loop, or
+// one whose transfer is of lower degree than model or fails, has its
+// characteristic built exactly from model's realization, and the float
+// verdict on the rounded exact characteristic comes first. transfer is
+// called only for loops out of both scopes, undelayed loops, or a rounded
+// characteristic that overflows beyond pidTuningExactLagOrder.
 func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, error), c *PID2, lag int) (bool, error) {
 	n, _, _ := model.Dims()
-	if n > pidTuningExactOrder && pidTuningIdealRealizable(model, c) {
+	realizable := pidTuningIdealRealizable(model, c)
+	if n > pidTuningExactOrder && realizable {
 		if stable, decided := pidTuningIdealRealizationFloat(model, c, lag); decided {
 			return stable, nil
 		}
 		exact, ok := pidTuningIdealExact(model, c, lag)
 		return exact && ok, nil
+	}
+	unresolved := func() bool {
+		stable, decided := false, false
+		if realizable {
+			stable, decided = pidTuningIdealRealizationFloat(model, c, lag)
+		}
+		return stable && decided
 	}
 	inScope := pidTuningIdealInScope(model, c)
 	var tr *TransferFuncResult
@@ -2770,12 +2850,15 @@ func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, e
 		f, ok := dyadicPolyFloat(ch)
 		if ok {
 			stable, decided, err := pidTuningIdealFloat(f, c.Dt == 0)
-			if err != nil || decided || n+lag > pidTuningExactLagOrder {
+			if err != nil || decided {
 				return stable, err
 			}
 		}
-		if ok || n+lag <= pidTuningExactLagOrder {
+		if n+lag <= pidTuningExactLagOrder {
 			return pidTuningDyadicStable(ch, c.Dt == 0), nil
+		}
+		if ok {
+			return unresolved(), nil
 		}
 		var err error
 		if tr, err = transfer(); err != nil {
@@ -2826,7 +2909,7 @@ func pidTuningIdealStable(model *System, transfer func() (*TransferFuncResult, e
 	if exact, ok := pidTuningIdealExact(model, c, lag); ok {
 		return exact, nil
 	}
-	return stable, nil
+	return unresolved(), nil
 }
 
 // pidTuningIdealRealizationFloat is the float verdict of pidTuningIdealStable
@@ -2991,8 +3074,10 @@ func pidTuningIdealRealization(model *System, c *PID2, lag int) (a, abs *mat.Den
 // and s_i = |y_iᴴx_i| for unit left ones, κ(V) ≤ √(n·Σ1/s_i²), and every
 // eigenvalue of a matrix within eta of a in the 2-norm lies in a disc of
 // radius κ(V)·eta, padded by pidTuningPoleMarginSafety, about a computed
-// one. The discs must be pairwise disjoint, so each holds exactly one, and
-// each must lie wholly inside or outside the exact test's boundary
+// one. The computed pairs are exact for a + R·V⁻¹, R = aV − VΛ, so eta
+// grows by ‖R‖_F·‖V⁻¹‖_F ≤ ‖R‖_F·√(Σ1/s_i²). The discs must be pairwise
+// disjoint, so each holds exactly one, and each must lie wholly inside or
+// outside the exact test's boundary
 // (Re s < −1e-10, |z| < 1−1e-10; inside also within poleStabilityTolerance).
 func pidTuningEigenDiscVerdict(a *mat.Dense, continuous bool, eta float64) (stable, decided bool) {
 	var eig mat.Eigen
@@ -3004,7 +3089,23 @@ func pidTuningEigenDiscVerdict(a *mat.Dense, continuous bool, eta float64) (stab
 	eig.VectorsTo(&vr)
 	eig.LeftVectorsTo(&vl)
 	n := len(vals)
-	var sum float64
+	var sum, res float64
+	col := make([]complex128, n)
+	for i := range n {
+		var nr, ri float64
+		for k := range n {
+			col[k] = vr.At(k, i)
+			nr += real(col[k])*real(col[k]) + imag(col[k])*imag(col[k])
+		}
+		for k := range n {
+			d := -vals[i] * col[k]
+			for j, v := range a.RawRowView(k) {
+				d += complex(v, 0) * col[j]
+			}
+			ri += real(d)*real(d) + imag(d)*imag(d)
+		}
+		res += ri / nr
+	}
 	for i := range n {
 		var dot complex128
 		var nr, nl float64
@@ -3020,7 +3121,7 @@ func pidTuningEigenDiscVerdict(a *mat.Dense, continuous bool, eta float64) (stab
 		}
 		sum += 1 / (s * s)
 	}
-	r := pidTuningPoleMarginSafety * math.Sqrt(float64(n)*sum) * eta
+	r := pidTuningPoleMarginSafety * math.Sqrt(float64(n)*sum) * (eta + math.Sqrt(sum*res))
 	if !finitePID(r) {
 		return false, false
 	}
@@ -3084,8 +3185,11 @@ func pidTuningIdealFloat(characteristic Poly, continuous bool) (stable, decided 
 // plant numerator over Δ and the characteristic is Δ·λ^lag·den(c) + N·num(c).
 func pidTuningIdealExact(model *System, c *PID2, lag int) (stable, ok bool) {
 	n, _, _ := model.Dims()
+	if n+lag > pidTuningExactLagOrder {
+		return false, false
+	}
 	ch, ok := pidTuningIdealCharacteristic(model, c, lag)
-	if !ok || n+lag > pidTuningExactLagOrder {
+	if !ok {
 		return false, false
 	}
 	return pidTuningDyadicStable(ch, c.Dt == 0), true
@@ -3500,8 +3604,11 @@ func pidTuningModes(plant *System) []complex128 {
 	return modes
 }
 
-// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [p.low, top],
-// top = max(p.high, p.crossHigh), the reported band's top, extended, by at
+// pidTuningSensitivityPeak returns max |1/(1+L(jω))| over [min(p.low,
+// p.sensLow), top], top = max(p.high, p.crossHigh, p.sensHigh): the reported
+// band widened, by TunePID, to a tenth of the slowest plant root and,
+// discrete, π/Dt, since a peak there shows neither in the band nor at its
+// edges; extended, by at
 // most pidTuningTailPoints samples up to pidTuningTailReach·top, while
 // p.loopTail admits |L| > 1 − 1/p.maxSensitivity beyond, since a large derivative gain can cross 0 dB again far above the
 // crossover.
@@ -3511,16 +3618,44 @@ func pidTuningModes(plant *System) []complex128 {
 // refined by golden section on log ω, since a delay ripple can sit between
 // samples and read ~10% low. |S| at p.dcEdge and p.nyquistEdge counts too.
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
-	s := func(w float64) float64 { return 1 / cmplx.Abs(1+p.at(w)*pidTuningFeedback(c, w)) }
+	band := math.Max(p.high, p.crossHigh)
+	top, start := math.Max(band, p.sensHigh), p.low
+	if p.sensLow > 0 {
+		start = math.Min(start, p.sensLow)
+	}
+	outside := func(w float64) bool { return p.try != nil && (w < p.low || w > band && w <= p.sensHigh) }
+	sample := func(w float64, cached bool) float64 {
+		g, ok, in := complex128(0), true, !outside(w)
+		switch {
+		case in:
+			g = p.at(w)
+		case cached && p.sensCache != nil:
+			if g, ok = p.sensCache[w]; !ok {
+				g, ok = p.try(w)
+				if !ok || !pidFiniteComplex(g) {
+					g = cmplx.NaN()
+				}
+				p.sensCache[w] = g
+			}
+			ok = pidFiniteComplex(g)
+		default:
+			g, ok = p.try(w)
+		}
+		v := 1 / cmplx.Abs(1+g*pidTuningFeedback(c, w))
+		if !in && (!ok || math.IsNaN(v)) {
+			return 0
+		}
+		return v
+	}
+	s := func(w float64) float64 { return sample(w, false) }
 	peak := pidTuningEdgeSensitivity(p, c)
-	top := math.Max(p.high, p.crossHigh)
 	high, extend, inBand := top, p.loopTail != nil && p.maxSensitivity > 1, 0
 	var w0, v0, w1, v1 float64
-	for k, w := 0, p.low; ; k++ {
+	for k, w := 0, start; ; k++ {
 		if w <= top {
 			inBand = k
 		}
-		v := s(w)
+		v := sample(w, true)
 		if k >= 2 && v1 >= v0 && v1 >= v && v1 >= .8*math.Max(peak, v) {
 			_, g := pidTuningGoldenMax(s, w0, w)
 			peak = math.Max(peak, g)
@@ -3552,7 +3687,8 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 // since every derivative term vanishes there; with it |L(0)| is infinite.
 // At z = −1 each integrator dt·(1/(z−1) + w), w its formula's weight, is
 // dt·(w − ½), so the derivative term is Kd/(Tf + dt·(w − ½)), infinite
-// when that is 0.
+// when that is 0. An ideal derivative on continuous data showing
+// lim sG = p.markov ends at L(∞) = Kd·p.markov.
 func pidTuningEdgeSensitivity(p pidTuningPlant, c PID2) float64 {
 	peak := 0.
 	s := func(l complex128) {
@@ -3562,6 +3698,9 @@ func pidTuningEdgeSensitivity(p pidTuningPlant, c PID2) float64 {
 	}
 	if g := p.dcEdge; g != 0 && pidFiniteComplex(g) && c.Ki == 0 {
 		s(g * complex(c.Kp, 0))
+	}
+	if p.markov != 0 && c.Dt == 0 && c.Tf == 0 && c.Kd != 0 {
+		s(complex(c.Kd*p.markov, 0))
 	}
 	if g := p.nyquistEdge; g != 0 && pidFiniteComplex(g) && c.Dt > 0 {
 		k := c.Kp + c.Ki*c.Dt*(pidFormulaWeight(c.IFormula)-.5)
@@ -3583,6 +3722,10 @@ const (
 	pidTuningTailReach  = 1e4
 	pidTuningTailPoints = 4096
 )
+
+// pidTuningSensNyquist is the discrete |S| scan's top as a fraction of π/Dt,
+// short of a pole at z = −1 that p.nyquistEdge resolves.
+const pidTuningSensNyquist = .9999
 
 // pidTuningLoopTail returns a bound on |C(jω')·P(jω')| over ω' ≥ ω for a
 // continuous plant without internal delays, or nil; see pidMarkovTail.

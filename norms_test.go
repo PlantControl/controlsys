@@ -1921,6 +1921,7 @@ func TestHinfNorm_LightlyDampedMatchesExactOracle(t *testing.T) {
 // under QZ, and the Hamiltonian matrix [A BBᵀ/γ²; −CᵀC −Aᵀ] lost them
 // altogether: the TI6YYN loop was under-reported by 8.4e-10.
 func TestHinfNorm_NearOptimalLoopsMatchOracle(t *testing.T) {
+	skipSlowUnderRace(t)
 	exact := func(sys *System) func(float64) float64 {
 		return func(w float64) float64 { return exactSigmaMax(sys, w) }
 	}

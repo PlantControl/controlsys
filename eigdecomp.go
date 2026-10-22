@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -120,7 +121,9 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 // generalized Schur form Qᵀ(A, E)Z = (S, T), selected finite eigenvalues
 // leading, then removes the coupling blocks with the generalized Sylvester
 // equation S11 R - L S22 = -S12, T11 R - L T22 = -T12. G1 is returned explicit
-// (T11 is nonsingular); G2 keeps E = T22.
+// (T11 is nonsingular); G2 keeps E = T22. Eigenvalues with
+// |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ are infinite; a large retained one that
+// certifyFiniteRetained cannot certify finite fails closed.
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	policy := newRealizationTransformPolicy(sys)
 	n, m, p := sys.Dims()
@@ -131,16 +134,35 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	alphar := make([]float64, n)
 	alphai := make([]float64, n)
 	beta := make([]float64, n)
+	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
+	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
 	selct := func(ar, ai, b float64) bool {
-		return b != 0 && isGroup1(complex(ar/b, ai/b))
+		return !qzInfinite(ar, ai, b, infTol) && isGroup1(complex(ar/b, ai/b))
 	}
 	n1, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
 	if !ok {
 		return nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
 	}
+	ninf := 0
 	for i := range n {
 		if beta[i] == 0 && alphar[i] == 0 && alphai[i] == 0 {
 			return nil, nil, fmt.Errorf("singular pencil (A, E): %w", ErrDescriptorSingular)
+		}
+		if qzInfinite(alphar[i], alphai[i], beta[i], infTol) {
+			ninf++
+		}
+	}
+	if n1 > 0 {
+		retol, err := certifyFiniteRetained(sys.A, sys.E, n, n1, ninf, alphar, alphai, beta, qzInfiniteTol(qzLargeRatio, normA, normE), normA)
+		if err != nil {
+			return nil, nil, err
+		}
+		if retol > 0 {
+			infTol = retol
+			n1, recip, ok = orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), selct, s, t, q, z, alphar, alphai, beta)
+			if !ok {
+				return nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+			}
 		}
 	}
 	if n1 == 0 {
@@ -355,6 +377,92 @@ func qzReciprocal(ar, ai, b float64) (float64, float64, float64) {
 	}
 	return b * (ar / mod), -b * (ai / mod), mod
 }
+
+// qzInfiniteTol returns the bound on |β|/|α| below which an eigenvalue of
+// the pencil (A, E), with Frobenius norms normA and normE, counts as
+// infinite: |λ| ≥ ‖A‖/(ratio·‖E‖), MATLAB's |β| ≤ tol·|α| on the
+// norm-scaled pencil. Decomposition uses ratio 100·n·ε, since a
+// rank-deficient E leaves rounding-level β, not 0.
+func qzInfiniteTol(ratio, normA, normE float64) float64 {
+	if normA == 0 {
+		return 0
+	}
+	return ratio * normE / normA
+}
+
+func qzInfinite(ar, ai, b, tol float64) bool {
+	return math.Abs(b) <= tol*math.Hypot(ar, ai)
+}
+
+// qzLargeRatio is the norm-scaled |β|/|α| below which a retained
+// eigenvalue may be an infinite one that QZ resolved only to
+// |β|/|α| ~ ε/σ_min(A22) (index 1, A22 nearly singular) or ε^(1/k)
+// (an infinite Jordan chain of length k ≥ 2).
+const qzLargeRatio = 1e-3
+
+// certifyFiniteRetained checks the n1 retained eigenvalues of the
+// generalized Schur form of (a, e) once one is large (|β| ≤ largeTol·|α|).
+// They are certified finite when the pencil has index 1, so Ulᵀ·A·Vr is
+// well conditioned for the null spaces Ul, Vr of E, and QZ marked all
+// d = n − rank(E) of its infinite eigenvalues (ninf). When it marked
+// fewer, the d eigenvalues of least |β|/|α| are the infinite ones and
+// infTol, if nonzero, is the |β|/|α| bound that selects them; anything
+// else fails closed.
+func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, beta []float64, largeTol, normA float64) (infTol float64, err error) {
+	large := false
+	for i := range n1 {
+		large = large || qzInfinite(alphar[i], alphai[i], beta[i], largeTol)
+	}
+	if !large {
+		return 0, nil
+	}
+	leak := fmt.Errorf("a retained mode may be infinite: %w", ErrSchurFailed)
+	var svd mat.SVD
+	if !svd.Factorize(e, mat.SVDFull) {
+		return 0, leak
+	}
+	sv := svd.Values(nil)
+	rank := 0
+	for _, v := range sv {
+		if v > 1e3*float64(n)*eps()*sv[0] {
+			rank++
+		}
+	}
+	d := n - rank
+	if d == 0 {
+		return 0, nil
+	}
+	var u, v mat.Dense
+	svd.UTo(&u)
+	svd.VTo(&v)
+	var av, a22 mat.Dense
+	av.Mul(a, v.Slice(0, n, rank, n))
+	a22.Mul(u.Slice(0, n, rank, n).T(), &av)
+	var svd22 mat.SVD
+	if !svd22.Factorize(&a22, mat.SVDNone) || svd22.Values(nil)[d-1] <= math.Sqrt(eps())*normA {
+		return 0, leak
+	}
+	if ninf >= d {
+		return 0, nil
+	}
+	ratio := make([]float64, n)
+	for i := range n {
+		ratio[i] = math.Abs(beta[i]) / math.Hypot(alphar[i], alphai[i])
+	}
+	slices.Sort(ratio)
+	next := math.Inf(1)
+	if d < n {
+		next = ratio[d]
+	}
+	if ratio[d-1] > largeTol || !(next > qzInfiniteGap*ratio[d-1]) {
+		return 0, leak
+	}
+	return ratio[d-1] * math.Sqrt(qzInfiniteGap), nil
+}
+
+// qzInfiniteGap is the least factor between the |β|/|α| of the infinite
+// and of the finite eigenvalues for certifyFiniteRetained to tell them apart.
+const qzInfiniteGap = 1e4
 
 // qzSylvester solves S11·R − L·S22 = scale·C, T11·R − L·T22 = scale·F for
 // the n1-leading split of the generalized Schur form (s, t) of orderedQZ,

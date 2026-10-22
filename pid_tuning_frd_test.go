@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 )
@@ -59,6 +60,20 @@ func TestTunePIDFRDRejectsMalformedCoverage(t *testing.T) {
 		if _, err := TunePIDFRD(context.Background(), makeFRD(), PidtunePI, PIDTuningOptions{CrossoverFrequency: wc}); err == nil {
 			t.Fatal("accepted out-of-band or endpoint crossover")
 		}
+	}
+	withDC := func(g complex128) *FRD {
+		f := makeFRD()
+		f.Omega = append([]float64{0}, f.Omega...)
+		f.Response = append([][][]complex128{{{g}}}, f.Response...)
+		return f
+	}
+	for _, f := range []*FRD{func() *FRD { f := makeFRD(); f.Omega[0] = -1; return f }(), withDC(1 + .1i), func() *FRD { f := withDC(1); f.Omega, f.Response = f.Omega[:3], f.Response[:3]; return f }()} {
+		if _, err := TunePIDFRD(context.Background(), f, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1}); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("Omega %v: %v, want ErrInvalidArgument", f.Omega, err)
+		}
+	}
+	if _, err := TunePIDFRD(context.Background(), withDC(1), PidtunePI, PIDTuningOptions{CrossoverFrequency: 1}); errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("rejected a real DC sample: %v", err)
 	}
 }
 

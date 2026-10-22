@@ -219,6 +219,50 @@ func TestPolyRootsZeroPolynomialErrors(t *testing.T) {
 	}
 }
 
+func TestPolyRootsTinyLeadingSmallRootsAccurate(t *testing.T) {
+	stableQuad := func(p Poly) []float64 {
+		a, b, c := p[0], p[1], p[2]
+		q := -(b + math.Copysign(math.Sqrt(b*b-4*a*c), b)) / 2
+		return []float64{c / q, q / a}
+	}
+	newton := func(p Poly, x float64) float64 {
+		for range 100 {
+			f, df := 0.0, 0.0
+			for _, c := range p {
+				df = df*x + f
+				f = f*x + c
+			}
+			x -= f / df
+		}
+		return x
+	}
+	cubic := Poly{1e-10, 1, 3, 2}
+	cases := []struct {
+		p    Poly
+		want []float64
+	}{
+		{Poly{1e-16, 6, 6}, stableQuad(Poly{1e-16, 6, 6})},
+		{Poly{1, 6e16, 6e16}, stableQuad(Poly{1, 6e16, 6e16})},
+		{Poly{1.256e-15, -8, -4}, stableQuad(Poly{1.256e-15, -8, -4})},
+		{cubic, []float64{newton(cubic, -1), newton(cubic, -2), newton(cubic, -1e10)}},
+	}
+	for _, tc := range cases {
+		roots, err := tc.p.Roots()
+		if err != nil || len(roots) != len(tc.want) {
+			t.Fatalf("%v.Roots() = %v, %v", tc.p, roots, err)
+		}
+		for _, w := range tc.want {
+			best := math.Inf(1)
+			for _, r := range roots {
+				best = min(best, cmplx.Abs(r-complex(w, 0)))
+			}
+			if best > 1e-8*math.Max(1, math.Abs(w)) {
+				t.Errorf("%v.Roots() = %v, missing root %v (closest off by %.3g)", tc.p, roots, w, best)
+			}
+		}
+	}
+}
+
 func TestPolyMonicErrorSentinel(t *testing.T) {
 	for _, p := range []Poly{{}, {0, 1}} {
 		_, err := p.Monic()

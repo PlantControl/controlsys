@@ -34,6 +34,9 @@ type riccatiProblem struct {
 	candidates           []riccatiPass
 	// eFactored reports that ws.eLU holds the LU factors of E.
 	eFactored bool
+	// poor is the stabilizing solution of smallest first Newton step that
+	// verifyRiccati did not certify, or nil.
+	poor *riccatiPoor
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -62,7 +65,8 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 	if !isSymmetric(R, eps()*denseNorm(R)) {
 		return riccatiProblem{}, fmt.Errorf("R: %w", ErrNotSymmetric)
 	}
-	if !isPSD(Q) {
+	// isPSD's Cholesky shift is 0 for Q = 0, which icare/idare accept.
+	if denseNorm(Q) != 0 && !isPSD(Q) {
 		return riccatiProblem{}, fmt.Errorf("Q: %w", ErrNotPSD)
 	}
 
@@ -215,7 +219,7 @@ func (problem *riccatiProblem) scale(opts *RiccatiOpts) {
 }
 
 // result maps the scaled solution back: X = T·X̂·T, K = K̂·T.
-func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd float64) *RiccatiResult {
+func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd float64, accuracy int) *RiccatiResult {
 	if t := problem.t; t != nil {
 		n, m := problem.n, problem.m
 		x, k := X.RawMatrix(), K.RawMatrix()
@@ -230,5 +234,5 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 			}
 		}
 	}
-	return &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd}
+	return &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy}
 }

@@ -346,13 +346,14 @@ func (l *fzMgLoop) dcValue() (num, den *big.Rat, budget float64) {
 }
 
 // fzMgCheckBandwidth checks Bandwidth(sys, dbDrop) against the first
-// robust exact crossing of |L| = |L(0)|·10^(dbDrop/20).
-func fzMgCheckBandwidth(t *testing.T, l *fzMgLoop, sys *System, dbDrop float64, multiInt bool, ctx string) {
+// robust exact crossing of |L| = |L(0)|·10^(dbDrop/20). integrators counts
+// the intended poles at DC: DCGain resolves one rounded off DC as ∞.
+func fzMgCheckBandwidth(t *testing.T, l *fzMgLoop, sys *System, dbDrop float64, integrators int, ctx string) {
 	t.Helper()
 	bw, err := Bandwidth(sys, dbDrop)
 	num, den, dcb := l.dcValue()
 	if num.Sign() == 0 || den.Sign() == 0 {
-		if err == nil && multiInt {
+		if err == nil && integrators > 1 {
 			fzSkip(t, "Bandwidth: exact DC 0/∞ beside an integrator cluster")
 		}
 		if num.Sign() == 0 {
@@ -368,6 +369,9 @@ func fzMgCheckBandwidth(t *testing.T, l *fzMgLoop, sys *System, dbDrop float64, 
 	}
 	if dcb > 1e-3 {
 		fzSkip(t, "Bandwidth: DC gain ill-determined")
+	}
+	if err != nil && integrators > 0 && errors.Is(err, ErrInvalidArgument) {
+		fzSkip(t, "Bandwidth: intended integrator rounded off DC taken as DC gain ∞")
 	}
 	if err != nil {
 		t.Fatalf("Bandwidth: undocumented error %v (exact DC %v)\n%s", err, fzMgRatio(num, den), ctx)
@@ -415,7 +419,7 @@ func FuzzBandwidth(f *testing.F) {
 		if v := s.Vals[15]; v >= -3 {
 			dbDrop = -math.Pow(10, fzClamp(v, -2, 2))
 		}
-		fzMgCheckBandwidth(t, l, sys, dbDrop, fzMgIntegrators(s) > 1, s.String())
+		fzMgCheckBandwidth(t, l, sys, dbDrop, fzMgIntegrators(s), s.String())
 	})
 }
 
@@ -722,7 +726,7 @@ func TestFzMgRepros(t *testing.T) {
 				if len(cs) == 0 || math.Abs(cs[0].w-c.bandwidth) > 1e-4*c.bandwidth {
 					t.Fatalf("oracle bandwidth crossings %+v, want first %v", cs, c.bandwidth)
 				}
-				fzMgCheckBandwidth(t, l, sys, -3, false, c.name)
+				fzMgCheckBandwidth(t, l, sys, -3, 0, c.name)
 				return
 			}
 			res, err := AllMargin(sys)

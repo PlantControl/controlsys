@@ -85,8 +85,12 @@ func TestTunePIDDCEdgeSensitivity(t *testing.T) {
 // 2FQ6DJ #18b: on sampled data of a stable non-minimum-phase plant, PDF
 // put 1 + Kp·G(0) at −9.8e-7 relative to the plant's DC gain, inside the
 // gap between the lowest sample and DC, which the Nyquist count took for
-// the DC gain: the loop was unstable. No design keeps |S| <= 4, so the
-// returned one keeps a warning. Oracle: companion roots of the exact model.
+// the DC gain: the loop was unstable. No design keeps |S| <= 4 at the
+// default crossover 0.32 rad/s, above the plant's right-half-plane zero at
+// 0.0225, where the fixed design came back with true |S| about 4e3 and a
+// warning (GNWBQZ). The default crossover now backs off as Pidtune's does
+// and lands where a design keeps |S| within the bound. Oracles: companion
+// roots and dense |S| of the exact model.
 func TestTunePIDFRDDCEdgeStable(t *testing.T) {
 	num := []float64{-0.5218348847732306, 0.01176025018024663}
 	den := []float64{1, 0.03931173190809955, 0.0050731315734235775}
@@ -98,8 +102,11 @@ func TestTunePIDFRDDCEdgeStable(t *testing.T) {
 	if re := pidClosedLoopMaxRe(num, den, k); !(re < 0) {
 		t.Errorf("%+v: closed-loop root at Re %g", k, re)
 	}
-	if !pidSensitivityWarned(r) {
-		t.Errorf("%+v: |S| %g without warning", k, pidExactSensitivityPeak(num, den, k, 1e-8, 1e3))
+	if s := pidExactSensitivityPeak(num, den, k, 1e-8, 1e3); s > 4*1.05 || !pidHasWarning(r, "lowered") {
+		t.Errorf("%+v: |S| %g, warnings %q", k, s, r.Evidence.Warnings)
+	}
+	if r.Evidence.AchievedPhaseMargin < 27 {
+		t.Errorf("%+v: margin %g", k, r.Evidence.AchievedPhaseMargin)
 	}
 }
 
