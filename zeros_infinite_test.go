@@ -18,33 +18,10 @@ func TestZerosVanishingMarkovInfinite(t *testing.T) {
 	a, b, c := vanishingMarkovModel()
 	const n = 5
 
-	v := make([]*big.Rat, n)
-	vAbs := make([]float64, n)
-	for i := range n {
-		v[i] = new(big.Rat).SetFloat64(b[i])
-		vAbs[i] = math.Abs(b[i])
-	}
-	for k := 1; k <= n; k++ {
-		if k > 1 {
-			w := make([]*big.Rat, n)
-			wAbs := make([]float64, n)
-			for i := range n {
-				w[i] = new(big.Rat)
-				for j := range n {
-					w[i].Add(w[i], new(big.Rat).Mul(new(big.Rat).SetFloat64(a[i*n+j]), v[j]))
-					wAbs[i] += math.Abs(a[i*n+j]) * vAbs[j]
-				}
-			}
-			v, vAbs = w, wAbs
-		}
-		h, bound := new(big.Rat), 0.0
-		for i := range n {
-			h.Add(h, new(big.Rat).Mul(new(big.Rat).SetFloat64(c[i]), v[i]))
-			bound += math.Abs(c[i]) * vAbs[i]
-		}
-		hf, _ := h.Float64()
-		if noise := math.Abs(hf) <= 2*eps()*bound; noise != (k < n) {
-			t.Fatalf("oracle: h%d = %g, bound %g", k, hf, bound)
+	h, bound := exactMarkov(a, b, c, n)
+	for k := range n {
+		if noise := math.Abs(h[k]) <= 2*eps()*bound[k]; noise != (k < n-1) {
+			t.Fatalf("oracle: h%d = %g, bound %g", k+1, h[k], bound[k])
 		}
 	}
 
@@ -80,6 +57,39 @@ func TestZerosVanishingMarkovInfinite(t *testing.T) {
 	}
 }
 
+// exactMarkov returns h_k = C·A^(k−1)·B, k = 1..n, of the stored float64
+// entries, computed exactly and then rounded, and |C|·|A|^(k−1)·|B|.
+func exactMarkov(a, b, c []float64, n int) (h, bound []float64) {
+	v := make([]*big.Rat, n)
+	vAbs := make([]float64, n)
+	for i := range n {
+		v[i] = new(big.Rat).SetFloat64(b[i])
+		vAbs[i] = math.Abs(b[i])
+	}
+	for k := 1; k <= n; k++ {
+		if k > 1 {
+			w := make([]*big.Rat, n)
+			wAbs := make([]float64, n)
+			for i := range n {
+				w[i] = new(big.Rat)
+				for j := range n {
+					w[i].Add(w[i], new(big.Rat).Mul(new(big.Rat).SetFloat64(a[i*n+j]), v[j]))
+					wAbs[i] += math.Abs(a[i*n+j]) * vAbs[j]
+				}
+			}
+			v, vAbs = w, wAbs
+		}
+		hk, bk := new(big.Rat), 0.0
+		for i := range n {
+			hk.Add(hk, new(big.Rat).Mul(new(big.Rat).SetFloat64(c[i]), v[i]))
+			bk += math.Abs(c[i]) * vAbs[i]
+		}
+		hf, _ := hk.Float64()
+		h, bound = append(h, hf), append(bound, bk)
+	}
+	return h, bound
+}
+
 func vanishingMarkovModel() (a, b, c []float64) {
 	a = []float64{
 		0.019797815752731235, 0.1279571753021788, 0.3811493659662884, 0.139536029114894, -0.24264502599501941,
@@ -91,6 +101,106 @@ func vanishingMarkovModel() (a, b, c []float64) {
 	return a,
 		[]float64{-0.26141391328956, -0.5418493331123063, -1.6696096552907065, 0.5915593669800094, 0.7074766289020779},
 		[]float64{-142.41775793762778, 47.204252982690086, -16.13755010077696, -144.21002232543742, 66.02760815553987}
+}
+
+// TestZerosSimilarCompanionRelativeDegree: companion realizations of
+// k/den(s) ("none") and 5.8e-4·(s+2)(s+3)/den(s) ("s+2,s+3") under a dense
+// similarity, so the vanishing Markov parameters are rounding noise (exactly,
+// below 2ε of |C|·|A|^(k−1)·|B|) and the relative degree is 5 (3). The
+// balanced staircase kept a noise block at margins 1.5 to 22, and the
+// arbitration, when it ran, picked it or an unscaled reduction keeping one
+// too, returning zeros far out (±6.57e5, triples at 4e4; 3.7e13 and −9.7e11
+// beside −2, −3), which MATLAB tzero returns as infinite. MYNTN2.
+func TestZerosSimilarCompanionRelativeDegree(t *testing.T) {
+	capped := 0
+	for _, tc := range similarCompanionModels() {
+		const n = 5
+		h, bound := exactMarkov(tc.a, tc.b, tc.c, n)
+		for k := range n {
+			if noise := math.Abs(h[k]) <= 2*eps()*bound[k]; noise != (k < n-1-len(tc.want)) {
+				t.Fatalf("%s: oracle: h%d = %g, bound %g", tc.name, k+1, h[k], bound[k])
+			}
+		}
+		for _, dt := range []float64{0, 0.1} {
+			sys, err := NewFromSlices(n, 1, 1, tc.a, tc.b, tc.c, []float64{0}, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st, _, err := prescaledStaircaseZeros(sys, zerosPrescale(sys)); err == nil && len(st) > len(tc.want) {
+				capped++
+			}
+			res, err := sys.ZerosDetail()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ok := len(res.Zeros) == len(tc.want) && res.Rank == 1
+			for i := 0; ok && i < len(tc.want); i++ {
+				ok = cmplx.Abs(res.Zeros[i]-tc.want[i]) <= 1e-6
+			}
+			if !ok {
+				t.Errorf("%s dt=%g: zeros %v rank %d, want %v, rank 1", tc.name, dt, res.Zeros, res.Rank, tc.want)
+			}
+		}
+	}
+	if capped < 4 {
+		t.Errorf("precondition: staircase kept noise zeros in %d of 10 cases, want ≥ 4", capped)
+	}
+}
+
+type siso5Model struct {
+	name    string
+	a, b, c []float64
+	want    []complex128
+}
+
+func similarCompanionModels() []siso5Model {
+	return []siso5Model{
+		{"none/2", []float64{
+			2.444937294663357, 0.10513697286922953, 9.342873135806606, 4.441551374594324, 18.959821362312205,
+			3.7073181732086193, -1.6344828135615028, 14.494888957755071, 6.639600320851898, 27.845215287137208,
+			-2.7120883051379634, 3.1066403713044215, -11.88350838504976, -2.849793267082719, -26.26997184413238,
+			4.001766105823747, -4.243626043580455, 16.6537374903842, 5.4476498573617915, 37.45163452814799,
+			-9.009479793308829, 6.293223648148065, -35.61334908886938, -14.705388943881916, -75.61499139993215,
+		}, []float64{-0.18450588794433898, -0.2780576379076768, 0.26847218133783696, -0.3727441804949622, 0.753752414815281},
+			[]float64{-0.0008367074928394088, -9.550308436440604e-05, -0.0004925365350772862, -0.0006295762953850253, -0.000375947536245429},
+			nil},
+		{"none/11", []float64{
+			-3.6010216759602174, -0.46512870837258147, 2.236497396208176, -2.4683005752946268, -1.3320590976227453,
+			0.9079065707857181, -0.8064266897835732, 0.7124703524803059, 0.11372910652152624, 0.5889210456887256,
+			-16.07081918413467, 3.1265972603201337, 12.951306306175812, -11.02416925826211, -3.9732029318673012,
+			-15.17887249006612, 4.777787035905897, 12.099343472556473, -10.311537157193824, -3.277081188862873,
+			-36.85271007226071, 3.1761629641702758, 29.670054058916094, -26.88463579862337, -9.257265515662914,
+		}, []float64{0.03205381751478459, -0.031041354866690317, 0.2907356668029031, 0.32478132659586667, 0.5851337409813273},
+			[]float64{0.012032755997848114, 0.006100507906573344, -0.00608097301619804, 0.0072055345075150165, -0.001313537387844313},
+			nil},
+		{"none/14", []float64{
+			15.460970574216162, 16.291145717511764, -46.685209055739925, 2.594994933331953, 30.522987872368244,
+			-7.742194407419967, -6.6551333118005775, 24.011201608392085, -0.5388297210952228, -16.070602587415618,
+			-25.797729652219875, -23.678382903522774, 79.26698647244923, -2.0551292229724645, -52.76680205489684,
+			7.777513040505962, 6.050311896001683, -23.789565341498744, 0.7744449908505388, 16.875772391225198,
+			-44.59630215631924, -41.760266215165764, 136.29092171323356, -5.1503306028349565, -90.00846744305078,
+		}, []float64{-0.26634080875693966, 0.12755678795496206, 0.44945677731769595, -0.12782497550518856, 0.7702280959616997},
+			[]float64{-0.7030457700387364, 0.04572871831400207, 0.18352372862522875, -0.0254727266201958, -0.36200292245643845},
+			nil},
+		{"s+2,s+3/0", []float64{
+			-1.0130237394008652, 2.3287914543598327, -1.5835460797730496, -1.0958531615427625, 1.2564304598093636,
+			5.614078974924694, 1.7123995053793803, 6.561926338487748, 5.606258763128271, -6.377786886947062,
+			2.600969332499258, 1.9504229132358917, 1.5794755475449676, 3.1599159530480097, -1.9077478891815942,
+			-0.5389179648420596, -1.636388957369126, -0.525285541365883, -0.46399528901619136, 1.2018272444872915,
+			25.881268850035568, 10.003678053851939, 26.675699414400068, 26.088798393314185, -26.86277671729723,
+		}, []float64{-0.09117907860104175, 0.281932554509531, 0.07524613507732114, 0.0017994324710368268, 1.2211087083313872},
+			[]float64{0.0065762466212722645, 0.012137062100383164, 0.003776120044725033, 0.004379284748623399, -0.002550334347387211},
+			[]complex128{-2, -3}},
+		{"s+2,s+3/182", []float64{
+			-3.751590125568706, -0.23525455045190324, 1.270280920151462, 4.154738662579246, -3.326668767254115,
+			4.923664987623986, 1.1899751094750468, -0.5934880511393412, -5.427260916572899, 5.260425489860091,
+			4.306918135226285, -0.0281095702942773, -2.891917020765666, -2.48619756686081, 4.041708017354085,
+			27.756391650013267, 8.70365434198883, -7.764774203936903, -32.17467796361963, 34.13733579345778,
+			30.940932159501493, 8.832959704291078, -9.321977920468493, -35.40575293563956, 36.98470835536557,
+		}, []float64{-0.11844914219805149, 0.08850987556274156, 0.41014895225342224, 0.5482328974640411, 0.7002416175514553},
+			[]float64{0.0784628111668368, 0.028914817667556394, -0.01347153637344174, -0.09389612152148384, 0.09102127530997685},
+			[]complex128{-2, -3}},
+	}
 }
 
 // TestZerosLargeOutputGainKeepsZeros: companion realizations of known
