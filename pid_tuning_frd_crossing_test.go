@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -154,8 +155,10 @@ func TestTunePIDFRDCrossingsBetweenGridPoints(t *testing.T) {
 // 1.08), P at wc 0.119 (|S| 1.33) and 7.58 (|S| 1.0), and I at wc 0.401
 // (|S| 2.47) and 0.0624 (|S| 1.60), whose extra crossings sit at wrapped
 // margins down to −172° on −1's far side. The I design at wc 0.0262 is
-// unstable (root at Re +0.012) and is now returned with its −80° crossing
-// as the achieved margin, not the 90.2° at wc. Oracles: closed-loop roots
+// unstable (root at Re +0.012) and was returned with its −80° crossing
+// as the achieved margin, not the 90.2° at wc; its resonance, ζ = 0.002,
+// the 200 samples do not resolve, so the count leaves it unknown and the
+// call may fail instead (N4MOKA). Oracles: closed-loop roots
 // and a dense |S| sweep of the exact plant, and sign changes of |L| − 1
 // and wrapped phases of the documented interpolant.
 func TestTunePIDFRDFreeOneGainReportsSampledCrossings(t *testing.T) {
@@ -179,7 +182,9 @@ func TestTunePIDFRDFreeOneGainReportsSampledCrossings(t *testing.T) {
 		frd := pidExactFRD(t, c.num, c.den, c.lo, c.hi, c.n)
 		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: c.wc})
 		if err != nil {
-			t.Errorf("case %d: %v", i, err)
+			if c.stable || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("case %d: %v", i, err)
+			}
 			continue
 		}
 		k, ev := *r.Controller, r.Evidence
