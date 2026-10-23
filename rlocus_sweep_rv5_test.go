@@ -21,7 +21,7 @@ var rvSweep5 = rvSweep{
 // rlrv5Limits are base-correct breakaway verdicts the track leaves open
 // (logged, not enforced; wave 22 report).
 var rlrv5Limits = map[int]string{
-	11942: "4-fold zero −36 of G − D split 0.09 by rounding of the similarity: as eigenvalues of A − B·C·A³/h₃ all four are u·κ-linked (u·κ ≈ 40) but the converted numerator needs ~1e3·u to merge them and the exact TF of the floats has four distinct zeros (stationary point −35.995); 1 ulp from losing it in the exact oracle",
+	11942: "open (rv oracle Prec=false): 4-fold zero −36 of G split 0.09 by rounding of the similarity; as eigenvalues of A − B·C·A³/h₃ all four are u·κ-linked (u·κ ≈ 40) but the converted numerator needs ~1e3·u to merge them (10·u allowed) and the exact TF of the floats has four distinct zeros (stationary point −35.995)",
 	11761: "amd64: discrete stationary points beside a pole/zero dipole off by 2e-5 relative (converted N/D accuracy)",
 }
 
