@@ -716,10 +716,10 @@ func TestKalman_BoundaryUndetectableNoStabilizing(t *testing.T) {
 			if !errors.Is(err, ErrNoStabilizing) {
 				t.Fatalf("got %v (result %v), want ErrNoStabilizing", err, res != nil)
 			}
-			// IsDetectable's rank verdict on this exactly undetectable Jordan
-			// pair flips with FMA contraction (-race on arm64); log only.
+			// F77544: the unobservable mode of this Jordan pair landed inside
+			// the unit circle under FMA contraction (-race on arm64).
 			if ok, derr := IsDetectable(mqDense(s.N, s.N, s.A), mqDense(p, s.N, s.C), false); derr != nil || ok {
-				t.Logf("IsDetectable = %v, %v; exact answer false", ok, derr)
+				t.Errorf("IsDetectable = %v, %v; exact answer false", ok, derr)
 			}
 		})
 	}

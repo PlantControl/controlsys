@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/cmplx"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -218,7 +219,9 @@ func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) (*StaircaseForm
 
 // IsStabilizable reports whether every uncontrollable mode of (A, B) is
 // stable: in the open left half-plane when continuous, inside the unit circle
-// otherwise. A model with no states is stabilizable. Nil, non-finite or
+// otherwise. A mode within rounding of uncontrollable on the boundary (PBH
+// rank at the staircase's floor) is not stabilizable, whichever side
+// rounding puts its eigenvalue. A model with no states is stabilizable. Nil, non-finite or
 // mismatched matrices return an error.
 func IsStabilizable(A, B *mat.Dense, continuous bool) (bool, error) {
 	return isStabilizable("IsStabilizable", A, B, continuous)
@@ -246,29 +249,193 @@ func isStabilizable(op string, A, B *mat.Dense, continuous bool) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", op, err)
 	}
-	if res.NCont == n {
+	var eig mat.Eigen
+	if nc2 := n - res.NCont; nc2 > 0 {
+		auc := mat.NewDense(nc2, nc2, nil)
+		aRaw := res.A.RawMatrix()
+		for i := range nc2 {
+			for j := range nc2 {
+				auc.Set(i, j, aRaw.Data[(res.NCont+i)*aRaw.Stride+(res.NCont+j)])
+			}
+		}
+		if !eig.Factorize(auc, mat.EigenNone) {
+			return false, fmt.Errorf("%s: eigenvalues of the uncontrollable part: %w", op, ErrSchurFailed)
+		}
+		for _, v := range eig.Values(nil) {
+			if poleOnOrOutsideStabilityBoundary(v, continuous, poleStabilityTolerance(v)) {
+				return false, nil
+			}
+		}
+	} else if res.MinCoupling > float64(n)*math.Sqrt(eps())*frobNorm(A) {
+		// A boundary mode counted controllable by amplified rounding has
+		// coupling ~1e-4 of this; genuine ones ~1e3 times it.
 		return true, nil
 	}
+	if !eig.Factorize(A, mat.EigenNone) {
+		return false, fmt.Errorf("%s: eigenvalues of A: %w", op, ErrSchurFailed)
+	}
+	return !boundaryPBHDeficient(A, B, eig.Values(nil), continuous), nil
+}
 
-	nc2 := n - res.NCont
-	auc := mat.NewDense(nc2, nc2, nil)
-	aRaw := res.A.RawMatrix()
-	for i := range nc2 {
-		for j := range nc2 {
-			auc.Set(i, j, aRaw.Data[(res.NCont+i)*aRaw.Stride+(res.NCont+j)])
+// boundaryPBHDeficient reports a point λ on the stability boundary where
+// [A − λI, B] has rank below n: σmin ≤ n²·eps·‖[A, B]‖_F, the staircase's
+// rank floor, with B scaled to ‖B‖_F = ‖A‖_F as the staircase's first step
+// is relative to σ₁(B), so the verdict is invariant to B's scale (a tiny B
+// gives σmin ≤ ‖B‖ at a pole near the boundary). The staircase alone
+// misses an uncontrollable boundary mode whose Jordan partner is
+// controllable: the pair splits by about √(eps·κ)·‖A‖, so the isolated
+// mode lands inside or outside the boundary by rounding (FMA flips it), or
+// the Krylov coupling, amplified rounding, exceeds the floor and the mode
+// counts as controllable. The real boundary points (z = ±1, s = 0) are
+// tested exactly when an eigenvalue is within its neighbour gap or
+// band = n·√eps·‖A‖_F of them, so the verdict does not depend on which side
+// rounding put a split pair. Off the real axis a split pair's mean,
+// accurate only to eps·κ, is projected onto the boundary and σmin
+// minimized along it within the pair's gap; pairs farther apart than 16·band
+// are distinct modes, not a split, and are left to the staircase.
+func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool) bool {
+	n, _ := A.Dims()
+	an := frobNorm(A)
+	if bn := frobNorm(B); bn > 0 {
+		s := an
+		if s == 0 {
+			s = 1
+		}
+		B = mat.DenseCopyOf(B)
+		B.Scale(s/bn, B)
+	}
+	floor := float64(n*n) * eps() * math.Hypot(an, frobNorm(B))
+	band := float64(n) * math.Sqrt(eps()) * an
+	gaps := make([]float64, len(lams))
+	nbs := make([]int, len(lams))
+	for k, lam := range lams {
+		gaps[k], nbs[k] = math.Inf(1), -1
+		for j, mu := range lams {
+			if d := cmplx.Abs(mu - lam); j != k && d < gaps[k] {
+				gaps[k], nbs[k] = d, j
+			}
 		}
 	}
-
-	var eig mat.Eigen
-	if !eig.Factorize(auc, mat.EigenNone) {
-		return false, fmt.Errorf("%s: eigenvalues of the uncontrollable part: %w", op, ErrSchurFailed)
+	points := []complex128{0}
+	if !continuous {
+		points = []complex128{1, -1}
 	}
-	for _, v := range eig.Values(nil) {
-		if poleOnOrOutsideStabilityBoundary(v, continuous, poleStabilityTolerance(v)) {
-			return false, nil
+	for _, pt := range points {
+		for k, lam := range lams {
+			if cmplx.Abs(lam-pt) <= max(band, min(gaps[k], 1)) {
+				if pbhSigmaMin(A, B, pt) <= floor {
+					return true
+				}
+				break
+			}
 		}
 	}
-	return true, nil
+	for k, lam := range lams {
+		j := nbs[k]
+		if gaps[k] > 16*band || (j < k && nbs[j] == k) {
+			continue
+		}
+		mean := (lam + lams[j]) / 2
+		lb, d := projectToStabilityBoundary(mean, continuous)
+		if imag(lb) == 0 || d > gaps[k] {
+			continue
+		}
+		if boundarySigmaMin(A, B, lb, gaps[k], floor, continuous) <= floor {
+			return true
+		}
+	}
+	return false
+}
+
+// boundarySigmaMin is the least σmin([A − λI, B]) found by golden-section
+// search over boundary points λ within radius of lb: the arc e^{iθ} when
+// discrete, the imaginary axis when continuous. σmin is 1-Lipschitz in λ,
+// so the search stops at an interval of floor/10.
+func boundarySigmaMin(A, B *mat.Dense, lb complex128, radius, floor float64, continuous bool) float64 {
+	best := pbhSigmaMin(A, B, lb)
+	p0 := imag(lb)
+	at := func(p float64) complex128 { return complex(0, p) }
+	if !continuous {
+		p0 = cmplx.Phase(lb)
+		at = func(p float64) complex128 { return cmplx.Rect(1, p) }
+	}
+	const ratio = 0.6180339887498949
+	lo, hi := p0-radius, p0+radius
+	x1, x2 := hi-ratio*(hi-lo), lo+ratio*(hi-lo)
+	f1, f2 := pbhSigmaMin(A, B, at(x1)), pbhSigmaMin(A, B, at(x2))
+	for range 80 {
+		if hi-lo <= max(floor/10, eps()*math.Abs(p0)) {
+			break
+		}
+		if f1 <= f2 {
+			hi, x2, f2 = x2, x1, f1
+			x1 = hi - ratio*(hi-lo)
+			f1 = pbhSigmaMin(A, B, at(x1))
+		} else {
+			lo, x1, f1 = x1, x2, f2
+			x2 = lo + ratio*(hi-lo)
+			f2 = pbhSigmaMin(A, B, at(x2))
+		}
+	}
+	return min(best, f1, f2)
+}
+
+// projectToStabilityBoundary returns the point of the stability boundary
+// nearest p and its distance from p.
+func projectToStabilityBoundary(p complex128, continuous bool) (complex128, float64) {
+	if continuous {
+		return complex(0, imag(p)), math.Abs(real(p))
+	}
+	r := cmplx.Abs(p)
+	if r == 0 {
+		return 1, 1
+	}
+	return p / complex(r, 0), math.Abs(1 - r)
+}
+
+// pbhSigmaMin is σmin([A − λI, B]), through the real embedding when λ is
+// complex.
+func pbhSigmaMin(A, B *mat.Dense, lam complex128) float64 {
+	n, _ := A.Dims()
+	_, m := B.Dims()
+	aRaw, bRaw := A.RawMatrix(), B.RawMatrix()
+	lr, li := real(lam), imag(lam)
+	k := 1
+	if li != 0 {
+		k = 2
+	}
+	cols := k * (n + m)
+	g := mat.NewDense(k*n, cols, nil)
+	gRaw := g.RawMatrix()
+	for i := range n {
+		for j := range n {
+			re := aRaw.Data[i*aRaw.Stride+j]
+			if i == j {
+				re -= lr
+			}
+			gRaw.Data[i*gRaw.Stride+j] = re
+			if k == 2 {
+				gRaw.Data[(n+i)*gRaw.Stride+n+m+j] = re
+			}
+		}
+		for j := range m {
+			b := bRaw.Data[i*bRaw.Stride+j]
+			gRaw.Data[i*gRaw.Stride+n+j] = b
+			if k == 2 {
+				gRaw.Data[(n+i)*gRaw.Stride+2*n+m+j] = b
+			}
+		}
+		if k == 2 {
+			gRaw.Data[i*gRaw.Stride+n+m+i] = li
+			gRaw.Data[(n+i)*gRaw.Stride+i] = -li
+		}
+	}
+	var svd mat.SVD
+	if !svd.Factorize(g, mat.SVDNone) {
+		return 0
+	}
+	sv := svd.Values(nil)
+	return sv[k*n-1]
 }
 
 // IsDetectable reports whether every unobservable mode of (A, C) is stable,
