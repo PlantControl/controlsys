@@ -420,12 +420,30 @@ func newRlswOracle(num, den []*big.Rat) rlswOracle {
 			o.required = append(o.required, x)
 		}
 	}
+	slices.Sort(o.required)
+	o.required = slices.CompactFunc(o.required, func(x, y float64) bool { return rlswSamePoint(complex(x, 0), complex(y, 0)) })
 	o.posed = true
 	return o
 }
 
+// rlswSamePoint reports whether x and y are one break point listed twice.
+func rlswSamePoint(x, y complex128) bool {
+	return x == y || cmplx.Abs(x-y) <= 1e-6*math.Max(cmplx.Abs(x), 1e-300)
+}
+
+// rlswDuplicate returns a break point bp lists twice.
+func rlswDuplicate(bp []complex128) (complex128, bool) {
+	for i, x := range bp {
+		if slices.ContainsFunc(bp[i+1:], func(y complex128) bool { return rlswSamePoint(x, y) }) {
+			return x, true
+		}
+	}
+	return 0, false
+}
+
+// accepts reports whether bp is the required set, each point listed once.
 func (o rlswOracle) accepts(bp []complex128) bool {
-	if !o.posed {
+	if _, dup := rlswDuplicate(bp); !o.posed || dup {
 		return false
 	}
 	tol := func(x float64) float64 { return 1e-4 * math.Max(math.Abs(x), 1e-3*o.scale) }
@@ -442,12 +460,12 @@ func (o rlswOracle) accepts(bp []complex128) bool {
 	return true
 }
 
-// rlswVerdict returns the components res gets right and the components the
-// oracles can judge.
-func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, err error) {
+// rlswVerdict returns the components res gets right, the components the
+// oracles can judge and whether Breakaway lists a point twice.
+func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, err error) {
 	sys, err := c.system()
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	res, rerr := RootLocus(sys, []float64{0, 1})
 	if oInt.posed || oFlt.posed {
@@ -482,8 +500,9 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, err error) 
 		posed |= rlswDepart
 	}
 	if rerr != nil {
-		return 0, posed, nil
+		return 0, posed, false, nil
 	}
+	_, dup = rlswDuplicate(res.Breakaway)
 	if oInt.accepts(res.Breakaway) || oFlt.accepts(res.Breakaway) {
 		ok |= rlswBreak
 	}
@@ -521,12 +540,12 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, err error) 
 		abs := sys
 		if c.L > 0 {
 			if abs, err = sys.AbsorbDelay(); err != nil {
-				return ok, posed, err
+				return ok, posed, dup, err
 			}
 		}
 		got, err := abs.Poles()
 		if err != nil {
-			return ok, posed, err
+			return ok, posed, dup, err
 		}
 		dok := len(got) == len(poles) && len(res.DepartureAngles) == len(poles)
 		for i := 0; dok && i < len(got); i++ {
@@ -552,7 +571,7 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, err error) 
 			ok |= rlswDepart
 		}
 	}
-	return ok, posed, nil
+	return ok, posed, dup, nil
 }
 
 func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
@@ -590,17 +609,21 @@ type rlswGolden struct {
 	Posed string `json:"posed"`
 }
 
-func rlswRun(t *testing.T, cases []rlswCase) (ok, posed []int) {
+func rlswRun(t *testing.T, cases []rlswCase) (ok, posed, dups []int) {
 	ok, posed = make([]int, len(cases)), make([]int, len(cases))
 	for i := range cases {
 		oi, of := cases[i].oracles()
 		var err error
-		ok[i], posed[i], err = rlswVerdict(&cases[i], oi, of)
+		var dup bool
+		ok[i], posed[i], dup, err = rlswVerdict(&cases[i], oi, of)
 		if err != nil {
 			t.Fatalf("case %d: %v\n%s", i, err, &cases[i])
 		}
+		if dup {
+			dups = append(dups, i)
+		}
 	}
-	return ok, posed
+	return ok, posed, dups
 }
 
 func rlswHex(v []int) string {
@@ -662,10 +685,11 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 // rlswCheck fails when a component that base got right on cases (golden
 // file golden) is now wrong or errors; env names the regenerate variable.
 // A Breakaway verdict listed in limits is reported, not enforced, when
-// rlswUlpSensitive confirms it is a float64 precision limit.
+// rlswUlpSensitive confirms it is a float64 precision limit. It also fails
+// when any case's Breakaway lists a point twice, which base did.
 func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string) {
 	t.Helper()
-	ok, posed := rlswRun(t, cases)
+	ok, posed, dups := rlswRun(t, cases)
 	if path := os.Getenv(env); path != "" {
 		data, err := json.Marshal(rlswGolden{Base: rlswBaseRev, OK: rlswHex(ok), Posed: rlswHex(posed)})
 		if err != nil {
@@ -724,6 +748,13 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 		}
 	}
 	t.Logf("fixed vs base: break %d asym %d depart %d arrive %d; regressed: %v", fixed[0], fixed[1], fixed[2], fixed[3], regressed)
+	for k, i := range dups {
+		if k < 5 {
+			sys, _ := cases[i].system()
+			res, _ := RootLocus(sys, []float64{0, 1})
+			t.Errorf("case %d: Breakaway %v lists a point twice\n%s", i, res.Breakaway, &cases[i])
+		}
+	}
 }
 
 // rlswPrecisionLimits are base-correct breakaway verdicts below float64

@@ -395,7 +395,9 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 	// A multiple root of multiplicity m is an (m−1)-fold root of N'D − ND',
 	// split by rounding: the m−1 nearest roots are that break point, so it
 	// is reported once: at the centre of exactly equal roots, else at the
-	// nearest root when that is real.
+	// nearest root when that is real. A point reached twice (a pole and a
+	// zero cluster snapping to the same root, a near-real conjugate pair) is
+	// listed once.
 	used := make([]bool, len(roots))
 	claim := func(c float64, k int) (first int) {
 		first = -1
@@ -423,11 +425,13 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 			if i := claim(c.centre, c.m-1); i >= 0 && !c.exact && isReal(roots[i]) {
 				at = complex(real(roots[i]), 0)
 			}
-			result = append(result, at)
+			if !slices.Contains(result, at) {
+				result = append(result, at)
+			}
 		}
 	}
 	for i, r := range roots {
-		if used[i] || !isReal(r) || slices.Contains(roots[:i], r) {
+		if used[i] || !isReal(r) || slices.Contains(roots[:i], r) || slices.Contains(roots[:i], cmplx.Conj(r)) {
 			continue
 		}
 		s := real(r)
@@ -444,7 +448,7 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 		} else {
 			onLocus = isOnRealAxisSegment(s, poles, zeros) != lp.negGain
 		}
-		if onLocus {
+		if onLocus && !slices.Contains(result, complex(s, 0)) {
 			result = append(result, complex(s, 0))
 		}
 	}
@@ -1076,7 +1080,37 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 		}
 		test(members, nil)
 	}
-	return out
+	return mergeClusters(out, u, sigma, sigmaTrace)
+}
+
+// mergeClusters joins the clusters of multipleRoots in its origin band
+// (|c| ≤ u^(1/m)·σ or ≤ 10·u·σₜ) into one multiple root at the origin.
+// Exactly equal roots are grouped apart from the others, so exact delay
+// poles at 0 and an eig cluster at 0 would otherwise each be reported.
+func mergeClusters(cs []rootCluster, u, sigma, sigmaTrace float64) []rootCluster {
+	atOrigin := func(c rootCluster) bool {
+		return math.Abs(c.centre) <= math.Max(math.Pow(u, 1/float64(c.m))*sigma, 10*u*sigmaTrace)
+	}
+	for i := 0; i < len(cs); i++ {
+		for j := i + 1; j < len(cs); j++ {
+			a, b := cs[i], cs[j]
+			d := math.Abs(a.centre - b.centre)
+			if !atOrigin(a) || !atOrigin(b) {
+				continue
+			}
+			m := a.m + b.m
+			cs[i] = rootCluster{
+				centre: (float64(a.m)*a.centre + float64(b.m)*b.centre) / float64(m),
+				radius: max(a.radius, b.radius, d),
+				m:      m,
+				exact:  a.exact && b.exact && d == 0,
+				tf:     a.tf && b.tf,
+			}
+			cs = slices.Delete(cs, j, j+1)
+			j = i
+		}
+	}
+	return cs
 }
 
 // splitWidest splits the group members of roots in two at the widest link

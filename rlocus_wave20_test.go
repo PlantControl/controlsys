@@ -32,13 +32,8 @@ func rlqObservable(num, den []float64) (a, b, c []float64, d float64) {
 
 func rlqUnique(t *testing.T, name string, bp []complex128) {
 	t.Helper()
-	for i, x := range bp {
-		for _, y := range bp[i+1:] {
-			if cmplx.Abs(x-y) <= 1e-6*math.Max(cmplx.Abs(x), 1e-300) || x == y {
-				t.Errorf("%s: Breakaway %v lists %v twice", name, bp, x)
-				return
-			}
-		}
+	if x, dup := rlswDuplicate(bp); dup {
+		t.Errorf("%s: Breakaway %v lists %v twice", name, bp, x)
 	}
 }
 
@@ -264,5 +259,59 @@ func TestRootLocus_PAOH7XSweepPins(t *testing.T) {
 		if !oi.accepts(res.Breakaway) && !of.accepts(res.Breakaway) {
 			t.Errorf("%s: Breakaway = %v, oracles %v / %v", tc.name, res.Breakaway, oi.required, of.required)
 		}
+	}
+}
+
+// TestRootLocus_MultiplePoleBreakawayListedOnce: PAOH7X review (wave 20).
+// A multiple pole or a near-real stationary pair is one break point:
+//   - exact delay poles z^L beside a nilpotent A whose eig returns an equal
+//     pair −5.7e-18: one 4- or 5-fold pole at 0 (eig and delay clusters were
+//     kept apart and both listed);
+//   - a rotated+similar triple pole at 10.5 whose N'D − ND' roots near it
+//     are a conjugate pair within 1e-6 of real (each listed);
+//   - observable companions with a triple zero at −1.335144e-5, D = −1.75
+//     and a pole at 2.25 or −2.75 (double) nearly cancelled by a zero, whose
+//     stationary point there is the same near-real pair (oracle ill posed).
+func TestRootLocus_MultiplePoleBreakawayListedOnce(t *testing.T) {
+	for _, L := range []float64{2, 3} {
+		sys := rlpSys(t, 2, []float64{0.5, 1, -0.25, -0.5}, []float64{0, 1}, []float64{1, 0}, 0, 1)
+		if err := sys.SetInputDelay([]float64{L}); err != nil {
+			t.Fatal(err)
+		}
+		res, err := RootLocus(sys, []float64{0, 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Breakaway) != 1 || res.Breakaway[0] != 0 {
+			t.Errorf("delay %g: Breakaway = %v, want [0]", L, res.Breakaway)
+		}
+	}
+
+	a := []float64{39.47763330898467, 351.3792695398101, 803.2895398100804, 108.07267348429517, 961.0695288531774, 2192.113853177502, -48.41540540540544, -424.72716216216213, -969.0471621621621}
+	b := []float64{-0.4972972972972973, -1.3567567567567567, 0.6}
+	c := []float64{-4550.918918918919, 14864.432432432433, 29840.432432432433}
+	o := rlpExactOracle(t, 3, a, b, c, 0)
+	res, err := RootLocus(rlpSys(t, 3, a, b, c, 0, 0), []float64{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rlqUnique(t, "rotated triple pole 10.5", res.Breakaway)
+	for _, x := range o.required {
+		if !slices.ContainsFunc(res.Breakaway, func(z complex128) bool { return cmplx.Abs(z-complex(x, 0)) <= 1e-6*math.Abs(x) }) {
+			t.Errorf("rotated triple pole 10.5: Breakaway = %v, missing %v", res.Breakaway, x)
+		}
+	}
+
+	for _, tc := range []struct{ num, den []float64 }{
+		{[]float64{-1.75, 3.93742990494, 0.00015771294913001212, 2.105703307673736e-09, 9.371408993299497e-15}, []float64{1, -1.625, -2.71875, 2.953125, 0}},
+		{[]float64{-1.75, 1.5311799049400001, 17.44537383224163, 0.0006987609482570744, 9.329457586179378e-09, 4.152054817864638e-14}, []float64{1, 2.25, -12.6875, -35.765625, -7.6484375, 14.1796875}},
+	} {
+		a, b, c, d := rlqObservable(tc.num, tc.den)
+		n := len(tc.den) - 1
+		res, err := RootLocus(rlpSys(t, n, a, b, c, d, 0), []float64{0, 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rlqUnique(t, "triple zero companion", res.Breakaway)
 	}
 }
