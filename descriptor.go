@@ -547,7 +547,7 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 			}
 		}
 		if ok && !resolved && !index1 && nf >= n-d {
-			return nil, fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
+			return nil, nil, fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
 		}
 	}
 	if !ok {
