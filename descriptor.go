@@ -165,11 +165,12 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 // leaving out the infinite ones as MATLAB pole does. A nonsingular E (MATLAB
 // rank) keeps every eigenvalue with β ≠ 0. For a singular E of rank r the
 // n − r eigenvalues of least |β|/|α| of the whole-pencil QZ are infinite
-// when a gap separates them (leastRatioInfTol) and no large one remains
-// (index 1); when E has a stiff singular value just above the rounding
-// this is the classification, with β = 0 alone infinite if no gap shows
-// or the pencil has index ≥ 2 (pencilIndexOne): its chain members QZ
-// leaves at |β|/|α| ~ ε^(1/k), above the stiff finite pole's.
+// when a gap separates them (leastRatioInfTol), no large one remains and
+// the pencil has index 1 (pencilIndexOne): a chain of length k has k
+// infinite eigenvalues but lowers rank(E) by one. When E has a stiff
+// singular value just above the rounding this is the classification,
+// with β = 0 alone infinite if no gap shows or the pencil has index ≥ 2:
+// its chain members QZ leaves at |β|/|α| ~ ε^(1/k), above the stiff finite pole's.
 // Otherwise the infinite structure is deflated first (deflateInfinite),
 // since QZ resolves an infinite Jordan chain of length k only to
 // |β|/|α| ~ ε^(1/k), and the poles are the QZ eigenvalues of the finite
@@ -206,7 +207,9 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 			return finitePoles(alphar, alphai, beta, tol), nil
 		}
 		if sep && !largeRetained(alphar, alphai, beta, tol, qzInfiniteTol(qzLargeRatio, normA, normE)) {
-			return finitePoles(alphar, alphai, beta, tol), nil
+			if _, index1 := pencilIndexOne(A, E, n, normA); index1 {
+				return finitePoles(alphar, alphai, beta, tol), nil
+			}
 		}
 	}
 	if a, e, _, _, nf, stiff, ok := deflateInfinite(A, E, false); ok && !stiff {
@@ -453,9 +456,13 @@ func allZeroVec(v *mat.VecDense) bool {
 // decides by the same test. Entries of E_∞ below the finite/infinite
 // threshold are rounding noise and are zeroed so index-1 parts give N = 0
 // exactly. QZ resolves an infinite Jordan chain
-// only to |β|/|α| ~ ε^(1/k); when it fails or keeps a large eigenvalue and
-// the staircase (deflateInfinite) counts the finite ones differently, the
-// split is taken from the deflated pencil instead. Internal
+// only to |β|/|α| ~ ε^(1/k); when it fails, keeps a large eigenvalue,
+// keeps more than rank(E) (the most a regular pencil has finite) or the
+// pencil has index ≥ 2 (fewer than rank(E) finite, pencilIndexOne), and the
+// staircase (deflateInfinite) counts the finite ones differently, the
+// split is taken from the deflated pencil instead; an index ≥ 2 pencil
+// whose QZ split keeps rank(E) or more finite and that the staircase
+// cannot resolve returns ErrDescriptorSingular. Internal
 // delay channels are reduced together with the I/O channels.
 func (sys *System) properExplicitForm() (*System, error) {
 	out, err := sys.weierstrassReduce()
@@ -528,12 +535,19 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	vsl := make([]float64, n*n)
 	vsr := make([]float64, n*n)
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
-	if !ok || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
-		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff && (!ok || nfd != nf) {
+	if !ok || nf > n-d || !index1 || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
+		resolved := false
+		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff {
+			resolved = ok && nfd == nf
 			all := func(_, _, _ float64) bool { return true }
-			if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
-				s, t, vsl, vsr, nf, recip, ok = sd, td, qs, zs, nfd, rc, true
+			if !resolved {
+				if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
+					s, t, vsl, vsr, nf, recip, ok, resolved = sd, td, qs, zs, nfd, rc, true, true
+				}
 			}
+		}
+		if ok && !resolved && !index1 && nf >= n-d {
+			return nil, fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
 		}
 	}
 	if !ok {
