@@ -21,7 +21,6 @@ var rvSweep5 = rvSweep{
 // rlrv5Limits are base-correct breakaway verdicts the track leaves open
 // (logged, not enforced; wave 22 report).
 var rlrv5Limits = map[int]string{
-	11124: "open B1: pole pair 116±0.25i of a non-normal A (σ_b 4.4e7, u·κ 1.03 against the 0.55 split, √u·σ_b 1.3) passes the eig pair rule as a double pole; the K-sign test on such pairs drops exact doubles split complex (sweeps 1–3)",
 	11942: "4-fold zero −36 of G − D split by rounding of the similarity; 1 ulp from losing it in the exact oracle",
 	11761: "amd64: discrete stationary points beside a pole/zero dipole off by 2e-5 relative (converted N/D accuracy)",
 }
@@ -39,8 +38,10 @@ func TestRootLocusSweepRV5NoRegression(t *testing.T) {
 // TestRootLocus_RV5Repros pins the wave-20 final-review cases of the fifth
 // frozen sweep, judged on every component by its exact oracle: 11941,
 // 11400, 10478 (a rounding-level h₂ kept a noise zero, flipping departure
-// angles by π and adding a far break point ~1e12). The rlrv5Limits cases
-// are logged.
+// angles by π and adding a far break point ~1e12), and 11124 (a resolved
+// pair 116±0.25i of a non-normal A, σ_b 4.4e7, admitted as a double only
+// by the √u·σ_b split, gave the K < 0 point 116.00007). The rlrv5Limits
+// cases are logged.
 func TestRootLocus_RV5Repros(t *testing.T) {
 	cs := rvSweep5.frozenCases(t)
 	oras := rvSweep5.cachedOracles(t, cs)

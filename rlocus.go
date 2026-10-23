@@ -1006,8 +1006,9 @@ type rootCluster struct {
 	// conversion may already have cancelled a common root.
 	tf bool
 	// resolved marks a tf multiplicity whose roots eig resolves (no u·κ
-	// link): the converted polynomial cannot tell them from a multiple root,
-	// but the realization can, so it is a break point only where K > 0.
+	// link), or a complex eig pair that only the √u·σ_b split merges and
+	// the coefficients do not confirm: no proof of a multiple root, so it
+	// is a break point only where K > 0.
 	resolved bool
 }
 
@@ -1048,9 +1049,16 @@ func polyRootsOrNil(p Poly) []complex128 {
 //     its roots);
 //   - each of its roots is merged by u with another and it is an eig pair
 //     (pairCond set) whose mean u·κ_mean is below its split and that is
-//     real, straddles the origin, or is split by at most √u·σ_b (a zero
-//     pair of zeroCondition's capped normwise κ is left to the next rule:
-//     that κ links a resolved near-axis complex zero pair);
+//     real or straddles the origin (a zero pair of zeroCondition's capped
+//     normwise κ is left to the next rule: that κ links a resolved
+//     near-axis complex zero pair); a complex pair off the origin that is
+//     only split by at most √u·σ_b is no proof of a double (a non-normal A
+//     of scale σ_b resolves 116±0.25i, σ_b 4.4e7): the coefficients must
+//     merge it within a backward error √u (a rotated companion double needs
+//     ≤ 6e4·u, that resolved pair 1e9·u), or else it is a double only
+//     where the converted p splits it into two real roots (eig and p
+//     disagree on the split, so it is rounding), and otherwise it is a
+//     break point only where K > 0 (rootCluster.resolved);
 //   - or p has, up to a backward error of 10·u in its coefficients, a root
 //     of multiplicity m at the centre c found by Newton on p^(m−1) within
 //     max(2·spread, ρ) of the group mean (ρ the split of that backward
@@ -1173,8 +1181,13 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 			}
 			origin := math.Max(spread, cmplx.Abs(c0)) <= math.Pow(u, 1/float64(m))*sigma && (connected || pairCond == nil) ||
 				cmplx.Abs(c0) <= 10*u*sigmaTrace && spread <= math.Pow(u, 1/float64(m))*sigmaTrace
-			pair := m == 2 && pairCond != nil && (imag(roots[members[0]]) == 0 || cmplx.Abs(c0) <= spread || spread <= nuBal) &&
-				u*pairCond(members[0], members[1]) < spread
+			cplx := imag(roots[members[0]]) != 0
+			pair := m == 2 && pairCond != nil && u*pairCond(members[0], members[1]) < spread
+			// normwise marks a complex pair off the origin that only the √u·σ_b
+			// rounding split admits: no proof of a double, so the converted
+			// polynomial must confirm it, else K > 0 decides.
+			normwise := pair && cplx && cmplx.Abs(c0) > spread
+			pair = pair && (!normwise || spread <= nuBal)
 			if sub && m == 2 && pairCond != nil {
 				gap := math.Inf(1)
 				for _, j := range rest {
@@ -1184,7 +1197,7 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 					return
 				}
 			}
-			if spread == 0 || !sub && origin || linked && pair && (!sub || imag(roots[members[0]]) == 0) {
+			if spread == 0 || !sub && origin || linked && pair && !normwise && (!sub || !cplx) {
 				out = append(out, rootCluster{centre: real(c0), radius: radius, m: m, exact: spread == 0})
 				return
 			}
@@ -1196,6 +1209,9 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 			if linked && m == 2 && imag(roots[members[0]]) == 0 && sigmaTrace > 0 {
 				conf = 100 * u
 			}
+			if linked && pair && normwise && !sub {
+				conf = math.Sqrt(u)
+			}
 			if m < len(p) {
 				c, ok := multipleRootAt(p, real(c0), m, conf, math.Max(2*spread, splitRadius(p, real(c0), m, conf)))
 				if ok && sub {
@@ -1203,7 +1219,11 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 					ok = !slices.ContainsFunc(rest, func(j int) bool { return cmplx.Abs(roots[j]-complex(c, 0)) <= rho })
 				}
 				if ok {
-					out = append(out, rootCluster{centre: c, radius: math.Max(radius, math.Sqrt(u)*math.Abs(c)), m: m, tf: true, resolved: pairCond != nil && m == 2 && !linked && imag(roots[members[0]]) != 0})
+					out = append(out, rootCluster{centre: c, radius: math.Max(radius, math.Sqrt(u)*math.Abs(c)), m: m, tf: true, resolved: pairCond != nil && m == 2 && !linked && cplx})
+					return
+				}
+				if linked && pair && normwise && !sub {
+					out = append(out, rootCluster{centre: real(c0), radius: radius, m: m, resolved: !realPairAt(p, real(c0), math.Max(10*spread, splitRadius(p, real(c0), m, conf)))})
 					return
 				}
 			}
@@ -1609,6 +1629,27 @@ func multipleRootAt(p Poly, s float64, m int, tol, reach float64) (float64, bool
 		}
 	}
 	return c, true
+}
+
+// realPairAt reports whether p has two real roots within reach of s about
+// the root c of p′ found by Newton from s: p(c) and p(c ± reach) differ in
+// sign on both sides.
+func realPairAt(p Poly, s, reach float64) bool {
+	d1 := p.Derivative()
+	d2 := d1.Derivative()
+	c := s
+	for range 8 {
+		f, df := evalReal(d1, c), evalReal(d2, c)
+		if df == 0 {
+			break
+		}
+		c -= f / df
+	}
+	if !isFinite(c) || math.Abs(c-s) > reach {
+		return false
+	}
+	v := evalReal(p, c)
+	return v*evalReal(p, c-reach) < 0 && v*evalReal(p, c+reach) < 0
 }
 
 // balance returns D⁻¹·A·D for LAPACK's diagonal balancing D (Dgebal,
