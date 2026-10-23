@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -513,10 +514,7 @@ func (g *rvGen) jordanBlocks(nmax, bits, emin, emax int) []rvBlk {
 			bs = append(bs, rvBlk{g.realPole(bits, emin, emax, 0.8), g.dy(bits, emin, emax), 2})
 			n += 2
 		case u < 0.65:
-			s := 2 + g.r.IntN(2)
-			if s > target-n {
-				s = target - n
-			}
+			s := min(2+g.r.IntN(2), target-n)
 			bs = append(bs, rvBlk{g.realPole(bits, emin, emax, 0.8), 0, s})
 			n += s
 		default:
@@ -635,10 +633,7 @@ func (g *rvGen) famDSign(c *rvCase) bool {
 		return true
 	}
 	n := 3 + g.r.IntN(4)
-	rel := 1 + g.r.IntN(3)
-	if rel > n {
-		rel = n
-	}
+	rel := min(1+g.r.IntN(3), n)
 	poles := g.poleSet(n, 5, -3, 1, 0.75, 0.35)
 	zs := g.poleSet(n-rel, 5, -3, 1, 0.6, 0.3)
 	if rvNroots(zs) > n-rel {
@@ -1052,9 +1047,9 @@ func rvPGcd(a, b rvP) rvP {
 }
 func rvPEval(a rvP, x *big.Rat) *big.Rat {
 	r := new(big.Rat)
-	for i := len(a) - 1; i >= 0; i-- {
+	for _, v := range slices.Backward(a) {
 		r.Mul(r, x)
-		r.Add(r, a[i])
+		r.Add(r, v)
 	}
 	return r
 }
@@ -1126,7 +1121,7 @@ func rvCauchy(f rvP) *big.Rat {
 	f = f.trim()
 	n := len(f) - 1
 	m := new(big.Rat)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		t := new(big.Rat).Quo(f[i], f[n])
 		t.Abs(t)
 		if t.Cmp(m) > 0 {
@@ -1172,7 +1167,7 @@ func rvRefine(f rvP, lo, hi *big.Rat) rvIval {
 	}
 	sh := rvPEval(f, hi).Sign()
 	two := rvRi(2)
-	for it := 0; it < 600; it++ {
+	for it := range 600 {
 		w := new(big.Rat).Sub(hi, lo)
 		m := new(big.Rat).Abs(lo)
 		if a := new(big.Rat).Abs(hi); a.Cmp(m) > 0 {
@@ -1242,7 +1237,7 @@ func rvNumRoots(c []float64) []complex128 {
 		a[i] = complex(c[i]/lead, 0)
 	}
 	R := 0.0
-	for i := 0; i < deg; i++ {
+	for i := range deg {
 		R = math.Max(R, math.Pow(cmplx.Abs(a[i]), 1/float64(deg-i)))
 	}
 	if R == 0 {
@@ -1260,7 +1255,7 @@ func rvNumRoots(c []float64) []complex128 {
 		}
 		return p, dp
 	}
-	for it := 0; it < 500; it++ {
+	for range 500 {
 		maxc := 0.0
 		for k := range z {
 			p, dp := ev(z[k])
@@ -1393,7 +1388,7 @@ func rvFujiwara(p rvP) float64 {
 		return 0
 	}
 	R := 0.0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		R = math.Max(R, math.Pow(math.Abs(f[i]/f[n]), 1/float64(n-i)))
 	}
 	return R
