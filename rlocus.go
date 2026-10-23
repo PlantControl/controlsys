@@ -345,8 +345,9 @@ func makeBranches(allEigs [][]complex128, nStates, nGains int) [][]complex128 {
 // N'D − ND' it splits into; no absolute cut-off decides it, so slow or
 // close resolved poles stay distinct. A resolved complex pair that only the
 // converted polynomial merges (rootCluster.resolved) is no multiple root:
-// the real root of N'D − ND' it claims is a break point only where K > 0
-// (eval, else the real-axis rule). A root of N'D − ND' is real when its
+// the real root of N'D − ND' it claims is a stationary point. A root of
+// N'D − ND' near a multiple pole or zero (multipleRootNear) is that root
+// only within the cluster's own split radius. A root of N'D − ND' is real when its
 // imaginary part is within 1e-6 of its modulus. A multiple root of N'D − ND'
 // itself (multipleRootNear on it; a multiple zero of G − D, or of G split
 // past its cluster test) is one stationary point, judged and reported once
@@ -355,7 +356,9 @@ func makeBranches(allEigs [][]complex128, nStates, nGains int) [][]complex128 {
 // from the state space, so a sign rule over rounding-noise zeros or a
 // conversion error in N/D cannot misplace it; where the sign of G is not
 // resolved the real-axis rule (0° for a negative high-frequency gain)
-// decides.
+// decides. Every reported stationary point passes that K > 0 test last; a
+// K = 0 or ∞ point has no sign test. G ≡ 0 (an all-zero converted N) has
+// no locus and no break points.
 func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, zeros []complex128) ([]complex128, error) {
 	num, den0, numFull, denFull, delay, err := breakawayTF(sys, undelayed, delay, lp.n)
 	if err != nil {
@@ -385,6 +388,9 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 		return nil, err
 	}
 	num, den := trimmedTF(num, den0, delay, lp.relDeg, lp.n)
+	if !slices.ContainsFunc(num, func(c float64) bool { return c != 0 }) {
+		return []complex128{}, nil
+	}
 
 	sigmaBal, sigma := balancedNorm(lp.a, lp.n), 0.0
 	for _, r := range slices.Concat(poles, zeros) {
@@ -397,7 +403,18 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 		clusters = append(clusters, netClusters(multipleRoots(ec.vals, ec.kappa, ec.pairCondition, den, lp.n, sigma, sigmaBal, sigmaBal), zeros, numRoots)...)
 	}
 	bl := lp.balanced()
-	var result []complex128
+	type point struct {
+		s float64
+		// multiple marks a K = 0 or ∞ point (a multiple pole or zero),
+		// where the sign of G is no locus test.
+		multiple bool
+	}
+	var pts []point
+	add := func(p point) {
+		if !slices.ContainsFunc(pts, func(q point) bool { return q.s == p.s }) {
+			pts = append(pts, p)
+		}
+	}
 	// A multiple root of multiplicity m is an (m−1)-fold root of N'D − ND',
 	// split by rounding: the m−1 nearest roots are that break point, so it
 	// is reported once: at the centre of exactly equal roots, else at the
@@ -438,12 +455,10 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 			if i >= 0 && !c.exact && isReal(roots[i]) {
 				at = complex(real(roots[i]), 0)
 			}
-			if c.resolved && (i < 0 || !isReal(roots[i]) || !onLocusAt(real(at))) {
+			if c.resolved && (i < 0 || !isReal(roots[i])) {
 				continue
 			}
-			if !slices.Contains(result, at) {
-				result = append(result, at)
-			}
+			add(point{real(at), !c.resolved})
 		}
 	}
 	for i, r := range roots {
@@ -455,7 +470,8 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 		if m == 0 {
 			c, m = multipleRootNear(num, nil, s, lp.n, zeros)
 		}
-		onLocus := m > 0
+		multiple := m > 0
+		onLocus := multiple
 		if !onLocus && s != 0 {
 			if cs, ms := multipleRootNear(stat, statBound, s, lp.n, roots); ms > 0 {
 				claim(cs, ms)
@@ -470,8 +486,14 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 		} else {
 			onLocus = isOnRealAxisSegment(s, poles, zeros) != lp.negGain
 		}
-		if onLocus && !slices.Contains(result, complex(s, 0)) {
-			result = append(result, complex(s, 0))
+		if onLocus {
+			add(point{s, multiple})
+		}
+	}
+	var result []complex128
+	for _, p := range pts {
+		if p.multiple || onLocusAt(p.s) {
+			result = append(result, complex(p.s, 0))
 		}
 	}
 	return result, nil
@@ -779,9 +801,11 @@ func (lp *rlocusLoop) eval(s float64) (g, dg float64, ok bool) {
 // cluster is a multiple pole (zero) split by rounding and a break point
 // under either angle condition; for N'D − ND' it is one stationary point.
 // m is the size of the cluster itself: the roots within 10·ρ₂ of c,
-// ρ₂ = √(u·pb(|c|)/|p″(c)/2|) the
-// rounding split of a double root there. A double-root test alone would
-// merge m ≥ 3 distinct roots a relative δ apart, since p(c) ~ δ^m.
+// ρ₂ = √(u·pb(|c|)/|p″(c)/2|) the rounding split of a double root there.
+// A double-root test alone would merge m ≥ 3 distinct roots a relative δ
+// apart, since p(c) ~ δ^m. s itself must lie within 10·ρₘ of c,
+// ρₘ = (u·pb(|c|)/|p^(m)(c)/m!|)^(1/m) the split of that m-fold root: a
+// resolved root of N'D − ND' beside a multiple pole is no part of it.
 func multipleRootNear(p, pb Poly, s float64, n int, roots []complex128) (centre float64, m int) {
 	u := 2 * float64(n) * eps()
 	deg := len(p) - 1
@@ -846,6 +870,13 @@ func multipleRootNear(p, pb Poly, s float64, n int, roots []complex128) (centre 
 		if math.Abs(evalReal(der(j), c)) > u*boundAt(j, c) {
 			return 0, 0
 		}
+	}
+	f := 1.0
+	for k := 2; k <= m; k++ {
+		f *= float64(k)
+	}
+	if math.Abs(s-c) > 10*math.Pow(u*boundAt(0, c)/math.Abs(evalReal(der(m), c)/f), 1/float64(m)) {
+		return 0, 0
 	}
 	return c, m
 }
@@ -1006,15 +1037,20 @@ func polyRootsOrNil(p Poly) []complex128 {
 // centre when
 //   - its roots are equal;
 //   - it lies within u^(1/m)·σ of the origin, where normwise rounding of a
-//     realization of scale σ splits an m-fold root at 0; or it is split by
+//     realization of scale σ splits an m-fold root at 0, and for eig roots
+//     its u·κ links connect all of it (two resolved slow doubles of a
+//     fast/slow loop are no 4-fold root at 0); or it is split by
 //     at most u^(1/m)·σₜ about a centre within 10·u·σₜ of the origin
 //     (σₜ = σ_b for poles and for zeros with a feedthrough, else 0: the
 //     centre of an eig cluster is its
 //     trace, which rounding of A moves by only ~u·σ_b, so a resolved slow
 //     cluster stays off 0 even when a realization of scale σ_b cannot split
 //     its roots);
-//   - each of its roots is merged by u with another and it is a pair that
-//     is real, straddles the origin, or is split by at most √u·σ_b;
+//   - each of its roots is merged by u with another and it is an eig pair
+//     (pairCond set) whose mean u·κ_mean is below its split and that is
+//     real, straddles the origin, or is split by at most √u·σ_b (a zero
+//     pair of zeroCondition's capped normwise κ is left to the next rule:
+//     that κ links a resolved near-axis complex zero pair);
 //   - or p has, up to a backward error of 10·u in its coefficients, a root
 //     of multiplicity m at the centre c found by Newton on p^(m−1); 100·u
 //     for m ≥ 3 poles merged by u, which eig cannot resolve and the TF
@@ -1119,10 +1155,22 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 					return b != a && cmplx.Abs(roots[a]-roots[b]) <= u*(kappa[a]+kappa[b])
 				})
 			}
-			origin := math.Max(spread, cmplx.Abs(c0)) <= math.Pow(u, 1/float64(m))*sigma ||
+			connected := kappa != nil
+			if connected {
+				reach := []int{members[0]}
+				for k := 0; k < len(reach); k++ {
+					for _, b := range members {
+						if !slices.Contains(reach, b) && cmplx.Abs(roots[reach[k]]-roots[b]) <= u*(kappa[reach[k]]+kappa[b]) {
+							reach = append(reach, b)
+						}
+					}
+				}
+				connected = len(reach) == m
+			}
+			origin := math.Max(spread, cmplx.Abs(c0)) <= math.Pow(u, 1/float64(m))*sigma && (connected || pairCond == nil) ||
 				cmplx.Abs(c0) <= 10*u*sigmaTrace && spread <= math.Pow(u, 1/float64(m))*sigmaTrace
-			pair := m == 2 && (imag(roots[members[0]]) == 0 || cmplx.Abs(c0) <= spread || spread <= nuBal) &&
-				(pairCond == nil || u*pairCond(members[0], members[1]) < spread)
+			pair := m == 2 && pairCond != nil && (imag(roots[members[0]]) == 0 || cmplx.Abs(c0) <= spread || spread <= nuBal) &&
+				u*pairCond(members[0], members[1]) < spread
 			if sub && m == 2 && pairCond != nil {
 				gap := math.Inf(1)
 				for _, j := range rest {
