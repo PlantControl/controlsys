@@ -2430,8 +2430,10 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 				} else if restart == 1 {
 					current = nearest
 				}
+				// A Tf step without Kd is a null move whose rounding-level
+				// score change would steer the search.
 				for axis := range 4 {
-					if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && !filtered {
+					if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && (!filtered || current.Kd == 0) {
 						continue
 					}
 					for _, sign := range []float64{-1, 1} {
