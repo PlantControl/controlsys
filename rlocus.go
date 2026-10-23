@@ -1052,10 +1052,14 @@ func polyRootsOrNil(p Poly) []complex128 {
 //     pair of zeroCondition's capped normwise κ is left to the next rule:
 //     that κ links a resolved near-axis complex zero pair);
 //   - or p has, up to a backward error of 10·u in its coefficients, a root
-//     of multiplicity m at the centre c found by Newton on p^(m−1); 100·u
-//     for m ≥ 3 poles merged by u, which eig cannot resolve and the TF
-//     conversion misses by more than 10·u (an exact companion triple pole
-//     by ~30·u), while a resolved near triple needs ~400·u.
+//     of multiplicity m at the centre c found by Newton on p^(m−1) within
+//     max(2·spread, ρ) of the group mean (ρ the split of that backward
+//     error, splitRadius); 100·u for m ≥ 3 poles merged by u, which eig
+//     cannot resolve and the TF conversion misses by more than 10·u (an
+//     exact companion triple pole by ~30·u), while a resolved near triple
+//     needs ~400·u; 100·u also confirms a real pole pair merged by u (a
+//     semisimple double that eig splits by rounding only), whose isolation
+//     from the rest of its group stays at 10·u.
 //
 // A group that is none is split at its widest link (splitWidest) and its
 // parts tested by the last rule alone, a part only when no other root of
@@ -1188,8 +1192,12 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 			if linked && m >= 3 && sigmaTrace > 0 {
 				tol = 100 * u
 			}
+			conf := tol
+			if linked && m == 2 && imag(roots[members[0]]) == 0 && sigmaTrace > 0 {
+				conf = 100 * u
+			}
 			if m < len(p) {
-				c, ok := multipleRootAt(p, real(c0), m, tol, 2*spread)
+				c, ok := multipleRootAt(p, real(c0), m, conf, math.Max(2*spread, splitRadius(p, real(c0), m, conf)))
 				if ok && sub {
 					rho := splitRadius(p, c, m, tol)
 					ok = !slices.ContainsFunc(rest, func(j int) bool { return cmplx.Abs(roots[j]-complex(c, 0)) <= rho })
