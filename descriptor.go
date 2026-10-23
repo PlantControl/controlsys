@@ -460,7 +460,9 @@ func allZeroVec(v *mat.VecDense) bool {
 // keeps more than rank(E) (the most a regular pencil has finite) or the
 // pencil has index ≥ 2 (fewer than rank(E) finite, pencilIndexOne), and the
 // staircase (deflateInfinite) counts the finite ones differently, the
-// split is taken from the deflated pencil instead. Internal
+// split is taken from the deflated pencil instead; an index ≥ 2 pencil
+// whose QZ split keeps rank(E) or more finite and that the staircase
+// cannot resolve returns ErrDescriptorSingular. Internal
 // delay channels are reduced together with the I/O channels.
 func (sys *System) properExplicitForm() (*System, error) {
 	out, err := sys.weierstrassReduce()
@@ -521,11 +523,18 @@ func (sys *System) weierstrassReduce() (*System, error) {
 	vsr := make([]float64, n*n)
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
 	if !ok || nf > n-d || !index1 || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
-		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff && (!ok || nfd != nf) {
+		resolved := false
+		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff {
+			resolved = ok && nfd == nf
 			all := func(_, _, _ float64) bool { return true }
-			if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
-				s, t, vsl, vsr, nf, recip, ok = sd, td, qs, zs, nfd, rc, true
+			if !resolved {
+				if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
+					s, t, vsl, vsr, nf, recip, ok, resolved = sd, td, qs, zs, nfd, rc, true, true
+				}
 			}
+		}
+		if ok && !resolved && !index1 && nf >= n-d {
+			return nil, fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
 		}
 	}
 	if !ok {
