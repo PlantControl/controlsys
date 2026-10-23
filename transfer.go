@@ -186,10 +186,14 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 //
 // A descriptor model is first reduced to explicit form as MATLAB tf(dss)
 // does: nonsingular E is folded in, and singular E is reduced by eliminating
-// the algebraic states (dss2ss). Improper models are rejected with
-// ErrDescriptorUnsupported wrapping ErrImproperModel.
+// the algebraic states (dss2ss). An improper model keeps its polynomial
+// part, as MATLAB tf(dss): the s^k coefficients −C∞·N^k·A∞⁻¹B∞ of the
+// nilpotent block (rounding-level ones dropped, as IsProper decides) are
+// added to the transfer function of the explicit part, so the numerator
+// degree exceeds the denominator's. MinimalOrder and RowDegrees then
+// describe that explicit part.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
-	std, _, err := conversionStandardForm(sys, "TransferFunction")
+	std, poly, err := transferStandardForm(sys)
 	if err != nil {
 		return nil, err
 	}
@@ -197,10 +201,59 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 	if err != nil {
 		return nil, err
 	}
+	addPolynomialPart(res.TF, poly)
 	if total := newDelayTopology(sys).totalExternal(true); total != nil {
 		res.TF.Delay = denseToSlice2D(total)
 	}
 	return res, nil
+}
+
+// transferStandardForm is conversionStandardForm keeping the polynomial part
+// of an improper descriptor (see weierstrassReduceParts).
+func transferStandardForm(sys *System) (*System, []*mat.Dense, error) {
+	if !sys.IsDescriptor() {
+		return sys, nil, nil
+	}
+	if explicit, err := sys.ToExplicit(); err == nil {
+		return explicit, nil, nil
+	}
+	out, poly, err := sys.weierstrassReduceParts()
+	if err == nil {
+		if n, m, p := out.Dims(); n == 0 {
+			err = storableStaticGain("descriptor has no dynamic states", p, m)
+		}
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("TransferFunction: %w: %w", ErrDescriptorUnsupported, err)
+	}
+	return out, poly, nil
+}
+
+// addPolynomialPart adds Σ poly[k-1]·s^k to every channel of tf.
+func addPolynomialPart(tf *TransferFunc, poly []*mat.Dense) {
+	if len(poly) == 0 {
+		return
+	}
+	for i, den := range tf.Den {
+		for j := range tf.Num[i] {
+			q := make(Poly, len(poly)+1)
+			for k, c := range poly {
+				q[len(poly)-1-k] = c.At(i, j)
+			}
+			start := 0
+			for start < len(poly) && q[start] == 0 {
+				start++
+			}
+			if start == len(poly) {
+				continue
+			}
+			num := Poly(tf.Num[i][j]).Add(Poly(den).Mul(q[start:]))
+			for len(num) > 1 && num[0] == 0 {
+				num = num[1:]
+			}
+			tf.Num[i][j] = num
+		}
+	}
 }
 
 // rationalTransferFunction returns the delay-free rational part; callers
@@ -287,24 +340,26 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	return pick.result(order), nil
 }
 
-// keepObservable returns the full-order Dgebal conversion in place of c, a
-// conversion in which a row lost states, when c misses the response in the
-// band of its own and of the full one's poles and zeros by more than 1e-6
-// and the full one misses it by 1e3× less. MATLAB tf(ss) takes den = poly(A)
+// keepObservable replaces rows of c, a conversion in which a row lost
+// states, by those of the full-order Dgebal conversion when c misses the
+// response in the band of its own and of the full one's poles and zeros by
+// more than 1e-6 and the full row misses it by 1e3× less. MATLAB tf(ss) takes den = poly(A)
 // after only structural reduction, while the observability cut is by
 // magnitude: the last Hessenberg subdiagonal of a slow companion is an exact
 // product of tiny couplings, which the cut drops with the origin pole and a
 // zero (U3H63X). A truly hidden mode leaves c matching everywhere, so it
 // stays dropped, and the full conversion is only made once c misses in its
 // own band. The default check points sit far above such poles, where the
-// lost state barely shows.
+// lost state barely shows; the band points below them are solved in
+// double-double where GEPP rejects them, and the full conversion takes a
+// row the staircase floor cut directly (see directRowTF) when it can.
 func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConverter, int) {
 	if c.opts.ObservabilityTol != 0 {
 		return c, order
 	}
 	c.trimRows()
 	bd := newBalancedDense(c.sys, c.n, c.m, c.p)
-	if e, ok := sampleTFCheck(bd, bandCheckPoints(c.sys, c.tf.polys()), c.m, c.p).resolvedErr(c.tf); !ok || !(e > 1e-6) {
+	if e, ok := sampleBandCheck(c.sys, bd, bandCheckPoints(c.sys, c.tf.polys()), false).resolvedErr(c.tf); !ok || !(e > 1e-6) {
 		return c, order
 	}
 	full := c.fresh(c.sys)
@@ -314,13 +369,38 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 		return c, order
 	}
 	full.trimRows()
-	ck := sampleTrimCheck(bd, bandCheckPoints(c.sys, append(full.tf.polys(), c.tf.polys()...)), c.m, c.p)
+	ck := sampleBandCheck(c.sys, bd, bandCheckPoints(c.sys, append(full.tf.polys(), c.tf.polys()...)), bd.e == nil)
 	eKept, ok := ck.resolvedErr(c.tf)
 	if !ok || !(eKept > 1e-6) {
 		return c, order
 	}
-	if eFull, _ := ck.resolvedErr(full.tf); eFull <= 1e-3*eKept {
-		return full, fullOrder
+	// Rows are independent, so each takes the full row where that row is
+	// the better one, unless it misses by over 10% a resolved point the kept
+	// row matches to 1e-6: a direct row exact on a graded companion must not
+	// carry along dense rows whose full conversion fixes the response below
+	// the poles but loses it far above them. Better is 1e3× less worst miss,
+	// or no point missed by more than twice the kept row's miss (or 1e-6) and
+	// one missed 1e3× less: at the band edge the reference itself can miss a
+	// small row by 1e-2, the same for both rows.
+	order = 0
+	for i := range c.p {
+		eK := ck.rowPointErrs(c.tf, i)
+		eF := ck.rowPointErrs(full.tf, i)
+		worstK, worstF, loses := 0.0, 0.0, false
+		dominates, gains := true, false
+		for k := range eK {
+			if eK[k] < 0 || eF[k] < 0 {
+				continue
+			}
+			worstK, worstF = max(worstK, eK[k]), max(worstF, eF[k])
+			loses = loses || eK[k] <= 1e-6 && !(eF[k] <= 0.1)
+			dominates = dominates && eF[k] <= max(2*eK[k], 1e-6)
+			gains = gains || eK[k] > 1e-6 && eF[k] <= 1e-3*eK[k]
+		}
+		if !loses && worstK > 1e-6 && (worstF <= 1e-3*worstK || dominates && gains) {
+			c.tf.Den[i], c.tf.Num[i], c.rows[i] = full.tf.Den[i], full.tf.Num[i], full.rows[i]
+		}
+		order += c.rows[i]
 	}
 	return c, order
 }
@@ -390,13 +470,39 @@ func bandCheckPoints(sys *System, polys [][]float64) []complex128 {
 // resolvedErr is relErr per entry, relative to the entry, over the points
 // where the entry is resolved (sens < 10% of it).
 func (ck tfCheck) resolvedErr(tf *TransferFunc) (worst float64, ok bool) {
+	for _, e := range ck.rowPointErrs(tf, -1) {
+		if e >= 0 {
+			worst, ok = max(worst, e), true
+		}
+	}
+	return worst, ok
+}
+
+// rowPointErrs is resolvedErr per point over output row only, or all rows
+// when row < 0; −1 marks a point resolving no entry.
+func (ck tfCheck) rowPointErrs(tf *TransferFunc, only int) []float64 {
+	out := make([]float64, len(ck.s))
 	for k, s := range ck.s {
 		got := tf.eval(s)
 		m := len(got[0])
+		worst := -1.0
 		for i, row := range got {
+			if only >= 0 && i != only {
+				continue
+			}
+			if dv := Poly(tf.Den[i]).Eval(s); cmplx.IsInf(dv) || cmplx.IsNaN(dv) {
+				continue
+			}
+			rowMag := 0.0
+			for j := range row {
+				rowMag = max(rowMag, cmplx.Abs(ck.ref[k][i*m+j]))
+			}
+			if rowMag == 0 {
+				rowMag = ck.mag[k]
+			}
 			for j, v := range row {
 				ref := ck.ref[k][i*m+j]
-				scale := max(cmplx.Abs(ref), eps()*ck.mag[k])
+				scale := max(cmplx.Abs(ref), eps()*rowMag)
 				if len(ck.sens) == len(ck.s) && ck.sens[k] != nil && ck.sens[k][i*m+j] >= 0.1*scale {
 					continue
 				}
@@ -404,11 +510,12 @@ func (ck tfCheck) resolvedErr(tf *TransferFunc) (worst float64, ok bool) {
 				if math.IsNaN(e) {
 					e = math.Inf(1)
 				}
-				worst, ok = max(worst, e), true
+				worst = max(worst, e)
 			}
 		}
+		out[k] = worst
 	}
-	return worst, ok
+	return out
 }
 
 // choose returns the Dgebal or Osborne converter, filled, and its order.
@@ -702,22 +809,36 @@ func trimCheckPoints(sys *System, den []float64) []complex128 {
 }
 
 func sampleTFCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
-	return sampleCheck(bd, pts, m, p, false)
+	return sampleCheck(nil, bd, pts, m, p, false)
 }
 
 // sampleTrimCheck is sampleTFCheck with sens, the trim gate's per-point
 // resolution of the response.
 func sampleTrimCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
-	return sampleCheck(bd, pts, m, p, bd.e == nil)
+	return sampleCheck(nil, bd, pts, m, p, bd.e == nil)
 }
 
-func sampleCheck(bd *balancedDense, pts []complex128, m, p int, sens bool) tfCheck {
+// sampleBandCheck is sampleCheck of sys with the double-double fallback,
+// as EvalFr: on a slow graded companion evalInto's normwise pivot test
+// rejects every band point below the poles, where a cut origin pole shows
+// (YY7Z5C).
+func sampleBandCheck(sys *System, bd *balancedDense, pts []complex128, sens bool) tfCheck {
+	return sampleCheck(sys, bd, pts, bd.m, bd.p, sens)
+}
+
+// sampleCheck samples bd at pts; with sys set, a point evalInto rejects as
+// singular is solved in double-double instead of skipped.
+func sampleCheck(sys *System, bd *balancedDense, pts []complex128, m, p int, sens bool) tfCheck {
 	var ck tfCheck
 	var sw *sensWork
 	for _, s := range pts {
 		dst := make([]complex128, p*m)
-		if bd.evalInto(pointAt(s), dst) != nil {
-			continue
+		fallback := false
+		if err := bd.evalInto(pointAt(s), dst); err != nil {
+			if sys == nil || !errors.Is(err, errSingularPencil) || !ddResponseInto(sys, pointAt(s), dst) || finiteResponse(dst) != nil {
+				continue
+			}
+			fallback = true
 		}
 		mag := 0.0
 		for _, v := range dst {
@@ -731,10 +852,35 @@ func sampleCheck(bd *balancedDense, pts []complex128, m, p int, sens bool) tfChe
 			if sw == nil {
 				sw = newSensWork(bd.n, m, p)
 			}
-			ck.sens = append(ck.sens, sw.bound(bd, s))
+			var b []float64
+			if !fallback || sw.solveX(bd, s) {
+				b = sw.bound(bd, s)
+			}
+			ck.sens = append(ck.sens, b)
 		}
 	}
 	return ck
+}
+
+// solveX sets bd.x to (sI−Â)⁻¹B̂ by GEPP without evalInto's pivot test, for
+// bound at a point evalInto rejected; it reports false on an exactly
+// singular pencil.
+func (sw *sensWork) solveX(bd *balancedDense, s complex128) bool {
+	n, m := bd.n, bd.m
+	for i, v := range bd.a {
+		sw.lu[i] = complex(-v, 0)
+	}
+	for i := range n {
+		sw.lu[i*n+i] += s
+	}
+	if !cLUFactor(sw.lu, sw.piv, n) {
+		return false
+	}
+	for i, v := range bd.b[:n*m] {
+		bd.x[i] = complex(v, 0)
+	}
+	cLUSolve(sw.lu, sw.piv, bd.x, n, m)
+	return true
 }
 
 type sensWork struct {
@@ -1001,9 +1147,13 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 		if nobs > 0 {
 			bhData = ws.cData
 		}
-		if nobs == c.n && !c.noDirect {
+		stride := ncont
+		// The full-order candidate of keepObservable also takes the direct
+		// row where the staircase floor cut a graded companion's coupling.
+		if (nobs == c.n || c.keepObs) && !c.noDirect {
 			if dDen, dNums, dbh, ok := directRowTF(a, b, cm, i, c.n, c.m, inExp, outExp[i]); ok {
 				den, numCoeffs, bhData = dDen, dNums, dbh
+				nobs, stride = c.n, c.n
 				direct++
 			}
 		}
@@ -1027,8 +1177,8 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 				return Poly(num).Add(Poly(den).Scale(dij))
 			}
 			var bh []float64
-			if j*ncont < len(bhData) {
-				bh = bhData[j*ncont : j*ncont+nobs]
+			if j*stride < len(bhData) {
+				bh = bhData[j*stride : j*stride+nobs]
 			}
 			c.trims[i*c.m+j] = nil
 			if cands := markov.trim(i, j, nobs, numCoeffs[j], bh); len(cands) > 1 || len(cands[0]) != len(numCoeffs[j]) {
@@ -1186,9 +1336,10 @@ func (t *markovTrim) negligible(row, j, k int) bool {
 // trim returns the trimmed candidates for num over a monic denominator of
 // degree deg, most trimmed first, every trim from the larger of the two
 // counts down; the last, dropping at most a negligible C·B, needs no check.
-// bh is input j in the row's observability-Hessenberg basis.
+// bh is input j in the row's observability-Hessenberg basis; nil (a row
+// of companionRowTF, which has none) leaves only the Markov counts.
 func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
-	if len(num) < 2 || len(num) > deg || len(bh) != deg || !t.negligible(row, j, 0) {
+	if len(num) < 2 || len(num) > deg || bh != nil && len(bh) != deg || !t.negligible(row, j, 0) {
 		return [][]float64{num}
 	}
 	off := deg - len(num)
@@ -1200,10 +1351,12 @@ func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
 	for lead < len(num)-1 && t.negligible(row, j, off+lead) {
 		lead++
 	}
-	tol := float64(deg) * eps() * blas64.Implementation().Dnrm2(deg, bh, 1)
 	r := 0
-	for r < deg-1 && math.Abs(bh[r]) <= tol {
-		r++
+	if bh != nil {
+		tol := float64(deg) * eps() * blas64.Implementation().Dnrm2(deg, bh, 1)
+		for r < deg-1 && math.Abs(bh[r]) <= tol {
+			r++
+		}
 	}
 	var cands [][]float64
 	for k := min(max(lead, r-off), len(num)-1); k > len(num)-len(safe); k-- {
@@ -1530,7 +1683,8 @@ func hessenbergTF(aData, cData []float64, n, nobs, m int, b1 float64, inExp []in
 }
 
 // directRowTF converts output row of the balanced (a, b, cm) without the
-// staircase and Hessenberg rotations when hessenbergDual applies: on a
+// staircase and Hessenberg rotations when hessenbergDual or, for a companion
+// with dense b and c, companionRowTF applies: on a
 // graded companion (a slow or observable companion) the rotations mix the
 // scales and cost up to all digits of the low den coefficients, or of the
 // numerator far above the poles, while the recurrence in the given basis
@@ -1540,7 +1694,8 @@ func hessenbergTF(aData, cData []float64, n, nobs, m int, b1 float64, inExp []in
 func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, bh []float64, ok bool) {
 	aData, cData, b1, primal, ok := hessenbergDual(a, b, cm, row, n, m)
 	if !ok {
-		return nil, nil, nil, false
+		den, nums, ok = companionRowTF(a, b, cm, row, n, m, inExp, outExp)
+		return den, nums, nil, ok
 	}
 	if primal {
 		den, nums = hessenbergTF(aData, cData, n, n, 1, b1, []int{outExp}, inExp[0])
@@ -1552,6 +1707,127 @@ func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (d
 		return nil, nil, nil, false
 	}
 	return den, nums, cData, true
+}
+
+// companionRowTF converts output row of (a, b, cm) in the given basis when
+// a is a companion of any b and c: in the observable form a nonzero
+// subdiagonal h and otherwise nonzeros only in the last column g, or its
+// transpose or reversal (last row, first column, first row) with b and c
+// swapped or reversed to match. Then det(sI − A) has the coefficients
+// −H_i·g_i, H_i = h_{i+1}⋯h_{n−1}, exact on a power-of-two scaling, and
+// num(s) = Σ_k c_k·P_k(s) with x_k = P_k/det from the state equations
+// s·x_k = h_k·x_{k−1} + g_k·x_{n−1} + b_k; P_k's coefficient of s^j is
+//
+//	Σ_{l ≤ min(j,k), i = j+k+1−l ≤ n−1} H^k_l·H_i·(g_l·b_i − b_l·g_i) + H^k_{l₀}·b_{l₀},
+//
+// l₀ = j+k+1−n ≥ 0, H^k_l = h_{l+1}⋯h_k: the products its cofactor
+// expansion gives, without the pairs that cancel in the recurrence. With
+// dense b and c the rotations of the staircase path mix the scales of a
+// graded companion and lose its low den coefficients (N2JIRH).
+func companionRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, ok bool) {
+	ar, br, cr := a.RawMatrix(), b.RawMatrix(), cm.RawMatrix()
+	at := func(i, j int) float64 { return ar.Data[i*ar.Stride+j] }
+	maxA := 0.0
+	var shape [4]bool
+	for i := range shape {
+		shape[i] = true
+	}
+	for i := range n {
+		for j := range n {
+			v := at(i, j)
+			if v == 0 {
+				continue
+			}
+			maxA = max(maxA, math.Abs(v))
+			sub, sup := i == j+1, j == i+1
+			shape[0] = shape[0] && (sub || j == n-1)
+			shape[1] = shape[1] && (sup || j == 0)
+			shape[2] = shape[2] && (sup || i == n-1)
+			shape[3] = shape[3] && (sub || i == 0)
+		}
+	}
+	smlnum := math.SmallestNonzeroFloat64 / eps()
+	if maxA != 0 && (maxA < smlnum || maxA > 1/smlnum) {
+		return nil, nil, false
+	}
+	t := slices.Index(shape[:], true)
+	if t < 0 {
+		return nil, nil, false
+	}
+	rev := func(k int) int { return n - 1 - k }
+	canon := func(i, j int) float64 {
+		switch t {
+		case 0:
+			return at(i, j)
+		case 1:
+			return at(rev(i), rev(j))
+		case 2:
+			return at(j, i)
+		default:
+			return at(rev(j), rev(i))
+		}
+	}
+	h, g := make([]float64, n), make([]float64, n)
+	for i := range n {
+		g[i] = canon(i, n-1)
+		if i > 0 {
+			if h[i] = canon(i, i-1); h[i] == 0 {
+				return nil, nil, false
+			}
+		}
+	}
+	hk := make([]float64, n*n)
+	for k := range n {
+		hk[k*n+k] = 1
+		for l := k - 1; l >= 0; l-- {
+			hk[k*n+l] = hk[k*n+l+1] * h[l+1]
+		}
+	}
+	hn := hk[(n-1)*n:]
+	den = make([]float64, n+1)
+	den[0] = 1
+	for i := range n {
+		if g[i] != 0 {
+			den[n-i] = -hn[i] * g[i]
+		}
+	}
+	crow := cr.Data[row*cr.Stride : row*cr.Stride+n]
+	bv, cv := make([]float64, n), make([]float64, n)
+	nums = make([][]float64, m)
+	for col := range m {
+		for k := range n {
+			src := k
+			if t == 1 || t == 3 {
+				src = rev(k)
+			}
+			bk := math.Ldexp(br.Data[src*br.Stride+col], -inExp[col])
+			ck := math.Ldexp(crow[src], -outExp)
+			if t >= 2 {
+				bk, ck = ck, bk
+			}
+			bv[k], cv[k] = bk, ck
+		}
+		num := make([]float64, n)
+		for k, ck := range cv {
+			if ck == 0 {
+				continue
+			}
+			hrow := hk[k*n:]
+			for j := range n {
+				p := 0.0
+				for l := max(0, j+k+2-n); l <= min(j, k); l++ {
+					i := j + k + 1 - l
+					p += hrow[l] * hn[i] * (g[l]*bv[i] - bv[l]*g[i])
+				}
+				if l0 := j + k + 1 - n; l0 >= 0 {
+					p += hrow[l0] * bv[l0]
+				}
+				num[n-1-j] += ck * p
+			}
+		}
+		nums[col] = num
+	}
+	return den, nums, true
 }
 
 // hessenbergDual returns a dual form of output row of (a, b, cm), aData

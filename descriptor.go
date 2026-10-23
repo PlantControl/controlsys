@@ -165,11 +165,12 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 // leaving out the infinite ones as MATLAB pole does. A nonsingular E (MATLAB
 // rank) keeps every eigenvalue with β ≠ 0. For a singular E of rank r the
 // n − r eigenvalues of least |β|/|α| of the whole-pencil QZ are infinite
-// when a gap separates them (leastRatioInfTol) and no large one remains
-// (index 1); when E has a stiff singular value just above the rounding
-// this is the classification, with β = 0 alone infinite if no gap shows
-// or the pencil has index ≥ 2 (pencilIndexOne): its chain members QZ
-// leaves at |β|/|α| ~ ε^(1/k), above the stiff finite pole's.
+// when a gap separates them (leastRatioInfTol), no large one remains and
+// the pencil has index 1 (pencilIndexOne): a chain of length k has k
+// infinite eigenvalues but lowers rank(E) by one. When E has a stiff
+// singular value just above the rounding this is the classification,
+// with β = 0 alone infinite if no gap shows or the pencil has index ≥ 2:
+// its chain members QZ leaves at |β|/|α| ~ ε^(1/k), above the stiff finite pole's.
 // Otherwise the infinite structure is deflated first (deflateInfinite),
 // since QZ resolves an infinite Jordan chain of length k only to
 // |β|/|α| ~ ε^(1/k), and the poles are the QZ eigenvalues of the finite
@@ -206,7 +207,9 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 			return finitePoles(alphar, alphai, beta, tol), nil
 		}
 		if sep && !largeRetained(alphar, alphai, beta, tol, qzInfiniteTol(qzLargeRatio, normA, normE)) {
-			return finitePoles(alphar, alphai, beta, tol), nil
+			if _, index1 := pencilIndexOne(A, E, n, normA); index1 {
+				return finitePoles(alphar, alphai, beta, tol), nil
+			}
 		}
 	}
 	if a, e, _, _, nf, stiff, ok := deflateInfinite(A, E, false); ok && !stiff {
@@ -453,9 +456,13 @@ func allZeroVec(v *mat.VecDense) bool {
 // decides by the same test. Entries of E_∞ below the finite/infinite
 // threshold are rounding noise and are zeroed so index-1 parts give N = 0
 // exactly. QZ resolves an infinite Jordan chain
-// only to |β|/|α| ~ ε^(1/k); when it fails or keeps a large eigenvalue and
-// the staircase (deflateInfinite) counts the finite ones differently, the
-// split is taken from the deflated pencil instead. Internal
+// only to |β|/|α| ~ ε^(1/k); when it fails, keeps a large eigenvalue,
+// keeps more than rank(E) (the most a regular pencil has finite) or the
+// pencil has index ≥ 2 (fewer than rank(E) finite, pencilIndexOne), and the
+// staircase (deflateInfinite) counts the finite ones differently, the
+// split is taken from the deflated pencil instead; an index ≥ 2 pencil
+// whose QZ split keeps rank(E) or more finite and that the staircase
+// cannot resolve returns ErrDescriptorSingular. Internal
 // delay channels are reduced together with the I/O channels.
 func (sys *System) properExplicitForm() (*System, error) {
 	out, err := sys.weierstrassReduce()
@@ -472,9 +479,22 @@ func (sys *System) properExplicitForm() (*System, error) {
 }
 
 func (sys *System) weierstrassReduce() (*System, error) {
+	out, poly, err := sys.weierstrassReduceParts()
+	if err == nil && poly != nil {
+		return nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+	}
+	return out, err
+}
+
+// weierstrassReduceParts is weierstrassReduce keeping the polynomial part:
+// poly[k-1] is the p×m coefficient of s^k, −C∞·N^k·A∞⁻¹B∞, with entries at
+// the rounding level of algebraicPartStatic zeroed; poly is nil for a proper
+// model. Impulsive internal-delay channels return ErrImproperModel.
+func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	n, m, p := sys.Dims()
 	q := sys.internalDelayCount()
 	mi, pi := max(m+q, 1), max(p+q, 1)
+	var poly []*mat.Dense
 
 	bAug := mat.NewDense(n, mi, nil)
 	cAug := mat.NewDense(pi, n, nil)
@@ -515,16 +535,23 @@ func (sys *System) weierstrassReduce() (*System, error) {
 	vsl := make([]float64, n*n)
 	vsr := make([]float64, n*n)
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
-	if !ok || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
-		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff && (!ok || nfd != nf) {
+	if !ok || nf > n-d || !index1 || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
+		resolved := false
+		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff {
+			resolved = ok && nfd == nf
 			all := func(_, _, _ float64) bool { return true }
-			if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
-				s, t, vsl, vsr, nf, recip, ok = sd, td, qs, zs, nfd, rc, true
+			if !resolved {
+				if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
+					s, t, vsl, vsr, nf, recip, ok, resolved = sd, td, qs, zs, nfd, rc, true, true
+				}
 			}
+		}
+		if ok && !resolved && !index1 && nf >= n-d {
+			return nil, nil, fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
 		}
 	}
 	if !ok {
-		return nil, fmt.Errorf("generalized Schur decomposition failed: %w", ErrDescriptorSingular)
+		return nil, nil, fmt.Errorf("generalized Schur decomposition failed: %w", ErrDescriptorSingular)
 	}
 	ni := n - nf
 
@@ -546,7 +573,7 @@ func (sys *System) weierstrassReduce() (*System, error) {
 		l.Scale(-1, l)
 		scale, ok := qzSylvester(n, nf, recip, s, t, r.RawMatrix().Data, l.RawMatrix().Data)
 		if !ok || scale == 0 {
-			return nil, fmt.Errorf("Weierstrass decoupling failed: %w", ErrDescriptorSingular)
+			return nil, nil, fmt.Errorf("Weierstrass decoupling failed: %w", ErrDescriptorSingular)
 		}
 		r.Scale(1/scale, r)
 		l.Scale(1/scale, l)
@@ -563,12 +590,12 @@ func (sys *System) weierstrassReduce() (*System, error) {
 		s22 := extractBlock(S, nf, nf, ni, ni)
 		lu.Factorize(s22)
 		if luNearSingular(&lu) {
-			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
+			return nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
 		bScale := denseNorm(bAug) / denseNorm(s22)
 		var b, nilpotent mat.Dense
 		if err := lu.SolveTo(&b, false, extractBlock(&bq, nf, 0, ni, mi)); err != nil {
-			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
+			return nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
 		if !index1 || ni != d {
 			e22 := extractBlock(T, nf, nf, ni, ni)
@@ -579,10 +606,12 @@ func (sys *System) weierstrassReduce() (*System, error) {
 				return v
 			}, e22)
 			if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
-				return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
+				return nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 			}
 			if !algebraicPartStatic(c2, &nilpotent, &b, cScale, bScale, n) {
-				return nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+				if poly = algebraicPolyTerms(c2, &nilpotent, &b, cScale, bScale, n, p, m); poly == nil || q > 0 {
+					return nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+				}
 			}
 		}
 		var cb mat.Dense
@@ -601,10 +630,10 @@ func (sys *System) weierstrassReduce() (*System, error) {
 		aRed := mat.NewDense(nf, nf, nil)
 		lu.Factorize(extractBlock(T, 0, 0, nf, nf))
 		if err := lu.SolveTo(aRed, false, extractBlock(S, 0, 0, nf, nf)); err != nil {
-			return nil, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
+			return nil, nil, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
 		}
 		if err := lu.SolveTo(&bRed, false, b1); err != nil {
-			return nil, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
+			return nil, nil, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
 		}
 		out.A = aRed
 		out.B = subDense(&bRed, 0, 0, nf, m)
@@ -620,7 +649,7 @@ func (sys *System) weierstrassReduce() (*System, error) {
 		out.LFT.D21 = subDense(dRed, p, 0, q, m)
 		out.LFT.D22 = subDense(dRed, p, m, q, q)
 	}
-	return out, nil
+	return out, poly, nil
 }
 
 // weierstrassSplit classifies the pencil (A, E) for weierstrassReduce as
@@ -691,6 +720,47 @@ func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale float64, n i
 		}
 	}
 	return true
+}
+
+// algebraicPolyTerms returns −c·N^k·b, k ≥ 1, restricted to its leading
+// p×m block, up to the last term above the algebraicPartStatic bound; entries
+// below that bound are zeroed. It returns nil when every term vanishes.
+func algebraicPolyTerms(c, nilpotent, b *mat.Dense, cScale, bScale float64, n, p, m int) []*mat.Dense {
+	if p == 0 || m == 0 {
+		return nil
+	}
+	ni, _ := nilpotent.Dims()
+	nNorm := denseNorm(nilpotent)
+	v := mat.DenseCopyOf(b)
+	var next, term mat.Dense
+	bound := max(denseNorm(c), cScale) * max(denseNorm(b), bScale)
+	var poly []*mat.Dense
+	last := 0
+	for k := 1; k < ni; k++ {
+		next.Mul(nilpotent, v)
+		v.Copy(&next)
+		bound *= nNorm
+		term.Mul(c, v)
+		tol := 1e3 * float64(n) * eps() * bound
+		coef := mat.NewDense(p, m, nil)
+		nonzero := false
+		for i := range p {
+			for j := range m {
+				if x := term.At(i, j); math.Abs(x) > tol {
+					coef.Set(i, j, -x)
+					nonzero = true
+				}
+			}
+		}
+		poly = append(poly, coef)
+		if nonzero {
+			last = k
+		}
+	}
+	if last == 0 {
+		return nil
+	}
+	return poly[:last]
 }
 
 func subDense(m *mat.Dense, r0, c0, rows, cols int) *mat.Dense {

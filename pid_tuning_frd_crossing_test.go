@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -100,23 +101,28 @@ func TestTunePIDFRDUncertifiedCrossingKeepsSign(t *testing.T) {
 // reported only wc and 63° while samples straddled |L| = 1 near 1.95 and
 // 2.0 (ζ = 1e-2, a graze peaking at |L| 1.0000025, ∠L 24°) or four times
 // over 1.93–2.06 (ζ = 1e-3, ζ = 0, PID and PIDF), with ∠L near +24° there,
-// a wrapped margin near −156°. Oracles: sign changes of |L| − 1 over
-// adjacent samples of the documented interpolant, and closed-loop roots of
-// the exact plant.
+// a wrapped margin near −156°. The ζ = 1e-3 PIDF may fail unattainable:
+// its design (dense |S| 4.82) sweeps the unresolved resonance loop within
+// ¼ of 0, which the strict count leaves unknown (N4MOKA). Oracles: sign
+// changes of |L| − 1 over adjacent samples of the documented interpolant,
+// and closed-loop roots of the exact plant.
 func TestTunePIDFRDCrossingsBetweenGridPoints(t *testing.T) {
 	zeta2 := [2][]float64{{6.335797216731407, 24.391227797024047, 54.72113901759225, 74.15735471976932, 17.515790582716292}, {1, 6.680688332652979, 7.2460737902166565, 26.873377152592504, 11.955834263494538, 1.258925411794167}}
 	zeta3 := [2][]float64{{6.335797216731407, 24.176553599151454, 54.076453749896416, 73.97279314928015, 17.511839053168945}, {1, 6.6447736109835365, 7.007571914003141, 26.76563298758415, 11.944477031293877, 1.2589254117941655}}
 	zeta0 := [2][]float64{{6.335797216731407, 24.152681801253724, 54.004695153133355, 73.95222898037906, 17.51139395145642}, {1, 6.640783086353598, 6.981071705534972, 26.75366141369434, 11.943215116604915, 1.258925411794167}}
 	for i, c := range []struct {
-		plant  [2][]float64
-		family PidtuneType
-	}{{zeta2, PidtunePID}, {zeta3, PidtunePID}, {zeta3, PidtunePIDF}, {zeta0, PidtunePID}} {
+		plant   [2][]float64
+		family  PidtuneType
+		mayFail bool
+	}{{zeta2, PidtunePID, false}, {zeta3, PidtunePID, false}, {zeta3, PidtunePIDF, true}, {zeta0, PidtunePID, false}} {
 		num, den := c.plant[0], c.plant[1]
 		name := fmt.Sprintf("case %d %s", i, c.family)
 		frd := pidExactFRD(t, num, den, 1e-3, 1e3, 600)
 		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: 0.1623})
 		if err != nil {
-			t.Errorf("%s: %v", name, err)
+			if !c.mayFail || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("%s: %v", name, err)
+			}
 			continue
 		}
 		k, ev := *r.Controller, r.Evidence
@@ -154,8 +160,10 @@ func TestTunePIDFRDCrossingsBetweenGridPoints(t *testing.T) {
 // 1.08), P at wc 0.119 (|S| 1.33) and 7.58 (|S| 1.0), and I at wc 0.401
 // (|S| 2.47) and 0.0624 (|S| 1.60), whose extra crossings sit at wrapped
 // margins down to −172° on −1's far side. The I design at wc 0.0262 is
-// unstable (root at Re +0.012) and is now returned with its −80° crossing
-// as the achieved margin, not the 90.2° at wc. Oracles: closed-loop roots
+// unstable (root at Re +0.012) and was returned with its −80° crossing
+// as the achieved margin, not the 90.2° at wc; its resonance, ζ = 0.002,
+// the 200 samples do not resolve, so the count leaves it unknown and the
+// call may fail instead (N4MOKA). Oracles: closed-loop roots
 // and a dense |S| sweep of the exact plant, and sign changes of |L| − 1
 // and wrapped phases of the documented interpolant.
 func TestTunePIDFRDFreeOneGainReportsSampledCrossings(t *testing.T) {
@@ -179,7 +187,9 @@ func TestTunePIDFRDFreeOneGainReportsSampledCrossings(t *testing.T) {
 		frd := pidExactFRD(t, c.num, c.den, c.lo, c.hi, c.n)
 		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: c.wc})
 		if err != nil {
-			t.Errorf("case %d: %v", i, err)
+			if c.stable || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
+				t.Errorf("case %d: %v", i, err)
+			}
 			continue
 		}
 		k, ev := *r.Controller, r.Evidence

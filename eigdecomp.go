@@ -767,18 +767,23 @@ const (
 const qzInfiniteGap = 1e4
 
 // descriptorRank returns the rank of E from its descending singular values
-// sv, n the order of the pencil and scale ≈ σ_max(E), with floor = n·ε·scale
-// and tol = 1e3·floor. For the whole E (full) the rank is MATLAB's: the
-// singular values above floor. A nonsingular E thus has no infinite modes,
-// however stiff its poles, and one in (floor, qzInfiniteGap·tol] of a
-// singular E sets stiff: a stiff finite pole beside the rounding of an
-// infinite one, which the staircase cannot separate reliably. The deflated
+// sv, n the order of the pencil and scale ≈ σ_max(E), with tol =
+// 1e3·n·ε·scale and floor = n·ε·scale. For the whole E (full) the rank is
+// MATLAB's: the singular values above floor = n·eps(scale), with eps(scale)
+// the float spacing at scale (ε·scale/2 just below a power of two). A
+// nonsingular E thus has no infinite modes, however stiff its poles, and
+// one in (floor, qzInfiniteGap·tol] of a singular E sets stiff: a stiff
+// finite pole beside the rounding of an infinite one, which the staircase
+// cannot separate reliably. The deflated
 // blocks of the staircase carry more rounding: a singular value at most tol
 // is zero, one above qzInfiniteGap·tol is nonzero and one in between is
 // ambiguous (ok false).
 func descriptorRank(sv []float64, scale float64, n int, full bool) (rank int, stiff, ok bool) {
 	floor := float64(n) * eps() * scale
 	tol := 1e3 * floor
+	if full {
+		floor = float64(n) * (math.Nextafter(scale, math.Inf(1)) - scale)
+	}
 	for j, s := range sv {
 		switch {
 		case s <= floor:

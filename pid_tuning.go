@@ -200,6 +200,10 @@ type pidTuningPlant struct {
 	// when one is below the floor; zeroSearch checks every candidate so.
 	// Sampled data, without a model below its band, leaves both off.
 	zeroScan, zeroSearch bool
+	// zeroLow, if positive, is a tenth of the plant's slowest pole or zero,
+	// down to which the zero grid also reaches: a slow plant zero or
+	// resonance can lift |L| back through 1 below the band.
+	zeroLow float64
 	// crossScan selects the margin check of a search outside the floor.
 	crossScan pidCrossScan
 	// floorRungs, if positive, caps the floor bands tried; minTfSeed seeds
@@ -905,6 +909,14 @@ func pidTuningDCAdmissible(c PID2, dc, wHi float64, gHi complex128) bool {
 	return zero*inf > 0
 }
 
+// pidTuningKeepsIntegral reports whether c keeps the integral action its
+// family has. A search step can land Ki on exactly 0, a P/PD loop that
+// bypasses the integral-only screens, such as the integrator cancelling a
+// plant zero at s = 0 (JJJR63).
+func pidTuningKeepsIntegral(c PID2, hasI bool) bool {
+	return !hasI || c.Ki != 0
+}
+
 // pidTuningSignConsistent reports whether every nonzero gain of c has sign
 // want; want = 0 accepts any signs. Other signs on a stable plant come from
 // the wrapped-phase branch of the crossover equations.
@@ -1097,6 +1109,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			p.maxSensitivity = pidTuningMaxSensitivity
 		}
 		p.modes = modes()
+		if lo, _ := span(); finitePID(lo) && lo > 0 {
+			p.zeroLow = lo / 10
+		}
 		if floor {
 			lo, hi := span()
 			p.crossLow, p.crossHigh = math.Min(p.low, lo/10), math.Max(p.high, hi*10)
@@ -2251,6 +2266,9 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			return err
 		}
 		evidence.Evaluations++
+		if !pidTuningKeepsIntegral(candidate, hasI) {
+			return nil
+		}
 		if filtered && (candidate.Tf < math.Max(.001/wc, p.dt*.51) || candidate.Tf > 10/wc) {
 			return nil
 		}
@@ -2418,14 +2436,21 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		// search from c finds no incumbent, it restarts from the candidate
 		// least below the floor, as such a seed can sit next to the
 		// feasible set; the restart counts a smaller violation as progress.
-		// Floor bands, which share one budget, skip it.
-		for restart := range 2 {
+		// Floor bands, which share one budget, skip it. Under a model-based
+		// stability check a PIDF incumbent is then polished by Kd and Tf
+		// steps with Kp and Ki re-solved to hold C(jwc), as the coordinate
+		// steps leave the phase band there; the polish reaches loops whose
+		// resonances sparse frequency data do not resolve.
+		for restart := range 3 {
 			current := c
 			if restart == 1 {
 				if p.hasCrossFloor || !seedViolated || finitePID(incumbentScore) {
-					break
+					continue
 				}
 				current = nearest
+			}
+			if restart == 2 && !(hasP && hasI && hasD && filtered && p.stable != nil && finitePID(incumbentScore)) {
+				break
 			}
 			step := .5
 			for round := 0; round < 64 && evidence.Evaluations < o.MaxEvaluations; round++ {
@@ -2443,9 +2468,10 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 				// Ki put back on the incumbent's phase at wc if off the
 				// band. The probe can reach loops near the stability
 				// boundary, which sampled checks cannot certify.
-				for axis := range 4 {
+				for axis := range 6 {
 					diagonal := axis == 3 && current.Kd == 0
-					if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && (!filtered || diagonal && p.stable == nil) {
+					if (restart == 2) != (axis >= 4) || axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD ||
+						axis == 3 && (!filtered || diagonal && p.stable == nil) || axis == 5 && current.Kd == 0 {
 						continue
 					}
 					kdSigns := []float64{0}
@@ -2461,15 +2487,21 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 								candidate.Kp += sign * step * scale
 							case 1:
 								candidate.Ki += sign * step * scale * wc
-							case 2:
+							case 2, 4:
 								candidate.Kd += sign * step * scale / wc
-							case 3:
+							case 3, 5:
 								tfStep := step
 								if diagonal {
 									tfStep = math.Max(step, .5)
 								}
 								candidate.Tf *= math.Exp(sign * tfStep)
 								candidate.Kd += kdSign * step * scale / wc
+							}
+							if axis >= 4 {
+								held := pidTuningFeedback(current, wc)
+								ib, db := pidTuningBasis(candidate, wc)
+								candidate.Ki = (imag(held) - candidate.Kd*imag(db)) / imag(ib)
+								candidate.Kp = real(held) - candidate.Ki*real(ib) - candidate.Kd*real(db)
 							}
 							if err := evaluate(candidate); err != nil {
 								return nil, fmt.Errorf("%s: %w", op, err)
@@ -3546,8 +3578,10 @@ func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 // put a 0 dB crossing that grid misses: a lightly damped pair σ+jω₀ of
 // Kd·s² + Kp·s + Ki, as when tiny Kp and Ki set it below the band, notches
 // |L| through 1 within a few |σ| of ω₀. It extends grid at step (in log ω)
-// down to a tenth of the slowest zero, at most four decades, and adds
-// points within 4|σ| of ω₀. Discrete controllers use the continuous zeros,
+// down to a tenth of the slowest zero, of p.zeroLow's plant dynamics and,
+// with integral action, of |Ki·G(0)|, where |L| ≈ |Ki·G(0)|/ω crosses 1,
+// at most four decades, and adds points within 4|σ| of ω₀ and of each
+// p.modes mode in that extension. Discrete controllers use the continuous zeros,
 // which match theirs well below Nyquist. An integral-free c whose |L| − 1
 // changes sign between ω = 0 and lo walks further down
 // (pidTuningDCCrossingFloor). It extends grid up at step too, as far as
@@ -3585,6 +3619,14 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 		}
 	}
 	floor := math.Max(slowest/10, lo*1e-4)
+	if p.zeroLow > 0 {
+		floor = math.Min(floor, math.Max(p.zeroLow, lo*1e-4))
+	}
+	if g := p.dcEdge; c.Ki != 0 && g != 0 && pidFiniteComplex(g) {
+		if wa := cmplx.Abs(complex(c.Ki, 0) * g); wa > 0 && finitePID(wa) {
+			floor = math.Min(floor, math.Max(wa/10, lo*1e-4))
+		}
+	}
 	if w, ok := pidTuningDCCrossingFloor(p, c, lo, step, cache); ok {
 		floor = math.Min(floor, w)
 	}
@@ -3611,7 +3653,9 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 	for _, m := range p.modes {
 		d := math.Max(math.Abs(real(m)), 1e-6*imag(m))
 		for j := -8.; j <= 8; j++ {
-			if w := imag(m) + j*d/2; w > hi {
+			if w := imag(m) + j*d/2; w < lo && w >= bottom {
+				modal = append(modal, w)
+			} else if w > hi {
 				modal = append(modal, w)
 				if p.loopTail == nil && p.dt == 0 && w <= hi*pidTuningTailReach {
 					top = math.Max(top, w)
