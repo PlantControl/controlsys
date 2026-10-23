@@ -1267,9 +1267,10 @@ func (t *markovTrim) negligible(row, j, k int) bool {
 // trim returns the trimmed candidates for num over a monic denominator of
 // degree deg, most trimmed first, every trim from the larger of the two
 // counts down; the last, dropping at most a negligible C·B, needs no check.
-// bh is input j in the row's observability-Hessenberg basis.
+// bh is input j in the row's observability-Hessenberg basis; nil (a row
+// of companionRowTF, which has none) leaves only the Markov counts.
 func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
-	if len(num) < 2 || len(num) > deg || len(bh) != deg || !t.negligible(row, j, 0) {
+	if len(num) < 2 || len(num) > deg || bh != nil && len(bh) != deg || !t.negligible(row, j, 0) {
 		return [][]float64{num}
 	}
 	off := deg - len(num)
@@ -1281,10 +1282,12 @@ func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
 	for lead < len(num)-1 && t.negligible(row, j, off+lead) {
 		lead++
 	}
-	tol := float64(deg) * eps() * blas64.Implementation().Dnrm2(deg, bh, 1)
 	r := 0
-	for r < deg-1 && math.Abs(bh[r]) <= tol {
-		r++
+	if bh != nil {
+		tol := float64(deg) * eps() * blas64.Implementation().Dnrm2(deg, bh, 1)
+		for r < deg-1 && math.Abs(bh[r]) <= tol {
+			r++
+		}
 	}
 	var cands [][]float64
 	for k := min(max(lead, r-off), len(num)-1); k > len(num)-len(safe); k-- {
@@ -1611,7 +1614,8 @@ func hessenbergTF(aData, cData []float64, n, nobs, m int, b1 float64, inExp []in
 }
 
 // directRowTF converts output row of the balanced (a, b, cm) without the
-// staircase and Hessenberg rotations when hessenbergDual applies: on a
+// staircase and Hessenberg rotations when hessenbergDual or, for a companion
+// with dense b and c, companionRowTF applies: on a
 // graded companion (a slow or observable companion) the rotations mix the
 // scales and cost up to all digits of the low den coefficients, or of the
 // numerator far above the poles, while the recurrence in the given basis
@@ -1621,7 +1625,8 @@ func hessenbergTF(aData, cData []float64, n, nobs, m int, b1 float64, inExp []in
 func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, bh []float64, ok bool) {
 	aData, cData, b1, primal, ok := hessenbergDual(a, b, cm, row, n, m)
 	if !ok {
-		return nil, nil, nil, false
+		den, nums, ok = companionRowTF(a, b, cm, row, n, m, inExp, outExp)
+		return den, nums, nil, ok
 	}
 	if primal {
 		den, nums = hessenbergTF(aData, cData, n, n, 1, b1, []int{outExp}, inExp[0])
@@ -1633,6 +1638,127 @@ func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (d
 		return nil, nil, nil, false
 	}
 	return den, nums, cData, true
+}
+
+// companionRowTF converts output row of (a, b, cm) in the given basis when
+// a is a companion of any b and c: in the observable form a nonzero
+// subdiagonal h and otherwise nonzeros only in the last column g, or its
+// transpose or reversal (last row, first column, first row) with b and c
+// swapped or reversed to match. Then det(sI − A) has the coefficients
+// −H_i·g_i, H_i = h_{i+1}⋯h_{n−1}, exact on a power-of-two scaling, and
+// num(s) = Σ_k c_k·P_k(s) with x_k = P_k/det from the state equations
+// s·x_k = h_k·x_{k−1} + g_k·x_{n−1} + b_k; P_k's coefficient of s^j is
+//
+//	Σ_{l ≤ min(j,k), i = j+k+1−l ≤ n−1} H^k_l·H_i·(g_l·b_i − b_l·g_i) + H^k_{l₀}·b_{l₀},
+//
+// l₀ = j+k+1−n ≥ 0, H^k_l = h_{l+1}⋯h_k: the products its cofactor
+// expansion gives, without the pairs that cancel in the recurrence. With
+// dense b and c the rotations of the staircase path mix the scales of a
+// graded companion and lose its low den coefficients (N2JIRH).
+func companionRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, ok bool) {
+	ar, br, cr := a.RawMatrix(), b.RawMatrix(), cm.RawMatrix()
+	at := func(i, j int) float64 { return ar.Data[i*ar.Stride+j] }
+	maxA := 0.0
+	var shape [4]bool
+	for i := range shape {
+		shape[i] = true
+	}
+	for i := range n {
+		for j := range n {
+			v := at(i, j)
+			if v == 0 {
+				continue
+			}
+			maxA = max(maxA, math.Abs(v))
+			sub, sup := i == j+1, j == i+1
+			shape[0] = shape[0] && (sub || j == n-1)
+			shape[1] = shape[1] && (sup || j == 0)
+			shape[2] = shape[2] && (sup || i == n-1)
+			shape[3] = shape[3] && (sub || i == 0)
+		}
+	}
+	smlnum := math.SmallestNonzeroFloat64 / eps()
+	if maxA != 0 && (maxA < smlnum || maxA > 1/smlnum) {
+		return nil, nil, false
+	}
+	t := slices.Index(shape[:], true)
+	if t < 0 {
+		return nil, nil, false
+	}
+	rev := func(k int) int { return n - 1 - k }
+	canon := func(i, j int) float64 {
+		switch t {
+		case 0:
+			return at(i, j)
+		case 1:
+			return at(rev(i), rev(j))
+		case 2:
+			return at(j, i)
+		default:
+			return at(rev(j), rev(i))
+		}
+	}
+	h, g := make([]float64, n), make([]float64, n)
+	for i := range n {
+		g[i] = canon(i, n-1)
+		if i > 0 {
+			if h[i] = canon(i, i-1); h[i] == 0 {
+				return nil, nil, false
+			}
+		}
+	}
+	hk := make([]float64, n*n)
+	for k := range n {
+		hk[k*n+k] = 1
+		for l := k - 1; l >= 0; l-- {
+			hk[k*n+l] = hk[k*n+l+1] * h[l+1]
+		}
+	}
+	hn := hk[(n-1)*n:]
+	den = make([]float64, n+1)
+	den[0] = 1
+	for i := range n {
+		if g[i] != 0 {
+			den[n-i] = -hn[i] * g[i]
+		}
+	}
+	crow := cr.Data[row*cr.Stride : row*cr.Stride+n]
+	bv, cv := make([]float64, n), make([]float64, n)
+	nums = make([][]float64, m)
+	for col := range m {
+		for k := range n {
+			src := k
+			if t == 1 || t == 3 {
+				src = rev(k)
+			}
+			bk := math.Ldexp(br.Data[src*br.Stride+col], -inExp[col])
+			ck := math.Ldexp(crow[src], -outExp)
+			if t >= 2 {
+				bk, ck = ck, bk
+			}
+			bv[k], cv[k] = bk, ck
+		}
+		num := make([]float64, n)
+		for k, ck := range cv {
+			if ck == 0 {
+				continue
+			}
+			hrow := hk[k*n:]
+			for j := range n {
+				p := 0.0
+				for l := max(0, j+k+2-n); l <= min(j, k); l++ {
+					i := j + k + 1 - l
+					p += hrow[l] * hn[i] * (g[l]*bv[i] - bv[l]*g[i])
+				}
+				if l0 := j + k + 1 - n; l0 >= 0 {
+					p += hrow[l0] * bv[l0]
+				}
+				num[n-1-j] += ck * p
+			}
+		}
+		nums[col] = num
+	}
+	return den, nums, true
 }
 
 // hessenbergDual returns a dual form of output row of (a, b, cm), aData
