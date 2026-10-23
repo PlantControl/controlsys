@@ -220,6 +220,8 @@ type rowRealizationConverter struct {
 	// trims[i*m+j] holds the Markov trim candidates of entry (i, j), most
 	// trimmed first; trimRows applies them after the realization is chosen.
 	trims [][][]float64
+	// keepObs disables the observability cut (see keepObservable).
+	keepObs bool
 }
 
 func newRowRealizationConverter(sys *System, opts *TransferFuncOpts) rowRealizationConverter {
@@ -256,38 +258,196 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	if groups := c.structuralRowGroups(); groups != nil {
 		return c.convertRowGroups(groups)
 	}
-	order, err := c.convertFrom(false)
+	pick, order, err := c.choose()
 	if err != nil {
 		return nil, err
 	}
-	if !c.hasZeroDiagonal() && slices.Min(c.rows) == c.n {
-		return c.result(order), nil
+	if slices.Min(pick.rows) < c.n {
+		pick, order = pick.keepObservable(order)
+	}
+	return pick.result(order), nil
+}
+
+// keepObservable returns the full-order Dgebal conversion in place of c, a
+// conversion in which a row lost states, when c misses the response in the
+// band of its own and of the full one's poles and zeros by more than 1e-6
+// and the full one misses it by 1e3× less. MATLAB tf(ss) takes den = poly(A)
+// after only structural reduction, while the observability cut is by
+// magnitude: the last Hessenberg subdiagonal of a slow companion is an exact
+// product of tiny couplings, which the cut drops with the origin pole and a
+// zero (U3H63X). A truly hidden mode leaves c matching everywhere, so it
+// stays dropped, and the full conversion is only made once c misses in its
+// own band. The default check points sit far above such poles, where the
+// lost state barely shows.
+func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConverter, int) {
+	if c.opts.ObservabilityTol != 0 {
+		return c, order
+	}
+	c.trimRows()
+	bd := newBalancedDense(c.sys, c.n, c.m, c.p)
+	if e, ok := sampleTFCheck(bd, bandCheckPoints(c.sys, c.tf.polys()), c.m, c.p).resolvedErr(c.tf); !ok || !(e > 1e-6) {
+		return c, order
+	}
+	full := newRowRealizationConverter(c.sys, c.opts)
+	full.keepObs = true
+	fullOrder, err := full.convertFrom(false)
+	if err != nil || fullOrder <= order {
+		return c, order
+	}
+	full.trimRows()
+	ck := sampleTrimCheck(bd, bandCheckPoints(c.sys, append(full.tf.polys(), c.tf.polys()...)), c.m, c.p)
+	eKept, ok := ck.resolvedErr(c.tf)
+	if !ok || !(eKept > 1e-6) {
+		return c, order
+	}
+	if eFull, _ := ck.resolvedErr(full.tf); eFull <= 1e-3*eKept {
+		return full, fullOrder
+	}
+	return c, order
+}
+
+// polys returns the row dens and the numerators.
+func (tf *TransferFunc) polys() [][]float64 {
+	var out [][]float64
+	for i, den := range tf.Den {
+		out = append(out, den)
+		out = append(out, tf.Num[i]...)
+	}
+	return out
+}
+
+// bandCheckPoints adds jω, ω log-spaced over [r, R] and r/10, to the
+// continuous points of newTFCheck, r and R estimating the smallest and
+// largest nonzero root moduli over polys; discrete models get six points on
+// the unit circle.
+func bandCheckPoints(sys *System, polys [][]float64) []complex128 {
+	var pts []complex128
+	if !sys.IsContinuous() {
+		for _, th := range []float64{0.05, 0.3, 0.7, 1.3, 1.9, 2.8} {
+			pts = append(pts, cmplx.Rect(1, th))
+		}
+		return pts
+	}
+	rho := frobNorm(sys.A)
+	if rho == 0 || math.IsInf(rho, 0) {
+		rho = 1
+	}
+	for _, w := range []float64{1e-2, 1, 1e2} {
+		pts = append(pts, complex(0, rho*w))
+	}
+	lo, hi := math.Inf(1), 0.0
+	for _, p := range polys {
+		p = trimLeadingFloatZeros(p)
+		for len(p) > 1 && p[len(p)-1] == 0 {
+			p = p[:len(p)-1]
+		}
+		d := len(p) - 1
+		if d < 1 {
+			continue
+		}
+		up, down := 0.0, 0.0
+		for k := 1; k <= d; k++ {
+			up = max(up, math.Pow(math.Abs(p[k]/p[0]), 1/float64(k)))
+			down = max(down, math.Pow(math.Abs(p[d-k]/p[d]), 1/float64(k)))
+		}
+		if up > 0 && down > 0 && !math.IsInf(up, 0) && !math.IsInf(down, 0) {
+			lo, hi = min(lo, 1/down), max(hi, up)
+		}
+	}
+	if hi == 0 {
+		return pts
+	}
+	nb := 8
+	if hi <= lo {
+		nb = 2
+	}
+	ratio := math.Pow(hi/lo, 1/float64(nb-1))
+	for w := range nb {
+		pts = append(pts, complex(0, lo*math.Pow(ratio, float64(w))))
+	}
+	return append(pts, complex(0, lo/10))
+}
+
+// resolvedErr is relErr per entry, relative to the entry, over the points
+// where the entry is resolved (sens < 10% of it).
+func (ck tfCheck) resolvedErr(tf *TransferFunc) (worst float64, ok bool) {
+	for k, s := range ck.s {
+		got := tf.eval(s)
+		m := len(got[0])
+		for i, row := range got {
+			for j, v := range row {
+				ref := ck.ref[k][i*m+j]
+				scale := max(cmplx.Abs(ref), eps()*ck.mag[k])
+				if len(ck.sens) == len(ck.s) && ck.sens[k] != nil && ck.sens[k][i*m+j] >= 0.1*scale {
+					continue
+				}
+				e := cmplx.Abs(v-ref) / scale
+				if math.IsNaN(e) {
+					e = math.Inf(1)
+				}
+				worst, ok = max(worst, e), true
+			}
+		}
+	}
+	return worst, ok
+}
+
+// choose returns the Dgebal or Osborne converter, filled, and its order.
+func (c rowRealizationConverter) choose() (rowRealizationConverter, int, error) {
+	order, err := c.convertFrom(false)
+	if err != nil {
+		return c, 0, err
+	}
+	zero, tiny := c.diagonalZeros()
+	full := slices.Min(c.rows) == c.n
+	if !zero && !tiny && full {
+		return c, order, nil
 	}
 	check := newTFCheck(c.sys, c.n, c.m, c.p)
 	gate := 1e3 * float64(c.n) * eps()
+	// With only rotation noise on the diagonal Dgebal's grading costs
+	// digits (P6VF2M: a lost zero), but Osborne's often costs more in the
+	// low den coefficients the check points above the poles miss, so then
+	// only a gross Dgebal miss switches, and only to an Osborne result
+	// within 1e-10 of the response at those points: the right ones of a
+	// near-double integrator reach 2e-11, those with a wrong DC den 1e-9.
+	coarse := !zero && full
+	if coarse {
+		gate = 1e-6
+	}
 	e0, ok := check.relErr(c.tf)
 	if !ok || e0 <= gate {
-		return c.result(order), nil
+		return c, order, nil
 	}
 	alt := newRowRealizationConverter(c.sys, c.opts)
 	altOrder, err := alt.convertFrom(true)
 	if err != nil {
-		return c.result(order), nil
+		return c, order, nil
 	}
-	if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
-		return alt.result(altOrder), nil
-	}
-	// Far above the poles the untrimmed Markov noise of a correct alt can
-	// exceed even a Dgebal result that lost every state (WGMRIE), so compare
-	// trimmed results too.
+	// Far above the poles the untrimmed Markov noise of either result can
+	// exceed the error of one that lost states, which barely shows there
+	// (WGMRIE; U3H63X: an exact Dgebal slow companion against an Osborne
+	// one missing a state), so only the trimmed results are compared.
+	// Once trimmed, a Dgebal result within 1e3·n·eps can still carry
+	// 1e4·eps den errors on a graded zero-diagonal chain (P6VF2M), so then
+	// the trimmed errors are compared outright, by a 4× margin against ties.
 	c.trimRows()
 	alt.trimRows()
-	if e0, _ = check.relErr(c.tf); e0 > gate {
-		if e1, ok := check.relErr(alt.tf); ok && e1 < e0 {
-			return alt.result(altOrder), nil
-		}
+	e0, _ = check.relErr(c.tf)
+	e1, ok := check.relErr(alt.tf)
+	switch {
+	case !ok:
+	case coarse:
+		ok = e0 > gate && e1 < e0 && e1 <= 1e-10
+	case e0 > gate:
+		ok = e1 < e0
+	default:
+		ok = 4*e1 < e0
 	}
-	return c.result(order), nil
+	if ok {
+		return alt, altOrder, nil
+	}
+	return c, order, nil
 }
 
 // rowGroup is a set of output rows that structurally see the same states.
@@ -445,14 +605,18 @@ func (c rowRealizationConverter) convertFrom(osborne bool) (int, error) {
 	return order, nil
 }
 
-func (c rowRealizationConverter) hasZeroDiagonal() bool {
+// diagonalZeros reports whether A has an exactly zero diagonal entry, and
+// whether it has one within n·eps·‖A‖_F, the rounding a rotation leaves on
+// the diagonal of a zero-diagonal chain, which Dgebal grades like a zero.
+func (c rowRealizationConverter) diagonalZeros() (zero, tiny bool) {
 	raw := c.sys.A.RawMatrix()
+	tol := float64(c.n) * eps() * frobNorm(c.sys.A)
 	for i := range c.n {
-		if raw.Data[i*raw.Stride+i] == 0 {
-			return true
-		}
+		v := math.Abs(raw.Data[i*raw.Stride+i])
+		zero = zero || v == 0
+		tiny = tiny || v <= tol
 	}
-	return false
+	return zero, tiny
 }
 
 // tfCheck holds reference responses of the state-space model at a few
@@ -486,45 +650,10 @@ func newTFCheck(sys *System, n, m, p int) tfCheck {
 	return sampleTFCheck(newBalancedDense(sys, n, m, p), pts, m, p)
 }
 
-// trimCheckPoints adds jω, ω log-spaced over [r, R] and r/10, to the continuous
-// points of newTFCheck, r and R estimating the smallest and largest root
-// moduli of the row's monic den, so that a trim is also checked in and below
-// the band of that row's poles.
+// trimCheckPoints is bandCheckPoints of the row's den, so that a trim is
+// also checked in and below the band of that row's poles.
 func trimCheckPoints(sys *System, den []float64) []complex128 {
-	var pts []complex128
-	if !sys.IsContinuous() {
-		for _, th := range []float64{0.05, 0.3, 0.7, 1.3, 1.9, 2.8} {
-			pts = append(pts, cmplx.Rect(1, th))
-		}
-		return pts
-	}
-	rho := frobNorm(sys.A)
-	if rho == 0 || math.IsInf(rho, 0) {
-		rho = 1
-	}
-	for _, w := range []float64{1e-2, 1, 1e2} {
-		pts = append(pts, complex(0, rho*w))
-	}
-	d := len(den) - 1
-	hi, lo := 0.0, 0.0
-	for k := 1; k <= d; k++ {
-		hi = max(hi, math.Pow(math.Abs(den[k]), 1/float64(k)))
-	}
-	if an := den[d]; an != 0 {
-		for k := 1; k <= d; k++ {
-			lo = max(lo, math.Pow(math.Abs(den[d-k]/an), 1/float64(k)))
-		}
-	}
-	if hi > 0 && lo > 0 && !math.IsInf(hi, 0) && !math.IsInf(lo, 0) {
-		const nb = 8
-		r := 1 / lo
-		ratio := math.Pow(hi/r, 1/float64(nb-1))
-		for w := range nb {
-			pts = append(pts, complex(0, r*math.Pow(ratio, float64(w))))
-		}
-		pts = append(pts, complex(0, r/10))
-	}
-	return pts
+	return bandCheckPoints(sys, [][]float64{den})
 }
 
 func sampleTFCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
@@ -726,6 +855,9 @@ func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order i
 		// 10·n·eps·‖A‖₁ for small n.
 		floor *= 10
 	}
+	if c.keepObs {
+		floor = 0
+	}
 	return c.convertDynamicRows(stair, stair.NCont, floor, inExp, outExp), scaled, nil
 }
 
@@ -812,8 +944,15 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 
 	markov := newMarkovTrim(c.sys)
 	totalOrder := 0
+	zeroEigs := -1
 	for i := 0; i < c.p; i++ {
 		nobs, den, numCoeffs := ssToTFRow(Ac, Bc, Cc, i, ncont, c.m, c.opts.ObservabilityTol, floor, inExp, outExp[i], ws)
+		if nobs == c.n {
+			if zeroEigs < 0 {
+				zeroEigs = isolatedZeroEigs(c.sys.A)
+			}
+			clear(den[len(den)-zeroEigs:])
+		}
 		c.rows[i] = nobs
 		totalOrder += nobs
 
@@ -839,6 +978,28 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 		}
 	}
 	return totalOrder
+}
+
+// isolatedZeroEigs counts the zero eigenvalues of A that Dgebal's
+// permutation isolates, exact factors s of det(sI − A): a row keeping all
+// states has that den, whose trailing coefficients the reductions leave as
+// rounding noise instead of zeros (a k-fold origin pole then splits by
+// noise^(1/k)).
+func isolatedZeroEigs(A *mat.Dense) int {
+	n, _ := A.Dims()
+	a := make([]float64, n*n)
+	raw := A.RawMatrix()
+	for i := range n {
+		copy(a[i*n:(i+1)*n], raw.Data[i*raw.Stride:i*raw.Stride+n])
+	}
+	ilo, ihi := impl.Dgebal(lapack.Permute, n, a, n, make([]float64, n))
+	k := 0
+	for i := range n {
+		if (i < ilo || i > ihi || ilo == ihi) && a[i*n+i] == 0 {
+			k++
+		}
+	}
+	return k
 }
 
 // trimRows replaces each numerator that has Markov trim candidates by the
@@ -1316,10 +1477,13 @@ type StateSpaceResult struct {
 
 // StateSpace returns an observable-companion realization with one block per
 // output row, as MATLAB ss(tf) (SLICOT TD04AD); like MATLAB it is not
-// reduced to minimal order. A malformed or empty model returns
-// ErrDimensionMismatch, a NaN or Inf coefficient ErrInvalidArgument, an
-// improper one ErrImproperTF and a zero leading denominator coefficient
-// ErrSingularDenom.
+// reduced to minimal order. An improper model gives, as MATLAB ss(tf), a
+// descriptor realization with singular E: the companion blocks of the
+// proper remainders, then per improper row i a nilpotent chain of q_i+1
+// states realizing the polynomial quotient of degree q_i (MinimalOrder
+// counts them; BlockSizes does not). A malformed or empty model returns
+// ErrDimensionMismatch, a NaN or Inf coefficient ErrInvalidArgument and a
+// zero leading denominator coefficient ErrSingularDenom.
 func (tf *TransferFunc) StateSpace() (*StateSpaceResult, error) {
 	res, err := tf.stateSpace()
 	if err != nil {
@@ -1340,7 +1504,7 @@ func (tf *TransferFunc) stateSpace() (*StateSpaceResult, error) {
 		return nil, err
 	}
 	if !tf.isProper() {
-		return nil, ErrImproperTF
+		return tf.improperStateSpace(p, m)
 	}
 
 	smlnum := math.SmallestNonzeroFloat64 / eps()
@@ -1487,6 +1651,122 @@ func (tf *TransferFunc) stateSpace() (*StateSpaceResult, error) {
 		MinimalOrder: totalN,
 		BlockSizes:   degrees,
 	}, nil
+}
+
+// improperStateSpace splits each channel into quotient q_ij and proper
+// remainder r_ij of num_ij/den_i, realizes r with stateSpace and appends,
+// per row, E z' = z + B u with E the upper shift and B_k = -[q_ij]_k, so
+// z_0 = Σ_k s^k Σ_j [q_ij]_k u_j.
+func (tf *TransferFunc) improperStateSpace(p, m int) (*StateSpaceResult, error) {
+	smlnum := math.SmallestNonzeroFloat64 / eps()
+	for i := range p {
+		if math.Abs(tf.Den[i][0]) < smlnum {
+			return nil, fmt.Errorf("row %d: %w", i, ErrSingularDenom)
+		}
+	}
+	rem := &TransferFunc{Num: make([][][]float64, p), Den: tf.Den, Dt: tf.Dt,
+		Delay: tf.Delay, InputName: tf.InputName, OutputName: tf.OutputName}
+	quot := make([][][]float64, p)
+	chain := make([]int, p)
+	nPoly := 0
+	for i := range p {
+		den := tf.Den[i]
+		d := len(den) - 1
+		rem.Num[i] = make([][]float64, m)
+		quot[i] = make([][]float64, m)
+		for j := range m {
+			num := trimLeadingFloatZeros(tf.Num[i][j])
+			if len(num)-1 <= d {
+				rem.Num[i][j] = num
+				continue
+			}
+			r := append([]float64(nil), num...)
+			q := make([]float64, len(num)-d)
+			for k := range q {
+				c := r[k] / den[0]
+				if math.IsInf(c, 0) || math.IsNaN(c) {
+					return nil, fmt.Errorf("row %d: polynomial quotient: %w", i, ErrOverflow)
+				}
+				q[k] = c
+				for l := 1; l <= d; l++ {
+					r[k+l] -= c * den[l]
+				}
+			}
+			for _, v := range r {
+				if math.IsInf(v, 0) || math.IsNaN(v) {
+					return nil, fmt.Errorf("row %d: polynomial remainder: %w", i, ErrOverflow)
+				}
+			}
+			if d == 0 {
+				rem.Num[i][j] = []float64{0}
+			} else {
+				rem.Num[i][j] = r[len(q):]
+			}
+			quot[i][j] = q
+			chain[i] = max(chain[i], len(q))
+		}
+		nPoly += chain[i]
+	}
+	res, err := rem.stateSpace()
+	if err != nil || nPoly == 0 {
+		return res, err
+	}
+	base := res.Sys
+	n0, _, _ := base.Dims()
+	n := n0 + nPoly
+	A := mat.NewDense(n, n, nil)
+	E := mat.NewDense(n, n, nil)
+	B := mat.NewDense(n, m, nil)
+	C := mat.NewDense(p, n, nil)
+	D := mat.DenseCopyOf(base.D)
+	aRaw, eRaw, bRaw, cRaw, dRaw := A.RawMatrix(), E.RawMatrix(), B.RawMatrix(), C.RawMatrix(), D.RawMatrix()
+	if n0 > 0 {
+		a0, b0, c0 := base.A.RawMatrix(), base.B.RawMatrix(), base.C.RawMatrix()
+		for r := range n0 {
+			copy(aRaw.Data[r*aRaw.Stride:r*aRaw.Stride+n0], a0.Data[r*a0.Stride:r*a0.Stride+n0])
+			copy(bRaw.Data[r*bRaw.Stride:r*bRaw.Stride+m], b0.Data[r*b0.Stride:r*b0.Stride+m])
+			eRaw.Data[r*eRaw.Stride+r] = 1
+		}
+		for r := range p {
+			copy(cRaw.Data[r*cRaw.Stride:r*cRaw.Stride+n0], c0.Data[r*c0.Stride:r*c0.Stride+n0])
+		}
+	}
+	off := n0
+	for i := range p {
+		for j := range m {
+			if q := quot[i][j]; len(q) > 0 {
+				dRaw.Data[i*dRaw.Stride+j] += q[len(q)-1]
+			}
+		}
+		qi := chain[i]
+		if qi == 0 {
+			continue
+		}
+		for k := range qi {
+			aRaw.Data[(off+k)*aRaw.Stride+off+k] = 1
+			if k+1 < qi {
+				eRaw.Data[(off+k)*eRaw.Stride+off+k+1] = 1
+			}
+			for j := range m {
+				q := quot[i][j]
+				if idx := len(q) - 1 - k; k > 0 && idx >= 0 {
+					bRaw.Data[(off+k)*bRaw.Stride+j] = -q[idx]
+				}
+			}
+		}
+		cRaw.Data[i*cRaw.Stride+off] = 1
+		off += qi
+	}
+	sys, err := newDescriptorOwned(A, B, C, D, E, tf.Dt)
+	if err != nil {
+		return nil, err
+	}
+	if tf.Delay != nil {
+		sys.Delay = slice2DToDense(tf.Delay)
+	}
+	sys.InputName = copyStringSlice(tf.InputName)
+	sys.OutputName = copyStringSlice(tf.OutputName)
+	return &StateSpaceResult{Sys: sys, MinimalOrder: n, BlockSizes: res.BlockSizes}, nil
 }
 
 // IsProper reports whether the delay-free part of sys, including internal

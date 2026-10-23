@@ -9,14 +9,18 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-func TestStateSpace_RejectsImproperTF(t *testing.T) {
+func TestStateSpace_ImproperTFIsDescriptor(t *testing.T) {
 	tf := &TransferFunc{
 		Num: [][][]float64{{{1, 0}}}, // s (degree 1)
 		Den: [][]float64{{1}},        // 1 (degree 0)
 	}
-	_, err := tf.StateSpace()
-	if !errors.Is(err, ErrImproperTF) {
-		t.Errorf("expected ErrImproperTF, got %v", err)
+	res, err := tf.StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := res.Sys.EvalFr(2i)
+	if err != nil || res.Sys.E == nil || cmplx.Abs(h[0][0]-2i) > 1e-15 {
+		t.Errorf("s realization: E=%v H(2i)=%v err=%v", res.Sys.E, h, err)
 	}
 }
 
