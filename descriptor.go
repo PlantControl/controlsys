@@ -504,6 +504,10 @@ func (sys *System) weierstrassReduce() (*System, error) {
 	t := make([]float64, n*n)
 	tol := 100 * float64(n) * eps() * denseNorm(sys.E)
 	finite := func(_, _, beta float64) bool { return math.Abs(beta) > tol }
+	d, index1, ratioTol, stiffSplit := weierstrassSplit(sys.A, sys.E, n)
+	if stiffSplit {
+		finite = func(ar, ai, beta float64) bool { return !qzInfinite(ar, ai, beta, ratioTol) }
+	}
 
 	alphar := make([]float64, n)
 	alphai := make([]float64, n)
@@ -511,7 +515,7 @@ func (sys *System) weierstrassReduce() (*System, error) {
 	vsl := make([]float64, n*n)
 	vsr := make([]float64, n*n)
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
-	if !ok || largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
+	if !ok || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
 		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff && (!ok || nfd != nf) {
 			all := func(_, _, _ float64) bool { return true }
 			if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
@@ -566,18 +570,20 @@ func (sys *System) weierstrassReduce() (*System, error) {
 		if err := lu.SolveTo(&b, false, extractBlock(&bq, nf, 0, ni, mi)); err != nil {
 			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
-		e22 := extractBlock(T, nf, nf, ni, ni)
-		e22.Apply(func(_, _ int, v float64) float64 {
-			if math.Abs(v) <= tol {
-				return 0
+		if !index1 || ni != d {
+			e22 := extractBlock(T, nf, nf, ni, ni)
+			e22.Apply(func(_, _ int, v float64) float64 {
+				if math.Abs(v) <= tol {
+					return 0
+				}
+				return v
+			}, e22)
+			if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
+				return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 			}
-			return v
-		}, e22)
-		if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
-			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
-		}
-		if !algebraicPartStatic(c2, &nilpotent, &b, cScale, bScale, n) {
-			return nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+			if !algebraicPartStatic(c2, &nilpotent, &b, cScale, bScale, n) {
+				return nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+			}
 		}
 		var cb mat.Dense
 		cb.Mul(c2, &b)
@@ -615,6 +621,51 @@ func (sys *System) weierstrassReduce() (*System, error) {
 		out.LFT.D22 = subDense(dRed, p, m, q, q)
 	}
 	return out, nil
+}
+
+// weierstrassSplit classifies the pencil (A, E) for weierstrassReduce as
+// generalizedPoles does: d = n − rank(E) and index1 from pencilIndexOne;
+// an index-1 pencil has N = 0, so its infinite block, once it has d
+// eigenvalues, carries no s-terms however much rounding T∞ keeps. When E
+// has a stiff singular value and a gap separates the d eigenvalues of
+// least |β|/|α| (leastRatioInfTol), stiffSplit is set and ratioTol, inside
+// that gap below the stiff pole's |β|/|α|, bounds the infinite ones: the
+// flat |β| cut would send the stiff finite pole to the infinite block. The
+// bound sits under the finite side because the reordering QZ recomputes β
+// of the infinite ones, which may be 0 in one run and not the other.
+func weierstrassSplit(A, E *mat.Dense, n int) (d int, index1 bool, ratioTol float64, stiffSplit bool) {
+	d, index1 = pencilIndexOne(A, E, n, mat.Norm(A, 2))
+	if d == 0 || !index1 {
+		return d, index1, 0, false
+	}
+	var svd mat.SVD
+	if !svd.Factorize(E, mat.SVDNone) {
+		return d, index1, 0, false
+	}
+	sv := svd.Values(nil)
+	r, stiff, _ := descriptorRank(sv, sv[0], n, true)
+	if !stiff || r != n-d {
+		return d, index1, 0, false
+	}
+	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
+	alphar, alphai, beta, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
+	if !ok {
+		return d, index1, 0, false
+	}
+	margin := sv[r-1] / (float64(n) * eps() * sv[0])
+	if _, sep := leastRatioInfTol(alphar, alphai, beta, d, margin); !sep {
+		return d, index1, 0, false
+	}
+	gap := stiffRatioGap
+	if margin < stiffMarginal {
+		gap = marginalRatioGap
+	}
+	ratio := make([]float64, n)
+	for i := range n {
+		ratio[i] = math.Abs(beta[i]) / math.Hypot(alphar[i], alphai[i])
+	}
+	slices.Sort(ratio)
+	return d, index1, ratio[d] / math.Sqrt(gap), true
 }
 
 // algebraicPartStatic reports whether c·N^k·b vanishes for k ≥ 1, i.e. the
