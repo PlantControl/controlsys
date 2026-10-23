@@ -616,7 +616,12 @@ func pidTuningFRDStrictDCGain(data *FRD, at func(float64) complex128) float64 {
 // integrator, or starts at 1 when m > 0 and c has no integral action,
 // needing |L(low)| <= 1/2; any other c is unknown. Between samples G runs
 // along their interpolant, each step bisected until 1 + L turns by under
-// 90°; one that cannot be rejects c, as its |S| is unbounded.
+// 90°; one that cannot be rejects c, as its |S| is unbounded. Between two
+// consecutive samples the count is unknown when 0 lies between their chord
+// of 1 + L and its arc on the circle through them and the sample before,
+// and on the one through them and the sample after (where each exists), as
+// a resonance the samples do not resolve winds 1 + L round 0 along that
+// arc, opposite to the chord.
 //
 // A discrete top sample within 10% of Nyquist with L within 30° of the real
 // axis ends 1 + L at 1 + L(z = −1), which is real; Re L is extrapolated
@@ -836,21 +841,32 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 	if !(math.Abs(total) < math.Pi/2) {
 		return false, true, false
 	}
-	step := func(w float64) bool {
-		f := at(w)
+	step := func(w float64, f complex128) bool {
 		d, ok := walk(wPrev, w, fPrev, f, 0)
 		total += d
 		wPrev, fPrev = w, f
 		return ok
 	}
 	for w := w0 * math.Sqrt(10); w < p.low; w *= math.Sqrt(10) {
-		if !step(w) {
+		if !step(w, at(w)) {
 			return false, true, false
 		}
 	}
-	for _, w := range p.samples {
-		if w > wPrev && !step(w) {
+	s := p.samples
+	var f0, f1, f2, f3 complex128
+	for i, w := range s {
+		f0, f1, f2 = f1, f2, f3
+		if i == 0 {
+			f2 = at(w)
+		}
+		if i+1 < len(s) {
+			f3 = at(s[i+1])
+		}
+		if w > wPrev && !step(w, f2) {
 			return false, true, false
+		}
+		if i > 0 && (i > 1 || i+1 < len(s)) && (i < 2 || pidTuningFRDArcHidesZero(f1, f2, f0)) && (i+1 == len(s) || pidTuningFRDArcHidesZero(f1, f2, f3)) {
+			return true, false, false
 		}
 	}
 	if fPrev == 0 {
@@ -858,4 +874,21 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 	}
 	total += turn(fPrev, end) + bump
 	return math.Abs(expected-total) < math.Pi/2, true, top
+}
+
+// pidTuningFRDArcHidesZero reports whether 0 lies between the chord from a
+// to b and the arc from a to b, not through x, of the circle through a, b
+// and x, as a lightly damped mode traces such a circle and the count's
+// interpolant follows the chord.
+func pidTuningFRDArcHidesZero(a, b, x complex128) bool {
+	cross := func(u, v complex128) float64 { return real(u)*imag(v) - imag(u)*real(v) }
+	u, v := b-a, x-a
+	den := 2 * cross(u, v)
+	if den == 0 || !pidFiniteComplex(u) || !pidFiniteComplex(v) {
+		return false
+	}
+	nu, nv := real(u)*real(u)+imag(u)*imag(u), real(v)*real(v)+imag(v)*imag(v)
+	o := complex(imag(v)*nu-imag(u)*nv, real(u)*nv-real(v)*nu) / complex(den, 0)
+	r := cmplx.Abs(o)
+	return cmplx.Abs(-a-o) < r && cross(u, -a)*cross(u, v) < 0
 }
