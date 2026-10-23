@@ -263,6 +263,64 @@ func TestZerosLargeOutputGainKeepsZeros(t *testing.T) {
 	}
 }
 
+// TestZerosInputDelayLargeBInfinite: h₁..h₅ of this model are rounding
+// noise (exactly, below 2ε of |C|·|A|^(k−1)·|B|) and h₆ ≈ 9.97e6, so it has
+// relative degree n with or without an absorbed delay and no finite zeros
+// (MATLAB tzero returns none). With ‖B‖ ≈ 1.7e4 above the noise zeros'
+// moduli the arbitration's distinctness test never applied, and absorbing
+// an input delay of 2 (3) samples returned four (five) zeros near |z| ≈ 2e3.
+// JHFQWK.
+func TestZerosInputDelayLargeBInfinite(t *testing.T) {
+	a := []float64{
+		-0.30812557411587743, 0.6642811222774762, -1.1645951468833002, -0.0774231837121592, -0.6957122625842734, -0.8391493631056596,
+		0.1742671697306247, -0.441999883149851, 3.175914877766397, -1.8304741724157747, 1.6766889770226296, 2.3009535388386806,
+		0.07809970640914293, 0.8851521730199738, 2.3656838826550635, -0.6859101645736735, 2.7476434064579385, 1.5047064085275361,
+		0.2595955965940777, -0.4398854610498305, 1.7634706847539088, -0.6372481972646447, 0.9502909064750453, 1.4468053236485743,
+		-0.11507076475116207, 1.470456556015531, -2.737620174425864, 1.1400303375637728, -0.483720411368498, -1.6359846465196202,
+		0.6653156905942649, -3.690028155629834, 1.7280184492821011, 0.8744715567741346, -1.7297313935029008, 1.4367589206521012,
+	}
+	b := []float64{-1671.334311584176, -200.42706161256677, -3646.1927910641903, 3621.1579406128153, -5992.121742212304, 14873.703230695197}
+	c := []float64{1736.7870217404882, 168.06629242245003, 282.1481094074295, 39.89682694543168, -13.009369726597079, 251.6371800679135}
+	const n = 6
+
+	h, bound := exactMarkov(a, b, c, n)
+	for k := range n {
+		if noise := math.Abs(h[k]) <= 2*eps()*bound[k]; noise != (k < n-1) {
+			t.Fatalf("oracle: h%d = %g, bound %g", k+1, h[k], bound[k])
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		in, out float64
+	}{{"none", 0, 0}, {"input2", 2, 0}, {"input3", 3, 0}, {"input4", 4, 0}, {"output2", 0, 2}} {
+		sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0.1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.in > 0 {
+			err = sys.SetInputDelay([]float64{tc.in})
+		}
+		if err == nil && tc.out > 0 {
+			err = sys.SetOutputDelay([]float64{tc.out})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := sys.AbsorbDelay()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := s.ZerosDetail()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Zeros) != 0 || res.Rank != 1 {
+			t.Errorf("%s: zeros %v rank %d, want none, rank 1", tc.name, res.Zeros, res.Rank)
+		}
+	}
+}
+
 func BenchmarkZerosVanishingMarkov(b *testing.B) {
 	a, bm, c := vanishingMarkovModel()
 	sys, err := NewFromSlices(5, 1, 1, a, bm, c, []float64{0}, 0.1)
