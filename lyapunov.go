@@ -505,6 +505,9 @@ func solveDiscrKron(da, db int, at []float64, aRow, ldat int, bt []float64, bRow
 			bBlk[i*db+j] = bt[(bRow+i)*ldbt+bRow+j]
 		}
 	}
+	// Balance each 2×2 block as solveDiscrLyap2 does, T = D·T̃·D⁻¹ with
+	// D = diag(1, d): Y = Da⁻¹·X·Db⁻¹ solves T̃_kk·Y·T̃_llᵀ − Y = Da⁻¹·C·Db⁻¹.
+	sa, sb := kronBalance(da, aBlk[:]), kronBalance(db, bBlk[:])
 
 	// Build Kronecker product (B ⊗ A) - I of size nn×nn
 	// vec(A*X*B') = (B ⊗ A) * vec(X), so (T_ll ⊗ T_kk - I)*vec(X) = vec(C)
@@ -528,7 +531,7 @@ func solveDiscrKron(da, db int, at []float64, aRow, ldat int, bt []float64, bRow
 	var rhs [4]float64
 	for i := range da {
 		for j := range db {
-			rhs[j*da+i] = c[(cRow+i)*ldc+cCol+j]
+			rhs[j*da+i] = c[(cRow+i)*ldc+cCol+j] / (sa[i] * sb[j])
 		}
 	}
 
@@ -540,7 +543,7 @@ func solveDiscrKron(da, db int, at []float64, aRow, ldat int, bt []float64, bRow
 
 	for i := range da {
 		for j := range db {
-			c[(cRow+i)*ldc+cCol+j] = rhs[j*da+i]
+			c[(cRow+i)*ldc+cCol+j] = rhs[j*da+i] * sa[i] * sb[j]
 		}
 	}
 
@@ -548,4 +551,16 @@ func solveDiscrKron(da, db int, at []float64, aRow, ldat int, bt []float64, bRow
 		return 1, ErrSingularEquation
 	}
 	return scale, nil
+}
+
+// kronBalance balances the row-major 2×2 block blk (size 2; size 1 is
+// left alone) in place by D = diag(1, d), d a power of two near
+// √|t21/t12|, and returns D's diagonal.
+func kronBalance(size int, blk []float64) [2]float64 {
+	s := [2]float64{1, 1}
+	if size == 2 && blk[1] != 0 && blk[2] != 0 {
+		s[1] = pow2Near(math.Sqrt(math.Abs(blk[2])) / math.Sqrt(math.Abs(blk[1])))
+		blk[1], blk[2] = blk[1]*s[1], blk[2]/s[1]
+	}
+	return s
 }
