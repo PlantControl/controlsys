@@ -325,20 +325,26 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 	// the better one, unless it misses by over 10% a resolved point the kept
 	// row matches to 1e-6: a direct row exact on a graded companion must not
 	// carry along dense rows whose full conversion fixes the response below
-	// the poles but loses it far above them.
+	// the poles but loses it far above them. Better is 1e3× less worst miss,
+	// or no point missed by more than twice the kept row's miss (or 1e-6) and
+	// one missed 1e3× less: at the band edge the reference itself can miss a
+	// small row by 1e-2, the same for both rows.
 	order = 0
 	for i := range c.p {
 		eK := ck.rowPointErrs(c.tf, i)
 		eF := ck.rowPointErrs(full.tf, i)
 		worstK, worstF, loses := 0.0, 0.0, false
+		dominates, gains := true, false
 		for k := range eK {
-			if eK[k] < 0 {
+			if eK[k] < 0 || eF[k] < 0 {
 				continue
 			}
 			worstK, worstF = max(worstK, eK[k]), max(worstF, eF[k])
 			loses = loses || eK[k] <= 1e-6 && !(eF[k] <= 0.1)
+			dominates = dominates && eF[k] <= max(2*eK[k], 1e-6)
+			gains = gains || eK[k] > 1e-6 && eF[k] <= 1e-3*eK[k]
 		}
-		if !loses && worstK > 1e-6 && worstF <= 1e-3*worstK {
+		if !loses && worstK > 1e-6 && (worstF <= 1e-3*worstK || dominates && gains) {
 			c.tf.Den[i], c.tf.Num[i], c.rows[i] = full.tf.Den[i], full.tf.Num[i], full.rows[i]
 		}
 		order += c.rows[i]
@@ -431,9 +437,19 @@ func (ck tfCheck) rowPointErrs(tf *TransferFunc, only int) []float64 {
 			if only >= 0 && i != only {
 				continue
 			}
+			if dv := Poly(tf.Den[i]).Eval(s); cmplx.IsInf(dv) || cmplx.IsNaN(dv) {
+				continue
+			}
+			rowMag := 0.0
+			for j := range row {
+				rowMag = max(rowMag, cmplx.Abs(ck.ref[k][i*m+j]))
+			}
+			if rowMag == 0 {
+				rowMag = ck.mag[k]
+			}
 			for j, v := range row {
 				ref := ck.ref[k][i*m+j]
-				scale := max(cmplx.Abs(ref), eps()*ck.mag[k])
+				scale := max(cmplx.Abs(ref), eps()*rowMag)
 				if len(ck.sens) == len(ck.s) && ck.sens[k] != nil && ck.sens[k][i*m+j] >= 0.1*scale {
 					continue
 				}
