@@ -2239,7 +2239,11 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		}
 		return returnExcess
 	}
+	// phaseRejected reports that evaluate's last candidate left the phase
+	// band at wc.
+	phaseRejected := false
 	evaluate := func(candidate PID2) error {
+		phaseRejected = false
 		if evidence.Evaluations >= o.MaxEvaluations {
 			return nil
 		}
@@ -2262,6 +2266,7 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		candidate.Ki /= mag
 		candidate.Kd /= mag
 		if pidPhaseDistance(h*pidTuningFeedback(candidate, wc), o.PhaseMargin) > 3 {
+			phaseRejected = true
 			return nil
 		}
 		if !pidTuningDCAdmissible(candidate, p.dcGain, p.high, p.highGain) {
@@ -2431,26 +2436,53 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 					current = nearest
 				}
 				// A Tf step without Kd is a null move whose rounding-level
-				// score change would steer the search.
+				// score change would steer the search. Tf still decides
+				// where a Kd step lands, so under an exact stability check
+				// the Tf axis then steps Kd too, at a Tf stride that does
+				// not shrink, as no score ranks Tf there, and with Kp and
+				// Ki put back on the incumbent's phase at wc if off the
+				// band. The probe can reach loops near the stability
+				// boundary, which sampled checks cannot certify.
 				for axis := range 4 {
-					if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && (!filtered || current.Kd == 0) {
+					diagonal := axis == 3 && current.Kd == 0
+					if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && (!filtered || diagonal && p.stable == nil) {
 						continue
 					}
+					kdSigns := []float64{0}
+					if diagonal {
+						kdSigns = []float64{-1, 1}
+					}
 					for _, sign := range []float64{-1, 1} {
-						candidate := current
-						scale := 1 / cmplx.Abs(h)
-						switch axis {
-						case 0:
-							candidate.Kp += sign * step * scale
-						case 1:
-							candidate.Ki += sign * step * scale * wc
-						case 2:
-							candidate.Kd += sign * step * scale / wc
-						case 3:
-							candidate.Tf *= math.Exp(sign * step)
-						}
-						if err := evaluate(candidate); err != nil {
-							return nil, fmt.Errorf("%s: %w", op, err)
+						for _, kdSign := range kdSigns {
+							candidate := current
+							scale := 1 / cmplx.Abs(h)
+							switch axis {
+							case 0:
+								candidate.Kp += sign * step * scale
+							case 1:
+								candidate.Ki += sign * step * scale * wc
+							case 2:
+								candidate.Kd += sign * step * scale / wc
+							case 3:
+								tfStep := step
+								if diagonal {
+									tfStep = math.Max(step, .5)
+								}
+								candidate.Tf *= math.Exp(sign * tfStep)
+								candidate.Kd += kdSign * step * scale / wc
+							}
+							if err := evaluate(candidate); err != nil {
+								return nil, fmt.Errorf("%s: %w", op, err)
+							}
+							if diagonal && hasP && hasI && phaseRejected {
+								on := pidTuningFeedback(current, wc)
+								ib, db := pidTuningBasis(candidate, wc)
+								candidate.Ki = (imag(on) - candidate.Kd*imag(db)) / imag(ib)
+								candidate.Kp = real(on) - candidate.Ki*real(ib) - candidate.Kd*real(db)
+								if err := evaluate(candidate); err != nil {
+									return nil, fmt.Errorf("%s: %w", op, err)
+								}
+							}
 						}
 					}
 				}
