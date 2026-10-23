@@ -103,6 +103,9 @@ func exactBoundaryUncontrollable(rng *rand.Rand, jb [][]int64) (A, B, Q *mat.Den
 // with no Accuracy 1 X returned before the check (base: 60 of 800 Accuracy
 // 1 X). Dare returned ErrSchurFailed, not ErrNoStabilizing, when QZ
 // failed with no Accuracy 1 X kept (FXO5QS: schur*, PCG(seed, 1)).
+// jordan1_322 (PCG(322, 4)) was certified, Accuracy 0 with X ≈ 1e49 and
+// closed loop 1 − 3e-16 ± 1e-8i, in both modes: a certified X does not
+// override the boundary verdict both scalings give (MPWOJM).
 func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 	type tcase struct {
 		name       string
@@ -131,6 +134,10 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 			mat.NewDense(4, 4, []float64{-1, 2, -4, -2, -3, -1, -2, 8, 1, 2, 1, -7, -1, 1, -2, 0}),
 			mat.NewDense(4, 1, []float64{6, 4, 2, 3}),
 			mat.NewDense(4, 4, []float64{27, 7, 5, -6, 7, 8, 0, 2, 5, 0, 3, -4, -6, 2, -4, 13}), 3.654958830626971e-11},
+		{"jordan1_322", false,
+			mat.NewDense(5, 5, []float64{4, 1, 0, 0, 0, -9, -2, 0, 0, 0, 32, 10, 0, -4, 5, 17, 5, -1, 1, 2, 6, 2, 1, 2, 2}),
+			mat.NewDense(5, 1, []float64{0, 0, 0, 3, 1}),
+			mat.NewDense(5, 5, []float64{7, -6, 0, -5, 0, -6, 23, -2, 7, 0, 0, -2, 4, 2, -5, -5, 7, 2, 16, -3, 0, 0, -5, -3, 13}), 5.443340272572639e-12},
 	}
 	kinds := []struct {
 		name       string

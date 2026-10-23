@@ -272,7 +272,7 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // otherScaling solves by solve and, when that finds no stabilizing
 // solution (ErrNoStabilizing or ErrSchurFailed) or one no Newton step
 // certifies (Accuracy 1), once more with opts.NoScaling flipped, and then,
-// with plainRetry (Care), state-scaled with B in place of its cost proxy
+// when continuous (Care), state-scaled with B in place of its cost proxy
 // (opts.plainScaling).
 // State scaling can push a cheap-control pencil (R ≪ BᵀXB) to where no
 // cost scale deflates it while the unscaled one solves (w17 #8), and the
@@ -283,10 +283,19 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // (errBoundaryUnstabilizable) in any mode overrides every Accuracy 1
 // result but not a certified one: its rounding band is a heuristic that
 // a non-normal block can inflate past a mode inside the boundary (seen
-// unscaled only), while a Newton-certified X is stable. A kept Accuracy
-// 1 result lives in opts.Workspace, so later solves run without it.
-func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), plainRetry bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+// unscaled only), while a Newton-certified X is stable. A certified X
+// with a closed-loop mode within rounding of the boundary
+// (boundaryCertified) is a boundary verdict when both the unscaled and
+// the state-scaled problem have an unstabilizable boundary mode: an
+// exactly uncontrollable Jordan block at 1 left the closed loop at
+// 1 − 3e-16 ± 1e-8i with X ≈ 1e49 that Newton could not move (MPWOJM).
+// A kept Accuracy 1 result lives in opts.Workspace, so later solves run
+// without it.
+func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := solve(A, B, Q, R, opts)
+	if err == nil && res.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res) {
+		res, err = nil, errBoundaryUnstabilizable
+	}
 	if err == nil && res.Accuracy == 0 ||
 		err != nil && !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
 		return res, err
@@ -303,7 +312,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 	flipped.NoScaling = !base.NoScaling
 	plain.NoScaling, plain.plainScaling = false, true
 	retries := []RiccatiOpts{flipped, plain}
-	if !plainRetry {
+	if !continuous {
 		retries = retries[:1]
 	}
 	for _, o := range retries {
@@ -311,6 +320,9 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 			o.Workspace = nil
 		}
 		r, e := solve(A, B, Q, R, &o)
+		if e == nil && r.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, r) {
+			r, e = nil, errBoundaryUnstabilizable
+		}
 		switch {
 		case errors.Is(e, errBoundaryUnstabilizable):
 			if boundary == nil {
@@ -330,6 +342,43 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 		return res, nil
 	}
 	return nil, err
+}
+
+// boundaryCertified reports a closed-loop eigenvalue of the certified
+// res within the rounding of a well-conditioned eigenvalue, n·eps·‖A‖_F,
+// of the stability boundary, where the certificate shows no stability,
+// with boundaryUnstabilizable true both unscaled and state-scaled as
+// solve scales (Care with its cost proxy). Wider bands (√eps, 10·n·eps·‖A‖_F)
+// rejected oracle-exact X of stable uncontrollable modes at 1 − 1e-9 and
+// 1 − 1e-11 that boundaryUnstabilizable's κ-weighted band covers.
+func boundaryCertified(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) bool {
+	if len(res.Eig) == 0 {
+		return false
+	}
+	n, _ := A.Dims()
+	band := float64(n) * eps() * denseNorm(A)
+	near := false
+	for _, l := range res.Eig {
+		if continuous && -real(l) <= band || !continuous && 1-cmplx.Abs(l) <= band {
+			near = true
+			break
+		}
+	}
+	if !near {
+		return false
+	}
+	var base RiccatiOpts
+	if opts != nil {
+		base = *opts
+	}
+	base.Workspace, base.NoScaling, base.plainScaling = nil, true, false
+	problem, err := newRiccatiProblem(A, B, Q, R, &base)
+	if err != nil || !problem.boundaryUnstabilizable(continuous) {
+		return false
+	}
+	base.NoScaling = false
+	problem.scale(&base, continuous)
+	return problem.boundaryUnstabilizable(continuous)
 }
 
 func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
