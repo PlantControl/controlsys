@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -333,12 +334,17 @@ func makeBranches(allEigs [][]complex128, nStates, nGains int) [][]complex128 {
 // The numerator is trimmed to the loop's relative degree, so rounding-noise
 // leading coefficients add no far stationary points, and N, D are scaled
 // by powers of two so N'D − ND' cannot overflow. An absorbed delay of L
-// samples is kept exact as D = z^L·D0 (the L noise trailing coefficients of
-// the full-order D dropped, or D0 from the undelayed loop when the
-// conversion reduced the order), so z = 0 is reported once, not rooted from
-// an L-fold cluster; if rooting that form fails, the full D is rooted as is.
-// A root at a repeated pole or zero (K = 0 or ∞) is kept under either angle
-// condition.
+// samples is kept exact as D = z^L·D0 (N and D0 from the undelayed loop,
+// whose conversion carries no noise from the delay states, else the
+// full-order D with its L noise trailing coefficients dropped), so z = 0 is
+// reported once, not rooted from an L-fold cluster; if rooting that form
+// fails, the full D is rooted as is.
+// A real pole or zero of net multiplicity m ≥ 2 (K = 0 or ∞, multipleRoots
+// less cancelling roots of the other kind) is a break point under either
+// angle condition, reported once in place of the m − 1 nearest roots of
+// N'D − ND' it splits into; no absolute cut-off decides it, so slow or
+// close resolved poles stay distinct. A root of N'D − ND' is real when its
+// imaginary part is within 1e-6 of its modulus.
 // Any other root is on the locus when K = −1/G(s) > 0 and G'(s) ≈ 0, both
 // from the state space, so a sign rule over rounding-noise zeros or a
 // conversion error in N/D cannot misplace it; where the sign of G is not
@@ -374,23 +380,69 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 	}
 	num, den := trimmedTF(num, den0, delay, lp.relDeg, lp.n)
 
+	sigmaBal, sigma := balancedNorm(lp.a, lp.n), 0.0
+	for _, r := range slices.Concat(poles, zeros) {
+		sigma = math.Max(sigma, cmplx.Abs(r))
+	}
+	sigma = math.Min(sigma, sigmaBal)
+	numRoots, denRoots := polyRootsOrNil(num), polyRootsOrNil(den)
+	clusters := netClusters(lp.zeroClusters(sys, zeros, num, sigma, sigmaBal), poles, denRoots)
+	if ec, ok := eigCondition(lp.a, nil, lp.n); ok {
+		clusters = append(clusters, netClusters(multipleRoots(ec.vals, ec.kappa, ec.pairCondition, den, lp.n, sigma, sigmaBal, sigmaBal), zeros, numRoots)...)
+	}
+	bl := lp.balanced()
 	var result []complex128
-	for _, r := range roots {
-		if math.Abs(imag(r)) > 1e-6*math.Max(1, math.Abs(real(r))) {
+	// A multiple root of multiplicity m is an (m−1)-fold root of N'D − ND',
+	// split by rounding: the m−1 nearest roots are that break point, so it
+	// is reported once: at the centre of exactly equal roots, else at the
+	// nearest root when that is real.
+	used := make([]bool, len(roots))
+	claim := func(c float64, k int) (first int) {
+		first = -1
+		for range k {
+			best := -1
+			for i, r := range roots {
+				if !used[i] && (best < 0 || cmplx.Abs(r-complex(c, 0)) < cmplx.Abs(roots[best]-complex(c, 0))) {
+					best = i
+				}
+			}
+			if best < 0 {
+				break
+			}
+			used[best] = true
+			if first < 0 {
+				first = best
+			}
+		}
+		return first
+	}
+	isReal := func(r complex128) bool { return math.Abs(imag(r)) <= 1e-6*cmplx.Abs(r) }
+	for _, c := range clusters {
+		if c.m >= 2 {
+			at := complex(c.centre, 0)
+			if i := claim(c.centre, c.m-1); i >= 0 && !c.exact && isReal(roots[i]) {
+				at = complex(real(roots[i]), 0)
+			}
+			result = append(result, at)
+		}
+	}
+	for i, r := range roots {
+		if used[i] || !isReal(r) || slices.Contains(roots[:i], r) {
 			continue
 		}
 		s := real(r)
-		if isNearRepeatedReal(s, poles) || isNearRepeatedReal(s, zeros) {
-			result = append(result, complex(s, 0))
-			continue
+		c, m := multipleRootNear(den, s, lp.n, poles)
+		if m == 0 {
+			c, m = multipleRootNear(num, s, lp.n, zeros)
 		}
-		onLocus := multipleRootNear(den, s, lp.n, poles) || multipleRootNear(num, s, lp.n, zeros)
-		if !onLocus {
-			if g, dg, ok := lp.eval(s); ok {
-				onLocus = g < 0 && isStationary(s, g, dg, poles, zeros)
-			} else {
-				onLocus = isOnRealAxisSegment(s, poles, zeros) != lp.negGain
-			}
+		onLocus := m > 0
+		if onLocus {
+			used[i] = true
+			claim(c, m-2)
+		} else if g, dg, ok := bl.eval(s); ok {
+			onLocus = g < 0 && isStationary(s, g, dg, poles, zeros)
+		} else {
+			onLocus = isOnRealAxisSegment(s, poles, zeros) != lp.negGain
 		}
 		if onLocus {
 			result = append(result, complex(s, 0))
@@ -411,17 +463,19 @@ func breakawayTF(sys, undelayed *System, delay, n int) (num, den0, numFull, denF
 	numFull = Poly(tfr.TF.Num[0][0])
 	denFull = Poly(tfr.TF.Den[0])
 	num, den0 = numFull, denFull
+	var u *TransferFuncResult
+	if delay > 0 && undelayed != nil && slices.ContainsFunc(num, func(c float64) bool { return c != 0 }) {
+		if ur, uerr := undelayed.rationalTransferFunction(nil); uerr == nil {
+			u = ur
+		}
+	}
 	switch {
 	case delay <= 0:
 		delay = 0
+	case u != nil:
+		num, den0 = u.TF.Num[0][0], u.TF.Den[0]
 	case len(den0) == n+1:
 		den0 = den0[:len(den0)-delay]
-	case undelayed != nil && slices.ContainsFunc(num, func(c float64) bool { return c != 0 }):
-		if u, uerr := undelayed.rationalTransferFunction(nil); uerr == nil {
-			num, den0 = u.TF.Num[0][0], u.TF.Den[0]
-		} else {
-			delay = 0
-		}
 	default:
 		delay = 0
 	}
@@ -441,10 +495,19 @@ func trimmedTF(num, den0 Poly, delay, relDeg, n int) (Poly, Poly) {
 }
 
 // stationaryCandidates returns the roots of N'D − ND' for D = z^delay·D0,
-// with N trimmed to relative degree relDeg and N, D unit-scaled. Roots is
-// nil when the converted N, D or N'D − ND' are empty, all zero or not
-// finite.
+// with exact common roots at 0 of N and D cancelled, N trimmed to relative
+// degree relDeg and N, D unit-scaled; exact roots at 0 (z^(L−1) and zero
+// trailing coefficients) are listed with their multiplicity. Roots is nil
+// when the converted N, D or N'D − ND' are empty, all zero or not finite.
 func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex128, err error) {
+	for len(num) > 1 && num[len(num)-1] == 0 && (delay > 0 || len(den0) > 1 && den0[len(den0)-1] == 0) {
+		if delay > 0 {
+			delay--
+		} else {
+			den0 = den0[:len(den0)-1]
+		}
+		num = num[:len(num)-1]
+	}
 	num, den := trimmedTF(num, den0, delay, relDeg, n)
 	if len(num) == 0 {
 		return nil, nil
@@ -463,17 +526,15 @@ func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex
 	if !slices.ContainsFunc(poly, func(c float64) bool { return c != 0 }) || slices.ContainsFunc(poly, notFinite) {
 		return []complex128{}, nil
 	}
-	atZero := delay > 1
+	atZero := max(delay-1, 0)
 	for len(poly) > 1 && poly[len(poly)-1] == 0 {
-		poly, atZero = poly[:len(poly)-1], true
+		poly = poly[:len(poly)-1]
+		atZero++
 	}
 	if roots, err = poly.Roots(); err != nil {
 		return nil, err
 	}
-	if atZero {
-		roots = append(roots, 0)
-	}
-	return roots, nil
+	return append(roots, make([]complex128, atZero)...), nil
 }
 
 // rlocusLoop is the explicit SISO loop C(sI−A)⁻¹B + D, A row-major n×n.
@@ -676,20 +737,21 @@ func (lp *rlocusLoop) eval(s float64) (g, dg float64, ok bool) {
 	return g, dg, true
 }
 
-// multipleRootNear reports whether p (the denominator or numerator, with
-// computed roots) has, up to a backward error of u = 2·n·eps in its
-// coefficients, a root of multiplicity m ≥ 2 at the centre c of the root
-// cluster near s, c being the root of p^(m−1) found by Newton from s. K = 0
+// multipleRootNear returns the multiplicity m ≥ 2 (0 when none) and the
+// centre c of a multiple root of p (the denominator or numerator, with
+// computed roots) up to a backward error of u = 2·n·eps in its
+// coefficients, at the centre of the root cluster near s, c being the root
+// of p^(m−1) found by Newton from s. K = 0
 // (∞) there, so the cluster is a multiple pole (zero) split by rounding and
 // a break point under either angle condition. m is the size of the cluster
 // itself: the roots within 10·ρ₂ of c, ρ₂ = √(u·Σ|pᵢ||c|ⁱ/|p″(c)/2|) the
 // rounding split of a double root there. A double-root test alone would
 // merge m ≥ 3 distinct roots a relative δ apart, since p(c) ~ δ^m.
-func multipleRootNear(p Poly, s float64, n int, roots []complex128) bool {
+func multipleRootNear(p Poly, s float64, n int, roots []complex128) (centre float64, m int) {
 	u := 2 * float64(n) * eps()
 	deg := len(p) - 1
 	if deg < 2 {
-		return false
+		return 0, 0
 	}
 	scale := 0.0
 	for _, r := range roots {
@@ -705,7 +767,7 @@ func multipleRootNear(p Poly, s float64, n int, roots []complex128) bool {
 		}
 		return ders[k]
 	}
-	centre := func(m int) (float64, bool) {
+	newton := func(m int) (float64, bool) {
 		c := s
 		for range 4 {
 			f, df := evalReal(der(m-1), c), evalReal(der(m), c)
@@ -716,13 +778,12 @@ func multipleRootNear(p Poly, s float64, n int, roots []complex128) bool {
 		}
 		return c, isFinite(c) && math.Abs(c-s) <= 1e-3*math.Max(math.Abs(s), scale)
 	}
-	c, ok := centre(2)
+	c, ok := newton(2)
 	if !ok {
-		return false
+		return 0, 0
 	}
 	_, b0 := evalRealBound(p, c)
 	rho := math.Sqrt(u * b0 / math.Abs(evalReal(der(2), c)/2))
-	m := 0
 	for _, r := range roots {
 		if cmplx.Abs(r-complex(c, 0)) <= 10*rho {
 			m++
@@ -730,20 +791,20 @@ func multipleRootNear(p Poly, s float64, n int, roots []complex128) bool {
 	}
 	m = max(m, 2)
 	if m > deg {
-		return false
+		return 0, 0
 	}
 	if m > 2 {
-		if c, ok = centre(m); !ok {
-			return false
+		if c, ok = newton(m); !ok {
+			return 0, 0
 		}
 	}
 	for j := range m {
 		v, b := evalRealBound(der(j), c)
 		if math.Abs(v) > u*b {
-			return false
+			return 0, 0
 		}
 	}
-	return true
+	return c, m
 }
 
 func evalReal(p Poly, x float64) float64 {
@@ -831,28 +892,583 @@ func unitScalePoly(p Poly) Poly {
 	return out
 }
 
-func isOnRealAxisSegment(s float64, poles, zeros []complex128) bool {
-	// Count real poles and zeros to the right of s
-	count := 0
-	for _, p := range poles {
-		if math.Abs(imag(p)) < 1e-6 && real(p) > s {
-			count++
+// netClusters lowers each cluster's multiplicity by the roots of the other
+// kind within its radius: a zero at a multiple pole cancels in the minimal
+// transfer function, so a net simple root there is no break point.
+func netClusters(clusters []rootCluster, others, otherTF []complex128) []rootCluster {
+	for i, c := range clusters {
+		o := others
+		if c.tf {
+			o = otherTF
+		}
+		for _, r := range o {
+			if cmplx.Abs(r-complex(c.centre, 0)) <= c.radius {
+				clusters[i].m--
+			}
 		}
 	}
-	for _, z := range zeros {
-		if math.Abs(imag(z)) < 1e-6 && real(z) > s {
+	return clusters
+}
+
+// rootCluster is a real pole (K = 0) or zero (K = ∞) of net multiplicity m
+// at centre, a break point under either angle condition when m ≥ 2; roots
+// of the other kind within radius of the centre cancel against it.
+type rootCluster struct {
+	centre, radius float64
+	m              int
+	// exact marks a cluster of exactly equal roots.
+	exact bool
+	// tf marks a multiplicity confirmed by the converted polynomial, which
+	// is netted against the other converted polynomial's roots: the
+	// conversion may already have cancelled a common root.
+	tf bool
+}
+
+// polyRootsOrNil returns the roots of p, nil when it has none or rooting
+// fails.
+func polyRootsOrNil(p Poly) []complex128 {
+	if len(p) < 2 {
+		return nil
+	}
+	r, err := p.Roots()
+	if err != nil {
+		return nil
+	}
+	return r
+}
+
+// multipleRoots returns the real multiple roots among the computed roots
+// of p (the unit-scaled denominator or numerator); kappa, when not nil,
+// holds the roots' condition numbers (eigCondition, zeroCondition). With
+// u = 2·n·eps, σ the smaller of the balanced norm σ_b of A and the largest
+// pole or zero modulus, and ν = √u·σ, exactly equal roots form a group, and
+// the others join when within 1e-2 of each other relative to their size,
+// within ν, or merged to first order by a relative change u of A's
+// entries, |λᵢ − λⱼ| ≤ u·(κᵢ + κⱼ). A group of m is a multiple root at its
+// centre when
+//   - its roots are equal;
+//   - it lies within u^(1/m)·σ of the origin, where normwise rounding of a
+//     realization of scale σ splits an m-fold root at 0; or it is split by
+//     at most u^(1/m)·σₜ about a centre within 10·u·σₜ of the origin
+//     (σₜ = σ_b for poles, 0 for zeros: the centre of an eig cluster is its
+//     trace, which rounding of A moves by only ~u·σ_b, so a resolved slow
+//     cluster stays off 0 even when a realization of scale σ_b cannot split
+//     its roots);
+//   - each of its roots is merged by u with another and it is a pair that
+//     is real, straddles the origin, or is split by at most √u·σ_b;
+//   - or p has, up to a backward error of 10·u in its coefficients, a root
+//     of multiplicity m at the centre c found by Newton on p^(m−1); 100·u
+//     for m ≥ 3 poles merged by u, which eig cannot resolve and the TF
+//     conversion misses by more than 10·u (an exact companion triple pole
+//     by ~30·u), while a resolved near triple needs ~400·u.
+//
+// A group that is none is split at its widest link (splitWidest) and its
+// parts tested by the last rule alone, a part only when no other root of
+// the group lies within the radius splitRadius by which that backward
+// error splits its m-fold root (else p(c) ~ δ^m merges a near (m+1)-fold
+// cluster as an m-fold one): a double pole beside a resolved simple pole
+// keeps its break point.
+//
+// Resolved roots, however slow or close, therefore stay apart; a near
+// multiple root that only eig's rounding merges but the coefficients do not
+// confirm is left to the stationary-point rules.
+func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) float64, p Poly, n int, sigma, sigmaBal, sigmaTrace float64) []rootCluster {
+	k := len(roots)
+	if k < 2 {
+		return nil
+	}
+	u := 2 * float64(n) * eps()
+	nu, nuBal := math.Sqrt(u)*sigma, math.Sqrt(u)*sigmaBal
+	group := make([]int, k)
+	for i := range group {
+		group[i] = i
+	}
+	find := func(i int) int {
+		for group[i] != i {
+			group[i] = group[group[i]]
+			i = group[i]
+		}
+		return i
+	}
+	exact := make([]bool, k)
+	for i := range k {
+		for j := i + 1; j < k; j++ {
+			if roots[i] == roots[j] {
+				exact[i], exact[j] = true, true
+				group[find(i)] = find(j)
+			}
+		}
+	}
+	for i := range k {
+		for j := i + 1; j < k; j++ {
+			if exact[i] || exact[j] {
+				continue
+			}
+			d := cmplx.Abs(roots[i] - roots[j])
+			if d <= math.Max(1e-2*math.Max(cmplx.Abs(roots[i]), cmplx.Abs(roots[j])), nu) || kappa != nil && d <= u*(kappa[i]+kappa[j]) {
+				group[find(i)] = find(j)
+			}
+		}
+	}
+	var out []rootCluster
+	var test func(members, rest []int)
+	test = func(members, rest []int) {
+		sub := rest != nil
+		m := len(members)
+		if m < 2 {
+			return
+		}
+		var sum complex128
+		for _, j := range members {
+			sum += roots[j]
+		}
+		c0 := sum / complex(float64(m), 0)
+		spread := 0.0
+		for _, j := range members {
+			spread = math.Max(spread, cmplx.Abs(roots[j]-c0))
+		}
+		if math.Abs(imag(c0)) <= spread {
+			radius := math.Max(10*spread, nu)
+			linked := kappa != nil
+			for _, a := range members {
+				linked = linked && slices.ContainsFunc(members, func(b int) bool {
+					return b != a && cmplx.Abs(roots[a]-roots[b]) <= u*(kappa[a]+kappa[b])
+				})
+			}
+			origin := math.Max(spread, cmplx.Abs(c0)) <= math.Pow(u, 1/float64(m))*sigma ||
+				cmplx.Abs(c0) <= 10*u*sigmaTrace && spread <= math.Pow(u, 1/float64(m))*sigmaTrace
+			pair := m == 2 && (imag(roots[members[0]]) == 0 || cmplx.Abs(c0) <= spread || spread <= nuBal) &&
+				(pairCond == nil || u*pairCond(members[0], members[1]) < spread)
+			if spread == 0 || !sub && (origin || linked && pair) {
+				out = append(out, rootCluster{centre: real(c0), radius: radius, m: m, exact: spread == 0})
+				return
+			}
+			tol := 10 * u
+			if linked && m >= 3 && sigmaTrace > 0 {
+				tol = 100 * u
+			}
+			if m < len(p) {
+				c, ok := multipleRootAt(p, real(c0), m, tol, 2*spread)
+				if ok && sub {
+					rho := splitRadius(p, c, m, tol)
+					ok = !slices.ContainsFunc(rest, func(j int) bool { return cmplx.Abs(roots[j]-complex(c, 0)) <= rho })
+				}
+				if ok {
+					out = append(out, rootCluster{centre: c, radius: math.Max(radius, math.Sqrt(u)*math.Abs(c)), m: m, tf: true})
+					return
+				}
+			}
+		}
+		parts := splitWidest(roots, members)
+		for i, part := range parts {
+			test(part, slices.Concat(rest, parts[1-i]))
+		}
+	}
+	for i := range k {
+		if find(i) != i {
+			continue
+		}
+		var members []int
+		for j := range k {
+			if find(j) == i {
+				members = append(members, j)
+			}
+		}
+		test(members, nil)
+	}
+	return out
+}
+
+// splitWidest splits the group members of roots in two at the widest link
+// of its single-linkage tree (minimum spanning tree), so a group that is no
+// multiple root as a whole is tested as its tighter sub-groups. A complex
+// root and its nearest conjugate stay together, as the roots of a real
+// polynomial split into conjugate-closed sub-groups; nil when no split is
+// left.
+func splitWidest(roots []complex128, members []int) [][]int {
+	var units [][]int
+	used := make([]bool, len(members))
+	for i, a := range members {
+		if used[i] {
+			continue
+		}
+		used[i] = true
+		unit := []int{a}
+		if imag(roots[a]) != 0 {
+			best := -1
+			for j, b := range members {
+				if !used[j] && imag(roots[b])*imag(roots[a]) < 0 &&
+					(best < 0 || cmplx.Abs(roots[b]-cmplx.Conj(roots[a])) < cmplx.Abs(roots[members[best]]-cmplx.Conj(roots[a]))) {
+					best = j
+				}
+			}
+			if best >= 0 {
+				used[best] = true
+				unit = append(unit, members[best])
+			}
+		}
+		units = append(units, unit)
+	}
+	m := len(units)
+	if m < 2 {
+		return nil
+	}
+	gap := func(x, y []int) float64 {
+		d := math.Inf(1)
+		for _, a := range x {
+			for _, b := range y {
+				d = math.Min(d, cmplx.Abs(roots[a]-roots[b]))
+			}
+		}
+		return d
+	}
+	in := make([]bool, m)
+	dist := make([]float64, m)
+	parent := make([]int, m)
+	in[0] = true
+	for j := 1; j < m; j++ {
+		dist[j] = gap(units[j], units[0])
+	}
+	widest, cut := -1.0, -1
+	for range m - 1 {
+		next := -1
+		for j := range m {
+			if !in[j] && (next < 0 || dist[j] < dist[next]) {
+				next = j
+			}
+		}
+		in[next] = true
+		if dist[next] > widest {
+			widest, cut = dist[next], next
+		}
+		for j := range m {
+			if d := gap(units[j], units[next]); !in[j] && d < dist[j] {
+				dist[j], parent[j] = d, next
+			}
+		}
+	}
+	if widest <= 0 {
+		return nil
+	}
+	side := make([]int, m)
+	for j := range m {
+		side[j] = -1
+	}
+	side[0], side[cut] = 0, 1
+	var sideOf func(j int) int
+	sideOf = func(j int) int {
+		if side[j] < 0 {
+			side[j] = sideOf(parent[j])
+		}
+		return side[j]
+	}
+	parts := make([][]int, 2)
+	for j := range m {
+		parts[sideOf(j)] = append(parts[sideOf(j)], units[j]...)
+	}
+	return parts
+}
+
+// zeroClusters returns the real multiple zeros (multipleRoots). With a
+// feedthrough the zeros are the eigenvalues of A − B·C/D, whose condition
+// numbers (against the entrywise rounding |A| + |B|·|C|/|D| of forming it)
+// decide them as for poles, so an exact multiple zero is not lost to the
+// rounding of the converted numerator; without one, the zeros' condition
+// numbers in the system pencil (zeroCondition) do.
+func (lp *rlocusLoop) zeroClusters(sys *System, zeros []complex128, num Poly, sigma, sigmaBal float64) []rootCluster {
+	n := lp.n
+	if lp.d != 0 {
+		az, w := make([]float64, n*n), make([]float64, n*n)
+		finite := true
+		for i := range n {
+			for j := range n {
+				bc := lp.b[i] * lp.c[j] / lp.d
+				az[i*n+j] = lp.a[i*n+j] - bc
+				w[i*n+j] = math.Abs(lp.a[i*n+j]) + math.Abs(bc)
+				finite = finite && isFinite(az[i*n+j]) && isFinite(w[i*n+j])
+			}
+		}
+		if finite {
+			if ec, ok := eigCondition(az, w, n); ok {
+				return multipleRoots(ec.vals, ec.kappa, ec.pairCondition, num, n, sigma, balancedNorm(az, n), 0)
+			}
+		}
+	}
+	return multipleRoots(zeros, zeroCondition(sys, zeros), nil, num, n, sigma, sigmaBal, 0)
+}
+
+// zeroCondition returns the normwise condition numbers of the zeros of
+// the SISO model sys as generalized eigenvalues of its system pencil
+// S(λ) = [A−λI B; C D], in the prescaled realization (zerosPrescale) whose
+// pencil the zeros are computed from, accurate to ε·‖S‖:
+// κ = ‖S‖·(‖x‖₁ + 1)·(‖y‖₁ + 1) / |C·(λI−A)⁻²·B| with x = (λI−A)⁻¹B,
+// yᵀ = C(λI−A)⁻¹, so a change ε·‖S‖ of the pencil's entries moves λ by
+// ≈ ε·κ to first order. κ is capped at ‖S‖/√u, u = 2·n·eps, so a root
+// links (multipleRoots) only within the √u·‖S‖ rounding split of a double
+// root, not with every zero where the first-order κ is infinite; κ is 0
+// where λI−A is singular; nil for fewer than two zeros.
+func zeroCondition(sys *System, zeros []complex128) []float64 {
+	if len(zeros) < 2 {
+		return nil
+	}
+	zs := zerosPrescale(sys)
+	n, _, _ := zs.Dims()
+	a, b, c := zs.A.RawMatrix(), zs.B.RawMatrix(), zs.C.RawMatrix()
+	nrm := math.Abs(zs.D.At(0, 0))
+	for i := range n {
+		row := math.Abs(b.Data[i*b.Stride])
+		for j := range n {
+			row += math.Abs(a.Data[i*a.Stride+j])
+		}
+		nrm = math.Max(nrm, row)
+	}
+	row := math.Abs(zs.D.At(0, 0))
+	for j := range n {
+		row += math.Abs(c.Data[j])
+	}
+	nrm = math.Max(nrm, row)
+	kmax := nrm / math.Sqrt(2*float64(n)*eps())
+	kappa := make([]float64, len(zeros))
+	m, mt := make([]complex128, n*n), make([]complex128, n*n)
+	x, y := make([]complex128, n), make([]complex128, n)
+	for k, z := range zeros {
+		for i := range n {
+			for j := range n {
+				v := complex(-a.Data[i*a.Stride+j], 0)
+				if i == j {
+					v += z
+				}
+				m[i*n+j], mt[j*n+i] = v, v
+			}
+			x[i], y[i] = complex(b.Data[i*b.Stride], 0), complex(c.Data[i], 0)
+		}
+		if !solveDenseC(m, x, n) || !solveDenseC(mt, y, n) {
+			continue
+		}
+		var den complex128
+		nx, ny := 1.0, 1.0
+		for i := range n {
+			den += y[i] * x[i]
+			nx += cmplx.Abs(x[i])
+			ny += cmplx.Abs(y[i])
+		}
+		kappa[k] = kmax
+		if kp := nrm * nx * ny / cmplx.Abs(den); kp < kmax {
+			kappa[k] = kp
+		}
+	}
+	return kappa
+}
+
+// solveDenseC solves the row-major complex n×n system m·x = b in place
+// (m overwritten) by Gaussian elimination with partial pivoting; false at
+// an exactly zero pivot.
+func solveDenseC(m, b []complex128, n int) bool {
+	for k := range n {
+		p := k
+		for i := k + 1; i < n; i++ {
+			if cmplx.Abs(m[i*n+k]) > cmplx.Abs(m[p*n+k]) {
+				p = i
+			}
+		}
+		if m[p*n+k] == 0 {
+			return false
+		}
+		if p != k {
+			for j := range n {
+				m[k*n+j], m[p*n+j] = m[p*n+j], m[k*n+j]
+			}
+			b[k], b[p] = b[p], b[k]
+		}
+		for i := k + 1; i < n; i++ {
+			f := m[i*n+k] / m[k*n+k]
+			for j := k + 1; j < n; j++ {
+				m[i*n+j] -= f * m[k*n+j]
+			}
+			b[i] -= f * b[k]
+		}
+	}
+	for k := n - 1; k >= 0; k-- {
+		v := b[k]
+		for j := k + 1; j < n; j++ {
+			v -= m[k*n+j] * b[j]
+		}
+		b[k] = v / m[k*n+k]
+	}
+	return true
+}
+
+// eigCond holds eigenvalues of a matrix with their right and left
+// eigenvectors and the entrywise rounding scale w of the matrix.
+type eigCond struct {
+	n      int
+	vals   []complex128
+	kappa  []float64
+	vr, vl mat.CDense
+	a, w   []float64
+}
+
+func (e *eigCond) weight(r, c int) float64 {
+	if e.w != nil {
+		return e.w[r*e.n+c]
+	}
+	return math.Abs(e.a[r*e.n+c])
+}
+
+// eigCondition returns the eigenvalues of the row-major n×n matrix a and
+// their componentwise condition numbers κᵢ = |yᵢ|ᵀ·W·|xᵢ| / |yᵢᴴxᵢ|, W the
+// entrywise rounding scale of a (|a| when w is nil): a relative change ε of
+// W moves λᵢ by ≈ ε·κᵢ to first order.
+func eigCondition(a, w []float64, n int) (*eigCond, bool) {
+	var eig mat.Eigen
+	if !eig.Factorize(mat.NewDense(n, n, slices.Clone(a)), mat.EigenBoth) {
+		return nil, false
+	}
+	e := &eigCond{n: n, vals: eig.Values(nil), a: a, w: w, kappa: make([]float64, n)}
+	eig.VectorsTo(&e.vr)
+	eig.LeftVectorsTo(&e.vl)
+	ax := make([]float64, n)
+	for i := range n {
+		var dot complex128
+		for r := range n {
+			dot += cmplx.Conj(e.vl.At(r, i)) * e.vr.At(r, i)
+			var s float64
+			for c := range n {
+				s += e.weight(r, c) * cmplx.Abs(e.vr.At(c, i))
+			}
+			ax[r] = s
+		}
+		var num float64
+		for r := range n {
+			num += cmplx.Abs(e.vl.At(r, i)) * ax[r]
+		}
+		e.kappa[i] = num / cmplx.Abs(dot)
+	}
+	return e, true
+}
+
+// pairCondition returns the componentwise condition number of the mean
+// (λᵢ + λⱼ)/2, ½·Σ W∘|Pᵀ| for the spectral projector P = X·(YᴴX)⁻¹·Yᴴ,
+// X = [xᵢ xⱼ], Y = [yᵢ yⱼ], of the pair's invariant subspace. A double root split by rounding
+// has a mean far better conditioned than its roots (u·κ_mean below the
+// split), while two resolved roots of a non-normal matrix do not.
+func (e *eigCond) pairCondition(i, j int) float64 {
+	n := e.n
+	idx := [2]int{i, j}
+	var g [2][2]complex128
+	for p, a := range idx {
+		for q, b := range idx {
+			for r := range n {
+				g[p][q] += cmplx.Conj(e.vl.At(r, a)) * e.vr.At(r, b)
+			}
+		}
+	}
+	det := g[0][0]*g[1][1] - g[0][1]*g[1][0]
+	if det == 0 {
+		return math.Inf(1)
+	}
+	inv := [2][2]complex128{{g[1][1] / det, -g[0][1] / det}, {-g[1][0] / det, g[0][0] / det}}
+	z := make([][2]complex128, n)
+	for r := range n {
+		for k := range 2 {
+			z[r][k] = inv[k][0]*cmplx.Conj(e.vl.At(r, i)) + inv[k][1]*cmplx.Conj(e.vl.At(r, j))
+		}
+	}
+	var kappa float64
+	for r := range n {
+		for c := range n {
+			pcr := e.vr.At(c, i)*z[r][0] + e.vr.At(c, j)*z[r][1]
+			kappa += e.weight(r, c) * cmplx.Abs(pcr)
+		}
+	}
+	return kappa / 2
+}
+
+// splitRadius returns ρ = (tol·Σ|pᵢ||c|ⁱ / |p^(m)(c)/m!|)^(1/m), the radius
+// by which a backward error tol in p's coefficients splits an m-fold root
+// at c.
+func splitRadius(p Poly, c float64, m int, tol float64) float64 {
+	d, f := p, 1.0
+	for k := 1; k <= m; k++ {
+		d, f = d.Derivative(), f*float64(k)
+	}
+	_, b := evalRealBound(p, c)
+	return math.Pow(tol*b/math.Abs(evalReal(d, c)/f), 1/float64(m))
+}
+
+// multipleRootAt reports whether p has, up to a backward error of tol in
+// its coefficients, a root of multiplicity m at c, the root of p^(m−1)
+// found by Newton from s within reach of s (p^(m−1)(c) is tested too, so
+// a Newton run that did not reach a real root confirms nothing).
+func multipleRootAt(p Poly, s float64, m int, tol, reach float64) (float64, bool) {
+	ders := []Poly{p}
+	for range m {
+		ders = append(ders, ders[len(ders)-1].Derivative())
+	}
+	c := s
+	for range 8 {
+		f, df := evalReal(ders[m-1], c), evalReal(ders[m], c)
+		if df == 0 {
+			break
+		}
+		c -= f / df
+	}
+	if !isFinite(c) || math.Abs(c-s) > reach {
+		return 0, false
+	}
+	for j := range m {
+		if v, b := evalRealBound(ders[j], c); math.Abs(v) > tol*b {
+			return 0, false
+		}
+	}
+	return c, true
+}
+
+// balance returns D⁻¹·A·D for LAPACK's diagonal balancing D (Dgebal,
+// scaling only) and the diagonal of D.
+func balance(a []float64, n int) (ab, scale []float64) {
+	ab, scale = slices.Clone(a), make([]float64, n)
+	impl.Dgebal(lapack.Scale, n, ab, n, scale)
+	return ab, scale
+}
+
+// balanced returns the loop in the balanced coordinates D⁻¹·A·D, D⁻¹·B,
+// C·D (balance), where solves with sI − A are accurate to the scale of
+// its eigenvalues rather than of A's largest entries.
+func (lp *rlocusLoop) balanced() *rlocusLoop {
+	ab, scale := balance(lp.a, lp.n)
+	bl := *lp
+	bl.a, bl.b, bl.c = ab, make([]float64, lp.n), make([]float64, lp.n)
+	for i, d := range scale {
+		bl.b[i], bl.c[i] = lp.b[i]/d, lp.c[i]*d
+	}
+	return &bl
+}
+
+// balancedNorm returns the 1-norm of A after LAPACK diagonal balancing
+// (Dgebal), the scale eig's rounding is relative to.
+func balancedNorm(a []float64, n int) float64 {
+	b, _ := balance(a, n)
+	nrm := 0.0
+	for j := range n {
+		var s float64
+		for i := range n {
+			s += math.Abs(b[i*n+j])
+		}
+		nrm = math.Max(nrm, s)
+	}
+	return nrm
+}
+
+// isOnRealAxisSegment reports whether an odd number of poles and zeros lie
+// right of s. Complex roots come in conjugate pairs with equal real parts,
+// so counting them leaves the parity of the real ones unchanged.
+func isOnRealAxisSegment(s float64, poles, zeros []complex128) bool {
+	count := 0
+	for _, r := range slices.Concat(poles, zeros) {
+		if real(r) > s {
 			count++
 		}
 	}
 	return count%2 == 1
-}
-
-func isNearRepeatedReal(s float64, roots []complex128) bool {
-	count := 0
-	for _, r := range roots {
-		if math.Abs(imag(r)) < 1e-6 && math.Abs(real(r)-s) < 1e-4 {
-			count++
-		}
-	}
-	return count >= 2
 }

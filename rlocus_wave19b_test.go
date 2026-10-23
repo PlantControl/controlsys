@@ -168,7 +168,7 @@ func TestRootLocus_RotatedTriplePole(t *testing.T) {
 	den := []float64{1, 3.0 / 128, 3.0 / 16384, 1.0 / 2097152, 0}
 	rlpCheckForms(t, "1/(s(s+1/128)³)", den, []float64{1}, []int{0})
 	t.Run("similar", func(t *testing.T) {
-		t.Skip("float64 precision limit: indistinguishable from sweep case 274's distinct near triple")
+		t.Skip("float64 precision limit: indistinguishable from sweep case 274's distinct near triple; rlswUlpSensitive confirms 1-ulp changes of A, B, C change the exact oracle for all four forms")
 		rlpCheckForms(t, "1/(s(s+1/128)³)", den, []float64{1}, []int{11, 13, 15, 17})
 	})
 }

@@ -233,3 +233,36 @@ func TestRootLocus_MarkovZeroCountConsistent(t *testing.T) {
 		}
 	}
 }
+
+// TestRootLocus_PAOH7XSweepPins: frozen-sweep cases a first PAOH7X rework
+// got wrong. Ext 439/495: a double pole beside a resolved simple pole (sub-
+// group split; the stationary point between them is kept). Ext 1887: two
+// resolved poles of a non-normal rotated realization, whose pair mean is no
+// better conditioned than their split, are no double pole (amd64 eig links
+// them). Ext 1994: an origin pair split by rounding is reported at the
+// stationary point, not the eig mean. Ext 954: an exact triple pole at 0
+// is reported at 0. Base 512: a near triple is not merged as a double.
+// Base 207: an origin double split into a real pair ±3.9e-9.
+func TestRootLocus_PAOH7XSweepPins(t *testing.T) {
+	ext, base := rlsxGenerate(), rlswGenerate()
+	for _, tc := range []struct {
+		name string
+		c    *rlswCase
+	}{
+		{"ext 439", &ext[439]}, {"ext 495", &ext[495]}, {"ext 1887", &ext[1887]},
+		{"ext 1994", &ext[1994]}, {"ext 954", &ext[954]}, {"base 512", &base[512]}, {"base 207", &base[207]},
+	} {
+		sys, err := tc.c.system()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := RootLocus(sys, []float64{0, 1})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		oi, of := tc.c.oracles()
+		if !oi.accepts(res.Breakaway) && !of.accepts(res.Breakaway) {
+			t.Errorf("%s: Breakaway = %v, oracles %v / %v", tc.name, res.Breakaway, oi.required, of.required)
+		}
+	}
+}
