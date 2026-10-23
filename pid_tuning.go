@@ -3551,8 +3551,11 @@ func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 // which match theirs well below Nyquist. An integral-free c whose |L| − 1
 // changes sign between ω = 0 and lo walks further down
 // (pidTuningDCCrossingFloor). It extends grid up at step too, as far as
-// pidTuningZeroGridTop, since a large Kd can cross 0 dB above it. Points
-// where p.try fails are dropped; cache keeps the samples of the
+// pidTuningZeroGridTop, since a large Kd can cross 0 dB above it, and adds
+// points within 4|σ| of each p.modes mode above hi up to that top (without
+// p.loopTail, up to pidTuningTailReach·hi): a resonance there lifts |L|
+// through 1 in a pair the coarse step skips. Points where p.try fails are
+// dropped; cache keeps the samples of the
 // extensions, whose points recur.
 func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, cache map[float64]complex128) []float64 {
 	a, b, k := c.Kp*c.Tf+c.Kd, c.Kp+c.Ki*c.Tf, c.Ki
@@ -3604,9 +3607,22 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 		return h, pidFiniteComplex(h)
 	}
 	top := pidTuningZeroGridTop(p, c, hi, step, sample)
+	var modal []float64
+	for _, m := range p.modes {
+		d := math.Max(math.Abs(real(m)), 1e-6*imag(m))
+		for j := -8.; j <= 8; j++ {
+			if w := imag(m) + j*d/2; w > hi {
+				modal = append(modal, w)
+				if p.loopTail == nil && p.dt == 0 && w <= hi*pidTuningTailReach {
+					top = math.Max(top, w)
+				}
+			}
+		}
+	}
 	for j := 1.; j <= math.Ceil(math.Log(top/hi)/step); j++ {
 		extra = append(extra, math.Min(hi*math.Exp(j*step), top))
 	}
+	extra = append(extra, modal...)
 	extra = slices.DeleteFunc(extra, func(w float64) bool {
 		if w < bottom || w > top || w <= 0 {
 			return true

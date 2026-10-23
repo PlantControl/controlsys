@@ -14,7 +14,10 @@ import (
 // PD a 26.3° one at 45.3 and PD PM 70 a 43.5° one at 159 (floor 67°);
 // evidence listed none. On a plant with ‖A‖ ≈ 100 and wc 1.8e-8 the tail
 // bound has none below ~100 rad/s, so the grid stopped at 1e4·hi and PID
-// returned a 14.6° crossing at 0.0417. Oracle: a dense sweep of L from closed forms up to
+// returned a 14.6° crossing at 0.0417. On 1/(s+a)·wn²/(s²+2ζwn·s+wn²)
+// plants with a light resonance above wc·100 the coarse upward walk skipped
+// the 0 dB pair at the resonance, so PID chose Kd > 0 with a 19.6–50° pair
+// (floors 57/42), evidence listing only wc. Oracle: a dense sweep of L from closed forms up to
 // 1e8·wc (π/Dt discrete) for every crossing, its distance from −1 and the
 // |S| peak; Routh on the undelayed characteristic, exact Schur–Cohn on the
 // discrete one, and for the delayed loop the argument principle on the
@@ -35,6 +38,10 @@ func TestTunePIDCrossingAboveBand(t *testing.T) {
 		{Poly{3192.2331382806533, 5851.625992116486, -877.4244188893074, 333.241988470858}, Poly{1, 22.613219017484063, 300.08480842823417, 2335.3743882340327, 17335.04620231331, 777.8271144157021, 8.60408782147981}, PidtunePD, 0, 0, 0, 0, 57},
 		{Poly{22325.58242167066, 124508.53366421786, -142162.3708506173, 56237.397576648174}, Poly{1, 100.95776592853754, 10305.077053015631, 92467.96236379766, 344493.371039096, 244772.35713592256, 21806.063124087068}, PidtunePD, 70, 0, 0, 0, 67},
 		{Poly{0.24849499151690158, 0.0013485275346479704, 0.0002090434235708211}, Poly{1, 12.667867466748863, 2206.0447677301145, 11594.580723295541, 0}, PidtunePID, 0, 0, 0, 0, 57},
+		{Poly{0.21467032679905076}, Poly{1, 0.03883985469722036, 8.813883266103884, 0.15326452402747637}, PidtunePID, 0, 0, 0, 0, 57},
+		{Poly{4075438442.4872518}, Poly{1, 117.0569186253515, 1504139329.2863033, 9783782999.809948}, PidtunePID, 0, 0, 0, 0, 57},
+		{Poly{2.1287074056182735}, Poly{1, 0.16558866802656774, 355.35147111975954, 17.797980704545058}, PidtunePID, 0, 0, 0, 0, 57},
+		{Poly{59021969576.8529}, Poly{1, 231.91684178910205, 2139037576.7899263, 21319430144.2219}, PidtunePID, 45, 0, 0, 0, 42},
 	} {
 		tf := &TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: c.dt}
 		res, err := tf.StateSpace()
