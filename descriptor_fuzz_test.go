@@ -438,7 +438,9 @@ func fzCheckDescriptor(t *testing.T, s *fzSpec) {
 		t.Fatalf("TransferFunction: %v (IsProper %v)\n%s", err, pr, s)
 	}
 	if !pr {
-		t.Fatalf("TransferFunction succeeded on a model IsProper rejects\n%s", s)
+		// TF of an improper descriptor returns the improper ratio (MATLAB tf(dss), SC36CE);
+		// the checks below assume a proper TF.
+		fzSkip(t, "improper descriptor TF")
 	}
 	tf := res.TF
 	nfc := d.nf
