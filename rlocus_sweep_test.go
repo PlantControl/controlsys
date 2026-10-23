@@ -8,6 +8,7 @@ import (
 	"math/cmplx"
 	"math/rand/v2"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -603,6 +604,10 @@ func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
 
 const rlswBaseRev = "03edce8"
 
+// rlswMainRev is the base the track is merged onto; the goldens stay at
+// rlswBaseRev.
+const rlswMainRev = "2db88fe"
+
 type rlswGolden struct {
 	Base  string `json:"base"`
 	OK    string `json:"ok"`
@@ -685,9 +690,11 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 // rlswCheck fails when a component that base got right on cases (golden
 // file golden) is now wrong or errors; env names the regenerate variable.
 // A Breakaway verdict listed in limits is reported, not enforced, when
-// rlswUlpSensitive confirms it is a float64 precision limit. It also fails
-// when any case's Breakaway lists a point twice, which base did.
-func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string) {
+// rlswUlpSensitive confirms it is a float64 precision limit; one listed in
+// atBase for runtime.GOARCH (wrong at rlswMainRev too) is reported, not
+// enforced. It also fails when any case's Breakaway lists a point twice,
+// which base did.
+func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string, atBase map[int]map[string]string) {
 	t.Helper()
 	ok, posed, dups := rlswRun(t, cases)
 	if path := os.Getenv(env); path != "" {
@@ -735,6 +742,8 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 			switch {
 			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && limits[i] != "" && rlswUlpSensitive(&cases[i], i):
 				t.Logf("case %d: Breakaway differs from base at a precision limit: %s", i, limits[i])
+			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && atBase[i][runtime.GOARCH] != "":
+				t.Logf("case %d: Breakaway wrong at %s too: %s", i, rlswMainRev, atBase[i][runtime.GOARCH])
 			case base[i]&m != 0 && ok[i]&m == 0:
 				regressed[bit]++
 				if regressed[bit] <= 5 {
@@ -774,5 +783,5 @@ func TestRootLocusSweepNoRegression(t *testing.T) {
 		t.Skip("frozen 2000-case sweep")
 	}
 	skipSlowUnderRace(t)
-	rlswCheck(t, rlswGenerate(), "testdata/rlocus_sweep_base.json", "RLOCUS_SWEEP_WRITE", rlswPrecisionLimits)
+	rlswCheck(t, rlswGenerate(), "testdata/rlocus_sweep_base.json", "RLOCUS_SWEEP_WRITE", rlswPrecisionLimits, nil)
 }

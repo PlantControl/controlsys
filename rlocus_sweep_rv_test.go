@@ -20,7 +20,7 @@ import (
 
 // Fourth frozen RootLocus regression sweep (track rlocus, wave 20 review
 // 5): the independent reviewer's generator and exact oracle, seed 20261022,
-// 2500 cases (frozen, rvFrozenCases). Families: diagonal, Jordan, fast/slow, near pole-zero
+// 2500 cases (frozen, rvSweep4). Families: diagonal, Jordan, fast/slow, near pole-zero
 // cancellation, D sign, discrete with input/output delay, integrators,
 // near-axis complex zeros, high relative degree; each identity, transposed,
 // diagonally scaled, Givens-rotated or triangular-similar. The oracle is
@@ -125,18 +125,37 @@ type rvOracleCache struct {
 	DegN    int
 }
 
-// rvFrozenCases returns the sweep cases, generated once on arm64 (the
+// rvSweep is one frozen sweep of rvCase cases: cases, oracle cache and base
+// verdicts live in testdata; the env variables regenerate them (cases only
+// when gen is set).
+type rvSweep struct {
+	name                  string
+	count                 int
+	gen                   func() []rvCase
+	cases, oracle, golden string
+	envCases, envOracle   string
+	envWrite              string
+	limits                map[int]string
+}
+
+var rvSweep4 = rvSweep{
+	name: "RV", count: rlrvCases, gen: func() []rvCase { return rvGenerate(rlrvSeed, rlrvCases) },
+	cases: "testdata/rlocus_sweep_rv_cases.json.gz", oracle: "testdata/rlocus_sweep_rv_oracle.json.gz",
+	golden: "testdata/rlocus_sweep_rv_base.json", envCases: "RLOCUS_SWEEPRV_CASES",
+	envOracle: "RLOCUS_SWEEPRV_ORACLE", envWrite: "RLOCUS_SWEEPRV_WRITE", limits: rlrvLimits,
+}
+
+// frozenCases returns the sweep cases, generated once on arm64 (the
 // Givens angles go through math.Cos/Sin, whose last bits differ by arch)
-// and frozen in testdata/rlocus_sweep_rv_cases.json.gz;
-// RLOCUS_SWEEPRV_CASES=<path> regenerates them.
-func rvFrozenCases(t *testing.T) []rvCase {
+// and frozen in sw.cases.
+func (sw rvSweep) frozenCases(t *testing.T) []rvCase {
 	t.Helper()
-	if path := os.Getenv("RLOCUS_SWEEPRV_CASES"); path != "" {
-		cs := rvGenerate(rlrvSeed, rlrvCases)
+	if path := os.Getenv(sw.envCases); path != "" && sw.gen != nil {
+		cs := sw.gen()
 		rvWriteGzipJSON(t, path, cs)
 		return cs
 	}
-	f, err := os.Open("testdata/rlocus_sweep_rv_cases.json.gz")
+	f, err := os.Open(sw.cases)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +168,8 @@ func rvFrozenCases(t *testing.T) []rvCase {
 	if err := json.NewDecoder(zr).Decode(&cs); err != nil {
 		t.Fatal(err)
 	}
-	if len(cs) != rlrvCases {
-		t.Fatalf("frozen cases: %d, want %d", len(cs), rlrvCases)
+	if len(cs) != sw.count {
+		t.Fatalf("frozen cases: %d, want %d", len(cs), sw.count)
 	}
 	return cs
 }
@@ -173,9 +192,9 @@ func rvWriteGzipJSON(t *testing.T, path string, v any) {
 	}
 }
 
-func rvCachedOracles(t *testing.T, cs []rvCase) []rvOra {
+func (sw rvSweep) cachedOracles(t *testing.T, cs []rvCase) []rvOra {
 	t.Helper()
-	if path := os.Getenv("RLOCUS_SWEEPRV_ORACLE"); path != "" {
+	if path := os.Getenv(sw.envOracle); path != "" {
 		oras := rvOracles(cs)
 		cache := make([]rvOracleCache, len(oras))
 		for i, o := range oras {
@@ -184,7 +203,7 @@ func rvCachedOracles(t *testing.T, cs []rvCase) []rvOra {
 		rvWriteGzipJSON(t, path, cache)
 		return oras
 	}
-	f, err := os.Open("testdata/rlocus_sweep_rv_oracle.json.gz")
+	f, err := os.Open(sw.oracle)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,8 +267,15 @@ func TestRootLocusSweepRVNoRegression(t *testing.T) {
 		t.Skip("frozen 2500-case sweep")
 	}
 	skipSlowUnderRace(t)
-	cs := rvFrozenCases(t)
-	oras := rvCachedOracles(t, cs)
+	rvSweep4.check(t, rlswBaseRev)
+}
+
+// check fails when a component that base got right is now wrong; cases
+// are named by ID and limits are keyed by ID.
+func (sw rvSweep) check(t *testing.T, baseRev string) {
+	t.Helper()
+	cs := sw.frozenCases(t)
+	oras := sw.cachedOracles(t, cs)
 	bits := make([]int, len(cs))
 	outs := make([]rvOut, len(cs))
 	for i, c := range cs {
@@ -263,8 +289,8 @@ func TestRootLocusSweepRVNoRegression(t *testing.T) {
 		}
 		return string(b)
 	}
-	if path := os.Getenv("RLOCUS_SWEEPRV_WRITE"); path != "" {
-		g := rlrvGolden{Base: rlswBaseRev, OK: map[string]string{}}
+	if path := os.Getenv(sw.envWrite); path != "" {
+		g := rlrvGolden{Base: baseRev, OK: map[string]string{}}
 		if data, err := os.ReadFile(path); err == nil {
 			if err := json.Unmarshal(data, &g); err != nil {
 				t.Fatal(err)
@@ -280,7 +306,7 @@ func TestRootLocusSweepRVNoRegression(t *testing.T) {
 		}
 		return
 	}
-	data, err := os.ReadFile("testdata/rlocus_sweep_rv_base.json")
+	data, err := os.ReadFile(sw.golden)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,22 +320,22 @@ func TestRootLocusSweepRVNoRegression(t *testing.T) {
 	}
 	names := []string{"Breakaway", "Asymptotes", "Centroid", "DepartureAngles", "ArrivalAngles"}
 	var fixed, regressed [5]int
-	for i := range cs {
+	for i, c := range cs {
 		var base int
 		fmt.Sscanf(s[2*i:2*i+2], "%02x", &base)
 		for k := range 5 {
 			m := 1 << k
 			switch {
 			case base&m != 0 && bits[i]&m == 0 && (m == rlrvBk && oras[i].Prec || oras[i].PrecWhy == "intended!=actual"):
-				t.Logf("case %d %s/%s: %s differs from base at a precision limit (%s): %v", i, cs[i].Fam, cs[i].Xf, names[k], oras[i].PrecWhy, outs[i].Bk)
+				t.Logf("case %d %s/%s: %s differs from base at a precision limit (%s): %v", c.ID, c.Fam, c.Xf, names[k], oras[i].PrecWhy, outs[i].Bk)
 			case base&m != 0 && bits[i]&m == 0 && m == rlrvCen && base&rlrvAsym == 0:
-				t.Logf("case %d %s/%s: Centroid not judged at base (asymptote count wrong there), now %v vs %v", i, cs[i].Fam, cs[i].Xf, outs[i].Cen, oras[i].I.Centroid)
-			case base&m != 0 && bits[i]&m == 0 && m == rlrvBk && rlrvLimits[i] != "":
-				t.Logf("case %d %s/%s: Breakaway differs from base at a known limit: %s", i, cs[i].Fam, cs[i].Xf, rlrvLimits[i])
+				t.Logf("case %d %s/%s: Centroid not judged at base (asymptote count wrong there), now %v vs %v", c.ID, c.Fam, c.Xf, outs[i].Cen, oras[i].I.Centroid)
+			case base&m != 0 && bits[i]&m == 0 && m == rlrvBk && sw.limits[c.ID] != "":
+				t.Logf("case %d %s/%s: Breakaway differs from base at a known limit: %s", c.ID, c.Fam, c.Xf, sw.limits[c.ID])
 			case base&m != 0 && bits[i]&m == 0:
 				regressed[k]++
 				if regressed[k] <= 5 {
-					t.Errorf("case %d %s/%s: %s regressed: Breakaway %v want %v (rejected %v) err %q", i, cs[i].Fam, cs[i].Xf, names[k], outs[i].Bk, oras[i].I.Pts, oras[i].I.Rej, outs[i].Err)
+					t.Errorf("case %d %s/%s: %s regressed: Breakaway %v want %v (rejected %v) err %q", c.ID, c.Fam, c.Xf, names[k], outs[i].Bk, oras[i].I.Pts, oras[i].I.Rej, outs[i].Err)
 				}
 			case base&m == 0 && bits[i]&m != 0:
 				fixed[k]++

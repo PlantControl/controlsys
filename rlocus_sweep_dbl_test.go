@@ -164,6 +164,15 @@ var rlsdPrecisionLimits = map[int]string{
 	1099: "similar-bidiag double 7.629e-5 + simple 2^-13 apart: eig pair ±1.3e-10i (8x √u·σ_b), converted D confirms no double",
 	1433: "observable double 3.8147e-4 + simple 2^-14 apart: eig pair ±6.1e-9i and the simple all u-merged (u·κ 4.7e-8, gaps 2.6e-8)",
 	1436: "observable double 1.0986e-3 + simple 2^-13 apart: eig pair ±8.2e-9i, converted D confirms no double",
+	1452: "arm64: observable+similar D=0.5 double -5.371e-3 + simple 2^-11 apart: eig -5.310e-3±1.05e-4i, -5.490e-3 (u·κ 2.4e-3); float-TF oracle drops the double",
+}
+
+// rlsdAtBase are base-correct verdicts that the merge base rlswMainRev
+// already gets wrong on that arch (its converted N/D moved the stationary
+// candidates), independent of the rlocus track.
+var rlsdAtBase = map[int]map[string]string{
+	1413: {"amd64": "observable+similar double -0.02295 + simple 2^-12 apart: eig -0.022726±3.9e-4i, -0.023403 (u·κ 1.6e-2 against a 5.6e-6 cluster), the real-axis rule over them accepts two N'D−ND' roots beside the cluster"},
+	1452: {"arm64": "see rlsdPrecisionLimits"},
 }
 
 // TestRootLocusSweepDblNoRegression fails when a component that base got
@@ -173,5 +182,5 @@ func TestRootLocusSweepDblNoRegression(t *testing.T) {
 		t.Skip("frozen 1500-case sweep")
 	}
 	skipSlowUnderRace(t)
-	rlswCheck(t, rlsdGenerate(), "testdata/rlocus_sweep_dbl_base.json", "RLOCUS_SWEEPD_WRITE", rlsdPrecisionLimits)
+	rlswCheck(t, rlsdGenerate(), "testdata/rlocus_sweep_dbl_base.json", "RLOCUS_SWEEPD_WRITE", rlsdPrecisionLimits, rlsdAtBase)
 }
