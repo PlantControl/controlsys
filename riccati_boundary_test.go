@@ -101,7 +101,8 @@ func exactBoundaryUncontrollable(rng *rand.Rand, jb [][]int64) (A, B, Q *mat.Den
 // the boundary (MPWOJM) splits by √(eps·κ); its mean, off by eps·‖A‖ times
 // the cluster condition, missed a band without that factor, and a pass
 // with no Accuracy 1 X returned before the check (base: 60 of 800 Accuracy
-// 1 X).
+// 1 X). Dare returned ErrSchurFailed, not ErrNoStabilizing, when QZ
+// failed with no Accuracy 1 X kept (FXO5QS: schur*, PCG(seed, 1)).
 func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 	type tcase struct {
 		name       string
@@ -118,6 +119,18 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 			mat.NewDense(5, 5, []float64{3, 8, 18, -8, 4, 8, 12, 38, -16, -4, 3, 4, 14, -6, -2, 15, 23, 73, -31, -6, -1, 4, -2, -2, 2}),
 			mat.NewDense(5, 1, []float64{4, 5, 1, 9, 1}),
 			mat.NewDense(5, 5, []float64{14, 1, -3, 11, 4, 1, 9, 10, 4, 6, -3, 10, 17, 3, 0, 11, 4, 3, 14, 2, 4, 6, 0, 2, 13}), 1e-7},
+		{"schur331", false,
+			mat.NewDense(4, 4, []float64{1, 0, 0, 0, 3, 5, -1, 3, -3, -1, -3, -1, -7, -6, 0, -5}),
+			mat.NewDense(4, 1, []float64{0, 2, 1, 1}),
+			mat.NewDense(4, 4, []float64{32, -10, 22, -14, -10, 15, -5, 6, 22, -5, 24, -9, -14, 6, -9, 10}), 1.0532619636346889e-09},
+		{"schur156", false,
+			mat.NewDense(4, 4, []float64{1, 0, -1, 0, -6, -1, 2, -13, 11, 2, -2, 26, 0, 0, 1, 1}),
+			mat.NewDense(4, 1, []float64{3, -2, -7, -3}),
+			mat.NewDense(4, 4, []float64{23, 6, 2, 2, 6, 5, 0, -6, 2, 0, 18, 1, 2, -6, 1, 21}), 2.3224190736627256e-08},
+		{"schur50", false,
+			mat.NewDense(4, 4, []float64{-1, 2, -4, -2, -3, -1, -2, 8, 1, 2, 1, -7, -1, 1, -2, 0}),
+			mat.NewDense(4, 1, []float64{6, 4, 2, 3}),
+			mat.NewDense(4, 4, []float64{27, 7, 5, -6, 7, 8, 0, 2, 5, 0, 3, -4, -6, 2, -4, 13}), 3.654958830626971e-11},
 	}
 	kinds := []struct {
 		name       string
@@ -162,7 +175,7 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 			}
 			if err == nil {
 				t.Errorf("%s NoScaling %v: Accuracy %d X, want ErrNoStabilizing", tc.name, ns, res.Accuracy)
-			} else if !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+			} else if !errors.Is(err, ErrNoStabilizing) {
 				t.Errorf("%s NoScaling %v: %v", tc.name, ns, err)
 			}
 		}
