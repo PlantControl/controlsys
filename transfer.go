@@ -1500,8 +1500,7 @@ func hessenbergTF(aData, cData []float64, n, nobs, m int, b1 float64, inExp []in
 // given entries det(sI − A) and the cofactors expand to. bh is the
 // Hessenberg-basis input (or output, in the primal form) for markovTrim.
 func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, bh []float64, ok bool) {
-	aData, cData := make([]float64, n*n), make([]float64, m*n)
-	b1, primal, ok := hessenbergDual(a, b, cm, row, n, m, aData, cData)
+	aData, cData, b1, primal, ok := hessenbergDual(a, b, cm, row, n, m)
 	if !ok {
 		return nil, nil, nil, false
 	}
@@ -1517,14 +1516,14 @@ func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (d
 	return den, nums, cData, true
 }
 
-// hessenbergDual fills aData and cData with a dual form of output row of
-// (a, b, cm) by an exact transpose and reversal, and returns its input
-// coefficient b1, when a is Hessenberg with nonzero subdiagonal and the
+// hessenbergDual returns a dual form of output row of (a, b, cm), aData
+// and cData, by an exact transpose and reversal, and its input coefficient
+// b1, when a is Hessenberg with nonzero subdiagonal and the
 // row, or with m = 1 the input, is a multiple of the unit vector at the
 // matching end: lower Hessenberg with c ∝ e₁ᵀ or upper with c ∝ eₙᵀ (the
 // dual (Aᵀ, cᵀ, Bᵀ)), or upper with b ∝ e₁ or lower with b ∝ eₙ (primal:
 // (A, b, c) itself, cData holding the row).
-func hessenbergDual(a, b, cm *mat.Dense, row, n, m int, aData, cData []float64) (b1 float64, primal, ok bool) {
+func hessenbergDual(a, b, cm *mat.Dense, row, n, m int) (aData, cData []float64, b1 float64, primal, ok bool) {
 	ar, br, cr := a.RawMatrix(), b.RawMatrix(), cm.RawMatrix()
 	at := func(i, j int) float64 { return ar.Data[i*ar.Stride+j] }
 	upper, lower := true, true
@@ -1538,13 +1537,13 @@ func hessenbergDual(a, b, cm *mat.Dense, row, n, m int, aData, cData []float64) 
 				lower = lower && j <= i+1
 			}
 		}
-	}
-	if !upper && !lower {
-		return 0, false, false
+		if !upper && !lower {
+			return nil, nil, 0, false, false
+		}
 	}
 	smlnum := math.SmallestNonzeroFloat64 / eps()
 	if maxA != 0 && (maxA < smlnum || maxA > 1/smlnum) {
-		return 0, false, false
+		return nil, nil, 0, false, false
 	}
 	crow := cr.Data[row*cr.Stride : row*cr.Stride+n]
 	unit := func(v []float64, k int) bool {
@@ -1555,14 +1554,33 @@ func hessenbergDual(a, b, cm *mat.Dense, row, n, m int, aData, cData []float64) 
 		}
 		return true
 	}
-	bcol := make([]float64, n)
-	if m == 1 {
-		for i := range n {
-			bcol[i] = br.Data[i*br.Stride]
+	unitB := func(k int) bool {
+		if m != 1 {
+			return false
 		}
+		for i := range n {
+			if (br.Data[i*br.Stride] != 0) != (i == k) {
+				return false
+			}
+		}
+		return true
 	}
+	var mode int
 	switch {
 	case lower && unit(crow, 0):
+		mode = 1
+	case upper && unit(crow, n-1):
+		mode = 2
+	case upper && unitB(0):
+		mode = 3
+	case lower && unitB(n-1):
+		mode = 4
+	default:
+		return nil, nil, 0, false, false
+	}
+	aData, cData = make([]float64, n*n), make([]float64, m*n)
+	switch mode {
+	case 1:
 		b1 = crow[0]
 		for i := range n {
 			for j := range n {
@@ -1572,7 +1590,7 @@ func hessenbergDual(a, b, cm *mat.Dense, row, n, m int, aData, cData []float64) 
 				cData[j*n+i] = br.Data[i*br.Stride+j]
 			}
 		}
-	case upper && unit(crow, n-1):
+	case 2:
 		b1 = crow[n-1]
 		for i := range n {
 			for j := range n {
@@ -1582,29 +1600,27 @@ func hessenbergDual(a, b, cm *mat.Dense, row, n, m int, aData, cData []float64) 
 				cData[j*n+i] = br.Data[(n-1-i)*br.Stride+j]
 			}
 		}
-	case m == 1 && upper && unit(bcol, 0):
-		b1, primal = bcol[0], true
+	case 3:
+		b1, primal = br.Data[0], true
 		for i := range n {
 			copy(aData[i*n:(i+1)*n], ar.Data[i*ar.Stride:i*ar.Stride+n])
 		}
 		copy(cData[:n], crow)
-	case m == 1 && lower && unit(bcol, n-1):
-		b1, primal = bcol[n-1], true
+	default:
+		b1, primal = br.Data[(n-1)*br.Stride], true
 		for i := range n {
 			for j := range n {
 				aData[i*n+j] = at(n-1-i, n-1-j)
 			}
 			cData[i] = crow[n-1-i]
 		}
-	default:
-		return 0, false, false
 	}
 	for k := 1; k < n; k++ {
 		if aData[k*n+k-1] == 0 {
-			return 0, false, false
+			return nil, nil, 0, false, false
 		}
 	}
-	return b1, primal, true
+	return aData, cData, b1, primal, true
 }
 
 // StateSpaceResult is the result of (*TransferFunc).StateSpace.
