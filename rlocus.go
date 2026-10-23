@@ -948,13 +948,16 @@ func polyRootsOrNil(p Poly) []complex128 {
 // pole or zero modulus, and ν = √u·σ, exactly equal roots form a group, and
 // the others join when within 1e-2 of each other relative to their size,
 // within ν, or merged to first order by a relative change u of A's
-// entries, |λᵢ − λⱼ| ≤ u·(κᵢ + κⱼ). A group of m is a multiple root at its
+// entries, |λᵢ − λⱼ| ≤ u·(κᵢ + κⱼ); the largest m roots within u^(1/m)·σ of
+// the origin join too, as rounding splits an m-fold root at 0 past ν for
+// m ≥ 3. A group of m is a multiple root at its
 // centre when
 //   - its roots are equal;
 //   - it lies within u^(1/m)·σ of the origin, where normwise rounding of a
 //     realization of scale σ splits an m-fold root at 0; or it is split by
 //     at most u^(1/m)·σₜ about a centre within 10·u·σₜ of the origin
-//     (σₜ = σ_b for poles, 0 for zeros: the centre of an eig cluster is its
+//     (σₜ = σ_b for poles and for zeros with a feedthrough, else 0: the
+//     centre of an eig cluster is its
 //     trace, which rounding of A moves by only ~u·σ_b, so a resolved slow
 //     cluster stays off 0 even when a realization of scale σ_b cannot split
 //     its roots);
@@ -971,7 +974,10 @@ func polyRootsOrNil(p Poly) []complex128 {
 // the group lies within the radius splitRadius by which that backward
 // error splits its m-fold root (else p(c) ~ δ^m merges a near (m+1)-fold
 // cluster as an m-fold one): a double pole beside a resolved simple pole
-// keeps its break point.
+// keeps its break point. A real pair part is also a double root by the pair
+// rule, and a pair part whose mean u·κ_mean (pairCond) is not below its
+// distance to the rest of the group is not tested at all: eig cannot order
+// such roots, so which two of them pair is rounding.
 //
 // Resolved roots, however slow or close, therefore stay apart; a near
 // multiple root that only eig's rounding merges but the coefficients do not
@@ -1001,6 +1007,20 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 				exact[i], exact[j] = true, true
 				group[find(i)] = find(j)
 			}
+		}
+	}
+	for m := k; m >= 2; m-- {
+		var in []int
+		for i, r := range roots {
+			if !exact[i] && cmplx.Abs(r) <= math.Pow(u, 1/float64(m))*sigma {
+				in = append(in, i)
+			}
+		}
+		if len(in) >= m {
+			for _, i := range in[1:] {
+				group[find(i)] = find(in[0])
+			}
+			break
 		}
 	}
 	for i := range k {
@@ -1043,7 +1063,16 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 				cmplx.Abs(c0) <= 10*u*sigmaTrace && spread <= math.Pow(u, 1/float64(m))*sigmaTrace
 			pair := m == 2 && (imag(roots[members[0]]) == 0 || cmplx.Abs(c0) <= spread || spread <= nuBal) &&
 				(pairCond == nil || u*pairCond(members[0], members[1]) < spread)
-			if spread == 0 || !sub && (origin || linked && pair) {
+			if sub && m == 2 && pairCond != nil {
+				gap := math.Inf(1)
+				for _, j := range rest {
+					gap = math.Min(gap, cmplx.Abs(roots[j]-c0))
+				}
+				if u*pairCond(members[0], members[1]) >= gap {
+					return
+				}
+			}
+			if spread == 0 || !sub && origin || linked && pair && (!sub || imag(roots[members[0]]) == 0) {
 				out = append(out, rootCluster{centre: real(c0), radius: radius, m: m, exact: spread == 0})
 				return
 			}
@@ -1206,9 +1235,10 @@ func splitWidest(roots []complex128, members []int) [][]int {
 // zeroClusters returns the real multiple zeros (multipleRoots). With a
 // feedthrough the zeros are the eigenvalues of A − B·C/D, whose condition
 // numbers (against the entrywise rounding |A| + |B|·|C|/|D| of forming it)
-// decide them as for poles, so an exact multiple zero is not lost to the
-// rounding of the converted numerator; without one, the zeros' condition
-// numbers in the system pencil (zeroCondition) do.
+// and its characteristic polynomial (converted as for the poles, with the
+// trace rule) decide them as for poles, so an exact multiple zero is not
+// lost to the rounding of the converted numerator; without one, the
+// zeros' condition numbers in the system pencil (zeroCondition) do.
 func (lp *rlocusLoop) zeroClusters(sys *System, zeros []complex128, num Poly, sigma, sigmaBal float64) []rootCluster {
 	n := lp.n
 	if lp.d != 0 {
@@ -1224,7 +1254,13 @@ func (lp *rlocusLoop) zeroClusters(sys *System, zeros []complex128, num Poly, si
 		}
 		if finite {
 			if ec, ok := eigCondition(az, w, n); ok {
-				return multipleRoots(ec.vals, ec.kappa, ec.pairCondition, num, n, sigma, balancedNorm(az, n), 0)
+				p, sb := num, balancedNorm(az, n)
+				if zs, err := NewFromSlices(n, 1, 1, az, lp.b, lp.c, []float64{0}, 0); err == nil {
+					if tfr, err := zs.rationalTransferFunction(nil); err == nil {
+						p = unitScalePoly(Poly(tfr.TF.Den[0]))
+					}
+				}
+				return multipleRoots(ec.vals, ec.kappa, ec.pairCondition, p, n, sigma, sb, sb)
 			}
 		}
 	}
