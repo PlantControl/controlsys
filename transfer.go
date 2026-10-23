@@ -299,7 +299,7 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 	}
 	full := c.fresh(c.sys)
 	full.keepObs = true
-	fullOrder, err := full.convertFrom(false)
+	fullOrder, _, err := full.convertFrom(false)
 	if err != nil || fullOrder <= order {
 		return c, order
 	}
@@ -403,7 +403,7 @@ func (ck tfCheck) resolvedErr(tf *TransferFunc) (worst float64, ok bool) {
 
 // choose returns the Dgebal or Osborne converter, filled, and its order.
 func (c rowRealizationConverter) choose() (rowRealizationConverter, int, error) {
-	order, err := c.convertFrom(false)
+	order, direct, err := c.convertFrom(false)
 	if err != nil {
 		return c, 0, err
 	}
@@ -412,6 +412,34 @@ func (c rowRealizationConverter) choose() (rowRealizationConverter, int, error) 
 	if !zero && !tiny && full {
 		return c, order, nil
 	}
+	alt, altOrder, altDirect, useAlt := c.preferOsborne(zero, full)
+	// A direct row is exact in either candidate, so with more rows the
+	// check points above the poles see only the others, where Osborne's
+	// wrong low den coefficients barely show: a direct row that took the
+	// Osborne miss out of the check flipped the choice and the other rows
+	// to wrong, unstable dens. Then the staircase conversions decide.
+	if c.p > 1 && !c.noDirect && direct+altDirect > 0 {
+		sc := c.fresh(c.sys)
+		sc.noDirect = true
+		if _, _, err := sc.convertFrom(false); err != nil {
+			useAlt = false
+		} else if _, _, _, useAlt = sc.preferOsborne(zero, full); useAlt && alt.tf == nil {
+			alt = c.fresh(c.sys)
+			if altOrder, _, err = alt.convertFrom(true); err != nil {
+				useAlt = false
+			}
+		}
+	}
+	if useAlt {
+		return alt, altOrder, nil
+	}
+	return c, order, nil
+}
+
+// preferOsborne reports whether the Osborne conversion alt beats the
+// filled Dgebal converter c; alt.tf stays nil when the check of c alone
+// keeps c.
+func (c rowRealizationConverter) preferOsborne(zero, full bool) (alt rowRealizationConverter, altOrder, altDirect int, ok bool) {
 	check := newTFCheck(c.sys, c.n, c.m, c.p)
 	gate := 1e3 * float64(c.n) * eps()
 	// With only rotation noise on the diagonal Dgebal's grading costs
@@ -426,12 +454,12 @@ func (c rowRealizationConverter) choose() (rowRealizationConverter, int, error) 
 	}
 	e0, ok := check.relErr(c.tf)
 	if !ok || e0 <= gate {
-		return c, order, nil
+		return alt, 0, 0, false
 	}
-	alt := c.fresh(c.sys)
-	altOrder, err := alt.convertFrom(true)
+	alt = c.fresh(c.sys)
+	altOrder, altDirect, err := alt.convertFrom(true)
 	if err != nil {
-		return c, order, nil
+		return alt, 0, altDirect, false
 	}
 	// Far above the poles the untrimmed Markov noise of either result can
 	// exceed the error of one that lost states, which barely shows there
@@ -453,10 +481,7 @@ func (c rowRealizationConverter) choose() (rowRealizationConverter, int, error) 
 	default:
 		ok = 4*e1 < e0
 	}
-	if ok {
-		return alt, altOrder, nil
-	}
-	return c, order, nil
+	return alt, altOrder, altDirect, ok
 }
 
 // rowGroup is a set of output rows that structurally see the same states.
@@ -597,21 +622,22 @@ func (c rowRealizationConverter) convertRowGroups(groups []rowGroup) (*TransferF
 }
 
 // convertFrom fills the rows from the Dgebal or, with osborne, the
-// [A B; C ·]-balanced realization (see balancedABC).
-func (c rowRealizationConverter) convertFrom(osborne bool) (int, error) {
-	order, scaled, err := c.convertBalanced(osborne, true)
+// [A B; C ·]-balanced realization (see balancedABC); direct counts the rows
+// converted in the given basis (see directRowTF).
+func (c rowRealizationConverter) convertFrom(osborne bool) (order, direct int, err error) {
+	order, direct, scaled, err := c.convertBalanced(osborne, true)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if scaled && !c.finiteCoeffs() {
-		if order, _, err = c.convertBalanced(osborne, false); err != nil {
-			return 0, err
+		if order, direct, _, err = c.convertBalanced(osborne, false); err != nil {
+			return 0, 0, err
 		}
 	}
 	if !c.finiteCoeffs() {
-		return 0, fmt.Errorf("TransferFunction: %w", ErrOverflow)
+		return 0, 0, fmt.Errorf("TransferFunction: %w", ErrOverflow)
 	}
-	return order, nil
+	return order, direct, nil
 }
 
 // diagonalZeros reports whether A has an exactly zero diagonal entry, and
@@ -834,17 +860,17 @@ func (ck tfCheck) trimOK(i, j, m, n int, trimmed, full, den []float64) bool {
 // when ioScale; scaled reports whether any I/O scale was not 1. Scaling a
 // tiny B or C up toward a huge ‖A‖ can overflow coefficients that are
 // finite without it.
-func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order int, scaled bool, err error) {
+func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order, direct int, scaled bool, err error) {
 	a, b, cm, inExp, outExp := c.balancedABC(osborne, ioScale)
 	stair, err := controllabilityStaircaseFloor(a, b, cm, c.opts.ControllabilityTol, ctrbfFloor(a, c.opts.ControllabilityTol), false)
 	if err != nil {
-		return 0, false, err
+		return 0, 0, false, err
 	}
 	if stair.NCont < c.n && !osborne {
 		a2, b2, cm2, inExp2, outExp2 := c.balancedABC(true, ioScale)
 		alt, err := controllabilityStaircaseFloor(a2, b2, cm2, c.opts.ControllabilityTol, ctrbfFloor(a2, c.opts.ControllabilityTol), false)
 		if err != nil {
-			return 0, false, err
+			return 0, 0, false, err
 		}
 		if alt.NCont == c.n {
 			stair, inExp, outExp = alt, inExp2, outExp2
@@ -856,7 +882,7 @@ func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order i
 	if stair.NCont == 0 {
 		clear(c.rows)
 		c.fillStaticRows()
-		return 0, scaled, nil
+		return 0, 0, scaled, nil
 	}
 	floor := ctrbfFloor(stair.A, c.opts.ControllabilityTol)
 	if c.opts.ControllabilityTol == 0 {
@@ -868,7 +894,8 @@ func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order i
 	if c.keepObs {
 		floor = 0
 	}
-	return c.convertDynamicRows(stair, stair.NCont, floor, inExp, outExp, a, b, cm), scaled, nil
+	order, direct = c.convertDynamicRows(stair, stair.NCont, floor, inExp, outExp, a, b, cm)
+	return order, direct, scaled, nil
 }
 
 func (c rowRealizationConverter) finiteCoeffs() bool {
@@ -945,8 +972,9 @@ func (c rowRealizationConverter) balancedABC(osborne, ioScale bool) (a, b, cm *m
 
 // convertDynamicRows converts each row from the staircase form, a row
 // keeping all n states from the balanced realization (a, b, cm) itself
-// when that is already Hessenberg (see directRowTF).
-func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int, floor float64, inExp, outExp []int, a, b, cm *mat.Dense) int {
+// when that is already Hessenberg (see directRowTF), and returns the total
+// order and the number of such direct rows.
+func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int, floor float64, inExp, outExp []int, a, b, cm *mat.Dense) (totalOrder, direct int) {
 	Ac := extractSubmatrix(stair.A, 0, ncont, 0, ncont)
 	Bc := extractSubmatrix(stair.B, 0, ncont, 0, c.m)
 	Cc := extractSubmatrix(stair.C, 0, c.p, 0, ncont)
@@ -956,7 +984,6 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 	}
 
 	markov := newMarkovTrim(c.sys)
-	totalOrder := 0
 	zeroEigs := -1
 	for i := 0; i < c.p; i++ {
 		nobs, den, numCoeffs := ssToTFRow(Ac, Bc, Cc, i, ncont, c.m, c.opts.ObservabilityTol, floor, inExp, outExp[i], ws)
@@ -967,6 +994,7 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 		if nobs == c.n && !c.noDirect {
 			if dDen, dNums, dbh, ok := directRowTF(a, b, cm, i, c.n, c.m, inExp, outExp[i]); ok {
 				den, numCoeffs, bhData = dDen, dNums, dbh
+				direct++
 			}
 		}
 		if nobs == c.n {
@@ -999,7 +1027,7 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 			c.tf.Num[i][j] = withD(numCoeffs[j])
 		}
 	}
-	return totalOrder
+	return totalOrder, direct
 }
 
 // isolatedZeroEigs counts the zero eigenvalues of A that Dgebal's
