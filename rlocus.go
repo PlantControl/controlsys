@@ -186,7 +186,7 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 	}
 	if d == 0 {
 		if lp.relDeg <= n {
-			zeros = lp.finiteZeros(zeros, poles, lp.nonVanishingDegree())
+			zeros = lp.finiteZeros(zeros, poles, lp.relDeg)
 		}
 		if r := n - len(zeros); r >= 1 && r != lp.relDeg {
 			// Zeros() fixes the asymptote count; the angles, the 0° rule and
@@ -615,55 +615,69 @@ func (lp *rlocusLoop) highFrequencyGain() (int, bool) {
 
 // markovRelDegree returns the relative degree of C(sI−A)⁻¹B, the index of
 // the first Markov parameter hₖ = C·A^(k−1)·B resolved by the given
-// coefficients (n+1 when none is), and whether hₖ < 0.
+// coefficients (markovResolved; n+1 when none is), and whether hₖ < 0.
 func (lp *rlocusLoop) markovRelDegree() (int, bool) {
-	r, neg := lp.n+1, false
-	lp.markov(func(k int, h, sens float64) bool {
-		if resolved := math.Abs(h) > 10*eps()*sens; resolved {
-			r, neg = k, h < 0
-			return true
+	h, ok := lp.markovResolved()
+	for k := range h {
+		if ok[k] {
+			return k + 1, h[k] < 0
 		}
-		return false
-	})
-	return r, neg
-}
-
-// nonVanishingDegree returns the index of the first hₖ that no elementwise
-// rounding of A, B and C can make zero to first order, |hₖ| > eps·sensₖ
-// (n+1 when none): the least relative degree the coefficients allow.
-func (lp *rlocusLoop) nonVanishingDegree() int {
-	r := lp.n + 1
-	lp.markov(func(k int, h, sens float64) bool {
-		if math.Abs(h) > eps()*sens {
-			r = k
-			return true
-		}
-		return false
-	})
-	return r
+	}
+	return lp.n + 1, false
 }
 
 // markovSign returns whether the high-frequency gain of a loop with
 // relative degree r ≤ n is negative: the sign of the first resolved hₖ,
 // k ≥ r, or of h_r when none is.
 func (lp *rlocusLoop) markovSign(r int) bool {
-	var neg, set bool
-	lp.markov(func(k int, h, sens float64) bool {
-		resolved := math.Abs(h) > 10*eps()*sens
-		if k == r || (k > r && resolved) {
-			neg, set = h < 0, true
+	h, ok := lp.markovResolved()
+	if r < 1 || r > len(h) {
+		return false
+	}
+	for k := r - 1; k < len(h); k++ {
+		if ok[k] {
+			return h[k] < 0
 		}
-		return k >= r && resolved
+	}
+	return h[r-1] < 0
+}
+
+// markovResolved returns h₁…hₙ and which of them the coefficients resolve,
+// the one threshold of the relative degree, the high-frequency sign and the
+// noise-zero trim. With ρₖ = |hₖ|/(eps·sensₖ), hₖ is resolved when
+// ρₖ > 10, or when ρₖ > 1 stands 4× above every earlier ρⱼ and starts a
+// plateau: every later ρⱼ is within [ρₖ/4, 10·ρₖ]. sensₖ is a first-order
+// bound, loose by about the same factor for the exact hₖ of a realization
+// (an exact h₂ at ρ 6.7 beside h₃…h₆ at 12…17; h₄…h₆ at 1.4…1.9 above
+// rounding-level h₁…h₃ at ≤ 0.2), while a rounding-level hₖ sits at the
+// level of the earlier ones or far below the later resolved ones (ρ 1.7
+// beside 9e10). Where no ρ reaches that (exact h₂…h₆ at 0.1…1.5 of a
+// realization with sens 1e17…1e25), none is resolved and RootLocus takes
+// the relative degree from the zero count.
+func (lp *rlocusLoop) markovResolved() (h []float64, ok []bool) {
+	var rho []float64
+	lp.markov(func(k int, hk, sens float64) bool {
+		r := 0.0
+		if sens > 0 {
+			r = math.Abs(hk) / (eps() * sens)
+		}
+		h, rho = append(h, hk), append(rho, r)
+		return false
 	})
-	return set && neg
+	ok = make([]bool, len(h))
+	prev := 0.0
+	for k, r := range rho {
+		ok[k] = r > 10 || r > 1 && r >= 4*prev && !slices.ContainsFunc(rho[k+1:], func(x float64) bool { return x < r/4 || x > 10*r })
+		prev = math.Max(prev, r)
+	}
+	return h, ok
 }
 
 // markov calls f with hₖ and its first-order sensitivity sensₖ to
 // elementwise relative changes of A, B and C,
 // Σⱼ |C·Aʲ|·|A|·|A^(k−2−j)·B| + |C·A^(k−1)|·|B| + |C|·|A^(k−1)·B|, which
 // unlike |C|·|A|^(k−1)·|B| stays tight for non-normal realizations, for
-// k = 1…n until f returns true. hₖ is resolved when it exceeds
-// 10·eps·sensₖ.
+// k = 1…n until f returns true.
 func (lp *rlocusLoop) markov(f func(k int, h, sens float64) bool) {
 	n := lp.n
 	abs := func(v []float64) []float64 {
@@ -716,9 +730,10 @@ func (lp *rlocusLoop) markov(f func(k int, h, sens float64) bool) {
 
 // finiteZeros drops the excess largest zeros beyond the n − r finite ones a
 // loop of relative degree r has: rounding noise that MATLAB's tzero reports
-// as infinite. r is nonVanishingDegree, used only when some hₖ is resolved
-// (computed hₖ within the margin are not themselves reliable). Only zeros
-// larger than every pole are dropped.
+// as infinite. r is markovRelDegree, whose resolution threshold
+// (markovResolved) the sign rule and the numerator trim share: an hₖ that
+// rounding alone could produce keeps no noise zero. Only zeros larger than
+// every pole are dropped.
 func (lp *rlocusLoop) finiteZeros(zeros, poles []complex128, r int) []complex128 {
 	excess := len(zeros) - (lp.n - r)
 	if r == 0 || r > lp.n || excess <= 0 {
