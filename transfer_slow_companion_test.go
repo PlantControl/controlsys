@@ -62,95 +62,156 @@ func ratRatioJ(num, den []float64, w float64) complex128 {
 	return complex(fr, fi)
 }
 
+// slowCompanionCase is a seeded slow companion: force origin poles, then
+// dyadic real poles (at most maxOrigin at the origin in all) and pairs and
+// zeros at scale 2^-14..2^-8. lo and hi bound the nonzero pole and zero
+// moduli; den and num are the exact coefficients.
+type slowCompanionCase struct {
+	den, c, num []float64
+	lo, hi      float64
+}
+
+func newSlowCompanionCase(r *rand.Rand, n, maxOrigin, force int) slowCompanionCase {
+	scale := math.Ldexp(1, -14+2*r.IntN(4))
+	dy := func() float64 { return float64(r.IntN(64)-32) / 16 * scale }
+	rat := func(v float64) *big.Rat { return new(big.Rat).SetFloat64(v) }
+	mul := func(p []*big.Rat, q ...*big.Rat) []*big.Rat {
+		out := make([]*big.Rat, len(p)+len(q)-1)
+		for k := range out {
+			out[k] = new(big.Rat)
+		}
+		for a, v := range p {
+			for b, w := range q {
+				out[a+b].Add(out[a+b], new(big.Rat).Mul(v, w))
+			}
+		}
+		return out
+	}
+	one := big.NewRat(1, 1)
+	den := []*big.Rat{one}
+	poles := make([]float64, force)
+	for range force {
+		den = mul(den, one, new(big.Rat))
+	}
+	origins := force
+	lo, hi := math.Inf(1), 0.0
+	for deg := force; deg < n; {
+		if deg+2 <= n && r.IntN(3) == 0 {
+			re, im := dy(), math.Abs(dy())+scale/16
+			m2 := new(big.Rat).Add(new(big.Rat).Mul(rat(re), rat(re)), new(big.Rat).Mul(rat(im), rat(im)))
+			den = mul(den, one, rat(-2*re), m2)
+			w := math.Hypot(re, im)
+			lo, hi = min(lo, w), max(hi, w)
+			deg += 2
+			continue
+		}
+		p := dy()
+		if p == 0 {
+			if origins >= maxOrigin {
+				continue
+			}
+			origins++
+		} else {
+			lo, hi = min(lo, math.Abs(p)), max(hi, math.Abs(p))
+		}
+		den = mul(den, one, rat(-p))
+		poles = append(poles, p)
+		deg++
+	}
+	num := []*big.Rat{rat(float64(1+r.IntN(64)) / 16)}
+	for range r.IntN(n) {
+		z := dy()
+		for slices.Contains(poles, z) {
+			z = dy()
+		}
+		if z != 0 {
+			lo, hi = min(lo, math.Abs(z)), max(hi, math.Abs(z))
+		}
+		num = mul(num, one, rat(-z))
+	}
+	if hi == 0 {
+		lo, hi = scale, scale
+	}
+	cs := slowCompanionCase{den: make([]float64, n+1), c: make([]float64, n), lo: lo, hi: hi}
+	for k, v := range den {
+		cs.den[k], _ = v.Float64()
+	}
+	for k, v := range num {
+		cs.c[len(num)-1-k], _ = v.Float64()
+	}
+	cs.num = slices.Clone(cs.c[:len(num)])
+	slices.Reverse(cs.num)
+	return cs
+}
+
+// bandErr is the worst relative error of tf against the exact response
+// over [lo/10, 100·hi] (the factor 1.003 keeps the points off jω poles).
+func (cs slowCompanionCase) bandErr(tf *TransferFunc) float64 {
+	worst := 0.0
+	for k := range 9 {
+		w := cs.lo / 10 * math.Pow(100.3*cs.hi/cs.lo, float64(k)/8)
+		want := ratRatioJ(cs.num, cs.den, w)
+		got := tf.eval(complex(0, w))[0][0]
+		worst = max(worst, cmplx.Abs(got-want)/cmplx.Abs(want))
+	}
+	return worst
+}
+
 // TestTransferFunctionSlowCompanionSweep converts seeded companions of slow
 // dyadic poles (at most one at the origin) and zeros, scale 2^-14..2^-8,
-// and checks the response against the exact coefficients over the pole
-// band (U3H63X).
+// and checks the response against the exact coefficients over the band of
+// the poles and zeros (U3H63X).
 func TestTransferFunctionSlowCompanionSweep(t *testing.T) {
 	r := rand.New(rand.NewPCG(20, 63))
 	fails := 0
 	for trial := range 400 {
 		n := 3 + r.IntN(4)
-		scale := math.Ldexp(1, -14+2*r.IntN(4))
-		dy := func() float64 { return float64(r.IntN(64)-32) / 16 * scale }
-		den := []*big.Rat{big.NewRat(1, 1)}
-		mul := func(p []*big.Rat, q ...*big.Rat) []*big.Rat {
-			out := make([]*big.Rat, len(p)+len(q)-1)
-			for k := range out {
-				out[k] = new(big.Rat)
-			}
-			for a, v := range p {
-				for b, w := range q {
-					out[a+b].Add(out[a+b], new(big.Rat).Mul(v, w))
-				}
-			}
-			return out
-		}
-		one := big.NewRat(1, 1)
-		origin := false
-		var poles []float64
-		lo, hi := math.Inf(1), 0.0
-		for deg := 0; deg < n; {
-			if deg+2 <= n && r.IntN(3) == 0 {
-				re, im := dy(), math.Abs(dy())+scale/16
-				m2 := re*re + im*im
-				den = mul(den, one, new(big.Rat).SetFloat64(-2*re), new(big.Rat).Add(new(big.Rat).Mul(new(big.Rat).SetFloat64(re), new(big.Rat).SetFloat64(re)), new(big.Rat).Mul(new(big.Rat).SetFloat64(im), new(big.Rat).SetFloat64(im))))
-				lo, hi = min(lo, math.Sqrt(m2)), max(hi, math.Sqrt(m2))
-				deg += 2
-				continue
-			}
-			p := dy()
-			if p == 0 {
-				if origin {
-					continue
-				}
-				origin = true
-			} else {
-				lo, hi = min(lo, math.Abs(p)), max(hi, math.Abs(p))
-			}
-			den = mul(den, one, new(big.Rat).SetFloat64(-p))
-			poles = append(poles, p)
-			deg++
-		}
-		num := []*big.Rat{new(big.Rat).SetFloat64(float64(1+r.IntN(64)) / 16)}
-		for range r.IntN(n) {
-			z := dy()
-			for slices.Contains(poles, z) {
-				z = dy()
-			}
-			num = mul(num, one, new(big.Rat).SetFloat64(-z))
-		}
-		fden := make([]float64, n+1)
-		for k, v := range den {
-			fden[k], _ = v.Float64()
-		}
-		c := make([]float64, n)
-		for k, v := range num {
-			c[len(num)-1-k], _ = v.Float64()
-		}
-		fnum := slices.Clone(c)
-		slices.Reverse(fnum)
-		res, err := slowCompanion(t, fden, c, 0).TransferFunction(nil)
+		cs := newSlowCompanionCase(r, n, 1, 0)
+		res, err := slowCompanion(t, cs.den, cs.c, 0).TransferFunction(nil)
 		if err != nil {
 			t.Fatalf("trial %d: %v", trial, err)
 		}
 		tf := res.TF
-		worst := 0.0
-		for k := range 9 {
-			w := lo / 10 * math.Pow(100*hi/lo, float64(k)/8)
-			want := ratRatioJ(fnum, fden, w)
-			got := tf.eval(complex(0, w))[0][0]
-			worst = max(worst, cmplx.Abs(got-want)/cmplx.Abs(want))
-		}
-		if len(tf.Den[0]) != n+1 || !(worst <= 1e-8) {
+		if e := cs.bandErr(tf); len(tf.Den[0]) != n+1 || !(e <= 1e-8) {
 			fails++
 			if fails <= 5 {
-				t.Errorf("trial %d: den %v (want %v), num %v (want %v): band err %.3g", trial, tf.Den[0], fden, tf.Num[0][0], fnum, worst)
+				t.Errorf("trial %d: den %v (want %v), num %v (want %v): band err %.3g", trial, tf.Den[0], cs.den, tf.Num[0][0], cs.num, e)
 			}
 		}
 	}
 	if fails > 0 {
 		t.Errorf("%d of 400 failed", fails)
+	}
+}
+
+// TestTransferFunctionSlowCompanionOrigins extends the sweep to n = 3..8 with
+// 2..5 origin poles. The observability cut dropped states, and a kept
+// k-fold origin pole split by the den tail's rounding noise^(1/k)
+// (U3H63X). Every state must stay, the den tail be exactly zero, and the
+// band response match; the residue of up to 1e-5 in some 8-state cases is
+// Dgebal's partial grading of the companion (base and Osborne miss more).
+func TestTransferFunctionSlowCompanionOrigins(t *testing.T) {
+	r := rand.New(rand.NewPCG(77, 5))
+	for trial := range 600 {
+		n := 3 + r.IntN(6)
+		k := 2 + r.IntN(4)
+		cs := newSlowCompanionCase(r, n, k, min(k, n-1))
+		res, err := slowCompanion(t, cs.den, cs.c, 0).TransferFunction(nil)
+		if err != nil {
+			t.Fatalf("trial %d: %v", trial, err)
+		}
+		den := res.TF.Den[0]
+		zeros := 0
+		for zeros < n && cs.den[n-zeros] == 0 {
+			zeros++
+		}
+		if len(den) != n+1 || slices.ContainsFunc(den[n+1-zeros:], func(v float64) bool { return v != 0 }) {
+			t.Errorf("trial %d: den %v, want %v", trial, den, cs.den)
+			continue
+		}
+		if e := cs.bandErr(res.TF); !(e <= 2e-5) {
+			t.Errorf("trial %d: den %v (want %v), num %v (want %v): band err %.3g", trial, den, cs.den, res.TF.Num[0][0], cs.num, e)
+		}
 	}
 }
 
@@ -186,6 +247,11 @@ func TestTransferFunctionSlowCompanion(t *testing.T) {
 			[]float64{1.0263912597528111e-07, -0.0005619489132617759, 3.0689903316269787, 0, 0}, 0, 1e-4},
 		{"double_origin_six", []float64{1, 0.005462646484375, 2.0046718418598175e-07, -2.1223584667495743e-08, 8.022575008828636e-12, 0, 0},
 			[]float64{4.075500212540671e-08, 0.0004899112466881561, 2.1053654729806555, 0, 0, 0}, 0, 1.5e-3},
+		// Both conversions cut the last Hessenberg subdiagonal, an exact
+		// product of tiny couplings, dropping the origin pole and the zero.
+		{"origin_seven_cut", []float64{1, 0.0015716552734375, 1.0181684046983719e-06, 3.453202168657299e-10, 6.426315642821256e-14, 6.236857446227348e-18, 2.468235962998539e-22, 0},
+			[]float64{-0.000118255615234375, 3.875, 0, 0, 0, 0, 0}, 0, 5e-4},
+		{"double_integrator_zero", []float64{1, 0, 0}, []float64{-6.25e-9, 1}, 0, 6.25e-9},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
