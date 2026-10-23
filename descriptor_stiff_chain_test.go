@@ -296,6 +296,56 @@ func TestTransferFunction_DescriptorHigherIndexChain(t *testing.T) {
 	}
 }
 
+// TestTransferFunction_DescriptorIndexFourChain: an index-4 chain leaves
+// its QZ members at |β|/|α| ~ ε^(1/4), above the large-eigenvalue bound,
+// so the split kept them finite beside the true finite poles (e.g. chains
+// [4] seed 239: QZ kept all 5, rank(E) = 4, 1 finite). The finite count cannot
+// exceed rank(E), so such a split now goes to the staircase; before, the
+// slow-subsystem LU failed and IsProper, Step and TransferFunction
+// returned ErrDescriptorSingular. Oracle: the structured model. Seed 202
+// of chains [4 1] (proper) is skipped: its c·N·b, zero in exact
+// arithmetic, is 1.1× the 1e3·n·ε rounding bound after the staircase, so
+// it is called improper (also on base).
+func TestTransferFunction_DescriptorIndexFourChain(t *testing.T) {
+	for _, chains := range [][]int{{4}, {4, 1}} {
+		for seed := range uint64(300) {
+			for _, proper := range []bool{true, false} {
+				if seed == 202 && len(chains) == 2 && proper {
+					continue
+				}
+				rng := rand.New(rand.NewPCG(seed, 77))
+				nf := 1 + rng.IntN(3)
+				sys, oracle, _ := chainDescriptor(t, rng, nf, chains, 0, proper)
+				label := fmt.Sprintf("seed %d chains %v proper %v", seed, chains, proper)
+				if got, err := sys.IsProper(); err != nil || got != proper {
+					t.Fatalf("%s: IsProper = %v, %v", label, got, err)
+				}
+				res, err := sys.TransferFunction(nil)
+				_, serr := Step(sys, 1)
+				if !proper {
+					if !errors.Is(err, ErrImproperModel) || !errors.Is(serr, ErrImproperModel) {
+						t.Fatalf("%s: TransferFunction err = %v, Step err = %v, want ErrImproperModel", label, err, serr)
+					}
+					continue
+				}
+				if err != nil || serr != nil {
+					t.Fatalf("%s: TransferFunction err = %v, Step err = %v", label, err, serr)
+				}
+				for _, s := range []complex128{1i, complex(0.5, 3), 20i} {
+					got, err := res.TF.Eval(s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := pencilResponse(t, oracle, s)[0][0]
+					if d := cmplx.Abs(got[0][0] - want); !(d <= 1e-6*math.Max(1, cmplx.Abs(want))) {
+						t.Fatalf("%s: G(%v) = %v, want %v", label, s, got[0][0], want)
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestStabsep_StiffPoleBesideChainFailsClosed: a stiff finite pole (E
 // singular value 29× the rounding n·ε·σ₁) beside an index-2 chain and an
 // index-1 algebraic state (review seed 351). The staircase reports stiff,

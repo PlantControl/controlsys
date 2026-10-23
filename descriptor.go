@@ -453,8 +453,9 @@ func allZeroVec(v *mat.VecDense) bool {
 // decides by the same test. Entries of E_∞ below the finite/infinite
 // threshold are rounding noise and are zeroed so index-1 parts give N = 0
 // exactly. QZ resolves an infinite Jordan chain
-// only to |β|/|α| ~ ε^(1/k); when it fails or keeps a large eigenvalue and
-// the staircase (deflateInfinite) counts the finite ones differently, the
+// only to |β|/|α| ~ ε^(1/k); when it fails, keeps a large eigenvalue or
+// keeps more than rank(E) (the most a regular pencil has finite), and the
+// staircase (deflateInfinite) counts the finite ones differently, the
 // split is taken from the deflated pencil instead. Internal
 // delay channels are reduced together with the I/O channels.
 func (sys *System) properExplicitForm() (*System, error) {
@@ -515,7 +516,7 @@ func (sys *System) weierstrassReduce() (*System, error) {
 	vsl := make([]float64, n*n)
 	vsr := make([]float64, n*n)
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
-	if !ok || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
+	if !ok || nf > n-d || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
 		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff && (!ok || nfd != nf) {
 			all := func(_, _, _ float64) bool { return true }
 			if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
