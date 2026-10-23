@@ -200,7 +200,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 		}
 		tol, sep := leastRatioInfTol(alphar, alphai, beta, n-r, margin)
 		if stiff {
-			if _, index1 := pencilIndexOne(A, E, n, normA, stiffIndexTol); !index1 {
+			if _, index1 := pencilIndexOne(A, E, n, normA); !index1 {
 				tol = 0
 			}
 			return finitePoles(alphar, alphai, beta, tol), nil

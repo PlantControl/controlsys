@@ -290,3 +290,119 @@ func TestTransferFunction_DescriptorHigherIndexChain(t *testing.T) {
 		}
 	}
 }
+
+// TestStabsep_StiffPoleBesideChainFailsClosed: a stiff finite pole (E
+// singular value 29× the rounding n·ε·σ₁) beside an index-2 chain and an
+// index-1 algebraic state (review seed 351). The staircase reports stiff,
+// the index test at stiffIndexTol sends the pencil to the whole-pencil QZ,
+// and certifyFiniteRetained then certified the large chain members finite
+// at √ε: Stable got poles −7.7e5 ± 1.3e6i and Stable(1.3j) = −195.8 against
+// −1.907. Base fails closed. Oracle: the structured pencil, one finite pole
+// 6.174e12 (unstable), so Stable is the static gain D. With the stiff
+// singular value within ~10× the rounding the chain leaves Ulᵀ·A·Vr above
+// the fixed 1e-5·‖A‖ (e.g. seed 200: the staircase assumed index 1, Poles
+// lost the stiff pole and Stable was wrong); the bound now grows as
+// n·ε·σ₁/σs. In the sweep (stiff poles QZ resolves), Poles keeps the stiff
+// pole and Stabsep either fails or Stable has only true stable poles and,
+// unless it lost one (as base does on a few draws), matches the modal sum
+// of the structured model.
+func TestStabsep_StiffPoleBesideChainFailsClosed(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{0.0326899509802978, -0.36681246430299563, -3.56487586437879, 0.25246302255452163,
+		0.6606135039155011, -0.43540691343289234, 3.3979318604419704, -1.7075249912700554,
+		1.3826351754761992, 0.640327981177481, 3.1680427757739014, 0.44104901835708266,
+		-1.514985795667952, 0.1931901558680369, -0.1333724682997395, -0.7695321392558229})
+	E := mat.NewDense(4, 4, []float64{1.0662327841230625, 1.7917350472211688, 2.531354002133062, 2.217927773599035,
+		0.5932828850880467, -0.8836228344645478, -0.8753323906956624, -0.4134416502459626,
+		-0.372441429505175, -0.8025989135619086, -1.0988494198957623, -0.9295703080116933,
+		-1.9927302748987492, -1.1015990026565192, -2.002071511755178, -2.1765748276831554})
+	B := mat.NewDense(4, 1, []float64{-0.6619790154245511, -1.854762109834214, -0.9504604353484285, -1.3106967440008177})
+	C := mat.NewDense(1, 4, []float64{0.49894649696582166, 0.33908167011908524, 0.4276281248480783, 0.8677160078788655})
+	D := mat.NewDense(1, 1, []float64{-1.9066529430493717})
+	sys, err := NewDescriptor(A, B, C, D, E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := Stabsep(sys); err == nil {
+		for _, s := range []complex128{1.3i, complex(0.5, 2), 10i} {
+			if got := pencilResponse(t, res.Stable, s)[0][0]; !(cmplx.Abs(got-complex(D.At(0, 0), 0)) <= 1e-6) {
+				t.Fatalf("seed 351: Stable(%v) = %v, want D = %v", s, got, D.At(0, 0))
+			}
+		}
+	}
+
+	split, failed, lost := 0, 0, 0
+	for seed := range uint64(1000) {
+		rng := rand.New(rand.NewPCG(seed, 2026))
+		nf := 1 + rng.IntN(2)
+		chains := [][]int{{2}, {2, 1}, {3}}[rng.IntN(3)]
+		sys, oracle, poles := chainDescriptor(t, rng, nf, chains, math.Pow(10, -14+5*rng.Float64()), true)
+		n, _, _ := sys.Dims()
+		var svd mat.SVD
+		if !svd.Factorize(sys.E, mat.SVDNone) {
+			t.Fatal("svd failed")
+		}
+		sv := svd.Values(nil)
+		if _, stiff, _ := descriptorRank(sv, sv[0], n, true); !stiff {
+			continue
+		}
+		ar, ai, b, ok := qzEigenvalues(n, sys.A.RawMatrix().Data, n, sys.E.RawMatrix().Data, n)
+		if !ok {
+			t.Fatal("QZ failed")
+		}
+		resolved := finitePoles(ar, ai, b, 0)
+		unresolved := false
+		for _, w := range poles {
+			found := false
+			for _, g := range resolved {
+				found = found || cmplx.Abs(g-w) <= 2e-2*cmplx.Abs(w)
+			}
+			unresolved = unresolved || !found
+		}
+		if unresolved {
+			continue
+		}
+		label := fmt.Sprintf("seed %d chains %v", seed, chains)
+		got, err := sys.Poles()
+		if err != nil {
+			t.Fatalf("%s: Poles: %v", label, err)
+		}
+		requirePolesContain(t, label, got, poles, 2e-2)
+		res, err := Stabsep(sys)
+		if err != nil {
+			failed++
+			continue
+		}
+		split++
+		var stable []complex128
+		for _, p := range poles {
+			if real(p) < 0 {
+				stable = append(stable, p)
+			}
+		}
+		got, err = res.Stable.Poles()
+		if err != nil {
+			t.Fatalf("%s: Stable.Poles: %v", label, err)
+		}
+		for _, g := range got {
+			requirePolesContain(t, label+" Stable pole", stable, []complex128{g}, 2e-2)
+		}
+		if len(got) < len(stable) {
+			lost++
+			continue
+		}
+		for _, s := range []complex128{1.3i, complex(0.5, 2), 10i} {
+			want := complex(oracle.D.At(0, 0), 0)
+			for i, p := range poles {
+				if real(p) < 0 {
+					f, w := oracle.A.At(i, i), oracle.E.At(i, i)
+					want += complex(oracle.C.At(0, i)*oracle.B.At(i, 0), 0) / (s*complex(w, 0) - complex(f, 0))
+				}
+			}
+			scale := math.Max(1, cmplx.Abs(pencilResponse(t, oracle, s)[0][0]))
+			if got := pencilResponse(t, res.Stable, s)[0][0]; !(cmplx.Abs(got-want) <= 1e-6*scale) {
+				t.Fatalf("%s: Stable(%v) = %v, want %v", label, s, got, want)
+			}
+		}
+	}
+	t.Logf("stiff draws: %d split (%d losing a stable pole), %d failed closed", split, lost, failed)
+}

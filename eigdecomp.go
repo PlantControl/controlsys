@@ -130,7 +130,7 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	a, e, qd, zd, nf, stiff, ok := deflateInfinite(sys.A, sys.E, true)
 	if ok && stiff {
-		_, ok = pencilIndexOne(sys.A, sys.E, sys.A.RawMatrix().Rows, mat.Norm(sys.A, 2), stiffIndexTol)
+		_, ok = pencilIndexOne(sys.A, sys.E, sys.A.RawMatrix().Rows, mat.Norm(sys.A, 2))
 	}
 	if !ok {
 		return decomposeGeneralizedQZ(sys, isGroup1)
@@ -693,7 +693,7 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 		return 0, nil
 	}
 	leak := fmt.Errorf("a retained mode may be infinite: %w", ErrSchurFailed)
-	d, index1 := pencilIndexOne(a, e, n, normA, math.Sqrt(eps()))
+	d, index1 := pencilIndexOne(a, e, n, normA)
 	if d == 0 {
 		return 0, nil
 	}
@@ -720,19 +720,25 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 
 // pencilIndexOne returns d = n − rank(E) (descriptorRank, MATLAB rank) and
 // whether the pencil (a, e) has index at most 1: Ulᵀ·A·Vr is well
-// conditioned, σ_min > tol·normA, for the null spaces Ul, Vr of E. Only
+// conditioned, σ_min > tol·normA, for the null spaces Ul, Vr of E, with
+// tol = √ε, or when E has a stiff singular value σs the larger of
+// stiffIndexTol and stiffIndexCoef·n·ε·σ₁(E)/σs. Only
 // then does E have exactly d infinite eigenvalues; an infinite Jordan chain
 // leaves Ulᵀ·A·Vr singular. A failed SVD reports index1 false.
-func pencilIndexOne(a, e *mat.Dense, n int, normA, tol float64) (d int, index1 bool) {
+func pencilIndexOne(a, e *mat.Dense, n int, normA float64) (d int, index1 bool) {
 	var svd mat.SVD
 	if !svd.Factorize(e, mat.SVDFull) {
 		return n, false
 	}
 	sv := svd.Values(nil)
-	rank, _, _ := descriptorRank(sv, sv[0], n, true)
+	rank, stiff, _ := descriptorRank(sv, sv[0], n, true)
 	d = n - rank
 	if d == 0 {
 		return 0, true
+	}
+	tol := math.Sqrt(eps())
+	if stiff {
+		tol = max(stiffIndexTol, stiffIndexCoef*float64(n)*eps()*sv[0]/sv[rank-1])
 	}
 	var u, v mat.Dense
 	svd.UTo(&u)
@@ -744,10 +750,15 @@ func pencilIndexOne(a, e *mat.Dense, n int, normA, tol float64) (d int, index1 b
 	return d, svd22.Factorize(&a22, mat.SVDNone) && svd22.Values(nil)[d-1] > tol*normA
 }
 
-// stiffIndexTol is the pencilIndexOne bound when E has a stiff singular
-// value: the stiff direction perturbs the null spaces of E, which leaves
-// Ulᵀ·A·Vr of an index-2 chain up to ~1e-6·‖A‖ instead of rounding level.
-const stiffIndexTol = 1e-5
+// stiffIndexTol and stiffIndexCoef bound pencilIndexOne when E has a stiff
+// singular value σs: rounding tilts the null spaces of E toward the stiff
+// direction by ~n·ε·σ₁/σs, which leaves Ulᵀ·A·Vr of an index-2 chain up to
+// ~3e-4·n·ε·σ₁/σs·‖A‖ instead of rounding level (7e-5·‖A‖ with σs 3× the
+// rounding); an index-1 pencil keeps it near ‖A‖.
+const (
+	stiffIndexTol  = 1e-5
+	stiffIndexCoef = 3e-3
+)
 
 // qzInfiniteGap is the least factor between the |β|/|α| of the infinite
 // and of the finite eigenvalues for certifyFiniteRetained to tell them apart,
