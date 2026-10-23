@@ -103,3 +103,57 @@ func rlpRats(x ...float64) []*big.Rat {
 	}
 	return out
 }
+
+// TestRootLocus_ResolvedNonNormalPairKSign (wave 22 B1 class, reviewer
+// cases 30987, 31290 and a minimal dyadic repro): a complex pole pair of
+// relative split ~1e-4 realized by a non-normal A (σ_b/|λ| ~ 2e4) is
+// u·κ-linked by eig and split by at most √u·σ_b, so only the converted D
+// can tell it from a double; D needs 6e5·u…4.5e6·u to merge it, which the
+// old √u tolerance admitted, listing the K < 0 point at the pair's real
+// part. The exact oracle of the floats rejects it (robust to 1-ulp
+// changes for 31290; rlswUlpSensitive flags the other two, pinned as
+// given). Grid: G = 32/((s+3584)² + σ²) under exact I + v·e₀e₁ᵀ
+// similarities of the companion [0 1; −q −7168] (the minimal repro is
+// σ = 0.4375, v = −2), asserted only where the oracle is posed and robust
+// to 1-ulp changes; every point is 1-ulp sensitive at entries ~1e7…1e10
+// (eig splits most of them into two real roots), so they are logged as
+// precision limits.
+func TestRootLocus_ResolvedNonNormalPairKSign(t *testing.T) {
+	type sysData struct {
+		name    string
+		n       int
+		a, b, c []float64
+	}
+	cs := []sysData{
+		{"minimal", 2, []float64{25690112.3828125, 51394561.765625, -12845056.19140625, -25697280.3828125}, []float64{-2, 1}, []float64{32, 64}},
+		{"30987", 2, []float64{-2.56829453828125e7, -1.284147244140625e7, 5.1351556765625e7, 2.56757773828125e7}, []float64{32, -64}, []float64{2, 1}},
+		{"31290", 3, []float64{45942.01278480432, -7700.285188740199, -46254.37380409317, 32263.2672003399, -5410.057865434646, -32487.91250383978, 40346.07038640868, -6761.950570224694, -40619.45491936967}, []float64{0.04153337941018198, 0.029169793742546878, 0.036473984259841205}, []float64{2898791.329147607, -505488.26534131414, -2896245.4694443424}},
+	}
+	const p = 3584.0
+	for _, sg := range []float64{0.4375, 0.25, 0.125, 1.0 / 16, 1.0 / 64} {
+		for _, v := range []float64{-2, -8, -64, -1024} {
+			q := p*p + sg*sg
+			cs = append(cs, sysData{
+				"grid σ=" + strconv.FormatFloat(sg, 'g', -1, 64) + " v=" + strconv.FormatFloat(v, 'g', -1, 64), 2,
+				[]float64{-v * q, v*v*q + 1 - 2*p*v, -q, v*q - 2*p},
+				[]float64{v, 1},
+				[]float64{32, -32 * v},
+			})
+		}
+	}
+	for i, c := range cs {
+		res, err := RootLocus(rlpSys(t, c.n, c.a, c.b, c.c, 0, 0), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc := rlswCase{n: c.n, a: c.a, b: c.b, c: c.c, num: rlpRats(1), den: rlpRats(1)}
+		_, o := rc.oracles()
+		if !o.posed || i >= 3 && rlswUlpSensitive(&rc, i) {
+			t.Logf("%s: oracle unposed or 1-ulp sensitive (precision limit): Breakaway %v, oracle %v", c.name, res.Breakaway, o.required)
+			continue
+		}
+		if !o.accepts(res.Breakaway) {
+			t.Errorf("%s: Breakaway = %v, want %v", c.name, res.Breakaway, o.required)
+		}
+	}
+}

@@ -1069,11 +1069,15 @@ func polyRootsOrNil(p Poly) []complex128 {
 //     near-axis complex zero pair); a complex pair off the origin that is
 //     only split by at most √u·σ_b is no proof of a double (a non-normal A
 //     of scale σ_b resolves 116±0.25i, σ_b 4.4e7): the coefficients must
-//     merge it within a backward error √u (a rotated companion double needs
-//     ≤ 6e4·u, that resolved pair 1e9·u), or else it is a double only
-//     where the converted p splits it into two real roots (eig and p
-//     disagree on the split, so it is rounding), and otherwise it is a
-//     break point only where K > 0 (rootCluster.resolved);
+//     merge it within a backward error u^(2/3), a relative root split
+//     ~u^(1/3) (doubles of the frozen sweeps whose floats still hold a
+//     double need ≤ 3e4·u; exactly realized resolved pairs 6e5·u and more,
+//     −42±0.0026i and −3584±0.4375i of non-normal A among them, which √u
+//     admitted; doubles whose float TF is already a resolved pair need
+//     2e5…3.5e6·u and are precision limits), or
+//     else it is a double only where the converted p splits it into two
+//     real roots (eig and p disagree on the split, so it is rounding), and
+//     otherwise it is a break point only where K > 0 (rootCluster.resolved);
 //   - or p has, up to a backward error of 10·u in its coefficients, a root
 //     of multiplicity m at the centre c found by Newton on p^(m−1) within
 //     max(2·spread, ρ) of the group mean (ρ the split of that backward
@@ -1225,7 +1229,7 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 				conf = 100 * u
 			}
 			if linked && pair && normwise && !sub {
-				conf = math.Sqrt(u)
+				conf = math.Pow(u, 2.0/3)
 			}
 			if m < len(p) {
 				c, ok := multipleRootAt(p, real(c0), m, conf, math.Max(2*spread, splitRadius(p, real(c0), m, conf)))
