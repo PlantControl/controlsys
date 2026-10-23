@@ -905,6 +905,14 @@ func pidTuningDCAdmissible(c PID2, dc, wHi float64, gHi complex128) bool {
 	return zero*inf > 0
 }
 
+// pidTuningKeepsIntegral reports whether c keeps the integral action its
+// family has. A search step can land Ki on exactly 0, a P/PD loop that
+// bypasses the integral-only screens, such as the integrator cancelling a
+// plant zero at s = 0 (JJJR63).
+func pidTuningKeepsIntegral(c PID2, hasI bool) bool {
+	return !hasI || c.Ki != 0
+}
+
 // pidTuningSignConsistent reports whether every nonzero gain of c has sign
 // want; want = 0 accepts any signs. Other signs on a stable plant come from
 // the wrapped-phase branch of the crossover equations.
@@ -2251,6 +2259,9 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 			return err
 		}
 		evidence.Evaluations++
+		if !pidTuningKeepsIntegral(candidate, hasI) {
+			return nil
+		}
 		if filtered && (candidate.Tf < math.Max(.001/wc, p.dt*.51) || candidate.Tf > 10/wc) {
 			return nil
 		}

@@ -88,6 +88,51 @@ func TestPIDTuningDelayOriginZeroOracle(t *testing.T) {
 	}
 }
 
+// A Kd step with Kp and Ki re-solved on the phase at wc can land Ki on −0,
+// a PD that is stable on the delayed origin-zero plant and passes its delay
+// screen, which rejects every integrator there. Under such re-solve axes
+// TestPIDTuningDelayOriginZeroRejected returned it as a PID (JJJR63).
+func TestPIDTuningKeepsIntegral(t *testing.T) {
+	p := originZeroPlant(t, 1, 1e-7, .5)
+	pd := PID2{Kp: 2.404297840448417, Ki: math.Copysign(0, -1), Kd: 0.6847020353096901, B: 1, C: 1}
+	q, err := p.Pade(6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mustPID(t, pd.Kp, 0, pd.Kd, 0, 0).System()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl, err := Feedback(q, cs, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := cl.IsStable(); !ok || err != nil {
+		t.Fatalf("Padé PD loop stable = %v, %v", ok, err)
+	}
+	eval, err := newSISOEval(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stable, ok, err := pidTuningDelayStability(p, eval, 3, false, 1)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if got, err := stable(&pd); !got || err != nil {
+		t.Fatalf("delay screen on PD = %v, %v; want stable", got, err)
+	}
+	if pidTuningKeepsIntegral(pd, true) {
+		t.Errorf("Ki = −0 admitted for a family with integral action")
+	}
+	if !pidTuningKeepsIntegral(pd, false) {
+		t.Errorf("PD rejected for a family without integral action")
+	}
+	pd.Ki = 1e-300
+	if !pidTuningKeepsIntegral(pd, true) {
+		t.Errorf("nonzero Ki rejected")
+	}
+}
+
 func TestPIDTuningLeastZero(t *testing.T) {
 	for _, tc := range []struct {
 		num, den []float64
