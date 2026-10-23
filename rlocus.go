@@ -376,9 +376,9 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 			sNum, sDen0, sNumFull, sDenFull, sDelay = a, b, c, e, l
 		}
 	}
-	roots, stat, err := stationaryCandidates(sNum, sDen0, sDelay, lp.spRelDeg, lp.n)
+	roots, stat, statBound, err := stationaryCandidates(sNum, sDen0, sDelay, lp.spRelDeg, lp.n)
 	if err != nil && sDelay > 0 {
-		roots, stat, err = stationaryCandidates(sNumFull, sDenFull, 0, lp.spRelDeg, lp.n)
+		roots, stat, statBound, err = stationaryCandidates(sNumFull, sDenFull, 0, lp.spRelDeg, lp.n)
 		num, den0, delay = numFull, denFull, 0
 	}
 	if err != nil {
@@ -451,13 +451,13 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 			continue
 		}
 		s := real(r)
-		c, m := multipleRootNear(den, s, lp.n, poles)
+		c, m := multipleRootNear(den, nil, s, lp.n, poles)
 		if m == 0 {
-			c, m = multipleRootNear(num, s, lp.n, zeros)
+			c, m = multipleRootNear(num, nil, s, lp.n, zeros)
 		}
 		onLocus := m > 0
 		if !onLocus && s != 0 {
-			if cs, ms := multipleRootNear(stat, s, lp.n, roots); ms > 0 {
+			if cs, ms := multipleRootNear(stat, statBound, s, lp.n, roots); ms > 0 {
 				claim(cs, ms)
 				s = cs
 			}
@@ -524,9 +524,11 @@ func trimmedTF(num, den0 Poly, delay, relDeg, n int) (Poly, Poly) {
 // with exact common roots at 0 of N and D cancelled, N trimmed to relative
 // degree relDeg and N, D unit-scaled; exact roots at 0 (z^(L−1) and zero
 // trailing coefficients) are listed with their multiplicity; poly is
-// N'D − ND' without them. Roots is nil when the converted N, D or
+// N'D − ND' without them and bound its coefficientwise change per unit
+// relative change of N's and D's coefficients, 2·(|N'|·|D| + |N|·|D'|)
+// (+ L·|N|·|D0| terms). Roots is nil when the converted N, D or
 // N'D − ND' are empty, all zero or not finite.
-func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex128, poly Poly, err error) {
+func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex128, poly, bound Poly, err error) {
 	for len(num) > 1 && num[len(num)-1] == 0 && (delay > 0 || len(den0) > 1 && den0[len(den0)-1] == 0) {
 		if delay > 0 {
 			delay--
@@ -537,31 +539,35 @@ func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex
 	}
 	num, den := trimmedTF(num, den0, delay, relDeg, n)
 	if len(num) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	den0 = den[:len(den)-delay]
 	notFinite := func(c float64) bool { return !isFinite(c) }
 	if slices.ContainsFunc(num, notFinite) || slices.ContainsFunc(den0, notFinite) {
-		return []complex128{}, nil, nil
+		return []complex128{}, nil, nil, nil
 	}
 
 	// D = z^L·D0 is exact, so N'D − ND' = z^(L−1)·(z·(N'D0 − ND0') − L·N·D0).
 	poly = num.Derivative().Mul(den0).Sub(num.Mul(den0.Derivative()))
+	an, ad := absPoly(num), absPoly(den0)
+	bound = an.Derivative().Mul(ad).Add(an.Mul(ad.Derivative()))
 	if delay > 0 {
 		poly = slices.Concat(poly, Poly{0}).Sub(num.Mul(den0).Scale(float64(delay)))
+		bound = slices.Concat(bound, Poly{0}).Add(an.Mul(ad).Scale(float64(delay)))
 	}
+	bound = bound.Scale(2)
 	if !slices.ContainsFunc(poly, func(c float64) bool { return c != 0 }) || slices.ContainsFunc(poly, notFinite) {
-		return []complex128{}, nil, nil
+		return []complex128{}, nil, nil, nil
 	}
 	atZero := max(delay-1, 0)
 	for len(poly) > 1 && poly[len(poly)-1] == 0 {
-		poly = poly[:len(poly)-1]
+		poly, bound = poly[:len(poly)-1], bound[:len(bound)-1]
 		atZero++
 	}
 	if roots, err = poly.Roots(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return append(roots, make([]complex128, atZero)...), poly, nil
+	return append(roots, make([]complex128, atZero)...), poly, bound, nil
 }
 
 // rlocusLoop is the explicit SISO loop C(sI−A)⁻¹B + D, A row-major n×n.
@@ -765,20 +771,32 @@ func (lp *rlocusLoop) eval(s float64) (g, dg float64, ok bool) {
 }
 
 // multipleRootNear returns the multiplicity m ≥ 2 (0 when none) and the
-// centre c of a multiple root of p (the denominator or numerator, with
-// computed roots) up to a backward error of u = 2·n·eps in its
-// coefficients, at the centre of the root cluster near s, c being the root
-// of p^(m−1) found by Newton from s. K = 0
-// (∞) there, so the cluster is a multiple pole (zero) split by rounding and
-// a break point under either angle condition. m is the size of the cluster
-// itself: the roots within 10·ρ₂ of c, ρ₂ = √(u·Σ|pᵢ||c|ⁱ/|p″(c)/2|) the
+// centre c of a multiple root of p (the denominator, numerator or
+// N'D − ND', with computed roots) up to a backward error of u = 2·n·eps in
+// its coefficients (relative to their magnitudes pb, |p| when nil), at the
+// centre of the root cluster near s, c being the root of p^(m−1) found by
+// Newton from s. For the denominator (numerator) K = 0 (∞) there, so the
+// cluster is a multiple pole (zero) split by rounding and a break point
+// under either angle condition; for N'D − ND' it is one stationary point.
+// m is the size of the cluster itself: the roots within 10·ρ₂ of c,
+// ρ₂ = √(u·pb(|c|)/|p″(c)/2|) the
 // rounding split of a double root there. A double-root test alone would
 // merge m ≥ 3 distinct roots a relative δ apart, since p(c) ~ δ^m.
-func multipleRootNear(p Poly, s float64, n int, roots []complex128) (centre float64, m int) {
+func multipleRootNear(p, pb Poly, s float64, n int, roots []complex128) (centre float64, m int) {
 	u := 2 * float64(n) * eps()
 	deg := len(p) - 1
 	if deg < 2 {
 		return 0, 0
+	}
+	if pb == nil {
+		pb = absPoly(p)
+	}
+	bounds := []Poly{pb}
+	boundAt := func(k int, c float64) float64 {
+		for len(bounds) <= k {
+			bounds = append(bounds, bounds[len(bounds)-1].Derivative())
+		}
+		return evalReal(bounds[k], math.Abs(c))
 	}
 	scale := 0.0
 	for _, r := range roots {
@@ -809,8 +827,7 @@ func multipleRootNear(p Poly, s float64, n int, roots []complex128) (centre floa
 	if !ok {
 		return 0, 0
 	}
-	_, b0 := evalRealBound(p, c)
-	rho := math.Sqrt(u * b0 / math.Abs(evalReal(der(2), c)/2))
+	rho := math.Sqrt(u * boundAt(0, c) / math.Abs(evalReal(der(2), c)/2))
 	for _, r := range roots {
 		if cmplx.Abs(r-complex(c, 0)) <= 10*rho {
 			m++
@@ -826,12 +843,20 @@ func multipleRootNear(p Poly, s float64, n int, roots []complex128) (centre floa
 		}
 	}
 	for j := range m {
-		v, b := evalRealBound(der(j), c)
-		if math.Abs(v) > u*b {
+		if math.Abs(evalReal(der(j), c)) > u*boundAt(j, c) {
 			return 0, 0
 		}
 	}
 	return c, m
+}
+
+// absPoly returns the polynomial of the coefficient magnitudes of p.
+func absPoly(p Poly) Poly {
+	out := make(Poly, len(p))
+	for i, c := range p {
+		out[i] = math.Abs(c)
+	}
+	return out
 }
 
 func evalReal(p Poly, x float64) float64 {
@@ -1011,7 +1036,8 @@ func polyRootsOrNil(p Poly) []complex128 {
 // pair with no u·κ link) can pass it. Such a pair is marked resolved and
 // computeBreakaway keeps it only where K > 0. Only a complex pair is: the
 // real-axis rule is exact beside it, while a double root split into two
-// real roots puts one on each side of c.
+// real roots puts one on each side of c. Only eig roots (pairCond set) are:
+// zeroCondition's normwise κ does not resolve a split double zero.
 //
 // Resolved roots, however slow or close, therefore stay apart; a near
 // multiple root that only eig's rounding merges but the coefficients do not
@@ -1121,7 +1147,7 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 					ok = !slices.ContainsFunc(rest, func(j int) bool { return cmplx.Abs(roots[j]-complex(c, 0)) <= rho })
 				}
 				if ok {
-					out = append(out, rootCluster{centre: c, radius: math.Max(radius, math.Sqrt(u)*math.Abs(c)), m: m, tf: true, resolved: m == 2 && !linked && imag(roots[members[0]]) != 0})
+					out = append(out, rootCluster{centre: c, radius: math.Max(radius, math.Sqrt(u)*math.Abs(c)), m: m, tf: true, resolved: pairCond != nil && m == 2 && !linked && imag(roots[members[0]]) != 0})
 					return
 				}
 			}
