@@ -280,14 +280,20 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // certified result is kept; else of Accuracy 1 results the one of
 // smallest first Newton step (the first on a tie), and with all failing
 // the first error. An unstabilizable boundary mode
-// (errBoundaryUnstabilizable) is structural and returned at once. A kept
-// Accuracy 1 result lives in opts.Workspace, so later solves run
-// without it.
+// (errBoundaryUnstabilizable) in any mode overrides every Accuracy 1
+// result but not a certified one: its rounding band is a heuristic that
+// a non-normal block can inflate past a mode inside the boundary (seen
+// unscaled only), while a Newton-certified X is stable. A kept Accuracy
+// 1 result lives in opts.Workspace, so later solves run without it.
 func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), plainRetry bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := solve(A, B, Q, R, opts)
-	if err == nil && res.Accuracy == 0 || errors.Is(err, errBoundaryUnstabilizable) ||
+	if err == nil && res.Accuracy == 0 ||
 		err != nil && !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
 		return res, err
+	}
+	var boundary error
+	if errors.Is(err, errBoundaryUnstabilizable) {
+		boundary = err
 	}
 	var base RiccatiOpts
 	if opts != nil {
@@ -307,13 +313,18 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 		r, e := solve(A, B, Q, R, &o)
 		switch {
 		case errors.Is(e, errBoundaryUnstabilizable):
-			return nil, e
+			if boundary == nil {
+				boundary = e
+			}
 		case e != nil:
 		case r.Accuracy == 0:
 			return r, nil
 		case res == nil || r.step < res.step:
 			res = r
 		}
+	}
+	if boundary != nil {
+		return nil, boundary
 	}
 	if res != nil {
 		return res, nil
@@ -750,16 +761,16 @@ type riccatiPoor struct {
 // keepPoor saves X (xData, gain K) in problem.poor with the eigenvalues
 // eig of A − BK (nil: those of the last newtonCost), unless the saved one
 // has a smaller first Newton step or rcnd is below poorRcnd.
-func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []complex128, rcnd, step float64) {
+func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []complex128, rcnd, step float64) bool {
 	if !(rcnd >= poorRcnd) {
-		return
+		return false
 	}
 	p := problem.poor
 	if p == nil {
 		p = &riccatiPoor{}
 		problem.poor = p
 	} else if !(step < p.step) {
-		return
+		return false
 	}
 	n, m := problem.n, problem.m
 	p.x = append(p.x[:0], xData...)
@@ -771,10 +782,12 @@ func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []com
 		problem.closedLoopEig(p.eig)
 	}
 	p.rcnd, p.step = rcnd, step
+	return true
 }
 
 // errBoundaryUnstabilizable is the ErrNoStabilizing of
-// boundaryUnstabilizable: structural, so it holds in either scaling mode.
+// boundaryUnstabilizable: structural, so it holds in either scaling mode
+// over any Accuracy 1 X, though not over a certified one (otherScaling).
 var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on the stability boundary is unstabilizable", ErrNoStabilizing)
 
 // boundaryUnstabilizable reports a finite eigenvalue λ of (A, E) on or
@@ -1099,7 +1112,14 @@ func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 // Lyapunov equation is singular is kept with a residual within rescueTol
 // of its terms and a stable A − BK as a candidate of problem.poor, as is
 // a stabilizing X whose first step exceeds newtonTol (keepPoor, before
-// any iterate overwrites it). Otherwise verifyRiccati returns
+// any iterate overwrites it). From a stabilizing K, Newton's iterates
+// stay stabilizing and converge in exact arithmetic, so when they break
+// down (an iterate unstable or unsolvable) or newtonSteps solves pass
+// without convergence or a stall within newtonGlobalTol, rounding rules
+// the iteration and the first step is no error estimate (75DTNG: an
+// unscaled non-normal pencil X off by 5e8, first step 0.5): that
+// candidate's step becomes +Inf, or the candidate it displaced is
+// restored. Otherwise verifyRiccati returns
 // problem.rescueErr, or ErrNoStabilizing, and the caller falls back to
 // problem.poor with Accuracy 1. X and eig are updated in place.
 func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, eig []complex128, rcnd float64) (*mat.Dense, error) {
@@ -1109,6 +1129,17 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 	}
 	xData := X.RawMatrix().Data
 	bestStep, stalls := math.Inf(1), 0
+	kept, prevPoor := false, (*riccatiPoor)(nil)
+	defer func() {
+		if !kept {
+			return
+		}
+		if prevPoor != nil {
+			problem.poor = prevPoor
+		} else {
+			problem.poor.step = math.Inf(1)
+		}
+	}()
 	for it := range newtonSteps {
 		x1, err := problem.newtonCost(continuous, K, xData)
 		if err != nil {
@@ -1131,9 +1162,13 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 				problem.closedLoopEig(eig)
 				return K, nil
 			}
-			problem.keepPoor(xData, K, nil, rcnd, step)
+			if p := problem.poor; p != nil && step < p.step {
+				prevPoor = &riccatiPoor{slices.Clone(p.x), slices.Clone(p.k), slices.Clone(p.eig), p.rcnd, p.step}
+			}
+			kept = problem.keepPoor(xData, K, nil, rcnd, step)
 		}
 		if it > 0 && step <= newtonRefineTol {
+			kept = false
 			prev := append([]float64(nil), xData...)
 			copy(xData, x1)
 			if K1, err := problem.closedLoopGain(continuous, xData, eig); err == nil {
@@ -1148,6 +1183,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		if step < bestStep {
 			bestStep, stalls = step, 0
 		} else if stalls++; stalls == 3 && step <= newtonGlobalTol {
+			kept = false
 			break
 		}
 		copy(xData, x1)

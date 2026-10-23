@@ -162,7 +162,10 @@ func lqgH2SynAccuracy(t *testing.T, name string) {
 // 3CVH7I), without the workspace that holds it (MQM2E7); a certified
 // retry replaces it, an Accuracy 1 retry only with a smaller first Newton
 // step, and a failed retry never turns it into an error. An
-// unstabilizable boundary mode in any mode is ErrNoStabilizing (K72KOR).
+// unstabilizable boundary mode in any mode is ErrNoStabilizing (K72KOR)
+// unless another mode certifies X: a first-mode boundary verdict still
+// retries, and a certified retry is returned (Dare NoScaling regression
+// of the MPWOJM cluster band on a non-normal block).
 func TestRiccati_OtherScalingAccuracy(t *testing.T) {
 	ws := NewRiccatiWorkspace(1, 1)
 	poor := &RiccatiResult{Accuracy: 1, step: 1e-6}
@@ -187,8 +190,9 @@ func TestRiccati_OtherScalingAccuracy(t *testing.T) {
 		{"retry fails", out{nil, ErrNoStabilizing}, out{nil, ErrSchurFailed}, 0, 3, nil},
 		{"plain certified", out{acc1(1e-7), nil}, out{certified, nil}, 2, 3, nil},
 		{"plain smaller step", out{nil, ErrNoStabilizing}, out{acc1(1e-7), nil}, 2, 3, nil},
-		{"boundary", out{nil, errBoundaryUnstabilizable}, out{}, -1, 2, errBoundaryUnstabilizable},
+		{"boundary", out{nil, errBoundaryUnstabilizable}, out{acc1(1e-7), nil}, -1, 3, errBoundaryUnstabilizable},
 		{"plain boundary", out{acc1(1e-7), nil}, out{nil, errBoundaryUnstabilizable}, -1, 3, errBoundaryUnstabilizable},
+		{"boundary then certified", out{nil, errBoundaryUnstabilizable}, out{certified, nil}, 2, 3, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls []RiccatiOpts
@@ -224,6 +228,27 @@ func TestRiccati_OtherScalingAccuracy(t *testing.T) {
 	}, true, nil, nil, nil, nil, nil)
 	if err != nil || res != certified || calls != 1 {
 		t.Errorf("certified first: %v %v, %d calls", res, err, calls)
+	}
+	for _, tc := range []struct {
+		name   string
+		second out
+		want   *RiccatiResult
+		err    error
+	}{
+		{"boundary first, certified retry", out{certified, nil}, certified, nil},
+		{"boundary first, Accuracy 1 retry", out{acc1(1e-9), nil}, nil, errBoundaryUnstabilizable},
+		{"boundary first, failed retry", out{nil, ErrNoStabilizing}, nil, errBoundaryUnstabilizable},
+	} {
+		calls = 0
+		res, err := otherScaling(func(_, _, _, _ *mat.Dense, _ *RiccatiOpts) (*RiccatiResult, error) {
+			if calls++; calls == 1 {
+				return nil, errBoundaryUnstabilizable
+			}
+			return tc.second.res, tc.second.err
+		}, false, nil, nil, nil, nil, nil)
+		if res != tc.want || err != tc.err || calls != 2 {
+			t.Errorf("%s: %v %v, %d calls", tc.name, res, err, calls)
+		}
 	}
 }
 
@@ -628,12 +653,19 @@ func TestDare_NearCircleZeroCostMode(t *testing.T) {
 // through a Kronecker block whose unbalanced entries (t₁₂ against
 // ε²/t₁₂) tripped Dgetc2's pivot test, so dare kept the pencil X as the
 // Lyapunov-singular candidate (Accuracy 1, step +Inf), off by 1e-5 to
-// 3e-3 relative in the first three cases and by 99 and 190 in the last
+// 3e-3 relative in the first three cases and by 99 and 190 in the next
 // two (its X₁₁ held only by the residual) against the 256-bit Hewer
-// oracle. DLyap now balances that block as it does a diagonal 2×2 block,
-// the Stein solve succeeds, and Newton refines the unscaled X to a
-// certified one or, failing that, reports a finite step that shows its
-// error; both public modes return an X accurate to the oracle.
+// oracle. DLyap now balances that block as it does a diagonal 2×2 block
+// and the Stein solve succeeds; Newton then certifies the unscaled X or
+// breaks down from it (an unstable iterate, no convergence), and a
+// broken-down candidate's first step is no error estimate: 0.5 for an X
+// off by 5e8 (256/1e-7), 0.99 off by 2e9 (512/1e-9), 0.003 off by 8e5
+// (1e4/1e-6), so it is +Inf, as for the singular candidate. In the last
+// four cases the unscaled boundary check flags the non-normal pair, a
+// mode 1e-6 inside the circle, as unstabilizable (its cluster band
+// inflated by the pair's condition), or found no X: Dare(NoScaling)
+// returned ErrNoStabilizing although the scaled retry certifies the
+// oracle's X. Both public modes return an X accurate to the oracle.
 func TestDare_SteinSingularRescue(t *testing.T) {
 	cases := []struct{ t12, delta, eps2 float64 }{
 		{64, 1e-10, 1.92e-13},
@@ -641,6 +673,14 @@ func TestDare_SteinSingularRescue(t *testing.T) {
 		{256, 1e-9, 7.68e-12},
 		{64, 1e-8, 6.4e-13},
 		{1024, 1e-8, 1.024e-11},
+		{256, 1e-7, 1e-12},
+		{512, 1e-9, 5e-12},
+		{1024, 1e-10, 5e-12},
+		{1e4, 1e-6, 1e-12},
+		{1e6, 1e-6, 1e-10},
+		{3e5, 1e-6, 1e-10},
+		{1e4, 1e-10, 1e-12},
+		{1e8, 1e-8, 1e-12},
 	}
 	const r = 0.8
 	for _, tc := range cases {
@@ -658,21 +698,11 @@ func TestDare_SteinSingularRescue(t *testing.T) {
 			Q.Set(4, 4, 0.5)
 			Q.Set(5, 5, 2)
 			R := mat.NewDense(1, 1, []float64{r})
-			cand, err := dare(A, B, Q, R, &RiccatiOpts{NoScaling: true})
-			if err != nil {
-				t.Fatalf("unscaled dare: %v", err)
-			}
-			Xc := bigRiccatiNewton(t, false, A, B, Q, r, cand.X)
-			var dc mat.Dense
-			dc.Sub(cand.X, Xc)
-			rel := mat.Norm(&dc, 2) / mat.Norm(Xc, 2)
-			switch {
-			case cand.Accuracy == 0 && !(rel <= 1e-9):
-				t.Errorf("unscaled dare: certified X off by %.3g", rel)
-			case cand.Accuracy != 0 && !(cand.step >= math.Min(rel, 1)/10 && !math.IsInf(cand.step, 1)):
-				// The 1024 case's unscaled pencil X is off by 17 under amd64
-				// rounding and Newton does not converge from it.
-				t.Errorf("unscaled dare: Accuracy %d, step %g for an X off by %.3g; want a certified X or a step that shows its error", cand.Accuracy, cand.step, rel)
+			var Xo *mat.Dense
+			relErr := func(X *mat.Dense) float64 {
+				var d mat.Dense
+				d.Sub(X, Xo)
+				return mat.Norm(&d, 2) / mat.Norm(Xo, 2)
 			}
 			for _, ns := range []bool{false, true} {
 				res, err := Dare(A, B, Q, R, &RiccatiOpts{NoScaling: ns})
@@ -682,19 +712,33 @@ func TestDare_SteinSingularRescue(t *testing.T) {
 				if res.Accuracy != 0 {
 					t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
 				}
-				Xo := bigRiccatiNewton(t, false, A, B, Q, r, res.X)
-				var d mat.Dense
-				d.Sub(res.X, Xo)
-				if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= 1e-9) {
-					t.Errorf("NoScaling %v: relative error %.3g", ns, rel)
-				}
-				for i := range 3 {
-					for j := range 6 {
-						if v := Xo.At(i, j); !(math.Abs(v) <= 1e-30) {
-							t.Fatalf("oracle X[%d,%d] = %g, want 0", i, j, v)
+				if Xo == nil {
+					Xo = bigRiccatiNewton(t, false, A, B, Q, r, res.X)
+					for i := range 3 {
+						for j := range 6 {
+							if v := Xo.At(i, j); !(math.Abs(v) <= 1e-30) {
+								t.Fatalf("oracle X[%d,%d] = %g, want 0", i, j, v)
+							}
 						}
 					}
 				}
+				if rel := relErr(res.X); !(rel <= 1e-9) {
+					t.Errorf("NoScaling %v: relative error %.3g", ns, rel)
+				}
+			}
+			cand, err := dare(A, B, Q, R, &RiccatiOpts{NoScaling: true})
+			if err != nil {
+				if !errors.Is(err, ErrNoStabilizing) {
+					t.Errorf("unscaled dare: %v", err)
+				}
+				return
+			}
+			rel := relErr(cand.X)
+			switch {
+			case cand.Accuracy == 0 && !(rel <= 1e-9):
+				t.Errorf("unscaled dare: certified X off by %.3g", rel)
+			case cand.Accuracy != 0 && !(cand.step >= rel/10):
+				t.Errorf("unscaled dare: Accuracy %d, step %g for an X off by %.3g; want a certified X or a step that shows its error", cand.Accuracy, cand.step, rel)
 			}
 		})
 	}
