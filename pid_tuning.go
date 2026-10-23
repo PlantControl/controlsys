@@ -2436,14 +2436,21 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		// search from c finds no incumbent, it restarts from the candidate
 		// least below the floor, as such a seed can sit next to the
 		// feasible set; the restart counts a smaller violation as progress.
-		// Floor bands, which share one budget, skip it.
-		for restart := range 2 {
+		// Floor bands, which share one budget, skip it. Under a model-based
+		// stability check a PIDF incumbent is then polished by Kd and Tf
+		// steps with Kp and Ki re-solved to hold C(jwc), as the coordinate
+		// steps leave the phase band there; the polish reaches loops whose
+		// resonances sparse frequency data do not resolve.
+		for restart := range 3 {
 			current := c
 			if restart == 1 {
 				if p.hasCrossFloor || !seedViolated || finitePID(incumbentScore) {
-					break
+					continue
 				}
 				current = nearest
+			}
+			if restart == 2 && !(hasP && hasI && hasD && filtered && p.stable != nil && finitePID(incumbentScore)) {
+				break
 			}
 			step := .5
 			for round := 0; round < 64 && evidence.Evaluations < o.MaxEvaluations; round++ {
@@ -2461,9 +2468,10 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 				// Ki put back on the incumbent's phase at wc if off the
 				// band. The probe can reach loops near the stability
 				// boundary, which sampled checks cannot certify.
-				for axis := range 4 {
+				for axis := range 6 {
 					diagonal := axis == 3 && current.Kd == 0
-					if axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD || axis == 3 && (!filtered || diagonal && p.stable == nil) {
+					if (restart == 2) != (axis >= 4) || axis == 0 && !hasP || axis == 1 && !hasI || axis == 2 && !hasD ||
+						axis == 3 && (!filtered || diagonal && p.stable == nil) || axis == 5 && current.Kd == 0 {
 						continue
 					}
 					kdSigns := []float64{0}
@@ -2479,15 +2487,21 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 								candidate.Kp += sign * step * scale
 							case 1:
 								candidate.Ki += sign * step * scale * wc
-							case 2:
+							case 2, 4:
 								candidate.Kd += sign * step * scale / wc
-							case 3:
+							case 3, 5:
 								tfStep := step
 								if diagonal {
 									tfStep = math.Max(step, .5)
 								}
 								candidate.Tf *= math.Exp(sign * tfStep)
 								candidate.Kd += kdSign * step * scale / wc
+							}
+							if axis >= 4 {
+								held := pidTuningFeedback(current, wc)
+								ib, db := pidTuningBasis(candidate, wc)
+								candidate.Ki = (imag(held) - candidate.Kd*imag(db)) / imag(ib)
+								candidate.Kp = real(held) - candidate.Ki*real(ib) - candidate.Kd*real(db)
 							}
 							if err := evaluate(candidate); err != nil {
 								return nil, fmt.Errorf("%s: %w", op, err)

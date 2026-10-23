@@ -15,7 +15,9 @@ import (
 // phase band or crossed 0 dB again below the floor (J 1.61, 10.3 against
 // base 1.30, 1.15 and 1.085 against 1.10 and 1.004). The Tf axis now steps
 // Kd with it from Kd = 0. Designs must not depend on rounding of the
-// coefficients and must reach the better basin. Oracles on the raw
+// coefficients and must reach the better basin. Kd and Tf steps with Kp
+// and Ki re-solved on C(jwc) then polish the incumbent (TUEC2L: J 1.02,
+// 0.789, 1.07 and 1.004 before). Oracles on the raw
 // coefficients: closed-loop roots (Padé-10 for the delay), the winding of
 // 1 + L, and a dense sweep of every 0 dB crossing and of |S|.
 func TestTunePIDNullTfMoveRoundingInvariant(t *testing.T) {
@@ -25,10 +27,10 @@ func TestTunePIDNullTfMoveRoundingInvariant(t *testing.T) {
 		tau, dt  float64
 		pm, maxJ float64
 	}{
-		{"DKOLCU delayed", []float64{1.7707309809714888, 14.680167506003471}, []float64{1, 14.361343001258692, 49.96072517014042, 38.982637653846695}, 0.019603320901217147, 0, 30, 1.2},
-		{"#1449", []float64{48.06191588347829, 0.13735368706155338, 0.002249656527236773}, []float64{1, 0.32198253945344046, 0.18444876027906507, 0.05272355937125802}, 0, 0, 45, 1.31},
-		{"#70 discrete", []float64{-0.3047465759638495}, []float64{1, -2.4260740657587038e-12}, 0, 1.13124, 60, 1.09},
-		{"#723 discrete", []float64{2.702596709175337}, []float64{1, -0.062364934839474126}, 0, 0.00106787, 60, 1.03},
+		{"DKOLCU delayed", []float64{1.7707309809714888, 14.680167506003471}, []float64{1, 14.361343001258692, 49.96072517014042, 38.982637653846695}, 0.019603320901217147, 0, 30, .95},
+		{"#1449", []float64{48.06191588347829, 0.13735368706155338, 0.002249656527236773}, []float64{1, 0.32198253945344046, 0.18444876027906507, 0.05272355937125802}, 0, 0, 45, .77},
+		{"#70 discrete", []float64{-0.3047465759638495}, []float64{1, -2.4260740657587038e-12}, 0, 1.13124, 60, 1},
+		{"#723 discrete", []float64{2.702596709175337}, []float64{1, -0.062364934839474126}, 0, 0.00106787, 60, .93},
 	}
 	for _, c := range cases {
 		var ref PID2

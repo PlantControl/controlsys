@@ -235,8 +235,28 @@ func TestTunePIDSensitivitySearchKeepsScoreRankedOptimum(t *testing.T) {
 		if margin < pm-3-1e-6 || peak > 4*(1+1e-4) {
 			t.Errorf("%s: %+v dense margin %g, max|S| %g", c.name, k, margin, peak)
 		}
-		if wind := pidWindingDeg(L, 1e-6, 1e6); math.Abs(wind-90) > 1 {
+		// Tf near 1e-5 leaves |L| ≈ 0.05 at 1e6 rad/s, short of the winding's end.
+		if wind := pidWindingDeg(L, 1e-6, 1e9); math.Abs(wind-90) > 1 {
 			t.Errorf("%s: %+v arg(1+L) changes by %g°, want 90° for a stable loop", c.name, k, wind)
+		}
+		pp, err := pidPlantDelayed(t, c.num, c.den, c.tau).Pade(10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs, err := mustPID(t, k.Kp, k.Ki, k.Kd, k.Tf, 0).System()
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := Series(cs, pp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl, err := Feedback(l, nil, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := cl.IsStable(); !ok || err != nil {
+			t.Errorf("%s: %+v Padé-10 closed loop stable = %v, %v", c.name, k, ok, err)
 		}
 	}
 }
