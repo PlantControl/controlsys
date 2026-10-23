@@ -343,7 +343,10 @@ func makeBranches(allEigs [][]complex128, nStates, nGains int) [][]complex128 {
 // less cancelling roots of the other kind) is a break point under either
 // angle condition, reported once in place of the m − 1 nearest roots of
 // N'D − ND' it splits into; no absolute cut-off decides it, so slow or
-// close resolved poles stay distinct. A root of N'D − ND' is real when its
+// close resolved poles stay distinct. A resolved complex pair that only the
+// converted polynomial merges (rootCluster.resolved) is no multiple root:
+// the real root of N'D − ND' it claims is a break point only where K > 0
+// (eval, else the real-axis rule). A root of N'D − ND' is real when its
 // imaginary part is within 1e-6 of its modulus.
 // Any other root is on the locus when K = −1/G(s) > 0 and G'(s) ≈ 0, both
 // from the state space, so a sign rule over rounding-noise zeros or a
@@ -419,11 +422,21 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 		return first
 	}
 	isReal := func(r complex128) bool { return math.Abs(imag(r)) <= 1e-6*cmplx.Abs(r) }
+	onLocusAt := func(s float64) bool {
+		if g, _, ok := bl.eval(s); ok {
+			return g < 0
+		}
+		return isOnRealAxisSegment(s, poles, zeros) != lp.negGain
+	}
 	for _, c := range clusters {
 		if c.m >= 2 {
 			at := complex(c.centre, 0)
-			if i := claim(c.centre, c.m-1); i >= 0 && !c.exact && isReal(roots[i]) {
+			i := claim(c.centre, c.m-1)
+			if i >= 0 && !c.exact && isReal(roots[i]) {
 				at = complex(real(roots[i]), 0)
+			}
+			if c.resolved && (i < 0 || !isReal(roots[i]) || !onLocusAt(real(at))) {
+				continue
 			}
 			if !slices.Contains(result, at) {
 				result = append(result, at)
@@ -926,6 +939,10 @@ type rootCluster struct {
 	// is netted against the other converted polynomial's roots: the
 	// conversion may already have cancelled a common root.
 	tf bool
+	// resolved marks a tf multiplicity whose roots eig resolves (no u·κ
+	// link): the converted polynomial cannot tell them from a multiple root,
+	// but the realization can, so it is a break point only where K > 0.
+	resolved bool
 }
 
 // polyRootsOrNil returns the roots of p, nil when it has none or rooting
@@ -978,6 +995,13 @@ func polyRootsOrNil(p Poly) []complex128 {
 // rule, and a pair part whose mean u·κ_mean (pairCond) is not below its
 // distance to the rest of the group is not tested at all: eig cannot order
 // such roots, so which two of them pair is rounding.
+//
+// The coefficient test is no conditioning test of the cluster itself: a
+// root nearby shrinks p and p′ at c, so a pair resolved by eig (a complex
+// pair with no u·κ link) can pass it. Such a pair is marked resolved and
+// computeBreakaway keeps it only where K > 0. Only a complex pair is: the
+// real-axis rule is exact beside it, while a double root split into two
+// real roots puts one on each side of c.
 //
 // Resolved roots, however slow or close, therefore stay apart; a near
 // multiple root that only eig's rounding merges but the coefficients do not
@@ -1087,7 +1111,7 @@ func multipleRoots(roots []complex128, kappa []float64, pairCond func(i, j int) 
 					ok = !slices.ContainsFunc(rest, func(j int) bool { return cmplx.Abs(roots[j]-complex(c, 0)) <= rho })
 				}
 				if ok {
-					out = append(out, rootCluster{centre: c, radius: math.Max(radius, math.Sqrt(u)*math.Abs(c)), m: m, tf: true})
+					out = append(out, rootCluster{centre: c, radius: math.Max(radius, math.Sqrt(u)*math.Abs(c)), m: m, tf: true, resolved: m == 2 && !linked && imag(roots[members[0]]) != 0})
 					return
 				}
 			}
@@ -1129,11 +1153,12 @@ func mergeClusters(cs []rootCluster, u, sigma, sigmaTrace float64) []rootCluster
 			}
 			m := a.m + b.m
 			cs[i] = rootCluster{
-				centre: (float64(a.m)*a.centre + float64(b.m)*b.centre) / float64(m),
-				radius: max(a.radius, b.radius, d),
-				m:      m,
-				exact:  a.exact && b.exact && d == 0,
-				tf:     a.tf && b.tf,
+				centre:   (float64(a.m)*a.centre + float64(b.m)*b.centre) / float64(m),
+				radius:   max(a.radius, b.radius, d),
+				m:        m,
+				exact:    a.exact && b.exact && d == 0,
+				tf:       a.tf && b.tf,
+				resolved: a.resolved && b.resolved,
 			}
 			cs = slices.Delete(cs, j, j+1)
 			j = i
