@@ -619,8 +619,9 @@ func pidTuningFRDStrictDCGain(data *FRD, at func(float64) complex128) float64 {
 // 90°; one that cannot be rejects c, as its |S| is unbounded. Between two
 // consecutive samples the count is unknown when 0 lies between their chord
 // of 1 + L and its arc on the circle through them and the sample before,
-// and on the one through them and the sample after (where each exists), as
-// a resonance the samples do not resolve winds 1 + L round 0 along that
+// or that arc, the circle's major one, passes within ¼ of 0, and likewise
+// on the one through them and the sample after (where each exists), as a
+// resonance the samples do not resolve winds 1 + L round 0 along that
 // arc, opposite to the chord.
 //
 // A discrete top sample within 10% of Nyquist with L within 30° of the real
@@ -878,8 +879,12 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 
 // pidTuningFRDArcHidesZero reports whether 0 lies between the chord from a
 // to b and the arc from a to b, not through x, of the circle through a, b
-// and x, as a lightly damped mode traces such a circle and the count's
-// interpolant follows the chord.
+// and x, or that arc, when it is the circle's major one (1 + L sweeping
+// most of a resonance loop between two samples), passes within ¼ of 0
+// (|S| > 4), as a lightly damped mode traces such a circle and the count's
+// interpolant follows the chord; the margin keeps the search from walking
+// to a design whose 0 sits on the fitted circle, which the fit cannot
+// place on either side.
 func pidTuningFRDArcHidesZero(a, b, x complex128) bool {
 	cross := func(u, v complex128) float64 { return real(u)*imag(v) - imag(u)*real(v) }
 	u, v := b-a, x-a
@@ -889,6 +894,12 @@ func pidTuningFRDArcHidesZero(a, b, x complex128) bool {
 	}
 	nu, nv := real(u)*real(u)+imag(u)*imag(u), real(v)*real(v)+imag(v)*imag(v)
 	o := complex(imag(v)*nu-imag(u)*nv, real(u)*nv-real(v)*nu) / complex(den, 0)
-	r := cmplx.Abs(o)
-	return cmplx.Abs(-a-o) < r && cross(u, -a)*cross(u, v) < 0
+	r, d := cmplx.Abs(o), cmplx.Abs(-a-o)
+	if d < r && cross(u, -a)*cross(u, v) < 0 {
+		return true
+	}
+	if !(math.Abs(d-r) < .25) || d == 0 || cross(u, o)*cross(u, v) >= 0 {
+		return false
+	}
+	return cross(u, o+(-a-o)*complex(r/d, 0))*cross(u, v) < 0
 }

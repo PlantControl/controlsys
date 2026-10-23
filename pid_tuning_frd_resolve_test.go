@@ -103,3 +103,46 @@ func TestPIDTuningFRDStrictCountRejectsResolvedPIDF(t *testing.T) {
 		}
 	}
 }
+
+// N4MOKA #16: a PID whose resonance loop passes 0.0038 from 0 between
+// samples 6.6% apart (dense crossings at 0.3962 and 0.4102 rad/s) was
+// certified with a closed-loop root at Re s = +2.9e-5. Both arcs fitted
+// to the samples round the resonance put 0 within 0.001 of their circle,
+// on either side, so the lens test alone let the search walk to it; an
+// arc sweeping most of its circle that passes within ¼ of 0 (|S| > 4) now
+// leaves the count unknown. PID, PIDF and PI at PM 60 come back stable
+// with dense |S| <= 4, where base's were unstable or |S| above 13.
+// Oracles: companion roots and a dense |S| sweep of the exact plant.
+func TestTunePIDFRDResonanceArcNearOrigin(t *testing.T) {
+	num, den := []float64{1.0387992186759023e-05}, []float64{1, 0.13699372147773697, 0.1644482602582385, 0.02195020295201065, 0.00021753977446639744}
+	frd := pidFRDStrictWithDC(t, pidExactFRD(t, num, den, 0.000590353197528667, 119.30244754043795, 191), num, den)
+	p, _ := pidTuningFRDStrictPlant(frd, nil)
+	c := PID2{Kp: 92.55344502177579, Ki: 1.5343353197175762, Kd: -32.6931943547603, B: 1, C: 1}
+	if re := pidClosedLoopMaxRe(num, den, c); !(re > 1e-5) {
+		t.Fatalf("oracle max Re %g, want unstable", re)
+	}
+	if stable, known := pidTuningFRDNyquistCount(c, p); stable && known {
+		t.Errorf("strict count certifies unstable %+v", c)
+	}
+	exact := func(w float64) complex128 {
+		s := complex(0, w)
+		return pidPolyAt(num, s) / pidPolyAt(den, s)
+	}
+	for _, family := range []PidtuneType{PidtunePID, PidtunePIDF, PidtunePI} {
+		r, err := TunePIDFRD(context.Background(), frd, family, PIDTuningOptions{PhaseMargin: 60})
+		if err != nil {
+			t.Errorf("%v: %v", family, err)
+			continue
+		}
+		k := *r.Controller
+		if re := pidClosedLoopMaxRe(num, den, k); !(re < 0) {
+			t.Errorf("%v: %+v closed-loop root at Re %g (certified %v)", family, k, re, !pidHasWarning(r, "not certified"))
+		}
+		if peak, at := pidDenseSensitivity(k, exact, 1e-4, 1e3); peak > 4 {
+			t.Errorf("%v: %+v dense |S| %g at %g", family, k, peak, at)
+		}
+		if pm := r.Evidence.AchievedPhaseMargin; pm < 58.5 {
+			t.Errorf("%v: achieved PM %g", family, pm)
+		}
+	}
+}
