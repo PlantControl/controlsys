@@ -222,6 +222,8 @@ type rowRealizationConverter struct {
 	trims [][][]float64
 	// keepObs disables the observability cut (see keepObservable).
 	keepObs bool
+	// noDirect disables the Hessenberg path of convertDynamicRows (tests).
+	noDirect bool
 }
 
 func newRowRealizationConverter(sys *System, opts *TransferFuncOpts) rowRealizationConverter {
@@ -247,6 +249,13 @@ func newRowRealizationConverter(sys *System, opts *TransferFuncOpts) rowRealizat
 		dRaw:  dRaw,
 		trims: make([][][]float64, p*m),
 	}
+}
+
+// fresh returns an empty converter of sys with the options of c.
+func (c rowRealizationConverter) fresh(sys *System) rowRealizationConverter {
+	f := newRowRealizationConverter(sys, c.opts)
+	f.noDirect = c.noDirect
+	return f
 }
 
 func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
@@ -288,7 +297,7 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 	if e, ok := sampleTFCheck(bd, bandCheckPoints(c.sys, c.tf.polys()), c.m, c.p).resolvedErr(c.tf); !ok || !(e > 1e-6) {
 		return c, order
 	}
-	full := newRowRealizationConverter(c.sys, c.opts)
+	full := c.fresh(c.sys)
 	full.keepObs = true
 	fullOrder, err := full.convertFrom(false)
 	if err != nil || fullOrder <= order {
@@ -419,7 +428,7 @@ func (c rowRealizationConverter) choose() (rowRealizationConverter, int, error) 
 	if !ok || e0 <= gate {
 		return c, order, nil
 	}
-	alt := newRowRealizationConverter(c.sys, c.opts)
+	alt := c.fresh(c.sys)
 	altOrder, err := alt.convertFrom(true)
 	if err != nil {
 		return c, order, nil
@@ -573,7 +582,7 @@ func (c rowRealizationConverter) convertRowGroups(groups []rowGroup) (*TransferF
 		if err != nil {
 			return nil, err
 		}
-		res, err := newRowRealizationConverter(sub, c.opts).convert()
+		res, err := c.fresh(sub).convert()
 		if err != nil {
 			return nil, err
 		}
@@ -832,13 +841,14 @@ func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order i
 		return 0, false, err
 	}
 	if stair.NCont < c.n && !osborne {
-		a, b, cm, inExp2, outExp2 := c.balancedABC(true, ioScale)
-		alt, err := controllabilityStaircaseFloor(a, b, cm, c.opts.ControllabilityTol, ctrbfFloor(a, c.opts.ControllabilityTol), false)
+		a2, b2, cm2, inExp2, outExp2 := c.balancedABC(true, ioScale)
+		alt, err := controllabilityStaircaseFloor(a2, b2, cm2, c.opts.ControllabilityTol, ctrbfFloor(a2, c.opts.ControllabilityTol), false)
 		if err != nil {
 			return 0, false, err
 		}
 		if alt.NCont == c.n {
 			stair, inExp, outExp = alt, inExp2, outExp2
+			a, b, cm = a2, b2, cm2
 		}
 	}
 	scaled = slices.ContainsFunc(inExp, func(e int) bool { return e != 0 }) ||
@@ -858,7 +868,7 @@ func (c rowRealizationConverter) convertBalanced(osborne, ioScale bool) (order i
 	if c.keepObs {
 		floor = 0
 	}
-	return c.convertDynamicRows(stair, stair.NCont, floor, inExp, outExp), scaled, nil
+	return c.convertDynamicRows(stair, stair.NCont, floor, inExp, outExp, a, b, cm), scaled, nil
 }
 
 func (c rowRealizationConverter) finiteCoeffs() bool {
@@ -933,7 +943,10 @@ func (c rowRealizationConverter) balancedABC(osborne, ioScale bool) (a, b, cm *m
 	return a, b, cm, inExp, outExp
 }
 
-func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int, floor float64, inExp, outExp []int) int {
+// convertDynamicRows converts each row from the staircase form, a row
+// keeping all n states from the balanced realization (a, b, cm) itself
+// when that is already Hessenberg (see directRowTF).
+func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncont int, floor float64, inExp, outExp []int, a, b, cm *mat.Dense) int {
 	Ac := extractSubmatrix(stair.A, 0, ncont, 0, ncont)
 	Bc := extractSubmatrix(stair.B, 0, ncont, 0, c.m)
 	Cc := extractSubmatrix(stair.C, 0, c.p, 0, ncont)
@@ -947,6 +960,15 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 	zeroEigs := -1
 	for i := 0; i < c.p; i++ {
 		nobs, den, numCoeffs := ssToTFRow(Ac, Bc, Cc, i, ncont, c.m, c.opts.ObservabilityTol, floor, inExp, outExp[i], ws)
+		var bhData []float64
+		if nobs > 0 {
+			bhData = ws.cData
+		}
+		if nobs == c.n && !c.noDirect {
+			if dDen, dNums, dbh, ok := directRowTF(a, b, cm, i, c.n, c.m, inExp, outExp[i]); ok {
+				den, numCoeffs, bhData = dDen, dNums, dbh
+			}
+		}
 		if nobs == c.n {
 			if zeroEigs < 0 {
 				zeroEigs = isolatedZeroEigs(c.sys.A)
@@ -967,8 +989,8 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 				return Poly(num).Add(Poly(den).Scale(dij))
 			}
 			var bh []float64
-			if nobs > 0 {
-				bh = ws.cData[j*ncont : j*ncont+nobs]
+			if j*ncont < len(bhData) {
+				bh = bhData[j*ncont : j*ncont+nobs]
 			}
 			c.trims[i*c.m+j] = nil
 			if cands := markov.trim(i, j, nobs, numCoeffs[j], bh); len(cands) > 1 || len(cands[0]) != len(numCoeffs[j]) {
@@ -1441,8 +1463,15 @@ func ssToTFRow(Ac, Bc, Cc *mat.Dense, row, ncont, m int, obsTol, floor float64, 
 		return zeroReturn()
 	}
 
-	aData := ws.aData
+	den, nums := hessenbergTF(ws.aData, ws.cData, n, nobs, m, b1, inExp, outExp)
+	return nobs, den, nums
+}
 
+// hessenbergTF returns the den and numerators of the leading nobs states of
+// the dual form (upper Hessenberg aData with stride n, input b1·e1, outputs
+// the m rows of cData), undoing the I/O scales as ssToTFRow. It overwrites
+// the strict upper triangle of aData.
+func hessenbergTF(aData, cData []float64, n, nobs, m int, b1 float64, inExp []int, outExp int) ([]float64, [][]float64) {
 	scale := make([]float64, nobs)
 	scale[0] = math.Ldexp(b1, -outExp)
 	for k := 1; k < nobs; k++ {
@@ -1458,9 +1487,124 @@ func ssToTFRow(Ac, Bc, Cc *mat.Dense, row, ncont, m int, obsTol, floor float64, 
 
 	wPolys := vPolyRecurrence(aData, n, nobs)
 	den := []float64(wPolys[nobs])
-	nums := computeNumerators(ws.cData, n, nobs, m, scale, inExp, wPolys)
+	nums := computeNumerators(cData, n, nobs, m, scale, inExp, wPolys)
+	return den, nums
+}
 
-	return nobs, den, nums
+// directRowTF converts output row of the balanced (a, b, cm) without the
+// staircase and Hessenberg rotations when hessenbergDual applies: on a
+// graded companion (a slow or observable companion) the rotations mix the
+// scales and cost up to all digits of the low den coefficients, or of the
+// numerator far above the poles, while the recurrence in the given basis
+// is exact on a companion and otherwise sums the same products of the
+// given entries det(sI − A) and the cofactors expand to. bh is the
+// Hessenberg-basis input (or output, in the primal form) for markovTrim.
+func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, bh []float64, ok bool) {
+	aData, cData := make([]float64, n*n), make([]float64, m*n)
+	b1, primal, ok := hessenbergDual(a, b, cm, row, n, m, aData, cData)
+	if !ok {
+		return nil, nil, nil, false
+	}
+	if primal {
+		den, nums = hessenbergTF(aData, cData, n, n, 1, b1, []int{outExp}, inExp[0])
+	} else {
+		den, nums = hessenbergTF(aData, cData, n, n, m, b1, inExp, outExp)
+	}
+	bad := func(x float64) bool { return math.IsInf(x, 0) || math.IsNaN(x) }
+	if slices.ContainsFunc(den, bad) || slices.ContainsFunc(nums, func(p []float64) bool { return slices.ContainsFunc(p, bad) }) {
+		return nil, nil, nil, false
+	}
+	return den, nums, cData, true
+}
+
+// hessenbergDual fills aData and cData with a dual form of output row of
+// (a, b, cm) by an exact transpose and reversal, and returns its input
+// coefficient b1, when a is Hessenberg with nonzero subdiagonal and the
+// row, or with m = 1 the input, is a multiple of the unit vector at the
+// matching end: lower Hessenberg with c ∝ e₁ᵀ or upper with c ∝ eₙᵀ (the
+// dual (Aᵀ, cᵀ, Bᵀ)), or upper with b ∝ e₁ or lower with b ∝ eₙ (primal:
+// (A, b, c) itself, cData holding the row).
+func hessenbergDual(a, b, cm *mat.Dense, row, n, m int, aData, cData []float64) (b1 float64, primal, ok bool) {
+	ar, br, cr := a.RawMatrix(), b.RawMatrix(), cm.RawMatrix()
+	at := func(i, j int) float64 { return ar.Data[i*ar.Stride+j] }
+	upper, lower := true, true
+	maxA := 0.0
+	for i := range n {
+		for j := range n {
+			v := at(i, j)
+			maxA = max(maxA, math.Abs(v))
+			if v != 0 {
+				upper = upper && i <= j+1
+				lower = lower && j <= i+1
+			}
+		}
+	}
+	if !upper && !lower {
+		return 0, false, false
+	}
+	smlnum := math.SmallestNonzeroFloat64 / eps()
+	if maxA != 0 && (maxA < smlnum || maxA > 1/smlnum) {
+		return 0, false, false
+	}
+	crow := cr.Data[row*cr.Stride : row*cr.Stride+n]
+	unit := func(v []float64, k int) bool {
+		for i, x := range v {
+			if (x != 0) != (i == k) {
+				return false
+			}
+		}
+		return true
+	}
+	bcol := make([]float64, n)
+	if m == 1 {
+		for i := range n {
+			bcol[i] = br.Data[i*br.Stride]
+		}
+	}
+	switch {
+	case lower && unit(crow, 0):
+		b1 = crow[0]
+		for i := range n {
+			for j := range n {
+				aData[i*n+j] = at(j, i)
+			}
+			for j := range m {
+				cData[j*n+i] = br.Data[i*br.Stride+j]
+			}
+		}
+	case upper && unit(crow, n-1):
+		b1 = crow[n-1]
+		for i := range n {
+			for j := range n {
+				aData[i*n+j] = at(n-1-j, n-1-i)
+			}
+			for j := range m {
+				cData[j*n+i] = br.Data[(n-1-i)*br.Stride+j]
+			}
+		}
+	case m == 1 && upper && unit(bcol, 0):
+		b1, primal = bcol[0], true
+		for i := range n {
+			copy(aData[i*n:(i+1)*n], ar.Data[i*ar.Stride:i*ar.Stride+n])
+		}
+		copy(cData[:n], crow)
+	case m == 1 && lower && unit(bcol, n-1):
+		b1, primal = bcol[n-1], true
+		for i := range n {
+			for j := range n {
+				aData[i*n+j] = at(n-1-i, n-1-j)
+			}
+			cData[i] = crow[n-1-i]
+		}
+	default:
+		return 0, false, false
+	}
+	for k := 1; k < n; k++ {
+		if aData[k*n+k-1] == 0 {
+			return 0, false, false
+		}
+	}
+	return b1, primal, true
 }
 
 // StateSpaceResult is the result of (*TransferFunc).StateSpace.
