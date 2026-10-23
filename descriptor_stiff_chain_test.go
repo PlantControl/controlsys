@@ -319,12 +319,10 @@ func TestTransferFunction_DescriptorIndexFourChain(t *testing.T) {
 				res, err := sys.TransferFunction(nil)
 				_, serr := Step(sys, 1)
 				if !proper {
-					if !errors.Is(err, ErrImproperModel) || !errors.Is(serr, ErrImproperModel) {
-						t.Fatalf("%s: TransferFunction err = %v, Step err = %v, want ErrImproperModel", label, err, serr)
+					if err != nil || !errors.Is(serr, ErrImproperModel) {
+						t.Fatalf("%s: TransferFunction err = %v (want improper ratio), Step err = %v (want ErrImproperModel)", label, err, serr)
 					}
-					continue
-				}
-				if err != nil || serr != nil {
+				} else if err != nil || serr != nil {
 					t.Fatalf("%s: TransferFunction err = %v, Step err = %v", label, err, serr)
 				}
 				for _, s := range []complex128{1i, complex(0.5, 3), 20i} {
@@ -399,12 +397,10 @@ func TestDescriptor_IndexFiveSixChain(t *testing.T) {
 					t.Fatalf("%s: IsProper = %v, %v", label, isProper, prErr)
 				}
 				if !proper {
-					if !errors.Is(err, ErrImproperModel) || !errors.Is(serr, ErrImproperModel) {
-						t.Fatalf("%s: TransferFunction err = %v, Step err = %v, want ErrImproperModel", label, err, serr)
+					if err != nil || !errors.Is(serr, ErrImproperModel) {
+						t.Fatalf("%s: TransferFunction err = %v (want improper ratio), Step err = %v (want ErrImproperModel)", label, err, serr)
 					}
-					continue
-				}
-				if err != nil || serr != nil {
+				} else if err != nil || serr != nil {
 					t.Fatalf("%s: TransferFunction err = %v, Step err = %v", label, err, serr)
 				}
 				for _, s := range []complex128{1i, complex(0.5, 3), 20i} {
