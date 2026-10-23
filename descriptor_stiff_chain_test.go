@@ -346,6 +346,110 @@ func TestTransferFunction_DescriptorIndexFourChain(t *testing.T) {
 	}
 }
 
+// TestDescriptor_IndexFiveSixChain: chains of length 5 and 6 leave their QZ
+// members at |β|/|α| ~ ε^(1/k) ≈ 1e-3·‖E‖/‖A‖, at or above the
+// large-eigenvalue bound, while rank(E) drops by one per chain. With one
+// member marked infinite the QZ split kept rank(E) finite, so the
+// slow-subsystem LU failed (IsProper, Step and TransferFunction returned
+// ErrDescriptorSingular), and Poles returned the k−1 spurious members
+// (|λ| ~ 1e3, e.g. chains [6] seed 0: 8 poles, 3 finite, IsStable wrong on
+// seed 22). A pencil of index ≥ 2 has fewer than rank(E) finite
+// eigenvalues, so both now defer to the staircase. Oracle: the structured
+// model and the eigenvalues of its finite block.
+func TestDescriptor_IndexFiveSixChain(t *testing.T) {
+	for _, chains := range [][]int{{5}, {6}, {5, 1}} {
+		for seed := range uint64(100) {
+			for _, proper := range []bool{true, false} {
+				rng := rand.New(rand.NewPCG(seed, 77))
+				nf := 1 + rng.IntN(3)
+				sys, oracle, _ := chainDescriptor(t, rng, nf, chains, 0, proper)
+				label := fmt.Sprintf("seed %d chains %v proper %v", seed, chains, proper)
+				var eig mat.Eigen
+				if !eig.Factorize(oracle.A.Slice(0, nf, 0, nf), mat.EigenNone) {
+					t.Fatal("oracle eig failed")
+				}
+				want := eig.Values(nil)
+				got, err := sys.Poles()
+				if err != nil || len(got) != nf {
+					t.Fatalf("%s: Poles = %v, %v, want %v", label, got, err, want)
+				}
+				requirePolesContain(t, label, got, want, 1e-6)
+				wantStable := true
+				for _, p := range want {
+					wantStable = wantStable && real(p) < 0
+				}
+				if st, err := sys.IsStable(); err != nil || st != wantStable {
+					t.Fatalf("%s: IsStable = %v, %v, want %v", label, st, err, wantStable)
+				}
+				if got, err := sys.IsProper(); err != nil || got != proper {
+					t.Fatalf("%s: IsProper = %v, %v", label, got, err)
+				}
+				res, err := sys.TransferFunction(nil)
+				_, serr := Step(sys, 1)
+				if !proper {
+					if !errors.Is(err, ErrImproperModel) || !errors.Is(serr, ErrImproperModel) {
+						t.Fatalf("%s: TransferFunction err = %v, Step err = %v, want ErrImproperModel", label, err, serr)
+					}
+					continue
+				}
+				if err != nil || serr != nil {
+					t.Fatalf("%s: TransferFunction err = %v, Step err = %v", label, err, serr)
+				}
+				for _, s := range []complex128{1i, complex(0.5, 3), 20i} {
+					g, err := res.TF.Eval(s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					w := pencilResponse(t, oracle, s)[0][0]
+					if d := cmplx.Abs(g[0][0] - w); !(d <= 1e-6*math.Max(1, cmplx.Abs(w))) {
+						t.Fatalf("%s: G(%v) = %v, want %v", label, s, g[0][0], w)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestPoles_DescriptorRankMATLABEps: E = diag(1.99, 1, 0.5, 1.3e-15) is
+// nonsingular by MATLAB rank, whose bound n·eps(σ₁) = 8.9e-16 is the float
+// spacing at σ₁ = 1.99, half of n·ε·σ₁ = 1.8e-15. The rank floor used
+// n·ε·σ₁, so Poles dropped the stiff pole near +1e15 and IsStable reported
+// a stable model. Oracle: eig(E⁻¹A), E diagonal.
+func TestPoles_DescriptorRankMATLABEps(t *testing.T) {
+	ed := []float64{1.99, 1, 0.5, 1.3e-15}
+	a := mat.NewDense(4, 4, []float64{
+		-2, 0.4, -0.3, 0.2,
+		0.7, -1.5, 0.5, -0.1,
+		-0.2, 0.3, -3, 0.6,
+		0.5, -0.4, 0.8, 1.1,
+	})
+	e := mat.NewDense(4, 4, nil)
+	ea := mat.NewDense(4, 4, nil)
+	for i := range 4 {
+		e.Set(i, i, ed[i])
+		for j := range 4 {
+			ea.Set(i, j, a.At(i, j)/ed[i])
+		}
+	}
+	sys, err := NewDescriptor(a, mat.NewDense(4, 1, []float64{1, 0, -1, 0.5}), mat.NewDense(1, 4, []float64{1, -0.5, 0.3, 0.2}), mat.NewDense(1, 1, nil), e, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(ea, mat.EigenNone) {
+		t.Fatal("oracle eig failed")
+	}
+	want := eig.Values(nil)
+	got, err := sys.Poles()
+	if err != nil || len(got) != 4 {
+		t.Fatalf("Poles = %v, %v, want %v", got, err, want)
+	}
+	requirePolesContain(t, "rank-eps", got, want, 1e-6)
+	if st, err := sys.IsStable(); err != nil || st {
+		t.Fatalf("IsStable = %v, %v, want false (poles %v)", st, err, want)
+	}
+}
+
 // TestStabsep_StiffPoleBesideChainFailsClosed: a stiff finite pole (E
 // singular value 29× the rounding n·ε·σ₁) beside an index-2 chain and an
 // index-1 algebraic state (review seed 351). The staircase reports stiff,
