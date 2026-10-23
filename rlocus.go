@@ -347,7 +347,10 @@ func makeBranches(allEigs [][]complex128, nStates, nGains int) [][]complex128 {
 // converted polynomial merges (rootCluster.resolved) is no multiple root:
 // the real root of N'D − ND' it claims is a break point only where K > 0
 // (eval, else the real-axis rule). A root of N'D − ND' is real when its
-// imaginary part is within 1e-6 of its modulus.
+// imaginary part is within 1e-6 of its modulus. A multiple root of N'D − ND'
+// itself (multipleRootNear on it; a multiple zero of G − D, or of G split
+// past its cluster test) is one stationary point, judged and reported once
+// at its centre.
 // Any other root is on the locus when K = −1/G(s) > 0 and G'(s) ≈ 0, both
 // from the state space, so a sign rule over rounding-noise zeros or a
 // conversion error in N/D cannot misplace it; where the sign of G is not
@@ -373,9 +376,9 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 			sNum, sDen0, sNumFull, sDenFull, sDelay = a, b, c, e, l
 		}
 	}
-	roots, err := stationaryCandidates(sNum, sDen0, sDelay, lp.spRelDeg, lp.n)
+	roots, stat, err := stationaryCandidates(sNum, sDen0, sDelay, lp.spRelDeg, lp.n)
 	if err != nil && sDelay > 0 {
-		roots, err = stationaryCandidates(sNumFull, sDenFull, 0, lp.spRelDeg, lp.n)
+		roots, stat, err = stationaryCandidates(sNumFull, sDenFull, 0, lp.spRelDeg, lp.n)
 		num, den0, delay = numFull, denFull, 0
 	}
 	if err != nil {
@@ -453,6 +456,12 @@ func computeBreakaway(sys, undelayed *System, delay int, lp *rlocusLoop, poles, 
 			c, m = multipleRootNear(num, s, lp.n, zeros)
 		}
 		onLocus := m > 0
+		if !onLocus && s != 0 {
+			if cs, ms := multipleRootNear(stat, s, lp.n, roots); ms > 0 {
+				claim(cs, ms)
+				s = cs
+			}
+		}
 		if onLocus {
 			used[i] = true
 			claim(c, m-2)
@@ -514,9 +523,10 @@ func trimmedTF(num, den0 Poly, delay, relDeg, n int) (Poly, Poly) {
 // stationaryCandidates returns the roots of N'D − ND' for D = z^delay·D0,
 // with exact common roots at 0 of N and D cancelled, N trimmed to relative
 // degree relDeg and N, D unit-scaled; exact roots at 0 (z^(L−1) and zero
-// trailing coefficients) are listed with their multiplicity. Roots is nil
-// when the converted N, D or N'D − ND' are empty, all zero or not finite.
-func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex128, err error) {
+// trailing coefficients) are listed with their multiplicity; poly is
+// N'D − ND' without them. Roots is nil when the converted N, D or
+// N'D − ND' are empty, all zero or not finite.
+func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex128, poly Poly, err error) {
 	for len(num) > 1 && num[len(num)-1] == 0 && (delay > 0 || len(den0) > 1 && den0[len(den0)-1] == 0) {
 		if delay > 0 {
 			delay--
@@ -527,21 +537,21 @@ func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex
 	}
 	num, den := trimmedTF(num, den0, delay, relDeg, n)
 	if len(num) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	den0 = den[:len(den)-delay]
 	notFinite := func(c float64) bool { return !isFinite(c) }
 	if slices.ContainsFunc(num, notFinite) || slices.ContainsFunc(den0, notFinite) {
-		return []complex128{}, nil
+		return []complex128{}, nil, nil
 	}
 
 	// D = z^L·D0 is exact, so N'D − ND' = z^(L−1)·(z·(N'D0 − ND0') − L·N·D0).
-	poly := num.Derivative().Mul(den0).Sub(num.Mul(den0.Derivative()))
+	poly = num.Derivative().Mul(den0).Sub(num.Mul(den0.Derivative()))
 	if delay > 0 {
 		poly = slices.Concat(poly, Poly{0}).Sub(num.Mul(den0).Scale(float64(delay)))
 	}
 	if !slices.ContainsFunc(poly, func(c float64) bool { return c != 0 }) || slices.ContainsFunc(poly, notFinite) {
-		return []complex128{}, nil
+		return []complex128{}, nil, nil
 	}
 	atZero := max(delay-1, 0)
 	for len(poly) > 1 && poly[len(poly)-1] == 0 {
@@ -549,9 +559,9 @@ func stationaryCandidates(num, den0 Poly, delay, relDeg, n int) (roots []complex
 		atZero++
 	}
 	if roots, err = poly.Roots(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return append(roots, make([]complex128, atZero)...), nil
+	return append(roots, make([]complex128, atZero)...), poly, nil
 }
 
 // rlocusLoop is the explicit SISO loop C(sI−A)⁻¹B + D, A row-major n×n.
