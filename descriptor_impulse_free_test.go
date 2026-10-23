@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -123,9 +124,8 @@ func TestDescriptorObservableDerivativeStaysImproper(t *testing.T) {
 			if _, err := Step(sys, 1); !errors.Is(err, ErrImproperModel) {
 				t.Errorf("Kd %g %s: Step err = %v, want ErrImproperModel", kd, name, err)
 			}
-			if _, err := sys.TransferFunction(nil); !errors.Is(err, ErrImproperModel) || !errors.Is(err, ErrDescriptorUnsupported) {
-				t.Errorf("Kd %g %s: TransferFunction err = %v, want ErrImproperModel", kd, name, err)
-			}
+			res, err := sys.TransferFunction(nil)
+			requireImproperDescriptorTF(t, fmt.Sprintf("Kd %g %s", kd, name), sys, res, err, 1e-12)
 		}
 	}
 }
@@ -172,17 +172,18 @@ func TestDescriptorSmallDerivativeStaysImproper(t *testing.T) {
 			}
 			_, stepErr := Step(s, 1)
 			res, tfErr := s.TransferFunction(nil)
-			if (stepErr == nil) != proper || (tfErr == nil) != proper {
+			if (stepErr == nil) != proper || tfErr != nil {
 				t.Errorf("%s: IsProper %v but Step err %v, TransferFunction err %v", label, proper, stepErr, tfErr)
 			}
 			if !tc.proper {
 				if !errors.Is(stepErr, ErrImproperModel) {
 					t.Errorf("%s: Step err = %v, want ErrImproperModel", label, stepErr)
 				}
-				if !errors.Is(tfErr, ErrImproperModel) || !errors.Is(tfErr, ErrDescriptorUnsupported) {
-					t.Errorf("%s: TransferFunction err = %v, want ErrImproperModel", label, tfErr)
-				}
+				requireImproperDescriptorTF(t, label, s, res, tfErr, 1e-12)
 				continue
+			}
+			if !res.TF.isProper() {
+				t.Errorf("%s: proper model gave tf %v / %v", label, res.TF.Num, res.TF.Den)
 			}
 			if tfErr != nil {
 				continue

@@ -256,9 +256,8 @@ func TestTransferFunction_DescriptorHigherIndexChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sys.TransferFunction(nil); !errors.Is(err, ErrImproperModel) {
-		t.Fatalf("seed 1472: TransferFunction err = %v, want ErrImproperModel", err)
-	}
+	res, err := sys.TransferFunction(nil)
+	requireImproperDescriptorTF(t, "seed 1472", sys, res, err, 1e-6)
 	if _, err := Step(sys, 1); !errors.Is(err, ErrImproperModel) {
 		t.Fatalf("seed 1472: Step err = %v, want ErrImproperModel", err)
 	}
@@ -274,14 +273,11 @@ func TestTransferFunction_DescriptorHigherIndexChain(t *testing.T) {
 			t.Fatalf("%s: IsProper = %v, %v", label, got, err)
 		}
 		res, err := sys.TransferFunction(nil)
-		if !proper {
-			if !errors.Is(err, ErrImproperModel) {
-				t.Fatalf("%s: err = %v, want ErrImproperModel", label, err)
-			}
-			continue
-		}
 		if err != nil {
 			t.Fatalf("%s: %v", label, err)
+		}
+		if res.TF.isProper() != proper {
+			t.Fatalf("%s: tf %v / %v", label, res.TF.Num, res.TF.Den)
 		}
 		for _, s := range []complex128{1i, complex(0.5, 3), 20i} {
 			got, err := res.TF.Eval(s)
