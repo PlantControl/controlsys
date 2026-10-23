@@ -2,7 +2,11 @@ package controlsys
 
 import (
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 func mustPanicAt(t *testing.T, name string, fn func()) {
@@ -91,5 +95,84 @@ func TestSigmaResultAtBounds(t *testing.T) {
 	}
 	for _, c := range [][2]int{{0, 2}, {1, -1}, {len(omega), 0}, {-1, 1}} {
 		mustPanicAt(t, fmt.Sprintf("Sigma At%v", c), func() { s.At(c[0], c[1]) })
+	}
+}
+
+func TestNicholsResultAtBounds(t *testing.T) {
+	omega := []float64{0.1, 1, 10, 100, 1000}
+	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nr, err := sys.Nichols(omega, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := nr.MagDBAt(1, 0, 0), -10*math.Log10(2); math.Abs(got-want) > 1e-12 {
+		t.Errorf("MagDBAt(1,0,0)=%v want %v", got, want)
+	}
+	if got := nr.PhaseAt(1, 0, 0); math.Abs(got+45) > 1e-12 {
+		t.Errorf("PhaseAt(1,0,0)=%v want -45", got)
+	}
+	for _, c := range [][3]int{{0, 0, 1}, {0, 1, 0}, {-1, 0, 1}, {1, -1, 0}, {1, 0, -1}, {len(omega), 0, 0}, {-1, 0, 0}} {
+		mustPanicAt(t, fmt.Sprintf("Nichols MagDBAt%v", c), func() { nr.MagDBAt(c[0], c[1], c[2]) })
+		mustPanicAt(t, fmt.Sprintf("Nichols PhaseAt%v", c), func() { nr.PhaseAt(c[0], c[1], c[2]) })
+	}
+
+	mimo, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 2, []float64{1, 2}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 2, []float64{0, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nm, err := mimo.Nichols(omega, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := nm.MagDBAt(1, 0, 1), 20*math.Log10(math.Sqrt2); math.Abs(got-want) > 1e-12 {
+		t.Errorf("1x2 MagDBAt(1,0,1)=%v want %v", got, want)
+	}
+	mustPanicAt(t, "1x2 Nichols MagDBAt(0,1,0) swapped", func() { nm.MagDBAt(0, 1, 0) })
+	mustPanicAt(t, "1x2 Nichols PhaseAt(0,0,2)", func() { nm.PhaseAt(0, 0, 2) })
+}
+
+func TestFreqRespEstCoherenceAtBounds(t *testing.T) {
+	const steps = 1024
+	rng := rand.New(rand.NewPCG(7, 11))
+	u := mat.NewDense(2, steps, nil)
+	y := mat.NewDense(1, steps, nil)
+	for k := range steps {
+		u0, u1 := rng.NormFloat64(), rng.NormFloat64()
+		u.Set(0, k, u0)
+		u.Set(1, k, u1)
+		y.Set(0, k, 0.6*u0-0.2*u1)
+	}
+	est, err := FreqRespEst(u, y, 0.1, &FreqRespEstOpts{NFFT: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coh, ok := est.Coherence()
+	if !ok {
+		t.Fatal("H1 estimator: no coherence")
+	}
+	nf := len(est.Omega)
+	for k := range nf {
+		for j := range 2 {
+			got, ok := est.CoherenceAt(k, 0, j)
+			if !ok || got != coh[k*2+j] {
+				t.Errorf("CoherenceAt(%d,0,%d)=%v,%v want %v", k, j, got, ok, coh[k*2+j])
+			}
+		}
+	}
+	for _, c := range [][3]int{{0, 1, 0}, {0, 0, 2}, {1, -1, 0}, {1, 0, -1}, {-1, 0, 1}, {nf, 0, 0}} {
+		mustPanicAt(t, fmt.Sprintf("CoherenceAt%v", c), func() { est.CoherenceAt(c[0], c[1], c[2]) })
+	}
+
+	fft, err := FreqRespEst(u, y, 0.1, &FreqRespEstOpts{NFFT: 64, Method: FreqRespEstFFT})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fft.CoherenceAt(0, 0, 0); ok {
+		t.Error("FFT estimator CoherenceAt ok=true")
 	}
 }

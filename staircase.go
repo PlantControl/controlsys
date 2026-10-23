@@ -20,6 +20,9 @@ type staircaseResult struct {
 	T          *mat.Dense
 	NCont      int
 	BlockSizes []int
+	// MinCoupling is the least singular value counted as rank in the
+	// steps after the first (A's subdiagonal blocks); +Inf when none.
+	MinCoupling float64
 }
 
 // controllabilityStaircase reduces (A, B, C) to controllability staircase
@@ -120,12 +123,13 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 
 	if n == 0 || m == 0 {
 		return &staircaseResult{
-			A:          denseCopy(A),
-			B:          denseCopy(B),
-			C:          denseCopy(C),
-			T:          tWork,
-			NCont:      0,
-			BlockSizes: nil,
+			A:           denseCopy(A),
+			B:           denseCopy(B),
+			C:           denseCopy(C),
+			T:           tWork,
+			NCont:       0,
+			BlockSizes:  nil,
+			MinCoupling: math.Inf(1),
 		}, nil
 	}
 
@@ -151,6 +155,7 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 
 	ncont := 0
 	var blockSizes []int
+	minCoupling := math.Inf(1)
 
 	bufSize := n * n
 	if nm := n * m; nm > bufSize {
@@ -194,6 +199,9 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 			break
 		}
 
+		if len(blockSizes) > 0 {
+			minCoupling = math.Min(minCoupling, vals[rank-1])
+		}
 		blockSizes = append(blockSizes, rank)
 
 		uFull.Reset()
@@ -253,11 +261,12 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 	}
 
 	return &staircaseResult{
-		A:          aWork,
-		B:          bWork,
-		C:          cWork,
-		T:          tWork,
-		NCont:      ncont,
-		BlockSizes: blockSizes,
+		A:           aWork,
+		B:           bWork,
+		C:           cWork,
+		T:           tWork,
+		NCont:       ncont,
+		BlockSizes:  blockSizes,
+		MinCoupling: minCoupling,
 	}, nil
 }
