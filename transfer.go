@@ -287,24 +287,26 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 	return pick.result(order), nil
 }
 
-// keepObservable returns the full-order Dgebal conversion in place of c, a
-// conversion in which a row lost states, when c misses the response in the
-// band of its own and of the full one's poles and zeros by more than 1e-6
-// and the full one misses it by 1e3× less. MATLAB tf(ss) takes den = poly(A)
+// keepObservable replaces rows of c, a conversion in which a row lost
+// states, by those of the full-order Dgebal conversion when c misses the
+// response in the band of its own and of the full one's poles and zeros by
+// more than 1e-6 and the full row misses it by 1e3× less. MATLAB tf(ss) takes den = poly(A)
 // after only structural reduction, while the observability cut is by
 // magnitude: the last Hessenberg subdiagonal of a slow companion is an exact
 // product of tiny couplings, which the cut drops with the origin pole and a
 // zero (U3H63X). A truly hidden mode leaves c matching everywhere, so it
 // stays dropped, and the full conversion is only made once c misses in its
 // own band. The default check points sit far above such poles, where the
-// lost state barely shows.
+// lost state barely shows; the band points below them are solved in
+// double-double where GEPP rejects them, and the full conversion takes a
+// row the staircase floor cut directly (see directRowTF) when it can.
 func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConverter, int) {
 	if c.opts.ObservabilityTol != 0 {
 		return c, order
 	}
 	c.trimRows()
 	bd := newBalancedDense(c.sys, c.n, c.m, c.p)
-	if e, ok := sampleTFCheck(bd, bandCheckPoints(c.sys, c.tf.polys()), c.m, c.p).resolvedErr(c.tf); !ok || !(e > 1e-6) {
+	if e, ok := sampleBandCheck(c.sys, bd, bandCheckPoints(c.sys, c.tf.polys()), false).resolvedErr(c.tf); !ok || !(e > 1e-6) {
 		return c, order
 	}
 	full := c.fresh(c.sys)
@@ -314,13 +316,32 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 		return c, order
 	}
 	full.trimRows()
-	ck := sampleTrimCheck(bd, bandCheckPoints(c.sys, append(full.tf.polys(), c.tf.polys()...)), c.m, c.p)
+	ck := sampleBandCheck(c.sys, bd, bandCheckPoints(c.sys, append(full.tf.polys(), c.tf.polys()...)), bd.e == nil)
 	eKept, ok := ck.resolvedErr(c.tf)
 	if !ok || !(eKept > 1e-6) {
 		return c, order
 	}
-	if eFull, _ := ck.resolvedErr(full.tf); eFull <= 1e-3*eKept {
-		return full, fullOrder
+	// Rows are independent, so each takes the full row where that row is
+	// the better one, unless it misses by over 10% a resolved point the kept
+	// row matches to 1e-6: a direct row exact on a graded companion must not
+	// carry along dense rows whose full conversion fixes the response below
+	// the poles but loses it far above them.
+	order = 0
+	for i := range c.p {
+		eK := ck.rowPointErrs(c.tf, i)
+		eF := ck.rowPointErrs(full.tf, i)
+		worstK, worstF, loses := 0.0, 0.0, false
+		for k := range eK {
+			if eK[k] < 0 {
+				continue
+			}
+			worstK, worstF = max(worstK, eK[k]), max(worstF, eF[k])
+			loses = loses || eK[k] <= 1e-6 && !(eF[k] <= 0.1)
+		}
+		if !loses && worstK > 1e-6 && worstF <= 1e-3*worstK {
+			c.tf.Den[i], c.tf.Num[i], c.rows[i] = full.tf.Den[i], full.tf.Num[i], full.rows[i]
+		}
+		order += c.rows[i]
 	}
 	return c, order
 }
@@ -390,10 +411,26 @@ func bandCheckPoints(sys *System, polys [][]float64) []complex128 {
 // resolvedErr is relErr per entry, relative to the entry, over the points
 // where the entry is resolved (sens < 10% of it).
 func (ck tfCheck) resolvedErr(tf *TransferFunc) (worst float64, ok bool) {
+	for _, e := range ck.rowPointErrs(tf, -1) {
+		if e >= 0 {
+			worst, ok = max(worst, e), true
+		}
+	}
+	return worst, ok
+}
+
+// rowPointErrs is resolvedErr per point over output row only, or all rows
+// when row < 0; −1 marks a point resolving no entry.
+func (ck tfCheck) rowPointErrs(tf *TransferFunc, only int) []float64 {
+	out := make([]float64, len(ck.s))
 	for k, s := range ck.s {
 		got := tf.eval(s)
 		m := len(got[0])
+		worst := -1.0
 		for i, row := range got {
+			if only >= 0 && i != only {
+				continue
+			}
 			for j, v := range row {
 				ref := ck.ref[k][i*m+j]
 				scale := max(cmplx.Abs(ref), eps()*ck.mag[k])
@@ -404,11 +441,12 @@ func (ck tfCheck) resolvedErr(tf *TransferFunc) (worst float64, ok bool) {
 				if math.IsNaN(e) {
 					e = math.Inf(1)
 				}
-				worst, ok = max(worst, e), true
+				worst = max(worst, e)
 			}
 		}
+		out[k] = worst
 	}
-	return worst, ok
+	return out
 }
 
 // choose returns the Dgebal or Osborne converter, filled, and its order.
@@ -702,22 +740,36 @@ func trimCheckPoints(sys *System, den []float64) []complex128 {
 }
 
 func sampleTFCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
-	return sampleCheck(bd, pts, m, p, false)
+	return sampleCheck(nil, bd, pts, m, p, false)
 }
 
 // sampleTrimCheck is sampleTFCheck with sens, the trim gate's per-point
 // resolution of the response.
 func sampleTrimCheck(bd *balancedDense, pts []complex128, m, p int) tfCheck {
-	return sampleCheck(bd, pts, m, p, bd.e == nil)
+	return sampleCheck(nil, bd, pts, m, p, bd.e == nil)
 }
 
-func sampleCheck(bd *balancedDense, pts []complex128, m, p int, sens bool) tfCheck {
+// sampleBandCheck is sampleCheck of sys with the double-double fallback,
+// as EvalFr: on a slow graded companion evalInto's normwise pivot test
+// rejects every band point below the poles, where a cut origin pole shows
+// (YY7Z5C).
+func sampleBandCheck(sys *System, bd *balancedDense, pts []complex128, sens bool) tfCheck {
+	return sampleCheck(sys, bd, pts, bd.m, bd.p, sens)
+}
+
+// sampleCheck samples bd at pts; with sys set, a point evalInto rejects as
+// singular is solved in double-double instead of skipped.
+func sampleCheck(sys *System, bd *balancedDense, pts []complex128, m, p int, sens bool) tfCheck {
 	var ck tfCheck
 	var sw *sensWork
 	for _, s := range pts {
 		dst := make([]complex128, p*m)
-		if bd.evalInto(pointAt(s), dst) != nil {
-			continue
+		fallback := false
+		if err := bd.evalInto(pointAt(s), dst); err != nil {
+			if sys == nil || !errors.Is(err, errSingularPencil) || !ddResponseInto(sys, pointAt(s), dst) || finiteResponse(dst) != nil {
+				continue
+			}
+			fallback = true
 		}
 		mag := 0.0
 		for _, v := range dst {
@@ -731,10 +783,35 @@ func sampleCheck(bd *balancedDense, pts []complex128, m, p int, sens bool) tfChe
 			if sw == nil {
 				sw = newSensWork(bd.n, m, p)
 			}
-			ck.sens = append(ck.sens, sw.bound(bd, s))
+			var b []float64
+			if !fallback || sw.solveX(bd, s) {
+				b = sw.bound(bd, s)
+			}
+			ck.sens = append(ck.sens, b)
 		}
 	}
 	return ck
+}
+
+// solveX sets bd.x to (sI−Â)⁻¹B̂ by GEPP without evalInto's pivot test, for
+// bound at a point evalInto rejected; it reports false on an exactly
+// singular pencil.
+func (sw *sensWork) solveX(bd *balancedDense, s complex128) bool {
+	n, m := bd.n, bd.m
+	for i, v := range bd.a {
+		sw.lu[i] = complex(-v, 0)
+	}
+	for i := range n {
+		sw.lu[i*n+i] += s
+	}
+	if !cLUFactor(sw.lu, sw.piv, n) {
+		return false
+	}
+	for i, v := range bd.b[:n*m] {
+		bd.x[i] = complex(v, 0)
+	}
+	cLUSolve(sw.lu, sw.piv, bd.x, n, m)
+	return true
 }
 
 type sensWork struct {
@@ -1001,9 +1078,13 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 		if nobs > 0 {
 			bhData = ws.cData
 		}
-		if nobs == c.n && !c.noDirect {
+		stride := ncont
+		// The full-order candidate of keepObservable also takes the direct
+		// row where the staircase floor cut a graded companion's coupling.
+		if (nobs == c.n || c.keepObs) && !c.noDirect {
 			if dDen, dNums, dbh, ok := directRowTF(a, b, cm, i, c.n, c.m, inExp, outExp[i]); ok {
 				den, numCoeffs, bhData = dDen, dNums, dbh
+				nobs, stride = c.n, c.n
 				direct++
 			}
 		}
@@ -1027,8 +1108,8 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 				return Poly(num).Add(Poly(den).Scale(dij))
 			}
 			var bh []float64
-			if j*ncont < len(bhData) {
-				bh = bhData[j*ncont : j*ncont+nobs]
+			if j*stride < len(bhData) {
+				bh = bhData[j*stride : j*stride+nobs]
 			}
 			c.trims[i*c.m+j] = nil
 			if cands := markov.trim(i, j, nobs, numCoeffs[j], bh); len(cands) > 1 || len(cands[0]) != len(numCoeffs[j]) {
