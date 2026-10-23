@@ -449,14 +449,29 @@ func allZeroVec(v *mat.VecDense) bool {
 // the ordered QZ form and a generalized Sylvester decoupling; the algebraic
 // part x_∞ = −Σ N^k A_∞⁻¹ B_∞ s^k (N = A_∞⁻¹E_∞ nilpotent) must reduce to the
 // static term −C_∞ A_∞⁻¹ B_∞, which joins D. Otherwise the model is improper
-// (non-causal in discrete time) and ErrImproperModel is returned. Entries of
-// E_∞ below the finite/infinite threshold are rounding noise and are zeroed
-// so index-1 parts give N = 0 exactly. QZ resolves an infinite Jordan chain
+// (non-causal in discrete time) and ErrImproperModel is returned; IsProper
+// decides by the same test. Entries of E_∞ below the finite/infinite
+// threshold are rounding noise and are zeroed so index-1 parts give N = 0
+// exactly. QZ resolves an infinite Jordan chain
 // only to |β|/|α| ~ ε^(1/k); when it fails or keeps a large eigenvalue and
 // the staircase (deflateInfinite) counts the finite ones differently, the
 // split is taken from the deflated pencil instead. Internal
 // delay channels are reduced together with the I/O channels.
 func (sys *System) properExplicitForm() (*System, error) {
+	out, err := sys.weierstrassReduce()
+	if err != nil {
+		return nil, err
+	}
+	if n, _, _ := out.Dims(); n == 0 {
+		_, m, p := sys.Dims()
+		if err := storableStaticGain("descriptor has no dynamic states", p, m); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (sys *System) weierstrassReduce() (*System, error) {
 	n, m, p := sys.Dims()
 	q := sys.internalDelayCount()
 	mi, pi := max(m+q, 1), max(p+q, 1)
@@ -508,11 +523,6 @@ func (sys *System) properExplicitForm() (*System, error) {
 		return nil, fmt.Errorf("generalized Schur decomposition failed: %w", ErrDescriptorSingular)
 	}
 	ni := n - nf
-	if nf == 0 {
-		if err := storableStaticGain("descriptor has no dynamic states", p, m); err != nil {
-			return nil, err
-		}
-	}
 
 	Q := mat.NewDense(n, n, vsl)
 	Z := mat.NewDense(n, n, vsr)
@@ -566,7 +576,7 @@ func (sys *System) properExplicitForm() (*System, error) {
 		if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
 			return nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
-		if !algebraicPartStatic(c2, &nilpotent, &b, cScale, bScale) {
+		if !algebraicPartStatic(c2, &nilpotent, &b, cScale, bScale, n) {
 			return nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 		}
 		var cb mat.Dense
@@ -609,10 +619,12 @@ func (sys *System) properExplicitForm() (*System, error) {
 
 // algebraicPartStatic reports whether c·N^k·b vanishes for k ≥ 1, i.e. the
 // algebraic part contributes no polynomial (impulsive or anticipative) term.
-// cScale and bScale are the data scales of c and b, ‖C‖ and ‖B‖/‖A∞‖:
-// an impulsive mode that is unobservable or uncontrollable leaves c or b at
-// rounding level, which must not set the bound itself.
-func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale float64) bool {
+// A term vanishes only at rounding level, 1e3·n·ε of ‖c‖‖N‖^k‖b‖; a fixed
+// relative cut such as 1e-8 drops real s-terms that are small beside the
+// largest C or B entry. cScale and bScale are the data scales of c and b,
+// ‖C‖ and ‖B‖/‖A∞‖: an impulsive mode that is unobservable or uncontrollable
+// leaves c or b at rounding level, which must not set the bound itself.
+func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale float64, n int) bool {
 	ni, _ := nilpotent.Dims()
 	nNorm := denseNorm(nilpotent)
 	v := mat.DenseCopyOf(b)
@@ -623,7 +635,7 @@ func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale float64) boo
 		v.Copy(&next)
 		bound *= nNorm
 		term.Mul(c, v)
-		if denseNorm(&term) > 1e-8*bound {
+		if denseNorm(&term) > 1e3*float64(n)*eps()*bound {
 			return false
 		}
 	}

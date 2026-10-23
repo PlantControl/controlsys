@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -1501,9 +1502,11 @@ func (tf *TransferFunc) stateSpace() (*StateSpaceResult, error) {
 // IsProper reports whether the delay-free part of sys, including internal
 // delay channels, is proper, as MATLAB isproper. Explicit models always are;
 // a descriptor model is proper iff its infinite eigenvalues are all
-// nondynamic. A singular pencil (A, E), for which properness is undefined,
-// returns ErrDescriptorSingular, and a numerical failure deciding it returns
-// an error rather than false. See
+// nondynamic. The decision is the Weierstrass reduction Step and
+// TransferFunction use, so they agree; s^k coefficients at rounding level
+// count as zero. A singular pencil (A, E), for which properness is
+// undefined, returns ErrDescriptorSingular, and a numerical failure deciding
+// it returns an error rather than false. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.isproper.html.
 func (sys *System) IsProper() (bool, error) {
 	if err := requireFiniteSystem("IsProper", sys); err != nil {
@@ -1530,49 +1533,16 @@ func (sys *System) isProper() (bool, error) {
 	if m+N == 0 || p+N == 0 {
 		return true, nil
 	}
-	F, ok := regularDescriptorShift(sys.A, sys.E, n)
-	if !ok {
+	if _, ok := regularDescriptorShift(sys.A, sys.E, n); !ok {
 		return false, fmt.Errorf("pencil (A, E) is singular: %w", ErrDescriptorSingular)
 	}
-	B := newDense(n, m+N)
-	C := newDense(p+N, n)
-	setBlock(B, 0, 0, sys.B)
-	setBlock(C, 0, 0, sys.C)
-	if N > 0 {
-		setBlock(B, 0, m, sys.LFT.B2)
-		setBlock(C, p, 0, sys.LFT.C2)
-	}
-	var K, Fb mat.Dense
-	if F.SolveTo(&K, false, sys.E) != nil || F.SolveTo(&Fb, false, B) != nil {
-		return false, fmt.Errorf("shifted pencil A-σE is singular: %w", ErrSingularTransform)
-	}
-	// With F = A-σE, K = F⁻¹E and ν = 1/(s-σ):
-	// G(s) = D - ν·C(νI-K)⁻¹F⁻¹B, so G is proper iff that transfer has at
-	// most a simple pole at ν = 0, i.e. K's zero eigenvalue is semisimple
-	// in a minimal realization.
-	aux, err := New(&K, &Fb, C, newDense(p+N, m+N), 0)
-	if err != nil {
+	if _, err := sys.weierstrassReduce(); err != nil {
+		if errors.Is(err, ErrImproperModel) {
+			return false, nil
+		}
 		return false, err
 	}
-	red, err := aux.Reduce(nil)
-	if err != nil {
-		return false, err
-	}
-	if red.Order == 0 {
-		return true, nil
-	}
-	Kr := red.Sys.A
-	var K2 mat.Dense
-	K2.Mul(Kr, Kr)
-	r1, err := numericRank(Kr)
-	if err != nil {
-		return false, err
-	}
-	r2, err := numericRank(&K2)
-	if err != nil {
-		return false, err
-	}
-	return r1 == r2, nil
+	return true, nil
 }
 
 func regularDescriptorShift(A, E *mat.Dense, n int) (*mat.LU, bool) {
@@ -1592,26 +1562,6 @@ func regularDescriptorShift(A, E *mat.Dense, n int) (*mat.LU, bool) {
 		return nil, false
 	}
 	return best, true
-}
-
-func numericRank(M *mat.Dense) (int, error) {
-	var svd mat.SVD
-	if !svd.Factorize(M, mat.SVDNone) {
-		return 0, fmt.Errorf("SVD did not converge: %w", ErrSchurFailed)
-	}
-	sv := svd.Values(nil)
-	if len(sv) == 0 || sv[0] == 0 {
-		return 0, nil
-	}
-	r, c := M.Dims()
-	tol := float64(max(r, c)) * 1e3 * eps() * sv[0]
-	rank := 0
-	for _, v := range sv {
-		if v > tol {
-			rank++
-		}
-	}
-	return rank, nil
 }
 
 // IsProper reports whether every channel's numerator degree is at most its

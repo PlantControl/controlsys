@@ -235,7 +235,9 @@ func TestStabsep_StiffPoleBesideIndexTwoChain(t *testing.T) {
 // fit. The infinite structure is now deflated (staircase) when it disagrees
 // with QZ. The sweep: chains of length ≥ 2 driven beyond their kernel
 // state are improper (ErrImproperModel); driven only at it they are proper
-// and TransferFunction matches the structured model (oracle).
+// and TransferFunction matches the structured model (oracle). IsProper
+// agrees; its former minimal-realization rank test called seed 54 (chains
+// [3 1], driven at the kernel) improper.
 func TestTransferFunction_DescriptorHigherIndexChain(t *testing.T) {
 	A := mat.NewDense(5, 5, []float64{1.6845448672194017, 6.2677246894560765, -7.904169090011227, -7.527371794454999, -0.9747958955559203,
 		-6.921228232067118, 7.387288301665237, 1.631139568049228, -2.370924674068633, -4.1463663476005514,
@@ -268,6 +270,9 @@ func TestTransferFunction_DescriptorHigherIndexChain(t *testing.T) {
 		proper := seed%2 == 0
 		sys, oracle, _ := chainDescriptor(t, rng, nf, chains, 0, proper)
 		label := fmt.Sprintf("seed %d chains %v proper %v", seed, chains, proper)
+		if got, err := sys.IsProper(); err != nil || got != proper {
+			t.Fatalf("%s: IsProper = %v, %v", label, got, err)
+		}
 		res, err := sys.TransferFunction(nil)
 		if !proper {
 			if !errors.Is(err, ErrImproperModel) {

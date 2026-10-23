@@ -67,6 +67,9 @@ func TestDescriptorProperClosedLoopIdealPD(t *testing.T) {
 		return (complex(kd, 0)*s + complex(kp, 0)) / (s*s + complex(kd-1, 0)*s + complex(kp, 0))
 	}
 	for name, sys := range map[string]*System{"cl": cl, "transpose": transposeDescriptor(t, cl)} {
+		if proper, err := sys.IsProper(); err != nil || !proper {
+			t.Fatalf("%s: IsProper = %v, %v, want true", name, proper, err)
+		}
 		got, err := Step(sys, 3)
 		if err != nil {
 			t.Fatalf("%s: Step: %v", name, err)
@@ -122,6 +125,75 @@ func TestDescriptorObservableDerivativeStaysImproper(t *testing.T) {
 			}
 			if _, err := sys.TransferFunction(nil); !errors.Is(err, ErrImproperModel) || !errors.Is(err, ErrDescriptorUnsupported) {
 				t.Errorf("Kd %g %s: TransferFunction err = %v, want ErrImproperModel", kd, name, err)
+			}
+		}
+	}
+}
+
+func smallDerivativeDescriptor(t *testing.T, c *mat.Dense) *System {
+	t.Helper()
+	p, _ := c.Dims()
+	sys, err := NewDescriptor(mat.NewDense(3, 3, []float64{-1, 0, 0, 0, 1, 0, 0, 0, 1}), mat.NewDense(3, 1, []float64{1, 0, -1}), c, mat.NewDense(p, 1, nil), mat.NewDense(3, 3, []float64{1, 0, 0, 0, 0, 1, 0, 0, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// Review of RMGVA3: y = c1/(s+1)·u + kd·s·u with kd ≤ 1e-8·c1 passed the
+// 1e-8-relative impulse test, so Step and TransferFunction dropped kd·s
+// (TF(1e6j) = −0.001i, EvalFr +0.999i) while IsProper reported false. Base
+// and MATLAB step reject them. The test is now rounding level and IsProper
+// uses it, so all three agree; a 1e-15 s-term is rounding noise.
+func TestDescriptorSmallDerivativeStaysImproper(t *testing.T) {
+	cases := []struct {
+		name   string
+		c      *mat.Dense
+		proper bool
+	}{
+		{"c1=1e3 kd=1e-6", mat.NewDense(1, 3, []float64{1e3, 1e-6, 0}), false},
+		{"c1=1e2 kd=1e-6", mat.NewDense(1, 3, []float64{1e2, 1e-6, 0}), false},
+		{"c1=1 kd=1e-9", mat.NewDense(1, 3, []float64{1, 1e-9, 0}), false},
+		{"c1=1e4 kd=1e-5", mat.NewDense(1, 3, []float64{1e4, 1e-5, 0}), false},
+		{"c1=1 kd=1e-11", mat.NewDense(1, 3, []float64{1, 1e-11, 0}), false},
+		{"two outputs", mat.NewDense(2, 3, []float64{1e4, 0, 0, 0, 1e-5, 0}), false},
+		{"c1=1 kd=1e-15", mat.NewDense(1, 3, []float64{1, 1e-15, 0}), true},
+	}
+	for _, tc := range cases {
+		sys := smallDerivativeDescriptor(t, tc.c)
+		for name, s := range map[string]*System{"sys": sys, "transpose": transposeDescriptor(t, sys)} {
+			label := tc.name + " " + name
+			proper, err := s.IsProper()
+			if err != nil {
+				t.Fatalf("%s: IsProper: %v", label, err)
+			}
+			if proper != tc.proper {
+				t.Errorf("%s: IsProper = %v, want %v", label, proper, tc.proper)
+			}
+			_, stepErr := Step(s, 1)
+			res, tfErr := s.TransferFunction(nil)
+			if (stepErr == nil) != proper || (tfErr == nil) != proper {
+				t.Errorf("%s: IsProper %v but Step err %v, TransferFunction err %v", label, proper, stepErr, tfErr)
+			}
+			if !tc.proper {
+				if !errors.Is(stepErr, ErrImproperModel) {
+					t.Errorf("%s: Step err = %v, want ErrImproperModel", label, stepErr)
+				}
+				if !errors.Is(tfErr, ErrImproperModel) || !errors.Is(tfErr, ErrDescriptorUnsupported) {
+					t.Errorf("%s: TransferFunction err = %v, want ErrImproperModel", label, tfErr)
+				}
+				continue
+			}
+			if tfErr != nil {
+				continue
+			}
+			for _, w := range []float64{0, 1, 1e3} {
+				z := complex(0, w)
+				got := polyEvalC(res.TF.Num[0][0], z) / polyEvalC(res.TF.Den[0], z)
+				want := 1 / (z + 1)
+				if cmplx.Abs(got-want) > 1e-12 {
+					t.Errorf("%s: tf(%gj) = %v, want %v", label, w, got, want)
+				}
 			}
 		}
 	}
