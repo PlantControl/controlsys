@@ -143,10 +143,6 @@ func TestDescriptorSystem_UnsupportedOperationsRejectExplicitly(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{name: "TransferFunction", run: func() error {
-			_, err := sys.TransferFunction(nil)
-			return err
-		}},
 		{name: "Inv", run: func() error {
 			_, err := Inv(sys)
 			return err
@@ -159,6 +155,18 @@ func TestDescriptorSystem_UnsupportedOperationsRejectExplicitly(t *testing.T) {
 				t.Fatalf("got %v, want ErrDescriptorUnsupported", err)
 			}
 		})
+	}
+
+	res, err := sys.TransferFunction(nil)
+	if err != nil {
+		t.Fatalf("TransferFunction: %v", err)
+	}
+	for _, s := range []complex128{0, 1i, 2 + 3i} {
+		got := polyEvalC(res.TF.Num[0][0], s) / polyEvalC(res.TF.Den[0], s)
+		want := (0.5*s + 1.5) / (s*s + 3.5*s + 1)
+		if cmplx.Abs(got-want) > 1e-14*cmplx.Abs(want) {
+			t.Errorf("tf(%v) = %v, want %v", s, got, want)
+		}
 	}
 }
 
