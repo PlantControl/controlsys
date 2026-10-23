@@ -621,22 +621,26 @@ func TestDare_NearCircleZeroCostMode(t *testing.T) {
 	}
 }
 
-// TestDare_SteinSingularRescue (FD55OF #7): zero-cost uncontrollable modes
-// at 1 − δ and 1 − δ ± iε, the pair a non-normal block (t₁₂ ≫ t₂₁), stay
-// in the closed loop. Unscaled, the Stein equation of the first Hewer
-// step couples the real mode with the pair through a Kronecker block of
-// pivot ((2δ)² + ε²)/t₁₂ below eps·t₁₂, so it is singular: dare keeps
-// the pencil X as the Lyapunov-singular candidate (Accuracy 1, step +Inf).
-// The 256-bit Hewer oracle shows that candidate inaccurate (off by 1e-5
-// to 3e-3 relative here, by 1e2 at δ = 1e-8, its X₁₁ held only by the
-// residual); Dare's retry in the scaled mode, whose balancing makes the
-// pair normal, certifies an X accurate to the oracle, and is what both
-// modes return.
+// TestDare_SteinSingularRescue (FD55OF #7, 75DTNG): zero-cost
+// uncontrollable modes at 1 − δ and 1 − δ ± iε, the pair a non-normal
+// block (t₁₂ ≫ t₂₁), stay in the closed loop. Unscaled, the Stein
+// equation of the first Hewer step couples the real mode with the pair
+// through a Kronecker block whose unbalanced entries (t₁₂ against
+// ε²/t₁₂) tripped Dgetc2's pivot test, so dare kept the pencil X as the
+// Lyapunov-singular candidate (Accuracy 1, step +Inf), off by 1e-5 to
+// 3e-3 relative in the first three cases and by 99 and 190 in the last
+// two (its X₁₁ held only by the residual) against the 256-bit Hewer
+// oracle. DLyap now balances that block as it does a diagonal 2×2 block,
+// the Stein solve succeeds, and Newton refines the unscaled X to a
+// certified one or, failing that, reports a finite step that shows its
+// error; both public modes return an X accurate to the oracle.
 func TestDare_SteinSingularRescue(t *testing.T) {
 	cases := []struct{ t12, delta, eps2 float64 }{
 		{64, 1e-10, 1.92e-13},
 		{256, 1e-10, 7.68e-12},
 		{256, 1e-9, 7.68e-12},
+		{64, 1e-8, 6.4e-13},
+		{1024, 1e-8, 1.024e-11},
 	}
 	const r = 0.8
 	for _, tc := range cases {
@@ -658,8 +662,17 @@ func TestDare_SteinSingularRescue(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unscaled dare: %v", err)
 			}
-			if cand.Accuracy != 1 || !math.IsInf(cand.step, 1) {
-				t.Errorf("unscaled dare: Accuracy %d, step %g; want the Lyapunov-singular candidate (1, +Inf)", cand.Accuracy, cand.step)
+			Xc := bigRiccatiNewton(t, false, A, B, Q, r, cand.X)
+			var dc mat.Dense
+			dc.Sub(cand.X, Xc)
+			rel := mat.Norm(&dc, 2) / mat.Norm(Xc, 2)
+			switch {
+			case cand.Accuracy == 0 && !(rel <= 1e-9):
+				t.Errorf("unscaled dare: certified X off by %.3g", rel)
+			case cand.Accuracy != 0 && !(cand.step >= math.Min(rel, 1)/10 && !math.IsInf(cand.step, 1)):
+				// The 1024 case's unscaled pencil X is off by 17 under amd64
+				// rounding and Newton does not converge from it.
+				t.Errorf("unscaled dare: Accuracy %d, step %g for an X off by %.3g; want a certified X or a step that shows its error", cand.Accuracy, cand.step, rel)
 			}
 			for _, ns := range []bool{false, true} {
 				res, err := Dare(A, B, Q, R, &RiccatiOpts{NoScaling: ns})
