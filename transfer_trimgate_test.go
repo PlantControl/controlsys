@@ -208,6 +208,7 @@ func trimGatePlant(rng *rand.Rand) *System {
 }
 
 func TestTransferFunctionTrimGateFastModeSweep(t *testing.T) {
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(17, 4))
 	for trial := range 300 {
 		sys := trimGatePlant(rng)

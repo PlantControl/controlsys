@@ -53,6 +53,7 @@ func pidDelayedLag(t *testing.T, a, tau float64) *System {
 // moved crossovers, and the floor bands together. Evidence.Evaluations
 // counts all of them.
 func TestTunePIDEvaluationBudgetPerSearch(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		name   string
 		plant  *System
@@ -109,6 +110,7 @@ func TestTunePIDFloorSkipsUnreachableBands(t *testing.T) {
 // |S| bound by more as the margin rises, so the floor stops after the first
 // bands rather than searching all of them.
 func TestTunePIDFloorStopsWhenSensitivityWorsens(t *testing.T) {
+	skipSlowUnderRace(t)
 	_, ev, searches, err := pidTuneCounted(t, pidDelayedLag(t, 10, .3), PidtunePDF, PIDTuningOptions{})
 	if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 		t.Fatalf("err %v", err)

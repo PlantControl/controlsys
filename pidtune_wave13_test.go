@@ -59,6 +59,7 @@ func TestPidtuneRaisedCrossoverMeetsBar(t *testing.T) {
 // log grid gives an oracle-stable loop with 58.5° at every crossover and
 // |S| ≤ 4.
 func TestPidtuneZeroDCUnstablePUnattainable(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct{ num, den Poly }{
 		{Poly{0.799670298477293, 0, 0}, Poly{1, -1.5732586048745847, -0.7058774442032956}},
 		{Poly{0.058830338909354074, 0, 0}, Poly{1, -0.7250580809031377, -0.2552994670450437}},
@@ -97,6 +98,7 @@ func TestPidtuneZeroDCUnstablePUnattainable(t *testing.T) {
 // float64 Horner on den loses |G| below ω ≈ 1e-4 (I: 307 spurious crossovers,
 // |S| 232; true PM 58.7°, |S| 1.36).
 func TestPidtuneDisplacedIntegratorMeetsBar(t *testing.T) {
+	skipSlowUnderRace(t)
 	num := Poly{1.8748015424080903e-16}
 	den := Poly{1, -6.656527066165689, 18.974082402962605, -30.020939359334676, 28.473509438245436, -16.187809823253666, 5.1075991528389695, -0.6899147452929796}
 	const dt = 0.1

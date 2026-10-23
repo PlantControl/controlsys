@@ -155,6 +155,7 @@ func lsqChannel(t *testing.T, sys *System, i, j int) *System {
 }
 
 func TestLeastSquaresHighOrderSources(t *testing.T) {
+	skipSlowUnderRace(t)
 	const dt, order = .05, 20
 	tests := []struct {
 		name                      string
@@ -344,6 +345,7 @@ func TestLeastSquaresIntegratorCount(t *testing.T) {
 }
 
 func TestLeastSquaresDenseSweepSourceN100(t *testing.T) {
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(100, uint64(sweepDense)))
 	source, _ := randomSweepRealization(rng, sweepDense, 0, false, 100, 1, 1)
 	_, result, err := source.C2DFit(.05, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 8})

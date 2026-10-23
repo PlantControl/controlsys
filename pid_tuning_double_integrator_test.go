@@ -62,6 +62,7 @@ func TestTunePIDFreePDoubleIntegratorMovesToLeadPoint(t *testing.T) {
 // target unattainable. Before the fix a share returned the floor sample's
 // nonfinite-response or singular-matrix error.
 func TestTunePIDFreePDoubleIntegratorSweep(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(53, 59))
 	designs := 0

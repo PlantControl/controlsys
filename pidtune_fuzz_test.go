@@ -928,6 +928,7 @@ func TestFzPidOracles(t *testing.T) {
 // TestFzPidRepros runs the fuzz oracles over closed PID task repros
 // lifted from the pidtune regression tests (source noted per row).
 func TestFzPidRepros(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	for i, c := range []struct {
 		f         PidtuneType

@@ -12,6 +12,7 @@ import (
 // past the oracle range that G attains at the reported ω; IsStable agrees
 // with the dyadic twin, exactly commensurate.
 func TestHinfNormRoundedMultipleSweep(t *testing.T) {
+	skipSlowUnderRace(t)
 	seeds := 200
 	if testing.Short() {
 		seeds = 40

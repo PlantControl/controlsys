@@ -23,6 +23,7 @@ func originZeroPlant(t *testing.T, sign, eps, tau float64) *System {
 // An integrator cancelling the plant zero at s = 0 leaves a closed-loop pole
 // at the origin that the delay Nyquist test cannot see (G4YFOH).
 func TestPIDTuningDelayOriginZeroRejected(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, eps := range []float64{1e-8, 1e-7} {
 		for _, sign := range []float64{1, -1} {
 			p := originZeroPlant(t, sign, eps, .5)
@@ -125,6 +126,7 @@ func TestPIDTuningDelayNearOriginZeroTunes(t *testing.T) {
 // A slow zero under a fast pole is not cancelled; the spread must not trip
 // the origin test.
 func TestPIDTuningDelaySlowZeroFastPoleTunes(t *testing.T) {
+	skipSlowUnderRace(t)
 	p := makePlant(t, []float64{1, 1e-4}, []float64{1, 1e6 + 1, 1e6})
 	if err := p.SetInputDelay([]float64{.5}); err != nil {
 		t.Fatal(err)

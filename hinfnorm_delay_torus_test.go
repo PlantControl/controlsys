@@ -115,6 +115,7 @@ func lftGInf2(c lftCase, p, q float64) float64 {
 // above the torus sup from an independent grid search, where the limit used
 // to be left unsupported.
 func TestHinfNormTorusFinitePeakPastLimit(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range torusPeakCases {
 		t.Run(c.name, func(t *testing.T) {
 			sys := c.system(t)
@@ -150,6 +151,7 @@ func TestHinfNormTorusFinitePeakPastLimit(t *testing.T) {
 // κ < 0 and above every finite peak (dense ω scan), so HinfNorm reports it
 // at ω = +Inf, where it used to give up.
 func TestHinfNormTorusFixedPointLimit(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range expansionFinite {
 		sys, gain, _ := feedthroughDifferenceLoop(t, c.d22, c.d12, c.d21, []float64{c.h, math.Sqrt2 * c.h}, [2]float64{1, 1})
 		e, err := newDelayLFT(sys)

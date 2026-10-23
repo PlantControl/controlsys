@@ -58,6 +58,7 @@ func TestDelayNyquistTinyRealPolesAtOrigin(t *testing.T) {
 // the RHP pole at 1.3e-7, beside which the walk then fails. Oracles:
 // argument principle on χ and a dense sweep of |T| and |S-1/2|.
 func TestDelayNyquistTinyRealPolesDDCircles(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []quasiLoop{
 		{num: []float64{1.1248828988699036, 5.337591591109049, 7.966020292280976, 3.9251826905697533, 0.16739720620721268, 0.0017474023654776626}, den: []float64{1, 0.004586181042618237, -1.0902408236859952e-08, -2.02597355493661e-17, 0, 0, 0}, tau: 0.1456899273039475},
 		{num: []float64{7.428774737994522, 27.535483143910717, 26.496350076689353, 9.510730545180923, 1.1303308497133764, 0.004373771149703272}, den: []float64{1, 0.006386411776610228, 3.0129825054035514e-08, 1.2921688426134479e-17, 0, 0, 0}, tau: 0.025221635624798323},

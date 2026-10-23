@@ -97,6 +97,7 @@ func delayResonanceLoop(t *testing.T, tau []float64, kr float64, c, d []float64)
 // the 4 of one phase per delay, so a resonance peaking between the two is
 // certified as the norm.
 func TestHinfNormPartlyCommensurateDelays(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, tc := range []struct {
 		name   string
 		kr     float64
@@ -373,6 +374,7 @@ func TestHinfNormLargeMultipleClass(t *testing.T) {
 // cells when several classes hold a large multiple: τ = h_c·(1, 63) for
 // h = (1, √2/2, √3/2), the last two rounded to 30 bits so 63·h_c is exact.
 func TestHinfNormManyLargeMultipleClasses(t *testing.T) {
+	skipSlowUnderRace(t)
 	h1 := math.Ldexp(math.Round(math.Ldexp(math.Sqrt2/2, 30)), -30)
 	h2 := math.Ldexp(math.Round(math.Ldexp(math.Sqrt(3)/2, 30)), -30)
 	tau := []float64{1, 63, h1, 63 * h1, h2, 63 * h2}

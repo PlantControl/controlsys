@@ -647,6 +647,7 @@ func refHFBelow(h *highFrequencyGain, level float64, budget int) bool {
 // reference sweep pruning by lip alone in no more samples, or certifies a
 // level the reference certifies given a larger budget.
 func TestHighFrequencyGainMatchesReference(t *testing.T) {
+	skipSlowUnderRace(t)
 	mimo1, _ := mimoDelayedSensitivity(t, 1)
 	mimo2, _ := mimoDelayedSensitivity(t, 1.8)
 	for _, tc := range []struct {

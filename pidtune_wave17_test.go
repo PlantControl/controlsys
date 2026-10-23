@@ -22,6 +22,7 @@ import (
 // the continuous two. Oracle: the best smallest margin over a (K, Td) grid of
 // loops stable by companion-matrix closed-loop roots.
 func TestPidtuneFilteredPDUnattainable(t *testing.T) {
+	skipSlowUnderRace(t)
 	if best := pidtuneFamilyBestMargin(t, Poly{1}, Poly{1, -1}, 0, pidtuneOracleP); !(best > 58.5) {
 		t.Fatalf("oracle: P on 1/(s−1) reaches %.2f°, want ≈ 90°", best)
 	}

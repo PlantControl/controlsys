@@ -46,6 +46,12 @@ func (l sampledResponseLayout) blockOffset(freq int) int {
 	return freq * l.p * l.m
 }
 
+func checkResponseIndex(method string, freq, output, input, nFreq, p, m int) {
+	if freq < 0 || freq >= nFreq || output < 0 || output >= p || input < 0 || input >= m {
+		panic(fmt.Sprintf("controlsys: %s(%d, %d, %d) index out of range [%d freqs, %dx%d]", method, freq, output, input, nFreq, p, m))
+	}
+}
+
 func (r sampledComplexResponse) offset(freq, output, input int) int {
 	return r.layout.offset(freq, output, input)
 }

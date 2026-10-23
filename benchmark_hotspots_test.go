@@ -51,6 +51,7 @@ func benchSysNonSym(tb testing.TB, n, m, p int) *System {
 }
 
 func TestBenchSysNonSymStable(t *testing.T) {
+	skipSlowUnderRace(t)
 	for n := 1; n <= 200; n++ {
 		sys := benchSysNonSym(t, n, 2, 2)
 		if n > 1 && mat.Equal(sys.A, sys.A.T()) {

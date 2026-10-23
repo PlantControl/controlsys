@@ -20,6 +20,7 @@ import (
 // from −1 measured either way round, |S| <= 4, and no net turn of
 // arg(1+L(jω)), as the stable plant has no integrator.
 func TestTunePIDKeepsCrossingFarFromMinusOne(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		name     string
 		num, den []float64

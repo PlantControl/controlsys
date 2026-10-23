@@ -62,6 +62,7 @@ func TestPIDStabilityScreenRejectsUnstable(t *testing.T) {
 // Every Pidtune design on the TAUEF7, 5BV36Q and LHSHE7 plants must be
 // stable by the exact test or fail with ErrPIDTuningTargetUnattainable.
 func TestPidtuneBadlyScaledLoopsStable(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		num, den Poly
 	}{

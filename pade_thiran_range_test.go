@@ -120,6 +120,7 @@ func exactThiranCoeffs(D float64, N int) []*big.Float {
 }
 
 func TestThiranCoeffsMatchClosedForm(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		D float64
 		N int

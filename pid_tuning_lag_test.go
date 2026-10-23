@@ -20,6 +20,7 @@ import (
 // |L| > 1 at high frequency against the 20-sample delay. Oracle: exact
 // Schur–Cohn on (D·z + CB)/((z−a)·z^20).
 func TestPIDStabilityScreenIdealDelayAbsorbed(t *testing.T) {
+	skipSlowUnderRace(t)
 	const a, b, c, d = 3.720075976020836e-44, -0.9667981925794609, -0.8568887533689471, 57.7675665396686
 	const lag = 20
 	num, den := Poly{d, c*b - d*a}, Poly{1, -a}
@@ -101,6 +102,7 @@ func TestPIDStabilityScreenIdealIP3XICUnit(t *testing.T) {
 // it certified unstable PD/PID designs as closed-loop-poles stable and
 // rejected stable ones (#3018). Oracle: exact Schur–Cohn with z^lag.
 func TestPIDStabilityScreenIdealDelayTinyPoles(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, tc := range []struct {
 		name     string
 		dt       float64
@@ -175,6 +177,8 @@ func TestPIDTuningIdealStableCollapsedTransfer(t *testing.T) {
 // transfer function is not consulted, so its failure does not matter.
 // Oracle: exact Schur–Cohn with z^70.
 func TestPIDTuningIdealStableCollapsedTransferLongLag(t *testing.T) {
+	t.Parallel()
+	skipSlowUnderRace(t)
 	const dt, lag = 0.1, 70
 	num, den := Poly{0.05508874359571571, 1.4671058437019866, -0.6931435149725129}, Poly{1, 2.0625805448700525e-30, 4.842253744153856e-61}
 	plant := pidtuneBackoffPlant(t, num, den, dt, 0)

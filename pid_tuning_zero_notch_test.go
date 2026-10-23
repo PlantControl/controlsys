@@ -51,6 +51,7 @@ func routhStable(p []float64) bool {
 // over [1e-4·wc, 1e4·wc] for every 0 dB crossing and the |S| peak, and,
 // without delay, Routh on den·s(Tf·s+1) + num·((Kd+Kp·Tf)s² + (Kp+Ki·Tf)s + Ki).
 func TestTunePIDZeroNotchBelowBand(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		num, den []float64
 		tau      float64

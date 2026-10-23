@@ -21,6 +21,7 @@ import (
 // undelayed plant in 256-bit arithmetic, |S| at z = −1, and exact
 // Schur–Cohn stability.
 func TestTunePIDBandSensitivity(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		name     string

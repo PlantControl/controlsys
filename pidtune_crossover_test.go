@@ -103,6 +103,7 @@ func TestPidtunePoleFallbackBacksOffSixDecades(t *testing.T) {
 // evaluated loop, counted as the distance of ∠L from −1 since the roots
 // certify stability.
 func TestPidtunePoleFallbackFirstDesignGated(t *testing.T) {
+	skipSlowUnderRace(t)
 	robust := func(name string, pid *PID, num, den Poly, dt float64) {
 		t.Helper()
 		if stable, ok := pidtuneOracleStable(t, pid, num, den, dt, 0); !ok || !stable {
@@ -207,6 +208,7 @@ func TestPidtunePoleFallbackFirstDesignGated(t *testing.T) {
 // Oracle: closed-loop roots from num/den; over a seeded population every
 // returned design is stable.
 func TestPidtunePoleFallbackContinuousStable(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		f        PidtuneType
 		num, den Poly
@@ -323,6 +325,8 @@ func TestPidtuneZeroDCGainCrossoverRaised(t *testing.T) {
 // on a dense grid of both signs gives an oracle-stable loop keeping 60° at
 // every crossover with |S| < 3.5.
 func TestPidtunePoleFallbackUnshapedKept(t *testing.T) {
+	t.Parallel()
+	skipSlowUnderRace(t)
 	worst := func(pms []float64) float64 {
 		m := math.Inf(1)
 		for _, v := range pms {

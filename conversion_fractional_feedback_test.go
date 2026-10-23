@@ -133,6 +133,7 @@ func holdFeedbackReference(sys *System, dt, theta float64, foh bool) [][]complex
 }
 
 func TestFractionalFeedbackHoldIndependentReference(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
 		for _, tau := range [][]float64{{.15, .24}, {.04, .08}, {.2, .3}} {
 			for _, external := range []string{"none", "fractional", "integer-output"} {

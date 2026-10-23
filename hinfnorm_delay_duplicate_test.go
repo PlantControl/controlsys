@@ -112,6 +112,7 @@ func TestHinfNormDelayDuplicatedLightlyDamped(t *testing.T) {
 // every closed-loop root to that multiplicity, so the replica is stable
 // exactly when the channel is and has its norm.
 func TestHinfNormDelayDuplicateSweep(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	const seeds = 300
 	unstable := 0
@@ -185,6 +186,7 @@ func (p sisoDelayLoop) rhpRoots(t *testing.T) int {
 // loops (close to the point budget already) past it. The root counts are
 // checked against the branch-root oracle rhpRoots.
 func TestDelayNyquistNearNeutralBudget(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		eps   float64
 		seed  int64
@@ -299,6 +301,7 @@ func (p sisoDelayLoop) pair(t *testing.T, q sisoDelayLoop) *System {
 // Two channels whose d22 differ by 1e-7 split each double root into a close
 // pair.
 func TestHinfNormDelayNearNeutralReplica(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	cases := []struct {
 		name  string
