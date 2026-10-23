@@ -143,6 +143,7 @@ func pidtune(plant *System, pidType PidtuneType, wc float64, opts *PidtuneOption
 	if _, err := newSISOLoopModel(plant, "Pidtune"); err != nil {
 		return nil, err
 	}
+	plant = pidTuningExplicitPlant(plant)
 	if !finitePID(wc) || wc < 0 {
 		return nil, fmt.Errorf("Pidtune: wc %g must be finite and nonnegative (0 = automatic): %w", wc, ErrInvalidArgument)
 	}

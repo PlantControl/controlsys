@@ -122,6 +122,7 @@ func pidDCSignCheckRobust(t *testing.T, name string, pid *PID, num, den Poly, dt
 // plants, such as PI and (on amd64) PID at the phase walk's start wc·1e-6,
 // lie past pidTuningDCSign.
 func TestPidtuneDCSignFailedSample(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	const dt = 0.01
 	cases := []struct {

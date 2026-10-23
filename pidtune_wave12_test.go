@@ -129,6 +129,7 @@ func TestPidtuneZeroDCLegacyPDGated(t *testing.T) {
 // pairs or comparable distances are scattered clusters this oracle does
 // not describe.
 func TestPidtuneIsolatedDisplacedIntegrator(t *testing.T) {
+	t.Parallel()
 	num := Poly{1.353366909367569e-15}
 	den := Poly{1, -5.60431550709433, 13.063429504287544, -16.210023582131356, 11.292650985912374, -4.187371704674265, 0.6456303037000314}
 	p := pidtuneBackoffPlant(t, num, den, 0.01, 0)
@@ -222,6 +223,7 @@ func TestPidtuneIsolatedDisplacedIntegrator(t *testing.T) {
 // Oracle: extended-precision Schur–Cohn, margins and |S| from the
 // coefficients (one crossover, PM 90°, |S| 1).
 func TestPidtuneGateSnappedSample(t *testing.T) {
+	skipSlowUnderRace(t)
 	const dt = 0.01
 	for _, c := range []struct{ num, den Poly }{
 		{Poly{6.110773630519141e-14, 3.4198170787824316e-15}, Poly{1, -5.71016988999306, 13.887907770588715, -18.645468986193702, 14.92072833819654, -7.1153754170879235, 1.8719233030765783, -0.20954511858714697}},

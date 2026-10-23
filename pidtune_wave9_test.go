@@ -220,6 +220,7 @@ func pidtuneRolloffUnstableCase(t *testing.T, num, den Poly, want []PidtuneType,
 // design stable by the exact Schur–Cohn test. Integrators displaced beyond
 // pidtuneClusterRadius(2, 1) are TestPidtuneIsolatedDisplacedIntegrator's.
 func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(5, 8))
 	kept, displaced := 0, 0
@@ -282,6 +283,7 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 // is 3.6e-7 inside).
 // Oracle: exact Schur–Cohn test of every design.
 func TestPidtuneDisplacedIntegratorDCSign(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, c := range []struct {
 		num, den Poly
 		dt       float64

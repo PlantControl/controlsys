@@ -388,6 +388,24 @@ func (s *pidStabilityScreen) transfer() (*TransferFuncResult, error) {
 	return s.transferRes, s.transferErr
 }
 
+// pidTuningExplicitPlant returns plant with E folded in when E is the
+// identity or well conditioned (normExplicitForm), else plant: the search,
+// screens and tails read A, B, C as an explicit realization.
+func pidTuningExplicitPlant(plant *System) *System {
+	if plant.E == nil {
+		return plant
+	}
+	if !plant.IsDescriptor() {
+		cp := plant.Copy()
+		cp.E = nil
+		return cp
+	}
+	if ex, err := normExplicitForm(plant, "TunePID"); err == nil {
+		return ex
+	}
+	return plant
+}
+
 func newPIDStabilityScreen(plant *System, eval *sisoEval, maxTail float64) (*pidStabilityScreen, error) {
 	model, rational, lag := plant, plant, 0
 	if plant.Dt > 0 && plant.HasDelay() {
@@ -570,7 +588,7 @@ func pidTuningPoleUncertain(poles []complex128, i int, e, eta float64) bool {
 // pidTuningExactStable is pidTuningPolesStable's exact test; ok is false
 // when the loop is outside its scope.
 func pidTuningExactStable(plant, c *System) (stable, ok bool) {
-	if plant.E != nil || c.E != nil || plant.HasDelay() || c.HasDelay() || c.Dt != plant.Dt {
+	if plant.IsDescriptor() || c.IsDescriptor() || plant.HasDelay() || c.HasDelay() || c.Dt != plant.Dt {
 		return false, false
 	}
 	n1, m1, p1 := plant.Dims()
@@ -1001,6 +1019,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	if _, err := newSISOLoopModel(plant, "TunePID"); err != nil {
 		return nil, err
 	}
+	plant = pidTuningExplicitPlant(plant)
 	if opts.UnstablePoles != nil {
 		return nil, fmt.Errorf("TunePID: UnstablePoles applies only to TunePIDFRD: %w", ErrOptionUnsupported)
 	}
@@ -3488,7 +3507,9 @@ func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 // |L| through 1 within a few |σ| of ω₀. It extends grid at step (in log ω)
 // down to a tenth of the slowest zero, at most four decades, and adds
 // points within 4|σ| of ω₀. Discrete controllers use the continuous zeros,
-// which match theirs well below Nyquist. Points where p.try fails are
+// which match theirs well below Nyquist. An integral-free c whose |L| − 1
+// changes sign between ω = 0 and lo walks further down
+// (pidTuningDCCrossingFloor). Points where p.try fails are
 // dropped; cache keeps the samples of the extension, whose points recur.
 func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, cache map[float64]complex128) []float64 {
 	a, b, k := c.Kp*c.Tf+c.Kd, c.Kp+c.Ki*c.Tf, c.Ki
@@ -3518,6 +3539,9 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 		}
 	}
 	floor := math.Max(slowest/10, lo*1e-4)
+	if w, ok := pidTuningDCCrossingFloor(p, c, lo, step, cache); ok {
+		floor = math.Min(floor, w)
+	}
 	for j := 1.; j <= math.Ceil(math.Log(lo/floor)/step); j++ {
 		extra = append(extra, lo*math.Exp(-j*step))
 	}
@@ -3553,6 +3577,49 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 	return slices.Compact(out)
 }
 
+// pidTuningDCCrossingFloor returns, for an integral-free c on a plant whose
+// DC gain p.dcEdge resolves, the first point of the grid lo·e^{−j·step} at
+// which |L| − 1 takes the sign of |Kp·G(0)| − 1, when |L(lo)| − 1 has the
+// other: an odd count of 0 dB crossings then lies below lo. It walks at most
+// six decades and stops at a sample p.try cannot resolve.
+func pidTuningDCCrossingFloor(p pidTuningPlant, c PID2, lo, step float64, cache map[float64]complex128) (float64, bool) {
+	g := p.dcEdge
+	if c.Ki != 0 || g == 0 || !pidFiniteComplex(g) || !(step > 0) {
+		return 0, false
+	}
+	dc := cmplx.Abs(complex(c.Kp, 0)*g) - 1
+	if dc == 0 || !finitePID(dc) {
+		return 0, false
+	}
+	excess := func(w float64, h complex128) float64 { return cmplx.Abs(h*pidTuningFeedback(c, w)) - 1 }
+	if v := excess(lo, p.at(lo)); dc*v >= 0 || !finitePID(v) {
+		return 0, false
+	}
+	for j := 1.; j <= math.Ceil(math.Log(1e6)/step); j++ {
+		w := lo * math.Exp(-j*step)
+		h, ok := cache[w]
+		if !ok {
+			if p.try != nil {
+				h, ok = p.try(w)
+			} else {
+				h, ok = p.at(w), true
+			}
+			if !ok {
+				h = cmplx.NaN()
+			}
+			cache[w] = h
+		}
+		v := excess(w, h)
+		if !finitePID(v) {
+			return 0, false
+		}
+		if dc*v > 0 {
+			return w, true
+		}
+	}
+	return 0, false
+}
+
 // pidTuningIntegralZero returns a real zero z of a stable, strictly proper,
 // delay-free continuous plant with −poleStabilityTolerance(z) <= z <= 0, when
 // family has an integral term. Under C = Nc/(s·Dc), Dc(s) = 1 or 1+Tf·s, the
@@ -3566,7 +3633,7 @@ func pidTuningIntegralZero(plant *System, family PidtuneType) (float64, bool) {
 	if _, hasI, _, _, ok := pidTuningTerms(family); !ok || !hasI {
 		return 0, false
 	}
-	if plant.Dt != 0 || plant.HasDelay() || plant.E != nil || plant.D.At(0, 0) != 0 {
+	if plant.Dt != 0 || plant.HasDelay() || plant.IsDescriptor() || plant.D.At(0, 0) != 0 {
 		return 0, false
 	}
 	if stable, err := plant.IsStable(); err != nil || !stable {
@@ -4065,6 +4132,7 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 		return nil, false, nil
 	}
 	leastZero := sync.OnceValue(func() float64 { return pidTuningLeastZero(plant) })
+	origin := sync.OnceValue(func() pidTuningOrigin { return newPIDTuningOrigin(plant, wc) })
 	return func(c *PID2) (bool, error) {
 		if c.Ki != 0 && leastZero() <= 1e-9*wc {
 			return false, nil
@@ -4108,6 +4176,9 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 		default:
 			return false, nil
 		}
+		if l.tailLimit < 1 && origin().unstable(c) {
+			return false, nil
+		}
 		cert, err := pidLoopCertifier(plant, &cand)
 		if errors.Is(err, errDelayLoopUnsupported) {
 			return false, nil
@@ -4122,4 +4193,56 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 		}
 		return stable, err
 	}, true, nil
+}
+
+// pidTuningOrigin holds N(0) and D(0) of a continuous plant G = N/D without
+// internal delays, signed by D's leading coefficient, with their rounding
+// scales Σ|cₖ|·wcᵏ.
+type pidTuningOrigin struct {
+	n0, d0, nScale, dScale float64
+	ok                     bool
+}
+
+func newPIDTuningOrigin(plant *System, wc float64) pidTuningOrigin {
+	if plant.E != nil || plant.HasInternalDelay() || !plant.IsContinuous() {
+		return pidTuningOrigin{}
+	}
+	res, err := plant.rationalTransferFunction(nil)
+	if err != nil {
+		return pidTuningOrigin{}
+	}
+	num, den := res.TF.Num[0][0], res.TF.Den[0]
+	if len(num) == 0 || len(den) == 0 || den[0] == 0 {
+		return pidTuningOrigin{}
+	}
+	scale := func(q []float64) float64 {
+		v := 0.0
+		for i, c := range q {
+			v += math.Abs(c) * math.Pow(wc, float64(len(q)-1-i))
+		}
+		return v
+	}
+	a := math.Copysign(1, den[0])
+	o := pidTuningOrigin{n0: a * num[len(num)-1], d0: a * den[len(den)-1], nScale: scale(num), dScale: scale(den)}
+	o.ok = finitePID(o.n0) && finitePID(o.d0) && finitePID(o.nScale) && finitePID(o.dScale)
+	return o
+}
+
+// unstable reports a real closed-loop root in [0, ∞) by the sign of the
+// characteristic P(s) = s·D·(1+Tf·s) + ((Kp·s+Ki)(1+Tf·s) + Kd·s)·N·e^{−sτ}
+// (without the s and Kp·s factors when Ki = 0), real on the real axis.
+// When limsup |L| < 1 there, P/a > 0 as s → +∞, so P(0)/a = Ki·N(0)/a, or
+// (D(0) + Kp·N(0))/a, below its rounding is certainly unstable. The Nyquist
+// grid can miss such a root far below wc: an indentation merging the
+// integrator with a pair at 2.2e-7 enclosed the root 5e-8 that a zero at
+// +5e-8 leaves under a PI crossing at 0.83.
+func (o pidTuningOrigin) unstable(c *PID2) bool {
+	if !o.ok {
+		return false
+	}
+	p0, scale := c.Ki*o.n0, math.Abs(c.Ki)*o.nScale
+	if c.Ki == 0 {
+		p0, scale = o.d0+c.Kp*o.n0, o.dScale+math.Abs(c.Kp)*o.nScale
+	}
+	return finitePID(p0) && -p0 > 1e3*0x1p-52*scale
 }

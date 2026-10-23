@@ -51,6 +51,7 @@ func pidCheckZPoleResult(t *testing.T, name string, num, den []float64, dt float
 // the call with a solver error. MATLAB pidtune returns a design or reports
 // the target unattainable.
 func TestTunePIDUnitPoleClusterNoSolverError(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	cases := []struct {
 		name     string
@@ -77,6 +78,7 @@ func TestTunePIDUnitPoleClusterNoSolverError(t *testing.T) {
 // Schur–Cohn test, or target unattainable. Before the fix about a third
 // returned a singular-matrix error.
 func TestTunePIDUnitPoleClusterSweep(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(71, 79))
 	fams := []PidtuneType{PidtunePI, PidtunePID, PidtunePIDF, PidtunePD}

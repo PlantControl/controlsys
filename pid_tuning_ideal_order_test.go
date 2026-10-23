@@ -165,6 +165,7 @@ func TestPIDTuningIdealStableHighOrderFailClosed(t *testing.T) {
 // random non-symmetric plants, continuous and forward-Euler discrete
 // derivatives, every integral formula, D ≠ 0 and lags.
 func TestPIDTuningIdealRealizationMatchesExact(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(5, 0x5ee2d))
 	decided, total := 0, 0
@@ -233,6 +234,7 @@ func TestPIDTuningIdealRealizationMatchesExact(t *testing.T) {
 // pidTuningEigenDiscVerdict decides there matches exact Schur–Cohn on the
 // dyadic characteristic, over random non-symmetric discrete plants.
 func TestPIDTuningEigenDiscVerdictMatchesExact(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(41, 0x5ee2d))
 	disc, total, stables := 0, 0, 0
@@ -325,6 +327,7 @@ func TestPIDTuningIdealStableLowOrderLongLagFailClosed(t *testing.T) {
 // non-symmetric plants of every order up to pidTuningExactOrder and beyond,
 // continuous and discrete, D ≠ 0 and lags.
 func TestPIDTuningEigenDiscVerdictMatchesExactLowOrder(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(97, 0x4f71))
 	disc, total, stables := 0, 0, 0

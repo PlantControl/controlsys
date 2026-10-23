@@ -392,6 +392,7 @@ func pidFRDStrictSweepCase(r *rand.Rand) pidFRDStrictCase {
 // against a strict count that certifies nothing. Oracles: companion roots
 // and exact Schur–Cohn.
 func TestTunePIDFRDCertifiedDesignsStable(t *testing.T) {
+	t.Parallel()
 	n := 150
 	if testing.Short() || raceEnabled {
 		n = 30

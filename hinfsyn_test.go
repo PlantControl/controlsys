@@ -607,6 +607,7 @@ func mixedSensitivityPlant(t testing.TB, G *System, k1, a1, d1, w2 float64) *Sys
 // closed loop so ill-conditioned that sigma_max carries relative errors of a
 // few 1e-6 that vary with build flags (-race), hence the looser tolerance.
 func TestHinfSyn_RandomMixedSensitivityMeetsGamma(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		name     string
 		G        *System

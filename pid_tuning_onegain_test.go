@@ -64,6 +64,7 @@ func TestTunePIDFreePMovesCrossoverOffLightlyDampedMode(t *testing.T) {
 // before V2CIOE free I designed 57 of 120 cases, then 108; the LV4BRD free
 // P scan makes 109.
 func TestTunePIDFreeOneGainLightlyDampedRobust(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(41, 43))
 	designs, moved := 0, 0

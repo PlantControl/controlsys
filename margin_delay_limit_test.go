@@ -149,6 +149,7 @@ func TestDiskMarginDelayedFeedthroughLimitSet(t *testing.T) {
 // sup, the delay H∞ peak used to refuse and the disk bound at tailLimit was
 // kept at +Inf (2.70 for d = −0.3, d2 = 0.33, r = 3, exact 1.91).
 func TestDiskMarginStaticDelayLimitSweep(t *testing.T) {
+	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(15, 4))
 	ratios := []float64{2, 3, 4, 5, 1.5, 2.5}
 	for i := range 60 {

@@ -76,6 +76,7 @@ func pidTuningCallEvidence(r *PIDTuningResult, err error) (*PIDTuningEvidence, e
 // even though it found one: 4161-4229 evaluations. The scan down stops at
 // its first design; the deep gate adds two depths.
 func TestTunePIDBackOffStopsAtFirstDesign(t *testing.T) {
+	skipSlowUnderRace(t)
 	plant := pidPlantDelayed(t, []float64{2.4655092866840786, -3.982218498257481}, []float64{1, 1.0125481422685352, 1.0543664790048073, .9556591577782928}, .4563737532946457)
 	for _, fam := range []PidtuneType{PidtunePI, PidtunePID, PidtunePIDF} {
 		r, err := TunePID(context.Background(), plant, fam, PIDTuningOptions{})
@@ -97,6 +98,7 @@ func TestTunePIDBackOffStopsAtFirstDesign(t *testing.T) {
 // for "no design": a full scan of every depth, each with its own budget,
 // found none.
 func TestTunePIDBackOffFailsFastWhenDeepestFail(t *testing.T) {
+	skipSlowUnderRace(t)
 	plant := pidPlantDelayed(t, []float64{1.0794, -.89075}, []float64{1, 18.247, 107.37, 1711.56}, .01834)
 	for _, fam := range []PidtuneType{PidtunePID, PidtunePIDF} {
 		_, err := TunePID(context.Background(), plant, fam, PIDTuningOptions{PhaseMargin: 68.08})

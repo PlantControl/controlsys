@@ -15,6 +15,7 @@ import (
 // Stability is checked by the Routh array of the closed-loop polynomial
 // built from the gains, the margin by L(jωc) evaluated directly.
 func TestTunePIDRaisesCrossoverOnUnstablePlant(t *testing.T) {
+	skipSlowUnderRace(t)
 	cases := []struct {
 		name string
 		den  []float64

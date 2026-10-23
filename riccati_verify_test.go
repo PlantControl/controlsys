@@ -46,6 +46,7 @@ import (
 //	            (amd64): its Hewer steps wandered in 1e-6..1e-5 rounding
 //	            noise and a noise dip was kept.
 func TestDare_NewtonVerified(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, tc := range []struct {
 		name          string
 		n, m          int

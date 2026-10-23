@@ -523,6 +523,7 @@ func pidtuneOracleStable(t *testing.T, pid *PID, num, den Poly, dt, delay float6
 // the crossover, is stable by the independent oracle; random continuous and
 // discrete plants, some unstable or delayed.
 func TestPidtuneAutoCrossoverRandomStable(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	// e^{−s}/(s+1) under P: phase −180° at ω ≈ 2.029, |G| ≈ 0.442, so the
 	// loop is stable iff −1 < Kp < 2.26; Ki < 0 puts a real root in Re s > 0.
@@ -615,7 +616,9 @@ func TestPidtuneAutoCrossoverRandomStable(t *testing.T) {
 // with den Hurwitz: the phase of 1+L, unwrapped along ω ∈ (0, ω_end] with
 // steps refined until each turns less than π/8, must change by π/2 with
 // integral action (the indentation at s = 0 adds −π) and by 0 without,
-// within π/2, the tail beyond ω_end having |L| < 1/2. ok is false when the
+// within π/2, the tail beyond ω_end having |L| < 1/2. The grid starts at
+// 1e-7, so a real RHP root below it is caught by the sign of the
+// characteristic at s = 0, which is positive at +∞. ok is false when the
 // tail bound or refinement fails.
 func pidtuneWindingStable(pid *PID, num, den Poly, tau float64) (stable, ok bool) {
 	L := func(w float64) complex128 {
@@ -645,6 +648,13 @@ func pidtuneWindingStable(pid *PID, num, den Poly, tau float64) (stable, ok bool
 	}
 	if (math.Abs(pid.Kp)+math.Abs(pid.Ki)/wEnd+kd)*gEnd >= 0.5 {
 		return false, false
+	}
+	p0 := pid.Ki * num[len(num)-1]
+	if pid.Ki == 0 {
+		p0 = den[len(den)-1] + pid.Kp*num[len(num)-1]
+	}
+	if p0 < 0 {
+		return false, true
 	}
 	var step func(a, b float64, fa complex128, depth int) (float64, bool)
 	step = func(a, b float64, fa complex128, depth int) (float64, bool) {

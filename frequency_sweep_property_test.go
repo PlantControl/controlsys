@@ -244,6 +244,7 @@ func kernelErr(t *testing.T, sys, ref *System, solver frequencyPointSolver, omeg
 // twin (the same transfer function), independent of which one the sweep tier
 // picks; the user-facing sweep is also held to its own pointwise path.
 func TestFreqResponseSweepMatchesPointwiseRandomized(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	const tol = 1e-12
 	seeds := 400
@@ -289,6 +290,7 @@ func evalFrAtPoint(sys *System, pt frequencyPoint) ([][]complex128, error) {
 // Descriptor sweeps are held to the refined oracle on the well-scaled
 // descriptor twin; EvalFr must agree with the sweep bit for bit.
 func TestFreqResponseDescriptorSweepRandomized(t *testing.T) {
+	skipSlowUnderRace(t)
 	const tol = 1e-12
 	seeds := 240
 	if testing.Short() {
@@ -352,6 +354,7 @@ func TestFreqResponseDescriptorSweepRandomized(t *testing.T) {
 // and G cannot cancel far below the terms GEPP computes it from. EvalFr must
 // agree with the sweep bit for bit.
 func TestFreqResponseInternalDelaySweepRandomized(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	const tol = 1e-12
 	seeds := 240
@@ -832,6 +835,7 @@ func TestDot2AddProdErrorFree(t *testing.T) {
 // transfer-function polynomials whenever n > 40, which are useless at this
 // order. The user-facing sweep is held to the refined oracle on the twin.
 func TestFreqResponseSweepHighOrder(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	const points, stride = 25, 6
 	orders := []int{41, 120, 204}
@@ -875,6 +879,7 @@ func TestFreqResponseSweepHighOrder(t *testing.T) {
 // is 4e-11 off the refined oracle (sweep: 3e-11), and the controller varies
 // with build flags, hence 1e-9.
 func TestSigmaHighOrderHinfLoop(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	if testing.Short() {
 		t.Skip("HinfSyn on a 102-state plant")

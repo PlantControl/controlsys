@@ -249,6 +249,7 @@ func TestPidtuneUnstableMirrorsPositive(t *testing.T) {
 // has the sign pidtuneGainSign picks, judged by the roots of
 // den·denC + num·numC.
 func TestPidtuneGainSignMatchesStabilizingGains(t *testing.T) {
+	skipSlowUnderRace(t)
 	plants := []struct {
 		num, den []float64
 		dt       float64
@@ -336,6 +337,7 @@ func TestPidtuneGainSignMatchesStabilizingGains(t *testing.T) {
 // triple against the forced sign must flip it. Oracle: roots of
 // den·denC + num·numC.
 func TestPidtuneGainSignWithDerivative(t *testing.T) {
+	skipSlowUnderRace(t)
 	plants := []struct{ num, den Poly }{
 		{Poly{-0.38686, 0.064537, -0.71409}, Poly{1, -0.49821, -1.41706, 0.93640}},
 		{Poly{1, -3}, Poly{1, 1, -2}},

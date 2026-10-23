@@ -83,6 +83,7 @@ func TestTunePIDFRDBoundsFragileSensitivity(t *testing.T) {
 // replaces a design over the bound by one within it. Oracles: closed-loop
 // roots and dense exact |S|.
 func TestTunePIDFRDSensitivityBoundKeepsDesigns(t *testing.T) {
+	t.Parallel()
 	skipSlowUnderRace(t)
 	rng := rand.New(rand.NewPCG(16, 0xffc3d6))
 	n := 300

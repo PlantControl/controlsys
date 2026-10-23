@@ -70,6 +70,7 @@ func TestPidtuneDelayReflectedCrossingClassical(t *testing.T) {
 // bound is out of reach, and the gate-passing PDFs of the BIAA3G plants,
 // each loop winds reports unstable is unstable by pidTuningDelayStability.
 func TestPidtuneGateWindsAgreesWithNyquist(t *testing.T) {
+	t.Parallel()
 	if raceEnabled {
 		t.Skip("slow under race")
 	}
@@ -571,6 +572,7 @@ func TestPidtuneBackoffStaysInBand(t *testing.T) {
 // |ln p|/Dt, capped at 0.1π/Dt, to 5% (clustered poles round); designs stable by the exact Schur–Cohn
 // test; failures only ErrPIDTuningTargetUnattainable or ErrInvalidArgument.
 func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
+	t.Parallel()
 	num := Poly{-8.70643320022765e-16, 2.9186581655941266e-16, 1.3545850066477854e-16}
 	den := Poly{1, -5.609886783435264, 13.099973168748164, -16.29841103348229, 11.394314088807377, -4.243853507030152, 0.6578640663921657}
 	p := pidtuneBackoffPlant(t, num, den, 0.01, 0)
