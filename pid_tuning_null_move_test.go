@@ -152,3 +152,22 @@ func pidNullMoveOracle(t *testing.T, name string, num, den []float64, tau, dt fl
 		t.Errorf("%s: %+v max|S| %g", name, k, peak)
 	}
 }
+
+// At the default crossover the PIDF coordinate search left |S| above 4, so
+// the back-off lowered it to 1.73 rad/s; the re-solving polish finds a
+// design within the bound there, as MATLAB keeps its default crossover
+// when it can (TUEC2L). Oracles as above.
+func TestTunePIDPolishKeepsDefaultCrossover(t *testing.T) {
+	num, den, tau := []float64{-44.2286770948797}, []float64{1, 7.749038297474921, 14.735484830381466, 7.445267248583522}, 0.45705013361688546
+	p := pidPlantDelayed(t, num, den, tau)
+	r, err := TunePID(context.Background(), p, PidtunePIDF, PIDTuningOptions{PhaseMargin: 45})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := r.Evidence
+	const wc = 2.4400555398549475
+	if math.Abs(e.AchievedCrossover-wc) > 1e-6*wc || pidHasWarning(r, "lowered") {
+		t.Errorf("crossover %g, want default %g; warnings %q", e.AchievedCrossover, wc, e.Warnings)
+	}
+	pidNullMoveOracle(t, "default crossover", num, den, tau, 0, p, *r.Controller, e.AchievedCrossover, 42)
+}
