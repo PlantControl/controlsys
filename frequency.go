@@ -951,12 +951,14 @@ type NicholsResult struct {
 // MagDBAt returns the open-loop gain in dB from input to output at
 // Omega[freq].
 func (r *NicholsResult) MagDBAt(freq, output, input int) float64 {
+	checkResponseIndex("NicholsResult.MagDBAt", freq, output, input, len(r.Omega), r.p, r.m)
 	return newSampledScalarResponse(r.magDB, r.Omega, r.p, r.m).at(freq, output, input)
 }
 
 // PhaseAt returns the open-loop phase in degrees from input to output at
 // Omega[freq], shifted so the first point lies in (-360, 0].
 func (r *NicholsResult) PhaseAt(freq, output, input int) float64 {
+	checkResponseIndex("NicholsResult.PhaseAt", freq, output, input, len(r.Omega), r.p, r.m)
 	return newSampledScalarResponse(r.phase, r.Omega, r.p, r.m).at(freq, output, input)
 }
 
