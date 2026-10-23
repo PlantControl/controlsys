@@ -160,3 +160,42 @@ func TestPIDTuningZeroGrid(t *testing.T) {
 		t.Fatalf("zero at 20, a tenth of it above a tenth of the band start changed the grid: %v", g)
 	}
 }
+
+// AP6JSB: a lightly damped plant mode above the band's top gets the zero
+// grid's 4|σ| bracket up to the grid's top, which without a loop tail
+// bound reaches the mode; a tail bound under 1 below it drops the bracket.
+func TestPIDTuningZeroGridModeAboveTop(t *testing.T) {
+	grid := []float64{1, 10, 100}
+	step := math.Log(10) / 60
+	c := PID2{Kp: .5, Ki: .1, B: 1, C: 1}
+	w0, s := 1000., .5
+	at := func(w float64) complex128 { return 1 / complex(1, w) }
+	for _, x := range []struct {
+		tail func(*PID2, float64) float64
+		want bool
+	}{
+		{nil, true},
+		{func(_ *PID2, w float64) float64 {
+			if w < 2000 {
+				return 2
+			}
+			return .5
+		}, true},
+		{func(*PID2, float64) float64 { return .5 }, false},
+	} {
+		p := pidTuningPlant{at: at, loopTail: x.tail, modes: []complex128{complex(-s, w0)}}
+		got := pidTuningZeroGrid(p, c, grid, step, map[float64]complex128{})
+		below, above := 0, 0
+		for _, w := range got {
+			if w >= w0-4*s && w < w0 {
+				below++
+			}
+			if w > w0 && w <= w0+4*s {
+				above++
+			}
+		}
+		if has := below >= 4 && above >= 4; has != x.want {
+			t.Errorf("tail %v: mode %g bracketed by %d below, %d above, want bracket %v", x.tail != nil, w0, below, above, x.want)
+		}
+	}
+}

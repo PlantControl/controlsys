@@ -27,6 +27,54 @@ func TestDLyap_NonNormalComplexBlock(t *testing.T) {
 	}
 }
 
+// TestDLyap_NonNormalKroneckerBlock (75DTNG): A is already in real Schur
+// form, a real mode at 1 − δ coupled to the pair 1 − δ ± iε whose block
+// has t₁₂ = 1e4, t₂₁ = −ε²/t₁₂. The off-diagonal Stein block of the pair
+// against the real mode (and, in "pairs", against a second pair) was
+// solved unbalanced, its Kronecker pivot ((2δ)² + ε²)/t₁₂ below
+// eps·t₁₂, so DLyap returned ErrSingularEquation though the equation is
+// well posed (separation ~2δ once balanced). The oracle is the 320-bit
+// Kronecker solve.
+func TestDLyap_NonNormalKroneckerBlock(t *testing.T) {
+	const d, t12, eps2 = 1e-5, 1e4, 1e-10
+	cases := []struct {
+		name string
+		n    int
+		a    []float64
+	}{
+		{"real", 3, []float64{
+			1 - d, 0.3, -0.2,
+			0, 1 - d, t12,
+			0, -eps2 / t12, 1 - d,
+		}},
+		{"pairs", 4, []float64{
+			1 - d, t12, 0.3, -0.2,
+			-eps2 / t12, 1 - d, 0.1, 0.4,
+			0, 0, 1 - d, t12,
+			0, 0, -eps2 / t12, 1 - d,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			A := mat.NewDense(tc.n, tc.n, tc.a)
+			Q := mat.NewDense(tc.n, tc.n, nil)
+			for i := range tc.n {
+				for j := range tc.n {
+					Q.Set(i, j, 0.1/float64(1+i+j))
+				}
+				Q.Set(i, i, float64(1+i))
+			}
+			X, err := DLyap(A, Q, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e := relErr(X, dlyapBig(A, Q)); !(e <= 1e-8) {
+				t.Errorf("X rel err %g against 320-bit Kronecker solve", e)
+			}
+		})
+	}
+}
+
 // dlyapBig solves A X Aᵀ − X + Q = 0 by the 320-bit Kronecker system.
 func dlyapBig(A, Q *mat.Dense) *mat.Dense {
 	a, q := hbFrom(A), hbFrom(Q)

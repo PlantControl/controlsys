@@ -172,7 +172,7 @@ func TestTransferFunctionSlowCompanionSweep(t *testing.T) {
 			t.Fatalf("trial %d: %v", trial, err)
 		}
 		tf := res.TF
-		if e := cs.bandErr(tf); len(tf.Den[0]) != n+1 || !(e <= 1e-8) {
+		if e := cs.bandErr(tf); len(tf.Den[0]) != n+1 || !(e <= 1e-12) {
 			fails++
 			if fails <= 5 {
 				t.Errorf("trial %d: den %v (want %v), num %v (want %v): band err %.3g", trial, tf.Den[0], cs.den, tf.Num[0][0], cs.num, e)
@@ -188,8 +188,9 @@ func TestTransferFunctionSlowCompanionSweep(t *testing.T) {
 // 2..5 origin poles. The observability cut dropped states, and a kept
 // k-fold origin pole split by the den tail's rounding noise^(1/k)
 // (U3H63X). Every state must stay, the den tail be exactly zero, and the
-// band response match; the residue of up to 1e-5 in some 8-state cases is
-// Dgebal's partial grading of the companion (base and Osborne miss more).
+// band response match; the rotations over Dgebal's partial grading left up
+// to 1e-5 in some 8-state cases before the companion was converted in its
+// own basis (DZG5LV).
 func TestTransferFunctionSlowCompanionOrigins(t *testing.T) {
 	r := rand.New(rand.NewPCG(77, 5))
 	for trial := range 600 {
@@ -209,7 +210,7 @@ func TestTransferFunctionSlowCompanionOrigins(t *testing.T) {
 			t.Errorf("trial %d: den %v, want %v", trial, den, cs.den)
 			continue
 		}
-		if e := cs.bandErr(res.TF); !(e <= 2e-5) {
+		if e := cs.bandErr(res.TF); !(e <= 1e-12) {
 			t.Errorf("trial %d: den %v (want %v), num %v (want %v): band err %.3g", trial, den, cs.den, res.TF.Num[0][0], cs.num, e)
 		}
 	}

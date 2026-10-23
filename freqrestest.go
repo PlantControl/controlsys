@@ -77,6 +77,7 @@ func (r *FreqRespEstResult) CoherenceAt(freq, output, input int) (coherence floa
 	if r.coherence == nil {
 		return 0, false
 	}
+	checkResponseIndex("FreqRespEstResult.CoherenceAt", freq, output, input, len(r.Omega), r.H.P, r.H.M)
 	return newSampledScalarResponse(r.coherence, r.Omega, r.H.P, r.H.M).at(freq, output, input), true
 }
 

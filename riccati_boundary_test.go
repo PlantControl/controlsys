@@ -12,7 +12,7 @@ import (
 
 // exactBoundaryUncontrollable returns integer A = P·J·P⁻¹, B = P·B̃ and
 // Q = MMᵀ + I, P unimodular, J lower block triangular with a leading
-// boundary block Jb (0, 1 or [0 ω; −ω 0]) whose rows of B̃ are zero: Jb's
+// boundary block Jb (0, 1, [0 ω; −ω 0] or a 2×2 Jordan block) whose rows of B̃ are zero: Jb's
 // modes are exactly uncontrollable (left eigenvector [w; 0] of J), so no
 // stabilizing solution exists. The trailing 3×3 block is random and may
 // share Jb's modes (a Jordan block across the two parts).
@@ -95,9 +95,17 @@ func exactBoundaryUncontrollable(rng *rand.Rand, jb [][]int64) (A, B, Q *mat.Den
 // band of n·eps·|λ| missed (Accuracy 1 X on about a quarter of these, its
 // exact closed loop not stable); the componentwise eigenvalue error band
 // and the Jordan cluster mean catch them. The two review repros are named.
-// boundaryUnstabilizable is asserted directly too: whether Care reaches it
-// depends on rounding (zero1 returned Accuracy 1 under -race on amd64
-// CI), and its verdict must not.
+// boundaryUnstabilizable is asserted directly too, unscaled and scaled:
+// whether Care reaches it depends on rounding (zero1 returned Accuracy 1
+// under -race on amd64 CI), and its verdict must not. A Jordan block at
+// the boundary (MPWOJM) splits by √(eps·κ); its mean, off by eps·‖A‖ times
+// the cluster condition, missed a band without that factor, and a pass
+// with no Accuracy 1 X returned before the check (base: 60 of 800 Accuracy
+// 1 X). Dare returned ErrSchurFailed, not ErrNoStabilizing, when QZ
+// failed with no Accuracy 1 X kept (FXO5QS: schur*, PCG(seed, 1)).
+// jordan1_322 (PCG(322, 4)) was certified, Accuracy 0 with X ≈ 1e49 and
+// closed loop 1 − 3e-16 ± 1e-8i, in both modes: a certified X does not
+// override the boundary verdict both scalings give (MPWOJM).
 func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 	type tcase struct {
 		name       string
@@ -114,11 +122,27 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 			mat.NewDense(5, 5, []float64{3, 8, 18, -8, 4, 8, 12, 38, -16, -4, 3, 4, 14, -6, -2, 15, 23, 73, -31, -6, -1, 4, -2, -2, 2}),
 			mat.NewDense(5, 1, []float64{4, 5, 1, 9, 1}),
 			mat.NewDense(5, 5, []float64{14, 1, -3, 11, 4, 1, 9, 10, 4, 6, -3, 10, 17, 3, 0, 11, 4, 3, 14, 2, 4, 6, 0, 2, 13}), 1e-7},
+		{"schur331", false,
+			mat.NewDense(4, 4, []float64{1, 0, 0, 0, 3, 5, -1, 3, -3, -1, -3, -1, -7, -6, 0, -5}),
+			mat.NewDense(4, 1, []float64{0, 2, 1, 1}),
+			mat.NewDense(4, 4, []float64{32, -10, 22, -14, -10, 15, -5, 6, 22, -5, 24, -9, -14, 6, -9, 10}), 1.0532619636346889e-09},
+		{"schur156", false,
+			mat.NewDense(4, 4, []float64{1, 0, -1, 0, -6, -1, 2, -13, 11, 2, -2, 26, 0, 0, 1, 1}),
+			mat.NewDense(4, 1, []float64{3, -2, -7, -3}),
+			mat.NewDense(4, 4, []float64{23, 6, 2, 2, 6, 5, 0, -6, 2, 0, 18, 1, 2, -6, 1, 21}), 2.3224190736627256e-08},
+		{"schur50", false,
+			mat.NewDense(4, 4, []float64{-1, 2, -4, -2, -3, -1, -2, 8, 1, 2, 1, -7, -1, 1, -2, 0}),
+			mat.NewDense(4, 1, []float64{6, 4, 2, 3}),
+			mat.NewDense(4, 4, []float64{27, 7, 5, -6, 7, 8, 0, 2, 5, 0, 3, -4, -6, 2, -4, 13}), 3.654958830626971e-11},
+		{"jordan1_322", false,
+			mat.NewDense(5, 5, []float64{4, 1, 0, 0, 0, -9, -2, 0, 0, 0, 32, 10, 0, -4, 5, 17, 5, -1, 1, 2, 6, 2, 1, 2, 2}),
+			mat.NewDense(5, 1, []float64{0, 0, 0, 3, 1}),
+			mat.NewDense(5, 5, []float64{7, -6, 0, -5, 0, -6, 23, -2, 7, 0, 0, -2, 4, 2, -5, -5, 7, 2, 16, -3, 0, 0, -5, -3, 13}), 5.443340272572639e-12},
 	}
 	kinds := []struct {
 		name       string
 		continuous bool
-	}{{"zero", true}, {"one", false}, {"imag", true}}
+	}{{"zero", true}, {"one", false}, {"imag", true}, {"jordan0", true}, {"jordan1", false}}
 	for kind, k := range kinds {
 		for seed := range 50 {
 			rng := rand.New(rand.NewPCG(uint64(seed), uint64(kind)))
@@ -129,6 +153,10 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 			case 2:
 				w := int64(1 + rng.IntN(4))
 				jb = [][]int64{{0, w}, {-w, 0}}
+			case 3:
+				jb = [][]int64{{0, 1}, {0, 0}}
+			case 4:
+				jb = [][]int64{{1, 1}, {0, 1}}
 			}
 			A, B, Q := exactBoundaryUncontrollable(rng, jb)
 			cases = append(cases, tcase{fmt.Sprintf("%s%d", k.name, seed), k.continuous, A, B, Q, math.Pow(10, -12+12*rng.Float64())})
@@ -149,10 +177,12 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 				t.Errorf("%s NoScaling %v: %v", tc.name, ns, perr)
 			} else if !problem.boundaryUnstabilizable(tc.continuous) {
 				t.Errorf("%s NoScaling %v: boundaryUnstabilizable false", tc.name, ns)
+			} else if problem.scale(opts, true); !problem.boundaryUnstabilizable(tc.continuous) {
+				t.Errorf("%s NoScaling %v: boundaryUnstabilizable false once scaled", tc.name, ns)
 			}
 			if err == nil {
 				t.Errorf("%s NoScaling %v: Accuracy %d X, want ErrNoStabilizing", tc.name, ns, res.Accuracy)
-			} else if !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+			} else if !errors.Is(err, ErrNoStabilizing) {
 				t.Errorf("%s NoScaling %v: %v", tc.name, ns, err)
 			}
 		}

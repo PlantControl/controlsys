@@ -50,8 +50,10 @@ func pidOffbandPeak(L func(float64) complex128, lo, hi float64) (peak, at float6
 // starting at 4.08; explicit-crossover discrete PID (d43) peaked at |S| ~1e5
 // at 2.475 rad/s above its band top 1.52, unwarned. Every default design now
 // keeps |S| <= 4 densely over [1e-5, π/Dt] or 1e6 rad/s, else fails; the
-// explicit design keeps its gains and warns. Oracle: the loop from the
-// coefficients, a discrete plant in 256-bit arithmetic, on a 1e-4 log grid.
+// explicit design warns. Since AP6JSB its crossing at 2.69 rad/s, above
+// wc·100, holds the 57° floor and |S| falls to ~9, still over 4 and warned.
+// Oracle: the loop from the coefficients, a discrete plant in 256-bit
+// arithmetic, on a 1e-4 log grid.
 func TestTunePIDOffbandSensitivity(t *testing.T) {
 	skipSlowUnderRace(t)
 	for _, c := range []struct {
@@ -87,12 +89,12 @@ func TestTunePIDOffbandSensitivity(t *testing.T) {
 		t.Fatal(err)
 	}
 	k := r.Controller
-	if math.Abs(k.Kp-0.0061342)/0.0061342 > 1e-3 || math.Abs(k.Ki-7.8935e-5)/7.8935e-5 > 1e-3 || math.Abs(k.Kd-0.15713)/0.15713 > 1e-3 {
+	if math.Abs(k.Kp-0.0060596)/0.0060596 > 1e-3 || math.Abs(k.Ki-7.7340e-5)/7.7340e-5 > 1e-3 || math.Abs(k.Kd-0.13954)/0.13954 > 1e-3 {
 		t.Errorf("d43: gains %+v changed", *k)
 	}
 	ms, at := pidOffbandPeak(pidOffbandLoop(k, num, den, 1, 0), 1e-5, math.Pi)
-	if ms < 1000 || at < r.Evidence.FrequencyBand[1] {
-		t.Fatalf("d43: dense |S| %g at ω=%g, band %v; reference no longer off-band", ms, at, r.Evidence.FrequencyBand)
+	if ms <= pidTuningMaxSensitivity*1.01 || at < 100*0.015241268242045015 {
+		t.Fatalf("d43: dense |S| %g at ω=%g, band %v; reference no longer above wc·100", ms, at, r.Evidence.FrequencyBand)
 	}
 	if pidExplicitSWarned(r) != 1 {
 		t.Errorf("d43: dense |S| %g at ω=%g, warnings %q", ms, at, r.Evidence.Warnings)
