@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 	"math/cmplx"
 	"strconv"
 	"testing"
@@ -62,4 +63,43 @@ func TestRootLocus_NoiseMarkovKeepsSign(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRootLocus_SplitDoubleZeroNoFeedthrough (wave 22, reviewer case 10677
+// class): 3(s+3)(s+2.5)²/(s(s+36)(s²+0.5625)), D = 0, under a scaling/
+// Givens/triangular similarity whose rounding splits the double zero into
+// two real zeros ~9e-5 apart (2.7e-5 in Zeros). The zeros, as eigenvalues
+// of the zero-dynamics matrix A − B·C·A/h₁, are u·κ-linked with a pair mean
+// far better conditioned than their split, so −2.5 (K = ∞) is a break point
+// as in the intended loop; the system-pencil κ cap had left them apart.
+func TestRootLocus_SplitDoubleZeroNoFeedthrough(t *testing.T) {
+	oi := newRlswOracle(rlpRats(0, 3, 24, 63.75, 56.25), rlpRats(1, 36, 0.5625, 20.25, 0))
+	for i, m := range []struct{ a, b, c []float64 }{
+		{
+			[]float64{163.81420983322218, 74.64311883533684, -18.657679132180508, 104.08724455861936, -472.64224358957824, -215.64402982158288, 64.8635449321895, -254.73496123334695, -141.16136208281264, -64.32148825943844, 16.077280882322196, -89.69348206133829, 60.12041991450314, 27.632977608583705, -16.15089553712487, -0.24746089396148463},
+			[]float64{-0.16756204546463738, 0.009101100712632315, 0.14439063482537975, 0.341252489940445},
+			[]float64{5160.933543272735, 208.4169900883478, 5390.671604349607, 256.45896951229673},
+		},
+		{
+			[]float64{0.15390810036605915, -0.31384178289046555, -0.512144401732552, -0.3095796931570512, 16.57185812997175, 6.543536321209192, -22.181593872621626, 4.336700561913234, -8.454250686839965, 69.9742851310155, 70.01580658577112, 65.34358255525224, -2.9969293057060007, -122.63553821294721, -93.25032335157478, -112.71325100734637},
+			[]float64{0, 0, -126.50252275153427, 209.27586745612555},
+			[]float64{-5.825280442286043, 3.3362212538934637, 5.326103880181568, 3.2338443295263697},
+		},
+	} {
+		res, err := RootLocus(rlpSys(t, 4, m.a, m.b, m.c, 0, 0), []float64{0, 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !oi.accepts(res.Breakaway) {
+			t.Errorf("case %d: Breakaway = %v, want %v", i, res.Breakaway, oi.required)
+		}
+	}
+}
+
+func rlpRats(x ...float64) []*big.Rat {
+	out := make([]*big.Rat, len(x))
+	for i, v := range x {
+		out[i] = fzRat(v)
+	}
+	return out
 }

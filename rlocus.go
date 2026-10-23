@@ -1416,7 +1416,100 @@ func (lp *rlocusLoop) zeroClusters(sys *System, zeros []complex128, num Poly, si
 			}
 		}
 	}
+	if cs, ok := lp.zeroDynamicsClusters(zeros, num, sigma); ok {
+		return cs
+	}
 	return multipleRoots(zeros, zeroCondition(sys, zeros), nil, num, n, sigma, sigmaBal, 0)
+}
+
+// zeroDynamicsClusters decides the multiple zeros of a strictly proper loop
+// of resolved relative degree r ≤ n − 2 as for poles: the zeros are the
+// n − r eigenvalues of Az = A − B·C·A^r/h_r away from its r structural
+// eigenvalues at 0, so the condition numbers of those eigenvalues (against
+// |A| + |B|·|C·A^r|/|h_r|), each taken for the nearest of the given zeros
+// (computed from the pencil, which forming Az does not round), and their
+// pair conditioning merge a double zero that the similarity's
+// rounding split, and the converted numerator confirms it. Forming Az
+// rounds past those κ, so no cluster is marked resolved (a double zero −5
+// that eig of Az splits ±6.2e-7i, just past its u·κ link, stays one).
+// ok is false (zeroCondition decides) when r is not resolved, a zero lies
+// in the origin band where the structural eigenvalues are, or eig fails.
+func (lp *rlocusLoop) zeroDynamicsClusters(zeros []complex128, num Poly, sigma float64) ([]rootCluster, bool) {
+	n, r := lp.n, lp.relDeg
+	if r < 1 || r > n-2 || len(zeros) != n-r {
+		return nil, false
+	}
+	u := 2 * float64(n) * eps()
+	for _, z := range zeros {
+		if cmplx.Abs(z) <= math.Sqrt(u)*sigma {
+			return nil, false
+		}
+	}
+	q := slices.Clone(lp.c)
+	for range r - 1 {
+		q = rowTimes(q, lp.a, n)
+	}
+	var h float64
+	for i := range n {
+		h += q[i] * lp.b[i]
+	}
+	if h == 0 {
+		return nil, false
+	}
+	qa := rowTimes(q, lp.a, n)
+	az, w := make([]float64, n*n), make([]float64, n*n)
+	for i := range n {
+		for j := range n {
+			bq := lp.b[i] * qa[j] / h
+			az[i*n+j] = lp.a[i*n+j] - bq
+			w[i*n+j] = math.Abs(lp.a[i*n+j]) + math.Abs(bq)
+			if !isFinite(az[i*n+j]) || !isFinite(w[i*n+j]) {
+				return nil, false
+			}
+		}
+	}
+	ec, ok := eigCondition(az, w, n)
+	if !ok {
+		return nil, false
+	}
+	idx := make([]int, n)
+	for i := range idx {
+		idx[i] = i
+	}
+	slices.SortStableFunc(idx, func(i, j int) int { return cmp.Compare(cmplx.Abs(ec.vals[j]), cmplx.Abs(ec.vals[i])) })
+	idx = idx[:n-r]
+	vals, kappa := slices.Clone(zeros), make([]float64, n-r)
+	used := make([]bool, n-r)
+	match := make([]int, n-r)
+	for k, z := range vals {
+		best := -1
+		for m, i := range idx {
+			if !used[m] && (best < 0 || cmplx.Abs(ec.vals[i]-z) < cmplx.Abs(ec.vals[idx[best]]-z)) {
+				best = m
+			}
+		}
+		used[best] = true
+		match[k] = idx[best]
+		kappa[k] = ec.kappa[idx[best]]
+	}
+	idx = match
+	pc := func(i, j int) float64 { return ec.pairCondition(idx[i], idx[j]) }
+	cs := multipleRoots(vals, kappa, pc, num, n, sigma, balancedNorm(az, n), 0)
+	for i := range cs {
+		cs[i].resolved = false
+	}
+	return cs, true
+}
+
+// rowTimes returns the row vector x·A for the row-major n×n A.
+func rowTimes(x, a []float64, n int) []float64 {
+	out := make([]float64, n)
+	for i, xi := range x {
+		for j := range n {
+			out[j] += xi * a[i*n+j]
+		}
+	}
+	return out
 }
 
 // zeroCondition returns the normwise condition numbers of the zeros of
