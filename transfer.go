@@ -186,10 +186,14 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 //
 // A descriptor model is first reduced to explicit form as MATLAB tf(dss)
 // does: nonsingular E is folded in, and singular E is reduced by eliminating
-// the algebraic states (dss2ss). Improper models are rejected with
-// ErrDescriptorUnsupported wrapping ErrImproperModel.
+// the algebraic states (dss2ss). An improper model keeps its polynomial
+// part, as MATLAB tf(dss): the s^k coefficients −C∞·N^k·A∞⁻¹B∞ of the
+// nilpotent block (rounding-level ones dropped, as IsProper decides) are
+// added to the transfer function of the explicit part, so the numerator
+// degree exceeds the denominator's. MinimalOrder and RowDegrees then
+// describe that explicit part.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
-	std, _, err := conversionStandardForm(sys, "TransferFunction")
+	std, poly, err := transferStandardForm(sys)
 	if err != nil {
 		return nil, err
 	}
@@ -197,10 +201,59 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 	if err != nil {
 		return nil, err
 	}
+	addPolynomialPart(res.TF, poly)
 	if total := newDelayTopology(sys).totalExternal(true); total != nil {
 		res.TF.Delay = denseToSlice2D(total)
 	}
 	return res, nil
+}
+
+// transferStandardForm is conversionStandardForm keeping the polynomial part
+// of an improper descriptor (see weierstrassReduceParts).
+func transferStandardForm(sys *System) (*System, []*mat.Dense, error) {
+	if !sys.IsDescriptor() {
+		return sys, nil, nil
+	}
+	if explicit, err := sys.ToExplicit(); err == nil {
+		return explicit, nil, nil
+	}
+	out, poly, err := sys.weierstrassReduceParts()
+	if err == nil {
+		if n, m, p := out.Dims(); n == 0 {
+			err = storableStaticGain("descriptor has no dynamic states", p, m)
+		}
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("TransferFunction: %w: %w", ErrDescriptorUnsupported, err)
+	}
+	return out, poly, nil
+}
+
+// addPolynomialPart adds Σ poly[k-1]·s^k to every channel of tf.
+func addPolynomialPart(tf *TransferFunc, poly []*mat.Dense) {
+	if len(poly) == 0 {
+		return
+	}
+	for i, den := range tf.Den {
+		for j := range tf.Num[i] {
+			q := make(Poly, len(poly)+1)
+			for k, c := range poly {
+				q[len(poly)-1-k] = c.At(i, j)
+			}
+			start := 0
+			for start < len(poly) && q[start] == 0 {
+				start++
+			}
+			if start == len(poly) {
+				continue
+			}
+			num := Poly(tf.Num[i][j]).Add(Poly(den).Mul(q[start:]))
+			for len(num) > 1 && num[0] == 0 {
+				num = num[1:]
+			}
+			tf.Num[i][j] = num
+		}
+	}
 }
 
 // rationalTransferFunction returns the delay-free rational part; callers
