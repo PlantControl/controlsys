@@ -197,6 +197,9 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if m == 1 && p == 1 && rank == 1 && len(zeros) > 0 {
+		zeros = capSISOZeros(sys, zeros)
+	}
 	if m == p && rank == m && len(zeros) > 0 {
 		scale, raw := pencilNorm(zs), pencilNorm(sys)
 		tol := eps() * math.Max(scale, raw) / zeroRefineTol
@@ -318,6 +321,140 @@ func prescaledStaircaseZeros(sys, zs *System) ([]complex128, int, error) {
 		return zp, pre.rank, nil
 	}
 	return zr, raw.rank, nil
+}
+
+// capSISOZeros keeps the n−r smallest zeros when the staircase returned
+// more, r being the relative degree from sisoRelativeDegree: a SISO pencil
+// has exactly n−r finite zeros, and the extra ones are the rounding-noise
+// zeros a rank decision on a vanishing Markov parameter leaves far out
+// (MATLAB tzero returns those as infinite). A conjugate pair straddling the
+// cut is kept whole.
+func capSISOZeros(sys *System, zeros []complex128) []complex128 {
+	n, _, _ := sys.Dims()
+	r, ok := sisoRelativeDegree(sys)
+	k := n - r
+	if !ok || len(zeros) <= k {
+		return zeros
+	}
+	sortZeros(zeros)
+	if k > 0 && imag(zeros[k-1]) != 0 && cmplx.Abs(zeros[k]-cmplx.Conj(zeros[k-1])) <= 1e-8*cmplx.Abs(zeros[k]) {
+		k++
+	}
+	return zeros[:k]
+}
+
+// markovNoiseTol and markovSignificantTol bound |h_k|/(ε·β_k) for a Markov
+// parameter h_k that sisoRelativeDegree counts as zero and as nonzero.
+// Exactly vanishing ones of similarity-transformed companion models
+// (n ≤ 24) came below 6; nonzero ones of n ≤ 5 above 1e5, but of n ≥ 8 with
+// large coefficients down to 1e-6, where the staircase zeros the cap
+// would drop are themselves inaccurate (rare true zeros within 1e-3 sat
+// at ratios 7 to 10, hence the gap).
+const (
+	markovNoiseTol       = 8
+	markovSignificantTol = 100
+)
+
+// sisoRelativeDegree returns the first k with |h_k| > markovSignificantTol·ε·β_k
+// for the Markov parameters h_k = C·A^(k−1)·B of a SISO model with D = 0,
+// provided every earlier h_j is within markovNoiseTol·ε·β_j, where
+// β_k = |C||A^(k−1)B| + |CA^(k−1)||B| + Σ_j |CA^j||A||A^(k−2−j)B| bounds the
+// first-order change of h_k under relative perturbations of size ε of the
+// entries of A, B and C. It returns false when D ≠ 0 or no such k ≤ n
+// exists. β_k and h_k scale alike under diagonal similarity and I/O
+// scaling, so the test is that of the balanced model; A^k·B and C·A^k are
+// kept at unit size with power-of-two exponents against overflow and
+// underflow.
+func sisoRelativeDegree(sys *System) (int, bool) {
+	n, _, _ := sys.Dims()
+	if n == 0 || sys.D.At(0, 0) != 0 {
+		return 0, false
+	}
+	var h1, beta1 float64
+	for i := range n {
+		b, c := sys.B.At(i, 0), sys.C.At(0, i)
+		h1 += c * b
+		beta1 += 2 * math.Abs(c*b)
+	}
+	if math.Abs(h1) > markovSignificantTol*eps()*beta1 {
+		return 1, true
+	}
+	ar := sys.A.RawMatrix()
+	nn := n * n
+	buf := make([]float64, 4*nn+5*n)
+	a, absA, ws, us := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn]
+	vec := buf[4*nn:]
+	v, vt, absV, absB, absC := vec[:n], vec[n:2*n], vec[2*n:3*n], vec[3*n:4*n], vec[4*n:5*n]
+	c := ws[:n]
+	for i := range n {
+		copy(a[i*n:(i+1)*n], ar.Data[i*ar.Stride:i*ar.Stride+n])
+		v[i] = sys.B.At(i, 0)
+		c[i] = sys.C.At(0, i)
+	}
+	unitScale(a)
+	unitScale(v)
+	unitScale(c)
+	for i, x := range a {
+		absA[i] = math.Abs(x)
+	}
+	for i := range n {
+		absB[i], absC[i] = math.Abs(v[i]), math.Abs(c[i])
+	}
+	e := make([]int, 2*n)
+	ev, ew := e[:n], e[n:]
+	bl := blas64.Implementation()
+	for k := 1; k <= n; k++ {
+		if k > 1 {
+			bl.Dgemv(blas.NoTrans, n, n, 1, absA, n, absV, 1, 0, us[(k-2)*n:(k-1)*n], 1)
+			bl.Dgemv(blas.NoTrans, n, n, 1, a, n, v, 1, 0, vt, 1)
+			v, vt = vt, v
+			ev[k-1] = ev[k-2] + unitScale(v)
+			wk := ws[(k-1)*n : k*n]
+			bl.Dgemv(blas.Trans, n, n, 1, a, n, ws[(k-2)*n:(k-1)*n], 1, 0, wk, 1)
+			ew[k-1] = ew[k-2] + unitScale(wk)
+		}
+		var h, beta, tb float64
+		for i, x := range ws[(k-1)*n : k*n] {
+			h += c[i] * v[i]
+			absV[i] = math.Abs(v[i])
+			beta += absC[i] * absV[i]
+			tb += math.Abs(x) * absB[i]
+		}
+		beta += math.Ldexp(tb, ew[k-1]-ev[k-1])
+		for j := 0; j+2 <= k; j++ {
+			var t float64
+			uj := us[(k-2-j)*n : (k-1-j)*n]
+			for i, x := range ws[j*n : (j+1)*n] {
+				t += math.Abs(x) * uj[i]
+			}
+			beta += math.Ldexp(t, ew[j]+ev[k-2-j]-ev[k-1])
+		}
+		switch ah := math.Abs(h); {
+		case ah > markovSignificantTol*eps()*beta:
+			return k, true
+		case ah > markovNoiseTol*eps()*beta:
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// unitScale scales x by the power of two bringing its largest magnitude
+// into [1/2, 1) and returns the exponent removed (0 when x is zero).
+func unitScale(x []float64) int {
+	var mx float64
+	for _, v := range x {
+		mx = math.Max(mx, math.Abs(v))
+	}
+	e, ok := binaryExp(mx)
+	if !ok {
+		return 0
+	}
+	f := math.Ldexp(1, -e)
+	for i := range x {
+		x[i] *= f
+	}
+	return e
 }
 
 // squareDownZeros returns, when all but r rows of the I/O-scaled [C D] of
