@@ -674,11 +674,13 @@ func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.
 		}
 	}
 	if err != nil {
-		if problem.poor == nil {
-			return nil, nil, 0, 0, err
-		}
+		// Before poor: a pass with no Accuracy 1 X must not let the
+		// other scaling mode return one.
 		if problem.boundaryUnstabilizable(continuous) {
 			return nil, nil, 0, 0, errBoundaryUnstabilizable
+		}
+		if problem.poor == nil {
+			return nil, nil, 0, 0, err
 		}
 		X, K, rcnd = problem.poorSolution(eig)
 		return X, K, rcnd, 1, nil
@@ -791,8 +793,12 @@ var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on the stability boundary
 // controllable one splits by √(eps·κ)·‖A‖ beyond first order: x ⊥ y
 // there, and τ, past the split, would swallow a stable mode at −1e-5. λ is
 // tested alone only when τ is below its distance to every other
-// eigenvalue; the mean of the eigenvalues within max(√eps·(‖A‖ +
-// |λ|‖E‖), τ) of λ, accurate to rounding, is tested too.
+// eigenvalue; the mean of each nearest-first cluster of λ within
+// max(√eps·(‖A‖ + |λ|‖E‖), τ) is tested too, to 10·n·eps·(‖A‖ +
+// |mean|‖E‖) times the cluster condition 1/min(pl, pr) (Dtgsen; a Jordan
+// block at 0 with an ill-conditioned P is off by more than eps·‖A‖,
+// MPWOJM) when it is within √eps of the boundary, and only when that
+// band is below the mean's distance to the eigenvalues left out.
 func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 	n, m := problem.n, problem.m
 	aRaw, bRaw := problem.A.RawMatrix(), problem.B.RawMatrix()
@@ -846,6 +852,46 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 		sv := svd.Values(nil)
 		return sv[2*n-1] <= nf*ep*math.Hypot(an+cmplx.Abs(lam)*en, bn)+tol*en
 	}
+	var sa, se, sar, sai, sbeta []float64
+	clusterCond := func(lam complex128, rho float64) float64 {
+		if sa == nil {
+			sa, se = slices.Clone(a), slices.Clone(e)
+			sar, sai, sbeta = make([]float64, n), make([]float64, n), make([]float64, n)
+			var query [1]float64
+			impl.Dgges(lapack.SchurNone, lapack.SchurNone, lapack.SortNone, nil,
+				n, sa, n, se, n, sar, sai, sbeta, nil, 1, nil, 1, query[:], -1, nil)
+			w := make([]float64, int(query[0]))
+			if _, ok := impl.Dgges(lapack.SchurNone, lapack.SchurNone, lapack.SortNone, nil,
+				n, sa, n, se, n, sar, sai, sbeta, nil, 1, nil, 1, w, len(w), nil); !ok {
+				sbeta = nil
+			}
+		}
+		if sbeta == nil {
+			return 1
+		}
+		sel := make([]bool, n)
+		for j := 0; j < n; j++ {
+			in := func(k int) bool {
+				return sbeta[k] != 0 && cmplx.Abs(complex(sar[k]/sbeta[k], sai[k]/sbeta[k])-lam) <= rho
+			}
+			if sai[j] != 0 && j+1 < n {
+				sel[j] = in(j) || in(j+1)
+				sel[j+1] = sel[j]
+				j++
+				continue
+			}
+			sel[j] = in(j)
+		}
+		ta, te := slices.Clone(sa), slices.Clone(se)
+		ar, ai, b := slices.Clone(sar), slices.Clone(sai), slices.Clone(sbeta)
+		lw := max(4*n+16, n*n)
+		_, pl, pr, _, ok := impl.Dtgsen(1, false, false, sel, n, ta, n, te, n, ar, ai, b,
+			nil, 1, nil, 1, make([]float64, lw), lw, make([]int, n+6), n+6)
+		if !ok || !(pl > 0) || !(pr > 0) {
+			return 1
+		}
+		return 1 / min(pl, pr)
+	}
 	lams := make([]complex128, n)
 	finite := make([]bool, n)
 	for k := range n {
@@ -854,6 +900,7 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 		}
 	}
 	x, y := make([]complex128, n), make([]complex128, n)
+	ds := make([]float64, 0, n)
 	for k := 0; k < n; k++ {
 		kk := k
 		if wi[k] != 0 {
@@ -889,32 +936,50 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 		}
 		mod := cmplx.Abs(lam)
 		tol := 10 * (nf*ep*(ya+mod*ye) + yr) / cmplx.Abs(yex)
-		rho := max(math.Sqrt(ep)*(an+mod*en), tol)
-		var mean complex128
-		count, gap := 0, math.Inf(1)
+		rho := math.Sqrt(ep) * (an + mod*en)
+		ds = ds[:0]
 		for j := range n {
-			if !finite[j] {
-				continue
+			if finite[j] {
+				ds = append(ds, cmplx.Abs(lams[j]-lam))
 			}
-			d := cmplx.Abs(lams[j] - lam)
-			if j != kk {
-				gap = min(gap, d)
-			}
-			if d <= rho {
-				mean += lams[j]
-				count++
-			}
+		}
+		slices.Sort(ds)
+		gap := math.Inf(1)
+		if len(ds) > 1 {
+			gap = ds[1]
 		}
 		if tol < gap && inBand(lam, tol) && pbhDeficient(lam, tol) {
 			return true
 		}
-		if count < 2 {
-			continue
-		}
-		mean /= complex(float64(count), 0)
-		tol = 10 * nf * ep * (an + cmplx.Abs(mean)*en)
-		if inBand(mean, tol) && pbhDeficient(mean, tol) {
-			return true
+		for c := 1; c < len(ds) && ds[c] <= max(rho, tol); c++ {
+			r := ds[c]
+			if c+1 < len(ds) {
+				if ds[c+1] == r {
+					continue
+				}
+				r = (r + ds[c+1]) / 2
+			}
+			var mean complex128
+			for j := range n {
+				if finite[j] && cmplx.Abs(lams[j]-lam) <= r {
+					mean += lams[j]
+				}
+			}
+			mean /= complex(float64(c+1), 0)
+			sep := math.Inf(1)
+			for j := range n {
+				if finite[j] && cmplx.Abs(lams[j]-lam) > r {
+					sep = min(sep, cmplx.Abs(lams[j]-mean))
+				}
+			}
+			scale := an + cmplx.Abs(mean)*en
+			mtol := 10 * nf * ep * scale
+			if !inBand(mean, mtol) && inBand(mean, math.Sqrt(ep)*scale) {
+				mtol *= clusterCond(lam, r)
+			}
+			if mtol < sep && inBand(mean, mtol) && pbhDeficient(mean, mtol) {
+				return true
+			}
 		}
 	}
 	return false
