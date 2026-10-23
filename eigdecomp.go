@@ -124,18 +124,42 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 // (T11 is nonsingular); G2 keeps E = T22. The infinite structure is deflated
 // to the trailing block first (deflateInfinite), so QZ never has to resolve
 // an infinite Jordan chain, which it does only to |β|/|α| ~ ε^(1/k).
-// When the rank decisions are ambiguous the whole pencil goes to QZ
-// instead (decomposeGeneralizedQZ).
+// When the rank decisions are ambiguous, or E has a stiff singular value
+// and the pencil index ≥ 2 (the staircase then deflates the null space of E
+// only), the whole pencil goes to QZ instead (decomposeGeneralizedQZ).
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
-	a, e, qd, zd, nf, _, ok := deflateInfinite(sys.A, sys.E, true)
+	a, e, qd, zd, nf, stiff, ok := deflateInfinite(sys.A, sys.E, true)
+	if ok && stiff {
+		_, ok = pencilIndexOne(sys.A, sys.E, sys.A.RawMatrix().Rows, mat.Norm(sys.A, 2), stiffIndexTol)
+	}
 	if !ok {
 		return decomposeGeneralizedQZ(sys, isGroup1)
 	}
 	policy := newRealizationTransformPolicy(sys)
-	n := sys.A.RawMatrix().Rows
 	if nf == 0 {
 		return modesAllInGroup2(policy, sys)
 	}
+	selct := func(ar, ai, b float64) bool {
+		return b != 0 && isGroup1(complex(ar/b, ai/b))
+	}
+	s, t, q, z, n1, recip, err := deflatedSchur(a, e, qd, zd, nf, selct, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	if n1 == 0 {
+		return modesAllInGroup2(policy, sys)
+	}
+	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+}
+
+// deflatedSchur completes the deflation Qdᵀ(A, E)Zd = (a, e) of
+// deflateInfinite (finite block nf leading) to a generalized Schur form
+// Qᵀ(A, E)Z = (S, T): the finite block by orderedQZ, its n1 eigenvalues
+// selected by selct leading, and the infinite block by QZ on its own, so the
+// exact block structure is kept. When n1 is 0 the form is built only if
+// full is set.
+func deflatedSchur(a, e, qd, zd *mat.Dense, nf int, selct func(ar, ai, b float64) bool, full bool) (s, t, q, z []float64, n1 int, recip bool, err error) {
+	n := a.RawMatrix().Rows
 	ninf := n - nf
 	sf := make([]float64, nf*nf)
 	tf := make([]float64, nf*nf)
@@ -145,31 +169,33 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	alphai := make([]float64, n)
 	beta := make([]float64, n)
 	aRaw, eRaw := a.RawMatrix(), e.RawMatrix()
-	selct := func(ar, ai, b float64) bool {
-		return b != 0 && isGroup1(complex(ar/b, ai/b))
+	if nf > 0 {
+		var ok bool
+		n1, recip, ok = orderedQZ(nf, blas64.General{Rows: nf, Cols: nf, Stride: aRaw.Stride, Data: aRaw.Data},
+			blas64.General{Rows: nf, Cols: nf, Stride: eRaw.Stride, Data: eRaw.Data}, selct, sf, tf, qf, zf, alphar[:nf], alphai[:nf], beta[:nf])
+		if !ok {
+			return nil, nil, nil, nil, 0, false, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
+		}
 	}
-	n1, recip, ok := orderedQZ(nf, blas64.General{Rows: nf, Cols: nf, Stride: aRaw.Stride, Data: aRaw.Data},
-		blas64.General{Rows: nf, Cols: nf, Stride: eRaw.Stride, Data: eRaw.Data}, selct, sf, tf, qf, zf, alphar[:nf], alphai[:nf], beta[:nf])
-	if !ok {
-		return nil, nil, fmt.Errorf("ordered generalized Schur failed: %w", ErrSchurFailed)
-	}
-	if n1 == 0 {
-		return modesAllInGroup2(policy, sys)
+	if n1 == 0 && !full {
+		return nil, nil, nil, nil, 0, false, nil
 	}
 
-	s := make([]float64, n*n)
-	t := make([]float64, n*n)
-	q := make([]float64, n*n)
-	z := make([]float64, n*n)
+	s = make([]float64, n*n)
+	t = make([]float64, n*n)
+	q = make([]float64, n*n)
+	z = make([]float64, n*n)
 	copyStrided(s, n, sf, nf, nf, nf)
 	copyStrided(t, n, tf, nf, nf, nf)
 	qfGen := blas64.General{Rows: nf, Cols: nf, Stride: nf, Data: qf}
 	zfGen := blas64.General{Rows: nf, Cols: nf, Stride: nf, Data: zf}
 	qdRaw, zdRaw := qd.RawMatrix(), zd.RawMatrix()
-	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: nf, Stride: qdRaw.Stride, Data: qdRaw.Data}, qfGen,
-		0, blas64.General{Rows: n, Cols: nf, Stride: n, Data: q})
-	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: nf, Stride: zdRaw.Stride, Data: zdRaw.Data}, zfGen,
-		0, blas64.General{Rows: n, Cols: nf, Stride: n, Data: z})
+	if nf > 0 {
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: nf, Stride: qdRaw.Stride, Data: qdRaw.Data}, qfGen,
+			0, blas64.General{Rows: n, Cols: nf, Stride: n, Data: q})
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: nf, Stride: zdRaw.Stride, Data: zdRaw.Data}, zfGen,
+			0, blas64.General{Rows: n, Cols: nf, Stride: n, Data: z})
+	}
 	if ninf > 0 {
 		si := make([]float64, ninf*ninf)
 		ti := make([]float64, ninf*ninf)
@@ -189,7 +215,7 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 		work := make([]float64, int(query[0]))
 		if _, ok := impl.Dgges(lapack.SchurHess, lapack.SchurHess, lapack.SortNone, nil, ninf, first, ninf, second, ninf,
 			ar, ai, b, qi, ninf, zi, ninf, work, len(work), bwork); !ok {
-			return nil, nil, fmt.Errorf("generalized Schur of the infinite part failed: %w", ErrSchurFailed)
+			return nil, nil, nil, nil, 0, false, fmt.Errorf("generalized Schur of the infinite part failed: %w", ErrSchurFailed)
 		}
 		copyStrided(s[nf*n+nf:], n, si, ninf, ninf, ninf)
 		copyStrided(t[nf*n+nf:], n, ti, ninf, ninf, ninf)
@@ -199,6 +225,9 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 			0, blas64.General{Rows: n, Cols: ninf, Stride: n, Data: q[nf:]})
 		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, blas64.General{Rows: n, Cols: ninf, Stride: zdRaw.Stride, Data: zdRaw.Data[nf:]}, ziGen,
 			0, blas64.General{Rows: n, Cols: ninf, Stride: n, Data: z[nf:]})
+		if nf == 0 {
+			return s, t, q, z, n1, recip, nil
+		}
 		tmp := make([]float64, nf*ninf)
 		tmpGen := blas64.General{Rows: nf, Cols: ninf, Stride: ninf, Data: tmp}
 		for _, pair := range [2]struct {
@@ -210,7 +239,7 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 			blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, tmpGen, ziGen, 0, blas64.General{Rows: nf, Cols: ninf, Stride: n, Data: pair.dst})
 		}
 	}
-	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+	return s, t, q, z, n1, recip, nil
 }
 
 // deflateInfinite reduces the regular pencil (A, E) by orthogonal Q, Z to
@@ -664,26 +693,11 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 		return 0, nil
 	}
 	leak := fmt.Errorf("a retained mode may be infinite: %w", ErrSchurFailed)
-	var svd mat.SVD
-	if !svd.Factorize(e, mat.SVDFull) {
-		return 0, leak
-	}
-	sv := svd.Values(nil)
-	rank, _, _ := descriptorRank(sv, sv[0], n, true)
-	d := n - rank
+	d, index1 := pencilIndexOne(a, e, n, normA, math.Sqrt(eps()))
 	if d == 0 {
 		return 0, nil
 	}
-	var u, v mat.Dense
-	u.Reset()
-	svd.UTo(&u)
-	v.Reset()
-	svd.VTo(&v)
-	var av, a22 mat.Dense
-	av.Mul(a, v.Slice(0, n, rank, n))
-	a22.Mul(u.Slice(0, n, rank, n).T(), &av)
-	var svd22 mat.SVD
-	if !svd22.Factorize(&a22, mat.SVDNone) || svd22.Values(nil)[d-1] <= math.Sqrt(eps())*normA {
+	if !index1 {
 		return 0, leak
 	}
 	if ninf >= d {
@@ -703,6 +717,37 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 	}
 	return ratio[d-1] * math.Sqrt(qzInfiniteGap), nil
 }
+
+// pencilIndexOne returns d = n − rank(E) (descriptorRank, MATLAB rank) and
+// whether the pencil (a, e) has index at most 1: Ulᵀ·A·Vr is well
+// conditioned, σ_min > tol·normA, for the null spaces Ul, Vr of E. Only
+// then does E have exactly d infinite eigenvalues; an infinite Jordan chain
+// leaves Ulᵀ·A·Vr singular. A failed SVD reports index1 false.
+func pencilIndexOne(a, e *mat.Dense, n int, normA, tol float64) (d int, index1 bool) {
+	var svd mat.SVD
+	if !svd.Factorize(e, mat.SVDFull) {
+		return n, false
+	}
+	sv := svd.Values(nil)
+	rank, _, _ := descriptorRank(sv, sv[0], n, true)
+	d = n - rank
+	if d == 0 {
+		return 0, true
+	}
+	var u, v mat.Dense
+	svd.UTo(&u)
+	svd.VTo(&v)
+	var av, a22 mat.Dense
+	av.Mul(a, v.Slice(0, n, rank, n))
+	a22.Mul(u.Slice(0, n, rank, n).T(), &av)
+	var svd22 mat.SVD
+	return d, svd22.Factorize(&a22, mat.SVDNone) && svd22.Values(nil)[d-1] > tol*normA
+}
+
+// stiffIndexTol is the pencilIndexOne bound when E has a stiff singular
+// value: the stiff direction perturbs the null spaces of E, which leaves
+// Ulᵀ·A·Vr of an index-2 chain up to ~1e-6·‖A‖ instead of rounding level.
+const stiffIndexTol = 1e-5
 
 // qzInfiniteGap is the least factor between the |β|/|α| of the infinite
 // and of the finite eigenvalues for certifyFiniteRetained to tell them apart,

@@ -167,7 +167,9 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 // n − r eigenvalues of least |β|/|α| of the whole-pencil QZ are infinite
 // when a gap separates them (leastRatioInfTol) and no large one remains
 // (index 1); when E has a stiff singular value just above the rounding
-// this is the classification, with β = 0 alone infinite if no gap shows.
+// this is the classification, with β = 0 alone infinite if no gap shows
+// or the pencil has index ≥ 2 (pencilIndexOne): its chain members QZ
+// leaves at |β|/|α| ~ ε^(1/k), above the stiff finite pole's.
 // Otherwise the infinite structure is deflated first (deflateInfinite),
 // since QZ resolves an infinite Jordan chain of length k only to
 // |β|/|α| ~ ε^(1/k), and the poles are the QZ eigenvalues of the finite
@@ -197,7 +199,13 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 			margin = sv[r-1] / (float64(n) * eps() * sv[0])
 		}
 		tol, sep := leastRatioInfTol(alphar, alphai, beta, n-r, margin)
-		if stiff || sep && !largeRetained(alphar, alphai, beta, tol, qzInfiniteTol(qzLargeRatio, normA, normE)) {
+		if stiff {
+			if _, index1 := pencilIndexOne(A, E, n, normA, stiffIndexTol); !index1 {
+				tol = 0
+			}
+			return finitePoles(alphar, alphai, beta, tol), nil
+		}
+		if sep && !largeRetained(alphar, alphai, beta, tol, qzInfiniteTol(qzLargeRatio, normA, normE)) {
 			return finitePoles(alphar, alphai, beta, tol), nil
 		}
 	}
@@ -443,7 +451,10 @@ func allZeroVec(v *mat.VecDense) bool {
 // static term −C_∞ A_∞⁻¹ B_∞, which joins D. Otherwise the model is improper
 // (non-causal in discrete time) and ErrImproperModel is returned. Entries of
 // E_∞ below the finite/infinite threshold are rounding noise and are zeroed
-// so index-1 parts give N = 0 exactly. Internal
+// so index-1 parts give N = 0 exactly. QZ resolves an infinite Jordan chain
+// only to |β|/|α| ~ ε^(1/k); when it fails or keeps a large eigenvalue and
+// the staircase (deflateInfinite) counts the finite ones differently, the
+// split is taken from the deflated pencil instead. Internal
 // delay channels are reduced together with the I/O channels.
 func (sys *System) properExplicitForm() (*System, error) {
 	n, m, p := sys.Dims()
@@ -485,6 +496,14 @@ func (sys *System) properExplicitForm() (*System, error) {
 	vsl := make([]float64, n*n)
 	vsr := make([]float64, n*n)
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
+	if !ok || largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
+		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff && (!ok || nfd != nf) {
+			all := func(_, _, _ float64) bool { return true }
+			if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
+				s, t, vsl, vsr, nf, recip, ok = sd, td, qs, zs, nfd, rc, true
+			}
+		}
+	}
 	if !ok {
 		return nil, fmt.Errorf("generalized Schur decomposition failed: %w", ErrDescriptorSingular)
 	}
