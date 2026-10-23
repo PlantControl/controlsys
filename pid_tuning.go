@@ -200,6 +200,10 @@ type pidTuningPlant struct {
 	// when one is below the floor; zeroSearch checks every candidate so.
 	// Sampled data, without a model below its band, leaves both off.
 	zeroScan, zeroSearch bool
+	// zeroLow, if positive, is a tenth of the plant's slowest pole or zero,
+	// down to which the zero grid also reaches: a slow plant zero or
+	// resonance can lift |L| back through 1 below the band.
+	zeroLow float64
 	// crossScan selects the margin check of a search outside the floor.
 	crossScan pidCrossScan
 	// floorRungs, if positive, caps the floor bands tried; minTfSeed seeds
@@ -1105,6 +1109,9 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 			p.maxSensitivity = pidTuningMaxSensitivity
 		}
 		p.modes = modes()
+		if lo, _ := span(); finitePID(lo) && lo > 0 {
+			p.zeroLow = lo / 10
+		}
 		if floor {
 			lo, hi := span()
 			p.crossLow, p.crossHigh = math.Min(p.low, lo/10), math.Max(p.high, hi*10)
@@ -3557,8 +3564,10 @@ func pidTuningCrossGrid(p pidTuningPlant, omega []float64) []float64 {
 // put a 0 dB crossing that grid misses: a lightly damped pair σ+jω₀ of
 // Kd·s² + Kp·s + Ki, as when tiny Kp and Ki set it below the band, notches
 // |L| through 1 within a few |σ| of ω₀. It extends grid at step (in log ω)
-// down to a tenth of the slowest zero, at most four decades, and adds
-// points within 4|σ| of ω₀. Discrete controllers use the continuous zeros,
+// down to a tenth of the slowest zero, of p.zeroLow's plant dynamics and,
+// with integral action, of |Ki·G(0)|, where |L| ≈ |Ki·G(0)|/ω crosses 1,
+// at most four decades, and adds points within 4|σ| of ω₀ and of each
+// p.modes mode in that extension. Discrete controllers use the continuous zeros,
 // which match theirs well below Nyquist. An integral-free c whose |L| − 1
 // changes sign between ω = 0 and lo walks further down
 // (pidTuningDCCrossingFloor). It extends grid up at step too, as far as
@@ -3596,6 +3605,14 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 		}
 	}
 	floor := math.Max(slowest/10, lo*1e-4)
+	if p.zeroLow > 0 {
+		floor = math.Min(floor, math.Max(p.zeroLow, lo*1e-4))
+	}
+	if g := p.dcEdge; c.Ki != 0 && g != 0 && pidFiniteComplex(g) {
+		if wa := cmplx.Abs(complex(c.Ki, 0) * g); wa > 0 && finitePID(wa) {
+			floor = math.Min(floor, math.Max(wa/10, lo*1e-4))
+		}
+	}
 	if w, ok := pidTuningDCCrossingFloor(p, c, lo, step, cache); ok {
 		floor = math.Min(floor, w)
 	}
@@ -3622,7 +3639,9 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 	for _, m := range p.modes {
 		d := math.Max(math.Abs(real(m)), 1e-6*imag(m))
 		for j := -8.; j <= 8; j++ {
-			if w := imag(m) + j*d/2; w > hi {
+			if w := imag(m) + j*d/2; w < lo && w >= bottom {
+				modal = append(modal, w)
+			} else if w > hi {
 				modal = append(modal, w)
 				if p.loopTail == nil && p.dt == 0 && w <= hi*pidTuningTailReach {
 					top = math.Max(top, w)
