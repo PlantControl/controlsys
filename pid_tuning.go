@@ -3641,9 +3641,12 @@ func pidTuningZeroGrid(p pidTuningPlant, c PID2, grid []float64, step float64, c
 // pidTuningZeroGridTop returns the top of c's zero grid, hi or above it:
 // discrete, pidTuningSensNyquist·π/Dt; continuous, the first point of
 // hi·e^{j·step} where p.loopTail bounds |L| below 1 beyond, or, without
-// it, where |L| − 1 turns negative, at most pidTuningTailReach·hi. Past
-// the band a large Kd keeps |L| over 1 or lifts it back to 1, so 0 dB
-// crossings can lie above the band's top. sample gives G.
+// it, where |L| − 1 turns negative, at most pidTuningTailReach·hi. Where
+// p.loopTail has no bound there yet, as its Markov bound holds only above
+// ‖A‖, far above the band of a slow crossover, the grid walks on to the
+// first point it bounds, at most pidTuningTailReach²·hi. Past the band a
+// large Kd keeps |L| over 1 or lifts it back to 1, so 0 dB crossings can
+// lie above the band's top. sample gives G.
 func pidTuningZeroGridTop(p pidTuningPlant, c PID2, hi, step float64, sample func(float64) (complex128, bool)) float64 {
 	if !(step > 0) || !finitePID(hi) || hi <= 0 {
 		return hi
@@ -3662,6 +3665,15 @@ func pidTuningZeroGridTop(p pidTuningPlant, c PID2, hi, step float64, sample fun
 			return w
 		}
 		if w >= reach {
+			break
+		}
+	}
+	if p.loopTail == nil {
+		return reach
+	}
+	last := reach * pidTuningTailReach
+	for w := reach; ; w = math.Min(w*math.Exp(step), last) {
+		if !math.IsInf(p.loopTail(&c, w), 1) || w >= last {
 			return w
 		}
 	}

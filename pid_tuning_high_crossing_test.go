@@ -12,7 +12,9 @@ import (
 // PM 30 returned a 15.5° crossing at 5.25 rad/s (floor 27°), delayed PID PM
 // 60 a 51.2° one at 110.7, discrete PIDF a 31.1° one at 9.14 (floor 57°),
 // PD a 26.3° one at 45.3 and PD PM 70 a 43.5° one at 159 (floor 67°);
-// evidence listed none. Oracle: a dense sweep of L from closed forms up to
+// evidence listed none. On a plant with ‖A‖ ≈ 100 and wc 1.8e-8 the tail
+// bound has none below ~100 rad/s, so the grid stopped at 1e4·hi and PID
+// returned a 14.6° crossing at 0.0417. Oracle: a dense sweep of L from closed forms up to
 // 1e8·wc (π/Dt discrete) for every crossing, its distance from −1 and the
 // |S| peak; Routh on the undelayed characteristic, exact Schur–Cohn on the
 // discrete one, and for the delayed loop the argument principle on the
@@ -32,6 +34,7 @@ func TestTunePIDCrossingAboveBand(t *testing.T) {
 		{Poly{-2.796109607219298, 5.593663885306331, -2.7975567338662084}, Poly{1, -2.918405067519246, 2.8369550245882103, -0.918549781024696}, PidtunePIDF, 0, 0, 0.05308576324401414, 2, 57},
 		{Poly{3192.2331382806533, 5851.625992116486, -877.4244188893074, 333.241988470858}, Poly{1, 22.613219017484063, 300.08480842823417, 2335.3743882340327, 17335.04620231331, 777.8271144157021, 8.60408782147981}, PidtunePD, 0, 0, 0, 0, 57},
 		{Poly{22325.58242167066, 124508.53366421786, -142162.3708506173, 56237.397576648174}, Poly{1, 100.95776592853754, 10305.077053015631, 92467.96236379766, 344493.371039096, 244772.35713592256, 21806.063124087068}, PidtunePD, 70, 0, 0, 0, 67},
+		{Poly{0.24849499151690158, 0.0013485275346479704, 0.0002090434235708211}, Poly{1, 12.667867466748863, 2206.0447677301145, 11594.580723295541, 0}, PidtunePID, 0, 0, 0, 0, 57},
 	} {
 		tf := &TransferFunc{Num: [][][]float64{{c.num}}, Den: [][]float64{c.den}, Dt: c.dt}
 		res, err := tf.StateSpace()
@@ -141,7 +144,8 @@ func pidtuneDelayedRHPRoots(num, den Poly, k *PID2, tau float64) int {
 }
 
 // The zero grid's top: π/Dt discrete; continuous, the first step where the
-// loop tail bound drops under 1, or, without one, where |L| does.
+// loop tail bound drops under 1, or, without one, where |L| does; past
+// 1e4·hi, while the tail bound is infinite, the first step it is finite.
 func TestPIDTuningZeroGridTop(t *testing.T) {
 	g := func(w float64) complex128 { return 1 / complex(1, w) }
 	sample := func(w float64) (complex128, bool) { return g(w), true }
@@ -160,7 +164,13 @@ func TestPIDTuningZeroGridTop(t *testing.T) {
 		{pidTuningPlant{dt: .01}, pidTuningSensNyquist * math.Pi / .01, pidTuningSensNyquist * math.Pi / .01},
 		{pidTuningPlant{loopTail: tail}, 100, 100 * math.Exp(step)},
 		{pidTuningPlant{}, 1e4, 1e4},
-		{pidTuningPlant{loopTail: func(*PID2, float64) float64 { return math.Inf(1) }}, 1e4, 1e4},
+		{pidTuningPlant{loopTail: func(*PID2, float64) float64 { return math.Inf(1) }}, 1e8, 1e8},
+		{pidTuningPlant{loopTail: func(_ *PID2, w float64) float64 {
+			if w < 1e6 {
+				return math.Inf(1)
+			}
+			return 2
+		}}, 1e6, 1e6 * math.Exp(step)},
 	} {
 		if top := pidTuningZeroGridTop(x.p, c, 1, step, sample); top < x.lo*(1-1e-12) || top > x.high*(1+1e-12) {
 			t.Errorf("dt %g tail %v: top %g, want [%g, %g]", x.p.dt, x.p.loopTail != nil, top, x.lo, x.high)
