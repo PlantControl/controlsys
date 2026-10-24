@@ -763,6 +763,22 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 	}
 }
 
+// Verdicts right at 03edce8 but wrong on this branch (sw, dbl, ext sweeps,
+// AND of arm64 and amd64) are not listed in the limit maps, although
+// rlswUlpSensitive flags most of them: their converted TF equals the exact
+// TF of the float realization, and the flag comes from far noise roots or
+// unposed exact multiple poles in the perturbed oracles. The defects are in
+// rlocus.go, which fix/rlocus-wave22 fixes; with its rlocus.go on this
+// branch all three sweeps lose none of them except limits it lists:
+//   - exact multiple root of N'D−ND' (z^L or repeated pole/zero) listed
+//     twice; 03edce8 split it by TF noise: sw 17 138 166 613 977 1389 1436
+//     1518 1590 1648 1709 1745 1754, dbl 2 125 325 491 602 608 856, ext 27
+//     903 1420 1751 1762.
+//   - negative numerator lead, no K<0 sign handling (03edce8 got the
+//     segments from a far noise zero): sw 38 (departure) 74 105 194 334 372
+//     595 958 1187, dbl 107, ext 307 364 858 1081 1399 1683.
+//   - u-level TF tail: dbl 1413 (amd64), dbl 1452 (arm64), ext 32 (arm64).
+//
 // rlswPrecisionLimits are base-correct breakaway verdicts below float64
 // resolution of the given coefficients (1-ulp changes of A, B, C change the
 // exact oracle; checked by rlswUlpSensitive), where base was right by luck.
