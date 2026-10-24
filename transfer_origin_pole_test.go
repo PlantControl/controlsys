@@ -109,3 +109,65 @@ func TestTransferFunctionGradedCompanionFullRowsPerRow(t *testing.T) {
 		}
 	}
 }
+
+// 4XDPLI: graded companions with an origin pole whose observability cut
+// drops it with a zero within 1e-7 relative of it. The cut row misses by
+// under 1e-6 from its own slowest pole up, so keepObservable never made the
+// full conversion and the type-1 system came back type 0. The exact num
+// constant is resolved in float64 (no cancellation), and MATLAB ss2tf keeps
+// den = poly(A) with the integrator.
+func TestTransferFunctionGradedCompanionKeepsOriginPoleBesideSlowZero(t *testing.T) {
+	den1472 := []float64{1, 0.09228515625, 0.004141807556152344, 9.087217040359974e-05, 9.155219231615774e-07, 2.865249149053284e-09, 0}
+	b1472 := []float64{2.86102294921875e-06, -14336, 336, -2.86102294921875e-05, 1728, 0}
+	ws1472 := []float64{1e-11, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2}
+	cases := []struct {
+		name      string
+		den, b, c []float64
+		p, shape  int
+		ws        []float64
+	}{
+		{"1472", den1472, b1472, []float64{0, 0, 0, 0, 0, 1}, 1, 0, ws1472},
+		{"1472-mimo", den1472, b1472, []float64{0, 0, 0, 0, 0, 1, 0.5, 1.5, 0.25, 0.25, 1.75, 1.5}, 2, 0, ws1472},
+		{"dense-transposed", []float64{1, 2664, 3.174912e+06, 2.177994752e+09, 9.27255625728e+11, 2.47497308504064e+14, 3.986381863282278e+16, 3.4771921332810547e+18, 1.2210569259201331e+20, 0},
+			[]float64{-2.384185791015625e-07, 1536, -112, 0, 116, -92, 0.02392578125, 0, -1.28125},
+			[]float64{0.75, 1.75, -1, 0.5, -1.25, 0, 0, -0.25, 0}, 1, 2, []float64{2e-10, 2e-9, 1e-6, 1e-2, 1, 1e4}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := len(tc.den) - 1
+			a, b, c := observableCompanion(tc.den), tc.b, tc.c
+			if tc.shape != 0 {
+				a, b, c = companionShape(tc.den, tc.b, tc.c, tc.shape)
+			}
+			sys, err := NewFromSlices(n, 1, tc.p, a, b, c, make([]float64, tc.p), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := sys.TransferFunction(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range tc.p {
+				den := res.TF.Den[i]
+				if len(den) != n+1 {
+					t.Fatalf("row %d den %v, want %v", i, den, tc.den)
+				}
+				if den[n] != 0 {
+					t.Errorf("row %d den[%d] = %g, want 0 (origin pole)", i, n, den[n])
+				}
+				for k := 1; k < n; k++ {
+					if r := math.Abs(den[k]-tc.den[k]) / math.Abs(tc.den[k]); r > 1e-12 {
+						t.Errorf("row %d den[%d] = %.17g, want %.17g", i, k, den[k], tc.den[k])
+					}
+				}
+				num := ratObservableNum(tc.den, tc.b, tc.c[i*n:(i+1)*n])
+				for _, w := range tc.ws {
+					ex := ratRatioJ(num, tc.den, w)
+					if e := cmplx.Abs(res.TF.eval(complex(0, w))[i][0]-ex) / cmplx.Abs(ex); e > 1e-9 {
+						t.Errorf("row %d at w=%g off exact by %.3g", i, w, e)
+					}
+				}
+			}
+		})
+	}
+}

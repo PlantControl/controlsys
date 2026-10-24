@@ -348,8 +348,10 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 // magnitude: the last Hessenberg subdiagonal of a slow companion is an exact
 // product of tiny couplings, which the cut drops with the origin pole and a
 // zero (U3H63X). A truly hidden mode leaves c matching everywhere, so it
-// stays dropped, and the full conversion is only made once c misses in its
-// own band. The default check points sit far above such poles, where the
+// stays dropped. The band of c alone starts at its slowest kept pole, above
+// a cut origin pole and its near-cancelling zero, where c can miss by less
+// than 1e-6 (4XDPLI), so the full conversion is always made and the joint
+// band decides. The default check points sit far above such poles, where the
 // lost state barely shows; the band points below them are solved in
 // double-double where GEPP rejects them, and the full conversion takes a
 // row the staircase floor cut directly (see directRowTF) when it can.
@@ -359,9 +361,6 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 	}
 	c.trimRows()
 	bd := newBalancedDense(c.sys, c.n, c.m, c.p)
-	if e, ok := sampleBandCheck(c.sys, bd, bandCheckPoints(c.sys, c.tf.polys()), false).resolvedErr(c.tf); !ok || !(e > 1e-6) {
-		return c, order
-	}
 	full := c.fresh(c.sys)
 	full.keepObs = true
 	fullOrder, _, err := full.convertFrom(false)
