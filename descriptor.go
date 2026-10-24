@@ -178,7 +178,9 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 // block. When the deflation is ambiguous, |β| ≤ 100·n·ε·|α|·‖E‖/‖A‖ is
 // infinite, and a large remaining pole is dropped as well when
 // certifyFiniteRetained proves it one of the n − rank(E) infinite
-// eigenvalues of an index-1 pencil; one it cannot classify is kept.
+// eigenvalues of an index-1 pencil; one it cannot classify is kept. In the
+// gap-separated index-1 case a dropped real eigenvalue whose β the
+// coefficients resolve is kept (keepResolvedStiffPoles).
 func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
 	alphar, alphai, beta, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
@@ -209,7 +211,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 		}
 		if sep && !largeRetained(alphar, alphai, beta, tol, qzInfiniteTol(qzLargeRatio, normA, normE)) {
 			if _, index1 := pencilIndexOne(A, E, n, normA); index1 {
-				return finitePoles(alphar, alphai, beta, tol), nil
+				return keepResolvedStiffPoles(A, E, n, alphar, alphai, beta, tol), nil
 			}
 		}
 	}
@@ -223,6 +225,59 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	}
 	return finitePoles(alphar, alphai, beta, infTol), nil
 }
+
+// keepResolvedStiffPoles is finitePoles at infTol, except that a real
+// eigenvalue infTol drops is kept when stiffPoleResolved: E within MATLAB
+// rank tolerance of singular can still carry a stiff finite pole whose β
+// the coefficients of E determine. β ≠ 0 there implies α ≠ 0.
+func keepResolvedStiffPoles(A, E *mat.Dense, n int, alphar, alphai, beta []float64, infTol float64) []complex128 {
+	poles := finitePoles(alphar, alphai, beta, infTol)
+	for i := range beta {
+		if alphai[i] == 0 && beta[i] != 0 && qzInfinite(alphar[i], 0, beta[i], infTol) &&
+			stiffPoleResolved(A, E, n, beta[i]/alphar[i]) {
+			poles = append(poles, complex(alphar[i]/beta[i], 0))
+		}
+	}
+	return poles
+}
+
+// stiffPoleResolved reports whether the eigenvalue 1/μ of (A, E), real μ
+// ≈ 0, has |yᵀEx| above stiffResolvedRatio times its componentwise
+// rounding ε·(|y|ᵀ|E||x| + |μ|·|y|ᵀ|A||x|), x and y the unit null vectors
+// of E − μA. Normwise (ε·‖E‖) such a β can lie within rounding; a
+// componentwise perturbation of the coefficients still keeps its sign.
+func stiffPoleResolved(A, E *mat.Dense, n int, mu float64) bool {
+	m := mat.NewDense(n, n, nil)
+	m.Scale(-mu, A)
+	m.Add(m, E)
+	var svd mat.SVD
+	if !svd.Factorize(m, mat.SVDFull) {
+		return false
+	}
+	var u, v mat.Dense
+	svd.UTo(&u)
+	svd.VTo(&v)
+	ur, vr := u.RawMatrix(), v.RawMatrix()
+	ad, ed := A.RawMatrix(), E.RawMatrix()
+	var bet, absE, absA float64
+	for i := range n {
+		yi := ur.Data[i*ur.Stride+n-1]
+		for j := range n {
+			xj := vr.Data[j*vr.Stride+n-1]
+			e := ed.Data[i*ed.Stride+j]
+			bet += yi * e * xj
+			absE += math.Abs(yi * e * xj)
+			absA += math.Abs(yi * ad.Data[i*ad.Stride+j] * xj)
+		}
+	}
+	return math.Abs(bet) > stiffResolvedRatio*eps()*(absE+math.Abs(mu)*absA)
+}
+
+// stiffResolvedRatio is the least factor of stiffPoleResolved. Over ~2700
+// randomized Weierstrass pencils the near-infinite eigenvalues reach 0.85
+// (amd64; 0.51 arm64), while 2262 of 2271 stiff finite poles of an E within
+// MATLAB rank tolerance of singular exceed 3 (the 7TQIAU pencil at 8).
+const stiffResolvedRatio = 2.5
 
 // largeRetained reports whether an eigenvalue that infTol keeps is large,
 // |β| ≤ largeTol·|α|, a possible member of an infinite Jordan chain.
