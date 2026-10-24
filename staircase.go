@@ -23,6 +23,11 @@ type staircaseResult struct {
 	// MinCoupling is the least singular value counted as rank in the
 	// steps after the first (A's subdiagonal blocks); +Inf when none.
 	MinCoupling float64
+	// Amplification bounds, to first order, the growth of rounding on its
+	// way to the uncontrollable rows: a step's rotation errs by its block's
+	// error over σ_rank, and the next block inherits that times ‖A‖. It is
+	// σ₁(B)/σ_rank(B) times ‖A‖_F/σ_rank over the later steps.
+	Amplification float64
 }
 
 // controllabilityStaircase reduces (A, B, C) to controllability staircase
@@ -123,13 +128,14 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 
 	if n == 0 || m == 0 {
 		return &staircaseResult{
-			A:           denseCopy(A),
-			B:           denseCopy(B),
-			C:           denseCopy(C),
-			T:           tWork,
-			NCont:       0,
-			BlockSizes:  nil,
-			MinCoupling: math.Inf(1),
+			A:             denseCopy(A),
+			B:             denseCopy(B),
+			C:             denseCopy(C),
+			T:             tWork,
+			NCont:         0,
+			BlockSizes:    nil,
+			MinCoupling:   math.Inf(1),
+			Amplification: 1,
 		}, nil
 	}
 
@@ -156,6 +162,8 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 	ncont := 0
 	var blockSizes []int
 	minCoupling := math.Inf(1)
+	amp := 1.0
+	an := frobNorm(A)
 
 	bufSize := n * n
 	if nm := n * m; nm > bufSize {
@@ -201,6 +209,9 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 
 		if len(blockSizes) > 0 {
 			minCoupling = math.Min(minCoupling, vals[rank-1])
+			amp *= an / vals[rank-1]
+		} else {
+			amp *= vals[0] / vals[rank-1]
 		}
 		blockSizes = append(blockSizes, rank)
 
@@ -261,12 +272,13 @@ func controllabilityStaircaseFloor(A, B, C *mat.Dense, tol, floor float64, wantT
 	}
 
 	return &staircaseResult{
-		A:           aWork,
-		B:           bWork,
-		C:           cWork,
-		T:           tWork,
-		NCont:       ncont,
-		BlockSizes:  blockSizes,
-		MinCoupling: minCoupling,
+		A:             aWork,
+		B:             bWork,
+		C:             cWork,
+		T:             tWork,
+		NCont:         ncont,
+		BlockSizes:    blockSizes,
+		MinCoupling:   minCoupling,
+		Amplification: amp,
 	}, nil
 }
