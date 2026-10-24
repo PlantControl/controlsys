@@ -165,7 +165,10 @@ func TestTunePIDFRDCrossingsBetweenGridPoints(t *testing.T) {
 // the 200 samples do not resolve, so the count leaves it unknown and the
 // call may fail instead (N4MOKA). Oracles: closed-loop roots
 // and a dense |S| sweep of the exact plant, and sign changes of |L| − 1
-// and wrapped phases of the documented interpolant.
+// and wrapped phases of the documented interpolant, or, for a crossing
+// read along a fitted resonance arc (I at 0.401, whose chord crossings
+// near 2.31 rad/s sit where exact |L| is 0.4-0.7), the exact plant's angle
+// from −1 there.
 func TestTunePIDFRDFreeOneGainReportsSampledCrossings(t *testing.T) {
 	for i, c := range []struct {
 		num, den []float64
@@ -229,8 +232,9 @@ func TestTunePIDFRDFreeOneGainReportsSampledCrossings(t *testing.T) {
 		for j, m := range ev.PhaseMargins {
 			w := ev.GainCrossovers[j]
 			l, _ := g(w)
-			if want := fzPidWrap(180 + cmplx.Phase(l*ctrl.resp(w))*180/math.Pi); math.Abs(math.Remainder(m-want, 360)) > .5 {
-				t.Errorf("case %d: margin %g at %g, interpolant gives %g", i, m, w, want)
+			want := fzPidWrap(180 + cmplx.Phase(l*ctrl.resp(w))*180/math.Pi)
+			if far := 180 - math.Abs(cmplx.Phase(exact(w)*ctrl.resp(w)))*180/math.Pi; math.Abs(math.Remainder(m-want, 360)) > .5 && math.Abs(m-far) > .5 {
+				t.Errorf("case %d: margin %g at %g, interpolant gives %g, exact plant's angle from −1 %g", i, m, w, want, far)
 			}
 			least = math.Min(least, m)
 		}
