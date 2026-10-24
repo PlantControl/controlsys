@@ -499,13 +499,7 @@ func (ck tfCheck) rowPointErrs(tf *TransferFunc, only int) []float64 {
 			if dv := Poly(tf.Den[i]).Eval(s); cmplx.IsInf(dv) || cmplx.IsNaN(dv) {
 				continue
 			}
-			rowMag := 0.0
-			for j := range row {
-				rowMag = max(rowMag, cmplx.Abs(ck.ref[k][i*m+j]))
-			}
-			if rowMag == 0 {
-				rowMag = ck.mag[k]
-			}
+			rowMag := ck.rowMag(k, i, m)
 			for j, v := range row {
 				ref := ck.ref[k][i*m+j]
 				scale := max(cmplx.Abs(ref), eps()*rowMag)
@@ -522,6 +516,19 @@ func (ck tfCheck) rowPointErrs(tf *TransferFunc, only int) []float64 {
 		out[k] = worst
 	}
 	return out
+}
+
+// rowMag is the largest reference magnitude of output row i at point k,
+// or that of all rows when the row is zero there.
+func (ck tfCheck) rowMag(k, i, m int) float64 {
+	mag := 0.0
+	for _, v := range ck.ref[k][i*m : (i+1)*m] {
+		mag = max(mag, cmplx.Abs(v))
+	}
+	if mag == 0 {
+		return ck.mag[k]
+	}
+	return mag
 }
 
 // choose returns the Dgebal or Osborne converter, filled, and its order.
@@ -972,7 +979,9 @@ func (ck tfCheck) relErr(tf *TransferFunc) (worst float64, ok bool) {
 
 // trimOK reports whether numerator trimmed over den matches entry (i, j) of
 // an m-input model at every point to within twice the error of numerator
-// full at that point, or 1e3·n·eps, relative to the entry. A point where
+// full at that point, or 1e3·n·eps, relative to the entry, floored at eps
+// times the largest entry of row i: rows are independent, and eps of a far
+// larger row hid a small exact row's lost degree (TOIGMD). A point where
 // full is inaccurate gives no slack at another. With sens, a point where
 // the entry is unresolved (sens ≥ |ref|) also allows sens/|ref|, as long as
 // some point resolves the entry to 10%: a fast mode in a dense basis leaves
@@ -990,7 +999,7 @@ func (ck tfCheck) trimOK(i, j, m, n int, trimmed, full, den []float64) bool {
 		for k := range ck.s {
 			if ck.sens[k] != nil {
 				ref := ck.ref[k][i*m+j]
-				resolved = resolved || ck.sens[k][i*m+j] < 0.1*max(cmplx.Abs(ref), eps()*ck.mag[k])
+				resolved = resolved || ck.sens[k][i*m+j] < 0.1*max(cmplx.Abs(ref), eps()*ck.rowMag(k, i, m))
 			}
 		}
 		if resolved {
@@ -1007,7 +1016,7 @@ func (ck tfCheck) trimOK(i, j, m, n int, trimmed, full, den []float64) bool {
 	}
 	for k, s := range ck.s {
 		ref := ck.ref[k][i*m+j]
-		scale := max(cmplx.Abs(ref), eps()*ck.mag[k])
+		scale := max(cmplx.Abs(ref), eps()*ck.rowMag(k, i, m))
 		d := Poly(den).Eval(s)
 		eT := cmplx.Abs(Poly(trimmed).Eval(s)/d-ref) / scale
 		eF := cmplx.Abs(Poly(full).Eval(s)/d-ref) / scale

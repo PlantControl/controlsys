@@ -74,7 +74,8 @@ func TestTransferFunctionGradedCompanionKeepsOriginPole(t *testing.T) {
 // Rows of a graded observable companion are taken from the full-order
 // conversion one by one: the eₙᵀ row is exact there, while the full
 // conversion of the dense rows lost their response far above the poles,
-// which the cut rows keep (seeded MIMO sweep trial 1371).
+// which the cut rows keep (seeded MIMO sweep trial 1371). Every entry is
+// checked below the poles too, where cut dense rows were off by ~1 (TOIGMD).
 func TestTransferFunctionGradedCompanionFullRowsPerRow(t *testing.T) {
 	cs := newObservableMIMO(
 		[]float64{1, 0.001705169677734375, 1.3068784028291702e-06, 5.920067769338289e-10, 1.751269915200329e-13, 3.521489792846935e-17, 4.83880643540895e-21, 4.410882240923436e-25, 2.4380426657192067e-29, 6.2618485959831026e-34},
@@ -97,10 +98,7 @@ func TestTransferFunctionGradedCompanionFullRowsPerRow(t *testing.T) {
 				bcol[k] = cs.b[k*cs.m+j]
 			}
 			num := ratObservableNum(cs.den, bcol, cs.c[i*cs.n:(i+1)*cs.n])
-			for _, w := range []float64{1e-8, 1e-6, 1e-4, 1e-2, 1, 100} {
-				if i > 0 && w < 1 {
-					continue
-				}
+			for _, w := range []float64{1e-8, 1e-6, 1e-5, 1e-4, 1e-2, 1, 100} {
 				r := ratRatioJ(num, cs.den, w)
 				if e := cmplx.Abs(tf.eval(complex(0, w))[i][j]-r) / cmplx.Abs(r); e > 1e-12 {
 					t.Errorf("entry %d,%d at w=%g off exact by %.3g", i, j, w, e)

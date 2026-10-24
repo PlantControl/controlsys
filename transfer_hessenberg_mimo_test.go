@@ -268,7 +268,9 @@ func TestTransferFunctionObservableCompanionMixedRows(t *testing.T) {
 // multi-output observable companions, one row eₙᵀ and the others dense,
 // with and without the given-basis path (DZG5LV) against the exact big.Rat
 // entries: the path must never be worse, nor flip a row's right-half-plane
-// root count.
+// root count. Every entry must be within 1e-8 and no row den, cut or not,
+// may gain RHP roots (TOIGMD: cut dense rows of trial 1371 were off by ~1
+// below the poles with negative den coefficients).
 func TestTransferFunctionObservableCompanionMIMOSweep(t *testing.T) {
 	skipSlowUnderRace(t)
 	r := rand.New(rand.NewPCG(99, 77))
@@ -278,7 +280,7 @@ func TestTransferFunctionObservableCompanionMIMOSweep(t *testing.T) {
 		tfNew, tfBase := convertMIMOCompanion(t, cs, false), convertMIMOCompanion(t, cs, true)
 		ex := newMIMOExact(cs)
 		eNew, eBase := ex.respErr(tfNew, cs.m), ex.respErr(tfBase, cs.m)
-		if eNew > 2*eBase && eNew > 1e-12 {
+		if eNew > 2*eBase && eNew > 1e-12 || !(eNew <= 1e-8) {
 			t.Errorf("trial %d: err %.3g, without the path %.3g; A %v B %v C %v", trial, eNew, eBase, cs.a, cs.b, cs.c)
 		}
 		den := cs.den
@@ -287,6 +289,10 @@ func TestTransferFunctionObservableCompanionMIMOSweep(t *testing.T) {
 			if len(tfNew.Den[i]) == cs.n+1 && len(tfBase.Den[i]) == cs.n+1 &&
 				rhpRoots(tfNew.Den[i]) != rhp && rhpRoots(tfBase.Den[i]) == rhp {
 				t.Errorf("trial %d: row %d den %v flips the RHP root count of %v", trial, i, tfNew.Den[i], den)
+			}
+			// A cut row's den divides poly(A), so it has no extra RHP roots.
+			if rhpRoots(tfNew.Den[i]) > rhp {
+				t.Errorf("trial %d: row %d den %v has more RHP roots than %v", trial, i, tfNew.Den[i], den)
 			}
 		}
 	}
