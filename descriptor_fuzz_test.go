@@ -437,12 +437,10 @@ func fzCheckDescriptor(t *testing.T, s *fzSpec) {
 		}
 		t.Fatalf("TransferFunction: %v (IsProper %v)\n%s", err, pr, s)
 	}
-	if !pr {
-		// TF of an improper descriptor returns the improper ratio (MATLAB tf(dss), SC36CE);
-		// the checks below assume a proper TF.
-		fzSkip(t, "improper descriptor TF")
-	}
 	tf := res.TF
+	if improper := fzTFImproper(tf); improper == pr {
+		t.Fatalf("TransferFunction improper=%v, IsProper %v\nnum=%v den=%v\n%s", improper, pr, tf.Num, tf.Den, s)
+	}
 	nfc := d.nf
 	var cp []float64
 	if nfc > 0 {
@@ -554,4 +552,25 @@ func fzDescSeeds() []fzSeed {
 			s.N, s.M, s.P, s.Mag, s.Damp, s.In, s.Out, s.Tau = 5, 2, 1, [3]float64{0, 0.5, 1}, [3]float64{2, 3, 1}, 2.0, 0.2, 2
 		}),
 	}
+}
+
+// fzTFImproper reports whether a channel numerator of tf outranks its
+// denominator (leading coefficients first, exact zeros trimmed).
+func fzTFImproper(tf *TransferFunc) bool {
+	deg := func(c []float64) int {
+		for i, x := range c {
+			if x != 0 {
+				return len(c) - 1 - i
+			}
+		}
+		return -1
+	}
+	for i, row := range tf.Num {
+		for _, num := range row {
+			if deg(num) > deg(tf.Den[i]) {
+				return true
+			}
+		}
+	}
+	return false
 }
