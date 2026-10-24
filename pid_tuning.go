@@ -177,6 +177,11 @@ type pidTuningPlant struct {
 	// plant across which a resonance the data do not resolve may loop
 	// (pidTuningFRDResonances).
 	resonances [][]pidTuningFRDMode
+	// arcs holds, by step as resonances, the fitted interpolants of each
+	// step of sampled data across which a lightly damped mode's circle
+	// turns past π/8, along which pidTuningSensitivityPeak also reads |S|
+	// (pidTuningFRDArcs).
+	arcs [][]pidTuningFRDMode
 	// markov, if nonzero, is lim sG(s) that continuous sampled data show at
 	// their top (pidTuningFRDMarkov), and markovSpread its change over the
 	// top half decade.
@@ -3854,7 +3859,8 @@ func pidTuningModes(plant *System) []complex128 {
 // σ+jω₀, is at most max(|σ|, |ω−ω₀|)/4, so a lightly damped mode's narrow
 // peak is bracketed. Grid maxima within 0.8 of the running peak are then
 // refined by golden section on log ω, since a delay ripple can sit between
-// samples and read ~10% low. |S| at p.dcEdge and p.nyquistEdge counts too.
+// samples and read ~10% low. |S| at p.dcEdge and p.nyquistEdge counts too,
+// and along sampled data's fitted resonance arcs (p.arcs).
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 	band := math.Max(p.high, p.crossHigh)
 	top, start := math.Max(band, p.sensHigh), p.low
@@ -3886,7 +3892,7 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 		return v
 	}
 	s := func(w float64) float64 { return sample(w, false) }
-	peak := pidTuningEdgeSensitivity(p, c)
+	peak := math.Max(pidTuningEdgeSensitivity(p, c), pidTuningFRDArcPeak(p.arcs, p.samples, c))
 	high, extend, inBand := top, p.loopTail != nil && p.maxSensitivity > 1, 0
 	var w0, v0, w1, v1 float64
 	for k, w := 0, start; ; k++ {

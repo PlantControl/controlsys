@@ -357,6 +357,7 @@ func pidTuningFRDPlant(data *FRD, unstablePoles *int) pidTuningPlant {
 		p.dcGain, p.highGain = dc, p.at(high)
 		p.dcEdge = complex(p.dcGain, 0)
 	}
+	p.arcs = pidTuningFRDArcs(data)
 	return p
 }
 
@@ -919,42 +920,102 @@ type pidTuningFRDMode struct{ pole, c, r complex128 }
 // unknown to the count.
 func pidTuningFRDResonances(data *FRD) [][]pidTuningFRDMode {
 	n := len(data.Omega)
-	w := data.Omega
 	g := func(k int) complex128 { return data.Response[k][0][0] }
 	var out [][]pidTuningFRDMode
 	for k := 0; k+1 < n; k++ {
 		peak := math.Max(cmplx.Abs(g(k)), cmplx.Abs(g(k+1)))
 		marked := math.Abs(cmplx.Phase(g(k+1)/g(k))) > math.Pi/2 && !(k > 0 && !(peak > cmplx.Abs(g(k-1))) || k+2 < n && !(peak > cmplx.Abs(g(k+2))))
-		var poles []complex128
-		for _, j := range []int{k - 1, k + 2} {
-			if j < 0 || j >= n {
-				continue
-			}
-			pole := pidTuningFRDMobiusPole(w[k], w[k+1], w[j], g(k), g(k+1), g(j))
-			if !pidFiniteComplex(pole) || !(imag(pole) > 0) {
-				continue
-			}
-			span := 2 * (math.Atan((w[k+1]-real(pole))/imag(pole)) - math.Atan((w[k]-real(pole))/imag(pole)))
-			marked = marked || span > math.Pi/2
-			poles = append(poles, pole)
-		}
-		if !marked {
+		modes, span := pidTuningFRDStepFits(data, k)
+		if !marked && !(span > math.Pi/2) {
 			continue
 		}
 		if out == nil {
 			out = make([][]pidTuningFRDMode, n-1)
 		}
-		modes := []pidTuningFRDMode{}
-		for _, pole := range poles {
-			da, db := 1/complex(w[k]-real(pole), -imag(pole)), 1/complex(w[k+1]-real(pole), -imag(pole))
-			r := (g(k) - g(k+1)) / (da - db)
-			if m := (pidTuningFRDMode{pole, g(k) - r*da, r}); pidFiniteComplex(m.c) && pidFiniteComplex(m.r) {
-				modes = append(modes, m)
-			}
+		out[k] = modes
+	}
+	return out
+}
+
+// pidTuningFRDStepFits returns the interpolants across step samples[k] →
+// samples[k+1] of data (above DC) that the Möbius fits through its two
+// samples and either neighbour give, those with σ > 0, and the largest
+// turn of a fit's circle across the step, 0 without one.
+func pidTuningFRDStepFits(data *FRD, k int) ([]pidTuningFRDMode, float64) {
+	w := data.Omega
+	g := func(k int) complex128 { return data.Response[k][0][0] }
+	modes, span := []pidTuningFRDMode{}, 0.
+	for _, j := range []int{k - 1, k + 2} {
+		if j < 0 || j >= len(w) {
+			continue
+		}
+		pole := pidTuningFRDMobiusPole(w[k], w[k+1], w[j], g(k), g(k+1), g(j))
+		if !pidFiniteComplex(pole) || !(imag(pole) > 0) {
+			continue
+		}
+		span = math.Max(span, 2*(math.Atan((w[k+1]-real(pole))/imag(pole))-math.Atan((w[k]-real(pole))/imag(pole))))
+		da, db := 1/complex(w[k]-real(pole), -imag(pole)), 1/complex(w[k+1]-real(pole), -imag(pole))
+		r := (g(k) - g(k+1)) / (da - db)
+		if m := (pidTuningFRDMode{pole, g(k) - r*da, r}); pidFiniteComplex(m.c) && pidFiniteComplex(m.r) {
+			modes = append(modes, m)
+		}
+	}
+	return modes, span
+}
+
+// pidTuningFRDArcs returns, by step as pidTuningFRDResonances, the fitted
+// interpolants (pidTuningFRDStepFits) of each step of data (above DC)
+// whose fitted circle turns past π/8 across it, or nil when there is none:
+// there the samples resolve a lightly damped mode only coarsely, and the
+// chord between them cuts inside its circle, missing an |S| peak between
+// them that the fit follows.
+func pidTuningFRDArcs(data *FRD) [][]pidTuningFRDMode {
+	var out [][]pidTuningFRDMode
+	for k := 0; k+1 < len(data.Omega); k++ {
+		modes, span := pidTuningFRDStepFits(data, k)
+		if !(span > math.Pi/8) || len(modes) == 0 {
+			continue
+		}
+		if out == nil {
+			out = make([][]pidTuningFRDMode, len(data.Omega)-1)
 		}
 		out[k] = modes
 	}
 	return out
+}
+
+// pidTuningFRDArcPeak returns the largest |S| of c along the fitted
+// interpolants arcs of the steps of samples (pidTuningFRDArcs), each read
+// at 16 points even in the angle its pole sees and refined about its
+// largest by golden section, or 0 without arcs.
+func pidTuningFRDArcPeak(arcs [][]pidTuningFRDMode, samples []float64, c PID2) float64 {
+	peak := 0.
+	for k, modes := range arcs {
+		for _, m := range modes {
+			w0, sigma := real(m.pole), imag(m.pole)
+			s := func(w float64) float64 {
+				v := 1 / cmplx.Abs(1+(m.c+m.r/(complex(w, 0)-m.pole))*pidTuningFeedback(c, w))
+				if math.IsNaN(v) {
+					return math.Inf(1)
+				}
+				return v
+			}
+			ta, tb := math.Atan((samples[k]-w0)/sigma), math.Atan((samples[k+1]-w0)/sigma)
+			const pieces = 16
+			at := func(i int) float64 {
+				return math.Min(math.Max(w0+sigma*math.Tan(ta+(tb-ta)*float64(i)/pieces), samples[k]), samples[k+1])
+			}
+			best, bv := 0, 0.
+			for i := 0; i <= pieces; i++ {
+				if v := s(at(i)); v > bv {
+					best, bv = i, v
+				}
+			}
+			_, g := pidTuningGoldenMax(s, at(max(best-1, 0)), at(min(best+1, pieces)))
+			peak = math.Max(peak, math.Max(bv, g))
+		}
+	}
+	return peak
 }
 
 // pidTuningFRDMobiusPole is the pole of the Möbius map

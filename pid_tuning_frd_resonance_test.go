@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"math"
 	"testing"
 )
 
@@ -124,5 +125,84 @@ func TestTunePIDFRDResolvedResonanceKeepsDesign(t *testing.T) {
 	}
 	if peak, at := pidDenseSensitivity(k, exact, 1e-3, 1e2); peak > 4 {
 		t.Errorf("%+v dense |S| %g at %g", k, peak, at)
+	}
+}
+
+// 5G6YXU: ζ = 0.046 at 6.44 rad/s on samples 5% apart (σ = 0.30): the
+// step above the resonance turns its circle by 78°, short of the count's
+// quarter turn, and the chord between its samples cut inside the circle,
+// so the sampled |S| of this PI read 3.57 against a dense 6.02 at 6.62
+// rad/s. Along the fitted resonance it reads the dense peak. Oracle: a
+// dense |S| sweep of the exact plant.
+func TestPIDTuningFRDSensitivityPeakFollowsArc(t *testing.T) {
+	num, den := []float64{87.79273299108002}, []float64{1, 0.5970851544204655, 41.47651141229077}
+	frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, num, den, 0, 0.0011661855703621533, 452.1165827954031, 262), num, den)
+	k := PID2{Kp: 0.02675078176886847, Ki: 0.24064168758398488, B: 1, C: 1}
+	exact := func(w float64) complex128 {
+		s := complex(0, w)
+		return pidPolyAt(num, s) / pidPolyAt(den, s)
+	}
+	dense, _ := pidDenseSensitivity(k, exact, 1, 20)
+	for _, strict := range []bool{false, true} {
+		p := pidTuningFRDPlant(frd, nil)
+		if strict {
+			p, _ = pidTuningFRDStrictPlant(frd, nil)
+		}
+		p.maxSensitivity, p.crossLow, p.crossHigh = pidTuningMaxSensitivity, p.low, p.high
+		if peak := pidTuningSensitivityPeak(p, k); math.Abs(peak-dense) > .05*dense {
+			t.Errorf("strict %v: sampled |S| %g, dense %g", strict, peak, dense)
+		}
+	}
+}
+
+// 5G6YXU: on these lightly damped plants (ζ 0.01-0.07) TunePIDFRD
+// certified stable designs with sampled |S| <= 4 and dense |S| 4.4-6.0
+// between samples 2.5-5% apart about the resonance. Each now returns a
+// certified stable design with dense |S| <= 4 and the margin asked within
+// 3°, or, for the PI, fails. Oracles: companion roots and a dense |S|
+// sweep of the exact plant.
+func TestTunePIDFRDArcSensitivity(t *testing.T) {
+	cases := []struct {
+		name     string
+		num, den []float64
+		lo, hi   float64
+		n        int
+		family   PidtuneType
+		pm       float64
+	}{
+		{"82", []float64{490.901408513619}, []float64{1, 4.032335082820667, 535.4806740835618, 199.3019023956184, 4095.1958006460177, 31.245174001970312, 121.48384152077081}, 0.001463989011206276, 760.8521933269211, 326, PidtunePID, 0},
+		{"446", []float64{0.03427386159776838, 0.014532818541378367}, []float64{1, 0.2636013737368447, 5.091192189068356, 0.038108756380640485, 0.024300556782702296}, 0.003781847655459871, 455.973506587706, 283, PidtunePDF, 45},
+		{"863", []float64{0.00021970886469083835}, []float64{1, 0.9776769452222025, 0.1027180463208214, 0.018029569371016227, 0.0012495681804130616}, 0.00437729377687368, 257.2570683909091, 215, PidtunePID, 70},
+		{"1139", []float64{87.79273299108002}, []float64{1, 0.5970851544204655, 41.47651141229077}, 0.0011661855703621533, 452.1165827954031, 262, PidtunePI, 70},
+		{"1662", []float64{-0.0009820178513339885}, []float64{1, 0.08206323645579383, 0.641603795034597, 0.004614502651611619, 0.0014155991549359775}, 0.00857853825824086, 205.38058135561954, 252, PidtunePD, 45},
+		{"1851", []float64{6.464532750828114}, []float64{1, 1.021751437068309, 52.08341188662163, 2.923264202150054}, 0.007945063099872534, 462.51586702986936, 338, PidtunePID, 0},
+	}
+	for _, c := range cases {
+		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, 0, c.lo, c.hi, c.n), c.num, c.den)
+		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
+		if err != nil {
+			if c.family != PidtunePI {
+				t.Errorf("%s: %v", c.name, err)
+			}
+			continue
+		}
+		k := *r.Controller
+		if pidHasWarning(r, "not certified") {
+			t.Errorf("%s: %+v not certified", c.name, k)
+		}
+		if re := pidClosedLoopMaxRe(c.num, c.den, k); !(re < 0) {
+			t.Errorf("%s: %+v closed-loop root at Re %g", c.name, k, re)
+			continue
+		}
+		exact := func(w float64) complex128 {
+			s := complex(0, w)
+			return pidPolyAt(c.num, s) / pidPolyAt(c.den, s)
+		}
+		if peak, at := pidDenseSensitivity(k, exact, c.lo, c.hi); peak > 4 {
+			t.Errorf("%s: %+v dense |S| %g at %g", c.name, k, peak, at)
+		}
+		if pm := r.Evidence.AchievedPhaseMargin; c.pm > 0 && math.Abs(pm-c.pm) > 3 {
+			t.Errorf("%s: %+v achieved PM %g, want %g", c.name, k, pm, c.pm)
+		}
 	}
 }
