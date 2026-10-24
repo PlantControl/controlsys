@@ -925,14 +925,14 @@ func pidTuningFRDResonances(data *FRD) [][]pidTuningFRDMode {
 	for k := 0; k+1 < n; k++ {
 		peak := math.Max(cmplx.Abs(g(k)), cmplx.Abs(g(k+1)))
 		marked := math.Abs(cmplx.Phase(g(k+1)/g(k))) > math.Pi/2 && !(k > 0 && !(peak > cmplx.Abs(g(k-1))) || k+2 < n && !(peak > cmplx.Abs(g(k+2))))
-		modes, span := pidTuningFRDStepFits(data, k)
+		fits, nf, span := pidTuningFRDStepFits(data, k)
 		if !marked && !(span > math.Pi/2) {
 			continue
 		}
 		if out == nil {
 			out = make([][]pidTuningFRDMode, n-1)
 		}
-		out[k] = modes
+		out[k] = append([]pidTuningFRDMode{}, fits[:nf]...)
 	}
 	return out
 }
@@ -941,10 +941,9 @@ func pidTuningFRDResonances(data *FRD) [][]pidTuningFRDMode {
 // samples[k+1] of data (above DC) that the Möbius fits through its two
 // samples and either neighbour give, those with σ > 0, and the largest
 // turn of a fit's circle across the step, 0 without one.
-func pidTuningFRDStepFits(data *FRD, k int) ([]pidTuningFRDMode, float64) {
+func pidTuningFRDStepFits(data *FRD, k int) (fits [2]pidTuningFRDMode, n int, span float64) {
 	w := data.Omega
 	g := func(k int) complex128 { return data.Response[k][0][0] }
-	modes, span := []pidTuningFRDMode{}, 0.
 	for _, j := range []int{k - 1, k + 2} {
 		if j < 0 || j >= len(w) {
 			continue
@@ -957,10 +956,11 @@ func pidTuningFRDStepFits(data *FRD, k int) ([]pidTuningFRDMode, float64) {
 		da, db := 1/complex(w[k]-real(pole), -imag(pole)), 1/complex(w[k+1]-real(pole), -imag(pole))
 		r := (g(k) - g(k+1)) / (da - db)
 		if m := (pidTuningFRDMode{pole, g(k) - r*da, r}); pidFiniteComplex(m.c) && pidFiniteComplex(m.r) {
-			modes = append(modes, m)
+			fits[n] = m
+			n++
 		}
 	}
-	return modes, span
+	return fits, n, span
 }
 
 // pidTuningFRDArcs returns, by step as pidTuningFRDResonances, the fitted
@@ -972,14 +972,14 @@ func pidTuningFRDStepFits(data *FRD, k int) ([]pidTuningFRDMode, float64) {
 func pidTuningFRDArcs(data *FRD) [][]pidTuningFRDMode {
 	var out [][]pidTuningFRDMode
 	for k := 0; k+1 < len(data.Omega); k++ {
-		modes, span := pidTuningFRDStepFits(data, k)
-		if !(span > math.Pi/8) || len(modes) == 0 {
+		fits, nf, span := pidTuningFRDStepFits(data, k)
+		if !(span > math.Pi/8) || nf == 0 {
 			continue
 		}
 		if out == nil {
 			out = make([][]pidTuningFRDMode, len(data.Omega)-1)
 		}
-		out[k] = modes
+		out[k] = append([]pidTuningFRDMode(nil), fits[:nf]...)
 	}
 	return out
 }
