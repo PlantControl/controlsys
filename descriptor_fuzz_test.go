@@ -724,3 +724,77 @@ func TestDescriptorNonNormalChainImproper(t *testing.T) {
 		t.Fatalf("Step err = %v, want ErrImproperModel", err)
 	}
 }
+
+// TestDescriptorChainBesideSmallEPole: proper index-2/3 chains beside a
+// finite pole whose E singular value is 1e-2..1e-4 relative (far above the
+// rank floor). That pole turns the computed infinite subspace by ε·egap,
+// σ₁(E)/σ_r, leaving c·N·b up to 5× the A-side cut, so IsProper said false
+// and Step/TF ErrImproperModel or an improper ratio whose s-term diverged
+// from the response (XSDPXI, on base: [3] 1e-3 111/200; [3] 1e-2, [2]
+// 1e-4 and [2 1] 1e-4 together 23/600, ≤ 6 now on arm64 and amd64).
+// Oracle: the structured model's pencil response. The cut is widened by
+// egap only when the reduction matches the direct (sE − A) solve at the
+// data scale; reductions too inaccurate for that stay improper as before.
+func TestDescriptorChainBesideSmallEPole(t *testing.T) {
+	skipSlowUnderRace(t)
+	falseMild := 0
+	for _, tc := range []struct {
+		chains []int
+		sr     float64
+		mild   bool
+	}{{[]int{3}, 1e-2, true}, {[]int{2}, 1e-4, true}, {[]int{2, 1}, 1e-4, true}, {[]int{3}, 1e-3, false}} {
+		false_ := 0
+		for seed := range uint64(200) {
+			rng := rand.New(rand.NewPCG(seed, 77))
+			nf := 1 + rng.IntN(3)
+			sys, oracle, _ := chainDescriptor(t, rng, nf, tc.chains, tc.sr, true)
+			pr, err := sys.IsProper()
+			if err != nil {
+				t.Fatalf("%v %g seed %d: IsProper: %v", tc.chains, tc.sr, seed, err)
+			}
+			res, terr := sys.TransferFunction(nil)
+			if terr != nil {
+				t.Fatalf("%v %g seed %d: TransferFunction: %v", tc.chains, tc.sr, seed, terr)
+			}
+			if fzTFImproper(res.TF) == pr {
+				t.Fatalf("%v %g seed %d: IsProper %v, improper TF %v", tc.chains, tc.sr, seed, pr, !pr)
+			}
+			if !pr {
+				false_++
+				continue
+			}
+			if _, err := Step(sys, 1); err != nil {
+				t.Fatalf("%v %g seed %d: Step: %v", tc.chains, tc.sr, seed, err)
+			}
+			for _, s := range []complex128{0.37i, complex(0.5, 3), 1e3i} {
+				g, err := res.TF.Eval(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				w := pencilResponse(t, oracle, s)[0][0]
+				if d := cmplx.Abs(g[0][0] - w); !(d <= 2e-6*math.Max(1, cmplx.Abs(w))) {
+					t.Fatalf("%v %g seed %d: G(%v) = %v, want %v", tc.chains, tc.sr, seed, s, g[0][0], w)
+				}
+			}
+		}
+		if tc.mild {
+			falseMild += false_
+		} else if false_ > 90 {
+			t.Errorf("%v %g: %d/200 proper chains IsProper false, want ≤ 90", tc.chains, tc.sr, false_)
+		}
+		for seed := range uint64(50) {
+			rng := rand.New(rand.NewPCG(seed, 78))
+			nf := 1 + rng.IntN(3)
+			sys, _, _ := chainDescriptor(t, rng, nf, tc.chains, tc.sr, false)
+			if pr, err := sys.IsProper(); err != nil || pr {
+				t.Fatalf("%v %g improper seed %d: IsProper = %v, %v; want false", tc.chains, tc.sr, seed, pr, err)
+			}
+			if _, err := Step(sys, 1); !errors.Is(err, ErrImproperModel) {
+				t.Fatalf("%v %g improper seed %d: Step err = %v, want ErrImproperModel", tc.chains, tc.sr, seed, err)
+			}
+		}
+	}
+	if falseMild > 10 {
+		t.Errorf("%d/600 mild proper chains IsProper false, want ≤ 10", falseMild)
+	}
+}

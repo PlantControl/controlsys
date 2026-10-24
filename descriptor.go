@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/cmplx"
 	"slices"
 
 	"plantcontrol.org/v1/gonum/lapack"
@@ -212,7 +213,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 			}
 		}
 	}
-	if a, e, _, _, nf, stiff, _, _, ok := deflateInfinite(A, E, false); ok && !stiff {
+	if a, e, _, _, nf, stiff, _, _, _, ok := deflateInfinite(A, E, false); ok && !stiff {
 		ad, ed := a.RawMatrix(), e.RawMatrix()
 		return qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
 	}
@@ -489,7 +490,10 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // weierstrassReduceParts is weierstrassReduce keeping the polynomial part:
 // poly[k-1] is the p×m coefficient of s^k, −C∞·N^k·A∞⁻¹B∞, with entries at
 // the rounding level of algebraicPartStatic zeroed; poly is nil for a proper
-// model. Impulsive internal-delay channels return ErrImproperModel.
+// model. Impulsive internal-delay channels return ErrImproperModel. Terms
+// above that level but within it widened by egap of deflateInfinite (a
+// finite pole near ∞ beside the chain) are dropped when reductionMatches
+// confirms the proper reduction.
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	n, m, p := sys.Dims()
 	q := sys.internalDelayCount()
@@ -525,7 +529,7 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	tol := 100 * float64(n) * eps() * denseNorm(sys.E)
 	finite := func(_, _, beta float64) bool { return math.Abs(beta) > tol }
 	d, index1, ratioTol, stiffSplit := weierstrassSplit(sys.A, sys.E, n)
-	blurTol := 1.0
+	blurTol, stiffTol := 1.0, 1.0
 	if stiffSplit {
 		finite = func(ar, ai, beta float64) bool { return !qzInfinite(ar, ai, beta, ratioTol) }
 	}
@@ -538,7 +542,7 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
 	if !ok || nf > n-d || !index1 || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
 		resolved := false
-		if a, e, qd, zd, nfd, stiff, leak, blur, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff {
+		if a, e, qd, zd, nfd, stiff, leak, blur, egap, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff {
 			resolved = ok && nfd == nf
 			all := func(_, _, _ float64) bool { return true }
 			if !resolved {
@@ -552,6 +556,7 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 				// index-2..6 chain sweeps), unless the staircase rank was
 				// itself decided within the leak.
 				blurTol = max(blur, math.Sqrt(leak))
+				stiffTol = egap
 			}
 		}
 		if ok && !resolved && !index1 && nf >= n-d {
@@ -593,6 +598,7 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	}
 
 	dRed := mat.DenseCopyOf(dAug)
+	stiffLeak := false
 	if ni > 0 {
 		var lu mat.LU
 		s22 := extractBlock(S, nf, nf, ni, ni)
@@ -616,9 +622,15 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 			if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
 				return nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 			}
-			terms, tols := algebraicTerms(c2, &nilpotent, &b, cScale, bScale, 1e3*float64(n)*eps(), blurTol)
+			rel := 1e3 * float64(n) * eps()
+			terms, tols := algebraicTerms(c2, &nilpotent, &b, cScale, bScale, rel, blurTol)
 			if !algebraicPartStatic(terms, tols) {
-				if poly = algebraicPolyTerms(terms, tols, p, m); poly == nil || q > 0 {
+				poly = algebraicPolyTerms(terms, tols, p, m)
+				if q == 0 && stiffTol > 1 {
+					_, wide := algebraicTerms(c2, &nilpotent, &b, cScale, bScale, rel, blurTol*stiffTol)
+					stiffLeak = algebraicPartStatic(terms, wide)
+				}
+				if !stiffLeak && (poly == nil || q > 0) {
 					return nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 				}
 			}
@@ -658,7 +670,48 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 		out.LFT.D21 = subDense(dRed, p, 0, q, m)
 		out.LFT.D22 = subDense(dRed, p, m, q, q)
 	}
+	if stiffLeak {
+		if reductionMatches(sys, out) {
+			poly = nil
+		} else if poly == nil {
+			return nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+		}
+	}
 	return out, poly, nil
+}
+
+// reductionMatchTol bounds the relative mismatch reductionMatches accepts.
+const reductionMatchTol = 1e-10
+
+// reductionMatches reports whether the proper reduction red of the
+// descriptor sys, its s-terms dropped, matches sys's response, solved
+// directly from (sE − A), within reductionMatchTol at two off-axis points
+// of modulus about ‖A‖/‖E‖. It decides s-terms the egap widening of
+// weierstrassReduceParts admits: a finite pole near ∞ turns the computed
+// infinite subspace by ε·egap, and the reduction then carries an error of
+// that order times egap^k, which also shows at low frequency. The points
+// sit at the data scale because, for index ≥ 2, (sE − A) is too
+// ill-conditioned above it for the direct solve to certify anything.
+func reductionMatches(sys, red *System) bool {
+	_, m, p := sys.Dims()
+	w := mat.Norm(sys.A, 2) / mat.Norm(sys.E, 2)
+	direct, reduced := newFrequencyEvaluator(sys).pointEval(), newFrequencyEvaluator(red).pointEval()
+	g, h := make([]complex128, p*m), make([]complex128, p*m)
+	for _, s := range [...]complex128{complex(0.6*w, 0.8*w), complex(0.24*w, 0.18*w)} {
+		pt := pointAt(s)
+		if direct(pt, g) != nil || reduced(pt, h) != nil {
+			return false
+		}
+		var diff, size float64
+		for i := range g {
+			diff = max(diff, cmplx.Abs(g[i]-h[i]))
+			size = max(size, cmplx.Abs(g[i]), cmplx.Abs(h[i]))
+		}
+		if !(diff <= reductionMatchTol*size) {
+			return false
+		}
+	}
+	return true
 }
 
 // weierstrassSplit classifies the pencil (A, E) for weierstrassReduce as
