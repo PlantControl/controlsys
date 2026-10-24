@@ -19,7 +19,7 @@ func TestDeflateInfinite_Structure(t *testing.T) {
 				label := fmt.Sprintf("chains %v orth %v seed %d", chains, orth, seed)
 				A, E := w.sys.A, w.sys.E
 				n, _ := A.Dims()
-				a, e, q, z, nf, _, ok := deflateInfinite(A, E, true)
+				a, e, q, z, nf, _, _, _, _, ok := deflateInfinite(A, E, true)
 				if !ok || nf != r {
 					t.Fatalf("%s: nf %d ok %v, want %d", label, nf, ok, r)
 				}

@@ -1,10 +1,12 @@
 package controlsys
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
@@ -124,11 +126,12 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 // (T11 is nonsingular); G2 keeps E = T22. The infinite structure is deflated
 // to the trailing block first (deflateInfinite), so QZ never has to resolve
 // an infinite Jordan chain, which it does only to |β|/|α| ~ ε^(1/k).
-// When the rank decisions are ambiguous, or E has a stiff singular value
+// When the rank decisions are ambiguous or blurred, or E has a stiff singular value
 // and the pencil index ≥ 2 (the staircase then deflates the null space of E
 // only), the whole pencil goes to QZ instead (decomposeGeneralizedQZ).
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
-	a, e, qd, zd, nf, stiff, ok := deflateInfinite(sys.A, sys.E, true)
+	a, e, qd, zd, nf, stiff, _, blur, _, ok := deflateInfinite(sys.A, sys.E, true)
+	ok = ok && blur == 1
 	if ok && stiff {
 		_, ok = pencilIndexOne(sys.A, sys.E, sys.A.RawMatrix().Rows, mat.Norm(sys.A, 2))
 	}
@@ -252,12 +255,36 @@ func deflatedSchur(a, e, qd, zd *mat.Dense, nf int, selct func(ar, ai, b float64
 // When it reports stiff, only the null space of E is deflated (index 1 is
 // assumed) and stiff is set: the deflated block can mix the stiff finite
 // pole with that null space, so callers that can should classify on the
-// whole pencil. An ambiguous rank, or a near rank-deficient row block
-// of A (a nearly singular pencil), sets ok false.
-func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff, ok bool) {
+// whole pencil. leak, at most qzInfiniteGap, is the factor by which
+// rounding of A, turning Z of each level by ε·‖A‖/σ_min(A row block), may
+// leave more than ε-level rounding in the deflated blocks and in Qᵀ·B:
+// callers widen their zero tests by it. A rank of a deflated E block that
+// descriptorRank finds ambiguous is decided by deflatedRank, which may
+// deflate no more than infiniteChainCount directions per level (a level
+// past the first asserts that many chains of length ≥ 2) and only values
+// leakedZeros finds to be rounding: a finite pole small in E is otherwise
+// taken as infinite; blur is then leak, else 1.
+// egap, the E-side counterpart of leak, is the largest σ₁(E)/σ_r of a
+// deflated E block, σ_r its least nonzero singular value: a
+// finite pole that is small in E (near ∞ chordally) turns the null space
+// of that block, so Q and Z, by ε·egap, and that rounding of Qᵀ·B and the
+// deflated blocks is not bounded by leak.
+// An ambiguous rank, or a near rank-deficient row block of A
+// (a nearly singular pencil), sets ok false.
+func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, ok bool) {
+	a, e, q, z, nf, stiff, leak, blur, egap, _, ok = deflateStaircase(A, E, wantQZ, -1, 0)
+	return a, e, q, z, nf, stiff, leak, blur, egap, ok
+}
+
+// deflateStaircase is deflateInfinite. With probe ≥ 0 it stops at that
+// level (0 the full E) and returns only the cnt eigenvalues of its leading
+// k×k pencil nearest ∞ (nearInfiniteEigs) with k, nil when the staircase
+// ends first; zeros deflatedRank takes on the way are not checked by
+// leakedZeros.
+func deflateStaircase(A, E *mat.Dense, wantQZ bool, probe, cnt int) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, probeEig []complex128, ok bool) {
 	n, _ := A.Dims()
 	if n == 0 {
-		return nil, nil, nil, nil, 0, false, false
+		return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
 	}
 	buf := make([]float64, 6*n*n+n)
 	ad, ed, ud, vtd, sd, td := buf[:n*n], buf[n*n:2*n*n], buf[2*n*n:3*n*n], buf[3*n*n:4*n*n], buf[4*n*n:5*n*n], buf[5*n*n:6*n*n]
@@ -292,28 +319,48 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		copyStrided(dst, stride, td, cols, rows, cols)
 	}
 	ratio := 1e3 * float64(n) * eps()
-	tolA := ratio * mat.Norm(A, 2)
+	normA := mat.Norm(A, 2)
+	tolA := ratio * normA
 	scaleE := mat.Norm(E, 2)
+	leak, blur, egap = 1.0, 1.0, 1.0
+	chains := -1
 	k := n
-	for k > 0 && !stiff {
+	for level := 0; k > 0 && !stiff; level++ {
 		if clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*ratio*scaleE) {
 			break
 		}
 		copyStrided(sd, k, ed, n, k, k)
 		if !svd(lapack.SVDAll, lapack.SVDNone, k, k) {
-			return nil, nil, nil, nil, 0, false, false
+			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
 		}
 		if k == n {
 			scaleE = sv[0]
 		}
+		if level == probe {
+			eig, eok := nearInfiniteEigs(ad, ed, n, k, cnt)
+			return nil, nil, nil, nil, k, false, 0, 0, 0, eig, eok
+		}
 		r, st, ok := descriptorRank(sv[:k], scaleE, n, k == n)
+		if !ok && k < n {
+			r, ok = deflatedRank(sv[:k], 1e3*float64(n)*eps()*scaleE, leak)
+			if ok && r < k {
+				if chains < 0 {
+					chains = infiniteChainCount(A, E, n, normA)
+				}
+				ok = k-r <= chains && (probe >= 0 || leakedZeros(A, E, ad, ed, level, k, k-r))
+			}
+			blur = max(blur, leak)
+		}
 		if !ok {
-			return nil, nil, nil, nil, 0, false, false
+			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
 		}
 		stiff = st
 		d := k - r
 		if d == 0 {
 			break
+		}
+		if r > 0 {
+			egap = max(egap, scaleE/sv[r-1])
 		}
 		u := gen(ud, k, k, k)
 		mulInto(ad, n, k, n, u, gen(ad, k, n, n), blas.Trans)
@@ -343,8 +390,9 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		}
 		impl.Dorgqr(k, k, d, ud, k, tau, work, len(work))
 		if !svd(lapack.SVDNone, lapack.SVDNone, d, d) || sv[d-1] <= qzInfiniteGap*tolA {
-			return nil, nil, nil, nil, 0, false, false
+			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
 		}
+		leak = min(qzInfiniteGap, leak*max(1, normA/sv[d-1]))
 		zk := vtd[:k*k]
 		for i := range k {
 			for j := range k {
@@ -363,7 +411,109 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		}
 		k = r
 	}
-	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, stiff, true
+	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, stiff, leak, blur, egap, nil, true
+}
+
+// leakedZeros reports whether the cnt singular values that deflatedRank
+// takes as zero in the E block of staircase level (size k, deflated pencil
+// ad, ed) of (A, E) are rounding the leak left rather than a finite pole
+// small in E, which deflating would drop. Kept, such a value makes the
+// leading k×k pencil carry cnt eigenvalues near ∞ (nearInfiniteEigs). From
+// a finite pole they are a function of the data: the same eigenvalues come
+// back to leakStableTol from each of leakDraws copies of A and E with
+// entries scaled by 1 + δ, |δ| ≤ 4ε. From rounding of an infinite chain
+// they are perturbed chain eigenvalues, which move at first order (ε^(1/j)
+// for a chain of length j) and so do not; a copy that reaches that level
+// with another block size also reports leaked.
+func leakedZeros(A, E *mat.Dense, ad, ed []float64, level, k, cnt int) bool {
+	n, _ := A.Dims()
+	ref, ok := nearInfiniteEigs(ad, ed, n, k, cnt)
+	if !ok {
+		return true
+	}
+	rng := rand.New(rand.NewPCG(3, 5))
+	jitter := func(m *mat.Dense) *mat.Dense {
+		c := mat.DenseCopyOf(m)
+		raw := c.RawMatrix()
+		for i := range raw.Rows {
+			row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+			for j := range row {
+				row[j] *= 1 + 4*eps()*(2*rng.Float64()-1)
+			}
+		}
+		return c
+	}
+	for range leakDraws {
+		_, _, _, _, kc, _, _, _, _, got, ok := deflateStaircase(jitter(A), jitter(E), false, level, cnt)
+		if !ok || kc != k || got == nil {
+			return true
+		}
+		for _, w := range ref {
+			found := false
+			for _, g := range got {
+				found = found || cmplx.Abs(g-w) <= leakStableTol*cmplx.Abs(w)
+			}
+			if !found {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// nearInfiniteEigs returns the cnt generalized eigenvalues of the leading
+// k×k block of the pencil (ad, ed) (stride n) of least |β|/|α|; ok is false
+// when QZ fails or one of them is infinite or not finite.
+func nearInfiniteEigs(ad, ed []float64, n, k, cnt int) (eig []complex128, ok bool) {
+	alphar, alphai, beta, ok := qzEigenvalues(k, ad, n, ed, n)
+	if !ok {
+		return nil, false
+	}
+	idx := make([]int, k)
+	for i := range idx {
+		idx[i] = i
+	}
+	ratio := func(i int) float64 { return math.Abs(beta[i]) / math.Hypot(alphar[i], alphai[i]) }
+	slices.SortFunc(idx, func(i, j int) int { return cmp.Compare(ratio(i), ratio(j)) })
+	for _, i := range idx[:cnt] {
+		if beta[i] == 0 {
+			return nil, false
+		}
+		w := complex(alphar[i]/beta[i], alphai[i]/beta[i])
+		if cmplx.IsInf(w) || cmplx.IsNaN(w) {
+			return nil, false
+		}
+		eig = append(eig, w)
+	}
+	return eig, true
+}
+
+// leakDraws and leakStableTol set leakedZeros. Over the package tests and
+// 3000 chains beside a pole small in E (cond(U), cond(V) up to 1e4), the
+// eigenvalues of finite poles moved by at most 5.6e-6 relative, those of
+// leaked rounding by at least 2.9e-2.
+const (
+	leakDraws     = 3
+	leakStableTol = 1e-3
+)
+
+// deflatedRank decides the rank of a deflated E block of the staircase that
+// descriptorRank finds ambiguous: Z of each level is the row space of a block
+// of A with σ_min σa, so rounding of A, ε·‖A‖, turns it by ε·‖A‖/σa and
+// leaks into the next E block as that times its rounding tol. A singular
+// value up to leak·tol is zero, leak ≤ qzInfiniteGap keeping the nonzero
+// side of descriptorRank as is.
+func deflatedRank(sv []float64, tol, leak float64) (rank int, ok bool) {
+	for j, s := range sv {
+		switch {
+		case s > qzInfiniteGap*tol:
+		case s <= leak*tol:
+			return j, true
+		default:
+			return 0, false
+		}
+	}
+	return len(sv), true
 }
 
 // clearlyNonsingular reports whether the leading k×k block of e (stride
@@ -726,12 +876,10 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 // then does E have exactly d infinite eigenvalues; an infinite Jordan chain
 // leaves Ulᵀ·A·Vr singular. A failed SVD reports index1 false.
 func pencilIndexOne(a, e *mat.Dense, n int, normA float64) (d int, index1 bool) {
-	var svd mat.SVD
-	if !svd.Factorize(e, mat.SVDFull) {
+	sv, sv22, rank, stiff, ok := nullCoupling(a, e, n)
+	if !ok {
 		return n, false
 	}
-	sv := svd.Values(nil)
-	rank, stiff, _ := descriptorRank(sv, sv[0], n, true)
 	d = n - rank
 	if d == 0 {
 		return 0, true
@@ -740,6 +888,43 @@ func pencilIndexOne(a, e *mat.Dense, n int, normA float64) (d int, index1 bool) 
 	if stiff {
 		tol = max(stiffIndexTol, stiffIndexCoef*float64(n)*eps()*sv[0]/sv[rank-1])
 	}
+	return d, sv22 != nil && sv22[d-1] > tol*normA
+}
+
+// infiniteChainCount returns the number of infinite Jordan chains of length
+// at least 2 of (a, e) when E's rank is not stiff: the singular values of
+// Ulᵀ·A·Vr (nullCoupling) at most 100·n·ε·normA, which a chain leaves at
+// rounding level (Ulᵀ·A·Vr couples the tail and head of each chain) while
+// an index-1 pencil with ill-conditioned coordinates keeps them orders of
+// magnitude above it. It is -1 when undecided (failed SVD, stiff rank).
+func infiniteChainCount(a, e *mat.Dense, n int, normA float64) int {
+	_, sv22, rank, stiff, ok := nullCoupling(a, e, n)
+	if !ok || stiff || rank < n && sv22 == nil {
+		return -1
+	}
+	c := 0
+	for _, s := range sv22 {
+		if s <= 100*float64(n)*eps()*normA {
+			c++
+		}
+	}
+	return c
+}
+
+// nullCoupling returns the singular values sv of E, its rank
+// (descriptorRank, MATLAB rank) with the stiff flag, and the singular
+// values sv22 of Ulᵀ·A·Vr for the null spaces Ul, Vr of E, nil when E is
+// nonsingular or their SVD fails. ok is false when the SVD of E fails.
+func nullCoupling(a, e *mat.Dense, n int) (sv, sv22 []float64, rank int, stiff, ok bool) {
+	var svd mat.SVD
+	if !svd.Factorize(e, mat.SVDFull) {
+		return nil, nil, 0, false, false
+	}
+	sv = svd.Values(nil)
+	rank, stiff, _ = descriptorRank(sv, sv[0], n, true)
+	if rank == n {
+		return sv, nil, rank, stiff, true
+	}
 	var u, v mat.Dense
 	svd.UTo(&u)
 	svd.VTo(&v)
@@ -747,7 +932,10 @@ func pencilIndexOne(a, e *mat.Dense, n int, normA float64) (d int, index1 bool) 
 	av.Mul(a, v.Slice(0, n, rank, n))
 	a22.Mul(u.Slice(0, n, rank, n).T(), &av)
 	var svd22 mat.SVD
-	return d, svd22.Factorize(&a22, mat.SVDNone) && svd22.Values(nil)[d-1] > tol*normA
+	if !svd22.Factorize(&a22, mat.SVDNone) {
+		return sv, nil, rank, stiff, true
+	}
+	return sv, svd22.Values(nil), rank, stiff, true
 }
 
 // stiffIndexTol and stiffIndexCoef bound pencilIndexOne when E has a stiff

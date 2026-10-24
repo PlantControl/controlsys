@@ -837,7 +837,7 @@ func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []com
 // errBoundaryUnstabilizable is the ErrNoStabilizing of
 // boundaryUnstabilizable: structural, so it holds in either scaling mode
 // over any Accuracy 1 X, though not over a certified one (otherScaling).
-var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on the stability boundary is unstabilizable", ErrNoStabilizing)
+var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on or beyond the stability boundary is unstabilizable", ErrNoStabilizing)
 
 // boundaryUnstabilizable reports a finite eigenvalue λ of (A, E) on or
 // beyond the stability boundary, or within rounding of it, at which
@@ -1166,9 +1166,12 @@ func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 // down (an iterate unstable or unsolvable) or newtonSteps solves pass
 // without convergence or a stall within newtonGlobalTol, rounding rules
 // the iteration and the first step is no error estimate (75DTNG: an
-// unscaled non-normal pencil X off by 5e8, first step 0.5): that
-// candidate's step becomes +Inf, or the candidate it displaced is
-// restored. Otherwise verifyRiccati returns
+// unscaled non-normal pencil X off by 5e8, first step 0.5): the
+// candidate it displaced is restored, else, as a singular first solve,
+// it is kept with step +Inf only with a residual within rescueTol of its
+// terms (3XCWZW: a Hamiltonian pair on the axis to rounding left an X of
+// residual 0.9 of its terms, first step 1, that no stabilizing solution
+// underlies). Otherwise verifyRiccati returns
 // problem.rescueErr, or ErrNoStabilizing, and the caller falls back to
 // problem.poor with Accuracy 1. X and eig are updated in place.
 func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, eig []complex128, rcnd float64) (*mat.Dense, error) {
@@ -1185,8 +1188,12 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		}
 		if prevPoor != nil {
 			problem.poor = prevPoor
-		} else {
+			return
+		}
+		if res, scale := problem.residualTerms(continuous, problem.poor.x); res <= rescueTol*scale {
 			problem.poor.step = math.Inf(1)
+		} else {
+			problem.poor = nil
 		}
 	}()
 	for it := range newtonSteps {

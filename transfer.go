@@ -279,7 +279,10 @@ type rowRealizationConverter struct {
 	p    int
 	tf   *TransferFunc
 	rows []int
-	dRaw blas64.General
+	// companion[i] reports that row i came from directRowTF on a companion
+	// A, where its recurrence is exact.
+	companion []bool
+	dRaw      blas64.General
 	// trims[i*m+j] holds the Markov trim candidates of entry (i, j), most
 	// trimmed first; trimRows applies them after the realization is chosen.
 	trims [][][]float64
@@ -302,15 +305,16 @@ func newRowRealizationConverter(sys *System, opts *TransferFuncOpts) rowRealizat
 		dRaw = sys.D.RawMatrix()
 	}
 	return rowRealizationConverter{
-		sys:   sys,
-		opts:  opts,
-		n:     n,
-		m:     m,
-		p:     p,
-		tf:    tf,
-		rows:  make([]int, p),
-		dRaw:  dRaw,
-		trims: make([][][]float64, p*m),
+		sys:       sys,
+		opts:      opts,
+		n:         n,
+		m:         m,
+		p:         p,
+		tf:        tf,
+		rows:      make([]int, p),
+		companion: make([]bool, p),
+		dRaw:      dRaw,
+		trims:     make([][][]float64, p*m),
 	}
 }
 
@@ -348,8 +352,10 @@ func (c rowRealizationConverter) convert() (*TransferFuncResult, error) {
 // magnitude: the last Hessenberg subdiagonal of a slow companion is an exact
 // product of tiny couplings, which the cut drops with the origin pole and a
 // zero (U3H63X). A truly hidden mode leaves c matching everywhere, so it
-// stays dropped, and the full conversion is only made once c misses in its
-// own band. The default check points sit far above such poles, where the
+// stays dropped. The band of c alone starts at its slowest kept pole, above
+// a cut origin pole and its near-cancelling zero, where c can miss by less
+// than 1e-6 (4XDPLI), so the full conversion is always made and the joint
+// band decides. The default check points sit far above such poles, where the
 // lost state barely shows; the band points below them are solved in
 // double-double where GEPP rejects them, and the full conversion takes a
 // row the staircase floor cut directly (see directRowTF) when it can.
@@ -359,9 +365,6 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 	}
 	c.trimRows()
 	bd := newBalancedDense(c.sys, c.n, c.m, c.p)
-	if e, ok := sampleBandCheck(c.sys, bd, bandCheckPoints(c.sys, c.tf.polys()), false).resolvedErr(c.tf); !ok || !(e > 1e-6) {
-		return c, order
-	}
 	full := c.fresh(c.sys)
 	full.keepObs = true
 	fullOrder, _, err := full.convertFrom(false)
@@ -381,7 +384,10 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 	// the poles but loses it far above them. Better is 1e3× less worst miss,
 	// or no point missed by more than twice the kept row's miss (or 1e-6) and
 	// one missed 1e3× less: at the band edge the reference itself can miss a
-	// small row by 1e-2, the same for both rows.
+	// small row by 1e-2, the same for both rows. A direct full row on a
+	// companion A is exact, den = poly(A) as in MATLAB ss2tf, so it needs
+	// no margin: below the poles of a reversed unit-row companion the
+	// reference itself misses by up to 1e4 (4XDPLI).
 	order = 0
 	for i := range c.p {
 		eK := ck.rowPointErrs(c.tf, i)
@@ -397,7 +403,7 @@ func (c rowRealizationConverter) keepObservable(order int) (rowRealizationConver
 			dominates = dominates && eF[k] <= max(2*eK[k], 1e-6)
 			gains = gains || eK[k] > 1e-6 && eF[k] <= 1e-3*eK[k]
 		}
-		if !loses && worstK > 1e-6 && (worstF <= 1e-3*worstK || dominates && gains) {
+		if !loses && worstK > 1e-6 && (full.companion[i] || worstF <= 1e-3*worstK || dominates && gains) {
 			c.tf.Den[i], c.tf.Num[i], c.rows[i] = full.tf.Den[i], full.tf.Num[i], full.rows[i]
 		}
 		order += c.rows[i]
@@ -493,13 +499,7 @@ func (ck tfCheck) rowPointErrs(tf *TransferFunc, only int) []float64 {
 			if dv := Poly(tf.Den[i]).Eval(s); cmplx.IsInf(dv) || cmplx.IsNaN(dv) {
 				continue
 			}
-			rowMag := 0.0
-			for j := range row {
-				rowMag = max(rowMag, cmplx.Abs(ck.ref[k][i*m+j]))
-			}
-			if rowMag == 0 {
-				rowMag = ck.mag[k]
-			}
+			rowMag := ck.rowMag(k, i, m)
 			for j, v := range row {
 				ref := ck.ref[k][i*m+j]
 				scale := max(cmplx.Abs(ref), eps()*rowMag)
@@ -516,6 +516,19 @@ func (ck tfCheck) rowPointErrs(tf *TransferFunc, only int) []float64 {
 		out[k] = worst
 	}
 	return out
+}
+
+// rowMag is the largest reference magnitude of output row i at point k,
+// or that of all rows when the row is zero there.
+func (ck tfCheck) rowMag(k, i, m int) float64 {
+	mag := 0.0
+	for _, v := range ck.ref[k][i*m : (i+1)*m] {
+		mag = max(mag, cmplx.Abs(v))
+	}
+	if mag == 0 {
+		return ck.mag[k]
+	}
+	return mag
 }
 
 // choose returns the Dgebal or Osborne converter, filled, and its order.
@@ -966,7 +979,9 @@ func (ck tfCheck) relErr(tf *TransferFunc) (worst float64, ok bool) {
 
 // trimOK reports whether numerator trimmed over den matches entry (i, j) of
 // an m-input model at every point to within twice the error of numerator
-// full at that point, or 1e3·n·eps, relative to the entry. A point where
+// full at that point, or 1e3·n·eps, relative to the entry, floored at eps
+// times the largest entry of row i: rows are independent, and eps of a far
+// larger row hid a small exact row's lost degree (TOIGMD). A point where
 // full is inaccurate gives no slack at another. With sens, a point where
 // the entry is unresolved (sens ≥ |ref|) also allows sens/|ref|, as long as
 // some point resolves the entry to 10%: a fast mode in a dense basis leaves
@@ -984,7 +999,7 @@ func (ck tfCheck) trimOK(i, j, m, n int, trimmed, full, den []float64) bool {
 		for k := range ck.s {
 			if ck.sens[k] != nil {
 				ref := ck.ref[k][i*m+j]
-				resolved = resolved || ck.sens[k][i*m+j] < 0.1*max(cmplx.Abs(ref), eps()*ck.mag[k])
+				resolved = resolved || ck.sens[k][i*m+j] < 0.1*max(cmplx.Abs(ref), eps()*ck.rowMag(k, i, m))
 			}
 		}
 		if resolved {
@@ -1001,7 +1016,7 @@ func (ck tfCheck) trimOK(i, j, m, n int, trimmed, full, den []float64) bool {
 	}
 	for k, s := range ck.s {
 		ref := ck.ref[k][i*m+j]
-		scale := max(cmplx.Abs(ref), eps()*ck.mag[k])
+		scale := max(cmplx.Abs(ref), eps()*ck.rowMag(k, i, m))
 		d := Poly(den).Eval(s)
 		eT := cmplx.Abs(Poly(trimmed).Eval(s)/d-ref) / scale
 		eF := cmplx.Abs(Poly(full).Eval(s)/d-ref) / scale
@@ -1140,7 +1155,7 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 	}
 
 	markov := newMarkovTrim(c.sys)
-	zeroEigs := -1
+	zeroEigs, isCompanion := -1, -1
 	for i := 0; i < c.p; i++ {
 		nobs, den, numCoeffs := ssToTFRow(Ac, Bc, Cc, i, ncont, c.m, c.opts.ObservabilityTol, floor, inExp, outExp[i], ws)
 		var bhData []float64
@@ -1148,12 +1163,20 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 			bhData = ws.cData
 		}
 		stride := ncont
+		c.companion[i] = false
 		// The full-order candidate of keepObservable also takes the direct
 		// row where the staircase floor cut a graded companion's coupling.
 		if (nobs == c.n || c.keepObs) && !c.noDirect {
 			if dDen, dNums, dbh, ok := directRowTF(a, b, cm, i, c.n, c.m, inExp, outExp[i]); ok {
 				den, numCoeffs, bhData = dDen, dNums, dbh
 				nobs, stride = c.n, c.n
+				if isCompanion < 0 {
+					isCompanion = 0
+					if t, _ := companionForm(a, c.n); t >= 0 {
+						isCompanion = 1
+					}
+				}
+				c.companion[i] = isCompanion == 1
 				direct++
 			}
 		}
@@ -1380,8 +1403,26 @@ func (c rowRealizationConverter) fillStaticRows() {
 	}
 }
 
+// capSISONumerator drops the numerator coefficients of a SISO model with
+// D = 0 above degree deg(den) − r, r from sisoRelativeDegree: they are
+// combinations of Markov parameters h_1 … h_(r−1) that vanish within the
+// rounding of A, B, C. capSISOZeros caps Zeros at n − r by the same test
+// (tzero parity), so the TF keeps the zeros Zeros returns instead of far
+// noise zeros.
+func (c rowRealizationConverter) capSISONumerator() {
+	if c.m != 1 || c.p != 1 || len(c.tf.Num[0][0]) < 2 {
+		return
+	}
+	r, ok := sisoRelativeDegree(c.sys)
+	num := c.tf.Num[0][0]
+	if keep := len(c.tf.Den[0]) - r; ok && keep >= 1 && len(num) > keep {
+		c.tf.Num[0][0] = num[len(num)-keep:]
+	}
+}
+
 func (c rowRealizationConverter) result(order int) *TransferFuncResult {
 	c.trimRows()
+	c.capSISONumerator()
 	c.tf.InputName = copyStringSlice(c.sys.InputName)
 	c.tf.OutputName = copyStringSlice(c.sys.OutputName)
 	return &TransferFuncResult{TF: c.tf, MinimalOrder: order, RowDegrees: c.rows}
@@ -1694,7 +1735,11 @@ func hessenbergTF(aData, cData []float64, n, nobs, m int, b1 float64, inExp []in
 func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, bh []float64, ok bool) {
 	aData, cData, b1, primal, ok := hessenbergDual(a, b, cm, row, n, m)
 	if !ok {
-		den, nums, ok = companionRowTF(a, b, cm, row, n, m, inExp, outExp)
+		if den, nums, ok = companionRowTF(a, b, cm, row, n, m, inExp, outExp); !ok {
+			if den, nums, ok = triangularRowTF(a, b, cm, row, n, m, inExp, outExp); ok && !finiteTF(den, nums) {
+				return nil, nil, nil, false
+			}
+		}
 		return den, nums, nil, ok
 	}
 	if primal {
@@ -1702,11 +1747,15 @@ func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (d
 	} else {
 		den, nums = hessenbergTF(aData, cData, n, n, m, b1, inExp, outExp)
 	}
-	bad := func(x float64) bool { return math.IsInf(x, 0) || math.IsNaN(x) }
-	if slices.ContainsFunc(den, bad) || slices.ContainsFunc(nums, func(p []float64) bool { return slices.ContainsFunc(p, bad) }) {
+	if !finiteTF(den, nums) {
 		return nil, nil, nil, false
 	}
 	return den, nums, cData, true
+}
+
+func finiteTF(den []float64, nums [][]float64) bool {
+	bad := func(x float64) bool { return math.IsInf(x, 0) || math.IsNaN(x) }
+	return !slices.ContainsFunc(den, bad) && !slices.ContainsFunc(nums, func(p []float64) bool { return slices.ContainsFunc(p, bad) })
 }
 
 // companionRowTF converts output row of (a, b, cm) in the given basis when
@@ -1727,30 +1776,11 @@ func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (d
 func companionRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, ok bool) {
 	ar, br, cr := a.RawMatrix(), b.RawMatrix(), cm.RawMatrix()
 	at := func(i, j int) float64 { return ar.Data[i*ar.Stride+j] }
-	maxA := 0.0
-	var shape [4]bool
-	for i := range shape {
-		shape[i] = true
-	}
-	for i := range n {
-		for j := range n {
-			v := at(i, j)
-			if v == 0 {
-				continue
-			}
-			maxA = max(maxA, math.Abs(v))
-			sub, sup := i == j+1, j == i+1
-			shape[0] = shape[0] && (sub || j == n-1)
-			shape[1] = shape[1] && (sup || j == 0)
-			shape[2] = shape[2] && (sup || i == n-1)
-			shape[3] = shape[3] && (sub || i == 0)
-		}
-	}
+	t, maxA := companionForm(a, n)
 	smlnum := math.SmallestNonzeroFloat64 / eps()
 	if maxA != 0 && (maxA < smlnum || maxA > 1/smlnum) {
 		return nil, nil, false
 	}
-	t := slices.Index(shape[:], true)
 	if t < 0 {
 		return nil, nil, false
 	}
@@ -1828,6 +1858,135 @@ func companionRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int)
 		nums[col] = num
 	}
 	return den, nums, true
+}
+
+// triangularRowTF converts output row of (a, b, cm) in the given basis when
+// a is upper or lower triangular (a lower one is read reversed). Then
+// det(sI − A) = Π(s − a_ii), and with x = (sI − A)⁻¹b_col solved by back
+// substitution, x_k = P_k/Π_{i≥k}(s − a_ii),
+//
+//	P_k = b_k·Π_{i>k}(s − a_ii) + Σ_{j>k} a_kj·P_j·Π_{k<i<j}(s − a_ii),
+//
+// and num = Σ_k c_k·P_k·Π_{i<k}(s − a_ii): sums of products of the given
+// entries. Any rotation perturbs A by eps·‖A‖, which loses near-origin
+// poles in an Osborne basis and, in a Dgebal-graded one, the tiny couplings
+// the numerator sums are built from (WM67N5).
+func triangularRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, ok bool) {
+	ar, br, cr := a.RawMatrix(), b.RawMatrix(), cm.RawMatrix()
+	upper, lower := true, true
+	maxA := 0.0
+	for i := range n {
+		for j, v := range ar.Data[i*ar.Stride : i*ar.Stride+n] {
+			if v != 0 {
+				maxA = max(maxA, math.Abs(v))
+				upper = upper && j >= i
+				lower = lower && j <= i
+			}
+		}
+	}
+	smlnum := math.SmallestNonzeroFloat64 / eps()
+	if !upper && !lower || maxA != 0 && (maxA < smlnum || maxA > 1/smlnum) {
+		return nil, nil, false
+	}
+	idx := func(k int) int { return k }
+	if !upper {
+		idx = func(k int) int { return n - 1 - k }
+	}
+	u := make([]float64, n*n)
+	for i := range n {
+		for j := i; j < n; j++ {
+			u[i*n+j] = ar.Data[idx(i)*ar.Stride+idx(j)]
+		}
+	}
+	// Polynomials are ascending in s, of length n+1; mulLin multiplies one
+	// of degree < deg by (s − r).
+	mulLin := func(p []float64, deg int, r float64) {
+		for k := deg; k > 0; k-- {
+			p[k] = p[k-1] - r*p[k]
+		}
+		p[0] *= -r
+	}
+	w := n + 1
+	q := make([]float64, (n+1)*w)
+	qk := func(k int) []float64 { return q[(k+1)*w : (k+2)*w] }
+	qk(n - 1)[0] = 1
+	for k := n - 2; k >= -1; k-- {
+		copy(qk(k), qk(k+1))
+		mulLin(qk(k), n-1-k, u[(k+1)*n+k+1])
+	}
+	P := make([]float64, n*w)
+	// acc sets dst to Σ_{j>k} coef_j·P_j·Π_{k<i<j}(s − a_ii); P_j has degree
+	// n−1−j, and so has the sum over j' ≥ j.
+	acc := func(dst []float64, k int, coef []float64) {
+		clear(dst)
+		have := false
+		for j := n - 1; j > k; j-- {
+			if have {
+				mulLin(dst, n-1-j, u[j*n+j])
+			}
+			if v := coef[j]; v != 0 {
+				have = true
+				pj := P[j*w : j*w+n-j]
+				for l, x := range pj {
+					dst[l] += v * x
+				}
+			}
+		}
+	}
+	den = make([]float64, n+1)
+	for k := range n + 1 {
+		den[k] = qk(-1)[n-k]
+	}
+	crow := make([]float64, n)
+	for j := range n {
+		crow[j] = math.Ldexp(cr.Data[row*cr.Stride+idx(j)], -outExp)
+	}
+	numBuf := make([]float64, w)
+	nums = make([][]float64, m)
+	for col := range m {
+		for k := n - 1; k >= 0; k-- {
+			dst := P[k*w : (k+1)*w]
+			acc(dst, k, u[k*n:(k+1)*n])
+			if bk := math.Ldexp(br.Data[idx(k)*br.Stride+col], -inExp[col]); bk != 0 {
+				for l, x := range qk(k)[:n-k] {
+					dst[l] += bk * x
+				}
+			}
+		}
+		acc(numBuf, -1, crow)
+		num := make([]float64, n)
+		for k := range n {
+			num[k] = numBuf[n-1-k]
+		}
+		nums[col] = num
+	}
+	return den, nums, true
+}
+
+// companionForm returns the companion shape of a that companionRowTF
+// reads (0 observable, 1 its reversal, 2 its transpose, 3 both), or −1,
+// and the largest entry magnitude of a.
+func companionForm(a *mat.Dense, n int) (t int, maxA float64) {
+	ar := a.RawMatrix()
+	var shape [4]bool
+	for i := range shape {
+		shape[i] = true
+	}
+	for i := range n {
+		for j := range n {
+			v := ar.Data[i*ar.Stride+j]
+			if v == 0 {
+				continue
+			}
+			maxA = max(maxA, math.Abs(v))
+			sub, sup := i == j+1, j == i+1
+			shape[0] = shape[0] && (sub || j == n-1)
+			shape[1] = shape[1] && (sup || j == 0)
+			shape[2] = shape[2] && (sup || i == n-1)
+			shape[3] = shape[3] && (sub || i == 0)
+		}
+	}
+	return slices.Index(shape[:], true), maxA
 }
 
 // hessenbergDual returns a dual form of output row of (a, b, cm), aData

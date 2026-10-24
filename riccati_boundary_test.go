@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 
@@ -184,6 +185,31 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 				t.Errorf("%s NoScaling %v: Accuracy %d X, want ErrNoStabilizing", tc.name, ns, res.Accuracy)
 			} else if !errors.Is(err, ErrNoStabilizing) {
 				t.Errorf("%s NoScaling %v: %v", tc.name, ns, err)
+			}
+		}
+	}
+}
+
+// TestDare_BoundaryCertifiedJordan1 (IA3SU3): the gate that rejects
+// jordan1_322's certified X, fed that X's closed loop (1 − 3e-16 ± 1e-8i;
+// arm64 unscaled dare certifies it, amd64 errors first, so the public pin
+// above skips the gate there). A closed loop 1e-6 inside the circle is no
+// boundary verdict.
+func TestDare_BoundaryCertifiedJordan1(t *testing.T) {
+	A := mat.NewDense(5, 5, []float64{4, 1, 0, 0, 0, -9, -2, 0, 0, 0, 32, 10, 0, -4, 5, 17, 5, -1, 1, 2, 6, 2, 1, 2, 2})
+	B := mat.NewDense(5, 1, []float64{0, 0, 0, 3, 1})
+	Q := mat.NewDense(5, 5, []float64{7, -6, 0, -5, 0, -6, 23, -2, 7, 0, 0, -2, 4, 2, -5, -5, 7, 2, 16, -3, 0, 0, -5, -3, 13})
+	R := mat.NewDense(1, 1, []float64{5.443340272572639e-12})
+	rest := []complex128{0.5, 0.25, -0.125}
+	for _, tc := range []struct {
+		pair complex128
+		want bool
+	}{{complex(1-3e-16, 1e-8), true}, {complex(1-1e-6, 1e-8), false}} {
+		eig := append([]complex128{tc.pair, cmplx.Conj(tc.pair)}, rest...)
+		for _, ns := range []bool{false, true} {
+			res := &RiccatiResult{Eig: eig}
+			if got := boundaryCertified(false, A, B, Q, R, &RiccatiOpts{NoScaling: ns}, res); got != tc.want {
+				t.Errorf("pair %v NoScaling %v: boundaryCertified %v, want %v", tc.pair, ns, got, tc.want)
 			}
 		}
 	}

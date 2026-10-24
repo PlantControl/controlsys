@@ -74,7 +74,8 @@ func TestTransferFunctionGradedCompanionKeepsOriginPole(t *testing.T) {
 // Rows of a graded observable companion are taken from the full-order
 // conversion one by one: the eₙᵀ row is exact there, while the full
 // conversion of the dense rows lost their response far above the poles,
-// which the cut rows keep (seeded MIMO sweep trial 1371).
+// which the cut rows keep (seeded MIMO sweep trial 1371). Every entry is
+// checked below the poles too, where cut dense rows were off by ~1 (TOIGMD).
 func TestTransferFunctionGradedCompanionFullRowsPerRow(t *testing.T) {
 	cs := newObservableMIMO(
 		[]float64{1, 0.001705169677734375, 1.3068784028291702e-06, 5.920067769338289e-10, 1.751269915200329e-13, 3.521489792846935e-17, 4.83880643540895e-21, 4.410882240923436e-25, 2.4380426657192067e-29, 6.2618485959831026e-34},
@@ -97,15 +98,83 @@ func TestTransferFunctionGradedCompanionFullRowsPerRow(t *testing.T) {
 				bcol[k] = cs.b[k*cs.m+j]
 			}
 			num := ratObservableNum(cs.den, bcol, cs.c[i*cs.n:(i+1)*cs.n])
-			for _, w := range []float64{1e-8, 1e-6, 1e-4, 1e-2, 1, 100} {
-				if i > 0 && w < 1 {
-					continue
-				}
+			for _, w := range []float64{1e-8, 1e-6, 1e-5, 1e-4, 1e-2, 1, 100} {
 				r := ratRatioJ(num, cs.den, w)
 				if e := cmplx.Abs(tf.eval(complex(0, w))[i][j]-r) / cmplx.Abs(r); e > 1e-12 {
 					t.Errorf("entry %d,%d at w=%g off exact by %.3g", i, j, w, e)
 				}
 			}
 		}
+	}
+}
+
+// 4XDPLI: graded companions with an origin pole whose observability cut
+// drops it with a zero within 1e-7 relative of it. The cut row misses by
+// under 1e-6 from its own slowest pole up, so keepObservable never made the
+// full conversion and the type-1 system came back type 0. The exact num
+// constant is resolved in float64 (no cancellation), and MATLAB ss2tf keeps
+// den = poly(A) with the integrator.
+func TestTransferFunctionGradedCompanionKeepsOriginPoleBesideSlowZero(t *testing.T) {
+	den1472 := []float64{1, 0.09228515625, 0.004141807556152344, 9.087217040359974e-05, 9.155219231615774e-07, 2.865249149053284e-09, 0}
+	b1472 := []float64{2.86102294921875e-06, -14336, 336, -2.86102294921875e-05, 1728, 0}
+	ws1472 := []float64{1e-11, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2}
+	cases := []struct {
+		name      string
+		den, b, c []float64
+		p, shape  int
+		ws        []float64
+	}{
+		{"1472", den1472, b1472, []float64{0, 0, 0, 0, 0, 1}, 1, 0, ws1472},
+		{"1472-mimo", den1472, b1472, []float64{0, 0, 0, 0, 0, 1, 0.5, 1.5, 0.25, 0.25, 1.75, 1.5}, 2, 0, ws1472},
+		{"dense-transposed", []float64{1, 2664, 3.174912e+06, 2.177994752e+09, 9.27255625728e+11, 2.47497308504064e+14, 3.986381863282278e+16, 3.4771921332810547e+18, 1.2210569259201331e+20, 0},
+			[]float64{-2.384185791015625e-07, 1536, -112, 0, 116, -92, 0.02392578125, 0, -1.28125},
+			[]float64{0.75, 1.75, -1, 0.5, -1.25, 0, 0, -0.25, 0}, 1, 2, []float64{2e-10, 2e-9, 1e-6, 1e-2, 1, 1e4}},
+		// Reversed companions with a unit row: the band reference is itself
+		// off by up to 1e4 below the poles, so the exact direct full row
+		// never beat the cut one there (cut error 62.8 and 0.995).
+		{"unit-reversed-12", []float64{1, 754, 255356, 5.1226392e+07, 6.755561344e+09, 6.140269664e+11, 3.9174454525952e+13, 1.749820945778688e+15, 5.344039379091456e+16, 1.0575501408690831e+18, 1.2115752641409319e+19, 6.01702493877751e+19, 0},
+			[]float64{0.05078125, 0, -2.6702880859375e-05, -8.821487426757812e-06, -524288, -0.0072021484375, 0.21875, 1.7642974853515625e-05, 3.375, 2.288818359375e-05, 1.1444091796875e-05, -15.25},
+			[]float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 1, 1, []float64{1.76e-3, 1.76e-2, 0.08, 1.38, 108}},
+		{"unit-reversed-10", []float64{1, 1472, 685248, -9.1623424e+07, -1.87501314048e+11, -5.6863329353728e+13, -1.614542569209856e+15, 1.9241177747501875e+18, 1.944393572627251e+19, -1.1803426695136936e+22, 0},
+			[]float64{1.4901161193847656e-06, 0.265625, 0.007080078125, -15872, -245760, 0, -0.2265625, 0, 3.4570693969726562e-06, 1.0251998901367188e-05},
+			[]float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 1, 1, []float64{5.6e-7, 5.6e-6, 0.0577, 592}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := len(tc.den) - 1
+			a, b, c := observableCompanion(tc.den), tc.b, tc.c
+			if tc.shape != 0 {
+				a, b, c = companionShape(tc.den, tc.b, tc.c, tc.shape)
+			}
+			sys, err := NewFromSlices(n, 1, tc.p, a, b, c, make([]float64, tc.p), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := sys.TransferFunction(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range tc.p {
+				den := res.TF.Den[i]
+				if len(den) != n+1 {
+					t.Fatalf("row %d den %v, want %v", i, den, tc.den)
+				}
+				if den[n] != 0 {
+					t.Errorf("row %d den[%d] = %g, want 0 (origin pole)", i, n, den[n])
+				}
+				for k := 1; k < n; k++ {
+					if r := math.Abs(den[k]-tc.den[k]) / math.Abs(tc.den[k]); r > 1e-12 {
+						t.Errorf("row %d den[%d] = %.17g, want %.17g", i, k, den[k], tc.den[k])
+					}
+				}
+				num := ratObservableNum(tc.den, tc.b, tc.c[i*n:(i+1)*n])
+				for _, w := range tc.ws {
+					ex := ratRatioJ(num, tc.den, w)
+					if e := cmplx.Abs(res.TF.eval(complex(0, w))[i][0]-ex) / cmplx.Abs(ex); e > 1e-9 {
+						t.Errorf("row %d at w=%g off exact by %.3g", i, w, e)
+					}
+				}
+			}
+		})
 	}
 }
