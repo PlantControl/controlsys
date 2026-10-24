@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -437,12 +438,10 @@ func fzCheckDescriptor(t *testing.T, s *fzSpec) {
 		}
 		t.Fatalf("TransferFunction: %v (IsProper %v)\n%s", err, pr, s)
 	}
-	if !pr {
-		// TF of an improper descriptor returns the improper ratio (MATLAB tf(dss), SC36CE);
-		// the checks below assume a proper TF.
-		fzSkip(t, "improper descriptor TF")
-	}
 	tf := res.TF
+	if improper := fzTFImproper(tf); improper == pr {
+		t.Fatalf("TransferFunction improper=%v, IsProper %v\nnum=%v den=%v\n%s", improper, pr, tf.Num, tf.Den, s)
+	}
 	nfc := d.nf
 	var cp []float64
 	if nfc > 0 {
@@ -554,4 +553,314 @@ func fzDescSeeds() []fzSeed {
 			s.N, s.M, s.P, s.Mag, s.Damp, s.In, s.Out, s.Tau = 5, 2, 1, [3]float64{0, 0.5, 1}, [3]float64{2, 3, 1}, 2.0, 0.2, 2
 		}),
 	}
+}
+
+// fzTFImproper reports whether a channel numerator of tf outranks its
+// denominator (leading coefficients first, exact zeros trimmed).
+func fzTFImproper(tf *TransferFunc) bool {
+	deg := func(c []float64) int {
+		for i, x := range c {
+			if x != 0 {
+				return len(c) - 1 - i
+			}
+		}
+		return -1
+	}
+	for i, row := range tf.Num {
+		for _, num := range row {
+			if deg(num) > deg(tf.Den[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestDescriptorChainPerturbedA: an improper index-3 chain beside a slow pair
+// at |λ| 1e4 (kind 0x40). Rounding of A (‖A‖ 1.4e4) turns the staircase Z
+// and leaks ~1e-12 into the deflated E blocks, above the E-only rank tol;
+// the staircase must still deflate the chain, so IsProper is false, the TF
+// is improper and matches the exact response, Poles is the slow pair, not
+// three spurious ~2e5 ones, and IsStable is true (base errored).
+func TestDescriptorChainPerturbedA(t *testing.T) {
+	s := fzDecode(t, 0x40, [fzNVals]float64{83, 3, 0, 0, 0, 0, 6, 1, 0, -10, 0.37, -83.2, 64.7, -1, 0.3, 0})
+	d := fzBuildDesc(s)
+	if d.proper != 0 || d.nf != 2 || d.chain != 3 {
+		t.Fatalf("spec: proper %d nf %d chain %d", d.proper, d.nf, d.chain)
+	}
+	n, m, p := d.n, s.M, s.P
+	rng := rand.New(rand.NewPCG(1, 2))
+	pert := func(x []float64) []float64 {
+		y := slicesCopy(x)
+		for i := range y {
+			for range rng.IntN(9) {
+				y[i] = math.Nextafter(y[i], math.Inf(2*rng.IntN(2)-1))
+			}
+		}
+		return y
+	}
+	for k := range 200 {
+		a, e, b, c := pert(d.a), pert(d.e), pert(d.b), pert(d.c)
+		sys, err := NewDescriptor(mat.NewDense(n, n, a), mat.NewDense(n, m, b), mat.NewDense(p, n, c), mat.NewDense(p, m, slicesCopy(s.D)), mat.NewDense(n, n, e), s.Dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pr, err := sys.IsProper(); err != nil || pr {
+			t.Fatalf("run %d: IsProper = %v, %v; want false", k, pr, err)
+		}
+		res, err := sys.TransferFunction(nil)
+		if err != nil {
+			t.Fatalf("run %d: TransferFunction: %v", k, err)
+		}
+		if !fzTFImproper(res.TF) {
+			t.Fatalf("run %d: TF proper, num=%v den=%v", k, res.TF.Num, res.TF.Den)
+		}
+		var pts []complex128
+		if k%25 == 0 {
+			if _, err := Step(sys, 1); !errors.Is(err, ErrImproperModel) {
+				t.Fatalf("run %d: Step err = %v, want ErrImproperModel", k, err)
+			}
+			pts = []complex128{complex(-2.3, 0.4), 300i}
+		}
+		for _, x := range pts {
+			w, ok := fzExactDescResponse(n, m, p, a, e, b, c, s.D, x)
+			if !ok {
+				t.Fatalf("run %d: exact response at %v failed", k, x)
+			}
+			g, err := res.TF.Eval(x)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range p {
+				for j := range m {
+					if dd := cmplx.Abs(g[i][j] - w[i*m+j]); !(dd <= 1e-6*(1+cmplx.Abs(w[i*m+j]))) {
+						t.Fatalf("run %d: G(%v)[%d,%d] = %v, exact %v", k, x, i, j, g[i][j], w[i*m+j])
+					}
+				}
+			}
+		}
+		poles, err := sys.Poles()
+		if err != nil {
+			t.Fatalf("run %d: Poles: %v", k, err)
+		}
+		if _, _, msg := fzMatchEig(poles, s.Eig, 1e-6*fzMaxAbsC(s.Eig)); msg != "" {
+			t.Fatalf("run %d: Poles %v, want %v: %s", k, poles, s.Eig, msg)
+		}
+		if st, err := sys.IsStable(); err != nil || !st {
+			t.Fatalf("run %d: IsStable = %v, %v; want true", k, st, err)
+		}
+	}
+}
+
+// TestDescriptorBlurredChainProper: index-3..6 chains whose staircase
+// leaks rounding of A into the deflated blocks and Qᵀ·B, so c·N^k·b of a
+// proper model sits above the ε-level static cut and IsProper reported
+// false: rank decided within the leak (deflatedRank; [6] seed 205, amd64
+// also [6] seed 84), or every rank clear but A row blocks ill-conditioned
+// (JDKLOX; [5] 328, 422, [6] 452, 875, 916, 961, [3] 988: b carries ~1e-9
+// of ‖b‖ on chain states B does not drive). Oracle: the structured model,
+// B on chain heads.
+func TestDescriptorBlurredChainProper(t *testing.T) {
+	for _, tc := range []struct {
+		chains []int
+		seed   uint64
+	}{{[]int{6}, 205}, {[]int{6}, 84}, {[]int{5}, 66},
+		{[]int{5}, 328}, {[]int{5}, 422}, {[]int{6}, 452}, {[]int{6}, 875},
+		{[]int{6}, 916}, {[]int{6}, 961}, {[]int{3}, 988}} {
+		rng := rand.New(rand.NewPCG(tc.seed, 77))
+		nf := 1 + rng.IntN(3)
+		sys, oracle, _ := chainDescriptor(t, rng, nf, tc.chains, 0, true)
+		if pr, err := sys.IsProper(); err != nil || !pr {
+			t.Fatalf("%v seed %d: IsProper = %v, %v; want true", tc.chains, tc.seed, pr, err)
+		}
+		res, err := sys.TransferFunction(nil)
+		if err != nil || fzTFImproper(res.TF) {
+			t.Fatalf("%v seed %d: TransferFunction err %v, want proper TF", tc.chains, tc.seed, err)
+		}
+		if _, err := Step(sys, 1); err != nil {
+			t.Fatalf("%v seed %d: Step: %v", tc.chains, tc.seed, err)
+		}
+		for _, s := range []complex128{1i, complex(0.5, 3), 20i} {
+			g, err := res.TF.Eval(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := pencilResponse(t, oracle, s)[0][0]
+			if d := cmplx.Abs(g[0][0] - w); !(d <= 1e-6*math.Max(1, cmplx.Abs(w))) {
+				t.Fatalf("%v seed %d: G(%v) = %v, want %v", tc.chains, tc.seed, s, g[0][0], w)
+			}
+		}
+	}
+}
+
+// TestDescriptorNonNormalChainImproper: an improper index-5 chain whose
+// staircase N is strongly non-normal (‖N‖ ≈ 106 from entries off the chain
+// path, while the s⁴ coefficient c₀·N₀₁·N₁₂·N₂₃·N₃₄·b₄ is 0.118). The
+// cut 1e3·n·ε·‖c‖‖N‖⁴‖b‖ ≈ 0.13 dropped that term, so G(1i) was off by
+// 0.118 (JDKLOX [5] seed 837). Oracle: the structured model's pencil
+// response at |s| ≤ 3, where the float data still matches it.
+func TestDescriptorNonNormalChainImproper(t *testing.T) {
+	rng := rand.New(rand.NewPCG(837, 77))
+	nf := 1 + rng.IntN(3)
+	sys, oracle, _ := chainDescriptor(t, rng, nf, []int{5}, 0, false)
+	if pr, err := sys.IsProper(); err != nil || pr {
+		t.Fatalf("IsProper = %v, %v; want false", pr, err)
+	}
+	res, err := sys.TransferFunction(nil)
+	if err != nil || !fzTFImproper(res.TF) {
+		t.Fatalf("TransferFunction err %v, want improper TF", err)
+	}
+	for _, s := range []complex128{0, 1i, complex(0.5, 3), complex(-2, 1)} {
+		g, err := res.TF.Eval(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := pencilResponse(t, oracle, s)[0][0]
+		if d := cmplx.Abs(g[0][0] - w); !(d <= 1e-6*math.Max(1, cmplx.Abs(w))) {
+			t.Fatalf("G(%v) = %v, want %v", s, g[0][0], w)
+		}
+	}
+	if _, err := Step(sys, 1); !errors.Is(err, ErrImproperModel) {
+		t.Fatalf("Step err = %v, want ErrImproperModel", err)
+	}
+}
+
+// TestDescriptorChainBesideSmallEPole: proper index-2/3 chains beside a
+// finite pole whose E singular value is 1e-2..1e-4 relative (far above the
+// rank floor). That pole turns the computed infinite subspace by ε·egap,
+// σ₁(E)/σ_r, leaving c·N·b up to 5× the A-side cut, so IsProper said false
+// and Step/TF ErrImproperModel or an improper ratio whose s-term diverged
+// from the response (XSDPXI, on base: [3] 1e-3 111/200; [3] 1e-2, [2]
+// 1e-4 and [2 1] 1e-4 together 23/600, ≤ 6 now on arm64 and amd64).
+// Oracle: the structured model's pencil response. The cut is widened by
+// egap only when the reduction matches the direct (sE − A) solve at the
+// data scale; reductions too inaccurate for that stay improper as before.
+func TestDescriptorChainBesideSmallEPole(t *testing.T) {
+	skipSlowUnderRace(t)
+	falseMild := 0
+	for _, tc := range []struct {
+		chains []int
+		sr     float64
+		mild   bool
+	}{{[]int{3}, 1e-2, true}, {[]int{2}, 1e-4, true}, {[]int{2, 1}, 1e-4, true}, {[]int{3}, 1e-3, false}} {
+		false_ := 0
+		for seed := range uint64(200) {
+			rng := rand.New(rand.NewPCG(seed, 77))
+			nf := 1 + rng.IntN(3)
+			sys, oracle, _ := chainDescriptor(t, rng, nf, tc.chains, tc.sr, true)
+			pr, err := sys.IsProper()
+			if err != nil {
+				t.Fatalf("%v %g seed %d: IsProper: %v", tc.chains, tc.sr, seed, err)
+			}
+			res, terr := sys.TransferFunction(nil)
+			if terr != nil {
+				t.Fatalf("%v %g seed %d: TransferFunction: %v", tc.chains, tc.sr, seed, terr)
+			}
+			if fzTFImproper(res.TF) == pr {
+				t.Fatalf("%v %g seed %d: IsProper %v, improper TF %v", tc.chains, tc.sr, seed, pr, !pr)
+			}
+			if !pr {
+				false_++
+				continue
+			}
+			if _, err := Step(sys, 1); err != nil {
+				t.Fatalf("%v %g seed %d: Step: %v", tc.chains, tc.sr, seed, err)
+			}
+			for _, s := range []complex128{0.37i, complex(0.5, 3), 1e3i} {
+				g, err := res.TF.Eval(s)
+				if err != nil {
+					t.Fatal(err)
+				}
+				w := pencilResponse(t, oracle, s)[0][0]
+				if d := cmplx.Abs(g[0][0] - w); !(d <= 2e-6*math.Max(1, cmplx.Abs(w))) {
+					t.Fatalf("%v %g seed %d: G(%v) = %v, want %v", tc.chains, tc.sr, seed, s, g[0][0], w)
+				}
+			}
+		}
+		if tc.mild {
+			falseMild += false_
+		} else if false_ > 90 {
+			t.Errorf("%v %g: %d/200 proper chains IsProper false, want ≤ 90", tc.chains, tc.sr, false_)
+		}
+		for seed := range uint64(50) {
+			rng := rand.New(rand.NewPCG(seed, 78))
+			nf := 1 + rng.IntN(3)
+			sys, _, _ := chainDescriptor(t, rng, nf, tc.chains, tc.sr, false)
+			if pr, err := sys.IsProper(); err != nil || pr {
+				t.Fatalf("%v %g improper seed %d: IsProper = %v, %v; want false", tc.chains, tc.sr, seed, pr, err)
+			}
+			if _, err := Step(sys, 1); !errors.Is(err, ErrImproperModel) {
+				t.Fatalf("%v %g improper seed %d: Step err = %v, want ErrImproperModel", tc.chains, tc.sr, seed, err)
+			}
+		}
+	}
+	if falseMild > 10 {
+		t.Errorf("%d/600 mild proper chains IsProper false, want ≤ 10", falseMild)
+	}
+}
+
+// TestDescriptorResolvedStiffPoleBesideSingularE: E = U·diag(stiff, ·)·V
+// with ill-conditioned U, V has σ_min(E) = 1.5e-16·σ₁, singular by MATLAB
+// rank, yet its finite pole 7.36e10 (eig(J⁻¹H) of the Weierstrass form)
+// keeps its sign under ε-relative perturbation of every coefficient: Poles
+// must keep it and IsStable report false. The index-1 pencil beside it, with
+// three truly infinite eigenvalues one of which QZ leaves at a spurious
+// 5.7e10, must still drop it.
+func TestDescriptorResolvedStiffPoleBesideSingularE(t *testing.T) {
+	stiff := fzSISODescriptor(t, 4,
+		[]float64{-1.9651420498947512, 0.4511331850387587, -3.903325821299698, -2.1071665846340033, -2.510852549255214, 0.6061389302182965, -4.101585228735571, -0.1449395045195351, 9.460857760190997, -2.9285124408083663, 3.5373016434532296, -10.878549923559335, -1.2457097818319816, 0.15882051399581854, -3.693634405241814, 2.8126101489672135},
+		[]float64{-0.2865629093030843, 0.39606632059173413, 4.380765102388117, -2.23719822419682, -0.026702463114780185, 0.27130657819669923, 3.9785692482385873, -0.9618323729854058, -2.8079105794719337, 0.4484968183258368, -8.58020038331605, -4.1851194670910195, -0.5397825685710043, 0.1283459528193161, -0.514051921992716, 3.323512111827485},
+		[]float64{-1.9817879232089508, -1.1359541291201685, -0.82576257469081, 1.5990689467188857},
+		[]float64{-0.3518918418578226, 0.11992443533614167, -0.1624074560605437, 0.17227523457923055})
+	p, err := stiff.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := 0
+	for _, q := range p {
+		if cmplx.Abs(q) > 1e6 {
+			big++
+			if imag(q) != 0 || !(real(q) > 5e10 && real(q) < 1.2e11) {
+				t.Errorf("stiff pole %v, want ≈ 7.36e10", q)
+			}
+		}
+	}
+	if len(p) != 4 || big != 1 {
+		t.Errorf("Poles = %v, want 3 moderate poles and 7.36e10", p)
+	}
+	if st, err := stiff.IsStable(); err != nil || st {
+		t.Errorf("IsStable = %v, %v; want false", st, err)
+	}
+
+	idx1 := fzSISODescriptor(t, 6,
+		[]float64{2.4543590156043518, -1.5727936230189952, 0.8008936196660447, 0.5701021401430599, 1.788458205213457, -0.24034295962142865, 1.7646171502425094, 0.5711891793634173, 2.219428466428872, 0.65615478386703, 2.3629806745786945, -0.7530169573820555, -5.075402703765479, 5.770644557746602, 3.451925981168709, -0.3418997576605705, -0.17128166548768226, 4.162827927332865, -0.8788781926919537, 2.181892515464334, 2.339131037516222, 0.014238610173178231, 1.9176818016161064, 1.9658866060637348, 2.0610638281283102, -0.0050096938069942925, 1.479837881843069, 0.6061689068434293, 1.8826490044808781, -1.490906302694088, -0.9815019405761776, -5.233190273310258, -10.228889139722353, -2.716229315405433, -5.635359499344855, -2.2112449296212513},
+		[]float64{0.932929895136712, 3.895883629028563, 3.0884070618918815, -0.5602259056606955, 1.0160871805801919, -0.26503842154306056, -0.7138104855118033, -2.077421612639241, -2.654391119915962, -0.41449274826926863, -0.7356014086396095, 0.46745919006870573, 0.3977916345723491, -8.145048631781748, -13.88566355443944, -4.923164594329562, -4.709723842245629, 0.2965132316827421, -0.805424647262451, -4.5141818473025515, -4.615742460507339, -0.19066819207852864, -1.5229773728117553, 0.3064382296386195, -0.8037235305714053, -1.4322868286005581, -1.4421068104382306, 0.07255373501615214, -0.3167213576720211, 0.4633043238518937, 1.5657388752560872, 6.042251402093731, 9.416419716175175, 2.5915050825408894, 2.722242594395652, -1.318170600767564},
+		[]float64{2.9915478884783386, -1.479329078819797, -2.5612432524264848, -1.3659078326469678, -1.6649474135712992, 3.049472155458685},
+		[]float64{0.6905863711792901, 0.00273228360346223, -1.198340118888849, -1.5750372739123064, -1.341096952841661, 1.2155306904556067})
+	want := []complex128{0.08195911807227599, complex(-0.6837326670536606, 0.8716240141943284), complex(-0.6837326670536606, -0.8716240141943284)}
+	p, err = idx1.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p) != len(want) {
+		t.Fatalf("index-1 Poles = %v, want %v", p, want)
+	}
+	for _, w := range want {
+		found := false
+		for _, q := range p {
+			found = found || cmplx.Abs(q-w) < 1e-8
+		}
+		if !found {
+			t.Errorf("index-1 Poles = %v, want %v", p, want)
+		}
+	}
+}
+
+func fzSISODescriptor(t *testing.T, n int, a, e, b, c []float64) *System {
+	t.Helper()
+	sys, err := NewDescriptor(mat.NewDense(n, n, a), mat.NewDense(n, 1, b), mat.NewDense(1, n, c), mat.NewDense(1, 1, []float64{0.3}), mat.NewDense(n, n, e), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
 }
