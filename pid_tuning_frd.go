@@ -390,6 +390,7 @@ func pidTuningFRDStrictPlant(data *FRD, unstablePoles *int) (p pidTuningPlant, c
 	if p.dcGain == 0 {
 		p.lowOrder, p.lowAnchor = pidTuningFRDLowOrder(data, p.at)
 	}
+	p.resonances = pidTuningFRDResonances(data)
 	if data.Dt == 0 {
 		p.markov, p.markovSpread = pidTuningFRDMarkov(data, p.at)
 		p.topOrder, p.topAnchored = pidTuningFRDTopOrder(data, p.at)
@@ -622,7 +623,10 @@ func pidTuningFRDStrictDCGain(data *FRD, at func(float64) complex128) float64 {
 // or that arc, the circle's major one, passes within ¼ of 0, and likewise
 // on the one through them and the sample after (where each exists), as a
 // resonance the samples do not resolve winds 1 + L round 0 along that
-// arc, opposite to the chord.
+// arc, opposite to the chord. On the strict plant, across a step that
+// pidTuningFRDResonances marks, 1 + L follows each fitted resonance
+// instead of the chord, the count unknown unless every one stays ¼ from 0
+// and they agree on its turn.
 //
 // A discrete top sample within 10% of Nyquist with L within 30° of the real
 // axis ends 1 + L at 1 + L(z = −1), which is real; Re L is extrapolated
@@ -842,8 +846,10 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 	if !(math.Abs(total) < math.Pi/2) {
 		return false, true, false
 	}
+	var last float64
 	step := func(w float64, f complex128) bool {
 		d, ok := walk(wPrev, w, fPrev, f, 0)
+		last = d
 		total += d
 		wPrev, fPrev = w, f
 		return ok
@@ -866,6 +872,22 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 		if w > wPrev && !step(w, f2) {
 			return false, true, false
 		}
+		if i > 0 && p.resonances != nil && p.resonances[i-1] != nil {
+			if len(p.resonances[i-1]) == 0 {
+				return true, false, false
+			}
+			var ref float64
+			for j, m := range p.resonances[i-1] {
+				d, ok := pidTuningFRDModeTurn(c, m, s[i-1], w)
+				if j == 0 {
+					ref = d
+				}
+				if !ok || !(math.Abs(d-ref) < math.Pi/2) {
+					return true, false, false
+				}
+			}
+			total += ref - last
+		}
 		if i > 0 && (i > 1 || i+1 < len(s)) && (i < 2 || pidTuningFRDArcHidesZero(f1, f2, f0)) && (i+1 == len(s) || pidTuningFRDArcHidesZero(f1, f2, f3)) {
 			return true, false, false
 		}
@@ -875,6 +897,129 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 	}
 	total += turn(fPrev, end) + bump
 	return math.Abs(expected-total) < math.Pi/2, true, top
+}
+
+// pidTuningFRDMode is a lightly damped pole pair's interpolant
+// G(ω) = c + r/(ω − pole) across one step of the samples, through both,
+// pole = ω₀ + jσ.
+type pidTuningFRDMode struct{ pole, c, r complex128 }
+
+// pidTuningFRDResonances returns, for each step samples[k] → samples[k+1]
+// of data (above DC) that a resonance the samples do not resolve may span,
+// the interpolants of that resonance across it, and nil for any other
+// step, or nil when no step is marked. Near a lightly damped pole pair G
+// is a Möbius map of ω, c + r/(ω − ω₀ − jσ), tracing a circle clockwise,
+// so the step's two samples and either neighbour fix its pole; each fit
+// with σ > 0 gives an interpolant through the step's samples. A step is
+// marked when a fit's circle turns across it by more than a quarter turn,
+// beyond what the count's chord follows, or when arg G does while |G|
+// peaks there, the larger of its two samples above both outer neighbours,
+// as a pole pair between them lifts both, while a delay's phase turns
+// with |G| smooth and an antiresonance dips. A marked step with no fit is
+// unknown to the count.
+func pidTuningFRDResonances(data *FRD) [][]pidTuningFRDMode {
+	n := len(data.Omega)
+	w := data.Omega
+	g := func(k int) complex128 { return data.Response[k][0][0] }
+	var out [][]pidTuningFRDMode
+	for k := 0; k+1 < n; k++ {
+		peak := math.Max(cmplx.Abs(g(k)), cmplx.Abs(g(k+1)))
+		marked := math.Abs(cmplx.Phase(g(k+1)/g(k))) > math.Pi/2 && !(k > 0 && !(peak > cmplx.Abs(g(k-1))) || k+2 < n && !(peak > cmplx.Abs(g(k+2))))
+		var poles []complex128
+		for _, j := range []int{k - 1, k + 2} {
+			if j < 0 || j >= n {
+				continue
+			}
+			pole := pidTuningFRDMobiusPole(w[k], w[k+1], w[j], g(k), g(k+1), g(j))
+			if !pidFiniteComplex(pole) || !(imag(pole) > 0) {
+				continue
+			}
+			span := 2 * (math.Atan((w[k+1]-real(pole))/imag(pole)) - math.Atan((w[k]-real(pole))/imag(pole)))
+			marked = marked || span > math.Pi/2
+			poles = append(poles, pole)
+		}
+		if !marked {
+			continue
+		}
+		if out == nil {
+			out = make([][]pidTuningFRDMode, n-1)
+		}
+		modes := []pidTuningFRDMode{}
+		for _, pole := range poles {
+			da, db := 1/complex(w[k]-real(pole), -imag(pole)), 1/complex(w[k+1]-real(pole), -imag(pole))
+			r := (g(k) - g(k+1)) / (da - db)
+			if m := (pidTuningFRDMode{pole, g(k) - r*da, r}); pidFiniteComplex(m.c) && pidFiniteComplex(m.r) {
+				modes = append(modes, m)
+			}
+		}
+		out[k] = modes
+	}
+	return out
+}
+
+// pidTuningFRDMobiusPole is the pole of the Möbius map
+// G(ω) = (αω + β)/(ω − pole) through (ωᵢ, gᵢ), i = 1..3.
+func pidTuningFRDMobiusPole(w1, w2, w3 float64, g1, g2, g3 complex128) complex128 {
+	det := func(a, b, c [3]complex128) complex128 {
+		return a[0]*(b[1]*c[2]-b[2]*c[1]) - a[1]*(b[0]*c[2]-b[2]*c[0]) + a[2]*(b[0]*c[1]-b[1]*c[0])
+	}
+	x1, x2, x3 := complex(w1, 0), complex(w2, 0), complex(w3, 0)
+	return det([3]complex128{x1, 1, g1 * x1}, [3]complex128{x2, 1, g2 * x2}, [3]complex128{x3, 1, g3 * x3}) / det([3]complex128{x1, 1, g1}, [3]complex128{x2, 1, g2}, [3]complex128{x3, 1, g3})
+}
+
+// pidTuningFRDModeTurn is the turn of 1 + L along mode m's interpolant from
+// wa to wb, and whether it stays at least ¼ from 0 (|S| <= 4) and is
+// followed: the step is walked evenly in the angle the pole sees, each
+// piece bisected until 1 + L turns by at most π/8 over it.
+func pidTuningFRDModeTurn(c PID2, m pidTuningFRDMode, wa, wb float64) (float64, bool) {
+	w0, sigma := real(m.pole), imag(m.pole)
+	f := func(th float64) complex128 {
+		w := w0 + sigma*math.Tan(th)
+		return 1 + (m.c+m.r/(complex(w, 0)-m.pole))*pidTuningFeedback(c, w)
+	}
+	near := func(v complex128) bool { return !pidFiniteComplex(v) || !(cmplx.Abs(v) >= .25) }
+	var walk func(ta, tb float64, fa, fb complex128, depth int) (float64, bool)
+	walk = func(ta, tb float64, fa, fb complex128, depth int) (float64, bool) {
+		d := cmplx.Phase(fb / fa)
+		if math.Abs(d) <= math.Pi/8 {
+			return d, true
+		}
+		if depth == 30 {
+			return 0, false
+		}
+		tm := (ta + tb) / 2
+		fm := f(tm)
+		if near(fm) {
+			return 0, false
+		}
+		d1, ok := walk(ta, tm, fa, fm, depth+1)
+		if !ok {
+			return 0, false
+		}
+		d2, ok := walk(tm, tb, fm, fb, depth+1)
+		return d1 + d2, ok
+	}
+	ta, tb := math.Atan((wa-w0)/sigma), math.Atan((wb-w0)/sigma)
+	const pieces = 32
+	t0, f0 := ta, f(ta)
+	if near(f0) {
+		return 0, false
+	}
+	total := 0.
+	for i := 1; i <= pieces; i++ {
+		t1 := ta + (tb-ta)*float64(i)/pieces
+		f1 := f(t1)
+		if near(f1) {
+			return 0, false
+		}
+		d, ok := walk(t0, t1, f0, f1, 0)
+		if !ok {
+			return 0, false
+		}
+		total += d
+		t0, f0 = t1, f1
+	}
+	return total, true
 }
 
 // pidTuningFRDArcHidesZero reports whether 0 lies between the chord from a

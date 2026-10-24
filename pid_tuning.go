@@ -172,6 +172,11 @@ type pidTuningPlant struct {
 	lowAnchored bool
 	topOrder    int
 	topAnchored bool
+	// resonances holds, by the index k of its lower sample, the fitted
+	// interpolants of each step samples[k] → samples[k+1] of the strict
+	// plant across which a resonance the data do not resolve may loop
+	// (pidTuningFRDResonances).
+	resonances [][]pidTuningFRDMode
 	// markov, if nonzero, is lim sG(s) that continuous sampled data show at
 	// their top (pidTuningFRDMarkov), and markovSpread its change over the
 	// top half decade.
