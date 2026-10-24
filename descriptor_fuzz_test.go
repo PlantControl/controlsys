@@ -798,3 +798,12 @@ func TestDescriptorChainBesideSmallEPole(t *testing.T) {
 		t.Errorf("%d/600 mild proper chains IsProper false, want ≤ 10", falseMild)
 	}
 }
+
+func fzSISODescriptor(t *testing.T, n int, a, e, b, c []float64) *System {
+	t.Helper()
+	sys, err := NewDescriptor(mat.NewDense(n, n, a), mat.NewDense(n, 1, b), mat.NewDense(1, n, c), mat.NewDense(1, 1, []float64{0.3}), mat.NewDense(n, n, e), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
