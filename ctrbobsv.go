@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -221,7 +222,9 @@ func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) (*StaircaseForm
 // stable: in the open left half-plane when continuous, inside the unit circle
 // otherwise. A mode within rounding of uncontrollable on the boundary (PBH
 // rank at the staircase's floor) is not stabilizable, whichever side
-// rounding puts its eigenvalue. A model with no states is stabilizable. Nil, non-finite or
+// rounding puts its eigenvalue; so is an unstable mode whose PBH rank is at
+// the floor when the staircase's coupling could be amplified rounding (a weak
+// stair or nearly parallel inputs). A model with no states is stabilizable. Nil, non-finite or
 // mismatched matrices return an error.
 func IsStabilizable(A, B *mat.Dense, continuous bool) (bool, error) {
 	return isStabilizable("IsStabilizable", A, B, continuous)
@@ -249,6 +252,11 @@ func isStabilizable(op string, A, B *mat.Dense, continuous bool) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", op, err)
 	}
+	// Coupling below rounding amplified by the staircase (a weak stair,
+	// nearly parallel inputs, a dominant unstable mode; ≤ 1e-3 of the
+	// bound seen) may be no coupling at all, so PBH decides.
+	an := frobNorm(A)
+	weak := res.MinCoupling <= max(float64(n)*math.Sqrt(eps())*an, float64(n)*eps()*an*res.Amplification)
 	var eig mat.Eigen
 	if nc2 := n - res.NCont; nc2 > 0 {
 		auc := mat.NewDense(nc2, nc2, nil)
@@ -266,15 +274,131 @@ func isStabilizable(op string, A, B *mat.Dense, continuous bool) (bool, error) {
 				return false, nil
 			}
 		}
-	} else if res.MinCoupling > float64(n)*math.Sqrt(eps())*frobNorm(A) {
-		// A boundary mode counted controllable by amplified rounding has
-		// coupling ~1e-4 of this; genuine ones ~1e3 times it.
+	} else if !weak {
 		return true, nil
 	}
 	if !eig.Factorize(A, mat.EigenNone) {
 		return false, fmt.Errorf("%s: eigenvalues of A: %w", op, ErrSchurFailed)
 	}
-	return !boundaryPBHDeficient(A, B, eig.Values(nil), continuous), nil
+	return !boundaryPBHDeficient(A, B, eig.Values(nil), continuous, weak), nil
+}
+
+// unstablePBHDeficient reports a computed λ on or outside the stability
+// boundary with σmin([A − λI, B]) ≤ floor at some point within δλ of it, δλ
+// bounding the error of λ. σmin is 1-Lipschitz in λ, so only σmin(λ) ≤
+// floor + δλ needs the search (diskSigmaMin). δλ, needing eigenvectors, is
+// computed only when some σmin lies within band of floor.
+func unstablePBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool, floor, band float64) bool {
+	test := func(lam complex128) bool {
+		return imag(lam) >= 0 && poleOnOrOutsideStabilityBoundary(lam, continuous, poleStabilityTolerance(lam))
+	}
+	need := false
+	for _, lam := range lams {
+		if !test(lam) {
+			continue
+		}
+		s := pbhSigmaMin(A, B, lam)
+		if s <= floor {
+			return true
+		}
+		need = need || s <= floor+band
+	}
+	if !need {
+		return false
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(A, mat.EigenBoth) {
+		return true
+	}
+	lams = eig.Values(nil)
+	slack := eigenvalueErrorBounds(&eig, A, len(lams), band)
+	var searched []complex128
+	for k, lam := range lams {
+		if !test(lam) || pbhSigmaMin(A, B, lam) > floor+slack[k] {
+			continue
+		}
+		if slack[k] <= floor {
+			return true
+		}
+		var mean complex128
+		var cnt int
+		for _, mu := range lams {
+			if cmplx.Abs(mu-lam) <= slack[k] {
+				mean += mu
+				cnt++
+			}
+		}
+		mean /= complex(float64(cnt), 0)
+		if slices.ContainsFunc(searched, func(z complex128) bool { return cmplx.Abs(z-mean) <= slack[k] }) {
+			continue
+		}
+		searched = append(searched, mean)
+		if diskSigmaMin(A, B, lam, slack[k], floor, mean) <= floor {
+			return true
+		}
+	}
+	return false
+}
+
+// diskSigmaMin is the least σmin([A − λI, B]) found by compass search from
+// mean over λ within radius of center, stopping once it is at most floor or
+// the step is below floor/10 or a quarter of its excess over floor (a local
+// minimum well above floor). A defective mode's computed λ (center) errs by
+// up to √eps·‖A‖ but its cluster mean is accurate, so a controllable Jordan
+// block keeps the σmin it has there rather than the Lipschitz slack.
+func diskSigmaMin(A, B *mat.Dense, center complex128, radius, floor float64, mean complex128) float64 {
+	at := func(z complex128) float64 {
+		if imag(z) < 0 {
+			z = cmplx.Conj(z)
+		}
+		return pbhSigmaMin(A, B, z)
+	}
+	x, f := mean, at(mean)
+	step := radius / 2
+	for evals := 0; f > floor && step > max(floor/10, (f-floor)/4) && evals < 400; {
+		moved := false
+		for _, d := range [4]complex128{1, -1, 1i, -1i} {
+			y := x + d*complex(step, 0)
+			if cmplx.Abs(y-center) > radius {
+				continue
+			}
+			evals++
+			if fy := at(y); fy < f {
+				x, f, moved = y, fy, true
+				break
+			}
+		}
+		if !moved {
+			step /= 2
+		}
+	}
+	return f
+}
+
+// eigenvalueErrorBounds is n·eps·‖A‖_F·κ(λ) for each eigenvalue of a
+// factorization with both eigenvector sets, κ = ‖x‖‖y‖/|yᴴx|, capped at
+// band where a mode is defective to rounding.
+func eigenvalueErrorBounds(eig *mat.Eigen, A *mat.Dense, n int, band float64) []float64 {
+	an := frobNorm(A)
+	var vr, vl mat.CDense
+	eig.VectorsTo(&vr)
+	eig.LeftVectorsTo(&vl)
+	out := make([]float64, n)
+	for k := range n {
+		var xx, yy float64
+		var yx complex128
+		for i := range n {
+			x, y := vr.At(i, k), vl.At(i, k)
+			xx += real(x)*real(x) + imag(x)*imag(x)
+			yy += real(y)*real(y) + imag(y)*imag(y)
+			yx += cmplx.Conj(y) * x
+		}
+		out[k] = band
+		if d := cmplx.Abs(yx); d > 0 {
+			out[k] = min(band, float64(n)*eps()*an*math.Sqrt(xx*yy)/d)
+		}
+	}
+	return out
 }
 
 // boundaryPBHDeficient reports a point λ on the stability boundary where
@@ -292,8 +416,11 @@ func isStabilizable(op string, A, B *mat.Dense, continuous bool) (bool, error) {
 // rounding put a split pair. Off the real axis a split pair's mean,
 // accurate only to eps·κ, is projected onto the boundary and σmin
 // minimized along it within the pair's gap; pairs farther apart than 16·band
-// are distinct modes, not a split, and are left to the staircase.
-func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool) bool {
+// are distinct modes, not a split, and are left to the staircase. When weak,
+// the staircase counted rounding-level coupling as rank, which can hide a
+// simple uncontrollable mode anywhere, so every λ on or outside the
+// boundary is tested too (unstablePBHDeficient).
+func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous, weak bool) bool {
 	n, _ := A.Dims()
 	an := frobNorm(A)
 	if bn := frobNorm(B); bn > 0 {
@@ -306,6 +433,9 @@ func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool) b
 	}
 	floor := float64(n*n) * eps() * math.Hypot(an, frobNorm(B))
 	band := float64(n) * math.Sqrt(eps()) * an
+	if weak && unstablePBHDeficient(A, B, lams, continuous, floor, band) {
+		return true
+	}
 	gaps := make([]float64, len(lams))
 	nbs := make([]int, len(lams))
 	for k, lam := range lams {
