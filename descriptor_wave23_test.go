@@ -2,10 +2,13 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
 	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // fzPertULP returns x with each entry moved by up to 8 ulps.
@@ -165,6 +168,208 @@ func TestDescriptorSmallImpulsiveTermKept(t *testing.T) {
 				if d := cmplx.Abs(g[0][0] - w[0]); !(d <= 2e-12*(1+cmplx.Abs(w[0]))) {
 					t.Fatalf("%s run %d: G(%v) = %v, exact %v (diff %.2g)", tc.name, run, x, g[0][0], w[0], d)
 				}
+			}
+		}
+	}
+}
+
+// TestDescriptorChainKeepsSmallEPole: an infinite chain beside a finite
+// pole small in E (σ_r/σ₁ ≈ 5e-8, 1e7 above the MATLAB rank tol) under
+// cond(U), cond(V) ≈ 1e4. In a deflated E block that pole's singular value
+// fell within the A-side leak of the rank tol and deflatedRank took it as
+// zero: Poles dropped the unstable stiff pole (seeds 386: 7409.37, 2172:
+// 2277.04; 1854: −2668.3), IsStable flipped to true, and IsProper/TF/Step
+// gave an improper TF off by 1e-4..3e-3 where base failed closed. Oracle:
+// the structured Weierstrass form (poles f/w); TF against the exact
+// rational response of the float data.
+func TestDescriptorChainKeepsSmallEPole(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		n          int
+		a, e, b, c []float64
+		want       []complex128
+		proper     bool
+	}{
+		{"386", 4,
+			[]float64{0.892905025076295, -0.11288359472818811, 0.9121083376923637, -0.06474985778103985, 0.46847707441570297, -0.025600491611808118, 0.4888439986831914, -0.031011494609847604, 0.3040948175501781, -0.03675096186313089, 0.3110230756314638, -0.021847274755270155, 0.25919757166822116, -0.022057008396182534, 0.2681687454551831, -0.017902817068011438},
+			[]float64{0.039090653700109564, -0.015922243461823127, 0.03649628155897175, -0.003979387166376351, 0.03947811058918048, -0.0068678529290251734, 0.0403821076458006, -0.003357539145365296, 0.014607023283755748, -0.005410720424973301, 0.013843752738052106, -0.0014482895996516835, 0.017090311446907713, -0.004100339614095816, 0.017050454944971, -0.001534416346945183},
+			[]float64{-0.30084654660217397, -0.10967877856694218, -0.10559431595866899, -0.06587309615955014},
+			[]float64{0.04359101531472977, 0.09478608888419238, 0.0617121928111728, 0.012238155734080158},
+			[]complex128{7409.37, -4.2696}, false},
+		{"2172", 6,
+			[]float64{-0.0037670257606886824, -0.007534333558418587, -0.0037340504776319406, -0.0016358267147548494, 0.0020932562077547808, -0.007051182977603471, -0.008762732227666416, -0.021784631287861164, 0.03685219790162874, 0.005354194240266594, 0.016892935336291225, -0.004958406734307635, -0.022944618465151372, -0.051878167427000084, 0.024483125256966828, -0.00044560920206025093, 0.02538146215696462, -0.03169271285663985, 0.003417091623774009, 0.007009375520647093, 0.007373602353952956, 0.002279136151688046, -0.0009023226683092553, 0.007614342599610211, 0.033461428203977905, 0.06919721493521581, 0.02416425910692988, 0.012702161208775709, -0.021117183938092986, 0.06093832940793687, 0.0068888509149271976, 0.01839224067772071, -0.039580915997083764, -0.00634702561399234, -0.01611373333267787, 0.001332870310336167},
+			[]float64{-0.0007816041745176931, -0.0036098013584827, -0.006786076178720048, -0.0015288167656925314, -0.0010358584763391348, -0.0040944059875368975, 0.0008010236227489541, -0.008688766945771146, -0.0018378185959809284, -0.00010420236396322053, -0.0006932745135124995, -0.0037054114787483275, 0.0023870409320582184, -0.014907199080758701, 0.00862451920074572, 0.0024321444380847783, 0.0011049204152274777, -0.0022419048534452974, -0.0005841607963448808, 0.0006700681844692078, -0.004575916070760294, -0.0010672277976571385, -0.0007823245471057813, -0.0014508727553353576, 0.00248199921596936, 0.025353825362253404, 0.02706574820092621, 0.005859954588711335, 0.004144872588998478, 0.02062641461179422, -0.002094473979436187, 0.005520413620345255, -0.008864789956889479, -0.002340114156119926, -0.00099841765736524, -0.0016973256741709159},
+			[]float64{-0.023145546634428398, -0.11921245242090785, -0.2299581473296095, 0.023229190436582104, 0.23990230117121622, 0.11292032969690191},
+			[]float64{0.07615822592058047, 0.11217225582365138, 1.003112789362183, 0.21908929747737776, 0.19985098544576227, 0.39458741066664194},
+			[]complex128{2277.04, -0.95907}, true},
+		{"1854", 5,
+			[]float64{0.01017989210285958, -0.020584080467212926, 0.05164182315690744, 0.024001568618924454, 0.09360134432454659, 0.05122278456511631, -0.08489137745099413, 0.2099592844844192, 0.10046455326623703, 0.4395722925197165, -0.0004240204609980562, -0.004424325983754342, 0.011532410778990646, 0.004747450828118146, 0.005199045731007235, 0.006362601012326807, -0.015284635563423847, 0.03840586108300097, 0.017606814859495428, 0.06242478331079874, 0.020018517793076434, -0.0284340996693922, 0.06932881360865033, 0.03410251858559945, 0.16379420264829347},
+			[]float64{0.005285537407305326, -0.021112482999938058, 0.0488903396198416, 0.023996430101286263, 0.06989497802888067, 0.015893861198156382, -0.0775267594707307, 0.17987725759868822, 0.08732704501531556, 0.23263403563186663, 0.002824505434612172, -0.006932558424837709, 0.015988681701215784, 0.008117475352608046, 0.030233742013942043, 0.005704823045735848, -0.01856417941143227, 0.04306079178568076, 0.021309738054861624, 0.06802291448530058, 0.0037517108552665647, -0.023485494209275745, 0.05463671817622567, 0.026209062198649886, 0.06305408908276564},
+			[]float64{-0.04534447858238751, -0.3879786812689528, 0.04694865027834787, -0.008157914224348478, -0.1926344633457886},
+			[]float64{-0.12495085488484634, 0.09864359667198877, -0.12044547296762002, -0.13119227422806057, -0.9490914512399493},
+			[]complex128{-2668.3, 1.7444, -0.9397}, true},
+	} {
+		wantStable := true
+		for _, w := range tc.want {
+			wantStable = wantStable && real(w) < 0
+		}
+		rng := rand.New(rand.NewPCG(11, 23))
+		for run := range 20 {
+			a, e := tc.a, tc.e
+			if run > 0 {
+				a, e = fzPertULP(rng, a), fzPertULP(rng, e)
+			}
+			sys := fzSISODescriptor(t, tc.n, a, e, tc.b, tc.c)
+			if st, err := sys.IsStable(); err == nil && st != wantStable {
+				t.Fatalf("%s run %d: IsStable = %v, want %v", tc.name, run, st, wantStable)
+			}
+			if p, err := sys.Poles(); err == nil {
+				requirePolesContain(t, fmt.Sprintf("%s run %d", tc.name, run), p, tc.want, 1e-4)
+			}
+			pr, prErr := sys.IsProper()
+			if prErr == nil && pr != tc.proper {
+				t.Fatalf("%s run %d: IsProper = %v, want %v (or an error)", tc.name, run, pr, tc.proper)
+			}
+			_, stepErr := Step(sys, 1)
+			res, err := sys.TransferFunction(nil)
+			if (prErr == nil) != (err == nil) || prErr == nil && pr == errors.Is(stepErr, ErrImproperModel) {
+				t.Fatalf("%s run %d: IsProper %v, %v; TransferFunction err %v; Step err %v disagree", tc.name, run, pr, prErr, err, stepErr)
+			}
+			if err != nil {
+				continue
+			}
+			for _, x := range []complex128{0.37i, complex(-0.5, 3)} {
+				w, ok := fzExactDescResponse(tc.n, 1, 1, a, e, tc.b, tc.c, []float64{0.3}, x)
+				if !ok {
+					t.Fatalf("%s run %d: exact response at %v failed", tc.name, run, x)
+				}
+				g, err := res.TF.Eval(x)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if d := cmplx.Abs(g[0][0] - w[0]); !(d <= 1e-6*(1+cmplx.Abs(w[0]))) {
+					t.Fatalf("%s run %d: G(%v) = %v, exact %v", tc.name, run, x, g[0][0], w[0])
+				}
+			}
+		}
+	}
+}
+
+// condChainDescriptor is chainDescriptor with U = Q₁·diag(10^(−logCond·i/(n−1)))·Q₂
+// (V likewise) and Ff, Wf diagonal with Wf[0] = stiffRel.
+func condChainDescriptor(t *testing.T, rng *rand.Rand, nf int, chains []int, stiffRel float64, proper bool, logCond float64) (sys, oracle *System, poles []complex128) {
+	t.Helper()
+	n := nf
+	for _, k := range chains {
+		n += k
+	}
+	F, W := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+	b, c := mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil)
+	for i := range nf {
+		c.Set(0, i, rng.NormFloat64())
+		b.Set(i, 0, rng.NormFloat64())
+		f, w := rng.NormFloat64(), 0.5+rng.Float64()
+		if i == 0 {
+			w = stiffRel
+		}
+		F.Set(i, i, f)
+		W.Set(i, i, w)
+		poles = append(poles, complex(f/w, 0))
+	}
+	o := nf
+	for _, k := range chains {
+		for i := range k {
+			F.Set(o+i, o+i, 1)
+			if i+1 < k {
+				W.Set(o+i, o+i+1, 1)
+			}
+			c.Set(0, o+i, rng.NormFloat64())
+			if !proper || i == 0 {
+				b.Set(o+i, 0, rng.NormFloat64())
+			}
+		}
+		o += k
+	}
+	orth := func() *mat.Dense {
+		g := mat.NewDense(n, n, nil)
+		for i := range n {
+			for j := range n {
+				g.Set(i, j, rng.NormFloat64())
+			}
+		}
+		var qr mat.QR
+		qr.Factorize(g)
+		var q mat.Dense
+		qr.QTo(&q)
+		return &q
+	}
+	conditioned := func() *mat.Dense {
+		d := mat.NewDense(n, n, nil)
+		for i := range n {
+			d.Set(i, i, math.Pow(10, -logCond*float64(i)/float64(n-1)))
+		}
+		var t, out mat.Dense
+		t.Mul(orth(), d)
+		out.Mul(&t, orth())
+		return &out
+	}
+	U, V := conditioned(), conditioned()
+	var T, A, E, B, C mat.Dense
+	T.Mul(U, F)
+	A.Mul(&T, V)
+	T.Mul(U, W)
+	E.Mul(&T, V)
+	B.Mul(U, b)
+	C.Mul(c, V)
+	D := mat.NewDense(1, 1, []float64{0.3})
+	sys, err := NewDescriptor(&A, &B, &C, D, &E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oracle, err = NewDescriptor(F, b, c, D, W, 0); err != nil {
+		t.Fatal(err)
+	}
+	return sys, oracle, poles
+}
+
+// TestDescriptorChainBesideSmallEPoleSweep: chains [2], [3], [2 1], [3 1]
+// beside a finite pole small in E (stiffRel 1e-1..1e-4) under cond(U),
+// cond(V) up to 1e4. Poles must keep every finite pole, IsStable must
+// not report an unstable model stable, and a returned TF must match the
+// structured oracle to 1e-5 (base reaches 1.6e-6 here). Before
+// leakedZeros, 5 of these lost a pole (2 stability flips) and returned a
+// TF off by 2.4e-5..7.5e-4.
+func TestDescriptorChainBesideSmallEPoleSweep(t *testing.T) {
+	skipSlowUnderRace(t)
+	for seed := range uint64(3000) {
+		rng := rand.New(rand.NewPCG(seed, 707))
+		chains := [][]int{{2}, {3}, {2, 1}, {3, 1}}[rng.IntN(4)]
+		nf := 1 + rng.IntN(3)
+		sr := math.Pow(10, -1-3*rng.Float64())
+		proper := rng.IntN(2) == 0
+		sys, oracle, poles := condChainDescriptor(t, rng, nf, chains, sr, proper, 4*rng.Float64())
+		wantStable := true
+		for _, p := range poles {
+			wantStable = wantStable && real(p) < 0
+		}
+		if st, err := sys.IsStable(); err == nil && st && !wantStable {
+			t.Fatalf("seed %d: IsStable = true, poles %v", seed, poles)
+		}
+		if p, err := sys.Poles(); err == nil {
+			requirePolesContain(t, fmt.Sprintf("seed %d", seed), p, poles, 1e-3)
+		}
+		res, err := sys.TransferFunction(nil)
+		if err != nil {
+			continue
+		}
+		for _, s := range []complex128{0.37i, complex(-0.5, 3)} {
+			g, err := res.TF.Eval(s)
+			if err != nil {
+				t.Fatalf("seed %d: Eval(%v): %v", seed, s, err)
+			}
+			w := pencilResponse(t, oracle, s)[0][0]
+			if d := cmplx.Abs(g[0][0] - w); !(d <= 1e-5*math.Max(1, cmplx.Abs(w))) {
+				t.Fatalf("seed %d: G(%v) = %v, want %v", seed, s, g[0][0], w)
 			}
 		}
 	}
