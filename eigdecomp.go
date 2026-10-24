@@ -257,9 +257,12 @@ func deflatedSchur(a, e, qd, zd *mat.Dense, nf int, selct func(ar, ai, b float64
 // rounding of A, turning Z of each level by ε·‖A‖/σ_min(A row block), may
 // leave more than ε-level rounding in the deflated blocks and in Qᵀ·B:
 // callers widen their zero tests by it. A rank of a deflated E block that
-// descriptorRank finds ambiguous is decided by deflatedRank; blur is then
-// leak, else 1. egap, the E-side counterpart of leak, is the largest
-// σ₁(E)/σ_r of a deflated E block, σ_r its least nonzero singular value: a
+// descriptorRank finds ambiguous is decided by deflatedRank, which may
+// deflate no more than infiniteChainCount directions per level (a level
+// past the first asserts that many chains of length ≥ 2: a finite pole
+// small in E is otherwise taken as infinite); blur is then leak, else 1.
+// egap, the E-side counterpart of leak, is the largest σ₁(E)/σ_r of a
+// deflated E block, σ_r its least nonzero singular value: a
 // finite pole that is small in E (near ∞ chordally) turns the null space
 // of that block, so Q and Z, by ε·egap, and that rounding of Qᵀ·B and the
 // deflated blocks is not bounded by leak.
@@ -307,6 +310,7 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 	tolA := ratio * normA
 	scaleE := mat.Norm(E, 2)
 	leak, blur, egap = 1.0, 1.0, 1.0
+	chains := -1
 	k := n
 	for k > 0 && !stiff {
 		if clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*ratio*scaleE) {
@@ -322,6 +326,12 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		r, st, ok := descriptorRank(sv[:k], scaleE, n, k == n)
 		if !ok && k < n {
 			r, ok = deflatedRank(sv[:k], 1e3*float64(n)*eps()*scaleE, leak)
+			if ok && r < k {
+				if chains < 0 {
+					chains = infiniteChainCount(A, E, n, normA)
+				}
+				ok = k-r <= chains
+			}
 			blur = max(blur, leak)
 		}
 		if !ok {
@@ -766,12 +776,10 @@ func certifyFiniteRetained(a, e *mat.Dense, n, n1, ninf int, alphar, alphai, bet
 // then does E have exactly d infinite eigenvalues; an infinite Jordan chain
 // leaves Ulᵀ·A·Vr singular. A failed SVD reports index1 false.
 func pencilIndexOne(a, e *mat.Dense, n int, normA float64) (d int, index1 bool) {
-	var svd mat.SVD
-	if !svd.Factorize(e, mat.SVDFull) {
+	sv, sv22, rank, stiff, ok := nullCoupling(a, e, n)
+	if !ok {
 		return n, false
 	}
-	sv := svd.Values(nil)
-	rank, stiff, _ := descriptorRank(sv, sv[0], n, true)
 	d = n - rank
 	if d == 0 {
 		return 0, true
@@ -780,6 +788,43 @@ func pencilIndexOne(a, e *mat.Dense, n int, normA float64) (d int, index1 bool) 
 	if stiff {
 		tol = max(stiffIndexTol, stiffIndexCoef*float64(n)*eps()*sv[0]/sv[rank-1])
 	}
+	return d, sv22 != nil && sv22[d-1] > tol*normA
+}
+
+// infiniteChainCount returns the number of infinite Jordan chains of length
+// at least 2 of (a, e) when E's rank is not stiff: the singular values of
+// Ulᵀ·A·Vr (nullCoupling) at most 100·n·ε·normA, which a chain leaves at
+// rounding level (Ulᵀ·A·Vr couples the tail and head of each chain) while
+// an index-1 pencil with ill-conditioned coordinates keeps them orders of
+// magnitude above it. It is -1 when undecided (failed SVD, stiff rank).
+func infiniteChainCount(a, e *mat.Dense, n int, normA float64) int {
+	_, sv22, rank, stiff, ok := nullCoupling(a, e, n)
+	if !ok || stiff || rank < n && sv22 == nil {
+		return -1
+	}
+	c := 0
+	for _, s := range sv22 {
+		if s <= 100*float64(n)*eps()*normA {
+			c++
+		}
+	}
+	return c
+}
+
+// nullCoupling returns the singular values sv of E, its rank
+// (descriptorRank, MATLAB rank) with the stiff flag, and the singular
+// values sv22 of Ulᵀ·A·Vr for the null spaces Ul, Vr of E, nil when E is
+// nonsingular or their SVD fails. ok is false when the SVD of E fails.
+func nullCoupling(a, e *mat.Dense, n int) (sv, sv22 []float64, rank int, stiff, ok bool) {
+	var svd mat.SVD
+	if !svd.Factorize(e, mat.SVDFull) {
+		return nil, nil, 0, false, false
+	}
+	sv = svd.Values(nil)
+	rank, stiff, _ = descriptorRank(sv, sv[0], n, true)
+	if rank == n {
+		return sv, nil, rank, stiff, true
+	}
 	var u, v mat.Dense
 	svd.UTo(&u)
 	svd.VTo(&v)
@@ -787,7 +832,10 @@ func pencilIndexOne(a, e *mat.Dense, n int, normA float64) (d int, index1 bool) 
 	av.Mul(a, v.Slice(0, n, rank, n))
 	a22.Mul(u.Slice(0, n, rank, n).T(), &av)
 	var svd22 mat.SVD
-	return d, svd22.Factorize(&a22, mat.SVDNone) && svd22.Values(nil)[d-1] > tol*normA
+	if !svd22.Factorize(&a22, mat.SVDNone) {
+		return sv, nil, rank, stiff, true
+	}
+	return sv, svd22.Values(nil), rank, stiff, true
 }
 
 // stiffIndexTol and stiffIndexCoef bound pencilIndexOne when E has a stiff
