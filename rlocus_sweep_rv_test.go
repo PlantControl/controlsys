@@ -251,8 +251,9 @@ func rvOracles(cs []rvCase) []rvOra {
 // a pole/zero gap of 1e-13…1e-11 relative, below what the realization
 // resolves.
 var rlrvLimits = map[int]string{
-	// Base right only through its 1e-15-off den; the exact TF puts the
-	// pair's real part on the pole side of the gap (WM67N5).
+	// Base right only through its 1e-15-off den. The TF is now exact and
+	// resolves the verdict; RootLocus's root finding of N′D−ND′ does not,
+	// putting the pair real on the pole side of the gap (WM67N5).
 	293:  "stationary pair −20 ± 1.9e-6i inside pole −20 / zero −20(1+3.3e-14)",
 	1328: "stationary pair −12 ± 7.5e-6 inside pole −12 / zero −12(1+5.3e-13)",
 	1517: "stationary pair −20 ± 1.4e-5 inside pole −20 / zero −20(1+3.1e-12)",

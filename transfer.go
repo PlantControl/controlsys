@@ -1736,7 +1736,9 @@ func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (d
 	aData, cData, b1, primal, ok := hessenbergDual(a, b, cm, row, n, m)
 	if !ok {
 		if den, nums, ok = companionRowTF(a, b, cm, row, n, m, inExp, outExp); !ok {
-			den, nums, ok = triangularRowTF(a, b, cm, row, n, m, inExp, outExp)
+			if den, nums, ok = triangularRowTF(a, b, cm, row, n, m, inExp, outExp); ok && !finiteTF(den, nums) {
+				return nil, nil, nil, false
+			}
 		}
 		return den, nums, nil, ok
 	}
@@ -1745,11 +1747,15 @@ func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (d
 	} else {
 		den, nums = hessenbergTF(aData, cData, n, n, m, b1, inExp, outExp)
 	}
-	bad := func(x float64) bool { return math.IsInf(x, 0) || math.IsNaN(x) }
-	if slices.ContainsFunc(den, bad) || slices.ContainsFunc(nums, func(p []float64) bool { return slices.ContainsFunc(p, bad) }) {
+	if !finiteTF(den, nums) {
 		return nil, nil, nil, false
 	}
 	return den, nums, cData, true
+}
+
+func finiteTF(den []float64, nums [][]float64) bool {
+	bad := func(x float64) bool { return math.IsInf(x, 0) || math.IsNaN(x) }
+	return !slices.ContainsFunc(den, bad) && !slices.ContainsFunc(nums, func(p []float64) bool { return slices.ContainsFunc(p, bad) })
 }
 
 // companionRowTF converts output row of (a, b, cm) in the given basis when
