@@ -652,16 +652,21 @@ func TestDescriptorChainPerturbedA(t *testing.T) {
 	}
 }
 
-// TestDescriptorBlurredChainProper: index-5/6 chains whose staircase rank
-// is decided only within the leak of A's rounding (deflatedRank). The
-// deflated N then carries that leak, so c·N^k·b of a proper model sits
-// above the ε-level static cut and IsProper reported false ([6] seed 205;
-// amd64 also [6] seed 84). Oracle: the structured model, B on chain heads.
+// TestDescriptorBlurredChainProper: index-3..6 chains whose staircase
+// leaks rounding of A into the deflated blocks and Qᵀ·B, so c·N^k·b of a
+// proper model sits above the ε-level static cut and IsProper reported
+// false: rank decided within the leak (deflatedRank; [6] seed 205, amd64
+// also [6] seed 84), or every rank clear but A row blocks ill-conditioned
+// (JDKLOX; [5] 328, 422, [6] 452, 875, 916, 961, [3] 988: b carries ~1e-9
+// of ‖b‖ on chain states B does not drive). Oracle: the structured model,
+// B on chain heads.
 func TestDescriptorBlurredChainProper(t *testing.T) {
 	for _, tc := range []struct {
 		chains []int
 		seed   uint64
-	}{{[]int{6}, 205}, {[]int{6}, 84}, {[]int{5}, 66}} {
+	}{{[]int{6}, 205}, {[]int{6}, 84}, {[]int{5}, 66},
+		{[]int{5}, 328}, {[]int{5}, 422}, {[]int{6}, 452}, {[]int{6}, 875},
+		{[]int{6}, 916}, {[]int{6}, 961}, {[]int{3}, 988}} {
 		rng := rand.New(rand.NewPCG(tc.seed, 77))
 		nf := 1 + rng.IntN(3)
 		sys, oracle, _ := chainDescriptor(t, rng, nf, tc.chains, 0, true)
@@ -685,5 +690,37 @@ func TestDescriptorBlurredChainProper(t *testing.T) {
 				t.Fatalf("%v seed %d: G(%v) = %v, want %v", tc.chains, tc.seed, s, g[0][0], w)
 			}
 		}
+	}
+}
+
+// TestDescriptorNonNormalChainImproper: an improper index-5 chain whose
+// staircase N is strongly non-normal (‖N‖ ≈ 106 from entries off the chain
+// path, while the s⁴ coefficient c₀·N₀₁·N₁₂·N₂₃·N₃₄·b₄ is 0.118). The
+// cut 1e3·n·ε·‖c‖‖N‖⁴‖b‖ ≈ 0.13 dropped that term, so G(1i) was off by
+// 0.118 (JDKLOX [5] seed 837). Oracle: the structured model's pencil
+// response at |s| ≤ 3, where the float data still matches it.
+func TestDescriptorNonNormalChainImproper(t *testing.T) {
+	rng := rand.New(rand.NewPCG(837, 77))
+	nf := 1 + rng.IntN(3)
+	sys, oracle, _ := chainDescriptor(t, rng, nf, []int{5}, 0, false)
+	if pr, err := sys.IsProper(); err != nil || pr {
+		t.Fatalf("IsProper = %v, %v; want false", pr, err)
+	}
+	res, err := sys.TransferFunction(nil)
+	if err != nil || !fzTFImproper(res.TF) {
+		t.Fatalf("TransferFunction err %v, want improper TF", err)
+	}
+	for _, s := range []complex128{0, 1i, complex(0.5, 3), complex(-2, 1)} {
+		g, err := res.TF.Eval(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := pencilResponse(t, oracle, s)[0][0]
+		if d := cmplx.Abs(g[0][0] - w); !(d <= 1e-6*math.Max(1, cmplx.Abs(w))) {
+			t.Fatalf("G(%v) = %v, want %v", s, g[0][0], w)
+		}
+	}
+	if _, err := Step(sys, 1); !errors.Is(err, ErrImproperModel) {
+		t.Fatalf("Step err = %v, want ErrImproperModel", err)
 	}
 }
