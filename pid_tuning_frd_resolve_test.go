@@ -111,8 +111,12 @@ func TestPIDTuningFRDStrictCountRejectsResolvedPIDF(t *testing.T) {
 // on either side, so the lens test alone let the search walk to it; an
 // arc sweeping most of its circle that passes within ¼ of 0 (|S| > 4) now
 // leaves the count unknown. PID, PIDF and PI at PM 60 come back stable
-// with dense |S| <= 4, where base's were unstable or |S| above 13.
-// Oracles: companion roots and a dense |S| sweep of the exact plant.
+// with dense |S| <= 4, where base's were unstable or |S| above 13, and
+// the margin within the ±3° band that no dense crossing undercuts: a PID
+// reported at 59.1° crossed 0 dB again at 0.395 rad/s 19.5° from −1,
+// between samples, which the crossing check along fitted arcs rejects.
+// Oracles: companion roots, and dense |S| and crossing sweeps of the
+// exact plant.
 func TestTunePIDFRDResonanceArcNearOrigin(t *testing.T) {
 	num, den := []float64{1.0387992186759023e-05}, []float64{1, 0.13699372147773697, 0.1644482602582385, 0.02195020295201065, 0.00021753977446639744}
 	frd := pidFRDStrictWithDC(t, pidExactFRD(t, num, den, 0.000590353197528667, 119.30244754043795, 191), num, den)
@@ -141,8 +145,15 @@ func TestTunePIDFRDResonanceArcNearOrigin(t *testing.T) {
 		if peak, at := pidDenseSensitivity(k, exact, 1e-4, 1e3); peak > 4 {
 			t.Errorf("%v: %+v dense |S| %g at %g", family, k, peak, at)
 		}
-		if pm := r.Evidence.AchievedPhaseMargin; pm < 58.5 {
+		pm := r.Evidence.AchievedPhaseMargin
+		if pm < 57 {
 			t.Errorf("%v: achieved PM %g", family, pm)
+		}
+		L := func(w float64) complex128 { return exact(w) * pidTuningFeedback(k, w) }
+		for _, m := range pidLoopMargins(L, 1e-4, 1e3) {
+			if far := math.Abs(fzPidWrap(m)); far < pm-1 {
+				t.Errorf("%v: %+v dense crossing %g° from −1, achieved PM %g", family, k, far, pm)
+			}
 		}
 	}
 }

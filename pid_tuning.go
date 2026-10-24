@@ -172,6 +172,26 @@ type pidTuningPlant struct {
 	lowAnchored bool
 	topOrder    int
 	topAnchored bool
+	// resonances holds, by the index k of its lower sample, the fitted
+	// interpolants of each step samples[k] → samples[k+1] of the strict
+	// plant across which a resonance the data do not resolve may loop
+	// (pidTuningFRDResonances).
+	resonances [][]pidTuningFRDMode
+	// arcs holds, by step as resonances, the fitted interpolants of each
+	// step of sampled data across which a lightly damped mode's circle
+	// turns past π/8, the trusted ones (pidTuningFRDTrusted), along which
+	// pidTuningSensitivityPeak also reads |S| (pidTuningFRDArcs).
+	arcs [][]pidTuningFRDMode
+	// crossArcs holds, by step as resonances, both fits of each step of
+	// the strict plant's data whose fitted circle turns past π/8 or which
+	// resonances marks, along which the crossings are read
+	// (pidTuningArcCrossingsOf).
+	crossArcs [][]pidTuningFRDMode
+	// arcSearch scans every candidate's crossings along crossArcs too
+	// (pidTuningFRDArcCrossings); without it only the returned design's
+	// are, and one failing them is searched for again with it, so a design
+	// that passes them keeps the search path the chord alone gives.
+	arcSearch bool
 	// markov, if nonzero, is lim sG(s) that continuous sampled data show at
 	// their top (pidTuningFRDMarkov), and markovSpread its change over the
 	// top half decade.
@@ -258,6 +278,12 @@ const (
 type pidCoarseRejected struct{ evaluations int }
 
 func (*pidCoarseRejected) Error() string { return "coarse design fails refined crossing check" }
+
+// pidArcRejected reports a design whose crossings along sampled data's
+// fitted resonance arcs fall below the floor.
+type pidArcRejected struct{ evaluations int }
+
+func (*pidArcRejected) Error() string { return "design fails arc crossing check" }
 
 // pidZeroRejected reports a design that fails the crossing check down to
 // its controller zeros.
@@ -1967,7 +1993,33 @@ func tunePID(ctx context.Context, op string, p pidTuningPlant, family PidtuneTyp
 	return r, err
 }
 
+// tunePIDScan is tunePIDScanOnce, searched again with arcSearch, with the
+// rest of the budget, when the design fails its arc crossings.
 func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
+	r, err := tunePIDScanOnce(ctx, op, p, family, o)
+	ar, ok := errors.AsType[*pidArcRejected](err)
+	if !ok {
+		return r, err
+	}
+	budget := o.MaxEvaluations
+	if budget == 0 {
+		budget = 4096
+	}
+	if ar.evaluations >= budget {
+		return nil, &PIDTuningError{Op: op, Evidence: PIDTuningEvidence{RequestedCrossover: o.CrossoverFrequency, RequestedPhaseMargin: o.PhaseMargin, Evaluations: ar.evaluations, Termination: PIDTerminationEvaluationLimit, Stability: p.stability}}
+	}
+	p.arcSearch = true
+	o.MaxEvaluations = budget - ar.evaluations
+	r, err = tunePIDScanOnce(ctx, op, p, family, o)
+	if te, ok := errors.AsType[*PIDTuningError](err); ok {
+		te.Evidence.Evaluations += ar.evaluations
+	} else if err == nil {
+		r.Evidence.Evaluations += ar.evaluations
+	}
+	return r, err
+}
+
+func tunePIDScanOnce(ctx context.Context, op string, p pidTuningPlant, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
@@ -2591,6 +2643,13 @@ func tunePIDScan(ctx context.Context, op string, p pidTuningPlant, family Pidtun
 		return nil, &pidCoarseRejected{evaluations: evidence.Evaluations}
 	} else if violated && !p.zeroSearch && p.crossScan != pidCrossGrid {
 		return nil, &pidZeroRejected{evaluations: evidence.Evaluations}
+	}
+	if !p.arcSearch {
+		ws, ms := pidTuningArcCrossingsOf(q, best)
+		if _, violated, _, _, _ := violationOf(best, ws, ms, true); violated && p.crossScan != pidCrossGrid {
+			return nil, &pidArcRejected{evaluations: evidence.Evaluations}
+		}
+		evidence.GainCrossovers, evidence.PhaseMargins = append(evidence.GainCrossovers, ws...), append(evidence.PhaseMargins, ms...)
 	}
 	for i, margin := range evidence.PhaseMargins {
 		margin = pidTuningCrossingMargin(wc, evidence.GainCrossovers[i], margin, floor, p.stable != nil)
@@ -3849,7 +3908,8 @@ func pidTuningModes(plant *System) []complex128 {
 // σ+jω₀, is at most max(|σ|, |ω−ω₀|)/4, so a lightly damped mode's narrow
 // peak is bracketed. Grid maxima within 0.8 of the running peak are then
 // refined by golden section on log ω, since a delay ripple can sit between
-// samples and read ~10% low. |S| at p.dcEdge and p.nyquistEdge counts too.
+// samples and read ~10% low. |S| at p.dcEdge and p.nyquistEdge counts too,
+// and along sampled data's fitted resonance arcs (p.arcs).
 func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 	band := math.Max(p.high, p.crossHigh)
 	top, start := math.Max(band, p.sensHigh), p.low
@@ -3881,7 +3941,7 @@ func pidTuningSensitivityPeak(p pidTuningPlant, c PID2) float64 {
 		return v
 	}
 	s := func(w float64) float64 { return sample(w, false) }
-	peak := pidTuningEdgeSensitivity(p, c)
+	peak := math.Max(pidTuningEdgeSensitivity(p, c), pidTuningFRDArcPeak(p.arcs, p.samples, c))
 	high, extend, inBand := top, p.loopTail != nil && p.maxSensitivity > 1, 0
 	var w0, v0, w1, v1 float64
 	for k, w := 0, start; ; k++ {
@@ -4074,7 +4134,35 @@ func pidTuningCrossingsOn(p pidTuningPlant, c PID2, omega []float64, wc float64,
 		}
 		before, previous = previous, next
 	}
-	return crossings, pidTuningMargins(p, c, crossings)
+	return pidTuningArcCrossings(p, c, crossings, pidTuningMargins(p, c, crossings))
+}
+
+// pidTuningArcCrossings appends to crossings and margins c's along
+// sampled data's fitted resonance arcs (pidTuningArcCrossingsOf) under
+// p.arcSearch.
+func pidTuningArcCrossings(p pidTuningPlant, c PID2, crossings, margins []float64) ([]float64, []float64) {
+	if !p.arcSearch {
+		return crossings, margins
+	}
+	ws, ms := pidTuningArcCrossingsOf(p, c)
+	return append(crossings, ws...), append(margins, ms...)
+}
+
+// pidTuningArcCrossingsOf returns c's crossings along sampled data's
+// fitted resonance arcs (pidTuningFRDArcCrossings) on the strict plant,
+// and none on any other, each margin the crossing's angle from −1 either
+// way round: a design of the strict plant must pass its count, which takes
+// the loop stable, and then a crossing on the far side of −1 erodes none
+// (pidTuningCrossingMargin's certified case).
+func pidTuningArcCrossingsOf(p pidTuningPlant, c PID2) (crossings, margins []float64) {
+	if p.crossArcs == nil || !p.nyquistCount {
+		return nil, nil
+	}
+	ws, ms := pidTuningFRDArcCrossings(p.crossArcs, p.samples, p.at, c)
+	for i, m := range ms {
+		ms[i] = math.Abs(m)
+	}
+	return ws, ms
 }
 
 // pidTuningCoarseCrossings scans omega for sign changes of |L| − 1 only,
@@ -4104,7 +4192,7 @@ func pidTuningCoarseCrossings(p pidTuningPlant, c PID2, omega []float64, wc floa
 		}
 		previous = next
 	}
-	return crossings, pidTuningMargins(p, c, crossings)
+	return pidTuningArcCrossings(p, c, crossings, pidTuningMargins(p, c, crossings))
 }
 
 func pidTuningMargins(p pidTuningPlant, c PID2, crossings []float64) (margins []float64) {
