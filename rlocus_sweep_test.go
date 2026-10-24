@@ -601,7 +601,7 @@ func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
 	return oInt, oFlt
 }
 
-const rlswBaseRev = "23be053"
+const rlswBaseRev = "23be053+tfcap"
 
 type rlswGolden struct {
 	Base  string `json:"base"`

@@ -1380,8 +1380,26 @@ func (c rowRealizationConverter) fillStaticRows() {
 	}
 }
 
+// capSISONumerator drops the numerator coefficients of a SISO model with
+// D = 0 above degree deg(den) − r, r from sisoRelativeDegree: they are
+// combinations of Markov parameters h_1 … h_(r−1) that vanish within the
+// rounding of A, B, C. capSISOZeros caps Zeros at n − r by the same test
+// (tzero parity), so the TF keeps the zeros Zeros returns instead of far
+// noise zeros.
+func (c rowRealizationConverter) capSISONumerator() {
+	if c.m != 1 || c.p != 1 || len(c.tf.Num[0][0]) < 2 {
+		return
+	}
+	r, ok := sisoRelativeDegree(c.sys)
+	num := c.tf.Num[0][0]
+	if keep := len(c.tf.Den[0]) - r; ok && keep >= 1 && len(num) > keep {
+		c.tf.Num[0][0] = num[len(num)-keep:]
+	}
+}
+
 func (c rowRealizationConverter) result(order int) *TransferFuncResult {
 	c.trimRows()
+	c.capSISONumerator()
 	c.tf.InputName = copyStringSlice(c.sys.InputName)
 	c.tf.OutputName = copyStringSlice(c.sys.OutputName)
 	return &TransferFuncResult{TF: c.tf, MinimalOrder: order, RowDegrees: c.rows}
