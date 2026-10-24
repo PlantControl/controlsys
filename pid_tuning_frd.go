@@ -153,7 +153,7 @@ func pidTuningFRDDesign(ctx context.Context, base, strict pidTuningPlant, certif
 				return nil, &PIDTuningError{Op: "TunePIDFRD", Evidence: ev, unstable: true}
 			}
 			if certify {
-				ws, ms := pidTuningFRDArcCrossings(strict.arcs, strict.samples, strict.at, *r.Controller)
+				ws, ms := pidTuningFRDArcCrossings(strict.crossArcs, strict.samples, strict.at, *r.Controller)
 				for i, m := range ms {
 					if stable && known {
 						ms[i] = math.Abs(m)
@@ -424,6 +424,16 @@ func pidTuningFRDStrictPlant(data *FRD, unstablePoles *int) (p pidTuningPlant, c
 			p.arcs = make([][]pidTuningFRDMode, len(p.resonances))
 		}
 		p.arcs[k] = trusted
+	}
+	for k := 0; k+1 < len(data.Omega); k++ {
+		fits, nf, span := pidTuningFRDStepFits(data, k)
+		if nf < 2 || !(span > math.Pi/8) && (p.resonances == nil || len(p.resonances[k]) == 0) {
+			continue
+		}
+		if p.crossArcs == nil {
+			p.crossArcs = make([][]pidTuningFRDMode, len(data.Omega)-1)
+		}
+		p.crossArcs[k] = append([]pidTuningFRDMode(nil), fits[:nf]...)
 	}
 	if data.Dt == 0 {
 		p.markov, p.markovSpread = pidTuningFRDMarkov(data, p.at)
@@ -1050,8 +1060,8 @@ func pidTuningFRDArcs(data *FRD) [][]pidTuningFRDMode {
 	return out
 }
 
-// pidTuningFRDTrusted returns the fits of one step a reading of |S| or of
-// crossings may follow: both when they agree on the pole within the
+// pidTuningFRDTrusted returns the fits of one step a reading of |S| may
+// follow: both when they agree on the pole within the
 // smaller σ, or else the one, if any, fitted through samples straddling
 // the peak (peaked), as two modes about one step, or the far dynamics,
 // skew the others into a resonance the plant does not have.
@@ -1122,17 +1132,18 @@ func (m pidTuningFRDMode) max(f func(float64) float64, a, b float64) (float64, f
 }
 
 // pidTuningFRDArcCrossings returns c's gain crossings along the fitted
-// interpolants arcs (pidTuningFRDArcs) of the steps of samples, as the
-// chord between two samples cuts inside a lightly damped mode's circle:
-// where sampled |L| (at) is below 1 at both ends a resonance can lift it
-// over 1 between them, a crossover pair the chord misses, sought either
-// side of the fit's peak; where |L| crosses 1 across a step the fit's
-// circle turns past a quarter turn over, the chord's phase there can be
-// tens of degrees off the fit's. A step counts only when both its fits are
-// trusted (pidTuningFRDTrusted), agreeing on the pole, as one fitted
-// across two modes, peaked or not, can put a crossing's phase 20° off;
-// each then counts, the margins, wrapped as pidTuningMargins, taken at
-// their least.
+// interpolants arcs (crossArcs) of the steps of samples, as the chord
+// between two samples cuts inside a lightly damped mode's circle: where
+// sampled |L| (at) is below 1 at both ends a resonance can lift it over 1
+// between them, a crossover pair the chord misses, sought either side of
+// the fit's peak; where |L| crosses 1 across a step the fit's circle turns
+// past a quarter turn over, the chord's phase there can be tens of degrees
+// off the fit's. A step counts only with both its fits, through either
+// neighbour, and each fit's crossings count, the margins, wrapped as
+// pidTuningMargins, taken at their least: a lone fit across two modes can
+// put a crossing's phase 20° off, and near a mode of σ under 1% of ω₀ the
+// far dynamics skew the two fits apart by more than σ, so that one reads a
+// pair the other misses or margins 30° apart that bracket the plant's.
 func pidTuningFRDArcCrossings(arcs [][]pidTuningFRDMode, samples []float64, at func(float64) complex128, c PID2) (crossings, margins []float64) {
 	for k, modes := range arcs {
 		a, b := samples[k], samples[k+1]

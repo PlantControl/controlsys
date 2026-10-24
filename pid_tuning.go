@@ -180,10 +180,14 @@ type pidTuningPlant struct {
 	// arcs holds, by step as resonances, the fitted interpolants of each
 	// step of sampled data across which a lightly damped mode's circle
 	// turns past π/8, the trusted ones (pidTuningFRDTrusted), along which
-	// pidTuningSensitivityPeak also reads |S| (pidTuningFRDArcs) and, on
-	// the strict plant, the crossings are read (pidTuningArcCrossingsOf).
+	// pidTuningSensitivityPeak also reads |S| (pidTuningFRDArcs).
 	arcs [][]pidTuningFRDMode
-	// arcSearch scans every candidate's crossings along arcs too
+	// crossArcs holds, by step as resonances, both fits of each step of
+	// the strict plant's data whose fitted circle turns past π/8 or which
+	// resonances marks, along which the crossings are read
+	// (pidTuningArcCrossingsOf).
+	crossArcs [][]pidTuningFRDMode
+	// arcSearch scans every candidate's crossings along crossArcs too
 	// (pidTuningFRDArcCrossings); without it only the returned design's
 	// are, and one failing them is searched for again with it, so a design
 	// that passes them keeps the search path the chord alone gives.
@@ -4151,10 +4155,10 @@ func pidTuningArcCrossings(p pidTuningPlant, c PID2, crossings, margins []float6
 // the loop stable, and then a crossing on the far side of −1 erodes none
 // (pidTuningCrossingMargin's certified case).
 func pidTuningArcCrossingsOf(p pidTuningPlant, c PID2) (crossings, margins []float64) {
-	if p.arcs == nil || !p.nyquistCount {
+	if p.crossArcs == nil || !p.nyquistCount {
 		return nil, nil
 	}
-	ws, ms := pidTuningFRDArcCrossings(p.arcs, p.samples, p.at, c)
+	ws, ms := pidTuningFRDArcCrossings(p.crossArcs, p.samples, p.at, c)
 	for i, m := range ms {
 		ms[i] = math.Abs(m)
 	}

@@ -107,6 +107,10 @@ func TestTunePIDFRDResolvedResonanceBehindDelay(t *testing.T) {
 // base's designs land within 1% and 3° of the dense ones: a PID's 16.5° at
 // 8.43 rad/s between samples at 7.87 and 8.73 (sampled |L| <= 0.74) and
 // 41.7° at 1.934 (the chord read 67°), and a PIDF's 27° at 2.351 rad/s.
+// Under a pole of ζ = 0.0037 at 4.881 rad/s the step's two fits, ω₀
+// 4.890 and 4.873, differ by more than either σ, so were not trusted,
+// yet both read a PID's pair at 4.754 (21.3°) and 5.003 rad/s (172.7°)
+// between samples at 4.611 and 5.232.
 // Oracle: a dense crossing sweep of the exact plant.
 func TestPIDTuningFRDArcCrossingsReadHiddenPair(t *testing.T) {
 	for _, c := range []struct {
@@ -119,6 +123,7 @@ func TestPIDTuningFRDArcCrossingsReadHiddenPair(t *testing.T) {
 	}{
 		{"PID", []float64{-309.2560361793322, -9.876174638164844}, []float64{1, 0.34438666780163185, 70.49826361184176, 9.517500357530164, 216.6471488211492}, 0.011090121808060715, 508.14582362123843, 104, PID2{Kp: -0.017965938252623777, Ki: -0.17052256024967036, Kd: -0.015210989528842537, B: 1, C: 1}, [2]float64{1.9, 9}},
 		{"PIDF", []float64{-6.006874817954687, -9.631465973111077}, []float64{1, 0.6088284763961694, 5.978223314083145, 3.2080336945155454, 1.8717858124577227}, 1e-3, 1e3, 100, PID2{Kp: -0.026062305420954092, Ki: -0.07877168570884527, Tf: 0.2, B: 1, C: 1}, [2]float64{2, 3}},
+		{"ζ 0.0037", []float64{-0.4944554133143628}, []float64{1, 5.493895541186261, 24.20621446543021, 130.05050211477177, 4.264133670222141}, 0.002062975969084916, 108.75773056507813, 87, PID2{Kp: -39.966917993743856, Ki: -10.441152339228825, Kd: 15.70333314219386, B: 1, C: 1}, [2]float64{4.62, 5.23}},
 	} {
 		p, _ := pidTuningFRDStrictPlant(pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, 0, c.lo, c.hi, c.n), c.num, c.den), nil)
 		ws, ms := pidTuningArcCrossingsOf(p, c.k)
@@ -140,9 +145,14 @@ func TestPIDTuningFRDArcCrossingsReadHiddenPair(t *testing.T) {
 
 // 5G6YXU margins: on those plants TunePIDFRD certified designs whose
 // margin it reported at 42.7° (PIDF, PM 45) and 61.0° (PID, PM 60) against
-// dense crossings 27° and 16.5° from −1. A design it returns now, as the
-// PIDF case must, reports no margin over 1° above the dense least, and a
-// certified one is stable with dense |S| <= 4. Oracles: companion roots
+// dense crossings 27° and 16.5° from −1. With a step's crossings read
+// along both fits even where they disagree on the pole by more than σ,
+// light-damping sweep designs it certified at reported/dense PM
+// 45.4/21.3 (PID, ζ 0.0037 pair at 4.88 rad/s), 69.4/12.5 (PID) and
+// 72.5/22.6 (PDF) are searched past too. A design it returns now, as the
+// need cases must, reports no margin over 2° above the dense least (a
+// chord elsewhere reads 1° high), and a certified one is stable with
+// dense |S| <= 4. Oracles: companion roots
 // and dense |S| and crossing sweeps of the exact plant.
 func TestTunePIDFRDArcMarginNotOverstated(t *testing.T) {
 	for _, c := range []struct {
@@ -156,6 +166,9 @@ func TestTunePIDFRDArcMarginNotOverstated(t *testing.T) {
 	}{
 		{"PIDF", []float64{-6.006874817954687, -9.631465973111077}, []float64{1, 0.6088284763961694, 5.978223314083145, 3.2080336945155454, 1.8717858124577227}, 1e-3, 1e3, 100, PidtunePIDF, 45, true},
 		{"PID", []float64{-309.2560361793322, -9.876174638164844}, []float64{1, 0.34438666780163185, 70.49826361184176, 9.517500357530164, 216.6471488211492}, 0.011090121808060715, 508.14582362123843, 104, PidtunePID, 0, false},
+		{"PID ζ 0.0037", []float64{-0.4944554133143628}, []float64{1, 5.493895541186261, 24.20621446543021, 130.05050211477177, 4.264133670222141}, 0.002062975969084916, 108.75773056507813, 87, PidtunePID, 45, true},
+		{"PID PM70", []float64{-0.005034873797725784, -0.05598667953091903}, []float64{1, 2.222234948304132, 3.130121092047051, 0.8076176658434646, 0.6042408441564, 0.07143831148872529}, 0.0012313965410032392, 387.83025629669464, 94, PidtunePID, 70, true},
+		{"PDF PM70", []float64{12.814587929147747}, []float64{1, 1.2010774041842307, 51.12700861229407, 58.99906242837587, 71.23608811076774, 26.913291945463417}, 0.011569937342781517, 3091.200908811155, 88, PidtunePDF, 70, true},
 	} {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, 0, c.lo, c.hi, c.n), c.num, c.den)
 		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
@@ -166,7 +179,7 @@ func TestTunePIDFRDArcMarginNotOverstated(t *testing.T) {
 			continue
 		}
 		k := *r.Controller
-		if _, _, least := pidFRDDenseAngles(c.num, c.den, 0, k, c.lo, c.hi); r.Evidence.AchievedPhaseMargin > least+1 {
+		if _, _, least := pidFRDDenseAngles(c.num, c.den, 0, k, c.lo, c.hi); r.Evidence.AchievedPhaseMargin > least+2 {
 			t.Errorf("%s: %+v reports PM %g, dense least %g", c.name, k, r.Evidence.AchievedPhaseMargin, least)
 		}
 		if pidHasWarning(r, "not certified") {
