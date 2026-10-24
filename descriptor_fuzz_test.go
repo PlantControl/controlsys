@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -573,4 +574,116 @@ func fzTFImproper(tf *TransferFunc) bool {
 		}
 	}
 	return false
+}
+
+// TestDescriptorChainPerturbedA: an improper index-3 chain beside a slow pair
+// at |λ| 1e4 (kind 0x40). Rounding of A (‖A‖ 1.4e4) turns the staircase Z
+// and leaks ~1e-12 into the deflated E blocks, above the E-only rank tol;
+// the staircase must still deflate the chain, so IsProper is false, the TF
+// is improper and matches the exact response, Poles is the slow pair, not
+// three spurious ~2e5 ones, and IsStable is true (base errored).
+func TestDescriptorChainPerturbedA(t *testing.T) {
+	s := fzDecode(t, 0x40, [fzNVals]float64{83, 3, 0, 0, 0, 0, 6, 1, 0, -10, 0.37, -83.2, 64.7, -1, 0.3, 0})
+	d := fzBuildDesc(s)
+	if d.proper != 0 || d.nf != 2 || d.chain != 3 {
+		t.Fatalf("spec: proper %d nf %d chain %d", d.proper, d.nf, d.chain)
+	}
+	n, m, p := d.n, s.M, s.P
+	rng := rand.New(rand.NewPCG(1, 2))
+	pert := func(x []float64) []float64 {
+		y := slicesCopy(x)
+		for i := range y {
+			for range rng.IntN(9) {
+				y[i] = math.Nextafter(y[i], math.Inf(2*rng.IntN(2)-1))
+			}
+		}
+		return y
+	}
+	for k := range 200 {
+		a, e, b, c := pert(d.a), pert(d.e), pert(d.b), pert(d.c)
+		sys, err := NewDescriptor(mat.NewDense(n, n, a), mat.NewDense(n, m, b), mat.NewDense(p, n, c), mat.NewDense(p, m, slicesCopy(s.D)), mat.NewDense(n, n, e), s.Dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pr, err := sys.IsProper(); err != nil || pr {
+			t.Fatalf("run %d: IsProper = %v, %v; want false", k, pr, err)
+		}
+		res, err := sys.TransferFunction(nil)
+		if err != nil {
+			t.Fatalf("run %d: TransferFunction: %v", k, err)
+		}
+		if !fzTFImproper(res.TF) {
+			t.Fatalf("run %d: TF proper, num=%v den=%v", k, res.TF.Num, res.TF.Den)
+		}
+		var pts []complex128
+		if k%25 == 0 {
+			if _, err := Step(sys, 1); !errors.Is(err, ErrImproperModel) {
+				t.Fatalf("run %d: Step err = %v, want ErrImproperModel", k, err)
+			}
+			pts = []complex128{complex(-2.3, 0.4), 300i}
+		}
+		for _, x := range pts {
+			w, ok := fzExactDescResponse(n, m, p, a, e, b, c, s.D, x)
+			if !ok {
+				t.Fatalf("run %d: exact response at %v failed", k, x)
+			}
+			g, err := res.TF.Eval(x)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range p {
+				for j := range m {
+					if dd := cmplx.Abs(g[i][j] - w[i*m+j]); !(dd <= 1e-6*(1+cmplx.Abs(w[i*m+j]))) {
+						t.Fatalf("run %d: G(%v)[%d,%d] = %v, exact %v", k, x, i, j, g[i][j], w[i*m+j])
+					}
+				}
+			}
+		}
+		poles, err := sys.Poles()
+		if err != nil {
+			t.Fatalf("run %d: Poles: %v", k, err)
+		}
+		if _, _, msg := fzMatchEig(poles, s.Eig, 1e-6*fzMaxAbsC(s.Eig)); msg != "" {
+			t.Fatalf("run %d: Poles %v, want %v: %s", k, poles, s.Eig, msg)
+		}
+		if st, err := sys.IsStable(); err != nil || !st {
+			t.Fatalf("run %d: IsStable = %v, %v; want true", k, st, err)
+		}
+	}
+}
+
+// TestDescriptorBlurredChainProper: index-5/6 chains whose staircase rank
+// is decided only within the leak of A's rounding (deflatedRank). The
+// deflated N then carries that leak, so c·N^k·b of a proper model sits
+// above the ε-level static cut and IsProper reported false ([6] seed 205;
+// amd64 also [6] seed 84). Oracle: the structured model, B on chain heads.
+func TestDescriptorBlurredChainProper(t *testing.T) {
+	for _, tc := range []struct {
+		chains []int
+		seed   uint64
+	}{{[]int{6}, 205}, {[]int{6}, 84}, {[]int{5}, 66}} {
+		rng := rand.New(rand.NewPCG(tc.seed, 77))
+		nf := 1 + rng.IntN(3)
+		sys, oracle, _ := chainDescriptor(t, rng, nf, tc.chains, 0, true)
+		if pr, err := sys.IsProper(); err != nil || !pr {
+			t.Fatalf("%v seed %d: IsProper = %v, %v; want true", tc.chains, tc.seed, pr, err)
+		}
+		res, err := sys.TransferFunction(nil)
+		if err != nil || fzTFImproper(res.TF) {
+			t.Fatalf("%v seed %d: TransferFunction err %v, want proper TF", tc.chains, tc.seed, err)
+		}
+		if _, err := Step(sys, 1); err != nil {
+			t.Fatalf("%v seed %d: Step: %v", tc.chains, tc.seed, err)
+		}
+		for _, s := range []complex128{1i, complex(0.5, 3), 20i} {
+			g, err := res.TF.Eval(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := pencilResponse(t, oracle, s)[0][0]
+			if d := cmplx.Abs(g[0][0] - w); !(d <= 1e-6*math.Max(1, cmplx.Abs(w))) {
+				t.Fatalf("%v seed %d: G(%v) = %v, want %v", tc.chains, tc.seed, s, g[0][0], w)
+			}
+		}
+	}
 }

@@ -124,11 +124,12 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 // (T11 is nonsingular); G2 keeps E = T22. The infinite structure is deflated
 // to the trailing block first (deflateInfinite), so QZ never has to resolve
 // an infinite Jordan chain, which it does only to |β|/|α| ~ ε^(1/k).
-// When the rank decisions are ambiguous, or E has a stiff singular value
+// When the rank decisions are ambiguous or blurred, or E has a stiff singular value
 // and the pencil index ≥ 2 (the staircase then deflates the null space of E
 // only), the whole pencil goes to QZ instead (decomposeGeneralizedQZ).
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
-	a, e, qd, zd, nf, stiff, ok := deflateInfinite(sys.A, sys.E, true)
+	a, e, qd, zd, nf, stiff, blur, ok := deflateInfinite(sys.A, sys.E, true)
+	ok = ok && blur == 1
 	if ok && stiff {
 		_, ok = pencilIndexOne(sys.A, sys.E, sys.A.RawMatrix().Rows, mat.Norm(sys.A, 2))
 	}
@@ -252,12 +253,15 @@ func deflatedSchur(a, e, qd, zd *mat.Dense, nf int, selct func(ar, ai, b float64
 // When it reports stiff, only the null space of E is deflated (index 1 is
 // assumed) and stiff is set: the deflated block can mix the stiff finite
 // pole with that null space, so callers that can should classify on the
-// whole pencil. An ambiguous rank, or a near rank-deficient row block
-// of A (a nearly singular pencil), sets ok false.
-func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff, ok bool) {
+// whole pencil. A rank of a deflated E block that descriptorRank finds
+// ambiguous is decided by deflatedRank; blur, 1 otherwise, is then the
+// factor by which the deflated blocks may carry more than ε-level rounding,
+// for callers to widen their zero tests. An ambiguous rank, or a near
+// rank-deficient row block of A (a nearly singular pencil), sets ok false.
+func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff bool, blur float64, ok bool) {
 	n, _ := A.Dims()
 	if n == 0 {
-		return nil, nil, nil, nil, 0, false, false
+		return nil, nil, nil, nil, 0, false, 0, false
 	}
 	buf := make([]float64, 6*n*n+n)
 	ad, ed, ud, vtd, sd, td := buf[:n*n], buf[n*n:2*n*n], buf[2*n*n:3*n*n], buf[3*n*n:4*n*n], buf[4*n*n:5*n*n], buf[5*n*n:6*n*n]
@@ -292,8 +296,10 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		copyStrided(dst, stride, td, cols, rows, cols)
 	}
 	ratio := 1e3 * float64(n) * eps()
-	tolA := ratio * mat.Norm(A, 2)
+	normA := mat.Norm(A, 2)
+	tolA := ratio * normA
 	scaleE := mat.Norm(E, 2)
+	leak, blur := 1.0, 1.0
 	k := n
 	for k > 0 && !stiff {
 		if clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*ratio*scaleE) {
@@ -301,14 +307,18 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		}
 		copyStrided(sd, k, ed, n, k, k)
 		if !svd(lapack.SVDAll, lapack.SVDNone, k, k) {
-			return nil, nil, nil, nil, 0, false, false
+			return nil, nil, nil, nil, 0, false, 0, false
 		}
 		if k == n {
 			scaleE = sv[0]
 		}
 		r, st, ok := descriptorRank(sv[:k], scaleE, n, k == n)
+		if !ok && k < n {
+			r, ok = deflatedRank(sv[:k], 1e3*float64(n)*eps()*scaleE, leak)
+			blur = max(blur, leak)
+		}
 		if !ok {
-			return nil, nil, nil, nil, 0, false, false
+			return nil, nil, nil, nil, 0, false, 0, false
 		}
 		stiff = st
 		d := k - r
@@ -343,8 +353,9 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		}
 		impl.Dorgqr(k, k, d, ud, k, tau, work, len(work))
 		if !svd(lapack.SVDNone, lapack.SVDNone, d, d) || sv[d-1] <= qzInfiniteGap*tolA {
-			return nil, nil, nil, nil, 0, false, false
+			return nil, nil, nil, nil, 0, false, 0, false
 		}
+		leak = min(qzInfiniteGap, leak*max(1, normA/sv[d-1]))
 		zk := vtd[:k*k]
 		for i := range k {
 			for j := range k {
@@ -363,7 +374,26 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 		}
 		k = r
 	}
-	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, stiff, true
+	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, stiff, blur, true
+}
+
+// deflatedRank decides the rank of a deflated E block of the staircase that
+// descriptorRank finds ambiguous: Z of each level is the row space of a block
+// of A with σ_min σa, so rounding of A, ε·‖A‖, turns it by ε·‖A‖/σa and
+// leaks into the next E block as that times its rounding tol. A singular
+// value up to leak·tol is zero, leak ≤ qzInfiniteGap keeping the nonzero
+// side of descriptorRank as is.
+func deflatedRank(sv []float64, tol, leak float64) (rank int, ok bool) {
+	for j, s := range sv {
+		switch {
+		case s > qzInfiniteGap*tol:
+		case s <= leak*tol:
+			return j, true
+		default:
+			return 0, false
+		}
+	}
+	return len(sv), true
 }
 
 // clearlyNonsingular reports whether the leading k×k block of e (stride

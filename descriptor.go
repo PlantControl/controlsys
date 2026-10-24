@@ -212,7 +212,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 			}
 		}
 	}
-	if a, e, _, _, nf, stiff, ok := deflateInfinite(A, E, false); ok && !stiff {
+	if a, e, _, _, nf, stiff, _, ok := deflateInfinite(A, E, false); ok && !stiff {
 		ad, ed := a.RawMatrix(), e.RawMatrix()
 		return qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
 	}
@@ -525,6 +525,7 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	tol := 100 * float64(n) * eps() * denseNorm(sys.E)
 	finite := func(_, _, beta float64) bool { return math.Abs(beta) > tol }
 	d, index1, ratioTol, stiffSplit := weierstrassSplit(sys.A, sys.E, n)
+	blurTol := 1.0
 	if stiffSplit {
 		finite = func(ar, ai, beta float64) bool { return !qzInfinite(ar, ai, beta, ratioTol) }
 	}
@@ -537,13 +538,16 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
 	if !ok || nf > n-d || !index1 || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
 		resolved := false
-		if a, e, qd, zd, nfd, stiff, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff {
+		if a, e, qd, zd, nfd, stiff, blur, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff {
 			resolved = ok && nfd == nf
 			all := func(_, _, _ float64) bool { return true }
 			if !resolved {
 				if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
 					s, t, vsl, vsr, nf, recip, ok, resolved = sd, td, qs, zs, nfd, rc, true, true
 				}
+			}
+			if resolved {
+				blurTol = blur
 			}
 		}
 		if ok && !resolved && !index1 && nf >= n-d {
@@ -608,8 +612,9 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 			if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
 				return nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 			}
-			if !algebraicPartStatic(c2, &nilpotent, &b, cScale, bScale, n) {
-				if poly = algebraicPolyTerms(c2, &nilpotent, &b, cScale, bScale, n, p, m); poly == nil || q > 0 {
+			rel := 1e3 * float64(n) * eps()
+			if !algebraicPartStatic(c2, &nilpotent, &b, cScale, bScale, rel*blurTol) {
+				if poly = algebraicPolyTerms(c2, &nilpotent, &b, cScale, bScale, rel, p, m); poly == nil || q > 0 {
 					return nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 				}
 			}
@@ -699,12 +704,13 @@ func weierstrassSplit(A, E *mat.Dense, n int) (d int, index1 bool, ratioTol floa
 
 // algebraicPartStatic reports whether c·N^k·b vanishes for k ≥ 1, i.e. the
 // algebraic part contributes no polynomial (impulsive or anticipative) term.
-// A term vanishes only at rounding level, 1e3·n·ε of ‖c‖‖N‖^k‖b‖; a fixed
+// A term vanishes only at rounding level, rel (1e3·n·ε, times the staircase
+// blur of deflateInfinite) of ‖c‖‖N‖^k‖b‖; a fixed
 // relative cut such as 1e-8 drops real s-terms that are small beside the
 // largest C or B entry. cScale and bScale are the data scales of c and b,
 // ‖C‖ and ‖B‖/‖A∞‖: an impulsive mode that is unobservable or uncontrollable
 // leaves c or b at rounding level, which must not set the bound itself.
-func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale float64, n int) bool {
+func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale, rel float64) bool {
 	ni, _ := nilpotent.Dims()
 	nNorm := denseNorm(nilpotent)
 	v := mat.DenseCopyOf(b)
@@ -715,7 +721,7 @@ func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale float64, n i
 		v.Copy(&next)
 		bound *= nNorm
 		term.Mul(c, v)
-		if denseNorm(&term) > 1e3*float64(n)*eps()*bound {
+		if denseNorm(&term) > rel*bound {
 			return false
 		}
 	}
@@ -725,7 +731,7 @@ func algebraicPartStatic(c, nilpotent, b *mat.Dense, cScale, bScale float64, n i
 // algebraicPolyTerms returns −c·N^k·b, k ≥ 1, restricted to its leading
 // p×m block, up to the last term above the algebraicPartStatic bound; entries
 // below that bound are zeroed. It returns nil when every term vanishes.
-func algebraicPolyTerms(c, nilpotent, b *mat.Dense, cScale, bScale float64, n, p, m int) []*mat.Dense {
+func algebraicPolyTerms(c, nilpotent, b *mat.Dense, cScale, bScale, rel float64, p, m int) []*mat.Dense {
 	if p == 0 || m == 0 {
 		return nil
 	}
@@ -741,7 +747,7 @@ func algebraicPolyTerms(c, nilpotent, b *mat.Dense, cScale, bScale float64, n, p
 		v.Copy(&next)
 		bound *= nNorm
 		term.Mul(c, v)
-		tol := 1e3 * float64(n) * eps() * bound
+		tol := rel * bound
 		coef := mat.NewDense(p, m, nil)
 		nonzero := false
 		for i := range p {
