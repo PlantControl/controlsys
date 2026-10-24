@@ -1735,7 +1735,9 @@ func hessenbergTF(aData, cData []float64, n, nobs, m int, b1 float64, inExp []in
 func directRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, bh []float64, ok bool) {
 	aData, cData, b1, primal, ok := hessenbergDual(a, b, cm, row, n, m)
 	if !ok {
-		den, nums, ok = companionRowTF(a, b, cm, row, n, m, inExp, outExp)
+		if den, nums, ok = companionRowTF(a, b, cm, row, n, m, inExp, outExp); !ok {
+			den, nums, ok = triangularRowTF(a, b, cm, row, n, m, inExp, outExp)
+		}
 		return den, nums, nil, ok
 	}
 	if primal {
@@ -1846,6 +1848,109 @@ func companionRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int)
 				}
 				num[n-1-j] += ck * p
 			}
+		}
+		nums[col] = num
+	}
+	return den, nums, true
+}
+
+// triangularRowTF converts output row of (a, b, cm) in the given basis when
+// a is upper or lower triangular (a lower one is read reversed). Then
+// det(sI − A) = Π(s − a_ii), and with x = (sI − A)⁻¹b_col solved by back
+// substitution, x_k = P_k/Π_{i≥k}(s − a_ii),
+//
+//	P_k = b_k·Π_{i>k}(s − a_ii) + Σ_{j>k} a_kj·P_j·Π_{k<i<j}(s − a_ii),
+//
+// and num = Σ_k c_k·P_k·Π_{i<k}(s − a_ii): sums of products of the given
+// entries. Any rotation perturbs A by eps·‖A‖, which loses near-origin
+// poles in an Osborne basis and, in a Dgebal-graded one, the tiny couplings
+// the numerator sums are built from (WM67N5).
+func triangularRowTF(a, b, cm *mat.Dense, row, n, m int, inExp []int, outExp int) (den []float64, nums [][]float64, ok bool) {
+	ar, br, cr := a.RawMatrix(), b.RawMatrix(), cm.RawMatrix()
+	upper, lower := true, true
+	maxA := 0.0
+	for i := range n {
+		for j, v := range ar.Data[i*ar.Stride : i*ar.Stride+n] {
+			if v != 0 {
+				maxA = max(maxA, math.Abs(v))
+				upper = upper && j >= i
+				lower = lower && j <= i
+			}
+		}
+	}
+	smlnum := math.SmallestNonzeroFloat64 / eps()
+	if !upper && !lower || maxA != 0 && (maxA < smlnum || maxA > 1/smlnum) {
+		return nil, nil, false
+	}
+	idx := func(k int) int { return k }
+	if !upper {
+		idx = func(k int) int { return n - 1 - k }
+	}
+	u := make([]float64, n*n)
+	for i := range n {
+		for j := i; j < n; j++ {
+			u[i*n+j] = ar.Data[idx(i)*ar.Stride+idx(j)]
+		}
+	}
+	// Polynomials are ascending in s, of length n+1; mulLin multiplies one
+	// of degree < deg by (s − r).
+	mulLin := func(p []float64, deg int, r float64) {
+		for k := deg; k > 0; k-- {
+			p[k] = p[k-1] - r*p[k]
+		}
+		p[0] *= -r
+	}
+	w := n + 1
+	q := make([]float64, (n+1)*w)
+	qk := func(k int) []float64 { return q[(k+1)*w : (k+2)*w] }
+	qk(n - 1)[0] = 1
+	for k := n - 2; k >= -1; k-- {
+		copy(qk(k), qk(k+1))
+		mulLin(qk(k), n-1-k, u[(k+1)*n+k+1])
+	}
+	P := make([]float64, n*w)
+	// acc sets dst to Σ_{j>k} coef_j·P_j·Π_{k<i<j}(s − a_ii); P_j has degree
+	// n−1−j, and so has the sum over j' ≥ j.
+	acc := func(dst []float64, k int, coef []float64) {
+		clear(dst)
+		have := false
+		for j := n - 1; j > k; j-- {
+			if have {
+				mulLin(dst, n-1-j, u[j*n+j])
+			}
+			if v := coef[j]; v != 0 {
+				have = true
+				pj := P[j*w : j*w+n-j]
+				for l, x := range pj {
+					dst[l] += v * x
+				}
+			}
+		}
+	}
+	den = make([]float64, n+1)
+	for k := range n + 1 {
+		den[k] = qk(-1)[n-k]
+	}
+	crow := make([]float64, n)
+	for j := range n {
+		crow[j] = math.Ldexp(cr.Data[row*cr.Stride+idx(j)], -outExp)
+	}
+	numBuf := make([]float64, w)
+	nums = make([][]float64, m)
+	for col := range m {
+		for k := n - 1; k >= 0; k-- {
+			dst := P[k*w : (k+1)*w]
+			acc(dst, k, u[k*n:(k+1)*n])
+			if bk := math.Ldexp(br.Data[idx(k)*br.Stride+col], -inExp[col]); bk != 0 {
+				for l, x := range qk(k)[:n-k] {
+					dst[l] += bk * x
+				}
+			}
+		}
+		acc(numBuf, -1, crow)
+		num := make([]float64, n)
+		for k := range n {
+			num[k] = numBuf[n-1-k]
 		}
 		nums[col] = num
 	}
