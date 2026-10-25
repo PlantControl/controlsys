@@ -540,3 +540,92 @@ func TestSensBoundCoversStalledSolve(t *testing.T) {
 		}
 	}
 }
+
+// GEPP on a reversed graded companion below its poles left x₁ exactly 0,
+// the only state C reads, and outputCancels skipped the exact zero, the
+// extreme of cancellation: every entry point returned 0 beside an exact
+// 4.06e-26 that den and num determine to a few ε.
+func TestFrequencyResponseReversedCompanionExactZeroState(t *testing.T) {
+	den := []float64{1, 38836.14453125, 7.6326432e8, 1.3158335905792e13, 1.289109780782121e17, 1.0746583724948676e21, 4.3269613883408094e24, 1.1031075037031345e28, 9.569098187117596e29}
+	b := []float64{0, -0.75, -4, -7.5, 0, -2, -0.875, 1}
+	c := []float64{0, 1, 0, 0, 0, 0, 0, 0}
+	n := len(den) - 1
+	sys, err := NewFromSlices(n, 1, 1, reversedCompanion(den), b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	num := ratObservableNum(den, []float64{1, -0.875, -2, 0, -7.5, -4, -0.75, 0}, []float64{0, 0, 0, 0, 0, 0, 1, 0})
+	ws := []float64{1.7302345030553948e-4, 1e-5, 1e-3}
+	sweep, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, err := sys.FreqResponsePointwise(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := newHessenbergSweep(sys, n, 1, 1)
+	for k, w := range ws {
+		ex := frExactResponse(sys, frBigC(complex(0, w)))[0]
+		if e := cmplx.Abs(ratRatioJ(num, den, w)-ex) / cmplx.Abs(ex); e > 1e-13 {
+			t.Fatalf("w=%g: oracles disagree by %.3g", w, e)
+		}
+		g, err := sys.EvalFr(complex(0, w))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := make([]complex128, 1)
+		if err := hs.evalInto(pointAt(complex(0, w)), h); err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"EvalFr", g[0][0]}, {"FreqResponse", sweep.At(k, 0, 0)}, {"FreqResponsePointwise", pw.At(k, 0, 0)}, {"hessenbergSweep", h[0]}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > 1e-12 {
+				t.Errorf("%s at w=%g: %v off exact %v by %.3g", got.name, w, got.v, ex, e)
+			}
+		}
+	}
+}
+
+// A block-diagonal MIMO model leaves each output's states exactly zero
+// for the other input. Lifting the w > 0 guard of outputCancels must not
+// refine such structural zeros or mark them stalled.
+func TestBalancedDenseStructuralZeroNotStalled(t *testing.T) {
+	a := []float64{
+		-1, 2, 0, 0,
+		-3, -4, 0, 0,
+		0, 0, -5, 1,
+		0, 0, -2, -6,
+	}
+	b := []float64{1, 0, 0.5, 0, 0, 1, 0, 2}
+	c := []float64{1, 1, 0, 0, 0, 0, 1, -1}
+	sys, err := NewFromSlices(4, 2, 2, a, b, c, make([]float64, 4), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bd := newBalancedDense(sys, 4, 2, 2)
+	g := make([]complex128, 4)
+	for _, w := range []float64{0.01, 1, 100} {
+		if err := bd.evalInto(pointAt(complex(0, w)), g); err != nil {
+			t.Fatal(err)
+		}
+		if g[1] != 0 || g[2] != 0 || bd.stalled {
+			t.Errorf("w=%g: off-diagonal %v %v, stalled %v", w, g[1], g[2], bd.stalled)
+		}
+		if bd.outputCancels() {
+			t.Errorf("w=%g: structural zero flagged as cancelling", w)
+		}
+		dd := make([]complex128, 4)
+		if !ddResponseInto(sys, pointAt(complex(0, w)), dd) {
+			t.Fatalf("w=%g: double-double solve failed", w)
+		}
+		ex := frExactResponse(sys, frBigC(complex(0, w)))
+		for i, v := range dd {
+			if cmplx.Abs(v-ex[i]) > 1e-13*cmplx.Abs(ex[i]) {
+				t.Errorf("w=%g: double-double entry %d %v, exact %v", w, i, v, ex[i])
+			}
+		}
+	}
+}

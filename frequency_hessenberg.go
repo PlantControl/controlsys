@@ -392,7 +392,8 @@ func (bd *balancedDense) stallErr(d []complex128) {
 // companion C = e₁ reads x₀ ≈ 1e-20, formed as a difference of terms near
 // 976). Only an entry read from states at least refineCondition below the
 // largest of its column can lose more than refineCondition, so the others
-// skip substitutionError.
+// skip substitutionError. An entry substitution left exactly zero is the
+// extreme of that loss, not a resolved zero.
 func (bd *balancedDense) outputCancels() bool {
 	n, m, x := bd.n, bd.m, bd.x
 	for j := range m {
@@ -407,7 +408,7 @@ func (bd *balancedDense) outputCancels() bool {
 				w += math.Abs(c) * cabs1(x[k*m+j])
 				cMax = max(cMax, math.Abs(c))
 			}
-			if w > 0 && w*refineCondition < cMax*xMax {
+			if w*refineCondition < cMax*xMax {
 				return bd.substitutionError()
 			}
 		}
@@ -446,7 +447,7 @@ func (bd *balancedDense) substitutionError() bool {
 				w += math.Abs(c) * cabs1(x[k*m+j])
 				we += math.Abs(c) * real(e[k*m+j])
 			}
-			if w > 0 && !(we <= cancelCondition*w) {
+			if !(we <= cancelCondition*w) {
 				return true
 			}
 		}
