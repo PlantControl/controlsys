@@ -31,6 +31,10 @@ import (
 // that warning; one the strict count finds unstable fails with
 // ErrPIDTuningTargetUnattainable instead, whether or not the data reach
 // the end above the band it took.
+// That search follows the strict count along the chords between samples;
+// a design it passes that a resonance the samples may not resolve leaves
+// uncertain (pidTuningFRDUnresolved) carries the uncertified warning, as
+// no search on the same samples can rule that resonance out.
 // A design whose sampled |S| peak
 // exceeds 4 is searched for again under that bound at its crossover; at
 // the default crossover, failing that, at crossovers lowered and then
@@ -100,7 +104,21 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 	base.warnings = warnings
 	strict, certify := pidTuningFRDStrictPlant(data, o.UnstablePoles)
 	strict.warnings = warnings
-	return pidTuningFRDDesign(ctx, base, strict, certify, family, o, explicit)
+	chord := strict
+	chord.unresolved = nil
+	r, err := pidTuningFRDDesign(ctx, base, chord, certify, family, o, explicit)
+	if err != nil || !certify || !pidTuningFRDCertified(*r.Controller, chord) || pidTuningFRDCertified(*r.Controller, strict) {
+		return r, err
+	}
+	r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count passed this design along the chords between samples, but a step of the data may hide a lightly damped resonance whose loop winds 1 + L round 0, so its closed-loop stability is not certified.")
+	return r, nil
+}
+
+// pidTuningFRDCertified reports whether the strict count p certifies c:
+// stable, with both ends anchored (pidTuningFRDNyquistCount).
+func pidTuningFRDCertified(c PID2, p pidTuningPlant) bool {
+	stable, known := pidTuningFRDNyquistCount(c, p)
+	return stable && known
 }
 
 // pidTuningFRDDesign is TunePIDFRD's search on the looser plant base and,
@@ -435,6 +453,7 @@ func pidTuningFRDStrictPlant(data *FRD, unstablePoles *int) (p pidTuningPlant, c
 		}
 		p.crossArcs[k] = append([]pidTuningFRDMode(nil), fits[:nf]...)
 	}
+	p.unresolved = pidTuningFRDUnresolved(data)
 	if data.Dt == 0 {
 		p.markov, p.markovSpread = pidTuningFRDMarkov(data, p.at)
 		p.topOrder, p.topAnchored = pidTuningFRDTopOrder(data, p.at)
@@ -673,7 +692,11 @@ func pidTuningFRDStrictDCGain(data *FRD, at func(float64) complex128) float64 {
 // as two that differ by a whole turn leave the loop's encirclements to
 // samples that do not fix them; a marked step with no fit leaves it
 // unknown unless |L| < ¼ at both its samples, a loop small enough there
-// for the chord.
+// for the chord. On a step pidTuningFRDUnresolved marks, a pole pair the
+// samples miss can carry 1 + L clockwise round any point left of its chord,
+// however small |L| is at the samples, adding a whole clockwise turn, so a
+// count finding c stable is unknown when 0 lies there; one finding it
+// unstable stays so, as such turns only add unstable roots.
 //
 // A discrete top sample within 10% of Nyquist with L within 30° of the real
 // axis ends 1 + L at 1 + L(z = −1), which is real; Re L is extrapolated
@@ -907,6 +930,7 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 		}
 	}
 	s := p.samples
+	hidden := false
 	var f0, f1, f2, f3 complex128
 	for i, w := range s {
 		f0, f1, f2 = f1, f2, f3
@@ -918,6 +942,10 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 		}
 		if w > wPrev && !step(w, f2) {
 			return false, true, false
+		}
+		if i > 0 && p.unresolved != nil && p.unresolved[i-1] {
+			u := f2 - f1
+			hidden = hidden || real(u)*imag(-f1)-imag(u)*real(-f1) > 0
 		}
 		if i > 0 && p.resonances != nil && p.resonances[i-1] != nil {
 			if len(p.resonances[i-1]) == 0 && !(math.Max(cmplx.Abs(f1-1), cmplx.Abs(f2-1)) < .25) {
@@ -943,7 +971,10 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 		return false, true, false
 	}
 	total += turn(fPrev, end) + bump
-	return math.Abs(expected-total) < math.Pi/2, true, top
+	if stable := math.Abs(expected-total) < math.Pi/2; !stable || !hidden {
+		return stable, true, top
+	}
+	return true, false, false
 }
 
 // pidTuningFRDMode is a lightly damped pole pair's interpolant
@@ -994,6 +1025,35 @@ func pidTuningFRDResonances(data *FRD) [][]pidTuningFRDMode {
 			continue
 		}
 		out[k] = append([]pidTuningFRDMode{}, fits[:nf]...)
+	}
+	return out
+}
+
+// pidTuningFRDUnresolved marks, by step samples[k] → samples[k+1] of data
+// (above DC), the steps across which a lightly damped pole pair the samples
+// do not resolve may lie, or returns nil when there is none: arg G turns by
+// more than a quarter turn across the step, as across a pole pair, or both
+// its samples' |G| exceed both outer neighbours', as about a peak that two
+// pole pairs in one step, turning G by a whole turn, leave; a step whose
+// two Möbius fits (pidTuningFRDStepFits) agree on the pole within the
+// smaller σ (pidTuningFRDTrusted) resolves it and is not marked.
+func pidTuningFRDUnresolved(data *FRD) []bool {
+	n := len(data.Omega)
+	g := func(k int) float64 { return cmplx.Abs(data.Response[k][0][0]) }
+	var out []bool
+	for k := 0; k+1 < n; k++ {
+		turn := math.Abs(cmplx.Phase(data.Response[k+1][0][0] / data.Response[k][0][0]))
+		peak := k > 0 && k+2 < n && math.Min(g(k), g(k+1)) > math.Max(g(k-1), g(k+2))
+		if !(turn > math.Pi/2) && !peak {
+			continue
+		}
+		if fits, nf, _ := pidTuningFRDStepFits(data, k); len(pidTuningFRDTrusted(fits[:nf])) == 2 {
+			continue
+		}
+		if out == nil {
+			out = make([]bool, n-1)
+		}
+		out[k] = true
 	}
 	return out
 }

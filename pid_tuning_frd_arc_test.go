@@ -37,20 +37,27 @@ func pidFRDDenseAngles(num, den []float64, tau float64, c PID2, lo, hi float64) 
 // with no fit the count left every loop unknown and TunePIDFRD failed,
 // where base returned an I at 0.2266 rad/s whose |L| there is under 0.07.
 // A marked step without a fit is now unknown only for |L| >= ¼ at its
-// samples, and that design is back. Oracles: companion roots and dense |S|
-// and crossing sweeps of the exact plant.
+// samples, and that design is back. A small |L| at the samples does not
+// bound the loop a resonance between them traces, so the count no longer
+// certifies it (pidTuningFRDUnresolved); it is still returned, warned.
+// Oracles: companion roots and dense |S| and crossing sweeps of the exact
+// plant.
 func TestTunePIDFRDMarkedStepWithoutFitSmallLoop(t *testing.T) {
 	num, den := []float64{106261.00510779137}, []float64{1, 2.092741436561967, 1191.710129922301, 1541.774979994378, 354129.0555862611, 174487.41408022825}
 	frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, num, den, 0, 0.0030865473837564826, 266.1138651806388, 49), num, den)
 	p, _ := pidTuningFRDStrictPlant(frd, nil)
+	p.unresolved = nil
 	if stable, known, _ := pidTuningFRDNyquistVerdict(PID2{Ki: 0.4099362096159351, B: 1, C: 1}, p); !stable || !known {
-		t.Errorf("strict count on base's I: stable %v known %v", stable, known)
+		t.Errorf("strict chord count on base's I: stable %v known %v", stable, known)
 	}
 	r, err := TunePIDFRD(context.Background(), frd, PidtuneI, PIDTuningOptions{PhaseMargin: 60})
 	if err != nil {
 		t.Fatal(err)
 	}
 	k := *r.Controller
+	if math.Abs(k.Ki-0.4099362096159351) > 1e-3*0.41 {
+		t.Errorf("%+v, base gave Ki 0.40994", k)
+	}
 	if re := pidClosedLoopMaxRe(num, den, k); !(re < 0) {
 		t.Fatalf("%+v closed-loop root at Re %g", k, re)
 	}
