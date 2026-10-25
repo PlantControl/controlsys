@@ -68,12 +68,10 @@ func TestRootLocus_NoiseMarkovKeepsSign(t *testing.T) {
 // TestRootLocus_SplitDoubleZeroNoFeedthrough (wave 22, reviewer case 10677
 // class): 3(s+3)(s+2.5)²/(s(s+36)(s²+0.5625)), D = 0, under a scaling/
 // Givens/triangular similarity whose rounding splits the double zero into
-// two real zeros ~9e-5 apart (2.7e-5 in Zeros). The zeros, as eigenvalues
-// of the zero-dynamics matrix A − B·C·A/h₁, are u·κ-linked with a pair mean
-// far better conditioned than their split, so −2.5 (K = ∞) is a break point
-// as in the intended loop; the system-pencil κ cap had left them apart.
+// two real zeros ~9e-5 apart. The float data hold no double zero, so −2.5
+// (K = ∞ of the intended loop) is no break point: the break set is that of
+// the float realization (c = 0, J7OYOY).
 func TestRootLocus_SplitDoubleZeroNoFeedthrough(t *testing.T) {
-	oi := newRlswOracle(rlpRats(0, 3, 24, 63.75, 56.25), rlpRats(1, 36, 0.5625, 20.25, 0))
 	for i, m := range []struct{ a, b, c []float64 }{
 		{
 			[]float64{163.81420983322218, 74.64311883533684, -18.657679132180508, 104.08724455861936, -472.64224358957824, -215.64402982158288, 64.8635449321895, -254.73496123334695, -141.16136208281264, -64.32148825943844, 16.077280882322196, -89.69348206133829, 60.12041991450314, 27.632977608583705, -16.15089553712487, -0.24746089396148463},
@@ -90,9 +88,7 @@ func TestRootLocus_SplitDoubleZeroNoFeedthrough(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !oi.accepts(res.Breakaway) {
-			t.Errorf("case %d: Breakaway = %v, want %v", i, res.Breakaway, oi.required)
-		}
+		rlpFloatBreak(t, "case "+strconv.Itoa(i), res.Breakaway, rlpFloatOracle(4, m.a, m.b, m.c, 0, 0, 3))
 	}
 }
 
@@ -146,7 +142,7 @@ func TestRootLocus_ResolvedNonNormalPairKSign(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		rc := rlswCase{n: c.n, a: c.a, b: c.b, c: c.c, num: rlpRats(1), den: rlpRats(1)}
+		rc := rlswCase{n: c.n, a: c.a, b: c.b, c: c.c}
 		_, o := rc.oracles()
 		if !o.posed || i >= 3 && rlswUlpSensitive(&rc, i) {
 			t.Logf("%s: oracle unposed or 1-ulp sensitive (precision limit): Breakaway %v, oracle %v", c.name, res.Breakaway, o.required)

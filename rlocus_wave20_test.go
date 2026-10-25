@@ -157,8 +157,10 @@ func TestRootLocus_SlowLoopNonOrthogonalSimilarity(t *testing.T) {
 }
 
 // TestRootLocus_RotatedOriginDoublePole (w17 #66): Givens-rotated
-// companions of k(s+z)/(s²(s+p)) keep the origin breakaway also when
-// rounding splits the double pole into a real pair of about ±5e-9.
+// companions of k(s+z)/(s²(s+p)). The origin double pole is a breakaway
+// where the float data keep it; where the rotation's rounding splits it
+// (into a real pair of about ±5e-9 or a complex pair) the break set is
+// that of the float realization (c = 0, J7OYOY).
 func TestRootLocus_RotatedOriginDoublePole(t *testing.T) {
 	rng := rand.New(rand.NewPCG(66, 611))
 	miss := 0
@@ -177,15 +179,16 @@ func TestRootLocus_RotatedOriginDoublePole(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !slices.ContainsFunc(res.Breakaway, func(x complex128) bool { return cmplx.Abs(x) <= 1e-6*p }) {
+		o := rlpFloatOracle(3, a, b, c, 0, 0, 1)
+		if ok, _, _ := o.match(res.Breakaway); !ok {
 			miss++
 			if miss <= 3 {
-				t.Errorf("p=%g z=%g k=%g A=%v: Breakaway = %v lacks 0", p, z, k, a, res.Breakaway)
+				t.Errorf("p=%g z=%g k=%g A=%v: Breakaway = %v, float-realization oracle %v", p, z, k, a, res.Breakaway, o.Pts)
 			}
 		}
 	}
 	if miss > 0 {
-		t.Errorf("%d/600 rotated cases miss the origin breakaway", miss)
+		t.Errorf("%d/600 rotated cases miss the float-realization break set", miss)
 	}
 }
 

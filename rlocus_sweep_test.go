@@ -8,7 +8,6 @@ import (
 	"math/cmplx"
 	"math/rand/v2"
 	"os"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -16,18 +15,20 @@ import (
 
 // Frozen RootLocus regression sweep (track rlocus, wave 19). The generator
 // and the verdict rules below are frozen: testdata/rlocus_sweep_base.json
-// holds the verdicts of base 03edce8 (AND of arm64 and GOARCH=amd64 runs)
-// and every later revision must keep each verdict base got right.
-// Regenerate the file only with base code: RLOCUS_SWEEP_WRITE=<path>.
+// holds the verdicts of base rlswBaseRev (AND of arm64 and GOARCH=amd64
+// runs) and every later revision must keep each verdict base got right.
+// Regenerate the file only with base code: RLOCUS_SWEEP_WRITE=<path> (one
+// arch per run; AND the two ok strings nibble-wise).
 // rlocus_sweep_ext_test.go adds a second frozen set of harder families.
 //
 // Each case is a SISO loop k·Z(s)/P(s) (+D) with dyadic poles, zeros and
 // gain, realized as a companion form, a Givens-rotated companion or a
 // power-of-two-scaled companion, optionally discrete with an input delay.
-// Two exact big.Rat oracles judge the breakaway set: the intended TF and
-// the TF of the float realization; a result consistent with either one
-// that is well posed passes. Asymptotes, departure angles and the arrival
-// count are judged against the intended TF.
+// The breakaway set is judged by the exact big.Rat oracle of the float
+// realization's TF (RootLocus semantics since wave 24, J7OYOY: exact for
+// the data as given, so a rounded realization of an intended multiple root
+// has the split system's break points). Asymptotes, departure angles and
+// the arrival count are judged against the intended TF.
 
 const (
 	rlswCases = 2000
@@ -235,10 +236,32 @@ func (c *rlswCase) system() (*System, error) {
 }
 
 // rlswOracle is the exact breakaway answer of one TF N/D (D including z^L).
+// With exact set (the float-realization oracle of rlswCase.oracles), the
+// answer is exact's accepted set: every distinct real root of N'D − ND' of
+// the float realization's exact TF with K ≥ 0 (RootLocus semantics,
+// c = 0), the numerator of C(sI−A)⁻¹B cut to the intended degree. RootLocus
+// cuts it by a float Markov resolution test instead, which may keep
+// rounding-level coefficients; the exact sets of the cuts at the degrees
+// alt covers (intended+1 … n−1) are accepted too.
 type rlswOracle struct {
 	posed    bool
 	required []float64
 	scale    float64
+	exact    *rvOracle
+	alt      func(deg int) rvOracle
+	altDeg   [2]int
+}
+
+// rlswExactOracle returns the float-realization oracle of c with the
+// numerator of C(sI−A)⁻¹B cut to degree spDeg.
+func rlswExactOracle(c *rlswCase, spDeg int) rlswOracle {
+	mk := func(deg int) rvOracle { return rvBreakOracle(rvTrimmedTF(c.a, c.b, c.c, c.d, c.n, c.L, deg)) }
+	o := mk(spDeg)
+	r := rlswOracle{posed: !o.Cancel, scale: o.R, exact: &o, alt: mk, altDeg: [2]int{spDeg + 1, c.n - 1}}
+	for _, p := range o.Pts {
+		r.required = append(r.required, p.X)
+	}
+	return r
 }
 
 func rlswRatDeriv(p []*big.Rat) []*big.Rat {
@@ -444,6 +467,22 @@ func rlswDuplicate(bp []complex128) (complex128, bool) {
 
 // accepts reports whether bp is the required set, each point listed once.
 func (o rlswOracle) accepts(bp []complex128) bool {
+	if o.exact != nil {
+		if !o.posed {
+			return false
+		}
+		if ok, _, _ := o.exact.match(bp); ok {
+			return true
+		}
+		for deg := o.altDeg[0]; o.alt != nil && deg <= o.altDeg[1]; deg++ {
+			if a := o.alt(deg); !a.Cancel {
+				if ok, _, _ := a.match(bp); ok {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	if _, dup := rlswDuplicate(bp); !o.posed || dup {
 		return false
 	}
@@ -462,14 +501,17 @@ func (o rlswOracle) accepts(bp []complex128) bool {
 }
 
 // rlswVerdict returns the components res gets right, the components the
-// oracles can judge and whether Breakaway lists a point twice.
+// oracles can judge and whether Breakaway lists a point twice (one float
+// twice: distinct exact stationary points may round close). Breakaway is
+// judged by the float-realization oracle oFlt alone, the others by the
+// intended TF.
 func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, err error) {
 	sys, err := c.system()
 	if err != nil {
 		return 0, 0, false, err
 	}
 	res, rerr := RootLocus(sys, []float64{0, 1})
-	if oInt.posed || oFlt.posed {
+	if oFlt.posed {
 		posed |= rlswBreak
 	}
 	lead := c.num[len(c.num)-len(fzTrimRat(c.num))]
@@ -503,8 +545,10 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 	if rerr != nil {
 		return 0, posed, false, nil
 	}
-	_, dup = rlswDuplicate(res.Breakaway)
-	if oInt.accepts(res.Breakaway) || oFlt.accepts(res.Breakaway) {
+	for i, x := range res.Breakaway {
+		dup = dup || slices.Contains(res.Breakaway[i+1:], x)
+	}
+	if oFlt.accepts(res.Breakaway) {
 		ok |= rlswBreak
 	}
 	asymOK := len(res.AsymptoteAngles) == max(relDeg, 0)
@@ -584,29 +628,15 @@ func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
 		return out
 	}
 	oInt = newRlswOracle(c.num, lag(c.den))
-	den := fzCharPolyExact(c.a, c.n)
-	abc := make([]*big.Rat, c.n*c.n)
-	for i := range c.n {
-		for j := range c.n {
-			x := fzRat(c.a[i*c.n+j])
-			abc[i*c.n+j] = x.Sub(x, new(big.Rat).Mul(fzRat(c.b[i]), fzRat(c.c[j])))
-		}
+	spDeg := c.n
+	if c.num != nil {
+		spDeg = len(rlswRatSub(c.num, fzRatPolyMul([]*big.Rat{fzRat(c.d)}, c.den))) - 1
 	}
-	cp := fzCharPolyRat(abc, c.n)
-	num := make([]*big.Rat, c.n+1)
-	for i := range num {
-		num[i] = new(big.Rat).Sub(cp[i], den[i])
-		num[i].Add(num[i], new(big.Rat).Mul(fzRat(c.d), den[i]))
-	}
-	oFlt = newRlswOracle(num, lag(den))
+	oFlt = rlswExactOracle(c, spDeg)
 	return oInt, oFlt
 }
 
-const rlswBaseRev = "03edce8"
-
-// rlswMainRev is the base the track is merged onto; the goldens stay at
-// rlswBaseRev.
-const rlswMainRev = "2db88fe"
+const rlswBaseRev = "eb8d9e1"
 
 type rlswGolden struct {
 	Base  string `json:"base"`
@@ -676,11 +706,7 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 		p := *c
 		p.a, p.b, p.c = ulp(c.a), ulp(c.b), ulp(c.c)
 		_, op := p.oracles()
-		req := make([]complex128, len(op.required))
-		for i, x := range op.required {
-			req[i] = complex(x, 0)
-		}
-		if !op.posed || !of.posed || !of.accepts(req) {
+		if !op.posed || !of.posed || !rvSamePts(*of.exact, *op.exact, math.Inf(1)) || !rvSamePts(*op.exact, *of.exact, math.Inf(1)) {
 			return true
 		}
 	}
@@ -690,11 +716,9 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 // rlswCheck fails when a component that base got right on cases (golden
 // file golden) is now wrong or errors; env names the regenerate variable.
 // A Breakaway verdict listed in limits is reported, not enforced, when
-// rlswUlpSensitive confirms it is a float64 precision limit; one listed in
-// atBase for runtime.GOARCH (wrong at rlswMainRev too) is reported, not
-// enforced. It also fails when any case's Breakaway lists a point twice,
-// which base did.
-func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string, atBase map[int]map[string]string) {
+// rlswUlpSensitive confirms it is a float64 precision limit. It also fails
+// when any case's Breakaway lists a point twice.
+func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string) {
 	t.Helper()
 	ok, posed, dups := rlswRun(t, cases)
 	if path := os.Getenv(env); path != "" {
@@ -742,8 +766,6 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 			switch {
 			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && limits[i] != "" && rlswUlpSensitive(&cases[i], i):
 				t.Logf("case %d: Breakaway differs from base at a precision limit: %s", i, limits[i])
-			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && atBase[i][runtime.GOARCH] != "":
-				t.Logf("case %d: Breakaway wrong at %s too: %s", i, rlswMainRev, atBase[i][runtime.GOARCH])
 			case base[i]&m != 0 && ok[i]&m == 0:
 				regressed[bit]++
 				if regressed[bit] <= 5 {
@@ -784,5 +806,5 @@ func TestRootLocusSweepNoRegression(t *testing.T) {
 		t.Skip("frozen 2000-case sweep")
 	}
 	skipSlowUnderRace(t)
-	rlswCheck(t, rlswGenerate(), "testdata/rlocus_sweep_base.json", "RLOCUS_SWEEP_WRITE", rlswPrecisionLimits, nil)
+	rlswCheck(t, rlswGenerate(), "testdata/rlocus_sweep_base.json", "RLOCUS_SWEEP_WRITE", rlswPrecisionLimits)
 }

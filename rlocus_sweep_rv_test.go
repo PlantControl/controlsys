@@ -23,14 +23,16 @@ import (
 // 2500 cases (frozen, rvSweep4). Families: diagonal, Jordan, fast/slow, near pole-zero
 // cancellation, D sign, discrete with input/output delay, integrators,
 // near-axis complex zeros, high relative degree; each identity, transposed,
-// diagonally scaled, Givens-rotated or triangular-similar. The oracle is
-// the exact big.Rat TF of the intended realization (rvOracleFor); a
-// breakaway verdict flagged precision-limited (intended and float TF
-// disagree, or a 1-ulp change of A, B, C changes it) is logged, not
-// enforced, as is any component of a case whose float TF is not the
-// intended one, a centroid base was not judged on (its asymptote count was
-// wrong) and the rlrvLimits verdicts. testdata/rlocus_sweep_rv_base.json holds base 03edce8 verdicts
-// per arch; regenerate only with base code: RLOCUS_SWEEPRV_WRITE=<path>.
+// diagonally scaled, Givens-rotated or triangular-similar. Breakaway is
+// judged by the exact big.Rat TF of the float realization (rvOracleFor's
+// A, numerator cut to the intended degree; RootLocus semantics since wave
+// 24, J7OYOY), the other components by that of the intended realization
+// (I). A breakaway verdict a 1-ulp change of A, B, C changes (Prec) is
+// logged, not enforced, as are the components judged by I of a case whose
+// float TF is not the intended one (Differs), a centroid base was not
+// judged on (its asymptote count was wrong) and the rlrvLimits verdicts.
+// testdata/rlocus_sweep_rv_base.json holds base rlswBaseRev verdicts per
+// arch; regenerate only with base code: RLOCUS_SWEEPRV_WRITE=<path>.
 
 const (
 	rlrvSeed  = 20261022
@@ -118,7 +120,8 @@ func rvBits(s rvScore) int {
 // RLOCUS_SWEEPRV_ORACLE=<path>) less the intended poles and zeros, which
 // are float roots of the exact TF and so are recomputed on each arch.
 type rvOracleCache struct {
-	I       rvOracle
+	I, A    rvOracle
+	Differs bool
 	Prec    bool
 	PrecWhy string
 	Phase0  float64
@@ -198,7 +201,7 @@ func (sw rvSweep) cachedOracles(t *testing.T, cs []rvCase) []rvOra {
 		oras := rvOracles(cs)
 		cache := make([]rvOracleCache, len(oras))
 		for i, o := range oras {
-			cache[i] = rvOracleCache{I: o.I, Prec: o.Prec, PrecWhy: o.PrecWhy, Phase0: o.Phase0, DegN: o.DegN}
+			cache[i] = rvOracleCache{I: o.I, A: o.A, Differs: o.Differs, Prec: o.Prec, PrecWhy: o.PrecWhy, Phase0: o.Phase0, DegN: o.DegN}
 		}
 		rvWriteGzipJSON(t, path, cache)
 		return oras
@@ -222,7 +225,7 @@ func (sw rvSweep) cachedOracles(t *testing.T, cs []rvCase) []rvOra {
 	oras := make([]rvOra, len(cache))
 	for i, c := range cache {
 		ni, di := rvExactTF(cs[i].A0, cs[i].B0, cs[i].C0, cs[i].D, cs[i].N, cs[i].InDelay+cs[i].OutDelay)
-		oras[i] = rvOra{I: c.I, Prec: c.Prec, PrecWhy: c.PrecWhy, IPoles: rvNumRoots(rvPFloat(di)), IZeros: rvNumRoots(rvPFloat(ni)), Phase0: c.Phase0, DegN: c.DegN}
+		oras[i] = rvOra{I: c.I, A: c.A, Differs: c.Differs, Prec: c.Prec, PrecWhy: c.PrecWhy, IPoles: rvNumRoots(rvPFloat(di)), IZeros: rvNumRoots(rvPFloat(ni)), Phase0: c.Phase0, DegN: c.DegN}
 	}
 	return oras
 }
@@ -326,8 +329,10 @@ func (sw rvSweep) check(t *testing.T, baseRev string) {
 		for k := range 5 {
 			m := 1 << k
 			switch {
-			case base&m != 0 && bits[i]&m == 0 && (m == rlrvBk && oras[i].Prec || oras[i].PrecWhy == "intended!=actual"):
-				t.Logf("case %d %s/%s: %s differs from base at a precision limit (%s): %v", c.ID, c.Fam, c.Xf, names[k], oras[i].PrecWhy, outs[i].Bk)
+			case base&m != 0 && bits[i]&m == 0 && m == rlrvBk && oras[i].Prec:
+				t.Logf("case %d %s/%s: Breakaway differs from base at a precision limit (%s): %v", c.ID, c.Fam, c.Xf, oras[i].PrecWhy, outs[i].Bk)
+			case base&m != 0 && bits[i]&m == 0 && m != rlrvBk && oras[i].Differs:
+				t.Logf("case %d %s/%s: %s differs from base on a float TF that is not the intended one", c.ID, c.Fam, c.Xf, names[k])
 			case base&m != 0 && bits[i]&m == 0 && m == rlrvCen && base&rlrvAsym == 0:
 				t.Logf("case %d %s/%s: Centroid not judged at base (asymptote count wrong there), now %v vs %v", c.ID, c.Fam, c.Xf, outs[i].Cen, oras[i].I.Centroid)
 			case base&m != 0 && bits[i]&m == 0 && m == rlrvBk && sw.limits[c.ID] != "":
@@ -335,7 +340,7 @@ func (sw rvSweep) check(t *testing.T, baseRev string) {
 			case base&m != 0 && bits[i]&m == 0:
 				regressed[k]++
 				if regressed[k] <= 5 {
-					t.Errorf("case %d %s/%s: %s regressed: Breakaway %v want %v (rejected %v) err %q", c.ID, c.Fam, c.Xf, names[k], outs[i].Bk, oras[i].I.Pts, oras[i].I.Rej, outs[i].Err)
+					t.Errorf("case %d %s/%s: %s regressed: Breakaway %v want %v (rejected %v) err %q", c.ID, c.Fam, c.Xf, names[k], outs[i].Bk, oras[i].A.Pts, oras[i].A.Rej, outs[i].Err)
 				}
 			case base&m == 0 && bits[i]&m != 0:
 				fixed[k]++
@@ -1389,6 +1394,23 @@ func rvExactTF(a, b, c []float64, d float64, n, L int) (num, den rvP) {
 	return num.trim(), den.trim()
 }
 
+// rvSPDegree returns the degree of the exact numerator of C(sI−A)⁻¹B.
+func rvSPDegree(a, b, c []float64, n, L int) int {
+	num, _ := rvExactTF(a, b, c, 0, n, L)
+	return num.deg()
+}
+
+// rvTrimmedTF is rvExactTF with the numerator of C(sI−A)⁻¹B cut to degree
+// spDeg, the intended one: the float realization's higher coefficients
+// are rounding noise, which RootLocus trims by the relative degree.
+func rvTrimmedTF(a, b, c []float64, d float64, n, L, spDeg int) (num, den rvP) {
+	sp, den := rvExactTF(a, b, c, 0, n, L)
+	if len(sp) > spDeg+1 {
+		sp = sp[:max(spDeg+1, 0)]
+	}
+	return rvPAdd(sp, rvPScale(den[L:], rvRat(d))).trim(), den
+}
+
 type rvOPt struct {
 	X     float64
 	Kind  string // pole, zero, stat
@@ -1566,7 +1588,12 @@ func rvCx(v [][2]float64) []complex128 {
 }
 
 type rvOra struct {
-	I, A    rvOracle
+	I, A rvOracle
+	// Differs marks a float TF whose break set is not the intended one;
+	// the components judged by the intended TF are then not enforced.
+	Differs bool
+	// Prec marks a break set of the float TF that a 1-ulp change of A,
+	// B, C changes.
 	Prec    bool
 	PrecWhy string
 	IPoles  []complex128
@@ -1595,16 +1622,17 @@ func rvOracleFor(c rvCase) rvOra {
 	var o rvOra
 	Ni, Di := rvExactTF(c.A0, c.B0, c.C0, c.D, c.N, L)
 	o.I = rvBreakOracle(Ni, Di)
-	Na, Da := rvExactTF(c.A, c.B, c.C, c.D, c.N, L)
+	spDeg := rvSPDegree(c.A0, c.B0, c.C0, c.N, L)
+	Na, Da := rvTrimmedTF(c.A, c.B, c.C, c.D, c.N, L, spDeg)
 	o.A = rvBreakOracle(Na, Da)
 	far := 1e6 * o.I.R
-	if !o.I.Cancel && !o.I.Const {
-		if !rvSamePts(o.I, o.A, far) || !rvSamePts(o.A, o.I, far) {
-			o.Prec, o.PrecWhy = true, "intended!=actual"
+	if !o.A.Cancel && !o.A.Const {
+		if !o.I.Cancel && !o.I.Const && (!rvSamePts(o.I, o.A, far) || !rvSamePts(o.A, o.I, far)) {
+			o.Differs = true
 		}
 		r := rand.New(rand.NewPCG(uint64(c.ID), 77))
 		for k := 0; k < 2 && !o.Prec; k++ {
-			Np, Dp := rvExactTF(rvPerturb(r, c.A), rvPerturb(r, c.B), rvPerturb(r, c.C), c.D, c.N, L)
+			Np, Dp := rvTrimmedTF(rvPerturb(r, c.A), rvPerturb(r, c.B), rvPerturb(r, c.C), c.D, c.N, L, spDeg)
 			op := rvBreakOracle(Np, Dp)
 			if op.Cancel || !rvSamePts(o.A, op, far) || !rvSamePts(op, o.A, far) {
 				o.Prec, o.PrecWhy = true, "ulp"
@@ -1670,10 +1698,20 @@ func rvScoreCase(c rvCase, o rvOra, r rvOut) rvScore {
 		s.Err = r.Err
 		return s
 	}
-	if o.I.Cancel {
+	if o.A.Cancel {
 		s.Bk = true
 	} else {
-		s.Bk, s.Miss, s.Extra = o.I.match(rvCx(r.Bk))
+		s.Bk, s.Miss, s.Extra = o.A.match(rvCx(r.Bk))
+		if !s.Bk {
+			// RootLocus cuts the numerator by a float Markov test, which may
+			// keep rounding-level coefficients the intended TF has as zero.
+			L := c.InDelay + c.OutDelay
+			for deg := rvSPDegree(c.A0, c.B0, c.C0, c.N, L) + 1; deg < c.N && !s.Bk; deg++ {
+				if a := rvBreakOracle(rvTrimmedTF(c.A, c.B, c.C, c.D, c.N, L, deg)); !a.Cancel {
+					s.Bk, _, _ = a.match(rvCx(r.Bk))
+				}
+			}
+		}
 	}
 	na := o.I.NA
 	s.As, s.Ce = true, true

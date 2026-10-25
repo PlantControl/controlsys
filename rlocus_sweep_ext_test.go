@@ -230,5 +230,5 @@ func TestRootLocusSweepExtNoRegression(t *testing.T) {
 		t.Skip("frozen 2000-case sweep")
 	}
 	skipSlowUnderRace(t)
-	rlswCheck(t, rlsxGenerate(), "testdata/rlocus_sweep_ext_base.json", "RLOCUS_SWEEPX_WRITE", rlsxPrecisionLimits, nil)
+	rlswCheck(t, rlsxGenerate(), "testdata/rlocus_sweep_ext_base.json", "RLOCUS_SWEEPX_WRITE", rlsxPrecisionLimits)
 }

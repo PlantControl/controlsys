@@ -2,7 +2,6 @@ package controlsys
 
 import (
 	"math"
-	"slices"
 	"strconv"
 	"testing"
 )
@@ -77,8 +76,10 @@ func TestRootLocus_CloseRealPolesGainSign(t *testing.T) {
 }
 
 // TestRootLocus_TriplePoleBreakaway (w17 #63): ±1/(s+p)³ in companion form;
-// the triple pole is a K = 0 breakaway under either sign. eig splits it by
-// ~eps^(1/3)·p.
+// an exact triple pole (p = 0.5, 1, 1e3: dyadic coefficients) is a K = 0
+// breakaway under either sign, although eig splits it by ~eps^(1/3)·p. At
+// p = 1e-3 the rounded coefficients hold no triple pole and the break set
+// is that of the float realization (c = 0).
 func TestRootLocus_TriplePoleBreakaway(t *testing.T) {
 	for _, p := range []float64{1e-3, 0.5, 1, 1e3} {
 		for _, sg := range []float64{1, -1} {
@@ -87,7 +88,11 @@ func TestRootLocus_TriplePoleBreakaway(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rlpBreak(t, "triple p="+fmtG(p)+" sign "+fmtSign(sg), res.Breakaway, []float64{-p}, 1e-6)
+			name := "triple p=" + fmtG(p) + " sign " + fmtSign(sg)
+			if p != 1e-3 {
+				rlpBreak(t, name, res.Breakaway, []float64{-p}, 1e-12)
+			}
+			rlpFloatBreak(t, name, res.Breakaway, rlpFloatOracle(3, a, b, c, 0, 0, 0))
 		}
 	}
 }
@@ -117,11 +122,10 @@ func TestRootLocus_ScaledDoublePoleBreakaway(t *testing.T) {
 }
 
 // TestRootLocus_RotatedDoublePoleBreakaway: ±1/((s+p)²(s+2p)) under an
-// orthogonal similarity at p = 2^−12 … 2^3 (larger p makes the rotated
-// companion itself ill-posed: entries ~p³ and an order-reduced TF). eig splits the double pole by
-// up to ~√eps·‖A‖, beyond base's absolute 1e-4 window at large p and into
-// a complex pair; it is a K = 0 breakaway under either sign (closed form;
-// the exact oracle on the rotated floats is too close to judge).
+// orthogonal similarity at p = 2^−12 … 2^3. The rounded similarity splits
+// the double pole in the float data (into a real or a complex pair), so
+// the break set is that of the float realization (c = 0, J7OYOY): the
+// stationary points of the split loop with K > 0, not −p.
 func TestRootLocus_RotatedDoublePoleBreakaway(t *testing.T) {
 	for _, e := range []int{-12, -6, 0, 3} {
 		p := math.Ldexp(1, e)
@@ -133,9 +137,7 @@ func TestRootLocus_RotatedDoublePoleBreakaway(t *testing.T) {
 					t.Fatal(err)
 				}
 				name := "rotated (s+p)^2(s+2p) p=" + fmtG(p) + " sign " + fmtSign(sg) + " seed " + strconv.Itoa(seed)
-				if !slices.ContainsFunc(res.Breakaway, func(z complex128) bool { return math.Abs(real(z)+p) <= 1e-6*p }) {
-					t.Errorf("%s: Breakaway = %v, want −p = %g", name, res.Breakaway, -p)
-				}
+				rlpFloatBreak(t, name, res.Breakaway, rlpFloatOracle(3, a, b, c, 0, 0, 0))
 			}
 		}
 	}

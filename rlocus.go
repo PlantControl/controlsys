@@ -21,8 +21,9 @@ type RootLocusResult struct {
 	// Branches[b][k] is the b-th closed-loop pole at Gains[k]; branches are
 	// ordered for continuity between consecutive gains.
 	Branches [][]complex128
-	// Breakaway lists real break-away/break-in points on the locus; empty
-	// when the locus has none.
+	// Breakaway lists the real break-away/break-in points of the K ≥ 0
+	// locus in ascending order, each once; empty when the locus has none
+	// (see RootLocus for how they are computed).
 	Breakaway []complex128
 	// AsymptoteAngles are the angles in radians of the asymptotes along
 	// which branches leave to infinity; empty when the number of poles
@@ -65,6 +66,23 @@ func (r *RootLocusResult) AsymptoteCentroid() (centroid float64, ok bool) {
 // beyond the n − r finite ones of relative degree r are rounding noise
 // (MATLAB reports them as infinite) and are left out of the asymptotes and
 // angles.
+//
+// Breakaway follows python-control's root_locus break points: the distinct
+// real roots of N'D − ND' with K = −D/N ≥ 0, where K = 0 is a multiple pole
+// and K = ∞ a multiple zero (break-in). They are computed exactly for the
+// state-space data as given: A, B, C, D are exact binary rationals, so N
+// and D (with the numerator trimmed to the relative degree above, common
+// factors cancelled) are exact integer polynomials, and the roots of
+// N'D − ND', their multiplicity and the sign of K are decided in exact
+// arithmetic, then rounded to float64. No multiplicity is inferred: a
+// realization whose rounding split a multiple pole or zero (a rotated or
+// otherwise non-triangular similarity of a repeated root) reports the
+// stationary points of the split system, which may differ from the
+// textbook ones; build the model from its transfer function to keep the
+// multiple root exact. MATLAB rlocus reports no break points. Loops with
+// more than 12 states (delay states excluded), or whose entries of A and
+// B·C span more than 4800/n − 64 binary orders of magnitude, use the
+// eigenvalue-based approximation of computeBreakaway instead.
 //
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.rlocus.html.
 func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
@@ -195,9 +213,13 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 			lp.spRelDeg = r
 		}
 	}
-	breakaway, err := computeBreakaway(sys, undelayed, delay, &lp, poles, zeros)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", op, err)
+	breakaway, ok := lp.exactBreakaway(sys, undelayed, delay)
+	if !ok {
+		breakaway, err = computeBreakaway(sys, undelayed, delay, &lp, poles, zeros)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", op, err)
+		}
+		slices.SortStableFunc(breakaway, func(x, y complex128) int { return cmp.Compare(real(x), real(y)) })
 	}
 	phase0 := math.Pi
 	if lp.negGain {
@@ -330,7 +352,9 @@ func makeBranches(allEigs [][]complex128, nStates, nGains int) [][]complex128 {
 	return branches
 }
 
-// computeBreakaway returns the real roots of N'D − ND' on the K > 0 locus.
+// computeBreakaway returns the real roots of N'D − ND' on the K > 0 locus
+// from the eigenvalues and the converted transfer function in float64: the
+// fallback of exactBreakaway beyond its size gates.
 // The numerator is trimmed to the loop's relative degree, so rounding-noise
 // leading coefficients add no far stationary points, and N, D are scaled
 // by powers of two so N'D − ND' cannot overflow. An absorbed delay of L

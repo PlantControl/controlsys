@@ -25,10 +25,10 @@ func rlpSys(t *testing.T, n int, a, b, c []float64, d, dt float64) *System {
 }
 
 // rlpExactOracle returns the exact breakaway oracle of sys's float
-// coefficients (delay-free).
+// coefficients (delay-free, numerator untrimmed).
 func rlpExactOracle(t *testing.T, n int, a, b, c []float64, d float64) rlswOracle {
 	t.Helper()
-	cs := rlswCase{n: n, a: a, b: b, c: c, d: d, num: []*big.Rat{big.NewRat(1, 1)}, den: []*big.Rat{big.NewRat(1, 1)}}
+	cs := rlswCase{n: n, a: a, b: b, c: c, d: d}
 	_, o := cs.oracles()
 	if !o.posed {
 		t.Fatalf("exact oracle ill posed for A=%v", a)
@@ -186,7 +186,7 @@ func TestRootLocus_NoiseZerosRelativeDegree(t *testing.T) {
 	b := []float64{-0.26141391328956, -0.5418493331123063, -1.6696096552907065, 0.5915593669800094, 0.7074766289020779}
 	c := []float64{-142.41775793762778, 47.204252982690086, -16.13755010077696, -144.21002232543742, 66.02760815553987}
 	want := []float64{-0.5444920469, 0, 0.9380893887}
-	cs := rlswCase{n: 5, L: 3, a: a, b: b, c: c, num: []*big.Rat{big.NewRat(1, 1)}, den: []*big.Rat{big.NewRat(1, 1)}}
+	cs := rlswCase{n: 5, L: 3, a: a, b: b, c: c}
 	_, o := cs.oracles()
 	var near []float64
 	for _, x := range o.required {
@@ -327,10 +327,11 @@ func TestRootLocus_NearMultiplePolesNoBreakaway(t *testing.T) {
 	}
 }
 
-// TestRootLocus_DoubleIntegratorRotated (w17 #66, base correct): the
-// double pole of ±k/s² at the origin is a breakaway (K = ∓s²/k = 0) for
-// either gain sign, also when rounding splits it in a non-triangular
-// realization.
+// TestRootLocus_DoubleIntegratorRotated (w17 #66): the double pole of
+// ±k/s² at the origin is a breakaway (K = ∓s²/k = 0) for either gain sign
+// when the float data hold it (the nilpotent [1 1; −1 −1]); a rotation
+// whose rounding splits it gives the float realization's break set
+// (c = 0, J7OYOY). The asymptotes follow the gain sign either way.
 func TestRootLocus_DoubleIntegratorRotated(t *testing.T) {
 	rotate := func(th float64, k float64) *System {
 		Q := mat.NewDense(2, 2, []float64{math.Cos(th), -math.Sin(th), math.Sin(th), math.Cos(th)})
@@ -355,14 +356,16 @@ func TestRootLocus_DoubleIntegratorRotated(t *testing.T) {
 			cases = append(cases, tc{rotate(th, k), k < 0})
 		}
 	}
-	for _, c := range cases {
+	for i, c := range cases {
 		res, err := RootLocus(c.sys, []float64{0, 0.5, 2, 10})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(res.Breakaway) == 0 || slices.ContainsFunc(res.Breakaway, func(z complex128) bool { return cmplx.Abs(z) > 1e-8 }) {
+		if i == 0 && (len(res.Breakaway) != 1 || res.Breakaway[0] != 0) {
 			t.Errorf("A=%v: Breakaway = %v, want [0]", mat.Formatted(c.sys.A), res.Breakaway)
 		}
+		a := c.sys.A.RawMatrix().Data
+		rlpFloatBreak(t, fmtG(a[0]), res.Breakaway, rlpFloatOracle(2, a, []float64{c.sys.B.At(0, 0), c.sys.B.At(1, 0)}, c.sys.C.RawMatrix().Data, 0, 0, 0))
 		want := []float64{math.Pi / 2, 3 * math.Pi / 2}
 		if c.neg {
 			want = []float64{0, math.Pi}

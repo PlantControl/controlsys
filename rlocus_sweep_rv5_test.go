@@ -10,7 +10,7 @@ import "testing"
 // exact oracle of rlocus_sweep_rv_test.go. Cases are frozen as generated
 // (testdata/rlocus_sweep_rv5_cases.json.gz); RLOCUS_SWEEPRV5_ORACLE and
 // RLOCUS_SWEEPRV5_WRITE=<path> regenerate the oracle cache and the base
-// verdicts (base 2db88fe, per arch; base code only).
+// verdicts (base rlswBaseRev, per arch; base code only).
 var rvSweep5 = rvSweep{
 	name: "RV5", count: 2500,
 	cases: "testdata/rlocus_sweep_rv5_cases.json.gz", oracle: "testdata/rlocus_sweep_rv5_oracle.json.gz",
@@ -25,14 +25,12 @@ var rlrv5Limits = map[int]string{
 	11761: "amd64: discrete stationary points beside a pole/zero dipole off by 2e-5 relative (converted N/D accuracy)",
 }
 
-const rlrv5BaseRev = "2db88fe"
-
 func TestRootLocusSweepRV5NoRegression(t *testing.T) {
 	if testing.Short() {
 		t.Skip("frozen 2500-case sweep")
 	}
 	skipSlowUnderRace(t)
-	rvSweep5.check(t, rlrv5BaseRev)
+	rvSweep5.check(t, rlswBaseRev)
 }
 
 // TestRootLocus_RV5Repros pins the wave-20 final-review cases of the fifth
@@ -52,9 +50,9 @@ func TestRootLocus_RV5Repros(t *testing.T) {
 		s := rvScoreCase(c, o, r)
 		switch {
 		case rlrv5Limits[id] != "":
-			t.Logf("case %d %s/%s (open): Breakaway %v, oracle %v", id, c.Fam, c.Xf, rvCx(r.Bk), o.I.Pts)
+			t.Logf("case %d %s/%s (open): Breakaway %v, oracle %v", id, c.Fam, c.Xf, rvCx(r.Bk), o.A.Pts)
 		case !s.ok():
-			t.Errorf("case %d %s/%s: Breakaway %v (oracle %v, missing %v, extra %v), asymptotes %v, departure %v, err %q: %v", id, c.Fam, c.Xf, rvCx(r.Bk), o.I.Pts, s.Miss, s.Extra, r.Asym, r.Dep, s.Err, s.Why)
+			t.Errorf("case %d %s/%s: Breakaway %v (oracle %v, missing %v, extra %v), asymptotes %v, departure %v, err %q: %v", id, c.Fam, c.Xf, rvCx(r.Bk), o.A.Pts, s.Miss, s.Extra, r.Asym, r.Dep, s.Err, s.Why)
 		}
 	}
 }
