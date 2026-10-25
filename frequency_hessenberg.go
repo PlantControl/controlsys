@@ -99,6 +99,9 @@ type balancedDense struct {
 	solveErr []float64
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
+	// sys, when set, is the delay-free model whose double-double response
+	// (ddResponseInto) replaces a stalled point's inaccurate entries.
+	sys *System
 }
 
 // refineCondition is the error amplification, relative to ε, above which
@@ -305,7 +308,22 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re, im)
 		}
 	}
+	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
+		ddResponseInto(bd.sys, pt, dst)
+	}
 	return finiteResponse(dst)
+}
+
+// stallInaccurate reports whether a stalled point's error estimate exceeds
+// refineCondition·ε of a response entry; ddResponseInto resolves it there
+// (graded companion below its poles: 4e-2 relative off).
+func (bd *balancedDense) stallInaccurate(dst []complex128) bool {
+	for i, v := range dst {
+		if bd.solveErr[i] > refineCondition*eps()*cabs1(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // refine improves bd.x against the exact pencil at pt, M = (pÊ + qÂ)/κ with

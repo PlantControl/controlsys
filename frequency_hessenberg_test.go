@@ -629,3 +629,130 @@ func TestBalancedDenseStructuralZeroNotStalled(t *testing.T) {
 		}
 	}
 }
+
+// Below the poles of a graded tf2ss companion refine stalls and the dense
+// solve was off by up to 0.5 relative (4e-2 at ω = 0.00139) although the
+// double-double solve is exact there; a stalled point whose error estimate
+// exceeds refineCondition·ε of an entry must take the double-double
+// response at every entry point.
+func TestFrequencyResponseStalledRefineTakesDD(t *testing.T) {
+	r := []float64{3033.55, 8.635e6, 1.3387e10, 1.1713e13, 6.3856e15, 6.1226e17, 2.768e19, 7.2368e20, 1.1678e22, 1.5195e23, 1.0695e24, 6.2747e24, 1.6832e25, 3.404e25, 3.5338e25, 2.4398e25}
+	n := len(r)
+	a := make([]float64, n*n)
+	for j, v := range r {
+		a[j] = -v
+	}
+	for i := 1; i < n; i++ {
+		a[i*n+i-1] = 1
+	}
+	b := make([]float64, n)
+	b[14] = 1
+	c := []float64{1, .25, 1.875, -.109375, -.125, 3, -2, 0, -.015625, -8, -1.5, 0, -.75, 0, 0, 0}
+	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := []float64{1e-4, 0.0013941527, 0.01, 0.30392}
+	sweep, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, err := sys.FreqResponsePointwise(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, w := range ws {
+		s := complex(0, w)
+		ex := frExactResponse(sys, frBigC(s))[0]
+		dd := make([]complex128, 1)
+		if !ddResponseInto(sys, pointAt(s), dd) {
+			t.Fatalf("w=%g: double-double solve failed", w)
+		}
+		if e := cmplx.Abs(dd[0]-ex) / cmplx.Abs(ex); e > 1e-13 {
+			t.Fatalf("w=%g: oracles disagree by %.3g", w, e)
+		}
+		g, err := sys.EvalFr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"EvalFr", g[0][0]}, {"FreqResponse", sweep.At(k, 0, 0)}, {"FreqResponsePointwise", pw.At(k, 0, 0)}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > 1e-12 {
+				t.Errorf("%s at w=%g: %v off exact %v by %.3g", got.name, w, got.v, ex, e)
+			}
+		}
+	}
+}
+
+// stalledSweepRoots draws n poles graded over four decades, real or
+// complex pairs.
+func stalledSweepRoots(r *rand.Rand, n int) []complex128 {
+	var roots []complex128
+	for deg := 0; deg < n; {
+		mag := math.Ldexp(float64(16+r.IntN(48))/32, r.IntN(14))
+		if r.IntN(3) == 0 && deg+2 <= n {
+			roots = append(roots, complex(-mag*float64(1+r.IntN(8))/8, mag))
+			deg += 2
+			continue
+		}
+		roots = append(roots, complex(-mag, 0))
+		deg++
+	}
+	return roots
+}
+
+// Seeded graded companions (observable and tf2ss shapes, B a unit vector,
+// dense C): EvalFr against the exact response must resolve every point at
+// which the dense solve stalls, and never be worse than the dense solve.
+func TestEvalFrStalledRefineSweep(t *testing.T) {
+	skipSlowUnderRace(t)
+	r := rand.New(rand.NewPCG(24, 16))
+	stalls := 0
+	for trial := range 300 {
+		n := 6 + r.IntN(13)
+		den := ratPolyFromRoots(stalledSweepRoots(r, n))
+		b, c := make([]float64, n), make([]float64, n)
+		b[r.IntN(n)] = 1
+		for k := range n {
+			if r.IntN(3) > 0 {
+				c[k] = float64(r.IntN(33)-16) / 8
+			}
+		}
+		shape := []int{0, 3}[r.IntN(2)]
+		a, bt, ct := companionShape(den, b, c, shape)
+		sys, err := NewFromSlices(n, 1, 1, a, bt, ct, []float64{0}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bd := newBalancedDense(sys, n, 1, 1)
+		for _, w := range []float64{1e-4, 1.3e-3, 0.0088, 0.107, 0.3, 3, 100} {
+			s := complex(0, w)
+			ex := frExactResponse(sys, frBigC(s))[0]
+			g := make([]complex128, 1)
+			if ex == 0 || bd.evalInto(pointAt(s), g) != nil {
+				continue
+			}
+			ev, err := sys.EvalFr(s)
+			if err != nil {
+				t.Errorf("trial %d w=%g: %v", trial, w, err)
+				continue
+			}
+			eDense := cmplx.Abs(g[0]-ex) / cmplx.Abs(ex)
+			e := cmplx.Abs(ev[0][0]-ex) / cmplx.Abs(ex)
+			if bd.stalled {
+				stalls++
+				if e > 1e-12 {
+					t.Errorf("trial %d n %d shape %d w=%g: stalled point off exact by %.3g", trial, n, shape, w, e)
+				}
+			}
+			if e > max(2*eDense, 1e-11) {
+				t.Errorf("trial %d n %d shape %d w=%g: EvalFr off exact by %.3g, dense solve %.3g", trial, n, shape, w, e, eDense)
+			}
+		}
+	}
+	if stalls == 0 {
+		t.Error("no stalled point in the sweep")
+	}
+}
