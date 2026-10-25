@@ -447,3 +447,96 @@ func TestBalancedDenseNearDoublePoleRefines(t *testing.T) {
 		}
 	}
 }
+
+// reversedCompanion returns A with first column −den[1:] and a unit
+// superdiagonal, the reversed observable companion of den.
+func reversedCompanion(den []float64) []float64 {
+	n := len(den) - 1
+	a := make([]float64, n*n)
+	for i := range n {
+		a[i*n] = -den[i+1]
+		if i+1 < n {
+			a[i*n+i+1] = 1
+		}
+	}
+	return a
+}
+
+// LEAZRP: below the poles of a graded reversed companion C = e₁ reads only
+// x₀ ≈ 1e-20 beside x₁ ≈ 2, so GEPP's normwise error swamped the response
+// (6.9e4 relative at ω = 0.0176) although den and num resolve it to ~13ε,
+// and refinement stopped on its normwise test. Every entry point must match
+// the exact rational response.
+func TestFrequencyResponseGradedReversedCompanionBelowPoles(t *testing.T) {
+	den := []float64{1, 754, 255356, 5.1226392e+07, 6.755561344e+09, 6.140269664e+11, 3.9174454525952e+13, 1.749820945778688e+15, 5.344039379091456e+16, 1.0575501408690831e+18, 1.2115752641409319e+19, 6.01702493877751e+19, 0}
+	b0 := []float64{0.05078125, 0, -2.6702880859375e-05, -8.821487426757812e-06, -524288, -0.0072021484375, 0.21875, 1.7642974853515625e-05, 3.375, 2.288818359375e-05, 1.1444091796875e-05, -15.25}
+	c0 := []float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	n := len(den) - 1
+	a, b, c := companionShape(den, b0, c0, 1)
+	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	num := ratObservableNum(den, b0, c0)
+	ws := []float64{1e-5, 1e-4, 1.76e-3, 1.76e-2, 0.08, 1.38, 108}
+	sweep, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, err := sys.FreqResponsePointwise(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := newHessenbergSweep(sys, n, 1, 1)
+	for k, w := range ws {
+		ex := ratRatioJ(num, den, w)
+		g, err := sys.EvalFr(complex(0, w))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := make([]complex128, 1)
+		if err := hs.evalInto(pointAt(complex(0, w)), h); err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"EvalFr", g[0][0]}, {"FreqResponse", sweep.At(k, 0, 0)}, {"FreqResponsePointwise", pw.At(k, 0, 0)}, {"hessenbergSweep", h[0]}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > 1e-12 {
+				t.Errorf("%s at w=%g off exact by %.3g", got.name, w, e)
+			}
+		}
+	}
+}
+
+// Where refinement stalls (a 25-state graded companion, ε·cond ≳ 1), the
+// sens bound of the trim gate must cover the reference's own error, so an
+// inaccurate reference never counts as resolved; it was the data
+// conditioning alone, 2.6e-14 relative beside an error of 27 at the first
+// point.
+func TestSensBoundCoversStalledSolve(t *testing.T) {
+	den := []float64{1, 1960.54296875, 1324778.0375671387, 453017973.58403015, 90672566995.1926, 11432861553837.39, 949716471541430.8, 5.3628407407340744e+16, 2.109198001835061e+18, 5.8960716105277686e+19, 1.1918233492782816e+21, 1.767078704390106e+22, 1.9434022535784184e+23, 1.5980782540760173e+24, 9.868327675548808e+24, 4.5762879802036216e+25, 1.5853874470748784e+26, 4.054058535754468e+26, 7.490006007724049e+26, 9.649212545235104e+26, 8.173161151038438e+26, 4.1141976943341275e+26, 1.0271973116920471e+26, 1.0051652236654178e+25, 3.0487172137841685e+23, 2.8278471496166277e+21}
+	b := []float64{-6.866455078125e-05, 0, 272, 0, 0, 0.017578125, 0, -9, 0, -5.7220458984375e-05, 0, -0.125, 0, -0.00390625, 0, 0, 0, -2, -256, 0, 0, 0, 0, 0, 0}
+	n := len(den) - 1
+	c := make([]float64, n)
+	c[0] = 1
+	sys, err := NewFromSlices(n, 1, 1, reversedCompanion(den), b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bd := newBalancedDense(sys, n, 1, 1)
+	sw := newSensWork(n, 1, 1)
+	for _, w := range []float64{2.309734638458412e-05, 2.21300266697768e-05, 1.8709073417783588e-05, 0.000101680294768261, 0.0009890718650590099, 0.09303031026002107} {
+		s := complex(0, w)
+		g := make([]complex128, 1)
+		if err := bd.evalInto(pointAt(s), g); err != nil {
+			t.Fatalf("w=%g: %v", w, err)
+		}
+		bnd := sw.bound(bd, s)
+		ex := frExactResponse(sys, frBigC(s))[0]
+		e, scale := cmplx.Abs(g[0]-ex), cmplx.Abs(ex)
+		if e > max(10*bnd[0], 1e-9*scale) {
+			t.Errorf("w=%g: reference off exact by %.3g relative, sens bound %.3g", w, e/scale, bnd[0]/scale)
+		}
+	}
+}
