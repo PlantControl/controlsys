@@ -92,6 +92,7 @@ type balancedDense struct {
 	x      []complex128   // row-major n×m
 	piv    []int          // evalInto's row interchanges, for refine
 	r      []complex128   // row-major n×m, refine's residual
+	y      []complex128   // row-major n×m, substitutionError's Ly = Pb̂
 	dErr   []float64      // row-major n×m, substitutionBound's, made on first use
 	pt     frequencyPoint // the point evalInto last factored, for refine
 	tol    float64
@@ -120,13 +121,14 @@ func newBalancedDense(sys *System, n, m, p int) *balancedDense {
 // newBalancedDenseOf takes ownership of the balanced realization br.
 func newBalancedDenseOf(br balancedRealization) *balancedDense {
 	n, m := br.n, br.m
-	c := make([]complex128, n*n+n+2*n*m)
+	c := make([]complex128, n*n+n+3*n*m)
 	bd := &balancedDense{
 		balancedRealization: br,
 		pencil:              c[: n*n : n*n],
 		inv:                 c[n*n : n*n+n : n*n+n],
 		x:                   c[n*n+n : n*n+n+n*m : n*n+n+n*m],
-		r:                   c[n*n+n+n*m:],
+		r:                   c[n*n+n+n*m : n*n+n+2*n*m : n*n+n+2*n*m],
+		y:                   c[n*n+n+2*n*m:],
 	}
 	idx := make([]int, 3*n)
 	bd.lastA, bd.last, bd.piv = idx[:n:n], idx[n:2*n:2*n], idx[2*n:]
@@ -509,22 +511,18 @@ const cancelCondition = 1e4
 // forward elimination Ly = Pb̂, then eᵢ = (|xᵢ||uᵢᵢ| + fᵢ + Σₖ|uᵢₖ|(|xₖ| +
 // eₖ))/|uᵢᵢ| of back substitution. Forward elimination alone can carry the
 // error: a reversed graded companion's last state, 1e-11 relative off with
-// its back substitution exact (2QC7PE, seed 759). y is formed in bd.r and f
-// in bd.dErr; e is kept in the real parts of bd.r, which refine overwrites.
+// its back substitution exact (2QC7PE, seed 759). y is formed in bd.y; f
+// and then e are kept in the real parts of bd.r, which refine overwrites.
 func (bd *balancedDense) substitutionError() bool {
-	n, m, a, x, e := bd.n, bd.m, bd.pencil, bd.x, bd.r
-	if bd.dErr == nil {
-		bd.dErr = make([]float64, n*m)
-	}
-	f := bd.dErr
+	n, m, a, x, e, y := bd.n, bd.m, bd.pencil, bd.x, bd.r, bd.y
 	for i, v := range bd.b {
-		e[i] = complex(v, 0)
+		y[i] = complex(v, 0)
 	}
-	clear(f)
+	clear(e)
 	for k, pk := range bd.piv {
 		if pk != k {
 			for j := range m {
-				e[k*m+j], e[pk*m+j] = e[pk*m+j], e[k*m+j]
+				y[k*m+j], y[pk*m+j] = y[pk*m+j], y[k*m+j]
 			}
 		}
 	}
@@ -536,9 +534,9 @@ func (bd *balancedDense) substitutionError() bool {
 			}
 			al := cabs1(l)
 			for j := range m {
-				y := e[k*m+j]
-				e[i*m+j] -= l * y
-				f[i*m+j] += al * (cabs1(y) + f[k*m+j])
+				yk := y[k*m+j]
+				y[i*m+j] -= l * yk
+				e[i*m+j] += complex(al*(cabs1(yk)+real(e[k*m+j])), 0)
 			}
 		}
 	}
@@ -546,7 +544,7 @@ func (bd *balancedDense) substitutionError() bool {
 		ui := a[i*n+i+1 : i*n+bd.last[i]+1]
 		ii := cabs1(bd.inv[i])
 		for j := range m {
-			v := cabs1(x[i*m+j])/ii + f[i*m+j]
+			v := cabs1(x[i*m+j])/ii + real(e[i*m+j])
 			for k, u := range ui {
 				l := (i+1+k)*m + j
 				v += cabs1(u) * (cabs1(x[l]) + real(e[l]))
