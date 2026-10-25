@@ -14,9 +14,11 @@ import (
 // (every fifth case) carry an exact double or triple pole p instead, whose
 // K = 0 break point must stay; another fifth has a double or triple real
 // zero of G − D (one break point, a multiple root of N'D − ND'). Judged by the exact oracles of
-// rlocus_sweep_test.go; base 03edce8 is compared offline
-// (RLOCUS_SWEEPP_DUMP=<path> writes the verdicts), so the test fails only
-// on a duplicate point and logs the counts.
+// rlocus_sweep_test.go at rlswGains (K = 1/2 for the D = −1 cases, whose
+// K = 1 is an algebraic loop); RLOCUS_SWEEPP_DUMP=<path> writes the
+// verdicts. The test fails on a duplicate point or on any posed Breakaway
+// verdict that is wrong or unjudged (994 of 994 correct since wave 25, arm64
+// and amd64).
 
 const (
 	rlspCases = 1000
@@ -96,6 +98,14 @@ func TestRootLocusSweepPair(t *testing.T) {
 		good := ok[i]&rlswBreak != 0
 		if good {
 			nok++
+		} else if np-nok <= 5 {
+			sys, _ := cases[i].system()
+			res, err := RootLocus(sys, rlswGains(cases[i].d))
+			var bp []complex128
+			if err == nil {
+				bp = res.Breakaway
+			}
+			t.Errorf("case %d: Breakaway wrong (err %v): %v\n%s", i, err, bp, &cases[i])
 		}
 		if i%5 >= 3 {
 			ctlPosed++
@@ -108,7 +118,7 @@ func TestRootLocusSweepPair(t *testing.T) {
 	for k, i := range dups {
 		if k < 5 {
 			sys, _ := cases[i].system()
-			res, _ := RootLocus(sys, []float64{0, 1})
+			res, _ := RootLocus(sys, rlswGains(cases[i].d))
 			t.Errorf("case %d: Breakaway %v lists a point twice\n%s", i, res.Breakaway, &cases[i])
 		}
 	}

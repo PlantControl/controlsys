@@ -500,6 +500,15 @@ func (o rlswOracle) accepts(bp []complex128) bool {
 	return true
 }
 
+// rlswGains is the sweep's gain grid for feedthrough d: {0, 1}, or {0, 1/2}
+// when 1+d = 0 would make K = 1 an algebraic loop.
+func rlswGains(d float64) []float64 {
+	if 1+d == 0 {
+		return []float64{0, 0.5}
+	}
+	return []float64{0, 1}
+}
+
 // rlswVerdict returns the components res gets right, the components the
 // oracles can judge and whether Breakaway lists a point twice (one float
 // twice: distinct exact stationary points may round close). Breakaway is
@@ -510,7 +519,7 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 	if err != nil {
 		return 0, 0, false, err
 	}
-	res, rerr := RootLocus(sys, []float64{0, 1})
+	res, rerr := RootLocus(sys, rlswGains(c.d))
 	if oFlt.posed {
 		posed |= rlswBreak
 	}
@@ -770,7 +779,7 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 				regressed[bit]++
 				if regressed[bit] <= 5 {
 					sys, _ := cases[i].system()
-					res, rerr := RootLocus(sys, []float64{0, 1})
+					res, rerr := RootLocus(sys, rlswGains(cases[i].d))
 					t.Errorf("case %d: %s regressed (err %v)\nres=%+v\n%s", i, names[m], rerr, res, &cases[i])
 				}
 			case base[i]&m == 0 && ok[i]&m != 0:
@@ -782,7 +791,7 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 	for k, i := range dups {
 		if k < 5 {
 			sys, _ := cases[i].system()
-			res, _ := RootLocus(sys, []float64{0, 1})
+			res, _ := RootLocus(sys, rlswGains(cases[i].d))
 			t.Errorf("case %d: Breakaway %v lists a point twice\n%s", i, res.Breakaway, &cases[i])
 		}
 	}
