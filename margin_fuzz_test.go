@@ -654,10 +654,10 @@ func fzMgSeeds() []fzSeed {
 	}
 }
 
-// TestFzMgRepros replays the fixed margin repros (exact coefficients from
+// TestMargin_FuzzRegressionCases replays the fixed margin repros (exact coefficients from
 // their reports) through the oracle and the AllMargin/Bandwidth checks; the
 // oracle must reproduce the crossings the reports document.
-func TestFzMgRepros(t *testing.T) {
+func TestMargin_FuzzRegressionCases(t *testing.T) {
 	cases := []struct {
 		name       string
 		num, den   []float64

@@ -1843,7 +1843,7 @@ func rvScoreCase(c rvCase, o rvOra, r rvOut) rvScore {
 
 func (s rvScore) ok() bool { return s.Err == "" && s.Bk && s.As && s.Ce && s.Dp && s.Ar }
 
-// TestRootLocus_ReviewSweepRepros pins the wave-20 review-5 repros, cases
+// TestRootLocus_ReviewSweepCases pins the wave-20 review-5 repros, cases
 // of the fourth frozen sweep (this file, full A, B, C in its
 // frozen cases), judged as the sweep judges Breakaway: by the exact oracle
 // of the float realization (rvScoreCase). Fixed: 684, 1694, 1829, 171
@@ -1855,7 +1855,7 @@ func (s rvScore) ok() bool { return s.Err == "" && s.Bk && s.As && s.Ce && s.Dp 
 // relative degree 5) and the w17 #58 cancellation class 1328, 1517, 1622,
 // 1794 (stationary pair inside a pole/zero gap of ~1e-13 relative), which
 // the exact path resolves.
-func TestRootLocus_ReviewSweepRepros(t *testing.T) {
+func TestRootLocus_ReviewSweepCases(t *testing.T) {
 	cs := rvSweep4.frozenCases(t)
 	oras := rvSweep4.cachedOracles(t, cs)
 	for _, id := range []int{684, 1694, 1829, 171, 678, 1707, 893, 922, 1375, 1725, 1328, 1517, 1622, 1794, 838} {

@@ -21,12 +21,12 @@ var rvSweep5 = rvSweep{
 // rlrv5Limits are verdicts logged, not enforced. Since the exact
 // breakaway path every Breakaway verdict of the sweep is enforced (10041
 // and 10517 are flagged 1-ulp sensitive by the oracle cache); 11942 is
-// listed for TestRootLocus_RV5Repros, which judges every component.
+// listed for TestRootLocus_ReviewerFamilyCases, which judges every component.
 var rlrv5Limits = map[int]string{
 	11942: "amd64: departure angle at 6+32i off 2.5e-4 (eig zeros of a 4-fold zero −36 split 0.09 by the similarity's rounding); Breakaway matches the float-realization oracle",
 }
 
-func TestRootLocusSweepRV5NoRegression(t *testing.T) {
+func TestRootLocus_ReviewerFamiliesNoRegression(t *testing.T) {
 	if testing.Short() {
 		t.Skip("frozen 2500-case sweep")
 	}
@@ -34,7 +34,7 @@ func TestRootLocusSweepRV5NoRegression(t *testing.T) {
 	rvSweep5.check(t, rlswBaseRev)
 }
 
-// TestRootLocus_RV5Repros pins the wave-20 final-review cases of the fifth
+// TestRootLocus_ReviewerFamilyCases pins the wave-20 final-review cases of the fifth
 // frozen sweep, judged on every component as the sweep judges them
 // (Breakaway by the exact oracle of the float realization): 11941, 11400,
 // 10478 (a rounding-level h₂ kept a noise zero, flipping departure angles
@@ -43,7 +43,7 @@ func TestRootLocusSweepRV5NoRegression(t *testing.T) {
 // point 116.00007), 11942 (4-fold zero −36 split 0.09 by the similarity's
 // rounding: the split system's stationary points) and 11761 (stationary
 // points beside a pole/zero dipole). The rlrv5Limits cases are logged.
-func TestRootLocus_RV5Repros(t *testing.T) {
+func TestRootLocus_ReviewerFamilyCases(t *testing.T) {
 	cs := rvSweep5.frozenCases(t)
 	oras := rvSweep5.cachedOracles(t, cs)
 	for _, id := range []int{11941, 11400, 10478, 11124, 11942, 11761} {
