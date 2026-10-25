@@ -129,9 +129,9 @@ func TestTransferFunctionGradedCompanionKeepsOriginPoleBesideSlowZero(t *testing
 		{"dense-transposed", []float64{1, 2664, 3.174912e+06, 2.177994752e+09, 9.27255625728e+11, 2.47497308504064e+14, 3.986381863282278e+16, 3.4771921332810547e+18, 1.2210569259201331e+20, 0},
 			[]float64{-2.384185791015625e-07, 1536, -112, 0, 116, -92, 0.02392578125, 0, -1.28125},
 			[]float64{0.75, 1.75, -1, 0.5, -1.25, 0, 0, -0.25, 0}, 1, 2, []float64{2e-10, 2e-9, 1e-6, 1e-2, 1, 1e4}},
-		// Reversed companions with a unit row: the band reference is itself
-		// off by up to 1e4 below the poles, so the exact direct full row
-		// never beat the cut one there (cut error 62.8 and 0.995).
+		// Reversed companions with a unit row: below the poles the cut row
+		// misses by 62.8 and 0.995 relative, beside a band reference exact
+		// to about 4e-19.
 		{"unit-reversed-12", []float64{1, 754, 255356, 5.1226392e+07, 6.755561344e+09, 6.140269664e+11, 3.9174454525952e+13, 1.749820945778688e+15, 5.344039379091456e+16, 1.0575501408690831e+18, 1.2115752641409319e+19, 6.01702493877751e+19, 0},
 			[]float64{0.05078125, 0, -2.6702880859375e-05, -8.821487426757812e-06, -524288, -0.0072021484375, 0.21875, 1.7642974853515625e-05, 3.375, 2.288818359375e-05, 1.1444091796875e-05, -15.25},
 			[]float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 1, 1, []float64{1.76e-3, 1.76e-2, 0.08, 1.38, 108}},

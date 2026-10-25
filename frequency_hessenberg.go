@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -91,6 +92,7 @@ type balancedDense struct {
 	x      []complex128   // row-major n×m
 	piv    []int          // evalInto's row interchanges, for refine
 	r      []complex128   // row-major n×m, refine's residual
+	dErr   []float64      // row-major n×m, substitutionBound's, made on first use
 	pt     frequencyPoint // the point evalInto last factored, for refine
 	tol    float64
 	// stalled marks a point at which refine did not resolve every response
@@ -361,7 +363,7 @@ func (bd *balancedDense) refine() {
 		// rounds to zero an inaccurate x would pass.
 		if step == 0 && dMax <= refineCondition*eps()*xMax {
 			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineCondition*eps()); floored {
-				if !exact {
+				if !exact || bd.correctionNoise(r, refineCondition*eps()) {
 					bd.stallErr(r)
 				}
 				return
@@ -373,8 +375,17 @@ func (bd *balancedDense) refine() {
 			xMax = max(xMax, cabs1(x[i]))
 		}
 		if dMax <= refineStop*xMax {
+			// An entry at the resolution floor reads states far below the
+			// largest, where the normwise contraction does not bound its
+			// error (CKTRTW: 6e-10 relative left); others take refineStop.
+			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineCondition*eps()); floored {
+				if !exact || bd.correctionNoise(r, refineCondition*eps()) {
+					bd.stallErr(r)
+				}
+				return
+			}
 			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineStop); floored {
-				if !exact {
+				if !exact || bd.correctionNoise(r, refineStop) {
 					bd.stallErr(r)
 				}
 				return
@@ -385,24 +396,73 @@ func (bd *balancedDense) refine() {
 }
 
 // stallErr records in bd.solveErr, per response entry, Σₖ|ĉᵢₖ||dₖⱼ| of
-// refine's last correction d, which estimates the error left where
-// refinement stalls.
+// refine's last correction d, or the back-substitution noise in it where
+// larger, which estimates the error left where refinement stalls.
 func (bd *balancedDense) stallErr(d []complex128) {
 	n, m, p := bd.n, bd.m, bd.p
 	if bd.solveErr == nil {
 		bd.solveErr = make([]float64, p*m)
 	}
+	bd.substitutionBound(d)
 	for i := range p {
 		cr := bd.c[i*n : (i+1)*n]
 		for j := range m {
-			w := 0.0
+			var w, we float64
 			for k, c := range cr {
 				w += math.Abs(c) * cabs1(d[k*m+j])
+				we += math.Abs(c) * bd.dErr[k*m+j]
 			}
-			bd.solveErr[i*m+j] = w
+			bd.solveErr[i*m+j] = max(w, eps()*we)
 		}
 	}
 	bd.stalled = true
+}
+
+// correctionNoise reports whether the back-substitution rounding of the
+// correction d, ε·Σₖ|ĉᵢₖ|eₖⱼ, exceeds tol of some response entry
+// Σₖ|ĉᵢₖ||xₖⱼ|. An output reading states far below the largest takes its
+// correction from substitution terms that cancel, and its rounding can
+// exceed the correction it should resolve; a correction that then rounds
+// to zero proves nothing (CKTRTW: amd64 1.3e-4 relative accepted).
+func (bd *balancedDense) correctionNoise(d []complex128, tol float64) bool {
+	n, m, x := bd.n, bd.m, bd.x
+	bd.substitutionBound(d)
+	for j := range m {
+		for i := range bd.p {
+			var w, we float64
+			for k, c := range bd.c[i*n : (i+1)*n] {
+				w += math.Abs(c) * cabs1(x[k*m+j])
+				we += math.Abs(c) * bd.dErr[k*m+j]
+			}
+			if !(eps()*we <= tol*w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// substitutionBound sets bd.dErr to the first-order rounding error, in
+// units of ε, of back substitution for y: eᵢ = (|yᵢ||uᵢᵢ| + Σₖ|uᵢₖ|(|yₖ| +
+// eₖ))/|uᵢᵢ|, as substitutionError bounds it for bd.x.
+func (bd *balancedDense) substitutionBound(y []complex128) {
+	n, m, a := bd.n, bd.m, bd.pencil
+	if bd.dErr == nil {
+		bd.dErr = make([]float64, n*m)
+	}
+	e := bd.dErr
+	for i := n - 1; i >= 0; i-- {
+		ui := a[i*n+i+1 : i*n+bd.last[i]+1]
+		ii := cabs1(bd.inv[i])
+		for j := range m {
+			v := cabs1(y[i*m+j]) / ii
+			for k, u := range ui {
+				l := (i+1+k)*m + j
+				v += cabs1(u) * (cabs1(y[l]) + e[l])
+			}
+			e[i*m+j] = v * ii
+		}
+	}
 }
 
 // outputCancels reports whether back substitution may have lost a response
@@ -516,10 +576,13 @@ func outputConverged(cd, cx []float64, d, x []complex128, n, m, p, ks, js int, t
 // stability; one step normally suffices.
 type hessenbergSweep struct {
 	balancedRealization
-	q       []float64
-	h       []float64
-	bt      []float64 // QᵀB̂
-	ct      []float64 // ĈQ
+	q  []float64
+	h  []float64
+	bt []float64 // QᵀB̂
+	ct []float64 // ĈQ
+	// ctw bounds |ĈQ| with its reduction error, nε‖ĉᵢ‖₁ per row: a
+	// normwise backward error that swamps the entries a graded Ĉ cancels in.
+	ctw     []float64
 	hMax    float64
 	u       []complex128
 	inv     []complex128
@@ -531,11 +594,14 @@ type hessenbergSweep struct {
 	r       []complex128 // column-major n×m
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
+	sys       *System
+	dense     *balancedDense // denseRetry's solver, built on first use
+	alt       []complex128
 }
 
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	nn := n * n
-	f := make([]float64, 2*nn+n*m+p*n)
+	f := make([]float64, 2*nn+n*m+2*p*n)
 	c := make([]complex128, nn+3*n+3*n*m)
 	take := func(k int) []float64 {
 		out := f[:k:k]
@@ -547,8 +613,8 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 		c = c[k:]
 		return out
 	}
-	hs := &hessenbergSweep{balancedRealization: newBalancedRealization(sys, n, m, p)}
-	hs.q, hs.h, hs.bt, hs.ct = take(nn), take(nn), take(n*m), take(p*n)
+	hs := &hessenbergSweep{balancedRealization: newBalancedRealization(sys, n, m, p), sys: sys}
+	hs.q, hs.h, hs.bt, hs.ct, hs.ctw = take(nn), take(nn), take(n*m), take(p*n), take(p*n)
 	hs.u, hs.inv, hs.mult, hs.shift = ctake(nn), ctake(n), ctake(n), ctake(n)
 	hs.y, hs.x, hs.r = ctake(n*m), ctake(n*m), ctake(n*m)
 	hs.swapped = make([]bool, n)
@@ -568,6 +634,16 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	}
 	for _, v := range hs.h {
 		hs.hMax = max(hs.hMax, math.Abs(v))
+	}
+	for i := range p {
+		w := 0.0
+		for _, v := range hs.c[i*n : (i+1)*n] {
+			w += math.Abs(v)
+		}
+		w *= float64(n) * eps()
+		for k, v := range hs.ct[i*n : (i+1)*n] {
+			hs.ctw[i*n+k] = math.Abs(v) + w
+		}
 	}
 	return hs
 }
@@ -736,9 +812,19 @@ func qTMulCols(dst, src []complex128, q []float64, n, m int) {
 // roughly ε‖Â‖‖(sI-Â)⁻¹‖, so well-conditioned points stop after one.
 const maxRefineSteps = 3
 
+// sweepFirstStepTol is the relative output correction below which the
+// Hessenberg sweep accepts its first, working-precision refinement step;
+// later steps, against the exact pencil, accept only refineCondition·ε too,
+// since a step's correction bounds the error it leaves only where the
+// refinement contracts fast, which a graded model's slow states need not.
+var sweepFirstStepTol = refineCondition * eps()
+
 // refineStop is the relative correction below which refinement stops. The
 // correction δ estimates the error it removes and the contraction is about
 // ‖δ‖/‖x‖, so the error left after applying δ is near ‖δ‖²/‖x‖ ≤ ε‖x‖.
+// That bound is normwise: an output at the resolution floor, reading states
+// far below the largest, can keep 1e-9 relative error past a 1e-17 normwise
+// step (CKTRTW), so balancedDense.refine holds it to refineCondition·ε.
 var refineStop = math.Sqrt(eps())
 
 // residual sets r = B̂ - (sI-Â)x̂. The diagonal enters as s-âᵢᵢ, as GEPP
@@ -787,16 +873,50 @@ func (hs *hessenbergSweep) exactResidual(pt frequencyPoint) {
 }
 
 // outputConverged is outputConverged of the correction hs.y. Weighted by
-// |ĈQ| in Hessenberg coordinates it overstates the correction an output
-// sees, so where that fails the test is redone on Qy in r.
-func (hs *hessenbergSweep) outputConverged(tol float64) bool {
+// hs.ctw in Hessenberg coordinates it overstates the correction an output
+// sees, so where that is not exact the test is redone on Qy in r, and viaQ
+// reports that the correction must reach the output as Qy: ĈQ·y can then
+// be all reduction error (CKTRTW #23: 1.7e-30 beside Ĉ·Qy = 2.5e-40 and
+// |G| = 6.5e-27 on amd64).
+func (hs *hessenbergSweep) outputConverged(tol float64) (exact, floored, viaQ bool) {
 	n, m, p := hs.n, hs.m, hs.p
-	if _, ok := outputConverged(hs.ct, hs.c, hs.y, hs.x, n, m, p, 1, n, tol); ok {
-		return true
+	if exact, _ := outputConverged(hs.ctw, hs.c, hs.y, hs.x, n, m, p, 1, n, tol); exact {
+		return true, true, false
 	}
 	qMulCols(hs.r, hs.y, hs.q, n, m)
-	_, ok := outputConverged(hs.c, hs.c, hs.r, hs.x, n, m, p, 1, n, tol)
-	return ok
+	exact, floored = outputConverged(hs.c, hs.c, hs.r, hs.x, n, m, p, 1, n, tol)
+	return exact, floored, true
+}
+
+// denseRetry replaces dst with the balanced dense response at pt, built on
+// first use, where refinement stalled: only an output correction within
+// refineCondition·ε bounds the error left, and the reduction to H can leave
+// a graded model's slow states, the ones a cancelling output reads, beyond
+// what refinement through H resolves (CKTRTW: 2e10 relative). The dense
+// solver takes the double-double response where its own refinement stalls.
+// Where the dense pivots call the pencil singular, as a graded companion's
+// can far from any pole (CKTRTW: 12.6 relative kept), a delay-free model
+// takes the double-double response, and the dense error is returned where
+// that is singular too.
+func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) error {
+	if hs.sys == nil {
+		return nil
+	}
+	if hs.dense == nil {
+		hs.dense = newBalancedDense(hs.sys, hs.n, hs.m, hs.p)
+		if hs.sys.internalDelayCount() == 0 {
+			hs.dense.sys = hs.sys
+		}
+		hs.alt = make([]complex128, hs.p*hs.m)
+	}
+	err := hs.dense.evalInto(pt, hs.alt)
+	if errors.Is(err, errSingularPencil) && hs.dense.sys != nil && ddResponseInto(hs.sys, pt, hs.alt) {
+		err = nil
+	}
+	if err == nil {
+		copy(dst, hs.alt)
+	}
+	return err
 }
 
 func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
@@ -824,7 +944,9 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 	qMulCols(x, y, hs.q, n, m)
 
 	// y ends as the last correction in Hessenberg coordinates; it is
-	// applied through ĈQ, saving a final Q multiply.
+	// applied through ĈQ, saving a final Q multiply, unless only the Qy
+	// test passed (viaQ): then Qy, already in r, is added to x.
+	converged, viaQ := false, false
 	for step := range maxRefineSteps {
 		if step > 0 {
 			qMulCols(r, y, hs.q, n, m)
@@ -844,13 +966,24 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			dMax = max(dMax, cabs1(v))
 			xMax = max(xMax, cabs1(x[i]))
 		}
-		tol := refineStop
+		viaQ = false
+		tol := refineCondition * eps()
 		if step == 0 {
-			tol = refineCondition * eps()
+			tol = sweepFirstStepTol
 		}
-		if dMax <= tol*xMax && hs.outputConverged(tol) {
-			break
+		if dMax <= tol*xMax {
+			exact, floored, q := hs.outputConverged(tol)
+			converged, viaQ = exact, q
+			if floored {
+				break
+			}
 		}
+	}
+	if viaQ {
+		for i, v := range r {
+			x[i] += v
+		}
+		clear(y)
 	}
 
 	for row := range p {
@@ -870,6 +1003,11 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 				re += hs.d[row*hs.dStride+j]
 			}
 			out[j] = complex(re+dre, im+dim)
+		}
+	}
+	if !converged {
+		if err := hs.denseRetry(pt, dst); err != nil {
+			return err
 		}
 	}
 	return finiteResponse(dst)
