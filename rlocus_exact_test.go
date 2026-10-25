@@ -147,7 +147,7 @@ func TestRootLocus_ExactGateFallback(t *testing.T) {
 	b, c := make([]float64, n), make([]float64, n)
 	b[1], c[0] = 1, 1
 	sys := rlpSys(t, n, a, b, c, 0, 0)
-	if _, ok := (&rlocusLoop{n: n, relDeg: 2}).exactBreakaway(sys, nil, 0); ok {
+	if _, ok := systemExactBreakaway(sys, nil, 0); ok {
 		t.Fatalf("exact path ran at n = %d", n)
 	}
 	res, err := RootLocus(sys, []float64{0, 1})

@@ -20,23 +20,13 @@ const (
 	rlExactMaxSteps = 4000
 )
 
-// exactBreakaway returns the break points of the explicit delay-absorbed
-// loop sys by exactBreakaway, from the delay-free undelayed loop with
-// delay extra poles at z = 0 when there is one; the strictly proper
-// numerator is trimmed to the relative degree lp.relDeg (lp.spRelDeg with
-// a feedthrough) as in computeBreakaway.
-func (lp *rlocusLoop) exactBreakaway(sys, undelayed *System, delay int) ([]complex128, bool) {
+// systemExactBreakaway returns the break points of the explicit
+// delay-absorbed loop sys by exactBreakaway, from the delay-free undelayed
+// loop with delay extra poles at z = 0 when there is one.
+func systemExactBreakaway(sys, undelayed *System, delay int) ([]complex128, bool) {
 	ex, exDelay := sys, 0
 	if delay > 0 && undelayed != nil {
 		ex, exDelay = undelayed, delay
-	}
-	r := lp.relDeg
-	if lp.d != 0 {
-		r = lp.spRelDeg
-	}
-	keep := lp.n
-	if r <= lp.n {
-		keep = lp.n - r
 	}
 	n, _, _ := ex.Dims()
 	if n < 1 || n > rlExactMaxStates {
@@ -49,13 +39,13 @@ func (lp *rlocusLoop) exactBreakaway(sys, undelayed *System, delay int) ([]compl
 		copy(a[i*n:i*n+n], ar.Data[i*ar.Stride:i*ar.Stride+n])
 		b[i] = br.Data[i*br.Stride]
 	}
-	return exactBreakaway(a, b, cr.Data[:n], ex.D.At(0, 0), n, exDelay, keep)
+	return exactBreakaway(a, b, cr.Data[:n], ex.D.At(0, 0), n, exDelay)
 }
 
 // exactBreakaway returns the break points of the SISO loop
-// G(x) = C(xI−A)⁻¹B + d with keep ≥ 0 the highest power of x kept in the
-// numerator of C(xI−A)⁻¹B (the Markov relative-degree trim) and delay extra
-// poles at x = 0, computed exactly from the stored floats: A, B, C, d are
+// G(x) = C(xI−A)⁻¹B + d with delay extra poles at x = 0, the numerator of
+// C(xI−A)⁻¹B trimmed to the relative degree of xpMarkovKeep, computed
+// exactly from the stored floats: A, B, C, d are
 // dyadic rationals, so N and D are exact integer polynomials (Berkowitz),
 // common factors cancel exactly, and every distinct real root of
 // q = N'D − ND' is kept when it is a multiple pole (K = 0), a multiple
@@ -63,7 +53,7 @@ func (lp *rlocusLoop) exactBreakaway(sys, undelayed *System, delay int) ([]compl
 // signs. The points are rounded to float64 and sorted. ok is false when the
 // loop is outside the exact path's size gates (rlExactMaxStates,
 // rlExactBitBudget).
-func exactBreakaway(a, b, c []float64, d float64, n, delay, keep int) (pts []complex128, ok bool) {
+func exactBreakaway(a, b, c []float64, d float64, n, delay int) (pts []complex128, ok bool) {
 	if n < 1 || n > rlExactMaxStates {
 		return nil, false
 	}
@@ -112,6 +102,7 @@ func exactBreakaway(a, b, c []float64, d float64, n, delay, keep int) (pts []com
 	}
 	den := intCharPoly(m)
 	cp := intCharPoly(p)
+	keep := xpMarkovKeep(m, xpDyadicInts(bd), xpDyadicInts(cd))
 	num := make([]*big.Int, n+1)
 	for i := range num {
 		num[i] = new(big.Int)
@@ -150,6 +141,117 @@ func exactBreakaway(a, b, c []float64, d float64, n, delay, keep int) (pts []com
 	}
 	slices.SortFunc(pts, func(x, y complex128) int { return cmp.Compare(real(x), real(y)) })
 	return slices.Compact(pts), true
+}
+
+// xpDyadicInts returns v·2^−e as integers, e the least exponent of its
+// nonzero entries.
+func xpDyadicInts(v []dyadic) []*big.Int {
+	e := math.MaxInt
+	for _, x := range v {
+		if x.m.Sign() != 0 {
+			e = min(e, x.e)
+		}
+	}
+	out := make([]*big.Int, len(v))
+	for i, x := range v {
+		out[i] = new(big.Int)
+		if x.m.Sign() != 0 {
+			out[i].Lsh(x.m, uint(x.e-e))
+		}
+	}
+	return out
+}
+
+// xpMarkovKeep returns the highest power of x kept in the numerator of
+// C(xI−A)⁻¹B for A = m, B = b, C = c (each a power-of-two multiple of the
+// data): n − r for r the relative degree of markovResolved's rule, decided
+// on the exact hₖ = C·A^(k−1)·B and sensₖ (markov), so the trim depends on
+// the data alone; n (no trim) when no hₖ is resolved: the data then cannot
+// tell a rounding-level hₖ from an exact one (a realization whose exact h₂
+// is at ρ 0.03 beside a rounding-level h₁ at 0.35), and the numerator of
+// the data as given is kept whole.
+func xpMarkovKeep(m [][]*big.Int, b, c []*big.Int) int {
+	n := len(m)
+	abs := func(v []*big.Int) []*big.Int {
+		out := make([]*big.Int, len(v))
+		for i, x := range v {
+			out[i] = new(big.Int).Abs(x)
+		}
+		return out
+	}
+	t := new(big.Int)
+	dot := func(x, y []*big.Int) *big.Int {
+		s := new(big.Int)
+		for i := range x {
+			if x[i].Sign() != 0 && y[i].Sign() != 0 {
+				s.Add(s, t.Mul(x[i], y[i]))
+			}
+		}
+		return s
+	}
+	mAbs := make([][]*big.Int, n)
+	for i := range n {
+		mAbs[i] = abs(m[i])
+	}
+	bAbs, cAbs := abs(b), abs(c)
+	var lAbs, arAbs [][]*big.Int
+	r, l := b, c
+	rho := make([]*big.Rat, n)
+	for k := 1; k <= n; k++ {
+		if k > 1 {
+			nr, nl := make([]*big.Int, n), make([]*big.Int, n)
+			for j := range n {
+				nl[j] = new(big.Int)
+			}
+			for i := range n {
+				nr[i] = dot(m[i], r)
+				if l[i].Sign() != 0 {
+					for j, aij := range m[i] {
+						nl[j].Add(nl[j], t.Mul(l[i], aij))
+					}
+				}
+			}
+			r, l = nr, nl
+		}
+		rAbs := abs(r)
+		ar := make([]*big.Int, n)
+		for i := range n {
+			ar[i] = dot(mAbs[i], rAbs)
+		}
+		lAbs = append(lAbs, abs(l))
+		arAbs = append(arAbs, ar)
+		h := dot(c, r)
+		sens := dot(lAbs[k-1], bAbs)
+		sens.Add(sens, dot(cAbs, rAbs))
+		for j := 0; j <= k-2; j++ {
+			sens.Add(sens, dot(lAbs[j], arAbs[k-2-j]))
+		}
+		rho[k-1] = new(big.Rat)
+		if sens.Sign() > 0 {
+			rho[k-1].SetFrac(h.Abs(h).Lsh(h, 52), sens)
+		}
+	}
+	one, four, ten := big.NewRat(1, 1), big.NewRat(4, 1), big.NewRat(10, 1)
+	prev, x := new(big.Rat), new(big.Rat)
+	for k, rk := range rho {
+		ok := rk.Cmp(ten) > 0
+		if !ok && rk.Cmp(one) > 0 && rk.Cmp(x.Mul(four, prev)) >= 0 {
+			ok = true
+			for _, y := range rho[k+1:] {
+				if x.Mul(y, four).Cmp(rk) < 0 || y.Cmp(x.Mul(ten, rk)) > 0 {
+					ok = false
+					break
+				}
+			}
+		}
+		if ok {
+			return n - k - 1
+		}
+		if rk.Cmp(prev) > 0 {
+			prev.Set(rk)
+		}
+	}
+	return n
 }
 
 // xpRoot is the dyadic m·2^e.
