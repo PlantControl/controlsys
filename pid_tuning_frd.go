@@ -135,6 +135,8 @@ func pidTuningFRDFitMargins(r *PIDTuningResult, p pidTuningPlant) {
 	q.unresolved = nil
 	stable, known, _ := pidTuningFRDNyquistVerdict(c, q)
 	ws, ms := pidTuningFRDFitCrossings(p, c)
+	lw, lm := pidTuningFRDLowCrossings(p, c)
+	ws, ms = append(ws, lw...), append(ms, lm...)
 	ev := &r.Evidence
 	for i, w := range ws {
 		if slices.ContainsFunc(ev.GainCrossovers, func(x float64) bool { return math.Abs(math.Log(w/x)) <= 1e-6 }) {
@@ -155,17 +157,44 @@ func pidTuningFRDFitMargins(r *PIDTuningResult, p pidTuningPlant) {
 // (a lone or disagreeing fit, which the margin reading takes as it is,
 // the step then uncertified) and of arcs. Each fit is read at 64 points
 // even in the angle its pole sees and at its |L| peak, and each sign
-// change of |L| − 1 bisected.
+// change of |L| − 1 bisected. Any other step whose |L| crosses 1 or comes
+// within pidTuningFRDNearUnity of it at a sample is read along its trusted
+// fits too (pidTuningFRDStepFits, pidTuningFRDTrusted), as the chord there
+// can miss a crossing pair a mild curvature lifts between samples, or put
+// a crossing's phase off.
 func pidTuningFRDFitCrossings(p pidTuningPlant, c PID2) (crossings, margins []float64) {
+	var raw *FRD
 	for k := 0; k+1 < len(p.samples); k++ {
 		var fits []pidTuningFRDMode
+		marked := false
 		for _, set := range [][][]pidTuningFRDMode{p.crossArcs, p.unresolved, p.arcs} {
 			if set != nil && set[k] != nil {
-				fits = set[k]
+				fits, marked = set[k], true
 				break
 			}
 		}
 		a, b := p.samples[k], p.samples[k+1]
+		if !marked {
+			ea, eb := cmplx.Abs(p.at(a)*pidTuningFeedback(c, a))-1, cmplx.Abs(p.at(b)*pidTuningFeedback(c, b))-1
+			if !(math.Min(math.Abs(ea), math.Abs(eb)) < pidTuningFRDNearUnity) && !(ea*eb <= 0) {
+				continue
+			}
+			if raw == nil {
+				n := len(p.samples)
+				vals, rows := make([]complex128, n), make([][]complex128, n)
+				raw = &FRD{Omega: p.samples, Response: make([][][]complex128, n), Dt: p.dt}
+				for i, w := range p.samples {
+					vals[i] = p.at(w)
+					rows[i] = vals[i : i+1]
+					raw.Response[i] = rows[i : i+1]
+				}
+			}
+			f, nf, _ := pidTuningFRDStepFits(raw, k)
+			fits = pidTuningFRDTrusted(f[:nf])
+			if len(fits) == 0 && ea*eb < 0 {
+				fits = f[:nf]
+			}
+		}
 		for _, m := range fits {
 			l := func(w float64) complex128 { return m.at(w) * pidTuningFeedback(c, w) }
 			e := func(w float64) float64 { return cmplx.Abs(l(w)) - 1 }
@@ -205,6 +234,53 @@ func pidTuningFRDFitCrossings(p pidTuningPlant, c PID2) (crossings, margins []fl
 	}
 	return crossings, margins
 }
+
+// pidTuningFRDLowCrossings returns c's gain crossings below the band of
+// the strict plant p, and their margins wrapped as pidTuningMargins,
+// along the line the count runs G on from the sampled DC gain to the
+// lowest sample, when the band's low end shows that gain (lowAnchored):
+// a loop with |L| at the lowest sample just past 1 and |Kp·G(0)| below it
+// crosses there, outside the band the search reads.
+func pidTuningFRDLowCrossings(p pidTuningPlant, c PID2) (crossings, margins []float64) {
+	if !p.lowAnchored || p.lowAnchor || p.dcGain == 0 {
+		return nil, nil
+	}
+	dc, gLow := complex(p.dcGain, 0), p.at(p.low)
+	l := func(w float64) complex128 { return (dc + (gLow-dc)*complex(w/p.low, 0)) * pidTuningFeedback(c, w) }
+	e := func(w float64) float64 { return cmplx.Abs(l(w)) - 1 }
+	const pieces = 64
+	lo, elo := 1e-6*p.low, e(1e-6*p.low)
+	for i := 1; i <= pieces; i++ {
+		hi := p.low * math.Pow(1e-6, 1-float64(i)/pieces)
+		if i == pieces {
+			hi = p.low
+		}
+		ehi := e(hi)
+		if elo*ehi < 0 || ehi == 0 {
+			x, y, sx := lo, hi, elo
+			for range 60 {
+				mid := math.Sqrt(x * y)
+				if v := e(mid); sx*v <= 0 {
+					y = mid
+				} else {
+					x = mid
+				}
+			}
+			w := math.Sqrt(x * y)
+			pm := 180 + cmplx.Phase(l(w))*180/math.Pi
+			if pm > 180 {
+				pm -= 360
+			}
+			crossings, margins = append(crossings, w), append(margins, pm)
+		}
+		lo, elo = hi, ehi
+	}
+	return crossings, margins
+}
+
+// pidTuningFRDNearUnity is how near 1 sampled |L| − 1 at a step's end must
+// come for pidTuningFRDFitCrossings to read the step along its fits.
+const pidTuningFRDNearUnity = .1
 
 // pidTuningFRDCertified reports whether the strict count p certifies c:
 // stable, with both ends anchored (pidTuningFRDNyquistCount).
