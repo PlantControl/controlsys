@@ -509,12 +509,10 @@ func TestFrequencyResponseGradedReversedCompanionBelowPoles(t *testing.T) {
 	}
 }
 
-// Where refinement stalls (a 25-state graded companion, ε·cond ≳ 1), the
-// sens bound of the trim gate must cover the reference's own error, so an
-// inaccurate reference never counts as resolved; it was the data
-// conditioning alone, 2.6e-14 relative beside an error of 27 at the first
-// point.
-func TestSensBoundCoversStalledSolve(t *testing.T) {
+// stalledCompanion25 is a 25-state graded reversed companion, C = e₁, on
+// which refinement stalls below its poles.
+func stalledCompanion25(t *testing.T) (*System, int) {
+	t.Helper()
 	den := []float64{1, 1960.54296875, 1324778.0375671387, 453017973.58403015, 90672566995.1926, 11432861553837.39, 949716471541430.8, 5.3628407407340744e+16, 2.109198001835061e+18, 5.8960716105277686e+19, 1.1918233492782816e+21, 1.767078704390106e+22, 1.9434022535784184e+23, 1.5980782540760173e+24, 9.868327675548808e+24, 4.5762879802036216e+25, 1.5853874470748784e+26, 4.054058535754468e+26, 7.490006007724049e+26, 9.649212545235104e+26, 8.173161151038438e+26, 4.1141976943341275e+26, 1.0271973116920471e+26, 1.0051652236654178e+25, 3.0487172137841685e+23, 2.8278471496166277e+21}
 	b := []float64{-6.866455078125e-05, 0, 272, 0, 0, 0.017578125, 0, -9, 0, -5.7220458984375e-05, 0, -0.125, 0, -0.00390625, 0, 0, 0, -2, -256, 0, 0, 0, 0, 0, 0}
 	n := len(den) - 1
@@ -524,6 +522,16 @@ func TestSensBoundCoversStalledSolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return sys, n
+}
+
+// Where refinement stalls (a 25-state graded companion, ε·cond ≳ 1), the
+// sens bound of the trim gate must cover the reference's own error, so an
+// inaccurate reference never counts as resolved; it was the data
+// conditioning alone, 2.6e-14 relative beside an error of 27 at the first
+// point.
+func TestSensBoundCoversStalledSolve(t *testing.T) {
+	sys, n := stalledCompanion25(t)
 	bd := newBalancedDense(sys, n, 1, 1)
 	sw := newSensWork(n, 1, 1)
 	for _, w := range []float64{2.309734638458412e-05, 2.21300266697768e-05, 1.8709073417783588e-05, 0.000101680294768261, 0.0009890718650590099, 0.09303031026002107} {
@@ -537,6 +545,82 @@ func TestSensBoundCoversStalledSolve(t *testing.T) {
 		e, scale := cmplx.Abs(g[0]-ex), cmplx.Abs(ex)
 		if e > max(10*bnd[0], 1e-9*scale) {
 			t.Errorf("w=%g: reference off exact by %.3g relative, sens bound %.3g", w, e/scale, bnd[0]/scale)
+		}
+	}
+}
+
+// CKTRTW: on stalledCompanion25 the Hessenberg sweep accepted refinement
+// whose output correction passed only at the resolution floor, x₀ being
+// ε-small beside the largest state, and FreqResponse was 2.2e10, 3.6e-5 and
+// 6.4e-7 relative off at the first three points where EvalFr is exact. A
+// stalled point must take the dense solve.
+func TestHessenbergSweepStallTakesDense(t *testing.T) {
+	sys, n := stalledCompanion25(t)
+	ws := []float64{2.309734638458412e-05, 0.007690823083080494, 0.00931887964638536}
+	for k := 3; k < 40; k++ {
+		ws = append(ws, 1e-3*float64(k))
+	}
+	if (frequencyEvaluator{sys: sys, n: n, m: 1, p: 1}).useDenseSweep(len(ws)) {
+		t.Logf("FreqResponse takes the dense solver for %d points here", len(ws))
+	}
+	sweep, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := newHessenbergSweep(sys, n, 1, 1)
+	h := make([]complex128, 1)
+	for k, w := range ws {
+		ex := frExactResponse(sys, frBigC(complex(0, w)))[0]
+		if err := hs.evalInto(pointAt(complex(0, w)), h); err != nil {
+			t.Fatal(err)
+		}
+		for name, v := range map[string]complex128{"FreqResponse": sweep.At(k, 0, 0), "hessenbergSweep": h[0]} {
+			if e := cmplx.Abs(v-ex) / cmplx.Abs(ex); e > 1e-10 {
+				t.Errorf("%s at w=%.17g off exact by %.3g", name, w, e)
+			}
+		}
+	}
+}
+
+// CKTRTW (#23): on amd64 the sweep was 2.6e-4 and 8.3e-5 relative off on
+// this transposed graded companion (unit superdiagonal, last row −den
+// reversed, B = e₁₄) where EvalFr is 4e-16 and the perturbation condition
+// is 4: the last correction reached the output through ĈQ, whose reduction
+// error swamps what this graded Ĉ cancels.
+func TestHessenbergSweepTransposedCompanionMatchesExact(t *testing.T) {
+	const n = 14
+	last := []float64{-7.073762343067559e25, -1.558731796419265e26, -1.3175471662496587e26, -8.677710890794021e25, -2.645822728268286e25, -5.414438168429777e24, -7.512558301352139e23, -6.406381165983646e21, -3.0820683117072744e19, -5.839490363739341e16, -5.7657809436672e13, -3.750166528e10, -1.7804908e7, -5655.60498046875}
+	a := make([]float64, n*n)
+	for i := range n - 1 {
+		a[i*n+i+1] = 1
+	}
+	copy(a[(n-1)*n:], last)
+	b := make([]float64, n)
+	b[n-1] = 1
+	c := []float64{0, -15, 4, 3, 0, 0, 0, 1, 0.9375, 11, 0, -0.5, 3.25, -13}
+	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := []float64{0.030679185069885945, 0.009773307733924387}
+	for k := 2; k < 40; k++ {
+		ws = append(ws, 1e-3*float64(k))
+	}
+	sweep, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := newHessenbergSweep(sys, n, 1, 1)
+	h := make([]complex128, 1)
+	for k, w := range ws {
+		ex := frExactResponse(sys, frBigC(complex(0, w)))[0]
+		if err := hs.evalInto(pointAt(complex(0, w)), h); err != nil {
+			t.Fatal(err)
+		}
+		for name, v := range map[string]complex128{"FreqResponse": sweep.At(k, 0, 0), "hessenbergSweep": h[0]} {
+			if e := cmplx.Abs(v-ex) / cmplx.Abs(ex); e > 1e-12 {
+				t.Errorf("%s at w=%.17g off exact by %.3g", name, w, e)
+			}
 		}
 	}
 }
@@ -755,4 +839,107 @@ func TestEvalFrStalledRefineSweep(t *testing.T) {
 	if stalls == 0 {
 		t.Error("no stalled point in the sweep")
 	}
+}
+
+// stalledCompanionCase draws a graded companion as the CKTRTW probes did:
+// rand.NewPCG(seed, 25), n = 6..26, B a unit vector, dense C, and shape
+// drawn last unless shape >= 0 overrides it.
+func stalledCompanionCase(t *testing.T, seed uint64, shape int) *System {
+	t.Helper()
+	r := rand.New(rand.NewPCG(seed, 25))
+	n := 6 + r.IntN(21)
+	den := ratPolyFromRoots(stalledSweepRoots(r, n))
+	b, c := make([]float64, n), make([]float64, n)
+	b[r.IntN(n)] = 1
+	for k := range n {
+		if r.IntN(3) > 0 {
+			c[k] = float64(r.IntN(33)-16) / 8
+		}
+	}
+	if s := r.IntN(4); shape < 0 {
+		shape = s
+	}
+	a, bt, ct := companionShape(den, b, c, shape)
+	sys, err := NewFromSlices(n, 1, 1, a, bt, ct, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func stalledGrid(extra ...float64) []float64 {
+	ws := append([]float64(nil), extra...)
+	for i := range 60 {
+		ws = append(ws, math.Pow(10, -5+8*float64(i)/59))
+	}
+	return ws
+}
+
+func assertExactResponse(t *testing.T, label string, sys *System, ws []float64, tol float64) {
+	t.Helper()
+	fr, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	for k, w := range ws {
+		s := complex(0, w)
+		ex := frExactResponse(sys, frBigC(s))[0]
+		dd := make([]complex128, 1)
+		if !ddResponseInto(sys, pointAt(s), dd) || cmplx.Abs(dd[0]-ex) > 1e-13*cmplx.Abs(ex) {
+			t.Fatalf("%s w=%g: oracles disagree: dd %v, exact %v", label, w, dd[0], ex)
+		}
+		ev, err := sys.EvalFr(s)
+		if err != nil {
+			t.Fatalf("%s w=%g: EvalFr: %v", label, w, err)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"FreqResponse", fr.At(k, 0, 0)}, {"EvalFr", ev[0][0]}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > tol {
+				t.Errorf("%s %s at w=%g: %v off exact %v by %.3g", label, got.name, w, got.v, ex, e)
+			}
+		}
+	}
+}
+
+// CKTRTW: where the Hessenberg sweep stalls and the dense retry's pivots
+// call a well-conditioned graded companion singular (scale ~7e62), the
+// sweep kept its unconverged value, 12.6 relative off at ω = 1.02e-5 (case
+// 729) while EvalFr was exact. The sweep must take the double-double
+// response there.
+func TestFreqResponseSweepDenseRetrySingular(t *testing.T) {
+	sys := stalledCompanionCase(t, 1506, -1)
+	ws := stalledGrid(1.024780675602502e-5)
+	if _, ok := newFrequencyEvaluator(sys).pointSolver(len(ws)).(*hessenbergSweep); !ok {
+		t.Fatalf("%d-point grid not on the Hessenberg sweep", len(ws))
+	}
+	assertExactResponse(t, "seed 1506", sys, ws, 1e-12)
+}
+
+// CKTRTW (LEAZRP residual): balancedDense.refine accepted a step whose
+// output correction passed only at refineStop, leaving 6e-10 relative error
+// on well-conditioned tf2ss-shaped graded companions (cases 539, 795); the
+// output correction must pass at refineCondition·ε or mark a stall.
+func TestEvalFrRefineOutputTolerance(t *testing.T) {
+	for _, c := range []struct {
+		seed uint64
+		ws   []float64
+	}{
+		{1316, []float64{2.8479984625635305e-4, 1.4839497278460016e-2, 0.19271363044622533}},
+		{1572, []float64{2.5514065200312875e-5, 1.3280930072008135e-3}},
+	} {
+		sys := stalledCompanionCase(t, c.seed, 3)
+		assertExactResponse(t, fmt.Sprintf("seed %d", c.seed), sys, c.ws, 1e-12)
+	}
+}
+
+// CKTRTW: on a graded tf2ss companion (seed 3565) C = e₁ reads x₀ ~1e-12
+// against states ~5e12, so refine's back substitution resolves the output
+// correction only to ~14% of x₀. Under amd64 its first correction rounded
+// to exactly zero there and refine accepted (-1.5+0i), 1.3e-4 relative off
+// with the imaginary part lost; the substitution noise must mark a stall.
+func TestEvalFrRefineStagnation(t *testing.T) {
+	sys := stalledCompanionCase(t, 3565, -1)
+	assertExactResponse(t, "seed 3565", sys, []float64{0.0458159766905449}, 1e-12)
 }

@@ -272,16 +272,26 @@ func deflatedSchur(a, e, qd, zd *mat.Dense, nf int, selct func(ar, ai, b float64
 // An ambiguous rank, or a near rank-deficient row block of A
 // (a nearly singular pencil), sets ok false.
 func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, ok bool) {
-	a, e, q, z, nf, stiff, leak, blur, egap, _, ok = deflateStaircase(A, E, wantQZ, -1, 0)
+	a, e, q, z, nf, stiff, leak, blur, egap, _, ok = deflateStaircase(A, E, wantQZ, false, -1, 0)
 	return a, e, q, z, nf, stiff, leak, blur, egap, ok
 }
 
-// deflateStaircase is deflateInfinite. With probe ≥ 0 it stops at that
-// level (0 the full E) and returns only the cnt eigenvalues of its leading
-// k×k pencil nearest ∞ (nearInfiniteEigs) with k, nil when the staircase
-// ends first; zeros deflatedRank takes on the way are not checked by
-// leakedZeros.
-func deflateStaircase(A, E *mat.Dense, wantQZ bool, probe, cnt int) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, probeEig []complex128, ok bool) {
+// deflateStiffChain is deflateInfinite for a pencil of index ≥ 2
+// (pencilIndexOne) whose E has stiff singular values: those are finite, as
+// in MATLAB's rank (D62TAA), and the staircase goes on past the null space
+// of E, deciding the ranks of the deflated E blocks by stiffChainRank. It
+// fails (ok false) when E is not stiff or the index is 1.
+func deflateStiffChain(A, E *mat.Dense) (a, e, q, z *mat.Dense, nf int, leak, blur, egap float64, ok bool) {
+	a, e, q, z, nf, _, leak, blur, egap, _, ok = deflateStaircase(A, E, true, true, -1, 0)
+	return a, e, q, z, nf, leak, blur, egap, ok
+}
+
+// deflateStaircase is deflateInfinite, or deflateStiffChain with
+// stiffChain. With probe ≥ 0 it stops at that level (0 the full E) and
+// returns only the cnt eigenvalues of its leading k×k pencil nearest ∞
+// (nearInfiniteEigs) with k, nil when the staircase ends first; zeros
+// deflatedRank takes on the way are not checked by leakedZeros.
+func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, probeEig []complex128, ok bool) {
 	n, _ := A.Dims()
 	if n == 0 {
 		return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
@@ -324,6 +334,7 @@ func deflateStaircase(A, E *mat.Dense, wantQZ bool, probe, cnt int) (a, e, q, z 
 	scaleE := mat.Norm(E, 2)
 	leak, blur, egap = 1.0, 1.0, 1.0
 	chains := -1
+	stiffPoles := 0
 	k := n
 	for level := 0; k > 0 && !stiff; level++ {
 		if clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*ratio*scaleE) {
@@ -341,9 +352,23 @@ func deflateStaircase(A, E *mat.Dense, wantQZ bool, probe, cnt int) (a, e, q, z 
 			return nil, nil, nil, nil, k, false, 0, 0, 0, eig, eok
 		}
 		r, st, ok := descriptorRank(sv[:k], scaleE, n, k == n)
-		if !ok && k < n {
-			r, ok = deflatedRank(sv[:k], 1e3*float64(n)*eps()*scaleE, leak)
-			if ok && r < k {
+		switch {
+		case stiffChain && k == n:
+			if _, index1 := pencilIndexOne(A, E, n, normA); !st || index1 {
+				return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
+			}
+			st = false
+			for _, s := range sv[:r] {
+				if s <= qzInfiniteGap*1e3*float64(n)*eps()*scaleE {
+					stiffPoles++
+				}
+			}
+		case stiffChain:
+			r, ok = stiffChainRank(sv[:k], 1e3*float64(n)*eps()*scaleE, stiffPoles)
+		}
+		if !ok && k < n && !stiffChain {
+			tol := 1e3 * float64(n) * eps() * scaleE
+			if r, ok = deflatedRank(sv[:k], tol, leak); ok && r < k {
 				if chains < 0 {
 					chains = infiniteChainCount(A, E, n, normA)
 				}
@@ -444,7 +469,7 @@ func leakedZeros(A, E *mat.Dense, ad, ed []float64, level, k, cnt int) bool {
 		return c
 	}
 	for range leakDraws {
-		_, _, _, _, kc, _, _, _, _, got, ok := deflateStaircase(jitter(A), jitter(E), false, level, cnt)
+		_, _, _, _, kc, _, _, _, _, got, ok := deflateStaircase(jitter(A), jitter(E), false, false, level, cnt)
 		if !ok || kc != k || got == nil {
 			return true
 		}
@@ -509,6 +534,27 @@ func deflatedRank(sv []float64, tol, leak float64) (rank int, ok bool) {
 		case s > qzInfiniteGap*tol:
 		case s <= leak*tol:
 			return j, true
+		default:
+			return 0, false
+		}
+	}
+	return len(sv), true
+}
+
+// stiffChainRank is descriptorRank of a deflated E block of
+// deflateStiffChain, tol = 1e3·n·ε·σ₁(E): the stiff singular values of the
+// full E, stiff of them, are finite as in MATLAB's rank (D62TAA) and stay
+// in each deflated E block, so up to stiff values in (tol,
+// qzInfiniteGap·tol] are nonzero; more there are ambiguous (ok false). A
+// value at most tol is zero.
+func stiffChainRank(sv []float64, tol float64, stiff int) (rank int, ok bool) {
+	for j, s := range sv {
+		switch {
+		case s > qzInfiniteGap*tol:
+		case s <= tol:
+			return j, true
+		case stiff > 0:
+			stiff--
 		default:
 			return 0, false
 		}

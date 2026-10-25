@@ -187,6 +187,10 @@ type pidTuningPlant struct {
 	// resonances marks, along which the crossings are read
 	// (pidTuningArcCrossingsOf).
 	crossArcs [][]pidTuningFRDMode
+	// unresolved marks, by step as resonances, the steps of the strict
+	// plant's data that may hide a resonance, each with its fits, non-nil
+	// where marked (pidTuningFRDUnresolved).
+	unresolved [][]pidTuningFRDMode
 	// arcSearch scans every candidate's crossings along crossArcs too
 	// (pidTuningFRDArcCrossings); without it only the returned design's
 	// are, and one failing them is searched for again with it, so a design

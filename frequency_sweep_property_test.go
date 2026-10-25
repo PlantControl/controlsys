@@ -797,11 +797,12 @@ func (d *dot2) addProd(a, b float64) {
 
 func (d *dot2) value() float64 { return d.hi + d.lo }
 
-// One refinement step suffices on every model above; forcing the remaining
-// steps keeps that branch exercised and must not lose accuracy.
+// One refinement step suffices on every model above; rejecting the first
+// step forces the exact-residual steps, which keeps that branch exercised
+// and must not lose accuracy.
 func TestHessenbergSweepExtraRefinementSteps(t *testing.T) {
-	defer func(v float64) { refineStop = v }(refineStop)
-	refineStop = 0
+	defer func(v float64) { sweepFirstStepTol = v }(sweepFirstStepTol)
+	sweepFirstStepTol = 0
 	sys, omega := loadSeriesHinf(t)
 	n, m, p := sys.Dims()
 	if e, w := kernelErr(t, sys, sys, newHessenbergSweep(sys, n, m, p), omega, 1); e > 1e-12 {

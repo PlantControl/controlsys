@@ -71,8 +71,12 @@ func (r *RootLocusResult) AsymptoteCentroid() (centroid float64, ok bool) {
 // real roots of N'D − ND' with K = −D/N ≥ 0, where K = 0 is a multiple pole
 // and K = ∞ a multiple zero (break-in). They are computed exactly for the
 // state-space data as given: A, B, C, D are exact binary rationals, so N
-// and D (with the numerator trimmed to the relative degree above, common
-// factors cancelled) are exact integer polynomials, and the roots of
+// and D (common factors cancelled) are exact integer polynomials, the
+// numerator of C(sI−A)⁻¹B trimmed to the relative degree of the first
+// Markov parameter the rule above resolves, decided on the exact hₖ so
+// that no platform rounding enters, and kept whole when none is resolved
+// (the data cannot then tell a rounding-level coefficient from an exact
+// one, so a noise zero adds its far break point); and the roots of
 // N'D − ND', their multiplicity and the sign of K are decided in exact
 // arithmetic, then rounded to float64. No multiplicity is inferred: a
 // realization whose rounding split a multiple pole or zero (a rotated or
@@ -208,12 +212,13 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 		}
 		if r := n - len(zeros); r >= 1 && r != lp.relDeg {
 			// Zeros() fixes the asymptote count; the angles, the 0° rule and
-			// the numerator trim follow the Markov parameter of that degree.
+			// the eig path's numerator trim follow the Markov parameter of
+			// that degree.
 			lp.relDeg, lp.negGain = r, lp.markovSign(r)
 			lp.spRelDeg = r
 		}
 	}
-	breakaway, ok := lp.exactBreakaway(sys, undelayed, delay)
+	breakaway, ok := systemExactBreakaway(sys, undelayed, delay)
 	if !ok {
 		breakaway, err = computeBreakaway(sys, undelayed, delay, &lp, poles, zeros)
 		if err != nil {
@@ -677,7 +682,8 @@ func (lp *rlocusLoop) markovSign(r int) bool {
 // level of the earlier ones or far below the later resolved ones (ρ 1.7
 // beside 9e10). Where no ρ reaches that (exact h₂…h₆ at 0.1…1.5 of a
 // realization with sens 1e17…1e25), none is resolved and RootLocus takes
-// the relative degree from the zero count.
+// the relative degree of the asymptotes and of the eig path from the zero
+// count (the exact break-point path, xpMarkovKeep, keeps the numerator).
 func (lp *rlocusLoop) markovResolved() (h []float64, ok []bool) {
 	var rho []float64
 	lp.markov(func(k int, hk, sens float64) bool {

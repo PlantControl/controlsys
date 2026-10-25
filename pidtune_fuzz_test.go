@@ -14,6 +14,7 @@ import (
 	"math"
 	"math/big"
 	"math/cmplx"
+	"slices"
 	"strings"
 	"testing"
 
@@ -804,7 +805,18 @@ func fzPidCheckFRD(t *testing.T, s *fzSpec, sys *System, family PidtuneType, wc,
 		t.Fatalf("%s: bad controller %+v", name, res.Controller)
 	}
 	g := fzPidInterp(frd)
-	fzPidCheckEvidence(t, name, pl, g, g, frd.Omega, "", c, res.Evidence)
+	ev := res.Evidence
+	if p, certify := pidTuningFRDStrictPlant(frd, nil); certify {
+		// Crossings read along the data's resonance fits are not the chord's.
+		fit, _ := pidTuningFRDFitCrossings(p, *res.Controller)
+		ev.GainCrossovers, ev.PhaseMargins = nil, nil
+		for i, w := range res.Evidence.GainCrossovers {
+			if !slices.ContainsFunc(fit, func(x float64) bool { return math.Abs(math.Log(w/x)) <= 1e-6 }) {
+				ev.GainCrossovers, ev.PhaseMargins = append(ev.GainCrossovers, w), append(ev.PhaseMargins, res.Evidence.PhaseMargins[i])
+			}
+		}
+	}
+	fzPidCheckEvidence(t, name, pl, g, g, frd.Omega, "", c, ev)
 	for i, m := range res.Evidence.PhaseMargins {
 		if res.Evidence.AchievedPhaseMargin > m+1e-9 {
 			t.Fatalf("%s: achieved margin %.9g above %.9g at crossing %g", name, res.Evidence.AchievedPhaseMargin, m, res.Evidence.GainCrossovers[i])
