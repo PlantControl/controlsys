@@ -725,24 +725,26 @@ func TestDescriptorNonNormalChainImproper(t *testing.T) {
 	}
 }
 
-// TestDescriptorChainBesideSmallEPole: proper index-2/3 chains beside a
-// finite pole whose E singular value is 1e-2..1e-4 relative (far above the
-// rank floor). That pole turns the computed infinite subspace by ε·egap,
-// σ₁(E)/σ_r, leaving c·N·b up to 5× the A-side cut, so IsProper said false
-// and Step/TF ErrImproperModel or an improper ratio whose s-term diverged
-// from the response (XSDPXI, on base: [3] 1e-3 111/200; [3] 1e-2, [2]
-// 1e-4 and [2 1] 1e-4 together 23/600, ≤ 6 now on arm64 and amd64).
-// Oracle: the structured model's pencil response. The cut is widened by
-// egap only when the reduction matches the direct (sE − A) solve at the
-// data scale; reductions too inaccurate for that stay improper as before.
+// TestDescriptorChainBesideSmallEPole: proper index-2..5 chains beside a
+// finite pole λ whose E singular value is 1e-2..1e-4 relative (far above
+// the rank floor). Its deflating subspace is sensitive to ε/sep, sep ~
+// |λ|^(−k) beside an index-k chain, so the computed split moves part ΔR of
+// its residue into the nilpotent block: c·N^k·b = ΔR/λ^(k+1) (seed 10, [3]
+// 1e-3: 1.80e-8 and 6.80e-12, ratio 1/λ to 4 digits), and the reduction
+// with those terms dropped is off by ΔR·s/(λ(s − λ)), 4.7e-5 at ∞, while
+// the direct (sE − A) solve at 100i is within 6e-11 of the oracle. So
+// IsProper said false and Step/TF ErrImproperModel (XSDPXI; base eb8d9e1:
+// [3] 1e-3 74/200, [3] 1e-4 168/200, [4] 1e-3 175/200, [5] 1e-3 192/200,
+// [3 2] 1e-3 40/200), and dropped terms left D off by up to 4.7e-5.
+// absorbStiffLeak returns ΔR to λ; the check at 1e6i catches a D error.
+// Oracle: the structured model's pencil response.
 func TestDescriptorChainBesideSmallEPole(t *testing.T) {
 	skipSlowUnderRace(t)
-	falseMild := 0
 	for _, tc := range []struct {
 		chains []int
 		sr     float64
-		mild   bool
-	}{{[]int{3}, 1e-2, true}, {[]int{2}, 1e-4, true}, {[]int{2, 1}, 1e-4, true}, {[]int{3}, 1e-3, false}} {
+	}{{[]int{3}, 1e-2}, {[]int{2}, 1e-4}, {[]int{2, 1}, 1e-4}, {[]int{3}, 1e-3}, {[]int{3}, 1e-4},
+		{[]int{4}, 1e-3}, {[]int{5}, 1e-3}, {[]int{3, 2}, 1e-3}} {
 		false_ := 0
 		for seed := range uint64(200) {
 			rng := rand.New(rand.NewPCG(seed, 77))
@@ -766,7 +768,7 @@ func TestDescriptorChainBesideSmallEPole(t *testing.T) {
 			if _, err := Step(sys, 1); err != nil {
 				t.Fatalf("%v %g seed %d: Step: %v", tc.chains, tc.sr, seed, err)
 			}
-			for _, s := range []complex128{0.37i, complex(0.5, 3), 1e3i} {
+			for _, s := range []complex128{0.37i, complex(0.5, 3), 1e3i, 1e6i} {
 				g, err := res.TF.Eval(s)
 				if err != nil {
 					t.Fatal(err)
@@ -777,10 +779,8 @@ func TestDescriptorChainBesideSmallEPole(t *testing.T) {
 				}
 			}
 		}
-		if tc.mild {
-			falseMild += false_
-		} else if false_ > 90 {
-			t.Errorf("%v %g: %d/200 proper chains IsProper false, want ≤ 90", tc.chains, tc.sr, false_)
+		if false_ > 2 {
+			t.Errorf("%v %g: %d/200 proper chains IsProper false, want ≤ 2", tc.chains, tc.sr, false_)
 		}
 		for seed := range uint64(50) {
 			rng := rand.New(rand.NewPCG(seed, 78))
@@ -794,8 +794,61 @@ func TestDescriptorChainBesideSmallEPole(t *testing.T) {
 			}
 		}
 	}
-	if falseMild > 10 {
-		t.Errorf("%d/600 mild proper chains IsProper false, want ≤ 10", falseMild)
+}
+
+// TestDescriptorChainBesideSmallEPoleConditioned: XSDPXI under cond(U),
+// cond(V) 1e1..1e3 (condChainDescriptor), [4] and [5] beside a pole of E
+// singular value 1e-2..1e-4 relative. Base eb8d9e1 read 253/300 and
+// 283/300 of the proper ones improper. A returned TF must match the
+// structured oracle to 1e-5 up to 1e7i. Improper ones must stay improper
+// but for 1 ([4]) and 2 ([5]) that return ErrDescriptorSingular on base.
+func TestDescriptorChainBesideSmallEPoleConditioned(t *testing.T) {
+	skipSlowUnderRace(t)
+	for _, tc := range []struct {
+		chains         []int
+		maxFalse       int
+		maxFalseProper int
+	}{{[]int{4}, 10, 1}, {[]int{5}, 30, 2}} {
+		false_, falseProper := 0, 0
+		for seed := range uint64(300) {
+			for _, proper := range []bool{true, false} {
+				rng := rand.New(rand.NewPCG(seed, 911))
+				nf := 1 + rng.IntN(3)
+				sr := math.Pow(10, -2-2*rng.Float64())
+				sys, oracle, _ := condChainDescriptor(t, rng, nf, tc.chains, sr, proper, 1+2*rng.Float64())
+				pr, err := sys.IsProper()
+				if !proper {
+					if err != nil || pr {
+						falseProper++
+					}
+					continue
+				}
+				if err != nil || !pr {
+					false_++
+					continue
+				}
+				res, err := sys.TransferFunction(nil)
+				if err != nil {
+					t.Fatalf("%v seed %d: TransferFunction: %v", tc.chains, seed, err)
+				}
+				for _, s := range []complex128{0.37i, complex(0.5, 3), 1e2i, 1e7i} {
+					g, err := res.TF.Eval(s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					w := pencilResponse(t, oracle, s)[0][0]
+					if d := cmplx.Abs(g[0][0] - w); !(d <= 1e-5*math.Max(1, cmplx.Abs(w))) {
+						t.Fatalf("%v seed %d: G(%v) = %v, want %v", tc.chains, seed, s, g[0][0], w)
+					}
+				}
+			}
+		}
+		if false_ > tc.maxFalse {
+			t.Errorf("%v: %d/300 proper chains IsProper false, want ≤ %d", tc.chains, false_, tc.maxFalse)
+		}
+		if falseProper > tc.maxFalseProper {
+			t.Errorf("%v: %d/300 improper chains IsProper true or failed, want ≤ %d", tc.chains, falseProper, tc.maxFalseProper)
+		}
 	}
 }
 
