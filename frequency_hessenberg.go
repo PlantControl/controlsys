@@ -377,7 +377,10 @@ func (bd *balancedDense) refine() {
 		if dMax <= refineStop*xMax {
 			// An entry at the resolution floor reads states far below the
 			// largest, where the normwise contraction does not bound its
-			// error (CKTRTW: 6e-10 relative left); others take refineStop.
+			// error (CKTRTW: 6e-10 relative left); others take refineStop
+			// unless the correction's own substitution noise exceeds
+			// refineCondition·ε of an entry: refinement then stagnates at
+			// that noise instead of contracting (2QC7PE: 5.5e-11 left).
 			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineCondition*eps()); floored {
 				if !exact || bd.correctionNoise(r, refineCondition*eps()) {
 					bd.stallErr(r)
@@ -385,7 +388,7 @@ func (bd *balancedDense) refine() {
 				return
 			}
 			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineStop); floored {
-				if !exact || bd.correctionNoise(r, refineStop) {
+				if !exact || bd.correctionNoise(r, refineCondition*eps()) {
 					bd.stallErr(r)
 				}
 				return

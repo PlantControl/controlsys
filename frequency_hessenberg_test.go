@@ -963,3 +963,12 @@ func TestEvalFrSubstitutionErrorGate(t *testing.T) {
 		assertExactResponse(t, fmt.Sprintf("seed %d", c.seed), sys, []float64{c.w}, 1e-12)
 	}
 }
+
+// 2QC7PE: on a graded tf2ss companion (seed 3565) C reads x₀ ~2e-3 against
+// states ~7e15; refine's corrections to x₀ stagnate near 4e-11 relative at
+// their substitution noise, and the 2e-10 second step passed refineStop and
+// was accepted, 5.5e-11 relative off. It must stall and resolve instead.
+func TestEvalFrRefineStopNoise(t *testing.T) {
+	sys := stalledCompanionCase(t, 3565, -1)
+	assertExactResponse(t, "seed 3565", sys, []float64{9.249147277217336}, 1e-12)
+}
