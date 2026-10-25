@@ -497,6 +497,11 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // leak and egap of deflateInfinite) are real only when sTermsStable: a
 // finite pole near ∞ beside the chain, or ill-conditioned A row blocks,
 // leave rounding there that ε-perturbed coefficients change at first order.
+// Such terms that are not real, and terms above the widened level that
+// absorbStiffLeak explains with more equations than unknowns and
+// sTermsStable finds not real, are a residue the split moved from finite
+// poles near ∞: they are absorbed back before reductionMatches confirms
+// the reduction.
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	out, poly, _, err := sys.weierstrassReduceCore(false)
 	return out, poly, err
@@ -609,6 +614,9 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 
 	dRed := mat.DenseCopyOf(dAug)
 	confirm := false
+	var leakTerms []*mat.Dense
+	var leakTols []float64
+	leakOnly := false
 	if ni > 0 {
 		var lu mat.LU
 		s22 := extractBlock(S, nf, nf, ni, ni)
@@ -656,9 +664,13 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 					}
 					if poly = algebraicPolyTerms(terms, lowTols, p, m); !impulsive {
 						confirm = !normStatic && !algebraicPartStatic(terms, blurred)
+						leakTerms, leakTols = terms, blurred
 					}
 				default:
 					poly = algebraicPolyTerms(terms, blurred, p, m)
+					if q == 0 && len(terms) >= 2 {
+						leakTerms, leakTols, leakOnly = terms, blurred, true
+					}
 				}
 				if !impulsive && !confirm {
 					poly = nil
@@ -703,8 +715,17 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 		out.LFT.D21 = subDense(dRed, p, 0, q, m)
 		out.LFT.D22 = subDense(dRed, p, m, q, q)
 	}
+	if leakOnly && poly != nil {
+		if fixed, ok := absorbStiffLeak(out, leakTerms, leakTols, true); ok {
+			if stable, sok := sys.sTermsStable(leakTerms); sok && !stable && reductionMatches(sys, fixed) {
+				out, poly = fixed, nil
+			}
+		}
+	}
 	if confirm {
-		if reductionMatches(sys, out) {
+		if fixed, ok := absorbStiffLeak(out, leakTerms, leakTols, false); ok && reductionMatches(sys, fixed) {
+			out, poly = fixed, nil
+		} else if reductionMatches(sys, out) {
 			poly = nil
 		} else if poly == nil {
 			return nil, nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
@@ -746,6 +767,127 @@ func reductionMatches(sys, red *System) bool {
 		}
 	}
 	return true
+}
+
+// absorbStiffLeak returns red with the s-terms c·N^k·b (terms, k = 1..K)
+// absorbed into its finite poles of largest modulus, or false when no such
+// group explains them to tols. A finite pole λ near ∞ chordally (small in
+// E) has a deflating subspace that ε-perturbations turn by ε/sep, sep ~
+// |λ|^(−k) beside an index-k chain: the computed split moves part of its
+// residue ΔR into the nilpotent block, which then carries the Taylor terms
+// of ΔR·s/(λ(s − λ)), c·N^k·b = ΔR/λ^(k+1), and the reduction misses
+// ΔR·s/(λ(s − λ)) (a D error ΔR/λ). With A = X·Λ·Xᵀ restricted to the
+// group (real Schur, X orthonormal), ΔB = X·β solves
+// C·X·Λ^(−(k+1))·β = c·N^k·b in least squares and ΔD = C·X·Λ⁻¹·β.
+// Groups grow from the largest |λ|; trailing terms within tols (past the
+// nilpotency index) are not fitted. With strict, a group must leave more
+// equations than unknowns (K·p > its size), so a fit that is always exact
+// cannot pass for a real s-term. Only the B side is corrected: a leak the
+// C side carries (p, m > 1) does not fit and is left to the callers.
+func absorbStiffLeak(red *System, terms []*mat.Dense, tols []float64, strict bool) (*System, bool) {
+	n, m, p := red.Dims()
+	if n == 0 || m == 0 || p == 0 || len(terms) == 0 {
+		return nil, false
+	}
+	t := make([]float64, n*n)
+	copyStrided(t, n, red.A.RawMatrix().Data, red.A.RawMatrix().Stride, n, n)
+	z := make([]float64, n*n)
+	wr, wi := make([]float64, n), make([]float64, n)
+	bwork := make([]bool, n)
+	var query [1]float64
+	impl.Dgees(lapack.SchurHess, lapack.SortNone, nil, n, t, n, wr, wi, z, n, query[:], -1, bwork)
+	work := make([]float64, int(query[0]))
+	if _, ok := impl.Dgees(lapack.SchurHess, lapack.SortNone, nil, n, t, n, wr, wi, z, n, work, len(work), bwork); !ok {
+		return nil, false
+	}
+	var mods []float64
+	for i := 0; i < n; i += schurBlockSize(t, n, i) {
+		mods = append(mods, cmplx.Abs(schurBlockEigenvalue(t, n, i)))
+	}
+	slices.Sort(mods)
+	slices.Reverse(mods)
+	K := 0
+	for k, term := range terms {
+		if denseNorm(term) > tols[k] {
+			K = k + 1
+		}
+	}
+	if K == 0 {
+		return nil, false
+	}
+	terms, tols = terms[:K], tols[:K]
+	for g, j := 0, 0; g < n && j < len(mods); j++ {
+		cut := mods[j] * (1 - 1e-8)
+		ts, zs := slices.Clone(t), slices.Clone(z)
+		ns, err := orderSchurGroupFirst(ts, zs, n, func(v complex128) bool { return cmplx.Abs(v) >= cut })
+		if err != nil || ns <= g {
+			continue
+		}
+		g = ns
+		if strict && K*p <= ns {
+			return nil, false
+		}
+		lam := mat.NewDense(ns, ns, nil)
+		for i := range ns {
+			copy(lam.RawMatrix().Data[i*ns:(i+1)*ns], ts[i*n:i*n+ns])
+		}
+		x := mat.NewDense(n, ns, nil)
+		for i := range n {
+			copy(x.RawMatrix().Data[i*ns:(i+1)*ns], zs[i*n:i*n+ns])
+		}
+		var lu mat.LU
+		lu.Factorize(lam)
+		if luNearSingular(&lu) {
+			return nil, false
+		}
+		w := make([]*mat.Dense, K+1)
+		var cx mat.Dense
+		cx.Mul(red.C, x)
+		prev := &cx
+		for k := range K + 1 {
+			w[k] = new(mat.Dense)
+			if err := lu.SolveTo(w[k], true, prev.T()); err != nil {
+				return nil, false
+			}
+			w[k] = mat.DenseCopyOf(w[k].T())
+			prev = w[k]
+		}
+		M := mat.NewDense(K*p, ns, nil)
+		rhs := mat.NewDense(K*p, m, nil)
+		for k := range K {
+			setBlock(M, k*p, 0, w[k+1])
+			setBlock(rhs, k*p, 0, extractBlock(terms[k], 0, 0, p, m))
+		}
+		var svd mat.SVD
+		if !svd.Factorize(M, mat.SVDThin) {
+			return nil, false
+		}
+		var beta mat.Dense
+		rank := svd.Rank(float64(max(K*p, ns)) * eps())
+		if rank == 0 {
+			continue
+		}
+		svd.SolveTo(&beta, rhs, rank)
+		var fit mat.Dense
+		rest := make([]*mat.Dense, K)
+		for k := range K {
+			fit.Mul(w[k+1], &beta)
+			rest[k] = mat.DenseCopyOf(extractBlock(terms[k], 0, 0, p, m))
+			rest[k].Sub(rest[k], &fit)
+			fit.Reset()
+		}
+		if !algebraicPartStatic(rest, tols) {
+			continue
+		}
+		out := red.Copy()
+		var db, dd mat.Dense
+		db.Mul(x, &beta)
+		out.B.Add(out.B, &db)
+		dd.Mul(w[0], &beta)
+		out.D.Add(out.D, &dd)
+		return out, true
+	}
+	return nil, false
 }
 
 // sTermsStable reports whether the terms c·N^k·b of sys (no internal
