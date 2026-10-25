@@ -1410,3 +1410,51 @@ func TestPoleLimitOffOriginClusterDelayedMargin(t *testing.T) {
 		t.Errorf("Margin = %+v; want GM %v, PM %v", m, gm, pm)
 	}
 }
+
+// Below the poles of a graded tf2ss companion evalInto rejects the pencil
+// and EvalFr falls back to double-double, whose GEPP error is normwise: C
+// reads states ~1e-26 below the largest, and the response was off by 4e-5
+// although den and num determine it to a few ε. sampleCheck's fallback took
+// the same reference, so its sens bound (1e-12) passed an inaccurate one.
+func TestDDResponseGradedCompanionBelowPoles(t *testing.T) {
+	r := []float64{16905.013671875, 1.78700112e8, 1.412303945728e12, 5.73293845282816e15, 8.202446903162438e18, 1.1234761258181685e21, 7.89768974838222e22, 3.831923123226859e24, 1.3522918854136517e26, 3.5649295104614593e27, 7.048867248144328e28, 1.004527442241923e30, 9.856841270536082e30, 5.737659621097255e31, 1.5296372047391124e32, 1.4428735658060262e32}
+	n := len(r)
+	a := make([]float64, n*n)
+	for j, v := range r {
+		a[j] = -v
+	}
+	for i := 1; i < n; i++ {
+		a[i*n+i-1] = 1
+	}
+	b := []float64{-4, -0.0625, 3, 6, 2, 0, 0, 1, 0, -2, -0.5, 0, -15, 0.6875, 3.25, 0}
+	c := []float64{-15, 0, -6.5, -3.5, 1.75, 0.625, 0, 8, 3.5, -1.5, 3.75, -8, 4, -1.75, 1, -10}
+	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bd := newBalancedDense(sys, n, 1, 1)
+	for _, w := range []float64{2.695376166683779e-4, 1.2532459490772836e-3} {
+		s := complex(0, w)
+		ex := frExactResponse(sys, frBigC(s))[0]
+		g, err := sys.EvalFr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dd := make([]complex128, 1)
+		if !ddResponseInto(sys, pointAt(s), dd) {
+			t.Fatalf("w=%g: double-double solve failed", w)
+		}
+		ck := sampleBandCheck(sys, bd, []complex128{s}, true)
+		if len(ck.ref) != 1 {
+			t.Fatalf("w=%g: band check dropped the point", w)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"EvalFr", g[0][0]}, {"ddResponseInto", dd[0]}, {"sampleBandCheck", ck.ref[0][0]}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > 1e-12 {
+				t.Errorf("%s at w=%g: off exact by %.3g", got.name, w, e)
+			}
+		}
+	}
+}

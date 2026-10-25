@@ -147,25 +147,8 @@ func rlsdGenerate() []rlswCase {
 	return cases
 }
 
-// rlsdPrecisionLimits: see rlswPrecisionLimits. Every exact double pole is
-// 1-ulp sensitive; these are listed because eig cannot order the three
-// cluster poles (each u-merged with the others, the pair mean no better
-// conditioned than its gap) and the converted D confirms no double, so base
-// got them only by its absolute 1e-4 merge radius, which is scale-blind:
-// the pinned base 512 near triple has the same coefficient-level signature
-// (p(c) below u·Σ|pᵢ||c|ⁱ at the p' root) and no break point.
-var rlsdPrecisionLimits = map[int]string{
-	128:  "similar-bidiag double -1.25 + simple 2^-12 apart: eig -1.25030, -1.250018, -1.249983 all u-merged (u·κ to 7.5e-3)",
-	135:  "companion double -6.40869e-4 + simple 2^-14 apart: eig pair ±9.5e-9i and the simple all u-merged (u·κ 2.3e-7, gaps 4.4e-8)",
-	515:  "observable+similar double -0.0292969 + simple: eig -0.028964±5.1e-4i, -0.03005, -0.03118; oInt unposed, float-TF oracle [] while the converted TF keeps the cluster",
-	706:  "amd64: observable+similar double -0.34375 + simple 2^-12 apart: eig three reals -0.343678, -0.343713, -0.343774 all u-merged",
-	728:  "observable+similar double -9.155e-5 + simple 2^-11 apart: eig resolves none of the cluster; stationary point -5.125e-5 of the float TF has unresolved sign of G",
-	1073: "similar-bidiag double -0.052734 + simple 2^-13 apart: eig pair ±4.6e-7i u-merged with the simple (u·κ 1.3e-5, gap 6.5e-6)",
-	1099: "similar-bidiag double 7.629e-5 + simple 2^-13 apart: eig pair ±1.3e-10i (8x √u·σ_b), converted D confirms no double",
-	1433: "observable double 3.8147e-4 + simple 2^-14 apart: eig pair ±6.1e-9i and the simple all u-merged (u·κ 4.7e-8, gaps 2.6e-8)",
-	1436: "observable double 1.0986e-3 + simple 2^-13 apart: eig pair ±8.2e-9i, converted D confirms no double",
-	1452: "arm64: observable+similar D=0.5 double -5.371e-3 + simple 2^-11 apart: eig -5.310e-3±1.05e-4i, -5.490e-3 (u·κ 2.4e-3); float-TF oracle drops the double",
-}
+// rlsdPrecisionLimits: see rlswPrecisionLimits.
+var rlsdPrecisionLimits = map[int]string{}
 
 // TestRootLocusSweepDblNoRegression fails when a component that base got
 // right on the third frozen sweep is now wrong (or errors).

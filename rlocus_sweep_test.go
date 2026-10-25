@@ -17,16 +17,18 @@ import (
 // and the verdict rules below are frozen: testdata/rlocus_sweep_base.json
 // holds the verdicts of base rlswBaseRev (AND of arm64 and GOARCH=amd64
 // runs) and every later revision must keep each verdict base got right.
-// Regenerate the file only with base code: RLOCUS_SWEEP_WRITE=<path>.
+// Regenerate the file only with base code: RLOCUS_SWEEP_WRITE=<path> (one
+// arch per run; AND the two ok strings nibble-wise).
 // rlocus_sweep_ext_test.go adds a second frozen set of harder families.
 //
 // Each case is a SISO loop k·Z(s)/P(s) (+D) with dyadic poles, zeros and
 // gain, realized as a companion form, a Givens-rotated companion or a
 // power-of-two-scaled companion, optionally discrete with an input delay.
-// Two exact big.Rat oracles judge the breakaway set: the intended TF and
-// the TF of the float realization; a result consistent with either one
-// that is well posed passes. Asymptotes, departure angles and the arrival
-// count are judged against the intended TF.
+// The breakaway set is judged by the exact big.Rat oracle of the float
+// realization's TF (RootLocus semantics since wave 24, J7OYOY: exact for
+// the data as given, so a rounded realization of an intended multiple root
+// has the split system's break points). Asymptotes, departure angles and
+// the arrival count are judged against the intended TF.
 
 const (
 	rlswCases = 2000
@@ -234,10 +236,32 @@ func (c *rlswCase) system() (*System, error) {
 }
 
 // rlswOracle is the exact breakaway answer of one TF N/D (D including z^L).
+// With exact set (the float-realization oracle of rlswCase.oracles), the
+// answer is exact's accepted set: every distinct real root of N'D − ND' of
+// the float realization's exact TF with K ≥ 0 (RootLocus semantics,
+// c = 0), the numerator of C(sI−A)⁻¹B cut to the intended degree. RootLocus
+// cuts it by a float Markov resolution test instead, which may keep
+// rounding-level coefficients; the exact sets of the cuts at the degrees
+// alt covers (intended+1 … n−1) are accepted too.
 type rlswOracle struct {
 	posed    bool
 	required []float64
 	scale    float64
+	exact    *rvOracle
+	alt      func(deg int) rvOracle
+	altDeg   [2]int
+}
+
+// rlswExactOracle returns the float-realization oracle of c with the
+// numerator of C(sI−A)⁻¹B cut to degree spDeg.
+func rlswExactOracle(c *rlswCase, spDeg int) rlswOracle {
+	mk := func(deg int) rvOracle { return rvBreakOracle(rvTrimmedTF(c.a, c.b, c.c, c.d, c.n, c.L, deg)) }
+	o := mk(spDeg)
+	r := rlswOracle{posed: !o.Cancel, scale: o.R, exact: &o, alt: mk, altDeg: [2]int{spDeg + 1, c.n - 1}}
+	for _, p := range o.Pts {
+		r.required = append(r.required, p.X)
+	}
+	return r
 }
 
 func rlswRatDeriv(p []*big.Rat) []*big.Rat {
@@ -443,6 +467,22 @@ func rlswDuplicate(bp []complex128) (complex128, bool) {
 
 // accepts reports whether bp is the required set, each point listed once.
 func (o rlswOracle) accepts(bp []complex128) bool {
+	if o.exact != nil {
+		if !o.posed {
+			return false
+		}
+		if ok, _, _ := o.exact.match(bp); ok {
+			return true
+		}
+		for deg := o.altDeg[0]; o.alt != nil && deg <= o.altDeg[1]; deg++ {
+			if a := o.alt(deg); !a.Cancel {
+				if ok, _, _ := a.match(bp); ok {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	if _, dup := rlswDuplicate(bp); !o.posed || dup {
 		return false
 	}
@@ -461,14 +501,17 @@ func (o rlswOracle) accepts(bp []complex128) bool {
 }
 
 // rlswVerdict returns the components res gets right, the components the
-// oracles can judge and whether Breakaway lists a point twice.
+// oracles can judge and whether Breakaway lists a point twice (one float
+// twice: distinct exact stationary points may round close). Breakaway is
+// judged by the float-realization oracle oFlt alone, the others by the
+// intended TF.
 func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, err error) {
 	sys, err := c.system()
 	if err != nil {
 		return 0, 0, false, err
 	}
 	res, rerr := RootLocus(sys, []float64{0, 1})
-	if oInt.posed || oFlt.posed {
+	if oFlt.posed {
 		posed |= rlswBreak
 	}
 	lead := c.num[len(c.num)-len(fzTrimRat(c.num))]
@@ -502,8 +545,10 @@ func rlswVerdict(c *rlswCase, oInt, oFlt rlswOracle) (ok, posed int, dup bool, e
 	if rerr != nil {
 		return 0, posed, false, nil
 	}
-	_, dup = rlswDuplicate(res.Breakaway)
-	if oInt.accepts(res.Breakaway) || oFlt.accepts(res.Breakaway) {
+	for i, x := range res.Breakaway {
+		dup = dup || slices.Contains(res.Breakaway[i+1:], x)
+	}
+	if oFlt.accepts(res.Breakaway) {
 		ok |= rlswBreak
 	}
 	asymOK := len(res.AsymptoteAngles) == max(relDeg, 0)
@@ -583,31 +628,20 @@ func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
 		return out
 	}
 	oInt = newRlswOracle(c.num, lag(c.den))
-	den := fzCharPolyExact(c.a, c.n)
-	abc := make([]*big.Rat, c.n*c.n)
-	for i := range c.n {
-		for j := range c.n {
-			x := fzRat(c.a[i*c.n+j])
-			abc[i*c.n+j] = x.Sub(x, new(big.Rat).Mul(fzRat(c.b[i]), fzRat(c.c[j])))
-		}
+	spDeg := c.n
+	if c.num != nil {
+		spDeg = len(rlswRatSub(c.num, fzRatPolyMul([]*big.Rat{fzRat(c.d)}, c.den))) - 1
 	}
-	cp := fzCharPolyRat(abc, c.n)
-	num := make([]*big.Rat, c.n+1)
-	for i := range num {
-		num[i] = new(big.Rat).Sub(cp[i], den[i])
-		num[i].Add(num[i], new(big.Rat).Mul(fzRat(c.d), den[i]))
-	}
-	oFlt = newRlswOracle(num, lag(den))
+	oFlt = rlswExactOracle(c, spDeg)
 	return oInt, oFlt
 }
 
-const rlswBaseRev = "23be053+tfcap"
+const rlswBaseRev = "eb8d9e1"
 
 type rlswGolden struct {
 	Base  string `json:"base"`
 	OK    string `json:"ok"`
 	Posed string `json:"posed"`
-	Dup   []int  `json:"dup,omitempty"`
 }
 
 func rlswRun(t *testing.T, cases []rlswCase) (ok, posed, dups []int) {
@@ -672,11 +706,7 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 		p := *c
 		p.a, p.b, p.c = ulp(c.a), ulp(c.b), ulp(c.c)
 		_, op := p.oracles()
-		req := make([]complex128, len(op.required))
-		for i, x := range op.required {
-			req[i] = complex(x, 0)
-		}
-		if !op.posed || !of.posed || !of.accepts(req) {
+		if !op.posed || !of.posed || !rvSamePts(*of.exact, *op.exact, math.Inf(1)) || !rvSamePts(*op.exact, *of.exact, math.Inf(1)) {
 			return true
 		}
 	}
@@ -687,13 +717,12 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 // file golden) is now wrong or errors; env names the regenerate variable.
 // A Breakaway verdict listed in limits is reported, not enforced, when
 // rlswUlpSensitive confirms it is a float64 precision limit. It also fails
-// when a case's Breakaway lists a point twice where base (golden dup) did
-// not.
+// when any case's Breakaway lists a point twice.
 func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string) {
 	t.Helper()
 	ok, posed, dups := rlswRun(t, cases)
 	if path := os.Getenv(env); path != "" {
-		data, err := json.Marshal(rlswGolden{Base: rlswBaseRev, OK: rlswHex(ok), Posed: rlswHex(posed), Dup: dups})
+		data, err := json.Marshal(rlswGolden{Base: rlswBaseRev, OK: rlswHex(ok), Posed: rlswHex(posed)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -750,12 +779,8 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 		}
 	}
 	t.Logf("fixed vs base: break %d asym %d depart %d arrive %d; regressed: %v", fixed[0], fixed[1], fixed[2], fixed[3], regressed)
-	k := 0
-	for _, i := range dups {
-		if slices.Contains(g.Dup, i) {
-			continue
-		}
-		if k++; k <= 5 {
+	for k, i := range dups {
+		if k < 5 {
 			sys, _ := cases[i].system()
 			res, _ := RootLocus(sys, []float64{0, 1})
 			t.Errorf("case %d: Breakaway %v lists a point twice\n%s", i, res.Breakaway, &cases[i])
@@ -763,39 +788,12 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 	}
 }
 
-// Verdicts right at 03edce8 but wrong on this branch (sw, dbl, ext sweeps,
-// AND of arm64 and amd64) are not listed in the limit maps. None is lost
-// vs 23be053 (same verdicts). The converted TF is backward-stable, not
-// exact: its coefficient error vs the exact big.Rat TF of the floats is
-// 0 to ~2x the spread of that TF under 1-ulp changes of A, B, C, up to
-// 21-45x (sw 334 1648, ext 307) and 75-178x (ext 858). A rounding of the
-// exact TF, realized by StateSpace, gets the same or a worse verdict in
-// the first two groups below, so a more accurate TF cannot restore them. The defects are in rlocus.go,
-// which fix/rlocus-wave22 fixes; with its rlocus.go on this branch all
-// three sweeps lose none of them except limits it lists:
-//   - exact multiple root of N'D−ND' (z^L or repeated pole/zero) listed
-//     twice; 03edce8 split it by TF noise: sw 17 138 166 613 977 1389 1436
-//     1518 1590 1648 1709 1745 1754, dbl 2 125 325 491 602 608 856, ext 27
-//     1420 1751 1762.
-//   - negative numerator lead, no K<0 sign handling (03edce8 got the
-//     segments from a far noise zero, dropped by the tzero-parity numerator
-//     cap): sw 38 (departure) 74 105 194 334 372 595 958 1187, dbl 107, ext
-//     307 364 858 1081 1399 1683.
-//   - one arch only, TF error ≤1.5x the 1-ulp spread (dbl 1413 bit-exact),
-//     right from the rounded exact TF: precision limits of TF rounding plus
-//     eig of the given realization: dbl 1413 (amd64), dbl 1452 (arm64),
-//     ext 32 (arm64), ext 903 (amd64).
-//
 // rlswPrecisionLimits are base-correct breakaway verdicts below float64
 // resolution of the given coefficients (1-ulp changes of A, B, C change the
-// exact oracle; checked by rlswUlpSensitive), where base was right by luck.
-var rlswPrecisionLimits = map[int]string{
-	55:   "rotated double pole -1.526e-4 in a unit-norm A: exact charpoly of the floats is a complex pair (disc −5.8e-18, a 1-ulp entry change moves it ~1e-16), the converted D needs 2.1e5·u to merge it, past the u^(2/3) a resolved non-normal pair needs (wave 22 B1); oFlt only a far root 2.1e17",
-	113:  "amd64: rotated triple pole -3.418e-3 in a unit-norm A: float charpoly -3.4184e-3, -3.4178e-3±3.8e-7i, oFlt unposed; 1-ulp perturbations leave it unposed or give far roots ~-1e16 (w19 #21)",
-	539:  "rotated 4 real poles at 1e-5 in a unit-norm A: exact charpoly of the floats has a complex pair -5.7e-5±4.5e-5i, 1-ulp perturbations give breakaway sets [] or [-9.34e-5 -5.69e-5 -2.28e-5]",
-	1012: "amd64: rotated triple pole -6.1035e-4 in a unit-norm A: float charpoly -6.1050e-4, -6.1028e-4±1.3e-7i; 1-ulp perturbations give [], a close pair -6.10355e-4/-6.10348e-4 or a far root -2.7e16 (w19 #21)",
-	1720: "rotated triple pole at -3.357e-4: float charpoly splits it by 1.9e-6; 1-ulp perturbations give [] or a pair at -3.3569e-4 plus a far root",
-}
+// exact oracle; checked by rlswUlpSensitive), logged instead of enforced.
+// None since the exact breakaway path (wave 24) on the float-realization
+// oracle, arm64 and amd64.
+var rlswPrecisionLimits = map[int]string{}
 
 // TestRootLocusSweepNoRegression fails when a component that base got
 // right on the frozen 2000-case sweep is now wrong (or errors).
