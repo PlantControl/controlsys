@@ -943,3 +943,23 @@ func TestEvalFrRefineStagnation(t *testing.T) {
 	sys := stalledCompanionCase(t, 3565, -1)
 	assertExactResponse(t, "seed 3565", sys, []float64{0.0458159766905449}, 1e-12)
 }
+
+// 2QC7PE: on well-conditioned graded companions GEPP left 1e-11..3e-11
+// relative, unrefined: tf2ss shapes (seeds 2184, 1395, 1435) at a back
+// substitution estimate just under the old 1e6ε gate, and a reversed
+// companion (seed 759) whose error is all forward elimination, which the
+// estimate did not model.
+func TestEvalFrSubstitutionErrorGate(t *testing.T) {
+	for _, c := range []struct {
+		seed uint64
+		w    float64
+	}{
+		{2184, 1.867181091291921e-05},
+		{1395, 0.0458159766905449},
+		{1435, 0.5568813990945267},
+		{759, 1.093956366272093e-05},
+	} {
+		sys := stalledCompanionCase(t, c.seed, -1)
+		assertExactResponse(t, fmt.Sprintf("seed %d", c.seed), sys, []float64{c.w}, 1e-12)
+	}
+}

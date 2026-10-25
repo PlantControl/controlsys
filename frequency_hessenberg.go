@@ -495,22 +495,55 @@ func (bd *balancedDense) outputCancels() bool {
 }
 
 // cancelCondition is the estimated error amplification, relative to ε, of
-// a response entry above which substitutionError refines it: about 2e-10
-// relative. The estimate is first order and usually pessimistic; refinement
-// costs several solves, so entries GEPP leaves within ~1e-10 stay.
-const cancelCondition = 1e6
+// a response entry above which substitutionError refines it: about 2e-12
+// relative. The estimate is first order and pessimistic by up to ~7x on
+// graded companions, where GEPP left 3e-11 at an estimate of 9e5 (2QC7PE).
+const cancelCondition = 1e4
 
-// substitutionError reports whether the first-order rounding error of back
-// substitution, eᵢ = (|xᵢ| + Σₖ|uᵢₖ|(|xₖ| + eₖ))/|uᵢᵢ| in units of ε,
-// exceeds cancelCondition in some response entry relative to Σₖ|cₖ||xₖ|.
-// e is kept in the real parts of bd.r, which refine overwrites.
+// substitutionError reports whether the first-order rounding error of the
+// solve with the GEPP factors exceeds cancelCondition in some response
+// entry relative to Σₖ|cₖ||xₖ|, in units of ε: fᵢ = Σₖ|lᵢₖ|(|yₖ| + fₖ) of
+// forward elimination Ly = Pb̂, then eᵢ = (|xᵢ||uᵢᵢ| + fᵢ + Σₖ|uᵢₖ|(|xₖ| +
+// eₖ))/|uᵢᵢ| of back substitution. Forward elimination alone can carry the
+// error: a reversed graded companion's last state, 1e-11 relative off with
+// its back substitution exact (2QC7PE, seed 759). y is formed in bd.r and f
+// in bd.dErr; e is kept in the real parts of bd.r, which refine overwrites.
 func (bd *balancedDense) substitutionError() bool {
 	n, m, a, x, e := bd.n, bd.m, bd.pencil, bd.x, bd.r
+	if bd.dErr == nil {
+		bd.dErr = make([]float64, n*m)
+	}
+	f := bd.dErr
+	for i, v := range bd.b {
+		e[i] = complex(v, 0)
+	}
+	clear(f)
+	for k, pk := range bd.piv {
+		if pk != k {
+			for j := range m {
+				e[k*m+j], e[pk*m+j] = e[pk*m+j], e[k*m+j]
+			}
+		}
+	}
+	for k := range n {
+		for i := k + 1; i < n; i++ {
+			l := a[i*n+k]
+			if l == 0 {
+				continue
+			}
+			al := cabs1(l)
+			for j := range m {
+				y := e[k*m+j]
+				e[i*m+j] -= l * y
+				f[i*m+j] += al * (cabs1(y) + f[k*m+j])
+			}
+		}
+	}
 	for i := n - 1; i >= 0; i-- {
 		ui := a[i*n+i+1 : i*n+bd.last[i]+1]
 		ii := cabs1(bd.inv[i])
 		for j := range m {
-			v := cabs1(x[i*m+j]) / ii
+			v := cabs1(x[i*m+j])/ii + f[i*m+j]
 			for k, u := range ui {
 				l := (i+1+k)*m + j
 				v += cabs1(u) * (cabs1(x[l]) + real(e[l]))
