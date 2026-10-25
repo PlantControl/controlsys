@@ -18,11 +18,12 @@ var rvSweep5 = rvSweep{
 	envWrite: "RLOCUS_SWEEPRV5_WRITE", limits: rlrv5Limits,
 }
 
-// rlrv5Limits are base-correct breakaway verdicts the track leaves open
-// (logged, not enforced; wave 22 report).
+// rlrv5Limits are verdicts logged, not enforced. Since the exact
+// breakaway path every Breakaway verdict of the sweep is enforced (10041
+// and 10517 are flagged 1-ulp sensitive by the oracle cache); 11942 is
+// listed for TestRootLocus_RV5Repros, which judges every component.
 var rlrv5Limits = map[int]string{
-	11942: "open (rv oracle Prec=false): 4-fold zero −36 of G split 0.09 by rounding of the similarity; as eigenvalues of A − B·C·A³/h₃ all four are u·κ-linked (u·κ ≈ 40) but the converted numerator needs ~1e3·u to merge them (10·u allowed) and the exact TF of the floats has four distinct zeros (stationary point −35.995)",
-	11761: "amd64: discrete stationary points beside a pole/zero dipole off by 2e-5 relative (converted N/D accuracy)",
+	11942: "amd64: departure angle at 6+32i off 2.5e-4 (eig zeros of a 4-fold zero −36 split 0.09 by the similarity's rounding); Breakaway matches the float-realization oracle",
 }
 
 func TestRootLocusSweepRV5NoRegression(t *testing.T) {
@@ -34,12 +35,14 @@ func TestRootLocusSweepRV5NoRegression(t *testing.T) {
 }
 
 // TestRootLocus_RV5Repros pins the wave-20 final-review cases of the fifth
-// frozen sweep, judged on every component by its exact oracle: 11941,
-// 11400, 10478 (a rounding-level h₂ kept a noise zero, flipping departure
-// angles by π and adding a far break point ~1e12), and 11124 (a resolved
-// pair 116±0.25i of a non-normal A, σ_b 4.4e7, admitted as a double only
-// by the √u·σ_b split, gave the K < 0 point 116.00007). The rlrv5Limits
-// cases are logged.
+// frozen sweep, judged on every component as the sweep judges them
+// (Breakaway by the exact oracle of the float realization): 11941, 11400,
+// 10478 (a rounding-level h₂ kept a noise zero, flipping departure angles
+// by π and adding a far break point ~1e12), 11124 (a resolved pair
+// 116±0.25i of a non-normal A, σ_b 4.4e7: the eig path gave the K < 0
+// point 116.00007), 11942 (4-fold zero −36 split 0.09 by the similarity's
+// rounding: the split system's stationary points) and 11761 (stationary
+// points beside a pole/zero dipole). The rlrv5Limits cases are logged.
 func TestRootLocus_RV5Repros(t *testing.T) {
 	cs := rvSweep5.frozenCases(t)
 	oras := rvSweep5.cachedOracles(t, cs)

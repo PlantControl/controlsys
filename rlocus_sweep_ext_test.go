@@ -206,22 +206,8 @@ func rlsxGenerate() []rlswCase {
 	return cases
 }
 
-// rlsxPrecisionLimits: see rlswPrecisionLimits. All are rotated+similar
-// realizations whose eigenvalues eps-level entry changes move by O(1)
-// relative.
-var rlsxPrecisionLimits = map[int]string{
-	215:  "amd64: rotated poles 0, 0, -1.3e-6, -3.8e-6 in a unit-norm A: float charpoly 2.8e-6, -1.8e-6±2.9e-6i, -4.4e-6 (eig ~5e-5 off); 1-ulp perturbations give [] or one root 6.5e-7..9.1e-7",
-	394:  "D=1.75, rotated triple pole 4.395e-3: float charpoly splits it into 4.37e-3±4.2e-5i, 4.44e-3, and the float TF has no breakaway there (oFlt [-7.3e-3]); amd64 eig resolves a near pair",
-	477:  "triple pole -15.25: float charpoly splits it by 2e-3 (complex pair); 1-ulp perturbations give [], unposed or a pair -15.25002/-15.24998",
-	685:  "rotated near triple pole -2.9564e-5 (double + 7.2e-9 apart) in a unit-norm A: float charpoly -2.9525e-5, -2.9587e-5±3.5e-8i; 1-ulp perturbations give [], a pair -2.9567e-5/-2.9565e-5 or a far root 1.7e16",
-	885:  "D=-1.5, double pole -1.648e-3: float charpoly poles -1.53e-3±2.5e-4i, -1.94e-3; 1-ulp perturbations give [] or far pairs ±1.7e8..4.6e8",
-	958:  "rotated triple pole -1.5259e-4 in a unit-norm A: float charpoly -1.5263e-4, -1.5257e-4±3.7e-8i, oFlt unposed; 1-ulp perturbations give [-3.553e-4 1.048e-4] (no triple point, as returned) or unposed",
-	1042: "poles ~1e-3: 1-ulp perturbations move the real pole 7.9e-4..9.3e-4 and give [], a far root -1.6e8..-2.6e8 or three near ones",
-	1567: "rotated near triple pole -3.967e-4 (double + 9.7e-8 apart) in a unit-norm A: float charpoly -4.008e-4, -3.948e-4±3.5e-6i (1% off); oFlt and 1-ulp perturbations give only far roots ±1.4e16..5.3e17",
-	1647: "D=-1.25, poles ~1e-5: 1-ulp perturbations move the poles to ~1.5e-4 (10x) and leave the oracle unposed",
-	1752: "amd64: rotated double pole at 0: float charpoly ±6.4e-9i (oFlt only a far root 4e8) and amd64 eig splits it ±7.2e-8i, past the √u·σ origin window; 1-ulp perturbations give ~1e-15..1e-19 or that plus a far root 1.5e8..2.6e8",
-	1766: "relative degree 6, poles ~5e-6: float charpoly poles ~2.3e-3; 1-ulp perturbations give [] or one root in -7.3e-4..-5.9e-4",
-}
+// rlsxPrecisionLimits: see rlswPrecisionLimits.
+var rlsxPrecisionLimits = map[int]string{}
 
 // TestRootLocusSweepExtNoRegression fails when a component that base got
 // right on the second frozen sweep is now wrong (or errors).

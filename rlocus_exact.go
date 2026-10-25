@@ -246,6 +246,11 @@ func xpClassify(f, num, den, gD, gN []*big.Int, iv xpIval) (r xpRoot, keep, ok b
 	}
 	lo, hi, e := new(big.Int).Set(iv.lo), new(big.Int).Set(iv.hi), iv.e
 	sLo := xpSign(f, lo, e)
+	if sLo == 0 {
+		// lo is the exact root split off by xpIsolatePositive: f just
+		// right of it has the sign of f'(lo).
+		sLo = xpSign(xpDeriv(f), lo, e)
+	}
 	w, t := new(big.Int), new(big.Int)
 	mid := new(big.Int)
 	resolved := func() bool {

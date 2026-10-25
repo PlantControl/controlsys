@@ -2,7 +2,9 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -153,4 +155,61 @@ func TestRootLocus_ExactGateFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	rlpBreak(t, "padded 1/(s(s+1))", res.Breakaway, []float64{-0.5}, 1e-9)
+}
+
+// TestRootLocus_BVLIUFVerdicts pins the 44 frozen-sweep Breakaway verdicts
+// 03edce8 got right only through TF noise and main (eb8d9e1) got wrong
+// (BVLIUF): an exact multiple root of N'D − ND' listed twice, a negative
+// numerator lead without K < 0 sign handling, and the arch-only cases dbl
+// 1413 (amd64), 1452 (arm64), ext 32 (arm64), 903 (amd64); judged by the
+// float-realization oracle on each arch, with no point listed twice.
+func TestRootLocus_BVLIUFVerdicts(t *testing.T) {
+	for _, s := range []struct {
+		name  string
+		cases []rlswCase
+		ids   []int
+	}{
+		{"sw", rlswGenerate(), []int{17, 138, 166, 613, 977, 1389, 1436, 1518, 1590, 1648, 1709, 1745, 1754, 38, 74, 105, 194, 334, 372, 595, 958, 1187}},
+		{"dbl", rlsdGenerate(), []int{2, 125, 325, 491, 602, 608, 856, 107, 1413, 1452}},
+		{"ext", rlsxGenerate(), []int{27, 1420, 1751, 1762, 307, 364, 858, 1081, 1399, 1683, 32, 903}},
+	} {
+		for _, i := range s.ids {
+			c := &s.cases[i]
+			oi, of := c.oracles()
+			ok, posed, dup, err := rlswVerdict(c, oi, of)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if posed&rlswBreak == 0 || ok&rlswBreak == 0 || dup {
+				sys, _ := c.system()
+				res, _ := RootLocus(sys, []float64{0, 1})
+				t.Errorf("%s %d: Breakaway %v (posed %v, dup %v), float-realization oracle %v", s.name, i, res.Breakaway, posed&rlswBreak != 0, dup, of.required)
+			}
+		}
+	}
+}
+
+// TestRootLocus_ExactRootBesideDyadicRoot: a root of N'D − ND' next to an
+// exact dyadic one, which root isolation splits off as an interval end
+// (dbl sweep 59: stationary points −6.40869140625e-4 and −6.40973e-4;
+// 1136: the double pole 0.01611328125 beside the stationary point
+// 0.0161139), is found and classified.
+func TestRootLocus_ExactRootBesideDyadicRoot(t *testing.T) {
+	p := xpMul([]*big.Int{big.NewInt(1), big.NewInt(-21)}, []*big.Int{big.NewInt(1000), big.NewInt(-21003)})
+	if ivs := xpIsolatePositive(p); len(ivs) != 2 {
+		t.Fatalf("isolating intervals %v, want 2", ivs)
+	}
+	cs := rlsdGenerate()
+	for _, i := range []int{59, 1136} {
+		c := &cs[i]
+		sys, err := c.system()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := RootLocus(sys, []float64{0, 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rlpFloatBreak(t, "dbl "+strconv.Itoa(i), res.Breakaway, rlpFloatOracle(c.n, c.a, c.b, c.c, c.d, c.L, c.n))
+	}
 }

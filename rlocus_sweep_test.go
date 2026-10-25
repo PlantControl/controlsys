@@ -790,14 +790,10 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 
 // rlswPrecisionLimits are base-correct breakaway verdicts below float64
 // resolution of the given coefficients (1-ulp changes of A, B, C change the
-// exact oracle; checked by rlswUlpSensitive), where base was right by luck.
-var rlswPrecisionLimits = map[int]string{
-	55:   "rotated double pole -1.526e-4 in a unit-norm A: exact charpoly of the floats is a complex pair (disc −5.8e-18, a 1-ulp entry change moves it ~1e-16), the converted D needs 2.1e5·u to merge it, past the u^(2/3) a resolved non-normal pair needs (wave 22 B1); oFlt only a far root 2.1e17",
-	113:  "amd64: rotated triple pole -3.418e-3 in a unit-norm A: float charpoly -3.4184e-3, -3.4178e-3±3.8e-7i, oFlt unposed; 1-ulp perturbations leave it unposed or give far roots ~-1e16 (w19 #21)",
-	539:  "rotated 4 real poles at 1e-5 in a unit-norm A: exact charpoly of the floats has a complex pair -5.7e-5±4.5e-5i, 1-ulp perturbations give breakaway sets [] or [-9.34e-5 -5.69e-5 -2.28e-5]",
-	1012: "amd64: rotated triple pole -6.1035e-4 in a unit-norm A: float charpoly -6.1050e-4, -6.1028e-4±1.3e-7i; 1-ulp perturbations give [], a close pair -6.10355e-4/-6.10348e-4 or a far root -2.7e16 (w19 #21)",
-	1720: "rotated triple pole at -3.357e-4: float charpoly splits it by 1.9e-6; 1-ulp perturbations give [] or a pair at -3.3569e-4 plus a far root",
-}
+// exact oracle; checked by rlswUlpSensitive), logged instead of enforced.
+// None since the exact breakaway path (wave 24) on the float-realization
+// oracle, arm64 and amd64.
+var rlswPrecisionLimits = map[int]string{}
 
 // TestRootLocusSweepNoRegression fails when a component that base got
 // right on the frozen 2000-case sweep is now wrong (or errors).

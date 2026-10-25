@@ -249,16 +249,10 @@ func rvOracles(cs []rvCase) []rvOra {
 	return oras
 }
 
-// rlrvLimits are base-correct breakaway verdicts of the w17 #58
-// cancellation class (coordinator decision): a K > 0 stationary pair inside
-// a pole/zero gap of 1e-13…1e-11 relative, below what the realization
-// resolves.
-var rlrvLimits = map[int]string{
-	1328: "stationary pair −12 ± 7.5e-6 inside pole −12 / zero −12(1+5.3e-13)",
-	1517: "stationary pair −20 ± 1.4e-5 inside pole −20 / zero −20(1+3.1e-12)",
-	1622: "stationary pair −14.25 ± 1.6e-5 inside pole −14.25 / zero −14.25(1+8.4e-12)",
-	1794: "stationary pair −40 ± 5.2e-6 inside pole −40 / zero −40(1+5.4e-14)",
-}
+// rlrvLimits are base-correct breakaway verdicts logged, not enforced
+// (none since the exact breakaway path; the w17 #58 cancellation class
+// 1328, 1517, 1622, 1794 is resolved exactly).
+var rlrvLimits = map[int]string{}
 
 type rlrvGolden struct {
 	Base string            `json:"base"`
@@ -1114,21 +1108,59 @@ func rvYun(f rvP) []rvP {
 	return out
 }
 
+// rvPInt returns p times a positive rational with coprime integer
+// coefficients: same roots and signs.
+func rvPInt(p rvP) rvP {
+	p = p.trim()
+	l, g := big.NewInt(1), new(big.Int)
+	for _, c := range p {
+		d := c.Denom()
+		g.GCD(nil, nil, l, d)
+		l.Mul(l, new(big.Int).Quo(d, g))
+	}
+	out := make(rvP, len(p))
+	g.SetInt64(0)
+	for i, c := range p {
+		v := new(big.Int).Mul(c.Num(), new(big.Int).Quo(l, c.Denom()))
+		out[i] = new(big.Rat).SetInt(v)
+		g.GCD(nil, nil, g, new(big.Int).Abs(v))
+	}
+	if g.Sign() > 0 {
+		for _, c := range out {
+			c.SetInt(new(big.Int).Quo(c.Num(), g))
+		}
+	}
+	return out
+}
+
+// rvSign returns the sign of p(x) for p with integer coefficients
+// (rvPInt), by homogeneous Horner in big.Int.
+func rvSign(p rvP, x *big.Rat) int {
+	a, b := x.Num(), x.Denom()
+	acc, bp, t := new(big.Int), big.NewInt(1), new(big.Int)
+	for _, v := range slices.Backward(p) {
+		acc.Mul(acc, a)
+		acc.Add(acc, t.Mul(v.Num(), bp))
+		bp.Mul(bp, b)
+	}
+	return acc.Sign()
+}
+
 func rvSturmSeq(f rvP) []rvP {
-	s := []rvP{f.trim(), rvPDeriv(f)}
+	s := []rvP{rvPInt(f), rvPInt(rvPDeriv(f))}
 	for s[len(s)-1].deg() > 0 {
 		_, r := rvPDivMod(s[len(s)-2], s[len(s)-1])
 		if len(r) == 0 {
 			break
 		}
-		s = append(s, rvPNeg(r))
+		s = append(s, rvPInt(rvPNeg(r)))
 	}
 	return s
 }
 func rvSturmV(s []rvP, x *big.Rat) int {
 	v, prev := 0, 0
 	for _, p := range s {
-		sg := rvPEval(p, x).Sign()
+		sg := rvSign(p, x)
 		if sg == 0 {
 			continue
 		}
@@ -1167,6 +1199,7 @@ func rvRealRoots(f rvP) []rvIval {
 	if f.deg() <= 0 {
 		return nil
 	}
+	f = rvPInt(f)
 	s := rvSturmSeq(f)
 	B := rvCauchy(f)
 	var out []rvIval
@@ -1193,10 +1226,10 @@ func rvRealRoots(f rvP) []rvIval {
 // rvRefine: single rvRoot in (lo, hi].
 func rvRefine(f rvP, lo, hi *big.Rat) rvIval {
 	lo, hi = new(big.Rat).Set(lo), new(big.Rat).Set(hi)
-	if rvPEval(f, hi).Sign() == 0 {
+	if rvSign(f, hi) == 0 {
 		return rvIval{hi, hi, true}
 	}
-	sh := rvPEval(f, hi).Sign()
+	sh := rvSign(f, hi)
 	two := rvRi(2)
 	for it := range 600 {
 		w := new(big.Rat).Sub(hi, lo)
@@ -1211,7 +1244,7 @@ func rvRefine(f rvP, lo, hi *big.Rat) rvIval {
 		}
 		mid := new(big.Rat).Add(lo, hi)
 		mid.Quo(mid, two)
-		sm := rvPEval(f, mid).Sign()
+		sm := rvSign(f, mid)
 		if sm == 0 {
 			return rvIval{mid, mid, true}
 		}
