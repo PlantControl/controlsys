@@ -3,6 +3,7 @@ package controlsys
 import (
 	"context"
 	"math"
+	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 )
@@ -48,4 +49,77 @@ func TestTunePIDFRDMarginReadsOffChord(t *testing.T) {
 			t.Errorf("%s: certified %v, achieved margin %g, dense %g", c.name, !pidHasWarning(r, "not certified"), pm, least)
 		}
 	}
+}
+
+// IJCIOS #4: the PID resonance sweep case PCG(2525, 1476) returns on
+// arm64 has a zero pair (ζ 0.02 at 27.4 rad/s) dipping |L| through 1
+// twice inside a smooth step of ratio 1.63 where sampled |L| is 8.7 and
+// 4.4. Off the chord the lower crossing reads 62.0° against the plant's
+// 57.3°; along the cubic through the step's four samples
+// (pidTuningFRDSmoothCrossing) each reads within 1° of the plant's, and
+// TunePIDFRD reports their least. The controller is fixed here, as amd64
+// rounding leads the search to another design. Oracle: the exact plant's
+// loop and a dense margin sweep of it.
+func TestTunePIDFRDMarginReadsSmoothStepCubic(t *testing.T) {
+	c := pidFRDResonanceSweepCase(rand.New(rand.NewPCG(2525, 1476)))
+	k := PID2{Kp: -1.3681157973818694, Ki: -892.1782481501085, Kd: -1.1866465896282126, B: 1, C: 1}
+	frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, 0, c.lo, c.hi, c.n), c.num, c.den)
+	p, _ := pidTuningFRDStrictPlant(frd, nil)
+	exact := func(w float64) complex128 {
+		s := complex(0, w)
+		return pidPolyAt(c.num, s) / pidPolyAt(c.den, s) * pidTuningFeedback(k, w)
+	}
+	l := func(w float64) complex128 { return p.at(w) * pidTuningFeedback(k, w) }
+	e := func(w float64) float64 { return cmplx.Abs(l(w)) - 1 }
+	var chord []float64
+	for i := 0; i+1 < len(p.samples); i++ {
+		a, b := p.samples[i], p.samples[i+1]
+		for j := range 256 {
+			x, y := a*math.Pow(b/a, float64(j)/256), a*math.Pow(b/a, float64(j+1)/256)
+			if e(x)*e(y) < 0 {
+				for range 60 {
+					if m := math.Sqrt(x * y); e(x)*e(m) <= 0 {
+						y = m
+					} else {
+						x = m
+					}
+				}
+				chord = append(chord, math.Sqrt(x*y))
+			}
+		}
+	}
+	if len(chord) != 2 {
+		t.Fatalf("chord crossings %v, want the notch's two", chord)
+	}
+	off := 0.
+	for _, w := range chord {
+		v, pm, ok := pidTuningFRDSmoothCrossing(p, k, w)
+		if !ok {
+			t.Fatalf("crossing %g not re-read", w)
+		}
+		off = math.Max(off, math.Abs(pidFRDWrapDeg(180+cmplx.Phase(l(w))*180/math.Pi)-pidFRDWrapDeg(180+cmplx.Phase(exact(w))*180/math.Pi)))
+		if want := pidFRDWrapDeg(180 + cmplx.Phase(exact(v))*180/math.Pi); math.Abs(pm-want) > 1 || math.Abs(cmplx.Abs(exact(v))-1) > .02 {
+			t.Errorf("crossing %g re-read at %g, margin %g, exact |L| %g margin %g", w, v, pm, cmplx.Abs(exact(v)), want)
+		}
+	}
+	if least := pidFRDDenseMargin(c.num, c.den, k, c.lo/1e3, c.hi*1e3); !(math.Abs(pidFRDWrapDeg(180+cmplx.Phase(l(chord[0]))*180/math.Pi)-least) > 3) {
+		t.Errorf("chord margin within 3° of dense %g (%g° off at most), case no longer pins the chord's error", least, off)
+	}
+
+	r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *r.Controller; got.Kp == k.Kp && got.Ki == k.Ki && got.Kd == k.Kd {
+		if pm, least := r.Evidence.AchievedPhaseMargin, pidFRDDenseMargin(c.num, c.den, k, c.lo/1e3, c.hi*1e3); math.Abs(pm-least) > 1 {
+			t.Errorf("achieved margin %g, dense %g", pm, least)
+		}
+	}
+}
+
+func pidFRDWrapDeg(d float64) float64 {
+	if d > 180 {
+		d -= 360
+	}
+	return d
 }

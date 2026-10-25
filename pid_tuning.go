@@ -198,8 +198,10 @@ type pidTuningPlant struct {
 	arcSearch bool
 	// markov, if nonzero, is lim sG(s) that continuous sampled data show at
 	// their top (pidTuningFRDMarkov), and markovSpread its change over the
-	// top half decade.
+	// top half decade; markovAnchored marks it established
+	// (pidTuningFRDTopFlat), as topAnchored does a high-end order.
 	markov, markovSpread float64
+	markovAnchored       bool
 	// maxSensitivity bounds the sampled peak of |1/(1+L)| over the band, or
 	// 0 for none; tau is the loop delay in seconds that sets its grid step.
 	maxSensitivity, tau float64

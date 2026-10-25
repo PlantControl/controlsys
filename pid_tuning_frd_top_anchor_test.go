@@ -49,3 +49,42 @@ func TestTunePIDFRDTopUnanchoredBelowResonance(t *testing.T) {
 		t.Errorf("seed 446: top order %d %v, want -3 anchored", n, ok)
 	}
 }
+
+// M5M43J: continuous data stopping 4.5-6 times below a ζ 0.01-0.03 pole
+// pair, whose phase the pair turns under half a degree there, so only the
+// bend it gives |G| over the top half decade shows it. Each design is
+// returned unchanged, uncertified: the two PIDFs are unstable on the
+// exact plant, the PID stable with dense |S| 14.6 at 48 rad/s, past the
+// band, on the Markov end it took (Tf = 0). Oracles: companion roots and
+// a dense exact |S| sweep.
+func TestTunePIDFRDTopUnanchoredBelowFarResonance(t *testing.T) {
+	for _, c := range []struct {
+		pidFRDStrictCase
+		unstable bool
+	}{
+		{pidFRDStrictCase{"pair 4.5x above PIDF", []float64{-8262.93623685102}, []float64{1, 0.7519020138192478, 1032.7699262257074, 358.01196203512444}, 0, 0.07926255008180683, 7.162852266317181, 117, PidtunePIDF, PIDTuningOptions{}, PID2{Kp: -0.04328738756302844, Ki: -0.15525853497588135, Kd: -0.17023952382149093, Tf: 0.2226680566048483}}, true},
+		{pidFRDStrictCase{"pair 5x above PIDF", []float64{58.561483836812066}, []float64{1, 0.4948643611220235, 62.07187598018631, 5.326256369931688}, 0, 0.007795302566269365, 1.57856375781812, 31, PidtunePIDF, PIDTuningOptions{}, PID2{Kp: 0.03387099198725247, Ki: 0.037108072857484145, Kd: 1.8443099069106503, Tf: 1.3340800478048032}}, true},
+		{pidFRDStrictCase{"pair 5.8x above PID", []float64{172.95458044720178, 243.93143446803765}, []float64{1, 2.869209679584981, 1419.286920970929, 2303.5392064029966, 880.1053701399039}, 0, 0.01493150412148546, 6.547781650196431, 159, PidtunePID, PIDTuningOptions{}, PID2{Kp: 0.336780194858159, Ki: 1.8053609921275728, Kd: 5.2798120749694615}}, false},
+	} {
+		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, 0, c.lo, c.hi, c.n), c.num, c.den)
+		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		k := *r.Controller
+		for _, g := range [][2]float64{{k.Kp, c.k.Kp}, {k.Ki, c.k.Ki}, {k.Kd, c.k.Kd}, {k.Tf, c.k.Tf}} {
+			if math.Abs(g[0]-g[1]) > 1e-6*math.Abs(g[1]) {
+				t.Errorf("%s: %+v, base gave %+v", c.name, k, c.k)
+				break
+			}
+		}
+		re, peak := pidClosedLoopMaxRe(c.num, c.den, k), pidFRDStrictPeak(c.num, c.den, 0, k, c.lo)
+		if c.unstable != (re > 0) || !c.unstable && !(peak > 4) {
+			t.Errorf("%s: oracle max Re %g, dense |S| %g; case no longer pins its defect", c.name, re, peak)
+		}
+		if !pidHasWarning(r, "end above the band is established") {
+			t.Errorf("%s: %+v certified, warnings %q", c.name, k, r.Evidence.Warnings)
+		}
+	}
+}

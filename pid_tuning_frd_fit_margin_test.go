@@ -40,6 +40,11 @@ func pidFRDDenseMargin(num, den []float64, c PID2, lo, hi float64) float64 {
 // case's lone fit (σ 0.345 against 0.241) keeps |L| under 1, so its
 // margin, 63° against 31°, is the data's to leave open: it is only
 // uncertified, its warning saying the margins are not certified there.
+// So is the PD on 19 samples over five decades (IJCIOS, sparse sweep 11)
+// whose lone fit, pole 31.96+1.34j, keeps |L| under 0.37 across a step
+// where the plant's ζ 0.012 pair at 33.4 rad/s crosses |L| = 1 twice, at
+// 51.5° against the 68.0° reported: a fit σ shrunk by that 0.37 still
+// leaves ζ above 0.001, so the step cannot bound the crossings.
 // Oracles: companion roots and dense margin sweeps of the exact plant.
 func TestTunePIDFRDFitMargins(t *testing.T) {
 	const resolved, unresolved, open = 0, 1, 2
@@ -52,6 +57,7 @@ func TestTunePIDFRDFitMargins(t *testing.T) {
 		{pidFRDStrictCase{"unresolved PI", []float64{-0.0038222756367263635, -0.0012677818618067795}, []float64{1, 0.06464407243270755, 0.10005760257112094, 0.006401267418325189}, 0, 0.009316179985551253, 42.7362164944245, 24, PidtunePI, PIDTuningOptions{}, PID2{Kp: 0.7813664543073326, Ki: -0.15030598936538894}}, unresolved},
 		{pidFRDStrictCase{"unresolved PID", []float64{-0.009282208062694386, 0.04876889443040703}, []float64{1, 0.07603633177863955, 308.805799363479, 11.21177666667732, 0.09525859590094857}, 0, 0.0012085278713223453, 240.56717347654157, 56, PidtunePID, PIDTuningOptions{PhaseMargin: 70}, PID2{Kp: 8.922063202887225, Ki: 0.12976245348251073, Kd: 197.33952686919986}}, unresolved},
 		{pidFRDStrictCase{"lone fit PIDF", []float64{-78.74148934979667, -861.811951445858}, []float64{1, 1.6360010805908205, 115.34333096043075, 132.496771148978}, 0, 0.0011441884089918987, 226.26584361638064, 30, PidtunePIDF, PIDTuningOptions{PhaseMargin: 60}, PID2{Kp: 0.01802552622194053, Ki: -0.09105004128568404, Kd: -0.022092043152332708, Tf: 0.2651911956500729}}, open},
+		{pidFRDStrictCase{"lone fit below unity PD", []float64{-3.615594739522033, -192.1747327166767, -3385.2820999049263, -19775.660643644802}, []float64{1, 4.79275327213227, 1118.14081692987, 4419.945850325421, 122.65938818334538, 70.46075872422402}, 0, 0.0035825926993535953, 398.3837886475481, 19, PidtunePD, PIDTuningOptions{PhaseMargin: 70}, PID2{Kp: -0.09989555702680614, Kd: -0.25882559180853604}}, open},
 	} {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
 		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
