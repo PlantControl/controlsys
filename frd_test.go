@@ -1334,7 +1334,7 @@ func TestFRDMargin_WrappedCrossings(t *testing.T) {
 	}
 }
 
-func TestFRDMargin_DelayRepro(t *testing.T) {
+func TestFRDMargin_Delay(t *testing.T) {
 	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}),
 		mat.NewDense(1, 1, []float64{2}), mat.NewDense(1, 1, []float64{0}), 0)
 	if err != nil {

@@ -8,13 +8,13 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// TestIsStabilizable_AmplifiedRoundingRepros: exactly uncontrollable
+// TestIsStabilizable_AmplifiedRoundingCases: exactly uncontrollable
 // unstable modes the staircase counted controllable with coupling far above
 // rounding, amplified by nearly parallel inputs (MinCoupling 5e-6, unstable
 // real mode at 1.38, PBH σmin 1.7e-16) or by a dominating unstable
 // eigenvalue (Q·diag(−1, −2, 100)·Qᵀ, B = Q·[1; 1; 0], MinCoupling 3.5e-13,
 // PBH σmin at 100 7.5e-15).
-func TestIsStabilizable_AmplifiedRoundingRepros(t *testing.T) {
+func TestIsStabilizable_AmplifiedRoundingCases(t *testing.T) {
 	cases := []struct {
 		name string
 		n, m int

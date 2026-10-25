@@ -7,9 +7,9 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// riccatiScaledRepro returns the Process Lab repro (Z7VJAB) in original
+// riccatiScaledCase returns the Process Lab repro (Z7VJAB) in original
 // coordinates and after the state change x' = T·x, T = diag(1e-3, 7, 250).
-func riccatiScaledRepro() (A, B, C, As, Bs, Cs, T *mat.Dense) {
+func riccatiScaledCase() (A, B, C, As, Bs, Cs, T *mat.Dense) {
 	A = mat.NewDense(3, 3, []float64{0, 1, 0, 0, 0, 1, -1, -3, -3})
 	B = mat.NewDense(3, 1, []float64{0, 0, 1})
 	C = mat.NewDense(1, 3, []float64{4, 0, 0})
@@ -42,7 +42,7 @@ func relErr(got, want mat.Matrix) float64 {
 // TestRiccati_StateScalingInvariance checks that badly scaled state
 // coordinates do not cost accuracy: X' = T⁻ᵀXT⁻¹, K' = KT⁻¹, same poles.
 func TestRiccati_StateScalingInvariance(t *testing.T) {
-	A, B, C, As, Bs, Cs, T := riccatiScaledRepro()
+	A, B, C, As, Bs, Cs, T := riccatiScaledCase()
 	R := mat.NewDense(1, 1, []float64{1})
 	var Tinv mat.Dense
 	if err := Tinv.Inverse(T); err != nil {
@@ -85,7 +85,7 @@ func TestRiccati_StateScalingInvariance(t *testing.T) {
 }
 
 func TestRiccati_LqeStateScalingInvariance(t *testing.T) {
-	A, _, C, As, _, Cs, T := riccatiScaledRepro()
+	A, _, C, As, _, Cs, T := riccatiScaledCase()
 	G := mat.NewDense(3, 1, []float64{0, 0, 1})
 	Gs := mat.NewDense(3, 1, nil)
 	Gs.Mul(T, G)
@@ -176,7 +176,7 @@ func eulerStep(A *mat.Dense, h float64) *mat.Dense {
 }
 
 func TestRiccati_NoScalingReachesWrappers(t *testing.T) {
-	A, B, C, As, Bs, Cs, _ := riccatiScaledRepro()
+	A, B, C, As, Bs, Cs, _ := riccatiScaledCase()
 	R := mat.NewDense(1, 1, []float64{1})
 	ref, err := Lqr(A, B, gram(C), R, nil)
 	if err != nil {

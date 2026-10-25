@@ -1189,7 +1189,7 @@ func delayXFinalPlant() (A, B, C, D *mat.Dense, u *mat.Dense, x0 []float64) {
 	return A, B, C, D, u, []float64{0.3, -0.8, 0.5}
 }
 
-func TestSimulateXFinalInputDelayRepro(t *testing.T) {
+func TestSimulateXFinalInputDelay(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{0.5, 0.2, -0.3, 0.4})
 	B := mat.NewDense(2, 1, []float64{1, -0.5})
 	C := mat.NewDense(1, 2, []float64{1, 1})

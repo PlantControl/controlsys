@@ -47,7 +47,7 @@ func hornerC(p []float64, s complex128) complex128 {
 	return acc
 }
 
-func TestTFStateSpaceImproperMATLABRepro(t *testing.T) {
+func TestTFStateSpaceImproperMatchesMATLAB(t *testing.T) {
 	num, den := []float64{7, 5, 3}, []float64{2, 1}
 	tf := &TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}}
 	res, err := tf.StateSpace()
@@ -276,7 +276,7 @@ func requireImproperDescriptorTF(t *testing.T, label string, sys *System, res *T
 
 // SC36CE: MATLAB tf(ss(tf([7 5 3],[2 1]))) is (3.5s^2+2.5s+1.5)/(s+0.5) and
 // zpk of it keeps both zeros; base rejected the descriptor realization.
-func TestTransferFunctionImproperDescriptorMATLABRepro(t *testing.T) {
+func TestTransferFunctionImproperDescriptorMatchesMATLAB(t *testing.T) {
 	cases := []struct {
 		num, den, wantNum, wantDen []float64
 		dt                         float64
