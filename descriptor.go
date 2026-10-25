@@ -619,6 +619,7 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 	var leakTols []float64
 	leakOnly := false
 	var leakDrift []float64
+	chain := false
 	if ni > 0 {
 		var lu mat.LU
 		s22 := extractBlock(S, nf, nf, ni, ni)
@@ -632,6 +633,7 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 			return nil, nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
 		if !index1 || ni != d {
+			chain = true
 			e22 := extractBlock(T, nf, nf, ni, ni)
 			e22.Apply(func(_, _ int, v float64) float64 {
 				if math.Abs(v) <= tol {
@@ -724,14 +726,26 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 				out, poly = fixed, nil
 			}
 		}
+		if poly != nil {
+			if fixed, ok := refitFromPencil(sys, out, leakTerms); ok {
+				out, poly = fixed, nil
+			}
+		}
 	}
 	if confirm {
 		if fixed, ok := absorbStiffLeak(out, leakTerms, leakTols, false); ok && leakDriftShared(leakTerms, leakTols, leakDrift) && reductionMatches(sys, fixed) {
 			out, poly = fixed, nil
 		} else if reductionMatches(sys, out) {
 			poly = nil
+		} else if fixed, ok := refitFromPencil(sys, out, leakTerms); ok {
+			out, poly = fixed, nil
 		} else if poly == nil {
 			return nil, nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+		}
+	}
+	if chain && poly == nil && q == 0 && nf > 0 {
+		if fixed, ok := refitFromPencil(sys, out, nil); ok {
+			out = fixed
 		}
 	}
 	return out, poly, nil, nil
@@ -1193,4 +1207,363 @@ func subDense(m *mat.Dense, r0, c0, rows, cols int) *mat.Dense {
 		return newDense(rows, cols)
 	}
 	return extractBlock(m, r0, c0, rows, cols)
+}
+
+// pencilSample is the response G(s) of a descriptor solved directly from
+// (sE − A) at s; scale is its largest entry modulus and unc the mismatch a
+// reduction may show there, reductionMatchTol·scale plus the response's
+// sensitivity to rounding of the data.
+type pencilSample struct {
+	s          complex128
+	g          []complex128
+	scale, unc float64
+}
+
+// pencilSamples evaluates sys from (sE − A) at two points a decade from a
+// tenth of the least to ten times the largest modulus among poles and the
+// data scale ‖A‖/‖E‖ (points within 1e-3·|s| of a pole turned off it). It
+// keeps a point only where the direct solve succeeds and the response is
+// determined by the data: its first-order change under normwise ε
+// perturbations of A, E, B and C, ε·(‖C·R‖·‖R·B‖·(|s|·‖E‖ + ‖A‖) +
+// ‖C‖·‖R·B‖ + ‖C·R‖·‖B‖), R = (sE − A)⁻¹, is at most pencilSampleCap of
+// it. Above that the rounding of the data leaves s-terms and chain
+// eigenvalues of its own (|λ| ~ ε^(−1/k) for an index-k chain), which the
+// proper part MATLAB keeps does not have.
+func pencilSamples(sys *System, poles []complex128) []pencilSample {
+	n, m, p := sys.Dims()
+	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
+	normB, normC := denseNorm(sys.B), denseNorm(sys.C)
+	w := normA / normE
+	lo, hi := w, w
+	for _, v := range poles {
+		if r := cmplx.Abs(v); r > 0 && !math.IsInf(r, 0) {
+			lo, hi = min(lo, r), max(hi, r)
+		}
+	}
+	if !(lo > 0) || math.IsInf(hi, 0) {
+		return nil
+	}
+	k0, k1 := math.Floor(math.Log10(lo))-1, math.Ceil(math.Log10(hi))+1
+	step := math.Max(1, math.Ceil((k1-k0)/pencilSampleDecades))
+	direct := newFrequencyEvaluator(sys).pointEval()
+	a, e, b, c := sys.A.RawMatrix(), sys.E.RawMatrix(), sys.B.RawMatrix(), sys.C.RawMatrix()
+	lu := make([]complex128, n*n)
+	piv := make([]int, n)
+	x, y := make([]complex128, n*m), make([]complex128, n*p)
+	var out []pencilSample
+	for k := k0; k <= k1; k += step {
+		for _, dir := range [...]complex128{complex(0.6, 0.8), complex(-0.28, 0.96)} {
+			s := dir * complex(math.Pow(10, k), 0)
+			for range 4 {
+				near := false
+				for _, v := range poles {
+					near = near || cmplx.Abs(s-v) < 1e-3*cmplx.Abs(s)
+				}
+				if !near {
+					break
+				}
+				s *= cmplx.Rect(1, 0.05)
+			}
+			g := make([]complex128, p*m)
+			if direct(pointAt(s), g) != nil {
+				continue
+			}
+			var scale float64
+			for _, v := range g {
+				scale = max(scale, cmplx.Abs(v))
+			}
+			if !(scale > 0) || math.IsInf(scale, 0) {
+				continue
+			}
+			for i := range n {
+				for j := range n {
+					lu[i*n+j] = s*complex(e.Data[i*e.Stride+j], 0) - complex(a.Data[i*a.Stride+j], 0)
+				}
+			}
+			if !cLUFactor(lu, piv, n) {
+				continue
+			}
+			for i := range n {
+				for j := range m {
+					x[i*m+j] = complex(b.Data[i*b.Stride+j], 0)
+				}
+			}
+			cLUSolve(lu, piv, x, n, m)
+			for i := range n {
+				for j := range n {
+					lu[i*n+j] = s*complex(e.Data[j*e.Stride+i], 0) - complex(a.Data[j*a.Stride+i], 0)
+				}
+			}
+			if !cLUFactor(lu, piv, n) {
+				continue
+			}
+			for i := range n {
+				for j := range p {
+					y[i*p+j] = complex(c.Data[j*c.Stride+i], 0)
+				}
+			}
+			cLUSolve(lu, piv, y, n, p)
+			rb, cr := cFrobenius(x), cFrobenius(y)
+			sens := eps() * (cr*rb*(cmplx.Abs(s)*normE+normA) + normC*rb + cr*normB)
+			if sens <= pencilSampleCap*scale {
+				out = append(out, pencilSample{s, g, scale, reductionMatchTol*scale + sens})
+			}
+		}
+	}
+	return out
+}
+
+// pencilSampleDecades caps the decades pencilSamples spans one by one.
+const pencilSampleDecades = 24
+
+// pencilSampleCap bounds the relative sensitivity of a kept sample.
+const pencilSampleCap = 1e-4
+
+// resolventBases returns, for each sample, Φ = C·(sI − A)⁻¹ (p×nf) and
+// Ψ = (sI − A)⁻¹·B (nf×m) of the explicit model red, row-major; ok is
+// false at an exactly singular sI − A.
+func resolventBases(red *System, samples []pencilSample) (phi, psi [][]complex128, ok bool) {
+	nf, m, p := red.Dims()
+	lu := make([]complex128, nf*nf)
+	piv := make([]int, nf)
+	a, b, c := red.A.RawMatrix(), red.B.RawMatrix(), red.C.RawMatrix()
+	for _, smp := range samples {
+		for i := range nf {
+			for j := range nf {
+				lu[i*nf+j] = complex(-a.Data[i*a.Stride+j], 0)
+			}
+			lu[i*nf+i] += smp.s
+		}
+		if !cLUFactor(lu, piv, nf) {
+			return nil, nil, false
+		}
+		x := make([]complex128, nf*m)
+		for i := range nf {
+			for j := range m {
+				x[i*m+j] = complex(b.Data[i*b.Stride+j], 0)
+			}
+		}
+		cLUSolve(lu, piv, x, nf, m)
+		psi = append(psi, x)
+		for i := range nf {
+			for j := range nf {
+				lu[i*nf+j] = complex(-a.Data[j*a.Stride+i], 0)
+			}
+			lu[i*nf+i] += smp.s
+		}
+		if !cLUFactor(lu, piv, nf) {
+			return nil, nil, false
+		}
+		y := make([]complex128, nf*p)
+		for i := range nf {
+			for j := range p {
+				y[i*p+j] = complex(c.Data[j*c.Stride+i], 0)
+			}
+		}
+		cLUSolve(lu, piv, y, nf, p)
+		f := make([]complex128, p*nf)
+		for i := range p {
+			for j := range nf {
+				f[i*nf+j] = y[j*p+i]
+			}
+		}
+		phi = append(phi, f)
+	}
+	return phi, psi, true
+}
+
+// samplesMismatch is the largest mismatch of red against samples, each
+// entry relative to its sample's uncertainty unc.
+func samplesMismatch(red *System, samples []pencilSample, psi [][]complex128) float64 {
+	nf, m, p := red.Dims()
+	c, d := red.C.RawMatrix(), red.D.RawMatrix()
+	var worst float64
+	for k, smp := range samples {
+		for i := range p {
+			for j := range m {
+				h := complex(d.Data[i*d.Stride+j], 0)
+				for l := range nf {
+					h += complex(c.Data[i*c.Stride+l], 0) * psi[k][l*m+j]
+				}
+				worst = max(worst, cmplx.Abs(h-smp.g[i*m+j])/smp.unc)
+			}
+		}
+	}
+	return worst
+}
+
+// refitFromPencil returns red, the proper reduction of sys, with B and D,
+// and for p > 1 alternately C and D, refitted in weighted least squares to
+// pencilSamples of sys, A and so the poles kept; ok reports that the
+// result (red itself when it already does) matches every sample to its
+// uncertainty, from at least refitSurplus samples more than red has poles.
+// With dropped, the s-terms the reduction drops, ok also needs them
+// visible at some sample (droppedVisible). The response is well
+// conditioned where the Weierstrass split is not: beside an index ≥ 2
+// chain that QZ smears to |λ| ~ ε^(−1/k), a large finite pole λ (large in A
+// or small in E) has a deflating subspace turned by ε/sep, which moves a
+// residue ΔR, up to O(1)·|λ|, between λ, the nilpotent block and D. The
+// error ΔR·s/(λ(s − λ)) shows below |λ|, where the direct solve is
+// accurate, even when the data-scale points of reductionMatches cannot be
+// solved; the first-order fit of absorbStiffLeak leaves a second-order
+// remainder of it. Internal-delay models are not refitted.
+func refitFromPencil(sys, red *System, dropped []*mat.Dense) (*System, bool) {
+	nf, m, p := red.Dims()
+	if m == 0 || p == 0 || sys.internalDelayCount() > 0 {
+		return nil, false
+	}
+	var poles []complex128
+	if nf > 0 {
+		var eig mat.Eigen
+		if !eig.Factorize(red.A, mat.EigenNone) {
+			return nil, false
+		}
+		poles = eig.Values(nil)
+	}
+	samples := pencilSamples(sys, poles)
+	if len(samples) < nf+refitSurplus || dropped != nil && !droppedVisible(samples, dropped) {
+		return nil, false
+	}
+	phi, psi, ok := resolventBases(red, samples)
+	if !ok {
+		return nil, false
+	}
+	if samplesMismatch(red, samples, psi) <= 1 {
+		return red, true
+	}
+	out := red.Copy()
+	for round := range 2*refitRounds - 1 {
+		bSide := round%2 == 0
+		if !bSide && p == 1 {
+			break
+		}
+		basis := psi
+		if bSide {
+			basis = phi
+		}
+		if !refitSide(out, samples, basis, bSide) {
+			return nil, false
+		}
+		if phi, psi, ok = resolventBases(out, samples); !ok {
+			return nil, false
+		}
+		if samplesMismatch(out, samples, psi) <= 1 {
+			return out, true
+		}
+	}
+	return nil, false
+}
+
+// droppedVisible reports whether the s-terms dropped, Σ dropped[k−1]·s^k,
+// exceed refitVisible times the uncertainty of some sample: a proper model
+// that then matches every sample shows they are not in the response.
+func droppedVisible(samples []pencilSample, dropped []*mat.Dense) bool {
+	for _, smp := range samples {
+		r, c := dropped[0].Dims()
+		for i := range r {
+			for j := range c {
+				var v, pow complex128 = 0, 1
+				for _, t := range dropped {
+					pow *= smp.s
+					v += complex(t.At(i, j), 0) * pow
+				}
+				if cmplx.Abs(v) > refitVisible*smp.unc {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// refitSurplus, refitRounds (B-side fits, C-side ones between for p > 1)
+// and refitVisible set refitFromPencil.
+const (
+	refitSurplus = 4
+	refitRounds  = 3
+	refitVisible = 100
+	refitRankTol = 1e-13
+)
+
+// refitSide solves, in place, for B and D of red with bSide (basis Φ per
+// sample), else C and D (basis Ψ), one input column (output row) at a
+// time: Re and Im of Φ·B(:,j) + D(:,j) = G(:,j) at each sample, weighted
+// by 1/unc, with equilibrated columns, by SVD least squares truncated at
+// refitRankTol: a pole far above every sample is a column nearly equal to
+// D's, and a minimal-norm fit keeps it from a cancelling residue.
+func refitSide(red *System, samples []pencilSample, basis [][]complex128, bSide bool) bool {
+	nf, m, p := red.Dims()
+	outer, inner := m, p
+	if !bSide {
+		outer, inner = p, m
+	}
+	rows, cols := 2*len(samples)*inner, nf+inner
+	M := mat.NewDense(rows, cols, nil)
+	rhs := mat.NewVecDense(rows, nil)
+	colScale := make([]float64, cols)
+	var svd mat.SVD
+	var sol mat.Dense
+	for o := range outer {
+		for k, smp := range samples {
+			wk := 1 / smp.unc
+			for i := range inner {
+				r := 2 * (k*inner + i)
+				var g complex128
+				if bSide {
+					g = smp.g[i*m+o]
+				} else {
+					g = smp.g[o*m+i]
+				}
+				rhs.SetVec(r, wk*real(g))
+				rhs.SetVec(r+1, wk*imag(g))
+				for l := range nf {
+					v := basis[k][i*nf+l]
+					if !bSide {
+						v = basis[k][l*m+i]
+					}
+					M.Set(r, l, wk*real(v))
+					M.Set(r+1, l, wk*imag(v))
+				}
+				for l := range inner {
+					M.Set(r, nf+l, 0)
+					M.Set(r+1, nf+l, 0)
+				}
+				M.Set(r, nf+i, wk)
+			}
+		}
+		for l := range cols {
+			colScale[l] = mat.Norm(M.ColView(l), 2)
+			if colScale[l] == 0 {
+				return false
+			}
+			for r := range rows {
+				M.Set(r, l, M.At(r, l)/colScale[l])
+			}
+		}
+		if !svd.Factorize(M, mat.SVDThin) {
+			return false
+		}
+		rank := svd.Rank(refitRankTol)
+		if rank == 0 {
+			return false
+		}
+		svd.SolveTo(&sol, rhs, rank)
+		for l := range nf {
+			v := sol.At(l, 0) / colScale[l]
+			if bSide {
+				red.B.Set(l, o, v)
+			} else {
+				red.C.Set(o, l, v)
+			}
+		}
+		for l := range inner {
+			v := sol.At(nf+l, 0) / colScale[nf+l]
+			if bSide {
+				red.D.Set(l, o, v)
+			} else {
+				red.D.Set(o, l, v)
+			}
+		}
+	}
+	return true
 }
