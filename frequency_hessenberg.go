@@ -516,10 +516,13 @@ func outputConverged(cd, cx []float64, d, x []complex128, n, m, p, ks, js int, t
 // stability; one step normally suffices.
 type hessenbergSweep struct {
 	balancedRealization
-	q       []float64
-	h       []float64
-	bt      []float64 // QᵀB̂
-	ct      []float64 // ĈQ
+	q  []float64
+	h  []float64
+	bt []float64 // QᵀB̂
+	ct []float64 // ĈQ
+	// ctw bounds |ĈQ| with its reduction error, nε‖ĉᵢ‖₁ per row: a
+	// normwise backward error that swamps the entries a graded Ĉ cancels in.
+	ctw     []float64
 	hMax    float64
 	u       []complex128
 	inv     []complex128
@@ -531,11 +534,14 @@ type hessenbergSweep struct {
 	r       []complex128 // column-major n×m
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
+	sys       *System
+	dense     *balancedDense // denseRetry's solver, built on first use
+	alt       []complex128
 }
 
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	nn := n * n
-	f := make([]float64, 2*nn+n*m+p*n)
+	f := make([]float64, 2*nn+n*m+2*p*n)
 	c := make([]complex128, nn+3*n+3*n*m)
 	take := func(k int) []float64 {
 		out := f[:k:k]
@@ -547,8 +553,8 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 		c = c[k:]
 		return out
 	}
-	hs := &hessenbergSweep{balancedRealization: newBalancedRealization(sys, n, m, p)}
-	hs.q, hs.h, hs.bt, hs.ct = take(nn), take(nn), take(n*m), take(p*n)
+	hs := &hessenbergSweep{balancedRealization: newBalancedRealization(sys, n, m, p), sys: sys}
+	hs.q, hs.h, hs.bt, hs.ct, hs.ctw = take(nn), take(nn), take(n*m), take(p*n), take(p*n)
 	hs.u, hs.inv, hs.mult, hs.shift = ctake(nn), ctake(n), ctake(n), ctake(n)
 	hs.y, hs.x, hs.r = ctake(n*m), ctake(n*m), ctake(n*m)
 	hs.swapped = make([]bool, n)
@@ -568,6 +574,16 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	}
 	for _, v := range hs.h {
 		hs.hMax = max(hs.hMax, math.Abs(v))
+	}
+	for i := range p {
+		w := 0.0
+		for _, v := range hs.c[i*n : (i+1)*n] {
+			w += math.Abs(v)
+		}
+		w *= float64(n) * eps()
+		for k, v := range hs.ct[i*n : (i+1)*n] {
+			hs.ctw[i*n+k] = math.Abs(v) + w
+		}
 	}
 	return hs
 }
@@ -736,6 +752,13 @@ func qTMulCols(dst, src []complex128, q []float64, n, m int) {
 // roughly ε‖Â‖‖(sI-Â)⁻¹‖, so well-conditioned points stop after one.
 const maxRefineSteps = 3
 
+// sweepFirstStepTol is the relative output correction below which the
+// Hessenberg sweep accepts its first, working-precision refinement step;
+// later steps, against the exact pencil, accept only refineCondition·ε too,
+// since a step's correction bounds the error it leaves only where the
+// refinement contracts fast, which a graded model's slow states need not.
+var sweepFirstStepTol = refineCondition * eps()
+
 // refineStop is the relative correction below which refinement stops. The
 // correction δ estimates the error it removes and the contraction is about
 // ‖δ‖/‖x‖, so the error left after applying δ is near ‖δ‖²/‖x‖ ≤ ε‖x‖.
@@ -787,16 +810,42 @@ func (hs *hessenbergSweep) exactResidual(pt frequencyPoint) {
 }
 
 // outputConverged is outputConverged of the correction hs.y. Weighted by
-// |ĈQ| in Hessenberg coordinates it overstates the correction an output
-// sees, so where that fails the test is redone on Qy in r.
-func (hs *hessenbergSweep) outputConverged(tol float64) bool {
+// hs.ctw in Hessenberg coordinates it overstates the correction an output
+// sees, so where that is not exact the test is redone on Qy in r, and viaQ
+// reports that the correction must reach the output as Qy: ĈQ·y can then
+// be all reduction error (CKTRTW #23: 1.7e-30 beside Ĉ·Qy = 2.5e-40 and
+// |G| = 6.5e-27 on amd64).
+func (hs *hessenbergSweep) outputConverged(tol float64) (exact, floored, viaQ bool) {
 	n, m, p := hs.n, hs.m, hs.p
-	if _, ok := outputConverged(hs.ct, hs.c, hs.y, hs.x, n, m, p, 1, n, tol); ok {
-		return true
+	if exact, _ := outputConverged(hs.ctw, hs.c, hs.y, hs.x, n, m, p, 1, n, tol); exact {
+		return true, true, false
 	}
 	qMulCols(hs.r, hs.y, hs.q, n, m)
-	_, ok := outputConverged(hs.c, hs.c, hs.r, hs.x, n, m, p, 1, n, tol)
-	return ok
+	exact, floored = outputConverged(hs.c, hs.c, hs.r, hs.x, n, m, p, 1, n, tol)
+	return exact, floored, true
+}
+
+// denseRetry replaces dst with the balanced dense response at pt, built on
+// first use, where refinement stalled: only an output correction within
+// refineCondition·ε bounds the error left, and the reduction to H can leave
+// a graded model's slow states, the ones a cancelling output reads, beyond
+// what refinement through H resolves (CKTRTW: 2e10 relative). The dense
+// solver takes the double-double response where its own refinement stalls.
+// A dense failure keeps the sweep's value.
+func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) {
+	if hs.sys == nil {
+		return
+	}
+	if hs.dense == nil {
+		hs.dense = newBalancedDense(hs.sys, hs.n, hs.m, hs.p)
+		if hs.sys.internalDelayCount() == 0 {
+			hs.dense.sys = hs.sys
+		}
+		hs.alt = make([]complex128, hs.p*hs.m)
+	}
+	if hs.dense.evalInto(pt, hs.alt) == nil {
+		copy(dst, hs.alt)
+	}
 }
 
 func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
@@ -824,7 +873,9 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 	qMulCols(x, y, hs.q, n, m)
 
 	// y ends as the last correction in Hessenberg coordinates; it is
-	// applied through ĈQ, saving a final Q multiply.
+	// applied through ĈQ, saving a final Q multiply, unless only the Qy
+	// test passed (viaQ): then Qy, already in r, is added to x.
+	converged, viaQ := false, false
 	for step := range maxRefineSteps {
 		if step > 0 {
 			qMulCols(r, y, hs.q, n, m)
@@ -844,13 +895,24 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			dMax = max(dMax, cabs1(v))
 			xMax = max(xMax, cabs1(x[i]))
 		}
-		tol := refineStop
+		viaQ = false
+		tol := refineCondition * eps()
 		if step == 0 {
-			tol = refineCondition * eps()
+			tol = sweepFirstStepTol
 		}
-		if dMax <= tol*xMax && hs.outputConverged(tol) {
-			break
+		if dMax <= tol*xMax {
+			exact, floored, q := hs.outputConverged(tol)
+			converged, viaQ = exact, q
+			if floored {
+				break
+			}
 		}
+	}
+	if viaQ {
+		for i, v := range r {
+			x[i] += v
+		}
+		clear(y)
 	}
 
 	for row := range p {
@@ -871,6 +933,9 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			}
 			out[j] = complex(re+dre, im+dim)
 		}
+	}
+	if !converged {
+		hs.denseRetry(pt, dst)
 	}
 	return finiteResponse(dst)
 }
