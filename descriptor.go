@@ -748,7 +748,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 			}
 		}
 		if poly != nil {
-			if fixed, ok := refitFromPencil(sys, out, leakTerms); ok {
+			if fixed, ok, _ := refitFromPencil(sys, out, leakTerms); ok {
 				out, poly = fixed, nil
 			}
 		}
@@ -758,7 +758,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 			out, poly = fixed, nil
 		} else if reductionMatches(sys, out) {
 			poly = nil
-		} else if fixed, ok := refitFromPencil(sys, out, leakTerms); ok {
+		} else if fixed, ok, _ := refitFromPencil(sys, out, leakTerms); ok {
 			out, poly = fixed, nil
 		} else if poly == nil {
 			if verifyChain {
@@ -768,8 +768,11 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		}
 	}
 	if chain && poly == nil && q == 0 && nf > 0 {
-		if fixed, ok := refitFromPencil(sys, out, nil); ok {
+		fixed, ok, miss := refitFromPencil(sys, out, nil)
+		if ok {
 			out = fixed
+		} else if miss > refitRefuted {
+			return nil, nil, nil, errReductionRefuted
 		}
 	}
 	if verifyChain && (q > 0 || !reductionPolyMatches(sys, out, poly) || !nested && !sys.chainSplitReproducible(out, poly)) {
@@ -784,6 +787,14 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 // (reductionPolyMatches) or its own under rounding of the data
 // (chainSplitReproducible).
 var errChainLeft = fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
+
+// errReductionRefuted is the error of weierstrassReduceCore when a proper
+// reduction beside an index ≥ 2 chain misses the direct pencil solves of
+// refitFromPencil by more than refitRefuted times their uncertainty and
+// no refit matches them (too few samples, or none fits): the split moved
+// residue between a large finite pole, the nilpotent block and D, and the
+// model it gives is not the pencil's.
+var errReductionRefuted = fmt.Errorf("proper reduction contradicts direct pencil solves: %w", ErrDescriptorSingular)
 
 // reductionMatchTol bounds the relative mismatch reductionMatches accepts.
 const reductionMatchTol = 1e-10
@@ -1551,30 +1562,35 @@ func samplesMismatch(red *System, samples []pencilSample, psi [][]complex128) fl
 // error ΔR·s/(λ(s − λ)) shows below |λ|, where the direct solve is
 // accurate, even when the data-scale points of reductionMatches cannot be
 // solved; the first-order fit of absorbStiffLeak leaves a second-order
-// remainder of it. Internal-delay models are not refitted.
-func refitFromPencil(sys, red *System, dropped []*mat.Dense) (*System, bool) {
+// remainder of it. Internal-delay models are not refitted. miss is the
+// mismatch of red itself at whatever samples there are (0 with none).
+func refitFromPencil(sys, red *System, dropped []*mat.Dense) (fixed *System, ok bool, miss float64) {
 	nf, m, p := red.Dims()
 	if m == 0 || p == 0 || sys.internalDelayCount() > 0 {
-		return nil, false
+		return nil, false, 0
 	}
 	var poles []complex128
 	if nf > 0 {
 		var eig mat.Eigen
 		if !eig.Factorize(red.A, mat.EigenNone) {
-			return nil, false
+			return nil, false, 0
 		}
 		poles = eig.Values(nil)
 	}
 	samples := pencilSamples(sys, poles)
-	if len(samples) < nf+refitSurplus || dropped != nil && !droppedVisible(samples, dropped) {
-		return nil, false
+	if len(samples) == 0 {
+		return nil, false, 0
 	}
 	phi, psi, ok := resolventBases(red, samples)
 	if !ok {
-		return nil, false
+		return nil, false, 0
 	}
-	if samplesMismatch(red, samples, psi) <= 1 {
-		return red, true
+	miss = samplesMismatch(red, samples, psi)
+	if len(samples) < nf+refitSurplus || dropped != nil && !droppedVisible(samples, dropped) {
+		return nil, false, miss
+	}
+	if miss <= 1 {
+		return red, true, miss
 	}
 	out := red.Copy()
 	for round := range 2*refitRounds - 1 {
@@ -1587,16 +1603,16 @@ func refitFromPencil(sys, red *System, dropped []*mat.Dense) (*System, bool) {
 			basis = phi
 		}
 		if !refitSide(out, samples, basis, bSide) {
-			return nil, false
+			return nil, false, miss
 		}
 		if phi, psi, ok = resolventBases(out, samples); !ok {
-			return nil, false
+			return nil, false, miss
 		}
 		if samplesMismatch(out, samples, psi) <= 1 {
-			return out, true
+			return out, true, miss
 		}
 	}
-	return nil, false
+	return nil, false, miss
 }
 
 // droppedVisible reports whether the s-terms dropped, Σ dropped[k−1]·s^k,
@@ -1621,13 +1637,17 @@ func droppedVisible(samples []pencilSample, dropped []*mat.Dense) bool {
 	return false
 }
 
-// refitSurplus, refitRounds (B-side fits, C-side ones between for p > 1)
-// and refitVisible set refitFromPencil.
+// refitSurplus, refitRounds (B-side fits, C-side ones between for p > 1),
+// refitVisible and refitRefuted set refitFromPencil and its use: above
+// refitRefuted a reduction that no refit matches fails closed. Correct
+// reductions miss by ≤ 6 in the condChainDescriptor sweeps, misallocated
+// residues by 1e10 and more.
 const (
 	refitSurplus = 4
 	refitRounds  = 3
 	refitVisible = 100
 	refitRankTol = 1e-13
+	refitRefuted = 1e4
 )
 
 // refitSide solves, in place, for B and D of red with bSide (basis Φ per

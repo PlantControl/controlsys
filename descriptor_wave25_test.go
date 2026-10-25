@@ -235,3 +235,143 @@ func TestDescriptorStiffChainSweep(t *testing.T) {
 		t.Errorf("%d proper [4] chains match the oracle (want ≥ 35), %d do not (want ≤ 10)", good, bad)
 	}
 }
+
+// refutedChainDescriptor: MIMO 3×3 index-6 proper chain beside the finite
+// pole 1e5/w (F = diag(1e5, f2, f3, I6), W = diag(w1, w2, w3, N6),
+// w ∈ [0.5, 1.5); b nonzero at the finite states and the chain's first,
+// c and D Gaussian; A = U·F·V, E = U·W·V, Gaussian U, V). Oracle: the
+// structured model (F, W, b, c, D).
+func refutedChainDescriptor(t *testing.T, seed uint64) (sys, oracle *System) {
+	t.Helper()
+	rng := rand.New(rand.NewPCG(seed, 4242))
+	nf, k, p, m := 3, 6, 3, 3
+	n := nf + k
+	F, W := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+	for i := range nf {
+		f := rng.NormFloat64()
+		if i == 0 {
+			f = 1e5
+		}
+		F.Set(i, i, f)
+		W.Set(i, i, 0.5+rng.Float64())
+	}
+	for i := range k {
+		F.Set(nf+i, nf+i, 1)
+		if i+1 < k {
+			W.Set(nf+i, nf+i+1, 1)
+		}
+	}
+	b, c, D := mat.NewDense(n, m, nil), mat.NewDense(p, n, nil), mat.NewDense(p, m, nil)
+	for i := range n {
+		for j := range m {
+			if i <= nf {
+				b.Set(i, j, rng.NormFloat64())
+			}
+		}
+		for j := range p {
+			c.Set(j, i, rng.NormFloat64())
+		}
+	}
+	for i := range p {
+		for j := range m {
+			D.Set(i, j, rng.NormFloat64())
+		}
+	}
+	U, V := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+	for i := range n {
+		for j := range n {
+			U.Set(i, j, rng.NormFloat64())
+			V.Set(i, j, rng.NormFloat64())
+		}
+	}
+	var T, A, E, B, C mat.Dense
+	T.Mul(U, F)
+	A.Mul(&T, V)
+	T.Mul(U, W)
+	E.Mul(&T, V)
+	B.Mul(U, b)
+	C.Mul(c, V)
+	var err error
+	if sys, err = NewDescriptor(&A, &B, &C, D, &E, 0); err != nil {
+		t.Fatal(err)
+	}
+	if oracle, err = NewDescriptor(F, b, c, D, W, 0); err != nil {
+		t.Fatal(err)
+	}
+	return sys, oracle
+}
+
+// TestDescriptorRefutedReductionFailsClosed: BAQHZG. Beside an index ≥ 2
+// chain the split misallocates residue to a large finite pole; the direct
+// (sE − A) samples of refitFromPencil show it (mismatch 1e10..1e15 times
+// their uncertainty; correct reductions ≤ 6), but there were too few to
+// refit (B/55: 8 at |s| 0.01..10, 10 needed) or none fit, and base
+// returned the reduction as proper: B/55 TF(0.05i) −0.545 − 15.44i
+// against −0.544 + 0.285i, 3e5 relative at 1e3i; MIMO chains [6] beside
+// 1.67e5 (seed 0: 1e5 relative). Now IsProper, Step and TransferFunction
+// fail closed alike; proper chains whose reduction is right still return
+// TFs that match the structured oracle.
+func TestDescriptorRefutedReductionFailsClosed(t *testing.T) {
+	failsClosed := func(label string, sys *System) bool {
+		t.Helper()
+		_, perr := sys.IsProper()
+		_, serr := Step(sys, 1)
+		_, terr := sys.TransferFunction(nil)
+		n := 0
+		for _, e := range []error{perr, serr, terr} {
+			if errors.Is(e, ErrDescriptorSingular) {
+				n++
+			}
+		}
+		if n != 0 && n != 3 {
+			t.Errorf("%s: IsProper %v, Step %v, TF %v disagree", label, perr, serr, terr)
+		}
+		return n == 3
+	}
+	rng := rand.New(rand.NewPCG(55, 911))
+	chains := [][]int{{2}, {3}, {4}, {5}, {6}, {2, 3}, {3, 2}}[rng.IntN(7)]
+	proper := rng.IntN(3) != 0
+	nf := 1 + rng.IntN(3)
+	sr := math.Pow(10, -1-5*rng.Float64())
+	sys, _, _ := condChainDescriptor(t, rng, nf, chains, sr, proper, 1+2*rng.Float64())
+	if !failsClosed("B/55", sys) {
+		t.Errorf("B/55: want ErrDescriptorSingular from IsProper, Step and TF")
+	}
+
+	good, closed := 0, 0
+	for seed := range uint64(200) {
+		label := fmt.Sprintf("C/%d", seed)
+		sys, oracle := refutedChainDescriptor(t, seed)
+		if failsClosed(label, sys) {
+			closed++
+			continue
+		}
+		pr, err := sys.IsProper()
+		if err != nil || !pr {
+			continue
+		}
+		res, err := sys.TransferFunction(nil)
+		if err != nil {
+			t.Fatalf("%s: TransferFunction: %v", label, err)
+		}
+		for _, s := range []complex128{0.05i, 0.37i, complex(0.5, 3), 30i} {
+			g, err := res.TF.Eval(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := pencilResponse(t, oracle, s)
+			for i := range w {
+				for j := range w[i] {
+					if d := cmplx.Abs(g[i][j] - w[i][j]); !(d <= 1e-5*math.Max(1, cmplx.Abs(w[i][j]))) {
+						t.Errorf("%s: IsProper true, G(%v)[%d][%d] = %v, want %v", label, s, i, j, g[i][j], w[i][j])
+					}
+				}
+			}
+		}
+		good++
+	}
+	t.Logf("%d proper TFs match, %d fail closed", good, closed)
+	if good < 45 || closed == 0 {
+		t.Errorf("%d proper TFs match the oracle (want ≥ 45), %d fail closed (want > 0)", good, closed)
+	}
+}
