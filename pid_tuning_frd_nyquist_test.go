@@ -280,8 +280,11 @@ func TestPIDTuningFRDNyquistCountDiscreteEnd(t *testing.T) {
 
 // Data that stop at 0.3π/Dt leave this PI loop at |L| ≈ 1.005 and falling
 // at the top sample. Taking the loop to roll off there keeps base's stable
-// design (|S| about 2.9); treating the end as unknown rejected it.
-// Oracle: exact Schur–Cohn.
+// design (|S| about 2.9); treating the end as unknown rejected it. Its
+// loop also crosses 0 dB at 7.33 rad/s with L within 3° of +1, a margin
+// of −178° wrapped, which the step's fits read and the chord, 10° off,
+// put at 172°; every crossing stays at least 42° from −1.
+// Oracles: exact Schur–Cohn and a dense margin sweep of the exact plant.
 func TestTunePIDFRDNyquistKeepsFallingTop(t *testing.T) {
 	num, den := []float64{0.9023903264994049}, []float64{1, -0.8012602517942834, 0.42575814095814646, 0.03842946865883065, 0.0055779329529266905}
 	dt := .1
@@ -299,7 +302,25 @@ func TestTunePIDFRDNyquistKeepsFallingTop(t *testing.T) {
 	if !pidtuneExactSchur(&PID{IFormula: k.IFormula, DFormula: k.DFormula, Kp: k.Kp, Ki: k.Ki, Kd: k.Kd, Tf: k.Tf, Dt: k.Dt}, num, den, dt) {
 		t.Errorf("%+v unstable", k)
 	}
-	if r.Evidence.AchievedPhaseMargin < 42-1e-6 {
-		t.Errorf("achieved margin %g", r.Evidence.AchievedPhaseMargin)
+	if m := r.Evidence.PhaseMargins[0]; m < 42-1e-6 {
+		t.Errorf("margin %g at wc", m)
+	}
+	least, n, prev := 180., 0, 0.
+	for i := 0; i <= 200000; i++ {
+		w := 1e-3 * math.Pow(.3*math.Pi/dt/1e-3, float64(i)/200000)
+		z := cmplx.Exp(complex(0, w*dt))
+		l := pidPolyAt(num, z) / pidPolyAt(den, z) * pidTuningFeedback(k, w)
+		if e := cmplx.Abs(l) - 1; i > 0 && e*prev < 0 {
+			least, n = math.Min(least, 180-math.Abs(cmplx.Phase(l))*180/math.Pi), n+1
+		}
+		prev = cmplx.Abs(l) - 1
+	}
+	if n < 2 || least < 42 {
+		t.Errorf("dense margin %g over %d crossings", least, n)
+	}
+	for i, m := range r.Evidence.PhaseMargins {
+		if math.Abs(m) < 42-1e-6 {
+			t.Errorf("margin %g at %g", m, r.Evidence.GainCrossovers[i])
+		}
 	}
 }
