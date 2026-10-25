@@ -7,7 +7,7 @@ import "testing"
 // dense, zoh, repzero, unstable, leadlag, notch, marginal, pid realized
 // exactly from k·Π(s−z)/Π(s−p), each identity, transposed, diagonally
 // scaled, Givens-rotated, elementary- or triangular-similar), judged by the
-// exact oracle of rlocus_sweep_rv_test.go. Cases are frozen as generated
+// exact oracle of rlocus_sweep_reviewer_test.go. Cases are frozen as generated
 // (testdata/rlocus_sweep_rv5_cases.json.gz); RLOCUS_SWEEPRV5_ORACLE and
 // RLOCUS_SWEEPRV5_WRITE=<path> regenerate the oracle cache and the base
 // verdicts (base rlswBaseRev, per arch; base code only).

@@ -19,7 +19,7 @@ import (
 // runs) and every later revision must keep each verdict base got right.
 // Regenerate the file only with base code: RLOCUS_SWEEP_WRITE=<path> (one
 // arch per run; AND the two ok strings nibble-wise).
-// rlocus_sweep_ext_test.go adds a second frozen set of harder families.
+// rlocus_sweep_feedthrough_test.go adds a second frozen set of harder families.
 //
 // Each case is a SISO loop k·Z(s)/P(s) (+D) with dyadic poles, zeros and
 // gain, realized as a companion form, a Givens-rotated companion or a
