@@ -197,7 +197,10 @@ func nonEmptyDense(m *mat.Dense) *mat.Dense {
 // discrete, are set to zero (zero-order Padé) so the model has finitely many
 // poles; an ill-posed zero-delay loop returns ErrAlgebraicLoop. Discrete delay
 // poles at z = 0 appear only after AbsorbDelay. Input/output delays add no
-// poles. NaN or Inf entries in A or E return ErrInvalidArgument. See
+// poles. NaN or Inf entries in A or E return ErrInvalidArgument. When E is
+// rank deficient by MATLAB's rank tolerance, the eigenvalues from its null
+// space are infinite and not reported, as in MATLAB pole, even where a
+// perturbed pencil would place them at a large finite value. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html.
 func (sys *System) Poles() ([]complex128, error) {
 	n, _, _ := sys.Dims()
@@ -217,7 +220,9 @@ func (sys *System) Poles() ([]complex128, error) {
 // IsStable reports whether every pole lies in the open left half-plane
 // (continuous) or the open unit disk (discrete), as MATLAB isstable
 // (https://www.mathworks.com/help/control/ref/dynamicsystem.isstable.html);
-// poles on the boundary are not stable. Input, output and I/O delays do not
+// poles on the boundary are not stable. Descriptor poles are those of
+// Poles: eigenvalues from the null space of an E rank deficient by MATLAB's
+// rank tolerance are infinite and do not count. Input, output and I/O delays do not
 // affect stability. Discrete internal delays are absorbed exactly into
 // shift-register states before the pole test. A continuous model with
 // internal delays has the infinitely many roots of

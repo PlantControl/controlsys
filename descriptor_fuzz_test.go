@@ -800,15 +800,16 @@ func TestDescriptorChainBesideSmallEPole(t *testing.T) {
 // cond(V) 1e1..1e3 (condChainDescriptor), [4] and [5] beside a pole of E
 // singular value 1e-2..1e-4 relative. Base eb8d9e1 read 253/300 and
 // 283/300 of the proper ones improper. A returned TF must match the
-// structured oracle to 1e-5 up to 1e7i. Improper ones must stay improper
-// but for 1 ([4]) and 2 ([5]) that return ErrDescriptorSingular on base.
+// structured oracle to 1e-5 up to 1e7i. Improper ones must stay improper;
+// 1 ([4]) and 2 ([5]) with a stiff E returned ErrDescriptorSingular before
+// EVSFPV, [5] seed 92 still does (TestDescriptorStiffChainConditioned).
 func TestDescriptorChainBesideSmallEPoleConditioned(t *testing.T) {
 	skipSlowUnderRace(t)
 	for _, tc := range []struct {
 		chains         []int
 		maxFalse       int
 		maxFalseProper int
-	}{{[]int{4}, 10, 1}, {[]int{5}, 30, 2}} {
+	}{{[]int{4}, 10, 0}, {[]int{5}, 30, 1}} {
 		false_, falseProper := 0, 0
 		for seed := range uint64(300) {
 			for _, proper := range []bool{true, false} {
