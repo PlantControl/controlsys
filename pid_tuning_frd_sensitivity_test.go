@@ -127,3 +127,56 @@ func TestTunePIDFRDSensitivityBoundKeepsDesigns(t *testing.T) {
 	}
 	t.Logf("%d of %d designs replaced", replaced, n)
 }
+
+// Certified designs whose |S| peaks where the sampled scan reads none:
+// between two samples across a lightly damped mode whose two fits
+// disagree (J42E7A: 4.75 and 8.86 against sampled 3.07 and 2.56), on the
+// DC-to-lo line below the band (CXWHXX: 11.5), at z = −1 above discrete
+// data stopping at 0.955π (4.38) and at ω → ∞ of an ideal PD on a
+// relative-degree-one plant (4.24). Each design is returned unchanged,
+// stable, now without certification. Ideal PDs parked just under the
+// bound at ω → ∞ (strict sweep seeds 519, 565, 833) stay certified, as
+// the Markov end is extrapolated, not widened by its spread. Oracles:
+// companion roots, exact Schur–Cohn and dense exact |S|.
+func TestTunePIDFRDUnsampledSensitivityUncertified(t *testing.T) {
+	for _, c := range []pidFRDStrictCase{
+		{"between samples PIDF", []float64{5.256412315376749e-08, 4.7338299227851e-09}, []float64{1, 0.00696924768219797, 0.0005706342067653564, 1.49497704056467e-06, 5.978781921603224e-08}, 0, 0.00018504889257226238, 1.0694725898516853, 67, PidtunePIDF, PIDTuningOptions{}, PID2{Kp: 2.052565140571584, Ki: 0.019062621341399227, Kd: 245.4031504143213, Tf: 0.07109858305474219}},
+		{"sparse between samples PIDF", []float64{-0.0009501753302565275}, []float64{1, 0.27163067136624075, 0.0611715345300015, 0.009142841844187882, 0.00013121342125506342}, 0, 0.0017225746868072026, 8.035444271007805, 29, PidtunePIDF, PIDTuningOptions{PhaseMargin: 70}, PID2{Kp: -0.6838885802382229, Ki: -0.012940973039722694, Kd: -1.6868808667511357, Tf: 0.01202861076201854}},
+		{"below band PID", []float64{8956.585594900349, -136138.83030121162, 203360.74062388795}, []float64{1, 65.324624930553185, 138.64933209380754, 3008.0268873768041, 1038.3228838918781}, 0, 0.090582667614022838, 4655.7551987022716, 218, PidtunePID, PIDTuningOptions{PhaseMargin: 45}, PID2{Kp: -0.004648420111217961, Ki: 1.6093841187230203e-05, Kd: -0.00010947744200795812}},
+		{"short of Nyquist P", []float64{3.2276235464735703}, []float64{1, -0.1353352832366127}, 1, 0.1, 3, 235, PidtuneP, PIDTuningOptions{DFormula: BackwardEuler}, PID2{Kp: 0.27146407295759734, DFormula: BackwardEuler, Dt: 1}},
+		{"ideal PD at infinity", []float64{29.738740460879715}, []float64{1, 58.620180397923804}, 0, 14.294148998804204, 428.82446996412614, 212, PidtunePD, PIDTuningOptions{PhaseMargin: 30}, PID2{Kp: 2.3083139862711555, Kd: -0.02568974752121812}},
+	} {
+		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
+		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		k := *r.Controller
+		for _, g := range [][2]float64{{k.Kp, c.k.Kp}, {k.Ki, c.k.Ki}, {k.Kd, c.k.Kd}, {k.Tf, c.k.Tf}} {
+			if math.Abs(g[0]-g[1]) > 1e-3*math.Abs(g[1]) {
+				t.Errorf("%s: %+v, base gave %+v", c.name, k, c.k)
+				break
+			}
+		}
+		if !pidFRDStrictStable(c.num, c.den, k) {
+			t.Errorf("%s: %+v unstable", c.name, k)
+		}
+		if peak := pidFRDStrictPeak(c.num, c.den, c.dt, k, c.lo); !(peak > 4.2) || !pidHasWarning(r, "sensitivity peak is not certified") {
+			t.Errorf("%s: dense |S| %g, warnings %q", c.name, peak, r.Evidence.Warnings)
+		}
+	}
+	for _, seed := range []uint64{519, 565, 833} {
+		c := pidFRDStrictSweepCase(rand.New(rand.NewPCG(7729, seed)))
+		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
+		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		if err != nil {
+			t.Errorf("seed %d: %v", seed, err)
+			continue
+		}
+		k := *r.Controller
+		if peak := pidFRDStrictPeak(c.num, c.den, c.dt, k, c.lo); !pidFRDStrictStable(c.num, c.den, k) || !(peak <= 4) || pidHasWarning(r, "not certified") {
+			t.Errorf("seed %d: %+v dense |S| %g, warnings %q", seed, k, peak, r.Evidence.Warnings)
+		}
+	}
+}

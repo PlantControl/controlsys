@@ -37,7 +37,11 @@ import (
 // no search on the same samples can rule that resonance out; so does one
 // whose loop, along a fit across such a step, reaches |L| = 1 or |S| > 4.
 // The returned design's margins count its crossings along the data's
-// resonance fits too (pidTuningFRDFitMargins).
+// resonance fits too (pidTuningFRDFitMargins). A certified design whose
+// |S| the data leave above 4 where the sampled scan reads none (along a
+// fit between samples, between DC and the band, or past its top;
+// pidTuningFRDUnsampledPeak) is returned unchanged with a warning that
+// its sensitivity peak is not certified.
 // A design whose sampled |S| peak
 // exceeds 4 is searched for again under that bound at its crossover; at
 // the default crossover, failing that, at crossovers lowered and then
@@ -114,11 +118,94 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 		return r, err
 	}
 	pidTuningFRDFitMargins(r, strict)
-	if !pidTuningFRDCertified(*r.Controller, chord) || pidTuningFRDCertified(*r.Controller, strict) {
-		return r, nil
+	c := *r.Controller
+	switch {
+	case !pidTuningFRDCertified(c, chord):
+	case !pidTuningFRDCertified(c, strict):
+		r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count passed this design along the chords between samples, but a step of the data may hide a lightly damped resonance whose loop winds 1 + L round 0 or takes |L| through 1 or |S| past 4 between them, so its closed-loop stability is not certified, nor its margins and sensitivity peak there.")
+	default:
+		if v := pidTuningFRDUnsampledPeak(strict, c); v > pidTuningMaxSensitivity {
+			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("The strict sampled Nyquist count passed this design, but the data leave its sensitivity peak |S| up to %.4g, above %d, along a fitted resonance between samples or below or above the band, so its sensitivity peak is not certified.", v, pidTuningMaxSensitivity))
+		}
 	}
-	r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count passed this design along the chords between samples, but a step of the data may hide a lightly damped resonance whose loop winds 1 + L round 0 or takes |L| through 1 or |S| past 4 between them, so its closed-loop stability is not certified, nor its margins and sensitivity peak there.")
 	return r, nil
+}
+
+// pidTuningFRDUnsampledPeak returns the largest |S| of c the strict plant
+// p's data leave open where the sampled scan (pidTuningSensitivityPeak)
+// reads none: along every fit of each step crossArcs, unresolved or arcs
+// holds, both fits taken as the samples may not fix the pole's σ; along
+// the line the count runs G on from a sampled DC gain to the lowest
+// sample; discrete, at z = −1 extrapolated from the top two samples as the
+// count does where it ends 1 + L there (within 10% of Nyquist, L within
+// 30° of the real axis, no derivative pole at z = −1); and continuous, with an
+// ideal derivative, at L(∞) = Kd·m for any m between the Markov end the
+// data show at their top and its extrapolation from there and half a
+// decade below, Re jωG being m + O(ω⁻²). It only reads: the design is
+// unchanged.
+func pidTuningFRDUnsampledPeak(p pidTuningPlant, c PID2) float64 {
+	peak := 0.
+	at := func(l complex128) {
+		if v := 1 / cmplx.Abs(1+l); !math.IsNaN(v) {
+			peak = math.Max(peak, v)
+		}
+	}
+	for _, set := range [][][]pidTuningFRDMode{p.crossArcs, p.unresolved, p.arcs} {
+		for k, fits := range set {
+			for _, m := range fits {
+				_, v := m.max(func(w float64) float64 {
+					v := 1 / cmplx.Abs(1+m.at(w)*pidTuningFeedback(c, w))
+					if math.IsNaN(v) {
+						return math.Inf(1)
+					}
+					return v
+				}, p.samples[k], p.samples[k+1])
+				peak = math.Max(peak, v)
+			}
+		}
+	}
+	if p.lowAnchored && !p.lowAnchor && p.dcGain != 0 {
+		dc, gLow := complex(p.dcGain, 0), p.at(p.low)
+		s := func(w float64) float64 {
+			v := 1 / cmplx.Abs(1+(dc+(gLow-dc)*complex(w/p.low, 0))*pidTuningFeedback(c, w))
+			if math.IsNaN(v) {
+				return 0
+			}
+			return v
+		}
+		const pieces = 64
+		grid := func(i int) float64 { return p.low * math.Pow(1e-6, 1-float64(i)/pieces) }
+		best, bv := 0, -1.
+		for i := 0; i <= pieces; i++ {
+			if v := s(grid(i)); v > bv {
+				best, bv = i, v
+			}
+		}
+		_, g := pidTuningGoldenMax(s, grid(max(best-1, 0)), grid(min(best+1, pieces)))
+		peak = math.Max(peak, math.Max(bv, g))
+	}
+	n := len(p.samples)
+	if n < 2 {
+		return peak
+	}
+	high, w2 := p.samples[n-1], p.samples[n-2]
+	l, l2 := p.at(high)*pidTuningFeedback(c, high), p.at(w2)*pidTuningFeedback(c, w2)
+	circle := c.Dt > 0 && c.Kd != 0 && c.Tf+c.Dt*pidFormulaWeight(c.DFormula) == c.Dt/2
+	switch {
+	case c.Dt > 0 && high*c.Dt >= .9*math.Pi && !circle && math.Abs(imag(l)) <= .5*cmplx.Abs(l):
+		e1, e2 := math.Pi/c.Dt-high, math.Pi/c.Dt-w2
+		at(complex((real(l)*e2*e2-real(l2)*e1*e1)/(e2*e2-e1*e1), 0))
+	case c.Dt == 0 && c.Tf == 0 && c.Kd != 0 && p.markov != 0:
+		w1 := math.Max(high/math.Sqrt(10), p.low)
+		r1 := real(complex(0, w1) * p.at(w1))
+		m := (p.markov*high*high - r1*w1*w1) / (high*high - w1*w1)
+		lo, hi := c.Kd*p.markov, c.Kd*m
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		at(complex(math.Min(math.Max(-1, lo), hi), 0))
+	}
+	return peak
 }
 
 // pidTuningFRDFitMargins adds to r's evidence its design's gain crossings
