@@ -22,7 +22,7 @@ func runtimeArchitectureMIMO(t *testing.T) *System {
 	return sys
 }
 
-func TestRuntimeArchitectureSISOLoopAnalysisRejectsMIMOConsistently(t *testing.T) {
+func TestArchitectureSISOLoopAnalysisRejectsMIMOConsistently(t *testing.T) {
 	sys := runtimeArchitectureMIMO(t)
 	checks := []struct {
 		name string
@@ -60,7 +60,7 @@ func TestRuntimeArchitectureSISOLoopAnalysisRejectsMIMOConsistently(t *testing.T
 	}
 }
 
-func TestRuntimeArchitectureSISOLoopAnalysisKeepsGainWorkflow(t *testing.T) {
+func TestArchitectureSISOLoopAnalysisKeepsGainWorkflow(t *testing.T) {
 	sys, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestRuntimeArchitectureSISOLoopAnalysisKeepsGainWorkflow(t *testing.T) {
 	}
 }
 
-func TestRuntimeArchitectureCovarianceRejectsDescriptorWorkflows(t *testing.T) {
+func TestArchitectureCovarianceRejectsDescriptorWorkflows(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
 		mat.NewDense(2, 1, []float64{1, 0}),
@@ -112,7 +112,7 @@ func TestRuntimeArchitectureCovarianceRejectsDescriptorWorkflows(t *testing.T) {
 	}
 }
 
-func TestRuntimeArchitectureTransformationsRejectDescriptorWorkflows(t *testing.T) {
+func TestArchitectureTransformationsRejectDescriptorWorkflows(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
 		mat.NewDense(2, 1, []float64{1, 0}),
@@ -153,7 +153,7 @@ func TestRuntimeArchitectureTransformationsRejectDescriptorWorkflows(t *testing.
 	}
 }
 
-func TestRuntimeArchitectureEnergyAnalysisRejectsDescriptorWorkflows(t *testing.T) {
+func TestArchitectureEnergyAnalysisRejectsDescriptorWorkflows(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{-1, 2, 0, -3}),
 		mat.NewDense(2, 1, []float64{1, 0}),

@@ -7,7 +7,7 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-func TestPRD131RealizationTransformsPreserveMetadataAndSampleTime(t *testing.T) {
+func TestArchitectureRealizationTransformsPreserveMetadataAndSampleTime(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{
 			0.7, 0.2,
@@ -57,7 +57,7 @@ func TestPRD131RealizationTransformsPreserveMetadataAndSampleTime(t *testing.T) 
 	check("Ssbal", ssbal.Sys)
 }
 
-func TestPRD131ReductionAndBalancingPreserveResultConstructionBehavior(t *testing.T) {
+func TestArchitectureReductionAndBalancingPreserveResultConstructionBehavior(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{
 			0.5, 0.1,
@@ -95,7 +95,7 @@ func TestPRD131ReductionAndBalancingPreserveResultConstructionBehavior(t *testin
 	}
 }
 
-func TestPRD131StabsepUsesConsistentDecompositionResultAssembly(t *testing.T) {
+func TestArchitectureStabsepUsesConsistentDecompositionResultAssembly(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{
 			-0.4, 0.2,

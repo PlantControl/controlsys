@@ -40,7 +40,7 @@ func prd103Model(t *testing.T, dt float64) *System {
 	return sys
 }
 
-func TestPRD103InterconnectionTopologyPublicDelayWorkflows(t *testing.T) {
+func TestArchitectureInterconnectionTopologyPublicDelayWorkflows(t *testing.T) {
 	plant := prd103Model(t, 0.1)
 	if err := plant.SetInputDelay([]float64{2, 0}); err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestPRD103InterconnectionTopologyPublicDelayWorkflows(t *testing.T) {
 	}
 }
 
-func TestPRD103DelayConversionPolicyPublicWorkflows(t *testing.T) {
+func TestArchitectureDelayConversionPolicyPublicWorkflows(t *testing.T) {
 	cont := prd103Model(t, 0)
 	cont.InputDelay = []float64{0.25, 0}
 	cont.OutputDelay = []float64{0, 0.35}
@@ -141,7 +141,7 @@ func TestPRD103DelayConversionPolicyPublicWorkflows(t *testing.T) {
 	}
 }
 
-func TestPRD103FrequencyAnalysisSampledResponseParity(t *testing.T) {
+func TestArchitectureFrequencyAnalysisSampledResponseParity(t *testing.T) {
 	sys := prd103Model(t, 0.1)
 	omega := []float64{0.2, 0.8, 1.7, 2.9}
 
@@ -202,7 +202,7 @@ func TestPRD103FrequencyAnalysisSampledResponseParity(t *testing.T) {
 	}
 }
 
-func TestPRD103TimeResponsePlanningPublicWorkflows(t *testing.T) {
+func TestArchitectureTimeResponsePlanningPublicWorkflows(t *testing.T) {
 	gain, err := NewGain(mat.NewDense(2, 2, []float64{2, -1, 0.5, 1.5}), 0.1)
 	if err != nil {
 		t.Fatal(err)

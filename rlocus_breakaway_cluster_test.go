@@ -1,9 +1,11 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -232,7 +234,7 @@ func TestRootLocus_MarkovZeroCountConsistent(t *testing.T) {
 	}
 }
 
-// TestRootLocus_PAOH7XSweepPins: frozen-sweep cases a first PAOH7X rework
+// TestRootLocus_SweepPins: frozen-sweep cases a first PAOH7X rework
 // got wrong. Ext 439/495: a double pole beside a resolved simple pole (sub-
 // group split; the stationary point between them is kept). Ext 1887: two
 // resolved poles of a non-normal rotated realization, whose pair mean is no
@@ -241,7 +243,7 @@ func TestRootLocus_MarkovZeroCountConsistent(t *testing.T) {
 // stationary point, not the eig mean. Ext 954: an exact triple pole at 0
 // is reported at 0. Base 512: a near triple is not merged as a double.
 // Base 207: an origin double split into a real pair ±3.9e-9.
-func TestRootLocus_PAOH7XSweepPins(t *testing.T) {
+func TestRootLocus_SweepPins(t *testing.T) {
 	ext, base := rlsxGenerate(), rlswGenerate()
 	for _, tc := range []struct {
 		name string
@@ -317,4 +319,178 @@ func TestRootLocus_MultiplePoleBreakawayListedOnce(t *testing.T) {
 		}
 		rlqUnique(t, "triple zero companion", res.Breakaway)
 	}
+}
+
+// Pinned wave-20 review-3 cases of the rlocus track. Expected sets come
+// from the exact big.Rat oracle on the float coefficients (rlpExactOracle)
+// or the sweep oracles (rlswCase.oracles).
+
+// TestRootLocus_DoublePoleBesideSimplePoleExact: an exact double real pole
+// beside a simple pole 2⁻¹¹ relative apart keeps its K = 0 breakaway (base
+// correct). R272: controllable companion, eig resolves the double pair from
+// the simple pole. Observable companion of (13/2³⁸)((s+3·2⁻¹⁶)²+(25·2⁻¹⁷)²)
+// over (s+15·2⁻¹⁷)²(s+15·2⁻¹⁷(1+2⁻¹¹))(s+15·2⁻¹⁵)(s−3·2⁻¹⁴).
+func TestRootLocus_DoublePoleBesideSimplePoleExact(t *testing.T) {
+	a := make([]float64, 16)
+	for i := range 3 {
+		a[i*4+i+1] = 1
+	}
+	copy(a[12:], []float64{5.5084024941437495e-21, 1.7213335791466111e-15, 1.0912870607171499e-10, -1.0494142770767212e-05})
+	rlqOracleCheck(t, "R272", 4, a, []float64{0, 0, 0, 1}, []float64{1.0799670077492329e-19, -1.3322676295501878e-14, 0, 0}, 0, 2)
+
+	q := math.Ldexp(15, -17)
+	poles := []complex128{complex(-q, 0), complex(-q, 0), complex(-q*(1+math.Ldexp(1, -11)), 0), complex(-4*q, 0), complex(math.Ldexp(3, -14), 0)}
+	zeros := []complex128{complex(-math.Ldexp(3, -16), math.Ldexp(25, -17)), complex(-math.Ldexp(3, -16), -math.Ldexp(25, -17))}
+	num := rlsdNum(5, rlswPolyFromRoots(poles), zeros, math.Ldexp(13, -38), 0)
+	c := rlsdCase(nil, poles, zeros, num, 0, 1)
+	rlqOracleCheck(t, "observable 2^-11", 5, c.a, c.b, c.c, 0, 3)
+}
+
+// TestRootLocus_NoSpuriousBreakBesideNearTriple (case 2095): a dyadic
+// similarity of 448/((s+3.625)²(s+3.625885009765625)(s+5.625)) whose eig
+// cannot order its three cluster poles (u·κ far above their split): a
+// cluster pair is no double pole, so N'D − ND' root −3.62559 (K < 0) is no
+// breakaway. amd64 eig splits the cluster into a complex pair, where base
+// is wrong too ([]), so the pin runs on arm64.
+func TestRootLocus_NoSpuriousBreakBesideNearTriple(t *testing.T) {
+	if runtime.GOARCH != "arm64" {
+		t.Skip("amd64 eig: precision limit, base also wrong")
+	}
+	a := []float64{0, 1, -2.25, 9, 0, 0, 1, -2.25, -1072.0438921451569, -1613.7440816164017, 2421.6315648257732, -9751.529799342155, -268.0109730362892, -403.4360204041004, 605.4078912064433, -2438.132449835539}
+	rlqOracleCheck(t, "2095", 4, a, []float64{0, 0, 4, 1}, []float64{448, 224, -392, 1568}, 0, 2)
+}
+
+// TestRootLocus_MultipleZeroBreakOnce: a triple zero is one break point.
+// Companion of −1024s³(s−512)/((s+3072)³(s−1024)²) (w17 #60): the triple
+// zero at 0 is split by rounding past √u·σ but within u^(1/3)·σ, base gave
+// [409.15]. Third sweep 850/325/856 (D ≠ 0, triple zero −0.03125, −1.831e-4,
+// −9.52e-3: base listed it twice or the converted numerator lost it) and 2
+// (triple zero at 0, amd64).
+func TestRootLocus_MultipleZeroBreakOnce(t *testing.T) {
+	den := rlswPolyFromRoots([]complex128{-3072, -3072, -3072, 1024, 1024})
+	df := make([]float64, len(den))
+	for i, x := range den {
+		df[i] = rlswF(x)
+	}
+	a, b, c := rlpCompanion(df, []float64{-1024, 524288, 0, 0, 0})
+	rlqOracleCheck(t, "w17 #60", 5, a, b, c, 0, 3)
+
+	cases := rlsdGenerate()
+	for _, i := range []int{2, 325, 850, 856} {
+		sys, err := cases[i].system()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := RootLocus(sys, []float64{0, 1})
+		if err != nil {
+			t.Fatalf("case %d: %v", i, err)
+		}
+		oi, of := cases[i].oracles()
+		if !oi.accepts(res.Breakaway) && !of.accepts(res.Breakaway) {
+			t.Errorf("sweep %d: Breakaway = %v, oracles %v / %v", i, res.Breakaway, oi.required, of.required)
+		}
+	}
+}
+
+// Pinned wave-20 review-4 cases of the rlocus track. Expected sets come
+// from the exact big.Rat oracles of the intended and the float TF
+// (rlswCase.oracles).
+
+func rlrcCheck(t *testing.T, name string, c rlswCase) {
+	t.Helper()
+	sys, err := c.system()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := RootLocus(sys, []float64{0, 1})
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	rlqUnique(t, name, res.Breakaway)
+	if oi, of := c.oracles(); !oi.accepts(res.Breakaway) && !of.accepts(res.Breakaway) {
+		t.Errorf("%s: Breakaway = %v, want %v / %v", name, res.Breakaway, oi.required, of.required)
+	}
+}
+
+// rlrcPairBesideSimple is 1 − 3s(s+1.625)/den (d = 1) or −3s(s+1.625)/den
+// (d = 0), den with poles −2, −5.5, −5.875 and −5.875(1+2^−k1) ± 5.875·2^−k2·i,
+// as an exact companion (form 0) or observable (form 1) realization.
+func rlrcPairBesideSimple(k1, k2, form int, d float64) rlswCase {
+	q := 5.875
+	re, im := -q*(1+math.Ldexp(1, -k1)), q*math.Ldexp(1, -k2)
+	poles := []complex128{-2, -5.5, complex(-q, 0), complex(re, im), complex(re, -im)}
+	zeros := []complex128{0, -1.625}
+	return rlsdCase(nil, poles, zeros, rlsdNum(5, rlswPolyFromRoots(poles), zeros, -3, d), d, form)
+}
+
+// TestRootLocus_ResolvedPairBesideSimplePole: a resolved complex pole pair
+// beside a simple pole is no K = 0 double pole, though the nearby simple
+// pole makes the converted D confirm a double root at its p′ root to 10·u:
+// eig resolves the pair (no u·κ link), and K < 0 there (exact G ≈ +3.5e10
+// for 2^−11, 2^−13), so the only break point is −5.5932 (base correct for
+// D = 1; base listed four points for D = 0).
+func TestRootLocus_ResolvedPairBesideSimplePole(t *testing.T) {
+	for _, k := range [][2]int{{9, 14}, {10, 14}, {11, 13}, {11, 14}, {12, 14}} {
+		for form := range 2 {
+			rlrcCheck(t, fmt.Sprintf("2^-%d, 2^-%d form %d", k[0], k[1], form), rlrcPairBesideSimple(k[0], k[1], form, 1))
+		}
+	}
+	rlrcCheck(t, "2^-11, 2^-13 D=0", rlrcPairBesideSimple(11, 13, 0, 0))
+}
+
+func rlrcCompanion(n int, lastRow, c []float64) (a, b []float64) {
+	a, b = make([]float64, n*n), make([]float64, n)
+	for i := range n - 1 {
+		a[i*n+i+1] = 1
+	}
+	copy(a[(n-1)*n:], lastRow)
+	b[n-1] = 1
+	return a, b
+}
+
+// TestRootLocus_TripleZeroListedOnce: −16(s+1)³/((s+38)(s+41)(s−10)(s−17)),
+// integer companion: the triple zero −1 is one break point. amd64 tzero
+// splits it by 1.5e-4, so both split roots of N'D − ND' were listed (base
+// [12.4695], wrong too).
+func TestRootLocus_TripleZeroListedOnce(t *testing.T) {
+	a, b := rlrcCompanion(4, []float64{-264860, 28636, 405, -52}, nil)
+	rlqOracleCheck(t, "triple zero -1", 4, a, b, []float64{-16, -48, -48, -16}, 0, 2)
+}
+
+// TestRootLocus_MultipleZeroOfStrictlyProperPartOnce: with D ≠ 0 a triple
+// zero of G − D (no zero of G) is a double root of N'D − ND', one break
+// point (base missed it).
+func TestRootLocus_MultipleZeroOfStrictlyProperPartOnce(t *testing.T) {
+	a := []float64{0, 0, 0, -2.575143298599869e-07, 1, 0, 0, -2.7045607566833496e-06, 0, 1, 0, -0.0010194778442382812, 0, 0, 1, -0.005859375}
+	res, err := RootLocus(rlpSys(t, 4, a, []float64{2.6520865503698587e-09, -2.7157366275787354e-06, 0.000926971435546875, -0.10546875}, []float64{0, 0, 0, 1}, -0.25, 0), []float64{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exact oracle (arm64; its float posedness check fails on amd64).
+	o := rlswOracle{posed: true, required: []float64{0.0029296875, 0.04708051704829962}, scale: 0.0059}
+	if !o.accepts(res.Breakaway) {
+		t.Errorf("observable triple zero 0.0029296875: Breakaway = %v, want %v", res.Breakaway, o.required)
+	}
+	a, b := rlrcCompanion(4, []float64{695625, 14450, -2360, -98}, nil)
+	rlqOracleCheck(t, "companion triple zero -12", 4, a, b, []float64{193536, 48384, 4032, 112}, -0.25, 2)
+}
+
+// TestRootLocus_SlowSixPoleBreakaways (U3H63X): companion of poles
+// 1.220703125e-4, −4.8828125e-4, −7.9345703125e-4, 3.0517578125e-4,
+// −3.0517578125e-4 ± 5.4931640625e-4i with C = [0.00201416015625 −3 0 0 0 0]
+// has three K > 0 break points (exact oracle −6.763e-4, 2.387e-4,
+// 8.360e-4; not 1-ulp sensitive). Base and branch give []: the converted
+// TF (rationalTransferFunction) is −3/(degree-5 D), dropping the zero
+// 6.714e-4 with a pole the loop does not have, so N'D − ND' has no real
+// root there; rlocus.go cannot recover it.
+func TestRootLocus_SlowSixPoleBreakaways(t *testing.T) {
+	t.Skip("TransferFunction drops zero 6.714e-4 and a pole of this slow companion (transfer.go)")
+	poles := []complex128{1.220703125e-4, -4.8828125e-4, -7.9345703125e-4, 3.0517578125e-4, complex(-3.0517578125e-4, 5.4931640625e-4), complex(-3.0517578125e-4, -5.4931640625e-4)}
+	den := rlswPolyFromRoots(poles)
+	row := make([]float64, 6)
+	for j := range 6 {
+		row[j] = -rlswF(den[6-j])
+	}
+	a, b := rlrcCompanion(6, row, nil)
+	rlqOracleCheck(t, "U3H63X six-pole", 6, a, b, []float64{0.00201416015625, -3, 0, 0, 0, 0}, 0, 3)
 }

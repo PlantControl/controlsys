@@ -9,7 +9,7 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-func TestPostPR116CrossSeamConversionMetadataRationalAndFRD(t *testing.T) {
+func TestArchitectureCrossSeamConversionMetadataRationalAndFRD(t *testing.T) {
 	cont, err := New(
 		mat.NewDense(2, 2, []float64{-1, 2, -3, -4}),
 		mat.NewDense(2, 1, []float64{1, -2}),

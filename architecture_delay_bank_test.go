@@ -41,7 +41,7 @@ func prd95MIMOModel(t *testing.T, dt float64) *System {
 	return sys
 }
 
-func TestPRD95DelayBankPublicWorkflowsShareRules(t *testing.T) {
+func TestArchitectureDelayBankPublicWorkflowsShareRules(t *testing.T) {
 	plant := prd95MIMOModel(t, 0)
 	plant.InputDelay = []float64{0.35, 0}
 	plant.OutputDelay = []float64{0, 0.45}
@@ -89,7 +89,7 @@ func TestPRD95DelayBankPublicWorkflowsShareRules(t *testing.T) {
 	}
 }
 
-func TestPRD95LFTDelayWorkflowPreservesExternalDelayAndMetadata(t *testing.T) {
+func TestArchitectureLFTDelayWorkflowPreservesExternalDelayAndMetadata(t *testing.T) {
 	M, err := NewGain(mat.NewDense(2, 2, []float64{
 		0.2, 0.5,
 		1.0, 0.1,
@@ -150,7 +150,7 @@ func TestPRD95LFTDelayWorkflowPreservesExternalDelayAndMetadata(t *testing.T) {
 	}
 }
 
-func TestPRD95TimeDomainResponsePreparationPublicContracts(t *testing.T) {
+func TestArchitectureTimeDomainResponsePreparationPublicContracts(t *testing.T) {
 	cont := prd95MIMOModel(t, 0)
 	cont.OutputName = []string{"temperature", "pressure"}
 	tFinal := 0.5
@@ -213,7 +213,7 @@ func TestPRD95TimeDomainResponsePreparationPublicContracts(t *testing.T) {
 	}
 }
 
-func TestPRD95FrequencyResponseLayoutPublicWorkflowsAgree(t *testing.T) {
+func TestArchitectureFrequencyResponseLayoutPublicWorkflowsAgree(t *testing.T) {
 	sys := prd95MIMOModel(t, 0.1)
 	omega := []float64{0.2, 1.0, 2.4}
 	resp, err := sys.FreqResponse(omega)
