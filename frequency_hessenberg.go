@@ -92,6 +92,7 @@ type balancedDense struct {
 	x      []complex128   // row-major n×m
 	piv    []int          // evalInto's row interchanges, for refine
 	r      []complex128   // row-major n×m, refine's residual
+	dErr   []float64      // row-major n×m, substitutionBound's, made on first use
 	pt     frequencyPoint // the point evalInto last factored, for refine
 	tol    float64
 	// stalled marks a point at which refine did not resolve every response
@@ -362,7 +363,7 @@ func (bd *balancedDense) refine() {
 		// rounds to zero an inaccurate x would pass.
 		if step == 0 && dMax <= refineCondition*eps()*xMax {
 			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineCondition*eps()); floored {
-				if !exact {
+				if !exact || bd.correctionNoise(r, refineCondition*eps()) {
 					bd.stallErr(r)
 				}
 				return
@@ -378,13 +379,13 @@ func (bd *balancedDense) refine() {
 			// largest, where the normwise contraction does not bound its
 			// error (CKTRTW: 6e-10 relative left); others take refineStop.
 			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineCondition*eps()); floored {
-				if !exact {
+				if !exact || bd.correctionNoise(r, refineCondition*eps()) {
 					bd.stallErr(r)
 				}
 				return
 			}
 			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineStop); floored {
-				if !exact {
+				if !exact || bd.correctionNoise(r, refineStop) {
 					bd.stallErr(r)
 				}
 				return
@@ -395,24 +396,73 @@ func (bd *balancedDense) refine() {
 }
 
 // stallErr records in bd.solveErr, per response entry, Σₖ|ĉᵢₖ||dₖⱼ| of
-// refine's last correction d, which estimates the error left where
-// refinement stalls.
+// refine's last correction d, or the back-substitution noise in it where
+// larger, which estimates the error left where refinement stalls.
 func (bd *balancedDense) stallErr(d []complex128) {
 	n, m, p := bd.n, bd.m, bd.p
 	if bd.solveErr == nil {
 		bd.solveErr = make([]float64, p*m)
 	}
+	bd.substitutionBound(d)
 	for i := range p {
 		cr := bd.c[i*n : (i+1)*n]
 		for j := range m {
-			w := 0.0
+			var w, we float64
 			for k, c := range cr {
 				w += math.Abs(c) * cabs1(d[k*m+j])
+				we += math.Abs(c) * bd.dErr[k*m+j]
 			}
-			bd.solveErr[i*m+j] = w
+			bd.solveErr[i*m+j] = max(w, eps()*we)
 		}
 	}
 	bd.stalled = true
+}
+
+// correctionNoise reports whether the back-substitution rounding of the
+// correction d, ε·Σₖ|ĉᵢₖ|eₖⱼ, exceeds tol of some response entry
+// Σₖ|ĉᵢₖ||xₖⱼ|. An output reading states far below the largest takes its
+// correction from substitution terms that cancel, and its rounding can
+// exceed the correction it should resolve; a correction that then rounds
+// to zero proves nothing (CKTRTW: amd64 1.3e-4 relative accepted).
+func (bd *balancedDense) correctionNoise(d []complex128, tol float64) bool {
+	n, m, x := bd.n, bd.m, bd.x
+	bd.substitutionBound(d)
+	for j := range m {
+		for i := range bd.p {
+			var w, we float64
+			for k, c := range bd.c[i*n : (i+1)*n] {
+				w += math.Abs(c) * cabs1(x[k*m+j])
+				we += math.Abs(c) * bd.dErr[k*m+j]
+			}
+			if !(eps()*we <= tol*w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// substitutionBound sets bd.dErr to the first-order rounding error, in
+// units of ε, of back substitution for y: eᵢ = (|yᵢ||uᵢᵢ| + Σₖ|uᵢₖ|(|yₖ| +
+// eₖ))/|uᵢᵢ|, as substitutionError bounds it for bd.x.
+func (bd *balancedDense) substitutionBound(y []complex128) {
+	n, m, a := bd.n, bd.m, bd.pencil
+	if bd.dErr == nil {
+		bd.dErr = make([]float64, n*m)
+	}
+	e := bd.dErr
+	for i := n - 1; i >= 0; i-- {
+		ui := a[i*n+i+1 : i*n+bd.last[i]+1]
+		ii := cabs1(bd.inv[i])
+		for j := range m {
+			v := cabs1(y[i*m+j]) / ii
+			for k, u := range ui {
+				l := (i+1+k)*m + j
+				v += cabs1(u) * (cabs1(y[l]) + e[l])
+			}
+			e[i*m+j] = v * ii
+		}
+	}
 }
 
 // outputCancels reports whether back substitution may have lost a response

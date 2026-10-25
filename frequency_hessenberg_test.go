@@ -933,3 +933,13 @@ func TestEvalFrRefineOutputTolerance(t *testing.T) {
 		assertExactResponse(t, fmt.Sprintf("seed %d", c.seed), sys, c.ws, 1e-12)
 	}
 }
+
+// CKTRTW: on a graded tf2ss companion (seed 3565) C = e₁ reads x₀ ~1e-12
+// against states ~5e12, so refine's back substitution resolves the output
+// correction only to ~14% of x₀. Under amd64 its first correction rounded
+// to exactly zero there and refine accepted (-1.5+0i), 1.3e-4 relative off
+// with the imaginary part lost; the substitution noise must mark a stall.
+func TestEvalFrRefineStagnation(t *testing.T) {
+	sys := stalledCompanionCase(t, 3565, -1)
+	assertExactResponse(t, "seed 3565", sys, []float64{0.0458159766905449}, 1e-12)
+}
