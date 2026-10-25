@@ -840,3 +840,96 @@ func TestEvalFrStalledRefineSweep(t *testing.T) {
 		t.Error("no stalled point in the sweep")
 	}
 }
+
+// stalledCompanionCase draws a graded companion as the CKTRTW probes did:
+// rand.NewPCG(seed, 25), n = 6..26, B a unit vector, dense C, and shape
+// drawn last unless shape >= 0 overrides it.
+func stalledCompanionCase(t *testing.T, seed uint64, shape int) *System {
+	t.Helper()
+	r := rand.New(rand.NewPCG(seed, 25))
+	n := 6 + r.IntN(21)
+	den := ratPolyFromRoots(stalledSweepRoots(r, n))
+	b, c := make([]float64, n), make([]float64, n)
+	b[r.IntN(n)] = 1
+	for k := range n {
+		if r.IntN(3) > 0 {
+			c[k] = float64(r.IntN(33)-16) / 8
+		}
+	}
+	if s := r.IntN(4); shape < 0 {
+		shape = s
+	}
+	a, bt, ct := companionShape(den, b, c, shape)
+	sys, err := NewFromSlices(n, 1, 1, a, bt, ct, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+func stalledGrid(extra ...float64) []float64 {
+	ws := append([]float64(nil), extra...)
+	for i := range 60 {
+		ws = append(ws, math.Pow(10, -5+8*float64(i)/59))
+	}
+	return ws
+}
+
+func assertExactResponse(t *testing.T, label string, sys *System, ws []float64, tol float64) {
+	t.Helper()
+	fr, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+	for k, w := range ws {
+		s := complex(0, w)
+		ex := frExactResponse(sys, frBigC(s))[0]
+		dd := make([]complex128, 1)
+		if !ddResponseInto(sys, pointAt(s), dd) || cmplx.Abs(dd[0]-ex) > 1e-13*cmplx.Abs(ex) {
+			t.Fatalf("%s w=%g: oracles disagree: dd %v, exact %v", label, w, dd[0], ex)
+		}
+		ev, err := sys.EvalFr(s)
+		if err != nil {
+			t.Fatalf("%s w=%g: EvalFr: %v", label, w, err)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"FreqResponse", fr.At(k, 0, 0)}, {"EvalFr", ev[0][0]}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > tol {
+				t.Errorf("%s %s at w=%g: %v off exact %v by %.3g", label, got.name, w, got.v, ex, e)
+			}
+		}
+	}
+}
+
+// CKTRTW: where the Hessenberg sweep stalls and the dense retry's pivots
+// call a well-conditioned graded companion singular (scale ~7e62), the
+// sweep kept its unconverged value, 12.6 relative off at ω = 1.02e-5 (case
+// 729) while EvalFr was exact. The sweep must take the double-double
+// response there.
+func TestFreqResponseSweepDenseRetrySingular(t *testing.T) {
+	sys := stalledCompanionCase(t, 1506, -1)
+	ws := stalledGrid(1.024780675602502e-5)
+	if _, ok := newFrequencyEvaluator(sys).pointSolver(len(ws)).(*hessenbergSweep); !ok {
+		t.Fatalf("%d-point grid not on the Hessenberg sweep", len(ws))
+	}
+	assertExactResponse(t, "seed 1506", sys, ws, 1e-12)
+}
+
+// CKTRTW (LEAZRP residual): balancedDense.refine accepted a step whose
+// output correction passed only at refineStop, leaving 6e-10 relative error
+// on well-conditioned tf2ss-shaped graded companions (cases 539, 795); the
+// output correction must pass at refineCondition·ε or mark a stall.
+func TestEvalFrRefineOutputTolerance(t *testing.T) {
+	for _, c := range []struct {
+		seed uint64
+		ws   []float64
+	}{
+		{1316, []float64{2.8479984625635305e-4, 1.4839497278460016e-2, 0.19271363044622533}},
+		{1572, []float64{2.5514065200312875e-5, 1.3280930072008135e-3}},
+	} {
+		sys := stalledCompanionCase(t, c.seed, 3)
+		assertExactResponse(t, fmt.Sprintf("seed %d", c.seed), sys, c.ws, 1e-12)
+	}
+}

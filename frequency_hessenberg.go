@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -373,6 +374,15 @@ func (bd *balancedDense) refine() {
 			xMax = max(xMax, cabs1(x[i]))
 		}
 		if dMax <= refineStop*xMax {
+			// An entry at the resolution floor reads states far below the
+			// largest, where the normwise contraction does not bound its
+			// error (CKTRTW: 6e-10 relative left); others take refineStop.
+			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineCondition*eps()); floored {
+				if !exact {
+					bd.stallErr(r)
+				}
+				return
+			}
 			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineStop); floored {
 				if !exact {
 					bd.stallErr(r)
@@ -762,6 +772,9 @@ var sweepFirstStepTol = refineCondition * eps()
 // refineStop is the relative correction below which refinement stops. The
 // correction δ estimates the error it removes and the contraction is about
 // ‖δ‖/‖x‖, so the error left after applying δ is near ‖δ‖²/‖x‖ ≤ ε‖x‖.
+// That bound is normwise: an output at the resolution floor, reading states
+// far below the largest, can keep 1e-9 relative error past a 1e-17 normwise
+// step (CKTRTW), so balancedDense.refine holds it to refineCondition·ε.
 var refineStop = math.Sqrt(eps())
 
 // residual sets r = B̂ - (sI-Â)x̂. The diagonal enters as s-âᵢᵢ, as GEPP
@@ -831,10 +844,13 @@ func (hs *hessenbergSweep) outputConverged(tol float64) (exact, floored, viaQ bo
 // a graded model's slow states, the ones a cancelling output reads, beyond
 // what refinement through H resolves (CKTRTW: 2e10 relative). The dense
 // solver takes the double-double response where its own refinement stalls.
-// A dense failure keeps the sweep's value.
-func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) {
+// Where the dense pivots call the pencil singular, as a graded companion's
+// can far from any pole (CKTRTW: 12.6 relative kept), a delay-free model
+// takes the double-double response, and the dense error is returned where
+// that is singular too.
+func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) error {
 	if hs.sys == nil {
-		return
+		return nil
 	}
 	if hs.dense == nil {
 		hs.dense = newBalancedDense(hs.sys, hs.n, hs.m, hs.p)
@@ -843,9 +859,14 @@ func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) {
 		}
 		hs.alt = make([]complex128, hs.p*hs.m)
 	}
-	if hs.dense.evalInto(pt, hs.alt) == nil {
+	err := hs.dense.evalInto(pt, hs.alt)
+	if errors.Is(err, errSingularPencil) && hs.dense.sys != nil && ddResponseInto(hs.sys, pt, hs.alt) {
+		err = nil
+	}
+	if err == nil {
 		copy(dst, hs.alt)
 	}
+	return err
 }
 
 func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
@@ -935,7 +956,9 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 		}
 	}
 	if !converged {
-		hs.denseRetry(pt, dst)
+		if err := hs.denseRetry(pt, dst); err != nil {
+			return err
+		}
 	}
 	return finiteResponse(dst)
 }
