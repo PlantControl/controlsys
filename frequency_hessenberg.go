@@ -79,8 +79,8 @@ func newRealizationCopy(sys *System, n, m, p int) balancedRealization {
 // pencil entries are rounded: next to a lightly damped pole at distance d
 // the slow mode keeps only about ε/d relative accuracy. A pivot below
 // 1/refineCondition of the pencil scale flags such a point, and so does a
-// response entry that back substitution may have lost to cancellation
-// (outputCancels); refine reuses the LU factors and, unless the first
+// response entry that elimination or back substitution may have lost to
+// cancellation (outputCancels); refine reuses the LU factors and, unless the first
 // correction against the exact pencil (pencilResidual) shows the solution
 // already accurate, refines with them.
 type balancedDense struct {
@@ -334,8 +334,9 @@ func (bd *balancedDense) stallInaccurate(dst []complex128) bool {
 // κ = −q for the explicit sI − Â of a non-plain point and 1 otherwise, with
 // the factors evalInto left in bd.pencil and bd.piv. It stops once the
 // correction is small normwise and in every response entry; where an entry
-// passes only at the resolution floor of outputConverged, or the steps run
-// out, the point is marked stalled.
+// passes only at the resolution floor of outputConverged, the correction is
+// within its own substitution noise, or the steps run out, the point is
+// marked stalled.
 func (bd *balancedDense) refine() {
 	pt := bd.pt
 	n, m := bd.n, bd.m
