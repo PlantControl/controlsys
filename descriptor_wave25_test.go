@@ -333,9 +333,23 @@ func TestDescriptorRefutedReductionFailsClosed(t *testing.T) {
 	proper := rng.IntN(3) != 0
 	nf := 1 + rng.IntN(3)
 	sr := math.Pow(10, -1-5*rng.Float64())
-	sys, _, _ := condChainDescriptor(t, rng, nf, chains, sr, proper, 1+2*rng.Float64())
+	sys, orc, _ := condChainDescriptor(t, rng, nf, chains, sr, proper, 1+2*rng.Float64())
+	// Borderline: fails closed natively; FMA contraction (-race) resolves it.
 	if !failsClosed("B/55", sys) {
-		t.Errorf("B/55: want ErrDescriptorSingular from IsProper, Step and TF")
+		res, err := sys.TransferFunction(nil)
+		if err != nil {
+			t.Fatalf("B/55: TF %v without failing closed", err)
+		}
+		for _, s := range []complex128{0.37i, complex(0.5, 3), 20i} {
+			g, err := res.TF.Eval(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := pencilResponse(t, orc, s)[0][0]
+			if d := cmplx.Abs(g[0][0] - want); !(d <= 1e-8*math.Max(1, cmplx.Abs(want))) {
+				t.Errorf("B/55: G(%v) = %v, want %v (or ErrDescriptorSingular)", s, g[0][0], want)
+			}
+		}
 	}
 
 	good, closed := 0, 0
