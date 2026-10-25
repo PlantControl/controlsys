@@ -1040,6 +1040,9 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 			return false, true, false
 		}
 		if i > 0 && p.unresolved != nil && p.unresolved[i-1] != nil {
+			if len(p.unresolved[i-1]) == 0 && pidTuningFRDModeLifts(p, i-1) && !(math.Max(cmplx.Abs(f1-1), cmplx.Abs(f2-1)) < .25) {
+				return true, false, false
+			}
 			u := f2 - f1
 			hidden = hidden || real(u)*imag(-f1)-imag(u)*real(-f1) > 0 || pidTuningFRDFitsReach(p.unresolved[i-1], c, s[i-1], w)
 		}
@@ -1154,6 +1157,24 @@ func pidTuningFRDUnresolved(data *FRD) [][]pidTuningFRDMode {
 		out[k] = append([]pidTuningFRDMode{}, fits[:nf]...)
 	}
 	return out
+}
+
+// pidTuningFRDModeLifts reports whether step k of p's samples, marked
+// unresolved, may hold a pole pair: arg G turns past a quarter turn across
+// it, or its samples' |G| exceed both outer neighbours' by more than
+// √min(ρ, 1 + 1/ρ), ρ the step's ratio. A pole pair at ω₀ inside the step
+// lifts them by at least min(ρ, 1 + 1/ρ) (|G| ∝ 1/|ω − ω₀|, ω₀ at an end),
+// while the two samples about a smooth maximum differ from their
+// neighbours only to second order in log ρ.
+func pidTuningFRDModeLifts(p pidTuningPlant, k int) bool {
+	s := p.samples
+	a, b := p.at(s[k]), p.at(s[k+1])
+	if math.Abs(cmplx.Phase(b/a)) > math.Pi/2 || k == 0 || k+2 >= len(s) {
+		return true
+	}
+	rho := s[k+1] / s[k]
+	lift := math.Min(cmplx.Abs(a), cmplx.Abs(b)) / math.Max(cmplx.Abs(p.at(s[k-1])), cmplx.Abs(p.at(s[k+2])))
+	return !(lift <= math.Sqrt(math.Min(rho, 1+1/rho)))
 }
 
 // pidTuningFRDFitsReach reports whether c's loop along any of fits over
