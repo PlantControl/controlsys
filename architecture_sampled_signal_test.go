@@ -9,7 +9,7 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-func TestPRD125SampledTimeDomainWorkflowsPreserveOrientation(t *testing.T) {
+func TestArchitectureSampledTimeDomainWorkflowsPreserveOrientation(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{
 			0.7, 0.2,
@@ -61,7 +61,7 @@ func TestPRD125SampledTimeDomainWorkflowsPreserveOrientation(t *testing.T) {
 	}
 }
 
-func TestPRD125LsimAllowsZeroInputAutonomousSampledSignal(t *testing.T) {
+func TestArchitectureLsimAllowsZeroInputAutonomousSampledSignal(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{
 			0.5, 0.1,
@@ -88,7 +88,7 @@ func TestPRD125LsimAllowsZeroInputAutonomousSampledSignal(t *testing.T) {
 	assertMatClose(t, "autonomous Lsim output", resp.Y, wantY, 1e-12)
 }
 
-func TestPRD125FreqRespEstUsesStridedSampledSignals(t *testing.T) {
+func TestArchitectureFreqRespEstUsesStridedSampledSignals(t *testing.T) {
 	dt := 0.05
 	steps := 512
 	baseInput := mat.NewDense(2, steps+3, nil)
@@ -118,7 +118,7 @@ func TestPRD125FreqRespEstUsesStridedSampledSignals(t *testing.T) {
 	}
 }
 
-func TestPRD125ERAMarkovValidationPreservesPublicErrors(t *testing.T) {
+func TestArchitectureERAMarkovValidationPreservesPublicErrors(t *testing.T) {
 	_, err := ERA([]*mat.Dense{
 		mat.NewDense(2, 1, nil),
 		mat.NewDense(1, 1, nil),
@@ -138,7 +138,7 @@ func TestPRD125ERAMarkovValidationPreservesPublicErrors(t *testing.T) {
 	}
 }
 
-func TestPRD125MatrixEquationPublicErrorBehavior(t *testing.T) {
+func TestArchitectureMatrixEquationPublicErrorBehavior(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{
 		0, 1,
 		-2, -3,
@@ -169,7 +169,7 @@ func TestPRD125MatrixEquationPublicErrorBehavior(t *testing.T) {
 	}
 }
 
-func TestPRD125MatrixEquationPublicNumericalBehavior(t *testing.T) {
+func TestArchitectureMatrixEquationPublicNumericalBehavior(t *testing.T) {
 	sys, err := New(
 		mat.NewDense(2, 2, []float64{
 			0.7, 0.2,

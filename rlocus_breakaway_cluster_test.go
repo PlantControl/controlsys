@@ -234,7 +234,7 @@ func TestRootLocus_MarkovZeroCountConsistent(t *testing.T) {
 	}
 }
 
-// TestRootLocus_PAOH7XSweepPins: frozen-sweep cases a first PAOH7X rework
+// TestRootLocus_SweepPins: frozen-sweep cases a first PAOH7X rework
 // got wrong. Ext 439/495: a double pole beside a resolved simple pole (sub-
 // group split; the stationary point between them is kept). Ext 1887: two
 // resolved poles of a non-normal rotated realization, whose pair mean is no
@@ -243,7 +243,7 @@ func TestRootLocus_MarkovZeroCountConsistent(t *testing.T) {
 // stationary point, not the eig mean. Ext 954: an exact triple pole at 0
 // is reported at 0. Base 512: a near triple is not merged as a double.
 // Base 207: an origin double split into a real pair ±3.9e-9.
-func TestRootLocus_PAOH7XSweepPins(t *testing.T) {
+func TestRootLocus_SweepPins(t *testing.T) {
 	ext, base := rlsxGenerate(), rlswGenerate()
 	for _, tc := range []struct {
 		name string

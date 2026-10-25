@@ -42,7 +42,7 @@ func remainingArchitectureMIMO(t *testing.T, dt float64) *System {
 	return sys
 }
 
-func TestRemainingArchitectureDelayTopologyPublicOperations(t *testing.T) {
+func TestArchitectureDelayTopologyPublicOperations(t *testing.T) {
 	base := remainingArchitectureMIMO(t, 0)
 
 	split := base.Copy()
@@ -151,7 +151,7 @@ func replaceExplicitIODelaysWithPade(sys *System, padeOrder int) (*System, error
 	return result, nil
 }
 
-func TestRemainingArchitectureConversionPlannerBehavior(t *testing.T) {
+func TestArchitectureConversionPlannerBehavior(t *testing.T) {
 	sys := remainingArchitectureMIMO(t, 0)
 	sys.InputDelay = []float64{0.2, 0.3}
 	sys.OutputDelay = []float64{0.1, 0.0}
@@ -192,7 +192,7 @@ func TestRemainingArchitectureConversionPlannerBehavior(t *testing.T) {
 	}
 }
 
-func TestRemainingArchitectureTimeDomainPolicyPublicConsumers(t *testing.T) {
+func TestArchitectureTimeDomainPolicyPublicConsumers(t *testing.T) {
 	cont := remainingArchitectureMIMO(t, 0)
 	disc, err := cont.C2D(0.1, C2DOptions{})
 	if err != nil {
@@ -239,7 +239,7 @@ func TestRemainingArchitectureTimeDomainPolicyPublicConsumers(t *testing.T) {
 	}
 }
 
-func TestRemainingArchitectureSignalMetadataMappings(t *testing.T) {
+func TestArchitectureSignalMetadataMappings(t *testing.T) {
 	sys := remainingArchitectureMIMO(t, 0)
 	selected, err := sys.SelectByName([]string{"u-slow"}, []string{"y-bottom"})
 	if err != nil {
