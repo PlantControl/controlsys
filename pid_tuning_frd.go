@@ -559,7 +559,11 @@ func pidTuningFRDStrictPlant(data *FRD, unstablePoles *int) (p pidTuningPlant, c
 // slope of |G| must stay within 0.25 of n, and G/jⁿ within 30° of one side
 // of the real axis, turning no further from it as ω rises, as a strictly
 // proper end whose relative degree the data show leaves it. A zero or pole
-// above the band bends that slope, so data stopping short of it show none.
+// above the band bends that slope, so data stopping short of it show none:
+// G/jⁿ must head to the axis over each quarter decade, not only from end
+// to end, as the pull of a pole or zero below the band fades with ω while
+// one above grows; a lightly damped pair just above the band turns the
+// phase back long before the 0.25 bound on the slope trips.
 func pidTuningFRDTopOrder(data *FRD, at func(float64) complex128) (n int, ok bool) {
 	low, high := data.Omega[0], data.Omega[len(data.Omega)-1]
 	w1, wm := high/math.Sqrt(10), high/math.Pow(10, .25)
@@ -577,8 +581,8 @@ func pidTuningFRDTopOrder(data *FRD, at func(float64) complex128) (n int, ok boo
 		return 0, false
 	}
 	j := cmplx.Pow(1i, complex(r, 0))
-	h1, h2 := g1/j, g2/j
-	if math.Abs(imag(h1)) <= .5*cmplx.Abs(h1) && math.Abs(imag(h2)) <= .5*cmplx.Abs(h2) && real(h1)*real(h2) > 0 && pidTuningFRDHeadsToAxis(h2, h1) {
+	h1, hm, h2 := g1/j, gm/j, g2/j
+	if math.Abs(imag(h1)) <= .5*cmplx.Abs(h1) && math.Abs(imag(h2)) <= .5*cmplx.Abs(h2) && real(h1)*real(h2) > 0 && real(h1)*real(hm) > 0 && pidTuningFRDHeadsToAxis(hm, h1) && pidTuningFRDHeadsToAxis(h2, hm) {
 		return int(r), true
 	}
 	return 0, false
