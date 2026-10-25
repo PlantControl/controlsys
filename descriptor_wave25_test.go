@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -115,5 +116,122 @@ func TestTransferFunction_StiffProperChainSweep(t *testing.T) {
 		if improper > 3 {
 			t.Errorf("[%d] %g: %d/200 proper chains read improper or failed, want ≤ 3", tc.chain, tc.stiffRel, improper)
 		}
+	}
+}
+
+// TestDescriptorStiffChainConditioned: EVSFPV. condChainDescriptor chains
+// [4], [5] whose E singular value of the finite pole (σ/σ₁ 6e-9 to 1.8e-8)
+// is above MATLAB's rank floor but within qzInfiniteGap of the staircase
+// tol, so descriptorRank sets stiff, beside index ≥ 2. The staircase
+// stopped after the null space of E, and IsProper, Step and
+// TransferFunction returned ErrDescriptorSingular ("infinite Jordan chain
+// left among the finite eigenvalues"), improper and proper alike. MATLAB
+// rank keeps the pole finite (D62TAA): deflateStiffChain deflates the whole
+// chain, and the split stands when it matches the pencil at the data scale
+// and 4ε copies of the data reduce alike. [5] seed 92 improper still fails
+// closed: its split misses the direct solve by 6.6e-10 (> 1e-10) and every
+// 4ε copy fails alike. Oracle: the structured model's pencil response and
+// finite pole count.
+func TestDescriptorStiffChainConditioned(t *testing.T) {
+	for _, tc := range []struct {
+		chain    int
+		seed     uint64
+		proper   bool
+		singular bool
+	}{{4, 92, false, false}, {5, 92, false, true}, {5, 193, false, false}, {4, 92, true, false}, {5, 92, true, false}} {
+		label := fmt.Sprintf("[%d] seed %d proper %v", tc.chain, tc.seed, tc.proper)
+		rng := rand.New(rand.NewPCG(tc.seed, 911))
+		nf := 1 + rng.IntN(3)
+		sr := math.Pow(10, -2-2*rng.Float64())
+		sys, oracle, _ := condChainDescriptor(t, rng, nf, []int{tc.chain}, sr, tc.proper, 1+2*rng.Float64())
+		n, _, _ := sys.Dims()
+		var svd mat.SVD
+		if !svd.Factorize(sys.E, mat.SVDNone) {
+			t.Fatal("SVD failed")
+		}
+		sv := svd.Values(nil)
+		if _, stiff, _ := descriptorRank(sv, sv[0], n, true); !stiff {
+			t.Fatalf("%s: E not stiff, σ_{n-1}/σ₁ = %g", label, sv[n-2]/sv[0])
+		}
+		if _, _, _, _, k, _, _, _, ok := deflateStiffChain(sys.A, sys.E); !ok || k != nf {
+			t.Errorf("%s: deflateStiffChain nf %d ok %v, want %d finite", label, k, ok, nf)
+		}
+		pr, err := sys.IsProper()
+		_, serr := Step(sys, 1)
+		res, terr := sys.TransferFunction(nil)
+		if tc.singular {
+			for _, e := range []error{err, serr, terr} {
+				if !errors.Is(e, ErrDescriptorSingular) {
+					t.Errorf("%s: err %v, want ErrDescriptorSingular", label, e)
+				}
+			}
+			continue
+		}
+		if err != nil || pr != tc.proper {
+			t.Fatalf("%s: IsProper = %v, %v; want %v", label, pr, err, tc.proper)
+		}
+		if tc.proper && serr != nil || !tc.proper && !errors.Is(serr, ErrImproperModel) {
+			t.Fatalf("%s: Step err = %v", label, serr)
+		}
+		if terr != nil {
+			t.Fatalf("%s: TransferFunction: %v", label, terr)
+		}
+		if fzTFImproper(res.TF) == tc.proper {
+			t.Fatalf("%s: TF improper %v, IsProper %v", label, !tc.proper, tc.proper)
+		}
+		for _, s := range []complex128{0.37i, complex(0.5, 3), 1e2i, 1e4i, 1e7i} {
+			g, err := res.TF.Eval(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := pencilResponse(t, oracle, s)[0][0]
+			if d := cmplx.Abs(g[0][0] - w); !(d <= 1e-5*math.Max(1, cmplx.Abs(w))) {
+				t.Errorf("%s: G(%v) = %v, want %v", label, s, g[0][0], w)
+			}
+		}
+	}
+}
+
+// TestDescriptorStiffChainSweep: EVSFPV. Proper [4] chains beside a pole
+// of E singular value 3e-8..1e-9 relative (chainDescriptor), stiff for
+// descriptorRank: base read 3/300 proper and 290 failed closed;
+// deflateStiffChain with its checks reads 46 (53 amd64), and the 7 (6)
+// whose reduction misses the oracle are base's (another path). Over the chain
+// sweeps (index 2..5, 10800 draws) the stiff chain split only turned
+// ErrDescriptorSingular into results that match the oracle.
+func TestDescriptorStiffChainSweep(t *testing.T) {
+	good, bad := 0, 0
+	for seed := range uint64(300) {
+		rng := rand.New(rand.NewPCG(seed, 5))
+		nf := 1 + rng.IntN(3)
+		sr := math.Pow(10, -7.5-1.5*rng.Float64())
+		sys, oracle, _ := chainDescriptor(t, rng, nf, []int{4}, sr, true)
+		pr, err := sys.IsProper()
+		if err != nil {
+			continue
+		}
+		res, terr := sys.TransferFunction(nil)
+		if !pr || terr != nil {
+			bad++
+			continue
+		}
+		ok := true
+		for _, s := range []complex128{0.37i, complex(0.5, 3), 1e2i, 1e4i} {
+			g, err := res.TF.Eval(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := pencilResponse(t, oracle, s)[0][0]
+			ok = ok && cmplx.Abs(g[0][0]-w) <= 1e-5*math.Max(1, cmplx.Abs(w))
+		}
+		if ok {
+			good++
+		} else {
+			bad++
+		}
+	}
+	t.Logf("%d match, %d do not", good, bad)
+	if good < 35 || bad > 10 {
+		t.Errorf("%d proper [4] chains match the oracle (want ≥ 35), %d do not (want ≤ 10)", good, bad)
 	}
 }

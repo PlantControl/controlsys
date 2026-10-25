@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -504,13 +505,14 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // perturbation (leakDriftShared), they are absorbed back before
 // reductionMatches confirms the reduction.
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
-	out, poly, _, err := sys.weierstrassReduceCore(false)
+	out, poly, _, err := sys.weierstrassReduceCore(false, false)
 	return out, poly, err
 }
 
 // weierstrassReduceCore is weierstrassReduceParts; with probe it returns
 // only the terms c·N^k·b of algebraicTerms (nil without a nilpotent part).
-func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*mat.Dense, error) {
+// nested skips chainSplitReproducible, for its own copies.
+func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.Dense, []*mat.Dense, error) {
 	n, m, p := sys.Dims()
 	q := sys.internalDelayCount()
 	mi, pi := max(m+q, 1), max(p+q, 1)
@@ -544,6 +546,7 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 	t := make([]float64, n*n)
 	tol := 100 * float64(n) * eps() * denseNorm(sys.E)
 	finite := func(_, _, beta float64) bool { return math.Abs(beta) > tol }
+	verifyChain := false
 	d, index1, ratioTol, stiffSplit := weierstrassSplit(sys.A, sys.E, n)
 	blurTol, stiffTol := 1.0, 1.0
 	if stiffSplit {
@@ -558,9 +561,10 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
 	if !ok || nf > n-d || !index1 || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
 		resolved := false
-		if a, e, qd, zd, nfd, stiff, leak, blur, egap, dok := deflateInfinite(sys.A, sys.E, true); dok && !stiff {
+		a, e, qd, zd, nfd, stiff, leak, blur, egap, dok := deflateInfinite(sys.A, sys.E, true)
+		all := func(_, _, _ float64) bool { return true }
+		if dok && !stiff {
 			resolved = ok && nfd == nf
-			all := func(_, _, _ float64) bool { return true }
 			if !resolved {
 				if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
 					s, t, vsl, vsr, nf, recip, ok, resolved = sd, td, qs, zs, nfd, rc, true, true
@@ -576,7 +580,21 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 			}
 		}
 		if ok && !resolved && !index1 && nf >= n-d {
-			return nil, nil, nil, fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
+			// A stiff E stopped the staircase at its null space; past it
+			// the split is checked against the pencil (verifyChain).
+			if !dok || !stiff {
+				return nil, nil, nil, errChainLeft
+			}
+			a, e, qd, zd, nfd, leak, blur, egap, dok = deflateStiffChain(sys.A, sys.E)
+			if !dok {
+				return nil, nil, nil, errChainLeft
+			}
+			sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true)
+			if err != nil || n1 != nfd {
+				return nil, nil, nil, errChainLeft
+			}
+			s, t, vsl, vsr, nf, recip = sd, td, qs, zs, nfd, rc
+			blurTol, stiffTol, verifyChain = max(blur, math.Sqrt(leak)), egap, true
 		}
 	}
 	if !ok {
@@ -681,6 +699,9 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 					poly = nil
 				}
 				if impulsive && (poly == nil || q > 0) {
+					if verifyChain {
+						return nil, nil, nil, errChainLeft
+					}
 					return nil, nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 				}
 			}
@@ -740,6 +761,9 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 		} else if fixed, ok := refitFromPencil(sys, out, leakTerms); ok {
 			out, poly = fixed, nil
 		} else if poly == nil {
+			if verifyChain {
+				return nil, nil, nil, errChainLeft
+			}
 			return nil, nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 		}
 	}
@@ -748,8 +772,18 @@ func (sys *System) weierstrassReduceCore(probe bool) (*System, []*mat.Dense, []*
 			out = fixed
 		}
 	}
+	if verifyChain && (q > 0 || !reductionPolyMatches(sys, out, poly) || !nested && !sys.chainSplitReproducible(out, poly)) {
+		return nil, nil, nil, errChainLeft
+	}
 	return out, poly, nil, nil
 }
+
+// errChainLeft is the error of weierstrassReduceCore when an infinite
+// Jordan chain stays among the finite eigenvalues, or a split of
+// deflateStiffChain does not reproduce the pencil's response
+// (reductionPolyMatches) or its own under rounding of the data
+// (chainSplitReproducible).
+var errChainLeft = fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
 
 // reductionMatchTol bounds the relative mismatch reductionMatches accepts.
 const reductionMatchTol = 1e-10
@@ -765,13 +799,18 @@ const reductionMatchTol = 1e-10
 // (sE − A) is too ill-conditioned above it for the direct solve to
 // certify anything.
 func reductionMatches(sys, red *System) bool {
+	return reductionPolyMatches(sys, red, nil)
+}
+
+// reductionPolyMatches is reductionMatches for red plus the polynomial
+// part poly of weierstrassReduceParts (q = 0).
+func reductionPolyMatches(sys, red *System, poly []*mat.Dense) bool {
 	_, m, p := sys.Dims()
 	w := mat.Norm(sys.A, 2) / mat.Norm(sys.E, 2)
-	direct, reduced := newFrequencyEvaluator(sys).pointEval(), newFrequencyEvaluator(red).pointEval()
+	direct, reduced := newFrequencyEvaluator(sys).pointEval(), polyResponse(red, poly)
 	g, h := make([]complex128, p*m), make([]complex128, p*m)
 	for _, s := range [...]complex128{complex(0.6*w, 0.8*w), complex(0.24*w, 0.18*w)} {
-		pt := pointAt(s)
-		if direct(pt, g) != nil || reduced(pt, h) != nil {
+		if direct(pointAt(s), g) != nil || reduced(s, h) != nil {
 			return false
 		}
 		var diff, size float64
@@ -784,6 +823,112 @@ func reductionMatches(sys, red *System) bool {
 		}
 	}
 	return true
+}
+
+// polyResponse returns the evaluator of red plus Σ poly[k−1]·s^k, which
+// writes the p×m response at s into dst, row-major.
+func polyResponse(red *System, poly []*mat.Dense) func(s complex128, dst []complex128) error {
+	eval := newFrequencyEvaluator(red).pointEval()
+	_, m, p := red.Dims()
+	return func(s complex128, dst []complex128) error {
+		if err := eval(pointAt(s), dst); err != nil {
+			return err
+		}
+		sk := complex(1, 0)
+		for _, c := range poly {
+			sk *= s
+			raw := c.RawMatrix()
+			for i := range p {
+				for j := range m {
+					dst[i*m+j] += complex(raw.Data[i*raw.Stride+j], 0) * sk
+				}
+			}
+		}
+		return nil
+	}
+}
+
+// chainSplitDraws and chainSplitTol set chainSplitReproducible: the
+// splits of deflateStiffChain that matched the oracle in chain sweeps
+// (index 2..5 beside poles of E singular value 1e-9..1e-2 relative,
+// cond(U), cond(V) up to 1e4) reproduce under 4ε to about 5e-6 near the
+// largest pole; the ones that did not move by O(1) or fail.
+const (
+	chainSplitDraws = 3
+	chainSplitTol   = 1e-5
+)
+
+// chainSplitReproducible reports whether copies of sys (no internal
+// delays) with A, E, B and C entries scaled by 1 + δ, |δ| ≤ 4ε, reduce
+// alike: of chainSplitDraws copies, those that do not fail closed
+// (ErrDescriptorSingular), at least one, give reductions (red, poly) that
+// agree with this one within chainSplitTol at the data scale ‖A‖/‖E‖, at
+// 1e2..1e6 times it on the imaginary axis and about the largest finite
+// pole, relative to the response there or at the data scale. The direct
+// (sE − A) solve of reductionPolyMatches cannot check above the data scale;
+// a split that depends on the rounding of the data moves there.
+func (sys *System) chainSplitReproducible(red *System, poly []*mat.Dense) bool {
+	_, m, p := sys.Dims()
+	w := mat.Norm(sys.A, 2) / mat.Norm(sys.E, 2)
+	pts := []complex128{complex(0.6*w, 0.8*w), complex(0, 1e2*w), complex(0, 1e4*w), complex(0, 1e6*w)}
+	if nr, _ := red.A.Dims(); nr > 0 {
+		var eig mat.Eigen
+		if !eig.Factorize(red.A, mat.EigenNone) {
+			return false
+		}
+		rho := 0.0
+		for _, v := range eig.Values(nil) {
+			rho = max(rho, cmplx.Abs(v))
+		}
+		pts = append(pts, complex(0.3*rho, 0.9*rho), complex(0, 3*rho))
+	}
+	rng := rand.New(rand.NewPCG(7, 11))
+	jitter := func(x *mat.Dense) {
+		raw := x.RawMatrix()
+		for i := range raw.Rows {
+			row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+			for j := range row {
+				row[j] *= 1 + 4*eps()*(2*rng.Float64()-1)
+			}
+		}
+	}
+	g, h := make([]complex128, p*m), make([]complex128, p*m)
+	own := polyResponse(red, poly)
+	agreed := 0
+	for range chainSplitDraws {
+		c := sys.Copy()
+		jitter(c.A)
+		jitter(c.E)
+		jitter(c.B)
+		jitter(c.C)
+		red2, poly2, _, err := c.weierstrassReduceCore(false, true)
+		if errors.Is(err, ErrDescriptorSingular) {
+			continue
+		}
+		if err != nil || len(poly2) != len(poly) {
+			return false
+		}
+		agreed++
+		floor := 0.0
+		copyEval := polyResponse(red2, poly2)
+		for k, s := range pts {
+			if own(s, g) != nil || copyEval(s, h) != nil {
+				return false
+			}
+			var diff, size float64
+			for i := range g {
+				diff = max(diff, cmplx.Abs(g[i]-h[i]))
+				size = max(size, cmplx.Abs(g[i]), cmplx.Abs(h[i]))
+			}
+			if k == 0 {
+				floor = size
+			}
+			if !(diff <= chainSplitTol*max(size, floor)) {
+				return false
+			}
+		}
+	}
+	return agreed > 0
 }
 
 // absorbStiffLeak returns red with the s-terms c·N^k·b (terms, k = 1..K)
@@ -987,7 +1132,7 @@ func (sys *System) sTermsStable(terms []*mat.Dense) (stable, ok bool, drift []fl
 		jitter(c.E)
 		jitter(c.B)
 		jitter(c.C)
-		_, _, got, err := c.weierstrassReduceCore(true)
+		_, _, got, err := c.weierstrassReduceCore(true, false)
 		if err != nil || len(got) != len(terms) {
 			return false, false, nil
 		}
