@@ -447,3 +447,312 @@ func TestBalancedDenseNearDoublePoleRefines(t *testing.T) {
 		}
 	}
 }
+
+// reversedCompanion returns A with first column −den[1:] and a unit
+// superdiagonal, the reversed observable companion of den.
+func reversedCompanion(den []float64) []float64 {
+	n := len(den) - 1
+	a := make([]float64, n*n)
+	for i := range n {
+		a[i*n] = -den[i+1]
+		if i+1 < n {
+			a[i*n+i+1] = 1
+		}
+	}
+	return a
+}
+
+// LEAZRP: below the poles of a graded reversed companion C = e₁ reads only
+// x₀ ≈ 1e-20 beside x₁ ≈ 2, so GEPP's normwise error swamped the response
+// (6.9e4 relative at ω = 0.0176) although den and num resolve it to ~13ε,
+// and refinement stopped on its normwise test. Every entry point must match
+// the exact rational response.
+func TestFrequencyResponseGradedReversedCompanionBelowPoles(t *testing.T) {
+	den := []float64{1, 754, 255356, 5.1226392e+07, 6.755561344e+09, 6.140269664e+11, 3.9174454525952e+13, 1.749820945778688e+15, 5.344039379091456e+16, 1.0575501408690831e+18, 1.2115752641409319e+19, 6.01702493877751e+19, 0}
+	b0 := []float64{0.05078125, 0, -2.6702880859375e-05, -8.821487426757812e-06, -524288, -0.0072021484375, 0.21875, 1.7642974853515625e-05, 3.375, 2.288818359375e-05, 1.1444091796875e-05, -15.25}
+	c0 := []float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	n := len(den) - 1
+	a, b, c := companionShape(den, b0, c0, 1)
+	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	num := ratObservableNum(den, b0, c0)
+	ws := []float64{1e-5, 1e-4, 1.76e-3, 1.76e-2, 0.08, 1.38, 108}
+	sweep, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, err := sys.FreqResponsePointwise(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := newHessenbergSweep(sys, n, 1, 1)
+	for k, w := range ws {
+		ex := ratRatioJ(num, den, w)
+		g, err := sys.EvalFr(complex(0, w))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := make([]complex128, 1)
+		if err := hs.evalInto(pointAt(complex(0, w)), h); err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"EvalFr", g[0][0]}, {"FreqResponse", sweep.At(k, 0, 0)}, {"FreqResponsePointwise", pw.At(k, 0, 0)}, {"hessenbergSweep", h[0]}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > 1e-12 {
+				t.Errorf("%s at w=%g off exact by %.3g", got.name, w, e)
+			}
+		}
+	}
+}
+
+// Where refinement stalls (a 25-state graded companion, ε·cond ≳ 1), the
+// sens bound of the trim gate must cover the reference's own error, so an
+// inaccurate reference never counts as resolved; it was the data
+// conditioning alone, 2.6e-14 relative beside an error of 27 at the first
+// point.
+func TestSensBoundCoversStalledSolve(t *testing.T) {
+	den := []float64{1, 1960.54296875, 1324778.0375671387, 453017973.58403015, 90672566995.1926, 11432861553837.39, 949716471541430.8, 5.3628407407340744e+16, 2.109198001835061e+18, 5.8960716105277686e+19, 1.1918233492782816e+21, 1.767078704390106e+22, 1.9434022535784184e+23, 1.5980782540760173e+24, 9.868327675548808e+24, 4.5762879802036216e+25, 1.5853874470748784e+26, 4.054058535754468e+26, 7.490006007724049e+26, 9.649212545235104e+26, 8.173161151038438e+26, 4.1141976943341275e+26, 1.0271973116920471e+26, 1.0051652236654178e+25, 3.0487172137841685e+23, 2.8278471496166277e+21}
+	b := []float64{-6.866455078125e-05, 0, 272, 0, 0, 0.017578125, 0, -9, 0, -5.7220458984375e-05, 0, -0.125, 0, -0.00390625, 0, 0, 0, -2, -256, 0, 0, 0, 0, 0, 0}
+	n := len(den) - 1
+	c := make([]float64, n)
+	c[0] = 1
+	sys, err := NewFromSlices(n, 1, 1, reversedCompanion(den), b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bd := newBalancedDense(sys, n, 1, 1)
+	sw := newSensWork(n, 1, 1)
+	for _, w := range []float64{2.309734638458412e-05, 2.21300266697768e-05, 1.8709073417783588e-05, 0.000101680294768261, 0.0009890718650590099, 0.09303031026002107} {
+		s := complex(0, w)
+		g := make([]complex128, 1)
+		if err := bd.evalInto(pointAt(s), g); err != nil {
+			t.Fatalf("w=%g: %v", w, err)
+		}
+		bnd := sw.bound(bd, s)
+		ex := frExactResponse(sys, frBigC(s))[0]
+		e, scale := cmplx.Abs(g[0]-ex), cmplx.Abs(ex)
+		if e > max(10*bnd[0], 1e-9*scale) {
+			t.Errorf("w=%g: reference off exact by %.3g relative, sens bound %.3g", w, e/scale, bnd[0]/scale)
+		}
+	}
+}
+
+// GEPP on a reversed graded companion below its poles left x₁ exactly 0,
+// the only state C reads, and outputCancels skipped the exact zero, the
+// extreme of cancellation: every entry point returned 0 beside an exact
+// 4.06e-26 that den and num determine to a few ε.
+func TestFrequencyResponseReversedCompanionExactZeroState(t *testing.T) {
+	den := []float64{1, 38836.14453125, 7.6326432e8, 1.3158335905792e13, 1.289109780782121e17, 1.0746583724948676e21, 4.3269613883408094e24, 1.1031075037031345e28, 9.569098187117596e29}
+	b := []float64{0, -0.75, -4, -7.5, 0, -2, -0.875, 1}
+	c := []float64{0, 1, 0, 0, 0, 0, 0, 0}
+	n := len(den) - 1
+	sys, err := NewFromSlices(n, 1, 1, reversedCompanion(den), b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	num := ratObservableNum(den, []float64{1, -0.875, -2, 0, -7.5, -4, -0.75, 0}, []float64{0, 0, 0, 0, 0, 0, 1, 0})
+	ws := []float64{1.7302345030553948e-4, 1e-5, 1e-3}
+	sweep, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, err := sys.FreqResponsePointwise(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := newHessenbergSweep(sys, n, 1, 1)
+	for k, w := range ws {
+		ex := frExactResponse(sys, frBigC(complex(0, w)))[0]
+		if e := cmplx.Abs(ratRatioJ(num, den, w)-ex) / cmplx.Abs(ex); e > 1e-13 {
+			t.Fatalf("w=%g: oracles disagree by %.3g", w, e)
+		}
+		g, err := sys.EvalFr(complex(0, w))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := make([]complex128, 1)
+		if err := hs.evalInto(pointAt(complex(0, w)), h); err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"EvalFr", g[0][0]}, {"FreqResponse", sweep.At(k, 0, 0)}, {"FreqResponsePointwise", pw.At(k, 0, 0)}, {"hessenbergSweep", h[0]}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > 1e-12 {
+				t.Errorf("%s at w=%g: %v off exact %v by %.3g", got.name, w, got.v, ex, e)
+			}
+		}
+	}
+}
+
+// A block-diagonal MIMO model leaves each output's states exactly zero
+// for the other input. Lifting the w > 0 guard of outputCancels must not
+// refine such structural zeros or mark them stalled.
+func TestBalancedDenseStructuralZeroNotStalled(t *testing.T) {
+	a := []float64{
+		-1, 2, 0, 0,
+		-3, -4, 0, 0,
+		0, 0, -5, 1,
+		0, 0, -2, -6,
+	}
+	b := []float64{1, 0, 0.5, 0, 0, 1, 0, 2}
+	c := []float64{1, 1, 0, 0, 0, 0, 1, -1}
+	sys, err := NewFromSlices(4, 2, 2, a, b, c, make([]float64, 4), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bd := newBalancedDense(sys, 4, 2, 2)
+	g := make([]complex128, 4)
+	for _, w := range []float64{0.01, 1, 100} {
+		if err := bd.evalInto(pointAt(complex(0, w)), g); err != nil {
+			t.Fatal(err)
+		}
+		if g[1] != 0 || g[2] != 0 || bd.stalled {
+			t.Errorf("w=%g: off-diagonal %v %v, stalled %v", w, g[1], g[2], bd.stalled)
+		}
+		if bd.outputCancels() {
+			t.Errorf("w=%g: structural zero flagged as cancelling", w)
+		}
+		dd := make([]complex128, 4)
+		if !ddResponseInto(sys, pointAt(complex(0, w)), dd) {
+			t.Fatalf("w=%g: double-double solve failed", w)
+		}
+		ex := frExactResponse(sys, frBigC(complex(0, w)))
+		for i, v := range dd {
+			if cmplx.Abs(v-ex[i]) > 1e-13*cmplx.Abs(ex[i]) {
+				t.Errorf("w=%g: double-double entry %d %v, exact %v", w, i, v, ex[i])
+			}
+		}
+	}
+}
+
+// Below the poles of a graded tf2ss companion refine stalls and the dense
+// solve was off by up to 0.5 relative (4e-2 at ω = 0.00139) although the
+// double-double solve is exact there; a stalled point whose error estimate
+// exceeds refineCondition·ε of an entry must take the double-double
+// response at every entry point.
+func TestFrequencyResponseStalledRefineTakesDD(t *testing.T) {
+	r := []float64{3033.55, 8.635e6, 1.3387e10, 1.1713e13, 6.3856e15, 6.1226e17, 2.768e19, 7.2368e20, 1.1678e22, 1.5195e23, 1.0695e24, 6.2747e24, 1.6832e25, 3.404e25, 3.5338e25, 2.4398e25}
+	n := len(r)
+	a := make([]float64, n*n)
+	for j, v := range r {
+		a[j] = -v
+	}
+	for i := 1; i < n; i++ {
+		a[i*n+i-1] = 1
+	}
+	b := make([]float64, n)
+	b[14] = 1
+	c := []float64{1, .25, 1.875, -.109375, -.125, 3, -2, 0, -.015625, -8, -1.5, 0, -.75, 0, 0, 0}
+	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := []float64{1e-4, 0.0013941527, 0.01, 0.30392}
+	sweep, err := sys.FreqResponse(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw, err := sys.FreqResponsePointwise(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, w := range ws {
+		s := complex(0, w)
+		ex := frExactResponse(sys, frBigC(s))[0]
+		dd := make([]complex128, 1)
+		if !ddResponseInto(sys, pointAt(s), dd) {
+			t.Fatalf("w=%g: double-double solve failed", w)
+		}
+		if e := cmplx.Abs(dd[0]-ex) / cmplx.Abs(ex); e > 1e-13 {
+			t.Fatalf("w=%g: oracles disagree by %.3g", w, e)
+		}
+		g, err := sys.EvalFr(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range []struct {
+			name string
+			v    complex128
+		}{{"EvalFr", g[0][0]}, {"FreqResponse", sweep.At(k, 0, 0)}, {"FreqResponsePointwise", pw.At(k, 0, 0)}} {
+			if e := cmplx.Abs(got.v-ex) / cmplx.Abs(ex); e > 1e-12 {
+				t.Errorf("%s at w=%g: %v off exact %v by %.3g", got.name, w, got.v, ex, e)
+			}
+		}
+	}
+}
+
+// stalledSweepRoots draws n poles graded over four decades, real or
+// complex pairs.
+func stalledSweepRoots(r *rand.Rand, n int) []complex128 {
+	var roots []complex128
+	for deg := 0; deg < n; {
+		mag := math.Ldexp(float64(16+r.IntN(48))/32, r.IntN(14))
+		if r.IntN(3) == 0 && deg+2 <= n {
+			roots = append(roots, complex(-mag*float64(1+r.IntN(8))/8, mag))
+			deg += 2
+			continue
+		}
+		roots = append(roots, complex(-mag, 0))
+		deg++
+	}
+	return roots
+}
+
+// Seeded graded companions (observable and tf2ss shapes, B a unit vector,
+// dense C): EvalFr against the exact response must resolve every point at
+// which the dense solve stalls, and never be worse than the dense solve.
+func TestEvalFrStalledRefineSweep(t *testing.T) {
+	skipSlowUnderRace(t)
+	r := rand.New(rand.NewPCG(24, 16))
+	stalls := 0
+	for trial := range 300 {
+		n := 6 + r.IntN(13)
+		den := ratPolyFromRoots(stalledSweepRoots(r, n))
+		b, c := make([]float64, n), make([]float64, n)
+		b[r.IntN(n)] = 1
+		for k := range n {
+			if r.IntN(3) > 0 {
+				c[k] = float64(r.IntN(33)-16) / 8
+			}
+		}
+		shape := []int{0, 3}[r.IntN(2)]
+		a, bt, ct := companionShape(den, b, c, shape)
+		sys, err := NewFromSlices(n, 1, 1, a, bt, ct, []float64{0}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bd := newBalancedDense(sys, n, 1, 1)
+		for _, w := range []float64{1e-4, 1.3e-3, 0.0088, 0.107, 0.3, 3, 100} {
+			s := complex(0, w)
+			ex := frExactResponse(sys, frBigC(s))[0]
+			g := make([]complex128, 1)
+			if ex == 0 || bd.evalInto(pointAt(s), g) != nil {
+				continue
+			}
+			ev, err := sys.EvalFr(s)
+			if err != nil {
+				t.Errorf("trial %d w=%g: %v", trial, w, err)
+				continue
+			}
+			eDense := cmplx.Abs(g[0]-ex) / cmplx.Abs(ex)
+			e := cmplx.Abs(ev[0][0]-ex) / cmplx.Abs(ex)
+			if bd.stalled {
+				stalls++
+				if e > 1e-12 {
+					t.Errorf("trial %d n %d shape %d w=%g: stalled point off exact by %.3g", trial, n, shape, w, e)
+				}
+			}
+			if e > max(2*eDense, 1e-11) {
+				t.Errorf("trial %d n %d shape %d w=%g: EvalFr off exact by %.3g, dense solve %.3g", trial, n, shape, w, e, eDense)
+			}
+		}
+	}
+	if stalls == 0 {
+		t.Error("no stalled point in the sweep")
+	}
+}

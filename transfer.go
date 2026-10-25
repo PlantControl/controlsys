@@ -911,8 +911,10 @@ func newSensWork(n, m, p int) *sensWork {
 // entry, x = (sI−Â)⁻¹B̂ from the solve evalInto just made at s and
 // yᵢ = (sI−Â)⁻ᵀĉᵢᵀ: the first-order componentwise condition of G(s), the same
 // in every diagonal state scaling. Where it is near |G(s)| the given
-// coefficients do not determine the response at s. The result is nil when
-// the transposed pencil is singular.
+// coefficients do not determine the response at s. Where evalInto's
+// refinement stalled, each entry is at least its error estimate, so a point
+// whose reference is not accurate never counts as resolved. The result is
+// nil when the transposed pencil is singular.
 func (sw *sensWork) bound(bd *balancedDense, s complex128) []float64 {
 	n, m, p := bd.n, bd.m, bd.p
 	a, x := bd.a, bd.x
@@ -953,6 +955,9 @@ func (sw *sensWork) bound(bd *balancedDense, s complex128) []float64 {
 				v += math.Abs(bd.d[i*bd.dStride+j])
 			}
 			out[i*m+j] = v * eps()
+			if bd.stalled {
+				out[i*m+j] = max(out[i*m+j], bd.solveErr[i*m+j])
+			}
 		}
 	}
 	return out

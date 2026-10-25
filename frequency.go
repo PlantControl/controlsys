@@ -378,12 +378,17 @@ func (e frequencyEvaluator) pointAt(w float64) frequencyPoint {
 // pointSolver picks the delay-free solver for an nw-point sweep. Both solve
 // the balanced realization with componentwise-stable arithmetic; the
 // Hessenberg sweep pays an O(n³) reduction once to make each point O(n²m)
-// and handles only explicit models.
+// and handles only explicit models. The dense solver of a delay-free model
+// takes the double-double response where its refinement stalls.
 // FreqResponsePointwise and EvalFr use the nw=1 choice so single points stay
 // bit-identical across entry points.
 func (e frequencyEvaluator) pointSolver(nw int) frequencyPointSolver {
 	if e.sys.IsDescriptor() || e.useDenseSweep(nw) {
-		return newBalancedDense(e.sys, e.n, e.m, e.p)
+		bd := newBalancedDense(e.sys, e.n, e.m, e.p)
+		if e.sys.internalDelayCount() == 0 {
+			bd.sys = e.sys
+		}
+		return bd
 	}
 	return newHessenbergSweep(e.sys, e.n, e.m, e.p)
 }

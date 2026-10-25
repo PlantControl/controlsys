@@ -3,6 +3,7 @@ package controlsys
 import (
 	"errors"
 	"math"
+	"math/big"
 	"math/cmplx"
 	"slices"
 )
@@ -379,7 +380,8 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 // next to an exact origin pole. It solves the balanced realization scaled
 // by a power of two σ, ((p/σ)E + q(A/σ))⁻¹(B/σ), so that neither a graded
 // realization nor one far from unit scale overflows or underflows, and
-// reports false where the response is still not finite.
+// reports false where the response is still not finite. Where an output
+// reads only states far below the largest, ddRefine refines the solution.
 func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 	n, m, p := sys.Dims()
 	if n == 0 {
@@ -412,20 +414,15 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 	mag := make([]float64, n*n)
 	for i := range n {
 		for j := range n {
-			av := br.a[i*n+j] / sigma
-			var e float64
-			if br.e != nil {
-				e = br.e[i*n+j]
-			} else if i == j {
-				e = 1
-			}
-			a[i*n+j] = ddComplex{ddProd(pr, e).add(ddProd(qr, av)), ddProd(pi, e).add(ddProd(qi, av))}
-			mag[i*n+j] = math.Abs(pr*e) + math.Abs(qr*av) + math.Abs(pi*e) + math.Abs(qi*av)
+			var mg float64
+			a[i*n+j], mg = ddPencilEntry(&br, i, j, pr, pi, qr, qi, sigma)
+			mag[i*n+j] = mg
 		}
 		for j := range m {
 			x[i*m+j] = ddComplex{re: dd{br.b[i*m+j] / sigma, 0}}
 		}
 	}
+	perm := make([]int, n)
 	tol := float64(n) * 0x1p-100
 	for k := range n {
 		piv, best := k, a[k*n+k].abs1()
@@ -437,13 +434,11 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 		if !(best > tol*mag[piv*n+k]) {
 			return false
 		}
+		perm[k] = piv
 		if piv != k {
 			for j := range n {
 				a[k*n+j], a[piv*n+j] = a[piv*n+j], a[k*n+j]
 				mag[k*n+j], mag[piv*n+j] = mag[piv*n+j], mag[k*n+j]
-			}
-			for j := range m {
-				x[k*m+j], x[piv*m+j] = x[piv*m+j], x[k*m+j]
 			}
 		}
 		for i := k + 1; i < n; i++ {
@@ -451,25 +446,16 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 				continue
 			}
 			f := a[i*n+k].div(a[k*n+k])
+			a[i*n+k] = f
 			fm := f.abs1()
 			for j := k + 1; j < n; j++ {
 				a[i*n+j] = a[i*n+j].sub(f.mul(a[k*n+j]))
 				mag[i*n+j] += fm * mag[k*n+j]
 			}
-			for j := range m {
-				x[i*m+j] = x[i*m+j].sub(f.mul(x[k*m+j]))
-			}
 		}
 	}
-	for i := n - 1; i >= 0; i-- {
-		for c := range m {
-			v := x[i*m+c]
-			for j := i + 1; j < n; j++ {
-				v = v.sub(a[i*n+j].mul(x[j*m+c]))
-			}
-			x[i*m+c] = v.div(a[i*n+i])
-		}
-	}
+	ddLUSolve(a, perm, x, n, m)
+	ddRefine(a, perm, x, &br, sigma, pt)
 	q := ddComplex{dd{-qr, 0}, dd{-qi, 0}}
 	g := make([]complex128, p*m)
 	for r := range p {
@@ -487,6 +473,302 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 	}
 	copy(dst, g)
 	return true
+}
+
+// ddLUSolve overwrites the row-major n×m x with the solution of the system
+// whose GEPP factors ddResponseInto left in lu, unit L below the diagonal,
+// with row interchanges perm. The interchanges moved whole rows, earlier
+// multipliers included, so they all apply before the forward solve.
+func ddLUSolve(lu []ddComplex, perm []int, x []ddComplex, n, m int) {
+	for k, p := range perm {
+		if p != k {
+			for j := range m {
+				x[k*m+j], x[p*m+j] = x[p*m+j], x[k*m+j]
+			}
+		}
+	}
+	for k := range n {
+		for i := k + 1; i < n; i++ {
+			f := lu[i*n+k]
+			if f.abs1() == 0 {
+				continue
+			}
+			for j := range m {
+				x[i*m+j] = x[i*m+j].sub(f.mul(x[k*m+j]))
+			}
+		}
+	}
+	for i := n - 1; i >= 0; i-- {
+		for c := range m {
+			v := x[i*m+c]
+			for j := i + 1; j < n; j++ {
+				v = v.sub(lu[i*n+j].mul(x[j*m+c]))
+			}
+			x[i*m+c] = v.div(lu[i*n+i])
+		}
+	}
+}
+
+// ddCancelRatio is the ratio of an output's weighted states to the
+// largest state below which ddRefine refines: double-double GEPP keeps
+// about ε_dd/ddCancelRatio ≈ 1e-22 relative in the other entries.
+const ddCancelRatio = 1e-10
+
+// ddRefineTol is the output-weighted correction, relative to the response
+// entry, below which ddRefine stops: below the rounding of the double
+// result.
+const ddRefineTol = 0x1p-60
+
+// bigSolvePrec and bigSolveMaxPrec bound the precisions of bigSolve.
+const (
+	bigSolvePrec    = 256
+	bigSolveMaxPrec = 2048
+)
+
+// ddPencilEntry returns entry (i, j) of the pencil p/σ·E + q·A/σ of br,
+// p/σ = pr + j·pi and q = qr + j·qi, in double-double, and the sum of the
+// magnitudes it was formed from.
+func ddPencilEntry(br *balancedRealization, i, j int, pr, pi, qr, qi, sigma float64) (ddComplex, float64) {
+	n := br.n
+	av := br.a[i*n+j] / sigma
+	var e float64
+	if br.e != nil {
+		e = br.e[i*n+j]
+	} else if i == j {
+		e = 1
+	}
+	return ddComplex{ddProd(pr, e).add(ddProd(qr, av)), ddProd(pi, e).add(ddProd(qi, av))},
+		math.Abs(pr*e) + math.Abs(qr*av) + math.Abs(pi*e) + math.Abs(qi*av)
+}
+
+// ddRefine refines x, the GEPP solution in lu of the pencil
+// (p/σ·E + q·A/σ)x = B/σ of the balanced br. GEPP's error is normwise: on a
+// graded companion below its poles an output reading states far below the
+// largest lost ~1e-5 even in double-double, while the data determine it to
+// a few ε. One step against the double-double residual is cheap and ends
+// the common case. Where the outputs still move, the double-double factors
+// cannot resolve them (cond·ε_dd ≳ 1), and bigSolve solves the pencil from
+// the realization's doubles at rising precision.
+func ddRefine(lu []ddComplex, perm []int, x []ddComplex, br *balancedRealization, sigma float64, pt frequencyPoint) {
+	if !ddReadsSmall(x, br) {
+		return
+	}
+	n, m := br.n, br.m
+	pr, pi, qr, qi := real(pt.p)/sigma, imag(pt.p)/sigma, real(pt.q), imag(pt.q)
+	r := make([]ddComplex, n*m)
+	for j := range m {
+		for i := range n {
+			r[i*m+j] = ddComplex{re: dd{br.b[i*m+j] / sigma, 0}}
+		}
+	}
+	for i := range n {
+		for k := range n {
+			a, _ := ddPencilEntry(br, i, k, pr, pi, qr, qi, sigma)
+			if a.abs1() == 0 {
+				continue
+			}
+			for j := range m {
+				r[i*m+j] = r[i*m+j].sub(a.mul(x[k*m+j]))
+			}
+		}
+	}
+	if !ddCorrect(lu, perm, r, x, br) {
+		bigSolve(x, br, sigma, pt)
+	}
+}
+
+// ddReadsSmall reports whether some response entry of the double-double
+// solution x reads only states below ddCancelRatio of the largest of its
+// column, the only entries GEPP's normwise error can swamp in
+// double-double.
+func ddReadsSmall(x []ddComplex, br *balancedRealization) bool {
+	n, m := br.n, br.m
+	for j := range m {
+		xMax := 0.0
+		for k := range n {
+			xMax = max(xMax, x[k*m+j].abs1())
+		}
+		for i := range br.p {
+			var w, cMax float64
+			for k, c := range br.c[i*n : (i+1)*n] {
+				w += math.Abs(c) * x[k*m+j].abs1()
+				cMax = max(cMax, math.Abs(c))
+			}
+			if w < ddCancelRatio*cMax*xMax {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bigSolve sets x to the solution of (p/σ·E + q·A/σ)x = B/σ by GEPP in
+// big.Float, doubling the precision from bigSolvePrec until two solutions
+// agree to ddRefineTol in every response entry Σₖ|cᵢₖ||xₖⱼ|, or up to
+// bigSolveMaxPrec. At an exactly singular pencil x is left unchanged.
+func bigSolve(x []ddComplex, br *balancedRealization, sigma float64, pt frequencyPoint) {
+	n, m := br.n, br.m
+	pr, pi, qr, qi := real(pt.p)/sigma, imag(pt.p)/sigma, real(pt.q), imag(pt.q)
+	prev := make([]ddComplex, n*m)
+	for prec := uint(bigSolvePrec); prec <= bigSolveMaxPrec; prec *= 2 {
+		f := func(v float64) *big.Float { return new(big.Float).SetPrec(prec).SetFloat64(v) }
+		mre, mim := make([]*big.Float, n*n), make([]*big.Float, n*n)
+		t := new(big.Float).SetPrec(prec)
+		for i := range n {
+			for k := range n {
+				var e float64
+				if br.e != nil {
+					e = br.e[i*n+k]
+				} else if i == k {
+					e = 1
+				}
+				av := br.a[i*n+k] / sigma
+				re, im := f(pr), f(pi)
+				re.Mul(re, f(e)).Add(re, t.Mul(f(qr), f(av)))
+				im.Mul(im, f(e)).Add(im, t.Mul(f(qi), f(av)))
+				mre[i*n+k], mim[i*n+k] = re, im
+			}
+		}
+		xre, xim := make([]*big.Float, n*m), make([]*big.Float, n*m)
+		for i, v := range br.b[:n*m] {
+			xre[i], xim[i] = f(v/sigma), f(0)
+		}
+		if !bigLUSolve(mre, mim, xre, xim, n, m, prec) {
+			return
+		}
+		copy(prev, x)
+		for i := range x {
+			x[i] = ddComplex{bigDD(xre[i]), bigDD(xim[i])}
+		}
+		if prec == bigSolvePrec {
+			continue
+		}
+		done := true
+		for j := range m {
+			for i := range br.p {
+				var wd, wx float64
+				for k, ck := range br.c[i*n : (i+1)*n] {
+					wd += math.Abs(ck) * x[k*m+j].sub(prev[k*m+j]).abs1()
+					wx += math.Abs(ck) * x[k*m+j].abs1()
+				}
+				done = done && wd <= ddRefineTol*wx
+			}
+		}
+		if done {
+			return
+		}
+	}
+}
+
+// bigLUSolve overwrites the n×m (xre, xim) with the GEPP solution of the
+// complex system (mre, mim) at precision prec, destroying (mre, mim). It
+// reports false at an exactly zero pivot.
+func bigLUSolve(mre, mim, xre, xim []*big.Float, n, m int, prec uint) bool {
+	nf := func() *big.Float { return new(big.Float).SetPrec(prec) }
+	abs1 := func(i int) float64 {
+		a, _ := mre[i].Float64()
+		b, _ := mim[i].Float64()
+		return math.Abs(a) + math.Abs(b)
+	}
+	t, u, d, fr, fi := nf(), nf(), nf(), nf(), nf()
+	ire, iim := nf(), nf()
+	bigCMul := func(zr, zi, ar, ai, br, bi *big.Float) {
+		t.Mul(ar, br)
+		u.Mul(ai, bi)
+		re := nf().Sub(t, u)
+		t.Mul(ar, bi)
+		u.Mul(ai, br)
+		zi.Add(t, u)
+		zr.Set(re)
+	}
+	for k := range n {
+		piv, best := k, abs1(k*n+k)
+		for i := k + 1; i < n; i++ {
+			if v := abs1(i*n + k); v > best {
+				piv, best = i, v
+			}
+		}
+		if mre[piv*n+k].Sign() == 0 && mim[piv*n+k].Sign() == 0 {
+			return false
+		}
+		if piv != k {
+			for j := range n {
+				mre[k*n+j], mre[piv*n+j] = mre[piv*n+j], mre[k*n+j]
+				mim[k*n+j], mim[piv*n+j] = mim[piv*n+j], mim[k*n+j]
+			}
+			for j := range m {
+				xre[k*m+j], xre[piv*m+j] = xre[piv*m+j], xre[k*m+j]
+				xim[k*m+j], xim[piv*m+j] = xim[piv*m+j], xim[k*m+j]
+			}
+		}
+		d.Mul(mre[k*n+k], mre[k*n+k]).Add(d, t.Mul(mim[k*n+k], mim[k*n+k]))
+		ire.Quo(mre[k*n+k], d)
+		iim.Quo(mim[k*n+k], d).Neg(iim)
+		for i := k + 1; i < n; i++ {
+			if mre[i*n+k].Sign() == 0 && mim[i*n+k].Sign() == 0 {
+				continue
+			}
+			bigCMul(fr, fi, mre[i*n+k], mim[i*n+k], ire, iim)
+			for j := k + 1; j < n; j++ {
+				if mre[k*n+j].Sign() == 0 && mim[k*n+j].Sign() == 0 {
+					continue
+				}
+				zr, zi := nf(), nf()
+				bigCMul(zr, zi, fr, fi, mre[k*n+j], mim[k*n+j])
+				mre[i*n+j].Sub(mre[i*n+j], zr)
+				mim[i*n+j].Sub(mim[i*n+j], zi)
+			}
+			for j := range m {
+				zr, zi := nf(), nf()
+				bigCMul(zr, zi, fr, fi, xre[k*m+j], xim[k*m+j])
+				xre[i*m+j].Sub(xre[i*m+j], zr)
+				xim[i*m+j].Sub(xim[i*m+j], zi)
+			}
+		}
+		mre[k*n+k], mim[k*n+k] = nf().Set(ire), nf().Set(iim)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for c := range m {
+			vr, vi := nf().Set(xre[i*m+c]), nf().Set(xim[i*m+c])
+			for j := i + 1; j < n; j++ {
+				zr, zi := nf(), nf()
+				bigCMul(zr, zi, mre[i*n+j], mim[i*n+j], xre[j*m+c], xim[j*m+c])
+				vr.Sub(vr, zr)
+				vi.Sub(vi, zi)
+			}
+			bigCMul(xre[i*m+c], xim[i*m+c], vr, vi, mre[i*n+i], mim[i*n+i])
+		}
+	}
+	return true
+}
+
+// bigDD rounds v to double-double.
+func bigDD(v *big.Float) dd {
+	hi, _ := v.Float64()
+	lo, _ := new(big.Float).SetPrec(v.Prec()).Sub(v, new(big.Float).SetFloat64(hi)).Float64()
+	return quickTwoSum(hi, lo)
+}
+
+// ddCorrect solves for the correction from the residual r in place, adds it
+// to x and reports whether it is below ddRefineTol in every response entry.
+func ddCorrect(lu []ddComplex, perm []int, r, x []ddComplex, br *balancedRealization) bool {
+	n, m := br.n, br.m
+	ddLUSolve(lu, perm, r, n, m)
+	done := true
+	for j := range m {
+		for i := range br.p {
+			var wd, wx float64
+			for k, ck := range br.c[i*n : (i+1)*n] {
+				wd += math.Abs(ck) * r[k*m+j].abs1()
+				wx += math.Abs(ck) * x[k*m+j].abs1()
+			}
+			done = done && wd <= ddRefineTol*wx
+		}
+	}
+	for i, v := range r {
+		x[i] = x[i].add(v)
+	}
+	return done
 }
 
 // evalFrLFTFrozenInto sets ws.g to G(s) by closing the delay channels with

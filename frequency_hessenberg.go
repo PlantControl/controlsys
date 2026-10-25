@@ -77,9 +77,11 @@ func newRealizationCopy(sys *System, n, m, p int) balancedRealization {
 // componentwise backward stable relative to the pivoted rows, and the
 // pencil entries are rounded: next to a lightly damped pole at distance d
 // the slow mode keeps only about ε/d relative accuracy. A pivot below
-// 1/refineCondition of the pencil scale flags such a point; refine
-// refactors it and, unless the first correction against the exact pencil
-// (pencilResidual) shows the solution already accurate, refines with it.
+// 1/refineCondition of the pencil scale flags such a point, and so does a
+// response entry that back substitution may have lost to cancellation
+// (outputCancels); refine reuses the LU factors and, unless the first
+// correction against the exact pencil (pencilResidual) shows the solution
+// already accurate, refines with them.
 type balancedDense struct {
 	balancedRealization
 	lastA  []int // last structural nonzero column in each row of sÊ-Â
@@ -87,12 +89,19 @@ type balancedDense struct {
 	pencil []complex128
 	inv    []complex128
 	x      []complex128   // row-major n×m
-	piv    []int          // refine's factorization, allocated on first use
+	piv    []int          // evalInto's row interchanges, for refine
 	r      []complex128   // row-major n×m, refine's residual
 	pt     frequencyPoint // the point evalInto last factored, for refine
 	tol    float64
+	// stalled marks a point at which refine did not resolve every response
+	// entry; solveErr then holds its error estimate per entry.
+	stalled  bool
+	solveErr []float64
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
+	// sys, when set, is the delay-free model whose double-double response
+	// (ddResponseInto) replaces a stalled point's inaccurate entries.
+	sys *System
 }
 
 // refineCondition is the error amplification, relative to ε, above which
@@ -109,15 +118,16 @@ func newBalancedDense(sys *System, n, m, p int) *balancedDense {
 // newBalancedDenseOf takes ownership of the balanced realization br.
 func newBalancedDenseOf(br balancedRealization) *balancedDense {
 	n, m := br.n, br.m
-	c := make([]complex128, n*n+n+n*m)
+	c := make([]complex128, n*n+n+2*n*m)
 	bd := &balancedDense{
 		balancedRealization: br,
 		pencil:              c[: n*n : n*n],
 		inv:                 c[n*n : n*n+n : n*n+n],
-		x:                   c[n*n+n:],
+		x:                   c[n*n+n : n*n+n+n*m : n*n+n+n*m],
+		r:                   c[n*n+n+n*m:],
 	}
-	idx := make([]int, 2*n)
-	bd.lastA, bd.last = idx[:n:n], idx[n:]
+	idx := make([]int, 3*n)
+	bd.lastA, bd.last, bd.piv = idx[:n:n], idx[n:2*n:2*n], idx[2*n:]
 	for i := range n {
 		last := n - 1
 		for last > i && bd.a[i*n+last] == 0 && (bd.e == nil || bd.e[i*n+last] == 0) {
@@ -208,7 +218,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 	if tol == 0 {
 		tol = 1e-15
 	}
-	bd.pt, bd.tol = pt, tol
+	bd.pt, bd.tol, bd.stalled = pt, tol, false
 	refineBelow, refine := max(scale/refineCondition, tol), false
 
 	// last[i] bounds the nonzeros of row i, so banded and block-triangular
@@ -228,6 +238,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			}
 			refine = true
 		}
+		bd.piv[k] = piv
 		if piv != k {
 			rk, rp := a[k*n:(k+1)*n], a[piv*n:(piv+1)*n]
 			for j := range rk {
@@ -248,6 +259,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			if f == 0 {
 				continue
 			}
+			a[i*n+k] = f
 			ri := a[i*n+k+1 : i*n+lk+1]
 			ri = ri[:len(rk)]
 			for j, v := range rk {
@@ -272,7 +284,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			x[i*m+j] = (x[i*m+j] - complex(re, im)) * inv[i]
 		}
 	}
-	if refine {
+	if refine || bd.outputCancels() {
 		bd.refine()
 	}
 
@@ -296,31 +308,37 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re, im)
 		}
 	}
+	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
+		ddResponseInto(bd.sys, pt, dst)
+	}
 	return finiteResponse(dst)
 }
 
+// stallInaccurate reports whether a stalled point's error estimate exceeds
+// refineCondition·ε of a response entry; ddResponseInto resolves it there
+// (graded companion below its poles: 4e-2 relative off).
+func (bd *balancedDense) stallInaccurate(dst []complex128) bool {
+	for i, v := range dst {
+		if bd.solveErr[i] > refineCondition*eps()*cabs1(v) {
+			return true
+		}
+	}
+	return false
+}
+
 // refine improves bd.x against the exact pencil at pt, M = (pÊ + qÂ)/κ with
-// κ = −q for the explicit sI − Â of a non-plain point and 1 otherwise. It
-// refactors the pencil keeping L, which the elimination in evalInto
-// discards to stay lean on the common well-conditioned point.
+// κ = −q for the explicit sI − Â of a non-plain point and 1 otherwise, with
+// the factors evalInto left in bd.pencil and bd.piv. It stops once the
+// correction is small normwise and in every response entry; where an entry
+// passes only at the resolution floor of outputConverged, or the steps run
+// out, the point is marked stalled.
 func (bd *balancedDense) refine() {
 	pt := bd.pt
 	n, m := bd.n, bd.m
-	if bd.r == nil {
-		bd.r, bd.piv = make([]complex128, n*m), make([]int, n)
-	}
 	x, r := bd.x, bd.r
 	kappa := complex(1, 0)
-	if pt.isPlain() {
-		bd.fillPencil(pt.value())
-	} else {
-		bd.fillPencilAt(pt)
-		if bd.e == nil {
-			kappa = pt.scale()
-		}
-	}
-	if !cLUFactor(bd.pencil, bd.piv, n) {
-		return
+	if !pt.isPlain() && bd.e == nil {
+		kappa = pt.scale()
 	}
 	ik := crecip(kappa)
 	for step := range maxRefineSteps {
@@ -342,7 +360,12 @@ func (bd *balancedDense) refine() {
 		// rounding, ε|M||x|, is the error being measured, and where it
 		// rounds to zero an inaccurate x would pass.
 		if step == 0 && dMax <= refineCondition*eps()*xMax {
-			return
+			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineCondition*eps()); floored {
+				if !exact {
+					bd.stallErr(r)
+				}
+				return
+			}
 		}
 		xMax = 0
 		for i, v := range r {
@@ -350,9 +373,138 @@ func (bd *balancedDense) refine() {
 			xMax = max(xMax, cabs1(x[i]))
 		}
 		if dMax <= refineStop*xMax {
-			return
+			if exact, floored := outputConverged(bd.c, bd.c, r, x, n, m, bd.p, m, 1, refineStop); floored {
+				if !exact {
+					bd.stallErr(r)
+				}
+				return
+			}
 		}
 	}
+	bd.stallErr(r)
+}
+
+// stallErr records in bd.solveErr, per response entry, Σₖ|ĉᵢₖ||dₖⱼ| of
+// refine's last correction d, which estimates the error left where
+// refinement stalls.
+func (bd *balancedDense) stallErr(d []complex128) {
+	n, m, p := bd.n, bd.m, bd.p
+	if bd.solveErr == nil {
+		bd.solveErr = make([]float64, p*m)
+	}
+	for i := range p {
+		cr := bd.c[i*n : (i+1)*n]
+		for j := range m {
+			w := 0.0
+			for k, c := range cr {
+				w += math.Abs(c) * cabs1(d[k*m+j])
+			}
+			bd.solveErr[i*m+j] = w
+		}
+	}
+	bd.stalled = true
+}
+
+// outputCancels reports whether back substitution may have lost a response
+// entry to cancellation (LEAZRP: below the poles of a graded reversed
+// companion C = e₁ reads x₀ ≈ 1e-20, formed as a difference of terms near
+// 976). Only an entry read from states at least refineCondition below the
+// largest of its column can lose more than refineCondition, so the others
+// skip substitutionError. An entry substitution left exactly zero is the
+// extreme of that loss, not a resolved zero.
+func (bd *balancedDense) outputCancels() bool {
+	n, m, x := bd.n, bd.m, bd.x
+	for j := range m {
+		xMax := 0.0
+		for k := range n {
+			xMax = max(xMax, cabs1(x[k*m+j]))
+		}
+		for i := range bd.p {
+			cr := bd.c[i*n : (i+1)*n]
+			var w, cMax float64
+			for k, c := range cr {
+				w += math.Abs(c) * cabs1(x[k*m+j])
+				cMax = max(cMax, math.Abs(c))
+			}
+			if w*refineCondition < cMax*xMax {
+				return bd.substitutionError()
+			}
+		}
+	}
+	return false
+}
+
+// cancelCondition is the estimated error amplification, relative to ε, of
+// a response entry above which substitutionError refines it: about 2e-10
+// relative. The estimate is first order and usually pessimistic; refinement
+// costs several solves, so entries GEPP leaves within ~1e-10 stay.
+const cancelCondition = 1e6
+
+// substitutionError reports whether the first-order rounding error of back
+// substitution, eᵢ = (|xᵢ| + Σₖ|uᵢₖ|(|xₖ| + eₖ))/|uᵢᵢ| in units of ε,
+// exceeds cancelCondition in some response entry relative to Σₖ|cₖ||xₖ|.
+// e is kept in the real parts of bd.r, which refine overwrites.
+func (bd *balancedDense) substitutionError() bool {
+	n, m, a, x, e := bd.n, bd.m, bd.pencil, bd.x, bd.r
+	for i := n - 1; i >= 0; i-- {
+		ui := a[i*n+i+1 : i*n+bd.last[i]+1]
+		ii := cabs1(bd.inv[i])
+		for j := range m {
+			v := cabs1(x[i*m+j]) / ii
+			for k, u := range ui {
+				l := (i+1+k)*m + j
+				v += cabs1(u) * (cabs1(x[l]) + real(e[l]))
+			}
+			e[i*m+j] = complex(v*ii, 0)
+		}
+	}
+	for j := range m {
+		for i := range bd.p {
+			var w, we float64
+			for k, c := range bd.c[i*n : (i+1)*n] {
+				w += math.Abs(c) * cabs1(x[k*m+j])
+				we += math.Abs(c) * real(e[k*m+j])
+			}
+			if !(we <= cancelCondition*w) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// outputConverged reports whether the correction d is within tol of x in
+// every response entry, weighted by the output rows: Σₖ|cdᵢₖ||dₖⱼ| ≤
+// tol·Σₖ|cxᵢₖ||xₖⱼ|. A normwise test passes a correction that is tiny
+// against ‖x‖ but not against the few states an output reads. cd and cx are
+// row-major p×n; entry (k, j) of d and x is at k·ks + j·js. floored is the
+// test with the weight floored at ε·max|cxᵢ|·max|xⱼ|, which also passes an
+// entry below what the compensated residual resolves, about ε² of that
+// scale.
+func outputConverged(cd, cx []float64, d, x []complex128, n, m, p, ks, js int, tol float64) (exact, floored bool) {
+	exact = true
+	for j := range m {
+		xMax := 0.0
+		for k := range n {
+			xMax = max(xMax, cabs1(x[k*ks+j*js]))
+		}
+		for i := range p {
+			rd, rx := cd[i*n:(i+1)*n], cx[i*n:(i+1)*n]
+			var wd, wx, cMax float64
+			for k := range n {
+				wd += math.Abs(rd[k]) * cabs1(d[k*ks+j*js])
+				wx += math.Abs(rx[k]) * cabs1(x[k*ks+j*js])
+				cMax = max(cMax, math.Abs(rx[k]))
+			}
+			if wd > tol*wx {
+				exact = false
+				if wd > tol*eps()*cMax*xMax {
+					return false, false
+				}
+			}
+		}
+	}
+	return exact, true
 }
 
 // hessenbergSweep evaluates C(sI-A)^{-1}B + D over many frequencies after one
@@ -634,6 +786,19 @@ func (hs *hessenbergSweep) exactResidual(pt frequencyPoint) {
 	}
 }
 
+// outputConverged is outputConverged of the correction hs.y. Weighted by
+// |ĈQ| in Hessenberg coordinates it overstates the correction an output
+// sees, so where that fails the test is redone on Qy in r.
+func (hs *hessenbergSweep) outputConverged(tol float64) bool {
+	n, m, p := hs.n, hs.m, hs.p
+	if _, ok := outputConverged(hs.ct, hs.c, hs.y, hs.x, n, m, p, 1, n, tol); ok {
+		return true
+	}
+	qMulCols(hs.r, hs.y, hs.q, n, m)
+	_, ok := outputConverged(hs.c, hs.c, hs.r, hs.x, n, m, p, 1, n, tol)
+	return ok
+}
+
 func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 	n, m, p := hs.n, hs.m, hs.p
 	if hs.nonFinite || cmplx.IsNaN(pt.value()) {
@@ -679,7 +844,11 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			dMax = max(dMax, cabs1(v))
 			xMax = max(xMax, cabs1(x[i]))
 		}
-		if dMax <= refineStop*xMax && (step > 0 || dMax <= refineCondition*eps()*xMax) {
+		tol := refineStop
+		if step == 0 {
+			tol = refineCondition * eps()
+		}
+		if dMax <= tol*xMax && hs.outputConverged(tol) {
 			break
 		}
 	}
