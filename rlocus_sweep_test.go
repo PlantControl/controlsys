@@ -8,6 +8,7 @@ import (
 	"math/cmplx"
 	"math/rand/v2"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -15,8 +16,8 @@ import (
 
 // Frozen RootLocus regression sweep (track rlocus, wave 19). The generator
 // and the verdict rules below are frozen: testdata/rlocus_sweep_base.json
-// holds the verdicts of base rlswBaseRev (AND of arm64 and GOARCH=amd64
-// runs) and every later revision must keep each verdict base got right.
+// holds the verdicts of base 03edce8 (AND of arm64 and GOARCH=amd64 runs)
+// and every later revision must keep each verdict base got right.
 // Regenerate the file only with base code: RLOCUS_SWEEP_WRITE=<path>.
 // rlocus_sweep_ext_test.go adds a second frozen set of harder families.
 //
@@ -601,13 +602,16 @@ func (c *rlswCase) oracles() (oInt, oFlt rlswOracle) {
 	return oInt, oFlt
 }
 
-const rlswBaseRev = "23be053+tfcap"
+const rlswBaseRev = "03edce8"
+
+// rlswMainRev is the base the track is merged onto; the goldens stay at
+// rlswBaseRev.
+const rlswMainRev = "2db88fe"
 
 type rlswGolden struct {
 	Base  string `json:"base"`
 	OK    string `json:"ok"`
 	Posed string `json:"posed"`
-	Dup   []int  `json:"dup,omitempty"`
 }
 
 func rlswRun(t *testing.T, cases []rlswCase) (ok, posed, dups []int) {
@@ -686,14 +690,15 @@ func rlswUlpSensitive(c *rlswCase, seed int) bool {
 // rlswCheck fails when a component that base got right on cases (golden
 // file golden) is now wrong or errors; env names the regenerate variable.
 // A Breakaway verdict listed in limits is reported, not enforced, when
-// rlswUlpSensitive confirms it is a float64 precision limit. It also fails
-// when a case's Breakaway lists a point twice where base (golden dup) did
-// not.
-func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string) {
+// rlswUlpSensitive confirms it is a float64 precision limit; one listed in
+// atBase for runtime.GOARCH (wrong at rlswMainRev too) is reported, not
+// enforced. It also fails when any case's Breakaway lists a point twice,
+// which base did.
+func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[int]string, atBase map[int]map[string]string) {
 	t.Helper()
 	ok, posed, dups := rlswRun(t, cases)
 	if path := os.Getenv(env); path != "" {
-		data, err := json.Marshal(rlswGolden{Base: rlswBaseRev, OK: rlswHex(ok), Posed: rlswHex(posed), Dup: dups})
+		data, err := json.Marshal(rlswGolden{Base: rlswBaseRev, OK: rlswHex(ok), Posed: rlswHex(posed)})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -737,6 +742,8 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 			switch {
 			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && limits[i] != "" && rlswUlpSensitive(&cases[i], i):
 				t.Logf("case %d: Breakaway differs from base at a precision limit: %s", i, limits[i])
+			case base[i]&m != 0 && ok[i]&m == 0 && m == rlswBreak && atBase[i][runtime.GOARCH] != "":
+				t.Logf("case %d: Breakaway wrong at %s too: %s", i, rlswMainRev, atBase[i][runtime.GOARCH])
 			case base[i]&m != 0 && ok[i]&m == 0:
 				regressed[bit]++
 				if regressed[bit] <= 5 {
@@ -750,12 +757,8 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 		}
 	}
 	t.Logf("fixed vs base: break %d asym %d depart %d arrive %d; regressed: %v", fixed[0], fixed[1], fixed[2], fixed[3], regressed)
-	k := 0
-	for _, i := range dups {
-		if slices.Contains(g.Dup, i) {
-			continue
-		}
-		if k++; k <= 5 {
+	for k, i := range dups {
+		if k < 5 {
 			sys, _ := cases[i].system()
 			res, _ := RootLocus(sys, []float64{0, 1})
 			t.Errorf("case %d: Breakaway %v lists a point twice\n%s", i, res.Breakaway, &cases[i])
@@ -763,29 +766,6 @@ func rlswCheck(t *testing.T, cases []rlswCase, golden, env string, limits map[in
 	}
 }
 
-// Verdicts right at 03edce8 but wrong on this branch (sw, dbl, ext sweeps,
-// AND of arm64 and amd64) are not listed in the limit maps. None is lost
-// vs 23be053 (same verdicts). The converted TF is backward-stable, not
-// exact: its coefficient error vs the exact big.Rat TF of the floats is
-// 0 to ~2x the spread of that TF under 1-ulp changes of A, B, C, up to
-// 21-45x (sw 334 1648, ext 307) and 75-178x (ext 858). A rounding of the
-// exact TF, realized by StateSpace, gets the same or a worse verdict in
-// the first two groups below, so a more accurate TF cannot restore them. The defects are in rlocus.go,
-// which fix/rlocus-wave22 fixes; with its rlocus.go on this branch all
-// three sweeps lose none of them except limits it lists:
-//   - exact multiple root of N'D−ND' (z^L or repeated pole/zero) listed
-//     twice; 03edce8 split it by TF noise: sw 17 138 166 613 977 1389 1436
-//     1518 1590 1648 1709 1745 1754, dbl 2 125 325 491 602 608 856, ext 27
-//     1420 1751 1762.
-//   - negative numerator lead, no K<0 sign handling (03edce8 got the
-//     segments from a far noise zero, dropped by the tzero-parity numerator
-//     cap): sw 38 (departure) 74 105 194 334 372 595 958 1187, dbl 107, ext
-//     307 364 858 1081 1399 1683.
-//   - one arch only, TF error ≤1.5x the 1-ulp spread (dbl 1413 bit-exact),
-//     right from the rounded exact TF: precision limits of TF rounding plus
-//     eig of the given realization: dbl 1413 (amd64), dbl 1452 (arm64),
-//     ext 32 (arm64), ext 903 (amd64).
-//
 // rlswPrecisionLimits are base-correct breakaway verdicts below float64
 // resolution of the given coefficients (1-ulp changes of A, B, C change the
 // exact oracle; checked by rlswUlpSensitive), where base was right by luck.
@@ -804,5 +784,5 @@ func TestRootLocusSweepNoRegression(t *testing.T) {
 		t.Skip("frozen 2000-case sweep")
 	}
 	skipSlowUnderRace(t)
-	rlswCheck(t, rlswGenerate(), "testdata/rlocus_sweep_base.json", "RLOCUS_SWEEP_WRITE", rlswPrecisionLimits)
+	rlswCheck(t, rlswGenerate(), "testdata/rlocus_sweep_base.json", "RLOCUS_SWEEP_WRITE", rlswPrecisionLimits, nil)
 }

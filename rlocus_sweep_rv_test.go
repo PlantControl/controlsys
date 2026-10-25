@@ -29,8 +29,8 @@ import (
 // disagree, or a 1-ulp change of A, B, C changes it) is logged, not
 // enforced, as is any component of a case whose float TF is not the
 // intended one, a centroid base was not judged on (its asymptote count was
-// wrong) and the rlrvLimits verdicts. testdata/rlocus_sweep_rv_base.json holds base
-// rlswBaseRev verdicts per arch; regenerate only with base code: RLOCUS_SWEEPRV_WRITE=<path>.
+// wrong) and the rlrvLimits verdicts. testdata/rlocus_sweep_rv_base.json holds base 03edce8 verdicts
+// per arch; regenerate only with base code: RLOCUS_SWEEPRV_WRITE=<path>.
 
 const (
 	rlrvSeed  = 20261022
@@ -251,10 +251,6 @@ func rvOracles(cs []rvCase) []rvOra {
 // a pole/zero gap of 1e-13…1e-11 relative, below what the realization
 // resolves.
 var rlrvLimits = map[int]string{
-	// Base right only through its 1e-15-off den. The TF is now exact and
-	// resolves the verdict; RootLocus's root finding of N′D−ND′ does not,
-	// putting the pair real on the pole side of the gap (WM67N5).
-	293:  "stationary pair −20 ± 1.9e-6i inside pole −20 / zero −20(1+3.3e-14)",
 	1328: "stationary pair −12 ± 7.5e-6 inside pole −12 / zero −12(1+5.3e-13)",
 	1517: "stationary pair −20 ± 1.4e-5 inside pole −20 / zero −20(1+3.1e-12)",
 	1622: "stationary pair −14.25 ± 1.6e-5 inside pole −14.25 / zero −14.25(1+8.4e-12)",
