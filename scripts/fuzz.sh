@@ -35,7 +35,7 @@ fi
 echo "new crashers:"
 echo "$new"
 for f in $new; do
-	dir=$(dirname "$(dirname "$(dirname "$f")")")
+	dir=${f%%/testdata/fuzz/*}
 	target=$(basename "$(dirname "$f")")
 	echo "== replay GOARCH=amd64 $target/$(basename "$f")"
 	GOARCH=amd64 go test -count=1 -run "^${target}\$/^$(basename "$f")\$" "$dir" || true
