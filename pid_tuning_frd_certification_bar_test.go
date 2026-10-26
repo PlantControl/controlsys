@@ -42,7 +42,8 @@ func pidFRDDenseMarginAny(num, den []float64, dt float64, c PID2, lo, hi float64
 // is stable, its reported margin at most 1.5° above the plant's, and its
 // |S| peak at most 4·1.05. The sparse family is the strict one on 12-51
 // samples; the top-cut one stops its band 3-30 times lower. XXVU4O
-// (resonance 84, 237) and NHV6F5 (strict 189) were certified violators;
+// (resonance 84, 237), NHV6F5 (strict 189) and QHMGQL (top-cut 402)
+// were certified violators;
 // a floor on certified designs guards against certifying nothing.
 // Oracles: companion roots, exact Schur–Cohn, dense margin and |S|
 // sweeps of the exact plant.
@@ -71,11 +72,7 @@ func TestTunePIDFRDCertificationBar(t *testing.T) {
 			c.n = 12 + rand.New(rand.NewPCG(9107, seed)).IntN(40)
 			return c
 		}, nil, n / 15},
-		{"top-cut", func(seed uint64) pidFRDStrictCase {
-			c := pidFRDStrictSweepCase(rand.New(rand.NewPCG(9108, seed)))
-			c.hi = math.Max(c.hi/math.Pow(10, 0.5+rand.New(rand.NewPCG(9109, seed)).Float64()), 30*c.lo)
-			return c
-		}, nil, n / 40},
+		{"top-cut", pidFRDTopCutSweepCase, []uint64{402}, n / 40},
 	} {
 		t.Run(f.name, func(t *testing.T) {
 			t.Parallel()

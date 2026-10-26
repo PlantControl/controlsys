@@ -1019,6 +1019,18 @@ func pidTuningFRDTopBend(data *FRD, n float64) float64 {
 // leaves the top unestablished.
 const pidTuningFRDTopCurvature = .01
 
+// pidTuningFRDIdealEndSettled reports whether an ideal derivative's loop
+// end L(∞) = Kd·m on an anchored Markov end, of top bend |β|
+// (pidTuningFRDTopBend), is established: |L(∞)| ≤ ½, or β within
+// pidTuningFRDTopCurvature/3, no pole pair within about 17 times the top.
+// L does not roll off, so a pair beyond the ten-times zone of
+// pidTuningFRDTopFlat still lifts |L(∞)| by 1/(2ζ) through 1 there, where
+// the data read no crossing: a ζ 0.07 pair 14 times above the top
+// (β 0.0052) put |L(∞)| 0.83 at a 13.6° margin.
+func pidTuningFRDIdealEndSettled(end, bend float64) bool {
+	return math.Abs(end) <= .5 || bend <= pidTuningFRDTopCurvature/3
+}
+
 // pidTuningFRDMarkov returns m = lim sG(s) that continuous sampled data
 // show at their top, as a relative-degree-one plant leaves it, with spread
 // the change of jω·G over the top half decade, or 0, 0 when they show none:
@@ -1390,7 +1402,7 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 			end = complex(1+real(l), 0)
 		}
 	case c.Dt == 0 && c.Tf == 0 && c.Kd != 0 && p.markov != 0:
-		end, top = complex(1+c.Kd*p.markov, 0), p.markovAnchored
+		end, top = complex(1+c.Kd*p.markov, 0), p.markovAnchored && pidTuningFRDIdealEndSettled(c.Kd*p.markov, p.markovBend)
 		if !(math.Abs(real(end)) > math.Abs(real(1+l-end))+2*math.Abs(c.Kd)*p.markovSpread) {
 			return true, false, false
 		}
