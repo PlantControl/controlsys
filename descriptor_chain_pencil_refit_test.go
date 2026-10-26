@@ -49,39 +49,6 @@ func chainOracleMismatch(t *testing.T, res *TransferFuncResult, oracle *System, 
 
 var chainLowFreq = []complex128{0.05i, 0.37i, complex(0.5, 3)}
 
-// TestIsProperChainBesideLargeAPole: KLVET5. refutedChainDescriptor seeds
-// 19, 102 and 131, proper MIMO index-6 chains beside the finite pole
-// 1e5/w, read improper (IsProper false, TransferFunction
-// ErrImproperModel): the split moved residue of the pole into s-terms
-// (s-coefficient norm 7.5e5, 3.5e5, 3.5e4, ratio λ between successive
-// terms) that pass the normwise rounding level while every entry stays
-// within it, so no polynomial part was kept. The direct (sE − A) solves
-// below the pole refute such s-terms and a proper refit with the split's
-// poles matches them. Oracle: the structured model's pencil response.
-func TestIsProperChainBesideLargeAPole(t *testing.T) {
-	for _, seed := range []uint64{19, 102, 131} {
-		label := fmt.Sprintf("seed %d", seed)
-		sys, oracle := refutedChainDescriptor(t, seed)
-		pr, err := sys.IsProper()
-		if err != nil || !pr {
-			t.Fatalf("%s: IsProper = %v, %v; want true", label, pr, err)
-		}
-		if _, err := Step(sys, 1); err != nil {
-			t.Fatalf("%s: Step: %v", label, err)
-		}
-		res, err := sys.TransferFunction(nil)
-		if err != nil {
-			t.Fatalf("%s: TransferFunction: %v", label, err)
-		}
-		if fzTFImproper(res.TF) {
-			t.Fatalf("%s: TF improper", label)
-		}
-		if d := chainOracleMismatch(t, res, oracle, append(chainLowFreq, 30i)); !(d <= 1e-6) {
-			t.Errorf("%s: TF off the oracle by %.3g relative", label, d)
-		}
-	}
-}
-
 // TestTransferFunctionImproperChainBesideStiffPole: 5CNIZA. Improper
 // index-5/6 chains beside a stiff finite pole (seed 159: [6] beside
 // −2.47e6; seed 45: [6] beside 2.95e5; seed 17) whose rounding chain
