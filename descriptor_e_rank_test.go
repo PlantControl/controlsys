@@ -31,6 +31,27 @@ func nearSingularEModel(t *testing.T, seed uint64, nIn int, kIn float64) (sys, t
 	if kIn > 0 {
 		k = kIn
 	}
+	return nearSingularEDraw(t, rng, n, m, p, k)
+}
+
+// nearSingularEContinuousK is nearSingularEModel with n in 2..6 and k
+// log-uniform on [0.2, 2.5], so σ_n of E spans MATLAB's rank boundary
+// continuously.
+func nearSingularEContinuousK(t *testing.T, seed uint64) *System {
+	t.Helper()
+	rng := rand.New(rand.NewPCG(seed, 7704))
+	n := 2 + rng.IntN(5)
+	m, p := 1, 1
+	if rng.IntN(3) == 0 {
+		m, p = 1+rng.IntN(2), 1+rng.IntN(2)
+	}
+	k := math.Exp(math.Log(0.2) + rng.Float64()*(math.Log(2.5)-math.Log(0.2)))
+	sys, _ := nearSingularEDraw(t, rng, n, m, p, k)
+	return sys
+}
+
+func nearSingularEDraw(t *testing.T, rng *rand.Rand, n, m, p int, k float64) (sys, twin *System) {
+	t.Helper()
 	F, W := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
 	for i := range n {
 		F.Set(i, i, rng.NormFloat64()-0.3)
@@ -268,5 +289,55 @@ func TestDescriptorNearSingularEModelsAgreeAcrossAPIs(t *testing.T) {
 				checkERankAgreement(t, fmt.Sprintf("k=%v n=%d seed=%d", k, n, seed+40), sys, twin)
 			}
 		}
+	}
+}
+
+// The generalized Schur form zeroes the E entry of a stiff mode whose σ_n
+// lies within ε‖E‖ although MATLAB rank(E) is full; TransferFunction then
+// folded E in whole and the stiff pole near 1/ε swamped the slow ones
+// (literal 1: off the pencil by 1.38 on both arches, literal 2: 0.957 on
+// amd64, denominator of order 1).
+func TestTransferFunctionStiffModeDeflatedByQZKeepsSlowPoles(t *testing.T) {
+	model := func(a, b, c []float64, d float64, e []float64) *System {
+		sys, err := NewDescriptor(mat.NewDense(3, 3, a), mat.NewDense(3, 1, b), mat.NewDense(1, 3, c),
+			mat.NewDense(1, 1, []float64{d}), mat.NewDense(3, 3, e), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sys
+	}
+	cases := map[string]*System{
+		"literal 1": model(
+			[]float64{0.48183367983483827, 0.02194172359683036, 0.3125942093617087, 0.031175700420809086, -0.08312389461428946, -0.11921583987828199, -0.13878703891954458, 1.2752340032961218, -0.04620546167813694},
+			[]float64{-0.8266135256850403, 0.4962938310619698, 0.1997252733191939},
+			[]float64{-0.24668887742578766, -0.4891475656619139, 0.7993999478702887}, -0.8501554151268462,
+			[]float64{0.075029881031847, -0.1008963391206154, -0.6646984857762108, 0.4791288452228757, 0.33805115635506466, 0.38789676231208653, 0.547940315656329, 0.21367437046148713, -0.3718739090884265}),
+		"literal 2": model(
+			[]float64{0.5625274460361358, -0.6407286013614327, 0.5026553490392252, 0.3653322516032209, 1.4044694523891432, -0.3174031473250085, 0.15459687343604056, 0.33533431698174915, -0.7915061398096794},
+			[]float64{0.09415594089797513, 0.6342443518062528, -0.8776086054621898},
+			[]float64{1.4386639092184832, -0.6837301171758893, -0.830597432505679}, 0.14982469859342595,
+			[]float64{0.36111507420312494, -0.464622654922211, -0.16025987959200083, 0.11602906673378945, 0.7889788330468326, -0.25621413919277564, 0.47811368921432795, 0.20641790152016704, -0.3914433749837351}),
+	}
+	// Seeds whose TF was off the pencil by 1e-7..3.9 on arm64 or amd64.
+	for _, seed := range []uint64{17063, 18268, 48903, 54949, 57207, 74809, 80013, 117306, 170665, 180034} {
+		cases[fmt.Sprintf("seed %d", seed)] = nearSingularEContinuousK(t, seed)
+	}
+	for name, sys := range cases {
+		t.Run(name, func(t *testing.T) {
+			checkERankAgreementTF(t, sys, sys)
+			pol, err := sys.Poles()
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := sys.TransferFunction(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, m, p := sys.Dims(); m == 1 && p == 1 {
+				if got := len(res.TF.Den[0]) - 1; got != len(pol) {
+					t.Errorf("denominator order %d, want %d finite poles", got, len(pol))
+				}
+			}
+		})
 	}
 }
