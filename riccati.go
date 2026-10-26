@@ -721,7 +721,8 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // solve returns the first solution of the Dare of red whose gain in the
 // inputs u stabilizes A − BK (closedLoopStable), or nil: that of dareSolve
 // and, should its K fail there, those of dare in the other scaling mode
-// and of placedDare in both. Under cheap control A − BK can be so
+// and of placedDare in both (as dareSolve, none boundaryCertified).
+// Under cheap control A − BK can be so
 // sensitive to K that the K of X accurate to 1e-14 and that of 3e-13 lie
 // on either side of the unit circle, while each mode rounds it
 // differently.
@@ -753,13 +754,13 @@ func (red *reducedInputs) solve(A, B, Q *mat.Dense, opts *RiccatiOpts) *RiccatiR
 	o.Workspace = nil
 	flipped := o
 	flipped.NoScaling = !o.NoScaling
-	if r, err := dare(A, red.b, red.q, red.r, &flipped); err == nil && r.Accuracy == 0 {
+	if r, err := dare(A, red.b, red.q, red.r, &flipped); err == nil && r.Accuracy == 0 && !boundaryCertified(false, A, red.b, red.q, red.r, &o, r) {
 		if r = accept(r, nil); r != nil {
 			return r
 		}
 	}
 	for _, p := range []*RiccatiOpts{&o, &flipped} {
-		if r, err := placedDare(A, red.b, red.q, red.r, p); err == nil {
+		if r, err := placedDare(A, red.b, red.q, red.r, p); err == nil && !boundaryCertified(false, A, red.b, red.q, red.r, &o, r) {
 			if r = accept(r, nil); r != nil {
 				return r
 			}
