@@ -15,10 +15,17 @@ import (
 // (A, B, Q, R) by the structure-preserving doubling algorithm in hbPrec
 // bits: A₊ = A(I+GH)⁻¹A, G₊ = G + A(I+GH)⁻¹GAᵀ, H₊ = H + AᵀH(I+GH)⁻¹A
 // from G = BR⁻¹Bᵀ, H = Q, with H → X quadratically. It shares no step
-// with the pencil or Hewer's iteration that Dare uses.
-func dareDoublingBig(A, B, Q, R *mat.Dense) *mat.Dense {
+// with the pencil or Hewer's iteration that Dare uses. A cross term S
+// (nil for none) is eliminated first: A − BR⁻¹Sᵀ, Q − SR⁻¹Sᵀ.
+func dareDoublingBig(A, B, Q, R, S *mat.Dense) *mat.Dense {
 	a, b, h := hbFrom(A), hbFrom(B), hbFrom(Q)
 	n := a.r
+	if S != nil {
+		s := hbFrom(S)
+		rs := hbSolve(hbFrom(R), s.t())
+		a = hbAdd(a, hbMul(b, rs), -1)
+		h = hbAdd(h, hbMul(s, rs), -1)
+	}
 	g := hbMul(b, hbSolve(hbFrom(R), b.t()))
 	eye := newHbMat(n, n)
 	for i := range n {
@@ -83,6 +90,24 @@ func dareCheapUnstableCase(k int) (A, B, Q, R *mat.Dense) {
 	}
 }
 
+// dareCheapCross returns a cross term S = γ·Q·U (U with unit-norm
+// columns) of norm ≈ √(‖Q‖‖R‖) for R = 1e-12·I, with γ small enough that
+// R − SᵀQ⁺S = R − γ²UᵀQU stays positive definite: [Q S; Sᵀ R] ⪰ 0.
+func dareCheapCross(Q *mat.Dense, m int) *mat.Dense {
+	n, _ := Q.Dims()
+	u := mat.NewDense(n, m, nil)
+	for i := range n {
+		for j := range m {
+			u.Set(i, j, math.Cos(float64(i+2*j+1))/math.Sqrt(float64(n)))
+		}
+	}
+	gamma := math.Sqrt(0.25e-12 / mat.Norm(Q, 2))
+	var s mat.Dense
+	s.Mul(Q, u)
+	s.Scale(gamma, &s)
+	return &s
+}
+
 // dareCheapDescriptor returns a nonsymmetric, well-conditioned E.
 func dareCheapDescriptor(n int) *mat.Dense {
 	e := mat.NewDense(n, n, nil)
@@ -102,8 +127,10 @@ func dareCheapDescriptor(n int) *mat.Dense {
 func TestDare_CheapControlOfUnstablePlantIsCertified(t *testing.T) {
 	for _, k := range []int{6, 19, 25, 29} {
 		A0, B0, Q, R := dareCheapUnstableCase(k)
-		n, _ := A0.Dims()
-		want := dareDoublingBig(A0, B0, Q, R)
+		n, m := B0.Dims()
+		want := dareDoublingBig(A0, B0, Q, R, nil)
+		S := dareCheapCross(Q, m)
+		wantS := dareDoublingBig(A0, B0, Q, R, S)
 		E := dareCheapDescriptor(n)
 		var Ae, Be mat.Dense
 		Ae.Mul(E, A0)
@@ -112,10 +139,12 @@ func TestDare_CheapControlOfUnstablePlantIsCertified(t *testing.T) {
 			name string
 			A, B *mat.Dense
 			opts *RiccatiOpts
+			want *mat.Dense
 		}{
-			{"explicit", A0, B0, nil},
-			{"NoScaling", A0, B0, &RiccatiOpts{NoScaling: true}},
-			{"descriptor", &Ae, &Be, &RiccatiOpts{E: E}},
+			{"explicit", A0, B0, nil, want},
+			{"NoScaling", A0, B0, &RiccatiOpts{NoScaling: true}, want},
+			{"descriptor", &Ae, &Be, &RiccatiOpts{E: E}, want},
+			{"cross term", A0, B0, &RiccatiOpts{S: S}, wantS},
 		} {
 			res, err := Dare(tc.A, tc.B, Q, R, tc.opts)
 			if err != nil {
@@ -136,9 +165,9 @@ func TestDare_CheapControlOfUnstablePlantIsCertified(t *testing.T) {
 				X = &ex
 			}
 			var d mat.Dense
-			d.Sub(X, want)
-			if rel := mat.Norm(&d, 2) / mat.Norm(want, 2); !(rel <= 1e-8) {
-				t.Errorf("case %d %s: ‖X − X*‖/‖X*‖ = %.3g (‖X*‖ %.3g)", k, tc.name, rel, mat.Norm(want, 2))
+			d.Sub(X, tc.want)
+			if rel := mat.Norm(&d, 2) / mat.Norm(tc.want, 2); !(rel <= 1e-8) {
+				t.Errorf("case %d %s: ‖X − X*‖/‖X*‖ = %.3g (‖X*‖ %.3g)", k, tc.name, rel, mat.Norm(tc.want, 2))
 			}
 			var acl mat.Dense
 			acl.Mul(B0, res.K)

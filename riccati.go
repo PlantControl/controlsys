@@ -149,7 +149,8 @@ type RiccatiResult struct {
 	// Rcnd is the reciprocal 1-norm condition estimate of U11, where
 	// [U11; U21] spans the stable invariant subspace and X = U21·U11⁻¹. A
 	// tiny Rcnd means X may be inaccurate. U11 is that of the state- and
-	// cost-scaled problem actually solved.
+	// cost-scaled problem actually solved or, for Dare's pole-placement
+	// fallback, of the orthonormal basis of span[I; X̂/σ], σ ≈ ‖X̂‖.
 	Rcnd float64
 	// Accuracy is the Report of MATLAB icare/idare for X: 0 when a Newton
 	// step certifies X (to about 1e-8 relative), 1 when X is a stabilizing
