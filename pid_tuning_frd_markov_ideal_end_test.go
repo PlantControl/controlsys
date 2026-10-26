@@ -103,8 +103,8 @@ func TestTunePIDFRDIdealDerivativeEndBeyondTopZone(t *testing.T) {
 		if !pidFRDStrictStable(c.num, c.den, k) {
 			t.Errorf("%s: %+v unstable", tc.name, k)
 		}
-		if !pidHasWarning(r, "loop's end above the band is established") {
-			t.Errorf("%s: certified; warnings %q", tc.name, r.Evidence.Warnings)
+		if !pidHasWarning(r, "ideal derivative (Tf = 0) does not roll off") || !pidHasWarning(r, "PIDF with Tf > 0") {
+			t.Errorf("%s: certified or no ideal-derivative reason; warnings %q", tc.name, r.Evidence.Warnings)
 		}
 		pm, least := r.Evidence.AchievedPhaseMargin, pidFRDDenseMarginAny(c.num, c.den, c.dt, k, c.lo*1e-4, c.hi*1e5)
 		peak := pidFRDStrictPeak(c.num, c.den, c.dt, k, c.lo)

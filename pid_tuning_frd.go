@@ -606,8 +606,10 @@ func pidTuningFRDDesign(ctx context.Context, base, strict pidTuningPlant, certif
 				if !p.lowAnchored {
 					why = append(why, "the data have no sample at ω = 0 to anchor the DC end")
 				}
-				if _, _, top := pidTuningFRDNyquistVerdict(*r.Controller, p); !top {
-					why = append(why, "they stop before the loop's end above the band is established")
+				if c := *r.Controller; c.Dt == 0 && c.Tf == 0 && c.Kd != 0 && p.markov != 0 {
+					why = append(why, "an ideal derivative (Tf = 0) does not roll off, so no band of data shows the loop's end above the band is established (a filtered derivative, PIDF with Tf > 0, can be certified)")
+				} else if _, _, top := pidTuningFRDNyquistVerdict(c, p); !top {
+					why = append(why, "the data stop before the loop's end above the band is established")
 				}
 				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("The strict sampled Nyquist count passed this design, but %s, so its closed-loop stability is not certified.", strings.Join(why, " and ")))
 			}
