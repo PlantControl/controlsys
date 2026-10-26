@@ -136,6 +136,9 @@ type RiccatiOpts struct {
 	// plainScaling balances Care's state scaling with B in place of its
 	// cost proxy (scale): otherScaling's last resort.
 	plainScaling bool
+	// reducedQ marks Q as Dare's Q − S₂R₂₂⁻¹S₂ᵀ of reduceInputs, which
+	// may be indefinite as Q − SR⁻¹Sᵀ of the given Dare may.
+	reducedQ bool
 }
 
 // RiccatiResult is the stabilizing solution of Care or Dare.
@@ -654,27 +657,157 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care,
 // including its PBH check of boundary modes, and its retry in the other
 // NoScaling mode). With no stabilizing pencil solution in either mode and
-// no unstabilizable boundary mode (and no cross term S with rank(B) < m,
-// whose null-space inputs float64 cannot resolve), Dare runs Hewer's
+// no unstabilizable boundary mode, Dare runs Hewer's
 // iteration from a pole-placement gain and returns its X only when the
 // same Newton check certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖),
 // else ErrNoStabilizing: under cheap control of a strongly unstable plant
-// no cost scale of the pencil may resolve its split.
+// no cost scale of the pencil may resolve its split. It runs them too
+// over an Accuracy 1 pencil solution, which a certified placed X
+// replaces: under cheap control with m = n the pencil's X can be off by
+// 4e-3 where Hewer from a placed gain certifies it to 1e-10. Not with B
+// of condition above rotationCond in the given inputs, where Newton's
+// R + BᵀXB has lost its smallest eigenvalue and certified placed X off by
+// 2e-6 over pencil X accurate to 1e-7.
 //
 // Dare scales the states and the cost as Care does (MATLAB idare), its
 // state scaling balanced with B (the cost proxy of Care brought no
 // certification on cheap-control sweeps and cost 10-20% time);
 // opts.NoScaling disables it. An unscaled pencil that fails QZ or the
 // stable split is solved again cost-scaled before an error is returned.
+//
+// With m ≥ 2 and B of condition above rotationCond, Dare solves in the
+// inputs w = Vᵀu of B's right singular vectors V (reduceInputs): X, Eig
+// and Rcnd are unchanged, and R + (BV)ᵀX(BV) keeps on its diagonal the
+// smallest eigenvalue that R + BᵀXB loses to rounding under cheap
+// control, where Newton certified X off by 5e-7 (or the pencil's X by
+// 1e-5) on well-conditioned problems with nearly collinear inputs. With
+// a cross term S and rank(B) = r < m (always when m > n), Dare instead
+// eliminates the inputs B does not see, as their optimal value
+// w₂ = −R₂₂⁻¹(R₂₁w₁ + S₂ᵀx) is explicit, and solves the problem of r
+// inputs: R + BᵀXB loses their R₂₂, and with it a cost xᵀS₂R₂₂⁻¹S₂ᵀx
+// comparable to Q, so Newton certified a wrong X ≈ Q. Its X is returned
+// once the same Newton check certifies it in the m inputs w, with K
+// and Eig from there. Either K is returned only with A − BK in the given
+// inputs stable; should that, or the problem in w, fail, the given one
+// is solved.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
+	red, ill := reduceInputs(A, B, Q, R, opts)
+	if red != nil {
+		var o RiccatiOpts
+		if opts != nil {
+			o = *opts
+		}
+		o.S, o.reducedQ = red.s, !red.rotated
+		if res, err := dareSolve(A, red.b, red.q, red.r, &o, true); err == nil {
+			ok := true
+			if red.rotated {
+				res.K = red.gain(res.K, o.Workspace)
+			} else {
+				res, ok = red.certify(A, Q, opts, res)
+			}
+			if ok && closedLoopStable(A, B, res.K, o.E, res.Eig) {
+				return res, nil
+			}
+		}
+	}
+	return dareSolve(A, B, Q, R, opts, !ill)
+}
+
+// closedLoopStable reports whether the eigenvalues of A − BK (with E, of
+// E⁻¹(A − BK)), A − BK formed in double-double, lie inside the unit
+// circle, and writes them to eig when they do. Dare checks the K of the
+// inputs u it returns: under cheap control ‖K‖ ≈ 1e13 rounds by 1e-3 in
+// every direction of u, which BV₁ = O(1) can carry to an unstable A − BK
+// although that of the inputs w is stable.
+func closedLoopStable(A, B, K, E *mat.Dense, eig []complex128) bool {
+	n, m := B.Dims()
+	aRaw, bRaw, kRaw := A.RawMatrix(), B.RawMatrix(), K.RawMatrix()
+	hi, lo := make([]float64, n*n), make([]float64, n*n)
+	copyStrided(hi, n, aRaw.Data, aRaw.Stride, n, n)
+	ddMulAcc(n, n, m, -1, bRaw.Data, bRaw.Stride, 1, kRaw.Data, kRaw.Stride, 1, hi, lo, n)
+	for i := range hi {
+		hi[i] += lo[i]
+	}
+	acl := mat.NewDense(n, n, hi)
+	if E != nil {
+		var lu mat.LU
+		lu.Factorize(E)
+		var f mat.Dense
+		if lu.SolveTo(&f, false, acl) != nil {
+			return false
+		}
+		acl = &f
+	}
+	var ed mat.Eigen
+	if !ed.Factorize(acl, mat.EigenNone) {
+		return false
+	}
+	vals := ed.Values(nil)
+	for _, v := range vals {
+		if !(cmplx.Abs(v) < 1) {
+			return false
+		}
+	}
+	copy(eig, vals)
+	return true
+}
+
+// certify returns the X of res, the solution of the reduced Dare, once
+// verifyRiccati certifies it as that of the given one in the inputs w,
+// whose R + (BV)ᵀX(BV) keeps R₂₂ on its diagonal, with the gain and
+// Eig of A − BK there: BV₂ is zero only to rounding, and under cheap
+// control the K₂ ≈ R₂₂⁻¹S₂ᵀ it multiplies can move X, or destabilize
+// A − BK, well beyond the rounding of B.
+func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) (*RiccatiResult, bool) {
+	var o RiccatiOpts
+	if opts != nil {
+		o = *opts
+	}
+	o.S, o.Workspace = red.sw, nil
+	problem, err := newRiccatiProblem(A, red.bw, Q, red.rw, &o)
+	if err != nil {
+		return nil, false
+	}
+	problem.scale(&o, false)
+	n := problem.n
+	X := mat.NewDense(n, n, problem.ws.xData[:n*n])
+	xr := res.X.RawMatrix()
+	for i := range n {
+		for j := range n {
+			v := xr.Data[i*xr.Stride+j]
+			if t := problem.t; t != nil {
+				v /= t[i] * t[j]
+			}
+			X.Set(i, j, v)
+		}
+	}
+	eig := problem.ws.eig[:n]
+	K, err := problem.acceptRiccati(false, X, eig, res.Rcnd)
+	if err != nil {
+		return nil, false
+	}
+	out := problem.result(X, K, eig, res.Rcnd, 0)
+	out.K = red.gain(out.K, nil)
+	return out, true
+}
+
+// dareSolve is Dare without its input reduction; swapPoor lets placedDare
+// replace an Accuracy 1 pencil X, which Dare declines on a B of condition
+// above rotationCond in the inputs u, where Newton's R + BᵀXB has lost
+// its smallest eigenvalue and certifies a wrong X.
+func dareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, swapPoor bool) (*RiccatiResult, error) {
 	res, err := otherScaling(dare, false, A, B, Q, R, opts)
-	if (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) {
+	poor := swapPoor && err == nil && res.Accuracy != 0
+	if poor || (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) {
 		var base RiccatiOpts
 		if opts != nil {
 			base = *opts
+		}
+		if poor {
+			base.Workspace = nil
 		}
 		flipped := base
 		flipped.NoScaling = !base.NoScaling
@@ -715,6 +848,137 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	return problem.result(X, K, ws.eig[:n], rcnd, accuracy), nil
+}
+
+// reducedInputs is the Dare of reduceInputs in the inputs w = Vᵀu, V = [V₁ V₂]
+// the right singular vectors of B with BV₂ = 0 to rounding: B₁ = BV₁ (b),
+// Q − S₂R₂₂⁻¹S₂ᵀ (q), R₁₁ − R₁₂R₂₂⁻¹R₂₁ (r) and S₁ − S₂R₂₂⁻¹R₂₁ (s) for
+// VᵀRV = [R₁₁ R₁₂; R₂₁ R₂₂] and SV = [S₁ S₂]. With V₂ empty (rotated) it
+// is the given Dare in the inputs w: BV, Q, VᵀRV and SV.
+type reducedInputs struct {
+	b, q, r, s *mat.Dense
+	// bw, rw and sw are BV, VᵀRV and SV (nil without S).
+	bw, rw, sw *mat.Dense
+	v          *mat.Dense
+	rotated    bool
+}
+
+// rotationCond is the condition of B above which Dare solves in the
+// inputs of B's right singular vectors: R + BᵀXB then loses its smallest
+// eigenvalue, ≈ R₂₂ + σ²_min·xᵀXx, to the rounding eps·σ²_max·‖X‖ of its
+// entries, a relative error of up to eps·cond(B)², while (BV)ᵀX(BV) keeps
+// it on its diagonal.
+const rotationCond = 1e3
+
+// reduceInputs returns the reducedInputs of a Dare with a cross term S and
+// rank(B) < m, rank as placedHewer counts it, or, with rank(B) = m ≥ 2 and
+// cond(B) above rotationCond, the rotated one; nil when there are none
+// or R₂₂ is not positive definite. ill reports m ≥ 2 and cond(B) above
+// rotationCond.
+func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs, ill bool) {
+	n, m := B.Dims()
+	if m < 2 || n == 0 {
+		return nil, ill
+	}
+	var S *mat.Dense
+	if opts != nil {
+		S = opts.S
+		if opts.Workspace != nil && opts.Workspace.fits(n, m) != nil {
+			return nil, ill
+		}
+	}
+	if an, _ := A.Dims(); an != n {
+		return nil, ill
+	}
+	if S != nil {
+		if sr, sc := S.Dims(); sr != n || sc != m {
+			return nil, ill
+		}
+	}
+	if rr, rc := R.Dims(); rr != m || rc != m {
+		return nil, ill
+	}
+	if qr, qc := Q.Dims(); qr != n || qc != n {
+		return nil, ill
+	}
+	var svd mat.SVD
+	if !svd.Factorize(B, mat.SVDFullV) {
+		return nil, ill
+	}
+	sv := svd.Values(nil)
+	r := 0
+	for _, s := range sv {
+		if s > float64(max(n, m))*eps()*sv[0] {
+			r++
+		}
+	}
+	ill = len(sv) < m || !(sv[m-1] >= sv[0]/rotationCond)
+	if r == 0 || !ill || r < m && S == nil {
+		return nil, ill
+	}
+	red = &reducedInputs{v: &mat.Dense{}}
+	svd.VTo(red.v)
+	var rv, rt mat.Dense
+	rv.Mul(R, red.v)
+	rt.Mul(red.v.T(), &rv)
+	symmetrize(rt.RawMatrix().Data, m, rt.RawMatrix().Stride)
+	red.bw, red.rw = &mat.Dense{}, &rt
+	red.bw.Mul(B, red.v)
+	var sv2 mat.Dense
+	if S != nil {
+		sv2.Mul(S, red.v)
+		red.sw = &sv2
+	}
+	if r == m {
+		red.b, red.q, red.r, red.s, red.rotated = red.bw, Q, red.rw, red.sw, true
+		return red, ill
+	}
+	red.b = mat.DenseCopyOf(red.bw.Slice(0, n, 0, r))
+	r22 := mat.NewSymDense(m-r, nil)
+	for i := range m - r {
+		for j := i; j < m-r; j++ {
+			r22.SetSym(i, j, rt.At(r+i, r+j))
+		}
+	}
+	var r22c mat.Cholesky
+	if !r22c.Factorize(r22) {
+		return nil, ill
+	}
+	s2 := sv2.Slice(0, n, r, m)
+	var r21, s2t mat.Dense
+	if r22c.SolveTo(&r21, rt.Slice(r, m, 0, r)) != nil || r22c.SolveTo(&s2t, s2.T()) != nil {
+		return nil, ill
+	}
+	var t mat.Dense
+	t.Mul(rt.Slice(0, r, r, m), &r21)
+	red.r = &mat.Dense{}
+	red.r.Sub(rt.Slice(0, r, 0, r), &t)
+	symmetrize(red.r.RawMatrix().Data, r, r)
+	t.Reset()
+	t.Mul(s2, &r21)
+	red.s = &mat.Dense{}
+	red.s.Sub(sv2.Slice(0, n, 0, r), &t)
+	t.Reset()
+	t.Mul(s2, &s2t)
+	red.q = &mat.Dense{}
+	red.q.Sub(Q, &t)
+	symmetrize(red.q.RawMatrix().Data, n, n)
+	return red, ill
+}
+
+// gain returns the gain VK of the inputs u from the gain K of the inputs
+// w, in ws.kData when ws is given.
+func (red *reducedInputs) gain(K *mat.Dense, ws *RiccatiWorkspace) *mat.Dense {
+	m, _ := red.v.Dims()
+	_, n := K.Dims()
+	var out *mat.Dense
+	if ws != nil {
+		out = mat.NewDense(m, n, ws.kData[:m*n])
+	} else {
+		out = mat.NewDense(m, n, nil)
+	}
+	out.Mul(red.v, mat.DenseCopyOf(K))
+	return out
 }
 
 // placedDare solves the Dare by placedHewer, state-scaled as dare.
@@ -828,8 +1092,8 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 
 // placedHewer is Dare's last source of a stabilizing solution, tried by
 // Dare (placedDare, as given and then with NoScaling flipped) only
-// when neither scaling mode's pencil gave a stabilizing X, not even an
-// Accuracy 1 one, nor a boundary verdict: Hewer's
+// when neither scaling mode's pencil gave a certified X nor a boundary
+// verdict: Hewer's
 // iteration, which from any stabilizing gain converges to the stabilizing
 // solution, started from a pole-placement gain. Under cheap control of a
 // strongly unstable plant (ρ(A) ≈ 500, Q/R ≈ 1e26, ‖X‖ ≈ 1e30) every cost
