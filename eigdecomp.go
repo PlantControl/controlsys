@@ -18,7 +18,8 @@ import (
 // decomposeByEigenvalues splits sys additively, G = G1 + G2, where G1 holds the
 // modes selected by isGroup1 and the feedthrough D goes to G1 when
 // feedthroughInGroup1 is set, else to G2. Nonsingular-E descriptors are made
-// explicit first so the split follows the generalized eigenvalues of (A, E).
+// explicit first so the split follows the generalized eigenvalues of (A, E);
+// ill-conditioned E (descriptorFoldInaccurate) is not.
 // The ordered real Schur form is block-diagonalized with a Sylvester solve, so
 // G1 + G2 is exact. Singular-E descriptors are split with the ordered
 // generalized Schur form instead; infinite eigenvalues are never selected, so
@@ -58,6 +59,9 @@ func modesAllInGroup1(policy realizationTransformPolicy, group1 *System) (*Syste
 func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	if sys.HasDelay() {
 		return nil, nil, fmt.Errorf("delayed model; use Pade or AbsorbDelay first: %w", ErrDelayUnsupported)
+	}
+	if sys.IsDescriptor() && descriptorFoldInaccurate(sys.E) {
+		return decomposeGeneralized(sys, isGroup1)
 	}
 	explicit, err := sys.ToExplicit()
 	if errors.Is(err, ErrDescriptorSingular) {
@@ -117,6 +121,17 @@ func decomposeModes(sys *System, isGroup1 func(complex128) bool) (group1, group2
 		return nil, nil, err
 	}
 	return sys1, sys2, nil
+}
+
+// descriptorFoldInaccurate reports whether E has a 1-norm condition
+// estimate of illConditionedECond or more, full rank or not: the ordered
+// Schur form of the LU fold E⁻¹A then smears the stiff direction over the
+// slow modes (at cond 1e15 a 1e-1 error of G1 + G2), and the generalized
+// Schur form of (A, E) splits them instead, as TransferFunction does.
+func descriptorFoldInaccurate(E *mat.Dense) bool {
+	var lu mat.LU
+	lu.Factorize(E)
+	return !(lu.Cond() < illConditionedECond)
 }
 
 // decomposeGeneralized splits a singular-E descriptor with the ordered

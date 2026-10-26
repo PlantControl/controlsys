@@ -1,7 +1,9 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
+	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -71,16 +73,16 @@ func (sys *System) ToExplicit() (*System, error) {
 
 	result := sys.Copy()
 	result.E = nil
-	if err := lu.SolveTo(result.A, false, sys.A); err != nil {
+	if err := fullRankSolve(&lu, result.A, sys.A); err != nil {
 		return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 	}
 	if _, m, _ := sys.Dims(); m > 0 {
-		if err := lu.SolveTo(result.B, false, sys.B); err != nil {
+		if err := fullRankSolve(&lu, result.B, sys.B); err != nil {
 			return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 		}
 	}
 	if result.LFT != nil && result.LFT.B2 != nil {
-		if err := lu.SolveTo(result.LFT.B2, false, sys.LFT.B2); err != nil {
+		if err := fullRankSolve(&lu, result.LFT.B2, sys.LFT.B2); err != nil {
 			return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 		}
 	}
@@ -88,19 +90,19 @@ func (sys *System) ToExplicit() (*System, error) {
 }
 
 // eRankDeficient reports whether the square E, factorized in lu, is
-// numerically singular: luNearSingular, or rank below n by MATLAB's rank,
-// σ_n ≤ n·eps(σ₁) (descriptorRank), the rule by which generalizedPoles
-// counts infinite eigenvalues. E⁻¹A of an E within that of a singular one
-// carries the infinite eigenvalue as a pole near 1/ε whose rounding
-// swamps the response. The SVD runs only when the 1-norm condition
-// estimate reaches 1/(10·n²·ε): below it σ_n > n·ε·σ₁ (κ₁ ≥ κ₂/n, the
-// estimate within 10).
+// numerically singular by MATLAB's rank: σ_n ≤ n·eps(σ₁) (descriptorRank),
+// the rule by which generalizedPoles counts infinite eigenvalues. The LU
+// condition estimate only short-cuts: below 1/(10·n²·ε) E has full rank
+// (σ_n > n·ε·σ₁, κ₁ ≥ κ₂/n, the estimate within 10), and an exact zero
+// pivot or a non-finite E is deficient. A condition estimate at or above
+// 1/ε does not by itself make E singular; MATLAB rank decides.
 func eRankDeficient(E *mat.Dense, lu *mat.LU) bool {
-	if luNearSingular(lu) {
+	cond := lu.Cond()
+	if math.IsNaN(cond) || math.IsInf(cond, 1) {
 		return true
 	}
 	n, _ := E.Dims()
-	if lu.Cond()*10*float64(n*n)*eps() < 1 {
+	if cond*10*float64(n*n)*eps() < 1 {
 		return false
 	}
 	var svd mat.SVD
@@ -108,8 +110,26 @@ func eRankDeficient(E *mat.Dense, lu *mat.LU) bool {
 		return true
 	}
 	sv := svd.Values(nil)
+	if !(sv[n-1] >= 0) || math.IsInf(sv[0], 1) {
+		return true
+	}
 	r, _, _ := descriptorRank(sv, sv[0], n, true)
 	return r < n
+}
+
+// fullRankSolve is lu.SolveTo for an E that eRankDeficient found full rank:
+// a finite condition estimate above mat.ConditionTolerance is accepted, as
+// MATLAB E\A only warns.
+func fullRankSolve(lu *mat.LU, dst *mat.Dense, b mat.Matrix) error {
+	err := lu.SolveTo(dst, false, b)
+	if err == nil {
+		return nil
+	}
+	var c mat.Condition
+	if errors.As(err, &c) && !math.IsInf(float64(c), 1) && !math.IsNaN(float64(c)) {
+		return nil
+	}
+	return err
 }
 
 // EliminateStates removes the states elim with Modred using method.
