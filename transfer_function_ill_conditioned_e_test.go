@@ -142,6 +142,9 @@ func TestTransferFunctionIllConditionedEMatchesPencil(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
+		if res.TF.Dt != dt {
+			t.Errorf("seed %d: Dt %g, want %g", seed, res.TF.Dt, dt)
+		}
 		worst := 0.0
 		for _, s := range pts {
 			want := pencilResponse(t, oracle, s)

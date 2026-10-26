@@ -249,8 +249,8 @@ func transferStandardForm(sys *System) (*System, []*mat.Dense, error) {
 // illConditionedECond is the 1-norm condition estimate of a full-rank E
 // from which TransferFunction avoids E⁻¹: an LU solve smears the
 // cond(E)·ε error of the stiff direction over every row of E⁻¹A, and the
-// explicit ss→tf then loses the slow modes (QKYC6R: 1e-3 response error,
-// a dropped pole, at cond 1e15).
+// explicit ss→tf then loses the slow modes (at cond 1e15: 1e-3 response
+// error from the fold, then a dropped pole).
 const illConditionedECond = 1e4
 
 // stiffExplicitParts returns explicit realizations, (slow, fast) or a single
