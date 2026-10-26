@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/big"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -163,9 +164,9 @@ func TestNewtonAscending_NonConsecutiveNodes(t *testing.T) {
 	y := make([]*big.Int, len(xs))
 	for k, x := range xs {
 		v := new(big.Int)
-		for d := len(coef) - 1; d >= 0; d-- {
+		for _, c := range slices.Backward(coef) {
 			v.Mul(v, big.NewInt(x))
-			v.Add(v, big.NewInt(coef[d]))
+			v.Add(v, big.NewInt(c))
 		}
 		y[k] = v
 	}
