@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math/cmplx"
 	"testing"
@@ -57,6 +58,9 @@ func TestDare_CrossTermRankDeficientBIsAccurate(t *testing.T) {
 	E := dareCheapDescriptor(2)
 	for i, c := range cases {
 		A, B, Q, S := mat.NewDense(2, 2, c.a), mat.NewDense(2, 3, c.b), mat.NewDense(2, 2, c.q), mat.NewDense(2, 3, c.s)
+		if _, err := Dare(A, B, Q, rs["R=1e-12·I"], &RiccatiOpts{S: S, Workspace: NewRiccatiWorkspace(2, 2)}); !errors.Is(err, ErrDimensionMismatch) {
+			t.Errorf("case %d: workspace for 2 inputs: %v, want ErrDimensionMismatch", i, err)
+		}
 		var Ae, Be mat.Dense
 		Ae.Mul(E, A)
 		Be.Mul(E, B)

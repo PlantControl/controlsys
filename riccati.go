@@ -774,6 +774,9 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*reducedInputs, boo
 	if qr, qc := Q.Dims(); qr != n || qc != n {
 		return nil, false
 	}
+	if opts.Workspace != nil && opts.Workspace.fits(n, m) != nil {
+		return nil, false
+	}
 	var svd mat.SVD
 	if !svd.Factorize(B, mat.SVDFull) {
 		return nil, false
