@@ -2433,7 +2433,7 @@ func (sys *System) isProper() (bool, error) {
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
-	if !luNearSingular(&lu) {
+	if !eRankDeficient(sys.E, &lu) {
 		return true, nil
 	}
 	n, m, p := sys.Dims()
