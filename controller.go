@@ -362,6 +362,8 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 // poles keeps each within 0.1·|p| of its pole p (a zero pole uses the
 // largest |p| instead; MATLAB ignores zero poles). This signals an assignment too
 // ill-conditioned (huge gains, near-uncontrollable modes) to be trusted.
+// An inaccurate assignment of a pair the controllability staircase finds
+// uncontrollable returns ErrUncontrollable instead.
 //
 // Poles must come in conjugate pairs and len(poles) must equal n. As in MATLAB,
 // a pole repeated (exactly) more than rank(B) times returns
@@ -429,6 +431,9 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 		K, kErr = Ks, sErr
 	}
 	if !(kErr <= placeMaxPoleError) {
+		if st, err := controllabilityStaircase(A, B, nil, 0, false); err == nil && st.NCont < n {
+			return nil, fmt.Errorf("Place: %w", ErrUncontrollable)
+		}
 		return nil, fmt.Errorf("Place: worst relative pole error %.3g: %w", kErr, ErrPoleAccuracy)
 	}
 	return K, nil
@@ -542,6 +547,8 @@ func (m *placeMatcher) augment(j int, th float64) bool {
 // independent input directions the block is made normal).
 func placeSchur(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 	n, m := B.Dims()
+	// Schur and reordering errors in a block scale with ‖A‖, not with the block.
+	aScale := float64(n) * mat.Norm(A, 2)
 
 	t := make([]float64, n*n)
 	aRaw := A.RawMatrix()
@@ -642,7 +649,7 @@ func placeSchur(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 			p2 = pool[i2]
 			pool = removePoolEntry(pool, i2)
 		}
-		if err := placeAssign2x2(t, z, bhat, fData, fBuf, p1, p2, n, m, k); err != nil {
+		if err := placeAssign2x2(t, z, bhat, fData, fBuf, p1, p2, aScale, n, m, k); err != nil {
 			return nil, err
 		}
 		standardizeSchur2x2(t, z, n, k)
@@ -712,12 +719,12 @@ func placeAssign1x1(t, z, bhat, fData, fBuf []float64, desired float64, n, m, k 
 // single input direction b = B2·w is used, which fixes F2 uniquely. Targets enter only through
 // (re, im) or (r1, r2), never through (trace, det), so small imaginary parts
 // survive at any scale.
-func placeAssign2x2(t, z, bhat, fData, fBuf []float64, p1, p2 complex128, n, m, k int) error {
+func placeAssign2x2(t, z, bhat, fData, fBuf []float64, p1, p2 complex128, aScale float64, n, m, k int) error {
 	k1 := k + 1
 	t11, t12, t21, t22 := t[k*n+k], t[k*n+k1], t[k1*n+k], t[k1*n+k1]
 	b0 := bhat[k*m : k*m+m]
 	b1 := bhat[k1*m : k1*m+m]
-	tNorm := math.Abs(t11) + math.Abs(t12) + math.Abs(t21) + math.Abs(t22)
+	tNorm := max(math.Abs(t11)+math.Abs(t12)+math.Abs(t21)+math.Abs(t22), aScale)
 
 	fBlock := fBuf[:2*m]
 	if !placeMultiInput2x2(fBlock, b0, b1, t11, t12, t21, t22, p1, p2, m) &&
