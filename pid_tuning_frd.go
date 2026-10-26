@@ -904,7 +904,8 @@ func pidTuningFRDStrictPlant(data *FRD, unstablePoles *int) (p pidTuningPlant, c
 	p.unresolved = pidTuningFRDUnresolved(data)
 	if data.Dt == 0 {
 		p.markov, p.markovSpread = pidTuningFRDMarkov(data, p.at)
-		p.markovAnchored = p.markov != 0 && pidTuningFRDTopFlat(data, -1) && pidTuningFRDMarkovSettles(data, p.at)
+		p.markovBend = pidTuningFRDTopBend(data, -1)
+		p.markovAnchored = p.markov != 0 && p.markovBend <= pidTuningFRDTopCurvature && pidTuningFRDMarkovSettles(data, p.at)
 		p.topOrder, p.topAnchored = pidTuningFRDTopOrder(data, p.at)
 	}
 	return p, p.dcGain != 0 || p.lowAnchor
@@ -956,6 +957,12 @@ func pidTuningFRDTopOrder(data *FRD, at func(float64) complex128) (n int, ok boo
 // its phase, under half a degree at ζ 0.01, but not this bend in |G|,
 // and lifts |L| past the band by 1/(2ζ).
 func pidTuningFRDTopFlat(data *FRD, n float64) bool {
+	return pidTuningFRDTopBend(data, n) <= pidTuningFRDTopCurvature
+}
+
+// pidTuningFRDTopBend is |β| of pidTuningFRDTopFlat, +Inf when the top
+// half decade has under three distinct samples to fit.
+func pidTuningFRDTopBend(data *FRD, n float64) float64 {
 	w := data.Omega
 	high := w[len(w)-1]
 	near := func(x float64) int {
@@ -978,7 +985,7 @@ func pidTuningFRDTopFlat(data *FRD, n float64) bool {
 	idx := pick(4)
 	if idx == nil {
 		if idx = pick(3); idx == nil {
-			return false
+			return math.Inf(1)
 		}
 	}
 	m := len(idx)
@@ -1004,7 +1011,7 @@ func pidTuningFRDTopFlat(data *FRD, n float64) bool {
 			}
 		}
 	}
-	return math.Abs(a[2][m]/a[2][2]) <= pidTuningFRDTopCurvature
+	return math.Abs(a[2][m] / a[2][2])
 }
 
 // pidTuningFRDTopCurvature bounds β of pidTuningFRDTopFlat: a pole pair
