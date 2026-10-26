@@ -697,7 +697,8 @@ func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, er
 // in Laurent series by back-substitution over the strongly connected
 // components of A's exact sparsity, which put A in block triangular form.
 // A 1×1 component with A_kk = x0 exactly is a pole at x0 of the float
-// model, counted exactly; exactly zero couplings stay zero, so the sign of
+// model, counted exactly, as is a larger block with x0·I − A_KK exactly
+// singular; exactly zero couplings stay zero, so the sign of
 // an entry's leading coefficient does not hinge on roundoff in
 // transfer-function coefficients. Given such a pole, a larger block that a
 // regular solve would reject has its eigenvalues nearest x0 deflated to x0
@@ -771,7 +772,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 			ns++
 		}
 	}
-	if ns == 0 {
+	if ns == 0 && !hasExactSingularBlock(aRaw, blocks, x0) {
 		return nil, false
 	}
 	type regular struct {
@@ -800,7 +801,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		reg.lu.Factorize(pk)
 		c := reg.lu.Cond()
 		singular := math.IsInf(c, 0) || math.IsNaN(c) ||
-			(!(c <= 1e12) && r <= exactDetMaxOrder && exactDetIsZero(pkRaw))
+			(!(c <= 1e12) && r <= exactDetMaxOrder && exactBlockSingularAt(aRaw, blk, x0))
 		if singular && mode != laurentDeflate {
 			return nil, false
 		}
@@ -948,6 +949,47 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 	return gain, true
 }
 
+// hasExactSingularBlock reports whether a block of a, at most
+// exactDetMaxOrder states, has x0·I − A_KK exactly singular: a pole at x0
+// of the float model that no 1×1 block shows.
+func hasExactSingularBlock(a blas64.General, blocks [][]int, x0 float64) bool {
+	for _, blk := range blocks {
+		r := len(blk)
+		if r < 2 || r > exactDetMaxOrder {
+			continue
+		}
+		pk := mat.NewDense(r, r, nil)
+		for ii, k := range blk {
+			for jj, l := range blk {
+				v := -a.Data[k*a.Stride+l]
+				if ii == jj {
+					v += x0
+				}
+				pk.Set(ii, jj, v)
+			}
+		}
+		var lu mat.LU
+		lu.Factorize(pk)
+		if !(lu.Cond() <= 1e12) && exactBlockSingularAt(a, blk, x0) {
+			return true
+		}
+	}
+	return false
+}
+
+// exactBlockSingularAt reports whether A_KK − x0·I, K = blk, is exactly
+// singular.
+func exactBlockSingularAt(a blas64.General, blk []int, x0 float64) bool {
+	r := len(blk)
+	ak := blas64.General{Rows: r, Cols: r, Stride: r, Data: make([]float64, r*r)}
+	for ii, k := range blk {
+		for jj, l := range blk {
+			ak.Data[ii*r+jj] = a.Data[k*a.Stride+l]
+		}
+	}
+	return exactShiftedDetIsZero(ak, x0)
+}
+
 // exactDetMaxOrder caps the blocks whose determinant exactDetIsZero
 // computes; larger ones keep the LU condition estimate alone.
 const exactDetMaxOrder = 16
@@ -956,8 +998,17 @@ const exactDetMaxOrder = 16
 // by fraction-free (Bareiss) elimination over the integers its entries
 // become once scaled by a common power of two.
 func exactDetIsZero(a blas64.General) bool {
+	return exactShiftedDetIsZero(a, 0)
+}
+
+// exactShiftedDetIsZero reports whether a − x0·I is exactly singular, with
+// the shift applied in exact arithmetic.
+func exactShiftedDetIsZero(a blas64.General, x0 float64) bool {
 	r := a.Rows
 	emin := math.MaxInt
+	if x0 != 0 {
+		_, emin = math.Frexp(x0)
+	}
 	for i := range r {
 		for _, v := range a.Data[i*a.Stride : i*a.Stride+r] {
 			if v != 0 {
@@ -969,12 +1020,18 @@ func exactDetIsZero(a blas64.General) bool {
 	if emin == math.MaxInt {
 		return true
 	}
+	scaled := func(v float64) *big.Int {
+		f, e := math.Frexp(v)
+		x := big.NewInt(int64(math.Ldexp(f, 53)))
+		return x.Lsh(x, uint(e-emin))
+	}
 	m := make([]*big.Int, r*r)
 	for i := range r {
 		for j, v := range a.Data[i*a.Stride : i*a.Stride+r] {
-			f, e := math.Frexp(v)
-			x := big.NewInt(int64(math.Ldexp(f, 53)))
-			m[i*r+j] = x.Lsh(x, uint(e-emin))
+			m[i*r+j] = scaled(v)
+			if i == j && x0 != 0 {
+				m[i*r+j].Sub(m[i*r+j], scaled(x0))
+			}
 		}
 	}
 	prev := big.NewInt(1)
