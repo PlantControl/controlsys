@@ -507,7 +507,9 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // improper split is checked against the pencil samples
 // (refitPolyFromPencil), and a stiff improper chain split that misses the
 // data-scale points of reductionPolyMatches stands when its refit at the
-// same degree matches the samples (refitPolyKeepDegree).
+// same degree matches the samples (refitPolyKeepDegree). A proper split
+// beside such a chain that the low-frequency pencil solves refute
+// (reductionRefutedBelow) fails closed.
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	out, poly, _, err := sys.weierstrassReduceCore(false, false)
 	return out, poly, err
@@ -815,9 +817,10 @@ var errChainLeft = fmt.Errorf("infinite Jordan chain left among the finite eigen
 // errReductionRefuted is the error of weierstrassReduceCore when a proper
 // reduction beside an index ≥ 2 chain misses the direct pencil solves of
 // refitFromPencil by more than refitRefuted times their uncertainty and
-// no refit matches them (too few samples, or none fits): the split moved
-// residue between a large finite pole, the nilpotent block and D, and the
-// model it gives is not the pencil's.
+// no refit matches them (too few samples, or none fits), or misses those
+// under their range (reductionRefutedBelow): the split moved residue
+// between a large finite pole, the nilpotent block and D, and the model
+// it gives is not the pencil's.
 var errReductionRefuted = fmt.Errorf("proper reduction contradicts direct pencil solves: %w", ErrDescriptorSingular)
 
 // reductionMatchTol bounds the relative mismatch reductionMatches accepts.
