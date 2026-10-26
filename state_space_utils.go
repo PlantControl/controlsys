@@ -51,8 +51,9 @@ func (sys *System) DescriptorE() *mat.Dense {
 }
 
 // ToExplicit returns the equivalent explicit model (E⁻¹A, E⁻¹B, C, D) of a
-// descriptor model, or a copy of an explicit one. A numerically singular E
-// returns ErrDescriptorSingular.
+// descriptor model, or a copy of an explicit one. A numerically singular E,
+// rank below n by MATLAB's rank (eRankDeficient), returns
+// ErrDescriptorSingular.
 func (sys *System) ToExplicit() (*System, error) {
 	if err := requireSystem("ToExplicit", sys); err != nil {
 		return nil, err
@@ -64,7 +65,7 @@ func (sys *System) ToExplicit() (*System, error) {
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
-	if luNearSingular(&lu) {
+	if eRankDeficient(sys.E, &lu) {
 		return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
 	}
 
@@ -84,6 +85,31 @@ func (sys *System) ToExplicit() (*System, error) {
 		}
 	}
 	return result, nil
+}
+
+// eRankDeficient reports whether the square E, factorized in lu, is
+// numerically singular: luNearSingular, or rank below n by MATLAB's rank,
+// σ_n ≤ n·eps(σ₁) (descriptorRank), the rule by which generalizedPoles
+// counts infinite eigenvalues. E⁻¹A of an E within that of a singular one
+// carries the infinite eigenvalue as a pole near 1/ε whose rounding
+// swamps the response. The SVD runs only when the 1-norm condition
+// estimate reaches 1/(10·n²·ε): below it σ_n > n·ε·σ₁ (κ₁ ≥ κ₂/n, the
+// estimate within 10).
+func eRankDeficient(E *mat.Dense, lu *mat.LU) bool {
+	if luNearSingular(lu) {
+		return true
+	}
+	n, _ := E.Dims()
+	if lu.Cond()*10*float64(n*n)*eps() < 1 {
+		return false
+	}
+	var svd mat.SVD
+	if !svd.Factorize(E, mat.SVDNone) {
+		return true
+	}
+	sv := svd.Values(nil)
+	r, _, _ := descriptorRank(sv, sv[0], n, true)
+	return r < n
 }
 
 // EliminateStates removes the states elim with Modred using method.
