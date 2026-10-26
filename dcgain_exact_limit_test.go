@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 	"math/rand/v2"
 	"testing"
 )
@@ -83,6 +84,95 @@ func BenchmarkDCGain_ExactlySingularBlock_N16_M4_P4(b *testing.B) {
 	for b.Loop() {
 		if _, err := sys.DCGain(); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// FSLFI7: the fraction-free solve behind the exact DC limit returns
+// det M and y with M·y = det M·R exactly, pivot swaps included, and
+// declines a singular M.
+func TestBareissSolve_AdjugateIdentityAndSingular(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5, 9))
+	const n, m = 6, 2
+	for trial := range 40 {
+		mm := make([]int64, n*n)
+		for i := range mm {
+			if rng.IntN(3) > 0 {
+				mm[i] = int64(rng.IntN(41) - 20)
+			}
+		}
+		mm[0] = 0
+		singular := trial%4 == 3
+		if singular {
+			for j := range n {
+				mm[(n-1)*n+j] = 2*mm[j] - mm[n+j]
+			}
+		}
+		r := make([]int64, n*m)
+		for i := range r {
+			r[i] = int64(rng.IntN(21) - 10)
+		}
+		a := make([]*big.Int, n*(n+m))
+		for i := range n {
+			for j := range n {
+				a[i*(n+m)+j] = big.NewInt(mm[i*n+j])
+			}
+			for j := range m {
+				a[i*(n+m)+n+j] = big.NewInt(r[i*m+j])
+			}
+		}
+		y := make([]*big.Int, n*m)
+		for i := range y {
+			y[i] = new(big.Int)
+		}
+		ratM := make([]*big.Rat, n*n)
+		for i, v := range mm {
+			ratM[i] = big.NewRat(v, 1)
+		}
+		_, wantDet := fzRatElim(ratM, n, n)
+		det, ok := bareissSolve(a, y, n, m, new(big.Int))
+		if singular || wantDet.Sign() == 0 {
+			if ok {
+				t.Fatalf("trial %d: singular M accepted, det %v", trial, det)
+			}
+			continue
+		}
+		if !ok || new(big.Rat).SetInt(det).Cmp(wantDet) != 0 {
+			t.Fatalf("trial %d: det %v ok %v, want %v", trial, det, ok, wantDet)
+		}
+		for i := range n {
+			for j := range m {
+				s := new(big.Int)
+				for l := range n {
+					s.Add(s, new(big.Int).Mul(big.NewInt(mm[i*n+l]), y[l*m+j]))
+				}
+				want := new(big.Int).Mul(det, big.NewInt(r[i*m+j]))
+				if s.Cmp(want) != 0 {
+					t.Fatalf("trial %d: (M·y)[%d,%d] = %v, want det·R = %v", trial, i, j, s, want)
+				}
+			}
+		}
+	}
+}
+
+// FSLFI7: interpolation on nodes skipped where σ̂I + P̂ is singular
+// recovers the polynomial exactly.
+func TestNewtonAscending_NonConsecutiveNodes(t *testing.T) {
+	coef := []int64{0, -7, 3, 0, 11, -2}
+	xs := []int64{1, 2, 4, 5, 9, 13}
+	y := make([]*big.Int, len(xs))
+	for k, x := range xs {
+		v := new(big.Int)
+		for d := len(coef) - 1; d >= 0; d-- {
+			v.Mul(v, big.NewInt(x))
+			v.Add(v, big.NewInt(coef[d]))
+		}
+		y[k] = v
+	}
+	got := newtonAscending(xs, y)
+	for d, c := range coef {
+		if got[d].Cmp(big.NewRat(c, 1)) != 0 {
+			t.Fatalf("coef[%d] = %v, want %d", d, got[d], c)
 		}
 	}
 }

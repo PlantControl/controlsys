@@ -1095,7 +1095,9 @@ func bareissDet(m []*big.Int, r int) *big.Int {
 // the leading Laurent coefficient at a pole, else the rounded finite value.
 // With A, x0 scaled to integers by a common power of two s (σ̂ = s·σ), the
 // numerator Ĉ adj(σ̂I + P̂) B̂ and det(σ̂I + P̂) are polynomials of degree
-// at most n, interpolated from exact bordered determinants at σ̂ = 0, …, n.
+// at most n, interpolated from n+1 integer nodes σ̂ = k where σ̂I + P̂ is
+// nonsingular: one fraction-free solve there gives det and adj·B̂ for every
+// entry at once.
 func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
 	n, m := B.Dims()
 	p, _ := C.Dims()
@@ -1148,50 +1150,55 @@ func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
 		}
 	}
 
-	r := n + 1
-	work := make([]*big.Int, r*r)
+	w := n + m
+	work := make([]*big.Int, n*w)
 	for i := range work {
 		work[i] = new(big.Int)
 	}
-	fill := func(k int64, i, j int) {
-		for ii := range n {
-			for jj := range n {
-				work[ii*r+jj].Set(pHat[ii*n+jj])
-			}
-			work[ii*r+ii].Add(work[ii*r+ii], big.NewInt(k))
-			work[ii*r+n].Set(bHat[ii*m+j])
-			work[n*r+ii].Neg(cHat[i*n+ii])
-		}
-		work[n*r+n].SetInt64(0)
+	y := make([]*big.Int, n*m)
+	for i := range y {
+		y[i] = new(big.Int)
 	}
-	dVals := make([]*big.Int, n+1)
-	sub := make([]*big.Int, n*n)
-	for k := range n + 1 {
+	t := new(big.Int)
+	nodes := make([]int64, 0, n+1)
+	dVals := make([]*big.Int, 0, n+1)
+	nVals := make([][]*big.Int, p*m)
+	for k := int64(0); len(nodes) < n+1; k++ {
 		for ii := range n {
 			for jj := range n {
-				v := new(big.Int).Set(pHat[ii*n+jj])
-				if ii == jj {
-					v.Add(v, big.NewInt(int64(k)))
+				work[ii*w+jj].Set(pHat[ii*n+jj])
+			}
+			work[ii*w+ii].Add(work[ii*w+ii], big.NewInt(k))
+			for j := range m {
+				work[ii*w+n+j].Set(bHat[ii*m+j])
+			}
+		}
+		det, ok := bareissSolve(work, y, n, m, t)
+		if !ok {
+			continue
+		}
+		nodes = append(nodes, k)
+		dVals = append(dVals, det)
+		for i := range p {
+			for j := range m {
+				v := new(big.Int)
+				for l, c := range cHat[i*n : i*n+n] {
+					if c.Sign() != 0 {
+						v.Add(v, t.Mul(c, y[l*m+j]))
+					}
 				}
-				sub[ii*n+jj] = v
+				nVals[i*m+j] = append(nVals[i*m+j], v)
 			}
 		}
-		dVals[k] = bareissDet(sub, n)
 	}
-	den := newtonAscending(dVals)
-	od, dLow := lowestNonzero(den)
+	od, dLow := lowestNonzero(newtonAscending(nodes, dVals))
 
 	// G = D + 2^(53−ea) / 2^(53−eb) / 2^(53−ec) · N/d.
 	shift := 53 - ea - (53 - eb) - (53 - ec)
 	gain := mat.NewDense(p, m, nil)
-	nVals := make([]*big.Int, n+1)
 	for i := range p {
 		for j := range m {
-			for k := range n + 1 {
-				fill(int64(k), i, j)
-				nVals[k] = bareissDet(work, r)
-			}
-			on, nLow := lowestNonzero(newtonAscending(nVals))
+			on, nLow := lowestNonzero(newtonAscending(nodes, nVals[i*m+j]))
 			dij := 0.0
 			if D != nil {
 				dij = D.At(i, j)
@@ -1218,9 +1225,67 @@ func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
 	return gain
 }
 
+// bareissSolve takes the n×(n+m) integer matrix a = [M | R], overwriting
+// it, and when M is nonsingular returns det M and y = adj(M)·R = det M·M⁻¹R
+// (n×m) by fraction-free elimination and back-substitution, every division
+// exact; ok is false when M is singular. t is scratch.
+func bareissSolve(a, y []*big.Int, n, m int, t *big.Int) (det *big.Int, ok bool) {
+	w := n + m
+	prev := big.NewInt(1)
+	neg := false
+	for k := range n {
+		if a[k*w+k].Sign() == 0 {
+			piv := -1
+			for i := k + 1; i < n; i++ {
+				if a[i*w+k].Sign() != 0 {
+					piv = i
+					break
+				}
+			}
+			if piv < 0 {
+				return nil, false
+			}
+			for j := range w {
+				a[k*w+j], a[piv*w+j] = a[piv*w+j], a[k*w+j]
+			}
+			neg = !neg
+		}
+		for i := k + 1; i < n; i++ {
+			for j := k + 1; j < w; j++ {
+				x := a[i*w+j]
+				x.Mul(x, a[k*w+k])
+				x.Sub(x, t.Mul(a[i*w+k], a[k*w+j]))
+				x.Quo(x, prev)
+			}
+		}
+		prev = a[k*w+k]
+	}
+	dn := prev
+	for i := n - 1; i >= 0; i-- {
+		for j := range m {
+			v := y[i*m+j]
+			v.Mul(dn, a[i*w+n+j])
+			for l := i + 1; l < n; l++ {
+				if c := a[i*w+l]; c.Sign() != 0 {
+					v.Sub(v, t.Mul(c, y[l*m+j]))
+				}
+			}
+			v.Quo(v, a[i*w+i])
+		}
+	}
+	det = new(big.Int).Set(dn)
+	if neg {
+		det.Neg(det)
+		for _, v := range y {
+			v.Neg(v)
+		}
+	}
+	return det, true
+}
+
 // newtonAscending returns the ascending coefficients of the polynomial of
-// degree < len(y) taking the values y at 0, 1, ….
-func newtonAscending(y []*big.Int) []*big.Rat {
+// degree < len(y) taking the values y at the distinct nodes xs.
+func newtonAscending(xs []int64, y []*big.Int) []*big.Rat {
 	q := len(y)
 	c := make([]*big.Rat, q)
 	for k, v := range y {
@@ -1229,7 +1294,7 @@ func newtonAscending(y []*big.Int) []*big.Rat {
 	for j := 1; j < q; j++ {
 		for k := q - 1; k >= j; k-- {
 			c[k].Sub(c[k], c[k-1])
-			c[k].Quo(c[k], big.NewRat(int64(j), 1))
+			c[k].Quo(c[k], big.NewRat(xs[k]-xs[k-j], 1))
 		}
 	}
 	poly := make([]*big.Rat, q)
@@ -1239,10 +1304,11 @@ func newtonAscending(y []*big.Int) []*big.Rat {
 	poly[0].Set(c[q-1])
 	t := new(big.Rat)
 	for k := q - 2; k >= 0; k-- {
+		xk := big.NewRat(xs[k], 1)
 		for d := q - 1; d >= 1; d-- {
-			poly[d].Sub(poly[d-1], t.Mul(poly[d], big.NewRat(int64(k), 1)))
+			poly[d].Sub(poly[d-1], t.Mul(poly[d], xk))
 		}
-		poly[0].Sub(c[k], t.Mul(poly[0], big.NewRat(int64(k), 1)))
+		poly[0].Sub(c[k], t.Mul(poly[0], xk))
 	}
 	return poly
 }
