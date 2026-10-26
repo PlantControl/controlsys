@@ -654,8 +654,7 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care,
 // including its PBH check of boundary modes, and its retry in the other
 // NoScaling mode). With no stabilizing pencil solution in either mode and
-// no unstabilizable boundary mode (and no cross term S with rank(B) < m,
-// whose null-space inputs float64 cannot resolve), Dare runs Hewer's
+// no unstabilizable boundary mode, Dare runs Hewer's
 // iteration from a pole-placement gain and returns its X only when the
 // same Newton check certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖),
 // else ErrNoStabilizing: under cheap control of a strongly unstable plant
@@ -666,10 +665,32 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // certification on cheap-control sweeps and cost 10-20% time);
 // opts.NoScaling disables it. An unscaled pencil that fails QZ or the
 // stable split is solved again cost-scaled before an error is returned.
+//
+// With a cross term S and rank(B) = r < m (always when m > n), Dare first
+// eliminates the inputs B does not see (reduceInputs), as their optimal
+// value w₂ = −R₂₂⁻¹(R₂₁w₁ + S₂ᵀx) is explicit, and solves the problem of r
+// inputs: in float64 R + BᵀXB loses their R₂₂ under cheap control, and
+// with it a cost xᵀS₂R₂₂⁻¹S₂ᵀx comparable to Q, so Newton certified a
+// wrong X ≈ Q. X, Eig, Rcnd and Accuracy are those of the reduced
+// problem, K is expanded to all m inputs; should the reduced problem fail,
+// the given one is solved.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
+	if red, ok := reduceInputs(A, B, Q, R, opts); ok {
+		o := *opts
+		o.S = red.s
+		if res, err := dareSolve(A, red.b, red.q, red.r, &o); err == nil {
+			res.K = red.expand(res.K, opts.Workspace)
+			return res, nil
+		}
+	}
+	return dareSolve(A, B, Q, R, opts)
+}
+
+// dareSolve is Dare without its input reduction.
+func dareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := otherScaling(dare, false, A, B, Q, R, opts)
 	if (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) {
 		var base RiccatiOpts
@@ -715,6 +736,112 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	return problem.result(X, K, ws.eig[:n], rcnd, accuracy), nil
+}
+
+// reducedInputs is the Dare of reduceInputs in the inputs w = Vᵀu, V = [V₁ V₂]
+// the right singular vectors of B with BV₂ = 0 to rounding: B₁ = BV₁ (b),
+// Q − S₂R₂₂⁻¹S₂ᵀ (q), R₁₁ − R₁₂R₂₂⁻¹R₂₁ (r) and S₁ − S₂R₂₂⁻¹R₂₁ (s) for
+// VᵀRV = [R₁₁ R₁₂; R₂₁ R₂₂] and SV = [S₁ S₂].
+type reducedInputs struct {
+	b, q, r, s *mat.Dense
+	v          *mat.Dense
+	r22        mat.Cholesky
+	r21, s2    *mat.Dense
+}
+
+// reduceInputs returns the reducedInputs of a Dare with a cross term S and
+// rank(B) < m, rank as placedHewer counts it, or false when there are none
+// or R₂₂ is not positive definite.
+func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*reducedInputs, bool) {
+	if opts == nil || opts.S == nil {
+		return nil, false
+	}
+	n, m := B.Dims()
+	an, _ := A.Dims()
+	if sr, sc := opts.S.Dims(); an != n || sr != n || sc != m || n == 0 {
+		return nil, false
+	}
+	if rr, rc := R.Dims(); rr != m || rc != m {
+		return nil, false
+	}
+	if qr, qc := Q.Dims(); qr != n || qc != n {
+		return nil, false
+	}
+	var svd mat.SVD
+	if !svd.Factorize(B, mat.SVDFull) {
+		return nil, false
+	}
+	sv := svd.Values(nil)
+	r := 0
+	for _, s := range sv {
+		if s > float64(max(n, m))*eps()*sv[0] {
+			r++
+		}
+	}
+	if r == 0 || r == m {
+		return nil, false
+	}
+	red := &reducedInputs{v: &mat.Dense{}}
+	svd.VTo(red.v)
+	var rv, rt, sv2 mat.Dense
+	rv.Mul(R, red.v)
+	rt.Mul(red.v.T(), &rv)
+	symmetrize(rt.RawMatrix().Data, m, rt.RawMatrix().Stride)
+	sv2.Mul(opts.S, red.v)
+	r22 := mat.NewSymDense(m-r, nil)
+	for i := range m - r {
+		for j := i; j < m-r; j++ {
+			r22.SetSym(i, j, rt.At(r+i, r+j))
+		}
+	}
+	if !red.r22.Factorize(r22) {
+		return nil, false
+	}
+	red.r21 = mat.DenseCopyOf(rt.Slice(r, m, 0, r))
+	red.s2 = mat.DenseCopyOf(sv2.Slice(0, n, r, m))
+	var r21, s2t mat.Dense
+	if red.r22.SolveTo(&r21, red.r21) != nil || red.r22.SolveTo(&s2t, red.s2.T()) != nil {
+		return nil, false
+	}
+	var t mat.Dense
+	red.b = &mat.Dense{}
+	red.b.Mul(B, red.v.Slice(0, m, 0, r))
+	t.Mul(rt.Slice(0, r, r, m), &r21)
+	red.r = &mat.Dense{}
+	red.r.Sub(rt.Slice(0, r, 0, r), &t)
+	symmetrize(red.r.RawMatrix().Data, r, r)
+	t.Reset()
+	t.Mul(red.s2, &r21)
+	red.s = &mat.Dense{}
+	red.s.Sub(sv2.Slice(0, n, 0, r), &t)
+	t.Reset()
+	t.Mul(red.s2, &s2t)
+	red.q = &mat.Dense{}
+	red.q.Sub(Q, &t)
+	symmetrize(red.q.RawMatrix().Data, n, n)
+	return red, true
+}
+
+// expand returns the gain V[K₁; R₂₂⁻¹(S₂ᵀ − R₂₁K₁)] of all m inputs from
+// the gain K₁ of the reduced problem, in ws.kData when ws is given.
+func (red *reducedInputs) expand(K1 *mat.Dense, ws *RiccatiWorkspace) *mat.Dense {
+	r, n := K1.Dims()
+	m, _ := red.v.Dims()
+	var rhs, k2 mat.Dense
+	rhs.Mul(red.r21, K1)
+	rhs.Sub(red.s2.T(), &rhs)
+	_ = red.r22.SolveTo(&k2, &rhs)
+	kw := mat.NewDense(m, n, nil)
+	kw.Slice(0, r, 0, n).(*mat.Dense).Copy(K1)
+	kw.Slice(r, m, 0, n).(*mat.Dense).Copy(&k2)
+	var K *mat.Dense
+	if ws != nil {
+		K = mat.NewDense(m, n, ws.kData[:m*n])
+	} else {
+		K = mat.NewDense(m, n, nil)
+	}
+	K.Mul(red.v, kw)
+	return K
 }
 
 // placedDare solves the Dare by placedHewer, state-scaled as dare.
