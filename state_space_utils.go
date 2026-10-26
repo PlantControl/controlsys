@@ -122,6 +122,9 @@ func eRankDeficient(E *mat.Dense, lu *mat.LU) bool {
 // MATLAB E\A only warns.
 func fullRankSolve(lu *mat.LU, dst *mat.Dense, b mat.Matrix) error {
 	err := lu.SolveTo(dst, false, b)
+	if err == nil {
+		return nil
+	}
 	var c mat.Condition
 	if errors.As(err, &c) && !math.IsInf(float64(c), 1) && !math.IsNaN(float64(c)) {
 		return nil
