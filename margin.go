@@ -1356,7 +1356,8 @@ func (r *rationalLoop) highFrequency() float64 {
 // next to an origin cluster stay rejected. Beside a ring of poles around
 // z = 1 the roots fall up to 6× off, or are missing, beyond any bracket;
 // when a root is unevaluable, off the real axis by strayRootDeg, or fails
-// polish, the scan beside real poles next to z = 1 takes in the ring too.
+// polish, or when the pencil has no root at all, the scan beside real poles
+// next to z = 1 takes in the ring too.
 func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	reals, err := r.realCandidates()
 	if err != nil {
@@ -1380,7 +1381,7 @@ func (r *rationalLoop) phaseCrossings() ([]float64, error) {
 	out := r.polish(cands, f, 1e-7, true)
 	r.eval.extended = false
 	pairs, realPoles, cluster := r.resonancePoles()
-	if len(cluster) > 0 && (stray || len(out) < len(cands)) {
+	if len(cluster) > 0 && (stray || len(out) < len(cands) || len(cands) == 0) {
 		realPoles = cluster
 	}
 	out = r.dropRefuted(out, realPoles, f)
@@ -1580,8 +1581,9 @@ func (r *rationalLoop) mergeResonanceCrossings(ws, cs []float64, f func(float64)
 // beside a pole split by rounding only finds crossings double-double
 // verifies. Discrete,
 // cluster holds |ln p|/Δt for the other pairs within clusterRadius of z = 1,
-// with the real poles of reals however many lie there, or nothing without
-// such a pair.
+// with the real poles of reals however many lie there; without such a pair,
+// the real poles within clusterRadius when two or more lie there, as a ring
+// of real poles whose pencil roots are lost too.
 func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 	n := r.n
 	if n == 0 {
@@ -1593,7 +1595,7 @@ func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, n, a, n, e, n, alphar, alphai, beta, nil, 1, nil, 1, work, len(work)) {
 		return nil, nil, nil
 	}
-	var ws, nearOne []float64
+	var ws, nearOne, ring []float64
 	nOne := 0
 	for j := 0; j < n; j++ {
 		if alphai[j] == 0 {
@@ -1601,6 +1603,9 @@ func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 				continue
 			}
 			p := alphar[j] / beta[j]
+			if th := math.Abs(math.Log(p)); math.Abs(p-1) <= clusterRadius && th > 0 {
+				ring = append(ring, th/r.dt)
+			}
 			if math.Abs(p-1) > 1e-2 {
 				continue
 			}
@@ -1630,6 +1635,8 @@ func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 	}
 	if len(cluster) > 0 {
 		cluster = append(cluster, nearOne...)
+	} else if len(ring) >= 2 {
+		cluster = ring
 	}
 	if nOne < 2 {
 		nearOne = nil
@@ -1641,7 +1648,10 @@ func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
 // on a grid graded towards it, from 1e-4 to ten times its frequency: below
 // a pair 1 ± jε the phase can stay within 1e-8° of −180° and cross it down
 // to ~1e-2 of the pole frequency, where pencil roots land far off and the
-// double solve's phase error exceeds tol next to the pole. Pencil roots near a
+// double solve's phase error exceeds tol next to the pole. Beside real poles
+// next to z = 1 the grid runs on to Nyquist in steps of π/(4n·Δt), over which
+// L of order n turns by about 45° at most away from its poles: a delay adds
+// crossings up there that the pencil loses. Pencil roots near a
 // pole pair 1 ± jε, ε ≲ 1e-4, are off by more than ε: the pencil of L − L~
 // carries the pair, its reflection and the crossings in a cluster of radius
 // ε, whose roots move by a root of the backward error. A sign change between
@@ -1705,6 +1715,12 @@ func (r *rationalLoop) resonanceCrossings(pairs, reals []float64, f func(float64
 				break
 			}
 			grid = append(grid, w)
+		}
+		if r.discrete() {
+			step := wTop / float64(4*r.n)
+			for w := hi; w < wTop; w += step {
+				grid = append(grid, w)
+			}
 		}
 		grids = append(grids, grid)
 	}
