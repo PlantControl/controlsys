@@ -833,7 +833,7 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 // strongly unstable plant (ρ(A) ≈ 500, Q/R ≈ 1e26, ‖X‖ ≈ 1e30) every cost
 // scale of the pencil misplaces its eigenvalues or yields an X whose gain
 // destabilizes, while Hewer from a placed gain reaches the oracle X to
-// 1e-10 (TV3THH). Placement (KNV, then Varga's Schur method) only supplies
+// 1e-10. Placement (KNV, then Varga's Schur method) only supplies
 // a K0 with E⁻¹(A − BK0) stable in float64, so its pole accuracy does not
 // matter; the first iterate X0 solves the Stein equation of the cost of
 // K0, A_K0ᵀX0A_K0 − EᵀX0E + Q_K0 = 0, and the result is the one
