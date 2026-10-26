@@ -658,7 +658,10 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // iteration from a pole-placement gain and returns its X only when the
 // same Newton check certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖),
 // else ErrNoStabilizing: under cheap control of a strongly unstable plant
-// no cost scale of the pencil may resolve its split.
+// no cost scale of the pencil may resolve its split. It runs them too
+// over an Accuracy 1 pencil solution, which a certified placed X
+// replaces: under cheap control with m = n the pencil's X can be off by
+// 4e-3 where Hewer from a placed gain certifies it to 1e-10.
 //
 // Dare scales the states and the cost as Care does (MATLAB idare), its
 // state scaling balanced with B (the cost proxy of Care brought no
@@ -692,10 +695,14 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // dareSolve is Dare without its input reduction.
 func dareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := otherScaling(dare, false, A, B, Q, R, opts)
-	if (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) {
+	poor := err == nil && res.Accuracy != 0
+	if poor || (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) {
 		var base RiccatiOpts
 		if opts != nil {
 			base = *opts
+		}
+		if poor {
+			base.Workspace = nil
 		}
 		flipped := base
 		flipped.NoScaling = !base.NoScaling
@@ -955,8 +962,8 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 
 // placedHewer is Dare's last source of a stabilizing solution, tried by
 // Dare (placedDare, as given and then with NoScaling flipped) only
-// when neither scaling mode's pencil gave a stabilizing X, not even an
-// Accuracy 1 one, nor a boundary verdict: Hewer's
+// when neither scaling mode's pencil gave a certified X nor a boundary
+// verdict: Hewer's
 // iteration, which from any stabilizing gain converges to the stabilizing
 // solution, started from a pole-placement gain. Under cheap control of a
 // strongly unstable plant (ρ(A) ≈ 500, Q/R ≈ 1e26, ‖X‖ ≈ 1e30) every cost
