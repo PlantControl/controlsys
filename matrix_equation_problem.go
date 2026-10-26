@@ -70,7 +70,7 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 		return riccatiProblem{}, fmt.Errorf("R: %w", ErrNotSymmetric)
 	}
 	// isPSD's Cholesky shift is 0 for Q = 0, which icare/idare accept.
-	if denseNorm(Q) != 0 && !isPSD(Q) {
+	if denseNorm(Q) != 0 && !(opts != nil && opts.reducedQ) && !isPSD(Q) {
 		return riccatiProblem{}, fmt.Errorf("Q: %w", ErrNotPSD)
 	}
 
