@@ -811,6 +811,13 @@ func FRDFeedback(plant, controller *FRD, sign float64) (*FRD, error) {
 	for w := 0; w < ic.nw; w++ {
 		copyComplexMatrixInto(ws.g, plant.Response[w], pp, pm)
 		copyComplexMatrixInto(ws.k, controller.Response[w], cp, pp)
+		dst := data[w*pp*pm : (w+1)*pp*pm]
+		if ws.wide {
+			if err := ws.solveWide(dst, sign); err != nil {
+				return nil, fmt.Errorf("FRDFeedback: I-G·K singular at omega[%d]=%g: %v: %w", w, ic.omega[w], err, ErrAlgebraicLoop)
+			}
+			continue
+		}
 		cMulInto(ws.kg, ws.k, ws.g, cp, pp, pm)
 
 		for i := range ws.n {
@@ -829,7 +836,6 @@ func FRDFeedback(plant, controller *FRD, sign float64) (*FRD, error) {
 		if err := cSolveInPlace(ws.ipkg, ws.rhs, ws.n, pp); err != nil {
 			return nil, fmt.Errorf("FRDFeedback: I-K·G singular at omega[%d]=%g: %v: %w", w, ic.omega[w], err, ErrAlgebraicLoop)
 		}
-		dst := data[w*pp*pm : (w+1)*pp*pm]
 		for i := range pp {
 			for j := range ws.n {
 				dst[i*ws.n+j] = ws.rhs[j*pp+i]
@@ -840,6 +846,21 @@ func FRDFeedback(plant, controller *FRD, sign float64) (*FRD, error) {
 	return result, nil
 }
 
+// solveWide uses G(I-s·K·G)^-1 = (I-s·G·K)^-1 G: for p < m the m x m
+// I-s·K·G has rank-p K·G, which swamps its identity part once ||K·G||·eps >= 1.
+func (ws *frdFeedbackWorkspace) solveWide(dst []complex128, sign float64) error {
+	p, m := ws.p, ws.n
+	cMulInto(ws.kg, ws.g, ws.k, p, m, p)
+	for i := range p * p {
+		ws.ipkg[i] = complex(-sign, 0) * ws.kg[i]
+	}
+	for i := range p {
+		ws.ipkg[i*p+i] += 1
+	}
+	copy(dst, ws.g)
+	return cSolveInPlace(ws.ipkg, dst, p, m)
+}
+
 type frdFeedbackWorkspace struct {
 	g    []complex128
 	k    []complex128
@@ -847,16 +868,23 @@ type frdFeedbackWorkspace struct {
 	ipkg []complex128
 	rhs  []complex128
 	n    int
+	p    int
+	wide bool
 }
 
 func newFRDFeedbackWorkspace(pp, pm int) *frdFeedbackWorkspace {
-	n := pm
+	n, nrhs := pm, pp
+	if pp < pm {
+		n, nrhs = pp, 0
+	}
 	return &frdFeedbackWorkspace{
 		g:    make([]complex128, pp*pm),
 		k:    make([]complex128, pm*pp),
 		kg:   make([]complex128, n*n),
 		ipkg: make([]complex128, n*n),
-		rhs:  make([]complex128, n*pp),
-		n:    n,
+		rhs:  make([]complex128, n*nrhs),
+		n:    pm,
+		p:    pp,
+		wide: pp < pm,
 	}
 }

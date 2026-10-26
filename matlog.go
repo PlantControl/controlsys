@@ -94,6 +94,7 @@ func matrixLogISS(a *mat.Dense) (*mat.Dense, error) {
 
 func matrixPrincipalSqrt(a, eye *mat.Dense) (*mat.Dense, error) {
 	y, z := denseCopy(a), denseCopy(eye)
+	floor, prev := math.Sqrt(0x1p-52), math.Inf(1)
 	for range 100 {
 		var ly, lz mat.LU
 		ly.Factorize(y)
@@ -112,9 +113,16 @@ func matrixPrincipalSqrt(a, eye *mat.Dense) (*mat.Dense, error) {
 		zn.Scale(0.5, &zn)
 		change.Sub(&yn, y)
 		y, z = denseCopy(&yn), denseCopy(&zn)
-		if mat.Norm(&change, 1) <= 4e-15*math.Max(1, mat.Norm(y, 1)) {
+		rel := mat.Norm(&change, 1) / math.Max(1, mat.Norm(y, 1))
+		if rel <= 4e-15 {
 			return y, nil
 		}
+		// Quadratic convergence from rel ≤ √eps would reach eps next step;
+		// failing to halve means the iterate sits on the rounding floor.
+		if prev <= floor && rel > prev/2 {
+			return y, nil
+		}
+		prev = rel
 	}
 	return nil, fmt.Errorf("matLog: principal square root did not converge: %w", ErrSingularTransform)
 }
