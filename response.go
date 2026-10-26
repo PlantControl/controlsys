@@ -697,15 +697,17 @@ func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, er
 // in Laurent series by back-substitution over the strongly connected
 // components of A's exact sparsity, which put A in block triangular form.
 // A 1×1 component with A_kk = x0 exactly is a pole at x0 of the float
-// model, counted exactly, as is a larger block with x0·I − A_KK exactly
-// singular; exactly zero couplings stay zero, so the sign of
+// model, counted exactly; exactly zero couplings stay zero, so the sign of
 // an entry's leading coefficient does not hinge on roundoff in
 // transfer-function coefficients. Given such a pole, a larger block that a
 // regular solve would reject has its eigenvalues nearest x0 deflated to x0
 // (deflateBlockAt), but only once the expansion on the model as given has
 // declined: deflation moves poles by up to √ε·‖A_KK‖, which can raise the
-// pole order at x0 and flip an Inf sign the float model fixes. An exactly
-// singular block always goes to deflation. An entry is ±∞ by its most
+// pole order at x0 and flip an Inf sign the float model fixes. A larger
+// block with x0·I − A_KK exactly singular is a pole at x0 whose residue may
+// cancel exactly, which no deflation resolves: with n ≤ exactDetMaxOrder
+// the gain is then the exact limit (exactDCGainLimit); otherwise such a
+// block always goes to deflation. An entry is ±∞ by its most
 // negative order coefficient above 100·n·ε of its magnitude scale, else the
 // σ⁰ coefficient. The deflated model's magnitudes are first those of the
 // sums that formed it (laurentAbs); only if that cannot decide, and no
@@ -715,6 +717,17 @@ func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, er
 // with no exact pole at x0, a block deflation cannot settle, or a finite
 // entry without three correct digits, leaving those to the transfer limit.
 func (sys *System) dcGainByBlockLaurent() (*mat.Dense, bool) {
+	n, _, _ := sys.Dims()
+	x0 := 0.0
+	if sys.IsDiscrete() {
+		x0 = 1
+	}
+	if n <= exactDetMaxOrder {
+		aRaw := sys.A.RawMatrix()
+		if hasExactSingularBlock(aRaw, tarjanBlocks(aRaw, n), x0) {
+			return exactDCGainLimit(sys.A, sys.B, sys.C, sys.D, x0), true
+		}
+	}
 	for _, mode := range []laurentMode{laurentAsGiven, laurentDeflate, laurentDeflateLoose} {
 		if g, ok := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, mode); ok {
 			return g, true
@@ -772,7 +785,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 			ns++
 		}
 	}
-	if ns == 0 && !hasExactSingularBlock(aRaw, blocks, x0) {
+	if ns == 0 {
 		return nil, false
 	}
 	type regular struct {
@@ -1034,8 +1047,15 @@ func exactShiftedDetIsZero(a blas64.General, x0 float64) bool {
 			}
 		}
 	}
+	return bareissDet(m, r).Sign() == 0
+}
+
+// bareissDet returns the determinant of the r×r integer matrix m by
+// fraction-free (Bareiss) elimination, overwriting m.
+func bareissDet(m []*big.Int, r int) *big.Int {
 	prev := big.NewInt(1)
 	t := new(big.Int)
+	neg := false
 	for k := range r - 1 {
 		if m[k*r+k].Sign() == 0 {
 			piv := -1
@@ -1046,11 +1066,12 @@ func exactShiftedDetIsZero(a blas64.General, x0 float64) bool {
 				}
 			}
 			if piv < 0 {
-				return true
+				return new(big.Int)
 			}
 			for j := range r {
 				m[k*r+j], m[piv*r+j] = m[piv*r+j], m[k*r+j]
 			}
+			neg = !neg
 		}
 		for i := k + 1; i < r; i++ {
 			for j := k + 1; j < r; j++ {
@@ -1062,7 +1083,179 @@ func exactShiftedDetIsZero(a blas64.General, x0 float64) bool {
 		}
 		prev = m[k*r+k]
 	}
-	return m[r*r-1].Sign() == 0
+	d := new(big.Int).Set(m[r*r-1])
+	if neg {
+		d.Neg(d)
+	}
+	return d
+}
+
+// exactDCGainLimit returns, entry by entry, the exact limit σ → 0+ of
+// D + C(σI + P)⁻¹B, P = x0·I − A, on the float model: ±Inf by the sign of
+// the leading Laurent coefficient at a pole, else the rounded finite value.
+// With A, x0 scaled to integers by a common power of two s (σ̂ = s·σ), the
+// numerator Ĉ adj(σ̂I + P̂) B̂ and det(σ̂I + P̂) are polynomials of degree
+// at most n, interpolated from exact bordered determinants at σ̂ = 0, …, n.
+func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
+	n, m := B.Dims()
+	p, _ := C.Dims()
+	aRaw, bRaw, cRaw := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
+	minExp := func(r blas64.General, e0 int) int {
+		for i := range r.Rows {
+			for _, v := range r.Data[i*r.Stride : i*r.Stride+r.Cols] {
+				if v != 0 {
+					_, e := math.Frexp(v)
+					e0 = min(e0, e)
+				}
+			}
+		}
+		if e0 == math.MaxInt {
+			return 0
+		}
+		return e0
+	}
+	seedA := math.MaxInt
+	if x0 != 0 {
+		_, seedA = math.Frexp(x0)
+	}
+	ea, eb, ec := minExp(aRaw, seedA), minExp(bRaw, math.MaxInt), minExp(cRaw, math.MaxInt)
+	scaled := func(v float64, e0 int) *big.Int {
+		f, e := math.Frexp(v)
+		x := big.NewInt(int64(math.Ldexp(f, 53)))
+		return x.Lsh(x, uint(e-e0))
+	}
+	pHat := make([]*big.Int, n*n)
+	for i := range n {
+		for j := range n {
+			v := scaled(aRaw.Data[i*aRaw.Stride+j], ea)
+			v.Neg(v)
+			if i == j && x0 != 0 {
+				v.Add(v, scaled(x0, ea))
+			}
+			pHat[i*n+j] = v
+		}
+	}
+	bHat := make([]*big.Int, n*m)
+	for i := range n {
+		for j := range m {
+			bHat[i*m+j] = scaled(bRaw.Data[i*bRaw.Stride+j], eb)
+		}
+	}
+	cHat := make([]*big.Int, p*n)
+	for i := range p {
+		for j := range n {
+			cHat[i*n+j] = scaled(cRaw.Data[i*cRaw.Stride+j], ec)
+		}
+	}
+
+	r := n + 1
+	work := make([]*big.Int, r*r)
+	for i := range work {
+		work[i] = new(big.Int)
+	}
+	fill := func(k int64, i, j int) {
+		for ii := range n {
+			for jj := range n {
+				work[ii*r+jj].Set(pHat[ii*n+jj])
+			}
+			work[ii*r+ii].Add(work[ii*r+ii], big.NewInt(k))
+			work[ii*r+n].Set(bHat[ii*m+j])
+			work[n*r+ii].Neg(cHat[i*n+ii])
+		}
+		work[n*r+n].SetInt64(0)
+	}
+	dVals := make([]*big.Int, n+1)
+	sub := make([]*big.Int, n*n)
+	for k := range n + 1 {
+		for ii := range n {
+			for jj := range n {
+				v := new(big.Int).Set(pHat[ii*n+jj])
+				if ii == jj {
+					v.Add(v, big.NewInt(int64(k)))
+				}
+				sub[ii*n+jj] = v
+			}
+		}
+		dVals[k] = bareissDet(sub, n)
+	}
+	den := newtonAscending(dVals)
+	od, dLow := lowestNonzero(den)
+
+	// G = D + 2^(53−ea) / 2^(53−eb) / 2^(53−ec) · N/d.
+	shift := 53 - ea - (53 - eb) - (53 - ec)
+	gain := mat.NewDense(p, m, nil)
+	nVals := make([]*big.Int, n+1)
+	for i := range p {
+		for j := range m {
+			for k := range n + 1 {
+				fill(int64(k), i, j)
+				nVals[k] = bareissDet(work, r)
+			}
+			on, nLow := lowestNonzero(newtonAscending(nVals))
+			dij := 0.0
+			if D != nil {
+				dij = D.At(i, j)
+			}
+			switch {
+			case on < 0 || on > od:
+				gain.Set(i, j, dij)
+			case on < od:
+				gain.Set(i, j, math.Inf(nLow.Sign()*dLow.Sign()))
+			default:
+				v := new(big.Rat).Quo(nLow, dLow)
+				sc := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), uint(max(shift, -shift))))
+				if shift >= 0 {
+					v.Mul(v, sc)
+				} else {
+					v.Quo(v, sc)
+				}
+				v.Add(v, new(big.Rat).SetFloat64(dij))
+				f, _ := v.Float64()
+				gain.Set(i, j, f)
+			}
+		}
+	}
+	return gain
+}
+
+// newtonAscending returns the ascending coefficients of the polynomial of
+// degree < len(y) taking the values y at 0, 1, ….
+func newtonAscending(y []*big.Int) []*big.Rat {
+	q := len(y)
+	c := make([]*big.Rat, q)
+	for k, v := range y {
+		c[k] = new(big.Rat).SetInt(v)
+	}
+	for j := 1; j < q; j++ {
+		for k := q - 1; k >= j; k-- {
+			c[k].Sub(c[k], c[k-1])
+			c[k].Quo(c[k], big.NewRat(int64(j), 1))
+		}
+	}
+	poly := make([]*big.Rat, q)
+	for k := range poly {
+		poly[k] = new(big.Rat)
+	}
+	poly[0].Set(c[q-1])
+	t := new(big.Rat)
+	for k := q - 2; k >= 0; k-- {
+		for d := q - 1; d >= 1; d-- {
+			poly[d].Sub(poly[d-1], t.Mul(poly[d], big.NewRat(int64(k), 1)))
+		}
+		poly[0].Sub(c[k], t.Mul(poly[0], big.NewRat(int64(k), 1)))
+	}
+	return poly
+}
+
+// lowestNonzero returns the order and value of the lowest nonzero
+// coefficient of an ascending polynomial, order −1 when it is identically 0.
+func lowestNonzero(c []*big.Rat) (int, *big.Rat) {
+	for k, v := range c {
+		if v.Sign() != 0 {
+			return k, v
+		}
+	}
+	return -1, nil
 }
 
 // deflateBlockAt applies x_K = Z·y to the states blk of (A, B, C), with
