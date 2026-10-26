@@ -305,6 +305,16 @@ func (e *pidNonfiniteResponse) Error() string {
 
 func (*pidNonfiniteResponse) Unwrap() error { return ErrInvalidArgument }
 
+// pidZeroGain reports a plant gain at the crossover that is zero or not
+// finite, as at a crossover moved far past the plant's dynamics.
+type pidZeroGain struct{ h complex128 }
+
+func (e *pidZeroGain) Error() string {
+	return fmt.Sprintf("plant gain %v at crossover is zero or not finite: %v", e.h, ErrInvalidArgument)
+}
+
+func (*pidZeroGain) Unwrap() error { return ErrInvalidArgument }
+
 // pidTuningMaxSensitivity bounds |S| for a delay-capped or moved default
 // crossover, so the design keeps at least 2.5 dB of gain margin and 14° of
 // phase margin at every frequency. A margin met only at wc can leave
@@ -1223,7 +1233,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	skipped := func(err error) bool {
 		blind := err != nil && fellBack
 		fellBack = false
-		return evalFailed() || blind || errors.As(err, new(*pidNonfiniteResponse))
+		return evalFailed() || blind || errors.As(err, new(*pidNonfiniteResponse)) || errors.As(err, new(*pidZeroGain))
 	}
 	// stamp reports the whole call's evaluations on the returned evidence.
 	stamp := func(res *PIDTuningResult, err error) (*PIDTuningResult, error) {
@@ -2092,7 +2102,7 @@ func tunePIDScanOnce(ctx context.Context, op string, p pidTuningPlant, family Pi
 	c := PID2{Tf: tf, Dt: p.dt, IFormula: o.IFormula, DFormula: o.DFormula, B: 1, C: 1}
 	h := p.at(wc)
 	if !pidFiniteComplex(h) || cmplx.Abs(h) < 1e-15 {
-		return nil, invalid("plant gain %v at crossover is zero or not finite", h)
+		return nil, fmt.Errorf("%s: %w", op, &pidZeroGain{h})
 	}
 	// P and I have one gain: its crossover fixes the phase margin, so an
 	// unspecified margin takes the plant's instead of the 60° default.
@@ -2163,7 +2173,13 @@ func tunePIDScanOnce(ctx context.Context, op string, p pidTuningPlant, family Pi
 		omega[k] = math.Exp(math.Log(p.low) + float64(k)*math.Log(p.high/p.low)/float64(points-1))
 		plant[k] = p.at(omega[k])
 		if !pidFiniteComplex(plant[k]) {
-			return nil, fmt.Errorf("%s: %w", op, &pidNonfiniteResponse{omega[k]})
+			// A sample exactly on a jω-axis mode, as 10^0.4 on the grid
+			// of wc = 1, moves off it.
+			w, g, ok := pidTuningNudgedSample(p, omega[k])
+			if !ok {
+				return nil, fmt.Errorf("%s: %w", op, &pidNonfiniteResponse{omega[k]})
+			}
+			omega[k], plant[k] = w, g
 		}
 	}
 	// Include wc exactly so target evidence never depends on a nearby grid sample.
@@ -4499,4 +4515,26 @@ func (o pidTuningOrigin) unstable(c *PID2) bool {
 		p0, scale = o.d0+c.Kp*o.n0, o.dScale+math.Abs(c.Kp)*o.nScale
 	}
 	return finitePID(p0) && -p0 > 1e3*0x1p-52*scale
+}
+
+// pidTuningNudgedSample samples p within a relative 1e-6 of w, inside the
+// band, where the response at w is not finite.
+func pidTuningNudgedSample(p pidTuningPlant, w float64) (float64, complex128, bool) {
+	for _, f := range []float64{1e-9, -1e-9, 1e-6, -1e-6} {
+		v := w * (1 + f)
+		if v < p.low || v > p.high {
+			continue
+		}
+		var g complex128
+		ok := true
+		if p.try != nil {
+			g, ok = p.try(v)
+		} else {
+			g = p.at(v)
+		}
+		if ok && pidFiniteComplex(g) {
+			return v, g, true
+		}
+	}
+	return 0, 0, false
 }
