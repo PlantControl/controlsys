@@ -817,7 +817,7 @@ func pidTuningFRDStrictPlant(data *FRD, unstablePoles *int) (p pidTuningPlant, c
 	p.unresolved = pidTuningFRDUnresolved(data)
 	if data.Dt == 0 {
 		p.markov, p.markovSpread = pidTuningFRDMarkov(data, p.at)
-		p.markovAnchored = p.markov != 0 && pidTuningFRDTopFlat(data, -1)
+		p.markovAnchored = p.markov != 0 && pidTuningFRDTopFlat(data, -1) && pidTuningFRDMarkovSettles(data, p.at)
 		p.topOrder, p.topAnchored = pidTuningFRDTopOrder(data, p.at)
 	}
 	return p, p.dcGain != 0 || p.lowAnchor
@@ -945,6 +945,23 @@ func pidTuningFRDMarkov(data *FRD, at func(float64) complex128) (m, spread float
 		return 0, 0
 	}
 	return real(g2), math.Abs(real(g2 - g1))
+}
+
+// pidTuningFRDMarkovSettles reports whether jω·G of continuous sampled
+// data heads to the real axis over each quarter decade of the top half
+// decade and across it (pidTuningFRDHeadsToAxis), as an end whose
+// dynamics all lie below the band does. A zero and pole above the band,
+// whose bends in |G| nearly cancel in pidTuningFRDTopFlat, still turn
+// jω·G away from the axis as ω rises, and leave lim sG beyond the top
+// sample's: at 2.8 and 3.1 times the top, 8% further.
+func pidTuningFRDMarkovSettles(data *FRD, at func(float64) complex128) bool {
+	low, high := data.Omega[0], data.Omega[len(data.Omega)-1]
+	w1, wm := high/math.Sqrt(10), high/math.Pow(10, .25)
+	if !(w1 >= low) {
+		return false
+	}
+	h1, hm, h2 := complex(0, w1)*at(w1), complex(0, wm)*at(wm), complex(0, high)*at(high)
+	return pidTuningFRDHeadsToAxis(hm, h1) && pidTuningFRDHeadsToAxis(h2, hm) && pidTuningFRDHeadsToAxis(h2, h1)
 }
 
 // pidTuningFRDLowOrder returns n of a low end G ≈ K·(jω)^n, K real, that
