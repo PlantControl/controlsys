@@ -325,6 +325,7 @@ func TestTransferFunctionStiffModeDeflatedByQZKeepsSlowPoles(t *testing.T) {
 	for name, sys := range cases {
 		t.Run(name, func(t *testing.T) {
 			checkERankAgreementTF(t, sys, sys)
+			checkERankAgreement(t, name, sys, sys)
 			pol, err := sys.Poles()
 			if err != nil {
 				t.Fatal(err)
