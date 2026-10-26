@@ -802,7 +802,7 @@ func TestDescriptorChainBesideSmallEPole(t *testing.T) {
 // 283/300 of the proper ones improper. A returned TF must match the
 // structured oracle to 1e-5 up to 1e7i. Improper ones must stay improper;
 // 1 ([4]) and 2 ([5]) with a stiff E returned ErrDescriptorSingular before
-// EVSFPV, [5] seed 92 still does (TestDescriptorStiffChainConditioned).
+// EVSFPV; [5] seed 92 did until refitPolyKeepDegree (TestDescriptorStiffChainConditioned).
 func TestDescriptorChainBesideSmallEPoleConditioned(t *testing.T) {
 	skipSlowUnderRace(t)
 	for _, tc := range []struct {

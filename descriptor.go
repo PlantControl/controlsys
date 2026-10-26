@@ -503,7 +503,14 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // sTermsStable finds not real, are a residue the split moved from finite
 // poles near ∞: when every one of them moves alike under sTermsStable's
 // perturbation (leakDriftShared), they are absorbed back before
-// reductionMatches confirms the reduction.
+// reductionMatches confirms the reduction. Terms whose norm only passes
+// the rounding level while each entry stays within it carry no polynomial
+// part: the reduction is proper when refitFromPencil matches the pencil
+// with them visible, else ErrImproperModel as before. Beside an index ≥ 2
+// chain an improper split is checked against the pencil samples
+// (refitPolyFromPencil), and a stiff chain split that misses the
+// data-scale points of reductionPolyMatches stands when its refit at the
+// same degree matches the samples (refitPolyKeepDegree).
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	out, poly, _, err := sys.weierstrassReduceCore(false, false)
 	return out, poly, err
@@ -638,6 +645,8 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 	leakOnly := false
 	var leakDrift []float64
 	chain := false
+	entrywiseStatic := false
+	var entryTerms []*mat.Dense
 	if ni > 0 {
 		var lu mat.LU
 		s22 := extractBlock(S, nf, nf, ni, ni)
@@ -685,13 +694,20 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 							leakDrift = drift
 						}
 					}
-					if poly = algebraicPolyTerms(terms, lowTols, p, m); !impulsive {
+					poly = algebraicPolyTerms(terms, lowTols, p, m)
+					if impulsive && poly == nil && q == 0 && nf > 0 {
+						impulsive, entrywiseStatic, entryTerms = false, true, terms
+					}
+					if !impulsive {
 						confirm = !normStatic && !algebraicPartStatic(terms, blurred)
 						leakTerms, leakTols = terms, blurred
 					}
 				default:
 					poly = algebraicPolyTerms(terms, blurred, p, m)
-					if q == 0 && len(terms) >= 2 {
+					switch {
+					case poly == nil && q == 0 && nf > 0:
+						impulsive, entrywiseStatic, entryTerms = false, true, terms
+					case q == 0 && len(terms) >= 2:
 						leakTerms, leakTols, leakOnly = terms, blurred, true
 					}
 				}
@@ -767,16 +783,39 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 			return nil, nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 		}
 	}
+	if chain && poly != nil && q == 0 {
+		if fixed, fpoly, ok := refitPolyFromPencil(sys, out, poly, ni-1, !nested); ok {
+			out, poly = fixed, fpoly
+		}
+	}
 	if chain && poly == nil && q == 0 && nf > 0 {
-		fixed, ok, miss := refitFromPencil(sys, out, nil)
-		if ok {
+		fixed, ok, miss := refitFromPencil(sys, out, entryTerms)
+		switch {
+		case ok:
 			out = fixed
-		} else if miss > refitRefuted {
+		case entrywiseStatic:
+			if verifyChain {
+				return nil, nil, nil, errChainLeft
+			}
+			return nil, nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+		case miss > refitRefuted:
 			return nil, nil, nil, errReductionRefuted
 		}
 	}
-	if verifyChain && (q > 0 || !reductionPolyMatches(sys, out, poly) || !nested && !sys.chainSplitReproducible(out, poly)) {
-		return nil, nil, nil, errChainLeft
+	if verifyChain {
+		if q > 0 {
+			return nil, nil, nil, errChainLeft
+		}
+		if !reductionPolyMatches(sys, out, poly) {
+			fixed, fpoly, ok := refitPolyKeepDegree(sys, out, poly)
+			if !ok {
+				return nil, nil, nil, errChainLeft
+			}
+			out, poly = fixed, fpoly
+		}
+		if !nested && !sys.chainSplitReproducible(out, poly) {
+			return nil, nil, nil, errChainLeft
+		}
 	}
 	return out, poly, nil, nil
 }
@@ -784,8 +823,8 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 // errChainLeft is the error of weierstrassReduceCore when an infinite
 // Jordan chain stays among the finite eigenvalues, or a split of
 // deflateStiffChain does not reproduce the pencil's response
-// (reductionPolyMatches) or its own under rounding of the data
-// (chainSplitReproducible).
+// (reductionPolyMatches, else refitPolyKeepDegree on pencil samples) or
+// its own under rounding of the data (chainSplitReproducible).
 var errChainLeft = fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
 
 // errReductionRefuted is the error of weierstrassReduceCore when a proper
@@ -1384,8 +1423,9 @@ type pencilSample struct {
 // ‖C‖·‖R·B‖ + ‖C·R‖·‖B‖), R = (sE − A)⁻¹, is at most pencilSampleCap of
 // it. Above that the rounding of the data leaves s-terms and chain
 // eigenvalues of its own (|λ| ~ ε^(−1/k) for an index-k chain), which the
-// proper part MATLAB keeps does not have.
-func pencilSamples(sys *System, poles []complex128) []pencilSample {
+// proper part MATLAB keeps does not have. While fewer than need points are
+// kept, up to pencilSampleBelow further decades under the range are tried.
+func pencilSamples(sys *System, poles []complex128, need int) []pencilSample {
 	n, m, p := sys.Dims()
 	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
 	normB, normC := denseNorm(sys.B), denseNorm(sys.C)
@@ -1407,7 +1447,7 @@ func pencilSamples(sys *System, poles []complex128) []pencilSample {
 	piv := make([]int, n)
 	x, y := make([]complex128, n*m), make([]complex128, n*p)
 	var out []pencilSample
-	for k := k0; k <= k1; k += step {
+	decade := func(k float64) {
 		for _, dir := range [...]complex128{complex(0.6, 0.8), complex(-0.28, 0.96)} {
 			s := dir * complex(math.Pow(10, k), 0)
 			for range 4 {
@@ -1466,8 +1506,19 @@ func pencilSamples(sys *System, poles []complex128) []pencilSample {
 			}
 		}
 	}
+	for k := k0; k <= k1; k += step {
+		decade(k)
+	}
+	for j := 1.0; j <= pencilSampleBelow && len(out) < need; j++ {
+		decade(k0 - j)
+	}
 	return out
 }
+
+// pencilSampleBelow is the most decades pencilSamples goes under its range
+// while it keeps fewer than need points: at low frequency the response is
+// determined by the data however large a pole is.
+const pencilSampleBelow = 3
 
 // pencilSampleDecades caps the decades pencilSamples spans one by one.
 const pencilSampleDecades = 24
@@ -1528,9 +1579,9 @@ func resolventBases(red *System, samples []pencilSample) (phi, psi [][]complex12
 	return phi, psi, true
 }
 
-// samplesMismatch is the largest mismatch of red against samples, each
-// entry relative to its sample's uncertainty unc.
-func samplesMismatch(red *System, samples []pencilSample, psi [][]complex128) float64 {
+// samplesMismatch is the largest mismatch of red plus Σ poly[k−1]·s^k
+// against samples, each entry relative to its sample's uncertainty unc.
+func samplesMismatch(red *System, poly []*mat.Dense, samples []pencilSample, psi [][]complex128) float64 {
 	nf, m, p := red.Dims()
 	c, d := red.C.RawMatrix(), red.D.RawMatrix()
 	var worst float64
@@ -1540,6 +1591,11 @@ func samplesMismatch(red *System, samples []pencilSample, psi [][]complex128) fl
 				h := complex(d.Data[i*d.Stride+j], 0)
 				for l := range nf {
 					h += complex(c.Data[i*c.Stride+l], 0) * psi[k][l*m+j]
+				}
+				sk := complex(1, 0)
+				for _, t := range poly {
+					sk *= smp.s
+					h += complex(t.At(i, j), 0) * sk
 				}
 				worst = max(worst, cmplx.Abs(h-smp.g[i*m+j])/smp.unc)
 			}
@@ -1577,7 +1633,11 @@ func refitFromPencil(sys, red *System, dropped []*mat.Dense) (fixed *System, ok 
 		}
 		poles = eig.Values(nil)
 	}
-	samples := pencilSamples(sys, poles)
+	need := 0
+	if dropped != nil {
+		need = nf + refitSurplus
+	}
+	samples := pencilSamples(sys, poles, need)
 	if len(samples) == 0 {
 		return nil, false, 0
 	}
@@ -1585,7 +1645,7 @@ func refitFromPencil(sys, red *System, dropped []*mat.Dense) (fixed *System, ok 
 	if !ok {
 		return nil, false, 0
 	}
-	miss = samplesMismatch(red, samples, psi)
+	miss = samplesMismatch(red, nil, samples, psi)
 	if len(samples) < nf+refitSurplus || dropped != nil && !droppedVisible(samples, dropped) {
 		return nil, false, miss
 	}
@@ -1593,6 +1653,148 @@ func refitFromPencil(sys, red *System, dropped []*mat.Dense) (fixed *System, ok 
 		return red, true, miss
 	}
 	out := red.Copy()
+	if refitRounded(out, nil, samples, phi, psi) > 1 {
+		return nil, false, miss
+	}
+	return out, true, miss
+}
+
+// refitPolyFromPencil checks the improper reduction (red, poly) of sys
+// (no internal delays) against pencilSamples and, when they refute it by
+// more than refitRefuted, refits B, D (and C for p > 1) with a polynomial
+// part s^1..s^deg of least deg ≤ maxDeg to them (refitRounded), keeping A
+// and so the poles. Beside an index ≥ 2 chain whose rounding eigenvalues
+// (|λ| ~ (ε·‖A‖)^(−1/k)) reach past a large finite pole λ the split
+// misplaces a residue ΔR between λ, D and the s-terms, ΔR/λ^(k+1) to s^k,
+// in amounts far above the response that cancel only in exact arithmetic,
+// and the rounding tests then drop the real s-terms beside them. Below λ
+// the data determine the response, so the refit must match every sample,
+// at least refitSurplus more than its unknowns per channel, while a
+// proper refit misses them by more than refitRefuted (the data need the
+// s-terms) and the s-terms reach polyDominant of the response at some
+// sample. With allowProper, a proper refit that matches every sample while
+// the split's s-terms show at some (droppedVisible) is returned instead,
+// with fpoly nil: the s-terms were that residue (proper chains read
+// improper). Otherwise ok is false and the reduction is kept as it is.
+// The minimal-norm fit may split D and λ's residue otherwise than the
+// structured model: they are collinear to s/λ where the data reach.
+func refitPolyFromPencil(sys, red *System, poly []*mat.Dense, maxDeg int, allowProper bool) (fixed *System, fpoly []*mat.Dense, ok bool) {
+	nf, m, p := red.Dims()
+	if m == 0 || p == 0 || nf == 0 || maxDeg < 1 || sys.internalDelayCount() > 0 {
+		return nil, nil, false
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(red.A, mat.EigenNone) {
+		return nil, nil, false
+	}
+	samples := pencilSamples(sys, eig.Values(nil), nf+1+maxDeg+refitSurplus)
+	if len(samples) < nf+2+refitSurplus {
+		return nil, nil, false
+	}
+	phi, psi, ok := resolventBases(red, samples)
+	if !ok || samplesMismatch(red, poly, samples, psi) <= refitRefuted {
+		return nil, nil, false
+	}
+	proper := red.Copy()
+	if miss := refitRounded(proper, nil, samples, phi, psi); miss <= refitRefuted {
+		if allowProper && miss <= 1 && droppedVisible(samples, poly) {
+			return proper, nil, true
+		}
+		return nil, nil, false
+	}
+	for deg := 1; deg <= maxDeg && len(samples) >= nf+1+deg+refitSurplus; deg++ {
+		out := red.Copy()
+		fpoly = make([]*mat.Dense, deg)
+		for k := range fpoly {
+			fpoly[k] = mat.NewDense(p, m, nil)
+		}
+		if refitRounded(out, fpoly, samples, phi, psi) <= 1 {
+			if !polyDominates(samples, fpoly) {
+				return nil, nil, false
+			}
+			return out, fpoly, true
+		}
+	}
+	return nil, nil, false
+}
+
+// refitPolyKeepDegree returns the reduction (red, poly) of sys (no
+// internal delays) matched to every one of at least refitSurplus more
+// pencilSamples than its unknowns per channel: as it is, or with B, D (C
+// for p > 1) and the s-terms refitted at the same degree (refitRounded).
+// The s-terms must reach polyDominant of the response at some sample, so
+// a proper model's rounding cannot pass for them. A proper reduction is
+// refitFromPencil's.
+func refitPolyKeepDegree(sys, red *System, poly []*mat.Dense) (fixed *System, fpoly []*mat.Dense, ok bool) {
+	if poly == nil {
+		fixed, ok, _ = refitFromPencil(sys, red, nil)
+		return fixed, nil, ok
+	}
+	nf, m, p := red.Dims()
+	if m == 0 || p == 0 || nf == 0 || sys.internalDelayCount() > 0 {
+		return nil, nil, false
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(red.A, mat.EigenNone) {
+		return nil, nil, false
+	}
+	need := nf + 1 + len(poly) + refitSurplus
+	samples := pencilSamples(sys, eig.Values(nil), need)
+	if len(samples) < need {
+		return nil, nil, false
+	}
+	phi, psi, ok := resolventBases(red, samples)
+	if !ok {
+		return nil, nil, false
+	}
+	if samplesMismatch(red, poly, samples, psi) <= 1 {
+		return red, poly, polyDominates(samples, poly)
+	}
+	out := red.Copy()
+	fpoly = make([]*mat.Dense, len(poly))
+	for k, c := range poly {
+		fpoly[k] = mat.DenseCopyOf(c)
+	}
+	if refitRounded(out, fpoly, samples, phi, psi) > 1 || !polyDominates(samples, fpoly) {
+		return nil, nil, false
+	}
+	return out, fpoly, true
+}
+
+// polyDominates reports whether Σ poly[k−1]·s^k reaches polyDominant of
+// the response at some sample.
+func polyDominates(samples []pencilSample, poly []*mat.Dense) bool {
+	p, m := poly[0].Dims()
+	for _, smp := range samples {
+		for i := range p {
+			for j := range m {
+				var v, pw complex128 = 0, 1
+				for _, t := range poly {
+					pw *= smp.s
+					v += complex(t.At(i, j), 0) * pw
+				}
+				if cmplx.Abs(v) >= polyDominant*smp.scale {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// polyDominant is the share of the response at some sample the s-terms of
+// refitPolyFromPencil and refitPolyKeepDegree must reach.
+const polyDominant = 0.1
+
+// refitRounded refits red (B and D, for p > 1 alternately C and D) and the
+// coefficients poly in place to samples, from the resolvent bases phi, psi
+// of red, for up to refitRounds B-side fits, and returns the least
+// mismatch reached (+Inf when a fit fails); it stops once that is at most
+// 1.
+func refitRounded(red *System, poly []*mat.Dense, samples []pencilSample, phi, psi [][]complex128) float64 {
+	_, _, p := red.Dims()
+	best := math.Inf(1)
+	ok := true
 	for round := range 2*refitRounds - 1 {
 		bSide := round%2 == 0
 		if !bSide && p == 1 {
@@ -1602,17 +1804,17 @@ func refitFromPencil(sys, red *System, dropped []*mat.Dense) (fixed *System, ok 
 		if bSide {
 			basis = phi
 		}
-		if !refitSide(out, samples, basis, bSide) {
-			return nil, false, miss
+		if !refitSide(red, poly, samples, basis, bSide) {
+			return math.Inf(1)
 		}
-		if phi, psi, ok = resolventBases(out, samples); !ok {
-			return nil, false, miss
+		if phi, psi, ok = resolventBases(red, samples); !ok {
+			return math.Inf(1)
 		}
-		if samplesMismatch(out, samples, psi) <= 1 {
-			return out, true, miss
+		if best = min(best, samplesMismatch(red, poly, samples, psi)); best <= 1 {
+			break
 		}
 	}
-	return nil, false, miss
+	return best
 }
 
 // droppedVisible reports whether the s-terms dropped, Σ dropped[k−1]·s^k,
@@ -1655,20 +1857,23 @@ const (
 // time: Re and Im of Φ·B(:,j) + D(:,j) = G(:,j) at each sample, weighted
 // by 1/unc, with equilibrated columns, by SVD least squares truncated at
 // refitRankTol: a pole far above every sample is a column nearly equal to
-// D's, and a minimal-norm fit keeps it from a cancelling residue.
-func refitSide(red *System, samples []pencilSample, basis [][]complex128, bSide bool) bool {
+// D's, and a minimal-norm fit keeps it from a cancelling residue. The
+// coefficients poly[k−1] of s^k, when given, are fitted alongside D.
+func refitSide(red *System, poly []*mat.Dense, samples []pencilSample, basis [][]complex128, bSide bool) bool {
 	nf, m, p := red.Dims()
 	outer, inner := m, p
 	if !bSide {
 		outer, inner = p, m
 	}
-	rows, cols := 2*len(samples)*inner, nf+inner
+	terms := 1 + len(poly)
+	rows, cols := 2*len(samples)*inner, nf+terms*inner
 	M := mat.NewDense(rows, cols, nil)
 	rhs := mat.NewVecDense(rows, nil)
 	colScale := make([]float64, cols)
 	var svd mat.SVD
 	var sol mat.Dense
 	for o := range outer {
+		M.Zero()
 		for k, smp := range samples {
 			wk := 1 / smp.unc
 			for i := range inner {
@@ -1689,11 +1894,12 @@ func refitSide(red *System, samples []pencilSample, basis [][]complex128, bSide 
 					M.Set(r, l, wk*real(v))
 					M.Set(r+1, l, wk*imag(v))
 				}
-				for l := range inner {
-					M.Set(r, nf+l, 0)
-					M.Set(r+1, nf+l, 0)
+				sk := complex(wk, 0)
+				for t := range terms {
+					M.Set(r, nf+t*inner+i, real(sk))
+					M.Set(r+1, nf+t*inner+i, imag(sk))
+					sk *= smp.s
 				}
-				M.Set(r, nf+i, wk)
 			}
 		}
 		for l := range cols {
@@ -1721,12 +1927,18 @@ func refitSide(red *System, samples []pencilSample, basis [][]complex128, bSide 
 				red.C.Set(o, l, v)
 			}
 		}
-		for l := range inner {
-			v := sol.At(nf+l, 0) / colScale[nf+l]
-			if bSide {
-				red.D.Set(l, o, v)
-			} else {
-				red.D.Set(o, l, v)
+		for t := range terms {
+			dst := red.D
+			if t > 0 {
+				dst = poly[t-1]
+			}
+			for l := range inner {
+				v := sol.At(nf+t*inner+l, 0) / colScale[nf+t*inner+l]
+				if bSide {
+					dst.Set(l, o, v)
+				} else {
+					dst.Set(o, l, v)
+				}
 			}
 		}
 	}

@@ -128,17 +128,20 @@ func TestTransferFunction_StiffProperChainSweep(t *testing.T) {
 // left among the finite eigenvalues"), improper and proper alike. MATLAB
 // rank keeps the pole finite (D62TAA): deflateStiffChain deflates the whole
 // chain, and the split stands when it matches the pencil at the data scale
-// and 4ε copies of the data reduce alike. [5] seed 92 improper still fails
-// closed: its split misses the direct solve by 6.6e-10 (> 1e-10) and every
-// 4ε copy fails alike. Oracle: the structured model's pencil response and
-// finite pole count.
+// and 4ε copies of the data reduce alike. [5] seed 92 improper failed
+// closed: its split misses the direct solve at the data scale by 6.6e-10
+// (> 1e-10) and every 4ε copy failed alike; MATLAB isproper gives false.
+// It now stands, as improper, when its refit at the same degree matches
+// the (sE − A) samples below the data scale with dominant s-terms
+// (refitPolyKeepDegree). Oracle: the structured model's pencil response
+// and finite pole count.
 func TestDescriptorStiffChainConditioned(t *testing.T) {
 	for _, tc := range []struct {
 		chain    int
 		seed     uint64
 		proper   bool
 		singular bool
-	}{{4, 92, false, false}, {5, 92, false, true}, {5, 193, false, false}, {4, 92, true, false}, {5, 92, true, false}} {
+	}{{4, 92, false, false}, {5, 92, false, false}, {5, 193, false, false}, {4, 92, true, false}, {5, 92, true, false}} {
 		label := fmt.Sprintf("[%d] seed %d proper %v", tc.chain, tc.seed, tc.proper)
 		rng := rand.New(rand.NewPCG(tc.seed, 911))
 		nf := 1 + rng.IntN(3)
@@ -310,7 +313,9 @@ func refutedChainDescriptor(t *testing.T, seed uint64) (sys, oracle *System) {
 // against −0.544 + 0.285i, 3e5 relative at 1e3i; MIMO chains [6] beside
 // 1.67e5 (seed 0: 1e5 relative). Now IsProper, Step and TransferFunction
 // fail closed alike; proper chains whose reduction is right still return
-// TFs that match the structured oracle.
+// TFs that match the structured oracle. KLVET5: 35 more of the 200 MIMO
+// chains (59 before, 94 now) read proper with a TF that matches, where
+// their split had passed residue for s-terms the pencil solves refute.
 func TestDescriptorRefutedReductionFailsClosed(t *testing.T) {
 	failsClosed := func(label string, sys *System) bool {
 		t.Helper()
@@ -385,7 +390,7 @@ func TestDescriptorRefutedReductionFailsClosed(t *testing.T) {
 		good++
 	}
 	t.Logf("%d proper TFs match, %d fail closed", good, closed)
-	if good < 45 || closed == 0 {
-		t.Errorf("%d proper TFs match the oracle (want ≥ 45), %d fail closed (want > 0)", good, closed)
+	if good < 85 || closed == 0 {
+		t.Errorf("%d proper TFs match the oracle (want ≥ 85), %d fail closed (want > 0)", good, closed)
 	}
 }
