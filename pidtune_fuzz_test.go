@@ -524,11 +524,11 @@ func fzPidSystem(t *testing.T, s *fzSpec) *System {
 //     limit: the exact integrator takes the integrating path); the same
 //     error with poles ~1e-8 off the integrator and |G| > 1 everywhere
 //     (followup);
-//   - TunePID evaluating a plant whose float A has an eigenvalue exactly
-//     on the imaginary axis at that pole's frequency (followup);
-//   - TunePID P/I with automatic wc on a zero-DC-gain plant whose
-//     one-gain search lands where |G| ≈ 0 and returns ErrInvalidArgument
-//     (followup).
+//   - TunePIDFRD evaluating a plant whose float A has an eigenvalue
+//     exactly on the imaginary axis at that pole's frequency (followup);
+//   - TunePIDFRD with automatic wc whose search lands where |G| ≈ 0 and
+//     returns ErrInvalidArgument (followup; TunePID skips such moved
+//     crossovers and nudges grid samples off jω-axis modes, ZHTUBP).
 //
 // fzPidNearIntegrator reports an intended pole within rounding (or the
 // library's 1e-10 boundary band) of the integrator s = 0 / z = 1.
@@ -555,7 +555,8 @@ func fzPidSkipDocumented(t *testing.T, s *fzSpec, name string, wc float64, err e
 		return
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "nonfinite plant response") && !s.Decidable() {
+	frd := strings.HasPrefix(name, "TunePIDFRD")
+	if strings.Contains(msg, "nonfinite plant response") && !s.Decidable() && frd {
 		fzSkip(t, name+": search sampled an imaginary-axis pole exactly (followup)")
 	}
 	if wc != 0 {
@@ -571,7 +572,7 @@ func fzPidSkipDocumented(t *testing.T, s *fzSpec, name string, wc float64, err e
 		fzSkip(t, "rounded integrator without crossover (precision limit)")
 	case strings.Contains(msg, "no gain crossover, bandwidth or nonzero pole"):
 		fzSkip(t, "near-integrator plant with |G| > 1 everywhere (followup)")
-	case strings.Contains(msg, "at crossover is zero or not finite"):
+	case strings.Contains(msg, "at crossover is zero or not finite") && frd:
 		fzSkip(t, name+": one-gain search at |G| = 0 (followup)")
 	}
 }
