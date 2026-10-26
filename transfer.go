@@ -193,6 +193,26 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // degree exceeds the denominator's. MinimalOrder and RowDegrees then
 // describe that explicit part.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
+	res, err := sys.transferRational(opts)
+	if err != nil {
+		return nil, err
+	}
+	if total := newDelayTopology(sys).totalExternal(true); total != nil {
+		res.TF.Delay = denseToSlice2D(total)
+	}
+	return res, nil
+}
+
+func (sys *System) transferRational(opts *TransferFuncOpts) (*TransferFuncResult, error) {
+	if sys.IsDescriptor() {
+		if parts, ok := stiffExplicitParts(sys); ok {
+			if res, err := sumTransferFunction(parts, opts); err == nil {
+				res.TF.InputName = copyStringSlice(sys.InputName)
+				res.TF.OutputName = copyStringSlice(sys.OutputName)
+				return res, nil
+			}
+		}
+	}
 	std, poly, err := transferStandardForm(sys)
 	if err != nil {
 		return nil, err
@@ -202,9 +222,6 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 		return nil, err
 	}
 	addPolynomialPart(res.TF, poly)
-	if total := newDelayTopology(sys).totalExternal(true); total != nil {
-		res.TF.Delay = denseToSlice2D(total)
-	}
 	return res, nil
 }
 
@@ -227,6 +244,179 @@ func transferStandardForm(sys *System) (*System, []*mat.Dense, error) {
 		return nil, nil, fmt.Errorf("TransferFunction: %w: %w", ErrDescriptorUnsupported, err)
 	}
 	return out, poly, nil
+}
+
+// illConditionedECond is the 1-norm condition estimate of a full-rank E
+// from which TransferFunction avoids E⁻¹: an LU solve smears the
+// cond(E)·ε error of the stiff direction over every row of E⁻¹A, and the
+// explicit ss→tf then loses the slow modes (at cond 1e15: 1e-3 response
+// error from the fold, then a dropped pole).
+const illConditionedECond = 1e4
+
+// stiffExplicitParts returns explicit realizations, (slow, fast) or a single
+// one, whose transfer functions sum to that of the descriptor sys with
+// full-rank but ill-conditioned E; ok is false when E⁻¹ is safe to form, E is
+// rank deficient by the MATLAB rule, or sys has internal delays. The modes
+// with |λ|·‖E‖/‖A‖ ≥ 1/qzLargeRatio are split off by the ordered
+// generalized Schur form; each part folds its E in by svdExplicit.
+func stiffExplicitParts(sys *System) ([]*System, bool) {
+	if sys.LFT != nil {
+		return nil, false
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	if lu.Cond() < illConditionedECond || eRankDeficient(sys.E, &lu) {
+		return nil, false
+	}
+	sys = equilibrateDescriptor(sys)
+	lu.Factorize(sys.E)
+	if lu.Cond() < illConditionedECond {
+		return nil, false
+	}
+	whole, ok := svdExplicit(sys)
+	if !ok {
+		return nil, false
+	}
+	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
+	if normA == 0 {
+		return []*System{whole}, true
+	}
+	slow, fast, err := decomposeGeneralizedQZ(sys, func(l complex128) bool {
+		return cmplx.Abs(l)*normE*qzLargeRatio < normA
+	})
+	if err != nil {
+		return []*System{whole}, true
+	}
+	n1, _, _ := slow.Dims()
+	n2, _, _ := fast.Dims()
+	if n1 == 0 || n2 == 0 {
+		return []*System{whole}, true
+	}
+	fastExplicit, ok := svdExplicit(fast)
+	if !ok {
+		return []*System{whole}, true
+	}
+	return []*System{slow, fastExplicit}, true
+}
+
+// equilibrateDescriptor returns sys with the rows of (A, B, E) and the
+// columns of (A, C, E) scaled by powers of two so E has unit row and column
+// maxima, as LAPACK DGEEQU. The scaling is exact and leaves the transfer
+// function unchanged; badly scaled E (e.g. diagonal) then no longer looks
+// ill-conditioned, where the LU E⁻¹A is already componentwise accurate.
+func equilibrateDescriptor(sys *System) *System {
+	n, m, p := sys.Dims()
+	out := sys.Copy()
+	e, a := out.E.RawMatrix(), out.A.RawMatrix()
+	b, c := out.B.RawMatrix(), out.C.RawMatrix()
+	pow2 := func(x float64) int {
+		_, k := math.Frexp(x)
+		return 1 - k
+	}
+	for i := range n {
+		mx := 0.0
+		for j := range n {
+			mx = math.Max(mx, math.Abs(e.Data[i*e.Stride+j]))
+		}
+		k := pow2(mx)
+		for j := range n {
+			e.Data[i*e.Stride+j] = math.Ldexp(e.Data[i*e.Stride+j], k)
+			a.Data[i*a.Stride+j] = math.Ldexp(a.Data[i*a.Stride+j], k)
+		}
+		for j := range m {
+			b.Data[i*b.Stride+j] = math.Ldexp(b.Data[i*b.Stride+j], k)
+		}
+	}
+	for j := range n {
+		mx := 0.0
+		for i := range n {
+			mx = math.Max(mx, math.Abs(e.Data[i*e.Stride+j]))
+		}
+		k := pow2(mx)
+		for i := range n {
+			e.Data[i*e.Stride+j] = math.Ldexp(e.Data[i*e.Stride+j], k)
+			a.Data[i*a.Stride+j] = math.Ldexp(a.Data[i*a.Stride+j], k)
+		}
+		for i := range p {
+			c.Data[i*c.Stride+j] = math.Ldexp(c.Data[i*c.Stride+j], k)
+		}
+	}
+	return out
+}
+
+// sumTransferFunction is the transfer function of the parallel connection
+// of explicit parts with disjoint spectra: per row the denominators multiply
+// and the numerators cross-multiply.
+func sumTransferFunction(parts []*System, opts *TransferFuncOpts) (*TransferFuncResult, error) {
+	res, err := parts[0].rationalTransferFunction(opts)
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range parts[1:] {
+		r, err := part.rationalTransferFunction(opts)
+		if err != nil {
+			return nil, err
+		}
+		for i, d1 := range res.TF.Den {
+			d2 := r.TF.Den[i]
+			for j, n1 := range res.TF.Num[i] {
+				num := Poly(n1).Mul(d2).Add(Poly(r.TF.Num[i][j]).Mul(d1))
+				for len(num) > 1 && num[0] == 0 {
+					num = num[1:]
+				}
+				res.TF.Num[i][j] = num
+			}
+			res.TF.Den[i] = Poly(d1).Mul(d2)
+			res.RowDegrees[i] += r.RowDegrees[i]
+		}
+		res.MinimalOrder += r.MinimalOrder
+	}
+	return res, nil
+}
+
+// svdExplicit folds a full-rank E into the explicit realization
+// (Σ⁻¹UᵀAV, Σ⁻¹UᵀB, CV, D) from E = UΣVᵀ. Row i is scaled by 1/σᵢ alone,
+// so the result is the exact explicit form of a normwise nearby pencil,
+// with the stiff directions confined to their own rows. The caller decides
+// the rank of E; ok is false only for an exactly singular or non-finite E.
+func svdExplicit(sys *System) (*System, bool) {
+	n, m, _ := sys.Dims()
+	var svd mat.SVD
+	if !svd.Factorize(sys.E, mat.SVDThin) {
+		return nil, false
+	}
+	sv := svd.Values(nil)
+	if !(sv[n-1] > 0) || math.IsInf(sv[0], 1) {
+		return nil, false
+	}
+	var u, v mat.Dense
+	svd.UTo(&u)
+	svd.VTo(&v)
+	out := sys.Copy()
+	out.E = nil
+	var av mat.Dense
+	av.Mul(sys.A, &v)
+	out.A.Mul(u.T(), &av)
+	if m > 0 {
+		out.B.Mul(u.T(), sys.B)
+	}
+	if out.C != nil {
+		if r, _ := out.C.Dims(); r > 0 {
+			out.C.Mul(sys.C, &v)
+		}
+	}
+	a, b := out.A.RawMatrix(), out.B.RawMatrix()
+	for i, s := range sv {
+		inv := 1 / s
+		for j := range n {
+			a.Data[i*a.Stride+j] *= inv
+		}
+		for j := range m {
+			b.Data[i*b.Stride+j] *= inv
+		}
+	}
+	out.StateName = nil
+	return out, true
 }
 
 // addPolynomialPart adds Σ poly[k-1]·s^k to every channel of tf.
