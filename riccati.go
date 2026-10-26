@@ -149,7 +149,8 @@ type RiccatiResult struct {
 	// Rcnd is the reciprocal 1-norm condition estimate of U11, where
 	// [U11; U21] spans the stable invariant subspace and X = U21·U11⁻¹. A
 	// tiny Rcnd means X may be inaccurate. U11 is that of the state- and
-	// cost-scaled problem actually solved.
+	// cost-scaled problem actually solved or, for Dare's pole-placement
+	// fallback, of the orthonormal basis of span[I; X̂/σ], σ ≈ ‖X̂‖.
 	Rcnd float64
 	// Accuracy is the Report of MATLAB icare/idare for X: 0 when a Newton
 	// step certifies X (to about 1e-8 relative), 1 when X is a stabilizing
@@ -652,8 +653,13 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // Accuracy 0; with none certified Dare returns the stabilizing solution of
 // smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care,
 // including its PBH check of boundary modes, and its retry in the other
-// NoScaling mode), and with no stabilizing solution in either mode
-// ErrNoStabilizing.
+// NoScaling mode). With no stabilizing pencil solution in either mode and
+// no unstabilizable boundary mode (and no cross term S with rank(B) < m,
+// whose null-space inputs float64 cannot resolve), Dare runs Hewer's
+// iteration from a pole-placement gain and returns its X only when the
+// same Newton check certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖),
+// else ErrNoStabilizing: under cheap control of a strongly unstable plant
+// no cost scale of the pencil may resolve its split.
 //
 // Dare scales the states and the cost as Care does (MATLAB idare), its
 // state scaling balanced with B (the cost proxy of Care brought no
@@ -665,6 +671,19 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	res, err := otherScaling(dare, false, A, B, Q, R, opts)
+	if (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) {
+		var base RiccatiOpts
+		if opts != nil {
+			base = *opts
+		}
+		flipped := base
+		flipped.NoScaling = !base.NoScaling
+		for _, o := range []RiccatiOpts{base, flipped} {
+			if r, e := placedDare(A, B, Q, R, &o); e == nil && !boundaryCertified(false, A, B, Q, R, opts, r) {
+				return r, nil
+			}
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("Dare: %w", err)
 	}
@@ -696,6 +715,24 @@ func dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	return problem.result(X, K, ws.eig[:n], rcnd, accuracy), nil
+}
+
+// placedDare solves the Dare by placedHewer, state-scaled as dare.
+func placedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	problem, err := newRiccatiProblem(A, B, Q, R, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := problem.ws.fits(problem.n, problem.m); err != nil {
+		return nil, err
+	}
+	problem.scale(opts, false)
+	eig := problem.ws.eig[:problem.n]
+	X, K, rcnd, err := problem.placedHewer(eig)
+	if err != nil {
+		return nil, err
+	}
+	return problem.result(X, K, eig, rcnd, 0), nil
 }
 
 // pencilRiccati solves the Riccati equation from the extended pencil
@@ -787,6 +824,150 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 		problem.candidates = append(problem.candidates, riccatiPass{sigma: sigma})
 	}
 	return nil, nil, 0, ErrNoStabilizing
+}
+
+// placedHewer is Dare's last source of a stabilizing solution, tried by
+// Dare (placedDare, as given and then with NoScaling flipped) only
+// when neither scaling mode's pencil gave a stabilizing X, not even an
+// Accuracy 1 one, nor a boundary verdict: Hewer's
+// iteration, which from any stabilizing gain converges to the stabilizing
+// solution, started from a pole-placement gain. Under cheap control of a
+// strongly unstable plant (ρ(A) ≈ 500, Q/R ≈ 1e26, ‖X‖ ≈ 1e30) every cost
+// scale of the pencil misplaces its eigenvalues or yields an X whose gain
+// destabilizes, while Hewer from a placed gain reaches the oracle X to
+// 1e-10. Placement (KNV, then Varga's Schur method) only supplies
+// a K0 with E⁻¹(A − BK0) stable in float64, so its pole accuracy does not
+// matter; the first iterate X0 solves the Stein equation of the cost of
+// K0, A_K0ᵀX0A_K0 − EᵀX0E + Q_K0 = 0, and the result is the one
+// verifyRiccati certifies from it (Accuracy 0), else an error. Rcnd is
+// that of U11 for the orthonormal basis of span[I; X̂/σ], σ the power of
+// two nearest ‖X̂‖ (the subspace a pencil at that cost scale deflates).
+// It declines a cross term S with rank(B) < m: inputs in the null space
+// of B lower the cost by about xᵀSR⁻¹Sᵀx, comparable to Q under cheap
+// control, which R + BᵀXB (singular in float64) loses, so Newton then
+// certifies a wrong X (≈ Q).
+func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.Dense, float64, error) {
+	n, m, ws := problem.n, problem.m, problem.ws
+	A, B := problem.A, problem.B
+	var eLU mat.LU
+	if problem.E != nil {
+		eLU.Factorize(problem.E)
+		var ea, eb mat.Dense
+		if err := eLU.SolveTo(&ea, false, A); err != nil {
+			return nil, nil, 0, ErrNoStabilizing
+		}
+		if err := eLU.SolveTo(&eb, false, B); err != nil {
+			return nil, nil, 0, ErrNoStabilizing
+		}
+		A, B = &ea, &eb
+	}
+	var svd mat.SVD
+	if !svd.Factorize(B, mat.SVDFull) {
+		return nil, nil, 0, ErrNoStabilizing
+	}
+	sv := svd.Values(nil)
+	r := 0
+	for _, s := range sv {
+		if s > float64(max(n, m))*eps()*sv[0] {
+			r++
+		}
+	}
+	if r == 0 || (problem.S != nil && r < m) {
+		return nil, nil, 0, ErrNoStabilizing
+	}
+	nf := float64(n)
+	poleSets := [][]complex128{make([]complex128, n), make([]complex128, n)}
+	for i := range n {
+		poleSets[0][i] = complex(0.1+0.8*float64(i)/nf, 0)
+		poleSets[1][i] = complex(-0.6+1.2*(float64(i)+0.5)/nf, 0)
+	}
+	xData := ws.xData[:n*n]
+	try := func(K0 *mat.Dense) (*mat.Dense, *mat.Dense, float64, error) {
+		if K0 == nil || !finiteSlice(K0.RawMatrix().Data) {
+			return nil, nil, 0, ErrNoStabilizing
+		}
+		if _, ok := problem.stableGain(false, K0); !ok {
+			return nil, nil, 0, ErrNoStabilizing
+		}
+		var bk, acl, rk, qk mat.Dense
+		bk.Mul(problem.B, K0)
+		acl.Sub(problem.A, &bk)
+		rk.Mul(problem.R, K0)
+		qk.Mul(K0.T(), &rk)
+		qk.Add(&qk, problem.Q)
+		if problem.S != nil {
+			var sk mat.Dense
+			sk.Mul(problem.S, K0)
+			qk.Sub(&qk, &sk)
+			qk.Sub(&qk, sk.T())
+		}
+		f := mat.DenseCopyOf(acl.T())
+		if problem.E != nil {
+			var ft mat.Dense
+			if err := eLU.SolveTo(&ft, false, &acl); err != nil {
+				return nil, nil, 0, ErrNoStabilizing
+			}
+			f = mat.DenseCopyOf(ft.T())
+		}
+		symmetrize(qk.RawMatrix().Data, n, n)
+		Y, err := dlyap(f, &qk, nil)
+		if err != nil {
+			return nil, nil, 0, ErrNoStabilizing
+		}
+		X0 := Y
+		if problem.E != nil {
+			var w, x mat.Dense
+			if err := eLU.SolveTo(&w, true, Y); err != nil {
+				return nil, nil, 0, ErrNoStabilizing
+			}
+			if err := eLU.SolveTo(&x, true, w.T()); err != nil {
+				return nil, nil, 0, ErrNoStabilizing
+			}
+			X0 = &x
+		}
+		copyStrided(xData, n, X0.RawMatrix().Data, X0.RawMatrix().Stride, n, n)
+		symmetrize(xData, n, n)
+		if !finiteSlice(xData) {
+			return nil, nil, 0, ErrNoStabilizing
+		}
+		X := mat.NewDense(n, n, xData)
+		K, err := problem.acceptRiccati(false, X, eig, 0)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		return X, K, placedRcnd(xData, n), nil
+	}
+	for _, poles := range poleSets {
+		if r >= 2 {
+			if X, K, rcnd, err := try(placeKNV(A, &svd, sv[:r], poles)); err == nil {
+				return X, K, rcnd, nil
+			}
+		}
+		if K0, err := placeSchur(A, B, poles); err == nil {
+			if X, K, rcnd, err := try(K0); err == nil {
+				return X, K, rcnd, nil
+			}
+		}
+	}
+	return nil, nil, 0, ErrNoStabilizing
+}
+
+// placedRcnd returns the reciprocal 2-norm condition of U11 for the
+// orthonormal basis of span[I; X/σ], σ the power of two nearest ‖X‖_F:
+// √((1 + λmin²)/(1 + λmax²)) over the eigenvalues λ of X/σ ordered by
+// magnitude.
+func placedRcnd(xData []float64, n int) float64 {
+	sigma := pow2Near(impl.Dlange(lapack.Frobenius, n, n, xData, n, nil))
+	var es mat.EigenSym
+	if !es.Factorize(mat.NewSymDense(n, slices.Clone(xData)), false) {
+		return 0
+	}
+	lo, hi := math.Inf(1), 0.0
+	for _, v := range es.Values(nil) {
+		a := math.Abs(v / sigma)
+		lo, hi = min(lo, a), max(hi, a)
+	}
+	return math.Sqrt((1 + lo*lo) / (1 + hi*hi))
 }
 
 // acceptRiccati returns the gain of the solution X (with rcnd), which it
