@@ -507,9 +507,10 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // improper split is checked against the pencil samples
 // (refitPolyFromPencil), and a stiff improper chain split that misses the
 // data-scale points of reductionPolyMatches stands when its refit at the
-// same degree matches the samples (refitPolyKeepDegree). A proper split
-// beside such a chain that the low-frequency pencil solves refute
-// (reductionRefutedBelow) fails closed.
+// same degree matches the samples (refitPolyKeepDegree). A proper or
+// improper split beside such a chain that the low-frequency pencil solves
+// refute, or that no pencil solve can check (reductionRefutedBelow), fails
+// closed.
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	out, poly, _, err := sys.weierstrassReduceCore(false, false)
 	return out, poly, err
@@ -777,6 +778,9 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		if fixed, fpoly, ok := refitPolyFromPencil(sys, out, poly, ni-1); ok {
 			out, poly = fixed, fpoly
 		}
+		if nf > 0 && reductionRefutedBelow(sys, out, poly) {
+			return nil, nil, nil, errReductionRefuted
+		}
 	}
 	if chain && poly == nil && q == 0 && nf > 0 {
 		fixed, ok, miss := refitFromPencil(sys, out, nil)
@@ -785,7 +789,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		} else if miss > refitRefuted {
 			return nil, nil, nil, errReductionRefuted
 		}
-		if reductionRefutedBelow(sys, out) {
+		if reductionRefutedBelow(sys, out, nil) {
 			return nil, nil, nil, errReductionRefuted
 		}
 	}
@@ -817,11 +821,12 @@ var errChainLeft = fmt.Errorf("infinite Jordan chain left among the finite eigen
 // errReductionRefuted is the error of weierstrassReduceCore when a proper
 // reduction beside an index ≥ 2 chain misses the direct pencil solves of
 // refitFromPencil by more than refitRefuted times their uncertainty and
-// no refit matches them (too few samples, or none fits), or misses those
-// under their range (reductionRefutedBelow): the split moved residue
+// no refit matches them (too few samples, or none fits), or when a proper
+// or improper one misses those under their range, or no solve there or in
+// the range is usable (reductionRefutedBelow): the split moved residue
 // between a large finite pole, the nilpotent block and D, and the model
 // it gives is not the pencil's.
-var errReductionRefuted = fmt.Errorf("proper reduction contradicts direct pencil solves: %w", ErrDescriptorSingular)
+var errReductionRefuted = fmt.Errorf("reduction contradicts direct pencil solves: %w", ErrDescriptorSingular)
 
 // reductionMatchTol bounds the relative mismatch reductionMatches accepts.
 const reductionMatchTol = 1e-10
@@ -1414,12 +1419,16 @@ type pencilSample struct {
 // proper part MATLAB keeps does not have. While fewer than need points are
 // kept, up to pencilSampleBelow further decades under the range are tried.
 func pencilSamples(sys *System, poles []complex128, need int) []pencilSample {
-	return pencilSampleSet(sys, poles, need, false)
+	out, _ := pencilSampleSet(sys, poles, need, false)
+	return out
 }
 
 // pencilSampleSet is pencilSamples, or with below only the points of the
-// reductionRefuteBelow decades under its range.
-func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pencilSample {
+// reductionRefuteBelow decades under its range. blind reports that no
+// point was kept although some were tried, each dropped by a failed
+// direct solve, a non-finite response or the sensitivity cap: an exactly
+// zero response (C or B zero) is determined by the data, not blind.
+func pencilSampleSet(sys *System, poles []complex128, need int, below bool) (out []pencilSample, blind bool) {
 	n, m, p := sys.Dims()
 	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
 	normB, normC := denseNorm(sys.B), denseNorm(sys.C)
@@ -1431,7 +1440,7 @@ func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pe
 		}
 	}
 	if !(lo > 0) || math.IsInf(hi, 0) {
-		return nil
+		return nil, false
 	}
 	k0, k1 := math.Floor(math.Log10(lo))-1, math.Ceil(math.Log10(hi))+1
 	step := math.Max(1, math.Ceil((k1-k0)/pencilSampleDecades))
@@ -1440,7 +1449,8 @@ func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pe
 	lu := make([]complex128, n*n)
 	piv := make([]int, n)
 	x, y := make([]complex128, n*m), make([]complex128, n*p)
-	var out []pencilSample
+	undetermined, zero := false, false
+	blindSet := func() bool { return len(out) == 0 && undetermined && !zero }
 	decade := func(k float64) {
 		for _, dir := range [...]complex128{complex(0.6, 0.8), complex(-0.28, 0.96)} {
 			s := dir * complex(math.Pow(10, k), 0)
@@ -1456,13 +1466,19 @@ func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pe
 			}
 			g := make([]complex128, p*m)
 			if direct(pointAt(s), g) != nil {
+				undetermined = true
 				continue
 			}
 			var scale float64
 			for _, v := range g {
 				scale = max(scale, cmplx.Abs(v))
 			}
-			if !(scale > 0) || math.IsInf(scale, 0) {
+			if scale == 0 {
+				zero = true
+				continue
+			}
+			if math.IsInf(scale, 0) || math.IsNaN(scale) {
+				undetermined = true
 				continue
 			}
 			for i := range n {
@@ -1471,6 +1487,7 @@ func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pe
 				}
 			}
 			if !cLUFactor(lu, piv, n) {
+				undetermined = true
 				continue
 			}
 			for i := range n {
@@ -1485,6 +1502,7 @@ func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pe
 				}
 			}
 			if !cLUFactor(lu, piv, n) {
+				undetermined = true
 				continue
 			}
 			for i := range n {
@@ -1497,6 +1515,8 @@ func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pe
 			sens := eps() * (cr*rb*(cmplx.Abs(s)*normE+normA) + normC*rb + cr*normB)
 			if sens <= pencilSampleCap*scale {
 				out = append(out, pencilSample{s, g, scale, reductionMatchTol*scale + sens})
+			} else {
+				undetermined = true
 			}
 		}
 	}
@@ -1504,7 +1524,7 @@ func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pe
 		for j := 1.0; j <= reductionRefuteBelow; j++ {
 			decade(k0 - j)
 		}
-		return out
+		return out, blindSet()
 	}
 	for k := k0; k <= k1; k += step {
 		decade(k)
@@ -1512,21 +1532,24 @@ func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pe
 	for j := 1.0; j <= pencilSampleBelow && len(out) < need; j++ {
 		decade(k0 - j)
 	}
-	return out
+	return out, blindSet()
 }
 
-// reductionRefutedBelow reports whether the proper reduction red of sys
-// (no internal delays) misses the points of pencilSampleSet under the
-// range of pencilSamples by more than refitRefuted times their
-// uncertainty. There the data determine the response however large a
-// pole is: a residue that a large finite pole λ took from an own s-term
-// t·s leaves only t·s²/λ, so these points cannot accept a proper
-// reduction (refitFromPencil), but a model that misses them is not the
-// pencil's whatever its s-terms. A split whose decoupling from λ was
-// ill-conditioned misallocates a residue of many orders above the
-// response and fails here even when no point in the range is
-// determined by the data.
-func reductionRefutedBelow(sys, red *System) bool {
+// reductionRefutedBelow reports whether the reduction red of sys (no
+// internal delays) plus Σ poly[k−1]·s^k misses the points of
+// pencilSampleSet under the range of pencilSamples by more than
+// refitRefuted times their uncertainty. There the data determine the
+// response however large a pole is: a residue that a large finite pole λ
+// took from an own s-term t·s leaves only t·s²/λ, so these points cannot
+// accept a proper reduction (refitFromPencil), but a model that misses
+// them is not the pencil's whatever its s-terms. A split whose decoupling
+// from λ was ill-conditioned misallocates a residue of many orders above
+// the response and fails here even when no point in the range is
+// determined by the data. Correct splits beside index 2..6 chains miss
+// these points by under 1e3, misallocated ones (proper or improper) by
+// 1e4 and more. When both these points and those of the range are blind
+// (pencilSampleSet), nothing supports the split and it counts as refuted.
+func reductionRefutedBelow(sys, red *System, poly []*mat.Dense) bool {
 	nf, m, p := red.Dims()
 	if m == 0 || p == 0 {
 		return false
@@ -1539,12 +1562,16 @@ func reductionRefutedBelow(sys, red *System) bool {
 		}
 		poles = eig.Values(nil)
 	}
-	samples := pencilSampleSet(sys, poles, 0, true)
+	samples, blind := pencilSampleSet(sys, poles, 0, true)
 	if len(samples) == 0 {
-		return false
+		if !blind {
+			return false
+		}
+		_, blind = pencilSampleSet(sys, poles, 0, false)
+		return blind
 	}
 	_, psi, ok := resolventBases(red, samples)
-	return ok && samplesMismatch(red, nil, samples, psi) > refitRefuted
+	return ok && samplesMismatch(red, poly, samples, psi) > refitRefuted
 }
 
 // reductionRefuteBelow is the number of decades under the range of

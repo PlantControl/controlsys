@@ -189,3 +189,86 @@ func TestDescriptorChainBesideLargePoleReadingsKept(t *testing.T) {
 		}
 	}
 }
+
+// TestDescriptorImproperChainBesideLargePoleRefutedAtLowFrequency: the
+// improper split beside an index-6 chain and a large-A pole kept a
+// misallocated residue unchecked when no pencilSamples point in the range
+// was usable (pointEval fails there) or refitPolyFromPencil found no refit:
+// base read IsProper false with a TF 0.4 to 93 relative off the oracle at
+// low frequency, where the data determine it to 1e-10, for the improper
+// chains and their proper twins. The points under the range refute it, as
+// they do the proper split (QNIQ7V). Skipped under -race like
+// TestDescriptorChainBesideLargePoleRefutedAtLowFrequency.
+func TestDescriptorImproperChainBesideLargePoleRefutedAtLowFrequency(t *testing.T) {
+	if raceEnabled {
+		t.Skip("rounding-regime dependent: no FMA fusion under -race")
+	}
+	for _, tc := range []struct {
+		firstTail bool
+		seed      uint64
+	}{{false, 8}, {false, 30}, {false, 164}, {false, 192}, {true, 29}, {true, 89}} {
+		for _, bscale := range []float64{1e-8, 0} {
+			var sys, oracle *System
+			if tc.firstTail {
+				sys, oracle = firstTailChainDescriptor(t, tc.seed, []int{6}, bscale, false)
+			} else {
+				sys, oracle = largePoleChainDescriptor(t, tc.seed, []int{6}, bscale)
+			}
+			label := fmt.Sprintf("firstTail %v seed %d bscale %g", tc.firstTail, tc.seed, bscale)
+			pr, closed := checkChainDescriptorReading(t, label, sys, oracle)
+			if !closed && pr != (bscale == 0) {
+				t.Errorf("%s: IsProper %v", label, pr)
+			}
+		}
+	}
+}
+
+// TestDescriptorImproperChainBesideLargePoleReadingsKept: improper splits
+// beside index-5 and index-6 chains and a large-A pole that match the
+// points under the range keep their reading and an oracle-matching TF.
+func TestDescriptorImproperChainBesideLargePoleReadingsKept(t *testing.T) {
+	for _, chain := range []int{5, 6} {
+		for _, seed := range []uint64{3, 4, 5, 7, 12} {
+			sys, oracle := firstTailChainDescriptor(t, seed, []int{chain}, 1e-4, false)
+			label := fmt.Sprintf("chain %d seed %d", chain, seed)
+			pr, closed := checkChainDescriptorReading(t, label, sys, oracle)
+			switch {
+			case closed:
+				t.Errorf("%s: failed closed", label)
+			case pr:
+				t.Errorf("%s: improper chain read proper", label)
+			}
+		}
+	}
+}
+
+// TestReductionRefutedBelowBlindSamples: with no pencil point usable in
+// or under the range (every direct solve of a singular pencil fails) the
+// reduction counts as refuted, not as matching zero samples; an exactly
+// zero response (C = 0) is determined by the data and refutes nothing.
+func TestReductionRefutedBelowBlindSamples(t *testing.T) {
+	red, err := New(mat.NewDense(1, 1, []float64{-2}), mat.NewDense(1, 1, []float64{1}),
+		mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, d := mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 1, nil)
+	singular, err := NewDescriptor(mat.NewDense(2, 2, []float64{-2, 0, 0, 0}), b,
+		mat.NewDense(1, 2, []float64{1, 1}), d, mat.NewDense(2, 2, []float64{1, 0, 0, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reductionRefutedBelow(singular, red, nil) {
+		t.Error("singular pencil: no usable sample read as not refuted")
+	}
+	zero, err := NewDescriptor(mat.NewDense(2, 2, []float64{-2, 0, 0, 1}), b,
+		mat.NewDense(1, 2, nil), d, mat.NewDense(2, 2, []float64{1, 0, 0, 0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroRed := red.Copy()
+	zeroRed.C = mat.NewDense(1, 1, nil)
+	if reductionRefutedBelow(zero, zeroRed, nil) {
+		t.Error("zero response: matching reduction refuted")
+	}
+}
