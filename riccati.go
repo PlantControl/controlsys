@@ -654,9 +654,10 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care,
 // including its PBH check of boundary modes, and its retry in the other
 // NoScaling mode). With no stabilizing pencil solution in either mode and
-// no unstabilizable boundary mode, Dare runs Hewer's iteration from a
-// pole-placement gain and returns its X only when the same Newton check
-// certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖),
+// no unstabilizable boundary mode (and no cross term S with rank(B) < m,
+// whose null-space inputs float64 cannot resolve), Dare runs Hewer's
+// iteration from a pole-placement gain and returns its X only when the
+// same Newton check certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖),
 // else ErrNoStabilizing: under cheap control of a strongly unstable plant
 // no cost scale of the pencil may resolve its split.
 //
@@ -841,6 +842,10 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 // verifyRiccati certifies from it (Accuracy 0), else an error. Rcnd is
 // that of U11 for the orthonormal basis of span[I; X̂/σ], σ the power of
 // two nearest ‖X̂‖ (the subspace a pencil at that cost scale deflates).
+// It declines a cross term S with rank(B) < m: inputs in the null space
+// of B lower the cost by about xᵀSR⁻¹Sᵀx, comparable to Q under cheap
+// control, which R + BᵀXB (singular in float64) loses, so Newton then
+// certifies a wrong X (≈ Q).
 func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.Dense, float64, error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	A, B := problem.A, problem.B
@@ -867,7 +872,7 @@ func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.D
 			r++
 		}
 	}
-	if r == 0 {
+	if r == 0 || (problem.S != nil && r < m) {
 		return nil, nil, 0, ErrNoStabilizing
 	}
 	nf := float64(n)
