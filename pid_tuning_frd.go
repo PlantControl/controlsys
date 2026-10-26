@@ -606,8 +606,10 @@ func pidTuningFRDDesign(ctx context.Context, base, strict pidTuningPlant, certif
 				if !p.lowAnchored {
 					why = append(why, "the data have no sample at ω = 0 to anchor the DC end")
 				}
-				if _, _, top := pidTuningFRDNyquistVerdict(*r.Controller, p); !top {
-					why = append(why, "they stop before the loop's end above the band is established")
+				if c := *r.Controller; c.Dt == 0 && c.Tf == 0 && c.Kd != 0 && p.markov != 0 {
+					why = append(why, "an ideal derivative (Tf = 0) does not roll off, so no band of data shows the loop's end above the band is established (a filtered derivative, PIDF with Tf > 0, can be certified)")
+				} else if _, _, top := pidTuningFRDNyquistVerdict(c, p); !top {
+					why = append(why, "the data stop before the loop's end above the band is established")
 				}
 				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("The strict sampled Nyquist count passed this design, but %s, so its closed-loop stability is not certified.", strings.Join(why, " and ")))
 			}
@@ -904,7 +906,6 @@ func pidTuningFRDStrictPlant(data *FRD, unstablePoles *int) (p pidTuningPlant, c
 	p.unresolved = pidTuningFRDUnresolved(data)
 	if data.Dt == 0 {
 		p.markov, p.markovSpread = pidTuningFRDMarkov(data, p.at)
-		p.markovAnchored = p.markov != 0 && pidTuningFRDTopFlat(data, -1) && pidTuningFRDMarkovSettles(data, p.at)
 		p.topOrder, p.topAnchored = pidTuningFRDTopOrder(data, p.at)
 	}
 	return p, p.dcGain != 0 || p.lowAnchor
@@ -1032,23 +1033,6 @@ func pidTuningFRDMarkov(data *FRD, at func(float64) complex128) (m, spread float
 		return 0, 0
 	}
 	return real(g2), math.Abs(real(g2 - g1))
-}
-
-// pidTuningFRDMarkovSettles reports whether jω·G of continuous sampled
-// data heads to the real axis over each quarter decade of the top half
-// decade and across it (pidTuningFRDHeadsToAxis), as an end whose
-// dynamics all lie below the band does. A zero and pole above the band,
-// whose bends in |G| nearly cancel in pidTuningFRDTopFlat, still turn
-// jω·G away from the axis as ω rises, and leave lim sG beyond the top
-// sample's: at 2.8 and 3.1 times the top, 8% further.
-func pidTuningFRDMarkovSettles(data *FRD, at func(float64) complex128) bool {
-	low, high := data.Omega[0], data.Omega[len(data.Omega)-1]
-	w1, wm := high/math.Sqrt(10), high/math.Pow(10, .25)
-	if !(w1 >= low) {
-		return false
-	}
-	h1, hm, h2 := complex(0, w1)*at(w1), complex(0, wm)*at(wm), complex(0, high)*at(high)
-	return pidTuningFRDHeadsToAxis(hm, h1) && pidTuningFRDHeadsToAxis(h2, hm) && pidTuningFRDHeadsToAxis(h2, h1)
 }
 
 // pidTuningFRDLowOrder returns n of a low end G ≈ K·(jω)^n, K real, that
@@ -1253,7 +1237,8 @@ func pidTuningFRDStrictDCGain(data *FRD, at func(float64) complex128) float64 {
 // cannot show; an ideal derivative (Tf = 0) on continuous data showing
 // lim sG = m at their top (pidTuningFRDMarkov) ends at 1 + Kd·m when
 // Re(1 + L) at the top sample, less twice the change of Re(Kd·jω·G) over
-// the top half decade, keeps its sign; and any other end is 1 when
+// the top half decade, keeps its sign, an end the data never certify;
+// and any other end is 1 when
 // pidTuningFRDTopBounded keeps |L| below 1 past the band (below ½ when
 // |L| < 1 rises at the top sample), needing |L| < 2 there, and short of
 // 10% of Nyquist or with |L| < 1 at the top sample.
@@ -1383,7 +1368,11 @@ func pidTuningFRDNyquistVerdict(c PID2, p pidTuningPlant) (stable, known, top bo
 			end = complex(1+real(l), 0)
 		}
 	case c.Dt == 0 && c.Tf == 0 && c.Kd != 0 && p.markov != 0:
-		end, top = complex(1+c.Kd*p.markov, 0), p.markovAnchored
+		// The end never anchors: L does not roll off, so a pair of damping ζ
+		// anywhere above the band lifts |L| past |L(∞)| by about 1/(2ζ), a
+		// crossing no sample shows; band-limited data fix neither ζ nor,
+		// for |L(∞)| ≥ 1, the plant's eventual roll-off through 1.
+		end = complex(1+c.Kd*p.markov, 0)
 		if !(math.Abs(real(end)) > math.Abs(real(1+l-end))+2*math.Abs(c.Kd)*p.markovSpread) {
 			return true, false, false
 		}

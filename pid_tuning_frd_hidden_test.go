@@ -98,7 +98,9 @@ func TestTunePIDFRDHiddenLoopKeepsDesigns(t *testing.T) {
 // 23N2LA: the two samples about a smooth, densely sampled maximum of |G|
 // exceed both neighbours, as about a pole pair, though only to second
 // order in the step. The count stays known there, and base's oracle-stable
-// designs stay certified. Oracles: companion roots, dense |S|.
+// designs stay certified, but for the ideal PD, whose end above the band
+// the strict count no longer certifies (QHMGQL). Oracles: companion
+// roots, dense |S|.
 func TestTunePIDFRDSmoothPeakStaysCertified(t *testing.T) {
 	for _, c := range []pidFRDStrictCase{
 		{"P at a flat maximum", []float64{-16.65166441248027, -0.2656008763515839}, []float64{1, 14.896440526427224, 102.3050809895444, 2.647216720152547}, 0, 0.0043993174278432546, 198.42290124282408, 110, PidtuneP, PIDTuningOptions{PhaseMargin: 60}, PID2{Kp: -6.125875260846174}},
@@ -117,7 +119,12 @@ func TestTunePIDFRDSmoothPeakStaysCertified(t *testing.T) {
 				break
 			}
 		}
-		if pidHasWarning(r, "not certified") {
+		if k.Tf == 0 && k.Kd != 0 {
+			p, _ := pidTuningFRDStrictPlant(frd, c.o.UnstablePoles)
+			if stable, known, _ := pidTuningFRDNyquistVerdict(k, p); !stable || !known || !pidHasWarning(r, "loop's end above the band is established") {
+				t.Errorf("%s: %+v count stable %v known %v, warnings %q", c.name, k, stable, known, r.Evidence.Warnings)
+			}
+		} else if pidHasWarning(r, "not certified") {
 			t.Errorf("%s: %+v not certified", c.name, k)
 		}
 		if !pidFRDStrictStable(c.num, c.den, k) {
