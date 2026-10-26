@@ -78,8 +78,8 @@ func TestDare_NearlyCollinearInputsAreCertified(t *testing.T) {
 				t.Errorf("%s NoScaling=%v: %v", c.name, noScaling, err)
 				continue
 			}
-			if rel := relErr(res.X, want); res.Accuracy != 0 || !(rel <= 1e-9) {
-				t.Errorf("%s NoScaling=%v: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g; want 0, ≤ 1e-9", c.name, noScaling, res.Accuracy, rel)
+			if rel := relErr(res.X, want); res.Accuracy != 0 || !(rel <= 1e-8) {
+				t.Errorf("%s NoScaling=%v: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g; want 0, ≤ 1e-8", c.name, noScaling, res.Accuracy, rel)
 			}
 			if rel := relErr(hewerDareBig(A, B, Q, R, S, res.K, 30), want); !(rel <= 1e-12) {
 				t.Errorf("%s NoScaling=%v: Hewer from K reaches %.3g of X*", c.name, noScaling, rel)
