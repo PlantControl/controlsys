@@ -362,6 +362,8 @@ func Acker(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 // poles keeps each within 0.1·|p| of its pole p (a zero pole uses the
 // largest |p| instead; MATLAB ignores zero poles). This signals an assignment too
 // ill-conditioned (huge gains, near-uncontrollable modes) to be trusted.
+// An inaccurate assignment of a pair the controllability staircase finds
+// uncontrollable returns ErrUncontrollable instead.
 //
 // Poles must come in conjugate pairs and len(poles) must equal n. As in MATLAB,
 // a pole repeated (exactly) more than rank(B) times returns
@@ -429,6 +431,9 @@ func Place(A, B *mat.Dense, poles []complex128) (*mat.Dense, error) {
 		K, kErr = Ks, sErr
 	}
 	if !(kErr <= placeMaxPoleError) {
+		if st, err := controllabilityStaircase(A, B, nil, 0, false); err == nil && st.NCont < n {
+			return nil, fmt.Errorf("Place: %w", ErrUncontrollable)
+		}
 		return nil, fmt.Errorf("Place: worst relative pole error %.3g: %w", kErr, ErrPoleAccuracy)
 	}
 	return K, nil
