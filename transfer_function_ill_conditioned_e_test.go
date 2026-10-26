@@ -69,6 +69,53 @@ func illConditionedEDescriptor(t *testing.T, rng *rand.Rand, n, m, p int, k, dt 
 	return sys, oracle
 }
 
+// TestTransferFunctionBadlyScaledDiagonalEStaysExact: a diagonal E spanning
+// 1e-6..1e6 has cond(E) far above the stiff threshold, but E⁻¹A by LU is
+// exact row scaling. The normwise SVD/QZ route of the ill-conditioned-E
+// path would perturb the small entries by ε·‖E‖ (response error ~1e-9), so
+// TransferFunction must judge cond(E) after equilibration (QKYC6R).
+// Oracle: the pencil response of the same data.
+func TestTransferFunctionBadlyScaledDiagonalEStaysExact(t *testing.T) {
+	pts := []complex128{0.05i, 0.37i, complex(0.5, 3), 10i, 100i}
+	for seed := range uint64(600) {
+		rng := rand.New(rand.NewPCG(seed, 77))
+		n := 2 + rng.IntN(5)
+		A, E := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+		B, C := mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil)
+		D := mat.NewDense(1, 1, []float64{rng.NormFloat64()})
+		for i := range n {
+			for j := range n {
+				A.Set(i, j, rng.NormFloat64())
+			}
+			B.Set(i, 0, rng.NormFloat64())
+			C.Set(0, i, rng.NormFloat64())
+		}
+		for i := range n {
+			E.Set(i, i, math.Pow(10, -6+12*rng.Float64()))
+		}
+		sys, err := NewDescriptor(A, B, C, D, E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := sys.TransferFunction(nil)
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		worst := 0.0
+		for _, s := range pts {
+			want := pencilResponse(t, sys, s)[0][0]
+			got, err := res.TF.Eval(s)
+			if err != nil {
+				t.Fatalf("seed %d: Eval: %v", seed, err)
+			}
+			worst = math.Max(worst, cmplx.Abs(got[0][0]-want)/math.Max(1, cmplx.Abs(want)))
+		}
+		if !(worst < 3e-10) {
+			t.Errorf("seed %d (n=%d): TF response error %.3g", seed, n, worst)
+		}
+	}
+}
+
 // TestTransferFunctionIllConditionedEMatchesPencil: a full-rank E with
 // cond(E) ≈ 1e4..1e15 put the stiff direction's cond(E)·ε error of the LU
 // E⁻¹A into every row, and the explicit ss→tf then lost the slow modes:

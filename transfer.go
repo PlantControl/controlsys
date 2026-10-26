@@ -268,6 +268,11 @@ func stiffExplicitParts(sys *System) ([]*System, bool) {
 	if lu.Cond() < illConditionedECond || eRankDeficient(sys.E, &lu) {
 		return nil, false
 	}
+	sys = equilibrateDescriptor(sys)
+	lu.Factorize(sys.E)
+	if lu.Cond() < illConditionedECond {
+		return nil, false
+	}
 	whole, ok := svdExplicit(sys)
 	if !ok {
 		return nil, false
@@ -292,6 +297,51 @@ func stiffExplicitParts(sys *System) ([]*System, bool) {
 		return []*System{whole}, true
 	}
 	return []*System{slow, fastExplicit}, true
+}
+
+// equilibrateDescriptor returns sys with the rows of (A, B, E) and the
+// columns of (A, C, E) scaled by powers of two so E has unit row and column
+// maxima, as LAPACK DGEEQU. The scaling is exact and leaves the transfer
+// function unchanged; badly scaled E (e.g. diagonal) then no longer looks
+// ill-conditioned, where the LU E⁻¹A is already componentwise accurate.
+func equilibrateDescriptor(sys *System) *System {
+	n, m, p := sys.Dims()
+	out := sys.Copy()
+	e, a := out.E.RawMatrix(), out.A.RawMatrix()
+	b, c := out.B.RawMatrix(), out.C.RawMatrix()
+	pow2 := func(x float64) int {
+		_, k := math.Frexp(x)
+		return 1 - k
+	}
+	for i := range n {
+		mx := 0.0
+		for j := range n {
+			mx = math.Max(mx, math.Abs(e.Data[i*e.Stride+j]))
+		}
+		k := pow2(mx)
+		for j := range n {
+			e.Data[i*e.Stride+j] = math.Ldexp(e.Data[i*e.Stride+j], k)
+			a.Data[i*a.Stride+j] = math.Ldexp(a.Data[i*a.Stride+j], k)
+		}
+		for j := range m {
+			b.Data[i*b.Stride+j] = math.Ldexp(b.Data[i*b.Stride+j], k)
+		}
+	}
+	for j := range n {
+		mx := 0.0
+		for i := range n {
+			mx = math.Max(mx, math.Abs(e.Data[i*e.Stride+j]))
+		}
+		k := pow2(mx)
+		for i := range n {
+			e.Data[i*e.Stride+j] = math.Ldexp(e.Data[i*e.Stride+j], k)
+			a.Data[i*a.Stride+j] = math.Ldexp(a.Data[i*a.Stride+j], k)
+		}
+		for i := range p {
+			c.Data[i*c.Stride+j] = math.Ldexp(c.Data[i*c.Stride+j], k)
+		}
+	}
+	return out
 }
 
 // sumTransferFunction is the transfer function of the parallel connection
@@ -327,8 +377,8 @@ func sumTransferFunction(parts []*System, opts *TransferFuncOpts) (*TransferFunc
 // svdExplicit folds a full-rank E into the explicit realization
 // (Σ⁻¹UᵀAV, Σ⁻¹UᵀB, CV, D) from E = UΣVᵀ. Row i is scaled by 1/σᵢ alone,
 // so the result is the exact explicit form of a normwise nearby pencil,
-// with the stiff directions confined to their own rows. ok is false when
-// E is rank deficient by the MATLAB rule (descriptorRank).
+// with the stiff directions confined to their own rows. The caller decides
+// the rank of E; ok is false only for an exactly singular or non-finite E.
 func svdExplicit(sys *System) (*System, bool) {
 	n, m, _ := sys.Dims()
 	var svd mat.SVD
@@ -336,7 +386,7 @@ func svdExplicit(sys *System) (*System, bool) {
 		return nil, false
 	}
 	sv := svd.Values(nil)
-	if r, _, _ := descriptorRank(sv, sv[0], n, true); r < n {
+	if !(sv[n-1] > 0) || math.IsInf(sv[0], 1) {
 		return nil, false
 	}
 	var u, v mat.Dense
