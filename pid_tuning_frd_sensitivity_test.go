@@ -134,10 +134,13 @@ func TestTunePIDFRDSensitivityBoundKeepsDesigns(t *testing.T) {
 // DC-to-lo line below the band (CXWHXX: 11.5), at z = −1 above discrete
 // data stopping at 0.955π (4.38) and at ω → ∞ of an ideal PD on a
 // relative-degree-one plant (4.24). Each design is returned unchanged,
-// stable, now without certification. Ideal PDs parked just under the
-// bound at ω → ∞ (strict sweep seeds 519, 565, 833) stay certified, as
-// the Markov end is extrapolated, not widened by its spread. Oracles:
-// companion roots, exact Schur–Cohn and dense exact |S|.
+// stable, now without certification, the ideal PD's also as the strict
+// count certifies no ideal derivative's end above the band (QHMGQL).
+// Ideal PDs parked just under the bound at ω → ∞ (strict sweep seeds 519,
+// 565, 833) keep their unsampled peak under it, as the Markov end is
+// extrapolated, not widened by its spread, though that end leaves them
+// uncertified. Oracles: companion roots, exact Schur–Cohn and dense exact
+// |S|.
 func TestTunePIDFRDUnsampledSensitivityUncertified(t *testing.T) {
 	for _, c := range []pidFRDStrictCase{
 		{"between samples PIDF", []float64{5.256412315376749e-08, 4.7338299227851e-09}, []float64{1, 0.00696924768219797, 0.0005706342067653564, 1.49497704056467e-06, 5.978781921603224e-08}, 0, 0.00018504889257226238, 1.0694725898516853, 67, PidtunePIDF, PIDTuningOptions{}, PID2{Kp: 2.052565140571584, Ki: 0.019062621341399227, Kd: 245.4031504143213, Tf: 0.07109858305474219}},
@@ -162,7 +165,8 @@ func TestTunePIDFRDUnsampledSensitivityUncertified(t *testing.T) {
 		if !pidFRDStrictStable(c.num, c.den, k) {
 			t.Errorf("%s: %+v unstable", c.name, k)
 		}
-		if peak := pidFRDStrictPeak(c.num, c.den, c.dt, k, c.lo); !(peak > 4.2) || !pidHasWarning(r, "sensitivity peak is not certified") {
+		ideal := k.Dt == 0 && k.Tf == 0 && k.Kd != 0 && pidHasWarning(r, "loop's end above the band is established")
+		if peak := pidFRDStrictPeak(c.num, c.den, c.dt, k, c.lo); !(peak > 4.2) || !ideal && !pidHasWarning(r, "sensitivity peak is not certified") {
 			t.Errorf("%s: dense |S| %g, warnings %q", c.name, peak, r.Evidence.Warnings)
 		}
 	}
@@ -175,8 +179,10 @@ func TestTunePIDFRDUnsampledSensitivityUncertified(t *testing.T) {
 			continue
 		}
 		k := *r.Controller
-		if peak := pidFRDStrictPeak(c.num, c.den, c.dt, k, c.lo); !pidFRDStrictStable(c.num, c.den, k) || !(peak <= 4) || pidHasWarning(r, "not certified") {
-			t.Errorf("seed %d: %+v dense |S| %g, warnings %q", seed, k, peak, r.Evidence.Warnings)
+		strict, _ := pidTuningFRDStrictPlant(frd, c.o.UnstablePoles)
+		peak, unsampled := pidFRDStrictPeak(c.num, c.den, c.dt, k, c.lo), pidTuningFRDUnsampledPeak(strict, k)
+		if !pidFRDStrictStable(c.num, c.den, k) || !(peak <= 4) || unsampled > pidTuningMaxSensitivity || !pidHasWarning(r, "loop's end above the band is established") {
+			t.Errorf("seed %d: %+v dense |S| %g, unsampled %g, warnings %q", seed, k, peak, unsampled, r.Evidence.Warnings)
 		}
 	}
 }

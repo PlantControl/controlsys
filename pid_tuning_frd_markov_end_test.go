@@ -11,15 +11,14 @@ import (
 // 3.1 times the data's top, nearly cancel in |G|, the strict count took
 // the top sample's lim sG, −0.0407, for the Markov end, certifying an ideal
 // PD whose true L(∞) = Kd·(−0.0444) leaves |S| at 4.34. The design is
-// unchanged but uncertified, as jω·G turns away from the real axis over
-// the top half decade. A first-order lag whose dynamics all lie below the
-// band keeps its anchored Markov end. Oracles: companion roots and a dense
-// |S| sweep of the exact plant.
+// unchanged but uncertified, as the strict count certifies no ideal
+// derivative's end above the band (QHMGQL). Oracles: companion roots and
+// a dense |S| sweep of the exact plant.
 func TestTunePIDFRDMarkovEndAboveBand(t *testing.T) {
 	c := pidFRDStrictSweepCase(rand.New(rand.NewPCG(9103, 189)))
 	frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
-	if p, _ := pidTuningFRDStrictPlant(frd, nil); p.markov == 0 || p.markovAnchored {
-		t.Errorf("markov %g anchored %v", p.markov, p.markovAnchored)
+	if p, _ := pidTuningFRDStrictPlant(frd, nil); p.markov == 0 {
+		t.Errorf("no Markov end read")
 	}
 	r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
 	if err != nil {
@@ -37,11 +36,5 @@ func TestTunePIDFRDMarkovEndAboveBand(t *testing.T) {
 	}
 	if !pidHasWarning(r, "loop's end above the band is established") {
 		t.Errorf("certified; warnings %q", r.Evidence.Warnings)
-	}
-
-	num, den := []float64{2}, []float64{1, 0.5}
-	lag := pidFRDStrictWithDC(t, pidFRDStrictData(t, num, den, 0, 0.01, 100, 200), num, den)
-	if p, _ := pidTuningFRDStrictPlant(lag, nil); p.markov == 0 || !p.markovAnchored {
-		t.Errorf("lag: markov %g anchored %v", p.markov, p.markovAnchored)
 	}
 }

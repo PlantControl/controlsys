@@ -161,8 +161,10 @@ func pidFRDResonanceSweepCase(r *rand.Rand) pidFRDStrictCase {
 // reached 5.6 along an unresolved resonance its samples left |S| under 4.
 // The first now report within 2° of the dense margin, still certified;
 // 422 is uncertified. Designs whose loop stays above |L| = 1 across an
-// unresolved step (446, 573, 1133) stay certified. Oracles: companion
-// roots and dense margin and |S| sweeps of the exact plant.
+// unresolved step (446, 573, 1133) stay certified, or read their steps
+// as resolved where an ideal derivative's end above the band leaves the
+// design uncertified (573, QHMGQL). Oracles: companion roots and dense
+// margin and |S| sweeps of the exact plant.
 func TestTunePIDFRDFitMarginsSweep(t *testing.T) {
 	t.Parallel()
 	const reported, uncertified, kept = 0, 1, 2
@@ -194,6 +196,10 @@ func TestTunePIDFRDFitMarginsSweep(t *testing.T) {
 				t.Errorf("case %d: certified %v, dense |S| %g", c.seed, certified, peak)
 			}
 		case kept:
+			if !certified && k.Tf == 0 && k.Kd != 0 {
+				strict, _ := pidTuningFRDStrictPlant(frd, p.o.UnstablePoles)
+				certified = pidHasWarning(r, "loop's end above the band is established") && pidTuningFRDFitMargins(r, strict)
+			}
 			if peak := pidFRDStrictPeak(p.num, p.den, 0, k, p.lo); !certified || !(peak <= 4) {
 				t.Errorf("case %d: certified %v, dense |S| %g", c.seed, certified, peak)
 			}
