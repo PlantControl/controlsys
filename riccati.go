@@ -689,31 +689,83 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // once the same Newton check certifies it in the m inputs w, with K
 // and Eig from there. Either K is returned only with A − BK in the given
 // inputs stable; should that, or the problem in w, fail, the given one
-// is solved.
+// is solved, and its X keeps Accuracy 0 only once the Newton check in w
+// certifies it, from its X or else its K (then with that X, K and Eig):
+// there Newton certified X off by 1e-3 to 0.16.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
 	red, ill := reduceInputs(A, B, Q, R, opts)
-	if red != nil {
-		var o RiccatiOpts
-		if opts != nil {
-			o = *opts
+	if red == nil {
+		return dareSolve(A, B, Q, R, opts, !ill)
+	}
+	if res := red.solve(A, B, Q, opts); res != nil {
+		return res, nil
+	}
+	res, err := dareSolve(A, B, Q, R, opts, !ill)
+	if err != nil || res.Accuracy != 0 {
+		return res, err
+	}
+	var E *mat.Dense
+	if opts != nil {
+		E = opts.E
+	}
+	if c, ok := red.certify(A, Q, opts, res, res.K); ok && closedLoopStable(A, B, c.K, E, c.Eig) {
+		return c, nil
+	}
+	res.Accuracy = 1
+	return res, nil
+}
+
+// solve returns the first solution of the Dare of red whose gain in the
+// inputs u stabilizes A − BK (closedLoopStable), or nil: that of dareSolve
+// and, should its K fail there, those of dare in the other scaling mode
+// and of placedDare in both. Under cheap control A − BK can be so
+// sensitive to K that the K of X accurate to 1e-14 and that of 3e-13 lie
+// on either side of the unit circle, while each mode rounds it
+// differently.
+func (red *reducedInputs) solve(A, B, Q *mat.Dense, opts *RiccatiOpts) *RiccatiResult {
+	var o RiccatiOpts
+	if opts != nil {
+		o = *opts
+	}
+	o.S, o.reducedQ = red.s, !red.rotated
+	accept := func(res *RiccatiResult, ws *RiccatiWorkspace) *RiccatiResult {
+		ok := true
+		if red.rotated {
+			res.K = red.gain(res.K, ws)
+		} else {
+			res, ok = red.certify(A, Q, opts, res, nil)
 		}
-		o.S, o.reducedQ = red.s, !red.rotated
-		if res, err := dareSolve(A, red.b, red.q, red.r, &o, true); err == nil {
-			ok := true
-			if red.rotated {
-				res.K = red.gain(res.K, o.Workspace)
-			} else {
-				res, ok = red.certify(A, Q, opts, res)
-			}
-			if ok && closedLoopStable(A, B, res.K, o.E, res.Eig) {
-				return res, nil
+		if ok && closedLoopStable(A, B, res.K, o.E, res.Eig) {
+			return res
+		}
+		return nil
+	}
+	res, err := dareSolve(A, red.b, red.q, red.r, &o, true)
+	if err != nil {
+		return nil
+	}
+	if r := accept(res, o.Workspace); r != nil {
+		return r
+	}
+	o.Workspace = nil
+	flipped := o
+	flipped.NoScaling = !o.NoScaling
+	if r, err := dare(A, red.b, red.q, red.r, &flipped); err == nil && r.Accuracy == 0 {
+		if r = accept(r, nil); r != nil {
+			return r
+		}
+	}
+	for _, p := range []*RiccatiOpts{&o, &flipped} {
+		if r, err := placedDare(A, red.b, red.q, red.r, p); err == nil {
+			if r = accept(r, nil); r != nil {
+				return r
 			}
 		}
 	}
-	return dareSolve(A, B, Q, R, opts, !ill)
+	return nil
 }
 
 // closedLoopStable reports whether the eigenvalues of A − BK (with E, of
@@ -761,7 +813,7 @@ func closedLoopStable(A, B, K, E *mat.Dense, eig []complex128) bool {
 // Eig of A − BK there: BV₂ is zero only to rounding, and under cheap
 // control the K₂ ≈ R₂₂⁻¹S₂ᵀ it multiplies can move X, or destabilize
 // A − BK, well beyond the rounding of B.
-func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) (*RiccatiResult, bool) {
+func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, k0 *mat.Dense) (*RiccatiResult, bool) {
 	var o RiccatiOpts
 	if opts != nil {
 		o = *opts
@@ -772,20 +824,37 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 		return nil, false
 	}
 	problem.scale(&o, false)
-	n := problem.n
+	n, m, t := problem.n, problem.m, problem.t
 	X := mat.NewDense(n, n, problem.ws.xData[:n*n])
-	xr := res.X.RawMatrix()
-	for i := range n {
-		for j := range n {
-			v := xr.Data[i*xr.Stride+j]
-			if t := problem.t; t != nil {
-				v /= t[i] * t[j]
+	setX := func() {
+		xr := res.X.RawMatrix()
+		for i := range n {
+			for j := range n {
+				v := xr.Data[i*xr.Stride+j]
+				if t != nil {
+					v /= t[i] * t[j]
+				}
+				X.Set(i, j, v)
 			}
-			X.Set(i, j, v)
 		}
 	}
+	setX()
 	eig := problem.ws.eig[:n]
 	K, err := problem.acceptRiccati(false, X, eig, res.Rcnd)
+	if err != nil && k0 != nil {
+		setX()
+		kw := mat.NewDense(m, n, nil)
+		kw.Mul(red.v.T(), k0)
+		if t != nil {
+			kr := kw.RawMatrix()
+			for i := range m {
+				for j := range n {
+					kr.Data[i*kr.Stride+j] /= t[j]
+				}
+			}
+		}
+		K, err = problem.verifyRiccati(false, X, kw, eig, res.Rcnd)
+	}
 	if err != nil {
 		return nil, false
 	}
