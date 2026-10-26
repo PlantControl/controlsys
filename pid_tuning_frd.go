@@ -236,9 +236,9 @@ func pidTuningFRDFitMargins(r *PIDTuningResult, p pidTuningPlant) (resolved bool
 	stable, known, _ := pidTuningFRDNyquistVerdict(c, q)
 	ev := &r.Evidence
 	ws, ms := pidTuningFRDFitCrossings(p, c)
-	fit := ws
+	nfit := len(ws)
 	lw, lm := pidTuningFRDLowCrossings(p, c)
-	ws, ms = append(slices.Clone(ws), lw...), append(ms, lm...)
+	ws, ms = append(ws, lw...), append(ms, lm...)
 	var raw *FRD
 	var open []float64
 	for _, w := range ev.GainCrossovers {
@@ -251,7 +251,7 @@ func pidTuningFRDFitMargins(r *PIDTuningResult, p pidTuningPlant) (resolved bool
 		if k < 0 || k+1 >= len(p.samples) || !(w > p.samples[k] && w < p.samples[k+1]) || slices.ContainsFunc([][][]pidTuningFRDMode{p.crossArcs, p.unresolved, p.arcs}, func(set [][]pidTuningFRDMode) bool { return set != nil && set[k] != nil }) {
 			continue
 		}
-		if a, b := p.samples[k], p.samples[k+1]; slices.ContainsFunc(fit, func(x float64) bool { return x > a && x < b }) {
+		if a, b := p.samples[k], p.samples[k+1]; slices.ContainsFunc(ws[:nfit], func(x float64) bool { return x > a && x < b }) {
 			continue
 		}
 		if raw == nil {
@@ -408,28 +408,27 @@ func pidTuningFRDStepReading(p pidTuningPlant, c PID2, w float64) (v, pm float64
 		}
 		return best, pm, true
 	}
+	gate := !marked(k-1) && !marked(k+1) && !turns(k-1) && !turns(k+1) && cmplx.Abs(interp(w, 0, 2)-interp(w, 1, 3)) <= .25*cmplx.Abs(interp(w, 0, 3)-cmplx.Log(p.at(w)))
+	v, pm, found := cross(func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 3)) })
+	if gate && found {
+		return v, pm, true, pm, pm
+	}
 	ref := 180 + cmplx.Phase(p.at(w)*pidTuningFeedback(c, w))*180/math.Pi
 	if ref > 180 {
 		ref -= 360
 	}
 	lo, hi = ref, ref
+	if found {
+		m := ref + pidTuningWrapDeg(pm-ref)
+		lo, hi = math.Min(lo, m), math.Max(hi, m)
+	}
 	for _, g := range []func(float64) complex128{func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 2)) }, func(w float64) complex128 { return cmplx.Exp(interp(w, 1, 3)) }} {
 		if _, m, ok := cross(g); ok {
 			m = ref + pidTuningWrapDeg(m-ref)
 			lo, hi = math.Min(lo, m), math.Max(hi, m)
 		}
 	}
-	v, pm, found := cross(func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 3)) })
-	if !found {
-		return 0, 0, false, lo, hi
-	}
-	m := ref + pidTuningWrapDeg(pm-ref)
-	lo, hi = math.Min(lo, m), math.Max(hi, m)
-	smooth = !marked(k-1) && !marked(k+1) && !turns(k-1) && !turns(k+1) && cmplx.Abs(interp(w, 0, 2)-interp(w, 1, 3)) <= .25*cmplx.Abs(interp(w, 0, 3)-cmplx.Log(p.at(w)))
-	if !smooth {
-		v, pm = 0, 0
-	}
-	return v, pm, smooth, lo, hi
+	return 0, 0, false, lo, hi
 }
 
 // pidTuningFRDMarginSlack is how far, in degrees, a certified design's
