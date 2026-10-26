@@ -1233,7 +1233,7 @@ func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTun
 	skipped := func(err error) bool {
 		blind := err != nil && fellBack
 		fellBack = false
-		return evalFailed() || blind || errors.As(err, new(*pidNonfiniteResponse)) || errors.As(err, new(*pidZeroGain))
+		return evalFailed() || blind || errors.As(err, new(*pidNonfiniteResponse)) || pidIsZeroGain(err)
 	}
 	// stamp reports the whole call's evaluations on the returned evidence.
 	stamp := func(res *PIDTuningResult, err error) (*PIDTuningResult, error) {
@@ -4537,4 +4537,9 @@ func pidTuningNudgedSample(p pidTuningPlant, w float64) (float64, complex128, bo
 		}
 	}
 	return 0, 0, false
+}
+
+func pidIsZeroGain(err error) bool {
+	_, ok := errors.AsType[*pidZeroGain](err)
+	return ok
 }
