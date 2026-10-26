@@ -506,9 +506,10 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // reductionMatches confirms the reduction. Terms whose norm only passes
 // the rounding level while each entry stays within it carry no polynomial
 // part: the reduction is proper when refitFromPencil matches the pencil
-// with them visible, else ErrImproperModel as before. Beside an index ≥ 2
-// chain an improper split is checked against the pencil samples
-// (refitPolyFromPencil), and a stiff chain split that misses the
+// where they, and any own s-terms beside the residue leaked from a large
+// pole, would show (sTermsTestable), else ErrImproperModel as before.
+// Beside an index ≥ 2 chain an improper split is checked against the
+// pencil samples (refitPolyFromPencil), and a stiff chain split that misses the
 // data-scale points of reductionPolyMatches stands when its refit at the
 // same degree matches the samples (refitPolyKeepDegree).
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
@@ -647,6 +648,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 	chain := false
 	entrywiseStatic := false
 	var entryTerms []*mat.Dense
+	var rawTerms []*mat.Dense
 	if ni > 0 {
 		var lu mat.LU
 		s22 := extractBlock(S, nf, nf, ni, ni)
@@ -711,6 +713,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 						leakTerms, leakTols, leakOnly = terms, blurred, true
 					}
 				}
+				rawTerms = terms
 				if !impulsive && !confirm {
 					poly = nil
 				}
@@ -784,7 +787,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		}
 	}
 	if chain && poly != nil && q == 0 {
-		if fixed, fpoly, ok := refitPolyFromPencil(sys, out, poly, ni-1, !nested); ok {
+		if fixed, fpoly, ok := refitPolyFromPencil(sys, out, poly, rawTerms, ni-1, !nested); ok {
 			out, poly = fixed, fpoly
 		}
 	}
@@ -1609,8 +1612,8 @@ func samplesMismatch(red *System, poly []*mat.Dense, samples []pencilSample, psi
 // pencilSamples of sys, A and so the poles kept; ok reports that the
 // result (red itself when it already does) matches every sample to its
 // uncertainty, from at least refitSurplus samples more than red has poles.
-// With dropped, the s-terms the reduction drops, ok also needs them
-// visible at some sample (droppedVisible). The response is well
+// With dropped, the s-terms the reduction drops, ok also needs the
+// samples to be able to refute them (sTermsTestable). The response is well
 // conditioned where the Weierstrass split is not: beside an index ≥ 2
 // chain that QZ smears to |λ| ~ ε^(−1/k), a large finite pole λ (large in A
 // or small in E) has a deflating subspace turned by ε/sep, which moves a
@@ -1646,7 +1649,7 @@ func refitFromPencil(sys, red *System, dropped []*mat.Dense) (fixed *System, ok 
 		return nil, false, 0
 	}
 	miss = samplesMismatch(red, nil, samples, psi)
-	if len(samples) < nf+refitSurplus || dropped != nil && !droppedVisible(samples, dropped) {
+	if len(samples) < nf+refitSurplus || dropped != nil && !sTermsTestable(samples, poles, dropped) {
 		return nil, false, miss
 	}
 	if miss <= 1 {
@@ -1673,12 +1676,12 @@ func refitFromPencil(sys, red *System, dropped []*mat.Dense) (fixed *System, ok 
 // proper refit misses them by more than refitRefuted (the data need the
 // s-terms) and the s-terms reach polyDominant of the response at some
 // sample. With allowProper, a proper refit that matches every sample while
-// the split's s-terms show at some (droppedVisible) is returned instead,
+// they can refute the split's terms (sTermsTestable) is returned instead,
 // with fpoly nil: the s-terms were that residue (proper chains read
 // improper). Otherwise ok is false and the reduction is kept as it is.
 // The minimal-norm fit may split D and λ's residue otherwise than the
 // structured model: they are collinear to s/λ where the data reach.
-func refitPolyFromPencil(sys, red *System, poly []*mat.Dense, maxDeg int, allowProper bool) (fixed *System, fpoly []*mat.Dense, ok bool) {
+func refitPolyFromPencil(sys, red *System, poly, terms []*mat.Dense, maxDeg int, allowProper bool) (fixed *System, fpoly []*mat.Dense, ok bool) {
 	nf, m, p := red.Dims()
 	if m == 0 || p == 0 || nf == 0 || maxDeg < 1 || sys.internalDelayCount() > 0 {
 		return nil, nil, false
@@ -1687,7 +1690,8 @@ func refitPolyFromPencil(sys, red *System, poly []*mat.Dense, maxDeg int, allowP
 	if !eig.Factorize(red.A, mat.EigenNone) {
 		return nil, nil, false
 	}
-	samples := pencilSamples(sys, eig.Values(nil), nf+1+maxDeg+refitSurplus)
+	poles := eig.Values(nil)
+	samples := pencilSamples(sys, poles, nf+1+maxDeg+refitSurplus)
 	if len(samples) < nf+2+refitSurplus {
 		return nil, nil, false
 	}
@@ -1697,7 +1701,7 @@ func refitPolyFromPencil(sys, red *System, poly []*mat.Dense, maxDeg int, allowP
 	}
 	proper := red.Copy()
 	if miss := refitRounded(proper, nil, samples, phi, psi); miss <= refitRefuted {
-		if allowProper && miss <= 1 && droppedVisible(samples, poly) {
+		if allowProper && miss <= 1 && sTermsTestable(samples, poles, terms) {
 			return proper, nil, true
 		}
 		return nil, nil, false
@@ -1838,6 +1842,99 @@ func droppedVisible(samples []pencilSample, dropped []*mat.Dense) bool {
 	}
 	return false
 }
+
+// sTermsTestable reports whether samples can refute the s-terms
+// Σ dropped[k−1]·s^k a proper reduction drops: they show at some sample
+// (droppedVisible), and so does any part of them (ownSTerms) that a
+// residue leaked from a finite pole beyond the samples cannot carry. The
+// leak dominates the terms and shows wherever they do, while an s-term of
+// the model's own, far smaller, may show at no sample: a proper refit
+// matching the samples then says nothing about it.
+func sTermsTestable(samples []pencilSample, poles []complex128, dropped []*mat.Dense) bool {
+	if len(dropped) == 0 || !droppedVisible(samples, dropped) {
+		return false
+	}
+	own := ownSTerms(samples, poles, dropped)
+	return own == nil || droppedVisible(samples, own)
+}
+
+// ownSTerms returns the part of the s-terms t_k = dropped[k−1] that a
+// residue ΔR leaked from the finite poles λ_j beyond ownSTermPoleGap times
+// every sample cannot carry: their share Σ_j ΔR_j/λ_j^(k+1) satisfies the
+// recurrence of Π_j (x − 1/λ_j), so applying it to t_k leaves own s-terms
+// and rounding. An entry left counts as own above ownSTermFloor·ε of the
+// largest sampled response and ownSTermLeakRatio times the share it
+// predicts. The first J terms, for J such poles, are not tested; with no
+// term past them every term counts as own. nil means none is left.
+func ownSTerms(samples []pencilSample, poles []complex128, dropped []*mat.Dense) []*mat.Dense {
+	var hi, scale float64
+	for _, smp := range samples {
+		hi = max(hi, cmplx.Abs(smp.s))
+		scale = max(scale, smp.scale)
+	}
+	coef := []complex128{1}
+	for _, v := range poles {
+		if cmplx.Abs(v) <= ownSTermPoleGap*hi {
+			continue
+		}
+		mu := 1 / v
+		next := make([]complex128, len(coef)+1)
+		for i, c := range coef {
+			next[i] += c
+			next[i+1] -= c * mu
+		}
+		coef = next
+	}
+	j := len(coef) - 1
+	if j >= len(dropped) {
+		j = 0
+		coef = coef[:1]
+	}
+	r, c := dropped[0].Dims()
+	floor := ownSTermFloor * eps() * scale
+	var own []*mat.Dense
+	found := false
+	for k := range dropped {
+		t := mat.NewDense(r, c, nil)
+		if k >= j {
+			for a := range r {
+				for b := range c {
+					var v complex128
+					for i, ci := range coef {
+						v += ci * complex(dropped[k-i].At(a, b), 0)
+					}
+					leak := dropped[k].At(a, b) - real(v)
+					if cmplx.Abs(v) > max(floor, ownSTermLeakRatio*math.Abs(leak)) {
+						t.Set(a, b, real(v))
+						found = true
+					}
+				}
+			}
+		}
+		own = append(own, t)
+	}
+	if !found {
+		return nil
+	}
+	return own
+}
+
+// ownSTermFloor is the rounding level, in ε of the largest sampled
+// response, below which ownSTerms drops what the leak recurrence leaves
+// (large-pole chain sweeps: proper ones need > 1e2, own terms of b tail
+// 1e-10..1e-8 < 1e6).
+const ownSTermFloor = 1e4
+
+// ownSTermLeakRatio is how many times the leak share the recurrence
+// predicts for a term what it leaves must be to count as own: the pole and
+// the terms carry the leak to a few digits only (large-pole chain sweeps:
+// proper ones need > 10, own terms of b tail 1e-10..1e-8 reach 1.2e3).
+const ownSTermLeakRatio = 100
+
+// ownSTermPoleGap is how far beyond the largest sample |s| a finite pole
+// of ownSTerms must lie to count as a leak source: one nearer has no
+// small 1/λ to tell its share from the terms'.
+const ownSTermPoleGap = 100
 
 // refitSurplus, refitRounds (B-side fits, C-side ones between for p > 1),
 // refitVisible and refitRefuted set refitFromPencil and its use: above
