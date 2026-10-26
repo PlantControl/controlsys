@@ -783,6 +783,9 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		} else if miss > refitRefuted {
 			return nil, nil, nil, errReductionRefuted
 		}
+		if reductionRefutedBelow(sys, out) {
+			return nil, nil, nil, errReductionRefuted
+		}
 	}
 	if verifyChain {
 		if q > 0 {
@@ -1408,6 +1411,12 @@ type pencilSample struct {
 // proper part MATLAB keeps does not have. While fewer than need points are
 // kept, up to pencilSampleBelow further decades under the range are tried.
 func pencilSamples(sys *System, poles []complex128, need int) []pencilSample {
+	return pencilSampleSet(sys, poles, need, false)
+}
+
+// pencilSampleSet is pencilSamples, or with below only the points of the
+// reductionRefuteBelow decades under its range.
+func pencilSampleSet(sys *System, poles []complex128, need int, below bool) []pencilSample {
 	n, m, p := sys.Dims()
 	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
 	normB, normC := denseNorm(sys.B), denseNorm(sys.C)
@@ -1488,6 +1497,12 @@ func pencilSamples(sys *System, poles []complex128, need int) []pencilSample {
 			}
 		}
 	}
+	if below {
+		for j := 1.0; j <= reductionRefuteBelow; j++ {
+			decade(k0 - j)
+		}
+		return out
+	}
 	for k := k0; k <= k1; k += step {
 		decade(k)
 	}
@@ -1496,6 +1511,42 @@ func pencilSamples(sys *System, poles []complex128, need int) []pencilSample {
 	}
 	return out
 }
+
+// reductionRefutedBelow reports whether the proper reduction red of sys
+// (no internal delays) misses the points of pencilSampleSet under the
+// range of pencilSamples by more than refitRefuted times their
+// uncertainty. There the data determine the response however large a
+// pole is: a residue that a large finite pole λ took from an own s-term
+// t·s leaves only t·s²/λ, so these points cannot accept a proper
+// reduction (refitFromPencil), but a model that misses them is not the
+// pencil's whatever its s-terms. A split whose decoupling from λ was
+// ill-conditioned misallocates a residue of many orders above the
+// response and fails here even when no point in the range is
+// determined by the data.
+func reductionRefutedBelow(sys, red *System) bool {
+	nf, m, p := red.Dims()
+	if m == 0 || p == 0 {
+		return false
+	}
+	var poles []complex128
+	if nf > 0 {
+		var eig mat.Eigen
+		if !eig.Factorize(red.A, mat.EigenNone) {
+			return false
+		}
+		poles = eig.Values(nil)
+	}
+	samples := pencilSampleSet(sys, poles, 0, true)
+	if len(samples) == 0 {
+		return false
+	}
+	_, psi, ok := resolventBases(red, samples)
+	return ok && samplesMismatch(red, nil, samples, psi) > refitRefuted
+}
+
+// reductionRefuteBelow is the number of decades under the range of
+// pencilSamples that reductionRefutedBelow checks.
+const reductionRefuteBelow = 6
 
 // pencilSampleBelow is the most decades pencilSamples goes under its range
 // while it keeps fewer than need points: at low frequency the response is
