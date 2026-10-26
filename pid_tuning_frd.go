@@ -39,7 +39,10 @@ import (
 // or stays below |L| = 1 where a lighter pair in the step could lift it
 // through. The returned design's margins count its crossings along the
 // data's resonance fits and the cubic across smooth steps too
-// (pidTuningFRDFitMargins). A certified design whose
+// (pidTuningFRDFitMargins); a design with a crossing those leave
+// unresolved, in a step the chord and the polynomials through its
+// neighbours read apart, carries the uncertified warning, nor are its
+// margins certified. A certified design whose
 // |S| the data leave above 4 where the sampled scan reads none (along a
 // fit between samples, between DC and the band, or past its top;
 // pidTuningFRDUnsampledPeak) is returned unchanged with a warning that
@@ -119,12 +122,14 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 	if err != nil || !certify {
 		return r, err
 	}
-	pidTuningFRDFitMargins(r, strict)
+	resolved := pidTuningFRDFitMargins(r, strict)
 	c := *r.Controller
 	switch {
 	case !pidTuningFRDCertified(c, chord):
 	case !pidTuningFRDCertified(c, strict):
 		r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count passed this design along the chords between samples, but a step of the data may hide a lightly damped resonance whose loop winds 1 + L round 0 or takes |L| through 1 or |S| past 4 between them, so its closed-loop stability is not certified, nor its margins and sensitivity peak there.")
+	case !resolved:
+		r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count passed this design, but a gain crossing lies in a step of the data no fit follows, where the chord and the cubic and quadratics through the neighbouring samples read its phase margin apart, so the design is not certified, nor its margins there.")
 	default:
 		if v := pidTuningFRDUnsampledPeak(strict, c); v > pidTuningMaxSensitivity {
 			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("The strict sampled Nyquist count passed this design, but the data leave its sensitivity peak |S| up to %.4g, above %d, along a fitted resonance between samples or below or above the band, so its sensitivity peak is not certified.", v, pidTuningMaxSensitivity))
@@ -218,20 +223,52 @@ func pidTuningFRDUnsampledPeak(p pidTuningPlant, c PID2) float64 {
 // fits of steps whose circle turns past a quarter turn, while a chord
 // cutting inside a circle turning less can still put a crossing's phase
 // 8° off, or miss the crossing pair a resonance lifts between samples.
+// It reports whether every crossing is read where the data resolve it: on
+// a sample, outside the samples, in a marked step, along a fit of its
+// step or the cubic's gate, in a step with a trusted fit
+// (pidTuningFRDTrusted), or where no reading of pidTuningFRDStepReading
+// falls more than pidTuningFRDMarginSlack below the achieved margin.
 // Reading is all it does; the search and so the design are unchanged.
-func pidTuningFRDFitMargins(r *PIDTuningResult, p pidTuningPlant) {
+func pidTuningFRDFitMargins(r *PIDTuningResult, p pidTuningPlant) (resolved bool) {
 	c := *r.Controller
 	q := p
 	q.unresolved = nil
 	stable, known, _ := pidTuningFRDNyquistVerdict(c, q)
 	ev := &r.Evidence
 	ws, ms := pidTuningFRDFitCrossings(p, c)
+	nfit := len(ws)
 	lw, lm := pidTuningFRDLowCrossings(p, c)
 	ws, ms = append(ws, lw...), append(ms, lm...)
+	var raw *FRD
+	var open []float64
 	for _, w := range ev.GainCrossovers {
-		if v, m, ok := pidTuningFRDSmoothCrossing(p, c, w); ok {
+		v, m, smooth, lo, hi := pidTuningFRDStepReading(p, c, w)
+		if smooth {
 			ws, ms = append(ws, v), append(ms, m)
+			continue
 		}
+		k := sort.SearchFloat64s(p.samples, w) - 1
+		if k < 0 || k+1 >= len(p.samples) || !(w > p.samples[k] && w < p.samples[k+1]) || slices.ContainsFunc([][][]pidTuningFRDMode{p.crossArcs, p.unresolved, p.arcs}, func(set [][]pidTuningFRDMode) bool { return set != nil && set[k] != nil }) {
+			continue
+		}
+		if a, b := p.samples[k], p.samples[k+1]; slices.ContainsFunc(ws[:nfit], func(x float64) bool { return x > a && x < b }) {
+			continue
+		}
+		if raw == nil {
+			raw = pidTuningFRDSampled(p)
+		}
+		if f, nf, _ := pidTuningFRDStepFits(raw, k); len(pidTuningFRDTrusted(f[:nf])) > 0 {
+			continue
+		}
+		if stable && known {
+			switch {
+			case hi <= 0:
+				lo = -hi
+			case lo < 0:
+				lo = 0
+			}
+		}
+		open = append(open, lo)
 	}
 	for i, w := range ws {
 		if slices.ContainsFunc(ev.GainCrossovers, func(x float64) bool { return math.Abs(math.Log(w/x)) <= 1e-6 }) {
@@ -244,6 +281,25 @@ func pidTuningFRDFitMargins(r *PIDTuningResult, p pidTuningPlant) {
 		ev.GainCrossovers, ev.PhaseMargins = append(ev.GainCrossovers, w), append(ev.PhaseMargins, m)
 		ev.AchievedPhaseMargin = math.Min(ev.AchievedPhaseMargin, m)
 	}
+	for _, lo := range open {
+		if !(lo >= ev.AchievedPhaseMargin-pidTuningFRDMarginSlack) {
+			return false
+		}
+	}
+	return true
+}
+
+// pidTuningFRDSampled is the strict plant p's samples as FRD data.
+func pidTuningFRDSampled(p pidTuningPlant) *FRD {
+	n := len(p.samples)
+	vals, rows := make([]complex128, n), make([][]complex128, n)
+	raw := &FRD{Omega: p.samples, Response: make([][][]complex128, n), Dt: p.dt}
+	for i, w := range p.samples {
+		vals[i] = p.at(w)
+		rows[i] = vals[i : i+1]
+		raw.Response[i] = rows[i : i+1]
+	}
+	return raw
 }
 
 // pidTuningFRDSmoothCrossing re-reads c's gain crossing w, read off the
@@ -260,31 +316,43 @@ func pidTuningFRDFitMargins(r *PIDTuningResult, p pidTuningPlant) {
 // above it, the chord's error in G alone can put the margin 5° off; the
 // cubic's is of fourth order in the step.
 func pidTuningFRDSmoothCrossing(p pidTuningPlant, c PID2, w float64) (float64, float64, bool) {
+	v, m, smooth, _, _ := pidTuningFRDStepReading(p, c, w)
+	return v, m, smooth
+}
+
+// pidTuningFRDStepReading is pidTuningFRDSmoothCrossing's re-reading of
+// c's gain crossing w, smooth its gate, with lo and hi the least and
+// greatest margin of the chord at w and, nearest w, of the cubic and
+// both quadratics across w's step, which no mark covers and G turns at most 30° over,
+// its neighbours marked or turning or not, among those crossing there,
+// as one that does not leaves no lower margin; ±Inf where the step has
+// no outer neighbours, is marked or turns further. Beside a lightly
+// damped mode the chord can read 3° high where the gate fails, as its
+// neighbour turns, while the cubic reads 2° low, as at ζ 0.01.
+func pidTuningFRDStepReading(p pidTuningPlant, c PID2, w float64) (v, pm float64, smooth bool, lo, hi float64) {
 	s := p.samples
 	k := sort.SearchFloat64s(s, w) - 1
-	if k < 0 || k+1 >= len(s) || !(w > s[k] && w < s[k+1]) {
-		return 0, 0, false
+	if k < 1 || k+2 >= len(s) || !(w > s[k] && w < s[k+1]) {
+		return 0, 0, false, math.Inf(-1), math.Inf(1)
 	}
-	smooth := func(j int) bool {
-		if j < 0 || j+1 >= len(s) {
-			return false
-		}
+	marked := func(j int) bool {
 		for _, set := range [][][]pidTuningFRDMode{p.crossArcs, p.unresolved, p.arcs, p.resonances} {
 			if set != nil && set[j] != nil {
-				return false
+				return true
 			}
 		}
-		return math.Abs(cmplx.Phase(p.at(s[j+1])/p.at(s[j]))) <= math.Pi/6
+		return false
 	}
-	if !smooth(k-1) || !smooth(k) || !smooth(k+1) {
-		return 0, 0, false
+	turns := func(j int) bool { return !(math.Abs(cmplx.Phase(p.at(s[j+1])/p.at(s[j]))) <= math.Pi/6) }
+	if marked(k) || turns(k) {
+		return 0, 0, false, math.Inf(-1), math.Inf(1)
 	}
 	var x [4]float64
 	var z [4]complex128
 	for i := range 4 {
 		g := p.at(s[k-1+i])
 		if g == 0 || !pidFiniteComplex(g) {
-			return 0, 0, false
+			return 0, 0, false, math.Inf(-1), math.Inf(1)
 		}
 		x[i], z[i] = math.Log(s[k-1+i]), cmplx.Log(g)
 		if i > 0 {
@@ -305,44 +373,70 @@ func pidTuningFRDSmoothCrossing(p pidTuningPlant, c PID2, w float64) (float64, f
 		}
 		return v
 	}
-	if !(cmplx.Abs(interp(w, 0, 2)-interp(w, 1, 3)) <= .25*cmplx.Abs(interp(w, 0, 3)-cmplx.Log(p.at(w)))) {
-		return 0, 0, false
-	}
-	g := func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 3)) }
-	l := func(w float64) complex128 { return g(w) * pidTuningFeedback(c, w) }
-	e := func(w float64) float64 { return cmplx.Abs(l(w)) - 1 }
-	const pieces = 64
-	best, found := 0., false
 	a, b := s[k], s[k+1]
-	wa, ea := a, e(a)
-	for i := 1; i <= pieces; i++ {
-		wb := a * math.Pow(b/a, float64(i)/pieces)
-		eb := e(wb)
-		if ea*eb < 0 {
-			x, y, sx := wa, wb, ea
-			for range 60 {
-				mid := math.Sqrt(x * y)
-				if v := e(mid); sx*v <= 0 {
-					y = mid
-				} else {
-					x = mid
+	cross := func(g func(float64) complex128) (float64, float64, bool) {
+		l := func(w float64) complex128 { return g(w) * pidTuningFeedback(c, w) }
+		e := func(w float64) float64 { return cmplx.Abs(l(w)) - 1 }
+		const pieces = 64
+		best, found := 0., false
+		wa, ea := a, e(a)
+		for i := 1; i <= pieces; i++ {
+			wb := a * math.Pow(b/a, float64(i)/pieces)
+			eb := e(wb)
+			if ea*eb < 0 {
+				x, y, sx := wa, wb, ea
+				for range 60 {
+					mid := math.Sqrt(x * y)
+					if v := e(mid); sx*v <= 0 {
+						y = mid
+					} else {
+						x = mid
+					}
+				}
+				if v := math.Sqrt(x * y); !found || math.Abs(math.Log(v/w)) < math.Abs(math.Log(best/w)) {
+					best, found = v, true
 				}
 			}
-			if v := math.Sqrt(x * y); !found || math.Abs(math.Log(v/w)) < math.Abs(math.Log(best/w)) {
-				best, found = v, true
-			}
+			wa, ea = wb, eb
 		}
-		wa, ea = wb, eb
+		if !found {
+			return 0, 0, false
+		}
+		pm := 180 + cmplx.Phase(l(best))*180/math.Pi
+		if pm > 180 {
+			pm -= 360
+		}
+		return best, pm, true
 	}
-	if !found {
-		return 0, 0, false
+	gate := !marked(k-1) && !marked(k+1) && !turns(k-1) && !turns(k+1) && cmplx.Abs(interp(w, 0, 2)-interp(w, 1, 3)) <= .25*cmplx.Abs(interp(w, 0, 3)-cmplx.Log(p.at(w)))
+	v, pm, found := cross(func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 3)) })
+	if gate && found {
+		return v, pm, true, pm, pm
 	}
-	pm := 180 + cmplx.Phase(l(best))*180/math.Pi
-	if pm > 180 {
-		pm -= 360
+	ref := 180 + cmplx.Phase(p.at(w)*pidTuningFeedback(c, w))*180/math.Pi
+	if ref > 180 {
+		ref -= 360
 	}
-	return best, pm, true
+	lo, hi = ref, ref
+	if found {
+		m := ref + pidTuningWrapDeg(pm-ref)
+		lo, hi = math.Min(lo, m), math.Max(hi, m)
+	}
+	for _, g := range []func(float64) complex128{func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 2)) }, func(w float64) complex128 { return cmplx.Exp(interp(w, 1, 3)) }} {
+		if _, m, ok := cross(g); ok {
+			m = ref + pidTuningWrapDeg(m-ref)
+			lo, hi = math.Min(lo, m), math.Max(hi, m)
+		}
+	}
+	return 0, 0, false, lo, hi
 }
+
+// pidTuningFRDMarginSlack is how far, in degrees, a certified design's
+// reported margin may read above its plant's.
+const pidTuningFRDMarginSlack = 1.5
+
+// pidTuningWrapDeg wraps d degrees into [−180, 180).
+func pidTuningWrapDeg(d float64) float64 { return d - 360*math.Floor((d+180)/360) }
 
 // pidTuningFRDFitCrossings returns c's gain crossings, and their margins
 // wrapped as pidTuningMargins, along every fit of p's data that follows a
@@ -373,14 +467,7 @@ func pidTuningFRDFitCrossings(p pidTuningPlant, c PID2) (crossings, margins []fl
 				continue
 			}
 			if raw == nil {
-				n := len(p.samples)
-				vals, rows := make([]complex128, n), make([][]complex128, n)
-				raw = &FRD{Omega: p.samples, Response: make([][][]complex128, n), Dt: p.dt}
-				for i, w := range p.samples {
-					vals[i] = p.at(w)
-					rows[i] = vals[i : i+1]
-					raw.Response[i] = rows[i : i+1]
-				}
+				raw = pidTuningFRDSampled(p)
 			}
 			f, nf, _ := pidTuningFRDStepFits(raw, k)
 			fits = pidTuningFRDTrusted(f[:nf])
@@ -817,7 +904,7 @@ func pidTuningFRDStrictPlant(data *FRD, unstablePoles *int) (p pidTuningPlant, c
 	p.unresolved = pidTuningFRDUnresolved(data)
 	if data.Dt == 0 {
 		p.markov, p.markovSpread = pidTuningFRDMarkov(data, p.at)
-		p.markovAnchored = p.markov != 0 && pidTuningFRDTopFlat(data, -1)
+		p.markovAnchored = p.markov != 0 && pidTuningFRDTopFlat(data, -1) && pidTuningFRDMarkovSettles(data, p.at)
 		p.topOrder, p.topAnchored = pidTuningFRDTopOrder(data, p.at)
 	}
 	return p, p.dcGain != 0 || p.lowAnchor
@@ -945,6 +1032,23 @@ func pidTuningFRDMarkov(data *FRD, at func(float64) complex128) (m, spread float
 		return 0, 0
 	}
 	return real(g2), math.Abs(real(g2 - g1))
+}
+
+// pidTuningFRDMarkovSettles reports whether jω·G of continuous sampled
+// data heads to the real axis over each quarter decade of the top half
+// decade and across it (pidTuningFRDHeadsToAxis), as an end whose
+// dynamics all lie below the band does. A zero and pole above the band,
+// whose bends in |G| nearly cancel in pidTuningFRDTopFlat, still turn
+// jω·G away from the axis as ω rises, and leave lim sG beyond the top
+// sample's: at 2.8 and 3.1 times the top, 8% further.
+func pidTuningFRDMarkovSettles(data *FRD, at func(float64) complex128) bool {
+	low, high := data.Omega[0], data.Omega[len(data.Omega)-1]
+	w1, wm := high/math.Sqrt(10), high/math.Pow(10, .25)
+	if !(w1 >= low) {
+		return false
+	}
+	h1, hm, h2 := complex(0, w1)*at(w1), complex(0, wm)*at(wm), complex(0, high)*at(high)
+	return pidTuningFRDHeadsToAxis(hm, h1) && pidTuningFRDHeadsToAxis(h2, hm) && pidTuningFRDHeadsToAxis(h2, h1)
 }
 
 // pidTuningFRDLowOrder returns n of a low end G ≈ K·(jω)^n, K real, that
