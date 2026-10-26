@@ -322,10 +322,11 @@ func pidTuningFRDSmoothCrossing(p pidTuningPlant, c PID2, w float64) (float64, f
 
 // pidTuningFRDStepReading is pidTuningFRDSmoothCrossing's re-reading of
 // c's gain crossing w, smooth its gate, with lo and hi the least and
-// greatest margin, nearest w, of the chord, the cubic and both quadratics
-// across w's step, which no mark covers and G turns at most 30° over,
-// its neighbours marked or turning or not; ±Inf where one has no
-// crossing there or the step has no outer neighbours. Beside a lightly
+// greatest margin of the chord at w and, nearest w, of the cubic and
+// both quadratics across w's step, which no mark covers and G turns at most 30° over,
+// its neighbours marked or turning or not, among those crossing there,
+// as one that does not leaves no lower margin; ±Inf where the step has
+// no outer neighbours, is marked or turns further. Beside a lightly
 // damped mode the chord can read 3° high where the gate fails, as its
 // neighbour turns, while the cubic reads 2° low, as at ζ 0.01.
 func pidTuningFRDStepReading(p pidTuningPlant, c PID2, w float64) (v, pm float64, smooth bool, lo, hi float64) {
@@ -407,22 +408,24 @@ func pidTuningFRDStepReading(p pidTuningPlant, c PID2, w float64) (v, pm float64
 		}
 		return best, pm, true
 	}
-	cubic := func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 3)) }
-	v, pm, found := cross(cubic)
-	if !found {
-		return 0, 0, false, math.Inf(-1), math.Inf(1)
+	ref := 180 + cmplx.Phase(p.at(w)*pidTuningFeedback(c, w))*180/math.Pi
+	if ref > 180 {
+		ref -= 360
 	}
-	smooth = !marked(k-1) && !marked(k+1) && !turns(k-1) && !turns(k+1) && cmplx.Abs(interp(w, 0, 2)-interp(w, 1, 3)) <= .25*cmplx.Abs(interp(w, 0, 3)-cmplx.Log(p.at(w)))
-	lo, hi = pm, pm
-	for _, g := range []func(float64) complex128{p.at, func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 2)) }, func(w float64) complex128 { return cmplx.Exp(interp(w, 1, 3)) }} {
-		_, m, ok := cross(g)
-		if !ok {
-			lo, hi = math.Inf(-1), math.Inf(1)
-			break
+	lo, hi = ref, ref
+	for _, g := range []func(float64) complex128{func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 2)) }, func(w float64) complex128 { return cmplx.Exp(interp(w, 1, 3)) }} {
+		if _, m, ok := cross(g); ok {
+			m = ref + pidTuningWrapDeg(m-ref)
+			lo, hi = math.Min(lo, m), math.Max(hi, m)
 		}
-		m = pm + pidTuningWrapDeg(m-pm)
-		lo, hi = math.Min(lo, m), math.Max(hi, m)
 	}
+	v, pm, found := cross(func(w float64) complex128 { return cmplx.Exp(interp(w, 0, 3)) })
+	if !found {
+		return 0, 0, false, lo, hi
+	}
+	m := ref + pidTuningWrapDeg(pm-ref)
+	lo, hi = math.Min(lo, m), math.Max(hi, m)
+	smooth = !marked(k-1) && !marked(k+1) && !turns(k-1) && !turns(k+1) && cmplx.Abs(interp(w, 0, 2)-interp(w, 1, 3)) <= .25*cmplx.Abs(interp(w, 0, 3)-cmplx.Log(p.at(w)))
 	if !smooth {
 		v, pm = 0, 0
 	}

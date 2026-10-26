@@ -13,9 +13,11 @@ import (
 // certified with the chord's 48.0° against the plant's 44.8° and 46.4°.
 // The cubic and quadratics through the neighbouring samples read 40.9°
 // and 45.8° there, so the step is unresolved: each design is unchanged
-// but uncertified, nor are its margins certified. On 219 and 38 the
+// but uncertified, nor are its margins certified. On 219, 38 and 520 the
 // polynomial readings stay within 1.5° below the reported margin, which
-// is within 1.5° of the plant's, and the designs stay certified.
+// is within 1.5° of the plant's, and the designs stay certified; on 520
+// the chord's |L| only touches 1 at the crossover, and a quadratic
+// misses it.
 // Oracles: companion roots and dense margin sweeps of the exact plant.
 func TestTunePIDFRDChordStepCertification(t *testing.T) {
 	for _, c := range []struct {
@@ -27,6 +29,7 @@ func TestTunePIDFRDChordStepCertification(t *testing.T) {
 		{237, PID2{Kp: 0.2756510432802599, Ki: 0.24877371414799967, Kd: 0.2568817871989368, Tf: 0.0007662945678520511}, false},
 		{219, PID2{Kp: -0.0005223280762033192, Ki: 0.00015101532366830803}, true},
 		{38, PID2{Kp: -0.00010248146531481524, Kd: -0.0010378000601871783}, true},
+		{520, PID2{Kp: 0.5103343340380928, Kd: 0.2479447133892781, Tf: 0.0002601522147131845}, true},
 	} {
 		p := pidFRDResonanceSweepCase(rand.New(rand.NewPCG(2525, c.seed)))
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, p.num, p.den, 0, p.lo, p.hi, p.n), p.num, p.den)
