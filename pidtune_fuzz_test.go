@@ -807,11 +807,13 @@ func fzPidCheckFRD(t *testing.T, s *fzSpec, sys *System, family PidtuneType, wc,
 	g := fzPidInterp(frd)
 	ev := res.Evidence
 	if p, certify := pidTuningFRDStrictPlant(frd, nil); certify {
-		// Crossings read along the data's resonance fits are not the chord's.
+		// Crossings read along the data's resonance fits, or along the cubic
+		// across a smooth step, are not the chord's.
 		fit, _ := pidTuningFRDFitCrossings(p, *res.Controller)
 		ev.GainCrossovers, ev.PhaseMargins = nil, nil
 		for i, w := range res.Evidence.GainCrossovers {
-			if !slices.ContainsFunc(fit, func(x float64) bool { return math.Abs(math.Log(w/x)) <= 1e-6 }) {
+			v, _, smooth := pidTuningFRDSmoothCrossing(p, *res.Controller, w)
+			if !slices.ContainsFunc(fit, func(x float64) bool { return math.Abs(math.Log(w/x)) <= 1e-6 }) && !(smooth && math.Abs(math.Log(w/v)) <= 1e-6) {
 				ev.GainCrossovers, ev.PhaseMargins = append(ev.GainCrossovers, w), append(ev.PhaseMargins, res.Evidence.PhaseMargins[i])
 			}
 		}
