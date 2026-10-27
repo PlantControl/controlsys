@@ -240,7 +240,9 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // chain of length k to a ring |λ| ~ ε^(−1/k) and can give the stiff finite
 // pole β = 0. The deflated block only decides which poles are finite. It
 // is taken when its QZ leaves no β = 0, it has a large pole (qzLargeRatio)
-// for each stiff singular value, and it carries every whole-pencil
+// for each singular value of E within qzLargeRatio of σ₁ (a finite pole
+// small in E the staircase took for a chain zero leaves one short, merged
+// into another), and it carries every whole-pencil
 // eigenvalue that is not large within qzRetryTol chordally. A deflated
 // pole then takes the value of the nearest whole-pencil eigenvalue within
 // 1/stiffRatioGap of it in 1/λ, since the staircase turns the null spaces
@@ -268,7 +270,7 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 	largeTol := qzInfiniteTol(qzLargeRatio, normA, normE)
 	stiff := 0
 	for _, s := range sv {
-		if s <= qzInfiniteGap*1e3*float64(len(beta))*eps()*sv[0] {
+		if s <= qzLargeRatio*sv[0] {
 			stiff++
 		}
 	}
