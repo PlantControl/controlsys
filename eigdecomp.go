@@ -153,7 +153,10 @@ func descriptorFoldInaccurate(E *mat.Dense) bool {
 // (fullRankPoles), and for a single real one splitStiffFullRank sets
 // its β to α/λ, a change of order ε·‖E‖, and puts it as an explicit
 // state in the part λ selects, so G1 and G2 (then both explicit)
-// together have exactly the poles of Poles.
+// together have exactly the poles of Poles. A stiff mode whose β is tiny but
+// nonzero is selected by its value; when the descriptor G2 that keeps it
+// fails MATLAB rank although E does not, Poles(G2) would drop it, so it too
+// goes through splitStiffFullRank at its value α/β (stiffTinyBetaPole).
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	a, e, qd, zd, nf, stiff, _, blur, _, ok := deflateInfinite(sys.A, sys.E, true)
 	ok = ok && blur == 1
@@ -198,7 +201,58 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	if n1 == 0 {
 		return modesAllInGroup2(policy, sys)
 	}
-	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+	g1, g2, err := splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+	if err != nil || sawInfinite || nf != a.RawMatrix().Rows || g2 == nil || g2.E == nil || !descriptorERankDeficient(g2.E) || descriptorERankDeficient(sys.E) {
+		return g1, g2, err
+	}
+	if lambda, tol, ok := stiffTinyBetaPole(sys.A, sys.E); ok {
+		if h1, h2, ok := splitStiffFullRank(policy, sys, s, t, q, z, recip, tol, real(lambda), isGroup1); ok && (h2.E == nil || !descriptorERankDeficient(h2.E)) {
+			return h1, h2, nil
+		}
+	}
+	return g1, g2, nil
+}
+
+// descriptorERankDeficient reports whether E fails MATLAB rank
+// (eRankDeficient).
+func descriptorERankDeficient(E *mat.Dense) bool {
+	var lu mat.LU
+	lu.Factorize(E)
+	return eRankDeficient(E, &lu)
+}
+
+// stiffTinyBetaPole returns the pole α/β that Poles reports for the QZ
+// eigenvalue of (A, E) of least |β|/|α| when no β is zero, it is real, and
+// stiffRatioGap separates its ratio from the next; tol is the geometric mean
+// of the two ratios, which finds its block in another Schur form of (A, E).
+func stiffTinyBetaPole(A, E *mat.Dense) (lambda complex128, tol float64, ok bool) {
+	n := A.RawMatrix().Rows
+	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
+	alphar, alphai, beta, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
+	if !ok || n < 2 {
+		return 0, 0, false
+	}
+	at, least, next := -1, math.Inf(1), math.Inf(1)
+	for i, b := range beta {
+		if b == 0 {
+			return 0, 0, false
+		}
+		r := math.Abs(b) / math.Hypot(alphar[i], alphai[i])
+		switch {
+		case r < least:
+			at, least, next = i, r, least
+		case r < next:
+			next = r
+		}
+	}
+	if at < 0 || alphai[at] != 0 || !(next > stiffRatioGap*least) {
+		return 0, 0, false
+	}
+	l := alphar[at] / beta[at]
+	if l == 0 || math.IsInf(l, 0) || math.IsNaN(l) {
+		return 0, 0, false
+	}
+	return complex(l, 0), math.Sqrt(least * next), true
 }
 
 // stiffFullRankPole returns the stiff pole that Poles reports for an E of
