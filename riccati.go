@@ -1146,11 +1146,12 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	return nil, d.units(gainFloor), false
 }
 
-// steppedX returns res with X one Newton step on once certifyIn
-// certifies that X with a smaller Newton step, else res. K, Eig and EᵀXE
-// are kept: refined in double-double, they are terminal (Y6BJEX am.3),
-// while the float64 X they came with, its Newton step 9.7e-9, was 1e-8
-// off the 320-bit X and the X one step on within 1e-17.
+// steppedX returns res with X one Newton step on (certifyIn) once that
+// X is certified: with its own K and EᵀXE when the certification refines
+// them in double-double and A − BK is stable, else with K, Eig and EᵀXE
+// of res (terminal, Y6BJEX am.3) when its Newton step is smaller; else
+// res. The float64 X such a refinement came with, its Newton step
+// 9.7e-9, was 1e-8 off the 320-bit X and the X one step on within 1e-17.
 func steppedX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) *RiccatiResult {
 	if !(res.step > eps()) {
 		return res
@@ -1162,7 +1163,23 @@ func steppedX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res 
 	} else {
 		c, ok = certifyIn(A, B, Q, R, crossTerm(opts), opts, res, nil, true)
 	}
-	if !ok || !(c.step < res.step) {
+	if !ok {
+		return res
+	}
+	if c.xe != nil {
+		if red != nil {
+			c.K = red.gain(c.K, nil)
+		}
+		var E *mat.Dense
+		if opts != nil {
+			E = opts.E
+		}
+		if closedLoopStable(A, B, c.K, E, c.Eig) {
+			return c
+		}
+		return res
+	}
+	if !(c.step < res.step) {
 		return res
 	}
 	r := *res
