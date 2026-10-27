@@ -242,7 +242,11 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // has a large pole (qzLargeRatio) for each stiff singular value, a finite
 // pole small in E, and it carries every whole-pencil eigenvalue that is not
 // large within qzRetryTol chordally: those QZ resolves, so the deflation
-// replaces only the large ones.
+// replaces only the large ones. The staircase turns the null spaces of E
+// by up to n·ε·σ₁/σs (σs the least stiff singular value), which moves a
+// large deflated pole λ = a/σs by up to n·ε·σ₁·‖A‖/(|λ|·σs²) relative; a
+// whole-pencil eigenvalue within that of it, nearest and not yet taken, is
+// the same pole at QZ's backward error and replaces it.
 func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
 	a, e, _, _, nf, _, _, _, _, _, ok := deflateStaircase(A, E, false, true, true, -1, 0)
 	if !ok {
@@ -273,6 +277,7 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 		return nil, false
 	}
 	used := make([]bool, nf)
+	whole := make([]bool, len(beta))
 	for i := range beta {
 		if qzInfinite(alphar[i], alphai[i], beta[i], largeTol) {
 			continue
@@ -293,7 +298,27 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 		if !(bestD <= qzRetryTol) {
 			return nil, false
 		}
-		used[best] = true
+		used[best], whole[i] = true, true
+	}
+	sigma := sv[len(sv)-1]
+	for j := range nf {
+		if !qzInfinite(far[j], fai[j], fbeta[j], largeTol) {
+			continue
+		}
+		size := cmplx.Abs(poles[j])
+		bound := float64(len(beta)) * eps() * sv[0] * normA / (size * sigma * sigma)
+		best, bestD := -1, math.Inf(1)
+		for i := range beta {
+			if whole[i] || beta[i] == 0 {
+				continue
+			}
+			if d := cmplx.Abs(complex(alphar[i]/beta[i], alphai[i]/beta[i]) - poles[j]); d < bestD {
+				best, bestD = i, d
+			}
+		}
+		if best >= 0 && bestD <= bound*size {
+			poles[j], whole[best] = complex(alphar[best]/beta[best], alphai[best]/beta[best]), true
+		}
 	}
 	return poles, true
 }
