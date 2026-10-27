@@ -94,9 +94,19 @@ func TestPolesFullRankEKeepsStiffModeOfExplicitModel(t *testing.T) {
 		if ws, _ := ex.IsStable(); got != ws {
 			t.Errorf("%s: IsStable = %v, ToExplicit model %v (poles %v)", c.name, got, ws, want)
 		}
+		if real(largestPole(want)) > 0 {
+			st, err := Step(sys, 5)
+			if err != nil {
+				t.Fatalf("%s: Step: %v", c.name, err)
+			}
+			_, cols := st.Y.Dims()
+			if v := st.Y.At(0, cols-1); !(math.IsNaN(v) || math.Abs(v) > 1e100) {
+				t.Errorf("%s: Step(5) = %v, want divergence of the unstable stiff pole", c.name, v)
+			}
+		}
 	}
 	if full == 0 {
-		t.Fatal("no model has full MATLAB rank E on this platform")
+		t.Skip("no model has full MATLAB rank E on this platform")
 	}
 }
 

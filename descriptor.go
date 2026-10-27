@@ -309,6 +309,9 @@ func fullRankPoles(A, E *mat.Dense, alphar, alphai, beta []float64) []complex128
 	}
 	ev := eig.Values(nil)
 	slices.SortStableFunc(ev, func(a, b complex128) int { return cmp.Compare(cmplx.Abs(b), cmplx.Abs(a)) })
+	if d < len(ev) && imag(ev[d-1]) != 0 && ev[d] == cmplx.Conj(ev[d-1]) {
+		return poles
+	}
 	return append(poles, ev[:d]...)
 }
 
