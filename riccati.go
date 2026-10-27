@@ -690,8 +690,9 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // and Eig from there. Either K is returned only with A − BK in the given
 // inputs stable; should that, or the problem in w, fail, the given one
 // is solved, and its X keeps Accuracy 0 only once the Newton check in w
-// certifies it, from its X or else its K (then with that X, K and Eig):
-// there Newton certified X off by 1e-3 to 0.16.
+// certifies it, from its X or else the Hewer step X₁ of its K (then with
+// X₁, its K and Eig): there Newton certified X off by 1e-3 to 0.16, and
+// the cost of K equal to X shows only that, not that K is the gain of X.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -854,7 +855,11 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 				}
 			}
 		}
-		K, err = problem.verifyRiccati(false, X, kw, eig, res.Rcnd)
+		var x1 []float64
+		if x1, err = problem.newtonCost(false, kw, X.RawMatrix().Data); err == nil {
+			copy(X.RawMatrix().Data, x1)
+			K, err = problem.acceptRiccati(false, X, eig, res.Rcnd)
+		}
 	}
 	if err != nil {
 		return nil, false
