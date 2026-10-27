@@ -106,7 +106,9 @@ func normExplicitForm(sys *System, context string) (*System, error) {
 }
 
 // requireNonsingular rejects a singular E, as MATLAB lqr, lqi, icare and
-// idare require nonsingular E.
+// idare require nonsingular E: one whose LU condition estimate reaches 1/ε
+// and that MATLAB rank finds deficient (eRankDeficient). Care and Dare
+// return a near-singular E's design only once certified (nearSingularEGate).
 func (p descriptorPolicy) requireNonsingular(context string) error {
 	if !p.isDescriptor() {
 		return nil

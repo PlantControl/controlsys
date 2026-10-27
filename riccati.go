@@ -223,8 +223,11 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // from the stable deflating subspace of the extended pencil, and Eig holds
 // the generalized eigenvalues of (A-BK, E). X is the generalized solution;
 // E'XE solves the Care of the explicit model (E⁻¹A, E⁻¹B). A singular E
-// returns ErrDescriptorSingular. Nil or NaN/Inf arguments return
-// ErrInvalidArgument.
+// (LU condition estimate at or above 1/ε and rank deficient by MATLAB rank)
+// returns ErrDescriptorSingular, as does a near-singular E (either test
+// alone) whose result is not certified (Accuracy 1) or whose K or E'XE
+// cancels in X ~ 1/σ_min(E) (nearSingularEGate). Nil or NaN/Inf arguments
+// return ErrInvalidArgument.
 //
 // As MATLAB icare, Care first balances the states by an exact power-of-two
 // diagonal scaling, so X, K and Eig do not depend on the units of x; the
@@ -720,8 +723,8 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 //
 // with the same K formula, and Eig holds the generalized eigenvalues of
 // (A-BK, E). E'XE solves the Dare of the explicit model (E⁻¹A, E⁻¹B). A
-// singular E returns ErrDescriptorSingular. Nil or NaN/Inf arguments return
-// ErrInvalidArgument.
+// singular or near-singular E is handled as in Care. Nil or NaN/Inf
+// arguments return ErrInvalidArgument.
 //
 // Dare always deflates the extended pencil, as MATLAB idare does, so A may
 // be singular or have near-zero eigenvalues. A solution with R+B'XB not
