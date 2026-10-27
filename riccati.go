@@ -852,6 +852,9 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // singular value 1.2e-6), in both its Frobenius and 1-norm (X off by
 // 1.25e-8 with 9.97e-9 in the first). With reduced inputs, under cheap
 // control, K is neither substituted nor kept from a refinement (gainOfX).
+// A descriptor Dare left with no stabilizing solution whose E is
+// ill-conditioned but nonsingular is solved once more on its explicit
+// model in extended precision (nearSingularDare).
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
