@@ -50,6 +50,10 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 	if err != nil || opts == nil || isIdentityDescriptor(opts.E) {
 		return res, err
 	}
+	if res.xe != nil {
+		res.X = res.xe
+		return res, nil
+	}
 	n, _ := res.X.Dims()
 	xe := mulDims(n, n, res.X, opts.E)
 	res.X = mulDims(n, n, opts.E.T(), xe)
