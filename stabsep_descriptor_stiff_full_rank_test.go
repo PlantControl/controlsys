@@ -170,7 +170,10 @@ func TestModsepFullRankEStiffModeKeepsPolesOfSys(t *testing.T) {
 // and where ordering swapped the stiff block, its β left the β = 0 test
 // and the mode stayed in the wrong part with a QZ value off by 10–1000×.
 // The last three are from a sweep of U·diag(σ₁, σ₂, ~3·eps(σ₁))·Vᵀ
-// models (PCG seeds 6399, 65907, 543647).
+// models (PCG seeds 6399, 65907, 543647). A case is in this class only
+// where QZ returns β = 0 for the stiff mode (stiffFullRankPole); amd64
+// rounding leaves β ~ 1e-15 for the last three, and the stiff value is
+// then that of QZ, unresolved by the coefficients.
 var stiffFullRankEWithFiniteCases = []struct {
 	name    string
 	dt      float64
@@ -208,7 +211,7 @@ func TestStabsepFullRankEStiffModeSharingPartKeepsPolesOfSys(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !matlabRankFull(t, sys.E) {
+		if _, ok := stiffFullRankPole(sys.A, sys.E); !ok || !matlabRankFull(t, sys.E) {
 			continue
 		}
 		full++
@@ -241,6 +244,6 @@ func TestStabsepFullRankEStiffModeSharingPartKeepsPolesOfSys(t *testing.T) {
 		}
 	}
 	if full == 0 {
-		t.Skip("no model has full MATLAB rank E on this platform")
+		t.Skip("no model has full MATLAB rank E with a β = 0 stiff mode on this platform")
 	}
 }
