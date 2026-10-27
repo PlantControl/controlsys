@@ -239,14 +239,16 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // re-splits by: QZ on the whole pencil (alphar, alphai, beta) smears a
 // chain of length k to |λ| ~ ε^(−1/k) and can give the stiff finite pole
 // β = 0. The deflated set is taken only when its QZ leaves no β = 0, it
-// has a large pole (qzLargeRatio) for each stiff singular value, a finite
-// pole small in E, and it carries every whole-pencil eigenvalue that is not
-// large within qzRetryTol chordally: those QZ resolves, so the deflation
-// replaces only the large ones. The staircase turns the null spaces of E
-// by up to n·ε·σ₁/σs (σs the least stiff singular value), which moves a
-// large deflated pole λ = a/σs by up to n·ε·σ₁·‖A‖/(|λ|·σs²) relative; a
-// whole-pencil eigenvalue within that of it, nearest and not yet taken, is
-// the same pole at QZ's backward error and replaces it.
+// has a large pole (qzLargeRatio) for each stiff singular value, and it
+// carries every whole-pencil eigenvalue that is not large within
+// qzRetryTol chordally: those QZ resolves. A large deflated pole within
+// leakStableTol of a whole-pencil eigenvalue takes that value, since the
+// staircase turns the null spaces of E by up to n·ε·σ₁/σs and moves it
+// further than QZ's backward error. The whole-pencil eigenvalues left over
+// must be one smear ring, their |β|/|α| within stiffRatioGap: a finite pole
+// small in E beside the chain that the staircase took for a chain zero
+// (a second small singular value of E above the stiff band) is one QZ
+// resolves apart from the ring, and the whole-pencil set is kept.
 func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
 	a, e, _, _, nf, _, _, _, _, _, ok := deflateStaircase(A, E, false, true, true, -1, 0)
 	if !ok {
@@ -300,25 +302,34 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 		}
 		used[best], whole[i] = true, true
 	}
-	sigma := sv[len(sv)-1]
+	roundTol := qzInfiniteTol(float64(len(beta))*eps(), normA, normE)
 	for j := range nf {
 		if !qzInfinite(far[j], fai[j], fbeta[j], largeTol) {
 			continue
 		}
-		size := cmplx.Abs(poles[j])
-		bound := float64(len(beta)) * eps() * sv[0] * normA / (size * sigma * sigma)
 		best, bestD := -1, math.Inf(1)
 		for i := range beta {
-			if whole[i] || beta[i] == 0 {
+			if whole[i] || qzInfinite(alphar[i], alphai[i], beta[i], roundTol) {
 				continue
 			}
 			if d := cmplx.Abs(complex(alphar[i]/beta[i], alphai[i]/beta[i]) - poles[j]); d < bestD {
 				best, bestD = i, d
 			}
 		}
-		if best >= 0 && bestD <= bound*size {
+		if best >= 0 && bestD <= leakStableTol*cmplx.Abs(poles[j]) {
 			poles[j], whole[best] = complex(alphar[best]/beta[best], alphai[best]/beta[best]), true
 		}
+	}
+	lo, hi := math.Inf(1), 0.0
+	for i := range beta {
+		if whole[i] || qzInfinite(alphar[i], alphai[i], beta[i], roundTol) {
+			continue
+		}
+		r := math.Abs(beta[i]) / math.Hypot(alphar[i], alphai[i])
+		lo, hi = min(lo, r), max(hi, r)
+	}
+	if hi > stiffRatioGap*lo {
+		return nil, false
 	}
 	return poles, true
 }
