@@ -200,7 +200,9 @@ func nonEmptyDense(m *mat.Dense) *mat.Dense {
 // poles. NaN or Inf entries in A or E return ErrInvalidArgument. When E is
 // rank deficient by MATLAB's rank tolerance, the eigenvalues from its null
 // space are infinite and not reported, as in MATLAB pole, even where a
-// perturbed pencil would place them at a large finite value. See
+// perturbed pencil would place them at a large finite value. With E of full
+// MATLAB rank every eigenvalue is a pole: a stiff one that QZ returns with
+// β = 0 is reported at its value in the explicit model of ToExplicit. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html.
 func (sys *System) Poles() ([]complex128, error) {
 	n, _, _ := sys.Dims()
