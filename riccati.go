@@ -1061,10 +1061,20 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // gainMissIn with the floor gainTol, else res refined (refined) once its
 // K is; failing both, the same with the floor gainFloor, as Dare kept
 // before. ok is false when none is, miss then the distance of res in
-// units of the tolerance with gainFloor.
+// units of the tolerance with gainFloor. A K off the gain of an X whose
+// Newton step is within eps by more than gainTol is first replaced by
+// that gain (gainSubstituted): X is then its own Newton iterate, and the
+// pencil K was off by 7.3e-6, 43 times its eps-sensitivity, with X exact
+// and its gain within 3.4e-9, inside a tolerance of 1e-5 set by the move
+// of that gain under X∘(1 + eps).
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	d := gainMissIn(A, B, R, opts, red, res)
 	if d.units(gainTol) <= 1 {
+		if d.d > gainFloor && res.x1 == nil && res.xe == nil && res.step <= eps() {
+			if r, ok := gainSubstituted(A, B, R, opts, red, res); ok {
+				return r, 0, true
+			}
+		}
 		return res, 0, true
 	}
 	c, cd, stable := refined(A, B, Q, R, opts, red, res)
@@ -1078,6 +1088,44 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		return c, 0, true
 	}
 	return nil, d.units(gainFloor), false
+}
+
+// gainSubstituted returns res with K the gain of its X (gainIn) and Eig
+// that of A − BK, once A − BK is stable.
+func gainSubstituted(A, B, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
+	K, _, ok := gainIn(A, B, R, opts, red)(res.X)
+	if !ok {
+		return nil, false
+	}
+	var E *mat.Dense
+	if opts != nil {
+		E = opts.E
+	}
+	eig := make([]complex128, len(res.Eig))
+	if !closedLoopStable(A, B, K, E, eig) {
+		return nil, false
+	}
+	c := *res
+	c.K, c.Eig = K, eig
+	return &c, true
+}
+
+// gainIn returns the gain gainMissIn measures K against: the ddGain of
+// the inputs of red when its null space of B is exact, else of the given
+// inputs.
+func gainIn(A, B, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs) func(X *mat.Dense) (*mat.Dense, float64, bool) {
+	if red != nil && red.exact {
+		return func(X *mat.Dense) (*mat.Dense, float64, bool) {
+			kw, cond, ok := ddGain(A, red.bw, red.rw, red.sw, X)
+			if !ok {
+				return nil, 0, false
+			}
+			return red.gain(kw, nil), cond, true
+		}
+	}
+	return func(X *mat.Dense) (*mat.Dense, float64, bool) {
+		return ddGain(A, B, R, crossTerm(opts), X)
+	}
 }
 
 // gainMissIn returns the gainMiss of res with reduced inputs red, else
@@ -1411,18 +1459,7 @@ const (
 // equals X there, no Newton or Hewer step sees it.
 func (red *reducedInputs) gainMiss(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) gainDist {
 	n, _ := A.Dims()
-	if !red.exact {
-		return gainMissOf(n, res, func(X *mat.Dense) (*mat.Dense, float64, bool) {
-			return ddGain(A, B, R, crossTerm(opts), X)
-		})
-	}
-	return gainMissOf(n, res, func(X *mat.Dense) (*mat.Dense, float64, bool) {
-		kw, cond, ok := ddGain(A, red.bw, red.rw, red.sw, X)
-		if !ok {
-			return nil, 0, false
-		}
-		return red.gain(kw, nil), cond, true
-	})
+	return gainMissOf(n, res, gainIn(A, B, R, opts, red))
 }
 
 // crossTerm returns the S of opts, nil for none.
