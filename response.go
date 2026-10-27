@@ -2081,7 +2081,10 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // Initial returns the free response from x0 with zero delay-line history.
 // Output delays, including the output share of Delay, delay it; see Simulate.
 // As in MATLAB, a descriptor model with singular E rejects a nonzero x0 with
-// ErrDescriptorInitialState.
+// ErrDescriptorInitialState. A delay-free continuous descriptor whose
+// full-rank E is too ill-conditioned for E⁻¹A (as in Step) follows the
+// pencil (A, E): the response is C·x0 plus the step response of the
+// input A·x0 (x − x0 starts at rest).
 // Continuous models without internal delays, or whose internal delays share
 // one length (within the chain budget, see Step), are sampled exactly; other
 // internal-delay models use the approximate ZOH discretization of the delay
@@ -2101,6 +2104,13 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	}
 	if x0 == nil {
 		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrInvalidArgument)
+	}
+	if n, _, _ := sys.Dims(); x0.Len() == n && foldInaccurateContinuous(sys) {
+		resp, err := stiffDescriptorInitial(sys, x0, tFinal)
+		if err != nil {
+			return nil, fmt.Errorf("Initial: %w", err)
+		}
+		return resp, nil
 	}
 	sim, simX0, reduced, err := sys.timeResponseForm(x0)
 	if err != nil {
@@ -2150,6 +2160,65 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	}
 
 	return plan.response(resp.Y), nil
+}
+
+// initialStateInput returns sys with the input column A·x0 and a zero D
+// column appended to the inputs (replacing them unless keepInputs), and
+// y0 = C·x0. z = x − x0 solves E·ż = A·z + B·u + A·x0 with z(0) = 0, so the
+// zero-state response with that input held at one, plus y0, is the
+// response from x0. The model stays a descriptor, so the zero-state
+// response keeps the pencil route of foldInaccurateParts, whose parts
+// carry x0 through their own transformations of B.
+func initialStateInput(sys *System, x0 *mat.VecDense, keepInputs bool) (*System, *mat.VecDense) {
+	n, m, p := sys.Dims()
+	k := 0
+	if keepInputs {
+		k = m
+	}
+	out := sys.Copy()
+	out.B, out.D = newDense(n, k+1), newDense(p, k+1)
+	if k > 0 {
+		out.B.Slice(0, n, 0, k).(*mat.Dense).Copy(sys.B)
+		out.D.Slice(0, p, 0, k).(*mat.Dense).Copy(sys.D)
+	}
+	var ax mat.VecDense
+	ax.MulVec(sys.A, x0)
+	out.B.SetCol(k, ax.RawVector().Data)
+	out.InputName = nil
+	if keepInputs && sys.InputName != nil {
+		out.InputName = append(copyStringSlice(sys.InputName), "")
+	}
+	y0 := mat.NewVecDense(p, nil)
+	y0.MulVec(sys.C, x0)
+	return out, y0
+}
+
+// addColumnOffset adds y0 to every column of Y.
+func addColumnOffset(Y *mat.Dense, y0 *mat.VecDense) {
+	raw := Y.RawMatrix()
+	for i := range raw.Rows {
+		v := y0.AtVec(i)
+		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		for j := range row {
+			row[j] += v
+		}
+	}
+}
+
+// stiffDescriptorInitial is Initial of a continuous descriptor with
+// foldInaccurateParts: the step response of initialStateInput plus C·x0.
+func stiffDescriptorInitial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
+	free, y0 := initialStateInput(sys, x0, false)
+	plan, err := prepareAutoTimeResponse(free, tFinal, 0)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := plan.allInputResponse(stepResponse)
+	if err != nil {
+		return nil, err
+	}
+	addColumnOffset(resp.Y, y0)
+	return resp, nil
 }
 
 // zeroInputModel returns sys with one zero input standing in for m = 0, since
@@ -2259,8 +2328,9 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 
 // Lsim simulates the response to u held constant between samples (ZOH).
 // Descriptor models are handled as in Step; with singular E a nonzero x0
-// returns ErrDescriptorInitialState, as in MATLAB. x0 with Delay follows
-// Simulate.
+// returns ErrDescriptorInitialState, as in MATLAB, and a nonzero x0 of a
+// model Step simulates by the pencil adds its free response as Initial
+// does. x0 with Delay follows Simulate.
 // Continuous models with internal delays of one common length are sampled
 // exactly within the chain budget (see Step); other internal-delay models use
 // the approximate ZOH discretization of the delay channels, as MATLAB does.
@@ -2276,9 +2346,15 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		return nil, fmt.Errorf("Lsim: model has no outputs: %w", ErrDimensionMismatch)
 	}
 	var err error
-	stiff := false
-	if x0 == nil || allZeroVec(x0) {
-		stiff = foldInaccurateContinuous(sys)
+	var y0 *mat.VecDense
+	stiff := foldInaccurateContinuous(sys)
+	if n, m, _ := sys.Dims(); stiff && x0 != nil && x0.Len() == n && !allZeroVec(x0) {
+		if uFree, ok := appendUnitInput(u, len(t), m); ok {
+			sys, y0 = initialStateInput(sys, x0, true)
+			u, x0 = uFree, nil
+		} else {
+			stiff = false
+		}
 	}
 	if stiff {
 		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
@@ -2304,6 +2380,9 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 			return nil, fmt.Errorf("Lsim: %w", err)
 		}
 		if ok {
+			if y0 != nil {
+				addColumnOffset(Y, y0)
+			}
 			return plan.response(Y), nil
 		}
 	}
@@ -2323,6 +2402,34 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		}
 		resp.Y.Add(resp.Y, free)
 	}
+	if y0 != nil && resp.Y != nil {
+		addColumnOffset(resp.Y, y0)
+	}
 
 	return plan.response(resp.Y), nil
+}
+
+// appendUnitInput returns the steps×m input u with a column of ones
+// appended; ok is false when u is not steps×m (an empty or nil u for m = 0).
+func appendUnitInput(u *mat.Dense, steps, m int) (*mat.Dense, bool) {
+	if steps < 2 {
+		return nil, false
+	}
+	if m == 0 {
+		if u != nil && !u.IsEmpty() {
+			return nil, false
+		}
+	} else if u == nil || u.IsEmpty() {
+		return nil, false
+	} else if r, c := u.Dims(); r != steps || c != m {
+		return nil, false
+	}
+	out := mat.NewDense(steps, m+1, nil)
+	if m > 0 {
+		out.Slice(0, steps, 0, m).(*mat.Dense).Copy(u)
+	}
+	for k := range steps {
+		out.Set(k, m, 1)
+	}
+	return out, true
 }
