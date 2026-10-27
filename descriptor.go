@@ -333,16 +333,15 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 		}
 	}
 	var ring complex128
-	lo, hi := math.Inf(1), 0.0
+	var left []complex128
 	for i := range beta {
 		if whole[i] || qzInfinite(alphar[i], alphai[i], beta[i], roundTol) {
 			continue
 		}
 		ring += recip(i)
-		r := cmplx.Abs(recip(i))
-		lo, hi = min(lo, r), max(hi, r)
+		left = append(left, complex(alphar[i]/beta[i], alphai[i]/beta[i]))
 	}
-	if hi > stiffRatioGap*lo || drift > cmplx.Abs(ring)+leakStableTol*size {
+	if drift > cmplx.Abs(ring)+leakStableTol*size || stableUnderJitter(A, E, left) {
 		return nil, false
 	}
 	for j, i := range match {
@@ -351,6 +350,38 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 		}
 	}
 	return poles, true
+}
+
+// stableUnderJitter reports whether one of the whole-pencil eigenvalues
+// eig of (A, E) comes back to leakStableTol from each of leakDraws copies
+// of A and E with entries scaled by 1 + δ, |δ| ≤ 4ε (jitterCopy): a finite
+// pole QZ resolves, where smear of an infinite chain moves at first order.
+func stableUnderJitter(A, E *mat.Dense, eig []complex128) bool {
+	if len(eig) == 0 {
+		return false
+	}
+	n, _ := A.Dims()
+	stable := make([]bool, len(eig))
+	for i := range stable {
+		stable[i] = true
+	}
+	rng := rand.New(rand.NewPCG(3, 5))
+	for range leakDraws {
+		a, e := jitterCopy(A, rng), jitterCopy(E, rng)
+		ar, er := a.RawMatrix(), e.RawMatrix()
+		alphar, alphai, beta, ok := qzEigenvalues(n, ar.Data, ar.Stride, er.Data, er.Stride)
+		if !ok {
+			return true
+		}
+		for k, w := range eig {
+			found := false
+			for i := range beta {
+				found = found || beta[i] != 0 && cmplx.Abs(complex(alphar[i]/beta[i], alphai[i]/beta[i])-w) <= leakStableTol*cmplx.Abs(w)
+			}
+			stable[k] = stable[k] && found
+		}
+	}
+	return slices.Contains(stable, true)
 }
 
 // largeRetained reports whether an eigenvalue that infTol keeps is large,

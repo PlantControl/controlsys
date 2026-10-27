@@ -686,19 +686,8 @@ func leakedZeros(A, E *mat.Dense, ad, ed []float64, level, k, cnt int) bool {
 		return true
 	}
 	rng := rand.New(rand.NewPCG(3, 5))
-	jitter := func(m *mat.Dense) *mat.Dense {
-		c := mat.DenseCopyOf(m)
-		raw := c.RawMatrix()
-		for i := range raw.Rows {
-			row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
-			for j := range row {
-				row[j] *= 1 + 4*eps()*(2*rng.Float64()-1)
-			}
-		}
-		return c
-	}
 	for range leakDraws {
-		_, _, _, _, kc, _, _, _, _, got, ok := deflateStaircase(jitter(A), jitter(E), false, false, false, level, cnt)
+		_, _, _, _, kc, _, _, _, _, got, ok := deflateStaircase(jitterCopy(A, rng), jitterCopy(E, rng), false, false, false, level, cnt)
 		if !ok || kc != k || got == nil {
 			return true
 		}
@@ -713,6 +702,20 @@ func leakedZeros(A, E *mat.Dense, ad, ed []float64, level, k, cnt int) bool {
 		}
 	}
 	return false
+}
+
+// jitterCopy returns m with each entry scaled by 1 + δ, δ uniform in
+// [−4ε, 4ε] from rng.
+func jitterCopy(m *mat.Dense, rng *rand.Rand) *mat.Dense {
+	c := mat.DenseCopyOf(m)
+	raw := c.RawMatrix()
+	for i := range raw.Rows {
+		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		for j := range row {
+			row[j] *= 1 + 4*eps()*(2*rng.Float64()-1)
+		}
+	}
+	return c
 }
 
 // nearInfiniteEigs returns the cnt generalized eigenvalues of the leading
@@ -742,7 +745,7 @@ func nearInfiniteEigs(ad, ed []float64, n, k, cnt int) (eig []complex128, ok boo
 	return eig, true
 }
 
-// leakDraws and leakStableTol set leakedZeros. Over the package tests and
+// leakDraws and leakStableTol set leakedZeros and stableUnderJitter. Over the package tests and
 // 3000 chains beside a pole small in E (cond(U), cond(V) up to 1e4), the
 // eigenvalues of finite poles moved by at most 5.6e-6 relative, those of
 // leaked rounding by at least 2.9e-2.
