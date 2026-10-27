@@ -183,6 +183,9 @@ type RiccatiResult struct {
 	// the Newton step of EᵀXE of the certified X.
 	xe     *mat.Dense
 	xeStep float64
+	// xeX is ‖X − X_dd‖/‖X‖ for the double-double iterate X_dd whose K
+	// and EᵀXE refineDescriptorDare returned in xe.
+	xeX float64
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -826,13 +829,22 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // A − BK stable (refined). Of an X whose Newton step is within eps, a K
 // off its double-double gain by more than 1e-6 is replaced by that gain
 // (A − BK stable), X being its own Newton iterate: the pencil K was off
-// by 7.3e-6 with X exact and its gain within 3.4e-9.
+// by 7.3e-6 with X exact and its gain within 3.4e-9. K and EᵀXE that a
+// descriptor refinement in double-double formed (refineDescriptorDare)
+// are kept: the gain of the float64 X lost cond(K)·eps ≈ 1e-5 against
+// them. Their X keeps Accuracy 0 only within newtonTol of the
+// double-double iterate they came from (3e-8 off it with E's smallest
+// singular value 1.2e-6).
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
 	res, err := dareInputs(A, B, Q, R, opts)
-	return nearSingularEGate("Dare", false, A, B, R, opts, res, err)
+	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
+	if err == nil && res.Accuracy == 0 && res.xe != nil && res.xeX > newtonTol {
+		res.Accuracy = 1
+	}
+	return res, err
 }
 
 // dareInputs is Dare after its argument check.
@@ -1080,11 +1092,16 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // that gain (gainSubstituted): X is then its own Newton iterate, and the
 // pencil K was off by 7.3e-6, 43 times its eps-sensitivity, with X exact
 // and its gain within 3.4e-9, inside a tolerance of 1e-5 set by the move
-// of that gain under X∘(1 + eps).
+// of that gain under X∘(1 + eps). A K refined in double-double (res.xe)
+// is returned as it is: measured against the gain of the rounded X it
+// was off by 7.7e-6 while within 1e-17 of the 320-bit gain.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
+	if res.xe != nil {
+		return res, 0, true
+	}
 	d := gainMissIn(A, B, R, opts, red, res)
 	if d.units(gainTol) <= 1 {
-		if d.d > gainFloor && res.x1 == nil && res.xe == nil && res.step <= eps() {
+		if d.d > gainFloor && res.x1 == nil && res.step <= eps() {
 			if r, ok := gainSubstituted(A, B, R, opts, red, res); ok {
 				return r, 0, true
 			}
@@ -2712,7 +2729,7 @@ func explicitUncertified(X, E *mat.Dense) bool {
 // more: it is relative to ‖X‖ ~ 1/σ_min(E), and K sees X in E's small
 // directions (Lqr K off by 9.2e-7, X by 1.7e-9).
 func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.Dense, xData, x1 []float64, eig []complex128) bool {
-	problem.xe, problem.xeStep = nil, 0
+	problem.xe, problem.xeStep, problem.xeX = nil, 0, 0
 	if problem.E == nil {
 		return true
 	}
@@ -2989,6 +3006,10 @@ func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float6
 			cancelRatio(norm(kr, false), norm(nr, false)))
 		kd = kn
 		if step <= newtonRefineTol {
+			for i, v := range xData {
+				y[i] = xH[i] - v + xL[i]
+			}
+			problem.xeX = cancelRatio(norm(y, true), norm(xH, true))
 			symmetrize(eH, n, n)
 			copy(K.RawMatrix().Data[:m*n], nr)
 			problem.closedLoopEig(eig)
