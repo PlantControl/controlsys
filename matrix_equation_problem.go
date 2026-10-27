@@ -45,6 +45,9 @@ type riccatiProblem struct {
 	// certified, and certX1 (Dare, step above eps) the iterate it reached.
 	certStep float64
 	certX1   []float64
+	// xe is EᵀXE of the X verifyRiccati last certified when
+	// refineDescriptorGain formed it, else nil.
+	xe []float64
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -290,6 +293,18 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 			}
 			res.x1 = mat.NewDense(n, n, x1)
 			problem.certX1 = nil
+		}
+		if xe := problem.xe; xe != nil {
+			n, t := problem.n, problem.t
+			if t != nil {
+				for i := range n {
+					for j := range n {
+						xe[i*n+j] *= t[i] * t[j]
+					}
+				}
+			}
+			res.xe = mat.NewDense(n, n, xe)
+			problem.xe = nil
 		}
 	} else if problem.poor != nil {
 		res.step = problem.poor.step
