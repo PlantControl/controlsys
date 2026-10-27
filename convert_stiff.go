@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
@@ -53,6 +54,24 @@ func splitModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf, root bool) (*mat
 		}
 		return leaf(a, b, dt, false)
 	}
+	slowMode := func(rho float64) func(complex128) bool {
+		return func(l complex128) bool { return cmplx.Abs(l) < qzLargeRatio*rho }
+	}
+	if !upperQuasiTriangular(a) {
+		var eig mat.Eigen
+		if !eig.Factorize(a, mat.EigenNone) {
+			return slowLeaf()
+		}
+		vals := eig.Values(nil)
+		rho := 0.0
+		for _, l := range vals {
+			rho = math.Max(rho, cmplx.Abs(l))
+		}
+		if !(rho*dt*qzLargeRatio >= 1) || slices.ContainsFunc(vals, slowMode(rho)) {
+			return slowLeaf()
+		}
+		return leaf(a, b, dt, true)
+	}
 	t, z, ok := realSchur(a)
 	if !ok {
 		return slowLeaf()
@@ -64,15 +83,12 @@ func splitModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf, root bool) (*mat
 	if !(rho*dt*qzLargeRatio >= 1) {
 		return slowLeaf()
 	}
-	n1, err := orderSchurGroupFirst(t, z, n, func(l complex128) bool { return cmplx.Abs(l) < qzLargeRatio*rho })
+	n1, err := orderSchurGroupFirst(t, z, n, slowMode(rho))
 	if err != nil {
 		return slowLeaf()
 	}
 	if n1 == 0 {
 		return leaf(a, b, dt, true)
-	}
-	if !upperQuasiTriangular(a) {
-		return slowLeaf()
 	}
 	x, err := separateSchurBlocks(t, n, n1, "stiff hold")
 	if err != nil {
