@@ -37,7 +37,10 @@ type LqgResult struct {
 	// Accuracy is the larger RiccatiResult.Accuracy of Xc and Xf: 1 when
 	// no Newton step certifies one of them (MATLAB lqg warns and returns
 	// the controller), so the controller may be inaccurate and its closed
-	// loop near the stability boundary only rounded to stable.
+	// loop near the stability boundary only rounded to stable. With
+	// Current it is also 1 when eps perturbations of the data can move Kw
+	// beyond 1e-8, or Kw of an ill-conditioned E is not confirmed in
+	// extended precision.
 	Accuracy int
 
 	ki, kw, mx, mw *mat.Dense
@@ -93,6 +96,9 @@ func (r *LqgResult) Mw() (mw *mat.Dense, ok bool) { return r.mw, r.mw != nil }
 // error covariance. Mw and Kw act on w, so Mw = E·M̄w and Kw = K̄w·E⁻¹ for
 // the explicit-model gains M̄w, K̄w, and L is Kalman's descriptor gain (E
 // times the explicit gain). The controller keeps E: its descriptor is blkdiag(E, I).
+// Where E is ill-conditioned, ‖X‖ ~ 1/σ_min(E)² and Ba'X Ba cancels in
+// float64, so Kw = (R + B̄'YB̄)⁻¹B̄'Y E⁻¹ is formed in extended precision
+// from Y = E'XE of the explicit model (B̄ = E⁻¹Ba).
 //
 // Plants without inputs, outputs or states are rejected with
 // ErrDimensionMismatch, singular E with ErrDescriptorSingular and plants
