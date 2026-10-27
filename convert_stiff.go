@@ -21,9 +21,14 @@ type holdLeaf func(a, b *mat.Dense, dt float64, fast bool) (ad *mat.Dense, gamma
 // is discretized by leaf. Ad and the integrals are returned in the
 // coordinates of A. One exponential of A·dt with ‖A·dt‖ ≫ 1 rounds every
 // mode to ε·‖A·dt‖ in its squarings, which swamps the slow ones beside a
-// stiff one (|λ|·dt ~ 1e13: 1e-3). ok is false when ‖A‖₁·dt or ρ(A)·dt is
+// stiff one (|λ|·dt ~ 1e13: 1e-3). The split needs A upper
+// quasi-triangular (the parts of a descriptor, the E⁻¹A of a diagonal E
+// and triangular A), whose Schur form is A itself and keeps the slow
+// eigenvalues exactly; a dense A has them only to ε·‖A‖, as the single
+// exponential does, and keeps it unless all its modes are stiff (one fast
+// cluster, leaf without a split). ok is false when ‖A‖₁·dt or ρ(A)·dt is
 // below 1/qzLargeRatio, so callers keep their single exponential, or when
-// the split fails.
+// no stiff leaf applies.
 func stiffModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf) (ad *mat.Dense, gammas []*mat.Dense, ok bool) {
 	n, _ := a.Dims()
 	if n == 0 || !(mat.Norm(a, 1)*dt*qzLargeRatio >= 1) {
@@ -65,6 +70,9 @@ func splitModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf, root bool) (*mat
 	}
 	if n1 == 0 {
 		return leaf(a, b, dt, true)
+	}
+	if !upperQuasiTriangular(a) {
+		return slowLeaf()
 	}
 	x, err := separateSchurBlocks(t, n, n1, "stiff hold")
 	if err != nil {
@@ -117,6 +125,33 @@ func splitModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf, root bool) (*mat
 		gammas[k] = g
 	}
 	return ad, gammas, true
+}
+
+// upperQuasiTriangular reports that a is in real Schur shape: zero below
+// its subdiagonal, with subdiagonal nonzeros only in non-adjacent 2×2
+// diagonal blocks of complex eigenvalues.
+func upperQuasiTriangular(a *mat.Dense) bool {
+	n, _ := a.Dims()
+	r := a.RawMatrix()
+	at := func(i, j int) float64 { return r.Data[i*r.Stride+j] }
+	for i := 1; i < n; i++ {
+		for j := 0; j < i-1; j++ {
+			if at(i, j) != 0 {
+				return false
+			}
+		}
+		if at(i, i-1) == 0 {
+			continue
+		}
+		if i >= 2 && at(i-1, i-2) != 0 {
+			return false
+		}
+		h := (at(i-1, i-1) - at(i, i)) / 2
+		if !(h*h+at(i-1, i)*at(i, i-1) < 0) {
+			return false
+		}
+	}
+	return true
 }
 
 // realSchur returns the real Schur form a = z·t·zᵀ, row-major.
