@@ -1071,7 +1071,7 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 		return nil, ill
 	}
 	var svd mat.SVD
-	if !svd.Factorize(B, mat.SVDThinU|mat.SVDFullV) {
+	if !svd.Factorize(B, mat.SVDFullV) {
 		return nil, ill
 	}
 	sv := svd.Values(nil)
@@ -1103,9 +1103,7 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 		return red, ill
 	}
 	red.b = mat.DenseCopyOf(red.bw.Slice(0, n, 0, r))
-	var u mat.Dense
-	svd.UTo(&u)
-	if nullExact(B, &u, red.v, sv, r) {
+	if nullExact(B, red.bw, red.v, sv, r) {
 		bwr := red.bw.RawMatrix()
 		for i := range n {
 			clear(bwr.Data[i*bwr.Stride+r : i*bwr.Stride+m])
@@ -1145,12 +1143,12 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 
 // nullExact reports whether columns r.. of V span a null space of B
 // exactly, as with duplicated or m > n inputs: one step refining each
-// against B's leading r singular triplets brings B·v, formed in
-// double-double, to the rounding eps²·σ₁ of the product, where a B with
-// σ_min ≈ eps·σ₁ keeps σ_min there.
-func nullExact(B, U, V *mat.Dense, sv []float64, r int) bool {
+// against B's leading r singular triplets (BV the columns σᵢuᵢ) brings
+// B·v, formed in double-double, to the rounding eps²·σ₁ of the product,
+// where a B with σ_min ≈ eps·σ₁ keeps σ_min there.
+func nullExact(B, BV, V *mat.Dense, sv []float64, r int) bool {
 	n, m := B.Dims()
-	bRaw, vRaw, uRaw := B.RawMatrix(), V.RawMatrix(), U.RawMatrix()
+	bRaw, vRaw, uRaw := B.RawMatrix(), V.RawMatrix(), BV.RawMatrix()
 	hi, lo := make([]float64, n), make([]float64, n)
 	c, d := make([]float64, r), make([]float64, m)
 	tol := 64 * float64(n*m) * eps() * eps() * sv[0]
@@ -1166,7 +1164,7 @@ func nullExact(B, U, V *mat.Dense, sv []float64, r int) bool {
 			for i := range n {
 				c[k] += uRaw.Data[i*uRaw.Stride+k] * hi[i]
 			}
-			c[k] /= sv[k]
+			c[k] /= sv[k] * sv[k]
 		}
 		for i := range m {
 			d[i] = 0

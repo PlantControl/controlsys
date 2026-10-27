@@ -83,7 +83,7 @@ func TestNullExactSeparatesExactFromRoundingNullSpace(t *testing.T) {
 	for _, c := range cases {
 		n, m := c.b.Dims()
 		var svd mat.SVD
-		if !svd.Factorize(c.b, mat.SVDThinU|mat.SVDFullV) {
+		if !svd.Factorize(c.b, mat.SVDFullV) {
 			t.Fatalf("%s: SVD failed", c.name)
 		}
 		sv := svd.Values(nil)
@@ -96,10 +96,10 @@ func TestNullExactSeparatesExactFromRoundingNullSpace(t *testing.T) {
 		if r >= m {
 			t.Fatalf("%s: rank %d, want < %d", c.name, r, m)
 		}
-		var u, v mat.Dense
-		svd.UTo(&u)
+		var v, bv mat.Dense
 		svd.VTo(&v)
-		if got := nullExact(c.b, &u, &v, sv, r); got != c.want {
+		bv.Mul(c.b, &v)
+		if got := nullExact(c.b, &bv, &v, sv, r); got != c.want {
 			t.Errorf("%s: nullExact = %v, want %v", c.name, got, c.want)
 		}
 	}
