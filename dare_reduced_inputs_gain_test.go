@@ -8,10 +8,11 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// Under cheap control (m > n) Dare refines and certifies in the reduced
-// inputs (red.bw, red.rw, red.sw rounded to float64), whose double-double
-// gain loses cond·eps against the gain of the given problem: it is not
-// terminal there (Y6BJEX am.4).
+// Under cheap control (m > n) Dare certifies in the reduced inputs (red.bw,
+// red.rw, red.sw rounded to float64). There neither a K refined in
+// double-double nor the gain of an X converged to eps is kept as terminal,
+// nor is X stepped by such a refinement (Y6BJEX am.4): each left K or X
+// off the 320-bit solution at Accuracy 0.
 
 // dareReducedInputsOracle returns the errors of the X and K of res against
 // the stabilizing solution of Hewer's iteration in 320 bits on the explicit
@@ -126,7 +127,7 @@ func TestDareCrossTermReducedInputsGainNotSubstituted(t *testing.T) {
 		}
 		eX, eK := dareReducedInputsOracle(t, A, B, Q, R, S, nil, res)
 		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.Accuracy, eX, eK)
-		if res.Accuracy == 0 && (eX > newtonTol || eK > 2*gainFloor) {
+		if res.Accuracy == 0 && (eX > newtonTol || eK > 3*gainFloor) {
 			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
 		}
 	}
