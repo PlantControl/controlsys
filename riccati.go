@@ -771,7 +771,9 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // inputs: R + BᵀXB loses their R₂₂, and with it a cost xᵀS₂R₂₂⁻¹S₂ᵀx
 // comparable to Q, so Newton certified a wrong X ≈ Q. Its X is returned
 // once the same Newton check certifies it in the m inputs w, with K
-// and Eig from there. Either K is returned only with A − BK in the given
+// and Eig from there, BV₂ = 0 there when B's null space is exact
+// (duplicated inputs, or m > n): the rounding of V in BV₂ ≈ 1e-17 moved
+// their X by 1e-5. Either K is returned only with A − BK in the given
 // inputs stable; should that, or the problem in w, fail, the given one
 // is solved, and its X keeps Accuracy 0 only once the Newton check in w
 // certifies it, from its X or else the Hewer step X₁ of its K (then with
@@ -904,7 +906,9 @@ func closedLoopStable(A, B, K, E *mat.Dense, eig []complex128) bool {
 // whose R + (BV)ᵀX(BV) keeps R₂₂ on its diagonal, with the gain and
 // Eig of A − BK there: BV₂ is zero only to rounding, and under cheap
 // control the K₂ ≈ R₂₂⁻¹S₂ᵀ it multiplies can move X, or destabilize
-// A − BK, well beyond the rounding of B.
+// A − BK, well beyond the rounding of B. With an exact null space of B
+// (nullExact) BV₂ is 0 there: its rounding, that of V, moved the exact
+// X of duplicated inputs by 1e-5.
 func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, k0 *mat.Dense) (*RiccatiResult, bool) {
 	var o RiccatiOpts
 	if opts != nil {
@@ -1067,7 +1071,7 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 		return nil, ill
 	}
 	var svd mat.SVD
-	if !svd.Factorize(B, mat.SVDFullV) {
+	if !svd.Factorize(B, mat.SVDThinU|mat.SVDFullV) {
 		return nil, ill
 	}
 	sv := svd.Values(nil)
@@ -1099,6 +1103,14 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 		return red, ill
 	}
 	red.b = mat.DenseCopyOf(red.bw.Slice(0, n, 0, r))
+	var u mat.Dense
+	svd.UTo(&u)
+	if nullExact(B, &u, red.v, sv, r) {
+		bwr := red.bw.RawMatrix()
+		for i := range n {
+			clear(bwr.Data[i*bwr.Stride+r : i*bwr.Stride+m])
+		}
+	}
 	r22 := mat.NewSymDense(m-r, nil)
 	for i := range m - r {
 		for j := i; j < m-r; j++ {
@@ -1129,6 +1141,52 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 	red.q.Sub(Q, &t)
 	symmetrize(red.q.RawMatrix().Data, n, n)
 	return red, ill
+}
+
+// nullExact reports whether columns r.. of V span a null space of B
+// exactly, as with duplicated or m > n inputs: one step refining each
+// against B's leading r singular triplets brings B·v, formed in
+// double-double, to the rounding eps²·σ₁ of the product, where a B with
+// σ_min ≈ eps·σ₁ keeps σ_min there.
+func nullExact(B, U, V *mat.Dense, sv []float64, r int) bool {
+	n, m := B.Dims()
+	bRaw, vRaw, uRaw := B.RawMatrix(), V.RawMatrix(), U.RawMatrix()
+	hi, lo := make([]float64, n), make([]float64, n)
+	c, d := make([]float64, r), make([]float64, m)
+	tol := 64 * float64(n*m) * eps() * eps() * sv[0]
+	for j := r; j < m; j++ {
+		clear(hi)
+		clear(lo)
+		ddMulAcc(n, 1, m, 1, bRaw.Data, bRaw.Stride, 1, vRaw.Data[j:], vRaw.Stride, 1, hi, lo, 1)
+		for i := range n {
+			hi[i] += lo[i]
+		}
+		for k := range r {
+			c[k] = 0
+			for i := range n {
+				c[k] += uRaw.Data[i*uRaw.Stride+k] * hi[i]
+			}
+			c[k] /= sv[k]
+		}
+		for i := range m {
+			d[i] = 0
+			for k := range r {
+				d[i] += vRaw.Data[i*vRaw.Stride+k] * c[k]
+			}
+		}
+		res := 0.0
+		for i := range n {
+			s := hi[i]
+			for k := range m {
+				s -= bRaw.Data[i*bRaw.Stride+k] * d[k]
+			}
+			res = math.Hypot(res, s)
+		}
+		if !(res <= tol) {
+			return false
+		}
+	}
+	return true
 }
 
 // gain returns the gain VK of the inputs u from the gain K of the inputs
