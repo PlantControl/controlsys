@@ -248,10 +248,11 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // staircase turns the null spaces of E by up to n·ε·σ₁/σs and lets a pole
 // absorb the trace of the smear (Σ 1/λ is invariant), so the summed moves
 // must stay within the trace of the eigenvalues left over and
-// leakStableTol. None of those may come back to jitterResolvedTol in most
-// jittered copies (jitteredEigenvalues), as a pole QZ resolves does; smear
-// moves at first order. A matched pole takes the QZ value when that is
-// resolved so; one QZ merged with the smear keeps the deflated value.
+// leakStableTol. None of those may come back to jitterResolvedTol in a
+// jittered copy (jitteredEigenvalues), as a pole QZ resolves does; smear
+// moves at first order. A matched pole takes the QZ value when a copy
+// reproduces it to half the gap to the deflated value: QZ merged with the
+// smear does not, and the deflated value is kept.
 func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
 	a, e, _, _, nf, _, _, _, _, _, ok := deflateStaircase(A, E, false, true, true, -1, 0)
 	if !ok {
@@ -349,23 +350,19 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 	if !ok {
 		return nil, false
 	}
-	resolved := func(w complex128) bool {
-		back := 0
-		for _, c := range copies {
-			if nearestDist(c, w) <= jitterResolvedTol*cmplx.Abs(w) {
-				back++
-			}
-		}
-		return 2*back > len(copies)
+	back := func(w complex128, tol float64) bool {
+		return slices.ContainsFunc(copies, func(c []complex128) bool { return nearestDist(c, w) <= tol })
 	}
-	if slices.ContainsFunc(left, resolved) {
-		return nil, false
+	for _, w := range left {
+		if back(w, jitterResolvedTol*cmplx.Abs(w)) {
+			return nil, false
+		}
 	}
 	for j, i := range match {
 		if i < 0 {
 			continue
 		}
-		if w := complex(alphar[i]/beta[i], alphai[i]/beta[i]); resolved(w) {
+		if w := complex(alphar[i]/beta[i], alphai[i]/beta[i]); back(w, cmplx.Abs(w-poles[j])/2) {
 			poles[j] = w
 		}
 	}
@@ -374,15 +371,14 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 
 // jitterResolvedTol is the relative distance within which a whole-pencil
 // eigenvalue left over by stiffChainPoles that comes back in one of
-// jitteredEigenvalues is a finite pole QZ resolves, where smear of an
-// infinite chain moves at first order; a majority of copies is enough,
-// since QZ of a copy can merge the pole with the smear, and smear can come
-// back in one copy whose jitter is below QZ's own rounding. It only decides whether the
+// jitteredEigenvalues may be a finite pole QZ resolves, where smear of an
+// infinite chain moves at first order; one copy is enough, since QZ of a
+// copy can merge the pole with the smear. It only decides whether the
 // deflated set may replace the whole-pencil one, so too large a value falls
 // back to the whole-pencil set. In the stiff-chain review pencils (native
 // and amd64) a pole QZ resolves beside the smear came back to at most
-// 9.4e-3 relative in its nearest copy (4.9e-3 at best), smear to no less
-// than 2.5e-2, as the leaked rounding leakStableTol separates (2.9e-2).
+// 9.4e-3 relative in its nearest copy (4.9e-3 at best), smear mostly to no
+// less than 2.5e-2, as the leaked rounding leakStableTol separates.
 const jitterResolvedTol = 1e-2
 
 // jitteredEigenvalues returns the finite whole-pencil eigenvalues of
