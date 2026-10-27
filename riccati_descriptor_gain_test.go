@@ -133,3 +133,28 @@ func TestDlqrDescriptorExplicitSolutionHonest(t *testing.T) {
 		t.Errorf("Accuracy 0 with EᵀXE off the oracle by %.3g", eX)
 	}
 }
+
+// TestKalmanDescriptorMoreSensorsThanStates: three sensors on two states
+// make the dual B = Cᵀ wider than tall, through the cancellation check and
+// refinement of the gain of an E of condition 1e13; the certified L must
+// match the oracle.
+func TestKalmanDescriptorMoreSensorsThanStates(t *testing.T) {
+	base := descriptorGainModels(t)[0]
+	C := mat.NewDense(3, 2, []float64{0.97228848391683376, -0.39447132160607812, 0.3, 1.1, -0.7, 0.25})
+	sys, err := NewDescriptor(base.A, base.B, C, mat.NewDense(3, 1, nil), base.E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Kalman(sys, eyeDense(1), eyeDense(3), nil, nil)
+	if errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrDescriptorSingular) {
+		t.Skipf("Kalman: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	dual := kalmanDual(sys, sys.B, sys.D)
+	_, _, Lo, ok := nearSingularOracle(true, dual.A, dual.B, dual.Q, dual.R, dual.S, dual.E, mat.DenseCopyOf(res.K.T()))
+	if e := relErr(res.K.T(), Lo); ok && res.Accuracy == 0 && e > descriptorGainTol {
+		t.Errorf("Accuracy 0, L off the oracle by %.3g", e)
+	}
+}

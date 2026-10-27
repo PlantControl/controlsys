@@ -2509,12 +2509,12 @@ func (problem *riccatiProblem) descriptorCancellation(xData []float64) float64 {
 	n, m := problem.n, problem.m
 	nn := n * n
 	ws := problem.ws
-	if len(ws.cancel) < 5*nn+2*m*n {
-		ws.cancel = make([]float64, 5*nn+2*m*n)
+	if len(ws.cancel) < 5*nn+3*m*n {
+		ws.cancel = make([]float64, 5*nn+3*m*n)
 	}
 	buf := ws.cancel
 	absX, absE, xe, axe := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn]
-	ete, g, ag := buf[4*nn:5*nn], buf[5*nn:5*nn+m*n], buf[5*nn+m*n:]
+	ete, g, ag, absB := buf[4*nn:5*nn], buf[5*nn:5*nn+m*n], buf[5*nn+m*n:5*nn+2*m*n], buf[5*nn+2*m*n:5*nn+3*m*n]
 	eRaw, bRaw := problem.E.RawMatrix(), problem.B.RawMatrix()
 	gen := func(r, c int, d []float64, s int) blas64.General {
 		return blas64.General{Rows: r, Cols: c, Data: d, Stride: s}
@@ -2533,10 +2533,10 @@ func (problem *riccatiProblem) descriptorCancellation(xData []float64) float64 {
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, m, bRaw.Data, bRaw.Stride), gen(n, n, xe, n), 0, gen(m, n, g, n))
 	for i := range n {
 		for j := range m {
-			absE[i*m+j] = math.Abs(bRaw.Data[i*bRaw.Stride+j])
+			absB[i*m+j] = math.Abs(bRaw.Data[i*bRaw.Stride+j])
 		}
 	}
-	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, m, absE, m), gen(n, n, axe, n), 0, gen(m, n, ag, n))
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, m, absB, m), gen(n, n, axe, n), 0, gen(m, n, ag, n))
 	if problem.S != nil {
 		sRaw := problem.S.RawMatrix()
 		for i := range m {
