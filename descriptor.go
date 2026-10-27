@@ -310,7 +310,7 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 	drift, size := 0.0, 0.0
 	for j := range nf {
 		match[j] = -1
-		if !qzInfinite(far[j], fai[j], fbeta[j], largeTol) {
+		if used[j] {
 			continue
 		}
 		mu := 1 / poles[j]
