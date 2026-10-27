@@ -2495,18 +2495,17 @@ func (problem *riccatiProblem) newtonSolve(continuous bool, K *mat.Dense, xData,
 	return D.RawMatrix().Data[:n*n], nil
 }
 
-// descriptorGainCancels reports whether K = R⁻¹(BᵀXE + Sᵀ) or EᵀXE of the
-// continuous descriptor X (xData) cancel by more than
-// nearSingularCancelLimit: ‖|Bᵀ||X||E| + |Sᵀ|‖ or ‖|Eᵀ||X||E|‖ against the
-// norm of the product. There X ~ 1/σ_min(E) in some direction and its
-// rounding, which a Newton step relative to ‖X‖ does not see, moves both
-// by up to that ratio times eps.
-func (problem *riccatiProblem) descriptorGainCancels(xData []float64) bool {
+// descriptorCancellation returns how far K = R⁻¹(BᵀXE + Sᵀ) and EᵀXE of
+// the continuous descriptor X (xData) cancel: the larger of
+// ‖|Bᵀ||X||E| + |Sᵀ|‖/‖BᵀXE + Sᵀ‖ and ‖|Eᵀ||X||E|‖/‖EᵀXE‖. There X ~
+// 1/σ_min(E) in some direction and its rounding, which a Newton step
+// relative to ‖X‖ does not see, moves both by up to that ratio times eps.
+func (problem *riccatiProblem) descriptorCancellation(xData []float64) float64 {
 	n, m := problem.n, problem.m
 	nn := n * n
-	buf := make([]float64, 4*nn+2*m*n+nn)
+	buf := make([]float64, 5*nn+2*m*n)
 	absX, absE, xe, axe := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn]
-	g, ag, ete := buf[4*nn:4*nn+m*n], buf[4*nn+m*n:4*nn+2*m*n], buf[4*nn+2*m*n:]
+	ete, g, ag := buf[4*nn:5*nn], buf[5*nn:5*nn+m*n], buf[5*nn+m*n:]
 	eRaw, bRaw := problem.E.RawMatrix(), problem.B.RawMatrix()
 	gen := func(r, c int, d []float64, s int) blas64.General {
 		return blas64.General{Rows: r, Cols: c, Data: d, Stride: s}
@@ -2521,9 +2520,7 @@ func (problem *riccatiProblem) descriptorGainCancels(xData []float64) bool {
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, absX, n), gen(n, n, absE, n), 0, gen(n, n, axe, n))
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, n, eRaw.Data, eRaw.Stride), gen(n, n, xe, n), 0, gen(n, n, ete, n))
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, n, absE, n), gen(n, n, axe, n), 0, gen(n, n, absX, n))
-	if !(impl.Dlange(lapack.Frobenius, n, n, absX, n, nil) <= nearSingularCancelLimit*impl.Dlange(lapack.Frobenius, n, n, ete, n, nil)) {
-		return true
-	}
+	ratio := cancelRatio(impl.Dlange(lapack.Frobenius, n, n, absX, n, nil), impl.Dlange(lapack.Frobenius, n, n, ete, n, nil))
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, m, bRaw.Data, bRaw.Stride), gen(n, n, xe, n), 0, gen(m, n, g, n))
 	for i := range n {
 		for j := range m {
@@ -2541,19 +2538,46 @@ func (problem *riccatiProblem) descriptorGainCancels(xData []float64) bool {
 			}
 		}
 	}
-	return !(impl.Dlange(lapack.Frobenius, m, n, ag, n, nil) <= nearSingularCancelLimit*impl.Dlange(lapack.Frobenius, m, n, g, n, nil))
+	return max(ratio, cancelRatio(impl.Dlange(lapack.Frobenius, m, n, ag, n, nil), impl.Dlange(lapack.Frobenius, m, n, g, n, nil)))
+}
+
+// cancelRatio returns abs/v, 0 when abs is 0, the cancellation of a
+// product v whose terms sum to abs in magnitude.
+func cancelRatio(abs, v float64) float64 {
+	if abs == 0 {
+		return 0
+	}
+	return abs / v
+}
+
+// explicitUncertified reports whether EᵀXE of a certified X cancels so
+// far that the rounding of X alone can move it beyond newtonTol:
+// ‖|Eᵀ||X||E|‖·eps > newtonTol·‖EᵀXE‖.
+func explicitUncertified(X, E *mat.Dense) bool {
+	var xe, ete, ax, aete mat.Dense
+	xe.Mul(X, E)
+	ete.Mul(E.T(), &xe)
+	absE := absDense(E)
+	ax.Mul(absDense(X), absE)
+	aete.Mul(absE.T(), &ax)
+	return !(cancelRatio(denseNorm(&aete), denseNorm(&ete))*eps() <= newtonTol)
 }
 
 // descriptorGainCertified reports whether the gain K of an X (xData)
-// verifyRiccati certifies is certified with it: always but for a
-// continuous E whose K or EᵀXE cancels (descriptorGainCancels), where
-// refineDescriptorGain must converge.
+// verifyRiccati certifies is certified with it. For a continuous E whose
+// K or EᵀXE cancel beyond nearSingularCancelLimit (descriptorCancellation)
+// they are refined (refineDescriptorGain) and, should that fail,
+// certified only when the ratio times eps is within newtonTol.
 func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.Dense, xData []float64, eig []complex128) bool {
 	problem.xe = nil
-	if !continuous || problem.E == nil || !problem.descriptorGainCancels(xData) {
+	if !continuous || problem.E == nil {
 		return true
 	}
-	return problem.refineDescriptorGain(K, xData, eig)
+	c := problem.descriptorCancellation(xData)
+	if c <= nearSingularCancelLimit || problem.refineDescriptorGain(K, xData, eig) {
+		return true
+	}
+	return c*eps() <= newtonTol
 }
 
 // refineDescriptorGain replaces the gain K of the certified continuous
@@ -2562,7 +2586,7 @@ func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.D
 // converges: steps ‖Y‖/‖EᵀP‖ and ‖K₊ − K‖/‖K₊‖ within newtonRefineTol,
 // for Y = EᵀΔE of newtonSolve from the residual of P itself and
 // P₊ = P + E⁻ᵀY. K and EᵀXE are icare's; formed from the rounded X they
-// lose up to descriptorGainCancels' ratio times eps (Kalman L off by
+// lose up to descriptorCancellation times eps (Kalman L off by
 // 4.6e-4 at cond(E) 1e13 with X exact), which the Newton step of X,
 // relative to ‖X‖ ~ 1/σ_min(E), does not see. The residual of P has no
 // such rounding and each step contracts by about cond(E)·eps. It reports
@@ -2632,12 +2656,11 @@ func (problem *riccatiProblem) refineDescriptorGain(K *mat.Dense, xData []float6
 			blas64.General{Rows: n, Cols: n, Data: eRaw.Data, Stride: eRaw.Stride},
 			blas64.General{Rows: n, Cols: n, Data: pH, Stride: n},
 			0, blas64.General{Rows: n, Cols: n, Data: ep, Stride: n})
-		step := yn / norm(ep, true)
-		kn := norm(next, false)
+		step := cancelRatio(yn, norm(ep, true))
 		for i, v := range next {
 			cur[i] -= v
 		}
-		step = max(step, norm(cur, false)/kn)
+		step = max(step, cancelRatio(norm(cur, false), norm(next, false)))
 		copy(cur, next)
 		if !finiteSlice(cur) {
 			return false
