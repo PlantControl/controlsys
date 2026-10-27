@@ -353,10 +353,18 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 }
 
 // stableUnderJitter reports whether one of the whole-pencil eigenvalues
-// eig of (A, E) comes back to leakStableTol in one of leakDraws copies of A
-// and E with entries scaled by 1 + δ, |δ| ≤ 4ε (jitterCopy): a finite pole
-// QZ resolves, where smear of an infinite chain moves at first order. One
-// copy is enough, since QZ of a copy can merge the pole with the smear.
+// eig of (A, E) comes back to jitterResolvedTol in one of leakDraws copies
+// of A and E with entries scaled by 1 + δ, |δ| ≤ 4ε (jitterCopy): a finite
+// pole QZ resolves, where smear of an infinite chain moves at first order.
+// One copy is enough, since QZ of a copy can merge the pole with the smear.
+// jitterResolvedTol sets stableUnderJitter. It only decides whether the
+// deflated set may replace the whole-pencil one, so too large a value falls
+// back to the whole-pencil set. In the stiff-chain review pencils (native
+// and amd64) a pole QZ resolves beside the smear came back to at most
+// 9.4e-3 relative in its nearest copy (4.9e-3 at best), smear to no less
+// than 2.5e-2, as the leaked rounding leakStableTol separates (2.9e-2).
+const jitterResolvedTol = 1e-2
+
 func stableUnderJitter(A, E *mat.Dense, eig []complex128) bool {
 	if len(eig) == 0 {
 		return false
@@ -372,7 +380,7 @@ func stableUnderJitter(A, E *mat.Dense, eig []complex128) bool {
 		}
 		for _, w := range eig {
 			for i := range beta {
-				if beta[i] != 0 && cmplx.Abs(complex(alphar[i]/beta[i], alphai[i]/beta[i])-w) <= leakStableTol*cmplx.Abs(w) {
+				if beta[i] != 0 && cmplx.Abs(complex(alphar[i]/beta[i], alphai[i]/beta[i])-w) <= jitterResolvedTol*cmplx.Abs(w) {
 					return true
 				}
 			}
