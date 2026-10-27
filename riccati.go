@@ -267,10 +267,12 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // Hamiltonian solve fails, or E is given) Care solves the extended pencil
 // of MATLAB icare, verified the same way at each of its cost scales. A
 // certified X has Accuracy 0. With E, where K and EᵀXE formed from X ~
-// 1/σ_min(E) cancel (beyond nearSingularCancelLimit), K and the EᵀXE of
-// Lqr are those of P = XE refined by Newton's method in double-double,
-// and X is certified only once that converges or the cancellation times
-// eps is within 1e-8. With none certified, Care returns, as
+// 1/σ_min(E) cancel (beyond nearSingularCancelLimit), or the Newton step
+// of X moves K or EᵀXE beyond 1e-10 (a step of 1.7e-9 left K off by
+// 9.2e-7), K and the EᵀXE of Lqr are those of P = XE refined by Newton's
+// method in double-double, and X is certified only once that converges
+// or the cancellation times eps and the step's move of K are within
+// 1e-8. With none certified, Care returns, as
 // MATLAB icare with Report 1, the stabilizing solution (A − BK stable in
 // float64) of smallest first Newton step (or, without one, a stabilizing
 // X whose Lyapunov equation is singular) with Accuracy 1, unrefined:
@@ -742,7 +744,14 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // with the same K formula, and Eig holds the generalized eigenvalues of
 // (A-BK, E). E'XE solves the Dare of the explicit model (E⁻¹A, E⁻¹B). A
 // singular or near-singular E is handled as in Care. Nil or NaN/Inf
-// arguments return ErrInvalidArgument.
+// arguments return ErrInvalidArgument. Where E'XE of the certified X
+// cancels beyond nearSingularCancelLimit, X ~ 1/σ_min(E)² and its float64
+// rounding moves K (a Kalman L off by 1.4e-5 at E's last pivot 1e-5), or
+// the Newton step moves E'XE beyond 1e-10, K and the E'XE of Dlqr are, as
+// those idare takes from the deflating subspace, the double-double gain
+// and E'XE of X refined by Hewer's method in double-double; X keeps its
+// certificate. Should that not converge, X is certified only while the
+// rounding of X moves K, and the Newton step K, within 1e-8.
 //
 // Dare always deflates the extended pencil, as MATLAB idare does, so A may
 // be singular or have near-zero eigenvalues. A solution with R+B'XB not
@@ -814,7 +823,10 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // error the gain may amplify by 1e9 (K off by 9e-3 with X off by 7e-14):
 // a K that is not is replaced, before Accuracy 1, by the double-double
 // gain of X taken one Newton step on, once that X is certified and its
-// A − BK stable (refined).
+// A − BK stable (refined). Of an X whose Newton step is within eps, a K
+// off its double-double gain by more than 1e-6 is replaced by that gain
+// (A − BK stable), X being its own Newton iterate: the pencil K was off
+// by 7.3e-6 with X exact and its gain within 3.4e-9.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
