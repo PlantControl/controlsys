@@ -821,6 +821,9 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		if r := red.solve(A, B, Q, o); r != nil {
 			return r, nil
 		}
+		if err == nil {
+			res.Accuracy = 1
+		}
 		return res, err
 	}
 	if res := red.solve(A, B, Q, opts); res != nil {
