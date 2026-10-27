@@ -111,7 +111,7 @@ func riccatiDescriptor(opts *RiccatiOpts, n int) (*mat.Dense, error) {
 	}
 	var lu mat.LU
 	lu.Factorize(opts.E)
-	if luNearSingular(&lu) {
+	if eRankDeficient(opts.E, &lu) {
 		return nil, fmt.Errorf("E: %w", ErrDescriptorSingular)
 	}
 	return opts.E, nil

@@ -139,6 +139,9 @@ type RiccatiOpts struct {
 	// reducedQ marks Q as Dare's Q − S₂R₂₂⁻¹S₂ᵀ of reduceInputs, which
 	// may be indefinite as Q − SR⁻¹Sᵀ of the given Dare may.
 	reducedQ bool
+	// plantE is the model E when E is its transpose (Kalman's dual), so
+	// nearSingularEGate keeps the window of both condition estimates.
+	plantE *mat.Dense
 }
 
 // RiccatiResult is the stabilizing solution of Care or Dare.
@@ -268,9 +271,77 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	}
 	res, err := otherScaling(care, true, A, B, Q, R, opts)
 	if err != nil {
-		return nil, fmt.Errorf("Care: %w", err)
+		err = fmt.Errorf("Care: %w", err)
 	}
-	return res, nil
+	return nearSingularEGate("Care", true, A, B, R, opts, res, err)
+}
+
+// nearSingularCancelLimit is the largest ratio ‖|M₁||X||M₂|‖/‖M₁XM₂ + C‖
+// of the products that K and EᵀXE are formed from at which a certified X
+// of an E in the near-singular window keeps them to within that factor of
+// its own accuracy.
+const nearSingularCancelLimit = 1e2
+
+// nearSingularEGate returns res, err unless opts.E is nonsingular by MATLAB
+// rank (eRankDeficient) with a condition estimate at or above 1/ε, which
+// MATLAB lqr and icare accept as nonsingular (RL6IT7) but where
+// X ~ 1/σ_min(E): there K = R⁻¹(BᵀXE + Sᵀ) (continuous), the discrete K
+// from BᵀXA and BᵀXB, and EᵀXE cancel, and a certified X to every digit
+// left L of Kalman off by 0.3. Such a result is returned only with
+// Accuracy 0 and none of these products cancelling beyond
+// nearSingularCancelLimit; otherwise, as for a singular E, Care and Dare
+// return ErrDescriptorSingular. Argument errors pass through.
+func nearSingularEGate(op string, continuous bool, A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, error) {
+	if opts == nil || isIdentityDescriptor(opts.E) {
+		return res, err
+	}
+	if err != nil && (errors.Is(err, ErrInvalidArgument) || errors.Is(err, ErrDimensionMismatch) ||
+		errors.Is(err, ErrNotSymmetric) || errors.Is(err, ErrNotPSD) || errors.Is(err, ErrDescriptorSingular)) {
+		return res, err
+	}
+	if !luConditionNearSingular(opts.E) && (opts.plantE == nil || !luConditionNearSingular(opts.plantE)) {
+		return res, err
+	}
+	if err == nil && res.Accuracy == 0 && !nearSingularCancels(continuous, A, B, R, opts, res.X) {
+		return res, nil
+	}
+	return nil, fmt.Errorf("%s: E: %w", op, ErrDescriptorSingular)
+}
+
+func luConditionNearSingular(E *mat.Dense) bool {
+	var lu mat.LU
+	lu.Factorize(E)
+	return luNearSingular(&lu)
+}
+
+// nearSingularCancels reports whether a product K or EᵀXE is formed from
+// cancels by more than nearSingularCancelLimit.
+func nearSingularCancels(continuous bool, A, B, R *mat.Dense, opts *RiccatiOpts, X *mat.Dense) bool {
+	absX := absDense(X)
+	cancels := func(M1t, M2, add mat.Matrix) bool {
+		var t, p, at, ap mat.Dense
+		t.Mul(M1t, X)
+		p.Mul(&t, M2)
+		at.Mul(absDense(mat.DenseCopyOf(M1t)), absX)
+		ap.Mul(&at, absDense(mat.DenseCopyOf(M2)))
+		if add != nil {
+			p.Add(&p, add)
+			ap.Add(&ap, absDense(mat.DenseCopyOf(add)))
+		}
+		return !(denseNorm(&ap) <= nearSingularCancelLimit*denseNorm(&p))
+	}
+	E := opts.E
+	if cancels(E.T(), E, nil) {
+		return true
+	}
+	var St mat.Matrix
+	if opts.S != nil {
+		St = opts.S.T()
+	}
+	if continuous {
+		return cancels(B.T(), E, St)
+	}
+	return cancels(B.T(), A, St) || cancels(B.T(), B, R)
 }
 
 // otherScaling solves by solve and, when that finds no stabilizing
@@ -697,6 +768,12 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
+	res, err := dareInputs(A, B, Q, R, opts)
+	return nearSingularEGate("Dare", false, A, B, R, opts, res, err)
+}
+
+// dareInputs is Dare after its argument check.
+func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	red, ill := reduceInputs(A, B, Q, R, opts)
 	if red == nil {
 		return dareSolve(A, B, Q, R, opts, !ill)
