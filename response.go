@@ -2164,29 +2164,57 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 }
 
 // stiffFreeParts returns the parts of foldInaccurateParts of
-// (A, E, E·x0, C, 0) for a continuous descriptor: each part's single
-// input column is its share of x0. Sampled from those shares, the free
-// response is an impulse response with no constant C·x0 to cancel in a
-// decaying tail, unlike the step response of the input A·x0. A model with
-// a nonzero delay does not split; zero-valued delay metadata is dropped.
+// (A, E, [E·x0, A·x0], C, 0) for a continuous descriptor. Column 0 of a
+// part's B is its share s of x0 and column 1 is A_part·s. Sampled from the
+// shares, the free response is an impulse response with no constant C·x0
+// to cancel in a decaying tail, unlike the step response of the input A·x0.
+// A model with a nonzero delay does not split; zero-valued delay metadata
+// is dropped.
 func stiffFreeParts(sys *System, x0 *mat.VecDense) ([]*System, bool) {
 	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.HasDelay() {
 		return nil, false
 	}
 	n, _, p := sys.Dims()
 	fm := sys.Copy()
-	fm.B, fm.D = newDense(n, 1), newDense(p, 1)
+	fm.B, fm.D = newDense(n, 2), newDense(p, 2)
 	fm.InputDelay, fm.Delay, fm.InputName = nil, nil, nil
-	var ex mat.VecDense
+	var ex, ax mat.VecDense
 	ex.MulVec(sys.E, x0)
+	ax.MulVec(sys.A, x0)
 	fm.B.SetCol(0, ex.RawVector().Data)
+	fm.B.SetCol(1, ax.RawVector().Data)
 	return foldInaccurateParts(fm)
 }
 
+// freePartShare returns the share of x0 of part k of stiffFreeParts. A fast
+// part (k ≥ 1 of a split; stiffExplicitParts puts the slow part first)
+// takes A_part⁻¹·(A·x0 column): E·x0 projects x0 onto the nearly null
+// directions of E, so its column carries cond(E)·ε relative error there,
+// while A·x0 has no such cancellation and A_part, all of whose poles are
+// large, is well conditioned to solve. The slow part, or a fast part whose
+// A_part is singular, keeps the E·x0 column.
+func freePartShare(parts []*System, k int) []float64 {
+	part := parts[k]
+	pn, _, _ := part.Dims()
+	share := make([]float64, pn)
+	if k > 0 {
+		var lu mat.LU
+		lu.Factorize(part.A)
+		if lu.Cond() < 0x1p52 {
+			var s mat.VecDense
+			if err := lu.SolveVecTo(&s, false, part.B.ColView(1)); err == nil {
+				copy(share, s.RawVector().Data)
+				return share
+			}
+		}
+	}
+	mat.Col(share, 0, part.B)
+	return share
+}
+
 // sampleFreeParts sums y(k·dt) of the parts of stiffFreeParts of sys, each
-// from its share of x0, sampled exactly as in continuousFreeSamples. y(0)
-// is C·x0 itself: the shares of a fast part, gone after one sample, are
-// only as accurate as its fold.
+// from its share of x0 (freePartShare), sampled exactly as in
+// continuousFreeSamples. y(0) is C·x0 itself.
 func sampleFreeParts(sys *System, parts []*System, x0 *mat.VecDense, steps int, dt float64) (*mat.Dense, error) {
 	_, _, p := sys.Dims()
 	if p == 0 || steps == 0 {
@@ -2195,7 +2223,7 @@ func sampleFreeParts(sys *System, parts []*System, x0 *mat.VecDense, steps int, 
 	Y := mat.NewDense(p, steps, nil)
 	yRaw := Y.RawMatrix()
 	var scaled, ad mat.Dense
-	for _, part := range parts {
+	for pk, part := range parts {
 		pn, _, _ := part.Dims()
 		if pn == 0 {
 			continue
@@ -2204,11 +2232,8 @@ func sampleFreeParts(sys *System, parts []*System, x0 *mat.VecDense, steps int, 
 		ad.Reset()
 		scaled.Scale(dt, part.A)
 		ad.Exp(&scaled)
-		aRaw, bRaw, cRaw := ad.RawMatrix(), part.B.RawMatrix(), part.C.RawMatrix()
-		x, next := make([]float64, pn), make([]float64, pn)
-		for i := range pn {
-			x[i] = bRaw.Data[i*bRaw.Stride]
-		}
+		aRaw, cRaw := ad.RawMatrix(), part.C.RawMatrix()
+		x, next := freePartShare(parts, pk), make([]float64, pn)
 		for k := range steps {
 			live := false
 			for i := range p {

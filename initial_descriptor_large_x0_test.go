@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/cmplx"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -87,5 +88,66 @@ func TestInitialStateLargeX0StiffDescriptorTail(t *testing.T) {
 	}
 	if worst > 1e-7 {
 		t.Errorf("Lsim off the pencil by %.3g", worst)
+	}
+}
+
+// Lsim from x0 on a grid that resolves the fast pole (dt = 0.2/|λ_fast|)
+// keeps the fast part's share of x0 on the pencil: taken from E·x0, which
+// projects x0 onto the nearly null directions of E, it carried cond(E)·ε
+// relative error (2.8e-7 here), while from A·x0 it is accurate. Reviewer
+// generator gen 229 of scratchpad/w45review/rev_w45_sweep_test.go.txt
+// (PCG(229, 454545), cond(E) 2.2e10, |λ_fast| 6.2e9; AZUMSC review).
+func TestLsimInitialStateStiffDescriptorFastGrid(t *testing.T) {
+	A := mat.NewDense(6, 6, []float64{
+		-20.92193676320473, 7.5710963870004493, 10.178472416004963, -0.61210886914353912, 9.6624818420711662, 8.211412247662258,
+		-5.8776079579807119, -22.283094863857613, -10.508547318893488, 15.947596509521928, -10.159822766041623, -8.0135603854710862,
+		-7.614681945661145, 16.268257361115701, -28.39499942538718, 6.4823865377718279, -3.3224911304532347, -1.841826911615648,
+		0.88741135604255372, -8.2368627226890681, 11.877888190047681, -0.54787748409886705, -2.5581311981325459, 15.392611223374029,
+		-22.92640633024271, -7.7790344688429691, -17.052740642532111, 23.301986110678136, -26.798359322113978, 6.8853956660428501,
+		-16.742902929404003, -5.5373747006232117, 7.5803358450507847, 9.6292135334703097, -4.6546419245941877, 4.0707730073573547,
+	})
+	B := mat.NewDense(6, 1, []float64{
+		0.37767784060338194, -3.2054957759580436, 3.5124177045472527, 0.55487876962653671, 1.8879224494925892, 0.89889703865169801,
+	})
+	C := mat.NewDense(1, 6, []float64{
+		1.9367509547619997, -2.3981137356763713, 1.7343555005797284, 1.31598518113679, 0.34322044459024842, 1.5514171207017835,
+	})
+	E := mat.NewDense(6, 6, []float64{
+		3.4056271052572153, 0.12240280292364843, 0.10664311228932497, 0.96590049825467339, 0.24771335757976304, -0.6208538972176042,
+		-1.7975039134060302, 7.4063687382391263, -1.1150180377831298, -1.3336419120719585, -0.19085876646808103, -1.2506379057425407,
+		0.41422208876747724, -0.22764583421054849, 1.5473741404670298, -0.057713759212410398, -0.13946288935777193, -0.055156006168660315,
+		0.080746099913851482, 1.5800297475510006, -2.599008872583938, 4.4537170766782825, -0.7757041474180788, 1.225539045030769,
+		1.3573847462649957, 0.3418929928284743, 0.16354734810129504, -1.6325375616139191, 3.135715595631094, 1.3458576894210235,
+		1.3697237130616686, 0.96560109107943759, -0.55568112775698064, 0.31883847817976613, 0.9821537061370943, 0.31180797264681764,
+	})
+	sys, err := NewDescriptor(A, B, C, mat.NewDense(1, 1, nil), E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x0 := mat.NewVecDense(6, []float64{1.979653950810202, 2.122624355443024, 0.35953887072096885, 0.11961900558070837, 0.5626117257850443, -0.7368971446921588})
+	pol, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	modes, ok := newStepOracleModes(sys, pol)
+	if !ok {
+		t.Fatal("oracle did not resolve the poles")
+	}
+	fast := 0.0
+	for _, q := range modes.poles {
+		fast = math.Max(fast, cmplx.Abs(q))
+	}
+	free := freeOracle(t, sys, modes, x0)
+	tt := makeTimeVector(30, 0.2/fast)
+	r, err := Lsim(sys, mat.NewDense(len(tt), 1, nil), tt, x0)
+	if err != nil {
+		t.Fatalf("Lsim: %v", err)
+	}
+	worst := 0.0
+	for s := 1; s < len(tt); s++ {
+		worst = math.Max(worst, stepOracleRel(r.Y.At(0, s), free(0, tt[s])))
+	}
+	if worst > 1e-7 {
+		t.Errorf("Lsim from x0 on the fast grid off the pencil by %.3g", worst)
 	}
 }
