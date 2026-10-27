@@ -269,6 +269,20 @@ func (m stepOracleModes) step(i, j int, t float64) float64 {
 	return real(y)
 }
 
+// zoh returns the exact ZOH discretization G_d(z) = G(∞) + Σ Rᵢ·(e^{λᵢT} −
+// 1)/λᵢ/(z − e^{λᵢT}) of the modes at z, sample time dt.
+func (m stepOracleModes) zoh(i, j int, dt float64, z complex128) complex128 {
+	g := complex(m.dc.At(i, j), 0)
+	for k, l := range m.poles {
+		g += m.residues[k][i][j] / l
+	}
+	for k, l := range m.poles {
+		e := cmplx.Exp(l * complex(dt, 0))
+		g += m.residues[k][i][j] * (e - 1) / l / (z - e)
+	}
+	return g
+}
+
 func (m stepOracleModes) stable() bool {
 	for _, l := range m.poles {
 		if real(l) >= 0 {

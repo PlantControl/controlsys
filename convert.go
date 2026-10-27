@@ -28,6 +28,14 @@ func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 }
 
 func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
+	if (opts.Method == "" || opts.Method == C2DMethodZOH) && sys.IsContinuous() {
+		if parts, ok := stiffDescriptorParts(sys); ok {
+			if _, err := normalizeC2DOptions(dt, opts); err != nil {
+				return nil, err
+			}
+			return discretizeZOHParallel(sys, parts, dt)
+		}
+	}
 	if !sys.HasDelay() && !sys.IsDescriptor() && opts.Method != C2DMethodLeastSquares {
 		normalized, err := normalizeC2DOptions(dt, opts)
 		if err != nil {
@@ -376,6 +384,101 @@ func (sys *System) discretizeZOH(dt float64) (*System, error) {
 	}
 	propagateNames(out, sys)
 	return out, nil
+}
+
+// stiffDescriptorParts returns, for a delay-free descriptor sys with
+// full-rank ill-conditioned E (stiffExplicitParts), explicit parts whose sum
+// has the transfer function and the poles of the pencil (A, E). The LU
+// fold E⁻¹A (ToExplicit) of such an E moves the slow poles by cond(E)·ε,
+// up to a stability flip, and one matrix exponential of the stiff pole
+// beside them loses the slow dynamics to the squarings. ok is false when
+// the fold is accurate, E is rank deficient, or the generalized Schur form
+// zeroed the stiff part's E (deflated).
+func stiffDescriptorParts(sys *System) ([]*System, bool) {
+	if !sys.IsDescriptor() || sys.HasDelay() {
+		return nil, false
+	}
+	parts, deflated, ok := stiffExplicitParts(sys)
+	if !ok || deflated {
+		return nil, false
+	}
+	return parts, true
+}
+
+// discretizeZOHParallel is the ZOH discretization of the parallel
+// connection of the explicit parts, each discretized on its own and
+// assembled block diagonally, with the I/O metadata of src. The state
+// coordinates are those of the parts, so state names are dropped.
+func discretizeZOHParallel(src *System, parts []*System, dt float64) (*System, error) {
+	disc := make([]*System, len(parts))
+	for i, part := range parts {
+		d, err := part.discretizeZOHScalarExact(dt)
+		if err != nil {
+			return nil, err
+		}
+		disc[i] = d
+	}
+	out, err := parallelExplicit(disc)
+	if err != nil {
+		return nil, err
+	}
+	out.Dt = dt
+	propagateIONames(out, src)
+	return out, nil
+}
+
+// discretizeZOHScalarExact is discretizeZOH, except that a delay-free
+// one-state model takes the closed form a_d = e^{a·dt}, b_d =
+// expm1(a·dt)/a·b: the scaling and squaring of the augmented exponential
+// keeps b_d of a stiff a·dt ~ -1e10 to only ~1e-6.
+func (sys *System) discretizeZOHScalarExact(dt float64) (*System, error) {
+	n, m, _ := sys.Dims()
+	if n != 1 || m == 0 || sys.HasDelay() || sys.IsDiscrete() || sys.A.At(0, 0) == 0 {
+		return sys.discretizeZOH(dt)
+	}
+	if err := validateConversionSampleTime(dt); err != nil {
+		return nil, err
+	}
+	a := sys.A.At(0, 0)
+	B := mat.NewDense(1, m, nil)
+	B.Scale(math.Expm1(a*dt)/a, sys.B)
+	out, err := newNoCopy(mat.NewDense(1, 1, []float64{math.Exp(a * dt)}), B, denseCopy(sys.C), denseCopy(sys.D), dt)
+	if err != nil {
+		return nil, err
+	}
+	propagateNames(out, sys)
+	return out, nil
+}
+
+// parallelExplicit returns the explicit parallel connection of parts with
+// equal input and output counts: block-diagonal A, stacked B, adjacent C
+// columns and summed D.
+func parallelExplicit(parts []*System) (*System, error) {
+	_, m, p := parts[0].Dims()
+	n := 0
+	for _, part := range parts {
+		k, _, _ := part.Dims()
+		n += k
+	}
+	A, B, C, D := newDense(n, n), newDense(n, m), newDense(p, n), newDense(p, m)
+	off := 0
+	for _, part := range parts {
+		k, _, _ := part.Dims()
+		if k > 0 {
+			A.Slice(off, off+k, off, off+k).(*mat.Dense).Copy(part.A)
+			if m > 0 {
+				B.Slice(off, off+k, 0, m).(*mat.Dense).Copy(part.B)
+			}
+			if p > 0 {
+				C.Slice(0, p, off, off+k).(*mat.Dense).Copy(part.C)
+			}
+		}
+		if p > 0 && m > 0 {
+			D.Add(D, part.D)
+		}
+		off += k
+	}
+	return newNoCopy(A, B, C, D, parts[0].Dt)
 }
 
 func discretizeWithInternalDelay(sys *System, dt float64, opts C2DOptions) (*System, error) {
