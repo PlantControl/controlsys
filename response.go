@@ -2189,22 +2189,50 @@ func stiffFreeParts(sys *System, x0 *mat.VecDense) ([]*System, bool) {
 // only as accurate as its fold.
 func sampleFreeParts(sys *System, parts []*System, x0 *mat.VecDense, steps int, dt float64) (*mat.Dense, error) {
 	_, _, p := sys.Dims()
+	if p == 0 || steps == 0 {
+		return nil, fmt.Errorf("free response needs outputs and samples, got p=%d steps=%d: %w", p, steps, ErrDimensionMismatch)
+	}
 	Y := mat.NewDense(p, steps, nil)
+	yRaw := Y.RawMatrix()
+	var scaled, ad mat.Dense
 	for _, part := range parts {
 		pn, _, _ := part.Dims()
 		if pn == 0 {
 			continue
 		}
-		xi := mat.NewVecDense(pn, nil)
+		scaled.Reset()
+		ad.Reset()
+		scaled.Scale(dt, part.A)
+		ad.Exp(&scaled)
+		aRaw, bRaw, cRaw := ad.RawMatrix(), part.B.RawMatrix(), part.C.RawMatrix()
+		x, next := make([]float64, pn), make([]float64, pn)
 		for i := range pn {
-			xi.SetVec(i, part.B.At(i, 0))
+			x[i] = bRaw.Data[i*bRaw.Stride]
 		}
-		part.OutputDelay = nil
-		y, err := part.continuousFreeSamples(xi, steps, dt)
-		if err != nil {
-			return nil, err
+		for k := range steps {
+			live := false
+			for i := range p {
+				row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+pn]
+				s := 0.0
+				for j, v := range row {
+					s += v * x[j]
+				}
+				yRaw.Data[i*yRaw.Stride+k] += s
+			}
+			for i := range pn {
+				row := aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+pn]
+				s := 0.0
+				for j, v := range row {
+					s += v * x[j]
+				}
+				next[i] = s
+				live = live || s != 0
+			}
+			if !live {
+				break
+			}
+			x, next = next, x
 		}
-		Y.Add(Y, y)
 	}
 	var y0 mat.VecDense
 	y0.MulVec(sys.C, x0)
