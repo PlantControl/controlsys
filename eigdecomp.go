@@ -201,16 +201,15 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	if n1 == 0 {
 		return modesAllInGroup2(policy, sys)
 	}
-	g1, g2, err := splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
-	if err != nil || sawInfinite || nf != a.RawMatrix().Rows || g2 == nil || g2.E == nil || !descriptorERankDeficient(g2.E) || descriptorERankDeficient(sys.E) {
-		return g1, g2, err
-	}
-	if lambda, tol, ok := stiffTinyBetaPole(sys.A, sys.E); ok {
-		if h1, h2, ok := splitStiffFullRank(policy, sys, s, t, q, z, recip, tol, real(lambda), isGroup1); ok && (h2.E == nil || !descriptorERankDeficient(h2.E)) {
-			return h1, h2, nil
+	if n := nf; !sawInfinite && n == a.RawMatrix().Rows && n1 < n &&
+		descriptorERankDeficient(extractModalBlock(t, n, n1, n, n1, n)) && !descriptorERankDeficient(sys.E) {
+		if lambda, tol, ok := stiffTinyBetaPole(sys.A, sys.E); ok {
+			if g1, g2, ok := splitStiffFullRank(policy, sys, s, t, q, z, recip, tol, real(lambda), isGroup1); ok && (g2.E == nil || !descriptorERankDeficient(g2.E)) {
+				return g1, g2, nil
+			}
 		}
 	}
-	return g1, g2, nil
+	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
 }
 
 // descriptorERankDeficient reports whether E fails MATLAB rank
