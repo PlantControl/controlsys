@@ -16,7 +16,8 @@ import (
 // and I/O delays become sample delays (fractional ones per opts), internal
 // delays stay internal, and a singular-E descriptor model is first reduced as
 // MATLAB dss2ss does. A delay-free model with full-rank E too
-// ill-conditioned for E⁻¹A (as in TransferFunction) is discretized from its
+// ill-conditioned for E⁻¹A (as in TransferFunction; for all methods but
+// matched, also LU condition estimate 1e6 or more) is discretized from its
 // generalized Schur parts, which keep the poles of the pencil (A, E), by
 // every method but least squares (matched from the transfer function of
 // the pencil); the result then has new state coordinates and no state
@@ -37,7 +38,11 @@ func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 
 func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
 	if opts.Method != C2DMethodLeastSquares && sys.IsContinuous() {
-		if parts, ok := stiffDescriptorParts(sys); ok {
+		route := foldInaccurateParts
+		if opts.Method == C2DMethodMatched {
+			route = stiffDescriptorParts
+		}
+		if parts, ok := route(sys); ok {
 			normalized, err := normalizeC2DOptions(dt, opts)
 			if err != nil {
 				return nil, err
@@ -429,6 +434,30 @@ func stiffDescriptorParts(sys *System) ([]*System, bool) {
 		return nil, false
 	}
 	return append([]*System{slow}, fastParts...), true
+}
+
+// foldAccurateECond is the 1-norm condition estimate of E below which C2D
+// (other than matched) and the zero-state Step and Lsim take the LU fold E⁻¹A
+// (ToExplicit) of a full-rank E even when stiffDescriptorParts applies: its
+// cond(E)·ε error then stays under 1e-9 relative in the discrete response
+// and 1e-7 in the step response, where the pencil parts cost a generalized
+// Schur split and several matrix exponentials. Impulse is not gated: the
+// step form of the fold cancels C·B of the stiff pole to worse than 1e-7
+// already at cond(E) = 1e4.
+const foldAccurateECond = 1e6
+
+// foldInaccurateParts is stiffDescriptorParts for an E whose LU condition
+// estimate is foldAccurateECond or more.
+func foldInaccurateParts(sys *System) ([]*System, bool) {
+	if !sys.IsDescriptor() {
+		return nil, false
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	if lu.Cond() < foldAccurateECond {
+		return nil, false
+	}
+	return stiffDescriptorParts(sys)
 }
 
 // splitFastPencil returns explicit parts of the fast descriptor part of

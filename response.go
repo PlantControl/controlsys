@@ -1886,7 +1886,8 @@ func Damp(sys *System) ([]DampInfo, error) {
 // follow MATLAB: proper singular-E models are reduced to an explicit model
 // plus feedthrough, improper ones return ErrImproperModel. A continuous
 // delay-free model with full-rank E too ill-conditioned for E⁻¹A (as in
-// TransferFunction) is simulated from its generalized Schur parts, so the
+// TransferFunction, with LU condition estimate 1e6 or more; for Impulse
+// from 1e4) is simulated from its generalized Schur parts, so the
 // response follows the poles of the pencil (A, E). Continuous models
 // with internal delays of one common length are sampled exactly (method of
 // steps) while the chain fits its size and work budget; past it, and for
@@ -1975,15 +1976,25 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 }
 
 // zeroStateResponseForm is timeResponseForm without an initial state,
-// except that a continuous descriptor with stiffContinuousDescriptorParts
-// stays a descriptor: its poles are then those of the pencil and C2D
-// discretizes its parts instead of the LU fold E⁻¹A.
+// except that a continuous descriptor with foldInaccurateParts stays a
+// descriptor: its poles are then those of the pencil and C2D discretizes
+// its parts instead of the LU fold E⁻¹A.
 func (sys *System) zeroStateResponseForm() (*System, error) {
-	if _, ok := stiffContinuousDescriptorParts(sys); ok {
+	if foldInaccurateContinuous(sys) {
 		return sys, nil
 	}
 	out, _, _, err := sys.timeResponseForm(nil)
 	return out, err
+}
+
+// foldInaccurateContinuous reports whether the continuous sys has
+// foldInaccurateParts.
+func foldInaccurateContinuous(sys *System) bool {
+	if !sys.IsContinuous() {
+		return false
+	}
+	_, ok := foldInaccurateParts(sys)
+	return ok
 }
 
 // stiffContinuousDescriptorParts is stiffDescriptorParts for a continuous
@@ -2267,7 +2278,7 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	var err error
 	stiff := false
 	if x0 == nil || allZeroVec(x0) {
-		_, stiff = stiffContinuousDescriptorParts(sys)
+		stiff = foldInaccurateContinuous(sys)
 	}
 	if stiff {
 		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
