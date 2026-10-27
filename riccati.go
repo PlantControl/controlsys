@@ -262,7 +262,11 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // (a step within 1e-10); when that fails (or A − BK is unstable, or the
 // Hamiltonian solve fails, or E is given) Care solves the extended pencil
 // of MATLAB icare, verified the same way at each of its cost scales. A
-// certified X has Accuracy 0. With none certified, Care returns, as
+// certified X has Accuracy 0. With E, where K and EᵀXE formed from X ~
+// 1/σ_min(E) cancel (beyond nearSingularCancelLimit), K and the EᵀXE of
+// Lqr are those of P = XE refined by Newton's method in double-double,
+// and X is certified only once that converges or the cancellation times
+// eps is within 1e-8. With none certified, Care returns, as
 // MATLAB icare with Report 1, the stabilizing solution (A − BK stable in
 // float64) of smallest first Newton step (or, without one, a stabilizing
 // X whose Lyapunov equation is singular) with Accuracy 1, unrefined:
