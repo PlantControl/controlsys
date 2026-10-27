@@ -783,7 +783,10 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // R alone: once ‖B‖²‖X‖ exceeds ‖R‖ (cheap control), where the rounding
 // of BᵀXB swamps R there, the X of the given problem is certified again
 // in the inputs w and K taken from there (VᵀRV costs K only eps·cond(R)),
-// and a given problem that fails or is poor is solved in r inputs.
+// and a given problem that fails or is poor is solved in r inputs; either
+// K keeps Accuracy 0 only as the double-double gain of its X (gainMiss),
+// else the one nearest it is returned with Accuracy 1: with a
+// rank-deficient Q, K was off by O(1) on B's range with X exact.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -804,11 +807,21 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	}
 	if red.s == nil && !red.rotated {
 		res, err := dareSolve(A, B, Q, R, opts, !ill)
+		var poor *RiccatiResult
+		poorMiss := math.Inf(1)
+		gainOfX := func(c *RiccatiResult) bool {
+			if miss := red.gainMiss(A, B, R, c); miss <= 1 {
+				return true
+			} else if poor == nil || miss < poorMiss {
+				poor, poorMiss = c, miss
+			}
+			return false
+		}
 		if err == nil && res.Accuracy == 0 {
 			if !(red.sigma*red.sigma*mat.Norm(res.X, 1) > mat.Norm(R, 1)) {
 				return res, nil
 			}
-			if c, ok := red.certify(A, Q, opts, res, nil); ok && closedLoopStable(A, B, c.K, E, c.Eig) {
+			if c, ok := red.certify(A, Q, opts, res, nil); ok && closedLoopStable(A, B, c.K, E, c.Eig) && gainOfX(c) {
 				return c, nil
 			}
 		}
@@ -818,8 +831,12 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			c.Workspace = nil
 			o = &c
 		}
-		if r := red.solve(A, B, Q, o); r != nil {
+		if r := red.solve(A, B, Q, o); r != nil && gainOfX(r) {
 			return r, nil
+		}
+		if poor != nil {
+			poor.Accuracy = 1
+			return poor, nil
 		}
 		if err == nil {
 			res.Accuracy = 1
@@ -1059,6 +1076,9 @@ type reducedInputs struct {
 	bw, rw, sw *mat.Dense
 	v          *mat.Dense
 	rotated    bool
+	// exact reports a null space of B spanned exactly by V₂ (nullExact),
+	// BV₂ then set to 0.
+	exact bool
 	// sigma is B's largest singular value.
 	sigma float64
 }
@@ -1134,7 +1154,7 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 		return red, ill
 	}
 	red.b = mat.DenseCopyOf(red.bw.Slice(0, n, 0, r))
-	if nullExact(B, red.bw, red.v, sv, r) {
+	if red.exact = nullExact(B, red.bw, red.v, sv, r); red.exact {
 		bwr := red.bw.RawMatrix()
 		for i := range n {
 			clear(bwr.Data[i*bwr.Stride+r : i*bwr.Stride+m])
@@ -1178,6 +1198,181 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 	red.q.Sub(Q, &t)
 	symmetrize(red.q.RawMatrix().Data, n, n)
 	return red, ill
+}
+
+// gainTol is the relative distance from the gain of its X that a K Dare
+// returns at Accuracy 0 may have, unless the gain itself moves more under
+// eps perturbations of X or is resolved only more coarsely in
+// double-double; gainCap bounds that resolution: a gain unresolved to it
+// is not certified.
+const (
+	gainTol = 1e-6
+	gainCap = 1e-4
+)
+
+// gainMiss returns the distance ‖K − K*‖₁/‖K*‖₁ of res.K from the gain
+// K* = (R + BᵀXB)⁻¹BᵀXA of res.X (ddGain), with an exact null space of B
+// (nullExact) formed in the inputs w as V times the ddGain of BV, VᵀRV and
+// X, in units of its tolerance: the largest of
+// gainTol, 8× the move of K* under the relative eps perturbations
+// X∘(1 + eps) and X∘(1 ± eps) of X, and 32·eps²·cond for the
+// componentwise condition cond of ddGain, the resolution of K* in
+// double-double. It is +Inf when that tolerance exceeds gainCap or ddGain
+// fails. In the inputs u, R + BᵀXB loses R₂₂ even in double-double under
+// cheap control (K* off by 1e-6 at ‖BᵀXB‖/‖R‖ ≈ 1e26), where (BV)ᵀX(BV)
+// keeps it on the diagonal; without one, BV₂ rounded in float64 moved
+// K* by O(1) there. Under cheap control with rank(B) < m and a
+// rank-deficient Q, the float64 gain loses also the part of K on B's
+// range fixed by R against X's small eigenvalues: K came out off by O(1)
+// with X exact to 1e-16, and as the cost of K equals X there,
+// no Newton or Hewer step sees it.
+func (red *reducedInputs) gainMiss(A, B, R *mat.Dense, res *RiccatiResult) float64 {
+	gain := func(X *mat.Dense) (*mat.Dense, float64, bool) {
+		if !red.exact {
+			return ddGain(A, B, R, X)
+		}
+		kw, cond, ok := ddGain(A, red.bw, red.rw, X)
+		if !ok {
+			return nil, 0, false
+		}
+		return red.gain(kw, nil), cond, true
+	}
+	K, mcond, ok := gain(res.X)
+	if !ok {
+		return math.Inf(1)
+	}
+	n, _ := A.Dims()
+	nk := mat.Norm(K, 1)
+	if nk == 0 {
+		if mat.Norm(res.K, 1) == 0 {
+			return 0
+		}
+		return math.Inf(1)
+	}
+	tol := gainTol
+	xr := res.X.RawMatrix()
+	xp := mat.NewDense(n, n, nil)
+	pr := xp.RawMatrix()
+	for p := range 2 {
+		for i := range n {
+			for j := range n {
+				f := 1.0
+				if p == 1 && (i+j+i*j)&1 == 1 {
+					f = -1
+				}
+				pr.Data[i*pr.Stride+j] = xr.Data[i*xr.Stride+j] * (1 + f*eps())
+			}
+		}
+		kp, _, ok := gain(xp)
+		if !ok {
+			return math.Inf(1)
+		}
+		kp.Sub(kp, K)
+		tol = max(tol, 8*mat.Norm(kp, 1)/nk)
+	}
+	tol = max(tol, 32*eps()*eps()*mcond)
+	if !(tol <= gainCap) {
+		return math.Inf(1)
+	}
+	var d mat.Dense
+	d.Sub(res.K, K)
+	return mat.Norm(&d, 1) / (nk * tol)
+}
+
+// ddGain returns the gain (R + BᵀXB)⁻¹BᵀXA of X, its products formed
+// and the system solved (Gaussian elimination, partial pivoting) in
+// double-double, with the componentwise condition ‖|M⁻¹|·(|R| +
+// |B|ᵀ|X||B|)·|K| + |M⁻¹|·|B|ᵀ|X||A|‖₁/‖K‖₁ of K, M = R + BᵀXB, the
+// relative error of K per unit rounding of its double-double operations;
+// ok is false when a pivot vanishes or K is not finite.
+func ddGain(A, B, R, X *mat.Dense) (K *mat.Dense, cond float64, ok bool) {
+	n, m := B.Dims()
+	aRaw, bRaw, rRaw, xRaw := A.RawMatrix(), B.RawMatrix(), R.RawMatrix(), X.RawMatrix()
+	bxH, bxL := make([]float64, m*n), make([]float64, m*n)
+	ddMulAcc(m, n, n, 1, bRaw.Data, 1, bRaw.Stride, xRaw.Data, xRaw.Stride, 1, bxH, bxL, n)
+	c := 2*m + n
+	hi, lo := make([]float64, m*c), make([]float64, m*c)
+	for i := range m {
+		copy(hi[i*c:i*c+m], rRaw.Data[i*rRaw.Stride:i*rRaw.Stride+m])
+		hi[i*c+m+n+i] = 1
+	}
+	for _, bx := range [][]float64{bxH, bxL} {
+		ddMulAcc(m, m, n, 1, bx, n, 1, bRaw.Data, bRaw.Stride, 1, hi, lo, c)
+		ddMulAcc(m, n, n, 1, bx, n, 1, aRaw.Data, aRaw.Stride, 1, hi[m:], lo[m:], c)
+	}
+	w := make([]dd, m*c)
+	for i := range w {
+		w[i] = quickTwoSum(twoSum(hi[i], lo[i]))
+	}
+	for k := range m {
+		p := k
+		for i := k + 1; i < m; i++ {
+			if math.Abs(w[i*c+k].hi) > math.Abs(w[p*c+k].hi) {
+				p = i
+			}
+		}
+		if !(w[p*c+k].hi != 0) || math.IsInf(w[p*c+k].hi, 0) {
+			return nil, 0, false
+		}
+		if p != k {
+			for j := k; j < c; j++ {
+				w[k*c+j], w[p*c+j] = w[p*c+j], w[k*c+j]
+			}
+		}
+		for i := k + 1; i < m; i++ {
+			f := w[i*c+k].div(w[k*c+k])
+			for j := k + 1; j < c; j++ {
+				w[i*c+j] = w[i*c+j].add(f.mul(w[k*c+j]).neg())
+			}
+		}
+	}
+	for k := m - 1; k >= 0; k-- {
+		for j := m; j < c; j++ {
+			s := w[k*c+j]
+			for i := k + 1; i < m; i++ {
+				s = s.add(w[k*c+i].mul(w[i*c+j]).neg())
+			}
+			w[k*c+j] = s.div(w[k*c+k])
+		}
+	}
+	K = mat.NewDense(m, n, nil)
+	kRaw := K.RawMatrix()
+	for i := range m {
+		for j := range n {
+			kRaw.Data[i*kRaw.Stride+j] = w[i*c+m+j].hi
+		}
+	}
+	if !finiteSlice(kRaw.Data) {
+		return nil, 0, false
+	}
+	abs := func(d []float64, r, cols, stride int) *mat.Dense {
+		out := mat.NewDense(r, cols, nil)
+		o := out.RawMatrix().Data
+		for i := range r {
+			for j := range cols {
+				o[i*cols+j] = math.Abs(d[i*stride+j])
+			}
+		}
+		return out
+	}
+	var bx, bxb, mag, t mat.Dense
+	bx.Mul(abs(bRaw.Data, n, m, bRaw.Stride).T(), abs(xRaw.Data, n, n, xRaw.Stride))
+	bxb.Mul(&bx, abs(bRaw.Data, n, m, bRaw.Stride))
+	bxb.Add(&bxb, abs(rRaw.Data, m, m, rRaw.Stride))
+	mag.Mul(&bxb, abs(kRaw.Data, m, n, kRaw.Stride))
+	t.Mul(&bx, abs(aRaw.Data, n, n, aRaw.Stride))
+	mag.Add(&mag, &t)
+	minv := mat.NewDense(m, m, nil)
+	mi := minv.RawMatrix().Data
+	for i := range m {
+		for j := range m {
+			mi[i*m+j] = math.Abs(w[i*c+m+n+j].hi)
+		}
+	}
+	t.Reset()
+	t.Mul(minv, &mag)
+	cond = mat.Norm(&t, 1) / mat.Norm(K, 1)
+	return K, cond, !math.IsInf(cond, 0) && !math.IsNaN(cond)
 }
 
 // nullExact reports whether columns r.. of V span a null space of B
