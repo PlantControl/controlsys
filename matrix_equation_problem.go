@@ -3,7 +3,6 @@ package controlsys
 import (
 	"fmt"
 	"math"
-	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -282,15 +281,15 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 		res.step = problem.certStep
 		if x1 := problem.certX1; x1 != nil {
 			n, t := problem.n, problem.t
-			res.x1 = mat.NewDense(n, n, slices.Clone(x1))
 			if t != nil {
-				d := res.x1.RawMatrix().Data
 				for i := range n {
 					for j := range n {
-						d[i*n+j] *= t[i] * t[j]
+						x1[i*n+j] *= t[i] * t[j]
 					}
 				}
 			}
+			res.x1 = mat.NewDense(n, n, x1)
+			problem.certX1 = nil
 		}
 	} else if problem.poor != nil {
 		res.step = problem.poor.step
