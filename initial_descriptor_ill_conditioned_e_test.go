@@ -156,3 +156,51 @@ func TestInitialStateFullRankIllConditionedEArgumentErrors(t *testing.T) {
 		t.Errorf("Lsim u shape: err = %v, want ErrDimensionMismatch", err)
 	}
 }
+
+// Zero-valued delay metadata (HasDelay false) keeps the pencil route of
+// Initial and Lsim from x0: the response equals the one without metadata
+// (AZUMSC review: C2D rejected the resized inputs as a delay length
+// mismatch).
+func TestInitialStateFullRankIllConditionedEZeroDelayMetadata(t *testing.T) {
+	names, systems, _ := stiffDescriptorModels(t)
+	for k, sys := range systems {
+		n, m, p := sys.Dims()
+		x0 := onesVec(n)
+		in, err := Initial(sys, x0, 5)
+		if err != nil {
+			t.Fatalf("%s: Initial: %v", names[k], err)
+		}
+		cols := len(in.T)
+		u := mat.NewDense(cols, m, nil)
+		for s := range cols {
+			u.Set(s, 0, 1)
+		}
+		ls, err := Lsim(sys, u, in.T, x0)
+		if err != nil {
+			t.Fatalf("%s: Lsim: %v", names[k], err)
+		}
+		for _, field := range []string{"InputDelay", "OutputDelay", "Delay"} {
+			s := sys.Copy()
+			switch field {
+			case "InputDelay":
+				s.InputDelay = make([]float64, m)
+			case "OutputDelay":
+				s.OutputDelay = make([]float64, p)
+			case "Delay":
+				s.Delay = mat.NewDense(p, m, nil)
+			}
+			zi, err := Initial(s, x0, 5)
+			if err != nil {
+				t.Errorf("%s zero %s: Initial: %v", names[k], field, err)
+			} else if !mat.EqualApprox(zi.Y, in.Y, 1e-12) {
+				t.Errorf("%s zero %s: Initial differs", names[k], field)
+			}
+			zl, err := Lsim(s, u, in.T, x0)
+			if err != nil {
+				t.Errorf("%s zero %s: Lsim: %v", names[k], field, err)
+			} else if !mat.EqualApprox(zl.Y, ls.Y, 1e-12) {
+				t.Errorf("%s zero %s: Lsim differs", names[k], field)
+			}
+		}
+	}
+}

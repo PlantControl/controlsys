@@ -2168,7 +2168,8 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 // zero-state response with that input held at one, plus y0, is the
 // response from x0. The model stays a descriptor, so the zero-state
 // response keeps the pencil route of foldInaccurateParts, whose parts
-// carry x0 through their own transformations of B.
+// carry x0 through their own transformations of B. That route has no
+// nonzero delay, so zero-valued input delay metadata is dropped.
 func initialStateInput(sys *System, x0 *mat.VecDense, keepInputs bool) (*System, *mat.VecDense) {
 	n, m, p := sys.Dims()
 	k := 0
@@ -2177,6 +2178,7 @@ func initialStateInput(sys *System, x0 *mat.VecDense, keepInputs bool) (*System,
 	}
 	out := sys.Copy()
 	out.B, out.D = newDense(n, k+1), newDense(p, k+1)
+	out.InputDelay, out.Delay = nil, nil
 	if k > 0 {
 		out.B.Slice(0, n, 0, k).(*mat.Dense).Copy(sys.B)
 		out.D.Slice(0, p, 0, k).(*mat.Dense).Copy(sys.D)
