@@ -230,34 +230,48 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 }
 
 // staircasePoles returns the finite poles of (A, E) from the staircase of
-// deflateInfinite, ok false when it fails or stops at a stiff E. A
-// staircase it rescues (leakedRank) stands only when its poles carry every
-// simple, well-conditioned eigenvalue QZ of the whole pencil keeps
-// (stablePencilEigs); its poles are then moved onto QZ's finite
-// eigenvalues within leakStableTol (snapStableValues): the rounding the
-// staircase leaves beside a chain moves a pole large in A (+93147 by
-// 1.2e-4 relative beside an index-6 chain) that QZ keeps to ε·cond.
-// Otherwise the staircase without rescue decides.
+// deflateInfinite, ok false when it fails or stops at a stiff E. Where it
+// fails at an ambiguous level, the staircase with rescue (leakedRank) is
+// taken when its poles carry every simple, well-conditioned eigenvalue QZ
+// of the whole pencil keeps (stablePencilEigs); they are then moved onto
+// QZ's finite eigenvalues within leakStableTol (snapStableValues): the
+// rounding the staircase leaves beside a chain moves a pole large in A
+// (+93147 by 1.2e-4 relative beside an index-6 chain) that QZ keeps to
+// ε·cond.
 func staircasePoles(A, E *mat.Dense) (poles []complex128, ok bool, err error) {
-	a, e, _, _, nf, stiff, _, _, _, rescued, dok := deflateInfinite(A, E, false, true)
-	if dok && !stiff && rescued {
-		ad, ed := a.RawMatrix(), e.RawMatrix()
-		if poles, err := qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0); err == nil {
-			n, _ := A.Dims()
-			aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
-			if alphar, alphai, beta, qok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride); qok &&
-				snapStableValues(poles, finitePoles(alphar, alphai, beta, 0), stablePencilEigs(A, E)) {
-				return poles, true, nil
-			}
+	a, e, _, _, nf, stiff, _, _, _, dok := deflateInfinite(A, E, false, false)
+	if !dok {
+		poles, ok := rescuedStaircasePoles(A, E)
+		if !ok {
+			return nil, false, nil
 		}
-		a, e, _, _, nf, stiff, _, _, _, _, dok = deflateInfinite(A, E, false, false)
+		n, _ := A.Dims()
+		aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
+		alphar, alphai, beta, qok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
+		if !qok || !snapStableValues(poles, finitePoles(alphar, alphai, beta, 0), stablePencilEigs(A, E)) {
+			return nil, false, nil
+		}
+		return poles, true, nil
 	}
-	if !dok || stiff {
+	if stiff {
 		return nil, false, nil
 	}
 	ad, ed := a.RawMatrix(), e.RawMatrix()
 	poles, err = qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
 	return poles, true, err
+}
+
+// rescuedStaircasePoles returns the finite poles of the staircase of
+// deflateInfinite with rescue, ok false when it fails or stops at a stiff
+// E.
+func rescuedStaircasePoles(A, E *mat.Dense) ([]complex128, bool) {
+	a, e, _, _, nf, stiff, _, _, _, ok := deflateInfinite(A, E, false, true)
+	if !ok || stiff {
+		return nil, false
+	}
+	ad, ed := a.RawMatrix(), e.RawMatrix()
+	poles, err := qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
+	return poles, err == nil && len(poles) == nf
 }
 
 // snapStableValues moves each of poles within leakStableTol of one of the
@@ -617,10 +631,11 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 // count then keeps chain members and drops the pole. That split is checked
 // as the one taken past the null space of E (verifyChain); the perturbed
 // copies of sTermsStable and chainSplitReproducible split as it did.
-// Outside those copies (probe, nested) the staircase also runs with
-// rescue (deflateInfinite, no internal delays), and the split is taken
-// without it; when the rescued staircase resolves and counts another
-// number of finite eigenvalues than the split taken, that split kept
+// Outside those copies (probe, nested), when the staircase stops at an
+// ambiguous level it also runs with rescue (deflateInfinite, no internal
+// delays) once the split is taken without it; when that one resolves and
+// counts another number of finite eigenvalues than the split taken, that
+// split kept
 // members of an infinite chain among its poles or dropped a finite one:
 // a proper one that carries every pole of the rescue loses the others
 // (dropChainPoles), else errChainLeft is returned. Each eigenvalue the
@@ -665,8 +680,7 @@ func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *Sys
 	t := make([]float64, n*n)
 	tol := 100 * float64(n) * eps() * denseNorm(sys.E)
 	finite := func(_, _, beta float64) bool { return math.Abs(beta) > tol }
-	verifyChain := false
-	var rescuedPoles []complex128
+	verifyChain, rescue := false, false
 	d, index1, ratioTol, stiffSplit := weierstrassSplit(sys.A, sys.E, n)
 	blurTol, stiffTol := 1.0, 1.0
 	if stiffSplit {
@@ -681,16 +695,8 @@ func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *Sys
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
 	if !ok || nf > n-d || !index1 || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
 		resolved := false
-		a, e, qd, zd, nfd, stiff, leak, blur, egap, rescued, dok := deflateInfinite(sys.A, sys.E, true, !probe && !nested && q == 0)
-		if rescued {
-			if dok && !stiff {
-				ad, ed := a.RawMatrix(), e.RawMatrix()
-				if poles, err := qzFinitePoles(nfd, ad.Data, ad.Stride, ed.Data, ed.Stride, 0); err == nil && len(poles) == nfd {
-					rescuedPoles = poles
-				}
-			}
-			a, e, qd, zd, nfd, stiff, leak, blur, egap, _, dok = deflateInfinite(sys.A, sys.E, true, false)
-		}
+		a, e, qd, zd, nfd, stiff, leak, blur, egap, dok := deflateInfinite(sys.A, sys.E, true, false)
+		rescue = !dok && !probe && !nested && q == 0
 		all := func(_, _, _ float64) bool { return true }
 		if dok && !stiff {
 			resolved = ok && nfd == nf
@@ -941,12 +947,14 @@ func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *Sys
 			return nil, nil, nil, resplit, errChainLeft
 		}
 	}
-	if rescuedPoles != nil && nf != len(rescuedPoles) {
-		fixed, ok := sys.dropChainPoles(out, poly, rescuedPoles)
-		if !ok {
-			return nil, nil, nil, resplit, errChainLeft
+	if rescue {
+		if keep, ok := rescuedStaircasePoles(sys.A, sys.E); ok && nf != len(keep) {
+			fixed, ok := sys.dropChainPoles(out, poly, keep)
+			if !ok {
+				return nil, nil, nil, resplit, errChainLeft
+			}
+			out = fixed
 		}
-		out = fixed
 	}
 	return out, poly, nil, resplit, nil
 }
