@@ -250,8 +250,8 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // must stay within the trace of the eigenvalues left over and
 // leakStableTol. None of those may come back to jitterResolvedTol in most
 // jittered copies (jitteredEigenvalues), as a pole QZ resolves does; smear
-// moves at first order. A matched pole takes the QZ value when every copy
-// reproduces it to half the move.
+// moves at first order. A matched pole takes the QZ value when that is
+// resolved so; one QZ merged with the smear keeps the deflated value.
 func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
 	a, e, _, _, nf, _, _, _, _, _, ok := deflateStaircase(A, E, false, true, true, -1, 0)
 	if !ok {
@@ -349,27 +349,23 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 	if !ok {
 		return nil, false
 	}
-	for _, w := range left {
+	resolved := func(w complex128) bool {
 		back := 0
 		for _, c := range copies {
 			if nearestDist(c, w) <= jitterResolvedTol*cmplx.Abs(w) {
 				back++
 			}
 		}
-		if 2*back > len(copies) {
-			return nil, false
-		}
+		return 2*back > len(copies)
+	}
+	if slices.ContainsFunc(left, resolved) {
+		return nil, false
 	}
 	for j, i := range match {
 		if i < 0 {
 			continue
 		}
-		w := complex(alphar[i]/beta[i], alphai[i]/beta[i])
-		d, keep := cmplx.Abs(w-poles[j]), true
-		for _, c := range copies {
-			keep = keep && nearestDist(c, w) <= d/2
-		}
-		if keep {
+		if w := complex(alphar[i]/beta[i], alphai[i]/beta[i]); resolved(w) {
 			poles[j] = w
 		}
 	}
