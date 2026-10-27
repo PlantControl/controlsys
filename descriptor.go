@@ -219,15 +219,67 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 			}
 		}
 	}
-	if a, e, _, _, nf, stiff, _, _, _, ok := deflateInfinite(A, E, false); ok && !stiff {
-		ad, ed := a.RawMatrix(), e.RawMatrix()
-		return qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
+	if poles, ok, err := staircasePoles(A, E); ok {
+		return poles, err
 	}
 	infTol := qzInfiniteTol(100*float64(n)*eps(), normA, normE)
 	if tol := finitePoleInfTol(A, E, n, alphar, alphai, beta, infTol, normA, normE); tol > 0 {
 		infTol = tol
 	}
 	return finitePoles(alphar, alphai, beta, infTol), nil
+}
+
+// staircasePoles returns the finite poles of (A, E) from the staircase of
+// deflateInfinite, ok false when it fails or stops at a stiff E. A
+// staircase it rescues (leakedRank) stands only when its poles carry every
+// simple, well-conditioned eigenvalue QZ of the whole pencil keeps
+// (stablePencilEigs); its poles are then moved onto QZ's finite
+// eigenvalues within leakStableTol (snapStableValues): the rounding the
+// staircase leaves beside a chain moves a pole large in A (+93147 by
+// 1.2e-4 relative beside an index-6 chain) that QZ keeps to ε·cond.
+// Otherwise the staircase without rescue decides.
+func staircasePoles(A, E *mat.Dense) (poles []complex128, ok bool, err error) {
+	a, e, _, _, nf, stiff, _, _, _, rescued, dok := deflateInfinite(A, E, false, true)
+	if dok && !stiff && rescued {
+		ad, ed := a.RawMatrix(), e.RawMatrix()
+		if poles, err := qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0); err == nil {
+			n, _ := A.Dims()
+			aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
+			if alphar, alphai, beta, qok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride); qok &&
+				snapStableValues(poles, finitePoles(alphar, alphai, beta, 0), stablePencilEigs(A, E)) {
+				return poles, true, nil
+			}
+		}
+		a, e, _, _, nf, stiff, _, _, _, _, dok = deflateInfinite(A, E, false, false)
+	}
+	if !dok || stiff {
+		return nil, false, nil
+	}
+	ad, ed := a.RawMatrix(), e.RawMatrix()
+	poles, err = qzFinitePoles(nf, ad.Data, ad.Stride, ed.Data, ed.Stride, 0)
+	return poles, true, err
+}
+
+// snapStableValues moves each of poles within leakStableTol of one of the
+// QZ eigenvalues qz onto it, a real one onto a real one, each used once,
+// and reports whether every one of stable (stablePencilEigs) lies within
+// leakStableTol of a pole.
+func snapStableValues(poles, qz, stable []complex128) bool {
+	for _, w := range stable {
+		if nearestWithin(poles, w, leakStableTol) < 0 {
+			return false
+		}
+	}
+	used := make([]bool, len(qz))
+	for i, v := range poles {
+		j := nearestWithin(qz, v, leakStableTol)
+		if j < 0 || used[j] || (imag(v) == 0) != (imag(qz[j]) == 0) {
+			continue
+		}
+		used[j] = true
+		poles[i] = qz[j]
+	}
+	return true
 }
 
 // largeRetained reports whether an eigenvalue that infTol keeps is large,
@@ -565,6 +617,20 @@ func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 // count then keeps chain members and drops the pole. That split is checked
 // as the one taken past the null space of E (verifyChain); the perturbed
 // copies of sTermsStable and chainSplitReproducible split as it did.
+// Outside those copies (probe, nested) the staircase also runs with
+// rescue (deflateInfinite, no internal delays), and the split is taken
+// without it; when the rescued staircase resolves and counts another
+// number of finite eigenvalues than the split taken, that split kept
+// members of an infinite chain among its poles or dropped a finite one:
+// a proper one that carries every pole of the rescue loses the others
+// (dropChainPoles), else errChainLeft is returned. Each eigenvalue the
+// rescue deflates moves at first order under ε-perturbation of the data
+// and each it keeps does not (leakedRank), while QZ smears an index-k
+// chain to |λ| ~ ε^(−1/k), over a pole small in E: such a split read
+// proper with a transfer function up to O(1) off and a realization whose
+// spurious poles made Step overflow. The rescued split itself is not
+// taken: beside a pole beyond the samples its rounding can hide an own
+// s-term (t·s is a residue −t·λ² on λ up to t·s²/λ).
 func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *System, _, _ []*mat.Dense, resplit bool, _ error) {
 	n, m, p := sys.Dims()
 	q := sys.internalDelayCount()
@@ -600,6 +666,7 @@ func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *Sys
 	tol := 100 * float64(n) * eps() * denseNorm(sys.E)
 	finite := func(_, _, beta float64) bool { return math.Abs(beta) > tol }
 	verifyChain := false
+	var rescuedPoles []complex128
 	d, index1, ratioTol, stiffSplit := weierstrassSplit(sys.A, sys.E, n)
 	blurTol, stiffTol := 1.0, 1.0
 	if stiffSplit {
@@ -614,7 +681,16 @@ func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *Sys
 	nf, recip, ok := orderedQZ(n, sys.A.RawMatrix(), sys.E.RawMatrix(), finite, s, t, vsl, vsr, alphar, alphai, beta)
 	if !ok || nf > n-d || !index1 || !stiffSplit && largeRetained(alphar, alphai, beta, 0, qzInfiniteTol(qzLargeRatio, mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))) {
 		resolved := false
-		a, e, qd, zd, nfd, stiff, leak, blur, egap, dok := deflateInfinite(sys.A, sys.E, true)
+		a, e, qd, zd, nfd, stiff, leak, blur, egap, rescued, dok := deflateInfinite(sys.A, sys.E, true, !probe && !nested && q == 0)
+		if rescued {
+			if dok && !stiff {
+				ad, ed := a.RawMatrix(), e.RawMatrix()
+				if poles, err := qzFinitePoles(nfd, ad.Data, ad.Stride, ed.Data, ed.Stride, 0); err == nil && len(poles) == nfd {
+					rescuedPoles = poles
+				}
+			}
+			a, e, qd, zd, nfd, stiff, leak, blur, egap, _, dok = deflateInfinite(sys.A, sys.E, true, false)
+		}
 		all := func(_, _, _ float64) bool { return true }
 		if dok && !stiff {
 			resolved = ok && nfd == nf
@@ -865,11 +941,59 @@ func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *Sys
 			return nil, nil, nil, resplit, errChainLeft
 		}
 	}
+	if rescuedPoles != nil && nf != len(rescuedPoles) {
+		fixed, ok := sys.dropChainPoles(out, poly, rescuedPoles)
+		if !ok {
+			return nil, nil, nil, resplit, errChainLeft
+		}
+		out = fixed
+	}
 	return out, poly, nil, resplit, nil
 }
 
+// dropChainPoles returns the proper reduction red of sys (no internal
+// delays) without the poles that are not within leakStableTol of one of
+// keep, the finite poles of the rescued staircase, which must each match
+// one of red's: the others are members of an infinite chain QZ smeared to
+// finite. They are residualized (their static gain joins D), and the
+// result is checked as a proper chain reduction is (refitFromPencil,
+// reductionRefutedBelow). ok is false for an improper red, when red lacks
+// a pole of keep, or the result is refuted.
+func (sys *System) dropChainPoles(red *System, poly []*mat.Dense, keep []complex128) (*System, bool) {
+	n, m, p := red.Dims()
+	if poly != nil || n <= len(keep) || m == 0 || p == 0 {
+		return nil, false
+	}
+	kept := func(v complex128) bool { return nearestWithin(keep, v, leakStableTol) >= 0 }
+	g1, g2, err := decomposeModes(red, kept)
+	if err != nil {
+		return nil, false
+	}
+	if n1, _, _ := g1.Dims(); n1 != len(keep) {
+		return nil, false
+	}
+	var lu mat.LU
+	lu.Factorize(g2.A)
+	var x mat.Dense
+	if luNearSingular(&lu) || lu.SolveTo(&x, false, g2.B) != nil {
+		return nil, false
+	}
+	var cx mat.Dense
+	cx.Mul(g2.C, &x)
+	out := g1.Copy()
+	out.D.Sub(g2.D, &cx)
+	fixed, ok, miss := refitFromPencil(sys, out, nil)
+	if ok {
+		out = fixed
+	} else if miss > refitRefuted {
+		return nil, false
+	}
+	return out, !reductionRefutedBelow(sys, out, nil)
+}
+
 // errChainLeft is the error of weierstrassReduceCore when an infinite
-// Jordan chain stays among the finite eigenvalues, or a split of
+// Jordan chain stays among the finite eigenvalues (also by the count of
+// the rescued staircase), or a split of
 // deflateStiffChain does not reproduce the pencil's response
 // (reductionPolyMatches, else refitPolyKeepDegree on pencil samples) or
 // its own under rounding of the data (chainSplitReproducible).

@@ -158,7 +158,7 @@ func descriptorFoldInaccurate(E *mat.Dense) bool {
 // fails MATLAB rank although E does not, Poles(G2) would drop it, so it too
 // goes through splitStiffFullRank at its value α/β (stiffTinyBetaPole).
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
-	a, e, qd, zd, nf, stiff, _, blur, _, ok := deflateInfinite(sys.A, sys.E, true)
+	a, e, qd, zd, nf, stiff, _, blur, _, _, ok := deflateInfinite(sys.A, sys.E, true, false)
 	ok = ok && blur == 1
 	if ok && stiff {
 		_, ok = pencilIndexOne(sys.A, sys.E, sys.A.RawMatrix().Rows, mat.Norm(sys.A, 2))
@@ -493,10 +493,13 @@ func deflatedSchur(a, e, qd, zd *mat.Dense, nf int, selct func(ar, ai, b float64
 // of that block, so Q and Z, by ε·egap, and that rounding of Qᵀ·B and the
 // deflated blocks is not bounded by leak.
 // An ambiguous rank, or a near rank-deficient row block of A
-// (a nearly singular pencil), sets ok false.
-func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, ok bool) {
-	a, e, q, z, nf, stiff, leak, blur, egap, _, ok = deflateStaircase(A, E, wantQZ, false, -1, 0)
-	return a, e, q, z, nf, stiff, leak, blur, egap, ok
+// (a nearly singular pencil), sets ok false. With rescue, a level that
+// rule leaves ambiguous or decides otherwise than leakedRank takes
+// leakedRank's rank, and rescued reports it: callers check such a split
+// and otherwise take the one without rescue.
+func deflateInfinite(A, E *mat.Dense, wantQZ, rescue bool) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, rescued, ok bool) {
+	a, e, q, z, nf, stiff, leak, blur, egap, _, rescued, ok = deflateStaircase(A, E, wantQZ, false, -1, 0, nil, rescue)
+	return a, e, q, z, nf, stiff, leak, blur, egap, rescued, ok
 }
 
 // deflateStiffChain is deflateInfinite for a pencil of index ≥ 2
@@ -505,19 +508,21 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 // of E, deciding the ranks of the deflated E blocks by stiffChainRank. It
 // fails (ok false) when E is not stiff or the index is 1.
 func deflateStiffChain(A, E *mat.Dense) (a, e, q, z *mat.Dense, nf int, leak, blur, egap float64, ok bool) {
-	a, e, q, z, nf, _, leak, blur, egap, _, ok = deflateStaircase(A, E, true, true, -1, 0)
+	a, e, q, z, nf, _, leak, blur, egap, _, _, ok = deflateStaircase(A, E, true, true, -1, 0, nil, false)
 	return a, e, q, z, nf, leak, blur, egap, ok
 }
 
 // deflateStaircase is deflateInfinite, or deflateStiffChain with
 // stiffChain. With probe ≥ 0 it stops at that level (0 the full E) and
 // returns only the cnt eigenvalues of its leading k×k pencil nearest ∞
-// (nearInfiniteEigs) with k, nil when the staircase ends first; zeros
-// deflatedRank takes on the way are not checked by leakedZeros.
-func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, probeEig []complex128, ok bool) {
+// (nearInfiniteEigs) with k, nil when the staircase ends first; the ranks
+// of the levels before it are ranks[level] when given, else zeros
+// deflatedRank takes on the way are not checked by leakedZeros. rescue
+// and rescued are those of deflateInfinite.
+func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int, ranks []int, rescue bool) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, probeEig []complex128, rescued, ok bool) {
 	n, _ := A.Dims()
 	if n == 0 {
-		return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
+		return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false, false
 	}
 	buf := make([]float64, 6*n*n+n)
 	ad, ed, ud, vtd, sd, td := buf[:n*n], buf[n*n:2*n*n], buf[2*n*n:3*n*n], buf[3*n*n:4*n*n], buf[4*n*n:5*n*n], buf[5*n*n:6*n*n]
@@ -558,6 +563,9 @@ func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) 
 	leak, blur, egap = 1.0, 1.0, 1.0
 	chains := -1
 	stiffPoles := 0
+	var taken []int
+	var stable []complex128
+	stableDone := false
 	k := n
 	for level := 0; k > 0 && !stiff; level++ {
 		if clearlyNonsingular(ed, n, k, sd, qzInfiniteGap*ratio*scaleE) {
@@ -565,20 +573,23 @@ func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) 
 		}
 		copyStrided(sd, k, ed, n, k, k)
 		if !svd(lapack.SVDAll, lapack.SVDNone, k, k) {
-			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
+			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false, false
 		}
 		if k == n {
 			scaleE = sv[0]
 		}
 		if level == probe {
 			eig, eok := nearInfiniteEigs(ad, ed, n, k, cnt)
-			return nil, nil, nil, nil, k, false, 0, 0, 0, eig, eok
+			return nil, nil, nil, nil, k, false, 0, 0, 0, eig, false, eok
 		}
 		r, st, ok := descriptorRank(sv[:k], scaleE, n, k == n)
+		if level < len(ranks) {
+			r, st, ok = ranks[level], false, true
+		}
 		switch {
 		case stiffChain && k == n:
 			if _, index1 := pencilIndexOne(A, E, n, normA); !st || index1 {
-				return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
+				return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false, false
 			}
 			st = false
 			for _, s := range sv[:r] {
@@ -591,16 +602,30 @@ func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) 
 		}
 		if !ok && k < n && !stiffChain {
 			tol := 1e3 * float64(n) * eps() * scaleE
-			if r, ok = deflatedRank(sv[:k], tol, leak); ok && r < k {
+			r0, ok0 := deflatedRank(sv[:k], tol, leak)
+			r, ok = r0, ok0
+			if ok && r < k {
 				if chains < 0 {
 					chains = infiniteChainCount(A, E, n, normA)
 				}
 				ok = k-r <= chains && (probe >= 0 || leakedZeros(A, E, ad, ed, level, k, k-r))
 			}
+			if rescue && probe < 0 {
+				if chains < 0 {
+					chains = infiniteChainCount(A, E, n, normA)
+				}
+				if !stableDone {
+					stable, stableDone = stablePencilEigs(A, E), true
+				}
+				if r1, ok1 := leakedRank(A, E, ad, ed, level, k, r0, ok0, chains, taken, stable); ok1 != ok || ok && r1 != r {
+					r, ok, rescued = r1, ok1, true
+				}
+			}
 			blur = max(blur, leak)
 		}
+		taken = append(taken, r)
 		if !ok {
-			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
+			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false, false
 		}
 		stiff = st
 		d := k - r
@@ -638,7 +663,7 @@ func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) 
 		}
 		impl.Dorgqr(k, k, d, ud, k, tau, work, len(work))
 		if !svd(lapack.SVDNone, lapack.SVDNone, d, d) || sv[d-1] <= qzInfiniteGap*tolA {
-			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
+			return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false, false
 		}
 		leak = min(qzInfiniteGap, leak*max(1, normA/sv[d-1]))
 		zk := vtd[:k*k]
@@ -659,7 +684,7 @@ func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) 
 		}
 		k = r
 	}
-	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, stiff, leak, blur, egap, nil, true
+	return mat.NewDense(n, n, ad), mat.NewDense(n, n, ed), denseOrNil(qd, n), denseOrNil(zd, n), k, stiff, leak, blur, egap, nil, rescued, true
 }
 
 // leakedZeros reports whether the cnt singular values that deflatedRank
@@ -692,7 +717,7 @@ func leakedZeros(A, E *mat.Dense, ad, ed []float64, level, k, cnt int) bool {
 		return c
 	}
 	for range leakDraws {
-		_, _, _, _, kc, _, _, _, _, got, ok := deflateStaircase(jitter(A), jitter(E), false, false, level, cnt)
+		_, _, _, _, kc, _, _, _, _, got, _, ok := deflateStaircase(jitter(A), jitter(E), false, false, level, cnt, nil, false)
 		if !ok || kc != k || got == nil {
 			return true
 		}
@@ -707,6 +732,156 @@ func leakedZeros(A, E *mat.Dense, ad, ed []float64, level, k, cnt int) bool {
 		}
 	}
 	return false
+}
+
+// leakedRank decides the rank of the E block (size k) of staircase level
+// of (A, E) that descriptorRank finds ambiguous, given rank r of
+// deflatedRank (ok false when it too is ambiguous), the chain count of
+// infiniteChainCount and the ranks taken at the levels before. The k
+// eigenvalues of the leading k×k block of the deflated pencil (ad, ed) are
+// compared with those of leakDraws copies of A and E with entries scaled
+// by 1 + δ, |δ| ≤ 4ε, deflated with the same ranks (stagedEigsMoved). From
+// a finite pole they are a function of the data and come back to
+// leakStableTol. A zero the rounding of an infinite chain leaves (the
+// leak) makes perturbed chain eigenvalues, which move at first order
+// (ε^(1/j) for j members left) and so do not: one member left goes near ∞,
+// more are smeared to a ring of radius ~δ^(−1/j), where a finite pole
+// large in A can be the eigenvalue nearest ∞. Such a pole, accurate in QZ
+// of the whole pencil, moves in the block by the rounding the staircase
+// left at the levels before; an eigenvalue within leakStableTol of one of
+// stable (stablePencilEigs) does not count as moved. The k − r zeros of
+// deflatedRank, at most chains, stand when the k − r eigenvalues nearest ∞
+// do not all come back, or at least k − r eigenvalues move; more zeros
+// than chains are ambiguous. When none moves, the small singular values,
+// zeros or ambiguous, are finite poles small in E: the block is
+// nonsingular (rank k). Anything else is ambiguous (ok false); an
+// infinite eigenvalue or a copy that fails leaves the k − r zeros
+// standing.
+func leakedRank(A, E *mat.Dense, ad, ed []float64, level, k, r int, ok bool, chains int, ranks []int, stable []complex128) (int, bool) {
+	n, _ := A.Dims()
+	ref, eok := nearInfiniteEigs(ad, ed, n, k, k)
+	var gone []bool
+	if eok {
+		gone, eok = stagedEigsMoved(A, E, level, k, ref, ranks)
+	}
+	if !eok {
+		return r, ok && k-r <= chains
+	}
+	moved, nearMoved := 0, false
+	for i, g := range gone {
+		if g && nearestWithin(stable, ref[i], leakStableTol) < 0 {
+			moved++
+			nearMoved = nearMoved || ok && i < k-r
+		}
+	}
+	switch {
+	case ok && r < k && k-r > chains:
+		return r, false
+	case moved == 0:
+		return k, true
+	case ok && r < k && (nearMoved || moved >= k-r):
+		return r, true
+	}
+	return r, ok && r == k
+}
+
+// stablePencilEigs returns the finite eigenvalues of the pencil (A, E)
+// from QZ that each of leakDraws copies of A and E with entries scaled by
+// 1 + δ, |δ| ≤ 4ε, returns to √ε relative: simple, well-conditioned
+// poles. The members of an infinite Jordan chain that rounding makes
+// finite, |λ| ~ δ^(−1/k), move at first order, and a pole QZ cannot
+// resolve beside them (small in E within their smear) is not returned.
+func stablePencilEigs(A, E *mat.Dense) []complex128 {
+	n, _ := A.Dims()
+	eigs := func(a, e *mat.Dense) []complex128 {
+		ar, er := a.RawMatrix(), e.RawMatrix()
+		alphar, alphai, beta, ok := qzEigenvalues(n, ar.Data, ar.Stride, er.Data, er.Stride)
+		if !ok {
+			return nil
+		}
+		return finitePoles(alphar, alphai, beta, 0)
+	}
+	ref := eigs(A, E)
+	keep := make([]bool, len(ref))
+	for i := range keep {
+		keep[i] = true
+	}
+	rng := rand.New(rand.NewPCG(3, 5))
+	jitter := func(m *mat.Dense) *mat.Dense {
+		c := mat.DenseCopyOf(m)
+		raw := c.RawMatrix()
+		for i := range raw.Rows {
+			row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+			for j := range row {
+				row[j] *= 1 + 4*eps()*(2*rng.Float64()-1)
+			}
+		}
+		return c
+	}
+	tol := math.Sqrt(eps())
+	for range leakDraws {
+		got := eigs(jitter(A), jitter(E))
+		for i, w := range ref {
+			keep[i] = keep[i] && nearestWithin(got, w, tol) >= 0
+		}
+	}
+	var out []complex128
+	for i, w := range ref {
+		if keep[i] && !cmplx.IsInf(w) && !cmplx.IsNaN(w) {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// nearestWithin returns the index of the value of set nearest w when it
+// lies within tol·|w| of w, else −1.
+func nearestWithin(set []complex128, w complex128, tol float64) int {
+	best, at := math.Inf(1), -1
+	for i, v := range set {
+		if d := cmplx.Abs(v - w); d < best {
+			best, at = d, i
+		}
+	}
+	if at < 0 || !(best <= tol*cmplx.Abs(w)) {
+		return -1
+	}
+	return at
+}
+
+// stagedEigsMoved reports for each of ref, the eigenvalues of the leading
+// k×k block at staircase level of (A, E), whether some of leakDraws copies
+// of A and E with entries scaled by 1 + δ, |δ| ≤ 4ε, deflated with the
+// ranks of the levels before, does not return it to leakStableTol. ok is
+// false when a copy fails or has an infinite eigenvalue there.
+func stagedEigsMoved(A, E *mat.Dense, level, k int, ref []complex128, ranks []int) (gone []bool, ok bool) {
+	rng := rand.New(rand.NewPCG(3, 5))
+	jitter := func(m *mat.Dense) *mat.Dense {
+		c := mat.DenseCopyOf(m)
+		raw := c.RawMatrix()
+		for i := range raw.Rows {
+			row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+			for j := range row {
+				row[j] *= 1 + 4*eps()*(2*rng.Float64()-1)
+			}
+		}
+		return c
+	}
+	gone = make([]bool, len(ref))
+	for range leakDraws {
+		_, _, _, _, kc, _, _, _, _, got, _, ok := deflateStaircase(jitter(A), jitter(E), false, false, level, len(ref), ranks, false)
+		if !ok || kc != k || got == nil {
+			return nil, false
+		}
+		for i, w := range ref {
+			found := false
+			for _, g := range got {
+				found = found || cmplx.Abs(g-w) <= leakStableTol*cmplx.Abs(w)
+			}
+			gone[i] = gone[i] || !found
+		}
+	}
+	return gone, true
 }
 
 // nearInfiniteEigs returns the cnt generalized eigenvalues of the leading
@@ -736,7 +911,7 @@ func nearInfiniteEigs(ad, ed []float64, n, k, cnt int) (eig []complex128, ok boo
 	return eig, true
 }
 
-// leakDraws and leakStableTol set leakedZeros. Over the package tests and
+// leakDraws and leakStableTol set leakedZeros and leakedRank. Over the package tests and
 // 3000 chains beside a pole small in E (cond(U), cond(V) up to 1e4), the
 // eigenvalues of finite poles moved by at most 5.6e-6 relative, those of
 // leaked rounding by at least 2.9e-2.
