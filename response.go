@@ -1884,7 +1884,11 @@ func Damp(sys *System) ([]DampInfo, error) {
 
 // Step returns the step response of each input channel. Descriptor models
 // follow MATLAB: proper singular-E models are reduced to an explicit model
-// plus feedthrough, improper ones return ErrImproperModel. Continuous models
+// plus feedthrough, improper ones return ErrImproperModel. A continuous
+// delay-free model with full-rank E too ill-conditioned for E⁻¹A (as in
+// TransferFunction, with LU condition estimate 1e6 or more; for Impulse
+// from 1e4) is simulated from its generalized Schur parts, so the
+// response follows the poles of the pencil (A, E). Continuous models
 // with internal delays of one common length are sampled exactly (method of
 // steps) while the chain fits its size and work budget; past it, and for
 // other internal-delay models, they are simulated through the approximate
@@ -1898,7 +1902,7 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Step", sys, tFinal); err != nil {
 		return nil, err
 	}
-	sys, _, _, err := sys.timeResponseForm(nil)
+	sys, err := sys.zeroStateResponseForm()
 	if err != nil {
 		return nil, fmt.Errorf("Step: %w", err)
 	}
@@ -1932,6 +1936,13 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Impulse", sys, tFinal); err != nil {
 		return nil, err
 	}
+	if parts, ok := stiffContinuousDescriptorParts(sys); ok {
+		resp, err := stiffDescriptorImpulse(sys, parts, tFinal)
+		if err != nil {
+			return nil, fmt.Errorf("Impulse: %w", err)
+		}
+		return resp, nil
+	}
 	sys, _, _, err := sys.timeResponseForm(nil)
 	if err != nil {
 		return nil, fmt.Errorf("Impulse: %w", err)
@@ -1962,6 +1973,66 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 		return nil, fmt.Errorf("Impulse: %w", err)
 	}
 	return resp, nil
+}
+
+// zeroStateResponseForm is timeResponseForm without an initial state,
+// except that a continuous descriptor with foldInaccurateParts stays a
+// descriptor: its poles are then those of the pencil and C2D discretizes
+// its parts instead of the LU fold E⁻¹A.
+func (sys *System) zeroStateResponseForm() (*System, error) {
+	if foldInaccurateContinuous(sys) {
+		return sys, nil
+	}
+	out, _, _, err := sys.timeResponseForm(nil)
+	return out, err
+}
+
+// foldInaccurateContinuous reports whether the continuous sys has
+// foldInaccurateParts.
+func foldInaccurateContinuous(sys *System) bool {
+	if !sys.IsContinuous() {
+		return false
+	}
+	_, ok := foldInaccurateParts(sys)
+	return ok
+}
+
+// stiffContinuousDescriptorParts is stiffDescriptorParts for a continuous
+// model.
+func stiffContinuousDescriptorParts(sys *System) ([]*System, bool) {
+	if !sys.IsContinuous() {
+		return nil, false
+	}
+	return stiffDescriptorParts(sys)
+}
+
+// stiffDescriptorImpulse is the impulse response of sys on the automatic
+// grid from the parts of stiffDescriptorParts, each sampled exactly as the
+// discrete impulse response of (A_d, A_d·B, C, C·B), A_d = e^{A·dt}: the
+// step form of impulseAsStepModel cancels C·B of a stiff part (~1e14)
+// against its state to an absolute 1e-2.
+func stiffDescriptorImpulse(sys *System, parts []*System, tFinal float64) (*TimeResponse, error) {
+	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
+	if err != nil {
+		return nil, err
+	}
+	disc := make([]*System, len(parts))
+	for i, part := range parts {
+		d, err := part.discretizeZOH(dt)
+		if err != nil {
+			return nil, fmt.Errorf("auto-discretize: %w", err)
+		}
+		d.B.Mul(d.A, part.B)
+		d.D.Mul(part.C, part.B)
+		disc[i] = d
+	}
+	sim, err := parallelExplicit(disc)
+	if err != nil {
+		return nil, err
+	}
+	propagateIONames(sim, sys)
+	plan := timeResponsePlan{original: sys, sim: sim, t: t, dt: dt, steps: len(t), wasContinuous: true}
+	return plan.allInputResponse(impulseResponse)
 }
 
 // impulseAsStepModel returns a model whose step response equals the
@@ -2204,7 +2275,19 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	if _, _, p := sys.Dims(); p == 0 {
 		return nil, fmt.Errorf("Lsim: model has no outputs: %w", ErrDimensionMismatch)
 	}
-	sys, x0, _, err := sys.timeResponseForm(x0)
+	var err error
+	stiff := false
+	if x0 == nil || allZeroVec(x0) {
+		stiff = foldInaccurateContinuous(sys)
+	}
+	if stiff {
+		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
+			return nil, fmt.Errorf("Lsim: x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
+		}
+		x0 = nil
+	} else {
+		sys, x0, _, err = sys.timeResponseForm(x0)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("Lsim: %w", err)
 	}

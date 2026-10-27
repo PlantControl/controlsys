@@ -221,7 +221,19 @@ func fohKernel(a *mat.Dense, dt float64) (ad, k0, k1 *mat.Dense) {
 	return fohInputIntegrals(a, eye, dt)
 }
 
+// fohInputIntegrals returns e^{a·dt}, Γ₀ = ∫₀^dt e^{a·s} ds·b and Γ₁ =
+// ∫₀^dt e^{a·(dt−s)}·s ds·b/dt, by mode cluster when a·dt is stiff
+// (stiffModalHold).
 func fohInputIntegrals(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Dense) {
+	if _, m := b.Dims(); m > 0 {
+		if ad, g, ok := stiffModalHold(a, b, dt, fohHoldLeaf); ok {
+			return ad, g[0], g[1]
+		}
+	}
+	return fohAugmented(a, b, dt)
+}
+
+func fohAugmented(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Dense) {
 	n, _ := a.Dims()
 	_, m := b.Dims()
 	q := n + 2*m

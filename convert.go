@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"math/cmplx"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -14,7 +15,15 @@ import (
 // c2d(sysc,Ts,method) is C2D(dt, C2DOptions{Method: method}). Input, output
 // and I/O delays become sample delays (fractional ones per opts), internal
 // delays stay internal, and a singular-E descriptor model is first reduced as
-// MATLAB dss2ss does. An already discrete model returns ErrWrongDomain;
+// MATLAB dss2ss does. A delay-free model with full-rank E too
+// ill-conditioned for E⁻¹A (as in TransferFunction; for all methods but
+// matched, also LU condition estimate 1e6 or more) is discretized from its
+// generalized Schur parts, which keep the poles of the pencil (A, E), by
+// every method but least squares (matched from the transfer function of
+// the pencil); the result then has new state coordinates and no state
+// names. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
+// shape, such as those parts, exponentiate its modes of different scale
+// separately; with all modes stiff, any A takes Γ = A⁻¹(e^{A·dt} − I)·B. An already discrete model returns ErrWrongDomain;
 // invalid options return ErrInvalidConversionOptions.
 func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {
@@ -28,6 +37,19 @@ func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 }
 
 func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
+	if opts.Method != C2DMethodLeastSquares && sys.IsContinuous() {
+		route := foldInaccurateParts
+		if opts.Method == C2DMethodMatched {
+			route = stiffDescriptorParts
+		}
+		if parts, ok := route(sys); ok {
+			normalized, err := normalizeC2DOptions(dt, opts)
+			if err != nil {
+				return nil, err
+			}
+			return discretizeStiffDescriptor(sys, parts, dt, normalized)
+		}
+	}
 	if !sys.HasDelay() && !sys.IsDescriptor() && opts.Method != C2DMethodLeastSquares {
 		normalized, err := normalizeC2DOptions(dt, opts)
 		if err != nil {
@@ -326,23 +348,43 @@ func (sys *System) discretizeZOH(dt float64) (*System, error) {
 		return newDelayConversionPolicy(dt).applyDiscreteDelayFields(out, sys)
 	}
 
-	nm := n + m
 	if m == 0 {
-		var eA mat.Dense
-		Adt := mat.NewDense(n, n, nil)
-		Adt.Scale(dt, sys.A)
-		eA.Exp(Adt)
-		Ad := mat.NewDense(n, n, nil)
-		Ad.Copy(&eA)
+		Ad, ok := stiffExp(sys.A, dt)
+		if !ok {
+			Ad = expmScaled(sys.A, dt)
+		}
 		out := &System{A: Ad, B: denseCopy(sys.B), C: C, D: D, Dt: dt}
 		propagateNames(out, sys)
 		return newDelayConversionPolicy(dt).applyDiscreteDelayFields(out, sys)
 	}
 
+	Ad, gammas, ok := stiffModalHold(sys.A, sys.B, dt, zohHoldLeaf)
+	var Bd *mat.Dense
+	if ok {
+		Bd = gammas[0]
+	} else {
+		Ad, Bd = zohAugmented(sys.A, sys.B, dt)
+	}
+	out := &System{A: Ad, B: Bd, C: C, D: D, Dt: dt}
+	policy := newDelayConversionPolicy(dt)
+	out, err := policy.applyDiscreteDelayFields(out, sys)
+	if err != nil {
+		return nil, err
+	}
+	propagateNames(out, sys)
+	return out, nil
+}
+
+// zohAugmented returns e^{a·dt} and ∫₀^dt e^{a·s} ds·b from one exponential
+// of [a b; 0 0]·dt.
+func zohAugmented(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
+	n, _ := a.Dims()
+	_, m := b.Dims()
+	nm := n + m
 	M := mat.NewDense(nm, nm, nil)
 	mRaw := M.RawMatrix()
-	aRaw := sys.A.RawMatrix()
-	bRaw := sys.B.RawMatrix()
+	aRaw := a.RawMatrix()
+	bRaw := b.RawMatrix()
 	for i := range n {
 		mRow := mRaw.Data[i*mRaw.Stride:]
 		aRow := aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+n]
@@ -365,17 +407,170 @@ func (sys *System) discretizeZOH(dt float64) (*System, error) {
 		copy(adData[i*n:], emRaw.Data[i*emRaw.Stride:i*emRaw.Stride+n])
 		copy(bdData[i*m:], emRaw.Data[i*emRaw.Stride+n:i*emRaw.Stride+n+m])
 	}
-	Ad := mat.NewDense(n, n, adData)
-	Bd := mat.NewDense(n, m, bdData)
+	return mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData)
+}
 
-	out := &System{A: Ad, B: Bd, C: C, D: D, Dt: dt}
-	policy := newDelayConversionPolicy(dt)
-	out, err := policy.applyDiscreteDelayFields(out, sys)
+// stiffDescriptorParts returns, for a delay-free descriptor sys with
+// full-rank ill-conditioned E (stiffPencilSplit, splitFastPencil), explicit parts whose sum
+// has the transfer function and the poles of the pencil (A, E). The LU
+// fold E⁻¹A (ToExplicit) of such an E moves the slow poles by cond(E)·ε,
+// up to a stability flip, and one matrix exponential of the stiff pole
+// beside them loses the slow dynamics to the squarings. ok is false when
+// the fold is accurate, E is rank deficient, or the generalized Schur form
+// zeroed the stiff part's E (deflated).
+func stiffDescriptorParts(sys *System) ([]*System, bool) {
+	if !sys.IsDescriptor() || sys.HasDelay() {
+		return nil, false
+	}
+	whole, slow, fast, ok := stiffPencilSplit(sys)
+	if !ok {
+		return nil, false
+	}
+	if fast == nil {
+		return []*System{whole}, true
+	}
+	fastParts, ok := splitFastPencil(fast)
+	if !ok {
+		return nil, false
+	}
+	return append([]*System{slow}, fastParts...), true
+}
+
+// foldAccurateECond is the 1-norm condition estimate of E below which C2D
+// (other than matched) and the zero-state Step and Lsim take the LU fold E⁻¹A
+// (ToExplicit) of a full-rank E even when stiffDescriptorParts applies: its
+// cond(E)·ε error then stays under 1e-9 relative in the discrete response
+// and 1e-7 in the step response, where the pencil parts cost a generalized
+// Schur split and several matrix exponentials. Impulse is not gated: the
+// step form of the fold cancels C·B of the stiff pole to worse than 1e-7
+// already at cond(E) = 1e4.
+const foldAccurateECond = 1e6
+
+// foldInaccurateParts is stiffDescriptorParts for an E whose LU condition
+// estimate is foldAccurateECond or more.
+func foldInaccurateParts(sys *System) ([]*System, bool) {
+	if !sys.IsDescriptor() {
+		return nil, false
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	if lu.Cond() < foldAccurateECond {
+		return nil, false
+	}
+	return stiffDescriptorParts(sys)
+}
+
+// splitFastPencil returns explicit parts of the fast descriptor part of
+// stiffPencilSplit, split again by the ordered generalized Schur form into
+// modes with |λ| < qzLargeRatio·ρ and the rest, recursively. Folded whole
+// by svdExplicit, a fast part with two stiff singular values of E keeps its
+// slower stiff pole only to ε·‖E⁻¹A‖ (1e-6 relative at |λ| ~ 1e4 beside
+// 1e15), while the generalized Schur form resolves it to ε relative and
+// the triangular fold of the leading block keeps it. ok is false when the
+// fold is exactly singular (deflated).
+func splitFastPencil(fast *System) ([]*System, bool) {
+	folded, ok := svdExplicit(fast)
+	if !ok {
+		return nil, false
+	}
+	n, _, _ := fast.Dims()
+	if n == 1 {
+		return []*System{folded}, true
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(folded.A, mat.EigenNone) {
+		return []*System{folded}, true
+	}
+	rho := 0.0
+	for _, l := range eig.Values(nil) {
+		rho = math.Max(rho, cmplx.Abs(l))
+	}
+	slow, rest, err := decomposeGeneralizedQZ(fast, func(l complex128) bool {
+		return cmplx.Abs(l) < qzLargeRatio*rho
+	})
+	if err != nil {
+		return []*System{folded}, true
+	}
+	n1, _, _ := slow.Dims()
+	n2, _, _ := rest.Dims()
+	if n1 == 0 || n2 == 0 {
+		return []*System{folded}, true
+	}
+	restParts, ok := splitFastPencil(rest)
+	if !ok {
+		return []*System{folded}, true
+	}
+	return append([]*System{slow}, restParts...), true
+}
+
+// discretizeStiffDescriptor discretizes the descriptor sys from its
+// stiffDescriptorParts. ZOH, FOH, impulse and Tustin are linear in the
+// model, so each part is discretized on its own and the results are
+// connected in parallel, with the metadata of sys; the state
+// coordinates are those of the parts, so state names are dropped. Matched
+// maps the poles and zeros of the transfer function of the pencil.
+func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2DOptions) (*System, error) {
+	if opts.Method == C2DMethodMatched {
+		return sys.discretizeMatched(dt)
+	}
+	disc := make([]*System, len(parts))
+	for i, part := range parts {
+		var d *System
+		var err error
+		switch opts.Method {
+		case C2DMethodTustin:
+			d, err = part.discretizeTustin(dt, opts.PrewarpFrequency)
+		case C2DMethodFOH:
+			d, err = part.discretizeModifiedFOH(dt)
+		case C2DMethodImpulse:
+			d, err = part.discretizeImpulseParity(dt)
+		default:
+			d, err = part.discretizeZOH(dt)
+		}
+		if err != nil {
+			return nil, err
+		}
+		disc[i] = d
+	}
+	out, err := parallelExplicit(disc)
 	if err != nil {
 		return nil, err
 	}
+	out.Dt = dt
 	propagateNames(out, sys)
+	out.StateName = nil
 	return out, nil
+}
+
+// parallelExplicit returns the explicit parallel connection of parts with
+// equal input and output counts: block-diagonal A, stacked B, adjacent C
+// columns and summed D.
+func parallelExplicit(parts []*System) (*System, error) {
+	_, m, p := parts[0].Dims()
+	n := 0
+	for _, part := range parts {
+		k, _, _ := part.Dims()
+		n += k
+	}
+	A, B, C, D := newDense(n, n), newDense(n, m), newDense(p, n), newDense(p, m)
+	off := 0
+	for _, part := range parts {
+		k, _, _ := part.Dims()
+		if k > 0 {
+			A.Slice(off, off+k, off, off+k).(*mat.Dense).Copy(part.A)
+			if m > 0 {
+				B.Slice(off, off+k, 0, m).(*mat.Dense).Copy(part.B)
+			}
+			if p > 0 {
+				C.Slice(0, p, off, off+k).(*mat.Dense).Copy(part.C)
+			}
+		}
+		if p > 0 && m > 0 {
+			D.Add(D, part.D)
+		}
+		off += k
+	}
+	return newNoCopy(A, B, C, D, parts[0].Dt)
 }
 
 func discretizeWithInternalDelay(sys *System, dt float64, opts C2DOptions) (*System, error) {
