@@ -535,7 +535,13 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // sTermsStable finds not real, are a residue the split moved from finite
 // poles near ∞: when every one of them moves alike under sTermsStable's
 // perturbation (leakDriftShared), they are absorbed back before
-// reductionMatches confirms the reduction. Beside an index ≥ 2 chain an
+// reductionMatches confirms the reduction. Absorbed terms above the
+// widened level leave a second-order remainder of the residue (a pole of
+// E singular value 1e-9 relative: 3e-9 at the data scale, above
+// reductionMatchTol); the absorbed reduction then stands when its refit
+// to the pencil samples matches them and it missed them by at most
+// refitRefuted (refitFromPencil): the fit that explained the terms kept
+// the poles and the proper structure. Beside an index ≥ 2 chain an
 // improper split is checked against the pencil samples
 // (refitPolyFromPencil), and a stiff improper chain split that misses the
 // data-scale points of reductionPolyMatches stands when its refit at the
@@ -544,14 +550,22 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // refute, or that no pencil solve can check (reductionRefutedBelow), fails
 // closed.
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
-	out, poly, _, err := sys.weierstrassReduceCore(false, false)
+	out, poly, _, _, err := sys.weierstrassReduceCore(false, false, true)
 	return out, poly, err
 }
 
 // weierstrassReduceCore is weierstrassReduceParts; with probe it returns
 // only the terms c·N^k·b of algebraicTerms (nil without a nilpotent part).
-// nested skips chainSplitReproducible, for its own copies.
-func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.Dense, []*mat.Dense, error) {
+// nested skips chainSplitReproducible, for its own copies. With
+// tryResplit, an index ≥ 2 pencil with a stiff E (or one the staircase of
+// deflateInfinite cannot resolve) whose QZ split keeps fewer than rank(E)
+// finite eigenvalues but another count than deflateStiffChain is split by
+// deflateStiffChain instead, and resplit reports it: QZ smears a chain to
+// |λ| ~ ε^(−1/k), where a finite pole small in E sits as well, and its
+// count then keeps chain members and drops the pole. That split is checked
+// as the one taken past the null space of E (verifyChain); the perturbed
+// copies of sTermsStable and chainSplitReproducible split as it did.
+func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *System, _, _ []*mat.Dense, resplit bool, _ error) {
 	n, m, p := sys.Dims()
 	q := sys.internalDelayCount()
 	mi, pi := max(m+q, 1), max(p+q, 1)
@@ -622,22 +636,29 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 			// A stiff E stopped the staircase at its null space; past it
 			// the split is checked against the pencil (verifyChain).
 			if !dok || !stiff {
-				return nil, nil, nil, errChainLeft
+				return nil, nil, nil, resplit, errChainLeft
 			}
 			a, e, qd, zd, nfd, leak, blur, egap, dok = deflateStiffChain(sys.A, sys.E)
 			if !dok {
-				return nil, nil, nil, errChainLeft
+				return nil, nil, nil, resplit, errChainLeft
 			}
 			sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true)
 			if err != nil || n1 != nfd {
-				return nil, nil, nil, errChainLeft
+				return nil, nil, nil, resplit, errChainLeft
 			}
 			s, t, vsl, vsr, nf, recip = sd, td, qs, zs, nfd, rc
 			blurTol, stiffTol, verifyChain = max(blur, math.Sqrt(leak)), egap, true
+		} else if tryResplit && q == 0 && ok && !resolved && !index1 && (!dok || stiff) {
+			if a, e, qd, zd, nfd, leak, blur, egap, sok := deflateStiffChain(sys.A, sys.E); sok && nfd != nf {
+				if sd, td, qs, zs, n1, rc, err := deflatedSchur(a, e, qd, zd, nfd, all, true); err == nil && n1 == nfd {
+					s, t, vsl, vsr, nf, recip = sd, td, qs, zs, nfd, rc
+					blurTol, stiffTol, verifyChain, resplit = max(blur, math.Sqrt(leak)), egap, true, true
+				}
+			}
 		}
 	}
 	if !ok {
-		return nil, nil, nil, fmt.Errorf("generalized Schur decomposition failed: %w", ErrDescriptorSingular)
+		return nil, nil, nil, resplit, fmt.Errorf("generalized Schur decomposition failed: %w", ErrDescriptorSingular)
 	}
 	ni := n - nf
 
@@ -659,7 +680,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		l.Scale(-1, l)
 		scale, ok := qzSylvester(n, nf, recip, s, t, r.RawMatrix().Data, l.RawMatrix().Data)
 		if !ok || scale == 0 {
-			return nil, nil, nil, fmt.Errorf("Weierstrass decoupling failed: %w", ErrDescriptorSingular)
+			return nil, nil, nil, resplit, fmt.Errorf("Weierstrass decoupling failed: %w", ErrDescriptorSingular)
 		}
 		r.Scale(1/scale, r)
 		l.Scale(1/scale, l)
@@ -682,12 +703,12 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		s22 := extractBlock(S, nf, nf, ni, ni)
 		lu.Factorize(s22)
 		if luNearSingular(&lu) {
-			return nil, nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
+			return nil, nil, nil, resplit, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
 		bScale := denseNorm(bAug) / denseNorm(s22)
 		var b, nilpotent mat.Dense
 		if err := lu.SolveTo(&b, false, extractBlock(&bq, nf, 0, ni, mi)); err != nil {
-			return nil, nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
+			return nil, nil, nil, resplit, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 		}
 		if !index1 || ni != d {
 			chain = true
@@ -699,12 +720,12 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 				return v
 			}, e22)
 			if err := lu.SolveTo(&nilpotent, false, e22); err != nil {
-				return nil, nil, nil, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
+				return nil, nil, nil, resplit, fmt.Errorf("singular pencil sE-A: %w", ErrDescriptorSingular)
 			}
 			rel := 1e3 * float64(n) * eps()
 			terms, vecTols := algebraicTerms(c2, &nilpotent, &b, cScale, bScale, rel, 1)
 			if probe {
-				return nil, nil, terms, nil
+				return nil, nil, terms, resplit, nil
 			}
 			normTols := algebraicNormTols(len(terms), c2, &nilpotent, &b, cScale, bScale, rel)
 			normStatic := algebraicPartStatic(terms, normTols)
@@ -719,7 +740,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 				switch {
 				case normStatic || algebraicPartStatic(terms, wide):
 					if q == 0 {
-						if stable, ok, drift := sys.sTermsStable(terms); ok {
+						if stable, ok, drift := sys.sTermsStable(terms, resplit); ok {
 							impulsive = stable
 							leakDrift = drift
 						}
@@ -739,9 +760,9 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 				}
 				if impulsive && (poly == nil || q > 0) {
 					if verifyChain {
-						return nil, nil, nil, errChainLeft
+						return nil, nil, nil, resplit, errChainLeft
 					}
-					return nil, nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+					return nil, nil, nil, resplit, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 				}
 			}
 		}
@@ -761,10 +782,10 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		aRed := mat.NewDense(nf, nf, nil)
 		lu.Factorize(extractBlock(T, 0, 0, nf, nf))
 		if err := lu.SolveTo(aRed, false, extractBlock(S, 0, 0, nf, nf)); err != nil {
-			return nil, nil, nil, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
+			return nil, nil, nil, resplit, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
 		}
 		if err := lu.SolveTo(&bRed, false, b1); err != nil {
-			return nil, nil, nil, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
+			return nil, nil, nil, resplit, fmt.Errorf("slow subsystem: %w", ErrDescriptorSingular)
 		}
 		out.A = aRed
 		out.B = subDense(&bRed, 0, 0, nf, m)
@@ -782,8 +803,12 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 	}
 	if leakOnly && poly != nil {
 		if fixed, ok := absorbStiffLeak(out, leakTerms, leakTols, true); ok {
-			if stable, sok, drift := sys.sTermsStable(leakTerms); sok && !stable && leakDriftShared(leakTerms, leakTols, drift) && reductionMatches(sys, fixed) {
-				out, poly = fixed, nil
+			if stable, sok, drift := sys.sTermsStable(leakTerms, resplit); sok && !stable && leakDriftShared(leakTerms, leakTols, drift) {
+				if reductionMatches(sys, fixed) {
+					out, poly = fixed, nil
+				} else if refit, rok, miss := refitFromPencil(sys, fixed, nil); rok && miss <= refitRefuted {
+					out, poly = refit, nil
+				}
 			}
 		}
 		if poly != nil {
@@ -801,9 +826,9 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 			out, poly = fixed, nil
 		} else if poly == nil {
 			if verifyChain {
-				return nil, nil, nil, errChainLeft
+				return nil, nil, nil, resplit, errChainLeft
 			}
-			return nil, nil, nil, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
+			return nil, nil, nil, resplit, fmt.Errorf("descriptor has impulsive modes: %w", ErrImproperModel)
 		}
 	}
 	if chain && poly != nil && q == 0 {
@@ -811,7 +836,7 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 			out, poly = fixed, fpoly
 		}
 		if nf > 0 && reductionRefutedBelow(sys, out, poly) {
-			return nil, nil, nil, errReductionRefuted
+			return nil, nil, nil, resplit, errReductionRefuted
 		}
 	}
 	if chain && poly == nil && q == 0 && nf > 0 {
@@ -819,28 +844,28 @@ func (sys *System) weierstrassReduceCore(probe, nested bool) (*System, []*mat.De
 		if ok {
 			out = fixed
 		} else if miss > refitRefuted {
-			return nil, nil, nil, errReductionRefuted
+			return nil, nil, nil, resplit, errReductionRefuted
 		}
 		if reductionRefutedBelow(sys, out, nil) {
-			return nil, nil, nil, errReductionRefuted
+			return nil, nil, nil, resplit, errReductionRefuted
 		}
 	}
 	if verifyChain {
 		if q > 0 {
-			return nil, nil, nil, errChainLeft
+			return nil, nil, nil, resplit, errChainLeft
 		}
 		if !reductionPolyMatches(sys, out, poly) {
 			fixed, fpoly, ok := refitPolyKeepDegree(sys, out, poly)
 			if !ok {
-				return nil, nil, nil, errChainLeft
+				return nil, nil, nil, resplit, errChainLeft
 			}
 			out, poly = fixed, fpoly
 		}
-		if !nested && !sys.chainSplitReproducible(out, poly) {
-			return nil, nil, nil, errChainLeft
+		if !nested && !sys.chainSplitReproducible(out, poly, resplit) {
+			return nil, nil, nil, resplit, errChainLeft
 		}
 	}
-	return out, poly, nil, nil
+	return out, poly, nil, resplit, nil
 }
 
 // errChainLeft is the error of weierstrassReduceCore when an infinite
@@ -942,7 +967,7 @@ const (
 // pole, relative to the response there or at the data scale. The direct
 // (sE − A) solve of reductionPolyMatches cannot check above the data scale;
 // a split that depends on the rounding of the data moves there.
-func (sys *System) chainSplitReproducible(red *System, poly []*mat.Dense) bool {
+func (sys *System) chainSplitReproducible(red *System, poly []*mat.Dense, resplit bool) bool {
 	_, m, p := sys.Dims()
 	w := mat.Norm(sys.A, 2) / mat.Norm(sys.E, 2)
 	pts := []complex128{complex(0.6*w, 0.8*w), complex(0, 1e2*w), complex(0, 1e4*w), complex(0, 1e6*w)}
@@ -976,7 +1001,7 @@ func (sys *System) chainSplitReproducible(red *System, poly []*mat.Dense) bool {
 		jitter(c.E)
 		jitter(c.B)
 		jitter(c.C)
-		red2, poly2, _, err := c.weierstrassReduceCore(false, true)
+		red2, poly2, _, _, err := c.weierstrassReduceCore(false, true, resplit)
 		if errors.Is(err, ErrDescriptorSingular) {
 			continue
 		}
@@ -1184,7 +1209,7 @@ func absorbStiffLeak(red *System, terms []*mat.Dense, tols []float64, strict boo
 // reduces to another nilpotent order or fails. drift[k] is the largest
 // change of terms[k] relative to itself over the copies drawn, which stop
 // at the first that moves (nil when a copy failed).
-func (sys *System) sTermsStable(terms []*mat.Dense) (stable, ok bool, drift []float64) {
+func (sys *System) sTermsStable(terms []*mat.Dense, resplit bool) (stable, ok bool, drift []float64) {
 	var size float64
 	for _, t := range terms {
 		size = max(size, denseNorm(t))
@@ -1207,7 +1232,7 @@ func (sys *System) sTermsStable(terms []*mat.Dense) (stable, ok bool, drift []fl
 		jitter(c.E)
 		jitter(c.B)
 		jitter(c.C)
-		_, _, got, err := c.weierstrassReduceCore(true, false)
+		_, _, got, _, err := c.weierstrassReduceCore(true, false, resplit)
 		if err != nil || len(got) != len(terms) {
 			return false, false, nil
 		}
