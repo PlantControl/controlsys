@@ -531,10 +531,10 @@ func (d extendedDare) eig(K *mat.Dense) []complex128 {
 	copyStrided(e, n, eRaw.Data, eRaw.Stride, n, n)
 	wr, wi, beta := make([]float64, n), make([]float64, n), make([]float64, n)
 	work := make([]float64, max(1, 8*n))
-	eig := make([]complex128, n)
 	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, n, a, n, e, n, wr, wi, beta, nil, 1, nil, 1, work, len(work)) {
-		return eig
+		return nil
 	}
+	eig := make([]complex128, n)
 	for k := range n {
 		eig[k] = complex(wr[k]/beta[k], wi[k]/beta[k])
 		if beta[k] == 0 {

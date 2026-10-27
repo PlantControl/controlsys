@@ -78,7 +78,10 @@ func (c nearSingularDareCase) ulpSpread(t *testing.T, Y, X, K *mat.Dense) (sY, s
 		if !ok {
 			t.Fatalf("Newton oracle of a 1-ulp perturbation does not converge")
 		}
-		sY, sX, sK = max(sY, relErr(Yp, Y)), max(sX, relErr(Xp, X)), max(sK, relErr(Kp, K))
+		if Y != nil {
+			sY = max(sY, relErr(Yp, Y))
+		}
+		sX, sK = max(sX, relErr(Xp, X)), max(sK, relErr(Kp, K))
 	}
 	return sY, sX, sK
 }
@@ -210,6 +213,83 @@ func TestDare_WellConditionedEKeepsBoundaryVerdict(t *testing.T) {
 	for _, ns := range []bool{false, true} {
 		if _, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns}); !errors.Is(err, errBoundaryUnstabilizable) {
 			t.Errorf("Dare NoScaling %v: %v, want an unstabilizable boundary mode", ns, err)
+		}
+	}
+}
+
+// A rotated near-singular E (cond 5.9e14) with a cross term: X =
+// E⁻ᵀYE⁻¹ moves by 4% under 1-ulp perturbations of E, so Dare returns it
+// at Accuracy 1, while Y and K, well posed, keep Accuracy 0 in Dlqr
+// (O2YDYA sweep ctrl seed 46; base errBoundaryUnstabilizable).
+func TestDlqr_NearSingularERotatedCertifiesYNotX(t *testing.T) {
+	c := nearSingularDareCase{
+		A: mat.NewDense(2, 2, []float64{0.9157029945696862, -0.5986836560374968, 1.314617489524672, 0.18206342374170612}),
+		B: mat.NewDense(2, 1, []float64{-0.6180015980622806, -0.30194086085431415}),
+		E: mat.NewDense(2, 2, []float64{0.0564948849043164, 0.09424855637151722, -0.359132386009782, -0.599128735017446}),
+		Q: mat.NewDense(2, 2, []float64{1.3658176126238195, -0.4667952848832471, -0.4667952848832471, 1.595646110165019}),
+		R: mat.NewDense(1, 1, []float64{1.01875062088887}),
+		S: mat.NewDense(2, 1, []float64{-0.0828209355705472, 0.10568223311245058}),
+	}
+	c.check(t, 1, 0)
+}
+
+// More inputs than states (m = 3, n = 2) with a cross term: the extended
+// solve runs on the given, unreduced problem (O2YDYA sweep ctrl seed 13;
+// base errBoundaryUnstabilizable).
+func TestDlqr_NearSingularEMoreInputsThanStatesIsSolved(t *testing.T) {
+	c := nearSingularDareCase{
+		A: mat.NewDense(2, 2, []float64{0.923010477433099, 2.0820636924475, -0.9200537881286719, -1.361812134364599}),
+		B: mat.NewDense(2, 3, []float64{-0.7649133317207344, -0.0015390678071096064, 1.2371736568788594, 0.6699795793910823, 0.37405306155207996, 1.3833774115150517}),
+		E: mat.NewDense(2, 2, []float64{0.5004371458498397, 2.921975405177471, 0, 8.520053948604121e-13}),
+		Q: mat.NewDense(2, 2, []float64{1.8866101723360833, 0.4407050760660495, 0.4407050760660495, 6.019308608388756}),
+		R: mat.NewDense(3, 3, []float64{4.7486349226800515, -1.1064545236921663, 1.512245701955511, -1.1064545236921663, 2.42778007790058, 0.6521422583478569, 1.512245701955511, 0.6521422583478569, 3.6215308801989963}),
+		S: mat.NewDense(2, 3, []float64{-0.5025960774448042, 0.1337427256625519, -0.18850723325213473, -1.0631702312989222, 0.2829136377269464, -0.3987601331811068}),
+	}
+	c.check(t, 0, 0)
+}
+
+// Kalman of the plant above with C = Bᵀ solves the dual Dare with Eᵀ:
+// X = P and Lᵀ must match that Dare's 320-bit solution and gain (base
+// errBoundaryUnstabilizable).
+func TestKalman_NearSingularEDualIsSolved(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.923010477433099, 2.0820636924475, -0.9200537881286719, -1.361812134364599})
+	B := mat.NewDense(2, 3, []float64{-0.7649133317207344, -0.0015390678071096064, 1.2371736568788594, 0.6699795793910823, 0.37405306155207996, 1.3833774115150517})
+	E := mat.NewDense(2, 2, []float64{0.5004371458498397, 2.921975405177471, 0, 8.520053948604121e-13})
+	Rn := mat.NewDense(3, 3, []float64{4.7486349226800515, -1.1064545236921663, 1.512245701955511, -1.1064545236921663, 2.42778007790058, 0.6521422583478569, 1.512245701955511, 0.6521422583478569, 3.6215308801989963})
+	sys, err := NewDescriptor(A, B, mat.DenseCopyOf(B.T()), mat.NewDense(3, 3, nil), E, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gq mat.Dense
+	gq.Mul(B, B.T())
+	symmetrize(gq.RawMatrix().Data, 2, 2)
+	dual := nearSingularDareCase{A: mat.DenseCopyOf(A.T()), B: B, Q: &gq, R: Rn, E: mat.DenseCopyOf(E.T())}
+	wantX, _, wantK, rho, ok := descriptorDareDoublingBig(dual.A, dual.B, dual.Q, dual.R, nil, dual.E)
+	if !ok {
+		t.Fatalf("doubling oracle: no stabilizing solution (ρ %.3g)", rho)
+	}
+	res, err := Kalman(sys, eyeDense(3), Rn, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	K := mat.DenseCopyOf(res.K.T())
+	_, X, Kn, conv := nearSingularOracle(false, dual.A, dual.B, dual.Q, dual.R, nil, dual.E, K)
+	if !conv {
+		t.Fatal("Newton from the returned gain does not converge")
+	}
+	tol := 1e-6
+	if res.Accuracy == 0 {
+		tol = newtonTol
+		if _, sX, sK := dual.ulpSpread(t, nil, X, Kn); !(sX <= newtonTol && sK <= newtonTol) {
+			t.Errorf("Accuracy 0 where 1 ulp moves X by %.3g, L by %.3g", sX, sK)
+		}
+	}
+	for _, d := range []struct {
+		name      string
+		got, want *mat.Dense
+	}{{"X vs Newton", res.X, X}, {"X vs doubling", res.X, wantX}, {"L vs Newton", K, Kn}, {"L vs doubling", K, wantK}} {
+		if rel := relErr(d.got, d.want); !(rel <= tol) {
+			t.Errorf("Accuracy %d with %s off by %.3g", res.Accuracy, d.name, rel)
 		}
 	}
 }
