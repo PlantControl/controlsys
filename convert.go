@@ -411,29 +411,22 @@ func zohAugmented(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
 }
 
 // stiffDescriptorParts returns, for a delay-free descriptor sys with
-// full-rank ill-conditioned E (stiffPencilSplit, splitFastPencil), explicit parts whose sum
-// has the transfer function and the poles of the pencil (A, E). The LU
-// fold E⁻¹A (ToExplicit) of such an E moves the slow poles by cond(E)·ε,
-// up to a stability flip, and one matrix exponential of the stiff pole
-// beside them loses the slow dynamics to the squarings. ok is false when
-// the fold is accurate, E is rank deficient, or the generalized Schur form
-// zeroed the stiff part's E (deflated).
+// full-rank ill-conditioned E, the explicit parts of stiffExplicitParts,
+// whose sum has the transfer function and the poles of the pencil (A, E).
+// The LU fold E⁻¹A (ToExplicit) of such an E moves the slow poles by
+// cond(E)·ε, up to a stability flip, and one matrix exponential of the
+// stiff pole beside them loses the slow dynamics to the squarings. ok is
+// false when the fold is accurate, E is rank deficient, or the generalized
+// Schur form zeroed the stiff part's E (deflated).
 func stiffDescriptorParts(sys *System) ([]*System, bool) {
 	if !sys.IsDescriptor() || sys.HasDelay() {
 		return nil, false
 	}
-	whole, slow, fast, ok := stiffPencilSplit(sys)
-	if !ok {
+	parts, deflated, ok := stiffExplicitParts(sys)
+	if !ok || deflated {
 		return nil, false
 	}
-	if fast == nil {
-		return []*System{whole}, true
-	}
-	fastParts, ok := splitFastPencil(fast)
-	if !ok {
-		return nil, false
-	}
-	return append([]*System{slow}, fastParts...), true
+	return parts, true
 }
 
 // foldAccurateECond is the 1-norm condition estimate of E below which C2D

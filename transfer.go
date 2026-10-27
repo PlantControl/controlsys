@@ -276,16 +276,17 @@ func transferStandardForm(sys *System) (*System, []*mat.Dense, error) {
 // error from the fold, then a dropped pole).
 const illConditionedECond = 1e4
 
-// stiffExplicitParts returns explicit realizations, (slow, fast) or a single
-// one, whose transfer functions sum to that of the descriptor sys with
-// full-rank but ill-conditioned E; ok is false when E⁻¹ is safe to form, E is
-// rank deficient by the MATLAB rule, or sys has internal delays. The modes
-// with |λ|·‖E‖/‖A‖ ≥ 1/qzLargeRatio are split off by the ordered
-// generalized Schur form; each part folds its E in by svdExplicit.
-// deflated reports that the generalized Schur form zeroed the E of the
-// stiff part (σ_n of E within ε‖E‖): the single part returned then holds
-// the stiff pole near 1/ε, whose fold rounding swamps the slow poles, and
-// the Weierstrass reduction is the accurate route.
+// stiffExplicitParts returns explicit realizations, the slow part and the
+// fast parts of splitFastPencil or a single one, whose transfer functions
+// sum to that of the descriptor sys with full-rank but ill-conditioned E;
+// ok is false when E⁻¹ is safe to form, E is rank deficient by the MATLAB
+// rule, or sys has internal delays. The modes with |λ|·‖E‖/‖A‖ ≥
+// 1/qzLargeRatio are split off by the ordered generalized Schur form; each
+// part folds its E in by svdExplicit. deflated reports that the
+// generalized Schur form zeroed the E of the stiff part (σ_n of E within
+// ε‖E‖): the single part returned then holds the stiff pole near 1/ε,
+// whose fold rounding swamps the slow poles, and the Weierstrass reduction
+// is the accurate route.
 func stiffExplicitParts(sys *System) (parts []*System, deflated, ok bool) {
 	whole, slow, fast, ok := stiffPencilSplit(sys)
 	if !ok {
@@ -294,11 +295,11 @@ func stiffExplicitParts(sys *System) (parts []*System, deflated, ok bool) {
 	if fast == nil {
 		return []*System{whole}, false, true
 	}
-	fastExplicit, ok := svdExplicit(fast)
+	fastParts, ok := splitFastPencil(fast)
 	if !ok {
 		return []*System{whole}, true, true
 	}
-	return []*System{slow, fastExplicit}, false, true
+	return append([]*System{slow}, fastParts...), false, true
 }
 
 // stiffPencilSplit is the split of stiffExplicitParts before the fast part
