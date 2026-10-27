@@ -303,33 +303,49 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 		used[best], whole[i] = true, true
 	}
 	roundTol := qzInfiniteTol(float64(len(beta))*eps(), normA, normE)
+	recip := func(i int) complex128 {
+		return complex(beta[i], 0) / complex(alphar[i], alphai[i])
+	}
+	match := make([]int, nf)
+	drift, size := 0.0, 0.0
 	for j := range nf {
+		match[j] = -1
 		if !qzInfinite(far[j], fai[j], fbeta[j], largeTol) {
 			continue
 		}
+		mu := 1 / poles[j]
 		best, bestD := -1, math.Inf(1)
 		for i := range beta {
 			if whole[i] || qzInfinite(alphar[i], alphai[i], beta[i], roundTol) {
 				continue
 			}
-			if d := cmplx.Abs(complex(alphar[i]/beta[i], alphai[i]/beta[i]) - poles[j]); d < bestD {
+			if d := cmplx.Abs(recip(i) - mu); d < bestD {
 				best, bestD = i, d
 			}
 		}
-		if best >= 0 && bestD <= leakStableTol*cmplx.Abs(poles[j]) {
-			poles[j], whole[best] = complex(alphar[best]/beta[best], alphai[best]/beta[best]), true
+		if best >= 0 && bestD <= cmplx.Abs(mu)/stiffRatioGap {
+			match[j], whole[best] = best, true
+			drift += bestD
+			size += cmplx.Abs(recip(best))
 		}
 	}
+	var ring complex128
 	lo, hi := math.Inf(1), 0.0
 	for i := range beta {
 		if whole[i] || qzInfinite(alphar[i], alphai[i], beta[i], roundTol) {
 			continue
 		}
-		r := math.Abs(beta[i]) / math.Hypot(alphar[i], alphai[i])
+		ring += recip(i)
+		r := cmplx.Abs(recip(i))
 		lo, hi = min(lo, r), max(hi, r)
 	}
-	if hi > stiffRatioGap*lo {
+	if hi > stiffRatioGap*lo || drift > cmplx.Abs(ring)+leakStableTol*size {
 		return nil, false
+	}
+	for j, i := range match {
+		if i >= 0 {
+			poles[j] = complex(alphar[i]/beta[i], alphai[i]/beta[i])
+		}
 	}
 	return poles, true
 }
