@@ -779,6 +779,11 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // certifies it, from its X or else the Hewer step X₁ of its K (then with
 // X₁, its K and Eig): there Newton certified X off by 1e-3 to 0.16, and
 // the cost of K equal to X shows only that, not that K is the gain of X.
+// Without S, rank(B) < m loses only K's part on B's null space, fixed by
+// R alone: once ‖B‖²‖X‖ exceeds ‖R‖ (cheap control), where the rounding
+// of BᵀXB swamps R there, the X of the given problem is certified again
+// in the inputs w and K taken from there (VᵀRV costs K only eps·cond(R)),
+// and a given problem that fails or is poor is solved in r inputs.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -793,16 +798,37 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	if red == nil {
 		return dareSolve(A, B, Q, R, opts, !ill)
 	}
+	var E *mat.Dense
+	if opts != nil {
+		E = opts.E
+	}
+	if red.s == nil && !red.rotated {
+		res, err := dareSolve(A, B, Q, R, opts, !ill)
+		if err == nil && res.Accuracy == 0 {
+			if !(red.sigma*red.sigma*mat.Norm(res.X, 1) > mat.Norm(R, 1)) {
+				return res, nil
+			}
+			if c, ok := red.certify(A, Q, opts, res, nil); ok && closedLoopStable(A, B, c.K, E, c.Eig) {
+				return c, nil
+			}
+		}
+		o := opts
+		if res != nil && opts != nil && opts.Workspace != nil {
+			c := *opts
+			c.Workspace = nil
+			o = &c
+		}
+		if r := red.solve(A, B, Q, o); r != nil {
+			return r, nil
+		}
+		return res, err
+	}
 	if res := red.solve(A, B, Q, opts); res != nil {
 		return res, nil
 	}
 	res, err := dareSolve(A, B, Q, R, opts, !ill)
 	if err != nil || res.Accuracy != 0 {
 		return res, err
-	}
-	var E *mat.Dense
-	if opts != nil {
-		E = opts.E
 	}
 	if c, ok := red.certify(A, Q, opts, res, res.K); ok && closedLoopStable(A, B, c.K, E, c.Eig) {
 		return c, nil
@@ -1030,6 +1056,8 @@ type reducedInputs struct {
 	bw, rw, sw *mat.Dense
 	v          *mat.Dense
 	rotated    bool
+	// sigma is B's largest singular value.
+	sigma float64
 }
 
 // rotationCond is the condition of B above which Dare solves in the
@@ -1039,9 +1067,9 @@ type reducedInputs struct {
 // it on its diagonal.
 const rotationCond = 1e3
 
-// reduceInputs returns the reducedInputs of a Dare with a cross term S and
-// rank(B) < m, rank as placedHewer counts it, or, with rank(B) = m ≥ 2 and
-// cond(B) above rotationCond, the rotated one; nil when there are none
+// reduceInputs returns the reducedInputs of a Dare with rank(B) < m (s nil
+// and q = Q without S), rank as placedHewer counts it, or, with
+// rank(B) = m ≥ 2 and cond(B) above rotationCond, the rotated one; nil when there are none
 // or R₂₂ is not positive definite. ill reports m ≥ 2 and cond(B) above
 // rotationCond.
 func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs, ill bool) {
@@ -1082,10 +1110,10 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 		}
 	}
 	ill = len(sv) < m || !(sv[m-1] >= sv[0]/rotationCond)
-	if r == 0 || !ill || r < m && S == nil {
+	if r == 0 || !ill {
 		return nil, ill
 	}
-	red = &reducedInputs{v: &mat.Dense{}}
+	red = &reducedInputs{v: &mat.Dense{}, sigma: sv[0]}
 	svd.VTo(red.v)
 	var rv, rt mat.Dense
 	rv.Mul(R, red.v)
@@ -1119,9 +1147,8 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 	if !r22c.Factorize(r22) {
 		return nil, ill
 	}
-	s2 := sv2.Slice(0, n, r, m)
-	var r21, s2t mat.Dense
-	if r22c.SolveTo(&r21, rt.Slice(r, m, 0, r)) != nil || r22c.SolveTo(&s2t, s2.T()) != nil {
+	var r21 mat.Dense
+	if r22c.SolveTo(&r21, rt.Slice(r, m, 0, r)) != nil {
 		return nil, ill
 	}
 	var t mat.Dense
@@ -1129,6 +1156,15 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 	red.r = &mat.Dense{}
 	red.r.Sub(rt.Slice(0, r, 0, r), &t)
 	symmetrize(red.r.RawMatrix().Data, r, r)
+	if S == nil {
+		red.q = Q
+		return red, ill
+	}
+	s2 := sv2.Slice(0, n, r, m)
+	var s2t mat.Dense
+	if r22c.SolveTo(&s2t, s2.T()) != nil {
+		return nil, ill
+	}
 	t.Reset()
 	t.Mul(s2, &r21)
 	red.s = &mat.Dense{}
