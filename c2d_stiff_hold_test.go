@@ -206,3 +206,28 @@ func TestC2DTwoStiffSingularValuesFollowPencil(t *testing.T) {
 		t.Fatalf("only %d models resolved", resolved)
 	}
 }
+
+// A dense A whose modes are all stiff (-1e10 and -3e10 rotated by 30°) is
+// one fast cluster: its ZOH, FOH and impulse integrals come from
+// A⁻¹(e^{A·dt} − I)·B, while the squarings of one augmented exponential
+// kept them only to ~1e-6.
+func TestC2DAllStiffDenseMatchesExactHold(t *testing.T) {
+	c, s := math.Cos(math.Pi/6), math.Sin(math.Pi/6)
+	U := mat.NewDense(2, 2, []float64{c, -s, s, c})
+	var T, A mat.Dense
+	T.Mul(U, mat.NewDense(2, 2, []float64{-1e10, 0, 0, -3e10}))
+	A.Mul(&T, U.T())
+	sys, err := New(&A, mat.NewDense(2, 1, []float64{2e10, -1e10}), mat.NewDense(1, 2, []float64{1, 0.5}), mat.NewDense(1, 1, []float64{0.3}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	modes, ok := newStepOracleModes(sys, pol)
+	if !ok {
+		t.Fatalf("oracle did not resolve the poles %v", pol)
+	}
+	stiffHoldOracleChecks(t, "all stiff", sys, modes, 0.1, 1e-12, 1e-9)
+}
