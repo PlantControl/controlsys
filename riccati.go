@@ -1052,24 +1052,34 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 // a cheap-control Dare can amplify the error of a certified X by 1e9, and
 // an X off by 5e-14 within newtonTol gave a K off by 2e-4 to 9e-3, while
 // X one step on was the rounded 320-bit X and its ddGain within K's own
-// eps-sensitivity.
+// eps-sensitivity. A K and EᵀXE the certification refined in
+// double-double (c.xe) are kept and returned without gainMiss: the ddGain
+// of the rounded X was 1.9e-6 off the 320-bit gain where the refined K
+// matched it.
 func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, gainDist, bool) {
 	var c *RiccatiResult
 	ok := false
-	if red != nil && red.exact {
+	switch {
+	case red != nil && red.exact:
 		if c, ok = certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, nil, true); ok {
-			var kw *mat.Dense
-			if kw, _, ok = ddGain(A, red.bw, red.rw, red.sw, c.X); ok {
+			kw := c.K
+			if c.xe == nil {
+				kw, _, ok = ddGain(A, red.bw, red.rw, red.sw, c.X)
+			}
+			if ok {
 				c.K = red.gain(kw, nil)
 			}
 		}
-	} else {
-		if red != nil {
-			c, ok = certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, nil, true)
-		} else {
-			c, ok = certifyIn(A, B, Q, R, crossTerm(opts), opts, res, nil, true)
+	case red != nil:
+		if c, ok = certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, nil, true); ok {
+			if c.xe != nil {
+				c.K = red.gain(c.K, nil)
+			} else {
+				c.K, _, ok = ddGain(A, B, R, crossTerm(opts), c.X)
+			}
 		}
-		if ok {
+	default:
+		if c, ok = certifyIn(A, B, Q, R, crossTerm(opts), opts, res, nil, true); ok && c.xe == nil {
 			c.K, _, ok = ddGain(A, B, R, crossTerm(opts), c.X)
 		}
 	}
@@ -1079,6 +1089,9 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	}
 	if !ok || !closedLoopStable(A, B, c.K, E, c.Eig) {
 		return nil, gainDist{}, false
+	}
+	if c.xe != nil {
+		return c, gainDist{}, true
 	}
 	return c, gainMissIn(A, B, R, opts, red, c), true
 }
@@ -1094,7 +1107,8 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // and its gain within 3.4e-9, inside a tolerance of 1e-5 set by the move
 // of that gain under X∘(1 + eps). A K refined in double-double (res.xe)
 // is returned as it is: measured against the gain of the rounded X it
-// was off by 7.7e-6 while within 1e-17 of the 320-bit gain.
+// was off by 7.7e-6 while within 1e-17 of the 320-bit gain. So is one
+// refined returns.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if res.xe != nil {
 		return res, 0, true
@@ -1109,7 +1123,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		return res, 0, true
 	}
 	c, cd, stable := refined(A, B, Q, R, opts, red, res)
-	if stable && cd.units(gainTol) <= 1 {
+	if stable && (c.xe != nil || cd.units(gainTol) <= 1) {
 		return c, 0, true
 	}
 	if d.units(gainFloor) <= 1 {
