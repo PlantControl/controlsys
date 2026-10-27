@@ -53,6 +53,9 @@ type riccatiProblem struct {
 	// xeX is ‖X − X_dd‖/‖X‖ of the X whose refined xe
 	// refineDescriptorDare formed from the double-double iterate X_dd.
 	xeX float64
+	// xeLoose reports an xe whose next Newton step exceeds
+	// newtonRefineTol: the iteration met it at its noise floor.
+	xeLoose bool
 	// gainUncertified reports a continuous descriptor K whose refinement
 	// failed while the Newton step of X moves it beyond newtonTol.
 	gainUncertified bool
@@ -311,7 +314,7 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 					}
 				}
 			}
-			res.xe, res.xeX = mat.NewDense(n, n, xe), problem.xeX
+			res.xe, res.xeX, res.xeLoose = mat.NewDense(n, n, xe), problem.xeX, problem.xeLoose
 			problem.xe = nil
 		}
 	} else if problem.poor != nil {
