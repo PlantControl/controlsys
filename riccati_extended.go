@@ -195,7 +195,7 @@ const (
 // arithmetic, bit-identical on every platform. EᵀXE = Y is the solution
 // of that model's Dare, and Y and K are well posed while X ~ 1/σ_min(E)²
 // is not: at cond(E)·eps ≈ 0.1 the float64 QZ subspace left Y off by 6.5%
-// and the float64 K from the exact Y was off by 360% (O2YDYA).
+// and the float64 K from the exact Y was off by 360%.
 //
 // It runs only when E (and Kalman's plant E) is nonsingular to both
 // MATLAB rank and LU condition (nearSingularEGate rejects anything

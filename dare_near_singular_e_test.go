@@ -217,6 +217,33 @@ func TestDare_WellConditionedEKeepsBoundaryVerdict(t *testing.T) {
 	}
 }
 
+// Lqg of the first plant above (C = Bᵀ) takes its regulator from the
+// same extended-precision solve: Xc and K are Dlqr's, which the 320-bit
+// oracles confirm (base errBoundaryUnstabilizable).
+func TestLqg_NearSingularERegulatorIsDlqrs(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.42832161169283334, 1.0362853424557894, 0.3431284077914542, -0.7926130901776904})
+	B := mat.NewDense(2, 2, []float64{2.4606698336961226, 0.8073964829247321, -2.5367599785728485, -0.7294612311954138})
+	E := mat.NewDense(2, 2, []float64{1.0831741096873624, -0.084731321391598, 0, 1.7497519700889574e-15})
+	sys, err := NewDescriptor(A, B, mat.DenseCopyOf(B.T()), mat.NewDense(2, 2, nil), E, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, wantY, wantK, rho, ok := descriptorDareDoublingBig(A, B, eyeDense(2), eyeDense(2), nil, E)
+	if !ok {
+		t.Fatalf("doubling oracle: no stabilizing solution (ρ %.3g)", rho)
+	}
+	res, err := Lqg(sys, eyeDense(4), eyeDense(4), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel := relErr(res.Xc, wantY); !(rel <= newtonTol) {
+		t.Errorf("Xc off by %.3g", rel)
+	}
+	if rel := relErr(res.K, wantK); !(rel <= newtonTol) {
+		t.Errorf("K off by %.3g", rel)
+	}
+}
+
 // A rotated near-singular E (cond 5.9e14) with a cross term: X =
 // E⁻ᵀYE⁻¹ moves by 4% under 1-ulp perturbations of E, so Dare returns it
 // at Accuracy 1, while Y and K, well posed, keep Accuracy 0 in Dlqr
