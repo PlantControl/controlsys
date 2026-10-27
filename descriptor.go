@@ -113,7 +113,7 @@ func (p descriptorPolicy) requireNonsingular(context string) error {
 	}
 	var lu mat.LU
 	lu.Factorize(p.E)
-	if eRankDeficient(p.E, &lu) {
+	if luNearSingular(&lu) && eRankDeficient(p.E, &lu) {
 		return fmt.Errorf("%s: %w", context, ErrDescriptorSingular)
 	}
 	return nil

@@ -278,19 +278,22 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 
 // nearSingularCancelLimit is the largest ratio ‖|M₁||X||M₂|‖/‖M₁XM₂ + C‖
 // of the products that K and EᵀXE are formed from at which a certified X
-// of an E in the near-singular window keeps them to within that factor of
-// its own accuracy.
+// of a near-singular E keeps them to within that factor of its own
+// accuracy.
 const nearSingularCancelLimit = 1e2
 
-// nearSingularEGate returns res, err unless opts.E is nonsingular by MATLAB
-// rank (eRankDeficient) with a condition estimate at or above 1/ε, which
-// MATLAB lqr and icare accept as nonsingular (RL6IT7) but where
-// X ~ 1/σ_min(E): there K = R⁻¹(BᵀXE + Sᵀ) (continuous), the discrete K
-// from BᵀXA and BᵀXB, and EᵀXE cancel, and a certified X to every digit
-// left L of Kalman off by 0.3. Such a result is returned only with
+// nearSingularEGate screens the result of a Care or Dare whose E (or, for
+// Kalman's dual, opts.plantE) is near singular: its LU condition estimate
+// reaches 1/ε or MATLAB rank (eRankDeficient) finds it deficient. MATLAB
+// lqr and icare accept an E of full MATLAB rank as nonsingular, but there
+// X ~ 1/σ_min(E), and K = R⁻¹(BᵀXE + Sᵀ) (continuous), the discrete K
+// from BᵀXA and BᵀXB, and EᵀXE cancel: a certified X correct to every
+// digit left L of Kalman off by 0.3. Such a result is returned only with
 // Accuracy 0 and none of these products cancelling beyond
-// nearSingularCancelLimit; otherwise, as for a singular E, Care and Dare
-// return ErrDescriptorSingular. Argument errors pass through.
+// nearSingularCancelLimit, else ErrDescriptorSingular. A solver error
+// stays, except that one with a condition estimate at or above 1/ε, which
+// the E check rejected before MATLAB rank admitted it, is
+// ErrDescriptorSingular.
 func nearSingularEGate(op string, continuous bool, A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, error) {
 	if opts == nil || isIdentityDescriptor(opts.E) {
 		return res, err
@@ -299,7 +302,12 @@ func nearSingularEGate(op string, continuous bool, A, B, R *mat.Dense, opts *Ric
 		errors.Is(err, ErrNotSymmetric) || errors.Is(err, ErrNotPSD) || errors.Is(err, ErrDescriptorSingular)) {
 		return res, err
 	}
-	if !luConditionNearSingular(opts.E) && (opts.plantE == nil || !luConditionNearSingular(opts.plantE)) {
+	condNear, rankDeficient := nearSingularE(opts.E)
+	if opts.plantE != nil {
+		c, r := nearSingularE(opts.plantE)
+		condNear, rankDeficient = condNear || c, rankDeficient || r
+	}
+	if !condNear && !rankDeficient || err != nil && !condNear {
 		return res, err
 	}
 	if err == nil && res.Accuracy == 0 && !nearSingularCancels(continuous, A, B, R, opts, res.X) {
@@ -308,10 +316,12 @@ func nearSingularEGate(op string, continuous bool, A, B, R *mat.Dense, opts *Ric
 	return nil, fmt.Errorf("%s: E: %w", op, ErrDescriptorSingular)
 }
 
-func luConditionNearSingular(E *mat.Dense) bool {
+// nearSingularE reports whether the LU condition estimate of E reaches 1/ε
+// and whether E is rank deficient by MATLAB rank.
+func nearSingularE(E *mat.Dense) (condNear, rankDeficient bool) {
 	var lu mat.LU
 	lu.Factorize(E)
-	return luNearSingular(&lu)
+	return luNearSingular(&lu), eRankDeficient(E, &lu)
 }
 
 // nearSingularCancels reports whether a product K or EᵀXE is formed from
