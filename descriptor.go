@@ -238,21 +238,20 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // the finite block of deflateStiffChain, the split TransferFunction
 // re-splits by: QZ on the whole pencil (alphar, alphai, beta) smears a
 // chain of length k to a ring |λ| ~ ε^(−1/k) and can give the stiff finite
-// pole β = 0. The deflated block only decides which poles are finite. It
-// is taken when its QZ leaves no β = 0, it has a large pole (qzLargeRatio)
-// for each singular value of E within qzLargeRatio of σ₁ (a finite pole
-// small in E the staircase took for a chain zero leaves one short, merged
-// into another), and it carries every whole-pencil
-// eigenvalue that is not large within qzRetryTol chordally. A deflated
-// pole then takes the value of the nearest whole-pencil eigenvalue within
-// 1/stiffRatioGap of it in 1/λ, since the staircase turns the null spaces
-// of E by up to n·ε·σ₁/σs and lets the pole absorb the trace of the smear
-// (Σ 1/λ is invariant): the summed moves must stay within that trace and
-// leakStableTol. No whole-pencil eigenvalue left over, above rounding, may
-// be stable under jitter (stableUnderJitter): smear moves at first order,
-// while a finite pole small in E that the staircase took for a chain zero
-// (a second small singular value of E above the stiff band) is one QZ
-// resolves, so the whole-pencil set is kept then.
+// pole β = 0. The deflated block decides which poles are finite. It is
+// taken when its QZ leaves no β = 0, it has a large pole (qzLargeRatio) for
+// each singular value of E within qzLargeRatio of σ₁ (a finite pole small
+// in E the staircase took for a chain zero leaves it one short, merged into
+// another), and it carries every whole-pencil eigenvalue that is not large
+// within qzRetryTol chordally. Each other deflated pole is matched to the
+// nearest whole-pencil eigenvalue within 1/stiffRatioGap of it in 1/λ: the
+// staircase turns the null spaces of E by up to n·ε·σ₁/σs and lets a pole
+// absorb the trace of the smear (Σ 1/λ is invariant), so the summed moves
+// must stay within the trace of the eigenvalues left over and
+// leakStableTol. None of those may come back to jitterResolvedTol in most
+// jittered copies (jitteredEigenvalues), as a pole QZ resolves does; smear
+// moves at first order. A matched pole takes the QZ value when every copy
+// reproduces it to half the move.
 func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
 	a, e, _, _, nf, _, _, _, _, _, ok := deflateStaircase(A, E, false, true, true, -1, 0)
 	if !ok {
@@ -343,23 +342,46 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 		ring += recip(i)
 		left = append(left, complex(alphar[i]/beta[i], alphai[i]/beta[i]))
 	}
-	if drift > cmplx.Abs(ring)+leakStableTol*size || stableUnderJitter(A, E, left) {
+	if drift > cmplx.Abs(ring)+leakStableTol*size {
 		return nil, false
 	}
+	copies, ok := jitteredEigenvalues(A, E)
+	if !ok {
+		return nil, false
+	}
+	for _, w := range left {
+		back := 0
+		for _, c := range copies {
+			if nearestDist(c, w) <= jitterResolvedTol*cmplx.Abs(w) {
+				back++
+			}
+		}
+		if 2*back > len(copies) {
+			return nil, false
+		}
+	}
 	for j, i := range match {
-		if i >= 0 {
-			poles[j] = complex(alphar[i]/beta[i], alphai[i]/beta[i])
+		if i < 0 {
+			continue
+		}
+		w := complex(alphar[i]/beta[i], alphai[i]/beta[i])
+		d, keep := cmplx.Abs(w-poles[j]), true
+		for _, c := range copies {
+			keep = keep && nearestDist(c, w) <= d/2
+		}
+		if keep {
+			poles[j] = w
 		}
 	}
 	return poles, true
 }
 
-// stableUnderJitter reports whether one of the whole-pencil eigenvalues
-// eig of (A, E) comes back to jitterResolvedTol in one of leakDraws copies
-// of A and E with entries scaled by 1 + δ, |δ| ≤ 4ε (jitterCopy): a finite
-// pole QZ resolves, where smear of an infinite chain moves at first order.
-// One copy is enough, since QZ of a copy can merge the pole with the smear.
-// jitterResolvedTol sets stableUnderJitter. It only decides whether the
+// jitterResolvedTol is the relative distance within which a whole-pencil
+// eigenvalue left over by stiffChainPoles that comes back in one of
+// jitteredEigenvalues is a finite pole QZ resolves, where smear of an
+// infinite chain moves at first order; a majority of copies is enough,
+// since QZ of a copy can merge the pole with the smear, and smear can come
+// back in one copy whose jitter is below QZ's own rounding. It only decides whether the
 // deflated set may replace the whole-pencil one, so too large a value falls
 // back to the whole-pencil set. In the stiff-chain review pencils (native
 // and amd64) a pole QZ resolves beside the smear came back to at most
@@ -367,10 +389,10 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 // than 2.5e-2, as the leaked rounding leakStableTol separates (2.9e-2).
 const jitterResolvedTol = 1e-2
 
-func stableUnderJitter(A, E *mat.Dense, eig []complex128) bool {
-	if len(eig) == 0 {
-		return false
-	}
+// jitteredEigenvalues returns the finite whole-pencil eigenvalues of
+// leakDraws copies of A and E with entries scaled by 1 + δ, |δ| ≤ 4ε
+// (jitterCopy); ok is false when QZ fails.
+func jitteredEigenvalues(A, E *mat.Dense) (copies [][]complex128, ok bool) {
 	n, _ := A.Dims()
 	rng := rand.New(rand.NewPCG(3, 5))
 	for range leakDraws {
@@ -378,17 +400,20 @@ func stableUnderJitter(A, E *mat.Dense, eig []complex128) bool {
 		ar, er := a.RawMatrix(), e.RawMatrix()
 		alphar, alphai, beta, ok := qzEigenvalues(n, ar.Data, ar.Stride, er.Data, er.Stride)
 		if !ok {
-			return true
+			return nil, false
 		}
-		for _, w := range eig {
-			for i := range beta {
-				if beta[i] != 0 && cmplx.Abs(complex(alphar[i]/beta[i], alphai[i]/beta[i])-w) <= jitterResolvedTol*cmplx.Abs(w) {
-					return true
-				}
-			}
-		}
+		copies = append(copies, finitePoles(alphar, alphai, beta, 0))
 	}
-	return false
+	return copies, true
+}
+
+// nearestDist returns the distance from w to the nearest of eig.
+func nearestDist(eig []complex128, w complex128) float64 {
+	d := math.Inf(1)
+	for _, v := range eig {
+		d = min(d, cmplx.Abs(v-w))
+	}
+	return d
 }
 
 // largeRetained reports whether an eigenvalue that infTol keeps is large,

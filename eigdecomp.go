@@ -745,8 +745,8 @@ func nearInfiniteEigs(ad, ed []float64, n, k, cnt int) (eig []complex128, ok boo
 	return eig, true
 }
 
-// leakDraws and leakStableTol set leakedZeros and stableUnderJitter. Over
-// the package tests and 3000 chains beside a pole small in E (cond(U),
+// leakDraws and leakStableTol set leakedZeros (leakDraws also
+// jitteredEigenvalues). Over the package tests and 3000 chains beside a pole small in E (cond(U),
 // cond(V) up to 1e4), the eigenvalues of finite poles moved by at most
 // 5.6e-6 relative, those of leaked rounding by at least 2.9e-2.
 const (
