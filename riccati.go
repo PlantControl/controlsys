@@ -1225,7 +1225,7 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 // eps·‖B‖₁‖B‖∞‖X‖₁, exceeds 1e-9 of the smallest eigenvalue of R, bounded
 // by 1/‖R⁻¹‖₁ (or, without forming R⁻¹, by its Gershgorin bound g as
 // √m/g), so that the float64 gain may lose R in R + BᵀXB: the K that
-// Dare certified off by 1e-5 to 5.6 with X exact had it above 1e-5.
+// Dare certified off by 1e-5 to 5.6 with X exact had it above 9e-6.
 func rLost(B, R, X *mat.Dense) bool {
 	b := eps() * mat.Norm(B, 1) * mat.Norm(B, math.Inf(1)) * mat.Norm(X, 1)
 	m, _ := R.Dims()
