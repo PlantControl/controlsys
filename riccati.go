@@ -845,7 +845,9 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // are kept: the gain of the float64 X lost cond(K)·eps ≈ 1e-5 against
 // them. Their X keeps Accuracy 0 only within newtonTol of the
 // double-double iterate they came from (3e-8 off it with E's smallest
-// singular value 1.2e-6).
+// singular value 1.2e-6), in both its Frobenius and 1-norm (X off by
+// 1.25e-8 with 9.97e-9 in the first). With reduced inputs, under cheap
+// control, K is neither substituted nor kept from a refinement (gainOfX).
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -1063,31 +1065,24 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 // a cheap-control Dare can amplify the error of a certified X by 1e9, and
 // an X off by 5e-14 within newtonTol gave a K off by 2e-4 to 9e-3, while
 // X one step on was the rounded 320-bit X and its ddGain within K's own
-// eps-sensitivity. A K and EᵀXE the certification refined in
-// double-double (c.xe) are kept and returned without gainMiss: the ddGain
-// of the rounded X was 1.9e-6 off the 320-bit gain where the refined K
-// matched it.
+// eps-sensitivity. A K and EᵀXE the certification of the given inputs
+// refined in double-double (c.xe) are kept and returned without gainMiss:
+// the ddGain of the rounded X was 1.9e-6 off the 320-bit gain where the
+// refined K matched it.
 func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, gainDist, bool) {
 	var c *RiccatiResult
 	ok := false
 	switch {
 	case red != nil && red.exact:
 		if c, ok = certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, nil, true); ok {
-			kw := c.K
-			if c.xe == nil {
-				kw, _, ok = ddGain(A, red.bw, red.rw, red.sw, c.X)
-			}
-			if ok {
+			var kw *mat.Dense
+			if kw, _, ok = ddGain(A, red.bw, red.rw, red.sw, c.X); ok {
 				c.K = red.gain(kw, nil)
 			}
 		}
 	case red != nil:
 		if c, ok = certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, nil, true); ok {
-			if c.xe != nil {
-				c.K = red.gain(c.K, nil)
-			} else {
-				c.K, _, ok = ddGain(A, B, R, crossTerm(opts), c.X)
-			}
+			c.K, _, ok = ddGain(A, B, R, crossTerm(opts), c.X)
 		}
 	default:
 		if c, ok = certifyIn(A, B, Q, R, crossTerm(opts), opts, res, nil, true); ok && c.xe == nil {
@@ -1101,7 +1096,7 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	if !ok || !closedLoopStable(A, B, c.K, E, c.Eig) {
 		return nil, gainDist{}, false
 	}
-	if c.xe != nil {
+	if red == nil && c.xe != nil {
 		return c, gainDist{}, true
 	}
 	return c, gainMissIn(A, B, R, opts, red, c), true
@@ -1119,22 +1114,26 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // of that gain under X∘(1 + eps). A K refined in double-double (res.xe)
 // is returned as it is: measured against the gain of the rounded X it
 // was off by 7.7e-6 while within 1e-17 of the 320-bit gain. So is one
-// refined returns, its X taken one Newton step on (steppedX).
+// refined returns, its X taken one Newton step on (steppedX). Both hold
+// only for the given inputs (red nil): with reduced inputs K is measured
+// by gainMissIn and taken as Dare kept before, a substituted K and an X
+// its certification did not step being 4.7e-6 and 1.25e-8 off the
+// 320-bit solution at Accuracy 0.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
-	if res.xe != nil {
-		return steppedX(A, B, Q, R, opts, red, res), 0, true
+	if red == nil && res.xe != nil {
+		return steppedX(A, B, Q, R, opts, res), 0, true
 	}
 	d := gainMissIn(A, B, R, opts, red, res)
 	if d.units(gainTol) <= 1 {
-		if d.d > gainFloor && res.x1 == nil && res.step <= eps() {
-			if r, ok := gainSubstituted(A, B, R, opts, red, res); ok {
+		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
+			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
 				return r, 0, true
 			}
 		}
 		return res, 0, true
 	}
 	c, cd, stable := refined(A, B, Q, R, opts, red, res)
-	if stable && (c.xe != nil || cd.units(gainTol) <= 1) {
+	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1) {
 		return c, 0, true
 	}
 	if d.units(gainFloor) <= 1 {
@@ -1152,24 +1151,16 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // of res (terminal, Y6BJEX am.3) when its Newton step is smaller; else
 // res. The float64 X such a refinement came with, its Newton step
 // 9.7e-9, was 1e-8 off the 320-bit X and the X one step on within 1e-17.
-func steppedX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) *RiccatiResult {
+// Of the given inputs only (gainOfX).
+func steppedX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) *RiccatiResult {
 	if !(res.step > eps()) {
 		return res
 	}
-	var c *RiccatiResult
-	var ok bool
-	if red != nil {
-		c, ok = certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, nil, true)
-	} else {
-		c, ok = certifyIn(A, B, Q, R, crossTerm(opts), opts, res, nil, true)
-	}
+	c, ok := certifyIn(A, B, Q, R, crossTerm(opts), opts, res, nil, true)
 	if !ok {
 		return res
 	}
 	if c.xe != nil {
-		if red != nil {
-			c.K = red.gain(c.K, nil)
-		}
 		var E *mat.Dense
 		if opts != nil {
 			E = opts.E
@@ -1187,10 +1178,10 @@ func steppedX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res 
 	return &r
 }
 
-// gainSubstituted returns res with K the gain of its X (gainIn) and Eig
-// that of A − BK, once A − BK is stable.
-func gainSubstituted(A, B, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
-	K, _, ok := gainIn(A, B, R, opts, red)(res.X)
+// gainSubstituted returns res with K the ddGain of its X and Eig that of
+// A − BK, once A − BK is stable.
+func gainSubstituted(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) (*RiccatiResult, bool) {
+	K, _, ok := ddGain(A, B, R, crossTerm(opts), res.X)
 	if !ok {
 		return nil, false
 	}
@@ -2984,7 +2975,8 @@ func (problem *riccatiProblem) gainStep(continuous bool, K *mat.Dense, xData, x1
 // by Hewer's method in double-double, from the residual (riccatiResidual)
 // of X itself, and saves EᵀXE of that X in problem.xe, when the
 // iteration converges: steps ‖Δ‖/‖X‖, ‖EᵀΔE‖/‖EᵀXE‖ and ‖K₊ − K‖/‖K₊‖
-// within newtonRefineTol. As in idare, K and EᵀXE are then those of the
+// within newtonRefineTol, with ‖X − X_dd‖/‖X‖ in problem.xeX, the larger
+// in the Frobenius and 1-norm. As in idare, K and EᵀXE are then those of the
 // solution, which the float64 X cannot carry (dareCancellation). X keeps
 // its certificate: replaced by the rounded refined X, a cheap-control
 // Dare with reduced inputs no longer certified it. It reports false, K
@@ -3020,6 +3012,21 @@ func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float6
 			s += v * v
 		}
 		return math.Sqrt(s)
+	}
+	colNorm := func(d []float64) float64 {
+		s := 0.0
+		for j := range n {
+			c := 0.0
+			for i := range n {
+				v := d[i*n+j]
+				if t != nil {
+					v *= t[i] * t[j]
+				}
+				c += math.Abs(v)
+			}
+			s = max(s, c)
+		}
+		return s
 	}
 	kd := gain()
 	if kd == nil {
@@ -3080,7 +3087,7 @@ func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float6
 			for i, v := range xData {
 				y[i] = xH[i] - v + xL[i]
 			}
-			problem.xeX = cancelRatio(norm(y, true), norm(xH, true))
+			problem.xeX = max(cancelRatio(norm(y, true), norm(xH, true)), cancelRatio(colNorm(y), colNorm(xH)))
 			problem.xeLoose = true
 			if y, err := problem.newtonSolve(false, kn, xH, pe); err == nil {
 				problem.xeLoose = !(cancelRatio(norm(y, true), norm(eH, true)) <= newtonRefineTol)
