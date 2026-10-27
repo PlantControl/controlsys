@@ -23,9 +23,11 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 	if sys.IsDiscrete() {
 		return c2dPlan{}, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
-	sys, _, err := conversionStandardForm(sys, "descriptor reduction")
-	if err != nil {
-		return c2dPlan{}, err
+	var err error
+	if opts.Method != C2DMethodMatched || !stiffDelayedDescriptor(sys) {
+		if sys, _, err = conversionStandardForm(sys, "descriptor reduction"); err != nil {
+			return c2dPlan{}, err
+		}
 	}
 	opts, err = normalizeC2DOptions(dt, opts)
 	if err != nil {
@@ -112,10 +114,39 @@ func (p c2dPlan) discretizeMethod() (*System, error) {
 	case C2DMethodImpulse:
 		return p.workSys.discretizeImpulseParity(p.dt)
 	case C2DMethodMatched:
+		if p.workSys.IsDescriptor() {
+			return discretizeMatchedDescriptor(p.workSys, p.dt)
+		}
 		return p.workSys.discretizeMatched(p.dt)
 	default:
 		panic("unvalidated C2D method")
 	}
+}
+
+// stiffDelayedDescriptor reports that the descriptor sys with I/O delays
+// and no internal ones has stiffDescriptorParts without the delays, so
+// matched C2D maps the transfer function of the pencil as without delays
+// instead of that of the LU fold E⁻¹A.
+func stiffDelayedDescriptor(sys *System) bool {
+	if !sys.IsDescriptor() || sys.LFT != nil || !sys.HasDelay() {
+		return false
+	}
+	core := *sys
+	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
+	_, ok := stiffDescriptorParts(&core)
+	return ok
+}
+
+// discretizeMatchedDescriptor is discretizeMatched of the delay-free part
+// of the stiffDelayedDescriptor sys, with the I/O delay of sys in samples.
+func discretizeMatchedDescriptor(sys *System, dt float64) (*System, error) {
+	core := *sys
+	core.Delay = nil
+	out, err := core.discretizeMatched(dt)
+	if err != nil {
+		return nil, err
+	}
+	return newDelayConversionPolicy(dt).applyDiscreteDelayFields(out, sys)
 }
 
 func (p c2dPlan) applyExternalDelays(disc *System) (*System, error) {
