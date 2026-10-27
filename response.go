@@ -2083,8 +2083,7 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // As in MATLAB, a descriptor model with singular E rejects a nonzero x0 with
 // ErrDescriptorInitialState. A delay-free continuous descriptor whose
 // full-rank E is too ill-conditioned for E⁻¹A (as in Step) follows the
-// pencil (A, E): the response is C·x0 plus the step response of the
-// input A·x0 (x − x0 starts at rest).
+// pencil (A, E): the impulse response of the input E·x0.
 // Continuous models without internal delays, or whose internal delays share
 // one length (within the chain budget, see Step), are sampled exactly; other
 // internal-delay models use the approximate ZOH discretization of the delay
@@ -2105,12 +2104,14 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	if x0 == nil {
 		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrInvalidArgument)
 	}
-	if n, _, _ := sys.Dims(); x0.Len() == n && foldInaccurateContinuous(sys) {
-		resp, err := stiffDescriptorInitial(sys, x0, tFinal)
-		if err != nil {
-			return nil, fmt.Errorf("Initial: %w", err)
+	if n, _, _ := sys.Dims(); x0.Len() == n {
+		if parts, ok := stiffFreeParts(sys, x0); ok {
+			resp, err := stiffDescriptorInitial(sys, parts, x0, tFinal)
+			if err != nil {
+				return nil, fmt.Errorf("Initial: %w", err)
+			}
+			return resp, nil
 		}
-		return resp, nil
 	}
 	sim, simX0, reduced, err := sys.timeResponseForm(x0)
 	if err != nil {
@@ -2162,65 +2163,67 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	return plan.response(resp.Y), nil
 }
 
-// initialStateInput returns sys with the input column A·x0 and a zero D
-// column appended to the inputs (replacing them unless keepInputs), and
-// y0 = C·x0. z = x − x0 solves E·ż = A·z + B·u + A·x0 with z(0) = 0, so the
-// zero-state response with that input held at one, plus y0, is the
-// response from x0. The model stays a descriptor, so the zero-state
-// response keeps the pencil route of foldInaccurateParts, whose parts
-// carry x0 through their own transformations of B. That route has no
-// nonzero delay, so zero-valued input delay metadata is dropped.
-func initialStateInput(sys *System, x0 *mat.VecDense, keepInputs bool) (*System, *mat.VecDense) {
-	n, m, p := sys.Dims()
-	k := 0
-	if keepInputs {
-		k = m
+// stiffFreeParts returns the parts of foldInaccurateParts of
+// (A, E, E·x0, C, 0) for a continuous descriptor: each part's single
+// input column is its share of x0. Sampled from those shares, the free
+// response is an impulse response with no constant C·x0 to cancel in a
+// decaying tail, unlike the step response of the input A·x0. A model with
+// a nonzero delay does not split; zero-valued delay metadata is dropped.
+func stiffFreeParts(sys *System, x0 *mat.VecDense) ([]*System, bool) {
+	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.HasDelay() {
+		return nil, false
 	}
-	out := sys.Copy()
-	out.B, out.D = newDense(n, k+1), newDense(p, k+1)
-	out.InputDelay, out.Delay = nil, nil
-	if k > 0 {
-		out.B.Slice(0, n, 0, k).(*mat.Dense).Copy(sys.B)
-		out.D.Slice(0, p, 0, k).(*mat.Dense).Copy(sys.D)
-	}
-	var ax mat.VecDense
-	ax.MulVec(sys.A, x0)
-	out.B.SetCol(k, ax.RawVector().Data)
-	out.InputName = nil
-	if keepInputs && sys.InputName != nil {
-		out.InputName = append(copyStringSlice(sys.InputName), "")
-	}
-	y0 := mat.NewVecDense(p, nil)
-	y0.MulVec(sys.C, x0)
-	return out, y0
+	n, _, p := sys.Dims()
+	fm := sys.Copy()
+	fm.B, fm.D = newDense(n, 1), newDense(p, 1)
+	fm.InputDelay, fm.Delay, fm.InputName = nil, nil, nil
+	var ex mat.VecDense
+	ex.MulVec(sys.E, x0)
+	fm.B.SetCol(0, ex.RawVector().Data)
+	return foldInaccurateParts(fm)
 }
 
-// addColumnOffset adds y0 to every column of Y.
-func addColumnOffset(Y *mat.Dense, y0 *mat.VecDense) {
-	raw := Y.RawMatrix()
-	for i := range raw.Rows {
-		v := y0.AtVec(i)
-		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
-		for j := range row {
-			row[j] += v
+// sampleFreeParts sums y(k·dt) of the parts of stiffFreeParts of sys, each
+// from its share of x0, sampled exactly as in continuousFreeSamples. y(0)
+// is C·x0 itself: the shares of a fast part, gone after one sample, are
+// only as accurate as its fold.
+func sampleFreeParts(sys *System, parts []*System, x0 *mat.VecDense, steps int, dt float64) (*mat.Dense, error) {
+	_, _, p := sys.Dims()
+	Y := mat.NewDense(p, steps, nil)
+	for _, part := range parts {
+		pn, _, _ := part.Dims()
+		if pn == 0 {
+			continue
 		}
+		xi := mat.NewVecDense(pn, nil)
+		for i := range pn {
+			xi.SetVec(i, part.B.At(i, 0))
+		}
+		part.OutputDelay = nil
+		y, err := part.continuousFreeSamples(xi, steps, dt)
+		if err != nil {
+			return nil, err
+		}
+		Y.Add(Y, y)
 	}
+	var y0 mat.VecDense
+	y0.MulVec(sys.C, x0)
+	Y.SetCol(0, y0.RawVector().Data)
+	return Y, nil
 }
 
-// stiffDescriptorInitial is Initial of a continuous descriptor with
-// foldInaccurateParts: the step response of initialStateInput plus C·x0.
-func stiffDescriptorInitial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
-	free, y0 := initialStateInput(sys, x0, false)
-	plan, err := prepareAutoTimeResponse(free, tFinal, 0)
+// stiffDescriptorInitial is Initial from the parts of stiffFreeParts on the
+// automatic grid of sys.
+func stiffDescriptorInitial(sys *System, parts []*System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
+	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := plan.allInputResponse(stepResponse)
+	Y, err := sampleFreeParts(sys, parts, x0, len(t), dt)
 	if err != nil {
 		return nil, err
 	}
-	addColumnOffset(resp.Y, y0)
-	return resp, nil
+	return &TimeResponse{T: t, Y: Y, OutputName: copyStringSlice(sys.OutputName)}, nil
 }
 
 // zeroInputModel returns sys with one zero input standing in for m = 0, since
@@ -2348,21 +2351,14 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		return nil, fmt.Errorf("Lsim: model has no outputs: %w", ErrDimensionMismatch)
 	}
 	var err error
-	var y0 *mat.VecDense
+	var freeX0 *mat.VecDense
 	stiff := foldInaccurateContinuous(sys)
-	if n, m, _ := sys.Dims(); stiff && x0 != nil && x0.Len() == n && !allZeroVec(x0) {
-		if uFree, ok := appendUnitInput(u, len(t), m); ok {
-			sys, y0 = initialStateInput(sys, x0, true)
-			u, x0 = uFree, nil
-		} else if _, _, err := prepareLsimResponse(sys, u, t); err != nil {
-			return nil, err
-		} else {
-			stiff = false
-		}
-	}
 	if stiff {
 		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
 			return nil, fmt.Errorf("Lsim: x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
+		}
+		if x0 != nil && !allZeroVec(x0) {
+			freeX0 = x0
 		}
 		x0 = nil
 	} else {
@@ -2384,8 +2380,8 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 			return nil, fmt.Errorf("Lsim: %w", err)
 		}
 		if ok {
-			if y0 != nil {
-				addColumnOffset(Y, y0)
+			if err := addStiffFreeSamples(sys, freeX0, plan, Y); err != nil {
+				return nil, fmt.Errorf("Lsim: %w", err)
 			}
 			return plan.response(Y), nil
 		}
@@ -2406,34 +2402,32 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		}
 		resp.Y.Add(resp.Y, free)
 	}
-	if y0 != nil && resp.Y != nil {
-		addColumnOffset(resp.Y, y0)
+	if err := addStiffFreeSamples(sys, freeX0, plan, resp.Y); err != nil {
+		return nil, fmt.Errorf("Lsim: %w", err)
 	}
 
 	return plan.response(resp.Y), nil
 }
 
-// appendUnitInput returns the steps×m input u with a column of ones
-// appended; ok is false when u is not steps×m (an empty or nil u for m = 0).
-func appendUnitInput(u *mat.Dense, steps, m int) (*mat.Dense, bool) {
-	if steps < 2 {
-		return nil, false
+// addStiffFreeSamples adds to Y the free response from x0 of a continuous
+// descriptor with foldInaccurateParts on the grid of plan; a nil x0 adds
+// nothing. A pencil that does not split (not expected: the split depends on
+// (A, E) only) takes the fold E⁻¹A.
+func addStiffFreeSamples(sys *System, x0 *mat.VecDense, plan timeResponsePlan, Y *mat.Dense) (err error) {
+	if x0 == nil {
+		return nil
 	}
-	if m == 0 {
-		if u != nil && !u.IsEmpty() {
-			return nil, false
-		}
-	} else if u == nil || u.IsEmpty() {
-		return nil, false
-	} else if r, c := u.Dims(); r != steps || c != m {
-		return nil, false
+	var free *mat.Dense
+	if parts, ok := stiffFreeParts(sys, x0); ok {
+		free, err = sampleFreeParts(sys, parts, x0, plan.steps, plan.dt)
+	} else if fold, ferr := sys.ToExplicit(); ferr != nil {
+		err = ferr
+	} else {
+		free, err = fold.continuousFreeSamples(x0, plan.steps, plan.dt)
 	}
-	out := mat.NewDense(steps, m+1, nil)
-	if m > 0 {
-		out.Slice(0, steps, 0, m).(*mat.Dense).Copy(u)
+	if err != nil {
+		return err
 	}
-	for k := range steps {
-		out.Set(k, m, 1)
-	}
-	return out, true
+	Y.Add(Y, free)
+	return nil
 }
