@@ -239,6 +239,8 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // rounding the staircase leaves beside a chain moves a pole large in A
 // (+93147 by 1.2e-4 relative beside an index-6 chain) that QZ keeps to
 // ε·cond. Otherwise the staircase without rescue decides as it did.
+// blur > 1 marks exactly the staircases that decided a level descriptorRank
+// left ambiguous: deflatedRank only takes a zero there within leak > 1.
 func staircasePoles(A, E *mat.Dense) (poles []complex128, ok bool, err error) {
 	a, e, _, _, nf, stiff, _, blur, _, dok := deflateInfinite(A, E, false, false)
 	if dok && stiff {
