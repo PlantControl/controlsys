@@ -209,6 +209,9 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 		tol, sep := leastRatioInfTol(alphar, alphai, beta, n-r, margin)
 		if stiff {
 			if _, index1 := pencilIndexOne(A, E, n, normA); !index1 {
+				if poles, ok := stiffChainPoles(A, E, alphar, alphai, beta, normA, normE); ok {
+					return poles, nil
+				}
 				tol = 0
 			}
 			return finitePoles(alphar, alphai, beta, tol), nil
@@ -228,6 +231,54 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 		infTol = tol
 	}
 	return finitePoles(alphar, alphai, beta, infTol), nil
+}
+
+// stiffChainPoles returns the finite poles of an index ≥ 2 pencil whose E
+// has a stiff singular value from the finite block of deflateStiffChain:
+// QZ on the whole pencil smears a chain of length k to |λ| ~ ε^(−1/k) and
+// can give the stiff finite pole β = 0. The deflated set is taken only when
+// its QZ leaves no β = 0 and it carries every whole-pencil eigenvalue that
+// is not large (qzLargeRatio) within qzRetryTol chordally: those QZ
+// resolves, so the deflation may replace only the large ones.
+func stiffChainPoles(A, E *mat.Dense, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
+	a, e, _, _, nf, _, _, _, ok := deflateStiffChain(A, E)
+	if !ok {
+		return nil, false
+	}
+	ad, ed := a.RawMatrix(), e.RawMatrix()
+	far, fai, fbeta, ok := qzEigenvalues(nf, ad.Data, ad.Stride, ed.Data, ed.Stride)
+	if !ok {
+		return nil, false
+	}
+	poles := finitePoles(far, fai, fbeta, 0)
+	if len(poles) != nf {
+		return nil, false
+	}
+	largeTol := qzInfiniteTol(qzLargeRatio, normA, normE)
+	used := make([]bool, nf)
+	for i := range beta {
+		if qzInfinite(alphar[i], alphai[i], beta[i], largeTol) {
+			continue
+		}
+		ai := complex(alphar[i], alphai[i])
+		ni := math.Hypot(cmplx.Abs(ai), beta[i])
+		best, bestD := -1, math.Inf(1)
+		for j := range nf {
+			if used[j] {
+				continue
+			}
+			aj := complex(far[j], fai[j])
+			nj := math.Hypot(cmplx.Abs(aj), fbeta[j])
+			if d := cmplx.Abs(ai*complex(fbeta[j], 0)-aj*complex(beta[i], 0)) / (ni * nj); d < bestD {
+				best, bestD = j, d
+			}
+		}
+		if !(bestD <= qzRetryTol) {
+			return nil, false
+		}
+		used[best] = true
+	}
+	return poles, true
 }
 
 // largeRetained reports whether an eigenvalue that infTol keeps is large,
