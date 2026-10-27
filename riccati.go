@@ -64,6 +64,7 @@ type RiccatiWorkspace struct {
 	scaleProxy  []float64
 	certX1      []float64
 	xe          []float64
+	cancel      []float64
 	lyap        *LyapunovWorkspace
 }
 
@@ -2503,7 +2504,11 @@ func (problem *riccatiProblem) newtonSolve(continuous bool, K *mat.Dense, xData,
 func (problem *riccatiProblem) descriptorCancellation(xData []float64) float64 {
 	n, m := problem.n, problem.m
 	nn := n * n
-	buf := make([]float64, 5*nn+2*m*n)
+	ws := problem.ws
+	if len(ws.cancel) < 5*nn+2*m*n {
+		ws.cancel = make([]float64, 5*nn+2*m*n)
+	}
+	buf := ws.cancel
 	absX, absE, xe, axe := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn]
 	ete, g, ag := buf[4*nn:5*nn], buf[5*nn:5*nn+m*n], buf[5*nn+m*n:]
 	eRaw, bRaw := problem.E.RawMatrix(), problem.B.RawMatrix()
