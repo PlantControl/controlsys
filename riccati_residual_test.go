@@ -86,7 +86,7 @@ func TestRiccatiResidual_DoubleDouble(t *testing.T) {
 				}
 			}
 			aclT, res := make([]float64, n*n), make([]float64, n*n)
-			problem.riccatiResidual(continuous, K.RawMatrix().Data, X.RawMatrix().Data, aclT, res)
+			problem.riccatiResidual(continuous, K.RawMatrix().Data, X.RawMatrix().Data, nil, aclT, res)
 			want := riccatiResidualBig(continuous, A, B, Q, R, S, X)
 			if e := relErr(mat.NewDense(n, n, res), want); !(e <= 1e-12) {
 				t.Errorf("residual rel err %g (‖Ric‖ %g)", e, mat.Norm(want, 2))
