@@ -2696,14 +2696,21 @@ func explicitUncertified(X, E *mat.Dense) bool {
 
 // descriptorGainCertified reports whether the gain K of an X (xData)
 // verifyRiccati certifies is certified with it, x1 the Newton iterate of
-// that check (nil once converged). With E, where K or EᵀXE cancel beyond
-// nearSingularCancelLimit (descriptorCancellation, dareCancellation) or
-// the Newton step moves K beyond newtonTol (gainStep), they are refined,
-// continuous by refineDescriptorGain, discrete by refineDescriptorDare,
-// and, should that fail, certified only when the gain's ratio times eps
-// and its step are within newtonTol. A step of X within newtonTol may
-// leave K off by far more: it is relative to ‖X‖ ~ 1/σ_min(E), and K
-// sees X in E's small directions (Lqr K off by 9.2e-7, X by 1.7e-9).
+// that check (nil once converged), and records the Newton step of EᵀXE
+// (gainStep) in problem.xeStep. With E, where EᵀXE (continuous, also K)
+// cancels beyond nearSingularCancelLimit (descriptorCancellation,
+// dareCancellation), or the Newton step moves EᵀXE (continuous, also K)
+// beyond newtonRefineTol, K and EᵀXE are refined, continuous by
+// refineDescriptorGain, discrete by refineDescriptorDare. Should that
+// fail, X is certified only when the gain's ratio times eps and the
+// step's move of K are within newtonTol, except for a discrete EᵀXE that
+// does not cancel: there the Dare is as without refinement, and only
+// Dlqr's EᵀXE loses Accuracy 0 (xeStep), as the discrete gain ratio, with
+// |W⁻¹| of a cheap-control W = R + BᵀXB, overstates the move of K by
+// up to 1e16 and failing on it turned correct values into
+// ErrNoStabilizing. A step of X within newtonTol may leave K off by far
+// more: it is relative to ‖X‖ ~ 1/σ_min(E), and K sees X in E's small
+// directions (Lqr K off by 9.2e-7, X by 1.7e-9).
 func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.Dense, xData, x1 []float64, eig []complex128) bool {
 	problem.xe, problem.xeStep = nil, 0
 	if problem.E == nil {
