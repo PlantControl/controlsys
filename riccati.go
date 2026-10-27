@@ -2479,15 +2479,15 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			problem.certStep, problem.certX1 = 0, nil
 			prev := append([]float64(nil), xData...)
 			copy(xData, x1)
-			if K1, err := problem.closedLoopGain(continuous, xData, eig); err == nil {
-				if !problem.descriptorGainCertified(continuous, K1, xData, nil, eig) {
+			if K1, x2, err := problem.closedLoopGain(continuous, xData, eig); err == nil {
+				if !problem.descriptorGainCertified(continuous, K1, xData, x2, eig) {
 					return nil, fail
 				}
 				return K1, nil
 			}
 			copy(xData, prev)
-			if K, err = problem.closedLoopGain(continuous, xData, eig); err != nil ||
-				!problem.descriptorGainCertified(continuous, K, xData, nil, eig) {
+			if K, x1, err = problem.closedLoopGain(continuous, xData, eig); err != nil ||
+				!problem.descriptorGainCertified(continuous, K, xData, x1, eig) {
 				return nil, fail
 			}
 			return K, nil
@@ -2524,19 +2524,20 @@ func (problem *riccatiProblem) stepNorms(x1, xData []float64) (d, x1n float64) {
 	return d, x1n
 }
 
-// closedLoopGain returns the gain K of xData with the eigenvalues of
-// A − BK in eig, or an error when A − BK is not stable or its cost does
-// not solve.
-func (problem *riccatiProblem) closedLoopGain(continuous bool, xData []float64, eig []complex128) (*mat.Dense, error) {
+// closedLoopGain returns the gain K of xData and its Newton iterate x1
+// (newtonCost) with the eigenvalues of A − BK in eig, or an error when
+// A − BK is not stable or its cost does not solve.
+func (problem *riccatiProblem) closedLoopGain(continuous bool, xData []float64, eig []complex128) (*mat.Dense, []float64, error) {
 	K, err := problem.gain(continuous, xData)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if _, err := problem.newtonCost(continuous, K, xData); err != nil {
-		return nil, err
+	x1, err := problem.newtonCost(continuous, K, xData)
+	if err != nil {
+		return nil, nil, err
 	}
 	problem.closedLoopEig(eig)
-	return K, nil
+	return K, x1, nil
 }
 
 // closedLoopEig copies the eigenvalues of A − BK of the last newtonCost
@@ -2713,7 +2714,8 @@ func explicitUncertified(X, E *mat.Dense) bool {
 
 // descriptorGainCertified reports whether the gain K of an X (xData)
 // verifyRiccati certifies is certified with it, x1 the Newton iterate of
-// that check (nil once converged), and records the Newton step of EᵀXE
+// X (also of an iterated X: the iterate kept after its successor's gain
+// was unstable left Lqr's EᵀXE off by 3.5e-4 unseen), and records the Newton step of EᵀXE
 // (gainStep) in problem.xeStep. With E, where EᵀXE (continuous, also K)
 // cancels beyond nearSingularCancelLimit (descriptorCancellation,
 // dareCancellation), or the Newton step moves EᵀXE (continuous, also K)
