@@ -205,7 +205,12 @@ func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult
 
 func (sys *System) transferRational(opts *TransferFuncOpts) (*TransferFuncResult, error) {
 	if sys.IsDescriptor() {
-		if parts, ok := stiffExplicitParts(sys); ok {
+		if parts, deflated, ok := stiffExplicitParts(sys); ok {
+			if deflated {
+				if res, err := sys.reducedTransferFunction(opts); err == nil {
+					return res, nil
+				}
+			}
 			if res, err := sumTransferFunction(parts, opts); err == nil {
 				res.TF.InputName = copyStringSlice(sys.InputName)
 				res.TF.OutputName = copyStringSlice(sys.OutputName)
@@ -218,6 +223,24 @@ func (sys *System) transferRational(opts *TransferFuncOpts) (*TransferFuncResult
 		return nil, err
 	}
 	res, err := std.rationalTransferFunction(opts)
+	if err != nil {
+		return nil, err
+	}
+	addPolynomialPart(res.TF, poly)
+	return res, nil
+}
+
+// reducedTransferFunction is the transfer function of the descriptor sys
+// through weierstrassReduceParts, without trying E⁻¹ first.
+func (sys *System) reducedTransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
+	out, poly, err := sys.weierstrassReduceParts()
+	if err != nil {
+		return nil, err
+	}
+	if n, _, _ := out.Dims(); n == 0 {
+		return nil, ErrDescriptorUnsupported
+	}
+	res, err := out.rationalTransferFunction(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -259,44 +282,48 @@ const illConditionedECond = 1e4
 // rank deficient by the MATLAB rule, or sys has internal delays. The modes
 // with |λ|·‖E‖/‖A‖ ≥ 1/qzLargeRatio are split off by the ordered
 // generalized Schur form; each part folds its E in by svdExplicit.
-func stiffExplicitParts(sys *System) ([]*System, bool) {
+// deflated reports that the generalized Schur form zeroed the E of the
+// stiff part (σ_n of E within ε‖E‖): the single part returned then holds
+// the stiff pole near 1/ε, whose fold rounding swamps the slow poles, and
+// the Weierstrass reduction is the accurate route.
+func stiffExplicitParts(sys *System) (parts []*System, deflated, ok bool) {
 	if sys.LFT != nil {
-		return nil, false
+		return nil, false, false
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	if lu.Cond() < illConditionedECond || eRankDeficient(sys.E, &lu) {
-		return nil, false
+		return nil, false, false
 	}
 	sys = equilibrateDescriptor(sys)
 	lu.Factorize(sys.E)
 	if lu.Cond() < illConditionedECond {
-		return nil, false
+		return nil, false, false
 	}
 	whole, ok := svdExplicit(sys)
 	if !ok {
-		return nil, false
+		return nil, false, false
 	}
 	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
 	if normA == 0 {
-		return []*System{whole}, true
+		return []*System{whole}, false, true
 	}
 	slow, fast, err := decomposeGeneralizedQZ(sys, func(l complex128) bool {
 		return cmplx.Abs(l)*normE*qzLargeRatio < normA
 	})
 	if err != nil {
-		return []*System{whole}, true
+		return []*System{whole}, false, true
 	}
 	n1, _, _ := slow.Dims()
 	n2, _, _ := fast.Dims()
 	if n1 == 0 || n2 == 0 {
-		return []*System{whole}, true
+		return []*System{whole}, false, true
 	}
 	fastExplicit, ok := svdExplicit(fast)
 	if !ok {
-		return []*System{whole}, true
+		return []*System{whole}, true, true
 	}
-	return []*System{slow, fastExplicit}, true
+	return []*System{slow, fastExplicit}, false, true
 }
 
 // equilibrateDescriptor returns sys with the rows of (A, B, E) and the
