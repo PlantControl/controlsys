@@ -371,10 +371,12 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 // infinite chain moves at first order; one copy is enough, since QZ of a
 // copy can merge the pole with the smear. It only decides whether the
 // deflated set may replace the whole-pencil one, so too large a value falls
-// back to the whole-pencil set. In the stiff-chain review pencils (native
-// and amd64) a pole QZ resolves beside the smear came back to at most
-// 9.4e-3 relative in its nearest copy (4.9e-3 at best), smear mostly to no
-// less than 2.5e-2, as the leaked rounding leakStableTol separates.
+// back to the whole-pencil set. In the review literals (native and amd64)
+// a pole QZ resolves beside the smear came back within 4.9e-3..9.4e-3
+// relative in each copy, the smear of 15 chain literals no nearer than
+// 2.5e-2, as the leaked rounding leakStableTol separates. Under -race (other
+// QZ rounding) smear came back to 5e-4 in one copy (PCG(316, 31)): the
+// whole-pencil set is kept there.
 const jitterResolvedTol = 1e-2
 
 // jitteredEigenvalues returns the finite whole-pencil eigenvalues of
