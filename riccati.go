@@ -196,6 +196,11 @@ type RiccatiResult struct {
 	// X, at Accuracy 1, is not: explicitRiccatiSolution returns them at
 	// Accuracy 0.
 	xeCertified bool
+	// kw is the noise gain (R + BᵀXB)⁻¹BᵀX of nearSingularDare, formed in
+	// extended precision, for Lqg's current estimator; kwCertified when
+	// eps perturbations of the data move it by at most newtonTol.
+	kw          *mat.Dense
+	kwCertified bool
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches

@@ -4,10 +4,8 @@ import (
 	"errors"
 	"math"
 	"math/big"
-	"math/cmplx"
 	"math/rand/v2"
 
-	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -207,8 +205,11 @@ const (
 // ‖Y‖ + ‖Q‖, once more at 64 bits more on a miss; K is formed from it in
 // the same precision and rounded, and the closed loop of the rounded K
 // is shown stable in extended precision: ‖(Ae − BeK)^(2^j)‖_∞ ≤ ½ for
-// some j. Eig is the float64 QZ of (A − BK, E), MATLAB pole(dss). Any
-// failure keeps err, so no value it returned before changes.
+// some j. Eig is the float64 eigenvalues of that extended-precision
+// Ae − BeK rounded once, the exact eig(A − BK, E): a float64 A − BK
+// errs by eps·|B||K|, which 1/σ_min(E) carries to O(1) in the QZ of
+// (A − BK, E) (|λ| 1.27 for an exact 0.58). Any failure keeps err, so no
+// value it returned before changes.
 //
 // Y and K carry Accuracy 0 (Dlqr, Lqg: xeCertified) when they move by at
 // most newtonTol under each of two componentwise eps perturbations of A,
@@ -252,9 +253,11 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 		return nil, false
 	}
 	K := sol.k.dense()
-	if !d.stable(sol, K) {
+	acl := d.closedLoop(sol, K)
+	if !stableLoop(acl) {
 		return nil, false
 	}
+	eig := loopEig(acl)
 	z, ok := xSolve(sol.e.t(), sol.y)
 	if !ok {
 		return nil, false
@@ -268,13 +271,18 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 	symmetrize(X.RawMatrix().Data, n, n)
 	symmetrize(Y.RawMatrix().Data, n, n)
 
-	ykOK, xOK := true, d.xBound(sol, x)
-	for seed := range uint64(2) {
-		dy, dk, dx, ok := d.perturbedMove(sol, x, prec, seed)
-		ykOK = ykOK && ok && dy <= newtonTol && dk <= newtonTol
-		xOK = xOK && ok && dx <= newtonTol
+	kw, ok := d.noiseGain(sol, sol.y)
+	if !ok {
+		return nil, false
 	}
-	res := &RiccatiResult{X: X, K: K, Eig: d.eig(K), Rcnd: placedRcnd(X.RawMatrix().Data, n), Accuracy: 1, xe: Y}
+	ykOK, xOK, kwOK := true, d.xBound(sol, x), true
+	for seed := range uint64(2) {
+		mv, ok := d.perturbedMove(sol, x, kw, prec, seed)
+		ykOK = ykOK && ok && mv.y <= newtonTol && mv.k <= newtonTol
+		xOK = xOK && ok && mv.x <= newtonTol
+		kwOK = kwOK && ok && mv.kw <= newtonTol
+	}
+	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: placedRcnd(X.RawMatrix().Data, n), Accuracy: 1, xe: Y, kw: kw.dense(), kwCertified: kwOK}
 	if ykOK {
 		res.xeCertified = true
 		if xOK {
@@ -376,6 +384,18 @@ func (d extendedDare) gain(sol extendedSol, y xMat) (xMat, bool) {
 	return xSolve(xAdd(sol.r, xMul(btx, sol.be), 1), rh)
 }
 
+// noiseGain is (R + BᵀXB)⁻¹BᵀX = (R + BeᵀYBe)⁻¹BeᵀYE⁻¹, the gain of a
+// process noise w in Ex[k+1] = Ax[k] + Bu[k] + w[k]: formed from X in
+// float64 BᵀXB cancels, ‖X‖ ~ 1/σ_min(E)².
+func (d extendedDare) noiseGain(sol extendedSol, y xMat) (xMat, bool) {
+	ei, ok := xSolve(sol.e, xEye(sol.e.r, sol.e.prec))
+	if !ok {
+		return xMat{}, false
+	}
+	bty := xMul(sol.be.t(), y)
+	return xSolve(xAdd(sol.r, xMul(bty, sol.be), 1), xMul(bty, ei))
+}
+
 // residual is max |AeᵀYAe − Y − (AeᵀYBe + S)K + Q|.
 func (d extendedDare) residual(sol extendedSol, y, k xMat) float64 {
 	aty := xMul(sol.ae.t(), y)
@@ -391,10 +411,9 @@ func (d extendedDare) closedLoop(sol extendedSol, K *mat.Dense) xMat {
 	return xAdd(sol.ae, xMul(sol.be, xFrom(K, sol.ae.prec)), -1)
 }
 
-// stable reports ‖(Ae − BeK)^(2^j)‖_∞ ≤ ½ for some j ≤ extendedDoublings,
-// a proof that ρ(Ae − BeK) < 1.
-func (d extendedDare) stable(sol extendedSol, K *mat.Dense) bool {
-	m := d.closedLoop(sol, K)
+// stableLoop reports ‖m^(2^j)‖_∞ ≤ ½ for some j ≤ extendedDoublings, a
+// proof that ρ(m) < 1.
+func stableLoop(m xMat) bool {
 	limit := math.Ldexp(1, int(m.prec/4))
 	for range extendedDoublings {
 		v := m.infNorm()
@@ -442,10 +461,13 @@ func (d extendedDare) xBound(sol extendedSol, x xMat) bool {
 	return xn > 0 && denseNorm(&b1)*eps() <= newtonTol*xn
 }
 
-// perturbedMove returns the relative moves of Y, K and X under a
-// componentwise eps perturbation (seeded signs) of the data: one Hewer
-// step from Y, the Stein equation solved by Smith doubling.
-func (d extendedDare) perturbedMove(sol extendedSol, x xMat, prec uint, seed uint64) (dy, dk, dx float64, ok bool) {
+// extendedMove is the relative move of Y, K, X and the noise gain.
+type extendedMove struct{ y, k, x, kw float64 }
+
+// perturbedMove returns the relative moves of Y, K, X and the noise gain
+// kw under a componentwise eps perturbation (seeded signs) of the data:
+// one Hewer step from Y, the Stein equation solved by Smith doubling.
+func (d extendedDare) perturbedMove(sol extendedSol, x, kw xMat, prec uint, seed uint64) (mv extendedMove, ok bool) {
 	rng := rand.New(rand.NewPCG(seed+1, 0x0a2d))
 	ep := new(big.Float).SetPrec(prec).SetFloat64(eps())
 	perturb := func(m xMat) xMat {
@@ -463,11 +485,11 @@ func (d extendedDare) perturbedMove(sol extendedSol, x xMat, prec uint, seed uin
 	}
 	p, ok := d.model(prec, perturb)
 	if !ok {
-		return 0, 0, 0, false
+		return mv, false
 	}
 	k, ok := d.gain(p, sol.y)
 	if !ok {
-		return 0, 0, 0, false
+		return mv, false
 	}
 	acl := xAdd(p.ae, xMul(p.be, k), -1)
 	rk := xMul(p.r, k)
@@ -478,26 +500,30 @@ func (d extendedDare) perturbedMove(sol extendedSol, x xMat, prec uint, seed uin
 	}
 	y, ok := smithStein(acl, w.symmetrized())
 	if !ok {
-		return 0, 0, 0, false
+		return mv, false
 	}
 	k1, ok := d.gain(p, y)
 	if !ok {
-		return 0, 0, 0, false
+		return mv, false
 	}
 	z, ok1 := xSolve(p.e.t(), y)
 	if !ok1 {
-		return 0, 0, 0, false
+		return mv, false
 	}
 	xt, ok2 := xSolve(p.e.t(), z.t())
 	if !ok2 {
-		return 0, 0, 0, false
+		return mv, false
 	}
 	rel := func(a, b xMat) float64 {
 		v := xAdd(a, b, -1).dense()
 		w := b.dense()
 		return max(mat.Norm(v, 1)/mat.Norm(w, 1), mat.Norm(v, 2)/mat.Norm(w, 2))
 	}
-	return rel(y, sol.y), rel(k1, sol.k), rel(xt.t(), x), true
+	kwp, ok := d.noiseGain(p, y)
+	if !ok {
+		return mv, false
+	}
+	return extendedMove{y: rel(y, sol.y), k: rel(k1, sol.k), x: rel(xt.t(), x), kw: rel(kwp, kw)}, true
 }
 
 // smithStein solves Y = FᵀYF + W for ρ(F) < 1 by Smith doubling.
@@ -518,28 +544,12 @@ func smithStein(f, w xMat) (xMat, bool) {
 	return y, false
 }
 
-// eig is the float64 QZ of (A − BK, E).
-func (d extendedDare) eig(K *mat.Dense) []complex128 {
-	n, _ := d.A.Dims()
-	var acl mat.Dense
-	acl.Mul(d.B, K)
-	acl.Sub(d.A, &acl)
-	a := make([]float64, n*n)
-	e := make([]float64, n*n)
-	aRaw, eRaw := acl.RawMatrix(), d.E.RawMatrix()
-	copyStrided(a, n, aRaw.Data, aRaw.Stride, n, n)
-	copyStrided(e, n, eRaw.Data, eRaw.Stride, n, n)
-	wr, wi, beta := make([]float64, n), make([]float64, n), make([]float64, n)
-	work := make([]float64, max(1, 8*n))
-	if !impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, n, a, n, e, n, wr, wi, beta, nil, 1, nil, 1, work, len(work)) {
+// loopEig is the float64 eigenvalues of the closed loop Ae − BeK formed
+// in extended precision and rounded once; nil if they do not converge.
+func loopEig(acl xMat) []complex128 {
+	var ed mat.Eigen
+	if !ed.Factorize(acl.dense(), mat.EigenNone) {
 		return nil
 	}
-	eig := make([]complex128, n)
-	for k := range n {
-		eig[k] = complex(wr[k]/beta[k], wi[k]/beta[k])
-		if beta[k] == 0 {
-			eig[k] = cmplx.Inf()
-		}
-	}
-	return eig
+	return ed.Values(nil)
 }

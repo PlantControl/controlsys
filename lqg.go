@@ -167,7 +167,7 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 		return nil, err
 	}
 
-	xGen := kRes.X
+	xGen, kwGen, kwCertified := kRes.X, kRes.kw, kRes.kwCertified
 	if kRes, err = explicitRiccatiSolution(kRes, ropts, nil); err != nil {
 		return nil, err
 	}
@@ -177,8 +177,11 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	}
 	var F *mat.Dense
 	if o.Current {
-		if F, err = res.currentGains(sys, Ba, xGen, R, Rn, Nn); err != nil {
+		if F, err = res.currentGains(sys, Ba, xGen, kwGen, R, Rn, Nn); err != nil {
 			return nil, err
+		}
+		if kwGen != nil && !kwCertified {
+			res.Accuracy = max(res.Accuracy, 1)
 		}
 	}
 	if res.Controller, err = lqgController(sys, res, F, o.OneDOF); err != nil {
@@ -244,8 +247,9 @@ func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
 }
 
 // currentGains takes X, the regulator solution of the generalized Riccati
-// equation: Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] for E x[n+1] = ... + w.
-func (res *LqgResult) currentGains(sys *System, Ba, X, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {
+// equation: Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] for E x[n+1] = ... + w, or
+// (R + Ba'X Ba)⁻¹ Ba'X itself when Dare formed it (kw, near-singular E).
+func (res *LqgResult) currentGains(sys *System, Ba, X, kw, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {
 	n, m, p := sys.Dims()
 	PCt := mulDims(n, p, res.Xf, sys.C.T())
 	S := mulDims(p, p, sys.C, PCt)
@@ -260,13 +264,17 @@ func (res *LqgResult) currentGains(sys *System, Ba, X, R, Rn, Nn *mat.Dense) (*m
 		res.mw.Mul(Nn, &Sinv)
 	}
 
-	na, _ := X.Dims()
-	BtX := mulDims(m, na, Ba.T(), X)
-	G := mulDims(m, m, BtX, Ba)
-	G.Add(G, R)
-	res.kw = mat.NewDense(m, n, nil)
-	if err := res.kw.Solve(G, subDense(BtX, 0, 0, m, n)); err != nil {
-		return nil, fmt.Errorf("Lqg: %w", ErrSingularR)
+	if kw != nil {
+		res.kw = subDense(kw, 0, 0, m, n)
+	} else {
+		na, _ := X.Dims()
+		BtX := mulDims(m, na, Ba.T(), X)
+		G := mulDims(m, m, BtX, Ba)
+		G.Add(G, R)
+		res.kw = mat.NewDense(m, n, nil)
+		if err := res.kw.Solve(G, subDense(BtX, 0, 0, m, n)); err != nil {
+			return nil, fmt.Errorf("Lqg: %w", ErrSingularR)
+		}
 	}
 
 	F := mulDims(m, p, res.K, res.mx)
