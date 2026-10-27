@@ -2352,6 +2352,8 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		if uFree, ok := appendUnitInput(u, len(t), m); ok {
 			sys, y0 = initialStateInput(sys, x0, true)
 			u, x0 = uFree, nil
+		} else if _, _, err := prepareLsimResponse(sys, u, t); err != nil {
+			return nil, err
 		} else {
 			stiff = false
 		}

@@ -142,7 +142,8 @@ func TestLsimInitialStateFullRankIllConditionedEFollowsPencil(t *testing.T) {
 // The pencil route keeps the argument checks: a wrong x0 length is
 // ErrDimensionMismatch, a wrong u shape the Lsim shape error.
 func TestInitialStateFullRankIllConditionedEArgumentErrors(t *testing.T) {
-	sys := stepFoldLossCases[2].system(t)
+	_, systems, _ := stiffDescriptorModels(t)
+	sys := systems[0]
 	n, m, _ := sys.Dims()
 	if _, err := Initial(sys, onesVec(n+1), 5); !errors.Is(err, ErrDimensionMismatch) {
 		t.Errorf("Initial x0 length: err = %v, want ErrDimensionMismatch", err)
