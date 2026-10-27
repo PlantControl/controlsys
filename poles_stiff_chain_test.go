@@ -126,12 +126,12 @@ func TestPoles_SmallEPoleBesideChainKept(t *testing.T) {
 	}
 }
 
-// TestPoles_StiffChainPoleKeepsQZValue: IP4PC3. An index-2 chain beside a
-// pole small in E (stiff E singular value 1.6e-10..2.7e-10 relative): base
-// Poles has the stiff pole to 1e-8 beside two smeared chain members; the
-// deflateStiffChain block moves it by 1.8e-4 and 3.5e-4 (staircase turns
-// of order n·ε·σ₁/σs). Poles must be the oracle set with the stiff pole at
-// QZ's accuracy.
+// TestPoles_StiffChainPoleKeepsQZValue: IP4PC3. A chain beside a pole
+// small in E (a stiff singular value of E, MATLAB rank keeps it): base Poles
+// has the stiff pole to 1e-8 beside smeared chain members; the
+// deflateStiffChain block moves it by 1.1e-4..6e-4 (staircase turns and
+// the trace of the smear it absorbs). Poles must be the oracle set with
+// the stiff pole at QZ's accuracy.
 func TestPoles_StiffChainPoleKeepsQZValue(t *testing.T) {
 	for _, tc := range stiffChainQZValueCases {
 		sys, want := tc.system(t)

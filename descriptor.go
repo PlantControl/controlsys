@@ -237,18 +237,20 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // has stiff singular values (sv, those of E within its MATLAB rank) from
 // the finite block of deflateStiffChain, the split TransferFunction
 // re-splits by: QZ on the whole pencil (alphar, alphai, beta) smears a
-// chain of length k to |λ| ~ ε^(−1/k) and can give the stiff finite pole
-// β = 0. The deflated set is taken only when its QZ leaves no β = 0, it
-// has a large pole (qzLargeRatio) for each stiff singular value, and it
-// carries every whole-pencil eigenvalue that is not large within
-// qzRetryTol chordally: those QZ resolves. A large deflated pole within
-// leakStableTol of a whole-pencil eigenvalue takes that value, since the
-// staircase turns the null spaces of E by up to n·ε·σ₁/σs and moves it
-// further than QZ's backward error. The whole-pencil eigenvalues left over
-// must be one smear ring, their |β|/|α| within stiffRatioGap: a finite pole
-// small in E beside the chain that the staircase took for a chain zero
-// (a second small singular value of E above the stiff band) is one QZ
-// resolves apart from the ring, and the whole-pencil set is kept.
+// chain of length k to a ring |λ| ~ ε^(−1/k) and can give the stiff finite
+// pole β = 0. The deflated block only decides which poles are finite. It
+// is taken when its QZ leaves no β = 0, it has a large pole (qzLargeRatio)
+// for each stiff singular value, and it carries every whole-pencil
+// eigenvalue that is not large within qzRetryTol chordally. A deflated
+// pole then takes the value of the nearest whole-pencil eigenvalue within
+// 1/stiffRatioGap of it in 1/λ, since the staircase turns the null spaces
+// of E by up to n·ε·σ₁/σs and lets the pole absorb the trace of the smear
+// (Σ 1/λ is invariant): the summed moves must stay within that trace and
+// leakStableTol. The whole-pencil eigenvalues left over, above rounding,
+// must be one smear ring, their |β|/|α| within stiffRatioGap. A finite pole
+// small in E that the staircase took for a chain zero (a second small
+// singular value of E above the stiff band) is one QZ resolves apart from
+// the ring, so the whole-pencil set is kept then.
 func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
 	a, e, _, _, nf, _, _, _, _, _, ok := deflateStaircase(A, E, false, true, true, -1, 0)
 	if !ok {
