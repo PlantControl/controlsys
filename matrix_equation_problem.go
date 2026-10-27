@@ -46,8 +46,10 @@ type riccatiProblem struct {
 	certStep float64
 	certX1   []float64
 	// xe is EᵀXE of the X verifyRiccati last certified when
-	// refineDescriptorGain formed it, else nil.
-	xe []float64
+	// refineDescriptorGain or refineDescriptorDare formed it, else nil,
+	// and xeStep the Newton step ‖EᵀΔE‖/‖EᵀXE‖ of that X.
+	xe     []float64
+	xeStep float64
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -281,7 +283,7 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 	}
 	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy}
 	if accuracy == 0 {
-		res.step = problem.certStep
+		res.step, res.xeStep = problem.certStep, problem.xeStep
 		if x1 := problem.certX1; x1 != nil {
 			n, t := problem.n, problem.t
 			if t != nil {

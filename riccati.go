@@ -176,9 +176,11 @@ type RiccatiResult struct {
 	// (Dare, step above eps) the Newton iterate it reached.
 	step float64
 	x1   *mat.Dense
-	// xe is EᵀXE of a certified descriptor Care solution whose X·E
-	// cancels (refineDescriptorGain), else nil.
-	xe *mat.Dense
+	// xe is EᵀXE of a certified descriptor solution refined by
+	// refineDescriptorGain or refineDescriptorDare, else nil, and xeStep
+	// the Newton step of EᵀXE of the certified X.
+	xe     *mat.Dense
+	xeStep float64
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -1532,10 +1534,20 @@ func (g gainDist) units(floor float64) float64 {
 // relative error of K per unit rounding of its double-double operations;
 // ok is false when a pivot vanishes or K is not finite.
 func ddGain(A, B, R, S, X *mat.Dense) (K *mat.Dense, cond float64, ok bool) {
+	xRaw := X.RawMatrix()
+	return ddGainOf(A, B, R, S, xRaw.Data, nil, xRaw.Stride)
+}
+
+// ddGainOf is ddGain of the double-double X = xh + xl (xl nil for none),
+// row-major with stride ldx.
+func ddGainOf(A, B, R, S *mat.Dense, xh, xl []float64, ldx int) (K *mat.Dense, cond float64, ok bool) {
 	n, m := B.Dims()
-	aRaw, bRaw, rRaw, xRaw := A.RawMatrix(), B.RawMatrix(), R.RawMatrix(), X.RawMatrix()
+	aRaw, bRaw, rRaw := A.RawMatrix(), B.RawMatrix(), R.RawMatrix()
 	bxH, bxL := make([]float64, m*n), make([]float64, m*n)
-	ddMulAcc(m, n, n, 1, bRaw.Data, 1, bRaw.Stride, xRaw.Data, xRaw.Stride, 1, bxH, bxL, n)
+	ddMulAcc(m, n, n, 1, bRaw.Data, 1, bRaw.Stride, xh, ldx, 1, bxH, bxL, n)
+	if xl != nil {
+		ddMulAcc(m, n, n, 1, bRaw.Data, 1, bRaw.Stride, xl, ldx, 1, bxH, bxL, n)
+	}
 	c := 2*m + n
 	hi, lo := make([]float64, m*c), make([]float64, m*c)
 	for i := range m {
@@ -1610,7 +1622,7 @@ func ddGain(A, B, R, S, X *mat.Dense) (K *mat.Dense, cond float64, ok bool) {
 		return out
 	}
 	var bx, bxb, mag, t mat.Dense
-	bx.Mul(abs(bRaw.Data, n, m, bRaw.Stride).T(), abs(xRaw.Data, n, n, xRaw.Stride))
+	bx.Mul(abs(bRaw.Data, n, m, bRaw.Stride).T(), abs(xh, n, n, ldx))
 	bxb.Mul(&bx, abs(bRaw.Data, n, m, bRaw.Stride))
 	bxb.Add(&bxb, abs(rRaw.Data, m, m, rRaw.Stride))
 	mag.Mul(&bxb, abs(kRaw.Data, m, n, kRaw.Stride))
@@ -2374,14 +2386,18 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		if it == 0 {
 			if step <= newtonTol {
 				problem.closedLoopEig(eig)
-				if !problem.descriptorGainCertified(continuous, K, xData, eig) {
+				var c1 []float64
+				if !continuous && step > eps() {
+					c1 = append(problem.ws.certX1[:0], x1...)
+					problem.ws.certX1 = c1
+				}
+				if !problem.descriptorGainCertified(continuous, K, xData, x1, eig) {
 					problem.keepPoor(xData, K, eig, rcnd, step)
 					return nil, fail
 				}
 				problem.certStep, problem.certX1 = step, nil
-				if !continuous && step > eps() {
-					problem.certX1 = append(problem.ws.certX1[:0], x1...)
-					problem.ws.certX1 = problem.certX1
+				if problem.xe == nil {
+					problem.certX1 = c1
 				}
 				return K, nil
 			}
@@ -2396,14 +2412,14 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			prev := append([]float64(nil), xData...)
 			copy(xData, x1)
 			if K1, err := problem.closedLoopGain(continuous, xData, eig); err == nil {
-				if !problem.descriptorGainCertified(continuous, K1, xData, eig) {
+				if !problem.descriptorGainCertified(continuous, K1, xData, nil, eig) {
 					return nil, fail
 				}
 				return K1, nil
 			}
 			copy(xData, prev)
 			if K, err = problem.closedLoopGain(continuous, xData, eig); err != nil ||
-				!problem.descriptorGainCertified(continuous, K, xData, eig) {
+				!problem.descriptorGainCertified(continuous, K, xData, nil, eig) {
 				return nil, fail
 			}
 			return K, nil
@@ -2628,20 +2644,299 @@ func explicitUncertified(X, E *mat.Dense) bool {
 }
 
 // descriptorGainCertified reports whether the gain K of an X (xData)
-// verifyRiccati certifies is certified with it. For a continuous E whose
-// K or EᵀXE cancel beyond nearSingularCancelLimit (descriptorCancellation)
-// they are refined (refineDescriptorGain) and, should that fail,
-// certified only when the ratio times eps is within newtonTol.
-func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.Dense, xData []float64, eig []complex128) bool {
-	problem.xe = nil
-	if !continuous || problem.E == nil {
+// verifyRiccati certifies is certified with it, x1 the Newton iterate of
+// that check (nil once converged). With E, where K or EᵀXE cancel beyond
+// nearSingularCancelLimit (descriptorCancellation, dareCancellation) or
+// the Newton step moves K beyond newtonTol (gainStep), they are refined,
+// continuous by refineDescriptorGain, discrete by refineDescriptorDare,
+// and, should that fail, certified only when the gain's ratio times eps
+// and its step are within newtonTol. A step of X within newtonTol may
+// leave K off by far more: it is relative to ‖X‖ ~ 1/σ_min(E), and K
+// sees X in E's small directions (Lqr K off by 9.2e-7, X by 1.7e-9).
+func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.Dense, xData, x1 []float64, eig []complex128) bool {
+	problem.xe, problem.xeStep = nil, 0
+	if problem.E == nil {
 		return true
 	}
-	c := problem.descriptorCancellation(xData)
-	if c <= nearSingularCancelLimit || problem.refineDescriptorGain(K, xData, eig) {
+	var cE, cK float64
+	if continuous {
+		cE = problem.descriptorCancellation(xData)
+		cK = cE
+	} else {
+		cE, cK = problem.dareCancellation(K, xData)
+	}
+	move, xeStep := 0.0, 0.0
+	if x1 != nil {
+		move, xeStep = problem.gainStep(continuous, K, xData, x1)
+	}
+	problem.xeStep = xeStep
+	if cE <= nearSingularCancelLimit && xeStep <= newtonRefineTol && (!continuous || move <= newtonRefineTol) {
 		return true
 	}
-	return c*eps() <= newtonTol
+	if continuous && problem.refineDescriptorGain(K, xData, eig) ||
+		!continuous && problem.refineDescriptorDare(K, xData, eig) {
+		problem.xeStep = 0
+		return true
+	}
+	if !continuous && cE <= nearSingularCancelLimit {
+		return true
+	}
+	return cK*eps() <= newtonTol && move <= newtonTol
+}
+
+// dareCancellation returns how far EᵀXE and the discrete gain K of the
+// descriptor X (xData) cancel: ‖|Eᵀ||X||E|‖/‖EᵀXE‖ and
+// ‖|W⁻¹||Bᵀ||X||A_K|‖/‖K‖, W = R + BᵀXB and A_K = A − BK, which bounds
+// the move of K = W⁻¹(BᵀXA + Sᵀ) under the rounding of X in eps units
+// (δK = W⁻¹BᵀδXA_K). There X ~ 1/σ_min(E)², and the double-double gain
+// of the 320-bit X rounded to float64 was off by 4.9e-6 (Kalman, E's
+// last pivot 1e-5).
+func (problem *riccatiProblem) dareCancellation(K *mat.Dense, xData []float64) (cE, cK float64) {
+	n, m := problem.n, problem.m
+	nn := n * n
+	ws := problem.ws
+	if len(ws.cancel) < 6*nn+3*m*n+m*m {
+		ws.cancel = make([]float64, 6*nn+3*m*n+m*m)
+	}
+	buf := ws.cancel
+	absX, absE, xe, axe := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn]
+	ete, acl := buf[4*nn:5*nn], buf[5*nn:6*nn]
+	bx, absB, g := buf[6*nn:6*nn+m*n], buf[6*nn+m*n:6*nn+2*m*n], buf[6*nn+2*m*n:6*nn+3*m*n]
+	w := buf[6*nn+3*m*n : 6*nn+3*m*n+m*m]
+	eRaw, bRaw, aRaw := problem.E.RawMatrix(), problem.B.RawMatrix(), problem.A.RawMatrix()
+	kRaw := K.RawMatrix()
+	gen := func(r, c int, d []float64, s int) blas64.General {
+		return blas64.General{Rows: r, Cols: c, Data: d, Stride: s}
+	}
+	for i := range n {
+		for j := range n {
+			absX[i*n+j] = math.Abs(xData[i*n+j])
+			absE[i*n+j] = math.Abs(eRaw.Data[i*eRaw.Stride+j])
+		}
+	}
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, xData, n), gen(n, n, eRaw.Data, eRaw.Stride), 0, gen(n, n, xe, n))
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, absX, n), gen(n, n, absE, n), 0, gen(n, n, axe, n))
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, n, eRaw.Data, eRaw.Stride), gen(n, n, xe, n), 0, gen(n, n, ete, n))
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, n, absE, n), gen(n, n, axe, n), 0, gen(n, n, xe, n))
+	cE = cancelRatio(impl.Dlange(lapack.Frobenius, n, n, xe, n, nil), impl.Dlange(lapack.Frobenius, n, n, ete, n, nil))
+
+	copyStrided(acl, n, aRaw.Data, aRaw.Stride, n, n)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, -1, gen(n, m, bRaw.Data, bRaw.Stride), gen(m, n, kRaw.Data, kRaw.Stride), 1, gen(n, n, acl, n))
+	for i := range acl {
+		acl[i] = math.Abs(acl[i])
+	}
+	if !problem.dareWeight(xData, bx, w) || !impl.Dpotri(blas.Upper, m, w, m) {
+		return cE, math.Inf(1)
+	}
+	for i := range m {
+		for j := range i {
+			w[i*m+j] = w[j*m+i]
+		}
+	}
+	for i := range w {
+		w[i] = math.Abs(w[i])
+	}
+	for i := range n {
+		for j := range m {
+			absB[j*n+i] = math.Abs(bRaw.Data[i*bRaw.Stride+j])
+		}
+	}
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, absX, n), gen(n, n, acl, n), 0, gen(n, n, axe, n))
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(m, n, absB, n), gen(n, n, axe, n), 0, gen(m, n, g, n))
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(m, m, w, m), gen(m, n, g, n), 0, gen(m, n, bx, n))
+	return cE, cancelRatio(impl.Dlange(lapack.Frobenius, m, n, bx, n, nil), impl.Dlange(lapack.Frobenius, m, n, kRaw.Data, kRaw.Stride, nil))
+}
+
+// dareWeight forms BᵀX in bx and the Cholesky factor (upper) of
+// W = R + BᵀXB in w, false when W is not positive definite.
+func (problem *riccatiProblem) dareWeight(xData, bx, w []float64) bool {
+	n, m := problem.n, problem.m
+	bRaw, rRaw := problem.B.RawMatrix(), problem.R.RawMatrix()
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1,
+		blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
+		blas64.General{Rows: n, Cols: n, Data: xData, Stride: n},
+		0, blas64.General{Rows: m, Cols: n, Data: bx, Stride: n})
+	copyStrided(w, m, rRaw.Data, rRaw.Stride, m, m)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
+		blas64.General{Rows: m, Cols: n, Data: bx, Stride: n},
+		blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
+		1, blas64.General{Rows: m, Cols: m, Data: w, Stride: m})
+	return impl.Dpotrf(blas.Upper, m, w, m)
+}
+
+// gainStep returns, in the caller's coordinates, ‖δK‖/‖K‖ for the move
+// δK of the gain K of X (xData) to first order along the Newton step
+// D = X₁ − X, R⁻¹BᵀDE continuous, W⁻¹BᵀDA_K discrete (dareWeight), and
+// the step ‖EᵀDE‖/‖EᵀXE‖ of EᵀXE: relative to ‖X‖ ~ 1/σ_min(E) a step
+// of 1.9e-9 left EᵀXE off by 2.6e-7.
+func (problem *riccatiProblem) gainStep(continuous bool, K *mat.Dense, xData, x1 []float64) (move, xeStep float64) {
+	n, m, t := problem.n, problem.m, problem.t
+	nn := n * n
+	buf := make([]float64, 5*nn+2*m*n+m*m)
+	d, md, acl, de, xe := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn], buf[4*nn:5*nn]
+	g, bx, w := buf[5*nn:5*nn+m*n], buf[5*nn+m*n:5*nn+2*m*n], buf[5*nn+2*m*n:]
+	for i := range d {
+		d[i] = x1[i] - xData[i]
+	}
+	bRaw, kRaw, eRaw := problem.B.RawMatrix(), K.RawMatrix(), problem.E.RawMatrix()
+	gen := func(r, c int, v []float64, s int) blas64.General {
+		return blas64.General{Rows: r, Cols: c, Data: v, Stride: s}
+	}
+	wnorm := func(v []float64) float64 {
+		sum := 0.0
+		for i, x := range v {
+			if t != nil {
+				x *= t[i/n] * t[i%n]
+			}
+			sum += x * x
+		}
+		return math.Sqrt(sum)
+	}
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, d, n), gen(n, n, eRaw.Data, eRaw.Stride), 0, gen(n, n, de, n))
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, n, eRaw.Data, eRaw.Stride), gen(n, n, de, n), 0, gen(n, n, md, n))
+	dn := wnorm(md)
+	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, xData, n), gen(n, n, eRaw.Data, eRaw.Stride), 0, gen(n, n, de, n))
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, n, eRaw.Data, eRaw.Stride), gen(n, n, de, n), 0, gen(n, n, xe, n))
+	xeStep = cancelRatio(dn, wnorm(xe))
+	chol := problem.ws.rChol[:m*m]
+	if continuous {
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, d, n), gen(n, n, eRaw.Data, eRaw.Stride), 0, gen(n, n, md, n))
+	} else {
+		aRaw := problem.A.RawMatrix()
+		copyStrided(acl, n, aRaw.Data, aRaw.Stride, n, n)
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, -1, gen(n, m, bRaw.Data, bRaw.Stride), gen(m, n, kRaw.Data, kRaw.Stride), 1, gen(n, n, acl, n))
+		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, d, n), gen(n, n, acl, n), 0, gen(n, n, md, n))
+		if !problem.dareWeight(xData, bx, w) {
+			return math.Inf(1), xeStep
+		}
+		chol = w
+	}
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, m, bRaw.Data, bRaw.Stride), gen(n, n, md, n), 0, gen(m, n, g, n))
+	impl.Dpotrs(blas.Upper, m, n, chol, m, g, n)
+	norm := func(v []float64, s int) float64 {
+		sum := 0.0
+		for i := range m {
+			for j := range n {
+				x := v[i*s+j]
+				if t != nil {
+					x *= t[j]
+				}
+				sum += x * x
+			}
+		}
+		return math.Sqrt(sum)
+	}
+	return cancelRatio(norm(g, n), norm(kRaw.Data, kRaw.Stride)), xeStep
+}
+
+// refineDescriptorDare replaces the certified discrete descriptor X
+// (xData) and its gain K by X refined by Hewer's method in
+// double-double, from the residual (riccatiResidual) of X itself, and
+// its double-double gain (ddGainOf), and saves EᵀXE in problem.xe, when
+// the iteration converges: steps ‖Δ‖/‖X‖ and ‖K₊ − K‖/‖K₊‖ within
+// newtonRefineTol, and ‖EᵀΔE‖/‖EᵀXE‖ too. As idare, K and EᵀXE are then
+// those of the solution,
+// which the float64 X cannot carry (dareCancellation). It reports false,
+// X, K and eig unchanged, when the iteration fails or stalls. eig
+// receives the eigenvalues of A − BK of the last step.
+func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float64, eig []complex128) bool {
+	n, m, ws, t := problem.n, problem.m, problem.ws, problem.t
+	nn := n * n
+	buf := make([]float64, 6*nn)
+	pe, xe, ete := buf[:2*nn], buf[2*nn:4*nn], buf[4*nn:]
+	xH, xL := pe[:nn], pe[nn:]
+	copy(xH, xData)
+	gain := func() *mat.Dense {
+		k, _, ok := ddGainOf(problem.A, problem.B, problem.R, problem.S, xH, xL, n)
+		if !ok {
+			return nil
+		}
+		return k
+	}
+	norm := func(d []float64, both bool) float64 {
+		s := 0.0
+		for i, v := range d {
+			if t != nil {
+				v *= t[i%n]
+				if both {
+					v *= t[i/n]
+				}
+			}
+			s += v * v
+		}
+		return math.Sqrt(s)
+	}
+	kd := gain()
+	if kd == nil {
+		return false
+	}
+	eLU, eIpiv := problem.descriptorLU()
+	eRaw := problem.E.RawMatrix()
+	xeH, xeL, eH, eL := xe[:nn], xe[nn:], ete[:nn], ete[nn:]
+	best, stalls := math.Inf(1), 0
+	for range newtonSteps {
+		y, err := problem.newtonSolve(false, kd, xH, pe)
+		if err != nil {
+			return false
+		}
+		yn := norm(y, true)
+		impl.Dgetrs(blas.Trans, n, n, eLU, n, eIpiv, y, n)
+		for i := range n {
+			for j := i + 1; j < n; j++ {
+				y[i*n+j], y[j*n+i] = y[j*n+i], y[i*n+j]
+			}
+		}
+		impl.Dgetrs(blas.Trans, n, n, eLU, n, eIpiv, y, n)
+		symmetrize(y, n, n)
+		if !finiteSlice(y) {
+			return false
+		}
+		dn := norm(y, true)
+		for i, v := range y {
+			ddAdd(&xH[i], &xL[i], v, 0)
+		}
+		ddNormalize(xH, xL)
+		kn := gain()
+		if kn == nil {
+			return false
+		}
+		clear(xe)
+		clear(ete)
+		for _, x := range [][]float64{xH, xL} {
+			ddMulAcc(n, n, n, 1, x, n, 1, eRaw.Data, eRaw.Stride, 1, xeH, xeL, n)
+		}
+		ddNormalize(xeH, xeL)
+		ddMulAcc(n, n, n, 1, eRaw.Data, 1, eRaw.Stride, xeH, n, 1, eH, eL, n)
+		blas64.Gemm(blas.Trans, blas.NoTrans, 1,
+			blas64.General{Rows: n, Cols: n, Data: eRaw.Data, Stride: eRaw.Stride},
+			blas64.General{Rows: n, Cols: n, Data: xeL, Stride: n},
+			1, blas64.General{Rows: n, Cols: n, Data: eL, Stride: n})
+		for i := range eH {
+			eH[i] += eL[i]
+		}
+		kr, nr := kd.RawMatrix().Data, kn.RawMatrix().Data
+		for i, v := range nr {
+			kr[i] -= v
+		}
+		step := max(cancelRatio(dn, norm(xH, true)), cancelRatio(yn, norm(eH, true)),
+			cancelRatio(norm(kr, false), norm(nr, false)))
+		kd = kn
+		if step <= newtonRefineTol {
+			symmetrize(eH, n, n)
+			copy(K.RawMatrix().Data[:m*n], nr)
+			copy(xData, xH)
+			problem.closedLoopEig(eig)
+			problem.xe = append(ws.xe[:0], eH...)
+			ws.xe = problem.xe
+			return true
+		}
+		if step < best {
+			best, stalls = step, 0
+		} else if stalls++; stalls == 3 {
+			return false
+		}
+	}
+	return false
 }
 
 // refineDescriptorGain replaces the gain K of the certified continuous
@@ -2778,9 +3073,10 @@ func (problem *riccatiProblem) descriptorLU() ([]float64, []int) {
 // (continuous) or G = BᵀXA_K + Sᵀ − RK, W = R + BᵀXB (discrete), so that
 // the rounding of the gain drops out. It uses ws.h, ws.btx, ws.costV,
 // ws.gainRes, ws.rbar and, with E, ws.eRes as scratch. A non-nil pe
-// (continuous with E) is P = XE in double-double (hi then lo, 2n²),
+// (with E) is, continuous, P = XE in double-double (hi then lo, 2n²),
 // which replaces XE and, as PᵀA_K, EᵀXA_K: the residual of P itself,
-// free of the rounding of X ~ 1/σ_min(E).
+// free of the rounding of X ~ 1/σ_min(E); discrete, X itself in
+// double-double, which replaces xData.
 func (problem *riccatiProblem) riccatiResidual(continuous bool, kData, xData, pe, aclT, res []float64) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	aRaw, bRaw, qRaw, rRaw := problem.A.RawMatrix(), problem.B.RawMatrix(), problem.Q.RawMatrix(), problem.R.RawMatrix()
@@ -2797,6 +3093,10 @@ func (problem *riccatiProblem) riccatiResidual(continuous bool, kData, xData, pe
 		}
 	}
 
+	var xLo []float64
+	if pe != nil && !continuous {
+		xData, xLo, pe = pe[:nn], pe[nn:2*nn], nil
+	}
 	clear(yH)
 	clear(yL)
 	if pe == nil {
@@ -2805,6 +3105,12 @@ func (problem *riccatiProblem) riccatiResidual(continuous bool, kData, xData, pe
 			1, blas64.General{Rows: n, Cols: n, Data: xData, Stride: n},
 			blas64.General{Rows: n, Cols: n, Data: acL, Stride: n},
 			1, blas64.General{Rows: n, Cols: n, Data: yL, Stride: n})
+		if xLo != nil {
+			blas64.Gemm(blas.NoTrans, blas.NoTrans,
+				1, blas64.General{Rows: n, Cols: n, Data: xLo, Stride: n},
+				blas64.General{Rows: n, Cols: n, Data: acH, Stride: n},
+				1, blas64.General{Rows: n, Cols: n, Data: yL, Stride: n})
+		}
 	}
 
 	var eRaw blas64.General
@@ -2827,6 +3133,12 @@ func (problem *riccatiProblem) riccatiResidual(continuous bool, kData, xData, pe
 		clear(xeH)
 		clear(xeL)
 		ddMulAcc(n, n, n, 1, xData, n, 1, eRaw.Data, eRaw.Stride, 1, xeH, xeL, n)
+		if xLo != nil {
+			blas64.Gemm(blas.NoTrans, blas.NoTrans,
+				1, blas64.General{Rows: n, Cols: n, Data: xLo, Stride: n},
+				blas64.General{Rows: n, Cols: n, Data: eRaw.Data, Stride: eRaw.Stride},
+				1, blas64.General{Rows: n, Cols: n, Data: xeL, Stride: n})
+		}
 	}
 
 	resL := ws.z[nn : 2*nn]

@@ -59,7 +59,7 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 		res.X = res.xe
 		return res, nil
 	}
-	if res.Accuracy == 0 && explicitUncertified(res.X, opts.E) {
+	if res.Accuracy == 0 && (res.xeStep > newtonTol || explicitUncertified(res.X, opts.E)) {
 		res.Accuracy = 1
 	}
 	n, _ := res.X.Dims()
