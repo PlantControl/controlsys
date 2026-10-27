@@ -167,7 +167,8 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	if nf == 0 {
 		return modesAllInGroup2(policy, sys)
 	}
-	infTol := qzInfiniteTol(1e-3*eps(), mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))
+	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
+	infTol := qzInfiniteTol(1e-3*eps(), normA, normE)
 	sawInfinite := false
 	selct := func(ar, ai, b float64) bool {
 		if b == 0 || qzInfinite(ar, ai, b, infTol) {
@@ -187,7 +188,7 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 				s, t, q, z, _, recip, err = deflatedSchur(a, e, qd, zd, nf, selct, true)
 			}
 			if err == nil {
-				stiffTol := qzInfiniteTol(16*float64(nf)*eps(), mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))
+				stiffTol := qzInfiniteTol(16*float64(nf)*eps(), normA, normE)
 				if g1, g2, ok := splitStiffFullRank(policy, sys, s, t, q, z, recip, stiffTol, real(lambda), isGroup1); ok {
 					return g1, g2, nil
 				}
