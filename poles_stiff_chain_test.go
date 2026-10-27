@@ -85,6 +85,28 @@ type smallEPoleCase struct {
 	a, e  []float64
 }
 
+// system returns the pencil of tc as a descriptor model and its oracle
+// poles refined to the roots of det(A − λE) of the stored data at
+// pencilOraclePrec bits.
+func (tc smallEPoleCase) system(t *testing.T) (*System, []float64) {
+	t.Helper()
+	n := tc.n
+	sys, err := NewDescriptor(mat.NewDense(n, n, tc.a), mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil), mat.NewDense(1, 1, nil), mat.NewDense(n, n, tc.e), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	A, E := pencilOracleMatrix(sys.A), pencilOracleMatrix(sys.E)
+	want := make([]float64, len(tc.poles))
+	for i, p := range tc.poles {
+		r, ok := pencilOracleRealRoot(A, E, p)
+		if !ok || math.Abs(r-p) > 1e-6*math.Abs(p) {
+			t.Fatalf("%s: oracle pole %v not a root of the data pencil (%v, %v)", tc.name, p, r, ok)
+		}
+		want[i] = r
+	}
+	return sys, want
+}
+
 // TestPoles_SmallEPoleBesideChainKept: F4OPPD. A finite pole small in E
 // (E singular value 1.2e-8..1.9e-8 relative, not stiff) beside an index ≥ 2
 // chain and a pole large in A: base Poles carries every oracle pole (beside
@@ -92,20 +114,7 @@ type smallEPoleCase struct {
 // value for a chain zero and dropped the pole. Every oracle pole must stay.
 func TestPoles_SmallEPoleBesideChainKept(t *testing.T) {
 	for _, tc := range smallEPoleCases {
-		n := tc.n
-		sys, err := NewDescriptor(mat.NewDense(n, n, tc.a), mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil), mat.NewDense(1, 1, nil), mat.NewDense(n, n, tc.e), 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		A, E := pencilOracleMatrix(sys.A), pencilOracleMatrix(sys.E)
-		want := make([]float64, len(tc.poles))
-		for i, p := range tc.poles {
-			r, ok := pencilOracleRealRoot(A, E, p)
-			if !ok || math.Abs(r-p) > 1e-6*math.Abs(p) {
-				t.Fatalf("%s: oracle pole %v not a root of the data pencil (%v, %v)", tc.name, p, r, ok)
-			}
-			want[i] = r
-		}
+		sys, want := tc.system(t)
 		got, err := sys.Poles()
 		if err != nil {
 			t.Fatalf("%s: Poles: %v", tc.name, err)
@@ -114,6 +123,60 @@ func TestPoles_SmallEPoleBesideChainKept(t *testing.T) {
 			t.Errorf("%s: Poles %v miss oracle poles %v", tc.name, got, miss)
 		}
 	}
+}
+
+// TestPoles_StiffChainPoleKeepsQZValue: IP4PC3. An index-2 chain beside a
+// pole small in E (stiff E singular value 1.6e-10..2.7e-10 relative): base
+// Poles has the stiff pole to 1e-8 beside two smeared chain members; the
+// deflateStiffChain block moves it by 1.8e-4 and 3.5e-4 (staircase turns
+// of order n·ε·σ₁/σs). Poles must be the oracle set with the stiff pole at
+// QZ's accuracy.
+func TestPoles_StiffChainPoleKeepsQZValue(t *testing.T) {
+	for _, tc := range stiffChainQZValueCases {
+		sys, want := tc.system(t)
+		got, err := sys.Poles()
+		if err != nil {
+			t.Fatalf("%s: Poles: %v", tc.name, err)
+		}
+		if miss := missingPoles(got, want, 1e-6); len(got) != len(want) || len(miss) > 0 {
+			t.Errorf("%s: Poles %v, want %v (missing %v)", tc.name, got, want, miss)
+		}
+	}
+}
+
+var stiffChainQZValueCases = []smallEPoleCase{
+	{
+		name: "mix PCG(42, 6061)", n: 4,
+		poles: []float64{-110.24405344196043, 1426975220.5355685},
+		a: []float64{
+			-23.106543215970053, 26.002790343470835, 35.757950299280651, 20.899203316283334,
+			-9.8368227716379781, 11.013802543342766, 15.228156645973307, 8.9984981828187216,
+			-1.6987991003005194, 1.9347190349710712, 2.6107792790428759, 1.3334863573509488,
+			-15.690670579924049, 17.622076816556124, 24.26106770312801, 14.258021201303722,
+		},
+		e: []float64{
+			0.14983465593715778, -0.15529859791120029, -0.25088841264367689, -0.14321903087362439,
+			0.097448814326347694, -0.11093077513704654, -0.14827943242706709, -0.08828716555919279,
+			0.022083126147350928, -0.026077541926508036, -0.032193154049582895, -0.019547313344893704,
+			0.13469238478882428, -0.14945408305221422, -0.21075898010470376, -0.1239246984354008,
+		},
+	},
+	{
+		name: "mix PCG(638, 6061)", n: 4,
+		poles: []float64{25123.134512833632, -347302838.20609295},
+		a: []float64{
+			-365.26320251301769, -741.71229932414053, -523.07740522709196, 936.53675527126961,
+			-891.6658386136362, -1812.970269573515, -1277.6703093333258, 2288.460846217969,
+			-717.8024736285995, -1459.4271440651298, -1028.500413950642, 1842.1189246642202,
+			34.067931111083112, 69.042928683454946, 48.721836299836511, -87.200364415902868,
+		},
+		e: []float64{
+			0.018220446061089805, -0.033935369717634306, 0.0017722608972167246, 0.01703894068486999,
+			-0.3484645451368138, -0.030009873022821109, -0.26669340299643218, 0.28443699774497894,
+			-0.16451684314921763, -0.039780794963953169, -0.1346922468328943, 0.15730881135520475,
+			-0.012112116879360429, 0.0045621614357077671, -0.0073481354762158831, 0.004848594703902552,
+		},
+	},
 }
 
 var smallEPoleCases = []smallEPoleCase{
