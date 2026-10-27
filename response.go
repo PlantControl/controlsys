@@ -2081,7 +2081,9 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // Initial returns the free response from x0 with zero delay-line history.
 // Output delays, including the output share of Delay, delay it; see Simulate.
 // As in MATLAB, a descriptor model with singular E rejects a nonzero x0 with
-// ErrDescriptorInitialState.
+// ErrDescriptorInitialState. A delay-free continuous descriptor whose
+// full-rank E is too ill-conditioned for E⁻¹A (as in Step) follows the
+// pencil (A, E): the impulse response of the input E·x0.
 // Continuous models without internal delays, or whose internal delays share
 // one length (within the chain budget, see Step), are sampled exactly; other
 // internal-delay models use the approximate ZOH discretization of the delay
@@ -2101,6 +2103,15 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	}
 	if x0 == nil {
 		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrInvalidArgument)
+	}
+	if n, _, _ := sys.Dims(); x0.Len() == n {
+		if parts, ok := stiffFreeParts(sys, x0); ok {
+			resp, err := stiffDescriptorInitial(sys, parts, x0, tFinal)
+			if err != nil {
+				return nil, fmt.Errorf("Initial: %w", err)
+			}
+			return resp, nil
+		}
 	}
 	sim, simX0, reduced, err := sys.timeResponseForm(x0)
 	if err != nil {
@@ -2150,6 +2161,122 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	}
 
 	return plan.response(resp.Y), nil
+}
+
+// stiffFreeParts returns the parts of foldInaccurateParts of
+// (A, E, [E·x0, A·x0], C, 0) for a continuous descriptor. Column 0 of a
+// part's B is its share s of x0 and column 1 is A_part·s. Sampled from the
+// shares, the free response is an impulse response with no constant C·x0
+// to cancel in a decaying tail, unlike the step response of the input A·x0.
+// A model with a nonzero delay does not split; zero-valued delay metadata
+// is dropped.
+func stiffFreeParts(sys *System, x0 *mat.VecDense) ([]*System, bool) {
+	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.HasDelay() {
+		return nil, false
+	}
+	n, _, p := sys.Dims()
+	fm := sys.Copy()
+	fm.B, fm.D = newDense(n, 2), newDense(p, 2)
+	fm.InputDelay, fm.Delay, fm.InputName = nil, nil, nil
+	var ex, ax mat.VecDense
+	ex.MulVec(sys.E, x0)
+	ax.MulVec(sys.A, x0)
+	fm.B.SetCol(0, ex.RawVector().Data)
+	fm.B.SetCol(1, ax.RawVector().Data)
+	return foldInaccurateParts(fm)
+}
+
+// freePartShare returns the share of x0 of part k of stiffFreeParts. A fast
+// part (k ≥ 1 of a split; stiffExplicitParts puts the slow part first)
+// takes A_part⁻¹·(A·x0 column): E·x0 projects x0 onto the nearly null
+// directions of E, so its column carries cond(E)·ε relative error there,
+// while A·x0 has no such cancellation and A_part, all of whose poles are
+// large, is well conditioned to solve. The slow part, or a fast part whose
+// A_part is singular, keeps the E·x0 column.
+func freePartShare(parts []*System, k int) []float64 {
+	part := parts[k]
+	pn, _, _ := part.Dims()
+	share := make([]float64, pn)
+	if k > 0 {
+		var lu mat.LU
+		lu.Factorize(part.A)
+		if lu.Cond() < 0x1p52 {
+			var s mat.VecDense
+			if err := lu.SolveVecTo(&s, false, part.B.ColView(1)); err == nil {
+				copy(share, s.RawVector().Data)
+				return share
+			}
+		}
+	}
+	mat.Col(share, 0, part.B)
+	return share
+}
+
+// sampleFreeParts sums y(k·dt) of the parts of stiffFreeParts of sys, each
+// from its share of x0 (freePartShare), sampled exactly as in
+// continuousFreeSamples. y(0) is C·x0 itself.
+func sampleFreeParts(sys *System, parts []*System, x0 *mat.VecDense, steps int, dt float64) (*mat.Dense, error) {
+	_, _, p := sys.Dims()
+	if p == 0 || steps == 0 {
+		return nil, fmt.Errorf("free response needs outputs and samples, got p=%d steps=%d: %w", p, steps, ErrDimensionMismatch)
+	}
+	Y := mat.NewDense(p, steps, nil)
+	yRaw := Y.RawMatrix()
+	var scaled, ad mat.Dense
+	for pk, part := range parts {
+		pn, _, _ := part.Dims()
+		if pn == 0 {
+			continue
+		}
+		scaled.Reset()
+		ad.Reset()
+		scaled.Scale(dt, part.A)
+		ad.Exp(&scaled)
+		aRaw, cRaw := ad.RawMatrix(), part.C.RawMatrix()
+		x, next := freePartShare(parts, pk), make([]float64, pn)
+		for k := range steps {
+			live := false
+			for i := range p {
+				row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+pn]
+				s := 0.0
+				for j, v := range row {
+					s += v * x[j]
+				}
+				yRaw.Data[i*yRaw.Stride+k] += s
+			}
+			for i := range pn {
+				row := aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+pn]
+				s := 0.0
+				for j, v := range row {
+					s += v * x[j]
+				}
+				next[i] = s
+				live = live || s != 0
+			}
+			if !live {
+				break
+			}
+			x, next = next, x
+		}
+	}
+	var y0 mat.VecDense
+	y0.MulVec(sys.C, x0)
+	Y.SetCol(0, y0.RawVector().Data)
+	return Y, nil
+}
+
+// stiffDescriptorInitial is Initial from the parts of stiffFreeParts on the
+// automatic grid of sys.
+func stiffDescriptorInitial(sys *System, parts []*System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
+	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
+	if err != nil {
+		return nil, err
+	}
+	Y, err := sampleFreeParts(sys, parts, x0, len(t), dt)
+	if err != nil {
+		return nil, err
+	}
+	return &TimeResponse{T: t, Y: Y, OutputName: copyStringSlice(sys.OutputName)}, nil
 }
 
 // zeroInputModel returns sys with one zero input standing in for m = 0, since
@@ -2259,8 +2386,9 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 
 // Lsim simulates the response to u held constant between samples (ZOH).
 // Descriptor models are handled as in Step; with singular E a nonzero x0
-// returns ErrDescriptorInitialState, as in MATLAB. x0 with Delay follows
-// Simulate.
+// returns ErrDescriptorInitialState, as in MATLAB, and a nonzero x0 of a
+// model Step simulates by the pencil adds its free response as Initial
+// does. x0 with Delay follows Simulate.
 // Continuous models with internal delays of one common length are sampled
 // exactly within the chain budget (see Step); other internal-delay models use
 // the approximate ZOH discretization of the delay channels, as MATLAB does.
@@ -2276,13 +2404,14 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		return nil, fmt.Errorf("Lsim: model has no outputs: %w", ErrDimensionMismatch)
 	}
 	var err error
-	stiff := false
-	if x0 == nil || allZeroVec(x0) {
-		stiff = foldInaccurateContinuous(sys)
-	}
+	var freeX0 *mat.VecDense
+	stiff := foldInaccurateContinuous(sys)
 	if stiff {
 		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
 			return nil, fmt.Errorf("Lsim: x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
+		}
+		if x0 != nil && !allZeroVec(x0) {
+			freeX0 = x0
 		}
 		x0 = nil
 	} else {
@@ -2304,6 +2433,9 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 			return nil, fmt.Errorf("Lsim: %w", err)
 		}
 		if ok {
+			if err := addStiffFreeSamples(sys, freeX0, plan, Y); err != nil {
+				return nil, fmt.Errorf("Lsim: %w", err)
+			}
 			return plan.response(Y), nil
 		}
 	}
@@ -2323,6 +2455,32 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		}
 		resp.Y.Add(resp.Y, free)
 	}
+	if err := addStiffFreeSamples(sys, freeX0, plan, resp.Y); err != nil {
+		return nil, fmt.Errorf("Lsim: %w", err)
+	}
 
 	return plan.response(resp.Y), nil
+}
+
+// addStiffFreeSamples adds to Y the free response from x0 of a continuous
+// descriptor with foldInaccurateParts on the grid of plan; a nil x0 adds
+// nothing. A pencil that does not split (not expected: the split depends on
+// (A, E) only) takes the fold E⁻¹A.
+func addStiffFreeSamples(sys *System, x0 *mat.VecDense, plan timeResponsePlan, Y *mat.Dense) (err error) {
+	if x0 == nil {
+		return nil
+	}
+	var free *mat.Dense
+	if parts, ok := stiffFreeParts(sys, x0); ok {
+		free, err = sampleFreeParts(sys, parts, x0, plan.steps, plan.dt)
+	} else if fold, ferr := sys.ToExplicit(); ferr != nil {
+		err = ferr
+	} else {
+		free, err = fold.continuousFreeSamples(x0, plan.steps, plan.dt)
+	}
+	if err != nil {
+		return err
+	}
+	Y.Add(Y, free)
+	return nil
 }

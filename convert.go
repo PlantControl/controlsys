@@ -15,13 +15,13 @@ import (
 // c2d(sysc,Ts,method) is C2D(dt, C2DOptions{Method: method}). Input, output
 // and I/O delays become sample delays (fractional ones per opts), internal
 // delays stay internal, and a singular-E descriptor model is first reduced as
-// MATLAB dss2ss does. A delay-free model with full-rank E too
-// ill-conditioned for E⁻¹A (as in TransferFunction; for all methods but
-// matched, also LU condition estimate 1e6 or more) is discretized from its
-// generalized Schur parts, which keep the poles of the pencil (A, E), by
-// every method but least squares (matched from the transfer function of
-// the pencil); the result then has new state coordinates and no state
-// names. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
+// MATLAB dss2ss does. A model without internal delays whose full-rank E
+// is too ill-conditioned for E⁻¹A (as in TransferFunction; for all methods
+// but matched, also LU condition estimate 1e6 or more) is discretized from
+// its generalized Schur parts, which keep the poles of the pencil (A, E),
+// by every method but least squares (matched from the transfer function of
+// the pencil), its I/O delays as for an explicit model; the result then
+// has new state coordinates and no state names. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
 // shape, such as those parts, exponentiate its modes of different scale
 // separately; with all modes stiff, any A takes Γ = A⁻¹(e^{A·dt} − I)·B. An already discrete model returns ErrWrongDomain;
 // invalid options return ErrInvalidConversionOptions.
@@ -48,6 +48,9 @@ func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
 				return nil, err
 			}
 			return discretizeStiffDescriptor(sys, parts, dt, normalized)
+		}
+		if px, ok := stiffDescriptorExplicit(sys, opts.Method); ok {
+			sys = px
 		}
 	}
 	if !sys.HasDelay() && !sys.IsDescriptor() && opts.Method != C2DMethodLeastSquares {
@@ -411,29 +414,22 @@ func zohAugmented(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
 }
 
 // stiffDescriptorParts returns, for a delay-free descriptor sys with
-// full-rank ill-conditioned E (stiffPencilSplit, splitFastPencil), explicit parts whose sum
-// has the transfer function and the poles of the pencil (A, E). The LU
-// fold E⁻¹A (ToExplicit) of such an E moves the slow poles by cond(E)·ε,
-// up to a stability flip, and one matrix exponential of the stiff pole
-// beside them loses the slow dynamics to the squarings. ok is false when
-// the fold is accurate, E is rank deficient, or the generalized Schur form
-// zeroed the stiff part's E (deflated).
+// full-rank ill-conditioned E, the explicit parts of stiffExplicitParts,
+// whose sum has the transfer function and the poles of the pencil (A, E).
+// The LU fold E⁻¹A (ToExplicit) of such an E moves the slow poles by
+// cond(E)·ε, up to a stability flip, and one matrix exponential of the
+// stiff pole beside them loses the slow dynamics to the squarings. ok is
+// false when the fold is accurate, E is rank deficient, or the generalized
+// Schur form zeroed the stiff part's E (deflated).
 func stiffDescriptorParts(sys *System) ([]*System, bool) {
 	if !sys.IsDescriptor() || sys.HasDelay() {
 		return nil, false
 	}
-	whole, slow, fast, ok := stiffPencilSplit(sys)
-	if !ok {
+	parts, deflated, ok := stiffExplicitParts(sys)
+	if !ok || deflated {
 		return nil, false
 	}
-	if fast == nil {
-		return []*System{whole}, true
-	}
-	fastParts, ok := splitFastPencil(fast)
-	if !ok {
-		return nil, false
-	}
-	return append([]*System{slow}, fastParts...), true
+	return parts, true
 }
 
 // foldAccurateECond is the 1-norm condition estimate of E below which C2D
@@ -540,6 +536,65 @@ func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2
 	propagateNames(out, sys)
 	out.StateName = nil
 	return out, nil
+}
+
+// stiffDescriptorExplicit returns, for a continuous descriptor with I/O
+// delays and no internal ones, the parallel connection of the
+// foldInaccurateParts of its delay-free core, each in real Schur form, with
+// the delays and names of sys and no state names: an explicit model with
+// the transfer function and poles of the pencil for the delay paths of
+// C2D, which would otherwise fold E⁻¹A. Upper quasi-triangular, it lets
+// the hold discretize its stiff and slow modes separately
+// (stiffModalHold). Matched is left to newC2DPlan, which keeps the
+// transfer function of the pencil.
+func stiffDescriptorExplicit(sys *System, method C2DMethod) (*System, bool) {
+	if method == C2DMethodMatched || !sys.IsDescriptor() || sys.LFT != nil || !sys.HasDelay() {
+		return nil, false
+	}
+	core := *sys
+	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
+	parts, ok := foldInaccurateParts(&core)
+	if !ok {
+		return nil, false
+	}
+	for i, part := range parts {
+		if parts[i], ok = realSchurPart(part); !ok {
+			return nil, false
+		}
+	}
+	out, err := parallelExplicit(parts)
+	if err != nil {
+		return nil, false
+	}
+	propagateNames(out, sys)
+	out.StateName = nil
+	delays := sys.Copy()
+	out.Delay, out.InputDelay, out.OutputDelay = delays.Delay, delays.InputDelay, delays.OutputDelay
+	return out, true
+}
+
+// realSchurPart returns the explicit part, if its A is not already upper
+// quasi-triangular, in the coordinates of the real Schur form of A.
+func realSchurPart(part *System) (*System, bool) {
+	if upperQuasiTriangular(part.A) {
+		return part, true
+	}
+	n, m, p := part.Dims()
+	t, z, ok := realSchur(part.A)
+	if !ok {
+		return nil, false
+	}
+	Z := mat.NewDense(n, n, z)
+	out := part.Copy()
+	out.A = mat.NewDense(n, n, t)
+	if m > 0 {
+		out.B.Mul(Z.T(), part.B)
+	}
+	if p > 0 {
+		out.C.Mul(part.C, Z)
+	}
+	out.StateName = nil
+	return out, true
 }
 
 // parallelExplicit returns the explicit parallel connection of parts with
