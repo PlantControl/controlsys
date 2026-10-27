@@ -38,9 +38,10 @@ func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // A is n×n, B is n×m, Q is n×n symmetric PSD, R is m×m symmetric PD.
 // Returns gain K (m×n), Riccati solution X, and closed-loop eigenvalues.
 // opts.E is handled as in Lqr: X solves the Riccati equation of the explicit
-// model x[k+1] = E⁻¹Ax[k] + E⁻¹Bu[k]. It has Accuracy 1 when EᵀXE, formed
-// from the certified X of Dare, cancels so far that its rounding alone can
-// move it beyond 1e-8.
+// model x[k+1] = E⁻¹Ax[k] + E⁻¹Bu[k]: EᵀXE of X refined in double-double
+// where Dare refines it, else formed from the certified X of Dare, then
+// with Accuracy 1 when it cancels so far that its rounding alone can move
+// it beyond 1e-8, or the Newton step of X moves it beyond 1e-8.
 func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := Dare(A, B, Q, R, opts)
 	return explicitRiccatiSolution(res, opts, err)
@@ -48,18 +49,24 @@ func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 
 // explicitRiccatiSolution maps the generalized solution X of a Care or Dare
 // solved with opts.E to E'XE, the solution for the explicit model: the
-// refined one the solver certified with X, else E'XE of X, which is
-// Accuracy 1 when its cancellation leaves it uncertified
-// (explicitUncertified).
+// refined one the solver certified with X (Accuracy 1 when its next
+// Newton step exceeds newtonRefineTol, xeLoose: a refinement stalled at
+// its noise floor met the tolerance once with EᵀXE 1.3e-8 off the 320-bit
+// oracle), else E'XE of X, which is Accuracy 1 when its cancellation
+// (explicitUncertified) or the Newton step of X (xeStep) leaves it
+// uncertified.
 func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (*RiccatiResult, error) {
 	if err != nil || opts == nil || isIdentityDescriptor(opts.E) {
 		return res, err
 	}
 	if res.xe != nil {
 		res.X = res.xe
+		if res.Accuracy == 0 && res.xeLoose {
+			res.Accuracy = 1
+		}
 		return res, nil
 	}
-	if res.Accuracy == 0 && explicitUncertified(res.X, opts.E) {
+	if res.Accuracy == 0 && (res.xeStep > newtonTol || explicitUncertified(res.X, opts.E)) {
 		res.Accuracy = 1
 	}
 	n, _ := res.X.Dims()
