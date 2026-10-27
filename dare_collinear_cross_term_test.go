@@ -9,7 +9,7 @@ import (
 )
 
 // Cheap control with a cross term S and nearly collinear inputs (σmin/σmax
-// of B 1.9e-9, 1e-8, 2.9e-8 and 1.5e-7): the solve in B's singular-vector
+// of B 1.9e-9, 1e-8, 2.9e-8 and 2.8e-8): the solve in B's singular-vector
 // inputs either failed, or its gain mapped back to u left A − BK unstable
 // in float64, and Dare then solved in the given inputs, where Newton's
 // R + BᵀXB has lost its smallest eigenvalue and certified X ≈ Q off by
@@ -24,7 +24,8 @@ import (
 // The last case's K once certified its own cost as X: that shows only
 // X = cost(K), not K = gain(X). Any K returned must stabilize: Hewer from
 // it reaches the oracle. noStabilizing marks a case where both base and
-// fix return ErrNoStabilizing on amd64.
+// fix return ErrNoStabilizing on amd64; it is accepted on any arch, as
+// that boundary moves with platform rounding.
 func TestDare_CollinearCrossTermGivenInputXIsNotCertifiedWrong(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -108,9 +109,10 @@ func TestDare_CollinearCrossTermGivenInputXIsNotCertifiedWrong(t *testing.T) {
 // NoScaling) at Accuracy 0 while the oracle moves 1.9e-15 under eps
 // perturbations (D3WPCL item 4). Dare solves r1 in the rotated inputs, but
 // were that to fail, its given-input fallback must not keep such an X:
-// recertified in B's singular-vector inputs, from X or from K, it is
-// refined to the oracle or rejected.
-func TestDare_ReducedInputsCertifyRejectsGivenInputNewtonX(t *testing.T) {
+// recertified in B's singular-vector inputs it is refined to the oracle
+// or rejected. (Here certify from X succeeds, so its K path is not
+// reached.)
+func TestDare_ReducedInputsCertifyRefinesGivenInputNewtonX(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{1.4620991642104912, -0.8784792442575562, -1.2071382595750249, 0.16268284639648423})
 	B := mat.NewDense(2, 2, []float64{0.7873745903512255, -0.20096102363846285, -0.8592447854231653, 0.21930438011983636})
 	Q := mat.NewDense(2, 2, []float64{6.441166398562846e13, 4.786743416308757e13, 4.786743416308757e13, 1.614517464168949e14})
