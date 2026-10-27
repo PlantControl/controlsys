@@ -209,7 +209,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 		tol, sep := leastRatioInfTol(alphar, alphai, beta, n-r, margin)
 		if stiff {
 			if _, index1 := pencilIndexOne(A, E, n, normA); !index1 {
-				if poles, ok := stiffChainPoles(A, E, alphar, alphai, beta, normA, normE); ok {
+				if poles, ok := stiffChainPoles(A, E, sv[:r], alphar, alphai, beta, normA, normE); ok {
 					return poles, nil
 				}
 				tol = 0
@@ -234,13 +234,16 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 }
 
 // stiffChainPoles returns the finite poles of an index ≥ 2 pencil whose E
-// has a stiff singular value from the finite block of deflateStiffChain:
-// QZ on the whole pencil smears a chain of length k to |λ| ~ ε^(−1/k) and
-// can give the stiff finite pole β = 0. The deflated set is taken only when
-// its QZ leaves no β = 0 and it carries every whole-pencil eigenvalue that
-// is not large (qzLargeRatio) within qzRetryTol chordally: those QZ
-// resolves, so the deflation may replace only the large ones.
-func stiffChainPoles(A, E *mat.Dense, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
+// has stiff singular values (sv, those of E within its MATLAB rank) from
+// the finite block of deflateStiffChain, the split TransferFunction
+// re-splits by: QZ on the whole pencil (alphar, alphai, beta) smears a
+// chain of length k to |λ| ~ ε^(−1/k) and can give the stiff finite pole
+// β = 0. The deflated set is taken only when its QZ leaves no β = 0, it
+// has a large pole (qzLargeRatio) for each stiff singular value, a finite
+// pole small in E, and it carries every whole-pencil eigenvalue that is not
+// large within qzRetryTol chordally: those QZ resolves, so the deflation
+// replaces only the large ones.
+func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
 	a, e, _, _, nf, _, _, _, ok := deflateStiffChain(A, E)
 	if !ok {
 		return nil, false
@@ -255,6 +258,20 @@ func stiffChainPoles(A, E *mat.Dense, alphar, alphai, beta []float64, normA, nor
 		return nil, false
 	}
 	largeTol := qzInfiniteTol(qzLargeRatio, normA, normE)
+	stiff := 0
+	for _, s := range sv {
+		if s <= qzInfiniteGap*1e3*float64(len(beta))*eps()*sv[0] {
+			stiff++
+		}
+	}
+	for j := range nf {
+		if qzInfinite(far[j], fai[j], fbeta[j], largeTol) {
+			stiff--
+		}
+	}
+	if stiff > 0 {
+		return nil, false
+	}
 	used := make([]bool, nf)
 	for i := range beta {
 		if qzInfinite(alphar[i], alphai[i], beta[i], largeTol) {
