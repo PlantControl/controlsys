@@ -41,6 +41,10 @@ type riccatiProblem struct {
 	// poor is the stabilizing solution of smallest first Newton step that
 	// verifyRiccati did not certify, or nil.
 	poor *riccatiPoor
+	// certStep is the first Newton step of the X verifyRiccati last
+	// certified, and certX1 (Dare, step above eps) the iterate it reached.
+	certStep float64
+	certX1   []float64
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -273,7 +277,21 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 		}
 	}
 	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy}
-	if accuracy != 0 && problem.poor != nil {
+	if accuracy == 0 {
+		res.step = problem.certStep
+		if x1 := problem.certX1; x1 != nil {
+			n, t := problem.n, problem.t
+			if t != nil {
+				for i := range n {
+					for j := range n {
+						x1[i*n+j] *= t[i] * t[j]
+					}
+				}
+			}
+			res.x1 = mat.NewDense(n, n, x1)
+			problem.certX1 = nil
+		}
+	} else if problem.poor != nil {
 		res.step = problem.poor.step
 	}
 	return res

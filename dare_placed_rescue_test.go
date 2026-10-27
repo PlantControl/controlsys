@@ -11,7 +11,9 @@ import (
 // while Hewer's iteration from a pole-placement gain certifies X to 1e-9:
 // Q of rank below n with, in the last two, cheap control and a cross
 // term. Draws 764, 1060 and 2531 of a rank-deficient-cost review sweep
-// (TDHYKU follow-up).
+// (TDHYKU follow-up). Their 320-bit K moves by 0.95 to 1.7 under eps
+// perturbations of A, B, Q, R and S, and K is off 0.25 to 1.08 from it:
+// Dare's check of K against the gain of X leaves Accuracy 1 (COKNFU).
 func TestDare_PoorPencilSolutionIsCertifiedByPlacedHewer(t *testing.T) {
 	cases := []struct {
 		n, m          int
@@ -55,8 +57,8 @@ func TestDare_PoorPencilSolutionIsCertifiedByPlacedHewer(t *testing.T) {
 			t.Errorf("case %d: %v", i, err)
 			continue
 		}
-		if rel := relErr(res.X, want); res.Accuracy != 0 || !(rel <= 1e-8) {
-			t.Errorf("case %d: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g; want 0, ≤ 1e-8", i, res.Accuracy, rel)
+		if rel := relErr(res.X, want); !(rel <= 1e-8) {
+			t.Errorf("case %d: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g; want ≤ 1e-8", i, res.Accuracy, rel)
 		}
 		if rel := relErr(hewerDareBig(A, B, Q, R, S, res.K, 30), want); !(rel <= 1e-12) {
 			t.Errorf("case %d: Hewer from K reaches %.3g of X*", i, rel)

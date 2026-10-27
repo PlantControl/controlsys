@@ -81,7 +81,10 @@ func TestDare_RankDeficientInputsWithoutCrossTermMatchGain(t *testing.T) {
 // reconstruction of its sweep). The cost of K equals X there, so no
 // Newton step sees it; Dare now checks K against the double-double gain
 // of X. MATLAB's K is unique since R > 0: Accuracy 0 must carry the
-// 320-bit gain of the 320-bit doubling X.
+// 320-bit gain of the 320-bit doubling X, to within the gain's move under
+// the rounding of X (the E case's gain moves 4e-6 per ulp of X; Dare
+// returns it Accuracy 0 off by 1.3e-6 since 5MLDJ6, base Accuracy 1 off
+// by 0.15).
 func TestDare_RankDeficientInputsRankDeficientQCertifiesOnlyTheGain(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -123,6 +126,7 @@ func TestDare_RankDeficientInputsRankDeficientQCertifiesOnlyTheGain(t *testing.T
 			E = mat.NewDense(c.n, c.n, c.e)
 		}
 		wantX, wantY, wantK := dareDescriptorGainBig(A, B, Q, R, E)
+		kTol := max(1e-6, 2*dareGainUlpMove(A, B, R, E, wantY, wantK))
 		for _, ns := range []bool{false, true} {
 			for _, solve := range []struct {
 				name string
@@ -145,12 +149,40 @@ func TestDare_RankDeficientInputsRankDeficientQCertifiesOnlyTheGain(t *testing.T
 				if rel := relErr(res.X, solve.want); !(rel <= 1e-8) {
 					t.Errorf("%s: Accuracy 0 with ‖X − X*‖/‖X*‖ = %.3g", name, rel)
 				}
-				if rel := relErr(res.K, wantK); !(rel <= 1e-6) {
+				if rel := relErr(res.K, wantK); !(rel <= kTol) {
 					t.Errorf("%s: Accuracy 0 with ‖K − K*‖/‖K*‖ = %.3g", name, rel)
 				}
 			}
 		}
 	}
+}
+
+// dareGainUlpMove returns the largest relative move of the 320-bit gain
+// K of Y (with E, that of E⁻¹A and E⁻¹B) under the 1-ulp perturbations
+// Y∘(1 + eps) and Y∘(1 ± eps): the resolution of K from an X in float64.
+func dareGainUlpMove(A, B, R, E, Y, K *mat.Dense) float64 {
+	n, m := B.Dims()
+	if E != nil {
+		A = hbDense(hbSolve(hbFrom(E), hbFrom(A)))
+		B = hbDense(hbSolve(hbFrom(E), hbFrom(B)))
+	}
+	move := 0.0
+	for p := range 2 {
+		yp := mat.DenseCopyOf(Y)
+		d := yp.RawMatrix().Data
+		for i := range n {
+			for j := range n {
+				f := 1.0
+				if p == 1 && (i+j+i*j)&1 == 1 {
+					f = -1
+				}
+				d[i*n+j] *= 1 + f*eps()
+			}
+		}
+		symmetrize(d, n, n)
+		move = max(move, relErr(dareGainBig(A, B, R, mat.NewDense(n, m, nil), yp), K))
+	}
+	return move
 }
 
 // dareDescriptorGainBig returns the stabilizing solution X of the Dare of
