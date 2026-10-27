@@ -14,7 +14,10 @@ import (
 // c2d(sysc,Ts,method) is C2D(dt, C2DOptions{Method: method}). Input, output
 // and I/O delays become sample delays (fractional ones per opts), internal
 // delays stay internal, and a singular-E descriptor model is first reduced as
-// MATLAB dss2ss does. An already discrete model returns ErrWrongDomain;
+// MATLAB dss2ss does. ZOH of a delay-free model with full-rank E too
+// ill-conditioned for E⁻¹A (as in TransferFunction) discretizes its
+// generalized Schur parts, which keep the poles of the pencil (A, E); the
+// result then has new state coordinates and no state names. An already discrete model returns ErrWrongDomain;
 // invalid options return ErrInvalidConversionOptions.
 func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {

@@ -1884,7 +1884,10 @@ func Damp(sys *System) ([]DampInfo, error) {
 
 // Step returns the step response of each input channel. Descriptor models
 // follow MATLAB: proper singular-E models are reduced to an explicit model
-// plus feedthrough, improper ones return ErrImproperModel. Continuous models
+// plus feedthrough, improper ones return ErrImproperModel. A continuous
+// delay-free model with full-rank E too ill-conditioned for E⁻¹A (as in
+// TransferFunction) is simulated from its generalized Schur parts, so the
+// response follows the poles of the pencil (A, E). Continuous models
 // with internal delays of one common length are sampled exactly (method of
 // steps) while the chain fits its size and work budget; past it, and for
 // other internal-delay models, they are simulated through the approximate
@@ -2262,7 +2265,11 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		return nil, fmt.Errorf("Lsim: model has no outputs: %w", ErrDimensionMismatch)
 	}
 	var err error
-	if _, ok := stiffContinuousDescriptorParts(sys); ok && (x0 == nil || allZeroVec(x0)) {
+	stiff := false
+	if x0 == nil || allZeroVec(x0) {
+		_, stiff = stiffContinuousDescriptorParts(sys)
+	}
+	if stiff {
 		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
 			return nil, fmt.Errorf("Lsim: x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
 		}
