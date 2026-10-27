@@ -192,6 +192,10 @@ type RiccatiResult struct {
 	// gainUncertified reports a certified X whose K Care cannot certify
 	// with it (descriptorGainCertified); Care returns it with Accuracy 1.
 	gainUncertified bool
+	// xeCertified reports an xe and K of nearSingularDare certified while
+	// X, at Accuracy 1, is not: explicitRiccatiSolution returns them at
+	// Accuracy 0.
+	xeCertified bool
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -853,6 +857,9 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	res, err := dareInputs(A, B, Q, R, opts)
+	if r, ok := nearSingularDare(A, B, Q, R, opts, err); ok {
+		res, err = r, nil
+	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
 	if err == nil && res.Accuracy == 0 && res.xe != nil && res.xeX > newtonTol {
 		res.Accuracy = 1

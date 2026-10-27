@@ -61,6 +61,9 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 	}
 	if res.xe != nil {
 		res.X = res.xe
+		if res.xeCertified {
+			res.Accuracy = 0
+		}
 		if res.Accuracy == 0 && res.xeLoose {
 			res.Accuracy = 1
 		}
