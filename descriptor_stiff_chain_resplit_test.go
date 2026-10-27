@@ -810,3 +810,20 @@ var largePoleAbsorbCases = []stiffChainCase{
 		},
 	},
 }
+
+func BenchmarkDescriptorTF_StiffChainResplit(b *testing.B) {
+	t := &testing.T{}
+	var cases []*System
+	for _, set := range [][]stiffChainCase{stiffChainResplitCases, stiffChainClosedCases, largePoleAbsorbCases} {
+		for _, tc := range set {
+			sys, _ := tc.systems(t)
+			cases = append(cases, sys)
+		}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		for _, sys := range cases {
+			_, _ = sys.TransferFunction(nil)
+		}
+	}
+}
