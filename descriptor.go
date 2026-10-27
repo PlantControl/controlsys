@@ -244,7 +244,7 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 // large within qzRetryTol chordally: those QZ resolves, so the deflation
 // replaces only the large ones.
 func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA, normE float64) ([]complex128, bool) {
-	a, e, _, _, nf, _, _, _, ok := deflateStiffChain(A, E)
+	a, e, _, _, nf, _, _, _, _, _, ok := deflateStaircase(A, E, false, true, true, -1, 0)
 	if !ok {
 		return nil, false
 	}

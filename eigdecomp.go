@@ -495,7 +495,7 @@ func deflatedSchur(a, e, qd, zd *mat.Dense, nf int, selct func(ar, ai, b float64
 // An ambiguous rank, or a near rank-deficient row block of A
 // (a nearly singular pencil), sets ok false.
 func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, ok bool) {
-	a, e, q, z, nf, stiff, leak, blur, egap, _, ok = deflateStaircase(A, E, wantQZ, false, -1, 0)
+	a, e, q, z, nf, stiff, leak, blur, egap, _, ok = deflateStaircase(A, E, wantQZ, false, false, -1, 0)
 	return a, e, q, z, nf, stiff, leak, blur, egap, ok
 }
 
@@ -505,16 +505,17 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 // of E, deciding the ranks of the deflated E blocks by stiffChainRank. It
 // fails (ok false) when E is not stiff or the index is 1.
 func deflateStiffChain(A, E *mat.Dense) (a, e, q, z *mat.Dense, nf int, leak, blur, egap float64, ok bool) {
-	a, e, q, z, nf, _, leak, blur, egap, _, ok = deflateStaircase(A, E, true, true, -1, 0)
+	a, e, q, z, nf, _, leak, blur, egap, _, ok = deflateStaircase(A, E, true, true, false, -1, 0)
 	return a, e, q, z, nf, leak, blur, egap, ok
 }
 
 // deflateStaircase is deflateInfinite, or deflateStiffChain with
-// stiffChain. With probe ≥ 0 it stops at that level (0 the full E) and
-// returns only the cnt eigenvalues of its leading k×k pencil nearest ∞
-// (nearInfiniteEigs) with k, nil when the staircase ends first; zeros
-// deflatedRank takes on the way are not checked by leakedZeros.
-func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, probeEig []complex128, ok bool) {
+// stiffChain; indexKnown skips its pencilIndexOne test for a caller that
+// found index ≥ 2 already. With probe ≥ 0 it stops at that level (0 the
+// full E) and returns only the cnt eigenvalues of its leading k×k pencil
+// nearest ∞ (nearInfiniteEigs) with k, nil when the staircase ends first;
+// zeros deflatedRank takes on the way are not checked by leakedZeros.
+func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain, indexKnown bool, probe, cnt int) (a, e, q, z *mat.Dense, nf int, stiff bool, leak, blur, egap float64, probeEig []complex128, ok bool) {
 	n, _ := A.Dims()
 	if n == 0 {
 		return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
@@ -577,8 +578,13 @@ func deflateStaircase(A, E *mat.Dense, wantQZ, stiffChain bool, probe, cnt int) 
 		r, st, ok := descriptorRank(sv[:k], scaleE, n, k == n)
 		switch {
 		case stiffChain && k == n:
-			if _, index1 := pencilIndexOne(A, E, n, normA); !st || index1 {
+			if !st {
 				return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
+			}
+			if !indexKnown {
+				if _, index1 := pencilIndexOne(A, E, n, normA); index1 {
+					return nil, nil, nil, nil, 0, false, 0, 0, 0, nil, false
+				}
 			}
 			st = false
 			for _, s := range sv[:r] {
@@ -692,7 +698,7 @@ func leakedZeros(A, E *mat.Dense, ad, ed []float64, level, k, cnt int) bool {
 		return c
 	}
 	for range leakDraws {
-		_, _, _, _, kc, _, _, _, _, got, ok := deflateStaircase(jitter(A), jitter(E), false, false, level, cnt)
+		_, _, _, _, kc, _, _, _, _, got, ok := deflateStaircase(jitter(A), jitter(E), false, false, false, level, cnt)
 		if !ok || kc != k || got == nil {
 			return true
 		}
