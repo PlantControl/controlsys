@@ -215,3 +215,165 @@ func TestIsProperChainSmearSplitFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// largeAPoleChainDescriptor: nf poles (one large in A, ±1e2..1e6, beside
+// E entries in [0.5, 1.5)) beside a chain of [2]..[6], [2 3], [3 2],
+// [2 2] or [1 3]; SISO or up to 3×3 (one draw in three), D Gaussian,
+// proper in two draws of three (only the first member of each chain
+// driven); A = U·F·V, E = U·W·V with Gaussian U, V; PCG(seed, 2527).
+func largeAPoleChainDescriptor(t *testing.T, seed uint64) (sys, oracle *System, nf int, proper bool) {
+	t.Helper()
+	rng := rand.New(rand.NewPCG(seed, 2527))
+	proper = rng.IntN(3) != 0
+	nf = 1 + rng.IntN(3)
+	f, w := make([]float64, nf), make([]float64, nf)
+	for i := range nf {
+		f[i], w[i] = rng.NormFloat64(), 0.5+rng.Float64()
+	}
+	f[0] = math.Copysign(math.Pow(10, 2+4*rng.Float64()), rng.NormFloat64())
+	m, p := 1, 1
+	if rng.IntN(3) == 0 {
+		m, p = 1+rng.IntN(3), 1+rng.IntN(3)
+	}
+	chains := [][]int{{2}, {3}, {4}, {5}, {6}, {2, 3}, {3, 2}, {2, 2}, {1, 3}}[rng.IntN(9)]
+	n := nf
+	for _, k := range chains {
+		n += k
+	}
+	F, W := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+	b, c, D := mat.NewDense(n, m, nil), mat.NewDense(p, n, nil), mat.NewDense(p, m, nil)
+	for i := range nf {
+		F.Set(i, i, f[i])
+		W.Set(i, i, w[i])
+		for j := range m {
+			b.Set(i, j, rng.NormFloat64())
+		}
+		for j := range p {
+			c.Set(j, i, rng.NormFloat64())
+		}
+	}
+	o := nf
+	for _, k := range chains {
+		for i := range k {
+			F.Set(o+i, o+i, 1)
+			if i+1 < k {
+				W.Set(o+i, o+i+1, 1)
+			}
+			for j := range p {
+				c.Set(j, o+i, rng.NormFloat64())
+			}
+			if !proper || i == 0 {
+				for j := range m {
+					b.Set(o+i, j, rng.NormFloat64())
+				}
+			}
+		}
+		o += k
+	}
+	for i := range p {
+		for j := range m {
+			D.Set(i, j, rng.NormFloat64())
+		}
+	}
+	gauss := func() *mat.Dense {
+		g := mat.NewDense(n, n, nil)
+		for i := range n {
+			for j := range n {
+				g.Set(i, j, rng.NormFloat64())
+			}
+		}
+		return g
+	}
+	U, V := gauss(), gauss()
+	var T, A, E, B, C mat.Dense
+	T.Mul(U, F)
+	A.Mul(&T, V)
+	T.Mul(U, W)
+	E.Mul(&T, V)
+	B.Mul(U, b)
+	C.Mul(c, V)
+	var err error
+	if sys, err = NewDescriptor(&A, &B, &C, D, &E, 0); err != nil {
+		t.Fatal(err)
+	}
+	if oracle, err = NewDescriptor(F, b, c, D, W, 0); err != nil {
+		t.Fatal(err)
+	}
+	return sys, oracle, nf, proper
+}
+
+// TestTransferFunctionStaircaseSplitRefitsResidues: KLVET5 (largeA 540,
+// 387). Beside an index ≥ 2 chain the staircase split moves the pole large
+// in A by its rounding (540: −344686.26 for −344688.83) and the residue and
+// D with it; with no direct (sE − A) solve in the pencil-sample range
+// determined by the data the split was returned as it was, its TF 9.6e-6
+// (387: 2e-8) off at 0.05i..3, where the data determine it to 1e-13. The
+// pole is now moved onto QZ's value and B, D refitted to the solves under
+// the range (staircaseLowRefit); the proper reading stays the split's.
+// Oracle: the structured pencil, at points where the exact rational
+// response of the float data matches it to 1e-9. Under GOARCH=amd64 both
+// read improper, as on base (s-terms of the split above its rounding
+// level), and are not checked.
+func TestTransferFunctionStaircaseSplitRefitsResidues(t *testing.T) {
+	read := 0
+	for _, seed := range []uint64{387, 540} {
+		label := fmt.Sprintf("largeA %d", seed)
+		sys, oracle, nf, proper := largeAPoleChainDescriptor(t, seed)
+		if !proper {
+			t.Fatalf("%s: improper draw", label)
+		}
+		if pr, err := sys.IsProper(); err != nil {
+			t.Fatalf("%s: IsProper: %v", label, err)
+		} else if !pr {
+			read++
+			continue
+		}
+		res, err := sys.TransferFunction(nil)
+		if err != nil {
+			t.Fatalf("%s: TransferFunction: %v", label, err)
+		}
+		red, _, err := sys.weierstrassReduceParts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var eig mat.Eigen
+		if !eig.Factorize(red.A, mat.EigenNone) {
+			t.Fatal("eig")
+		}
+		requirePolesContain(t, label, eig.Values(nil), chainSmearOraclePoles(t, oracle, nf), 1e-9)
+		n, m, p := sys.Dims()
+		a, e, b, c, d := chainSmearFlat(sys.A), chainSmearFlat(sys.E), chainSmearFlat(sys.B), chainSmearFlat(sys.C), chainSmearFlat(sys.D)
+		checked := 0
+		for _, s := range []complex128{0.05i, 0.37i, complex(0.5, 3)} {
+			w := pencilResponse(t, oracle, s)
+			x, ok := fzExactDescResponse(n, m, p, a, e, b, c, d, s)
+			g, gerr := res.TF.Eval(s)
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			var size, data, diff float64
+			for i := range p {
+				for j := range m {
+					size = max(size, cmplx.Abs(w[i][j]))
+					if ok {
+						data = max(data, cmplx.Abs(x[i*m+j]-w[i][j]))
+					}
+					diff = max(diff, cmplx.Abs(g[i][j]-w[i][j]))
+				}
+			}
+			if !ok || data > 1e-9*size {
+				continue
+			}
+			checked++
+			if diff > 1e-8*size {
+				t.Errorf("%s: G(%v) off the oracle by %.3g relative", label, s, diff/size)
+			}
+		}
+		if checked == 0 {
+			t.Fatalf("%s: no point determined by the data", label)
+		}
+	}
+	if read == 2 {
+		t.Skip("both read improper under this rounding, as on base")
+	}
+}
