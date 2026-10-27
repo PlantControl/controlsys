@@ -337,6 +337,18 @@ func TestLqrKalmanLqgNearSingularEMatchOracle(t *testing.T) {
 	}
 }
 
+// TestKalmdFullRankNearSingularEIsSingular: Kalmd folds E⁻¹ into the plant
+// before discretizing, unverified, so an E with LU condition estimate at or
+// above 1/ε stays ErrDescriptorSingular though MATLAB rank admits it for
+// Kalman.
+func TestKalmdFullRankNearSingularEIsSingular(t *testing.T) {
+	sys := fullRankNearSingularE(t, 2.46e-15)
+	sys.D.Zero()
+	if _, err := Kalmd(sys, eyeDense(1), eyeDense(1), 0.1, nil); !errors.Is(err, ErrDescriptorSingular) {
+		t.Errorf("Kalmd: err = %v, want ErrDescriptorSingular", err)
+	}
+}
+
 // TestLqrKalmanLqgFullRankNearSingularE runs the full-rank E with condition
 // estimate above 1/ε of the descriptor rank tests through Lqr, Kalman and
 // Lqg: each returns a value matching the oracle or ErrDescriptorSingular.
