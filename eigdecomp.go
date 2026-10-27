@@ -148,7 +148,11 @@ func descriptorFoldInaccurate(E *mat.Dense) bool {
 // pole of a nonsingular block is that large (|λ| ≤ ‖A‖/σ_min(E)), but QZ
 // zeroes β of a stiff mode of a full-rank E within ε·‖E‖ and a reorder
 // swap leaves it at ~ε²; folded into the explicit G1 that pole (~1e31)
-// wrecks G1 + G2, so it stays in G2, whose E keeps it.
+// wrecks G1 + G2, so it stays in G2, whose E keeps it. When E has full
+// MATLAB rank that mode is finite: Poles takes its value λ from E⁻¹A
+// (fullRankPoles), and for a single real one stiffFullRankPole selects
+// it by λ and sets its β to α/λ, a change of order ε·‖E‖, so G1 and G2
+// together have exactly the poles of Poles.
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	a, e, qd, zd, nf, stiff, _, blur, _, ok := deflateInfinite(sys.A, sys.E, true)
 	ok = ok && blur == 1
@@ -163,17 +167,88 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 		return modesAllInGroup2(policy, sys)
 	}
 	infTol := qzInfiniteTol(1e-3*eps(), mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))
+	sawInfinite := false
 	selct := func(ar, ai, b float64) bool {
-		return b != 0 && !qzInfinite(ar, ai, b, infTol) && isGroup1(complex(ar/b, ai/b))
+		if b == 0 || qzInfinite(ar, ai, b, infTol) {
+			sawInfinite = true
+			return false
+		}
+		return isGroup1(complex(ar/b, ai/b))
 	}
 	s, t, q, z, n1, recip, err := deflatedSchur(a, e, qd, zd, nf, selct, false)
 	if err != nil {
 		return nil, nil, err
 	}
+	if sawInfinite && nf == a.RawMatrix().Rows {
+		if lambda, ok := stiffFullRankPole(sys.A, sys.E); ok {
+			stiffSel := func(ar, ai, b float64) bool {
+				if b == 0 || qzInfinite(ar, ai, b, infTol) {
+					return isGroup1(lambda)
+				}
+				return isGroup1(complex(ar/b, ai/b))
+			}
+			s2, t2, q2, z2, n12, recip2, err := deflatedSchur(a, e, qd, zd, nf, stiffSel, true)
+			if err == nil && setStiffBeta(s2, t2, nf, infTol, real(lambda)) {
+				if n12 == 0 {
+					return modesAllInGroup2(policy, sys)
+				}
+				return splitGeneralizedSchur(policy, sys, s2, t2, q2, z2, n12, recip2)
+			}
+		}
+	}
 	if n1 == 0 {
 		return modesAllInGroup2(policy, sys)
 	}
 	return splitGeneralizedSchur(policy, sys, s, t, q, z, n1, recip)
+}
+
+// stiffFullRankPole returns the stiff pole that Poles reports for an E of
+// full MATLAB rank (fullRankPoles) when QZ gives exactly one β = 0 and its
+// value from E⁻¹A is real and finite.
+func stiffFullRankPole(A, E *mat.Dense) (complex128, bool) {
+	n := A.RawMatrix().Rows
+	aRaw, eRaw := A.RawMatrix(), E.RawMatrix()
+	alphar, alphai, beta, ok := qzEigenvalues(n, aRaw.Data, aRaw.Stride, eRaw.Data, eRaw.Stride)
+	if !ok {
+		return 0, false
+	}
+	poles := fullRankPoles(A, E, alphar, alphai, beta)
+	if len(poles) != n || len(finitePoles(alphar, alphai, beta, 0)) != n-1 {
+		return 0, false
+	}
+	lambda := poles[n-1]
+	if imag(lambda) != 0 || real(lambda) == 0 || math.IsInf(real(lambda), 0) || math.IsNaN(real(lambda)) {
+		return 0, false
+	}
+	return lambda, true
+}
+
+// setStiffBeta finds the single 1×1 block of the generalized Schur form
+// (s, t) with |t_ii| ≤ infTol·|s_ii| and sets t_ii = s_ii/lambda, so the
+// block has eigenvalue lambda; it reports false, leaving t unchanged,
+// when there is not exactly one such block or it lies in a 2×2 block.
+func setStiffBeta(s, t []float64, n int, infTol, lambda float64) bool {
+	at := -1
+	for i := range n {
+		sii, tii := s[i*n+i], t[i*n+i]
+		if sii == 0 || !(math.Abs(tii) <= infTol*math.Abs(sii)) {
+			continue
+		}
+		if at >= 0 {
+			return false
+		}
+		at = i
+	}
+	if at < 0 {
+		return false
+	}
+	for _, m := range [2][]float64{s, t} {
+		if at > 0 && m[at*n+at-1] != 0 || at < n-1 && m[(at+1)*n+at] != 0 {
+			return false
+		}
+	}
+	t[at*n+at] = s[at*n+at] / lambda
+	return true
 }
 
 // deflatedSchur completes the deflation Qdᵀ(A, E)Zd = (a, e) of
