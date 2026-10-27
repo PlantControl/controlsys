@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -166,7 +167,8 @@ func isIdentityDescriptor(E *mat.Dense) bool {
 
 // generalizedPoles computes the finite eigenvalues of the pencil (A, E),
 // leaving out the infinite ones as MATLAB pole does. A nonsingular E (MATLAB
-// rank) keeps every eigenvalue with β ≠ 0. For a singular E of rank r the
+// rank) has no infinite eigenvalue: one with β = 0
+// is a stiff finite pole (fullRankPoles). For a singular E of rank r the
 // n − r eigenvalues of least |β|/|α| of the whole-pencil QZ are infinite
 // when a gap separates them (leastRatioInfTol), no large one remains and
 // the pencil has index 1 (pencilIndexOne): a chain of length k has k
@@ -189,14 +191,14 @@ func generalizedPoles(A, E *mat.Dense, n int) ([]complex128, error) {
 	}
 	normA, normE := mat.Norm(A, 2), mat.Norm(E, 2)
 	if n == 0 || clearlyNonsingular(eRaw.Data, eRaw.Stride, n, make([]float64, n*n), qzInfiniteGap*1e3*float64(n)*eps()*normE) {
-		return finitePoles(alphar, alphai, beta, 0), nil
+		return fullRankPoles(A, E, alphar, alphai, beta), nil
 	}
 	var svd mat.SVD
 	if svd.Factorize(E, mat.SVDNone) {
 		sv := svd.Values(nil)
 		r, stiff, _ := descriptorRank(sv, sv[0], n, true)
 		if r == n {
-			return finitePoles(alphar, alphai, beta, 0), nil
+			return fullRankPoles(A, E, alphar, alphai, beta), nil
 		}
 		margin := 0.0
 		if stiff {
@@ -283,6 +285,31 @@ func qzFinitePoles(n int, a []float64, lda int, e []float64, lde int, infTol flo
 		return nil, fmt.Errorf("generalized eigenvalue decomposition failed: %w", ErrSchurFailed)
 	}
 	return finitePoles(alphar, alphai, beta, infTol), nil
+}
+
+// fullRankPoles returns the poles of (A, E) with E of full MATLAB rank:
+// every eigenvalue is finite. QZ zeroes β of a stiff mode whose σ_n(E) lies
+// within its deflation threshold ε·‖E‖, although σ_n is above n·eps(σ₁);
+// those d modes are the d largest eigenvalues of the LU fold E⁻¹A, the
+// explicit model of ToExplicit, so Poles and IsStable agree with it (MATLAB
+// itself drops them in pole(dss) but keeps them in ss(dss)). The other
+// poles stay those of QZ, which the fold resolves only to cond(E)·ε.
+func fullRankPoles(A, E *mat.Dense, alphar, alphai, beta []float64) []complex128 {
+	poles := finitePoles(alphar, alphai, beta, 0)
+	d := len(beta) - len(poles)
+	if d == 0 {
+		return poles
+	}
+	var lu mat.LU
+	lu.Factorize(E)
+	var fold mat.Dense
+	var eig mat.Eigen
+	if fullRankSolve(&lu, &fold, A) != nil || !eig.Factorize(&fold, mat.EigenNone) {
+		return poles
+	}
+	ev := eig.Values(nil)
+	slices.SortStableFunc(ev, func(a, b complex128) int { return cmp.Compare(cmplx.Abs(b), cmplx.Abs(a)) })
+	return append(poles, ev[:d]...)
 }
 
 // finitePoles returns (α_r + iα_i)/β for the eigenvalues that are not

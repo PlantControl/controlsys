@@ -144,6 +144,10 @@ func descriptorFoldInaccurate(E *mat.Dense) bool {
 // When the rank decisions are ambiguous or blurred, or E has a stiff singular value
 // and the pencil index ≥ 2 (the staircase then deflates the null space of E
 // only), the whole pencil goes to QZ instead (decomposeGeneralizedQZ).
+// A mode with |β| ≤ ε·‖E‖_F, the QZ deflation threshold, is never selected:
+// QZ zeroes β of a stiff mode of a full-rank E there, and a reorder swap
+// leaves it at ~ε²; folded into the explicit G1 that pole (~1e31) wrecks
+// G1 + G2, so it stays in G2, whose E keeps it.
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	a, e, qd, zd, nf, stiff, _, blur, _, ok := deflateInfinite(sys.A, sys.E, true)
 	ok = ok && blur == 1
@@ -157,8 +161,9 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 	if nf == 0 {
 		return modesAllInGroup2(policy, sys)
 	}
+	btol := eps() * mat.Norm(sys.E, 2)
 	selct := func(ar, ai, b float64) bool {
-		return b != 0 && isGroup1(complex(ar/b, ai/b))
+		return math.Abs(b) > btol && isGroup1(complex(ar/b, ai/b))
 	}
 	s, t, q, z, n1, recip, err := deflatedSchur(a, e, qd, zd, nf, selct, false)
 	if err != nil {
