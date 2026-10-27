@@ -828,14 +828,10 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		if err != nil || res.Accuracy != 0 || n == 0 || m == 0 || !rLost(B, R, res.X) {
 			return res, err
 		}
-		if gainMissOf(n, res, func(X *mat.Dense) (*mat.Dense, float64, bool) {
-			return ddGain(A, B, R, crossTerm(opts), X)
-		}) > 1 {
-			if r, ok := refined(A, B, Q, R, opts, nil, res); ok {
-				return r, nil
-			}
-			res.Accuracy = 1
+		if r, _, ok := gainOfX(A, B, Q, R, opts, nil, res); ok {
+			return r, nil
 		}
+		res.Accuracy = 1
 		return res, nil
 	}
 	var E *mat.Dense
@@ -846,25 +842,19 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		res, err := dareSolve(A, B, Q, R, opts, !ill)
 		var poor *RiccatiResult
 		poorMiss := math.Inf(1)
-		gainOfX := func(c *RiccatiResult) (*RiccatiResult, bool) {
-			miss := red.gainMiss(A, B, R, opts, c)
-			if miss <= 1 {
-				return c, true
-			}
-			if r, ok := refined(A, B, Q, R, opts, red, c); ok {
-				return r, true
-			}
-			if poor == nil || miss < poorMiss {
+		gainOf := func(c *RiccatiResult) (*RiccatiResult, bool) {
+			r, miss, ok := gainOfX(A, B, Q, R, opts, red, c)
+			if !ok && (poor == nil || miss < poorMiss) {
 				poor, poorMiss = c, miss
 			}
-			return nil, false
+			return r, ok
 		}
 		if err == nil && res.Accuracy == 0 {
 			if !(red.sigma*red.sigma*mat.Norm(res.X, 1) > mat.Norm(R, 1)) {
 				return res, nil
 			}
 			if c, ok := red.certify(A, Q, opts, res, nil); ok && closedLoopStable(A, B, c.K, E, c.Eig) {
-				if c, ok = gainOfX(c); ok {
+				if c, ok = gainOf(c); ok {
 					return c, nil
 				}
 			}
@@ -876,7 +866,7 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			o = &c
 		}
 		if r := red.solve(A, B, Q, o); r != nil {
-			if r, ok := gainOfX(r); ok {
+			if r, ok := gainOf(r); ok {
 				return r, nil
 			}
 		}
@@ -889,9 +879,10 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		}
 		return res, err
 	}
-	gainOfX := func(c *RiccatiResult) *RiccatiResult {
-		if !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) && !(red.gainMiss(A, B, R, opts, c) <= 1) {
-			if r, ok := refined(A, B, Q, R, opts, red, c); ok {
+	gainOf := func(c *RiccatiResult) *RiccatiResult {
+		if !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
+			r, _, ok := gainOfX(A, B, Q, R, opts, red, c)
+			if ok {
 				return r
 			}
 			c.Accuracy = 1
@@ -899,14 +890,14 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		return c
 	}
 	if res := red.solve(A, B, Q, opts); res != nil {
-		return gainOfX(res), nil
+		return gainOf(res), nil
 	}
 	res, err := dareSolve(A, B, Q, R, opts, !ill)
 	if err != nil || res.Accuracy != 0 {
 		return res, err
 	}
 	if c, ok := red.certify(A, Q, opts, res, res.K); ok && closedLoopStable(A, B, c.K, E, c.Eig) {
-		return gainOfX(c), nil
+		return gainOf(c), nil
 	}
 	res.Accuracy = 1
 	return res, nil
@@ -1034,7 +1025,7 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 // an X off by 5e-14 within newtonTol gave a K off by 2e-4 to 9e-3, while
 // X one step on was the rounded 320-bit X and its ddGain within K's own
 // eps-sensitivity.
-func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
+func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, gainDist, bool) {
 	var c *RiccatiResult
 	ok := false
 	if red != nil && red.exact {
@@ -1059,17 +1050,43 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		E = opts.E
 	}
 	if !ok || !closedLoopStable(A, B, c.K, E, c.Eig) {
-		return nil, false
+		return nil, gainDist{}, false
 	}
-	miss := 0.0
+	return c, gainMissIn(A, B, R, opts, red, c), true
+}
+
+// gainOfX returns res once its K is the gain of its X to the tolerance of
+// gainMissIn with the floor gainTol, else res refined (refined) once its
+// K is; failing both, the same with the floor gainFloor, as Dare kept
+// before. ok is false when none is, miss then the distance of res in
+// units of the tolerance with gainFloor.
+func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
+	d := gainMissIn(A, B, R, opts, red, res)
+	if d.units(gainTol) <= 1 {
+		return res, 0, true
+	}
+	c, cd, stable := refined(A, B, Q, R, opts, red, res)
+	if stable && cd.units(gainTol) <= 1 {
+		return c, 0, true
+	}
+	if d.units(gainFloor) <= 1 {
+		return res, 0, true
+	}
+	if stable && cd.units(gainFloor) <= 1 {
+		return c, 0, true
+	}
+	return nil, d.units(gainFloor), false
+}
+
+// gainMissIn returns the gainMiss of res with reduced inputs red, else
+// its gainMissOf from the ddGain of the given inputs.
+func gainMissIn(A, B, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) gainDist {
 	if red != nil {
-		miss = red.gainMiss(A, B, R, opts, c)
-	} else {
-		miss = gainMissOf(A.RawMatrix().Rows, c, func(X *mat.Dense) (*mat.Dense, float64, bool) {
-			return ddGain(A, B, R, crossTerm(opts), X)
-		})
+		return red.gainMiss(A, B, R, opts, res)
 	}
-	return c, miss <= 1
+	return gainMissOf(A.RawMatrix().Rows, res, func(X *mat.Dense) (*mat.Dense, float64, bool) {
+		return ddGain(A, B, R, crossTerm(opts), X)
+	})
 }
 
 // certifyIn returns the X of res once verifyRiccati certifies it as the
@@ -1363,10 +1380,19 @@ func rLost(B, R, X *mat.Dense) bool {
 // returns at Accuracy 0 may have, unless the gain itself moves more under
 // eps perturbations of X or is resolved only more coarsely in
 // double-double; gainCap bounds that resolution: a gain unresolved to it
-// is not certified.
+// is not certified. It is newtonTol, the floor of the X certificate: a
+// floor of 1e-6 kept a cheap-control K off by 2.8e-7, 500 times its move
+// per ulp of X, at Accuracy 0, while the gain of X one Newton step on
+// was exact. That floor, gainFloor, remains the fallback once neither K
+// nor that of X one step on meets gainTol (gainOfX), and bounds what the
+// Newton iterate of X adds to the tolerance (gainMissOf): with a
+// closed-loop pole at 1 − 3e-7, K off by 2.3e-7 was within a tenth of its
+// eps-sensitivity, which no perturbation of X shows (its move per ulp of
+// X 3e-13), and Newton steps of X stayed in that noise.
 const (
-	gainTol = 1e-6
-	gainCap = 1e-4
+	gainTol   = newtonTol
+	gainFloor = 1e-6
+	gainCap   = 1e-4
 )
 
 // gainMiss returns the distance ‖K − K*‖₁/‖K*‖₁ of res.K from the gain
@@ -1381,7 +1407,7 @@ const (
 // part of K on B's range fixed by R against X's small eigenvalues: K
 // came out off by O(1) with X exact to 1e-16, and as the cost of K
 // equals X there, no Newton or Hewer step sees it.
-func (red *reducedInputs) gainMiss(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) float64 {
+func (red *reducedInputs) gainMiss(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) gainDist {
 	n, _ := A.Dims()
 	if !red.exact {
 		return gainMissOf(n, res, func(X *mat.Dense) (*mat.Dense, float64, bool) {
@@ -1406,67 +1432,96 @@ func crossTerm(opts *RiccatiOpts) *mat.Dense {
 }
 
 // gainMissOf returns the distance ‖K − K*‖₁/‖K*‖₁ of res.K from the
-// gain K* of res.X that gain forms, in units of its tolerance: the
-// largest of gainTol, 8× the move of K* under the relative eps
+// gain K* of res.X that gain forms and its tolerance: the largest of
+// 8× the move of K* under the relative eps
 // perturbations X∘(1 + eps) and X∘(1 ± eps) of X, and 32·eps²·cond for
 // the componentwise condition cond of gain, the resolution of K* in
-// double-double. It is +Inf when that tolerance exceeds gainCap or gain
-// fails. With the Newton iterate res.x1 of a certified step above eps,
+// double-double. The distance is +Inf when that tolerance exceeds gainCap
+// or gain fails. With the Newton iterate res.x1 of a certified step above eps,
 // the distance is the larger of those from K* and from the gain of x1:
 // the gain of a cheap-control Dare amplified an X off by 5e-14 (its step
 // 7e-14, inside newtonTol) to a K off by 2e-4 to 9e-3 from that of the
 // solution, K the gain of X, while that of x1 was within K's own
 // eps-sensitivity. The ±eps perturbations of X do not bound this move: in
-// their direction it was 1e4 times that along the step.
-func gainMissOf(n int, res *RiccatiResult, gain func(X *mat.Dense) (*mat.Dense, float64, bool)) float64 {
+// their direction it was 1e4 times that along the step. The tolerance
+// then also takes, up to gainFloor, 8× the move of the gain of x1 under
+// those perturbations of x1: the gain of an X off by 1.3e-9 moved under
+// gainTol per ulp, that of x1 by 1.7e-8, and K, the pencil gain, was
+// exact to 1.8e-9.
+func gainMissOf(n int, res *RiccatiResult, gain func(X *mat.Dense) (*mat.Dense, float64, bool)) gainDist {
+	fail := gainDist{math.Inf(1), 1}
 	K, mcond, ok := gain(res.X)
 	if !ok {
-		return math.Inf(1)
+		return fail
 	}
 	nk := mat.Norm(K, 1)
 	if nk == 0 {
 		if mat.Norm(res.K, 1) == 0 {
-			return 0
+			return gainDist{0, 1}
 		}
-		return math.Inf(1)
+		return fail
 	}
-	tol := gainTol
-	xr := res.X.RawMatrix()
+	tol := 0.0
 	xp := mat.NewDense(n, n, nil)
 	pr := xp.RawMatrix()
-	for p := range 2 {
-		for i := range n {
-			for j := range n {
-				f := 1.0
-				if p == 1 && (i+j+i*j)&1 == 1 {
-					f = -1
+	ulpMove := func(X, K *mat.Dense) (float64, bool) {
+		move := 0.0
+		xr := X.RawMatrix()
+		for p := range 2 {
+			for i := range n {
+				for j := range n {
+					f := 1.0
+					if p == 1 && (i+j+i*j)&1 == 1 {
+						f = -1
+					}
+					pr.Data[i*pr.Stride+j] = xr.Data[i*xr.Stride+j] * (1 + f*eps())
 				}
-				pr.Data[i*pr.Stride+j] = xr.Data[i*xr.Stride+j] * (1 + f*eps())
 			}
+			kp, _, ok := gain(xp)
+			if !ok {
+				return 0, false
+			}
+			kp.Sub(kp, K)
+			move = max(move, 8*mat.Norm(kp, 1)/nk)
 		}
-		kp, _, ok := gain(xp)
-		if !ok {
-			return math.Inf(1)
+		return move, true
+	}
+	move, ok := ulpMove(res.X, K)
+	if !ok {
+		return fail
+	}
+	tol = max(tol, move)
+	var k1 *mat.Dense
+	if res.x1 != nil {
+		if k1, _, ok = gain(res.x1); !ok {
+			return fail
 		}
-		kp.Sub(kp, K)
-		tol = max(tol, 8*mat.Norm(kp, 1)/nk)
+		if move, ok = ulpMove(res.x1, k1); !ok {
+			return fail
+		}
+		tol = max(tol, min(move, gainFloor))
 	}
 	tol = max(tol, 32*eps()*eps()*mcond)
 	if !(tol <= gainCap) {
-		return math.Inf(1)
+		return fail
 	}
 	var d mat.Dense
 	d.Sub(res.K, K)
 	miss := mat.Norm(&d, 1) / nk
-	if res.x1 != nil {
-		k1, _, ok := gain(res.x1)
-		if !ok {
-			return math.Inf(1)
-		}
+	if k1 != nil {
 		d.Sub(res.K, k1)
 		miss = max(miss, mat.Norm(&d, 1)/nk)
 	}
-	return miss / tol
+	return gainDist{miss, tol}
+}
+
+// gainDist is the distance d of a K from the gain of its X and the
+// resolution tol of that gain (gainMissOf).
+type gainDist struct{ d, tol float64 }
+
+// units returns d in units of tol, at least floor.
+func (g gainDist) units(floor float64) float64 {
+	return g.d / max(g.tol, floor)
 }
 
 // ddGain returns the gain (R + BᵀXB)⁻¹(BᵀXA + Sᵀ) of X (S nil for
