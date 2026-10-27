@@ -301,6 +301,7 @@ func stiffChainPoles(A, E *mat.Dense, sv, alphar, alphai, beta []float64, normA,
 			return nil, false
 		}
 		used[best], whole[i] = true, true
+		poles[best] = complex(alphar[i]/beta[i], alphai[i]/beta[i])
 	}
 	roundTol := qzInfiniteTol(float64(len(beta))*eps(), normA, normE)
 	recip := func(i int) complex128 {
