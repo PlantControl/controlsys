@@ -2009,7 +2009,12 @@ var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on or beyond the stabilit
 // eps·‖A‖·κ off, is tested whatever the rounding (zero1 under -race), while a mode at −3e-16 that is an exact diagonal entry
 // of a triangular A is known to relative eps and stays stable (BWUCB5),
 // as does a lightly damped mode at −3e-9 ± i. PBH rank is σmin ≤
-// n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖ + τ‖E‖. A mode in a Jordan block with a
+// n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖ + τ‖E‖. A deficient verdict with τ < |λ|
+// stands only if the rank-equivalent reversed pencil [λ⁻¹A − E, B] is
+// deficient too, to n·eps·‖[‖A‖/|λ| + ‖E‖, ‖B‖]‖ + ‖A‖·τ/(|λ|(|λ| − τ)),
+// the bound on the error of λ⁻¹: at λ ≈ 1/σmin(E) of a near-singular E,
+// τ‖E‖ outweighs ‖B‖ although τ ≪ |λ| (IR5YOF: σmin 2.6 against a band
+// of 5, reversed 0.76 against 2e-15). A mode in a Jordan block with a
 // controllable one splits by √(eps·κ)·‖A‖ beyond first order: x ⊥ y
 // there, and τ, past the split, would swallow a stable mode at −1e-5. λ is
 // tested alone only when τ is below its distance to every other
@@ -2050,11 +2055,19 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 	}
 	g := mat.NewDense(2*n, 2*(n+m), nil)
 	var svd mat.SVD
-	pbhDeficient := func(lam complex128, tol float64) bool {
+	pbhMin := func(lam complex128, reversed bool) (float64, bool) {
 		lr, li := real(lam), imag(lam)
+		var mr, mi float64
+		if reversed {
+			mu := 1 / lam
+			mr, mi = real(mu), imag(mu)
+		}
 		for i := range n {
 			for j := range n {
 				re, im := a[i*n+j]-lr*e[i*n+j], -li*e[i*n+j]
+				if reversed {
+					re, im = mr*a[i*n+j]-e[i*n+j], mi*a[i*n+j]
+				}
 				g.Set(i, j, re)
 				g.Set(i, n+m+j, -im)
 				g.Set(n+i, j, im)
@@ -2067,10 +2080,23 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 			}
 		}
 		if !svd.Factorize(g, mat.SVDNone) {
+			return 0, false
+		}
+		return svd.Values(nil)[2*n-1], true
+	}
+	pbhDeficient := func(lam complex128, tol float64) bool {
+		mod := cmplx.Abs(lam)
+		s, ok := pbhMin(lam, false)
+		if !ok || !(s <= nf*ep*math.Hypot(an+mod*en, bn)+tol*en) {
 			return false
 		}
-		sv := svd.Values(nil)
-		return sv[2*n-1] <= nf*ep*math.Hypot(an+cmplx.Abs(lam)*en, bn)+tol*en
+		if !(tol < mod) {
+			return true
+		}
+		if s, ok = pbhMin(lam, true); !ok {
+			return true
+		}
+		return s <= nf*ep*math.Hypot(an/mod+en, bn)+tol/(mod*(mod-tol))*an
 	}
 	var sa, se, sar, sai, sbeta []float64
 	clusterCond := func(lam complex128, rho float64) float64 {
