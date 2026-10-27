@@ -50,6 +50,9 @@ type riccatiProblem struct {
 	// and xeStep the Newton step ‖EᵀΔE‖/‖EᵀXE‖ of that X.
 	xe     []float64
 	xeStep float64
+	// xeX is ‖X − X_dd‖/‖X‖ of the X whose refined xe
+	// refineDescriptorDare formed from the double-double iterate X_dd.
+	xeX float64
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -305,7 +308,7 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 					}
 				}
 			}
-			res.xe = mat.NewDense(n, n, xe)
+			res.xe, res.xeX = mat.NewDense(n, n, xe), problem.xeX
 			problem.xe = nil
 		}
 	} else if problem.poor != nil {
