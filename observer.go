@@ -173,7 +173,7 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 
 	ropts := &RiccatiOpts{S: Nbar}
 	if !isIdentityDescriptor(E) {
-		ropts.E = mat.DenseCopyOf(E.T())
+		ropts.E, ropts.plantE = mat.DenseCopyOf(E.T()), E
 	}
 	if opts != nil {
 		ropts.Workspace, ropts.NoScaling = opts.Workspace, opts.NoScaling
@@ -238,6 +238,9 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 	if !isIdentityDescriptor(sys.E) {
 		var lu mat.LU
 		lu.Factorize(sys.E)
+		if luNearSingular(&lu) {
+			return nil, fmt.Errorf("Kalmd: %w", ErrDescriptorSingular)
+		}
 		A, G = new(mat.Dense), new(mat.Dense)
 		if err := lu.SolveTo(A, false, sys.A); err != nil {
 			return nil, fmt.Errorf("Kalmd: %w", ErrDescriptorSingular)
