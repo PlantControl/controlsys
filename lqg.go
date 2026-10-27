@@ -177,6 +177,14 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	}
 	var F *mat.Dense
 	if o.Current {
+		if kwGen == nil && ropts.E != nil && noiseGainIll(Ba, xGen, R, ropts.E) {
+			kw, certified, ok := descriptorNoiseGain(Aa, Ba, Q, R, ropts.S, ropts.E, kRes.K)
+			if ok {
+				kwGen, kwCertified = kw, certified
+			} else {
+				res.Accuracy = max(res.Accuracy, 1)
+			}
+		}
 		if F, err = res.currentGains(sys, Ba, xGen, kwGen, R, Rn, Nn); err != nil {
 			return nil, err
 		}
@@ -244,6 +252,28 @@ func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
 	hd.Scale(-h, sys.D)
 	setBlock(Ba, n, 0, &hd)
 	return Aa, Ba
+}
+
+// noiseGainIll reports a Kw = (R + BᵀXB)⁻¹BᵀX that the float64
+// descriptor X may not carry within newtonTol: cond(E)·eps beyond it (Kw
+// off by 3e-7 at cond(E) 8e9), or R + BᵀXB cancelling so far that
+// rounding X alone can move it beyond it (‖X‖ ~ 1/σ_min(E)²). Lqg then
+// takes Kw from descriptorNoiseGain, else keeps the float64 Kw at
+// Accuracy 1.
+func noiseGainIll(B, X, R, E *mat.Dense) bool {
+	var lu mat.LU
+	lu.Factorize(E)
+	if !(lu.Cond()*eps() <= newtonTol) {
+		return true
+	}
+	na, m := B.Dims()
+	absB := absDense(B)
+	t := mulDims(m, na, absB.T(), absDense(X))
+	bound := mulDims(m, m, t, absB)
+	BtX := mulDims(m, na, B.T(), X)
+	G := mulDims(m, m, BtX, B)
+	G.Add(G, R)
+	return mat.Norm(bound, 1)*eps() > newtonTol*mat.Norm(G, 1)
 }
 
 // currentGains takes X, the regulator solution of the generalized Riccati

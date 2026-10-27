@@ -32,7 +32,31 @@ func TestLqg_CurrentNearSingularENoiseGainMatchesOracle(t *testing.T) {
 	Q := mat.NewDense(5, 5, []float64{6.657549588624399, 4.410892534611584, -6.832387991043152, 2.171063965708072, -2.149201426120526, 4.410892534611584, 4.228668867735996, -3.6060248346286246, 1.030847264195174, -0.9998091956449603, -6.832387991043152, -3.6060248346286246, 14.357225640793184, -3.177614634793004, 4.0384796020452605, 2.171063965708072, 1.030847264195174, -3.177614634793004, 1.1118610974818954, -1.718371227613103, -2.149201426120526, -0.9998091956449603, 4.0384796020452605, -1.718371227613103, 4.020100655687023})
 	R := mat.NewDense(2, 2, []float64{0.7306262818179861, 0.29938406008382973, 0.29938406008382973, 2.227625211673149})
 	C := mat.NewDense(1, 5, []float64{1.6840207559434308, 0.6618344647930041, -0.4347790640815497, -0.5315900659866536, 0.26403849045331})
-	n, m, p := 5, 2, 1
+	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, mat.NewDense(1, 1, []float64{0.5004178462278779}))
+}
+
+// Lqg Current where the regulator Dare solves in float64 and only the
+// Kalman dual needs the extended-precision solve (cond(E) 7.2e10, base
+// ErrNoStabilizing): Kw of the float64 X was 4.1e-7 off at Accuracy 0
+// (O2YDYA review 2, mixed seed 82; Kw moves 3e-16 under eps
+// perturbations).
+func TestLqg_CurrentNearSingularEFloatRegulatorNoiseGain(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{444562.99535538786, 0, -0.22594540719588263, -0.9016891657118802})
+	B := mat.NewDense(2, 2, []float64{4.071401339571243e-11, -4.6407160979664015e-10, 0.5375947195865346, 0.3398117257077149})
+	E := mat.NewDense(2, 2, []float64{1.0888022376440525, 0, 0, 1.5051327511388926e-11})
+	Q := mat.NewDense(2, 2, []float64{1.3780019980278215, -1.8139079669120497, -1.8139079669120497, 6.479179684656806})
+	R := mat.NewDense(2, 2, []float64{1.4774236832145244, -0.43040918076399104, -0.43040918076399104, 0.7298443780640265})
+	C := mat.NewDense(1, 2, []float64{1.3221467858160478, 2.029922235601939})
+	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, mat.NewDense(1, 1, []float64{0.7330290179542455}))
+}
+
+// checkLqgCurrentNoiseGain runs Lqg Current on (A, B, C, 0, E) with
+// weights blkdiag(Q, R), blkdiag(I, Rn) and requires Accuracy 0 with Xc,
+// K and Kw within newtonTol of the 320-bit doubling oracles.
+func checkLqgCurrentNoiseGain(t *testing.T, A, B, C, E, Q, R, Rn *mat.Dense) {
+	t.Helper()
+	n, m := B.Dims()
+	p, _ := C.Dims()
 	sys, err := NewDescriptor(A, B, C, mat.NewDense(p, m, nil), E, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +65,7 @@ func TestLqg_CurrentNearSingularENoiseGainMatchesOracle(t *testing.T) {
 	setBlock(qxu, 0, 0, Q)
 	setBlock(qxu, n, n, R)
 	qwv := eyeDense(n + p)
-	qwv.Set(n, n, 0.5004178462278779)
+	setBlock(qwv, n, n, Rn)
 	want, ok := descriptorNoiseGainBig(A, B, Q, R, E)
 	if !ok {
 		t.Fatal("doubling oracle does not converge")

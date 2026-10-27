@@ -242,7 +242,7 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 	if !(cond*eps() > newtonTol) {
 		return nil, false
 	}
-	prec := uint(min(extendedPrecMax, max(extendedPrecMin, 4*math.Log2(cond)+64)))
+	prec := extendedPrec(cond)
 	d := extendedDare{A: A, B: B, Q: Q, R: R, S: opts.S, E: opts.E}
 	sol, ok := d.solve(prec)
 	if !ok && prec < extendedPrecMax {
@@ -258,15 +258,10 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 		return nil, false
 	}
 	eig := loopEig(acl)
-	z, ok := xSolve(sol.e.t(), sol.y)
+	x, ok := sol.xOf(sol.y)
 	if !ok {
 		return nil, false
 	}
-	xt, ok := xSolve(sol.e.t(), z.t())
-	if !ok {
-		return nil, false
-	}
-	x := xt.t().symmetrized()
 	X, Y := x.dense(), sol.y.dense()
 	symmetrize(X.RawMatrix().Data, n, n)
 	symmetrize(Y.RawMatrix().Data, n, n)
@@ -290,6 +285,63 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 		}
 	}
 	return res, true
+}
+
+// extendedPrec is the precision of nearSingularDare for cond(E).
+func extendedPrec(cond float64) uint {
+	return uint(min(extendedPrecMax, max(extendedPrecMin, 4*math.Log2(cond)+64)))
+}
+
+// descriptorNoiseGain returns Lqg's noise gain (R + BᵀXB)⁻¹BᵀX of the
+// descriptor Dare (A, B, Q, R, S, E) whose stabilizing gain is K, formed
+// in extended precision (nearSingularDare's model, precision from
+// cond(E)) from Y = EᵀXE of two Hewer steps from K: where BᵀXB of the
+// float64 X cancels, its Kw was off by 3e-7 at cond(E) 8e9. certified
+// reports that Kw moves by at most newtonTol under two componentwise eps
+// perturbations of the data; ok is false unless the closed loop of K is
+// shown stable, K moves by at most newtonTol in the first step (K is the
+// stabilizing gain to tolerance) and every step succeeds.
+func descriptorNoiseGain(A, B, Q, R, S, E, K *mat.Dense) (kw *mat.Dense, certified, ok bool) {
+	var lu mat.LU
+	lu.Factorize(E)
+	if luNearSingular(&lu) {
+		return nil, false, false
+	}
+	prec := extendedPrec(lu.Cond())
+	d := extendedDare{A: A, B: B, Q: Q, R: R, S: S, E: E}
+	sol, ok := d.model(prec, nil)
+	if !ok || !stableLoop(d.closedLoop(sol, K)) {
+		return nil, false, false
+	}
+	k := xFrom(K, prec)
+	for i := range 2 {
+		y, ok := sol.hewer(k)
+		if !ok {
+			return nil, false, false
+		}
+		k1, ok := d.gain(sol, y)
+		if !ok {
+			return nil, false, false
+		}
+		if i == 0 && !(xRel(k1, k) <= newtonTol) {
+			return nil, false, false
+		}
+		sol.y, sol.k, k = y, k1, k1
+	}
+	x, ok := sol.xOf(sol.y)
+	if !ok {
+		return nil, false, false
+	}
+	g, ok := d.noiseGain(sol, sol.y)
+	if !ok {
+		return nil, false, false
+	}
+	certified = true
+	for seed := range uint64(2) {
+		mv, ok := d.perturbedMove(sol, x, g, prec, seed)
+		certified = certified && ok && mv.kw <= newtonTol
+	}
+	return g.dense(), certified, true
 }
 
 type extendedDare struct {
@@ -491,14 +543,7 @@ func (d extendedDare) perturbedMove(sol extendedSol, x, kw xMat, prec uint, seed
 	if !ok {
 		return mv, false
 	}
-	acl := xAdd(p.ae, xMul(p.be, k), -1)
-	rk := xMul(p.r, k)
-	w := xAdd(p.q, xMul(k.t(), rk), 1)
-	if p.s.r > 0 {
-		sk := xMul(p.s, k)
-		w = xAdd(xAdd(w, sk, -1), sk.t(), -1)
-	}
-	y, ok := smithStein(acl, w.symmetrized())
+	y, ok := p.hewer(k)
 	if !ok {
 		return mv, false
 	}
@@ -506,24 +551,47 @@ func (d extendedDare) perturbedMove(sol extendedSol, x, kw xMat, prec uint, seed
 	if !ok {
 		return mv, false
 	}
-	z, ok1 := xSolve(p.e.t(), y)
-	if !ok1 {
+	xp, ok := p.xOf(y)
+	if !ok {
 		return mv, false
-	}
-	xt, ok2 := xSolve(p.e.t(), z.t())
-	if !ok2 {
-		return mv, false
-	}
-	rel := func(a, b xMat) float64 {
-		v := xAdd(a, b, -1).dense()
-		w := b.dense()
-		return max(mat.Norm(v, 1)/mat.Norm(w, 1), mat.Norm(v, 2)/mat.Norm(w, 2))
 	}
 	kwp, ok := d.noiseGain(p, y)
 	if !ok {
 		return mv, false
 	}
-	return extendedMove{y: rel(y, sol.y), k: rel(k1, sol.k), x: rel(xt.t(), x), kw: rel(kwp, kw)}, true
+	return extendedMove{y: xRel(y, sol.y), k: xRel(k1, sol.k), x: xRel(xp, x), kw: xRel(kwp, kw)}, true
+}
+
+// hewer is the cost Y of the gain k: Y = (Ae − Bek)ᵀY(Ae − Bek) + Q +
+// kᵀRk − Sk − kᵀSᵀ, by Smith doubling.
+func (sol extendedSol) hewer(k xMat) (xMat, bool) {
+	acl := xAdd(sol.ae, xMul(sol.be, k), -1)
+	w := xAdd(sol.q, xMul(k.t(), xMul(sol.r, k)), 1)
+	if sol.s.r > 0 {
+		sk := xMul(sol.s, k)
+		w = xAdd(xAdd(w, sk, -1), sk.t(), -1)
+	}
+	return smithStein(acl, w.symmetrized())
+}
+
+// xOf is X = E⁻ᵀYE⁻¹, symmetrized.
+func (sol extendedSol) xOf(y xMat) (xMat, bool) {
+	z, ok := xSolve(sol.e.t(), y)
+	if !ok {
+		return xMat{}, false
+	}
+	xt, ok := xSolve(sol.e.t(), z.t())
+	if !ok {
+		return xMat{}, false
+	}
+	return xt.t().symmetrized(), true
+}
+
+// xRel is the relative difference of a from b in the 1- and 2-norm,
+// whichever is larger, rounded to float64.
+func xRel(a, b xMat) float64 {
+	v, w := xAdd(a, b, -1).dense(), b.dense()
+	return max(mat.Norm(v, 1)/mat.Norm(w, 1), mat.Norm(v, 2)/mat.Norm(w, 2))
 }
 
 // smithStein solves Y = FᵀYF + W for ρ(F) < 1 by Smith doubling.
