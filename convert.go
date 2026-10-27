@@ -477,7 +477,7 @@ func splitFastPencil(fast *System) ([]*System, bool) {
 // discretizeStiffDescriptor discretizes the descriptor sys from its
 // stiffDescriptorParts. ZOH, FOH, impulse and Tustin are linear in the
 // model, so each part is discretized on its own and the results are
-// connected in parallel, with the I/O metadata of sys; the state
+// connected in parallel, with the metadata of sys; the state
 // coordinates are those of the parts, so state names are dropped. Matched
 // maps the poles and zeros of the transfer function of the pencil.
 func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2DOptions) (*System, error) {
@@ -508,7 +508,8 @@ func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2
 		return nil, err
 	}
 	out.Dt = dt
-	propagateIONames(out, sys)
+	propagateNames(out, sys)
+	out.StateName = nil
 	return out, nil
 }
 

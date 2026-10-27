@@ -157,3 +157,32 @@ func TestC2DMatchedFullRankIllConditionedEFollowsPencil(t *testing.T) {
 		}
 	}
 }
+
+// Routed C2D keeps the model metadata as base C2D does; only the state
+// names go with the new state coordinates.
+func TestC2DFullRankIllConditionedEKeepsMetadata(t *testing.T) {
+	sys := stepFoldLossCases[0].system(t)
+	sys.Notes = "plant note"
+	sys.InputName = []string{"u"}
+	sys.OutputName = []string{"y"}
+	n, _, _ := sys.Dims()
+	sys.StateName = make([]string, n)
+	for i := range sys.StateName {
+		sys.StateName[i] = "x"
+	}
+	for _, method := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodImpulse, C2DMethodTustin} {
+		d, err := sys.C2D(0.1, C2DOptions{Method: method})
+		if err != nil {
+			t.Fatalf("%s: C2D: %v", method, err)
+		}
+		if d.Notes != sys.Notes {
+			t.Errorf("%s: Notes %q, want %q", method, d.Notes, sys.Notes)
+		}
+		if len(d.InputName) != 1 || d.InputName[0] != "u" || len(d.OutputName) != 1 || d.OutputName[0] != "y" {
+			t.Errorf("%s: I/O names %v %v", method, d.InputName, d.OutputName)
+		}
+		if d.StateName != nil {
+			t.Errorf("%s: StateName %v, want nil", method, d.StateName)
+		}
+	}
+}
