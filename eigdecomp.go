@@ -150,8 +150,9 @@ func descriptorFoldInaccurate(E *mat.Dense) bool {
 // swap leaves it at ~ε²; folded into the explicit G1 that pole (~1e31)
 // wrecks G1 + G2, so it stays in G2, whose E keeps it. When E has full
 // MATLAB rank that mode is finite: Poles takes its value λ from E⁻¹A
-// (fullRankPoles), and for a single real one stiffFullRankPole selects
-// it by λ and sets its β to α/λ, a change of order ε·‖E‖, so G1 and G2
+// (fullRankPoles), and for a single real one splitStiffFullRank sets
+// its β to α/λ, a change of order ε·‖E‖, and puts it as an explicit
+// state in the part λ selects, so G1 and G2 (then both explicit)
 // together have exactly the poles of Poles.
 func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, group2 *System, err error) {
 	a, e, qd, zd, nf, stiff, _, blur, _, ok := deflateInfinite(sys.A, sys.E, true)
@@ -180,19 +181,16 @@ func decomposeGeneralized(sys *System, isGroup1 func(complex128) bool) (group1, 
 		return nil, nil, err
 	}
 	if sawInfinite && nf == a.RawMatrix().Rows {
-		if lambda, ok := stiffFullRankPole(sys.A, sys.E); ok {
-			stiffSel := func(ar, ai, b float64) bool {
-				if b == 0 || qzInfinite(ar, ai, b, infTol) {
-					return isGroup1(lambda)
-				}
-				return isGroup1(complex(ar/b, ai/b))
+		if lambda, ok := stiffFullRankPole(sys.A, sys.E); ok && (n1 > 0 || isGroup1(lambda)) {
+			s, t, q, z, recip := s, t, q, z, recip
+			if n1 == 0 {
+				s, t, q, z, _, recip, err = deflatedSchur(a, e, qd, zd, nf, selct, true)
 			}
-			s2, t2, q2, z2, n12, recip2, err := deflatedSchur(a, e, qd, zd, nf, stiffSel, true)
-			if err == nil && setStiffBeta(s2, t2, nf, infTol, real(lambda)) {
-				if n12 == 0 {
-					return modesAllInGroup2(policy, sys)
+			if err == nil {
+				stiffTol := qzInfiniteTol(16*float64(nf)*eps(), mat.Norm(sys.A, 2), mat.Norm(sys.E, 2))
+				if g1, g2, ok := splitStiffFullRank(policy, sys, s, t, q, z, recip, stiffTol, real(lambda), isGroup1); ok {
+					return g1, g2, nil
 				}
-				return splitGeneralizedSchur(policy, sys, s2, t2, q2, z2, n12, recip2)
 			}
 		}
 	}
@@ -223,32 +221,107 @@ func stiffFullRankPole(A, E *mat.Dense) (complex128, bool) {
 	return lambda, true
 }
 
-// setStiffBeta finds the single 1×1 block of the generalized Schur form
-// (s, t) with |t_ii| ≤ infTol·|s_ii| and sets t_ii = s_ii/lambda, so the
-// block has eigenvalue lambda; it reports false, leaving t unchanged,
-// when there is not exactly one such block or it lies in a 2×2 block.
-func setStiffBeta(s, t []float64, n int, infTol, lambda float64) bool {
+// splitStiffFullRank splits the generalized Schur form (s, t) of a
+// full-rank E with a single stiff mode (value λ from stiffFullRankPole),
+// the one 1×1 block with |β| ≤ stiffTol·|α|. That block is moved to the
+// trailing position (a swap perturbs its β by ~ε·‖E‖, so it is found by
+// stiffTol, not by the β = 0 test of the ordering), its β set to α/λ,
+// decoupled from the rest, and returned as the explicit state (λ, b/β,
+// c): kept as a descriptor row it leaves E an entry ~ε·‖E‖ that Poles
+// ranks deficient once its part has another mode, and folded to explicit
+// while still coupled it costs G1 + G2 up to 1e-2. The rest, with a
+// well-conditioned T11, is split by decomposeModes, and the stiff state
+// joins the part isGroup1(λ) picks. It reports false, leaving the
+// caller's form untouched, when there is not exactly one such block or
+// the blocks cannot be separated.
+func splitStiffFullRank(policy realizationTransformPolicy, sys *System, s, t, q, z []float64, recip bool, stiffTol, lambda float64, isGroup1 func(complex128) bool) (group1, group2 *System, ok bool) {
+	n, m, p := sys.Dims()
+	if n < 2 {
+		return nil, nil, false
+	}
 	at := -1
 	for i := range n {
 		sii, tii := s[i*n+i], t[i*n+i]
-		if sii == 0 || !(math.Abs(tii) <= infTol*math.Abs(sii)) {
+		if sii == 0 || !(math.Abs(tii) <= stiffTol*math.Abs(sii)) {
 			continue
 		}
 		if at >= 0 {
-			return false
+			return nil, nil, false
 		}
 		at = i
 	}
 	if at < 0 {
-		return false
+		return nil, nil, false
 	}
-	for _, m := range [2][]float64{s, t} {
-		if at > 0 && m[at*n+at-1] != 0 || at < n-1 && m[(at+1)*n+at] != 0 {
-			return false
+	s, t, q, z = slices.Clone(s), slices.Clone(t), slices.Clone(q), slices.Clone(z)
+	k := n - 1
+	if at != k {
+		qzA, qzB := s, t
+		if recip {
+			qzA, qzB = t, s
+		}
+		work := make([]float64, 4*n+16)
+		if _, last, ok := impl.Dtgexc(true, true, n, qzA, n, qzB, n, q, n, z, n, at, k, work, len(work)); !ok || last != k {
+			return nil, nil, false
 		}
 	}
-	t[at*n+at] = s[at*n+at] / lambda
-	return true
+	if s[k*n+k-1] != 0 || t[k*n+k-1] != 0 || s[k*n+k] == 0 {
+		return nil, nil, false
+	}
+	t[k*n+k] = s[k*n+k] / lambda
+	rest, stiff, err := splitGeneralizedSchur(policy, sys, s, t, q, z, k, recip)
+	if err != nil {
+		return nil, nil, false
+	}
+	beta := stiff.E.At(0, 0)
+	r1, r2, err := decomposeModes(rest, isGroup1)
+	if err != nil {
+		return nil, nil, false
+	}
+	r2.D = denseCopy(sys.D)
+	b := make([]float64, m)
+	for j := range b {
+		b[j] = stiff.B.At(0, j) / beta
+	}
+	c := make([]float64, p)
+	for i := range c {
+		c[i] = stiff.C.At(i, 0)
+	}
+	if isGroup1(complex(lambda, 0)) {
+		r1, err = appendExplicitState(policy, r1, lambda, b, c)
+	} else {
+		r2, err = appendExplicitState(policy, r2, lambda, b, c)
+	}
+	if err != nil {
+		return nil, nil, false
+	}
+	return r1, r2, true
+}
+
+// appendExplicitState returns the explicit g with one more state x' = a·x
+// + b·u, y += c·x, keeping g's D.
+func appendExplicitState(policy realizationTransformPolicy, g *System, a float64, b, c []float64) (*System, error) {
+	n, m, p := g.Dims()
+	A := mat.NewDense(n+1, n+1, nil)
+	B := mat.NewDense(n+1, m, nil)
+	C := mat.NewDense(p, n+1, nil)
+	if n > 0 {
+		A.Slice(0, n, 0, n).(*mat.Dense).Copy(g.A)
+		if m > 0 {
+			B.Slice(0, n, 0, m).(*mat.Dense).Copy(g.B)
+		}
+		if p > 0 {
+			C.Slice(0, p, 0, n).(*mat.Dense).Copy(g.C)
+		}
+	}
+	A.Set(n, n, a)
+	for j, v := range b {
+		B.Set(n, j, v)
+	}
+	for i, v := range c {
+		C.Set(i, n, v)
+	}
+	return policy.result(A, B, C, denseCopy(g.D))
 }
 
 // deflatedSchur completes the deflation Qdᵀ(A, E)Zd = (a, e) of
