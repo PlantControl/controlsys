@@ -108,29 +108,38 @@ func TestLqrCareRotatedDescriptorMatchesOracle(t *testing.T) {
 // TestDlqrDescriptorExplicitSolutionHonest: a rotated E of condition 1e12
 // leaves X and K of Dare certified, while EᵀXE formed from the rounded X
 // ~ 1/σ_min(E) was off by 8e5 of itself with Accuracy 0 (5AFLTD sweep).
-// Dlqr must return it with Accuracy 1 or right. amd64 rounding puts the
-// pencil's infinite-like mode within the boundary test's band, as on base:
-// that error is no value.
+// Dlqr must return it with Accuracy 1 or right. That model errors on amd64
+// (its pencil's infinite-like mode falls in the boundary test's band, as
+// on base), so the models here certify on both archs: EᵀXE of the
+// rounded Dare X is off by 2e5 and 1.6e3 (O2MVDD generator, seeds 0, 132).
 func TestDlqrDescriptorExplicitSolutionHonest(t *testing.T) {
-	A := mat.NewDense(2, 2, []float64{-0.17559899627794834, -0.5762118993392078, 0.8200678753162827, 0.759333778286975})
-	B := mat.NewDense(2, 1, []float64{-0.10835553173294793, 0.5792788523148241})
-	E := mat.NewDense(2, 2, []float64{0.06611116980138723, -0.040185383258526684, 0.7241335841133476, -0.44016140834430917})
-	res, err := Dlqr(A, B, eyeDense(2), eyeDense(1), &RiccatiOpts{E: E})
-	if errors.Is(err, ErrNoStabilizing) {
-		t.Skipf("Dlqr: %v", err)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	Y, _, Ko, ok := nearSingularOracle(false, A, B, eyeDense(2), eyeDense(1), nil, E, res.K)
-	if !ok {
-		t.Fatal("oracle did not converge")
-	}
-	if eK := relErr(res.K, Ko); eK > descriptorGainTol {
-		t.Errorf("K off the oracle by %.3g", eK)
-	}
-	if eX := relErr(res.X, Y); res.Accuracy == 0 && eX > newtonTol {
-		t.Errorf("Accuracy 0 with EᵀXE off the oracle by %.3g", eX)
+	for i, m := range []struct{ a, b, e []float64 }{
+		{
+			[]float64{1.7315579929713067, -0.1940539074978917, 1.1190984891999822, -0.02238295182090704},
+			[]float64{-0.8303147397714788, -0.593834159892699},
+			[]float64{0.25882966603870977, 0.013068593225123316, -1.3735630017052287, -0.06935269983202669},
+		},
+		{
+			[]float64{-0.22838186469513516, 0.5665228292856828, 0.11061261264548296, 0.18596912536540255},
+			[]float64{1.167180144775775, -0.9092794127429058},
+			[]float64{-0.0034286785675923708, -0.0015845417530948786, -0.8886126096442941, -0.41066660391411713},
+		},
+	} {
+		A, B, E := mat.NewDense(2, 2, m.a), mat.NewDense(2, 1, m.b), mat.NewDense(2, 2, m.e)
+		res, err := Dlqr(A, B, eyeDense(2), eyeDense(1), &RiccatiOpts{E: E})
+		if err != nil {
+			t.Fatalf("model %d Dlqr: %v", i, err)
+		}
+		Y, _, Ko, ok := nearSingularOracle(false, A, B, eyeDense(2), eyeDense(1), nil, E, res.K)
+		if !ok {
+			t.Fatalf("model %d: oracle did not converge", i)
+		}
+		if eK := relErr(res.K, Ko); eK > descriptorGainTol {
+			t.Errorf("model %d: K off the oracle by %.3g", i, eK)
+		}
+		if eX := relErr(res.X, Y); res.Accuracy == 0 && eX > newtonTol {
+			t.Errorf("model %d: Accuracy 0 with EᵀXE off the oracle by %.3g", i, eX)
+		}
 	}
 }
 
