@@ -2829,16 +2829,17 @@ func (problem *riccatiProblem) gainStep(continuous bool, K *mat.Dense, xData, x1
 	return cancelRatio(norm(g, n), norm(kRaw.Data, kRaw.Stride)), xeStep
 }
 
-// refineDescriptorDare replaces the certified discrete descriptor X
-// (xData) and its gain K by X refined by Hewer's method in
-// double-double, from the residual (riccatiResidual) of X itself, and
-// its double-double gain (ddGainOf), and saves EᵀXE in problem.xe, when
-// the iteration converges: steps ‖Δ‖/‖X‖ and ‖K₊ − K‖/‖K₊‖ within
-// newtonRefineTol, and ‖EᵀΔE‖/‖EᵀXE‖ too. As idare, K and EᵀXE are then
-// those of the solution,
-// which the float64 X cannot carry (dareCancellation). It reports false,
-// X, K and eig unchanged, when the iteration fails or stalls. eig
-// receives the eigenvalues of A − BK of the last step.
+// refineDescriptorDare replaces the gain K of the certified discrete
+// descriptor X (xData) by the double-double gain (ddGainOf) of X refined
+// by Hewer's method in double-double, from the residual (riccatiResidual)
+// of X itself, and saves EᵀXE of that X in problem.xe, when the
+// iteration converges: steps ‖Δ‖/‖X‖, ‖EᵀΔE‖/‖EᵀXE‖ and ‖K₊ − K‖/‖K₊‖
+// within newtonRefineTol. As in idare, K and EᵀXE are then those of the
+// solution, which the float64 X cannot carry (dareCancellation). X keeps
+// its certificate: replaced by the rounded refined X, a cheap-control
+// Dare with reduced inputs no longer certified it. It reports false, K
+// and eig unchanged, when the iteration fails or stalls. eig receives
+// the eigenvalues of A − BK of the last step.
 func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float64, eig []complex128) bool {
 	n, m, ws, t := problem.n, problem.m, problem.ws, problem.t
 	nn := n * n
@@ -2924,7 +2925,6 @@ func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float6
 		if step <= newtonRefineTol {
 			symmetrize(eH, n, n)
 			copy(K.RawMatrix().Data[:m*n], nr)
-			copy(xData, xH)
 			problem.closedLoopEig(eig)
 			problem.xe = append(ws.xe[:0], eH...)
 			ws.xe = problem.xe
