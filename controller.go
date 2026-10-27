@@ -49,15 +49,21 @@ func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 
 // explicitRiccatiSolution maps the generalized solution X of a Care or Dare
 // solved with opts.E to E'XE, the solution for the explicit model: the
-// refined one the solver certified with X, else E'XE of X, which is
-// Accuracy 1 when its cancellation (explicitUncertified) or the Newton
-// step of X (xeStep) leaves it uncertified.
+// refined one the solver certified with X (Accuracy 1 when its next
+// Newton step exceeds newtonRefineTol, xeLoose: a refinement stalled at
+// its noise floor met the tolerance once with EᵀXE 1.3e-8 off the 320-bit
+// oracle), else E'XE of X, which is Accuracy 1 when its cancellation
+// (explicitUncertified) or the Newton step of X (xeStep) leaves it
+// uncertified.
 func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (*RiccatiResult, error) {
 	if err != nil || opts == nil || isIdentityDescriptor(opts.E) {
 		return res, err
 	}
 	if res.xe != nil {
 		res.X = res.xe
+		if res.Accuracy == 0 && res.xeLoose {
+			res.Accuracy = 1
+		}
 		return res, nil
 	}
 	if res.Accuracy == 0 && (res.xeStep > newtonTol || explicitUncertified(res.X, opts.E)) {

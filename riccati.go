@@ -186,6 +186,9 @@ type RiccatiResult struct {
 	// xeX is ‖X − X_dd‖/‖X‖ for the double-double iterate X_dd whose K
 	// and EᵀXE refineDescriptorDare returned in xe.
 	xeX float64
+	// xeLoose reports an xe of refineDescriptorDare whose next Newton
+	// step exceeds newtonRefineTol (explicitRiccatiSolution: Accuracy 1).
+	xeLoose bool
 	// gainUncertified reports a certified X whose K Care cannot certify
 	// with it (descriptorGainCertified); Care returns it with Accuracy 1.
 	gainUncertified bool
@@ -2755,7 +2758,7 @@ func explicitUncertified(X, E *mat.Dense) bool {
 // more: it is relative to ‖X‖ ~ 1/σ_min(E), and K sees X in E's small
 // directions (Lqr K off by 9.2e-7, X by 1.7e-9).
 func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.Dense, xData, x1 []float64, eig []complex128) bool {
-	problem.xe, problem.xeStep, problem.xeX, problem.gainUncertified = nil, 0, 0, false
+	problem.xe, problem.xeStep, problem.xeX, problem.xeLoose, problem.gainUncertified = nil, 0, 0, false, false
 	if problem.E == nil {
 		return true
 	}
@@ -3037,6 +3040,10 @@ func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float6
 				y[i] = xH[i] - v + xL[i]
 			}
 			problem.xeX = cancelRatio(norm(y, true), norm(xH, true))
+			problem.xeLoose = true
+			if y, err := problem.newtonSolve(false, kn, xH, pe); err == nil {
+				problem.xeLoose = !(cancelRatio(norm(y, true), norm(eH, true)) <= newtonRefineTol)
+			}
 			symmetrize(eH, n, n)
 			copy(K.RawMatrix().Data[:m*n], nr)
 			problem.closedLoopEig(eig)
