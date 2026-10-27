@@ -788,8 +788,8 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // else the one nearest it is returned with Accuracy 1: with a
 // rank-deficient Q, K was off by O(1) on B's range with X exact. Under
 // cheap control the same holds for the K of the problem with a cross term
-// solved in r inputs, and for that of a B without reduced inputs
-// (‖B‖₁‖B‖∞‖X‖₁ above ‖R‖₁), there with Accuracy 1 otherwise: with a
+// solved in r inputs, and for that of a B without reduced inputs where
+// BᵀXB may round R away (rLost), there with Accuracy 1 otherwise: with a
 // full-rank square B and a rank-deficient Q, BᵀXB is singular and the
 // float64 gain lost R against it, K off by O(1) with X exact to 1e-14.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -806,7 +806,7 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	if red == nil {
 		res, err := dareSolve(A, B, Q, R, opts, !ill)
 		n, m := B.Dims()
-		if err != nil || res.Accuracy != 0 || n == 0 || m == 0 || !(mat.Norm(B, 1)*mat.Norm(B, math.Inf(1))*mat.Norm(res.X, 1) > mat.Norm(R, 1)) {
+		if err != nil || res.Accuracy != 0 || n == 0 || m == 0 || !rLost(B, R, res.X) {
 			return res, err
 		}
 		if gainMissOf(n, res, func(X *mat.Dense) (*mat.Dense, float64, bool) {
@@ -1219,6 +1219,18 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 	red.q.Sub(Q, &t)
 	symmetrize(red.q.RawMatrix().Data, n, n)
 	return red, ill
+}
+
+// rLost reports whether the rounding eps·‖B‖²‖X‖ of BᵀXB, bounded by
+// eps·‖B‖₁‖B‖∞‖X‖₁, exceeds 1e-9 of the smallest eigenvalue of R, bounded
+// by 1/‖R⁻¹‖₁, so that the float64 gain may lose R in R + BᵀXB: the K
+// that Dare certified off by 1e-5 to 5.6 with X exact had it above 1e-5.
+func rLost(B, R, X *mat.Dense) bool {
+	var ri mat.Dense
+	if ri.Inverse(R) != nil {
+		return true
+	}
+	return eps()*mat.Norm(B, 1)*mat.Norm(B, math.Inf(1))*mat.Norm(X, 1)*mat.Norm(&ri, 1) > 1e-9
 }
 
 // gainTol is the relative distance from the gain of its X that a K Dare
