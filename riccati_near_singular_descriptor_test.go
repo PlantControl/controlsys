@@ -351,7 +351,9 @@ func TestKalmdFullRankNearSingularEIsSingular(t *testing.T) {
 
 // TestLqrKalmanLqgFullRankNearSingularE runs the full-rank E with condition
 // estimate above 1/ε of the descriptor rank tests through Lqr, Kalman and
-// Lqg: each returns a value matching the oracle or ErrDescriptorSingular.
+// Lqg: each returns a value matching the oracle or ErrDescriptorSingular,
+// as does Lqi, and Lqr, rejected before, returns the oracle's design. Admitted
+// unscreened, Kalman and Lqg returned gains off the oracle with Accuracy 0.
 func TestLqrKalmanLqgFullRankNearSingularE(t *testing.T) {
 	sys := fullRankNearSingularE(t, 2.46e-15)
 	if condNear, full := nearSingularWindow(t, sys.E); !condNear || !full {
@@ -361,5 +363,22 @@ func TestLqrKalmanLqgFullRankNearSingularE(t *testing.T) {
 	checkNearSingularDesigns(t, "fullRankNearSingularE", sys, tally)
 	for api, c := range tally {
 		t.Logf("%s: %d values, %d errors", api, c.values, c.errs)
+	}
+	if tally["Lqr"].values != 1 {
+		t.Error("Lqr: no value for a full-rank E")
+	}
+	n, _, p := sys.Dims()
+	_, m, _ := sys.Dims()
+	res, err := Lqi(sys, eyeDense(n+p), eyeDense(m), nil)
+	if err != nil {
+		if !errors.Is(err, ErrDescriptorSingular) {
+			t.Errorf("Lqi: err = %v, want a value or ErrDescriptorSingular", err)
+		}
+		return
+	}
+	Aa, Ba := lqiAugmentation(sys)
+	pr := nearSingularRiccati{true, Aa, Ba, eyeDense(n + p), eyeDense(m), nil, augmentedDescriptor(sys.E, p), false}
+	if eX, eK, ok := pr.honest(t, res.X, res.K); !ok || res.Accuracy != 0 {
+		t.Errorf("Lqi: Accuracy %d, X off the oracle by %.3g, K by %.3g", res.Accuracy, eX, eK)
 	}
 }
