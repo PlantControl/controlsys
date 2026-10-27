@@ -1119,9 +1119,18 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // of that gain under X∘(1 + eps). A K refined in double-double (res.xe)
 // is returned as it is: measured against the gain of the rounded X it
 // was off by 7.7e-6 while within 1e-17 of the 320-bit gain. So is one
-// refined returns.
+// refined returns. Of an X whose Newton step exceeds eps, the X one
+// step on is returned with its own refined K and EᵀXE (refined) when
+// certifyIn re-certifies it and refines them, else res: the step left
+// unapplied kept an X 1e-8 off the 320-bit X where that one was within
+// 1e-17.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if res.xe != nil {
+		if res.step > eps() {
+			if c, _, stable := refined(A, B, Q, R, opts, red, res); stable && c.xe != nil {
+				return c, 0, true
+			}
+		}
 		return res, 0, true
 	}
 	d := gainMissIn(A, B, R, opts, red, res)
