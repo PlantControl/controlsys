@@ -2007,7 +2007,7 @@ func stiffDescriptorImpulse(sys *System, parts []*System, tFinal float64) (*Time
 	}
 	disc := make([]*System, len(parts))
 	for i, part := range parts {
-		d, err := part.discretizeZOHScalarExact(dt)
+		d, err := part.discretizeZOH(dt)
 		if err != nil {
 			return nil, fmt.Errorf("auto-discretize: %w", err)
 		}

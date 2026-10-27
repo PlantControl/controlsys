@@ -152,13 +152,15 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	if m != 1 || p != 1 {
 		return nil, ErrNotSISO
 	}
-	if sys.IsDescriptor() {
-		return nil, ErrDescriptorUnsupported
-	}
 	if sys.HasInternalDelay() {
 		return nil, fmt.Errorf("matched: internal delays: %w", ErrFeedbackDelay)
 	}
-	rational, err := sys.rationalTransferFunction(nil)
+	if sys.IsDescriptor() {
+		if _, stiff := stiffDescriptorParts(sys); !stiff {
+			return nil, ErrDescriptorUnsupported
+		}
+	}
+	rational, err := sys.transferRational(nil)
 	if err != nil {
 		return nil, err
 	}

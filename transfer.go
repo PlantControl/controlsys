@@ -287,36 +287,11 @@ const illConditionedECond = 1e4
 // the stiff pole near 1/ε, whose fold rounding swamps the slow poles, and
 // the Weierstrass reduction is the accurate route.
 func stiffExplicitParts(sys *System) (parts []*System, deflated, ok bool) {
-	if sys.LFT != nil {
-		return nil, false, false
-	}
-	var lu mat.LU
-	lu.Factorize(sys.E)
-	if lu.Cond() < illConditionedECond || eRankDeficient(sys.E, &lu) {
-		return nil, false, false
-	}
-	sys = equilibrateDescriptor(sys)
-	lu.Factorize(sys.E)
-	if lu.Cond() < illConditionedECond {
-		return nil, false, false
-	}
-	whole, ok := svdExplicit(sys)
+	whole, slow, fast, ok := stiffPencilSplit(sys)
 	if !ok {
 		return nil, false, false
 	}
-	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
-	if normA == 0 {
-		return []*System{whole}, false, true
-	}
-	slow, fast, err := decomposeGeneralizedQZ(sys, func(l complex128) bool {
-		return cmplx.Abs(l)*normE*qzLargeRatio < normA
-	})
-	if err != nil {
-		return []*System{whole}, false, true
-	}
-	n1, _, _ := slow.Dims()
-	n2, _, _ := fast.Dims()
-	if n1 == 0 || n2 == 0 {
+	if fast == nil {
 		return []*System{whole}, false, true
 	}
 	fastExplicit, ok := svdExplicit(fast)
@@ -324,6 +299,46 @@ func stiffExplicitParts(sys *System) (parts []*System, deflated, ok bool) {
 		return []*System{whole}, true, true
 	}
 	return []*System{slow, fastExplicit}, false, true
+}
+
+// stiffPencilSplit is the split of stiffExplicitParts before the fast part
+// is folded: whole is svdExplicit of the equilibrated sys, slow the explicit
+// slow part and fast the descriptor fast part (nil, with slow, when the
+// modes do not split).
+func stiffPencilSplit(sys *System) (whole, slow, fast *System, ok bool) {
+	if sys.LFT != nil {
+		return nil, nil, nil, false
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	if lu.Cond() < illConditionedECond || eRankDeficient(sys.E, &lu) {
+		return nil, nil, nil, false
+	}
+	sys = equilibrateDescriptor(sys)
+	lu.Factorize(sys.E)
+	if lu.Cond() < illConditionedECond {
+		return nil, nil, nil, false
+	}
+	whole, ok = svdExplicit(sys)
+	if !ok {
+		return nil, nil, nil, false
+	}
+	normA, normE := mat.Norm(sys.A, 2), mat.Norm(sys.E, 2)
+	if normA == 0 {
+		return whole, nil, nil, true
+	}
+	slow, fast, err := decomposeGeneralizedQZ(sys, func(l complex128) bool {
+		return cmplx.Abs(l)*normE*qzLargeRatio < normA
+	})
+	if err != nil {
+		return whole, nil, nil, true
+	}
+	n1, _, _ := slow.Dims()
+	n2, _, _ := fast.Dims()
+	if n1 == 0 || n2 == 0 {
+		return whole, nil, nil, true
+	}
+	return whole, slow, fast, true
 }
 
 // equilibrateDescriptor returns sys with the rows of (A, B, E) and the

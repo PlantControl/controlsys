@@ -4,9 +4,13 @@ func (sys *System) discretizeImpulseParity(dt float64) (*System, error) {
 	n, m, p := sys.Dims()
 	out := &System{A: newDense(n, n), B: denseCopy(sys.B), C: denseCopy(sys.C), D: newDense(p, m), Dt: dt}
 	if n > 0 {
-		scaled := newDense(n, n)
-		scaled.Scale(dt, sys.A)
-		out.A.Exp(scaled)
+		if ad, ok := stiffExp(sys.A, dt); ok {
+			out.A = ad
+		} else {
+			scaled := newDense(n, n)
+			scaled.Scale(dt, sys.A)
+			out.A.Exp(scaled)
+		}
 		if m > 0 {
 			out.B.Mul(out.A, sys.B)
 			out.B.Scale(dt, out.B)
