@@ -45,7 +45,10 @@ func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 }
 
 // explicitRiccatiSolution maps the generalized solution X of a Care or Dare
-// solved with opts.E to E'XE, the solution for the explicit model.
+// solved with opts.E to E'XE, the solution for the explicit model: the
+// refined one the solver certified with X, else E'XE of X, which is
+// Accuracy 1 when its cancellation leaves it uncertified
+// (explicitUncertified).
 func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (*RiccatiResult, error) {
 	if err != nil || opts == nil || isIdentityDescriptor(opts.E) {
 		return res, err
@@ -53,6 +56,9 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 	if res.xe != nil {
 		res.X = res.xe
 		return res, nil
+	}
+	if res.Accuracy == 0 && explicitUncertified(res.X, opts.E) {
+		res.Accuracy = 1
 	}
 	n, _ := res.X.Dims()
 	xe := mulDims(n, n, res.X, opts.E)
