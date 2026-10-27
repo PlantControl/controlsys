@@ -186,6 +186,9 @@ type RiccatiResult struct {
 	// xeX is ‖X − X_dd‖/‖X‖ for the double-double iterate X_dd whose K
 	// and EᵀXE refineDescriptorDare returned in xe.
 	xeX float64
+	// gainUncertified reports a certified X whose K Care cannot certify
+	// with it (descriptorGainCertified); Care returns it with Accuracy 1.
+	gainUncertified bool
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -275,7 +278,8 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // 9.2e-7), K and the EᵀXE of Lqr are those of P = XE refined by Newton's
 // method in double-double, and X is certified only once that converges
 // or the cancellation times eps and the step's move of K are within
-// 1e-8. With none certified, Care returns, as
+// 1e-8; without cancellation X stays certified, at Accuracy 1 when the
+// step moves K beyond 1e-8. With none certified, Care returns, as
 // MATLAB icare with Report 1, the stabilizing solution (A − BK stable in
 // float64) of smallest first Newton step (or, without one, a stabilizing
 // X whose Lyapunov equation is singular) with Accuracy 1, unrefined:
@@ -299,7 +303,11 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err != nil {
 		err = fmt.Errorf("Care: %w", err)
 	}
-	return nearSingularEGate("Care", true, A, B, R, opts, res, err)
+	res, err = nearSingularEGate("Care", true, A, B, R, opts, res, err)
+	if err == nil && res.Accuracy == 0 && res.gainUncertified {
+		res.Accuracy = 1
+	}
+	return res, err
 }
 
 // nearSingularCancelLimit is the largest ratio ‖|M₁||X||M₂|‖/‖M₁XM₂ + C‖
@@ -2736,16 +2744,18 @@ func explicitUncertified(X, E *mat.Dense) bool {
 // beyond newtonRefineTol, K and EᵀXE are refined, continuous by
 // refineDescriptorGain, discrete by refineDescriptorDare. Should that
 // fail, X is certified only when the gain's ratio times eps and the
-// step's move of K are within newtonTol, except for a discrete EᵀXE that
-// does not cancel: there the Dare is as without refinement, and only
-// Dlqr's EᵀXE loses Accuracy 0 (xeStep), as the discrete gain ratio, with
-// |W⁻¹| of a cheap-control W = R + BᵀXB, overstates the move of K by
-// up to 1e16 and failing on it turned correct values into
-// ErrNoStabilizing. A step of X within newtonTol may leave K off by far
+// step's move of K are within newtonTol, except for an EᵀXE that does not
+// cancel: there X is certified as without refinement, Lqr's and Dlqr's
+// EᵀXE lose Accuracy 0 (xeStep), and a continuous K the step moves beyond
+// newtonTol is gainUncertified (Accuracy 1). Failing on them turned
+// correct values into ErrNoStabilizing: the discrete gain ratio, with
+// |W⁻¹| of a cheap-control W = R + BᵀXB, overstates the move of K by up
+// to 1e16, and a continuous K moved 1.35e-8 was 5.7e-9 off the 320-bit
+// gain (E's last pivot 4.4e-14), while one moved 3.8e-8 was 4.8e-8 off. A step of X within newtonTol may leave K off by far
 // more: it is relative to ‖X‖ ~ 1/σ_min(E), and K sees X in E's small
 // directions (Lqr K off by 9.2e-7, X by 1.7e-9).
 func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.Dense, xData, x1 []float64, eig []complex128) bool {
-	problem.xe, problem.xeStep, problem.xeX = nil, 0, 0
+	problem.xe, problem.xeStep, problem.xeX, problem.gainUncertified = nil, 0, 0, false
 	if problem.E == nil {
 		return true
 	}
@@ -2769,7 +2779,8 @@ func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.D
 		problem.xeStep = 0
 		return true
 	}
-	if !continuous && cE <= nearSingularCancelLimit {
+	if cE <= nearSingularCancelLimit {
+		problem.gainUncertified = continuous && move > newtonTol
 		return true
 	}
 	return cK*eps() <= newtonTol && move <= newtonTol

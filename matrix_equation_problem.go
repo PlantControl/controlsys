@@ -53,6 +53,9 @@ type riccatiProblem struct {
 	// xeX is ‖X − X_dd‖/‖X‖ of the X whose refined xe
 	// refineDescriptorDare formed from the double-double iterate X_dd.
 	xeX float64
+	// gainUncertified reports a continuous descriptor K whose refinement
+	// failed while the Newton step of X moves it beyond newtonTol.
+	gainUncertified bool
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -286,7 +289,7 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 	}
 	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy}
 	if accuracy == 0 {
-		res.step, res.xeStep = problem.certStep, problem.xeStep
+		res.step, res.xeStep, res.gainUncertified = problem.certStep, problem.xeStep, problem.gainUncertified
 		if x1 := problem.certX1; x1 != nil {
 			n, t := problem.n, problem.t
 			if t != nil {
