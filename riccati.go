@@ -1223,14 +1223,32 @@ func reduceInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (red *reducedInputs,
 
 // rLost reports whether the rounding eps·‖B‖²‖X‖ of BᵀXB, bounded by
 // eps·‖B‖₁‖B‖∞‖X‖₁, exceeds 1e-9 of the smallest eigenvalue of R, bounded
-// by 1/‖R⁻¹‖₁, so that the float64 gain may lose R in R + BᵀXB: the K
-// that Dare certified off by 1e-5 to 5.6 with X exact had it above 1e-5.
+// by 1/‖R⁻¹‖₁ (or, without forming R⁻¹, by its Gershgorin bound g as
+// √m/g), so that the float64 gain may lose R in R + BᵀXB: the K that
+// Dare certified off by 1e-5 to 5.6 with X exact had it above 1e-5.
 func rLost(B, R, X *mat.Dense) bool {
+	b := eps() * mat.Norm(B, 1) * mat.Norm(B, math.Inf(1)) * mat.Norm(X, 1)
+	m, _ := R.Dims()
+	rr := R.RawMatrix()
+	g := math.Inf(1)
+	for i := range m {
+		row := rr.Data[i*rr.Stride : i*rr.Stride+m]
+		d := row[i]
+		for j, v := range row {
+			if j != i {
+				d -= math.Abs(v)
+			}
+		}
+		g = min(g, d)
+	}
+	if g > 0 && b*math.Sqrt(float64(m)) <= 1e-9*g {
+		return false
+	}
 	var ri mat.Dense
 	if ri.Inverse(R) != nil {
 		return true
 	}
-	return eps()*mat.Norm(B, 1)*mat.Norm(B, math.Inf(1))*mat.Norm(X, 1)*mat.Norm(&ri, 1) > 1e-9
+	return b*mat.Norm(&ri, 1) > 1e-9
 }
 
 // gainTol is the relative distance from the gain of its X that a K Dare
