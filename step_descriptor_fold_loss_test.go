@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -187,11 +188,23 @@ func TestImpulseFullRankIllConditionedEFollowsPencil(t *testing.T) {
 func TestC2DZOHFullRankIllConditionedEFollowsPencil(t *testing.T) {
 	names, systems, modes := stiffDescriptorModels(t)
 	for k, sys := range systems {
-		_, m, p := sys.Dims()
+		n, m, p := sys.Dims()
+		sys = sys.Copy()
+		sys.StateName = make([]string, n)
+		sys.InputName = make([]string, m)
+		for i := range n {
+			sys.StateName[i] = fmt.Sprintf("x%d", i)
+		}
+		for i := range m {
+			sys.InputName[i] = fmt.Sprintf("u%d", i)
+		}
 		d, err := sys.C2D(0.1, C2DOptions{})
 		if err != nil {
 			t.Errorf("%s: C2D: %v", names[k], err)
 			continue
+		}
+		if d.StateName != nil || !slices.Equal(d.InputName, sys.InputName) {
+			t.Errorf("%s: C2D names: states %v (new coordinates, want none), inputs %v", names[k], d.StateName, d.InputName)
 		}
 		worst := 0.0
 		for _, th := range []float64{0.05, 0.5, 2, 3} {
@@ -213,6 +226,34 @@ func TestC2DZOHFullRankIllConditionedEFollowsPencil(t *testing.T) {
 		}
 		if got != modes[k].stable() {
 			t.Errorf("%s: IsStable(C2D) = %v, pencil poles %v", names[k], got, modes[k].poles)
+		}
+	}
+}
+
+// The automatic Step horizon of these models comes from the pencil's slow
+// poles, 7/min|λ| for real poles: the fold's slow pole of seed 355 is
+// exactly 0, which left only the stiff pole and a horizon of 2e-15 s.
+func TestStepAutoHorizonFullRankIllConditionedEFollowsPencil(t *testing.T) {
+	names, systems, modes := stiffDescriptorModels(t)
+	for k, sys := range systems {
+		slow := math.Inf(1)
+		for _, l := range modes[k].poles {
+			if imag(l) != 0 {
+				slow = math.NaN()
+				break
+			}
+			slow = math.Min(slow, math.Abs(real(l)))
+		}
+		if math.IsNaN(slow) {
+			continue
+		}
+		st, err := Step(sys, 0)
+		if err != nil {
+			t.Fatalf("%s: Step: %v", names[k], err)
+		}
+		got, want := st.T[len(st.T)-1], math.Min(autoHorizonTimeConstants/slow, autoMaxHorizon)
+		if math.Abs(got-want) > 1e-6*want {
+			t.Errorf("%s: auto horizon %.6g, want %.6g from the pencil", names[k], got, want)
 		}
 	}
 }
