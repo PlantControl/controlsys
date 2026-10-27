@@ -62,6 +62,7 @@ type RiccatiWorkspace struct {
 	scaledB     []float64
 	scaledS     []float64
 	scaleProxy  []float64
+	certX1      []float64
 	lyap        *LyapunovWorkspace
 }
 
@@ -168,7 +169,11 @@ type RiccatiResult struct {
 	// on the boundary to within rounding (PBH).
 	Accuracy int
 
+	// step is the first Newton step of an Accuracy 1 X or, at Accuracy 0,
+	// that of the X verifyRiccati certified, its relative error, and x1
+	// (Dare, step above eps) the Newton iterate it reached.
 	step float64
+	x1   *mat.Dense
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -792,6 +797,11 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // BᵀXB may round R away (rLost), there with Accuracy 1 otherwise: with a
 // full-rank square B and a rank-deficient Q, BᵀXB is singular and the
 // float64 gain lost R against it, K off by O(1) with X exact to 1e-14.
+// That K must also be the gain of X one certified Newton step on, whose
+// error the gain may amplify by 1e9 (K off by 9e-3 with X off by 7e-14):
+// a K that is not is replaced, before Accuracy 1, by the double-double
+// gain of X taken one Newton step on, once that X is certified and its
+// A − BK stable (refined).
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -812,6 +822,9 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		if gainMissOf(n, res, func(X *mat.Dense) (*mat.Dense, float64, bool) {
 			return ddGain(A, B, R, crossTerm(opts), X)
 		}) > 1 {
+			if r, ok := refined(A, B, Q, R, opts, nil, res); ok {
+				return r, nil
+			}
 			res.Accuracy = 1
 		}
 		return res, nil
@@ -824,20 +837,27 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		res, err := dareSolve(A, B, Q, R, opts, !ill)
 		var poor *RiccatiResult
 		poorMiss := math.Inf(1)
-		gainOfX := func(c *RiccatiResult) bool {
-			if miss := red.gainMiss(A, B, R, opts, c); miss <= 1 {
-				return true
-			} else if poor == nil || miss < poorMiss {
+		gainOfX := func(c *RiccatiResult) (*RiccatiResult, bool) {
+			miss := red.gainMiss(A, B, R, opts, c)
+			if miss <= 1 {
+				return c, true
+			}
+			if r, ok := refined(A, B, Q, R, opts, red, c); ok {
+				return r, true
+			}
+			if poor == nil || miss < poorMiss {
 				poor, poorMiss = c, miss
 			}
-			return false
+			return nil, false
 		}
 		if err == nil && res.Accuracy == 0 {
 			if !(red.sigma*red.sigma*mat.Norm(res.X, 1) > mat.Norm(R, 1)) {
 				return res, nil
 			}
-			if c, ok := red.certify(A, Q, opts, res, nil); ok && closedLoopStable(A, B, c.K, E, c.Eig) && gainOfX(c) {
-				return c, nil
+			if c, ok := red.certify(A, Q, opts, res, nil); ok && closedLoopStable(A, B, c.K, E, c.Eig) {
+				if c, ok = gainOfX(c); ok {
+					return c, nil
+				}
 			}
 		}
 		o := opts
@@ -846,8 +866,10 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			c.Workspace = nil
 			o = &c
 		}
-		if r := red.solve(A, B, Q, o); r != nil && gainOfX(r) {
-			return r, nil
+		if r := red.solve(A, B, Q, o); r != nil {
+			if r, ok := gainOfX(r); ok {
+				return r, nil
+			}
 		}
 		if poor != nil {
 			poor.Accuracy = 1
@@ -860,6 +882,9 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	}
 	gainOfX := func(c *RiccatiResult) *RiccatiResult {
 		if !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) && !(red.gainMiss(A, B, R, opts, c) <= 1) {
+			if r, ok := refined(A, B, Q, R, opts, red, c); ok {
+				return r
+			}
 			c.Accuracy = 1
 		}
 		return c
@@ -977,12 +1002,78 @@ func closedLoopStable(A, B, K, E *mat.Dense, eig []complex128) bool {
 // (nullExact) BV₂ is 0 there: its rounding, that of V, moved the exact
 // X of duplicated inputs by 1e-5.
 func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, k0 *mat.Dense) (*RiccatiResult, bool) {
+	var kw func() *mat.Dense
+	if k0 != nil {
+		kw = func() *mat.Dense {
+			var k mat.Dense
+			k.Mul(red.v.T(), k0)
+			return &k
+		}
+	}
+	out, ok := certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, kw, false)
+	if ok {
+		out.K = red.gain(out.K, nil)
+	}
+	return out, ok
+}
+
+// refined returns res with its X one Newton step on, certified as by
+// certify (in the inputs w with reduced inputs, else as given), and K the
+// ddGain of that X (as gainMiss forms it), once A − BK is stable and
+// gainMiss accepts it. Dare tries it on a K gainMiss rejects: the gain of
+// a cheap-control Dare can amplify the error of a certified X by 1e9, and
+// an X off by 5e-14 within newtonTol gave a K off by 2e-4 to 9e-3, while
+// X one step on was the rounded 320-bit X and its ddGain within K's own
+// eps-sensitivity.
+func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
+	var c *RiccatiResult
+	ok := false
+	if red != nil && red.exact {
+		if c, ok = certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, nil, true); ok {
+			var kw *mat.Dense
+			if kw, _, ok = ddGain(A, red.bw, red.rw, red.sw, c.X); ok {
+				c.K = red.gain(kw, nil)
+			}
+		}
+	} else {
+		if red != nil {
+			c, ok = certifyIn(A, red.bw, Q, red.rw, red.sw, opts, res, nil, true)
+		} else {
+			c, ok = certifyIn(A, B, Q, R, crossTerm(opts), opts, res, nil, true)
+		}
+		if ok {
+			c.K, _, ok = ddGain(A, B, R, crossTerm(opts), c.X)
+		}
+	}
+	var E *mat.Dense
+	if opts != nil {
+		E = opts.E
+	}
+	if !ok || !closedLoopStable(A, B, c.K, E, c.Eig) {
+		return nil, false
+	}
+	miss := 0.0
+	if red != nil {
+		miss = red.gainMiss(A, B, R, opts, c)
+	} else {
+		miss = gainMissOf(A.RawMatrix().Rows, c, func(X *mat.Dense) (*mat.Dense, float64, bool) {
+			return ddGain(A, B, R, crossTerm(opts), X)
+		})
+	}
+	return c, miss <= 1
+}
+
+// certifyIn returns the X of res once verifyRiccati certifies it as the
+// solution of the Dare (A, B, Q, R, S), with its gain and Eig; with kw,
+// should X fail, the Hewer step X₁ of the gain kw() is certified instead,
+// and with refine X is first taken one Newton step on.
+func certifyIn(A, B, Q, R, S *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, kw func() *mat.Dense, refine bool) (*RiccatiResult, bool) {
 	var o RiccatiOpts
 	if opts != nil {
 		o = *opts
 	}
-	o.S, o.Workspace = red.sw, nil
-	problem, err := newRiccatiProblem(A, red.bw, Q, red.rw, &o)
+	o.S, o.Workspace = S, nil
+	problem, err := newRiccatiProblem(A, B, Q, R, &o)
 	if err != nil {
 		return nil, false
 	}
@@ -1002,14 +1093,24 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 		}
 	}
 	setX()
+	if refine {
+		K, err := problem.gain(false, X.RawMatrix().Data)
+		if err != nil {
+			return nil, false
+		}
+		x1, err := problem.newtonCost(false, K, X.RawMatrix().Data)
+		if err != nil {
+			return nil, false
+		}
+		copy(X.RawMatrix().Data, x1)
+	}
 	eig := problem.ws.eig[:n]
 	K, err := problem.acceptRiccati(false, X, eig, res.Rcnd)
-	if err != nil && k0 != nil {
+	if err != nil && kw != nil {
 		setX()
-		kw := mat.NewDense(m, n, nil)
-		kw.Mul(red.v.T(), k0)
+		k := kw()
 		if t != nil {
-			kr := kw.RawMatrix()
+			kr := k.RawMatrix()
 			for i := range m {
 				for j := range n {
 					kr.Data[i*kr.Stride+j] /= t[j]
@@ -1017,7 +1118,7 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 			}
 		}
 		var x1 []float64
-		if x1, err = problem.newtonCost(false, kw, X.RawMatrix().Data); err == nil {
+		if x1, err = problem.newtonCost(false, k, X.RawMatrix().Data); err == nil {
 			copy(X.RawMatrix().Data, x1)
 			K, err = problem.acceptRiccati(false, X, eig, res.Rcnd)
 		}
@@ -1025,9 +1126,7 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 	if err != nil {
 		return nil, false
 	}
-	out := problem.result(X, K, eig, res.Rcnd, 0)
-	out.K = red.gain(out.K, nil)
-	return out, true
+	return problem.result(X, K, eig, res.Rcnd, 0), true
 }
 
 // dareSolve is Dare without its input reduction; swapPoor lets placedDare
@@ -1303,7 +1402,13 @@ func crossTerm(opts *RiccatiOpts) *mat.Dense {
 // perturbations X∘(1 + eps) and X∘(1 ± eps) of X, and 32·eps²·cond for
 // the componentwise condition cond of gain, the resolution of K* in
 // double-double. It is +Inf when that tolerance exceeds gainCap or gain
-// fails.
+// fails. With the Newton iterate res.x1 of a certified step above eps,
+// the distance is the larger of those from K* and from the gain of x1:
+// the gain of a cheap-control Dare amplified an X off by 5e-14 (its step
+// 7e-14, inside newtonTol) to a K off by 2e-4 to 9e-3 from that of the
+// solution, K the gain of X, while that of x1 was within K's own
+// eps-sensitivity. The ±eps perturbations of X do not bound this move: in
+// their direction it was 1e4 times that along the step.
 func gainMissOf(n int, res *RiccatiResult, gain func(X *mat.Dense) (*mat.Dense, float64, bool)) float64 {
 	K, mcond, ok := gain(res.X)
 	if !ok {
@@ -1343,7 +1448,16 @@ func gainMissOf(n int, res *RiccatiResult, gain func(X *mat.Dense) (*mat.Dense, 
 	}
 	var d mat.Dense
 	d.Sub(res.K, K)
-	return mat.Norm(&d, 1) / (nk * tol)
+	miss := mat.Norm(&d, 1) / nk
+	if res.x1 != nil {
+		k1, _, ok := gain(res.x1)
+		if !ok {
+			return math.Inf(1)
+		}
+		d.Sub(res.K, k1)
+		miss = max(miss, mat.Norm(&d, 1)/nk)
+	}
+	return miss / tol
 }
 
 // ddGain returns the gain (R + BᵀXB)⁻¹(BᵀXA + Sᵀ) of X (S nil for
@@ -2196,6 +2310,11 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		if it == 0 {
 			if step <= newtonTol {
 				problem.closedLoopEig(eig)
+				problem.certStep, problem.certX1 = step, nil
+				if !continuous && step > eps() {
+					problem.certX1 = append(problem.ws.certX1[:0], x1...)
+					problem.ws.certX1 = problem.certX1
+				}
 				return K, nil
 			}
 			if p := problem.poor; p != nil && step < p.step {
@@ -2205,6 +2324,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 		}
 		if it > 0 && step <= newtonRefineTol {
 			kept = false
+			problem.certStep, problem.certX1 = 0, nil
 			prev := append([]float64(nil), xData...)
 			copy(xData, x1)
 			if K1, err := problem.closedLoopGain(continuous, xData, eig); err == nil {

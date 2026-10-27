@@ -3,6 +3,7 @@ package controlsys
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -41,6 +42,10 @@ type riccatiProblem struct {
 	// poor is the stabilizing solution of smallest first Newton step that
 	// verifyRiccati did not certify, or nil.
 	poor *riccatiPoor
+	// certStep is the first Newton step of the X verifyRiccati last
+	// certified, and certX1 (Dare, step above eps) the iterate it reached.
+	certStep float64
+	certX1   []float64
 }
 
 func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem, error) {
@@ -273,7 +278,21 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 		}
 	}
 	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy}
-	if accuracy != 0 && problem.poor != nil {
+	if accuracy == 0 {
+		res.step = problem.certStep
+		if x1 := problem.certX1; x1 != nil {
+			n, t := problem.n, problem.t
+			res.x1 = mat.NewDense(n, n, slices.Clone(x1))
+			if t != nil {
+				d := res.x1.RawMatrix().Data
+				for i := range n {
+					for j := range n {
+						d[i*n+j] *= t[i] * t[j]
+					}
+				}
+			}
+		}
+	} else if problem.poor != nil {
 		res.step = problem.poor.step
 	}
 	return res
