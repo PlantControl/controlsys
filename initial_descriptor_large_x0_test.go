@@ -12,7 +12,7 @@ import (
 // scratchpad/w45review/rev_w45_sweep_test.go.txt (w45Case "gen",
 // PCG(1331, 454545)): cond(E) 7.7e7, poles −2.0e7, −2.5e3, −1.68,
 // −2.06 ± 1.28i, and x0 drawn at |x0| ~ 3e3 with C·x0 ≈ 9908.
-func largeX0StiffDescriptor(t *testing.T) (*System, *mat.VecDense) {
+func largeX0StiffDescriptor(t testing.TB) (*System, *mat.VecDense) {
 	t.Helper()
 	A := mat.NewDense(5, 5, []float64{
 		-3.2016767179805368, 8.7501185032415005, -0.056943677446508641, 1.9351087706555996, -2.8496837416942662,
