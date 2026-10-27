@@ -65,6 +65,8 @@ type RiccatiWorkspace struct {
 	certX1      []float64
 	xe          []float64
 	cancel      []float64
+	gainStep    []float64
+	refine      []float64
 	lyap        *LyapunovWorkspace
 }
 
@@ -2809,7 +2811,11 @@ func (problem *riccatiProblem) dareWeight(xData, bx, w []float64) bool {
 func (problem *riccatiProblem) gainStep(continuous bool, K *mat.Dense, xData, x1 []float64) (move, xeStep float64) {
 	n, m, t := problem.n, problem.m, problem.t
 	nn := n * n
-	buf := make([]float64, 5*nn+2*m*n+m*m)
+	ws := problem.ws
+	if len(ws.gainStep) < 5*nn+2*m*n+m*m {
+		ws.gainStep = make([]float64, 5*nn+2*m*n+m*m)
+	}
+	buf := ws.gainStep
 	d, md, acl, de, xe := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn], buf[4*nn:5*nn]
 	g, bx, w := buf[5*nn:5*nn+m*n], buf[5*nn+m*n:5*nn+2*m*n], buf[5*nn+2*m*n:]
 	for i := range d {
@@ -2835,7 +2841,7 @@ func (problem *riccatiProblem) gainStep(continuous bool, K *mat.Dense, xData, x1
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, xData, n), gen(n, n, eRaw.Data, eRaw.Stride), 0, gen(n, n, de, n))
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1, gen(n, n, eRaw.Data, eRaw.Stride), gen(n, n, de, n), 0, gen(n, n, xe, n))
 	xeStep = cancelRatio(dn, wnorm(xe))
-	chol := problem.ws.rChol[:m*m]
+	chol := ws.rChol[:m*m]
 	if continuous {
 		blas64.Gemm(blas.NoTrans, blas.NoTrans, 1, gen(n, n, d, n), gen(n, n, eRaw.Data, eRaw.Stride), 0, gen(n, n, md, n))
 	} else {
@@ -2880,8 +2886,12 @@ func (problem *riccatiProblem) gainStep(continuous bool, K *mat.Dense, xData, x1
 func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float64, eig []complex128) bool {
 	n, m, ws, t := problem.n, problem.m, problem.ws, problem.t
 	nn := n * n
-	buf := make([]float64, 6*nn)
-	pe, xe, ete := buf[:2*nn], buf[2*nn:4*nn], buf[4*nn:]
+	if len(ws.refine) < 6*nn {
+		ws.refine = make([]float64, 6*nn)
+	}
+	buf := ws.refine
+	pe, xe, ete := buf[:2*nn], buf[2*nn:4*nn], buf[4*nn:6*nn]
+	clear(pe)
 	xH, xL := pe[:nn], pe[nn:]
 	copy(xH, xData)
 	gain := func() *mat.Dense {
@@ -2991,10 +3001,14 @@ func (problem *riccatiProblem) refineDescriptorDare(K *mat.Dense, xData []float6
 func (problem *riccatiProblem) refineDescriptorGain(K *mat.Dense, xData []float64, eig []complex128) bool {
 	n, m, ws, t := problem.n, problem.m, problem.ws, problem.t
 	nn := n * n
-	buf := make([]float64, 3*nn+3*m*n)
+	if len(ws.refine) < 3*nn+3*m*n {
+		ws.refine = make([]float64, 3*nn+3*m*n)
+	}
+	buf := ws.refine
 	pe, ep := buf[:2*nn], buf[2*nn:3*nn]
-	cur, next, gL := buf[3*nn:3*nn+m*n], buf[3*nn+m*n:3*nn+2*m*n], buf[3*nn+2*m*n:]
+	cur, next, gL := buf[3*nn:3*nn+m*n], buf[3*nn+m*n:3*nn+2*m*n], buf[3*nn+2*m*n:3*nn+3*m*n]
 	pH, pL := pe[:nn], pe[nn:]
+	clear(pe)
 	eRaw, bRaw := problem.E.RawMatrix(), problem.B.RawMatrix()
 	ddMulAcc(n, n, n, 1, xData, n, 1, eRaw.Data, eRaw.Stride, 1, pH, pL, n)
 	ddNormalize(pH, pL)
