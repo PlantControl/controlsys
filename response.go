@@ -1885,10 +1885,11 @@ func Damp(sys *System) ([]DampInfo, error) {
 // Step returns the step response of each input channel. Descriptor models
 // follow MATLAB: proper singular-E models are reduced to an explicit model
 // plus feedthrough, improper ones return ErrImproperModel. A continuous
-// delay-free model with full-rank E too ill-conditioned for E⁻¹A (as in
-// TransferFunction, with LU condition estimate 1e6 or more; for Impulse
-// from 1e4) is simulated from its generalized Schur parts, so the
-// response follows the poles of the pencil (A, E). Continuous models
+// model without internal delays whose full-rank E is too ill-conditioned
+// for E⁻¹A (as in TransferFunction, with LU condition estimate 1e6 or more;
+// for Impulse from 1e4) is simulated from its generalized Schur parts, so
+// the response follows the poles of the pencil (A, E); as in MATLAB, its
+// I/O delays shift the delay-free response. Continuous models
 // with internal delays of one common length are sampled exactly (method of
 // steps) while the chain fits its size and work budget; past it, and for
 // other internal-delay models, they are simulated through the approximate
@@ -1988,33 +1989,38 @@ func (sys *System) zeroStateResponseForm() (*System, error) {
 }
 
 // foldInaccurateContinuous reports whether the continuous sys has
-// foldInaccurateParts.
+// foldInaccurateParts of its I/O-delay-free core (ioDelayFreeCore): MATLAB
+// simulates a dss with I/O delays as the shifted delay-free response.
 func foldInaccurateContinuous(sys *System) bool {
 	if !sys.IsContinuous() {
 		return false
 	}
-	_, ok := foldInaccurateParts(sys)
+	_, ok := foldInaccurateParts(ioDelayFreeCore(sys))
 	return ok
 }
 
-// stiffContinuousDescriptorParts is stiffDescriptorParts for a continuous
-// model.
+// stiffContinuousDescriptorParts is stiffDescriptorParts of the
+// I/O-delay-free core of a continuous model.
 func stiffContinuousDescriptorParts(sys *System) ([]*System, bool) {
 	if !sys.IsContinuous() {
 		return nil, false
 	}
-	return stiffDescriptorParts(sys)
+	return stiffDescriptorParts(ioDelayFreeCore(sys))
 }
 
 // stiffDescriptorImpulse is the impulse response of sys on the automatic
 // grid from the parts of stiffDescriptorParts, each sampled exactly as the
 // discrete impulse response of (A_d, A_d·B, C, C·B), A_d = e^{A·dt}: the
 // step form of impulseAsStepModel cancels C·B of a stiff part (~1e14)
-// against its state to an absolute 1e-2.
+// against its state to an absolute 1e-2. Channel (i, j) of a model with
+// I/O delays is the delay-free one shifted by its total delay τ_ij.
 func stiffDescriptorImpulse(sys *System, parts []*System, tFinal float64) (*TimeResponse, error) {
 	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
 	if err != nil {
 		return nil, err
+	}
+	if sys.HasDelay() {
+		return shiftedStiffImpulse(sys, parts, t, dt), nil
 	}
 	disc := make([]*System, len(parts))
 	for i, part := range parts {
@@ -2033,6 +2039,100 @@ func stiffDescriptorImpulse(sys *System, parts []*System, tFinal float64) (*Time
 	propagateIONames(sim, sys)
 	plan := timeResponsePlan{original: sys, sim: sim, t: t, dt: dt, steps: len(t), wasContinuous: true}
 	return plan.allInputResponse(impulseResponse)
+}
+
+// shiftedStiffImpulse is stiffDescriptorImpulse of a model with I/O
+// delays: y_ij(k·dt) = C·e^{A(k·dt − τ_ij)}·B_j of each part, zero before
+// τ_ij.
+func shiftedStiffImpulse(sys *System, parts []*System, t []float64, dt float64) *TimeResponse {
+	_, m, p := sys.Dims()
+	tau := effectiveIODelayMatrix(sys, p, m, true)
+	Y := mat.NewDense(p*m, len(t), nil)
+	rows, taus := make([]int, p), make([]float64, p)
+	var ad mat.Dense
+	for _, part := range parts {
+		pn, _, _ := part.Dims()
+		if pn == 0 {
+			continue
+		}
+		partExp(&ad, part.A, dt)
+		for j := range m {
+			x := mat.Col(nil, j, part.B)
+			for i := range p {
+				rows[i], taus[i] = j*p+i, tau.At(i, j)
+			}
+			addShiftedPartSamples(Y, rows, taus, part, &ad, x, dt)
+		}
+	}
+	return &TimeResponse{T: t, Y: Y, OutputName: copyStringSlice(sys.OutputName)}
+}
+
+// partExp sets ad to e^{A·dt}.
+func partExp(ad *mat.Dense, a mat.Matrix, dt float64) {
+	var scaled mat.Dense
+	scaled.Scale(dt, a)
+	ad.Reset()
+	ad.Exp(&scaled)
+}
+
+// addShiftedPartSamples adds C_i·e^{A(k·dt − τ_i)}·x of the explicit part,
+// ad = e^{A·dt}, to Y[rows[i], k] for every sample k·dt ≥ τ_i, i < len(rows),
+// exactly; a τ_i within gridTol samples of the grid is on it.
+func addShiftedPartSamples(Y *mat.Dense, rows []int, taus []float64, part *System, ad *mat.Dense, x []float64, dt float64) {
+	_, steps := Y.Dims()
+	pn, _, _ := part.Dims()
+	yRaw, aRaw, cRaw := Y.RawMatrix(), ad.RawMatrix(), part.C.RawMatrix()
+	done := make([]bool, len(rows))
+	cur, next := make([]float64, pn), make([]float64, pn)
+	var group []int
+	for g := range rows {
+		if done[g] {
+			continue
+		}
+		tau := taus[g]
+		group = group[:0]
+		for i := g; i < len(rows); i++ {
+			if !done[i] && taus[i] == tau {
+				group, done[i] = append(group, i), true
+			}
+		}
+		k0 := max(int(math.Ceil(tau/dt-gridTol)), 0)
+		if k0 >= steps {
+			continue
+		}
+		copy(cur, x)
+		if lead := float64(k0)*dt - tau; lead > gridTol*dt {
+			var lag mat.Dense
+			partExp(&lag, part.A, lead)
+			v := mat.NewVecDense(pn, next)
+			v.MulVec(&lag, mat.NewVecDense(pn, x))
+			cur, next = next, cur
+		}
+		for k := k0; k < steps; k++ {
+			live := false
+			for _, i := range group {
+				row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+pn]
+				s := 0.0
+				for j, v := range row {
+					s += v * cur[j]
+				}
+				yRaw.Data[rows[i]*yRaw.Stride+k] += s
+			}
+			for i := range pn {
+				row := aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+pn]
+				s := 0.0
+				for j, v := range row {
+					s += v * cur[j]
+				}
+				next[i] = s
+				live = live || s != 0
+			}
+			if !live {
+				break
+			}
+			cur, next = next, cur
+		}
+	}
 }
 
 // impulseAsStepModel returns a model whose step response equals the
@@ -2081,9 +2181,10 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // Initial returns the free response from x0 with zero delay-line history.
 // Output delays, including the output share of Delay, delay it; see Simulate.
 // As in MATLAB, a descriptor model with singular E rejects a nonzero x0 with
-// ErrDescriptorInitialState. A delay-free continuous descriptor whose
-// full-rank E is too ill-conditioned for E⁻¹A (as in Step) follows the
-// pencil (A, E): the impulse response of the input E·x0.
+// ErrDescriptorInitialState. A continuous descriptor without internal
+// delays whose full-rank E is too ill-conditioned for E⁻¹A (as in Step)
+// follows the pencil (A, E): the impulse response of the input E·x0,
+// delayed by the output delays.
 // Continuous models without internal delays, or whose internal delays share
 // one length (within the chain budget, see Step), are sampled exactly; other
 // internal-delay models use the approximate ZOH discretization of the delay
@@ -2105,12 +2206,14 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 		return nil, fmt.Errorf("Initial: x0 must not be nil: %w", ErrInvalidArgument)
 	}
 	if n, _, _ := sys.Dims(); x0.Len() == n {
-		if parts, ok := stiffFreeParts(sys, x0); ok {
-			resp, err := stiffDescriptorInitial(sys, parts, x0, tFinal)
-			if err != nil {
-				return nil, fmt.Errorf("Initial: %w", err)
+		if split, err := sys.splitIODelayForInitialState(x0); err == nil {
+			if parts, ok := stiffFreeParts(split, x0); ok {
+				resp, err := stiffDescriptorInitial(split, parts, x0, tFinal)
+				if err != nil {
+					return nil, fmt.Errorf("Initial: %w", err)
+				}
+				return resp, nil
 			}
-			return resp, nil
 		}
 	}
 	sim, simX0, reduced, err := sys.timeResponseForm(x0)
@@ -2168,14 +2271,16 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 // part's B is its share s of x0 and column 1 is A_part·s. Sampled from the
 // shares, the free response is an impulse response with no constant C·x0
 // to cancel in a decaying tail, unlike the step response of the input A·x0.
-// A model with a nonzero delay does not split; zero-valued delay metadata
-// is dropped.
+// Input and output delays are left out of the parts: the free response
+// ignores input delays and sampleFreeParts shifts it by the output delays.
+// A model with a nonzero Delay matrix (split it first with
+// splitIODelayForInitialState) or internal delays does not split.
 func stiffFreeParts(sys *System, x0 *mat.VecDense) ([]*System, bool) {
-	if !sys.IsContinuous() || !sys.IsDescriptor() || sys.HasDelay() {
+	if !sys.IsContinuous() || !sys.IsDescriptor() || delayMatrixHasNonzero(sys.Delay) {
 		return nil, false
 	}
 	n, _, p := sys.Dims()
-	fm := sys.Copy()
+	fm := ioDelayFreeCore(sys).Copy()
 	fm.B, fm.D = newDense(n, 2), newDense(p, 2)
 	fm.InputDelay, fm.Delay, fm.InputName = nil, nil, nil
 	var ex, ax mat.VecDense
@@ -2214,61 +2319,47 @@ func freePartShare(parts []*System, k int) []float64 {
 
 // sampleFreeParts sums y(k·dt) of the parts of stiffFreeParts of sys, each
 // from its share of x0 (freePartShare), sampled exactly as in
-// continuousFreeSamples. y(0) is C·x0 itself.
+// continuousFreeSamples: output i is delayed by its OutputDelay τ_i, zero
+// before τ_i, and y_i(τ_i) is C_i·x0 itself.
 func sampleFreeParts(sys *System, parts []*System, x0 *mat.VecDense, steps int, dt float64) (*mat.Dense, error) {
 	_, _, p := sys.Dims()
 	if p == 0 || steps == 0 {
 		return nil, fmt.Errorf("free response needs outputs and samples, got p=%d steps=%d: %w", p, steps, ErrDimensionMismatch)
 	}
 	Y := mat.NewDense(p, steps, nil)
-	yRaw := Y.RawMatrix()
-	var scaled, ad mat.Dense
+	rows, taus := make([]int, p), make([]float64, p)
+	for i := range p {
+		rows[i] = i
+		if sys.OutputDelay != nil {
+			taus[i] = sys.OutputDelay[i]
+		}
+	}
+	var ad mat.Dense
 	for pk, part := range parts {
-		pn, _, _ := part.Dims()
-		if pn == 0 {
+		if pn, _, _ := part.Dims(); pn == 0 {
 			continue
 		}
-		scaled.Reset()
-		ad.Reset()
-		scaled.Scale(dt, part.A)
-		ad.Exp(&scaled)
-		aRaw, cRaw := ad.RawMatrix(), part.C.RawMatrix()
-		x, next := freePartShare(parts, pk), make([]float64, pn)
-		for k := range steps {
-			live := false
-			for i := range p {
-				row := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+pn]
-				s := 0.0
-				for j, v := range row {
-					s += v * x[j]
-				}
-				yRaw.Data[i*yRaw.Stride+k] += s
-			}
-			for i := range pn {
-				row := aRaw.Data[i*aRaw.Stride : i*aRaw.Stride+pn]
-				s := 0.0
-				for j, v := range row {
-					s += v * x[j]
-				}
-				next[i] = s
-				live = live || s != 0
-			}
-			if !live {
-				break
-			}
-			x, next = next, x
-		}
+		partExp(&ad, part.A, dt)
+		addShiftedPartSamples(Y, rows, taus, part, &ad, freePartShare(parts, pk), dt)
 	}
 	var y0 mat.VecDense
 	y0.MulVec(sys.C, x0)
-	Y.SetCol(0, y0.RawVector().Data)
+	for i, tau := range taus {
+		k0 := max(int(math.Ceil(tau/dt-gridTol)), 0)
+		if k0 < steps && float64(k0)*dt-tau <= gridTol*dt {
+			Y.Set(i, k0, y0.AtVec(i))
+		}
+	}
 	return Y, nil
 }
 
 // stiffDescriptorInitial is Initial from the parts of stiffFreeParts on the
-// automatic grid of sys.
+// automatic grid of sys without its input delays, which do not act on the
+// free response.
 func stiffDescriptorInitial(sys *System, parts []*System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
-	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
+	free := *sys
+	free.InputDelay, free.Delay = nil, nil
+	t, dt, err := newTimeResponsePlanner(&free).grid(tFinal, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -2412,6 +2503,7 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 		}
 		if x0 != nil && !allZeroVec(x0) {
 			freeX0 = x0
+			sys, err = sys.splitIODelayForInitialState(x0)
 		}
 		x0 = nil
 	} else {

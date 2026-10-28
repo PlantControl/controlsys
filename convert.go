@@ -543,7 +543,8 @@ func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2
 // foldInaccurateParts of its delay-free core, each in real Schur form, with
 // the delays and names of sys and no state names: an explicit model with
 // the transfer function and poles of the pencil for the delay paths of
-// C2D, which would otherwise fold E⁻¹A. Upper quasi-triangular, it lets
+// C2D (and so of Step and Lsim, which discretize through it), which would
+// otherwise fold E⁻¹A. Upper quasi-triangular, it lets
 // the hold discretize its stiff and slow modes separately
 // (stiffModalHold). Matched is left to newC2DPlan, which keeps the
 // transfer function of the pencil.
@@ -551,9 +552,7 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod) (*System, bool) {
 	if method == C2DMethodMatched || !sys.IsDescriptor() || sys.LFT != nil || !sys.HasDelay() {
 		return nil, false
 	}
-	core := *sys
-	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
-	parts, ok := foldInaccurateParts(&core)
+	parts, ok := foldInaccurateParts(ioDelayFreeCore(sys))
 	if !ok {
 		return nil, false
 	}
@@ -571,6 +570,17 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod) (*System, bool) {
 	delays := sys.Copy()
 	out.Delay, out.InputDelay, out.OutputDelay = delays.Delay, delays.InputDelay, delays.OutputDelay
 	return out, true
+}
+
+// ioDelayFreeCore returns sys without its I/O delays (Delay, InputDelay,
+// OutputDelay) when it has no LFT; otherwise sys itself.
+func ioDelayFreeCore(sys *System) *System {
+	if sys.LFT != nil {
+		return sys
+	}
+	core := *sys
+	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
+	return &core
 }
 
 // realSchurPart returns the explicit part, if its A is not already upper
