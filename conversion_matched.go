@@ -288,66 +288,105 @@ func matchedCascade(zeros, poles []complex128, gain, dt float64) (*System, error
 }
 
 // matchedSections groups conjugate pairs and real roots into sections of
-// order at most two, each with no more zeros than poles; complex zero pairs
-// beyond the complex pole pairs take two real poles.
+// order at most two, each with no more zeros than poles. Each zero joins
+// the nearest pole in log z (the continuous root times T), so a section's
+// gain stays moderate; a complex zero pair without a free complex pole pair
+// takes the two nearest real poles.
 func matchedSections(zeros, poles []complex128) []matchedSection {
-	var realPoles, realZeros []float64
-	var pairPoles, pairZeros []complex128
+	var realPoles []float64
+	var realZeros, pairZeros []complex128
+	sections := make([]matchedSection, 0, len(poles))
 	for _, p := range poles {
 		switch {
 		case imag(p) == 0:
 			realPoles = append(realPoles, real(p))
 		case imag(p) > 0:
-			pairPoles = append(pairPoles, p)
+			sections = append(sections, matchedSection{p1: p, p2: cmplx.Conj(p), order: 2})
 		}
 	}
 	for _, z := range zeros {
 		switch {
 		case imag(z) == 0:
-			realZeros = append(realZeros, real(z))
+			realZeros = append(realZeros, z)
 		case imag(z) > 0:
 			pairZeros = append(pairZeros, z)
 		}
 	}
 	sort.Float64s(realPoles)
-	sections := make([]matchedSection, 0, len(poles))
-	for _, p := range pairPoles {
-		sections = append(sections, matchedSection{p1: p, p2: cmplx.Conj(p), order: 2})
-	}
-	extra := max(len(pairZeros)-len(pairPoles), 0)
-	for i := range extra {
-		sections = append(sections, matchedSection{p1: complex(realPoles[2*i], 0), p2: complex(realPoles[2*i+1], 0), order: 2})
-	}
-	for _, p := range realPoles[2*extra:] {
-		sections = append(sections, matchedSection{p1: complex(p, 0), order: 1})
+	used := make([]bool, len(realPoles))
+	nearestReal := func(z complex128) int {
+		best := -1
+		for i, p := range realPoles {
+			if !used[i] && (best < 0 || matchedLogDistance(z, complex(p, 0)) < matchedLogDistance(z, complex(realPoles[best], 0))) {
+				best = i
+			}
+		}
+		return best
 	}
 	for _, z := range pairZeros {
-		best := -1
+		best, dist := -1, math.Inf(1)
 		for i, s := range sections {
-			if s.order == 2 && len(s.zeros) == 0 && (best < 0 || cmplx.Abs(z-s.p1) < cmplx.Abs(z-sections[best].p1)) {
-				best = i
+			if len(s.zeros) == 0 && imag(s.p1) != 0 {
+				if e := matchedLogDistance(z, s.p1); best < 0 || e < dist {
+					best, dist = i, e
+				}
+			}
+		}
+		if free := len(realPoles) - countTrue(used); free >= 2 {
+			i := nearestReal(z)
+			used[i] = true
+			k := nearestReal(z)
+			used[i] = false
+			if e := math.Max(matchedLogDistance(z, complex(realPoles[i], 0)), matchedLogDistance(z, complex(realPoles[k], 0))); best < 0 || e < dist {
+				used[i], used[k] = true, true
+				sections = append(sections, matchedSection{p1: complex(realPoles[min(i, k)], 0), p2: complex(realPoles[max(i, k)], 0), order: 2})
+				best = len(sections) - 1
 			}
 		}
 		sections[best].zeros = []complex128{z, cmplx.Conj(z)}
 	}
+	for i, p := range realPoles {
+		if !used[i] {
+			sections = append(sections, matchedSection{p1: complex(p, 0), order: 1})
+		}
+	}
 	for _, z := range realZeros {
-		zc := complex(z, 0)
 		best, dist := -1, math.Inf(1)
 		for i, s := range sections {
 			if len(s.zeros) >= s.order {
 				continue
 			}
-			e := cmplx.Abs(zc - s.p1)
+			e := matchedLogDistance(z, s.p1)
 			if s.order == 2 {
-				e = math.Min(e, cmplx.Abs(zc-s.p2))
+				e = math.Min(e, matchedLogDistance(z, s.p2))
 			}
 			if best < 0 || e < dist {
 				best, dist = i, e
 			}
 		}
-		sections[best].zeros = append(sections[best].zeros, zc)
+		sections[best].zeros = append(sections[best].zeros, z)
 	}
 	return sections
+}
+
+func matchedLogDistance(z, p complex128) float64 {
+	if z == p {
+		return 0
+	}
+	if z == 0 || p == 0 {
+		return math.MaxFloat64
+	}
+	return cmplx.Abs(cmplx.Log(z) - cmplx.Log(p))
+}
+
+func countTrue(b []bool) int {
+	n := 0
+	for _, v := range b {
+		if v {
+			n++
+		}
+	}
+	return n
 }
 
 // realize returns (A, B, C, D) of the section with monic numerator and
