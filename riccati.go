@@ -1168,11 +1168,11 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	d := gainMissIn(A, B, R, opts, red, res)
 	var nearest *RiccatiResult
 	nearestMiss, contra := math.Inf(1), false
-	contradicted := func(r *RiccatiResult, rd gainDist) func() bool {
+	contradicted := func(r *RiccatiResult) func() bool {
 		known, v := false, false
 		return func() bool {
 			if !known && red != nil {
-				if m, off, ok := hewerGainContradicts(A, B, Q, R, opts, red, r, max(rd.tol, gainFloor)); ok {
+				if m, off, ok := hewerGainContradicts(A, B, Q, R, opts, red, r, gainFloor); ok {
 					v = off
 					contra = contra || v
 					if m < nearestMiss {
@@ -1184,7 +1184,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 			return v
 		}
 	}
-	resOff := contradicted(res, d)
+	resOff := contradicted(res)
 	if d.units(gainTol) <= 1 {
 		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
 			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
@@ -1208,7 +1208,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	}
 	var cOff func() bool
 	if stable {
-		cOff = contradicted(c, cd)
+		cOff = contradicted(c)
 	}
 	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1 && !cOff()) {
 		return c, 0, true
