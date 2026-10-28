@@ -22,8 +22,8 @@ func withIterationCap(t *testing.T, limit *int, v int) {
 const boundaryError = "Dare: controlsys: no stabilizing solution exists: a mode on or beyond the stability boundary is unstabilizable"
 
 // A near-singular-E Dare, Dlqr or Kalman whose extended-precision solve
-// hits an iteration cap (SDA doubling, stableLoop squaring or the Smith
-// doubling of the perturbed Hewer step) returns exactly the float64
+// hits an iteration cap (SDA doubling or its exponent spread, stableLoop
+// squaring or the Smith doubling of the perturbed Hewer step) returns exactly the float64
 // pencil's error, boundary verdict included, as before the extended solve
 // existed (O2YDYA round 3).
 func TestDare_NearSingularEIterationCapKeepsFloatError(t *testing.T) {
@@ -48,7 +48,7 @@ func TestDare_NearSingularEIterationCapKeepsFloatError(t *testing.T) {
 		name  string
 		limit *int
 		v     int
-	}{{"doubling", &extendedDoublings, 2}, {"stableLoop", &stableSquarings, 0}, {"smithStein", &steinDoublings, 1}} {
+	}{{"doubling", &extendedDoublings, 2}, {"spread", &extendedSpreadBits, 0}, {"stableLoop", &stableSquarings, 0}, {"smithStein", &steinDoublings, 1}} {
 		t.Run(c.name, func(t *testing.T) {
 			withIterationCap(t, c.limit, c.v)
 			for _, ns := range []bool{false, true} {

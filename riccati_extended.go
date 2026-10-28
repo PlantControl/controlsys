@@ -188,13 +188,17 @@ const (
 
 // Iteration caps of the extended-precision solves, variables only so that
 // tests can hit them: SDA doublings of nearSingularDare (ρ(A − BK) up to
-// 1 − 2⁻⁴⁰ converges; no retry at higher precision once hit), squarings of
+// 1 − 2⁻⁴⁰ converges; no retry at higher precision once hit) and the
+// exponent spread in bits its iterates may reach (each big.Float sum
+// shifts a mantissa by the exponent gap of its terms, and entries tiny
+// beside the largest still matter there, so they are not flushed), squarings of
 // stableLoop and Smith doublings of smithStein. A solve that hits its cap
 // fails, and its caller keeps the float64 result.
 var (
-	extendedDoublings = 48
-	stableSquarings   = 48
-	steinDoublings    = 48
+	extendedDoublings  = 48
+	stableSquarings    = 48
+	steinDoublings     = 48
+	extendedSpreadBits = 1 << 14
 )
 
 // nearSingularDare solves a Dare with a near-singular E that Dare's
@@ -424,7 +428,10 @@ func (d extendedDare) solve(prec uint) (sol extendedSol, capped, ok bool) {
 		}
 		hn := xAdd(h, xMul(xMul(a.t(), h), wa), 1)
 		g = xAdd(g, xMul(xMul(a, wg), a.t()), 1).symmetrized()
-		a = xMul(a, wa).flushTiny()
+		a = xMul(a, wa)
+		if a.expSpread() > extendedSpreadBits || g.expSpread() > extendedSpreadBits {
+			return sol, true, false
+		}
 		dh, hm := xAdd(hn, h, -1).maxAbs(), hn.maxAbs()
 		h = hn.symmetrized()
 		if !(hm < math.Ldexp(1, int(prec/2))) {
@@ -500,10 +507,27 @@ func stableLoop(m xMat) bool {
 	return false
 }
 
+// expSpread is the exponent range in bits of the nonzero entries.
+func (m xMat) expSpread() int {
+	lo, hi, seen := 0, 0, false
+	for i := range m.d {
+		if m.d[i].Sign() != 0 {
+			e := m.d[i].MantExp(nil)
+			if !seen {
+				lo, hi, seen = e, e, true
+			}
+			lo, hi = min(lo, e), max(hi, e)
+		}
+	}
+	return hi - lo
+}
+
 // flushTiny zeroes, in place, the entries below 2^(−2·prec) times the
 // largest: a big.Float sum shifts its mantissa by the full exponent gap,
 // and repeated squaring with modes near 1 next to fast ones grows that gap
 // to ~2³⁰ bits (GB-scale allocation), far below the precision carried.
+// Only for powers of a matrix of bounded norm (stableLoop, smithStein),
+// where they move the power by 2^(−2·prec) of its norm.
 func (m xMat) flushTiny() xMat {
 	top, seen := 0, false
 	for i := range m.d {
