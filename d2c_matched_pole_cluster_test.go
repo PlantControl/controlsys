@@ -229,6 +229,51 @@ func TestD2CMatchedInvertsMatchedC2D(t *testing.T) {
 	}
 }
 
+// An input or output delay of whole samples becomes the same continuous
+// delay on the matched core.
+func TestD2CMatchedDelayedClusterKeepsCore(t *testing.T) {
+	const dt = 0.01
+	cs := matchedClusterDiagonal(t)
+	core := cs.Copy()
+	core.Dt = dt
+	for i := range 8 {
+		core.A.Set(i, i, math.Exp(cs.A.At(i, i)*dt))
+	}
+	want, err := core.D2C(D2COptions{Method: C2DMethodMatched})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		in, out []float64
+		k       float64
+	}{{"input", []float64{3}, nil, 3}, {"output", nil, []float64{2}, 2}} {
+		d := core.Copy()
+		d.InputDelay, d.OutputDelay = tc.in, tc.out
+		c, err := d.D2C(D2COptions{Method: C2DMethodMatched})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		free := c.Copy()
+		free.InputDelay, free.OutputDelay = nil, nil
+		checkD2CMatchedAgainstOracle(t, tc.name+" delay", core, free)
+		for _, s := range []complex128{0.1i, 1i, -0.2 + 0.4i} {
+			g, err := c.EvalFr(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h, err := want.EvalFr(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := h[0][0] * cmplx.Exp(-s*complex(tc.k*dt, 0))
+			if rel := cmplx.Abs(g[0][0]-w) / cmplx.Abs(w); !(rel <= 1e-9) {
+				t.Errorf("%s: G(%v) = %v, want %v (rel %.3g)", tc.name, s, g[0][0], w, rel)
+			}
+		}
+	}
+}
+
 func BenchmarkD2CMatched(b *testing.B) {
 	g, err := NewZPK([]complex128{-1.1729}, []complex128{-0.1531, -0.9583, -1.4969 + 1.397i, -1.4969 - 1.397i, -0.6914}, 1.3863, 0)
 	if err != nil {
