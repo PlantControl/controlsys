@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/cmplx"
+	"slices"
 	"sort"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -171,9 +172,34 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	cz, cp := source.Zeros[0][0], source.Poles[0][0]
-	dz := make([]complex128, len(cz), max(len(cz), len(cp)-1))
-	dp := make([]complex128, len(cp))
+	cz, cp, k := source.Zeros[0][0], source.Poles[0][0], source.Gain[0][0]
+	dz, dp, gain, err := matchedDiscreteRoots(cz, cp, k, dt)
+	if pz, pp, pk, ok := matchedPencilRoots(sys, cz, cp, k); ok {
+		if z, p, g, perr := matchedDiscreteRoots(pz, pp, pk, dt); perr == nil {
+			dz, dp, gain, err = z, p, g, nil
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	realized, err := matchedCascade(dz, dp, gain, dt)
+	if err != nil {
+		return nil, err
+	}
+	out, err := newDelayConversionPolicy(dt).applyDiscreteDelayFields(realized, sys)
+	if err != nil {
+		return nil, err
+	}
+	propagateNames(out, sys)
+	out.StateName = nil
+	return out, nil
+}
+
+// matchedDiscreteRoots maps continuous roots to exp(root·dt), adds zeros at
+// z = −1 up to relative degree one, and matches the gain at DC.
+func matchedDiscreteRoots(cz, cp []complex128, k, dt float64) (dz, dp []complex128, gain float64, err error) {
+	dz = make([]complex128, len(cz), max(len(cz), len(cp)-1))
+	dp = make([]complex128, len(cp))
 	for i, z := range cz {
 		dz[i] = cmplx.Exp(z * complex(dt, 0))
 	}
@@ -185,26 +211,154 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	}
 	scale, err := matchedContinuousGain(dz, dp, cz, cp, 1, dt)
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, err
 	}
 	if scale == 0 {
-		return nil, ErrSingularTransform
+		return nil, nil, 0, ErrSingularTransform
 	}
-	discrete, err := NewZPK(dz, dp, source.Gain[0][0]/scale, dt)
+	discrete, err := NewZPK(dz, dp, k/scale, dt)
 	if err != nil {
-		return nil, err
+		return nil, nil, 0, err
 	}
-	realized, err := matchedCascade(dz, dp, discrete.Gain[0][0], dt)
+	return dz, dp, discrete.Gain[0][0], nil
+}
+
+// matchedPencilRoots returns the poles eig(A, E), the invariant zeros and
+// a gain fitted to the response of sys, as MATLAB zpk(ss) takes them;
+// polynomial roots of the transfer function lose tight pole clusters. ok is
+// false unless the roots are finite, keep the relative degree of the
+// transfer-function roots cz, cp with gain k, and fit the response at a
+// probe point no worse than those do.
+func matchedPencilRoots(sys *System, cz, cp []complex128, k float64) (zeros, poles []complex128, gain float64, ok bool) {
+	poles, err := sys.Poles()
+	if err != nil || len(poles) == 0 {
+		return nil, nil, 0, false
+	}
+	zeros, err = sys.Zeros()
+	if err != nil || len(zeros) > len(poles) || len(poles)-len(zeros) != len(cp)-len(cz) {
+		return nil, nil, 0, false
+	}
+	if poles, ok = matchedConjugateClosed(poles); !ok {
+		return nil, nil, 0, false
+	}
+	if zeros, ok = matchedConjugateClosed(zeros); !ok {
+		return nil, nil, 0, false
+	}
+	free := *sys
+	free.Delay, free.InputDelay, free.OutputDelay = nil, nil, nil
+	s0, s1 := matchedProbePoints(poles, zeros, cp, cz)
+	g0, ok0 := matchedEvalModel(&free, s0)
+	g1, ok1 := matchedEvalModel(&free, s1)
+	if !ok0 || !ok1 {
+		return nil, nil, 0, false
+	}
+	gain = real(g0 / matchedRootRatio(zeros, poles, s0))
+	misfit := func(z, p []complex128, k float64) float64 {
+		return cmplx.Abs(complex(k, 0)*matchedRootRatio(z, p, s1)-g1) / cmplx.Abs(g1)
+	}
+	if e := misfit(zeros, poles, gain); math.IsNaN(e) || e > math.Max(2*misfit(cz, cp, k), 1e-10) {
+		return nil, nil, 0, false
+	}
+	return zeros, poles, gain, true
+}
+
+// matchedConjugateClosed pairs each root with positive imaginary part with
+// the nearest unpaired root of negative imaginary part, as eigensolvers
+// return them, and makes the pair exact conjugates.
+func matchedConjugateClosed(roots []complex128) ([]complex128, bool) {
+	out := slices.Clone(roots)
+	used := make([]bool, len(out))
+	for i, r := range out {
+		if cmplx.IsNaN(r) || cmplx.IsInf(r) {
+			return nil, false
+		}
+		if imag(r) <= 0 {
+			continue
+		}
+		best := -1
+		for j, q := range out {
+			if !used[j] && imag(q) < 0 && (best < 0 || cmplx.Abs(q-cmplx.Conj(r)) < cmplx.Abs(out[best]-cmplx.Conj(r))) {
+				best = j
+			}
+		}
+		if best < 0 || cmplx.Abs(out[best]-cmplx.Conj(r)) > 1e-8*cmplx.Abs(r) {
+			return nil, false
+		}
+		used[best] = true
+		mid := (r + cmplx.Conj(out[best])) / 2
+		out[i], out[best] = mid, cmplx.Conj(mid)
+	}
+	for j, q := range out {
+		if imag(q) < 0 && !used[j] {
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+func matchedEvalModel(sys *System, s complex128) (complex128, bool) {
+	g, err := sys.EvalFr(s)
 	if err != nil {
-		return nil, err
+		return 0, false
 	}
-	out, err := newDelayConversionPolicy(dt).applyDiscreteDelayFields(realized, sys)
-	if err != nil {
-		return nil, err
+	v := g[0][0]
+	if v == 0 || cmplx.IsNaN(v) || cmplx.IsInf(v) {
+		return 0, false
 	}
-	propagateNames(out, sys)
-	out.StateName = nil
-	return out, nil
+	return v, true
+}
+
+// matchedRootRatio is Π(s−zeros)/Π(s−poles), interleaved against overflow.
+func matchedRootRatio(zeros, poles []complex128, s complex128) complex128 {
+	r := complex(1, 0)
+	for i, p := range poles {
+		if i < len(zeros) {
+			r *= (s - zeros[i]) / (s - p)
+		} else {
+			r /= s - p
+		}
+	}
+	return r
+}
+
+// matchedProbePoints returns the two points, at the median root modulus
+// times 1/2, 1 or 2 and angles from 0.25π to 0.75π, farthest from every
+// root relative to their modulus.
+func matchedProbePoints(sets ...[]complex128) (complex128, complex128) {
+	var mags []float64
+	for _, set := range sets {
+		for _, r := range set {
+			if a := cmplx.Abs(r); a > 0 {
+				mags = append(mags, a)
+			}
+		}
+	}
+	rho := 1.0
+	if len(mags) > 0 {
+		sort.Float64s(mags)
+		rho = mags[len(mags)/2]
+	}
+	var best [2]complex128
+	score := [2]float64{-1, -1}
+	for _, f := range []float64{0.5, 1, 2} {
+		for _, theta := range []float64{0.25, 0.4, 0.5, 0.6, 0.75} {
+			s := cmplx.Rect(f*rho, theta*math.Pi)
+			d := math.Inf(1)
+			for _, set := range sets {
+				for _, r := range set {
+					d = math.Min(d, cmplx.Abs(s-r)/(f*rho))
+				}
+			}
+			switch {
+			case d > score[0]:
+				best[1], score[1] = best[0], score[0]
+				best[0], score[0] = s, d
+			case d > score[1]:
+				best[1], score[1] = s, d
+			}
+		}
+	}
+	return best[0], best[1]
 }
 
 func matchedDeflateArtificialZeros(numerator []float64) ([]float64, int) {
