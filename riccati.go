@@ -856,7 +856,11 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // double-double iterate they came from (3e-8 off it with E's smallest
 // singular value 1.2e-6), in both its Frobenius and 1-norm (X off by
 // 1.25e-8 with 9.97e-9 in the first). With reduced inputs, under cheap
-// control, K is neither substituted nor kept from a refinement (gainOfX).
+// control, K is neither the gain of the rounded X nor kept from a
+// refinement; of an X whose Newton step is within eps, a K off its gain
+// by more than 1e-6 is replaced by the gain of X taken on by Hewer steps
+// in extended precision (gainOfX): the pencil K was 6.1e-6 off the
+// 320-bit gain and the gain of the rounded X 1.4e-6, that one 1e-10.
 // A descriptor Dare left with no stabilizing solution whose E is
 // ill-conditioned but nonsingular is solved once more on its explicit
 // model in extended precision (nearSingularDare).
@@ -1133,15 +1137,22 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // only for the given inputs (red nil): with reduced inputs K is measured
 // by gainMissIn and taken as Dare kept before, a substituted K and an X
 // its certification did not step being 4.7e-6 and 1.25e-8 off the
-// 320-bit solution at Accuracy 0.
+// 320-bit solution at Accuracy 0. There a K off the gain of an X whose
+// Newton step is within eps by more than gainFloor is instead replaced by
+// the gain of the extended-precision Hewer iterate of X
+// (hewerGainSubstituted), which gainMissIn must accept.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
 	}
 	d := gainMissIn(A, B, R, opts, red, res)
 	if d.units(gainTol) <= 1 {
-		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
-			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
+		if d.d > gainFloor && res.x1 == nil && res.step <= eps() {
+			if red == nil {
+				if r, ok := gainSubstituted(A, B, R, opts, res); ok {
+					return r, 0, true
+				}
+			} else if r, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
 				return r, 0, true
 			}
 		}

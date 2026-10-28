@@ -7,16 +7,14 @@ import (
 )
 
 // TestDareCrossTermGainOfConvergedX: cheap control (R ≈ 1e-12·I) with a
-// cross term S, m > n and a large Q. Dare certified X exact to 1e-16 (its
-// Newton step within eps) and kept the pencil K, off by 7.3e-6 against an
-// eps-sensitivity of 1.7e-7 under normwise perturbations of A, B, Q, R
-// and S, with Accuracy 0: the tolerance of the gain check, the move of
-// the gain of X under X∘(1 + eps), was 1e-5, while that gain was within
-// 3.4e-9 (5AFLTD). Here m > n reduces the inputs, where the gain of the
-// converged X is not substituted (Y6BJEX am.4: on the amd64 rounding of
-// rv39 seed 10831 that gain was 4.7e-6 off with the pencil K 6.9e-7), so
-// K is held to that tolerance only. Checked against the 320-bit doubling
-// X and its gain.
+// cross term S, m > n and a large Q (5AFLTD, D6QQX7). Dare certifies X
+// exact to 1e-16 (its Newton step within eps) in reduced inputs. The
+// pencil K was 6.1e-6 off the 320-bit gain of the exact X and the
+// double-double gain of the rounded X 1.4e-6, both within the gain's move
+// under X∘(1 ± eps) (1.1e-5): K is now the gain of X taken on by Hewer
+// steps in extended precision. Checked against the exact-E 320-bit
+// reference, whose K is not the gain of a rounded X: the 320-bit gain of
+// the rounded 320-bit X is itself 1.4e-6 off.
 func TestDareCrossTermGainOfConvergedX(t *testing.T) {
 	n, m := 4, 5
 	A := mat.NewDense(n, n, []float64{0.9073904551956422, -0.3938152915303475, -0.1388654955148709, 0.6453691774282841, 0.07270460266915588, -1.3227405203905365, -0.8145105234248935, -0.26261350333082434, 0.8606718971767525, -0.1309492538747483, 0.9146168182607435, -0.9427195885249914, 0.09993913936332144, -1.7391953973156133, -1.0297260545452867, -0.40407230105408143})
@@ -24,14 +22,16 @@ func TestDareCrossTermGainOfConvergedX(t *testing.T) {
 	Q := mat.NewDense(n, n, []float64{3.424717771208278e+10, 9.375648066214362e+10, 1.648872960038449e+10, -1.2571465024884272e+10, 9.375648066214362e+10, 4.695821782485053e+11, 1.25151172539841e+11, -5.695962137191818e+10, 1.648872960038449e+10, 1.25151172539841e+11, 5.818587941113509e+10, -7.592674358853244e+10, -1.2571465024884272e+10, -5.695962137191818e+10, -7.592674358853244e+10, 1.9383815312282648e+11})
 	R := mat.NewDense(m, m, []float64{1.0129698221949526e-12, 1.5165534002083716e-14, -1.2020908235405675e-14, 1.4730276877923464e-14, 7.971426705444214e-16, 1.5165534002083716e-14, 1.055249871213906e-12, -1.8659862189909865e-14, 4.2063454499163176e-14, 7.148581032856596e-16, -1.2020908235405675e-14, -1.8659862189909865e-14, 1.0342727142679341e-12, -4.031636262769193e-14, -1.953123696413e-14, 1.4730276877923464e-14, 4.2063454499163176e-14, -4.031636262769193e-14, 1.1195035906083e-12, 7.277818688036334e-15, 7.971426705444214e-16, 7.148581032856596e-16, -1.953123696413e-14, 7.277818688036334e-15, 1.0435714003513245e-12})
 	S := mat.NewDense(n, m, []float64{1.3277908247730363e-08, 3.5794708903881897e-07, -9.256902635584484e-08, -1.7438274301574403e-08, 1.2848707174858998e-07, -2.7742347215359556e-07, 1.12153672115933e-06, -2.780328713310766e-07, -3.867847434506816e-07, 7.592864211405702e-07, -1.039632649658123e-07, 2.2589547554642853e-07, -5.98713266066638e-08, -2.199125578621379e-07, 2.941184187586047e-07, 5.3489231538812025e-09, -1.474307824511386e-07, 5.50065642036163e-08, 2.982166320641515e-07, -3.3102366951328807e-07})
-	Xo := dareDoublingBig(A, B, Q, R, S)
-	Ko := dareGainBig(A, B, R, S, Xo)
+	ref := riccatiExactReference(false, A, B, Q, R, S, nil, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("reference not certified")
+	}
 	for _, ns := range []bool{false, true} {
 		res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: ns})
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
-		if eX, eK := relErr(res.X, Xo), relErr(res.K, Ko); res.Accuracy == 0 && (eX > 1e-12 || eK > 1e-5) {
+		if eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K); res.Accuracy == 0 && (eX > 1e-12 || eK > 1e-7) {
 			t.Errorf("NoScaling %v: Accuracy 0, X off the oracle by %.3g, K by %.3g", ns, eX, eK)
 		}
 	}

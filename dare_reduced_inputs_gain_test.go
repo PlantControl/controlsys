@@ -113,7 +113,9 @@ func TestDareDescriptorReducedInputsUnsteppedXNotCertified(t *testing.T) {
 // ~1.2e-12, cross term, no E (O2MVDD rv39 seed 10831 as generated on
 // amd64). On amd64 X is exact to 6.9e-17, yet its gain, substituted for
 // K, was 4.7e-6 off the 320-bit gain (as was the 320-bit gain of that X;
-// an eps perturbation of Q moves K by 8e-8; base 6.9e-7).
+// an eps perturbation of Q moves K by 8e-8; base 6.9e-7 and, with
+// NoScaling, 1.39e-6). K is now the gain of X taken on by Hewer steps in
+// extended precision (D6QQX7).
 func TestDareCrossTermReducedInputsGainNotSubstituted(t *testing.T) {
 	A := mat.NewDense(3, 3, []float64{0.11277767345321332, -0.12701086166535683, -0.3282418505397938, -0.6162985556828814, 0.20592104971302708, -0.12800032343860365, 0.0907954836845478, 0.10112538417271175, -0.4293440070156919})
 	B := mat.NewDense(3, 4, []float64{-1.3460581287057858, -0.4303380677629103, -1.118400476700266, -0.4753542311719018, -1.0230348133871177, -1.5094495481218706, 0.8812892138062883, 0.544558646697797, 2.9391988593246956, -0.03745218545200002, -1.8306089580990381, 0.6069334486152766})
@@ -127,7 +129,7 @@ func TestDareCrossTermReducedInputsGainNotSubstituted(t *testing.T) {
 		}
 		eX, eK := dareReducedInputsOracle(t, A, B, Q, R, S, nil, res)
 		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.Accuracy, eX, eK)
-		if res.Accuracy == 0 && (eX > newtonTol || eK > 3*gainFloor) {
+		if res.Accuracy == 0 && (eX > newtonTol || eK > 1e-7) {
 			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
 		}
 	}
