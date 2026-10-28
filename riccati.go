@@ -860,7 +860,10 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // refinement; a K off the gain of X by more than 1e-6 is replaced by the
 // gain of X taken on by Hewer steps in extended precision (gainOfX): with
 // X exact to 1e-16 the pencil K was 6.1e-6 off the 320-bit gain and the
-// gain of the rounded X 1.4e-6, that one 1e-10.
+// gain of the rounded X 1.4e-6, that one 1e-10. With an ill-conditioned
+// E, a K that extended-precision Hewer gain contradicts beyond its band
+// is returned with Accuracy 1: the float64 X wandered 1e-10 off, its gain
+// 3.6e-4 off the 320-bit one (band 1.3e-9).
 // A descriptor Dare left with no stabilizing solution whose E is
 // ill-conditioned but nonsingular is solved once more on its explicit
 // model in extended precision (nearSingularDare).

@@ -48,7 +48,7 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 // over successive Newton steps against an eps band of 3e-15, and a
 // cheap-control gain amplifies that by 1e5 to 1e6: the gain of X was
 // 1.2e-4 to 1.6e-3 off the 320-bit gain (band 1.3e-9), the Hewer gain
-// from either X within 1e-12 of it (V4OJPR). The precision also carries
+// from either X within 1e-12 of it. The precision also carries
 // the condition of the gain in the given inputs: with duplicated inputs
 // that was 1.9e33 against under 10 in the reduced ones, and at 128 bits
 // the Hewer gain converged 4.9e-6 off the 320-bit one.
