@@ -1,6 +1,15 @@
 package controlsys
 
-import "plantcontrol.org/v1/gonum/mat"
+import (
+	"math"
+
+	"plantcontrol.org/v1/gonum/mat"
+)
+
+// hewerGainPrecMin is the least precision of hewerGainSubstituted, which
+// carries log2 of the gain's condition plus 96 bits: at 106 bits the
+// Hewer gain stalled 8e-9 off the 320-bit one, at 160 it matched it.
+const hewerGainPrecMin = 128
 
 // hewerGainSubstituted returns res with K the gain of X taken two Hewer
 // steps on in extended precision (extendedDare's model, E unrounded),
@@ -34,7 +43,7 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 	} else {
 		model = eyeDense(n)
 	}
-	prec := extendedPrec(cond)
+	prec := uint(min(extendedPrecMax, max(hewerGainPrecMin, math.Log2(cond)+96)))
 	d := extendedDare{A: A, B: B, Q: Q, R: R, S: crossTerm(opts), E: model}
 	sol, ok := d.model(prec, nil)
 	if !ok {
