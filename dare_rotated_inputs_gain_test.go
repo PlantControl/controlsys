@@ -106,3 +106,62 @@ func dareRotatedInputsUnstable(A, B, E, K *mat.Dense) bool {
 	}
 	return !xbStable(false, xbAxpy(md.a, -1, xbMul(md.b, xbFrom(K, m, n, md.prec))))
 }
+
+// TestDareRotatedInputsUnrefinedGainHeldToGainOfX: a rotated Dare whose K
+// is not refined in double-double (xe nil) is held to the gain of its X
+// (gainOfX), as the reduced inputs are, and not returned as terminal.
+// Before, the pencil K was certified-wrong at Accuracy 0 (XD3P6I; rv48r
+// seeds 1743 and 2270): 1.7e-6 and 2.2e-5 off against a band of 1.9e-9
+// without E, 0.69 and 0.94 against 8e-11 with E's last pivot 4.8e-6, while
+// X was within 1.5e-11.
+func TestDareRotatedInputsUnrefinedGainHeldToGainOfX(t *testing.T) {
+	cases := []dareRotatedInputsCase{
+		{name: "n2 m2 no E",
+			A: mat.NewDense(2, 2, []float64{1.1970987248830431, 0.21839387389975254, -0.5696974383317107, -0.325348970298359}),
+			B: mat.NewDense(2, 2, []float64{0.4816730169796179, 0.35567159949345223, 0.6443107633354956, 0.4757651293207472}),
+			Q: mat.NewDense(2, 2, []float64{1.952990385750042e+07, 8.1407794804044e+07, 8.1407794804044e+07, 3.3933751559724957e+08}),
+			R: mat.NewDense(2, 2, []float64{2.197687831027214e-12, -2.8287591636902017e-14, -2.8287591636902017e-14, 2.0745224304428615e-12})},
+		{name: "n2 m2 pivot 4.8e-6",
+			A: mat.NewDense(2, 2, []float64{-0.3784656429752892, 0.1508584940756077, 0.3546425885971392, 1.06643209694223}),
+			B: mat.NewDense(2, 2, []float64{-0.1835140494171699, 0.07209681722520986, 0.9124725198553958, -0.35849482998694643}),
+			Q: mat.NewDense(2, 2, []float64{890.0283588313838, 1552.553172757777, 1552.553172757777, 2708.252304909865}),
+			R: mat.NewDense(2, 2, []float64{8.106860178282055e-09, 3.6169833946935676e-11, 3.6169833946935676e-11, 8.144705169254964e-09}),
+			E: mat.NewDense(2, 2, []float64{1.031897554859899, -0.18384676410337314, 0, 4.841874544440457e-06})},
+	}
+	for _, c := range cases {
+		ref := riccatiExactReference(false, c.A, c.B, c.Q, c.R, c.S, c.E, riccatiExactPrec)
+		if !ref.OK {
+			t.Fatalf("%s: exact-E oracle did not certify", c.name)
+		}
+		sens, ok := riccatiExactSensitivity(false, c.A, c.B, c.Q, c.R, c.S, c.E, ref, "ABQRSE")
+		if !ok {
+			t.Fatalf("%s: no sensitivity", c.name)
+		}
+		kTol := max(newtonTol, 4*sens.KBand())
+		for _, ns := range []bool{false, true} {
+			opts := &RiccatiOpts{E: c.E, S: c.S, NoScaling: ns}
+			red, _ := reduceInputs(c.A, c.B, c.Q, c.R, opts)
+			if red == nil || !red.rotated {
+				t.Fatalf("%s NoScaling %v: inputs not rotated", c.name, ns)
+			}
+			if r := red.solve(c.A, c.B, c.Q, opts); r == nil || r.xe != nil {
+				t.Fatalf("%s NoScaling %v: rotated Dare K not the unrefined one", c.name, ns)
+			}
+			res, err := Dare(c.A, c.B, c.Q, c.R, opts)
+			if err != nil {
+				t.Fatalf("%s NoScaling %v: %v", c.name, ns, err)
+			}
+			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g, K err %.3g (tol %.3g)", c.name, ns, res.Accuracy, eX, eK, kTol)
+			if res.Accuracy != 0 {
+				t.Errorf("%s NoScaling %v: Accuracy %d", c.name, ns, res.Accuracy)
+			}
+			if eX > newtonTol || eK > kTol {
+				t.Errorf("%s NoScaling %v: X off by %.3g, K by %.3g (tol %.3g)", c.name, ns, eX, eK, kTol)
+			}
+			if dareRotatedInputsUnstable(c.A, c.B, c.E, res.K) {
+				t.Errorf("%s NoScaling %v: E⁻¹(A − BK) unstable in %d bits", c.name, ns, riccatiExactPrec)
+			}
+		}
+	}
+}

@@ -943,9 +943,10 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	// and SV round within the K band, so a K refined there is terminal.
 	// The gain of the rounded X was up to 2.5 off the 320-bit gain where
 	// that K was within 4x its band; held to it, K became 3.2e-6 off
-	// (band 4.4e-13).
+	// (band 4.4e-13). An unrefined rotated K is held to it: the pencil K
+	// was 0.69 off the 320-bit gain (band 8e-11) with X within 1.5e-11.
 	gainOf := func(c *RiccatiResult) *RiccatiResult {
-		if !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
+		if red.rotated && c.xe == nil || !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
 			r, _, ok := gainOfX(A, B, Q, R, opts, red, c)
 			if ok {
 				return r
