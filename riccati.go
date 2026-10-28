@@ -1152,7 +1152,10 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // am.3), which gainMissIn must accept; X is kept. Not with rotated
 // inputs: all 24 such K of 2686 unrefined rotated sweep rows were within
 // 4x their band, while the Hewer gain cost 4 to 16 times the Dare.
-// Neither is a rotated K
+// Such a rotated K is refined instead, kept should that miss gainTol:
+// the gain of X moved 5e-7 per ulp of X, so gainMissIn accepted a K
+// 1.9e-6 off the 320-bit gain (band 4.3e-9) where that of X one Newton
+// step on was within 8.7e-9. Neither is a rotated K
 // refined whose gain gainMissIn cannot resolve (+Inf): X one step on
 // never resolved it either. A rotated refined K inside gainFloor but not
 // gainTol is refined once more first: on amd64 one Newton step took X
@@ -1172,6 +1175,11 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		if red != nil && !red.rotated && d.d > gainFloor {
 			if r, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
 				return r, 0, true
+			}
+		}
+		if red != nil && red.rotated && d.d > gainFloor {
+			if c, cd, ok := refined(A, B, Q, R, opts, red, res); ok && cd.units(gainTol) <= 1 {
+				return c, 0, true
 			}
 		}
 		return res, 0, true
