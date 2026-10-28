@@ -159,7 +159,7 @@ func matchedD2CInvariantZeros(sys *System, count, artificial int) ([]complex128,
 
 // matchedRootsWellConditioned reports whether every root r of the
 // polynomial is resolved to 1e-10 of its continuous image log(r)/T: the
-// first-order error ε·Σ|aₖ||r|ᵏ/|p'(r)| over |r|·|log r| (UYCHOO). The
+// first-order error ε·Σ|aₖ||r|ᵏ/|p'(r)| over |r|·|log r|. The
 // invariant zeros are then not needed.
 func matchedRootsWellConditioned(poly []float64, roots []complex128) bool {
 	for _, r := range roots {
