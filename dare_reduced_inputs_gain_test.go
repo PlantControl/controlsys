@@ -12,7 +12,9 @@ import (
 // red.rw, red.sw rounded to float64). There neither a K refined in
 // double-double nor the gain of an X converged to eps is kept as terminal,
 // nor is X stepped by such a refinement (Y6BJEX am.4): each left K or X
-// off the 320-bit solution at Accuracy 0.
+// off the 320-bit solution at Accuracy 0. K may instead be the gain of X
+// taken on by Hewer steps in extended precision, held to gainMiss and not
+// terminal (D6QQX7).
 
 // dareReducedInputsOracle returns the errors of the X and K of res against
 // the stabilizing solution of Hewer's iteration in 320 bits on the explicit
@@ -113,7 +115,10 @@ func TestDareDescriptorReducedInputsUnsteppedXNotCertified(t *testing.T) {
 // ~1.2e-12, cross term, no E (O2MVDD rv39 seed 10831 as generated on
 // amd64). On amd64 X is exact to 6.9e-17, yet its gain, substituted for
 // K, was 4.7e-6 off the 320-bit gain (as was the 320-bit gain of that X;
-// an eps perturbation of Q moves K by 8e-8; base 6.9e-7).
+// an eps perturbation of Q moves K by 8e-8; base 6.9e-7 and, with
+// NoScaling, 1.39e-6). K of an X converged to eps is now the gain of X
+// taken on by Hewer steps in extended precision (D6QQX7), held to 1e-7;
+// under -race X is 1.5e-9 off, K 4e-7 (band 2.8e-6), held to 3e-6.
 func TestDareCrossTermReducedInputsGainNotSubstituted(t *testing.T) {
 	A := mat.NewDense(3, 3, []float64{0.11277767345321332, -0.12701086166535683, -0.3282418505397938, -0.6162985556828814, 0.20592104971302708, -0.12800032343860365, 0.0907954836845478, 0.10112538417271175, -0.4293440070156919})
 	B := mat.NewDense(3, 4, []float64{-1.3460581287057858, -0.4303380677629103, -1.118400476700266, -0.4753542311719018, -1.0230348133871177, -1.5094495481218706, 0.8812892138062883, 0.544558646697797, 2.9391988593246956, -0.03745218545200002, -1.8306089580990381, 0.6069334486152766})
@@ -127,8 +132,45 @@ func TestDareCrossTermReducedInputsGainNotSubstituted(t *testing.T) {
 		}
 		eX, eK := dareReducedInputsOracle(t, A, B, Q, R, S, nil, res)
 		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.Accuracy, eX, eK)
-		if res.Accuracy == 0 && (eX > newtonTol || eK > 3*gainFloor) {
+		kTol := 3 * gainFloor
+		if eX <= 1e-15 {
+			kTol = 1e-7
+		}
+		if res.Accuracy == 0 && (eX > newtonTol || eK > kTol) {
 			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
+		}
+	}
+}
+
+// TestDareDescriptorDuplicateInputsGainOfConvergedX: n 2, m 4 with three
+// duplicated input columns, cheap R ~1.9e-12, tiny cross term, E well
+// conditioned (rv39 seed 1342, D6QQX7). X is exact to 2e-16, while the
+// pencil K was 9e-5 off the exact-E 320-bit gain (its eps-sensitivity
+// 4e-4); the gain of X taken on by Hewer steps in extended precision is
+// exact. A K off the exact gain by more than 1e-7 must be the gain of its
+// own X (320-bit, dareGainBig): on amd64 without NoScaling it is, 1.4e-6
+// off with X exact, inside the band, and is kept.
+func TestDareDescriptorDuplicateInputsGainOfConvergedX(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-0.28864518346838963, -0.549870329431709, -0.6243674170543952, 0.8833863280696619})
+	B := mat.NewDense(2, 4, []float64{0.047175451585948935, -0.5961903208497157, -0.5961903208497157, -0.5961903208497157, -0.06500131021983324, 0.9803468818573009, 0.9803468818573009, 0.9803468818573009})
+	Q := mat.NewDense(2, 2, []float64{59.22482557898569, -117.240527973113, -117.240527973113, 232.08749481385476})
+	R := mat.NewDense(4, 4, []float64{1.8689544268484782e-12, 1.6790511259354945e-14, 1.7683876130756696e-14, -5.764886519549634e-14, 1.6790511259354945e-14, 1.8593955819544937e-12, -1.1495510171279438e-14, -1.681607306145989e-14, 1.7683876130756696e-14, -1.1495510171279438e-14, 1.8630544642286726e-12, -4.4225454168101175e-14, -5.764886519549634e-14, -1.681607306145989e-14, -4.4225454168101175e-14, 1.9383488945488344e-12})
+	S := mat.NewDense(2, 4, []float64{-1.3842151587849728e-16, 4.124675003603732e-17, -2.0137472633148114e-16, 3.9939457662832224e-16, 2.740170434573968e-16, -8.165141398265057e-17, 3.986382231562215e-16, -7.906351867774363e-16})
+	E := mat.NewDense(2, 2, []float64{0.9141292581144288, -0.16189848878288213, -0.19642846953561233, 0.7158936931290532})
+	ref := riccatiExactReference(false, A, B, Q, R, S, E, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("reference not certified")
+	}
+	for _, ns := range []bool{false, true} {
+		res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns})
+		if err != nil {
+			t.Fatalf("NoScaling %v: %v", ns, err)
+		}
+		eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
+		eG := relErr(res.K, dareGainBig(A, B, R, S, res.X))
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g, off the gain of X by %.3g", ns, res.Accuracy, eX, eK, eG)
+		if res.Accuracy == 0 && (eX > newtonTol || eK > 1e-7 && eG > 1e-9) {
+			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g (%.3g off the gain of X)", ns, eX, eK, eG)
 		}
 	}
 }

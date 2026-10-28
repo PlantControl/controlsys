@@ -856,7 +856,11 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // double-double iterate they came from (3e-8 off it with E's smallest
 // singular value 1.2e-6), in both its Frobenius and 1-norm (X off by
 // 1.25e-8 with 9.97e-9 in the first). With reduced inputs, under cheap
-// control, K is neither substituted nor kept from a refinement (gainOfX).
+// control, K is neither the gain of the rounded X nor kept from a
+// refinement; a K off the gain of X by more than 1e-6 is replaced by the
+// gain of X taken on by Hewer steps in extended precision (gainOfX): with
+// X exact to 1e-16 the pencil K was 6.1e-6 off the 320-bit gain and the
+// gain of the rounded X 1.4e-6, that one 1e-10.
 // A descriptor Dare left with no stabilizing solution whose E is
 // ill-conditioned but nonsingular is solved once more on its explicit
 // model in extended precision (nearSingularDare).
@@ -935,6 +939,11 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		}
 		return res, err
 	}
+	// Rotated inputs are the given Dare under an orthogonal V: BV, VᵀRV
+	// and SV round within the K band, so a K refined there is terminal.
+	// The gain of the rounded X was up to 2.5 off the 320-bit gain where
+	// that K was within 4x its band; held to it, K became 3.2e-6 off
+	// (band 4.4e-13).
 	gainOf := func(c *RiccatiResult) *RiccatiResult {
 		if !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
 			r, _, ok := gainOfX(A, B, Q, R, opts, red, c)
@@ -1133,7 +1142,10 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // only for the given inputs (red nil): with reduced inputs K is measured
 // by gainMissIn and taken as Dare kept before, a substituted K and an X
 // its certification did not step being 4.7e-6 and 1.25e-8 off the
-// 320-bit solution at Accuracy 0.
+// 320-bit solution at Accuracy 0. There a K off the gain of X by more
+// than gainFloor is instead replaced by the gain of the
+// extended-precision Hewer iterate of X (hewerGainSubstituted, Y6BJEX
+// am.3), which gainMissIn must accept; X is kept.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
@@ -1142,6 +1154,11 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	if d.units(gainTol) <= 1 {
 		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
 			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
+				return r, 0, true
+			}
+		}
+		if red != nil && d.d > gainFloor {
+			if r, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
 				return r, 0, true
 			}
 		}
