@@ -11,9 +11,14 @@ import (
 // Hewer gain stalled 8e-9 off the 320-bit one, at 160 it matched it.
 const hewerGainPrecMin = 128
 
-// hewerGainStepsMax is the most Hewer steps hewerGainContradicts takes:
+// hewerGainStepsMax is the most Hewer steps hewerGainRef takes:
 // from a gain of X 3.6e-4 off, the second step still moved K by 1.6e-7.
 const hewerGainStepsMax = 4
+
+// hewerGainCondE is the least cond(E) at which hewerGainRef checks K: below it X does not wander enough to move a gain by
+// gainFloor (on the rv48r sweep the K it contradicted had cond(E) of
+// 6.9e4 and above), and the check cost 2.5 to 8 times the Dare.
+const hewerGainCondE = 1e4
 
 // hewerGainSubstituted returns res with K the gain of X taken two Hewer
 // steps on in extended precision (hewerGain) and Eig that of A − BK, once
@@ -36,62 +41,94 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 	return &c, true
 }
 
-// hewerGainContradicts returns the relative distance miss of the K of res
-// from the gain hewerGain forms from its X, with a descriptor E, and
-// whether miss exceeds both floor and 4√N times the largest move of that
-// gain under two componentwise eps perturbations of the N entries of the
-// data (perturbedMove), a lower estimate of K's band that √N lifts to an
-// upper one. ok is false without E or when hewerGain fails. There the
-// certified float64 X wanders within cond(E)-amplified rounding, 1e-11
-// to 1e-9 off over successive Newton steps against an eps band of 3e-15,
-// and a cheap-control gain amplifies that by 1e5 to 1e6: the gain of X
-// was 1.2e-4 to 1.6e-3 off the 320-bit gain (band 1.3e-9), the Hewer gain
-// within 1e-12 of it (V4OJPR). Where K's band is wide the gain of X is
-// as good as any: K 1.4e-6 off the Hewer gain had a band of 9.8e-6. The
-// precision also carries the condition of the gain in the given inputs:
-// with duplicated inputs that was 1.9e33 against under 10 in the reduced
-// ones, and at 128 bits the Hewer gain converged 4.9e-6 off the 320-bit
-// one.
-func hewerGainContradicts(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult, floor float64) (miss float64, contradicts, ok bool) {
-	if opts == nil || opts.E == nil {
+// hewerGainRef is the gain hewerGain forms, with a descriptor E, from the
+// X of the first result it is asked about whose gain converges there,
+// against which contradicts measures the K of each. There the certified
+// float64 X wanders within cond(E)-amplified rounding, 1e-11 to 1e-9 off
+// over successive Newton steps against an eps band of 3e-15, and a
+// cheap-control gain amplifies that by 1e5 to 1e6: the gain of X was
+// 1.2e-4 to 1.6e-3 off the 320-bit gain (band 1.3e-9), the Hewer gain
+// from either X within 1e-12 of it (V4OJPR). The precision also carries
+// the condition of the gain in the given inputs: with duplicated inputs
+// that was 1.9e33 against under 10 in the reduced ones, and at 128 bits
+// the Hewer gain converged 4.9e-6 off the 320-bit one.
+type hewerGainRef struct {
+	A, B, Q, R *mat.Dense
+	opts       *RiccatiOpts
+	red        *reducedInputs
+	off        bool
+	h          hewerGainSol
+	have       bool
+	band       float64
+}
+
+// newHewerGainRef returns the reference of the Dare, off (never
+// contradicting) without E or with cond(E) below hewerGainCondE.
+func newHewerGainRef(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs) *hewerGainRef {
+	g := &hewerGainRef{A: A, B: B, Q: Q, R: R, opts: opts, red: red, off: true, band: -1}
+	if red == nil || opts == nil || opts.E == nil {
+		return g
+	}
+	var lu mat.LU
+	lu.Factorize(opts.E)
+	g.off = !(lu.Cond() >= hewerGainCondE)
+	return g
+}
+
+// contradicts returns the relative distance miss of the K of res from the
+// reference gain and whether miss exceeds both floor and 4√N times the
+// largest move of that gain under two componentwise eps perturbations of
+// the N entries of the data (perturbedMove), a lower estimate of K's band
+// that √N lifts to an upper one: where that band is wide the gain of X is
+// as good as any (K 1.4e-6 off the Hewer gain had a band of 9.8e-6). ok
+// is false while there is no reference.
+func (g *hewerGainRef) contradicts(res *RiccatiResult, floor float64) (miss float64, contradicts, ok bool) {
+	if g.off {
 		return 0, false, false
 	}
-	_, cond, ok := ddGain(A, B, R, crossTerm(opts), res.X)
-	if !ok {
-		cond = math.Inf(1)
-	}
-	h, ok := hewerGain(A, B, Q, R, opts, red, res, hewerGainStepsMax, cond)
-	if !ok {
-		return 0, false, false
+	if !g.have {
+		_, cond, ok := ddGain(g.A, g.B, g.R, crossTerm(g.opts), res.X)
+		if !ok {
+			cond = math.Inf(1)
+		}
+		if g.h, ok = hewerGain(g.A, g.B, g.Q, g.R, g.opts, g.red, res, hewerGainStepsMax, cond); !ok {
+			return 0, false, false
+		}
+		g.have = true
 	}
 	var diff mat.Dense
-	diff.Sub(h.K, res.K)
-	miss = mat.Norm(&diff, 1) / mat.Norm(h.K, 1)
+	diff.Sub(g.h.K, res.K)
+	miss = mat.Norm(&diff, 1) / mat.Norm(g.h.K, 1)
 	if !(miss > floor) {
 		return miss, false, true
 	}
-	x, ok := h.sol.xOf(h.sol.y)
-	if !ok {
-		return miss, false, true
-	}
-	kw, ok := h.d.noiseGain(h.sol, h.sol.y)
-	if !ok {
-		return miss, false, true
-	}
-	move := 0.0
-	for seed := range uint64(2) {
-		mv, ok := h.d.perturbedMove(h.sol, x, kw, h.prec, seed)
+	if g.band < 0 {
+		g.band = math.Inf(1)
+		h := g.h
+		x, ok := h.sol.xOf(h.sol.y)
 		if !ok {
 			return miss, false, true
 		}
-		move = max(move, mv.k)
+		kw, ok := h.d.noiseGain(h.sol, h.sol.y)
+		if !ok {
+			return miss, false, true
+		}
+		move := 0.0
+		for seed := range uint64(2) {
+			mv, ok := h.d.perturbedMove(h.sol, x, kw, h.prec, seed)
+			if !ok {
+				return miss, false, true
+			}
+			move = max(move, mv.k)
+		}
+		n, m := g.B.Dims()
+		entries := 2*n*n + 2*n*m + m*m
+		if g.opts.S != nil {
+			entries += n * m
+		}
+		g.band = 4 * math.Sqrt(float64(entries)) * move
 	}
-	n, m := B.Dims()
-	entries := 2*n*n + 2*n*m + m*m
-	if opts.S != nil {
-		entries += n * m
-	}
-	return miss, miss > 4*math.Sqrt(float64(entries))*move, true
+	return miss, miss > g.band, true
 }
 
 // hewerGainSol is the gain K of hewerGain, the eigenvalues eig of A − BK,

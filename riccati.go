@@ -1157,8 +1157,8 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // step took X from 1e-10 to 5e-14 off, its gain 2.4e-7 off the 320-bit
 // one (band 1.9e-9), and the second to 1.8e-17 and 8e-11. With reduced
 // inputs and a descriptor E, a K the Hewer gain of its X contradicts
-// (hewerGainContradicts) is not returned with ok; then r is, of res and the X
-// refined, that whose K is nearest the Hewer gain of its X, for Accuracy
+// (hewerGainRef) is not returned with ok; then r is, of res and the X
+// refined, that whose K is nearest the Hewer gain, for Accuracy
 // 1: there the gain of the float64 X was 3.6e-4 off the 320-bit gain at
 // Accuracy 0 (band 1.3e-9).
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
@@ -1168,11 +1168,12 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	d := gainMissIn(A, B, R, opts, red, res)
 	var nearest *RiccatiResult
 	nearestMiss, contra := math.Inf(1), false
+	ref := newHewerGainRef(A, B, Q, R, opts, red)
 	contradicted := func(r *RiccatiResult) func() bool {
 		known, v := false, false
 		return func() bool {
-			if !known && red != nil {
-				if m, off, ok := hewerGainContradicts(A, B, Q, R, opts, red, r, gainFloor); ok {
+			if !known {
+				if m, off, ok := ref.contradicts(r, gainFloor); ok {
 					v = off
 					contra = contra || v
 					if m < nearestMiss {
