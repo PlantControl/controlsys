@@ -43,7 +43,7 @@ func (sys *System) d2cMatched() (*System, error) {
 	}
 	dz, dp, k := disc.Zeros[0][0], disc.Poles[0][0], disc.Gain[0][0]
 	var out *System
-	if z, p, g, ok := matchedD2CPencilRoots(sys, dz, dp, k, artificial); ok {
+	if z, p, g, ok := matchedD2CPencilRoots(sys, numerator, dz, dp, k, artificial); ok {
 		out, _ = matchedD2CModel(z, p, g, artificial, sys.Dt)
 	}
 	if out == nil {
@@ -83,13 +83,13 @@ func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64)
 // d2c(...,'matched') takes them, with zeros other than the artificial
 // zeros at −1 and a gain fitted to the response of sys; polynomial roots of
 // the transfer function lose tight pole clusters near z = 1. The zeros are
-// the invariant zeros less the count nearest −1, as MATLAB takes them, or
-// the transfer-function zeros cz when tzero cannot resolve the multiple
-// zero at −1. ok is false unless the fit at a probe point is no worse than
+// the invariant zeros less the count nearest −1, as MATLAB takes them,
+// unless the transfer-function zeros cz (roots of numerator) are well
+// conditioned or tzero cannot resolve the multiple zero at −1. ok is false unless the fit at a probe point is no worse than
 // that of cz, cp, k, at low frequency; eig(A) may hold more poles than cp
 // only when the transfer function cancelled roots it should not have,
 // fitting worse than 1e-6 where the pencil roots fit to 1e-9.
-func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artificial int) (zeros, poles []complex128, gain float64, ok bool) {
+func matchedD2CPencilRoots(sys *System, numerator []float64, cz, cp []complex128, k float64, artificial int) (zeros, poles []complex128, gain float64, ok bool) {
 	poles, err := sys.Poles()
 	if err != nil || len(poles) == 0 || len(poles) < len(cp) {
 		return nil, nil, 0, false
@@ -105,17 +105,6 @@ func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artifici
 		return out
 	}
 	extra := len(poles) - len(cp)
-	var candidates [][]complex128
-	if extra == 0 {
-		candidates = append(candidates, cz)
-	}
-	if pz, err := sys.Zeros(); err == nil && len(pz) == len(cz)+artificial+extra {
-		if pz, ok := matchedConjugateClosed(pz); ok {
-			if pz, ok := matchedStripArtificialZeros(pz, artificial); ok {
-				candidates = append(candidates, pz)
-			}
-		}
-	}
 	free := *sys
 	free.Delay, free.InputDelay, free.OutputDelay = nil, nil, nil
 	tfZeros := withArtificial(cz)
@@ -135,6 +124,15 @@ func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artifici
 		}
 		limit = 1e-9
 	}
+	var candidates [][]complex128
+	if extra == 0 {
+		candidates = append(candidates, cz)
+	}
+	if extra > 0 || !matchedRootsWellConditioned(numerator, cz) {
+		if pz, ok := matchedD2CInvariantZeros(sys, len(cz)+artificial+extra, artificial); ok {
+			candidates = append(candidates, pz)
+		}
+	}
 	for _, z := range slices.Backward(candidates) {
 		all := withArtificial(z)
 		g := real(g0 / matchedRootRatio(all, poles, s0))
@@ -143,6 +141,42 @@ func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artifici
 		}
 	}
 	return nil, nil, 0, false
+}
+
+// matchedD2CInvariantZeros returns the count invariant zeros of sys less
+// the artificial ones nearest −1.
+func matchedD2CInvariantZeros(sys *System, count, artificial int) ([]complex128, bool) {
+	pz, err := sys.Zeros()
+	if err != nil || len(pz) != count {
+		return nil, false
+	}
+	pz, ok := matchedConjugateClosed(pz)
+	if !ok {
+		return nil, false
+	}
+	return matchedStripArtificialZeros(pz, artificial)
+}
+
+// matchedRootsWellConditioned reports whether every root r of the
+// polynomial is resolved to 1e-10 of its continuous image log(r)/T: the
+// first-order error ε·Σ|aₖ||r|ᵏ/|p'(r)| over |r|·|log r| (UYCHOO). The
+// invariant zeros are then not needed.
+func matchedRootsWellConditioned(poly []float64, roots []complex128) bool {
+	for _, r := range roots {
+		var v, dv complex128
+		var scale float64
+		ar := cmplx.Abs(r)
+		for _, c := range poly {
+			dv = dv*r + v
+			v = v*r + complex(c, 0)
+			scale = scale*ar + math.Abs(c)
+		}
+		l := cmplx.Abs(cmplx.Log(r))
+		if dv == 0 || l == 0 || !(0x1p-52*scale/cmplx.Abs(dv) <= 1e-10*ar*l) {
+			return false
+		}
+	}
+	return true
 }
 
 // matchedD2CProbePoints maps the matchedProbePoints of the continuous roots

@@ -228,3 +228,24 @@ func TestD2CMatchedInvertsMatchedC2D(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkD2CMatched(b *testing.B) {
+	g, err := NewZPK([]complex128{-1.1729}, []complex128{-0.1531, -0.9583, -1.4969 + 1.397i, -1.4969 - 1.397i, -0.6914}, 1.3863, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	res, err := g.StateSpace()
+	if err != nil {
+		b.Fatal(err)
+	}
+	d, err := res.Sys.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := d.D2C(D2COptions{Method: C2DMethodMatched}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
