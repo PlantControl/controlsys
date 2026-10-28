@@ -551,9 +551,7 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod) (*System, bool) {
 	if method == C2DMethodMatched || !sys.IsDescriptor() || sys.LFT != nil || !sys.HasDelay() {
 		return nil, false
 	}
-	core := *sys
-	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
-	parts, ok := foldInaccurateParts(&core)
+	parts, ok := foldInaccurateParts(ioDelayFreeCore(sys))
 	if !ok {
 		return nil, false
 	}
@@ -571,6 +569,17 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod) (*System, bool) {
 	delays := sys.Copy()
 	out.Delay, out.InputDelay, out.OutputDelay = delays.Delay, delays.InputDelay, delays.OutputDelay
 	return out, true
+}
+
+// ioDelayFreeCore returns sys without its I/O delays (Delay, InputDelay,
+// OutputDelay) when it has no LFT; otherwise sys itself.
+func ioDelayFreeCore(sys *System) *System {
+	if sys.LFT != nil {
+		return sys
+	}
+	core := *sys
+	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
+	return &core
 }
 
 // realSchurPart returns the explicit part, if its A is not already upper
