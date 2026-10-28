@@ -939,6 +939,11 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		}
 		return res, err
 	}
+	// Rotated inputs are the given Dare under an orthogonal V: BV, VᵀRV
+	// and SV round within the K band, so a K refined there is terminal.
+	// The gain of the rounded X was up to 2.5 off the 320-bit gain where
+	// that K was within 4x its band; held to it, K became 3.2e-6 off
+	// (band 4.4e-13).
 	gainOf := func(c *RiccatiResult) *RiccatiResult {
 		if !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
 			r, _, ok := gainOfX(A, B, Q, R, opts, red, c)
