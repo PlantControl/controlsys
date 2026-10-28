@@ -42,32 +42,41 @@ func (sys *System) d2cMatched() (*System, error) {
 		return nil, err
 	}
 	dz, dp, k := disc.Zeros[0][0], disc.Poles[0][0], disc.Gain[0][0]
+	var out *System
 	if z, p, g, ok := matchedD2CPencilRoots(sys, dz, dp, k, artificial); ok {
-		dz, dp, k = z, p, g
+		out, _ = matchedD2CModel(z, p, g, artificial, sys.Dt)
 	}
-	cz, err := matchedLogRoots(dz, sys.Dt)
-	if err != nil {
-		return nil, err
-	}
-	cp, err := matchedLogRoots(dp, sys.Dt)
-	if err != nil {
-		return nil, err
-	}
-	for range artificial {
-		dz = append(dz, -1)
-	}
-	gain, err := matchedContinuousGain(dz, dp, cz, cp, k, sys.Dt)
-	if err != nil {
-		return nil, err
-	}
-	out, err := matchedCascade(cz, cp, gain, 0)
-	if err != nil {
-		return nil, err
+	if out == nil {
+		if out, err = matchedD2CModel(dz, dp, k, artificial, sys.Dt); err != nil {
+			return nil, err
+		}
 	}
 	newDelayConversionPolicy(sys.Dt).applyContinuousDelayFields(out, sys)
 	propagateNames(out, sys)
 	out.StateName = nil
 	return out, nil
+}
+
+// matchedD2CModel realizes the continuous matched model of the discrete
+// roots dz (less the artificial zeros at −1), dp and gain k.
+func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64) (*System, error) {
+	cz, err := matchedLogRoots(dz, dt)
+	if err != nil {
+		return nil, err
+	}
+	cp, err := matchedLogRoots(dp, dt)
+	if err != nil {
+		return nil, err
+	}
+	all := slices.Clone(dz)
+	for range artificial {
+		all = append(all, -1)
+	}
+	gain, err := matchedContinuousGain(all, dp, cz, cp, k, dt)
+	if err != nil {
+		return nil, err
+	}
+	return matchedCascade(cz, cp, gain, 0)
 }
 
 // matchedD2CPencilRoots returns the poles eig(A), as MATLAB
@@ -153,11 +162,10 @@ func matchedD2CProbePoints(dt float64, sets ...[]complex128) (complex128, comple
 }
 
 // matchedStripArtificialZeros removes the count zeros nearest −1 from the
-// zeros; ok is false unless each lies within the 1e-10^(1/count)
-// spread of a count-fold root at −1.
+// zeros; ok is false unless each lies within 0.25 of −1, the spread tzero
+// leaves on a many-fold zero there.
 func matchedStripArtificialZeros(zeros []complex128, count int) ([]complex128, bool) {
 	out := slices.Clone(zeros)
-	tol := math.Pow(1e-10, 1/float64(max(count, 1)))
 	for range count {
 		best := -1
 		for i, z := range out {
@@ -165,7 +173,7 @@ func matchedStripArtificialZeros(zeros []complex128, count int) ([]complex128, b
 				best = i
 			}
 		}
-		if best < 0 || cmplx.Abs(out[best]+1) > tol {
+		if best < 0 || cmplx.Abs(out[best]+1) > 0.25 {
 			return nil, false
 		}
 		out = slices.Delete(out, best, best+1)

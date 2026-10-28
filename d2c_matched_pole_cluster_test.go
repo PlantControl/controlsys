@@ -159,50 +159,71 @@ func TestD2CMatchedRotatedClusterFollowsMatchedZPK(t *testing.T) {
 }
 
 // D2C undoes matched C2D: the zeros at −1 that C2D adds up to relative
-// degree one are dropped and the clustered poles come back.
+// degree one are dropped and the clustered poles come back. The transfer
+// function of the discrete model cancelled two poles of the dt = 0.001
+// cluster (sweep seed 431) and lost one (seed 307), and tzero spreads the
+// five- and six-fold zeros at −1 by up to 0.08 (seeds 494, 307; UYCHOO).
 func TestD2CMatchedInvertsMatchedC2D(t *testing.T) {
-	poles := []complex128{-0.2, -0.4, -0.6, -0.8, -1}
-	g, err := NewZPK(nil, poles, 0.384, 0)
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name         string
+		zeros, poles []complex128
+		k            float64
+		dts          []float64
+	}{
+		{"real cluster", nil, []complex128{-0.2, -0.4, -0.6, -0.8, -1}, 0.384, []float64{0.01, 0.001}},
+		{"near cancellation", []complex128{-0.5001, -1.0347}, []complex128{-0.4566 + 1.814i, -0.4566 - 1.814i, -0.7451 + 1.4472i, -0.7451 - 1.4472i, -1.5689, -1.6005}, 1.6263, []float64{0.001}},
+		{"five-fold zero at -1", []complex128{-1.1729}, []complex128{-0.1531, -0.9583, -1.4969 + 1.397i, -1.4969 - 1.397i, -1.6828 + 1.9039i, -1.6828 - 1.9039i, -0.6914}, 1.3863, []float64{0.001}},
+		{"six-fold zero at -1", []complex128{-2.1046}, []complex128{-2.0689 + 0.3575i, -2.0689 - 0.3575i, -0.5251 + 1.6007i, -0.5251 - 1.6007i, -1.5949 + 0.2987i, -1.5949 - 0.2987i, -0.8573 + 0.211i, -0.8573 - 0.211i}, 1.7933, []float64{0.01}},
 	}
-	res, err := g.StateSpace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, dt := range []float64{0.01, 0.001} {
-		d, err := res.Sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
+	for _, tc := range cases {
+		g, err := NewZPK(tc.zeros, tc.poles, tc.k, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		c, err := d.D2C(D2COptions{Method: C2DMethodMatched})
+		res, err := g.StateSpace()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if z, err := c.Zeros(); err != nil || len(z) != 0 {
-			t.Errorf("dt=%g: zeros %v, %v; want none", dt, z, err)
-		}
-		got, err := c.Poles()
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, p := range poles {
-			best := math.Inf(1)
-			for _, q := range got {
-				best = math.Min(best, cmplx.Abs(q-p))
+		for _, dt := range tc.dts {
+			d, err := res.Sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !(best <= 1e-8*cmplx.Abs(p)) {
-				t.Errorf("dt=%g: no pole near %v: nearest %.3g away", dt, p, best)
+			c, err := d.D2C(D2COptions{Method: C2DMethodMatched})
+			if err != nil {
+				t.Fatalf("%s dt=%g: %v", tc.name, dt, err)
 			}
-		}
-		cont := newStepOraclePencil(c)
-		for _, s := range []complex128{0, 0.3i, 1i, -0.1 + 0.5i} {
-			want := complex(0.384, 0)
-			for _, p := range poles {
-				want /= s - p
+			got, err := c.Poles()
+			if err != nil {
+				t.Fatal(err)
 			}
-			if got := matchedOracleTransfer(cont, s); !(cmplx.Abs(got-want) <= 1e-7*cmplx.Abs(want)) {
-				t.Errorf("dt=%g: G(%v) = %v, want %v", dt, s, got, want)
+			if len(got) != len(tc.poles) {
+				t.Errorf("%s dt=%g: %d poles, want %d", tc.name, dt, len(got), len(tc.poles))
+			}
+			for _, p := range tc.poles {
+				best := math.Inf(1)
+				for _, q := range got {
+					best = math.Min(best, cmplx.Abs(q-p))
+				}
+				if !(best <= 1e-8*cmplx.Abs(p)) {
+					t.Errorf("%s dt=%g: no pole near %v: nearest %.3g away", tc.name, dt, p, best)
+				}
+			}
+			cont := newStepOraclePencil(c)
+			for _, s := range []complex128{0, 0.3i, 1i, -0.1 + 0.5i, 3i} {
+				want := complex(tc.k, 0)
+				for _, z := range tc.zeros {
+					want *= s - z
+				}
+				for _, p := range tc.poles {
+					want /= s - p
+				}
+				if got := matchedOracleTransfer(cont, s); !(cmplx.Abs(got-want) <= 1e-7*cmplx.Abs(want)) {
+					t.Errorf("%s dt=%g: G(%v) = %v, want %v", tc.name, dt, s, got, want)
+				}
+			}
+			if stable, err := c.IsStable(); err != nil || !stable {
+				t.Errorf("%s dt=%g: IsStable = %v, %v; want stable", tc.name, dt, stable, err)
 			}
 		}
 	}
