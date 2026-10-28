@@ -943,9 +943,13 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	// and SV round within the K band, so a K refined there is terminal.
 	// The gain of the rounded X was up to 2.5 off the 320-bit gain where
 	// that K was within 4x its band; held to it, K became 3.2e-6 off
-	// (band 4.4e-13).
+	// (band 4.4e-13). An unrefined rotated K at Accuracy 0 is held to it:
+	// the pencil K was 0.69 off the 320-bit gain (band 8e-11) with X
+	// within 1.5e-11. One at Accuracy 1 stays there (Y6BJEX am.7): refined
+	// from an X 1.1e-7 off, the gain of the stepped X was 0.44 off (band
+	// 2.1e-5) and would have been certified.
 	gainOf := func(c *RiccatiResult) *RiccatiResult {
-		if !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
+		if red.rotated && c.xe == nil && c.Accuracy == 0 || !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
 			r, _, ok := gainOfX(A, B, Q, R, opts, red, c)
 			if ok {
 				return r
@@ -1145,7 +1149,12 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // 320-bit solution at Accuracy 0. There a K off the gain of X by more
 // than gainFloor is instead replaced by the gain of the
 // extended-precision Hewer iterate of X (hewerGainSubstituted, Y6BJEX
-// am.3), which gainMissIn must accept; X is kept.
+// am.3), which gainMissIn must accept; X is kept. Not with rotated
+// inputs: all 24 such K of 2686 unrefined rotated sweep rows were within
+// 4x their band, while the Hewer gain cost 4 to 16 times the Dare.
+// Neither is a rotated K
+// refined whose gain gainMissIn cannot resolve (+Inf): X one step on
+// never resolved it either.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
@@ -1157,12 +1166,15 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 				return r, 0, true
 			}
 		}
-		if red != nil && d.d > gainFloor {
+		if red != nil && !red.rotated && d.d > gainFloor {
 			if r, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
 				return r, 0, true
 			}
 		}
 		return res, 0, true
+	}
+	if red != nil && red.rotated && math.IsInf(d.d, 1) {
+		return nil, math.Inf(1), false
 	}
 	c, cd, stable := refined(A, B, Q, R, opts, red, res)
 	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1) {
