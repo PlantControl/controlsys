@@ -96,3 +96,102 @@ func checkLqgCurrentNoiseGain(t *testing.T, A, B, C, E, Q, R, S, Rn *mat.Dense) 
 		}
 	}
 }
+
+// lqgCurrent runs Lqg Current on (A, B, C, 0, E) with weights [Q S; Sᵀ R]
+// and blkdiag(I, Rn).
+func lqgCurrent(t *testing.T, A, B, C, E, Q, R, S, Rn *mat.Dense) *LqgResult {
+	t.Helper()
+	n, m := B.Dims()
+	p, _ := C.Dims()
+	sys, err := NewDescriptor(A, B, C, mat.NewDense(p, m, nil), E, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qxu := mat.NewDense(n+m, n+m, nil)
+	setBlock(qxu, 0, 0, Q)
+	setBlock(qxu, n, n, R)
+	setBlock(qxu, 0, n, S)
+	setBlock(qxu, n, 0, mat.DenseCopyOf(S.T()))
+	qwv := eyeDense(n + p)
+	setBlock(qwv, n, n, Rn)
+	res, err := Lqg(sys, qxu, qwv, &LqgOpts{Current: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// floatKw is the float64 Kw = (R + BᵀXB)⁻¹BᵀX of Dare's descriptor X,
+// what Lqg Current returned before the extended-precision Kw existed.
+func floatKw(t *testing.T, A, B, E, Q, R, S *mat.Dense) *mat.Dense {
+	t.Helper()
+	res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := A.Dims()
+	kw, err := floatNoiseGain(B, res.X, R, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return kw
+}
+
+func requireEqualDense(t *testing.T, name string, got, want *mat.Dense) {
+	t.Helper()
+	if !mat.Equal(got, want) {
+		t.Errorf("%s %v, want %v", name, got.RawMatrix().Data, want.RawMatrix().Data)
+	}
+}
+
+// mixed generator seed 1180 (O2YDYA round-2 sweep): cond(E) 2.2e10, a
+// cross term, the regulator Dare solved in float64. The float64 Kw is
+// 1.4e-7 off at Accuracy 0 (base); the extended-precision Kw matches the
+// 320-bit oracle. When that solve hits an iteration cap, Lqg returns
+// exactly the float64 Kw, at Accuracy 1.
+func TestLqg_CurrentNoiseGainIterationCapKeepsFloatGain(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{99044.01351554065, 0, 1.0487692324354092, -0.6953941759371415})
+	B := mat.NewDense(2, 2, []float64{-2.610506420650651e-07, -1.8170173245948552e-07, 0.6457960508325897, -0.08343661377617334})
+	E := mat.NewDense(2, 2, []float64{0.9559215480825146, 0, 0, 4.4012666202884514e-11})
+	Q := mat.NewDense(2, 2, []float64{12.203399920996048, -0.9582545390033572, -0.9582545390033572, 0.39170958224428754})
+	R := mat.NewDense(2, 2, []float64{2.3653075853813097, 0.06401298917217467, 0.06401298917217467, 0.5240556077252992})
+	S := mat.NewDense(2, 2, []float64{-1.9701701619311962, -0.2444165670281241, 0.06715750757897745, 0.008331466880266421})
+	C := mat.NewDense(1, 2, []float64{-1.5857467997528196, -1.323027260137359})
+	Rn := mat.NewDense(1, 1, []float64{0.5056739899770474})
+	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, S, Rn)
+	want := floatKw(t, A, B, E, Q, R, S)
+	for _, c := range []struct {
+		name  string
+		limit *int
+		v     int
+	}{{"stableLoop", &stableSquarings, 1}, {"smithStein", &steinDoublings, 1}} {
+		t.Run(c.name, func(t *testing.T) {
+			withIterationCap(t, c.limit, c.v)
+			res := lqgCurrent(t, A, B, C, E, Q, R, S, Rn)
+			kw, _ := res.Kw()
+			requireEqualDense(t, "Kw", kw, want)
+			if res.Accuracy != 1 {
+				t.Errorf("Accuracy %d, want 1", res.Accuracy)
+			}
+		})
+	}
+}
+
+// bnd generator seed 1195 (O2YDYA round-2 review): cond(E) 2.5e9 sends
+// Kw to the extended-precision check, which took 27 s, but the float64
+// Kw is within 1.3e-16 of the 320-bit oracle: Lqg keeps it, bit for bit,
+// at Accuracy 0.
+func TestLqg_CurrentNoiseGainKeepsAccurateFloatGain(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{0.9183556219745826, 0, 0, 0, -2.2969114693285295, 0.08261525495786126, -1.3948025825870896, 0.8463873280314725, -2.403360915759004, 2.3204042332203, 0.9502594851010887, 0.5376189498275064, 0.5669414789724267, 0.0567055835576058, -1.2986117587904453, 0.9537360149593903})
+	B := mat.NewDense(4, 1, []float64{0, 0.6055840707414784, -1.067654775309174, 0.2821496973777199})
+	E := mat.NewDense(4, 4, []float64{0.9183556228929383, 0, 0, 0, 0, 0.9267457902072246, -0.22368097616560978, -0.12603908158672228, 0, 0, 1.2524916458443114, -1.2119825492005298, 0, 0, 0, 1.0014631606607184e-09})
+	Q := mat.NewDense(4, 4, []float64{1.0256199901950613, -0.04413993039679562, 0.07006376489200947, 0.19176594480422388, -0.04413993039679562, 1.0760473927039023, -0.12071080754226411, -0.33038792722746024, 0.07006376489200947, -0.12071080754226411, 1.191605504665222, 0.5244281503919992, 0.19176594480422388, -0.33038792722746024, 0.5244281503919992, 2.4353704785470742})
+	R := mat.NewDense(1, 1, []float64{1.0275889074156928})
+	S := mat.NewDense(4, 1, []float64{-0.02658622834255557, 0.04580463378865494, -0.07270616568452702, -0.19899824933866586})
+	C := mat.NewDense(1, 4, []float64{0.5092856705191796, -0.20603704357593627, -1.3369952145435433, -0.8249058573815162})
+	Rn := mat.NewDense(1, 1, []float64{1.8324828128836743})
+	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, S, Rn)
+	res := lqgCurrent(t, A, B, C, E, Q, R, S, Rn)
+	kw, _ := res.Kw()
+	requireEqualDense(t, "Kw", kw, floatKw(t, A, B, E, Q, R, S))
+}
