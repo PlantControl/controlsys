@@ -10,13 +10,31 @@ import (
 // ‖X‖ 4e14 makes G = R + BᵀXB ill-conditioned (Kw forward-error bound
 // 2.6e15) though ‖G‖ is large, so the float64 Kw was 1.75e-2 off at
 // Accuracy 0 while Kw moves 2.8e-16 under eps perturbations (6A3I67,
-// rv46 edge seed 11).
+// rv46 edge seed 11). Under GOARCH=amd64 the regulator Dare itself is
+// Accuracy 1 there (K 6e-3 off), so only the honesty rule binds.
 func TestLqg_CurrentNoiseGainIllConditionedGram(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{0.5710674631112018, -0.5930139855848822, -0.24619564944575117, 1.5800291814347958})
 	B := mat.NewDense(2, 3, []float64{0.2981770083534915, -1.162497051770968, 1.5373983392212918, 0.39240493382135816, -0.8228936704346205, -1.2085461246052969})
 	C := mat.NewDense(1, 2, []float64{0.15800404103018534, -1.2206747060996226})
 	E := mat.NewDense(2, 2, []float64{1.2223331468430856, -1.2285663860299658, 0, 8.37481347583292e-08})
-	checkLqgCurrentNoiseGain(t, A, B, C, E, eyeDense(2), eyeDense(3), nil, mat.NewDense(1, 1, []float64{0.52116111961218}))
+	Q, R, Rn := eyeDense(2), eyeDense(3), mat.NewDense(1, 1, []float64{0.52116111961218})
+	reg, err := Dare(A, B, Q, R, &RiccatiOpts{E: E})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.Accuracy == 0 {
+		checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, nil, Rn)
+		return
+	}
+	want, ok := descriptorNoiseGainBig(A, B, Q, R, nil, E)
+	if !ok {
+		t.Fatal("doubling oracle does not converge")
+	}
+	res := lqgCurrent(t, A, B, C, E, Q, R, mat.NewDense(2, 3, nil), Rn)
+	kw, _ := res.Kw()
+	if rel := relErr(kw, want); res.Accuracy == 0 && !(rel <= newtonTol) {
+		t.Errorf("Accuracy 0 with Kw off by %.3g", rel)
+	}
 }
 
 // As above with a cross term and cond(E) 4.02e7: Dare's X is 5.2e-9 off
