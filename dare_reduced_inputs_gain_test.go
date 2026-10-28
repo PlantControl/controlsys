@@ -12,7 +12,9 @@ import (
 // red.rw, red.sw rounded to float64). There neither a K refined in
 // double-double nor the gain of an X converged to eps is kept as terminal,
 // nor is X stepped by such a refinement (Y6BJEX am.4): each left K or X
-// off the 320-bit solution at Accuracy 0.
+// off the 320-bit solution at Accuracy 0. K may instead be the gain of X
+// taken on by Hewer steps in extended precision, held to gainMiss and not
+// terminal (D6QQX7).
 
 // dareReducedInputsOracle returns the errors of the X and K of res against
 // the stabilizing solution of Hewer's iteration in 320 bits on the explicit
