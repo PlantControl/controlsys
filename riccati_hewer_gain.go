@@ -15,11 +15,6 @@ const hewerGainPrecMin = 128
 // from a gain of X 3.6e-4 off, the second step still moved K by 1.6e-7.
 const hewerGainStepsMax = 4
 
-// hewerGainCondE is the least cond(E) at which hewerGainRef checks K: below it X does not wander enough to move a gain by
-// gainFloor (on the rv48r sweep the K it contradicted had cond(E) of
-// 6.9e4 and above), and the check cost 2.5 to 8 times the Dare.
-const hewerGainCondE = 1e4
-
 // hewerGainSubstituted returns res with K the gain of X taken two Hewer
 // steps on in extended precision (hewerGain) and Eig that of A − BK, once
 // gainMissIn accepts the new K (Y6BJEX am.4). X is kept. With reduced
@@ -41,9 +36,9 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 	return &c, true
 }
 
-// hewerGainRef is the gain hewerGain forms, with a descriptor E, from the
-// X of the first result it is asked about whose gain converges there,
-// against which contradicts measures the K of each. There the certified
+// hewerGainRef is the gain hewerGain forms, with reduced inputs, from the
+// X of the result res gainOfX was given, against which contradicts
+// measures the K of each result gainOfX would return. There the certified
 // float64 X wanders within cond(E)-amplified rounding, 1e-11 to 1e-9 off
 // over successive Newton steps against an eps band of 3e-15, and a
 // cheap-control gain amplifies that by 1e5 to 1e6: the gain of X was
@@ -56,79 +51,95 @@ type hewerGainRef struct {
 	A, B, Q, R *mat.Dense
 	opts       *RiccatiOpts
 	red        *reducedInputs
-	off        bool
+	res        *RiccatiResult
 	h          hewerGainSol
+	tried      bool
 	have       bool
 	band       float64
 }
 
-// newHewerGainRef returns the reference of the Dare, off (never
-// contradicting) without E or with cond(E) below hewerGainCondE.
-func newHewerGainRef(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs) *hewerGainRef {
-	g := &hewerGainRef{A: A, B: B, Q: Q, R: R, opts: opts, red: red, off: true, band: -1}
-	if red == nil || opts == nil || opts.E == nil {
-		return g
-	}
-	var lu mat.LU
-	lu.Factorize(opts.E)
-	g.off = !(lu.Cond() >= hewerGainCondE)
-	return g
+// newHewerGainRef returns the reference of the Dare whose result res
+// enters gainOfX, never contradicting without reduced inputs.
+func newHewerGainRef(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) *hewerGainRef {
+	return &hewerGainRef{A: A, B: B, Q: Q, R: R, opts: opts, red: red, res: res, band: -1}
 }
 
-// contradicts returns the relative distance miss of the K of res from the
-// reference gain and whether miss exceeds both floor and 4√N times the
-// largest move of that gain under two componentwise eps perturbations of
-// the N entries of E, A, B, Q, R and S (perturbedMove), a lower estimate
-// of K's band that √N lifts to an upper one: where that band is wide the
-// gain of X is as good as any (K 1.4e-6 off the Hewer gain had a band of
-// 9.8e-6). ok is false while there is no reference.
-func (g *hewerGainRef) contradicts(res *RiccatiResult, floor float64) (miss float64, contradicts, ok bool) {
-	if g.off {
-		return 0, false, false
+// contradicts reports whether the reference contradicts the K of r: its
+// relative distance from the reference gain exceeds gainFloor and 4√N
+// times the largest move of that gain under two componentwise eps
+// perturbations of the N entries of E, A, B, Q, R and S (perturbedMove),
+// a lower estimate of K's band that √N lifts to an upper one: where that
+// band is wide the gain of X is as good as any (K 1.4e-6 off the Hewer
+// gain had a band of 9.8e-6). K is checked only when the gain of X may be
+// off by gainFloor: when its move across a Newton step of X (move) or
+// under X∘(1 ± eps) (tol/8, gainMissOf) exceeds gainFloor, or when res
+// entered at Accuracy 1, which an X refined to Accuracy 0 may leave only
+// with a K the reference confirms (Y6BJEX am.7). Where K moved under
+// gainFloor X was within 1e-16 and the check cost 2 to 4 times the Dare.
+// A reference that fails to converge, or whose band cannot be formed,
+// contradicts (fails closed): under -race the gain of an X refined from
+// Accuracy 1 was 0.44 off the 320-bit gain (band 2.1e-5) while hewerGain
+// failed.
+func (g *hewerGainRef) contradicts(r *RiccatiResult, move, tol float64) bool {
+	if g.red == nil || g.res.Accuracy == 0 && move <= gainFloor && tol <= 8*gainFloor {
+		return false
 	}
-	if !g.have {
-		_, cond, ok := ddGain(g.A, g.B, g.R, crossTerm(g.opts), res.X)
+	if !g.tried {
+		g.tried = true
+		_, cond, ok := ddGain(g.A, g.B, g.R, crossTerm(g.opts), g.res.X)
 		if !ok {
 			cond = math.Inf(1)
 		}
-		if g.h, ok = hewerGain(g.A, g.B, g.Q, g.R, g.opts, g.red, res, hewerGainStepsMax, cond); !ok {
-			return 0, false, false
-		}
-		g.have = true
+		g.h, g.have = hewerGain(g.A, g.B, g.Q, g.R, g.opts, g.red, g.res, hewerGainStepsMax, cond)
+	}
+	if !g.have {
+		return true
 	}
 	var diff mat.Dense
-	diff.Sub(g.h.K, res.K)
-	miss = mat.Norm(&diff, 1) / mat.Norm(g.h.K, 1)
-	if !(miss > floor) {
-		return miss, false, true
+	diff.Sub(g.h.K, r.K)
+	miss := mat.Norm(&diff, 1) / mat.Norm(g.h.K, 1)
+	if !(miss > gainFloor) {
+		return false
 	}
 	if g.band < 0 {
-		g.band = math.Inf(1)
+		g.band = math.NaN()
 		h := g.h
 		x, ok := h.sol.xOf(h.sol.y)
 		if !ok {
-			return miss, false, true
+			return true
 		}
 		kw, ok := h.d.noiseGain(h.sol, h.sol.y)
 		if !ok {
-			return miss, false, true
+			return true
 		}
 		move := 0.0
 		for seed := range uint64(2) {
 			mv, ok := h.d.perturbedMove(h.sol, x, kw, h.prec, seed)
 			if !ok {
-				return miss, false, true
+				return true
 			}
 			move = max(move, mv.k)
 		}
 		n, m := g.B.Dims()
 		entries := 3*n*n + n*m + m*m
-		if g.opts.S != nil {
+		if g.opts != nil && g.opts.S != nil {
 			entries += n * m
 		}
 		g.band = 4 * math.Sqrt(float64(entries)) * move
 	}
-	return miss, miss > g.band, true
+	return !(miss <= g.band)
+}
+
+// substituted returns res with K the reference gain and Eig that of
+// A − BK, X kept, or nil without a reference. gainOfX returns it for
+// Accuracy 1 when the reference contradicts every K it would return.
+func (g *hewerGainRef) substituted() *RiccatiResult {
+	if !g.have {
+		return nil
+	}
+	c := *g.res
+	c.K, c.Eig = g.h.K, g.h.eig
+	return &c
 }
 
 // hewerGainSol is the gain K of hewerGain, the eigenvalues eig of A − BK,

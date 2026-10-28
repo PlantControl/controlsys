@@ -1169,26 +1169,19 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		return steppedX(A, B, Q, R, opts, res), 0, true
 	}
 	d := gainMissIn(A, B, R, opts, red, res)
-	var nearest *RiccatiResult
-	nearestMiss, contra := math.Inf(1), false
-	ref := newHewerGainRef(A, B, Q, R, opts, red)
-	contradicted := func(r *RiccatiResult) func() bool {
+	ref := newHewerGainRef(A, B, Q, R, opts, red, res)
+	contra := false
+	contradicted := func(r *RiccatiResult, move, tol float64) func() bool {
 		known, v := false, false
 		return func() bool {
 			if !known {
-				if m, off, ok := ref.contradicts(r, gainFloor); ok {
-					v = off
-					contra = contra || v
-					if m < nearestMiss {
-						nearest, nearestMiss = r, m
-					}
-				}
+				known, v = true, ref.contradicts(r, move, tol)
+				contra = contra || v
 			}
-			known = true
 			return v
 		}
 	}
-	resOff := contradicted(res)
+	resOff := contradicted(res, d.move, d.tol)
 	if d.units(gainTol) <= 1 {
 		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
 			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
@@ -1212,7 +1205,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	}
 	var cOff func() bool
 	if stable {
-		cOff = contradicted(c)
+		cOff = contradicted(c, gainMove(d.k, c.K), cd.tol)
 	}
 	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1 && !cOff()) {
 		return c, 0, true
@@ -1224,8 +1217,9 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		return c, 0, true
 	}
 	if contra {
-		resOff()
-		return nearest, nearestMiss / gainFloor, false
+		if h := ref.substituted(); h != nil {
+			return h, 0, false
+		}
 	}
 	return nil, d.units(gainFloor), false
 }
@@ -1661,7 +1655,7 @@ func crossTerm(opts *RiccatiOpts) *mat.Dense {
 // gainTol per ulp, that of x1 by 1.7e-8, and K, the pencil gain, was
 // exact to 1.8e-9.
 func gainMissOf(n int, res *RiccatiResult, gain func(X *mat.Dense) (*mat.Dense, float64, bool)) gainDist {
-	fail := gainDist{math.Inf(1), 1}
+	fail := gainDist{d: math.Inf(1), tol: 1}
 	K, mcond, ok := gain(res.X)
 	if !ok {
 		return fail
@@ -1669,7 +1663,7 @@ func gainMissOf(n int, res *RiccatiResult, gain func(X *mat.Dense) (*mat.Dense, 
 	nk := mat.Norm(K, 1)
 	if nk == 0 {
 		if mat.Norm(res.K, 1) == 0 {
-			return gainDist{0, 1}
+			return gainDist{d: 0, tol: 1}
 		}
 		return fail
 	}
@@ -1720,16 +1714,33 @@ func gainMissOf(n int, res *RiccatiResult, gain func(X *mat.Dense) (*mat.Dense, 
 	var d mat.Dense
 	d.Sub(res.K, K)
 	miss := mat.Norm(&d, 1) / nk
+	stepMove := 0.0
 	if k1 != nil {
 		d.Sub(res.K, k1)
 		miss = max(miss, mat.Norm(&d, 1)/nk)
+		d.Sub(k1, K)
+		stepMove = mat.Norm(&d, 1) / nk
 	}
-	return gainDist{miss, tol}
+	return gainDist{d: miss, tol: tol, move: stepMove, k: K}
 }
 
-// gainDist is the distance d of a K from the gain of its X and the
-// resolution tol of that gain (gainMissOf).
-type gainDist struct{ d, tol float64 }
+// gainDist is the distance d of a K from the gain k of its X, the
+// resolution tol of k and its move across the Newton step x1
+// (gainMissOf).
+type gainDist struct {
+	d, tol, move float64
+	k            *mat.Dense
+}
+
+// gainMove returns ‖K − k‖₁/‖k‖₁, +Inf without k.
+func gainMove(k, K *mat.Dense) float64 {
+	if k == nil {
+		return math.Inf(1)
+	}
+	var d mat.Dense
+	d.Sub(K, k)
+	return mat.Norm(&d, 1) / mat.Norm(k, 1)
+}
 
 // units returns d in units of tol, at least floor.
 func (g gainDist) units(floor float64) float64 {
