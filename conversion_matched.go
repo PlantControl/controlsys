@@ -76,11 +76,13 @@ func (sys *System) d2cMatched() (*System, error) {
 // the transfer function lose tight pole clusters near z = 1. The zeros are
 // the invariant zeros less the count nearest −1, as MATLAB takes them, or
 // the transfer-function zeros cz when tzero cannot resolve the multiple
-// zero at −1. ok is false unless the poles are as many as cp and the fit at a
-// probe point is no worse than that of cz, cp, k.
+// zero at −1. ok is false unless the fit at a probe point is no worse than
+// that of cz, cp, k, at low frequency; eig(A) may hold more poles than cp
+// only when the transfer function cancelled roots it should not have,
+// fitting worse than 1e-6 where the pencil roots fit to 1e-9.
 func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artificial int) (zeros, poles []complex128, gain float64, ok bool) {
 	poles, err := sys.Poles()
-	if err != nil || len(poles) == 0 || len(poles) != len(cp) {
+	if err != nil || len(poles) == 0 || len(poles) < len(cp) {
 		return nil, nil, 0, false
 	}
 	if poles, ok = matchedConjugateClosed(poles); !ok {
@@ -93,8 +95,12 @@ func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artifici
 		}
 		return out
 	}
-	candidates := [][]complex128{cz}
-	if pz, err := sys.Zeros(); err == nil && len(pz) == len(cz)+artificial {
+	extra := len(poles) - len(cp)
+	var candidates [][]complex128
+	if extra == 0 {
+		candidates = append(candidates, cz)
+	}
+	if pz, err := sys.Zeros(); err == nil && len(pz) == len(cz)+artificial+extra {
 		if pz, ok := matchedConjugateClosed(pz); ok {
 			if pz, ok := matchedStripArtificialZeros(pz, artificial); ok {
 				candidates = append(candidates, pz)
@@ -104,7 +110,7 @@ func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artifici
 	free := *sys
 	free.Delay, free.InputDelay, free.OutputDelay = nil, nil, nil
 	tfZeros := withArtificial(cz)
-	s0, s1 := matchedProbePoints(poles, tfZeros, cp)
+	s0, s1 := matchedD2CProbePoints(sys.Dt, poles, cz, cp)
 	g0, ok0 := matchedEvalModel(&free, s0)
 	g1, ok1 := matchedEvalModel(&free, s1)
 	if !ok0 || !ok1 {
@@ -114,6 +120,12 @@ func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artifici
 		return cmplx.Abs(complex(k, 0)*matchedRootRatio(z, p, s1)-g1) / cmplx.Abs(g1)
 	}
 	limit := math.Max(2*misfit(tfZeros, cp, k), 1e-12)
+	if extra > 0 {
+		if limit <= 1e-6 {
+			return nil, nil, 0, false
+		}
+		limit = 1e-9
+	}
 	for _, z := range slices.Backward(candidates) {
 		all := withArtificial(z)
 		g := real(g0 / matchedRootRatio(all, poles, s0))
@@ -122,6 +134,22 @@ func matchedD2CPencilRoots(sys *System, cz, cp []complex128, k float64, artifici
 		}
 	}
 	return nil, nil, 0, false
+}
+
+// matchedD2CProbePoints maps the matchedProbePoints of the continuous roots
+// log(r)/T back to z = e^{sT}, so the fit is checked at low frequency on the
+// scale of the continuous model rather than far from a cluster near z = 1.
+func matchedD2CProbePoints(dt float64, sets ...[]complex128) (complex128, complex128) {
+	var roots []complex128
+	for _, set := range sets {
+		for _, r := range set {
+			if cmplx.Abs(r) > 0 && (real(r) > 0 || math.Abs(imag(r)) > 1e-10*cmplx.Abs(r)) {
+				roots = append(roots, cmplx.Log(r)/complex(dt, 0))
+			}
+		}
+	}
+	s0, s1 := matchedProbePoints(roots)
+	return cmplx.Exp(s0 * complex(dt, 0)), cmplx.Exp(s1 * complex(dt, 0))
 }
 
 // matchedStripArtificialZeros removes the count zeros nearest −1 from the
