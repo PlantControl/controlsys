@@ -1885,10 +1885,11 @@ func Damp(sys *System) ([]DampInfo, error) {
 // Step returns the step response of each input channel. Descriptor models
 // follow MATLAB: proper singular-E models are reduced to an explicit model
 // plus feedthrough, improper ones return ErrImproperModel. A continuous
-// delay-free model with full-rank E too ill-conditioned for E⁻¹A (as in
-// TransferFunction, with LU condition estimate 1e6 or more; for Impulse
-// from 1e4) is simulated from its generalized Schur parts, so the
-// response follows the poles of the pencil (A, E). Continuous models
+// model without internal delays whose full-rank E is too ill-conditioned
+// for E⁻¹A (as in TransferFunction, with LU condition estimate 1e6 or more;
+// for Impulse from 1e4) is simulated from its generalized Schur parts, so
+// the response follows the poles of the pencil (A, E); as in MATLAB, its
+// I/O delays shift the delay-free response. Continuous models
 // with internal delays of one common length are sampled exactly (method of
 // steps) while the chain fits its size and work budget; past it, and for
 // other internal-delay models, they are simulated through the approximate
@@ -2180,9 +2181,10 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // Initial returns the free response from x0 with zero delay-line history.
 // Output delays, including the output share of Delay, delay it; see Simulate.
 // As in MATLAB, a descriptor model with singular E rejects a nonzero x0 with
-// ErrDescriptorInitialState. A delay-free continuous descriptor whose
-// full-rank E is too ill-conditioned for E⁻¹A (as in Step) follows the
-// pencil (A, E): the impulse response of the input E·x0.
+// ErrDescriptorInitialState. A continuous descriptor without internal
+// delays whose full-rank E is too ill-conditioned for E⁻¹A (as in Step)
+// follows the pencil (A, E): the impulse response of the input E·x0,
+// delayed by the output delays.
 // Continuous models without internal delays, or whose internal delays share
 // one length (within the chain budget, see Step), are sampled exactly; other
 // internal-delay models use the approximate ZOH discretization of the delay
