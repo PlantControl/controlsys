@@ -179,12 +179,22 @@ func (m xMat) symmetrized() xMat {
 	return o
 }
 
-// Limits of the extended-precision explicit Dare of nearSingularDare:
-// doublings (ρ(A − BK) up to 1 − 2⁻⁴⁰ converges) and the precision range.
+// Precision range of the extended-precision explicit Dare of
+// nearSingularDare.
 const (
+	extendedPrecMin = 192
+	extendedPrecMax = 320
+)
+
+// Iteration caps of the extended-precision solves, variables only so that
+// tests can hit them: SDA doublings of nearSingularDare (ρ(A − BK) up to
+// 1 − 2⁻⁴⁰ converges; no retry at higher precision once hit), squarings of
+// stableLoop and Smith doublings of smithStein. A solve that hits its cap
+// fails, and its caller keeps the float64 result.
+var (
 	extendedDoublings = 48
-	extendedPrecMin   = 192
-	extendedPrecMax   = 320
+	stableSquarings   = 48
+	steinDoublings    = 48
 )
 
 // nearSingularDare solves a Dare with a near-singular E that Dare's
@@ -208,8 +218,9 @@ const (
 // some j. Eig is the float64 eigenvalues of that extended-precision
 // Ae − BeK rounded once, the exact eig(A − BK, E): a float64 A − BK
 // errs by eps·|B||K|, which 1/σ_min(E) carries to O(1) in the QZ of
-// (A − BK, E) (|λ| 1.27 for an exact 0.58). Any failure keeps err, so no
-// value it returned before changes.
+// (A − BK, E) (|λ| 1.27 for an exact 0.58). Any failure, an iteration
+// cap hit or a failed perturbed solve included, keeps err, so no value it
+// returned before changes.
 //
 // Y and K carry Accuracy 0 (Dlqr, Lqg: xeCertified) when they move by at
 // most newtonTol under each of two componentwise eps perturbations of A,
@@ -244,10 +255,10 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 	}
 	prec := extendedPrec(cond)
 	d := extendedDare{A: A, B: B, Q: Q, R: R, S: opts.S, E: opts.E}
-	sol, ok := d.solve(prec)
-	if !ok && prec < extendedPrecMax {
+	sol, capped, ok := d.solve(prec)
+	if !ok && !capped && prec < extendedPrecMax {
 		prec = min(extendedPrecMax, prec+64)
-		sol, ok = d.solve(prec)
+		sol, _, ok = d.solve(prec)
 	}
 	if !ok {
 		return nil, false
@@ -273,9 +284,12 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 	ykOK, xOK, kwOK := true, d.xBound(sol, x), true
 	for seed := range uint64(2) {
 		mv, ok := d.perturbedMove(sol, x, kw, prec, seed)
-		ykOK = ykOK && ok && mv.y <= newtonTol && mv.k <= newtonTol
-		xOK = xOK && ok && mv.x <= newtonTol
-		kwOK = kwOK && ok && mv.kw <= newtonTol
+		if !ok {
+			return nil, false
+		}
+		ykOK = ykOK && mv.y <= newtonTol && mv.k <= newtonTol
+		xOK = xOK && mv.x <= newtonTol
+		kwOK = kwOK && mv.kw <= newtonTol
 	}
 	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: placedRcnd(X.RawMatrix().Data, n), Accuracy: 1, xe: Y, kw: kw.dense(), kwCertified: kwOK}
 	if ykOK {
@@ -300,7 +314,8 @@ func extendedPrec(cond float64) uint {
 // reports that Kw moves by at most newtonTol under two componentwise eps
 // perturbations of the data; ok is false unless the closed loop of K is
 // shown stable, K moves by at most newtonTol in the first step (K is the
-// stabilizing gain to tolerance) and every step succeeds.
+// stabilizing gain to tolerance) and every step, the perturbed ones and
+// their iteration caps included, succeeds.
 func descriptorNoiseGain(A, B, Q, R, S, E, K *mat.Dense) (kw *mat.Dense, certified, ok bool) {
 	var lu mat.LU
 	lu.Factorize(E)
@@ -339,7 +354,10 @@ func descriptorNoiseGain(A, B, Q, R, S, E, K *mat.Dense) (kw *mat.Dense, certifi
 	certified = true
 	for seed := range uint64(2) {
 		mv, ok := d.perturbedMove(sol, x, g, prec, seed)
-		certified = certified && ok && mv.kw <= newtonTol
+		if !ok {
+			return nil, false, false
+		}
+		certified = certified && mv.kw <= newtonTol
 	}
 	return g.dense(), certified, true
 }
@@ -373,23 +391,25 @@ func (d extendedDare) model(prec uint, perturb func(xMat) xMat) (sol extendedSol
 	return sol, true
 }
 
-func (d extendedDare) solve(prec uint) (extendedSol, bool) {
-	sol, ok := d.model(prec, nil)
+// solve runs at most extendedDoublings SDA doublings; capped reports that
+// it did not converge within them, so a retry at higher precision cannot.
+func (d extendedDare) solve(prec uint) (sol extendedSol, capped, ok bool) {
+	sol, ok = d.model(prec, nil)
 	if !ok {
-		return sol, false
+		return sol, false, false
 	}
 	n := sol.ae.r
 	a, h := sol.ae, sol.q
 	if sol.s.r > 0 {
 		rs, ok := xSolve(sol.r, sol.s.t())
 		if !ok {
-			return sol, false
+			return sol, false, false
 		}
 		a, h = xAdd(a, xMul(sol.be, rs), -1), xAdd(h, xMul(sol.s, rs), -1)
 	}
 	rb, ok := xSolve(sol.r, sol.be.t())
 	if !ok {
-		return sol, false
+		return sol, false, false
 	}
 	g := xMul(sol.be, rb)
 	eye := xEye(n, prec)
@@ -400,15 +420,15 @@ func (d extendedDare) solve(prec uint) (extendedSol, bool) {
 		wa, ok1 := xSolve(w, a)
 		wg, ok2 := xSolve(w, g)
 		if !ok1 || !ok2 {
-			return sol, false
+			return sol, false, false
 		}
 		hn := xAdd(h, xMul(xMul(a.t(), h), wa), 1)
 		g = xAdd(g, xMul(xMul(a, wg), a.t()), 1).symmetrized()
-		a = xMul(a, wa)
+		a = xMul(a, wa).flushTiny()
 		dh, hm := xAdd(hn, h, -1).maxAbs(), hn.maxAbs()
 		h = hn.symmetrized()
 		if !(hm < math.Ldexp(1, int(prec/2))) {
-			return sol, false
+			return sol, false, false
 		}
 		if dh <= tol*hm {
 			conv = true
@@ -416,14 +436,14 @@ func (d extendedDare) solve(prec uint) (extendedSol, bool) {
 		}
 	}
 	if !conv {
-		return sol, false
+		return sol, true, false
 	}
 	sol.y = h
 	if sol.k, ok = d.gain(sol, h); !ok {
-		return sol, false
+		return sol, false, false
 	}
 	res := d.residual(sol, h, sol.k)
-	return sol, res <= tol*(h.maxAbs()+sol.q.maxAbs())
+	return sol, false, res <= tol*(h.maxAbs()+sol.q.maxAbs())
 }
 
 // gain is (R + BeᵀYBe)⁻¹(BeᵀYAe + Sᵀ).
@@ -463,11 +483,11 @@ func (d extendedDare) closedLoop(sol extendedSol, K *mat.Dense) xMat {
 	return xAdd(sol.ae, xMul(sol.be, xFrom(K, sol.ae.prec)), -1)
 }
 
-// stableLoop reports ‖m^(2^j)‖_∞ ≤ ½ for some j ≤ extendedDoublings, a
+// stableLoop reports ‖m^(2^j)‖_∞ ≤ ½ for some j ≤ stableSquarings, a
 // proof that ρ(m) < 1.
 func stableLoop(m xMat) bool {
 	limit := math.Ldexp(1, int(m.prec/4))
-	for range extendedDoublings {
+	for range stableSquarings {
 		v := m.infNorm()
 		if v <= 0.5 {
 			return true
@@ -475,9 +495,32 @@ func stableLoop(m xMat) bool {
 		if !(v < limit) {
 			return false
 		}
-		m = xMul(m, m)
+		m = xMul(m, m).flushTiny()
 	}
 	return false
+}
+
+// flushTiny zeroes, in place, the entries below 2^(−2·prec) times the
+// largest: a big.Float sum shifts its mantissa by the full exponent gap,
+// and repeated squaring with modes near 1 next to fast ones grows that gap
+// to ~2³⁰ bits (GB-scale allocation), far below the precision carried.
+func (m xMat) flushTiny() xMat {
+	top, seen := 0, false
+	for i := range m.d {
+		if m.d[i].Sign() != 0 {
+			e := m.d[i].MantExp(nil)
+			if !seen || e > top {
+				top, seen = e, true
+			}
+		}
+	}
+	lim := top - 2*int(m.prec)
+	for i := range m.d {
+		if m.d[i].Sign() != 0 && m.d[i].MantExp(nil) < lim {
+			m.d[i].SetInt64(0)
+		}
+	}
+	return m
 }
 
 func (m xMat) infNorm() float64 {
@@ -598,13 +641,13 @@ func xRel(a, b xMat) float64 {
 func smithStein(f, w xMat) (xMat, bool) {
 	y := w
 	tol := math.Ldexp(1, -int(w.prec/2))
-	for range extendedDoublings {
+	for range steinDoublings {
 		inc := xMul(xMul(f.t(), y), f)
 		y = xAdd(y, inc, 1)
 		if !(inc.maxAbs() > tol*y.maxAbs()) {
 			return y.symmetrized(), true
 		}
-		f = xMul(f, f)
+		f = xMul(f, f).flushTiny()
 		if !(f.maxAbs() < math.Ldexp(1, int(w.prec/4))) {
 			return y, false
 		}

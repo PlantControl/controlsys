@@ -187,6 +187,12 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 			kw, certified, ok := descriptorNoiseGain(Aa, Ba, Q, R, ropts.S, ropts.E, kRes.K)
 			if ok {
 				kwGen, kwCertified = kw, certified
+				if fkw, err := floatNoiseGain(Ba, xGen, R, n); err == nil && keepFloatNoiseGain(fkw, kw) {
+					kwGen = nil
+					if !certified {
+						res.Accuracy = max(res.Accuracy, 1)
+					}
+				}
 			} else {
 				res.Accuracy = max(res.Accuracy, 1)
 			}
@@ -264,8 +270,10 @@ func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
 // descriptor X may not carry within newtonTol: cond(E)·eps beyond it (Kw
 // off by 3e-7 at cond(E) 8e9), or R + BᵀXB cancelling so far that
 // rounding X alone can move it beyond it (‖X‖ ~ 1/σ_min(E)²). Lqg then
-// takes Kw from descriptorNoiseGain, else keeps the float64 Kw at
-// Accuracy 1.
+// takes Kw from descriptorNoiseGain, unless the float64 Kw is within
+// newtonTol of it (keepFloatNoiseGain), else keeps the float64 Kw at
+// Accuracy 1. No float64 bound tells these apart: a Kw off by 1.4e-7
+// shows the same rounding sensitivity as Kw correct to 1e-16.
 func noiseGainIll(B, X, R, E *mat.Dense) bool {
 	var lu mat.LU
 	lu.Factorize(E)
@@ -280,6 +288,17 @@ func noiseGainIll(B, X, R, E *mat.Dense) bool {
 	G := mulDims(m, m, BtX, B)
 	G.Add(G, R)
 	return mat.Norm(bound, 1)*eps() > newtonTol*mat.Norm(G, 1)
+}
+
+// keepFloatNoiseGain reports the float64 Kw (first n columns of the
+// extended one) within newtonTol of the extended-precision Kw: Lqg then
+// returns the float64 Kw, as before the extended path existed.
+func keepFloatNoiseGain(fkw, kw *mat.Dense) bool {
+	r, c := fkw.Dims()
+	var d mat.Dense
+	d.Sub(fkw, subDense(kw, 0, 0, r, c))
+	w := subDense(kw, 0, 0, r, c)
+	return mat.Norm(&d, 1) <= newtonTol*mat.Norm(w, 1) && mat.Norm(&d, 2) <= newtonTol*mat.Norm(w, 2)
 }
 
 // currentGains takes X, the regulator solution of the generalized Riccati
@@ -303,19 +322,29 @@ func (res *LqgResult) currentGains(sys *System, Ba, X, kw, R, Rn, Nn *mat.Dense)
 	if kw != nil {
 		res.kw = subDense(kw, 0, 0, m, n)
 	} else {
-		na, _ := X.Dims()
-		BtX := mulDims(m, na, Ba.T(), X)
-		G := mulDims(m, m, BtX, Ba)
-		G.Add(G, R)
-		res.kw = mat.NewDense(m, n, nil)
-		if err := res.kw.Solve(G, subDense(BtX, 0, 0, m, n)); err != nil {
-			return nil, fmt.Errorf("Lqg: %w", ErrSingularR)
+		var err error
+		if res.kw, err = floatNoiseGain(Ba, X, R, n); err != nil {
+			return nil, err
 		}
 	}
 
 	F := mulDims(m, p, res.K, res.mx)
 	F.Add(F, mulDims(m, p, res.kw, res.mw))
 	return F, nil
+}
+
+// floatNoiseGain is Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] of the float64 X, the
+// first n columns.
+func floatNoiseGain(Ba, X, R *mat.Dense, n int) (*mat.Dense, error) {
+	na, m := Ba.Dims()
+	BtX := mulDims(m, na, Ba.T(), X)
+	G := mulDims(m, m, BtX, Ba)
+	G.Add(G, R)
+	kw := mat.NewDense(m, n, nil)
+	if err := kw.Solve(G, subDense(BtX, 0, 0, m, n)); err != nil {
+		return nil, fmt.Errorf("Lqg: %w", ErrSingularR)
+	}
+	return kw, nil
 }
 
 // lqgController assembles the controller with states [x̂; xi] and

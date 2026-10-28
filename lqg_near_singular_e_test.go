@@ -7,11 +7,12 @@ import (
 )
 
 // descriptorNoiseGainBig is Lqg's current-estimator noise gain
-// (R + BᵀXB)⁻¹BᵀX of the descriptor Dare solution X, all in hbPrec bits:
-// Y by SDA doubling on E⁻¹A, E⁻¹B (never rounded), X = E⁻ᵀYE⁻¹.
-func descriptorNoiseGainBig(A, B, Q, R, E *mat.Dense) (*mat.Dense, bool) {
+// (R + BᵀXB)⁻¹BᵀX of the descriptor Dare solution X with cross term S
+// (nil for none), all in hbPrec bits: Y by SDA doubling on E⁻¹A, E⁻¹B
+// (never rounded), X = E⁻ᵀYE⁻¹.
+func descriptorNoiseGainBig(A, B, Q, R, S, E *mat.Dense) (*mat.Dense, bool) {
 	e, b := hbFrom(E), hbFrom(B)
-	y, conv := dareDoublingHB(hbSolve(e, hbFrom(A)), hbSolve(e, b), hbFrom(Q), hbFrom(R), hbMat{}, 120)
+	y, conv := dareDoublingHB(hbSolve(e, hbFrom(A)), hbSolve(e, b), hbFrom(Q), hbFrom(R), hbFrom(S), 120)
 	if !conv {
 		return nil, false
 	}
@@ -32,7 +33,7 @@ func TestLqg_CurrentNearSingularENoiseGainMatchesOracle(t *testing.T) {
 	Q := mat.NewDense(5, 5, []float64{6.657549588624399, 4.410892534611584, -6.832387991043152, 2.171063965708072, -2.149201426120526, 4.410892534611584, 4.228668867735996, -3.6060248346286246, 1.030847264195174, -0.9998091956449603, -6.832387991043152, -3.6060248346286246, 14.357225640793184, -3.177614634793004, 4.0384796020452605, 2.171063965708072, 1.030847264195174, -3.177614634793004, 1.1118610974818954, -1.718371227613103, -2.149201426120526, -0.9998091956449603, 4.0384796020452605, -1.718371227613103, 4.020100655687023})
 	R := mat.NewDense(2, 2, []float64{0.7306262818179861, 0.29938406008382973, 0.29938406008382973, 2.227625211673149})
 	C := mat.NewDense(1, 5, []float64{1.6840207559434308, 0.6618344647930041, -0.4347790640815497, -0.5315900659866536, 0.26403849045331})
-	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, mat.NewDense(1, 1, []float64{0.5004178462278779}))
+	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, nil, mat.NewDense(1, 1, []float64{0.5004178462278779}))
 }
 
 // Lqg Current where the regulator Dare solves in float64 and only the
@@ -47,13 +48,13 @@ func TestLqg_CurrentNearSingularEFloatRegulatorNoiseGain(t *testing.T) {
 	Q := mat.NewDense(2, 2, []float64{1.3780019980278215, -1.8139079669120497, -1.8139079669120497, 6.479179684656806})
 	R := mat.NewDense(2, 2, []float64{1.4774236832145244, -0.43040918076399104, -0.43040918076399104, 0.7298443780640265})
 	C := mat.NewDense(1, 2, []float64{1.3221467858160478, 2.029922235601939})
-	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, mat.NewDense(1, 1, []float64{0.7330290179542455}))
+	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, nil, mat.NewDense(1, 1, []float64{0.7330290179542455}))
 }
 
 // checkLqgCurrentNoiseGain runs Lqg Current on (A, B, C, 0, E) with
-// weights blkdiag(Q, R), blkdiag(I, Rn) and requires Accuracy 0 with Xc,
+// weights [Q S; Sᵀ R] (S nil for none), blkdiag(I, Rn) and requires Accuracy 0 with Xc,
 // K and Kw within newtonTol of the 320-bit doubling oracles.
-func checkLqgCurrentNoiseGain(t *testing.T, A, B, C, E, Q, R, Rn *mat.Dense) {
+func checkLqgCurrentNoiseGain(t *testing.T, A, B, C, E, Q, R, S, Rn *mat.Dense) {
 	t.Helper()
 	n, m := B.Dims()
 	p, _ := C.Dims()
@@ -64,13 +65,17 @@ func checkLqgCurrentNoiseGain(t *testing.T, A, B, C, E, Q, R, Rn *mat.Dense) {
 	qxu := mat.NewDense(n+m, n+m, nil)
 	setBlock(qxu, 0, 0, Q)
 	setBlock(qxu, n, n, R)
+	if S != nil {
+		setBlock(qxu, 0, n, S)
+		setBlock(qxu, n, 0, mat.DenseCopyOf(S.T()))
+	}
 	qwv := eyeDense(n + p)
 	setBlock(qwv, n, n, Rn)
-	want, ok := descriptorNoiseGainBig(A, B, Q, R, E)
+	want, ok := descriptorNoiseGainBig(A, B, Q, R, S, E)
 	if !ok {
 		t.Fatal("doubling oracle does not converge")
 	}
-	_, wantY, wantK, rho, ok := descriptorDareDoublingBig(A, B, Q, R, nil, E)
+	_, wantY, wantK, rho, ok := descriptorDareDoublingBig(A, B, Q, R, S, E)
 	if !ok {
 		t.Fatalf("doubling oracle: no stabilizing solution (ρ %.3g)", rho)
 	}
