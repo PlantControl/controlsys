@@ -1931,7 +1931,8 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 // ErrInternalDelayImpulse; MATLAB's impulse rejects every continuous
 // internal-delay model, while this library samples the D21 = 0 case (exactly
 // for one common delay length within the chain budget, else by the
-// approximate ZOH discretization).
+// approximate ZOH discretization). Continuous models without internal
+// delays are sampled exactly as C·e^{A·t}·B, shifted by their I/O delays.
 // tFinal and models without inputs or outputs are handled as in Step.
 func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Impulse", sys, tFinal); err != nil {

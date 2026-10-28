@@ -437,9 +437,8 @@ func stiffDescriptorParts(sys *System) ([]*System, bool) {
 // (ToExplicit) of a full-rank E even when stiffDescriptorParts applies: its
 // cond(E)·ε error then stays under 1e-9 relative in the discrete response
 // and 1e-7 in the step response, where the pencil parts cost a generalized
-// Schur split and several matrix exponentials. Impulse is not gated: the
-// step form of the fold cancels C·B of the stiff pole to worse than 1e-7
-// already at cond(E) = 1e4.
+// Schur split and several matrix exponentials. Impulse routes at the
+// stiffPencilSplit gate (cond(E) 1e4) instead.
 const foldAccurateECond = 1e6
 
 // foldInaccurateParts is stiffDescriptorParts for an E whose LU condition
