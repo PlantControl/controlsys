@@ -1146,7 +1146,10 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // 320-bit solution at Accuracy 0. There a K off the gain of X by more
 // than gainFloor is instead replaced by the gain of the
 // extended-precision Hewer iterate of X (hewerGainSubstituted, Y6BJEX
-// am.3), which gainMissIn must accept; X is kept.
+// am.3), which gainMissIn must accept; X is kept. With rotated inputs a
+// refined X whose K gainMissIn declines is refined once more: one Newton
+// step took X from 1e-10 to 5e-14 off, its gain 2.4e-7 off the 320-bit
+// one (band 1.9e-9), and the second to 1.8e-17 and 8e-11.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
@@ -1166,6 +1169,11 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		return res, 0, true
 	}
 	c, cd, stable := refined(A, B, Q, R, opts, red, res)
+	if stable && red != nil && red.rotated && !(cd.units(gainTol) <= 1) {
+		if c2, cd2, ok := refined(A, B, Q, R, opts, red, c); ok && cd2.units(gainTol) <= 1 {
+			c, cd = c2, cd2
+		}
+	}
 	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1) {
 		return c, 0, true
 	}
