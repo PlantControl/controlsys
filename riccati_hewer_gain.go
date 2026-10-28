@@ -78,10 +78,10 @@ func newHewerGainRef(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInput
 // contradicts returns the relative distance miss of the K of res from the
 // reference gain and whether miss exceeds both floor and 4√N times the
 // largest move of that gain under two componentwise eps perturbations of
-// the N entries of the data (perturbedMove), a lower estimate of K's band
-// that √N lifts to an upper one: where that band is wide the gain of X is
-// as good as any (K 1.4e-6 off the Hewer gain had a band of 9.8e-6). ok
-// is false while there is no reference.
+// the N entries of E, A, B, Q, R and S (perturbedMove), a lower estimate
+// of K's band that √N lifts to an upper one: where that band is wide the
+// gain of X is as good as any (K 1.4e-6 off the Hewer gain had a band of
+// 9.8e-6). ok is false while there is no reference.
 func (g *hewerGainRef) contradicts(res *RiccatiResult, floor float64) (miss float64, contradicts, ok bool) {
 	if g.off {
 		return 0, false, false
@@ -122,7 +122,7 @@ func (g *hewerGainRef) contradicts(res *RiccatiResult, floor float64) (miss floa
 			move = max(move, mv.k)
 		}
 		n, m := g.B.Dims()
-		entries := 2*n*n + 2*n*m + m*m
+		entries := 3*n*n + n*m + m*m
 		if g.opts.S != nil {
 			entries += n * m
 		}
