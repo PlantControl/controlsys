@@ -268,12 +268,15 @@ func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
 
 // noiseGainIll reports a Kw = (R + BᵀXB)⁻¹BᵀX that the float64
 // descriptor X may not carry within newtonTol: cond(E)·eps beyond it (Kw
-// off by 3e-7 at cond(E) 8e9), or R + BᵀXB cancelling so far that
-// rounding X alone can move it beyond it (‖X‖ ~ 1/σ_min(E)²). Lqg then
+// off by 3e-7 at cond(E) 8e9), or Kw so sensitive to X that rounding X
+// alone can move it beyond it. The sensitivity is the forward-error bound
+// ‖G⁻¹‖(‖|B|ᵀ|X|‖ + ‖|B|ᵀ|X||B|‖‖Kw‖)/‖Kw‖ of G·Kw = BᵀX, G = R + BᵀXB:
+// with ‖X‖ ~ 1/σ_min(E)² and R small against BᵀXB, G is ill-conditioned
+// while ‖G‖ is not small (cond(E) 3e7: bound 3e15, Kw off 2e-2). Lqg then
 // takes Kw from descriptorNoiseGain, unless the float64 Kw is within
 // newtonTol of it (keepFloatNoiseGain), else keeps the float64 Kw at
-// Accuracy 1. No float64 bound tells these apart: a Kw off by 1.4e-7
-// shows the same rounding sensitivity as Kw correct to 1e-16.
+// Accuracy 1. Within the bound, no float64 test tells a Kw off by 1.4e-7
+// from one correct to 1e-16.
 func noiseGainIll(B, X, R, E *mat.Dense) bool {
 	var lu mat.LU
 	lu.Factorize(E)
@@ -287,7 +290,16 @@ func noiseGainIll(B, X, R, E *mat.Dense) bool {
 	BtX := mulDims(m, na, B.T(), X)
 	G := mulDims(m, m, BtX, B)
 	G.Add(G, R)
-	return mat.Norm(bound, 1)*eps() > newtonTol*mat.Norm(G, 1)
+	var Ginv mat.Dense
+	if Ginv.Inverse(G) != nil {
+		return true
+	}
+	kw := mulDims(m, na, &Ginv, BtX)
+	nk := mat.Norm(kw, 1)
+	if !(nk > 0) {
+		return false
+	}
+	return mat.Norm(&Ginv, 1)*(mat.Norm(t, 1)+mat.Norm(bound, 1)*nk)*eps() > newtonTol*nk
 }
 
 // keepFloatNoiseGain reports the float64 Kw (first n columns of the
