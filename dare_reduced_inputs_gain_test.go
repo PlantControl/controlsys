@@ -134,3 +134,36 @@ func TestDareCrossTermReducedInputsGainNotSubstituted(t *testing.T) {
 		}
 	}
 }
+
+// TestDareDescriptorDuplicateInputsGainOfConvergedX: n 2, m 4 with three
+// duplicated input columns, cheap R ~1.9e-12, tiny cross term, E well
+// conditioned (rv39 seed 1342, D6QQX7). X is exact to 2e-16, while the
+// pencil K was 9e-5 off the exact-E 320-bit gain (its eps-sensitivity
+// 4e-4); the gain of X taken on by Hewer steps in extended precision is
+// exact. A K off the exact gain by more than 1e-7 must be the gain of its
+// own X (320-bit, dareGainBig): on amd64 without NoScaling it is, 1.4e-6
+// off with X exact, inside the band, and is kept.
+func TestDareDescriptorDuplicateInputsGainOfConvergedX(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-0.28864518346838963, -0.549870329431709, -0.6243674170543952, 0.8833863280696619})
+	B := mat.NewDense(2, 4, []float64{0.047175451585948935, -0.5961903208497157, -0.5961903208497157, -0.5961903208497157, -0.06500131021983324, 0.9803468818573009, 0.9803468818573009, 0.9803468818573009})
+	Q := mat.NewDense(2, 2, []float64{59.22482557898569, -117.240527973113, -117.240527973113, 232.08749481385476})
+	R := mat.NewDense(4, 4, []float64{1.8689544268484782e-12, 1.6790511259354945e-14, 1.7683876130756696e-14, -5.764886519549634e-14, 1.6790511259354945e-14, 1.8593955819544937e-12, -1.1495510171279438e-14, -1.681607306145989e-14, 1.7683876130756696e-14, -1.1495510171279438e-14, 1.8630544642286726e-12, -4.4225454168101175e-14, -5.764886519549634e-14, -1.681607306145989e-14, -4.4225454168101175e-14, 1.9383488945488344e-12})
+	S := mat.NewDense(2, 4, []float64{-1.3842151587849728e-16, 4.124675003603732e-17, -2.0137472633148114e-16, 3.9939457662832224e-16, 2.740170434573968e-16, -8.165141398265057e-17, 3.986382231562215e-16, -7.906351867774363e-16})
+	E := mat.NewDense(2, 2, []float64{0.9141292581144288, -0.16189848878288213, -0.19642846953561233, 0.7158936931290532})
+	ref := riccatiExactReference(false, A, B, Q, R, S, E, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("reference not certified")
+	}
+	for _, ns := range []bool{false, true} {
+		res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns})
+		if err != nil {
+			t.Fatalf("NoScaling %v: %v", ns, err)
+		}
+		eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
+		eG := relErr(res.K, dareGainBig(A, B, R, S, res.X))
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g, off the gain of X by %.3g", ns, res.Accuracy, eX, eK, eG)
+		if res.Accuracy == 0 && (eX > newtonTol || eK > 1e-7 && eG > 1e-9) {
+			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g (%.3g off the gain of X)", ns, eX, eK, eG)
+		}
+	}
+}
