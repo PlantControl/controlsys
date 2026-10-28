@@ -28,13 +28,15 @@ func clusteredMatchedDiscrete(t *testing.T, zeros, poles []complex128, k, dt flo
 // MMAAZJ: on these models the observability cut drops modes whose last
 // Hessenberg coupling is at rounding level in the Dgebal basis, and the TF
 // misses the response near z = 1. The full-order den cannot do better: its
-// coefficients, even rounded correctly from the exact poles, have den(1) and
-// root moduli dominated by rounding (literal: den(1) 2.3e-17 exact, -1.6e-15
-// rounded, roots up to 1.0027; second model roots up to 1.0041), so a
-// full-order TF is unstable and no float64 TF meets TF(1) = EvalFr(1). Every
-// kept TF must match the 320-bit response away from the cluster; stability of
-// the den is asserted only where a stable float64 den exists at the kept
-// order.
+// coefficients, even rounded correctly from the exact poles, have den(1)
+// dominated by rounding. For the literal (den(1) 2.3e-17 exact, -1.6e-15
+// rounded) the correctly rounded full-order den is unstable by an exact
+// Schur-Cohn test, and so is every +-1 ulp neighbour. For the second model
+// the correctly rounded order-8 den is stable; the reason for the reduction
+// there is DC accuracy (den(1) 3.3e-15 rounded vs 2.4e-15 exact), not
+// stability. Every kept TF must match the 320-bit response away from the
+// cluster; stability of the den is asserted only where a stable float64 den
+// exists at the kept order.
 //
 // Seed 494 of the clustered matched generator (A, B, C as produced, dt 1e-3)
 // keeps order 6 of 7 with den roots up to |z| = 1.00014. An exact rational
