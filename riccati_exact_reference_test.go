@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -180,5 +181,91 @@ func TestRiccatiExactReference_IllConditionedEMethodsAgree(t *testing.T) {
 		if !(kRounded > 1e3*sens.K) {
 			t.Errorf("continuous %v: rounded model K off by %g, sensitivity %g", cont, kRounded, sens.K)
 		}
+	}
+}
+
+// xbStable2 is the 2×2 stability test from the characteristic polynomial
+// λ² − tλ + d in a's precision: Hurwitz iff t < 0 < d, Schur iff
+// |d| < 1 and |t| < 1 + d (Jury).
+func xbStable2(continuous bool, a xbMat) bool {
+	t := new(big.Float).SetPrec(a.prec).Add(a.at(0, 0), a.at(1, 1))
+	d := new(big.Float).SetPrec(a.prec).Mul(a.at(0, 0), a.at(1, 1))
+	d.Sub(d, new(big.Float).SetPrec(a.prec).Mul(a.at(0, 1), a.at(1, 0)))
+	if continuous {
+		return t.Sign() < 0 && d.Sign() > 0
+	}
+	one := big.NewFloat(1)
+	ad, at := new(big.Float).Abs(d), new(big.Float).Abs(t)
+	return ad.Cmp(one) < 0 && at.Cmp(new(big.Float).SetPrec(a.prec).Add(one, d)) < 0
+}
+
+// TestRiccatiExactStable_NonNormalNotRounded: closed loops whose stability
+// is decided below float64 resolution of their entries; xbStable must
+// match the 2×2 characteristic-polynomial test in 320 bits. δ = 2⁻⁷⁰ is
+// lost when 1 ± δ is rounded, which moves an eigenvalue to 0 (continuous)
+// or onto the unit circle (discrete).
+func TestRiccatiExactStable_NonNormalNotRounded(t *testing.T) {
+	delta := new(big.Float).SetMantExp(big.NewFloat(1), -70)
+	mk := func(v [4]float64, dEntry int, sign int) xbMat {
+		a := xbFrom(mat.NewDense(2, 2, v[:]), 2, 2, riccatiExactPrec)
+		d := new(big.Float).SetPrec(riccatiExactPrec).Mul(big.NewFloat(float64(sign)), delta)
+		a.d[dEntry].Add(a.d[dEntry], d)
+		return a
+	}
+	cases := []struct {
+		name       string
+		continuous bool
+		a          xbMat
+		want       bool
+	}{
+		{"continuous stable", true, mk([4]float64{-1e16, 1e16, 1, -1}, 3, -1), true},
+		{"continuous unstable", true, mk([4]float64{-1e16, 1e16, 1, -1}, 3, 1), false},
+		{"discrete stable", false, mk([4]float64{0.5, 1e20, 0, 1}, 3, -1), true},
+		{"discrete unstable", false, mk([4]float64{0.5, 1e20, 0, 1}, 3, 1), false},
+		{"discrete rotation stable", false, mk([4]float64{0, -1, 1, 0}, 1, 1), true},
+		{"discrete rotation unstable", false, mk([4]float64{0, -1, 1, 0}, 1, -1), false},
+	}
+	for _, c := range cases {
+		if ref := xbStable2(c.continuous, c.a); ref != c.want {
+			t.Fatalf("%s: characteristic-polynomial test %v, want %v", c.name, ref, c.want)
+		}
+		if got := xbStable(c.continuous, c.a); got != c.want {
+			t.Errorf("%s: xbStable %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRiccatiExactReference_NonNormalClosedLoopCertified: the Kalman dual
+// of an r2b review draw (seed 384, scratchpad w47review/oracle): Care with
+// E pivot 3.1e-16, so the exact closed loop E⁻¹(A − BK) has eigenvalues
+// near −6.4e15 and −0.78. Its float64 rounding has an eigenvalue at 0 and
+// an eigenvalue test on it rejected a reference with residual 1e-81
+// (TDFWXM review). The reference must certify, agree with Kleinman in 448
+// bits, and its closed loop pass the 2×2 characteristic-polynomial test.
+func TestRiccatiExactReference_NonNormalClosedLoopCertified(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-0.3023616046332625, -0.15850487436542046, -0.7866964207848689, 0.58860345651605805})
+	B := mat.NewDense(2, 1, []float64{0.78936534339228193, 1.3501877754092229})
+	Q := mat.NewDense(2, 2, []float64{1.0864596697066173, 0.20651901636561287, 0.20651901636561287, 1.6267227571836682})
+	R := mat.NewDense(1, 1, []float64{1})
+	E := mat.NewDense(2, 2, []float64{-0.54821111375151999, 0, 0.10072810142333721, -3.1028378217143543e-16})
+	ref := riccatiExactReference(true, A, B, Q, R, nil, E, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatalf("sign-function reference not certified (residual %g)", ref.Resid)
+	}
+	md, _ := xbExplicitModel(A, B, Q, R, nil, E, riccatiExactPrec)
+	if !xbStable2(true, xbAxpy(md.a, -1, xbMul(md.b, ref.k))) {
+		t.Fatal("closed loop not Hurwitz by its characteristic polynomial")
+	}
+	nw := riccatiExactNewtonReference(true, A, B, Q, R, nil, E, perturbGain(ref.K), 448)
+	if !nw.OK {
+		t.Fatalf("Kleinman reference not certified (residual %g)", nw.Resid)
+	}
+	dY, dX, dK := xbRelDiff(ref.y, nw.y), xbRelDiff(ref.x, nw.x), xbRelDiff(ref.k, nw.k)
+	t.Logf("residual %.3g, %d / %d steps; differ Y %.2g X %.2g K %.2g", ref.Resid, ref.Iter, nw.Iter, dY, dX, dK)
+	if !(dY <= 1e-50 && dX <= 1e-50 && dK <= 1e-50) {
+		t.Errorf("methods differ: Y %g X %g K %g", dY, dX, dK)
+	}
+	if k, y := ref.K.At(0, 0), ref.Y.At(0, 0); !(relDiffScalar(k, -1.4014861929134756) <= 1e-15 && relDiffScalar(y, 1.3508340744681693) <= 1e-15) {
+		t.Errorf("K₀₀ %.17g Y₀₀ %.17g", k, y)
 	}
 }

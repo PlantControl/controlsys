@@ -3,7 +3,6 @@ package controlsys
 import (
 	"math"
 	"math/big"
-	"math/cmplx"
 	"strings"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -203,15 +202,68 @@ func xbRelDiff(a, b xbMat) float64 {
 	return v
 }
 
-// xbStableF64 reports whether the rounded closed loop is stable.
-func xbStableF64(continuous bool, acl xbMat) bool {
-	var ev mat.Eigen
-	if !ev.Factorize(xbDense(acl), mat.EigenNone) {
+// xbLyap solves the Lyapunov equation aᵀy + ya + q = 0 (continuous) or
+// the Stein equation aᵀya − y + q = 0 by a Kronecker solve in a's
+// precision; ok is false when the operator is exactly singular.
+func xbLyap(continuous bool, a, q xbMat) (xbMat, bool) {
+	n, prec := a.r, a.prec
+	M, rhs := xbNew(n*n, n*n, prec), xbNew(n*n, 1, prec)
+	p := new(big.Float).SetPrec(prec)
+	for i := range n {
+		for j := range n {
+			row := i*n + j
+			if continuous {
+				rhs.d[row].Neg(q.at(i, j))
+				for l := range n {
+					c := M.at(row, l*n+j)
+					c.Add(c, a.at(l, i))
+					c = M.at(row, i*n+l)
+					c.Add(c, a.at(l, j))
+				}
+				continue
+			}
+			rhs.d[row].Set(q.at(i, j))
+			M.at(row, row).Add(M.at(row, row), big.NewFloat(1))
+			for l := range n {
+				for o := range n {
+					c := M.at(row, l*n+o)
+					c.Sub(c, p.Mul(a.at(l, i), a.at(o, j)))
+				}
+			}
+		}
+	}
+	yv, _, ok := xbSolve(M, rhs)
+	if !ok {
+		return xbMat{}, false
+	}
+	y := xbNew(n, n, prec)
+	for i := range y.d {
+		y.d[i].Set(yv.d[i])
+	}
+	return xbSym(y), true
+}
+
+// xbStable reports whether acl is Hurwitz (continuous) or Schur stable,
+// in acl's precision with nothing rounded to float64: the Lyapunov or
+// Stein solution P for q = I is positive definite (symmetric elimination,
+// every pivot > 0) exactly when it is. A float64 eigenvalue test of the
+// rounded closed loop rejects stable non-normal loops: with eigenvalues
+// −6.4e15 and −0.78, rounding the entries moves the small one to 0.
+func xbStable(continuous bool, acl xbMat) bool {
+	P, ok := xbLyap(continuous, acl, xbEye(acl.r, acl.prec))
+	if !ok {
 		return false
 	}
-	for _, v := range ev.Values(nil) {
-		if continuous && !(real(v) < 0) || !continuous && !(cmplx.Abs(v) < 1) {
+	f, p := new(big.Float).SetPrec(P.prec), new(big.Float).SetPrec(P.prec)
+	for k := range P.r {
+		if P.at(k, k).Sign() <= 0 {
 			return false
+		}
+		for i := k + 1; i < P.r; i++ {
+			f.Quo(P.at(i, k), P.at(k, k))
+			for j := k; j < P.r; j++ {
+				P.at(i, j).Sub(P.at(i, j), p.Mul(f, P.at(k, j)))
+			}
 		}
 	}
 	return true
@@ -310,7 +362,7 @@ func (md xbModel) finish(continuous bool, y xbMat, conv bool, iter int) riccatiE
 	ref.k, ref.x = k, xbSym(xt.t())
 	ref.Y, ref.X, ref.K = xbDense(y), xbDense(ref.x), xbDense(k)
 	ref.Resid = md.residual(continuous, y)
-	ref.OK = conv && ref.Resid <= 1e-40 && xbStableF64(continuous, xbAxpy(md.a, -1, xbMul(md.b, k)))
+	ref.OK = conv && ref.Resid <= 1e-40 && xbStable(continuous, xbAxpy(md.a, -1, xbMul(md.b, k)))
 	return ref
 }
 
@@ -442,40 +494,10 @@ func riccatiExactNewtonReference(continuous bool, A, B, Q, R, S, E, K0 *mat.Dens
 		acl := xbAxpy(md.a, -1, xbMul(md.b, k))
 		sk := xbMul(md.s, k)
 		qk := xbAxpy(xbAxpy(xbAxpy(md.q, 1, xbMul(xbMul(k.t(), md.r), k)), -1, sk), -1, sk.t())
-		M, rhs := xbNew(n*n, n*n, prec), xbNew(n*n, 1, prec)
-		p := new(big.Float).SetPrec(prec)
-		for i := range n {
-			for j := range n {
-				row := i*n + j
-				if continuous {
-					rhs.d[row].Neg(qk.at(i, j))
-					for l := range n {
-						c := M.at(row, l*n+j)
-						c.Add(c, acl.at(l, i))
-						c = M.at(row, i*n+l)
-						c.Add(c, acl.at(l, j))
-					}
-					continue
-				}
-				rhs.d[row].Set(qk.at(i, j))
-				M.at(row, row).Add(M.at(row, row), big.NewFloat(1))
-				for l := range n {
-					for o := range n {
-						c := M.at(row, l*n+o)
-						c.Sub(c, p.Mul(acl.at(l, i), acl.at(o, j)))
-					}
-				}
-			}
-		}
-		yv, _, ok := xbSolve(M, rhs)
+		yn, ok := xbLyap(continuous, acl, qk)
 		if !ok {
 			return riccatiExactRef{}
 		}
-		yn := xbNew(n, n, prec)
-		for i := range yn.d {
-			yn.d[i].Set(yv.d[i])
-		}
-		yn = xbSym(yn)
 		d := math.Inf(1)
 		if y.r > 0 {
 			d = xbRelDiff(yn, y)
