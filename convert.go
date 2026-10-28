@@ -543,7 +543,8 @@ func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2
 // foldInaccurateParts of its delay-free core, each in real Schur form, with
 // the delays and names of sys and no state names: an explicit model with
 // the transfer function and poles of the pencil for the delay paths of
-// C2D, which would otherwise fold E⁻¹A. Upper quasi-triangular, it lets
+// C2D (and so of Step and Lsim, which discretize through it), which would
+// otherwise fold E⁻¹A. Upper quasi-triangular, it lets
 // the hold discretize its stiff and slow modes separately
 // (stiffModalHold). Matched is left to newC2DPlan, which keeps the
 // transfer function of the pencil.
