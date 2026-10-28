@@ -281,3 +281,25 @@ func TestC2DMatchedSectionShapesFollowMatchedZPK(t *testing.T) {
 		}
 	}
 }
+
+// A discrete pole e^{pT} near 1e188 overflows the cascade's C; matched C2D
+// keeps the companion route's answer there and never returns Inf entries.
+func TestC2DMatchedOverflowingSectionKeepsFiniteOrError(t *testing.T) {
+	z, err := NewZPK([]complex128{-1.0241915648397435, -10356.095644626927}, []complex128{-0.5217603941516756, 4320.677636617519}, 0.9231445700524119, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := z.StateSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := res.Sys.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
+	if err != nil {
+		return
+	}
+	for name, m := range map[string]*mat.Dense{"A": d.A, "B": d.B, "C": d.C, "D": d.D} {
+		if !finiteSlice(m.RawMatrix().Data) {
+			t.Errorf("%s = %v is not finite", name, m.RawMatrix().Data)
+		}
+	}
+}

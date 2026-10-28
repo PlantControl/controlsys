@@ -237,31 +237,44 @@ type matchedSection struct {
 // matchedCascade realizes the conjugate-closed SISO model
 // gain·Π(z−zeros)/Π(z−poles) as a cascade of first- and second-order
 // sections with block upper-triangular A, so its eigenvalues are the given
-// poles to rounding; a companion realization loses clustered poles.
+// poles to rounding; a companion realization loses clustered poles. Models
+// the cascade cannot hold in finite float64 keep the companion realization.
 func matchedCascade(zeros, poles []complex128, gain, dt float64) (*System, error) {
-	finite := !math.IsNaN(gain) && !math.IsInf(gain, 0)
-	for _, r := range append(append([]complex128(nil), zeros...), poles...) {
-		finite = finite && !cmplx.IsNaN(r) && !cmplx.IsInf(r)
+	if sys := matchedCascadeFinite(zeros, poles, gain, dt); sys != nil {
+		return sys, nil
 	}
-	if !finite || len(zeros) > len(poles) || len(poles) == 0 {
-		discrete, err := NewZPK(zeros, poles, gain, dt)
-		if err != nil {
-			return nil, err
-		}
-		res, err := discrete.StateSpace()
-		if err != nil {
-			return nil, err
-		}
-		return res.Sys, nil
+	discrete, err := NewZPK(zeros, poles, gain, dt)
+	if err != nil {
+		return nil, err
 	}
-	sections := matchedSections(zeros, poles)
+	res, err := discrete.StateSpace()
+	if err != nil {
+		return nil, err
+	}
+	return res.Sys, nil
+}
+
+func matchedCascadeFinite(zeros, poles []complex128, gain, dt float64) *System {
+	if len(zeros) > len(poles) || len(poles) == 0 || !finiteSlice([]float64{gain}) {
+		return nil
+	}
+	for _, r := range zeros {
+		if cmplx.IsNaN(r) || cmplx.IsInf(r) {
+			return nil
+		}
+	}
+	for _, r := range poles {
+		if cmplx.IsNaN(r) || cmplx.IsInf(r) {
+			return nil
+		}
+	}
 	n := len(poles)
 	a := make([]float64, n*n)
 	b := make([]float64, n)
 	c := make([]float64, n)
 	d := 1.0
 	off := n
-	for _, s := range sections {
+	for _, s := range matchedSections(zeros, poles) {
 		as, bs, cs, ds := s.realize()
 		q := s.order
 		off -= q
@@ -284,7 +297,15 @@ func matchedCascade(zeros, poles []complex128, gain, dt float64) (*System, error
 	for j := range c {
 		c[j] *= gain
 	}
-	return New(mat.NewDense(n, n, a), mat.NewDense(n, 1, b), mat.NewDense(1, n, c), mat.NewDense(1, 1, []float64{gain * d}), dt)
+	d *= gain
+	if !finiteSlice(a) || !finiteSlice(b) || !finiteSlice(c) || !finiteSlice([]float64{d}) {
+		return nil
+	}
+	sys, err := New(mat.NewDense(n, n, a), mat.NewDense(n, 1, b), mat.NewDense(1, n, c), mat.NewDense(1, 1, []float64{d}), dt)
+	if err != nil {
+		return nil
+	}
+	return sys
 }
 
 // matchedSections groups conjugate pairs and real roots into sections of
