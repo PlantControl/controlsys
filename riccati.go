@@ -906,6 +906,9 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			r, miss, ok := gainOfX(A, B, Q, R, opts, red, c)
 			if !ok && (poor == nil || miss < poorMiss) {
 				poor, poorMiss = c, miss
+				if r != nil {
+					poor = r
+				}
 			}
 			return r, ok
 		}
@@ -950,6 +953,9 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			r, _, ok := gainOfX(A, B, Q, R, opts, red, c)
 			if ok {
 				return r
+			}
+			if r != nil {
+				c = r
 			}
 			c.Accuracy = 1
 		}
@@ -1149,12 +1155,36 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // am.3), which gainMissIn must accept; X is kept. With rotated inputs a
 // refined X whose K gainMissIn declines is refined once more: one Newton
 // step took X from 1e-10 to 5e-14 off, its gain 2.4e-7 off the 320-bit
-// one (band 1.9e-9), and the second to 1.8e-17 and 8e-11.
+// one (band 1.9e-9), and the second to 1.8e-17 and 8e-11. With reduced
+// inputs and a descriptor E, a K the Hewer gain of its X contradicts
+// (hewerGainMiss) is not returned with ok; then r is, of res and the X
+// refined, that whose K is nearest the Hewer gain of its X, for Accuracy
+// 1: there the gain of the float64 X was 3.6e-4 off the 320-bit gain at
+// Accuracy 0 (band 1.3e-9).
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
 	}
 	d := gainMissIn(A, B, R, opts, red, res)
+	var nearest *RiccatiResult
+	nearestMiss, contra := math.Inf(1), false
+	contradicted := func(r *RiccatiResult, rd gainDist) func() bool {
+		known, v := false, false
+		return func() bool {
+			if !known && red != nil {
+				if m, ok := hewerGainMiss(A, B, Q, R, opts, red, r); ok {
+					v = m > max(rd.tol, gainFloor)
+					contra = contra || v
+					if m < nearestMiss {
+						nearest, nearestMiss = r, m
+					}
+				}
+			}
+			known = true
+			return v
+		}
+	}
+	resOff := contradicted(res, d)
 	if d.units(gainTol) <= 1 {
 		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
 			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
@@ -1166,7 +1196,9 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 				return r, 0, true
 			}
 		}
-		return res, 0, true
+		if !resOff() {
+			return res, 0, true
+		}
 	}
 	c, cd, stable := refined(A, B, Q, R, opts, red, res)
 	if stable && red != nil && red.rotated && !(cd.units(gainTol) <= 1) {
@@ -1174,14 +1206,22 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 			c, cd = c2, cd2
 		}
 	}
-	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1) {
+	var cOff func() bool
+	if stable {
+		cOff = contradicted(c, cd)
+	}
+	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1 && !cOff()) {
 		return c, 0, true
 	}
-	if d.units(gainFloor) <= 1 {
+	if d.units(gainFloor) <= 1 && !resOff() {
 		return res, 0, true
 	}
-	if stable && cd.units(gainFloor) <= 1 {
+	if stable && cd.units(gainFloor) <= 1 && !cOff() {
 		return c, 0, true
+	}
+	if contra {
+		resOff()
+		return nearest, d.units(gainFloor), false
 	}
 	return nil, d.units(gainFloor), false
 }
