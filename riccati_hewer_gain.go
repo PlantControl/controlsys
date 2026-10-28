@@ -74,8 +74,9 @@ func newHewerGainRef(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInput
 // off by gainFloor: when its move across a Newton step of X (move) or
 // under X∘(1 ± eps) (tol/8, gainMissOf) exceeds gainFloor, or when res
 // entered at Accuracy 1, which an X refined to Accuracy 0 may leave only
-// with a K the reference confirms (Y6BJEX am.7). Where K moved under
-// gainFloor X was within 1e-16 and the check cost 2 to 4 times the Dare.
+// with a K the reference confirms (Y6BJEX am.7). Where neither moved by
+// gainFloor (by at most 1e-15, K band 3e5 to 2e11) the reference was
+// itself 2e-9 to 7e-3 off and the check doubled the time of the Dare.
 // A reference that fails to converge, or whose band cannot be formed,
 // contradicts (fails closed): under -race the gain of an X refined from
 // Accuracy 1 was 0.44 off the 320-bit gain (band 2.1e-5) while hewerGain
