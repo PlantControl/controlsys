@@ -256,7 +256,7 @@ func matchedPencilRoots(sys *System, cz, cp []complex128, k float64) (zeros, pol
 	misfit := func(z, p []complex128, k float64) float64 {
 		return cmplx.Abs(complex(k, 0)*matchedRootRatio(z, p, s1)-g1) / cmplx.Abs(g1)
 	}
-	if e := misfit(zeros, poles, gain); math.IsNaN(e) || e > math.Max(2*misfit(cz, cp, k), 1e-10) {
+	if e := misfit(zeros, poles, gain); math.IsNaN(e) || e > math.Max(2*misfit(cz, cp, k), 1e-12) {
 		return nil, nil, 0, false
 	}
 	return zeros, poles, gain, true
@@ -321,9 +321,10 @@ func matchedRootRatio(zeros, poles []complex128, s complex128) complex128 {
 	return r
 }
 
-// matchedProbePoints returns the two points, at the median root modulus
-// times 1/2, 1 or 2 and angles from 0.25π to 0.75π, farthest from every
-// root relative to their modulus.
+// matchedProbePoints returns the two points, at the smallest nonzero root
+// modulus times 1/2, 1 or 2 and angles from 0.25π to 0.75π, farthest from
+// every root relative to their modulus. The matched gain is set at low
+// frequency, where errors in stiff roots cancel as they do at DC.
 func matchedProbePoints(sets ...[]complex128) (complex128, complex128) {
 	var mags []float64
 	for _, set := range sets {
@@ -335,8 +336,7 @@ func matchedProbePoints(sets ...[]complex128) (complex128, complex128) {
 	}
 	rho := 1.0
 	if len(mags) > 0 {
-		sort.Float64s(mags)
-		rho = mags[len(mags)/2]
+		rho = slices.Min(mags)
 	}
 	var best [2]complex128
 	score := [2]float64{-1, -1}

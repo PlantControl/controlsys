@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/big"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -300,6 +301,62 @@ func TestC2DMatchedOverflowingSectionKeepsFiniteOrError(t *testing.T) {
 	for name, m := range map[string]*mat.Dense{"A": d.A, "B": d.B, "C": d.C, "D": d.D} {
 		if !finiteSlice(m.RawMatrix().Data) {
 			t.Errorf("%s = %v is not finite", name, m.RawMatrix().Data)
+		}
+	}
+}
+
+// matchedRotatedCluster is f rotated by a fixed random orthogonal Q, with
+// random B and C: the transfer-function roots of such a model lose a tight
+// cluster that eig(A) keeps.
+func matchedRotatedCluster(t *testing.T, f *mat.Dense, seed uint64) *System {
+	t.Helper()
+	n, _ := f.Dims()
+	rng := rand.New(rand.NewPCG(seed, 7))
+	q := randomOrthogonal(rng, n)
+	var tmp, a mat.Dense
+	tmp.Mul(q, f)
+	a.Mul(&tmp, q.T())
+	b, c := mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil)
+	for i := range n {
+		b.Set(i, 0, rng.NormFloat64())
+		c.Set(0, i, rng.NormFloat64())
+	}
+	sys, err := New(&a, b, c, mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// Matched C2D poles are e^{λT} for λ = eig(A), as MATLAB zpk(ss) takes
+// them, also where polynomial roots of the transfer function split a tight
+// real cluster into complex pairs (EGHOKQ review, sweep rows modal:16 and
+// modal:482: pole errors 3e-2 and 2e-3).
+func TestC2DMatchedRotatedClusterPolesFollowEig(t *testing.T) {
+	const n = 8
+	real8 := mat.NewDense(n, n, nil)
+	for i := range n {
+		real8.Set(i, i, -1.8176-0.01*float64(i))
+	}
+	pairs := mat.NewDense(n, n, nil)
+	for i, blk := range [][2]float64{{-1.7153, 2}, {-1.7353, 1e-3}, {-1.7553, 1e-3}, {-1.7753, 1e-3}} {
+		r := 2 * i
+		pairs.Set(r, r, blk[0])
+		pairs.Set(r+1, r+1, blk[0])
+		pairs.Set(r, r+1, blk[1])
+		pairs.Set(r+1, r, -blk[1])
+	}
+	for _, tc := range []struct {
+		name string
+		f    *mat.Dense
+	}{{"real cluster", real8}, {"tiny-imag pairs", pairs}} {
+		sys := matchedRotatedCluster(t, tc.f, 16)
+		for _, dt := range []float64{1, 0.1} {
+			d, err := sys.C2D(dt, C2DOptions{Method: C2DMethodMatched})
+			if err != nil {
+				t.Fatalf("%s dt=%g: %v", tc.name, dt, err)
+			}
+			checkMatchedAgainstOracle(t, tc.name, sys, d, dt)
 		}
 	}
 }
