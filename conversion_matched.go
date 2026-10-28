@@ -41,35 +41,178 @@ func (sys *System) d2cMatched() (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	dz, dp := disc.Zeros[0][0], disc.Poles[0][0]
-	cz, err := matchedLogRoots(dz, sys.Dt)
-	if err != nil {
-		return nil, err
+	dz, dp, k := disc.Zeros[0][0], disc.Poles[0][0], disc.Gain[0][0]
+	var out *System
+	if z, p, g, ok := matchedD2CPencilRoots(sys, numerator, dz, dp, k, artificial); ok {
+		out, _ = matchedD2CModel(z, p, g, artificial, sys.Dt)
 	}
-	cp, err := matchedLogRoots(dp, sys.Dt)
-	if err != nil {
-		return nil, err
+	if out == nil {
+		if out, err = matchedD2CModel(dz, dp, k, artificial, sys.Dt); err != nil {
+			return nil, err
+		}
 	}
-	for range artificial {
-		dz = append(dz, -1)
-	}
-	gain, err := matchedContinuousGain(dz, dp, cz, cp, disc.Gain[0][0], sys.Dt)
-	if err != nil {
-		return nil, err
-	}
-	model, err := NewZPK(cz, cp, gain, 0)
-	if err != nil {
-		return nil, err
-	}
-	ss, err := model.StateSpace()
-	if err != nil {
-		return nil, err
-	}
-	out := ss.Sys
 	newDelayConversionPolicy(sys.Dt).applyContinuousDelayFields(out, sys)
 	propagateNames(out, sys)
 	out.StateName = nil
 	return out, nil
+}
+
+// matchedD2CModel realizes the continuous matched model of the discrete
+// roots dz (less the artificial zeros at −1), dp and gain k.
+func matchedD2CModel(dz, dp []complex128, k float64, artificial int, dt float64) (*System, error) {
+	cz, err := matchedLogRoots(dz, dt)
+	if err != nil {
+		return nil, err
+	}
+	cp, err := matchedLogRoots(dp, dt)
+	if err != nil {
+		return nil, err
+	}
+	all := slices.Clone(dz)
+	for range artificial {
+		all = append(all, -1)
+	}
+	gain, err := matchedContinuousGain(all, dp, cz, cp, k, dt)
+	if err != nil {
+		return nil, err
+	}
+	return matchedCascade(cz, cp, gain, 0)
+}
+
+// matchedD2CPencilRoots returns the poles eig(A), as MATLAB
+// d2c(...,'matched') takes them, with zeros other than the artificial
+// zeros at −1 and a gain fitted to the response of sys; polynomial roots of
+// the transfer function lose tight pole clusters near z = 1. The zeros are
+// the invariant zeros less the count nearest −1, as MATLAB takes them,
+// unless the transfer-function zeros cz (roots of numerator) are well
+// conditioned or tzero cannot resolve the multiple zero at −1. ok is false unless the fit at a probe point is no worse than
+// that of cz, cp, k, at low frequency; eig(A) may hold more poles than cp
+// only when the transfer function cancelled roots it should not have,
+// fitting worse than 1e-6 where the pencil roots fit to 1e-9.
+func matchedD2CPencilRoots(sys *System, numerator []float64, cz, cp []complex128, k float64, artificial int) (zeros, poles []complex128, gain float64, ok bool) {
+	poles, err := sys.Poles()
+	if err != nil || len(poles) == 0 || len(poles) < len(cp) {
+		return nil, nil, 0, false
+	}
+	if poles, ok = matchedConjugateClosed(poles); !ok {
+		return nil, nil, 0, false
+	}
+	withArtificial := func(z []complex128) []complex128 {
+		out := slices.Clone(z)
+		for range artificial {
+			out = append(out, -1)
+		}
+		return out
+	}
+	extra := len(poles) - len(cp)
+	free := *sys
+	free.Delay, free.InputDelay, free.OutputDelay = nil, nil, nil
+	tfZeros := withArtificial(cz)
+	s0, s1 := matchedD2CProbePoints(sys.Dt, poles, cz, cp)
+	g0, ok0 := matchedEvalModel(&free, s0)
+	g1, ok1 := matchedEvalModel(&free, s1)
+	if !ok0 || !ok1 {
+		return nil, nil, 0, false
+	}
+	misfit := func(z, p []complex128, k float64) float64 {
+		return cmplx.Abs(complex(k, 0)*matchedRootRatio(z, p, s1)-g1) / cmplx.Abs(g1)
+	}
+	limit := math.Max(2*misfit(tfZeros, cp, k), 1e-12)
+	if extra > 0 {
+		if limit <= 1e-6 {
+			return nil, nil, 0, false
+		}
+		limit = 1e-9
+	}
+	var candidates [][]complex128
+	if extra == 0 {
+		candidates = append(candidates, cz)
+	}
+	if extra > 0 || !matchedRootsWellConditioned(numerator, cz) {
+		if pz, ok := matchedD2CInvariantZeros(sys, len(cz)+artificial+extra, artificial); ok {
+			candidates = append(candidates, pz)
+		}
+	}
+	for _, z := range slices.Backward(candidates) {
+		all := withArtificial(z)
+		g := real(g0 / matchedRootRatio(all, poles, s0))
+		if e := misfit(all, poles, g); e <= limit {
+			return z, poles, g, true
+		}
+	}
+	return nil, nil, 0, false
+}
+
+// matchedD2CInvariantZeros returns the count invariant zeros of sys less
+// the artificial ones nearest −1.
+func matchedD2CInvariantZeros(sys *System, count, artificial int) ([]complex128, bool) {
+	pz, err := sys.Zeros()
+	if err != nil || len(pz) != count {
+		return nil, false
+	}
+	pz, ok := matchedConjugateClosed(pz)
+	if !ok {
+		return nil, false
+	}
+	return matchedStripArtificialZeros(pz, artificial)
+}
+
+// matchedRootsWellConditioned reports whether every root r of the
+// polynomial is resolved to 1e-10 of its continuous image log(r)/T: the
+// first-order error ε·Σ|aₖ||r|ᵏ/|p'(r)| over |r|·|log r|. The
+// invariant zeros are then not needed.
+func matchedRootsWellConditioned(poly []float64, roots []complex128) bool {
+	for _, r := range roots {
+		var v, dv complex128
+		var scale float64
+		ar := cmplx.Abs(r)
+		for _, c := range poly {
+			dv = dv*r + v
+			v = v*r + complex(c, 0)
+			scale = scale*ar + math.Abs(c)
+		}
+		l := cmplx.Abs(cmplx.Log(r))
+		if dv == 0 || l == 0 || !(0x1p-52*scale/cmplx.Abs(dv) <= 1e-10*ar*l) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchedD2CProbePoints maps the matchedProbePoints of the continuous roots
+// log(r)/T back to z = e^{sT}, so the fit is checked at low frequency on the
+// scale of the continuous model rather than far from a cluster near z = 1.
+func matchedD2CProbePoints(dt float64, sets ...[]complex128) (complex128, complex128) {
+	var roots []complex128
+	for _, set := range sets {
+		for _, r := range set {
+			if cmplx.Abs(r) > 0 && (real(r) > 0 || math.Abs(imag(r)) > 1e-10*cmplx.Abs(r)) {
+				roots = append(roots, cmplx.Log(r)/complex(dt, 0))
+			}
+		}
+	}
+	s0, s1 := matchedProbePoints(roots)
+	return cmplx.Exp(s0 * complex(dt, 0)), cmplx.Exp(s1 * complex(dt, 0))
+}
+
+// matchedStripArtificialZeros removes the count zeros nearest −1 from the
+// zeros; ok is false unless each lies within 0.25 of −1, the spread tzero
+// leaves on a many-fold zero there.
+func matchedStripArtificialZeros(zeros []complex128, count int) ([]complex128, bool) {
+	out := slices.Clone(zeros)
+	for range count {
+		best := -1
+		for i, z := range out {
+			if best < 0 || cmplx.Abs(z+1) < cmplx.Abs(out[best]+1) {
+				best = i
+			}
+		}
+		if best < 0 || cmplx.Abs(out[best]+1) > 0.25 {
+			return nil, false
+		}
+		out = slices.Delete(out, best, best+1)
+	}
+	return out, true
 }
 
 func matchedLogRoots(roots []complex128, dt float64) ([]complex128, error) {

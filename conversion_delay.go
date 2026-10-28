@@ -214,6 +214,11 @@ func discretizeZOHExternal(cont, disc *System, dt float64) (*System, error) {
 		}
 		for j := range m {
 			sigma := inputResidual[j]
+			// σ+ρ on the grid: the input switches at the output sample; rounding
+			// of the split must not move the channel by a sample.
+			if sigma != 0 && isIntegerSampleDelay((sigma+rho)/dt) {
+				sigma = h
+			}
 			whole, part := 0., 0.
 			if n > 0 {
 				for k := range n {
