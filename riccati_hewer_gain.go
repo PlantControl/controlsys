@@ -17,7 +17,7 @@ const hewerGainStepsMax = 4
 
 // hewerGainSubstituted returns res with K the gain of X taken two Hewer
 // steps on in extended precision (hewerGain) and Eig that of A − BK, once
-// gainMissIn accepts the new K (Y6BJEX am.4). X is kept. With reduced
+// gainMissIn accepts the new K. X is kept. With reduced
 // inputs under cheap control both the float64 pencil K and the
 // double-double gain of the rounded X were off the 320-bit gain by up to
 // 6e-6 and 4.7e-6, either one the worse depending on the rounding of X,
@@ -74,7 +74,7 @@ func newHewerGainRef(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInput
 // off by gainFloor: when its move across a Newton step of X (move) or
 // under X∘(1 ± eps) (tol/8, gainMissOf) exceeds gainFloor, or when res
 // entered at Accuracy 1, which an X refined to Accuracy 0 may leave only
-// with a K the reference confirms (Y6BJEX am.7). Where neither moved by
+// with a K the reference confirms. Where neither moved by
 // gainFloor (by at most 1e-15, K band 3e5 to 2e11) the reference was
 // itself 2e-9 to 7e-3 off and the check doubled the time of the Dare.
 // A reference that fails to converge, or whose band cannot be formed,

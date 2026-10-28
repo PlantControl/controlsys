@@ -1161,7 +1161,7 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // one (band 1.9e-9), and the second to 1.8e-17 and 8e-11. With reduced
 // inputs a K the Hewer gain of the X of res contradicts (hewerGainRef) is
 // not returned with ok; once one is, r is res with K that Hewer gain, for
-// Accuracy 1 (Y6BJEX am.7): the gain of the float64 X was 3.6e-4 off the
+// Accuracy 1: the gain of the float64 X was 3.6e-4 off the
 // 320-bit gain at Accuracy 0 (band 1.3e-9).
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
