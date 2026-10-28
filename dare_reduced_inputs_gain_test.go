@@ -184,8 +184,10 @@ func TestDareDescriptorDuplicateInputsGainOfConvergedX(t *testing.T) {
 // 0, against a K band of 1.3e-9 and 3.6e-11, while the gain of X taken on
 // by Hewer steps in extended precision was within 1e-12 of it. A K that
 // gain contradicts is not certified: no Accuracy 0 row may be
-// certified-wrong (Y6BJEX rule 1). Returning that
-// Hewer gain at Accuracy 0 with X kept awaits an am.4 ruling. X is held
+// certified-wrong (Y6BJEX rule 1); the Hewer gain is returned at
+// Accuracy 1 with X kept (am.7). The bands are riccatiExactSensitivity
+// (..., "ABQRSE") of the reference, pinned: computing them took 10s
+// under -race. X is held
 // to 1e-7, not newtonTol: the same wander, identical on base, left X
 // 9.5e-9 to 9.6e-9 off at Accuracy 0 natively and on amd64. K is held
 // to gainFloor, the K detector limit (Y6BJEX am.2): under -race the
@@ -207,14 +209,12 @@ func TestDareDescriptorReducedInputsGainOfWanderingX(t *testing.T) {
 			S: mat.NewDense(3, 5, []float64{-0.04985769652217746, 0.1542707317303147, 0.021209052946968458, -0.043898554115086565, 0.0645341321939691, 0.028692724139473214, -0.08878162965999933, -0.012205648233190175, 0.02526328312792469, -0.03713890094778458, 0.1578663192394539, -0.48847328062596934, -0.06715503035330311, 0.13899766017068363, -0.2043368752554096}),
 			E: mat.NewDense(3, 3, []float64{1.1837152797534314, -0.42273036266657105, -0.18344766244566035, 0, 1.1828283096371839, -0.20231006085159206, 0, 0, 2.581063878791499e-05})},
 	}
-	for _, c := range cases {
+	bands := []struct{ x, k float64 }{{2.673892692294988e-15, 1.2488966195009199e-09}, {8.076545843518591e-16, 3.5856565593042107e-11}}
+	for i, c := range cases {
+		xBand, kBand := bands[i].x, bands[i].k
 		ref := riccatiExactReference(false, c.A, c.B, c.Q, c.R, c.S, c.E, riccatiExactPrec)
 		if !ref.OK {
 			t.Fatalf("%s: exact-E oracle did not certify", c.name)
-		}
-		sens, ok := riccatiExactSensitivity(false, c.A, c.B, c.Q, c.R, c.S, c.E, ref, "ABQRSE")
-		if !ok {
-			t.Fatalf("%s: no sensitivity", c.name)
 		}
 		for _, ns := range []bool{false, true} {
 			opts := &RiccatiOpts{E: c.E, S: c.S, NoScaling: ns}
@@ -226,11 +226,11 @@ func TestDareDescriptorReducedInputsGainOfWanderingX(t *testing.T) {
 				t.Fatalf("%s NoScaling %v: %v", c.name, ns, err)
 			}
 			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.Accuracy, eX, sens.X, eK, sens.KBand())
-			if riccatiCertifiedWrong(res.Accuracy, 0, 0, eK, sens.KBand(), gainFloor) {
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.Accuracy, eX, xBand, eK, kBand)
+			if riccatiCertifiedWrong(res.Accuracy, 0, 0, eK, kBand, gainFloor) {
 				t.Errorf("%s NoScaling %v: certified-wrong: Accuracy 0 with K off by %.3g", c.name, ns, eK)
 			}
-			if res.Accuracy == 0 && eX > max(1e-7, 4*sens.X) {
+			if res.Accuracy == 0 && eX > max(1e-7, 4*xBand) {
 				t.Errorf("%s NoScaling %v: Accuracy 0 with X off by %.3g", c.name, ns, eX)
 			}
 			if dareRotatedInputsUnstable(c.A, c.B, c.E, res.K) {
