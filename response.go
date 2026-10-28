@@ -1958,6 +1958,13 @@ func Impulse(sys *System, tFinal float64) (*TimeResponse, error) {
 		} else if ok {
 			return resp, nil
 		}
+		if n, _, _ := sys.Dims(); n > 0 && sys.LFT == nil {
+			resp, err := explicitImpulse(sys, tFinal)
+			if err != nil {
+				return nil, fmt.Errorf("Impulse: %w", err)
+			}
+			return resp, nil
+		}
 		derived, err := impulseAsStepModel(sys)
 		if err != nil {
 			return nil, fmt.Errorf("Impulse: %w", err)
@@ -1999,6 +2006,23 @@ func foldInaccurateContinuous(sys *System) bool {
 	return ok
 }
 
+// explicitImpulse is the impulse response of the continuous explicit sys
+// without internal delays, sampled exactly as C·e^{A·k·dt}·B, shifted by
+// the I/O delays. The step form of impulseAsStepModel would instead cancel
+// C·B against the state: with ‖A‖ far above the slow poles (a stiff mode,
+// or the fold E⁻¹A of a mildly ill-conditioned E) the tail then carries
+// rounding of C·B amplified by 1/(|λ_slow|·dt).
+func explicitImpulse(sys *System, tFinal float64) (*TimeResponse, error) {
+	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
+	if err != nil {
+		return nil, err
+	}
+	if sys.HasDelay() {
+		return shiftedPartsImpulse(sys, []*System{sys}, t, dt, holdExp), nil
+	}
+	return sampledPartsImpulse(sys, []*System{sys}, t, dt)
+}
+
 // stiffContinuousDescriptorParts is stiffDescriptorParts of the
 // I/O-delay-free core of a continuous model.
 func stiffContinuousDescriptorParts(sys *System) ([]*System, bool) {
@@ -2009,10 +2033,7 @@ func stiffContinuousDescriptorParts(sys *System) ([]*System, bool) {
 }
 
 // stiffDescriptorImpulse is the impulse response of sys on the automatic
-// grid from the parts of stiffDescriptorParts, each sampled exactly as the
-// discrete impulse response of (A_d, A_d·B, C, C·B), A_d = e^{A·dt}: the
-// step form of impulseAsStepModel cancels C·B of a stiff part (~1e14)
-// against its state to an absolute 1e-2. Channel (i, j) of a model with
+// grid from the parts of stiffDescriptorParts (sampledPartsImpulse). Channel (i, j) of a model with
 // I/O delays is the delay-free one shifted by its total delay τ_ij.
 func stiffDescriptorImpulse(sys *System, parts []*System, tFinal float64) (*TimeResponse, error) {
 	t, dt, err := newTimeResponsePlanner(sys).grid(tFinal, 0)
@@ -2020,8 +2041,15 @@ func stiffDescriptorImpulse(sys *System, parts []*System, tFinal float64) (*Time
 		return nil, err
 	}
 	if sys.HasDelay() {
-		return shiftedStiffImpulse(sys, parts, t, dt), nil
+		return shiftedPartsImpulse(sys, parts, t, dt, partExp), nil
 	}
+	return sampledPartsImpulse(sys, parts, t, dt)
+}
+
+// sampledPartsImpulse is the impulse response on the grid t of the sum of
+// the delay-free explicit parts, each sampled exactly as the discrete
+// impulse response of (A_d, A_d·B, C, C·B), A_d = e^{A·dt}.
+func sampledPartsImpulse(sys *System, parts []*System, t []float64, dt float64) (*TimeResponse, error) {
 	disc := make([]*System, len(parts))
 	for i, part := range parts {
 		d, err := part.discretizeZOH(dt)
@@ -2041,10 +2069,10 @@ func stiffDescriptorImpulse(sys *System, parts []*System, tFinal float64) (*Time
 	return plan.allInputResponse(impulseResponse)
 }
 
-// shiftedStiffImpulse is stiffDescriptorImpulse of a model with I/O
-// delays: y_ij(k·dt) = C·e^{A(k·dt − τ_ij)}·B_j of each part, zero before
-// τ_ij.
-func shiftedStiffImpulse(sys *System, parts []*System, t []float64, dt float64) *TimeResponse {
+// shiftedPartsImpulse is the impulse response of a model with I/O delays
+// from its delay-free explicit parts: y_ij(k·dt) = C·e^{A(k·dt − τ_ij)}·B_j
+// of each part, zero before τ_ij, with the exponentials of exp.
+func shiftedPartsImpulse(sys *System, parts []*System, t []float64, dt float64, exp expFunc) *TimeResponse {
 	_, m, p := sys.Dims()
 	tau := effectiveIODelayMatrix(sys, p, m, true)
 	Y := mat.NewDense(p*m, len(t), nil)
@@ -2055,30 +2083,44 @@ func shiftedStiffImpulse(sys *System, parts []*System, t []float64, dt float64) 
 		if pn == 0 {
 			continue
 		}
-		partExp(&ad, part.A, dt)
+		exp(&ad, part.A, dt)
 		for j := range m {
 			x := mat.Col(nil, j, part.B)
 			for i := range p {
 				rows[i], taus[i] = j*p+i, tau.At(i, j)
 			}
-			addShiftedPartSamples(Y, rows, taus, part, &ad, x, dt)
+			addShiftedPartSamples(Y, rows, taus, part, &ad, x, dt, exp)
 		}
 	}
 	return &TimeResponse{T: t, Y: Y, OutputName: copyStringSlice(sys.OutputName)}
 }
 
+// expFunc sets ad to e^{A·dt}.
+type expFunc func(ad *mat.Dense, a *mat.Dense, dt float64)
+
 // partExp sets ad to e^{A·dt}.
-func partExp(ad *mat.Dense, a mat.Matrix, dt float64) {
+func partExp(ad *mat.Dense, a *mat.Dense, dt float64) {
 	var scaled mat.Dense
 	scaled.Scale(dt, a)
 	ad.Reset()
 	ad.Exp(&scaled)
 }
 
+// holdExp is partExp by stiffExp when A·dt is stiff, as the ZOH
+// discretization takes it.
+func holdExp(ad *mat.Dense, a *mat.Dense, dt float64) {
+	if e, ok := stiffExp(a, dt); ok {
+		ad.Reset()
+		ad.CloneFrom(e)
+		return
+	}
+	partExp(ad, a, dt)
+}
+
 // addShiftedPartSamples adds C_i·e^{A(k·dt − τ_i)}·x of the explicit part,
 // ad = e^{A·dt}, to Y[rows[i], k] for every sample k·dt ≥ τ_i, i < len(rows),
 // exactly; a τ_i within gridTol samples of the grid is on it.
-func addShiftedPartSamples(Y *mat.Dense, rows []int, taus []float64, part *System, ad *mat.Dense, x []float64, dt float64) {
+func addShiftedPartSamples(Y *mat.Dense, rows []int, taus []float64, part *System, ad *mat.Dense, x []float64, dt float64, exp expFunc) {
 	_, steps := Y.Dims()
 	pn, _, _ := part.Dims()
 	yRaw, aRaw, cRaw := Y.RawMatrix(), ad.RawMatrix(), part.C.RawMatrix()
@@ -2103,7 +2145,7 @@ func addShiftedPartSamples(Y *mat.Dense, rows []int, taus []float64, part *Syste
 		copy(cur, x)
 		if lead := float64(k0)*dt - tau; lead > gridTol*dt {
 			var lag mat.Dense
-			partExp(&lag, part.A, lead)
+			exp(&lag, part.A, lead)
 			v := mat.NewVecDense(pn, next)
 			v.MulVec(&lag, mat.NewVecDense(pn, x))
 			cur, next = next, cur
@@ -2340,7 +2382,7 @@ func sampleFreeParts(sys *System, parts []*System, x0 *mat.VecDense, steps int, 
 			continue
 		}
 		partExp(&ad, part.A, dt)
-		addShiftedPartSamples(Y, rows, taus, part, &ad, freePartShare(parts, pk), dt)
+		addShiftedPartSamples(Y, rows, taus, part, &ad, freePartShare(parts, pk), dt, partExp)
 	}
 	var y0 mat.VecDense
 	y0.MulVec(sys.C, x0)
