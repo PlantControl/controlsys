@@ -226,16 +226,16 @@ func matchedDiscreteRoots(cz, cp []complex128, k, dt float64) (dz, dp []complex1
 // matchedPencilRoots returns the poles eig(A, E), the invariant zeros and
 // a gain fitted to the response of sys, as MATLAB zpk(ss) takes them;
 // polynomial roots of the transfer function lose tight pole clusters. ok is
-// false unless the roots are finite, keep the relative degree of the
-// transfer-function roots cz, cp with gain k, and fit the response at a
-// probe point no worse than those do.
+// false unless the roots are finite, as many as the transfer-function
+// roots cz, cp with gain k (so the order and relative degree stay), and fit
+// the response at a probe point no worse than those do.
 func matchedPencilRoots(sys *System, cz, cp []complex128, k float64) (zeros, poles []complex128, gain float64, ok bool) {
 	poles, err := sys.Poles()
-	if err != nil || len(poles) == 0 {
+	if err != nil || len(poles) == 0 || len(poles) != len(cp) {
 		return nil, nil, 0, false
 	}
 	zeros, err = sys.Zeros()
-	if err != nil || len(zeros) > len(poles) || len(poles)-len(zeros) != len(cp)-len(cz) {
+	if err != nil || len(zeros) != len(cz) {
 		return nil, nil, 0, false
 	}
 	if poles, ok = matchedConjugateClosed(poles); !ok {
