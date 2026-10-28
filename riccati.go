@@ -192,6 +192,15 @@ type RiccatiResult struct {
 	// gainUncertified reports a certified X whose K Care cannot certify
 	// with it (descriptorGainCertified); Care returns it with Accuracy 1.
 	gainUncertified bool
+	// xeCertified reports an xe and K of nearSingularDare certified while
+	// X, at Accuracy 1, is not: explicitRiccatiSolution returns them at
+	// Accuracy 0.
+	xeCertified bool
+	// kw is the noise gain (R + BᵀXB)⁻¹BᵀX of nearSingularDare, formed in
+	// extended precision, for Lqg's current estimator; kwCertified when
+	// eps perturbations of the data move it by at most newtonTol.
+	kw          *mat.Dense
+	kwCertified bool
 }
 
 // riccatiArgs rejects nil or non-finite Riccati data before it reaches
@@ -848,11 +857,17 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // singular value 1.2e-6), in both its Frobenius and 1-norm (X off by
 // 1.25e-8 with 9.97e-9 in the first). With reduced inputs, under cheap
 // control, K is neither substituted nor kept from a refinement (gainOfX).
+// A descriptor Dare left with no stabilizing solution whose E is
+// ill-conditioned but nonsingular is solved once more on its explicit
+// model in extended precision (nearSingularDare).
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
 	res, err := dareInputs(A, B, Q, R, opts)
+	if r, ok := nearSingularDare(A, B, Q, R, opts, err); ok {
+		res, err = r, nil
+	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
 	if err == nil && res.Accuracy == 0 && res.xe != nil && res.xeX > newtonTol {
 		res.Accuracy = 1

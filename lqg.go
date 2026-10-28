@@ -37,7 +37,10 @@ type LqgResult struct {
 	// Accuracy is the larger RiccatiResult.Accuracy of Xc and Xf: 1 when
 	// no Newton step certifies one of them (MATLAB lqg warns and returns
 	// the controller), so the controller may be inaccurate and its closed
-	// loop near the stability boundary only rounded to stable.
+	// loop near the stability boundary only rounded to stable. With
+	// Current it is also 1 when eps perturbations of the data can move Kw
+	// beyond 1e-8, or Kw of an ill-conditioned E is not confirmed in
+	// extended precision.
 	Accuracy int
 
 	ki, kw, mx, mw *mat.Dense
@@ -93,6 +96,9 @@ func (r *LqgResult) Mw() (mw *mat.Dense, ok bool) { return r.mw, r.mw != nil }
 // error covariance. Mw and Kw act on w, so Mw = E·M̄w and Kw = K̄w·E⁻¹ for
 // the explicit-model gains M̄w, K̄w, and L is Kalman's descriptor gain (E
 // times the explicit gain). The controller keeps E: its descriptor is blkdiag(E, I).
+// Where E is ill-conditioned, ‖X‖ ~ 1/σ_min(E)² and Ba'X Ba cancels in
+// float64, so Kw = (R + B̄'YB̄)⁻¹B̄'Y E⁻¹ is formed in extended precision
+// from Y = E'XE of the explicit model (B̄ = E⁻¹Ba).
 //
 // Plants without inputs, outputs or states are rejected with
 // ErrDimensionMismatch, singular E with ErrDescriptorSingular and plants
@@ -167,7 +173,7 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 		return nil, err
 	}
 
-	xGen := kRes.X
+	xGen, kwGen, kwCertified := kRes.X, kRes.kw, kRes.kwCertified
 	if kRes, err = explicitRiccatiSolution(kRes, ropts, nil); err != nil {
 		return nil, err
 	}
@@ -177,8 +183,25 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	}
 	var F *mat.Dense
 	if o.Current {
-		if F, err = res.currentGains(sys, Ba, xGen, R, Rn, Nn); err != nil {
+		if kwGen == nil && ropts.E != nil && noiseGainIll(Ba, xGen, R, ropts.E) {
+			kw, certified, ok := descriptorNoiseGain(Aa, Ba, Q, R, ropts.S, ropts.E, kRes.K)
+			if ok {
+				kwGen, kwCertified = kw, certified
+				if fkw, err := floatNoiseGain(Ba, xGen, R, n); err == nil && keepFloatNoiseGain(fkw, kw) {
+					kwGen = nil
+					if !certified {
+						res.Accuracy = max(res.Accuracy, 1)
+					}
+				}
+			} else {
+				res.Accuracy = max(res.Accuracy, 1)
+			}
+		}
+		if F, err = res.currentGains(sys, Ba, xGen, kwGen, R, Rn, Nn); err != nil {
 			return nil, err
+		}
+		if kwGen != nil && !kwCertified {
+			res.Accuracy = max(res.Accuracy, 1)
 		}
 	}
 	if res.Controller, err = lqgController(sys, res, F, o.OneDOF); err != nil {
@@ -243,9 +266,45 @@ func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
 	return Aa, Ba
 }
 
+// noiseGainIll reports a Kw = (R + BᵀXB)⁻¹BᵀX that the float64
+// descriptor X may not carry within newtonTol: cond(E)·eps beyond it (Kw
+// off by 3e-7 at cond(E) 8e9), or R + BᵀXB cancelling so far that
+// rounding X alone can move it beyond it (‖X‖ ~ 1/σ_min(E)²). Lqg then
+// takes Kw from descriptorNoiseGain, unless the float64 Kw is within
+// newtonTol of it (keepFloatNoiseGain), else keeps the float64 Kw at
+// Accuracy 1. No float64 bound tells these apart: a Kw off by 1.4e-7
+// shows the same rounding sensitivity as Kw correct to 1e-16.
+func noiseGainIll(B, X, R, E *mat.Dense) bool {
+	var lu mat.LU
+	lu.Factorize(E)
+	if !(lu.Cond()*eps() <= newtonTol) {
+		return true
+	}
+	na, m := B.Dims()
+	absB := absDense(B)
+	t := mulDims(m, na, absB.T(), absDense(X))
+	bound := mulDims(m, m, t, absB)
+	BtX := mulDims(m, na, B.T(), X)
+	G := mulDims(m, m, BtX, B)
+	G.Add(G, R)
+	return mat.Norm(bound, 1)*eps() > newtonTol*mat.Norm(G, 1)
+}
+
+// keepFloatNoiseGain reports the float64 Kw (first n columns of the
+// extended one) within newtonTol of the extended-precision Kw: Lqg then
+// returns the float64 Kw, as before the extended path existed.
+func keepFloatNoiseGain(fkw, kw *mat.Dense) bool {
+	r, c := fkw.Dims()
+	var d mat.Dense
+	d.Sub(fkw, subDense(kw, 0, 0, r, c))
+	w := subDense(kw, 0, 0, r, c)
+	return mat.Norm(&d, 1) <= newtonTol*mat.Norm(w, 1) && mat.Norm(&d, 2) <= newtonTol*mat.Norm(w, 2)
+}
+
 // currentGains takes X, the regulator solution of the generalized Riccati
-// equation: Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] for E x[n+1] = ... + w.
-func (res *LqgResult) currentGains(sys *System, Ba, X, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {
+// equation: Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] for E x[n+1] = ... + w, or
+// (R + Ba'X Ba)⁻¹ Ba'X itself when Dare formed it (kw, near-singular E).
+func (res *LqgResult) currentGains(sys *System, Ba, X, kw, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {
 	n, m, p := sys.Dims()
 	PCt := mulDims(n, p, res.Xf, sys.C.T())
 	S := mulDims(p, p, sys.C, PCt)
@@ -260,18 +319,32 @@ func (res *LqgResult) currentGains(sys *System, Ba, X, R, Rn, Nn *mat.Dense) (*m
 		res.mw.Mul(Nn, &Sinv)
 	}
 
-	na, _ := X.Dims()
-	BtX := mulDims(m, na, Ba.T(), X)
-	G := mulDims(m, m, BtX, Ba)
-	G.Add(G, R)
-	res.kw = mat.NewDense(m, n, nil)
-	if err := res.kw.Solve(G, subDense(BtX, 0, 0, m, n)); err != nil {
-		return nil, fmt.Errorf("Lqg: %w", ErrSingularR)
+	if kw != nil {
+		res.kw = subDense(kw, 0, 0, m, n)
+	} else {
+		var err error
+		if res.kw, err = floatNoiseGain(Ba, X, R, n); err != nil {
+			return nil, err
+		}
 	}
 
 	F := mulDims(m, p, res.K, res.mx)
 	F.Add(F, mulDims(m, p, res.kw, res.mw))
 	return F, nil
+}
+
+// floatNoiseGain is Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] of the float64 X, the
+// first n columns.
+func floatNoiseGain(Ba, X, R *mat.Dense, n int) (*mat.Dense, error) {
+	na, m := Ba.Dims()
+	BtX := mulDims(m, na, Ba.T(), X)
+	G := mulDims(m, m, BtX, Ba)
+	G.Add(G, R)
+	kw := mat.NewDense(m, n, nil)
+	if err := kw.Solve(G, subDense(BtX, 0, 0, m, n)); err != nil {
+		return nil, fmt.Errorf("Lqg: %w", ErrSingularR)
+	}
+	return kw, nil
 }
 
 // lqgController assembles the controller with states [x̂; xi] and

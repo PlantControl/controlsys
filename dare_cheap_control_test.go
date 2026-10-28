@@ -18,21 +18,26 @@ import (
 // with the pencil or Hewer's iteration that Dare uses. A cross term S
 // (nil for none) is eliminated first: A − BR⁻¹Sᵀ, Q − SR⁻¹Sᵀ.
 func dareDoublingBig(A, B, Q, R, S *mat.Dense) *mat.Dense {
-	a, b, h := hbFrom(A), hbFrom(B), hbFrom(Q)
+	h, _ := dareDoublingHB(hbFrom(A), hbFrom(B), hbFrom(Q), hbFrom(R), hbFrom(S), 80)
+	return hbDense(h)
+}
+
+// dareDoublingHB is dareDoublingBig on 320-bit matrices (s.r == 0 for no
+// cross term), at most steps doublings; it reports convergence.
+func dareDoublingHB(a, b, h, r, s hbMat, steps int) (hbMat, bool) {
 	n := a.r
-	if S != nil {
-		s := hbFrom(S)
-		rs := hbSolve(hbFrom(R), s.t())
+	if s.r > 0 {
+		rs := hbSolve(r, s.t())
 		a = hbAdd(a, hbMul(b, rs), -1)
 		h = hbAdd(h, hbMul(s, rs), -1)
 	}
-	g := hbMul(b, hbSolve(hbFrom(R), b.t()))
+	g := hbMul(b, hbSolve(r, b.t()))
 	eye := newHbMat(n, n)
 	for i := range n {
 		eye.at(i, i).SetInt64(1)
 	}
 	tol := new(big.Float).SetPrec(hbPrec).SetFloat64(1e-80)
-	for range 80 {
+	for range steps {
 		w := hbAdd(eye, hbMul(g, h), 1)
 		wa, wg := hbSolve(w, a), hbSolve(w, g)
 		hn := hbAdd(h, hbMul(hbMul(a.t(), h), wa), 1)
@@ -50,10 +55,10 @@ func dareDoublingBig(A, B, Q, R, S *mat.Dense) *mat.Dense {
 			}
 		}
 		if dm.Cmp(new(big.Float).Mul(hm, tol)) <= 0 {
-			break
+			return h, true
 		}
 	}
-	return hbDense(h)
+	return h, false
 }
 
 // dareCheapUnstableCase returns the k-th draw of a cheap-control sweep of

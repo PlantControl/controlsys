@@ -41,7 +41,10 @@ func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // model x[k+1] = E⁻¹Ax[k] + E⁻¹Bu[k]: EᵀXE of X refined in double-double
 // where Dare refines it, else formed from the certified X of Dare, then
 // with Accuracy 1 when it cancels so far that its rounding alone can move
-// it beyond 1e-8, or the Newton step of X moves it beyond 1e-8.
+// it beyond 1e-8, or the Newton step of X moves it beyond 1e-8. Where Dare
+// solved the explicit model in extended precision (near-singular E), X
+// and K are those of that solve, at Accuracy 0 when eps perturbations of
+// the data move neither beyond 1e-8, whatever the Accuracy of Dare's X.
 func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := Dare(A, B, Q, R, opts)
 	return explicitRiccatiSolution(res, opts, err)
@@ -61,6 +64,9 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 	}
 	if res.xe != nil {
 		res.X = res.xe
+		if res.xeCertified {
+			res.Accuracy = 0
+		}
 		if res.Accuracy == 0 && res.xeLoose {
 			res.Accuracy = 1
 		}
