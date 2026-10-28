@@ -1154,7 +1154,10 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // 4x their band, while the Hewer gain cost 4 to 16 times the Dare.
 // Neither is a rotated K
 // refined whose gain gainMissIn cannot resolve (+Inf): X one step on
-// never resolved it either.
+// never resolved it either. A rotated refined K inside gainFloor but not
+// gainTol is refined once more first: on amd64 one Newton step took X
+// from 1e-10 to 5e-14 off, its gain 2.4e-7 off the 320-bit one (band
+// 1.9e-9), and the second to 1.8e-17 and 8e-11.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
@@ -1179,6 +1182,11 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	c, cd, stable := refined(A, B, Q, R, opts, red, res)
 	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1) {
 		return c, 0, true
+	}
+	if stable && red != nil && red.rotated && cd.units(gainFloor) <= 1 {
+		if c2, cd2, ok := refined(A, B, Q, R, opts, red, c); ok && cd2.units(gainTol) <= 1 {
+			return c2, 0, true
+		}
 	}
 	if d.units(gainFloor) <= 1 {
 		return res, 0, true
