@@ -197,3 +197,49 @@ func TestLqg_CurrentNoiseGainKeepsAccurateFloatGain(t *testing.T) {
 	kw, _ := res.Kw()
 	requireEqualDense(t, "Kw", kw, floatKw(t, A, B, E, Q, R, S))
 }
+
+// unc generator seed 1021 (O2YDYA round-2 review): the Kalman dual of a
+// plant with an uncontrollable stable mode and σ_min(E) 2.8e-10 is solved
+// in extended precision, where E⁻¹A grows ~1e19 per doubling. Entries of
+// the SDA iterate tiny beside that growth still carry the solution, so
+// flushing them left the residual at 2e-10 and Kalman back at base's
+// ErrNoStabilizing. Base error; the 320-bit Newton oracle from the
+// returned gain confirms X and L, which move 1.7e-15 under eps changes.
+func TestKalman_NearSingularEGrowingModeDualIsSolved(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.878178528874579, -0.08520982476066301, 0, -1.0165374122833657})
+	B := mat.NewDense(2, 1, []float64{-0.8410793793830363, 0})
+	E := mat.NewDense(2, 2, []float64{0.8407532000541835, 0.09189134512682581, 0, 2.759904574783159e-10})
+	C := mat.NewDense(2, 2, []float64{-0.9513000543306657, -0.4032504287015719, 0.9822998155076401, -1.7808714744214704})
+	Rn := mat.NewDense(2, 2, []float64{1.5642621127944871, -1.3339904969241434, -1.3339904969241434, 3.249241770701404})
+	sys, err := NewDescriptor(A, B, C, mat.NewDense(2, 1, nil), E, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gq mat.Dense
+	gq.Mul(B, B.T())
+	dual := nearSingularDareCase{A: mat.DenseCopyOf(A.T()), B: mat.DenseCopyOf(C.T()), Q: &gq, R: Rn, E: mat.DenseCopyOf(E.T())}
+	for _, ns := range []bool{false, true} {
+		res, err := Kalman(sys, eyeDense(1), Rn, nil, &RiccatiOpts{NoScaling: ns})
+		if err != nil {
+			t.Fatalf("NoScaling %v: %v", ns, err)
+		}
+		K := mat.DenseCopyOf(res.K.T())
+		_, X, Kn, conv := nearSingularOracle(false, dual.A, dual.B, dual.Q, dual.R, nil, dual.E, K)
+		if !conv {
+			t.Fatal("Newton from the returned gain does not converge")
+		}
+		tol := 1e-6
+		if res.Accuracy == 0 {
+			tol = newtonTol
+			if _, sX, sK := dual.ulpSpread(t, nil, X, Kn); !(sX <= newtonTol && sK <= newtonTol) {
+				t.Errorf("Accuracy 0 where 1 ulp moves X by %.3g, L by %.3g", sX, sK)
+			}
+		}
+		if rel := relErr(res.X, X); !(rel <= tol) {
+			t.Errorf("NoScaling %v: Accuracy %d with X off by %.3g", ns, res.Accuracy, rel)
+		}
+		if rel := relErr(K, Kn); !(rel <= tol) {
+			t.Errorf("NoScaling %v: Accuracy %d with L off by %.3g", ns, res.Accuracy, rel)
+		}
+	}
+}
