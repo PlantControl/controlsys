@@ -1,0 +1,62 @@
+package controlsys
+
+import (
+	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
+)
+
+// Lqg Current with cond(E) 2.94e7, below the cond(E)·eps routing cutoff:
+// ‖X‖ 4e14 makes G = R + BᵀXB ill-conditioned (Kw forward-error bound
+// 2.6e15) though ‖G‖ is large, so the float64 Kw was 1.75e-2 off at
+// Accuracy 0 while Kw moves 2.8e-16 under eps perturbations (6A3I67,
+// rv46 edge seed 11). Under GOARCH=amd64 the regulator Dare itself is
+// Accuracy 1 there (K 6e-3 off), so only the honesty rule binds.
+func TestLqg_CurrentNoiseGainIllConditionedGram(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.5710674631112018, -0.5930139855848822, -0.24619564944575117, 1.5800291814347958})
+	B := mat.NewDense(2, 3, []float64{0.2981770083534915, -1.162497051770968, 1.5373983392212918, 0.39240493382135816, -0.8228936704346205, -1.2085461246052969})
+	C := mat.NewDense(1, 2, []float64{0.15800404103018534, -1.2206747060996226})
+	E := mat.NewDense(2, 2, []float64{1.2223331468430856, -1.2285663860299658, 0, 8.37481347583292e-08})
+	Q, R, Rn := eyeDense(2), eyeDense(3), mat.NewDense(1, 1, []float64{0.52116111961218})
+	reg, err := Dare(A, B, Q, R, &RiccatiOpts{E: E})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.Accuracy == 0 {
+		checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, nil, Rn)
+		return
+	}
+	want, ok := descriptorNoiseGainBig(A, B, Q, R, nil, E)
+	if !ok {
+		t.Fatal("doubling oracle does not converge")
+	}
+	res := lqgCurrent(t, A, B, C, E, Q, R, mat.NewDense(2, 3, nil), Rn)
+	kw, _ := res.Kw()
+	if rel := relErr(kw, want); res.Accuracy == 0 && !(rel <= newtonTol) {
+		t.Errorf("Accuracy 0 with Kw off by %.3g", rel)
+	}
+}
+
+// As above with a cross term and cond(E) 4.02e7: Dare's X is 5.2e-9 off
+// (certified), the float64 Kw 2.34e-3 off at Accuracy 0; Kw moves 5.5e-16
+// under eps perturbations (6A3I67, rv46 edge seed 1039).
+func TestLqg_CurrentNoiseGainIllConditionedGramCrossTerm(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{-1.0130149574034135, 1.0924864978467559, -0.5972293002972973, -0.36210773781949, 0.27605439420754907, 0.29748355060737586, 0.10867431243792491, 1.128442691856394, -0.8057592326497454})
+	B := mat.NewDense(3, 3, []float64{1.5839331921643718, 1.2511230799482913, -1.4022316844823228, -0.7935785711660515, 1.2380606144793775, 0.43143161780807765, 1.067952172217396, -0.0702231852120177, 0.20834515365114947})
+	C := mat.NewDense(1, 3, []float64{0.06621590457072735, 0.1687867634833895, -1.6242429876740228})
+	E := mat.NewDense(3, 3, []float64{1.2019533158449889, 1.2067868045629737, -0.29523779390634824, 0, 1.2468163519114634, 0.11276955980056846, 0, 0, 6.7186697028084e-08})
+	Q := mat.NewDense(3, 3, []float64{1.0005423926494563, 0.00246316942856844, -0.01009766094537967, 0.00246316942856844, 1.0111859989989085, -0.04585653910619569, -0.01009766094537967, -0.04585653910619569, 1.187986980778672})
+	R := mat.NewDense(3, 3, []float64{3.599312613760668, 1.8591114415671317, 1.7951887969954177, 1.8591114415671317, 2.3296959103219503, 1.2839763922965415, 1.7951887969954177, 1.2839763922965415, 2.2398288685235404})
+	S := mat.NewDense(3, 3, []float64{0.037547943423614914, 0.026855488969125287, 0.025932104906292604, 0.17051659243421752, 0.12195891571227603, 0.11776554879132593, -0.6990257007870213, -0.49996551834618674, -0.4827749845176088})
+	checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, S, mat.NewDense(1, 1, []float64{0.9846519890019234}))
+}
+
+// cond(E) 4.05e7 with X itself exact to 7.5e-14: rounding X alone moved
+// the float64 Kw 1.9e-4 (6A3I67, rv46 edge seed 159).
+func TestLqg_CurrentNoiseGainIllConditionedGramExactX(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{0.45576494314908356, -0.46698655747528384, 1.8355048255533926, -0.5492206301986314, -0.2645629849339487, 3.1866056948036854, -1.1719740432675707, 0.3303168182793964, 1.6119027231033367})
+	B := mat.NewDense(3, 2, []float64{1.1591435784404835, 2.827607878909536, -0.36005890713685673, 1.7880038258566213, -1.4576075800222554, -0.004741746363837951})
+	C := mat.NewDense(1, 3, []float64{0.422222770985985, 0.9189044404332625, -0.0646616191757432})
+	E := mat.NewDense(3, 3, []float64{1.4273991848063956, -0.9542011808049491, 0.22871190439667632, 0, 0.7072599814447332, 0.550835378604519, 0, 0, 6.447357025153927e-08})
+	checkLqgCurrentNoiseGain(t, A, B, C, E, eyeDense(3), eyeDense(2), nil, mat.NewDense(1, 1, []float64{1.643336093805475}))
+}

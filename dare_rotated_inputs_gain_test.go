@@ -106,3 +106,144 @@ func dareRotatedInputsUnstable(A, B, E, K *mat.Dense) bool {
 	}
 	return !xbStable(false, xbAxpy(md.a, -1, xbMul(md.b, xbFrom(K, m, n, md.prec))))
 }
+
+// TestDareRotatedInputsUnrefinedGainHeldToGainOfX: a rotated Dare whose K
+// is not refined in double-double (xe nil) is held to the gain of its X
+// (gainOfX), as the reduced inputs are, and not returned as terminal.
+// Before, the pencil K was certified-wrong at Accuracy 0 (XD3P6I; rv48r
+// seeds 1743 and 2270): 1.7e-6 and 2.2e-5 off against a band of 1.9e-9
+// without E, 0.69 and 0.94 against 8e-11 with E's last pivot 4.8e-6, while
+// X was within 1.5e-11.
+func TestDareRotatedInputsUnrefinedGainHeldToGainOfX(t *testing.T) {
+	cases := []dareRotatedInputsCase{
+		{name: "n2 m2 no E",
+			A: mat.NewDense(2, 2, []float64{1.1970987248830431, 0.21839387389975254, -0.5696974383317107, -0.325348970298359}),
+			B: mat.NewDense(2, 2, []float64{0.4816730169796179, 0.35567159949345223, 0.6443107633354956, 0.4757651293207472}),
+			Q: mat.NewDense(2, 2, []float64{1.952990385750042e+07, 8.1407794804044e+07, 8.1407794804044e+07, 3.3933751559724957e+08}),
+			R: mat.NewDense(2, 2, []float64{2.197687831027214e-12, -2.8287591636902017e-14, -2.8287591636902017e-14, 2.0745224304428615e-12})},
+		{name: "n2 m2 pivot 4.8e-6",
+			A: mat.NewDense(2, 2, []float64{-0.3784656429752892, 0.1508584940756077, 0.3546425885971392, 1.06643209694223}),
+			B: mat.NewDense(2, 2, []float64{-0.1835140494171699, 0.07209681722520986, 0.9124725198553958, -0.35849482998694643}),
+			Q: mat.NewDense(2, 2, []float64{890.0283588313838, 1552.553172757777, 1552.553172757777, 2708.252304909865}),
+			R: mat.NewDense(2, 2, []float64{8.106860178282055e-09, 3.6169833946935676e-11, 3.6169833946935676e-11, 8.144705169254964e-09}),
+			E: mat.NewDense(2, 2, []float64{1.031897554859899, -0.18384676410337314, 0, 4.841874544440457e-06})},
+	}
+	for _, c := range cases {
+		ref := riccatiExactReference(false, c.A, c.B, c.Q, c.R, c.S, c.E, riccatiExactPrec)
+		if !ref.OK {
+			t.Fatalf("%s: exact-E oracle did not certify", c.name)
+		}
+		sens, ok := riccatiExactSensitivity(false, c.A, c.B, c.Q, c.R, c.S, c.E, ref, "ABQRSE")
+		if !ok {
+			t.Fatalf("%s: no sensitivity", c.name)
+		}
+		kTol := max(newtonTol, 4*sens.KBand())
+		for _, ns := range []bool{false, true} {
+			opts := &RiccatiOpts{E: c.E, S: c.S, NoScaling: ns}
+			red, _ := reduceInputs(c.A, c.B, c.Q, c.R, opts)
+			if red == nil || !red.rotated {
+				t.Fatalf("%s NoScaling %v: inputs not rotated", c.name, ns)
+			}
+			if r := red.solve(c.A, c.B, c.Q, opts); r == nil || r.xe != nil {
+				t.Fatalf("%s NoScaling %v: rotated Dare K not the unrefined one", c.name, ns)
+			}
+			res, err := Dare(c.A, c.B, c.Q, c.R, opts)
+			if err != nil {
+				t.Fatalf("%s NoScaling %v: %v", c.name, ns, err)
+			}
+			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g, K err %.3g (tol %.3g)", c.name, ns, res.Accuracy, eX, eK, kTol)
+			if res.Accuracy != 0 {
+				t.Errorf("%s NoScaling %v: Accuracy %d", c.name, ns, res.Accuracy)
+			}
+			if eX > newtonTol || eK > kTol {
+				t.Errorf("%s NoScaling %v: X off by %.3g, K by %.3g (tol %.3g)", c.name, ns, eX, eK, kTol)
+			}
+			if dareRotatedInputsUnstable(c.A, c.B, c.E, res.K) {
+				t.Errorf("%s NoScaling %v: E⁻¹(A − BK) unstable in %d bits", c.name, ns, riccatiExactPrec)
+			}
+		}
+	}
+}
+
+// TestDareRotatedInputsAccuracy1UnrefinedGainNotPromoted: rotated inputs
+// (n 6, m 6, R ~6e-12, cond(E) 1.2e4, E's last pivot 2e-4) where the
+// rotated Dare K is unrefined at Accuracy 1, 4.7 off the exact-E 320-bit
+// gain with X 1.1e-7 off (rv49v seed 3 under -race; natively and on
+// amd64 the K is refined). A Newton step took X to 4.3e-10 and its gain
+// 0.44 off (band 2.1e-5): routed through the gain of X that was returned
+// at Accuracy 0. An unrefined rotated K at Accuracy 1 is not promoted
+// (Y6BJEX am.7, fail closed). Every platform must return Accuracy 1 or K
+// within 4x its band. The bands are riccatiExactSensitivity(..., "ABQRSE") of this
+// reference, pinned: computing them took 10s under -race.
+func TestDareRotatedInputsAccuracy1UnrefinedGainNotPromoted(t *testing.T) {
+	A := mat.NewDense(6, 6, []float64{-0.2297988526985603, 0.3731555690063577, 1.6005367049873171, -0.38756991713553657, 0.33510582389013127, 0.08504645344091989, -0.5878580140931389, -0.5782673939453522, -0.21762702892558278, 0.02143886398930735, -0.16506806977267724, -0.26020058732908286, -0.10214747110058674, -0.10461881409131268, -0.12375454705934234, -0.1895164312860169, 0.2176410185069525, -0.15170270590926807, 0.05256152317806577, -0.5961409450946975, -0.3110911237907826, -0.23886968259138613, -0.650335819081738, -0.2771955484055719, -0.4991114118076528, 0.12552433385164147, 0.30895872517593886, -0.46103270243213423, 0.38423116045407546, 0.33469547460146126, -0.14266517822780153, -1.1962252497363803, -0.5059055086723271, 0.3775313807989686, -1.7285400816033685, -1.072096871117419})
+	B := mat.NewDense(6, 6, []float64{-0.03755141253403411, -0.1671847236581683, -0.0745767006288806, 0.10064276288144533, -0.026476638185591622, -0.09197327958982354, 0.008142554911597, 0.0882101871490937, 0.015611507229654868, -0.05897419012861597, 0.014800715999891426, 0.046813442769757616, -0.04977843096468789, -0.19870112420251826, -0.10197990462683068, 0.11493651765413067, -0.03220288738909322, -0.11013398325426542, 0.013777681823248376, 0.09953419898975424, 0.023545276835942593, -0.06613801753609716, 0.015196351606215186, 0.0534562892980566, -0.05805390167886049, -0.3971847164339445, -0.09694350401797225, 0.26587441931062733, -0.05881458626746961, -0.21357366466110572, -0.09697079422938103, -0.5418154905761314, -0.1837009545501403, 0.3436796252317284, -0.08468758313905844, -0.2942789716525973})
+	Q := mat.NewDense(6, 6, []float64{34209.023096189616, 43830.27336253331, 56281.5702558246, 16813.585347948363, 37007.248768453566, 16356.893113504313, 43830.27336253331, 101339.14786141408, 89564.52624046597, 43714.59307887448, 7838.862131501163, 32030.92026215781, 56281.5702558246, 89564.52624046597, 118590.48099106591, 37255.15113282429, 96621.03691732543, 47619.76179116054, 16813.585347948363, 43714.59307887448, 37255.15113282429, 19199.344503041473, 1491.2994917198623, 14350.782232707803, 37007.248768453566, 7838.862131501163, 96621.03691732543, 1491.2994917198623, 209932.3461597246, 51542.88953784061, 16356.893113504313, 32030.92026215781, 47619.76179116054, 14350.782232707803, 51542.88953784061, 24558.635877973364})
+	R := mat.NewDense(6, 6, []float64{6.745576406971377e-12, 3.9960975749636263e-13, 1.4657687012340858e-13, -2.4485969198500932e-14, 7.331254822661314e-14, 4.047859312449157e-14, 3.9960975749636263e-13, 7.023014342241732e-12, 3.383898378985037e-13, 2.2199292386079556e-13, 6.26408911258951e-14, 1.0594078624752675e-13, 1.4657687012340858e-13, 3.383898378985037e-13, 6.625820954166991e-12, -2.0136929327440082e-14, 1.0976703527844666e-13, -1.8377402355335295e-13, -2.4485969198500932e-14, 2.2199292386079556e-13, -2.0136929327440082e-14, 6.656289563680706e-12, 2.3825121706802e-14, 1.1119708844870987e-14, 7.331254822661314e-14, 6.26408911258951e-14, 1.0976703527844666e-13, 2.3825121706802e-14, 6.3548542455912406e-12, 3.2570514237403766e-14, 4.047859312449157e-14, 1.0594078624752675e-13, -1.8377402355335295e-13, 1.1119708844870987e-14, 3.2570514237403766e-14, 6.49880304377061e-12})
+	E := mat.NewDense(6, 6, []float64{1.130290926636651, -0.07836538294209065, 0.015738385568786983, -0.649673140106426, -0.4536044749957713, 0.14334364029191377, 0, 1.0469912563915942, 0.3420650862788733, 0.1599513409111758, 0.11672951065862192, -0.3406444610170681, 0, 0, 1.1807478744239048, -0.2892797429357336, 0.09485219333518705, -0.42824085329432304, 0, 0, 0, 1.154953682326919, -0.1329712489844229, 0.21153069721367268, 0, 0, 0, 0, 1.1462579636908032, -0.08423225396399663, 0, 0, 0, 0, 0, 0.00019895149195974028})
+	ref := riccatiExactReference(false, A, B, Q, R, nil, E, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("exact-E oracle did not certify")
+	}
+	const xBand, kBand = 1.5872480733037953e-14, 2.113731658368811e-05
+	for _, ns := range []bool{false, true} {
+		opts := &RiccatiOpts{E: E, NoScaling: ns}
+		if red, _ := reduceInputs(A, B, Q, R, opts); red == nil || !red.rotated {
+			t.Fatalf("NoScaling %v: inputs not rotated", ns)
+		}
+		res, err := Dare(A, B, Q, R, opts)
+		if err != nil {
+			t.Fatalf("NoScaling %v: %v", ns, err)
+		}
+		eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", ns, res.Accuracy, eX, xBand, eK, kBand)
+		if riccatiCertifiedWrong(res.Accuracy, eX, xBand, eK, kBand, newtonTol) {
+			t.Errorf("NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
+		}
+		if dareRotatedInputsUnstable(A, B, E, res.K) {
+			t.Errorf("NoScaling %v: E⁻¹(A − BK) unstable in %d bits", ns, riccatiExactPrec)
+		}
+	}
+}
+
+// TestDareRotatedInputsUnrefinedGainWithinFloorRefined: rotated inputs
+// (n 5, m 4, R ~7e-13, E's last pivot 1.5e-5) whose unrefined K was 1.9e-6
+// off the exact-E 320-bit gain (band 4.3e-9) at Accuracy 0 (M4LKAP; rv48r
+// seed 4136): gainMissIn accepted it, as the gain of X moves 5e-7 per ulp
+// of X (tolerance 4.2e-6), while the gain of X one Newton step on was
+// within 8.7e-9. The bands are riccatiExactSensitivity(..., "ABQRSE") of
+// this reference, pinned.
+func TestDareRotatedInputsUnrefinedGainWithinFloorRefined(t *testing.T) {
+	A := mat.NewDense(5, 5, []float64{-0.5841825345794247, -0.3440717070890188, -0.12959541856493612, 0.11141751133232604, -0.1586275871651297, 0.46311937369386136, -0.14632175735824518, 0.15483445536350626, -0.22104662916609735, -0.467631899340577, -0.10246380740894212, 0.4015541025219238, 0.8951513817018157, 0.003777539065926909, 0.18929921159994959, -0.07786216129223318, 0.0842562962187307, -0.44944216418140237, -0.31428139223594176, 0.0025703588106172643, 0.4495800242080266, 0.0310598993147139, -0.6167122429772101, 0.056010556340855035, -0.14103439679386895})
+	B := mat.NewDense(5, 4, []float64{0.44640911273616507, 0.11389976778377006, 0.6921131354055368, 0.24881244457857596, -0.02903583752690968, -0.007805549988942555, -0.04431957675702311, -0.0172693833096702, -0.10605462290468767, -0.026062127901601017, -0.16632809008527055, -0.05620179611019856, 0.1464000410372859, 0.03898489929420118, 0.22408138889475232, 0.08610063455980342, 0.178381164526886, 0.0452076010801929, 0.277102701945397, 0.09858250912347907})
+	Q := mat.NewDense(5, 5, []float64{5456.288929824712, -3115.472305640989, 892.1993195844939, -3433.270642113965, -44.490135678558744, -3115.472305640989, 5070.191637230694, 624.407624662127, -916.8509703590398, -904.3785148814025, 892.1993195844939, 624.407624662127, 561.531496579672, -1827.3754908894102, -608.7137924316401, -3433.270642113965, -916.8509703590398, -1827.3754908894102, 7691.519372186855, 3926.426469901555, -44.490135678558744, -904.3785148814025, -608.7137924316401, 3926.426469901555, 3419.9074558460757})
+	R := mat.NewDense(4, 4, []float64{7.030054309927255e-13, 6.406892585154254e-15, 1.9312905614061376e-14, -4.492769819792562e-14, 6.406892585154254e-15, 6.68858975302816e-13, 1.2208285217284012e-14, -3.6527421409940764e-16, 1.9312905614061376e-14, 1.2208285217284012e-14, 7.233888383383858e-13, -4.586209177303498e-15, -4.492769819792562e-14, -3.6527421409940764e-16, -4.586209177303498e-15, 7.070511943426042e-13})
+	E := mat.NewDense(5, 5, []float64{1.1454397034701418, 0.2882709787792935, -0.06755473299413417, 0.3397107233057799, 0.11529351673408662, 0, 1.0128104894279837, 0.34128894414065536, 0.7443758454316614, -0.422857631869541, 0, 0, 1.0413214011330232, -0.16393032246388944, 0.4940298795946477, 0, 0, 0, 1.0281406818465948, -0.15316692585917466, 0, 0, 0, 0, 1.4664785409723689e-05})
+	ref := riccatiExactReference(false, A, B, Q, R, nil, E, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("exact-E oracle did not certify")
+	}
+	const xBand, kBand = 1.4284004463093428e-11, 4.2889341364835306e-09
+	for _, ns := range []bool{false, true} {
+		opts := &RiccatiOpts{E: E, NoScaling: ns}
+		if red, _ := reduceInputs(A, B, Q, R, opts); red == nil || !red.rotated {
+			t.Fatalf("NoScaling %v: inputs not rotated", ns)
+		}
+		res, err := Dare(A, B, Q, R, opts)
+		if err != nil {
+			t.Fatalf("NoScaling %v: %v", ns, err)
+		}
+		eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", ns, res.Accuracy, eX, xBand, eK, kBand)
+		if res.Accuracy != 0 {
+			t.Errorf("NoScaling %v: Accuracy %d", ns, res.Accuracy)
+		}
+		if riccatiCertifiedWrong(res.Accuracy, eX, xBand, eK, kBand, newtonTol) {
+			t.Errorf("NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
+		}
+		if dareRotatedInputsUnstable(A, B, E, res.K) {
+			t.Errorf("NoScaling %v: E⁻¹(A − BK) unstable in %d bits", ns, riccatiExactPrec)
+		}
+	}
+}
