@@ -15,12 +15,17 @@ import (
 // parameter as gain (a fit to the response at a low-frequency probe when
 // that parameter cancels). Roots of the transfer-function polynomials lose
 // tight clusters, e.g. discrete poles near z = 1 leave the unit circle
-// (HP3RZO). The per-channel orders stay those of the transfer function: a
-// row is replaced only when the structurally minimal part has its row
-// degree, every channel keeps its zero count, and each channel fits the
-// response, at the low-frequency probe and at a probe on the scale of its
-// largest root, no worse than its polynomial roots do. Descriptor models
-// keep the polynomial roots.
+// (HP3RZO). A structurally minimal part above the row degree, whose extra
+// modes are hidden uncontrollable or unobservable ones, is reduced by Reduce
+// with its default tolerance, as MATLAB zpk(ss) cancels them; the reduction
+// is kept only when it adds no unstable pole to eig(A) of that part or to
+// the polynomial poles. The
+// per-channel orders stay those of the transfer function: a row is replaced
+// only when the reduced part has its row degree, every channel keeps its
+// zero count, and each channel fits the response of the structurally
+// minimal part, at the low-frequency probe and at a probe on the scale of
+// its largest root, no worse than its polynomial roots do. Descriptor
+// models keep the polynomial roots.
 func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
 	n, m, p := sys.Dims()
 	if n == 0 || sys.IsDescriptor() || sys.HasDelay() || sys.LFT != nil || len(deg) != p {
@@ -92,18 +97,29 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, w *zpkPencilWork) (zeros [][
 		copy(w.d, dr.Data[i*dr.Stride:i*dr.Stride+m])
 		row = &System{A: sys.A, B: sys.B, C: mat.NewDense(1, n, w.c), D: mat.NewDense(1, m, w.d), Dt: sys.Dt}
 	}
+	ref := row
 	if deg < n {
 		var err error
 		if row, err = Sminreal(row); err != nil {
 			return nil, nil, nil, false
 		}
-		if nr, _, _ := row.Dims(); nr != deg {
+		ref = row
+		if nr, _, _ := row.Dims(); nr < deg {
 			return nil, nil, nil, false
+		} else if nr > deg {
+			red, err := row.Reduce(nil)
+			if err != nil || red.Order != deg {
+				return nil, nil, nil, false
+			}
+			row = red.Sys
 		}
 		if poles, err = row.Poles(); err != nil {
 			return nil, nil, nil, false
 		}
 		if poles, ok = matchedConjugateClosed(poles); !ok {
+			return nil, nil, nil, false
+		}
+		if row != ref && !zpkReducedStabilityKept(ref, poles, z.Poles[i], sys.Dt) {
 			return nil, nil, nil, false
 		}
 	} else {
@@ -165,12 +181,12 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, w *zpkPencilWork) (zeros [][
 	}
 	w.roots = roots
 	s0, s1, sh := zpkProbePoints(sys.Dt, roots, &w.probe)
-	eval := newFrequencyEvaluator(row).pointSolver(1).evalInto
+	eval := newFrequencyEvaluator(ref).pointSolver(1).evalInto
 	g1, gh, g0 := w.g[:m], w.g[m:2*m], w.g[2*m:]
-	if evalWithPoleLimit(eval, row, pointAt(s1), g1) != nil {
+	if evalWithPoleLimit(eval, ref, pointAt(s1), g1) != nil {
 		return nil, nil, nil, false
 	}
-	if evalWithPoleLimit(eval, row, pointAt(sh), gh) != nil {
+	if evalWithPoleLimit(eval, ref, pointAt(sh), gh) != nil {
 		return nil, nil, nil, false
 	}
 	haveG0 := false
@@ -182,10 +198,10 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, w *zpkPencilWork) (zeros [][
 		if !zpkFiniteNonzero(v1) || !zpkFiniteNonzero(vh) {
 			return nil, nil, nil, false
 		}
-		k, ok := zpkMarkovGain(row, j, deg-len(zeros[j]), w.markov)
+		k, ok := zpkMarkovGain(ref, j, deg-len(zeros[j]), w.markov)
 		if !ok {
 			if !haveG0 {
-				if evalWithPoleLimit(eval, row, pointAt(s0), g0) != nil {
+				if evalWithPoleLimit(eval, ref, pointAt(s0), g0) != nil {
 					return nil, nil, nil, false
 				}
 				haveG0 = true
@@ -211,6 +227,26 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, w *zpkPencilWork) (zeros [][
 		}
 	}
 	return zeros, poles, gains, true
+}
+
+// zpkReducedStabilityKept reports whether the poles of the reduced row have
+// no more unstable roots than eig(A) of its structurally minimal part ref and
+// than the polynomial poles of every channel of the row. A reduction that
+// cuts genuine modes of a cluster under-resolved at float64, rather than
+// hidden ones, moves the kept poles; the response gate cannot see it where
+// the polynomial roots misfit by O(1) as well.
+func zpkReducedStabilityKept(ref *System, poles []complex128, tf [][]complex128, dt float64) bool {
+	u := unstableModalCount(poles, dt)
+	if u == 0 {
+		return true
+	}
+	for _, ps := range tf {
+		if len(ps) > 0 && u > unstableModalCount(ps, dt) {
+			return false
+		}
+	}
+	all, err := ref.Poles()
+	return err == nil && u <= unstableModalCount(all, dt)
 }
 
 func zpkMisfit(zs, ps []complex128, k float64, s, v complex128) float64 {
