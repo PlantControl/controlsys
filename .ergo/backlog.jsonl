@@ -73,3 +73,5 @@
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"L4BCTU"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-10-29T13:24:45.243145Z","data":{"id":"3GARV6","agent_id":"coordinator@wave55","ts":"2026-10-29T13:24:45.243145Z"}},{"type":"state","ts":"2026-10-29T13:24:45.243145Z","data":{"id":"3GARV6","state":"doing","ts":"2026-10-29T13:24:45.243145Z"}}]}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-10-29T13:24:45.26187Z","data":{"id":"43H73S","agent_id":"coordinator@wave55","ts":"2026-10-29T13:24:45.26187Z"}},{"type":"state","ts":"2026-10-29T13:24:45.26187Z","data":{"id":"43H73S","state":"doing","ts":"2026-10-29T13:24:45.26187Z"}}]}
