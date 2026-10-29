@@ -71,6 +71,9 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 		if poles, err = row.Poles(); err != nil {
 			return nil, nil, nil, false
 		}
+		if poles, ok = matchedConjugateClosed(poles); !ok {
+			return nil, nil, nil, false
+		}
 	} else {
 		if *full == nil {
 			all, err := sys.Poles()
@@ -85,9 +88,6 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 		poles = *full
 	}
 	if len(poles) != deg {
-		return nil, nil, nil, false
-	}
-	if poles, ok = matchedConjugateClosed(poles); !ok {
 		return nil, nil, nil, false
 	}
 	nr := deg
@@ -128,13 +128,7 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 	for j := range m {
 		roots = append(roots, z.Poles[i][j])
 	}
-	var s0, s1 complex128
-	if sys.IsDiscrete() {
-		s0, s1 = matchedD2CProbePoints(sys.Dt, roots...)
-	} else {
-		s0, s1 = matchedProbePoints(roots...)
-	}
-	sh := zpkBandProbePoint(sys.Dt, roots)
+	s0, s1, sh := zpkProbePoints(sys.Dt, roots)
 	g1, err := row.EvalFr(s1)
 	if err != nil {
 		return nil, nil, nil, false
@@ -235,15 +229,23 @@ func zpkFiniteNonzero(v complex128) bool {
 	return v != 0 && !cmplx.IsNaN(v) && !cmplx.IsInf(v)
 }
 
-// zpkBandProbePoint returns a point at the largest nonzero root modulus of
-// the continuous roots (log(r)/dt for discrete roots), at the angle from
+var zpkProbeAngles = func() (u [5]complex128) {
+	for k, theta := range []float64{0.25, 0.4, 0.5, 0.6, 0.75} {
+		u[k] = cmplx.Rect(1, theta*math.Pi)
+	}
+	return u
+}()
+
+// zpkProbePoints returns s0 and s1 of matchedProbePoints (matchedD2CProbePoints
+// when dt > 0) and a band point sh: on the continuous roots (log(r)/dt for
+// discrete roots), at the largest nonzero root modulus and the angle from
 // 0.25π to 0.75π farthest from every root, mapped back to z = e^{s·dt}. The
-// low-frequency probes of matchedProbePoints fall inside a split cluster at
-// s = 0 or z = 1, where every candidate misfits by O(1); this point checks
-// the response where the roots are well separated.
-func zpkBandProbePoint(dt float64, sets [][]complex128) complex128 {
+// low-frequency probes fall inside a split cluster at s = 0 or z = 1, where
+// every candidate misfits by O(1); sh checks the response where the roots
+// are well separated.
+func zpkProbePoints(dt float64, sets [][]complex128) (s0, s1, sh complex128) {
 	var roots []complex128
-	rho := 0.0
+	lo, hi := math.Inf(1), 0.0
 	for _, set := range sets {
 		for _, r := range set {
 			if dt > 0 {
@@ -253,29 +255,53 @@ func zpkBandProbePoint(dt float64, sets [][]complex128) complex128 {
 				r = cmplx.Log(r) / complex(dt, 0)
 			}
 			roots = append(roots, r)
-			rho = math.Max(rho, cmplx.Abs(r))
+			if a := cmplx.Abs(r); a > 0 {
+				lo, hi = math.Min(lo, a), math.Max(hi, a)
+			}
 		}
 	}
-	if !(rho > 0) || math.IsInf(rho, 0) {
-		rho = 1
+	if math.IsInf(lo, 1) {
+		lo = 1
+	}
+	if !(hi > 0) || math.IsInf(hi, 0) {
+		hi = 1
 	}
 	if dt > 0 {
-		rho = math.Min(rho, 0.5*math.Pi/dt)
+		hi = math.Min(hi, 0.5*math.Pi/dt)
 	}
-	var best complex128
-	score := -1.0
-	for _, theta := range []float64{0.25, 0.4, 0.5, 0.6, 0.75} {
-		s := cmplx.Rect(rho, theta*math.Pi)
+	far := func(rho float64, u complex128) (complex128, float64) {
+		s := complex(rho, 0) * u
 		d := math.Inf(1)
 		for _, r := range roots {
-			d = math.Min(d, cmplx.Abs(s-r)/rho)
+			e := s - r
+			if q := real(e)*real(e) + imag(e)*imag(e); q < d {
+				d = q
+			}
 		}
-		if d > score {
-			best, score = s, d
+		return s, d / (rho * rho)
+	}
+	score := [2]float64{-1, -1}
+	for _, f := range []float64{0.5, 1, 2} {
+		for _, u := range zpkProbeAngles {
+			s, d := far(f*lo, u)
+			switch {
+			case d > score[0]:
+				s1, score[1] = s0, score[0]
+				s0, score[0] = s, d
+			case d > score[1]:
+				s1, score[1] = s, d
+			}
+		}
+	}
+	best := -1.0
+	for _, u := range zpkProbeAngles {
+		if s, d := far(hi, u); d > best {
+			sh, best = s, d
 		}
 	}
 	if dt > 0 {
-		return cmplx.Exp(best * complex(dt, 0))
+		t := complex(dt, 0)
+		return cmplx.Exp(s0 * t), cmplx.Exp(s1 * t), cmplx.Exp(sh * t)
 	}
-	return best
+	return s0, s1, sh
 }
