@@ -22,7 +22,7 @@ import (
 // by every method but least squares (matched from the transfer function of
 // the pencil), its I/O delays as for an explicit model; the result then
 // has new state coordinates and no state names. With internal delays, all
-// methods but matched treat the descriptor part G of H = lft(G, delay) the
+// methods that accept them (ZOH, FOH, Tustin) treat the descriptor part G of H = lft(G, delay) the
 // same way and keep the delay feedback. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
 // shape, such as those parts, exponentiate its modes of different scale
 // separately; with all modes stiff, any A takes Γ = A⁻¹(e^{A·dt} − I)·B. An already discrete model returns ErrWrongDomain;
@@ -555,6 +555,9 @@ func stiffDescriptorExplicit(sys *System, method C2DMethod) (*System, bool) {
 		return nil, false
 	}
 	if sys.LFT != nil {
+		if method == C2DMethodImpulse {
+			return nil, false
+		}
 		return stiffLFTExplicit(sys)
 	}
 	parts, ok := foldInaccurateParts(ioDelayFreeCore(sys))

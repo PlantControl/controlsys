@@ -22,7 +22,7 @@ func stiffLFTExplicit(sys *System) (*System, bool) {
 	_, m, p := sys.Dims()
 	g := conversionAugmentedRational(sys)
 	g.E = sys.E
-	parts, ok := foldInaccurateParts(g)
+	parts, ok := stiffDescriptorParts(g)
 	if !ok {
 		return nil, false
 	}
