@@ -113,6 +113,49 @@ func TestZPKModelClusteredDiscretePolesStayStable(t *testing.T) {
 	}
 }
 
+// TestZPKModelClusteredDiscreteTwoOutputs adds a second output to the
+// clustered model: each row takes eig(A) and its own pencil zeros, and every
+// channel matches the 320-bit oracle response.
+func TestZPKModelClusteredDiscreteTwoOutputs(t *testing.T) {
+	siso := zpkClusteredDiscreteMatched(t)
+	C := mat.NewDense(2, 8, nil)
+	C.Copy(siso.C)
+	C.Set(1, 2, 1e-12)
+	C.Set(1, 6, -3e-13)
+	sys, err := New(siso.A, siso.B, C, mat.NewDense(2, 1, nil), siso.Dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := sys.ZPKModel(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := newStepOraclePencil(sys)
+	for i := range 2 {
+		if res.RowDegrees[i] != len(res.ZPK.Poles[i][0]) {
+			t.Fatalf("row %d: %d poles, RowDegrees %v", i, len(res.ZPK.Poles[i][0]), res.RowDegrees)
+		}
+		for _, p := range res.ZPK.Poles[i][0] {
+			if !(cmplx.Abs(p) < 1) {
+				t.Errorf("row %d: pole %v outside the unit circle", i, p)
+			}
+		}
+	}
+	for _, s := range []complex128{cmplx.Exp(1e-3i), cmplx.Exp(1e-2i), cmplx.Exp(0.1i), cmplx.Exp(1i), 0.999 + 0.001i} {
+		got, err := res.ZPK.Eval(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		re, im := o.transfer(stepOracleComplex{stepOracleFloat(real(s)), stepOracleFloat(imag(s))})
+		for i := range 2 {
+			want := stepOracleComplex{re[i][0], im[i][0]}.complex128()
+			if rel := cmplx.Abs(got[i][0]-want) / cmplx.Abs(want); !(rel <= 1e-6) {
+				t.Errorf("H%d(%.6g) = %v, oracle %v (rel %.3g)", i, s, got[i][0], want, rel)
+			}
+		}
+	}
+}
+
 func nearestRootDistance(roots []complex128, x complex128) float64 {
 	best := math.Inf(1)
 	for _, r := range roots {
