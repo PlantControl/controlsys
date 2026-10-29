@@ -109,52 +109,88 @@ func TestDareRotatedInputsRefinedGainNotConvergedNotCertified(t *testing.T) {
 	}
 }
 
-// TestRotatedConvergedRejectsCyclingGain: refinement of the rv49v 4403
-// literal (TestDareRotatedInputsRefinedGainBeyondFloorHewer) cycles among
-// X a few ulps apart whose gains are up to 5.7e-6 off the exact-E 320-bit
-// gain (band 1.1e-7; GFGNUR: on amd64 one with d 0 and K 3.3e-6 off).
-// rotatedConverged must accept no refined iterate whose K is
-// certified-wrong.
-func TestRotatedConvergedRejectsCyclingGain(t *testing.T) {
-	A := mat.NewDense(3, 3, []float64{-0.1715478898601427, 0.16752989143887573, 0.07669486025546303, -0.3828044376881159, -0.2217838071345253, -0.1733414643177667, 0.11200079612909754, 0.29972133873324125, -0.01187752910411909})
-	B := mat.NewDense(3, 3, []float64{-0.0044252317289711525, 0.008788066916732324, -0.00040508011592204794, 0.11827735565472396, -0.29633361973433536, -0.0056586607136435004, 0.35061243329098624, -0.880250962948512, -0.01726744763850466})
-	Q := mat.NewDense(3, 3, []float64{6.488509821945091e+07, -1.5380440519737657e+07, 7.33986726722479e+07, -1.5380440519737657e+07, 1.2939955476131309e+07, -1.352656757673153e+06, 7.33986726722479e+07, -1.352656757673153e+06, 1.1073159268190524e+08})
-	R := mat.NewDense(3, 3, []float64{4.259539859850293e-10, 1.0920974537143577e-12, 2.0713438824064635e-12, 1.0920974537143577e-12, 4.327462133628632e-10, 1.2108899146932686e-12, 2.0713438824064635e-12, 1.2108899146932686e-12, 4.30313930728902e-10})
-	E := mat.NewDense(3, 3, []float64{1.1311141592119605, -0.24638606260717266, 0.16565715678543022, 0, 1.044040477615047, -0.4597924593730896, 0, 0, 7.525378985751742e-05})
-	ref := riccatiExactReference(false, A, B, Q, R, nil, E, riccatiExactPrec)
-	if !ref.OK {
-		t.Fatal("exact-E oracle did not certify")
+// TestRotatedConvergedSeparatesCyclingFromConverged: refinement of the
+// rv49v 4403 literal (TestDareRotatedInputsRefinedGainBeyondFloorHewer)
+// cycles among X a few ulps apart whose gains are up to 5.7e-6 off the
+// exact-E 320-bit gain (band 1.1e-7; GFGNUR: on amd64 one with d 0 and K
+// 3.3e-6 off); rotatedConverged must accept no refined iterate whose K is
+// certified-wrong and reject some. That of the rv48r 4136 literal
+// (TestDareRotatedInputsUnrefinedGainWithinFloorRefined) converged, K
+// 1.2e-9 to 9.5e-9 off (band 4.3e-9) and d 0 from the first refinement
+// on; rotatedConverged must accept every such iterate.
+func TestRotatedConvergedSeparatesCyclingFromConverged(t *testing.T) {
+	cases := []struct {
+		name       string
+		A, B, Q, R *mat.Dense
+		E          *mat.Dense
+		kBand      float64
+		converges  bool
+	}{
+		{
+			name:  "rv49v 4403",
+			A:     mat.NewDense(3, 3, []float64{-0.1715478898601427, 0.16752989143887573, 0.07669486025546303, -0.3828044376881159, -0.2217838071345253, -0.1733414643177667, 0.11200079612909754, 0.29972133873324125, -0.01187752910411909}),
+			B:     mat.NewDense(3, 3, []float64{-0.0044252317289711525, 0.008788066916732324, -0.00040508011592204794, 0.11827735565472396, -0.29633361973433536, -0.0056586607136435004, 0.35061243329098624, -0.880250962948512, -0.01726744763850466}),
+			Q:     mat.NewDense(3, 3, []float64{6.488509821945091e+07, -1.5380440519737657e+07, 7.33986726722479e+07, -1.5380440519737657e+07, 1.2939955476131309e+07, -1.352656757673153e+06, 7.33986726722479e+07, -1.352656757673153e+06, 1.1073159268190524e+08}),
+			R:     mat.NewDense(3, 3, []float64{4.259539859850293e-10, 1.0920974537143577e-12, 2.0713438824064635e-12, 1.0920974537143577e-12, 4.327462133628632e-10, 1.2108899146932686e-12, 2.0713438824064635e-12, 1.2108899146932686e-12, 4.30313930728902e-10}),
+			E:     mat.NewDense(3, 3, []float64{1.1311141592119605, -0.24638606260717266, 0.16565715678543022, 0, 1.044040477615047, -0.4597924593730896, 0, 0, 7.525378985751742e-05}),
+			kBand: 1.1411321515005277e-07,
+		},
+		{
+			name:      "rv48r 4136",
+			A:         mat.NewDense(5, 5, []float64{-0.5841825345794247, -0.3440717070890188, -0.12959541856493612, 0.11141751133232604, -0.1586275871651297, 0.46311937369386136, -0.14632175735824518, 0.15483445536350626, -0.22104662916609735, -0.467631899340577, -0.10246380740894212, 0.4015541025219238, 0.8951513817018157, 0.003777539065926909, 0.18929921159994959, -0.07786216129223318, 0.0842562962187307, -0.44944216418140237, -0.31428139223594176, 0.0025703588106172643, 0.4495800242080266, 0.0310598993147139, -0.6167122429772101, 0.056010556340855035, -0.14103439679386895}),
+			B:         mat.NewDense(5, 4, []float64{0.44640911273616507, 0.11389976778377006, 0.6921131354055368, 0.24881244457857596, -0.02903583752690968, -0.007805549988942555, -0.04431957675702311, -0.0172693833096702, -0.10605462290468767, -0.026062127901601017, -0.16632809008527055, -0.05620179611019856, 0.1464000410372859, 0.03898489929420118, 0.22408138889475232, 0.08610063455980342, 0.178381164526886, 0.0452076010801929, 0.277102701945397, 0.09858250912347907}),
+			Q:         mat.NewDense(5, 5, []float64{5456.288929824712, -3115.472305640989, 892.1993195844939, -3433.270642113965, -44.490135678558744, -3115.472305640989, 5070.191637230694, 624.407624662127, -916.8509703590398, -904.3785148814025, 892.1993195844939, 624.407624662127, 561.531496579672, -1827.3754908894102, -608.7137924316401, -3433.270642113965, -916.8509703590398, -1827.3754908894102, 7691.519372186855, 3926.426469901555, -44.490135678558744, -904.3785148814025, -608.7137924316401, 3926.426469901555, 3419.9074558460757}),
+			R:         mat.NewDense(4, 4, []float64{7.030054309927255e-13, 6.406892585154254e-15, 1.9312905614061376e-14, -4.492769819792562e-14, 6.406892585154254e-15, 6.68858975302816e-13, 1.2208285217284012e-14, -3.6527421409940764e-16, 1.9312905614061376e-14, 1.2208285217284012e-14, 7.233888383383858e-13, -4.586209177303498e-15, -4.492769819792562e-14, -3.6527421409940764e-16, -4.586209177303498e-15, 7.070511943426042e-13}),
+			E:         mat.NewDense(5, 5, []float64{1.1454397034701418, 0.2882709787792935, -0.06755473299413417, 0.3397107233057799, 0.11529351673408662, 0, 1.0128104894279837, 0.34128894414065536, 0.7443758454316614, -0.422857631869541, 0, 0, 1.0413214011330232, -0.16393032246388944, 0.4940298795946477, 0, 0, 0, 1.0281406818465948, -0.15316692585917466, 0, 0, 0, 0, 1.4664785409723689e-05}),
+			kBand:     4.2889341364835306e-09,
+			converges: true,
+		},
 	}
-	const kBand = 1.1411321515005277e-07
-	rejected := 0
-	for _, ns := range []bool{false, true} {
-		opts := &RiccatiOpts{E: E, NoScaling: ns}
-		red, _ := reduceInputs(A, B, Q, R, opts)
-		if red == nil || !red.rotated {
-			t.Fatalf("NoScaling %v: inputs not rotated", ns)
+	for _, tc := range cases {
+		ref := riccatiExactReference(false, tc.A, tc.B, tc.Q, tc.R, nil, tc.E, riccatiExactPrec)
+		if !ref.OK {
+			t.Fatalf("%s: exact-E oracle did not certify", tc.name)
 		}
-		p := red.solve(A, B, Q, opts)
-		if p == nil {
-			t.Fatalf("NoScaling %v: no solution", ns)
-		}
-		for it := range 6 {
-			c, cd, ok := refined(A, B, Q, R, opts, red, p)
-			if !ok {
-				break
+		accepted, rejected := 0, 0
+		for _, ns := range []bool{false, true} {
+			opts := &RiccatiOpts{E: tc.E, NoScaling: ns}
+			red, _ := reduceInputs(tc.A, tc.B, tc.Q, tc.R, opts)
+			if red == nil || !red.rotated {
+				t.Fatalf("%s NoScaling %v: inputs not rotated", tc.name, ns)
 			}
-			eK := relErr(c.K, ref.K)
-			conv, _ := rotatedConverged(A, B, Q, R, opts, red, p, c, cd)
-			t.Logf("NoScaling %v refinement %d: K err %.3g, d %.3g, converged %v", ns, it+1, eK, cd.d, conv)
-			if !conv {
-				rejected++
-			} else if eK > max(newtonTol, 4*kBand) {
-				t.Errorf("NoScaling %v refinement %d: K %.3g off (band %.3g) accepted as converged", ns, it+1, eK, kBand)
+			p := red.solve(tc.A, tc.B, tc.Q, opts)
+			if p == nil {
+				t.Fatalf("%s NoScaling %v: no solution", tc.name, ns)
 			}
-			p = c
+			for it := range 6 {
+				c, cd, ok := refined(tc.A, tc.B, tc.Q, tc.R, opts, red, p)
+				if !ok {
+					break
+				}
+				eK := relErr(c.K, ref.K)
+				conv := rotatedConverged(tc.A, tc.B, tc.Q, tc.R, opts, red, p, c)
+				t.Logf("%s NoScaling %v refinement %d: K err %.3g, d %.3g, converged %v", tc.name, ns, it+1, eK, cd.d, conv)
+				inBand := eK <= max(newtonTol, 4*tc.kBand)
+				switch {
+				case conv:
+					accepted++
+					if !inBand {
+						t.Errorf("%s NoScaling %v refinement %d: K %.3g off (band %.3g) accepted as converged", tc.name, ns, it+1, eK, tc.kBand)
+					}
+				case tc.converges && inBand && cd.d == 0:
+					t.Errorf("%s NoScaling %v refinement %d: converged K %.3g off (band %.3g) rejected", tc.name, ns, it+1, eK, tc.kBand)
+				default:
+					rejected++
+				}
+				p = c
+			}
 		}
-	}
-	if rejected == 0 {
-		t.Error("no refined iterate rejected")
+		if !tc.converges && rejected == 0 {
+			t.Errorf("%s: no refined iterate rejected", tc.name)
+		}
+		if tc.converges && accepted == 0 {
+			t.Errorf("%s: no refined iterate accepted", tc.name)
+		}
 	}
 }
 

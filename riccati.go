@@ -1175,8 +1175,8 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // 1.3e-15 off and its gain 2.3e-6 (band 1.1e-7), the second 5.3e-8. A
 // rotated K so kept beyond gainFloor takes the Hewer gain, and every
 // refined rotated K is held to the convergence of its refinement
-// (rotatedHewer): ok is then false when K moved beyond its tolerance and
-// Hewer failed, r the refined candidate, the best float64 K in hand
+// (rotatedHewer): ok is then false when it did not converge and Hewer
+// failed, r the refined candidate, the best float64 K in hand
 // (Y6BJEX; the pencil K it replaces was 0.29 off where r's was 2.3e-3).
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
@@ -1249,20 +1249,19 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // distance cd from the gain of its X, once cd.d is within gainFloor and
 // the refined sequence converged at c (rotatedConverged); else K
 // replaced by hewerGainSubstituted, X kept, should that pass; else c
-// unless rotatedConverged found K moving beyond its tolerance, then ok
-// false (Accuracy 1, Y6BJEX am.7). Repeated refinement of such a K
-// cycled among X a few ulps apart that its Newton step and gainMissIn
+// with ok false (Accuracy 1, Y6BJEX am.7). Repeated refinement of such a
+// K cycled among X a few ulps apart that its Newton step and gainMissIn
 // could not tell apart (rv49v 4403: K 5.3e-8 to 5.7e-6 off the 320-bit
 // gain, band 1.1e-7, by platform), while the Hewer gain was exact. Where
 // X moved away instead, K was the exact gain of an X within newtonTol
 // but 1e4 times outside its band (rv49v 4667: K 6.5e-3 off, band
 // 4.5e-7; one step on, X 1.1e-11 -> 4.3e-10 off and K moved 0.12) and
-// Hewer failed. Where K moved within its tolerance, Hewer failing, K was
-// within its band as often as not (rv48r 590: X stepping 1.4e-11 then
-// 1.4e-9, K 8.6e-8 off, band 7.6e-7), so c is kept there. Of 4008
-// rotated sweep rows per platform the convergence check failed on 74 to
-// 92, of which 4 to 5 were demoted, about 5 kept and the rest took the
-// Hewer gain.
+// Hewer failed. Nor is a K kept that moved within its own tolerance: one
+// 1.7e-8 off the gain of its X, moving 1.7e-8 one refinement on against
+// a tolerance of 2.3e-8, was 2.7e-8 off the 320-bit gain (band 3.4e-12;
+// amd64 rv49v 2393). Of 4008 rotated sweep rows per platform the
+// convergence check failed on 77 to 95, of which 9 to 12 were demoted
+// and the rest took the Hewer gain.
 func rotatedHewer(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, p, c *RiccatiResult, cd gainDist) (*RiccatiResult, bool) {
 	hewer := cd.d > gainFloor
 	if hewer {
@@ -1270,8 +1269,7 @@ func rotatedHewer(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, 
 			return h, true
 		}
 	}
-	conv, moved := rotatedConverged(A, B, Q, R, opts, red, p, c, cd)
-	if conv {
+	if rotatedConverged(A, B, Q, R, opts, red, p, c) {
 		return c, true
 	}
 	if !hewer {
@@ -1279,7 +1277,7 @@ func rotatedHewer(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, 
 			return h, true
 		}
 	}
-	return c, !moved
+	return c, false
 }
 
 // rotatedUlps is the relative move of X, in its 1-norm, that
@@ -1291,20 +1289,16 @@ const rotatedUlps = 16 * 0x1p-52
 // rotatedConverged reports whether the refinement of p to c converged:
 // c one refinement on (refinedStep), X neither moves away (by more than
 // rotatedUlps and its last move) nor K by more than gainTol where X moves
-// within rotatedUlps. moved reports K having moved beyond its tolerance
-// cd.tol, and gainTol, when not converged, or the refinement failing.
-func rotatedConverged(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, p, c *RiccatiResult, cd gainDist) (conv, moved bool) {
+// within rotatedUlps. A refinement failing is not convergence.
+func rotatedConverged(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, p, c *RiccatiResult) bool {
 	c2, ok := refinedStep(A, B, Q, R, opts, red, c)
 	if !ok {
-		return false, true
+		return false
 	}
 	dX1, dX2, dK := relDist(c.X, p.X), relDist(c2.X, c.X), relDist(c2.K, c.K)
 	away := dX2 > dX1 && dX2 > rotatedUlps
 	cycling := dX2 <= rotatedUlps && dK > gainTol
-	if !away && !cycling {
-		return true, false
-	}
-	return false, dK > max(gainTol, cd.tol)
+	return !away && !cycling
 }
 
 // relDist returns ‖a − b‖₁/‖b‖₁.
