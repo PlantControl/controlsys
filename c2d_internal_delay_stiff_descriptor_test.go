@@ -75,54 +75,119 @@ func stiffInternalDelayCases(t *testing.T) (names []string, systems []*System) {
 	return names, systems
 }
 
-// C2D (ZOH) of a stiff descriptor with internal delays of whole samples is
-// lft(c2d(G), z^-k), MATLAB's c2d of the delay model: its frequency
-// response matches the exact ZOH of the 320-bit modes of the pencil of G
-// closed by z^-k, times the I/O delays. The LU fold E⁻¹A put it off by up
-// to 0.47 (RT73OO).
-func TestC2DZOHInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
+// C2D (ZOH, FOH, Tustin) of a stiff descriptor with internal delays of
+// whole samples is lft(c2d(G), z^-k), MATLAB's c2d of the delay model: its
+// frequency response matches the exact discretization of the 320-bit
+// pencil of G closed by z^-k, times the I/O delays. The LU fold E⁻¹A put
+// ZOH off by up to 0.47 (RT73OO).
+func TestC2DInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
 	const dt = 0.1
 	names, systems := stiffInternalDelayCases(t)
 	for k, sys := range systems {
 		g := lftAugmentedDescriptor(sys)
-		pol, err := g.Poles()
-		if err != nil {
-			t.Fatal(err)
-		}
-		modes, ok := newStepOracleModes(g, pol)
-		if !ok {
-			t.Fatalf("%s: oracle does not resolve the pencil", names[k])
-		}
-		d, err := sys.C2D(dt, C2DOptions{})
-		if err != nil {
-			t.Errorf("%s: C2D: %v", names[k], err)
-			continue
-		}
-		_, m, p := sys.Dims()
-		worst := 0.0
-		for _, th := range []float64{0.05, 0.5, 2, 3} {
-			z := cmplx.Exp(complex(0, th))
-			want := lftClose(m, p, func(i, j int) complex128 { return modes.zoh(i, j, dt, z) }, []float64{3}, z)
-			got := lftClose(m, p, lftAugmentedAt(t, d, z), d.LFT.Tau, z)
-			for i := range p {
-				for j := range m {
-					shift := 0.0
-					if sys.InputDelay != nil {
-						shift += sys.InputDelay[j]
-					}
-					if sys.OutputDelay != nil {
-						shift += sys.OutputDelay[i]
-					}
-					w := want[i][j] * cmplx.Pow(z, complex(-math.Round(shift/dt), 0))
-					g := got[i][j] * discreteIODelayAt(d, i, j, z)
-					worst = math.Max(worst, cmplx.Abs(g-w)/math.Max(1, cmplx.Abs(w)))
-				}
+		for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+			oracle := pencilDiscreteOracle(t, g, meth, dt, nil)
+			d, err := sys.C2D(dt, C2DOptions{Method: meth})
+			if err != nil {
+				t.Errorf("%s %s: C2D: %v", names[k], meth, err)
+				continue
+			}
+			if worst := lftOracleGap(t, sys, d, oracle, dt); !(worst <= 1e-9) {
+				t.Errorf("%s %s: C2D frequency response off the pencil by %.3g", names[k], meth, worst)
 			}
 		}
-		if !(worst <= 1e-9) {
-			t.Errorf("%s: C2D frequency response off the pencil by %.3g", names[k], worst)
+	}
+}
+
+// pencilDiscreteOracle returns the exact ZOH, FOH or Tustin discretization
+// of the descriptor g at z from its 320-bit pencil. For ZOH, column j of g
+// delayed by frac[j] ∈ (0, dt) seconds takes the modified z-transform
+// z⁻¹·(G(∞) + Σ Rᵢ/λᵢ·(e^{λᵢ(dt−frac)}·(z−1)/(z−e^{λᵢdt}) − 1)).
+func pencilDiscreteOracle(t *testing.T, g *System, method C2DMethod, dt float64, frac []float64) func(i, j int, z complex128) complex128 {
+	t.Helper()
+	if method == C2DMethodTustin {
+		o := newStepOraclePencil(g)
+		return func(i, j int, z complex128) complex128 {
+			s := complex(2/dt, 0) * (z - 1) / (z + 1)
+			re, im := o.transfer(stepOracleComplex{stepOracleFloat(real(s)), stepOracleFloat(imag(s))})
+			if re == nil {
+				t.Fatal("oracle pencil singular at s")
+			}
+			x, _ := re[i][j].Float64()
+			y, _ := im[i][j].Float64()
+			return complex(x, y)
 		}
 	}
+	pol, err := g.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	modes, ok := newStepOracleModes(g, pol)
+	if !ok {
+		t.Fatal("oracle does not resolve the pencil")
+	}
+	ginf := func(i, j int) complex128 {
+		v := complex(modes.dc.At(i, j), 0)
+		for a, l := range modes.poles {
+			v += modes.residues[a][i][j] / l
+		}
+		return v
+	}
+	if method == C2DMethodFOH {
+		return func(i, j int, z complex128) complex128 {
+			v := ginf(i, j)
+			for a, l := range modes.poles {
+				e := cmplx.Exp(l * complex(dt, 0))
+				v += modes.residues[a][i][j] * ((((z-1)*(z-1))/(z-e)-(z-1))/(l*l*complex(dt, 0)) - 1/l)
+			}
+			return v
+		}
+	}
+	return func(i, j int, z complex128) complex128 {
+		if j >= len(frac) || frac[j] == 0 {
+			return modes.zoh(i, j, dt, z)
+		}
+		v := ginf(i, j)
+		for a, l := range modes.poles {
+			e := cmplx.Exp(l * complex(dt, 0))
+			v += modes.residues[a][i][j] / l * (cmplx.Exp(l*complex(dt-frac[j], 0))*(z-1)/(z-e) - 1)
+		}
+		return v / z
+	}
+}
+
+// lftOracleGap is the largest relative gap, over four frequencies, between
+// the discrete d and the oracle of G of the continuous sys closed by the
+// whole-sample parts of its internal delays, both times their I/O delays
+// in whole samples.
+func lftOracleGap(t *testing.T, sys, d *System, oracle func(i, j int, z complex128) complex128, dt float64) float64 {
+	t.Helper()
+	_, m, p := sys.Dims()
+	k := make([]float64, len(sys.LFT.Tau))
+	for b, v := range sys.LFT.Tau {
+		k[b] = math.Floor(v/dt + 1e-9)
+	}
+	worst := 0.0
+	for _, th := range []float64{0.05, 0.5, 2, 3} {
+		z := cmplx.Exp(complex(0, th))
+		want := lftClose(m, p, func(i, j int) complex128 { return oracle(i, j, z) }, k, z)
+		got := lftClose(m, p, lftAugmentedAt(t, d, z), d.LFT.Tau, z)
+		for i := range p {
+			for j := range m {
+				shift := 0.0
+				if sys.InputDelay != nil {
+					shift += sys.InputDelay[j]
+				}
+				if sys.OutputDelay != nil {
+					shift += sys.OutputDelay[i]
+				}
+				w := want[i][j] * cmplx.Pow(z, complex(-math.Round(shift/dt), 0))
+				g := got[i][j] * discreteIODelayAt(d, i, j, z)
+				worst = math.Max(worst, cmplx.Abs(g-w)/math.Max(1, cmplx.Abs(w)))
+			}
+		}
+	}
+	return worst
 }
 
 // discreteIODelayAt is z^-(k_in + k_out + k_ij) of channel (i, j) of the
