@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/big"
 	"math/cmplx"
 	"testing"
 
@@ -208,4 +209,75 @@ func csolveNoT(a, b [][]complex128) [][]complex128 {
 		}
 	}
 	return out
+}
+
+// A stiff descriptor (cond(E) 2e15, pencil poles −1.4e15 and 0.304, fold
+// slow pole 0.364) closed by two internal delays of 0.25 s (2.5 samples at
+// dt = 0.1) has two closed-loop roots in the right half-plane: the argument
+// principle on det(sE − A − e^{−sτ}·B2·C2), whose s² coefficient det(E) is
+// formed exactly. Its ZOH and FOH discretizations are then unstable; the
+// fold made them stable (RT73OO review sweep, nearSingularEContinuousK
+// seed 116).
+func TestC2DFractionalInternalDelayStiffDescriptorKeepsInstability(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-0.16651325993927746, -0.18881816152361589, -0.7812443071724737, -0.5105728073358802})
+	E := mat.NewDense(2, 2, []float64{0.05744448278498728, -0.062185957118855655, -0.3464693904136969, 0.3750670144582298})
+	B2 := mat.NewDense(2, 2, []float64{-0.4122687632518598, 0.02628900878011349, 0.05255512500346221, -0.05734616494225475})
+	C2 := mat.NewDense(2, 2, []float64{-0.6942289693736933, -0.6542020932766299, -0.5569197866445883, -0.028610092985908483})
+	sys, err := NewDescriptor(A, mat.NewDense(2, 1, []float64{-0.5096244121191215, -0.45477962922031856}),
+		mat.NewDense(1, 2, []float64{1.7357434392386313, 0.7945681613231941}), mat.NewDense(1, 1, []float64{-0.7933357460691265}), E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matlabRankFull(t, E) {
+		t.Skip("E reads rank deficient on this platform")
+	}
+	const tau = 0.25
+	if err := sys.SetInternalDelay([]float64{tau, tau}, B2, C2, mat.NewDense(1, 2, []float64{-0.12170991249970453, 0.9483805251588965}),
+		mat.NewDense(2, 1, []float64{-0.13280317748780845, -0.5976750171300884}), mat.NewDense(2, 2, nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	var K mat.Dense
+	K.Mul(B2, C2)
+	detE, _ := new(big.Float).SetPrec(200).Sub(
+		new(big.Float).SetPrec(200).Mul(big.NewFloat(E.At(0, 0)), big.NewFloat(E.At(1, 1))),
+		new(big.Float).SetPrec(200).Mul(big.NewFloat(E.At(0, 1)), big.NewFloat(E.At(1, 0)))).Float64()
+	char := func(s complex128) complex128 {
+		ex := cmplx.Exp(-s * tau)
+		M := func(i, j int) complex128 { return complex(A.At(i, j), 0) + ex*complex(K.At(i, j), 0) }
+		e := func(i, j int) complex128 { return complex(E.At(i, j), 0) }
+		c1 := -e(0, 0)*M(1, 1) - M(0, 0)*e(1, 1) + e(0, 1)*M(1, 0) + M(0, 1)*e(1, 0)
+		return s*s*complex(detE, 0) + s*c1 + M(0, 0)*M(1, 1) - M(0, 1)*M(1, 0)
+	}
+	const R, N = 200.0, 200000
+	wind, prev := 0.0, char(complex(0, -R))
+	for k := 1; k <= 2*N; k++ {
+		var s complex128
+		if k <= N {
+			s = complex(0, -R+2*R*float64(k)/N)
+		} else {
+			th := math.Pi/2 - math.Pi*float64(k-N)/N
+			s = complex(R*math.Cos(th), R*math.Sin(th))
+		}
+		cur := char(s)
+		wind += cmplx.Phase(cur / prev)
+		prev = cur
+	}
+	if rhp := -math.Round(wind / (2 * math.Pi)); rhp != 2 {
+		t.Fatalf("argument principle counts %g right half-plane roots, want 2", rhp)
+	}
+
+	for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH, C2DMethodTustin} {
+		d, err := sys.C2D(0.1, C2DOptions{Method: meth})
+		if err != nil {
+			t.Fatalf("%s: %v", meth, err)
+		}
+		stable, err := d.IsStable()
+		if err != nil {
+			t.Fatalf("%s: IsStable: %v", meth, err)
+		}
+		if stable {
+			t.Errorf("%s: C2D is stable; the closed loop has two right half-plane roots", meth)
+		}
+	}
 }
