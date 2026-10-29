@@ -30,7 +30,9 @@ type LeastSquaresFit struct {
 // The least-squares method fits an ordinary proper SISO model up to Nyquist
 // (MATLAB c2d 'least-squares'; see
 // https://www.mathworks.com/help/control/ug/continuous-discrete-conversion-methods.html).
-// The source is sampled through its state-space realization.
+// The source is sampled through its state-space realization; a descriptor
+// model whose LU fold E⁻¹A is inaccurate (ill-conditioned full-rank E) is
+// sampled through its pencil, (sE−A)⁻¹, for the fit and its quality.
 // opts.FitOrder 0 ("auto", the MATLAB default) selects the source state order
 // (after eliminating the algebraic states of a singular-E descriptor model);
 // positive orders are accepted.
@@ -74,6 +76,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 	if _, m, p := sys.Dims(); m != 1 || p != 1 {
 		return nil, none, ErrNotSISO
 	}
+	pencil := leastSquaresPencilSource(sys)
 	sys, _, err := conversionStandardForm(sys, "descriptor reduction")
 	if err != nil {
 		return nil, none, err
@@ -91,6 +94,10 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 
 	work := sys.Copy()
 	work.InputDelay, work.OutputDelay, work.Delay = nil, nil, nil
+	source := work
+	if pencil != nil {
+		source = pencil
+	}
 	maxInt := int(^uint(0) >> 1)
 	if fitOrder > (maxInt-1)/32 {
 		return nil, none, ErrInvalidOrder
@@ -114,7 +121,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 		}
 		omega[k] = theta / dt
 	}
-	target, err := leastSquaresSourceResponse(work, omega)
+	target, err := leastSquaresSourceResponse(source, omega)
 	if err != nil {
 		return nil, none, err
 	}
@@ -140,7 +147,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 		}
 		realized = result.Sys
 	}
-	rms, worst, err := leastSquaresFitQuality(work, realized, dt, samples)
+	rms, worst, err := leastSquaresFitQuality(source, realized, dt, samples)
 	if err != nil {
 		return nil, none, err
 	}
@@ -155,6 +162,23 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 		return nil, none, err
 	}
 	return out, LeastSquaresFit{FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: stable}, nil
+}
+
+// leastSquaresPencilSource returns the delay-free descriptor sys when its
+// LU fold E⁻¹A is inaccurate (foldInaccurateParts), so the least-squares fit
+// samples the frequency response of the pencil (sE−A)⁻¹, as MATLAB c2d
+// fits the continuous response, instead of that of the fold. It is nil
+// otherwise, and the fold is sampled.
+func leastSquaresPencilSource(sys *System) *System {
+	if !sys.IsDescriptor() || sys.HasInternalDelay() {
+		return nil
+	}
+	core := *sys
+	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
+	if _, ok := foldInaccurateParts(&core); !ok {
+		return nil
+	}
+	return &core
 }
 
 func (sys *System) discretizeLeastSquares(dt float64, fitOrder int) (*System, error) {

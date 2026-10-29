@@ -24,7 +24,7 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 		return c2dPlan{}, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
 	var err error
-	if opts.Method != C2DMethodMatched || !stiffDelayedDescriptor(sys) {
+	if !(opts.Method == C2DMethodMatched && stiffDelayedDescriptor(sys)) && !(opts.Method == C2DMethodLeastSquares && leastSquaresPencilSource(sys) != nil) {
 		if sys, _, err = conversionStandardForm(sys, "descriptor reduction"); err != nil {
 			return c2dPlan{}, err
 		}
