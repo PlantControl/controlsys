@@ -62,6 +62,7 @@ type zpkPencilWork struct {
 	roots  [][]complex128
 	probe  []complex128
 	markov []float64
+	zw     zerosWork
 }
 
 func newZPKPencilWork(n, m int) *zpkPencilWork {
@@ -146,7 +147,7 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, w *zpkPencilWork) (zeros [][
 			}
 			w.dch[0] = dRaw.Data[j]
 		}
-		res, err := mimoZeros(ch)
+		res, err := mimoZerosWork(ch, &w.zw)
 		if err != nil || len(res.Zeros) != len(z.Zeros[i][j]) {
 			return nil, nil, nil, false
 		}
