@@ -168,9 +168,14 @@ type RiccatiResult struct {
 	// Hamiltonian or pencil solution (A − BK stable in float64 arithmetic)
 	// that no Newton step certifies, so X may be inaccurate and, near the
 	// stability boundary, A − BK only rounded to stable; check it before
-	// use. A non-finite X or no stabilizing solution (Report 2, 3) is an
-	// error, not a result, as is an X with an unstabilizable mode of (A, B)
-	// on the boundary to within rounding (PBH).
+	// use. It is also 1 for a certified X whose closed loop has a mode
+	// within rounding of the boundary at which a mode of A is unobservable
+	// to the cost Q and cross term Sᵀ (Kalman: unreachable from the noise):
+	// the data cannot tell such a mode just inside the boundary, with a
+	// stabilizing solution, from one on it, with none. A non-finite X or
+	// no stabilizing solution (Report 2, 3) is an error, not a result, as
+	// is an X with an unstabilizable mode of (A, B) on the boundary to
+	// within rounding (PBH).
 	Accuracy int
 
 	// step is the first Newton step of an Accuracy 1 X or, at Accuracy 0,
@@ -319,7 +324,19 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err == nil && res.Accuracy == 0 && res.gainUncertified {
 		res.Accuracy = 1
 	}
+	if err == nil {
+		undetectableBoundary(true, A, B, Q, R, opts, res)
+	}
 	return res, err
+}
+
+// undetectableBoundary sets a certified res to Accuracy 1 where
+// boundaryCertified, with cost detectability, finds a boundary mode
+// unobservable to the cost: X and K stay those of the solve.
+func undetectableBoundary(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) {
+	if res.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res, true) {
+		res.Accuracy, res.xeCertified = 1, false
+	}
 }
 
 // nearSingularCancelLimit is the largest ratio ‖|M₁||X||M₂|‖/‖M₁XM₂ + C‖
@@ -424,7 +441,7 @@ func nearSingularCancels(continuous bool, A, B, R *mat.Dense, opts *RiccatiOpts,
 // without it.
 func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := solve(A, B, Q, R, opts)
-	if err == nil && res.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res) {
+	if err == nil && res.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res, false) {
 		res, err = nil, errBoundaryUnstabilizable
 	}
 	if err == nil && res.Accuracy == 0 ||
@@ -451,7 +468,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 			o.Workspace = nil
 		}
 		r, e := solve(A, B, Q, R, &o)
-		if e == nil && r.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, r) {
+		if e == nil && r.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, r, false) {
 			r, e = nil, errBoundaryUnstabilizable
 		}
 		switch {
@@ -478,11 +495,18 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 // boundaryCertified reports a closed-loop eigenvalue of the certified
 // res within the rounding of a well-conditioned eigenvalue, n·eps·‖A‖_F,
 // of the stability boundary, where the certificate shows no stability,
-// with boundaryUnstabilizable true both unscaled and state-scaled as
-// solve scales (Care with its cost proxy). Wider bands (√eps, 10·n·eps·‖A‖_F)
-// rejected oracle-exact X of stable uncontrollable modes at 1 − 1e-9 and
-// 1 − 1e-11 that boundaryUnstabilizable's κ-weighted band covers.
-func boundaryCertified(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) bool {
+// with boundaryDeficient(detect) true both unscaled and state-scaled as
+// solve scales (Care with its cost proxy). Without detect it is an error
+// verdict on candidates of solve, placedDare and reducedInputs; with
+// detect, cost detectability included, only undetectableBoundary runs it,
+// on the result Care or Dare returns, which it leaves unchanged but for
+// Accuracy 1: whether that mode is on the boundary or just inside it is
+// not decidable from the data (just inside, the in-band base X matched
+// the 320-bit reference). Wider bands (√eps,
+// 10·n·eps·‖A‖_F) rejected oracle-exact X of stable uncontrollable modes
+// at 1 − 1e-9 and 1 − 1e-11 that boundaryUnstabilizable's κ-weighted band
+// covers.
+func boundaryCertified(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, detect bool) bool {
 	if len(res.Eig) == 0 {
 		return false
 	}
@@ -504,12 +528,12 @@ func boundaryCertified(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts
 	}
 	base.Workspace, base.NoScaling, base.plainScaling = nil, true, false
 	problem, err := newRiccatiProblem(A, B, Q, R, &base)
-	if err != nil || !problem.boundaryUnstabilizable(continuous) {
+	if err != nil || !problem.boundaryDeficient(continuous, detect) {
 		return false
 	}
 	base.NoScaling = false
 	problem.scale(&base, continuous)
-	return problem.boundaryUnstabilizable(continuous)
+	return problem.boundaryDeficient(continuous, detect)
 }
 
 func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -876,6 +900,9 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err == nil && res.Accuracy == 0 && res.xe != nil && res.xeX > newtonTol {
 		res.Accuracy = 1
 	}
+	if err == nil {
+		undetectableBoundary(false, A, B, Q, R, opts, res)
+	}
 	return res, err
 }
 
@@ -1012,13 +1039,13 @@ func (red *reducedInputs) solve(A, B, Q *mat.Dense, opts *RiccatiOpts) *RiccatiR
 	o.Workspace = nil
 	flipped := o
 	flipped.NoScaling = !o.NoScaling
-	if r, err := dare(A, red.b, red.q, red.r, &flipped); err == nil && r.Accuracy == 0 && !boundaryCertified(false, A, red.b, red.q, red.r, &o, r) {
+	if r, err := dare(A, red.b, red.q, red.r, &flipped); err == nil && r.Accuracy == 0 && !boundaryCertified(false, A, red.b, red.q, red.r, &o, r, false) {
 		if r = accept(r, nil); r != nil {
 			return r
 		}
 	}
 	for _, p := range []*RiccatiOpts{&o, &flipped} {
-		if r, err := placedDare(A, red.b, red.q, red.r, p); err == nil && !boundaryCertified(false, A, red.b, red.q, red.r, &o, r) {
+		if r, err := placedDare(A, red.b, red.q, red.r, p); err == nil && !boundaryCertified(false, A, red.b, red.q, red.r, &o, r, false) {
 			if r = accept(r, nil); r != nil {
 				return r
 			}
@@ -1474,7 +1501,7 @@ func dareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, swapPoor bool) (*Riccat
 		flipped := base
 		flipped.NoScaling = !base.NoScaling
 		for _, o := range []RiccatiOpts{base, flipped} {
-			if r, e := placedDare(A, B, Q, R, &o); e == nil && !boundaryCertified(false, A, B, Q, R, opts, r) {
+			if r, e := placedDare(A, B, Q, R, &o); e == nil && !boundaryCertified(false, A, B, Q, R, opts, r, false) {
 				return r, nil
 			}
 		}
@@ -2320,6 +2347,20 @@ var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on or beyond the stabilit
 // MPWOJM) when it is within √eps of the boundary, and only when that
 // band is below the mean's distance to the eigenvalues left out.
 func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
+	return problem.boundaryDeficient(continuous, false)
+}
+
+// boundaryDeficient is boundaryUnstabilizable that, with detect, also
+// reports a mode within its band τ of the boundary on either side at
+// which [A − λE; Q; Sᵀ] has rank below n by the same PBH test (of
+// (Aᵀ, [Q S]) for Eᵀ, [Q S] in B's place): a boundary mode unobservable
+// to the cost, for Kalman's dual unreachable from the noise, is an
+// eigenvalue of the Hamiltonian pencil on the boundary, so no stabilizing
+// solution exists (icare/idare, kalman), while one strictly beyond
+// the boundary is reflected by X. Sᵀv = 0 makes v a mode of
+// A − BR⁻¹Sᵀ unobservable to Q − SR⁻¹Sᵀ, so the test is sound with S;
+// modes of A − BR⁻¹Sᵀ that are not modes of A go untested.
+func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 	n, m := problem.n, problem.m
 	aRaw, bRaw := problem.A.RawMatrix(), problem.B.RawMatrix()
 	a := make([]float64, n*n)
@@ -2348,9 +2389,8 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 		}
 		return cmplx.Abs(lam) >= 1-tol
 	}
-	g := mat.NewDense(2*n, 2*(n+m), nil)
 	var svd mat.SVD
-	pbhDeficient := func(lam complex128, tol float64) bool {
+	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol float64) bool {
 		lr, li := real(lam), imag(lam)
 		for i := range n {
 			for j := range n {
@@ -2361,7 +2401,7 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 				g.Set(n+i, n+m+j, re)
 			}
 			for j := range m {
-				b := bRaw.Data[i*bRaw.Stride+j]
+				b := bd[i*bs+j]
 				g.Set(i, n+j, b)
 				g.Set(n+i, n+m+n+j, b)
 			}
@@ -2371,6 +2411,44 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 		}
 		sv := svd.Values(nil)
 		return sv[2*n-1] <= nf*ep*math.Hypot(an+cmplx.Abs(lam)*en, bn)+tol*en
+	}
+	g := mat.NewDense(2*n, 2*(n+m), nil)
+	var at, et, qd []float64
+	var gq *mat.Dense
+	var qs, qm int
+	var qn float64
+	if detect {
+		at, et = make([]float64, n*n), make([]float64, n*n)
+		for i := range n {
+			for j := range n {
+				at[j*n+i], et[j*n+i] = a[i*n+j], e[i*n+j]
+			}
+		}
+		qRaw := problem.Q.RawMatrix()
+		qd, qs, qm = qRaw.Data, qRaw.Stride, n
+		if problem.S != nil {
+			sRaw := problem.S.RawMatrix()
+			qm = n + m
+			qd, qs = make([]float64, n*qm), qm
+			for i := range n {
+				copy(qd[i*qm:i*qm+n], qRaw.Data[i*qRaw.Stride:i*qRaw.Stride+n])
+				copy(qd[i*qm+n:(i+1)*qm], sRaw.Data[i*sRaw.Stride:i*sRaw.Stride+m])
+			}
+		}
+		qn = impl.Dlange(lapack.Frobenius, n, qm, qd, qs, nil)
+		gq = mat.NewDense(2*n, 2*(n+qm), nil)
+	}
+	onBoundary := func(lam complex128, tol float64) bool {
+		if continuous {
+			return math.Abs(real(lam)) <= tol
+		}
+		return math.Abs(1-cmplx.Abs(lam)) <= tol
+	}
+	pbhDeficient := func(lam complex128, tol float64) bool {
+		if rankDeficient(a, e, bRaw.Data, bRaw.Stride, m, bn, g, lam, tol) {
+			return true
+		}
+		return detect && onBoundary(lam, tol) && rankDeficient(at, et, qd, qs, qm, qn, gq, lam, tol)
 	}
 	var sa, se, sar, sai, sbeta []float64
 	clusterCond := func(lam complex128, rho float64) float64 {

@@ -208,7 +208,7 @@ func TestDare_BoundaryCertifiedJordan1(t *testing.T) {
 		eig := append([]complex128{tc.pair, cmplx.Conj(tc.pair)}, rest...)
 		for _, ns := range []bool{false, true} {
 			res := &RiccatiResult{Eig: eig}
-			if got := boundaryCertified(false, A, B, Q, R, &RiccatiOpts{NoScaling: ns}, res); got != tc.want {
+			if got := boundaryCertified(false, A, B, Q, R, &RiccatiOpts{NoScaling: ns}, res, false); got != tc.want {
 				t.Errorf("pair %v NoScaling %v: boundaryCertified %v, want %v", tc.pair, ns, got, tc.want)
 			}
 		}
