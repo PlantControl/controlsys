@@ -13,7 +13,8 @@ import (
 // measured on a validation grid distinct from the fitting grid. RMSRelativeError
 // divides RMS absolute error by RMS source magnitude; MaxRelativeError divides
 // maximum absolute error by maximum source magnitude. Both compare the
-// fitted model with the source, each evaluated on its state-space realization.
+// fitted model with the source, each evaluated on its state-space realization
+// (the pencil (sE−A)⁻¹ for a descriptor source sampled through it; see C2DFit).
 // Zero-source errors are zero. FitOrder is the order used. Stable reports the
 // fitted poles; unstable poles are never silently reflected.
 type LeastSquaresFit struct {
