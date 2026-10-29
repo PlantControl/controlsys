@@ -954,6 +954,10 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			if ok {
 				return r
 			}
+			if r != nil {
+				r.Accuracy = 1
+				return r
+			}
 			c.Accuracy = 1
 		}
 		return c
@@ -1172,7 +1176,8 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // rotated K so kept beyond gainFloor takes the Hewer gain, and every
 // refined rotated K is held to the convergence of its refinement
 // (rotatedHewer): ok is then false when K moved beyond its tolerance and
-// Hewer failed.
+// Hewer failed, r the refined candidate, the best float64 K in hand
+// (Y6BJEX; the pencil K it replaces was 0.29 off where r's was 2.3e-3).
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
@@ -1180,10 +1185,11 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	rot := red != nil && red.rotated
 	d := gainMissIn(A, B, R, opts, red, res)
 	gated := func(p, c *RiccatiResult, cd gainDist) (*RiccatiResult, float64, bool) {
-		if h, ok := rotatedHewer(A, B, Q, R, opts, red, p, c, cd); ok {
+		h, ok := rotatedHewer(A, B, Q, R, opts, red, p, c, cd)
+		if ok {
 			return h, 0, true
 		}
-		return nil, d.units(gainFloor), false
+		return h, d.units(gainFloor), false
 	}
 	if d.units(gainTol) <= 1 {
 		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
