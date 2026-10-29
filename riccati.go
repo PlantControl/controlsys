@@ -954,6 +954,10 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			if ok {
 				return r
 			}
+			if r != nil {
+				r.Accuracy = 1
+				return r
+			}
 			c.Accuracy = 1
 		}
 		return c
@@ -1098,6 +1102,22 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 // the ddGain of the rounded X was 1.9e-6 off the 320-bit gain where the
 // refined K matched it.
 func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, gainDist, bool) {
+	c, ok := refinedStep(A, B, Q, R, opts, red, res)
+	var E *mat.Dense
+	if opts != nil {
+		E = opts.E
+	}
+	if !ok || !closedLoopStable(A, B, c.K, E, c.Eig) {
+		return nil, gainDist{}, false
+	}
+	if red == nil && c.xe != nil {
+		return c, gainDist{}, true
+	}
+	return c, gainMissIn(A, B, R, opts, red, c), true
+}
+
+// refinedStep is refined before its stability check and gainMiss.
+func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
 	var c *RiccatiResult
 	ok := false
 	switch {
@@ -1117,17 +1137,7 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 			c.K, _, ok = ddGain(A, B, R, crossTerm(opts), c.X)
 		}
 	}
-	var E *mat.Dense
-	if opts != nil {
-		E = opts.E
-	}
-	if !ok || !closedLoopStable(A, B, c.K, E, c.Eig) {
-		return nil, gainDist{}, false
-	}
-	if red == nil && c.xe != nil {
-		return c, gainDist{}, true
-	}
-	return c, gainMissIn(A, B, R, opts, red, c), true
+	return c, ok
 }
 
 // gainOfX returns res once its K is the gain of its X to the tolerance of
@@ -1163,12 +1173,24 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // 1.9e-9), and the second to 1.8e-17 and 8e-11. So is a rotated K
 // refined to within gainTol but beyond gainFloor: X one step on was
 // 1.3e-15 off and its gain 2.3e-6 (band 1.1e-7), the second 5.3e-8. A
-// rotated K so kept beyond gainFloor takes the Hewer gain (rotatedHewer).
+// rotated K so kept beyond gainFloor takes the Hewer gain, and every
+// refined rotated K is held to the convergence of its refinement
+// (rotatedHewer): ok is then false when it did not converge and Hewer
+// failed, r the refined candidate, the best float64 K in hand
+// (Y6BJEX; the pencil K it replaces was 0.29 off where r's was 2.3e-3).
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
 	}
+	rot := red != nil && red.rotated
 	d := gainMissIn(A, B, R, opts, red, res)
+	gated := func(p, c *RiccatiResult, cd gainDist) (*RiccatiResult, float64, bool) {
+		h, ok := rotatedHewer(A, B, Q, R, opts, red, p, c, cd)
+		if ok {
+			return h, 0, true
+		}
+		return h, d.units(gainFloor), false
+	}
 	if d.units(gainTol) <= 1 {
 		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
 			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
@@ -1180,55 +1202,110 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 				return r, 0, true
 			}
 		}
-		if red != nil && red.rotated && d.d > gainFloor {
+		if rot && d.d > gainFloor {
 			if c, cd, ok := refined(A, B, Q, R, opts, red, res); ok && cd.units(gainTol) <= 1 {
-				return rotatedHewer(A, B, Q, R, opts, red, c, cd.d), 0, true
+				return gated(res, c, cd)
 			}
-			return rotatedHewer(A, B, Q, R, opts, red, res, d.d), 0, true
+			if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
+				return h, 0, true
+			}
 		}
 		return res, 0, true
 	}
-	if red != nil && red.rotated && math.IsInf(d.d, 1) {
+	if rot && math.IsInf(d.d, 1) {
 		return nil, math.Inf(1), false
 	}
 	c, cd, stable := refined(A, B, Q, R, opts, red, res)
 	if stable && (red == nil && c.xe != nil || cd.units(gainTol) <= 1) {
-		if red != nil && red.rotated && cd.d > gainFloor {
+		if rot && cd.d > gainFloor {
 			if c2, cd2, ok := refined(A, B, Q, R, opts, red, c); ok && cd2.units(gainTol) <= 1 {
-				return rotatedHewer(A, B, Q, R, opts, red, c2, cd2.d), 0, true
+				return gated(c, c2, cd2)
 			}
-			return rotatedHewer(A, B, Q, R, opts, red, c, cd.d), 0, true
+			return gated(res, c, cd)
+		}
+		if rot {
+			return gated(res, c, cd)
 		}
 		return c, 0, true
 	}
-	if stable && red != nil && red.rotated && cd.units(gainFloor) <= 1 {
+	if stable && rot && cd.units(gainFloor) <= 1 {
 		if c2, cd2, ok := refined(A, B, Q, R, opts, red, c); ok && cd2.units(gainTol) <= 1 {
-			return rotatedHewer(A, B, Q, R, opts, red, c2, cd2.d), 0, true
+			return gated(c, c2, cd2)
 		}
 	}
 	if d.units(gainFloor) <= 1 {
 		return res, 0, true
 	}
 	if stable && cd.units(gainFloor) <= 1 {
+		if rot {
+			return gated(res, c, cd)
+		}
 		return c, 0, true
 	}
 	return nil, d.units(gainFloor), false
 }
 
-// rotatedHewer returns c, a rotated-input K gainOfX keeps at distance d
-// from the gain of its X, with K replaced by hewerGainSubstituted once d
-// exceeds gainFloor, X kept; else c. Repeated refinement of such a K
-// cycled among X a few ulps apart that its Newton step and gainMissIn
+// rotatedHewer returns c, a rotated-input K gainOfX refined from p at
+// distance cd from the gain of its X, once cd.d is within gainFloor and
+// the refined sequence converged at c (rotatedConverged); else K
+// replaced by hewerGainSubstituted, X kept, should that pass; else c
+// with ok false (Accuracy 1, Y6BJEX am.7). Repeated refinement of such a
+// K cycled among X a few ulps apart that its Newton step and gainMissIn
 // could not tell apart (rv49v 4403: K 5.3e-8 to 5.7e-6 off the 320-bit
-// gain, band 1.1e-7, by platform), while the Hewer gain was exact. It
-// fired on 4 to 9 of about 4000 rotated sweep rows.
-func rotatedHewer(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, c *RiccatiResult, d float64) *RiccatiResult {
-	if d > gainFloor {
+// gain, band 1.1e-7, by platform), while the Hewer gain was exact. Where
+// X moved away instead, K was the exact gain of an X within newtonTol
+// but 1e4 times outside its band (rv49v 4667: K 6.5e-3 off, band
+// 4.5e-7; one step on, X 1.1e-11 -> 4.3e-10 off and K moved 0.12) and
+// Hewer failed. Nor is a K kept that moved within its own tolerance: one
+// 1.7e-8 off the gain of its X, moving 1.7e-8 one refinement on against
+// a tolerance of 2.3e-8, was 2.7e-8 off the 320-bit gain (band 3.4e-12;
+// amd64 rv49v 2393). Of 4008 rotated sweep rows per platform the
+// convergence check failed on 77 to 95, of which 9 to 12 were demoted
+// and the rest took the Hewer gain.
+func rotatedHewer(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, p, c *RiccatiResult, cd gainDist) (*RiccatiResult, bool) {
+	hewer := cd.d > gainFloor
+	if hewer {
 		if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, c); ok {
-			return h
+			return h, true
 		}
 	}
-	return c
+	if rotatedConverged(A, B, Q, R, opts, red, p, c) {
+		return c, true
+	}
+	if !hewer {
+		if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, c); ok {
+			return h, true
+		}
+	}
+	return c, false
+}
+
+// rotatedUlps is the relative move of X, in its 1-norm, that
+// rotatedConverged takes for rounding: refinement cycling at the
+// rounded X moved it by 0.3 to 4 ulps, X moving away by 26 ulps and
+// more.
+const rotatedUlps = 16 * 0x1p-52
+
+// rotatedConverged reports whether the refinement of p to c converged:
+// c one refinement on (refinedStep), X neither moves away (by more than
+// rotatedUlps and its last move) nor K by more than gainTol where X moves
+// within rotatedUlps. A refinement failing is not convergence.
+func rotatedConverged(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, p, c *RiccatiResult) bool {
+	c2, ok := refinedStep(A, B, Q, R, opts, red, c)
+	if !ok {
+		return false
+	}
+	dX1, dX2, dK := relDist(c.X, p.X), relDist(c2.X, c.X), relDist(c2.K, c.K)
+	away := dX2 > dX1 && dX2 > rotatedUlps
+	cycling := dX2 <= rotatedUlps && dK > gainTol
+	return !away && !cycling
+}
+
+// relDist returns ‖a − b‖₁/‖b‖₁.
+func relDist(a, b *mat.Dense) float64 {
+	var d mat.Dense
+	d.Sub(a, b)
+	return mat.Norm(&d, 1) / mat.Norm(b, 1)
 }
 
 // steppedX returns res with X one Newton step on (certifyIn) once that
