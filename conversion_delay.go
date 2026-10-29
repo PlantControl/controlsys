@@ -118,12 +118,17 @@ func roundConversionPathDelays(delays *mat.Dense, dt float64) (*mat.Dense, error
 	return out, nil
 }
 
+// conversionZOHKernel returns e^{a·period} and ∫₀^period e^{a·s} ds·b, by
+// stiffModalHold for a stiff a·period as discretizeZOH does.
 func conversionZOHKernel(a *mat.Dense, b *mat.Dense, period float64) (ad, bd *mat.Dense) {
 	n, _ := a.Dims()
 	_, m := b.Dims()
 	ad, bd = newDense(n, n), newDense(n, m)
 	if n == 0 {
 		return ad, bd
+	}
+	if sad, gammas, ok := stiffModalHold(a, b, period, zohHoldLeaf); ok {
+		return sad, gammas[0]
 	}
 	augmented := newDense(n+m, n+m)
 	ar, br, qr := a.RawMatrix(), b.RawMatrix(), augmented.RawMatrix()
