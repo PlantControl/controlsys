@@ -83,3 +83,4 @@
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"L4BCTU"}
 {"type":"snapshot_dependency","from_id":"6DLJUF","to_id":"T3AM3B"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-10-29T17:17:48.086142Z","data":{"id":"IR5YOF","agent_id":"coordinator@wave56","ts":"2026-10-29T17:17:48.086142Z"}},{"type":"state","ts":"2026-10-29T17:17:48.086142Z","data":{"id":"IR5YOF","state":"doing","ts":"2026-10-29T17:17:48.086142Z"}}]}
