@@ -21,7 +21,9 @@ import (
 // its generalized Schur parts, which keep the poles of the pencil (A, E),
 // by every method but least squares (matched from the transfer function of
 // the pencil), its I/O delays as for an explicit model; the result then
-// has new state coordinates and no state names. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
+// has new state coordinates and no state names. With internal delays, all
+// methods but matched treat the descriptor part G of H = lft(G, delay) the
+// same way and keep the delay feedback. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
 // shape, such as those parts, exponentiate its modes of different scale
 // separately; with all modes stiff, any A takes Γ = A⁻¹(e^{A·dt} − I)·B. An already discrete model returns ErrWrongDomain;
 // invalid options return ErrInvalidConversionOptions.
@@ -538,7 +540,8 @@ func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2
 }
 
 // stiffDescriptorExplicit returns, for a continuous descriptor with I/O
-// delays and no internal ones, the parallel connection of the
+// delays and no internal ones (with internal ones, stiffLFTExplicit), the
+// parallel connection of the
 // foldInaccurateParts of its delay-free core, each in real Schur form, with
 // the delays and names of sys and no state names: an explicit model with
 // the transfer function and poles of the pencil for the delay paths of
@@ -548,8 +551,11 @@ func discretizeStiffDescriptor(sys *System, parts []*System, dt float64, opts C2
 // (stiffModalHold). Matched is left to newC2DPlan, which keeps the
 // transfer function of the pencil.
 func stiffDescriptorExplicit(sys *System, method C2DMethod) (*System, bool) {
-	if method == C2DMethodMatched || !sys.IsDescriptor() || sys.LFT != nil || !sys.HasDelay() {
+	if method == C2DMethodMatched || !sys.IsDescriptor() || !sys.HasDelay() {
 		return nil, false
+	}
+	if sys.LFT != nil {
+		return stiffLFTExplicit(sys)
 	}
 	parts, ok := foldInaccurateParts(ioDelayFreeCore(sys))
 	if !ok {
