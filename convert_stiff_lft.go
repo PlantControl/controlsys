@@ -1,5 +1,7 @@
 package controlsys
 
+import "plantcontrol.org/v1/gonum/mat"
+
 // stiffLFTExplicit returns, for a continuous descriptor sys with internal
 // delays, the explicit model with the same delay feedback whose descriptor
 // part G = (A, E, [B B2], [C; C2], [D D12; D21 D22]) is replaced by the
@@ -10,6 +12,11 @@ package controlsys
 // internal delays or G does not need the split.
 func stiffLFTExplicit(sys *System) (*System, bool) {
 	if !sys.IsContinuous() || !sys.HasInternalDelay() || !sys.IsDescriptor() {
+		return nil, false
+	}
+	var lu mat.LU
+	lu.Factorize(sys.E)
+	if lu.Cond() < foldAccurateECond {
 		return nil, false
 	}
 	_, m, p := sys.Dims()
