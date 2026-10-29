@@ -887,7 +887,10 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // gain of the rounded X 1.4e-6, that one 1e-10.
 // A descriptor Dare left with no stabilizing solution whose E is
 // ill-conditioned but nonsingular is solved once more on its explicit
-// model in extended precision (nearSingularDare).
+// model in extended precision (nearSingularDare). With E better
+// conditioned, a Dare with no stabilizing solution (ErrNoStabilizing, an
+// unstabilizable boundary mode included) is solved the same way and that
+// solution returned only with EᵀXE and K certified (boundaryExtendedDare).
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
