@@ -10,13 +10,15 @@ import (
 // zpkPencilRows replaces, row by row, the polynomial roots of z (the ZPK of
 // the transfer function of sys, with row degrees deg) by the roots MATLAB
 // zpk(ss) takes: poles eig(A) of the row's structurally minimal part and,
-// per channel, the invariant zeros of that part, with a gain fitted to the
-// response of sys. Roots of the transfer-function polynomials lose tight
-// clusters, e.g. discrete poles near z = 1 leave the unit circle (HP3RZO).
-// The per-channel orders stay those of the transfer function: a row is
-// replaced only when the structurally minimal part has its row degree,
-// every channel keeps its zero count, and each channel fits the response at
-// a probe point no worse than its polynomial roots do. Descriptor models
+// per channel, the invariant zeros of that part, with the leading Markov
+// parameter as gain (a fit to the response at a low-frequency probe when
+// that parameter cancels). Roots of the transfer-function polynomials lose
+// tight clusters, e.g. discrete poles near z = 1 leave the unit circle
+// (HP3RZO). The per-channel orders stay those of the transfer function: a
+// row is replaced only when the structurally minimal part has its row
+// degree, every channel keeps its zero count, and each channel fits the
+// response, at the low-frequency probe and at a probe on the scale of its
+// largest root, no worse than its polynomial roots do. Descriptor models
 // keep the polynomial roots.
 func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
 	n, m, p := sys.Dims()
@@ -174,6 +176,8 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 		if e := misfit(zeros[j], poles, k, s1, v1); !(e <= math.Max(2*misfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], s1, v1), 1e-12)) {
 			return nil, nil, nil, false
 		}
+		// eig and tzero carry backward error amplified by root sensitivity;
+		// 1e-9 tolerates that and still rejects an O(1) wrong gain.
 		if e := misfit(zeros[j], poles, k, sh, vh); !(e <= math.Max(2*misfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], sh, vh), 1e-9)) {
 			return nil, nil, nil, false
 		}

@@ -28,8 +28,35 @@ func TestZPKModelRotatedDoubleIntegratorKeepsMarkovGain(t *testing.T) {
 	if len(z.Poles[0][0]) != 2 || len(z.Zeros[0][0]) != 1 {
 		t.Fatalf("got %d poles and %d zeros, want 2 and 1", len(z.Poles[0][0]), len(z.Zeros[0][0]))
 	}
+	zpkCheckOracleResponse(t, sys, z, []complex128{0.5i, 2i, 10i, 1 + 1i})
+}
+
+// TestZPKModelRotatedDiscreteDoubleIntegratorKeepsMarkovGain is the dt = 1
+// analogue: eig(A) splits the double pole at z = 1 to 1 ± 3e-9 and a gain
+// fitted inside that split misses C·B = 1.82670 by 60%.
+func TestZPKModelRotatedDiscreteDoubleIntegratorKeepsMarkovGain(t *testing.T) {
+	A := []float64{0.971954641643158, 1.0900815040101024, -0.0007215443271628928, 1.028045358356842}
+	B := []float64{1.2626209011558214, 0.8942986198543982}
+	C := []float64{0.5731509139865, 1.2334048611777249}
+	sys, err := New(mat.NewDense(2, 2, A), mat.NewDense(2, 1, B), mat.NewDense(1, 2, C), mat.NewDense(1, 1, nil), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := sys.ZPKModel(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z := res.ZPK
+	if len(z.Poles[0][0]) != 2 || len(z.Zeros[0][0]) != 1 {
+		t.Fatalf("got %d poles and %d zeros, want 2 and 1", len(z.Poles[0][0]), len(z.Zeros[0][0]))
+	}
+	zpkCheckOracleResponse(t, sys, z, []complex128{cmplx.Rect(1, 0.3), cmplx.Rect(1, 1), cmplx.Rect(1, 2), -0.5})
+}
+
+func zpkCheckOracleResponse(t *testing.T, sys *System, z *ZPK, pts []complex128) {
+	t.Helper()
 	o := newStepOraclePencil(sys)
-	for _, s := range []complex128{0.5i, 2i, 10i, 1 + 1i} {
+	for _, s := range pts {
 		got, err := z.Eval(s)
 		if err != nil {
 			t.Fatal(err)
