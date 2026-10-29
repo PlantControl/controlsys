@@ -132,35 +132,49 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 	} else {
 		s0, s1 = matchedProbePoints(roots...)
 	}
-	g0, err := row.EvalFr(s0)
-	if err != nil {
-		return nil, nil, nil, false
-	}
+	sh := zpkBandProbePoint(sys.Dt, roots)
 	g1, err := row.EvalFr(s1)
 	if err != nil {
 		return nil, nil, nil, false
 	}
+	gh, err := row.EvalFr(sh)
+	if err != nil {
+		return nil, nil, nil, false
+	}
+	var g0 [][]complex128
 	for j := range m {
 		if z.Gain[i][j] == 0 {
 			continue
 		}
-		v0, v1 := g0[0][j], g1[0][j]
-		if v0 == 0 || v1 == 0 || cmplx.IsNaN(v0) || cmplx.IsNaN(v1) || cmplx.IsInf(v0) || cmplx.IsInf(v1) {
+		v1, vh := g1[0][j], gh[0][j]
+		if !zpkFiniteNonzero(v1) || !zpkFiniteNonzero(vh) {
 			return nil, nil, nil, false
 		}
-		q := v0 / matchedRootRatio(zeros[j], poles, s0)
-		if cmplx.IsNaN(q) || cmplx.IsInf(q) || real(q) == 0 || !(math.Abs(imag(q)) <= 1e-7*cmplx.Abs(q)) {
+		k, ok := zpkMarkovGain(row, j, deg-len(zeros[j]))
+		if !ok {
+			if g0 == nil {
+				if g0, err = row.EvalFr(s0); err != nil {
+					return nil, nil, nil, false
+				}
+			}
+			v0 := g0[0][j]
+			if !zpkFiniteNonzero(v0) {
+				return nil, nil, nil, false
+			}
+			q := v0 / matchedRootRatio(zeros[j], poles, s0)
+			if cmplx.IsNaN(q) || cmplx.IsInf(q) || real(q) == 0 || !(math.Abs(imag(q)) <= 1e-7*cmplx.Abs(q)) {
+				return nil, nil, nil, false
+			}
+			k = real(q)
+		}
+		gains[j] = k
+		misfit := func(zs, ps []complex128, k float64, s, v complex128) float64 {
+			return cmplx.Abs(complex(k, 0)*matchedRootRatio(zs, ps, s)-v) / cmplx.Abs(v)
+		}
+		if e := misfit(zeros[j], poles, k, s1, v1); !(e <= math.Max(2*misfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], s1, v1), 1e-12)) {
 			return nil, nil, nil, false
 		}
-		misfit := func(zs, ps []complex128, k float64) float64 {
-			return cmplx.Abs(complex(k, 0)*matchedRootRatio(zs, ps, s1)-v1) / cmplx.Abs(v1)
-		}
-		gains[j] = real(q)
-		if k, ok := zpkMarkovGain(row, j, deg-len(zeros[j])); ok && math.Abs(k-gains[j]) <= 1e-6*math.Abs(gains[j]) {
-			gains[j] = k
-		}
-		e := misfit(zeros[j], poles, gains[j])
-		if !(e <= math.Max(2*misfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j]), 1e-12)) {
+		if e := misfit(zeros[j], poles, k, sh, vh); !(e <= math.Max(2*misfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], sh, vh), 1e-9)) {
 			return nil, nil, nil, false
 		}
 	}
@@ -211,4 +225,53 @@ func zpkMarkovGain(row *System, j, r int) (float64, bool) {
 		return 0, false
 	}
 	return k, true
+}
+
+func zpkFiniteNonzero(v complex128) bool {
+	return v != 0 && !cmplx.IsNaN(v) && !cmplx.IsInf(v)
+}
+
+// zpkBandProbePoint returns a point at the largest nonzero root modulus of
+// the continuous roots (log(r)/dt for discrete roots), at the angle from
+// 0.25π to 0.75π farthest from every root, mapped back to z = e^{s·dt}. The
+// low-frequency probes of matchedProbePoints fall inside a split cluster at
+// s = 0 or z = 1, where every candidate misfits by O(1); this point checks
+// the response where the roots are well separated.
+func zpkBandProbePoint(dt float64, sets [][]complex128) complex128 {
+	var roots []complex128
+	rho := 0.0
+	for _, set := range sets {
+		for _, r := range set {
+			if dt > 0 {
+				if !(cmplx.Abs(r) > 0 && (real(r) > 0 || math.Abs(imag(r)) > 1e-10*cmplx.Abs(r))) {
+					continue
+				}
+				r = cmplx.Log(r) / complex(dt, 0)
+			}
+			roots = append(roots, r)
+			rho = math.Max(rho, cmplx.Abs(r))
+		}
+	}
+	if !(rho > 0) || math.IsInf(rho, 0) {
+		rho = 1
+	}
+	if dt > 0 {
+		rho = math.Min(rho, 0.5*math.Pi/dt)
+	}
+	var best complex128
+	score := -1.0
+	for _, theta := range []float64{0.25, 0.4, 0.5, 0.6, 0.75} {
+		s := cmplx.Rect(rho, theta*math.Pi)
+		d := math.Inf(1)
+		for _, r := range roots {
+			d = math.Min(d, cmplx.Abs(s-r)/rho)
+		}
+		if d > score {
+			best, score = s, d
+		}
+	}
+	if dt > 0 {
+		return cmplx.Exp(best * complex(dt, 0))
+	}
+	return best
 }
