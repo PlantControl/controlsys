@@ -1253,9 +1253,10 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // 4.5e-7; one step on, X 1.1e-11 -> 4.3e-10 off and K moved 0.12) and
 // Hewer failed. Where K moved within its tolerance, Hewer failing, K was
 // within its band as often as not (rv48r 590: X stepping 1.4e-11 then
-// 1.4e-9, K 8.6e-8 off, band 7.6e-7), so c is kept there. Of about 4000
-// rotated sweep rows per platform it replaced 20 to 40 K by the Hewer
-// gain and demoted 4 to 5.
+// 1.4e-9, K 8.6e-8 off, band 7.6e-7), so c is kept there. Of 4008
+// rotated sweep rows per platform the convergence check failed on 74 to
+// 92, of which 4 to 5 were demoted, about 5 kept and the rest took the
+// Hewer gain.
 func rotatedHewer(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, p, c *RiccatiResult, cd gainDist) (*RiccatiResult, bool) {
 	hewer := cd.d > gainFloor
 	if hewer {
