@@ -234,13 +234,25 @@ var (
 // and its move under the same perturbations within newtonTol, else Dare
 // returns it at Accuracy 1.
 func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*RiccatiResult, bool) {
+	cond, ok := extendedDareCond(B, opts, err)
+	if !ok || !(cond*eps() > newtonTol) {
+		return nil, false
+	}
+	return extendedDareSolve(A, B, Q, R, opts, cond)
+}
+
+// extendedDareCond returns the largest LU condition estimate of E and
+// Kalman's plant E, and whether the extended solve applies to the Dare
+// error err: E given, n, m > 0, and each E nonsingular to MATLAB rank and
+// LU condition.
+func extendedDareCond(B *mat.Dense, opts *RiccatiOpts, err error) (float64, bool) {
 	if opts == nil || isIdentityDescriptor(opts.E) ||
 		!errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
-		return nil, false
+		return 0, false
 	}
 	n, m := B.Dims()
 	if n == 0 || m == 0 {
-		return nil, false
+		return 0, false
 	}
 	cond := 0.0
 	for _, E := range []*mat.Dense{opts.E, opts.plantE} {
@@ -250,13 +262,16 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 		var lu mat.LU
 		lu.Factorize(E)
 		if luNearSingular(&lu) || eRankDeficient(E, &lu) {
-			return nil, false
+			return 0, false
 		}
 		cond = max(cond, lu.Cond())
 	}
-	if !(cond*eps() > newtonTol) {
-		return nil, false
-	}
+	return cond, true
+}
+
+// extendedDareSolve is nearSingularDare past its cond(E)·eps gate.
+func extendedDareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, cond float64) (*RiccatiResult, bool) {
+	n, _ := B.Dims()
 	prec := extendedPrec(cond)
 	d := extendedDare{A: A, B: B, Q: Q, R: R, S: opts.S, E: opts.E}
 	sol, capped, ok := d.solve(prec)

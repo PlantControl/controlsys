@@ -895,6 +895,8 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareInputs(A, B, Q, R, opts)
 	if r, ok := nearSingularDare(A, B, Q, R, opts, err); ok {
 		res, err = r, nil
+	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, err); ok {
+		res, err = r, nil
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
 	if err == nil && res.Accuracy == 0 && res.xe != nil && res.xeX > newtonTol {
@@ -904,6 +906,28 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		undetectableBoundary(false, A, B, Q, R, opts, res)
 	}
 	return res, err
+}
+
+// boundaryExtendedDare is the extended solve of nearSingularDare for a
+// descriptor Dare with no stabilizing solution (ErrNoStabilizing, the
+// boundary verdict included) below its cond(E)·eps gate, kept only with
+// Y and K certified (xeCertified), else the error stays. With cond(E)
+// 2e6-4e7 the float64 pencil found a boundary mode unstabilizable where
+// the 320-bit Hewer K of the explicit model gave a closed-loop radius
+// 0.09-0.41, and the extended solve matched that K at every digit.
+func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*RiccatiResult, bool) {
+	if !errors.Is(err, ErrNoStabilizing) {
+		return nil, false
+	}
+	cond, ok := extendedDareCond(B, opts, err)
+	if !ok || cond*eps() > newtonTol {
+		return nil, false
+	}
+	res, ok := extendedDareSolve(A, B, Q, R, opts, cond)
+	if !ok || !res.xeCertified {
+		return nil, false
+	}
+	return res, true
 }
 
 // dareInputs is Dare after its argument check.
