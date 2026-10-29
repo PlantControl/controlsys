@@ -212,9 +212,9 @@ var (
 // It runs only when E (and Kalman's plant E) is nonsingular to both
 // MATLAB rank and LU condition (nearSingularEGate rejects anything
 // else) with cond(E)·eps above newtonTol, the regime where the float64
-// fold E⁻¹A alone leaves Accuracy 0's tolerance; a well-conditioned E
-// keeps the pencil's error. The precision is 4·log₂cond(E) + 64 bits in
-// [192, 320]. Y is the limit of SDA doubling, accepted only when its
+// fold E⁻¹A alone leaves Accuracy 0's tolerance; below that gate Dare
+// reaches extendedDareSolve only through boundaryExtendedDare. The
+// precision is 4·log₂cond(E) + 64 bits in [192, 320]. Y is the limit of SDA doubling, accepted only when its
 // residual in the given equation (with S) is within 2^(−prec/2) of
 // ‖Y‖ + ‖Q‖, once more at 64 bits more on a miss; K is formed from it in
 // the same precision and rounded, and the closed loop of the rounded K
@@ -234,13 +234,25 @@ var (
 // and its move under the same perturbations within newtonTol, else Dare
 // returns it at Accuracy 1.
 func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*RiccatiResult, bool) {
+	cond, ok := extendedDareCond(B, opts, err)
+	if !ok || !(cond*eps() > newtonTol) {
+		return nil, false
+	}
+	return extendedDareSolve(A, B, Q, R, opts, cond)
+}
+
+// extendedDareCond returns the largest LU condition estimate of E and
+// Kalman's plant E, and whether the extended solve applies to the Dare
+// error err: E given, n, m > 0, and each E nonsingular to MATLAB rank and
+// LU condition.
+func extendedDareCond(B *mat.Dense, opts *RiccatiOpts, err error) (float64, bool) {
 	if opts == nil || isIdentityDescriptor(opts.E) ||
 		!errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
-		return nil, false
+		return 0, false
 	}
 	n, m := B.Dims()
 	if n == 0 || m == 0 {
-		return nil, false
+		return 0, false
 	}
 	cond := 0.0
 	for _, E := range []*mat.Dense{opts.E, opts.plantE} {
@@ -250,13 +262,16 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 		var lu mat.LU
 		lu.Factorize(E)
 		if luNearSingular(&lu) || eRankDeficient(E, &lu) {
-			return nil, false
+			return 0, false
 		}
 		cond = max(cond, lu.Cond())
 	}
-	if !(cond*eps() > newtonTol) {
-		return nil, false
-	}
+	return cond, true
+}
+
+// extendedDareSolve is nearSingularDare past its cond(E)·eps gate.
+func extendedDareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, cond float64) (*RiccatiResult, bool) {
+	n, _ := B.Dims()
 	prec := extendedPrec(cond)
 	d := extendedDare{A: A, B: B, Q: Q, R: R, S: opts.S, E: opts.E}
 	sol, capped, ok := d.solve(prec)

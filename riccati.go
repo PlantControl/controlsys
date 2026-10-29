@@ -887,13 +887,18 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // gain of the rounded X 1.4e-6, that one 1e-10.
 // A descriptor Dare left with no stabilizing solution whose E is
 // ill-conditioned but nonsingular is solved once more on its explicit
-// model in extended precision (nearSingularDare).
+// model in extended precision (nearSingularDare). With E better
+// conditioned, a Dare with no stabilizing solution (ErrNoStabilizing, an
+// unstabilizable boundary mode included) is solved the same way and that
+// solution returned only with EᵀXE and K certified (boundaryExtendedDare).
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
 	res, err := dareInputs(A, B, Q, R, opts)
 	if r, ok := nearSingularDare(A, B, Q, R, opts, err); ok {
+		res, err = r, nil
+	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, err); ok {
 		res, err = r, nil
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
@@ -904,6 +909,28 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		undetectableBoundary(false, A, B, Q, R, opts, res)
 	}
 	return res, err
+}
+
+// boundaryExtendedDare is the extended solve of nearSingularDare for a
+// descriptor Dare with no stabilizing solution (ErrNoStabilizing, the
+// boundary verdict included) below its cond(E)·eps gate, kept only with
+// Y and K certified (xeCertified), else the error stays. With cond(E)
+// 2e6-4e7 the float64 pencil found a boundary mode unstabilizable where
+// the 320-bit Hewer K of the explicit model gave a closed-loop radius
+// 0.09-0.41, and the extended solve matched that K at every digit.
+func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*RiccatiResult, bool) {
+	if !errors.Is(err, ErrNoStabilizing) {
+		return nil, false
+	}
+	cond, ok := extendedDareCond(B, opts, err)
+	if !ok || cond*eps() > newtonTol {
+		return nil, false
+	}
+	res, ok := extendedDareSolve(A, B, Q, R, opts, cond)
+	if !ok || !res.xeCertified {
+		return nil, false
+	}
+	return res, true
 }
 
 // dareInputs is Dare after its argument check.
