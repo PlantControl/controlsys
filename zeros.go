@@ -176,8 +176,16 @@ func descriptorZeros(sys *System) (*ZerosResult, error) {
 // a zero cannot be refined, the staircase zeros of that size, accurate to
 // ε·‖[A B; C D]‖, seed the refinement instead (hybridZeros).
 func mimoZeros(sys *System) (*ZerosResult, error) {
+	return mimoZerosWork(sys, new(zerosWork))
+}
+
+// mimoZerosWork is mimoZeros with the buffers of w, which callers computing
+// the zeros of many models of one size reuse; the zeros are freshly
+// allocated. An all-zero square D skips the LU, whose singular factor
+// would send it to the staircase anyway.
+func mimoZerosWork(sys *System, w *zerosWork) (*ZerosResult, error) {
 	_, m, p := sys.Dims()
-	if m == p {
+	if m == p && !(m > 0 && allZeroDense(sys.D)) {
 		var luD mat.LU
 		luD.Factorize(sys.D)
 		if !nearZero(luD.Det()) || luD.Cond() <= dInvCondMax {
@@ -192,13 +200,13 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 		}
 	}
 
-	zs := zerosPrescale(sys)
-	zeros, rank, err := prescaledStaircaseZeros(sys, zs)
+	zs := zerosPrescaleWork(sys, w)
+	zeros, rank, err := prescaledStaircaseZerosWork(sys, zs, w)
 	if err != nil {
 		return nil, err
 	}
 	if m == 1 && p == 1 && rank == 1 && len(zeros) > 0 {
-		zeros = capSISOZeros(sys, zeros)
+		zeros = capSISOZerosWork(sys, zeros, w)
 	}
 	if m == p && rank == m && len(zeros) > 0 {
 		scale, raw := pencilNorm(zs), pencilNorm(sys)
@@ -214,6 +222,59 @@ func mimoZeros(sys *System) (*ZerosResult, error) {
 	}
 	sortZeros(zeros)
 	return &ZerosResult{Zeros: zeros, Rank: rank}, nil
+}
+
+// zerosWork holds the buffers of mimoZerosWork and its helpers; the zero
+// value is ready for use. Each buffer is cleared when handed out, so a reused
+// one computes exactly what a fresh allocation does.
+type zerosWork struct {
+	real, d                       []float64
+	bf, af, pencil, dp, tau, pass []float64
+	query, work, qz, rd           []float64
+	out                           [2][2][]float64
+	infz, kronl, kronr, rdExp     []int
+}
+
+func growFloats(b *[]float64, n int) []float64 {
+	if cap(*b) < n {
+		*b = make([]float64, n)
+	}
+	s := (*b)[:n:n]
+	clear(s)
+	return s
+}
+
+func growInts(b *[]int, n int) []int {
+	if cap(*b) < n {
+		*b = make([]int, n)
+	}
+	s := (*b)[:n:n]
+	clear(s)
+	return s
+}
+
+// realizationCopyInto is newRealizationCopy of an explicit model into f,
+// of length n·n+n·m+p·n.
+func realizationCopyInto(sys *System, n, m, p int, f []float64) balancedRealization {
+	br := balancedRealization{n: n, m: m, p: p, a: f[: n*n : n*n], b: f[n*n : n*n+n*m : n*n+n*m], c: f[n*n+n*m:]}
+	if sys.D != nil {
+		raw := sys.D.RawMatrix()
+		br.d, br.dStride = raw.Data, raw.Stride
+	}
+	if n == 0 {
+		return br
+	}
+	a := sys.A.RawMatrix()
+	copyStrided(br.a, n, a.Data, a.Stride, n, n)
+	if m > 0 {
+		b := sys.B.RawMatrix()
+		copyStrided(br.b, m, b.Data, b.Stride, n, m)
+	}
+	if p > 0 {
+		c := sys.C.RawMatrix()
+		copyStrided(br.c, n, c.Data, c.Stride, p, n)
+	}
+	return br
 }
 
 // eigZeros returns the refined eigenvalues of A − B·(D⁻¹C), sorted.
@@ -284,25 +345,29 @@ func hybridZeros(sys *System, zeros []complex128, scale, tol float64, failed int
 // uses the larger of the two normal ranks unless the pencil at a generic
 // point already passes it.
 func prescaledStaircaseZeros(sys, zs *System) ([]complex128, int, error) {
-	pre := reduceStaircase(zs)
+	return prescaledStaircaseZerosWork(sys, zs, new(zerosWork))
+}
+
+func prescaledStaircaseZerosWork(sys, zs *System, w *zerosWork) ([]complex128, int, error) {
+	pre := reduceStaircaseWork(zs, w, 0)
 	if zs == sys {
-		z, err := pre.zeros()
+		z, err := pre.zerosWork(w)
 		return z, pre.rank, err
 	}
 	_, m, p := sys.Dims()
 	low := pre.margin < rankMarginMin
 	if !low && (pre.margin >= rankMarginTrust || m == p && pre.rank == m) {
-		z, err := pre.zeros()
+		z, err := pre.zerosWork(w)
 		return z, pre.rank, err
 	}
-	raw := reduceStaircase(sys)
+	raw := reduceStaircaseWork(sys, w, 1)
 	preferRaw := !low || raw.margin >= pre.margin
 	if !low && raw.nu == pre.nu && raw.rank == pre.rank {
-		z, err := pre.zeros()
+		z, err := pre.zerosWork(w)
 		return z, pre.rank, err
 	}
-	zr, errRaw := raw.zeros()
-	zp, errPre := pre.zeros()
+	zr, errRaw := raw.zerosWork(w)
+	zp, errPre := pre.zerosWork(w)
 	switch {
 	case errRaw != nil && errPre != nil:
 		return nil, 0, errRaw
@@ -330,8 +395,12 @@ func prescaledStaircaseZeros(sys, zs *System) ([]complex128, int, error) {
 // (MATLAB tzero returns those as infinite). A conjugate pair straddling the
 // cut is kept whole.
 func capSISOZeros(sys *System, zeros []complex128) []complex128 {
+	return capSISOZerosWork(sys, zeros, new(zerosWork))
+}
+
+func capSISOZerosWork(sys *System, zeros []complex128, w *zerosWork) []complex128 {
 	n, _, _ := sys.Dims()
-	r, ok := sisoRelativeDegree(sys)
+	r, ok := sisoRelativeDegreeWork(sys, w)
 	k := n - r
 	if !ok || len(zeros) <= k {
 		return zeros
@@ -366,6 +435,10 @@ const (
 // kept at unit size with power-of-two exponents against overflow and
 // underflow.
 func sisoRelativeDegree(sys *System) (int, bool) {
+	return sisoRelativeDegreeWork(sys, new(zerosWork))
+}
+
+func sisoRelativeDegreeWork(sys *System, w *zerosWork) (int, bool) {
 	n, _, _ := sys.Dims()
 	if n == 0 || sys.D.At(0, 0) != 0 {
 		return 0, false
@@ -381,7 +454,7 @@ func sisoRelativeDegree(sys *System) (int, bool) {
 	}
 	ar := sys.A.RawMatrix()
 	nn := n * n
-	buf := make([]float64, 4*nn+5*n)
+	buf := growFloats(&w.rd, 4*nn+5*n)
 	a, absA, ws, us := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn]
 	vec := buf[4*nn:]
 	v, vt, absV, absB, absC := vec[:n], vec[n:2*n], vec[2*n:3*n], vec[3*n:4*n], vec[4*n:5*n]
@@ -400,7 +473,7 @@ func sisoRelativeDegree(sys *System) (int, bool) {
 	for i := range n {
 		absB[i], absC[i] = math.Abs(v[i]), math.Abs(c[i])
 	}
-	e := make([]int, 2*n)
+	e := growInts(&w.rdExp, 2*n)
 	ev, ew := e[:n], e[n:]
 	bl := blas64.Implementation()
 	for k := 1; k <= n; k++ {
@@ -444,7 +517,7 @@ func sisoRelativeDegree(sys *System) (int, bool) {
 func unitScale(x []float64) int {
 	var mx float64
 	for _, v := range x {
-		mx = math.Max(mx, math.Abs(v))
+		mx = max(mx, math.Abs(v))
 	}
 	e, ok := binaryExp(mx)
 	if !ok {
@@ -556,8 +629,14 @@ type staircase struct {
 }
 
 func reduceStaircase(sys *System) staircase {
+	return reduceStaircaseWork(sys, new(zerosWork), 0)
+}
+
+// reduceStaircaseWork is reduceStaircase with the buffers of w; the reduced
+// pencil lives in output slot 0 or 1 of w until the next reduction into it.
+func reduceStaircaseWork(sys *System, w *zerosWork, slot int) staircase {
 	n, m, p := sys.Dims()
-	af, bf, nu, rank, margin := zerosStaircase(sys.A, sys.B, sys.C, sys.D, n, m, p)
+	af, bf, nu, rank, margin := zerosStaircaseWork(sys.A, sys.B, sys.C, sys.D, n, m, p, w, slot)
 	return staircase{af: af, bf: bf, nu: nu, rank: rank, margin: margin}
 }
 
@@ -692,13 +771,17 @@ func staircaseZeros(sys *System) ([]complex128, int, float64, error) {
 
 // zeros returns the finite eigenvalues of the reduced pencil.
 func (st staircase) zeros() ([]complex128, error) {
+	return st.zerosWork(new(zerosWork))
+}
+
+func (st staircase) zerosWork(w *zerosWork) ([]complex128, error) {
 	afData, bfData, nu := st.af, st.bf, st.nu
 	if nu == 0 {
 		return nil, nil
 	}
 
 	lwork := dggevEigenvaluesWorkLen(nu)
-	buf := make([]float64, 3*nu+lwork)
+	buf := growFloats(&w.qz, 3*nu+lwork)
 	alphar, alphai, beta, work := buf[:nu], buf[nu:2*nu], buf[2*nu:3*nu], buf[3*nu:]
 
 	ok := impl.Dggev(lapack.LeftEVNone, lapack.RightEVNone, nu,
@@ -734,11 +817,23 @@ func (st staircase) zeros() ([]complex128, error) {
 // and ‖C‖ large (or a D swamped by them) keeps blocks below the staircase
 // rank tolerance ε·‖[A B; C D]‖ however its states are scaled.
 func zerosPrescale(sys *System) *System {
+	return zerosPrescaleWork(sys, new(zerosWork))
+}
+
+// zerosPrescaleWork is zerosPrescale with the buffers of w; the scaled
+// model, unless it is sys, is valid until the next call with w.
+func zerosPrescaleWork(sys *System, w *zerosWork) *System {
 	n, m, p := sys.Dims()
-	br := newBalancedRealization(sys, n, m, p)
+	var br balancedRealization
+	if sys.E == nil {
+		br = realizationCopyInto(sys, n, m, p, growFloats(&w.real, n*n+n*m+p*n))
+	} else {
+		br = newRealizationCopy(sys, n, m, p)
+	}
+	br.balance(nil)
 	D := sys.D
 	if n > 0 && m > 0 && p > 0 {
-		d := make([]float64, p*m)
+		d := growFloats(&w.d, p*m)
 		raw := sys.D.RawMatrix()
 		copyStrided(d, m, raw.Data, raw.Stride, p, m)
 		for range 4 {
@@ -766,14 +861,14 @@ func scaleIO(br *balancedRealization, d []float64) bool {
 	for k := range n {
 		var cs, rs float64
 		for i := range n {
-			cs = math.Max(cs, math.Abs(br.a[i*n+k]))
-			rs = math.Max(rs, math.Abs(br.a[k*n+i]))
+			cs = max(cs, math.Abs(br.a[i*n+k]))
+			rs = max(rs, math.Abs(br.a[k*n+i]))
 		}
 		for i := range p {
-			cs = math.Max(cs, math.Abs(br.c[i*n+k]))
+			cs = max(cs, math.Abs(br.c[i*n+k]))
 		}
 		for j := range m {
-			rs = math.Max(rs, math.Abs(br.b[k*m+j]))
+			rs = max(rs, math.Abs(br.b[k*m+j]))
 		}
 		if e, ok := binaryExp(cs); ok {
 			colSum += e
@@ -792,10 +887,10 @@ func scaleIO(br *balancedRealization, d []float64) bool {
 	for j := range m {
 		var s float64
 		for i := range n {
-			s = math.Max(s, math.Abs(br.b[i*m+j]))
+			s = max(s, math.Abs(br.b[i*m+j]))
 		}
 		for i := range p {
-			s = math.Max(s, math.Abs(d[i*m+j]))
+			s = max(s, math.Abs(d[i*m+j]))
 		}
 		e, ok := binaryExp(s)
 		if !ok || e == colT {
@@ -813,10 +908,10 @@ func scaleIO(br *balancedRealization, d []float64) bool {
 	for i := range p {
 		var s float64
 		for j := range n {
-			s = math.Max(s, math.Abs(br.c[i*n+j]))
+			s = max(s, math.Abs(br.c[i*n+j]))
 		}
 		for j := range m {
-			s = math.Max(s, math.Abs(d[i*m+j]))
+			s = max(s, math.Abs(d[i*m+j]))
 		}
 		e, ok := binaryExp(s)
 		if !ok || e == rowT {
@@ -1134,6 +1229,13 @@ func dggevEigenvaluesWorkLen(n int) int {
 }
 
 func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64, nu, rank int, margin float64) {
+	return zerosStaircaseWork(A, B, C, D, n, m, p, new(zerosWork), 0)
+}
+
+// zerosStaircaseWork is zerosStaircase with the buffers of w, returning the
+// pencil in output slot 0 or 1 of w. Every LAPACK work array keeps the
+// length zerosStaircase gives it, since lwork selects blocked code.
+func zerosStaircaseWork(A, B, C, D *mat.Dense, n, m, p int, w *zerosWork, slot int) (afOut, bfOut []float64, nu, rank int, margin float64) {
 	margin = math.Inf(1)
 	if n == 0 && min(m, p) == 0 {
 		return nil, nil, 0, 0, margin
@@ -1147,7 +1249,7 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 	}
 
 	// Build compound matrix [B A; D C], (n+p) × (m+n), row-major
-	bf := make([]float64, np*stride)
+	bf := growFloats(&w.bf, np*stride)
 	aRaw := A.RawMatrix()
 	bRaw := B.RawMatrix()
 	cRaw := C.RawMatrix()
@@ -1178,11 +1280,11 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 	svlmax = math.Sqrt(svlmax)
 
 	// Pass 1: reduce D to full row rank
-	infz := make([]int, max(n, 1))
-	kronl := make([]int, n+1)
-	kronr := make([]int, n+1)
+	infz := growInts(&w.infz, max(n, 1))
+	kronl := growInts(&w.kronl, n+1)
+	kronr := growInts(&w.kronr, n+1)
 
-	nu, mu, _, ninfz := zerosStaircasePass(n, m, p, p, 0, svlmax, bf, stride, 0, infz, kronl, tol, &margin)
+	nu, mu, _, ninfz := zerosStaircasePass(n, m, p, p, 0, svlmax, bf, stride, 0, infz, kronl, tol, &margin, growFloats(&w.pass, max(m+n, p+n, 1)))
 	rank = mu
 
 	numu := nu + mu
@@ -1197,7 +1299,7 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 	if afStride == 0 {
 		afStride = 1
 	}
-	af := make([]float64, mnu*afStride)
+	af := growFloats(&w.af, mnu*afStride)
 	for r := range mnu {
 		for c := range numu {
 			af[r*afStride+c] = bf[(numu-1-c)*stride+(mnu-1-r)]
@@ -1212,7 +1314,7 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 		// Pass 2: reduce D to square invertible
 		ro2 := pp - mm
 		sigma2 := mm
-		nu, mu, _, _ = zerosStaircasePass(nn, mm, pp, ro2, sigma2, svlmax, af, afStride, ninfz, infz, kronr, tol, &margin)
+		nu, mu, _, _ = zerosStaircasePass(nn, mm, pp, ro2, sigma2, svlmax, af, afStride, ninfz, infz, kronr, tol, &margin, growFloats(&w.pass, max(mm+nn, pp+nn, 1)))
 	}
 
 	if nu == 0 {
@@ -1221,33 +1323,33 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 
 	// Pencil extraction
 	i1 := nu + mu
-	bfPencil := make([]float64, nu*i1)
+	bfPencil := growFloats(&w.pencil, nu*i1)
 	for i := 0; i < nu; i++ {
 		bfPencil[i*i1+mu+i] = 1
 	}
 
 	if rank != 0 && mu > 0 {
 		// D' block: MU rows × I1 cols, extract for DTZRZF
-		dp := make([]float64, mu*i1)
+		dp := growFloats(&w.dp, mu*i1)
 		copyBlock(dp, i1, 0, 0, af, afStride, nu, 0, mu, i1)
 
-		tauRZ := make([]float64, mu)
-		work := make([]float64, 1)
+		tauRZ := growFloats(&w.tau, mu)
+		work := growFloats(&w.query, 1)
 		impl.Dtzrzf(mu, i1, dp, i1, tauRZ, work, -1)
-		work = make([]float64, max(int(work[0]), 1))
+		work = growFloats(&w.work, max(int(work[0]), 1))
 		impl.Dtzrzf(mu, i1, dp, i1, tauRZ, work, len(work))
 
 		l := i1 - mu
-		work2 := make([]float64, 1)
+		work2 := growFloats(&w.query, 1)
 		impl.Dormrz(blas.Right, blas.Trans, nu, i1, mu, l, dp, i1, tauRZ, af, afStride, work2, -1)
-		work2 = make([]float64, max(int(work2[0]), 1))
+		work2 = growFloats(&w.work, max(int(work2[0]), 1))
 		impl.Dormrz(blas.Right, blas.Trans, nu, i1, mu, l, dp, i1, tauRZ, af, afStride, work2, len(work2))
 		impl.Dormrz(blas.Right, blas.Trans, nu, i1, mu, l, dp, i1, tauRZ, bfPencil, i1, work2, len(work2))
 	}
 
 	// Extract Af = af[0:nu, mu:mu+nu] and Bf = bf[0:nu, mu:mu+nu]
-	afOut = make([]float64, nu*nu)
-	bfOut = make([]float64, nu*nu)
+	afOut = growFloats(&w.out[slot][0], nu*nu)
+	bfOut = growFloats(&w.out[slot][1], nu*nu)
 	copyBlock(afOut, nu, 0, 0, af, afStride, 0, mu, nu, nu)
 	copyBlock(bfOut, nu, 0, 0, bfPencil, i1, 0, mu, nu, nu)
 
@@ -1255,7 +1357,7 @@ func zerosStaircase(A, B, C, D *mat.Dense, n, m, p int) (afOut, bfOut []float64,
 }
 
 func zerosStaircasePass(n, m, p, ro, sigma int, svlmax float64, abcd []float64, stride int,
-	ninfz int, infz, kronl []int, tol float64, margin *float64) (nu, mu, nkrol, ninfzOut int) {
+	ninfz int, infz, kronl []int, tol float64, margin *float64, work []float64) (nu, mu, nkrol, ninfzOut int) {
 
 	mu = p
 	nu = n
@@ -1265,8 +1367,6 @@ func zerosStaircasePass(n, m, p, ro, sigma int, svlmax float64, abcd []float64, 
 	iz := 0
 	ik := 0
 	mm1 := m
-
-	work := make([]float64, max(max(m+n, p+n), 1))
 
 	for mu > 0 {
 		ro1 := ro
@@ -1415,7 +1515,26 @@ func nearZero(x float64) bool {
 	return math.Abs(x) < 1e-14
 }
 
+// sortZerosInsertion is the length up to which sort.Slice insertion-sorts.
+const sortZerosInsertion = 12
+
+// sortZeros orders z by modulus. Up to sortZerosInsertion zeros it runs the
+// insertion sort sort.Slice uses at that length, so ties (conjugate pairs)
+// land as sort.Slice puts them, without its allocations.
 func sortZeros(z []complex128) {
+	if len(z) <= sortZerosInsertion {
+		var key [sortZerosInsertion]float64
+		for i, v := range z {
+			key[i] = cmplx.Abs(v)
+		}
+		for i := 1; i < len(z); i++ {
+			for j := i; j > 0 && key[j] < key[j-1]; j-- {
+				z[j], z[j-1] = z[j-1], z[j]
+				key[j], key[j-1] = key[j-1], key[j]
+			}
+		}
+		return
+	}
 	sort.Slice(z, func(i, j int) bool {
 		return cmplx.Abs(z[i]) < cmplx.Abs(z[j])
 	})
