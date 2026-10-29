@@ -1895,10 +1895,11 @@ func Damp(sys *System) ([]DampInfo, error) {
 // other internal-delay models, they are simulated through the approximate
 // ZOH discretization of the delay channels, as MATLAB does, with O(dt) error.
 // A continuous descriptor with internal delays whose E is too
-// ill-conditioned for E⁻¹A (LU condition estimate 1e6 or more) always takes
-// that discretization, of its generalized Schur parts with the delay
-// feedback kept (as C2D), not the exact chain: one exponential of E⁻¹A would
-// lose its slow modes to cond(E)·ε.
+// ill-conditioned for E⁻¹A (LU condition estimate 1e6 or more) takes that
+// discretization, of its generalized Schur parts with the delay feedback
+// kept (as C2D), instead of the exact chain of E⁻¹A when the fold's
+// cond(E)·ε error exceeds the discretization's dt·ρ on the grid, ρ the
+// largest slow pole modulus of the pencil.
 //
 // tFinal = 0 selects the horizon automatically from the poles and delays, as
 // MATLAB step(sys); a negative or non-finite tFinal returns
@@ -1908,7 +1909,10 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Step", sys, tFinal); err != nil {
 		return nil, err
 	}
-	if ex, ok := stiffLFTExplicit(sys); ok {
+	if ex, _, ok := stiffLFTSampled(sys, nil, func(out *System) float64 {
+		_, dt, _ := newTimeResponsePlanner(out).grid(tFinal, 0)
+		return dt
+	}); ok {
 		sys = ex
 	} else {
 		var err error
@@ -2241,7 +2245,7 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // one length (within the chain budget, see Step), are sampled exactly; other
 // internal-delay models use the approximate ZOH discretization of the delay
 // channels, as MATLAB does. A stiff-E descriptor with internal delays takes
-// that discretization of its parts as in Step, from x0 mapped to the
+// that discretization of its parts where Step does, from x0 mapped to the
 // parts' coordinates.
 //
 // tFinal is handled as in Step. A model without outputs returns
@@ -2272,7 +2276,12 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	}
 	stiffLFT := false
 	if n, _, _ := sys.Dims(); x0.Len() == n {
-		if ex, xt, ok := stiffLFTExplicitState(sys, x0); ok {
+		if ex, xt, ok := stiffLFTSampled(sys, x0, func(out *System) float64 {
+			free := *out
+			free.InputDelay, free.Delay = nil, nil
+			_, dt, _ := newTimeResponsePlanner(&free).grid(tFinal, 0)
+			return dt
+		}); ok {
 			sys, x0, stiffLFT = ex, xt, true
 		}
 	}
@@ -2544,8 +2553,8 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 // exactly within the chain budget (see Step); other internal-delay models use
 // the approximate ZOH discretization of the delay channels, as MATLAB does.
 // A stiff-E descriptor with internal delays takes that discretization of
-// its parts, from x0 mapped to the parts' coordinates, as Step and Initial
-// do; its O(dt) error is set by the spacing of the caller's grid t.
+// its parts, from x0 mapped to the parts' coordinates, where Step would on
+// the spacing of the caller's grid t.
 //
 // t must be a finite, uniform, increasing grid of at least 2 samples (with
 // spacing Dt for discrete models) and u is len(t)×m; a model without outputs
@@ -2561,7 +2570,12 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	var freeX0 *mat.VecDense
 	stiffLFT := false
 	if n, _, _ := sys.Dims(); x0 == nil || x0.Len() == n {
-		if ex, xt, ok := stiffLFTExplicitState(sys, x0); ok {
+		if ex, xt, ok := stiffLFTSampled(sys, x0, func(*System) float64 {
+			if len(t) < 2 {
+				return 0
+			}
+			return t[1] - t[0]
+		}); ok {
 			sys, x0, stiffLFT = ex, xt, true
 		}
 	}
