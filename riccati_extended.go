@@ -212,9 +212,9 @@ var (
 // It runs only when E (and Kalman's plant E) is nonsingular to both
 // MATLAB rank and LU condition (nearSingularEGate rejects anything
 // else) with cond(E)·eps above newtonTol, the regime where the float64
-// fold E⁻¹A alone leaves Accuracy 0's tolerance; a well-conditioned E
-// keeps the pencil's error. The precision is 4·log₂cond(E) + 64 bits in
-// [192, 320]. Y is the limit of SDA doubling, accepted only when its
+// fold E⁻¹A alone leaves Accuracy 0's tolerance; below that gate Dare
+// reaches extendedDareSolve only through boundaryExtendedDare. The
+// precision is 4·log₂cond(E) + 64 bits in [192, 320]. Y is the limit of SDA doubling, accepted only when its
 // residual in the given equation (with S) is within 2^(−prec/2) of
 // ‖Y‖ + ‖Q‖, once more at 64 bits more on a miss; K is formed from it in
 // the same precision and rounded, and the closed loop of the rounded K
