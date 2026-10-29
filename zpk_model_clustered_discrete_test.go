@@ -8,10 +8,10 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// zpkClusteredDiscreteSeed688 is the matched C2D (dt 1e-3) of an 8-pole,
-// 2-zero continuous ZPK: every discrete pole lies within 2.1e-3 of z = 1 and
-// five zeros sit at z = −1 (HP3RZO).
-func zpkClusteredDiscreteSeed688(t *testing.T) *System {
+// zpkClusteredDiscreteMatched is the matched C2D (dt 1e-3) of an 8-pole,
+// 2-zero continuous ZPK (clustered generator seed 688): every discrete pole
+// lies within 2.1e-3 of z = 1 and five zeros sit at z = −1 (HP3RZO).
+func zpkClusteredDiscreteMatched(t *testing.T) *System {
 	t.Helper()
 	A := []float64{
 		0.9994408400786775, 1.99859903389979, 1.9984648788466934, 1, -0, 0, 0, 0,
@@ -38,7 +38,7 @@ func zpkClusteredDiscreteSeed688(t *testing.T) *System {
 // poles outside the unit circle and the zeros O(1) off (HP3RZO), while
 // MATLAB zpk(ss) takes poles from eig(A) and zeros from tzero.
 func TestZPKModelClusteredDiscretePolesStayStable(t *testing.T) {
-	sys := zpkClusteredDiscreteSeed688(t)
+	sys := zpkClusteredDiscreteMatched(t)
 	res, err := sys.ZPKModel(nil)
 	if err != nil {
 		t.Fatal(err)

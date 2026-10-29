@@ -23,11 +23,12 @@ func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
 	if n == 0 || sys.IsDescriptor() || sys.HasDelay() || sys.LFT != nil || len(deg) != p {
 		return
 	}
+	var full []complex128
 	for i := range p {
 		if deg[i] == 0 {
 			continue
 		}
-		zeros, poles, gains, ok := sys.zpkPencilRow(z, i, deg[i], m)
+		zeros, poles, gains, ok := sys.zpkPencilRow(z, i, deg[i], &full)
 		if !ok {
 			continue
 		}
@@ -42,32 +43,52 @@ func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
 	}
 }
 
-func (sys *System) zpkPencilRow(z *ZPK, i, deg, m int) (zeros [][]complex128, poles []complex128, gains []float64, ok bool) {
-	n := sys.A.RawMatrix().Rows
-	c := mat.NewDense(1, n, nil)
-	c.Copy(sys.C.Slice(i, i+1, 0, n))
-	d := mat.NewDense(1, m, nil)
-	if sys.D != nil {
+// zpkPencilRow returns the pencil roots and gains of row i of z, or ok
+// false; full caches eig(A), the poles of every row of full degree.
+func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [][]complex128, poles []complex128, gains []float64, ok bool) {
+	n, m, p := sys.Dims()
+	row := sys
+	if p > 1 {
+		c := mat.NewDense(1, n, nil)
+		c.Copy(sys.C.Slice(i, i+1, 0, n))
+		d := mat.NewDense(1, m, nil)
 		d.Copy(sys.D.Slice(i, i+1, 0, m))
+		var err error
+		if row, err = New(sys.A, sys.B, c, d, sys.Dt); err != nil {
+			return nil, nil, nil, false
+		}
 	}
-	row, err := New(sys.A, sys.B, c, d, sys.Dt)
-	if err != nil {
-		return nil, nil, nil, false
+	if deg < n {
+		var err error
+		if row, err = Sminreal(row); err != nil {
+			return nil, nil, nil, false
+		}
+		if nr, _, _ := row.Dims(); nr != deg {
+			return nil, nil, nil, false
+		}
+		if poles, err = row.Poles(); err != nil {
+			return nil, nil, nil, false
+		}
+	} else {
+		if *full == nil {
+			all, err := sys.Poles()
+			if err != nil {
+				return nil, nil, nil, false
+			}
+			if all, ok = matchedConjugateClosed(all); !ok {
+				return nil, nil, nil, false
+			}
+			*full = all
+		}
+		poles = *full
 	}
-	if row, err = Sminreal(row); err != nil {
-		return nil, nil, nil, false
-	}
-	nr, _, _ := row.Dims()
-	if nr != deg {
-		return nil, nil, nil, false
-	}
-	poles, err = row.Poles()
-	if err != nil || len(poles) != deg {
+	if len(poles) != deg {
 		return nil, nil, nil, false
 	}
 	if poles, ok = matchedConjugateClosed(poles); !ok {
 		return nil, nil, nil, false
 	}
+	nr := deg
 	zeros = make([][]complex128, m)
 	gains = make([]float64, m)
 	var roots [][]complex128
@@ -80,11 +101,14 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg, m int) (zeros [][]complex128, po
 		if len(z.Poles[i][j]) != deg {
 			return nil, nil, nil, false
 		}
-		b := mat.NewDense(nr, 1, nil)
-		b.Copy(row.B.Slice(0, nr, j, j+1))
-		ch, err := New(row.A, b, row.C, mat.NewDense(1, 1, []float64{row.D.At(0, j)}), sys.Dt)
-		if err != nil {
-			return nil, nil, nil, false
+		ch := row
+		if m > 1 {
+			b := mat.NewDense(nr, 1, nil)
+			b.Copy(row.B.Slice(0, nr, j, j+1))
+			var err error
+			if ch, err = New(row.A, b, row.C, mat.NewDense(1, 1, []float64{row.D.At(0, j)}), sys.Dt); err != nil {
+				return nil, nil, nil, false
+			}
 		}
 		zj, err := ch.Zeros()
 		if err != nil || len(zj) != len(z.Zeros[i][j]) {
