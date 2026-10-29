@@ -251,7 +251,10 @@ func nearDelayGrid(t, tau float64) bool {
 // E⁻¹A formed at 320 bits.
 func TestStepInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
 	names, systems := stiffInternalDelayCases(t)
-	for k, sys := range systems[:len(stepFoldLossCases)] {
+	for k, sys := range systems {
+		if sys.InputDelay != nil {
+			continue
+		}
 		o := newLFTStepOracle(t, sys)
 		st, err := Step(sys, 1)
 		if err != nil {
@@ -285,7 +288,10 @@ const lftStepTol = 5e-5
 // Initial from x0 with zero delay history follows the pencil as Step does.
 func TestInitialInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
 	names, systems := stiffInternalDelayCases(t)
-	for k, sys := range systems[:len(stepFoldLossCases)] {
+	for k, sys := range systems {
+		if sys.InputDelay != nil {
+			continue
+		}
 		o := newLFTStepOracle(t, sys)
 		n, _, p := sys.Dims()
 		x0 := make([]float64, n)
