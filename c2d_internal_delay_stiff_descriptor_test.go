@@ -100,9 +100,11 @@ func TestC2DInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
 }
 
 // pencilDiscreteOracle returns the exact ZOH, FOH or Tustin discretization
-// of the descriptor g at z from its 320-bit pencil. For ZOH, column j of g
-// delayed by frac[j] ∈ (0, dt) seconds takes the modified z-transform
-// z⁻¹·(G(∞) + Σ Rᵢ/λᵢ·(e^{λᵢ(dt−frac)}·(z−1)/(z−e^{λᵢdt}) − 1)).
+// of the descriptor g at z from its 320-bit pencil. Column j of g delayed
+// by frac[j] ∈ (0, dt) seconds takes, for ZOH, the modified z-transform
+// z⁻¹·(G(∞) + Σ Rᵢ/λᵢ·(e^{λᵢ(dt−frac)}·(z−1)/(z−e^{λᵢdt}) − 1)), and for
+// FOH the sampled response to the triangle hold delayed by frac
+// (fohFractionalMode).
 func pencilDiscreteOracle(t *testing.T, g *System, method C2DMethod, dt float64, frac []float64) func(i, j int, z complex128) complex128 {
 	t.Helper()
 	if method == C2DMethodTustin {
@@ -136,6 +138,14 @@ func pencilDiscreteOracle(t *testing.T, g *System, method C2DMethod, dt float64,
 	if method == C2DMethodFOH {
 		return func(i, j int, z complex128) complex128 {
 			v := ginf(i, j)
+			if j < len(frac) && frac[j] != 0 {
+				th := frac[j]
+				v *= complex(1-th/dt, 0) + complex(th/dt, 0)/z
+				for a, l := range modes.poles {
+					v += modes.residues[a][i][j] * fohFractionalMode(l, dt, th, z)
+				}
+				return v
+			}
 			for a, l := range modes.poles {
 				e := cmplx.Exp(l * complex(dt, 0))
 				v += modes.residues[a][i][j] * ((((z-1)*(z-1))/(z-e)-(z-1))/(l*l*complex(dt, 0)) - 1/l)
@@ -154,6 +164,28 @@ func pencilDiscreteOracle(t *testing.T, g *System, method C2DMethod, dt float64,
 		}
 		return v / z
 	}
+}
+
+// fohFractionalMode is the z-transform h₀ + h₁/z + h₂/(z(z − e^{λ·dt})) of
+// the samples h_k = ∫ w(τ)·e^{λ(k·dt−τ)} dτ (τ ≤ k·dt) of 1/(s − λ) driven
+// by the triangle hold w(τ) = max(0, 1 − |τ − θ|/dt) of u[0], θ ∈ (0, dt);
+// each linear piece integrates in closed form, anchored at k·dt so a stiff
+// λ underflows instead of overflowing.
+func fohFractionalMode(l complex128, dt, th float64, z complex128) complex128 {
+	seg := func(a, b, p, q, t float64) complex128 {
+		P, Q := complex(p+q*t, 0), complex(q, 0)
+		F := func(s float64) complex128 {
+			S := complex(s, 0)
+			return cmplx.Exp(l*S) * ((P-Q*S)/l + Q/(l*l))
+		}
+		return F(t-a) - F(t-b)
+	}
+	rise := func(a, b, t float64) complex128 { return seg(a, b, 1-th/dt, 1/dt, t) }
+	fall := func(a, b, t float64) complex128 { return seg(a, b, 1+th/dt, -1/dt, t) }
+	h0 := rise(th-dt, 0, 0)
+	h1 := rise(th-dt, th, dt) + fall(th, dt, dt)
+	h2 := rise(th-dt, th, 2*dt) + fall(th, th+dt, 2*dt)
+	return h0 + h1/z + h2/(z*(z-cmplx.Exp(l*complex(dt, 0))))
 }
 
 // lftOracleGap is the largest relative gap, over four frequencies, between

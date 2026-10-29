@@ -6,15 +6,40 @@ import (
 	"testing"
 )
 
-// C2D (ZOH) of a stiff descriptor with an internal delay of 2.5 or 3.5
+// C2D (ZOH, FOH) of a stiff descriptor with an internal delay of 2.5 or 3.5
 // samples holds the delayed signal over the fraction of a sample: the
-// frequency response matches G of the 320-bit pencil with the modified
-// z-transform on the delay column, closed by the whole samples. A single
+// frequency response matches G of the 320-bit pencil with the fractional
+// hold on the delay column, closed by the whole samples. A single
 // exponential of the stiff A·h in the fractional hold rounded the slow
-// modes off by up to 0.03 (RT73OO review, fold seed 28: 0.0134).
-func TestC2DZOHFractionalInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
-	const dt = 0.1
+// modes off by up to 0.03 (RT73OO review, fold seed 28: ZOH 0.0134).
+func TestC2DFractionalInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
 	names, systems := stiffInternalDelayCases(t)
+	checkFractionalInternalDelayOracle(t, names, systems, 1e-8)
+}
+
+// The fractional-hold oracle agrees with C2D on the same models with a
+// well-conditioned E, where the LU fold E⁻¹A and one exponential are
+// accurate.
+func TestC2DFractionalInternalDelayOracleMatchesWellConditionedDescriptor(t *testing.T) {
+	names, systems := stiffInternalDelayCases(t)
+	for _, sys := range systems {
+		n, _, _ := sys.Dims()
+		for i := range n {
+			for j := range n {
+				v := 0.1 * math.Sin(float64(3*i+j+1))
+				if i == j {
+					v += 1
+				}
+				sys.E.Set(i, j, v)
+			}
+		}
+	}
+	checkFractionalInternalDelayOracle(t, names, systems, 1e-9)
+}
+
+func checkFractionalInternalDelayOracle(t *testing.T, names []string, systems []*System, tol float64) {
+	t.Helper()
+	const dt = 0.1
 	for k, sys := range systems {
 		for _, tau := range []float64{0.25, 0.35} {
 			s := sys.Copy()
@@ -22,14 +47,16 @@ func TestC2DZOHFractionalInternalDelayStiffDescriptorFollowsPencil(t *testing.T)
 			_, m, _ := s.Dims()
 			frac := make([]float64, m+1)
 			frac[m] = tau - math.Floor(tau/dt+1e-9)*dt
-			oracle := pencilDiscreteOracle(t, lftAugmentedDescriptor(s), C2DMethodZOH, dt, frac)
-			d, err := s.C2D(dt, C2DOptions{})
-			if err != nil {
-				t.Errorf("%s τ=%g: C2D: %v", names[k], tau, err)
-				continue
-			}
-			if worst := lftOracleGap(t, s, d, oracle, dt); !(worst <= 1e-9) {
-				t.Errorf("%s τ=%g: C2D frequency response off the pencil by %.3g", names[k], tau, worst)
+			for _, meth := range []C2DMethod{C2DMethodZOH, C2DMethodFOH} {
+				oracle := pencilDiscreteOracle(t, lftAugmentedDescriptor(s), meth, dt, frac)
+				d, err := s.C2D(dt, C2DOptions{Method: meth})
+				if err != nil {
+					t.Errorf("%s τ=%g %s: C2D: %v", names[k], tau, meth, err)
+					continue
+				}
+				if worst := lftOracleGap(t, s, d, oracle, dt); !(worst <= tol) {
+					t.Errorf("%s τ=%g %s: C2D frequency response off the pencil by %.3g", names[k], tau, meth, worst)
+				}
 			}
 		}
 	}
