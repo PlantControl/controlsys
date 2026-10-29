@@ -3,6 +3,7 @@ package controlsys
 import (
 	"math"
 	"math/cmplx"
+	"slices"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
@@ -25,12 +26,15 @@ func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
 	if n == 0 || sys.IsDescriptor() || sys.HasDelay() || sys.LFT != nil || len(deg) != p {
 		return
 	}
-	var full []complex128
+	if requireFiniteSystem("ZPKModel", sys) != nil {
+		return
+	}
+	w := newZPKPencilWork(n, m)
 	for i := range p {
 		if deg[i] == 0 {
 			continue
 		}
-		zeros, poles, gains, ok := sys.zpkPencilRow(z, i, deg[i], &full)
+		zeros, poles, gains, ok := sys.zpkPencilRow(z, i, deg[i], w)
 		if !ok {
 			continue
 		}
@@ -45,20 +49,47 @@ func (sys *System) zpkPencilRows(z *ZPK, deg []int) {
 	}
 }
 
+// zpkPencilWork holds the buffers zpkPencilRow reuses across rows and
+// channels; full caches eig(A), the poles of every row of full degree.
+type zpkPencilWork struct {
+	full   []complex128
+	c, d   []float64
+	b      []float64
+	dch    []float64
+	zeros  [][]complex128
+	gains  []float64
+	g      []complex128
+	roots  [][]complex128
+	probe  []complex128
+	markov []float64
+}
+
+func newZPKPencilWork(n, m int) *zpkPencilWork {
+	f := make([]float64, 2*n+m+1+m+4*n)
+	return &zpkPencilWork{
+		c:      f[:n:n],
+		d:      f[n : n+m : n+m],
+		b:      f[n+m : 2*n+m : 2*n+m],
+		dch:    f[2*n+m : 2*n+m+1 : 2*n+m+1],
+		gains:  f[2*n+m+1 : 2*n+2*m+1 : 2*n+2*m+1],
+		markov: f[2*n+2*m+1:],
+		zeros:  make([][]complex128, m),
+		g:      make([]complex128, 3*m),
+		roots:  make([][]complex128, 0, 1+3*m),
+	}
+}
+
 // zpkPencilRow returns the pencil roots and gains of row i of z, or ok
-// false; full caches eig(A), the poles of every row of full degree.
-func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [][]complex128, poles []complex128, gains []float64, ok bool) {
+// false. The returned zeros and gains slices are w's, valid until the next
+// call.
+func (sys *System) zpkPencilRow(z *ZPK, i, deg int, w *zpkPencilWork) (zeros [][]complex128, poles []complex128, gains []float64, ok bool) {
 	n, m, p := sys.Dims()
 	row := sys
 	if p > 1 {
-		c := mat.NewDense(1, n, nil)
-		c.Copy(sys.C.Slice(i, i+1, 0, n))
-		d := mat.NewDense(1, m, nil)
-		d.Copy(sys.D.Slice(i, i+1, 0, m))
-		var err error
-		if row, err = New(sys.A, sys.B, c, d, sys.Dt); err != nil {
-			return nil, nil, nil, false
-		}
+		cr, dr := sys.C.RawMatrix(), sys.D.RawMatrix()
+		copy(w.c, cr.Data[i*cr.Stride:i*cr.Stride+n])
+		copy(w.d, dr.Data[i*dr.Stride:i*dr.Stride+m])
+		row = &System{A: sys.A, B: sys.B, C: mat.NewDense(1, n, w.c), D: mat.NewDense(1, m, w.d), Dt: sys.Dt}
 	}
 	if deg < n {
 		var err error
@@ -75,7 +106,7 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 			return nil, nil, nil, false
 		}
 	} else {
-		if *full == nil {
+		if w.full == nil {
 			all, err := sys.Poles()
 			if err != nil {
 				return nil, nil, nil, false
@@ -83,18 +114,24 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 			if all, ok = matchedConjugateClosed(all); !ok {
 				return nil, nil, nil, false
 			}
-			*full = all
+			w.full = all
 		}
-		poles = *full
+		poles = w.full
 	}
 	if len(poles) != deg {
 		return nil, nil, nil, false
 	}
 	nr := deg
-	zeros = make([][]complex128, m)
-	gains = make([]float64, m)
-	var roots [][]complex128
-	roots = append(roots, poles)
+	zeros, gains = w.zeros, w.gains
+	clear(zeros)
+	clear(gains)
+	roots := append(w.roots[:0], poles)
+	ch := row
+	bRaw := row.B.RawMatrix()
+	if m > 1 {
+		ch = &System{A: row.A, B: mat.NewDense(nr, 1, w.b[:nr]), C: row.C, D: mat.NewDense(1, 1, w.dch), Dt: sys.Dt}
+	}
+	dRaw := row.D.RawMatrix()
 	active := false
 	for j := range m {
 		if z.Gain[i][j] == 0 {
@@ -103,20 +140,17 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 		if len(z.Poles[i][j]) != deg {
 			return nil, nil, nil, false
 		}
-		ch := row
 		if m > 1 {
-			b := mat.NewDense(nr, 1, nil)
-			b.Copy(row.B.Slice(0, nr, j, j+1))
-			var err error
-			if ch, err = New(row.A, b, row.C, mat.NewDense(1, 1, []float64{row.D.At(0, j)}), sys.Dt); err != nil {
-				return nil, nil, nil, false
+			for k := range nr {
+				w.b[k] = bRaw.Data[k*bRaw.Stride+j]
 			}
+			w.dch[0] = dRaw.Data[j]
 		}
-		zj, err := ch.Zeros()
-		if err != nil || len(zj) != len(z.Zeros[i][j]) {
+		res, err := mimoZeros(ch)
+		if err != nil || len(res.Zeros) != len(z.Zeros[i][j]) {
 			return nil, nil, nil, false
 		}
-		if zeros[j], ok = matchedConjugateClosed(zj); !ok {
+		if zeros[j], ok = matchedConjugateClosed(res.Zeros); !ok {
 			return nil, nil, nil, false
 		}
 		roots = append(roots, zeros[j], z.Zeros[i][j])
@@ -128,32 +162,34 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 	for j := range m {
 		roots = append(roots, z.Poles[i][j])
 	}
-	s0, s1, sh := zpkProbePoints(sys.Dt, roots)
-	g1, err := row.EvalFr(s1)
-	if err != nil {
+	w.roots = roots
+	s0, s1, sh := zpkProbePoints(sys.Dt, roots, &w.probe)
+	eval := newFrequencyEvaluator(row).pointSolver(1).evalInto
+	g1, gh, g0 := w.g[:m], w.g[m:2*m], w.g[2*m:]
+	if evalWithPoleLimit(eval, row, pointAt(s1), g1) != nil {
 		return nil, nil, nil, false
 	}
-	gh, err := row.EvalFr(sh)
-	if err != nil {
+	if evalWithPoleLimit(eval, row, pointAt(sh), gh) != nil {
 		return nil, nil, nil, false
 	}
-	var g0 [][]complex128
+	haveG0 := false
 	for j := range m {
 		if z.Gain[i][j] == 0 {
 			continue
 		}
-		v1, vh := g1[0][j], gh[0][j]
+		v1, vh := g1[j], gh[j]
 		if !zpkFiniteNonzero(v1) || !zpkFiniteNonzero(vh) {
 			return nil, nil, nil, false
 		}
-		k, ok := zpkMarkovGain(row, j, deg-len(zeros[j]))
+		k, ok := zpkMarkovGain(row, j, deg-len(zeros[j]), w.markov)
 		if !ok {
-			if g0 == nil {
-				if g0, err = row.EvalFr(s0); err != nil {
+			if !haveG0 {
+				if evalWithPoleLimit(eval, row, pointAt(s0), g0) != nil {
 					return nil, nil, nil, false
 				}
+				haveG0 = true
 			}
-			v0 := g0[0][j]
+			v0 := g0[j]
 			if !zpkFiniteNonzero(v0) {
 				return nil, nil, nil, false
 			}
@@ -164,26 +200,27 @@ func (sys *System) zpkPencilRow(z *ZPK, i, deg int, full *[]complex128) (zeros [
 			k = real(q)
 		}
 		gains[j] = k
-		misfit := func(zs, ps []complex128, k float64, s, v complex128) float64 {
-			return cmplx.Abs(complex(k, 0)*matchedRootRatio(zs, ps, s)-v) / cmplx.Abs(v)
-		}
-		if e := misfit(zeros[j], poles, k, s1, v1); !(e <= math.Max(2*misfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], s1, v1), 1e-12)) {
+		if e := zpkMisfit(zeros[j], poles, k, s1, v1); !(e <= math.Max(2*zpkMisfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], s1, v1), 1e-12)) {
 			return nil, nil, nil, false
 		}
 		// eig and tzero carry backward error amplified by root sensitivity;
 		// 1e-9 tolerates that and still rejects an O(1) wrong gain.
-		if e := misfit(zeros[j], poles, k, sh, vh); !(e <= math.Max(2*misfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], sh, vh), 1e-9)) {
+		if e := zpkMisfit(zeros[j], poles, k, sh, vh); !(e <= math.Max(2*zpkMisfit(z.Zeros[i][j], z.Poles[i][j], z.Gain[i][j], sh, vh), 1e-9)) {
 			return nil, nil, nil, false
 		}
 	}
 	return zeros, poles, gains, true
 }
 
+func zpkMisfit(zs, ps []complex128, k float64, s, v complex128) float64 {
+	return cmplx.Abs(complex(k, 0)*matchedRootRatio(zs, ps, s)-v) / cmplx.Abs(v)
+}
+
 // zpkMarkovGain returns the leading Markov parameter c·A^(r−1)·b of input
 // j of the single-output row (D when r = 0), the gain of a channel of
 // relative degree r; ok is false when it cancels to below 1e-6 of its
 // magnitude bound |c|·|A|^(r−1)·|b|, so that rounding could dominate it.
-func zpkMarkovGain(row *System, j, r int) (float64, bool) {
+func zpkMarkovGain(row *System, j, r int, buf []float64) (float64, bool) {
 	if r < 0 {
 		return 0, false
 	}
@@ -195,13 +232,12 @@ func zpkMarkovGain(row *System, j, r int) (float64, bool) {
 	b := row.B.RawMatrix()
 	c := row.C.RawMatrix()
 	n := a.Rows
-	v := make([]float64, n)
-	w := make([]float64, n)
+	v, w := buf[:n], buf[n:2*n]
 	for k := range n {
 		v[k] = b.Data[k*b.Stride+j]
 		w[k] = math.Abs(v[k])
 	}
-	nv, nw := make([]float64, n), make([]float64, n)
+	nv, nw := buf[2*n:3*n], buf[3*n:4*n]
 	for range r - 1 {
 		for k := range n {
 			var s, t float64
@@ -243,10 +279,14 @@ var zpkProbeAngles = func() (u [5]complex128) {
 // low-frequency probes fall inside a split cluster at s = 0 or z = 1, where
 // every candidate misfits by O(1); sh checks the response where the roots
 // are well separated.
-func zpkProbePoints(dt float64, sets [][]complex128) (s0, s1, sh complex128) {
-	var roots []complex128
+func zpkProbePoints(dt float64, sets [][]complex128, scratch *[]complex128) (s0, s1, sh complex128) {
+	roots := (*scratch)[:0]
+	defer func() { *scratch = roots }()
 	lo, hi := math.Inf(1), 0.0
-	for _, set := range sets {
+	for k, set := range sets {
+		if slices.ContainsFunc(sets[:k], func(t []complex128) bool { return slices.Equal(t, set) }) {
+			continue
+		}
 		for _, r := range set {
 			if dt > 0 {
 				if !(cmplx.Abs(r) > 0 && (real(r) > 0 || math.Abs(imag(r)) > 1e-10*cmplx.Abs(r))) {
