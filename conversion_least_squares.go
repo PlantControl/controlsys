@@ -77,7 +77,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 	if _, m, p := sys.Dims(); m != 1 || p != 1 {
 		return nil, none, ErrNotSISO
 	}
-	pencil := leastSquaresPencilSource(sys)
+	pencil, slow := leastSquaresPencilParts(sys)
 	sys, _, err := conversionStandardForm(sys, "descriptor reduction")
 	if err != nil {
 		return nil, none, err
@@ -95,15 +95,15 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 
 	work := sys.Copy()
 	work.InputDelay, work.OutputDelay, work.Delay = nil, nil, nil
-	source := work
+	source, detect := work, work
 	if pencil != nil {
-		source = pencil
+		source, detect = pencil, slow
 	}
 	maxInt := int(^uint(0) >> 1)
 	if fitOrder > (maxInt-1)/32 {
 		return nil, none, ErrInvalidOrder
 	}
-	integrators, residue, err := leastSquaresIntegratorLimit(work)
+	integrators, residue, err := leastSquaresIntegratorLimit(detect)
 	if err != nil {
 		return nil, none, err
 	}
@@ -171,15 +171,26 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 // fits the continuous response, instead of that of the fold. It is nil
 // otherwise, and the fold is sampled.
 func leastSquaresPencilSource(sys *System) *System {
+	pencil, _ := leastSquaresPencilParts(sys)
+	return pencil
+}
+
+// leastSquaresPencilParts is leastSquaresPencilSource with the explicit slow
+// part of foldInaccurateParts, which holds any pole at s = 0. The integrators
+// are counted on it: the tolerance of leastSquaresIntegratorLimit scales with
+// ‖A‖₁, which the fold E⁻¹A inflates to the stiff pole (cond(E)), so a slow
+// pole there passes for one.
+func leastSquaresPencilParts(sys *System) (pencil, slow *System) {
 	if !sys.IsDescriptor() || sys.HasInternalDelay() {
-		return nil
+		return nil, nil
 	}
 	core := *sys
 	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
-	if _, ok := foldInaccurateParts(&core); !ok {
-		return nil
+	parts, ok := foldInaccurateParts(&core)
+	if !ok {
+		return nil, nil
 	}
-	return &core
+	return &core, parts[0]
 }
 
 func (sys *System) discretizeLeastSquares(dt float64, fitOrder int) (*System, error) {
