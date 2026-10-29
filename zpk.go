@@ -256,8 +256,11 @@ func (tf *TransferFunc) ZPK() (*ZPK, error) {
 	return z, nil
 }
 
-// ZPKModel returns the zero-pole-gain form of sys via TransferFunction, as
-// MATLAB zpk(ss).
+// ZPKModel returns the zero-pole-gain form of sys, as MATLAB zpk(ss). The
+// orders are those of TransferFunction; for explicit delay-free models each
+// row takes its poles from eig(A) and each channel its zeros from the
+// system pencil when they fit the response at least as well as the roots
+// of the transfer-function polynomials, which lose tight root clusters.
 func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	tfResult, err := sys.TransferFunction(opts)
 	if err != nil {
@@ -267,6 +270,7 @@ func (sys *System) ZPKModel(opts *TransferFuncOpts) (*ZPKResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ZPKModel: %w", err)
 	}
+	sys.zpkPencilRows(zpk, tfResult.RowDegrees)
 	zpk.InputName = copyStringSlice(sys.InputName)
 	zpk.OutputName = copyStringSlice(sys.OutputName)
 	return &ZPKResult{
