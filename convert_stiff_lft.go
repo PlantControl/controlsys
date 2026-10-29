@@ -11,34 +11,80 @@ import "plantcontrol.org/v1/gonum/mat"
 // of sys carry over; state names are dropped. ok is false when sys has no
 // internal delays or G does not need the split.
 func stiffLFTExplicit(sys *System) (*System, bool) {
+	out, _, ok := stiffLFTExplicitState(sys, nil)
+	return out, ok
+}
+
+// stiffLFTExplicitState is stiffLFTExplicit that also maps a non-nil x0 to
+// the coordinates of the returned model: each part takes its share of x0
+// from the input columns E·x0 and A·x0 appended to G (freePartShare), so
+// the free response of the returned model from xt is that of sys from x0.
+func stiffLFTExplicitState(sys *System, x0 *mat.VecDense) (out *System, xt *mat.VecDense, ok bool) {
 	if !sys.IsContinuous() || !sys.HasInternalDelay() || !sys.IsDescriptor() {
-		return nil, false
+		return nil, nil, false
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	if lu.Cond() < foldAccurateECond {
-		return nil, false
+		return nil, nil, false
 	}
-	_, m, p := sys.Dims()
+	n, m, p := sys.Dims()
 	g := conversionAugmentedRational(sys)
 	g.E = sys.E
+	cols := m + len(sys.LFT.Tau)
+	if x0 != nil {
+		rows, _ := g.D.Dims()
+		b, d := newDense(n, cols+2), newDense(rows, cols+2)
+		setBlock(b, 0, 0, g.B)
+		setBlock(d, 0, 0, g.D)
+		var ex, ax mat.VecDense
+		ex.MulVec(sys.E, x0)
+		ax.MulVec(sys.A, x0)
+		b.SetCol(cols, ex.RawVector().Data)
+		b.SetCol(cols+1, ax.RawVector().Data)
+		g.B, g.D = b, d
+	}
 	parts, ok := foldInaccurateParts(g)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
 	for i, part := range parts {
 		if parts[i], ok = realSchurPart(part); !ok {
-			return nil, false
+			return nil, nil, false
+		}
+	}
+	if x0 != nil {
+		views := make([]*System, len(parts))
+		for i, part := range parts {
+			v := *part
+			if pn, _, _ := part.Dims(); pn > 0 {
+				v.B = part.B.Slice(0, pn, cols, cols+2).(*mat.Dense)
+			}
+			views[i] = &v
+		}
+		shares := make([]float64, 0, n)
+		for i := range views {
+			shares = append(shares, freePartShare(views, i)...)
+		}
+		xt = mat.NewVecDense(len(shares), shares)
+		for i, part := range parts {
+			c := *part
+			if pn, _, _ := part.Dims(); pn > 0 {
+				c.B = part.B.Slice(0, pn, 0, cols).(*mat.Dense)
+			}
+			rows, _ := part.D.Dims()
+			c.D = part.D.Slice(0, rows, 0, cols).(*mat.Dense)
+			parts[i] = &c
 		}
 	}
 	explicit, err := parallelExplicit(parts)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
-	out := splitConversionRational(explicit, m, p, sys.LFT.Tau)
+	out = splitConversionRational(explicit, m, p, sys.LFT.Tau)
 	delays := sys.Copy()
 	out.Delay, out.InputDelay, out.OutputDelay = delays.Delay, delays.InputDelay, delays.OutputDelay
 	propagateNames(out, sys)
 	out.StateName = nil
-	return out, true
+	return out, xt, true
 }

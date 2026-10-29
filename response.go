@@ -1894,6 +1894,10 @@ func Damp(sys *System) ([]DampInfo, error) {
 // steps) while the chain fits its size and work budget; past it, and for
 // other internal-delay models, they are simulated through the approximate
 // ZOH discretization of the delay channels, as MATLAB does, with O(dt) error.
+// A descriptor with internal delays whose E needs the generalized Schur
+// parts always takes that discretization, of its explicit parts with the
+// delay feedback kept (stiffLFTExplicit): the chain's single exponential
+// would round its slow modes to ε·‖E⁻¹A‖·dt.
 //
 // tFinal = 0 selects the horizon automatically from the poles and delays, as
 // MATLAB step(sys); a negative or non-finite tFinal returns
@@ -1903,14 +1907,19 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Step", sys, tFinal); err != nil {
 		return nil, err
 	}
-	sys, err := sys.zeroStateResponseForm()
-	if err != nil {
-		return nil, fmt.Errorf("Step: %w", err)
-	}
-	if resp, ok, err := delayChainAuto(sys, tFinal, stepResponse); err != nil {
-		return nil, fmt.Errorf("Step: %w", err)
-	} else if ok {
-		return resp, nil
+	ex, stiffLFT := stiffLFTExplicit(sys)
+	if stiffLFT {
+		sys = ex
+	} else {
+		var err error
+		if sys, err = sys.zeroStateResponseForm(); err != nil {
+			return nil, fmt.Errorf("Step: %w", err)
+		}
+		if resp, ok, err := delayChainAuto(sys, tFinal, stepResponse); err != nil {
+			return nil, fmt.Errorf("Step: %w", err)
+		} else if ok {
+			return resp, nil
+		}
 	}
 	plan, err := prepareAutoTimeResponse(sys, tFinal, 0)
 	if err != nil {
@@ -2227,7 +2236,8 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // ErrDescriptorInitialState. A continuous descriptor without internal
 // delays whose full-rank E is too ill-conditioned for E⁻¹A (as in Step)
 // follows the pencil (A, E): the impulse response of the input E·x0,
-// delayed by the output delays.
+// delayed by the output delays; with internal delays it follows the pencil
+// as in Step, from x0 mapped to the coordinates of the parts.
 // Continuous models without internal delays, or whose internal delays share
 // one length (within the chain budget, see Step), are sampled exactly; other
 // internal-delay models use the approximate ZOH discretization of the delay
@@ -2259,6 +2269,14 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 			}
 		}
 	}
+	stiffLFT := false
+	if n, _, _ := sys.Dims(); x0.Len() == n {
+		var ex *System
+		var xt *mat.VecDense
+		if ex, xt, stiffLFT = stiffLFTExplicitState(sys, x0); stiffLFT {
+			sys, x0 = ex, xt
+		}
+	}
 	sim, simX0, reduced, err := sys.timeResponseForm(x0)
 	if err != nil {
 		return nil, fmt.Errorf("Initial: %w", err)
@@ -2277,7 +2295,7 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	if free.IsContinuous() && !free.HasInternalDelay() && !free.IsDescriptor() {
 		return free.continuousFreeResponse(x0, tFinal)
 	}
-	if _, _, ok := delayChainModel(free); ok {
+	if _, _, ok := delayChainModel(free); ok && !stiffLFT {
 		t, dt, err := newTimeResponsePlanner(free).grid(tFinal, 0)
 		if err != nil {
 			return nil, fmt.Errorf("Initial: %w", err)
