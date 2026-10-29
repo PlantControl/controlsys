@@ -2543,6 +2543,9 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 // Continuous models with internal delays of one common length are sampled
 // exactly within the chain budget (see Step); other internal-delay models use
 // the approximate ZOH discretization of the delay channels, as MATLAB does.
+// A stiff-E descriptor with internal delays takes that discretization of
+// its parts, from x0 mapped to the parts' coordinates, as Step and Initial
+// do; its O(dt) error is set by the spacing of the caller's grid t.
 //
 // t must be a finite, uniform, increasing grid of at least 2 samples (with
 // spacing Dt for discrete models) and u is len(t)×m; a model without outputs
@@ -2556,8 +2559,13 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	}
 	var err error
 	var freeX0 *mat.VecDense
-	stiff := foldInaccurateContinuous(sys)
-	if stiff {
+	stiffLFT := false
+	if n, _, _ := sys.Dims(); x0 == nil || x0.Len() == n {
+		if ex, xt, ok := stiffLFTExplicitState(sys, x0); ok {
+			sys, x0, stiffLFT = ex, xt, true
+		}
+	}
+	if foldInaccurateContinuous(sys) {
 		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
 			return nil, fmt.Errorf("Lsim: x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
 		}
@@ -2579,7 +2587,7 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	if err != nil {
 		return nil, err
 	}
-	if plan.wasContinuous {
+	if plan.wasContinuous && !stiffLFT {
 		Y, ok, err := delayChainForcedResponse(sys, x0, uSim, plan.dt, plan.steps)
 		if err != nil {
 			return nil, fmt.Errorf("Lsim: %w", err)
