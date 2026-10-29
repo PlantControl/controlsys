@@ -322,24 +322,24 @@ func TestInitialInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
 	}
 }
 
-// Initial of the seed 2210 model without inputs (an autonomous model) takes
+// Initial of the seed 4312 model without inputs (an autonomous model) takes
 // the same route as with them.
 func TestInitialNoInputInternalDelayStiffDescriptorFollowsPencil(t *testing.T) {
-	c := stepFoldLossCases[2]
-	sys, err := NewDescriptor(mat.NewDense(4, 4, c.a), &mat.Dense{}, mat.NewDense(1, 4, c.c), &mat.Dense{}, mat.NewDense(4, 4, c.e), 0)
+	c := stepFoldLossCases[3]
+	sys, err := NewDescriptor(mat.NewDense(3, 3, c.a), &mat.Dense{}, mat.NewDense(1, 3, c.c), &mat.Dense{}, mat.NewDense(3, 3, c.e), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !matlabRankFull(t, sys.E) {
 		t.Skip("E reads rank deficient on this platform")
 	}
-	if err := sys.SetInternalDelay([]float64{0.3}, mat.NewDense(4, 1, []float64{0.3, -0.2, 0.5, 0.1}),
-		mat.NewDense(1, 4, []float64{0.4, -0.3, 0.2, 0.6}), mat.NewDense(1, 1, []float64{0.5}), nil, mat.NewDense(1, 1, nil)); err != nil {
+	if err := sys.SetInternalDelay([]float64{0.3}, mat.NewDense(3, 1, []float64{0.3, -0.2, 0.5}),
+		mat.NewDense(1, 3, []float64{0.4, -0.3, 0.6}), mat.NewDense(1, 1, []float64{0.5}), nil, mat.NewDense(1, 1, nil)); err != nil {
 		t.Fatal(err)
 	}
 	o := newLFTStepOracle(t, sys)
-	x0 := []float64{0.7, -0.4, 0.2, 1.1}
-	in, err := Initial(sys, mat.NewVecDense(4, x0), 1)
+	x0 := []float64{0.7, -0.4, 1.1}
+	in, err := Initial(sys, mat.NewVecDense(3, x0), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
