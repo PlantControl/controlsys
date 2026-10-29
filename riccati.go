@@ -1171,7 +1171,16 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // gainMissIn with the floor gainTol, else res refined (refined) once its
 // K is; failing both, the same with the floor gainFloor, as Dare kept
 // before. ok is false when none is, miss then the distance of res in
-// units of the tolerance with gainFloor. A K off the gain of an X whose
+// units of the tolerance with gainFloor. A K of the given inputs whose X
+// resolves its gain only beyond gainFloor (gainMissOf's tolerance) is
+// first replaced by that of X refined in double-double (ddNewtonGain),
+// else by the Hewer gain (hewerGainSubstituted), else not certified
+// (Y6BJEX fail-closed; ok false, Dare then returns Accuracy 1): with a weakly
+// controllable unstable mode and a well-conditioned E, X within 5.4e-10
+// of the 320-bit X (its eps band 1.9e-9) moved its gain 9e-6 per ulp,
+// and the pencil K and the gain of X were 4e-6 and 4.7e-6 off the
+// 320-bit gain at Accuracy 0 (data sensitivity 9.5e-10), that of the
+// refined X exact. A K off the gain of an X whose
 // Newton step is within eps by more than gainTol is first replaced by
 // that gain (gainSubstituted): X is then its own Newton iterate, and the
 // pencil K was off by 7.3e-6, 43 times its eps-sensitivity, with X exact
@@ -1219,6 +1228,15 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		return h, d.units(gainFloor), false
 	}
 	if d.units(gainTol) <= 1 {
+		if red == nil && d.tol > gainFloor {
+			if h, ok := ddNewtonGain(A, B, Q, R, opts, res); ok {
+				return h, 0, true
+			}
+			if h, ok := hewerGainSubstituted(A, B, Q, R, opts, nil, res); ok {
+				return h, 0, true
+			}
+			return nil, d.units(gainFloor), false
+		}
 		if red == nil && d.d > gainFloor && res.x1 == nil && res.step <= eps() {
 			if r, ok := gainSubstituted(A, B, R, opts, res); ok {
 				return r, 0, true
@@ -1385,6 +1403,72 @@ func gainSubstituted(A, B, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) 
 	}
 	c := *res
 	c.K, c.Eig = K, eig
+	return &c, true
+}
+
+// ddNewtonGain returns res with K the double-double gain (ddGainOf) of
+// its X taken two Newton steps on in double-double (newtonSolve from the
+// residual of X itself) and Eig that of A − BK, once the second step
+// moves K by at most newtonTol, as hewerGainSubstituted accepts its own,
+// A − BK is stable (closedLoopStable) and gainMissIn accepts the new K.
+// X is kept. Of the given inputs only (gainOfX).
+func ddNewtonGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) (*RiccatiResult, bool) {
+	var o RiccatiOpts
+	if opts != nil {
+		o = *opts
+	}
+	o.Workspace, o.NoScaling = nil, true
+	problem, err := newRiccatiProblem(A, B, Q, R, &o)
+	if err != nil {
+		return nil, false
+	}
+	n := problem.n
+	nn := n * n
+	pe := make([]float64, 2*nn)
+	xH, xL := pe[:nn], pe[nn:]
+	xr := res.X.RawMatrix()
+	copyStrided(xH, n, xr.Data, xr.Stride, n, n)
+	gain := func() (*mat.Dense, bool) {
+		k, _, ok := ddGainOf(problem.A, problem.B, problem.R, problem.S, xH, xL, n)
+		return k, ok
+	}
+	k, ok := gain()
+	if !ok {
+		return nil, false
+	}
+	dk := math.Inf(1)
+	for range 2 {
+		y, err := problem.newtonSolve(false, k, xH, pe)
+		if err != nil {
+			return nil, false
+		}
+		problem.newtonDelta(y)
+		if !finiteSlice(y) {
+			return nil, false
+		}
+		for i, v := range y {
+			ddAdd(&xH[i], &xL[i], v, 0)
+		}
+		ddNormalize(xH, xL)
+		kn, ok := gain()
+		if !ok {
+			return nil, false
+		}
+		dk = relDist(kn, k)
+		k = kn
+	}
+	if !(dk <= newtonTol) {
+		return nil, false
+	}
+	eig := make([]complex128, len(res.Eig))
+	if !closedLoopStable(A, B, k, o.E, eig) {
+		return nil, false
+	}
+	c := *res
+	c.K, c.Eig = k, eig
+	if !(gainMissIn(A, B, R, opts, nil, &c).units(gainTol) <= 1) {
+		return nil, false
+	}
 	return &c, true
 }
 
@@ -2868,18 +2952,7 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense, xData [
 	if err != nil {
 		return nil, err
 	}
-	n := problem.n
-	if problem.E != nil {
-		eLU, eIpiv := problem.descriptorLU()
-		impl.Dgetrs(blas.Trans, n, n, eLU, n, eIpiv, x1, n)
-		for i := range n {
-			for j := i + 1; j < n; j++ {
-				x1[i*n+j], x1[j*n+i] = x1[j*n+i], x1[i*n+j]
-			}
-		}
-		impl.Dgetrs(blas.Trans, n, n, eLU, n, eIpiv, x1, n)
-		symmetrize(x1, n, n)
-	}
+	problem.newtonDelta(x1)
 	for i, v := range xData {
 		x1[i] += v
 	}
@@ -2887,6 +2960,24 @@ func (problem *riccatiProblem) newtonCost(continuous bool, K *mat.Dense, xData [
 		return nil, ErrSingularEquation
 	}
 	return x1, nil
+}
+
+// newtonDelta replaces the solution Y = EᵀΔE of newtonSolve by Δ (with E;
+// without, Y is Δ).
+func (problem *riccatiProblem) newtonDelta(y []float64) {
+	if problem.E == nil {
+		return
+	}
+	n := problem.n
+	eLU, eIpiv := problem.descriptorLU()
+	impl.Dgetrs(blas.Trans, n, n, eLU, n, eIpiv, y, n)
+	for i := range n {
+		for j := i + 1; j < n; j++ {
+			y[i*n+j], y[j*n+i] = y[j*n+i], y[i*n+j]
+		}
+	}
+	impl.Dgetrs(blas.Trans, n, n, eLU, n, eIpiv, y, n)
+	symmetrize(y, n, n)
 }
 
 // newtonSolve returns the solution Δ (with E, Y = EᵀΔE) of newtonCost's
