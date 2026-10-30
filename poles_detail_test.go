@@ -240,6 +240,7 @@ func TestPolesDetail_InvalidInputMatchesPoles(t *testing.T) {
 // τ_E < s ≤ ρ_j), so Accuracy is 1, and the bracket contains the
 // structural count of the generator.
 func TestPolesDetail_StiffChainLiteralsFlagged(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, l := range poleCountCases() {
 		sys, err := NewDescriptor(mat.NewDense(l.n, l.n, l.a), mat.NewDense(l.n, 1, nil), mat.NewDense(1, l.n, nil), mat.NewDense(1, 1, nil),
 			mat.NewDense(l.n, l.n, l.e), 0)
