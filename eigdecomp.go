@@ -503,9 +503,16 @@ func deflateInfinite(A, E *mat.Dense, wantQZ bool) (a, e, q, z *mat.Dense, nf in
 // (pencilIndexOne) whose E has stiff singular values: those are finite, as
 // in MATLAB's rank (D62TAA), and the staircase goes on past the null space
 // of E, deciding the ranks of the deflated E blocks by stiffChainRank. It
-// fails (ok false) when E is not stiff or the index is 1.
+// fails (ok false) when E is not stiff or the index is 1. It also fails
+// when the staircase keeps all rank(E) (MATLAB rank) values finite: index
+// ≥ 2 leaves more than n − rank(E) infinite eigenvalues, so such a count
+// contradicts the pencil (a level-1 value at the qzInfiniteGap edge of
+// stiffChainRank, which rounding puts on either side).
 func deflateStiffChain(A, E *mat.Dense) (a, e, q, z *mat.Dense, nf int, leak, blur, egap float64, ok bool) {
 	a, e, q, z, nf, _, leak, blur, egap, _, ok = deflateStaircase(A, E, true, true, -1, 0)
+	if ok && nf >= stiffChainERank(E) {
+		return nil, nil, nil, nil, 0, 0, 0, 0, false
+	}
 	return a, e, q, z, nf, leak, blur, egap, ok
 }
 
