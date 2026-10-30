@@ -20,6 +20,26 @@ func benchDelayChainSystem(b *testing.B) *System {
 	return sys
 }
 
+func benchDelayChain(b *testing.B) (*delayChain, []chainSource) {
+	sys := benchDelayChainSystem(b)
+	sys.LFT.D22.Zero()
+	c, ok := newDelayChain(sys, 0.3, []int{0}, 3e-4, 20001, 1)
+	if !ok {
+		b.Fatal("chain over budget")
+	}
+	x0 := []float64{1, -0.5, 0.25, 0}
+	u := []float64{0, 0, 0, 1}
+	return c, []chainSource{{dir: x0, amp: []float64{1}}, {shift: 0.1, dir: u, amp: []float64{1}}}
+}
+
+func BenchmarkDelayChainSimulate(b *testing.B) {
+	c, src := benchDelayChain(b)
+	Y := mat.NewDense(c.p, c.steps, nil)
+	for b.Loop() {
+		c.simulate(src, Y, 0, []int{0})
+	}
+}
+
 func BenchmarkStepInternalDelayChain(b *testing.B) {
 	sys := benchDelayChainSystem(b)
 	for b.Loop() {
