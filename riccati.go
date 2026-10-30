@@ -1282,6 +1282,12 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 				return h, 0, true
 			}
 		}
+		if rot && d.tol > gainFloor && !(d.d > gainFloor) {
+			if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
+				return h, 0, true
+			}
+			return res, d.units(gainFloor), false
+		}
 		return res, 0, true
 	}
 	if rot && math.IsInf(d.d, 1) {
