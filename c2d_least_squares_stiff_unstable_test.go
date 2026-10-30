@@ -66,6 +66,9 @@ func TestC2DLeastSquaresStiffDescriptorKeepsUnstablePole(t *testing.T) {
 	if fit.Stable {
 		t.Error("C2DFit reports a stable fit of an unstable plant")
 	}
+	if fit.Accuracy != 0 {
+		t.Errorf("Accuracy %d for a fit whose unstable pole is the plant's", fit.Accuracy)
+	}
 	for _, d := range []*System{d, df} {
 		poles, err := d.Poles()
 		if err != nil {
