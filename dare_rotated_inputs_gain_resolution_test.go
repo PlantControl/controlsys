@@ -22,9 +22,10 @@ var dareRotatedCoarseResolutionCase = dareRotatedInputsCase{
 // inputs whose gain of X resolves K only to 8.7e-6, beyond gainFloor,
 // while the pencil K is within gainFloor of it (2.6e-7). Kept unrefined
 // at Accuracy 0, K was 1.25e-6 off the exact-E 320-bit gain (band
-// max(gainFloor, 4·1.2e-10); 3RYNDV), where the Hewer gain was exact.
-// Dare and Dlqr must return K within band at Accuracy 0, else
-// Accuracy 1, with E⁻¹(A − BK) stable.
+// max(gainFloor, 4·1.2e-10); 3RYNDV) natively, 9.2e-7 on amd64, where
+// ddNewtonGain was 5.2e-14 off and the Hewer gain exact. Dare and Dlqr
+// must return K within band at Accuracy 0, else Accuracy 1, with
+// E⁻¹(A − BK) stable.
 func TestDareRotatedInputsCoarseGainResolutionNotCertifiedUnrefined(t *testing.T) {
 	c := dareRotatedCoarseResolutionCase
 	ref := riccatiExactReference(false, c.A, c.B, c.Q, c.R, c.S, c.E, riccatiExactPrec)
