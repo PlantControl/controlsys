@@ -2543,6 +2543,12 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 // Continuous models with internal delays of one common length are sampled
 // exactly within the chain budget (see Step); other internal-delay models use
 // the approximate ZOH discretization of the delay channels, as MATLAB does.
+// A continuous descriptor with internal delays whose E is too
+// ill-conditioned for E⁻¹A (LU condition estimate 1e6 or more) takes that
+// discretization of its generalized Schur parts, from x0 mapped to the
+// parts' coordinates, instead of the exact chain of E⁻¹A when the fold's
+// cond(E)·ε error exceeds the discretization's dt·ρ on the grid t, ρ the
+// largest slow pole modulus of the pencil.
 //
 // t must be a finite, uniform, increasing grid of at least 2 samples (with
 // spacing Dt for discrete models) and u is len(t)×m; a model without outputs
@@ -2556,8 +2562,17 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	}
 	var err error
 	var freeX0 *mat.VecDense
-	stiff := foldInaccurateContinuous(sys)
-	if stiff {
+	stiffLFT := false
+	if n, _, _ := sys.Dims(); x0 == nil || x0.Len() == n {
+		dt := 0.0
+		if len(t) >= 2 {
+			dt = t[1] - t[0]
+		}
+		if ex, xt, ok := stiffLFTSampled(sys, x0, dt); ok {
+			sys, x0, stiffLFT = ex, xt, true
+		}
+	}
+	if foldInaccurateContinuous(sys) {
 		if n, _, _ := sys.Dims(); x0 != nil && x0.Len() != n {
 			return nil, fmt.Errorf("Lsim: x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
 		}
@@ -2579,7 +2594,7 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	if err != nil {
 		return nil, err
 	}
-	if plan.wasContinuous {
+	if plan.wasContinuous && !stiffLFT {
 		Y, ok, err := delayChainForcedResponse(sys, x0, uSim, plan.dt, plan.steps)
 		if err != nil {
 			return nil, fmt.Errorf("Lsim: %w", err)

@@ -1,6 +1,11 @@
 package controlsys
 
-import "plantcontrol.org/v1/gonum/mat"
+import (
+	"math"
+	"math/cmplx"
+
+	"plantcontrol.org/v1/gonum/mat"
+)
 
 // stiffLFTExplicit returns, for a continuous descriptor sys with internal
 // delays, the explicit model with the same delay feedback whose descriptor
@@ -15,20 +20,59 @@ func stiffLFTExplicit(sys *System) (*System, bool) {
 	return out, ok
 }
 
+// stiffLFTSampled is stiffLFTExplicitState for a response sampled at the
+// spacing dt (Lsim). ok is false, so the caller samples the LU fold E⁻¹A by
+// the exact delay chain, when the fold's error cond(E)·ε is at most the
+// error dt·ρ of the ZOH discretization of the parts' delay channels, ρ the
+// spectral radius of the slow part: over one sample the held delay signal
+// moves by up to dt·ρ relative. Internal delays of different lengths have
+// no exact chain, so their fold takes the ZOH discretization too and the
+// parts are kept. The gate decides before the parts are assembled.
+func stiffLFTSampled(sys *System, x0 *mat.VecDense, dt float64) (*System, *mat.VecDense, bool) {
+	sp, ok := newStiffLFTSplit(sys, x0)
+	if !ok {
+		return nil, nil, false
+	}
+	if _, _, chain := delayChainModel(sys); chain && sp.cond*0x1p-52 <= dt*schurSpectralRadius(sp.parts[0].A) {
+		return nil, nil, false
+	}
+	return sp.explicit()
+}
+
 // stiffLFTExplicitState is stiffLFTExplicit that also maps a non-nil x0 to
 // the coordinates of the returned model: each part takes its share of x0
 // from the input columns E·x0 and A·x0 appended to G (freePartShare), so
 // the free response of the returned model from xt is that of sys from x0.
-func stiffLFTExplicitState(sys *System, x0 *mat.VecDense) (out *System, xt *mat.VecDense, ok bool) {
-	if !sys.IsContinuous() || !sys.HasInternalDelay() || !sys.IsDescriptor() {
+func stiffLFTExplicitState(sys *System, x0 *mat.VecDense) (*System, *mat.VecDense, bool) {
+	sp, ok := newStiffLFTSplit(sys, x0)
+	if !ok {
 		return nil, nil, false
+	}
+	return sp.explicit()
+}
+
+// stiffLFTSplit is the generalized Schur split of the descriptor part G of
+// stiffLFTExplicitState, with the LU condition estimate of E; the slow
+// (first) part is in real Schur form.
+type stiffLFTSplit struct {
+	sys   *System
+	x0    *mat.VecDense
+	parts []*System
+	cols  int
+	cond  float64
+}
+
+func newStiffLFTSplit(sys *System, x0 *mat.VecDense) (*stiffLFTSplit, bool) {
+	if !sys.IsContinuous() || !sys.HasInternalDelay() || !sys.IsDescriptor() {
+		return nil, false
 	}
 	var lu mat.LU
 	lu.Factorize(sys.E)
-	if lu.Cond() < foldAccurateECond {
-		return nil, nil, false
+	cond := lu.Cond()
+	if cond < foldAccurateECond {
+		return nil, false
 	}
-	n, m, p := sys.Dims()
+	n, m, _ := sys.Dims()
 	g := conversionAugmentedRational(sys)
 	g.E = sys.E
 	cols := m + len(sys.LFT.Tau)
@@ -46,26 +90,57 @@ func stiffLFTExplicitState(sys *System, x0 *mat.VecDense) (out *System, xt *mat.
 	}
 	parts, ok := stiffDescriptorParts(g)
 	if !ok {
-		return nil, nil, false
+		return nil, false
 	}
-	for i, part := range parts {
-		if parts[i], ok = realSchurPart(part); !ok {
+	if parts[0], ok = realSchurPart(parts[0]); !ok {
+		return nil, false
+	}
+	return &stiffLFTSplit{sys: sys, x0: x0, parts: parts, cols: cols, cond: cond}, true
+}
+
+// explicit assembles the parts, each in real Schur form, into the model of
+// stiffLFTExplicitState.
+func (sp *stiffLFTSplit) explicit() (*System, *mat.VecDense, bool) {
+	sys, parts := sp.sys, sp.parts
+	for i := 1; i < len(parts); i++ {
+		var ok bool
+		if parts[i], ok = realSchurPart(parts[i]); !ok {
 			return nil, nil, false
 		}
 	}
-	if x0 != nil {
-		xt, parts = splitFreeShareColumns(parts, cols, n)
+	n, m, p := sys.Dims()
+	var xt *mat.VecDense
+	if sp.x0 != nil {
+		xt, parts = splitFreeShareColumns(parts, sp.cols, n)
 	}
 	explicit, err := parallelExplicit(parts)
 	if err != nil {
 		return nil, nil, false
 	}
-	out = splitConversionRational(explicit, m, p, sys.LFT.Tau)
+	out := splitConversionRational(explicit, m, p, sys.LFT.Tau)
 	delays := sys.Copy()
 	out.Delay, out.InputDelay, out.OutputDelay = delays.Delay, delays.InputDelay, delays.OutputDelay
 	propagateNames(out, sys)
 	out.StateName = nil
 	return out, xt, true
+}
+
+// schurSpectralRadius returns the largest eigenvalue modulus of the upper
+// quasi-triangular a.
+func schurSpectralRadius(a *mat.Dense) float64 {
+	if a == nil || a.IsEmpty() {
+		return 0
+	}
+	n, _ := a.Dims()
+	raw := a.RawMatrix()
+	if raw.Stride != n {
+		raw = mat.DenseCopyOf(a).RawMatrix()
+	}
+	rho := 0.0
+	for _, l := range schurEigenvaluesRaw(raw.Data, n) {
+		rho = math.Max(rho, cmplx.Abs(l))
+	}
+	return rho
 }
 
 // splitFreeShareColumns returns the shares of x0 (freePartShare) of parts

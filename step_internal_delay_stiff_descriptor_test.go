@@ -415,3 +415,52 @@ func TestLFTStepOracleMatchesWellConditionedDescriptor(t *testing.T) {
 		t.Errorf("oracle off Step/Initial by %.3g", worst)
 	}
 }
+
+// Step and Initial keep the parts route at every cond(E) of 1e6 or more,
+// whatever their grid (PSVYDI ruling: the dt-aware gate is Lsim's only;
+// the exact chain on fine auto grids costs up to 8x, IK5K5L): at cond(E)
+// about 1e8 Step is the ZOH step response of stiffLFTExplicit, and both stay
+// within lftStepTol of the 320-bit method of steps.
+func TestStepInternalDelayModeratelyStiffDescriptorKeepsPartsRoute(t *testing.T) {
+	sys := stiffGridCase(t, 8)
+	ex, ok := stiffLFTExplicit(sys)
+	if !ok {
+		t.Fatal("stiffLFTExplicit: no split at cond(E) 1e8")
+	}
+	st, err := Step(sys, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := prepareAutoTimeResponse(ex, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := plan.allInputResponse(stepResponse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mat.Equal(st.Y, want.Y) || len(st.T) != len(want.T) {
+		t.Errorf("Step is not the step response of the parts")
+	}
+	o := newLFTStepOracle(t, sys)
+	x0 := []float64{0.7, -0.4, 1.1}
+	in, err := Initial(sys, mat.NewVecDense(3, x0), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worstStep, worstInitial := 0.0, 0.0
+	for _, s := range lftOracleSamples(len(st.T)) {
+		if !nearDelayGrid(st.T[s], o.tau) {
+			worstStep = math.Max(worstStep, stepOracleRel(st.Y.At(0, s), o.response(0, nil, st.T[s])[0]))
+		}
+	}
+	for _, s := range lftOracleSamples(len(in.T)) {
+		if !nearDelayGrid(in.T[s], o.tau) {
+			worstInitial = math.Max(worstInitial, stepOracleRel(in.Y.At(0, s), o.response(-1, x0, in.T[s])[0]))
+		}
+	}
+	t.Logf("Step %.3g, Initial %.3g", worstStep, worstInitial)
+	if worstStep > lftStepTol || worstInitial > lftStepTol {
+		t.Errorf("Step off the pencil by %.3g, Initial by %.3g, want <= %g", worstStep, worstInitial, lftStepTol)
+	}
+}
