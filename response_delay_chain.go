@@ -245,70 +245,683 @@ func (c *delayChain) injections(sources []chainSource) []chainInjection {
 	return out
 }
 
-// simulate returns the p×steps output sampled at k·dt.
-func (c *delayChain) simulate(sources []chainSource) *mat.Dense {
+// simulate sets row rowOffset+r of Y to output r sampled at k·dt for each
+// r in rows. Each sample adds the same products in the same order as the
+// plain block recurrence next_i = Σ_j F_j·ξ_{i+j}, y = Σ_i out_i·ξ_i, so
+// results do not depend on the kernel chosen for na.
+func (c *delayChain) simulate(sources []chainSource, Y *mat.Dense, rowOffset int, rows []int) {
 	na := c.na
-	Y := mat.NewDense(c.p, c.steps, nil)
+	yRaw := Y.RawMatrix()
 	injections := c.injections(sources)
 	if len(injections) == 0 {
-		return Y
+		for _, r := range rows {
+			clear(yRaw.Data[(rowOffset+r)*yRaw.Stride : (rowOffset+r)*yRaw.Stride+c.steps])
+		}
+		return
 	}
+	prop := make([]float64, (c.order+1)*na*na)
+	for j, f := range c.prop[:c.order+1] {
+		raw := f.RawMatrix()
+		for r := range na {
+			copy(prop[(j*na+r)*na:(j*na+r+1)*na], raw.Data[r*raw.Stride:r*raw.Stride+na])
+		}
+	}
+	type outBlock struct {
+		block int
+		rows  []float64
+	}
+	var outs []outBlock
+	for i, o := range c.out[:c.blocks] {
+		if o == nil {
+			continue
+		}
+		raw := o.RawMatrix()
+		rows := make([]float64, c.p*na)
+		for r := range c.p {
+			copy(rows[r*na:(r+1)*na], raw.Data[r*raw.Stride:r*raw.Stride+na])
+		}
+		outs = append(outs, outBlock{i, rows})
+	}
+	byStart := make([]int, len(injections))
+	for k := range byStart {
+		byStart[k] = k
+	}
+	slices.SortStableFunc(byStart, func(a, b int) int { return injections[a].start - injections[b].start })
+	active := make([]int, 0, len(injections))
+	pending := 0
+
 	xi := make([]float64, c.blocks*na)
 	next := make([]float64, c.blocks*na)
-	yRaw := Y.RawMatrix()
+	propagate := chainKernel(prop, na, c.order)
 	hi := -1
 	for m := range c.steps {
 		if m > 0 && hi >= 0 {
-			for i := 0; i <= hi; i++ {
-				dst := next[i*na : (i+1)*na]
-				clear(dst)
-				for j := 0; j <= c.order && i+j <= hi; j++ {
-					addMulVec(dst, c.prop[j], xi[(i+j)*na:(i+j+1)*na])
-				}
-			}
+			propagate(next, xi, hi)
 			xi, next = next, xi
 		}
-		for _, inj := range injections {
+		for pending < len(byStart) && injections[byStart[pending]].start <= m {
+			k := byStart[pending]
+			at, _ := slices.BinarySearch(active, k)
+			active = slices.Insert(active, at, k)
+			pending++
+		}
+		kept := active[:0]
+		for _, id := range active {
+			inj := &injections[id]
 			k := m - inj.start
-			if k < 0 || k >= len(inj.amp) || inj.amp[k] == 0 {
+			if k >= len(inj.amp) {
+				continue
+			}
+			kept = append(kept, id)
+			if inj.amp[k] == 0 {
 				continue
 			}
 			a := inj.amp[k]
-			base := inj.block * na
+			dst := xi[inj.block*na : inj.block*na+len(inj.vec)]
 			for idx, v := range inj.vec {
-				xi[base+idx] += a * v
+				dst[idx] += a * v
 			}
 			hi = max(hi, inj.block+len(inj.vec)/na-1)
 		}
-		for i := 0; i <= hi; i++ {
-			o := c.out[i]
-			if o == nil {
-				continue
-			}
-			oRaw := o.RawMatrix()
-			blk := xi[i*na : (i+1)*na]
-			for r := range c.p {
-				row := oRaw.Data[r*oRaw.Stride : r*oRaw.Stride+na]
+		active = kept
+		for _, r := range rows {
+			acc := 0.0
+			for _, ob := range outs {
+				if ob.block > hi {
+					break
+				}
+				row := ob.rows[r*na : (r+1)*na]
+				blk := xi[ob.block*na : ob.block*na+na]
 				s := 0.0
 				for idx, v := range row {
 					s += v * blk[idx]
 				}
-				yRaw.Data[r*yRaw.Stride+m] += s
+				acc += s
 			}
+			yRaw.Data[(rowOffset+r)*yRaw.Stride+m] = acc
 		}
 	}
-	return Y
 }
 
-func addMulVec(dst []float64, a *mat.Dense, x []float64) {
-	raw := a.RawMatrix()
-	for r := range dst {
-		row := raw.Data[r*raw.Stride : r*raw.Stride+raw.Cols]
-		s := 0.0
-		for idx, v := range row {
-			s += v * x[idx]
+// chainKernel returns propagateChain for prop, through a kernel that
+// advances two blocks at once for na ≤ 4, with the same sums.
+func chainKernel(prop []float64, na, order int) func(next, xi []float64, hi int) {
+	switch na {
+	case 2:
+		p := make([][4]float64, order+1)
+		for j := range p {
+			copy(p[j][:], prop[4*j:])
 		}
-		dst[r] += s
+		return func(next, xi []float64, hi int) { propagateChain2(next, xi, p, hi) }
+	case 3:
+		p := make([][9]float64, order+1)
+		for j := range p {
+			copy(p[j][:], prop[9*j:])
+		}
+		return func(next, xi []float64, hi int) { propagateChain3(next, xi, p, hi) }
+	case 4:
+		p := make([][16]float64, order+1)
+		for j := range p {
+			copy(p[j][:], prop[16*j:])
+		}
+		return func(next, xi []float64, hi int) { propagateChain4(next, xi, p, hi) }
+	}
+	return func(next, xi []float64, hi int) { propagateChain(next, xi, prop, na, order, hi) }
+}
+
+// propagateChain sets next_i = Σ_{j ≤ min(order, hi−i)} F_j·ξ_{i+j} for
+// i ≤ hi, F_j row-major at prop[j·na²:]. Every element sums its row
+// products from 0 in column order and then the per-j sums from 0 in j order,
+// whatever the kernel; the na-specific kernels advance two blocks at once.
+func propagateChain(next, xi, prop []float64, na, order, hi int) {
+	nn := na * na
+	for i := 0; i <= hi; i++ {
+		jn := min(order, hi-i) + 1
+		x := xi[i*na : (i+jn)*na]
+		dst := next[i*na : (i+1)*na]
+		for r := range dst {
+			acc := 0.0
+			for j := range jn {
+				row := prop[j*nn+r*na : j*nn+r*na+na]
+				v := x[j*na : j*na+na]
+				s := 0.0
+				for idx, w := range row {
+					s += w * v[idx]
+				}
+				acc += s
+			}
+			dst[r] = acc
+		}
+	}
+}
+
+func propagateChain2(next, xi []float64, prop [][4]float64, hi int) {
+	order := len(prop) - 1
+	i := 0
+	for ; i+1 <= hi; i += 2 {
+		jn := min(order, hi-i-1) + 1
+		var a00, a01, a10, a11 float64
+		x := xi[2*i:]
+		ps := prop[:jn]
+		for len(ps) >= 4 && len(x) >= 10 {
+			q0 := &ps[0]
+			q1 := &ps[1]
+			q2 := &ps[2]
+			q3 := &ps[3]
+			v := (*[10]float64)(x)
+			s000 := 0.0
+			s000 += q0[0] * v[0]
+			s000 += q0[1] * v[1]
+			a00 += s000
+			s001 := 0.0
+			s001 += q0[2] * v[0]
+			s001 += q0[3] * v[1]
+			a01 += s001
+			s010 := 0.0
+			s010 += q0[0] * v[2]
+			s010 += q0[1] * v[3]
+			a10 += s010
+			s011 := 0.0
+			s011 += q0[2] * v[2]
+			s011 += q0[3] * v[3]
+			a11 += s011
+			s100 := 0.0
+			s100 += q1[0] * v[2]
+			s100 += q1[1] * v[3]
+			a00 += s100
+			s101 := 0.0
+			s101 += q1[2] * v[2]
+			s101 += q1[3] * v[3]
+			a01 += s101
+			s110 := 0.0
+			s110 += q1[0] * v[4]
+			s110 += q1[1] * v[5]
+			a10 += s110
+			s111 := 0.0
+			s111 += q1[2] * v[4]
+			s111 += q1[3] * v[5]
+			a11 += s111
+			s200 := 0.0
+			s200 += q2[0] * v[4]
+			s200 += q2[1] * v[5]
+			a00 += s200
+			s201 := 0.0
+			s201 += q2[2] * v[4]
+			s201 += q2[3] * v[5]
+			a01 += s201
+			s210 := 0.0
+			s210 += q2[0] * v[6]
+			s210 += q2[1] * v[7]
+			a10 += s210
+			s211 := 0.0
+			s211 += q2[2] * v[6]
+			s211 += q2[3] * v[7]
+			a11 += s211
+			s300 := 0.0
+			s300 += q3[0] * v[6]
+			s300 += q3[1] * v[7]
+			a00 += s300
+			s301 := 0.0
+			s301 += q3[2] * v[6]
+			s301 += q3[3] * v[7]
+			a01 += s301
+			s310 := 0.0
+			s310 += q3[0] * v[8]
+			s310 += q3[1] * v[9]
+			a10 += s310
+			s311 := 0.0
+			s311 += q3[2] * v[8]
+			s311 += q3[3] * v[9]
+			a11 += s311
+			ps = ps[4:]
+			x = x[8:]
+		}
+		for len(ps) >= 1 && len(x) >= 4 {
+			q := &ps[0]
+			v := (*[4]float64)(x)
+			s00 := 0.0
+			s00 += q[0] * v[0]
+			s00 += q[1] * v[1]
+			a00 += s00
+			s01 := 0.0
+			s01 += q[2] * v[0]
+			s01 += q[3] * v[1]
+			a01 += s01
+			s10 := 0.0
+			s10 += q[0] * v[2]
+			s10 += q[1] * v[3]
+			a10 += s10
+			s11 := 0.0
+			s11 += q[2] * v[2]
+			s11 += q[3] * v[3]
+			a11 += s11
+			ps = ps[1:]
+			x = x[2:]
+		}
+		for j := jn; j <= min(order, hi-i); j++ {
+			q := &prop[j]
+			v := (*[2]float64)(xi[2*(i+j):])
+			s0 := 0.0
+			s0 += q[0] * v[0]
+			s0 += q[1] * v[1]
+			a00 += s0
+			s1 := 0.0
+			s1 += q[2] * v[0]
+			s1 += q[3] * v[1]
+			a01 += s1
+		}
+		dst := (*[4]float64)(next[2*i:])
+		dst[0], dst[1] = a00, a01
+		dst[2], dst[3] = a10, a11
+	}
+	for ; i <= hi; i++ {
+		var a00, a01 float64
+		for j := range prop[:min(order, hi-i)+1] {
+			q := &prop[j]
+			v := (*[2]float64)(xi[2*(i+j):])
+			s0 := 0.0
+			s0 += q[0] * v[0]
+			s0 += q[1] * v[1]
+			a00 += s0
+			s1 := 0.0
+			s1 += q[2] * v[0]
+			s1 += q[3] * v[1]
+			a01 += s1
+		}
+		dst := (*[2]float64)(next[2*i:])
+		dst[0], dst[1] = a00, a01
+	}
+}
+
+func propagateChain3(next, xi []float64, prop [][9]float64, hi int) {
+	order := len(prop) - 1
+	i := 0
+	for ; i+1 <= hi; i += 2 {
+		jn := min(order, hi-i-1) + 1
+		var a00, a01, a02, a10, a11, a12 float64
+		x := xi[3*i:]
+		ps := prop[:jn]
+		for len(ps) >= 2 && len(x) >= 9 {
+			q0 := &ps[0]
+			q1 := &ps[1]
+			v := (*[9]float64)(x)
+			s000 := 0.0
+			s000 += q0[0] * v[0]
+			s000 += q0[1] * v[1]
+			s000 += q0[2] * v[2]
+			a00 += s000
+			s001 := 0.0
+			s001 += q0[3] * v[0]
+			s001 += q0[4] * v[1]
+			s001 += q0[5] * v[2]
+			a01 += s001
+			s002 := 0.0
+			s002 += q0[6] * v[0]
+			s002 += q0[7] * v[1]
+			s002 += q0[8] * v[2]
+			a02 += s002
+			s010 := 0.0
+			s010 += q0[0] * v[3]
+			s010 += q0[1] * v[4]
+			s010 += q0[2] * v[5]
+			a10 += s010
+			s011 := 0.0
+			s011 += q0[3] * v[3]
+			s011 += q0[4] * v[4]
+			s011 += q0[5] * v[5]
+			a11 += s011
+			s012 := 0.0
+			s012 += q0[6] * v[3]
+			s012 += q0[7] * v[4]
+			s012 += q0[8] * v[5]
+			a12 += s012
+			s100 := 0.0
+			s100 += q1[0] * v[3]
+			s100 += q1[1] * v[4]
+			s100 += q1[2] * v[5]
+			a00 += s100
+			s101 := 0.0
+			s101 += q1[3] * v[3]
+			s101 += q1[4] * v[4]
+			s101 += q1[5] * v[5]
+			a01 += s101
+			s102 := 0.0
+			s102 += q1[6] * v[3]
+			s102 += q1[7] * v[4]
+			s102 += q1[8] * v[5]
+			a02 += s102
+			s110 := 0.0
+			s110 += q1[0] * v[6]
+			s110 += q1[1] * v[7]
+			s110 += q1[2] * v[8]
+			a10 += s110
+			s111 := 0.0
+			s111 += q1[3] * v[6]
+			s111 += q1[4] * v[7]
+			s111 += q1[5] * v[8]
+			a11 += s111
+			s112 := 0.0
+			s112 += q1[6] * v[6]
+			s112 += q1[7] * v[7]
+			s112 += q1[8] * v[8]
+			a12 += s112
+			ps = ps[2:]
+			x = x[6:]
+		}
+		for len(ps) >= 1 && len(x) >= 6 {
+			q := &ps[0]
+			v := (*[6]float64)(x)
+			s00 := 0.0
+			s00 += q[0] * v[0]
+			s00 += q[1] * v[1]
+			s00 += q[2] * v[2]
+			a00 += s00
+			s01 := 0.0
+			s01 += q[3] * v[0]
+			s01 += q[4] * v[1]
+			s01 += q[5] * v[2]
+			a01 += s01
+			s02 := 0.0
+			s02 += q[6] * v[0]
+			s02 += q[7] * v[1]
+			s02 += q[8] * v[2]
+			a02 += s02
+			s10 := 0.0
+			s10 += q[0] * v[3]
+			s10 += q[1] * v[4]
+			s10 += q[2] * v[5]
+			a10 += s10
+			s11 := 0.0
+			s11 += q[3] * v[3]
+			s11 += q[4] * v[4]
+			s11 += q[5] * v[5]
+			a11 += s11
+			s12 := 0.0
+			s12 += q[6] * v[3]
+			s12 += q[7] * v[4]
+			s12 += q[8] * v[5]
+			a12 += s12
+			ps = ps[1:]
+			x = x[3:]
+		}
+		for j := jn; j <= min(order, hi-i); j++ {
+			q := &prop[j]
+			v := (*[3]float64)(xi[3*(i+j):])
+			s0 := 0.0
+			s0 += q[0] * v[0]
+			s0 += q[1] * v[1]
+			s0 += q[2] * v[2]
+			a00 += s0
+			s1 := 0.0
+			s1 += q[3] * v[0]
+			s1 += q[4] * v[1]
+			s1 += q[5] * v[2]
+			a01 += s1
+			s2 := 0.0
+			s2 += q[6] * v[0]
+			s2 += q[7] * v[1]
+			s2 += q[8] * v[2]
+			a02 += s2
+		}
+		dst := (*[6]float64)(next[3*i:])
+		dst[0], dst[1], dst[2] = a00, a01, a02
+		dst[3], dst[4], dst[5] = a10, a11, a12
+	}
+	for ; i <= hi; i++ {
+		var a00, a01, a02 float64
+		for j := range prop[:min(order, hi-i)+1] {
+			q := &prop[j]
+			v := (*[3]float64)(xi[3*(i+j):])
+			s0 := 0.0
+			s0 += q[0] * v[0]
+			s0 += q[1] * v[1]
+			s0 += q[2] * v[2]
+			a00 += s0
+			s1 := 0.0
+			s1 += q[3] * v[0]
+			s1 += q[4] * v[1]
+			s1 += q[5] * v[2]
+			a01 += s1
+			s2 := 0.0
+			s2 += q[6] * v[0]
+			s2 += q[7] * v[1]
+			s2 += q[8] * v[2]
+			a02 += s2
+		}
+		dst := (*[3]float64)(next[3*i:])
+		dst[0], dst[1], dst[2] = a00, a01, a02
+	}
+}
+
+func propagateChain4(next, xi []float64, prop [][16]float64, hi int) {
+	order := len(prop) - 1
+	i := 0
+	for ; i+1 <= hi; i += 2 {
+		jn := min(order, hi-i-1) + 1
+		var a00, a01, a02, a03, a10, a11, a12, a13 float64
+		x := xi[4*i:]
+		ps := prop[:jn]
+		for len(ps) >= 2 && len(x) >= 12 {
+			q0 := &ps[0]
+			q1 := &ps[1]
+			v := (*[12]float64)(x)
+			s000 := 0.0
+			s000 += q0[0] * v[0]
+			s000 += q0[1] * v[1]
+			s000 += q0[2] * v[2]
+			s000 += q0[3] * v[3]
+			a00 += s000
+			s001 := 0.0
+			s001 += q0[4] * v[0]
+			s001 += q0[5] * v[1]
+			s001 += q0[6] * v[2]
+			s001 += q0[7] * v[3]
+			a01 += s001
+			s002 := 0.0
+			s002 += q0[8] * v[0]
+			s002 += q0[9] * v[1]
+			s002 += q0[10] * v[2]
+			s002 += q0[11] * v[3]
+			a02 += s002
+			s003 := 0.0
+			s003 += q0[12] * v[0]
+			s003 += q0[13] * v[1]
+			s003 += q0[14] * v[2]
+			s003 += q0[15] * v[3]
+			a03 += s003
+			s010 := 0.0
+			s010 += q0[0] * v[4]
+			s010 += q0[1] * v[5]
+			s010 += q0[2] * v[6]
+			s010 += q0[3] * v[7]
+			a10 += s010
+			s011 := 0.0
+			s011 += q0[4] * v[4]
+			s011 += q0[5] * v[5]
+			s011 += q0[6] * v[6]
+			s011 += q0[7] * v[7]
+			a11 += s011
+			s012 := 0.0
+			s012 += q0[8] * v[4]
+			s012 += q0[9] * v[5]
+			s012 += q0[10] * v[6]
+			s012 += q0[11] * v[7]
+			a12 += s012
+			s013 := 0.0
+			s013 += q0[12] * v[4]
+			s013 += q0[13] * v[5]
+			s013 += q0[14] * v[6]
+			s013 += q0[15] * v[7]
+			a13 += s013
+			s100 := 0.0
+			s100 += q1[0] * v[4]
+			s100 += q1[1] * v[5]
+			s100 += q1[2] * v[6]
+			s100 += q1[3] * v[7]
+			a00 += s100
+			s101 := 0.0
+			s101 += q1[4] * v[4]
+			s101 += q1[5] * v[5]
+			s101 += q1[6] * v[6]
+			s101 += q1[7] * v[7]
+			a01 += s101
+			s102 := 0.0
+			s102 += q1[8] * v[4]
+			s102 += q1[9] * v[5]
+			s102 += q1[10] * v[6]
+			s102 += q1[11] * v[7]
+			a02 += s102
+			s103 := 0.0
+			s103 += q1[12] * v[4]
+			s103 += q1[13] * v[5]
+			s103 += q1[14] * v[6]
+			s103 += q1[15] * v[7]
+			a03 += s103
+			s110 := 0.0
+			s110 += q1[0] * v[8]
+			s110 += q1[1] * v[9]
+			s110 += q1[2] * v[10]
+			s110 += q1[3] * v[11]
+			a10 += s110
+			s111 := 0.0
+			s111 += q1[4] * v[8]
+			s111 += q1[5] * v[9]
+			s111 += q1[6] * v[10]
+			s111 += q1[7] * v[11]
+			a11 += s111
+			s112 := 0.0
+			s112 += q1[8] * v[8]
+			s112 += q1[9] * v[9]
+			s112 += q1[10] * v[10]
+			s112 += q1[11] * v[11]
+			a12 += s112
+			s113 := 0.0
+			s113 += q1[12] * v[8]
+			s113 += q1[13] * v[9]
+			s113 += q1[14] * v[10]
+			s113 += q1[15] * v[11]
+			a13 += s113
+			ps = ps[2:]
+			x = x[8:]
+		}
+		for len(ps) >= 1 && len(x) >= 8 {
+			q := &ps[0]
+			v := (*[8]float64)(x)
+			s00 := 0.0
+			s00 += q[0] * v[0]
+			s00 += q[1] * v[1]
+			s00 += q[2] * v[2]
+			s00 += q[3] * v[3]
+			a00 += s00
+			s01 := 0.0
+			s01 += q[4] * v[0]
+			s01 += q[5] * v[1]
+			s01 += q[6] * v[2]
+			s01 += q[7] * v[3]
+			a01 += s01
+			s02 := 0.0
+			s02 += q[8] * v[0]
+			s02 += q[9] * v[1]
+			s02 += q[10] * v[2]
+			s02 += q[11] * v[3]
+			a02 += s02
+			s03 := 0.0
+			s03 += q[12] * v[0]
+			s03 += q[13] * v[1]
+			s03 += q[14] * v[2]
+			s03 += q[15] * v[3]
+			a03 += s03
+			s10 := 0.0
+			s10 += q[0] * v[4]
+			s10 += q[1] * v[5]
+			s10 += q[2] * v[6]
+			s10 += q[3] * v[7]
+			a10 += s10
+			s11 := 0.0
+			s11 += q[4] * v[4]
+			s11 += q[5] * v[5]
+			s11 += q[6] * v[6]
+			s11 += q[7] * v[7]
+			a11 += s11
+			s12 := 0.0
+			s12 += q[8] * v[4]
+			s12 += q[9] * v[5]
+			s12 += q[10] * v[6]
+			s12 += q[11] * v[7]
+			a12 += s12
+			s13 := 0.0
+			s13 += q[12] * v[4]
+			s13 += q[13] * v[5]
+			s13 += q[14] * v[6]
+			s13 += q[15] * v[7]
+			a13 += s13
+			ps = ps[1:]
+			x = x[4:]
+		}
+		for j := jn; j <= min(order, hi-i); j++ {
+			q := &prop[j]
+			v := (*[4]float64)(xi[4*(i+j):])
+			s0 := 0.0
+			s0 += q[0] * v[0]
+			s0 += q[1] * v[1]
+			s0 += q[2] * v[2]
+			s0 += q[3] * v[3]
+			a00 += s0
+			s1 := 0.0
+			s1 += q[4] * v[0]
+			s1 += q[5] * v[1]
+			s1 += q[6] * v[2]
+			s1 += q[7] * v[3]
+			a01 += s1
+			s2 := 0.0
+			s2 += q[8] * v[0]
+			s2 += q[9] * v[1]
+			s2 += q[10] * v[2]
+			s2 += q[11] * v[3]
+			a02 += s2
+			s3 := 0.0
+			s3 += q[12] * v[0]
+			s3 += q[13] * v[1]
+			s3 += q[14] * v[2]
+			s3 += q[15] * v[3]
+			a03 += s3
+		}
+		dst := (*[8]float64)(next[4*i:])
+		dst[0], dst[1], dst[2], dst[3] = a00, a01, a02, a03
+		dst[4], dst[5], dst[6], dst[7] = a10, a11, a12, a13
+	}
+	for ; i <= hi; i++ {
+		var a00, a01, a02, a03 float64
+		for j := range prop[:min(order, hi-i)+1] {
+			q := &prop[j]
+			v := (*[4]float64)(xi[4*(i+j):])
+			s0 := 0.0
+			s0 += q[0] * v[0]
+			s0 += q[1] * v[1]
+			s0 += q[2] * v[2]
+			s0 += q[3] * v[3]
+			a00 += s0
+			s1 := 0.0
+			s1 += q[4] * v[0]
+			s1 += q[5] * v[1]
+			s1 += q[6] * v[2]
+			s1 += q[7] * v[3]
+			a01 += s1
+			s2 := 0.0
+			s2 += q[8] * v[0]
+			s2 += q[9] * v[1]
+			s2 += q[10] * v[2]
+			s2 += q[11] * v[3]
+			a02 += s2
+			s3 := 0.0
+			s3 += q[12] * v[0]
+			s3 += q[13] * v[1]
+			s3 += q[14] * v[2]
+			s3 += q[15] * v[3]
+			a03 += s3
+		}
+		dst := (*[4]float64)(next[4*i:])
+		dst[0], dst[1], dst[2], dst[3] = a00, a01, a02, a03
 	}
 }
 
@@ -330,12 +943,8 @@ func (c *delayChain) response(Y *mat.Dense, rowOffset int, sourcesFor func(r int
 		}
 		groups[key.String()] = append(groups[key.String()], r)
 	}
-	yRaw := Y.RawMatrix()
 	for _, key := range keys {
-		out := c.simulate(sources[key]).RawMatrix()
-		for _, r := range groups[key] {
-			copy(yRaw.Data[(rowOffset+r)*yRaw.Stride:(rowOffset+r)*yRaw.Stride+c.steps], out.Data[r*out.Stride:r*out.Stride+c.steps])
-		}
+		c.simulate(sources[key], Y, rowOffset, groups[key])
 	}
 }
 
