@@ -47,7 +47,8 @@ type exactStairLevel struct {
 
 // exactStair is the workspace of the exact staircase of an n×n pencil:
 // every big.Float is allocated once at exactCountPrec and reused by both
-// runs.
+// runs. trace, when set, receives each level record once the level is done;
+// the record aliases workspace buffers and is valid only during the call.
 type exactStair struct {
 	n                        int
 	a0, e0, a, e             [][]*big.Float

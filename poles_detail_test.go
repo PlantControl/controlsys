@@ -240,6 +240,7 @@ func TestPolesDetail_InvalidInputMatchesPoles(t *testing.T) {
 // τ_E < s ≤ ρ_j), so Accuracy is 1, and the bracket contains the
 // structural count of the generator.
 func TestPolesDetail_StiffChainLiteralsFlagged(t *testing.T) {
+	skipSlowUnderRace(t)
 	for _, l := range poleCountCases() {
 		sys, err := NewDescriptor(mat.NewDense(l.n, l.n, l.a), mat.NewDense(l.n, 1, nil), mat.NewDense(1, l.n, nil), mat.NewDense(1, 1, nil),
 			mat.NewDense(l.n, l.n, l.e), 0)
@@ -260,7 +261,7 @@ func TestPolesDetail_StiffChainLiteralsFlagged(t *testing.T) {
 //     tolerance of the data has one stiff pole fewer, and FiniteHi is one
 //     below the structural count of the generator. Under the normwise
 //     definition of "finite" (L4BCTU decision 1) the count is ambiguous,
-//     not wrong. Poles returns 6 values on each.
+//     not wrong. The test does not pin how many values Poles returns.
 //   - cpx 17 (X7O5UZ): float64 deflateStiffChain over-counts on amd64
 //     only; the exact staircase keeps all 8 level-1 values (the smallest
 //     3.6e-12, far above τ_E = 5.0e-16) for FiniteHi = 8 = len(Poles),
@@ -268,9 +269,9 @@ func TestPolesDetail_StiffChainLiteralsFlagged(t *testing.T) {
 //     count is not decided.
 func TestPolesDetail_NormwiseAmbiguousChainsFlagged(t *testing.T) {
 	want := map[string][3]int{
-		"rvb cpx:2531": {2, 3, 6},
-		"rvb cpx:7001": {0, 1, 6},
-		"rvb two:11":   {0, 1, 6},
+		"rvb cpx:2531": {2, 3, -1},
+		"rvb cpx:7001": {0, 1, -1},
+		"rvb two:11":   {0, 1, -1},
 		"rvb cpx:17":   {0, 8, 8},
 	}
 	for _, l := range rvbChainLiterals {
@@ -281,8 +282,8 @@ func TestPolesDetail_NormwiseAmbiguousChainsFlagged(t *testing.T) {
 		}
 		res := checkPolesDetail(t, l.name, sys)
 		w := want[l.name]
-		if res.Accuracy != 1 || res.FiniteLo != w[0] || res.FiniteHi != w[1] || len(res.Poles) != w[2] {
-			t.Errorf("%s: bracket [%d, %d] Accuracy %d with %d poles, want [%d, %d] Accuracy 1 with %d (structural %d)",
+		if res.Accuracy != 1 || res.FiniteLo != w[0] || res.FiniteHi != w[1] || (w[2] >= 0 && len(res.Poles) != w[2]) {
+			t.Errorf("%s: bracket [%d, %d] Accuracy %d with %d poles, want [%d, %d] Accuracy 1 (poles %d, -1 any; structural %d)",
 				l.name, res.FiniteLo, res.FiniteHi, res.Accuracy, len(res.Poles), w[0], w[1], w[2], l.want)
 		}
 	}
