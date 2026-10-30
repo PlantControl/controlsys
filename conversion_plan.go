@@ -17,6 +17,7 @@ type c2dPlan struct {
 	contOutputDelay []float64
 	pathDelay       *mat.Dense
 	workSys         *System
+	lsSlow          *System
 }
 
 func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
@@ -24,7 +25,11 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 		return c2dPlan{}, fmt.Errorf("system already discrete: %w", ErrWrongDomain)
 	}
 	var err error
-	if !(opts.Method == C2DMethodMatched && stiffDelayedDescriptor(sys)) && !(opts.Method == C2DMethodLeastSquares && leastSquaresPencilSource(sys) != nil) {
+	var lsSlow *System
+	if opts.Method == C2DMethodLeastSquares {
+		lsSlow = leastSquaresPencilSlow(sys)
+	}
+	if !(opts.Method == C2DMethodMatched && stiffDelayedDescriptor(sys)) && lsSlow == nil {
 		if sys, _, err = conversionStandardForm(sys, "descriptor reduction"); err != nil {
 			return c2dPlan{}, err
 		}
@@ -46,6 +51,7 @@ func newC2DPlan(sys *System, dt float64, opts C2DOptions) (c2dPlan, error) {
 		contInputDelay:  sys.InputDelay,
 		contOutputDelay: sys.OutputDelay,
 		workSys:         cp,
+		lsSlow:          lsSlow,
 	}
 	plan.workSys.InputDelay = nil
 	plan.workSys.OutputDelay = nil
@@ -110,7 +116,7 @@ func (p c2dPlan) discretizeMethod() (*System, error) {
 	case C2DMethodFOH:
 		return p.workSys.discretizeModifiedFOH(p.dt)
 	case C2DMethodLeastSquares:
-		return p.workSys.discretizeLeastSquares(p.dt, p.opts.FitOrder)
+		return p.workSys.discretizeLeastSquares(p.dt, p.opts.FitOrder, p.lsSlow)
 	case C2DMethodImpulse:
 		return p.workSys.discretizeImpulseParity(p.dt)
 	case C2DMethodMatched:

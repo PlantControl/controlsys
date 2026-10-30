@@ -59,14 +59,16 @@ func (sys *System) C2DFit(dt float64, opts C2DOptions) (*System, LeastSquaresFit
 	if err != nil {
 		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: %w", err)
 	}
-	out, fit, err := sys.leastSquaresFit(dt, opts.FitOrder)
+	out, fit, err := sys.leastSquaresFit(dt, opts.FitOrder, leastSquaresPencilSlow(sys))
 	if err != nil {
 		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: %w", err)
 	}
 	return out, fit, nil
 }
 
-func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSquaresFit, error) {
+// leastSquaresFit fits sys; slow is its leastSquaresPencilSlow, computed once
+// by the caller (newC2DPlan gates the descriptor reduction on it).
+func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*System, LeastSquaresFit, error) {
 	var none LeastSquaresFit
 	if sys.IsDiscrete() {
 		return nil, none, ErrWrongDomain
@@ -77,7 +79,12 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 	if _, m, p := sys.Dims(); m != 1 || p != 1 {
 		return nil, none, ErrNotSISO
 	}
-	pencil, slow := leastSquaresPencilParts(sys)
+	var pencil *System
+	if slow != nil {
+		core := *sys
+		core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
+		pencil = &core
+	}
 	sys, _, err := conversionStandardForm(sys, "descriptor reduction")
 	if err != nil {
 		return nil, none, err
@@ -165,36 +172,30 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int) (*System, LeastSqua
 	return out, LeastSquaresFit{FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: stable}, nil
 }
 
-// leastSquaresPencilSource returns the delay-free descriptor sys when its
-// LU fold E⁻¹A is inaccurate (foldInaccurateParts), so the least-squares fit
-// samples the frequency response of the pencil (sE−A)⁻¹, as MATLAB c2d
-// fits the continuous response, instead of that of the fold. It is nil
-// otherwise, and the fold is sampled.
-func leastSquaresPencilSource(sys *System) *System {
-	pencil, _ := leastSquaresPencilParts(sys)
-	return pencil
-}
-
-// leastSquaresPencilParts is leastSquaresPencilSource with the explicit slow
-// part of foldInaccurateParts, which holds any pole at s = 0. The integrators
-// are counted on it: the tolerance of leastSquaresIntegratorLimit scales with
-// ‖A‖₁, which the fold E⁻¹A inflates to the stiff pole (cond(E)), so a slow
-// pole there passes for one.
-func leastSquaresPencilParts(sys *System) (pencil, slow *System) {
+// leastSquaresPencilSlow returns, for a descriptor sys whose LU fold E⁻¹A
+// of the delay-free core is inaccurate (foldInaccurateParts), the explicit
+// slow part of that split, which holds any pole at s = 0; it is nil
+// otherwise. When it is non-nil the least-squares fit samples the response
+// of the pencil (sE−A)⁻¹ of that core, as MATLAB c2d fits the continuous
+// response, instead of that of the fold, and counts the integrators on the
+// slow part: the tolerance of leastSquaresIntegratorLimit scales with ‖A‖₁,
+// which the fold inflates to the stiff pole (cond(E)), so a slow pole there
+// passes for one.
+func leastSquaresPencilSlow(sys *System) *System {
 	if !sys.IsDescriptor() || sys.HasInternalDelay() {
-		return nil, nil
+		return nil
 	}
 	core := *sys
 	core.Delay, core.InputDelay, core.OutputDelay = nil, nil, nil
 	parts, ok := foldInaccurateParts(&core)
 	if !ok {
-		return nil, nil
+		return nil
 	}
-	return &core, parts[0]
+	return parts[0]
 }
 
-func (sys *System) discretizeLeastSquares(dt float64, fitOrder int) (*System, error) {
-	out, _, err := sys.leastSquaresFit(dt, fitOrder)
+func (sys *System) discretizeLeastSquares(dt float64, fitOrder int, slow *System) (*System, error) {
+	out, _, err := sys.leastSquaresFit(dt, fitOrder, slow)
 	return out, err
 }
 
