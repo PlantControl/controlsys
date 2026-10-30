@@ -22,6 +22,12 @@ type LeastSquaresFit struct {
 	RMSRelativeError float64
 	MaxRelativeError float64
 	Stable           bool
+	// Accuracy is 1 when the fit of a descriptor sampled through its pencil
+	// (see C2DFit) has more poles not stable (IsStable) than the slow part
+	// of its pencil split, such as a redundant pole of an order above the
+	// minimal one landing on or beyond z = −1; the value is returned as
+	// fitted, and reducing FitOrder is the remedy. It is 0 otherwise.
+	Accuracy int
 }
 
 // C2DFit converts sys like C2D with opts.Method C2DMethodLeastSquares and
@@ -165,11 +171,53 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 	}
 	propagateNames(out, sys)
 	out.StateName = nil
-	stable, err := out.IsStable()
+	unstable, err := out.nonStablePoleCount()
 	if err != nil {
 		return nil, none, err
 	}
-	return out, LeastSquaresFit{FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: stable}, nil
+	fit := LeastSquaresFit{FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: unstable == 0}
+	if slow != nil && unstable > 0 {
+		slowUnstable, err := continuousNonStablePoleCount(slow)
+		if err != nil {
+			return nil, none, err
+		}
+		if unstable > slowUnstable {
+			fit.Accuracy = 1
+		}
+	}
+	return out, fit, nil
+}
+
+// continuousNonStablePoleCount is the number of poles of the explicit
+// continuous sys that IsStable classifies as not stable. The slow part of
+// the pencil split is T11⁻¹·S11 of the generalized Schur form, upper
+// quasi-triangular, whose poles are those of its diagonal blocks.
+func continuousNonStablePoleCount(sys *System) (int, error) {
+	var poles []complex128
+	if !sys.IsDescriptor() && upperQuasiTriangular(sys.A) {
+		n, _ := sys.A.Dims()
+		raw := sys.A.RawMatrix()
+		data := raw.Data
+		if raw.Stride != n {
+			data = make([]float64, n*n)
+			for i := range n {
+				copy(data[i*n:(i+1)*n], raw.Data[i*raw.Stride:])
+			}
+		}
+		poles = schurEigenvaluesRaw(data, n)
+	} else {
+		var err error
+		if poles, err = sys.Poles(); err != nil {
+			return 0, err
+		}
+	}
+	count := 0
+	for _, p := range poles {
+		if poleOnOrOutsideStabilityBoundary(p, true, poleStabilityTolerance(p)) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // leastSquaresPencilSlow returns, for a descriptor sys whose LU fold E⁻¹A

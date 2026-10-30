@@ -253,7 +253,8 @@ const (
 	// C2DMethodMatched is zero-pole matching (SISO only).
 	C2DMethodMatched C2DMethod = "matched"
 	// C2DMethodLeastSquares fits the frequency response up to Nyquist (c2d,
-	// SISO only).
+	// SISO only). C2D returns the fit as MATLAB does; C2DFit also reports
+	// its quality and Accuracy.
 	C2DMethodLeastSquares C2DMethod = "least-squares"
 )
 

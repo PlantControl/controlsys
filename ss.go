@@ -267,6 +267,31 @@ func (sys *System) IsStable() (bool, error) {
 	return true, nil
 }
 
+// nonStablePoleCount is the number of poles that IsStable classifies as not
+// stable; IsStable is true exactly when it is 0. A continuous model with
+// internal delays, whose roots IsStable does not count, returns
+// ErrContinuousInternalDelay.
+func (sys *System) nonStablePoleCount() (int, error) {
+	if err := requireSystem("IsStable", sys); err != nil {
+		return 0, err
+	}
+	sys, err := finiteDimensionalModel(sys, "IsStable")
+	if err != nil {
+		return 0, err
+	}
+	poles, err := sys.Poles()
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, p := range poles {
+		if poleOnOrOutsideStabilityBoundary(p, sys.IsContinuous(), poleStabilityTolerance(p)) {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func validateDims(A, B, C, D *mat.Dense, dt float64) (n, m, p int, err error) {
 	A, B, C, D = nonEmptyDense(A), nonEmptyDense(B), nonEmptyDense(C), nonEmptyDense(D)
 	if err := newTimeDomain(dt).validateSampleTime(); err != nil {
