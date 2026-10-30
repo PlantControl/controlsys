@@ -1248,7 +1248,10 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // res (Accuracy 1). Such a pencil K, 2.6e-7 from the gain of its X at a
 // resolution of 8.7e-6, was 1.25e-6 off the 320-bit gain (band 4.7e-10),
 // the ddNewtonGain K 5.2e-14 and the Hewer gain exact; the Hewer gain
-// cost 5 to 36 times the ddNewtonGain.
+// cost 5 to 36 times the ddNewtonGain. Of 40 such rotated sweep rows
+// natively (34 on amd64) 30 (25) took ddNewtonGain and 3 (6) the Hewer
+// gain, all within 3.7e-9 of the 320-bit gain, and 7 (3) were demoted,
+// their pencil K 3.1e-9 to 4e-7 off.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
