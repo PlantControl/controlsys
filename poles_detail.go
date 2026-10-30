@@ -21,12 +21,14 @@ type PolesResult struct {
 	// than the rounding of the data resolves need not lie in the bracket.
 	// Both are n for an explicit model.
 	FiniteLo, FiniteHi int
-	// Accuracy is 0 when FiniteLo == FiniteHi == len(Poles): the finite
-	// count is decided within the rounding class and Poles returns that
-	// many poles. It is 1 otherwise, so the number of poles (and those of
-	// large magnitude in particular) may be wrong: the count is not
-	// decided by the data in float64, or Poles disagrees with the decided
-	// count. This is the 0/1 Report convention of RiccatiResult.Accuracy.
+	// Accuracy is 0 when FiniteLo == FiniteHi == len(Poles): both
+	// staircase counts and Poles agree. It is not a certificate: FiniteHi
+	// counts a value at or below n·eps(σ₁(E)) as zero, and a pencil within
+	// that rounding of the data on which the value is not zero can have
+	// one finite pole more, so even at Accuracy 0 the count (and the poles
+	// of large magnitude) may be wrong. Accuracy is 1 otherwise: the count
+	// is not settled by the data in float64, or Poles disagrees with it.
+	// It follows the 0/1 convention of RiccatiResult.Accuracy.
 	Accuracy int
 }
 
@@ -37,8 +39,9 @@ type PolesResult struct {
 // descriptor model the bracket comes from a staircase run twice in
 // 320-bit arithmetic, identical on every platform. Its one-sided Jacobi
 // SVDs cost O(n³) multiple-precision operations per sweep and level: tens
-// of milliseconds for n ≈ 10 and seconds for n ≈ 40, hundreds of times
-// Poles, so it is a diagnostic, not for inner loops.
+// of milliseconds for n ≈ 10 and seconds for n ≈ 40, typically several
+// hundred and up to a few thousand times Poles, so it is a diagnostic,
+// not for inner loops.
 func (sys *System) PolesDetail() (*PolesResult, error) {
 	n, _, _ := sys.Dims()
 	if n == 0 {
