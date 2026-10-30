@@ -1241,6 +1241,17 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // (rotatedHewer): ok is then false when it did not converge and Hewer
 // failed, r the refined candidate, the best float64 K in hand
 // (Y6BJEX; the pencil K it replaces was 0.29 off where r's was 2.3e-3).
+// Nor is a rotated K within gainFloor of the gain of an X that resolves
+// that gain only beyond gainFloor kept as it is: as with the given
+// inputs it takes ddNewtonGain (the given gain, which gainMissIn
+// measures rotated K against), else the Hewer gain, else ok is false, r
+// res (Accuracy 1). Such a pencil K, 2.6e-7 from the gain of its X at a
+// resolution of 8.7e-6, was 1.25e-6 off the 320-bit gain (band 4.7e-10),
+// the ddNewtonGain K 5.2e-14 and the Hewer gain exact; the Hewer gain
+// cost 5 to 36 times the ddNewtonGain. Of 40 such rotated sweep rows
+// natively (34 on amd64) 30 (25) took ddNewtonGain and 3 (6) the Hewer
+// gain, all within 3.7e-9 of the 320-bit gain, and 7 (3) were demoted,
+// their pencil K 3.1e-9 to 4e-7 off.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
@@ -1281,6 +1292,15 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 			if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
 				return h, 0, true
 			}
+		}
+		if rot && d.tol > gainFloor && !(d.d > gainFloor) {
+			if h, ok := ddNewtonGain(A, B, Q, R, opts, res); ok {
+				return h, 0, true
+			}
+			if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
+				return h, 0, true
+			}
+			return res, d.units(gainFloor), false
 		}
 		return res, 0, true
 	}
