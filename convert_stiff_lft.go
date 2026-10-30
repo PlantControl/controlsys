@@ -33,10 +33,33 @@ func stiffLFTSampled(sys *System, x0 *mat.VecDense, dt float64) (*System, *mat.V
 	if !ok {
 		return nil, nil, false
 	}
-	if _, _, chain := delayChainModel(sys); chain && sp.cond*0x1p-52 <= dt*schurSpectralRadius(sp.parts[0].A) {
+	if sp.foldAccurate(dt) {
 		return nil, nil, false
 	}
 	return sp.explicit()
+}
+
+// stiffLFTSampledAuto is stiffLFTSampled for a response sampled at the
+// spacing dtOf(out) of the automatic grid of the returned model out (Step,
+// Initial), so the parts are assembled before the gate decides.
+func stiffLFTSampledAuto(sys *System, x0 *mat.VecDense, dtOf func(out *System) float64) (*System, *mat.VecDense, bool) {
+	sp, ok := newStiffLFTSplit(sys, x0)
+	if !ok {
+		return nil, nil, false
+	}
+	out, xt, ok := sp.explicit()
+	if !ok || sp.foldAccurate(dtOf(out)) {
+		return nil, nil, false
+	}
+	return out, xt, true
+}
+
+// foldAccurate reports whether the exact delay chain of the LU fold E⁻¹A,
+// with error cond(E)·ε, is at least as accurate on the spacing dt as the
+// ZOH discretization of the parts, with error dt·ρ (see stiffLFTSampled).
+func (sp *stiffLFTSplit) foldAccurate(dt float64) bool {
+	_, _, chain := delayChainModel(sp.sys)
+	return chain && sp.cond*0x1p-52 <= dt*schurSpectralRadius(sp.parts[0].A)
 }
 
 // stiffLFTExplicitState is stiffLFTExplicit that also maps a non-nil x0 to
