@@ -1,0 +1,839 @@
+package controlsys
+
+import (
+	"cmp"
+	"errors"
+	"math"
+	"math/big"
+	"math/cmplx"
+	"math/rand/v2"
+	"slices"
+	"testing"
+
+	"plantcontrol.org/v1/gonum/mat"
+)
+
+func polesBitsEqual(a, b []complex128) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if math.Float64bits(real(a[i])) != math.Float64bits(real(b[i])) || math.Float64bits(imag(a[i])) != math.Float64bits(imag(b[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+// exactPositiveDefinite reports whether the symmetric rational s·(g − c·I)
+// is positive definite, s = ±1, by exact LDLᵀ: every pivot must be positive.
+func exactPositiveDefinite(g [][]*big.Rat, c *big.Rat, s int) bool {
+	n := len(g)
+	m := make([][]*big.Rat, n)
+	for i := range n {
+		m[i] = make([]*big.Rat, n)
+		for j := range n {
+			m[i][j] = new(big.Rat).Set(g[i][j])
+		}
+		m[i][i].Sub(m[i][i], c)
+		if s < 0 {
+			for j := range n {
+				m[i][j].Neg(m[i][j])
+			}
+		}
+	}
+	var f, t big.Rat
+	for k := range n {
+		if m[k][k].Sign() <= 0 {
+			return false
+		}
+		for i := k + 1; i < n; i++ {
+			f.Quo(m[i][k], m[k][k])
+			for j := k + 1; j < n; j++ {
+				t.Mul(&f, m[k][j])
+				m[i][j].Sub(m[i][j], &t)
+			}
+		}
+	}
+	return true
+}
+
+// exactMATLABFullRank decides σ_n(E) > n·eps(fl(σ₁(E))), the full-rank
+// test of descriptorRank, in exact rational arithmetic on the Gram matrix
+// EᵀE: no floating-point SVD is involved. fl(σ₁) ≥ 2^k exactly when
+// σ₁ ≥ 2^k − 2^(k−54) (round to nearest, ties to the even 2^k).
+func exactMATLABFullRank(t *testing.T, E *mat.Dense) bool {
+	t.Helper()
+	n, _ := E.Dims()
+	g := make([][]*big.Rat, n)
+	zero := true
+	for i := range n {
+		g[i] = make([]*big.Rat, n)
+		for j := range n {
+			s, p := new(big.Rat), new(big.Rat)
+			for r := range n {
+				a, b := new(big.Rat).SetFloat64(E.At(r, i)), new(big.Rat).SetFloat64(E.At(r, j))
+				s.Add(s, p.Mul(a, b))
+			}
+			g[i][j] = s
+			zero = zero && s.Sign() == 0
+		}
+	}
+	if zero {
+		return false
+	}
+	pow2 := func(k int) *big.Rat {
+		r := new(big.Rat).SetInt64(1)
+		if k >= 0 {
+			r.Num().Lsh(r.Num(), uint(k))
+		} else {
+			r.Denom().Lsh(r.Denom(), uint(-k))
+		}
+		return r
+	}
+	sigma1Below := func(c *big.Rat) bool {
+		return exactPositiveDefinite(g, new(big.Rat).Mul(c, c), -1)
+	}
+	roundsBelow := func(k int) bool {
+		return sigma1Below(new(big.Rat).Sub(pow2(k), pow2(k-54)))
+	}
+	_, k := math.Frexp(mat.Norm(E, 2))
+	k--
+	for steps := 0; ; steps++ {
+		if steps > 2100 {
+			t.Fatal("exactMATLABFullRank: no binade for σ₁")
+		}
+		switch {
+		case roundsBelow(k):
+			k--
+		case !roundsBelow(k + 1):
+			k++
+		default:
+			if k < -1022 {
+				t.Fatalf("exactMATLABFullRank: subnormal σ₁ (binade %d) not handled", k)
+			}
+			tau := new(big.Rat).Mul(new(big.Rat).SetInt64(int64(n)), pow2(k-52))
+			return exactPositiveDefinite(g, new(big.Rat).Mul(tau, tau), 1)
+		}
+	}
+}
+
+// polesAccuracyOracle evaluates the Accuracy rule of PolesResult
+// independently of PolesDetail: 0 for E nil or exactly the identity, else 0
+// iff E has full MATLAB rank (exact arithmetic) and Poles returns n poles.
+func polesAccuracyOracle(t *testing.T, sys *System) int {
+	t.Helper()
+	if sys.LFT != nil {
+		zd, err := sys.ZeroDelayApprox()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sys = zd
+	}
+	n, _, _ := sys.Dims()
+	if n == 0 || sys.E == nil {
+		return 0
+	}
+	identity := true
+	for i := range n {
+		for j := range n {
+			if want := float64(boolToInt(i == j)); sys.E.At(i, j) != want {
+				identity = false
+			}
+		}
+	}
+	if identity {
+		return 0
+	}
+	p, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p) == n && exactMATLABFullRank(t, sys.E) {
+		return 0
+	}
+	return 1
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// checkPolesDetail returns PolesDetail of sys after checking that its Poles
+// are those of Poles bit for bit and that Accuracy is that of
+// polesAccuracyOracle.
+func checkPolesDetail(t *testing.T, name string, sys *System) *PolesResult {
+	t.Helper()
+	want, err := sys.Poles()
+	if err != nil {
+		t.Fatalf("%s: Poles: %v", name, err)
+	}
+	res, err := sys.PolesDetail()
+	if err != nil {
+		t.Fatalf("%s: PolesDetail: %v", name, err)
+	}
+	if !polesBitsEqual(res.Poles, want) {
+		t.Errorf("%s: PolesDetail poles %v, Poles %v", name, res.Poles, want)
+	}
+	if acc := polesAccuracyOracle(t, sys); res.Accuracy != acc {
+		t.Errorf("%s: Accuracy %d with %d poles, exact rule gives %d", name, res.Accuracy, len(res.Poles), acc)
+	}
+	return res
+}
+
+func polesDetailRandDense(rng *rand.Rand, r, c int) *mat.Dense {
+	m := mat.NewDense(r, c, nil)
+	for i := range r {
+		for j := range c {
+			m.Set(i, j, rng.NormFloat64())
+		}
+	}
+	return m
+}
+
+func polesDetailDescriptor(t *testing.T, n int, a, e []float64) *System {
+	t.Helper()
+	sys, err := NewDescriptor(mat.NewDense(n, n, a), mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil), mat.NewDense(1, 1, nil), mat.NewDense(n, n, e), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// TestExactMATLABFullRankMatchesDescriptorRank: on diagonal E, whose
+// singular values are exact, the exact test of the oracle and
+// descriptorRank agree at the tolerance boundary n·eps(σ₁), including σ₁
+// just below a power of two.
+func TestExactMATLABFullRankMatchesDescriptorRank(t *testing.T) {
+	ulp2 := math.Nextafter(2, 3) - 2
+	for _, tc := range []struct {
+		d    []float64
+		want bool
+	}{
+		{[]float64{2, 1}, true},
+		{[]float64{2, 2 * ulp2}, false},
+		{[]float64{2, math.Nextafter(2*ulp2, 1)}, true},
+		{[]float64{-2, 0, 1}, false},
+		{[]float64{math.Nextafter(2, 0), math.Ldexp(3, -52), 1}, false},
+		{[]float64{math.Nextafter(2, 0), math.Ldexp(4, -52), 1}, true},
+		{[]float64{0, 0}, false},
+	} {
+		n := len(tc.d)
+		E := mat.NewDense(n, n, nil)
+		for i, v := range tc.d {
+			E.Set(i, i, v)
+		}
+		sv := append([]float64(nil), tc.d...)
+		for i := range sv {
+			sv[i] = math.Abs(sv[i])
+		}
+		slices.SortFunc(sv, func(a, b float64) int { return cmp.Compare(b, a) })
+		if r, _, _ := descriptorRank(sv, sv[0], n, true); (r == n) != tc.want {
+			t.Errorf("diag %v: descriptorRank %d, want full rank %v", tc.d, r, tc.want)
+		}
+		if got := exactMATLABFullRank(t, E); got != tc.want {
+			t.Errorf("diag %v: exact full rank %v, want %v", tc.d, got, tc.want)
+		}
+	}
+}
+
+// TestPolesDetailExplicitModelsCertified: with E nil or the identity,
+// continuous or discrete, with or without internal delays, every
+// eigenvalue of A is a pole and Accuracy is 0.
+func TestPolesDetailExplicitModelsCertified(t *testing.T) {
+	rng := rand.New(rand.NewPCG(5, 56))
+	for run := range 6 {
+		n := 1 + run
+		A := polesDetailRandDense(rng, n, n)
+		for _, dt := range []float64{0, 0.1} {
+			sys, err := New(A, polesDetailRandDense(rng, n, 1), polesDetailRandDense(rng, 1, n), mat.NewDense(1, 1, nil), dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eye := mat.NewDense(n, n, nil)
+			for i := range n {
+				eye.Set(i, i, 1)
+			}
+			withI, err := NewDescriptor(A, sys.B, sys.C, sys.D, eye, dt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range []*System{sys, withI} {
+				if res := checkPolesDetail(t, "explicit", s); len(res.Poles) != n || res.Accuracy != 0 {
+					t.Errorf("n=%d dt=%v identity E=%v: %d poles Accuracy %d, want %d and 0", n, dt, s.E != nil, len(res.Poles), res.Accuracy, n)
+				}
+			}
+		}
+	}
+	for _, dt := range []float64{0, 0.1} {
+		sys, _ := internalDelayZerosFixture(t, dt, 2, mat.NewDense(1, 1, []float64{0.25}))
+		if res := checkPolesDetail(t, "internal delay", sys); res.Accuracy != 0 {
+			t.Errorf("internal delay dt=%v: Accuracy %d, want 0", dt, res.Accuracy)
+		}
+	}
+	gain, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := gain.PolesDetail(); err != nil || res == nil || len(res.Poles) != 0 || res.Accuracy != 0 {
+		t.Errorf("static gain: %+v, %v; want empty result, Accuracy 0", res, err)
+	}
+}
+
+// TestPolesDetailNonsingularDescriptorCertified: a nonsymmetric E far from
+// singular gives Accuracy 0 and the n poles of E⁻¹A.
+func TestPolesDetailNonsingularDescriptorCertified(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 56))
+	for run := range 6 {
+		n := 2 + run
+		E := polesDetailRandDense(rng, n, n)
+		for i := range n {
+			E.Set(i, i, E.At(i, i)+3)
+		}
+		A := polesDetailRandDense(rng, n, n)
+		sys, err := NewDescriptor(A, polesDetailRandDense(rng, n, 1), polesDetailRandDense(rng, 1, n), mat.NewDense(1, 1, nil), E, 0.1*float64(run%2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := checkPolesDetail(t, "nonsingular E", sys)
+		if res.Accuracy != 0 || len(res.Poles) != n {
+			t.Errorf("n=%d: %d poles Accuracy %d, want %d and 0", n, len(res.Poles), res.Accuracy, n)
+			continue
+		}
+		var fold mat.Dense
+		if err := fold.Solve(E, A); err != nil {
+			t.Fatal(err)
+		}
+		var eig mat.Eigen
+		if !eig.Factorize(&fold, mat.EigenNone) {
+			t.Fatal("eig failed")
+		}
+		for _, w := range eig.Values(nil) {
+			best := math.Inf(1)
+			for _, p := range res.Poles {
+				best = min(best, cmplx.Abs(p-w))
+			}
+			if best > 1e-9*(1+cmplx.Abs(w)) {
+				t.Errorf("n=%d: pole %v of E⁻¹A missing from %v", n, w, res.Poles)
+			}
+		}
+	}
+}
+
+// TestPolesDetailNearSingularEBoundary: E = [1 1; 1 1+δ] (exact in
+// float64) with σ_min ≈ δ/2.6 against MATLAB's rank tolerance
+// 2·eps(σ₁) ≈ 8.9e-16. δ = 2⁻⁴⁰ is robustly nonsingular, Accuracy 0 with
+// both poles (one stiff, ~1/δ); δ = 2⁻⁵² and δ = 0 are within the
+// tolerance of singular, Accuracy 1.
+func TestPolesDetailNearSingularEBoundary(t *testing.T) {
+	a := []float64{-1, 2, 0.5, -3}
+	for _, tc := range []struct {
+		delta float64
+		want  int
+	}{{math.Ldexp(1, -40), 0}, {math.Ldexp(1, -52), 1}, {0, 1}} {
+		sys := polesDetailDescriptor(t, 2, a, []float64{1, 1, 1, 1 + tc.delta})
+		res := checkPolesDetail(t, "near-singular E", sys)
+		if res.Accuracy != tc.want {
+			t.Errorf("δ=%g: Accuracy %d with poles %v, want %d", tc.delta, res.Accuracy, res.Poles, tc.want)
+		}
+		if tc.want == 0 && len(res.Poles) != 2 {
+			t.Errorf("δ=%g: poles %v, want 2", tc.delta, res.Poles)
+		}
+	}
+}
+
+// TestPolesDetailSingularDescriptorFlagged: integer pencils
+// M·(blkdiag(F, I), blkdiag(W, N))·P with unimodular M, P (exact in
+// float64) and N nilpotent of index 1, 2 or 3 have singular E, so Accuracy
+// is 1 even though Poles returns the nf poles of W⁻¹F: a pencil within
+// MATLAB's rank tolerance can have another finite count.
+func TestPolesDetailSingularDescriptorFlagged(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 57))
+	ints := func(lo, hi int) float64 { return float64(lo + rng.IntN(hi-lo+1)) }
+	for run := range 9 {
+		nf, k := 1+run%3, 1+run/3
+		n := nf + k
+		F, W := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+		for i := range nf {
+			for j := range nf {
+				F.Set(i, j, ints(-4, 4))
+				if j > i {
+					W.Set(i, j, ints(-2, 2))
+				}
+			}
+			W.Set(i, i, ints(1, 3))
+		}
+		for i := nf; i < n; i++ {
+			F.Set(i, i, 1)
+			if i+1 < n {
+				W.Set(i, i+1, 1)
+			}
+			for j := range nf {
+				F.Set(j, i, ints(-2, 2))
+			}
+		}
+		unimodular := func() *mat.Dense {
+			L, U := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+			for i := range n {
+				L.Set(i, i, 1)
+				U.Set(i, i, float64(1-2*rng.IntN(2)))
+				for j := range i {
+					L.Set(i, j, ints(-1, 1))
+					U.Set(j, i, ints(-1, 1))
+				}
+			}
+			var m mat.Dense
+			m.Mul(L, U)
+			return &m
+		}
+		M, P := unimodular(), unimodular()
+		var T, A, E mat.Dense
+		T.Mul(M, F)
+		A.Mul(&T, P)
+		T.Mul(M, W)
+		E.Mul(&T, P)
+		sys, err := NewDescriptor(&A, polesDetailRandDense(rng, n, 1), polesDetailRandDense(rng, 1, n), mat.NewDense(1, 1, nil), &E, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := checkPolesDetail(t, "integer chain pencil", sys)
+		if res.Accuracy != 1 || len(res.Poles) != nf {
+			t.Errorf("run %d nf=%d chain %d: %d poles Accuracy %d, want %d and 1", run, nf, k, len(res.Poles), res.Accuracy, nf)
+			continue
+		}
+		var winv, wf mat.Dense
+		if err := winv.Inverse(W.Slice(0, nf, 0, nf)); err != nil {
+			t.Fatal(err)
+		}
+		wf.Mul(&winv, F.Slice(0, nf, 0, nf))
+		var eig mat.Eigen
+		if !eig.Factorize(&wf, mat.EigenNone) {
+			t.Fatal("eig failed")
+		}
+		for _, w := range eig.Values(nil) {
+			best := math.Inf(1)
+			for _, p := range res.Poles {
+				best = min(best, cmplx.Abs(p-w))
+			}
+			if best > 1e-8*(1+cmplx.Abs(w)) {
+				t.Errorf("run %d: pole %v of (F, W) missing from %v", run, w, res.Poles)
+			}
+		}
+	}
+	sys, _ := internalDelayZerosFixture(t, 0, 2, mat.NewDense(1, 1, []float64{0.25}))
+	sys.E = mat.NewDense(3, 3, []float64{1, 2, 0, 0, 1, 1, 1, 3, 1})
+	if res := checkPolesDetail(t, "internal delay, singular E", sys); res.Accuracy != 1 {
+		t.Errorf("internal delay, singular E: Accuracy %d with %d poles, want 1", res.Accuracy, len(res.Poles))
+	}
+}
+
+// TestPolesDetailStiffChainLiteralsFlagged: the in-repo stiff-chain
+// literals have E rank deficient by MATLAB's rank tolerance (their
+// structural zeros sit at the rounding of the data), so Accuracy is 1.
+func TestPolesDetailStiffChainLiteralsFlagged(t *testing.T) {
+	for _, set := range [][]stiffChainCase{stiffChainResplitCases, stiffChainClosedCases, largePoleAbsorbCases} {
+		for _, tc := range set {
+			res := checkPolesDetail(t, tc.name, polesDetailDescriptor(t, tc.n, tc.a, tc.e))
+			if res.Accuracy != 1 {
+				t.Errorf("%s: Accuracy %d with %d poles, want 1", tc.name, res.Accuracy, len(res.Poles))
+			}
+		}
+	}
+}
+
+// TestPolesDetailMiscountedStiffPolesFlagged: rvbBuild "two" rows
+// (PCG(seed, 44044), generated on arm64, stored bit-exact; I5CXGD) whose
+// generator has oracle finite poles, two of them stiff (~1e8..1e9), and
+// whose E is rank deficient by MATLAB's rank tolerance. On arm64 Poles
+// returns oracle−1 poles with O(1)-wrong stiff values (two 50: {-5.81e8,
+// 0.862} against {1.173e9, -3.887e8, 0.862}); the count is not decided by
+// the data, so Accuracy must be 1 on every platform.
+func TestPolesDetailMiscountedStiffPolesFlagged(t *testing.T) {
+	for _, l := range polesDetailMiscountedRows {
+		sys := polesDetailDescriptor(t, l.n, l.a, l.e)
+		if exactMATLABFullRank(t, sys.E) {
+			t.Errorf("%s: E has full MATLAB rank in exact arithmetic, want deficient", l.name)
+		}
+		if res := checkPolesDetail(t, l.name, sys); res.Accuracy != 1 {
+			t.Errorf("%s: Accuracy %d with %d poles (oracle %d), want 1", l.name, res.Accuracy, len(res.Poles), l.oracle)
+		}
+	}
+}
+
+// TestPolesDetailRankDeficientEWithAllPolesFlagged: stiff-chain literals
+// (ELT76F/IP4PC3 task bodies, row-major, bit-exact) whose E is rank
+// deficient by MATLAB's rank tolerance, σ_min ≈ 0.02·n·eps(σ₁), yet
+// Poles keeps all n eigenvalues on arm64 and amd64: a full count does not
+// make Accuracy 0 without a robustly nonsingular E.
+func TestPolesDetailRankDeficientEWithAllPolesFlagged(t *testing.T) {
+	for _, l := range polesDetailRankDeficientRows {
+		sys := polesDetailDescriptor(t, l.n, l.a, l.e)
+		if exactMATLABFullRank(t, sys.E) {
+			t.Errorf("%s: E has full MATLAB rank in exact arithmetic, want deficient", l.name)
+		}
+		res := checkPolesDetail(t, l.name, sys)
+		if res.Accuracy != 1 {
+			t.Errorf("%s: Accuracy %d with %d poles, want 1", l.name, res.Accuracy, len(res.Poles))
+		}
+		if len(res.Poles) != l.n {
+			t.Logf("%s: %d of %d poles (stored rows keep all n on arm64 and amd64)", l.name, len(res.Poles), l.n)
+		}
+	}
+}
+
+// TestPolesDetailInvalidInputMatchesPoles: PolesDetail fails exactly
+// where Poles fails, with the same sentinel and a nil result.
+func TestPolesDetailInvalidInputMatchesPoles(t *testing.T) {
+	nanA := polesDetailDescriptor(t, 2, []float64{1, 0, 0, 2}, []float64{1, 0, 0, 0})
+	nanA.A.Set(0, 1, math.NaN())
+	nanE := polesDetailDescriptor(t, 2, []float64{1, 0, 0, 2}, []float64{1, 0, 0, 0})
+	nanE.E.Set(1, 1, math.Inf(1))
+	loop, _ := internalDelayZerosFixture(t, 0, 2, mat.NewDense(1, 1, []float64{1}))
+	for _, tc := range []struct {
+		name string
+		sys  *System
+		want error
+	}{{"NaN A", nanA, ErrInvalidArgument}, {"Inf E", nanE, ErrInvalidArgument}, {"algebraic loop", loop, ErrAlgebraicLoop}} {
+		_, perr := tc.sys.Poles()
+		res, err := tc.sys.PolesDetail()
+		if !errors.Is(perr, tc.want) || !errors.Is(err, tc.want) || res != nil {
+			t.Errorf("%s: PolesDetail (%v, %v), Poles error %v; want nil and %v from both", tc.name, res, err, perr, tc.want)
+		}
+	}
+}
+
+func benchPolesDetail(b *testing.B, sys *System) {
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := sys.PolesDetail(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchPolesNonsingularE(b *testing.B, n int) *System {
+	b.Helper()
+	rng := rand.New(rand.NewPCG(3, 58))
+	E := polesDetailRandDense(rng, n, n)
+	for i := range n {
+		E.Set(i, i, E.At(i, i)+3)
+	}
+	sys, err := NewDescriptor(polesDetailRandDense(rng, n, n), polesDetailRandDense(rng, n, 1), polesDetailRandDense(rng, 1, n), mat.NewDense(1, 1, nil), E, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return sys
+}
+
+func BenchmarkPolesDetail_Index1_N10(b *testing.B) {
+	benchPolesDetail(b, benchSingularDescriptor(b, 7, []int{1, 1, 1}))
+}
+
+func BenchmarkPolesDetail_Index2_N10(b *testing.B) {
+	benchPolesDetail(b, benchSingularDescriptor(b, 6, []int{2, 2}))
+}
+
+func BenchmarkPolesDetail_NonsingularE_N10(b *testing.B) {
+	benchPolesDetail(b, benchPolesNonsingularE(b, 10))
+}
+
+func BenchmarkDescriptorPoles_NonsingularE_N10(b *testing.B) {
+	benchDescriptorPoles(b, benchPolesNonsingularE(b, 10))
+}
+
+type polesDetailLiteral struct {
+	name      string
+	n, oracle int
+	a, e      []float64
+}
+
+// polesDetailMiscountedRows are the rvbBuild "two" seeds 27, 50, 104, 105,
+// 119, 167, 179, 212, 223, 242, 270 and 279 (I5CXGD), row-major.
+var polesDetailMiscountedRows = []polesDetailLiteral{
+	{
+		name: "two 27", n: 7, oracle: 2,
+		a: []float64{
+			0.005562749437761515, 0.09211674221380703, 0.4808128298135838, -0.013082257813497972, -0.00447042933142381, 0.10271993977475302, -0.2687949004943355,
+			-0.22977986821248678, -0.047737721565960255, -0.1274737965144999, 0.2550305049892434, 0.28700418850261156, 0.05747567711228913, 0.22418867379266147,
+			0.09827589697365462, -0.26847233112618635, 0.23358019201803093, 0.5141830866309626, -0.192748328361316, -0.260778467521156, 0.05462255233776649,
+			0.6227116064667212, -0.30123536498384834, -0.16666629867747143, 0.6511389194757767, 0.5488920139603548, -0.9888546635403862, 0.5369652582518223,
+			-0.33087254570382474, 0.14379990656780262, 0.3223470517160928, -0.13862305808877665, 0.0493616053436273, -0.3781398163081654, -0.12818926877673642,
+			-0.4439582733835786, -0.2501437053409763, -0.19999727940113737, -0.28847586396392294, -0.03495247602834517, 0.3375612592140764, -0.4033125470591281,
+			0.48567065364657214, -0.32090578324723024, -0.22167794582888367, 0.5220237532169365, -0.05458277451682334, -0.7205175299197811, 0.9134761282193116,
+		},
+		e: []float64{
+			0.13693484647401225, -0.09579276610020555, 0.13107502994325854, 0.07114360073348244, -0.053968135629557074, 0.06212478212116307, -0.21463421193902177,
+			0.12923882494972422, -0.13708770904747744, -0.10000988380171227, 0.0056235136874863536, 0.14291018486595738, 0.06898386429709158, -0.21047575922527567,
+			-0.004905699245783716, -0.056254047961671896, -0.23959123928610354, -0.048140189247884, 0.19586485815815707, 0.05006413697678953, -0.011605638698180373,
+			0.15183698131242468, -0.06695587680126906, 0.05652506374183709, 0.0550386708655245, 0.00681631056897283, -0.06517527968117491, -0.11379764845682942,
+			-0.0038289936399083474, -0.008203428875059008, 0.4642288477251928, 0.1806888884680612, -0.4177271907738857, 0.28187147009066704, -0.18043278400688786,
+			-0.11891722509710885, -0.06499325598245174, -0.2870941834382629, 0.017698407831451938, 0.1397801587838485, 0.3286094807286172, 0.0174877374302741,
+			-0.014547065904389938, 0.011259010710450731, -0.09465484893625385, 0.12245473424670932, -0.019004334111204738, 0.08077272901539155, 0.15908445260435955,
+		},
+	},
+	{
+		name: "two 50", n: 5, oracle: 3,
+		a: []float64{
+			0.013379343407078045, -0.2852823087068896, 0.09716057418958803, 0.23043052156761373, -0.02639668967104991,
+			0.030723781254779457, -0.10388925221399156, 0.0953310967345802, 0.10842423679404019, -0.06779236018247072,
+			0.06544637964322943, 0.06495635425421258, 0.024260537084083142, -0.0018261735418692755, 0.07185274078525003,
+			0.04670641935818163, 0.26684143401842825, 0.019657652401749128, -0.10530746911581022, -0.19452771499160967,
+			-0.018661434809259417, 0.10711230717688937, -0.11602791572126255, -0.06364223783569352, 0.2448372317848719,
+		},
+		e: []float64{
+			-0.015587479656972771, 0.17730381209539936, 0.026115707262074617, -0.08874570917860525, -0.2310644231283987,
+			0.002799845425950673, 0.28083147827753774, 0.05612626402865112, -0.0882202421800848, -0.39482511446921575,
+			0.057779854896728766, -0.1141766881252723, 0.035308101548793894, 0.04611503263872595, 0.057135309644916345,
+			0.05890915030649962, 0.023729112845428668, 0.056597854979546995, 0.025956154243011252, -0.1268552837191231,
+			0.046850971714762595, -0.4768660742899471, -0.04019418434188376, 0.14261885597805382, 0.5732890314775686,
+		},
+	},
+	{
+		name: "two 104", n: 5, oracle: 2,
+		a: []float64{
+			-0.19291025580116034, 0.20382618884872805, 0.12719186570802785, -0.0019902227722467182, 0.057209909481031336,
+			0.04470632234256471, -0.057109063546023346, -0.028891874599674964, -0.0017255581745351761, -0.014872403024691928,
+			-0.09275808301708044, 0.21126255955261106, 0.07311037939966661, 0.10520559548126274, -0.0026388071412513686,
+			0.00023578480253436321, 0.15362396576939125, 0.1053309196741512, 0.016031064003879134, 0.007068377652457555,
+			0.2967487484079424, -0.24025701824656456, -0.17996956162751004, 0.04340158630346224, -0.0799197280830425,
+		},
+		e: []float64{
+			-0.021102295206704393, -0.05040711802216574, -0.13424423632038054, 0.10399890178735159, -0.027618523787406677,
+			0.009892316894804468, 0.030150040120292206, 0.07709397908785245, -0.057479967732853854, 0.015789400055524472,
+			-0.011363865736410468, -0.046081438922499045, -0.11342574370103863, 0.08135167976647385, -0.023128079723474682,
+			-0.015661154681775678, -0.06657675888121115, -0.16298549439594598, 0.11622363819982248, -0.033212137388688216,
+			0.01632711195613953, 0.022117014807215597, 0.06719233474099064, -0.05786625217529633, 0.014008609701093659,
+		},
+	},
+	{
+		name: "two 105", n: 8, oracle: 4,
+		a: []float64{
+			-0.012740405505810582, -0.23016103510452388, 0.29671439785307946, -0.5790377976926345, -0.09255329807624911, 0.23924355879657483, -0.09394748625245804, -0.16628926003873024,
+			-0.43464759854885215, 0.4662300223228548, -0.17411255575937534, -0.03676331499821097, -0.3270816686623467, -0.2679517914554323, 0.13592174362761145, -0.11289058340942447,
+			0.32751258113957815, -0.26623082335632364, 0.2728626899883009, -0.1414048547516365, -0.044173103954648706, -0.04273001242284498, -0.4466206382051505, 0.20147329661561653,
+			-0.04287124959422736, 0.6468647444035028, -0.7860649207144577, -0.8485065173663567, -0.13921478039953594, 0.5576750985571626, 0.0837593079067303, -0.8586113263763687,
+			-0.23570459692086806, 0.05364957806907062, -0.3536277911773568, -0.2740983954465974, 0.05178129292294942, 0.4415820788513779, -0.04837294838922368, -0.6615676681705741,
+			0.050668645586687995, 0.0186661411287016, 0.11511207113740812, -0.32716527276871543, 0.007110514992244082, 0.01971805102893516, 0.11700523619428992, 0.061401942936275954,
+			0.37082077315886464, -0.3853864221604289, 0.3763450220405276, 0.03778110574562393, 0.04950297735111323, -0.04324902921796514, -0.05997430694273991, 0.2547042593949095,
+			0.0242113338549098, -0.20751308514883404, -0.04474150785901013, 0.17220873400683628, 0.27725317800942584, -0.21760695389303483, -0.19699432114297488, 0.15802573573219617,
+		},
+		e: []float64{
+			-0.18374877728988503, 0.16266634960642054, -0.09964603791483664, -0.00449916633676776, -0.034594847276381464, 0.06105423316527901, 0.029235169354601787, -0.08028562982024588,
+			-0.21441778371916376, -0.057694535927686336, -0.07070004407826488, -0.1481660471863533, -0.07253620331088098, -0.07557378251659347, 0.1320564155387504, -0.3249261035957731,
+			-0.06781271989919452, -0.20750775918181316, 0.18324565571190013, -0.1255876314293025, -0.05111830211175975, 0.057902039812152535, -0.07412024962120768, -0.11193155656805091,
+			-0.1912603751489089, 0.3188696651880315, 0.0041179805989974795, -0.407147229878958, -0.21413513555695607, 0.5527115045880795, -0.048946089863521565, -0.2228006530598628,
+			0.1885930350486217, 0.09263016813759943, 0.09895926754522465, -0.18834457682954384, -0.06964278695413212, 0.3088524654479662, -0.0885849082512243, 0.07653095864069288,
+			-0.10755061432697952, 0.010464073219169168, 0.0677446130458754, 0.1196711282664587, 0.025687492177421754, 0.038813541993669466, -0.11302634361910836, 0.10774834839918472,
+			0.38843803861190496, -0.27227511040832714, -0.012508986345222297, -0.11919347346764479, 0.0065863132794420414, -0.2717930164511102, 0.20470184982565529, -0.14102681437362163,
+			0.04030129183200418, -0.1245029326275108, 0.23507212344733325, 0.05387132619364203, 0.020023757370642846, 0.1251810785485044, -0.21052765474498786, 0.18747000501861602,
+		},
+	},
+	{
+		name: "two 119", n: 5, oracle: 2,
+		a: []float64{
+			0.0485854900235284, 0.3673939912177228, -0.06932235488891832, -0.20625666200239096, -0.2390934201982734,
+			0.3443463432799363, -0.06748039970188231, 0.297717663741917, 0.12719298943783136, -0.2411869435476807,
+			-0.08102113567147269, -0.2154548257494319, 0.013700679897020316, -0.22657733745436245, -0.004462901088796485,
+			-0.2006337631787311, 0.2764954762395002, 0.4039033239576859, 0.13307000080923742, 0.32398442334453714,
+			-0.1981503300622967, -0.08163896890085579, 0.27749647218879075, -0.43461889849127217, 0.08640016690481378,
+		},
+		e: []float64{
+			0.16473034465469072, 0.019995436898015213, 0.13498242508132177, 0.35165582801602696, 0.009375827732740793,
+			-0.07911905228709991, -0.011908301008217916, -0.05995023585522136, -0.11742932742649947, 0.011186559506757803,
+			-0.10684175985412496, -0.014264025834905849, -0.0848043548879211, -0.1991515921655919, 0.0027371451008898,
+			0.16417612040957547, 0.022580579629662624, 0.1289105791777919, 0.291236050778438, -0.008713319059065689,
+			-0.03444578693030936, -0.0045559759435119165, -0.02743146205570461, -0.06516114061345073, 0.0005914385125533776,
+		},
+	},
+	{
+		name: "two 167", n: 4, oracle: 2,
+		a: []float64{
+			-0.10328714972971204, -0.09982657055940462, 0.025345658340241946, -0.014932991133600066,
+			0.04773501178914145, 0.21671469505554342, 0.023882964422057715, -0.010160486908943889,
+			0.06535728815652878, -0.3450779689874808, -0.10681333076117909, 0.00655710050593624,
+			-0.10653484349842732, 0.3280773052444764, 0.14409480030421215, 0.012432183328642266,
+		},
+		e: []float64{
+			0.007225796201938641, 0.015865448975128326, -0.009326417505332384, 0.0023417111796856832,
+			0.06957413687295937, 0.08548060638759822, -0.03073048103184289, -0.006987801138790507,
+			-0.15801623665782524, -0.19825804052976687, 0.07340774157988254, 0.014064163203551954,
+			0.17456364881320502, 0.21461906029274036, -0.07723154337341977, -0.017468696480299868,
+		},
+	},
+	{
+		name: "two 179", n: 7, oracle: 3,
+		a: []float64{
+			-0.13855601230650927, -0.05657651894814781, -0.3584211311270174, -0.08280322456291855, -0.1550133521457888, -0.1409125639211103, -0.1742434223740464,
+			0.19062271735456165, -0.2531646820018073, -0.0322287330467203, -0.056316310235746354, -0.1328327475907466, 0.024579175884967247, 0.17547830555611746,
+			-0.16851791285548554, 0.005940287917488203, -0.39997312426144443, -0.4067346052605425, -0.2847766400570718, -0.06601576014085672, -0.14551205641088902,
+			0.06845232191116668, -0.23064448031329404, 0.23206553872800087, 0.08368869226921764, -0.1920423553804822, -0.05242393736409933, 0.009268275046891193,
+			0.05046462537667786, 0.02399677912144397, -0.03025453023506045, -0.017548589161321102, 0.09985706683506822, 0.02950163958344618, -0.001702638365801662,
+			0.11725163809597584, -0.06148247715096001, -0.025562211569523263, -0.04134010570759357, 0.11840892503450608, 0.11431819467463117, 0.11282421763266626,
+			0.16126180747452717, -0.0834443136026402, -0.26261169853556604, -0.09527554537600219, 0.0790400920827145, -0.11771256146918811, -0.2140997992636957,
+		},
+		e: []float64{
+			-0.05818763177873421, -0.12489611361031079, -0.0421516751368233, -0.005953107150354103, -0.16414923604162152, -0.13257384655248228, -0.18039582256187123,
+			0.07376591240866107, 0.04457251146022065, 0.31230853891427823, 0.14260819186290538, 0.0651390477345604, -0.019657569364084058, -0.0024896104942976967,
+			-0.1968652593221515, 0.12981672248369142, -0.05481229676198729, -0.036408111857704865, 0.024232030398650316, 0.05300217362602591, -0.016867100363861503,
+			0.14560467266536645, -0.08041135947665161, 0.028516258953733626, -0.12097087635392453, -0.0854710060681308, -0.030076882778189505, -0.02076427578980874,
+			0.25437785739440694, -0.11567764519208183, 0.05746129602131082, 0.1313856509131221, 0.15979042611657127, 0.05657519563972795, 0.20408061747803924,
+			-0.39045729990661493, 0.25403457368997606, -0.09817518149859707, 0.06538782286086316, -0.029026464306723943, -0.02184756857961011, -0.14845758058042638,
+			0.029472643680860406, -0.18673344689941812, -0.2904196896351284, -0.02429174921237014, -0.08011232277374516, -0.054840819999441744, -0.013336179538046956,
+		},
+	},
+	{
+		name: "two 212", n: 7, oracle: 4,
+		a: []float64{
+			0.2232650665937452, -0.900226886213298, 0.20670273834902889, 0.029600654457214673, 0.31758589132934806, -0.5323972140818033, 0.4417705073619268,
+			-1.0979168827069776, 4.996929760851064, 1.0819216831103178, -0.9369919858929412, -0.3904777848876519, 0.5603777607627226, -0.07945093773116782,
+			0.13647425446504366, -0.6772581011585949, 0.13024078274712828, -0.22817364206999138, 0.034751071803061334, -0.20519145069641148, -0.17877886920130998,
+			-0.13196771534965895, 0.4518092840301629, -0.27693996104394775, -0.4118227918052813, 0.20183959891186953, 0.5856414012675198, -0.5449739438817788,
+			-0.5218122410444732, 2.327803941067422, 0.32686562867204483, -0.15790525611072934, -0.3178494398346064, 0.3072872148789647, 0.11649614184623758,
+			0.027584209005213495, -1.07674439124033, -0.4735980614521817, 0.02553848751249356, 0.010824703167728983, -0.00740456598483308, -0.255712515415868,
+			-0.477864150507919, 1.712227966036009, 0.06667459429171875, -0.08729302632660071, -0.27028177959851896, 0.43476114419423834, -0.27596507662017167,
+		},
+		e: []float64{
+			-0.06331540162685782, 0.06299170530427976, -0.02823272706558678, -0.03937215150220305, 0.015346154036178394, -0.06202452015078879, -0.013250811525710048,
+			-0.10192946375655636, 0.5494312195749066, 0.07394137087845942, -0.09727035003127854, -0.029520041571351765, 0.14913725359989244, -0.03270796115768403,
+			-0.05030397622980962, 0.06270386558946754, -0.08824427467072704, -0.11975634987379796, 0.04051900849587986, -0.03194371116922803, -0.08676198326034287,
+			-0.05164912486380111, 0.09361042552957473, -0.06699227387585581, -0.1065460823300684, 0.04352689020913739, -0.016197200644901422, -0.08027566397941448,
+			-0.15333943409276587, 0.20991007289655889, -0.008251730868287238, -0.05331039945232255, 0.10221501930707547, -0.10485969813456464, -0.042407607456102316,
+			0.032949822842906235, -0.11437531639141191, -0.08616668537570078, -0.07625820484895705, 0.06113493562474716, 0.004249696243008963, -0.09379505181815595,
+			0.04450137246675201, 0.043985319645885215, -0.047413249591055986, -0.11675970362847367, 0.22027142934513003, 0.15085399455805, -0.22128263146604504,
+		},
+	},
+	{
+		name: "two 223", n: 7, oracle: 4,
+		a: []float64{
+			0.046513689088956804, -0.04930586157704728, -0.16909912606962796, -0.02436205777587286, -0.10467580796985695, 0.08730398091636811, 0.06493017043591136,
+			-0.03141998146408494, -0.1003441836428061, 0.010253045695323126, 0.06265760513557053, -0.0030520946288350712, 0.09120953420109862, 0.09544585175198521,
+			0.041780699353677155, 0.1340767155918173, -0.11549559261628034, -0.13874488421416667, 0.10880309531067459, -0.2694522901255516, 0.03616125343297755,
+			-0.08707372859752967, 0.060590571342656656, 0.13349574490691526, -0.09259615447752732, -0.016524309235323914, 0.07461852271770968, -0.10704749684969393,
+			-0.0009211142938640585, -0.09575014057442889, 0.2053690425946564, 0.1467037524986588, -0.048010044253840624, 0.2604364420508061, 0.11640701625702615,
+			0.029591326789005043, 0.05673157264011452, -0.036930473429455185, -0.08556962027128123, 0.1774779021673213, -0.4098440746948333, -0.023495886509802093,
+			0.035326007502623304, 0.07812734295303671, 0.06730818663415775, -0.006845767758305215, 0.059270599953705885, -0.006694897062472034, -0.01164604803625307,
+		},
+		e: []float64{
+			-0.009510532695819559, 0.020374128589926294, 0.03673068042962543, -0.03621653288699795, -0.011304867236812899, -0.0210918453920755, 0.0031966796135911744,
+			-0.06846852733766036, -0.13558523665820105, 0.06261420192209295, 0.11603573341946047, -0.03611346469336172, 0.14154926053573827, -0.011725694894081965,
+			0.05651397822195008, 0.18015055885763873, -0.00888052593686484, -0.1802402860766923, 0.01752273874543108, -0.16687062476024028, 0.04144930773637297,
+			-0.03357176551599644, -0.11189830099287547, -0.05015957247124795, 0.10316927348313946, 0.0449371044456119, 0.02093845618964262, 0.000108508215808937,
+			-0.07220998547391504, -0.29492715493745075, 0.05071484848968381, 0.3213461283593277, -0.08973806730257351, 0.3688925869987274, -0.1355141197992852,
+			-0.026924222733663628, 0.02203657177369239, 0.04990137537196846, -0.0474445092746582, -0.009168317236436874, -0.016873793653808346, 0.05323717652407011,
+			-0.015164837724961997, -0.0214673084041811, 0.030971564973465534, 0.018202399017797632, -0.022594356994625798, 0.04679642711220352, -0.0023747860938937867,
+		},
+	},
+	{
+		name: "two 242", n: 8, oracle: 4,
+		a: []float64{
+			-0.054154254134687156, 0.0014526862779005011, -0.0016772315597621218, -0.03542964853281128, 0.013221521414098986, -0.07051213213827605, 0.17039604521191756, -0.023840877648820456,
+			0.10274116886317561, -0.03231626036720345, 0.10109217331622695, 0.024710376965974046, 0.011588875983890924, 0.03137812907651751, -0.1904025992947365, 0.10588407892782374,
+			-0.11597097422588332, 0.07294672293791507, -0.07493961118363035, -0.12903550058967184, 0.011818512507619096, -0.04343708145802257, 0.01896847788564405, -0.023379269964417505,
+			0.02347814425544297, 0.11160208195360927, 0.03378658999922296, -0.1945435741503435, 0.007981957024288756, 0.029010283361226925, -0.4233521188866732, 0.191740893356107,
+			-0.0148057307975923, 0.024221693581769045, -0.0017014453935254713, -0.03743511273859272, 0.00958190845293582, -0.03137068787295514, -0.012388409153138576, 0.024732603628998845,
+			-0.1722390366432019, -0.042231885720584755, -0.1279895904917667, 0.03406009514238283, -0.02285508853007412, -0.07949282214498465, 0.5293698156745813, -0.2135206276416739,
+			0.10031276752708304, -0.08331129824278449, 0.06473868802937896, 0.16134837135068839, -0.010310981735692993, 0.10189975101891745, -0.0026087823706149663, -0.015237809522929297,
+			0.2476261365240001, -0.10776119500454474, 0.17498358871551015, 0.1768914750851133, -0.003999893930606618, 0.13488747459535338, -0.3398921443407946, 0.13663294483568716,
+		},
+		e: []float64{
+			0.07283771081907514, -0.10537106994065565, 0.04454673259544112, 0.11017871290630245, 0.0011068643807498391, 0.004342952603070284, 0.06164842644669206, -0.00775043677749951,
+			0.030276497582229615, -0.05978567620797164, 0.0734485652617728, 0.059898344962712395, -0.0014652001474484615, 0.03260787328612702, 0.14015888188083322, -0.003141455206822836,
+			-0.012725411969800152, -0.0013627679107340363, -0.03203257548474668, 0.011137295973973952, 0.0010414798708387489, -0.01481287737276024, -0.04525928527995243, -0.013171207805011277,
+			-0.04833688210400505, 0.07459406007940912, -0.008450754669830272, -0.03311023049445925, 0.008915377791466434, -0.019232727315677524, 0.05807270401479763, -0.002411519748360822,
+			0.007525905378669292, -0.023283827758194063, 0.026500667276696914, 0.02174213501748342, -0.001200179230895307, 0.014749017056678618, 0.04770199841227837, -0.0023440856086728397,
+			0.04826235370003262, -0.03831884428326988, -0.0033050345070359663, -0.003801397069758265, -0.005447174849377616, 0.008248240158987822, -0.127411804773391, 0.025011156477389093,
+			0.006975228488886387, 0.02902912148267337, 0.026077730783297667, -0.06408941989539034, -0.003173489009227192, 0.026087821848569243, -0.0642086629113744, 0.04213844556736078,
+			-0.035513039766208974, 0.0502640973369558, -0.04075876581009181, -0.04238189505157392, 0.00039508685781997207, -0.01849264102485797, -0.012911043791504647, -0.010713952872274923,
+		},
+	},
+	{
+		name: "two 270", n: 8, oracle: 4,
+		a: []float64{
+			-0.18185542875481597, 0.20389800174541928, -0.28909044991492877, 0.15932844101073534, 0.06484319563288277, 0.2557767211137509, 0.2651498976300225, 0.23336307995407188,
+			0.046206581535742496, -0.07399086252500342, 0.045783813463496116, -0.05076502362583733, 0.004291805241543943, -0.1333951652983573, -0.10680865111782596, -0.08926367925850244,
+			-0.013255275437354871, 0.2702168462911685, -0.3006586170208126, 0.024638490237587747, -0.1261271684401959, 0.2203068150879682, 0.28370529251032467, 0.06887316433264552,
+			0.029922253098190646, -0.19879614323045885, 0.32709486229339857, -0.12403625992597424, 0.08178842862016064, -0.2394401034242912, -0.3298398894424768, -0.024472438113319773,
+			-0.19211421684501184, -0.08624843278128501, 0.2483030836574877, -0.0171547114793702, 0.24337073335963721, 0.07167231762198424, -0.19746838386243004, 0.33322789711837614,
+			0.08990934021561862, -0.042351590583112025, 0.04947850294894616, -0.04681792065743997, -0.05403934834857247, -0.15723525378120018, -0.050619205876188206, -0.14636655256909153,
+			0.0679802665301988, -0.2646637023776849, 0.3926468088147581, -0.18843630367195263, 0.03296474742773474, -0.05616476162889272, -0.4299722359258287, 0.10098045564702333,
+			0.12511122859225096, -0.2778204209287135, 0.44021066969074435, -0.21803652546294094, 0.05293573978779454, -0.2275693362783981, -0.44876775501159205, 0.013973507655360777,
+		},
+		e: []float64{
+			-0.08362553224865404, 0.017313922460531078, -0.09087108503626547, 0.0397763997802361, 0.06706915697197917, 0.001862364474751747, -0.019865838531823027, 0.16264331751252345,
+			-0.011690780591446277, 0.0661232840596506, -0.033023480887303946, -0.051004823287973546, 0.0032097392548225356, -0.006197126870873836, 0.012054848292071136, 0.011127001562339395,
+			0.00502351003999957, 0.020196684026660812, 5.254895147752694e-05, 0.02389027913185171, -0.032340692500361916, 0.06497900792887425, 0.048685932297573856, 0.028374284009346263,
+			0.022376512048484256, -0.0181096340877753, 0.03377848401640177, -0.005881411444480549, -0.0003030683965442079, -0.033413079614644924, -0.009412133510494174, -0.0744140701666837,
+			-0.050691694855357745, -0.1277918078162423, -0.01297960429008844, 0.10860638940823401, 0.09588070125512659, -0.061286198396893504, -0.0873164985921099, 0.06160444416755512,
+			0.050074163341253364, 0.026352121051875774, 0.041098197972985265, -0.06994028649588038, -0.047657739040292656, -0.009961485450135168, 0.012047474068016815, -0.0977171775686664,
+			-0.005877455683568874, -0.008414863376929102, 0.0033257249757261387, 0.08516535896784663, 0.0072166124912582666, 0.05465383764767397, 0.049572825386767466, 0.010623478668617885,
+			0.08851882970579165, -0.07334886461631242, 0.0952725014073815, -0.008916646984635151, -0.04355575210522637, 0.0013539168611535679, -0.009811082238280018, -0.16437365747096397,
+		},
+	},
+	{
+		name: "two 279", n: 7, oracle: 2,
+		a: []float64{
+			0.011568828102759002, 0.07825284809700912, 0.0654610251774731, 0.1883104823108819, 0.11011948034321031, 0.02961446289874774, 0.004672275010969124,
+			0.14460249125438585, -0.04037307755401992, 0.0720054760476824, 0.0147546623713818, 0.07014178468712587, -0.055869281725954095, -0.004309460801426875,
+			0.11863373635482882, -0.08513213659746159, 0.012425871542070033, -0.008638523475233145, -0.034713452250191595, -0.0774312462381096, 0.1552649409860694,
+			0.05303848983751142, -0.061568850456655846, 0.07734092933790139, -0.17467266283766963, 0.06846535685113576, -0.03480789299113047, -0.04569704211438145,
+			0.055798417947788545, -0.06472375379190347, 0.027203832788187807, -0.21532555699819014, 0.1319798384429756, 0.010805599372239384, 0.027877508332975094,
+			-0.05407497552999234, 0.050293644083184263, 0.06900163144432771, 0.1645438487105375, -0.04562963102038934, 0.1123929615536694, -0.11696148625633498,
+			0.0013844904687895447, 0.08288196057263016, 0.11135455890370634, 0.18689751580574687, 0.09631355133284664, 0.09988965166343024, -0.11961892204336552,
+		},
+		e: []float64{
+			0.07537808330590653, -0.014942037856700322, 0.00040297794750159037, -0.05605243584275121, 0.10335960885270765, -0.08238789668413633, 0.05277792126796867,
+			0.03601281305411706, -0.09473307231205223, -0.0420051138190207, -0.18768593615894405, -0.030053487677774555, 0.007278395049255331, 0.07665348717883562,
+			0.03480382287945173, -0.10092318284069347, -0.05091469913673541, -0.22572933075132406, -0.03401841769997815, -0.013467289801660705, 0.07719964201757183,
+			0.055816990468062794, -0.027662835456992597, 0.02823790008244378, 0.050793192725865306, 0.03224095634354795, 0.009688258344733731, 0.15600097998552448,
+			0.005160963820342184, 0.0599732104087025, 0.060289870282208426, 0.21918425940005629, 0.038163107770731314, 0.026648540342474054, 0.04869211345695554,
+			0.007004428405690622, -0.006828287024887059, 0.01114088010424124, 0.03358061431342047, -0.006186150544163569, 0.02287540953489417, 0.04516406896121754,
+			0.07636318979458463, -0.025445888524974092, -0.0020105890746914433, -0.06129090821283765, 0.09423207728921902, -0.06142342364791291, 0.055394404032039296,
+		},
+	},
+}
+
+// polesDetailRankDeficientRows are stiff-chain literals of the ELT76F and
+// IP4PC3 task bodies, row-major.
+var polesDetailRankDeficientRows = []polesDetailLiteral{
+	{
+		name: "mix:752", n: 5, oracle: 2,
+		a: []float64{
+			1055.23013369951, 6592.5768592030345, 4500.930251102698, 6893.741583735621, 3096.947984738509,
+			-1643.0545147426844, -10265.347656076938, -7008.462044777457, -10734.06658041025, -4822.106698669439,
+			-233.4690365049614, -1458.1703061546934, -995.5048296042045, -1524.7828370679158, -684.9933024004888,
+			-14868.195899805305, -92888.41816177202, -63418.99863790096, -97132.64323588133, -43634.54016766729,
+			5889.829416097212, 36796.46869645502, 25122.666425275085, 38477.88460102334, 17285.312015357846,
+		},
+		e: []float64{
+			0.03032550204121205, -0.033842056195514975, -0.03987792496192471, 0.01112074161478585, -0.05353233186851174,
+			-0.0540287009103687, 0.013178193201513484, 0.06417657145568394, -0.018417117703534446, 0.08588367076353973,
+			-0.025491466476166597, -0.21410113339962394, -0.006902007448322727, -0.009318879688722992, -0.00746547142061449,
+			-0.008483757979430856, -0.46868013893666666, -0.2100829651193821, -0.2035849107726807, -0.18948642071725946,
+			-0.01785361314108416, 0.2405633906224514, 0.12366152505649931, 0.08326076489213916, 0.12450428448738249,
+		},
+	},
+	{
+		name: "stiff31:1401", n: 7, oracle: 1,
+		a: []float64{
+			0.42548806426540825, 4.137608319204455, -1.0566301762404826, -1.8101299544791463, -0.7377912325584521, 0.9975899718983875, 0.6007175628145444,
+			-3.7474095188633054, 0.02518500501560047, 0.25746471446971114, -0.48904731862932405, 0.7530463135979046, -1.063682511487793, -1.8039825973306054,
+			3.4574686544728577, 0.6136584733240854, -1.7705738384456098, 0.25777737042155313, -0.03878962172826287, 1.0933750309828418, 0.8003578181961242,
+			4.308919079197184, 1.9872876855125146, -2.572128698874577, 2.2319888271941073, -1.2359790942794713, 1.1445382111745401, 1.5537308761877866,
+			2.3761712807767466, 1.538514730143823, -0.43457871139794424, 1.2932143341546742, -0.8682476853898515, 0.8042342729539904, -0.12764681281403498,
+			2.055536262123273, -0.15343423168155207, -0.9078208400635293, 4.920073625816564, -1.006741905648866, -0.11100386312494527, -1.0536777506845367,
+			-3.3582124824239092, 2.272872960279048, -0.5484547442499363, 0.6517150270959075, -0.906945172088177, -1.1047497427062831, 0.10727386141704208,
+		},
+		e: []float64{
+			-0.4374876722156913, 0.6169656882340318, 0.007580328360332611, -0.5502604400179527, 0.8331476597685842, 0.10784137404408058, -2.592805356583513,
+			1.2112513709052346, 0.31771997693195264, 1.4538821669045405, 1.8435946531320457, -1.2427416814334755, 0.6272054482784585, 0.30076642298756195,
+			-1.3651983844944156, -0.2901546133920451, -0.8912235217010108, -1.7812101198890335, 1.3689355968073755, -0.5051140375048546, -1.2345233515737997,
+			-0.766264957723066, 0.6206879252381506, -1.95154952518068, -1.2761251843753716, 1.6207024595527804, -0.3462303410227218, -2.5404896819944165,
+			-0.4609464753797333, 0.2789556129520546, -1.8584799284373827, 1.537879099481616, 0.7238424971755608, -0.6613491098823491, -2.4048116602525376,
+			-1.6861140562574637, -0.8033180043461252, -0.020017725173333663, -0.22740868736705278, 0.9704239545523075, -0.7132263664844114, -1.7984739375226753,
+			3.116596951348401, 2.269562135052299, -0.28214542461074654, 2.5378227691268376, -1.3163238172397538, 1.3098762381223648, -0.7440496068613385,
+		},
+	},
+}
