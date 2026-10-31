@@ -17,7 +17,8 @@ type PolesResult struct {
 	// returns all n eigenvalues of (A, E). It is 1 otherwise. This is the
 	// 0/1 Report convention of RiccatiResult.Accuracy, used library-wide:
 	// at 0 every pencil within that tolerance of the data, normwise, has
-	// n finite poles. "Finite" is meant in this normwise sense, that of
+	// n finite poles, up to the backward error of the float64 SVD that
+	// computes σ_min (a few eps·‖E‖, as for MATLAB rank). "Finite" is meant in this normwise sense, that of
 	// backward-stable QZ (LAPACK) and MATLAB rank: a pole that only an
 	// entrywise perturbation smaller than the rounding of the data
 	// resolves is not certified. A singular E, or one within the tolerance
