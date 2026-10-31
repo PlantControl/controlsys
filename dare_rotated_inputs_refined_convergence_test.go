@@ -51,7 +51,8 @@ var dareRotatedRefinedNotConvergedCases = []dareRotatedInputsCase{
 // it, returned at Accuracy 0 off the exact-E 320-bit gain by up to 6.5e-3
 // (band 4.5e-7; CEFUJP). One refinement on, X moved away (4667:
 // 1.1e-11 -> 4.3e-10) and K by 0.12, beyond its tolerance; the Hewer
-// gain, held to the ddGain of the rounded X, failed on all. Literals: rv49vGen 4667 from the CEFUJP body;
+// gain, held to the ddGain of the rounded X, failed on all. Literals:
+// rv49vGen 4667 from the CEFUJP body;
 // 4667 and 9223 as rv49vGen forms them on amd64, where they were
 // certified-wrong (K 2.3e-3 and 6.5e-3, 8.5e-5 off; OSLSY3: the
 // generator differs by platform); 8499 natively (K 1.5e-6, band
@@ -107,7 +108,7 @@ func TestDareRotatedInputsRefinedGainNotConvergedNotCertified(t *testing.T) {
 		}
 	}
 	if improved == 0 && !raceEnabled {
-		t.Error("no Accuracy-1 K improved on the pencil K")
+		t.Error("no K improved on the pencil K")
 	}
 }
 
