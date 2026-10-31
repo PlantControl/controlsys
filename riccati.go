@@ -1157,14 +1157,16 @@ func (red *reducedInputs) certify(A, Q *mat.Dense, opts *RiccatiOpts, res *Ricca
 // eps-sensitivity. A K and EᵀXE the certification of the given inputs
 // refined in double-double (c.xe) are kept and returned without gainMiss:
 // the ddGain of the rounded X was 1.9e-6 off the 320-bit gain where the
-// refined K matched it. With reduced, not rotated, inputs that
-// certification still refines, its X comes without the Newton iterate
-// gainMissOf also measures K against (res.x1), and K is the gain
-// gainMiss measures it against: once gainMiss accepts K within
-// gainFloor, that iterate is then X one refinement on (refinedStep), K
-// not certified should that fail. Without it a gain
-// 1.42 off the 320-bit gain (band 3.9e-7, cond(E) 1.9e12) was accepted
-// as its own, the gain of the next iterate moving 0.36.
+// refined K matched it. With reduced, not rotated, inputs an X that
+// comes without the Newton iterate gainMissOf also measures K against
+// (res.x1), as one that certification refines in double-double or one
+// whose Newton step is within eps, has K the gain gainMiss measures it
+// against: once gainMiss accepts K within gainFloor, that iterate is then
+// X one refinement on (refinedStep), K not certified should that fail.
+// Without it a gain 1.42 off the 320-bit gain (band 3.9e-7, cond(E)
+// 1.9e12) was accepted as its own, the gain of the next iterate moving
+// 0.36; with X exact to 2e-15, its Newton step 1.2e-16, a gain 2.6e-4 off
+// (band 1.5e-4) was, the gain of the next iterate 2.2e-4 from it.
 func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, gainDist, bool) {
 	c, ok := refinedStep(A, B, Q, R, opts, red, res)
 	var E *mat.Dense
@@ -1178,7 +1180,7 @@ func refined(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		return c, gainDist{}, true
 	}
 	d := gainMissIn(A, B, R, opts, red, c)
-	if red != nil && !red.rotated && c.xe != nil && d.units(gainFloor) <= 1 {
+	if red != nil && !red.rotated && c.x1 == nil && d.units(gainFloor) <= 1 {
 		c2, ok := refinedStep(A, B, Q, R, opts, red, c)
 		if !ok {
 			return c, gainDist{math.Inf(1), 1}, true
@@ -1272,7 +1274,8 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // natively (34 on amd64) 30 (25) took ddNewtonGain and 3 (6) the Hewer
 // gain, all within 3.7e-9 of the 320-bit gain, and 7 (3) were demoted,
 // their pencil K 3.1e-9 to 4e-7 off. A refined K of reduced, not
-// rotated, inputs certified in double-double (c.xe) that gainMiss alone
+// rotated, inputs without a Newton iterate (c.x1 nil: certified in
+// double-double, or its Newton step within eps) that gainMiss alone
 // accepts within gainFloor but refined does not certify takes the Hewer
 // gain, else ok is false, r the refined K should
 // it be the nearer of the two to its gains (units of gainFloor), else
@@ -1361,7 +1364,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		}
 		return c, 0, true
 	}
-	if stable && red != nil && !rot && c.xe != nil && gainMissIn(A, B, R, opts, red, c).units(gainFloor) <= 1 {
+	if stable && red != nil && !rot && c.x1 == nil && gainMissIn(A, B, R, opts, red, c).units(gainFloor) <= 1 {
 		if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, c); ok {
 			return h, 0, true
 		}
