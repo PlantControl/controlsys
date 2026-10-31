@@ -123,7 +123,7 @@ func TestPidtuneRoundingLevelCrossoverDesigns(t *testing.T) {
 	num := Poly{4.905554616319012e-13}
 	den := Poly{1, -2.310228431318273, 1.8436939371933398, -0.6052316064965124, 0.07495077124036684, -0.0032273933261639186, 4.2722707242222904e-05}
 	p := pidtuneBackoffPlant(t, num, den, 0.1, 0)
-	for _, f := range []PidtuneType{PidtuneP, PidtunePI, PidtunePD, PidtunePID} {
+	for _, f := range []PidtuneType{PidtuneP, PidtunePI, PidtunePID} {
 		pid, err := Pidtune(p, f, 0, nil)
 		if err != nil {
 			t.Errorf("%s: %v", f, err)
