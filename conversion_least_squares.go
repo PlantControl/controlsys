@@ -260,16 +260,16 @@ func fitDiscreteResponse(target []complex128, order int) ([]float64, []float64, 
 	bestError := math.Inf(1)
 	var bestNum, bestDen []float64
 	var solver frequencyFitSolver
+	grid := newDiscreteFitGrid(len(target))
 	for range 12 {
 		raw, b := design.RawMatrix(), rhs.RawMatrix()
 		for k, value := range target {
-			theta := math.Pi * float64(k) / float64(len(target)-1)
-			q := cmplx.Exp(complex(0, -theta))
+			q := grid.q[k]
 			powers[0] = 1
 			for j := 1; j <= order; j++ {
 				powers[j] = powers[j-1] * q
 			}
-			weight := 1 / math.Max(1e-8, cmplx.Abs(Poly(denominator).Eval(1/q)))
+			weight := 1 / math.Max(1e-8, cmplx.Abs(Poly(denominator).Eval(grid.invQ[k])))
 			for j := range cols {
 				var v complex128
 				if j < order {
@@ -295,12 +295,7 @@ func fitDiscreteResponse(target []complex128, order int) ([]float64, []float64, 
 		for j := 0; j <= order; j++ {
 			numerator[j] = x[order+j]
 		}
-		residual := 0.0
-		for k, value := range target {
-			z := cmplx.Exp(complex(0, math.Pi*float64(k)/float64(len(target)-1)))
-			prediction := Poly(numerator).Eval(z) / Poly(denominator).Eval(z)
-			residual = math.Hypot(residual, cmplx.Abs(prediction-value))
-		}
+		residual := discreteResponseResidual(target, grid, numerator, denominator)
 		if residual < bestError {
 			bestError, bestNum, bestDen = residual, numerator, denominator
 		}
@@ -308,7 +303,26 @@ func fitDiscreteResponse(target []complex128, order int) ([]float64, []float64, 
 	if bestNum == nil {
 		return nil, nil, ErrSingularEquation
 	}
-	return refineDiscreteResponse(target, bestNum, bestDen)
+	return refineDiscreteResponse(target, grid, design, rhs, &solver, bestNum, bestDen)
+}
+
+// discreteFitGrid is the closed fitting grid θ_k = πk/(samples−1) on the unit
+// circle: z = e^{jθ}, q = e^{−jθ} and 1/q, which every reweighted solve and
+// residual of fitDiscreteResponse reads.
+type discreteFitGrid struct {
+	z, q, invQ []complex128
+}
+
+func newDiscreteFitGrid(samples int) discreteFitGrid {
+	points := make([]complex128, 3*samples)
+	grid := discreteFitGrid{z: points[:samples], q: points[samples : 2*samples], invQ: points[2*samples:]}
+	for k := range samples {
+		theta := math.Pi * float64(k) / float64(samples-1)
+		grid.z[k] = cmplx.Exp(complex(0, theta))
+		grid.q[k] = cmplx.Exp(complex(0, -theta))
+		grid.invQ[k] = 1 / grid.q[k]
+	}
+	return grid
 }
 
 func leastSquaresSourceResponse(source *System, omega []float64) ([]complex128, error) {
@@ -611,17 +625,16 @@ func (solver *frequencyFitSolver) solve(design, rhs *mat.Dense) ([]float64, erro
 	return result, nil
 }
 
-func refineDiscreteResponse(target []complex128, numerator, denominator []float64) ([]float64, []float64, error) {
+// refineDiscreteResponse reuses the design, rhs and solver of the
+// fitDiscreteResponse solves, whose shapes it shares.
+func refineDiscreteResponse(target []complex128, grid discreteFitGrid, design, rhs *mat.Dense, solver *frequencyFitSolver, numerator, denominator []float64) ([]float64, []float64, error) {
 	order := len(denominator) - 1
-	design, rhs := mat.NewDense(2*len(target), 2*order+1, nil), mat.NewDense(2*len(target), 1, nil)
-	best := discreteResponseResidual(target, numerator, denominator)
+	best := discreteResponseResidual(target, grid, numerator, denominator)
 	powers := make([]complex128, order+1)
-	var solver frequencyFitSolver
 	for range 8 {
 		raw, b := design.RawMatrix(), rhs.RawMatrix()
 		for k, h := range target {
-			theta := math.Pi * float64(k) / float64(len(target)-1)
-			q := cmplx.Exp(complex(0, -theta))
+			q := grid.q[k]
 			powers[0] = 1
 			for j := 1; j <= order; j++ {
 				powers[j] = powers[j-1] * q
@@ -658,7 +671,7 @@ func refineDiscreteResponse(target []complex128, numerator, denominator []float6
 			for j := 0; j <= order; j++ {
 				trialNum[j] = numerator[j] + step*delta[order+j]
 			}
-			residual := discreteResponseResidual(target, trialNum, trialDen)
+			residual := discreteResponseResidual(target, grid, trialNum, trialDen)
 			if residual < best {
 				relativeImprovement := (best - residual) / math.Max(best, 1e-30)
 				numerator, denominator, best = trialNum, trialDen, residual
@@ -676,10 +689,10 @@ func refineDiscreteResponse(target []complex128, numerator, denominator []float6
 	return numerator, denominator, nil
 }
 
-func discreteResponseResidual(target []complex128, num, den []float64) float64 {
+func discreteResponseResidual(target []complex128, grid discreteFitGrid, num, den []float64) float64 {
 	residual := 0.0
 	for k, h := range target {
-		z := cmplx.Exp(complex(0, math.Pi*float64(k)/float64(len(target)-1)))
+		z := grid.z[k]
 		prediction := Poly(num).Eval(z) / Poly(den).Eval(z)
 		residual = math.Hypot(residual, cmplx.Abs(prediction-h))
 	}
