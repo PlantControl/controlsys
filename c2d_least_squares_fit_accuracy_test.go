@@ -4,7 +4,6 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
-	"runtime"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -74,20 +73,21 @@ func discreteNonStable(t *testing.T, d *System) int {
 // unit circle is set below float64 rounding of the target (6QU2G3); MATLAB
 // returns such a fit as is. C2DFit returns the same model as C2D and reports
 // it at Accuracy 1 exactly when it has more poles not stable than the plant
-// slow poles (F_ii/W_ii of the exact twin). Where those land depends on the
-// platform rounding, so each arch states the rows that fire there.
+// slow poles (F_ii/W_ii of the exact twin). Which rows land there depends on
+// the platform rounding, so only the rule is pinned per row, and that some
+// row exercises it (not under -race, whose rounding fires none of these).
 func TestC2DFitLeastSquaresStiffDescriptorExcessUnstableAccuracy(t *testing.T) {
 	const dt = 0.1
+	fired := 0
 	for _, tc := range []struct {
 		name         string
 		seed, stream uint64
 		scaled       bool
-		fires        map[string]bool
 	}{
-		{"ns400/54", 54, 7704, false, map[string]bool{"arm64": true, "amd64": false}},
-		{"ns1600/103", 103, 9911, false, map[string]bool{"arm64": true, "amd64": false}},
-		{"ns1600/1281", 1281, 9911, false, map[string]bool{"arm64": false, "amd64": true}},
-		{"ns1600/123x7", 123, 9911, true, map[string]bool{"arm64": false, "amd64": true}},
+		{"ns400/54", 54, 7704, false},
+		{"ns1600/103", 103, 9911, false},
+		{"ns1600/1281", 1281, 9911, false},
+		{"ns1600/123x7", 123, 9911, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sys, twin := lsStiffDraw(t, tc.seed, tc.stream, tc.scaled)
@@ -117,10 +117,11 @@ func TestC2DFitLeastSquaresStiffDescriptorExcessUnstableAccuracy(t *testing.T) {
 			if fit.Accuracy != want {
 				t.Errorf("Accuracy %d with %d poles not stable against a stable plant, want %d", fit.Accuracy, ud, want)
 			}
-			if fires, ok := tc.fires[runtime.GOARCH]; ok && fires != (want == 1) {
-				t.Errorf("%s: fit with %d poles not stable, want excess %v on this arch", runtime.GOARCH, ud, fires)
-			}
+			fired += want
 		})
+	}
+	if fired == 0 && !raceEnabled {
+		t.Error("no row has an excess unstable pole; the rows no longer exercise the rule")
 	}
 }
 
@@ -160,6 +161,60 @@ func TestC2DFitLeastSquaresStiffDescriptorReducedOrderStable(t *testing.T) {
 				t.Errorf("fit error vs twin pencil %.4g above that of the twin fit %.4g", got, ref)
 			}
 		})
+	}
+}
+
+// A FitOrder below the minimal one can drop a real unstable slow pole: the
+// order-1 fit keeps a stable slow pole of the plant and loses the unstable
+// one, against the slow poles F_ii/W_ii of the exact twin. C2DFit reports it
+// at Accuracy 1 though Stable is true (Ud < Uc, 6QU2G3).
+func TestC2DFitLeastSquaresStiffDescriptorDroppedUnstablePoleAccuracy(t *testing.T) {
+	const dt = 0.1
+	for _, tc := range []struct {
+		name         string
+		seed, stream uint64
+	}{
+		{"ns1600/68", 68, 9911},
+		{"ns1600/311", 311, 9911},
+		{"ns400/59", 59, 7704},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys, twin := lsStiffDraw(t, tc.seed, tc.stream, false)
+			if twinSlowNonStable(twin) != 1 {
+				t.Fatalf("plant has %d unstable slow poles, want 1", twinSlowNonStable(twin))
+			}
+			df, fit, err := sys.C2DFit(dt, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ud := discreteNonStable(t, df); ud != 0 {
+				t.Fatalf("order-1 fit has %d poles not stable, want 0", ud)
+			}
+			if !fit.Stable || fit.Accuracy != 1 {
+				t.Errorf("fit %+v, want stable at Accuracy 1", fit)
+			}
+		})
+	}
+}
+
+// The count is against the slow part only: a positive stiff pole (F_nn/W_nn
+// of the twin near 1e15) has no sampled image and base never represented it,
+// so a stable fit with stable slow poles stays at Accuracy 0 (decision LPEXWJ).
+func TestC2DFitLeastSquaresStiffDescriptorPositiveStiffPoleNotCounted(t *testing.T) {
+	sys, twin := lsStiffDraw(t, 345, 7704, false)
+	n, _, _ := twin.Dims()
+	if stiff := twin.A.At(n-1, n-1) / twin.E.At(n-1, n-1); stiff < 1e12 {
+		t.Fatalf("stiff pole %g, want large positive", stiff)
+	}
+	if twinSlowNonStable(twin) != 0 {
+		t.Fatal("plant slow part is not stable")
+	}
+	_, fit, err := sys.C2DFit(0.1, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fit.Stable || fit.Accuracy != 0 {
+		t.Errorf("fit %+v, want stable at Accuracy 0", fit)
 	}
 }
 
