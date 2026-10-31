@@ -1244,7 +1244,7 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // 320-bit solution at Accuracy 0. There a K off the gain of X by more
 // than gainFloor is instead replaced by the gain of the
 // extended-precision Hewer iterate of X (hewerGainSubstituted, Y6BJEX
-// am.3), which gainMissIn must accept; X is kept. Not with rotated
+// am.3); X is kept. Not with rotated
 // inputs: all 24 such K of 2686 unrefined rotated sweep rows were within
 // 4x their band, while the Hewer gain cost 4 to 16 times the Dare.
 // Such a rotated K is refined instead, kept should that miss gainTol:

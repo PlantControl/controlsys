@@ -51,7 +51,7 @@ var dareRotatedRefinedNotConvergedCases = []dareRotatedInputsCase{
 // it, returned at Accuracy 0 off the exact-E 320-bit gain by up to 6.5e-3
 // (band 4.5e-7; CEFUJP). One refinement on, X moved away (4667:
 // 1.1e-11 -> 4.3e-10) and K by 0.12, beyond its tolerance; the Hewer
-// gain failed on all. Literals: rv49vGen 4667 from the CEFUJP body;
+// gain, held to the ddGain of the rounded X, failed on all. Literals: rv49vGen 4667 from the CEFUJP body;
 // 4667 and 9223 as rv49vGen forms them on amd64, where they were
 // certified-wrong (K 2.3e-3 and 6.5e-3, 8.5e-5 off; OSLSY3: the
 // generator differs by platform); 8499 natively (K 1.5e-6, band
@@ -60,8 +60,10 @@ var dareRotatedRefinedNotConvergedCases = []dareRotatedInputsCase{
 // best float64 K in hand (Y6BJEX), never worse than the unrefined
 // pencil K; demoted, the refined K was 2.3e-3 where the pencil K
 // returned in its place was 0.29 off (amd64 4667), 1.5e-6 for 6e-3
-// natively (8499), so some row must improve on the pencil K. The race
-// build rounds differently (O4VSO2) and demoted none through refinement.
+// natively (8499). Held to the gain of its next iterate the Hewer gain
+// now certifies 8499 NoScaling true and amd64 9223, K exact. Some row
+// must improve on the pencil K. The race build rounds differently
+// (O4VSO2) and demoted none through refinement.
 func TestDareRotatedInputsRefinedGainNotConvergedNotCertified(t *testing.T) {
 	improved := 0
 	for _, c := range dareRotatedRefinedNotConvergedCases {
@@ -92,9 +94,9 @@ func TestDareRotatedInputsRefinedGainNotConvergedNotCertified(t *testing.T) {
 				if eK > 2*eP {
 					t.Errorf("%s NoScaling %v: Accuracy-1 K %.3g off, the pencil K %.3g", c.name, ns, eK, eP)
 				}
-				if eK < eP/10 {
-					improved++
-				}
+			}
+			if eK < eP/10 {
+				improved++
 			}
 			if riccatiCertifiedWrong(res.Accuracy, eX, sens.X, eK, sens.K, newtonTol) {
 				t.Errorf("%s NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", c.name, ns, eX, eK)

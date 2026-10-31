@@ -16,12 +16,15 @@ const hewerGainPrecMin = 128
 // starting from the gain gainMissIn measures K against, and Eig that of
 // A − BK, once the second step moves K by at most newtonTol, A − BK is
 // shown stable in that precision and in double-double (closedLoopStable),
-// and gainMissIn accepts the new K (Y6BJEX am.4). X is kept. With reduced
-// inputs under cheap control both the float64 pencil K and the
-// double-double gain of the rounded X were off the 320-bit gain by up to
-// 6e-6 and 4.7e-6, either one the worse depending on the rounding of X,
-// within the gain's move under X∘(1 ± eps); the gain of the extended
-// Hewer iterate was within 1e-10 of it.
+// and X is within newtonTol of the iterate the new K is the gain of. X is
+// kept. With reduced inputs under cheap control both the float64 pencil K
+// and the double-double gain of the rounded X were off the 320-bit gain by
+// up to 6e-6 and 4.7e-6, either one the worse depending on the rounding of
+// X, within the gain's move under X∘(1 ± eps); the gain of the extended
+// Hewer iterate was within 1e-10 of it. So K is held to the gain of its
+// next iterate in this precision, not to the ddGain of the rounded X: with
+// X 9.7e-11 off the 320-bit X, that ddGain was 1.2e-4 from a K within 2e-17
+// of the 320-bit gain, at a tolerance of 1.7e-9.
 func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
 	k0, cond, ok := gainIn(A, B, R, opts, red)(res.X)
 	if !ok {
@@ -49,10 +52,9 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 	if !ok {
 		return nil, false
 	}
-	k, prev := xFrom(k0, prec), xMat{}
+	k, prev, y := xFrom(k0, prec), xMat{}, xMat{}
 	for range 2 {
-		y, ok := sol.hewer(k)
-		if !ok {
+		if y, ok = sol.hewer(k); !ok {
 			return nil, false
 		}
 		k1, ok := d.gain(sol, y)
@@ -74,7 +76,8 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 	}
 	c := *res
 	c.K, c.Eig = K, eig
-	if !(gainMissIn(A, B, R, opts, red, &c).units(gainTol) <= 1) {
+	x, ok := sol.xOf(y)
+	if !ok || !(xRel(x, xFrom(res.X, prec)) <= newtonTol) {
 		return nil, false
 	}
 	return &c, true
