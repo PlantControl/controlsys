@@ -41,17 +41,36 @@ func stiffLFTSampled(sys *System, x0 *mat.VecDense, dt float64) (*System, *mat.V
 
 // stiffLFTSampledAuto is stiffLFTSampled for a response sampled at the
 // spacing dtOf(out) of the automatic grid of the returned model out (Step,
-// Initial), so the parts are assembled before the gate decides.
-func stiffLFTSampledAuto(sys *System, x0 *mat.VecDense, dtOf func(out *System) float64) (*System, *mat.VecDense, bool) {
+// Initial), so the parts are assembled before the gate decides. The fold
+// also needs chainFits: its exact delay chain, on the fold's own automatic
+// grid, within the chain budget (delayChainWithinBudget). Over budget the
+// fold takes the ZOH discretization too, after the rejected chain's cost,
+// so the parts are kept.
+func stiffLFTSampledAuto(sys *System, x0 *mat.VecDense, dtOf func(out *System) float64, chainFits func() bool) (*System, *mat.VecDense, bool) {
 	sp, ok := newStiffLFTSplit(sys, x0)
 	if !ok {
 		return nil, nil, false
 	}
 	out, xt, ok := sp.explicit()
-	if !ok || sp.foldAccurate(dtOf(out)) {
+	if !ok || sp.foldAccurate(dtOf(out)) && chainFits() {
 		return nil, nil, false
 	}
 	return out, xt, true
+}
+
+// delayChainWithinBudget reports whether newDelayChain of the internal-delay
+// model sys over steps samples of dt, with k input columns and shifts
+// source shifts, can pass its delayChainMaxWork check: it passes the check
+// at the first truncation order tried, min(K, 4). A model outside
+// delayChainModel reports true, leaving the decision to its caller's route.
+func delayChainWithinBudget(sys *System, dt float64, steps, k, shifts int) bool {
+	explicit, tau, ok := delayChainModel(sys)
+	if !ok {
+		return true
+	}
+	n, _, _ := explicit.Dims()
+	blocks := math.Floor(float64(steps-1)*dt/tau+gridTol) + 1
+	return delayChainWork(blocks, float64(steps), math.Min(blocks-1, 4), float64(n+k), float64(shifts)) <= delayChainMaxWork
 }
 
 // foldAccurate reports whether the exact delay chain of the LU fold E⁻¹A,
