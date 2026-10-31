@@ -1753,6 +1753,9 @@ func plantCrossoverFreq(plant *System) (float64, error) {
 // cannot reach, and a delay's lag at the capped crossover leaves a PDF
 // needing phase lag where the delay-capped bandwidth has a robust design.
 // A DC gain rounded to 0 on a pidtuneRoundedIntegrator plant is infinite.
+// A finite DC gain whose every pole lies in pidtuneIntegratorCluster, as
+// for poles and zeros 1e-9 off z = 1, leaves the pole fallback nothing, so
+// it takes pidtuneIntegratingCrossover as the integrator it clusters into.
 func plantCrossoverFreqFrom(plant *System) (float64, bool, error) {
 	wc, src, err := plantCrossoverSource(plant)
 	return wc, src != pidtuneCrossGain, err
@@ -1799,6 +1802,10 @@ func plantCrossoverSource(plant *System) (float64, pidtuneCrossover, error) {
 			w = math.Min(w, 0.1*math.Pi/plant.Dt)
 		}
 		return w, pole, nil
+	}
+	if tol > 0 {
+		wc, err := pidtuneIntegratingCrossover(plant)
+		return wc, pidtuneCrossGain, err
 	}
 
 	return 0, pidtuneCrossGain, fmt.Errorf("no gain crossover, bandwidth or nonzero pole to infer a crossover from; pass wc > 0: %w", ErrInvalidArgument)
