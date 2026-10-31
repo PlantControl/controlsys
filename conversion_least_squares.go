@@ -24,7 +24,8 @@ type LeastSquaresFit struct {
 	Stable           bool
 	// Accuracy is 1 when the count of poles not stable (IsStable) of the fit
 	// of a descriptor sampled through its pencil (see C2DFit) differs from
-	// that of the slow part of its pencil split, or that count is unavailable.
+	// that of the slow part of its pencil split, a repeated pole at s = 0
+	// counted at its multiplicity, or that count is unavailable.
 	// More: a redundant pole of an order above the minimal one landed on or
 	// beyond z = −1, and reducing FitOrder is the remedy. Fewer: an order
 	// below the minimal one dropped an unstable slow pole, and raising
@@ -179,7 +180,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 	}
 	fit := LeastSquaresFit{FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: unstable == 0}
 	if slow != nil {
-		slowUnstable, err := continuousNonStablePoleCount(slow)
+		slowUnstable, err := continuousNonStablePoleCount(slow, integrators)
 		if err != nil || unstable != slowUnstable {
 			fit.Accuracy = 1
 		}
@@ -190,8 +191,11 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 // continuousNonStablePoleCount is the number of poles of the explicit
 // continuous sys that IsStable classifies as not stable. The slow part of
 // the pencil split is T11⁻¹·S11 of the generalized Schur form, upper
-// quasi-triangular, whose poles are those of its diagonal blocks.
-func continuousNonStablePoleCount(sys *System) (int, error) {
+// quasi-triangular, whose poles are those of its diagonal blocks. integrators
+// is the multiplicity of the pole at s = 0 (leastSquaresIntegratorLimit): a
+// k-fold chain spreads by roundoff to eps^(1/k)·‖A‖, beyond the IsStable
+// tolerance, so the k poles nearest s = 0 count as not stable by rank.
+func continuousNonStablePoleCount(sys *System, integrators int) (int, error) {
 	var poles []complex128
 	if !sys.IsDescriptor() && upperQuasiTriangular(sys.A) {
 		n, _ := sys.A.Dims()
@@ -210,8 +214,17 @@ func continuousNonStablePoleCount(sys *System) (int, error) {
 			return 0, err
 		}
 	}
-	count := 0
-	for _, p := range poles {
+	for k := range min(integrators, len(poles)) {
+		nearest := k
+		for i := k + 1; i < len(poles); i++ {
+			if cmplx.Abs(poles[i]) < cmplx.Abs(poles[nearest]) {
+				nearest = i
+			}
+		}
+		poles[k], poles[nearest] = poles[nearest], poles[k]
+	}
+	count := min(integrators, len(poles))
+	for _, p := range poles[count:] {
 		if poleOnOrOutsideStabilityBoundary(p, true, poleStabilityTolerance(p)) {
 			count++
 		}

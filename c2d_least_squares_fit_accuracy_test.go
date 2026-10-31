@@ -267,7 +267,7 @@ func TestNonStablePoleCountMatchesIsStable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := continuousNonStablePoleCount(sys)
+		got, err := continuousNonStablePoleCount(sys, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
