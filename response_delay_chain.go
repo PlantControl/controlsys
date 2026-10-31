@@ -64,8 +64,9 @@ func delayChainModel(sys *System) (*System, float64, bool) {
 // the distinct source shifts, each costing one exponential per block. ok is
 // false when the chain would exceed delayChainMaxExpm or delayChainMaxWork,
 // checked in float64 before sizing so a delay far below dt cannot overflow
-// the block count; callers then fall back to the approximate ZOH
-// discretization.
+// the block count, and before each exponential so a rejected chain costs
+// none at an order already over budget; callers then fall back to the
+// approximate ZOH discretization.
 func newDelayChain(sys *System, tau float64, inputs []int, dt float64, steps, shifts int) (*delayChain, bool) {
 	n, _, p := sys.Dims()
 	q := len(sys.LFT.Tau)
@@ -137,7 +138,7 @@ func newDelayChain(sys *System, tau float64, inputs []int, dt float64, steps, sh
 
 	order := min(K, 4)
 	for {
-		if (order+1)*na > delayChainMaxExpm {
+		if (order+1)*na > delayChainMaxExpm || delayChainWork(float64(c.blocks), float64(steps), float64(order), float64(na), float64(shifts)) > delayChainMaxWork {
 			return nil, false
 		}
 		c.order = order
@@ -147,12 +148,16 @@ func newDelayChain(sys *System, tau float64, inputs []int, dt float64, steps, sh
 		}
 		order = min(2*order, K)
 	}
-	size := float64((c.order + 1) * na)
-	work := float64(c.blocks) * (float64(steps)*float64(c.order+1)*float64(na*na) + float64(shifts)*(30*size*size*size+float64(steps)*size))
-	if work > delayChainMaxWork {
-		return nil, false
-	}
 	return c, true
+}
+
+// delayChainWork is the work newDelayChain bounds by delayChainMaxWork for a
+// chain of the given blocks, steps, truncation order, augmented size na and
+// source shifts. It grows with order, so newDelayChain checks it before each
+// exponential of the order-doubling search.
+func delayChainWork(blocks, steps, order, na, shifts float64) float64 {
+	size := (order + 1) * na
+	return blocks * (steps*(order+1)*(na*na) + shifts*(30*size*size*size+steps*size))
 }
 
 func maxAbsDense(m *mat.Dense) float64 {

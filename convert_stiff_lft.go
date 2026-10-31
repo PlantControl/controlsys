@@ -60,22 +60,17 @@ func stiffLFTSampledAuto(sys *System, x0 *mat.VecDense, dtOf func(out *System) f
 
 // delayChainWithinBudget reports whether newDelayChain of the internal-delay
 // model sys over steps samples of dt, with k input columns and shifts
-// source shifts, can pass its delayChainMaxWork check: its work at the
-// lowest truncation order it tries, min(K, 4), bounds the checked work from
-// below, as the order only grows. A model outside delayChainModel reports
-// true, leaving the decision to its caller's route.
+// source shifts, can pass its delayChainMaxWork check: it passes the check
+// at the first truncation order tried, min(K, 4). A model outside
+// delayChainModel reports true, leaving the decision to its caller's route.
 func delayChainWithinBudget(sys *System, dt float64, steps, k, shifts int) bool {
 	explicit, tau, ok := delayChainModel(sys)
 	if !ok {
 		return true
 	}
 	n, _, _ := explicit.Dims()
-	na := float64(n + k)
 	blocks := math.Floor(float64(steps-1)*dt/tau+gridTol) + 1
-	order := math.Min(blocks-1, 4)
-	size := (order + 1) * na
-	work := blocks * (float64(steps)*(order+1)*na*na + float64(shifts)*(30*size*size*size+float64(steps)*size))
-	return work <= delayChainMaxWork
+	return delayChainWork(blocks, float64(steps), math.Min(blocks-1, 4), float64(n+k), float64(shifts)) <= delayChainMaxWork
 }
 
 // foldAccurate reports whether the exact delay chain of the LU fold E⁻¹A,

@@ -1910,12 +1910,13 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if err := requireTimeResponse("Step", sys, tFinal); err != nil {
 		return nil, err
 	}
+	var zs *System
+	var zsErr error
 	if ex, _, ok := stiffLFTSampledAuto(sys, nil, func(out *System) float64 {
 		_, dt, _ := newTimeResponsePlanner(out).grid(tFinal, 0)
 		return dt
 	}, func() bool {
-		zs, err := sys.zeroStateResponseForm()
-		if err != nil {
+		if zs, zsErr = sys.zeroStateResponseForm(); zsErr != nil {
 			return true
 		}
 		t, dt, err := newTimeResponsePlanner(zs).grid(tFinal, 0)
@@ -1923,10 +1924,13 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	}); ok {
 		sys = ex
 	} else {
-		var err error
-		if sys, err = sys.zeroStateResponseForm(); err != nil {
-			return nil, fmt.Errorf("Step: %w", err)
+		if zs == nil && zsErr == nil {
+			zs, zsErr = sys.zeroStateResponseForm()
 		}
+		if zsErr != nil {
+			return nil, fmt.Errorf("Step: %w", zsErr)
+		}
+		sys = zs
 		if resp, ok, err := delayChainAuto(sys, tFinal, stepResponse); err != nil {
 			return nil, fmt.Errorf("Step: %w", err)
 		} else if ok {
@@ -2283,6 +2287,10 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 		}
 	}
 	stiffLFT := false
+	var sim *System
+	var simX0 *mat.VecDense
+	var reduced, formRan bool
+	var err error
 	if n, _, _ := sys.Dims(); x0.Len() == n {
 		if ex, xt, ok := stiffLFTSampledAuto(sys, x0, func(out *System) float64 {
 			free := *out
@@ -2290,8 +2298,8 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 			_, dt, _ := newTimeResponsePlanner(&free).grid(tFinal, 0)
 			return dt
 		}, func() bool {
-			sim, _, _, err := sys.timeResponseForm(x0)
-			if err != nil {
+			formRan = true
+			if sim, simX0, reduced, err = sys.timeResponseForm(x0); err != nil {
 				return true
 			}
 			free := *sim
@@ -2299,10 +2307,12 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 			t, dt, err := newTimeResponsePlanner(&free).grid(tFinal, 0)
 			return err != nil || delayChainWithinBudget(&free, dt, len(t), 0, delayShiftCount(&free))
 		}); ok {
-			sys, x0, stiffLFT = ex, xt, true
+			sys, x0, stiffLFT, formRan = ex, xt, true, false
 		}
 	}
-	sim, simX0, reduced, err := sys.timeResponseForm(x0)
+	if !formRan {
+		sim, simX0, reduced, err = sys.timeResponseForm(x0)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("Initial: %w", err)
 	}
