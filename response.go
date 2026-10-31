@@ -1899,7 +1899,8 @@ func Damp(sys *System) ([]DampInfo, error) {
 // discretization, of its generalized Schur parts with the delay feedback
 // kept (as C2D), instead of the exact chain of E⁻¹A when the fold's
 // cond(E)·ε error exceeds the discretization's dt·ρ on the automatic grid,
-// ρ the largest slow pole modulus of the pencil.
+// ρ the largest slow pole modulus of the pencil, or that chain cannot fit
+// its work budget.
 //
 // tFinal = 0 selects the horizon automatically from the poles and delays, as
 // MATLAB step(sys); a negative or non-finite tFinal returns
@@ -1912,6 +1913,13 @@ func Step(sys *System, tFinal float64) (*TimeResponse, error) {
 	if ex, _, ok := stiffLFTSampledAuto(sys, nil, func(out *System) float64 {
 		_, dt, _ := newTimeResponsePlanner(out).grid(tFinal, 0)
 		return dt
+	}, func() bool {
+		zs, err := sys.zeroStateResponseForm()
+		if err != nil {
+			return true
+		}
+		t, dt, err := newTimeResponsePlanner(zs).grid(tFinal, 0)
+		return err != nil || delayChainWithinBudget(zs, dt, len(t), 1, delayShiftCount(zs))
 	}); ok {
 		sys = ex
 	} else {
@@ -2281,6 +2289,15 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 			free.InputDelay, free.Delay = nil, nil
 			_, dt, _ := newTimeResponsePlanner(&free).grid(tFinal, 0)
 			return dt
+		}, func() bool {
+			sim, _, _, err := sys.timeResponseForm(x0)
+			if err != nil {
+				return true
+			}
+			free := *sim
+			free.InputDelay, free.Delay = nil, nil
+			t, dt, err := newTimeResponsePlanner(&free).grid(tFinal, 0)
+			return err != nil || delayChainWithinBudget(&free, dt, len(t), 0, delayShiftCount(&free))
 		}); ok {
 			sys, x0, stiffLFT = ex, xt, true
 		}
