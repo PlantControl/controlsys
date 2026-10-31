@@ -14,6 +14,9 @@ import (
 func TestStepInternalDelayStiffDescriptorKeepsPartsWhenFoldChainOverBudget(t *testing.T) {
 	const tf = 120
 	tc := stiffQZFoldCases[0]
+	if tc.seed != 50 {
+		t.Fatalf("stiffQZFoldCases[0] is seed %d, want 50", tc.seed)
+	}
 	sys := tc.system(t)
 	x0 := mat.NewVecDense(tc.n, []float64{0.7, -0.4, 1.1})
 
