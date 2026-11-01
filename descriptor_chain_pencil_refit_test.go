@@ -92,8 +92,7 @@ func TestTransferFunctionImproperChainBesideStiffPole(t *testing.T) {
 // (48) closed; now none is off, 30 (34) fail closed with
 // ErrDescriptorSingular, no improper model reads proper and IsProper,
 // Step and TransferFunction agree. Excepted: improper seed 276 on amd64,
-// 5.1 off on base too, whose reduction keeps a fourth pole, and improper
-// seed 250 under -race (no FMA fusion), 48.9 off on base too.
+// 5.1 off on base too, whose reduction keeps a fourth pole.
 func TestTransferFunctionChainBesideStiffPoleSweep(t *testing.T) {
 	matched, closed := 0, 0
 	for seed := range uint64(300) {
@@ -118,7 +117,7 @@ func TestTransferFunctionChainBesideStiffPoleSweep(t *testing.T) {
 		if pr == errors.Is(serr, ErrImproperModel) || fzTFImproper(res.TF) == pr {
 			t.Errorf("%s: IsProper %v, Step %v, TF improper %v disagree", label, pr, serr, fzTFImproper(res.TF))
 		}
-		if seed == 276 || seed == 250 {
+		if seed == 276 {
 			continue
 		}
 		if d := chainOracleMismatch(t, res, oracle, chainLowFreq); !(d <= 1e-5) {
