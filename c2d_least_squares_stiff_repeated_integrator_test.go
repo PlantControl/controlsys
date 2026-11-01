@@ -9,30 +9,25 @@ import (
 )
 
 // A repeated integrator of a stiff descriptor spreads on the slow part of the
-// pencil split to about ±1e-8, real or imaginary by platform rounding, so the
-// tolerance of IsStable can call the negative pole stable. Accuracy counts the
-// chain at its true multiplicity (6QU2G3 review): it is 1 exactly when the fit
-// and the triangular twin, whose poles are F_ii/W_ii, disagree on the count of
-// poles not stable.
-func TestC2DFitAccuracyCountsRepeatedIntegrator(t *testing.T) {
+// pencil split to about ±1e-8, real or imaginary by platform rounding. The fit
+// still pins the chain at z = 1, and is not certified: equal counts of poles
+// not stable are not the same poles, as the hidden unstable slow pole shows
+// (6QU2G3 review).
+func TestC2DFitLeastSquaresRepeatedIntegratorPinnedNotCertified(t *testing.T) {
 	const stiffness = 1e-13
 	for _, tc := range []struct {
-		name     string
-		f        []float64
-		w        []float64
-		b        []float64
-		c        []float64
-		plantNot int
-		minEqual int
+		name string
+		f    []float64
+		w    []float64
+		b    []float64
+		c    []float64
 	}{
 		{
-			name:     "double",
-			f:        []float64{0, 0.7, -0.4, 0, 0, 0.9, 0, 0, -0.8},
-			w:        []float64{1, 0.8, stiffness},
-			b:        []float64{0.6, -1.1, 0.5},
-			c:        []float64{1.2, 0.4, -0.9},
-			plantNot: 2,
-			minEqual: 20,
+			name: "double",
+			f:    []float64{0, 0.7, -0.4, 0, 0, 0.9, 0, 0, -0.8},
+			w:    []float64{1, 0.8, stiffness},
+			b:    []float64{0.6, -1.1, 0.5},
+			c:    []float64{1.2, 0.4, -0.9},
 		},
 		{
 			name: "double with unstable slow pole",
@@ -42,11 +37,9 @@ func TestC2DFitAccuracyCountsRepeatedIntegrator(t *testing.T) {
 				0, 0, 0.2, 0.5,
 				0, 0, 0, -0.8,
 			},
-			w:        []float64{1, 0.8, 1, stiffness},
-			b:        []float64{0.6, -1.1, 0.7, 0.5},
-			c:        []float64{1.2, 0.4, 0.8, -0.9},
-			plantNot: 3,
-			minEqual: 1,
+			w: []float64{1, 0.8, 1, stiffness},
+			b: []float64{0.6, -1.1, 0.7, 0.5},
+			c: []float64{1.2, 0.4, 0.8, -0.9},
 		},
 		{
 			name: "double with hidden unstable slow pole",
@@ -56,14 +49,13 @@ func TestC2DFitAccuracyCountsRepeatedIntegrator(t *testing.T) {
 				0, 0, 0.5, 0,
 				0, 0, 0, -0.8,
 			},
-			w:        []float64{1, 0.8, 1, stiffness},
-			b:        []float64{0.6, -1.1, 0, 0.5},
-			c:        []float64{1.2, 0.4, 0.8, -0.9},
-			plantNot: 3,
+			w: []float64{1, 0.8, 1, stiffness},
+			b: []float64{0.6, -1.1, 0, 0.5},
+			c: []float64{1.2, 0.4, 0.8, -0.9},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			routed, equal, differ := 0, 0, 0
+			routed := 0
 			for seed := range uint64(40) {
 				sys := stiffRotatedDescriptor(t, rand.New(rand.NewPCG(seed, 60608)), tc.f, tc.w, tc.b, tc.c)
 				if _, ok := foldInaccurateParts(sys); !ok {
@@ -88,26 +80,14 @@ func TestC2DFitAccuracyCountsRepeatedIntegrator(t *testing.T) {
 					if pinned != 2 {
 						t.Errorf("seed %d dt %g: poles %v, %d at z = 1, want 2", seed, dt, poles, pinned)
 					}
-					ud := discreteNonStable(t, d)
-					want := 0
-					if ud != tc.plantNot {
-						want = 1
-						differ++
-					} else {
-						equal++
-					}
-					if fit.Accuracy != want {
-						t.Errorf("seed %d dt %g: Ud %d, plant %d, Accuracy %d, want %d", seed, dt, ud, tc.plantNot, fit.Accuracy, want)
+					if fit.Accuracy != 1 {
+						t.Errorf("seed %d dt %g: Accuracy %d, want 1", seed, dt, fit.Accuracy)
 					}
 				}
 			}
 			if routed == 0 {
 				t.Fatal("no draw exercises the pencil route")
 			}
-			if equal < tc.minEqual {
-				t.Errorf("Ud == plant on %d fits (%d differ), want at least %d", equal, differ, tc.minEqual)
-			}
-			t.Logf("routed %d, Ud == plant %d, differ %d", routed, equal, differ)
 		})
 	}
 }

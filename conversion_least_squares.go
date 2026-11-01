@@ -22,14 +22,15 @@ type LeastSquaresFit struct {
 	RMSRelativeError float64
 	MaxRelativeError float64
 	Stable           bool
-	// Accuracy is 1 when the count of poles not stable (IsStable) of the fit
-	// of a descriptor sampled through its pencil (see C2DFit) differs from
-	// that of the slow part of its pencil split, a repeated pole at s = 0
-	// counted at its multiplicity, or that count is unavailable.
-	// More: a redundant pole of an order above the minimal one landed on or
-	// beyond z = −1, and reducing FitOrder is the remedy. Fewer: an order
-	// below the minimal one dropped an unstable slow pole, and raising
-	// FitOrder is the remedy. The value is returned as fitted. It is 0 otherwise.
+	// Accuracy is 1 for the fit of a descriptor sampled through its pencil (see
+	// C2DFit): such a fit is not certified, since equal counts of poles not
+	// stable (IsStable) of the fit and of the slow part of its pencil split do
+	// not make them the same poles. As guidance: more poles not stable than
+	// the slow part means a redundant pole of an order above the minimal one
+	// landed on or beyond z = −1, and reducing FitOrder is the remedy; fewer
+	// means an order below the minimal one dropped an unstable slow pole, and
+	// raising FitOrder is the remedy unless that pole lies above Nyquist,
+	// where a smaller dt is. The value is returned as fitted. It is 0 otherwise.
 	Accuracy int
 }
 
@@ -180,10 +181,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 	}
 	fit := LeastSquaresFit{FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: unstable == 0}
 	if slow != nil {
-		slowUnstable, err := continuousNonStablePoleCount(slow, integrators)
-		if err != nil || unstable != slowUnstable {
-			fit.Accuracy = 1
-		}
+		fit.Accuracy = 1
 	}
 	return out, fit, nil
 }

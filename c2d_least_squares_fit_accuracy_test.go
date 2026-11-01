@@ -72,13 +72,10 @@ func discreteNonStable(t *testing.T, d *System) int {
 // minimal order, keeps a redundant near-cancelling pole whose side of the
 // unit circle is set below float64 rounding of the target (6QU2G3); MATLAB
 // returns such a fit as is. C2DFit returns the same model as C2D and reports
-// it at Accuracy 1 exactly when it has more poles not stable than the plant
-// slow poles (F_ii/W_ii of the exact twin). Which rows land there depends on
-// the platform rounding, so only the rule is pinned per row, and that some
-// row exercises it (not under -race, whose rounding fires none of these).
+// it at Accuracy 1, as every fit through the pencil. Which rows have excess
+// poles not stable depends on the platform rounding.
 func TestC2DFitLeastSquaresStiffDescriptorExcessUnstableAccuracy(t *testing.T) {
 	const dt = 0.1
-	fired := 0
 	for _, tc := range []struct {
 		name         string
 		seed, stream uint64
@@ -110,24 +107,16 @@ func TestC2DFitLeastSquaresStiffDescriptorExcessUnstableAccuracy(t *testing.T) {
 			if fit.Stable != (ud == 0) {
 				t.Errorf("Stable %v with %d poles not stable", fit.Stable, ud)
 			}
-			want := 0
-			if ud > 0 {
-				want = 1
+			if fit.Accuracy != 1 {
+				t.Errorf("Accuracy %d with %d poles not stable against a stable plant, want 1", fit.Accuracy, ud)
 			}
-			if fit.Accuracy != want {
-				t.Errorf("Accuracy %d with %d poles not stable against a stable plant, want %d", fit.Accuracy, ud, want)
-			}
-			fired += want
 		})
-	}
-	if fired == 0 && !raceEnabled {
-		t.Error("no row has an excess unstable pole; the rows no longer exercise the rule")
 	}
 }
 
 // FitOrder 1, the minimal order and the MATLAB remedy for unstable poles
 // and z = −1 cancellations, fits ns400 seed 54 and ns1600 seed 103 stable
-// at Accuracy 0, about as well as the fit of the exact twin at that order
+// at Accuracy 1 (not certified), about as well as the fit of the exact twin at that order
 // (an accurately folded descriptor with the same response).
 func TestC2DFitLeastSquaresStiffDescriptorReducedOrderStable(t *testing.T) {
 	const dt = 0.1
@@ -145,8 +134,8 @@ func TestC2DFitLeastSquaresStiffDescriptorReducedOrderStable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !fit.Stable || fit.Accuracy != 0 || fit.FitOrder != 1 {
-				t.Errorf("fit %+v, want stable order-1 fit at Accuracy 0", fit)
+			if !fit.Stable || fit.Accuracy != 1 || fit.FitOrder != 1 {
+				t.Errorf("fit %+v, want stable order-1 fit at Accuracy 1", fit)
 			}
 			if stable, err := df.IsStable(); err != nil || !stable {
 				t.Errorf("IsStable %v, %v", stable, err)
@@ -199,7 +188,8 @@ func TestC2DFitLeastSquaresStiffDescriptorDroppedUnstablePoleAccuracy(t *testing
 
 // The count is against the slow part only: a positive stiff pole (F_nn/W_nn
 // of the twin near 1e15) has no sampled image and base never represented it,
-// so a stable fit with stable slow poles stays at Accuracy 0 (decision LPEXWJ).
+// so a stable fit keeps stable slow poles, and at Accuracy 1 like every fit
+// through the pencil (decision LPEXWJ).
 func TestC2DFitLeastSquaresStiffDescriptorPositiveStiffPoleNotCounted(t *testing.T) {
 	sys, twin := lsStiffDraw(t, 345, 7704, false)
 	n, _, _ := twin.Dims()
@@ -213,8 +203,8 @@ func TestC2DFitLeastSquaresStiffDescriptorPositiveStiffPoleNotCounted(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !fit.Stable || fit.Accuracy != 0 {
-		t.Errorf("fit %+v, want stable at Accuracy 0", fit)
+	if !fit.Stable || fit.Accuracy != 1 {
+		t.Errorf("fit %+v, want stable at Accuracy 1", fit)
 	}
 }
 
