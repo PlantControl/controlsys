@@ -560,7 +560,7 @@ func TestPidtuneBackoffStaysInBand(t *testing.T) {
 }
 
 // OBRXEO review: an ill-conditioned (z−1)·∏(z−pᵢ) realization can round
-// DCGain to 0 instead of ∞ (∞ since 5YRXMC, so the sweep keeps both) while
+// its DC gain to 0 instead of ∞ (∞ since 5YRXMC; the sweep keeps both) while
 // the integrator pole moves ~1e-9 off z = 1;
 // the zero-DC pole fallback took that pole as the slowest, wc ~5e-8, where
 // (zI−A) is singular, and every family failed "singular complex matrix".
@@ -623,7 +623,7 @@ func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
 		if err != nil || len(am.GainCrossFreqs) > 0 {
 			continue
 		}
-		dc, err := p.DCGain()
+		dc, err := p.integratingDCGain()
 		if err != nil || dc.At(0, 0) != 0 && !math.IsInf(dc.At(0, 0), 0) {
 			continue
 		}
@@ -657,7 +657,8 @@ func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
 			}
 		}
 	}
-	if kept < 60 || displaced < 30 {
+	t.Logf("kept %d plants, %d displaced", kept, displaced)
+	if kept < 75 || displaced < 45 {
 		t.Fatalf("sweep kept %d plants, %d displaced", kept, displaced)
 	}
 }
