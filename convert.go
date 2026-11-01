@@ -224,7 +224,11 @@ func bilinear(sys *System, palpha, pbeta, alpha, beta float64) (*System, error) 
 // rounds fractional delays to the nearest sample (tustin and matched only),
 // DelayModeling "" models extra delays as internal delays, PrewarpFrequency 0
 // (rad/s, tustin only, below Nyquist) disables prewarping, and FitOrder 0
-// ("auto") fits least-squares models of the source order.
+// ("auto") fits least-squares models of the source order n. Above the
+// minimal order the fit keeps a redundant near-cancelling pole-zero pair
+// whose pole is not imposed stable and can land on or beyond z = −1, as
+// MATLAB's can; the MATLAB remedy, reducing FitOrder (or the model, with
+// minreal), applies to such unstable poles and z = −1 cancellations.
 type C2DOptions struct {
 	Method           C2DMethod
 	ThiranOrder      int
@@ -249,7 +253,8 @@ const (
 	// C2DMethodMatched is zero-pole matching (SISO only).
 	C2DMethodMatched C2DMethod = "matched"
 	// C2DMethodLeastSquares fits the frequency response up to Nyquist (c2d,
-	// SISO only).
+	// SISO only). C2D returns the fit as MATLAB does; C2DFit also reports
+	// its quality and Accuracy.
 	C2DMethodLeastSquares C2DMethod = "least-squares"
 )
 
