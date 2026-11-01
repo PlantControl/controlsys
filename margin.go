@@ -657,8 +657,10 @@ func selectMargin(margins, freqs []float64) (m, w float64, ok bool) {
 // dbDrop = 0 selects MATLAB's default −3. Without continuous internal delays
 // it is the smallest boundary eigenvalue of the Hamiltonian pencil of
 // |L| = g, refined on the exact response; with them, the first crossing on
-// an adaptive frequency grid. It returns +Inf when the gain never drops that
-// far, as for a DC gain of 0 (MATLAB's high-pass result). An infinite DC
+// an adaptive frequency grid. A pole within rounding of DC with a finite DC
+// gain has its crossing there, on the double-double response. It returns +Inf
+// when the gain never drops that far, as for a DC gain of 0 (MATLAB's
+// high-pass result). An infinite DC
 // gain (an integrator) puts the threshold at ∞, so the bandwidth is
 // undefined rather than +Inf; python-control returns NaN, which the Go error
 // rule maps to ErrInvalidArgument. A dbDrop that is not a finite negative
@@ -706,6 +708,12 @@ func bandwidth(sys *System, dbDrop float64) (float64, error) {
 		return 0, err
 	}
 	if err == nil {
+		// A finite DC gain with a response snapped to +Inf at DC is a pole
+		// within rounding of DC: the snap covers the crossing, so the search
+		// reads the response in double-double, where it agrees with DCGain.
+		if h, ok := loop.eval.try(0); !ok || cmplx.IsInf(h) {
+			loop.eval.exact = true
+		}
 		ws, err := loop.gainCrossings(math.Pow(10, threshold/20))
 		if err != nil {
 			return 0, err
