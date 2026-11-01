@@ -238,7 +238,10 @@ func continuousNonStablePoleCount(sys *System, integrators int) (int, error) {
 // response, instead of that of the fold, and counts the integrators on the
 // slow part: the tolerance of leastSquaresIntegratorLimit scales with ‖A‖₁,
 // which the fold inflates to the stiff pole (cond(E)), so a slow pole there
-// passes for one.
+// passes for one. Coupling within rounding of the slow poles leaves them
+// undetermined by the stored data: F=[-1,c,1;0,-2,1;0,0,-1], W(1,1,1e-13) at
+// c ≥ 3e8 has them unstable under ±1 ulp of the pencil, so the fit is not
+// right there on either split, at Accuracy 1 (the routed path).
 func leastSquaresPencilSlow(sys *System) *System {
 	if !sys.IsDescriptor() || sys.HasInternalDelay() {
 		return nil
