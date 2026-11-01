@@ -271,3 +271,41 @@ func TestIsProperFirstSTermBesideLargePole(t *testing.T) {
 		}
 	}
 }
+
+// TestTransferFunctionImproperChainRefutedBySamples: 5CNIZA. Improper
+// index-5/6 chains with small s-terms beside a finite pole large in A: the
+// split misplaces residue into s^1 (bscale 1e-6, seed 293: −6.85e3 against a
+// true −3.84e-7) and misses the in-range pencil solves by 4.9e7 times their
+// uncertainty. The improper reduction was still returned, off the structured
+// oracle by up to 22 relative at 0.5+3i with nil error. The true s-terms are
+// not visible at any determined sample, so no refit recovers them: a returned
+// TF must match the oracle and otherwise the model fails closed. The bad
+// seeds differ by arch (FMA): 174 and 38 on both, 293 and 215 native, 85 and
+// 260 amd64.
+func TestTransferFunctionImproperChainRefutedBySamples(t *testing.T) {
+	for _, tc := range []struct {
+		seed   uint64
+		bscale float64
+	}{{174, 1e-6}, {38, 1e-6}, {293, 1e-6}, {174, 1e-8}, {293, 1e-8}, {215, 1e-8}, {85, 1e-8}, {260, 1e-8}} {
+		label := fmt.Sprintf("seed %d bscale %g", tc.seed, tc.bscale)
+		sys, oracle := smallSTermChainDescriptor(t, tc.seed, tc.bscale)
+		pr, perr := sys.IsProper()
+		_, serr := Step(sys, 1)
+		res, terr := sys.TransferFunction(nil)
+		if errors.Is(perr, ErrDescriptorSingular) {
+			if !errors.Is(serr, ErrDescriptorSingular) || !errors.Is(terr, ErrDescriptorSingular) {
+				t.Errorf("%s: IsProper %v, Step %v, TF %v disagree", label, perr, serr, terr)
+			}
+			continue
+		}
+		if perr != nil || terr != nil {
+			t.Fatalf("%s: IsProper %v, TransferFunction %v", label, perr, terr)
+		}
+		if pr {
+			t.Errorf("%s: improper model reads proper", label)
+		}
+		if d := chainOracleMismatch(t, res, oracle, chainLowFreq); !(d <= 1e-5) {
+			t.Errorf("%s: TF off the oracle by %.3g relative", label, d)
+		}
+	}
+}

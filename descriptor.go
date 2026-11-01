@@ -546,9 +546,9 @@ func (sys *System) weierstrassReduce() (*System, error) {
 // (refitPolyFromPencil), and a stiff improper chain split that misses the
 // data-scale points of reductionPolyMatches stands when its refit at the
 // same degree matches the samples (refitPolyKeepDegree). A proper or
-// improper split beside such a chain that the low-frequency pencil solves
-// refute, or that no pencil solve can check (reductionRefutedBelow), fails
-// closed.
+// improper split beside such a chain that the pencil samples refute with no
+// refit, that the low-frequency pencil solves refute, or that no pencil
+// solve can check (reductionRefutedBelow), fails closed.
 func (sys *System) weierstrassReduceParts() (*System, []*mat.Dense, error) {
 	out, poly, _, _, err := sys.weierstrassReduceCore(false, false, true)
 	return out, poly, err
@@ -832,8 +832,11 @@ func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *Sys
 		}
 	}
 	if chain && poly != nil && q == 0 {
-		if fixed, fpoly, ok := refitPolyFromPencil(sys, out, poly, ni-1); ok {
+		fixed, fpoly, ok, miss := refitPolyFromPencil(sys, out, poly, ni-1)
+		if ok {
 			out, poly = fixed, fpoly
+		} else if miss > refitRefuted {
+			return nil, nil, nil, resplit, errReductionRefuted
 		}
 		if nf > 0 && reductionRefutedBelow(sys, out, poly) {
 			return nil, nil, nil, resplit, errReductionRefuted
@@ -876,9 +879,10 @@ func (sys *System) weierstrassReduceCore(probe, nested, tryResplit bool) (_ *Sys
 var errChainLeft = fmt.Errorf("infinite Jordan chain left among the finite eigenvalues: %w", ErrDescriptorSingular)
 
 // errReductionRefuted is the error of weierstrassReduceCore when a proper
-// reduction beside an index ≥ 2 chain misses the direct pencil solves of
-// refitFromPencil by more than refitRefuted times their uncertainty and
-// no refit matches them (too few samples, or none fits), or when a proper
+// or improper reduction beside an index ≥ 2 chain misses the direct pencil
+// solves of refitFromPencil or refitPolyFromPencil by more than
+// refitRefuted times their uncertainty and no refit is taken (too few
+// samples, none fits, or its s-terms are not visible), or when a proper
 // or improper one misses those under their range, or no solve there or in
 // the range is usable (reductionRefutedBelow): the split moved residue
 // between a large finite pole, the nilpotent block and D, and the model
@@ -1791,31 +1795,36 @@ func refitFromPencil(sys, red *System, dropped []*mat.Dense) (fixed *System, ok 
 // at least refitSurplus more than its unknowns per channel, while a
 // proper refit misses them by more than refitRefuted (the data need the
 // s-terms) and the s-terms reach polyDominant of the response at some
-// sample; otherwise ok is false and the reduction is kept as it is. A
+// sample; otherwise ok is false and red stands only if miss, its mismatch
+// at whatever samples there are (0 with none), is at most refitRefuted. A
 // proper refit matching the samples is not taken: it cannot refute own
 // s-terms that a residue on λ mimics where |s| ≪ |λ|.
 // The minimal-norm fit may split D and λ's residue otherwise than the
 // structured model: they are collinear to s/λ where the data reach.
-func refitPolyFromPencil(sys, red *System, poly []*mat.Dense, maxDeg int) (fixed *System, fpoly []*mat.Dense, ok bool) {
+func refitPolyFromPencil(sys, red *System, poly []*mat.Dense, maxDeg int) (fixed *System, fpoly []*mat.Dense, ok bool, miss float64) {
 	nf, m, p := red.Dims()
 	if m == 0 || p == 0 || nf == 0 || maxDeg < 1 || sys.internalDelayCount() > 0 {
-		return nil, nil, false
+		return nil, nil, false, 0
 	}
 	var eig mat.Eigen
 	if !eig.Factorize(red.A, mat.EigenNone) {
-		return nil, nil, false
+		return nil, nil, false, 0
 	}
 	poles := eig.Values(nil)
 	samples := pencilSamples(sys, poles, nf+1+maxDeg+refitSurplus)
-	if len(samples) < nf+2+refitSurplus {
-		return nil, nil, false
+	if len(samples) == 0 {
+		return nil, nil, false, 0
 	}
 	phi, psi, ok := resolventBases(red, samples)
-	if !ok || samplesMismatch(red, poly, samples, psi) <= refitRefuted {
-		return nil, nil, false
+	if !ok {
+		return nil, nil, false, 0
+	}
+	miss = samplesMismatch(red, poly, samples, psi)
+	if len(samples) < nf+2+refitSurplus || miss <= refitRefuted {
+		return nil, nil, false, miss
 	}
 	if refitRounded(red.Copy(), nil, samples, phi, psi) <= refitRefuted {
-		return nil, nil, false
+		return nil, nil, false, miss
 	}
 	for deg := 1; deg <= maxDeg && len(samples) >= nf+1+deg+refitSurplus; deg++ {
 		out := red.Copy()
@@ -1825,12 +1834,12 @@ func refitPolyFromPencil(sys, red *System, poly []*mat.Dense, maxDeg int) (fixed
 		}
 		if refitRounded(out, fpoly, samples, phi, psi) <= 1 {
 			if !polyDominates(samples, fpoly) {
-				return nil, nil, false
+				return nil, nil, false, miss
 			}
-			return out, fpoly, true
+			return out, fpoly, true, miss
 		}
 	}
-	return nil, nil, false
+	return nil, nil, false, miss
 }
 
 // refitPolyKeepDegree returns the reduction (red, poly) of sys (no
