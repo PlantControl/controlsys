@@ -1,13 +1,15 @@
 package controlsys
 
 import (
+	"runtime"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
 )
 
 // dareRotatedRefinedNotConvergedCases are the inputs of
-// TestDareRotatedInputsRefinedGainNotConvergedNotCertified.
+// TestDareRotatedInputsRefinedGainCertifiedHewerOrDemoted.
 var dareRotatedRefinedNotConvergedCases = []dareRotatedInputsCase{
 	{
 		name: "rv49v 4667",
@@ -44,15 +46,15 @@ var dareRotatedRefinedNotConvergedCases = []dareRotatedInputsCase{
 	},
 }
 
-// TestDareRotatedInputsRefinedGainNotConvergedNotCertified: rotated
+// TestDareRotatedInputsRefinedGainCertifiedHewerOrDemoted: rotated
 // inputs under cheap control (R ~1e-13..1e-7, E's last pivot
 // 3e-5..6e-5) whose refined K was the exact gain of an X within
 // newtonTol but up to 1e4 times outside its band, so gainMissIn passed
 // it, returned at Accuracy 0 off the exact-E 320-bit gain by up to 6.5e-3
 // (band 4.5e-7; CEFUJP). One refinement on, X moved away (4667:
 // 1.1e-11 -> 4.3e-10) and K by 0.12, beyond its tolerance; the Hewer
-// gain failed on all. Literals: rv49vGen 4667 from the CEFUJP body;
-// 4667 and 9223 as rv49vGen forms them on amd64, where they were
+// gain, held to the ddGain of the rounded X, failed on all. Literals:
+// rv49vGen 4667 from the CEFUJP body; 4667 and 9223 as rv49vGen forms them on amd64, where they were
 // certified-wrong (K 2.3e-3 and 6.5e-3, 8.5e-5 off; OSLSY3: the
 // generator differs by platform); 8499 natively (K 1.5e-6, band
 // 6.1e-9). The outcome may differ by platform; none may be
@@ -60,9 +62,14 @@ var dareRotatedRefinedNotConvergedCases = []dareRotatedInputsCase{
 // best float64 K in hand (Y6BJEX), never worse than the unrefined
 // pencil K; demoted, the refined K was 2.3e-3 where the pencil K
 // returned in its place was 0.29 off (amd64 4667), 1.5e-6 for 6e-3
-// natively (8499), so some row must improve on the pencil K. The race
-// build rounds differently (O4VSO2) and demoted none through refinement.
-func TestDareRotatedInputsRefinedGainNotConvergedNotCertified(t *testing.T) {
+// natively (8499). Held to the gain of its next iterate the Hewer gain
+// now certifies 8499 NoScaling true and the 9223 literal natively, K
+// exact at Accuracy 0 (the base code held 8499 and 9223 NoScaling false
+// at Accuracy 1, K 1.5e-6 and 3e-5 off). On amd64 no row changes, and
+// some Accuracy-1 K must improve on the pencil K. The race build rounds
+// differently (O4VSO2) and demoted none through refinement.
+func TestDareRotatedInputsRefinedGainCertifiedHewerOrDemoted(t *testing.T) {
+	exact := map[string][]bool{"rv49v 8499": {true}, "rv49v 9223 amd64 generator": {false, true}}
 	improved := 0
 	for _, c := range dareRotatedRefinedNotConvergedCases {
 		ref := riccatiExactReference(false, c.A, c.B, c.Q, c.R, c.S, c.E, riccatiExactPrec)
@@ -88,13 +95,14 @@ func TestDareRotatedInputsRefinedGainNotConvergedNotCertified(t *testing.T) {
 			}
 			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
 			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g), pencil K err %.3g", c.name, ns, res.Accuracy, eX, sens.X, eK, sens.K, eP)
-			if res.Accuracy == 1 {
-				if eK > 2*eP {
-					t.Errorf("%s NoScaling %v: Accuracy-1 K %.3g off, the pencil K %.3g", c.name, ns, eK, eP)
-				}
-				if eK < eP/10 {
-					improved++
-				}
+			if res.Accuracy == 1 && eK > 2*eP {
+				t.Errorf("%s NoScaling %v: Accuracy-1 K %.3g off, the pencil K %.3g", c.name, ns, eK, eP)
+			}
+			if res.Accuracy == 1 && eK < eP/10 {
+				improved++
+			}
+			if !raceEnabled && runtime.GOARCH == "arm64" && slices.Contains(exact[c.name], ns) && (res.Accuracy != 0 || eK > 7e-16) {
+				t.Errorf("%s NoScaling %v: Accuracy %d, K err %g; want Accuracy 0, K exact", c.name, ns, res.Accuracy, eK)
 			}
 			if riccatiCertifiedWrong(res.Accuracy, eX, sens.X, eK, sens.K, newtonTol) {
 				t.Errorf("%s NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", c.name, ns, eX, eK)
@@ -104,7 +112,7 @@ func TestDareRotatedInputsRefinedGainNotConvergedNotCertified(t *testing.T) {
 			}
 		}
 	}
-	if improved == 0 && !raceEnabled {
+	if improved == 0 && !raceEnabled && runtime.GOARCH == "amd64" {
 		t.Error("no Accuracy-1 K improved on the pencil K")
 	}
 }
