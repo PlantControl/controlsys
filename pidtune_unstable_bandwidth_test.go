@@ -212,7 +212,8 @@ func pidtuneRolloffUnstableCase(t *testing.T, num, den Poly, want []PidtuneType,
 
 // FPMBHI review: an ill-conditioned realization of (z−1)·∏(z−pᵢ), pᵢ near
 // 1, moves the integrator pole 1e-10..1e-8 off z = 1, beyond the simple
-// cluster radius 100·ε, while DCGain stays infinite; with |G| < 1 the
+// cluster radius 100·ε, while the true DC gain stays infinite (DCGain
+// resolves the rounded pencil finite, like evalfr); with |G| < 1 the
 // displaced integrator was taken as the slowest pole, giving wc ~1e-9 and
 // "zero or infinite gain" or "singular complex matrix" errors. Oracle: the
 // crossover is half the slowest generated pole's |ln p|/Dt, capped at
@@ -241,10 +242,6 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 		if err != nil || len(am.GainCrossFreqs) > 0 {
 			continue
 		}
-		dc, err := p.DCGain()
-		if err != nil || !math.IsInf(dc.At(0, 0), 0) {
-			continue
-		}
 		poles, err := p.Poles()
 		if err != nil {
 			t.Fatal(err)
@@ -269,7 +266,8 @@ func TestPidtuneDisplacedDiscreteIntegrator(t *testing.T) {
 		}
 		pidtuneCheckDesigns(t, name, p, num, den, dt, nil)
 	}
-	if kept < 20 || displaced < 10 {
+	t.Logf("kept %d plants, %d displaced", kept, displaced)
+	if kept < 180 || displaced < 130 {
 		t.Fatalf("sweep kept %d plants, %d displaced", kept, displaced)
 	}
 }
