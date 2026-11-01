@@ -164,26 +164,29 @@ func TestDare_PoorPencilSolutionKeptOnRankDeficientInputs(t *testing.T) {
 // indefinite and moves by 0.8 to 12 relative under eps perturbations of
 // Q alone, so float64 does not determine it and the pencil's X off by 0.2
 // to 1.4 must stay Accuracy 1 (precision limits, not wrong values). Plain
-// and with E = 2I over 2A, 2B (the same X).
+// and with E = 2I over 2A, 2B, whose X is that of the plain Dare over 4:
+// 4X solves the plain equation.
 func TestDare_CheapUnstableRoundingBoundXIsNotCertified(t *testing.T) {
 	for _, k := range []int{43, 49, 84, 109, 132} {
 		A, B, Q, R := dareCheapUnstableCase(k)
 		n, _ := A.Dims()
 		want := dareDoublingBig(A, B, Q, R, nil)
-		var A2, B2, E mat.Dense
+		var A2, B2, E, wantE mat.Dense
 		A2.Scale(2, A)
 		B2.Scale(2, B)
 		E.Scale(2, eye(n))
+		wantE.Scale(0.25, want)
 		for _, tc := range []struct {
 			name string
 			A, B *mat.Dense
 			opts *RiccatiOpts
-		}{{"plain", A, B, nil}, {"E=2I", &A2, &B2, &RiccatiOpts{E: &E}}} {
+			want *mat.Dense
+		}{{"plain", A, B, nil, want}, {"E=2I", &A2, &B2, &RiccatiOpts{E: &E}, &wantE}} {
 			res, err := Dare(tc.A, tc.B, Q, R, tc.opts)
 			if err != nil {
 				continue
 			}
-			if rel := relErr(res.X, want); res.Accuracy == 0 && !(rel <= 1e-8) {
+			if rel := relErr(res.X, tc.want); res.Accuracy == 0 && !(rel <= 1e-8) {
 				t.Errorf("k=%d %s: Accuracy 0 with ‖X − X*‖/‖X*‖ = %.3g", k, tc.name, rel)
 			}
 		}
