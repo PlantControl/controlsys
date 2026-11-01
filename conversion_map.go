@@ -17,6 +17,7 @@ import (
 // state dimension, a result with no states), C2DMap returns
 // ErrOptionUnsupported; C2D still converts. A singular-E descriptor model,
 // whose algebraic states are eliminated, returns ErrDescriptorInitialState.
+// An Inf or NaN entry in the result or in G returns ErrOverflow.
 func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, error) {
 	if err := requireFiniteSystem("C2DMap", sys); err != nil {
 		return nil, nil, err
@@ -42,6 +43,9 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	G, err := conversionStateMap(std, out, opts.Method, opts.PrewarpFrequency, false)
 	if err != nil {
 		return nil, nil, fmt.Errorf("C2DMap: %w", err)
+	}
+	if err := finiteDense("C2DMap", "G", G, ErrOverflow); err != nil {
+		return nil, nil, err
 	}
 	return out, G, nil
 }

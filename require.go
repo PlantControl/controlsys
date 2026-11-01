@@ -42,6 +42,12 @@ func requireFiniteSystem(op string, sys *System) error {
 	if err := requireSystem(op, sys); err != nil {
 		return err
 	}
+	return finiteSystemMatrices(op, sys, ErrInvalidArgument)
+}
+
+// finiteSystemMatrices reports the first NaN/Inf entry of the state-space and
+// internal-delay matrices of sys, wrapping sentinel.
+func finiteSystemMatrices(op string, sys *System, sentinel error) error {
 	type named struct {
 		name string
 		m    *mat.Dense
@@ -54,7 +60,7 @@ func requireFiniteSystem(op string, sys *System) error {
 		if nm.m == nil {
 			continue
 		}
-		if err := requireFiniteDense(op, nm.name, nm.m); err != nil {
+		if err := finiteDense(op, nm.name, nm.m, sentinel); err != nil {
 			return err
 		}
 	}
@@ -67,12 +73,16 @@ func requireFiniteDense(op, name string, m *mat.Dense) error {
 	if m == nil {
 		return fmt.Errorf("%s: %s is nil: %w", op, name, ErrInvalidArgument)
 	}
+	return finiteDense(op, name, m, ErrInvalidArgument)
+}
+
+func finiteDense(op, name string, m *mat.Dense, sentinel error) error {
 	raw := m.RawMatrix()
 	for i := range raw.Rows {
 		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
 		for j, v := range row {
 			if !isFinite(v) {
-				return fmt.Errorf("%s: %s[%d,%d] is %g: %w", op, name, i, j, v, ErrInvalidArgument)
+				return fmt.Errorf("%s: %s[%d,%d] is %g: %w", op, name, i, j, v, sentinel)
 			}
 		}
 	}

@@ -26,7 +26,8 @@ import (
 // same way and keep the delay feedback. ZOH, FOH and impulse of a stiff A (ρ(A)·dt ≥ 1000) in real Schur
 // shape, such as those parts, exponentiate its modes of different scale
 // separately; with all modes stiff, any A takes Γ = A⁻¹(e^{A·dt} − I)·B. An already discrete model returns ErrWrongDomain;
-// invalid options return ErrInvalidConversionOptions.
+// invalid options return ErrInvalidConversionOptions; a result with an Inf or
+// NaN entry in any matrix returns ErrOverflow.
 func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {
 		return nil, err
@@ -38,7 +39,19 @@ func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 	return out, nil
 }
 
+// c2d is the exit shared by C2D, C2DMap, D2D and MakeWeight.
 func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
+	out, err := sys.c2dUnchecked(dt, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := finiteSystemMatrices("result", out, ErrOverflow); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (sys *System) c2dUnchecked(dt float64, opts C2DOptions) (*System, error) {
 	if opts.Method != C2DMethodLeastSquares && sys.IsContinuous() {
 		route := foldInaccurateParts
 		if opts.Method == C2DMethodMatched {
