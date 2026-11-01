@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"math"
 	"math/rand/v2"
 	"testing"
 
@@ -137,6 +138,48 @@ func TestC2DMapStiffDescriptorFOHMapIsFiniteOrError(t *testing.T) {
 		}
 		if nf := requireFiniteDense("C2DMap", "G", g); nf != nil {
 			t.Errorf("seed %d: nil error with %v", seed, nf)
+		}
+	}
+}
+
+// Lsim keeps the non-finite samples of a diverging plant as its response, as
+// Step does on the stiff unstable models of TestPolesFullRankEKeepsStiffModeOfExplicitModel,
+// on the plain path and through the rational part of held delay feedback (4MJ46B).
+func TestLsimDivergenceStaysResponseWhereC2DOverflows(t *testing.T) {
+	delayed := explicitOverflowingHold(t)
+	err := delayed.SetInternalDelay([]float64{0.25},
+		mat.NewDense(2, 1, []float64{0.3, -0.2}),
+		mat.NewDense(1, 2, []float64{0.4, -0.3}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(1, 1, []float64{0}),
+		mat.NewDense(1, 1, []float64{0}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayed.InputDelay = []float64{0.05}
+	const steps = 5
+	grid := make([]float64, steps)
+	u := mat.NewDense(steps, 1, nil)
+	for i := range steps {
+		grid[i] = 0.1 * float64(i)
+		u.Set(i, 0, 1)
+	}
+	for name, sys := range map[string]*System{"explicit": explicitOverflowingHold(t), "held delay feedback": delayed} {
+		r, err := Lsim(sys, u, grid, nil)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		rows, cols := r.Y.Dims()
+		diverged := false
+		for i := range rows {
+			for j := range cols {
+				v := r.Y.At(i, j)
+				diverged = diverged || math.IsNaN(v) || math.IsInf(v, 0)
+			}
+		}
+		if !diverged {
+			t.Errorf("%s: finite response %v of a diverging plant", name, mat.Formatted(r.Y))
 		}
 	}
 }

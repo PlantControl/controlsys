@@ -204,7 +204,7 @@ func (p timeResponsePlanner) auto(tFinal, dt float64) (timeResponsePlan, error) 
 	if p.sys.IsDiscrete() {
 		return plan, nil
 	}
-	if plan.sim, err = p.sys.C2D(dt, C2DOptions{}); err != nil {
+	if plan.sim, err = p.sys.c2dUnguarded(dt, C2DOptions{}); err != nil {
 		return timeResponsePlan{}, fmt.Errorf("auto-discretize: %w", err)
 	}
 	plan.wasContinuous = true
@@ -361,7 +361,7 @@ func (p timeResponsePlanner) lsim(u *mat.Dense, t []float64) (timeResponsePlan, 
 
 	var dsys *System
 	if p.sys.IsContinuous() {
-		dsys, err = p.sys.C2D(dt, C2DOptions{})
+		dsys, err = p.sys.c2dUnguarded(dt, C2DOptions{})
 		if err != nil {
 			return timeResponsePlan{}, nil, fmt.Errorf("Lsim: %w", err)
 		}

@@ -51,6 +51,19 @@ func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
 	return out, nil
 }
 
+// c2dUnguarded is C2D without the check of its result, for Step and Lsim: the
+// non-finite samples of a diverging plant are their response, not a model.
+func (sys *System) c2dUnguarded(dt float64, opts C2DOptions) (*System, error) {
+	if err := requireFiniteSystem("C2D", sys); err != nil {
+		return nil, err
+	}
+	out, err := sys.c2dUnchecked(dt, opts)
+	if err != nil {
+		return nil, fmt.Errorf("C2D: %w", err)
+	}
+	return out, nil
+}
+
 func (sys *System) c2dUnchecked(dt float64, opts C2DOptions) (*System, error) {
 	if opts.Method != C2DMethodLeastSquares && sys.IsContinuous() {
 		route := foldInaccurateParts
