@@ -623,10 +623,6 @@ func TestPidtuneRoundedZeroDCIntegrator(t *testing.T) {
 		if err != nil || len(am.GainCrossFreqs) > 0 {
 			continue
 		}
-		dc, err := p.integratingDCGain()
-		if err != nil || dc.At(0, 0) != 0 && !math.IsInf(dc.At(0, 0), 0) {
-			continue
-		}
 		kept++
 		poles, err := p.Poles()
 		if err != nil {
