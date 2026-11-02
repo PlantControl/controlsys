@@ -1199,7 +1199,12 @@ func frobenius(a []float64) float64 {
 // cluster, where the phase of the model as rounded departs from that of its
 // factored form; only resonanceCrossings evaluates phase in double-double
 // first, beside the resonance poles of resonancePoles.
-// Margins at any verified crossover use it too.
+// Margins at any verified crossover use it too. When a root fails polish, or
+// the pencil has none, the resonance scan takes over as in phaseCrossings:
+// beside a ring of poles around z = 1 or a pair 1 ± jε the roots of
+// L~·L/γ² − 1 fall far off the crossings or are missing (62HRTO). The scan
+// keeps a sign change of log|L| only where it evaluates in double-double, and
+// any exact search of the caller resumes after it.
 func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	cands, err := r.gainCandidates(gamma)
 	if err != nil {
@@ -1217,7 +1222,16 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	}
 	r.eval.extended = true
 	defer func() { r.eval.extended = false }()
-	return r.endCrossings(r.polish(cands, f, 1e-9, false), f, 1e-9), nil
+	out := r.polish(cands, f, 1e-9, false)
+	if len(out) < len(cands) || len(cands) == 0 {
+		pairs, _, cluster := r.resonancePoles()
+		if len(pairs)+len(cluster) > 0 {
+			exact := r.eval.exact
+			out = r.mergeResonanceCrossings(out, r.resonanceCrossings(pairs, cluster, f, 1e-9), f)
+			r.eval.extended, r.eval.exact = true, exact
+		}
+	}
+	return r.endCrossings(out, f, 1e-9), nil
 }
 
 // endCrossings adds a crossing of f = log|L| − log γ that the pencil missed
