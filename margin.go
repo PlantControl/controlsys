@@ -948,7 +948,11 @@ type rationalLoop struct {
 	// absorbed is the discrete loop with its delays absorbed as states, for
 	// L at z = −1, where e^{−jkπ} = (−1)^k sets the sign.
 	absorbed *System
+	// poles caches resonancePoles for the gain and phase searches of one loop.
+	poles *resonancePoleSet
 }
+
+type resonancePoleSet struct{ pairs, reals, cluster []float64 }
 
 // newRationalLoop fails with ErrContinuousInternalDelay when sys has
 // continuous internal delays, for which no finite-dimensional form exists.
@@ -1225,7 +1229,7 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	out := r.polish(cands, f, 1e-9, false)
 	if len(out) < len(cands) || len(cands) == 0 {
 		pairs, _, cluster := r.resonancePoles()
-		if len(pairs)+len(cluster) > 0 {
+		if r.discrete() && len(pairs)+len(cluster) > 0 {
 			exact := r.eval.exact
 			out = r.mergeResonanceCrossings(out, r.resonanceCrossings(pairs, cluster, f, 1e-9), f)
 			r.eval.extended, r.eval.exact = true, exact
@@ -1607,6 +1611,14 @@ func (r *rationalLoop) mergeResonanceCrossings(ws, cs []float64, f func(float64)
 // the real poles within clusterRadius when two or more lie there, as a ring
 // of real poles whose pencil roots are lost too.
 func (r *rationalLoop) resonancePoles() (pairs, reals, cluster []float64) {
+	if r.poles == nil {
+		r.poles = &resonancePoleSet{}
+		r.poles.pairs, r.poles.reals, r.poles.cluster = r.computeResonancePoles()
+	}
+	return r.poles.pairs, r.poles.reals, r.poles.cluster
+}
+
+func (r *rationalLoop) computeResonancePoles() (pairs, reals, cluster []float64) {
 	n := r.n
 	if n == 0 {
 		return nil, nil, nil
