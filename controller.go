@@ -241,7 +241,7 @@ func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult,
 	}
 
 	var eH mat.Dense
-	eH.Exp(H)
+	expGuarded(&eH, H)
 	ehRaw := eH.RawMatrix()
 
 	phiData := make([]float64, nm*nm)

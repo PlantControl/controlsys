@@ -141,7 +141,7 @@ func conversionZOHKernel(a *mat.Dense, b *mat.Dense, period float64) (ad, bd *ma
 		}
 	}
 	var exp mat.Dense
-	exp.Exp(augmented)
+	expGuarded(&exp, augmented)
 	er := exp.RawMatrix()
 	adr, bdr := ad.RawMatrix(), bd.RawMatrix()
 	for i := range n {

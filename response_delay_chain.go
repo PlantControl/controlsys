@@ -187,7 +187,7 @@ func (c *delayChain) expBlocks(delta float64) []*mat.Dense {
 		}
 	}
 	var e mat.Dense
-	e.Exp(big)
+	expGuarded(&e, big)
 	out := make([]*mat.Dense, J+1)
 	for j := range out {
 		out[j] = mat.DenseCopyOf(e.Slice(0, na, j*na, (j+1)*na))

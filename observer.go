@@ -267,7 +267,7 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 	}
 
 	var eF mat.Dense
-	eF.Exp(F)
+	expGuarded(&eF, F)
 	efRaw := eF.RawMatrix()
 
 	// Ad = eF[n:2n, n:2n]'

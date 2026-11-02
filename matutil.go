@@ -57,6 +57,27 @@ func denseCopySafe(m *mat.Dense, r, c int) *mat.Dense {
 	return mat.DenseCopyOf(m)
 }
 
+// expGuarded sets dst to e^a, or for r >= 2 fills it with NaN at a non-finite
+// 1-norm of a, where Dense.Exp never returns; its 1×1 path takes math.Exp and
+// keeps e^-Inf = 0. Drop it at the gonum bump whose Exp does this.
+func expGuarded(dst, a *mat.Dense) {
+	if r, _ := a.Dims(); r == 1 || isFinite(mat.Norm(a, 1)) {
+		dst.Exp(a)
+		return
+	}
+	if dst.IsEmpty() {
+		r, c := a.Dims()
+		dst.ReuseAs(r, c)
+	}
+	raw := dst.RawMatrix()
+	for i := range raw.Rows {
+		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		for j := range row {
+			row[j] = math.NaN()
+		}
+	}
+}
+
 func newDense(r, c int) *mat.Dense {
 	if r == 0 || c == 0 {
 		return &mat.Dense{}
