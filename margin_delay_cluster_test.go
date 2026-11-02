@@ -130,6 +130,202 @@ func TestAllMarginPhaseCrossDelayedUnitClusterSweep(t *testing.T) {
 	}
 }
 
+// checkGainCrossOracle requires every gain crossover the exact loop of the
+// realization has robustly under rounding, and soundness of each reported one
+// and of its phase margin.
+func checkGainCrossOracle(t *testing.T, sys *System) (required, missed, spurious int) {
+	t.Helper()
+	l := fzMgFromSystem(t, sys)
+	res, err := AllMargin(sys)
+	if err != nil {
+		t.Fatalf("AllMargin: %v", err)
+	}
+	gc, zero, ok := l.gainCross(1)
+	if zero || !ok {
+		return 0, 0, 0
+	}
+	for _, c := range gc {
+		if c.required {
+			required++
+			if !fzMgFound(c, res.GainCrossFreqs) {
+				missed++
+				t.Errorf("missed gain crossover ω=%v, got %v", c.w, res.GainCrossFreqs)
+			}
+		}
+	}
+	for i, w := range res.GainCrossFreqs {
+		if !fzMgSound(gc, w, l.lnMag(w), l.budget(w)+1e-6) {
+			spurious++
+			t.Errorf("spurious gain crossover ω=%v: exact |L|=%v", w, math.Exp(l.lnMag(w)))
+		}
+		if pm := l.pmDeg(w); fzMgDegDiff(res.PhaseMargins[i], pm) > l.pmTol(w) {
+			t.Errorf("PM=%v at ω=%v, exact %v", res.PhaseMargins[i], w, pm)
+		}
+	}
+	return required, missed, spurious
+}
+
+// An unstable ring around z = 1 with an input delay (62HRTO): the pencil of
+// L~·L − 1 yields one root, 2.5× off, and none of the crossovers. Values from
+// a 120-digit evaluation of num/den on the unit circle, without a realization.
+func TestAllMarginGainCrossDelayedUnstableRing(t *testing.T) {
+	loop := marginTFSystem(t, []float64{-2.0907322379476115e-16, 1.8917564199748163e-11}, []float64{1, -6.061761431534283, 15.310575464630974, -20.62471664086976, 15.628311184998115, -6.315967149646035, 1.0635585723967889}, 1, 2)
+	res, err := AllMargin(loop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	near := func(got, want []float64, tol float64) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if math.Abs(got[i]-want[i]) > tol*math.Max(1, math.Abs(want[i])) {
+				return false
+			}
+		}
+		return true
+	}
+	if want := []float64{0.00435840819910648, 0.009828228381034537}; !near(res.GainCrossFreqs, want, 1e-9) {
+		t.Errorf("GainCrossFreqs = %v, want %v", res.GainCrossFreqs, want)
+	}
+	if want := []float64{-12.060488671481153, 151.5480973844712}; !near(res.PhaseMargins, want, 1e-6) {
+		t.Errorf("PhaseMargins = %v, want %v", res.PhaseMargins, want)
+	}
+	if want := []float64{0.00735195247533927, 1.248076588130441, 2.511263778037712}; !near(res.PhaseCrossFreqs, want, 1e-7) {
+		t.Errorf("PhaseCrossFreqs = %v, want %v", res.PhaseCrossFreqs, want)
+	}
+}
+
+// Gain crossovers beside clusters at z = 1 that the pencil loses (62HRTO).
+// Oracle: exact rational loop of the realization, on the companion form and
+// on a sheared, non-symmetric one.
+func TestAllMarginGainCrossUnitCluster(t *testing.T) {
+	cases := []struct {
+		name     string
+		num, den []float64
+		dt       float64
+		delay    float64
+	}{
+		{"unstable ring delay2", []float64{-2.0907322379476115e-16, 1.8917564199748163e-11}, []float64{1, -6.061761431534283, 15.310575464630974, -20.62471664086976, 15.628311184998115, -6.315967149646035, 1.0635585723967889}, 1, 2},
+		{"ring delay2", []float64{-8.378251013625513e-10, 1.0244917031268362e-08}, []float64{1, -5.033127224944069, 10.134351691460928, -10.2043456596422, 5.138145542841502, -1.0350243487898194}, 1, 2},
+		{"ring and pair delay3", []float64{7.529031762705511e-10}, []float64{1, -4.91091642200764, 9.646322557101712, -9.473442916044313, 4.651584150792603, -0.9135473680132788}, 1, 3},
+		{"ring and pair delay2", []float64{-1.748157783448694e-10, -1.2021289447603093e-10}, []float64{1, -4.967166332610339, 9.869238604692624, -9.804709486681611, 4.870368565548047, -0.9677313506843048}, 1, 2},
+		{"lone pair delay3", []float64{-3.764586299482116e-09}, []float64{1, -2.974157696363287, 2.948315841796674, -0.9741581342151318}, 0.01, 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			companion := marginTFSystem(t, c.num, c.den, c.dt, 0)
+			sheared := shearRealization(t, companion, 0.3)
+			for k, sys := range []*System{companion, sheared} {
+				if err := sys.SetInputDelay([]float64{c.delay}); err != nil {
+					t.Fatal(err)
+				}
+				n, _, _ := checkGainCrossOracle(t, sys)
+				if k == 0 && n == 0 {
+					t.Fatal("oracle has no required crossing")
+				}
+				res, err := AllMargin(sys)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gc, _, _ := fzMgFromSystem(t, sys).gainCross(1)
+				for _, g := range gc {
+					if g.odd && !g.cluster && !fzMgFound(g, res.GainCrossFreqs) {
+						t.Errorf("realization %d: exact crossing ω=%v not reported, got %v", k, g.w, res.GainCrossFreqs)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Bandwidth reads the same crossings: base reported the second of a crossing
+// pair the pencil lost, past the first drop below DC − 3 dB (62HRTO).
+func TestBandwidthUnitClusterFirstCrossing(t *testing.T) {
+	sys := marginTFSystem(t, []float64{-1.748157783448694e-10, -1.2021289447603093e-10}, []float64{1, -4.967166332610339, 9.869238604692624, -9.804709486681611, 4.870368565548047, -0.9677313506843048}, 1, 2)
+	l := fzMgFromSystem(t, sys)
+	num, den, _ := l.dcValue()
+	gamma := math.Abs(fzMgRatio(num, den)) * math.Pow(10, -3.0/20)
+	cs, _, ok := l.gainCross(gamma)
+	if !ok || len(cs) == 0 {
+		t.Fatal("oracle has no crossing")
+	}
+	bw, err := Bandwidth(sys, -3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fzMgMatches(cs[0], bw) {
+		t.Fatalf("Bandwidth = %v, exact first crossing %v", bw, cs[0].w)
+	}
+}
+
+// Seeded sweep of clusters at z = 1: rings, a pair 1 ± jε with a ring, and
+// real poles split 1 − ε(u − 0.5), ε ≥ 1e-7, with and without delay. Reported
+// crossovers within the split band must be exact crossings, the check that
+// folded NLIPMQ asked for; base 2ddb2b8 misses crossings of this sweep.
+func TestAllMarginGainCrossUnitClusterSweep(t *testing.T) {
+	skipSlowUnderRace(t)
+	rng := rand.New(rand.NewPCG(62, 13))
+	total := 0
+	for i := range 600 {
+		var roots []complex128
+		band := 0.05
+		switch i % 3 {
+		case 0:
+			for np := 3 + rng.IntN(6); len(roots) < np; {
+				rho := 0.05 * rng.Float64()
+				if len(roots)+1 < np && rng.IntN(2) == 0 {
+					p := 1 + cmplx.Rect(rho, rng.Float64()*math.Pi)
+					roots = append(roots, p, cmplx.Conj(p))
+				} else {
+					roots = append(roots, complex(1+rho*(2*rng.Float64()-1), 0))
+				}
+			}
+		case 1:
+			w0 := 0.002 + 0.015*rng.Float64()
+			p := cmplx.Rect(1+math.Pow(10, -4+2*rng.Float64())*w0*(2*rng.Float64()-1), w0)
+			q := 1 + cmplx.Rect(0.05*rng.Float64(), rng.Float64()*math.Pi)
+			roots = append(roots, p, cmplx.Conj(p), q, cmplx.Conj(q), complex(1+0.05*(2*rng.Float64()-1), 0))
+		case 2:
+			band = math.Pow(10, -7+5*rng.Float64())
+			for range 2 + rng.IntN(3) {
+				roots = append(roots, complex(1-band*(rng.Float64()-0.5), 0))
+			}
+		}
+		den := []complex128{1}
+		for _, r := range roots {
+			nd := make([]complex128, len(den)+1)
+			for j, c := range den {
+				nd[j] += c
+				nd[j+1] -= c * r
+			}
+			den = nd
+		}
+		dr := make([]float64, len(den))
+		for j, c := range den {
+			dr[j] = real(c)
+		}
+		z := cmplx.Rect(1, min(band*math.Pow(10, -2+3*rng.Float64()), 3))
+		var dz complex128
+		for _, c := range den {
+			dz = dz*z + c
+		}
+		num := []float64{cmplx.Abs(dz) * math.Pow(10, -0.5+rng.Float64())}
+		if rng.IntN(2) == 0 {
+			num[0] = -num[0]
+		}
+		sys := marginTFSystem(t, num, dr, 1, float64(rng.IntN(4)))
+		n, _, _ := checkGainCrossOracle(t, sys)
+		total += n
+		if t.Failed() {
+			t.Fatalf("case %d: num %v den %v delay %v", i, num, dr, sys.InputDelay)
+		}
+	}
+	if total < 100 {
+		t.Fatalf("sweep has only %d required crossings", total)
+	}
+}
+
 func shearRealization(t *testing.T, s *System, k float64) *System {
 	t.Helper()
 	n, _, _ := s.Dims()
