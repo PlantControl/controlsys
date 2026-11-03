@@ -20,6 +20,8 @@ import (
 // Continuous internal delays have no finite-order form and return
 // ErrContinuousInternalDelay. A model with no outputs has no covariance and
 // returns ErrDimensionMismatch; with no inputs P is the p×p zero matrix.
+// An Inf or NaN entry of P returns ErrOverflow, except the continuous entries
+// white noise through D makes infinite, whatever their state part holds.
 func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	if err := requireFiniteSystem("Covar", sys); err != nil {
 		return nil, err
@@ -93,12 +95,15 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	DWDt.Mul(&DW, sys.D.T())
 	if sys.IsDiscrete() {
 		P.Add(P, &DWDt)
+		if err := finiteDense("Covar", "P", P, ErrOverflow); err != nil {
+			return nil, err
+		}
 		return P, nil
 	}
 	for i := range p {
 		for j := range p {
-			if v := DWDt.At(i, j); v != 0 {
-				P.Set(i, j, math.Inf(int(math.Copysign(1, v))))
+			if err := finishCovarEntry(P, i, j, DWDt.At(i, j)); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -229,12 +234,25 @@ func covarContinuousDelayed(sys *System, W *mat.Dense) (*mat.Dense, error) {
 					}
 				}
 			}
-			if impulse != 0 {
-				P.Set(i, j, math.Inf(int(math.Copysign(1, impulse))))
+			if err := finishCovarEntry(P, i, j, impulse); err != nil {
+				return nil, err
 			}
 		}
 	}
 	return P, nil
+}
+
+// finishCovarEntry makes P[i,j] infinite when feedthrough noise reaches it, and
+// otherwise rejects a non-finite state part.
+func finishCovarEntry(P *mat.Dense, i, j int, feedthrough float64) error {
+	if feedthrough != 0 {
+		P.Set(i, j, math.Inf(int(math.Copysign(1, feedthrough))))
+		return nil
+	}
+	if v := P.At(i, j); !isFinite(v) {
+		return fmt.Errorf("Covar: P[%d,%d] is %g: %w", i, j, v, ErrOverflow)
+	}
+	return nil
 }
 
 func dotCol(row, B *mat.Dense, col int) float64 {
