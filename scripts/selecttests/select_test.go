@@ -230,6 +230,7 @@ func TestTiers(t *testing.T) {
 			add("lib.go", "func (c Circle) half() float64 { return c.R / 2 }\n\nfunc UseHalf() float64 { return Circle{}.half() }\n"),
 		}, tier: TierLibrary},
 		{name: "unreached function", edits: []edit{add("lib.go", "func Dead() int { return 1 }\n")}, tier: TierLibrary},
+		{name: "test var added", edits: []edit{add("other_test.go", "var extra = 1\n")}, tier: TierTests},
 		{name: "source reader always selected", edits: []edit{
 			put("architecture_x_test.go", "package fx\n\nimport \"testing\"\n\nfunc TestArchX(t *testing.T) {}\n"),
 		}, tier: TierTests, tests: []string{"TestArchX"}},
@@ -272,7 +273,7 @@ func TestFailOpen(t *testing.T) {
 		{name: "blank import", edits: []edit{sub("lib.go", `import "reflect"`, "import (\n\t\"reflect\"\n\t_ \"embed\"\n)")}, reason: "blank or dot"},
 		{name: "var changed", edits: []edit{sub("lib.go", "var counter int", "var counter = 1")}, reason: "package variable"},
 		{name: "var added", edits: []edit{add("lib.go", "var extra = 1\n")}, reason: "package variable"},
-		{name: "test var added", edits: []edit{add("other_test.go", "var extra = 1\n")}, reason: "package variable"},
+		{name: "var moved into test file", base: []edit{add("lib.go", "var moved = 1\n")}, edits: []edit{sub("lib.go", "var moved = 1\n", ""), add("other_test.go", "var moved = 1\n")}, reason: "package variable"},
 		{name: "init added", edits: []edit{add("lib.go", "func init() {}\n")}, reason: "init"},
 		{name: "initializer callee", edits: []edit{sub("lib.go", "func Seed() int { return 7 }", "func Seed() int { return 8 }")}, reason: "initialization reaches"},
 		{name: "testmain added", edits: []edit{add("other_test.go", "func TestMain(m *testing.M) { m.Run() }\n")}, reason: "TestMain"},
@@ -499,7 +500,7 @@ func TestCommandsPerTier(t *testing.T) {
 		t.Errorf("tests = %v", tests)
 	}
 	lib := Plan{Tier: TierLibrary, Run: "^(?:TestA)$", Bench: "^(?:BenchmarkA)$"}.Commands()
-	for _, want := range []string{"GOARCH=amd64 go test -run", "go test -race -run", "-bench '^(?:BenchmarkA)$'"} {
+	for _, want := range []string{"GOARCH=amd64 go test -run", "go test -race -run", "go test -run '^$' -bench '^(?:BenchmarkA)$'", "GOARCH=amd64 go test -run '^$' -bench '^(?:BenchmarkA)$'"} {
 		if !has(lib, want) {
 			t.Errorf("library lacks %q: %v", want, lib)
 		}
@@ -641,5 +642,73 @@ func TestChangedTestWriterSelectsReaders(t *testing.T) {
 		if !slices.Contains(p.Tests, want) {
 			t.Errorf("missing %s: %v", want, p.Tests)
 		}
+	}
+}
+
+func TestChangedTestTableSelectsReaders(t *testing.T) {
+	base := []edit{
+		add("other_test.go", "var cases = []int{1, 2}\n\nfunc TestCasesA(t *testing.T) { _ = cases[0] }\n"),
+		add("helper_test.go", "func caseSum() int {\n\ts := 0\n\tfor _, c := range cases {\n\t\ts += c\n\t}\n\treturn s\n}\n\nfunc TestCasesB(t *testing.T) { caseSum() }\n"),
+		add("lib_test.go", "func TestCasesC(t *testing.T) { func() { caseSum() }() }\n"),
+	}
+	p := selectEdits(t, hostOnly(), base, []edit{sub("other_test.go", "{1, 2}", "{1, 3}")})
+	if p.Tier != TierTests || !slices.Equal(p.Tests, []string{"TestCasesA", "TestCasesB", "TestCasesC"}) {
+		t.Fatalf("plan %s %v %v", p.Tier, p.Tests, p.Reasons)
+	}
+	p = selectEdits(t, hostOnly(), base, []edit{sub("other_test.go", "{1, 2}", "{1, 3}"), sub("lib.go", "x * 2", "x * 3")})
+	if p.Tier != TierLibrary || !slices.Contains(p.Tests, "TestCasesC") || !slices.Contains(p.Tests, "TestTwice") {
+		t.Fatalf("with library change: plan %s %v %v", p.Tier, p.Tests, p.Reasons)
+	}
+}
+
+func TestChangedTestTableFailsOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		base   string
+		reason string
+	}{
+		{"initializer reads table", "var cases = []int{1, 2}\n\nvar derived = len(cases)\n\nfunc TestDerived(t *testing.T) { _ = derived }\n", "initialization reads"},
+		{"table calls package function", "var cases = []int{Double(1), 2}\n", "package variable"},
+		{"table names package variable", "var cases = []int{seeded, 2}\n", "package variable"},
+		{"table holds closure", "var cases = []any{func() {}, 2}\n", "package variable"},
+		{"blank variable", "var cases = []int{1}\n\nvar _ = []int{1, 2}\n", "package variable"},
+		{"table calls parenthesized method", "var cases = []float64{(Square{1}.Area)(), 2}\n", "package variable"},
+		{"table calls method", "var cases = []float64{Square{1}.Area(), 2}\n", "package variable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := selectEdits(t, hostOnly(), []edit{add("other_test.go", tc.base+"\nfunc TestCasesA(t *testing.T) { _ = cases }\n")}, []edit{sub("other_test.go", "2}", "3}")})
+			if p.Tier != TierFull || !strings.Contains(strings.Join(p.Reasons, ";"), tc.reason) {
+				t.Fatalf("plan %s %v %v, want full %q", p.Tier, p.Tests, p.Reasons, tc.reason)
+			}
+		})
+	}
+}
+
+func TestLocalCIFullCommands(t *testing.T) {
+	b, err := os.ReadFile("../localci.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	i := strings.Index(src, "full_commands=(\n")
+	if i < 0 {
+		t.Fatal("full_commands not found")
+	}
+	body := src[i+len("full_commands=(\n"):]
+	body = body[:strings.Index(body, "\n)\n")]
+	var got []string
+	for line := range strings.SplitSeq(body, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "'"):
+			got = append(got, strings.Trim(line, "'"))
+		case strings.HasPrefix(line, `"`):
+			got = append(got, strings.ReplaceAll(strings.Trim(line, `"`), `\$`, "$"))
+		default:
+			t.Fatalf("unparsed line %q", line)
+		}
+	}
+	if want := fullPlan("x").Commands(); !slices.Equal(got, want) {
+		t.Errorf("localci.sh full_commands\n got %q\nwant %q", got, want)
 	}
 }

@@ -71,6 +71,12 @@ type Graph struct {
 	TestWrites map[string][]string
 	// GlobalReaders maps a package variable to the functions referencing it.
 	GlobalReaders map[string][]string
+	// VarReaders maps a package variable's declaration key ("var:name") to
+	// the functions referencing it after initialization.
+	VarReaders map[string][]string
+	// InitReadVars lists variables that initialization code reads, so their
+	// values flow into other state.
+	InitReadVars map[string]bool
 	// Uncertain lists reasons this tree cannot be analyzed soundly.
 	Uncertain []string
 	// Stats is informational.
@@ -206,6 +212,8 @@ func buildGraph(dir string, cfg Config) (*Graph, error) {
 			ConstOutside:  map[string]bool{},
 			TestWrites:    map[string][]string{},
 			GlobalReaders: map[string][]string{},
+			VarReaders:    map[string][]string{},
+			InitReadVars:  map[string]bool{},
 		},
 		ssaPkg: map[*ssa.Package]bool{},
 		prog:   prog,
@@ -442,6 +450,7 @@ func (a *analysis) collectEdges() {
 	var reflective []string
 	testWriters := map[string]map[string]bool{}
 	funcState := map[string]bool{}
+	initReads := map[*ssa.Global]bool{}
 
 	for _, fn := range funcs {
 		if sig := fn.Signature; sig.Recv() != nil && !types.IsInterface(sig.Recv().Type()) {
@@ -482,6 +491,9 @@ func (a *analysis) collectEdges() {
 							globals[v] = u
 						}
 						u.readers = append(u.readers, fn)
+						if isInitializer(fn) && !initStore(in, v) {
+							initReads[v] = true
+						}
 						if load, isLoad := in.(*ssa.UnOp); !isLoad || mutatesThrough(load, map[ssa.Value]bool{}) {
 							u.writers = append(u.writers, fn)
 						}
@@ -536,6 +548,7 @@ func (a *analysis) collectEdges() {
 			}
 		}
 		readerKeys := map[string]bool{}
+		varKey := "var:" + funcKey(g.Pkg.Pkg.Path(), "", g.Name())
 		for _, r := range u.readers {
 			if isInitializer(r) {
 				continue
@@ -553,7 +566,12 @@ func (a *analysis) collectEdges() {
 			a.g.GlobalReaders[g.String()] = append(a.g.GlobalReaders[g.String()], k)
 		}
 		sort.Strings(a.g.GlobalReaders[g.String()])
+		a.g.VarReaders[varKey] = a.g.GlobalReaders[g.String()]
+		if initReads[g] {
+			a.g.InitReadVars[varKey] = true
+		}
 	}
+
 	for k := range funcState {
 		a.g.Uncertain = append(a.g.Uncertain, "function value stored in package variable after init: "+k)
 	}
@@ -799,6 +817,33 @@ func isValueOnly(t types.Type) bool {
 		return true
 	}
 	return false
+}
+
+// initStore reports whether in only stores into addr: a store to it, or a
+// field or element address of it used only for such stores.
+func initStore(in ssa.Instruction, addr ssa.Value) bool {
+	switch x := in.(type) {
+	case *ssa.Store:
+		return x.Addr == addr
+	case *ssa.FieldAddr:
+		return x.X == addr && onlyStores(x)
+	case *ssa.IndexAddr:
+		return x.X == addr && x.Index != addr && onlyStores(x)
+	}
+	return false
+}
+
+func onlyStores(v ssa.Value) bool {
+	refs := v.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, r := range *refs {
+		if !initStore(r, v) {
+			return false
+		}
+	}
+	return true
 }
 
 func isInitializer(fn *ssa.Function) bool {

@@ -172,6 +172,23 @@ func Select(baseDir, headDir string, opt Options) (p Plan) {
 			return fullPlan(why)
 		}
 	}
+	// A changed test-file variable with a self-contained initializer selects
+	// every root reaching a reader of it, unless initialization reads it.
+	for _, g := range graphs {
+		if len(dc.vars) == 0 {
+			break
+		}
+		for _, k := range dc.vars {
+			if g.InitReadVars[k] {
+				return fullPlan("initialization reads changed test variable: " + k)
+			}
+			for _, r := range g.VarReaders[k] {
+				if why := collect(r, false); why != "" {
+					return fullPlan(why)
+				}
+			}
+		}
+	}
 	// A changed test that may write package state selects every reader of it.
 	for _, g := range graphs {
 		for _, set := range [][]string{testKeys, rootKeys} {
@@ -187,13 +204,13 @@ func Select(baseDir, headDir string, opt Options) (p Plan) {
 		}
 	}
 	tier := TierDocs
-	if len(testKeys)+len(rootKeys) > 0 {
+	if len(testKeys)+len(rootKeys)+len(dc.vars) > 0 {
 		tier = TierTests
 	}
 	if len(libKeys) > 0 {
 		tier = TierLibrary
 	}
-	changed := uniq(append(append(append([]string(nil), libKeys...), testKeys...), rootKeys...))
+	changed := uniq(append(append(append(append([]string(nil), libKeys...), testKeys...), rootKeys...), dc.vars...))
 	return finishPlan(tier, selected, changed, head)
 }
 
@@ -334,7 +351,9 @@ func (p Plan) Commands() []string {
 			"GOARCH=amd64 go test -run "+q(p.Run)+" .",
 			"go test -race -run "+q(p.Run)+" .")
 		if p.Bench != noneRegex {
-			c = append(c, "go test -run '^$' -bench "+q(p.Bench)+" -benchtime=1x -benchmem .")
+			c = append(c,
+				"go test -run '^$' -bench "+q(p.Bench)+" -benchtime=1x -benchmem .",
+				"GOARCH=amd64 go test -run '^$' -bench "+q(p.Bench)+" -benchtime=1x -benchmem .")
 		}
 		return c
 	}

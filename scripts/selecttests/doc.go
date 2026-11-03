@@ -40,7 +40,12 @@
 //   - methods: adding or removing a method on an existing type, or changing a
 //     method's signature, is full, since it changes interface satisfaction
 //     (type assertions, errors.As) without any call edge.
-//   - var, init, TestMain, blank var: any change is full.
+//   - var declared in a test file (a case table): selects every root reaching
+//     a function that references it, when its initializer is self-contained
+//     (no function literal, no method call, no name of a package function or
+//     variable; calls into imported packages are allowed) and no
+//     initialization code reads it. Otherwise full.
+//   - other var, init, TestMain, blank var: any change is full.
 //   - build-constrained, arch-suffixed, generated, asm files, go: directives,
 //     blank or dot imports, go.mod, go.sum, testdata, CI, scripts, subdirectories,
 //     unknown file kinds: full.
@@ -60,4 +65,7 @@
 //	go -C scripts/selecttests run . -repo ../.. -base origin/main -head HEAD -format commands
 //
 // -head . reads the working tree. Exit status is 0 with a full plan on failure.
+// The commands format starts with "# tier: <tier>" and "# reason:" comment
+// lines. scripts/localci.sh runs the plan as the local CI gate and documents
+// when a full run is still required.
 package main

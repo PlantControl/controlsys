@@ -34,6 +34,10 @@ type decl struct {
 	isTest bool
 	root   RootKind
 	sig    string
+	// initNames are identifiers a variable's initializer names outside
+	// imported packages; initOpaque marks one it cannot vouch for.
+	initNames  []string
+	initOpaque bool
 }
 
 // tree is the parsed view of one checkout's root package.
@@ -198,8 +202,9 @@ func (t *tree) parse(name string) error {
 						continue
 					}
 					// Initialization order depends on file order.
+					names, opaque := initializerNames(s, f)
 					for _, id := range s.Names {
-						add("var:"+funcKey(gf.pkg, "", id.Name), decl{kind: declVar}, name+tokenHash(span(s)))
+						add("var:"+funcKey(gf.pkg, "", id.Name), decl{kind: declVar, initNames: names, initOpaque: opaque}, name+tokenHash(span(s)))
 					}
 				case *ast.TypeSpec:
 					add("type:"+funcKey(gf.pkg, "", s.Name.Name), decl{kind: declType}, tokenHash(span(s)))
@@ -223,6 +228,83 @@ func (t *tree) parse(name string) error {
 		}
 	}
 	return nil
+}
+
+// initializerNames lists the identifiers s names, skipping struct keys and
+// selections from imported packages. A function literal, or a call of
+// anything but a named function, conversion or imported package function,
+// makes the initializer opaque.
+func initializerNames(s *ast.ValueSpec, f *ast.File) (names []string, opaque bool) {
+	imports := map[string]bool{}
+	for _, imp := range f.Imports {
+		p, _ := strconv.Unquote(imp.Path.Value)
+		n := p[strings.LastIndex(p, "/")+1:]
+		if imp.Name != nil {
+			n = imp.Name.Name
+		}
+		imports[n] = true
+	}
+	var walk func(n ast.Node) bool
+	walk = func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.FuncLit:
+			opaque = true
+			return false
+		case *ast.KeyValueExpr:
+			if _, ok := v.Key.(*ast.Ident); !ok {
+				ast.Inspect(v.Key, walk)
+			}
+			ast.Inspect(v.Value, walk)
+			return false
+		case *ast.SelectorExpr:
+			if x, ok := v.X.(*ast.Ident); ok && imports[x.Name] {
+				return false
+			}
+		case *ast.CallExpr:
+			switch fn := ast.Unparen(v.Fun).(type) {
+			case *ast.Ident, *ast.IndexExpr, *ast.IndexListExpr, *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.FuncType, *ast.InterfaceType, *ast.StructType, *ast.StarExpr:
+			case *ast.SelectorExpr:
+				if x, ok := fn.X.(*ast.Ident); !ok || !imports[x.Name] {
+					opaque = true
+					return false
+				}
+			default:
+				opaque = true
+				return false
+			}
+		case *ast.Ident:
+			names = append(names, v.Name)
+		}
+		return true
+	}
+	if s.Type != nil {
+		ast.Inspect(s.Type, walk)
+	}
+	for _, v := range s.Values {
+		ast.Inspect(v, walk)
+	}
+	return names, opaque
+}
+
+// selfContained reports whether d's initializer names no function or
+// variable of the package, so evaluating it cannot reach package code or
+// touch package state.
+func (t *tree) selfContained(d *decl) bool {
+	if d.initOpaque {
+		return false
+	}
+	pre := ""
+	if strings.HasPrefix(d.key, "var:_test:") {
+		pre = "_test:"
+	}
+	for _, n := range d.initNames {
+		for _, k := range []string{pre + n, "var:" + pre + n, n, "var:" + n} {
+			if o := t.decls[k]; o != nil && o.kind != declType && o != d {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func readsSource(name string, f *ast.File) bool {
@@ -369,6 +451,8 @@ type declChanges struct {
 	lib     []string
 	test    []string
 	roots   []string
+	// vars are changed package variables declared only in test files.
+	vars []string
 }
 
 func compareDecls(base, head *tree) declChanges {
@@ -396,7 +480,11 @@ func compareDecls(base, head *tree) declChanges {
 		}
 		switch d.kind {
 		case declVar:
-			c.reasons = append(c.reasons, "package variable changed: "+k)
+			if !strings.HasSuffix(k, ":_") && (b == nil || b.isTest && base.selfContained(b)) && (h == nil || h.isTest && head.selfContained(h)) {
+				c.vars = append(c.vars, k)
+			} else {
+				c.reasons = append(c.reasons, "package variable changed: "+k)
+			}
 			continue
 		case declType:
 			if b != nil {

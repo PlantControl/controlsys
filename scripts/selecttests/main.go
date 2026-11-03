@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const graphSchema = "v6"
+const graphSchema = "v7"
 
 func main() {
 	repo := flag.String("repo", ".", "repository root")
@@ -117,6 +117,10 @@ func exportWorkTree(repo, dir string) error {
 func emit(p Plan, format string) {
 	switch format {
 	case "commands":
+		fmt.Println("# tier: " + string(p.Tier))
+		for _, r := range p.Reasons {
+			fmt.Println("# reason: " + r)
+		}
 		for _, c := range p.Commands() {
 			fmt.Println(c)
 		}
