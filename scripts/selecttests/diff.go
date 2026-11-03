@@ -33,6 +33,7 @@ type decl struct {
 	file   string
 	isTest bool
 	root   RootKind
+	sig    string
 }
 
 // tree is the parsed view of one checkout's root package.
@@ -42,6 +43,8 @@ type tree struct {
 	roots   map[string]Root
 	readers map[string]bool
 	parsed  map[string]*goFile
+	// ifaceMethods holds method names declared by interface types.
+	ifaceMethods map[string]bool
 }
 
 type goFile struct {
@@ -70,7 +73,7 @@ var sourceCalls = map[string]bool{
 }
 
 func readTree(dir string) (*tree, error) {
-	t := &tree{files: map[string][]byte{}, decls: map[string]*decl{}, roots: map[string]Root{}, readers: map[string]bool{}, parsed: map[string]*goFile{}}
+	t := &tree{files: map[string][]byte{}, decls: map[string]*decl{}, roots: map[string]Root{}, readers: map[string]bool{}, parsed: map[string]*goFile{}, ifaceMethods: map[string]bool{}}
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -163,6 +166,9 @@ func (t *tree) parse(name string) error {
 				recv = recvName(v.Recv.List[0].Type)
 			}
 			d := decl{kind: declFunc, recv: recv}
+			if recv != "" {
+				d.sig = tokenHash(span(v.Type))
+			}
 			payload := tokenHash(span(v))
 			if isTest {
 				if k, ok := classifyRoot(v); ok {
@@ -201,6 +207,16 @@ func (t *tree) parse(name string) error {
 			}
 		}
 	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if it, ok := n.(*ast.InterfaceType); ok {
+			for _, m := range it.Methods.List {
+				for _, id := range m.Names {
+					t.ifaceMethods[id.Name] = true
+				}
+			}
+		}
+		return true
+	})
 	if isTest && readsSource(name, f) {
 		for _, r := range fileRoots {
 			t.readers[r.Name] = true
@@ -397,8 +413,15 @@ func compareDecls(base, head *tree) declChanges {
 			c.reasons = append(c.reasons, "TestMain changed")
 			continue
 		}
-		if d.recv != "" && (b == nil || h == nil) && base.decls["type:"+typeKeyOf(k, d.recv)] != nil {
+		// An unexported method can only satisfy an interface declared here.
+		method := name[strings.LastIndex(name, ".")+1:]
+		visible := d.recv != "" && (ast.IsExported(method) || base.ifaceMethods[method] || head.ifaceMethods[method])
+		if visible && (b == nil || h == nil) && base.decls["type:"+typeKeyOf(k, d.recv)] != nil {
 			c.reasons = append(c.reasons, "method set changed: "+k)
+			continue
+		}
+		if visible && b != nil && h != nil && b.sig != h.sig {
+			c.reasons = append(c.reasons, "method signature changed: "+k)
 			continue
 		}
 		switch {

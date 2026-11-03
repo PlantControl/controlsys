@@ -131,18 +131,6 @@ func Select(baseDir, headDir string, opt Options) (p Plan) {
 	}
 	libKeys, testKeys, rootKeys = uniq(libKeys), uniq(testKeys), uniq(rootKeys)
 
-	for _, g := range graphs {
-		for _, w := range g.TestGlobalWriters {
-			for _, set := range [][]string{testKeys, rootKeys} {
-				for _, k := range set {
-					if k == w {
-						return fullPlan("changed test writes a package variable: " + k)
-					}
-				}
-			}
-		}
-	}
-
 	selected := map[string]Root{}
 	collect := func(k string, sharedCheck bool) string {
 		known := false
@@ -182,6 +170,20 @@ func Select(baseDir, headDir string, opt Options) (p Plan) {
 	for _, k := range rootKeys {
 		if why := collect(k, false); why != "" {
 			return fullPlan(why)
+		}
+	}
+	// A changed test that may write package state selects every reader of it.
+	for _, g := range graphs {
+		for _, set := range [][]string{testKeys, rootKeys} {
+			for _, k := range set {
+				for _, v := range g.TestWrites[k] {
+					for _, r := range g.GlobalReaders[v] {
+						if why := collect(r, false); why != "" {
+							return fullPlan(why)
+						}
+					}
+				}
+			}
 		}
 	}
 	tier := TierDocs

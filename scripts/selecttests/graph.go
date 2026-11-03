@@ -28,10 +28,12 @@ type Config struct {
 	Tags   string
 }
 
-// DefaultConfigs covers every constrained file in the root package: race and
-// norace, asm and noasm. Changes to constrained files themselves fail open.
+// DefaultConfigs is every combination of the constraints the root package
+// uses: GOARCH asm or noasm, race or norace. Changes to constrained files themselves fail open.
 var DefaultConfigs = []Config{
 	{Name: "arm64", GOARCH: "arm64"},
+	{Name: "arm64-race", GOARCH: "arm64", Tags: "race"},
+	{Name: "amd64", GOARCH: "amd64"},
 	{Name: "amd64-race", GOARCH: "amd64", Tags: "race"},
 }
 
@@ -64,9 +66,11 @@ type Graph struct {
 	ConstUsers map[string][]string
 	// ConstOutside lists constants named outside any function body.
 	ConstOutside map[string]bool
-	// TestGlobalWriters lists test functions that assign package variables;
-	// changing one can leak into any later test.
-	TestGlobalWriters []string
+	// TestWrites maps a test function to the package variables it may write;
+	// changing it can leak into any later test reading them.
+	TestWrites map[string][]string
+	// GlobalReaders maps a package variable to the functions referencing it.
+	GlobalReaders map[string][]string
 	// Uncertain lists reasons this tree cannot be analyzed soundly.
 	Uncertain []string
 	// Stats is informational.
@@ -196,10 +200,12 @@ func buildGraph(dir string, cfg Config) (*Graph, error) {
 
 	a := &analysis{
 		g: &Graph{
-			Reach:        map[string][]uint64{},
-			Consts:       map[string]string{},
-			ConstUsers:   map[string][]string{},
-			ConstOutside: map[string]bool{},
+			Reach:         map[string][]uint64{},
+			Consts:        map[string]string{},
+			ConstUsers:    map[string][]string{},
+			ConstOutside:  map[string]bool{},
+			TestWrites:    map[string][]string{},
+			GlobalReaders: map[string][]string{},
 		},
 		ssaPkg: map[*ssa.Package]bool{},
 		prog:   prog,
@@ -434,7 +440,8 @@ func (a *analysis) collectEdges() {
 	type globalUse struct{ readers, writers []*ssa.Function }
 	globals := map[*ssa.Global]*globalUse{}
 	var reflective []string
-	testWriters := map[string]bool{}
+	testWriters := map[string]map[string]bool{}
+	funcState := map[string]bool{}
 
 	for _, fn := range funcs {
 		if sig := fn.Signature; sig.Recv() != nil && !types.IsInterface(sig.Recv().Type()) {
@@ -475,7 +482,7 @@ func (a *analysis) collectEdges() {
 							globals[v] = u
 						}
 						u.readers = append(u.readers, fn)
-						if _, isLoad := in.(*ssa.UnOp); !isLoad {
+						if load, isLoad := in.(*ssa.UnOp); !isLoad || mutatesThrough(load, map[ssa.Value]bool{}) {
 							u.writers = append(u.writers, fn)
 						}
 					}
@@ -509,22 +516,32 @@ func (a *analysis) collectEdges() {
 		}
 	}
 
-	for _, u := range globals {
+	for g, u := range globals {
 		var writers []*ssa.Function
 		for _, w := range u.writers {
+			if !isInitializer(w) && storesFunc(g, w) {
+				funcState[g.String()] = true
+			}
 			switch {
 			case isInitializer(w):
 			case a.inTestFile(w):
 				if k, ok := a.topLevel(w); ok {
-					testWriters[k] = true
+					if testWriters[k] == nil {
+						testWriters[k] = map[string]bool{}
+					}
+					testWriters[k][g.String()] = true
 				}
 			default:
 				writers = append(writers, w)
 			}
 		}
+		readerKeys := map[string]bool{}
 		for _, r := range u.readers {
 			if isInitializer(r) {
 				continue
+			}
+			if k, ok := a.topLevel(r); ok {
+				readerKeys[k] = true
 			}
 			for _, w := range writers {
 				if r != w {
@@ -532,13 +549,256 @@ func (a *analysis) collectEdges() {
 				}
 			}
 		}
+		for k := range readerKeys {
+			a.g.GlobalReaders[g.String()] = append(a.g.GlobalReaders[g.String()], k)
+		}
+		sort.Strings(a.g.GlobalReaders[g.String()])
 	}
-	for k := range testWriters {
-		a.g.TestGlobalWriters = append(a.g.TestGlobalWriters, k)
+	for k := range funcState {
+		a.g.Uncertain = append(a.g.Uncertain, "function value stored in package variable after init: "+k)
 	}
-	sort.Strings(a.g.TestGlobalWriters)
+	for k, set := range testWriters {
+		for g := range set {
+			a.g.TestWrites[k] = append(a.g.TestWrites[k], g)
+		}
+		sort.Strings(a.g.TestWrites[k])
+	}
 	sort.Strings(reflective)
 	a.g.Uncertain = append(a.g.Uncertain, reflective...)
+}
+
+// storesFunc reports whether writer w may put a function value into g, which
+// would let one root call code that another root referenced: storing or
+// map-updating a func-carrying value (any value, when g's type has a func
+// component) through g, passing one to a method of g, or handing a reference
+// into g to a function that does so. Callees outside the analyzed packages
+// are assumed not to store function values into their arguments; dynamic
+// callees are assumed to.
+func storesFunc(g *ssa.Global, w *ssa.Function) bool {
+	direct, iface := holdsFunc(g.Type(), map[types.Type]bool{})
+	if !direct && !iface {
+		return false
+	}
+	return storesFuncVia(w, g, direct, g.Pkg, map[*ssa.Function]bool{})
+}
+
+func storesFuncVia(w *ssa.Function, base ssa.Value, direct bool, pkg *ssa.Package, seen map[*ssa.Function]bool) bool {
+	if seen[w] {
+		return false
+	}
+	seen[w] = true
+	carries := func(v ssa.Value) bool {
+		if d, _ := holdsFunc(v.Type(), map[types.Type]bool{}); d {
+			return true
+		}
+		if mi, ok := v.(*ssa.MakeInterface); ok {
+			d, i := holdsFunc(mi.X.Type(), map[types.Type]bool{})
+			return d || i
+		}
+		return false
+	}
+	from := func(v ssa.Value) bool { return derivesFrom(v, base, map[ssa.Value]bool{}) }
+	for _, b := range w.Blocks {
+		for _, in := range b.Instrs {
+			switch x := in.(type) {
+			case *ssa.Store:
+				if from(x.Addr) && (direct || carries(x.Val)) {
+					return true
+				}
+			case *ssa.MapUpdate:
+				if from(x.Map) && (direct || carries(x.Value) || carries(x.Key)) {
+					return true
+				}
+			case ssa.CallInstruction:
+				c := x.Common()
+				if c.IsInvoke() && from(c.Value) {
+					for _, a := range c.Args {
+						if carries(a) {
+							return true
+						}
+					}
+				}
+				if b, ok := c.Value.(*ssa.Builtin); ok {
+					if (b.Name() == "copy" || b.Name() == "append") && from(c.Args[0]) && (direct || len(c.Args) > 1 && carries(c.Args[1])) {
+						return true
+					}
+					continue
+				}
+				callee := c.StaticCallee()
+				for i, a := range c.Args {
+					if !aliases(a.Type(), map[types.Type]bool{}) || !from(a) {
+						continue
+					}
+					switch {
+					case callee == nil:
+						if direct {
+							return true
+						}
+					case callee.Pkg == nil || callee.Pkg.Pkg.Path() != pkg.Pkg.Path() && callee.Pkg.Pkg.Path() != pkg.Pkg.Path()+"_test":
+						// Unanalyzed callee handed a reference and a function may keep both,
+						// except calls that only run their function argument.
+						if isRunOnly(callee) {
+							continue
+						}
+						for j, o := range c.Args {
+							if j != i && carries(o) {
+								return true
+							}
+						}
+					case len(callee.Params) > i && storesFuncVia(callee, callee.Params[i], direct, pkg, seen):
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// holdsFunc reports whether values of t contain a func-typed component
+// (direct) or an interface component (iface).
+func holdsFunc(t types.Type, seen map[types.Type]bool) (direct, iface bool) {
+	if seen[t] {
+		return false, false
+	}
+	seen[t] = true
+	or := func(d, i bool) {
+		direct, iface = direct || d, iface || i
+	}
+	// sync and sync/atomic keep private function fields of their own; user
+	// values enter only as any (Map, Value) or type arguments (Pointer[T]).
+	if n, ok := types.Unalias(t).(*types.Named); ok && n.Obj().Pkg() != nil {
+		switch n.Obj().Pkg().Path() {
+		case "sync", "sync/atomic":
+			switch n.Obj().Name() {
+			case "Pool":
+				return true, false
+			case "Map", "Value":
+				return false, true
+			}
+			for i := range n.TypeArgs().Len() {
+				or(holdsFunc(n.TypeArgs().At(i), seen))
+			}
+			return direct, iface
+		}
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Signature:
+		return true, false
+	case *types.Interface:
+		return false, true
+	case *types.Pointer:
+		or(holdsFunc(u.Elem(), seen))
+	case *types.Slice:
+		or(holdsFunc(u.Elem(), seen))
+	case *types.Array:
+		or(holdsFunc(u.Elem(), seen))
+	case *types.Map:
+		or(holdsFunc(u.Key(), seen))
+		or(holdsFunc(u.Elem(), seen))
+	case *types.Chan:
+		or(holdsFunc(u.Elem(), seen))
+	case *types.Struct:
+		for i := range u.NumFields() {
+			or(holdsFunc(u.Field(i).Type(), seen))
+		}
+	}
+	return direct, iface
+}
+
+// mutatesThrough reports whether the value v, loaded from a package variable,
+// may be used to modify shared state: a map or element update, a store of
+// it or through it, a send, capture, or any non-builtin call receiving it.
+func mutatesThrough(v ssa.Value, seen map[ssa.Value]bool) bool {
+	if seen[v] {
+		return false
+	}
+	seen[v] = true
+	refs := v.Referrers()
+	if refs == nil {
+		return false
+	}
+	for _, r := range *refs {
+		switch x := r.(type) {
+		case *ssa.MapUpdate:
+			return true
+		case *ssa.Store:
+			return true
+		case *ssa.Send, *ssa.MakeClosure, *ssa.Go, *ssa.Defer:
+			return true
+		case *ssa.Call:
+			if b, ok := x.Call.Value.(*ssa.Builtin); ok {
+				switch b.Name() {
+				case "len", "cap", "print", "println":
+					continue
+				}
+			}
+			if x.Call.Value == v {
+				if x.Call.IsInvoke() {
+					return true
+				}
+				continue
+			}
+			// Arguments are copies; only references inside them can be written.
+			if aliases(v.Type(), map[types.Type]bool{}) {
+				return true
+			}
+		case *ssa.IndexAddr, *ssa.FieldAddr, *ssa.Slice, *ssa.ChangeType, *ssa.MakeInterface, *ssa.Convert,
+			*ssa.Field, *ssa.Index, *ssa.Lookup, *ssa.Phi, *ssa.TypeAssert, *ssa.Extract, *ssa.SliceToArrayPointer:
+			if mutatesThrough(x.(ssa.Value), seen) {
+				return true
+			}
+		case *ssa.UnOp:
+			if x.Op == token.MUL {
+				if _, isPtr := x.X.Type().Underlying().(*types.Pointer); isPtr && !isValueOnly(x.Type()) {
+					if mutatesThrough(x, seen) {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// aliases reports whether a copy of a t value shares memory with the original.
+// Interface values count as not aliasing: their methods are the invoke case.
+func aliases(t types.Type, seen map[types.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *types.Pointer, *types.Slice, *types.Map, *types.Chan:
+		return true
+	case *types.Array:
+		return aliases(u.Elem(), seen)
+	case *types.Struct:
+		for i := range u.NumFields() {
+			if aliases(u.Field(i).Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isValueOnly reports whether t holds no references, so copies cannot alias.
+func isValueOnly(t types.Type) bool {
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		return true
+	case *types.Array:
+		return isValueOnly(u.Elem())
+	case *types.Struct:
+		for i := range u.NumFields() {
+			if !isValueOnly(u.Field(i).Type()) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func isInitializer(fn *ssa.Function) bool {
@@ -721,4 +981,52 @@ func tarjan(n int, succ [][]int32) (comp []int32, order []int32) {
 		}
 	}
 	return comp, order
+}
+
+func isRunOnly(fn *ssa.Function) bool {
+	if fn.Pkg == nil {
+		return false
+	}
+	switch fn.Pkg.Pkg.Path() + "." + fn.Name() {
+	case "sync.Range", "sync.Do":
+		return true
+	}
+	return false
+}
+
+func derivesFrom(v ssa.Value, base ssa.Value, seen map[ssa.Value]bool) bool {
+	if v == base {
+		return true
+	}
+	if seen[v] {
+		return false
+	}
+	seen[v] = true
+	switch x := v.(type) {
+	case *ssa.UnOp:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.FieldAddr:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.IndexAddr:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.Field:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.Index:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.Slice:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.Lookup:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.ChangeType:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.TypeAssert:
+		return derivesFrom(x.X, base, seen)
+	case *ssa.Phi:
+		for _, e := range x.Edges {
+			if derivesFrom(e, base, seen) {
+				return true
+			}
+		}
+	}
+	return false
 }

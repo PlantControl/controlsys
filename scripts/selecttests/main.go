@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const graphSchema = "v1"
+const graphSchema = "v6"
 
 func main() {
 	repo := flag.String("repo", ".", "repository root")

@@ -225,6 +225,10 @@ func TestTiers(t *testing.T) {
 			sub("lib.go", "return Deleted()", "return Renamed()"),
 		}, tier: TierLibrary, tests: []string{"TestCallsDeleted"}},
 		{name: "new type additive", edits: []edit{add("lib.go", "type Hex struct{}\n\nfunc (Hex) Area() float64 { return 1 }\n")}, tier: TierLibrary, tests: []string{"TestTotal"}},
+		{name: "unexported method added", edits: []edit{add("lib.go", "func (Circle) scale() float64 { return 1 }\n")}, tier: TierLibrary},
+		{name: "unexported method signature", edits: []edit{
+			add("lib.go", "func (c Circle) half() float64 { return c.R / 2 }\n\nfunc UseHalf() float64 { return Circle{}.half() }\n"),
+		}, tier: TierLibrary},
 		{name: "unreached function", edits: []edit{add("lib.go", "func Dead() int { return 1 }\n")}, tier: TierLibrary},
 		{name: "source reader always selected", edits: []edit{
 			put("architecture_x_test.go", "package fx\n\nimport \"testing\"\n\nfunc TestArchX(t *testing.T) {}\n"),
@@ -276,10 +280,16 @@ func TestFailOpen(t *testing.T) {
 		{name: "type changed", edits: []edit{sub("lib.go", "type Circle struct{ R float64 }", "type Circle struct {\n\tR float64\n\tZ int\n}")}, reason: "type declaration"},
 		{name: "type removed", base: []edit{add("lib.go", "type Gone struct{}\n")}, edits: []edit{sub("lib.go", "type Gone struct{}\n", "")}, reason: "type declaration"},
 		{name: "method added", edits: []edit{add("lib.go", "func (Circle) Name() string { return \"c\" }\n")}, reason: "method set"},
+		{name: "method signature changed", edits: []edit{
+			sub("lib.go", "func (c Circle) Area() float64 { return 3 * c.R * c.R }", "func (c *Circle) Area() float64 { return 3 * c.R * c.R }"),
+		}, reason: "method signature"},
+		{name: "method result changed", base: []edit{add("lib.go", "func (Circle) Name() string { return \"c\" }\n")}, edits: []edit{sub("lib.go", "func (Circle) Name() string { return \"c\" }", "func (Circle) Name() int { return 1 }")}, reason: "method signature"},
+		{name: "func value in package state", edits: []edit{add("lib.go", "var hook func() int\n\nfunc SetHook() { hook = inner }\n")}, reason: "package variable"},
+		{name: "unexported method named by local interface", base: []edit{add("lib.go", "type scaler interface{ scale() float64 }\n")}, edits: []edit{add("lib.go", "func (Circle) scale() float64 { return 1 }\n")}, reason: "method set"},
+		{name: "interface value invoked on", base: []edit{add("lib.go", "type setter interface{ Set(func() int) }\n\nvar sink setter\n\nfunc Hook() { sink.Set(inner) }\n")}, edits: []edit{sub("lib.go", "x * 2", "x * 3")}, reason: "function value stored"},
 		{name: "method removed", base: []edit{add("lib.go", "func (Circle) Name() string { return \"c\" }\n")}, edits: []edit{sub("lib.go", "func (Circle) Name() string { return \"c\" }\n", "")}, reason: "method set"},
 		{name: "const outside function", base: []edit{add("lib.go", "type arr [Limit]int\n")}, edits: []edit{sub("lib.go", "const Limit = 10", "const Limit = 11")}, reason: "outside a function"},
 		{name: "shared helper", edits: []edit{sub("helper_test.go", "sharedHelper() int { return Everywhere2() }", "sharedHelper() int { return 2 }")}, reason: "shared test helper"},
-		{name: "test writes package var", base: []edit{add("other_test.go", "func TestW(t *testing.T) { counter = 1 }\n")}, edits: []edit{sub("other_test.go", "counter = 1", "counter = 2")}, reason: "writes a package variable"},
 		{name: "reflect call", edits: []edit{add("lib.go", "func R() { reflect.ValueOf(Comment).Call(nil) }\nfunc _x() { _ = 1 }\n")}, reason: "reflect.Call"},
 		{name: "linkname", edits: []edit{add("lib.go", "func L() {}\n"), put("l.go", "package fx\n\nimport _ \"unsafe\"\n\n//go:linkname L2 runtime.foo\nfunc L2()\n")}, reason: ""},
 		{name: "syntax error", edits: []edit{add("lib.go", "func {\n")}, reason: "head"},
@@ -356,12 +366,14 @@ func TestPerConfigGraphUnion(t *testing.T) {
 		put("arch_arm64_test.go", "package fx\n\nimport \"testing\"\n\nfunc TestOnlyArm64(t *testing.T) { Double(1) }\n"),
 		put("race_test.go", "//go:build race\n\npackage fx\n\nimport \"testing\"\n\nfunc TestOnlyRace(t *testing.T) { Double(1) }\n"),
 		put("norace_test.go", "//go:build !race\n\npackage fx\n\nimport \"testing\"\n\nfunc TestOnlyNorace(t *testing.T) { Double(1) }\n"),
+		put("combo_amd64_test.go", "//go:build !race\n\npackage fx\n\nimport \"testing\"\n\nfunc TestAmd64Norace(t *testing.T) { Double(1) }\n"),
+		put("combo_arm64_test.go", "//go:build race\n\npackage fx\n\nimport \"testing\"\n\nfunc TestArm64Race(t *testing.T) { Double(1) }\n"),
 	}
 	p := selectEdits(t, DefaultConfigs, constrained, []edit{sub("lib.go", "x * 2", "x * 3")})
 	if p.Tier != TierLibrary {
 		t.Fatalf("plan = %+v", p)
 	}
-	for _, want := range []string{"TestOnlyAmd64", "TestOnlyArm64", "TestOnlyRace", "TestOnlyNorace", "TestTwice"} {
+	for _, want := range []string{"TestOnlyAmd64", "TestOnlyArm64", "TestOnlyRace", "TestOnlyNorace", "TestAmd64Norace", "TestArm64Race", "TestTwice"} {
 		if !slices.Contains(p.Tests, want) {
 			t.Errorf("missing %s from %v", want, p.Tests)
 		}
@@ -547,5 +559,87 @@ func (r R) TestM() {}
 	want := map[string]RootKind{"TestA": KindTest, "Test": KindTest, "Test1": KindTest, "BenchmarkA": KindBench, "FuzzA": KindTest, "ExampleA": KindTest}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestFuncStateAfterInitIsUncertain(t *testing.T) {
+	h := baseFiles()
+	h["lib.go"] += "var hook func() int\n\nfunc SetHook() { hook = inner }\n\nfunc CallHook() int { return hook() }\n"
+	g, err := buildGraph(writeFiles(t, h), hostOnly()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(g.Uncertain, ";"), "hook") {
+		t.Fatalf("uncertain = %v", g.Uncertain)
+	}
+	m := baseFiles()
+	m["lib.go"] += "var syncFuncs sync.Map\n\nfunc PutSync() { syncFuncs.Store(1, inner) }\n"
+	m["lib.go"] = strings.Replace(m["lib.go"], `import "reflect"`, "import (\n\t\"reflect\"\n\t\"sync\"\n)", 1)
+	m["lib.go"] += "var anyState = map[string]any{}\n\nfunc PutFunc() { anyState[\"f\"] = inner }\n"
+	g, err = buildGraph(writeFiles(t, m), hostOnly()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := strings.Join(g.Uncertain, ";"); !strings.Contains(u, "anyState") || !strings.Contains(u, "syncFuncs") {
+		t.Fatalf("func boxed into interface state not uncertain: %v", g.Uncertain)
+	}
+	for _, src := range []string{
+		"type box struct{ f func() int }\n\nvar boxes = []box{{}}\n\nfunc setBox(b *box) { b.f = inner }\n\nfunc Fill() { setBox(&boxes[0]) }\n",
+		"var fns = make([]func() int, 1)\n\nfunc Fill() { copy(fns, []func() int{inner}) }\n",
+	} {
+		f := baseFiles()
+		f["lib.go"] += src
+		g, err := buildGraph(writeFiles(t, f), hostOnly()[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(g.Uncertain) == 0 {
+			t.Errorf("not uncertain: %s", src)
+		}
+	}
+	b := baseFiles()
+	b["lib.go"] += "var table = []func() int{inner}\n\nfunc Size() int { return len(table) }\n\nvar counts = map[string]any{}\n\nfunc Count() { counts[\"n\"] = new(int) }\n\nvar syncCounts sync.Map\n\nfunc SyncCount() { syncCounts.Store(\"n\", new(int)) }\n"
+	b["lib.go"] = strings.Replace(b["lib.go"], `import "reflect"`, "import (\n\t\"reflect\"\n\t\"sync\"\n)", 1)
+	g, err = buildGraph(writeFiles(t, b), hostOnly()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Uncertain) != 0 {
+		t.Fatalf("init-only func table uncertain: %v", g.Uncertain)
+	}
+}
+
+func TestWriterThroughLoadedReference(t *testing.T) {
+	base := []edit{
+		add("lib.go", "var cache = map[int]int{}\n\nfunc Fill() { cache[1] = 2 }\n\nfunc Look() int { return cache[1] }\n\nvar rows = [][]int{{1}}\n\nfunc Poke() { rows[0][0] = 2 }\n\nfunc Peek() int { return rows[0][0] }\n"),
+		add("lib_test.go", "func TestFill(t *testing.T) { Fill() }\nfunc TestLook(t *testing.T) { Look() }\nfunc TestPoke(t *testing.T) { Poke() }\nfunc TestPeek(t *testing.T) { Peek() }\n"),
+	}
+	for _, tc := range []struct {
+		edit edit
+		want []string
+	}{
+		{sub("lib.go", "cache[1] = 2", "cache[1] = 3"), []string{"TestFill", "TestLook"}},
+		{sub("lib.go", "rows[0][0] = 2", "rows[0][0] = 3"), []string{"TestPeek", "TestPoke"}},
+	} {
+		p := selectEdits(t, hostOnly(), base, []edit{tc.edit})
+		if p.Tier != TierLibrary || !slices.Equal(p.Tests, tc.want) {
+			t.Errorf("plan %s %v %v, want %v", p.Tier, p.Tests, p.Reasons, tc.want)
+		}
+	}
+}
+
+func TestChangedTestWriterSelectsReaders(t *testing.T) {
+	base := []edit{
+		add("other_test.go", "var table = [][]int{{1}}\n\nfunc TestW(t *testing.T) { counter = 1; mutate(table[0]) }\nfunc TestTableReader(t *testing.T) { _ = table[0][0] }\n"),
+		add("lib.go", "func mutate(x []int) { x[0] = 2 }\n"),
+	}
+	p := selectEdits(t, hostOnly(), base, []edit{sub("other_test.go", "counter = 1", "counter = 2")})
+	if p.Tier != TierTests {
+		t.Fatalf("plan %+v", p)
+	}
+	for _, want := range []string{"TestW", "TestRead", "TestBump", "TestTableReader"} {
+		if !slices.Contains(p.Tests, want) {
+			t.Errorf("missing %s: %v", want, p.Tests)
+		}
 	}
 }
