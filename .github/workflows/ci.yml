@@ -59,6 +59,18 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: go test -run '^$' -bench . -benchtime=1x -benchmem ./...
+  selector-comparison:
+    # Not a required check: runs the affected-test plan beside the full jobs to compare.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: git fetch origin main
+      - run: BASE=origin/main scripts/localci.sh
   downstream-consumer:
     runs-on: ubuntu-latest
     steps:
