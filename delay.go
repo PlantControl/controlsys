@@ -883,16 +883,16 @@ func absorbInputDelay(sys *System) (*System, error) {
 	}
 
 	aAugMat := mat.NewDense(nAug, nAug, aAug)
-	bAugMat := mat.NewDense(nAug, m, bAug)
-	cAugMat := mat.NewDense(p, nAug, cAug)
-	dAugMat := mat.NewDense(p, m, dAug)
+	bAugMat := denseFromData(nAug, m, bAug)
+	cAugMat := denseFromData(p, nAug, cAug)
+	dAugMat := denseFromData(p, m, dAug)
 
 	augSys, err := newNoCopy(aAugMat, bAugMat, cAugMat, dAugMat, sys.Dt)
 	if err != nil {
 		return nil, err
 	}
 	augSys.E = augmentDescriptorE(sys.E, n, nAug)
-	augSys.LFT = inputShiftLFT(sys.LFT, n, nAug, lastShift)
+	augSys.LFT = inputShiftLFT(sys.LFT, n, nAug, p, lastShift)
 	augSys.Delay = copyDelayOrNil(sys.Delay)
 	if sys.OutputDelay != nil {
 		augSys.OutputDelay = make([]float64, len(sys.OutputDelay))
@@ -976,16 +976,16 @@ func absorbOutputDelay(sys *System) (*System, error) {
 	}
 
 	aAugMat := mat.NewDense(nAug, nAug, aAug)
-	bAugMat := mat.NewDense(nAug, m, bAug)
-	cAugMat := mat.NewDense(p, nAug, cAug)
-	dAugMat := mat.NewDense(p, m, dAug)
+	bAugMat := denseFromData(nAug, m, bAug)
+	cAugMat := denseFromData(p, nAug, cAug)
+	dAugMat := denseFromData(p, m, dAug)
 
 	augSys, err := newNoCopy(aAugMat, bAugMat, cAugMat, dAugMat, sys.Dt)
 	if err != nil {
 		return nil, err
 	}
 	augSys.E = augmentDescriptorE(sys.E, n, nAug)
-	augSys.LFT = outputShiftLFT(sys.LFT, n, nAug, firstShift)
+	augSys.LFT = outputShiftLFT(sys.LFT, n, nAug, m, firstShift)
 	augSys.Delay = copyDelayOrNil(sys.Delay)
 	if sys.InputDelay != nil {
 		augSys.InputDelay = make([]float64, len(sys.InputDelay))
@@ -1029,12 +1029,11 @@ func copyLFTWithStates(lft *LFTDelay, n, nAug, m, p int) *LFTDelay {
 
 // inputShiftLFT moves each delayed input's D21 column onto the C2 column of
 // its register's last state, so internal delays see the delayed input.
-func inputShiftLFT(lft *LFTDelay, n, nAug int, lastShift []int) *LFTDelay {
+func inputShiftLFT(lft *LFTDelay, n, nAug, p int, lastShift []int) *LFTDelay {
 	if lft == nil || len(lft.Tau) == 0 {
 		return nil
 	}
 	m := len(lastShift)
-	p, _ := lft.D12.Dims()
 	out := copyLFTWithStates(lft, n, nAug, m, p)
 	c2 := out.C2.RawMatrix()
 	d21 := out.D21.RawMatrix()
@@ -1052,11 +1051,10 @@ func inputShiftLFT(lft *LFTDelay, n, nAug int, lastShift []int) *LFTDelay {
 
 // outputShiftLFT moves each delayed output's D12 row onto the B2 row of its
 // register's first state, so the register captures the full undelayed output.
-func outputShiftLFT(lft *LFTDelay, n, nAug int, firstShift []int) *LFTDelay {
+func outputShiftLFT(lft *LFTDelay, n, nAug, m int, firstShift []int) *LFTDelay {
 	if lft == nil || len(lft.Tau) == 0 {
 		return nil
 	}
-	_, m := lft.D21.Dims()
 	out := copyLFTWithStates(lft, n, nAug, m, len(firstShift))
 	q := len(lft.Tau)
 	b2 := out.B2.RawMatrix()
