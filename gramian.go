@@ -42,7 +42,8 @@ const (
 // An unknown type returns ErrInvalidArgument, an unstable model
 // ErrUnstableGramian and a model without states ErrDimensionMismatch. Like
 // MATLAB gram, models with internal delays (either domain) return
-// ErrInternalDelayUnsupported; absorb or approximate the delays first.
+// ErrInternalDelayUnsupported; absorb or approximate the delays first. An Inf
+// or NaN gramian entry returns ErrOverflow.
 // See https://www.mathworks.com/help/control/ref/statespacemodel.gram.html.
 func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 	if err := requireSystem("Gram", sys); err != nil {

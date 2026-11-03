@@ -77,9 +77,9 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 
 		var X *mat.Dense
 		if sys.IsContinuous() {
-			X, err = Lyap(sys.A, Q, nil)
+			X, err = lyapChecked(sys.A, Q, nil)
 		} else {
-			X, err = DLyap(sys.A, Q, nil)
+			X, err = dlyapChecked(sys.A, Q, nil)
 		}
 		if err != nil {
 			return nil, err
@@ -170,7 +170,7 @@ func covarContinuousDelayed(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		}
 		Q := inputNoiseIntensity(bAug, W, N, m)
 		symmetrize(Q.RawMatrix().Data, N, N)
-		Y, err := Lyap(aAug, Q, nil)
+		Y, err := lyapChecked(aAug, Q, nil)
 		if err != nil {
 			return nil, err
 		}
