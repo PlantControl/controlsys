@@ -2129,7 +2129,7 @@ func partExp(ad *mat.Dense, a *mat.Dense, dt float64) {
 	var scaled mat.Dense
 	scaled.Scale(dt, a)
 	ad.Reset()
-	ad.Exp(&scaled)
+	expGuarded(ad, &scaled)
 }
 
 // holdExp is partExp by stiffExp when A·dt is stiff, as the ZOH
@@ -2527,7 +2527,7 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 
 	var scaled, ad mat.Dense
 	scaled.Scale(dt, sys.A)
-	ad.Exp(&scaled)
+	expGuarded(&ad, &scaled)
 
 	byDelay := make(map[float64][]int)
 	var delays []float64
@@ -2555,7 +2555,7 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 		if lead := float64(k0)*dt - tau; lead > 0 {
 			var lag mat.Dense
 			scaled.Scale(lead, sys.A)
-			lag.Exp(&scaled)
+			expGuarded(&lag, &scaled)
 			next.MulVec(&lag, x0)
 			x, next = next, x
 		}

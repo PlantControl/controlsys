@@ -191,7 +191,7 @@ func expmScaled(a *mat.Dense, dt float64) *mat.Dense {
 	scaled := mat.NewDense(n, n, nil)
 	scaled.Scale(dt, a)
 	var e mat.Dense
-	e.Exp(scaled)
+	expGuarded(&e, scaled)
 	return mat.DenseCopyOf(&e)
 }
 

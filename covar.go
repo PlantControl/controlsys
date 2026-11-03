@@ -145,7 +145,7 @@ func covarContinuousDelayed(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		}
 		var at, e mat.Dense
 		at.Scale(t, sys.A)
-		e.Exp(&at)
+		expGuarded(&e, &at)
 		expCache[t] = &e
 		return &e
 	}

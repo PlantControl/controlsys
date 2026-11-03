@@ -434,7 +434,7 @@ func zohAugmented(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
 	}
 
 	var eM mat.Dense
-	eM.Exp(M)
+	expGuarded(&eM, M)
 
 	emRaw := eM.RawMatrix()
 	adData := make([]float64, n*n)
@@ -712,7 +712,8 @@ type D2COptions struct {
 // Methods are zoh (the zero-value default), tustin, foh and matched.
 // Delays of k samples become delays of k·Ts seconds; internal delays stay
 // internal, inverting C2D, except that matched rejects them as MATLAB does.
-// An already continuous model returns ErrWrongDomain.
+// An already continuous model returns ErrWrongDomain; a result with an Inf or
+// NaN entry in any matrix returns ErrOverflow.
 func (sys *System) D2C(opts D2COptions) (*System, error) {
 	if err := requireFiniteSystem("D2C", sys); err != nil {
 		return nil, err
@@ -724,12 +725,20 @@ func (sys *System) D2C(opts D2COptions) (*System, error) {
 	return out, nil
 }
 
+// d2c is the exit shared by D2C, D2CMap and D2D.
 func (sys *System) d2c(opts D2COptions) (*System, error) {
 	plan, err := newD2CPlan(sys, opts)
 	if err != nil {
 		return nil, err
 	}
-	return plan.run()
+	out, err := plan.run()
+	if err != nil {
+		return nil, err
+	}
+	if err := finiteSystemMatrices("result", out, ErrOverflow); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (sys *System) d2cZOH() (*System, error) {

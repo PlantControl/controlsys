@@ -251,7 +251,7 @@ func fohAugmented(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Dense) {
 		aug.Data[(n+i)*aug.Stride+n+m+i] = 1
 	}
 	var exponential mat.Dense
-	exponential.Exp(augmented)
+	expGuarded(&exponential, augmented)
 	er := exponential.RawMatrix()
 	ad, gamma0, gamma1 = mat.NewDense(n, n, nil), newDense(n, m), newDense(n, m)
 	adr, g0r, g1r := ad.RawMatrix(), gamma0.RawMatrix(), gamma1.RawMatrix()

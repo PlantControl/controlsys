@@ -52,7 +52,8 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 
 // D2CMap converts sys like D2C and also returns the map G of MATLAB
 // [sysc,G] = d2c(sysd,opts): xc(k·Ts) = G·[xd[k]; u[k]; w[k]]. Its
-// availability follows C2DMap.
+// availability follows C2DMap. An Inf or NaN entry in the result or in G returns
+// ErrOverflow.
 func (sys *System) D2CMap(opts D2COptions) (*System, *mat.Dense, error) {
 	if err := requireFiniteSystem("D2CMap", sys); err != nil {
 		return nil, nil, err
@@ -77,6 +78,9 @@ func (sys *System) D2CMap(opts D2COptions) (*System, *mat.Dense, error) {
 	G, err := conversionStateMap(std, out, opts.Method, opts.PrewarpFrequency, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("D2CMap: %w", err)
+	}
+	if err := finiteDense("D2CMap", "G", G, ErrOverflow); err != nil {
+		return nil, nil, err
 	}
 	return out, G, nil
 }
