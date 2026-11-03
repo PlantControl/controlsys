@@ -1333,6 +1333,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 			if r, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
 				return r, 0, true
 			}
+			return res, d.units(gainFloor), false
 		}
 		if rot && d.d > gainFloor {
 			if c, cd, ok := refined(A, B, Q, R, opts, red, res); ok && cd.units(gainTol) <= 1 {
