@@ -201,6 +201,9 @@ type RiccatiResult struct {
 	// X, at Accuracy 1, is not: explicitRiccatiSolution returns them at
 	// Accuracy 0.
 	xeCertified bool
+	// channelLost reports a placedDare X of no digit of R + BᵀXB in some
+	// input (inputChannelLost): Accuracy 1 however certify finds it.
+	channelLost bool
 	// kw is the noise gain (R + BᵀXB)⁻¹BᵀX of nearSingularDare, formed in
 	// extended precision, for Lqg's current estimator; kwCertified when
 	// eps perturbations of the data move it by at most newtonTol.
@@ -817,7 +820,8 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // NoScaling mode). With no stabilizing pencil solution in either mode and
 // no unstabilizable boundary mode, Dare runs Hewer's
 // iteration from a pole-placement gain and returns its X only when the
-// same Newton check certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖),
+// same Newton check certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖,
+// or Accuracy 1 where X holds no digit of R + BᵀXB in an input, placedHewer),
 // else ErrNoStabilizing: under cheap control of a strongly unstable plant
 // no cost scale of the pencil may resolve its split. It runs them too
 // over an Accuracy 1 pencil solution, which a certified placed X
@@ -1052,7 +1056,10 @@ func (red *reducedInputs) solve(A, B, Q *mat.Dense, opts *RiccatiOpts) *RiccatiR
 		if red.rotated {
 			res.K = red.gain(res.K, ws)
 		} else {
-			res, ok = red.certify(A, Q, opts, res, nil)
+			lost := res.channelLost
+			if res, ok = red.certify(A, Q, opts, res, nil); ok && lost {
+				res.Accuracy, res.channelLost = 1, true
+			}
 		}
 		if ok && closedLoopStable(A, B, res.K, o.E, res.Eig) {
 			return res
@@ -1292,6 +1299,9 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // 1.46e-6 from the gain of its X at a tolerance of 1.51e-6, it was 3.11e-6
 // off the 320-bit gain natively (2.4e-8 on amd64), the Hewer gain exact.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
+	if res.channelLost {
+		return res, 0, true
+	}
 	if red == nil && res.xe != nil {
 		return steppedX(A, B, Q, R, opts, res), 0, true
 	}
@@ -2226,7 +2236,35 @@ func placedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	if err != nil {
 		return nil, err
 	}
+	if inputChannelLost(problem.B, problem.R, X) {
+		res := problem.result(X, K, eig, rcnd, 1)
+		res.channelLost = true
+		return res, nil
+	}
 	return problem.result(X, K, eig, rcnd, 0), nil
+}
+
+// inputChannelLost reports an input i with |Rᵢᵢ + bᵢᵀXbᵢ| ≤ eps·|bᵢ|ᵀ|X||bᵢ|:
+// X holds no digit of R + BᵀXB in that channel (placedHewer).
+func inputChannelLost(B, R, X *mat.Dense) bool {
+	n, m := B.Dims()
+	bRaw, rRaw, xRaw := B.RawMatrix(), R.RawMatrix(), X.RawMatrix()
+	for i := range m {
+		w, bound := 0.0, 0.0
+		for p := range n {
+			bp := bRaw.Data[p*bRaw.Stride+i]
+			row := xRaw.Data[p*xRaw.Stride : p*xRaw.Stride+n]
+			for q, x := range row {
+				v := bp * x * bRaw.Data[q*bRaw.Stride+i]
+				w += v
+				bound += math.Abs(v)
+			}
+		}
+		if math.Abs(rRaw.Data[i*rRaw.Stride+i]+w) <= eps()*bound {
+			return true
+		}
+	}
+	return false
 }
 
 // pencilRiccati solves the Riccati equation from the extended pencil
@@ -2339,7 +2377,13 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 // It declines a cross term S with rank(B) < m: inputs in the null space
 // of B lower the cost by about xᵀSR⁻¹Sᵀx, comparable to Q under cheap
 // control, which R + BᵀXB (singular in float64) loses, so Newton then
-// certifies a wrong X (≈ Q).
+// certifies a wrong X (≈ Q). Nor can it certify an X with
+// |Rᵢᵢ + bᵢᵀXbᵢ| ≤ eps·|bᵢ|ᵀ|X||bᵢ| in an input i (inputChannelLost), of
+// which placedDare keeps the value at Accuracy 1 and gainOfX takes no gain:
+// with a weakly controllable unstable mode, s₂/s₁ of B 2e-13, R + BᵀXB ≈ 4
+// under a rounding of 5e9 drops the strong input, and Newton converges to
+// the Dare without it, X 0.036 off the 320-bit X, where the rounded 320-bit
+// X has a residual 1e3 times that of the wrong one.
 func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.Dense, float64, error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	A, B := problem.A, problem.B
