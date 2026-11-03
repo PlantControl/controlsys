@@ -78,8 +78,22 @@ func NewLyapunovWorkspace(n int) *LyapunovWorkspace {
 //
 //	A*X + X*A' + Q = 0
 //
-// A is n×n, Q is n×n symmetric. Returns X (n×n symmetric).
+// A is n×n, Q is n×n symmetric. Returns X (n×n symmetric). An Inf or NaN
+// entry of A or Q returns ErrInvalidArgument, of X ErrOverflow.
 func Lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
+	X, err := lyapChecked(A, Q, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := finiteDense("Lyap", "X", X, ErrOverflow); err != nil {
+		return nil, err
+	}
+	return X, nil
+}
+
+// lyapChecked is Lyap without the result check, for Covar, whose continuous
+// feedthrough entries are infinite whatever X holds.
+func lyapChecked(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	if err := requireFiniteDense("Lyap", "A", A); err != nil {
 		return nil, err
 	}
@@ -171,8 +185,21 @@ func lyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 //
 //	A*X*A' - X + Q = 0
 //
-// A is n×n, Q is n×n symmetric. Returns X (n×n symmetric).
+// A is n×n, Q is n×n symmetric. Returns X (n×n symmetric). An Inf or NaN
+// entry of A or Q returns ErrInvalidArgument, of X ErrOverflow.
 func DLyap(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
+	X, err := dlyapChecked(A, Q, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := finiteDense("DLyap", "X", X, ErrOverflow); err != nil {
+		return nil, err
+	}
+	return X, nil
+}
+
+// dlyapChecked is DLyap without the result check, for Covar.
+func dlyapChecked(A, Q *mat.Dense, opts *LyapunovOpts) (*mat.Dense, error) {
 	if err := requireFiniteDense("DLyap", "A", A); err != nil {
 		return nil, err
 	}
