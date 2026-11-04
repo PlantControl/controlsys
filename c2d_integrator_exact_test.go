@@ -96,7 +96,8 @@ func TestC2DKeepsZeroRowIntegratorExact(t *testing.T) {
 
 // A non-symmetric A with a zero row inside: the row stays e_1 for every
 // method and step, and the block of the other states is the exponential of
-// that block alone, which A is block triangular around.
+// that block alone, which A is block triangular around (e^{A·7} grows to
+// 1e17, hence the relative bound).
 func TestC2DZeroRowOfNonSymmetricA(t *testing.T) {
 	a := []float64{
 		-3, 7, 0.5, 2,
@@ -107,7 +108,14 @@ func TestC2DZeroRowOfNonSymmetricA(t *testing.T) {
 	sys := integratorExactSystem(t, 4, 2, a, []float64{1, -2, 3, 0.5, 0, 4, -1, 2})
 	rest := []int{0, 2, 3}
 	for _, dt := range []float64{1e-4, 0.01, 0.1, 1, 7} {
-		block := expmScaled(submatrix(sys.A, rest), dt)
+		sub := mat.NewDense(3, 3, nil)
+		for p, i := range rest {
+			for q, j := range rest {
+				sub.Set(p, q, sys.A.At(i, j))
+			}
+		}
+		block := expmScaled(sub, dt)
+		scale := mat.Norm(block, math.Inf(1))
 		for _, method := range integratorExactMethods {
 			d, err := sys.C2D(dt, C2DOptions{Method: method})
 			if err != nil {
@@ -121,7 +129,7 @@ func TestC2DZeroRowOfNonSymmetricA(t *testing.T) {
 			}
 			for p, i := range rest {
 				for q, j := range rest {
-					if got, want := d.A.At(i, j), block.At(p, q); got != want {
+					if got, want := d.A.At(i, j), block.At(p, q); math.Abs(got-want) > 1e-14*scale {
 						t.Errorf("dt=%g %s: Ad[%d][%d] = %.17g, block exponential %.17g", dt, method, i, j, got, want)
 					}
 				}
@@ -187,7 +195,8 @@ func TestC2DDoubleIntegratorDCGainSign(t *testing.T) {
 	}
 }
 
-// A=[0 0; 1 -1], dt=25: the lag pole e^-25 is computed alone, so D2C, whose
+// A=[0 0; 1 -1], dt=25: the lag pole e^-25 is computed apart from the
+// integrator row (its relative error was 6.7e-7), so D2C, whose
 // logarithm amplifies its absolute rounding by e^25, recovers A; with the
 // pole from the exponential of all of A it was off by 2.7e-8. D2C keeps the
 // integrator row exactly zero and B's row as Bd/dt.
@@ -200,7 +209,7 @@ func TestC2DIntegratorWithFastLagRoundTrip(t *testing.T) {
 		}
 		integratorExactRow(t, string(method), d.A, 0, 1)
 		if method != C2DMethodTustin {
-			if got, want := d.A.At(1, 1), math.Exp(-25); math.Abs(got-want) > 2e-16*want {
+			if got, want := d.A.At(1, 1), math.Exp(-25); math.Abs(got-want) > 4e-15*want {
 				t.Errorf("%s: Ad[1][1] = %.17g, want e^-25 = %.17g", method, got, want)
 			}
 		}

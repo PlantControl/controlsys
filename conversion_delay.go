@@ -130,6 +130,17 @@ func conversionZOHKernel(a *mat.Dense, b *mat.Dense, period float64) (ad, bd *ma
 	if sad, gammas, ok := stiffModalHold(a, b, period, zohHoldLeaf); ok {
 		return sad, gammas[0]
 	}
+	ad, gammas := integratorHold(a, b, period, func(a, b *mat.Dense) (*mat.Dense, []*mat.Dense) {
+		ad, bd := conversionZOHExp(a, b, period)
+		return ad, []*mat.Dense{bd}
+	})
+	return ad, gammas[0]
+}
+
+func conversionZOHExp(a, b *mat.Dense, period float64) (ad, bd *mat.Dense) {
+	n, _ := a.Dims()
+	_, m := b.Dims()
+	ad, bd = newDense(n, n), newDense(n, m)
 	augmented := newDense(n+m, n+m)
 	ar, br, qr := a.RawMatrix(), b.RawMatrix(), augmented.RawMatrix()
 	for i := range n {
@@ -148,7 +159,6 @@ func conversionZOHKernel(a *mat.Dense, b *mat.Dense, period float64) (ad, bd *ma
 		copy(adr.Data[i*adr.Stride:i*adr.Stride+n], er.Data[i*er.Stride:i*er.Stride+n])
 		copy(bdr.Data[i*bdr.Stride:i*bdr.Stride+m], er.Data[i*er.Stride+n:i*er.Stride+n+m])
 	}
-	exactIntegrators(a, b, period, true, ad, bd)
 	return ad, bd
 }
 

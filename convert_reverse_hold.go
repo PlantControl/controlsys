@@ -236,7 +236,17 @@ func fohInputIntegrals(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Den
 	return fohAugmented(a, b, dt)
 }
 
+// fohAugmented returns e^{a·dt}, Γ₀ and Γ₁ from one exponential of
+// [a b 0; 0 0 I/dt; 0 0 0]·dt, in the integratorOrder of a.
 func fohAugmented(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Dense) {
+	ad, gammas := integratorHold(a, b, dt, func(a, b *mat.Dense) (*mat.Dense, []*mat.Dense) {
+		ad, g0, g1 := fohAugmentedExp(a, b, dt)
+		return ad, []*mat.Dense{g0, g1}
+	})
+	return ad, gammas[0], gammas[1]
+}
+
+func fohAugmentedExp(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Dense) {
 	n, _ := a.Dims()
 	_, m := b.Dims()
 	q := n + 2*m
@@ -263,7 +273,6 @@ func fohAugmented(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Dense) {
 		copy(g0r.Data[i*g0r.Stride:i*g0r.Stride+m], er.Data[i*er.Stride+n:i*er.Stride+n+m])
 		copy(g1r.Data[i*g1r.Stride:i*g1r.Stride+m], er.Data[i*er.Stride+n+m:i*er.Stride+n+2*m])
 	}
-	exactIntegrators(a, b, dt, true, ad, gamma0, gamma1)
 	return ad, gamma0, gamma1
 }
 

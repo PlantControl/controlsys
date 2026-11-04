@@ -37,7 +37,9 @@ func stiffModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf) (ad *mat.Dense, 
 	}
 	ad, gammas, ok = splitModalHold(a, b, dt, leaf, true)
 	if ok {
-		exactIntegrators(a, b, dt, false, ad, gammas...)
+		if o, found := newIntegratorOrder(a, 0); found {
+			o.exactHold(b, dt, ad, gammas)
+		}
 	}
 	return ad, gammas, ok
 }
@@ -190,15 +192,21 @@ func realSchur(a *mat.Dense) (t, z []float64, ok bool) {
 	return t, z, ok
 }
 
+// expmScaled returns e^{a·dt}, in the integratorOrder of a.
 func expmScaled(a *mat.Dense, dt float64) *mat.Dense {
+	ad, _ := integratorHold(a, nil, dt, func(a, _ *mat.Dense) (*mat.Dense, []*mat.Dense) {
+		return expmScaledExp(a, dt), nil
+	})
+	return ad
+}
+
+func expmScaledExp(a *mat.Dense, dt float64) *mat.Dense {
 	n, _ := a.Dims()
 	scaled := mat.NewDense(n, n, nil)
 	scaled.Scale(dt, a)
 	var e mat.Dense
 	expGuarded(&e, scaled)
-	ad := mat.DenseCopyOf(&e)
-	exactIntegrators(a, nil, dt, true, ad)
-	return ad
+	return mat.DenseCopyOf(&e)
 }
 
 // fastInputIntegral returns ∫₀^dt e^{a·s} ds·b = a⁻¹(ad − I)·b for a fast

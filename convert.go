@@ -155,7 +155,24 @@ func (sys *System) undiscretizeTustin(prewarp float64) (*System, error) {
 	return out, nil
 }
 
+// bilinear maps (A, B, C, D) to (pbeta·I − 2αβ·W, scaleB·W·B, scaleC·C·W,
+// D − C·W·B), W = (A + palpha·I)⁻¹, in the integratorOrder of A.
 func bilinear(sys *System, palpha, pbeta, alpha, beta float64) (*System, error) {
+	pole := 0.0
+	if sys.IsDiscrete() {
+		pole = 1
+	}
+	scaleB, scaleC := beta, 2.0
+	if palpha < 0 {
+		scaleB, scaleC = -2, -beta
+	}
+	image := pbeta - 2*alpha*beta/(pole+palpha)
+	return integratorBilinear(sys, pole, palpha, image, scaleB, scaleC, func(sys *System) (*System, error) {
+		return bilinearInverse(sys, palpha, pbeta, alpha, beta)
+	})
+}
+
+func bilinearInverse(sys *System, palpha, pbeta, alpha, beta float64) (*System, error) {
 	n, m, p := sys.Dims()
 
 	D := denseCopy(sys.D)
@@ -239,19 +256,6 @@ func bilinear(sys *System, palpha, pbeta, alpha, beta float64) (*System, error) 
 		return nil, fmt.Errorf("bilinear: result contains Inf/NaN: %w", ErrOverflow)
 	}
 
-	integrator := 0.0
-	if sys.IsDiscrete() {
-		integrator = 1
-	}
-	block := func(a *mat.Dense) (*mat.Dense, bool) {
-		k, _ := a.Dims()
-		part, err := bilinear(&System{A: a, B: newDense(k, 0), C: newDense(0, k), D: newDense(0, 0), Dt: sys.Dt}, palpha, pbeta, alpha, beta)
-		if err != nil {
-			return nil, false
-		}
-		return part.A, true
-	}
-	exactBilinearIntegrators(sys.A, sys.B, sys.C, integrator, palpha, pbeta-twoAB/(integrator+palpha), scaleB, scaleC, block, Ainv, B, C)
 	out := &System{A: Ainv, B: B, C: C, D: D}
 	propagateNames(out, sys)
 	return out, nil
@@ -425,8 +429,16 @@ func (sys *System) discretizeZOH(dt float64) (*System, error) {
 }
 
 // zohAugmented returns e^{a·dt} and ∫₀^dt e^{a·s} ds·b from one exponential
-// of [a b; 0 0]·dt.
+// of [a b; 0 0]·dt, in the integratorOrder of a.
 func zohAugmented(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
+	ad, gammas := integratorHold(a, b, dt, func(a, b *mat.Dense) (*mat.Dense, []*mat.Dense) {
+		ad, bd := zohAugmentedExp(a, b, dt)
+		return ad, []*mat.Dense{bd}
+	})
+	return ad, gammas[0]
+}
+
+func zohAugmentedExp(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
 	n, _ := a.Dims()
 	_, m := b.Dims()
 	nm := n + m
@@ -456,9 +468,7 @@ func zohAugmented(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
 		copy(adData[i*n:], emRaw.Data[i*emRaw.Stride:i*emRaw.Stride+n])
 		copy(bdData[i*m:], emRaw.Data[i*emRaw.Stride+n:i*emRaw.Stride+n+m])
 	}
-	ad, bd = mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData)
-	exactIntegrators(a, b, dt, true, ad, bd)
-	return ad, bd
+	return mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData)
 }
 
 // stiffDescriptorParts returns, for a delay-free descriptor sys with
