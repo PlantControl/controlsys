@@ -60,6 +60,7 @@ func Norm(sys *System, normType float64) (float64, error) {
 // delays do not change the H2 norm. Discrete internal delays are absorbed
 // exactly; continuous strictly proper internal-delay models return
 // ErrContinuousInternalDelay. Descriptor models are handled as in Norm.
+// A norm beyond float64 range returns ErrOverflow.
 func H2Norm(sys *System) (float64, error) {
 	if err := requireSystem("H2Norm", sys); err != nil {
 		return 0, err
