@@ -3,6 +3,8 @@ package controlsys
 import (
 	"fmt"
 	"math/cmplx"
+	"runtime"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -88,7 +90,11 @@ func TestDare_CheapControlGainWithinItsUlpMove(t *testing.T) {
 // float64 gain off by 1.5 (7UDJQH review, draws 4175 and 6547 of the
 // wave-39 reviewer sweep generator; amd64 leaves the E case at Accuracy 1
 // on base as well). K must lie within max(newtonTol, 4× the move of the
-// 320-bit gain per ulp of its X) of the 320-bit gain.
+// 320-bit gain per ulp of its X) of the 320-bit gain. Under gonum 30740af
+// (HF5PTS) the E case is Accuracy 1 on every platform (K 0.06 to 1 off;
+// owner 2ARMRV), and S NoScaling false natively is Accuracy 0 with K
+// 1.14e-8 off: held there to the band max(gainFloor, 4·sens.K) of the
+// 320-bit reference only (owner BBN22I).
 func TestDare_GainResolvedAtNewtonIterate(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -96,6 +102,8 @@ func TestDare_GainResolvedAtNewtonIterate(t *testing.T) {
 		a, b, q, r, s, e []float64
 		kTol             float64
 		mustCertify      bool
+		acc1             bool
+		nativeBand       []bool
 	}{
 		{"E", 3, 3,
 			[]float64{0.09881904021718858, 0.02842688923022688, -0.05073982054164841, -0.005430769410857691, 0.10001562226283889, -0.22968762772515325, -0.06504657668826087, 0.09597690435726397, 0.3049505863517156},
@@ -104,7 +112,7 @@ func TestDare_GainResolvedAtNewtonIterate(t *testing.T) {
 			[]float64{7.816504827950286e-12, 3.1373991650654315e-14, -2.7957092369262666e-15, 3.1373991650654315e-14, 7.958716553401623e-12, 6.498686388958827e-14, -2.7957092369262666e-15, 6.498686388958827e-14, 7.915925302592696e-12},
 			nil,
 			[]float64{1.023034257867305, 0.0022117036130786722, -0.11645319695619356, -0.009589437543928887, 1.0739279582333912, 0.2167625748607436, 0.06248697628725246, -0.013532548546664679, 1.042329470990784},
-			0, false},
+			0, false, true, nil},
 		{"S", 2, 3,
 			[]float64{0.04049315759658805, 0.13106055730326033, 0.06526289018949011, -0.2214261484702837},
 			[]float64{2.053732806819227, 0.126339080840286, 2.053732806819227, 1.0487698057844066, -0.6931311091821057, 1.0487698057844066},
@@ -112,7 +120,7 @@ func TestDare_GainResolvedAtNewtonIterate(t *testing.T) {
 			[]float64{2.928452535666982e-12, 4.7961226422024686e-14, -1.220370773730529e-14, 4.7961226422024686e-14, 3.0727116573265732e-12, -3.71752471965101e-14, -1.220370773730529e-14, -3.71752471965101e-14, 2.963337309232291e-12},
 			[]float64{-0.00021246718919245902, -0.003693732197035752, -0.003577528872264808, 0.0002570660366954934, 0.004469081085486584, 0.004328485597480918},
 			nil,
-			newtonTol, true},
+			newtonTol, true, false, []bool{false}},
 	}
 	for _, c := range cases {
 		A, B := mat.NewDense(c.n, c.n, c.a), mat.NewDense(c.n, c.m, c.b)
@@ -141,6 +149,9 @@ func TestDare_GainResolvedAtNewtonIterate(t *testing.T) {
 				t.Errorf("%s: %v", name, err)
 				continue
 			}
+			if c.acc1 && res.Accuracy != 1 {
+				t.Errorf("%s: Accuracy %d, want 1", name, res.Accuracy)
+			}
 			if res.Accuracy != 0 {
 				if c.mustCertify {
 					t.Errorf("%s: Accuracy %d, want 0 (‖K − K*‖/‖K*‖ = %.3g)", name, res.Accuracy, relErr(res.K, wantK))
@@ -150,8 +161,17 @@ func TestDare_GainResolvedAtNewtonIterate(t *testing.T) {
 			if rel := relErr(res.X, wantX); !(rel <= newtonTol) {
 				t.Errorf("%s: Accuracy 0 with ‖X − X*‖/‖X*‖ = %.3g", name, rel)
 			}
-			if rel := relErr(res.K, wantK); !(rel <= kTol) {
-				t.Errorf("%s: Accuracy 0 with ‖K − K*‖/‖K*‖ = %.3g > %.3g", name, rel, kTol)
+			tol := kTol
+			if runtime.GOARCH == "arm64" && !raceEnabled && slices.Contains(c.nativeBand, ns) {
+				ref := riccatiExactReference(false, A, B, Q, R, S, E, riccatiExactPrec)
+				sens, ok := riccatiExactSensitivity(false, A, B, Q, R, S, E, ref, "ABQRSE")
+				if !ok {
+					t.Fatalf("%s: reference not certified", name)
+				}
+				tol = max(gainFloor, 4*sens.K)
+			}
+			if rel := relErr(res.K, wantK); !(rel <= tol) {
+				t.Errorf("%s: Accuracy 0 with ‖K − K*‖/‖K*‖ = %.3g > %.3g", name, rel, tol)
 			}
 		}
 	}

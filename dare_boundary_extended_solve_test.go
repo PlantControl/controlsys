@@ -17,12 +17,16 @@ import (
 // it, that oracle against SDA doubling (riccatiExactReference), and the
 // closed loop E⁻¹(A − BK) of the returned K by a 320-bit Stein test.
 // ulpSensitive rows error on base natively only: the amd64 pencil (and
-// the race build's) may solve them or keep the error.
+// the race build's) may solve them or keep the error. demoted rows are
+// Accuracy 1 natively under gonum 30740af (HF5PTS; mid-279-cross Dlqr K
+// and X exact, Dare X 1.67e-8 off): Dlqr need not certify them (owner
+// 2ARMRV).
 func TestDare_BoundaryVerdictExtendedSolve(t *testing.T) {
 	native := runtime.GOARCH == "arm64" && !raceEnabled
 	cases := []struct {
 		name             string
 		ulpSensitive     bool
+		demoted          bool
 		A, B, Q, R, S, E *mat.Dense
 	}{
 		{
@@ -61,7 +65,7 @@ func TestDare_BoundaryVerdictExtendedSolve(t *testing.T) {
 			E: mat.NewDense(4, 4, []float64{-0.3065793535120014, 1.008827979321256, 0.42469758902170346, 0.20199722915539825, -0.45124961627813603, 0.03466015680448618, -0.29406111220434566, -0.43844788466632745, -0.22753349474013698, -0.32041489239108245, 0.27218078149727276, -0.3167005270475097, -0.5446942033177934, -0.17631103409741658, 0.19287181319735117, -0.5579606893154194}),
 		},
 		{
-			name: "mid-279-cross", ulpSensitive: true,
+			name: "mid-279-cross", ulpSensitive: true, demoted: true,
 			A: mat.NewDense(5, 5, []float64{0.3345853680432942, -0.5444275521734381, 0.12170526714347651, 0.09496216282048281, 0.8698082007052628, -1.1832050021928828, -1.9769313652682223, 0.236925633588843, -1.0957790402457945, 0.4892996711553904, 0.630845571893818, -0.3195721156194128, -0.07693463896235497, -2.0497543274498478, -0.6806304034766936, 0.3851019339290179, -1.0385704600377679, 1.1774717763528888, 0.3633037140769124, -0.16830799934803908, -0.40538440193130365, -0.8487856726526775, 0.8766725432015005, 0.5629758043597742, 0.11977255729700625}),
 			B: mat.NewDense(5, 2, []float64{0.4369270913557226, 1.320204430389531, -0.18344196673917534, -2.065044438827403, 1.9291060463927412, 1.2581787847157724, -0.12266320499603922, 1.9419573218872788, 0.17494976812979202, -0.5253548996252111}),
 			Q: mat.NewDense(5, 5, []float64{1.4763330089923503, -0.7712926345378776, -0.20399808391151153, 0.07406185720162367, -0.7023591143098131, -0.7712926345378776, 3.817032944510636, -2.99160684332307, -1.2172015416451683, 2.8380768943850705, -0.20399808391151153, -2.99160684332307, 5.148645710885679, -0.17878575596093133, -2.5355952343338473, 0.07406185720162367, -1.2172015416451683, -0.17878575596093133, 2.776230392166753, -1.9418643175400545, -0.7023591143098131, 2.8380768943850705, -2.5355952343338473, -1.9418643175400545, 3.5334753523040856}),
@@ -120,7 +124,7 @@ func TestDare_BoundaryVerdictExtendedSolve(t *testing.T) {
 				}
 				eK, eX := relErr(res.K, K), relErr(res.X, want)
 				t.Logf("%s %s NoScaling %v: Accuracy %d, K %.3g X %.3g", c.name, api, ns, res.Accuracy, eK, eX)
-				if native && api == "Dlqr" && res.Accuracy != 0 {
+				if native && api == "Dlqr" && !c.demoted && res.Accuracy != 0 {
 					t.Errorf("%s Dlqr NoScaling %v: Accuracy %d, want 0", c.name, ns, res.Accuracy)
 				}
 				if res.Accuracy == 0 && !(eK <= newtonTol && eX <= newtonTol) {

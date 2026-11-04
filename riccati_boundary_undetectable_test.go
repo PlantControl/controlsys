@@ -30,13 +30,17 @@ func dualDare(A, B, C, E *mat.Dense) (At, Ct, Q, Et *mat.Dense) {
 	return mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C.T()), Q, mat.DenseCopyOf(E.T())
 }
 
-// wantUncertified reports a result that is not Accuracy 1.
-func wantUncertified(t *testing.T, what string, res *RiccatiResult, err error) {
+// wantNoStabilizing reports a result other than ErrNoStabilizing with a nil
+// result; the near-singular boundary error is not that verdict.
+func wantNoStabilizing(t *testing.T, what string, res *RiccatiResult, err error) {
 	t.Helper()
-	if err != nil {
-		t.Errorf("%s: %v, want Accuracy 1", what, err)
-	} else if res.Accuracy != 1 {
-		t.Errorf("%s: Accuracy %d, Eig %v, want 1", what, res.Accuracy, res.Eig)
+	switch {
+	case err == nil:
+		t.Errorf("%s: Accuracy %d, Eig %v, want ErrNoStabilizing", what, res.Accuracy, res.Eig)
+	case !errors.Is(err, ErrNoStabilizing) || errors.Is(err, errBoundaryUnstabilizable):
+		t.Errorf("%s: %v, want ErrNoStabilizing", what, err)
+	case res != nil:
+		t.Errorf("%s: non-nil result with %v", what, err)
 	}
 }
 
@@ -44,9 +48,8 @@ func wantUncertified(t *testing.T, what string, res *RiccatiResult, err error) {
 // is exactly unreachable from the process noise, so the filter Riccati
 // equation has no stabilizing solution (MATLAB kalman/idare). Base
 // returned Accuracy 0 with Eig −0.9999999999999999; the 320-bit closed
-// loop of its gain has spectral radius 1 (not Schur stable). The float64
-// data cannot tell that mode from one an ulp inside, which has a
-// solution, so Kalman keeps the solve's X and K at Accuracy 1.
+// loop of its gain has spectral radius 1 (not Schur stable), and Kalman
+// returns ErrNoStabilizing as idare does (HF5PTS ruling 2).
 func TestKalman_BoundaryModeUnreachableFromNoise(t *testing.T) {
 	A, B, C, E := boundaryUnreachablePlant(0)
 	sys, err := NewDescriptor(A, B, C, mat.NewDense(1, 1, nil), E, 1)
@@ -55,18 +58,18 @@ func TestKalman_BoundaryModeUnreachableFromNoise(t *testing.T) {
 	}
 	for _, ns := range []bool{false, true} {
 		res, err := Kalman(sys, eyeDense(1), eyeDense(1), nil, &RiccatiOpts{NoScaling: ns})
-		wantUncertified(t, fmt.Sprintf("NoScaling %v", ns), res, err)
+		wantNoStabilizing(t, fmt.Sprintf("NoScaling %v", ns), res, err)
 	}
 }
 
 // TestDare_BoundaryModeUnobservableToCost (DBOVA4): Kalman's dual Dare
 // solved directly, (Aᵀ, Cᵀ, B·Bᵀ, I, Eᵀ): the z = −1 mode is unobservable
-// to the cost Q = B·Bᵀ, and Dare returns Accuracy 1 as Kalman does.
+// to the cost Q = B·Bᵀ, and Dare returns ErrNoStabilizing as Kalman does.
 func TestDare_BoundaryModeUnobservableToCost(t *testing.T) {
 	At, Ct, Q, Et := dualDare(boundaryUnreachablePlant(0))
 	for _, ns := range []bool{false, true} {
 		res, err := Dare(At, Ct, Q, eyeDense(1), &RiccatiOpts{E: Et, NoScaling: ns})
-		wantUncertified(t, fmt.Sprintf("NoScaling %v", ns), res, err)
+		wantNoStabilizing(t, fmt.Sprintf("NoScaling %v", ns), res, err)
 	}
 }
 
@@ -117,7 +120,7 @@ var correlatedNoiseCases = []struct {
 // S = G·(Qn·Hᵀ + Nn) that inherits G's zero row at the z = −1 mode, which
 // stays unreachable, so no stabilizing solution exists. Base returned
 // Accuracy 0; the 320-bit closed loop of its gain has spectral radius
-// 1.0000000000000002. Kalman and the dual Dare return Accuracy 1.
+// 1.0000000000000002. Kalman and the dual Dare return ErrNoStabilizing.
 func TestKalman_BoundaryModeUnreachableWithCorrelatedNoise(t *testing.T) {
 	A, B, C, E := boundaryUnreachablePlant(0)
 	At, Ct, Q, Et := dualDare(A, B, C, E)
@@ -133,9 +136,9 @@ func TestKalman_BoundaryModeUnreachableWithCorrelatedNoise(t *testing.T) {
 		S, Rbar := kalmanCrossTerms(B, tc.h, tc.nn)
 		for _, ns := range []bool{false, true} {
 			res, err := Kalman(sys, eyeDense(1), eyeDense(1), Nn, &RiccatiOpts{NoScaling: ns})
-			wantUncertified(t, fmt.Sprintf("%s NoScaling %v: Kalman", tc.name, ns), res, err)
+			wantNoStabilizing(t, fmt.Sprintf("%s NoScaling %v: Kalman", tc.name, ns), res, err)
 			res, err = Dare(At, Ct, Q, Rbar, &RiccatiOpts{E: Et, S: S, NoScaling: ns})
-			wantUncertified(t, fmt.Sprintf("%s NoScaling %v: dual Dare", tc.name, ns), res, err)
+			wantNoStabilizing(t, fmt.Sprintf("%s NoScaling %v: dual Dare", tc.name, ns), res, err)
 		}
 	}
 }

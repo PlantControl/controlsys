@@ -67,10 +67,13 @@ var dareRotatedRefinedNotConvergedCases = []dareRotatedInputsCase{
 // exact at Accuracy 0 (the base code held 8499 and 9223 NoScaling false
 // at Accuracy 1, K 1.5e-6 and 3e-5 off). On amd64 no row changes, and
 // some Accuracy-1 K must improve on the pencil K. The race build rounds
-// differently (O4VSO2) and demoted none through refinement.
+// differently (O4VSO2) and demoted none through refinement. Under gonum
+// 30740af (HF5PTS) 8499 NoScaling true natively is Accuracy 0 with K
+// 1.05e-13 off, inside its band, and on amd64 no Accuracy-1 K improves on
+// the pencil K (4667 amd64 generator 0.0023 -> 0.41): both held to the
+// band only (owner 2ARMRV).
 func TestDareRotatedInputsRefinedGainCertifiedHewerOrDemoted(t *testing.T) {
-	exact := map[string][]bool{"rv49v 8499": {true}, "rv49v 9223 amd64 generator": {false, true}}
-	improved := 0
+	exact := map[string][]bool{"rv49v 9223 amd64 generator": {false, true}}
 	for _, c := range dareRotatedRefinedNotConvergedCases {
 		ref := riccatiExactReference(false, c.A, c.B, c.Q, c.R, c.S, c.E, riccatiExactPrec)
 		if !ref.OK {
@@ -98,9 +101,6 @@ func TestDareRotatedInputsRefinedGainCertifiedHewerOrDemoted(t *testing.T) {
 			if res.Accuracy == 1 && eK > 2*eP {
 				t.Errorf("%s NoScaling %v: Accuracy-1 K %.3g off, the pencil K %.3g", c.name, ns, eK, eP)
 			}
-			if res.Accuracy == 1 && eK < eP/10 {
-				improved++
-			}
 			if !raceEnabled && runtime.GOARCH == "arm64" && slices.Contains(exact[c.name], ns) && (res.Accuracy != 0 || eK > 7e-16) {
 				t.Errorf("%s NoScaling %v: Accuracy %d, K err %g; want Accuracy 0, K exact", c.name, ns, res.Accuracy, eK)
 			}
@@ -111,9 +111,6 @@ func TestDareRotatedInputsRefinedGainCertifiedHewerOrDemoted(t *testing.T) {
 				t.Errorf("%s NoScaling %v: E⁻¹(A − BK) unstable in %d bits", c.name, ns, riccatiExactPrec)
 			}
 		}
-	}
-	if improved == 0 && !raceEnabled && runtime.GOARCH == "amd64" {
-		t.Error("no Accuracy-1 K improved on the pencil K")
 	}
 }
 

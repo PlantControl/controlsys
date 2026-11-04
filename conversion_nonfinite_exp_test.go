@@ -7,7 +7,6 @@ import (
 	gotoken "go/token"
 	"io/fs"
 	"math"
-	"math/rand/v2"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -103,12 +102,23 @@ func TestD2CNonFiniteResultReturnsErrOverflow(t *testing.T) {
 	}
 }
 
-// On amd64 these reach the exit with NaN B, D and G; natively their reconstruction
-// fails as singular first. Neither may return a non-finite model with nil error.
+// The stiff pencil is the amd64 gonum v0.20.10 C2D(0.1) of a stiff rotated
+// descriptor, as literals (YTK4JK): its exponential has relative condition
+// ~1e20, so C2D at test time is not a fixed input. FOH reaches the exit with
+// NaN B; neither may return a non-finite model with nil error.
 func TestD2CReconstructionResultFiniteOrError(t *testing.T) {
-	rng := rand.New(rand.NewPCG(2, 777))
-	plant := stiffRotatedDescriptor(t, rng, []float64{-1, 1e10, 1, 0, -2, 1, 0, 0, -1}, []float64{1, 1, 1e-13}, []float64{1, 1.3, 1.6}, []float64{1, .8, .6})
-	pencil, err := plant.C2D(0.1, C2DOptions{})
+	bits := func(r, c int, v ...uint64) *mat.Dense {
+		d := make([]float64, len(v))
+		for i, b := range v {
+			d[i] = math.Float64frombits(b)
+		}
+		return mat.NewDense(r, c, d)
+	}
+	pencil, err := New(
+		bits(3, 3, 0xf997814a00e205e1, 0x79996f94efc357e4, 0x76f9109ce7d96e65, 0xf995b88596b3b120, 0x7997814b0f5e08c2, 0x76f7298888d6fffb, 0xf9859979e95f4cf5, 0x79875fb28490a001, 0x76e7086d6d85c94c),
+		bits(3, 1, 0x78f5ecda8d349754, 0x78f442c96c8a8390, 0x78e425d3ed8ef496),
+		bits(1, 3, 0xbfc4f96a15e66a0c, 0x3ff401ae986154b3, 0x3ff0bf3080fffe0b),
+		mat.NewDense(1, 1, []float64{0.3}), 0.1)
 	if err != nil {
 		t.Fatal(err)
 	}
