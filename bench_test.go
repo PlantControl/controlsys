@@ -242,16 +242,23 @@ func BenchmarkDiscretizeZOH(b *testing.B) {
 	}
 }
 
+var denseNormSink float64
+
 func BenchmarkDenseNorm(b *testing.B) {
-	m := mat.NewDense(50, 50, nil)
-	for i := range 50 {
-		for j := range 50 {
-			m.Set(i, j, float64(i*50+j)*0.01)
+	for _, n := range []int{2, 10, 50} {
+		m := mat.NewDense(n, n, nil)
+		for i := range n {
+			for j := range n {
+				m.Set(i, j, float64(i*n+j)*0.01)
+			}
 		}
-	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		denseNorm(m)
+		b.Run(fmt.Sprintf("N%d", n), func(b *testing.B) {
+			s := 0.0
+			for b.Loop() {
+				s += denseNorm(m)
+			}
+			denseNormSink = s
+		})
 	}
 }
 

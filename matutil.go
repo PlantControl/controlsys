@@ -151,7 +151,37 @@ func denseNorm(m *mat.Dense) float64 {
 			sum += v * v
 		}
 	}
-	return math.Sqrt(sum)
+	if sum >= denseNormTiny && sum <= math.MaxFloat64 {
+		return math.Sqrt(sum)
+	}
+	return denseNormScaled(raw)
+}
+
+// denseNormTiny bounds the unscaled sum of squares from below: above it,
+// squares that went subnormal contribute less than eps relative error.
+const denseNormTiny = 0x1p-969
+
+func denseNormScaled(raw blas64.General) float64 {
+	amax := 0.0
+	for i := range raw.Rows {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols] {
+			if math.IsNaN(v) {
+				return v
+			}
+			amax = math.Max(amax, math.Abs(v))
+		}
+	}
+	if amax == 0 || math.IsInf(amax, 0) {
+		return amax
+	}
+	sum := 0.0
+	for i := range raw.Rows {
+		for _, v := range raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols] {
+			s := v / amax
+			sum += s * s
+		}
+	}
+	return amax * math.Sqrt(sum)
 }
 
 func eps() float64 {

@@ -63,7 +63,10 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 
 	P := mat.NewDense(p, p, nil)
 	if n > 0 {
-		Q := inputNoiseIntensity(sys.B, W, n, m)
+		B, eB := pow2Scaled(sys.B)
+		C, eC := pow2Scaled(sys.C)
+		Ws, eW := pow2Scaled(W)
+		Q := inputNoiseIntensity(B, Ws, n, m)
 
 		// symmetrize Q for Lyapunov solver
 		qRaw := Q.RawMatrix()
@@ -86,8 +89,17 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		}
 
 		var CX mat.Dense
-		CX.Mul(sys.C, X)
-		P.Mul(&CX, sys.C.T())
+		CX.Mul(C, X)
+		P.Mul(&CX, C.T())
+		if e := 2*eB + eW + 2*eC; e != 0 {
+			pRaw := P.RawMatrix()
+			for i := range p {
+				row := pRaw.Data[i*pRaw.Stride : i*pRaw.Stride+p]
+				for j, v := range row {
+					row[j] = math.Ldexp(v, e)
+				}
+			}
+		}
 	}
 
 	var DW, DWDt mat.Dense
