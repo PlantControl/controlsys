@@ -88,7 +88,9 @@ func (sys *System) IsDiscrete() bool { return newTimeDomain(sys.Dt).isDiscrete()
 // Validate checks that the matrices, sample time, descriptor E, delays,
 // internal-delay blocks and signal names of sys are mutually consistent. A
 // nil sys returns ErrInvalidArgument; a non-nil InputName, OutputName or
-// StateName must have length m, p or n (ErrDimensionMismatch).
+// StateName must have length m, p or n (ErrDimensionMismatch). A nil or empty
+// A, B, C or D whose block is not empty returns ErrDimensionMismatch: unlike
+// New, which fills a missing matrix with zeros, a struct literal must set it.
 func (sys *System) Validate() error {
 	if err := sys.validate(); err != nil {
 		return fmt.Errorf("Validate: %w", err)
@@ -102,6 +104,9 @@ func (sys *System) validate() error {
 	}
 	n, m, p, err := validateDims(sys.A, sys.B, sys.C, sys.D, sys.Dt)
 	if err != nil {
+		return err
+	}
+	if err := requirePresentMatrices(sys, n, m, p); err != nil {
 		return err
 	}
 	for _, nm := range []struct {
@@ -177,6 +182,23 @@ func withZeroIOPadding(context string, sys *System, op func(*System) (*System, e
 func storableStaticGain(context string, p, m int) error {
 	if (p == 0) != (m == 0) {
 		return fmt.Errorf("%s: %dx%d static gain cannot be stored: %w", context, p, m, ErrDimensionMismatch)
+	}
+	return nil
+}
+
+// requirePresentMatrices rejects a nil or empty A, B, C or D whose block is
+// not empty in an n-state, m-input, p-output model. validateDims treats such
+// a matrix as absent so New can fill it with zeros; a struct literal skips
+// that step, and the analysis routines index every non-empty block.
+func requirePresentMatrices(sys *System, n, m, p int) error {
+	for _, blk := range []struct {
+		name       string
+		mat        *mat.Dense
+		rows, cols int
+	}{{"A", sys.A, n, n}, {"B", sys.B, n, m}, {"C", sys.C, p, n}, {"D", sys.D, p, m}} {
+		if blk.rows > 0 && blk.cols > 0 && nonEmptyDense(blk.mat) == nil {
+			return fmt.Errorf("%s is nil or empty, want %d×%d (New fills a missing matrix with zeros): %w", blk.name, blk.rows, blk.cols, ErrDimensionMismatch)
+		}
 	}
 	return nil
 }
@@ -373,16 +395,16 @@ func newNoCopy(A, B, C, D *mat.Dense, dt float64) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	if A == nil {
+	if nonEmptyDense(A) == nil {
 		A = newDense(n, n)
 	}
-	if B == nil {
+	if nonEmptyDense(B) == nil {
 		B = newDense(n, m)
 	}
-	if C == nil {
+	if nonEmptyDense(C) == nil {
 		C = newDense(p, n)
 	}
-	if D == nil {
+	if nonEmptyDense(D) == nil {
 		D = newDense(p, m)
 	}
 	return &System{A: A, B: B, C: C, D: D, Dt: dt}, nil
