@@ -69,6 +69,7 @@ func (sys *System) d2cZOHRobust() (*System, error) {
 				bcr.Data[i*bcr.Stride+j] = lr.Data[i*lr.Stride+n+j] / sys.Dt
 			}
 		}
+		exactLogIntegrators(sys.A, sys.B, sys.Dt, a, b)
 		out = &System{A: a, B: b, C: denseCopy(sys.C), D: denseCopy(sys.D)}
 		propagateNames(out, sys)
 	}
@@ -188,6 +189,7 @@ func (sys *System) d2cFOH() (*System, error) {
 	}
 	ac := mat.NewDense(n, n, nil)
 	ac.Scale(1/sys.Dt, logarithm)
+	exactLogIntegrators(sys.A, sys.B, sys.Dt, ac, nil)
 	out := &System{A: ac, B: denseCopy(sys.B), C: denseCopy(sys.C), D: denseCopy(sys.D)}
 	if m > 0 {
 		ad, k0, k1 := fohKernel(ac, sys.Dt)
@@ -200,6 +202,7 @@ func (sys *System) d2cFOH() (*System, error) {
 		if err := lu.SolveTo(out.B, false, sys.B); err != nil {
 			return nil, fmt.Errorf("foh: input reconstruction is singular: %w", ErrSingularTransform)
 		}
+		exactLogIntegrators(sys.A, sys.B, sys.Dt, ac, out.B)
 		if p > 0 {
 			var gamma1, feedthrough mat.Dense
 			gamma1.Mul(k1, out.B)
@@ -233,7 +236,17 @@ func fohInputIntegrals(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Den
 	return fohAugmented(a, b, dt)
 }
 
+// fohAugmented returns e^{a·dt}, Γ₀ and Γ₁ from one exponential of
+// [a b 0; 0 0 I/dt; 0 0 0]·dt, in the integratorOrder of a.
 func fohAugmented(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Dense) {
+	ad, gammas := integratorHold(a, b, dt, func(a, b *mat.Dense) (*mat.Dense, []*mat.Dense) {
+		ad, g0, g1 := fohAugmentedExp(a, b, dt)
+		return ad, []*mat.Dense{g0, g1}
+	})
+	return ad, gammas[0], gammas[1]
+}
+
+func fohAugmentedExp(a, b *mat.Dense, dt float64) (ad, gamma0, gamma1 *mat.Dense) {
 	n, _ := a.Dims()
 	_, m := b.Dims()
 	q := n + 2*m
@@ -304,6 +317,7 @@ func (sys *System) d2cZOHFast() (*System, error) {
 			return nil, ErrSingularTransform
 		}
 	}
+	exactLogIntegrators(sys.A, sys.B, sys.Dt, logarithm, bc)
 	out := &System{A: logarithm, B: bc, C: denseCopy(sys.C), D: denseCopy(sys.D)}
 	propagateNames(out, sys)
 	d2cPropagateDelays(out, sys, sys.Dt)

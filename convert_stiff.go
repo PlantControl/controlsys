@@ -35,7 +35,13 @@ func stiffModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf) (ad *mat.Dense, 
 	if n == 0 || !(mat.Norm(a, 1)*dt*qzLargeRatio >= 1) {
 		return nil, nil, false
 	}
-	return splitModalHold(a, b, dt, leaf, true)
+	ad, gammas, ok = splitModalHold(a, b, dt, leaf, true)
+	if ok {
+		if o, found := newIntegratorOrder(a, 0); found {
+			o.exactHold(b, dt, ad, gammas)
+		}
+	}
+	return ad, gammas, ok
 }
 
 func splitModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf, root bool) (*mat.Dense, []*mat.Dense, bool) {
@@ -186,7 +192,15 @@ func realSchur(a *mat.Dense) (t, z []float64, ok bool) {
 	return t, z, ok
 }
 
+// expmScaled returns e^{a·dt}, in the integratorOrder of a.
 func expmScaled(a *mat.Dense, dt float64) *mat.Dense {
+	ad, _ := integratorHold(a, nil, dt, func(a, _ *mat.Dense) (*mat.Dense, []*mat.Dense) {
+		return expmScaledExp(a, dt), nil
+	})
+	return ad
+}
+
+func expmScaledExp(a *mat.Dense, dt float64) *mat.Dense {
 	n, _ := a.Dims()
 	scaled := mat.NewDense(n, n, nil)
 	scaled.Scale(dt, a)
