@@ -1229,7 +1229,12 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // gainOfX returns res once its K is the gain of its X to the tolerance of
 // gainMissIn with the floor gainTol, else res refined (refined) once its
 // K is; failing both, the same with the floor gainFloor, as Dare kept
-// before. ok is false when none is, miss then the distance of res in
+// before, except that such an unrefined K of the given inputs (red nil)
+// takes the Hewer gain of its X (hewerGainSubstituted, X kept), else ok
+// is false, r res (Accuracy 1): float64 Newton moved that K about 1e-6
+// per step with X 1e-12 off, so refinement never met gainTol, and the
+// pencil K was 1.04e-6 to 1.46e-6 off the 320-bit gain at Accuracy 0,
+// the Hewer gain exact. ok is false when none is, miss then the distance of res in
 // units of the tolerance with gainFloor. A K of the given inputs whose X
 // resolves its gain only beyond gainFloor (gainMissOf's tolerance) is
 // first replaced by that of X refined in double-double (ddNewtonGain),
@@ -1385,7 +1390,13 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		}
 	}
 	if d.units(gainFloor) <= 1 {
-		return res, 0, true
+		if red != nil {
+			return res, 0, true
+		}
+		if h, ok := hewerGainSubstituted(A, B, Q, R, opts, nil, res); ok {
+			return h, 0, true
+		}
+		return res, d.units(gainFloor), false
 	}
 	if stable && cd.units(gainFloor) <= 1 {
 		if rot {
@@ -1916,7 +1927,8 @@ func rLost(B, R, X *mat.Dense) bool {
 // floor of 1e-6 kept a cheap-control K off by 2.8e-7, 500 times its move
 // per ulp of X, at Accuracy 0, while the gain of X one Newton step on
 // was exact. That floor, gainFloor, remains the fallback once neither K
-// nor that of X one step on meets gainTol (gainOfX), and bounds what the
+// nor that of X one step on meets gainTol (gainOfX; an unrefined K of the
+// given inputs so accepted takes the Hewer gain), and bounds what the
 // Newton iterate of X adds to the tolerance (gainMissOf): with a
 // closed-loop pole at 1 − 3e-7, K off by 2.3e-7 was within a tenth of its
 // eps-sensitivity, which no perturbation of X shows (its move per ulp of
