@@ -83,7 +83,8 @@ func (p descriptorPolicy) requireStandard(context string) error {
 var normDescriptorCondLimit = 1 / math.Sqrt(eps())
 
 // normExplicitForm returns sys with a nonsingular E folded in, (E⁻¹A, E⁻¹B,
-// C, D), which keeps the transfer function and the poles. Singular E and E
+// C, D), which keeps the transfer function and the poles; an E⁻¹B that
+// overflows is balanced against C by balancedExplicitForm. Singular E and E
 // with condition above normDescriptorCondLimit return ErrDescriptorUnsupported
 // wrapping ErrDescriptorSingular.
 func normExplicitForm(sys *System, context string) (*System, error) {
@@ -102,6 +103,37 @@ func normExplicitForm(sys *System, context string) (*System, error) {
 	out, err := sys.ToExplicit()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
+	}
+	if finiteDense(context, "E⁻¹B", out.B, ErrOverflow) == nil {
+		return out, nil
+	}
+	return balancedExplicitForm(sys, context)
+}
+
+// balancedExplicitForm returns (E⁻¹A, E⁻¹B·2ˢ, C·2⁻ˢ, D) for an E⁻¹B that
+// overflows unscaled; the power-of-two state scaling keeps the transfer
+// function exactly and balances the exponents of the input and output maps.
+func balancedExplicitForm(sys *System, context string) (*System, error) {
+	if sys.LFT != nil {
+		return nil, fmt.Errorf("%s: E⁻¹B overflows: %w", context, ErrOverflow)
+	}
+	B, eB := pow2Scaled(sys.B)
+	scaled := *sys
+	scaled.B = B
+	out, err := scaled.ToExplicit()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
+	}
+	_, eY := math.Frexp(maxAbsDense(out.B))
+	_, eC := math.Frexp(maxAbsDense(out.C))
+	s := (eC + eB - eY) / 2
+	out.B.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, s) }, out.B)
+	out.C.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, eB-s) }, out.C)
+	if err := finiteDense(context, "E⁻¹B", out.B, ErrOverflow); err != nil {
+		return nil, err
+	}
+	if err := finiteDense(context, "C", out.C, ErrOverflow); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
