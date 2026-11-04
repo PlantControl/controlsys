@@ -74,7 +74,8 @@ func TestDare_BoundaryModeUnobservableToCost(t *testing.T) {
 // with B[0] = 1e-15 the z = −1 mode is observable to the cost, the
 // stabilizing solution exists with its closed loop 3e-15 inside the unit
 // circle, within the rounding band that runs the boundary test, and Dare
-// keeps the certified solution: K matches the 320-bit reference.
+// keeps the solution: K matches the 320-bit reference. X is certified on
+// K alone with its EᵀXE step beyond newtonTol, so Accuracy 1 (D5PKRG).
 func TestDare_WeaklyObservableBoundaryModeKeepsSolution(t *testing.T) {
 	At, Ct, Q, Et := dualDare(boundaryUnreachablePlant(1e-15))
 	R := eyeDense(1)
@@ -88,8 +89,8 @@ func TestDare_WeaklyObservableBoundaryModeKeepsSolution(t *testing.T) {
 			t.Errorf("NoScaling %v: %v", ns, err)
 			continue
 		}
-		if res.Accuracy != 0 {
-			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
+		if res.Accuracy != 1 {
+			t.Errorf("NoScaling %v: Accuracy %d, want 1", ns, res.Accuracy)
 		}
 		if e := relErr(res.K, ref.K); e > 1e-12 {
 			t.Errorf("NoScaling %v: K off the 320-bit gain by %.3g", ns, e)
@@ -141,8 +142,8 @@ func TestKalman_BoundaryModeUnreachableWithCorrelatedNoise(t *testing.T) {
 
 // TestDare_WeaklyObservableBoundaryModeWithCrossTermKeepsSolution (DBOVA4
 // control): with B[0] = 1e-15 and noise feedthrough H = 0.5 the cost and
-// cross term reach the z = −1 mode, and Dare keeps the certified solution
-// of the 320-bit reference. (Nn = 0.3 errs here on base too: the closed
+// cross term reach the z = −1 mode, and Dare keeps the solution of the
+// 320-bit reference, at Accuracy 1 as without the cross term. (Nn = 0.3 errs here on base too: the closed
 // loop sits within rounding of the boundary; so does D = 0.5 under -race.)
 func TestDare_WeaklyObservableBoundaryModeWithCrossTermKeepsSolution(t *testing.T) {
 	A, B, C, E := boundaryUnreachablePlant(1e-15)
@@ -163,8 +164,8 @@ func TestDare_WeaklyObservableBoundaryModeWithCrossTermKeepsSolution(t *testing.
 				t.Errorf("%s NoScaling %v: %v", tc.name, ns, err)
 				continue
 			}
-			if res.Accuracy != 0 {
-				t.Errorf("%s NoScaling %v: Accuracy %d, want 0", tc.name, ns, res.Accuracy)
+			if res.Accuracy != 1 {
+				t.Errorf("%s NoScaling %v: Accuracy %d, want 1", tc.name, ns, res.Accuracy)
 			}
 			if e := relErr(res.K, ref.K); e > 1e-12 {
 				t.Errorf("%s NoScaling %v: K off the 320-bit gain by %.3g", tc.name, ns, e)

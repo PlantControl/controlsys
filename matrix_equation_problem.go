@@ -57,7 +57,9 @@ type riccatiProblem struct {
 	// newtonRefineTol: the iteration met it at its noise floor.
 	xeLoose bool
 	// gainUncertified reports a continuous descriptor K whose refinement
-	// failed while the Newton step of X moves it beyond newtonTol.
+	// failed while the Newton step of X moves it beyond newtonTol, or a
+	// discrete X certified on its K alone whose EᵀXE step exceeds
+	// newtonTol.
 	gainUncertified bool
 }
 
