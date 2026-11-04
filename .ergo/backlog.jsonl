@@ -134,3 +134,5 @@
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"L4BCTU"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"unclaim","ts":"2026-11-04T10:19:54.681372Z","data":{"id":"HF5PTS","ts":"2026-11-04T10:19:54.681372Z"}},{"type":"state","ts":"2026-11-04T10:19:54.681372Z","data":{"id":"HF5PTS","state":"todo","ts":"2026-11-04T10:19:54.681372Z"}}]}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-04T10:19:54.711648Z","data":{"id":"HF5PTS","agent_id":"coordinator@hf5pts-bump","ts":"2026-11-04T10:19:54.711648Z"}},{"type":"state","ts":"2026-11-04T10:19:54.711648Z","data":{"id":"HF5PTS","state":"doing","ts":"2026-11-04T10:19:54.711648Z"}}]}
