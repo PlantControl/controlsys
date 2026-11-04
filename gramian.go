@@ -42,8 +42,9 @@ const (
 // An unknown type returns ErrInvalidArgument, an unstable model
 // ErrUnstableGramian and a model without states ErrDimensionMismatch. Like
 // MATLAB gram, models with internal delays (either domain) return
-// ErrInternalDelayUnsupported; absorb or approximate the delays first. An Inf
-// or NaN gramian entry returns ErrOverflow.
+// ErrInternalDelayUnsupported; absorb or approximate the delays first. A
+// gramian (or factor) entry beyond float64 range returns ErrOverflow; the
+// factor types can succeed where the gramian itself overflows.
 // See https://www.mathworks.com/help/control/ref/statespacemodel.gram.html.
 func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 	if err := requireSystem("Gram", sys); err != nil {
@@ -74,20 +75,24 @@ func Gram(sys *System, typ GramType) (*mat.Dense, error) {
 	if err := policy.requireStable(ErrUnstableGramian); err != nil {
 		return nil, fmt.Errorf("Gram: %w", err)
 	}
-	Aarg, Q, err := policy.gramianInputs(base)
-	if err != nil {
-		return nil, fmt.Errorf("Gram: %w", err)
-	}
-	X, err := policy.solveLyapunov(Aarg, Q)
+	X, e, err := policy.scaledGramian(base)
 	if err != nil {
 		return nil, fmt.Errorf("Gram: %w", err)
 	}
 	if typ == base {
+		ldexpDense(X, 2*e)
+		if err := finiteDense("Gram", "gramian", X, ErrOverflow); err != nil {
+			return nil, err
+		}
 		return X, nil
 	}
 	R, err := gramFactor(X, n)
 	if err != nil {
 		return nil, fmt.Errorf("Gram: %w", err)
+	}
+	ldexpDense(R, e)
+	if err := finiteDense("Gram", "factor", R, ErrOverflow); err != nil {
+		return nil, err
 	}
 	return R, nil
 }

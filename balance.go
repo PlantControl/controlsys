@@ -56,7 +56,8 @@ type BalrealResult struct {
 // Unlike MATLAB, which balances the stable part and reports Inf for unstable
 // modes, an unstable model returns ErrUnstable; a non-minimal one returns
 // ErrNotMinimal. A model with no states returns ErrDimensionMismatch, since
-// TL and TR cannot be formed.
+// TL and TR cannot be formed. A result entry beyond float64 range returns
+// ErrOverflow.
 func Balreal(sys *System) (*BalrealResult, error) {
 	if err := requireFiniteSystem("Balreal", sys); err != nil {
 		return nil, err
@@ -87,6 +88,10 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	aRaw := sys.A.RawMatrix()
 	bRaw := sys.B.RawMatrix()
 	cRaw := sys.C.RawMatrix()
+	bScaled, eB := pow2Scaled(sys.B)
+	cScaled, eC := pow2Scaled(sys.C)
+	bsRaw := bScaled.RawMatrix()
+	csRaw := cScaled.RawMatrix()
 
 	bufSize := 14*n*n + n*m + p*n + n
 	ws := make([]float64, bufSize)
@@ -109,15 +114,15 @@ func Balreal(sys *System) (*BalrealResult, error) {
 
 	bbt := alloc(n * n)
 	blas64.Gemm(blas.NoTrans, blas.Trans, 1,
-		blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
-		blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
+		blas64.General{Rows: n, Cols: m, Stride: bsRaw.Stride, Data: bsRaw.Data},
+		blas64.General{Rows: n, Cols: m, Stride: bsRaw.Stride, Data: bsRaw.Data},
 		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: bbt})
 	symmetrize(bbt, n, n)
 
 	ctc := alloc(n * n)
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1,
-		blas64.General{Rows: p, Cols: n, Stride: cRaw.Stride, Data: cRaw.Data},
-		blas64.General{Rows: p, Cols: n, Stride: cRaw.Stride, Data: cRaw.Data},
+		blas64.General{Rows: p, Cols: n, Stride: csRaw.Stride, Data: csRaw.Data},
+		blas64.General{Rows: p, Cols: n, Stride: csRaw.Stride, Data: csRaw.Data},
 		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: ctc})
 	symmetrize(ctc, n, n)
 
@@ -183,6 +188,9 @@ func Balreal(sys *System) (*BalrealResult, error) {
 		uData, n, vtData, n, svdWork, len(svdWork)) {
 		return nil, fmt.Errorf("Balreal: SVD of gramian factors did not converge: %w", ErrSchurFailed)
 	}
+	if !ldexpFinite(lc, eB) || !ldexpFinite(lo, eC) || !ldexpFinite(s, eB+eC) {
+		return nil, fmt.Errorf("Balreal: gramian factors exceed float64 range: %w", ErrOverflow)
+	}
 
 	// V = Vt' — scale columns of Vt' by 1/sqrt(σ) → vScaled
 	// T = Lc * vScaled
@@ -244,6 +252,14 @@ func Balreal(sys *System) (*BalrealResult, error) {
 	Bb := mat.NewDense(n, m, bbData)
 	Cb := mat.NewDense(p, n, cbData)
 	Db := denseCopy(sys.D)
+	for _, out := range []struct {
+		name string
+		m    *mat.Dense
+	}{{"A", Ab}, {"B", Bb}, {"C", Cb}, {"TL", Tinv}, {"TR", T}} {
+		if err := finiteDense("Balreal", out.name, out.m, ErrOverflow); err != nil {
+			return nil, err
+		}
+	}
 
 	balSys, err := policy.result(Ab, Bb, Cb, Db)
 	if err != nil {

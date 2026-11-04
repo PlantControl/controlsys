@@ -100,14 +100,15 @@ func TestGramNonFiniteResultReturnsErrOverflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, typ := range []GramType{GramControllability, GramControllabilityFactor} {
-		W, err := Gram(sys, typ)
-		if !errors.Is(err, ErrOverflow) {
-			t.Fatalf("type %d: W=%v err=%v, want ErrOverflow", typ, W, err)
-		}
-		if W != nil {
-			t.Errorf("type %d: W=%v with error, want nil", typ, W)
-		}
+	if W, err := Gram(sys, GramControllability); !errors.Is(err, ErrOverflow) || W != nil {
+		t.Fatalf("W=%v err=%v, want nil and ErrOverflow", W, err)
+	}
+	sys, err = New(mat.NewDense(2, 2, lyapOscA), scaledIdentity2(1e308), mat.NewDense(1, 2, []float64{1e300, 2e300}), mat.NewDense(1, 2, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if R, err := Gram(sys, GramControllabilityFactor); !errors.Is(err, ErrOverflow) || R != nil {
+		t.Fatalf("R=%v err=%v, want nil and ErrOverflow", R, err)
 	}
 	for name, f := range map[string]func() error{
 		"HSV":     func() error { _, err := HSV(sys); return err },

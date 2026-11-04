@@ -100,16 +100,7 @@ func H2Norm(sys *System) (float64, error) {
 	}
 
 	B, eB := pow2Scaled(sys.B)
-	C, eC := pow2Scaled(sys.C)
-	scaled := *sys
-	scaled.B, scaled.C = B, C
-	policy = newEnergyAnalysisPolicy(&scaled)
-
-	At, Q, err := policy.gramianInputs(GramObservability)
-	if err != nil {
-		return 0, err
-	}
-	X, err := policy.solveLyapunov(At, Q)
+	X, eC, err := policy.scaledGramian(GramObservability)
 	if err != nil {
 		return 0, err
 	}
@@ -165,7 +156,8 @@ func pow2Scaled(M *mat.Dense) (*mat.Dense, int) {
 //
 // Discrete internal delays are absorbed exactly, so the result has one value
 // per original state plus one per delay sample. Continuous internal-delay
-// models return ErrContinuousInternalDelay.
+// models return ErrContinuousInternalDelay. A value beyond float64 range
+// returns ErrOverflow.
 func HSV(sys *System) ([]float64, error) {
 	if err := requireSystem("HSV", sys); err != nil {
 		return nil, err
@@ -187,33 +179,36 @@ func HSV(sys *System) ([]float64, error) {
 		return nil, err
 	}
 
-	A, Qc, err := policy.gramianInputs(GramControllability)
+	Wc, eB, err := policy.scaledGramian(GramControllability)
 	if err != nil {
 		return nil, err
 	}
-	Wc, err := policy.solveLyapunov(A, Qc)
-	if err != nil {
-		return nil, err
-	}
-	At, Qo, err := policy.gramianInputs(GramObservability)
-	if err != nil {
-		return nil, err
-	}
-	Wo, err := policy.solveLyapunov(At, Qo)
+	Wo, eC, err := policy.scaledGramian(GramObservability)
 	if err != nil {
 		return nil, err
 	}
 
-	return hsvFromGramians(Wc, Wo, n)
+	hsv, err := hsvFromGramians(Wc, Wo, n, eB+eC)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range hsv {
+		if !isFinite(s) {
+			return nil, fmt.Errorf("HSV: Hankel singular value exceeds float64 range: %w", ErrOverflow)
+		}
+	}
+	return hsv, nil
 }
 
-func hsvFromGramians(Wc, Wo *mat.Dense, n int) ([]float64, error) {
+// hsvFromGramians returns the Hankel singular values of gramians Wc·4ᵉᴮ and
+// Wo·4ᵉᶜ, given Wc, Wo and e = eB+eC.
+func hsvFromGramians(Wc, Wo *mat.Dense, n, e int) ([]float64, error) {
 	wcRaw := Wc.RawMatrix()
 	lc := make([]float64, n*n)
 	copyStrided(lc, n, wcRaw.Data, wcRaw.Stride, n, n)
 
 	if !impl.Dpotrf(blas.Lower, n, lc, n) {
-		return eigenvalueHSV(Wc, Wo, n)
+		return eigenvalueHSV(Wc, Wo, n, e)
 	}
 	for i := range n {
 		for j := i + 1; j < n; j++ {
@@ -226,7 +221,7 @@ func hsvFromGramians(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 	copyStrided(lo, n, woRaw.Data, woRaw.Stride, n, n)
 
 	if !impl.Dpotrf(blas.Lower, n, lo, n) {
-		return eigenvalueHSV(Wc, Wo, n)
+		return eigenvalueHSV(Wc, Wo, n, e)
 	}
 	for i := range n {
 		for j := i + 1; j < n; j++ {
@@ -247,10 +242,11 @@ func hsvFromGramians(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 	if !impl.Dgesvd(lapack.SVDNone, lapack.SVDNone, n, n, mData, n, s, nil, 1, nil, 1, work, len(work)) {
 		return nil, fmt.Errorf("HSV: singular value iteration did not converge: %w", ErrSchurFailed)
 	}
+	ldexpFinite(s, e)
 	return s, nil
 }
 
-func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
+func eigenvalueHSV(Wc, Wo *mat.Dense, n, e int) ([]float64, error) {
 	wcRaw := Wc.RawMatrix()
 	woRaw := Wo.RawMatrix()
 	prod := make([]float64, n*n)
@@ -258,6 +254,12 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 		blas64.General{Rows: n, Cols: n, Stride: wcRaw.Stride, Data: wcRaw.Data},
 		blas64.General{Rows: n, Cols: n, Stride: woRaw.Stride, Data: woRaw.Data},
 		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: prod})
+	// The QR iteration deflates against absolute thresholds, so it is not
+	// exactly scale-invariant: undo the scaling whenever it is representable.
+	unscaled := slices.Clone(prod)
+	if ldexpFinite(unscaled, 2*e) {
+		prod, e = unscaled, 0
+	}
 
 	var eig mat.Eigen
 	ok := eig.Factorize(mat.NewDense(n, n, prod), mat.EigenNone)
@@ -271,7 +273,7 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n int) ([]float64, error) {
 		if r < 0 {
 			r = 0
 		}
-		hsv[i] = math.Sqrt(r)
+		hsv[i] = math.Ldexp(math.Sqrt(r), e)
 	}
 	sort.Sort(sort.Reverse(sort.Float64Slice(hsv)))
 	return hsv, nil
