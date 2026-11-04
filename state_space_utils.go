@@ -212,11 +212,11 @@ func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string)
 		N := len(sys.LFT.Tau)
 		result.LFT = &LFTDelay{
 			Tau: append([]float64(nil), sys.LFT.Tau...),
-			B2:  copyDelayOrNil(sys.LFT.B2),
-			C2:  copyDelayOrNil(sys.LFT.C2),
-			D12: copyDelayOrNil(sys.LFT.D12),
+			B2:  denseCopy(sys.LFT.B2),
+			C2:  denseCopy(sys.LFT.C2),
+			D12: denseCopy(sys.LFT.D12),
 			D21: selectColumnsWithOffset(sys.LFT.D21, N, keep, fixed),
-			D22: copyDelayOrNil(sys.LFT.D22),
+			D22: denseCopy(sys.LFT.D22),
 		}
 	}
 	if sys.InputName != nil || offsetName != "" {
@@ -288,14 +288,17 @@ func (sys *System) AugmentInternalDelayOutputs(prefix string) (*System, error) {
 	}
 	n, m, p := sys.Dims()
 	N := len(sys.LFT.Tau)
-	C := mat.NewDense(p+N, n, nil)
-	D := mat.NewDense(p+N, m, nil)
+	if n == 0 && m == 0 {
+		return nil, fmt.Errorf("AugmentInternalDelayOutputs: static model without inputs cannot represent %d outputs: %w", p+N, ErrDimensionMismatch)
+	}
+	C := newDense(p+N, n)
+	D := newDense(p+N, m)
 	setBlock(C, 0, 0, sys.C)
 	setBlock(D, 0, 0, sys.D)
 	setBlock(C, p, 0, sys.LFT.C2)
 	setBlock(D, p, 0, sys.LFT.D21)
 
-	D12 := mat.NewDense(p+N, N, nil)
+	D12 := newDense(p+N, N)
 	setBlock(D12, 0, 0, sys.LFT.D12)
 	setBlock(D12, p, 0, sys.LFT.D22)
 

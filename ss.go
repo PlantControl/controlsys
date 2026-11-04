@@ -501,11 +501,11 @@ func (sys *System) Copy() *System {
 	if sys.LFT != nil {
 		cp.LFT = &LFTDelay{
 			Tau: append([]float64(nil), sys.LFT.Tau...),
-			B2:  copyDelayOrNil(sys.LFT.B2),
-			C2:  copyDelayOrNil(sys.LFT.C2),
-			D12: copyDelayOrNil(sys.LFT.D12),
-			D21: copyDelayOrNil(sys.LFT.D21),
-			D22: copyDelayOrNil(sys.LFT.D22),
+			B2:  denseCopy(sys.LFT.B2),
+			C2:  denseCopy(sys.LFT.C2),
+			D12: denseCopy(sys.LFT.D12),
+			D21: denseCopy(sys.LFT.D21),
+			D22: denseCopy(sys.LFT.D22),
 		}
 	}
 	cp.InputName = copyStringSlice(sys.InputName)

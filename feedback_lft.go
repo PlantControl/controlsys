@@ -57,7 +57,7 @@ func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
 	}
 
 	// Rows of M map [x1; x2; r; w1; w2] to [x1'; x2'; y; z1; z2].
-	M := mat.NewDense(rows, cols, nil)
+	M := newDense(rows, cols)
 	put(M, 0, 0, pH.A, 0, 0, n1, n1)
 	put(M, 0, w1Off, pH.B, 0, m1, n1, Np)
 	put(M, z1Off, 0, pH.C, p1, 0, Np, n1)
@@ -67,22 +67,23 @@ func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
 	put(M, z2Off, n1, cH.C, m1, 0, Nc, n2)
 	put(M, z2Off, w2Off, cH.D, m1, p1, Nc, Nc)
 
-	Y := mat.NewDense(p1, cols, nil)
+	Y := newDense(p1, cols)
 	put(Y, 0, 0, pH.C, 0, 0, p1, n1)
 	put(Y, 0, w1Off, pH.D, 0, m1, p1, Np)
 
-	G := mat.NewDense(m1, cols, nil)
-	put(G, 0, n1, cH.C, 0, 0, m1, n2)
-	put(G, 0, w2Off, cH.D, 0, p1, m1, Nc)
-	addMul(G, 0, D2ee, 0, 0, m1, p1, Y)
-	G.Scale(sign, G)
-	for i := range m1 {
-		G.Set(i, rOff+i, G.At(i, rOff+i)+1)
+	U := newDense(m1, cols)
+	if m1 > 0 {
+		G := mat.NewDense(m1, cols, nil)
+		put(G, 0, n1, cH.C, 0, 0, m1, n2)
+		put(G, 0, w2Off, cH.D, 0, p1, m1, Nc)
+		addMul(G, 0, D2ee, 0, 0, m1, p1, Y)
+		G.Scale(sign, G)
+		for i := range m1 {
+			G.Set(i, rOff+i, G.At(i, rOff+i)+1)
+		}
+		U.Mul(E12, G)
+		addMul(Y, 0, D1ee, 0, 0, p1, m1, U)
 	}
-
-	U := mat.NewDense(m1, cols, nil)
-	U.Mul(E12, G)
-	addMul(Y, 0, D1ee, 0, 0, p1, m1, U)
 
 	addMul(M, 0, pH.B, 0, 0, n1, m1, U)
 	addMul(M, z1Off, pH.D, p1, 0, Np, m1, U)
