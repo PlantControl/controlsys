@@ -195,7 +195,8 @@ type RiccatiResult struct {
 	// step exceeds newtonRefineTol (explicitRiccatiSolution: Accuracy 1).
 	xeLoose bool
 	// gainUncertified reports a certified X whose K Care cannot certify
-	// with it (descriptorGainCertified); Care returns it with Accuracy 1.
+	// with it, or a Dare X certified on its K alone whose EᵀXE step fails
+	// (descriptorGainCertified); Care and Dare return it with Accuracy 1.
 	gainUncertified bool
 	// xeCertified reports an xe and K of nearSingularDare certified while
 	// X, at Accuracy 1, is not: explicitRiccatiSolution returns them at
@@ -895,6 +896,11 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // conditioned, a Dare with no stabilizing solution (ErrNoStabilizing, an
 // unstabilizable boundary mode included) is solved the same way and that
 // solution returned only with EᵀXE and K certified (boundaryExtendedDare).
+// A descriptor X certified on its K alone whose EᵀXE step fails
+// (descriptorGainCertified) is returned with Accuracy 1, replaced by that
+// extended solve where its X and K lie no farther than the float64 ones
+// from the extended Hewer iterate of the float64 K
+// (uncertifiedDescriptorDare).
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
@@ -904,9 +910,13 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		res, err = r, nil
 	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, err); ok {
 		res, err = r, nil
+	} else if err == nil && res.Accuracy == 0 && res.gainUncertified {
+		if r, ok := uncertifiedDescriptorDare(A, B, Q, R, opts, res); ok {
+			res = r
+		}
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
-	if err == nil && res.Accuracy == 0 && res.xe != nil && res.xeX > newtonTol {
+	if err == nil && res.Accuracy == 0 && (res.gainUncertified || res.xe != nil && res.xeX > newtonTol) {
 		res.Accuracy = 1
 	}
 	if err == nil {
@@ -3271,7 +3281,12 @@ func explicitUncertified(X, E *mat.Dense) bool {
 // to 1e16, and a continuous K moved 1.35e-8 was 5.7e-9 off the 320-bit
 // gain (E's last pivot 4.4e-14), while one moved 3.8e-8 was 4.8e-8 off. A step of X within newtonTol may leave K off by far
 // more: it is relative to ‖X‖ ~ 1/σ_min(E), and K sees X in E's small
-// directions (Lqr K off by 9.2e-7, X by 1.7e-9).
+// directions (Lqr K off by 9.2e-7, X by 1.7e-9). A discrete X certified
+// so on its K alone is gainUncertified unless the Newton step of its EᵀXE
+// is within newtonTol, as explicitRiccatiSolution requires of Lqr and
+// Dlqr: there a float64 step of X within newtonTol is rounding noise
+// (1-ulp moves of X left it 9e-10 to 1.9e-7 with X 4.3e-8 off the 320-bit
+// solution), and Dare tries nearSingularDare before Accuracy 1.
 func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.Dense, xData, x1 []float64, eig []complex128) bool {
 	problem.xe, problem.xeStep, problem.xeX, problem.xeLoose, problem.gainUncertified = nil, 0, 0, false, false
 	if problem.E == nil {
@@ -3301,7 +3316,11 @@ func (problem *riccatiProblem) descriptorGainCertified(continuous bool, K *mat.D
 		problem.gainUncertified = continuous && move > newtonTol
 		return true
 	}
-	return cK*eps() <= newtonTol && move <= newtonTol
+	if !(cK*eps() <= newtonTol && move <= newtonTol) {
+		return false
+	}
+	problem.gainUncertified = !continuous && !(xeStep <= newtonTol)
+	return true
 }
 
 // dareCancellation returns how far EᵀXE and the discrete gain K of the

@@ -246,8 +246,55 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 // error err: E given, n, m > 0, and each E nonsingular to MATLAB rank and
 // LU condition.
 func extendedDareCond(B *mat.Dense, opts *RiccatiOpts, err error) (float64, bool) {
-	if opts == nil || isIdentityDescriptor(opts.E) ||
-		!errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+	if !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+		return 0, false
+	}
+	return extendedModelCond(B, opts)
+}
+
+// uncertifiedDescriptorDare is nearSingularDare for a descriptor Dare
+// whose float64 X, certified on its K alone, failed the Newton step of
+// EᵀXE (gainUncertified). Its solution replaces res only when its X and
+// K each lie no farther than those of res from the Hewer iterate of res's
+// K, solved in the same extended precision: K is all res certified, and
+// EᵀXE of any rounded X cancels to noise there (X 4.3e-8 off at
+// Accuracy 0 with K exact).
+func uncertifiedDescriptorDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) (*RiccatiResult, bool) {
+	cond, ok := extendedModelCond(B, opts)
+	if !ok || !(cond*eps() > newtonTol) {
+		return nil, false
+	}
+	r, ok := extendedDareSolve(A, B, Q, R, opts, cond)
+	if !ok {
+		return nil, false
+	}
+	prec := extendedPrec(cond)
+	d := extendedDare{A: A, B: B, Q: Q, R: R, S: opts.S, E: opts.E}
+	sol, ok := d.model(prec, nil)
+	if !ok {
+		return nil, false
+	}
+	y, ok := sol.hewer(xFrom(res.K, prec))
+	if !ok {
+		return nil, false
+	}
+	x, ok := sol.xOf(y)
+	if !ok {
+		return nil, false
+	}
+	k, ok := d.gain(sol, y)
+	if !ok {
+		return nil, false
+	}
+	if !(xRel(xFrom(r.X, prec), x) <= xRel(xFrom(res.X, prec), x) && xRel(xFrom(r.K, prec), k) <= xRel(xFrom(res.K, prec), k)) {
+		return nil, false
+	}
+	return r, true
+}
+
+// extendedModelCond is extendedDareCond without its error check.
+func extendedModelCond(B *mat.Dense, opts *RiccatiOpts) (float64, bool) {
+	if opts == nil || isIdentityDescriptor(opts.E) {
 		return 0, false
 	}
 	n, m := B.Dims()
