@@ -35,7 +35,11 @@ func stiffModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf) (ad *mat.Dense, 
 	if n == 0 || !(mat.Norm(a, 1)*dt*qzLargeRatio >= 1) {
 		return nil, nil, false
 	}
-	return splitModalHold(a, b, dt, leaf, true)
+	ad, gammas, ok = splitModalHold(a, b, dt, leaf, true)
+	if ok {
+		exactIntegrators(a, b, dt, false, ad, gammas...)
+	}
+	return ad, gammas, ok
 }
 
 func splitModalHold(a, b *mat.Dense, dt float64, leaf holdLeaf, root bool) (*mat.Dense, []*mat.Dense, bool) {
@@ -192,7 +196,9 @@ func expmScaled(a *mat.Dense, dt float64) *mat.Dense {
 	scaled.Scale(dt, a)
 	var e mat.Dense
 	expGuarded(&e, scaled)
-	return mat.DenseCopyOf(&e)
+	ad := mat.DenseCopyOf(&e)
+	exactIntegrators(a, nil, dt, true, ad)
+	return ad
 }
 
 // fastInputIntegral returns ∫₀^dt e^{a·s} ds·b = a⁻¹(ad − I)·b for a fast

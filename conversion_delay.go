@@ -148,6 +148,7 @@ func conversionZOHKernel(a *mat.Dense, b *mat.Dense, period float64) (ad, bd *ma
 		copy(adr.Data[i*adr.Stride:i*adr.Stride+n], er.Data[i*er.Stride:i*er.Stride+n])
 		copy(bdr.Data[i*bdr.Stride:i*bdr.Stride+m], er.Data[i*er.Stride+n:i*er.Stride+n+m])
 	}
+	exactIntegrators(a, b, period, true, ad, bd)
 	return ad, bd
 }
 

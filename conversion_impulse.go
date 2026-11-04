@@ -7,9 +7,7 @@ func (sys *System) discretizeImpulseParity(dt float64) (*System, error) {
 		if ad, ok := stiffExp(sys.A, dt); ok {
 			out.A = ad
 		} else {
-			scaled := newDense(n, n)
-			scaled.Scale(dt, sys.A)
-			expGuarded(out.A, scaled)
+			out.A = expmScaled(sys.A, dt)
 		}
 		if m > 0 {
 			out.B.Mul(out.A, sys.B)

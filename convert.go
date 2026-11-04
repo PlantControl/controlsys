@@ -239,6 +239,19 @@ func bilinear(sys *System, palpha, pbeta, alpha, beta float64) (*System, error) 
 		return nil, fmt.Errorf("bilinear: result contains Inf/NaN: %w", ErrOverflow)
 	}
 
+	integrator := 0.0
+	if sys.IsDiscrete() {
+		integrator = 1
+	}
+	block := func(a *mat.Dense) (*mat.Dense, bool) {
+		k, _ := a.Dims()
+		part, err := bilinear(&System{A: a, B: newDense(k, 0), C: newDense(0, k), D: newDense(0, 0), Dt: sys.Dt}, palpha, pbeta, alpha, beta)
+		if err != nil {
+			return nil, false
+		}
+		return part.A, true
+	}
+	exactBilinearIntegrators(sys.A, sys.B, sys.C, integrator, palpha, pbeta-twoAB/(integrator+palpha), scaleB, scaleC, block, Ainv, B, C)
 	out := &System{A: Ainv, B: B, C: C, D: D}
 	propagateNames(out, sys)
 	return out, nil
@@ -443,7 +456,9 @@ func zohAugmented(a, b *mat.Dense, dt float64) (ad, bd *mat.Dense) {
 		copy(adData[i*n:], emRaw.Data[i*emRaw.Stride:i*emRaw.Stride+n])
 		copy(bdData[i*m:], emRaw.Data[i*emRaw.Stride+n:i*emRaw.Stride+n+m])
 	}
-	return mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData)
+	ad, bd = mat.NewDense(n, n, adData), mat.NewDense(n, m, bdData)
+	exactIntegrators(a, b, dt, true, ad, bd)
+	return ad, bd
 }
 
 // stiffDescriptorParts returns, for a delay-free descriptor sys with
