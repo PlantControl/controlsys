@@ -63,42 +63,9 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 
 	P := mat.NewDense(p, p, nil)
 	if n > 0 {
-		B, eB := pow2Scaled(sys.B)
-		C, eC := pow2Scaled(sys.C)
-		Ws, eW := pow2Scaled(W)
-		Q := inputNoiseIntensity(B, Ws, n, m)
-
-		// symmetrize Q for Lyapunov solver
-		qRaw := Q.RawMatrix()
-		for i := range n {
-			for j := i + 1; j < n; j++ {
-				avg := (qRaw.Data[i*qRaw.Stride+j] + qRaw.Data[j*qRaw.Stride+i]) / 2
-				qRaw.Data[i*qRaw.Stride+j] = avg
-				qRaw.Data[j*qRaw.Stride+i] = avg
-			}
-		}
-
-		var X *mat.Dense
-		if sys.IsContinuous() {
-			X, err = lyapChecked(sys.A, Q, nil)
-		} else {
-			X, err = dlyapChecked(sys.A, Q, nil)
-		}
+		P, err = covarStateTerm(sys, W, covarNeedsScaling(sys.B, sys.C, W))
 		if err != nil {
 			return nil, err
-		}
-
-		var CX mat.Dense
-		CX.Mul(C, X)
-		P.Mul(&CX, C.T())
-		if e := 2*eB + eW + 2*eC; e != 0 {
-			pRaw := P.RawMatrix()
-			for i := range p {
-				row := pRaw.Data[i*pRaw.Stride : i*pRaw.Stride+p]
-				for j, v := range row {
-					row[j] = math.Ldexp(v, e)
-				}
-			}
 		}
 	}
 
@@ -116,6 +83,76 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 		for j := range p {
 			if err := finishCovarEntry(P, i, j, DWDt.At(i, j)); err != nil {
 				return nil, err
+			}
+		}
+	}
+	return P, nil
+}
+
+// covarScaleExponentLimit bounds the binary exponents of max|B|, max|C| and
+// max|W| within which Covar skips power-of-two scaling: Q = B·W·Bᵀ and
+// C·X·Cᵀ then stay far from overflow and underflow, and an X large enough to
+// overflow needs an A so ill-conditioned that the Lyapunov solve rejects it.
+const covarScaleExponentLimit = 64
+
+func covarNeedsScaling(ms ...*mat.Dense) bool {
+	for _, m := range ms {
+		amax := maxAbsDense(m)
+		if amax == 0 || math.IsInf(amax, 0) {
+			continue
+		}
+		if _, e := math.Frexp(amax); e > covarScaleExponentLimit || e < -covarScaleExponentLimit {
+			return true
+		}
+	}
+	return false
+}
+
+// covarStateTerm returns C·X·Cᵀ, X the state covariance under B·W·Bᵀ. With
+// scale, B, C and W are first scaled by powers of two, which is exact, so
+// that the Lyapunov solve neither overflows nor underflows spuriously.
+func covarStateTerm(sys *System, W *mat.Dense, scale bool) (*mat.Dense, error) {
+	n, m, p := sys.Dims()
+	B, C, Ws := sys.B, sys.C, W
+	var eB, eC, eW int
+	if scale {
+		B, eB = pow2Scaled(sys.B)
+		C, eC = pow2Scaled(sys.C)
+		Ws, eW = pow2Scaled(W)
+	}
+	Q := inputNoiseIntensity(B, Ws, n, m)
+
+	// symmetrize Q for Lyapunov solver
+	qRaw := Q.RawMatrix()
+	for i := range n {
+		for j := i + 1; j < n; j++ {
+			avg := (qRaw.Data[i*qRaw.Stride+j] + qRaw.Data[j*qRaw.Stride+i]) / 2
+			qRaw.Data[i*qRaw.Stride+j] = avg
+			qRaw.Data[j*qRaw.Stride+i] = avg
+		}
+	}
+
+	var X *mat.Dense
+	var err error
+	if sys.IsContinuous() {
+		X, err = lyapChecked(sys.A, Q, nil)
+	} else {
+		X, err = dlyapChecked(sys.A, Q, nil)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var CX mat.Dense
+	CX.Mul(C, X)
+	P := mat.NewDense(p, p, nil)
+	P.Mul(&CX, C.T())
+	if e := 2*eB + eW + 2*eC; e != 0 {
+		pRaw := P.RawMatrix()
+		for i := range p {
+			row := pRaw.Data[i*pRaw.Stride : i*pRaw.Stride+p]
+			for j, v := range row {
+				row[j] = math.Ldexp(v, e)
 			}
 		}
 	}
