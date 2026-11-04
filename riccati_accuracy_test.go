@@ -68,8 +68,9 @@ func TestRiccatiAccuracy_Propagated(t *testing.T) {
 // A + B·Cc and A − Bc·C stable, Ac = A + B·Cc − Bc·C. Their cheap-control
 // gains (weakBStall ‖K‖ = 8e8) leave the assembled closed loop unstable
 // in float64 (weakBStall: an eigenvalue +0.02 where those of A − BK lie
-// at −0.56 and below), so H2Norm, and with it H2Syn, fails; H2Syn keeps
-// base's ErrNoStabilizing alongside H2Norm's ErrUnstable.
+// at −0.56 and below), so H2Norm, and with it H2Syn, may fail; H2Syn then
+// keeps ErrNoStabilizing alongside H2Norm's ErrUnstable. Where rounding
+// leaves that loop stable (amd64, gonum 30740af), H2Syn returns Accuracy 1.
 func TestRiccatiAccuracy_LqgH2Syn(t *testing.T) {
 	for _, name := range []string{"ch360", "weakBStall"} {
 		t.Run(name, func(t *testing.T) { lqgH2SynAccuracy(t, name) })
@@ -152,7 +153,18 @@ func lqgH2SynAccuracy(t *testing.T, name string) {
 		t.Fatalf("h2Syn: Accuracy %d, want 1", h2.Accuracy)
 	}
 	separated("h2Syn", h2.K, B, mat.DenseCopyOf(Cp.Slice(n+1, 2*n+1, 0, n)))
-	if _, err := H2Syn(P, n, 1); !errors.Is(err, ErrUnstable) || !errors.Is(err, ErrNoStabilizing) {
+	res, err := H2Syn(P, n, 1)
+	switch {
+	case err == nil:
+		if res.Accuracy != 1 {
+			t.Fatalf("H2Syn: Accuracy %d, want 1", res.Accuracy)
+		}
+		for _, p := range res.CLPoles {
+			if !(real(p) < 0) {
+				t.Fatalf("H2Syn: closed-loop pole %v", p)
+			}
+		}
+	case !errors.Is(err, ErrUnstable) || !errors.Is(err, ErrNoStabilizing):
 		t.Fatalf("H2Syn: err %v, want ErrUnstable and ErrNoStabilizing", err)
 	}
 }
