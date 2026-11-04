@@ -98,7 +98,7 @@ func (sys *System) simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) 
 	if _, _, p := sys.Dims(); p == 0 && (opts == nil || !opts.FinalState) {
 		return nil, fmt.Errorf("Simulate: model has no outputs and FinalState is not requested: %w", ErrDimensionMismatch)
 	}
-	sim, simX0, reduced, err := sys.timeResponseForm(x0)
+	sim, simX0, reduced, k, err := sys.timeResponseFormScaled(x0)
 	if err != nil {
 		return nil, fmt.Errorf("Simulate: %w", err)
 	}
@@ -115,7 +115,14 @@ func (sys *System) simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) 
 	}
 	if !reduced {
 		if p > 0 || n == 0 || u == nil {
-			return simulationDispatcher{sys: sim, finalState: finalState}.run(u, simX0, opts)
+			resp, err := simulationDispatcher{sys: sim, finalState: finalState}.run(u, simX0, opts)
+			if err != nil {
+				return nil, err
+			}
+			if err := unscaleFinalState(resp, k); err != nil {
+				return nil, err
+			}
+			return resp, nil
 		}
 		if !finalState {
 			return &Response{}, nil
@@ -126,12 +133,31 @@ func (sys *System) simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) 
 			return nil, err
 		}
 		resp.Y = nil
+		if err := unscaleFinalState(resp, k); err != nil {
+			return nil, err
+		}
 		return resp, nil
 	}
 	if opts != nil {
 		opts = &SimulateOpts{yBuf: opts.yBuf, duBuf: opts.duBuf}
 	}
 	return simulationDispatcher{sys: sim}.run(u, nil, opts)
+}
+
+// unscaleFinalState maps resp.XFinal from the balanced explicit form of
+// explicitForm, x̄ = 2ᵏ·x, back to the descriptor state coordinates.
+func unscaleFinalState(resp *Response, k int) error {
+	if k == 0 || resp.XFinal == nil {
+		return nil
+	}
+	for i := range resp.XFinal.Len() {
+		v := math.Ldexp(resp.XFinal.AtVec(i), -k)
+		if !isFinite(v) {
+			return fmt.Errorf("Simulate: final state x[%d] is %g: %w", i, v, ErrOverflow)
+		}
+		resp.XFinal.SetVec(i, v)
+	}
+	return nil
 }
 
 type simulationDispatcher struct {

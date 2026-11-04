@@ -2676,9 +2676,9 @@ func addStiffFreeSamples(sys *System, x0 *mat.VecDense, plan timeResponsePlan, Y
 	var free *mat.Dense
 	if parts, ok := stiffFreeParts(sys, x0); ok {
 		free, err = sampleFreeParts(sys, parts, x0, plan.steps, plan.dt)
-	} else if fold, ferr := sys.ToExplicit(); ferr != nil {
+	} else if fold, k, ferr := sys.explicitForm("explicit form"); ferr != nil {
 		err = ferr
-	} else {
+	} else if x0, err = scaledInitialState(x0, k); err == nil {
 		free, err = fold.continuousFreeSamples(x0, plan.steps, plan.dt)
 	}
 	if err != nil {
