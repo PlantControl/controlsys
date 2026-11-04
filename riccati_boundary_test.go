@@ -261,3 +261,24 @@ func TestCare_StableJordanUncontrollableMode(t *testing.T) {
 		}
 	}
 }
+
+// Care's PBH test on the homogeneous pencil still finds an exactly
+// uncontrollable near-infinite mode: with A and E upper triangular and B's
+// last row zero, a₂₂/e₂₂ ≈ 4.5e14 down to 7.9e5 is unstable and
+// unreachable, so Care and Lqr keep the boundary verdict (OCTGBK).
+func TestCare_DescriptorNearInfiniteUncontrollableMode(t *testing.T) {
+	B := mat.NewDense(2, 2, []float64{2.4606698336961226, 0.8073964829247321, 0, 0})
+	A := mat.NewDense(2, 2, []float64{0.42832161169283334, 1.0362853424557894, 0, 0.7926130901776904})
+	for _, e22 := range []float64{1.7497519700889574e-15, 4.377563014184253e-14, 1e-10, 1e-6} {
+		E := mat.NewDense(2, 2, []float64{1.0831741096873624, -0.084731321391598, 0, e22})
+		for _, ns := range []bool{false, true} {
+			opts := &RiccatiOpts{E: E, NoScaling: ns}
+			if _, err := Care(A, B, eyeDense(2), eyeDense(2), opts); !errors.Is(err, errBoundaryUnstabilizable) {
+				t.Errorf("Care e₂₂ %g NoScaling %v: %v, want an unstabilizable boundary mode", e22, ns, err)
+			}
+			if _, err := Lqr(A, B, eyeDense(2), eyeDense(2), opts); !errors.Is(err, errBoundaryUnstabilizable) {
+				t.Errorf("Lqr e₂₂ %g NoScaling %v: %v, want an unstabilizable boundary mode", e22, ns, err)
+			}
+		}
+	}
+}
