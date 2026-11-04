@@ -83,7 +83,8 @@ func (p descriptorPolicy) requireStandard(context string) error {
 var normDescriptorCondLimit = 1 / math.Sqrt(eps())
 
 // normExplicitForm returns sys with a nonsingular E folded in, (E⁻¹A, E⁻¹B,
-// C, D), which keeps the transfer function and the poles. Singular E and E
+// C, D), which keeps the transfer function and the poles; an E⁻¹B that
+// overflows is balanced against C by balancedExplicitForm. Singular E and E
 // with condition above normDescriptorCondLimit return ErrDescriptorUnsupported
 // wrapping ErrDescriptorSingular.
 func normExplicitForm(sys *System, context string) (*System, error) {
