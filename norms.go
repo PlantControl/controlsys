@@ -255,9 +255,8 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n, e int) ([]float64, error) {
 		blas64.General{Rows: n, Cols: n, Stride: woRaw.Stride, Data: woRaw.Data},
 		0, blas64.General{Rows: n, Cols: n, Stride: n, Data: prod})
 	// The QR iteration deflates against absolute thresholds, so it is not
-	// exactly scale-invariant: undo the scaling whenever it is representable.
-	unscaled := slices.Clone(prod)
-	if ldexpFinite(unscaled, 2*e) {
+	// exactly scale-invariant: undo the scaling whenever it is exact.
+	if unscaled, ok := ldexpExact(prod, 2*e); ok {
 		prod, e = unscaled, 0
 	}
 
@@ -277,6 +276,20 @@ func eigenvalueHSV(Wc, Wo *mat.Dense, n, e int) ([]float64, error) {
 	}
 	sort.Sort(sort.Reverse(sort.Float64Slice(hsv)))
 	return hsv, nil
+}
+
+// ldexpExact returns data·2ᵉ and whether every entry is scaled without
+// overflow or rounding, that is, scaling back by 2⁻ᵉ recovers it.
+func ldexpExact(data []float64, e int) ([]float64, bool) {
+	out := make([]float64, len(data))
+	for i, x := range data {
+		y := math.Ldexp(x, e)
+		if !isFinite(y) || math.Ldexp(y, -e) != x {
+			return nil, false
+		}
+		out[i] = y
+	}
+	return out, true
 }
 
 // HinfNorm computes the H∞ norm (peak gain) of an LTI system and the
@@ -346,11 +359,11 @@ func HinfNorm(sys *System) (norm float64, omega float64, err error) {
 	n, m, p := policy.n, policy.m, policy.p
 
 	if n == 0 || m == 0 || p == 0 {
-		sv, err := maxSingularValue(sys.D)
+		sv, w, err := staticPeakGain(sys.D)
 		if err != nil {
 			return 0, 0, fmt.Errorf("HinfNorm: %w", err)
 		}
-		return sv, 0, nil
+		return sv, w, nil
 	}
 
 	poles, err := sys.Poles()
@@ -390,11 +403,11 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 	}
 	n, m, p := sys.Dims()
 	if n == 0 || m == 0 || p == 0 {
-		sv, err := maxSingularValue(sys.D)
+		sv, w, err := staticPeakGain(sys.D)
 		if err != nil {
 			return 0, 0, fmt.Errorf("Norm: %w", err)
 		}
-		return sv, 0, nil
+		return sv, w, nil
 	}
 	poles, err := sys.Poles()
 	if err != nil {
@@ -427,7 +440,96 @@ func linfNorm(sys *System) (norm float64, omega float64, err error) {
 // continuous peak approached only as ω → ∞ returns omega = +Inf. A higher
 // gain found by refinedPeak replaces the result, raised by certifyPeak probes,
 // so the result is never below that of the crossing search alone.
+//
+// A model with B = 0 or C = 0 is the static gain D, with omega = 0 as for a
+// stateless model. A model whose B, C or D lies far outside unit scale is
+// searched as 2⁻ˢ·G, exactly scaled by powers of two, and the peak scaled
+// back; a peak beyond float64 range returns ErrOverflow.
 func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err error) {
+	if allZeroDense(sys.B) || allZeroDense(sys.C) {
+		return staticPeakGain(sys.D)
+	}
+	scaled, s := ioScaledSystem(sys)
+	if scaled == nil {
+		return searchPeakGain(sys, poles)
+	}
+	norm, omega, err = searchPeakGain(scaled, poles)
+	if err != nil {
+		return 0, 0, err
+	}
+	norm = math.Ldexp(norm, s)
+	if sys.IsContinuous() {
+		sd, err := maxSingularValue(sys.D)
+		if err != nil {
+			return 0, 0, err
+		}
+		if sd > norm {
+			norm, omega = sd, math.Inf(1)
+		}
+	}
+	if !isFinite(norm) {
+		return 0, 0, fmt.Errorf("peak gain exceeds float64 range: %w", ErrOverflow)
+	}
+	return norm, omega, nil
+}
+
+// staticPeakGain returns σ_max(D) at omega = 0, or ErrOverflow when it is
+// beyond float64 range.
+func staticPeakGain(D *mat.Dense) (float64, float64, error) {
+	sv, err := maxSingularValue(D)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !isFinite(sv) {
+		return 0, 0, fmt.Errorf("peak gain exceeds float64 range: %w", ErrOverflow)
+	}
+	return sv, 0, nil
+}
+
+// peakGainScaleLimit bounds the binary exponents of max|B|, max|C|, max|D|
+// and max|B|·max|C| that peakGain searches without scaling. The pencil and
+// the σ_max evaluator form γ and C·(sI−A)⁻¹·B as they are, which overflow or
+// underflow far outside unit scale; inside the limit the search is left
+// untouched, since I/O scaling changes its rounding.
+const peakGainScaleLimit = 400
+
+// ioScaledSystem returns sys with B·2^−eB, C·2^(eB−s) and D·2⁻ˢ, whose
+// transfer function is 2⁻ˢ·G, and s, with 2^eB just above max|B| and 2ˢ just
+// above the larger of max|D| and max|B|·max|C|, but at most 2⁹⁶⁰·max|D| so
+// that D keeps full precision. It returns nil when every exponent is within
+// peakGainScaleLimit.
+func ioScaledSystem(sys *System) (*System, int) {
+	_, eB := math.Frexp(maxAbsDense(sys.B))
+	_, eC := math.Frexp(maxAbsDense(sys.C))
+	var dmax float64
+	if sys.D != nil {
+		dmax = maxAbsDense(sys.D)
+	}
+	_, eD := math.Frexp(dmax)
+	s := eB + eC
+	if dmax > 0 {
+		s = min(max(s, eD), eD+960)
+	}
+	if max(eB, eC, eD, eB+eC) <= peakGainScaleLimit && min(eB, eC, eD, eB+eC) >= -peakGainScaleLimit {
+		return nil, 0
+	}
+	cp := *sys
+	cp.B = ldexpCopy(sys.B, -eB)
+	cp.C = ldexpCopy(sys.C, eB-s)
+	if sys.D != nil {
+		cp.D = ldexpCopy(sys.D, -s)
+	}
+	return &cp, s
+}
+
+func ldexpCopy(M *mat.Dense, e int) *mat.Dense {
+	cp := mat.DenseCopyOf(M)
+	ldexpDense(cp, e)
+	return cp
+}
+
+// searchPeakGain is peakGain on a model in working range.
+func searchPeakGain(sys *System, poles []complex128) (norm float64, omega float64, err error) {
 	n, m, p := sys.Dims()
 	ws := newHamiltonianWS(sys, n, m, p)
 	norm, omega, err = ws.crossingPeak(poles)
@@ -442,7 +544,9 @@ func peakGain(sys *System, poles []complex128) (norm float64, omega float64, err
 	return norm, omega, nil
 }
 
-// crossingPeak is the γ-crossing search of peakGain.
+// crossingPeak is the γ-crossing search of peakGain. When every seed sample
+// is zero and no level shows an attained gain, as for C(sI−A)⁻¹B ≡ 0, the
+// peak is 0 rather than the last bisection level.
 func (ws *hamiltonianWS) crossingPeak(poles []complex128) (norm float64, omega float64, err error) {
 	sys := ws.sys
 	gammaLow, omegaPeak := ws.lowerBound(poles)
@@ -494,6 +598,9 @@ func (ws *hamiltonianWS) crossingPeak(poles []complex128) (norm float64, omega f
 		}
 	}
 
+	if gammaLow == 0 && len(ws.seeds) > 0 {
+		return 0, 0, nil
+	}
 	return gammaHigh, omegaPeak, nil
 }
 
