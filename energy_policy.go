@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"fmt"
+	"math"
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
@@ -33,47 +34,92 @@ func (p energyAnalysisPolicy) requireStable(errUnstable error) error {
 	return nil
 }
 
-func (p energyAnalysisPolicy) gramianInputs(typ GramType) (Aarg, Q *mat.Dense, err error) {
+// gramianInputs returns the Lyapunov operands of the typ gramian with B (or
+// C) scaled by 2⁻ᵉ, so that B·Bᵀ (or Cᵀ·C) cannot overflow; the gramian of
+// sys is the solution times 4ᵉ.
+func (p energyAnalysisPolicy) gramianInputs(typ GramType) (Aarg, Q *mat.Dense, e int, err error) {
 	aRaw := p.sys.A.RawMatrix()
 	aData := make([]float64, p.n*p.n)
 	copyStrided(aData, p.n, aRaw.Data, aRaw.Stride, p.n, p.n)
 
 	switch typ {
 	case GramControllability:
-		return mat.NewDense(p.n, p.n, aData), p.controllabilityEnergy(), nil
+		Q, e = p.controllabilityEnergy()
+		return mat.NewDense(p.n, p.n, aData), Q, e, nil
 	case GramObservability:
-		return mat.NewDense(p.n, p.n, transposeSquareData(aRaw.Data, aRaw.Stride, p.n)), p.observabilityEnergy(), nil
+		Q, e = p.observabilityEnergy()
+		return mat.NewDense(p.n, p.n, transposeSquareData(aRaw.Data, aRaw.Stride, p.n)), Q, e, nil
 	default:
-		return nil, nil, fmt.Errorf("unknown gramian type %d: %w", typ, ErrInvalidArgument)
+		return nil, nil, 0, fmt.Errorf("unknown gramian type %d: %w", typ, ErrInvalidArgument)
 	}
 }
 
-func (p energyAnalysisPolicy) controllabilityEnergy() *mat.Dense {
-	if p.m == 0 {
-		return mat.NewDense(p.n, p.n, nil)
+// scaledGramian returns X and e with the typ gramian of sys equal to X·4ᵉ.
+func (p energyAnalysisPolicy) scaledGramian(typ GramType) (*mat.Dense, int, error) {
+	Aarg, Q, e, err := p.gramianInputs(typ)
+	if err != nil {
+		return nil, 0, err
 	}
-	bRaw := p.sys.B.RawMatrix()
+	X, err := p.solveLyapunov(Aarg, Q)
+	if err != nil {
+		return nil, 0, err
+	}
+	return X, e, nil
+}
+
+func (p energyAnalysisPolicy) controllabilityEnergy() (*mat.Dense, int) {
+	if p.m == 0 {
+		return mat.NewDense(p.n, p.n, nil), 0
+	}
+	B, e := pow2Scaled(p.sys.B)
+	bRaw := B.RawMatrix()
 	q := make([]float64, p.n*p.n)
 	blas64.Gemm(blas.NoTrans, blas.Trans, 1,
 		blas64.General{Rows: p.n, Cols: p.m, Stride: bRaw.Stride, Data: bRaw.Data},
 		blas64.General{Rows: p.n, Cols: p.m, Stride: bRaw.Stride, Data: bRaw.Data},
 		0, blas64.General{Rows: p.n, Cols: p.n, Stride: p.n, Data: q})
 	symmetrize(q, p.n, p.n)
-	return mat.NewDense(p.n, p.n, q)
+	return mat.NewDense(p.n, p.n, q), e
 }
 
-func (p energyAnalysisPolicy) observabilityEnergy() *mat.Dense {
+func (p energyAnalysisPolicy) observabilityEnergy() (*mat.Dense, int) {
 	if p.p == 0 {
-		return mat.NewDense(p.n, p.n, nil)
+		return mat.NewDense(p.n, p.n, nil), 0
 	}
-	cRaw := p.sys.C.RawMatrix()
+	C, e := pow2Scaled(p.sys.C)
+	cRaw := C.RawMatrix()
 	q := make([]float64, p.n*p.n)
 	blas64.Gemm(blas.Trans, blas.NoTrans, 1,
 		blas64.General{Rows: p.p, Cols: p.n, Stride: cRaw.Stride, Data: cRaw.Data},
 		blas64.General{Rows: p.p, Cols: p.n, Stride: cRaw.Stride, Data: cRaw.Data},
 		0, blas64.General{Rows: p.n, Cols: p.n, Stride: p.n, Data: q})
 	symmetrize(q, p.n, p.n)
-	return mat.NewDense(p.n, p.n, q)
+	return mat.NewDense(p.n, p.n, q), e
+}
+
+// ldexpFinite multiplies every entry of data by 2ᵉ in place and reports
+// whether all results are finite.
+func ldexpFinite(data []float64, e int) bool {
+	ok := true
+	for i, x := range data {
+		data[i] = math.Ldexp(x, e)
+		ok = ok && isFinite(data[i])
+	}
+	return ok
+}
+
+// ldexpDense multiplies every entry of M by 2ᵉ in place.
+func ldexpDense(M *mat.Dense, e int) {
+	if e == 0 {
+		return
+	}
+	raw := M.RawMatrix()
+	for i := range raw.Rows {
+		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		for j, x := range row {
+			row[j] = math.Ldexp(x, e)
+		}
+	}
 }
 
 func (p energyAnalysisPolicy) solveLyapunov(A, Q *mat.Dense) (*mat.Dense, error) {
