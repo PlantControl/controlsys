@@ -46,7 +46,7 @@ var (
 	ErrSingularDenom = errors.New("controlsys: zero or near-zero leading denominator")
 
 	// ErrOverflow reports polynomial or matrix coefficients that overflow
-	// float64 during a conversion.
+	// float64 during a conversion, or a norm whose value exceeds float64.
 	ErrOverflow = errors.New("controlsys: coefficient overflow")
 
 	// ErrImproperTF reports a transfer function whose numerator degree exceeds
