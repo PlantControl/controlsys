@@ -60,6 +60,7 @@ func Norm(sys *System, normType float64) (float64, error) {
 // delays do not change the H2 norm. Discrete internal delays are absorbed
 // exactly; continuous strictly proper internal-delay models return
 // ErrContinuousInternalDelay. Descriptor models are handled as in Norm.
+// A norm beyond float64 range returns ErrOverflow.
 func H2Norm(sys *System) (float64, error) {
 	if err := requireSystem("H2Norm", sys); err != nil {
 		return 0, err
@@ -83,7 +84,11 @@ func H2Norm(sys *System) (float64, error) {
 		if sys.IsContinuous() && !allZeroDense(sys.D) {
 			return math.Inf(1), nil
 		}
-		return frobNormD(sys.D, p, m), nil
+		norm := frobNormD(sys.D, p, m)
+		if math.IsInf(norm, 0) {
+			return 0, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
+		}
+		return norm, nil
 	}
 
 	if err := policy.requireStable(ErrUnstable); err != nil {
@@ -93,6 +98,12 @@ func H2Norm(sys *System) (float64, error) {
 	if sys.IsContinuous() && !allZeroDense(sys.D) {
 		return math.Inf(1), nil
 	}
+
+	B, eB := pow2Scaled(sys.B)
+	C, eC := pow2Scaled(sys.C)
+	scaled := *sys
+	scaled.B, scaled.C = B, C
+	policy = newEnergyAnalysisPolicy(&scaled)
 
 	At, Q, err := policy.gramianInputs(GramObservability)
 	if err != nil {
@@ -105,7 +116,7 @@ func H2Norm(sys *System) (float64, error) {
 
 	xb := make([]float64, n*m)
 	xRaw := X.RawMatrix()
-	bRaw := sys.B.RawMatrix()
+	bRaw := B.RawMatrix()
 	blas64.Gemm(blas.NoTrans, blas.NoTrans, 1,
 		blas64.General{Rows: n, Cols: n, Stride: xRaw.Stride, Data: xRaw.Data},
 		blas64.General{Rows: n, Cols: m, Stride: bRaw.Stride, Data: bRaw.Data},
@@ -117,21 +128,37 @@ func H2Norm(sys *System) (float64, error) {
 			tr += bRaw.Data[i*bRaw.Stride+j] * xb[i*m+j]
 		}
 	}
-
-	if sys.IsDiscrete() {
-		dRaw := sys.D.RawMatrix()
-		for i := range p {
-			for j := range m {
-				v := dRaw.Data[i*dRaw.Stride+j]
-				tr += v * v
-			}
-		}
-	}
-
 	if tr < 0 {
 		tr = 0
 	}
-	return math.Sqrt(tr), nil
+	norm := math.Ldexp(math.Sqrt(tr), eB+eC)
+	if sys.IsDiscrete() {
+		norm = math.Hypot(norm, frobNormD(sys.D, p, m))
+	}
+	if math.IsInf(norm, 0) || math.IsNaN(norm) {
+		return 0, fmt.Errorf("H2Norm: norm exceeds float64 range: %w", ErrOverflow)
+	}
+	return norm, nil
+}
+
+// pow2Scaled returns M·2⁻ᵉ and e, with 2ᵉ the power of two just above
+// max|M|, so that quadratic forms in the result cannot overflow; e = 0 for
+// a zero matrix.
+func pow2Scaled(M *mat.Dense) (*mat.Dense, int) {
+	amax := maxAbsDense(M)
+	if !(amax > 0) || math.IsInf(amax, 0) {
+		return M, 0
+	}
+	_, e := math.Frexp(amax)
+	r, c := M.Dims()
+	raw := M.RawMatrix()
+	data := make([]float64, r*c)
+	for i := range r {
+		for j, x := range raw.Data[i*raw.Stride : i*raw.Stride+c] {
+			data[i*c+j] = math.Ldexp(x, -e)
+		}
+	}
+	return mat.NewDense(r, c, data), e
 }
 
 // HSV computes the Hankel singular values of a stable LTI system in descending order.
@@ -1252,7 +1279,8 @@ func frobNormD(D *mat.Dense, p, m int) float64 {
 	if D == nil || p == 0 || m == 0 {
 		return 0
 	}
-	return denseNorm(D)
+	raw := D.RawMatrix()
+	return impl.Dlange(lapack.Frobenius, raw.Rows, raw.Cols, raw.Data, raw.Stride, nil)
 }
 
 // maxSingularValue returns σ_max(M), 0 for a nil or empty matrix.
