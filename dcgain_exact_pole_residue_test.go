@@ -164,12 +164,13 @@ func TestDCGainOffPoleResolutionAroundRankTolerance(t *testing.T) {
 		return sv[n-1], float64(n) * 0x1p-52 * sv[0]
 	}
 
-	tf := &TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{1, 10, 21, 0}}}
-	res, err := tf.StateSpace()
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, err := res.Sys.C2D(0.1, C2DOptions{Method: C2DMethodZOH})
+	// Native gonum v0.20.10 C2D(0.1, ZOH) of 1/(s³+10s²+21s), whose integrator
+	// rounds off z = 1 (RXOK37).
+	d, err := New(
+		mat.NewDense(3, 3, []float64{0.99999999999999989, 0, 0, 0.09725208238950607, 0.92399290834944914, -1.2822228136741187, 0.0036193853166928982, 0.061058229222577087, 0.31341061612367815}),
+		mat.NewDense(3, 1, []float64{0.099999999999999992, 0.0049279175121661944, 0.00013085321954732975}),
+		mat.NewDense(1, 3, []float64{0, 0, 1}),
+		mat.NewDense(1, 1, nil), 0.1)
 	if err != nil {
 		t.Fatal(err)
 	}
