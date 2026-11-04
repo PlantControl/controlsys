@@ -36,7 +36,7 @@ const NormH2 = 2
 // condition estimate exceeds 1/√eps, returns ErrDescriptorUnsupported
 // wrapping ErrDescriptorSingular. The same holds for H2Norm and HinfNorm.
 func Norm(sys *System, normType float64) (float64, error) {
-	if err := requireSystem("Norm", sys); err != nil {
+	if err := requireFiniteSystem("Norm", sys); err != nil {
 		return 0, err
 	}
 	if normType == 2 {
@@ -62,7 +62,7 @@ func Norm(sys *System, normType float64) (float64, error) {
 // ErrContinuousInternalDelay. Descriptor models are handled as in Norm.
 // A norm beyond float64 range returns ErrOverflow.
 func H2Norm(sys *System) (float64, error) {
-	if err := requireSystem("H2Norm", sys); err != nil {
+	if err := requireFiniteSystem("H2Norm", sys); err != nil {
 		return 0, err
 	}
 	sys, err := normExplicitForm(sys, "H2Norm")
@@ -159,7 +159,7 @@ func pow2Scaled(M *mat.Dense) (*mat.Dense, int) {
 // models return ErrContinuousInternalDelay. A value beyond float64 range
 // returns ErrOverflow.
 func HSV(sys *System) ([]float64, error) {
-	if err := requireSystem("HSV", sys); err != nil {
+	if err := requireFiniteSystem("HSV", sys); err != nil {
 		return nil, err
 	}
 	if err := newDescriptorPolicy(sys).requireStandard("HSV"); err != nil {
@@ -337,7 +337,7 @@ func ldexpExact(data []float64, e int) ([]float64, bool) {
 // follows the exact-delay frequency response that MATLAB's frequency
 // analysis of delay models uses.
 func HinfNorm(sys *System) (norm float64, omega float64, err error) {
-	if err := requireSystem("HinfNorm", sys); err != nil {
+	if err := requireFiniteSystem("HinfNorm", sys); err != nil {
 		return 0, 0, err
 	}
 	sys, err = normExplicitForm(sys, "HinfNorm")

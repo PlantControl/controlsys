@@ -232,6 +232,9 @@ func (sys *System) Poles() ([]complex128, error) {
 	if n == 0 {
 		return nil, nil
 	}
+	if err := finiteSystemMatrices("Poles", sys, ErrInvalidArgument); err != nil {
+		return nil, err
+	}
 	if sys.LFT != nil {
 		zd, err := sys.ZeroDelayApprox()
 		if err != nil {
@@ -261,7 +264,7 @@ func (sys *System) Poles() ([]complex128, error) {
 // resolve, return ErrDelayUnsupported; descriptor ones
 // ErrDescriptorUnsupported.
 func (sys *System) IsStable() (bool, error) {
-	if err := requireSystem("IsStable", sys); err != nil {
+	if err := requireFiniteSystem("IsStable", sys); err != nil {
 		return false, err
 	}
 	if sys.IsContinuous() && sys.HasInternalDelay() {

@@ -12,7 +12,7 @@ import (
 )
 
 // Ctrb returns the n×(n·m) controllability matrix [B, AB, A²B, …, Aⁿ⁻¹B], as
-// MATLAB ctrb(A,B). Nil A or B returns ErrInvalidArgument; A with no states
+// MATLAB ctrb(A,B). Nil A or B, or a NaN/Inf entry, returns ErrInvalidArgument; A with no states
 // returns ErrDimensionMismatch.
 func Ctrb(A, B *mat.Dense) (*mat.Dense, error) {
 	if A == nil || B == nil {
@@ -28,6 +28,12 @@ func Ctrb(A, B *mat.Dense) (*mat.Dense, error) {
 	}
 	if n == 0 {
 		return nil, fmt.Errorf("Ctrb: system has no states: %w", ErrDimensionMismatch)
+	}
+	if err := finiteDense("Ctrb", "A", A, ErrInvalidArgument); err != nil {
+		return nil, err
+	}
+	if err := finiteDense("Ctrb", "B", B, ErrInvalidArgument); err != nil {
+		return nil, err
 	}
 
 	cols := n * m
@@ -47,7 +53,7 @@ func Ctrb(A, B *mat.Dense) (*mat.Dense, error) {
 }
 
 // Obsv returns the (n·p)×n observability matrix [C; CA; CA²; …; CAⁿ⁻¹], as
-// MATLAB obsv(A,C). Nil A or C returns ErrInvalidArgument; A with no states
+// MATLAB obsv(A,C). Nil A or C, or a NaN/Inf entry, returns ErrInvalidArgument; A with no states
 // returns ErrDimensionMismatch.
 func Obsv(A, C *mat.Dense) (*mat.Dense, error) {
 	if A == nil || C == nil {
@@ -63,6 +69,12 @@ func Obsv(A, C *mat.Dense) (*mat.Dense, error) {
 	}
 	if n == 0 {
 		return nil, fmt.Errorf("Obsv: system has no states: %w", ErrDimensionMismatch)
+	}
+	if err := finiteDense("Obsv", "A", A, ErrInvalidArgument); err != nil {
+		return nil, err
+	}
+	if err := finiteDense("Obsv", "C", C, ErrInvalidArgument); err != nil {
+		return nil, err
 	}
 
 	rows := n * p

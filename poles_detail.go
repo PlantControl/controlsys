@@ -38,6 +38,9 @@ func (sys *System) PolesDetail() (*PolesResult, error) {
 	if n == 0 {
 		return &PolesResult{}, nil
 	}
+	if err := finiteSystemMatrices("PolesDetail", sys, ErrInvalidArgument); err != nil {
+		return nil, err
+	}
 	if sys.LFT != nil {
 		zd, err := sys.ZeroDelayApprox()
 		if err != nil {

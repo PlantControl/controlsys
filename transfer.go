@@ -193,6 +193,9 @@ func copyFloatTensor(src [][][]float64) [][][]float64 {
 // degree exceeds the denominator's. MinimalOrder and RowDegrees then
 // describe that explicit part.
 func (sys *System) TransferFunction(opts *TransferFuncOpts) (*TransferFuncResult, error) {
+	if err := requireFiniteSystem("TransferFunction", sys); err != nil {
+		return nil, err
+	}
 	res, err := sys.transferRational(opts)
 	if err != nil {
 		return nil, err
