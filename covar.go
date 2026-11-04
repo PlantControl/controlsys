@@ -63,8 +63,7 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 
 	P := mat.NewDense(p, p, nil)
 	if n > 0 {
-		P, err = covarStateTerm(sys, W, covarNeedsScaling(sys.B, sys.C, W))
-		if err != nil {
+		if err := covarStateTerm(P, sys, W, covarNeedsScaling(sys.B, sys.C, W)); err != nil {
 			return nil, err
 		}
 	}
@@ -95,8 +94,8 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 // overflow needs an A so ill-conditioned that the Lyapunov solve rejects it.
 const covarScaleExponentLimit = 64
 
-func covarNeedsScaling(ms ...*mat.Dense) bool {
-	for _, m := range ms {
+func covarNeedsScaling(B, C, W *mat.Dense) bool {
+	for _, m := range [3]*mat.Dense{B, C, W} {
 		amax := maxAbsDense(m)
 		if amax == 0 || math.IsInf(amax, 0) {
 			continue
@@ -108,10 +107,10 @@ func covarNeedsScaling(ms ...*mat.Dense) bool {
 	return false
 }
 
-// covarStateTerm returns C·X·Cᵀ, X the state covariance under B·W·Bᵀ. With
+// covarStateTerm sets P to C·X·Cᵀ, X the state covariance under B·W·Bᵀ. With
 // scale, B, C and W are first scaled by powers of two, which is exact, so
 // that the Lyapunov solve neither overflows nor underflows spuriously.
-func covarStateTerm(sys *System, W *mat.Dense, scale bool) (*mat.Dense, error) {
+func covarStateTerm(P *mat.Dense, sys *System, W *mat.Dense, scale bool) error {
 	n, m, p := sys.Dims()
 	B, C, Ws := sys.B, sys.C, W
 	var eB, eC, eW int
@@ -140,12 +139,11 @@ func covarStateTerm(sys *System, W *mat.Dense, scale bool) (*mat.Dense, error) {
 		X, err = dlyapChecked(sys.A, Q, nil)
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	var CX mat.Dense
 	CX.Mul(C, X)
-	P := mat.NewDense(p, p, nil)
 	P.Mul(&CX, C.T())
 	if e := 2*eB + eW + 2*eC; e != 0 {
 		pRaw := P.RawMatrix()
@@ -156,7 +154,7 @@ func covarStateTerm(sys *System, W *mat.Dense, scale bool) (*mat.Dense, error) {
 			}
 		}
 	}
-	return P, nil
+	return nil
 }
 
 // covarContinuousDelayed evaluates P_ij = Σ_kl W_kl ∫ g_ik g_jl for a
