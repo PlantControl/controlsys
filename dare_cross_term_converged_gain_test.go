@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"runtime"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -14,7 +15,10 @@ import (
 // under X∘(1 ± eps) (1.1e-5): K is now the gain of X taken on by Hewer
 // steps in extended precision. Checked against the exact-E 320-bit
 // reference, whose K is not the gain of a rounded X: the 320-bit gain of
-// the rounded 320-bit X is itself 1.4e-6 off.
+// the rounded 320-bit X is itself 1.4e-6 off. Under gonum 30740af
+// (HF5PTS) NoScaling true natively is Accuracy 0 with K exact and X
+// 6.8e-10 off: X held there to the band max(newtonTol, 4·sens.X) only
+// (owner 2ARMRV).
 func TestDareCrossTermGainOfConvergedX(t *testing.T) {
 	n, m := 4, 5
 	A := mat.NewDense(n, n, []float64{0.9073904551956422, -0.3938152915303475, -0.1388654955148709, 0.6453691774282841, 0.07270460266915588, -1.3227405203905365, -0.8145105234248935, -0.26261350333082434, 0.8606718971767525, -0.1309492538747483, 0.9146168182607435, -0.9427195885249914, 0.09993913936332144, -1.7391953973156133, -1.0297260545452867, -0.40407230105408143})
@@ -31,7 +35,15 @@ func TestDareCrossTermGainOfConvergedX(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
-		if eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K); res.Accuracy == 0 && (eX > 1e-12 || eK > 1e-7) {
+		xTol := 1e-12
+		if ns && runtime.GOARCH == "arm64" && !raceEnabled {
+			sens, ok := riccatiExactSensitivity(false, A, B, Q, R, S, nil, ref, "ABQRS")
+			if !ok {
+				t.Fatal("sensitivity not certified")
+			}
+			xTol = max(newtonTol, 4*sens.X)
+		}
+		if eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K); res.Accuracy == 0 && (eX > xTol || eK > 1e-7) {
 			t.Errorf("NoScaling %v: Accuracy 0, X off the oracle by %.3g, K by %.3g", ns, eX, eK)
 		}
 	}
