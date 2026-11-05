@@ -27,7 +27,7 @@ type fixedSystemBlock struct {
 // later changes to sys do not affect the block. A nil or invalid sys returns
 // ErrInvalidArgument.
 func FixedBlock(sys *System) (NumericBlock, error) {
-	if err := requireSystem("FixedBlock", sys); err != nil {
+	if err := requireFiniteSystem("FixedBlock", sys); err != nil {
 		return nil, err
 	}
 	return fixedSystemBlock{sys: sys.Copy()}, nil
@@ -179,7 +179,7 @@ func NewGeneralizedClosedLoop(name string, plant *System, controller NumericBloc
 	if controller == nil {
 		return nil, fmt.Errorf("NewGeneralizedClosedLoop: controller is nil: %w", ErrInvalidArgument)
 	}
-	if err := requireSystem("NewGeneralizedClosedLoop", plant); err != nil {
+	if err := requireFiniteSystem("NewGeneralizedClosedLoop", plant); err != nil {
 		return nil, err
 	}
 	if analysisPoint == "" {

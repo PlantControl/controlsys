@@ -451,7 +451,7 @@ func lqgController(sys *System, res *LqgResult, F *mat.Dense, oneDOF bool) (*Sys
 		inputNames = concatStringSlices([][]string{nil, sys.OutputName}, []int{p, p})
 	}
 
-	ctrl, err := New(Ac, Bc, Cu, Dc, sys.Dt)
+	ctrl, err := newDerived(Ac, Bc, Cu, Dc, sys.Dt)
 	if err != nil {
 		return nil, fmt.Errorf("Lqg: %w", err)
 	}

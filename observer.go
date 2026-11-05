@@ -345,7 +345,7 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 // delays of known inputs carry over; output, I/O-matrix and internal delays
 // are rejected with ErrDelayUnsupported.
 func Estim(sys *System, L *mat.Dense, sensors, known []int) (*System, error) {
-	if err := requireSystem("Estim", sys); err != nil {
+	if err := requireFiniteSystem("Estim", sys); err != nil {
 		return nil, err
 	}
 	if err := requireFiniteDense("Estim", "L", L); err != nil {
@@ -412,9 +412,9 @@ func Estim(sys *System, L *mat.Dense, sensors, known []int) (*System, error) {
 		setBlock(De, 0, 0, D22)
 	}
 
-	result, err := New(Ae, Be, Ce, De, sys.Dt)
+	result, err := derivedOp("Estim").model(newCopy(Ae, Be, Ce, De, sys.Dt))
 	if err != nil {
-		return nil, fmt.Errorf("Estim: %w", err)
+		return nil, err
 	}
 	result.E = copyDescriptorE(sys.E)
 	if delaySliceHasNonzero(sys.InputDelay) {
@@ -474,6 +474,15 @@ func Reg(sys *System, K, L *mat.Dense) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requireFiniteSystem("Reg", sys); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Reg", "K", K); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Reg", "L", L); err != nil {
+		return nil, err
+	}
 	if sys.HasDelay() {
 		return nil, fmt.Errorf("Reg: %w", ErrDelayUnsupported)
 	}
@@ -496,7 +505,7 @@ func Reg(sys *System, K, L *mat.Dense) (*System, error) {
 
 	Dr := mat.NewDense(m, p, nil)
 
-	result, err := New(Ar, Br, Cr, Dr, sys.Dt)
+	result, err := derivedOp("Reg").model(newCopy(Ar, Br, Cr, Dr, sys.Dt))
 	if err != nil {
 		return nil, err
 	}

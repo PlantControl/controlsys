@@ -95,8 +95,8 @@ func NewModelArray(shape []int, models []*System) (*ModelArray, error) {
 		if sys == nil {
 			continue
 		}
-		if err := sys.validate(); err != nil {
-			return nil, fmt.Errorf("NewModelArray: %w", err)
+		if err := requireFiniteSystem("NewModelArray", sys); err != nil {
+			return nil, err
 		}
 		if ref == nil {
 			ref = sys

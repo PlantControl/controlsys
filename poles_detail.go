@@ -42,7 +42,7 @@ func (sys *System) PolesDetail() (*PolesResult, error) {
 		return nil, err
 	}
 	if sys.LFT != nil {
-		zd, err := sys.ZeroDelayApprox()
+		zd, err := sys.zeroDelayApprox()
 		if err != nil {
 			return nil, fmt.Errorf("PolesDetail: %w", err)
 		}

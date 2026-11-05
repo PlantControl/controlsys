@@ -594,7 +594,7 @@ func realizeDiscreteIntegrators(numerator, denominator []float64, integrators in
 		}
 		shift, next = next, shift
 	}
-	return New(a, b, c, mat.NewDense(1, 1, []float64{feedthrough}), dt)
+	return newDerived(a, b, c, mat.NewDense(1, 1, []float64{feedthrough}), dt)
 }
 
 type frequencyFitSolver struct {

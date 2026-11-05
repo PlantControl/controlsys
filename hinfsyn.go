@@ -458,7 +458,7 @@ func (gp *generalizedPlantPartition) closeStaticLoop(P *System, D0 *mat.Dense) (
 	setBlock(D, 0, m1, mulDense(gp.D12, U))
 	setBlock(D, p1, 0, mulDense(Delta, gp.D21))
 	setBlock(D, p1, m1, mulDense(Delta, gp.D22))
-	Ps, err := New(A, B, C, D, P.Dt)
+	Ps, err := newDerived(A, B, C, D, P.Dt)
 	if err != nil {
 		return nil, false
 	}

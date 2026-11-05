@@ -325,6 +325,15 @@ const MaxAbsorbedDelayStates = 10000
 // (or stack) of copies over groups of inputs (or outputs); each copy carries
 // its own states and its own copy of the internal delays.
 func (sys *System) AbsorbDelay(scopes ...AbsorbScope) (*System, error) {
+	if err := requireFiniteSystem("AbsorbDelay", sys); err != nil {
+		return nil, err
+	}
+	return derivedOp("AbsorbDelay").model(sys.absorbDelay(scopes...))
+}
+
+// absorbDelay is AbsorbDelay without the finiteness checks, for analysis
+// paths whose derived models may diverge.
+func (sys *System) absorbDelay(scopes ...AbsorbScope) (*System, error) {
 	if err := requireSystem("AbsorbDelay", sys); err != nil {
 		return nil, err
 	}
@@ -389,7 +398,7 @@ func absorbDelayScope(sys *System, scope AbsorbScope) (*System, error) {
 		case AbsorbIO:
 			return absorbIODelayContinuous(sys, DefaultPadeOrder)
 		default:
-			return sys.Pade(DefaultPadeOrder)
+			return sys.pade(DefaultPadeOrder)
 		}
 	}
 
@@ -471,7 +480,7 @@ func absorbInternalDiscreteDelay(sys *System) (*System, error) {
 	internal.Delay = nil
 	internal.InputDelay = nil
 	internal.OutputDelay = nil
-	H, tau, err := internal.GetDelayModel()
+	H, tau, err := internal.getDelayModel()
 	if err != nil {
 		return nil, err
 	}
@@ -1112,7 +1121,7 @@ func absorbInputDelayContinuous(sys *System, order int) (*System, error) {
 	plant.InputDelay = nil
 	plant.Delay = nil
 
-	result, err := Series(bank, plant)
+	result, err := series(bank, plant)
 	if err != nil {
 		return nil, fmt.Errorf("absorbInputDelayContinuous: %w", err)
 	}
@@ -1144,7 +1153,7 @@ func absorbOutputDelayContinuous(sys *System, order int) (*System, error) {
 	plant.OutputDelay = nil
 	plant.Delay = nil
 
-	result, err := Series(plant, bank)
+	result, err := series(plant, bank)
 	if err != nil {
 		return nil, fmt.Errorf("absorbOutputDelayContinuous: %w", err)
 	}
@@ -1462,6 +1471,15 @@ type delayEntry struct {
 // PullDelaysToLFT returns a copy of the system where all I/O delays (InputDelay,
 // OutputDelay, and IODelay) have been pulled into the InternalDelay (LFT) structure.
 func (sys *System) PullDelaysToLFT() (*System, error) {
+	if err := requireFiniteSystem("PullDelaysToLFT", sys); err != nil {
+		return nil, err
+	}
+	return sys.pullDelaysToLFT()
+}
+
+// pullDelaysToLFT is PullDelaysToLFT without the validity checks. Its
+// blocks are copies, so a finite model gives a finite result.
+func (sys *System) pullDelaysToLFT() (*System, error) {
 	if !sys.HasDelay() {
 		return sys.Copy(), nil
 	}
@@ -1684,6 +1702,15 @@ func (sys *System) PullDelaysToLFT() (*System, error) {
 // closed by exp(-s·tau) (z^-tau for discrete models). A model without delays
 // returns a copy of sys and an empty tau.
 func (sys *System) GetDelayModel() (H *System, tau []float64, err error) {
+	if err := requireFiniteSystem("GetDelayModel", sys); err != nil {
+		return nil, nil, err
+	}
+	return sys.getDelayModel()
+}
+
+// getDelayModel is GetDelayModel without the finiteness checks; see
+// pullDelaysToLFT.
+func (sys *System) getDelayModel() (H *System, tau []float64, err error) {
 	if err := requireSystem("GetDelayModel", sys); err != nil {
 		return nil, nil, err
 	}
@@ -1691,7 +1718,7 @@ func (sys *System) GetDelayModel() (H *System, tau []float64, err error) {
 		return sys.Copy(), []float64{}, nil
 	}
 
-	lft, err := sys.PullDelaysToLFT()
+	lft, err := sys.pullDelaysToLFT()
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetDelayModel: %w", err)
 	}
@@ -1732,6 +1759,15 @@ func (sys *System) GetDelayModel() (H *System, tau []float64, err error) {
 // finite and positive, and an integer number of samples for a discrete H. An
 // empty tau returns a copy of H.
 func SetDelayModel(H *System, tau []float64) (*System, error) {
+	if err := requireFiniteSystem("SetDelayModel", H); err != nil {
+		return nil, err
+	}
+	return setDelayModel(H, tau)
+}
+
+// setDelayModel is SetDelayModel without the finiteness checks; see
+// pullDelaysToLFT.
+func setDelayModel(H *System, tau []float64) (*System, error) {
 	if err := requireSystem("SetDelayModel", H); err != nil {
 		return nil, err
 	}
@@ -1920,6 +1956,14 @@ func slice2DToDense(s [][]float64) *mat.Dense {
 // signal (zero B2, C2, D12 and D21 columns/rows). A model without internal
 // delays is returned as a copy.
 func (sys *System) MinimalLFT() (*System, error) {
+	if err := requireFiniteSystem("MinimalLFT", sys); err != nil {
+		return nil, err
+	}
+	return sys.minimalLFT()
+}
+
+// minimalLFT is MinimalLFT without the validity checks; see pullDelaysToLFT.
+func (sys *System) minimalLFT() (*System, error) {
 	if !sys.HasInternalDelay() {
 		return sys.Copy(), nil
 	}
@@ -2213,6 +2257,15 @@ func isZeroGainChannel(sys *System, j, n, m, p, N int) bool {
 // the delay loops algebraically. A model without internal delays is returned
 // as a copy. An ill-posed loop (I-D22 singular) returns ErrAlgebraicLoop.
 func (sys *System) ZeroDelayApprox() (*System, error) {
+	if err := requireFiniteSystem("ZeroDelayApprox", sys); err != nil {
+		return nil, err
+	}
+	return derivedOp("ZeroDelayApprox").model(sys.zeroDelayApprox())
+}
+
+// zeroDelayApprox is ZeroDelayApprox without the finiteness checks; see
+// absorbDelay.
+func (sys *System) zeroDelayApprox() (*System, error) {
 	if err := requireSystem("ZeroDelayApprox", sys); err != nil {
 		return nil, err
 	}
@@ -2262,7 +2315,7 @@ func (sys *System) ZeroDelayApprox() (*System, error) {
 	var result *System
 	var err error
 	if n == 0 {
-		result, err = NewGain(Da, sys.Dt)
+		result, err = newGain(Da, sys.Dt)
 	} else {
 		EC2 := mulDims(N, n, E, sys.LFT.C2)
 		Aa := addMulDims(n, n, sys.A, sys.LFT.B2, EC2)

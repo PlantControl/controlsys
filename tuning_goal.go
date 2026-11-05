@@ -558,7 +558,7 @@ func selectGoalChannels(sys *System, input, output string, allInputs, allOutputs
 			return nil, fmt.Errorf("outputname: %w", err)
 		}
 	}
-	return sys.SelectByIndex(inputs, outputs)
+	return sys.selectByIndex(inputs, outputs)
 }
 
 // lookupGoalSignal returns the channel named name, or every channel of the

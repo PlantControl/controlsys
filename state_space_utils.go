@@ -14,19 +14,27 @@ import (
 // ErrInvalidArgument naming the matrix and entry; MATLAB dss accepts
 // non-finite data, and rejecting it is a deliberate departure (see Validate).
 func NewDescriptor(A, B, C, D, E *mat.Dense, dt float64) (*System, error) {
-	sys, err := newCopy(A, B, C, D, dt)
+	sys, err := newDescriptor(A, B, C, D, E, dt)
+	if err == nil {
+		err = systemMatricesFinite(sys, ErrInvalidArgument)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("NewDescriptor: %w", err)
+	}
+	return sys, nil
+}
+
+func newDescriptor(A, B, C, D, E *mat.Dense, dt float64) (*System, error) {
+	sys, err := newCopy(A, B, C, D, dt)
+	if err != nil {
+		return nil, err
 	}
 	n, _, _ := sys.Dims()
 	policy := descriptorPolicy{E: E}
 	if err := policy.validate(n); err != nil {
-		return nil, fmt.Errorf("NewDescriptor: %w", err)
+		return nil, err
 	}
 	sys.E = copyDescriptorE(E)
-	if err := systemMatricesFinite(sys, ErrInvalidArgument); err != nil {
-		return nil, fmt.Errorf("NewDescriptor: %w", err)
-	}
 	return sys, nil
 }
 
@@ -66,7 +74,7 @@ func (sys *System) DescriptorE() *mat.Dense {
 // returns ErrDescriptorSingular; an E⁻¹A, internal-delay E⁻¹B₂ or balanced
 // model beyond float64 range returns ErrOverflow.
 func (sys *System) ToExplicit() (*System, error) {
-	if err := requireSystem("ToExplicit", sys); err != nil {
+	if err := requireFiniteSystem("ToExplicit", sys); err != nil {
 		return nil, err
 	}
 	out, _, err := sys.explicitForm("ToExplicit")
@@ -191,7 +199,7 @@ func (sys *System) StateTransform(T *mat.Dense) (*System, error) {
 // ErrFixedInputDelayMismatch is returned. An empty fixed map returns a copy
 // without an offset input.
 func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string) (*System, error) {
-	if err := requireSystem("FixedInputReduction", sys); err != nil {
+	if err := requireFiniteSystem("FixedInputReduction", sys); err != nil {
 		return nil, err
 	}
 	if len(fixed) == 0 {
@@ -199,9 +207,12 @@ func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string)
 	}
 	n, m, p := sys.Dims()
 	fixedSeen := make([]bool, m)
-	for idx := range fixed {
+	for idx, v := range fixed {
 		if idx < 0 || idx >= m {
 			return nil, fmt.Errorf("FixedInputReduction: input index %d out of range [0,%d): %w", idx, m, ErrInvalidArgument)
+		}
+		if !isFinite(v) {
+			return nil, fmt.Errorf("FixedInputReduction: fixed[%d] is %g: %w", idx, v, ErrInvalidArgument)
 		}
 		fixedSeen[idx] = true
 	}
@@ -268,7 +279,7 @@ func (sys *System) FixedInputReduction(fixed map[int]float64, offsetName string)
 	}
 	result.OutputName = copyStringSlice(sys.OutputName)
 	result.StateName = copyStringSlice(sys.StateName)
-	return result, nil
+	return derivedOp("FixedInputReduction").model(result, nil)
 }
 
 func sameInputDelays(sys *System, a, b int) bool {
@@ -320,7 +331,7 @@ func selectColumnsWithOffset(src *mat.Dense, rows int, keep []int, fixed map[int
 // z = C2·x + D21·u + D22·w to the outputs. Appended rows inherit InputDelay
 // and carry no OutputDelay or IODelay.
 func (sys *System) AugmentInternalDelayOutputs(prefix string) (*System, error) {
-	if err := requireSystem("AugmentInternalDelayOutputs", sys); err != nil {
+	if err := requireFiniteSystem("AugmentInternalDelayOutputs", sys); err != nil {
 		return nil, err
 	}
 	if !sys.HasInternalDelay() {

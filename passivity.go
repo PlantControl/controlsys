@@ -161,7 +161,7 @@ func FRDPassive(frd *FRD, opts *PassivityOptions) (*PassivityResult, error) {
 // dynamic models and non-diagonal gains return ErrOptionUnsupported, and a
 // negative diagonal ErrNotPSD.
 func SpectralFactor(sys *System) (*System, error) {
-	if err := requireSystem("SpectralFactor", sys); err != nil {
+	if err := requireFiniteSystem("SpectralFactor", sys); err != nil {
 		return nil, err
 	}
 	if err := newDescriptorPolicy(sys).requireStandard("SpectralFactor"); err != nil {
@@ -192,7 +192,7 @@ func SpectralFactor(sys *System) (*System, error) {
 			}
 		}
 	}
-	return NewGain(D, sys.Dt)
+	return newGain(D, sys.Dt)
 }
 
 func passivityGrid(opts *PassivityOptions, dt float64) ([]float64, float64, error) {

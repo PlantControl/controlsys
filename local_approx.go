@@ -28,7 +28,10 @@ func (c localApproximationContract) validateOperatingPoint(x0, u0 *mat.VecDense)
 	if u0.Len() != c.m {
 		return fmt.Errorf("%s: u0 length %d != M %d: %w", c.context, u0.Len(), c.m, ErrDimensionMismatch)
 	}
-	return nil
+	if err := requireFinite(c.context, "x0", x0.RawVector().Data...); err != nil {
+		return err
+	}
+	return requireFinite(c.context, "u0", u0.RawVector().Data...)
 }
 
 func (c localApproximationContract) validateStateResult(label string, v *mat.VecDense) error {
@@ -45,6 +48,23 @@ func (c localApproximationContract) validateStateJacobian(label string, m *mat.D
 
 func (c localApproximationContract) validateMeasurementJacobian(label string, m *mat.Dense) error {
 	return validateDenseResult(c.context+": "+label, m, c.p, c.n)
+}
+
+// validateFiniteStateResult is validateStateResult also rejecting a NaN/Inf
+// entry, for results that become model data.
+func (c localApproximationContract) validateFiniteStateResult(label string, v *mat.VecDense) error {
+	if err := c.validateStateResult(label, v); err != nil {
+		return err
+	}
+	return requireFinite(c.context, label, v.RawVector().Data...)
+}
+
+// validateFiniteMeasurementResult is validateFiniteStateResult for H.
+func (c localApproximationContract) validateFiniteMeasurementResult(label string, v *mat.VecDense) error {
+	if err := c.validateMeasurementResult(label, v); err != nil {
+		return err
+	}
+	return requireFinite(c.context, label, v.RawVector().Data...)
 }
 
 func validateVecResult(context string, v *mat.VecDense, want int) error {
@@ -84,10 +104,10 @@ func finiteDifferenceLocalModel(
 
 		fp := state(xp, u0)
 		fm := state(xm, u0)
-		if err := contract.validateStateResult("F(x+h,u)", fp); err != nil {
+		if err := contract.validateFiniteStateResult("F(x+h,u)", fp); err != nil {
 			return nil, nil, nil, nil, err
 		}
-		if err := contract.validateStateResult("F(x-h,u)", fm); err != nil {
+		if err := contract.validateFiniteStateResult("F(x-h,u)", fm); err != nil {
 			return nil, nil, nil, nil, err
 		}
 		for i := range n {
@@ -96,10 +116,10 @@ func finiteDifferenceLocalModel(
 
 		hp := measurement(xp, u0)
 		hm := measurement(xm, u0)
-		if err := contract.validateMeasurementResult("H(x+h,u)", hp); err != nil {
+		if err := contract.validateFiniteMeasurementResult("H(x+h,u)", hp); err != nil {
 			return nil, nil, nil, nil, err
 		}
-		if err := contract.validateMeasurementResult("H(x-h,u)", hm); err != nil {
+		if err := contract.validateFiniteMeasurementResult("H(x-h,u)", hm); err != nil {
 			return nil, nil, nil, nil, err
 		}
 		for i := range p {
@@ -120,10 +140,10 @@ func finiteDifferenceLocalModel(
 
 		fp := state(x0, up)
 		fm := state(x0, um)
-		if err := contract.validateStateResult("F(x,u+h)", fp); err != nil {
+		if err := contract.validateFiniteStateResult("F(x,u+h)", fp); err != nil {
 			return nil, nil, nil, nil, err
 		}
-		if err := contract.validateStateResult("F(x,u-h)", fm); err != nil {
+		if err := contract.validateFiniteStateResult("F(x,u-h)", fm); err != nil {
 			return nil, nil, nil, nil, err
 		}
 		for i := range n {
@@ -132,10 +152,10 @@ func finiteDifferenceLocalModel(
 
 		hp := measurement(x0, up)
 		hm := measurement(x0, um)
-		if err := contract.validateMeasurementResult("H(x,u+h)", hp); err != nil {
+		if err := contract.validateFiniteMeasurementResult("H(x,u+h)", hp); err != nil {
 			return nil, nil, nil, nil, err
 		}
-		if err := contract.validateMeasurementResult("H(x,u-h)", hm); err != nil {
+		if err := contract.validateFiniteMeasurementResult("H(x,u-h)", hm); err != nil {
 			return nil, nil, nil, nil, err
 		}
 		for i := range p {

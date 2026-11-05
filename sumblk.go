@@ -373,7 +373,7 @@ func SumBlk(expr string, widths ...int) (*System, error) {
 		return nil, fmt.Errorf("SumBlk: %w", err)
 	}
 
-	sys, err := NewGain(parsed.directMatrix(), 0)
+	sys, err := newGain(parsed.directMatrix(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("SumBlk: %w", err)
 	}

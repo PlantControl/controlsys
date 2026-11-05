@@ -303,6 +303,9 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 		return nil, nil, fmt.Errorf("Balred: %w", err)
 	}
 	propagateIONames(red, sys)
+	if red, err = derivedOp("Balred").model(red, nil); err != nil {
+		return nil, nil, err
+	}
 	return red, br.HSV, nil
 }
 
@@ -325,7 +328,7 @@ func Modred(sys *System, elim []int, method StateProjection) (*System, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Modred: %w", err)
 	}
-	return red, nil
+	return derivedOp("Modred").model(red, nil)
 }
 
 func modred(sys *System, elim []int, method StateProjection) (*System, error) {
@@ -373,7 +376,7 @@ func modred(sys *System, elim []int, method StateProjection) (*System, error) {
 				return nil, err
 			}
 		}
-		g, err := NewGain(d, sys.Dt)
+		g, err := newDerivedGain(d, sys.Dt)
 		if err != nil {
 			return nil, err
 		}

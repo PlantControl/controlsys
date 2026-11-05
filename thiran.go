@@ -104,7 +104,7 @@ func integerDelaySS(samples, dt float64) (*System, error) {
 	}
 	d := int(math.Round(samples))
 	if d <= 0 {
-		return NewGain(mat.NewDense(1, 1, []float64{1}), dt)
+		return newGain(mat.NewDense(1, 1, []float64{1}), dt)
 	}
 	A := mat.NewDense(d, d, nil)
 	for i := 1; i < d; i++ {

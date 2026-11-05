@@ -15,7 +15,7 @@ func conversionThiranChannel(samples, dt float64, maxOrder int) (*System, error)
 		return nil, fmt.Errorf("thiran order %d must be positive: %w", maxOrder, ErrInvalidConversionOptions)
 	}
 	if isIntegerSampleDelay(samples) {
-		gain, err := NewGain(mat.NewDense(1, 1, []float64{1}), dt)
+		gain, err := newGain(mat.NewDense(1, 1, []float64{1}), dt)
 		if err != nil {
 			return nil, err
 		}

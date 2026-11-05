@@ -278,7 +278,7 @@ func (p *PID2) system() (*System, error) {
 
 	if n == 0 {
 		D := mat.NewDense(1, 2, []float64{p.Kp * p.B, -p.Kp})
-		return NewGain(D, p.Dt)
+		return newDerivedGain(D, p.Dt)
 	}
 
 	A := mat.NewDense(n, n, nil)
@@ -311,7 +311,7 @@ func (p *PID2) system() (*System, error) {
 	Dmat.Set(0, 0, dFeedR)
 	Dmat.Set(0, 1, dFeedY)
 
-	return New(A, Bmat, Cmat, Dmat, 0)
+	return newDerived(A, Bmat, Cmat, Dmat, 0)
 }
 
 // System returns the controller as a SISO state-space model. A continuous
@@ -346,10 +346,10 @@ func (p *PID) continuousSystem() (*System, error) {
 
 	switch {
 	case !hasI && !hasD:
-		return NewGain(mat.NewDense(1, 1, []float64{p.Kp}), 0)
+		return newDerivedGain(mat.NewDense(1, 1, []float64{p.Kp}), 0)
 
 	case hasI && !hasD:
-		return New(
+		return newDerived(
 			mat.NewDense(1, 1, []float64{0}),
 			mat.NewDense(1, 1, []float64{1}),
 			mat.NewDense(1, 1, []float64{p.Ki}),
@@ -359,7 +359,7 @@ func (p *PID) continuousSystem() (*System, error) {
 
 	case !hasI && hasD:
 		invTf := 1.0 / p.Tf
-		return New(
+		return newDerived(
 			mat.NewDense(1, 1, []float64{-invTf}),
 			mat.NewDense(1, 1, []float64{invTf}),
 			mat.NewDense(1, 1, []float64{-p.Kd * invTf}),
@@ -369,7 +369,7 @@ func (p *PID) continuousSystem() (*System, error) {
 
 	default:
 		invTf := 1.0 / p.Tf
-		return New(
+		return newDerived(
 			mat.NewDense(2, 2, []float64{0, 0, 0, -invTf}),
 			mat.NewDense(2, 1, []float64{1, invTf}),
 			mat.NewDense(1, 2, []float64{p.Ki, -p.Kd * invTf}),
@@ -434,7 +434,7 @@ func pidIdealDescriptor(kp, ki, kd float64, pw, iw, dw []float64) (*System, erro
 	for j, w := range dw {
 		b.Set(row+1, j, -w)
 	}
-	return NewDescriptor(a, b, c, d, e, 0)
+	return newDerivedDescriptor(a, b, c, d, e, 0)
 }
 
 func finitePID(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
@@ -477,7 +477,7 @@ func pidDiscrete(kp, ki, kd, tf, dt float64, integral, derivative PIDFormula, pw
 		feed.Set(0, j, kp*w)
 	}
 	if n == 0 {
-		return NewGain(feed, dt)
+		return newDerivedGain(feed, dt)
 	}
 	a := mat.NewDense(n, n, nil)
 	b := mat.NewDense(n, m, nil)
@@ -504,5 +504,5 @@ func pidDiscrete(kp, ki, kd, tf, dt float64, integral, derivative PIDFormula, pw
 			feed.Set(0, j, feed.At(0, j)+kd/denominator*w)
 		}
 	}
-	return New(a, b, c, feed, dt)
+	return newDerived(a, b, c, feed, dt)
 }

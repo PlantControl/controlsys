@@ -37,5 +37,9 @@ func Linearize(model *NonlinearModel, x0, u0 *mat.VecDense) (*System, error) {
 		return nil, err
 	}
 
-	return New(A, B, C, D, 0)
+	sys, err := newDerived(A, B, C, D, 0)
+	if err != nil {
+		return nil, fmt.Errorf("Linearize: %w", err)
+	}
+	return sys, nil
 }

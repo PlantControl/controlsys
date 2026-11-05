@@ -145,7 +145,7 @@ func (gp *generalizedPlantPartition) newController(Ak, Bk, Ck, Dk *mat.Dense) (*
 	if Dk == nil {
 		Dk = mat.NewDense(gp.m2, gp.p2, nil)
 	}
-	K, err := New(Ak, Bk, Ck, Dk, gp.dt)
+	K, err := newDerived(Ak, Bk, Ck, Dk, gp.dt)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}

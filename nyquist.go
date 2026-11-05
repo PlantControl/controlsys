@@ -716,7 +716,7 @@ func (p *nyquistPath) arc(center complex128, eps, phi0, phi1 float64, discrete b
 // the closed unit disk, as for d1 = d2 = 0.6 although |d1| + |d2| > 1), χ
 // has finitely many RHP roots. Otherwise it returns errNeutralDelayTail.
 func neutralLoopRoots(sys *System) (int, error) {
-	eye, err := NewGain(mat.NewDense(1, 1, []float64{1}), sys.Dt)
+	eye, err := newGain(mat.NewDense(1, 1, []float64{1}), sys.Dt)
 	if err != nil {
 		return 0, err
 	}

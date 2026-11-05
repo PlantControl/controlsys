@@ -33,7 +33,7 @@ func buildContinuousPadeDelayBank(contDelay []float64, order int) (*System, erro
 
 func buildPadeDelayChannel(tau float64, order int) (*System, error) {
 	if tau == 0 {
-		return NewGain(mat.NewDense(1, 1, []float64{1}), 0)
+		return newGain(mat.NewDense(1, 1, []float64{1}), 0)
 	}
 	pd, err := PadeDelay(tau, order)
 	if err != nil {

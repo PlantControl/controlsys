@@ -34,7 +34,7 @@ func Augw(G, W1, W2, W3 *System) (*System, error) {
 }
 
 func augw(op string, G, W1, W2, W3 *System) (*System, error) {
-	if err := requireSystem(op, G); err != nil {
+	if err := requireFiniteSystem(op, G); err != nil {
 		return nil, err
 	}
 	_, nu, ny := G.Dims()
@@ -79,7 +79,7 @@ func augw(op string, G, W1, W2, W3 *System) (*System, error) {
 	}
 	P.OutputName = append(outNames, expandName("e", ny)...)
 	P.InputName = append(expandName("w", ny), expandName("u", nu)...)
-	return P, nil
+	return derivedOp(op).model(P, nil)
 }
 
 // expandWeight validates the optional weight W of a G channel group of the
@@ -90,6 +90,9 @@ func expandWeight(op, name string, W, G *System, size int) (*System, error) {
 		return nil, nil
 	}
 	if err := W.validate(); err != nil {
+		return nil, fmt.Errorf("%s: %s: %w", op, name, err)
+	}
+	if err := systemMatricesFinite(W, ErrInvalidArgument); err != nil {
 		return nil, fmt.Errorf("%s: %s: %w", op, name, err)
 	}
 	if err := domainMatch(G, W); err != nil {
@@ -104,7 +107,7 @@ func expandWeight(op, name string, W, G *System, size int) (*System, error) {
 		for i := range copies {
 			copies[i] = W
 		}
-		Wd, err := BlkDiag(copies...)
+		Wd, err := blkDiag(copies...)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %s: %w", op, name, err)
 		}
@@ -134,11 +137,11 @@ func augwInterconnect(G, W1, W2, W3 *System, ny, nu int) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	plant, err := BlkDiag(passSys, G)
+	plant, err := blkDiag(passSys, G)
 	if err != nil {
 		return nil, err
 	}
-	H, err := Series(splitSys, plant)
+	H, err := series(splitSys, plant)
 	if err != nil {
 		return nil, err
 	}
@@ -188,18 +191,18 @@ func augwInterconnect(G, W1, W2, W3 *System, ny, nu int) (*System, error) {
 	if err != nil {
 		return nil, err
 	}
-	if H, err = Series(H, mixSys); err != nil {
+	if H, err = series(H, mixSys); err != nil {
 		return nil, err
 	}
 	measure, err := newGain(eyeDense(ny), dt)
 	if err != nil {
 		return nil, err
 	}
-	Wblk, err := BlkDiag(append(weights, measure)...)
+	Wblk, err := blkDiag(append(weights, measure)...)
 	if err != nil {
 		return nil, err
 	}
-	return Series(H, Wblk)
+	return series(H, Wblk)
 }
 
 // MixsynResult is the mixed-sensitivity H∞ design of MATLAB

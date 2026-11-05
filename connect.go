@@ -49,6 +49,15 @@ func newInterconnectionPlan(sys1, sys2 *System) interconnectionPlan {
 // boundary. Mismatched sizes return ErrDimensionMismatch, different sample
 // times ErrDomainMismatch and nil models ErrInvalidArgument.
 func Series(sys1, sys2 *System) (*System, error) {
+	if err := requireFiniteSystems("Series", sys1, sys2); err != nil {
+		return nil, err
+	}
+	return derivedOp("Series").model(series(sys1, sys2))
+}
+
+// series is Series without the finiteness checks, for callers that pass
+// validated models and check the model they return.
+func series(sys1, sys2 *System) (*System, error) {
 	if err := requireSystems("Series", sys1, sys2); err != nil {
 		return nil, err
 	}
@@ -213,6 +222,14 @@ func ioDelayOrZero(delay *mat.Dense, p, m int) *mat.Dense {
 // total delay per channel the rest goes to the I/O delay matrix, otherwise
 // to internal delays. Errors follow Series.
 func Parallel(sys1, sys2 *System) (*System, error) {
+	if err := requireFiniteSystems("Parallel", sys1, sys2); err != nil {
+		return nil, err
+	}
+	return derivedOp("Parallel").model(parallel(sys1, sys2))
+}
+
+// parallel is Parallel without the finiteness checks; see series.
+func parallel(sys1, sys2 *System) (*System, error) {
 	if err := requireSystems("Parallel", sys1, sys2); err != nil {
 		return nil, err
 	}
@@ -370,6 +387,19 @@ func sliceOrZeros(s []float64, n int) []float64 {
 // An ill-posed loop (I - sign·D1·D2 singular) returns ErrAlgebraicLoop as an
 // *AlgebraicLoopError.
 func Feedback(plant, controller *System, sign float64, ch ...FeedbackChannels) (*System, error) {
+	if err := requireFiniteSystem("Feedback", plant); err != nil {
+		return nil, err
+	}
+	if controller != nil {
+		if err := requireFiniteSystem("Feedback", controller); err != nil {
+			return nil, err
+		}
+	}
+	return derivedOp("Feedback").model(feedback(plant, controller, sign, ch...))
+}
+
+// feedback is Feedback without the finiteness checks; see series.
+func feedback(plant, controller *System, sign float64, ch ...FeedbackChannels) (*System, error) {
 	if err := requireSystem("Feedback", plant); err != nil {
 		return nil, err
 	}
@@ -513,6 +543,15 @@ func subBlock(dst *mat.Dense, r0, c0 int, src *mat.Dense) {
 // https://www.mathworks.com/help/control/ref/dynamicsystem.append.html. It
 // equals BlkDiag(sys1, sys2). Errors follow Series.
 func Append(sys1, sys2 *System) (*System, error) {
+	if err := requireFiniteSystems("Append", sys1, sys2); err != nil {
+		return nil, err
+	}
+	return appendSystems(sys1, sys2)
+}
+
+// appendSystems is Append without the finiteness checks. Its blocks are
+// copies, so finite models give a finite result.
+func appendSystems(sys1, sys2 *System) (*System, error) {
 	if err := requireSystems("Append", sys1, sys2); err != nil {
 		return nil, err
 	}
@@ -527,7 +566,7 @@ func Append(sys1, sys2 *System) (*System, error) {
 	p := p1 + p2
 
 	if sys1.HasInternalDelay() || sys2.HasInternalDelay() {
-		return BlkDiag(sys1, sys2)
+		return blkDiag(sys1, sys2)
 	}
 
 	A := mat.NewDense(max(n, 1), max(n, 1), nil)
@@ -553,7 +592,7 @@ func Append(sys1, sys2 *System) (*System, error) {
 	outDel := concatDelay(sys1.OutputDelay, p1, sys2.OutputDelay, p2)
 
 	if n == 0 {
-		sys, err := NewGain(resizeDense(D, p, m), sys1.Dt)
+		sys, err := newGain(resizeDense(D, p, m), sys1.Dt)
 		if err != nil {
 			return nil, err
 		}
@@ -674,11 +713,11 @@ func seriesLFT(sys1, sys2 *System) (*System, error) {
 	s2Stripped := sys2.Copy()
 	s2Stripped.OutputDelay = nil
 
-	s1, err := s1Stripped.PullDelaysToLFT()
+	s1, err := s1Stripped.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
-	s2, err := s2Stripped.PullDelaysToLFT()
+	s2, err := s2Stripped.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
@@ -853,11 +892,11 @@ func parallelLFT(sys1, sys2 *System) (*System, error) {
 		}
 	}
 
-	s1, err := s1Stripped.PullDelaysToLFT()
+	s1, err := s1Stripped.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
-	s2, err := s2Stripped.PullDelaysToLFT()
+	s2, err := s2Stripped.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
@@ -1048,6 +1087,14 @@ func BlkDiag(systems ...*System) (*System, error) {
 	if len(systems) == 0 {
 		return nil, fmt.Errorf("BlkDiag: no systems provided: %w", ErrInvalidArgument)
 	}
+	if err := requireFiniteSystems("BlkDiag", systems...); err != nil {
+		return nil, err
+	}
+	return blkDiag(systems...)
+}
+
+// blkDiag is BlkDiag without the finiteness checks; see appendSystems.
+func blkDiag(systems ...*System) (*System, error) {
 	if err := requireSystems("BlkDiag", systems...); err != nil {
 		return nil, err
 	}
@@ -1074,7 +1121,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 	if anyInternalDelay {
 		srcs = make([]*System, len(systems))
 		for i, s := range systems {
-			pulled, err := s.PullDelaysToLFT()
+			pulled, err := s.pullDelaysToLFT()
 			if err != nil {
 				return nil, err
 			}
@@ -1183,7 +1230,7 @@ func BlkDiag(systems ...*System) (*System, error) {
 	}
 
 	if nTotal == 0 {
-		sys, err := NewGain(D, dt)
+		sys, err := newGain(D, dt)
 		if err != nil {
 			return nil, err
 		}
@@ -1297,7 +1344,7 @@ type Junction struct {
 // outputs returns ErrInvalidArgument; a singular algebraic loop returns
 // ErrAlgebraicLoop.
 func Connect(blksys *System, junctions []Junction, inputs, outputs []int) (*System, error) {
-	if err := requireSystem("Connect", blksys); err != nil {
+	if err := requireFiniteSystem("Connect", blksys); err != nil {
 		return nil, err
 	}
 	if len(inputs) == 0 {
@@ -1327,7 +1374,7 @@ func Connect(blksys *System, junctions []Junction, inputs, outputs []int) (*Syst
 			}
 		}
 	}
-	return connectGain("Connect", blksys, Q, inputs, outputs)
+	return derivedOp("Connect").model(connectGain("Connect", blksys, Q, inputs, outputs))
 }
 
 // connectGain closes u = Q·y + v on the validated model sys, keeping the
@@ -1398,13 +1445,13 @@ func connectWithDelay(op string, sys *System, Q *mat.Dense, inputs, outputs []in
 	sCopy.InputDelay = clearDelayIndexes(sCopy.InputDelay, hoistInputs)
 	sCopy.OutputDelay = clearDelayIndexes(sCopy.OutputDelay, hoistOutputs)
 
-	sLFT, err := sCopy.PullDelaysToLFT()
+	sLFT, err := sCopy.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
 
 	N := sLFT.internalDelayCount()
-	H, tau, err := sLFT.GetDelayModel()
+	H, tau, err := sLFT.getDelayModel()
 	if err != nil {
 		return nil, err
 	}
@@ -1544,7 +1591,7 @@ func connectWithDelay(op string, sys *System, Q *mat.Dense, inputs, outputs []in
 	}
 
 	Hresult := &System{A: Acl, B: Bcl, C: Ccl, D: Dcl, E: sLFT.E, Dt: sys.Dt}
-	result, err := SetDelayModel(Hresult, tau)
+	result, err := setDelayModel(Hresult, tau)
 	if err != nil {
 		return nil, err
 	}
@@ -1589,7 +1636,7 @@ func connectSimple(op string, sys *System, Q *mat.Dense, inputs, outputs []int, 
 				Dcl.Set(ki, kj, Dfull.At(oi, ij))
 			}
 		}
-		result, err := NewGain(Dcl, sys.Dt)
+		result, err := newGain(Dcl, sys.Dt)
 		if err != nil {
 			return nil, err
 		}
@@ -1656,7 +1703,7 @@ func connectSimple(op string, sys *System, Q *mat.Dense, inputs, outputs []int, 
 
 func buildSystem(A, B, C, D *mat.Dense, dt float64, delay *mat.Dense) (*System, error) {
 	if A == nil && B == nil && C == nil {
-		sys, err := NewGain(D, dt)
+		sys, err := newGain(D, dt)
 		if err != nil {
 			return nil, err
 		}

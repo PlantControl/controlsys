@@ -259,7 +259,7 @@ func processSystem(s ProcessStructure, p ProcessParameters) (*System, error) {
 		}
 	}
 	b.Set(0, 0, 1/unit)
-	return New(a, b, c, d, 0)
+	return newDerived(a, b, c, d, 0)
 }
 
 // FitProcess estimates a process model from a SISO record, the analogue of

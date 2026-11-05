@@ -8,9 +8,9 @@ import (
 )
 
 // requireSystem rejects a nil or structurally invalid model at the boundary
-// of the exported operation op. It does not check finiteness: plain arithmetic
-// on a model propagates NaN/Inf as MATLAB does; use requireFiniteSystem before
-// eigen/LAPACK work.
+// of the exported operation op. It does not check finiteness, so internal
+// paths can pass derived models whose responses may diverge; exported
+// operations on caller models use requireFiniteSystem.
 func requireSystem(op string, sys *System) error {
 	if sys == nil {
 		return fmt.Errorf("%s: system is nil: %w", op, ErrInvalidArgument)
@@ -36,13 +36,43 @@ func requireSystems(op string, systems ...*System) error {
 }
 
 // requireFiniteSystem is requireSystem plus a finiteness check of every
-// state-space and internal-delay matrix, for operations that hand the model
-// to eigen/LAPACK routines.
+// state-space and internal-delay matrix, for operations that take a caller
+// model: a NaN/Inf entry returns ErrInvalidArgument.
 func requireFiniteSystem(op string, sys *System) error {
 	if err := requireSystem(op, sys); err != nil {
 		return err
 	}
 	return finiteSystemMatrices(op, sys, ErrInvalidArgument)
+}
+
+// requireFiniteSystems is requireFiniteSystem for the several models of an
+// interconnection, naming the offending one by its 0-based position.
+func requireFiniteSystems(op string, systems ...*System) error {
+	if err := requireSystems(op, systems...); err != nil {
+		return err
+	}
+	for i, sys := range systems {
+		if err := systemMatricesFinite(sys, ErrInvalidArgument); err != nil {
+			return fmt.Errorf("%s: system %d: %w", op, i, err)
+		}
+	}
+	return nil
+}
+
+// derivedOp names a model-building operation for derivedOp.model.
+type derivedOp string
+
+// model passes through the model that operation op derived from finite
+// inputs, unless it has a NaN/Inf entry: that returns ErrOverflow, never a
+// non-finite model with a nil error.
+func (op derivedOp) model(sys *System, err error) (*System, error) {
+	if err != nil {
+		return nil, err
+	}
+	if err := finiteSystemMatrices(string(op), sys, ErrOverflow); err != nil {
+		return nil, err
+	}
+	return sys, nil
 }
 
 // finiteSystemMatrices reports the first NaN/Inf entry of the state-space and
@@ -72,6 +102,38 @@ func systemMatricesFinite(sys *System, sentinel error) error {
 		}
 	}
 	return nil
+}
+
+// newDerived is New for data an operation derived from finite inputs: a
+// NaN/Inf entry is an overflow of that derivation and returns ErrOverflow,
+// not the ErrInvalidArgument of caller-supplied data.
+func newDerived(A, B, C, D *mat.Dense, dt float64) (*System, error) {
+	return finiteDerived(newCopy(A, B, C, D, dt))
+}
+
+// newDerivedGain is newDerived for NewGain.
+func newDerivedGain(D *mat.Dense, dt float64) (*System, error) {
+	return finiteDerived(newGain(D, dt))
+}
+
+// newDerivedFromSlices is newDerived for NewFromSlices.
+func newDerivedFromSlices(n, m, p int, a, b, c, d []float64, dt float64) (*System, error) {
+	return finiteDerived(newFromSlices(n, m, p, a, b, c, d, dt))
+}
+
+// newDerivedDescriptor is newDerived for NewDescriptor.
+func newDerivedDescriptor(A, B, C, D, E *mat.Dense, dt float64) (*System, error) {
+	return finiteDerived(newDescriptor(A, B, C, D, E, dt))
+}
+
+func finiteDerived(sys *System, err error) (*System, error) {
+	if err != nil {
+		return nil, err
+	}
+	if err := systemMatricesFinite(sys, ErrOverflow); err != nil {
+		return nil, err
+	}
+	return sys, nil
 }
 
 // requireFiniteDense rejects a nil matrix or one with a NaN/Inf entry. Callers

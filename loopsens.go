@@ -81,5 +81,5 @@ func Loopsens(P, C *System) (*LoopsensResult, error) {
 }
 
 func makeIdentityGain(n int, dt float64) (*System, error) {
-	return NewGain(eyeOrEmptyDense(n), dt)
+	return newGain(eyeOrEmptyDense(n), dt)
 }
