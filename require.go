@@ -154,8 +154,14 @@ func finiteDense(op, name string, m *mat.Dense, sentinel error) error {
 
 func denseFinite(name string, m *mat.Dense, sentinel error) error {
 	raw := m.RawMatrix()
+	if raw.Stride == raw.Cols && allFinite(raw.Data[:raw.Rows*raw.Cols]) {
+		return nil
+	}
 	for i := range raw.Rows {
 		row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+		if allFinite(row) {
+			continue
+		}
 		for j, v := range row {
 			if !isFinite(v) {
 				return fmt.Errorf("%s[%d,%d] is %g: %w", name, i, j, v, sentinel)
@@ -178,6 +184,24 @@ func requireFinite(op, name string, v ...float64) error {
 		return fmt.Errorf("%s: %s[%d] is %g: %w", op, name, i, x, ErrInvalidArgument)
 	}
 	return nil
+}
+
+// allFinite reports whether every entry of x is finite without a branch per
+// entry: v*0 is ±0 for finite v and NaN for NaN or ±Inf, so the sums stay 0
+// exactly when x is finite.
+func allFinite(x []float64) bool {
+	var s0, s1, s2, s3 float64
+	for len(x) >= 4 {
+		s0 += x[0] * 0
+		s1 += x[1] * 0
+		s2 += x[2] * 0
+		s3 += x[3] * 0
+		x = x[4:]
+	}
+	for _, v := range x {
+		s0 += v * 0
+	}
+	return s0+s1+s2+s3 == 0
 }
 
 func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }

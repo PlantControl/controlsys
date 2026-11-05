@@ -55,12 +55,9 @@ func Series(sys1, sys2 *System) (*System, error) {
 	return derivedOp("Series").model(series(sys1, sys2))
 }
 
-// series is Series without the finiteness checks, for callers that pass
-// validated models and check the model they return.
+// series is Series without the validity checks, for callers that pass
+// valid models and check the model they return.
 func series(sys1, sys2 *System) (*System, error) {
-	if err := requireSystems("Series", sys1, sys2); err != nil {
-		return nil, err
-	}
 	if err := domainMatch(sys1, sys2); err != nil {
 		return nil, err
 	}
@@ -228,11 +225,8 @@ func Parallel(sys1, sys2 *System) (*System, error) {
 	return derivedOp("Parallel").model(parallel(sys1, sys2))
 }
 
-// parallel is Parallel without the finiteness checks; see series.
+// parallel is Parallel without the validity checks; see series.
 func parallel(sys1, sys2 *System) (*System, error) {
-	if err := requireSystems("Parallel", sys1, sys2); err != nil {
-		return nil, err
-	}
 	if err := domainMatch(sys1, sys2); err != nil {
 		return nil, err
 	}
@@ -398,16 +392,8 @@ func Feedback(plant, controller *System, sign float64, ch ...FeedbackChannels) (
 	return derivedOp("Feedback").model(feedback(plant, controller, sign, ch...))
 }
 
-// feedback is Feedback without the finiteness checks; see series.
+// feedback is Feedback without the validity checks; see series.
 func feedback(plant, controller *System, sign float64, ch ...FeedbackChannels) (*System, error) {
-	if err := requireSystem("Feedback", plant); err != nil {
-		return nil, err
-	}
-	if controller != nil {
-		if err := requireSystem("Feedback", controller); err != nil {
-			return nil, err
-		}
-	}
 	if sign != 1 && sign != -1 {
 		return nil, fmt.Errorf("Feedback: sign %g must be -1 or +1: %w", sign, ErrInvalidArgument)
 	}
@@ -549,12 +535,9 @@ func Append(sys1, sys2 *System) (*System, error) {
 	return appendSystems(sys1, sys2)
 }
 
-// appendSystems is Append without the finiteness checks. Its blocks are
-// copies, so finite models give a finite result.
+// appendSystems is Append without the validity checks, for valid models.
+// Its blocks are copies, so finite models give a finite result.
 func appendSystems(sys1, sys2 *System) (*System, error) {
-	if err := requireSystems("Append", sys1, sys2); err != nil {
-		return nil, err
-	}
 	if err := domainMatch(sys1, sys2); err != nil {
 		return nil, err
 	}
