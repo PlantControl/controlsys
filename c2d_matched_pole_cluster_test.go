@@ -285,22 +285,53 @@ func TestC2DMatchedSectionShapesFollowMatchedZPK(t *testing.T) {
 
 // A discrete pole e^{pT} near 1e188 overflows the cascade's C; matched C2D
 // keeps the companion route's answer there and never returns Inf entries.
-func TestC2DMatchedOverflowingSectionKeepsFiniteOrError(t *testing.T) {
-	z, err := NewZPK([]complex128{-1.0241915648397435, -10356.095644626927}, []complex128{-0.5217603941516756, 4320.677636617519}, 0.9231445700524119, 0)
-	if err != nil {
-		t.Fatal(err)
+// 5AES7B: the old C2D literal errored on every route, so it could not fail.
+func TestMatchedCascadeFinite_OverflowReturnsNil(t *testing.T) {
+	cases := []struct {
+		name         string
+		zeros, poles []complex128
+		gain         float64
+	}{
+		{"gain times section C", []complex128{-1e155}, []complex128{1e155}, 1e160},
+		{"complex section C", []complex128{complex(-1e155, 1e155), complex(-1e155, -1e155)}, []complex128{complex(1e155, 1e154), complex(1e155, -1e154)}, 1},
 	}
-	res, err := z.StateSpace()
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range cases {
+		if sys := matchedCascadeFinite(tc.zeros, tc.poles, tc.gain, 0.1); sys != nil {
+			t.Errorf("%s: matchedCascadeFinite = %v, want nil", tc.name, sys)
+		}
+		sys, err := matchedCascade(tc.zeros, tc.poles, tc.gain, 0.1)
+		if err == nil {
+			for name, m := range map[string]*mat.Dense{"A": sys.A, "B": sys.B, "C": sys.C, "D": sys.D} {
+				if !finiteSlice(m.RawMatrix().Data) {
+					t.Errorf("%s: %s = %v is not finite with nil error", tc.name, name, m.RawMatrix().Data)
+				}
+			}
+		}
 	}
-	d, err := res.Sys.C2D(0.1, C2DOptions{Method: C2DMethodMatched})
-	if err != nil {
-		return
+}
+
+func TestMatchedCascadeFinite_MatchesZPK(t *testing.T) {
+	zeros := []complex128{0.1, complex(-0.2, 0.6), complex(-0.2, -0.6)}
+	poles := []complex128{0.5, -0.7, complex(0.3, 0.4), complex(0.3, -0.4)}
+	const gain = 2.5
+	sys := matchedCascadeFinite(zeros, poles, gain, 0.1)
+	if sys == nil {
+		t.Fatal("matchedCascadeFinite = nil on a finite model")
 	}
-	for name, m := range map[string]*mat.Dense{"A": d.A, "B": d.B, "C": d.C, "D": d.D} {
-		if !finiteSlice(m.RawMatrix().Data) {
-			t.Errorf("%s = %v is not finite", name, m.RawMatrix().Data)
+	for _, z := range []complex128{1, -1, cmplx.Rect(1, 0.3), cmplx.Rect(1, 2), complex(0.2, 1.5)} {
+		g, err := sys.EvalFr(z)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := complex(gain, 0)
+		for _, r := range zeros {
+			want *= z - r
+		}
+		for _, p := range poles {
+			want /= z - p
+		}
+		if cmplx.Abs(g[0][0]-want) > 1e-13*cmplx.Abs(want) {
+			t.Errorf("G(%v) = %v, want %v", z, g[0][0], want)
 		}
 	}
 }
