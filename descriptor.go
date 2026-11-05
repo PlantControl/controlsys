@@ -125,7 +125,9 @@ func balancedExplicitForm(sys *System, context string) (*System, int, error) {
 	_, eC := math.Frexp(maxAbsDense(out.C))
 	s := (eC + eB - eY) / 2
 	out.B.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, s) }, out.B)
-	out.C.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, eB-s) }, out.C)
+	if !out.C.IsEmpty() {
+		out.C.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, eB-s) }, out.C)
+	}
 	if err := finiteDense(context, "E⁻¹B", out.B, ErrOverflow); err != nil {
 		return nil, 0, err
 	}

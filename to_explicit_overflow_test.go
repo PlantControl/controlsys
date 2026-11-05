@@ -256,3 +256,20 @@ func TestSimulate_DescriptorWithOverflowingEinvBFinalState(t *testing.T) {
 		t.Fatalf("Simulate = %v, %v; want nil, ErrOverflow", res, err)
 	}
 }
+
+func TestToExplicit_OverflowingEinvBNoOutputs(t *testing.T) {
+	e := math.Ldexp(1, -664)
+	A := mat.NewDense(2, 2, nil)
+	A.Scale(e, mat.NewDense(2, 2, explicitOverflowM))
+	E := mat.NewDense(2, 2, []float64{e, 0, 0, e})
+	sys, err := NewDescriptor(A, mat.NewDense(2, 1, []float64{0, math.Ldexp(1, 498)}),
+		&mat.Dense{}, &mat.Dense{}, E, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := sys.ToExplicit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireExplicitOverflowFinite(t, "B", got.B)
+}

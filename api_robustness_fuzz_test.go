@@ -1629,7 +1629,7 @@ func FuzzAPIDescriptor(f *testing.F) {
 			t.Fatalf("explicitForm: %v after ToExplicit succeeded\n%s", kerr, in)
 		}
 		wantC := snap.C
-		if k != 0 {
+		if k != 0 && !snap.C.IsEmpty() {
 			wantC = mat.DenseCopyOf(snap.C)
 			wantC.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, -k) }, wantC)
 		}
