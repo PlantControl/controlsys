@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -192,61 +193,117 @@ func delayPinDigest(t *testing.T, sys *System, ops string) string {
 // their bits on 3f1ba16, before the guards (OAIXFO).
 func TestDelayAnalysisFixtureResultsPinned(t *testing.T) {
 	skipSlowUnderRace(t)
+	golden, ok := delayPinGolden[runtime.GOARCH]
+	if !ok {
+		t.Skipf("no results pinned for GOARCH=%s", runtime.GOARCH)
+	}
 	for _, f := range delayPinFixtures() {
 		t.Run(f.name, func(t *testing.T) {
 			got := delayPinDigest(t, f.build(t), f.ops)
-			if want := delayPinGolden[f.name]; got != want {
+			if want := golden[f.name]; got != want {
 				t.Errorf("got  %q\nwant %q", got, want)
 			}
 		})
 	}
 }
 
-var delayPinGolden = map[string]string{
-	"cluster/YJINK6-A":                     "c:true,<nil>;d:0x1.632d1ed477ec9p+00,[0x1.725e6a58512ep-03 0x1.61e5591911302p+02],0x1.15fe54bf65fecp+06,0x1.09e8c0ae9bf65p+00,0x1.4418b6836c407p+01,0x1.8dfd866af7693p+05,true;",
-	"cluster/5IT7DX-A":                     "c:true,<nil>;d:0x1.6f972e1969a2fp+00,[0x1.503c93a332848p-03 0x1.85d219dcca706p+02],0x1.1d6967d311947p+06,0x1.0fa0d90bbc4d3p+00,0x1.e636a52b70c3cp-01,0x1.3271a0093b6f9p+04,true;",
-	"cluster/RMVV47":                       "c:true,<nil>;d:0x1.4950477b9f2b9p-02,[0x1.7226eb296f529p-01 0x1.621a6856750d1p+00],0x1.24508c9d7a4fp+04,0x1.7a232d9dd5986p+01,0x1.7f606a81df9ccp+00,0x1.8a138018d3981p+00,true;",
-	"ddreach/0":                            "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
-	"ddreach/2":                            "c:true,<nil>;d:0x1.1a3087c36ae09p-01,[0x1.22c655acfedaep-01 0x1.c2c4a6e11f6cp+00],0x1.ed0573f385ce7p+04,0x1.d034decadf877p+00,0x1.5a2ea96a1193p+01,0x1.7dc18cfef4935p+01,true;",
-	"ddorigin/stable":                      "c:true,<nil>;d:0x1.47f03c7870cdap+00,[0x1.c0cae4d903da3p-03 0x1.240e047df0332p+02],0x1.051e3768c9abp+06,0x1.019d48aeaf6a3p+00,0x1.5ebb5ac86c85bp+00,0x1.3176694e43972p+07,true;",
-	"ddorigin/3-rhp":                       "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
-	"ddorigin/pair-cluster-4-rhp":          "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
-	"pole-limit":                           "c:true,<nil>;d:0x1.868244da5935p+00,[0x1.13b0f9845b692p-03 0x1.db6e27ea39549p+02],0x1.2aaa70f0682fep+06,0x1.0091c3b8f04b3p+00,0x1.6d445fdacd163p-01,0x1.b7813deeeef85p+07,true;",
-	"spread/0":                             "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
-	"spread/1":                             "c:true,<nil>;d:0x1.42f8c42c0dfb9p+00,[0x1.cfa4ef4992b88p-03 0x1.1ab311b723f7cp+02],0x1.01f382241cc84p+06,0x1.01c0880bc1fc6p+00,0x1.0fdd936fb5a14p-01,0x1.8e6c70aaac146p+05,true;",
-	"spread/2":                             "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
-	"spread/3":                             "c:true,<nil>;d:0x1.9ed597e3eab33p-01,[0x1.b189100d8eadap-02 0x1.2e5536a6f88dp+01],0x1.60dae7ea5ecf7p+05,0x1.37c9696fe1552p+00,0x1.e89578f94f489p-01,0x1.4654b12de5388p+00,true;",
-	"tiny-real/0":                          "c:true,<nil>;d:0x1.28952bc38d618p+00,[0x1.10ceaf87229c7p-02 0x1.e074cbd8f261p+01],0x1.e1506695a6764p+05,0x1.0ab68b43e5534p+00,0x1.494aa4dc0343bp+01,0x1.d93aad7ffe658p+05,true;",
-	"ddtrust/0":                            "c:true,<nil>;d:0x1.072ca429121eep+00,[0x1.48b269acee93ep-02 0x1.8ec331b1f6b7ap+01],0x1.b342790269a2cp+05,0x1.247e44c700182p+00,0x1.af96e5fa67308p+01,0x1.d7ced80926625p+04,true;",
-	"repro-internal":                       "h:0x1.f507507507508p+00,0x0p+00,<nil>;l:0x1.f507507507508p+00,<nil>;s:true,<nil>;",
-	"first-order-loop/k1.5":                "d:0x1.9e8c9a94e3488p-01,[0x1.b1d303f90fdd8p-02 0x1.2e21acf730ed3p+01],0x1.60a2c4d9bf098p+05,0x1.b805a9d09e02cp+00,0x1.91a951d6089f9p+01,0x1.9db44eb5a5151p+01,true;",
-	"first-order-loop/k-1.2":               "d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
-	"integrator-loop":                      "d:0x1.6726fd778a886p+00,[0x1.6754c0318d412p-03 0x1.6cc445b3ed59dp+02],0x1.18634aedf227fp+06,0x1.31b56638292e6p+00,0x1.b34ac67224364p+00,0x1.1f7168905a679p+01,true;",
-	"light-resonance/io":                   "d:0x1.0013ecde77168p-01,[0x1.332672d7a3252p-01 0x1.aabc613b64ab1p+00],0x1.c14a7bbd2576fp+04,0x1.3feb15a46f09dp+01,0x1.2a67766e1ef8ap+05,0x1.2a6784fa3201fp+05,true;",
-	"light-resonance/internal":             "d:0x1.0013ecde77168p-01,[0x1.332672d7a3252p-01 0x1.aabc613b64ab1p+00],0x1.c14a7bbd2576fp+04,0x1.3feb15a46f09dp+01,0x1.2a67766e1ef8ap+05,0x1.2a6784fa3201fp+05,true;",
-	"mimo-resonances":                      "h:0x1.db0a8722d9496p+11,0x1.7199994c67d16p+04,<nil>;",
-	"mimo-sensitivity/1":                   "h:0x1.26dfbc80772c6p+00,0x1.712faae1f8912p+01,<nil>;s:true,<nil>;",
-	"mimo-sensitivity/1.8":                 "h:0x1.4e4965700e27cp+00,0x1.768caf5251cdbp+01,<nil>;s:true,<nil>;",
-	"mimo3-sensitivity":                    "h:0x1.29688a34a2b4fp+00,0x1.7cff23eaa9dap+01,<nil>;s:true,<nil>;",
-	"partly-commensurate/no-loop":          "h:0x1.b71a904ca1d1p+01,0x1.4dddfd4e9989ap+00,<nil>;",
-	"partly-commensurate/neutral":          "h:0x1.b68515a3f9fbfp+01,0x1.4c956351d2489p+00,<nil>;",
-	"constant-difference/diagonal-scaling": "h:0x1.663dbe70f1309p+01,0x1.4feff2dcb5e06p-01,<nil>;s:true,<nil>;",
-	"constant-difference/equal-stein":      "h:0x1.47ecbf0631342p+00,0x1.00480f2b13d02p+00,<nil>;s:true,<nil>;",
-	"neutral-pair/k3":                      "h:0x1.54f31d9452359p+02,0x0p+00,<nil>;s:true,<nil>;",
-	"sharp-resonance/0.999":                "h:0x1.1eb245ff85dc9p+09,+Inf,<nil>;",
-	"feedthrough-difference/commensurate":  "h:0x1.7dfccd2596d16p+02,0x1.908b557e122ccp+00,<nil>;",
-	"expansion/near-90":                    "h:0x1.1df44a4b09495p+02,0x1.66cb46fece102p+06,<nil>;",
-	"expansion/limit":                      "h:0x1.de56d3a776b44p+00,+Inf,<nil>;",
-	"torus-cluster-siso":                   "h:0x1.29f15249f27e4p+02,0x1.ee18c7a8723b3p+07,<nil>;",
-	"torus-seed/near-three-15":             "h:0x1.9b33dd4936d8cp+00,+Inf,<nil>;",
-	"far-channel":                          "h:0x1.555555c03ac9ap+00,0x1.0fb48f3bf5cbcp+07,<nil>;",
-	"delay-resonance":                      "h:0x1.74626e5fc644fp+00,0x1.45808126322a9p+00,<nil>;",
-	"companion-feedback":                   "h:0x1p+00,0x0p+00,<nil>;",
-	"neutral-parallel":                     "n:0,0,0;",
-	"indent/double-integrator":             "h:0x1.c6f8cb7e66abbp+00,0x1.1abb69930ce87p+02,<nil>;s:true,<nil>;",
-	"indent/triple-integrator":             "s:true,<nil>;",
-	"static-internal-loop":                 "n:0,0,0;s:true,<nil>;h:0x1p-01,0x0p+00,<nil>;",
-	"delayed-first-order":                  "p:0x1.3efe7372b9b15p+02,0x1.1ab6688283131p+02,0x1.66e284330ad11p-02,0x0p+00;d:0x1.a3c2334d3e17dp+00,[0x1.957dfd5ec5f8dp-04 0x1.433de4bac5e1bp+03],0x1.3ac53ba19a3ep+06,0x1.1c20b664d8dbp+00,0x1.6cf3ee79ec633p+00,0x1.6d02fda93871dp+00,true;",
-	"pid-delay-loop/io":                    "d:0x1.e894cf17cd784p-01,[0x1.6a78e659c313fp-02 0x1.699b0873f2fdbp+01],0x1.981d8fabe9912p+05,0x1.80c103082c868p+00,0x1.6ac505f268784p-01,0x1.89904ba65dee4p-01,true;",
-	"pid-delay-loop/internal":              "d:0x1.e894cf17cd782p-01,[0x1.6a78e659c3142p-02 0x1.699b0873f2fd8p+01],0x1.981d8fabe991p+05,0x1.80c103082c868p+00,0x1.6ac505eba690bp-01,0x1.89904ba65dee4p-01,true;",
+// delayPinGolden holds the 3f1ba16 results per GOARCH: amd64 and arm64
+// round differently (FMA contraction on arm64), so each is pinned.
+var delayPinGolden = map[string]map[string]string{
+	"amd64": {
+		"cluster/YJINK6-A":                     "c:true,<nil>;d:0x1.632d1ed477ec8p+00,[0x1.725e6a58512e2p-03 0x1.61e55919112ffp+02],0x1.15fe54bf65feap+06,0x1.09e8c0ae9bf66p+00,0x1.4418b695faf68p+01,0x1.8dfd851b3437ap+05,true;",
+		"cluster/5IT7DX-A":                     "c:true,<nil>;d:0x1.6f972e1969a2fp+00,[0x1.503c93a332848p-03 0x1.85d219dcca706p+02],0x1.1d6967d311947p+06,0x1.0fa0d90bbc4d3p+00,0x1.e636a4b00b5dp-01,0x1.3271a0093b6f9p+04,true;",
+		"cluster/RMVV47":                       "c:true,<nil>;d:0x1.4950477b9f2b8p-02,[0x1.7226eb296f529p-01 0x1.621a6856750d1p+00],0x1.24508c9d7a4ecp+04,0x1.7a232d9dd5984p+01,0x1.7f606a9c77a72p+00,0x1.8a13803f6040dp+00,true;",
+		"ddreach/0":                            "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"ddreach/2":                            "c:true,<nil>;d:0x1.1a3087c36ae08p-01,[0x1.22c655acfedaep-01 0x1.c2c4a6e11f6cp+00],0x1.ed0573f385cd9p+04,0x1.d034decadf877p+00,0x1.5a2ea9592df73p+01,0x1.7dc18d1dc2c6ap+01,true;",
+		"ddorigin/stable":                      "c:true,<nil>;d:0x1.47f03c7870cd9p+00,[0x1.c0cae4d903da6p-03 0x1.240e047df032fp+02],0x1.051e3768c9aaep+06,0x1.019d48aeaf6a3p+00,0x1.5ebb5a46421d8p+00,0x1.3176694e43973p+07,true;",
+		"ddorigin/3-rhp":                       "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"ddorigin/pair-cluster-4-rhp":          "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"pole-limit":                           "c:true,<nil>;d:0x1.868244da5934ep+00,[0x1.13b0f9845b697p-03 0x1.db6e27ea3954p+02],0x1.2aaa70f0682fep+06,0x1.0091c3b8f04b3p+00,0x1.6d445fceccba1p-01,0x1.b7813deeeef85p+07,true;",
+		"spread/0":                             "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"spread/1":                             "c:true,<nil>;d:0x1.42f8c42c0dfb9p+00,[0x1.cfa4ef4992b88p-03 0x1.1ab311b723f7cp+02],0x1.01f382241cc84p+06,0x1.01c0880bc1fc7p+00,0x1.0fdd93651c149p-01,0x1.8e6c607a9bc5cp+05,true;",
+		"spread/2":                             "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"spread/3":                             "c:true,<nil>;d:0x1.9ed597e3eab33p-01,[0x1.b189100d8eadap-02 0x1.2e5536a6f88dp+01],0x1.60dae7ea5ecf7p+05,0x1.37c9696fe1551p+00,0x1.e89578ca90fe6p-01,0x1.4654b18ba7685p+00,true;",
+		"tiny-real/0":                          "c:true,<nil>;d:0x1.28952bc38d618p+00,[0x1.10ceaf87229c7p-02 0x1.e074cbd8f261p+01],0x1.e1506695a6764p+05,0x1.0ab68b43e5534p+00,0x1.494aa476b48b9p+01,0x1.d93aad7ffe658p+05,true;",
+		"ddtrust/0":                            "c:true,<nil>;d:0x1.072ca429121eep+00,[0x1.48b269acee93ep-02 0x1.8ec331b1f6b7ap+01],0x1.b342790269a2cp+05,0x1.247e44c700182p+00,0x1.af96e6bc03137p+01,0x1.d7ced7f2528c7p+04,true;",
+		"repro-internal":                       "h:0x1.f507507507508p+00,0x0p+00,<nil>;l:0x1.f507507507508p+00,<nil>;s:true,<nil>;",
+		"first-order-loop/k1.5":                "d:0x1.9e8c9a94e3488p-01,[0x1.b1d303f90fdd8p-02 0x1.2e21acf730ed3p+01],0x1.60a2c4d9bf095p+05,0x1.b805a9d09e02cp+00,0x1.91a951d8f55e9p+01,0x1.9db44ea34acdep+01,true;",
+		"first-order-loop/k-1.2":               "d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"integrator-loop":                      "d:0x1.6726fd778a886p+00,[0x1.6754c0318d412p-03 0x1.6cc445b3ed59dp+02],0x1.18634aedf227fp+06,0x1.31b56638292e6p+00,0x1.b34ac67224364p+00,0x1.1f7168905a679p+01,true;",
+		"light-resonance/io":                   "d:0x1.0013ecde777f8p-01,[0x1.332672d7a2e1fp-01 0x1.aabc613b65086p+00],0x1.c14a7bbd2627cp+04,0x1.3feb15a46f4cp+01,0x1.2a67766e25cadp+05,0x1.2a6784f99e67ap+05,true;",
+		"light-resonance/internal":             "d:0x1.0013ecde777f8p-01,[0x1.332672d7a2e1fp-01 0x1.aabc613b65086p+00],0x1.c14a7bbd2627cp+04,0x1.3feb15a46f4cp+01,0x1.2a67766e25cadp+05,0x1.2a6784f99e67ap+05,true;",
+		"mimo-resonances":                      "h:0x1.db0a8722df8d7p+11,0x1.7199994bfc1b7p+04,<nil>;",
+		"mimo-sensitivity/1":                   "h:0x1.26dfbc80772c7p+00,0x1.712faae2314afp+01,<nil>;s:true,<nil>;",
+		"mimo-sensitivity/1.8":                 "h:0x1.4e4965700e27cp+00,0x1.768caf51f0ad6p+01,<nil>;s:true,<nil>;",
+		"mimo3-sensitivity":                    "h:0x1.29688a34a2b4ep+00,0x1.7cff240352d72p+01,<nil>;s:true,<nil>;",
+		"partly-commensurate/no-loop":          "h:0x1.b71a904ca1d1p+01,0x1.4dddfd4e9989ap+00,<nil>;",
+		"partly-commensurate/neutral":          "h:0x1.b68515a3f9fcp+01,0x1.4c956351d1dcbp+00,<nil>;",
+		"constant-difference/diagonal-scaling": "h:0x1.663dbe70f130ap+01,0x1.4feff2652bc18p-01,<nil>;s:true,<nil>;",
+		"constant-difference/equal-stein":      "h:0x1.47ecbf0631343p+00,0x1.00480f181c73p+00,<nil>;s:true,<nil>;",
+		"neutral-pair/k3":                      "h:0x1.54f31d9452359p+02,0x0p+00,<nil>;s:true,<nil>;",
+		"sharp-resonance/0.999":                "h:0x1.1eb245ff85dc9p+09,+Inf,<nil>;",
+		"feedthrough-difference/commensurate":  "h:0x1.7dfccd2596d17p+02,0x1.908b557209227p+00,<nil>;",
+		"expansion/near-90":                    "h:0x1.1df44a4b09495p+02,0x1.66cb46fece102p+06,<nil>;",
+		"expansion/limit":                      "h:0x1.de56d3a776b44p+00,+Inf,<nil>;",
+		"torus-cluster-siso":                   "h:0x1.29f15249f27e4p+02,0x1.ee18c7a8723b3p+07,<nil>;",
+		"torus-seed/near-three-15":             "h:0x1.9b33dd4936d8bp+00,+Inf,<nil>;",
+		"far-channel":                          "h:0x1.555555c03ac9ap+00,0x1.0fb48f3bf5cbcp+07,<nil>;",
+		"delay-resonance":                      "h:0x1.74626e5fc644fp+00,0x1.45808126322a9p+00,<nil>;",
+		"companion-feedback":                   "h:0x1p+00,0x0p+00,<nil>;",
+		"neutral-parallel":                     "n:0,0,0;",
+		"indent/double-integrator":             "h:0x1.c6f8cb7e66abcp+00,0x1.1abb695b349dp+02,<nil>;s:true,<nil>;",
+		"indent/triple-integrator":             "s:true,<nil>;",
+		"static-internal-loop":                 "n:0,0,0;s:true,<nil>;h:0x1p-01,0x0p+00,<nil>;",
+		"delayed-first-order":                  "p:0x1.3efe7372b9b18p+02,0x1.1ab6688283131p+02,0x1.66e284330ad13p-02,0x0p+00;d:0x1.a3c2334d3e17dp+00,[0x1.957dfd5ec5f8dp-04 0x1.433de4bac5e1bp+03],0x1.3ac53ba19a3ep+06,0x1.1c20b664d8dbp+00,0x1.6cf3ee79ec633p+00,0x1.6d02fda93871dp+00,true;",
+		"pid-delay-loop/io":                    "d:0x1.e894cf17cd787p-01,[0x1.6a78e659c313cp-02 0x1.699b0873f2fdep+01],0x1.981d8fabe9912p+05,0x1.80c103082c868p+00,0x1.6ac5061a45742p-01,0x1.89904c28a646p-01,true;",
+		"pid-delay-loop/internal":              "d:0x1.e894cf17cd787p-01,[0x1.6a78e659c313cp-02 0x1.699b0873f2fdep+01],0x1.981d8fabe9912p+05,0x1.80c103082c868p+00,0x1.6ac5061a45742p-01,0x1.89904c28a646p-01,true;",
+	},
+	"arm64": {
+		"cluster/YJINK6-A":                     "c:true,<nil>;d:0x1.632d1ed477ec9p+00,[0x1.725e6a58512ep-03 0x1.61e5591911302p+02],0x1.15fe54bf65fecp+06,0x1.09e8c0ae9bf65p+00,0x1.4418b6836c407p+01,0x1.8dfd866af7693p+05,true;",
+		"cluster/5IT7DX-A":                     "c:true,<nil>;d:0x1.6f972e1969a2fp+00,[0x1.503c93a332848p-03 0x1.85d219dcca706p+02],0x1.1d6967d311947p+06,0x1.0fa0d90bbc4d3p+00,0x1.e636a52b70c3cp-01,0x1.3271a0093b6f9p+04,true;",
+		"cluster/RMVV47":                       "c:true,<nil>;d:0x1.4950477b9f2b9p-02,[0x1.7226eb296f529p-01 0x1.621a6856750d1p+00],0x1.24508c9d7a4fp+04,0x1.7a232d9dd5986p+01,0x1.7f606a81df9ccp+00,0x1.8a138018d3981p+00,true;",
+		"ddreach/0":                            "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"ddreach/2":                            "c:true,<nil>;d:0x1.1a3087c36ae09p-01,[0x1.22c655acfedaep-01 0x1.c2c4a6e11f6cp+00],0x1.ed0573f385ce7p+04,0x1.d034decadf877p+00,0x1.5a2ea96a1193p+01,0x1.7dc18cfef4935p+01,true;",
+		"ddorigin/stable":                      "c:true,<nil>;d:0x1.47f03c7870cdap+00,[0x1.c0cae4d903da3p-03 0x1.240e047df0332p+02],0x1.051e3768c9abp+06,0x1.019d48aeaf6a3p+00,0x1.5ebb5ac86c85bp+00,0x1.3176694e43972p+07,true;",
+		"ddorigin/3-rhp":                       "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"ddorigin/pair-cluster-4-rhp":          "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"pole-limit":                           "c:true,<nil>;d:0x1.868244da5935p+00,[0x1.13b0f9845b692p-03 0x1.db6e27ea39549p+02],0x1.2aaa70f0682fep+06,0x1.0091c3b8f04b3p+00,0x1.6d445fdacd163p-01,0x1.b7813deeeef85p+07,true;",
+		"spread/0":                             "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"spread/1":                             "c:true,<nil>;d:0x1.42f8c42c0dfb9p+00,[0x1.cfa4ef4992b88p-03 0x1.1ab311b723f7cp+02],0x1.01f382241cc84p+06,0x1.01c0880bc1fc6p+00,0x1.0fdd936fb5a14p-01,0x1.8e6c70aaac146p+05,true;",
+		"spread/2":                             "c:false,<nil>;d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"spread/3":                             "c:true,<nil>;d:0x1.9ed597e3eab33p-01,[0x1.b189100d8eadap-02 0x1.2e5536a6f88dp+01],0x1.60dae7ea5ecf7p+05,0x1.37c9696fe1552p+00,0x1.e89578f94f489p-01,0x1.4654b12de5388p+00,true;",
+		"tiny-real/0":                          "c:true,<nil>;d:0x1.28952bc38d618p+00,[0x1.10ceaf87229c7p-02 0x1.e074cbd8f261p+01],0x1.e1506695a6764p+05,0x1.0ab68b43e5534p+00,0x1.494aa4dc0343bp+01,0x1.d93aad7ffe658p+05,true;",
+		"ddtrust/0":                            "c:true,<nil>;d:0x1.072ca429121eep+00,[0x1.48b269acee93ep-02 0x1.8ec331b1f6b7ap+01],0x1.b342790269a2cp+05,0x1.247e44c700182p+00,0x1.af96e5fa67308p+01,0x1.d7ced80926625p+04,true;",
+		"repro-internal":                       "h:0x1.f507507507508p+00,0x0p+00,<nil>;l:0x1.f507507507508p+00,<nil>;s:true,<nil>;",
+		"first-order-loop/k1.5":                "d:0x1.9e8c9a94e3488p-01,[0x1.b1d303f90fdd8p-02 0x1.2e21acf730ed3p+01],0x1.60a2c4d9bf098p+05,0x1.b805a9d09e02cp+00,0x1.91a951d6089f9p+01,0x1.9db44eb5a5151p+01,true;",
+		"first-order-loop/k-1.2":               "d:0x0p+00,[0x1p+00 0x1p+00],0x0p+00,+Inf,0x0p+00,0x0p+00,false;",
+		"integrator-loop":                      "d:0x1.6726fd778a886p+00,[0x1.6754c0318d412p-03 0x1.6cc445b3ed59dp+02],0x1.18634aedf227fp+06,0x1.31b56638292e6p+00,0x1.b34ac67224364p+00,0x1.1f7168905a679p+01,true;",
+		"light-resonance/io":                   "d:0x1.0013ecde77168p-01,[0x1.332672d7a3252p-01 0x1.aabc613b64ab1p+00],0x1.c14a7bbd2576fp+04,0x1.3feb15a46f09dp+01,0x1.2a67766e1ef8ap+05,0x1.2a6784fa3201fp+05,true;",
+		"light-resonance/internal":             "d:0x1.0013ecde77168p-01,[0x1.332672d7a3252p-01 0x1.aabc613b64ab1p+00],0x1.c14a7bbd2576fp+04,0x1.3feb15a46f09dp+01,0x1.2a67766e1ef8ap+05,0x1.2a6784fa3201fp+05,true;",
+		"mimo-resonances":                      "h:0x1.db0a8722d9496p+11,0x1.7199994c67d16p+04,<nil>;",
+		"mimo-sensitivity/1":                   "h:0x1.26dfbc80772c6p+00,0x1.712faae1f8912p+01,<nil>;s:true,<nil>;",
+		"mimo-sensitivity/1.8":                 "h:0x1.4e4965700e27cp+00,0x1.768caf5251cdbp+01,<nil>;s:true,<nil>;",
+		"mimo3-sensitivity":                    "h:0x1.29688a34a2b4fp+00,0x1.7cff23eaa9dap+01,<nil>;s:true,<nil>;",
+		"partly-commensurate/no-loop":          "h:0x1.b71a904ca1d1p+01,0x1.4dddfd4e9989ap+00,<nil>;",
+		"partly-commensurate/neutral":          "h:0x1.b68515a3f9fbfp+01,0x1.4c956351d2489p+00,<nil>;",
+		"constant-difference/diagonal-scaling": "h:0x1.663dbe70f1309p+01,0x1.4feff2dcb5e06p-01,<nil>;s:true,<nil>;",
+		"constant-difference/equal-stein":      "h:0x1.47ecbf0631342p+00,0x1.00480f2b13d02p+00,<nil>;s:true,<nil>;",
+		"neutral-pair/k3":                      "h:0x1.54f31d9452359p+02,0x0p+00,<nil>;s:true,<nil>;",
+		"sharp-resonance/0.999":                "h:0x1.1eb245ff85dc9p+09,+Inf,<nil>;",
+		"feedthrough-difference/commensurate":  "h:0x1.7dfccd2596d16p+02,0x1.908b557e122ccp+00,<nil>;",
+		"expansion/near-90":                    "h:0x1.1df44a4b09495p+02,0x1.66cb46fece102p+06,<nil>;",
+		"expansion/limit":                      "h:0x1.de56d3a776b44p+00,+Inf,<nil>;",
+		"torus-cluster-siso":                   "h:0x1.29f15249f27e4p+02,0x1.ee18c7a8723b3p+07,<nil>;",
+		"torus-seed/near-three-15":             "h:0x1.9b33dd4936d8cp+00,+Inf,<nil>;",
+		"far-channel":                          "h:0x1.555555c03ac9ap+00,0x1.0fb48f3bf5cbcp+07,<nil>;",
+		"delay-resonance":                      "h:0x1.74626e5fc644fp+00,0x1.45808126322a9p+00,<nil>;",
+		"companion-feedback":                   "h:0x1p+00,0x0p+00,<nil>;",
+		"neutral-parallel":                     "n:0,0,0;",
+		"indent/double-integrator":             "h:0x1.c6f8cb7e66abbp+00,0x1.1abb69930ce87p+02,<nil>;s:true,<nil>;",
+		"indent/triple-integrator":             "s:true,<nil>;",
+		"static-internal-loop":                 "n:0,0,0;s:true,<nil>;h:0x1p-01,0x0p+00,<nil>;",
+		"delayed-first-order":                  "p:0x1.3efe7372b9b15p+02,0x1.1ab6688283131p+02,0x1.66e284330ad11p-02,0x0p+00;d:0x1.a3c2334d3e17dp+00,[0x1.957dfd5ec5f8dp-04 0x1.433de4bac5e1bp+03],0x1.3ac53ba19a3ep+06,0x1.1c20b664d8dbp+00,0x1.6cf3ee79ec633p+00,0x1.6d02fda93871dp+00,true;",
+		"pid-delay-loop/io":                    "d:0x1.e894cf17cd784p-01,[0x1.6a78e659c313fp-02 0x1.699b0873f2fdbp+01],0x1.981d8fabe9912p+05,0x1.80c103082c868p+00,0x1.6ac505f268784p-01,0x1.89904ba65dee4p-01,true;",
+		"pid-delay-loop/internal":              "d:0x1.e894cf17cd782p-01,[0x1.6a78e659c3142p-02 0x1.699b0873f2fd8p+01],0x1.981d8fabe991p+05,0x1.80c103082c868p+00,0x1.6ac505eba690bp-01,0x1.89904ba65dee4p-01,true;",
+	},
 }
