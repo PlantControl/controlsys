@@ -53,13 +53,48 @@ func (sys *System) DescriptorE() *mat.Dense {
 }
 
 // ToExplicit returns the equivalent explicit model (E⁻¹A, E⁻¹B, C, D) of a
-// descriptor model, or a copy of an explicit one. A numerically singular E,
-// rank below n by MATLAB's rank (eRankDeficient), returns
-// ErrDescriptorSingular.
+// descriptor model, or a copy of an explicit one. An E⁻¹B that overflows
+// is balanced against C by the exact state scaling x̄ = 2ᵏ·x, giving
+// (E⁻¹A, E⁻¹B·2ᵏ, C·2⁻ᵏ, D) with the same transfer function, as MATLAB
+// ss(sys,'explicit') returns some equivalent explicit realization. A
+// numerically singular E, rank below n by MATLAB's rank (eRankDeficient),
+// returns ErrDescriptorSingular; an E⁻¹A, internal-delay E⁻¹B₂ or balanced
+// model beyond float64 range returns ErrOverflow.
 func (sys *System) ToExplicit() (*System, error) {
 	if err := requireSystem("ToExplicit", sys); err != nil {
 		return nil, err
 	}
+	out, _, err := sys.explicitForm("ToExplicit")
+	return out, err
+}
+
+// explicitForm is ToExplicit also returning the exponent k of the state
+// scaling x̄ = 2ᵏ·x of the result; k = 0 keeps the state coordinates. A
+// model with a non-finite entry is folded unchecked.
+func (sys *System) explicitForm(context string) (*System, int, error) {
+	out, err := sys.foldExplicit(context)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !sys.IsDescriptor() || finiteSystemMatrices(context, sys, ErrOverflow) != nil {
+		return out, 0, nil
+	}
+	if err := finiteDense(context, "E⁻¹A", out.A, ErrOverflow); err != nil {
+		return nil, 0, err
+	}
+	if out.LFT != nil && out.LFT.B2 != nil {
+		if err := finiteDense(context, "E⁻¹B2", out.LFT.B2, ErrOverflow); err != nil {
+			return nil, 0, err
+		}
+	}
+	if finiteDense(context, "E⁻¹B", out.B, ErrOverflow) == nil {
+		return out, 0, nil
+	}
+	return balancedExplicitForm(sys, context)
+}
+
+// foldExplicit is the unbalanced fold (E⁻¹A, E⁻¹B, C, D) of ToExplicit.
+func (sys *System) foldExplicit(context string) (*System, error) {
 	if !sys.IsDescriptor() {
 		cp := sys.Copy()
 		cp.E = nil
@@ -68,22 +103,22 @@ func (sys *System) ToExplicit() (*System, error) {
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	if eRankDeficient(sys.E, &lu) {
-		return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
+		return nil, fmt.Errorf("%s: %w", context, ErrDescriptorSingular)
 	}
 
 	result := sys.Copy()
 	result.E = nil
 	if err := fullRankSolve(&lu, result.A, sys.A); err != nil {
-		return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
+		return nil, fmt.Errorf("%s: %w", context, ErrDescriptorSingular)
 	}
 	if _, m, _ := sys.Dims(); m > 0 {
 		if err := fullRankSolve(&lu, result.B, sys.B); err != nil {
-			return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
+			return nil, fmt.Errorf("%s: %w", context, ErrDescriptorSingular)
 		}
 	}
 	if result.LFT != nil && result.LFT.B2 != nil {
 		if err := fullRankSolve(&lu, result.LFT.B2, sys.LFT.B2); err != nil {
-			return nil, fmt.Errorf("ToExplicit: %w", ErrDescriptorSingular)
+			return nil, fmt.Errorf("%s: %w", context, ErrDescriptorSingular)
 		}
 	}
 	return result, nil

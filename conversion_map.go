@@ -26,9 +26,12 @@ func (sys *System) C2DMap(dt float64, opts C2DOptions) (*System, *mat.Dense, err
 	if err != nil {
 		return nil, nil, fmt.Errorf("C2DMap: %w", err)
 	}
-	std, reduced, err := conversionStandardForm(sys, "C2DMap")
+	std, reduced, k, err := conversionStandardFormScaled(sys, "C2DMap")
 	if err != nil {
 		return nil, nil, err
+	}
+	if k != 0 {
+		return nil, nil, fmt.Errorf("C2DMap: E⁻¹B overflows the descriptor state coordinates: %w", ErrOverflow)
 	}
 	if reduced {
 		return nil, nil, fmt.Errorf("C2DMap: algebraic descriptor states are eliminated: %w", ErrDescriptorInitialState)
@@ -61,9 +64,12 @@ func (sys *System) D2CMap(opts D2COptions) (*System, *mat.Dense, error) {
 	if opts.Method == "" {
 		opts.Method = C2DMethodZOH
 	}
-	std, reduced, err := conversionStandardForm(sys, "D2CMap")
+	std, reduced, k, err := conversionStandardFormScaled(sys, "D2CMap")
 	if err != nil {
 		return nil, nil, err
+	}
+	if k != 0 {
+		return nil, nil, fmt.Errorf("D2CMap: E⁻¹B overflows the descriptor state coordinates: %w", ErrOverflow)
 	}
 	if reduced {
 		return nil, nil, fmt.Errorf("D2CMap: algebraic descriptor states are eliminated: %w", ErrDescriptorInitialState)

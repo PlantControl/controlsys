@@ -82,11 +82,10 @@ func (p descriptorPolicy) requireStandard(context string) error {
 // explicit model E⁻¹A, E⁻¹B can lose half the significant digits.
 var normDescriptorCondLimit = 1 / math.Sqrt(eps())
 
-// normExplicitForm returns sys with a nonsingular E folded in, (E⁻¹A, E⁻¹B,
-// C, D), which keeps the transfer function and the poles; an E⁻¹B that
-// overflows is balanced against C by balancedExplicitForm. Singular E and E
-// with condition above normDescriptorCondLimit return ErrDescriptorUnsupported
-// wrapping ErrDescriptorSingular.
+// normExplicitForm returns sys with a nonsingular E folded in by
+// explicitForm, which keeps the transfer function and the poles. Singular E
+// and E with condition above normDescriptorCondLimit return
+// ErrDescriptorUnsupported wrapping ErrDescriptorSingular.
 func normExplicitForm(sys *System, context string) (*System, error) {
 	if !sys.IsDescriptor() {
 		return sys, nil
@@ -100,42 +99,42 @@ func normExplicitForm(sys *System, context string) (*System, error) {
 		return nil, fmt.Errorf("%s: cond(E) ≈ %.3g exceeds %.3g: %w: %w",
 			context, cond, normDescriptorCondLimit, ErrDescriptorUnsupported, ErrDescriptorSingular)
 	}
-	out, err := sys.ToExplicit()
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
+	out, _, err := sys.explicitForm(context)
+	if errors.Is(err, ErrDescriptorSingular) {
+		return nil, fmt.Errorf("%w: %w", ErrDescriptorUnsupported, err)
 	}
-	if finiteDense(context, "E⁻¹B", out.B, ErrOverflow) == nil {
-		return out, nil
-	}
-	return balancedExplicitForm(sys, context)
+	return out, err
 }
 
-// balancedExplicitForm returns (E⁻¹A, E⁻¹B·2ˢ, C·2⁻ˢ, D) for an E⁻¹B that
-// overflows unscaled; the power-of-two state scaling keeps the transfer
-// function exactly and balances the exponents of the input and output maps.
-func balancedExplicitForm(sys *System, context string) (*System, error) {
+// balancedExplicitForm returns (E⁻¹A, E⁻¹B·2ᵏ, C·2⁻ᵏ, D) and k for an E⁻¹B
+// that overflows unscaled; the power-of-two state scaling x̄ = 2ᵏ·x keeps
+// the transfer function exactly and balances the exponents of the input and
+// output maps.
+func balancedExplicitForm(sys *System, context string) (*System, int, error) {
 	if sys.LFT != nil {
-		return nil, fmt.Errorf("%s: E⁻¹B overflows: %w", context, ErrOverflow)
+		return nil, 0, fmt.Errorf("%s: E⁻¹B overflows: %w", context, ErrOverflow)
 	}
 	B, eB := pow2Scaled(sys.B)
 	scaled := *sys
 	scaled.B = B
-	out, err := scaled.ToExplicit()
+	out, err := scaled.foldExplicit(context)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
+		return nil, 0, err
 	}
 	_, eY := math.Frexp(maxAbsDense(out.B))
 	_, eC := math.Frexp(maxAbsDense(out.C))
 	s := (eC + eB - eY) / 2
 	out.B.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, s) }, out.B)
-	out.C.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, eB-s) }, out.C)
+	if !out.C.IsEmpty() {
+		out.C.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, eB-s) }, out.C)
+	}
 	if err := finiteDense(context, "E⁻¹B", out.B, ErrOverflow); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := finiteDense(context, "C", out.C, ErrOverflow); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return out, nil
+	return out, s - eB, nil
 }
 
 // requireNonsingular rejects a singular E, as MATLAB lqr, lqi, icare and
@@ -453,55 +452,100 @@ func blkDiagDescriptorE(parts ...*System) *mat.Dense {
 }
 
 // conversionStandardForm returns sys without E, as MATLAB c2d and d2c do for
-// dss models. Invertible E is folded into the state equation and keeps the
-// state coordinates. Singular E is reduced by properExplicitForm (MATLAB
-// dss2ss): the algebraic states are eliminated, the state coordinates change
-// and state names are dropped, so reduced reports true. Improper models and
-// singular pencils are rejected with ErrDescriptorUnsupported wrapping
-// ErrImproperModel or ErrDescriptorSingular.
+// dss models. Invertible E is folded into the state equation by explicitForm,
+// which keeps the state coordinates unless E⁻¹B overflows. Singular E is
+// reduced by properExplicitForm (MATLAB dss2ss): the algebraic states are
+// eliminated, the state coordinates change and state names are dropped, so
+// reduced reports true. Improper models and singular pencils are rejected
+// with ErrDescriptorUnsupported wrapping ErrImproperModel or
+// ErrDescriptorSingular; a fold beyond float64 range with ErrOverflow.
 func conversionStandardForm(sys *System, context string) (out *System, reduced bool, err error) {
+	out, reduced, _, err = conversionStandardFormScaled(sys, context)
+	return out, reduced, err
+}
+
+// conversionStandardFormScaled is conversionStandardForm also returning the
+// exponent k of the state scaling x̄ = 2ᵏ·x of an unreduced result.
+func conversionStandardFormScaled(sys *System, context string) (out *System, reduced bool, k int, err error) {
 	if !sys.IsDescriptor() {
-		return sys, false, nil
+		return sys, false, 0, nil
 	}
-	if explicit, err := sys.ToExplicit(); err == nil {
-		return explicit, false, nil
+	explicit, k, err := sys.explicitForm(context)
+	if err == nil {
+		return explicit, false, k, nil
+	}
+	if !errors.Is(err, ErrDescriptorSingular) {
+		return nil, false, 0, err
 	}
 	out, err = sys.properExplicitForm()
 	if err != nil {
-		return nil, false, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
+		return nil, false, 0, fmt.Errorf("%s: %w: %w", context, ErrDescriptorUnsupported, err)
 	}
-	return out, true, nil
+	return out, true, 0, nil
 }
 
 // timeResponseForm returns sys without E for time-domain simulation, as
 // MATLAB's step, impulse, initial and lsim do for dss models. Invertible E
-// keeps the state coordinates, so x0 carries over unchanged. Singular E is
+// is folded by explicitForm; x0 is returned in its state coordinates, scaled
+// by 2ᵏ when E⁻¹B overflows (ErrOverflow if x0·2ᵏ does). Singular E is
 // reduced by properExplicitForm, whose state is the slow subsystem only;
 // as in MATLAB, a nonzero x0 is then rejected with ErrDescriptorInitialState
 // and the returned x0 is nil. x0 must have the original state dimension.
 func (sys *System) timeResponseForm(x0 *mat.VecDense) (*System, *mat.VecDense, bool, error) {
+	out, x0, reduced, _, err := sys.timeResponseFormScaled(x0)
+	return out, x0, reduced, err
+}
+
+// timeResponseFormScaled is timeResponseForm also returning the exponent k
+// of the state scaling x̄ = 2ᵏ·x of an unreduced result.
+func (sys *System) timeResponseFormScaled(x0 *mat.VecDense) (*System, *mat.VecDense, bool, int, error) {
 	n, _, _ := sys.Dims()
 	if x0 != nil && x0.Len() != n {
-		return nil, nil, false, fmt.Errorf("x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
+		return nil, nil, false, 0, fmt.Errorf("x0 length %d != state dimension %d: %w", x0.Len(), n, ErrDimensionMismatch)
 	}
 	sys, err := sys.splitIODelayForInitialState(x0)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, 0, err
 	}
 	if !sys.IsDescriptor() {
-		return sys, x0, false, nil
+		return sys, x0, false, 0, nil
 	}
-	if explicit, err := sys.ToExplicit(); err == nil {
-		return explicit, x0, false, nil
+	explicit, k, err := sys.explicitForm("explicit form")
+	if err == nil {
+		x0, err = scaledInitialState(x0, k)
+		if err != nil {
+			return nil, nil, false, 0, err
+		}
+		return explicit, x0, false, k, nil
+	}
+	if !errors.Is(err, ErrDescriptorSingular) {
+		return nil, nil, false, 0, err
 	}
 	if x0 != nil && !allZeroVec(x0) {
-		return nil, nil, false, fmt.Errorf("%w: %w", ErrDescriptorInitialState, ErrDescriptorSingular)
+		return nil, nil, false, 0, fmt.Errorf("%w: %w", ErrDescriptorInitialState, ErrDescriptorSingular)
 	}
 	reduced, err := sys.properExplicitForm()
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, 0, err
 	}
-	return reduced, nil, true, nil
+	return reduced, nil, true, 0, nil
+}
+
+// scaledInitialState returns x0·2ᵏ, x0 itself for k = 0 or a nil x0, and
+// ErrOverflow when an entry leaves float64 range.
+func scaledInitialState(x0 *mat.VecDense, k int) (*mat.VecDense, error) {
+	if x0 == nil || k == 0 {
+		return x0, nil
+	}
+	out := mat.NewVecDense(x0.Len(), nil)
+	for i := range x0.Len() {
+		v := math.Ldexp(x0.AtVec(i), k)
+		if !isFinite(v) {
+			return nil, fmt.Errorf("x0[%d]·2^%d is %g in the balanced explicit form: %w", i, k, v, ErrOverflow)
+		}
+		out.SetVec(i, v)
+	}
+	return out, nil
 }
 
 func allZeroVec(v *mat.VecDense) bool {

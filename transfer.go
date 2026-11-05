@@ -257,8 +257,12 @@ func transferStandardForm(sys *System) (*System, []*mat.Dense, error) {
 	if !sys.IsDescriptor() {
 		return sys, nil, nil
 	}
-	if explicit, err := sys.ToExplicit(); err == nil {
+	explicit, err := sys.ToExplicit()
+	if err == nil {
 		return explicit, nil, nil
+	}
+	if !errors.Is(err, ErrDescriptorSingular) {
+		return nil, nil, fmt.Errorf("TransferFunction: %w", err)
 	}
 	out, poly, err := sys.weierstrassReduceParts()
 	if err == nil {

@@ -1624,15 +1624,29 @@ func FuzzAPIDescriptor(f *testing.F) {
 		if ex.E != nil && !isIdentityDescriptor(ex.E) {
 			t.Fatalf("ToExplicit left E = %v\n%s", mat.Formatted(ex.E), in)
 		}
-		if !fzAPISameBlock(snap.C, ex.C) || !fzAPISameBlock(snap.D, ex.D) {
-			t.Fatalf("ToExplicit changed C or D\n%s", in)
+		_, k, kerr := snap.explicitForm("ToExplicit")
+		if kerr != nil {
+			t.Fatalf("explicitForm: %v after ToExplicit succeeded\n%s", kerr, in)
+		}
+		wantC := snap.C
+		if k != 0 && !snap.C.IsEmpty() {
+			wantC = mat.DenseCopyOf(snap.C)
+			wantC.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, -k) }, wantC)
+		}
+		if !fzAPISameBlock(wantC, ex.C) || !fzAPISameBlock(snap.D, ex.D) {
+			t.Fatalf("ToExplicit changed C·2^-k (k=%d) or D\n%s", k, in)
 		}
 		if n == 0 || snap.E == nil || !finite {
 			return
 		}
 		fzAPIResidual(t, in, "A", snap.E, ex.A, snap.A)
 		if _, m, _ := snap.Dims(); m > 0 {
-			fzAPIResidual(t, in, "B", snap.E, ex.B, snap.B)
+			wantB := snap.B
+			if k != 0 {
+				wantB = mat.DenseCopyOf(snap.B)
+				wantB.Apply(func(_, _ int, v float64) float64 { return math.Ldexp(v, k) }, wantB)
+			}
+			fzAPIResidual(t, in, "B", snap.E, ex.B, wantB)
 		}
 	})
 }
