@@ -598,6 +598,8 @@ func (l *delayLoop) winding(R, w1 float64) (delayNyquist, error) {
 			return delayNyquist{}, fmt.Errorf("refined grid exceeds %d points: %w", l.pointBudget(), errDelayLoopUnsupported)
 		case refineUncertified:
 			return delayNyquist{}, fmt.Errorf("phase of 1+L not certified near ω=%g: %w", wRoot, errDelayLoopUnsupported)
+		case refineNonFinite:
+			return delayNyquist{}, fmt.Errorf("1+L is not finite at ω=%g: %w", wRoot, ErrOverflow)
 		}
 		fs := out.f[base:]
 		switch {
@@ -969,6 +971,7 @@ const (
 	refineAxisRoot
 	refineBudget
 	refineUncertified
+	refineNonFinite
 )
 
 func (l *delayLoop) pointBudget() int {
@@ -988,8 +991,10 @@ func (l *delayLoop) pointBudget() int {
 // and the root frequency when 1+L vanishes, or when a span of the bisection
 // tolerance is not certified and its phase turns by more than π/4, i.e. a
 // closed-loop root sits on the axis; refineUncertified when such a span
-// turns less; and refineBudget when the segment would exceed budget points.
-// The points are appended to ws and fs.
+// turns less; refineBudget when the segment would exceed budget points; and
+// refineNonFinite when a sample of 1+L is NaN or ±Inf with no evaluation
+// failure recorded, an overflow rather than a root. The points are appended
+// to ws and fs.
 func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []complex128) ([]float64, []complex128, refineResult, float64) {
 	f := l.one
 	if f == nil {
@@ -1002,7 +1007,7 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 	ws = append(ws, prev.w)
 	fs = append(fs, prev.f)
 	if !l.resolved(&prev) {
-		return ws, fs, refineAxisRoot, prev.w
+		return ws, fs, l.unresolved(prev.f), prev.w
 	}
 	stack := l.stack[:0]
 	defer func() { l.stack = stack[:0] }()
@@ -1012,7 +1017,7 @@ func (l *delayLoop) refine(seg nyquistSegment, budget int, ws []float64, fs []co
 			s := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 			if !l.resolved(&s.b) {
-				return ws, fs, refineAxisRoot, s.b.w
+				return ws, fs, l.unresolved(s.b.f), s.b.w
 			}
 			if l.certifiedSpan(&s) {
 				l.freeModels = append(l.freeModels, s.a.mi)
@@ -1187,6 +1192,15 @@ func (l *delayLoop) resolved(n *refineNode) bool {
 	return nm.good[0] && m.rho*(m.unit+a) <= maxSampleRho*a
 }
 
+// unresolved classifies an unresolved sample f of 1+L: an axis root, or an
+// overflow when f is not finite although no evaluation failed.
+func (l *delayLoop) unresolved(f complex128) refineResult {
+	if !finite(f) && !l.failed() {
+		return refineNonFinite
+	}
+	return refineAxisRoot
+}
+
 // maxSampleRho bounds the relative rounding of a sample of 1+L that falls
 // below resolvedNonzero's floor; it moves the sampled phase by less than 0.01.
 const maxSampleRho = 0.01
@@ -1269,6 +1283,9 @@ func (l *delayLoop) sensitivityPeaks(shifts ...float64) (stable bool, peaks []se
 				}
 			}
 			need = min(need, diskBoundLevel(shifts[i], g(res.f[best[i]]), lin))
+		}
+		if math.IsNaN(need) {
+			return false, nil, fmt.Errorf("sensitivity peak is NaN: %w", ErrOverflow)
 		}
 		if need == lin {
 			break
