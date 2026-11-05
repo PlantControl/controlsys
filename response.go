@@ -345,13 +345,12 @@ func (p timeResponsePlanner) lsim(u *mat.Dense, t []float64) (timeResponsePlan, 
 	if u == nil {
 		return timeResponsePlan{}, nil, fmt.Errorf("Lsim: u is nil: %w", ErrInvalidArgument)
 	}
+	if ur, uc := u.Dims(); ur != len(t) || uc != m {
+		return timeResponsePlan{}, nil, fmt.Errorf("Lsim: u must be %d×%d, got %d×%d: %w", len(t), m, ur, uc, ErrDimensionMismatch)
+	}
 	sig, err := validateLsimInputSignal("Lsim", u, len(t), m)
 	if err != nil {
-		ur, uc := 0, 0
-		if u != nil {
-			ur, uc = u.Dims()
-		}
-		return timeResponsePlan{}, nil, fmt.Errorf("Lsim: u must be %d×%d, got %d×%d: %w", len(t), m, ur, uc, ErrDimensionMismatch)
+		return timeResponsePlan{}, nil, err
 	}
 
 	dt, err := validateUniformTimeGrid("Lsim", t)
