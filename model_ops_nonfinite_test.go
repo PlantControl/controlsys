@@ -66,6 +66,25 @@ func modelOpsCarry(s *System, v float64) float64 {
 	return v
 }
 
+func TestAllFinite_EntryPositions(t *testing.T) {
+	x := make([]float64, 12)
+	for i := range x {
+		x[i] = float64(i) - 5.5
+	}
+	if !allFinite(x) {
+		t.Fatal("allFinite = false for finite entries")
+	}
+	for _, i := range []int{0, 7, 8, 11} {
+		for _, nf := range nonFiniteValues {
+			y := append([]float64(nil), x...)
+			y[i] = nf.v
+			if allFinite(y) {
+				t.Errorf("allFinite = true with %s at %d", nf.name, i)
+			}
+		}
+	}
+}
+
 func describeModelOpOutcome(sys *System, err error) string {
 	switch {
 	case errors.Is(err, ErrOverflow):
