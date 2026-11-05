@@ -268,3 +268,33 @@ func TestHinfNormDelayedFiniteUnchanged(t *testing.T) {
 		t.Errorf("internalDelayStable = %v, %v, want true", ok, err)
 	}
 }
+
+// The column of state 0 has off-diagonal sum 2e308, which overflows to +Inf
+// while its row sum is 1: on 3f1ba16 balance divided c = +Inf by 4 forever,
+// and newDescriptorResponse did not return within 10s under finishesWithin.
+// The model is finite; G(s) = a/((s+1)² − a) in closed form.
+func TestDescriptorResponseBalanceOverflowingColumn(t *testing.T) {
+	const a = 1e308
+	sys, err := New(mat.NewDense(3, 3, []float64{-1, 1, 0, a, -1, 0, a, 0, -1}), mat.NewDense(3, 1, []float64{1, 0, 0}),
+		mat.NewDense(1, 3, []float64{0, 0, 1}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r *descriptorResponse
+	finishesWithin(t, delayNonFiniteLimit, func() { r, err = newDescriptorResponse(sys) })
+	if err != nil {
+		if !errors.Is(err, ErrOverflow) {
+			t.Fatalf("newDescriptorResponse err = %v, want nil or ErrOverflow", err)
+		}
+		return
+	}
+	for _, w := range []float64{0.5, 1, 3, 100} {
+		s := r.sample(w)
+		g := s.g[0]
+		q := complex(1, w)
+		want := complex(a, 0) / (q*q - complex(a, 0))
+		if !finite(g) || cmplx.Abs(g-want) > 1e-12*cmplx.Abs(want) {
+			t.Errorf("G(j%g) = %v, want %v", w, g, want)
+		}
+	}
+}
