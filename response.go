@@ -148,7 +148,7 @@ func validateTimeHorizon(tFinal float64) error {
 // requireTimeResponse validates the model and final time of the standard
 // response op, which needs at least one input and one output.
 func requireTimeResponse(op string, sys *System, tFinal float64) error {
-	if err := requireSystem(op, sys); err != nil {
+	if err := requireFiniteSystem(op, sys); err != nil {
 		return err
 	}
 	if err := validateTimeHorizon(tFinal); err != nil {
@@ -250,7 +250,7 @@ func (p timeResponsePlan) simulatedInputResponse(kind standardInputResponse) (*T
 		} else {
 			u.Set(input, 0, 1)
 		}
-		resp, err := p.sim.Simulate(u, nil, nil)
+		resp, err := p.sim.simulate(u, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("input %d: %w", input, err)
 		}
@@ -1851,7 +1851,7 @@ func signInt(v float64) int {
 // every pole of sys, in the order of Poles; see DampInfo. A static gain has no
 // poles and returns an empty slice.
 func Damp(sys *System) ([]DampInfo, error) {
-	if err := requireSystem("Damp", sys); err != nil {
+	if err := requireFiniteSystem("Damp", sys); err != nil {
 		return nil, err
 	}
 	poles, err := sys.Poles()
@@ -2263,7 +2263,7 @@ func delayChainAuto(sys *System, tFinal float64, kind standardInputResponse) (*T
 // tFinal is handled as in Step. A model without outputs returns
 // ErrDimensionMismatch; one without inputs is valid.
 func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, error) {
-	if err := requireSystem("Initial", sys); err != nil {
+	if err := requireFiniteSystem("Initial", sys); err != nil {
 		return nil, err
 	}
 	if err := validateTimeHorizon(tFinal); err != nil {
@@ -2354,7 +2354,7 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 		ds = zeroInputModel(ds)
 	}
 	_, m, _ := ds.Dims()
-	resp, err := ds.Simulate(mat.NewDense(m, plan.steps, nil), x0, nil)
+	resp, err := ds.simulate(mat.NewDense(m, plan.steps, nil), x0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Initial: %w", err)
 	}
@@ -2590,7 +2590,7 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 // spacing Dt for discrete models) and u is len(t)×m; a model without outputs
 // returns ErrDimensionMismatch.
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
-	if err := requireSystem("Lsim", sys); err != nil {
+	if err := requireFiniteSystem("Lsim", sys); err != nil {
 		return nil, err
 	}
 	if _, _, p := sys.Dims(); p == 0 {
@@ -2647,7 +2647,7 @@ func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeRespon
 	if exactFree {
 		simX0 = nil
 	}
-	resp, err := plan.sim.Simulate(uSim, simX0, nil)
+	resp, err := plan.sim.simulate(uSim, simX0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Lsim: %w", err)
 	}

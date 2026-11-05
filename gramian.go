@@ -47,7 +47,7 @@ const (
 // factor types can succeed where the gramian itself overflows.
 // See https://www.mathworks.com/help/control/ref/statespacemodel.gram.html.
 func Gram(sys *System, typ GramType) (*mat.Dense, error) {
-	if err := requireSystem("Gram", sys); err != nil {
+	if err := requireFiniteSystem("Gram", sys); err != nil {
 		return nil, err
 	}
 	base := typ

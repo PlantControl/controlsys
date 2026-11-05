@@ -66,6 +66,16 @@ type SimulateOpts struct {
 // cannot hold a 0×steps matrix), so it is accepted only with FinalState, and
 // Y is then nil; otherwise it returns ErrDimensionMismatch.
 func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
+	if err := requireFiniteSystem("Simulate", sys); err != nil {
+		return nil, err
+	}
+	return sys.simulate(u, x0, opts)
+}
+
+// simulate is Simulate without the finiteness check, for the time responses
+// of finite models whose discretization overflowed, which return non-finite
+// samples as MATLAB does.
+func (sys *System) simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) (*Response, error) {
 	if err := requireSystem("Simulate", sys); err != nil {
 		return nil, err
 	}

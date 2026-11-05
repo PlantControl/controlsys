@@ -315,7 +315,7 @@ func Balred(sys *System, order int, opts BalredOptions) (*System, []float64, err
 // every state returns a static gain. MatchDC returns ErrSingularA22 when the
 // eliminated block (A22, or A22 - I for discrete models) is singular.
 func Modred(sys *System, elim []int, method StateProjection) (*System, error) {
-	if err := requireSystem("Modred", sys); err != nil {
+	if err := requireFiniteSystem("Modred", sys); err != nil {
 		return nil, err
 	}
 	if err := method.validate("Modred"); err != nil {
