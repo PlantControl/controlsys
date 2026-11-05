@@ -1314,7 +1314,7 @@ func (l *delayLoop) closedLoopSensitivity() *System {
 	if l.sys == nil {
 		return nil
 	}
-	eye, err := NewGain(mat.NewDense(1, 1, []float64{1}), l.sys.Dt)
+	eye, err := newGain(mat.NewDense(1, 1, []float64{1}), l.sys.Dt)
 	if err != nil {
 		return nil
 	}

@@ -66,7 +66,7 @@ func discretizeHoldFeedback(sys *System, input, output []float64, dt float64, op
 		}
 	}
 	if disc.HasDelay() {
-		disc, err = disc.PullDelaysToLFT()
+		disc, err = disc.pullDelaysToLFT()
 		if err != nil {
 			return nil, err
 		}
@@ -182,7 +182,7 @@ func discretizeHoldFeedbackPaths(sys *System, input, output []float64, dt float6
 				return nil, err
 			}
 			if disc.HasDelay() {
-				disc, err = disc.PullDelaysToLFT()
+				disc, err = disc.pullDelaysToLFT()
 				if err != nil {
 					return nil, err
 				}

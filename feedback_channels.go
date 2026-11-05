@@ -31,7 +31,7 @@ func feedbackController(plant, controller *System, ch []FeedbackChannels) (*Syst
 		if p != m {
 			return nil, fmt.Errorf("Feedback: plant must be square when controller is nil, got %d outputs × %d inputs: %w", p, m, ErrDimensionMismatch)
 		}
-		return NewGain(eyeOrEmptyDense(m), plant.Dt)
+		return newGain(eyeOrEmptyDense(m), plant.Dt)
 	}
 	in, out := ch[0].FeedIn, ch[0].FeedOut
 	if len(in) == 0 || len(out) == 0 {
@@ -48,7 +48,7 @@ func feedbackController(plant, controller *System, ch []FeedbackChannels) (*Syst
 			return nil, fmt.Errorf("Feedback: nil controller needs len(feedin) %d == len(feedout) %d: %w", len(in), len(out), ErrDimensionMismatch)
 		}
 		var err error
-		if controller, err = NewGain(eyeOrEmptyDense(len(in)), plant.Dt); err != nil {
+		if controller, err = newGain(eyeOrEmptyDense(len(in)), plant.Dt); err != nil {
 			return nil, err
 		}
 	}
@@ -67,19 +67,19 @@ func feedbackController(plant, controller *System, ch []FeedbackChannels) (*Syst
 	for k, i := range in {
 		scatter.Set(i, k, 1)
 	}
-	g, err := NewGain(gather, plant.Dt)
+	g, err := newGain(gather, plant.Dt)
 	if err != nil {
 		return nil, err
 	}
-	s, err := NewGain(scatter, plant.Dt)
+	s, err := newGain(scatter, plant.Dt)
 	if err != nil {
 		return nil, err
 	}
-	full, err := Series(g, controller)
+	full, err := series(g, controller)
 	if err != nil {
 		return nil, fmt.Errorf("Feedback: %w", err)
 	}
-	if full, err = Series(full, s); err != nil {
+	if full, err = series(full, s); err != nil {
 		return nil, fmt.Errorf("Feedback: %w", err)
 	}
 	return full, nil

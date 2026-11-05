@@ -225,7 +225,7 @@ func (c *detCertifier) chiDescriptor() *descriptorResponse {
 		return c.desc
 	}
 	e := c.e
-	sys, err := SetDelayModel(e.h22sys, e.tau)
+	sys, err := setDelayModel(e.h22sys, e.tau)
 	if err == nil {
 		c.desc, err = newDescriptorResponse(sys)
 	}
@@ -558,7 +558,7 @@ func pidLoopSystem(plant *System, c *PID2) (*System, error) {
 	for i := range n {
 		am[i*n+i] = a[i]
 	}
-	ctrl, err := NewFromSlices(n, 1, 1, am, b, cc, []float64{d}, 0)
+	ctrl, err := newDerivedFromSlices(n, 1, 1, am, b, cc, []float64{d}, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +601,7 @@ func pidIdealDerivativeLoop(plant *System, c *PID2) (*System, error) {
 	if nz == 1 {
 		cm.Set(0, np, c.Ki)
 	}
-	loop, err := New(a, b, cm, mat.NewDense(1, 1, []float64{c.Kd * d}), 0)
+	loop, err := newDerived(a, b, cm, mat.NewDense(1, 1, []float64{c.Kd * d}), 0)
 	if err != nil {
 		return nil, err
 	}

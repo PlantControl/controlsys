@@ -95,8 +95,9 @@ func (sys *System) IsDiscrete() bool { return newTimeDomain(sys.Dt).isDiscrete()
 // D12, D21, D22 returns ErrInvalidArgument naming the matrix and entry.
 // MATLAB ss accepts non-finite data; rejecting it is a deliberate departure,
 // so that a model carrying invalid data is not reported valid. The
-// constructors apply the same check, and analysis entry points reject
-// non-finite models; model-building operations check structure only.
+// constructors, analysis entry points and model-building operations apply
+// the same check to the models they are given; a model-building operation
+// whose finite inputs give a NaN/Inf entry returns ErrOverflow.
 func (sys *System) Validate() error {
 	err := sys.validate()
 	if err == nil {
@@ -246,7 +247,7 @@ func (sys *System) Poles() ([]complex128, error) {
 		return nil, err
 	}
 	if sys.LFT != nil {
-		zd, err := sys.ZeroDelayApprox()
+		zd, err := sys.zeroDelayApprox()
 		if err != nil {
 			return nil, fmt.Errorf("Poles: %w", err)
 		}

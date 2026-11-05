@@ -456,7 +456,7 @@ func newPIDStabilityScreen(plant *System, eval *sisoEval, maxTail float64) (*pid
 	model, rational, lag := plant, plant, 0
 	if plant.Dt > 0 && plant.HasDelay() {
 		var err error
-		if model, err = plant.AbsorbDelay(AbsorbAll); err != nil {
+		if model, err = plant.absorbDelay(AbsorbAll); err != nil {
 			return nil, err
 		}
 		rational = model

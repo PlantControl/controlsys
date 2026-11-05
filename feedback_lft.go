@@ -6,19 +6,19 @@ import "plantcontrol.org/v1/gonum/mat"
 // and controller. Every plant and controller delay lies inside the loop, so
 // all of them become internal delays of the result.
 func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
-	plantLFT, err := plant.PullDelaysToLFT()
+	plantLFT, err := plant.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
-	ctrlLFT, err := controller.PullDelaysToLFT()
+	ctrlLFT, err := controller.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
-	pH, plantTau, err := plantLFT.GetDelayModel()
+	pH, plantTau, err := plantLFT.getDelayModel()
 	if err != nil {
 		return nil, err
 	}
-	cH, ctrlTau, err := ctrlLFT.GetDelayModel()
+	cH, ctrlTau, err := ctrlLFT.getDelayModel()
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +109,7 @@ func feedbackWithLFT(plant, controller *System, sign float64) (*System, error) {
 	taus = append(taus, plantTau...)
 	taus = append(taus, ctrlTau...)
 
-	result, err := SetDelayModel(H, taus)
+	result, err := setDelayModel(H, taus)
 	if err != nil {
 		return nil, err
 	}

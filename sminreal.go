@@ -9,7 +9,7 @@ import "plantcontrol.org/v1/gonum/mat"
 // delayed models are not supported. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.sminreal.html.
 func Sminreal(sys *System) (*System, error) {
-	if err := requireSystem("Sminreal", sys); err != nil {
+	if err := requireFiniteSystem("Sminreal", sys); err != nil {
 		return nil, err
 	}
 	policy := newRealizationTransformPolicy(sys)
@@ -99,7 +99,7 @@ func Sminreal(sys *System) (*System, error) {
 		if err := storableStaticGain("Sminreal", p, m); err != nil {
 			return nil, err
 		}
-		g, err := NewGain(denseCopy(sys.D), sys.Dt)
+		g, err := newGain(denseCopy(sys.D), sys.Dt)
 		if err != nil {
 			return nil, err
 		}

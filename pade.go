@@ -13,6 +13,14 @@ import (
 // delay-free model is returned unchanged. order must be in 1..10 (else
 // ErrInvalidArgument); discrete models return ErrWrongDomain.
 func (sys *System) Pade(order int) (*System, error) {
+	if err := requireFiniteSystem("Pade", sys); err != nil {
+		return nil, err
+	}
+	return derivedOp("Pade").model(sys.pade(order))
+}
+
+// pade is Pade without the finiteness checks; see absorbDelay.
+func (sys *System) pade(order int) (*System, error) {
 	if err := requireSystem("Pade", sys); err != nil {
 		return nil, err
 	}
@@ -26,7 +34,7 @@ func (sys *System) Pade(order int) (*System, error) {
 		return sys.Copy(), nil
 	}
 
-	lft, err := sys.PullDelaysToLFT()
+	lft, err := sys.pullDelaysToLFT()
 	if err != nil {
 		return nil, fmt.Errorf("Pade: %w", err)
 	}
@@ -57,7 +65,7 @@ func padeCloseInternalDelay(lft *System, order int) (*System, error) {
 		if delayBank == nil {
 			delayBank = pd
 		} else {
-			delayBank, err = Append(delayBank, pd)
+			delayBank, err = appendSystems(delayBank, pd)
 			if err != nil {
 				return nil, err
 			}
@@ -136,7 +144,7 @@ func PadeDelay(tau float64, order int) (*System, error) {
 		return nil, fmt.Errorf("PadeDelay: %w", err)
 	}
 	if tau == 0 {
-		return NewGain(mat.NewDense(1, 1, []float64{1}), 0)
+		return newGain(mat.NewDense(1, 1, []float64{1}), 0)
 	}
 
 	n := order

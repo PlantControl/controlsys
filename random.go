@@ -60,7 +60,7 @@ func randomSSWithSource(spec randomStableModelSpec, rng randomSource) (*System, 
 		for i := range dData {
 			dData[i] = rng.NormFloat64()
 		}
-		return NewGain(mat.NewDense(spec.outputs, spec.inputs, dData), spec.dt)
+		return newGain(mat.NewDense(spec.outputs, spec.inputs, dData), spec.dt)
 	}
 
 	A := randomStableAWithSource(spec.states, spec.continuous, rng)

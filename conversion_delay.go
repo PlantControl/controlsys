@@ -727,7 +727,7 @@ func discretizeConversionChannel(sys *System, i, j int, dt float64, opts C2DOpti
 		return nil, err
 	}
 	if disc.HasDelay() {
-		disc, err = disc.PullDelaysToLFT()
+		disc, err = disc.pullDelaysToLFT()
 		if err != nil {
 			return nil, err
 		}

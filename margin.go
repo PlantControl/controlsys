@@ -833,7 +833,7 @@ func diskMargin(sys *System, sigma float64) (*DiskMarginResult, error) {
 		return diskMarginDelayed(sys, sigma, shift)
 	}
 
-	eye, err := NewGain(mat.NewDense(1, 1, []float64{1}), sys.Dt)
+	eye, err := newGain(mat.NewDense(1, 1, []float64{1}), sys.Dt)
 	if err != nil {
 		return nil, err
 	}
@@ -850,7 +850,7 @@ func diskMargin(sys *System, sigma float64) (*DiskMarginResult, error) {
 	}
 	peak, wPeak := Ms, wMs
 	if shift != 0 {
-		c, err := NewGain(mat.NewDense(1, 1, []float64{shift}), sys.Dt)
+		c, err := newDerivedGain(mat.NewDense(1, 1, []float64{shift}), sys.Dt)
 		if err != nil {
 			return nil, err
 		}
@@ -967,7 +967,7 @@ func newRationalLoop(sys *System) (*rationalLoop, error) {
 	}
 	fd := fsys
 	if fsys.IsDiscrete() {
-		if fd, err = fsys.AbsorbDelay(); err != nil {
+		if fd, err = fsys.absorbDelay(); err != nil {
 			return nil, err
 		}
 		r.absorbed = fd

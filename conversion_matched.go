@@ -598,7 +598,7 @@ func matchedCascadeFinite(zeros, poles []complex128, gain, dt float64) *System {
 	if !finiteSlice(a) || !finiteSlice(b) || !finiteSlice(c) || !finiteSlice([]float64{d}) {
 		return nil
 	}
-	sys, err := New(mat.NewDense(n, n, a), mat.NewDense(n, 1, b), mat.NewDense(1, n, c), mat.NewDense(1, 1, []float64{d}), dt)
+	sys, err := newDerived(mat.NewDense(n, n, a), mat.NewDense(n, 1, b), mat.NewDense(1, n, c), mat.NewDense(1, 1, []float64{d}), dt)
 	if err != nil {
 		return nil
 	}

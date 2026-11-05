@@ -14,7 +14,7 @@ import (
 // ErrDescriptorUnsupported.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.inv.html.
 func Inv(sys *System) (*System, error) {
-	if err := requireSystem("Inv", sys); err != nil {
+	if err := requireFiniteSystem("Inv", sys); err != nil {
 		return nil, err
 	}
 	if err := newDescriptorPolicy(sys).requireStandard("Inv"); err != nil {
@@ -49,7 +49,7 @@ func Inv(sys *System) (*System, error) {
 	}
 
 	if n == 0 {
-		result, err := NewGain(Dinv, sys.Dt)
+		result, err := derivedOp("Inv").model(newGain(Dinv, sys.Dt))
 		if err != nil {
 			return nil, err
 		}
@@ -82,5 +82,5 @@ func Inv(sys *System) (*System, error) {
 	result.OutputName = copyStringSlice(sys.InputName)
 	result.StateName = copyStringSlice(sys.StateName)
 
-	return result, nil
+	return derivedOp("Inv").model(result, nil)
 }

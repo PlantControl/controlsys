@@ -35,7 +35,7 @@ func Covar(sys *System, W *mat.Dense) (*mat.Dense, error) {
 	}
 	var err error
 	if sys.IsDiscrete() && sys.HasDelay() {
-		sys, err = sys.AbsorbDelay()
+		sys, err = sys.absorbDelay()
 	} else {
 		sys, err = finiteDimensionalModel(sys, "Covar")
 	}

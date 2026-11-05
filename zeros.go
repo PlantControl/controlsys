@@ -84,7 +84,7 @@ func zeroInternalDelays(sys *System) (*System, error) {
 	if !sys.HasDelay() && sys.LFT == nil {
 		return sys, nil
 	}
-	out, err := sys.ZeroDelayApprox()
+	out, err := sys.zeroDelayApprox()
 	if err != nil {
 		return nil, err
 	}

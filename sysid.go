@@ -134,7 +134,7 @@ func ERA(markov []*mat.Dense, order int, dt float64) (*ERAResult, error) {
 
 	D := mat.DenseCopyOf(markov[0])
 
-	sys, err := New(A, B, C, D, dt)
+	sys, err := newDerived(A, B, C, D, dt)
 	if err != nil {
 		return nil, fmt.Errorf("ERA: %w", err)
 	}

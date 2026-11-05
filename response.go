@@ -538,7 +538,7 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error, offPole bool) (*mat.
 		return nil, evalErr
 	}
 	if reduced.HasInternalDelay() {
-		if reduced, err = reduced.ZeroDelayApprox(); err != nil {
+		if reduced, err = reduced.zeroDelayApprox(); err != nil {
 			return nil, evalErr
 		}
 	}

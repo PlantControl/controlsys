@@ -57,7 +57,7 @@ type PhysicalConnection struct {
 // channels) return ErrInvalidArgument; channel-count mismatches return
 // ErrDimensionMismatch.
 func NewPhysicalComponent(name string, sys *System, ports []PhysicalPort) (PhysicalComponent, error) {
-	if err := requireSystem("NewPhysicalComponent", sys); err != nil {
+	if err := requireFiniteSystem("NewPhysicalComponent", sys); err != nil {
 		return PhysicalComponent{}, err
 	}
 	component := PhysicalComponent{Name: name, System: sys.Copy(), Ports: copyPhysicalPorts(ports)}
@@ -83,7 +83,7 @@ func AssemblePhysical(name string, components []PhysicalComponent, connections [
 	if err != nil {
 		return nil, fmt.Errorf("AssemblePhysical: %w", err)
 	}
-	return sys, nil
+	return derivedOp("AssemblePhysical").model(sys, nil)
 }
 
 type physicalAssemblyPlan struct {
@@ -140,6 +140,9 @@ func newPhysicalAssemblyPlan(name string, components []PhysicalComponent, connec
 			return nil, fmt.Errorf("duplicate component %q: %w", component.Name, ErrInvalidArgument)
 		}
 		if err := component.System.validate(); err != nil {
+			return nil, fmt.Errorf("component %q: %w", component.Name, err)
+		}
+		if err := systemMatricesFinite(component.System, ErrInvalidArgument); err != nil {
 			return nil, fmt.Errorf("component %q: %w", component.Name, err)
 		}
 		if i > 0 && component.System.Dt != components[0].System.Dt {
@@ -456,7 +459,7 @@ func (p *physicalAssemblyPlan) appendComponents() (*System, error) {
 		next := component.System.Copy()
 		prefixSystemMetadata(next, component.Name)
 		var err error
-		assembled, err = Append(assembled, next)
+		assembled, err = appendSystems(assembled, next)
 		if err != nil {
 			return nil, err
 		}

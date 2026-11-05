@@ -114,7 +114,7 @@ func RootLocus(sys *System, gains []float64) (*RootLocusResult, error) {
 			undelayed = sys.Copy()
 			undelayed.Delay, undelayed.InputDelay, undelayed.OutputDelay = nil, nil, nil
 		}
-		abs, err := sys.AbsorbDelay()
+		abs, err := sys.absorbDelay()
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", op, err)
 		}
@@ -1441,7 +1441,7 @@ func (lp *rlocusLoop) zeroClusters(sys *System, zeros []complex128, num Poly, si
 		if finite {
 			if ec, ok := eigCondition(az, w, n); ok {
 				p, sb := num, balancedNorm(az, n)
-				if zs, err := NewFromSlices(n, 1, 1, az, lp.b, lp.c, []float64{0}, 0); err == nil {
+				if zs, err := newDerivedFromSlices(n, 1, 1, az, lp.b, lp.c, []float64{0}, 0); err == nil {
 					if tfr, err := zs.rationalTransferFunction(nil); err == nil {
 						p = unitScalePoly(Poly(tfr.TF.Den[0]))
 					}

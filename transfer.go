@@ -2407,7 +2407,7 @@ func (tf *TransferFunc) stateSpace() (*StateSpaceResult, error) {
 				dRaw.Data[i*dRaw.Stride+j] = scale * tf.Num[i][j][0]
 			}
 		}
-		sys, err := NewGain(D, tf.Dt)
+		sys, err := newDerivedGain(D, tf.Dt)
 		if err != nil {
 			return nil, err
 		}

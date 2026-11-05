@@ -43,10 +43,10 @@ func SmithPredictor(controller, model *System, delay float64, padeOrder int) (*S
 	if model == nil {
 		return nil, fmt.Errorf("SmithPredictor: model is nil: %w", ErrInvalidArgument)
 	}
-	if err := requireSystem("SmithPredictor", controller); err != nil {
+	if err := requireFiniteSystem("SmithPredictor", controller); err != nil {
 		return nil, err
 	}
-	if err := requireSystem("SmithPredictor", model); err != nil {
+	if err := requireFiniteSystem("SmithPredictor", model); err != nil {
 		return nil, err
 	}
 	if model.HasDelay() {
@@ -87,22 +87,22 @@ func SmithPredictor(controller, model *System, delay float64, padeOrder int) (*S
 		return nil, fmt.Errorf("SmithPredictor: SetDelay: %w", err)
 	}
 
-	modelPade, err := modelDelayed.Pade(padeOrder)
+	modelPade, err := modelDelayed.pade(padeOrder)
 	if err != nil {
 		return nil, fmt.Errorf("SmithPredictor: Pade: %w", err)
 	}
 
 	negPade := negateSys(modelPade)
 
-	diff, err := Parallel(modelClean, negPade)
+	diff, err := parallel(modelClean, negPade)
 	if err != nil {
 		return nil, fmt.Errorf("SmithPredictor: Parallel: %w", err)
 	}
 
-	result, err := Feedback(controller, diff, -1.0)
+	result, err := feedback(controller, diff, -1.0)
 	if err != nil {
 		return nil, fmt.Errorf("SmithPredictor: Feedback: %w", err)
 	}
 
-	return result, nil
+	return derivedOp("SmithPredictor").model(result, nil)
 }

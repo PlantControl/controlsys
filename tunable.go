@@ -203,7 +203,7 @@ func (b *TunableGain) CurrentSystem() (*System, error) {
 	if D.IsEmpty() {
 		return nil, fmt.Errorf("%s: Gain is empty: %w", op, ErrDimensionMismatch)
 	}
-	sys, err := NewGain(D, b.Dt)
+	sys, err := newDerivedGain(D, b.Dt)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
@@ -916,7 +916,7 @@ func (b *TunableSS) CurrentSystem() (*System, error) {
 		}
 		ms[i] = m
 	}
-	sys, err := New(ms[0], ms[1], ms[2], ms[3], b.Dt)
+	sys, err := newDerived(ms[0], ms[1], ms[2], ms[3], b.Dt)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}

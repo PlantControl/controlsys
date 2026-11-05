@@ -49,7 +49,7 @@ type descriptorSpan struct{ a, b *descriptorSample }
 // newDescriptorResponse builds the descriptor form of sys with its I/O
 // delays pulled into the delay channels.
 func newDescriptorResponse(sys *System) (*descriptorResponse, error) {
-	pulled, err := sys.PullDelaysToLFT()
+	pulled, err := sys.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}

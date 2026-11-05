@@ -13,7 +13,7 @@ import (
 // like B and C, and I/O delays carry over unchanged. A nil T returns
 // ErrInvalidArgument; a model with no states accepts only an empty T.
 func SS2SS(sys *System, T *mat.Dense) (*System, error) {
-	if err := requireSystem("SS2SS", sys); err != nil {
+	if err := requireFiniteSystem("SS2SS", sys); err != nil {
 		return nil, err
 	}
 	if T == nil {
@@ -66,7 +66,7 @@ func SS2SS(sys *System, T *mat.Dense) (*System, error) {
 	if sys.IsDescriptor() {
 		result.A.Mul(sys.A, &Tinv)
 		result.E.Mul(sys.E, &Tinv)
-		return result, nil
+		return derivedOp("SS2SS").model(result, nil)
 	}
 	var tmp mat.Dense
 	tmp.Mul(sys.A, &Tinv)
@@ -77,7 +77,7 @@ func SS2SS(sys *System, T *mat.Dense) (*System, error) {
 	if sys.internalDelayCount() > 0 {
 		result.LFT.B2.Mul(T, sys.LFT.B2)
 	}
-	return result, nil
+	return derivedOp("SS2SS").model(result, nil)
 }
 
 // Xperm reorders the states so that new state i is old state perm[i], as
@@ -85,7 +85,7 @@ func SS2SS(sys *System, T *mat.Dense) (*System, error) {
 // internal-delay B2) take rows perm, C (and C2) take columns perm, and
 // StateName is permuted. Delays carry over unchanged.
 func Xperm(sys *System, perm []int) (*System, error) {
-	if err := requireSystem("Xperm", sys); err != nil {
+	if err := requireFiniteSystem("Xperm", sys); err != nil {
 		return nil, err
 	}
 	policy := newRealizationTransformPolicy(sys)

@@ -266,6 +266,15 @@ func (sys *System) String() string {
 // static gain with exactly one of inputs and outputs empty
 // ErrDimensionMismatch.
 func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
+	if err := requireFiniteSystem("SelectByIndex", sys); err != nil {
+		return nil, err
+	}
+	return sys.selectByIndex(inputs, outputs)
+}
+
+// selectByIndex is SelectByIndex for internal models, without the validity
+// checks. Its blocks are copies, so a finite model gives a finite result.
+func (sys *System) selectByIndex(inputs, outputs []int) (*System, error) {
 	if sys == nil {
 		return nil, fmt.Errorf("SelectByIndex: system is nil: %w", ErrInvalidArgument)
 	}
@@ -292,7 +301,7 @@ func (sys *System) SelectByIndex(inputs, outputs []int) (*System, error) {
 		if err := storableStaticGain("SelectByIndex", pSel, mSel); err != nil {
 			return nil, err
 		}
-		result, err = NewGain(Dsel, sys.Dt)
+		result, err = newGain(Dsel, sys.Dt)
 	} else {
 		result, err = newNoCopy(denseCopy(sys.A), nonEmptyDense(selectDense(sys.B, allStates, inputs)), nonEmptyDense(selectDense(sys.C, outputs, allStates)), nonEmptyDense(Dsel), sys.Dt)
 	}
@@ -426,7 +435,7 @@ func ConnectByName(systems []*System, connections []Connection, inputs, outputs 
 	if err != nil {
 		return nil, withAlgebraicLoopSignals(err, aug.InputName, aug.OutputName)
 	}
-	return result, nil
+	return derivedOp("ConnectByName").model(result, nil)
 }
 
 // formatDisplayValue renders v with 4 significant digits, like MATLAB's

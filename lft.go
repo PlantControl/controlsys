@@ -37,7 +37,7 @@ type LFTFeedback struct {
 // cannot be stored (MATLAB returns an empty gain): ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/inputoutputmodel.lft.html.
 func LFT(sys1, sys2 *System, fb ...LFTFeedback) (*System, error) {
-	if err := requireSystems("LFT", sys1, sys2); err != nil {
+	if err := requireFiniteSystems("LFT", sys1, sys2); err != nil {
 		return nil, err
 	}
 	n1, m1, p1 := sys1.Dims()
@@ -81,7 +81,7 @@ func LFT(sys1, sys2 *System, fb ...LFTFeedback) (*System, error) {
 	if n, _, _ := res.Dims(); n == n1+n2 {
 		res.StateName = concatStringSlices([][]string{sys1.StateName, sys2.StateName}, []int{n1, n2})
 	}
-	return res, nil
+	return derivedOp("LFT").model(res, nil)
 }
 
 // lftStar closes the star product as a lower LFT of append(sys1, sys2),
@@ -90,7 +90,7 @@ func LFT(sys1, sys2 *System, fb ...LFTFeedback) (*System, error) {
 func lftStar(sys1, sys2 *System, nu, ny int) (*System, error) {
 	_, m1, p1 := sys1.Dims()
 	_, m2, p2 := sys2.Dims()
-	app, err := Append(sys1, sys2)
+	app, err := appendSystems(sys1, sys2)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func lftStar(sys1, sys2 *System, nu, ny int) (*System, error) {
 	if k == 0 {
 		return app, nil
 	}
-	M, err := app.SelectByIndex(inputs, outputs)
+	M, err := app.selectByIndex(inputs, outputs)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func lftStar(sys1, sys2 *System, nu, ny int) (*System, error) {
 	for i := range ny {
 		swap.Set(nu+i, i, 1)
 	}
-	Delta, err := NewGain(swap, sys1.Dt)
+	Delta, err := newGain(swap, sys1.Dt)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func lftEmptyLoop(M, Delta *System, nw, nz int) (*System, error) {
 	if nD, _, _ := Delta.Dims(); nD == 0 {
 		return upper, nil
 	}
-	return Append(upper, Delta)
+	return appendSystems(upper, Delta)
 }
 
 func lftExtract(M *System, nw, nz int) (*System, error) {
@@ -314,11 +314,11 @@ func lftWithDelay(M, Delta *System, nw, nz int) (*System, error) {
 	mCopy.InputDelay = clearLeadingDelays(mCopy.InputDelay, nw)
 	mCopy.OutputDelay = clearLeadingDelays(mCopy.OutputDelay, nz)
 
-	mLFT, err := mCopy.PullDelaysToLFT()
+	mLFT, err := mCopy.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
-	dLFT, err := Delta.PullDelaysToLFT()
+	dLFT, err := Delta.pullDelaysToLFT()
 	if err != nil {
 		return nil, err
 	}
@@ -327,11 +327,11 @@ func lftWithDelay(M, Delta *System, nw, nz int) (*System, error) {
 	ND := dLFT.internalDelayCount()
 	N := NM + ND
 
-	mH, _, err := mLFT.GetDelayModel()
+	mH, _, err := mLFT.getDelayModel()
 	if err != nil {
 		return nil, err
 	}
-	dH, _, err := dLFT.GetDelayModel()
+	dH, _, err := dLFT.getDelayModel()
 	if err != nil {
 		return nil, err
 	}
@@ -575,7 +575,7 @@ func lftWithDelay(M, Delta *System, nw, nz int) (*System, error) {
 		copy(tau[NM:], dLFT.LFT.Tau)
 	}
 
-	result, err := SetDelayModel(H, tau)
+	result, err := setDelayModel(H, tau)
 	if err != nil {
 		return nil, err
 	}

@@ -180,7 +180,7 @@ func (d simulationDispatcher) simulate(u *mat.Dense, x0 *mat.VecDense, opts *Sim
 	if d.sys.HasInternalDelay() {
 		hasIODelay := d.sys.Delay != nil || d.sys.InputDelay != nil || d.sys.OutputDelay != nil
 		if hasIODelay {
-			merged, err := d.sys.PullDelaysToLFT()
+			merged, err := d.sys.pullDelaysToLFT()
 			if err != nil {
 				return nil, err
 			}
