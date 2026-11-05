@@ -74,7 +74,10 @@ func (sys *System) SetOutputDelay(delay []float64) error {
 // that connect them: the delayed signals enter through B2 and D12 and leave
 // through C2, D21 and D22, as in the H partition of GetDelayModel. An empty
 // tau removes all internal delays. Each tau must be finite and positive, and
-// an integer number of samples for a discrete model.
+// an integer number of samples for a discrete model. A NaN or ±Inf entry in
+// B2, C2, D12, D21 or D22 returns ErrInvalidArgument and leaves sys
+// unchanged; MATLAB accepts non-finite data, and rejecting it is a deliberate
+// departure (see Validate).
 func (sys *System) SetInternalDelay(tau []float64, B2, C2, D12, D21, D22 *mat.Dense) error {
 	if sys == nil {
 		return fmt.Errorf("SetInternalDelay: system is nil: %w", ErrInvalidArgument)
@@ -90,6 +93,17 @@ func (sys *System) SetInternalDelay(tau []float64, B2, C2, D12, D21, D22 *mat.De
 	}
 	if err := validateLFTDims(n, m, p, N, B2, C2, D12, D21, D22); err != nil {
 		return fmt.Errorf("SetInternalDelay: %w", err)
+	}
+	for _, blk := range []struct {
+		name string
+		m    *mat.Dense
+	}{{"B2", B2}, {"C2", C2}, {"D12", D12}, {"D21", D21}, {"D22", D22}} {
+		if blk.m == nil {
+			continue
+		}
+		if err := denseFinite(blk.name, blk.m, ErrInvalidArgument); err != nil {
+			return fmt.Errorf("SetInternalDelay: %w", err)
+		}
 	}
 	tauCopy := make([]float64, N)
 	copy(tauCopy, tau)

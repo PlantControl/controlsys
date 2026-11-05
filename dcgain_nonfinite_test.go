@@ -20,7 +20,11 @@ func shiftModel(t *testing.T, n int, dt float64, set func(a, b, c, d []float64))
 	}
 	d := []float64{1}
 	set(a, b, c, d)
-	return poleSys(t, n, 1, 1, a, b, c, d, dt)
+	sys, err := newFromSlices(n, 1, 1, a, b, c, d, dt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
 }
 
 func TestDCGainNonFiniteModelErrors(t *testing.T) {

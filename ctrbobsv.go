@@ -232,7 +232,10 @@ func controllabilityForm(A, B, C *mat.Dense, n int, tol float64) (*StaircaseForm
 
 // IsStabilizable reports whether every uncontrollable mode of (A, B) is
 // stable: in the open left half-plane when continuous, inside the unit circle
-// otherwise. A mode within rounding of uncontrollable on the boundary (PBH
+// otherwise, clear of the boundary band of IsStable (Re λ < −tol or
+// |λ| < 1 − tol, tol = 1e-10·max(1, |λ|)), a deliberate departure from
+// MATLAB's strict Re λ < 0 / |λ| < 1, since float64 cannot certify the side of
+// an eigenvalue within the band. A mode within rounding of uncontrollable on the boundary (PBH
 // rank at the staircase's floor) is not stabilizable, whichever side
 // rounding puts its eigenvalue; so is an unstable mode whose PBH rank is at
 // the floor when the staircase's coupling could be amplified rounding (a weak
@@ -581,7 +584,10 @@ func pbhSigmaMin(A, B *mat.Dense, lam complex128) float64 {
 }
 
 // IsDetectable reports whether every unobservable mode of (A, C) is stable,
-// the dual of IsStabilizable.
+// the dual of IsStabilizable. A mode is stable only clear of the boundary
+// band of IsStable (Re λ < −tol or |λ| < 1 − tol, tol = 1e-10·max(1, |λ|)),
+// a deliberate departure from MATLAB's strict Re λ < 0 / |λ| < 1, since
+// float64 cannot certify the side of an eigenvalue within the band.
 func IsDetectable(A, C *mat.Dense, continuous bool) (bool, error) {
 	if err := requireFiniteDense("IsDetectable", "A", A); err != nil {
 		return false, err

@@ -457,7 +457,7 @@ func TestPrescale_DescriptorAndDelays(t *testing.T) {
 
 func TestPrescaleRejectsNonFinite(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{-1, 2, math.NaN(), -3})
-	sys, err := New(A, mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 1}), nil, 0)
+	sys, err := newCopy(A, mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 1}), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

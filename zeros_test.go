@@ -789,6 +789,9 @@ func internalDelayZerosFixture(t *testing.T, dt float64, m int, D22 *mat.Dense) 
 		t.Fatal(err)
 	}
 	g := 1 / (1 - D22.At(0, 0))
+	if math.IsInf(g, 0) {
+		return sys, nil
+	}
 	var Ac, Bc, Cc, Dc, t1 mat.Dense
 	t1.Mul(B2, C2)
 	t1.Scale(g, &t1)

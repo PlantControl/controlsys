@@ -10,7 +10,9 @@ import (
 
 // NewDescriptor returns the descriptor model E·dx/dt = A·x + B·u,
 // y = C·x + D·u, as MATLAB dss(A, B, C, D, E, Ts). A nil E means E = I.
-// Matrices are copied.
+// Matrices are copied. A NaN or ±Inf entry in A, B, C, D or E returns
+// ErrInvalidArgument naming the matrix and entry; MATLAB dss accepts
+// non-finite data, and rejecting it is a deliberate departure (see Validate).
 func NewDescriptor(A, B, C, D, E *mat.Dense, dt float64) (*System, error) {
 	sys, err := newCopy(A, B, C, D, dt)
 	if err != nil {
@@ -22,6 +24,9 @@ func NewDescriptor(A, B, C, D, E *mat.Dense, dt float64) (*System, error) {
 		return nil, fmt.Errorf("NewDescriptor: %w", err)
 	}
 	sys.E = copyDescriptorE(E)
+	if err := systemMatricesFinite(sys, ErrInvalidArgument); err != nil {
+		return nil, fmt.Errorf("NewDescriptor: %w", err)
+	}
 	return sys, nil
 }
 

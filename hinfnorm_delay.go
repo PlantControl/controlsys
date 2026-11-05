@@ -85,7 +85,7 @@ func newDelayLFT(sys *System) (*delayLFT, error) {
 	}
 	if n > 0 {
 		h22sys := &System{A: sys.A, B: lft.B2, C: lft.C2, D: lft.D22}
-		if err := h22sys.Validate(); err != nil {
+		if err := h22sys.validate(); err != nil {
 			return nil, err
 		}
 		e.h22sys = h22sys

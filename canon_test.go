@@ -326,7 +326,7 @@ func TestCanonRejectsInvalidSystem(t *testing.T) {
 	if _, err := Canon(nil, CanonModal); !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("nil: err = %v, want ErrInvalidArgument", err)
 	}
-	sys, err := New(mat.NewDense(2, 2, []float64{-1, math.Inf(1), 0, -3}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), 0)
+	sys, err := newCopy(mat.NewDense(2, 2, []float64{-1, math.Inf(1), 0, -3}), mat.NewDense(2, 1, []float64{1, 1}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

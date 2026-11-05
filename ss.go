@@ -91,8 +91,18 @@ func (sys *System) IsDiscrete() bool { return newTimeDomain(sys.Dt).isDiscrete()
 // StateName must have length m, p or n (ErrDimensionMismatch). A nil or empty
 // A, B, C or D whose block is not empty returns ErrDimensionMismatch: unlike
 // New, which fills a missing matrix with zeros, a struct literal must set it.
+// A NaN or ±Inf entry in A, B, C, D, E or the internal-delay blocks B2, C2,
+// D12, D21, D22 returns ErrInvalidArgument naming the matrix and entry.
+// MATLAB ss accepts non-finite data; rejecting it is a deliberate departure,
+// so that a model carrying invalid data is not reported valid. The
+// constructors apply the same check, and analysis entry points reject
+// non-finite models; model-building operations check structure only.
 func (sys *System) Validate() error {
-	if err := sys.validate(); err != nil {
+	err := sys.validate()
+	if err == nil {
+		err = systemMatricesFinite(sys, ErrInvalidArgument)
+	}
+	if err != nil {
 		return fmt.Errorf("Validate: %w", err)
 	}
 	return nil
@@ -246,9 +256,15 @@ func (sys *System) Poles() ([]complex128, error) {
 }
 
 // IsStable reports whether every pole lies in the open left half-plane
-// (continuous) or the open unit disk (discrete), as MATLAB isstable
-// (https://www.mathworks.com/help/control/ref/dynamicsystem.isstable.html);
-// poles on the boundary are not stable. Descriptor poles are those of
+// (continuous) or the open unit disk (discrete), clear of a boundary band: a
+// pole p is stable only if Re p < −tol (continuous) or |p| < 1 − tol
+// (discrete), with tol = 1e-10·max(1, |p|), so a pole on or within tol of the
+// boundary is not stable. This band is a deliberate departure from MATLAB
+// isstable (https://www.mathworks.com/help/control/ref/dynamicsystem.isstable.html),
+// whose test is strict (Re p < 0, |p| < 1): float64 cannot certify which
+// side of the boundary a pole within the band lies on, and a strict test
+// flips on rounding, giving false "stable" results for marginal poles.
+// IsStabilizable, IsDetectable and Stabsep use the same band. Descriptor poles are those of
 // Poles: eigenvalues from the null space of an E rank deficient by MATLAB's
 // rank tolerance are infinite and do not count. Input, output and I/O delays do not
 // affect stability. Discrete internal delays are absorbed exactly into
@@ -370,9 +386,14 @@ func validateDims(A, B, C, D *mat.Dense, dt float64) (n, m, p int, err error) {
 
 // New validates dimension compatibility and returns a System, as MATLAB
 // ss(A, B, C, D, Ts) with dt = Ts (0 for continuous). Matrices are copied to
-// prevent aliasing bugs.
+// prevent aliasing bugs. A NaN or ±Inf entry returns ErrInvalidArgument
+// naming the matrix and entry; MATLAB ss accepts non-finite data, and
+// rejecting it is a deliberate departure (see Validate).
 func New(A, B, C, D *mat.Dense, dt float64) (*System, error) {
 	sys, err := newCopy(A, B, C, D, dt)
+	if err == nil {
+		err = systemMatricesFinite(sys, ErrInvalidArgument)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("New: %w", err)
 	}
@@ -414,9 +435,14 @@ func newNoCopy(A, B, C, D *mat.Dense, dt float64) (*System, error) {
 }
 
 // NewGain returns the static gain y = D·u with no states, as MATLAB ss(D, Ts).
-// A nil D returns ErrInvalidArgument.
+// A nil D, or a NaN or ±Inf entry of D, returns ErrInvalidArgument; MATLAB ss
+// accepts non-finite data, and rejecting it is a deliberate departure (see
+// Validate).
 func NewGain(D *mat.Dense, dt float64) (*System, error) {
 	sys, err := newGain(D, dt)
+	if err == nil {
+		err = denseFinite("D", sys.D, ErrInvalidArgument)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("NewGain: %w", err)
 	}
@@ -443,9 +469,14 @@ func newGain(D *mat.Dense, dt float64) (*System, error) {
 // NewFromSlices builds an n-state, m-input, p-output model from row-major
 // slices a (n×n), b (n×m), c (p×n) and d (p×m); a nil d means D = 0. The
 // slices are copied. Negative dimensions return ErrInvalidArgument and slice
-// lengths that disagree with them ErrDimensionMismatch.
+// lengths that disagree with them ErrDimensionMismatch. A NaN or ±Inf entry
+// returns ErrInvalidArgument, a deliberate departure from MATLAB ss (see
+// Validate).
 func NewFromSlices(n, m, p int, a, b, c, d []float64, dt float64) (*System, error) {
 	sys, err := newFromSlices(n, m, p, a, b, c, d, dt)
+	if err == nil {
+		err = systemMatricesFinite(sys, ErrInvalidArgument)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("NewFromSlices: %w", err)
 	}

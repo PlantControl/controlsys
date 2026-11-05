@@ -65,7 +65,7 @@ func TestNilArgumentsReturnInvalidArgument(t *testing.T) {
 
 func TestNonFiniteModelsRejectedBeforeLAPACK(t *testing.T) {
 	for _, bad := range []float64{math.NaN(), math.Inf(1)} {
-		sys, err := New(
+		sys, err := newCopy(
 			mat.NewDense(2, 2, []float64{-1, bad, 0.5, -2}),
 			mat.NewDense(2, 2, []float64{1, 0, 0.3, 1}),
 			mat.NewDense(2, 2, []float64{1, 0.2, 0, 1}),

@@ -11,7 +11,7 @@ import (
 )
 
 func TestPzmapGuardsInput(t *testing.T) {
-	sys, err := New(mat.NewDense(2, 2, []float64{-1, 2, math.NaN(), -3}), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 1}), nil, 0)
+	sys, err := newCopy(mat.NewDense(2, 2, []float64{-1, 2, math.NaN(), -3}), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 1}), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -118,7 +118,7 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 	if sys.internalDelayCount() > 0 {
 		e.eval = fe.pointEval()
 	} else {
-		if err := sys.Validate(); err != nil {
+		if err := sys.validate(); err != nil {
 			return nil, err
 		}
 		e.eval = fe.pointSolver(math.MaxInt).evalInto
