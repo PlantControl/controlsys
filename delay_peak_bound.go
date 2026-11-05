@@ -116,8 +116,30 @@ func newDescriptorResponse(sys *System) (*descriptorResponse, error) {
 	if p > 2 || m > 2 {
 		r.svd = newComplexSVDWorkspace(p, m)
 	}
+	if err := r.finite(); err != nil {
+		return nil, err
+	}
 	r.balance()
 	return r, nil
+}
+
+// finite returns ErrOverflow when M₀, B̃, Ĉ or D has a NaN/Inf entry, which
+// would stall balance and every bound built on them.
+func (r *descriptorResponse) finite() error {
+	for _, z := range [][]complex128{r.m0, r.b, r.c, r.d} {
+		if !allFiniteComplex(z) {
+			return fmt.Errorf("descriptor response is not finite: %w", ErrOverflow)
+		}
+	}
+	return nil
+}
+
+func allFiniteComplex(z []complex128) bool {
+	var s float64
+	for _, v := range z {
+		s += real(v)*0 + imag(v)*0
+	}
+	return s == 0
 }
 
 // balance applies the diagonal similarity M₀ → D⁻¹M₀D, Ĉ → ĈD, B̃ → D⁻¹B̃
@@ -136,7 +158,7 @@ func (r *descriptorResponse) balance() {
 					rn += cabs1(r.m0[i*size+j])
 				}
 			}
-			if c == 0 || rn == 0 {
+			if c == 0 || rn == 0 || !isFinite(c+rn) {
 				continue
 			}
 			sum, f := c+rn, 1.0
@@ -186,6 +208,9 @@ func (r *descriptorResponse) sensitivity() error {
 		r.c[j] *= -beta * beta
 	}
 	r.d[0] = beta
+	if err := r.finite(); err != nil {
+		return err
+	}
 	r.balance()
 	return nil
 }

@@ -64,7 +64,12 @@ type delayLFT struct {
 	gapMemo             map[float64]float64 // tailGain(0, w)
 }
 
+// newDelayLFT rejects a NaN/Inf entry of sys with ErrInvalidArgument, so a
+// non-finite value met later by its loops is an overflow (ErrOverflow).
 func newDelayLFT(sys *System) (*delayLFT, error) {
+	if err := systemMatricesFinite(sys, ErrInvalidArgument); err != nil {
+		return nil, err
+	}
 	n, m, p := sys.Dims()
 	lft := sys.LFT
 	nd := len(lft.Tau)
@@ -642,6 +647,9 @@ func (e *delayLFT) sigma(w float64) float64 {
 	if err != nil {
 		e.fail(w, err)
 		return math.NaN()
+	}
+	if math.IsNaN(sv) {
+		e.fail(w, fmt.Errorf("gain is NaN: %w", ErrOverflow))
 	}
 	return sv
 }
@@ -1470,6 +1478,9 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		}
 		hfx = newHighFrequencyExpansion(e, hf)
 	}
+	if math.IsNaN(lim) {
+		return 0, 0, fmt.Errorf("high-frequency gain is NaN: %w", ErrOverflow)
+	}
 	cert := append([]float64{0}, grid...)
 	atInf := false
 	if torus == nil && lim > best*(1+tol) {
@@ -1535,6 +1546,9 @@ func (e *delayLFT) peak(l *delayLoop, grid []float64) (float64, float64, error) 
 		}
 	}
 	for {
+		if math.IsNaN(best) || math.IsNaN(hi) {
+			return 0, 0, fmt.Errorf("peak search is not finite: %w", ErrOverflow)
+		}
 		level := best * (1 + tol)
 		R0 := max(hi, 2*e.minNormA()+1)
 		R, closed := R0, false
@@ -1662,6 +1676,9 @@ func (e *delayLFT) peakPastLimit(lim, tol, period float64, hfx *highFrequencyExp
 	}
 	h0 := *hi
 	for {
+		if math.IsNaN(R) || math.IsNaN(rMax) || math.IsNaN(*hi) {
+			return nil, fmt.Errorf("peak search past the limit is not finite: %w", ErrOverflow)
+		}
 		if Rs := min(R, rMax); Rs > *hi {
 			found, err := extend(*hi, Rs)
 			*hi = Rs

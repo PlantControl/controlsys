@@ -396,7 +396,7 @@ func (s *torusScan) next() {
 	s.R *= 2
 	s.ks = s.near.indices(s.hi, Rs, s.step, s.ks[:0])
 	ks := s.ks
-	bd := torusBand{b: math.Inf(-1), Rs: Rs, last: Rs >= s.end}
+	bd := torusBand{b: math.Inf(-1), Rs: Rs, last: !(Rs < s.end)}
 	for i := 0; i < len(ks); {
 		j := i + 1
 		for j < len(ks) && ks[j] == ks[j-1]+1 {
@@ -486,6 +486,9 @@ func (p *torusPassages) reach(w float64) float64 {
 // target, found from the windows where class 0 alone is, each bracketed by
 // the grid points about it, as it may be narrower than step.
 func (p *torusPassages) indices(lo, hi, step float64, dst []int) []int {
+	if !(lo <= hi) || !(step > 0) {
+		return dst
+	}
 	k0 := int(math.Floor(lo/step)) + 1
 	k1 := int(math.Floor(hi / step))
 	kd := min(k1, int(math.Floor(2*p.r0/step)))
@@ -505,7 +508,7 @@ func (p *torusPassages) indices(lo, hi, step float64, dst []int) []int {
 		for ; ; n++ {
 			wc := (t[0] + 2*math.Pi*n) / h0
 			half := p.reach(max(2*p.r0, wc-period)) / (s0 * h0)
-			if wc-half > whi {
+			if !(wc-half <= whi) {
 				break
 			}
 			lo, hi, ok := p.window(wc, t)
