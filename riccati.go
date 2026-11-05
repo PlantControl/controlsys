@@ -894,8 +894,9 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // ill-conditioned but nonsingular is solved once more on its explicit
 // model in extended precision (nearSingularDare). With E better
 // conditioned, a Dare with no stabilizing solution (ErrNoStabilizing, an
-// unstabilizable boundary mode included) is solved the same way and that
-// solution returned only with EᵀXE and K certified (boundaryExtendedDare).
+// unstabilizable boundary mode included), and at any cond(E) one whose X
+// is uncertified, is solved the same way and that solution returned only
+// with EᵀXE and K certified (boundaryExtendedDare).
 // A descriptor X certified on its K alone whose EᵀXE step fails
 // (descriptorGainCertified) is returned unchanged with Accuracy 1.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -905,7 +906,7 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareInputs(A, B, Q, R, opts)
 	if r, ok := nearSingularDare(A, B, Q, R, opts, err); ok {
 		res, err = r, nil
-	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, err); ok {
+	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, res, err); ok {
 		res, err = r, nil
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
@@ -920,24 +921,30 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 
 // boundaryExtendedDare is the extended solve of nearSingularDare for a
 // descriptor Dare with no stabilizing solution (ErrNoStabilizing, the
-// boundary verdict included) below its cond(E)·eps gate, kept only with
-// Y and K certified (xeCertified), else the error stays. With cond(E)
-// 2e6-4e7 the float64 pencil found a boundary mode unstabilizable where
-// the 320-bit Hewer K of the explicit model gave a closed-loop radius
-// 0.09-0.41, and the extended solve matched that K at every digit.
-func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*RiccatiResult, bool) {
-	if !errors.Is(err, ErrNoStabilizing) {
+// boundary verdict included) below its cond(E)·eps gate, or with an
+// uncertified result (Accuracy 1, or one Dare demotes to it) at any
+// cond(E), kept only with Y and K certified (xeCertified), else the error
+// or result stays. With cond(E) 2e6-4e7 the float64 pencil found a
+// boundary mode unstabilizable where the 320-bit Hewer K of the explicit
+// model gave a closed-loop radius 0.09-0.41, and the extended solve
+// matched that K at every digit. With a homogeneous PBH test
+// (boundaryDeficient) the same pencils return their X at Accuracy 1, K
+// 0.2 off the 320-bit gain (IR5YOF mid-85), which the extended solve
+// recovers (JGGEN2).
+func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, bool) {
+	uncertified := err == nil && (res.Accuracy != 0 || res.gainUncertified || res.xe != nil && res.xeX > newtonTol)
+	if !uncertified && !errors.Is(err, ErrNoStabilizing) {
 		return nil, false
 	}
-	cond, ok := extendedDareCond(B, opts, err)
-	if !ok || cond*eps() > newtonTol {
+	cond, ok := extendedDareCond(B, opts)
+	if !ok || !uncertified && cond*eps() > newtonTol {
 		return nil, false
 	}
-	res, ok := extendedDareSolve(A, B, Q, R, opts, cond)
-	if !ok || !res.xeCertified {
+	r, ok := extendedDareSolve(A, B, Q, R, opts, cond)
+	if !ok || !r.xeCertified {
 		return nil, false
 	}
-	return res, true
+	return r, true
 }
 
 // dareInputs is Dare after its argument check.
@@ -2587,15 +2594,13 @@ var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on or beyond the stabilit
 // of a triangular A is known to relative eps and stays stable (BWUCB5),
 // as does a lightly damped mode at −3e-9 ± i. PBH rank is σmin ≤
 // n·eps·‖[c(‖A‖ + |λ|‖E‖), ‖B‖]‖ + cτ‖E‖ of [c(A − λE), B], which has
-// the rank of [A − λE, B] for any c > 0. Care takes c = 1/max(1, |λ|),
-// the homogeneous pencil βA − αE: unscaled, a near-infinite mode of a
+// the rank of [A − λE, B] for any c > 0. c = 1/max(1, |λ|) gives the
+// homogeneous pencil βA − αE: unscaled, a near-infinite mode of a
 // near-singular E has a τ‖E‖ beyond ‖B‖, the most σmin reaches at an
 // eigenvalue, so no B passes (OCTGBK: a controllable mode at 1.24e13,
 // σmin 0.38 against 3e10; scaled 0.18 against 2.4e-3, and the 320-bit
-// solution moves it to −2.9e14). Dare keeps c = 1: there the verdict's
-// error is what its extended solve runs on (boundaryExtendedDare), and
-// clearing it returned the pencil's poor X instead (IR5YOF mid-85, K 0.2
-// off at Accuracy 1). A mode in a Jordan block with a
+// solution moves it to −2.9e14). A Dare that then returns an uncertified
+// X runs its extended solve on it (boundaryExtendedDare). A mode in a Jordan block with a
 // controllable one splits by √(eps·κ)·‖A‖ beyond first order: x ⊥ y
 // there, and τ, past the split, would swallow a stable mode at −1e-5. λ is
 // tested alone only when τ is below its distance to every other
@@ -2651,14 +2656,7 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 	var svd mat.SVD
 	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol float64) bool {
 		lr, li := real(lam), imag(lam)
-		c := 1.0
-		// Dare keeps the unscaled, vacuous verdict: its error is the
-		// dispatch into boundaryExtendedDare, which runs only on an
-		// error. JGGEN2 runs that solve on Accuracy 1 results and then
-		// scales Dare too.
-		if continuous {
-			c = 1 / max(1, cmplx.Abs(lam))
-		}
+		c := 1 / max(1, cmplx.Abs(lam))
 		for i := range n {
 			for j := range n {
 				re, im := c*(a[i*n+j]-lr*e[i*n+j]), -c*li*e[i*n+j]

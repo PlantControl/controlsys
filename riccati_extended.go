@@ -212,8 +212,9 @@ var (
 // It runs only when E (and Kalman's plant E) is nonsingular to both
 // MATLAB rank and LU condition (nearSingularEGate rejects anything
 // else) with cond(E)·eps above newtonTol, the regime where the float64
-// fold E⁻¹A alone leaves Accuracy 0's tolerance; below that gate Dare
-// reaches extendedDareSolve only through boundaryExtendedDare. The
+// fold E⁻¹A alone leaves Accuracy 0's tolerance; below that gate, and
+// on an uncertified result at any cond(E), Dare reaches extendedDareSolve
+// through boundaryExtendedDare. The
 // precision is 4·log₂cond(E) + 64 bits in [192, 320]. Y is the limit of SDA doubling, accepted only when its
 // residual in the given equation (with S) is within 2^(−prec/2) of
 // ‖Y‖ + ‖Q‖, once more at 64 bits more on a miss; K is formed from it in
@@ -234,7 +235,10 @@ var (
 // and its move under the same perturbations within newtonTol, else Dare
 // returns it at Accuracy 1.
 func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*RiccatiResult, bool) {
-	cond, ok := extendedDareCond(B, opts, err)
+	if !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+		return nil, false
+	}
+	cond, ok := extendedDareCond(B, opts)
 	if !ok || !(cond*eps() > newtonTol) {
 		return nil, false
 	}
@@ -242,12 +246,10 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 }
 
 // extendedDareCond returns the largest LU condition estimate of E and
-// Kalman's plant E, and whether the extended solve applies to the Dare
-// error err: E given, n, m > 0, and each E nonsingular to MATLAB rank and
-// LU condition.
-func extendedDareCond(B *mat.Dense, opts *RiccatiOpts, err error) (float64, bool) {
-	if opts == nil || isIdentityDescriptor(opts.E) ||
-		!errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+// Kalman's plant E, and whether the extended solve applies: E given,
+// n, m > 0, and each E nonsingular to MATLAB rank and LU condition.
+func extendedDareCond(B *mat.Dense, opts *RiccatiOpts) (float64, bool) {
+	if opts == nil || isIdentityDescriptor(opts.E) {
 		return 0, false
 	}
 	n, m := B.Dims()

@@ -154,3 +154,51 @@ func TestDare_BoundaryVerdictStaysWithoutStabilizingFloatGain(t *testing.T) {
 		}
 	}
 }
+
+// A descriptor Dare whose float64 pencil returns an uncertified X runs the
+// extended solve on it (JGGEN2; IR5YOF mid-85-cross, cond(E) ~1e2): once
+// the homogeneous PBH test no longer reports a boundary mode, the pencil
+// leaves K 0.2 off the 320-bit gain at Accuracy 1, and Dlqr returns the
+// extended solve's K and Y at Accuracy 0. With that solve capped the
+// pencil's value stays, at Accuracy 1.
+func TestDlqr_UncertifiedPencilRunsExtendedSolve(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{1.0596625396702297, 0.4519569829385703, -0.6513319386306535, -1.9810332929168784})
+	B := mat.NewDense(2, 2, []float64{-0.1636986889048983, -0.7676224253271123, -2.2433395437117265, 2.575287134620651})
+	Q := mat.NewDense(2, 2, []float64{7.856481631560513, -3.2452493276788226, -3.2452493276788226, 8.113676225088883})
+	R := mat.NewDense(2, 2, []float64{3.247662912032643, -2.1654952719405163, -2.1654952719405163, 2.469682828283582})
+	S := mat.NewDense(2, 2, []float64{-2.3766118908897984, 1.8566378338922267, 2.861016817419372, -2.2350607968362817})
+	E := mat.NewDense(2, 2, []float64{0.7246350543397122, -0.7542339544330663, 0.6658573764177139, -0.6930552783575629})
+	ref := riccatiExactReference(false, A, B, Q, R, S, E, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("doubling reference not certified")
+	}
+	for _, ns := range []bool{false, true} {
+		o := &RiccatiOpts{E: E, S: S, NoScaling: ns}
+		res, err := Dlqr(A, B, Q, R, o)
+		if err != nil {
+			t.Fatalf("Dlqr NoScaling %v: %v", ns, err)
+		}
+		eK, eY := relErr(res.K, ref.K), relErr(res.X, ref.Y)
+		if res.Accuracy != 0 || !(eK <= newtonTol && eY <= newtonTol) {
+			t.Errorf("Dlqr NoScaling %v: Accuracy %d, K %.3g Y %.3g off", ns, res.Accuracy, eK, eY)
+		}
+	}
+	withIterationCap(t, &extendedDoublings, 2)
+	for _, ns := range []bool{false, true} {
+		o := &RiccatiOpts{E: E, S: S, NoScaling: ns}
+		for _, api := range []string{"Dare", "Dlqr"} {
+			solve := Dare
+			if api == "Dlqr" {
+				solve = Dlqr
+			}
+			res, err := solve(A, B, Q, R, o)
+			if err != nil {
+				t.Errorf("capped %s NoScaling %v: %v", api, ns, err)
+				continue
+			}
+			if eK := relErr(res.K, ref.K); res.Accuracy != 1 {
+				t.Errorf("capped %s NoScaling %v: Accuracy %d (K %.3g off), want 1", api, ns, res.Accuracy, eK)
+			}
+		}
+	}
+}
