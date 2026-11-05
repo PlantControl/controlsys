@@ -90,7 +90,7 @@ func StepInfo(resp *TimeResponse, opts *StepInfoOptions) (*StepInfoResult, error
 // stability gate is skipped and the metrics come from the simulated
 // response, as MATLAB recommends assessing such models with step.
 func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*StepInfoResult, error) {
-	if err := requireSystem("StepInfoForSystem", sys); err != nil {
+	if err := requireFiniteSystem("StepInfoForSystem", sys); err != nil {
 		return nil, err
 	}
 	stable, err := sys.IsStable()

@@ -171,6 +171,26 @@ func denseFinite(name string, m *mat.Dense, sentinel error) error {
 	return nil
 }
 
+// requireFiniteSignals rejects a NaN/Inf entry of the optional input
+// signal u or initial state x0 of a time response.
+func requireFiniteSignals(op string, u *mat.Dense, x0 *mat.VecDense) error {
+	if u != nil {
+		if err := finiteDense(op, "u", u, ErrInvalidArgument); err != nil {
+			return err
+		}
+	}
+	if x0 == nil {
+		return nil
+	}
+	raw := x0.RawVector()
+	for i := range x0.Len() {
+		if v := raw.Data[i*raw.Inc]; !isFinite(v) {
+			return fmt.Errorf("%s: x0[%d] is %g: %w", op, i, v, ErrInvalidArgument)
+		}
+	}
+	return nil
+}
+
 // requireFinite rejects NaN/Inf values. A single value is reported by name,
 // several by name and index.
 func requireFinite(op, name string, v ...float64) error {

@@ -21,10 +21,10 @@ type LoopsensResult struct {
 // ErrInvalidArgument.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.loopsens.html.
 func Loopsens(P, C *System) (*LoopsensResult, error) {
-	if err := requireSystem("Loopsens", P); err != nil {
+	if err := requireFiniteSystem("Loopsens", P); err != nil {
 		return nil, err
 	}
-	if err := requireSystem("Loopsens", C); err != nil {
+	if err := requireFiniteSystem("Loopsens", C); err != nil {
 		return nil, err
 	}
 

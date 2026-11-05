@@ -104,7 +104,7 @@ func (r *LqgResult) Mw() (mw *mat.Dense, ok bool) { return r.mw, r.mw != nil }
 // ErrDimensionMismatch, singular E with ErrDescriptorSingular and plants
 // with delays with ErrDelayUnsupported.
 func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
-	if err := requireSystem("Lqg", sys); err != nil {
+	if err := requireFiniteSystem("Lqg", sys); err != nil {
 		return nil, err
 	}
 	policy, err := newControllerObserverPolicy(sys, "Lqg")
@@ -217,6 +217,9 @@ func validateLqgWeight(name string, W *mat.Dense, dim int) error {
 	r, c := W.Dims()
 	if r != dim || c != dim {
 		return fmt.Errorf("Lqg: %s is %dx%d, want %dx%d: %w", name, r, c, dim, dim, ErrDimensionMismatch)
+	}
+	if err := requireFiniteDense("Lqg", name, W); err != nil {
+		return err
 	}
 	if !isSymmetric(W, eps()*denseNorm(W)) {
 		return fmt.Errorf("Lqg: %s: %w", name, ErrNotSymmetric)

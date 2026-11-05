@@ -57,7 +57,7 @@ type NyquistResult struct {
 // models, at most π/dt. Negative nPoints or an invalid omega returns
 // ErrInvalidArgument.
 func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error) {
-	if err := requireSystem("Nyquist", sys); err != nil {
+	if err := requireFiniteSystem("Nyquist", sys); err != nil {
 		return nil, err
 	}
 	if _, err := newSISOLoopModel(sys, "Nyquist"); err != nil {

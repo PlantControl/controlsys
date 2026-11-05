@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"fmt"
+	"math"
 	"math/cmplx"
 )
 
@@ -15,6 +16,7 @@ type ModsepResult struct {
 // the modes with natural frequency below cutoff; Fast holds the rest, the
 // feedthrough D and, for singular-E descriptors, the infinite modes. The
 // natural frequency is |s| for continuous and |ln z|/Ts for discrete models.
+// cutoff must be positive and finite (ErrInvalidArgument).
 // A part without states on a model with no inputs or no outputs would be a
 // p×0 or 0×m static gain, which cannot be stored: ErrDimensionMismatch.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.freqsep.html.
@@ -22,8 +24,8 @@ func Modsep(sys *System, cutoff float64) (*ModsepResult, error) {
 	if err := requireFiniteSystem("Modsep", sys); err != nil {
 		return nil, err
 	}
-	if !(cutoff > 0) {
-		return nil, fmt.Errorf("Modsep: cutoff must be positive, got %g: %w", cutoff, ErrInvalidArgument)
+	if !(cutoff > 0) || math.IsInf(cutoff, 1) {
+		return nil, fmt.Errorf("Modsep: cutoff must be positive and finite, got %g: %w", cutoff, ErrInvalidArgument)
 	}
 
 	isSlow := func(ev complex128) bool {
