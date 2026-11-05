@@ -9,7 +9,11 @@ type StabsepResult struct {
 }
 
 // Stabsep splits sys = Stable + Unstable (MATLAB stabsep). Stable holds the
-// modes strictly inside the stability boundary, is always proper and carries
+// modes inside the stability boundary and clear of the boundary band of
+// IsStable (Re λ < −tol or |λ| < 1 − tol, tol = 1e-10·max(1, |λ|)); a mode
+// within the band goes to Unstable. The band is a deliberate departure from
+// MATLAB's strict Re λ < 0 / |λ| < 1, since float64 cannot certify the side
+// of an eigenvalue within it. Stable is always proper and carries
 // the feedthrough D; Unstable holds the remaining finite modes and, for
 // singular-E descriptors, the infinite (nondynamic/improper) modes.
 // A part without states on a model with no inputs or no outputs would be a

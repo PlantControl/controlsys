@@ -532,9 +532,7 @@ func fzAPIBuild(s *fzSpec, site, bad uint8) *fzAPIParts {
 		if b != nil && !b.IsEmpty() {
 			r, c := b.Dims()
 			b.Set(int(bad>>3)%r, int(bad>>5)%c, fzAPIBadValue(bad))
-			if k >= 4 {
-				pt.ValueBad = true
-			}
+			pt.ValueBad = true
 		}
 	case 4:
 		*bp = nil
@@ -737,8 +735,9 @@ func fzAPISystemSeeds() []fzSeed {
 
 // FuzzAPISystem drives the System constructors with corrupted blocks, then
 // the name setters and SelectByIndex/SelectByName on accepted models.
-// Oracles: a dimension-consistent input with a valid sample time, delay and
-// E must be accepted; an inconsistent one must be rejected; accepted
+// Oracles: a dimension-consistent, finite input with a valid sample time,
+// delay and E must be accepted; an inconsistent or non-finite one must be
+// rejected; accepted
 // models validate, store exactly the given entries and do not alias them;
 // name and index rules are the documented MATLAB ones and the selected
 // blocks are the exact submatrices.
@@ -759,7 +758,7 @@ func FuzzAPISystem(f *testing.F) {
 		relevant := k < 4 || k == 5 || (k == 4 && op == "NewDescriptor") || (k == 6 && usesDelay)
 		abcd, eOK, delayOK := fzAPIConsistent(pt)
 		consistent := abcd && (eOK || op != "NewDescriptor") && (delayOK || !usesDelay)
-		mustReject := (pt.DimsBroken && !consistent) || (relevant && pt.ValueBad && k >= 5)
+		mustReject := (pt.DimsBroken && !consistent) || (relevant && pt.ValueBad)
 		mustAccept := consistent && !(relevant && pt.ValueBad) && !fzAPIAmbiguous(pt, k, in)
 		if err != nil {
 			if mustAccept {

@@ -1443,7 +1443,7 @@ func TestPolesRejectNonFiniteWithoutHanging(t *testing.T) {
 		if descriptor {
 			E = mat.NewDense(3, 3, []float64{1, e01, 0, 0, 2, 0, 0, 0, 1})
 		}
-		sys, err := NewDescriptor(A, B, C, D, E, 0)
+		sys, err := newDescriptorOwned(A, B, C, D, E, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -114,7 +114,7 @@ func TestAnalysisRejectsNonFiniteModel(t *testing.T) {
 }
 
 func TestHinfNormRejectsInfFeedthroughWithHugeGains(t *testing.T) {
-	sys, err := New(
+	sys, err := newCopy(
 		mat.NewDense(2, 2, []float64{0.5, 0.2, 0, -0.3}),
 		mat.NewDense(2, 1, []float64{0, math.Ldexp(1, 521)}),
 		mat.NewDense(1, 2, []float64{math.Ldexp(1, 520), math.Ldexp(1, 520)}),

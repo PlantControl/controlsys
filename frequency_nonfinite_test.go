@@ -20,7 +20,7 @@ func nonFiniteShiftModel(t *testing.T, n int, bad float64) *System {
 	b[0] = 1
 	c := make([]float64, n)
 	c[n-1] = 1
-	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{1}, 0)
+	sys, err := newFromSlices(n, 1, 1, a, b, c, []float64{1}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestFrequencyNonFiniteModelErrors(t *testing.T) {
 func TestFrequencySolversNonFiniteNoPanic(t *testing.T) {
 	nanB := nonFiniteShiftModel(t, 10, 0)
 	nanB.B.Set(3, 0, math.NaN())
-	nanD, err := NewGain(mat.NewDense(1, 1, []float64{math.NaN()}), 0)
+	nanD, err := newGain(mat.NewDense(1, 1, []float64{math.NaN()}), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -84,7 +84,7 @@ func TestSsbal_Empty(t *testing.T) {
 
 func TestResidualOpsRejectNilAndNonFinite(t *testing.T) {
 	var nilSys *System
-	nan, err := New(mat.NewDense(2, 2, []float64{-1, 1, 0, math.NaN()}), mat.NewDense(2, 1, []float64{1, 0}),
+	nan, err := newCopy(mat.NewDense(2, 2, []float64{-1, 1, 0, math.NaN()}), mat.NewDense(2, 1, []float64{1, 0}),
 		mat.NewDense(1, 2, []float64{1, 1}), mat.NewDense(1, 1, []float64{0}), 0)
 	if err != nil {
 		t.Fatal(err)
