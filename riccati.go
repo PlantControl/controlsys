@@ -2586,7 +2586,16 @@ var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on or beyond the stabilit
 // eps·‖A‖·κ off, is tested whatever the rounding (zero1 under -race), while a mode at −3e-16 that is an exact diagonal entry
 // of a triangular A is known to relative eps and stays stable (BWUCB5),
 // as does a lightly damped mode at −3e-9 ± i. PBH rank is σmin ≤
-// n·eps·‖[‖A‖ + |λ|‖E‖, ‖B‖]‖ + τ‖E‖. A mode in a Jordan block with a
+// n·eps·‖[c(‖A‖ + |λ|‖E‖), ‖B‖]‖ + cτ‖E‖ of [c(A − λE), B], which has
+// the rank of [A − λE, B] for any c > 0. Care takes c = 1/max(1, |λ|),
+// the homogeneous pencil βA − αE: unscaled, a near-infinite mode of a
+// near-singular E has a τ‖E‖ beyond ‖B‖, the most σmin reaches at an
+// eigenvalue, so no B passes (OCTGBK: a controllable mode at 1.24e13,
+// σmin 0.38 against 3e10; scaled 0.18 against 2.4e-3, and the 320-bit
+// solution moves it to −2.9e14). Dare keeps c = 1: there the verdict's
+// error is what its extended solve runs on (boundaryExtendedDare), and
+// clearing it returned the pencil's poor X instead (IR5YOF mid-85, K 0.2
+// off at Accuracy 1). A mode in a Jordan block with a
 // controllable one splits by √(eps·κ)·‖A‖ beyond first order: x ⊥ y
 // there, and τ, past the split, would swallow a stable mode at −1e-5. λ is
 // tested alone only when τ is below its distance to every other
@@ -2642,9 +2651,17 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 	var svd mat.SVD
 	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol float64) bool {
 		lr, li := real(lam), imag(lam)
+		c := 1.0
+		// Dare keeps the unscaled, vacuous verdict: its error is the
+		// dispatch into boundaryExtendedDare, which runs only on an
+		// error. JGGEN2 runs that solve on Accuracy 1 results and then
+		// scales Dare too.
+		if continuous {
+			c = 1 / max(1, cmplx.Abs(lam))
+		}
 		for i := range n {
 			for j := range n {
-				re, im := a[i*n+j]-lr*e[i*n+j], -li*e[i*n+j]
+				re, im := c*(a[i*n+j]-lr*e[i*n+j]), -c*li*e[i*n+j]
 				g.Set(i, j, re)
 				g.Set(i, n+m+j, -im)
 				g.Set(n+i, j, im)
@@ -2660,7 +2677,7 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 			return false
 		}
 		sv := svd.Values(nil)
-		return sv[2*n-1] <= nf*ep*math.Hypot(an+cmplx.Abs(lam)*en, bn)+tol*en
+		return sv[2*n-1] <= nf*ep*math.Hypot(c*(an+cmplx.Abs(lam)*en), bn)+c*tol*en
 	}
 	g := mat.NewDense(2*n, 2*(n+m), nil)
 	var at, et, qd []float64
