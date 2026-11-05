@@ -190,18 +190,23 @@ func requireFinite(op, name string, v ...float64) error {
 // entry: v*0 is ±0 for finite v and NaN for NaN or ±Inf, so the sums stay 0
 // exactly when x is finite.
 func allFinite(x []float64) bool {
-	var s0, s1, s2, s3 float64
-	for len(x) >= 4 {
-		s0 += x[0] * 0
-		s1 += x[1] * 0
-		s2 += x[2] * 0
-		s3 += x[3] * 0
-		x = x[4:]
+	var s0, s1, s2, s3, s4, s5, s6, s7 float64
+	for len(x) >= 8 {
+		y := x[:8:8]
+		s0 += y[0] * 0
+		s1 += y[1] * 0
+		s2 += y[2] * 0
+		s3 += y[3] * 0
+		s4 += y[4] * 0
+		s5 += y[5] * 0
+		s6 += y[6] * 0
+		s7 += y[7] * 0
+		x = x[8:]
 	}
 	for _, v := range x {
 		s0 += v * 0
 	}
-	return s0+s1+s2+s3 == 0
+	return (s0+s1)+(s2+s3)+(s4+s5)+(s6+s7) == 0
 }
 
 func isFinite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
