@@ -2652,7 +2652,10 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol float64) bool {
 		lr, li := real(lam), imag(lam)
 		c := 1.0
-		// Discrete stays unscaled: see boundaryUnstabilizable.
+		// Dare keeps the unscaled, vacuous verdict: its error is the
+		// dispatch into boundaryExtendedDare, which runs only on an
+		// error. JGGEN2 runs that solve on Accuracy 1 results and then
+		// scales Dare too.
 		if continuous {
 			c = 1 / max(1, cmplx.Abs(lam))
 		}
