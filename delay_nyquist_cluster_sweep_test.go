@@ -197,6 +197,9 @@ func sweepOracle(q quasiLoop) (int, bool) {
 		walk(m, b, fm, fb, depth+1)
 	}
 	n := max(4000, int(8*B*q.tau)+1)
+	if n > 2_000_000 {
+		return 0, false
+	}
 	axis := make([]float64, 0, n+1)
 	for i := range n + 1 {
 		axis = append(axis, B*(1-2*float64(i)/float64(n)))
