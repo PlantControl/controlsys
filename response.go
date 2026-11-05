@@ -2266,6 +2266,9 @@ func Initial(sys *System, x0 *mat.VecDense, tFinal float64) (*TimeResponse, erro
 	if err := requireFiniteSystem("Initial", sys); err != nil {
 		return nil, err
 	}
+	if err := requireFiniteSignals("Initial", nil, x0); err != nil {
+		return nil, err
+	}
 	if err := validateTimeHorizon(tFinal); err != nil {
 		return nil, fmt.Errorf("Initial: %w", err)
 	}
@@ -2591,6 +2594,9 @@ func (sys *System) continuousFreeSamples(x0 *mat.VecDense, steps int, dt float64
 // returns ErrDimensionMismatch.
 func Lsim(sys *System, u *mat.Dense, t []float64, x0 *mat.VecDense) (*TimeResponse, error) {
 	if err := requireFiniteSystem("Lsim", sys); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteSignals("Lsim", u, x0); err != nil {
 		return nil, err
 	}
 	if _, _, p := sys.Dims(); p == 0 {

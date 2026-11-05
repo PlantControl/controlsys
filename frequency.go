@@ -453,7 +453,7 @@ func (e frequencyEvaluator) matrix(data []complex128, omega []float64) *FreqResp
 // system dynamics and stops at the Nyquist frequency; see
 // https://www.mathworks.com/help/control/ref/dynamicsystem.bode.html.
 func (sys *System) DefaultFrequencyGrid(nPoints int) ([]float64, error) {
-	if err := requireSystem("DefaultFrequencyGrid", sys); err != nil {
+	if err := requireFiniteSystem("DefaultFrequencyGrid", sys); err != nil {
 		return nil, err
 	}
 	if nPoints <= 0 {
@@ -1033,7 +1033,7 @@ func (r *SigmaResult) NSV() int {
 // has no singular values and returns ErrDimensionMismatch. The result owns a
 // copy of omega.
 func (sys *System) Sigma(omega []float64, nPoints int) (*SigmaResult, error) {
-	if err := requireSystem("Sigma", sys); err != nil {
+	if err := requireFiniteSystem("Sigma", sys); err != nil {
 		return nil, err
 	}
 	_, m, p := sys.Dims()

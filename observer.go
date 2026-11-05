@@ -103,7 +103,7 @@ func rejectKalmanOpts(op string, opts *RiccatiOpts) error {
 // MATLAB's kalman documentation does not specify descriptor models; this is
 // the form consistent with Estim. Singular E returns ErrDescriptorSingular.
 func Kalman(sys *System, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	if err := requireSystem("Kalman", sys); err != nil {
+	if err := requireFiniteSystem("Kalman", sys); err != nil {
 		return nil, err
 	}
 	if err := rejectKalmanOpts("Kalman", opts); err != nil {
@@ -205,7 +205,7 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 // x' = E⁻¹Ax + E⁻¹Bw, so the result is that of the explicit discrete model;
 // singular E returns ErrDescriptorSingular.
 func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
-	if err := requireSystem("Kalmd", sys); err != nil {
+	if err := requireFiniteSystem("Kalmd", sys); err != nil {
 		return nil, err
 	}
 	if opts != nil && opts.S != nil {

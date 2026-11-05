@@ -673,7 +673,7 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if !(dbDrop < 0) || math.IsInf(dbDrop, -1) {
 		return 0, fmt.Errorf("Bandwidth: dbDrop must be a finite negative scalar, got %g: %w", dbDrop, ErrInvalidArgument)
 	}
-	if err := requireSystem("Bandwidth", sys); err != nil {
+	if err := requireFiniteSystem("Bandwidth", sys); err != nil {
 		return 0, err
 	}
 	if _, m, p := sys.Dims(); m == 0 || p == 0 {

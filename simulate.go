@@ -69,6 +69,9 @@ func (sys *System) Simulate(u *mat.Dense, x0 *mat.VecDense, opts *SimulateOpts) 
 	if err := requireFiniteSystem("Simulate", sys); err != nil {
 		return nil, err
 	}
+	if err := requireFiniteSignals("Simulate", u, x0); err != nil {
+		return nil, err
+	}
 	return sys.simulate(u, x0, opts)
 }
 

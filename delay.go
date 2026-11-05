@@ -203,7 +203,7 @@ func validateDelayValue(v, dt float64) error {
 // discrete ones. A model with no inputs or no outputs has no delay matrix and
 // returns ErrDimensionMismatch.
 func (sys *System) TotalDelay() (*mat.Dense, error) {
-	if err := requireSystem("TotalDelay", sys); err != nil {
+	if err := requireFiniteSystem("TotalDelay", sys); err != nil {
 		return nil, err
 	}
 	_, m, p := sys.Dims()

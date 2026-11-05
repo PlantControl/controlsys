@@ -104,6 +104,9 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 // asymmetric Q or R ErrNotSymmetric, singular E ErrDescriptorSingular,
 // opts.E ErrOptionUnsupported and plants with delays ErrDelayUnsupported.
 func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	if err := requireFiniteSystem("Lqi", sys); err != nil {
+		return nil, err
+	}
 	policy, err := newControllerObserverPolicy(sys, "Lqi")
 	if err != nil {
 		return nil, err
@@ -123,6 +126,12 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	}
 	if rr, rc := R.Dims(); rr != m || rc != m {
 		return nil, fmt.Errorf("Lqi: R is %dx%d, want %dx%d: %w", rr, rc, m, m, ErrDimensionMismatch)
+	}
+	if err := requireFiniteDense("Lqi", "Q", Q); err != nil {
+		return nil, err
+	}
+	if err := requireFiniteDense("Lqi", "R", R); err != nil {
+		return nil, err
 	}
 	if !isSymmetric(Q, eps()*denseNorm(Q)) || !isSymmetric(R, eps()*denseNorm(R)) {
 		return nil, fmt.Errorf("Lqi: %w", ErrNotSymmetric)
