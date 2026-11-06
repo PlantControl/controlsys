@@ -460,7 +460,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 	if errors.Is(err, errBoundaryUnstabilizable) {
 		boundary = err
 	}
-	unscaled := err == nil && res.unscaledBoundary
+	unscaled := unscaledVerdict(res, err)
 	var base RiccatiOpts
 	if opts != nil {
 		base = *opts
@@ -480,7 +480,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 		if e == nil && r.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, r, false) {
 			r, e = nil, errBoundaryUnstabilizable
 		}
-		unscaled = unscaled || e == nil && r.unscaledBoundary
+		unscaled = unscaled || unscaledVerdict(r, e)
 		switch {
 		case errors.Is(e, errBoundaryUnstabilizable):
 			if boundary == nil {
@@ -2638,6 +2638,17 @@ func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []com
 	}
 	p.rcnd, p.step = rcnd, step
 	return true
+}
+
+// unscaledVerdict reports a Dare pass marked unscaledBoundary, or one
+// failed with no Accuracy 1 X where the unscaled PBH test finds a
+// deficient boundary mode: Dare returned errBoundaryUnstabilizable
+// there, overriding an Accuracy 1 X of the other scaling mode.
+func unscaledVerdict(res *RiccatiResult, err error) bool {
+	if err != nil {
+		return errors.As(err, new(unscaledBoundaryError))
+	}
+	return res.unscaledBoundary
 }
 
 // unscaledBoundaryError is a Dare pencil's ErrNoStabilizing, with no

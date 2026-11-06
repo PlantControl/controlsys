@@ -316,3 +316,45 @@ func TestDlqr_UncertifiedPencilAtIllConditionedERunsNearSingularSolve(t *testing
 // float64 boundary cases above take the path the census recorded; other
 // backends round them differently, as base did.
 func nativeBoundaryPath() bool { return runtime.GOARCH == "arm64" && !raceEnabled }
+
+// JGGEN2 census zw46mid 1914 (ρ 0.44, cond(E) 6e7): one scaling mode
+// returns a poor X at Accuracy 1 and the other fails with the unscaled PBH
+// test finding a deficient boundary mode. Base returned
+// errBoundaryUnstabilizable there and solved in extended precision; with
+// the verdict of the failed mode dropped, K was 2.4e-2 off the 320-bit
+// gain at Accuracy 1.
+func TestDare_FailedScalingModeUnscaledVerdictRunsNearSingularSolve(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{-0.54348738031290011, 0.73334636203808978, 0.6174557139527429, -0.37581976178648724, -0.41091170547645839, -0.34716981371260003, 0.4441338615012369, 0.9886260491643406, 0.33020600679380707, -0.92080378330119306, 1.4476779950508001, 0.76227906195847961, 0.53169648867224717, -0.7937527917268975, 0.31837611855391235, -0.48537929865183682})
+	B := mat.NewDense(4, 2, []float64{-1.723307731978911, 1.6266153081824966, 0.070490066743343904, -0.45244914096442335, -0.87500718471444972, 0.31628519843089842, -0.27495354852120735, 0.36675946348392008})
+	Q := mat.NewDense(4, 4, []float64{5.6143766518454985, 1.6624844435730595, -3.0566066369931542, 1.6877016024183351, 1.6624844435730595, 3.5854945506704872, -2.0298955813810555, 1.1124750510481676, -3.0566066369931542, -2.0298955813810555, 3.1534381916652143, -1.2751466505197664, 1.6877016024183351, 1.1124750510481676, -1.2751466505197664, 3.1121036670748712})
+	R := mat.NewDense(2, 2, []float64{4.1431713041737277, -3.697266847566655, -3.697266847566655, 4.2987493708638453})
+	E := mat.NewDense(4, 4, []float64{1.3115823857064357, -1.1282254549941944, 0.50437606518754907, 0.28861798113947756, 0, 0.79367692749015561, -0.53616079846115006, -0.14128752481883783, 0, 0, 1.4755648187283641, 1.1197288576143001, 0, 0, 0, 5.2266775494417855e-08})
+	ref := riccatiExactReference(false, A, B, Q, R, nil, E, 320)
+	if !ref.OK {
+		t.Fatal("320-bit reference failed")
+	}
+	o := &RiccatiOpts{E: E}
+	for _, api := range []string{"Dare", "Dlqr"} {
+		var res *RiccatiResult
+		var err error
+		if api == "Dare" {
+			res, err = Dare(A, B, Q, R, o)
+		} else {
+			res, err = Dlqr(A, B, Q, R, o)
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", api, err)
+		}
+		if res.Accuracy != 0 {
+			if nativeBoundaryPath() {
+				t.Errorf("%s: Accuracy %d, want 0", api, res.Accuracy)
+			} else {
+				t.Logf("%s: Accuracy %d off native", api, res.Accuracy)
+			}
+			continue
+		}
+		if d := relFrob(res.K, ref.K); d > 1e-12 {
+			t.Errorf("%s: K %.3g off the 320-bit K", api, d)
+		}
+	}
+}
