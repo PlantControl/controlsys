@@ -194,6 +194,11 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 					}
 				}
 			} else {
+				if cond, ok := extendedDareCond(Ba, ropts); ok {
+					if r, ok := extendedDareSolve(Aa, Ba, Q, R, ropts, cond); ok {
+						kwGen, kwCertified = r.kw, false
+					}
+				}
 				res.Accuracy = max(res.Accuracy, 1)
 			}
 		}
@@ -277,8 +282,11 @@ func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
 // with ‖X‖ ~ 1/σ_min(E)² and R small against BᵀXB, G is ill-conditioned
 // while ‖G‖ is not small (cond(E) 3e7: bound 3e15, Kw off 2e-2). Lqg then
 // takes Kw from descriptorNoiseGain, unless the float64 Kw is within
-// newtonTol of it (keepFloatNoiseGain), else keeps the float64 Kw at
-// Accuracy 1. Within the bound, no float64 test tells a Kw off by 1.4e-7
+// newtonTol of it (keepFloatNoiseGain). Where descriptorNoiseGain fails,
+// Kw is that of the extended Dare solve (extendedDareSolve) when it runs,
+// else the float64 Kw, at Accuracy 1: at a boundary closed loop (ρ
+// 0.999998) G is singular to float64 and its Kw 0.8 off, while the
+// extended Kw matched the 320-bit one. Within the bound, no float64 test tells a Kw off by 1.4e-7
 // from one correct to 1e-16.
 func noiseGainIll(B, X, R, E *mat.Dense) bool {
 	var lu mat.LU
@@ -319,11 +327,19 @@ func keepFloatNoiseGain(fkw, kw *mat.Dense) bool {
 // currentGains takes X, the regulator solution of the generalized Riccati
 // equation: Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] for E x[n+1] = ... + w, or
 // (R + Ba'X Ba)⁻¹ Ba'X itself when Dare formed it (kw, near-singular E).
+// The innovation gain Mx = PCᵀS⁻¹, S = CPCᵀ + Rn, is Accuracy 1 when
+// cond(S)·eps exceeds newtonTol: with P ~ 1/σ_min(E)², cond(S) 1e13-1e14
+// left Mx 4e-4 to 3e-3 off the 320-bit gain with every Riccati certified.
 func (res *LqgResult) currentGains(sys *System, Ba, X, kw, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {
 	n, m, p := sys.Dims()
 	PCt := mulDims(n, p, res.Xf, sys.C.T())
 	S := mulDims(p, p, sys.C, PCt)
 	S.Add(S, Rn)
+	var lu mat.LU
+	lu.Factorize(S)
+	if !(lu.Cond()*eps() <= newtonTol) {
+		res.Accuracy = max(res.Accuracy, 1)
+	}
 	var Sinv mat.Dense
 	if err := Sinv.Inverse(S); err != nil {
 		return nil, fmt.Errorf("Lqg: innovation covariance: %w", ErrSingularEquation)
