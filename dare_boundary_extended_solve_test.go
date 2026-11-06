@@ -267,3 +267,34 @@ func TestDlqr_LooseExplicitSolutionGainPairAgrees(t *testing.T) {
 		t.Errorf("Dare X %.3g off the 320-bit X", d)
 	}
 }
+
+// JGGEN2 census rv46 bnd 806 (cond(E) 2e12): the c = 1 PBH verdict sent it
+// to nearSingularDare, which returned Y and K exact at Accuracy 1. The
+// homogeneous verdict clears it, and the float64 pencil's uncertified Y
+// came back 5.8e-3 off (bnd 461 on amd64: K 0.92 off). An uncertified
+// result above the gate runs the extended solve too.
+func TestDlqr_UncertifiedPencilAtIllConditionedERunsNearSingularSolve(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-0.56014363633412578, -0.77081107545778782, 1.2428497489887969, -0.6043037583739419})
+	B := mat.NewDense(2, 1, []float64{0.018960481587139557, 0.096409661854527248})
+	Q := mat.NewDense(2, 2, []float64{0.304740285002572, -0.17024434730499005, -0.17024434730499005, 2.6702839412058812})
+	R := mat.NewDense(1, 1, []float64{5.2957243890862946})
+	S := mat.NewDense(2, 1, []float64{-1.0855947835212159, 1.3867386019933887})
+	E := mat.NewDense(2, 2, []float64{0.7746097390631389, 0.62768785119841863, -0.15233922970882519, -0.12344472180811875})
+	ref := riccatiExactReference(false, A, B, Q, R, S, E, 320)
+	if !ref.OK {
+		t.Fatal("320-bit reference failed")
+	}
+	for _, ns := range []bool{false, true} {
+		o := &RiccatiOpts{E: E, S: S, NoScaling: ns}
+		res, err := Dlqr(A, B, Q, R, o)
+		if err != nil {
+			t.Fatalf("Dlqr NoScaling %v: %v", ns, err)
+		}
+		if d := relFrob(res.X, ref.Y); d > 1e-12 {
+			t.Errorf("Dlqr NoScaling %v: Y %.3g off the 320-bit Y", ns, d)
+		}
+		if d := relFrob(res.K, ref.K); d > 1e-12 {
+			t.Errorf("Dlqr NoScaling %v: K %.3g off the 320-bit K", ns, d)
+		}
+	}
+}

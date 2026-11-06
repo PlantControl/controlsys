@@ -904,13 +904,13 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		return nil, err
 	}
 	res, err := dareInputs(A, B, Q, R, opts)
-	if r, ok := nearSingularDare(A, B, Q, R, opts, err); ok {
+	if r, ok := nearSingularDare(A, B, Q, R, opts, res, err); ok {
 		res, err = r, nil
 	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, res, err); ok {
 		res, err = r, nil
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
-	if err == nil && res.Accuracy == 0 && (res.gainUncertified || res.xe != nil && res.xeX > newtonTol) {
+	if err == nil && res.Accuracy == 0 && dareUncertified(res, err) {
 		res.Accuracy = 1
 	}
 	if err == nil {
@@ -939,13 +939,13 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // 0.2 off the 320-bit gain (IR5YOF mid-85), which the extended solve
 // recovers (JGGEN2).
 func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, bool) {
-	uncertified := err == nil && (res.Accuracy != 0 || res.gainUncertified || res.xe != nil && res.xeX > newtonTol)
+	uncertified := dareUncertified(res, err)
 	loose := err == nil && !uncertified && res.xe != nil && res.xeLoose
 	if !uncertified && !loose && !errors.Is(err, ErrNoStabilizing) {
 		return nil, false
 	}
 	cond, ok := extendedDareCond(B, opts)
-	if !ok || !uncertified && !loose && cond*eps() > newtonTol {
+	if !ok || !loose && cond*eps() > newtonTol {
 		return nil, false
 	}
 	r, ok := extendedDareSolve(A, B, Q, R, opts, cond)
@@ -960,6 +960,12 @@ func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *Riccati
 		return res, true
 	}
 	return r, true
+}
+
+// dareUncertified reports a Dare result uncertified: Accuracy 1, or one
+// Dare demotes to it.
+func dareUncertified(res *RiccatiResult, err error) bool {
+	return err == nil && (res.Accuracy != 0 || res.gainUncertified || res.xe != nil && res.xeX > newtonTol)
 }
 
 // gainPairAgrees reports the pencil K within newtonTol of the extended K,
