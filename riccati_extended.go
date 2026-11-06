@@ -202,7 +202,8 @@ var (
 )
 
 // nearSingularDare solves a Dare with a near-singular E that Dare's
-// float64 pencil left with no stabilizing solution (err), or uncertified,
+// float64 pencil left with no stabilizing solution (err), or uncertified
+// at an unscaled boundary verdict,
 // on its explicit model Ae = E⁻¹A, Be = E⁻¹B, formed with every later
 // step in big.Float arithmetic, bit-identical on every platform. EᵀXE = Y is the solution
 // of that model's Dare, and Y and K are well posed while X ~ 1/σ_min(E)²
@@ -213,8 +214,9 @@ var (
 // MATLAB rank and LU condition (nearSingularEGate rejects anything
 // else) with cond(E)·eps above newtonTol, the regime where the float64
 // fold E⁻¹A alone leaves Accuracy 0's tolerance; it runs there on an
-// uncertified float64 result too (dareUncertified), which a homogeneous
-// PBH verdict no longer turns into ErrNoStabilizing (JGGEN2: rv46 bnd 806
+// uncertified float64 result too (dareUncertified) that the unscaled PBH
+// test marks (unscaledBoundary), where a homogeneous PBH verdict no
+// longer gives ErrNoStabilizing (JGGEN2: rv46 bnd 806
 // returned its pencil Y 5.8e-3 off, bnd 461 on amd64 K 0.92 off, both
 // exact here). Below that gate Dare reaches extendedDareSolve through
 // boundaryExtendedDare. The
@@ -238,7 +240,7 @@ var (
 // and its move under the same perturbations within newtonTol, else Dare
 // returns it at Accuracy 1.
 func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, bool) {
-	if !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) && !dareUncertified(res, err) {
+	if !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) && !(dareUncertified(res, err) && res.unscaledBoundary) {
 		return nil, false
 	}
 	cond, ok := extendedDareCond(B, opts)

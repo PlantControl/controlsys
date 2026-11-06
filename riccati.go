@@ -194,6 +194,10 @@ type RiccatiResult struct {
 	// xeLoose reports an xe of refineDescriptorDare whose next Newton
 	// step exceeds newtonRefineTol (explicitRiccatiSolution: Accuracy 1).
 	xeLoose bool
+	// unscaledBoundary reports an Accuracy 1 Dare X returned where the
+	// unscaled PBH test, unlike the homogeneous one, finds a boundary mode
+	// unstabilizable (boundaryExtendedDare).
+	unscaledBoundary bool
 	// gainUncertified reports a certified X whose K Care cannot certify
 	// with it, or a Dare X certified on its K alone whose EᵀXE step fails
 	// (descriptorGainCertified); Care and Dare return it with Accuracy 1.
@@ -456,6 +460,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 	if errors.Is(err, errBoundaryUnstabilizable) {
 		boundary = err
 	}
+	unscaled := err == nil && res.unscaledBoundary
 	var base RiccatiOpts
 	if opts != nil {
 		base = *opts
@@ -475,6 +480,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 		if e == nil && r.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, r, false) {
 			r, e = nil, errBoundaryUnstabilizable
 		}
+		unscaled = unscaled || e == nil && r.unscaledBoundary
 		switch {
 		case errors.Is(e, errBoundaryUnstabilizable):
 			if boundary == nil {
@@ -491,6 +497,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 		return nil, boundary
 	}
 	if res != nil {
+		res.unscaledBoundary = unscaled
 		return res, nil
 	}
 	return nil, err
@@ -506,7 +513,8 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 // on the result Care or Dare returns, which it leaves unchanged but for
 // Accuracy 1: whether that mode is on the boundary or just inside it is
 // not decidable from the data (just inside, the in-band base X matched
-// the 320-bit reference). Wider bands (√eps,
+// the 320-bit reference). A Dare res that only the unscaled PBH test
+// finds deficient is marked unscaledBoundary. Wider bands (√eps,
 // 10·n·eps·‖A‖_F) rejected oracle-exact X of stable uncontrollable modes
 // at 1 − 1e-9 and 1 − 1e-11 that boundaryUnstabilizable's κ-weighted band
 // covers.
@@ -530,14 +538,28 @@ func boundaryCertified(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts
 	if opts != nil {
 		base = *opts
 	}
-	base.Workspace, base.NoScaling, base.plainScaling = nil, true, false
-	problem, err := newRiccatiProblem(A, B, Q, R, &base)
-	if err != nil || !problem.boundaryDeficient(continuous, detect) {
-		return false
+	base.Workspace = nil
+	deficient := func(unscaledPBH bool) bool {
+		base.NoScaling, base.plainScaling = true, false
+		problem, err := newRiccatiProblem(A, B, Q, R, &base)
+		if err != nil {
+			return false
+		}
+		problem.unscaledPBH = unscaledPBH
+		if !problem.boundaryDeficient(continuous, detect) {
+			return false
+		}
+		base.NoScaling = false
+		problem.scale(&base, continuous)
+		return problem.boundaryDeficient(continuous, detect)
 	}
-	base.NoScaling = false
-	problem.scale(&base, continuous)
-	return problem.boundaryDeficient(continuous, detect)
+	if deficient(false) {
+		return true
+	}
+	if !continuous && !detect && deficient(true) {
+		res.unscaledBoundary = true
+	}
+	return false
 }
 
 func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -922,8 +944,9 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // boundaryExtendedDare is the extended solve of nearSingularDare for a
 // descriptor Dare with no stabilizing solution (ErrNoStabilizing, the
 // boundary verdict included) below its cond(E)·eps gate, or with an
-// uncertified result (Accuracy 1, or one Dare demotes to it) at any
-// cond(E), kept only with Y and K certified (xeCertified), else the error
+// uncertified result (Accuracy 1, or one Dare demotes to it) that only the
+// unscaled PBH test finds at an unstabilizable boundary mode
+// (unscaledBoundary), kept only with Y and K certified (xeCertified), else the error
 // or result stays. A certified X whose refined EᵀXE is loose (xeLoose),
 // which Dlqr demotes, takes a certified extended solve whole when its X
 // is certified too (Accuracy 0); else it keeps X, K and Accuracy and takes
@@ -937,10 +960,13 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // matched that K at every digit. With a homogeneous PBH test
 // (boundaryDeficient) the same pencils return their X at Accuracy 1, K
 // 0.2 off the 320-bit gain (IR5YOF mid-85), which the extended solve
-// recovers (JGGEN2).
+// recovers (JGGEN2). Run on every uncertified result it made 9-13% of
+// rv48/rv49 correct rows over 2x slower (CEFUJP), mostly to no certified
+// result, so it runs only where the unscaled verdict, which Dare used
+// before, would have sent it.
 func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, bool) {
-	uncertified := dareUncertified(res, err)
-	loose := err == nil && !uncertified && res.xe != nil && res.xeLoose
+	uncertified := dareUncertified(res, err) && res.unscaledBoundary
+	loose := err == nil && !dareUncertified(res, err) && res.xe != nil && res.xeLoose
 	if !uncertified && !loose && !errors.Is(err, ErrNoStabilizing) {
 		return nil, false
 	}
@@ -1740,7 +1766,7 @@ func certifyIn(A, B, Q, R, S *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, 
 // its smallest eigenvalue and certifies a wrong X.
 func dareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, swapPoor bool) (*RiccatiResult, error) {
 	res, err := otherScaling(dare, false, A, B, Q, R, opts)
-	poor := swapPoor && err == nil && res.Accuracy != 0
+	poor := swapPoor && err == nil && res.Accuracy != 0 && !res.unscaledBoundary
 	if poor || (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) {
 		var base RiccatiOpts
 		if opts != nil {
@@ -1753,6 +1779,7 @@ func dareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, swapPoor bool) (*Riccat
 		flipped.NoScaling = !base.NoScaling
 		for _, o := range []RiccatiOpts{base, flipped} {
 			if r, e := placedDare(A, B, Q, R, &o); e == nil && !boundaryCertified(false, A, B, Q, R, opts, r, false) {
+				r.unscaledBoundary = r.unscaledBoundary || errors.As(err, new(unscaledBoundaryError))
 				return r, nil
 			}
 		}
@@ -2360,7 +2387,15 @@ func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.
 		if problem.boundaryUnstabilizable(continuous) {
 			return nil, nil, 0, 0, errBoundaryUnstabilizable
 		}
+		if !continuous {
+			problem.unscaledPBH = true
+			problem.unscaledBoundary = problem.boundaryUnstabilizable(false)
+			problem.unscaledPBH = false
+		}
 		if problem.poor == nil {
+			if problem.unscaledBoundary {
+				err = unscaledBoundaryError{err}
+			}
 			return nil, nil, 0, 0, err
 		}
 		X, K, rcnd = problem.poorSolution(eig)
@@ -2605,6 +2640,14 @@ func (problem *riccatiProblem) keepPoor(xData []float64, K *mat.Dense, eig []com
 	return true
 }
 
+// unscaledBoundaryError is a Dare pencil's ErrNoStabilizing, with no
+// uncertified X, where the unscaled PBH test, unlike the homogeneous one,
+// finds a boundary mode unstabilizable: a placedDare X that replaces it
+// is marked unscaledBoundary.
+type unscaledBoundaryError struct{ error }
+
+func (e unscaledBoundaryError) Unwrap() error { return e.error }
+
 // errBoundaryUnstabilizable is the ErrNoStabilizing of
 // boundaryUnstabilizable: structural, so it holds in either scaling mode
 // over any Accuracy 1 X, though not over a certified one (otherScaling).
@@ -2685,7 +2728,10 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 	var svd mat.SVD
 	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol float64) bool {
 		lr, li := real(lam), imag(lam)
-		c := 1 / max(1, cmplx.Abs(lam))
+		c := 1.0
+		if !problem.unscaledPBH {
+			c = 1 / max(1, cmplx.Abs(lam))
+		}
 		for i := range n {
 			for j := range n {
 				re, im := c*(a[i*n+j]-lr*e[i*n+j]), -c*li*e[i*n+j]
