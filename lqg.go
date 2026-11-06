@@ -156,7 +156,7 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	if continuous {
 		kRes, err = Care(Aa, Ba, Q, R, ropts)
 	} else {
-		kRes, err = Dare(Aa, Ba, Q, R, ropts)
+		kRes, err = dareFor(Aa, Ba, Q, R, ropts, true)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("Lqg: %w", err)

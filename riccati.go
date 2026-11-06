@@ -922,13 +922,20 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // A descriptor X certified on its K alone whose EᵀXE step fails
 // (descriptorGainCertified) is returned unchanged with Accuracy 1.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	return dareFor(A, B, Q, R, opts, false)
+}
+
+// dareFor is Dare; explicit is set by callers that return EᵀXE
+// (explicitRiccatiSolution), for which alone a loose EᵀXE takes the
+// extended solve (boundaryExtendedDare).
+func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiResult, error) {
 	if err := riccatiArgs("Dare", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
 	res, err := dareInputs(A, B, Q, R, opts)
 	if r, ok := nearSingularDare(A, B, Q, R, opts, res, err); ok {
 		res, err = r, nil
-	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, res, err); ok {
+	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, res, err, explicit); ok {
 		res, err = r, nil
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
@@ -948,7 +955,9 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // unscaled PBH test finds at an unstabilizable boundary mode
 // (unscaledBoundary), kept only with Y and K certified (xeCertified), else the error
 // or result stays. A certified X whose refined EᵀXE is loose (xeLoose),
-// which Dlqr demotes, takes a certified extended solve whole when its X
+// which Dlqr demotes, takes, for a caller returning EᵀXE (explicit: Dlqr,
+// Lqg; Dare and Kalman return X and paid for it with no change, CEFUJP),
+// a certified extended solve whole when its X
 // is certified too (Accuracy 0); else it keeps X, K and Accuracy and takes
 // Y as EᵀXE only with K within newtonTol of the gain of Y
 // (gainPairAgrees), the pair Dlqr returns. X and Y are not compared: at
@@ -964,9 +973,9 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // rv48/rv49 correct rows over 2x slower (CEFUJP), mostly to no certified
 // result, so it runs only where the unscaled verdict, which Dare used
 // before, would have sent it.
-func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, bool) {
+func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error, explicit bool) (*RiccatiResult, bool) {
 	uncertified := dareUncertified(res, err) && res.unscaledBoundary
-	loose := err == nil && !dareUncertified(res, err) && res.xe != nil && res.xeLoose
+	loose := explicit && err == nil && !dareUncertified(res, err) && res.xe != nil && res.xeLoose
 	if !uncertified && !loose && !errors.Is(err, ErrNoStabilizing) {
 		return nil, false
 	}
