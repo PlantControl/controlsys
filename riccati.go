@@ -144,6 +144,9 @@ type RiccatiOpts struct {
 	// reducedQ marks Q as Dare's Q − S₂R₂₂⁻¹S₂ᵀ of reduceInputs, which
 	// may be indefinite as Q − SR⁻¹Sᵀ of the given Dare may.
 	reducedQ bool
+	// placeUnscaled lets dareSolve take placedDare on a failure with the
+	// unscaled boundary verdict, dareFor's second pass.
+	placeUnscaled bool
 	// plantE is the model E when E is its transpose (Kalman's dual), so
 	// nearSingularEGate keeps the window of both condition estimates.
 	plantE *mat.Dense
@@ -937,6 +940,15 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 		res, err = r, nil
 	} else if r, ok := boundaryExtendedDare(A, B, Q, R, opts, res, err, explicit); ok {
 		res, err = r, nil
+	} else if errors.As(err, new(unscaledBoundaryError)) {
+		var o RiccatiOpts
+		if opts != nil {
+			o = *opts
+		}
+		o.placeUnscaled = true
+		if r, e := dareInputs(A, B, Q, R, &o); e == nil {
+			res, err = r, nil
+		}
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
 	if err == nil && res.Accuracy == 0 && dareUncertified(res, err) {
@@ -1772,11 +1784,15 @@ func certifyIn(A, B, Q, R, S *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, 
 // dareSolve is Dare without its input reduction; swapPoor lets placedDare
 // replace an Accuracy 1 pencil X, which Dare declines on a B of condition
 // above rotationCond in the inputs u, where Newton's R + BᵀXB has lost
-// its smallest eigenvalue and certifies a wrong X.
+// its smallest eigenvalue and certifies a wrong X. A failure with the
+// unscaled boundary verdict takes placedDare only on dareFor's second
+// pass (placeUnscaled), after the near-singular and extended solves fail:
+// they certify most such pencils at a third of the cost (CEFUJP).
 func dareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, swapPoor bool) (*RiccatiResult, error) {
 	res, err := otherScaling(dare, false, A, B, Q, R, opts)
 	poor := swapPoor && err == nil && res.Accuracy != 0 && !res.unscaledBoundary
-	if poor || (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) {
+	place := opts != nil && opts.placeUnscaled || !errors.As(err, new(unscaledBoundaryError))
+	if poor || (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) && place {
 		var base RiccatiOpts
 		if opts != nil {
 			base = *opts
