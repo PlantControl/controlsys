@@ -925,9 +925,12 @@ func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // uncertified result (Accuracy 1, or one Dare demotes to it) at any
 // cond(E), kept only with Y and K certified (xeCertified), else the error
 // or result stays. A certified X whose refined EᵀXE is loose (xeLoose),
-// which Dlqr demotes, keeps X, K and its Accuracy and takes Y of a
-// certified extended solve as EᵀXE: replacing the result whole returned
-// the extended X at Accuracy 1 (rv46 edge 651, X uncertified there). With
+// which Dlqr demotes, takes a certified extended solve whole when its X
+// is certified too (Accuracy 0); else it keeps X, K and Accuracy and takes
+// Y as EᵀXE only with K within newtonTol of the gain of Y
+// (gainPairAgrees), the pair Dlqr returns. X and Y are not compared: at
+// rv46 edge 651 the pencil X, 9.4e-11 off at ‖X‖ 5.7e21, maps to an EᵀXE
+// 0.15 off Y (‖Y‖ 2.3e6) even in exact arithmetic. With
 // cond(E) 2e6-4e7 the float64 pencil found a
 // boundary mode unstabilizable where the 320-bit Hewer K of the explicit
 // model gave a closed-loop radius 0.09-0.41, and the extended solve
@@ -949,11 +952,22 @@ func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *Riccati
 	if !ok || !r.xeCertified {
 		return nil, false
 	}
-	if loose {
+	if loose && r.Accuracy != 0 {
+		if !gainPairAgrees(res.K, r.K) {
+			return nil, false
+		}
 		res.xe, res.xeX, res.xeLoose, res.xeCertified = r.xe, 0, false, true
 		return res, true
 	}
 	return r, true
+}
+
+// gainPairAgrees reports the pencil K within newtonTol of the extended K,
+// the gain of Y, relative to ‖K‖: Dlqr returns Y with the pencil K.
+func gainPairAgrees(K, kExt *mat.Dense) bool {
+	var d mat.Dense
+	d.Sub(K, kExt)
+	return mat.Norm(&d, 2) <= newtonTol*mat.Norm(kExt, 2)
 }
 
 // dareInputs is Dare after its argument check.
