@@ -196,10 +196,13 @@ func sweepOracle(q quasiLoop) (int, bool) {
 		walk(a, m, fa, fm, depth+1)
 		walk(m, b, fm, fb, depth+1)
 	}
-	const n = 4000
+	n := max(4000, int(8*B*q.tau)+1)
+	if n > 2_000_000 {
+		return 0, false
+	}
 	axis := make([]float64, 0, n+1)
 	for i := range n + 1 {
-		axis = append(axis, B*(1-2*float64(i)/n))
+		axis = append(axis, B*(1-2*float64(i)/float64(n)))
 	}
 	roots, err := Poly(q.den).Roots()
 	if err != nil {
@@ -232,7 +235,7 @@ func sweepOracle(q quasiLoop) (int, bool) {
 			continue
 		}
 		for i := 1; i <= n && ok; i++ {
-			step(a + (b-a)*complex(float64(i)/n, 0))
+			step(a + (b-a)*complex(float64(i)/float64(n), 0))
 		}
 	}
 	turns := total / (2 * math.Pi)
@@ -240,4 +243,25 @@ func sweepOracle(q quasiLoop) (int, bool) {
 		return 0, false
 	}
 	return int(math.Round(turns)), true
+}
+
+// 6JX47X: a 4000-sample axis aliased the delay phase of neutral loops
+// (deg num = deg den) whose winding runs out to |w| in the thousands.
+func TestSweepOracle_NeutralLoopRootCount(t *testing.T) {
+	cases := []struct {
+		q    quasiLoop
+		want int
+	}{
+		{quasiLoop{num: []float64{0.4296301464503517, 203.91234280481635, 5365.104424297874}, den: []float64{1, 1.9549524004800882, 0.4265179988228929}, tau: 2.9078720269709444}, 200},
+		{quasiLoop{num: []float64{-0.4873935496838586, 238.2482872956028, 676.9561718253274}, den: []float64{1, -14.048506952489628, 4.371096488549578}, tau: 3.6253950291690042}, 316},
+	}
+	for _, c := range cases {
+		got, ok := sweepOracle(c.q)
+		if !ok || got != c.want {
+			t.Errorf("sweepOracle(%v) = %d, %v; want %d", c.q, got, ok, c.want)
+		}
+		if h := halfDiskRoots(t, c.q.chi, c.q.tau, 8000); h != c.want {
+			t.Errorf("halfDiskRoots(%v) = %d; want %d", c.q, h, c.want)
+		}
+	}
 }
