@@ -202,6 +202,7 @@ func sisoLoopDelay(sys *System) float64 {
 
 func (l *delayLoop) addPoles(poles []complex128) {
 	l.poles = append(l.poles, poles...)
+	var axis []float64
 	for _, p := range poles {
 		if a := cmplx.Abs(p); a > 0 {
 			l.scales = append(l.scales, a, math.Abs(imag(p)))
@@ -210,27 +211,48 @@ func (l *delayLoop) addPoles(poles []complex128) {
 		case poleClassUnstable:
 			l.rhp++
 		case poleClassBoundary:
-			if imag(p) < 0 {
-				continue
+			if imag(p) >= 0 {
+				axis = append(axis, imag(p))
 			}
-			l.addAxisPole(imag(p), 1)
 		}
+	}
+	slices.Sort(axis)
+	for _, w := range axis {
+		l.addAxisPole(w)
 	}
 }
 
-func (l *delayLoop) addAxisPole(w float64, mult int) {
-	if w < 1e-9 {
+// addAxisPole adds the boundary pole at jw, w >= 0, or with w > 0 the pair
+// ±jw. A pair within axisOriginReach of the origin, or within the
+// indentation radius axisSpanMargin·hi of the origin group, is indented
+// there with both its poles: counting jw alone, the pair at ±1e-13j beside
+// a delay loop read the two-decade growth of |L| as a root of χ. Ascending
+// w (addPoles) forms the origin group before the poles it may enclose.
+func (l *delayLoop) addAxisPole(w float64) {
+	mult, hi := 1, w
+	reach := axisOriginReach
+	if i := slices.IndexFunc(l.axis, func(a axisPole) bool { return a.w == 0 }); i >= 0 {
+		reach = max(reach, axisSpanMargin*l.axis[i].hi)
+	}
+	if w <= reach {
+		if w > 0 {
+			mult = 2
+		}
 		w = 0
 	}
 	for i := range l.axis {
-		if a := &l.axis[i]; math.Abs(a.w-w) <= 1e-6*max(1, w) {
+		if a := &l.axis[i]; math.Abs(a.w-w) <= axisOriginReach*max(1, w) {
 			a.mult += mult
-			a.lo, a.hi = min(a.lo, w), max(a.hi, w)
+			a.lo, a.hi = min(a.lo, w), max(a.hi, hi)
 			return
 		}
 	}
-	l.axis = append(l.axis, axisPole{w: w, mult: mult, lo: w, hi: w})
+	l.axis = append(l.axis, axisPole{w: w, mult: mult, lo: w, hi: hi})
 }
+
+// axisOriginReach is addAxisPole's merge tolerance, at the origin and
+// relative to max(1, w) elsewhere.
+const axisOriginReach = 1e-6
 
 // rationalTailBound bounds |L(s)| for Re s >= 0 and |s| >= w from the
 // augmented realization H = Daug + Caug(sI-A)^{-1}Baug of the delay LFT,

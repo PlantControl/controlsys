@@ -4446,7 +4446,7 @@ func pidTuningDelayStabilityBudget(plant *System, eval *sisoEval, wc float64, id
 		l.axis = slices.Clone(base.axis)
 		l.scales = append(slices.Clone(base.scales), wc)
 		if c.Ki != 0 {
-			l.addAxisPole(0, 1)
+			l.addAxisPole(0)
 		}
 		kp, ki, kd := math.Abs(c.Kp), math.Abs(c.Ki), math.Abs(c.Kd)
 		cand := *c
