@@ -185,7 +185,9 @@ func TestNormsDescriptorSingularOrIllConditionedE(t *testing.T) {
 	}{
 		{"singular", []float64{1, 0, 0, 0}, false},
 		{"rank-one", []float64{1, 2, 2, 4}, false},
-		{"over-limit", []float64{1, 0, 0, 1 / (4 * limit)}, false},
+		{"over-limit", []float64{1, 1, 1, 1 + 1/limit}, false},
+		// 4NAR5D: a diagonal E is fixed exactly by power-of-two equilibration.
+		{"badly-scaled-diagonal", []float64{1, 0, 0, 1 / (4 * limit)}, true},
 		{"under-limit", []float64{1, 0, 0, 4 / limit}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
