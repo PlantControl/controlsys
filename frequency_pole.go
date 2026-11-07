@@ -444,8 +444,8 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 // set it also reports false unless the rounded solution x of (pE+qA)x = B
 // is componentwise backward stable at working precision, |r| ≤ nε(|B| +
 // |p||E||x| + |q||A||x|) for the compensated residual r (rounding x alone
-// leaves ε/2), and no state is lost below the normal range
-// (stateUnderflow).
+// leaves ε/2); a state lost below the normal range where a row resolves it
+// fails this too.
 func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) bool {
 	n, m, p := br.n, br.m, br.p
 	maxA, maxE := 0.0, 1.0
@@ -529,7 +529,7 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 			g[r*m+c] = v
 		}
 	}
-	if verify && !ddVerified(br, pt, x, g) {
+	if verify && !ddVerified(br, pt, x) {
 		return false
 	}
 	copy(dst, g)
@@ -538,15 +538,12 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 
 // ddVerified reports whether the double-double solution x of br's pencil at
 // pt passes ddRealizationInto's verification.
-func ddVerified(br *balancedRealization, pt frequencyPoint, x []ddComplex, g []complex128) bool {
+func ddVerified(br *balancedRealization, pt frequencyPoint, x []ddComplex) bool {
 	n, m := br.n, br.m
 	xr := make([]complex128, 2*n*m)
 	r := xr[n*m:]
 	for i, v := range x {
 		xr[i] = v.complex128()
-	}
-	if stateUnderflow(br, xr, m, 1, g, cabs1(pt.q)) {
-		return false
 	}
 	ap, aq, tol := cabs1(pt.p), cabs1(pt.q), float64(n)*eps()
 	for j := range m {

@@ -126,3 +126,16 @@ func TestBalancedRealization_DiagonalInvariant(t *testing.T) {
 		}
 	}
 }
+
+// ECC62L: an exactly zero state at a transmission zero satisfies its pencil
+// rows and is not a lost state: s/(s²+1) at s = 0 stays 0 with nil error.
+func TestEvalFr_TransmissionZeroStateNotUnderflow(t *testing.T) {
+	sys, err := New(mat.NewDense(2, 2, []float64{0, -1, 1, 0}), mat.NewDense(2, 1, []float64{1, 0}), mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := sys.EvalFr(0)
+	if err != nil || g[0][0] != 0 {
+		t.Errorf("EvalFr(0) = %v, %v; want 0, nil", g, err)
+	}
+}

@@ -68,25 +68,28 @@ func (br *balancedRealization) unbalanced() (balancedRealization, bool) {
 	return u, true
 }
 
-// stateUnderflow reports whether a state of br's solution x, entry (i, j)
-// at x[i*rs+j*cs], is below the normal range where the output y = ys·Ĉx
-// (+D), row-major p×m, could resolve its loss: balancing keeps B̂ and Ĉ in
-// range but not D⁻¹x, and refinement cannot see a state lost to underflow,
-// since its correction underflows too. A lost state is below 2⁻¹⁰²², so
-// output k misses at most |ĉₖᵢ|·2⁻¹⁰²²·ys of it. An exactly zero state counts
-// only where it is driven, by B̂ or by a nonzero state through the pencil.
-func stateUnderflow(br *balancedRealization, x []complex128, rs, cs int, y []complex128, ys float64) bool {
+// stateUnderflow reports whether a state of br's solution x at pt, entry
+// (i, j) at x[i*rs+j*cs], was lost below the normal range: balancing keeps
+// B̂ and Ĉ in range but not D⁻¹x, and refinement cannot see a lost state,
+// since its correction underflows too. A state below 2⁻¹⁰²² counts where
+// output k, y = ys·Ĉx (+D) row-major p×m, could resolve its |ĉₖᵢ|·2⁻¹⁰²²·ys
+// and a pencil row reading it has componentwise backward error above nε,
+// which tells a lost state from an exact zero, as at a transmission zero.
+func stateUnderflow(br *balancedRealization, pt frequencyPoint, x []complex128, rs, cs int, y []complex128, ys float64) bool {
 	const tiny = 0x1p-1022
 	n, m, p := br.n, br.m, br.p
 	for i := range n {
 		for j := range m {
 			v := x[i*rs+j*cs]
-			if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny || v == 0 && !br.drives(x, i, j, rs, cs) {
+			if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny {
 				continue
 			}
 			for k := range p {
 				if math.Abs(br.c[k*n+i])*tiny*ys > eps()*cabs1(y[k*m+j]) {
-					return true
+					if br.inconsistent(pt, x, i, j, rs, cs) {
+						return true
+					}
+					break
 				}
 			}
 		}
@@ -94,19 +97,43 @@ func stateUnderflow(br *balancedRealization, x []complex128, rs, cs int, y []com
 	return false
 }
 
-// drives reports whether B̂ or a nonzero state of x drives state i from
-// input j.
-func (br *balancedRealization) drives(x []complex128, i, j, rs, cs int) bool {
-	n := br.n
-	if br.b[i*br.m+j] != 0 {
-		return true
-	}
+// inconsistent reports whether a row of the pencil at pt with a nonzero
+// entry in column i has componentwise backward error above nε for input j.
+func (br *balancedRealization) inconsistent(pt frequencyPoint, x []complex128, i, j, rs, cs int) bool {
+	n, tol := br.n, float64(br.n)*eps()
 	for k := range n {
-		if k != i && x[k*rs+j*cs] != 0 && (br.a[i*n+k] != 0 || br.e != nil && br.e[i*n+k] != 0) {
+		if br.pencilEntry(pt, k, i) == 0 {
+			continue
+		}
+		b := br.b[k*br.m+j]
+		r, scale := complex(b, 0), math.Abs(b)
+		for l := range n {
+			mv, xv := br.pencilEntry(pt, k, l), x[l*rs+j*cs]
+			r -= mv * xv
+			scale += cabs1(mv) * cabs1(xv)
+		}
+		if cabs1(r) > tol*scale {
 			return true
 		}
 	}
 	return false
+}
+
+// pencilEntry is entry (k, l) of the pencil the solvers factor at pt: sI−Â
+// with pt.shift diagonal, sÊ−Â, or pÊ+qÂ.
+func (br *balancedRealization) pencilEntry(pt frequencyPoint, k, l int) complex128 {
+	a := br.a[k*br.n+l]
+	if br.e == nil {
+		if k == l {
+			return pt.shift(a)
+		}
+		return complex(-a, 0)
+	}
+	e := br.e[k*br.n+l]
+	if pt.isPlain() {
+		return complex(real(pt.p)*e-a, imag(pt.p)*e)
+	}
+	return pt.p*complex(e, 0) + pt.q*complex(a, 0)
 }
 
 // underflowResponseInto sets dst to the double-double response of the
@@ -411,7 +438,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re, im)
 		}
 	}
-	if stateUnderflow(&bd.balancedRealization, x, m, 1, dst, cabs1(gs)) {
+	if stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
 		return bd.underflowResponseInto(pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
@@ -1142,7 +1169,7 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
-	if stateUnderflow(&hs.balancedRealization, x, 1, n, dst, 1) {
+	if stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
 		return hs.underflowResponseInto(pt, dst)
 	}
 	if !converged {
