@@ -20,52 +20,12 @@ type balancedRealization struct {
 	c       []float64 // Ĉ = CD
 	d       []float64
 	dStride int
-	// logD holds log₂ of D's diagonal, where recorded, so that
-	// unbalanced can undo the scaling exactly.
-	logD []float64
 }
 
 func newBalancedRealization(sys *System, n, m, p int) balancedRealization {
 	br := newRealizationCopy(sys, n, m, p)
 	br.balance(nil)
 	return br
-}
-
-// unbalanced returns the realization before balancing, exactly, or false
-// where the scaling was not recorded.
-func (br *balancedRealization) unbalanced() (balancedRealization, bool) {
-	n, m, p := br.n, br.m, br.p
-	if br.logD == nil {
-		return balancedRealization{}, false
-	}
-	k := make([]int, n)
-	for i, v := range br.logD {
-		k[i] = int(v)
-	}
-	u := balancedRealization{n: n, m: m, p: p, a: make([]float64, n*n), b: make([]float64, n*m), c: make([]float64, p*n), d: br.d, dStride: br.dStride}
-	unscale := func(dst, src []float64) {
-		for i := range n {
-			for j := range n {
-				dst[i*n+j] = math.Ldexp(src[i*n+j], k[i]-k[j])
-			}
-		}
-	}
-	unscale(u.a, br.a)
-	if br.e != nil {
-		u.e = make([]float64, n*n)
-		unscale(u.e, br.e)
-	}
-	for i := range n {
-		for j := range m {
-			u.b[i*m+j] = math.Ldexp(br.b[i*m+j], k[i])
-		}
-	}
-	for r := range p {
-		for j := range n {
-			u.c[r*n+j] = math.Ldexp(br.c[r*n+j], -k[j])
-		}
-	}
-	return u, true
 }
 
 // stateUnderflow reports whether a state of br's solution x at pt, entry
@@ -136,19 +96,35 @@ func (br *balancedRealization) pencilEntry(pt frequencyPoint, k, l int) complex1
 	return pt.p*complex(e, 0) + pt.q*complex(a, 0)
 }
 
-// underflowResponseInto sets dst to the double-double response of the
-// unbalanced realization at pt where a balanced state underflowed, and
-// returns errStateUnderflow where that does not verify (ddRealizationInto).
-func (br *balancedRealization) underflowResponseInto(pt frequencyPoint, dst []complex128) error {
-	u, ok := br.unbalanced()
-	if !ok || !ddRealizationInto(&u, pt, dst, true) {
+// belowNormal reports whether an entry of x is below the normal range, the
+// cheap screen for stateUnderflow.
+func belowNormal(x []complex128) bool {
+	for _, v := range x {
+		if math.Abs(real(v)) < 0x1p-1022 && math.Abs(imag(v)) < 0x1p-1022 {
+			return true
+		}
+	}
+	return false
+}
+
+// underflowResponseInto sets dst to the double-double response at pt of
+// src's n×n, n×m, p×n realization, unbalanced, where a balanced state
+// underflowed, and returns errStateUnderflow where src is nil or that does
+// not verify (ddRealizationInto).
+func underflowResponseInto(src *System, n, m, p int, pt frequencyPoint, dst []complex128) error {
+	if src == nil {
+		return errStateUnderflow
+	}
+	u := newRealizationCopy(src, n, m, p)
+	if !ddRealizationInto(&u, pt, dst, true) {
 		return errStateUnderflow
 	}
 	return nil
 }
 
-// errStateUnderflow rejects a point whose solution leaves the floating-point
-// range in the balanced and unbalanced realizations alike; the
+// errStateUnderflow rejects a point whose balanced solution lost a state
+// below the floating-point range and whose unbalanced solve does not verify
+// or is not available (the augmented internal-delay plant); the
 // double-double fallbacks solve the same balanced realization, so it fails
 // at once like errNonFinitePencil.
 var errStateUnderflow = fmt.Errorf("state underflow in frequency response: %w", ErrOverflow)
@@ -171,9 +147,8 @@ func (br *balancedRealization) finite() bool {
 
 // newRealizationCopy copies the realization into one fresh buffer, unscaled.
 func newRealizationCopy(sys *System, n, m, p int) balancedRealization {
-	f := make([]float64, n*n+n*m+p*n+n)
-	nc := n*n + n*m + p*n
-	br := balancedRealization{n: n, m: m, p: p, a: f[: n*n : n*n], b: f[n*n : n*n+n*m : n*n+n*m], c: f[n*n+n*m : nc : nc], logD: f[nc:]}
+	f := make([]float64, n*n+n*m+p*n)
+	br := balancedRealization{n: n, m: m, p: p, a: f[: n*n : n*n], b: f[n*n : n*n+n*m : n*n+n*m], c: f[n*n+n*m:]}
 	if sys.D != nil {
 		raw := sys.D.RawMatrix()
 		br.d, br.dStride = raw.Data, raw.Stride
@@ -231,6 +206,9 @@ type balancedDense struct {
 	// sys, when set, is the delay-free model whose double-double response
 	// (ddResponseInto) replaces a stalled point's inaccurate entries.
 	sys *System
+	// src, when set, is the model balanced into the realization, which
+	// underflowResponseInto solves unbalanced.
+	src *System
 }
 
 // refineCondition is the error amplification, relative to ε, above which
@@ -241,7 +219,9 @@ type balancedDense struct {
 const refineCondition = 1e3
 
 func newBalancedDense(sys *System, n, m, p int) *balancedDense {
-	return newBalancedDenseOf(newBalancedRealization(sys, n, m, p))
+	bd := newBalancedDenseOf(newBalancedRealization(sys, n, m, p))
+	bd.src = sys
+	return bd
 }
 
 // newBalancedDenseOf takes ownership of the balanced realization br.
@@ -438,8 +418,8 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re, im)
 		}
 	}
-	if stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
-		return bd.underflowResponseInto(pt, dst)
+	if belowNormal(x) && stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
+		return underflowResponseInto(bd.src, n, m, p, pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
 		ddResponseInto(bd.sys, pt, dst)
@@ -1169,8 +1149,8 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
-	if stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
-		return hs.underflowResponseInto(pt, dst)
+	if belowNormal(x) && stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
+		return underflowResponseInto(hs.sys, n, m, p, pt, dst)
 	}
 	if !converged {
 		if err := hs.denseRetry(pt, dst); err != nil {
@@ -1404,9 +1384,6 @@ func (br *balancedRealization) balance(t []float64) {
 			}
 			if t != nil {
 				t[i] *= inv
-			}
-			if br.logD != nil {
-				br.logD[i] += math.Logb(f)
 			}
 			for k := range m {
 				b[i*m+k] *= inv
