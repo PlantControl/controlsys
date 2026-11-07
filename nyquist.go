@@ -72,7 +72,7 @@ func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error)
 		return nil, fmt.Errorf("Nyquist: %w", err)
 	}
 
-	bd := classifyNyquistBoundary(poles, sys.IsContinuous(), sys.Dt)
+	bd := classifyNyquistBoundary(poles, func() []float64 { return nyquistPoleErrors(sys, poles) }, sys.IsContinuous(), sys.Dt)
 	rhpPoles := 0
 	for i, pole := range poles {
 		if bd.cluster[i] < 0 && poleOutsideStabilityBoundary(pole, sys.IsContinuous(), 0) {
@@ -137,12 +137,20 @@ type boundaryCluster struct {
 }
 
 // classifyNyquistBoundary puts on the boundary every pole within
-// sqrt(eps)*max(1, max|p|) of it, and every group of two or more poles within
-// cbrt(eps)*max(1, max|p|) of the boundary and of each other: computed
-// boundary poles carry eigenvalue error, repeated ones split by about
-// eps^(1/m), and evaluating the response that close to a pole is singular.
+// max(sqrt(eps)*max(1, |p|), errs[i]) of it, and every group of two or more
+// poles within max(cbrt(eps)*max(1, |p|), errs[i]) of the boundary and of
+// each other, each band capped at eps^(1/2) resp. eps^(1/3) times
+// max(1, max|p|).
+// Evaluating the response within sqrt(eps)*|p| of a pole is singular, the
+// rounding of e^{jωdt}−p or jω−p being eps*|p|. errs (see nyquistPoleErrors)
+// is the first-order error of a computed pole; it fails for a (near-)defective
+// pole, whose m-fold split (eps*‖A‖)^(1/m) the caps eps^(1/m)*max|p| bound for
+// m = 2 and 3 (eps^(1/m)*‖A‖ >= (eps*‖A‖)^(1/m) for ‖A‖ >= 1), so a band never
+// exceeds them. errs = poleErrors() is computed only when some pole lies
+// inside the loose cap but outside its own sqrt(eps) floor, the only case
+// where it changes the result; when it is nil both bands are the caps.
 // A cluster whose indentation would reach the real axis is centred on it.
-func classifyNyquistBoundary(poles []complex128, continuous bool, dt float64) nyquistBoundary {
+func classifyNyquistBoundary(poles []complex128, poleErrors func() []float64, continuous bool, dt float64) nyquistBoundary {
 	bd := nyquistBoundary{continuous: continuous, dt: dt, cluster: make([]int, len(poles))}
 	maxAbs := 1.0
 	for _, pole := range poles {
@@ -156,15 +164,33 @@ func classifyNyquistBoundary(poles []complex128, continuous bool, dt float64) ny
 		}
 		return math.Abs(cmplx.Abs(p) - 1)
 	}
+	singleBand := make([]float64, len(poles))
+	looseBand := make([]float64, len(poles))
+	var errs []float64
+	for _, p := range poles {
+		if d := dist(p); d < loose && d >= math.Sqrt(eps())*max(1, cmplx.Abs(p)) {
+			errs = poleErrors()
+			break
+		}
+	}
+	for i, p := range poles {
+		if errs == nil {
+			singleBand[i], looseBand[i] = single, loose
+			continue
+		}
+		scale := max(1, cmplx.Abs(p))
+		singleBand[i] = min(max(math.Sqrt(eps())*scale, errs[i]), single)
+		looseBand[i] = min(max(math.Cbrt(eps())*scale, errs[i]), loose)
+	}
 
 	on := make([]bool, len(poles))
 	for i, p := range poles {
-		on[i] = dist(p) < single
-		if on[i] || dist(p) >= loose {
+		on[i] = dist(p) < singleBand[i]
+		if on[i] || dist(p) >= looseBand[i] {
 			continue
 		}
 		for j, q := range poles {
-			if j != i && dist(q) < loose && cmplx.Abs(foldUpper(p)-foldUpper(q)) < 2*loose {
+			if j != i && dist(q) < looseBand[j] && cmplx.Abs(foldUpper(p)-foldUpper(q)) < looseBand[i]+looseBand[j] {
 				on[i] = true
 				break
 			}
@@ -239,6 +265,60 @@ func classifyNyquistBoundary(poles []complex128, continuous bool, dt float64) ny
 		}
 	}
 	return bd
+}
+
+// nyquistPoleErrors returns, per pole of sys.Poles(), the first-order bound
+// u·‖A‖_F·κᵢ on its eigenvalue error, κᵢ = ‖xᵢ‖‖yᵢ‖/|yᵢᴴxᵢ| the normwise
+// condition number from the right and left eigenvectors and u = 2n·eps the
+// backward-error unit of the QR algorithm (as in multipleRoots), plus the
+// distance from the pole to the matched eigenvalue of the vector
+// factorization. A small pole beside a huge one is thus resolved to its own
+// error, not to sqrt(eps) of the spectral radius. It returns nil for
+// descriptor models (QZ poles) and when the factorization fails.
+func nyquistPoleErrors(sys *System, poles []complex128) []float64 {
+	n := len(poles)
+	if n == 0 || sys.IsDescriptor() {
+		return nil
+	}
+	a := sys.A
+	if sys.LFT != nil {
+		zd, err := sys.zeroDelayApprox()
+		if err != nil {
+			return nil
+		}
+		a = zd.A
+	}
+	if r, _ := a.Dims(); r != n {
+		return nil
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(mat.DenseCopyOf(a), mat.EigenBoth) {
+		return nil
+	}
+	vals := eig.Values(nil)
+	var vr, vl mat.CDense
+	eig.VectorsTo(&vr)
+	eig.LeftVectorsTo(&vl)
+	u := 2 * float64(n) * eps() * mat.Norm(a, 2)
+	band := make([]float64, n)
+	for k := range n {
+		var dot complex128
+		for r := range n {
+			dot += cmplx.Conj(vl.At(r, k)) * vr.At(r, k)
+		}
+		band[k] = u / cmplx.Abs(dot)
+	}
+	errs := make([]float64, n)
+	for i, p := range poles {
+		k, d := 0, math.Inf(1)
+		for j, v := range vals {
+			if dj := cmplx.Abs(p - v); dj < d {
+				k, d = j, dj
+			}
+		}
+		errs[i] = band[k] + d
+	}
+	return errs
 }
 
 // assign puts pole i in the cluster at w0, merging within tol (in angle).
