@@ -1254,15 +1254,20 @@ func (br *balancedRealization) balance(t []float64) {
 				continue
 			}
 			converged = false
+			// The invariant diagonal is skipped: d/f·f can overflow.
 			inv := 1 / f
 			for j := range n {
-				h[i*n+j] *= inv
-				h[j*n+i] *= f
+				if j != i {
+					h[i*n+j] *= inv
+					h[j*n+i] *= f
+				}
 			}
 			if e != nil {
 				for j := range n {
-					e[i*n+j] *= inv
-					e[j*n+i] *= f
+					if j != i {
+						e[i*n+j] *= inv
+						e[j*n+i] *= f
+					}
 				}
 			}
 			if t != nil {
