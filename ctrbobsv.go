@@ -305,7 +305,7 @@ func isStabilizable(op string, A, B *mat.Dense, continuous bool) (bool, error) {
 // bounding the error of λ. σmin is 1-Lipschitz in λ, so only σmin(λ) ≤
 // floor + δλ needs the search (diskSigmaMin). δλ, needing eigenvectors, is
 // computed only when some σmin lies within band of floor. A λ whose σmin
-// a Cholesky certificate puts above 2·(floor + band) skips the SVD.
+// a Cholesky certificate puts above floor + band skips the SVD.
 func unstablePBHDeficient(p *pbhSolver, lams []complex128, continuous bool, floor, band float64) bool {
 	test := func(lam complex128) bool {
 		return imag(lam) >= 0 && poleOnOrOutsideStabilityBoundary(lam, continuous, poleStabilityTolerance(lam))
@@ -315,7 +315,7 @@ func unstablePBHDeficient(p *pbhSolver, lams []complex128, continuous bool, floo
 		if !test(lam) {
 			continue
 		}
-		if p.exceeds(lam, 2*(floor+band)) {
+		if p.exceeds(lam, floor+band) {
 			continue
 		}
 		s := p.sigmaMin(lam)
@@ -475,7 +475,7 @@ func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous, weak b
 	for _, pt := range points {
 		for k, lam := range lams {
 			if cmplx.Abs(lam-pt) <= max(band, min(gaps[k], 1)) {
-				if p.sigmaMin(pt) <= floor {
+				if !p.exceeds(pt, floor) && p.sigmaMin(pt) <= floor {
 					return true
 				}
 				break
@@ -560,15 +560,7 @@ type pbhSolver struct {
 func newPBHSolver(A, B *mat.Dense) *pbhSolver {
 	n, _ := A.Dims()
 	_, m := B.Dims()
-	p := &pbhSolver{A: A, B: B, n: n, m: m}
-	p.g = make([]float64, 4*n*(n+m))
-	p.sv = make([]float64, 2*n)
-	for k := 1; k <= 2; k++ {
-		q := []float64{0}
-		lapack64.Gesvd(lapack.SVDNone, lapack.SVDNone, blas64.General{Rows: k * n, Cols: k * (n + m), Stride: k * (n + m), Data: p.g}, blas64.General{Stride: 1}, blas64.General{Stride: 1}, p.sv, q, -1)
-		p.work[k-1] = make([]float64, int(q[0]))
-	}
-	return p
+	return &pbhSolver{A: A, B: B, n: n, m: m}
 }
 
 // sigmaMin is σmin([A − λI, B]), through the real embedding when λ is
@@ -582,8 +574,17 @@ func (p *pbhSolver) sigmaMin(lam complex128) float64 {
 		k = 2
 	}
 	stride := k * (n + m)
+	if len(p.g) < k*n*stride {
+		p.g = make([]float64, k*n*stride)
+		p.sv = make([]float64, k*n)
+	}
 	g := p.g[:k*n*stride]
 	clear(g)
+	if p.work[k-1] == nil {
+		q := []float64{0}
+		lapack64.Gesvd(lapack.SVDNone, lapack.SVDNone, blas64.General{Rows: k * n, Cols: stride, Stride: stride, Data: g}, blas64.General{Stride: 1}, blas64.General{Stride: 1}, p.sv, q, -1)
+		p.work[k-1] = make([]float64, int(q[0]))
+	}
 	for i := range n {
 		for j := range n {
 			re := aRaw.Data[i*aRaw.Stride+j]
@@ -615,15 +616,16 @@ func (p *pbhSolver) sigmaMin(lam complex128) float64 {
 	return sv[k*n-1]
 }
 
-// exceeds reports σmin([A − λI, B]) > tau, certified by a Cholesky
-// factorization of M·Mᴴ − t·I, M = [A − λI, B], M·Mᴴ = A·Aᵀ + B·Bᵀ − λ̄A − λAᵀ
-// + |λ|²I. Rounding in forming and factoring it is below
-// c·n·(n+m+4)·eps·S, S = (‖A‖_F + √n·|λ|)² + ‖B‖_F² ≥ ‖M‖_F², so t = tau² +
-// 2c·n·(n+m+4)·eps·S leaves λmin(M·Mᴴ) ≥ tau² when the factorization
-// succeeds; c = 16 is several times the first-order constants of the
-// product and of Cholesky's backward error (Higham Thm 10.3). False means
-// only not certified.
-func (p *pbhSolver) exceeds(lam complex128, tau float64) bool {
+// exceeds reports sigmaMin(λ) > thr without the SVD, certified by a
+// Cholesky factorization of M·Mᴴ − t·I, M = [A − λI, B], M·Mᴴ = A·Aᵀ + B·Bᵀ
+// − λ̄A − λAᵀ + |λ|²I. With S = (‖A‖_F + √n·|λ|)² + ‖B‖_F² ≥ ‖M‖_F², the SVD
+// errs by below c·n·(n+m)·eps·√S and forming and factoring M·Mᴴ by below
+// c·n·(n+m+4)·eps·S, so t = τ² + 2c·n·(n+m+4)·eps·S, τ = thr +
+// c·n·(n+m)·eps·√S, leaves σmin ≥ τ when the factorization succeeds; c = 16
+// is several times the first-order constants of the SVD, the product and
+// Cholesky's backward error (Higham Thm 10.3). False means only not
+// certified.
+func (p *pbhSolver) exceeds(lam complex128, thr float64) bool {
 	n, m := p.n, p.m
 	if p.gram == nil {
 		p.gram = make([]float64, n*n)
@@ -642,6 +644,7 @@ func (p *pbhSolver) exceeds(lam complex128, tau float64) bool {
 	r := p.normA + math.Sqrt(float64(n))*abs
 	S := r*r + p.nB2
 	const c = 16
+	tau := thr + c*float64(n*(n+m))*eps()*math.Sqrt(S)
 	t := tau*tau + 2*c*float64(n*(n+m+4))*eps()*S
 	if !(t < S) {
 		return false

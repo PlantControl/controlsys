@@ -10,7 +10,7 @@ import (
 
 // TestPBHSolverExceeds_CertifiedLowerBound: the Cholesky certificate that
 // lets the weak-gate PBH pass skip the SVD (JAZP5L) never claims
-// σmin([A − λI, B]) > τ when the SVD gives σmin ≤ τ, over random,
+// σmin([A − λI, B]) > τ when the SVD (sigmaMin) gives σmin ≤ τ, over random,
 // near-uncontrollable and exactly uncontrollable models at their
 // eigenvalues and nearby points, with τ around σmin; and it certifies
 // generic models, so the pass stays cheap.
@@ -86,7 +86,7 @@ func TestPBHSolverExceeds_CertifiedLowerBound(t *testing.T) {
 // TestPBHSolverExceeds_WeakGateCasesNotSkipped: on the weak-gate inputs of
 // 4KYHPC (nearly parallel inputs, dominant unstable mode, weak chain end
 // with c = 0), the certificate does not skip the uncontrollable unstable
-// mode at the PBH pass's τ = 2·(floor + band), so the SVD still decides
+// mode at the PBH pass's threshold floor + band, so the SVD still decides
 // it (JAZP5L).
 func TestPBHSolverExceeds_WeakGateCasesNotSkipped(t *testing.T) {
 	type sys struct {
@@ -131,8 +131,8 @@ func TestPBHSolverExceeds_WeakGateCasesNotSkipped(t *testing.T) {
 			}
 			if p.sigmaMin(lam) <= floor+band {
 				hit = true
-				if p.exceeds(lam, 2*(floor+band)) {
-					t.Errorf("%s: λ=%v certified above 2·(floor+band) with SVD σmin %g", c.name, lam, p.sigmaMin(lam))
+				if p.exceeds(lam, floor+band) {
+					t.Errorf("%s: λ=%v certified above floor+band with SVD σmin %g", c.name, lam, p.sigmaMin(lam))
 				}
 			}
 		}
