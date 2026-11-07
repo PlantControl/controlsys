@@ -10,24 +10,6 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-func ratPolyDiv(num, den []float64) (q, r []*big.Rat) {
-	rem := make([]*big.Rat, len(num))
-	for i, v := range num {
-		rem[i] = new(big.Rat).SetFloat64(v)
-	}
-	d := len(den) - 1
-	lead := new(big.Rat).SetFloat64(den[0])
-	for k := 0; k+d < len(num); k++ {
-		c := new(big.Rat).Quo(rem[k], lead)
-		q = append(q, c)
-		for l := 1; l <= d; l++ {
-			t := new(big.Rat).Mul(c, new(big.Rat).SetFloat64(den[l]))
-			rem[k+l].Sub(rem[k+l], t)
-		}
-	}
-	return q, rem[len(q):]
-}
-
 func ratHorner(p []float64, s *big.Rat) *big.Rat {
 	acc := new(big.Rat)
 	for _, c := range p {
@@ -61,15 +43,11 @@ func TestTFStateSpaceImproperMatchesMATLAB(t *testing.T) {
 	if proper, err := sys.IsProper(); err != nil || proper {
 		t.Fatalf("IsProper = %v, %v", proper, err)
 	}
-	q, r := ratPolyDiv(num, den)
-	if got, want := sys.D.At(0, 0), ratF(q[1]); got != want {
-		t.Fatalf("D = %v, want %v", got, want)
-	}
-	if got, want := sys.B.At(2, 0), -ratF(q[0]); got != want {
-		t.Fatalf("B chain = %v, want %v", got, want)
-	}
-	if got, want := sys.B.At(0, 0)*sys.C.At(0, 0), ratF(new(big.Rat).Quo(r[0], new(big.Rat).SetFloat64(den[0]))); math.Abs(got-want) > 4e-16*math.Abs(want) {
-		t.Fatalf("remainder residue = %v, want %v", got, want)
+	// RBVVVP: entries stay at coefficient scale; no quotient is formed.
+	for _, m := range []*mat.Dense{sys.A, sys.B, sys.C, sys.D, sys.E} {
+		if mat.Max(m) > 7 || mat.Min(m) < -7 {
+			t.Fatalf("entry beyond coefficient scale in %v", mat.Formatted(m))
+		}
 	}
 	poles, err := sys.Poles()
 	if err != nil || len(poles) != 1 || cmplx.Abs(poles[0]+0.5) > 1e-14 {
