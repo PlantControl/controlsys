@@ -349,16 +349,23 @@ func stiffPencilSplit(sys *System) (whole, slow, fast *System, ok bool) {
 	return whole, slow, fast, true
 }
 
-// equilibrateDescriptor returns sys with the rows of (A, B, E) and the
-// columns of (A, C, E) scaled by powers of two so E has unit row and column
-// maxima, as LAPACK DGEEQU. The scaling is exact and leaves the transfer
-// function unchanged; badly scaled E (e.g. diagonal) then no longer looks
-// ill-conditioned, where the LU E⁻¹A is already componentwise accurate.
+// equilibrateDescriptor returns sys with the rows of (A, B, E, B2) and the
+// columns of (A, C, E, C2) scaled by powers of two so E has unit row and
+// column maxima, as LAPACK DGEEQU. The scaling is exact barring overflow or
+// subnormal underflow and leaves the transfer function unchanged; badly
+// scaled E (e.g. diagonal) then no longer looks ill-conditioned, where the
+// LU E⁻¹A is already componentwise accurate.
 func equilibrateDescriptor(sys *System) *System {
 	n, m, p := sys.Dims()
 	out := sys.Copy()
 	e, a := out.E.RawMatrix(), out.A.RawMatrix()
 	b, c := out.B.RawMatrix(), out.C.RawMatrix()
+	var b2, c2 blas64.General
+	nd := 0
+	if out.LFT != nil && out.LFT.B2 != nil {
+		_, nd = out.LFT.B2.Dims()
+		b2, c2 = out.LFT.B2.RawMatrix(), out.LFT.C2.RawMatrix()
+	}
 	pow2 := func(x float64) int {
 		_, k := math.Frexp(x)
 		return 1 - k
@@ -376,6 +383,9 @@ func equilibrateDescriptor(sys *System) *System {
 		for j := range m {
 			b.Data[i*b.Stride+j] = math.Ldexp(b.Data[i*b.Stride+j], k)
 		}
+		for j := range nd {
+			b2.Data[i*b2.Stride+j] = math.Ldexp(b2.Data[i*b2.Stride+j], k)
+		}
 	}
 	for j := range n {
 		mx := 0.0
@@ -389,6 +399,9 @@ func equilibrateDescriptor(sys *System) *System {
 		}
 		for i := range p {
 			c.Data[i*c.Stride+j] = math.Ldexp(c.Data[i*c.Stride+j], k)
+		}
+		for i := range nd {
+			c2.Data[i*c2.Stride+j] = math.Ldexp(c2.Data[i*c2.Stride+j], k)
 		}
 	}
 	return out

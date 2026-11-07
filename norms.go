@@ -33,8 +33,9 @@ const NormH2 = 2
 //
 // A descriptor model with nonsingular E is reduced to (E⁻¹A, E⁻¹B, C, D),
 // which has the same transfer function and poles. Singular E, or E whose
-// condition estimate exceeds 1/√eps, returns ErrDescriptorUnsupported
-// wrapping ErrDescriptorSingular. The same holds for H2Norm and HinfNorm.
+// condition estimate exceeds 1/√eps after exact power-of-two row and column
+// equilibration of the pencil, returns ErrDescriptorUnsupported wrapping
+// ErrDescriptorSingular. The same holds for H2Norm and HinfNorm.
 func Norm(sys *System, normType float64) (float64, error) {
 	if err := requireFiniteSystem("Norm", sys); err != nil {
 		return 0, err

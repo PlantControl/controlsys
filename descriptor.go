@@ -83,9 +83,16 @@ func (p descriptorPolicy) requireStandard(context string) error {
 var normDescriptorCondLimit = 1 / math.Sqrt(eps())
 
 // normExplicitForm returns sys with a nonsingular E folded in by
-// explicitForm, which keeps the transfer function and the poles. Singular E
-// and E with condition above normDescriptorCondLimit return
-// ErrDescriptorUnsupported wrapping ErrDescriptorSingular.
+// explicitForm, which keeps the transfer function and the poles. An E whose
+// condition exceeds normDescriptorCondLimit is first equilibrated by
+// equilibrateDescriptor (E → L·E·R, A → L·A·R, B → L·B, C → C·R, with L, R
+// diagonal powers of two), an exact equivalence, so a badly scaled E such as
+// diag(1e-8, 1) is accepted; the equilibrated model then flows on, its state
+// scaled by R, which leaves the norms and peak frequency unchanged. Models
+// within the limit unscaled take the unscaled path. E singular by MATLAB
+// rank (eRankDeficient on the given E), or still above the limit after
+// equilibration, returns ErrDescriptorUnsupported wrapping
+// ErrDescriptorSingular.
 func normExplicitForm(sys *System, context string) (*System, error) {
 	if !sys.IsDescriptor() {
 		return sys, nil
@@ -96,14 +103,28 @@ func normExplicitForm(sys *System, context string) (*System, error) {
 	var lu mat.LU
 	lu.Factorize(sys.E)
 	if cond := lu.Cond(); luNearSingular(&lu) || !(cond <= normDescriptorCondLimit) {
-		return nil, fmt.Errorf("%s: cond(E) ≈ %.3g exceeds %.3g: %w: %w",
-			context, cond, normDescriptorCondLimit, ErrDescriptorUnsupported, ErrDescriptorSingular)
+		if eRankDeficient(sys.E, &lu) {
+			return nil, normCondError(context, cond)
+		}
+		sys = equilibrateDescriptor(sys)
+		if err := finiteSystemMatrices(context, sys, ErrOverflow); err != nil {
+			return nil, err
+		}
+		lu.Factorize(sys.E)
+		if cond := lu.Cond(); luNearSingular(&lu) || !(cond <= normDescriptorCondLimit) {
+			return nil, normCondError(context, cond)
+		}
 	}
 	out, _, err := sys.explicitForm(context)
 	if errors.Is(err, ErrDescriptorSingular) {
 		return nil, fmt.Errorf("%w: %w", ErrDescriptorUnsupported, err)
 	}
 	return out, err
+}
+
+func normCondError(context string, cond float64) error {
+	return fmt.Errorf("%s: cond(E) ≈ %.3g exceeds %.3g: %w: %w",
+		context, cond, normDescriptorCondLimit, ErrDescriptorUnsupported, ErrDescriptorSingular)
 }
 
 // balancedExplicitForm returns (E⁻¹A, E⁻¹B·2ᵏ, C·2⁻ᵏ, D) and k for an E⁻¹B
