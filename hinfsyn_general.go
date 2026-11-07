@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 
+	"plantcontrol.org/v1/gonum/blas"
+	"plantcontrol.org/v1/gonum/blas/blas64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -32,6 +34,7 @@ type hinfGeneralRiccatiWork struct {
 	BRinv, Ax, Gx, Qx      *mat.Dense
 	BDRt, Ay, AyT, RtC, Gy *mat.Dense
 	Qy, XY                 *mat.Dense
+	gram                   []float64
 }
 
 func (hp *hinfGeneralPlant) riccatiWork() *hinfGeneralRiccatiWork {
@@ -225,8 +228,9 @@ func shiftedInverse(G *mat.Dense, k int, gamma float64) (*mat.Dense, error) {
 // a Gram matrix it stays semidefinite; the subtraction leaves rounding noise
 // of size eps·‖C1‖², which decides γ-feasibility once z is scaled up. A
 // failed Cholesky factorization of I − DDᵀ/γ² means γ ≤ ‖D‖.
-// M is nil when it has no rows, and then the result is the n×n zero.
-func shiftedGram(dst, M, DDt *mat.Dense, n int, gamma float64) (*mat.Dense, error) {
+// M is nil when it has no rows, and then the result is the n×n zero. buf
+// holds reused scratch.
+func shiftedGram(dst, M, DDt *mat.Dense, n int, gamma float64, buf *[]float64) (*mat.Dense, error) {
 	if dst == nil {
 		dst = mat.NewDense(n, n, nil)
 	}
@@ -235,28 +239,28 @@ func shiftedGram(dst, M, DDt *mat.Dense, n int, gamma float64) (*mat.Dense, erro
 		return dst, nil
 	}
 	r, _ := M.Dims()
-	S := mat.NewSymDense(r, nil)
+	if len(*buf) < r*r+r*n {
+		*buf = make([]float64, r*r+r*n)
+	}
+	sd, z := (*buf)[:r*r], (*buf)[r*r:r*r+r*n]
 	g2 := gamma * gamma
+	dd := DDt.RawMatrix()
 	for i := range r {
-		for j := i; j < r; j++ {
-			v := -DDt.At(i, j) / g2
-			if i == j {
-				v++
-			}
-			S.SetSym(i, j, v)
+		for j := range r {
+			sd[i*r+j] = -dd.Data[i*dd.Stride+j] / g2
 		}
+		sd[i*r+i]++
 	}
-	var ch mat.Cholesky
-	if !ch.Factorize(S) {
+	if !impl.Dpotrf(blas.Upper, r, sd, r) {
 		return nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
 	}
-	var L mat.TriDense
-	ch.LTo(&L)
-	var Z mat.Dense
-	if err := Z.Solve(&L, M); err != nil {
-		return nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
-	}
-	dst.Mul(Z.T(), &Z)
+	mr := M.RawMatrix()
+	copyStrided(z, n, mr.Data, mr.Stride, r, n)
+	U := blas64.Triangular{Uplo: blas.Upper, Diag: blas.NonUnit, N: r, Stride: r, Data: sd}
+	Z := blas64.General{Rows: r, Cols: n, Stride: n, Data: z}
+	blas64.Trsm(blas.Left, blas.Trans, 1, U, Z)
+	d := dst.RawMatrix()
+	blas64.Gemm(blas.Trans, blas.NoTrans, 1, Z, Z, 0, blas64.General{Rows: n, Cols: n, Stride: d.Stride, Data: d.Data})
 	return dst, nil
 }
 
@@ -278,7 +282,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	rw.Ax.Sub(gp.A, rw.Ax)
 	rw.Gx = mulInto(rw.Gx, rw.BRinv, hp.BT)
 	rw.Gx.Scale(-1, rw.Gx)
-	if rw.Qx, err = shiftedGram(rw.Qx, hp.C1a, hp.D11aD11at, gp.n, gamma); err != nil {
+	if rw.Qx, err = shiftedGram(rw.Qx, hp.C1a, hp.D11aD11at, gp.n, gamma, &rw.gram); err != nil {
 		return nil, nil, nil, nil, err
 	}
 	rw.ham.setHamiltonian(rw.Ax, rw.Gx, rw.Qx)
@@ -297,7 +301,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	rw.RtC = mulInto(rw.RtC, Rtinv, hp.C)
 	rw.Gy = mulInto(rw.Gy, hp.CT, rw.RtC)
 	rw.Gy.Scale(-1, rw.Gy)
-	if rw.Qy, err = shiftedGram(rw.Qy, hp.B1atT, hp.D11ctD11c, gp.n, gamma); err != nil {
+	if rw.Qy, err = shiftedGram(rw.Qy, hp.B1atT, hp.D11ctD11c, gp.n, gamma, &rw.gram); err != nil {
 		return nil, nil, nil, nil, err
 	}
 	rw.AyT = transposeInto(rw.AyT, rw.Ay)
