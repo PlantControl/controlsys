@@ -608,6 +608,11 @@ func (p *pbhSolver) sigmaMin(lam complex128) float64 {
 			g[(n+i)*stride+i] = -li
 		}
 	}
+	for _, v := range g {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0
+		}
+	}
 	sv := p.sv[:k*n]
 	work := p.work[k-1]
 	if !lapack64.Gesvd(lapack.SVDNone, lapack.SVDNone, blas64.General{Rows: k * n, Cols: stride, Stride: stride, Data: g}, blas64.General{Stride: 1}, blas64.General{Stride: 1}, sv, work, len(work)) {
