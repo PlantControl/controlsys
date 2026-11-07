@@ -648,7 +648,7 @@ func (p *pbhSolver) exceeds(lam complex128, thr float64) bool {
 	abs := cmplx.Abs(lam)
 	r := p.normA + math.Sqrt(float64(n))*abs
 	S := r*r + p.nB2
-	const c = 16
+	const c = 16 // several times the SVD, product and Cholesky (Higham Thm 10.3) first-order constants
 	tau := thr + c*float64(n*(n+m))*eps()*math.Sqrt(S)
 	t := tau*tau + 2*c*float64(n*(n+m+4))*eps()*S
 	if !(t < S) {
