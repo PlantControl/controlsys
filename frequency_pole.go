@@ -45,8 +45,11 @@ const (
 // finite. The pole limit's samples fail there too;
 // each failed sample is solved in double-double, and where that is singular
 // as well the step is taken past the cluster at s (poleSpacing's wide).
-// An internal-delay model always takes the pole limit; a failed sample is
-// the LFT of its delay-free plant solved in double-double (ddLFTSampler).
+// An internal-delay model off a near pole takes the LFT of its delay-free
+// plant solved in double-double (ddLFTSampler), as beside a pole far above
+// the others, where the double solve sees the rest of the pencil as
+// singular; where that fails it takes the pole limit, each failed sample
+// solved the same way.
 // A non-finite realization or NaN point (errNonFinitePencil) fails at once.
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
@@ -95,6 +98,9 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 	}
 	if !delayFree && !gate.limit && !gate.snap && gate.allow == nil {
 		dd := newDDLFTSampler(sys)
+		if !sp.near && dd.responseInto(pt, dst) {
+			return nil
+		}
 		sample := func(pt frequencyPoint, dst []complex128) error {
 			if err := eval(pt, dst); err == nil || !dd.responseInto(pt, dst) {
 				return err
@@ -191,15 +197,42 @@ type ddLFTSampler struct {
 	h    *System
 	hv   []complex128
 	work []complex128
+
+	absorbed    *System // discrete delays as shift states, built on first use
+	absorbedErr error
 }
 
 func newDDLFTSampler(sys *System) *ddLFTSampler { return &ddLFTSampler{sys: sys} }
 
-// responseInto sets dst to the LFT of H at pt. It reports false where H is
-// singular in double-double, I − H22·Δ is singular, or an entry cancels
-// terms over lftCancelLimit times its size: there the loop moves a pole of
-// H, and H's rounding of order 1/d leaves the LFT no correct digits.
+// responseInto sets dst to the LFT of H at pt. Where H is singular in
+// double-double, I − H22·Δ is singular, or an entry cancels terms over
+// lftCancelLimit times its size, the loop moves a pole of H, and H's
+// rounding of order 1/d leaves the LFT no correct digits; so does the
+// rounding of a large Δ = z^{-k} at |z| < 1. A discrete model then takes
+// the double-double response of its absorbed realization, which holds the
+// delays exactly; responseInto reports false where that fails too or the
+// model is continuous.
 func (d *ddLFTSampler) responseInto(pt frequencyPoint, dst []complex128) bool {
+	if d.lftInto(pt, dst) {
+		return true
+	}
+	abs := d.absorbedSystem()
+	return abs != nil && ddResponseInto(abs, pt, dst)
+}
+
+// absorbedSystem returns sys with its discrete internal delays absorbed,
+// or nil as lftWorkspace.absorbedSolver does.
+func (d *ddLFTSampler) absorbedSystem() *System {
+	if d.sys.IsContinuous() {
+		return nil
+	}
+	if d.absorbed == nil && d.absorbedErr == nil {
+		d.absorbed, d.absorbedErr = absorbedDiscrete(d.sys)
+	}
+	return d.absorbed
+}
+
+func (d *ddLFTSampler) lftInto(pt frequencyPoint, dst []complex128) bool {
 	sys := d.sys
 	n, m, p := sys.Dims()
 	lft := sys.LFT
@@ -299,13 +332,15 @@ func ddAtPole(sys *System, s complex128, sp poleGeometry, g []complex128) bool {
 
 // poleGeometry locates s among the poles of the delay-free plant (A, E).
 // rho is the distance from s to the nearest pole that is distinct from s,
-// bounded by the overall spectral scale and, for continuous internal
-// delays, by 1/τ, over which e^{-sτ} varies. wide is rho with the k nearest
-// poles also taken as s when all lie within poleClusterSpread·eps^{1/k} of
-// the scale, the spread of a computed k-fold pole. gap is the distance to
-// the nearest finite pole, scale the largest of |s| and the finite pole
-// magnitudes, and near reports a computed pole near s as
-// evalWithPoleLimit defines it.
+// bounded by the overall spectral scale and, for internal delays, by 1/τ
+// (continuous) or |z|/τ (discrete), over which e^{-sτ} or z^{-τ} varies:
+// a step of the spectral scale would leave z^{-τ} underflowed or varying
+// by orders of magnitude across the pole limit's samples. wide is rho with
+// the k nearest poles also taken as s when all lie within
+// poleClusterSpread·eps^{1/k} of the scale, the spread of a computed k-fold
+// pole. gap is the distance to the nearest finite pole, scale the largest
+// of |s| and the finite pole magnitudes, and near reports a computed pole
+// near s as evalWithPoleLimit defines it.
 type poleGeometry struct {
 	rho, wide, gap, scale float64
 	near                  bool
@@ -355,12 +390,20 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 	if cluster < len(dist) {
 		wide = min(scale, max(rho, dist[cluster]))
 	}
-	if sys.IsContinuous() && sys.LFT != nil {
+	if sys.LFT != nil {
 		for _, tau := range sys.LFT.Tau {
-			if tau > 0 {
-				rho = min(rho, 1/tau)
-				wide = min(wide, 1/tau)
+			if tau <= 0 {
+				continue
 			}
+			r := 1 / tau
+			if !sys.IsContinuous() {
+				if s == 0 {
+					continue
+				}
+				r = cmplx.Abs(s) / tau
+			}
+			rho = min(rho, r)
+			wide = min(wide, r)
 		}
 	}
 	near = near || relative && dist[0] <= poleStepFraction*rho
