@@ -134,3 +134,5 @@
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"L4BCTU"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-07T21:29:15.983294Z","data":{"id":"BLHSVK","agent_id":"coordinator@controlsys-worker","ts":"2026-11-07T21:29:15.983294Z"}},{"type":"state","ts":"2026-11-07T21:29:15.983294Z","data":{"id":"BLHSVK","state":"doing","ts":"2026-11-07T21:29:15.983294Z"}}]}
+{"type":"transaction","version":1,"events":[{"type":"body","ts":"2026-11-07T21:51:47.565497Z","data":{"id":"A3QHIT","body":"Filed from 2TUAD6. Pre-existing, same on base and branch. Violates Go error pattern.\nn=2 m=1 p=1 dt=0 A=[-1e-300,0,0,-1e-300] B=[1e200,1e200] C=[1,-1] D=[0]: NaN, nil error; exact 0. File: response.go dcGain X.Solve success path.\nRuling (#472): +Inf,nil → ErrOverflow for an exact gain of 1e510 is accepted. It's a fix, not a value→error regression: +Inf with a nil error violates the Go error pattern, and the change matches the RKYIZJ derived-overflow rule.\n","ts":"2026-11-07T21:51:47.565497Z"}}]}
