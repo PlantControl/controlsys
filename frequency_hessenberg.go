@@ -124,6 +124,24 @@ func belowNormal(x []complex128, undriven uint64) bool {
 	return false
 }
 
+// underflowScreen holds a solver's undrivenMask for x laid out with
+// strides (rs, cs), made on the first below-normal hit so that models whose
+// states stay normal never pay for it.
+type underflowScreen struct {
+	mask  uint64
+	ready bool
+}
+
+// confirm reports whether x still has a below-normal entry once the mask is
+// made.
+func (sc *underflowScreen) confirm(br *balancedRealization, x []complex128, rs, cs int) bool {
+	if sc.ready {
+		return true
+	}
+	sc.mask, sc.ready = br.undrivenMask(rs, cs), true
+	return belowNormal(x, sc.mask)
+}
+
 // undrivenMask sets bit i*rs+j*cs for each state i that input j cannot
 // reach through B̂ and the off-diagonal pencil, which stays exactly zero at
 // every point and cannot be lost; it is 0 where n·m exceeds 64.
@@ -258,8 +276,7 @@ type balancedDense struct {
 	solveErr []float64
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
-	// undriven is undrivenMask of x's layout.
-	undriven uint64
+	screen    underflowScreen
 	// sys, when set, is the delay-free model whose double-double response
 	// (ddResponseInto) replaces a stalled point's inaccurate entries.
 	sys *System
@@ -303,7 +320,6 @@ func newBalancedDenseOf(br balancedRealization) *balancedDense {
 		bd.lastA[i] = last
 	}
 	bd.nonFinite = !br.finite()
-	bd.undriven = br.undrivenMask(m, 1)
 	return bd
 }
 
@@ -476,7 +492,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re, im)
 		}
 	}
-	if belowNormal(x, bd.undriven) && stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
+	if belowNormal(x, bd.screen.mask) && bd.screen.confirm(&bd.balancedRealization, x, m, 1) && stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
 		return underflowResponseInto(bd.src, n, m, p, pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
@@ -796,11 +812,10 @@ type hessenbergSweep struct {
 	r       []complex128 // column-major n×m
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
-	// undriven is undrivenMask of x's layout.
-	undriven uint64
-	sys      *System
-	dense    *balancedDense // denseRetry's solver, built on first use
-	alt      []complex128
+	screen    underflowScreen
+	sys       *System
+	dense     *balancedDense // denseRetry's solver, built on first use
+	alt       []complex128
 }
 
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
@@ -823,7 +838,6 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	hs.y, hs.x, hs.r = ctake(n*m), ctake(n*m), ctake(n*m)
 	hs.swapped = make([]bool, n)
 	hs.nonFinite = !hs.finite()
-	hs.undriven = hs.undrivenMask(1, n)
 	if n == 0 || hs.nonFinite {
 		return hs
 	}
@@ -1210,7 +1224,7 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
-	if belowNormal(x, hs.undriven) && stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
+	if belowNormal(x, hs.screen.mask) && hs.screen.confirm(&hs.balancedRealization, x, 1, n) && stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
 		return underflowResponseInto(hs.sys, n, m, p, pt, dst)
 	}
 	if !converged {
