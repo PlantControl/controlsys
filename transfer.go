@@ -2665,9 +2665,13 @@ func (tf *TransferFunc) improperStateSpace(p, m int) (*StateSpaceResult, error) 
 // a descriptor model is proper iff its infinite eigenvalues are all
 // nondynamic. The decision is the Weierstrass reduction Step and
 // TransferFunction use, so they agree; s^k coefficients at rounding level
-// count as zero. A singular pencil (A, E), for which properness is
-// undefined, returns ErrDescriptorSingular, and a numerical failure deciding
-// it returns an error rather than false. See
+// count as zero. When that reduction refutes its own split and E has an
+// exactly zero row or column (as tf→ss realizations of improper models),
+// properness is decided in exact rational arithmetic on the data instead
+// (exactProperness), while Step and TransferFunction still fail closed. A
+// singular pencil (A, E), for which properness is undefined, returns
+// ErrDescriptorSingular, and a numerical failure deciding it returns an
+// error rather than false. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.isproper.html.
 func (sys *System) IsProper() (bool, error) {
 	if err := requireFiniteSystem("IsProper", sys); err != nil {
@@ -2700,6 +2704,11 @@ func (sys *System) isProper() (bool, error) {
 	if _, err := sys.weierstrassReduce(); err != nil {
 		if errors.Is(err, ErrImproperModel) {
 			return false, nil
+		}
+		if errors.Is(err, errReductionRefuted) && N == 0 && hasExactZeroLine(sys.E) {
+			if proper, ok := exactProperness(sys); ok {
+				return proper, nil
+			}
 		}
 		return false, err
 	}
