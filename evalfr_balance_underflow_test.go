@@ -9,7 +9,10 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-func hugeDiagonalModel(t *testing.T, n int, k, bScale float64) *System {
+// hugeDiagonalModel is the upper bidiagonal A with diagonal -k, -2k, …
+// and superdiagonal k, B = bScale·1 with B₀ = 0 where coupled, and
+// C = 1ᵀ/bScale.
+func hugeDiagonalModel(t *testing.T, n int, k, bScale float64, coupled bool) *System {
 	t.Helper()
 	a := make([]float64, n*n)
 	b := make([]float64, n)
@@ -21,6 +24,9 @@ func hugeDiagonalModel(t *testing.T, n int, k, bScale float64) *System {
 		}
 		b[i], c[i] = bScale, 1/bScale
 	}
+	if coupled {
+		b[0] = 0
+	}
 	sys, err := New(mat.NewDense(n, n, a), mat.NewDense(n, 1, b), mat.NewDense(1, n, c), mat.NewDense(1, 1, []float64{0}), 0)
 	if err != nil {
 		t.Fatal(err)
@@ -31,44 +37,48 @@ func hugeDiagonalModel(t *testing.T, n int, k, bScale float64) *System {
 // ECC62L: with the diagonal skipped, balancing a 1e300 model is finite but
 // leaves D⁻¹x below the normal range (x̂₀ ≈ 1.7e-400 at 1i), so the
 // response takes the verified double-double solve of the unbalanced
-// realization. Mid scales do not trigger it and stay on the double path.
+// realization. Coupled has B̂₀ = 0: x̂₀ is driven only through â₀₁ and
+// underflows the same way. Mid scales do not trigger it and stay on the
+// double path.
 func TestEvalFr_HugeDiagonalBalanceNoOverflow(t *testing.T) {
-	for _, n := range []int{2, 3} {
-		for _, k := range []float64{1e3, 1e100, 1e300} {
-			t.Run(fmt.Sprintf("n=%d/k=%g", n, k), func(t *testing.T) {
-				sys := hugeDiagonalModel(t, n, k, 1)
-				omega := []float64{1, k}
-				fr, err := sys.FreqResponse(omega)
-				if err != nil {
-					t.Fatalf("FreqResponse: %v", err)
-				}
-				for i, w := range omega {
-					s := complex(0, w)
-					want := bigSISOResponse(sys, s)
-					got := map[string]complex128{"FreqResponse": fr.At(i, 0, 0)}
-					if g, err := sys.EvalFr(s); err != nil {
-						t.Errorf("EvalFr(%gi): %v", w, err)
-					} else {
-						got["EvalFr"] = g[0][0]
+	for _, coupled := range []bool{false, true} {
+		for _, n := range []int{2, 3} {
+			for _, k := range []float64{1e3, 1e100, 1e300} {
+				t.Run(fmt.Sprintf("coupled=%v/n=%d/k=%g", coupled, n, k), func(t *testing.T) {
+					sys := hugeDiagonalModel(t, n, k, 1, coupled)
+					omega := []float64{1, k}
+					fr, err := sys.FreqResponse(omega)
+					if err != nil {
+						t.Fatalf("FreqResponse: %v", err)
 					}
-					dst := make([]complex128, 1)
-					if err := newBalancedDense(sys, n, 1, 1).evalInto(pointAt(s), dst); err != nil {
-						t.Errorf("dense(%gi): %v", w, err)
-					} else {
-						got["dense"] = dst[0]
-					}
-					if err := newHessenbergSweep(sys, n, 1, 1).evalInto(pointAt(s), dst); err != nil {
-						t.Errorf("hessenberg(%gi): %v", w, err)
-					} else {
-						got["hessenberg"] = dst[0]
-					}
-					for name, g := range got {
-						if rel := cmplx.Abs(g-want) / cmplx.Abs(want); !(rel <= 1e-12) {
-							t.Errorf("%s(%gi) = %v, want %v (rel %.3g)", name, w, g, want, rel)
+					for i, w := range omega {
+						s := complex(0, w)
+						want := bigSISOResponse(sys, s)
+						got := map[string]complex128{"FreqResponse": fr.At(i, 0, 0)}
+						if g, err := sys.EvalFr(s); err != nil {
+							t.Errorf("EvalFr(%gi): %v", w, err)
+						} else {
+							got["EvalFr"] = g[0][0]
+						}
+						dst := make([]complex128, 1)
+						if err := newBalancedDense(sys, n, 1, 1).evalInto(pointAt(s), dst); err != nil {
+							t.Errorf("dense(%gi): %v", w, err)
+						} else {
+							got["dense"] = dst[0]
+						}
+						if err := newHessenbergSweep(sys, n, 1, 1).evalInto(pointAt(s), dst); err != nil {
+							t.Errorf("hessenberg(%gi): %v", w, err)
+						} else {
+							got["hessenberg"] = dst[0]
+						}
+						for name, g := range got {
+							if rel := cmplx.Abs(g-want) / cmplx.Abs(want); !(rel <= 1e-12) {
+								t.Errorf("%s(%gi) = %v, want %v (rel %.3g)", name, w, g, want, rel)
+							}
 						}
 					}
-				}
-			})
+				})
+			}
 		}
 	}
 }
@@ -76,18 +86,11 @@ func TestEvalFr_HugeDiagonalBalanceNoOverflow(t *testing.T) {
 // ECC62L: where the unbalanced states underflow too, the fallback cannot
 // verify and the point fails instead of returning the lost-state value.
 func TestEvalFr_StateUnderflowUnverifiedFails(t *testing.T) {
-	sys := hugeDiagonalModel(t, 2, 1e300, 1e-30)
+	sys := hugeDiagonalModel(t, 2, 1e300, 1e-30, false)
 	want := bigSISOResponse(sys, 1i)
 	g, err := sys.EvalFr(1i)
-	if err == nil {
-		if rel := cmplx.Abs(g[0][0]-want) / cmplx.Abs(want); !(rel <= 1e-12) {
-			t.Errorf("EvalFr(1i) = %v, nil error; want %v or an error", g[0][0], want)
-		}
-		t.Logf("EvalFr(1i) = %v resolved", g[0][0])
-		return
-	}
 	if !errors.Is(err, ErrOverflow) {
-		t.Errorf("EvalFr(1i) error %v, want ErrOverflow", err)
+		t.Errorf("EvalFr(1i) = %v, %v; want ErrOverflow (oracle %v not resolvable: B/σ ≈ 3.7e-331)", g, err, want)
 	}
 }
 

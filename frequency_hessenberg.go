@@ -68,24 +68,42 @@ func (br *balancedRealization) unbalanced() (balancedRealization, bool) {
 	return u, true
 }
 
-// stateUnderflow reports whether a state of the solution x, entry (i, j)
-// at x[i*rs+j*cs], is below the normal range while B̂ drives it from input
-// j and Ĉ reads it, both with normal entries: balancing keeps B̂ and Ĉ in
+// stateUnderflow reports whether a state of br's solution x, entry (i, j)
+// at x[i*rs+j*cs], is below the normal range where the output y = ys·Ĉx
+// (+D), row-major p×m, could resolve its loss: balancing keeps B̂ and Ĉ in
 // range but not D⁻¹x, and refinement cannot see a state lost to underflow,
-// since its correction underflows too.
-func stateUnderflow(x []complex128, b, c []float64, n, m, p, rs, cs int) bool {
+// since its correction underflows too. A lost state is below 2⁻¹⁰²², so
+// output k misses at most |ĉₖᵢ|·2⁻¹⁰²²·ys of it. An exactly zero state counts
+// only where it is driven, by B̂ or by a nonzero state through the pencil.
+func stateUnderflow(br *balancedRealization, x []complex128, rs, cs int, y []complex128, ys float64) bool {
+	const tiny = 0x1p-1022
+	n, m, p := br.n, br.m, br.p
 	for i := range n {
 		for j := range m {
 			v := x[i*rs+j*cs]
-			if max(math.Abs(real(v)), math.Abs(imag(v))) >= 0x1p-1022 || math.Abs(b[i*m+j]) < 0x1p-1022 {
+			if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny || v == 0 && !br.drives(x, i, j, rs, cs) {
 				continue
 			}
 			for k := range p {
-				if math.Abs(c[k*n+i]) >= 0x1p-1022 {
+				if math.Abs(br.c[k*n+i])*tiny*ys > eps()*cabs1(y[k*m+j]) {
 					return true
 				}
 			}
-			break
+		}
+	}
+	return false
+}
+
+// drives reports whether B̂ or a nonzero state of x drives state i from
+// input j.
+func (br *balancedRealization) drives(x []complex128, i, j, rs, cs int) bool {
+	n := br.n
+	if br.b[i*br.m+j] != 0 {
+		return true
+	}
+	for k := range n {
+		if k != i && x[k*rs+j*cs] != 0 && (br.a[i*n+k] != 0 || br.e != nil && br.e[i*n+k] != 0) {
+			return true
 		}
 	}
 	return false
@@ -372,9 +390,6 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 	if refine || bd.outputCancels() {
 		bd.refine()
 	}
-	if stateUnderflow(x, bd.b, bd.c, n, m, p, m, 1) {
-		return bd.underflowResponseInto(pt, dst)
-	}
 
 	for row := range p {
 		cr := bd.c[row*n : (row+1)*n]
@@ -395,6 +410,9 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			}
 			out[j] = complex(re, im)
 		}
+	}
+	if stateUnderflow(&bd.balancedRealization, x, m, 1, dst, cabs1(gs)) {
+		return bd.underflowResponseInto(pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
 		ddResponseInto(bd.sys, pt, dst)
@@ -1104,9 +1122,6 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 		}
 		clear(y)
 	}
-	if stateUnderflow(x, hs.b, hs.c, n, m, p, 1, n) {
-		return hs.underflowResponseInto(pt, dst)
-	}
 
 	for row := range p {
 		cr := hs.c[row*n : (row+1)*n]
@@ -1126,6 +1141,9 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			}
 			out[j] = complex(re+dre, im+dim)
 		}
+	}
+	if stateUnderflow(&hs.balancedRealization, x, 1, n, dst, 1) {
+		return hs.underflowResponseInto(pt, dst)
 	}
 	if !converged {
 		if err := hs.denseRetry(pt, dst); err != nil {
