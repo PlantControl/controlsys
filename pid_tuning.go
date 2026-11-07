@@ -305,6 +305,40 @@ func (e *pidNonfiniteResponse) Error() string {
 
 func (*pidNonfiniteResponse) Unwrap() error { return ErrInvalidArgument }
 
+// zeroGain reports h = G(wc) not finite, zero, or below 1e-15 of the larger
+// |G| at wc/2 and 2wc (clamped to [low, high]) — a plant zero at wc, as
+// tuning is scale invariant and k·G tunes as G for any k. With neither
+// neighbour usable, |h| < 1e-15 is zero. Neighbours use try when set, so
+// probing them does not mark a search blind.
+func (p pidTuningPlant) zeroGain(h complex128, wc float64) bool {
+	if !pidFiniteComplex(h) || h == 0 {
+		return true
+	}
+	a := cmplx.Abs(h)
+	if a >= 1e-15 {
+		return false
+	}
+	ref := 0.
+	for _, w := range []float64{wc / 2, 2 * wc} {
+		if p.high > p.low {
+			w = math.Min(math.Max(w, p.low), p.high)
+		}
+		if w == wc {
+			continue
+		}
+		g, ok := complex128(0), true
+		if p.try != nil {
+			g, ok = p.try(w)
+		} else {
+			g = p.at(w)
+		}
+		if b := cmplx.Abs(g); ok && finitePID(b) {
+			ref = math.Max(ref, b)
+		}
+	}
+	return ref == 0 || a < 1e-15*ref
+}
+
 // pidZeroGain reports a plant gain at the crossover that is zero or not
 // finite, as at a crossover moved far past the plant's dynamics.
 type pidZeroGain struct{ h complex128 }
@@ -2101,7 +2135,7 @@ func tunePIDScanOnce(ctx context.Context, op string, p pidTuningPlant, family Pi
 	}
 	c := PID2{Tf: tf, Dt: p.dt, IFormula: o.IFormula, DFormula: o.DFormula, B: 1, C: 1}
 	h := p.at(wc)
-	if !pidFiniteComplex(h) || cmplx.Abs(h) < 1e-15 {
+	if p.zeroGain(h, wc) {
 		return nil, fmt.Errorf("%s: %w", op, &pidZeroGain{h})
 	}
 	// P and I have one gain: its crossover fixes the phase margin, so an
@@ -2349,7 +2383,7 @@ func tunePIDScanOnce(ctx context.Context, op string, p pidTuningPlant, family Pi
 			return nil
 		}
 		mag := cmplx.Abs(h * pidTuningFeedback(candidate, wc))
-		if !finitePID(mag) || mag < 1e-15 {
+		if !finitePID(mag) || mag < 1e-15*cmplx.Abs(h) {
 			return nil
 		}
 		candidate.Kp /= mag
