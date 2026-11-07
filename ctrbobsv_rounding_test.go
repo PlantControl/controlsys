@@ -410,7 +410,7 @@ func pbhDistanceNear(A, B *mat.Dense, lam0 complex128) float64 {
 }
 
 // realifiedPBHSigma is σmin([A − λI, B]) through its own real embedding
-// [[Re, −Im], [Im, Re]], independent of pbhSigmaMin.
+// [[Re, −Im], [Im, Re]], independent of pbhSolver.sigmaMin.
 func realifiedPBHSigma(A, B *mat.Dense, z complex128) float64 {
 	n, _ := A.Dims()
 	_, m := B.Dims()
