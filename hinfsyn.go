@@ -37,7 +37,9 @@ type HinfSynResult struct {
 	// within hinfControllerBackoff (relative) of the smallest achievable
 	// gamma unless the central controller is ill-conditioned there, as at an
 	// unattained infimum of 0 or a coupling-limited optimum (ρ(XY) = γ²);
-	// then it is the smallest such bound among the backed-off controllers.
+	// then it is the smallest such bound among the backed-off controllers,
+	// measured within 2e-3 relative of the bisection edge at
+	// coupling-limited optima (LA6PVT restores 1e-4).
 	GammaOpt float64
 	X        *mat.Dense
 	Y        *mat.Dense
