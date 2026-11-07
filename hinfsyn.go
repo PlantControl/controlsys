@@ -14,12 +14,12 @@ import (
 // HinfSynResult is an H∞ controller, as MATLAB [K,CL,gamma,info] =
 // hinfsyn(P,nmeas,ncont) returns it (see
 // https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfsyn.html):
-// X and Y are the state-feedback and filter Riccati solutions at GammaOpt
-// and CLPoles the closed-loop poles. For a discrete plant X and Y
-// solve the Riccati equations of its Tustin-equivalent continuous plant (in
-// the same state coordinates), not discrete Riccati equations; when HinfSyn
-// first shifts modes away from z = ±1 (see HinfSyn), that of the shifted
-// plant.
+// X and Y are the state-feedback and filter Riccati solutions at the gamma
+// K is built for (at most GammaOpt) and CLPoles the closed-loop poles. For a
+// discrete plant X and Y solve the Riccati equations of its
+// Tustin-equivalent continuous plant (in the same state coordinates), not
+// discrete Riccati equations; when HinfSyn first shifts modes away from
+// z = ±1 (see HinfSyn), that of the shifted plant.
 type HinfSynResult struct {
 	K *System
 	// CL is the closed loop of P with K from w to z, LFT(P, K), as MATLAB CL.
@@ -32,11 +32,12 @@ type HinfSynResult struct {
 	// its peak σ_max(D) as ω → ∞, the Nyquist frequency π/Ts playing that
 	// role when discrete.
 	PeakFrequency float64
-	// GammaOpt is the gamma K is built for, verified on the returned K:
-	// Gamma ≤ GammaOpt. It is within hinfControllerBackoff (relative)
-	// of the smallest achievable gamma unless the Riccati solutions are
-	// ill-conditioned there, as when the infimum is 0 and unattained; then it
-	// is the smallest backed-off gamma whose controller meets it.
+	// GammaOpt is the gamma the returned K is verified to meet, Gamma ≤
+	// GammaOpt: the larger of the gamma K is built for and Gamma. It is
+	// within hinfControllerBackoff (relative) of the smallest achievable
+	// gamma unless the central controller is ill-conditioned there, as at an
+	// unattained infimum of 0 or a coupling-limited optimum (ρ(XY) = γ²);
+	// then it is the smallest such bound among the backed-off controllers.
 	GammaOpt float64
 	X        *mat.Dense
 	Y        *mat.Dense
@@ -76,11 +77,17 @@ type HinfSynResult struct {
 // hinfGammaAbsTol, like the RelTol and AbsTol of MATLAB hinfsynOptions (see
 // https://www.mathworks.com/help/robust/ref/hinfsynoptions.html) but tighter. As MATLAB
 // returns the controller of a passing gamma, HinfSyn builds K just above the
-// bisection edge and checks ||T_zw||inf <= GammaOpt on the returned K. If the
-// build fails or K misses that gamma (the Riccati solutions are numerically
+// bisection edge and measures ||T_zw||inf on the returned K. If the build
+// fails or K misses that gamma (the central controller is numerically
 // unreliable near an unattained infimum such as 0, where K grows without
-// bound), it backs gamma off upward, since every gamma above the infimum is
-// achievable, until a controller meets it.
+// bound, or a coupling-limited optimum, where one of its modes does), it
+// backs gamma off upward, since every gamma above the infimum is
+// achievable, until a controller meets it (see hinfDesign.verified).
+//
+// The Riccati tests are invariant under scaling z or w: each Hamiltonian is
+// balanced by a power-of-two symplectic scaling, the semidefiniteness test
+// applies to the balanced solution, the constant terms are formed as Gram
+// matrices, and the bisection's give-up bound scales with the plant.
 func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	gp, err := partitionGeneralizedPlant("HinfSyn", P, nmeas, ncont)
 	if err != nil {
@@ -110,9 +117,11 @@ type hinfDesign struct {
 // that the relative 1e-6 governs every gamma above 1e-3.
 const hinfGammaAbsTol = 1e-9
 
-// hinfControllerBackoff is the relative gamma margin above the bisection
-// edge. At the edge X or Y grows without bound, so the central controller is
-// ill-conditioned and overshoots gamma; 1e-4 restores a genuine margin.
+// hinfControllerBackoff is the first relative gamma margin above the
+// bisection edge, and the resolution to which verified narrows it. At the
+// edge X or Y grows without bound (or I − XY/γ² becomes singular), so the
+// central controller is ill-conditioned and overshoots gamma; 1e-4
+// restores a genuine margin.
 const hinfControllerBackoff = 1e-4
 
 // hinfBackoffTries bounds the doublings of the gamma margin in verified.
@@ -120,26 +129,69 @@ const hinfBackoffTries = 48
 
 // verified builds the controller at gammaEdge plus a margin that starts at
 // hinfControllerBackoff·gammaEdge and doubles (at least to hinfGammaAbsTol)
-// until the build succeeds and the closed loop of P with the returned K
-// meets gamma.
+// until the closed loop of P with the returned K meets the gamma it is built
+// for. Doubling alone can land up to twice the margin that is needed, so the
+// margin is then bisected between the last miss and the pass down to a
+// bracket of hinfControllerBackoff·gammaEdge. Near a coupling-limited optimum
+// (ρ(XY) → γ²) the central controller has a mode that grows without bound
+// and its rounding leaves ‖T_zw‖∞ a little above the gamma it is built for,
+// at random, so meeting it is not monotone in the margin; yet every stable
+// closed loop is a verified bound. Every try with a finite norm is therefore
+// a candidate, its GammaOpt the larger of its build gamma and its norm, and
+// the smallest candidate is returned.
 func (d hinfDesign) verified(op string, P *System, nmeas, ncont int) (*HinfSynResult, error) {
-	margin := hinfControllerBackoff * d.gammaEdge
+	var best *HinfSynResult
 	var err error
-	for range hinfBackoffTries {
+	try := func(margin float64) bool {
 		var res *HinfSynResult
 		if res, err = d.build(d.gammaEdge + margin); err == nil {
-			if err = res.meets(op, P, nmeas, ncont); err == nil {
-				return res, nil
+			err = res.measure(op, P, nmeas, ncont)
+		}
+		if err != nil {
+			return false
+		}
+		met := res.Gamma <= res.GammaOpt
+		res.GammaOpt = math.Max(res.GammaOpt, res.Gamma)
+		if best == nil || res.GammaOpt < best.GammaOpt {
+			best = res
+		}
+		return met
+	}
+	margin := hinfControllerBackoff * d.gammaEdge
+	for i := range hinfBackoffTries {
+		if try(margin) {
+			if i > 0 {
+				d.narrow(try, margin/2, margin)
 			}
+			break
 		}
 		margin = math.Max(2*margin, hinfGammaAbsTol)
 	}
-	return nil, err
+	if best == nil {
+		return nil, err
+	}
+	return best, nil
 }
 
-// meets checks ||T_zw||inf <= GammaOpt for the closed loop of P with K and
-// records that loop, its norm and peak frequency.
-func (res *HinfSynResult) meets(op string, P *System, nmeas, ncont int) error {
+// narrow bisects the margin in (lo, hi], try(hi) having met its gamma.
+func (d hinfDesign) narrow(try func(float64) bool, lo, hi float64) {
+	tol := math.Max(hinfControllerBackoff*d.gammaEdge, hinfGammaAbsTol)
+	for range hinfBackoffTries {
+		if !(hi-lo > tol) {
+			return
+		}
+		mid := (lo + hi) / 2
+		if try(mid) {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+}
+
+// measure records the closed loop of P with K, its norm and peak frequency;
+// an unstable loop (infinite norm) is an error.
+func (res *HinfSynResult) measure(op string, P *System, nmeas, ncont int) error {
 	cl, err := LFT(P, res.K, LFTFeedback{Nu: ncont, Ny: nmeas})
 	if err != nil {
 		return fmt.Errorf("%s: closing the loop: %w", op, err)
@@ -148,7 +200,7 @@ func (res *HinfSynResult) meets(op string, P *System, nmeas, ncont int) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
-	if !(norm <= res.GammaOpt) {
+	if math.IsInf(norm, 1) || math.IsNaN(norm) {
 		return fmt.Errorf("%s: controller for γ = %g gives ‖T_zw‖∞ = %g: %w", op, res.GammaOpt, norm, ErrGammaNotAchievable)
 	}
 	res.CL, res.Gamma, res.PeakFrequency = cl, norm, omega
@@ -166,7 +218,7 @@ func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string) (hinfDesig
 		return hinfSynGeneral(gp)
 	}
 	ric := newHinfD11ZeroRiccatis(gp)
-	gamma, err := hinfBisect(0, ric.feasible)
+	gamma, err := hinfBisect(0, gp.hinfGammaScale(), ric.feasible)
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
@@ -467,12 +519,14 @@ func (gp *generalizedPlantPartition) closeStaticLoop(P *System, D0 *mat.Dense) (
 }
 
 // hinfBisect returns the smallest gamma above gammaLB, to relative 1e-6 or
-// absolute hinfGammaAbsTol, that feasible accepts.
-func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
+// absolute hinfGammaAbsTol, that feasible accepts, giving up once the
+// doubled upper bound passes hinfGammaCap·max(1, scale).
+func hinfBisect(gammaLB, scale float64, feasible func(float64) bool) (float64, error) {
 	gammaUB := gammaLB*2 + 1
+	limit := hinfGammaCap * math.Max(1, scale)
 	for !feasible(gammaUB) {
 		gammaUB *= 2
-		if gammaUB > 1e12 {
+		if gammaUB > limit {
 			return 0, fmt.Errorf("no feasible gamma below %g: %w", gammaUB, ErrGammaNotAchievable)
 		}
 	}
@@ -485,6 +539,27 @@ func hinfBisect(gammaLB float64, feasible func(float64) bool) (float64, error) {
 		}
 	}
 	return gammaUB, nil
+}
+
+// hinfGammaCap is the gamma, relative to hinfGammaScale, beyond which
+// hinfBisect deems a plant infeasible.
+const hinfGammaCap = 1e12
+
+// hinfGammaScale is ‖[C1 D11 D12]‖_F·‖[B1; D11; D21]‖_F, the size of the
+// performance channels: scaling z or w by k scales it, and the optimal
+// gamma, by k, so hinfBisect's give-up bound follows the plant's scaling.
+func (gp *generalizedPlantPartition) hinfGammaScale() float64 {
+	sq := func(ms ...*mat.Dense) float64 {
+		var s float64
+		for _, m := range ms {
+			if m != nil && !m.IsEmpty() {
+				f := mat.Norm(m, 2)
+				s += f * f
+			}
+		}
+		return math.Sqrt(s)
+	}
+	return sq(gp.C1, gp.D11, gp.D12) * sq(gp.B1, gp.D11, gp.D21)
 }
 
 func hinfSynD11Zero(gp *generalizedPlantPartition, ric *hinfD11ZeroRiccatis, gamma float64) (*HinfSynResult, error) {
@@ -614,9 +689,11 @@ func newHinfD11ZeroRiccatis(gp *generalizedPlantPartition) *hinfD11ZeroRiccatis 
 	r.Ahat = mat.NewDense(n, n, nil)
 	r.Ahat.Sub(A, mulDense(B2R1inv, S1))
 
-	// Qhat = C1'C1 - S1'*R1inv*S1
-	r.Qhat = mat.NewDense(n, n, nil)
-	r.Qhat.Sub(r.C1tC1, mulDense(mat.DenseCopyOf(S1.T()), mulDense(R1inv, S1)))
+	var ok bool
+	if r.Qhat, ok = complementGram(C1, D12); !ok {
+		r.errR1 = fmt.Errorf("SVD of D12 failed: %w", ErrSchurFailed)
+		return r
+	}
 
 	// Gx = ginv2*B1*B1' - B2*R1inv*B2'
 	r.B2R1B2t = mulDense(B2R1inv, mat.DenseCopyOf(B2.T()))
@@ -638,14 +715,43 @@ func newHinfD11ZeroRiccatis(gp *generalizedPlantPartition) *hinfD11ZeroRiccatis 
 	Atilde.Sub(A, mulDense(S2R2inv, C2))
 	r.AtildeT = mat.DenseCopyOf(Atilde.T())
 
-	// Qy = B1*B1' - S2*R2inv*S2'
-	r.Qy = mat.NewDense(n, n, nil)
-	r.Qy.Sub(r.B1B1t, mulDense(S2R2inv, mat.DenseCopyOf(S2.T())))
+	if r.Qy, ok = complementGram(mat.DenseCopyOf(B1.T()), mat.DenseCopyOf(D21.T())); !ok {
+		r.errR2 = fmt.Errorf("SVD of D21 failed: %w", ErrSchurFailed)
+		return r
+	}
 
 	// Gy = ginv2*C1'C1 - C2'*R2inv*C2
 	r.C2R2C2 = mulDense(mat.DenseCopyOf(C2.T()), mulDense(R2inv, C2))
 	r.Gy = mat.NewDense(n, n, nil)
 	return r
+}
+
+// complementGram returns MᵀU₂U₂ᵀM for U₂ an orthonormal basis of the
+// orthogonal complement of range(D), that is Mᵀ(I − D(DᵀD)⁻¹Dᵀ)M for D of
+// full column rank: Qhat = C1ᵀ(I − D12 R1⁻¹ D12ᵀ)C1 with (M, D) = (C1, D12)
+// and, transposed, Qy = B1(I − D21ᵀR2⁻¹D21)B1ᵀ. Forming it as a Gram matrix
+// keeps it exactly semidefinite, where the subtraction C1ᵀC1 − S1ᵀR1⁻¹S1
+// cancels to rounding noise of size eps·‖C1‖² (all of it when D12 is
+// square), noise that decides γ-feasibility once C1 is large. ok is false
+// when the SVD of D fails.
+func complementGram(M, D *mat.Dense) (*mat.Dense, bool) {
+	p, k := D.Dims()
+	_, n := M.Dims()
+	G := mat.NewDense(n, n, nil)
+	if p == k {
+		return G, true
+	}
+	var svd mat.SVD
+	if !svd.Factorize(D, mat.SVDFull) {
+		return nil, false
+	}
+	var U mat.Dense
+	svd.UTo(&U)
+	U2 := U.Slice(0, p, k, p)
+	var Z mat.Dense
+	Z.Mul(U2.T(), M)
+	G.Mul(Z.T(), &Z)
+	return G, true
 }
 
 func (r *hinfD11ZeroRiccatis) feasible(gamma float64) bool {
@@ -701,8 +807,18 @@ func (r *hinfD11ZeroRiccatis) solve(gamma float64) (*mat.Dense, *mat.Dense, erro
 // arbitrary and yields spurious solutions.
 func solveHamiltonianRiccati(H *mat.Dense, n int) (*mat.Dense, error) {
 	w := newHamiltonianRiccatiWork(n)
+	w.c = 1
 	setBlock(w.H, 0, 0, H)
 	return w.solve()
+}
+
+// riccatiScale returns the power of two nearest √(q/g), the norms of Q and
+// G, or 1 when either is zero or not finite.
+func riccatiScale(g, q float64) float64 {
+	if !(g > 0 && q > 0) || math.IsInf(g, 0) || math.IsInf(q, 0) {
+		return 1
+	}
+	return math.Ldexp(1, int(math.Round(math.Log2(q/g)/2)))
 }
 
 // hamiltonianRiccatiWork holds the Hamiltonian and LAPACK buffers reused by
@@ -717,6 +833,7 @@ type hamiltonianRiccatiWork struct {
 	work     []float64
 	u11, u21 []float64
 	ipiv     []int
+	c        float64
 }
 
 func newHamiltonianRiccatiWork(n int) *hamiltonianRiccatiWork {
@@ -735,18 +852,27 @@ func newHamiltonianRiccatiWork(n int) *hamiltonianRiccatiWork {
 	}
 }
 
-// setHamiltonian sets H to [F G; -Q -Fᵀ].
+// setHamiltonian sets H to the symplectically scaled [F c·G; -Q/c -Fᵀ] =
+// diag(I, 1/c)·[F G; -Q -Fᵀ]·diag(I, c), whose stable invariant subspace is
+// spanned by [I; X/c]; solve returns c times that solution. c (see
+// riccatiScale) balances the off-diagonal blocks: scaling z or w by k scales
+// ‖Q‖/‖G‖ by k² and X by k², so unscaled, U11 of the basis [U11; U21] ≈
+// [I; X] shrinks against U21 and X = U21·U11⁻¹ and the semidefiniteness
+// test lose accuracy with k. A power-of-two c makes the scaling exact.
 func (w *hamiltonianRiccatiWork) setHamiltonian(F, G, Q *mat.Dense) {
 	n := w.n
+	w.c = riccatiScale(mat.Norm(G, 1), mat.Norm(Q, 1))
 	h := w.H.RawMatrix()
 	f, g, q := F.RawMatrix(), G.RawMatrix(), Q.RawMatrix()
 	for i := range n {
 		top := h.Data[i*h.Stride : i*h.Stride+2*n]
 		copy(top[:n], f.Data[i*f.Stride:i*f.Stride+n])
-		copy(top[n:], g.Data[i*g.Stride:i*g.Stride+n])
+		for j := range n {
+			top[n+j] = w.c * g.Data[i*g.Stride+j]
+		}
 		bottom := h.Data[(n+i)*h.Stride : (n+i)*h.Stride+2*n]
 		for j := range n {
-			bottom[j] = -q.Data[i*q.Stride+j]
+			bottom[j] = -q.Data[i*q.Stride+j] / w.c
 			bottom[n+j] = -f.Data[j*f.Stride+i]
 		}
 	}
@@ -803,23 +929,34 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 	}
 	impl.Dgetrs(blas.Trans, n, n, u11, n, ipiv, xData, n)
 	symmetrize(xData, n, n)
-
-	// Check positive semi-definiteness via eigenvalues
 	X := mat.NewDense(n, n, xData)
 	var eig mat.Eigen
-	eigOk := eig.Factorize(X, mat.EigenNone)
-	if !eigOk {
+	if !eig.Factorize(X, mat.EigenNone) {
 		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 	}
 	vals := eig.Values(nil)
+	floor := 1.0
 	for _, v := range vals {
-		if real(v) < -1e-8 {
+		floor = math.Max(floor, math.Abs(real(v)))
+	}
+	floor *= hamiltonianPSDTol
+	for _, v := range vals {
+		if real(v) < -floor {
 			return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
 		}
 	}
-
+	if w.c != 1 {
+		X.Scale(w.c, X)
+	}
 	return X, nil
 }
+
+// hamiltonianPSDTol bounds the negative eigenvalues solve accepts as rounding
+// of a semidefinite solution: those of X/c, the solution of the scaled
+// Hamiltonian (see setHamiltonian), above −hamiltonianPSDTol·max(1, ‖X/c‖).
+// X/c does not change when z or w is scaled, so neither does the test; the
+// relative part keeps it from failing on the rounding of a large X/c.
+const hamiltonianPSDTol = 1e-8
 
 // An eigenvalue with |Re| <= hamiltonianAxisCandidate*|lambda| is on the
 // imaginary axis when |Re| is also within hamiltonianAxisErr times its

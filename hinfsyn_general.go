@@ -12,24 +12,24 @@ import (
 // Control, ch. 17): z~ = Th1' z, w = Th2 w~, u = R12^-1 u~, y~ = R21^-1 y.
 // The Riccati solutions X and Y are invariant under this scaling.
 type hinfGeneralPlant struct {
-	gp             *generalizedPlantPartition
-	B, B2          *mat.Dense
-	C, C2          *mat.Dense
-	D11            *mat.Dense
-	D1dtC1, BT, CT *mat.Dense
-	D1dtD1d        *mat.Dense
-	B1Dd1t, Dd1Dd1 *mat.Dense
-	C1tC1, B1B1t   *mat.Dense
-	R12inv, R21inv *mat.Dense
-	gammaLB        float64
-	rw             *hinfGeneralRiccatiWork
+	gp               *generalizedPlantPartition
+	B, B2            *mat.Dense
+	C, C2            *mat.Dense
+	D11              *mat.Dense
+	D1dtC1, BT, CT   *mat.Dense
+	D1dtD1d          *mat.Dense
+	B1Dd1t, Dd1Dd1   *mat.Dense
+	C1a, D11aD11at   *mat.Dense
+	B1atT, D11ctD11c *mat.Dense
+	R12inv, R21inv   *mat.Dense
+	gammaLB          float64
+	rw               *hinfGeneralRiccatiWork
 }
 
 // hinfGeneralRiccatiWork holds the products riccatis forms at every γ.
 type hinfGeneralRiccatiWork struct {
 	ham                    *hamiltonianRiccatiWork
-	D1dtC1T, B1Dd1tT       *mat.Dense
-	BRinv, Ax, Gx, RD, Qx  *mat.Dense
+	BRinv, Ax, Gx, Qx      *mat.Dense
 	BDRt, Ay, AyT, RtC, Gy *mat.Dense
 	Qy, XY                 *mat.Dense
 }
@@ -37,9 +37,7 @@ type hinfGeneralRiccatiWork struct {
 func (hp *hinfGeneralPlant) riccatiWork() *hinfGeneralRiccatiWork {
 	if hp.rw == nil {
 		hp.rw = &hinfGeneralRiccatiWork{
-			ham:     newHamiltonianRiccatiWork(hp.gp.n),
-			D1dtC1T: mat.DenseCopyOf(hp.D1dtC1.T()),
-			B1Dd1tT: mat.DenseCopyOf(hp.B1Dd1t.T()),
+			ham: newHamiltonianRiccatiWork(hp.gp.n),
 		}
 	}
 	return hp.rw
@@ -129,25 +127,39 @@ func newHinfGeneralPlant(gp *generalizedPlantPartition) (*hinfGeneralPlant, erro
 		gammaLB = math.Max(gammaLB, sv)
 	}
 
+	var C1a, D11aD11at, B1atT, D11ctD11c *mat.Dense
+	if p1 > m2 {
+		C1a = extractBlock(C1, 0, 0, p1-m2, n)
+		D11a := extractBlock(D11, 0, 0, p1-m2, m1)
+		D11aD11at = mulDense(D11a, mat.DenseCopyOf(D11a.T()))
+	}
+	if m1 > p2 {
+		B1atT = mat.DenseCopyOf(extractBlock(B1, 0, 0, n, m1-p2).T())
+		D11c := extractBlock(D11, 0, 0, p1, m1-p2)
+		D11ctD11c = mulDense(mat.DenseCopyOf(D11c.T()), D11c)
+	}
+
 	D1dT := mat.DenseCopyOf(D1d.T())
 	return &hinfGeneralPlant{
-		gp:      gp,
-		B:       B,
-		B2:      B2,
-		C:       C,
-		C2:      C2,
-		D11:     D11,
-		D1dtC1:  mulDense(D1dT, C1),
-		BT:      mat.DenseCopyOf(B.T()),
-		CT:      mat.DenseCopyOf(C.T()),
-		D1dtD1d: mulDense(D1dT, D1d),
-		B1Dd1t:  mulDense(B1, mat.DenseCopyOf(Dd1.T())),
-		Dd1Dd1:  mulDense(Dd1, mat.DenseCopyOf(Dd1.T())),
-		C1tC1:   mulDense(mat.DenseCopyOf(C1.T()), C1),
-		B1B1t:   mulDense(B1, mat.DenseCopyOf(B1.T())),
-		R12inv:  R12inv,
-		R21inv:  R21inv,
-		gammaLB: gammaLB,
+		C1a:       C1a,
+		D11aD11at: D11aD11at,
+		B1atT:     B1atT,
+		D11ctD11c: D11ctD11c,
+		gp:        gp,
+		B:         B,
+		B2:        B2,
+		C:         C,
+		C2:        C2,
+		D11:       D11,
+		D1dtC1:    mulDense(D1dT, C1),
+		BT:        mat.DenseCopyOf(B.T()),
+		CT:        mat.DenseCopyOf(C.T()),
+		D1dtD1d:   mulDense(D1dT, D1d),
+		B1Dd1t:    mulDense(B1, mat.DenseCopyOf(Dd1.T())),
+		Dd1Dd1:    mulDense(Dd1, mat.DenseCopyOf(Dd1.T())),
+		R12inv:    R12inv,
+		R21inv:    R21inv,
+		gammaLB:   gammaLB,
 	}, nil
 }
 
@@ -205,6 +217,49 @@ func shiftedInverse(G *mat.Dense, k int, gamma float64) (*mat.Dense, error) {
 	return Rinv, nil
 }
 
+// shiftedGram returns Mᵀ(I − DDᵀ/γ²)⁻¹M, given DDᵀ, in dst (reallocated
+// when nil). With M = C1a and D = D11a, the rows of the scaled C1 and D11
+// that D12 = [0; I] leaves free, it is the X-Riccati constant term
+// C1ᵀC1 − C1ᵀD1•R⁻¹D1•ᵀC1 after the u-rows cancel exactly (Schur complement
+// of R in its identity block); dually B1a, D11c give the Y term. Formed as
+// a Gram matrix it stays semidefinite; the subtraction leaves rounding noise
+// of size eps·‖C1‖², which decides γ-feasibility once z is scaled up. A
+// failed Cholesky factorization of I − DDᵀ/γ² means γ ≤ ‖D‖.
+// M is nil when it has no rows, and then the result is the n×n zero.
+func shiftedGram(dst, M, DDt *mat.Dense, n int, gamma float64) (*mat.Dense, error) {
+	if dst == nil {
+		dst = mat.NewDense(n, n, nil)
+	}
+	if M == nil {
+		dst.Zero()
+		return dst, nil
+	}
+	r, _ := M.Dims()
+	S := mat.NewSymDense(r, nil)
+	g2 := gamma * gamma
+	for i := range r {
+		for j := i; j < r; j++ {
+			v := -DDt.At(i, j) / g2
+			if i == j {
+				v++
+			}
+			S.SetSym(i, j, v)
+		}
+	}
+	var ch mat.Cholesky
+	if !ch.Factorize(S) {
+		return nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
+	}
+	var L mat.TriDense
+	ch.LTo(&L)
+	var Z mat.Dense
+	if err := Z.Solve(&L, M); err != nil {
+		return nil, fmt.Errorf("γ = %g not achievable: %w", gamma, ErrGammaNotAchievable)
+	}
+	dst.Mul(Z.T(), &Z)
+	return dst, nil
+}
+
 // riccatis solves the general H-infinity Riccati equations at gamma and
 // returns X, Y together with R^-1 and R~^-1.
 func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dense, err error) {
@@ -223,9 +278,9 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	rw.Ax.Sub(gp.A, rw.Ax)
 	rw.Gx = mulInto(rw.Gx, rw.BRinv, hp.BT)
 	rw.Gx.Scale(-1, rw.Gx)
-	rw.RD = mulInto(rw.RD, Rinv, hp.D1dtC1)
-	rw.Qx = mulInto(rw.Qx, rw.D1dtC1T, rw.RD)
-	rw.Qx.Sub(hp.C1tC1, rw.Qx)
+	if rw.Qx, err = shiftedGram(rw.Qx, hp.C1a, hp.D11aD11at, gp.n, gamma); err != nil {
+		return nil, nil, nil, nil, err
+	}
 	rw.ham.setHamiltonian(rw.Ax, rw.Gx, rw.Qx)
 	X, err = rw.ham.solve()
 	if err != nil {
@@ -242,8 +297,9 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	rw.RtC = mulInto(rw.RtC, Rtinv, hp.C)
 	rw.Gy = mulInto(rw.Gy, hp.CT, rw.RtC)
 	rw.Gy.Scale(-1, rw.Gy)
-	rw.Qy = mulInto(rw.Qy, rw.BDRt, rw.B1Dd1tT)
-	rw.Qy.Sub(hp.B1B1t, rw.Qy)
+	if rw.Qy, err = shiftedGram(rw.Qy, hp.B1atT, hp.D11ctD11c, gp.n, gamma); err != nil {
+		return nil, nil, nil, nil, err
+	}
 	rw.AyT = transposeInto(rw.AyT, rw.Ay)
 	rw.ham.setHamiltonian(rw.AyT, rw.Gy, rw.Qy)
 	Y, err = rw.ham.solve()
@@ -308,7 +364,7 @@ func hinfSynGeneral(gp *generalizedPlantPartition) (hinfDesign, error) {
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
-	gamma, err := hinfBisect(hp.gammaLB, func(g float64) bool {
+	gamma, err := hinfBisect(hp.gammaLB, gp.hinfGammaScale(), func(g float64) bool {
 		_, _, _, _, err := hp.riccatis(g)
 		return err == nil
 	})

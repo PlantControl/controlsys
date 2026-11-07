@@ -1070,9 +1070,6 @@ func FuzzHinfSyn(f *testing.F) {
 		}
 		hc, wc := syHinfLower(cand, P.nw, P.nz, s.Dt)
 		if !(res.GammaOpt <= hc*(1+1e-3)+hinfGammaAbsTol) {
-			if res.GammaOpt > 1e6 {
-				fzSkip(t, "HinfSyn: GammaOpt above an H2 candidate at gamma > 1e6 (known followup)")
-			}
 			t.Fatalf("HinfSyn: GammaOpt %.10g exceeds the H∞ norm ≥ %.10g (ω=%g) of the stabilizing H2Syn controller\n%s", res.GammaOpt, hc, wc, s)
 		}
 	})
