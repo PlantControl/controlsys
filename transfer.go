@@ -2371,9 +2371,10 @@ type StateSpaceResult struct {
 // output row, as MATLAB ss(tf) (SLICOT TD04AD); like MATLAB it is not
 // reduced to minimal order. An improper model gives, as MATLAB ss(tf), a
 // descriptor realization with singular E: the companion blocks of the
-// proper remainders, then per improper row i a nilpotent chain of q_i+1
-// states realizing the polynomial quotient of degree q_i (MinimalOrder
-// counts them; BlockSizes does not). A malformed or empty model returns
+// proper rows, then per improper row i, with N_i the largest numerator
+// degree, an N_i+1 state observable-companion descriptor of the row that
+// never forms the polynomial quotient (MinimalOrder counts its states;
+// BlockSizes[i] stays the denominator degree). A malformed or empty model returns
 // ErrDimensionMismatch, a NaN or Inf coefficient ErrInvalidArgument and a
 // zero leading denominator coefficient ErrSingularDenom.
 func (tf *TransferFunc) StateSpace() (*StateSpaceResult, error) {
@@ -2545,59 +2546,42 @@ func (tf *TransferFunc) stateSpace() (*StateSpaceResult, error) {
 	}, nil
 }
 
-// improperStateSpace splits each channel into quotient q_ij and proper
-// remainder r_ij of num_ij/den_i, realizes r with stateSpace and appends,
-// per row, E z' = z + B u with E the upper shift and B_k = -[q_ij]_k, so
-// z_0 = Σ_k s^k Σ_j [q_ij]_k u_j.
+// improperStateSpace realizes proper rows with stateSpace and each
+// improper row i, with N = max_j deg num_ij > deg den_i, as an N+1 state
+// observable-companion descriptor of den_i(s)·y_i = Σ_j num_ij(s)·u_j over
+// the coefficients padded to degree N, with states x_1..x_N, y_i:
+// s·x_k = x_{k+1} − a_k·y_i + Σ_j b_jk·u_j and 0 = x_1 + Σ_j b_j0·u_j.
+// Never forming the polynomial quotient keeps the entries at coefficient
+// scale, so a small leading denominator coefficient cannot make the
+// quotient and remainder parts cancel.
 func (tf *TransferFunc) improperStateSpace(p, m int) (*StateSpaceResult, error) {
 	smlnum := math.SmallestNonzeroFloat64 / eps()
-	for i := range p {
-		if math.Abs(tf.Den[i][0]) < smlnum {
-			return nil, fmt.Errorf("row %d: %w", i, ErrSingularDenom)
-		}
-	}
-	rem := &TransferFunc{Num: make([][][]float64, p), Den: tf.Den, Dt: tf.Dt,
+	rem := &TransferFunc{Num: make([][][]float64, p), Den: make([][]float64, p), Dt: tf.Dt,
 		Delay: tf.Delay, InputName: tf.InputName, OutputName: tf.OutputName}
-	quot := make([][][]float64, p)
-	chain := make([]int, p)
+	order := make([]int, p)
 	nPoly := 0
 	for i := range p {
 		den := tf.Den[i]
-		d := len(den) - 1
-		rem.Num[i] = make([][]float64, m)
-		quot[i] = make([][]float64, m)
-		for j := range m {
-			num := trimLeadingFloatZeros(tf.Num[i][j])
-			if len(num)-1 <= d {
-				rem.Num[i][j] = num
-				continue
-			}
-			r := append([]float64(nil), num...)
-			q := make([]float64, len(num)-d)
-			for k := range q {
-				c := r[k] / den[0]
-				if math.IsInf(c, 0) || math.IsNaN(c) {
-					return nil, fmt.Errorf("row %d: polynomial quotient: %w", i, ErrOverflow)
-				}
-				q[k] = c
-				for l := 1; l <= d; l++ {
-					r[k+l] -= c * den[l]
-				}
-			}
-			for _, v := range r {
-				if math.IsInf(v, 0) || math.IsNaN(v) {
-					return nil, fmt.Errorf("row %d: polynomial remainder: %w", i, ErrOverflow)
-				}
-			}
-			if d == 0 {
-				rem.Num[i][j] = []float64{0}
-			} else {
-				rem.Num[i][j] = r[len(q):]
-			}
-			quot[i][j] = q
-			chain[i] = max(chain[i], len(q))
+		if math.Abs(den[0]) < smlnum {
+			return nil, fmt.Errorf("row %d: %w", i, ErrSingularDenom)
 		}
-		nPoly += chain[i]
+		d := len(den) - 1
+		trimmed := make([][]float64, m)
+		for j := range m {
+			trimmed[j] = trimLeadingFloatZeros(tf.Num[i][j])
+			order[i] = max(order[i], len(trimmed[j])-1)
+		}
+		if order[i] <= d {
+			order[i] = 0
+			rem.Num[i], rem.Den[i] = trimmed, den
+			continue
+		}
+		order[i]++
+		nPoly += order[i]
+		rem.Num[i], rem.Den[i] = make([][]float64, m), []float64{1}
+		for j := range m {
+			rem.Num[i][j] = []float64{0}
+		}
 	}
 	res, err := rem.stateSpace()
 	if err != nil || nPoly == 0 {
@@ -2611,7 +2595,7 @@ func (tf *TransferFunc) improperStateSpace(p, m int) (*StateSpaceResult, error) 
 	B := mat.NewDense(n, m, nil)
 	C := mat.NewDense(p, n, nil)
 	D := mat.DenseCopyOf(base.D)
-	aRaw, eRaw, bRaw, cRaw, dRaw := A.RawMatrix(), E.RawMatrix(), B.RawMatrix(), C.RawMatrix(), D.RawMatrix()
+	aRaw, eRaw, bRaw, cRaw := A.RawMatrix(), E.RawMatrix(), B.RawMatrix(), C.RawMatrix()
 	if n0 > 0 {
 		a0, b0, c0 := base.A.RawMatrix(), base.B.RawMatrix(), base.C.RawMatrix()
 		for r := range n0 {
@@ -2625,29 +2609,38 @@ func (tf *TransferFunc) improperStateSpace(p, m int) (*StateSpaceResult, error) 
 	}
 	off := n0
 	for i := range p {
-		for j := range m {
-			if q := quot[i][j]; len(q) > 0 {
-				dRaw.Data[i*dRaw.Stride+j] += q[len(q)-1]
-			}
-		}
-		qi := chain[i]
-		if qi == 0 {
+		if order[i] == 0 {
 			continue
 		}
-		for k := range qi {
-			aRaw.Data[(off+k)*aRaw.Stride+off+k] = 1
-			if k+1 < qi {
-				eRaw.Data[(off+k)*eRaw.Stride+off+k+1] = 1
+		N := order[i] - 1
+		y := off + N
+		den := tf.Den[i]
+		padD := N - (len(den) - 1)
+		for k := 1; k <= N; k++ {
+			r := off + k - 1
+			eRaw.Data[r*eRaw.Stride+r] = 1
+			if k < N {
+				aRaw.Data[r*aRaw.Stride+r+1] = 1
 			}
-			for j := range m {
-				q := quot[i][j]
-				if idx := len(q) - 1 - k; k > 0 && idx >= 0 {
-					bRaw.Data[(off+k)*bRaw.Stride+j] = -q[idx]
-				}
+			if l := k - padD; l >= 0 {
+				aRaw.Data[r*aRaw.Stride+y] = -den[l]
 			}
 		}
-		cRaw.Data[i*cRaw.Stride+off] = 1
-		off += qi
+		aRaw.Data[y*aRaw.Stride+off] = 1
+		for j := range m {
+			num := trimLeadingFloatZeros(tf.Num[i][j])
+			padN := N - (len(num) - 1)
+			for l, c := range num {
+				k := l + padN
+				r := y
+				if k > 0 {
+					r = off + k - 1
+				}
+				bRaw.Data[r*bRaw.Stride+j] = c
+			}
+		}
+		cRaw.Data[i*cRaw.Stride+y] = 1
+		off += order[i]
 	}
 	sys, err := newDescriptorOwned(A, B, C, D, E, tf.Dt)
 	if err != nil {
@@ -2658,7 +2651,13 @@ func (tf *TransferFunc) improperStateSpace(p, m int) (*StateSpaceResult, error) 
 	}
 	sys.InputName = copyStringSlice(tf.InputName)
 	sys.OutputName = copyStringSlice(tf.OutputName)
-	return &StateSpaceResult{Sys: sys, MinimalOrder: n, BlockSizes: res.BlockSizes}, nil
+	blocks := res.BlockSizes
+	for i := range p {
+		if order[i] > 0 {
+			blocks[i] = len(tf.Den[i]) - 1
+		}
+	}
+	return &StateSpaceResult{Sys: sys, MinimalOrder: n, BlockSizes: blocks}, nil
 }
 
 // IsProper reports whether the delay-free part of sys, including internal
