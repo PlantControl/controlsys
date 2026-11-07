@@ -442,10 +442,12 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 
 // ddRealizationInto is ddResponseInto of the realization br. With verify
 // set it also reports false unless the rounded solution x of (pE+qA)x = B
-// is componentwise backward stable at working precision, |r| ≤ nε(|B| +
-// |p||E||x| + |q||A||x|) for the compensated residual r (rounding x alone
-// leaves ε/2); a state lost below the normal range where a row resolves it
-// fails this too.
+// is normwise backward stable at working precision, ‖r‖ ≤ nε(‖B‖ +
+// (|p|‖E‖+|q|‖A‖)‖x‖) per column for the compensated residual r (rounding
+// x alone leaves ε/2), and no state is lost below the normal range by
+// stateUnderflow's test, whose componentwise row check a lost state fails;
+// a componentwise test of every row would reject a dd roundoff fill in a
+// state that is exactly zero but read at no visible weight.
 func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) bool {
 	n, m, p := br.n, br.m, br.p
 	maxA, maxE := 0.0, 1.0
@@ -529,7 +531,7 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 			g[r*m+c] = v
 		}
 	}
-	if verify && !ddVerified(br, pt, x) {
+	if verify && !ddVerified(br, pt, x, g) {
 		return false
 	}
 	copy(dst, g)
@@ -537,36 +539,51 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 }
 
 // ddVerified reports whether the double-double solution x of br's pencil at
-// pt passes ddRealizationInto's verification.
-func ddVerified(br *balancedRealization, pt frequencyPoint, x []ddComplex) bool {
+// pt, with output g, passes ddRealizationInto's verification.
+func ddVerified(br *balancedRealization, pt frequencyPoint, x []ddComplex, g []complex128) bool {
 	n, m := br.n, br.m
 	xr := make([]complex128, 2*n*m)
 	r := xr[n*m:]
 	for i, v := range x {
 		xr[i] = v.complex128()
 	}
-	ap, aq, tol := cabs1(pt.p), cabs1(pt.q), float64(n)*eps()
-	for j := range m {
-		pencilResidual(r[j:], xr[j:], m, br.a, br.e, n, br.b[j:], m, n, pt.p, pt.q, 1)
-		for i := range n {
-			var ax, ex float64
-			for k := range n {
-				xk := cabs1(xr[k*m+j])
-				ax += math.Abs(br.a[i*n+k]) * xk
-				if br.e != nil {
-					ex += math.Abs(br.e[i*n+k]) * xk
-				}
-			}
-			if br.e == nil {
-				ex = cabs1(xr[i*m+j])
-			}
-			bound := tol * (math.Abs(br.b[i*m+j]) + ap*ex + aq*ax)
-			if math.IsInf(bound, 0) || !(cabs1(r[i*m+j]) <= bound) {
-				return false
+	var normA, normE float64
+	for i := range n {
+		var sa, se float64
+		for k := range n {
+			sa += math.Abs(br.a[i*n+k])
+			if br.e != nil {
+				se += math.Abs(br.e[i*n+k])
 			}
 		}
+		normA, normE = max(normA, sa), max(normE, se)
 	}
-	return true
+	if br.e == nil {
+		normE = 1
+	}
+	normM, tol := cabs1(pt.p)*normE+cabs1(pt.q)*normA, float64(n)*eps()
+	for j := range m {
+		pencilResidual(r[j:], xr[j:], m, br.a, br.e, n, br.b[j:], m, n, pt.p, pt.q, 1)
+		var rMax, bMax, xMax float64
+		for i := range n {
+			rMax = max(rMax, cabs1(r[i*m+j]))
+			bMax = max(bMax, math.Abs(br.b[i*m+j]))
+			xMax = max(xMax, cabs1(xr[i*m+j]))
+		}
+		bound := tol * (bMax + normM*xMax)
+		if math.IsInf(bound, 0) || !(rMax <= bound) {
+			return false
+		}
+	}
+	ys := cabs1(pt.q)
+	if br.e == nil {
+		k := -pt.q
+		for i := range n * m {
+			xr[i] *= k
+		}
+		ys = 1
+	}
+	return !stateUnderflow(br, pt, xr, m, 1, g, ys)
 }
 
 // ddLUSolve overwrites the row-major n×m x with the solution of the system

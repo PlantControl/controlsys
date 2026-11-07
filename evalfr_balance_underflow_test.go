@@ -154,3 +154,33 @@ func TestBalancedRealization_UndrivenMask(t *testing.T) {
 		t.Errorf("column-major mask = %b, want %b", got, want)
 	}
 }
+
+// ECC62L: the fallback's dd GEPP fills the exactly zero, undriven state 0
+// with roundoff once pivoting mixes its row; verification must accept that
+// unread noise rather than demand a componentwise residual of that row.
+func TestEvalFr_UnderflowFallbackZeroStateFill(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(4, 4, []float64{
+			-1.214442610429162e+290, 0, 0, 0,
+			0, -1.986329444554168e+290, -9.779371965707476e+289, 0,
+			1.8549166562589078e+290, -8.319566527649257e+289, -1.8874556859501172e+290, 0,
+			2.0837908894259076e+290, -3.4030527121515706e+290, 0, -1.2573724467060058e+290}),
+		mat.NewDense(4, 1, []float64{0, 0.5871774780013506, -0.4878070560341442, -1.834676564228113}),
+		mat.NewDense(1, 4, []float64{0.79772142433102, -0.2428722708167741, -0.11053151151669649, 0.2568107334791625}),
+		mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []float64{1, 1e287, 1e290, 1e291} {
+		s := complex(0, w)
+		want := bigSISOResponse(sys, s)
+		g, err := sys.EvalFr(s)
+		if err != nil {
+			t.Errorf("EvalFr(%gi): %v", w, err)
+			continue
+		}
+		if rel := cmplx.Abs(g[0][0]-want) / cmplx.Abs(want); !(rel <= 1e-12) {
+			t.Errorf("EvalFr(%gi) = %v, want %v (rel %.3g)", w, g[0][0], want, rel)
+		}
+	}
+}
