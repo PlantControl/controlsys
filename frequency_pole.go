@@ -61,9 +61,15 @@ func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syste
 // tuned to it: the rational margin search takes near-roots of an
 // asymptotically real L next to an origin cluster for crossings once that
 // region evaluates. Otherwise, where allow(w) reports false, eval's error is
-// returned; a nil allow allows the fallback. With allow or snap set a near
-// computed pole is a pole at pt as at DC, without the double-double check;
-// the margin search keeps the pole limit's +Inf there. allow and limit also
+// returned; a nil allow allows the fallback. With allow set, or snap set
+// beside a pole that is not off DC (poleGeometry.offDC), a near computed
+// pole is a pole at pt as at DC, without the double-double check; the
+// margin search keeps the pole limit's +Inf there, beside an integrator or
+// a cluster at z = 1. Beside a resonance snap takes the double-double
+// response as ungated: there the step poleStepFraction·rho is a fraction
+// of the distance to the next pole past the cluster tolerance, and beside
+// a pair 1e-6 ± j of a realization with ‖A‖ ~ 1e7 it spans 1.4e-5, over ten
+// times the pair's distance to the axis (GAHTRN). allow and limit also
 // keep the pole limit's samples in double, so its errors stand for the
 // caller; for an internal-delay model so does snap, and only the zero gate
 // solves failed samples in double-double.
@@ -89,7 +95,7 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 	rho, wide := sp.rho, sp.wide
 	delayFree := sys.internalDelayCount() == 0
 	dc := s == 0 || !sys.IsContinuous() && s == 1
-	if !gate.limit && delayFree && (!sp.near || gate.allow == nil && !gate.snap && !dc) {
+	if !gate.limit && delayFree && (!sp.near || gate.allow == nil && (!gate.snap || sp.offDC) && !dc) {
 		if gate.allow != nil && !gate.allow(gate.w) {
 			return err
 		}
@@ -341,10 +347,13 @@ func ddAtPole(sys *System, s complex128, sp poleGeometry, g []complex128) bool {
 // poleClusterSpread·eps^{1/k} of the scale, the spread of a computed k-fold
 // pole. gap is the distance to the nearest finite pole, scale the largest
 // of |s| and the finite pole magnitudes, and near reports a computed pole
-// near s as evalWithPoleLimit defines it.
+// near s as evalWithPoleLimit defines it. offDC reports that gap is within
+// 1e-3 of the distance from s to DC (s = 0, or z = 1 for a discrete
+// model): the nearest pole is a resonance, not an integrator or a cluster
+// at DC.
 type poleGeometry struct {
 	rho, wide, gap, scale float64
-	near                  bool
+	near, offDC           bool
 }
 
 func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
@@ -412,7 +421,12 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 	if len(dist) > 0 {
 		gap = dist[0]
 	}
-	return poleGeometry{rho: rho, wide: wide, gap: gap, scale: scale, near: near}, nil
+	dc := complex(0, 0)
+	if !sys.IsContinuous() {
+		dc = 1
+	}
+	offDC := gap <= 1e-3*cmplx.Abs(s-dc)
+	return poleGeometry{rho: rho, wide: wide, gap: gap, scale: scale, near: near, offDC: offDC}, nil
 }
 
 // ddResponseInto sets dst to the p×m response C(sE−A)⁻¹B + D of the

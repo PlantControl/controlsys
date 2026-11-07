@@ -4,6 +4,7 @@ import (
 	"math"
 	"math/big"
 	"math/cmplx"
+	"math/rand/v2"
 	"slices"
 	"testing"
 
@@ -202,4 +203,210 @@ func TestBandwidthBadlyScaledNotch(t *testing.T) {
 			t.Errorf("trial %d: crossings %.12g, oracle [%.12g %.12g]", trial, ws, w1, w2)
 		}
 	}
+}
+
+// GAHTRN: beside the notch pair 9.9e-7 ± j1.00000004 the double solve fails
+// and sisoEval.at, with its extended fallback, snapped every ω within
+// 1e-5·rho ≈ 1.4e-5 of the pair to +Inf: rho, the distance to the real pole
+// at 1, skips the pair as within the cluster tolerance 1e-6·‖poles‖ ≈ 0.8.
+// The response there is finite, 30–170. Off DC at takes the double-double
+// response as FreqResponse does. Oracle: 300-bit solve of the stored data;
+// the double-double solve's error is about 2⁻¹⁰⁴·κ with κ ≲ 1e14 here, so
+// 1e-12 relative leaves headroom over the measured ~1e-16.
+func TestSISOEvalBadlyScaledResonanceFinite(t *testing.T) {
+	for trial := range 3 {
+		a := badScaleUlp(badScaleNotchA, trial)
+		sys := badScaleSystem(t, a, badScaleNotchB, badScaleNotchC, badScaleNotchD)
+		e, err := newSISOEval(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.extended = true
+		eval := newFrequencyEvaluator(sys).pointSolver(math.MaxInt).evalInto
+		failed := 0
+		const points = 800
+		for i := range points + 1 {
+			w := 0.99998 + 4e-5*float64(i)/points
+			if eval(pointAt(complex(0, w)), []complex128{0}) != nil {
+				failed++
+			}
+			e.err = nil
+			h := e.at(w)
+			want := badScaleOracle(a, badScaleNotchB, badScaleNotchC, badScaleNotchD, w)
+			if e.err != nil || cmplx.Abs(h-want) > 1e-12*cmplx.Abs(want) {
+				t.Fatalf("trial %d: at(%.10g) = %v, %v; oracle %v", trial, w, h, e.err, want)
+			}
+		}
+		if failed < points/2 {
+			t.Fatalf("trial %d: double solve failed at %d of %d ω; case no longer exercises the pole limit", trial, failed, points+1)
+		}
+	}
+}
+
+// badScaleResonance is a realization T·A₀·T⁻¹ of a pair σ ± j, a real pole
+// at 1, and poles near −150 and −1.5e5, with T = diag(10^k)·G₁·G₂ for k in
+// [−3, 3], G₁ Gaussian and G₂ Gaussian with rows graded by 10^{-ci/4}: an
+// ill-conditioned, non-diagonal similarity that balancing cannot undo.
+func badScaleResonance(t *testing.T, rng *rand.Rand, sigma, c float64) *System {
+	t.Helper()
+	const n = 5
+	a0 := mat.NewDense(n, n, []float64{
+		sigma, 1, 0, 0, 0,
+		-1, sigma, 0, 0, 0,
+		0, 0, 1, 0, 0,
+		0, 0, 0, -100 * (1 + rng.Float64()), 0,
+		0, 0, 0, 0, -1e5 * (1 + rng.Float64()),
+	})
+	g1, g2 := mat.NewDense(n, n, nil), mat.NewDense(n, n, nil)
+	for i := range n {
+		for j := range n {
+			g1.Set(i, j, rng.NormFloat64())
+			g2.Set(i, j, rng.NormFloat64()*math.Pow(10, -c*float64(i)/4))
+		}
+	}
+	var tm, ti, tmp, a, b, cm mat.Dense
+	tm.Mul(g1, g2)
+	for i := range n {
+		k := math.Pow(10, -3+6*rng.Float64())
+		for j := range n {
+			tm.Set(i, j, tm.At(i, j)*k)
+		}
+	}
+	if err := ti.Inverse(&tm); err != nil {
+		t.Fatal(err)
+	}
+	tmp.Mul(&tm, a0)
+	a.Mul(&tmp, &ti)
+	b0, c0 := mat.NewDense(n, 1, nil), mat.NewDense(1, n, nil)
+	for i := range n {
+		b0.Set(i, 0, rng.NormFloat64())
+		c0.Set(0, i, 1e-4*rng.NormFloat64())
+	}
+	b.Mul(&tm, b0)
+	cm.Mul(c0, &ti)
+	sys, err := New(&a, &b, &cm, mat.NewDense(1, 1, []float64{10 * rng.NormFloat64()}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sys
+}
+
+// badScaleResonanceFreq is the imaginary part of the computed upper pole
+// of the pair, the ω of closest approach.
+func badScaleResonanceFreq(t *testing.T, sys *System) float64 {
+	t.Helper()
+	poles, err := sys.Poles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range poles {
+		if imag(p) > 0 {
+			return imag(p)
+		}
+	}
+	t.Fatalf("no complex pole in %v", poles)
+	return 0
+}
+
+// GAHTRN: a seeded family of badly scaled resonant realizations, pair
+// damping |σ| ≤ 1e-6, ‖A‖ 1e9–1e15. Across ω within 2e-5 of the pair,
+// inside the old snap band 1.4e-5, sisoEval.at must be finite and match
+// the oracle. Off the double solve's failures it is the double solve
+// itself, accurate to about eps·κ ≲ 1e-10 here; within them the
+// double-double response, ~1e-16.
+func TestSISOEvalBadlyScaledResonanceFamily(t *testing.T) {
+	rng := rand.New(rand.NewPCG(0x6a48, 0x7452))
+	exercised := 0
+	const cases = 16
+	for k := range cases {
+		sys := badScaleResonance(t, rng, 1e-6*(2*rng.Float64()-1), 4)
+		wp := badScaleResonanceFreq(t, sys)
+		e, err := newSISOEval(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.extended = true
+		eval := newFrequencyEvaluator(sys).pointSolver(math.MaxInt).evalInto
+		failed := 0
+		for i := -20; i <= 20; i++ {
+			w := wp + 1e-6*float64(i)
+			if eval(pointAt(complex(0, w)), []complex128{0}) != nil {
+				failed++
+			}
+			e.err = nil
+			h := e.at(w)
+			want := frExactResponse(sys, frBigC(complex(0, w)))[0]
+			if e.err != nil || cmplx.Abs(h-want) > 1e-9*cmplx.Abs(want) {
+				t.Errorf("case %d: at(%.12g) = %v, %v; oracle %v", k, w, h, e.err, want)
+			}
+		}
+		if failed > 0 {
+			exercised++
+		}
+	}
+	if exercised < cases/2 {
+		t.Errorf("%d of %d cases exercise the pole limit; want ≥ %d", exercised, cases, cases/2)
+	}
+}
+
+// GAHTRN guard: the snap still holds at a genuine pole. sisoEval.at reads
+// +Inf at an undamped axis pair, at a double integrator at ω = 0, and next
+// to an origin cluster as before; at an undamped pair of a badly scaled
+// realization it agrees with FreqResponse's pole limit.
+func TestSISOEvalAtPoleSnapsInf(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		den  []float64
+		w    float64
+	}{
+		{"(s²+1)(s+2)", []float64{1, 2, 1, 2}, 1},
+		{"s²(s+1)", []float64{1, 1, 0, 0}, 0},
+	} {
+		sys := makePlant(t, []float64{1, 3, 1}, c.den)
+		if _, raw, _ := poleLimitAt(sys, c.w); raw == nil {
+			t.Fatalf("%s: double solve succeeded; case no longer exercises the pole limit", c.name)
+		}
+		for _, ext := range []bool{false, true} {
+			e, err := newSISOEval(sys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.extended = ext
+			if h := e.at(c.w); e.err != nil || !cmplx.IsInf(h) {
+				t.Errorf("%s extended %v: at(%g) = %v, %v; want +Inf", c.name, ext, c.w, h, e.err)
+			}
+		}
+	}
+	rng := rand.New(rand.NewPCG(0x6a48, 0x1f))
+	snapped, compared := 0, 0
+	for k := range 8 {
+		sys := badScaleResonance(t, rng, 0, 4)
+		wp := badScaleResonanceFreq(t, sys)
+		pt := pointAt(complex(0, wp))
+		eval := newFrequencyEvaluator(sys).pointSolver(math.MaxInt).evalInto
+		if eval(pt, []complex128{0}) == nil {
+			continue
+		}
+		want := []complex128{0}
+		if err := evalWithPoleLimit(eval, sys, pt, want); err != nil {
+			t.Fatal(err)
+		}
+		e, err := newSISOEval(sys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.extended = true
+		h := e.at(wp)
+		if e.err != nil || cmplx.IsInf(h) != cmplx.IsInf(want[0]) || !cmplx.IsInf(h) && cmplx.Abs(h-want[0]) > 1e-12*cmplx.Abs(want[0]) {
+			t.Errorf("case %d: at(%.17g) = %v, %v; FreqResponse pole limit %v", k, wp, h, e.err, want[0])
+		}
+		compared++
+		if cmplx.IsInf(h) {
+			snapped++
+		}
+	}
+	if compared < 4 {
+		t.Errorf("%d of 8 undamped cases exercise the pole limit; want ≥ 4", compared)
+	}
+	t.Logf("%d of %d badly scaled undamped pairs snap to +Inf", snapped, compared)
 }
