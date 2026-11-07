@@ -139,3 +139,18 @@ func TestEvalFr_TransmissionZeroStateNotUnderflow(t *testing.T) {
 		t.Errorf("EvalFr(0) = %v, %v; want 0, nil", g, err)
 	}
 }
+
+// ECC62L: states no input reaches stay exactly zero and are masked out of
+// the underflow screen; a reachable chain is not.
+func TestBalancedRealization_UndrivenMask(t *testing.T) {
+	br := balancedRealization{n: 3, m: 2, p: 1,
+		a: []float64{-1, 2, 0, 0, -2, 0, 0, 0, -3},
+		b: []float64{0, 0, 1, 0, 0, 0},
+		c: []float64{1, 1, 1}}
+	if got, want := br.undrivenMask(br.m, 1), uint64(1<<1|1<<3|1<<4|1<<5); got != want {
+		t.Errorf("row-major mask = %b, want %b", got, want)
+	}
+	if got, want := br.undrivenMask(1, br.n), uint64(1<<2|1<<3|1<<4|1<<5); got != want {
+		t.Errorf("column-major mask = %b, want %b", got, want)
+	}
+}

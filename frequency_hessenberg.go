@@ -35,23 +35,40 @@ func newBalancedRealization(sys *System, n, m, p int) balancedRealization {
 // output k, y = ys·Ĉx (+D) row-major p×m, could resolve its |ĉₖᵢ|·2⁻¹⁰²²·ys
 // and a pencil row reading it has componentwise backward error above nε,
 // which tells a lost state from an exact zero, as at a transmission zero.
+// A zero state that neither B̂ nor a nonzero state drives satisfies its own
+// row exactly and is skipped first.
 func stateUnderflow(br *balancedRealization, pt frequencyPoint, x []complex128, rs, cs int, y []complex128, ys float64) bool {
 	const tiny = 0x1p-1022
-	n, m, p := br.n, br.m, br.p
+	n, m, p, e := br.n, br.m, br.p, eps()
 	for i := range n {
 		for j := range m {
 			v := x[i*rs+j*cs]
-			if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny {
+			if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny || v == 0 && !br.drives(x, i, j, rs, cs) {
 				continue
 			}
 			for k := range p {
-				if math.Abs(br.c[k*n+i])*tiny*ys > eps()*cabs1(y[k*m+j]) {
+				if math.Abs(br.c[k*n+i])*tiny*ys > e*cabs1(y[k*m+j]) {
 					if br.inconsistent(pt, x, i, j, rs, cs) {
 						return true
 					}
 					break
 				}
 			}
+		}
+	}
+	return false
+}
+
+// drives reports whether B̂ or a nonzero state of x drives state i from
+// input j through row i.
+func (br *balancedRealization) drives(x []complex128, i, j, rs, cs int) bool {
+	n := br.n
+	if br.b[i*br.m+j] != 0 {
+		return true
+	}
+	for k := range n {
+		if k != i && x[k*rs+j*cs] != 0 && (br.a[i*n+k] != 0 || br.e != nil && br.e[i*n+k] != 0) {
+			return true
 		}
 	}
 	return false
@@ -96,15 +113,53 @@ func (br *balancedRealization) pencilEntry(pt frequencyPoint, k, l int) complex1
 	return pt.p*complex(e, 0) + pt.q*complex(a, 0)
 }
 
-// belowNormal reports whether an entry of x is below the normal range, the
-// cheap screen for stateUnderflow.
-func belowNormal(x []complex128) bool {
-	for _, v := range x {
-		if math.Abs(real(v)) < 0x1p-1022 && math.Abs(imag(v)) < 0x1p-1022 {
+// belowNormal reports whether an entry of x outside the undriven mask is
+// below the normal range, the cheap screen for stateUnderflow.
+func belowNormal(x []complex128, undriven uint64) bool {
+	for t, v := range x {
+		if math.Abs(real(v)) < 0x1p-1022 && math.Abs(imag(v)) < 0x1p-1022 && (t >= 64 || undriven>>t&1 == 0) {
 			return true
 		}
 	}
 	return false
+}
+
+// undrivenMask sets bit i*rs+j*cs for each state i that input j cannot
+// reach through B̂ and the off-diagonal pencil, which stays exactly zero at
+// every point and cannot be lost; it is 0 where n·m exceeds 64.
+func (br *balancedRealization) undrivenMask(rs, cs int) uint64 {
+	n, m := br.n, br.m
+	if n*m > 64 {
+		return 0
+	}
+	var mask uint64
+	var queue [64]int
+	for j := range m {
+		var reached uint64
+		q := queue[:0]
+		for i := range n {
+			if br.b[i*m+j] != 0 {
+				reached |= 1 << i
+				q = append(q, i)
+			}
+		}
+		for len(q) > 0 {
+			k := q[len(q)-1]
+			q = q[:len(q)-1]
+			for i := range n {
+				if reached>>i&1 == 0 && (br.a[i*n+k] != 0 || br.e != nil && br.e[i*n+k] != 0) {
+					reached |= 1 << i
+					q = append(q, i)
+				}
+			}
+		}
+		for i := range n {
+			if reached>>i&1 == 0 {
+				mask |= 1 << (i*rs + j*cs)
+			}
+		}
+	}
+	return mask
 }
 
 // underflowResponseInto sets dst to the double-double response at pt of
@@ -203,6 +258,8 @@ type balancedDense struct {
 	solveErr []float64
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
+	// undriven is undrivenMask of x's layout.
+	undriven uint64
 	// sys, when set, is the delay-free model whose double-double response
 	// (ddResponseInto) replaces a stalled point's inaccurate entries.
 	sys *System
@@ -246,6 +303,7 @@ func newBalancedDenseOf(br balancedRealization) *balancedDense {
 		bd.lastA[i] = last
 	}
 	bd.nonFinite = !br.finite()
+	bd.undriven = br.undrivenMask(m, 1)
 	return bd
 }
 
@@ -418,7 +476,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re, im)
 		}
 	}
-	if belowNormal(x) && stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
+	if belowNormal(x, bd.undriven) && stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
 		return underflowResponseInto(bd.src, n, m, p, pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
@@ -738,9 +796,11 @@ type hessenbergSweep struct {
 	r       []complex128 // column-major n×m
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
-	sys       *System
-	dense     *balancedDense // denseRetry's solver, built on first use
-	alt       []complex128
+	// undriven is undrivenMask of x's layout.
+	undriven uint64
+	sys      *System
+	dense    *balancedDense // denseRetry's solver, built on first use
+	alt      []complex128
 }
 
 func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
@@ -763,6 +823,7 @@ func newHessenbergSweep(sys *System, n, m, p int) *hessenbergSweep {
 	hs.y, hs.x, hs.r = ctake(n*m), ctake(n*m), ctake(n*m)
 	hs.swapped = make([]bool, n)
 	hs.nonFinite = !hs.finite()
+	hs.undriven = hs.undrivenMask(1, n)
 	if n == 0 || hs.nonFinite {
 		return hs
 	}
@@ -1149,7 +1210,7 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
-	if belowNormal(x) && stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
+	if belowNormal(x, hs.undriven) && stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
 		return underflowResponseInto(hs.sys, n, m, p, pt, dst)
 	}
 	if !converged {
