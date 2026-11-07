@@ -87,7 +87,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 		return nil, none, ErrInvalidSampleTime
 	}
 	if _, m, p := sys.Dims(); m != 1 || p != 1 {
-		return nil, none, ErrNotSISO
+		return nil, none, fmt.Errorf("least squares: sys is %d×%d, want SISO: %w", p, m, ErrNotSISO)
 	}
 	var pencil *System
 	if slow != nil {

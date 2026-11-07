@@ -297,7 +297,7 @@ func (sys *System) discretizeMatched(dt float64) (*System, error) {
 	}
 	_, m, p := sys.Dims()
 	if m != 1 || p != 1 {
-		return nil, ErrNotSISO
+		return nil, fmt.Errorf("matched: sys is %d×%d, want SISO: %w", p, m, ErrNotSISO)
 	}
 	if sys.HasInternalDelay() {
 		return nil, fmt.Errorf("matched: internal delays: %w", ErrFeedbackDelay)
