@@ -68,7 +68,7 @@ func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syste
 // a cluster at z = 1. Beside a resonance snap takes the double-double
 // response as ungated: there the step poleStepFraction·rho is a fraction
 // of the distance to the next pole past the cluster tolerance, and beside
-// a pair 1e-6 ± j of a realization with ‖A‖ ~ 1e7 it spans 1e-5, ten
+// a pair 1e-6 ± j of a realization with ‖A‖ ~ 1e7 it spans 1.4e-5, over ten
 // times the pair's distance to the axis (GAHTRN). allow and limit also
 // keep the pole limit's samples in double, so its errors stand for the
 // caller; for an internal-delay model so does snap, and only the zero gate
