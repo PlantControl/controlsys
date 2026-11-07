@@ -28,6 +28,180 @@ func newBalancedRealization(sys *System, n, m, p int) balancedRealization {
 	return br
 }
 
+// stateUnderflow reports whether a state of br's solution x at pt, entry
+// (i, j) at x[i*rs+j*cs], was lost below the normal range: balancing keeps
+// B̂ and Ĉ in range but not D⁻¹x, and refinement cannot see a lost state,
+// since its correction underflows too. A state below 2⁻¹⁰²² counts where
+// output k, y = ys·Ĉx (+D) row-major p×m, could resolve its |ĉₖᵢ|·2⁻¹⁰²²·ys
+// and a pencil row reading it has componentwise backward error above nε,
+// which tells a lost state from an exact zero, as at a transmission zero.
+// A zero state that neither B̂ nor a nonzero state drives satisfies its own
+// row exactly and is skipped first.
+func stateUnderflow(br *balancedRealization, pt frequencyPoint, x []complex128, rs, cs int, y []complex128, ys float64) bool {
+	const tiny = 0x1p-1022
+	n, m, p, e := br.n, br.m, br.p, eps()
+	for i := range n {
+		for j := range m {
+			v := x[i*rs+j*cs]
+			if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny || v == 0 && !br.drives(x, i, j, rs, cs) {
+				continue
+			}
+			for k := range p {
+				if math.Abs(br.c[k*n+i])*tiny*ys > e*cabs1(y[k*m+j]) {
+					if br.inconsistent(pt, x, i, j, rs, cs) {
+						return true
+					}
+					break
+				}
+			}
+		}
+	}
+	return false
+}
+
+// drives reports whether B̂ or a nonzero state of x drives state i from
+// input j through row i.
+func (br *balancedRealization) drives(x []complex128, i, j, rs, cs int) bool {
+	n := br.n
+	if br.b[i*br.m+j] != 0 {
+		return true
+	}
+	for k := range n {
+		if k != i && x[k*rs+j*cs] != 0 && (br.a[i*n+k] != 0 || br.e != nil && br.e[i*n+k] != 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// inconsistent reports whether a row of the pencil at pt with a nonzero
+// entry in column i has componentwise backward error above nε for input j.
+func (br *balancedRealization) inconsistent(pt frequencyPoint, x []complex128, i, j, rs, cs int) bool {
+	n, tol := br.n, float64(br.n)*eps()
+	for k := range n {
+		if br.pencilEntry(pt, k, i) == 0 {
+			continue
+		}
+		b := br.b[k*br.m+j]
+		r, scale := complex(b, 0), math.Abs(b)
+		for l := range n {
+			mv, xv := br.pencilEntry(pt, k, l), x[l*rs+j*cs]
+			r -= mv * xv
+			scale += cabs1(mv) * cabs1(xv)
+		}
+		if cabs1(r) > tol*scale {
+			return true
+		}
+	}
+	return false
+}
+
+// pencilEntry is entry (k, l) of the pencil the solvers factor at pt: sI−Â
+// with pt.shift diagonal, sÊ−Â, or pÊ+qÂ.
+func (br *balancedRealization) pencilEntry(pt frequencyPoint, k, l int) complex128 {
+	a := br.a[k*br.n+l]
+	if br.e == nil {
+		if k == l {
+			return pt.shift(a)
+		}
+		return complex(-a, 0)
+	}
+	e := br.e[k*br.n+l]
+	if pt.isPlain() {
+		return complex(real(pt.p)*e-a, imag(pt.p)*e)
+	}
+	return pt.p*complex(e, 0) + pt.q*complex(a, 0)
+}
+
+// belowNormal reports whether an entry of x outside the undriven mask is
+// below the normal range, the cheap screen for stateUnderflow.
+func belowNormal(x []complex128, undriven uint64) bool {
+	for t, v := range x {
+		if math.Abs(real(v)) < 0x1p-1022 && math.Abs(imag(v)) < 0x1p-1022 && (t >= 64 || undriven>>t&1 == 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// underflowScreen holds a solver's undrivenMask for x laid out with
+// strides (rs, cs), made on the first below-normal hit so that models whose
+// states stay normal never pay for it.
+type underflowScreen struct {
+	mask  uint64
+	ready bool
+}
+
+// confirm reports whether x still has a below-normal entry once the mask is
+// made.
+func (sc *underflowScreen) confirm(br *balancedRealization, x []complex128, rs, cs int) bool {
+	if sc.ready {
+		return true
+	}
+	sc.mask, sc.ready = br.undrivenMask(rs, cs), true
+	return belowNormal(x, sc.mask)
+}
+
+// undrivenMask sets bit i*rs+j*cs for each state i that input j cannot
+// reach through B̂ and the off-diagonal pencil, which stays exactly zero at
+// every point and cannot be lost; it is 0 where n·m exceeds 64.
+func (br *balancedRealization) undrivenMask(rs, cs int) uint64 {
+	n, m := br.n, br.m
+	if n*m > 64 {
+		return 0
+	}
+	var mask uint64
+	var queue [64]int
+	for j := range m {
+		var reached uint64
+		q := queue[:0]
+		for i := range n {
+			if br.b[i*m+j] != 0 {
+				reached |= 1 << i
+				q = append(q, i)
+			}
+		}
+		for len(q) > 0 {
+			k := q[len(q)-1]
+			q = q[:len(q)-1]
+			for i := range n {
+				if reached>>i&1 == 0 && (br.a[i*n+k] != 0 || br.e != nil && br.e[i*n+k] != 0) {
+					reached |= 1 << i
+					q = append(q, i)
+				}
+			}
+		}
+		for i := range n {
+			if reached>>i&1 == 0 {
+				mask |= 1 << (i*rs + j*cs)
+			}
+		}
+	}
+	return mask
+}
+
+// underflowResponseInto sets dst to the double-double response at pt of
+// src's n×n, n×m, p×n realization, unbalanced, where a balanced state
+// underflowed, and returns errStateUnderflow where src is nil or that does
+// not verify (ddRealizationInto).
+func underflowResponseInto(src *System, n, m, p int, pt frequencyPoint, dst []complex128) error {
+	if src == nil {
+		return errStateUnderflow
+	}
+	u := newRealizationCopy(src, n, m, p)
+	if !ddRealizationInto(&u, pt, dst, true) {
+		return errStateUnderflow
+	}
+	return nil
+}
+
+// errStateUnderflow rejects a point whose balanced solution lost a state
+// below the floating-point range and whose unbalanced solve does not verify
+// or is not available (the augmented internal-delay plant); the
+// double-double fallbacks solve the same balanced realization, so it fails
+// at once like errNonFinitePencil.
+var errStateUnderflow = fmt.Errorf("state underflow in frequency response: %w", ErrOverflow)
+
 // finite reports whether every realization entry is finite.
 func (br *balancedRealization) finite() bool {
 	if !finiteSlice(br.a) || !finiteSlice(br.b) || !finiteSlice(br.c) || br.e != nil && !finiteSlice(br.e) {
@@ -102,9 +276,13 @@ type balancedDense struct {
 	solveErr []float64
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
+	screen    underflowScreen
 	// sys, when set, is the delay-free model whose double-double response
 	// (ddResponseInto) replaces a stalled point's inaccurate entries.
 	sys *System
+	// src, when set, is the model balanced into the realization, which
+	// underflowResponseInto solves unbalanced.
+	src *System
 }
 
 // refineCondition is the error amplification, relative to ε, above which
@@ -115,7 +293,9 @@ type balancedDense struct {
 const refineCondition = 1e3
 
 func newBalancedDense(sys *System, n, m, p int) *balancedDense {
-	return newBalancedDenseOf(newBalancedRealization(sys, n, m, p))
+	bd := newBalancedDenseOf(newBalancedRealization(sys, n, m, p))
+	bd.src = sys
+	return bd
 }
 
 // newBalancedDenseOf takes ownership of the balanced realization br.
@@ -311,6 +491,9 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 			}
 			out[j] = complex(re, im)
 		}
+	}
+	if belowNormal(x, bd.screen.mask) && bd.screen.confirm(&bd.balancedRealization, x, m, 1) && stateUnderflow(&bd.balancedRealization, pt, x, m, 1, dst, cabs1(gs)) {
+		return underflowResponseInto(bd.src, n, m, p, pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
 		ddResponseInto(bd.sys, pt, dst)
@@ -629,6 +812,7 @@ type hessenbergSweep struct {
 	r       []complex128 // column-major n×m
 	// nonFinite marks a NaN or Inf realization entry.
 	nonFinite bool
+	screen    underflowScreen
 	sys       *System
 	dense     *balancedDense // denseRetry's solver, built on first use
 	alt       []complex128
@@ -1040,6 +1224,9 @@ func (hs *hessenbergSweep) evalInto(pt frequencyPoint, dst []complex128) error {
 			out[j] = complex(re+dre, im+dim)
 		}
 	}
+	if belowNormal(x, hs.screen.mask) && hs.screen.confirm(&hs.balancedRealization, x, 1, n) && stateUnderflow(&hs.balancedRealization, pt, x, 1, n, dst, 1) {
+		return underflowResponseInto(hs.sys, n, m, p, pt, dst)
+	}
 	if !converged {
 		if err := hs.denseRetry(pt, dst); err != nil {
 			return err
@@ -1254,15 +1441,20 @@ func (br *balancedRealization) balance(t []float64) {
 				continue
 			}
 			converged = false
+			// The invariant diagonal is skipped: d/f·f can overflow.
 			inv := 1 / f
 			for j := range n {
-				h[i*n+j] *= inv
-				h[j*n+i] *= f
+				if j != i {
+					h[i*n+j] *= inv
+					h[j*n+i] *= f
+				}
 			}
 			if e != nil {
 				for j := range n {
-					e[i*n+j] *= inv
-					e[j*n+i] *= f
+					if j != i {
+						e[i*n+j] *= inv
+						e[j*n+i] *= f
+					}
 				}
 			}
 			if t != nil {

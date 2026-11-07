@@ -50,7 +50,8 @@ const (
 // the others, where the double solve sees the rest of the pencil as
 // singular; where that fails it takes the pole limit, each failed sample
 // solved the same way.
-// A non-finite realization or NaN point (errNonFinitePencil) fails at once.
+// A non-finite realization or NaN point (errNonFinitePencil) fails at once,
+// as does an unverified state underflow (errStateUnderflow).
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
 }
@@ -77,7 +78,7 @@ type ddGate struct {
 // restricted by gate.
 func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128, gate ddGate) error {
 	err := eval(pt, dst)
-	if err == nil || errors.Is(err, errNonFinitePencil) {
+	if err == nil || errors.Is(err, errNonFinitePencil) || errors.Is(err, errStateUnderflow) {
 		return err
 	}
 	s := pt.value()
@@ -436,6 +437,19 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 		return true
 	}
 	br := newBalancedRealization(sys, n, m, p)
+	return ddRealizationInto(&br, pt, dst, false)
+}
+
+// ddRealizationInto is ddResponseInto of the realization br. With verify
+// set it also reports false unless the rounded solution x of (pE+qA)x = B
+// is normwise backward stable at working precision, ‖r‖ ≤ nε(‖B‖ +
+// (|p|‖E‖+|q|‖A‖)‖x‖) per column for the compensated residual r (rounding
+// x alone leaves ε/2), and no state is lost below the normal range by
+// stateUnderflow's test, whose componentwise row check a lost state fails;
+// a componentwise test of every row would reject a dd roundoff fill in a
+// state that is exactly zero but read at no visible weight.
+func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) bool {
+	n, m, p := br.n, br.m, br.p
 	maxA, maxE := 0.0, 1.0
 	for _, v := range br.a {
 		maxA = max(maxA, math.Abs(v))
@@ -458,7 +472,7 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 	for i := range n {
 		for j := range n {
 			var mg float64
-			a[i*n+j], mg = ddPencilEntry(&br, i, j, pr, pi, qr, qi, sigma)
+			a[i*n+j], mg = ddPencilEntry(br, i, j, pr, pi, qr, qi, sigma)
 			mag[i*n+j] = mg
 		}
 		for j := range m {
@@ -498,7 +512,7 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 		}
 	}
 	ddLUSolve(a, perm, x, n, m)
-	ddRefine(a, perm, x, &br, sigma, pt)
+	ddRefine(a, perm, x, br, sigma, pt)
 	q := ddComplex{dd{-qr, 0}, dd{-qi, 0}}
 	g := make([]complex128, p*m)
 	for r := range p {
@@ -507,15 +521,69 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 			for i := n - 1; i >= 0; i-- {
 				y = y.add(ddComplex{re: dd{br.c[r*n+i], 0}}.mul(x[i*m+c]))
 			}
-			v := y.mul(q).complex128() + complex(sys.D.At(r, c), 0)
+			v := y.mul(q).complex128()
+			if br.d != nil {
+				v += complex(br.d[r*br.dStride+c], 0)
+			}
 			if !finiteComplex(v) {
 				return false
 			}
 			g[r*m+c] = v
 		}
 	}
+	if verify && !ddVerified(br, pt, x, g) {
+		return false
+	}
 	copy(dst, g)
 	return true
+}
+
+// ddVerified reports whether the double-double solution x of br's pencil at
+// pt, with output g, passes ddRealizationInto's verification.
+func ddVerified(br *balancedRealization, pt frequencyPoint, x []ddComplex, g []complex128) bool {
+	n, m := br.n, br.m
+	xr := make([]complex128, 2*n*m)
+	r := xr[n*m:]
+	for i, v := range x {
+		xr[i] = v.complex128()
+	}
+	var normA, normE float64
+	for i := range n {
+		var sa, se float64
+		for k := range n {
+			sa += math.Abs(br.a[i*n+k])
+			if br.e != nil {
+				se += math.Abs(br.e[i*n+k])
+			}
+		}
+		normA, normE = max(normA, sa), max(normE, se)
+	}
+	if br.e == nil {
+		normE = 1
+	}
+	normM, tol := cabs1(pt.p)*normE+cabs1(pt.q)*normA, float64(n)*eps()
+	for j := range m {
+		pencilResidual(r[j:], xr[j:], m, br.a, br.e, n, br.b[j:], m, n, pt.p, pt.q, 1)
+		var rMax, bMax, xMax float64
+		for i := range n {
+			rMax = max(rMax, cabs1(r[i*m+j]))
+			bMax = max(bMax, math.Abs(br.b[i*m+j]))
+			xMax = max(xMax, cabs1(xr[i*m+j]))
+		}
+		bound := tol * (bMax + normM*xMax)
+		if math.IsInf(bound, 0) || !(rMax <= bound) {
+			return false
+		}
+	}
+	ys := cabs1(pt.q)
+	if br.e == nil {
+		k := -pt.q
+		for i := range n * m {
+			xr[i] *= k
+		}
+		ys = 1
+	}
+	return !stateUnderflow(br, pt, xr, m, 1, g, ys)
 }
 
 // ddLUSolve overwrites the row-major n×m x with the solution of the system
