@@ -696,7 +696,7 @@ func TestHinfSyn_LightlyDampedModes(t *testing.T) {
 
 func TestHinfBisect_ZeroOptimumTerminates(t *testing.T) {
 	calls := 0
-	gamma, err := hinfBisect(0, func(float64) bool { calls++; return true })
+	gamma, err := hinfBisect(0, 1, func(float64) bool { calls++; return true })
 	if err != nil {
 		t.Fatal(err)
 	}
