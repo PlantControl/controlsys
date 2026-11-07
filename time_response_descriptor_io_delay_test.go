@@ -126,14 +126,10 @@ func TestStepImpulseIODelayedIllConditionedEFollowShiftedPencil(t *testing.T) {
 					}
 				}
 			}
-			stepTol := 1e-7
-			if fractional := dc.tau(0, 0) / st.T[1]; math.Abs(fractional-math.Round(fractional)) > 1e-6 {
-				// A delay off the grid takes the fractional-delay ZOH of
-				// the stiff explicit parts, which loses the slow mode to
-				// ~1e-6 (RR43HG); the fold was off by O(1).
-				stepTol = 1e-5
-			}
-			if worstStep > stepTol {
+			// A delay off the grid takes the fractional-delay ZOH of the
+			// stiff explicit parts, which keeps the slow modes (RR43HG: it
+			// lost them to ~1e-6 before d728012).
+			if worstStep > 1e-7 {
 				t.Errorf("%s, %s: Step off the shifted pencil by %.3g", names[k], dc.name, worstStep)
 			}
 			if worstImp > 1e-7 {
