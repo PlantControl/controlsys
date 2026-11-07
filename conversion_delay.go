@@ -615,7 +615,7 @@ func eliminateConversionZeroDelays(sys *System) (*System, error) {
 func discretizeFOHFractionalChannel(cont *System, dt, tau float64) (*System, error) {
 	n, m, p := cont.Dims()
 	if m != 1 || p != 1 {
-		return nil, ErrNotSISO
+		return nil, fmt.Errorf("FOH fractional delay: sys is %d×%d, want SISO: %w", p, m, ErrNotSISO)
 	}
 	whole, residual, err := conversionDelayParts([]float64{tau}, 1, dt)
 	if err != nil {
