@@ -153,11 +153,13 @@ func (e *sisoEval) at(w float64) complex128 {
 // fails too: try with the extended fallback, and where at snaps a computed
 // pole near ω to +Inf, the double-double response unless that is singular or
 // ddAtPole puts the pole at ω. Beside a cluster at z = 1 the snap reaches ω
-// tens of times off the pole (S2RNHI). at keeps the snap and its failures
-// for the searches tuned to them: the gain search rejects brackets closing
-// on +Inf next to DC (offDCPole), so taking the response there adds crossings at |L| within
-// coefficient rounding of 1 next to an integrator, which pidtune would take
-// for its crossover. pidtune's back-off gate samples through resolve where
+// tens of times off the pole (S2RNHI). at keeps the snap next to DC and
+// its failures for the searches tuned to them: the gain search rejects
+// brackets closing on +Inf next to DC (offDCPole), so taking the response
+// there adds crossings at |L| within coefficient rounding of 1 next to an
+// integrator, which pidtune would take for its crossover. Beside a
+// resonance (poleGeometry.offDC) at with the extended fallback already
+// takes this response (GAHTRN). pidtune's back-off gate samples through resolve where
 // at fails; it leaves skipped and resolved as they were, so checkSkipped
 // of the screens sharing e does not change.
 func (e *sisoEval) resolve(w float64) (h complex128, ok bool) {
@@ -1193,9 +1195,10 @@ func frobenius(a []float64) float64 {
 
 // gainCrossings returns the verified ω > 0 where |L(jω)| = gamma, ascending.
 // Where at snaps ω to a computed pole, it takes resolve's finite response:
-// beside a pair 1e-6 ± j of a realization with ‖A‖ ~ 1e7 the snap spans
+// beside a pair 1e-6 ± j of a realization with ‖A‖ ~ 1e7 the snap spanned
 // 1e-3, past crossings 1e-6 off the pair (YEAQIK); resolve keeps +Inf where
-// ddAtPole puts the pole at ω. Where the double solve is singular it
+// ddAtPole puts the pole at ω. at now takes that response off DC itself
+// (GAHTRN), so this guards only a snap resolve would overturn there. Where the double solve is singular it
 // evaluates in double-double: beside
 // a cluster k/(z+1)⁴ with tiny k, |L| reaches gamma where the pivot of
 // zI − A is below n·eps·‖A‖, yet the model is resolved there. Phase
@@ -1353,13 +1356,8 @@ func (r *rationalLoop) endCrossings(ws []float64, f func(float64) float64, tol f
 // past the snap, not an integrator, whose snap keeps |L| within coefficient
 // rounding of γ from reading as crossings.
 func (r *rationalLoop) offDCPole(w float64) bool {
-	s := r.eval.td.frequencyPoint(w).value()
-	dc := complex(0, 0)
-	if r.discrete() {
-		dc = 1
-	}
-	sp, err := poleSpacing(r.eval.sys, s)
-	return err == nil && sp.gap <= 1e-3*cmplx.Abs(s-dc)
+	sp, err := poleSpacing(r.eval.sys, r.eval.td.frequencyPoint(w).value())
+	return err == nil && sp.offDC
 }
 
 // highFrequency is an ω above the poles of a continuous loop, where |L|
