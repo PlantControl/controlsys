@@ -8,6 +8,8 @@ import (
 
 	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/lapack"
+	"plantcontrol.org/v1/gonum/lapack/lapack64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -302,8 +304,9 @@ func isStabilizable(op string, A, B *mat.Dense, continuous bool) (bool, error) {
 // boundary with σmin([A − λI, B]) ≤ floor at some point within δλ of it, δλ
 // bounding the error of λ. σmin is 1-Lipschitz in λ, so only σmin(λ) ≤
 // floor + δλ needs the search (diskSigmaMin). δλ, needing eigenvectors, is
-// computed only when some σmin lies within band of floor.
-func unstablePBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool, floor, band float64) bool {
+// computed only when some σmin lies within band of floor. A λ whose σmin
+// a Cholesky certificate puts above 2·(floor + band) skips the SVD.
+func unstablePBHDeficient(p *pbhSolver, lams []complex128, continuous bool, floor, band float64) bool {
 	test := func(lam complex128) bool {
 		return imag(lam) >= 0 && poleOnOrOutsideStabilityBoundary(lam, continuous, poleStabilityTolerance(lam))
 	}
@@ -312,7 +315,10 @@ func unstablePBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool, f
 		if !test(lam) {
 			continue
 		}
-		s := pbhSigmaMin(A, B, lam)
+		if p.exceeds(lam, 2*(floor+band)) {
+			continue
+		}
+		s := p.sigmaMin(lam)
 		if s <= floor {
 			return true
 		}
@@ -322,14 +328,14 @@ func unstablePBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool, f
 		return false
 	}
 	var eig mat.Eigen
-	if !eig.Factorize(A, mat.EigenBoth) {
+	if !eig.Factorize(p.A, mat.EigenBoth) {
 		return true
 	}
 	lams = eig.Values(nil)
-	slack := eigenvalueErrorBounds(&eig, A, len(lams), band)
+	slack := eigenvalueErrorBounds(&eig, p.A, len(lams), band)
 	var searched []complex128
 	for k, lam := range lams {
-		if !test(lam) || pbhSigmaMin(A, B, lam) > floor+slack[k] {
+		if !test(lam) || p.sigmaMin(lam) > floor+slack[k] {
 			continue
 		}
 		if slack[k] <= floor {
@@ -348,7 +354,7 @@ func unstablePBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool, f
 			continue
 		}
 		searched = append(searched, mean)
-		if diskSigmaMin(A, B, lam, slack[k], floor, mean) <= floor {
+		if diskSigmaMin(p, lam, slack[k], floor, mean) <= floor {
 			return true
 		}
 	}
@@ -361,12 +367,12 @@ func unstablePBHDeficient(A, B *mat.Dense, lams []complex128, continuous bool, f
 // minimum well above floor). A defective mode's computed λ (center) errs by
 // up to √eps·‖A‖ but its cluster mean is accurate, so a controllable Jordan
 // block keeps the σmin it has there rather than the Lipschitz slack.
-func diskSigmaMin(A, B *mat.Dense, center complex128, radius, floor float64, mean complex128) float64 {
+func diskSigmaMin(p *pbhSolver, center complex128, radius, floor float64, mean complex128) float64 {
 	at := func(z complex128) float64 {
 		if imag(z) < 0 {
 			z = cmplx.Conj(z)
 		}
-		return pbhSigmaMin(A, B, z)
+		return p.sigmaMin(z)
 	}
 	x, f := mean, at(mean)
 	step := radius / 2
@@ -448,7 +454,8 @@ func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous, weak b
 	}
 	floor := float64(n*n) * eps() * math.Hypot(an, frobNorm(B))
 	band := float64(n) * math.Sqrt(eps()) * an
-	if weak && unstablePBHDeficient(A, B, lams, continuous, floor, band) {
+	p := newPBHSolver(A, B)
+	if weak && unstablePBHDeficient(p, lams, continuous, floor, band) {
 		return true
 	}
 	gaps := make([]float64, len(lams))
@@ -468,7 +475,7 @@ func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous, weak b
 	for _, pt := range points {
 		for k, lam := range lams {
 			if cmplx.Abs(lam-pt) <= max(band, min(gaps[k], 1)) {
-				if pbhSigmaMin(A, B, pt) <= floor {
+				if p.sigmaMin(pt) <= floor {
 					return true
 				}
 				break
@@ -485,7 +492,7 @@ func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous, weak b
 		if imag(lb) == 0 || d > gaps[k] {
 			continue
 		}
-		if boundarySigmaMin(A, B, lb, gaps[k], floor, continuous) <= floor {
+		if boundarySigmaMin(p, lb, gaps[k], floor, continuous) <= floor {
 			return true
 		}
 	}
@@ -496,8 +503,8 @@ func boundaryPBHDeficient(A, B *mat.Dense, lams []complex128, continuous, weak b
 // search over boundary points λ within radius of lb: the arc e^{iθ} when
 // discrete, the imaginary axis when continuous. σmin is 1-Lipschitz in λ,
 // so the search stops at an interval of floor/10.
-func boundarySigmaMin(A, B *mat.Dense, lb complex128, radius, floor float64, continuous bool) float64 {
-	best := pbhSigmaMin(A, B, lb)
+func boundarySigmaMin(p *pbhSolver, lb complex128, radius, floor float64, continuous bool) float64 {
+	best := p.sigmaMin(lb)
 	p0 := imag(lb)
 	at := func(p float64) complex128 { return complex(0, p) }
 	if !continuous {
@@ -507,7 +514,7 @@ func boundarySigmaMin(A, B *mat.Dense, lb complex128, radius, floor float64, con
 	const ratio = 0.6180339887498949
 	lo, hi := p0-radius, p0+radius
 	x1, x2 := hi-ratio*(hi-lo), lo+ratio*(hi-lo)
-	f1, f2 := pbhSigmaMin(A, B, at(x1)), pbhSigmaMin(A, B, at(x2))
+	f1, f2 := p.sigmaMin(at(x1)), p.sigmaMin(at(x2))
 	for range 80 {
 		if hi-lo <= max(floor/10, eps()*math.Abs(p0)) {
 			break
@@ -515,11 +522,11 @@ func boundarySigmaMin(A, B *mat.Dense, lb complex128, radius, floor float64, con
 		if f1 <= f2 {
 			hi, x2, f2 = x2, x1, f1
 			x1 = hi - ratio*(hi-lo)
-			f1 = pbhSigmaMin(A, B, at(x1))
+			f1 = p.sigmaMin(at(x1))
 		} else {
 			lo, x1, f1 = x1, x2, f2
 			x2 = lo + ratio*(hi-lo)
-			f2 = pbhSigmaMin(A, B, at(x2))
+			f2 = p.sigmaMin(at(x2))
 		}
 	}
 	return min(best, f1, f2)
@@ -538,49 +545,148 @@ func projectToStabilityBoundary(p complex128, continuous bool) (complex128, floa
 	return p / complex(r, 0), math.Abs(1 - r)
 }
 
-// pbhSigmaMin is σmin([A − λI, B]), through the real embedding when λ is
-// complex.
-func pbhSigmaMin(A, B *mat.Dense, lam complex128) float64 {
+// pbhSolver evaluates σmin([A − λI, B]) for one (A, B), reusing the
+// matrix and SVD work buffers across λ.
+type pbhSolver struct {
+	A, B       *mat.Dense
+	n, m       int
+	g, sv      []float64
+	work       [2][]float64
+	gram       []float64
+	lre, lim   []float64
+	normA, nB2 float64
+}
+
+func newPBHSolver(A, B *mat.Dense) *pbhSolver {
 	n, _ := A.Dims()
 	_, m := B.Dims()
-	aRaw, bRaw := A.RawMatrix(), B.RawMatrix()
+	p := &pbhSolver{A: A, B: B, n: n, m: m}
+	p.g = make([]float64, 4*n*(n+m))
+	p.sv = make([]float64, 2*n)
+	for k := 1; k <= 2; k++ {
+		q := []float64{0}
+		lapack64.Gesvd(lapack.SVDNone, lapack.SVDNone, blas64.General{Rows: k * n, Cols: k * (n + m), Stride: k * (n + m), Data: p.g}, blas64.General{Stride: 1}, blas64.General{Stride: 1}, p.sv, q, -1)
+		p.work[k-1] = make([]float64, int(q[0]))
+	}
+	return p
+}
+
+// sigmaMin is σmin([A − λI, B]), through the real embedding when λ is
+// complex.
+func (p *pbhSolver) sigmaMin(lam complex128) float64 {
+	n, m := p.n, p.m
+	aRaw, bRaw := p.A.RawMatrix(), p.B.RawMatrix()
 	lr, li := real(lam), imag(lam)
 	k := 1
 	if li != 0 {
 		k = 2
 	}
-	cols := k * (n + m)
-	g := mat.NewDense(k*n, cols, nil)
-	gRaw := g.RawMatrix()
+	stride := k * (n + m)
+	g := p.g[:k*n*stride]
+	clear(g)
 	for i := range n {
 		for j := range n {
 			re := aRaw.Data[i*aRaw.Stride+j]
 			if i == j {
 				re -= lr
 			}
-			gRaw.Data[i*gRaw.Stride+j] = re
+			g[i*stride+j] = re
 			if k == 2 {
-				gRaw.Data[(n+i)*gRaw.Stride+n+m+j] = re
+				g[(n+i)*stride+n+m+j] = re
 			}
 		}
 		for j := range m {
 			b := bRaw.Data[i*bRaw.Stride+j]
-			gRaw.Data[i*gRaw.Stride+n+j] = b
+			g[i*stride+n+j] = b
 			if k == 2 {
-				gRaw.Data[(n+i)*gRaw.Stride+2*n+m+j] = b
+				g[(n+i)*stride+2*n+m+j] = b
 			}
 		}
 		if k == 2 {
-			gRaw.Data[i*gRaw.Stride+n+m+i] = li
-			gRaw.Data[(n+i)*gRaw.Stride+i] = -li
+			g[i*stride+n+m+i] = li
+			g[(n+i)*stride+i] = -li
 		}
 	}
-	var svd mat.SVD
-	if !svd.Factorize(g, mat.SVDNone) {
+	sv := p.sv[:k*n]
+	work := p.work[k-1]
+	if !lapack64.Gesvd(lapack.SVDNone, lapack.SVDNone, blas64.General{Rows: k * n, Cols: stride, Stride: stride, Data: g}, blas64.General{Stride: 1}, blas64.General{Stride: 1}, sv, work, len(work)) {
 		return 0
 	}
-	sv := svd.Values(nil)
 	return sv[k*n-1]
+}
+
+// exceeds reports σmin([A − λI, B]) > tau, certified by a Cholesky
+// factorization of M·Mᴴ − t·I, M = [A − λI, B], M·Mᴴ = A·Aᵀ + B·Bᵀ − λ̄A − λAᵀ
+// + |λ|²I. Rounding in forming and factoring it is below
+// c·n·(n+m+4)·eps·S, S = (‖A‖_F + √n·|λ|)² + ‖B‖_F² ≥ ‖M‖_F², so t = tau² +
+// 2c·n·(n+m+4)·eps·S leaves λmin(M·Mᴴ) ≥ tau² when the factorization
+// succeeds; c = 16 is several times the first-order constants of the
+// product and of Cholesky's backward error (Higham Thm 10.3). False means
+// only not certified.
+func (p *pbhSolver) exceeds(lam complex128, tau float64) bool {
+	n, m := p.n, p.m
+	if p.gram == nil {
+		p.gram = make([]float64, n*n)
+		p.lre = make([]float64, n*n)
+		p.lim = make([]float64, n*n)
+		a, b := rawToGen(p.A), rawToGen(p.B)
+		gg := blas64.General{Rows: n, Cols: n, Stride: n, Data: p.gram}
+		blas64.Gemm(blas.NoTrans, blas.Trans, 1, a, a, 0, gg)
+		blas64.Gemm(blas.NoTrans, blas.Trans, 1, b, b, 1, gg)
+		p.normA = frobNorm(p.A)
+		nb := frobNorm(p.B)
+		p.nB2 = nb * nb
+	}
+	lr, li := real(lam), imag(lam)
+	abs := cmplx.Abs(lam)
+	r := p.normA + math.Sqrt(float64(n))*abs
+	S := r*r + p.nB2
+	const c = 16
+	t := tau*tau + 2*c*float64(n*(n+m+4))*eps()*S
+	if !(t < S) {
+		return false
+	}
+	aRaw := p.A.RawMatrix()
+	ad, as := aRaw.Data, aRaw.Stride
+	L, Li := p.lre, p.lim
+	cpx := li != 0
+	shift := abs*abs - t
+	for j := range n {
+		for i := j; i < n; i++ {
+			aij, aji := ad[i*as+j], ad[j*as+i]
+			gr := p.gram[i*n+j] - lr*(aij+aji)
+			gi := 0.0
+			if cpx {
+				gi = li * (aij - aji)
+			}
+			if i == j {
+				gr += shift
+			}
+			ri, rj := L[i*n:i*n+j], L[j*n:j*n+j]
+			for k, v := range rj {
+				gr -= ri[k] * v
+			}
+			if cpx {
+				ii, ij := Li[i*n:i*n+j], Li[j*n:j*n+j]
+				for k := range j {
+					gr -= ii[k] * ij[k]
+					gi -= ii[k]*rj[k] - ri[k]*ij[k]
+				}
+			}
+			if i == j {
+				if !(gr > 0) {
+					return false
+				}
+				L[j*n+j] = math.Sqrt(gr)
+				Li[j*n+j] = 0
+				continue
+			}
+			d := L[j*n+j]
+			L[i*n+j] = gr / d
+			Li[i*n+j] = gi / d
+		}
+	}
+	return true
 }
 
 // IsDetectable reports whether every unobservable mode of (A, C) is stable,
