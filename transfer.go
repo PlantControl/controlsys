@@ -1448,10 +1448,7 @@ func (c rowRealizationConverter) convertDynamicRows(stair *staircaseResult, ncon
 			if j*stride < len(bhData) {
 				bh = bhData[j*stride : j*stride+nobs]
 			}
-			c.trims[i*c.m+j] = nil
-			if cands := markov.trim(i, j, nobs, numCoeffs[j], bh); len(cands) > 1 || len(cands[0]) != len(numCoeffs[j]) {
-				c.trims[i*c.m+j] = cands
-			}
+			c.trims[i*c.m+j] = markov.trim(i, j, nobs, numCoeffs[j], bh)
 			c.tf.Num[i][j] = withD(numCoeffs[j])
 		}
 	}
@@ -1605,10 +1602,11 @@ func (t *markovTrim) negligible(row, j, k int) bool {
 // degree deg, most trimmed first, every trim from the larger of the two
 // counts down; the last, dropping at most a negligible C·B, needs no check.
 // bh is input j in the row's observability-Hessenberg basis; nil (a row
-// of companionRowTF, which has none) leaves only the Markov counts.
+// of companionRowTF, which has none) leaves only the Markov counts. It
+// returns nil when there is nothing to trim.
 func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
 	if len(num) < 2 || len(num) > deg || bh != nil && len(bh) != deg || !t.negligible(row, j, 0) {
-		return [][]float64{num}
+		return nil
 	}
 	off := deg - len(num)
 	safe := num
@@ -1629,6 +1627,9 @@ func (t *markovTrim) trim(row, j, deg int, num, bh []float64) [][]float64 {
 	var cands [][]float64
 	for k := min(max(lead, r-off), len(num)-1); k > len(num)-len(safe); k-- {
 		cands = append(cands, num[k:])
+	}
+	if cands == nil && len(safe) == len(num) {
+		return nil
 	}
 	return append(cands, safe)
 }
