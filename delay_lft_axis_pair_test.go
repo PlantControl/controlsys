@@ -92,7 +92,8 @@ func TestIsStable_InternalDelayLFTOriginAxisPair(t *testing.T) {
 
 // TestIsStable_InternalDelayLFTOriginAxisPairDecoded rebuilds the model
 // through the fuzz decoder, sweeping ε = 10^v[0] (the decoder clamps it at
-// 1e-13), and pins the literal model to the decoded one.
+// 1e-13), and pins the literal model to the decoded one up to the last-bit
+// differences of the amd64 math kernels.
 func TestIsStable_InternalDelayLFTOriginAxisPairDecoded(t *testing.T) {
 	for _, v0 := range []float64{-27, -12, -10, -8, -7, -6} {
 		v := axisPairVals
@@ -100,9 +101,12 @@ func TestIsStable_InternalDelayLFTOriginAxisPairDecoded(t *testing.T) {
 		md := fzDLNewModel(t, fzDecode(t, 0x40, v))
 		if v0 == -27 {
 			lit := axisPairModel(md.s.A)
-			if !slices.Equal(md.tau, lit.tau) || !slices.Equal(md.B2, lit.B2) || !slices.Equal(md.C2, lit.C2) ||
-				!slices.Equal(md.D12, lit.D12) || !slices.Equal(md.D21, lit.D21) || !slices.Equal(md.D22, lit.D22) ||
-				!slices.Equal(md.s.B, lit.s.B) || !slices.Equal(md.s.C, lit.s.C) {
+			near := func(a, b []float64) bool {
+				return slices.EqualFunc(a, b, func(x, y float64) bool { return math.Abs(x-y) <= 1e-15*math.Max(math.Abs(x), math.Abs(y)) })
+			}
+			if !near(md.tau, lit.tau) || !near(md.B2, lit.B2) || !near(md.C2, lit.C2) ||
+				!near(md.D12, lit.D12) || !near(md.D21, lit.D21) || !near(md.D22, lit.D22) ||
+				!near(md.s.B, lit.s.B) || !near(md.s.C, lit.s.C) {
 				t.Fatalf("decoded model differs from the literal one\n%s\n%s", md, lit)
 			}
 		}
