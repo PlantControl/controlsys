@@ -1,6 +1,8 @@
 package controlsys
 
 import (
+	"fmt"
+	"math"
 	"math/rand/v2"
 	"testing"
 
@@ -67,4 +69,36 @@ func BenchmarkIsStabilizable(b *testing.B) {
 			}
 		}
 	})
+}
+
+// BenchmarkIsStabilizableRandom: generic A = N(0, 1/n), B = N(0, 1) with one
+// input, whose staircase amplification bound fires the PBH pass.
+func BenchmarkIsStabilizableRandom(b *testing.B) {
+	for _, n := range []int{25, 35} {
+		rng := rand.New(rand.NewPCG(uint64(n), 5))
+		A := mat.NewDense(n, n, nil)
+		B := mat.NewDense(n, 1, nil)
+		s := 1 / math.Sqrt(float64(n))
+		for i := range n {
+			for j := range n {
+				A.Set(i, j, s*rng.NormFloat64())
+			}
+			B.Set(i, 0, rng.NormFloat64())
+		}
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				if _, err := IsStabilizable(A, B, true); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		C := mat.DenseCopyOf(B.T())
+		b.Run(fmt.Sprintf("detectable/n=%d", n), func(b *testing.B) {
+			for b.Loop() {
+				if _, err := IsDetectable(A, C, false); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
