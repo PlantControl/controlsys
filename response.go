@@ -449,6 +449,9 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 		if sys.D != nil {
 			gain.Add(gain, sys.D)
 		}
+		if !allFiniteDense(gain) {
+			return sys.dcGainOverflowed(0)
+		}
 		return gain, nil
 	}
 
@@ -473,7 +476,35 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 	if sys.D != nil {
 		gain.Add(gain, sys.D)
 	}
+	if !allFiniteDense(gain) {
+		return sys.dcGainOverflowed(1)
+	}
 	return gain, nil
+}
+
+// dcGainOverflowed resolves a delay-free explicit model whose DC solve
+// succeeded but whose gain overflowed in X = (x0·I − A)⁻¹B or C·X: the exact
+// limit decides for n ≤ exactDetMaxOrder, infinite only at an exact pole;
+// a finite gain beyond float64 range, or a larger model, is ErrOverflow.
+func (sys *System) dcGainOverflowed(x0 float64) (*mat.Dense, error) {
+	if n, _, _ := sys.Dims(); n <= exactDetMaxOrder {
+		if gain, overflow := exactDCGainLimitChecked(sys.A, sys.B, sys.C, sys.D, x0); !overflow {
+			return gain, nil
+		}
+	}
+	return nil, fmt.Errorf("DCGain: gain overflows float64: %w", ErrOverflow)
+}
+
+func allFiniteDense(m *mat.Dense) bool {
+	r := m.RawMatrix()
+	for i := range r.Rows {
+		for _, v := range r.Data[i*r.Stride : i*r.Stride+r.Cols] {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // dcGainOffPole resolves a delay-free explicit model whose DC solve failed.
@@ -1098,6 +1129,13 @@ func bareissDet(m []*big.Int, r int) *big.Int {
 // nonsingular: one fraction-free solve there gives det and adj·B̂ for every
 // entry at once.
 func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
+	gain, _ := exactDCGainLimitChecked(A, B, C, D, x0)
+	return gain
+}
+
+// exactDCGainLimitChecked is exactDCGainLimit reporting overflow: a finite
+// exact entry that rounds beyond float64 range.
+func exactDCGainLimitChecked(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow bool) {
 	n, m := B.Dims()
 	p, _ := C.Dims()
 	aRaw, bRaw, cRaw := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
@@ -1194,7 +1232,7 @@ func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
 
 	// G = D + 2^(53−ea) / 2^(53−eb) / 2^(53−ec) · N/d.
 	shift := 53 - ea - (53 - eb) - (53 - ec)
-	gain := mat.NewDense(p, m, nil)
+	gain = mat.NewDense(p, m, nil)
 	for i := range p {
 		for j := range m {
 			on, nLow := lowestNonzero(newtonAscending(nodes, nVals[i*m+j]))
@@ -1217,11 +1255,12 @@ func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
 				}
 				v.Add(v, new(big.Rat).SetFloat64(dij))
 				f, _ := v.Float64()
+				overflow = overflow || math.IsInf(f, 0)
 				gain.Set(i, j, f)
 			}
 		}
 	}
-	return gain
+	return gain, overflow
 }
 
 // bareissSolve takes the n×(n+m) integer matrix a = [M | R], overwriting
