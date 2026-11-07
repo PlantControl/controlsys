@@ -72,7 +72,7 @@ func (sys *System) Nyquist(omega []float64, nPoints int) (*NyquistResult, error)
 		return nil, fmt.Errorf("Nyquist: %w", err)
 	}
 
-	bd := classifyNyquistBoundary(poles, nyquistPoleErrors(sys, poles), sys.IsContinuous(), sys.Dt)
+	bd := classifyNyquistBoundary(poles, func() []float64 { return nyquistPoleErrors(sys, poles) }, sys.IsContinuous(), sys.Dt)
 	rhpPoles := 0
 	for i, pole := range poles {
 		if bd.cluster[i] < 0 && poleOutsideStabilityBoundary(pole, sys.IsContinuous(), 0) {
@@ -146,8 +146,11 @@ type boundaryCluster struct {
 // is the first-order error of a computed pole; it fails for a (near-)defective
 // pole, whose m-fold split (eps*‖A‖)^(1/m) the caps eps^(1/m)*max|p| bound for
 // m = 2 and 3 (eps^(1/m)*‖A‖ >= (eps*‖A‖)^(1/m) for ‖A‖ >= 1), so a band never
-// exceeds them. With errs nil both bands are the caps. A cluster whose indentation would reach the real axis is centred on it.
-func classifyNyquistBoundary(poles []complex128, errs []float64, continuous bool, dt float64) nyquistBoundary {
+// exceeds them. errs = poleErrors() is computed only when some pole lies
+// inside the loose cap but outside its own sqrt(eps) floor, the only case
+// where it changes the result; when it is nil both bands are the caps.
+// A cluster whose indentation would reach the real axis is centred on it.
+func classifyNyquistBoundary(poles []complex128, poleErrors func() []float64, continuous bool, dt float64) nyquistBoundary {
 	bd := nyquistBoundary{continuous: continuous, dt: dt, cluster: make([]int, len(poles))}
 	maxAbs := 1.0
 	for _, pole := range poles {
@@ -155,8 +158,21 @@ func classifyNyquistBoundary(poles []complex128, errs []float64, continuous bool
 	}
 	single := math.Sqrt(eps()) * maxAbs
 	loose := math.Cbrt(eps()) * maxAbs
+	dist := func(p complex128) float64 {
+		if continuous {
+			return math.Abs(real(p))
+		}
+		return math.Abs(cmplx.Abs(p) - 1)
+	}
 	singleBand := make([]float64, len(poles))
 	looseBand := make([]float64, len(poles))
+	var errs []float64
+	for _, p := range poles {
+		if d := dist(p); d < loose && d >= math.Sqrt(eps())*max(1, cmplx.Abs(p)) {
+			errs = poleErrors()
+			break
+		}
+	}
 	for i, p := range poles {
 		if errs == nil {
 			singleBand[i], looseBand[i] = single, loose
@@ -165,12 +181,6 @@ func classifyNyquistBoundary(poles []complex128, errs []float64, continuous bool
 		scale := max(1, cmplx.Abs(p))
 		singleBand[i] = min(max(math.Sqrt(eps())*scale, errs[i]), single)
 		looseBand[i] = min(max(math.Cbrt(eps())*scale, errs[i]), loose)
-	}
-	dist := func(p complex128) float64 {
-		if continuous {
-			return math.Abs(real(p))
-		}
-		return math.Abs(cmplx.Abs(p) - 1)
 	}
 
 	on := make([]bool, len(poles))
