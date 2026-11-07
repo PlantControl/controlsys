@@ -46,7 +46,7 @@ func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // and K are those of that solve, at Accuracy 0 when eps perturbations of
 // the data move neither beyond 1e-8, whatever the Accuracy of Dare's X.
 func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	res, err := Dare(A, B, Q, R, opts)
+	res, err := dareFor(A, B, Q, R, opts, true)
 	return explicitRiccatiSolution(res, opts, err)
 }
 

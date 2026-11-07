@@ -202,9 +202,10 @@ var (
 )
 
 // nearSingularDare solves a Dare with a near-singular E that Dare's
-// float64 pencil left with no stabilizing solution (err) on its explicit
-// model Ae = E⁻¹A, Be = E⁻¹B, formed with every later step in big.Float
-// arithmetic, bit-identical on every platform. EᵀXE = Y is the solution
+// float64 pencil left with no stabilizing solution (err), or uncertified
+// at an unscaled boundary verdict,
+// on its explicit model Ae = E⁻¹A, Be = E⁻¹B, formed with every later
+// step in big.Float arithmetic, bit-identical on every platform. EᵀXE = Y is the solution
 // of that model's Dare, and Y and K are well posed while X ~ 1/σ_min(E)²
 // is not: at cond(E)·eps ≈ 0.1 the float64 QZ subspace left Y off by 6.5%
 // and the float64 K from the exact Y was off by 360%.
@@ -212,8 +213,13 @@ var (
 // It runs only when E (and Kalman's plant E) is nonsingular to both
 // MATLAB rank and LU condition (nearSingularEGate rejects anything
 // else) with cond(E)·eps above newtonTol, the regime where the float64
-// fold E⁻¹A alone leaves Accuracy 0's tolerance; below that gate Dare
-// reaches extendedDareSolve only through boundaryExtendedDare. The
+// fold E⁻¹A alone leaves Accuracy 0's tolerance; it runs there on an
+// uncertified float64 result too (dareUncertified) that the unscaled PBH
+// test marks (unscaledBoundary), where a homogeneous PBH verdict no
+// longer gives ErrNoStabilizing (JGGEN2: rv46 bnd 806
+// returned its pencil Y 5.8e-3 off, bnd 461 on amd64 K 0.92 off, both
+// exact here). Below that gate Dare reaches extendedDareSolve through
+// boundaryExtendedDare. The
 // precision is 4·log₂cond(E) + 64 bits in [192, 320]. Y is the limit of SDA doubling, accepted only when its
 // residual in the given equation (with S) is within 2^(−prec/2) of
 // ‖Y‖ + ‖Q‖, once more at 64 bits more on a miss; K is formed from it in
@@ -223,8 +229,8 @@ var (
 // Ae − BeK rounded once, the exact eig(A − BK, E): a float64 A − BK
 // errs by eps·|B||K|, which 1/σ_min(E) carries to O(1) in the QZ of
 // (A − BK, E) (|λ| 1.27 for an exact 0.58). Any failure, an iteration
-// cap hit or a failed perturbed solve included, keeps err, so no value it
-// returned before changes.
+// cap hit or a failed perturbed solve included, keeps err or the float64
+// result, so no value it returned before changes.
 //
 // Y and K carry Accuracy 0 (Dlqr, Lqg: xeCertified) when they move by at
 // most newtonTol under each of two componentwise eps perturbations of A,
@@ -233,8 +239,11 @@ var (
 // componentwise bound ‖|E⁻ᵀ||δE|ᵀ|X| + |X||δE||E⁻¹|‖/‖X‖, δE = eps·|E|,
 // and its move under the same perturbations within newtonTol, else Dare
 // returns it at Accuracy 1.
-func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*RiccatiResult, bool) {
-	cond, ok := extendedDareCond(B, opts, err)
+func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, bool) {
+	if !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) && !(dareUncertified(res, err) && res.unscaledBoundary) {
+		return nil, false
+	}
+	cond, ok := extendedDareCond(B, opts)
 	if !ok || !(cond*eps() > newtonTol) {
 		return nil, false
 	}
@@ -242,12 +251,10 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*Ric
 }
 
 // extendedDareCond returns the largest LU condition estimate of E and
-// Kalman's plant E, and whether the extended solve applies to the Dare
-// error err: E given, n, m > 0, and each E nonsingular to MATLAB rank and
-// LU condition.
-func extendedDareCond(B *mat.Dense, opts *RiccatiOpts, err error) (float64, bool) {
-	if opts == nil || isIdentityDescriptor(opts.E) ||
-		!errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+// Kalman's plant E, and whether the extended solve applies: E given,
+// n, m > 0, and each E nonsingular to MATLAB rank and LU condition.
+func extendedDareCond(B *mat.Dense, opts *RiccatiOpts) (float64, bool) {
+	if opts == nil || isIdentityDescriptor(opts.E) {
 		return 0, false
 	}
 	n, m := B.Dims()

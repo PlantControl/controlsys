@@ -22,7 +22,7 @@ import (
 // and X exact, Dare X 1.67e-8 off): Dlqr need not certify them (owner
 // 2ARMRV).
 func TestDare_BoundaryVerdictExtendedSolve(t *testing.T) {
-	native := runtime.GOARCH == "arm64" && !raceEnabled
+	native := nativeBoundaryPath()
 	cases := []struct {
 		name             string
 		ulpSensitive     bool
@@ -151,6 +151,210 @@ func TestDare_BoundaryVerdictStaysWithoutStabilizingFloatGain(t *testing.T) {
 		}
 		if _, err := Dlqr(A, B, Q, R, o); !errors.Is(err, ErrNoStabilizing) {
 			t.Errorf("Dlqr NoScaling %v: err %v, want ErrNoStabilizing", ns, err)
+		}
+	}
+}
+
+// A descriptor Dare whose float64 pencil returns an uncertified X runs the
+// extended solve on it (JGGEN2; IR5YOF mid-85-cross, cond(E) ~1e2): once
+// the homogeneous PBH test no longer reports a boundary mode, the pencil
+// leaves K 0.2 off the 320-bit gain at Accuracy 1, and Dlqr returns the
+// extended solve's K and Y at Accuracy 0. With that solve capped the
+// pencil's value stays, at Accuracy 1.
+func TestDlqr_UncertifiedPencilRunsExtendedSolve(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{1.0596625396702297, 0.4519569829385703, -0.6513319386306535, -1.9810332929168784})
+	B := mat.NewDense(2, 2, []float64{-0.1636986889048983, -0.7676224253271123, -2.2433395437117265, 2.575287134620651})
+	Q := mat.NewDense(2, 2, []float64{7.856481631560513, -3.2452493276788226, -3.2452493276788226, 8.113676225088883})
+	R := mat.NewDense(2, 2, []float64{3.247662912032643, -2.1654952719405163, -2.1654952719405163, 2.469682828283582})
+	S := mat.NewDense(2, 2, []float64{-2.3766118908897984, 1.8566378338922267, 2.861016817419372, -2.2350607968362817})
+	E := mat.NewDense(2, 2, []float64{0.7246350543397122, -0.7542339544330663, 0.6658573764177139, -0.6930552783575629})
+	ref := riccatiExactReference(false, A, B, Q, R, S, E, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("doubling reference not certified")
+	}
+	for _, ns := range []bool{false, true} {
+		o := &RiccatiOpts{E: E, S: S, NoScaling: ns}
+		res, err := Dlqr(A, B, Q, R, o)
+		if err != nil {
+			t.Fatalf("Dlqr NoScaling %v: %v", ns, err)
+		}
+		eK, eY := relErr(res.K, ref.K), relErr(res.X, ref.Y)
+		if res.Accuracy != 0 || !(eK <= newtonTol && eY <= newtonTol) {
+			t.Errorf("Dlqr NoScaling %v: Accuracy %d, K %.3g Y %.3g off", ns, res.Accuracy, eK, eY)
+		}
+	}
+	withIterationCap(t, &extendedDoublings, 2)
+	for _, ns := range []bool{false, true} {
+		o := &RiccatiOpts{E: E, S: S, NoScaling: ns}
+		for _, api := range []string{"Dare", "Dlqr"} {
+			solve := Dare
+			if api == "Dlqr" {
+				solve = Dlqr
+			}
+			res, err := solve(A, B, Q, R, o)
+			if err != nil {
+				t.Errorf("capped %s NoScaling %v: %v", api, ns, err)
+				continue
+			}
+			if eK := relErr(res.K, ref.K); res.Accuracy != 1 {
+				t.Errorf("capped %s NoScaling %v: Accuracy %d (K %.3g off), want 1", api, ns, res.Accuracy, eK)
+			}
+		}
+	}
+}
+
+// JGGEN2 census rv46 edge 651 (native): the homogeneous PBH lets the
+// pencil return X at Accuracy 0 with a loose refined EᵀXE (xeLoose), which
+// Dlqr demoted to Accuracy 1 with X 3.9e-10 off. On base the vacuous PBH
+// error sent it to the extended solve, whose certified Y Dlqr returned at
+// Accuracy 0; a loose EᵀXE now runs that solve too. Off native it is an
+// uncertified Accuracy 1, Y 0.11 off, as on base.
+func TestDlqr_LooseExplicitSolutionRunsExtendedSolve(t *testing.T) {
+	A := mat.NewDense(5, 5, []float64{0.49064334409837296, -1.2630124986636051, 0.40991957396117545, 0.088641202660148924, 0.086357067712252156, -1.1146996452648377, 0.56944014566904322, 0.15795768461564391, -1.5277682013893639, -0.97213688341209525, 0.83126275735761923, -0.14821552239455368, 1.4912555327629049, -1.5542383807766351, -0.29372145618026019, 3.6433822518335832, -0.16421262927291874, 0.84432412335165097, -0.11802469634704317, 0.6984452915707684, -1.6998115128340563, 0.86924486592105088, 0.86372912944498093, -0.29478536619532253, 1.3430728636376159})
+	B := mat.NewDense(5, 1, []float64{-1.1002279700680406, -1.133485809284837, -0.49701898768160857, -1.6850037544281669, 0.50344277858901432})
+	Q := mat.NewDense(5, 5, []float64{3.6929075820887833, 0.56059583387044998, 0.35412136715499881, 2.8949887596086277, -2.8715519020834943, 0.56059583387044998, 6.9406760712811719, 3.5882402721815332, -3.1121356690817588, -1.1171793498728189, 0.35412136715499881, 3.5882402721815332, 2.8816821501968146, -0.46129779150349537, 0.51225179865283921, 2.8949887596086277, -3.1121356690817588, -0.46129779150349537, 7.0007396211055548, -1.689255443916053, -2.8715519020834943, -1.1171793498728189, 0.51225179865283921, -1.689255443916053, 4.176667572850091})
+	R := mat.NewDense(1, 1, []float64{0.56614162451301342})
+	E := mat.NewDense(5, 5, []float64{0.027640371106685199, -0.15835289668947367, 0.085081513234009545, 0.61239141396797292, -0.14122858328989185, -0.05415905770040004, -0.2987425768626355, 0.31636277775924954, -0.85743457835532799, -1.027338049485206, -0.31863286245762129, -0.073586027898234277, 0.41391183065911058, 0.12033842160115096, 0.75477942224586747, -0.2766137077530737, -0.11049355381654127, 0.78854145366571538, -0.096248754516484084, 0.031850224977045864, -0.14473648162328295, -1.1259999586917229, -0.96269119502210687, 0.30440820780531475, -0.074833515497742323})
+	ref := riccatiExactReference(false, A, B, Q, R, nil, E, 320)
+	if !ref.OK {
+		t.Fatal("320-bit reference failed")
+	}
+	res, err := Dlqr(A, B, Q, R, &RiccatiOpts{E: E})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Accuracy != 0 && !nativeBoundaryPath() {
+		t.Logf("Accuracy %d, as on base off native", res.Accuracy)
+		return
+	}
+	if res.Accuracy != 0 {
+		t.Errorf("Accuracy = %d, want 0", res.Accuracy)
+	}
+	if d := relFrob(res.X, ref.Y); d > 1e-12 {
+		t.Errorf("X %.3g off the 320-bit EᵀXE", d)
+	}
+	if d := relFrob(res.K, ref.K); d > 1e-12 {
+		t.Errorf("K %.3g off the 320-bit gain", d)
+	}
+}
+
+// The loose-EᵀXE path returns Y with the pencil K: Dlqr's K agrees with
+// the 320-bit gain of the 320-bit Y, and Dare keeps the pencil X and K.
+func TestDlqr_LooseExplicitSolutionGainPairAgrees(t *testing.T) {
+	A := mat.NewDense(5, 5, []float64{0.49064334409837296, -1.2630124986636051, 0.40991957396117545, 0.088641202660148924, 0.086357067712252156, -1.1146996452648377, 0.56944014566904322, 0.15795768461564391, -1.5277682013893639, -0.97213688341209525, 0.83126275735761923, -0.14821552239455368, 1.4912555327629049, -1.5542383807766351, -0.29372145618026019, 3.6433822518335832, -0.16421262927291874, 0.84432412335165097, -0.11802469634704317, 0.6984452915707684, -1.6998115128340563, 0.86924486592105088, 0.86372912944498093, -0.29478536619532253, 1.3430728636376159})
+	B := mat.NewDense(5, 1, []float64{-1.1002279700680406, -1.133485809284837, -0.49701898768160857, -1.6850037544281669, 0.50344277858901432})
+	Q := mat.NewDense(5, 5, []float64{3.6929075820887833, 0.56059583387044998, 0.35412136715499881, 2.8949887596086277, -2.8715519020834943, 0.56059583387044998, 6.9406760712811719, 3.5882402721815332, -3.1121356690817588, -1.1171793498728189, 0.35412136715499881, 3.5882402721815332, 2.8816821501968146, -0.46129779150349537, 0.51225179865283921, 2.8949887596086277, -3.1121356690817588, -0.46129779150349537, 7.0007396211055548, -1.689255443916053, -2.8715519020834943, -1.1171793498728189, 0.51225179865283921, -1.689255443916053, 4.176667572850091})
+	R := mat.NewDense(1, 1, []float64{0.56614162451301342})
+	E := mat.NewDense(5, 5, []float64{0.027640371106685199, -0.15835289668947367, 0.085081513234009545, 0.61239141396797292, -0.14122858328989185, -0.05415905770040004, -0.2987425768626355, 0.31636277775924954, -0.85743457835532799, -1.027338049485206, -0.31863286245762129, -0.073586027898234277, 0.41391183065911058, 0.12033842160115096, 0.75477942224586747, -0.2766137077530737, -0.11049355381654127, 0.78854145366571538, -0.096248754516484084, 0.031850224977045864, -0.14473648162328295, -1.1259999586917229, -0.96269119502210687, 0.30440820780531475, -0.074833515497742323})
+	ref := riccatiExactReference(false, A, B, Q, R, nil, E, 320)
+	if !ref.OK {
+		t.Fatal("320-bit reference failed")
+	}
+	opts := &RiccatiOpts{E: E}
+	dare, err := Dare(A, B, Q, R, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlqr, err := Dlqr(A, B, Q, R, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dlqr.Accuracy == 0 || nativeBoundaryPath() {
+		if d := relFrob(dlqr.K, ref.K); d > newtonTol {
+			t.Errorf("Dlqr K %.3g off the gain of the 320-bit Y", d)
+		}
+		if d := relFrob(dlqr.X, ref.Y); d > newtonTol {
+			t.Errorf("Dlqr Y %.3g off the 320-bit Y", d)
+		}
+	}
+	if !mat.Equal(dare.K, dlqr.K) {
+		t.Error("Dlqr K is not Dare's K")
+	}
+	if d := relFrob(dare.X, ref.X); d > newtonTol {
+		t.Errorf("Dare X %.3g off the 320-bit X", d)
+	}
+}
+
+// JGGEN2 census rv46 bnd 806 (cond(E) 2e12): the c = 1 PBH verdict sent it
+// to nearSingularDare, which returned Y and K exact at Accuracy 1. The
+// homogeneous verdict clears it, and the float64 pencil's uncertified Y
+// came back 5.8e-3 off (bnd 461 on amd64: K 0.92 off). An uncertified
+// result that the unscaled verdict marks runs the extended solve again.
+// Off native the verdict does not fire and Y is 1.3e-2 off at Accuracy 1,
+// as on base.
+func TestDlqr_UncertifiedPencilAtIllConditionedERunsNearSingularSolve(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{-0.56014363633412578, -0.77081107545778782, 1.2428497489887969, -0.6043037583739419})
+	B := mat.NewDense(2, 1, []float64{0.018960481587139557, 0.096409661854527248})
+	Q := mat.NewDense(2, 2, []float64{0.304740285002572, -0.17024434730499005, -0.17024434730499005, 2.6702839412058812})
+	R := mat.NewDense(1, 1, []float64{5.2957243890862946})
+	S := mat.NewDense(2, 1, []float64{-1.0855947835212159, 1.3867386019933887})
+	E := mat.NewDense(2, 2, []float64{0.7746097390631389, 0.62768785119841863, -0.15233922970882519, -0.12344472180811875})
+	ref := riccatiExactReference(false, A, B, Q, R, S, E, 320)
+	if !ref.OK {
+		t.Fatal("320-bit reference failed")
+	}
+	for _, ns := range []bool{false, true} {
+		o := &RiccatiOpts{E: E, S: S, NoScaling: ns}
+		res, err := Dlqr(A, B, Q, R, o)
+		if err != nil {
+			t.Fatalf("Dlqr NoScaling %v: %v", ns, err)
+		}
+		if res.Accuracy != 0 && !nativeBoundaryPath() {
+			t.Logf("Dlqr NoScaling %v: Accuracy %d, as on base off native", ns, res.Accuracy)
+			continue
+		}
+		if d := relFrob(res.X, ref.Y); d > 1e-12 {
+			t.Errorf("Dlqr NoScaling %v: Y %.3g off the 320-bit Y", ns, d)
+		}
+		if d := relFrob(res.K, ref.K); d > 1e-12 {
+			t.Errorf("Dlqr NoScaling %v: K %.3g off the 320-bit K", ns, d)
+		}
+	}
+}
+
+// nativeBoundaryPath reports the arm64 assembly backend, on which the
+// float64 boundary cases above take the path the census recorded; other
+// backends round them differently, as base did.
+func nativeBoundaryPath() bool { return runtime.GOARCH == "arm64" && !raceEnabled }
+
+// JGGEN2 census zw46mid 1914 (ρ 0.44, cond(E) 6e7): one scaling mode
+// returns a poor X at Accuracy 1 and the other fails with the unscaled PBH
+// test finding a deficient boundary mode. Base returned
+// errBoundaryUnstabilizable there and solved in extended precision; with
+// the verdict of the failed mode dropped, K was 2.4e-2 off the 320-bit
+// gain at Accuracy 1.
+func TestDare_FailedScalingModeUnscaledVerdictRunsNearSingularSolve(t *testing.T) {
+	A := mat.NewDense(4, 4, []float64{-0.54348738031290011, 0.73334636203808978, 0.6174557139527429, -0.37581976178648724, -0.41091170547645839, -0.34716981371260003, 0.4441338615012369, 0.9886260491643406, 0.33020600679380707, -0.92080378330119306, 1.4476779950508001, 0.76227906195847961, 0.53169648867224717, -0.7937527917268975, 0.31837611855391235, -0.48537929865183682})
+	B := mat.NewDense(4, 2, []float64{-1.723307731978911, 1.6266153081824966, 0.070490066743343904, -0.45244914096442335, -0.87500718471444972, 0.31628519843089842, -0.27495354852120735, 0.36675946348392008})
+	Q := mat.NewDense(4, 4, []float64{5.6143766518454985, 1.6624844435730595, -3.0566066369931542, 1.6877016024183351, 1.6624844435730595, 3.5854945506704872, -2.0298955813810555, 1.1124750510481676, -3.0566066369931542, -2.0298955813810555, 3.1534381916652143, -1.2751466505197664, 1.6877016024183351, 1.1124750510481676, -1.2751466505197664, 3.1121036670748712})
+	R := mat.NewDense(2, 2, []float64{4.1431713041737277, -3.697266847566655, -3.697266847566655, 4.2987493708638453})
+	E := mat.NewDense(4, 4, []float64{1.3115823857064357, -1.1282254549941944, 0.50437606518754907, 0.28861798113947756, 0, 0.79367692749015561, -0.53616079846115006, -0.14128752481883783, 0, 0, 1.4755648187283641, 1.1197288576143001, 0, 0, 0, 5.2266775494417855e-08})
+	ref := riccatiExactReference(false, A, B, Q, R, nil, E, 320)
+	if !ref.OK {
+		t.Fatal("320-bit reference failed")
+	}
+	o := &RiccatiOpts{E: E}
+	for _, api := range []string{"Dare", "Dlqr"} {
+		var res *RiccatiResult
+		var err error
+		if api == "Dare" {
+			res, err = Dare(A, B, Q, R, o)
+		} else {
+			res, err = Dlqr(A, B, Q, R, o)
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", api, err)
+		}
+		if res.Accuracy != 0 {
+			if nativeBoundaryPath() {
+				t.Errorf("%s: Accuracy %d, want 0", api, res.Accuracy)
+			} else {
+				t.Logf("%s: Accuracy %d off native", api, res.Accuracy)
+			}
+			continue
+		}
+		if d := relFrob(res.K, ref.K); d > 1e-12 {
+			t.Errorf("%s: K %.3g off the 320-bit K", api, d)
 		}
 	}
 }

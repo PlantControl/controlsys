@@ -41,6 +41,11 @@ type riccatiProblem struct {
 	// poor is the stabilizing solution of smallest first Newton step that
 	// verifyRiccati did not certify, or nil.
 	poor *riccatiPoor
+	// unscaledPBH has boundaryDeficient test [A − λE, B] unscaled (c = 1);
+	// unscaledBoundary reports a Dare poor solution returned where that
+	// test finds a boundary mode unstabilizable and the homogeneous one
+	// does not.
+	unscaledPBH, unscaledBoundary bool
 	// certStep is the first Newton step of the X verifyRiccati last
 	// certified, and certX1 (Dare, step above eps) the iterate it reached.
 	certStep float64
@@ -292,7 +297,7 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 			}
 		}
 	}
-	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy}
+	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy, unscaledBoundary: problem.unscaledBoundary}
 	if accuracy == 0 {
 		res.step, res.xeStep, res.gainUncertified = problem.certStep, problem.xeStep, problem.gainUncertified
 		if x1 := problem.certX1; x1 != nil {

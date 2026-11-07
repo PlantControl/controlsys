@@ -282,3 +282,24 @@ func TestCare_DescriptorNearInfiniteUncontrollableMode(t *testing.T) {
 		}
 	}
 }
+
+// Dare's PBH test runs on the homogeneous pencil too (JGGEN2): the
+// near-infinite mode a₂₂/e₂₂ of a stabilizable near-singular-E plant
+// (σmin(E) 1.7e-15, B reaches it) passes, where the unscaled threshold
+// τ‖E‖ beyond ‖B‖ called it unstabilizable in both scalings.
+func TestDare_DescriptorNearInfiniteControllableModePassesPBH(t *testing.T) {
+	A := mat.NewDense(2, 2, []float64{0.42832161169283334, 1.0362853424557894, 0.3431284077914542, -0.7926130901776904})
+	B := mat.NewDense(2, 2, []float64{2.4606698336961226, 0.8073964829247321, -2.5367599785728485, -0.7294612311954138})
+	E := mat.NewDense(2, 2, []float64{1.0831741096873624, -0.084731321391598, 0, 1.7497519700889574e-15})
+	for _, ns := range []bool{false, true} {
+		opts := &RiccatiOpts{E: E, NoScaling: ns}
+		problem, err := newRiccatiProblem(A, B, eyeDense(2), eyeDense(2), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		problem.scale(opts, false)
+		if problem.boundaryUnstabilizable(false) {
+			t.Errorf("NoScaling %v: controllable near-infinite mode fails PBH", ns)
+		}
+	}
+}

@@ -202,17 +202,48 @@ func TestDare_NearSingularEUncontrollableModeIsUnstabilizable(t *testing.T) {
 }
 
 // A well-conditioned E (orthogonal) with a discrete mode at 7e3 weakly
-// coupled to B keeps its boundary verdict: the extended solve runs only
-// for cond(E)·eps above newtonTol (IR5YOF review 2, zrwGen('big',10876,1),
-// where clearing the verdict returned X off by up to 3150% at Accuracy 0).
-func TestDare_WellConditionedEKeepsBoundaryVerdict(t *testing.T) {
+// coupled to B (IR5YOF review 2, zrwGen('big',10876,1)). The unscaled
+// PBH test called it unstabilizable; on the homogeneous pencil it passes
+// (JGGEN2), and it is stabilizable: the 320-bit gain is ~1e14, but no
+// float64 rounding of it stabilizes the exact closed loop, so the
+// extended solve fails and the pencil's K, 0.52 off that gain yet
+// exactly stabilizing, is returned at Accuracy 1, never certified.
+func TestDare_WellConditionedEFarModeStaysUncertified(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{-456.1125380107185, 212.12282671008353, -6542.374939554918, 3040.8017276406886})
 	B := mat.NewDense(2, 2, []float64{0.1511888949722682, 1.360456698990255, -0.010540390965378899, -0.09484655257220741})
 	E := mat.NewDense(2, 2, []float64{0.35739616083221576, 0.9339528811574985, -0.9339528811574985, 0.357396160832216})
 	Q, R := eyeDense(2), eyeDense(2)
+	ref := riccatiExactReference(false, A, B, Q, R, nil, E, riccatiExactPrec)
+	if !ref.OK {
+		t.Fatal("doubling reference not certified")
+	}
+	md, ok := xbExplicitModel(A, B, Q, R, nil, E, riccatiExactPrec)
+	if !ok {
+		t.Fatal("explicit model")
+	}
+	exactStable := func(K *mat.Dense) bool {
+		return xbStable(false, xbAxpy(md.a, -1, xbMul(md.b, xbFrom(K, 2, 2, riccatiExactPrec))))
+	}
+	if exactStable(ref.K) {
+		t.Fatal("rounded 320-bit gain stabilizes: the extended solve should certify it")
+	}
 	for _, ns := range []bool{false, true} {
-		if _, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns}); !errors.Is(err, errBoundaryUnstabilizable) {
-			t.Errorf("Dare NoScaling %v: %v, want an unstabilizable boundary mode", ns, err)
+		for _, api := range []string{"Dare", "Dlqr"} {
+			solve := Dare
+			if api == "Dlqr" {
+				solve = Dlqr
+			}
+			res, err := solve(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns})
+			if err != nil {
+				t.Errorf("%s NoScaling %v: %v", api, ns, err)
+				continue
+			}
+			if res.Accuracy != 1 {
+				t.Errorf("%s NoScaling %v: Accuracy %d, want 1 (K %.3g off)", api, ns, res.Accuracy, relErr(res.K, ref.K))
+			}
+			if !exactStable(res.K) {
+				t.Errorf("%s NoScaling %v: closed loop of K not Schur stable", api, ns)
+			}
 		}
 	}
 }

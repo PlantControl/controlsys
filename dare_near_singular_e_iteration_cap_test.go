@@ -17,15 +17,15 @@ func withIterationCap(t *testing.T, limit *int, v int) {
 	t.Cleanup(func() { *limit = old })
 }
 
-// boundaryError is the error base Dare returned (before the extended
-// solve existed) on the stabilizable near-singular-E plants below.
-const boundaryError = "Dare: controlsys: no stabilizing solution exists: a mode on or beyond the stability boundary is unstabilizable"
+// pencilError is the float64 pencil's error on the stabilizable
+// near-singular-E plants below. Before the homogeneous PBH test (JGGEN2)
+// it carried a vacuous boundary verdict at their near-infinite mode.
+const pencilError = "Dare: controlsys: no stabilizing solution exists"
 
 // A near-singular-E Dare, Dlqr or Kalman whose extended-precision solve
 // hits an iteration cap (SDA doubling or its exponent spread, stableLoop
 // squaring or the Smith doubling of the perturbed Hewer step) returns exactly the float64
-// pencil's error, boundary verdict included, as before the extended solve
-// existed (O2YDYA round 3).
+// pencil's error, as before the extended solve existed (O2YDYA round 3).
 func TestDare_NearSingularEIterationCapKeepsFloatError(t *testing.T) {
 	A := mat.NewDense(2, 2, []float64{0.42832161169283334, 1.0362853424557894, 0.3431284077914542, -0.7926130901776904})
 	B := mat.NewDense(2, 2, []float64{2.4606698336961226, 0.8073964829247321, -2.5367599785728485, -0.7294612311954138})
@@ -40,7 +40,7 @@ func TestDare_NearSingularEIterationCapKeepsFloatError(t *testing.T) {
 	}
 	check := func(t *testing.T, api string, err error, want string) {
 		t.Helper()
-		if err == nil || err.Error() != want || !errors.Is(err, errBoundaryUnstabilizable) {
+		if err == nil || err.Error() != want || !errors.Is(err, ErrNoStabilizing) || errors.Is(err, errBoundaryUnstabilizable) {
 			t.Errorf("%s: %v, want %q", api, err, want)
 		}
 	}
@@ -54,12 +54,12 @@ func TestDare_NearSingularEIterationCapKeepsFloatError(t *testing.T) {
 			for _, ns := range []bool{false, true} {
 				opts := &RiccatiOpts{E: E, NoScaling: ns}
 				_, err := Dare(A, B, eyeDense(2), eyeDense(2), opts)
-				check(t, "Dare", err, boundaryError)
+				check(t, "Dare", err, pencilError)
 				_, err = Dlqr(A, B, eyeDense(2), eyeDense(2), opts)
-				check(t, "Dlqr", err, boundaryError)
+				check(t, "Dlqr", err, pencilError)
 			}
 			_, err := Kalman(sys, eyeDense(3), Rn, nil, nil)
-			check(t, "Kalman", err, "Kalman: "+boundaryError)
+			check(t, "Kalman", err, "Kalman: "+pencilError)
 		})
 	}
 }
