@@ -741,7 +741,7 @@ func pidTuningFRDGate(ctx context.Context, p pidTuningPlant, family PidtuneType,
 // tries every depth, shallowest first, for PM±3° and then again with the
 // margin as a floor, whose search costs several times more, sharing one
 // budget; used counts every search. A crossover where the data's gain is
-// below 1e-15 or not finite, which tunePID rejects as an invalid argument
+// zero by zeroGain, which tunePID rejects as an invalid argument
 // the caller never gave, is skipped. A margin left 0 is 60° there, as a
 // moved one-gain crossover targets MATLAB's 60° rather than the plant's
 // own margin.
@@ -761,7 +761,7 @@ func pidTuningFRDMove(ctx context.Context, p pidTuningPlant, family PidtuneType,
 				if wc < p.low || wc > p.high {
 					break
 				}
-				if g := p.at(wc); !pidFiniteComplex(g) || cmplx.Abs(g) < 1e-15 {
+				if p.zeroGain(p.at(wc), wc) {
 					continue
 				}
 				q := o
