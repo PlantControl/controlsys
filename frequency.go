@@ -911,16 +911,7 @@ const maxAbsorbedStates = 256
 // its solver refines to the exact response.
 func (ws *lftWorkspace) absorbedSolver(sys *System) *balancedDense {
 	if ws.absorbed == nil && ws.absorbedErr == nil {
-		n, _, _ := sys.Dims()
-		total := float64(n)
-		for _, tau := range sys.LFT.Tau {
-			total += math.Round(tau)
-		}
-		if !(total <= maxAbsorbedStates) {
-			ws.absorbedErr = fmt.Errorf("%g absorbed states: %w", total, ErrInvalidArgument)
-			return nil
-		}
-		abs, err := absorbInternalDiscreteDelay(sys)
+		abs, err := absorbedDiscrete(sys)
 		if err != nil {
 			ws.absorbedErr = err
 			return nil
@@ -929,6 +920,21 @@ func (ws *lftWorkspace) absorbedSolver(sys *System) *balancedDense {
 		ws.absorbed = newBalancedDense(abs, n, m, p)
 	}
 	return ws.absorbed
+}
+
+// absorbedDiscrete returns sys with its discrete internal delays absorbed
+// as shift states, or an error when that would need more than
+// maxAbsorbedStates states.
+func absorbedDiscrete(sys *System) (*System, error) {
+	n, _, _ := sys.Dims()
+	total := float64(n)
+	for _, tau := range sys.LFT.Tau {
+		total += math.Round(tau)
+	}
+	if !(total <= maxAbsorbedStates) {
+		return nil, fmt.Errorf("%g absorbed states: %w", total, ErrInvalidArgument)
+	}
+	return absorbInternalDiscreteDelay(sys)
 }
 
 func cMulInto(dst, a, b []complex128, ar, ac, bc int) {

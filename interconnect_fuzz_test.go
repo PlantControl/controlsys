@@ -31,9 +31,7 @@ import (
 //
 // Delays: each target reruns on the components with their I/O delays
 // (fzDecode's v[12..14]) and checks the result against the exact
-// composition of the delayed responses (checkDelayed). Components whose
-// pole magnitudes span more than 1e12 are not rerun: internal-delay
-// evaluation then returns 0 or Inf (an EDGE defect, not checked here).
+// composition of the delayed responses (checkDelayed).
 
 func fzICSel(s *fzSpec) (q uint64, frac float64, loop bool) {
 	a := fzClamp(math.Abs(s.Vals[15]), 0, 0x1p52)
@@ -420,18 +418,12 @@ func fzICDelayFactor(c *fzSpec, i, j int, z complex128) complex128 {
 }
 
 // delayed reruns the operation on the components with their I/O delays
-// (when any, and no component spans more than 1e12 in pole magnitude) and
-// checks it with checkDelayed.
+// (when any) and checks it with checkDelayed.
 func (ic *fzIC) delayed(t *testing.T, s *fzSpec, op string, frac float64, resDF *System, errDF error, skip bool,
 	run func(d []*System) (*System, error)) {
 	t.Helper()
 	if skip || errDF != nil || !ic.hasDelays() {
 		return
-	}
-	for _, c := range ic.comps {
-		if c.NormJ*c.CondT > 1e12 {
-			return
-		}
 	}
 	d := make([]*System, len(ic.comps))
 	for k, c := range ic.comps {
@@ -1364,6 +1356,8 @@ var fzICCrashers = []struct {
 	{"Feedback", 0x4a, [fzNVals]float64{-28, 41, 14, 0, -39, 0, 48, 0.5, 0, -10, 0.37, 0, -10, -10, 12, -82.5}},
 	{"LFT", 0x48, [fzNVals]float64{-91, 96, 0, 0, 44, -70, 6, -0.5, -26, -10, 0.37, 0, 0.5, 20.299999999999997, 0.7, 101.2}},
 	{"Parallel", 0x3c, [fzNVals]float64{-6.5, 37, 3.3333333333333335, -43, 0, -24, 44, 4, 0, -10, 0.37, 7.428571428571429, -58, -2, 68, 0.08333333333333333}},
+	{"Parallel", 0x77, [fzNVals]float64{0, 15, 2, -40, 95, -100, 0.17142857142857143, 0.5, 0, -10, 2.37, 0, 19, -10, 67, -112.75}},
+	{"Feedback", 0x77, [fzNVals]float64{0, 15, 0, -40, 95, -100, 0.17142857142857143, 0.5, 2, -10, 2.37, 0, 19, -10, 67, -112.75}},
 	{"Series", 0x20, [fzNVals]float64{-70, 1, 0, 0, 23, 14, 6, 0.5, 0, -10, 97.06166666666667, 66, 27, -10, -10, -36.92857142857143}},
 }
 
