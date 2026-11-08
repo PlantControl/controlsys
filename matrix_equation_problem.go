@@ -297,7 +297,7 @@ func (problem *riccatiProblem) result(X, K *mat.Dense, eig []complex128, rcnd fl
 			}
 		}
 	}
-	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, Accuracy: accuracy, unscaledBoundary: problem.unscaledBoundary}
+	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: rcnd, accuracy: accuracy, unscaledBoundary: problem.unscaledBoundary}
 	if accuracy == 0 {
 		res.step, res.xeStep, res.gainUncertified = problem.certStep, problem.xeStep, problem.gainUncertified
 		if x1 := problem.certX1; x1 != nil {

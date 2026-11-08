@@ -26,7 +26,7 @@ func TestLqrDescriptorIteratedNewtonGain(t *testing.T) {
 		if ns {
 			label += " NoScaling"
 		}
-		res, err := Lqr(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns})
+		res, err := acceptUnverified(Lqr(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("%s: %v", label, err)
 		}
@@ -34,7 +34,7 @@ func TestLqrDescriptorIteratedNewtonGain(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: oracle did not converge", label)
 		}
-		if res.Accuracy == 0 {
+		if res.accuracy == 0 {
 			if e := relErr(res.X, Y); e > descriptorGainTol {
 				t.Errorf("%s: Accuracy 0, EᵀXE off the oracle by %.3g", label, e)
 			}
@@ -42,7 +42,7 @@ func TestLqrDescriptorIteratedNewtonGain(t *testing.T) {
 				t.Errorf("%s: Accuracy 0, K off the oracle by %.3g", label, e)
 			}
 		}
-		res, err = Care(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns})
+		res, err = acceptUnverified(Care(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("Care with S %v: %v", ns, err)
 		}
@@ -50,7 +50,7 @@ func TestLqrDescriptorIteratedNewtonGain(t *testing.T) {
 		if !ok {
 			t.Fatalf("Care with S %v: oracle did not converge", ns)
 		}
-		if e := relErr(res.K, Ko); res.Accuracy == 0 && e > descriptorGainTol {
+		if e := relErr(res.K, Ko); res.accuracy == 0 && e > descriptorGainTol {
 			t.Errorf("Care with S NoScaling=%v: Accuracy 0, K off the oracle by %.3g", ns, e)
 		}
 	}

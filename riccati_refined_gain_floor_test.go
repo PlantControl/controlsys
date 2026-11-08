@@ -95,7 +95,7 @@ func TestDareRefinedGainWithinFloorIsHewerGain(t *testing.T) {
 			if !ref.OK {
 				t.Fatal("no 320-bit reference")
 			}
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{NoScaling: tc.noScaling, E: E})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{NoScaling: tc.noScaling, E: E}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -110,7 +110,7 @@ func TestDareRefinedGainWithinFloorIsHewerGain(t *testing.T) {
 				}
 				want = max(gainFloor, 4*sens.K)
 			}
-			if kErr := relErr(res.K, ref.K); res.Accuracy == 0 && kErr > want {
+			if kErr := relErr(res.K, ref.K); res.accuracy == 0 && kErr > want {
 				t.Errorf("K %.3g off the 320-bit gain at Accuracy 0, want within %g", kErr, want)
 			}
 		})

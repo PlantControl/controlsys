@@ -24,9 +24,10 @@ import (
 // The last case's K once certified its own cost as X: that shows only
 // X = cost(K), not K = gain(X). Any K returned must stabilize: Hewer from
 // it reaches the oracle. noStabilizing marks a case where both base and
-// fix return ErrNoStabilizing on amd64; it is accepted on any arch, as
+// fix found no stabilizing solution on amd64, now ErrNotConverged (no
+// verified candidate, not a proof: ZOJBZX); it is accepted on any arch, as
 // that boundary moves with platform rounding. Under gonum 30740af
-// (HF5PTS) n = m = 3 returns ErrNoStabilizing natively and on amd64 too
+// (HF5PTS) n = m = 3 fails so natively and on amd64 too
 // (base: Accuracy 1, X 4.5e-2 off natively): a solvable cheap-control
 // problem with S and nearly collinear B (owner UYQUBF).
 func TestDare_CollinearCrossTermGivenInputXIsNotCertifiedWrong(t *testing.T) {
@@ -83,9 +84,9 @@ func TestDare_CollinearCrossTermGivenInputXIsNotCertifiedWrong(t *testing.T) {
 		want := dareDoublingBig(Ae, Be, Q, R, S)
 		for _, noScaling := range []bool{false, true} {
 			name := fmt.Sprintf("%s NoScaling=%v", c.name, noScaling)
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, E: E, NoScaling: noScaling})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S, E: E, NoScaling: noScaling}))
 			if err != nil {
-				if !c.noStabilizing || !errors.Is(err, ErrNoStabilizing) {
+				if !c.noStabilizing || !errors.Is(err, ErrNotConverged) {
 					t.Errorf("%s: %v", name, err)
 				}
 				continue
@@ -97,7 +98,7 @@ func TestDare_CollinearCrossTermGivenInputXIsNotCertifiedWrong(t *testing.T) {
 				ex.Mul(&ex, E)
 				X = &ex
 			}
-			if rel := relErr(X, want); res.Accuracy == 0 && !(rel <= 1e-8) {
+			if rel := relErr(X, want); res.accuracy == 0 && !(rel <= 1e-8) {
 				t.Errorf("%s: Accuracy 0 with ‖X − X*‖/‖X*‖ = %.3g", name, rel)
 			}
 			if rel := relErr(hewerDareBig(Ae, Be, Q, R, S, res.K, 30), want); !(rel <= 1e-12) {

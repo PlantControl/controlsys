@@ -32,7 +32,7 @@ func TestDare_EigMatchesClosedLoopOfReturnedGain(t *testing.T) {
 			r[i*m+i] += rr
 		}
 		A, B := mqDense(n, n, s.A), mqDense(n, m, s.B)
-		res, err := Dare(A, B, mqDense(n, n, q), mqDense(m, m, r), nil)
+		res, err := acceptUnverified(Dare(A, B, mqDense(n, n, q), mqDense(m, m, r), nil))
 		if err != nil {
 			t.Errorf("kind %#x: %v", tc.kind, err)
 			continue

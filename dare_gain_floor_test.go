@@ -64,7 +64,7 @@ func TestDare_CheapControlGainWithinItsUlpMove(t *testing.T) {
 						t.Errorf("%s: Eig %v not stable", name, e)
 					}
 				}
-				if res.Accuracy != 0 {
+				if res.accuracy != 0 {
 					continue
 				}
 				if rel := relErr(res.X, wantX); !(rel <= newtonTol) {
@@ -144,17 +144,17 @@ func TestDare_GainResolvedAtNewtonIterate(t *testing.T) {
 		}
 		for _, ns := range []bool{false, true} {
 			name := fmt.Sprintf("%s NoScaling=%v", c.name, ns)
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{NoScaling: ns, S: S, E: E})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{NoScaling: ns, S: S, E: E}))
 			if err != nil {
 				t.Errorf("%s: %v", name, err)
 				continue
 			}
-			if c.acc1 && res.Accuracy != 1 {
-				t.Errorf("%s: Accuracy %d, want 1", name, res.Accuracy)
+			if c.acc1 && res.accuracy != 1 {
+				t.Errorf("%s: Accuracy %d, want 1", name, res.accuracy)
 			}
-			if res.Accuracy != 0 {
+			if res.accuracy != 0 {
 				if c.mustCertify {
-					t.Errorf("%s: Accuracy %d, want 0 (‖K − K*‖/‖K*‖ = %.3g)", name, res.Accuracy, relErr(res.K, wantK))
+					t.Errorf("%s: Accuracy %d, want 0 (‖K − K*‖/‖K*‖ = %.3g)", name, res.accuracy, relErr(res.K, wantK))
 				}
 				continue
 			}

@@ -44,7 +44,7 @@ func TestDareReducedInputsGainHewerFailureNotCertified(t *testing.T) {
 			if !ref.OK {
 				t.Fatal("no 320-bit reference")
 			}
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S}))
 			if err != nil {
 				if runtime.GOARCH == tc.arch {
 					t.Fatal(err)
@@ -52,7 +52,7 @@ func TestDareReducedInputsGainHewerFailureNotCertified(t *testing.T) {
 				t.Logf("%v on %s, generated on %s", err, runtime.GOARCH, tc.arch)
 				return
 			}
-			if kErr := relErr(res.K, ref.K); res.Accuracy == 0 && kErr > 1e-6 {
+			if kErr := relErr(res.K, ref.K); res.accuracy == 0 && kErr > 1e-6 {
 				t.Errorf("K %.3g off the 320-bit gain at Accuracy 0, want within 1e-6", kErr)
 			}
 		})

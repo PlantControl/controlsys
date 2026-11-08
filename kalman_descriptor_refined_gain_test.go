@@ -38,16 +38,16 @@ func checkDiscreteDescriptorKalman(t *testing.T, dc descriptorRefinedCase) {
 		if ns {
 			label += " NoScaling"
 		}
-		res, err := Kalman(sys, Im, Ip, nil, &RiccatiOpts{NoScaling: ns})
+		res, err := acceptUnverified(Kalman(sys, Im, Ip, nil, &RiccatiOpts{NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("%s Kalman: %v", label, err)
 		}
-		check(label+" Kalman", kd, res.Accuracy, res.X, mat.DenseCopyOf(res.K.T()))
-		res, err = Dare(kd.A, kd.B, kd.Q, kd.R, &RiccatiOpts{E: kd.E, NoScaling: ns})
+		check(label+" Kalman", kd, res.accuracy, res.X, mat.DenseCopyOf(res.K.T()))
+		res, err = acceptUnverified(Dare(kd.A, kd.B, kd.Q, kd.R, &RiccatiOpts{E: kd.E, NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("%s Dare of the dual: %v", label, err)
 		}
-		check(label+" Dare of the dual", kd, res.Accuracy, res.X, res.K)
+		check(label+" Dare of the dual", kd, res.accuracy, res.X, res.K)
 	}
 	lq, err := Lqg(sys, eyeDense(dc.n+dc.m), eyeDense(dc.n+dc.p), nil)
 	if err != nil {

@@ -25,10 +25,14 @@ import (
 // (https://www.mathworks.com/help/control/ref/lti.lqr.html), X then solves the
 // Riccati equation of the explicit model dx/dt = E⁻¹Ax + E⁻¹Bu (E'X_gE for
 // the Care solution X_g with E); K is unchanged and Eig holds the
-// generalized eigenvalues of (A-BK, E).
+// generalized eigenvalues of (A-BK, E). Errors are those of Care
+// (RiccatiResult): an uncertified solution comes with ErrAccuracyUnverified,
+// and an unstabilizable boundary mode is ErrNoStabilizing with
+// ErrNotStabilizable.
 func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	res, err := Care(A, B, Q, R, opts)
-	return explicitRiccatiSolution(res, opts, err)
+	res, err := careCore(A, B, Q, R, opts)
+	res, err = explicitRiccatiSolution(res, opts, err)
+	return certify("Lqr", ErrNotStabilizable, res, err)
 }
 
 // Dlqr solves the discrete-time linear-quadratic regulator problem.
@@ -40,14 +44,16 @@ func Lqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 // opts.E is handled as in Lqr: X solves the Riccati equation of the explicit
 // model x[k+1] = E⁻¹Ax[k] + E⁻¹Bu[k]: EᵀXE of X refined in double-double
 // where Dare refines it, else formed from the certified X of Dare, then
-// with Accuracy 1 when it cancels so far that its rounding alone can move
-// it beyond 1e-8, or the Newton step of X moves it beyond 1e-8. Where Dare
-// solved the explicit model in extended precision (near-singular E), X
-// and K are those of that solve, at Accuracy 0 when eps perturbations of
-// the data move neither beyond 1e-8, whatever the Accuracy of Dare's X.
+// uncertified (ErrAccuracyUnverified) when it cancels so far that its
+// rounding alone can move it beyond 1e-8, or the Newton step of X moves it
+// beyond 1e-8. Where Dare solved the explicit model in extended precision
+// (near-singular E), X and K are those of that solve, certified when eps
+// perturbations of the data move neither beyond 1e-8, whether or not
+// Dare's X is. Errors are otherwise those of Dare, as for Lqr.
 func Dlqr(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, true)
-	return explicitRiccatiSolution(res, opts, err)
+	res, err = explicitRiccatiSolution(res, opts, err)
+	return certify("Dlqr", ErrNotStabilizable, res, err)
 }
 
 // explicitRiccatiSolution maps the generalized solution X of a Care or Dare
@@ -65,15 +71,15 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 	if res.xe != nil {
 		res.X = res.xe
 		if res.xeCertified {
-			res.Accuracy = 0
+			res.accuracy = 0
 		}
-		if res.Accuracy == 0 && res.xeLoose {
-			res.Accuracy = 1
+		if res.accuracy == 0 && res.xeLoose {
+			res.accuracy = 1
 		}
 		return res, nil
 	}
-	if res.Accuracy == 0 && (res.xeStep > newtonTol || explicitUncertified(res.X, opts.E)) {
-		res.Accuracy = 1
+	if res.accuracy == 0 && (res.xeStep > newtonTol || explicitUncertified(res.X, opts.E)) {
+		res.accuracy = 1
 	}
 	n, _ := res.X.Dims()
 	xe := mulDims(n, n, res.X, opts.E)
@@ -103,6 +109,8 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 // outputs return ErrDimensionMismatch,
 // asymmetric Q or R ErrNotSymmetric, singular E ErrDescriptorSingular,
 // opts.E ErrOptionUnsupported and plants with delays ErrDelayUnsupported.
+// The Riccati errors, ErrAccuracyUnverified with its result included, are
+// those of Lqr or Dlqr.
 func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := requireFiniteSystem("Lqi", sys); err != nil {
 		return nil, err
@@ -164,7 +172,8 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 //
 // A is n×n, B is n×m, Q is n×n, R is m×m, dt > 0. opts.S, when set, is the
 // continuous cross weight N (n×m); opts.Workspace is used for the discrete
-// Riccati solve. opts.E is rejected with ErrOptionUnsupported.
+// Riccati solve. opts.E is rejected with ErrOptionUnsupported. The Riccati
+// errors, ErrAccuracyUnverified with its result included, are those of Dlqr.
 func Lqrd(A, B, Q, R *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if opts != nil && opts.E != nil {
 		return nil, fmt.Errorf("Lqrd: opts.E: %w", ErrOptionUnsupported)

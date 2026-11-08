@@ -512,10 +512,13 @@ func syMul(a, b []float64, r, k, c int) []float64 {
 // covariances, and Lqe (H = 0) on continuous ones. By duality Lᵀ
 // is the gain of the regulator problem (Aᵀ, Cᵀ, BQnBᵀ, R̄, B(QnDᵀ+Nn)) with
 // R̄ = Rn + DNn + NnᵀDᵀ + DQnDᵀ; the solution and gain must pass the
-// syRiccatiChecks there (A − LC exactly stable, P PSD). ErrNoStabilizing
-// is a failure when mqRiccatiExists proves the dual problem solvable and
-// (A, B) is robustly stabilizable (no nearly noise-uncontrollable modes on
-// the boundary).
+// syRiccatiChecks there (A − LC exactly stable, P PSD), as must those of
+// an ErrAccuracyUnverified partial. ErrNotConverged and
+// ErrSingularEquation are failures when mqRiccatiExists proves the dual
+// problem solvable and (A, B) is robustly stabilizable (no nearly
+// noise-uncontrollable modes on the boundary); the proved ErrNoStabilizing
+// (with ErrNotDetectable) also when the dual pair (Aᵀ, Cᵀ) is robustly
+// stabilizable.
 func FuzzKalman(f *testing.F) {
 	for _, s := range fzMatEqSeeds() {
 		fzAddSeed(f, s)
@@ -555,13 +558,26 @@ func FuzzKalman(f *testing.F) {
 			}
 			res, err := call()
 			fzContract(t, s, op, res != nil, err)
+			if errors.Is(err, ErrAccuracyUnverified) {
+				err = nil
+			}
 			if err != nil {
 				switch {
 				case errors.Is(err, ErrNoStabilizing):
-					if !mqStabilizable(s) || !mqRiccatiExists(ds, qb, rb, sb) {
-						fzSkip(t, op+": no stabilizing solution (not provably solvable)")
+					if !errors.Is(err, ErrNotDetectable) {
+						t.Fatalf("%s: ErrNoStabilizing without ErrNotDetectable: %v\n%s", op, err, s)
 					}
-					t.Fatalf("%s: ErrNoStabilizing, but the dual pencil is clear of the boundary, (C,A) detectable and (A,B) stabilizable\nQn=%v Rn=%v Nn=%v\n%s", op, qn, rn, nn, s)
+					if mqStabilizable(ds) {
+						t.Fatalf("%s: ErrNoStabilizing, but (C,A) is robustly detectable: %v\n%s", op, err, s)
+					}
+					fzSkip(t, op+": no stabilizing solution (undetectable boundary mode)")
+				case errors.Is(err, ErrSchurFailed):
+					fzSkip(t, op+": "+ErrSchurFailed.Error())
+				case errors.Is(err, ErrNotConverged), errors.Is(err, ErrSingularEquation):
+					if !mqStabilizable(s) || !mqRiccatiExists(ds, qb, rb, sb) {
+						fzSkip(t, op+": not converged (not provably solvable)")
+					}
+					t.Fatalf("%s: %v, but the dual pencil is clear of the boundary, (C,A) detectable and (A,B) stabilizable\nQn=%v Rn=%v Nn=%v\n%s", op, err, qn, rn, nn, s)
 				case errors.Is(err, ErrNotPSD):
 					fzSkip(t, op+": BQnBᵀ numerically semidefinite rejected")
 				case errors.Is(err, ErrSingularR):
@@ -578,17 +594,17 @@ func FuzzKalman(f *testing.F) {
 			if r1, c1 := res.X.Dims(); r1 != n || c1 != n {
 				t.Fatalf("%s: P is %d×%d\n%s", op, r1, c1, s)
 			}
-			if res.Accuracy != 0 {
+			if res.accuracy != 0 {
 				for _, v := range res.Eig {
 					if ds.Discrete && !(cmplx.Abs(v) < 1) || !ds.Discrete && !(real(v) < 0) {
-						t.Fatalf("%s: Accuracy %d with closed-loop eigenvalue %v\n%s", op, res.Accuracy, v, s)
+						t.Fatalf("%s: Accuracy %d with closed-loop eigenvalue %v\n%s", op, res.accuracy, v, s)
 					}
 				}
 				if !mqStabilizable(ds) {
 					fzSkip(t, op+": Accuracy 1, pair not robustly stabilizable")
 				}
 				kd := mqTranspose(mqRaw(res.K), n, p)
-				syRequireStableRat(t, ds, op, syClosedLoopA(ds.A, ds.B, kd, n, p), n, ds.Discrete, fmt.Sprintf("Accuracy %d X=%v K=%v", res.Accuracy, mqRaw(res.X), kd))
+				syRequireStableRat(t, ds, op, syClosedLoopA(ds.A, ds.B, kd, n, p), n, ds.Discrete, fmt.Sprintf("Accuracy %d X=%v K=%v", res.accuracy, mqRaw(res.X), kd))
 				fzSkip(t, op+": X not certified (Accuracy 1)")
 			}
 			syRiccatiChecks(t, ds, op, qb, rb, sb, mqRaw(res.X), mqTranspose(mqRaw(res.K), n, p), res.Rcnd, true)

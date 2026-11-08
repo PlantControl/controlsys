@@ -73,13 +73,13 @@ func TestDare_NearlyCollinearInputsAreCertified(t *testing.T) {
 		A, B, Q, R, S := c.matrices()
 		want := dareDoublingBig(A, B, Q, R, S)
 		for _, noScaling := range []bool{false, true} {
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling, Workspace: NewRiccatiWorkspace(c.n, c.m)})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling, Workspace: NewRiccatiWorkspace(c.n, c.m)}))
 			if err != nil {
 				t.Errorf("%s NoScaling=%v: %v", c.name, noScaling, err)
 				continue
 			}
-			if rel := relErr(res.X, want); res.Accuracy != 0 || !(rel <= 1e-8) {
-				t.Errorf("%s NoScaling=%v: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g; want 0, ≤ 1e-8", c.name, noScaling, res.Accuracy, rel)
+			if rel := relErr(res.X, want); res.accuracy != 0 || !(rel <= 1e-8) {
+				t.Errorf("%s NoScaling=%v: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g; want 0, ≤ 1e-8", c.name, noScaling, res.accuracy, rel)
 			}
 			if rel := relErr(hewerDareBig(A, B, Q, R, S, res.K, 30), want); !(rel <= 1e-12) {
 				t.Errorf("%s NoScaling=%v: Hewer from K reaches %.3g of X*", c.name, noScaling, rel)
@@ -112,13 +112,13 @@ func TestDare_ReducedInputsGainStabilizesGivenPlant(t *testing.T) {
 	} {
 		A, B, Q, R, S := c.matrices()
 		for _, noScaling := range []bool{false, true} {
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling}))
 			if err != nil {
 				continue
 			}
 			rho := closedLoopRadiusBig(t, A, B, res.K)
 			if !(rho < 1) {
-				t.Errorf("%s NoScaling=%v: Accuracy %d with ρ(A − BK) = %.3g", c.name, noScaling, res.Accuracy, rho)
+				t.Errorf("%s NoScaling=%v: Accuracy %d with ρ(A − BK) = %.3g", c.name, noScaling, res.accuracy, rho)
 				continue
 			}
 			eig := 0.0
@@ -147,11 +147,11 @@ func TestDare_PoorPencilSolutionKeptOnRankDeficientInputs(t *testing.T) {
 		nil}
 	A, B, Q, R, _ := c.matrices()
 	want := dareDoublingBig(A, B, Q, R, nil)
-	res, err := Dare(A, B, Q, R, nil)
+	res, err := acceptUnverified(Dare(A, B, Q, R, nil))
 	if err != nil {
 		return
 	}
-	if rel := relErr(res.X, want); res.Accuracy == 0 && !(rel <= 1e-8) {
+	if rel := relErr(res.X, want); res.accuracy == 0 && !(rel <= 1e-8) {
 		t.Errorf("Accuracy 0 with ‖X − X*‖/‖X*‖ = %.3g", rel)
 	}
 	if rho := closedLoopRadiusBig(t, A, B, res.K); !(rho < 1) {
@@ -182,11 +182,11 @@ func TestDare_CheapUnstableRoundingBoundXIsNotCertified(t *testing.T) {
 			opts *RiccatiOpts
 			want *mat.Dense
 		}{{"plain", A, B, nil, want}, {"E=2I", &A2, &B2, &RiccatiOpts{E: &E}, &wantE}} {
-			res, err := Dare(tc.A, tc.B, Q, R, tc.opts)
+			res, err := acceptUnverified(Dare(tc.A, tc.B, Q, R, tc.opts))
 			if err != nil {
 				continue
 			}
-			if rel := relErr(res.X, tc.want); res.Accuracy == 0 && !(rel <= 1e-8) {
+			if rel := relErr(res.X, tc.want); res.accuracy == 0 && !(rel <= 1e-8) {
 				t.Errorf("k=%d %s: Accuracy 0 with ‖X − X*‖/‖X*‖ = %.3g", k, tc.name, rel)
 			}
 		}

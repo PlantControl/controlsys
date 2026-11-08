@@ -47,7 +47,7 @@ func TestDare_GainSensitiveToXCertifiesOnlyTheGain(t *testing.T) {
 				f    func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error)
 			}{{"Dare", Dare}, {"Dlqr", Dlqr}} {
 				name := fmt.Sprintf("%s %s NoScaling=%v", solve.name, c.name, ns)
-				res, err := solve.f(A, B, Q, R, &RiccatiOpts{NoScaling: ns})
+				res, err := acceptUnverified(solve.f(A, B, Q, R, &RiccatiOpts{NoScaling: ns}))
 				if err != nil {
 					t.Errorf("%s: %v", name, err)
 					continue
@@ -57,7 +57,7 @@ func TestDare_GainSensitiveToXCertifiesOnlyTheGain(t *testing.T) {
 						t.Errorf("%s: Eig %v not stable", name, e)
 					}
 				}
-				if res.Accuracy != 0 {
+				if res.accuracy != 0 {
 					continue
 				}
 				if rel := relErr(res.X, wantX); !(rel <= 1e-8) {

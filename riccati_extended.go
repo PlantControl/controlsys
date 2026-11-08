@@ -240,7 +240,7 @@ var (
 // and its move under the same perturbations within newtonTol, else Dare
 // returns it at Accuracy 1.
 func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) (*RiccatiResult, bool) {
-	if !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) && !(dareUncertified(res, err) && res.unscaledBoundary) {
+	if !noSolution(err) && !errors.Is(err, ErrSchurFailed) && !(dareUncertified(res, err) && res.unscaledBoundary) {
 		return nil, false
 	}
 	cond, ok := extendedDareCond(B, opts)
@@ -317,11 +317,11 @@ func extendedDareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, cond float64) (
 		xOK = xOK && mv.x <= newtonTol
 		kwOK = kwOK && mv.kw <= newtonTol
 	}
-	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: placedRcnd(X.RawMatrix().Data, n), Accuracy: 1, xe: Y, kw: kw.dense(), kwCertified: kwOK}
+	res := &RiccatiResult{X: X, K: K, Eig: eig, Rcnd: placedRcnd(X.RawMatrix().Data, n), accuracy: 1, xe: Y, kw: kw.dense(), kwCertified: kwOK}
 	if ykOK {
 		res.xeCertified = true
 		if xOK {
-			res.Accuracy = 0
+			res.accuracy = 0
 		}
 	}
 	return res, true

@@ -55,13 +55,13 @@ func TestCare_HamiltonianAxisPairNoStabilizing(t *testing.T) {
 	}
 
 	for _, ns := range []bool{false, true} {
-		res, err := Care(mat.NewDense(n, n, a), mat.NewDense(n, m, b), mat.NewDense(n, n, q), mat.NewDense(m, m, r),
-			&RiccatiOpts{S: mat.NewDense(n, m, s), NoScaling: ns})
-		if !errors.Is(err, ErrNoStabilizing) {
+		res, err := acceptUnverified(Care(mat.NewDense(n, n, a), mat.NewDense(n, m, b), mat.NewDense(n, n, q), mat.NewDense(m, m, r),
+			&RiccatiOpts{S: mat.NewDense(n, m, s), NoScaling: ns}))
+		if !errors.Is(err, ErrNotConverged) || errors.Is(err, ErrNoStabilizing) {
 			if err == nil {
-				t.Errorf("NoScaling %v: Accuracy %d X, want ErrNoStabilizing", ns, res.Accuracy)
+				t.Errorf("NoScaling %v: Accuracy %d X, want ErrNotConverged", ns, res.accuracy)
 			} else {
-				t.Errorf("NoScaling %v: %v, want ErrNoStabilizing", ns, err)
+				t.Errorf("NoScaling %v: %v, want ErrNotConverged", ns, err)
 			}
 		}
 	}

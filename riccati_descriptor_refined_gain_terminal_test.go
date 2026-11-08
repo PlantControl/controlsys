@@ -24,7 +24,7 @@ func TestCareDescriptorFailedGainRefinementKeepsValue(t *testing.T) {
 	Q := mat.NewDense(6, 6, []float64{0.024828915086904445, -0.0049730512820884845, -0.0044194473359073, -0.007724216992385617, -0.01442463210630172, 0.006015425274775725, -0.0049730512820884845, 0.0009960737923970073, 0.0008851834549828793, 0.001547105003108647, 0.002889149867444183, -0.0012048463355710866, -0.0044194473359073, 0.0008851834549828793, 0.0007866515988485728, 0.0013748800678938403, 0.002567527451546987, -0.001070721902083649, -0.007724216992385617, 0.001547105003108647, 0.0013748800678938403, 0.002402993887747633, 0.004487470414801152, -0.0018713851940258643, -0.01442463210630172, 0.002889149867444183, 0.002567527451546987, 0.004487470414801152, 0.008380159112424923, -0.003494728718731407, 0.006015425274775725, -0.0012048463355710866, -0.001070721902083649, -0.0018713851940258643, -0.003494728718731407, 0.001457395021365842})
 	R := mat.NewDense(3, 3, []float64{2.537546937221814e-06, -1.586689065040869e-07, -1.484518646343326e-07, -1.586689065040869e-07, 2.537546937221814e-06, -1.0345150618494639e-07, -1.484518646343326e-07, -1.0345150618494639e-07, 2.537546937221814e-06})
 	S := mat.NewDense(6, 3, []float64{5.131015479608521e-05, 8.531825996917146e-05, 1.2991747098556098e-05, -1.0277054266284336e-05, -1.7088632671110708e-05, -2.6021533257173093e-06, -9.133004572402262e-06, -1.5186312758255389e-05, -2.3124795886146795e-06, -1.5962473075878917e-05, -2.6542317657218313e-05, -4.041703130569237e-06, -2.9809209380482e-05, -4.956659915579656e-05, -7.547701054853881e-06, 1.243117122204422e-05, 2.0670487201971417e-05, 3.1475764066096553e-06})
-	res, err := Care(A, B, Q, R, &RiccatiOpts{E: E, S: S})
+	res, err := acceptUnverified(Care(A, B, Q, R, &RiccatiOpts{E: E, S: S}))
 	if err != nil {
 		t.Fatalf("Care: %v", err)
 	}
@@ -33,8 +33,8 @@ func TestCareDescriptorFailedGainRefinementKeepsValue(t *testing.T) {
 		t.Fatal("oracle did not converge")
 	}
 	e := relErr(res.K, Ko)
-	t.Logf("Accuracy %d, K off the 320-bit gain by %.3g", res.Accuracy, e)
-	if res.Accuracy == 0 && e > newtonTol {
+	t.Logf("Accuracy %d, K off the 320-bit gain by %.3g", res.accuracy, e)
+	if res.accuracy == 0 && e > newtonTol {
 		t.Errorf("Accuracy 0 with K off the 320-bit gain by %.3g", e)
 	}
 }
@@ -53,7 +53,7 @@ func TestDareDescriptorRefinedGainTerminal(t *testing.T) {
 		name  string
 		solve func(a, b, q, r *mat.Dense, o *RiccatiOpts) (*RiccatiResult, error)
 	}{{"Dare", Dare}, {"Dlqr", Dlqr}} {
-		res, err := tc.solve(A, B, Q, R, &RiccatiOpts{E: E})
+		res, err := acceptUnverified(tc.solve(A, B, Q, R, &RiccatiOpts{E: E}))
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -62,8 +62,8 @@ func TestDareDescriptorRefinedGainTerminal(t *testing.T) {
 			t.Fatalf("%s: oracle did not converge", tc.name)
 		}
 		e := relErr(res.K, Ko)
-		t.Logf("%s: Accuracy %d, K off the 320-bit gain by %.3g", tc.name, res.Accuracy, e)
-		if res.Accuracy == 0 && e > newtonTol {
+		t.Logf("%s: Accuracy %d, K off the 320-bit gain by %.3g", tc.name, res.accuracy, e)
+		if res.accuracy == 0 && e > newtonTol {
 			t.Errorf("%s: Accuracy 0 with K off the 320-bit gain by %.3g", tc.name, e)
 		}
 	}

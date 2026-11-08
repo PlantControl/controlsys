@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -35,8 +34,8 @@ func TestDlqrDescriptorStalledRefinementNotCertified(t *testing.T) {
 		if m.q != nil {
 			Q, R = mat.NewDense(m.n, m.n, m.q), mat.NewDense(m.m, m.m, m.r)
 		}
-		res, err := Dlqr(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: m.noScaling})
-		if raceEnabled && errors.Is(err, ErrNoStabilizing) {
+		res, err := acceptUnverified(Dlqr(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: m.noScaling}))
+		if raceEnabled && riccatiNoSolution(err) {
 			t.Logf("model %d: race build rounding: %v, as on base", i, err)
 			continue
 		}
@@ -48,8 +47,8 @@ func TestDlqrDescriptorStalledRefinementNotCertified(t *testing.T) {
 			t.Fatalf("model %d: oracle did not converge", i)
 		}
 		eX, eK := relErr(res.X, Y), relErr(res.K, Ko)
-		t.Logf("model %d: Accuracy %d, EᵀXE off the oracle by %.3g, K by %.3g", i, res.Accuracy, eX, eK)
-		if res.Accuracy == 0 && (eX > newtonTol || eK > newtonTol) {
+		t.Logf("model %d: Accuracy %d, EᵀXE off the oracle by %.3g, K by %.3g", i, res.accuracy, eX, eK)
+		if res.accuracy == 0 && (eX > newtonTol || eK > newtonTol) {
 			t.Errorf("model %d: Accuracy 0 with EᵀXE off the oracle by %.3g, K by %.3g", i, eX, eK)
 		}
 	}

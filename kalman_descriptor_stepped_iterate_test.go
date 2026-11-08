@@ -25,7 +25,7 @@ func TestKalmanDescriptorRefinedGainStepsIterate(t *testing.T) {
 	sys := dc.system(t)
 	kd := kalmanDual(sys, sys.B, sys.D)
 	for _, ns := range []bool{false, true} {
-		res, err := Kalman(sys, eyeDense(dc.m), eyeDense(dc.p), nil, &RiccatiOpts{NoScaling: ns})
+		res, err := acceptUnverified(Kalman(sys, eyeDense(dc.m), eyeDense(dc.p), nil, &RiccatiOpts{NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
@@ -33,8 +33,8 @@ func TestKalmanDescriptorRefinedGainStepsIterate(t *testing.T) {
 		if !ok {
 			t.Fatalf("NoScaling %v: oracle did not converge", ns)
 		}
-		if res.Accuracy != 0 {
-			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
+		if res.accuracy != 0 {
+			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.accuracy)
 			continue
 		}
 		if e := relErr(res.X, Xo); e > 1e-12 {

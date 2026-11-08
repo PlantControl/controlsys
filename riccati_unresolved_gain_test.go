@@ -46,30 +46,30 @@ func TestDare_GainUnresolvedByXRefined(t *testing.T) {
 		}
 		for _, ns := range []bool{false, true} {
 			opts := &RiccatiOpts{S: c.S, E: c.E, NoScaling: ns}
-			res, err := Dare(c.A, c.B, c.Q, c.R, opts)
+			res, err := acceptUnverified(Dare(c.A, c.B, c.Q, c.R, opts))
 			if err != nil {
 				t.Fatalf("%s NoScaling %v: Dare: %v", c.name, ns, err)
 			}
 			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-			if runtime.GOARCH == "arm64" && res.Accuracy != 0 {
+			if runtime.GOARCH == "arm64" && res.accuracy != 0 {
 				if raceEnabled {
 					// -race rounds this pencil differently; Accuracy 1 is honest.
-					t.Logf("%s NoScaling %v: Dare Accuracy %d under race", c.name, ns, res.Accuracy)
+					t.Logf("%s NoScaling %v: Dare Accuracy %d under race", c.name, ns, res.accuracy)
 				} else {
-					t.Errorf("%s NoScaling %v: Dare Accuracy %d on arm64, want 0", c.name, ns, res.Accuracy)
+					t.Errorf("%s NoScaling %v: Dare Accuracy %d on arm64, want 0", c.name, ns, res.accuracy)
 				}
 			}
-			if res.Accuracy == 0 && (eX > newtonTol || eK > newtonTol) {
+			if res.accuracy == 0 && (eX > newtonTol || eK > newtonTol) {
 				t.Errorf("%s NoScaling %v: Dare Accuracy 0 with X %.3g, K %.3g off the 320-bit solution; want ≤ %g", c.name, ns, eX, eK, newtonTol)
 			}
 			if !closedLoopStable(c.A, c.B, res.K, c.E, make([]complex128, len(res.Eig))) {
 				t.Errorf("%s NoScaling %v: A − BK not stable", c.name, ns)
 			}
-			lq, err := Dlqr(c.A, c.B, c.Q, c.R, opts)
+			lq, err := acceptUnverified(Dlqr(c.A, c.B, c.Q, c.R, opts))
 			if err != nil {
 				t.Fatalf("%s NoScaling %v: Dlqr: %v", c.name, ns, err)
 			}
-			if eK := relErr(lq.K, ref.K); lq.Accuracy == 0 && eK > newtonTol {
+			if eK := relErr(lq.K, ref.K); lq.accuracy == 0 && eK > newtonTol {
 				t.Errorf("%s NoScaling %v: Dlqr Accuracy 0 with K %.3g off; want ≤ %g", c.name, ns, eK, newtonTol)
 			}
 		}
@@ -94,7 +94,7 @@ func TestDare_GainUnresolvedByXNotCertifiedWrong(t *testing.T) {
 		t.Fatal("320-bit reference failed")
 	}
 	for _, ns := range []bool{false, true} {
-		res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns})
+		res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns}))
 		if err != nil {
 			// arm64 rounds the pencil to ErrNoStabilizing here, as before.
 			t.Logf("NoScaling %v: %v", ns, err)
@@ -103,7 +103,7 @@ func TestDare_GainUnresolvedByXNotCertifiedWrong(t *testing.T) {
 		if eX := relErr(res.X, ref.X); eX > newtonTol {
 			t.Errorf("NoScaling %v: X %.3g off the 320-bit X", ns, eX)
 		}
-		if eK := relErr(res.K, ref.K); res.Accuracy == 0 && eK > gainFloor {
+		if eK := relErr(res.K, ref.K); res.accuracy == 0 && eK > gainFloor {
 			t.Errorf("NoScaling %v: Accuracy 0 with K %.3g off the 320-bit gain, above %g", ns, eK, gainFloor)
 		}
 	}

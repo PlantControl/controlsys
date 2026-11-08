@@ -34,8 +34,8 @@ type LqgResult struct {
 	Xc *mat.Dense
 	// Xf is the Kalman Riccati solution P (steady-state error covariance).
 	Xf *mat.Dense
-	// Accuracy is the larger RiccatiResult.Accuracy of Xc and Xf: 1 when
-	// no Newton step certifies one of them (MATLAB lqg warns and returns
+	// Accuracy is 1 when no Newton step certifies Xc or Xf (where Lqr or
+	// Kalman return ErrAccuracyUnverified; MATLAB lqg warns and returns
 	// the controller), so the controller may be inaccurate and its closed
 	// loop near the stability boundary only rounded to stable. With
 	// Current it is also 1 when eps perturbations of the data can move Kw
@@ -154,12 +154,12 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	}
 	var kRes *RiccatiResult
 	if continuous {
-		kRes, err = Care(Aa, Ba, Q, R, ropts)
+		kRes, err = careCore(Aa, Ba, Q, R, ropts)
 	} else {
 		kRes, err = dareFor(Aa, Ba, Q, R, ropts, true)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("Lqg: %w", err)
+		return nil, fmt.Errorf("Lqg: %w", riccatiError(err, nil))
 	}
 
 	Qn := subDense(QWV, 0, 0, n, n)
@@ -170,14 +170,14 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	}
 	lRes, err := kalmanGain("Lqg", continuous, sys.A, sys.E, eyeDense(n), sys.C, nil, Qn, Rn, Nn, nil)
 	if err != nil {
-		return nil, err
+		return nil, riccatiError(err, nil)
 	}
 
 	xGen, kwGen, kwCertified := kRes.X, kRes.kw, kRes.kwCertified
 	if kRes, err = explicitRiccatiSolution(kRes, ropts, nil); err != nil {
 		return nil, err
 	}
-	res := &LqgResult{K: subDense(kRes.K, 0, 0, m, n), L: lRes.K, Xc: kRes.X, Xf: lRes.X, Accuracy: max(kRes.Accuracy, lRes.Accuracy)}
+	res := &LqgResult{K: subDense(kRes.K, 0, 0, m, n), L: lRes.K, Xc: kRes.X, Xf: lRes.X, Accuracy: max(kRes.accuracy, lRes.accuracy)}
 	if servo {
 		res.ki = subDense(kRes.K, 0, n, m, p)
 	}

@@ -48,7 +48,7 @@ func TestDareRotatedInputsCoarseGainResolutionNotCertifiedUnrefined(t *testing.T
 			if api == "Dlqr" {
 				solve = Dlqr
 			}
-			res, err := solve(c.A, c.B, c.Q, c.R, opts)
+			res, err := acceptUnverified(solve(c.A, c.B, c.Q, c.R, opts))
 			if err != nil {
 				t.Fatalf("%s %s NoScaling %v: %v", c.name, api, ns, err)
 			}
@@ -56,8 +56,8 @@ func TestDareRotatedInputsCoarseGainResolutionNotCertifiedUnrefined(t *testing.T
 			if api == "Dlqr" {
 				eX = relErr(res.X, ref.Y)
 			}
-			t.Logf("%s %s NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", c.name, api, ns, res.Accuracy, eX, eK)
-			if riccatiCertifiedWrong(res.Accuracy, eX, 0, eK, kBand, gainFloor) {
+			t.Logf("%s %s NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", c.name, api, ns, res.accuracy, eX, eK)
+			if riccatiCertifiedWrong(res.accuracy, eX, 0, eK, kBand, gainFloor) {
 				t.Errorf("%s %s NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", c.name, api, ns, eX, eK)
 			}
 			if dareRotatedInputsUnstable(c.A, c.B, c.E, res.K) {

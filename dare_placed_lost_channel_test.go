@@ -38,7 +38,7 @@ func TestDarePlacedLostChannelNotCertified(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			A, B, Q, R, E := mat.NewDense(2, 2, tc.a), mat.NewDense(2, 2, tc.b), mat.NewDense(2, 2, tc.q), mat.NewDense(2, 2, tc.r), mat.NewDense(2, 2, tc.e)
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{E: E}))
 			if err != nil {
 				t.Logf("error, certifies nothing: %v", err)
 				return
@@ -49,8 +49,8 @@ func TestDarePlacedLostChannelNotCertified(t *testing.T) {
 				t.Fatalf("oracle not converged: %.3g", e)
 			}
 			e := relErr(res.X, oracle)
-			t.Logf("Accuracy %d, X rel err %.3g", res.Accuracy, e)
-			if res.Accuracy == 0 && !(e <= maxX) {
+			t.Logf("Accuracy %d, X rel err %.3g", res.accuracy, e)
+			if res.accuracy == 0 && !(e <= maxX) {
 				t.Errorf("certified X %.3g off the 320-bit solution, want ≤ %g or Accuracy 1", e, maxX)
 			}
 		})

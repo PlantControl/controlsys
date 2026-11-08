@@ -47,7 +47,7 @@ func descriptorGainModels(t *testing.T) []*System {
 func TestKalmanDescriptorGainMatchesOracle(t *testing.T) {
 	for i, sys := range descriptorGainModels(t) {
 		n, m, p := sys.Dims()
-		res, err := Kalman(sys, eyeDense(m), eyeDense(p), nil, nil)
+		res, err := acceptUnverified(Kalman(sys, eyeDense(m), eyeDense(p), nil, nil))
 		if err != nil {
 			t.Fatalf("model %d Kalman: %v", i, err)
 		}
@@ -56,8 +56,8 @@ func TestKalmanDescriptorGainMatchesOracle(t *testing.T) {
 		if !ok {
 			t.Fatalf("model %d: oracle did not converge", i)
 		}
-		if e := relErr(res.K.T(), Lo); (res.Accuracy == 0 || i == 0) && (res.Accuracy != 0 || e > descriptorGainTol) {
-			t.Errorf("model %d Kalman: Accuracy %d, L off the oracle by %.3g", i, res.Accuracy, e)
+		if e := relErr(res.K.T(), Lo); (res.accuracy == 0 || i == 0) && (res.accuracy != 0 || e > descriptorGainTol) {
+			t.Errorf("model %d Kalman: Accuracy %d, L off the oracle by %.3g", i, res.accuracy, e)
 		}
 		lqg, err := Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil)
 		if err != nil {
@@ -81,7 +81,7 @@ func TestLqrCareRotatedDescriptorMatchesOracle(t *testing.T) {
 	E := mat.NewDense(2, 2, []float64{0.5928042801985111, -0.0005292567946201094, -0.09606464544811585, 8.576669910372701e-05})
 	S := mat.NewDense(2, 2, []float64{0.1, 0.2, -0.3, 0.05})
 	I := eyeDense(2)
-	res, err := Lqr(A, B, I, I, &RiccatiOpts{E: E})
+	res, err := acceptUnverified(Lqr(A, B, I, I, &RiccatiOpts{E: E}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,10 +89,10 @@ func TestLqrCareRotatedDescriptorMatchesOracle(t *testing.T) {
 	if !ok {
 		t.Fatal("oracle did not converge")
 	}
-	if eX, eK := relErr(res.X, Y), relErr(res.K, Ko); res.Accuracy != 0 || eX > descriptorGainTol || eK > descriptorGainTol {
-		t.Errorf("Lqr: Accuracy %d, EᵀXE off the oracle by %.3g, K by %.3g", res.Accuracy, eX, eK)
+	if eX, eK := relErr(res.X, Y), relErr(res.K, Ko); res.accuracy != 0 || eX > descriptorGainTol || eK > descriptorGainTol {
+		t.Errorf("Lqr: Accuracy %d, EᵀXE off the oracle by %.3g, K by %.3g", res.accuracy, eX, eK)
 	}
-	cres, err := Care(A, B, I, I, &RiccatiOpts{E: E, S: S})
+	cres, err := acceptUnverified(Care(A, B, I, I, &RiccatiOpts{E: E, S: S}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +100,8 @@ func TestLqrCareRotatedDescriptorMatchesOracle(t *testing.T) {
 	if !ok {
 		t.Fatal("oracle with S did not converge")
 	}
-	if eK := relErr(cres.K, Ko); cres.Accuracy != 0 || eK > descriptorGainTol {
-		t.Errorf("Care with S: Accuracy %d, K off the oracle by %.3g", cres.Accuracy, eK)
+	if eK := relErr(cres.K, Ko); cres.accuracy != 0 || eK > descriptorGainTol {
+		t.Errorf("Care with S: Accuracy %d, K off the oracle by %.3g", cres.accuracy, eK)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestDlqrDescriptorExplicitSolutionHonest(t *testing.T) {
 		},
 	} {
 		A, B, E := mat.NewDense(2, 2, m.a), mat.NewDense(2, 1, m.b), mat.NewDense(2, 2, m.e)
-		res, err := Dlqr(A, B, eyeDense(2), eyeDense(1), &RiccatiOpts{E: E})
+		res, err := acceptUnverified(Dlqr(A, B, eyeDense(2), eyeDense(1), &RiccatiOpts{E: E}))
 		if err != nil {
 			t.Fatalf("model %d Dlqr: %v", i, err)
 		}
@@ -137,7 +137,7 @@ func TestDlqrDescriptorExplicitSolutionHonest(t *testing.T) {
 		if eK := relErr(res.K, Ko); eK > descriptorGainTol {
 			t.Errorf("model %d: K off the oracle by %.3g", i, eK)
 		}
-		if eX := relErr(res.X, Y); res.Accuracy == 0 && eX > newtonTol {
+		if eX := relErr(res.X, Y); res.accuracy == 0 && eX > newtonTol {
 			t.Errorf("model %d: Accuracy 0 with EᵀXE off the oracle by %.3g", i, eX)
 		}
 	}
@@ -154,8 +154,8 @@ func TestKalmanDescriptorMoreSensorsThanStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := Kalman(sys, eyeDense(1), eyeDense(3), nil, nil)
-	if errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrDescriptorSingular) {
+	res, err := acceptUnverified(Kalman(sys, eyeDense(1), eyeDense(3), nil, nil))
+	if riccatiNoSolution(err) || errors.Is(err, ErrDescriptorSingular) {
 		t.Skipf("Kalman: %v", err)
 	}
 	if err != nil {
@@ -163,7 +163,7 @@ func TestKalmanDescriptorMoreSensorsThanStates(t *testing.T) {
 	}
 	dual := kalmanDual(sys, sys.B, sys.D)
 	_, _, Lo, ok := nearSingularOracle(true, dual.A, dual.B, dual.Q, dual.R, dual.S, dual.E, mat.DenseCopyOf(res.K.T()))
-	if e := relErr(res.K.T(), Lo); ok && res.Accuracy == 0 && e > descriptorGainTol {
+	if e := relErr(res.K.T(), Lo); ok && res.accuracy == 0 && e > descriptorGainTol {
 		t.Errorf("Accuracy 0, L off the oracle by %.3g", e)
 	}
 }

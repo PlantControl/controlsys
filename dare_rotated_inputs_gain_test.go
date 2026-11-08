@@ -65,7 +65,7 @@ func TestDareDescriptorRotatedInputsRefinedGainTerminal(t *testing.T) {
 			if r := red.solve(c.A, c.B, c.Q, opts); r == nil || r.xe == nil {
 				t.Fatalf("%s NoScaling %v: rotated Dare K not refined", c.name, ns)
 			}
-			res, err := Dare(c.A, c.B, c.Q, c.R, opts)
+			res, err := acceptUnverified(Dare(c.A, c.B, c.Q, c.R, opts))
 			if err != nil {
 				t.Fatalf("%s NoScaling %v: %v", c.name, ns, err)
 			}
@@ -75,9 +75,9 @@ func TestDareDescriptorRotatedInputsRefinedGainTerminal(t *testing.T) {
 			if ok {
 				eKx = relErr(kx, ref.K)
 			}
-			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g, K err %.3g, gain of X err %.3g", c.name, ns, res.Accuracy, eX, eK, eKx)
-			if res.Accuracy != 0 {
-				t.Errorf("%s NoScaling %v: Accuracy %d", c.name, ns, res.Accuracy)
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g, K err %.3g, gain of X err %.3g", c.name, ns, res.accuracy, eX, eK, eKx)
+			if res.accuracy != 0 {
+				t.Errorf("%s NoScaling %v: Accuracy %d", c.name, ns, res.accuracy)
 			}
 			if eX > newtonTol || eK > 1e-9 {
 				t.Errorf("%s NoScaling %v: X off by %.3g, K by %.3g", c.name, ns, eX, eK)
@@ -147,14 +147,14 @@ func TestDareRotatedInputsUnrefinedGainHeldToGainOfX(t *testing.T) {
 			if r := red.solve(c.A, c.B, c.Q, opts); r == nil || r.xe != nil {
 				t.Fatalf("%s NoScaling %v: rotated Dare K not the unrefined one", c.name, ns)
 			}
-			res, err := Dare(c.A, c.B, c.Q, c.R, opts)
+			res, err := acceptUnverified(Dare(c.A, c.B, c.Q, c.R, opts))
 			if err != nil {
 				t.Fatalf("%s NoScaling %v: %v", c.name, ns, err)
 			}
 			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g, K err %.3g (tol %.3g)", c.name, ns, res.Accuracy, eX, eK, kTol)
-			if res.Accuracy != 0 {
-				t.Errorf("%s NoScaling %v: Accuracy %d", c.name, ns, res.Accuracy)
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g, K err %.3g (tol %.3g)", c.name, ns, res.accuracy, eX, eK, kTol)
+			if res.accuracy != 0 {
+				t.Errorf("%s NoScaling %v: Accuracy %d", c.name, ns, res.accuracy)
 			}
 			if eX > newtonTol || eK > kTol {
 				t.Errorf("%s NoScaling %v: X off by %.3g, K by %.3g (tol %.3g)", c.name, ns, eX, eK, kTol)
@@ -192,13 +192,13 @@ func TestDareRotatedInputsAccuracy1UnrefinedGainNotPromoted(t *testing.T) {
 		if red, _ := reduceInputs(A, B, Q, R, opts); red == nil || !red.rotated {
 			t.Fatalf("NoScaling %v: inputs not rotated", ns)
 		}
-		res, err := Dare(A, B, Q, R, opts)
+		res, err := acceptUnverified(Dare(A, B, Q, R, opts))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
 		eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-		t.Logf("NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", ns, res.Accuracy, eX, xBand, eK, kBand)
-		if riccatiCertifiedWrong(res.Accuracy, eX, xBand, eK, kBand, newtonTol) {
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", ns, res.accuracy, eX, xBand, eK, kBand)
+		if riccatiCertifiedWrong(res.accuracy, eX, xBand, eK, kBand, newtonTol) {
 			t.Errorf("NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
 		}
 		if dareRotatedInputsUnstable(A, B, E, res.K) {
@@ -230,16 +230,16 @@ func TestDareRotatedInputsUnrefinedGainWithinFloorRefined(t *testing.T) {
 		if red, _ := reduceInputs(A, B, Q, R, opts); red == nil || !red.rotated {
 			t.Fatalf("NoScaling %v: inputs not rotated", ns)
 		}
-		res, err := Dare(A, B, Q, R, opts)
+		res, err := acceptUnverified(Dare(A, B, Q, R, opts))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
 		eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-		t.Logf("NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", ns, res.Accuracy, eX, xBand, eK, kBand)
-		if res.Accuracy != 0 {
-			t.Errorf("NoScaling %v: Accuracy %d", ns, res.Accuracy)
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", ns, res.accuracy, eX, xBand, eK, kBand)
+		if res.accuracy != 0 {
+			t.Errorf("NoScaling %v: Accuracy %d", ns, res.accuracy)
 		}
-		if riccatiCertifiedWrong(res.Accuracy, eX, xBand, eK, kBand, newtonTol) {
+		if riccatiCertifiedWrong(res.accuracy, eX, xBand, eK, kBand, newtonTol) {
 			t.Errorf("NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
 		}
 		if dareRotatedInputsUnstable(A, B, E, res.K) {
@@ -273,16 +273,16 @@ func TestDareRotatedInputsRefinedGainBeyondFloorHewer(t *testing.T) {
 		if red, _ := reduceInputs(A, B, Q, R, opts); red == nil || !red.rotated {
 			t.Fatalf("NoScaling %v: inputs not rotated", ns)
 		}
-		res, err := Dare(A, B, Q, R, opts)
+		res, err := acceptUnverified(Dare(A, B, Q, R, opts))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
 		eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-		t.Logf("NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", ns, res.Accuracy, eX, xBand, eK, kBand)
-		if res.Accuracy != 0 {
-			t.Errorf("NoScaling %v: Accuracy %d", ns, res.Accuracy)
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", ns, res.accuracy, eX, xBand, eK, kBand)
+		if res.accuracy != 0 {
+			t.Errorf("NoScaling %v: Accuracy %d", ns, res.accuracy)
 		}
-		if riccatiCertifiedWrong(res.Accuracy, eX, xBand, eK, kBand, newtonTol) {
+		if riccatiCertifiedWrong(res.accuracy, eX, xBand, eK, kBand, newtonTol) {
 			t.Errorf("NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
 		}
 		if dareRotatedInputsUnstable(A, B, E, res.K) {

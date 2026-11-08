@@ -99,12 +99,12 @@ func TestRiccati_ZeroQ(t *testing.T) {
 			if c.continuous {
 				solve = Care
 			}
-			res, err := solve(c.A, c.B, mat.NewDense(n, n, nil), eye(m), opts)
+			res, err := acceptUnverified(solve(c.A, c.B, mat.NewDense(n, n, nil), eye(m), opts))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res.Accuracy != 0 {
-				t.Fatalf("Accuracy = %d, want 0", res.Accuracy)
+			if res.accuracy != 0 {
+				t.Fatalf("Accuracy = %d, want 0", res.accuracy)
 			}
 			want := mat.NewDense(n, n, nil)
 			if !c.zero {
@@ -153,12 +153,12 @@ func TestRiccati_ZeroQMixed(t *testing.T) {
 			if c.continuous {
 				solve = Care
 			}
-			res, err := solve(c.A, B, mat.NewDense(2, 2, nil), eye(1), nil)
+			res, err := acceptUnverified(solve(c.A, B, mat.NewDense(2, 2, nil), eye(1), nil))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if res.Accuracy != 0 {
-				t.Fatalf("Accuracy = %d, want 0", res.Accuracy)
+			if res.accuracy != 0 {
+				t.Fatalf("Accuracy = %d, want 0", res.accuracy)
 			}
 			got := append([]complex128(nil), res.Eig...)
 			byRe := func(s []complex128) {

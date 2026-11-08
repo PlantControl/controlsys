@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"testing"
@@ -136,16 +135,16 @@ func TestDare_NewtonVerified(t *testing.T) {
 		}
 		for k, noScaling := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/NoScaling=%v", tc.name, noScaling), func(t *testing.T) {
-				res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling})
-				if errors.Is(err, ErrNoStabilizing) && !tc.mustSolve[k] {
+				res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling}))
+				if riccatiNoSolution(err) && !tc.mustSolve[k] {
 					return
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				if res.Accuracy != 0 {
+				if res.accuracy != 0 {
 					if tc.mustSolve[k] {
-						t.Fatalf("Accuracy %d", res.Accuracy)
+						t.Fatalf("Accuracy %d", res.accuracy)
 					}
 					return
 				}

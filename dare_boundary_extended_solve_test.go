@@ -99,9 +99,9 @@ func TestDare_BoundaryVerdictExtendedSolve(t *testing.T) {
 				if api == "Dlqr" {
 					solve = Dlqr
 				}
-				res, err := solve(c.A, c.B, c.Q, c.R, o)
+				res, err := acceptUnverified(solve(c.A, c.B, c.Q, c.R, o))
 				if err != nil {
-					if c.ulpSensitive && !native && errors.Is(err, ErrNoStabilizing) {
+					if c.ulpSensitive && !native && riccatiNoSolution(err) {
 						t.Logf("%s %s NoScaling %v: %v, as on base off native", c.name, api, ns, err)
 						continue
 					}
@@ -123,11 +123,11 @@ func TestDare_BoundaryVerdictExtendedSolve(t *testing.T) {
 					want = Y
 				}
 				eK, eX := relErr(res.K, K), relErr(res.X, want)
-				t.Logf("%s %s NoScaling %v: Accuracy %d, K %.3g X %.3g", c.name, api, ns, res.Accuracy, eK, eX)
-				if native && api == "Dlqr" && !c.demoted && res.Accuracy != 0 {
-					t.Errorf("%s Dlqr NoScaling %v: Accuracy %d, want 0", c.name, ns, res.Accuracy)
+				t.Logf("%s %s NoScaling %v: Accuracy %d, K %.3g X %.3g", c.name, api, ns, res.accuracy, eK, eX)
+				if native && api == "Dlqr" && !c.demoted && res.accuracy != 0 {
+					t.Errorf("%s Dlqr NoScaling %v: Accuracy %d, want 0", c.name, ns, res.accuracy)
 				}
-				if res.Accuracy == 0 && !(eK <= newtonTol && eX <= newtonTol) {
+				if res.accuracy == 0 && !(eK <= newtonTol && eX <= newtonTol) {
 					t.Errorf("%s %s NoScaling %v: Accuracy 0 with K %g X %g off", c.name, api, ns, eK, eX)
 				}
 			}
@@ -174,13 +174,13 @@ func TestDlqr_UncertifiedPencilRunsExtendedSolve(t *testing.T) {
 	}
 	for _, ns := range []bool{false, true} {
 		o := &RiccatiOpts{E: E, S: S, NoScaling: ns}
-		res, err := Dlqr(A, B, Q, R, o)
+		res, err := acceptUnverified(Dlqr(A, B, Q, R, o))
 		if err != nil {
 			t.Fatalf("Dlqr NoScaling %v: %v", ns, err)
 		}
 		eK, eY := relErr(res.K, ref.K), relErr(res.X, ref.Y)
-		if res.Accuracy != 0 || !(eK <= newtonTol && eY <= newtonTol) {
-			t.Errorf("Dlqr NoScaling %v: Accuracy %d, K %.3g Y %.3g off", ns, res.Accuracy, eK, eY)
+		if res.accuracy != 0 || !(eK <= newtonTol && eY <= newtonTol) {
+			t.Errorf("Dlqr NoScaling %v: Accuracy %d, K %.3g Y %.3g off", ns, res.accuracy, eK, eY)
 		}
 	}
 	withIterationCap(t, &extendedDoublings, 2)
@@ -191,13 +191,13 @@ func TestDlqr_UncertifiedPencilRunsExtendedSolve(t *testing.T) {
 			if api == "Dlqr" {
 				solve = Dlqr
 			}
-			res, err := solve(A, B, Q, R, o)
+			res, err := acceptUnverified(solve(A, B, Q, R, o))
 			if err != nil {
 				t.Errorf("capped %s NoScaling %v: %v", api, ns, err)
 				continue
 			}
-			if eK := relErr(res.K, ref.K); res.Accuracy != 1 {
-				t.Errorf("capped %s NoScaling %v: Accuracy %d (K %.3g off), want 1", api, ns, res.Accuracy, eK)
+			if eK := relErr(res.K, ref.K); res.accuracy != 1 {
+				t.Errorf("capped %s NoScaling %v: Accuracy %d (K %.3g off), want 1", api, ns, res.accuracy, eK)
 			}
 		}
 	}
@@ -219,16 +219,16 @@ func TestDlqr_LooseExplicitSolutionRunsExtendedSolve(t *testing.T) {
 	if !ref.OK {
 		t.Fatal("320-bit reference failed")
 	}
-	res, err := Dlqr(A, B, Q, R, &RiccatiOpts{E: E})
+	res, err := acceptUnverified(Dlqr(A, B, Q, R, &RiccatiOpts{E: E}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Accuracy != 0 && !nativeBoundaryPath() {
-		t.Logf("Accuracy %d, as on base off native", res.Accuracy)
+	if res.accuracy != 0 && !nativeBoundaryPath() {
+		t.Logf("Accuracy %d, as on base off native", res.accuracy)
 		return
 	}
-	if res.Accuracy != 0 {
-		t.Errorf("Accuracy = %d, want 0", res.Accuracy)
+	if res.accuracy != 0 {
+		t.Errorf("Accuracy = %d, want 0", res.accuracy)
 	}
 	if d := relFrob(res.X, ref.Y); d > 1e-12 {
 		t.Errorf("X %.3g off the 320-bit EᵀXE", d)
@@ -251,15 +251,15 @@ func TestDlqr_LooseExplicitSolutionGainPairAgrees(t *testing.T) {
 		t.Fatal("320-bit reference failed")
 	}
 	opts := &RiccatiOpts{E: E}
-	dare, err := Dare(A, B, Q, R, opts)
+	dare, err := acceptUnverified(Dare(A, B, Q, R, opts))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dlqr, err := Dlqr(A, B, Q, R, opts)
+	dlqr, err := acceptUnverified(Dlqr(A, B, Q, R, opts))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dlqr.Accuracy == 0 || nativeBoundaryPath() {
+	if dlqr.accuracy == 0 || nativeBoundaryPath() {
 		if d := relFrob(dlqr.K, ref.K); d > newtonTol {
 			t.Errorf("Dlqr K %.3g off the gain of the 320-bit Y", d)
 		}
@@ -295,12 +295,12 @@ func TestDlqr_UncertifiedPencilAtIllConditionedERunsNearSingularSolve(t *testing
 	}
 	for _, ns := range []bool{false, true} {
 		o := &RiccatiOpts{E: E, S: S, NoScaling: ns}
-		res, err := Dlqr(A, B, Q, R, o)
+		res, err := acceptUnverified(Dlqr(A, B, Q, R, o))
 		if err != nil {
 			t.Fatalf("Dlqr NoScaling %v: %v", ns, err)
 		}
-		if res.Accuracy != 0 && !nativeBoundaryPath() {
-			t.Logf("Dlqr NoScaling %v: Accuracy %d, as on base off native", ns, res.Accuracy)
+		if res.accuracy != 0 && !nativeBoundaryPath() {
+			t.Logf("Dlqr NoScaling %v: Accuracy %d, as on base off native", ns, res.accuracy)
 			continue
 		}
 		if d := relFrob(res.X, ref.Y); d > 1e-12 {
@@ -338,18 +338,18 @@ func TestDare_FailedScalingModeUnscaledVerdictRunsNearSingularSolve(t *testing.T
 		var res *RiccatiResult
 		var err error
 		if api == "Dare" {
-			res, err = Dare(A, B, Q, R, o)
+			res, err = acceptUnverified(Dare(A, B, Q, R, o))
 		} else {
-			res, err = Dlqr(A, B, Q, R, o)
+			res, err = acceptUnverified(Dlqr(A, B, Q, R, o))
 		}
 		if err != nil {
 			t.Fatalf("%s: %v", api, err)
 		}
-		if res.Accuracy != 0 {
+		if res.accuracy != 0 {
 			if nativeBoundaryPath() {
-				t.Errorf("%s: Accuracy %d, want 0", api, res.Accuracy)
+				t.Errorf("%s: Accuracy %d, want 0", api, res.accuracy)
 			} else {
-				t.Logf("%s: Accuracy %d off native", api, res.Accuracy)
+				t.Logf("%s: Accuracy %d off native", api, res.accuracy)
 			}
 			continue
 		}

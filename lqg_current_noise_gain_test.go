@@ -18,11 +18,11 @@ func TestLqg_CurrentNoiseGainIllConditionedGram(t *testing.T) {
 	C := mat.NewDense(1, 2, []float64{0.15800404103018534, -1.2206747060996226})
 	E := mat.NewDense(2, 2, []float64{1.2223331468430856, -1.2285663860299658, 0, 8.37481347583292e-08})
 	Q, R, Rn := eyeDense(2), eyeDense(3), mat.NewDense(1, 1, []float64{0.52116111961218})
-	reg, err := Dare(A, B, Q, R, &RiccatiOpts{E: E})
+	reg, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{E: E}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reg.Accuracy == 0 {
+	if reg.accuracy == 0 {
 		checkLqgCurrentNoiseGain(t, A, B, C, E, Q, R, nil, Rn)
 		return
 	}

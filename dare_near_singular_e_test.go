@@ -104,17 +104,17 @@ func (c nearSingularDareCase) check(t *testing.T, accDare, accDlqr int) {
 			var err error
 			wantAcc := accDare
 			if api == "Dare" {
-				res, err = Dare(c.A, c.B, c.Q, c.R, opts)
+				res, err = acceptUnverified(Dare(c.A, c.B, c.Q, c.R, opts))
 			} else {
-				res, err = Dlqr(c.A, c.B, c.Q, c.R, opts)
+				res, err = acceptUnverified(Dlqr(c.A, c.B, c.Q, c.R, opts))
 				wantAcc = accDlqr
 			}
 			if err != nil {
 				t.Errorf("%s: %v", label, err)
 				continue
 			}
-			if res.Accuracy != wantAcc {
-				t.Errorf("%s: Accuracy %d, want %d", label, res.Accuracy, wantAcc)
+			if res.accuracy != wantAcc {
+				t.Errorf("%s: Accuracy %d, want %d", label, res.accuracy, wantAcc)
 			}
 			Y, X, K, conv := nearSingularOracle(false, c.A, c.B, c.Q, c.R, c.S, c.E, res.K)
 			if !conv {
@@ -126,7 +126,7 @@ func (c nearSingularDareCase) check(t *testing.T, accDare, accDlqr int) {
 				wantN, wantD = Y, dY
 			}
 			tol := 1e-6
-			if res.Accuracy == 0 {
+			if res.accuracy == 0 {
 				tol = newtonTol
 				sY, sX, sK := c.ulpSpread(t, Y, X, K)
 				s := sX
@@ -142,7 +142,7 @@ func (c nearSingularDareCase) check(t *testing.T, accDare, accDlqr int) {
 				got, want *mat.Dense
 			}{{"X vs Newton", res.X, wantN}, {"X vs doubling", res.X, wantD}, {"K vs Newton", res.K, K}, {"K vs doubling", res.K, dK}} {
 				if rel := relErr(d.got, d.want); !(rel <= tol) {
-					t.Errorf("%s: Accuracy %d with %s off by %.3g", label, res.Accuracy, d.name, rel)
+					t.Errorf("%s: Accuracy %d with %s off by %.3g", label, res.accuracy, d.name, rel)
 				}
 			}
 			for _, l := range res.Eig {
@@ -233,13 +233,13 @@ func TestDare_WellConditionedEFarModeStaysUncertified(t *testing.T) {
 			if api == "Dlqr" {
 				solve = Dlqr
 			}
-			res, err := solve(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns})
+			res, err := acceptUnverified(solve(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns}))
 			if err != nil {
 				t.Errorf("%s NoScaling %v: %v", api, ns, err)
 				continue
 			}
-			if res.Accuracy != 1 {
-				t.Errorf("%s NoScaling %v: Accuracy %d, want 1 (K %.3g off)", api, ns, res.Accuracy, relErr(res.K, ref.K))
+			if res.accuracy != 1 {
+				t.Errorf("%s NoScaling %v: Accuracy %d, want 1 (K %.3g off)", api, ns, res.accuracy, relErr(res.K, ref.K))
 			}
 			if !exactStable(res.K) {
 				t.Errorf("%s NoScaling %v: closed loop of K not Schur stable", api, ns)
@@ -326,7 +326,7 @@ func TestKalman_NearSingularEDualIsSolved(t *testing.T) {
 	if !ok {
 		t.Fatalf("doubling oracle: no stabilizing solution (ρ %.3g)", rho)
 	}
-	res, err := Kalman(sys, eyeDense(3), Rn, nil, nil)
+	res, err := acceptUnverified(Kalman(sys, eyeDense(3), Rn, nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestKalman_NearSingularEDualIsSolved(t *testing.T) {
 		t.Fatal("Newton from the returned gain does not converge")
 	}
 	tol := 1e-6
-	if res.Accuracy == 0 {
+	if res.accuracy == 0 {
 		tol = newtonTol
 		if _, sX, sK := dual.ulpSpread(t, nil, X, Kn); !(sX <= newtonTol && sK <= newtonTol) {
 			t.Errorf("Accuracy 0 where 1 ulp moves X by %.3g, L by %.3g", sX, sK)
@@ -347,7 +347,7 @@ func TestKalman_NearSingularEDualIsSolved(t *testing.T) {
 		got, want *mat.Dense
 	}{{"X vs Newton", res.X, X}, {"X vs doubling", res.X, wantX}, {"L vs Newton", K, Kn}, {"L vs doubling", K, wantK}} {
 		if rel := relErr(d.got, d.want); !(rel <= tol) {
-			t.Errorf("Accuracy %d with %s off by %.3g", res.Accuracy, d.name, rel)
+			t.Errorf("Accuracy %d with %s off by %.3g", res.accuracy, d.name, rel)
 		}
 	}
 }
@@ -373,7 +373,7 @@ func TestKalman_NearSingularEGrowingModeDualIsSolved(t *testing.T) {
 	gq.Mul(B, B.T())
 	dual := nearSingularDareCase{A: mat.DenseCopyOf(A.T()), B: mat.DenseCopyOf(C.T()), Q: &gq, R: Rn, E: mat.DenseCopyOf(E.T())}
 	for _, ns := range []bool{false, true} {
-		res, err := Kalman(sys, eyeDense(1), Rn, nil, &RiccatiOpts{NoScaling: ns})
+		res, err := acceptUnverified(Kalman(sys, eyeDense(1), Rn, nil, &RiccatiOpts{NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
@@ -383,17 +383,17 @@ func TestKalman_NearSingularEGrowingModeDualIsSolved(t *testing.T) {
 			t.Fatal("Newton from the returned gain does not converge")
 		}
 		tol := 1e-6
-		if res.Accuracy == 0 {
+		if res.accuracy == 0 {
 			tol = newtonTol
 			if _, sX, sK := dual.ulpSpread(t, nil, X, Kn); !(sX <= newtonTol && sK <= newtonTol) {
 				t.Errorf("Accuracy 0 where 1 ulp moves X by %.3g, L by %.3g", sX, sK)
 			}
 		}
 		if rel := relErr(res.X, X); !(rel <= tol) {
-			t.Errorf("NoScaling %v: Accuracy %d with X off by %.3g", ns, res.Accuracy, rel)
+			t.Errorf("NoScaling %v: Accuracy %d with X off by %.3g", ns, res.accuracy, rel)
 		}
 		if rel := relErr(K, Kn); !(rel <= tol) {
-			t.Errorf("NoScaling %v: Accuracy %d with L off by %.3g", ns, res.Accuracy, rel)
+			t.Errorf("NoScaling %v: Accuracy %d with L off by %.3g", ns, res.accuracy, rel)
 		}
 	}
 }

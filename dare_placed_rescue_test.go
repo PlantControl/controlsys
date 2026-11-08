@@ -55,13 +55,13 @@ func TestDare_PoorPencilSolutionIsCertifiedByPlacedHewer(t *testing.T) {
 			S = mat.NewDense(c.n, c.m, c.s)
 		}
 		want := dareDoublingBig(A, B, Q, R, S)
-		res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S})
+		res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S}))
 		if err != nil {
 			t.Errorf("case %d: %v", i, err)
 			continue
 		}
-		if rel := relErr(res.X, want); !(rel <= 1e-8) && !(i == 2 && runtime.GOARCH == "amd64" && res.Accuracy == 1) {
-			t.Errorf("case %d: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g; want ≤ 1e-8", i, res.Accuracy, rel)
+		if rel := relErr(res.X, want); !(rel <= 1e-8) && !(i == 2 && runtime.GOARCH == "amd64" && res.accuracy == 1) {
+			t.Errorf("case %d: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g; want ≤ 1e-8", i, res.accuracy, rel)
 		}
 		if rel := relErr(hewerDareBig(A, B, Q, R, S, res.K, 30), want); !(rel <= 1e-12) {
 			t.Errorf("case %d: Hewer from K reaches %.3g of X*", i, rel)

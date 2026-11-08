@@ -15,7 +15,10 @@ import (
 // A is n×n, G is n×g (noise input), C is p×n, Qn is g×g, Rn is p×p and Nn,
 // the g×p noise cross-covariance E{w v'}, may be nil for 0. opts carries only
 // the Workspace (sized NewRiccatiWorkspace(n, p)); opts.S and opts.E return
-// ErrOptionUnsupported.
+// ErrOptionUnsupported. Errors are those of the dual Care (RiccatiResult):
+// an uncertified solution comes with ErrAccuracyUnverified, and a boundary
+// mode the PBH test finds undetectable is ErrNoStabilizing with
+// ErrNotDetectable.
 func Lqe(A, G, C, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	for _, m := range []struct {
 		name string
@@ -54,7 +57,8 @@ func Lqe(A, G, C, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, err
 	if n == 0 {
 		return nil, fmt.Errorf("Lqe: no states: %w", ErrDimensionMismatch)
 	}
-	return kalmanGain("Lqe", true, A, nil, G, C, nil, Qn, Rn, Nn, opts)
+	res, err := kalmanGain("Lqe", true, A, nil, G, C, nil, Qn, Rn, Nn, opts)
+	return certify("Lqe", ErrNotDetectable, res, err)
 }
 
 // rejectKalmanOpts keeps opts to the Workspace: the noise cross-covariance is
@@ -102,6 +106,7 @@ func rejectKalmanOpts(op string, opts *RiccatiOpts) error {
 // that Estim and Reg build from sys, i.e. E times the explicit-model gain.
 // MATLAB's kalman documentation does not specify descriptor models; this is
 // the form consistent with Estim. Singular E returns ErrDescriptorSingular.
+// The Riccati errors are as for Lqe.
 func Kalman(sys *System, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := requireFiniteSystem("Kalman", sys); err != nil {
 		return nil, err
@@ -122,7 +127,8 @@ func Kalman(sys *System, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResu
 	if err := validateNoiseCrossCovariance("Kalman", Nn, policy.m, policy.p); err != nil {
 		return nil, err
 	}
-	return kalmanGain("Kalman", sys.IsContinuous(), sys.A, sys.E, sys.B, sys.C, sys.D, Qn, Rn, Nn, opts)
+	res, err := kalmanGain("Kalman", sys.IsContinuous(), sys.A, sys.E, sys.B, sys.C, sys.D, Qn, Rn, Nn, opts)
+	return certify("Kalman", ErrNotDetectable, res, err)
 }
 
 func validateNoiseCrossCovariance(op string, Nn *mat.Dense, g, p int) error {
@@ -138,6 +144,8 @@ func validateNoiseCrossCovariance(op string, Nn *mat.Dense, g, p int) error {
 	return nil
 }
 
+// kalmanGain solves the dual Riccati equation of Lqe, Kalman and Lqg with
+// the cores of Care and Dare, uncertified: its exported callers certify.
 func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	n, _ := A.Dims()
 	g := Qn.RawMatrix().Rows
@@ -181,14 +189,14 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 	var res *RiccatiResult
 	var err error
 	if continuous {
-		res, err = Care(At, Ct, Qbar, Rbar, ropts)
+		res, err = careCore(At, Ct, Qbar, Rbar, ropts)
 	} else {
-		res, err = Dare(At, Ct, Qbar, Rbar, ropts)
+		res, err = dareFor(At, Ct, Qbar, Rbar, ropts, false)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", context, err)
 	}
-	return &RiccatiResult{X: res.X, K: transposeGain(res.K), Eig: res.Eig, Rcnd: res.Rcnd, Accuracy: res.Accuracy}, nil
+	return &RiccatiResult{X: res.X, K: transposeGain(res.K), Eig: res.Eig, Rcnd: res.Rcnd, accuracy: res.accuracy}, nil
 }
 
 // Kalmd computes the discrete Kalman filter gain from a continuous plant
@@ -203,7 +211,8 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 // used for the discrete Riccati solve and must be sized NewRiccatiWorkspace(n, p).
 // A descriptor plant with nonsingular E is discretized as its explicit model
 // x' = E⁻¹Ax + E⁻¹Bw, so the result is that of the explicit discrete model;
-// singular E returns ErrDescriptorSingular.
+// singular E returns ErrDescriptorSingular. The Riccati errors are as for
+// Lqe, of the discrete dual.
 func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := requireFiniteSystem("Kalmd", sys); err != nil {
 		return nil, err
@@ -319,14 +328,14 @@ func Kalmd(sys *System, Qn, Rn *mat.Dense, dt float64, opts *RiccatiOpts) (*Ricc
 	}
 	Ct := mat.NewDense(n, p, ctData)
 
-	res, err := Dare(Adt, Ct, Qd, Rd, opts)
+	res, err := dareFor(Adt, Ct, Qd, Rd, opts, false)
 	if err != nil {
-		return nil, fmt.Errorf("Kalmd: %w", err)
+		return certify("Kalmd", ErrNotDetectable, nil, fmt.Errorf("Kalmd: %w", err))
 	}
 
 	L := transposeGain(res.K)
 
-	return &RiccatiResult{X: res.X, K: L, Eig: res.Eig, Rcnd: res.Rcnd, Accuracy: res.Accuracy}, nil
+	return certify("Kalmd", ErrNotDetectable, &RiccatiResult{X: res.X, K: L, Eig: res.Eig, Rcnd: res.Rcnd, accuracy: res.accuracy}, nil)
 }
 
 // Estim constructs the state estimator of a plant with observer gain L, as
