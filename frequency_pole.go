@@ -6,6 +6,8 @@ import (
 	"math/big"
 	"math/cmplx"
 	"slices"
+
+	"plantcontrol.org/v1/gonum/mat"
 )
 
 // poleResponse is the response entry at one of its poles. Like MATLAB's 1/0
@@ -350,7 +352,12 @@ func ddAtPole(sys *System, s complex128, sp poleGeometry, g []complex128) bool {
 // near s as evalWithPoleLimit defines it. offDC reports that gap is within
 // 1e-3 of the distance from s to DC (s = 0, or z = 1 for a discrete
 // model): the nearest pole is a resonance, not an integrator or a cluster
-// at DC.
+// at DC. At s = 0 of an explicit model a nonzero pole the data locate to
+// poleClusterTol of itself (resolvedPoles) is distinct from s however
+// small against the scale: a stiff graded realization, triangular with
+// one fast pole near 1e15, puts a slow pole below eps·‖A‖ that only its
+// componentwise rounding moves (BLHSVK). So does an exactly stored tiny
+// diagonal entry, whose response is −CA⁻¹B + D as A is nonsingular.
 type poleGeometry struct {
 	rho, wide, gap, scale float64
 	near, offDC           bool
@@ -374,32 +381,50 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 	if scale == 0 {
 		scale = 1
 	}
+	var resolved []bool
+	if s == 0 && !newDescriptorPolicy(sys).isDescriptor() && slices.ContainsFunc(poles, func(p complex128) bool {
+		return p != 0 && cmplx.Abs(p) <= poleClusterTol*scale
+	}) {
+		if p, r := resolvedPoles(sys.A, n); r != nil {
+			poles, resolved = p, r
+		}
+	}
 	rho := scale
 	near := false
 	dist := make([]float64, 0, len(poles))
+	var clustered []float64
+	resolvedGap := math.Inf(1)
 	relative := false
-	for _, p := range poles {
+	for i, p := range poles {
 		d := cmplx.Abs(p - s)
-		if d > poleClusterTol*scale && d < rho {
+		distinct := resolved != nil && resolved[i]
+		if (distinct || d > poleClusterTol*scale) && d < rho {
 			rho = d
 		}
 		if !cmplx.IsInf(p) {
 			relative = relative || d <= poleRelativeTol*max(cmplx.Abs(s), cmplx.Abs(p))
-			near = near || s == 0 && d <= poleClusterTol*scale
+			near = near || s == 0 && !distinct && d <= poleClusterTol*scale
 			dist = append(dist, d)
+			if distinct {
+				resolvedGap = min(resolvedGap, d)
+			} else {
+				clustered = append(clustered, d)
+			}
 		}
 	}
 	slices.Sort(dist)
+	slices.Sort(clustered)
 	cluster := 0
-	for k, d := range dist {
+	for k, d := range clustered {
 		if d <= poleClusterSpread*math.Pow(eps(), 1/float64(k+1))*scale {
 			cluster = k + 1
 		}
 	}
 	wide := scale
-	if cluster < len(dist) {
-		wide = min(scale, max(rho, dist[cluster]))
+	if cluster < len(clustered) {
+		wide = min(scale, max(rho, clustered[cluster]))
 	}
+	wide = min(wide, max(rho, resolvedGap))
 	if sys.LFT != nil {
 		for _, tau := range sys.LFT.Tau {
 			if tau <= 0 {
@@ -427,6 +452,46 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 	}
 	offDC := gap <= 1e-3*cmplx.Abs(s-dc)
 	return poleGeometry{rho: rho, wide: wide, gap: gap, scale: scale, near: near, offDC: offDC}, nil
+}
+
+// resolvedPoles returns the eigenvalues of the n×n A with, for each, whether
+// componentwise rounding of A moves it by at most poleClusterTol of its
+// modulus: the first-order bound ε·|y|ᵀ|A||x| / |yᴴx| for right and left
+// eigenvectors x, y, invariant under diagonal scaling of A. A rounded
+// integrator, an exact zero or a computed one of a dense realization, has
+// a bound of the order of its own modulus and is not resolved. Where the
+// factorization fails it returns nil.
+func resolvedPoles(A *mat.Dense, n int) ([]complex128, []bool) {
+	var eig mat.Eigen
+	if !eig.Factorize(A, mat.EigenBoth) {
+		return nil, nil
+	}
+	poles := eig.Values(nil)
+	var x, y mat.CDense
+	eig.VectorsTo(&x)
+	eig.LeftVectorsTo(&y)
+	raw := A.RawMatrix()
+	ax := make([]float64, n)
+	resolved := make([]bool, len(poles))
+	for k, p := range poles {
+		if p == 0 {
+			continue
+		}
+		var yx complex128
+		for i := range n {
+			yx += cmplx.Conj(y.At(i, k)) * x.At(i, k)
+			ax[i] = 0
+			for j, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
+				ax[i] += math.Abs(v) * cmplx.Abs(x.At(j, k))
+			}
+		}
+		var yax float64
+		for i := range n {
+			yax += cmplx.Abs(y.At(i, k)) * ax[i]
+		}
+		resolved[k] = eps()*yax <= poleClusterTol*cmplx.Abs(p)*cmplx.Abs(yx)
+	}
+	return poles, resolved
 }
 
 // ddResponseInto sets dst to the p×m response C(sE−A)⁻¹B + D of the
