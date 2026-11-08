@@ -722,7 +722,8 @@ func FuzzC2DMatched(f *testing.F) {
 }
 
 // FuzzC2DLeastSquares checks the least-squares fit's contract: C2DFit and
-// C2D agree bitwise, the reported Stable flag matches an exact Schur–Cohn
+// C2D agree bitwise and in class (ErrAccuracyUnverified exactly on the
+// pencil route), the reported Stable flag matches an exact Schur–Cohn
 // count of the fitted A, the auto order is the source order, and MIMO is
 // ErrNotSISO.
 func FuzzC2DLeastSquares(f *testing.F) {
@@ -745,10 +746,21 @@ func FuzzC2DLeastSquares(f *testing.F) {
 		}
 		sd, fit, err := sys.C2DFit(dt, opts)
 		fzContract(t, s, "C2DFit", sd != nil, err)
-		fzErr(t, s, "C2DFit", err, ErrSingularTransform, ErrOverflow)
+		unverified := errors.Is(err, ErrAccuracyUnverified)
+		if !unverified {
+			fzErr(t, s, "C2DFit", err, ErrSingularTransform, ErrOverflow)
+		}
+		if routed := leastSquaresPencilSlow(sys) != nil; unverified != routed {
+			t.Fatalf("C2DFit: %v with the pencil route %v\n%s", err, routed, s)
+		}
 		sd2, err := sys.C2D(dt, opts)
 		fzContract(t, s, "C2D(least-squares)", sd2 != nil, err)
-		fzErr(t, s, "C2D(least-squares)", err)
+		if errors.Is(err, ErrAccuracyUnverified) != unverified {
+			t.Fatalf("C2D(least-squares): %v, C2DFit unverified %v\n%s", err, unverified, s)
+		}
+		if !unverified {
+			fzErr(t, s, "C2D(least-squares)", err)
+		}
 		a1, b1, c1, d1 := fzRaw(sd)
 		a2, b2, c2, d2 := fzRaw(sd2)
 		if !slices.Equal(a1, a2) || !slices.Equal(b1, b2) || !slices.Equal(c1, c2) || !slices.Equal(d1, d2) || sd.Dt != dt || sd2.Dt != dt {

@@ -56,18 +56,15 @@ func TestC2DLeastSquaresStiffDescriptorKeepsUnstablePole(t *testing.T) {
 		}
 	}
 	d, err := sys.C2D(dt, opts)
-	if err != nil {
-		t.Fatal(err)
+	if !lsUnverified(t, "C2D", d, err) {
+		t.Error("C2D: fit through the pencil certified")
 	}
 	df, fit, err := sys.C2DFit(dt, opts)
-	if err != nil {
-		t.Fatal(err)
+	if !lsUnverified(t, "C2DFit", df, err) {
+		t.Error("C2DFit: fit through the pencil certified")
 	}
 	if fit.Stable {
 		t.Error("C2DFit reports a stable fit of an unstable plant")
-	}
-	if fit.Accuracy != 1 {
-		t.Errorf("Accuracy %d for a fit through the pencil, want 1", fit.Accuracy)
 	}
 	for _, d := range []*System{d, df} {
 		poles, err := d.Poles()

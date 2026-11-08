@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -47,8 +48,8 @@ func TestC2DLeastSquaresStiffDescriptorNoSpuriousIntegrator(t *testing.T) {
 		}
 		opts := C2DOptions{Method: C2DMethodLeastSquares}
 		d, err := sys.C2D(dt, opts)
-		if err != nil {
-			t.Fatalf("seed %d: C2D: %v", tc.seed, err)
+		if !lsUnverified(t, fmt.Sprintf("seed %d: C2D", tc.seed), d, err) {
+			t.Errorf("seed %d: C2D: fit through the pencil certified", tc.seed)
 		}
 		poles, err := d.Poles()
 		if err != nil {
@@ -63,8 +64,8 @@ func TestC2DLeastSquaresStiffDescriptorNoSpuriousIntegrator(t *testing.T) {
 			t.Errorf("seed %d: C2D fit error vs pencil %.4g > base %.4g", tc.seed, got, tc.bound)
 		}
 		df, _, err := sys.C2DFit(dt, opts)
-		if err != nil {
-			t.Fatalf("seed %d: C2DFit: %v", tc.seed, err)
+		if !lsUnverified(t, fmt.Sprintf("seed %d: C2DFit", tc.seed), df, err) {
+			t.Errorf("seed %d: C2DFit: fit through the pencil certified", tc.seed)
 		}
 		if got := lsPencilFitError(t, df, twin, dt); got > tc.bound {
 			t.Errorf("seed %d: C2DFit fit error vs pencil %.4g > base %.4g", tc.seed, got, tc.bound)
@@ -105,12 +106,12 @@ func TestC2DLeastSquaresStiffDescriptorKeepsIntegrator(t *testing.T) {
 	}
 	opts := C2DOptions{Method: C2DMethodLeastSquares}
 	d, err := sys.C2D(dt, opts)
-	if err != nil {
-		t.Fatal(err)
+	if !lsUnverified(t, "C2D", d, err) {
+		t.Error("C2D: fit through the pencil certified")
 	}
 	df, _, err := sys.C2DFit(dt, opts)
-	if err != nil {
-		t.Fatal(err)
+	if !lsUnverified(t, "C2DFit", df, err) {
+		t.Error("C2DFit: fit through the pencil certified")
 	}
 	for _, d := range []*System{d, df} {
 		poles, err := d.Poles()
