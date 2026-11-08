@@ -206,11 +206,13 @@ var (
 	ErrSignalNotFound = errors.New("controlsys: signal name not found")
 
 	// ErrNotStabilizable reports a model with an unstable uncontrollable mode.
-	// Care, Dare and the Lqr family wrap it with ErrNoStabilizing.
+	// Care, Dare, the Lqr family and the regulator equations of Lqg and
+	// H2Syn wrap it with ErrNoStabilizing.
 	ErrNotStabilizable = errors.New("controlsys: system is not stabilizable")
 
 	// ErrNotDetectable reports a model with an unstable unobservable mode.
-	// Kalman, Lqe and Kalmd wrap it with ErrNoStabilizing.
+	// Kalman, Lqe, Kalmd and the filter equations of Lqg and H2Syn wrap it
+	// with ErrNoStabilizing.
 	ErrNotDetectable = errors.New("controlsys: system is not detectable")
 
 	// ErrInvalidPartition reports generalized-plant partition sizes that do
