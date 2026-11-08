@@ -34,14 +34,14 @@ func TestDare_ReducedInputsNearSingularERefinedGainNotCertifiedWrong(t *testing.
 			x     *mat.Dense
 			xBand float64
 		}{{"Dare", Dare, ref.X, sens.X}, {"Dlqr", Dlqr, ref.Y, sens.Y}} {
-			res, err := c.solve(A, B, Q, R, &RiccatiOpts{S: S, E: E, NoScaling: ns})
+			res, err := acceptUnverified(c.solve(A, B, Q, R, &RiccatiOpts{S: S, E: E, NoScaling: ns}))
 			if err != nil {
 				t.Errorf("%s NoScaling %v: %v", c.name, ns, err)
 				continue
 			}
 			eX, eK := relErr(res.X, c.x), relErr(res.K, ref.K)
-			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.Accuracy, eX, c.xBand, eK, sens.KBand())
-			if riccatiCertifiedWrong(res.Accuracy, eX, c.xBand, eK, sens.KBand(), gainFloor) {
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.accuracy, eX, c.xBand, eK, sens.KBand())
+			if riccatiCertifiedWrong(res.accuracy, eX, c.xBand, eK, sens.KBand(), gainFloor) {
 				t.Errorf("%s NoScaling %v: certified-wrong: X err %g, K err %g", c.name, ns, eX, eK)
 			}
 			if eK > max(gainFloor, 4*sens.KBand()) {

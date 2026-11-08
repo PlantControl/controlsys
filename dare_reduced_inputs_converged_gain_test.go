@@ -34,14 +34,14 @@ func TestDare_ReducedInputsConvergedXGainNotCertifiedWrong(t *testing.T) {
 			x     *mat.Dense
 			xBand float64
 		}{{"Dare", Dare, ref.X, sens.X}, {"Dlqr", Dlqr, ref.Y, sens.Y}} {
-			res, err := c.solve(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns})
+			res, err := acceptUnverified(c.solve(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns}))
 			if err != nil {
 				t.Errorf("%s NoScaling %v: %v", c.name, ns, err)
 				continue
 			}
 			eX, eK := relErr(res.X, c.x), relErr(res.K, ref.K)
-			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.Accuracy, eX, c.xBand, eK, sens.KBand())
-			if riccatiCertifiedWrong(res.Accuracy, eX, c.xBand, eK, sens.KBand(), gainFloor) {
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.accuracy, eX, c.xBand, eK, sens.KBand())
+			if riccatiCertifiedWrong(res.accuracy, eX, c.xBand, eK, sens.KBand(), gainFloor) {
 				t.Errorf("%s NoScaling %v: certified-wrong: X err %g, K err %g", c.name, ns, eX, eK)
 			}
 		}
@@ -102,18 +102,18 @@ func TestDare_ReducedInputsHewerGainNotHeldToRoundedX(t *testing.T) {
 			t.Fatalf("%s: reference not certified", c.name)
 		}
 		for _, ns := range []bool{false, true} {
-			res, err := Dare(c.A, c.B, c.Q, c.R, &RiccatiOpts{S: c.S, E: c.E, NoScaling: ns})
+			res, err := acceptUnverified(Dare(c.A, c.B, c.Q, c.R, &RiccatiOpts{S: c.S, E: c.E, NoScaling: ns}))
 			if err != nil {
 				t.Errorf("%s NoScaling %v: %v", c.name, ns, err)
 				continue
 			}
 			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.Accuracy, eX, sens.X, eK, sens.KBand())
-			if riccatiCertifiedWrong(res.Accuracy, eX, sens.X, eK, sens.KBand(), gainFloor) {
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.accuracy, eX, sens.X, eK, sens.KBand())
+			if riccatiCertifiedWrong(res.accuracy, eX, sens.X, eK, sens.KBand(), gainFloor) {
 				t.Errorf("%s NoScaling %v: certified-wrong: X err %g, K err %g", c.name, ns, eX, eK)
 			}
-			if !raceEnabled && slices.Contains(c.acc0[runtime.GOARCH], ns) && (res.Accuracy != 0 || eK > 7e-16) {
-				t.Errorf("%s NoScaling %v: Accuracy %d, K err %g; want Accuracy 0, K exact", c.name, ns, res.Accuracy, eK)
+			if !raceEnabled && slices.Contains(c.acc0[runtime.GOARCH], ns) && (res.accuracy != 0 || eK > 7e-16) {
+				t.Errorf("%s NoScaling %v: Accuracy %d, K err %g; want Accuracy 0, K exact", c.name, ns, res.accuracy, eK)
 			}
 		}
 	}

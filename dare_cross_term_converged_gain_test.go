@@ -31,7 +31,7 @@ func TestDareCrossTermGainOfConvergedX(t *testing.T) {
 		t.Fatal("reference not certified")
 	}
 	for _, ns := range []bool{false, true} {
-		res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: ns})
+		res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
@@ -43,7 +43,7 @@ func TestDareCrossTermGainOfConvergedX(t *testing.T) {
 			}
 			xTol = max(newtonTol, 4*sens.X)
 		}
-		if eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K); res.Accuracy == 0 && (eX > xTol || eK > 1e-7) {
+		if eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K); res.accuracy == 0 && (eX > xTol || eK > 1e-7) {
 			t.Errorf("NoScaling %v: Accuracy 0, X off the oracle by %.3g, K by %.3g", ns, eX, eK)
 		}
 	}

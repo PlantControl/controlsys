@@ -34,8 +34,8 @@ func TestRiccatiAccuracy_Propagated(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if res.Accuracy != 1 {
-			t.Fatalf("%s: Accuracy %d, want 1", name, res.Accuracy)
+		if res.accuracy != 1 {
+			t.Fatalf("%s: Accuracy %d, want 1", name, res.accuracy)
 		}
 		var bk, acl mat.Dense
 		if gainLeft {
@@ -54,10 +54,10 @@ func TestRiccatiAccuracy_Propagated(t *testing.T) {
 			}
 		}
 	}
-	res, err := Lqr(A, B, Q, R, nil)
+	res, err := acceptUnverified(Lqr(A, B, Q, R, nil))
 	check("Lqr", res, err, A, B, false)
 	At, Bt := mat.DenseCopyOf(A.T()), mat.DenseCopyOf(B.T())
-	res, err = Lqe(At, eyeDense(n), Bt, Q, R, nil, nil)
+	res, err = acceptUnverified(Lqe(At, eyeDense(n), Bt, Q, R, nil, nil))
 	check("Lqe", res, err, At, Bt, true)
 }
 
@@ -180,8 +180,8 @@ func lqgH2SynAccuracy(t *testing.T, name string) {
 // of the MPWOJM cluster band on a non-normal block).
 func TestRiccati_OtherScalingAccuracy(t *testing.T) {
 	ws := NewRiccatiWorkspace(1, 1)
-	poor := &RiccatiResult{Accuracy: 1, step: 1e-6}
-	acc1 := func(step float64) *RiccatiResult { return &RiccatiResult{Accuracy: 1, step: step} }
+	poor := &RiccatiResult{accuracy: 1, step: 1e-6}
+	acc1 := func(step float64) *RiccatiResult { return &RiccatiResult{accuracy: 1, step: step} }
 	certified := &RiccatiResult{}
 	type out struct {
 		res *RiccatiResult
@@ -198,10 +198,10 @@ func TestRiccati_OtherScalingAccuracy(t *testing.T) {
 		{"retry smaller step", out{acc1(1e-7), nil}, out{acc1(1e-7), nil}, 1, 3, nil},
 		{"retry larger step", out{acc1(1e-5), nil}, out{acc1(1e-5), nil}, 0, 3, nil},
 		{"retry equal step", out{acc1(1e-6), nil}, out{acc1(1e-6), nil}, 0, 3, nil},
-		{"retry Inf step", out{acc1(math.Inf(1)), nil}, out{nil, ErrNoStabilizing}, 0, 3, nil},
-		{"retry fails", out{nil, ErrNoStabilizing}, out{nil, ErrSchurFailed}, 0, 3, nil},
+		{"retry Inf step", out{acc1(math.Inf(1)), nil}, out{nil, errNoCandidate}, 0, 3, nil},
+		{"retry fails", out{nil, errNoCandidate}, out{nil, ErrSchurFailed}, 0, 3, nil},
 		{"plain certified", out{acc1(1e-7), nil}, out{certified, nil}, 2, 3, nil},
-		{"plain smaller step", out{nil, ErrNoStabilizing}, out{acc1(1e-7), nil}, 2, 3, nil},
+		{"plain smaller step", out{nil, errNoCandidate}, out{acc1(1e-7), nil}, 2, 3, nil},
 		{"boundary", out{nil, errBoundaryUnstabilizable}, out{acc1(1e-7), nil}, -1, 3, errBoundaryUnstabilizable},
 		{"plain boundary", out{acc1(1e-7), nil}, out{nil, errBoundaryUnstabilizable}, -1, 3, errBoundaryUnstabilizable},
 		{"boundary then certified", out{nil, errBoundaryUnstabilizable}, out{certified, nil}, 2, 3, nil},
@@ -249,7 +249,7 @@ func TestRiccati_OtherScalingAccuracy(t *testing.T) {
 	}{
 		{"boundary first, certified retry", out{certified, nil}, certified, nil},
 		{"boundary first, Accuracy 1 retry", out{acc1(1e-9), nil}, nil, errBoundaryUnstabilizable},
-		{"boundary first, failed retry", out{nil, ErrNoStabilizing}, nil, errBoundaryUnstabilizable},
+		{"boundary first, failed retry", out{nil, errNoCandidate}, nil, errBoundaryUnstabilizable},
 	} {
 		calls = 0
 		res, err := otherScaling(func(_, _, _, _ *mat.Dense, _ *RiccatiOpts) (*RiccatiResult, error) {
@@ -310,10 +310,10 @@ func TestRiccati_OtherScaling(t *testing.T) {
 		wantOK bool
 		err    error
 	}{
-		{"default fails", nil, map[bool]error{false: ErrNoStabilizing}, []bool{false, true}, true, nil},
+		{"default fails", nil, map[bool]error{false: errNoCandidate}, []bool{false, true}, true, nil},
 		{"NoScaling fails", &RiccatiOpts{S: S, NoScaling: true}, map[bool]error{true: first}, []bool{true, false}, true, nil},
-		{"both fail", &RiccatiOpts{S: S}, map[bool]error{false: first, true: ErrNoStabilizing}, []bool{false, true, false}, false, first},
-		{"both fail, Dare", &RiccatiOpts{S: S}, map[bool]error{false: first, true: ErrNoStabilizing}, []bool{false, true}, false, first},
+		{"both fail", &RiccatiOpts{S: S}, map[bool]error{false: first, true: errNoCandidate}, []bool{false, true, false}, false, first},
+		{"both fail, Dare", &RiccatiOpts{S: S}, map[bool]error{false: first, true: errNoCandidate}, []bool{false, true}, false, first},
 		{"singular R", nil, map[bool]error{false: ErrSingularR}, []bool{false}, false, ErrSingularR},
 		{"solves", nil, nil, []bool{false}, true, nil},
 	} {
@@ -508,12 +508,12 @@ func TestCare_NearZeroModeCertified(t *testing.T) {
 	const r = 54.32991215802281
 	Qd := mat.DenseCopyOf(Q)
 	for _, ns := range []bool{false, true} {
-		res, err := Care(A, B, Qd, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns})
+		res, err := acceptUnverified(Care(A, B, Qd, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
-		if res.Accuracy != 0 {
-			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
+		if res.accuracy != 0 {
+			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.accuracy)
 		}
 		Xo := bigRiccatiNewton(t, true, A, B, Qd, r, res.X)
 		var d mat.Dense
@@ -534,8 +534,8 @@ func TestCare_NearZeroModeCertified(t *testing.T) {
 // 256-bit Newton oracle shows each X accurate; the 0.11 error once
 // reported for "uncontrollable" was that of a block oracle whose x₁₁
 // cancels (TestCare_NearZeroModeCertified). Under gonum 30740af
-// (HF5PTS) uncontrollable2 returns ErrNoStabilizing on every platform
-// though a solution exists (owner A55GER).
+// (HF5PTS) uncontrollable2 finds no verified solution on every platform
+// (ErrNotConverged since ZOJBZX) though a solution exists (owner A55GER).
 func TestCare_LyapunovSingularRescue(t *testing.T) {
 	decoupled := func(a float64) []float64 {
 		return []float64{a, 0, 0, 0,
@@ -578,16 +578,16 @@ func TestCare_LyapunovSingularRescue(t *testing.T) {
 				A := mat.NewDense(n, n, tc.a)
 				B := mat.NewDense(n, 1, tc.b)
 				Q := mat.NewDense(n, n, tc.q)
-				res, err := Care(A, B, Q, mat.NewDense(1, 1, []float64{tc.r}), &RiccatiOpts{NoScaling: ns})
-				if tc.name == "uncontrollable2" && errors.Is(err, ErrNoStabilizing) {
+				res, err := acceptUnverified(Care(A, B, Q, mat.NewDense(1, 1, []float64{tc.r}), &RiccatiOpts{NoScaling: ns}))
+				if tc.name == "uncontrollable2" && errors.Is(err, ErrNotConverged) {
 					t.Logf("%v, as under gonum 30740af (HF5PTS; owner A55GER)", err)
 					return
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				if res.Accuracy != 1 || !math.IsInf(res.step, 1) {
-					t.Errorf("Accuracy %d, step %g; want the Lyapunov-singular candidate (1, +Inf)", res.Accuracy, res.step)
+				if res.accuracy != 1 || !math.IsInf(res.step, 1) {
+					t.Errorf("Accuracy %d, step %g; want the Lyapunov-singular candidate (1, +Inf)", res.accuracy, res.step)
 				}
 				Xo := bigRiccatiNewton(t, true, A, B, Q, tc.r, res.X)
 				var d mat.Dense
@@ -641,12 +641,12 @@ func TestDare_NearCircleZeroCostMode(t *testing.T) {
 	Q.Set(4, 4, 2)
 	const r = 0.8
 	for _, ns := range []bool{false, true} {
-		res, err := Dare(A, B, Q, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns})
+		res, err := acceptUnverified(Dare(A, B, Q, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
-		if res.Accuracy != 0 {
-			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
+		if res.accuracy != 0 {
+			t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.accuracy)
 		}
 		Xo := bigRiccatiNewton(t, false, A, B, Q, r, res.X)
 		var d mat.Dense
@@ -723,12 +723,12 @@ func TestDare_SteinSingularRescue(t *testing.T) {
 				return mat.Norm(&d, 2) / mat.Norm(Xo, 2)
 			}
 			for _, ns := range []bool{false, true} {
-				res, err := Dare(A, B, Q, R, &RiccatiOpts{NoScaling: ns})
+				res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{NoScaling: ns}))
 				if err != nil {
 					t.Fatalf("NoScaling %v: %v", ns, err)
 				}
-				if res.Accuracy != 0 {
-					t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.Accuracy)
+				if res.accuracy != 0 {
+					t.Errorf("NoScaling %v: Accuracy %d, want 0", ns, res.accuracy)
 				}
 				if Xo == nil {
 					Xo = bigRiccatiNewton(t, false, A, B, Q, r, res.X)
@@ -746,17 +746,17 @@ func TestDare_SteinSingularRescue(t *testing.T) {
 			}
 			cand, err := dare(A, B, Q, R, &RiccatiOpts{NoScaling: true})
 			if err != nil {
-				if !errors.Is(err, ErrNoStabilizing) {
+				if !noSolution(err) {
 					t.Errorf("unscaled dare: %v", err)
 				}
 				return
 			}
 			rel := relErr(cand.X)
 			switch {
-			case cand.Accuracy == 0 && !(rel <= 1e-9):
+			case cand.accuracy == 0 && !(rel <= 1e-9):
 				t.Errorf("unscaled dare: certified X off by %.3g", rel)
-			case cand.Accuracy != 0 && !(cand.step >= rel/10):
-				t.Errorf("unscaled dare: Accuracy %d, step %g for an X off by %.3g; want a certified X or a step that shows its error", cand.Accuracy, cand.step, rel)
+			case cand.accuracy != 0 && !(cand.step >= rel/10):
+				t.Errorf("unscaled dare: Accuracy %d, step %g for an X off by %.3g; want a certified X or a step that shows its error", cand.accuracy, cand.step, rel)
 			}
 		})
 	}
@@ -787,9 +787,9 @@ func TestKalman_BoundaryUndetectableNoStabilizing(t *testing.T) {
 			if nn != nil {
 				nnD = mqDense(m, p, nn)
 			}
-			res, err := Kalman(s.System(t, fzSysOpts{}), mqDense(m, m, qn), mqDense(p, p, rn), nnD, nil)
-			if !errors.Is(err, ErrNoStabilizing) {
-				t.Fatalf("got %v (result %v), want ErrNoStabilizing", err, res != nil)
+			res, err := acceptUnverified(Kalman(s.System(t, fzSysOpts{}), mqDense(m, m, qn), mqDense(p, p, rn), nnD, nil))
+			if !errors.Is(err, ErrNoStabilizing) || !errors.Is(err, ErrNotDetectable) {
+				t.Fatalf("got %v (result %v), want ErrNoStabilizing with ErrNotDetectable", err, res != nil)
 			}
 			// F77544: the unobservable mode of this Jordan pair landed inside
 			// the unit circle under FMA contraction (-race on arm64).
@@ -822,14 +822,14 @@ func TestKalman_WeaklyDetectableUnitPolesNotCertified(t *testing.T) {
 			nnD = mqDense(m, p, nn)
 		}
 		for _, ns := range []bool{false, true} {
-			res, err := Kalman(s.System(t, fzSysOpts{}), mqDense(m, m, qn), mqDense(p, p, rn), nnD, &RiccatiOpts{NoScaling: ns})
+			res, err := acceptUnverified(Kalman(s.System(t, fzSysOpts{}), mqDense(m, m, qn), mqDense(p, p, rn), nnD, &RiccatiOpts{NoScaling: ns}))
 			if err != nil {
-				if !errors.Is(err, ErrNoStabilizing) {
+				if !riccatiNoSolution(err) {
 					t.Fatalf("v6=%g NoScaling %v: %v", v6, ns, err)
 				}
 				continue
 			}
-			if res.Accuracy == 0 {
+			if res.accuracy == 0 {
 				t.Fatalf("v6=%g NoScaling %v: Accuracy 0", v6, ns)
 			}
 		}
@@ -867,7 +867,7 @@ func TestCare_LightlyDampedUncontrollableModeStable(t *testing.T) {
 						Q.Set(2+i, 2+j, z[3*i+j])
 					}
 				}
-				res, err := Care(A, B, Q, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns})
+				res, err := acceptUnverified(Care(A, B, Q, mat.NewDense(1, 1, []float64{r}), &RiccatiOpts{NoScaling: ns}))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -875,7 +875,7 @@ func TestCare_LightlyDampedUncontrollableModeStable(t *testing.T) {
 				var d mat.Dense
 				d.Sub(res.X, Xo)
 				if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= 1e-5) {
-					t.Errorf("Accuracy %d: relative error %.3g", res.Accuracy, rel)
+					t.Errorf("Accuracy %d: relative error %.3g", res.accuracy, rel)
 				}
 				var bk, acl mat.Dense
 				bk.Mul(B, res.K)

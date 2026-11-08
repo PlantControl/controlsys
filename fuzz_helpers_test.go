@@ -158,13 +158,18 @@ func fzErr(t *testing.T, s *fzSpec, op string, err error, documented ...error) b
 	return false
 }
 
-// fzContract fails on nil value with nil error or value with error.
+// fzContract fails on nil value with nil error, or a value with any error
+// but ErrAccuracyUnverified, which must carry one.
 func fzContract(t *testing.T, s *fzSpec, op string, hasValue bool, err error) {
 	t.Helper()
+	unverified := errors.Is(err, ErrAccuracyUnverified)
 	if err == nil && !hasValue {
 		t.Fatalf("%s: nil value with nil error\n%s", op, s)
 	}
-	if err != nil && hasValue {
+	if unverified && !hasValue {
+		t.Fatalf("%s: nil value with %v\n%s", op, err, s)
+	}
+	if err != nil && !unverified && hasValue {
 		t.Fatalf("%s: value returned with error %v\n%s", op, err, s)
 	}
 }

@@ -21,8 +21,8 @@ type H2SynResult struct {
 	X       *mat.Dense
 	Y       *mat.Dense
 	CLPoles []complex128
-	// Accuracy is the larger RiccatiResult.Accuracy of X and Y: 1 when no
-	// Newton step certifies one of them (MATLAB h2syn consumes such a
+	// Accuracy is 1 when no Newton step certifies X or Y (where Care or
+	// Dare return ErrAccuracyUnverified; MATLAB h2syn consumes such a
 	// solution with a warning), so K may be inaccurate and CL near the
 	// stability boundary only rounded to stable.
 	Accuracy int
@@ -100,9 +100,9 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	R1 := mulDense(mat.DenseCopyOf(D12.T()), D12)
 	S1 := mulDense(mat.DenseCopyOf(C1.T()), D12)
 
-	resX, err := Care(A, B2, Q1, R1, &RiccatiOpts{S: S1})
+	resX, err := careCore(A, B2, Q1, R1, &RiccatiOpts{S: S1})
 	if err != nil {
-		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, err)
+		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, riccatiError(err, nil))
 	}
 	X := resX.X
 
@@ -115,9 +115,9 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	R2 := mulDense(D21, mat.DenseCopyOf(D21.T()))
 	S2 := mulDense(B1, mat.DenseCopyOf(D21.T()))
 
-	resY, err := Care(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C2.T()), Q2, R2, &RiccatiOpts{S: S2})
+	resY, err := careCore(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C2.T()), Q2, R2, &RiccatiOpts{S: S2})
 	if err != nil {
-		return nil, fmt.Errorf("%s: filter %w", gp.op, err)
+		return nil, fmt.Errorf("%s: filter %w", gp.op, riccatiError(err, nil))
 	}
 	Y := resY.X
 
@@ -146,7 +146,7 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 		return nil, err
 	}
 
-	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, Accuracy: max(resX.Accuracy, resY.Accuracy)}, nil
+	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, Accuracy: max(resX.accuracy, resY.accuracy)}, nil
 }
 
 // h2SynDiscrete returns the discrete H2-optimal controller u = F·x̂(k|k) +
@@ -163,9 +163,9 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 	D12t, C2t := mat.DenseCopyOf(D12.T()), mat.DenseCopyOf(C2.T())
 
 	R1 := mulDense(D12t, D12)
-	resX, err := Dare(A, B2, mulDense(mat.DenseCopyOf(C1.T()), C1), R1, &RiccatiOpts{S: mulDense(mat.DenseCopyOf(C1.T()), D12)})
+	resX, err := dareFor(A, B2, mulDense(mat.DenseCopyOf(C1.T()), C1), R1, &RiccatiOpts{S: mulDense(mat.DenseCopyOf(C1.T()), D12)}, false)
 	if err != nil {
-		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, err)
+		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, riccatiError(err, nil))
 	}
 	X := resX.X
 	F := mat.DenseCopyOf(resX.K)
@@ -184,9 +184,9 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 	F0.Scale(-1, F0)
 
 	B1D21t := mulDense(B1, mat.DenseCopyOf(D21.T()))
-	resY, err := Dare(mat.DenseCopyOf(A.T()), C2t, mulDense(B1, mat.DenseCopyOf(B1.T())), mulDense(D21, mat.DenseCopyOf(D21.T())), &RiccatiOpts{S: B1D21t})
+	resY, err := dareFor(mat.DenseCopyOf(A.T()), C2t, mulDense(B1, mat.DenseCopyOf(B1.T())), mulDense(D21, mat.DenseCopyOf(D21.T())), &RiccatiOpts{S: B1D21t}, false)
 	if err != nil {
-		return nil, fmt.Errorf("%s: filter %w", gp.op, err)
+		return nil, fmt.Errorf("%s: filter %w", gp.op, riccatiError(err, nil))
 	}
 	Y := resY.X
 	M := mat.DenseCopyOf(resY.K.T())
@@ -219,5 +219,5 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, Accuracy: max(resX.Accuracy, resY.Accuracy)}, nil
+	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, Accuracy: max(resX.accuracy, resY.accuracy)}, nil
 }

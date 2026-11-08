@@ -142,17 +142,17 @@ func checkDescriptorRefinedDesigns(t *testing.T, dc descriptorRefinedCase) {
 			label += " NoScaling"
 		}
 		res, err := lqr(A, B, In, Im, &RiccatiOpts{E: E, NoScaling: ns})
-		if err != nil || res.Accuracy != 0 {
+		if err != nil || res.accuracy != 0 {
 			t.Fatalf("%s Lqr: not certified (%v)", label, err)
 		}
-		checkRefinedGain(t, label+" Lqr", nearSingularRiccati{dc.continuous, A, B, In, Im, nil, E, false}, res.Accuracy, res.X, res.K)
+		checkRefinedGain(t, label+" Lqr", nearSingularRiccati{dc.continuous, A, B, In, Im, nil, E, false}, res.accuracy, res.X, res.K)
 		res, err = care(A, B, In, Im, &RiccatiOpts{E: E, S: S, NoScaling: ns})
-		if err != nil || res.Accuracy != 0 {
+		if err != nil || res.accuracy != 0 {
 			t.Fatalf("%s Riccati with S: not certified (%v)", label, err)
 		}
-		checkRefinedGain(t, label+" Riccati with S", nearSingularRiccati{dc.continuous, A, B, In, Im, S, E, true}, res.Accuracy, nil, res.K)
-		if res, err := Kalman(sys, Im, eyeDense(p), nil, &RiccatiOpts{NoScaling: ns}); err == nil {
-			checkRefinedGain(t, label+" Kalman", kalmanDual(sys, sys.B, sys.D), res.Accuracy, nil, mat.DenseCopyOf(res.K.T()))
+		checkRefinedGain(t, label+" Riccati with S", nearSingularRiccati{dc.continuous, A, B, In, Im, S, E, true}, res.accuracy, nil, res.K)
+		if res, err := acceptUnverified(Kalman(sys, Im, eyeDense(p), nil, &RiccatiOpts{NoScaling: ns})); err == nil {
+			checkRefinedGain(t, label+" Kalman", kalmanDual(sys, sys.B, sys.D), res.accuracy, nil, mat.DenseCopyOf(res.K.T()))
 		}
 	}
 	if lq, err := Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil); err == nil {

@@ -47,13 +47,13 @@ func TestDare_RankDeficientInputsWithoutCrossTermMatchGain(t *testing.T) {
 				f    func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error)
 			}{{"Dare", Dare}, {"Dlqr", Dlqr}} {
 				name := fmt.Sprintf("%s %s NoScaling=%v", solve.name, c.name, ns)
-				res, err := solve.f(A, B, Q, R, &RiccatiOpts{NoScaling: ns})
+				res, err := acceptUnverified(solve.f(A, B, Q, R, &RiccatiOpts{NoScaling: ns}))
 				if err != nil {
 					t.Errorf("%s: %v", name, err)
 					continue
 				}
-				if rel := relErr(res.X, want); res.Accuracy != 0 || !(rel <= 1e-10) {
-					t.Errorf("%s: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g", name, res.Accuracy, rel)
+				if rel := relErr(res.X, want); res.accuracy != 0 || !(rel <= 1e-10) {
+					t.Errorf("%s: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g", name, res.accuracy, rel)
 				}
 				if rel := relErr(res.K, wantK); !(rel <= 1e-8) {
 					t.Errorf("%s: ‖K − K*‖/‖K*‖ = %.3g", name, rel)
@@ -134,7 +134,7 @@ func TestDare_RankDeficientInputsRankDeficientQCertifiesOnlyTheGain(t *testing.T
 				want *mat.Dense
 			}{{"Dare", Dare, wantX}, {"Dlqr", Dlqr, wantY}} {
 				name := fmt.Sprintf("%s %s NoScaling=%v", solve.name, c.name, ns)
-				res, err := solve.f(A, B, Q, R, &RiccatiOpts{NoScaling: ns, E: E})
+				res, err := acceptUnverified(solve.f(A, B, Q, R, &RiccatiOpts{NoScaling: ns, E: E}))
 				if err != nil {
 					continue
 				}
@@ -143,7 +143,7 @@ func TestDare_RankDeficientInputsRankDeficientQCertifiesOnlyTheGain(t *testing.T
 						t.Errorf("%s: Eig %v not stable", name, e)
 					}
 				}
-				if res.Accuracy != 0 {
+				if res.accuracy != 0 {
 					continue
 				}
 				if rel := relErr(res.X, solve.want); !(rel <= 1e-8) {

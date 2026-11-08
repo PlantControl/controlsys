@@ -803,8 +803,11 @@ func mqRiccatiForwardErr(s *fzSpec, acl, x []float64, den float64) float64 {
 // texture. A returned solution must be exactly symmetric, satisfy the
 // Riccati and gain equations to rounding, give an exactly stable A − BK
 // (unless a closed-loop root is within a tiny strip of the boundary) and,
-// for a PSD joint cost, be PSD. ErrNoStabilizing is a failure when
-// mqRiccatiExists proves a stabilizing solution exists.
+// for a PSD joint cost, be PSD; so must an ErrAccuracyUnverified partial.
+// ErrNotConverged and ErrSingularEquation are failures when
+// mqRiccatiExists proves a stabilizing solution exists, and the proved
+// ErrNoStabilizing (with ErrNotStabilizable) also when (A, B) is robustly
+// stabilizable (mqStabilizable).
 func FuzzRiccati(f *testing.F) {
 	for _, s := range fzMatEqSeeds() {
 		fzAddSeed(f, s)
@@ -847,13 +850,26 @@ func FuzzRiccati(f *testing.F) {
 		}
 		res, err := solve(mqDense(n, n, s.A), mqDense(n, m, s.B), mqDense(n, n, q), mqDense(m, m, r), opts)
 		fzContract(t, s, op, res != nil, err)
+		if errors.Is(err, ErrAccuracyUnverified) {
+			err = nil
+		}
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrNoStabilizing):
-				if (s.Discrete && !jointPSD) || !mqRiccatiExists(s, q, r, sm) {
-					fzSkip(t, op+": no stabilizing solution (not provably solvable)")
+				if !errors.Is(err, ErrNotStabilizable) {
+					t.Fatalf("%s: ErrNoStabilizing without ErrNotStabilizable: %v\n%s", op, err, s)
 				}
-				t.Fatalf("%s: ErrNoStabilizing, but the Hamiltonian/symplectic pencil is clear of the boundary and (A,B) stabilizable\nQ=%v R=%v S=%v\n%s", op, q, r, sm, s)
+				if mqStabilizable(s) {
+					t.Fatalf("%s: ErrNoStabilizing, but (A,B) is robustly stabilizable: %v\n%s", op, err, s)
+				}
+				fzSkip(t, op+": no stabilizing solution (unstabilizable boundary mode)")
+			case errors.Is(err, ErrSchurFailed):
+				fzSkip(t, op+": "+ErrSchurFailed.Error())
+			case errors.Is(err, ErrNotConverged), errors.Is(err, ErrSingularEquation):
+				if (s.Discrete && !jointPSD) || !mqRiccatiExists(s, q, r, sm) {
+					fzSkip(t, op+": not converged (not provably solvable)")
+				}
+				t.Fatalf("%s: %v, but the Hamiltonian/symplectic pencil is clear of the boundary and (A,B) stabilizable\nQ=%v R=%v S=%v\n%s", op, err, q, r, sm, s)
 			case errors.Is(err, ErrNotPSD):
 				if me := mqMinEigSym(q, n); me >= 1e-10*mqFro(q) {
 					t.Fatalf("%s: ErrNotPSD for Q with min eig %.3g\n%s", op, me, s)
@@ -865,7 +881,7 @@ func FuzzRiccati(f *testing.F) {
 				}
 				fzSkip(t, op+": R near singular")
 			}
-			fzErr(t, s, op, err, ErrSchurFailed)
+			fzErr(t, s, op, err)
 		}
 		x, k := mqRaw(res.X), mqRaw(res.K)
 		if r1, c1 := res.X.Dims(); r1 != n || c1 != n {

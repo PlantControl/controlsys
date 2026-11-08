@@ -42,13 +42,13 @@ func TestDare_DuplicateInputColumnsWithCrossTermReturnsReducedX(t *testing.T) {
 		wantK := dareGainBig(A, B, R, S, want)
 		for _, ns := range []bool{false, true} {
 			name := fmt.Sprintf("case %d NoScaling=%v", i, ns)
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: ns})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: ns}))
 			if err != nil {
 				t.Errorf("%s: %v", name, err)
 				continue
 			}
-			if rel := relErr(res.X, want); res.Accuracy != 0 || !(rel <= 1e-12) {
-				t.Errorf("%s: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g", name, res.Accuracy, rel)
+			if rel := relErr(res.X, want); res.accuracy != 0 || !(rel <= 1e-12) {
+				t.Errorf("%s: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g", name, res.accuracy, rel)
 			}
 			if rel := relErr(res.K, wantK); !(rel <= 1e-8) {
 				t.Errorf("%s: ‖K − K*‖/‖K*‖ = %.3g", name, rel)

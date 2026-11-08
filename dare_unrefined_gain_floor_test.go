@@ -59,7 +59,7 @@ func TestDareUnrefinedGainWithinFloorTakesHewerGain(t *testing.T) {
 				name string
 				f    func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error)
 			}{{"Dare", Dare}, {"Dlqr", Dlqr}} {
-				res, err := solve.f(A, B, Q, R, &RiccatiOpts{S: S, E: E})
+				res, err := acceptUnverified(solve.f(A, B, Q, R, &RiccatiOpts{S: S, E: E}))
 				if err != nil {
 					if native {
 						t.Errorf("%s: %v", solve.name, err)
@@ -69,13 +69,13 @@ func TestDareUnrefinedGainWithinFloorTakesHewerGain(t *testing.T) {
 					continue
 				}
 				kErr := relErr(res.K, ref.K)
-				t.Logf("%s on %s: Accuracy %d, K err %.3g (tol %.3g)", solve.name, runtime.GOARCH, res.Accuracy, kErr, kTol)
+				t.Logf("%s on %s: Accuracy %d, K err %.3g (tol %.3g)", solve.name, runtime.GOARCH, res.accuracy, kErr, kTol)
 				switch {
-				case native && res.Accuracy != 0:
-					t.Errorf("%s: Accuracy %d, want 0", solve.name, res.Accuracy)
+				case native && res.accuracy != 0:
+					t.Errorf("%s: Accuracy %d, want 0", solve.name, res.accuracy)
 				case native && !(kErr <= 1e-12):
 					t.Errorf("%s: K %.3g off the 320-bit gain, want the exact Hewer gain", solve.name, kErr)
-				case res.Accuracy == 0 && !(kErr <= kTol):
+				case res.accuracy == 0 && !(kErr <= kTol):
 					t.Errorf("%s: Accuracy 0 with K %.3g off the 320-bit gain, want within %.3g", solve.name, kErr, kTol)
 				}
 			}

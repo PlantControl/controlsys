@@ -77,13 +77,13 @@ func TestDareDescriptorReducedInputsRefinedGainNotTerminal(t *testing.T) {
 	S := mat.NewDense(3, 5, []float64{-0.006016709407351466, 0.001323427924358537, 0.0029056073955610077, -0.012203720922295528, -0.01826452801999528, -0.05001425399901001, 0.05282724820612193, 0.01710699602118271, -0.018591708238488363, 0.039893454500025426, 0.03286896187091784, -0.044632589161792274, -0.009572306330212433, -0.0074219625679628285, -0.07166476234837728})
 	E := mat.NewDense(3, 3, []float64{1.1858111144029029, -0.10985818610205345, -0.07221844004189239, -0.10358073796070186, 0.9912796253522691, -0.0016751547174243854, -0.12244927243585321, -0.1581051545198203, 1.1366520159218645})
 	for _, ns := range []bool{false, true} {
-		res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns})
+		res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
 		eX, eK := dareReducedInputsOracle(t, A, B, Q, R, S, E, res)
-		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.Accuracy, eX, eK)
-		if res.Accuracy == 0 && (eX > newtonTol || eK > 1e-5) {
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.accuracy, eX, eK)
+		if res.accuracy == 0 && (eX > newtonTol || eK > 1e-5) {
 			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
 		}
 	}
@@ -100,13 +100,13 @@ func TestDareDescriptorReducedInputsUnsteppedXNotCertified(t *testing.T) {
 	R := mat.NewDense(6, 6, []float64{1.5779375686682818e-12, -2.0608127037435347e-14, -2.242592135634772e-14, 3.3198336954669306e-15, 1.923748387688546e-14, -6.661969088908642e-14, -2.0608127037435347e-14, 1.5829272205280108e-12, 1.9550332356234864e-14, -9.977955106021387e-15, 9.372403104814777e-14, -3.3057272514660906e-14, -2.242592135634772e-14, 1.9550332356234864e-14, 1.536340205649908e-12, 3.661360823363816e-14, 2.6568846005918142e-14, 1.7002444747737617e-14, 3.3198336954669306e-15, -9.977955106021387e-15, 3.661360823363816e-14, 1.5419810212094235e-12, 2.977512144435967e-14, 3.032639816787587e-14, 1.923748387688546e-14, 9.372403104814777e-14, 2.6568846005918142e-14, 2.977512144435967e-14, 1.6436843524501524e-12, -4.6404000482889246e-14, -6.661969088908642e-14, -3.3057272514660906e-14, 1.7002444747737617e-14, 3.032639816787587e-14, -4.6404000482889246e-14, 1.5738708882113034e-12})
 	E := mat.NewDense(5, 5, []float64{0.9713189477084567, -0.3613259093210955, -0.23579723263809016, 0.05484436307734027, -0.36816299495050203, -0.037968895824093005, 1.108729701305503, -0.0023218160511450092, -0.004640677910160262, 0.08112140658431947, 0.07766527287837886, -0.04489345086778834, 1.108331987370999, -0.21353079059735428, -0.10039791025785894, 0.2403396276536591, -0.17038174413709858, -0.2801532407359234, 0.9348398616393371, 0.10664492279602827, 0.09306366501899203, -0.10655924753042285, -0.014422732822463934, 0.04699585439455927, 1.1732361492964607})
 	for _, ns := range []bool{false, true} {
-		res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns})
+		res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
 		eX, eK := dareReducedInputsOracle(t, A, B, Q, R, nil, E, res)
-		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.Accuracy, eX, eK)
-		if res.Accuracy == 0 && (eX > newtonTol || eK > gainFloor) {
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.accuracy, eX, eK)
+		if res.accuracy == 0 && (eX > newtonTol || eK > gainFloor) {
 			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
 		}
 	}
@@ -130,12 +130,12 @@ func TestDareCrossTermReducedInputsGainNotSubstituted(t *testing.T) {
 	R := mat.NewDense(4, 4, []float64{1.2020972856242958e-12, -1.1259540862215746e-14, 7.820449669239088e-15, -3.1770976235837157e-14, -1.1259540862215746e-14, 1.180783602283751e-12, 1.0477541448173887e-14, -2.1895375070522303e-14, 7.820449669239088e-15, 1.0477541448173887e-14, 1.172101703370729e-12, -5.005197143593813e-15, -3.1770976235837157e-14, -2.1895375070522303e-14, -5.005197143593813e-15, 1.1865001044155857e-12})
 	S := mat.NewDense(3, 4, []float64{4.738256256751149e-08, 7.533326484301201e-07, 1.4390883235646677e-07, -4.664061119321964e-08, 7.61789153108352e-08, -1.1744669584943483e-07, 3.481002938461837e-08, -9.13013599018104e-08, 2.8798043731460986e-07, -5.473965105421443e-07, 1.1629407766604448e-07, -3.464179514743311e-07})
 	for _, ns := range []bool{false, true} {
-		res, err := Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: ns})
+		res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
 		eX, eK := dareReducedInputsOracle(t, A, B, Q, R, S, nil, res)
-		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.Accuracy, eX, eK)
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g", ns, res.accuracy, eX, eK)
 		kTol := 3 * gainFloor
 		if eX <= 1e-15 {
 			kTol = 1e-7
@@ -148,7 +148,7 @@ func TestDareCrossTermReducedInputsGainNotSubstituted(t *testing.T) {
 			}
 			kTol = max(gainFloor, 4*sens.K)
 		}
-		if res.Accuracy == 0 && (eX > newtonTol || eK > kTol) {
+		if res.accuracy == 0 && (eX > newtonTol || eK > kTol) {
 			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g", ns, eX, eK)
 		}
 	}
@@ -174,14 +174,14 @@ func TestDareDescriptorDuplicateInputsGainOfConvergedX(t *testing.T) {
 		t.Fatal("reference not certified")
 	}
 	for _, ns := range []bool{false, true} {
-		res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns})
+		res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns}))
 		if err != nil {
 			t.Fatalf("NoScaling %v: %v", ns, err)
 		}
 		eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
 		eG := relErr(res.K, dareGainBig(A, B, R, S, res.X))
-		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g, off the gain of X by %.3g", ns, res.Accuracy, eX, eK, eG)
-		if res.Accuracy == 0 && (eX > newtonTol || eK > 1e-7 && eG > 1e-9) {
+		t.Logf("NoScaling %v: Accuracy %d, X err %.3g, K err %.3g, off the gain of X by %.3g", ns, res.accuracy, eX, eK, eG)
+		if res.accuracy == 0 && (eX > newtonTol || eK > 1e-7 && eG > 1e-9) {
 			t.Errorf("NoScaling %v: Accuracy 0 with X off by %.3g, K by %.3g (%.3g off the gain of X)", ns, eX, eK, eG)
 		}
 	}

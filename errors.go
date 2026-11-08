@@ -2,8 +2,16 @@ package controlsys
 
 import "errors"
 
-// Sentinel errors. Every error returned by an exported operation wraps exactly
-// one of these with %w, so callers can branch with errors.Is.
+// Sentinel errors. Every error returned by an exported operation wraps one
+// primary sentinel of these, so callers can branch with errors.Is.
+// ErrAccuracyUnverified and ErrNotConverged may additionally wrap the
+// sentinel of the check that failed, and ErrNoStabilizing that of the
+// structural property it found missing (ErrNotStabilizable, ErrNotDetectable).
+// ErrSchurFailed is itself an ErrNotConverged.
+//
+// An operation that returns a result alongside a non-nil error does so only
+// with ErrAccuracyUnverified: the result is computed but not certified to its
+// documented accuracy. Every other error comes with a nil result.
 var (
 	// ErrInvalidArgument reports an argument that is wrong regardless of the
 	// model's shape: a nil model, function or required matrix, a NaN/Inf value,
@@ -110,15 +118,33 @@ var (
 	// ErrNotPSD reports a weighting matrix that must be positive semidefinite.
 	ErrNotPSD = errors.New("controlsys: Q matrix must be positive semi-definite")
 
+	// ErrAccuracyUnverified reports a result the operation computed but could
+	// not certify to its documented accuracy, such as a Riccati solution no
+	// Newton step certifies (MATLAB icare/idare Report 1). The result is
+	// returned, non-nil, alongside the error; use it only after checking it
+	// yourself.
+	ErrAccuracyUnverified = errors.New("controlsys: result accuracy not verified")
+
+	// ErrNotConverged reports an iteration or bounded search that ended
+	// without a candidate passing its acceptance test. It is not a proof that
+	// no solution exists, and comes with a nil result.
+	ErrNotConverged = errors.New("controlsys: iteration did not converge")
+
 	// ErrSchurFailed reports that an eigenvalue, Schur or QZ iteration did not
-	// converge.
-	ErrSchurFailed = errors.New("controlsys: Schur decomposition failed to converge")
+	// converge. It wraps ErrNotConverged.
+	ErrSchurFailed error = &derivedError{"controlsys: Schur decomposition failed to converge", ErrNotConverged}
 
 	// ErrSingularEquation reports a Lyapunov, Sylvester or Riccati equation
-	// without a unique solution.
+	// without a unique solution, including a Riccati stable subspace whose
+	// basis U11 is singular so that X is not finite (MATLAB icare/idare
+	// Report 2).
 	ErrSingularEquation = errors.New("controlsys: matrix equation is singular or nearly singular")
 
-	// ErrNoStabilizing reports a Riccati equation with no stabilizing solution.
+	// ErrNoStabilizing reports a Riccati equation proved to have no
+	// stabilizing solution: a mode on or beyond the stability boundary,
+	// within a first-order band of the data, that fails the PBH rank test.
+	// A solve that only fails to find or verify a solution returns
+	// ErrNotConverged instead.
 	ErrNoStabilizing = errors.New("controlsys: no stabilizing solution exists")
 
 	// ErrSingularR reports a control or noise weight R that is singular or not
@@ -180,9 +206,11 @@ var (
 	ErrSignalNotFound = errors.New("controlsys: signal name not found")
 
 	// ErrNotStabilizable reports a model with an unstable uncontrollable mode.
+	// Care, Dare and the Lqr family wrap it with ErrNoStabilizing.
 	ErrNotStabilizable = errors.New("controlsys: system is not stabilizable")
 
 	// ErrNotDetectable reports a model with an unstable unobservable mode.
+	// Kalman, Lqe and Kalmd wrap it with ErrNoStabilizing.
 	ErrNotDetectable = errors.New("controlsys: system is not detectable")
 
 	// ErrInvalidPartition reports generalized-plant partition sizes that do
@@ -244,3 +272,14 @@ var (
 	// ErrProcessFit reports that no candidate process model fit the data.
 	ErrProcessFit = errors.New("controlsys: no valid process fit")
 )
+
+// derivedError is a sentinel with its own message that also matches parent
+// under errors.Is.
+type derivedError struct {
+	msg    string
+	parent error
+}
+
+func (e *derivedError) Error() string { return e.msg }
+
+func (e *derivedError) Unwrap() error { return e.parent }

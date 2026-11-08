@@ -19,8 +19,9 @@ func withIterationCap(t *testing.T, limit *int, v int) {
 
 // pencilError is the float64 pencil's error on the stabilizable
 // near-singular-E plants below. Before the homogeneous PBH test (JGGEN2)
-// it carried a vacuous boundary verdict at their near-infinite mode.
-const pencilError = "Dare: controlsys: no stabilizing solution exists"
+// it carried a vacuous boundary verdict at their near-infinite mode; it
+// is a non-convergence, not a proof (ZOJBZX).
+const pencilError = "Dare: no verified stabilizing solution found: controlsys: iteration did not converge"
 
 // A near-singular-E Dare, Dlqr or Kalman whose extended-precision solve
 // hits an iteration cap (SDA doubling or its exponent spread, stableLoop
@@ -40,7 +41,7 @@ func TestDare_NearSingularEIterationCapKeepsFloatError(t *testing.T) {
 	}
 	check := func(t *testing.T, api string, err error, want string) {
 		t.Helper()
-		if err == nil || err.Error() != want || !errors.Is(err, ErrNoStabilizing) || errors.Is(err, errBoundaryUnstabilizable) {
+		if err == nil || err.Error() != want || !errors.Is(err, ErrNotConverged) || errors.Is(err, ErrNoStabilizing) {
 			t.Errorf("%s: %v, want %q", api, err, want)
 		}
 	}
@@ -79,10 +80,10 @@ func TestDare_NearSingularENearUnitModeBoundedCost(t *testing.T) {
 	t0 := time.Now()
 	for _, ns := range []bool{false, true} {
 		opts := &RiccatiOpts{E: E, NoScaling: ns}
-		if _, err := Dare(A, B, eyeDense(4), eyeDense(3), opts); err != nil {
+		if _, err := acceptUnverified(Dare(A, B, eyeDense(4), eyeDense(3), opts)); err != nil {
 			t.Errorf("Dare NoScaling %v: %v", ns, err)
 		}
-		if _, err := Dlqr(A, B, eyeDense(4), eyeDense(3), opts); err != nil {
+		if _, err := acceptUnverified(Dlqr(A, B, eyeDense(4), eyeDense(3), opts)); err != nil {
 			t.Errorf("Dlqr NoScaling %v: %v", ns, err)
 		}
 	}

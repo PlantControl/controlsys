@@ -228,9 +228,10 @@ func kalmanDual(sys *System, G, H *mat.Dense) nearSingularRiccati {
 type nearSingularTally struct{ values, errs int }
 
 // checkNearSingularDesigns runs Lqr (Dlqr), Kalman and Lqg with identity
-// weights on sys and fails on a result off the oracle or of Accuracy 1, or
-// on an error other than ErrDescriptorSingular, ErrNoStabilizing or
-// ErrSchurFailed.
+// weights on sys and fails on a result off the oracle or uncertified
+// (ErrAccuracyUnverified), or on an error other than ErrDescriptorSingular,
+// ErrNoStabilizing, ErrNotConverged (ErrSchurFailed included) or
+// ErrSingularEquation.
 func checkNearSingularDesigns(t *testing.T, label string, sys *System, tally map[string]*nearSingularTally) {
 	t.Helper()
 	n, m, p := sys.Dims()
@@ -243,7 +244,7 @@ func checkNearSingularDesigns(t *testing.T, label string, sys *System, tally map
 		}
 		if err != nil {
 			tally[api].errs++
-			if !errors.Is(err, ErrDescriptorSingular) && !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+			if !errors.Is(err, ErrDescriptorSingular) && !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrNotConverged) && !errors.Is(err, ErrSingularEquation) {
 				t.Errorf("%s %s: unexpected error %v", label, api, err)
 			}
 			return false
@@ -262,16 +263,16 @@ func checkNearSingularDesigns(t *testing.T, label string, sys *System, tally map
 	var res *RiccatiResult
 	var err error
 	if cont {
-		res, err = Lqr(sys.A, sys.B, Q, R, &RiccatiOpts{E: sys.E})
+		res, err = acceptUnverified(Lqr(sys.A, sys.B, Q, R, &RiccatiOpts{E: sys.E}))
 	} else {
-		res, err = Dlqr(sys.A, sys.B, Q, R, &RiccatiOpts{E: sys.E})
+		res, err = acceptUnverified(Dlqr(sys.A, sys.B, Q, R, &RiccatiOpts{E: sys.E}))
 	}
 	if record("Lqr", err) {
-		check("Lqr", res.Accuracy, lqrProblem, res.X, res.K)
+		check("Lqr", res.accuracy, lqrProblem, res.X, res.K)
 	}
-	kres, err := Kalman(sys, eyeDense(m), eyeDense(p), nil, nil)
+	kres, err := acceptUnverified(Kalman(sys, eyeDense(m), eyeDense(p), nil, nil))
 	if record("Kalman", err) {
-		check("Kalman", kres.Accuracy, kalmanDual(sys, sys.B, sys.D), kres.X, mat.DenseCopyOf(kres.K.T()))
+		check("Kalman", kres.accuracy, kalmanDual(sys, sys.B, sys.D), kres.X, mat.DenseCopyOf(kres.K.T()))
 	}
 	lres, err := Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil)
 	if record("Lqg", err) {
@@ -369,7 +370,7 @@ func TestLqrKalmanLqgFullRankNearSingularE(t *testing.T) {
 	}
 	n, _, p := sys.Dims()
 	_, m, _ := sys.Dims()
-	res, err := Lqi(sys, eyeDense(n+p), eyeDense(m), nil)
+	res, err := acceptUnverified(Lqi(sys, eyeDense(n+p), eyeDense(m), nil))
 	if err != nil {
 		if !errors.Is(err, ErrDescriptorSingular) {
 			t.Errorf("Lqi: err = %v, want a value or ErrDescriptorSingular", err)
@@ -378,7 +379,7 @@ func TestLqrKalmanLqgFullRankNearSingularE(t *testing.T) {
 	}
 	Aa, Ba := lqiAugmentation(sys)
 	pr := nearSingularRiccati{true, Aa, Ba, eyeDense(n + p), eyeDense(m), nil, augmentedDescriptor(sys.E, p), false}
-	if eX, eK, ok := pr.honest(t, res.X, res.K); !ok || res.Accuracy != 0 {
-		t.Errorf("Lqi: Accuracy %d, X off the oracle by %.3g, K by %.3g", res.Accuracy, eX, eK)
+	if eX, eK, ok := pr.honest(t, res.X, res.K); !ok || res.accuracy != 0 {
+		t.Errorf("Lqi: Accuracy %d, X off the oracle by %.3g, K by %.3g", res.accuracy, eX, eK)
 	}
 }

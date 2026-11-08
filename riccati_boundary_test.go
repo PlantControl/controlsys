@@ -170,9 +170,9 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 			var res *RiccatiResult
 			var err error
 			if tc.continuous {
-				res, err = Care(tc.A, tc.B, tc.Q, R, opts)
+				res, err = acceptUnverified(Care(tc.A, tc.B, tc.Q, R, opts))
 			} else {
-				res, err = Dare(tc.A, tc.B, tc.Q, R, opts)
+				res, err = acceptUnverified(Dare(tc.A, tc.B, tc.Q, R, opts))
 			}
 			if problem, perr := newRiccatiProblem(tc.A, tc.B, tc.Q, R, opts); perr != nil {
 				t.Errorf("%s NoScaling %v: %v", tc.name, ns, perr)
@@ -182,9 +182,9 @@ func TestRiccati_ExactBoundaryUncontrollable(t *testing.T) {
 				t.Errorf("%s NoScaling %v: boundaryUnstabilizable false once scaled", tc.name, ns)
 			}
 			if err == nil {
-				t.Errorf("%s NoScaling %v: Accuracy %d X, want ErrNoStabilizing", tc.name, ns, res.Accuracy)
-			} else if !errors.Is(err, ErrNoStabilizing) {
-				t.Errorf("%s NoScaling %v: %v", tc.name, ns, err)
+				t.Errorf("%s NoScaling %v: Accuracy %d X, want ErrNoStabilizing", tc.name, ns, res.accuracy)
+			} else if !errors.Is(err, ErrNoStabilizing) || !errors.Is(err, ErrNotStabilizable) {
+				t.Errorf("%s NoScaling %v: %v, want ErrNoStabilizing with ErrNotStabilizable", tc.name, ns, err)
 			}
 		}
 	}
@@ -243,7 +243,7 @@ func TestCare_StableJordanUncontrollableMode(t *testing.T) {
 		for _, ns := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/NoScaling=%v", tc.name, ns), func(t *testing.T) {
 				A, B, Q := mat.NewDense(4, 4, tc.a), mat.NewDense(4, 1, tc.b), mat.NewDense(4, 4, tc.q)
-				res, err := Care(A, B, Q, mat.NewDense(1, 1, []float64{tc.r}), &RiccatiOpts{NoScaling: ns})
+				res, err := acceptUnverified(Care(A, B, Q, mat.NewDense(1, 1, []float64{tc.r}), &RiccatiOpts{NoScaling: ns}))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -251,11 +251,11 @@ func TestCare_StableJordanUncontrollableMode(t *testing.T) {
 				var d mat.Dense
 				d.Sub(res.X, Xo)
 				want := 1e-6
-				if res.Accuracy == 1 {
+				if res.accuracy == 1 {
 					want = 1e-3
 				}
 				if rel := mat.Norm(&d, 2) / mat.Norm(Xo, 2); !(rel <= want) {
-					t.Errorf("Accuracy %d X off the oracle by %.3g relative", res.Accuracy, rel)
+					t.Errorf("Accuracy %d X off the oracle by %.3g relative", res.accuracy, rel)
 				}
 			})
 		}

@@ -42,9 +42,9 @@ func descriptorExplicitGain(t *testing.T, continuous bool, A, B, Q, R, S, E *mat
 		var res *RiccatiResult
 		var err error
 		if continuous {
-			res, err = Care(&ea, &eb, Q, R, o)
+			res, err = acceptUnverified(Care(&ea, &eb, Q, R, o))
 		} else {
-			res, err = Dare(&ea, &eb, Q, R, o)
+			res, err = acceptUnverified(Dare(&ea, &eb, Q, R, o))
 		}
 		if err == nil {
 			return res.K
@@ -129,9 +129,9 @@ func TestDescriptorRiccatiVerified(t *testing.T) {
 			var res *RiccatiResult
 			var err error
 			if c.continuous {
-				res, err = Care(A, B, Q, R, opts)
+				res, err = acceptUnverified(Care(A, B, Q, R, opts))
 			} else {
-				res, err = Dare(A, B, Q, R, opts)
+				res, err = acceptUnverified(Dare(A, B, Q, R, opts))
 			}
 			if err != nil {
 				if c.wantX && noScaling == c.noScaling {
@@ -146,9 +146,9 @@ func TestDescriptorRiccatiVerified(t *testing.T) {
 				K0 = res.K
 			}
 			oracle := descriptorOracle(c.continuous, A, B, Q, R, S, E, K0, 12)
-			if res.Accuracy != 0 {
+			if res.accuracy != 0 {
 				if c.wantX && noScaling == c.noScaling {
-					t.Errorf("%s NoScaling=%v: Accuracy %d", c.name, noScaling, res.Accuracy)
+					t.Errorf("%s NoScaling=%v: Accuracy %d", c.name, noScaling, res.accuracy)
 				}
 				continue
 			}

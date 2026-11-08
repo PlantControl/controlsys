@@ -92,19 +92,19 @@ func TestDareRotatedInputsRefinedGainCertifiedHewerOrDemoted(t *testing.T) {
 				t.Fatalf("%s NoScaling %v: no pencil solution", c.name, ns)
 			}
 			eP := relErr(p.K, ref.K)
-			res, err := Dare(c.A, c.B, c.Q, c.R, opts)
+			res, err := acceptUnverified(Dare(c.A, c.B, c.Q, c.R, opts))
 			if err != nil {
 				t.Fatalf("%s NoScaling %v: %v", c.name, ns, err)
 			}
 			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g), pencil K err %.3g", c.name, ns, res.Accuracy, eX, sens.X, eK, sens.K, eP)
-			if res.Accuracy == 1 && eK > 2*eP {
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g), pencil K err %.3g", c.name, ns, res.accuracy, eX, sens.X, eK, sens.K, eP)
+			if res.accuracy == 1 && eK > 2*eP {
 				t.Errorf("%s NoScaling %v: Accuracy-1 K %.3g off, the pencil K %.3g", c.name, ns, eK, eP)
 			}
-			if !raceEnabled && runtime.GOARCH == "arm64" && slices.Contains(exact[c.name], ns) && (res.Accuracy != 0 || eK > 7e-16) {
-				t.Errorf("%s NoScaling %v: Accuracy %d, K err %g; want Accuracy 0, K exact", c.name, ns, res.Accuracy, eK)
+			if !raceEnabled && runtime.GOARCH == "arm64" && slices.Contains(exact[c.name], ns) && (res.accuracy != 0 || eK > 7e-16) {
+				t.Errorf("%s NoScaling %v: Accuracy %d, K err %g; want Accuracy 0, K exact", c.name, ns, res.accuracy, eK)
 			}
-			if riccatiCertifiedWrong(res.Accuracy, eX, sens.X, eK, sens.K, newtonTol) {
+			if riccatiCertifiedWrong(res.accuracy, eX, sens.X, eK, sens.K, newtonTol) {
 				t.Errorf("%s NoScaling %v: certified-wrong: Accuracy 0 with X off by %.3g, K by %.3g", c.name, ns, eX, eK)
 			}
 			if dareRotatedInputsUnstable(c.A, c.B, c.E, res.K) {

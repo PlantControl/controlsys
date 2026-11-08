@@ -151,13 +151,13 @@ func TestDare_CheapControlOfUnstablePlantIsCertified(t *testing.T) {
 			{"descriptor", &Ae, &Be, &RiccatiOpts{E: E}, want},
 			{"cross term", A0, B0, &RiccatiOpts{S: S}, wantS},
 		} {
-			res, err := Dare(tc.A, tc.B, Q, R, tc.opts)
+			res, err := acceptUnverified(Dare(tc.A, tc.B, Q, R, tc.opts))
 			if err != nil {
 				t.Errorf("case %d %s: %v", k, tc.name, err)
 				continue
 			}
-			if res.Accuracy != 0 {
-				t.Errorf("case %d %s: Accuracy %d, want 0", k, tc.name, res.Accuracy)
+			if res.accuracy != 0 {
+				t.Errorf("case %d %s: Accuracy %d, want 0", k, tc.name, res.accuracy)
 			}
 			if !(res.Rcnd > 0 && res.Rcnd <= 1) {
 				t.Errorf("case %d %s: Rcnd %g outside (0, 1]", k, tc.name, res.Rcnd)
@@ -223,8 +223,8 @@ func TestDare_CheapControlUnstabilizableModeIsError(t *testing.T) {
 	Q.Slice(0, n, 0, n).(*mat.Dense).Copy(Q0)
 	Q.Set(n, n, 1e14)
 	for _, opts := range []*RiccatiOpts{nil, {NoScaling: true}} {
-		if res, err := Dare(A, B, Q, R, opts); !errors.Is(err, ErrNoStabilizing) {
-			t.Errorf("NoScaling %v: got %v, %v; want ErrNoStabilizing", opts != nil, res, err)
+		if res, err := acceptUnverified(Dare(A, B, Q, R, opts)); !errors.Is(err, ErrNoStabilizing) || !errors.Is(err, ErrNotStabilizable) {
+			t.Errorf("NoScaling %v: got %v, %v; want ErrNoStabilizing with ErrNotStabilizable", opts != nil, res, err)
 		}
 	}
 }

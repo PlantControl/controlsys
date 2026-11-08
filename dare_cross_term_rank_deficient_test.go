@@ -80,8 +80,8 @@ func TestDare_CrossTermRankDeficientBIsAccurate(t *testing.T) {
 			variants = append(variants, variant{"descriptor", &Ae, &Be, RiccatiOpts{S: S, E: E}})
 			for _, tc := range variants {
 				name := fmt.Sprintf("case %d %s %s", i, rname, tc.name)
-				res, err := Dare(tc.A, tc.B, Q, R, &tc.opts)
-				if i < 2 && (err != nil || res.Accuracy != 0) {
+				res, err := acceptUnverified(Dare(tc.A, tc.B, Q, R, &tc.opts))
+				if i < 2 && (err != nil || res.accuracy != 0) {
 					continue
 				}
 				if err != nil {
@@ -96,7 +96,7 @@ func TestDare_CrossTermRankDeficientBIsAccurate(t *testing.T) {
 					X = &ex
 				}
 				if rel := relErr(X, want); !(rel <= 1e-8) {
-					t.Errorf("%s: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g", name, res.Accuracy, rel)
+					t.Errorf("%s: Accuracy %d, ‖X − X*‖/‖X*‖ = %.3g", name, res.accuracy, rel)
 				}
 				if r, c := res.K.Dims(); r != 3 || c != 2 {
 					t.Fatalf("%s: K is %d×%d, want 3×2", name, r, c)

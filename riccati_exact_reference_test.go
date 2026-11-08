@@ -124,14 +124,14 @@ func TestDare_DescriptorCheapControlNotCertifiedWrong(t *testing.T) {
 			t.Fatalf("%s: reference not certified", c.name)
 		}
 		for _, ns := range []bool{false, true} {
-			res, err := Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns})
+			res, err := acceptUnverified(Dare(A, B, Q, R, &RiccatiOpts{E: E, S: S, NoScaling: ns}))
 			if err != nil {
 				t.Logf("%s NoScaling %v: %v", c.name, ns, err)
 				continue
 			}
 			eX, eK := relErr(res.X, ref.X), relErr(res.K, ref.K)
-			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (sens %.3g), K err %.3g (sens %.3g)", c.name, ns, res.Accuracy, eX, sens.X, eK, sens.KBand())
-			if riccatiCertifiedWrong(res.Accuracy, eX, sens.X, eK, sens.KBand(), gainFloor) {
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (sens %.3g), K err %.3g (sens %.3g)", c.name, ns, res.accuracy, eX, sens.X, eK, sens.KBand())
+			if riccatiCertifiedWrong(res.accuracy, eX, sens.X, eK, sens.KBand(), gainFloor) {
 				t.Errorf("%s NoScaling %v: certified-wrong: X err %g, K err %g", c.name, ns, eX, eK)
 			}
 		}

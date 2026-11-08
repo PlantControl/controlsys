@@ -135,8 +135,8 @@ type RiccatiOpts struct {
 	// of its terms, is still retried with cost scaling; so is a plain Care
 	// solve that fails or leaves a residual above 1e-6 of its terms. A
 	// solve in either mode that finds no stabilizing solution, or one no
-	// Newton step certifies (Accuracy 1), is retried once in the other,
-	// and Care's then state-scaled ignoring R.
+	// Newton step certifies (ErrAccuracyUnverified), is retried once in
+	// the other, and Care's then state-scaled ignoring R.
 	NoScaling bool
 	// plainScaling balances Care's state scaling with B in place of its
 	// cost proxy (scale): otherScaling's last resort.
@@ -153,10 +153,35 @@ type RiccatiOpts struct {
 }
 
 // RiccatiResult is the stabilizing solution of Care or Dare.
+//
+// Care, Dare and the operations built on them (Lqr, Dlqr, Lqi, Lqrd, Lqe,
+// Kalman, Kalmd) report the certification of X, MATLAB icare/idare's
+// Report, by their error, not by a field:
+//   - nil: a Newton step certifies X (to about 1e-8 relative).
+//   - ErrAccuracyUnverified, with a non-nil result: X is a stabilizing
+//     Hamiltonian or pencil solution (A − BK stable in float64 arithmetic)
+//     that no Newton step certifies (Report 1), so X may be inaccurate
+//     and, near the stability boundary, A − BK only rounded to stable;
+//     check it before use. So is a certified X whose closed loop has a mode
+//     within rounding of the boundary at which a mode of A is unobservable
+//     to the cost Q and cross term Sᵀ (Kalman: unreachable from the noise):
+//     the data cannot tell such a mode just inside the boundary, with a
+//     stabilizing solution, from one on it, with none.
+//   - ErrNoStabilizing, with ErrNotStabilizable (ErrNotDetectable for
+//     Kalman, Lqe and Kalmd): a mode of (A, B) on or beyond the boundary,
+//     within a first-order band of the data, fails the PBH rank test, so
+//     no stabilizing solution exists (Report 3).
+//   - ErrNotConverged: no candidate X passed verification (a float64 stable
+//     count other than n, a Newton or Hewer breakdown, an exhausted search).
+//     It does not prove that no stabilizing solution exists.
+//   - ErrSingularEquation: the basis U11 of the stable subspace is
+//     singular, so X is not finite (Report 2).
+//
+// Every error but ErrAccuracyUnverified comes with a nil result.
 type RiccatiResult struct {
 	// X is the stabilizing solution, K the state-feedback gain and Eig the
 	// closed-loop eigenvalues. They are caller-owned unless a workspace was
-	// supplied.
+	// supplied, also with ErrAccuracyUnverified.
 	X   *mat.Dense
 	K   *mat.Dense
 	Eig []complex128
@@ -164,22 +189,13 @@ type RiccatiResult struct {
 	// [U11; U21] spans the stable invariant subspace and X = U21·U11⁻¹. A
 	// tiny Rcnd means X may be inaccurate. U11 is that of the state- and
 	// cost-scaled problem actually solved or, for Dare's pole-placement
-	// fallback, of the orthonormal basis of span[I; X̂/σ], σ ≈ ‖X̂‖.
+	// fallback, of the orthonormal basis of span[I; X̂/σ], σ ≈ ‖X̂‖. It is a
+	// diagnostic, not a certificate.
 	Rcnd float64
-	// Accuracy is the Report of MATLAB icare/idare for X: 0 when a Newton
-	// step certifies X (to about 1e-8 relative), 1 when X is a stabilizing
-	// Hamiltonian or pencil solution (A − BK stable in float64 arithmetic)
-	// that no Newton step certifies, so X may be inaccurate and, near the
-	// stability boundary, A − BK only rounded to stable; check it before
-	// use. It is also 1 for a certified X whose closed loop has a mode
-	// within rounding of the boundary at which a mode of A is unobservable
-	// to the cost Q and cross term Sᵀ (Kalman: unreachable from the noise):
-	// the data cannot tell such a mode just inside the boundary, with a
-	// stabilizing solution, from one on it, with none. A non-finite X or
-	// no stabilizing solution (Report 2, 3) is an error, not a result, as
-	// is an X with an unstabilizable mode of (A, B) on the boundary to
-	// within rounding (PBH).
-	Accuracy int
+	// accuracy is the Report of X inside the package, 0 when certified and
+	// 1 when not (Accuracy 0 and 1 in the comments). certify translates it
+	// to ErrAccuracyUnverified only at the exported exits.
+	accuracy int
 
 	// step is the first Newton step of an Accuracy 1 X or, at Accuracy 0,
 	// that of the X verifyRiccati certified, its relative error, and x1
@@ -273,7 +289,7 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // E'XE solves the Care of the explicit model (E⁻¹A, E⁻¹B). A singular E
 // (LU condition estimate at or above 1/ε and rank deficient by MATLAB rank)
 // returns ErrDescriptorSingular, as does a near-singular E (either test
-// alone) whose result is not certified (Accuracy 1) or whose K or E'XE
+// alone) whose result is not certified or whose K or E'XE
 // cancels in X ~ 1/σ_min(E) (nearSingularEGate). Nil or NaN/Inf arguments
 // return ErrInvalidArgument.
 //
@@ -300,30 +316,42 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // (a step within 1e-10); when that fails (or A − BK is unstable, or the
 // Hamiltonian solve fails, or E is given) Care solves the extended pencil
 // of MATLAB icare, verified the same way at each of its cost scales. A
-// certified X has Accuracy 0. With E, where K and EᵀXE formed from X ~
+// certified X comes with a nil error. With E, where K and EᵀXE formed from X ~
 // 1/σ_min(E) cancel (beyond nearSingularCancelLimit), or the Newton step
 // of X moves K or EᵀXE beyond 1e-10 (a step of 1.7e-9 left K off by
 // 9.2e-7), K and the EᵀXE of Lqr are those of P = XE refined by Newton's
 // method in double-double, and X is certified only once that converges
 // or the cancellation times eps and the step's move of K are within
-// 1e-8; without cancellation X stays certified, at Accuracy 1 when the
+// 1e-8; without cancellation X stays certified, uncertified only when the
 // step moves K beyond 1e-8. With none certified, Care returns, as
 // MATLAB icare with Report 1, the stabilizing solution (A − BK stable in
 // float64) of smallest first Newton step (or, without one, a stabilizing
-// X whose Lyapunov equation is singular) with Accuracy 1, unrefined:
+// X whose Lyapunov equation is singular) with ErrAccuracyUnverified,
+// unrefined:
 // under cheap control with weak actuation Newton has no quadratic region
 // (its first step from an X accurate to 1e-11 can be 1e-6), and such an
 // X may be accurate or off by far more than its step; when (A, B) has a
 // mode on the boundary (to its eigenvalue's rounding error) that fails
 // the PBH rank test, no stabilizing solution exists and Care returns
-// ErrNoStabilizing instead, in either mode. An X whose U11 has
-// rcnd below eps is not finite (icare Report 2) and is never returned.
-// A solve that finds no stabilizing solution, or only an Accuracy 1 one,
-// is retried with NoScaling flipped and then state-scaled balancing B in
-// place of BR⁻¹Bᵀ: the first certified X is returned, else the Accuracy
-// 1 X of smallest first Newton step; with none Care returns
-// ErrNoStabilizing (or the Hamiltonian's error) of the first.
+// ErrNoStabilizing with ErrNotStabilizable instead, in either mode. An X
+// whose U11 has rcnd below eps is not finite (icare Report 2) and is never
+// returned. A solve that finds no stabilizing solution, or only an
+// uncertified one, is retried with NoScaling flipped and then state-scaled
+// balancing B in place of BR⁻¹Bᵀ: the first certified X is returned, else
+// the uncertified X of smallest first Newton step; with none Care returns
+// the error of the first: ErrNotConverged (no candidate passed
+// verification, which proves nothing), ErrSchurFailed (itself an
+// ErrNotConverged) or ErrSingularEquation (Report 2). RiccatiResult lists
+// the errors; only ErrAccuracyUnverified comes with a result, which, like a
+// certified one, lives in opts.Workspace when one is given.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
+	res, err := careCore(A, B, Q, R, opts)
+	return certify("Care", ErrNotStabilizable, res, err)
+}
+
+// careCore is Care before certify: an uncertified X has accuracy 1 and a
+// nil error, and a failed solve keeps its unexported sentinel.
+func careCore(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	if err := riccatiArgs("Care", A, B, Q, R, opts); err != nil {
 		return nil, err
 	}
@@ -332,8 +360,8 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 		err = fmt.Errorf("Care: %w", err)
 	}
 	res, err = nearSingularEGate("Care", true, A, B, R, opts, res, err)
-	if err == nil && res.Accuracy == 0 && res.gainUncertified {
-		res.Accuracy = 1
+	if err == nil && res.accuracy == 0 && res.gainUncertified {
+		res.accuracy = 1
 	}
 	if err == nil {
 		undetectableBoundary(true, A, B, Q, R, opts, res)
@@ -341,12 +369,56 @@ func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	return res, err
 }
 
+// certify is the exit of every exported Riccati operation op (Care, Dare,
+// Lqr, Dlqr, Lqe, Kalman, Kalmd) from its core result: an X of accuracy 1
+// is returned with ErrAccuracyUnverified, errNoCandidate becomes
+// ErrNotConverged, errSingularBasis ErrSingularEquation, and
+// errBoundaryUnstabilizable, which stays ErrNoStabilizing, also wraps
+// unsolvable (ErrNotStabilizable, or ErrNotDetectable for the dual of
+// Kalman). Any other error is returned unchanged, and every error but
+// ErrAccuracyUnverified with a nil result.
+func certify(op string, unsolvable error, res *RiccatiResult, err error) (*RiccatiResult, error) {
+	if err != nil {
+		return nil, riccatiError(err, unsolvable)
+	}
+	if res.accuracy != 0 {
+		return res, fmt.Errorf("%s: solution not certified: %w", op, ErrAccuracyUnverified)
+	}
+	return res, nil
+}
+
+// riccatiError is the exported error of a Riccati core error err, as
+// certify maps it; a nil unsolvable adds no sentinel to the boundary
+// verdict (Lqg, H2Syn).
+func riccatiError(err error, unsolvable error) error {
+	switch {
+	case errors.Is(err, errBoundaryUnstabilizable):
+		if unsolvable == nil {
+			return err
+		}
+		return &jointError{err, unsolvable}
+	case errors.Is(err, errSingularBasis):
+		return fmt.Errorf("%v: %w", err, ErrSingularEquation)
+	case errors.Is(err, errNoCandidate):
+		return fmt.Errorf("%v: %w", err, ErrNotConverged)
+	}
+	return err
+}
+
+// jointError keeps the message of err and matches both err and also
+// under errors.Is.
+type jointError struct{ err, also error }
+
+func (e *jointError) Error() string { return e.err.Error() }
+
+func (e *jointError) Unwrap() []error { return []error{e.err, e.also} }
+
 // undetectableBoundary sets a certified res to Accuracy 1 where
 // boundaryCertified, with cost detectability, finds a boundary mode
 // unobservable to the cost: X and K stay those of the solve.
 func undetectableBoundary(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult) {
-	if res.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res, true) {
-		res.Accuracy, res.xeCertified = 1, false
+	if res.accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res, true) {
+		res.accuracy, res.xeCertified = 1, false
 	}
 }
 
@@ -384,7 +456,7 @@ func nearSingularEGate(op string, continuous bool, A, B, R *mat.Dense, opts *Ric
 	if !condNear && !rankDeficient || err != nil && !condNear {
 		return res, err
 	}
-	if err == nil && res.Accuracy == 0 && !nearSingularCancels(continuous, A, B, R, opts, res.X) {
+	if err == nil && res.accuracy == 0 && !nearSingularCancels(continuous, A, B, R, opts, res.X) {
 		return res, nil
 	}
 	return nil, fmt.Errorf("%s: E: %w", op, ErrDescriptorSingular)
@@ -429,7 +501,7 @@ func nearSingularCancels(continuous bool, A, B, R *mat.Dense, opts *RiccatiOpts,
 }
 
 // otherScaling solves by solve and, when that finds no stabilizing
-// solution (ErrNoStabilizing or ErrSchurFailed) or one no Newton step
+// solution (noSolution or ErrSchurFailed) or one no Newton step
 // certifies (Accuracy 1), once more with opts.NoScaling flipped, and then,
 // when continuous (Care), state-scaled with B in place of its cost proxy
 // (opts.plainScaling).
@@ -452,11 +524,11 @@ func nearSingularCancels(continuous bool, A, B, R *mat.Dense, opts *RiccatiOpts,
 // without it.
 func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := solve(A, B, Q, R, opts)
-	if err == nil && res.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res, false) {
+	if err == nil && res.accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res, false) {
 		res, err = nil, errBoundaryUnstabilizable
 	}
-	if err == nil && res.Accuracy == 0 ||
-		err != nil && !errors.Is(err, ErrNoStabilizing) && !errors.Is(err, ErrSchurFailed) {
+	if err == nil && res.accuracy == 0 ||
+		err != nil && !noSolution(err) && !errors.Is(err, ErrSchurFailed) {
 		return res, err
 	}
 	var boundary error
@@ -480,7 +552,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 			o.Workspace = nil
 		}
 		r, e := solve(A, B, Q, R, &o)
-		if e == nil && r.Accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, r, false) {
+		if e == nil && r.accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, r, false) {
 			r, e = nil, errBoundaryUnstabilizable
 		}
 		unscaled = unscaled || unscaledVerdict(r, e)
@@ -490,7 +562,7 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 				boundary = e
 			}
 		case e != nil:
-		case r.Accuracy == 0:
+		case r.accuracy == 0:
 			return r, nil
 		case res == nil || r.step < res.step:
 			res = r
@@ -708,13 +780,13 @@ solve:
 			nn, h, nn, wr, wi, vs, nn, ws.work, lwork, bwork)
 		err := ErrSchurFailed
 		if ok {
-			err = ErrNoStabilizing
+			err = errNoCandidate
 			if sdim == n {
 				X, xData, rcnd, err = problem.stabilizingSolution(vs)
 			}
 		}
 		if err == nil && !finiteSlice(xData) {
-			err = ErrNoStabilizing
+			err = errSingularBasis
 		}
 		if err != nil {
 			switch {
@@ -831,7 +903,7 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 //
 // Dare always deflates the extended pencil, as MATLAB idare does, so A may
 // be singular or have near-zero eigenvalues. A solution with R+B'XB not
-// positive definite returns ErrNoStabilizing.
+// positive definite is no candidate (ErrNotConverged).
 //
 // Dare checks the pencil's X by a Newton (Hewer) step from its gain, a
 // Stein solve (with E, for E⁻¹(A − BK) and EᵀΔE) of the double-double
@@ -839,19 +911,19 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // to the rounding of (R+B'XB)⁻¹ that hides lost digits from the residual
 // itself. An X the step moves by more than 1e-8 relative is refined by
 // Newton's method until a step is within 1e-10; if that does not
-// converge, the other cost scales' solutions are tried. A certified X has
-// Accuracy 0; with none certified Dare returns the stabilizing solution of
-// smallest first step with Accuracy 1 (MATLAB idare Report 1, as Care,
-// including its PBH check of boundary modes, and its retry in the other
-// NoScaling mode). With no stabilizing pencil solution in either mode and
-// no unstabilizable boundary mode, Dare runs Hewer's
-// iteration from a pole-placement gain and returns its X only when the
-// same Newton check certifies it (Accuracy 0; Rcnd then that of span[I; X/σ] at σ ≈ ‖X‖,
-// or Accuracy 1 where X holds no digit of R + BᵀXB in an input, placedHewer),
-// else ErrNoStabilizing: under cheap control of a strongly unstable plant
-// no cost scale of the pencil may resolve its split. It runs them too
-// over an Accuracy 1 pencil solution, which a certified placed X
-// replaces: under cheap control with m = n the pencil's X can be off by
+// converge, the other cost scales' solutions are tried. A certified X
+// comes with a nil error; with none certified Dare returns the stabilizing
+// solution of smallest first step with ErrAccuracyUnverified (MATLAB idare
+// Report 1, as Care, including its PBH check of boundary modes, its retry
+// in the other NoScaling mode and its errors). With no stabilizing pencil
+// solution in either mode and no unstabilizable boundary mode, Dare runs
+// Hewer's iteration from a pole-placement gain and returns its X only
+// when the same Newton check certifies it (Rcnd then that of span[I; X/σ]
+// at σ ≈ ‖X‖, and ErrAccuracyUnverified where X holds no digit of
+// R + BᵀXB in an input, placedHewer), else ErrNotConverged: under cheap
+// control of a strongly unstable plant no cost scale of the pencil may
+// resolve its split. It runs them too over an uncertified pencil solution,
+// which a certified placed X replaces: under cheap control with m = n the pencil's X can be off by
 // 4e-3 where Hewer from a placed gain certifies it to 1e-10. Not with B
 // of condition above rotationCond in the given inputs, where Newton's
 // R + BᵀXB has lost its smallest eigenvalue and certified placed X off by
@@ -879,7 +951,7 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // (duplicated inputs, or m > n): the rounding of V in BV₂ ≈ 1e-17 moved
 // their X by 1e-5. Either K is returned only with A − BK in the given
 // inputs stable; should that, or the problem in w, fail, the given one
-// is solved, and its X keeps Accuracy 0 only once the Newton check in w
+// is solved, and its X stays certified only once the Newton check in w
 // certifies it, from its X or else the Hewer step X₁ of its K (then with
 // X₁, its K and Eig): there Newton certified X off by 1e-3 to 0.16, and
 // the cost of K equal to X shows only that, not that K is the gain of X.
@@ -888,17 +960,17 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // of BᵀXB swamps R there, the X of the given problem is certified again
 // in the inputs w and K taken from there (VᵀRV costs K only eps·cond(R)),
 // and a given problem that fails or is poor is solved in r inputs; either
-// K keeps Accuracy 0 only as the double-double gain of its X (gainMiss),
-// else the one nearest it is returned with Accuracy 1: with a
+// K stays certified only as the double-double gain of its X (gainMiss),
+// else the one nearest it is returned with ErrAccuracyUnverified: with a
 // rank-deficient Q, K was off by O(1) on B's range with X exact. Under
 // cheap control the same holds for the K of the problem with a cross term
 // solved in r inputs, and for that of a B without reduced inputs where
-// BᵀXB may round R away (rLost), there with Accuracy 1 otherwise: with a
+// BᵀXB may round R away (rLost), there uncertified otherwise: with a
 // full-rank square B and a rank-deficient Q, BᵀXB is singular and the
 // float64 gain lost R against it, K off by O(1) with X exact to 1e-14.
 // That K must also be the gain of X one certified Newton step on, whose
 // error the gain may amplify by 1e9 (K off by 9e-3 with X off by 7e-14):
-// a K that is not is replaced, before Accuracy 1, by the double-double
+// a K that is not is replaced, before it is left uncertified, by the double-double
 // gain of X taken one Newton step on, once that X is certified and its
 // A − BK stable (refined). Of an X whose Newton step is within eps, a K
 // off its double-double gain by more than 1e-6 is replaced by that gain
@@ -906,7 +978,7 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // by 7.3e-6 with X exact and its gain within 3.4e-9. K and EᵀXE that a
 // descriptor refinement in double-double formed (refineDescriptorDare)
 // are kept: the gain of the float64 X lost cond(K)·eps ≈ 1e-5 against
-// them. Their X keeps Accuracy 0 only within newtonTol of the
+// them. Their X stays certified only within newtonTol of the
 // double-double iterate they came from (3e-8 off it with E's smallest
 // singular value 1.2e-6), in both its Frobenius and 1-norm (X off by
 // 1.25e-8 with 9.97e-9 in the first). With reduced inputs, under cheap
@@ -918,17 +990,19 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // A descriptor Dare left with no stabilizing solution whose E is
 // ill-conditioned but nonsingular is solved once more on its explicit
 // model in extended precision (nearSingularDare). With E better
-// conditioned, a Dare with no stabilizing solution (ErrNoStabilizing, an
-// unstabilizable boundary mode included), and at any cond(E) one whose X
-// is uncertified, is solved the same way and that solution returned only
-// with EᵀXE and K certified (boundaryExtendedDare).
+// conditioned, a Dare with no stabilizing solution (an unstabilizable
+// boundary mode included), and at any cond(E) one whose X is uncertified,
+// is solved the same way and that solution returned only with EᵀXE and K
+// certified (boundaryExtendedDare).
 // A descriptor X certified on its K alone whose EᵀXE step fails
-// (descriptorGainCertified) is returned unchanged with Accuracy 1.
+// (descriptorGainCertified) is returned unchanged with
+// ErrAccuracyUnverified.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
-	return dareFor(A, B, Q, R, opts, false)
+	res, err := dareFor(A, B, Q, R, opts, false)
+	return certify("Dare", ErrNotStabilizable, res, err)
 }
 
-// dareFor is Dare; explicit is set by callers that return EᵀXE
+// dareFor is Dare before certify, as careCore is Care; explicit is set by callers that return EᵀXE
 // (explicitRiccatiSolution), for which alone a loose EᵀXE takes the
 // extended solve (boundaryExtendedDare).
 func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiResult, error) {
@@ -951,8 +1025,8 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 		}
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
-	if err == nil && res.Accuracy == 0 && dareUncertified(res, err) {
-		res.Accuracy = 1
+	if err == nil && res.accuracy == 0 && dareUncertified(res, err) {
+		res.accuracy = 1
 	}
 	if err == nil {
 		undetectableBoundary(false, A, B, Q, R, opts, res)
@@ -961,7 +1035,7 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 }
 
 // boundaryExtendedDare is the extended solve of nearSingularDare for a
-// descriptor Dare with no stabilizing solution (ErrNoStabilizing, the
+// descriptor Dare with no stabilizing solution (noSolution, the
 // boundary verdict included) below its cond(E)·eps gate, or with an
 // uncertified result (Accuracy 1, or one Dare demotes to it) that only the
 // unscaled PBH test finds at an unstabilizable boundary mode
@@ -988,7 +1062,7 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error, explicit bool) (*RiccatiResult, bool) {
 	uncertified := dareUncertified(res, err) && res.unscaledBoundary
 	loose := explicit && err == nil && !dareUncertified(res, err) && res.xe != nil && res.xeLoose
-	if !uncertified && !loose && !errors.Is(err, ErrNoStabilizing) {
+	if !uncertified && !loose && !noSolution(err) {
 		return nil, false
 	}
 	cond, ok := extendedDareCond(B, opts)
@@ -999,7 +1073,7 @@ func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *Riccati
 	if !ok || !r.xeCertified {
 		return nil, false
 	}
-	if loose && r.Accuracy != 0 {
+	if loose && r.accuracy != 0 {
 		if !gainPairAgrees(res.K, r.K) {
 			return nil, false
 		}
@@ -1012,7 +1086,7 @@ func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *Riccati
 // dareUncertified reports a Dare result uncertified: Accuracy 1, or one
 // Dare demotes to it.
 func dareUncertified(res *RiccatiResult, err error) bool {
-	return err == nil && (res.Accuracy != 0 || res.gainUncertified || res.xe != nil && res.xeX > newtonTol)
+	return err == nil && (res.accuracy != 0 || res.gainUncertified || res.xe != nil && res.xeX > newtonTol)
 }
 
 // gainPairAgrees reports the pencil K within newtonTol of the extended K,
@@ -1029,13 +1103,13 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	if red == nil {
 		res, err := dareSolve(A, B, Q, R, opts, !ill)
 		n, m := B.Dims()
-		if err != nil || res.Accuracy != 0 || n == 0 || m == 0 || !rLost(B, R, res.X) {
+		if err != nil || res.accuracy != 0 || n == 0 || m == 0 || !rLost(B, R, res.X) {
 			return res, err
 		}
 		if r, _, ok := gainOfX(A, B, Q, R, opts, nil, res); ok {
 			return r, nil
 		}
-		res.Accuracy = 1
+		res.accuracy = 1
 		return res, nil
 	}
 	var E *mat.Dense
@@ -1056,7 +1130,7 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			}
 			return r, ok
 		}
-		if err == nil && res.Accuracy == 0 {
+		if err == nil && res.accuracy == 0 {
 			if !(red.sigma*red.sigma*mat.Norm(res.X, 1) > mat.Norm(R, 1)) {
 				return res, nil
 			}
@@ -1078,11 +1152,11 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 			}
 		}
 		if poor != nil {
-			poor.Accuracy = 1
+			poor.accuracy = 1
 			return poor, nil
 		}
 		if err == nil {
-			res.Accuracy = 1
+			res.accuracy = 1
 		}
 		return res, err
 	}
@@ -1096,16 +1170,16 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	// from an X 1.1e-7 off, the gain of the stepped X was 0.44 off (band
 	// 2.1e-5) and would have been certified.
 	gainOf := func(c *RiccatiResult) *RiccatiResult {
-		if red.rotated && c.xe == nil && c.Accuracy == 0 || !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
+		if red.rotated && c.xe == nil && c.accuracy == 0 || !red.rotated && red.sigma*red.sigma*mat.Norm(c.X, 1) > mat.Norm(R, 1) {
 			r, _, ok := gainOfX(A, B, Q, R, opts, red, c)
 			if ok {
 				return r
 			}
 			if r != nil {
-				r.Accuracy = 1
+				r.accuracy = 1
 				return r
 			}
-			c.Accuracy = 1
+			c.accuracy = 1
 		}
 		return c
 	}
@@ -1113,13 +1187,13 @@ func dareInputs(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		return gainOf(res), nil
 	}
 	res, err := dareSolve(A, B, Q, R, opts, !ill)
-	if err != nil || res.Accuracy != 0 {
+	if err != nil || res.accuracy != 0 {
 		return res, err
 	}
 	if c, ok := red.certify(A, Q, opts, res, res.K); ok && closedLoopStable(A, B, c.K, E, c.Eig) {
 		return gainOf(c), nil
 	}
-	res.Accuracy = 1
+	res.accuracy = 1
 	return res, nil
 }
 
@@ -1144,7 +1218,7 @@ func (red *reducedInputs) solve(A, B, Q *mat.Dense, opts *RiccatiOpts) *RiccatiR
 		} else {
 			lost := res.channelLost
 			if res, ok = red.certify(A, Q, opts, res, nil); ok && lost {
-				res.Accuracy, res.channelLost = 1, true
+				res.accuracy, res.channelLost = 1, true
 			}
 		}
 		if ok && closedLoopStable(A, B, res.K, o.E, res.Eig) {
@@ -1162,7 +1236,7 @@ func (red *reducedInputs) solve(A, B, Q *mat.Dense, opts *RiccatiOpts) *RiccatiR
 	o.Workspace = nil
 	flipped := o
 	flipped.NoScaling = !o.NoScaling
-	if r, err := dare(A, red.b, red.q, red.r, &flipped); err == nil && r.Accuracy == 0 && !boundaryCertified(false, A, red.b, red.q, red.r, &o, r, false) {
+	if r, err := dare(A, red.b, red.q, red.r, &flipped); err == nil && r.accuracy == 0 && !boundaryCertified(false, A, red.b, red.q, red.r, &o, r, false) {
 		if r = accept(r, nil); r != nil {
 			return r
 		}
@@ -1790,9 +1864,9 @@ func certifyIn(A, B, Q, R, S *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, 
 // they certify most such pencils at a third of the cost (CEFUJP).
 func dareSolve(A, B, Q, R *mat.Dense, opts *RiccatiOpts, swapPoor bool) (*RiccatiResult, error) {
 	res, err := otherScaling(dare, false, A, B, Q, R, opts)
-	poor := swapPoor && err == nil && res.Accuracy != 0 && !res.unscaledBoundary
+	poor := swapPoor && err == nil && res.accuracy != 0 && !res.unscaledBoundary
 	place := opts != nil && opts.placeUnscaled || !errors.As(err, new(unscaledBoundaryError))
-	if poor || (errors.Is(err, ErrNoStabilizing) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) && place {
+	if poor || (noSolution(err) || errors.Is(err, ErrSchurFailed)) && !errors.Is(err, errBoundaryUnstabilizable) && place {
 		var base RiccatiOpts
 		if opts != nil {
 			base = *opts
@@ -2467,7 +2541,7 @@ func (problem *riccatiProblem) lastResort(continuous bool, eig []complex128) (*m
 		}
 		problem.candidates = append(problem.candidates, riccatiPass{sigma: sigma})
 	}
-	return nil, nil, 0, ErrNoStabilizing
+	return nil, nil, 0, errNoCandidate
 }
 
 // placedHewer is Dare's last source of a stabilizing solution, tried by
@@ -2504,16 +2578,16 @@ func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.D
 		eLU.Factorize(problem.E)
 		var ea, eb mat.Dense
 		if err := eLU.SolveTo(&ea, false, A); err != nil {
-			return nil, nil, 0, ErrNoStabilizing
+			return nil, nil, 0, errNoCandidate
 		}
 		if err := eLU.SolveTo(&eb, false, B); err != nil {
-			return nil, nil, 0, ErrNoStabilizing
+			return nil, nil, 0, errNoCandidate
 		}
 		A, B = &ea, &eb
 	}
 	var svd mat.SVD
 	if !svd.Factorize(B, mat.SVDFull) {
-		return nil, nil, 0, ErrNoStabilizing
+		return nil, nil, 0, errNoCandidate
 	}
 	sv := svd.Values(nil)
 	r := 0
@@ -2523,7 +2597,7 @@ func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.D
 		}
 	}
 	if r == 0 || (problem.S != nil && r < m) {
-		return nil, nil, 0, ErrNoStabilizing
+		return nil, nil, 0, errNoCandidate
 	}
 	nf := float64(n)
 	poleSets := [][]complex128{make([]complex128, n), make([]complex128, n)}
@@ -2534,10 +2608,10 @@ func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.D
 	xData := ws.xData[:n*n]
 	try := func(K0 *mat.Dense) (*mat.Dense, *mat.Dense, float64, error) {
 		if K0 == nil || !finiteSlice(K0.RawMatrix().Data) {
-			return nil, nil, 0, ErrNoStabilizing
+			return nil, nil, 0, errNoCandidate
 		}
 		if _, ok := problem.stableGain(false, K0); !ok {
-			return nil, nil, 0, ErrNoStabilizing
+			return nil, nil, 0, errNoCandidate
 		}
 		var bk, acl, rk, qk mat.Dense
 		bk.Mul(problem.B, K0)
@@ -2555,30 +2629,30 @@ func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.D
 		if problem.E != nil {
 			var ft mat.Dense
 			if err := eLU.SolveTo(&ft, false, &acl); err != nil {
-				return nil, nil, 0, ErrNoStabilizing
+				return nil, nil, 0, errNoCandidate
 			}
 			f = mat.DenseCopyOf(ft.T())
 		}
 		symmetrize(qk.RawMatrix().Data, n, n)
 		Y, err := dlyap(f, &qk, nil)
 		if err != nil {
-			return nil, nil, 0, ErrNoStabilizing
+			return nil, nil, 0, errNoCandidate
 		}
 		X0 := Y
 		if problem.E != nil {
 			var w, x mat.Dense
 			if err := eLU.SolveTo(&w, true, Y); err != nil {
-				return nil, nil, 0, ErrNoStabilizing
+				return nil, nil, 0, errNoCandidate
 			}
 			if err := eLU.SolveTo(&x, true, w.T()); err != nil {
-				return nil, nil, 0, ErrNoStabilizing
+				return nil, nil, 0, errNoCandidate
 			}
 			X0 = &x
 		}
 		copyStrided(xData, n, X0.RawMatrix().Data, X0.RawMatrix().Stride, n, n)
 		symmetrize(xData, n, n)
 		if !finiteSlice(xData) {
-			return nil, nil, 0, ErrNoStabilizing
+			return nil, nil, 0, errNoCandidate
 		}
 		X := mat.NewDense(n, n, xData)
 		K, err := problem.acceptRiccati(false, X, eig, 0)
@@ -2599,7 +2673,7 @@ func (problem *riccatiProblem) placedHewer(eig []complex128) (*mat.Dense, *mat.D
 			}
 		}
 	}
-	return nil, nil, 0, ErrNoStabilizing
+	return nil, nil, 0, errNoCandidate
 }
 
 // placedRcnd returns the reciprocal 2-norm condition of U11 for the
@@ -2676,7 +2750,7 @@ func unscaledVerdict(res *RiccatiResult, err error) bool {
 	return res.unscaledBoundary
 }
 
-// unscaledBoundaryError is a Dare pencil's ErrNoStabilizing, with no
+// unscaledBoundaryError is a Dare pencil's failure (noSolution), with no
 // uncertified X, where the unscaled PBH test, unlike the homogeneous one,
 // finds a boundary mode unstabilizable: a placedDare X that replaces it
 // is marked unscaledBoundary.
@@ -2687,7 +2761,28 @@ func (e unscaledBoundaryError) Unwrap() error { return e.error }
 // errBoundaryUnstabilizable is the ErrNoStabilizing of
 // boundaryUnstabilizable: structural, so it holds in either scaling mode
 // over any Accuracy 1 X, though not over a certified one (otherScaling).
+// It is the only Riccati verdict that no stabilizing solution exists.
 var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on or beyond the stability boundary is unstabilizable", ErrNoStabilizing)
+
+// errNoCandidate reports a Riccati solve with no candidate X accepted: a
+// float64 stable count of the Hamiltonian or pencil other than n, a
+// Newton or Hewer iteration that broke down or did not converge, an
+// R + BᵀXB not positive definite, an exhausted cost-scale or placement
+// search. certify reports it as ErrNotConverged.
+var errNoCandidate = errors.New("no verified stabilizing solution found")
+
+// errSingularBasis reports a stable subspace whose basis U11 is singular,
+// or an X formed from it that is not finite (MATLAB icare/idare Report 2).
+// certify reports it as ErrSingularEquation.
+var errSingularBasis = errors.New("stable subspace basis U11 singular, X not finite")
+
+// noSolution reports a Riccati solve that found no stabilizing solution:
+// errNoCandidate, errSingularBasis or errBoundaryUnstabilizable, which
+// steer the retries of otherScaling, dareSolve, boundaryExtendedDare,
+// nearSingularDare and verifyRiccati.
+func noSolution(err error) bool {
+	return errors.Is(err, errNoCandidate) || errors.Is(err, errSingularBasis) || errors.Is(err, errBoundaryUnstabilizable)
+}
 
 // boundaryUnstabilizable reports a finite eigenvalue λ of (A, E) on or
 // beyond the stability boundary, or within rounding of it, at which
@@ -3012,7 +3107,7 @@ func (problem *riccatiProblem) careGain(xData []float64) *mat.Dense {
 }
 
 // dareGain returns K = (R + BᵀXB)⁻¹(BᵀXA + Sᵀ) in ws.kData, or
-// ErrNoStabilizing when R + BᵀXB is not positive definite.
+// errNoCandidate when R + BᵀXB is not positive definite.
 func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 	n, m, ws := problem.n, problem.m, problem.ws
 	aRaw, bRaw, rRaw := problem.A.RawMatrix(), problem.B.RawMatrix(), problem.R.RawMatrix()
@@ -3029,7 +3124,7 @@ func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 		blas64.General{Rows: n, Cols: m, Data: bRaw.Data, Stride: bRaw.Stride},
 		1, blas64.General{Rows: m, Cols: m, Data: rbar, Stride: m})
 	if !impl.Dpotrf(blas.Upper, m, rbar, m) {
-		return nil, ErrNoStabilizing
+		return nil, errNoCandidate
 	}
 
 	kData := ws.kData[:m*n]
@@ -3084,12 +3179,12 @@ func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 // terms (3XCWZW: a Hamiltonian pair on the axis to rounding left an X of
 // residual 0.9 of its terms, first step 1, that no stabilizing solution
 // underlies). Otherwise verifyRiccati returns
-// problem.rescueErr, or ErrNoStabilizing, and the caller falls back to
+// problem.rescueErr, or errNoCandidate, and the caller falls back to
 // problem.poor with Accuracy 1. X and eig are updated in place.
 func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, eig []complex128, rcnd float64) (*mat.Dense, error) {
 	fail := problem.rescueErr
 	if fail == nil {
-		fail = ErrNoStabilizing
+		fail = errNoCandidate
 	}
 	xData := X.RawMatrix().Data
 	bestStep, stalls := math.Inf(1), 0
@@ -3111,7 +3206,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 	for it := range newtonSteps {
 		x1, err := problem.newtonCost(continuous, K, xData)
 		if err != nil {
-			if it == 0 && !errors.Is(err, ErrNoStabilizing) && !problem.resolved {
+			if it == 0 && !noSolution(err) && !problem.resolved {
 				if res, scale := problem.residualTerms(continuous, xData); res <= rescueTol*scale {
 					if vals, ok := problem.stableGain(continuous, K); ok {
 						problem.keepPoor(xData, K, vals, rcnd, math.Inf(1))
@@ -3225,7 +3320,7 @@ func (problem *riccatiProblem) closedLoopEig(eig []complex128) {
 
 // newtonCost returns the Newton iterate X₁ = X + Δ of the iterate X
 // (xData) of gain K of verifyRiccati, with the eigenvalues of A − BK
-// (with E, of (A − BK, E)) in ws.lyap.wr, ws.lyap.wi; ErrNoStabilizing
+// (with E, of (A − BK, E)) in ws.lyap.wr, ws.lyap.wi; errNoCandidate
 // when they are not stable, or the error of the Lyapunov solve. With
 // A_K = A − BK (E = I when absent),
 //
@@ -3312,7 +3407,7 @@ func (problem *riccatiProblem) newtonSolve(continuous bool, K *mat.Dense, xData,
 	lw := ws.lyap
 	for i := range n {
 		if !stable(lw.wr[i], lw.wi[i]) {
-			return nil, ErrNoStabilizing
+			return nil, errNoCandidate
 		}
 	}
 	if err != nil {
@@ -4457,7 +4552,7 @@ func (problem *riccatiProblem) pencilSolution(continuous bool) (subspace riccati
 			X, xData, rcnd, err = problem.stabilizingSolution(subspace.vectors)
 		}
 		if err == nil && !finiteSlice(xData) {
-			err = ErrNoStabilizing
+			err = errSingularBasis
 		}
 		if err != nil && prev == nil {
 			if problem.rescueErr != nil {
@@ -4586,7 +4681,7 @@ func (problem *riccatiProblem) stabilizingSolution(vs []float64) (X *mat.Dense, 
 	anorm := impl.Dlange(lapack.MaxColumnSum, n, n, u11, n, work[:n])
 	ipiv := ws.ipiv[:n]
 	if !impl.Dgetrf(n, n, u11, n, ipiv) {
-		return nil, nil, 0, ErrNoStabilizing
+		return nil, nil, 0, errSingularBasis
 	}
 	rcnd = impl.Dgecon(lapack.MaxColumnSum, n, u11, n, anorm, work[:4*n], ws.iwork[:n])
 
@@ -4734,11 +4829,11 @@ func (problem *riccatiProblem) generalizedStableSubspace(continuous bool, d ricc
 		return riccatiSubspace{}, ErrSchurFailed
 	}
 	if sdim != n {
-		return riccatiSubspace{}, ErrNoStabilizing
+		return riccatiSubspace{}, errNoCandidate
 	}
 	for i := range n {
 		if beta[i] == 0 {
-			return riccatiSubspace{}, ErrNoStabilizing
+			return riccatiSubspace{}, errNoCandidate
 		}
 	}
 

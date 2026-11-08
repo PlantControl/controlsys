@@ -1,7 +1,6 @@
 package controlsys
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"testing"
@@ -123,16 +122,16 @@ func TestCare_NewtonVerified(t *testing.T) {
 		A, B, Q, R, S := tc.dense()
 		for k, noScaling := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/NoScaling=%v", tc.name, noScaling), func(t *testing.T) {
-				res, err := Care(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling})
+				res, err := acceptUnverified(Care(A, B, Q, R, &RiccatiOpts{S: S, NoScaling: noScaling}))
 				poorTol, poor := careVerifyPoor[tc.name]
-				if errors.Is(err, ErrNoStabilizing) && !tc.mustSolve[k] && !poor {
+				if riccatiNoSolution(err) && !tc.mustSolve[k] && !poor {
 					return
 				}
 				if err != nil {
 					t.Fatal(err)
 				}
-				if poor && res.Accuracy != 1 || tc.mustSolve[k] && res.Accuracy != 0 {
-					t.Fatalf("Accuracy %d", res.Accuracy)
+				if poor && res.accuracy != 1 || tc.mustSolve[k] && res.accuracy != 0 {
+					t.Fatalf("Accuracy %d", res.accuracy)
 				}
 				var bk, acl mat.Dense
 				bk.Mul(B, res.K)
@@ -151,7 +150,7 @@ func TestCare_NewtonVerified(t *testing.T) {
 					t.Fatalf("oracle not converged: %g", e)
 				}
 				tol := 1e-7
-				if res.Accuracy != 0 {
+				if res.accuracy != 0 {
 					tol = math.Inf(1)
 					if poor {
 						tol = poorTol[k]
