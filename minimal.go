@@ -65,8 +65,13 @@ type ReduceResult struct {
 // either side of the gap are also reduced separately. Then the lowest
 // order of the two whose frequency response matches the model's to √ε
 // (relative) at the eigenvalue scales is returned, else the model
-// unreduced. A nil
-// opts is ReduceAll with the default tolerance. A descriptor model returns
+// unreduced. Without such a gap, a discrete model's staircase reduction
+// is kept only when its response matches the model's to √ε on the unit
+// circle beside the removed modes, beyond what the rounding of the model's
+// entries leaves undetermined; else the model is returned unreduced (modes
+// clustered near z = 1, as from matched C2D, can carry the response
+// through couplings below the floor). A nil opts is ReduceAll with the
+// default tolerance. A descriptor model returns
 // ErrDescriptorUnsupported; an unknown Mode, a negative or non-finite Tol,
 // and a nil or non-finite model return ErrInvalidArgument.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.minreal.html.
@@ -118,36 +123,56 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 // decoupled blocks are exact to O(ε·κ), sep ≥ (1−√ε)·|λ_f| bounding the
 // Sylvester solution, while the staircase's slow response errs by
 // ε·‖A‖/|λ_s| ≥ √ε, so the band separates the two. Without a candidate in
-// it the model is returned unreduced.
+// it the model is returned unreduced. Otherwise a discrete model's
+// staircase cut must pass unitCircleCutInBand, or the model is returned
+// unreduced.
 func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool) (*ReduceResult, error) {
-	base, err := reduceByStaircase(sys, policy, opts, scaleIO)
+	base, removed, err := reduceByStaircase(sys, policy, opts, scaleIO)
 	if err != nil || base.Order == policy.n {
 		return base, err
 	}
-	if !gapPossible(sys.A) {
+	if res, ok, err := reduceAcrossResolvedGap(sys, policy, opts, base); ok || err != nil {
+		return res, err
+	}
+	if sys.Dt == 0 || unitCircleCutInBand(sys, base.Sys, removed) {
 		return base, nil
 	}
+	return unreducedResult(sys, policy)
+}
+
+// reduceAcrossResolvedGap is the spectral-gap stage of reduceStates; ok is
+// false when A has no resolved gap or the split fails, which leaves base to
+// the staircase's own rules.
+func reduceAcrossResolvedGap(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, base *ReduceResult) (*ReduceResult, bool, error) {
+	if !gapPossible(sys.A) {
+		return nil, false, nil
+	}
 	if _, _, ok := magnitudeGap(sys.A); !ok {
-		return base, nil
+		return nil, false, nil
 	}
 	evals, cutoff, ok := resolvedGap(sys.A)
 	if !ok {
-		return base, nil
+		return nil, false, nil
 	}
 	tol := math.Sqrt(eps())
 	probe := newProbedResponse(sys, gapProbePoints(evals, cutoff, sys.Dt != 0))
 	if probe.errOf(base.Sys) <= tol {
-		return base, nil
+		return base, true, nil
 	}
 	split, ok := reduceAcrossSpectralGap(sys, policy, opts, cutoff)
 	if !ok {
-		return base, nil
+		return nil, false, nil
 	}
 	for _, c := range slices.SortedFunc(slices.Values([]*ReduceResult{base, split}), func(a, b *ReduceResult) int { return a.Order - b.Order }) {
 		if c.Order < policy.n && probe.errOf(c.Sys) <= tol {
-			return c, nil
+			return c, true, nil
 		}
 	}
+	full, err := unreducedResult(sys, policy)
+	return full, true, err
+}
+
+func unreducedResult(sys *System, policy realizationTransformPolicy) (*ReduceResult, error) {
 	full, err := policy.result(denseCopy(sys.A), denseCopy(sys.B), denseCopy(sys.C), denseCopySafe(sys.D, policy.p, policy.m))
 	if err != nil {
 		return nil, err
@@ -155,8 +180,10 @@ func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOp
 	return &ReduceResult{Sys: full, Order: policy.n}, nil
 }
 
-// reduceByStaircase is reduceStates by the orthogonal staircases alone.
-func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool) (*ReduceResult, error) {
+// reduceByStaircase is reduceStates by the orthogonal staircases alone. It
+// also returns the diagonal blocks of the stage forms that hold the removed
+// states, whose spectra are the removed modes.
+func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool) (*ReduceResult, []*mat.Dense, error) {
 	n, m, p := policy.n, policy.m, policy.p
 	A := mat.DenseCopyOf(sys.A)
 	B := mat.DenseCopyOf(sys.B)
@@ -174,13 +201,17 @@ func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *Red
 
 	ncont := n
 	floor := ctrbfFloor(A, opts.Tol)
+	var removed []*mat.Dense
 
 	if opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable {
 		res, err := controllabilityStaircaseFloor(A, B, C, opts.Tol, floor, false)
 		if err != nil {
-			return nil, fmt.Errorf("Reduce: %w", err)
+			return nil, nil, fmt.Errorf("Reduce: %w", err)
 		}
 		ncont = res.NCont
+		if ncont < n {
+			removed = append(removed, extractSubmatrix(res.A, ncont, n, ncont, n))
+		}
 		// Nothing removed: the rotation would only turn exact zeros the
 		// observability stage needs into rounding noise, and can move
 		// ill-conditioned eigenvalues of a nonnormal A.
@@ -208,9 +239,12 @@ func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *Red
 
 			dualRes, err := controllabilityStaircaseFloor(acT, ccT, bcT, opts.Tol, floor, false)
 			if err != nil {
-				return nil, fmt.Errorf("Reduce: %w", err)
+				return nil, nil, fmt.Errorf("Reduce: %w", err)
 			}
 			nobs := dualRes.NCont
+			if nobs < ncont {
+				removed = append(removed, extractSubmatrix(dualRes.A, nobs, ncont, nobs, ncont))
+			}
 
 			// nobs == ncont keeps the stage input: the rotation alone can
 			// move ill-conditioned eigenvalues of a nonnormal A.
@@ -238,7 +272,8 @@ func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *Red
 	}
 
 	if nr == 0 {
-		return zeroOrderResult(sys)
+		res, err := zeroOrderResult(sys)
+		return res, removed, err
 	}
 
 	ar := extractSubmatrix(A, 0, nr, 0, nr)
@@ -249,10 +284,10 @@ func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *Red
 
 	reduced, err := policy.result(ar, br, cr, dr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &ReduceResult{Sys: reduced, Order: nr}, nil
+	return &ReduceResult{Sys: reduced, Order: nr}, removed, nil
 }
 
 // reduceInternalDelay reduces the delay-free augmented model
