@@ -1,9 +1,13 @@
 package controlsys
 
 import (
+	"cmp"
 	"fmt"
 	"math"
+	"math/cmplx"
+	"slices"
 
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -55,7 +59,13 @@ type ReduceResult struct {
 // has the same transfer function and keeps D and the delays. Each input and
 // output is first scaled by a power of two toward ‖A‖ (undone on the
 // result), so the order does not depend on I/O scaling and a tiny but
-// nonzero B or C is kept. A nil
+// nonzero B or C is kept. When the staircase removes states and the
+// eigenvalue magnitudes have a gap of 1/√ε or more (a stiff model, whose
+// floor ε·‖A‖ can exceed the couplings of its slow states), the modes on
+// either side of the gap are also reduced separately. Then the lowest
+// order of the two whose frequency response matches the model's to √ε
+// (relative) at the eigenvalue scales is returned, else the model
+// unreduced. A nil
 // opts is ReduceAll with the default tolerance. A descriptor model returns
 // ErrDescriptorUnsupported; an unknown Mode, a negative or non-finite Tol,
 // and a nil or non-finite model return ErrInvalidArgument.
@@ -96,6 +106,58 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 		return zeroOrderResult(sys)
 	}
 
+	return reduceStates(sys, policy, opts, true)
+}
+
+// reduceStates is Reduce of a model without internal delays and with
+// m, p > 0 for the modes it needs. scaleIO selects the I/O scaling toward
+// ‖A‖, which only the raw model gets. When the staircase removes states
+// and A has a spectral gap, the reduction across the gap competes with it
+// (reduceAcrossSpectralGap), and a candidate counts only within √ε of the
+// model's response at gapProbePoints: across a gap |λ_s| ≤ √ε·|λ_f| the
+// decoupled blocks are exact to O(ε·κ), sep ≥ (1−√ε)·|λ_f| bounding the
+// Sylvester solution, while the staircase's slow response errs by
+// ε·‖A‖/|λ_s| ≥ √ε, so the band separates the two. Without a candidate in
+// it the model is returned unreduced.
+func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool) (*ReduceResult, error) {
+	base, err := reduceByStaircase(sys, policy, opts, scaleIO)
+	if err != nil || base.Order == policy.n {
+		return base, err
+	}
+	if !gapPossible(sys.A) {
+		return base, nil
+	}
+	if _, _, ok := magnitudeGap(sys.A); !ok {
+		return base, nil
+	}
+	evals, cutoff, ok := resolvedGap(sys.A)
+	if !ok {
+		return base, nil
+	}
+	tol := math.Sqrt(eps())
+	probe := newProbedResponse(sys, gapProbePoints(evals, cutoff, sys.Dt != 0))
+	if probe.errOf(base.Sys) <= tol {
+		return base, nil
+	}
+	split, ok := reduceAcrossSpectralGap(sys, policy, opts, cutoff)
+	if !ok {
+		return base, nil
+	}
+	for _, c := range slices.SortedFunc(slices.Values([]*ReduceResult{base, split}), func(a, b *ReduceResult) int { return a.Order - b.Order }) {
+		if c.Order < policy.n && probe.errOf(c.Sys) <= tol {
+			return c, nil
+		}
+	}
+	full, err := policy.result(denseCopy(sys.A), denseCopy(sys.B), denseCopy(sys.C), denseCopySafe(sys.D, policy.p, policy.m))
+	if err != nil {
+		return nil, err
+	}
+	return &ReduceResult{Sys: full, Order: policy.n}, nil
+}
+
+// reduceByStaircase is reduceStates by the orthogonal staircases alone.
+func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool) (*ReduceResult, error) {
+	n, m, p := policy.n, policy.m, policy.p
 	A := mat.DenseCopyOf(sys.A)
 	B := mat.DenseCopyOf(sys.B)
 	C := mat.DenseCopyOf(sys.C)
@@ -104,8 +166,11 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 		equalize(A, B, C, n, m, p)
 	}
 
-	inExp, outExp := reduceIOExponents(A, B, C)
-	ldexpIO(B, C, inExp, outExp, 1)
+	var inExp, outExp []int
+	if scaleIO {
+		inExp, outExp = reduceIOExponents(A, B, C)
+		ldexpIO(B, C, inExp, outExp, 1)
+	}
 
 	ncont := n
 	floor := ctrbfFloor(A, opts.Tol)
@@ -229,6 +294,269 @@ func reduceInternalDelay(sys *System, policy realizationTransformPolicy, opts *R
 		return nil, err
 	}
 	return &ReduceResult{Sys: reduced, Order: nr}, nil
+}
+
+// reduceAcrossSpectralGap reduces the modes of A above and below cutoff, a
+// gap of 1/√ε or more in |λ|, separately. The staircase judges couplings
+// against ‖A‖, so stiff fast modes raise the floor ε·‖A‖ above the
+// couplings of the slow modes, which are of the order of their eigenvalues,
+// and slow states that carry the response are dropped. A block-diagonal
+// realization with disjoint spectra is minimal iff its blocks are, and each
+// block gets the floor of its own norm. The gap is 1/√ε: there the
+// staircase floor ε·‖A‖ is at least √ε of the slow couplings, so its slow
+// rank decisions carry relative error √ε or more, while the Sylvester
+// decoupling is conditioned by sep ≈ |λ_f| and costs O(ε). With no state
+// removed the original realization is kept: the Schur rotations would
+// smear the stiff direction over the slow modes. ok is false when the
+// modes cannot be separated.
+func reduceAcrossSpectralGap(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, cutoff float64) (*ReduceResult, bool) {
+	n, m, p := policy.n, policy.m, policy.p
+	B, C := denseCopy(sys.B), denseCopy(sys.C)
+	inExp, outExp := reduceIOExponents(sys.A, B, C)
+	ldexpIO(B, C, inExp, outExp, 1)
+	plain, err := newNoCopy(denseCopy(sys.A), B, C, newDense(p, m), sys.Dt)
+	if err != nil {
+		return nil, false
+	}
+	fast, slow, err := decomposeModes(plain, func(ev complex128) bool { return cmplx.Abs(ev) >= cutoff })
+	if err != nil {
+		return nil, false
+	}
+	if nf, _, _ := fast.Dims(); nf == 0 || nf == n {
+		return nil, false
+	}
+	var parts []*System
+	nr := 0
+	for _, part := range []*System{fast, slow} {
+		red, err := reduceStates(part, newRealizationTransformPolicy(part), opts, false)
+		if err != nil {
+			return nil, false
+		}
+		if red.Order > 0 {
+			parts = append(parts, red.Sys)
+			nr += red.Order
+		}
+	}
+	if nr == 0 {
+		res, err := zeroOrderResult(sys)
+		return res, err == nil
+	}
+	var ar, br, cr *mat.Dense
+	if nr == n {
+		ar, br, cr = denseCopy(sys.A), denseCopy(sys.B), denseCopy(sys.C)
+	} else {
+		ar, br, cr = newDense(nr, nr), newDense(nr, m), newDense(p, nr)
+		at := 0
+		for _, part := range parts {
+			setBlock(ar, at, at, part.A)
+			setBlock(br, at, 0, part.B)
+			setBlock(cr, 0, at, part.C)
+			at += part.A.RawMatrix().Rows
+		}
+		ldexpIO(br, cr, inExp, outExp, -1)
+	}
+	reduced, err := policy.result(ar, br, cr, denseCopySafe(sys.D, p, m))
+	if err != nil {
+		return nil, false
+	}
+	return &ReduceResult{Sys: reduced, Order: nr}, true
+}
+
+// gapPossible is a necessary condition for a magnitudeGap, cheaper than
+// the eigenvalues: for any diagonal similarity D, |λ_max|/|λ_min| ≤
+// κ₂(DAD⁻¹) ≤ ‖DAD⁻¹‖_F·‖(DAD⁻¹)⁻¹‖_F, so a gap |λ_k+1| ≤ √ε·|λ_k| needs
+// that bound ≥ 1/√ε. D is LAPACK's power-of-two balancing (exact), which
+// keeps the bound near |λ_max|/|λ_min| for graded A. The inverse from
+// partial-pivoting LU and Dgetri errs forward by about κε·‖A⁻¹‖, so the
+// computed bound is at least κ/(1 + O(nε)·κ): increasing in κ, and at
+// κ = 1/√ε within 1 + O(n√ε) < 2 of it, so every gap passes the test
+// against 1/(2√ε). A singular A passes.
+func gapPossible(A *mat.Dense) bool {
+	n, _ := A.Dims()
+	if n < 2 {
+		return false
+	}
+	a := make([]float64, n*n+n+4*n)
+	sc, work := a[n*n:n*n+n], a[n*n+n:]
+	a = a[:n*n]
+	raw := A.RawMatrix()
+	for i := range n {
+		copy(a[i*n:(i+1)*n], raw.Data[i*raw.Stride:i*raw.Stride+n])
+	}
+	impl.Dgebal(lapack.Scale, n, a, n, sc)
+	norm := impl.Dlange(lapack.Frobenius, n, n, a, n, nil)
+	ipiv := make([]int, n)
+	if !impl.Dgetrf(n, n, a, n, ipiv) || !impl.Dgetri(n, a, n, ipiv, work, len(work)) {
+		return true
+	}
+	k := norm * impl.Dlange(lapack.Frobenius, n, n, a, n, nil)
+	return !(k < 1/(2*math.Sqrt(eps())))
+}
+
+// magnitudeGap returns the eigenvalues of A and a magnitude inside the
+// topmost gap |λ_k+1| ≤ √ε·|λ_k| of their sorted magnitudes, and false
+// when there is none or the eigenvalues do not converge.
+func magnitudeGap(A *mat.Dense) ([]complex128, float64, bool) {
+	n, _ := A.Dims()
+	if n < 2 {
+		return nil, 0, false
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(A, mat.EigenNone) {
+		return nil, 0, false
+	}
+	evals := eig.Values(nil)
+	cutoff, ok := topGap(evals, nil)
+	return evals, cutoff, ok
+}
+
+// resolvedGap is magnitudeGap where a gap needs an eigenvalue below it
+// resolved from zero (resolvedFromZero): without one, the eigenvalues
+// below it are rounding, and so are the couplings that a reduction of
+// their own block would keep.
+func resolvedGap(A *mat.Dense) ([]complex128, float64, bool) {
+	n, _ := A.Dims()
+	evals, resolved, ok := resolvedFromZero(A, n)
+	if !ok {
+		return nil, 0, false
+	}
+	cutoff, ok := topGap(evals, resolved)
+	return evals, cutoff, ok
+}
+
+// topGap returns a magnitude inside the topmost gap |λ_k+1| ≤ √ε·|λ_k| of
+// the sorted magnitudes of evals with, for non-nil resolved, a resolved
+// eigenvalue below it.
+func topGap(evals []complex128, resolved []bool) (float64, bool) {
+	n := len(evals)
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+		if w := cmplx.Abs(evals[i]); math.IsInf(w, 0) || math.IsNaN(w) {
+			return 0, false
+		}
+	}
+	slices.SortFunc(order, func(i, j int) int { return cmp.Compare(cmplx.Abs(evals[i]), cmplx.Abs(evals[j])) })
+	below := make([]bool, n)
+	for k, i := range order {
+		below[k] = resolved == nil || resolved[i] || (k > 0 && below[k-1])
+	}
+	gap := math.Sqrt(eps())
+	for k := n - 1; k > 0 && below[k-1]; k-- {
+		lo, hi := cmplx.Abs(evals[order[k-1]]), cmplx.Abs(evals[order[k]])
+		if lo <= gap*hi {
+			return hi * math.Sqrt(gap), true
+		}
+	}
+	return 0, false
+}
+
+// resolvedFromZero returns the eigenvalues of the n×n A with, for each,
+// whether componentwise rounding of A moves it by less than its modulus:
+// the first-order bound ε·|y|ᵀ|A||x| / |yᴴx| for right and left
+// eigenvectors x, y, invariant under diagonal scaling of A. A rounded zero
+// eigenvalue of a dense realization has a bound of the order of its own
+// modulus and is not resolved; a slow pole of a stiff triangular one is.
+// ok is false where the factorization fails.
+func resolvedFromZero(A *mat.Dense, n int) ([]complex128, []bool, bool) {
+	evals, yax, yx, ok := eigenvalueRoundingTerms(A, n)
+	if !ok {
+		return nil, nil, false
+	}
+	resolved := make([]bool, len(evals))
+	for k, ev := range evals {
+		resolved[k] = ev != 0 && eps()*yax[k] < cmplx.Abs(ev)*yx[k]
+	}
+	return evals, resolved, true
+}
+
+// gapProbePoints returns points of the frequency axis: s = jω at the
+// smallest and largest nonzero |λ| on each side of cutoff for continuous
+// models, z = e^{jθ} over [0, 3] for discrete ones. Off the axis, or at
+// ω ~ ε·‖A‖, the states at the rounding level ε·‖A‖ that the staircase
+// rightly drops dominate the response near their poles.
+func gapProbePoints(evals []complex128, cutoff float64, discrete bool) []complex128 {
+	if discrete {
+		var pts []complex128
+		for _, th := range []float64{0, 0.01, 0.1, 0.5, 1, 2, 3} {
+			pts = append(pts, cmplx.Rect(1, th))
+		}
+		return pts
+	}
+	lo := [2]float64{math.Inf(1), math.Inf(1)}
+	hi := [2]float64{}
+	for _, ev := range evals {
+		w := cmplx.Abs(ev)
+		if w == 0 {
+			continue
+		}
+		side := 0
+		if w >= cutoff {
+			side = 1
+		}
+		lo[side] = math.Min(lo[side], w)
+		hi[side] = math.Max(hi[side], w)
+	}
+	var pts []complex128
+	for side := range 2 {
+		for _, w := range []float64{lo[side], hi[side]} {
+			if w > 0 && !math.IsInf(w, 0) && (len(pts) == 0 || imag(pts[len(pts)-1]) != w) {
+				pts = append(pts, complex(0, w))
+			}
+		}
+	}
+	return pts
+}
+
+// probedResponse is the response of a model at probe points, evaluated
+// once for every candidate reduction compared with it; nil where the
+// evaluation fails.
+type probedResponse struct {
+	sys *System
+	pts []complex128
+	g   [][][]complex128
+}
+
+func newProbedResponse(sys *System, pts []complex128) probedResponse {
+	g := make([][][]complex128, len(pts))
+	for k, s := range pts {
+		if r, err := sys.EvalFr(s); err == nil {
+			g[k] = r
+		}
+	}
+	return probedResponse{sys: sys, pts: pts, g: g}
+}
+
+// errOf is the largest relative difference of the strictly proper parts
+// of the model and red over the points; points where either evaluation
+// fails are skipped.
+func (pr probedResponse) errOf(red *System) float64 {
+	worst := 0.0
+	for k, s := range pr.pts {
+		g := pr.g[k]
+		if g == nil {
+			continue
+		}
+		r, err := red.EvalFr(s)
+		if err != nil {
+			continue
+		}
+		scale, diff := 0.0, 0.0
+		for i := range g {
+			for j := range g[i] {
+				d := complex(pr.sys.D.At(i, j), 0)
+				scale = math.Max(scale, math.Max(cmplx.Abs(g[i][j]-d), cmplx.Abs(r[i][j]-d)))
+				diff = math.Max(diff, cmplx.Abs(r[i][j]-g[i][j]))
+			}
+		}
+		if math.IsNaN(diff) || math.IsNaN(scale) {
+			return math.Inf(1)
+		}
+		if scale > 0 {
+			worst = math.Max(worst, diff/scale)
+		}
+	}
+	return worst
 }
 
 // MinimalRealization is Reduce(nil), MATLAB minreal(sys) with the default

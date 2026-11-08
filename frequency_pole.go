@@ -462,36 +462,57 @@ func poleSpacing(sys *System, s complex128) (poleGeometry, error) {
 // a bound of the order of its own modulus and is not resolved. Where the
 // factorization fails it returns nil.
 func resolvedPoles(A *mat.Dense, n int) ([]complex128, []bool) {
-	var eig mat.Eigen
-	if !eig.Factorize(A, mat.EigenBoth) {
+	poles, yax, yx, ok := eigenvalueRoundingTerms(A, n)
+	if !ok {
 		return nil, nil
 	}
-	poles := eig.Values(nil)
-	var x, y mat.CDense
-	eig.VectorsTo(&x)
-	eig.LeftVectorsTo(&y)
-	raw := A.RawMatrix()
-	ax := make([]float64, n)
 	resolved := make([]bool, len(poles))
 	for k, p := range poles {
 		if p == 0 {
 			continue
 		}
-		var yx complex128
+		resolved[k] = eps()*yax[k] <= poleClusterTol*cmplx.Abs(p)*yx[k]
+	}
+	return poles, resolved
+}
+
+// eigenvalueRoundingTerms returns the eigenvalues of the n×n A with, for
+// each nonzero one, |y|ᵀ|A||x| and |yᴴx| for its right and left
+// eigenvectors x, y: ε times the first ratio over the second bounds, to
+// first order, how far componentwise rounding of A moves it. ok is false
+// where the factorization fails.
+func eigenvalueRoundingTerms(A *mat.Dense, n int) (poles []complex128, yax, yx []float64, ok bool) {
+	var eig mat.Eigen
+	if !eig.Factorize(A, mat.EigenBoth) {
+		return nil, nil, nil, false
+	}
+	poles = eig.Values(nil)
+	var x, y mat.CDense
+	eig.VectorsTo(&x)
+	eig.LeftVectorsTo(&y)
+	raw := A.RawMatrix()
+	ax := make([]float64, n)
+	yax = make([]float64, len(poles))
+	yx = make([]float64, len(poles))
+	for k, p := range poles {
+		if p == 0 {
+			continue
+		}
+		var d complex128
 		for i := range n {
-			yx += cmplx.Conj(y.At(i, k)) * x.At(i, k)
+			d += cmplx.Conj(y.At(i, k)) * x.At(i, k)
 			ax[i] = 0
 			for j, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
 				ax[i] += math.Abs(v) * cmplx.Abs(x.At(j, k))
 			}
 		}
-		var yax float64
+		var s float64
 		for i := range n {
-			yax += cmplx.Abs(y.At(i, k)) * ax[i]
+			s += cmplx.Abs(y.At(i, k)) * ax[i]
 		}
-		resolved[k] = eps()*yax <= poleClusterTol*cmplx.Abs(p)*cmplx.Abs(yx)
+		yax[k], yx[k] = s, cmplx.Abs(d)
 	}
-	return poles, resolved
+	return poles, yax, yx, true
 }
 
 // ddResponseInto sets dst to the p×m response C(sE−A)⁻¹B + D of the
