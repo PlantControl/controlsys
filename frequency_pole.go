@@ -482,37 +482,59 @@ func resolvedPoles(A *mat.Dense, n int) ([]complex128, []bool) {
 // first order, how far componentwise rounding of A moves it. ok is false
 // where the factorization fails.
 func eigenvalueRoundingTerms(A *mat.Dense, n int) (poles []complex128, yax, yx []float64, ok bool) {
-	var eig mat.Eigen
-	if !eig.Factorize(A, mat.EigenBoth) {
+	pe, ok := newPoleEigen(A)
+	if !ok {
 		return nil, nil, nil, false
 	}
-	poles = eig.Values(nil)
-	var x, y mat.CDense
-	eig.VectorsTo(&x)
-	eig.LeftVectorsTo(&y)
-	raw := A.RawMatrix()
-	ax := make([]float64, n)
-	yax = make([]float64, len(poles))
-	yx = make([]float64, len(poles))
-	for k, p := range poles {
+	yax = make([]float64, len(pe.poles))
+	yx = make([]float64, len(pe.poles))
+	for k, p := range pe.poles {
 		if p == 0 {
 			continue
 		}
-		var d complex128
-		for i := range n {
-			d += cmplx.Conj(y.At(i, k)) * x.At(i, k)
-			ax[i] = 0
-			for j, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
-				ax[i] += math.Abs(v) * cmplx.Abs(x.At(j, k))
-			}
-		}
-		var s float64
-		for i := range n {
-			s += cmplx.Abs(y.At(i, k)) * ax[i]
-		}
+		s, d := pe.coupling(A, k, k)
 		yax[k], yx[k] = s, cmplx.Abs(d)
 	}
-	return poles, yax, yx, true
+	return pe.poles, yax, yx, true
+}
+
+// poleEigen holds the eigenvalues of A with right and left eigenvectors.
+type poleEigen struct {
+	poles []complex128
+	x, y  mat.CDense
+}
+
+func newPoleEigen(A *mat.Dense) (*poleEigen, bool) {
+	var eig mat.Eigen
+	if !eig.Factorize(A, mat.EigenBoth) {
+		return nil, false
+	}
+	pe := &poleEigen{poles: eig.Values(nil)}
+	eig.VectorsTo(&pe.x)
+	eig.LeftVectorsTo(&pe.y)
+	return pe, true
+}
+
+// coupling returns |y_j|ᵀ|A||x_k| and y_jᴴx_k.
+func (pe *poleEigen) coupling(A *mat.Dense, j, k int) (yax float64, yx complex128) {
+	raw := A.RawMatrix()
+	n := raw.Rows
+	for i := range n {
+		yx += cmplx.Conj(pe.y.At(i, j)) * pe.x.At(i, k)
+		ax := 0.0
+		for l, v := range raw.Data[i*raw.Stride : i*raw.Stride+n] {
+			ax += math.Abs(v) * cmplx.Abs(pe.x.At(l, k))
+		}
+		yax += cmplx.Abs(pe.y.At(i, j)) * ax
+	}
+	return yax, yx
+}
+
+// movement is ε·|y|ᵀ|A||x| / |yᴴx|, the first-order bound on the move of
+// pole k under componentwise rounding of A.
+func (pe *poleEigen) movement(A *mat.Dense, k int) float64 {
+	yax, yx := pe.coupling(A, k, k)
+	return eps() * yax / cmplx.Abs(yx)
 }
 
 // ddResponseInto sets dst to the p×m response C(sE−A)⁻¹B + D of the

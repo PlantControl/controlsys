@@ -596,6 +596,9 @@ func (sys *System) dcGainByTransferFunctionLimit(offPole bool) (*mat.Dense, erro
 		if gain, ok := sys.dcGainByBlockLaurent(); ok {
 			return gain, nil
 		}
+		if gain, ok := sys.dcGainByRoundedIntegrator(); ok {
+			return gain, nil
+		}
 		res, err := scaled.rationalTransferFunction(nil)
 		if err != nil {
 			return nil, fmt.Errorf("DCGain: %w", err)
