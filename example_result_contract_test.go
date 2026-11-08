@@ -1,6 +1,7 @@
 package controlsys_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -68,4 +69,22 @@ func ExampleSystem_PolesDetail() {
 
 	// Output:
 	// [(-1+0i)] true
+}
+
+// TunePID returns an uncertified design in full with ErrAccuracyUnverified;
+// Evidence says which check it lacks.
+func ExampleTunePID() {
+	tf := &controlsys.TransferFunc{Num: [][][]float64{{{1}}}, Den: [][]float64{{1, 3, 2}}}
+	ss, _ := tf.StateSpace()
+
+	res, err := controlsys.TunePID(context.Background(), ss.Sys, controlsys.PidtunePI, controlsys.PIDTuningOptions{CrossoverFrequency: 1})
+	if err != nil && !errors.Is(err, controlsys.ErrAccuracyUnverified) {
+		log.Fatal(err)
+	}
+	fmt.Println("certified:", err == nil)
+	fmt.Println("stability:", res.Evidence.Stability)
+
+	// Output:
+	// certified: true
+	// stability: closed-loop-poles
 }

@@ -43,7 +43,7 @@ func TestTunePIDFRD_LowGainPlantDesigns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := TunePIDFRD(context.Background(), data, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1}); err != nil {
+	if _, err := pidTuneFRDKept(t, context.Background(), data, PidtunePI, PIDTuningOptions{CrossoverFrequency: 1}); err != nil {
 		t.Fatal(err)
 	}
 }

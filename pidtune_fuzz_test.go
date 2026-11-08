@@ -707,7 +707,10 @@ func fzPidCheckTune(t *testing.T, s *fzSpec, sys *System, family PidtuneType, wc
 	name := fmt.Sprintf("TunePID(%s, wc=%g, pm=%g)", family, wc, pm)
 	res, err := TunePID(context.Background(), sys, family, PIDTuningOptions{CrossoverFrequency: wc, PhaseMargin: pm, MaxEvaluations: 512})
 	fzContract(t, s, name, res != nil, err)
-	if err != nil {
+	if unverified := errors.Is(err, ErrAccuracyUnverified); unverified != (res != nil && res.Evidence.Stability == PIDStabilitySampledOnly) {
+		t.Fatalf("%s: err %v with stability evidence %v", name, err, res != nil && res.Evidence.Stability == PIDStabilitySampledOnly)
+	}
+	if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 		fzPidSkipDocumented(t, s, name, wc, err)
 		fzErr(t, s, name, err, ErrPIDTuningTargetUnattainable)
 	}
@@ -792,7 +795,10 @@ func fzPidCheckFRD(t *testing.T, s *fzSpec, sys *System, family PidtuneType, wc,
 	name := fmt.Sprintf("TunePIDFRD(%s, wc=%g, pm=%g)", family, wc, pm)
 	res, err := TunePIDFRD(context.Background(), frd, family, PIDTuningOptions{CrossoverFrequency: wc, PhaseMargin: pm, MaxEvaluations: 512})
 	fzContract(t, s, name, res != nil, err)
-	if err != nil {
+	if res != nil && errors.Is(err, ErrAccuracyUnverified) != slices.ContainsFunc(res.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "not certified") }) {
+		t.Fatalf("%s: err %v with warnings %q", name, err, res.Evidence.Warnings)
+	}
+	if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 		if errors.Is(err, ErrInvalidArgument) && strings.Contains(err.Error(), "at crossover is zero or not finite") {
 			fzSkip(t, "FRD response below 1e-15 at the crossover")
 		}

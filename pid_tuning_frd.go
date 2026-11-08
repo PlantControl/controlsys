@@ -53,8 +53,25 @@ import (
 // raised by half octaves within the band, and failing those the call
 // returns ErrPIDTuningTargetUnattainable, as the true peak is at least the
 // sampled one. An explicit crossover keeps such a design with a warning.
-// Errors follow TunePID.
+//
+// A nil error means the strict count certified the design, its margins and
+// its sensitivity peak. A design carrying any of the warnings above that
+// its stability, margins or sensitivity peak is not certified is returned
+// in full with an error wrapping ErrAccuracyUnverified that names which;
+// MATLAB pidtune returns it without one. The warning that finite coverage
+// cannot certify global stability, which every design carries, and a user
+// UnstablePoles count, which the strict count does not take, do not make
+// the error. Other errors follow TunePID and come with a nil result.
 func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
+	res, err := tunePIDFRDData(ctx, frd, family, o)
+	var u pidTuningUnverified
+	if err == nil {
+		u = res.unverified
+	}
+	return pidTuningVerdict("TunePIDFRD", res, err, u)
+}
+
+func tunePIDFRDData(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("TunePIDFRD: nil context: %w", ErrInvalidArgument)
 	}
@@ -128,11 +145,14 @@ func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOp
 	case !pidTuningFRDCertified(c, chord):
 	case !pidTuningFRDCertified(c, strict):
 		r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count passed this design along the chords between samples, but a step of the data may hide a lightly damped resonance whose loop winds 1 + L round 0 or takes |L| through 1 or |S| past 4 between them, so its closed-loop stability is not certified, nor its margins and sensitivity peak there.")
+		r.unverified.stability = true
 	case !resolved:
 		r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count passed this design, but a gain crossing lies in a step of the data no fit follows, where the chord and the cubic and quadratics through the neighbouring samples read its phase margin apart, so the design is not certified, nor its margins there.")
+		r.unverified.margins = true
 	default:
 		if v := pidTuningFRDUnsampledPeak(strict, c); v > pidTuningMaxSensitivity {
 			r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("The strict sampled Nyquist count passed this design, but the data leave its sensitivity peak |S| up to %.4g, above %d, along a fitted resonance between samples or below or above the band, so its sensitivity peak is not certified.", v, pidTuningMaxSensitivity))
+			r.unverified.peak = true
 		}
 	}
 	return r, nil
@@ -612,6 +632,7 @@ func pidTuningFRDDesign(ctx context.Context, base, strict pidTuningPlant, certif
 					why = append(why, "the data stop before the loop's end above the band is established")
 				}
 				r.Evidence.Warnings = append(r.Evidence.Warnings, fmt.Sprintf("The strict sampled Nyquist count passed this design, but %s, so its closed-loop stability is not certified.", strings.Join(why, " and ")))
+				r.unverified.stability = true
 			}
 		default:
 			stable, known, _ := pidTuningFRDNyquistVerdict(*r.Controller, strict)
@@ -630,8 +651,10 @@ func pidTuningFRDDesign(ctx context.Context, base, strict pidTuningPlant, certif
 				}
 				r.Evidence.GainCrossovers, r.Evidence.PhaseMargins = append(r.Evidence.GainCrossovers, ws...), append(r.Evidence.PhaseMargins, ms...)
 				r.Evidence.Warnings = append(r.Evidence.Warnings, "The strict sampled Nyquist count certified no design; this one passed only the looser count, which can accept unstable loops, so its closed-loop stability is not certified.")
+				r.unverified.stability = true
 			} else {
 				r.Evidence.Warnings = append(r.Evidence.Warnings, "The data's low end fixes neither a DC gain nor an integrating or differentiating asymptote the strict sampled Nyquist count can anchor on, so this design passed only the looser count and its closed-loop stability is not certified.")
+				r.unverified.stability = true
 			}
 		}
 		return r, nil

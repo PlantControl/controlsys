@@ -106,7 +106,7 @@ func TestTunePIDFRDMarginReadsSmoothStepCubic(t *testing.T) {
 		t.Errorf("chord margin within 3° of dense %g (%g° off at most), case no longer pins the chord's error", least, off)
 	}
 
-	r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+	r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 	if err != nil {
 		t.Fatal(err)
 	}

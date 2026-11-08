@@ -45,7 +45,7 @@ func TestTunePIDFRDStablePlantDCSign(t *testing.T) {
 	} {
 		name := fmt.Sprintf("case %d %s", i, c.family)
 		frd := pidExactFRD(t, c.num, c.den, 1e-3, 1e3, c.n)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
 		if err != nil {
 			if c.mustTune || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 				t.Errorf("%s: %v", name, err)
@@ -94,7 +94,7 @@ func TestTunePIDFRDDCSignKeepsMixedSignDesigns(t *testing.T) {
 	} {
 		name := fmt.Sprintf("case %d %s", i, c.family)
 		frd := pidExactFRD(t, c.num, c.den, c.lo, c.hi, 600)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
 		if err != nil {
 			t.Errorf("%s: %v", name, err)
 			continue

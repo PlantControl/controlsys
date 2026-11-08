@@ -430,7 +430,7 @@ func TestTunePIDDelayIdealDerivativeOutOfScopeFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	for family, want := range map[PidtuneType]PIDStabilityEvidence{PidtunePID: PIDStabilitySampledOnly, PidtunePIDF: PIDStabilityNyquist} {
-		r, err := TunePID(context.Background(), lft, family, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
+		r, err := pidTuneKept(t, context.Background(), lft, family, PIDTuningOptions{CrossoverFrequency: 1, PhaseMargin: 60})
 		if err != nil {
 			t.Fatalf("%s: %v", family, err)
 		}

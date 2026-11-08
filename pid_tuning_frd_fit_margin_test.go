@@ -60,7 +60,7 @@ func TestTunePIDFRDFitMargins(t *testing.T) {
 		{pidFRDStrictCase{"lone fit below unity PD", []float64{-3.615594739522033, -192.1747327166767, -3385.2820999049263, -19775.660643644802}, []float64{1, 4.79275327213227, 1118.14081692987, 4419.945850325421, 122.65938818334538, 70.46075872422402}, 0, 0.0035825926993535953, 398.3837886475481, 19, PidtunePD, PIDTuningOptions{PhaseMargin: 70}, PID2{Kp: -0.09989555702680614, Kd: -0.25882559180853604}}, open},
 	} {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue
@@ -176,7 +176,7 @@ func TestTunePIDFRDFitMarginsSweep(t *testing.T) {
 	} {
 		p := pidFRDResonanceSweepCase(rand.New(rand.NewPCG(2525, uint64(c.seed))))
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, p.num, p.den, 0, p.lo, p.hi, p.n), p.num, p.den)
-		r, err := TunePIDFRD(context.Background(), frd, p.family, p.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, p.family, p.o)
 		if err != nil {
 			t.Errorf("case %d: %v", c.seed, err)
 			continue

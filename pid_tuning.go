@@ -121,15 +121,47 @@ type PIDTuningEvidence struct {
 	// delayed plants use a Nyquist encirclement count on a delay-aware
 	// adaptive grid when the plant is standard with an acyclic delay network;
 	// otherwise only sampled frequencies are checked, which is deliberately
-	// not a global stability certificate.
+	// not a global stability certificate, and TunePID returns the design
+	// with ErrAccuracyUnverified.
 	Stability PIDStabilityEvidence
 	Warnings  []string
 }
 
-// PIDTuningResult is a feasible TunePID design and its evidence.
+// PIDTuningResult is a feasible TunePID or TunePIDFRD design and its
+// evidence. It comes with a nil error when the design is certified, or with
+// one wrapping ErrAccuracyUnverified when its closed-loop stability, phase
+// margins or sensitivity peak are not; Evidence then says why.
 type PIDTuningResult struct {
 	Controller *PID2
 	Evidence   PIDTuningEvidence
+	// unverified names what TunePIDFRD's checks left uncertified.
+	unverified pidTuningUnverified
+}
+
+// pidTuningUnverified flags the uncertified parts of a design.
+type pidTuningUnverified struct{ stability, margins, peak bool }
+
+// pidTuningVerdict returns res with nil when it is certified and with an
+// error wrapping ErrAccuracyUnverified naming what is not; every other err
+// comes with a nil result.
+func pidTuningVerdict(op string, res *PIDTuningResult, err error, u pidTuningUnverified) (*PIDTuningResult, error) {
+	if err != nil {
+		return nil, err
+	}
+	var why []string
+	if u.stability {
+		why = append(why, "stability")
+	}
+	if u.margins {
+		why = append(why, "phase margin")
+	}
+	if u.peak {
+		why = append(why, "sensitivity peak")
+	}
+	if len(why) == 0 {
+		return res, nil
+	}
+	return res, fmt.Errorf("%s: %s not certified: %w", op, strings.Join(why, ", "), ErrAccuracyUnverified)
 }
 
 type pidTuningPlant struct {
@@ -1090,11 +1122,27 @@ func pidTuningSignConsistent(c PID2, want float64) bool {
 // pole there (pidTuningIntegralZero), so those families are searched only at
 // the requested or default crossover and fail with a warning naming the zero.
 //
-// An unattainable target returns a *PIDTuningError (wrapping
-// ErrPIDTuningTargetUnattainable) carrying the search evidence; invalid
-// options return ErrInvalidArgument; a numerical failure of a stability
-// check aborts the search with its error.
+// A nil error means the design is certified: its closed-loop stability is
+// proved by its poles or a Nyquist count (Evidence.Stability). A design
+// checked only at sampled frequencies (PIDStabilitySampledOnly) is returned
+// in full with an error wrapping ErrAccuracyUnverified; MATLAB pidtune
+// returns it without one. A search stopped at its round or evaluation limit
+// still returns a certified design with a nil error, as Evidence.Termination
+// records the budget, not the certificate. An unattainable target returns a
+// *PIDTuningError (wrapping ErrPIDTuningTargetUnattainable) carrying the
+// search evidence; invalid options return ErrInvalidArgument; a numerical
+// failure of a stability check aborts the search with its error. Every
+// error but ErrAccuracyUnverified comes with a nil result.
 func TunePID(ctx context.Context, plant *System, family PidtuneType, opts PIDTuningOptions) (*PIDTuningResult, error) {
+	res, err := tunePIDSystem(ctx, plant, family, opts)
+	var u pidTuningUnverified
+	if err == nil {
+		u.stability = res.Evidence.Stability == PIDStabilitySampledOnly
+	}
+	return pidTuningVerdict("TunePID", res, err, u)
+}
+
+func tunePIDSystem(ctx context.Context, plant *System, family PidtuneType, opts PIDTuningOptions) (*PIDTuningResult, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("TunePID: nil context: %w", ErrInvalidArgument)
 	}

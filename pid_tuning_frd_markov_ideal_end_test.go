@@ -91,7 +91,7 @@ func TestTunePIDFRDIdealDerivativeEndBeyondTopZone(t *testing.T) {
 		if p, _ := pidTuningFRDStrictPlant(frd, nil); p.markov == 0 {
 			t.Errorf("%s: no Markov end read", tc.name)
 		}
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
