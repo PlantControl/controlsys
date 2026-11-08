@@ -185,7 +185,7 @@ func TestLeastSquaresHighOrderSources(t *testing.T) {
 			if source.D.At(0, 0) == 0 {
 				t.Fatal("want D != 0")
 			}
-			k, residue, err := leastSquaresIntegratorLimit(source)
+			k, residue, err := leastSquaresIntegratorLimit(source, true, 0.1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -333,7 +333,7 @@ func TestLeastSquaresIntegratorCount(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			count, residue, err := leastSquaresIntegratorLimit(conversionSISO(t, tc.num, tc.den, 0))
+			count, residue, err := leastSquaresIntegratorLimit(conversionSISO(t, tc.num, tc.den, 0), true, 0.1)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -52,8 +52,10 @@ type LeastSquaresFit struct {
 // by up to 8 response-error Gauss-Newton refinements. It selects
 // the iterate with smallest frequency-response error. Stability is not imposed.
 // Integrators, the poles at s = 0 of the minimal realization (null-space
-// staircase with singular values at most 1e-10·‖A‖₁), retain their
-// multiplicity and leading low-frequency residue as exact poles at z = 1;
+// staircase with singular values at most 1e-10·‖A‖₁, capped by the number
+// of poles componentwise rounding of A does not locate away from s = 0),
+// retain their multiplicity and leading low-frequency residue as exact
+// poles at z = 1;
 // they require sufficient fit order and use an open midpoint frequency grid.
 // Integer external delays are preserved; fractional and internal delays and
 // improper descriptor models are rejected. A finite grid cannot certify intersample error
@@ -120,7 +122,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 	if fitOrder > (maxInt-1)/32 {
 		return nil, none, ErrInvalidOrder
 	}
-	integrators, residue, err := leastSquaresIntegratorLimit(detect)
+	integrators, residue, err := leastSquaresIntegratorLimit(detect, pencil == nil, dt)
 	if err != nil {
 		return nil, none, err
 	}
@@ -392,8 +394,19 @@ const leastSquaresIntegratorTol = 1e-10
 // minimal realization instead: each step deflates a singular value at most
 // leastSquaresIntegratorTol·‖A‖₁ with a Householder similarity, leaving
 // A = [N A12; 0 A22] with N strictly upper triangular and A22 nonsingular, so
-// lim s^k G(s) = C1 N^(k-1) (B1 - A12 A22⁻¹ B2).
-func leastSquaresIntegratorLimit(source *System) (int, float64, error) {
+// lim s^k G(s) = C1 N^(k-1) (B1 - A12 A22⁻¹ B2). With stored set, A is the
+// model's own realization or its fold, whose componentwise rounding is that
+// of the data, and the staircase takes at most as many steps as A has poles
+// within rounding of s = 0 or of z = 1 at dt (originUnresolvedPoles): the
+// normwise tolerance is of the order of a stiff pole, so alone it takes a
+// slow pole of a stiff graded realization, located to ε of itself and
+// mapped well inside z = 1, for an integrator (KEEWB4). k so depends on
+// dt: a resolved pole counts once e^{λ·dt} is within the existing IsStable
+// band poleStabilityTolerance of z = 1. The slow part of a pencil split is
+// not stored: it is quasi-triangular, its diagonal fixed exactly at the
+// split's rounding, as a repeated integrator spread to ±1e-8 that
+// componentwise rounding of the triangle would not move.
+func leastSquaresIntegratorLimit(source *System, stored bool, dt float64) (int, float64, error) {
 	minimal, err := source.MinimalRealization()
 	if err != nil {
 		return 0, 0, err
@@ -409,13 +422,22 @@ func leastSquaresIntegratorLimit(source *System) (int, float64, error) {
 	raw := a.RawMatrix()
 	var svd mat.SVD
 	var v mat.Dense
-	k := 0
+	k, unresolved := 0, -1
 	for ; k < n; k++ {
 		m := n - k
 		if !svd.Factorize(a.Slice(k, n, k, n), mat.SVDFullV) {
 			return 0, 0, ErrSingularEquation
 		}
 		if svd.Values(nil)[m-1] > tol {
+			break
+		}
+		if stored && unresolved < 0 {
+			var ok bool
+			if unresolved, ok = originUnresolvedPoles(minimal.Sys.A, n, dt); !ok {
+				return 0, 0, ErrSingularEquation
+			}
+		}
+		if stored && k >= unresolved {
 			break
 		}
 		v.Reset()
@@ -469,6 +491,32 @@ func leastSquaresIntegratorLimit(source *System) (int, float64, error) {
 		x, next = next, x
 	}
 	return k, mat.Dot(c.SliceVec(0, k), x), nil
+}
+
+// originUnresolvedPoles counts the eigenvalues λ of the n×n A that are
+// integrators to a fit at dt: zero or not located away from s = 0 by
+// componentwise rounding of A (resolvedPoles), or with e^{λ·dt} within the
+// IsStable boundary band poleStabilityTolerance of z = 1, where the
+// discrete fit cannot place a free pole apart from an exact one. A rounded
+// integrator or a member of a k-fold chain is not resolved, as |yᴴx|
+// collapses; a slow pole of a stiff graded realization is located to ε of
+// itself. It reports false where the factorization fails.
+func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
+	poles, resolved := resolvedPoles(A, n)
+	if resolved == nil {
+		return 0, false
+	}
+	count := 0
+	for k, p := range poles {
+		re, im := real(p)*dt, imag(p)*dt
+		half := math.Sin(im / 2)
+		toOne := complex(math.Expm1(re)*math.Cos(im)-2*half*half, math.Exp(re)*math.Sin(im))
+		nearOne := !cmplx.IsInf(toOne) && cmplx.Abs(toOne) <= poleStabilityTolerance(1+toOne)
+		if !resolved[k] || nearOne {
+			count++
+		}
+	}
+	return count, true
 }
 
 func fitDiscreteIntegrators(target []complex128, order, integrators int, limit float64) ([]float64, []float64, error) {
