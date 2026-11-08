@@ -21,11 +21,8 @@ type H2SynResult struct {
 	X       *mat.Dense
 	Y       *mat.Dense
 	CLPoles []complex128
-	// Accuracy is 1 when no Newton step certifies X or Y (where Care or
-	// Dare return ErrAccuracyUnverified; MATLAB h2syn consumes such a
-	// solution with a warning), so K may be inaccurate and CL near the
-	// stability boundary only rounded to stable.
-	Accuracy int
+
+	accuracy int
 }
 
 // H2Syn computes the H2-optimal output-feedback controller for the
@@ -44,10 +41,19 @@ type H2SynResult struct {
 // control and filter DAREs.
 //
 // CL and Gamma cost one LFT and the Lyapunov solve of H2Norm on the
-// closed loop, of twice P's order. With Accuracy 1 the gains can be so
-// large (cheap control) that the assembled CL is unstable in float64
-// though A + B2F and A − LC2 are stable; H2Syn then returns H2Norm's
-// ErrUnstable together with ErrNoStabilizing.
+// closed loop, of twice P's order.
+//
+// When no Newton step certifies X or Y (where Care or Dare return
+// ErrAccuracyUnverified; MATLAB h2syn consumes such a solution with a
+// warning), H2Syn returns the full result with ErrAccuracyUnverified: K
+// may be inaccurate and CL near the stability boundary only rounded to
+// stable. Its gains can also be so large (cheap control) that the
+// assembled CL is unstable in float64 though A + B2F and A − LC2 are
+// stable; H2Syn then returns a nil result with ErrNotConverged together
+// with H2Norm's ErrUnstable. The Riccati errors are otherwise those of
+// Care or Dare, with ErrNotStabilizable on the proved ErrNoStabilizing of
+// the state-feedback equation and ErrNotDetectable on that of the filter
+// equation; every error but ErrAccuracyUnverified comes with a nil result.
 func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 	res, err := h2Syn(P, nmeas, ncont)
 	if err != nil {
@@ -57,10 +63,13 @@ func H2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 		return nil, fmt.Errorf("H2Syn: closing the loop: %w", err)
 	}
 	if res.Gamma, err = H2Norm(res.CL); err != nil {
-		if res.Accuracy != 0 {
-			return nil, fmt.Errorf("H2Syn: closed loop of an uncertified (Accuracy %d) Riccati solution: %w: %w", res.Accuracy, err, ErrNoStabilizing)
+		if res.accuracy != 0 {
+			return nil, fmt.Errorf("H2Syn: closed loop of an uncertified Riccati solution: %w: %w", err, ErrNotConverged)
 		}
 		return nil, fmt.Errorf("H2Syn: %w", err)
+	}
+	if res.accuracy != 0 {
+		return res, fmt.Errorf("H2Syn: Riccati solution not certified: %w", ErrAccuracyUnverified)
 	}
 	return res, nil
 }
@@ -102,7 +111,7 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 
 	resX, err := careCore(A, B2, Q1, R1, &RiccatiOpts{S: S1})
 	if err != nil {
-		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, riccatiError(err, nil))
+		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, riccatiError(err, ErrNotStabilizable))
 	}
 	X := resX.X
 
@@ -117,7 +126,7 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 
 	resY, err := careCore(mat.DenseCopyOf(A.T()), mat.DenseCopyOf(C2.T()), Q2, R2, &RiccatiOpts{S: S2})
 	if err != nil {
-		return nil, fmt.Errorf("%s: filter %w", gp.op, riccatiError(err, nil))
+		return nil, fmt.Errorf("%s: filter %w", gp.op, riccatiError(err, ErrNotDetectable))
 	}
 	Y := resY.X
 
@@ -146,7 +155,7 @@ func h2Syn(P *System, nmeas, ncont int) (*H2SynResult, error) {
 		return nil, err
 	}
 
-	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, Accuracy: max(resX.accuracy, resY.accuracy)}, nil
+	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, accuracy: max(resX.accuracy, resY.accuracy)}, nil
 }
 
 // h2SynDiscrete returns the discrete H2-optimal controller u = F·x̂(k|k) +
@@ -165,7 +174,7 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 	R1 := mulDense(D12t, D12)
 	resX, err := dareFor(A, B2, mulDense(mat.DenseCopyOf(C1.T()), C1), R1, &RiccatiOpts{S: mulDense(mat.DenseCopyOf(C1.T()), D12)}, false)
 	if err != nil {
-		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, riccatiError(err, nil))
+		return nil, fmt.Errorf("%s: state-feedback %w", gp.op, riccatiError(err, ErrNotStabilizable))
 	}
 	X := resX.X
 	F := mat.DenseCopyOf(resX.K)
@@ -186,7 +195,7 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 	B1D21t := mulDense(B1, mat.DenseCopyOf(D21.T()))
 	resY, err := dareFor(mat.DenseCopyOf(A.T()), C2t, mulDense(B1, mat.DenseCopyOf(B1.T())), mulDense(D21, mat.DenseCopyOf(D21.T())), &RiccatiOpts{S: B1D21t}, false)
 	if err != nil {
-		return nil, fmt.Errorf("%s: filter %w", gp.op, riccatiError(err, nil))
+		return nil, fmt.Errorf("%s: filter %w", gp.op, riccatiError(err, ErrNotDetectable))
 	}
 	Y := resY.X
 	M := mat.DenseCopyOf(resY.K.T())
@@ -219,5 +228,5 @@ func h2SynDiscrete(gp *generalizedPlantPartition) (*H2SynResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, Accuracy: max(resX.accuracy, resY.accuracy)}, nil
+	return &H2SynResult{K: K, X: X, Y: Y, CLPoles: clPoles, accuracy: max(resX.accuracy, resY.accuracy)}, nil
 }

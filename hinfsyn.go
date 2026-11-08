@@ -84,7 +84,11 @@ type HinfSynResult struct {
 // unreliable near an unattained infimum such as 0, where K grows without
 // bound, or a coupling-limited optimum, where one of its modes does), it
 // backs gamma off upward, since every gamma above the infimum is
-// achievable, until a controller meets it (see hinfDesign.verified).
+// achievable, until a controller meets it (see hinfDesign.verified). When
+// no backed-off controller gives a stable closed loop, HinfSyn returns
+// ErrNotConverged together with the error of the last try; a plant with no
+// γ passing the Riccati test below the give-up bound is
+// ErrGammaNotAchievable. Every error comes with a nil result.
 //
 // The Riccati tests are invariant under scaling z or w: each Hamiltonian is
 // balanced by a power-of-two symplectic scaling, the semidefiniteness test
@@ -140,7 +144,10 @@ const hinfBackoffTries = 48
 // at random, so meeting it is not monotone in the margin; yet every stable
 // closed loop is a verified bound. Every try with a finite norm is therefore
 // a candidate, its GammaOpt the larger of its build gamma and its norm, and
-// the smallest candidate is returned.
+// the smallest candidate is returned. When no try gives one, verified
+// returns ErrNotConverged with the last try's error: the edge passed the
+// Riccati test, so the failure is numerical, not a proof that γ is not
+// achievable.
 func (d hinfDesign) verified(op string, P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	var best *HinfSynResult
 	var err error
@@ -170,7 +177,7 @@ func (d hinfDesign) verified(op string, P *System, nmeas, ncont int) (*HinfSynRe
 		margin = math.Max(2*margin, hinfGammaAbsTol)
 	}
 	if best == nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: no controller above the bisection edge γ = %g met its γ: %w: %w", op, d.gammaEdge, riccatiError(err, nil), ErrNotConverged)
 	}
 	return best, nil
 }
@@ -880,7 +887,12 @@ func (w *hamiltonianRiccatiWork) setHamiltonian(F, G, Q *mat.Dense) {
 	}
 }
 
-// solve returns the stabilizing Riccati solution for the Hamiltonian in H.
+// solve returns the stabilizing Riccati solution for the Hamiltonian in H,
+// positive semidefinite. A float64 stable count other than n is
+// errNoCandidate and a singular U11 errSingularBasis; an eigenvalue on the
+// imaginary axis or an X not semidefinite rejects γ with
+// ErrGammaNotAchievable, and a failed eigenvalue iteration is ErrSchurFailed.
+// The bisection and verified only test for an error.
 func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 	n := w.n
 	nn := 2 * n
@@ -907,10 +919,10 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 		return nil, fmt.Errorf("Hamiltonian Schur form did not converge: %w", ErrSchurFailed)
 	}
 	if sdim != n {
-		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
+		return nil, fmt.Errorf("Hamiltonian has %d stable eigenvalues in float64, not %d: %w", sdim, n, errNoCandidate)
 	}
 	if hasImaginaryAxisEigenvalue(hData, nn, wr, wi) {
-		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
+		return nil, fmt.Errorf("Hamiltonian eigenvalue on the imaginary axis: %w", ErrGammaNotAchievable)
 	}
 
 	u11, u21 := w.u11, w.u21
@@ -919,7 +931,7 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 
 	ipiv := w.ipiv
 	if !impl.Dgetrf(n, n, u11, n, ipiv) {
-		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
+		return nil, fmt.Errorf("Hamiltonian %w", errSingularBasis)
 	}
 
 	// X = U21 * U11^{-1}  =>  solve U11' * X' = U21'  =>  transpose approach
@@ -934,7 +946,7 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 	X := mat.NewDense(n, n, xData)
 	var eig mat.Eigen
 	if !eig.Factorize(X, mat.EigenNone) {
-		return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
+		return nil, fmt.Errorf("eigenvalues of the Hamiltonian Riccati solution: %w", ErrSchurFailed)
 	}
 	vals := eig.Values(nil)
 	floor := 1.0
@@ -944,7 +956,7 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 	floor *= hamiltonianPSDTol
 	for _, v := range vals {
 		if real(v) < -floor {
-			return nil, fmt.Errorf("Hamiltonian has no stabilizing solution: %w", ErrNoStabilizing)
+			return nil, fmt.Errorf("Hamiltonian Riccati solution not positive semidefinite: %w", ErrGammaNotAchievable)
 		}
 	}
 	if w.c != 1 {

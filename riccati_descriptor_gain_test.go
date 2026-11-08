@@ -59,13 +59,13 @@ func TestKalmanDescriptorGainMatchesOracle(t *testing.T) {
 		if e := relErr(res.K.T(), Lo); (res.accuracy == 0 || i == 0) && (res.accuracy != 0 || e > descriptorGainTol) {
 			t.Errorf("model %d Kalman: Accuracy %d, L off the oracle by %.3g", i, res.accuracy, e)
 		}
-		lqg, err := Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil)
+		lqg, err := acceptUnverifiedLqg(Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil))
 		if err != nil {
 			continue
 		}
 		dual = kalmanDual(sys, eyeDense(n), nil)
 		_, _, Lo, ok = nearSingularOracle(true, dual.A, dual.B, dual.Q, dual.R, dual.S, dual.E, mat.DenseCopyOf(lqg.L.T()))
-		if e := relErr(lqg.L.T(), Lo); ok && lqg.Accuracy == 0 && e > descriptorGainTol {
+		if e := relErr(lqg.L.T(), Lo); ok && lqg.accuracy == 0 && e > descriptorGainTol {
 			t.Errorf("model %d Lqg: Accuracy 0, L off the oracle by %.3g", i, e)
 		}
 	}

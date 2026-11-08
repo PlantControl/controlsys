@@ -34,16 +34,9 @@ type LqgResult struct {
 	Xc *mat.Dense
 	// Xf is the Kalman Riccati solution P (steady-state error covariance).
 	Xf *mat.Dense
-	// Accuracy is 1 when no Newton step certifies Xc or Xf (where Lqr or
-	// Kalman return ErrAccuracyUnverified; MATLAB lqg warns and returns
-	// the controller), so the controller may be inaccurate and its closed
-	// loop near the stability boundary only rounded to stable. With
-	// Current it is also 1 when eps perturbations of the data can move Kw
-	// beyond 1e-8, or Kw of an ill-conditioned E is not confirmed in
-	// extended precision.
-	Accuracy int
 
 	ki, kw, mx, mw *mat.Dense
+	accuracy       int
 }
 
 // Ki returns the m×p integrator gain; ok is false unless QI was given.
@@ -103,6 +96,17 @@ func (r *LqgResult) Mw() (mw *mat.Dense, ok bool) { return r.mw, r.mw != nil }
 // Plants without inputs, outputs or states are rejected with
 // ErrDimensionMismatch, singular E with ErrDescriptorSingular and plants
 // with delays with ErrDelayUnsupported.
+//
+// When no Newton step certifies Xc or Xf (where Lqr or Kalman return
+// ErrAccuracyUnverified), or with Current when eps perturbations of the
+// data can move Kw or Mx beyond 1e-8 or Kw of an ill-conditioned E is not
+// confirmed in extended precision, Lqg returns the full result with
+// ErrAccuracyUnverified (MATLAB lqg warns and returns the controller): the
+// controller may be inaccurate and its closed loop near the stability
+// boundary only rounded to stable. The Riccati errors are otherwise those
+// of Lqr for the regulator, with ErrNotStabilizable on the proved
+// ErrNoStabilizing, and of Kalman for the filter, with ErrNotDetectable;
+// every error but ErrAccuracyUnverified comes with a nil result.
 func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	if err := requireFiniteSystem("Lqg", sys); err != nil {
 		return nil, err
@@ -159,7 +163,7 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 		kRes, err = dareFor(Aa, Ba, Q, R, ropts, true)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("Lqg: %w", riccatiError(err, nil))
+		return nil, fmt.Errorf("Lqg: %w", riccatiError(err, ErrNotStabilizable))
 	}
 
 	Qn := subDense(QWV, 0, 0, n, n)
@@ -170,14 +174,14 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 	}
 	lRes, err := kalmanGain("Lqg", continuous, sys.A, sys.E, eyeDense(n), sys.C, nil, Qn, Rn, Nn, nil)
 	if err != nil {
-		return nil, riccatiError(err, nil)
+		return nil, riccatiError(err, ErrNotDetectable)
 	}
 
 	xGen, kwGen, kwCertified := kRes.X, kRes.kw, kRes.kwCertified
 	if kRes, err = explicitRiccatiSolution(kRes, ropts, nil); err != nil {
 		return nil, err
 	}
-	res := &LqgResult{K: subDense(kRes.K, 0, 0, m, n), L: lRes.K, Xc: kRes.X, Xf: lRes.X, Accuracy: max(kRes.accuracy, lRes.accuracy)}
+	res := &LqgResult{K: subDense(kRes.K, 0, 0, m, n), L: lRes.K, Xc: kRes.X, Xf: lRes.X, accuracy: max(kRes.accuracy, lRes.accuracy)}
 	if servo {
 		res.ki = subDense(kRes.K, 0, n, m, p)
 	}
@@ -190,7 +194,7 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 				if fkw, err := floatNoiseGain(Ba, xGen, R, n); err == nil && keepFloatNoiseGain(fkw, kw) {
 					kwGen = nil
 					if !certified {
-						res.Accuracy = max(res.Accuracy, 1)
+						res.accuracy = max(res.accuracy, 1)
 					}
 				}
 			} else {
@@ -199,18 +203,21 @@ func Lqg(sys *System, QXU, QWV *mat.Dense, opts *LqgOpts) (*LqgResult, error) {
 						kwGen, kwCertified = r.kw, false
 					}
 				}
-				res.Accuracy = max(res.Accuracy, 1)
+				res.accuracy = max(res.accuracy, 1)
 			}
 		}
 		if F, err = res.currentGains(sys, Ba, xGen, kwGen, R, Rn, Nn); err != nil {
 			return nil, err
 		}
 		if kwGen != nil && !kwCertified {
-			res.Accuracy = max(res.Accuracy, 1)
+			res.accuracy = max(res.accuracy, 1)
 		}
 	}
 	if res.Controller, err = lqgController(sys, res, F, o.OneDOF); err != nil {
 		return nil, err
+	}
+	if res.accuracy != 0 {
+		return res, fmt.Errorf("Lqg: controller not certified: %w", ErrAccuracyUnverified)
 	}
 	return res, nil
 }
@@ -284,7 +291,7 @@ func lqiAugmentation(sys *System) (Aa, Ba *mat.Dense) {
 // takes Kw from descriptorNoiseGain, unless the float64 Kw is within
 // newtonTol of it (keepFloatNoiseGain). Where descriptorNoiseGain fails,
 // Kw is that of the extended Dare solve (extendedDareSolve) when it runs,
-// else the float64 Kw, at Accuracy 1: at a boundary closed loop (ρ
+// else the float64 Kw, uncertified: at a boundary closed loop (ρ
 // 0.999998) G is singular to float64 and its Kw 0.8 off, while the
 // extended Kw matched the 320-bit one. Within the bound, no float64 test tells a Kw off by 1.4e-7
 // from one correct to 1e-16.
@@ -327,7 +334,7 @@ func keepFloatNoiseGain(fkw, kw *mat.Dense) bool {
 // currentGains takes X, the regulator solution of the generalized Riccati
 // equation: Kw = (R + Ba'X Ba)⁻¹ Ba'X [I; 0] for E x[n+1] = ... + w, or
 // (R + Ba'X Ba)⁻¹ Ba'X itself when Dare formed it (kw, near-singular E).
-// The innovation gain Mx = PCᵀS⁻¹, S = CPCᵀ + Rn, is Accuracy 1 when
+// The innovation gain Mx = PCᵀS⁻¹, S = CPCᵀ + Rn, is uncertified when
 // cond(S)·eps exceeds newtonTol: with P ~ 1/σ_min(E)², cond(S) 1e13-1e14
 // left Mx 4e-4 to 3e-3 off the 320-bit gain with every Riccati certified.
 func (res *LqgResult) currentGains(sys *System, Ba, X, kw, R, Rn, Nn *mat.Dense) (*mat.Dense, error) {
@@ -338,7 +345,7 @@ func (res *LqgResult) currentGains(sys *System, Ba, X, kw, R, Rn, Nn *mat.Dense)
 	var lu mat.LU
 	lu.Factorize(S)
 	if !(lu.Cond()*eps() <= newtonTol) {
-		res.Accuracy = max(res.Accuracy, 1)
+		res.accuracy = max(res.accuracy, 1)
 	}
 	var Sinv mat.Dense
 	if err := Sinv.Inverse(S); err != nil {

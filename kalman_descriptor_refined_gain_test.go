@@ -49,11 +49,11 @@ func checkDiscreteDescriptorKalman(t *testing.T, dc descriptorRefinedCase) {
 		}
 		check(label+" Dare of the dual", kd, res.accuracy, res.X, res.K)
 	}
-	lq, err := Lqg(sys, eyeDense(dc.n+dc.m), eyeDense(dc.n+dc.p), nil)
+	lq, err := acceptUnverifiedLqg(Lqg(sys, eyeDense(dc.n+dc.m), eyeDense(dc.n+dc.p), nil))
 	if err != nil {
 		t.Fatalf("%s Lqg: %v", dc.name, err)
 	}
-	check(dc.name+" Lqg L", kalmanDual(sys, eyeDense(dc.n), nil), lq.Accuracy, nil, mat.DenseCopyOf(lq.L.T()))
+	check(dc.name+" Lqg L", kalmanDual(sys, eyeDense(dc.n), nil), lq.accuracy, nil, mat.DenseCopyOf(lq.L.T()))
 }
 
 // TestKalmanDescriptorRefinedGainKept: with E's last pivot 2.4e-6 the

@@ -79,20 +79,20 @@ func checkLqgCurrentNoiseGain(t *testing.T, A, B, C, E, Q, R, S, Rn *mat.Dense) 
 	if !ok {
 		t.Fatalf("doubling oracle: no stabilizing solution (ρ %.3g)", rho)
 	}
-	res, err := Lqg(sys, qxu, qwv, &LqgOpts{Current: true})
+	res, err := acceptUnverifiedLqg(Lqg(sys, qxu, qwv, &LqgOpts{Current: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	kw, _ := res.Kw()
-	if res.Accuracy != 0 {
-		t.Errorf("Accuracy %d, want 0", res.Accuracy)
+	if res.accuracy != 0 {
+		t.Errorf("Accuracy %d, want 0", res.accuracy)
 	}
 	for _, d := range []struct {
 		name      string
 		got, want *mat.Dense
 	}{{"Xc", res.Xc, wantY}, {"K", res.K, wantK}, {"Kw", kw, want}} {
 		if rel := relErr(d.got, d.want); !(rel <= newtonTol) {
-			t.Errorf("Accuracy %d with %s off by %.3g", res.Accuracy, d.name, rel)
+			t.Errorf("Accuracy %d with %s off by %.3g", res.accuracy, d.name, rel)
 		}
 	}
 }
@@ -114,7 +114,7 @@ func lqgCurrent(t *testing.T, A, B, C, E, Q, R, S, Rn *mat.Dense) *LqgResult {
 	setBlock(qxu, n, 0, mat.DenseCopyOf(S.T()))
 	qwv := eyeDense(n + p)
 	setBlock(qwv, n, n, Rn)
-	res, err := Lqg(sys, qxu, qwv, &LqgOpts{Current: true})
+	res, err := acceptUnverifiedLqg(Lqg(sys, qxu, qwv, &LqgOpts{Current: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,8 +170,8 @@ func TestLqg_CurrentNoiseGainIterationCapKeepsFloatGain(t *testing.T) {
 			res := lqgCurrent(t, A, B, C, E, Q, R, S, Rn)
 			kw, _ := res.Kw()
 			requireEqualDense(t, "Kw", kw, want)
-			if res.Accuracy != 1 {
-				t.Errorf("Accuracy %d, want 1", res.Accuracy)
+			if res.accuracy != 1 {
+				t.Errorf("Accuracy %d, want 1", res.accuracy)
 			}
 		})
 	}

@@ -274,10 +274,10 @@ func checkNearSingularDesigns(t *testing.T, label string, sys *System, tally map
 	if record("Kalman", err) {
 		check("Kalman", kres.accuracy, kalmanDual(sys, sys.B, sys.D), kres.X, mat.DenseCopyOf(kres.K.T()))
 	}
-	lres, err := Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil)
+	lres, err := acceptUnverifiedLqg(Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil))
 	if record("Lqg", err) {
-		check("Lqg Xc", lres.Accuracy, lqrProblem, lres.Xc, lres.K)
-		check("Lqg Xf", lres.Accuracy, kalmanDual(sys, eyeDense(n), nil), lres.Xf, mat.DenseCopyOf(lres.L.T()))
+		check("Lqg Xc", lres.accuracy, lqrProblem, lres.Xc, lres.K)
+		check("Lqg Xf", lres.accuracy, kalmanDual(sys, eyeDense(n), nil), lres.Xf, mat.DenseCopyOf(lres.L.T()))
 	}
 }
 

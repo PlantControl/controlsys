@@ -32,7 +32,7 @@ func TestLqg_CurrentNoiseGainIllConditionedGram(t *testing.T) {
 	}
 	res := lqgCurrent(t, A, B, C, E, Q, R, mat.NewDense(2, 3, nil), Rn)
 	kw, _ := res.Kw()
-	if rel := relErr(kw, want); res.Accuracy == 0 && !(rel <= newtonTol) {
+	if rel := relErr(kw, want); res.accuracy == 0 && !(rel <= newtonTol) {
 		t.Errorf("Accuracy 0 with Kw off by %.3g", rel)
 	}
 }

@@ -949,7 +949,7 @@ func syLqgCandidate(t *testing.T, s *fzSpec, P *syPlant, rho, sig float64) *syCL
 			qwv[i*(n+p)+i] = sig * sig
 		}
 	}
-	res, err := Lqg(s.System(t, fzSysOpts{}), mqDense(n+m, n+m, qxu), mqDense(n+p, n+p, qwv), &LqgOpts{Current: s.Discrete})
+	res, err := acceptUnverifiedLqg(Lqg(s.System(t, fzSysOpts{}), mqDense(n+m, n+m, qxu), mqDense(n+p, n+p, qwv), &LqgOpts{Current: s.Discrete}))
 	if err != nil {
 		return nil
 	}
@@ -971,7 +971,8 @@ func syRegSolvable(s *fzSpec) bool { return mqStabilizable(s) && mqStabilizable(
 // strictly proper (continuous), give an exactly stable closed loop whose
 // Kronecker H2 norm equals Gamma, and no larger a norm than the Lqg
 // controller for the same weights (an H2-optimal candidate measured by the
-// same oracle).
+// same oracle). An ErrAccuracyUnverified result is checked as a returned
+// one.
 func FuzzH2Syn(f *testing.F) {
 	for _, s := range fzMatEqSeeds() {
 		fzAddSeed(f, s)
@@ -984,6 +985,12 @@ func FuzzH2Syn(f *testing.F) {
 		P, rho, sig := syRegPlant(s)
 		res, err := H2Syn(P.System(t, s), P.ny, P.nu)
 		fzContract(t, s, "H2Syn", res != nil, err)
+		if msg := synthesisContractBreach(res != nil, accuracyOfH2Syn(res), err); msg != "" {
+			t.Fatalf("H2Syn: %s\n%s", msg, s)
+		}
+		if errors.Is(err, ErrAccuracyUnverified) {
+			err = nil
+		}
 		solvable := syRegSolvable(s)
 		if err != nil {
 			if solvable {
@@ -1044,6 +1051,9 @@ func FuzzHinfSyn(f *testing.F) {
 		Psys := P.System(t, s)
 		res, err := HinfSyn(Psys, P.ny, P.nu)
 		fzContract(t, s, "HinfSyn", res != nil, err)
+		if msg := synthesisContractBreach(res != nil, 0, err); msg != "" || errors.Is(err, ErrAccuracyUnverified) || errors.Is(err, ErrNoStabilizing) {
+			t.Fatalf("HinfSyn: %s %v\n%s", msg, err, s)
+		}
 		solvable := syRegSolvable(s)
 		if err != nil {
 			if errors.Is(err, ErrInvalidPartition) && syNearUnitPole(s) {
@@ -1072,7 +1082,7 @@ func FuzzHinfSyn(f *testing.F) {
 			syRoundingExcess(t, s, "HinfSyn", res.CL, lo, w, res.Gamma, P.nw, P.nz)
 			t.Fatalf("HinfSyn: σmax %.10g at ω=%g exceeds Gamma %.10g\n%s", lo, w, res.Gamma, s)
 		}
-		h2, err := H2Syn(Psys, P.ny, P.nu)
+		h2, err := acceptUnverifiedH2Syn(H2Syn(Psys, P.ny, P.nu))
 		if err != nil {
 			return
 		}
@@ -1096,7 +1106,8 @@ func FuzzHinfSyn(f *testing.F) {
 // QWV = blkdiag(BBᵀ + qI, rI) (q, r from v[12], v[13]). When both Riccati
 // problems are provably solvable an error is a failure; a returned
 // controller on a robustly stabilizable and detectable plant must make the
-// positive-feedback closed loop exactly stable.
+// positive-feedback closed loop exactly stable, an ErrAccuracyUnverified
+// controller included.
 func FuzzLqg(f *testing.F) {
 	for _, s := range fzMatEqSeeds() {
 		fzAddSeed(f, s)
@@ -1135,6 +1146,12 @@ func FuzzLqg(f *testing.F) {
 		current := s.Discrete && s.Vals[15] > 0
 		res, err := Lqg(s.System(t, fzSysOpts{}), mqDense(n+m, n+m, blk(qx, ru, n, m)), mqDense(n+p, n+p, blk(qw, rv, n, p)), &LqgOpts{Current: current})
 		fzContract(t, s, "Lqg", res != nil, err)
+		if msg := synthesisContractBreach(res != nil, accuracyOfLqg(res), err); msg != "" {
+			t.Fatalf("Lqg: %s\n%s", msg, s)
+		}
+		if errors.Is(err, ErrAccuracyUnverified) {
+			err = nil
+		}
 		if err != nil {
 			if !errors.Is(err, ErrAlgebraicLoop) && mqRiccatiExists(s, qx, ru, nil) && mqRiccatiExists(syDual(s), qw, rv, nil) {
 				t.Fatalf("Lqg: %v with both Riccati problems provably solvable\n%s", err, s)
