@@ -33,6 +33,26 @@ This package is intended to be usable in production control and estimation code,
 - `System` values are mutable. Use `Copy` before sharing a model across goroutines that may mutate names, delays, notes, or other receiver state. Use `Validate` after direct field edits.
 - The repository CI runs `go fix ./...`, `go vet ./...`, `go test -v -count=1 -race ./...`, and a downstream consumer import check; those are the recommended baseline checks for downstream integrations.
 
+## Errors and Certified Results
+
+`err == nil` means the result is certified to its documented accuracy. Every error wraps a sentinel from `errors.go`, so branch with `errors.Is`:
+
+- `ErrAccuracyUnverified`: the result was computed but its certificate failed. It is returned in full alongside the error, and a caller may keep it as a warning (MATLAB warns). This applies to `Care`, `Dare`, `Lqr`, `Dlqr`, `Lqi`, `Lqrd`, `Lqe`, `Kalman`, `Kalmd`, `Lqg`, `H2Syn`, `PolesDetail`, `C2DFit` and least-squares `C2D` on a descriptor fitted through its pencil.
+- `ErrNotConverged`: the search or iteration accepted no candidate, so the result is nil. `ErrSchurFailed` is one.
+- `ErrNoStabilizing`: a proved boundary verdict. It also wraps `ErrNotStabilizable` (control side) or `ErrNotDetectable` (estimator side).
+- Every other error comes with a nil result.
+
+```go
+res, err := controlsys.Care(A, B, Q, R, nil)
+switch {
+case err == nil:
+case errors.Is(err, controlsys.ErrAccuracyUnverified):
+	log.Println("warning:", err) // res is usable but not certified
+default:
+	return err
+}
+```
+
 ## Features
 
 - **Model interfaces:** state-space, transfer function, zero-pole-gain (ZPK), frequency-response data (FRD), model arrays, generalized models, and tunable blocks
@@ -177,6 +197,7 @@ func main() {
 | Function/Method | Description |
 |-----------------|-------------|
 | `Poles` | Eigenvalues of A |
+| `PolesDetail` | Poles with a certified finite-pole count; `ErrAccuracyUnverified` with the poles when E is rank-deficient |
 | `Zeros` | Transmission zeros |
 | `IsStable` | Stability check |
 | `IsStabilizable` | Stabilizability test (unstable modes reachable from input) |
@@ -309,7 +330,7 @@ func main() {
 |--------|-------------|
 | `C2D` | MATLAB `c2d(sys,Ts,opts)`: zoh (default), foh, tustin, impulse, matched, least-squares |
 | `C2DMap` | MATLAB `[sysd,G] = c2d(...)`: also returns the initial-condition map G |
-| `C2DFit` | Least-squares `C2D` plus fit-quality diagnostics |
+| `C2DFit` | Least-squares `C2D` plus fit-quality diagnostics; `ErrAccuracyUnverified` with the model when fitted through a descriptor pencil |
 | `D2C` | MATLAB `d2c(sys,opts)`: zoh (default), foh, tustin, matched |
 | `D2CMap` | MATLAB `[sysc,G] = d2c(...)` |
 | `D2D` | MATLAB `d2d(sys,Ts,opts)`: zoh (default) or tustin resampling |
