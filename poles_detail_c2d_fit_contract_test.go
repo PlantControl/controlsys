@@ -89,6 +89,21 @@ func TestPolesDetailContractByClass(t *testing.T) {
 	}
 }
 
+// TestPolesDetailStaticGainEmpty checks that a model with no states has an
+// empty, non-nil pole set with a nil error (ZOJBZX step 4 ruling).
+func TestPolesDetailStaticGainEmpty(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		sys, err := NewGain(mat.NewDense(2, 3, []float64{1, -2, 0.5, 3, 0, -1}), dt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		poles, err := sys.PolesDetail()
+		if err != nil || poles == nil || len(poles) != 0 {
+			t.Fatalf("dt=%g: PolesDetail = (%v, nil=%t), %v; want ([], nil)", dt, poles, poles == nil, err)
+		}
+	}
+}
+
 // TestLeastSquaresC2DContractByOperation checks C2DFit and C2D (least
 // squares) in each class: an explicit model, not sampled through a pencil,
 // is certified (ZOJBZX Q11); a stiff descriptor sampled through its pencil

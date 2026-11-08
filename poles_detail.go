@@ -29,7 +29,7 @@ import (
 func (sys *System) PolesDetail() ([]complex128, error) {
 	n, _, _ := sys.Dims()
 	if n == 0 {
-		return nil, nil
+		return []complex128{}, nil
 	}
 	if err := finiteSystemMatrices("PolesDetail", sys, ErrInvalidArgument); err != nil {
 		return nil, err
