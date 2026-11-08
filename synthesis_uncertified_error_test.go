@@ -218,12 +218,10 @@ func (c synthesisClass) String() string {
 //     regulator and ErrNotDetectable from the filter, never the other,
 //     never ErrNotConverged;
 //   - structural: H2Syn and HinfSyn reject an exactly unstabilizable or
-//     undetectable plant with ErrNotStabilizable or ErrNotDetectable before
-//     any Riccati solve (IsStabilizable, IsDetectable). That check also
-//     rejects an uncontrollable mode 1e-12 inside the boundary, a band
-//     wider than the PBH band of the Riccati verdict, so no fixture
-//     reaches the Riccati ErrNoStabilizing of H2Syn: its proved class is
-//     the riccatiError mapping of Lqg, checked there;
+//     undetectable plant with ErrNotStabilizable or ErrNotDetectable alone
+//     before any Riccati solve (IsStabilizable, IsDetectable); a plant
+//     that passes it can still reach the proved Riccati verdict (H2Syn
+//     discrete rows);
 //   - infeasible: HinfSyn with no γ passing the Riccati test below its
 //     give-up bound: ErrGammaNotAchievable alone.
 func TestSynthesisContractByOperation(t *testing.T) {
@@ -270,6 +268,26 @@ func TestSynthesisContractByOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Discrete plants of a seeded boundary-mode sweep (a mode within 1e-15
+	// to 1e-3 of the unit circle, weakly reached or seen) on which the
+	// structural check passes and the Riccati PBH verdict proves the
+	// state-feedback (bnd 415) or filter (bnd 785) Dare unsolvable; their
+	// class held on arm64, amd64 and arm64 -race.
+	provedCtl, err := New(mat.NewDense(4, 4, []float64{0.3686769056761542, -1.261658619660003, -0.07721411064245116, -1.2748073666597657, -0.2068560984712352, -0.09518036781275836, 0.033625490561924334, -0.22565646205736925, 0.1326970817518858, -0.007128687367281733, 0.5041261461897845, 0.24570885835836545, 0.0710583653828091, -0.6769993425788091, 0.10384073071915179, 1.0603719796400988}),
+		mat.NewDense(4, 6, []float64{1, 0, 0, 0, 0, 0.5604542701685419, 0, 1, 0, 0, 0, 0.3081808977760851, 0, 0, 1, 0, 0, -0.09759146706272367, 0, 0, 0, 1, 0, 0.11066832566227279}),
+		mat.NewDense(6, 4, []float64{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -0.38023456486920126, -1.160172302262298, -0.9062063892296375, -0.2824663718882443}),
+		mat.NewDense(6, 6, []float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.8319905220840427e-05, 0, 0, 0, 0, 1, 0}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provedObs, err := New(mat.NewDense(3, 3, []float64{0.02284685140945349, 0.3334518749971631, -0.7870384975264465, 0.17645241804528727, -0.8192297650580581, -0.12268426534714037, -1.0482541007524069, -0.24606174254596427, -0.18325130573932003}),
+		mat.NewDense(3, 6, []float64{1, 0, 0, 0, 0, 0.06391329714731155, 0, 1, 0, 0, 0, 0.880622923735225, 0, 0, 1, 0, 0, 1.2264695586890177}),
+		mat.NewDense(6, 3, []float64{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -0.2028567928336173, -0.37284315430519127, 0.12351756449042259, -0.012961973472018414, -0.556206874610857, -0.048646089480725484}),
+		mat.NewDense(6, 6, []float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5.579422953478083e-07, 0, 0, 0, 0, 0, 0, 5.579422953478083e-07, 0}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	regP := func(A, B, C *mat.Dense, dt float64) *System { return synthesisRegulatorPlant(t, A, B, C, 1, 1, dt) }
 	weakB := mat.NewDense(2, 1, []float64{1e-8, 1})
 
@@ -305,6 +323,8 @@ func TestSynthesisContractByOperation(t *testing.T) {
 		{"H2Syn", synthesisUnverified, h2(synthesisCheapControl.plant(t), 1, 1), nil},
 		{"H2Syn control", synthesisNotConverged, h2(synthesisControlNotConverged.plant(t), 1, 1), nil},
 		{"H2Syn filter", synthesisNotConverged, h2(synthesisFilterNotConverged.plant(t), 1, 1), nil},
+		{"H2Syn discrete", synthesisProvedControl, h2(provedCtl, 1, 1), nil},
+		{"H2Syn discrete", synthesisProvedFilter, h2(provedObs, 2, 1), nil},
 		{"H2Syn", synthesisClosedLoopUnstable, h2(synthesisUnstableLoop.plant(t), 1, 1), nil},
 		{"H2Syn control", synthesisStructural, h2(regP(uA, uB, mat.NewDense(1, 2, []float64{1, 1}), 0), 1, 1), ErrNotStabilizable},
 		{"H2Syn filter", synthesisStructural, h2(regP(uA, eyeDense(2), uC, 0), 1, 2), ErrNotDetectable},
