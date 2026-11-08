@@ -1463,6 +1463,9 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // a refined K of inputs not rotated within gainTol but beyond gainFloor:
 // 1.46e-6 from the gain of its X at a tolerance of 1.51e-6, it was 3.11e-6
 // off the 320-bit gain natively (2.4e-8 on amd64), the Hewer gain exact.
+// Its Hewer gain is run to convergence (hewerGainConverged): two steps
+// moved K beyond newtonTol where the third matched the 320-bit gain, the
+// K of X 1.2e-5 to 2.76e-3 off it.
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if res.channelLost {
 		return res, 0, true
@@ -1495,7 +1498,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 			}
 		}
 		if red != nil && !red.rotated && d.d > gainFloor {
-			if r, ok := hewerGainSubstituted(A, B, Q, R, opts, red, res); ok {
+			if r, ok := hewerGainConverged(A, B, Q, R, opts, red, res); ok {
 				return r, 0, true
 			}
 			return res, d.units(gainFloor), false
