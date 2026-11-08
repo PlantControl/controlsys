@@ -177,8 +177,8 @@ func TestEvalFrStiffExplicitDCResolvedSlowPole(t *testing.T) {
 // fast pole near 1e15, and an integrator rounded off 0 by a dense
 // similarity, simple or double, alone or beside a fast pole, read +Inf
 // where it reaches. On base the stiff ones read 0.5 = D: the pole limit
-// stepped 1e-5·rho past the slow poles. DCGain of the rounded stiff one
-// takes the transfer limit, finite on base too, which this leaves alone.
+// stepped 1e-5·rho past the slow poles. DCGain reads the integrator too;
+// for the rounded stiff one the transfer limit was finite (W45MGH).
 func TestEvalFrStiffExplicitDCIntegratorStaysPole(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 2026))
 	T := mat.NewDense(3, 3, nil)
@@ -199,14 +199,13 @@ func TestEvalFrStiffExplicitDCIntegratorStaysPole(t *testing.T) {
 	c := mat.NewDense(1, 3, []float64{1.1, 0.3, -0.8})
 	d := mat.NewDense(1, 1, []float64{0.5})
 	for _, tc := range []struct {
-		name     string
-		A        *mat.Dense
-		dcFinite bool
+		name string
+		A    *mat.Dense
 	}{
-		{"exact stiff", mat.NewDense(3, 3, []float64{0, 0.4, -1.3, 0, -0.5, 0.9, 0, 0, -3.8e15}), false},
-		{"rounded dense", similar(0, 0, 0, 0, -1, 0, 0, 0, -3), false},
-		{"rounded double", similar(0, 1, 0, 0, 0, 0, 0, 0, -2), false},
-		{"rounded stiff", similar(0, 0, 0, 0, -1e4, 0, 0, 0, -1e12), true},
+		{"exact stiff", mat.NewDense(3, 3, []float64{0, 0.4, -1.3, 0, -0.5, 0.9, 0, 0, -3.8e15})},
+		{"rounded dense", similar(0, 0, 0, 0, -1, 0, 0, 0, -3)},
+		{"rounded double", similar(0, 1, 0, 0, 0, 0, 0, 0, -2)},
+		{"rounded stiff", similar(0, 0, 0, 0, -1e4, 0, 0, 0, -1e12)},
 	} {
 		sys, err := New(tc.A, b, c, d, 0)
 		if err != nil {
@@ -224,7 +223,7 @@ func TestEvalFrStiffExplicitDCIntegratorStaysPole(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: DCGain: %v", tc.name, err)
 		}
-		if !cmplx.IsInf(ev[0][0]) || !cmplx.IsInf(fr.At(0, 0, 0)) || !tc.dcFinite && !math.IsInf(dc.At(0, 0), 0) {
+		if !cmplx.IsInf(ev[0][0]) || !cmplx.IsInf(fr.At(0, 0, 0)) || !math.IsInf(dc.At(0, 0), 0) {
 			t.Errorf("%s: EvalFr(0) %v, FreqResponse(0) %v, DCGain %v, want Inf", tc.name, ev[0][0], fr.At(0, 0, 0), dc.At(0, 0))
 		}
 	}
