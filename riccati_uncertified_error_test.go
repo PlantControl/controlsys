@@ -212,7 +212,7 @@ func TestRiccatiCertifyMapping(t *testing.T) {
 		{"boundary, filter", nil, fmt.Errorf("Kalman: Dare: %w", errBoundaryUnstabilizable), ErrNotDetectable, []error{ErrNoStabilizing, ErrNotDetectable}, []error{ErrNotStabilizable, ErrNotConverged}, "Kalman: Dare: controlsys: no stabilizing solution exists: a mode on or beyond the stability boundary is unstabilizable"},
 		{"Schur", nil, fmt.Errorf("Care: %w", ErrSchurFailed), ErrNotStabilizable, []error{ErrSchurFailed, ErrNotConverged}, []error{ErrNoStabilizing}, "Care: controlsys: Schur decomposition failed to converge"},
 		{"other", nil, ErrSingularR, ErrNotStabilizable, []error{ErrSingularR}, []error{ErrNotConverged}, ErrSingularR.Error()},
-		{"unverified", partial, nil, ErrNotDetectable, []error{ErrAccuracyUnverified}, []error{ErrNotConverged, ErrNotDetectable}, "Kalman: no Newton step certifies the solution: controlsys: result accuracy not verified"},
+		{"unverified", partial, nil, ErrNotDetectable, []error{ErrAccuracyUnverified}, []error{ErrNotConverged, ErrNotDetectable}, "Kalman: solution not certified: controlsys: result accuracy not verified"},
 	} {
 		op := "Care"
 		if c.unsolvable == ErrNotDetectable {

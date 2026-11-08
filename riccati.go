@@ -382,7 +382,7 @@ func certify(op string, unsolvable error, res *RiccatiResult, err error) (*Ricca
 		return nil, riccatiError(err, unsolvable)
 	}
 	if res.accuracy != 0 {
-		return res, fmt.Errorf("%s: no Newton step certifies the solution: %w", op, ErrAccuracyUnverified)
+		return res, fmt.Errorf("%s: solution not certified: %w", op, ErrAccuracyUnverified)
 	}
 	return res, nil
 }
