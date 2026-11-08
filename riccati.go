@@ -405,8 +405,8 @@ func riccatiError(err error, unsolvable error) error {
 	return err
 }
 
-// jointError is err, with its message, that also matches also under
-// errors.Is.
+// jointError keeps the message of err and matches both err and also
+// under errors.Is.
 type jointError struct{ err, also error }
 
 func (e *jointError) Error() string { return e.err.Error() }

@@ -267,3 +267,187 @@ func bitEqualDense(a, b *mat.Dense) bool {
 	}
 	return true
 }
+
+// TestSchurFailedIsNotConverged: ErrSchurFailed is an ErrNotConverged
+// (ZOJBZX Q4) and stays matchable through wrapping.
+func TestSchurFailedIsNotConverged(t *testing.T) {
+	if !errors.Is(ErrSchurFailed, ErrNotConverged) {
+		t.Error("ErrSchurFailed is not ErrNotConverged")
+	}
+	wrapped := fmt.Errorf("x: %w", ErrSchurFailed)
+	if !errors.Is(wrapped, ErrSchurFailed) || !errors.Is(wrapped, ErrNotConverged) {
+		t.Errorf("%v: lost ErrSchurFailed or ErrNotConverged", wrapped)
+	}
+	if errors.Is(ErrNotConverged, ErrSchurFailed) {
+		t.Error("ErrNotConverged is ErrSchurFailed")
+	}
+}
+
+// riccatiContractClass is the outcome class of an exported Riccati
+// operation under the ZOJBZX contract.
+type riccatiContractClass int
+
+const (
+	contractCertified riccatiContractClass = iota
+	contractUnverified
+	contractNotConverged
+	contractProved
+)
+
+func (c riccatiContractClass) String() string {
+	return [...]string{"certified", "unverified", "not converged", "proved"}[c]
+}
+
+// TestRiccatiContractByOperation checks each exported Riccati operation
+// in each outcome class it has a fixture for (ZOJBZX):
+//   - certified: (res, nil);
+//   - uncertified: (res ≠ nil, ErrAccuracyUnverified);
+//   - not proved: (nil, ErrNotConverged), never ErrNoStabilizing;
+//   - proved: (nil, ErrNoStabilizing) with ErrNotStabilizable for the
+//     control side (Care, Dare, Lqr, Dlqr, Lqi, Lqrd) and ErrNotDetectable
+//     for the estimator side (Lqe, Kalman, Kalmd), never the other.
+//
+// Fixtures: a stabilizable well-conditioned plant (certified); weakBStall
+// and its dual, and the well-conditioned-E Dare
+// (TestRiccatiUnverifiedPartialResult; uncertified); the Hamiltonian axis
+// pair (TestCare_HamiltonianAxisPairNoStabilizing) and the noise-unreachable
+// boundary mode (TestKalman_BoundaryModeUnreachableFromNoise; not proved);
+// an exactly uncontrollable (unobservable) unstable mode, and K72KOR's
+// undetectable mode at z = 1 (proved).
+//
+// Lqi, Lqrd and Kalmd build their Riccati data (the integrator
+// augmentation, the Van Loan discretization), so the uncertified and
+// not-proved fixtures, which are exact Riccati data, do not carry over and
+// no plant is known to reach those classes through them: they are checked
+// certified and proved only. Their uncertified and not-proved exits are the
+// same certify as Lqr, Dlqr and Kalman's (Lqi and Lqrd return Lqr and
+// Dlqr; Kalmd certifies its dareFor result like Kalman), which the rows
+// for those cover.
+func TestRiccatiContractByOperation(t *testing.T) {
+	cA := mat.NewDense(2, 2, []float64{0, 1, -2, -3})
+	cB := mat.NewDense(2, 1, []float64{0, 1})
+	cC := mat.NewDense(1, 2, []float64{1, 0})
+	dA := mat.NewDense(2, 2, []float64{1.1, 0.2, 0, 0.5})
+	dB := mat.NewDense(2, 1, []float64{1, 1})
+	I2, I1 := eyeDense(2), eyeDense(1)
+	cSys, err := New(cA, cB, cC, mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dSys, err := New(dA, dB, mat.NewDense(1, 2, []float64{1, 0}), mat.NewDense(1, 1, nil), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	uA := mat.NewDense(2, 2, []float64{1, 0, 0, -1})
+	uB := mat.NewDense(2, 1, []float64{0, 1})
+	uC := mat.NewDense(1, 2, []float64{0, 1})
+	uDA := mat.NewDense(2, 2, []float64{2, 0, 0, 0.5})
+	ctlSys, err := New(uA, uB, uC, mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obsSys, err := New(uA, I2, uC, mat.NewDense(1, 2, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k72 := syKalmanSpec(fzDecode(t, 0xa7, [fzNVals]float64{-0.3010299956639812, 45.6, -68, 1, 0, -6, -30, 156, 1.2, 23.7824, 135.4, 48, -10, -2, 47, -1.1111}))
+	k72qn, k72rn, k72nn := syNoise(k72, k72.M, k72.P)
+	var k72N *mat.Dense
+	if k72nn != nil {
+		k72N = mqDense(k72.M, k72.P, k72nn)
+	}
+	k72Sys := k72.System(t, fzSysOpts{})
+
+	wA, wB, wQ, wR, _ := careVerifyCaseNamed(t, "weakBStall").dense()
+	wn, wm := wB.Dims()
+	wAt, wBt := mat.DenseCopyOf(wA.T()), mat.DenseCopyOf(wB.T())
+	wSys, err := New(wAt, eyeDense(wn), wBt, mat.NewDense(wm, wn, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eA := mat.NewDense(2, 2, []float64{-456.1125380107185, 212.12282671008353, -6542.374939554918, 3040.8017276406886})
+	eB := mat.NewDense(2, 2, []float64{0.1511888949722682, 1.360456698990255, -0.010540390965378899, -0.09484655257220741})
+	eOpts := &RiccatiOpts{E: mat.NewDense(2, 2, []float64{0.35739616083221576, 0.9339528811574985, -0.9339528811574985, 0.357396160832216})}
+
+	xa, xb, xq, xr, xs := hamiltonianAxisPair()
+	xA, xB, xQ, xR, xS := mat.NewDense(4, 4, xa), mat.NewDense(4, 3, xb), mat.NewDense(4, 4, xq), mat.NewDense(3, 3, xr), mat.NewDense(4, 3, xs)
+	pA, pB, pC, pE := boundaryUnreachablePlant(0)
+	pSys, err := NewDescriptor(pA, pB, pC, mat.NewDense(1, 1, nil), pE, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pAt, pCt, pQ, pEt := dualDare(pA, pB, pC, pE)
+
+	type op = func() (*RiccatiResult, error)
+	cases := []struct {
+		name  string
+		class riccatiContractClass
+		run   op
+	}{
+		{"Care", contractCertified, func() (*RiccatiResult, error) { return Care(cA, cB, I2, I1, nil) }},
+		{"Care", contractUnverified, func() (*RiccatiResult, error) { return Care(wA, wB, wQ, wR, nil) }},
+		{"Care", contractNotConverged, func() (*RiccatiResult, error) { return Care(xA, xB, xQ, xR, &RiccatiOpts{S: xS}) }},
+		{"Care", contractProved, func() (*RiccatiResult, error) { return Care(uA, uB, I2, I1, nil) }},
+		{"Lqr", contractCertified, func() (*RiccatiResult, error) { return Lqr(cA, cB, I2, I1, nil) }},
+		{"Lqr", contractUnverified, func() (*RiccatiResult, error) { return Lqr(wA, wB, wQ, wR, nil) }},
+		{"Lqr", contractNotConverged, func() (*RiccatiResult, error) { return Lqr(xA, xB, xQ, xR, &RiccatiOpts{S: xS}) }},
+		{"Lqr", contractProved, func() (*RiccatiResult, error) { return Lqr(uA, uB, I2, I1, nil) }},
+		{"Dare", contractCertified, func() (*RiccatiResult, error) { return Dare(dA, dB, I2, I1, nil) }},
+		{"Dare", contractUnverified, func() (*RiccatiResult, error) { return Dare(eA, eB, I2, I2, eOpts) }},
+		{"Dare", contractNotConverged, func() (*RiccatiResult, error) { return Dare(pAt, pCt, pQ, I1, &RiccatiOpts{E: pEt}) }},
+		{"Dare", contractProved, func() (*RiccatiResult, error) { return Dare(uDA, uB, I2, I1, nil) }},
+		{"Dlqr", contractCertified, func() (*RiccatiResult, error) { return Dlqr(dA, dB, I2, I1, nil) }},
+		{"Dlqr", contractUnverified, func() (*RiccatiResult, error) { return Dlqr(eA, eB, I2, I2, eOpts) }},
+		{"Dlqr", contractNotConverged, func() (*RiccatiResult, error) { return Dlqr(pAt, pCt, pQ, I1, &RiccatiOpts{E: pEt}) }},
+		{"Dlqr", contractProved, func() (*RiccatiResult, error) { return Dlqr(uDA, uB, I2, I1, nil) }},
+		{"Lqi", contractCertified, func() (*RiccatiResult, error) { return Lqi(cSys, eyeDense(3), I1, nil) }},
+		{"Lqi", contractProved, func() (*RiccatiResult, error) { return Lqi(ctlSys, eyeDense(3), I1, nil) }},
+		{"Lqrd", contractCertified, func() (*RiccatiResult, error) { return Lqrd(cA, cB, I2, I1, 0.1, nil) }},
+		{"Lqrd", contractProved, func() (*RiccatiResult, error) { return Lqrd(uA, uB, I2, I1, 0.1, nil) }},
+		{"Lqe", contractCertified, func() (*RiccatiResult, error) { return Lqe(cA, I2, cC, I2, I1, nil, nil) }},
+		{"Lqe", contractUnverified, func() (*RiccatiResult, error) { return Lqe(wAt, eyeDense(wn), wBt, wQ, wR, nil, nil) }},
+		{"Lqe", contractNotConverged, func() (*RiccatiResult, error) {
+			return Lqe(mat.DenseCopyOf(xA.T()), eyeDense(4), mat.DenseCopyOf(xB.T()), xQ, xR, xS, nil)
+		}},
+		{"Lqe", contractProved, func() (*RiccatiResult, error) { return Lqe(uA, I2, uC, I2, I1, nil, nil) }},
+		{"Kalman", contractCertified, func() (*RiccatiResult, error) { return Kalman(dSys, I1, I1, nil, nil) }},
+		{"Kalman", contractUnverified, func() (*RiccatiResult, error) { return Kalman(wSys, wQ, wR, nil, nil) }},
+		{"Kalman", contractNotConverged, func() (*RiccatiResult, error) { return Kalman(pSys, I1, I1, nil, nil) }},
+		{"Kalman", contractProved, func() (*RiccatiResult, error) {
+			return Kalman(k72Sys, mqDense(k72.M, k72.M, k72qn), mqDense(k72.P, k72.P, k72rn), k72N, nil)
+		}},
+		{"Kalmd", contractCertified, func() (*RiccatiResult, error) { return Kalmd(cSys, I1, I1, 0.1, nil) }},
+		{"Kalmd", contractProved, func() (*RiccatiResult, error) { return Kalmd(obsSys, I2, I1, 0.1, nil) }},
+	}
+	estimator := map[string]bool{"Lqe": true, "Kalman": true, "Kalmd": true}
+	for _, c := range cases {
+		res, err := c.run()
+		what := fmt.Sprintf("%s %v", c.name, c.class)
+		if msg := riccatiContractBreach(res, err); msg != "" {
+			t.Errorf("%s: %s", what, msg)
+		}
+		switch c.class {
+		case contractCertified:
+			if err != nil || res == nil {
+				t.Errorf("%s: result %v, err %v; want a result with nil", what, res != nil, err)
+			}
+		case contractUnverified:
+			if !errors.Is(err, ErrAccuracyUnverified) || res == nil {
+				t.Errorf("%s: result %v, err %v; want a result with ErrAccuracyUnverified", what, res != nil, err)
+			}
+		case contractNotConverged:
+			if !errors.Is(err, ErrNotConverged) || errors.Is(err, ErrNoStabilizing) || res != nil {
+				t.Errorf("%s: result %v, err %v; want nil with ErrNotConverged", what, res != nil, err)
+			}
+		case contractProved:
+			want, not := ErrNotStabilizable, ErrNotDetectable
+			if estimator[c.name] {
+				want, not = not, want
+			}
+			if !errors.Is(err, ErrNoStabilizing) || !errors.Is(err, want) || errors.Is(err, not) || errors.Is(err, ErrNotConverged) || res != nil {
+				t.Errorf("%s: result %v, err %v; want nil with ErrNoStabilizing and %v", what, res != nil, err, want)
+			}
+		}
+	}
+}
