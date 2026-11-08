@@ -27,7 +27,7 @@ func lqgCurrentDescriptor(t *testing.T, A, B, C, Q, R, S, E, Rn *mat.Dense) (*Lq
 		qwv.Set(i, i, 1)
 	}
 	qwv.Slice(n, n+p, n, n+p).(*mat.Dense).Copy(Rn)
-	return Lqg(sys, qxu, qwv, &LqgOpts{Current: true})
+	return acceptUnverifiedLqg(Lqg(sys, qxu, qwv, &LqgOpts{Current: true}))
 }
 
 // JGGEN2 census rv46 bnd 227: regulator closed loop at ρ 0.999998, ‖X‖
@@ -49,8 +49,8 @@ func TestLqg_CurrentBoundaryNoiseGainFromExtendedSolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lqg: %v", err)
 	}
-	if res.Accuracy != 1 {
-		t.Errorf("Accuracy = %d, want 1", res.Accuracy)
+	if res.accuracy != 1 {
+		t.Errorf("Accuracy = %d, want 1", res.accuracy)
 	}
 	kw, _ := res.Kw()
 	if d := relFrob(kw, want); d > 1e-9 {
@@ -75,8 +75,8 @@ func TestLqg_CurrentIllConditionedInnovationIsUncertified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lqg: %v", err)
 	}
-	if res.Accuracy != 1 {
-		t.Errorf("Accuracy = %d, want 1", res.Accuracy)
+	if res.accuracy != 1 {
+		t.Errorf("Accuracy = %d, want 1", res.accuracy)
 	}
 
 	A92 := mat.NewDense(2, 2, []float64{-0.090074153033864235, -0.0045558063145923564, 0.16258408844141831, 0.86435830695651372})

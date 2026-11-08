@@ -63,14 +63,16 @@ func TestRiccatiAccuracy_Propagated(t *testing.T) {
 
 // TestRiccatiAccuracy_LqgH2Syn: Lqg and H2Syn of ch360 and weakBStall,
 // whose regulator X no Newton step certifies, return the controller with
-// Accuracy 1, as MATLAB lqg and h2syn consume icare's X with a warning,
-// not ErrNoStabilizing (MQM2E7). The controller is checked by separation:
+// ErrAccuracyUnverified (ZOJBZX), as MATLAB lqg and h2syn consume icare's
+// X with a warning, not ErrNoStabilizing (MQM2E7). The controller is checked by separation:
 // A + B·Cc and A − Bc·C stable, Ac = A + B·Cc − Bc·C. Their cheap-control
 // gains (weakBStall ‖K‖ = 8e8) leave the assembled closed loop unstable
 // in float64 (weakBStall: an eigenvalue +0.02 where those of A − BK lie
 // at −0.56 and below), so H2Norm, and with it H2Syn, may fail; H2Syn then
-// keeps ErrNoStabilizing alongside H2Norm's ErrUnstable. Where rounding
-// leaves that loop stable (amd64, gonum 30740af), H2Syn returns Accuracy 1.
+// returns a nil result with ErrNotConverged alongside H2Norm's ErrUnstable
+// (ZOJBZX Q6), never ErrNoStabilizing. Where rounding leaves that loop
+// stable (amd64, gonum 30740af), H2Syn returns the result with
+// ErrAccuracyUnverified.
 func TestRiccatiAccuracy_LqgH2Syn(t *testing.T) {
 	for _, name := range []string{"ch360", "weakBStall"} {
 		t.Run(name, func(t *testing.T) { lqgH2SynAccuracy(t, name) })
@@ -114,11 +116,8 @@ func lqgH2SynAccuracy(t *testing.T, name string) {
 		t.Fatal(err)
 	}
 	lqg, err := Lqg(sys, blkdiagTest(Q, R), eyeDense(2*n), nil)
-	if err != nil {
-		t.Fatalf("Lqg: %v", err)
-	}
-	if lqg.Accuracy != 1 {
-		t.Fatalf("Lqg: Accuracy %d, want 1", lqg.Accuracy)
+	if !errors.Is(err, ErrAccuracyUnverified) || lqg == nil || lqg.accuracy != 1 {
+		t.Fatalf("Lqg: result %v, err %v; want the uncertified result with ErrAccuracyUnverified", lqg != nil, err)
 	}
 	separated("Lqg", lqg.Controller, B, sys.C)
 
@@ -149,23 +148,23 @@ func lqgH2SynAccuracy(t *testing.T, name string) {
 	if err != nil {
 		t.Fatalf("h2Syn: %v", err)
 	}
-	if h2.Accuracy != 1 {
-		t.Fatalf("h2Syn: Accuracy %d, want 1", h2.Accuracy)
+	if h2.accuracy != 1 {
+		t.Fatalf("h2Syn: accuracy %d, want 1", h2.accuracy)
 	}
 	separated("h2Syn", h2.K, B, mat.DenseCopyOf(Cp.Slice(n+1, 2*n+1, 0, n)))
 	res, err := H2Syn(P, n, 1)
+	if msg := synthesisContractBreach(res != nil, accuracyOfH2Syn(res), err); msg != "" {
+		t.Fatalf("H2Syn: %s", msg)
+	}
 	switch {
-	case err == nil:
-		if res.Accuracy != 1 {
-			t.Fatalf("H2Syn: Accuracy %d, want 1", res.Accuracy)
-		}
+	case errors.Is(err, ErrAccuracyUnverified):
 		for _, p := range res.CLPoles {
 			if !(real(p) < 0) {
 				t.Fatalf("H2Syn: closed-loop pole %v", p)
 			}
 		}
-	case !errors.Is(err, ErrUnstable) || !errors.Is(err, ErrNoStabilizing):
-		t.Fatalf("H2Syn: err %v, want ErrUnstable and ErrNoStabilizing", err)
+	case !errors.Is(err, ErrUnstable) || !errors.Is(err, ErrNotConverged) || errors.Is(err, ErrNoStabilizing):
+		t.Fatalf("H2Syn: err %v, want ErrAccuracyUnverified, or ErrNotConverged with ErrUnstable", err)
 	}
 }
 

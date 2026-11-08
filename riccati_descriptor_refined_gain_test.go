@@ -155,7 +155,7 @@ func checkDescriptorRefinedDesigns(t *testing.T, dc descriptorRefinedCase) {
 			checkRefinedGain(t, label+" Kalman", kalmanDual(sys, sys.B, sys.D), res.accuracy, nil, mat.DenseCopyOf(res.K.T()))
 		}
 	}
-	if lq, err := Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil); err == nil {
-		checkRefinedGain(t, dc.name+" Lqg L", kalmanDual(sys, In, nil), lq.Accuracy, nil, mat.DenseCopyOf(lq.L.T()))
+	if lq, err := acceptUnverifiedLqg(Lqg(sys, eyeDense(n+m), eyeDense(n+p), nil)); err == nil {
+		checkRefinedGain(t, dc.name+" Lqg L", kalmanDual(sys, In, nil), lq.accuracy, nil, mat.DenseCopyOf(lq.L.T()))
 	}
 }
