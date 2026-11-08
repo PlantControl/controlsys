@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -22,16 +23,6 @@ type LeastSquaresFit struct {
 	RMSRelativeError float64
 	MaxRelativeError float64
 	Stable           bool
-	// Accuracy is 1 for the fit of a descriptor sampled through its pencil (see
-	// C2DFit): such a fit is not certified, since equal counts of poles not
-	// stable (IsStable) of the fit and of the slow part of its pencil split do
-	// not make them the same poles. As guidance: more poles not stable than
-	// the slow part means a redundant pole of an order above the minimal one
-	// landed on or beyond z = −1, and reducing FitOrder is the remedy; fewer
-	// means an order below the minimal one dropped an unstable slow pole, and
-	// raising FitOrder is the remedy unless that pole lies above Nyquist,
-	// where a smaller dt is. The value is returned as fitted. It is 0 otherwise.
-	Accuracy int
 }
 
 // C2DFit converts sys like C2D with opts.Method C2DMethodLeastSquares and
@@ -60,6 +51,18 @@ type LeastSquaresFit struct {
 // Integer external delays are preserved; fractional and internal delays and
 // improper descriptor models are rejected. A finite grid cannot certify intersample error
 // or capture arbitrarily narrow resonances. No exact inverse is promised.
+//
+// A fit of a descriptor sampled through its pencil is not certified: equal
+// counts of poles not stable (IsStable) of the fit and of the slow part of
+// its pencil split do not make them the same poles. C2DFit returns it, with
+// its quality, alongside an error wrapping ErrAccuracyUnverified, as C2D
+// does. As guidance: more poles not stable than the slow part means a
+// redundant pole of an order above the minimal one landed on or beyond
+// z = −1, and reducing FitOrder is the remedy; fewer means an order below
+// the minimal one dropped an unstable slow pole, and raising FitOrder is the
+// remedy unless that pole lies above Nyquist, where a smaller dt is. Any
+// other fit returns a nil error: its quality is that reported. Every other
+// error comes with a nil model.
 func (sys *System) C2DFit(dt float64, opts C2DOptions) (*System, LeastSquaresFit, error) {
 	if err := requireFiniteSystem("C2DFit", sys); err != nil {
 		return nil, LeastSquaresFit{}, err
@@ -72,14 +75,23 @@ func (sys *System) C2DFit(dt float64, opts C2DOptions) (*System, LeastSquaresFit
 		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: %w", err)
 	}
 	out, fit, err := sys.leastSquaresFit(dt, opts.FitOrder, leastSquaresPencilSlow(sys))
+	if errors.Is(err, errPencilFitUncertified) {
+		return out, fit, fmt.Errorf("C2DFit: %v: %w", err, ErrAccuracyUnverified)
+	}
 	if err != nil {
 		return nil, LeastSquaresFit{}, fmt.Errorf("C2DFit: %w", err)
 	}
 	return out, fit, nil
 }
 
+// errPencilFitUncertified is returned by leastSquaresFit, with the fit,
+// for a descriptor sampled through its pencil; C2DFit and C2D map it to
+// ErrAccuracyUnverified.
+var errPencilFitUncertified = errors.New("least-squares fit through the descriptor pencil not certified")
+
 // leastSquaresFit fits sys; slow is its leastSquaresPencilSlow, computed once
-// by the caller (newC2DPlan gates the descriptor reduction on it).
+// by the caller (newC2DPlan gates the descriptor reduction on it). With slow
+// non-nil a successful fit returns errPencilFitUncertified with the model.
 func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*System, LeastSquaresFit, error) {
 	var none LeastSquaresFit
 	if sys.IsDiscrete() {
@@ -183,7 +195,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 	}
 	fit := LeastSquaresFit{FitOrder: fitOrder, RMSRelativeError: rms, MaxRelativeError: worst, Stable: unstable == 0}
 	if slow != nil {
-		fit.Accuracy = 1
+		return out, fit, errPencilFitUncertified
 	}
 	return out, fit, nil
 }
@@ -243,7 +255,8 @@ func continuousNonStablePoleCount(sys *System, integrators int) (int, error) {
 // passes for one. Coupling within rounding of the slow poles leaves them
 // undetermined by the stored data: F=[-1,c,1;0,-2,1;0,0,-1], W(1,1,1e-13) at
 // c ≥ 3e8 has them unstable under ±1 ulp of the pencil, so the fit is not
-// right there on either split, at Accuracy 1 (the routed path).
+// right there on either split, and is returned with ErrAccuracyUnverified
+// (the routed path).
 func leastSquaresPencilSlow(sys *System) *System {
 	if !sys.IsDescriptor() || sys.HasInternalDelay() {
 		return nil

@@ -1,6 +1,8 @@
 package controlsys
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -8,6 +10,38 @@ import (
 
 	"plantcontrol.org/v1/gonum/mat"
 )
+
+// lsContractBreach reports a least-squares C2D or C2DFit return outside its
+// contract: a nil error with a model, ErrAccuracyUnverified with a model,
+// any other error with a nil model, and no unexported sentinel in the chain.
+func lsContractBreach(out *System, err error) string {
+	unverified := errors.Is(err, ErrAccuracyUnverified)
+	switch {
+	case errors.Is(err, errPencilFitUncertified):
+		return fmt.Sprintf("unexported sentinel escapes: %v", err)
+	case err == nil && out == nil:
+		return "nil model with nil error"
+	case unverified && out == nil:
+		return fmt.Sprintf("nil model with %v", err)
+	case err != nil && !unverified && out != nil:
+		return fmt.Sprintf("model with error %v", err)
+	}
+	return ""
+}
+
+// lsUnverified checks a least-squares C2D or C2DFit return against its
+// contract and reports whether it is ErrAccuracyUnverified; any other error
+// is fatal.
+func lsUnverified(t *testing.T, op string, out *System, err error) bool {
+	t.Helper()
+	if msg := lsContractBreach(out, err); msg != "" {
+		t.Fatalf("%s: %s", op, msg)
+	}
+	if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("%s: %v", op, err)
+	}
+	return err != nil
+}
 
 // lsStiffDraw is the nearSingularEDraw of PCG(seed, stream) with the draw
 // sequence of the reviewer census (6QU2G3): ns400 is stream 7704, ns1600
@@ -71,8 +105,9 @@ func discreteNonStable(t *testing.T, d *System) int {
 // C2DFit of a stable stiff descriptor at the auto order n, one above its
 // minimal order, keeps a redundant near-cancelling pole whose side of the
 // unit circle is set below float64 rounding of the target (6QU2G3); MATLAB
-// returns such a fit as is. C2DFit returns the same model as C2D and reports
-// it at Accuracy 1, as every fit through the pencil. Which rows have excess
+// returns such a fit as is. C2DFit returns the same model as C2D, both
+// with ErrAccuracyUnverified, as every fit through the pencil. Which rows
+// have excess
 // poles not stable depends on the platform rounding.
 func TestC2DFitLeastSquaresStiffDescriptorExcessUnstableAccuracy(t *testing.T) {
 	const dt = 0.1
@@ -93,12 +128,12 @@ func TestC2DFitLeastSquaresStiffDescriptorExcessUnstableAccuracy(t *testing.T) {
 			}
 			opts := C2DOptions{Method: C2DMethodLeastSquares}
 			d, err := sys.C2D(dt, opts)
-			if err != nil {
-				t.Fatal(err)
+			if !lsUnverified(t, "C2D", d, err) {
+				t.Error("C2D: fit through the pencil certified")
 			}
 			df, fit, err := sys.C2DFit(dt, opts)
-			if err != nil {
-				t.Fatal(err)
+			if !lsUnverified(t, "C2DFit", df, err) {
+				t.Errorf("C2DFit: fit through the pencil certified with %d poles not stable against a stable plant", discreteNonStable(t, df))
 			}
 			if !mat.Equal(d.A, df.A) || !mat.Equal(d.B, df.B) || !mat.Equal(d.C, df.C) || !mat.Equal(d.D, df.D) {
 				t.Fatal("C2DFit model differs from C2D")
@@ -107,16 +142,14 @@ func TestC2DFitLeastSquaresStiffDescriptorExcessUnstableAccuracy(t *testing.T) {
 			if fit.Stable != (ud == 0) {
 				t.Errorf("Stable %v with %d poles not stable", fit.Stable, ud)
 			}
-			if fit.Accuracy != 1 {
-				t.Errorf("Accuracy %d with %d poles not stable against a stable plant, want 1", fit.Accuracy, ud)
-			}
 		})
 	}
 }
 
 // FitOrder 1, the minimal order and the MATLAB remedy for unstable poles
 // and z = −1 cancellations, fits ns400 seed 54 and ns1600 seed 103 stable
-// at Accuracy 1 (not certified), about as well as the fit of the exact twin at that order
+// with ErrAccuracyUnverified (not certified), about as well as the fit of
+// the exact twin at that order
 // (an accurately folded descriptor with the same response).
 func TestC2DFitLeastSquaresStiffDescriptorReducedOrderStable(t *testing.T) {
 	const dt = 0.1
@@ -131,11 +164,8 @@ func TestC2DFitLeastSquaresStiffDescriptorReducedOrderStable(t *testing.T) {
 			sys, twin := lsStiffDraw(t, tc.seed, tc.stream, false)
 			opts := C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1}
 			df, fit, err := sys.C2DFit(dt, opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !fit.Stable || fit.Accuracy != 1 || fit.FitOrder != 1 {
-				t.Errorf("fit %+v, want stable order-1 fit at Accuracy 1", fit)
+			if !lsUnverified(t, "C2DFit", df, err) || !fit.Stable || fit.FitOrder != 1 {
+				t.Errorf("fit %+v, %v; want stable order-1 fit with ErrAccuracyUnverified", fit, err)
 			}
 			if stable, err := df.IsStable(); err != nil || !stable {
 				t.Errorf("IsStable %v, %v", stable, err)
@@ -155,8 +185,8 @@ func TestC2DFitLeastSquaresStiffDescriptorReducedOrderStable(t *testing.T) {
 
 // A FitOrder below the minimal one can drop a real unstable slow pole: the
 // order-1 fit keeps a stable slow pole of the plant and loses the unstable
-// one, against the slow poles F_ii/W_ii of the exact twin. C2DFit reports it
-// at Accuracy 1 though Stable is true (Ud < Uc, 6QU2G3).
+// one, against the slow poles F_ii/W_ii of the exact twin. C2DFit returns it
+// with ErrAccuracyUnverified though Stable is true (Ud < Uc, 6QU2G3).
 func TestC2DFitLeastSquaresStiffDescriptorDroppedUnstablePoleAccuracy(t *testing.T) {
 	const dt = 0.1
 	for _, tc := range []struct {
@@ -173,14 +203,12 @@ func TestC2DFitLeastSquaresStiffDescriptorDroppedUnstablePoleAccuracy(t *testing
 				t.Fatalf("plant has %d unstable slow poles, want 1", twinSlowNonStable(twin))
 			}
 			df, fit, err := sys.C2DFit(dt, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
-			if err != nil {
-				t.Fatal(err)
-			}
+			unverified := lsUnverified(t, "C2DFit", df, err)
 			if ud := discreteNonStable(t, df); ud != 0 {
 				t.Fatalf("order-1 fit has %d poles not stable, want 0", ud)
 			}
-			if !fit.Stable || fit.Accuracy != 1 {
-				t.Errorf("fit %+v, want stable at Accuracy 1", fit)
+			if !fit.Stable || !unverified {
+				t.Errorf("fit %+v, %v; want stable with ErrAccuracyUnverified", fit, err)
 			}
 		})
 	}
@@ -188,8 +216,8 @@ func TestC2DFitLeastSquaresStiffDescriptorDroppedUnstablePoleAccuracy(t *testing
 
 // The count is against the slow part only: a positive stiff pole (F_nn/W_nn
 // of the twin near 1e15) has no sampled image and base never represented it,
-// so a stable fit keeps stable slow poles, and at Accuracy 1 like every fit
-// through the pencil (decision LPEXWJ).
+// so a stable fit keeps stable slow poles, with ErrAccuracyUnverified like
+// every fit through the pencil (decision LPEXWJ).
 func TestC2DFitLeastSquaresStiffDescriptorPositiveStiffPoleNotCounted(t *testing.T) {
 	sys, twin := lsStiffDraw(t, 345, 7704, false)
 	n, _, _ := twin.Dims()
@@ -199,29 +227,23 @@ func TestC2DFitLeastSquaresStiffDescriptorPositiveStiffPoleNotCounted(t *testing
 	if twinSlowNonStable(twin) != 0 {
 		t.Fatal("plant slow part is not stable")
 	}
-	_, fit, err := sys.C2DFit(0.1, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !fit.Stable || fit.Accuracy != 1 {
-		t.Errorf("fit %+v, want stable at Accuracy 1", fit)
+	df, fit, err := sys.C2DFit(0.1, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 1})
+	if !lsUnverified(t, "C2DFit", df, err) || !fit.Stable {
+		t.Errorf("fit %+v, %v; want stable with ErrAccuracyUnverified", fit, err)
 	}
 }
 
-// C2DFit of an explicit model, not sampled through a pencil, reports
-// Accuracy 0 even for an unstable fit: the plant pole at s = 0.5 is kept.
+// C2DFit of an explicit model, not sampled through a pencil, returns a nil
+// error even for an unstable fit: the plant pole at s = 0.5 is kept.
 func TestC2DFitLeastSquaresExplicitUnstableAccuracy(t *testing.T) {
 	sys, err := New(mat.NewDense(2, 2, []float64{0.5, 1, 0, -2}), mat.NewDense(2, 1, []float64{0, 1}),
 		mat.NewDense(1, 2, []float64{1, 0.3}), mat.NewDense(1, 1, []float64{0}), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, fit, err := sys.C2DFit(0.1, C2DOptions{Method: C2DMethodLeastSquares})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fit.Stable || fit.Accuracy != 0 {
-		t.Errorf("fit %+v, want unstable at Accuracy 0", fit)
+	df, fit, err := sys.C2DFit(0.1, C2DOptions{Method: C2DMethodLeastSquares})
+	if lsUnverified(t, "C2DFit", df, err) || fit.Stable {
+		t.Errorf("fit %+v, %v; want unstable with a nil error", fit, err)
 	}
 }
 

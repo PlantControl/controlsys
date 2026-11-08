@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -27,28 +28,41 @@ import (
 // shape, such as those parts, exponentiate its modes of different scale
 // separately; with all modes stiff, any A takes Γ = A⁻¹(e^{A·dt} − I)·B. An already discrete model returns ErrWrongDomain;
 // invalid options return ErrInvalidConversionOptions; a result with an Inf or
-// NaN entry in any matrix returns ErrOverflow.
+// NaN entry in any matrix returns ErrOverflow. A least-squares fit of a
+// descriptor sampled through its pencil is not certified (see C2DFit) and is
+// returned with an error wrapping ErrAccuracyUnverified; every other error
+// comes with a nil model.
 func (sys *System) C2D(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {
 		return nil, err
 	}
-	out, err := sys.c2d(dt, opts)
+	return c2dExit(sys.c2d(dt, opts))
+}
+
+// c2dExit maps the result of c2d to that of C2D: errPencilFitUncertified,
+// which comes with the fit, becomes ErrAccuracyUnverified.
+func c2dExit(out *System, err error) (*System, error) {
+	if errors.Is(err, errPencilFitUncertified) {
+		return out, fmt.Errorf("C2D: %v: %w", err, ErrAccuracyUnverified)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("C2D: %w", err)
 	}
 	return out, nil
 }
 
-// c2d is the exit shared by C2D, C2DMap, D2D and MakeWeight.
+// c2d is the exit shared by C2D, C2DMap, D2D and MakeWeight. A least-squares
+// fit through a descriptor pencil returns errPencilFitUncertified with the
+// model; only C2D (least squares) reaches it.
 func (sys *System) c2d(dt float64, opts C2DOptions) (*System, error) {
 	out, err := sys.c2dUnchecked(dt, opts)
-	if err != nil {
+	if err != nil && !errors.Is(err, errPencilFitUncertified) {
 		return nil, err
 	}
 	if err := finiteSystemMatrices("result", out, ErrOverflow); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return out, err
 }
 
 // c2dUnguarded is C2D without the check of its result, for Step and Lsim: the
@@ -57,11 +71,7 @@ func (sys *System) c2dUnguarded(dt float64, opts C2DOptions) (*System, error) {
 	if err := requireFiniteSystem("C2D", sys); err != nil {
 		return nil, err
 	}
-	out, err := sys.c2dUnchecked(dt, opts)
-	if err != nil {
-		return nil, fmt.Errorf("C2D: %w", err)
-	}
-	return out, nil
+	return c2dExit(sys.c2dUnchecked(dt, opts))
 }
 
 func (sys *System) c2dUnchecked(dt float64, opts C2DOptions) (*System, error) {
@@ -297,7 +307,8 @@ const (
 	C2DMethodMatched C2DMethod = "matched"
 	// C2DMethodLeastSquares fits the frequency response up to Nyquist (c2d,
 	// SISO only). C2D returns the fit as MATLAB does; C2DFit also reports
-	// its quality and Accuracy.
+	// its quality. A fit through a descriptor pencil returns
+	// ErrAccuracyUnverified with the model from both.
 	C2DMethodLeastSquares C2DMethod = "least-squares"
 )
 

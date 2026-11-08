@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"fmt"
 	"math/cmplx"
 	"math/rand/v2"
 	"testing"
@@ -63,9 +64,9 @@ func TestC2DFitLeastSquaresRepeatedIntegratorPinnedNotCertified(t *testing.T) {
 				}
 				routed++
 				for _, dt := range []float64{0.01, 0.1, 1} {
-					d, fit, err := sys.C2DFit(dt, C2DOptions{Method: C2DMethodLeastSquares})
-					if err != nil {
-						t.Fatalf("seed %d dt %g: %v", seed, dt, err)
+					d, _, err := sys.C2DFit(dt, C2DOptions{Method: C2DMethodLeastSquares})
+					if !lsUnverified(t, fmt.Sprintf("seed %d dt %g", seed, dt), d, err) {
+						t.Errorf("seed %d dt %g: fit through the pencil certified", seed, dt)
 					}
 					poles, err := d.Poles()
 					if err != nil {
@@ -80,9 +81,6 @@ func TestC2DFitLeastSquaresRepeatedIntegratorPinnedNotCertified(t *testing.T) {
 					if pinned != 2 {
 						t.Errorf("seed %d dt %g: poles %v, %d at z = 1, want 2", seed, dt, poles, pinned)
 					}
-					if fit.Accuracy != 1 {
-						t.Errorf("seed %d dt %g: Accuracy %d, want 1", seed, dt, fit.Accuracy)
-					}
 				}
 			}
 			if routed == 0 {
@@ -93,7 +91,7 @@ func TestC2DFitLeastSquaresRepeatedIntegratorPinnedNotCertified(t *testing.T) {
 }
 
 // Below the plant's count the fit keeps the chain and drops the unstable slow
-// pole, so Accuracy stays 1 with the chain counted at its multiplicity: order 2
+// pole, so the fit stays ErrAccuracyUnverified with the chain counted at its multiplicity: order 2
 // holds only the two poles pinned at z = 1 against a plant count of 3.
 func TestC2DFitAccuracyRepeatedIntegratorDroppedSlowPole(t *testing.T) {
 	f := []float64{
@@ -110,12 +108,10 @@ func TestC2DFitAccuracyRepeatedIntegratorDroppedSlowPole(t *testing.T) {
 		if _, ok := foldInaccurateParts(sys); !ok {
 			t.Fatalf("seed %d: fold is accurate; draw no longer exercises the pencil route", seed)
 		}
-		d, fit, err := sys.C2DFit(0.1, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 2})
-		if err != nil {
-			t.Fatalf("seed %d: %v", seed, err)
-		}
-		if ud := discreteNonStable(t, d); ud != 2 || fit.Accuracy != 1 {
-			t.Errorf("seed %d: Ud %d, Accuracy %d, want 2 and 1", seed, ud, fit.Accuracy)
+		d, _, err := sys.C2DFit(0.1, C2DOptions{Method: C2DMethodLeastSquares, FitOrder: 2})
+		unverified := lsUnverified(t, fmt.Sprintf("seed %d", seed), d, err)
+		if ud := discreteNonStable(t, d); ud != 2 || !unverified {
+			t.Errorf("seed %d: Ud %d, unverified %v, want 2 and true", seed, ud, unverified)
 		}
 	}
 }

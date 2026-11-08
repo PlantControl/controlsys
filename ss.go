@@ -237,7 +237,8 @@ func nonEmptyDense(m *mat.Dense) *mat.Dense {
 // MATLAB rank every eigenvalue is a pole: a stiff one that QZ returns with
 // β = 0 is reported at its value in the explicit model of ToExplicit. See
 // https://www.mathworks.com/help/control/ref/dynamicsystem.pole.html.
-// See also PolesDetail, which flags whether the number of poles is certified.
+// See also PolesDetail, which returns ErrAccuracyUnverified when the number
+// of poles is not certified.
 func (sys *System) Poles() ([]complex128, error) {
 	n, _, _ := sys.Dims()
 	if n == 0 {

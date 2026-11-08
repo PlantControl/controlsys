@@ -3,6 +3,7 @@ package controlsys
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"math/cmplx"
@@ -118,10 +119,11 @@ func exactMATLABFullRank(t *testing.T, E *mat.Dense) bool {
 	}
 }
 
-// polesAccuracyOracle evaluates the Accuracy rule of PolesResult
-// independently of PolesDetail: 0 for E nil or exactly the identity, else 0
-// iff E has full MATLAB rank (exact arithmetic) and Poles returns n poles.
-func polesAccuracyOracle(t *testing.T, sys *System) int {
+// polesUncertifiedOracle evaluates the rule of PolesDetail independently
+// of it: certified (false) for E nil or exactly the identity, else
+// certified iff E has full MATLAB rank (exact arithmetic) and Poles returns
+// n poles.
+func polesUncertifiedOracle(t *testing.T, sys *System) bool {
 	t.Helper()
 	if sys.LFT != nil {
 		zd, err := sys.ZeroDelayApprox()
@@ -132,7 +134,7 @@ func polesAccuracyOracle(t *testing.T, sys *System) int {
 	}
 	n, _, _ := sys.Dims()
 	if n == 0 || sys.E == nil {
-		return 0
+		return false
 	}
 	identity := true
 	for i := range n {
@@ -143,16 +145,13 @@ func polesAccuracyOracle(t *testing.T, sys *System) int {
 		}
 	}
 	if identity {
-		return 0
+		return false
 	}
 	p, err := sys.Poles()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p) == n && exactMATLABFullRank(t, sys.E) {
-		return 0
-	}
-	return 1
+	return !(len(p) == n && exactMATLABFullRank(t, sys.E))
 }
 
 func boolToInt(b bool) int {
@@ -162,26 +161,46 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// checkPolesDetail returns PolesDetail of sys after checking that its Poles
-// are those of Poles bit for bit and that Accuracy is that of
-// polesAccuracyOracle.
-func checkPolesDetail(t *testing.T, name string, sys *System) *PolesResult {
-	t.Helper()
-	want, err := sys.Poles()
-	if err != nil {
-		t.Fatalf("%s: Poles: %v", name, err)
+// polesDetailContractBreach reports a PolesDetail return outside its
+// contract: nil error or ErrAccuracyUnverified with poles bit for bit those
+// of Poles (non-nil with the error), any other error with nil poles.
+func polesDetailContractBreach(sys *System, poles []complex128, err error) string {
+	unverified := errors.Is(err, ErrAccuracyUnverified)
+	switch {
+	case unverified && poles == nil:
+		return fmt.Sprintf("nil poles with %v", err)
+	case err != nil && !unverified && poles != nil:
+		return fmt.Sprintf("poles with error %v", err)
+	case err != nil && !unverified:
+		return ""
 	}
-	res, err := sys.PolesDetail()
-	if err != nil {
+	want, perr := sys.Poles()
+	if perr != nil {
+		return fmt.Sprintf("PolesDetail %v where Poles fails with %v", err, perr)
+	}
+	if !polesBitsEqual(poles, want) {
+		return fmt.Sprintf("poles %v, Poles %v", poles, want)
+	}
+	return ""
+}
+
+// checkPolesDetail returns PolesDetail of sys and whether it returned
+// ErrAccuracyUnverified, after checking its contract and that the
+// classification is that of polesUncertifiedOracle.
+func checkPolesDetail(t *testing.T, name string, sys *System) ([]complex128, bool) {
+	t.Helper()
+	poles, err := sys.PolesDetail()
+	if msg := polesDetailContractBreach(sys, poles, err); msg != "" {
+		t.Fatalf("%s: PolesDetail: %s", name, msg)
+	}
+	unverified := errors.Is(err, ErrAccuracyUnverified)
+	if err != nil && !unverified {
 		t.Fatalf("%s: PolesDetail: %v", name, err)
 	}
-	if !polesBitsEqual(res.Poles, want) {
-		t.Errorf("%s: PolesDetail poles %v, Poles %v", name, res.Poles, want)
+	if want := polesUncertifiedOracle(t, sys); unverified != want {
+		t.Errorf("%s: unverified %v with %d poles, exact rule gives %v", name, unverified, len(poles), want)
 	}
-	if acc := polesAccuracyOracle(t, sys); res.Accuracy != acc {
-		t.Errorf("%s: Accuracy %d with %d poles, exact rule gives %d", name, res.Accuracy, len(res.Poles), acc)
-	}
-	return res
+	return poles, unverified
 }
 
 func polesDetailRandDense(rng *rand.Rand, r, c int) *mat.Dense {
@@ -242,7 +261,7 @@ func TestExactMATLABFullRankMatchesDescriptorRank(t *testing.T) {
 
 // TestPolesDetailExplicitModelsCertified: with E nil or the identity,
 // continuous or discrete, with or without internal delays, every
-// eigenvalue of A is a pole and Accuracy is 0.
+// eigenvalue of A is a pole and the error is nil.
 func TestPolesDetailExplicitModelsCertified(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 56))
 	for run := range 6 {
@@ -262,29 +281,29 @@ func TestPolesDetailExplicitModelsCertified(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, s := range []*System{sys, withI} {
-				if res := checkPolesDetail(t, "explicit", s); len(res.Poles) != n || res.Accuracy != 0 {
-					t.Errorf("n=%d dt=%v identity E=%v: %d poles Accuracy %d, want %d and 0", n, dt, s.E != nil, len(res.Poles), res.Accuracy, n)
+				if poles, unverified := checkPolesDetail(t, "explicit", s); len(poles) != n || unverified {
+					t.Errorf("n=%d dt=%v identity E=%v: %d poles unverified %v, want %d and certified", n, dt, s.E != nil, len(poles), unverified, n)
 				}
 			}
 		}
 	}
 	for _, dt := range []float64{0, 0.1} {
 		sys, _ := internalDelayZerosFixture(t, dt, 2, mat.NewDense(1, 1, []float64{0.25}))
-		if res := checkPolesDetail(t, "internal delay", sys); res.Accuracy != 0 {
-			t.Errorf("internal delay dt=%v: Accuracy %d, want 0", dt, res.Accuracy)
+		if _, unverified := checkPolesDetail(t, "internal delay", sys); unverified {
+			t.Errorf("internal delay dt=%v: unverified, want certified", dt)
 		}
 	}
 	gain, err := NewGain(mat.NewDense(1, 1, []float64{2}), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res, err := gain.PolesDetail(); err != nil || res == nil || len(res.Poles) != 0 || res.Accuracy != 0 {
-		t.Errorf("static gain: %+v, %v; want empty result, Accuracy 0", res, err)
+	if poles, err := gain.PolesDetail(); err != nil || len(poles) != 0 {
+		t.Errorf("static gain: %v, %v; want no poles and a nil error", poles, err)
 	}
 }
 
 // TestPolesDetailNonsingularDescriptorCertified: a nonsymmetric E far from
-// singular gives Accuracy 0 and the n poles of E⁻¹A.
+// singular gives a nil error and the n poles of E⁻¹A.
 func TestPolesDetailNonsingularDescriptorCertified(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 56))
 	for run := range 6 {
@@ -298,9 +317,9 @@ func TestPolesDetailNonsingularDescriptorCertified(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		res := checkPolesDetail(t, "nonsingular E", sys)
-		if res.Accuracy != 0 || len(res.Poles) != n {
-			t.Errorf("n=%d: %d poles Accuracy %d, want %d and 0", n, len(res.Poles), res.Accuracy, n)
+		poles, unverified := checkPolesDetail(t, "nonsingular E", sys)
+		if unverified || len(poles) != n {
+			t.Errorf("n=%d: %d poles unverified %v, want %d and certified", n, len(poles), unverified, n)
 			continue
 		}
 		var fold mat.Dense
@@ -313,11 +332,11 @@ func TestPolesDetailNonsingularDescriptorCertified(t *testing.T) {
 		}
 		for _, w := range eig.Values(nil) {
 			best := math.Inf(1)
-			for _, p := range res.Poles {
+			for _, p := range poles {
 				best = min(best, cmplx.Abs(p-w))
 			}
 			if best > 1e-9*(1+cmplx.Abs(w)) {
-				t.Errorf("n=%d: pole %v of E⁻¹A missing from %v", n, w, res.Poles)
+				t.Errorf("n=%d: pole %v of E⁻¹A missing from %v", n, w, poles)
 			}
 		}
 	}
@@ -325,31 +344,32 @@ func TestPolesDetailNonsingularDescriptorCertified(t *testing.T) {
 
 // TestPolesDetailNearSingularEBoundary: E = [1 1; 1 1+δ] (exact in
 // float64) with σ_min ≈ δ/2.6 against MATLAB's rank tolerance
-// 2·eps(σ₁) ≈ 8.9e-16. δ = 2⁻⁴⁰ is robustly nonsingular, Accuracy 0 with
+// 2·eps(σ₁) ≈ 8.9e-16. δ = 2⁻⁴⁰ is robustly nonsingular, a nil error with
 // both poles (one stiff, ~1/δ); δ = 2⁻⁵² and δ = 0 are within the
-// tolerance of singular, Accuracy 1.
+// tolerance of singular, ErrAccuracyUnverified.
 func TestPolesDetailNearSingularEBoundary(t *testing.T) {
 	a := []float64{-1, 2, 0.5, -3}
 	for _, tc := range []struct {
 		delta float64
-		want  int
-	}{{math.Ldexp(1, -40), 0}, {math.Ldexp(1, -52), 1}, {0, 1}} {
+		want  bool
+	}{{math.Ldexp(1, -40), false}, {math.Ldexp(1, -52), true}, {0, true}} {
 		sys := polesDetailDescriptor(t, 2, a, []float64{1, 1, 1, 1 + tc.delta})
-		res := checkPolesDetail(t, "near-singular E", sys)
-		if res.Accuracy != tc.want {
-			t.Errorf("δ=%g: Accuracy %d with poles %v, want %d", tc.delta, res.Accuracy, res.Poles, tc.want)
+		poles, unverified := checkPolesDetail(t, "near-singular E", sys)
+		if unverified != tc.want {
+			t.Errorf("δ=%g: unverified %v with poles %v, want %v", tc.delta, unverified, poles, tc.want)
 		}
-		if tc.want == 0 && len(res.Poles) != 2 {
-			t.Errorf("δ=%g: poles %v, want 2", tc.delta, res.Poles)
+		if !tc.want && len(poles) != 2 {
+			t.Errorf("δ=%g: poles %v, want 2", tc.delta, poles)
 		}
 	}
 }
 
 // TestPolesDetailSingularDescriptorFlagged: integer pencils
 // M·(blkdiag(F, I), blkdiag(W, N))·P with unimodular M, P (exact in
-// float64) and N nilpotent of index 1, 2 or 3 have singular E, so Accuracy
-// is 1 even though Poles returns the nf poles of W⁻¹F: a pencil within
-// MATLAB's rank tolerance can have another finite count.
+// float64) and N nilpotent of index 1, 2 or 3 have singular E, so
+// PolesDetail returns ErrAccuracyUnverified even though Poles returns the nf
+// poles of W⁻¹F: a pencil within MATLAB's rank tolerance can have another
+// finite count.
 func TestPolesDetailSingularDescriptorFlagged(t *testing.T) {
 	rng := rand.New(rand.NewPCG(7, 57))
 	ints := func(lo, hi int) float64 { return float64(lo + rng.IntN(hi-lo+1)) }
@@ -399,9 +419,9 @@ func TestPolesDetailSingularDescriptorFlagged(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		res := checkPolesDetail(t, "integer chain pencil", sys)
-		if res.Accuracy != 1 || len(res.Poles) != nf {
-			t.Errorf("run %d nf=%d chain %d: %d poles Accuracy %d, want %d and 1", run, nf, k, len(res.Poles), res.Accuracy, nf)
+		poles, unverified := checkPolesDetail(t, "integer chain pencil", sys)
+		if !unverified || len(poles) != nf {
+			t.Errorf("run %d nf=%d chain %d: %d poles unverified %v, want %d and unverified", run, nf, k, len(poles), unverified, nf)
 			continue
 		}
 		var winv, wf mat.Dense
@@ -415,30 +435,31 @@ func TestPolesDetailSingularDescriptorFlagged(t *testing.T) {
 		}
 		for _, w := range eig.Values(nil) {
 			best := math.Inf(1)
-			for _, p := range res.Poles {
+			for _, p := range poles {
 				best = min(best, cmplx.Abs(p-w))
 			}
 			if best > 1e-8*(1+cmplx.Abs(w)) {
-				t.Errorf("run %d: pole %v of (F, W) missing from %v", run, w, res.Poles)
+				t.Errorf("run %d: pole %v of (F, W) missing from %v", run, w, poles)
 			}
 		}
 	}
 	sys, _ := internalDelayZerosFixture(t, 0, 2, mat.NewDense(1, 1, []float64{0.25}))
 	sys.E = mat.NewDense(3, 3, []float64{1, 2, 0, 0, 1, 1, 1, 3, 1})
-	if res := checkPolesDetail(t, "internal delay, singular E", sys); res.Accuracy != 1 {
-		t.Errorf("internal delay, singular E: Accuracy %d with %d poles, want 1", res.Accuracy, len(res.Poles))
+	if poles, unverified := checkPolesDetail(t, "internal delay, singular E", sys); !unverified {
+		t.Errorf("internal delay, singular E: certified with %d poles, want unverified", len(poles))
 	}
 }
 
 // TestPolesDetailStiffChainLiteralsFlagged: the in-repo stiff-chain
 // literals have E rank deficient by MATLAB's rank tolerance (their
-// structural zeros sit at the rounding of the data), so Accuracy is 1.
+// structural zeros sit at the rounding of the data), so PolesDetail
+// returns ErrAccuracyUnverified.
 func TestPolesDetailStiffChainLiteralsFlagged(t *testing.T) {
 	for _, set := range [][]stiffChainCase{stiffChainResplitCases, stiffChainClosedCases, largePoleAbsorbCases} {
 		for _, tc := range set {
-			res := checkPolesDetail(t, tc.name, polesDetailDescriptor(t, tc.n, tc.a, tc.e))
-			if res.Accuracy != 1 {
-				t.Errorf("%s: Accuracy %d with %d poles, want 1", tc.name, res.Accuracy, len(res.Poles))
+			poles, unverified := checkPolesDetail(t, tc.name, polesDetailDescriptor(t, tc.n, tc.a, tc.e))
+			if !unverified {
+				t.Errorf("%s: certified with %d poles, want unverified", tc.name, len(poles))
 			}
 		}
 	}
@@ -450,15 +471,16 @@ func TestPolesDetailStiffChainLiteralsFlagged(t *testing.T) {
 // whose E is rank deficient by MATLAB's rank tolerance. On arm64 Poles
 // returns oracle−1 poles with O(1)-wrong stiff values (two 50: {-5.81e8,
 // 0.862} against {1.173e9, -3.887e8, 0.862}); the count is not decided by
-// the data, so Accuracy must be 1 on every platform.
+// the data, so PolesDetail must return ErrAccuracyUnverified on every
+// platform.
 func TestPolesDetailMiscountedStiffPolesFlagged(t *testing.T) {
 	for _, l := range polesDetailMiscountedRows {
 		sys := polesDetailDescriptor(t, l.n, l.a, l.e)
 		if exactMATLABFullRank(t, sys.E) {
 			t.Errorf("%s: E has full MATLAB rank in exact arithmetic, want deficient", l.name)
 		}
-		if res := checkPolesDetail(t, l.name, sys); res.Accuracy != 1 {
-			t.Errorf("%s: Accuracy %d with %d poles (oracle %d), want 1", l.name, res.Accuracy, len(res.Poles), l.oracle)
+		if poles, unverified := checkPolesDetail(t, l.name, sys); !unverified {
+			t.Errorf("%s: certified with %d poles (oracle %d), want unverified", l.name, len(poles), l.oracle)
 		}
 	}
 }
@@ -467,19 +489,19 @@ func TestPolesDetailMiscountedStiffPolesFlagged(t *testing.T) {
 // (ELT76F/IP4PC3 task bodies, row-major, bit-exact) whose E is rank
 // deficient by MATLAB's rank tolerance, σ_min ≈ 0.02·n·eps(σ₁), yet
 // Poles keeps all n eigenvalues on arm64 and amd64: a full count does not
-// make Accuracy 0 without a robustly nonsingular E.
+// certify the count without a robustly nonsingular E.
 func TestPolesDetailRankDeficientEWithAllPolesFlagged(t *testing.T) {
 	for _, l := range polesDetailRankDeficientRows {
 		sys := polesDetailDescriptor(t, l.n, l.a, l.e)
 		if exactMATLABFullRank(t, sys.E) {
 			t.Errorf("%s: E has full MATLAB rank in exact arithmetic, want deficient", l.name)
 		}
-		res := checkPolesDetail(t, l.name, sys)
-		if res.Accuracy != 1 {
-			t.Errorf("%s: Accuracy %d with %d poles, want 1", l.name, res.Accuracy, len(res.Poles))
+		poles, unverified := checkPolesDetail(t, l.name, sys)
+		if !unverified {
+			t.Errorf("%s: certified with %d poles, want unverified", l.name, len(poles))
 		}
-		if len(res.Poles) != l.n {
-			t.Logf("%s: %d of %d poles (stored rows keep all n on arm64 and amd64)", l.name, len(res.Poles), l.n)
+		if len(poles) != l.n {
+			t.Logf("%s: %d of %d poles (stored rows keep all n on arm64 and amd64)", l.name, len(poles), l.n)
 		}
 	}
 }
@@ -498,9 +520,9 @@ func TestPolesDetailInvalidInputMatchesPoles(t *testing.T) {
 		want error
 	}{{"NaN A", nanA, ErrInvalidArgument}, {"Inf E", nanE, ErrInvalidArgument}, {"algebraic loop", loop, ErrAlgebraicLoop}} {
 		_, perr := tc.sys.Poles()
-		res, err := tc.sys.PolesDetail()
-		if !errors.Is(perr, tc.want) || !errors.Is(err, tc.want) || res != nil {
-			t.Errorf("%s: PolesDetail (%v, %v), Poles error %v; want nil and %v from both", tc.name, res, err, perr, tc.want)
+		poles, err := tc.sys.PolesDetail()
+		if !errors.Is(perr, tc.want) || !errors.Is(err, tc.want) || poles != nil {
+			t.Errorf("%s: PolesDetail (%v, %v), Poles error %v; want nil and %v from both", tc.name, poles, err, perr, tc.want)
 		}
 	}
 }
@@ -508,7 +530,7 @@ func TestPolesDetailInvalidInputMatchesPoles(t *testing.T) {
 func benchPolesDetail(b *testing.B, sys *System) {
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := sys.PolesDetail(); err != nil {
+		if _, err := sys.PolesDetail(); err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 			b.Fatal(err)
 		}
 	}

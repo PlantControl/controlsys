@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -90,10 +91,14 @@ func (p c2dPlan) run() (*System, error) {
 		return p.discretizeInternalDelay()
 	}
 	disc, err := p.discretizeMethod()
-	if err != nil {
+	if err != nil && !errors.Is(err, errPencilFitUncertified) {
 		return nil, err
 	}
-	return p.applyExternalDelays(disc)
+	out, derr := p.applyExternalDelays(disc)
+	if derr != nil {
+		return nil, derr
+	}
+	return out, err
 }
 
 func (p c2dPlan) discretizeInternalDelay() (*System, error) {
