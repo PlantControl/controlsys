@@ -38,6 +38,7 @@ This package is intended to be usable in production control and estimation code,
 `err == nil` means the result is certified to its documented accuracy. Every error wraps a sentinel from `errors.go`, so branch with `errors.Is`:
 
 - `ErrAccuracyUnverified`: the result was computed but its certificate failed. It is returned in full alongside the error, and a caller may keep it as a warning (MATLAB warns). This applies to `Care`, `Dare`, `Lqr`, `Dlqr`, `Lqi`, `Lqrd`, `Lqe`, `Kalman`, `Kalmd`, `Lqg`, `H2Syn`, `PolesDetail`, `C2DFit`, least-squares `C2D` on a descriptor fitted through its pencil, and `TunePID`/`TunePIDFRD` designs whose stability, margins or sensitivity peak are not certified (`Evidence` says why; MATLAB `pidtune` returns them silently).
+- `ErrHardGoalsNotMet`: `Systune` or `Looptune` found no grid candidate meeting every hard goal. The candidate with the smallest hard violation is returned in full alongside the error, which names the failing goals (MATLAB returns it with gHard > 1 and no error). A soft-goal shortfall alone keeps a nil error and shows in `Score`.
 - `ErrNotConverged`: the search or iteration accepted no candidate, so the result is nil. `ErrSchurFailed` is one.
 - `ErrNoStabilizing`: a proved boundary verdict. It also wraps `ErrNotStabilizable` (control side) or `ErrNotDetectable` (estimator side).
 - Every other error comes with a nil result.
@@ -159,7 +160,7 @@ func main() {
 | `NewLoopShapeGoal` / `NewLoopShapeGoalWc` / `NewMarginsGoal` | MATLAB `TuningGoal.LoopShape` and disk-based `TuningGoal.Margins` |
 | `NewPolesGoal` | MATLAB `TuningGoal.Poles` decay, damping and frequency region |
 | `GridTune` | Bounded Cartesian-grid tuning over free parameters and point-specific goals |
-| `Systune` / `Looptune` | MATLAB `systune`/`looptune` argument shapes, solved by the same bounded grid search |
+| `Systune` / `Looptune` | MATLAB `systune`/`looptune` argument shapes, solved by the same bounded grid search; `ErrHardGoalsNotMet` with the design when a hard goal is missed |
 
 ### Frequency Response & Plotting
 

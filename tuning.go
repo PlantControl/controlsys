@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 )
 
 // TuneMethod names the search a tuning result came from.
@@ -25,9 +26,13 @@ type SystuneOptions struct {
 }
 
 // SystuneResult is the best grid candidate of GridTune, Systune or Looptune.
+// Systune and Looptune return it with a nil error only when every hard goal
+// is met, and in full with an error wrapping ErrHardGoalsNotMet otherwise.
 type SystuneResult struct {
 	Method TuneMethod
-	// Pass reports whether every hard goal (for GridTune, every goal) is met.
+	// Pass reports whether every hard goal (for GridTune, every goal) is met;
+	// for Systune and Looptune it is false exactly when the error wraps
+	// ErrHardGoalsNotMet.
 	Pass bool
 	// Score is the summed normalized violation of the soft goals (for
 	// GridTune, of all goals), MATLAB systune's fSoft analogue.
@@ -57,7 +62,9 @@ type LooptuneOptions struct {
 // evaluation fails (for example an unstable closed loop under an overshoot
 // goal) or scores NaN/Inf is skipped as infeasible; when no candidate scores,
 // the first candidate error is returned, or ErrNoTuningCandidate. ctx is
-// checked before each evaluation.
+// checked before each evaluation. GridTune treats every goal as soft, so a
+// missed goal leaves Pass false with a nil error, never ErrHardGoalsNotMet;
+// use Systune with hard goals for that error.
 func GridTune(ctx context.Context, model *GeneralizedClosedLoop, goals []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
 	res, err := gridSearch(ctx, model, goals, nil, opts)
 	if err != nil {
@@ -70,15 +77,35 @@ func GridTune(ctx context.Context, model *GeneralizedClosedLoop, goals []TuningG
 // Systune tunes the controller of CL0 to minimize the soft goals subject to
 // the hard goals, as MATLAB systune(CL0, SoftReqs, HardReqs, opts), by
 // Cartesian grid search (see GridTune). Among candidates meeting every hard
-// goal the smallest soft score wins; when none does, the candidate with the
-// smallest hard violation is returned with Pass false, as MATLAB returns
-// gHard > 1. See https://www.mathworks.com/help/control/ref/inputoutputmodel.systune.html.
+// goal the smallest soft score wins, and the error is nil whatever its soft
+// Score. When no candidate meets every hard goal, the one with the smallest
+// hard violation is returned in full with an error wrapping
+// ErrHardGoalsNotMet that names the failing goals; MATLAB returns it with
+// gHard > 1 and no error. Every other error comes with a nil result. See
+// https://www.mathworks.com/help/control/ref/inputoutputmodel.systune.html.
 func Systune(ctx context.Context, CL0 *GeneralizedClosedLoop, soft, hard []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
 	res, err := gridSearch(ctx, CL0, soft, hard, opts)
+	return systuneVerdict("Systune", res, err, len(soft))
+}
+
+// systuneVerdict returns res with nil when every hard goal, those after the
+// first nsoft Goals, is met, and in full with an error wrapping
+// ErrHardGoalsNotMet naming the failing ones otherwise; every other err
+// comes with a nil result.
+func systuneVerdict(op string, res *SystuneResult, err error, nsoft int) (*SystuneResult, error) {
 	if err != nil {
-		return nil, fmt.Errorf("Systune: %w", err)
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	return res, nil
+	if res.Pass {
+		return res, nil
+	}
+	var failed []string
+	for _, g := range res.Goals[nsoft:] {
+		if !g.Pass {
+			failed = append(failed, fmt.Sprintf("%q", g.GoalName))
+		}
+	}
+	return res, fmt.Errorf("%s: hard goals %s not met (HardScore %g): %w", op, strings.Join(failed, ", "), res.HardScore, ErrHardGoalsNotMet)
 }
 
 // Looptune tunes C0 in the negative feedback loop with plant G0, as MATLAB
@@ -88,17 +115,24 @@ func Systune(ctx context.Context, CL0 *GeneralizedClosedLoop, soft, hard []Tunin
 // (opts margins, default 7.6 dB and 45°) to reqs and treats them all as hard
 // goals in Systune. The loop's analysis point is "looptune": its closed loop
 // has C0's InputName and G0's OutputName, so reqs can name those channels or
-// "looptune". See
-// https://www.mathworks.com/help/control/ref/dynamicsystem.looptune.html.
+// "looptune". As in Systune, a result missing any of these goals comes in
+// full with an error wrapping ErrHardGoalsNotMet, where MATLAB returns it
+// with gHard > 1 and no error; every other error comes with a nil result.
+// See https://www.mathworks.com/help/control/ref/dynamicsystem.looptune.html.
 func Looptune(ctx context.Context, G0 *System, C0 TunableBlock, wc []float64, reqs []TuningGoal, opts *LooptuneOptions) (*SystuneResult, error) {
+	res, err := looptuneGrid(ctx, G0, C0, wc, reqs, opts)
+	return systuneVerdict("Looptune", res, err, 0)
+}
+
+func looptuneGrid(ctx context.Context, G0 *System, C0 TunableBlock, wc []float64, reqs []TuningGoal, opts *LooptuneOptions) (*SystuneResult, error) {
 	if C0 == nil {
-		return nil, fmt.Errorf("Looptune: C0 is nil: %w", ErrInvalidArgument)
+		return nil, fmt.Errorf("C0 is nil: %w", ErrInvalidArgument)
 	}
 	gm, pm := 7.6, 45.0
 	var sopts *SystuneOptions
 	if opts != nil {
 		if opts.GainMarginDB < 0 || opts.PhaseMarginDeg < 0 {
-			return nil, fmt.Errorf("Looptune: negative margin: %w", ErrInvalidArgument)
+			return nil, fmt.Errorf("negative margin: %w", ErrInvalidArgument)
 		}
 		if opts.GainMarginDB > 0 {
 			gm = opts.GainMarginDB
@@ -110,22 +144,18 @@ func Looptune(ctx context.Context, G0 *System, C0 TunableBlock, wc []float64, re
 	}
 	crossover, err := NewLoopShapeGoalWc("looptune", wc)
 	if err != nil {
-		return nil, fmt.Errorf("Looptune: %w", err)
+		return nil, err
 	}
 	margins, err := NewMarginsGoal("looptune", gm, pm)
 	if err != nil {
-		return nil, fmt.Errorf("Looptune: %w", err)
+		return nil, err
 	}
 	loop, err := NewGeneralizedClosedLoop("looptune", G0, C0, "looptune")
 	if err != nil {
-		return nil, fmt.Errorf("Looptune: %w", err)
+		return nil, err
 	}
 	hard := append([]TuningGoal{crossover, margins}, reqs...)
-	res, err := gridSearch(ctx, loop, nil, hard, sopts)
-	if err != nil {
-		return nil, fmt.Errorf("Looptune: %w", err)
-	}
-	return res, nil
+	return gridSearch(ctx, loop, nil, hard, sopts)
 }
 
 type tuneCandidate struct {

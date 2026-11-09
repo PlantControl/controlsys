@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 
 	"plantcontrol.org/v1/gonum/mat"
 	"plantcontrol.org/v2/controlsys/v2"
@@ -87,4 +88,34 @@ func ExampleTunePID() {
 	// Output:
 	// certified: true
 	// stability: closed-loop-poles
+}
+
+// Systune returns a design missing a hard goal in full with
+// ErrHardGoalsNotMet; a soft-goal shortfall alone keeps a nil error and
+// shows in Score.
+func ExampleSystune() {
+	plant, _ := controlsys.NewFromSlices(1, 1, 1, []float64{-2}, []float64{1}, []float64{1}, []float64{0}, 0)
+	gain, _ := controlsys.NewTunableGain("C", 1, 1)
+	_ = gain.Gain[0][0].SetBounds(0, 5)
+	loop, _ := controlsys.NewGeneralizedClosedLoop("loop", plant, gain, "u")
+	decay := func(rate float64) controlsys.TuningGoal {
+		g, _ := controlsys.NewPolesGoal("", rate, 0, math.Inf(1))
+		return g.WithName(fmt.Sprintf("decay %g", rate))
+	}
+
+	res, err := controlsys.Systune(context.Background(), loop, []controlsys.TuningGoal{decay(100)}, []controlsys.TuningGoal{decay(3)}, nil)
+	if err != nil && !errors.Is(err, controlsys.ErrHardGoalsNotMet) {
+		log.Fatal(err)
+	}
+	fmt.Println("hard goals met:", err == nil, "soft shortfall:", res.Score > 0)
+
+	res, err = controlsys.Systune(context.Background(), loop, nil, []controlsys.TuningGoal{decay(100)}, nil)
+	if err != nil && !errors.Is(err, controlsys.ErrHardGoalsNotMet) {
+		log.Fatal(err)
+	}
+	fmt.Println("hard goals met:", err == nil, "best K:", res.Parameters["C.Gain(1,1)"])
+
+	// Output:
+	// hard goals met: true soft shortfall: true
+	// hard goals met: false best K: 5
 }
