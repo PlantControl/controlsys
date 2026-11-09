@@ -44,10 +44,12 @@ func hewerGainConverged(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedIn
 	return hewerGain(A, B, Q, R, opts, red, res, true, false)
 }
 
-// hewerSolution is hewerGainConverged taken one Hewer step past
-// convergence with X and EᵀXE (xe) replaced by that iterate's, rounded
-// once, rather than held to the X of res: res.X need not be within
-// newtonTol of the solution where newtonUnproven voids its certificate.
+// hewerSolution is hewerGainConverged run until Y converges with K and
+// then one Hewer step on, X and EᵀXE (xe) replaced by that iterate's,
+// rounded once, when res.X is beyond newtonTol of it, rather than
+// failing: res.X need not be within newtonTol of the solution where
+// newtonUnproven voids its certificate. Under cheap control K converged
+// within newtonTol while Y was still 2.8e-4 off.
 func hewerSolution(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
 	return hewerGain(A, B, Q, R, opts, red, res, true, true)
 }
@@ -88,6 +90,7 @@ func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res
 		if i == steps {
 			return nil, false
 		}
+		yPrev := y
 		if y, ok = sol.hewer(k); !ok {
 			return nil, false
 		}
@@ -102,7 +105,11 @@ func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res
 		}
 		move := xRel(k, prev)
 		if move <= newtonTol {
-			break
+			if !takeX || xRel(y, yPrev) <= newtonTol {
+				break
+			}
+			last = move
+			continue
 		}
 		if !converge || i >= 2 && !(move < last) {
 			return nil, false
@@ -131,7 +138,7 @@ func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res
 	if !ok {
 		return nil, false
 	}
-	if takeX {
+	if takeX && !(xRel(x, xFrom(res.X, prec)) <= newtonTol) {
 		c.X, c.step, c.x1 = x.dense(), 0, nil
 		if E != nil {
 			c.xe = y.dense()

@@ -82,12 +82,12 @@ func TestReducedGainNewtonUnproven(t *testing.T) {
 	X := mat.NewDense(2, 2, []float64{1.7724375917753828e+25, -1.488162703102e+25, -1.488162703102e+25, 1.2494816410915453e+25})
 	K := mat.NewDense(3, 2, []float64{4.124994857997649e+12, -2.621497149063337e+12, -3.371253942919774e+11, 2.1424833010385208e+11, -2.205907959707569e+10, 1.4018881541143198e+10})
 	const step = 3.5966770340945995e-12
-	if h, ok := newtonKantorovich(c.A, c.B, c.R, opts, X, K, step); !ok || h <= 0.5 {
-		t.Fatalf("h %.3g ok %v, want > 0.5", h, ok)
-	}
 	red, _ := reduceInputs(c.A, c.B, c.Q, c.R, opts)
 	if red == nil || red.rotated {
 		t.Fatalf("want reduced inputs, got %+v", red)
+	}
+	if h, ok := newtonKantorovich(c.A, c.B, opts, red, X, K, step); !ok || h <= 0.5 {
+		t.Fatalf("h %.3g ok %v, want > 0.5", h, ok)
 	}
 	res := &RiccatiResult{X: X, K: K, Eig: []complex128{0.3065736473417928, -2.32782766293698e-05}, step: step}
 	if r, _, ok := unprovenReduced(c.A, c.B, c.Q, c.R, opts, red, res, gainDist{}); ok {
@@ -107,13 +107,13 @@ func TestReducedGainNewtonProven(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if newtonUnproven(A, B, R, opts, res.X, res.K, res.step) {
-		h, _ := newtonKantorovich(A, B, R, opts, res.X, res.K, res.step)
-		t.Fatalf("h %.3g on a well-conditioned Dare", h)
-	}
 	red, _ := reduceInputs(A, B, Q, R, opts)
 	if red == nil {
 		t.Fatal("want reduced inputs")
+	}
+	if newtonUnproven(A, B, opts, red, res.X, res.K, res.step) {
+		h, _ := newtonKantorovich(A, B, opts, red, res.X, res.K, res.step)
+		t.Fatalf("h %.3g on a well-conditioned Dare", h)
 	}
 	if _, _, ok := unprovenReduced(A, B, Q, R, opts, red, res, gainDist{}); !ok {
 		t.Fatal("gate rejected a proven K")
@@ -123,9 +123,9 @@ func TestReducedGainNewtonProven(t *testing.T) {
 // TestDareUnprovenReducedTakesHewerSolution: zrw "reg" rows with
 // duplicated inputs, n 2, m 3, whose Newton certificate newtonUnproven
 // voids. On base 2d35ddd Dare and Dlqr returned them at Accuracy 0 with X
-// 2.3e-7 and 5.5e-8 off the 320-bit X (within their eps-sensitivity);
-// held to that X the Hewer gain would have demoted them. The converged
-// Hewer solution is the 320-bit one rounded.
+// 2.3e-7 and 5.5e-8 off the 320-bit X, within their eps-sensitivity; held
+// to newtonTol of the Hewer X (hewerGainConverged) they lost it. They
+// take the converged Hewer solution (hewerSolution) and stay honest.
 func TestDareUnprovenReducedTakesHewerSolution(t *testing.T) {
 	rows := []struct {
 		name          string
@@ -145,15 +145,8 @@ func TestDareUnprovenReducedTakesHewerSolution(t *testing.T) {
 				t.Errorf("%s %s: %v", c.name, api, err)
 				continue
 			}
-			Y, X, K, ok := nearSingularOracle(false, c.A, c.B, c.Q, c.R, nil, c.E, res.K)
-			want := X
-			if api == "Dlqr" {
-				want = Y
-			}
-			if !ok {
-				t.Fatalf("%s %s: oracle failed", c.name, api)
-			}
-			if ek, ex := relErr(res.K, K), relErr(res.X, want); ek > 1e-12 || ex > 1e-12 {
+			pr := nearSingularRiccati{A: c.A, B: c.B, Q: c.Q, R: c.R, E: c.E, generalized: api == "Dare"}
+			if ex, ek, ok := pr.honest(t, res.X, res.K); !ok {
 				t.Errorf("%s %s: K %.3g, X %.3g off the 320-bit solution", c.name, api, ek, ex)
 			}
 		}
