@@ -118,3 +118,49 @@ func TestDare_ReducedInputsHewerGainNotHeldToRoundedX(t *testing.T) {
 		}
 	}
 }
+
+// TestDare_ReducedInputsUnresolvedRefinedGainNotCertifiedWrong: reduced,
+// not rotated inputs (n 3, m 5, B's first row about 1e-4), cheap control
+// (R about 8e-6) and a weakly controllable unstable mode, E upper
+// triangular with last pivot 1.9e-3. On amd64 with NoScaling true the
+// refined K was 3.1e-7 from the gains of its X and of the next iterate,
+// which resolved the gain only to 1.22e-6, and Dare and Dlqr returned it at
+// Accuracy 0, 1.02e-5 off the 320-bit gain (band 3.47e-7) with X 1.5e-15
+// off (GORR3I, rw59Gen 79). acc0 are the platforms and NoScaling values on
+// which K is within its band at Accuracy 0; elsewhere a result need only not
+// be certified-wrong (amd64 NoScaling false stays Accuracy 1, K 0.012 off).
+func TestDare_ReducedInputsUnresolvedRefinedGainNotCertifiedWrong(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{1.464760643312109, 0.67962637938839132, 0.77673688421495202, 0, -0.43510512161580284, -0.56593237809637098, 0, -0.018272771808927217, -0.2293951183380008})
+	B := mat.NewDense(3, 5, []float64{5.6439882073793943e-05, 3.6304501615020114e-05, 0.000368012221726658, 0.00011139938400065276, -0.00011287976414758789, 0.3057185001479456, 0.62702728992182477, -0.25038282678605822, -0.125311358139923, -0.61143700029589121, 0.30858278828507268, 0.074707281490576261, 0.21444894227735123, 1.246861992667615, -0.61716557657014537})
+	Q := mat.NewDense(3, 3, []float64{1586.853849859931, 2746.3354119271598, 11842.662014831063, 2746.3354119271598, 4753.0263706836477, 20495.852258660136, 11842.662014831063, 20495.852258660136, 88381.575663002644})
+	R := mat.NewDense(5, 5, []float64{7.6573259012276877e-06, 8.8424267673011974e-08, -2.2090237037388394e-07, -3.6966994081144248e-08, -2.6540835467010758e-09, 8.8424267673011974e-08, 7.4153873984837409e-06, 2.7418544038273047e-08, 4.1393869731034063e-08, -3.9116926460097876e-08, -2.2090237037388394e-07, 2.7418544038273047e-08, 8.3448323821159233e-06, -2.0801300755197557e-08, -4.6435632059350757e-07, -3.6966994081144248e-08, 4.1393869731034063e-08, -2.0801300755197557e-08, 7.4394654635626775e-06, -1.9958114778829804e-08, -2.6540835467010758e-09, -3.9116926460097876e-08, -4.6435632059350757e-07, -1.9958114778829804e-08, 7.9602250679853636e-06})
+	E := mat.NewDense(3, 3, []float64{1.1930069339979439, -0.16559448109665867, -0.0850624003339399, 0, 1.0953066933662572, 0.38167816669975702, 0, 0, 0.0019318163300530678})
+	acc0 := map[string][]bool{"arm64": {false, true}, "amd64": {true}}
+	ref := riccatiExactReference(false, A, B, Q, R, nil, E, riccatiExactPrec)
+	sens, ok := riccatiExactSensitivity(false, A, B, Q, R, nil, E, ref, "ABQRSE")
+	if !ref.OK || !ok {
+		t.Fatal("reference not certified")
+	}
+	for _, ns := range []bool{false, true} {
+		for _, c := range []struct {
+			name  string
+			solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error)
+			x     *mat.Dense
+			xBand float64
+		}{{"Dare", Dare, ref.X, sens.X}, {"Dlqr", Dlqr, ref.Y, sens.Y}} {
+			res, err := acceptUnverified(c.solve(A, B, Q, R, &RiccatiOpts{E: E, NoScaling: ns}))
+			if err != nil {
+				t.Errorf("%s NoScaling %v: %v", c.name, ns, err)
+				continue
+			}
+			eX, eK := relErr(res.X, c.x), relErr(res.K, ref.K)
+			t.Logf("%s NoScaling %v: Accuracy %d, X err %.3g (band %.3g), K err %.3g (band %.3g)", c.name, ns, res.accuracy, eX, c.xBand, eK, sens.KBand())
+			if riccatiCertifiedWrong(res.accuracy, eX, c.xBand, eK, sens.KBand(), gainFloor) {
+				t.Errorf("%s NoScaling %v: certified-wrong: X err %g, K err %g", c.name, ns, eX, eK)
+			}
+			if !raceEnabled && slices.Contains(acc0[runtime.GOARCH], ns) && (res.accuracy != 0 || eK > sens.KBand()) {
+				t.Errorf("%s NoScaling %v: Accuracy %d, K err %g; want Accuracy 0, K within band %g", c.name, ns, res.accuracy, eK, sens.KBand())
+			}
+		}
+	}
+}
