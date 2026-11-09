@@ -121,12 +121,23 @@ var (
 		rho: 9.801674418925994e-07, sig: 7.495075384191857e-08,
 	}
 	// synthesisControlNotConverged: no state-feedback X passes
-	// verification; HinfSyn finds no γ below its give-up bound.
+	// verification. HinfSyn, which found no γ below its give-up bound by
+	// the Hamiltonian alone, is certified by the extended pencil (BMNGOS).
 	synthesisControlNotConverged = synthesisFixture{
 		a:   []float64{0.6387616393876916, 0.4587988411199844, 0.528907006112241, 0.12157279348037137, 0.4342701769944363, 1.5828768967155433, -0.014001459255651827, -0.2030728131081514, 0.31309763284412817, -0.25266771115404013, -1.9007061455699903, -1.2059618903768583, -0.30241700661402304, -0.5891295338839894, 1.4718530704475516, 0.6057568301514619},
 		b:   []float64{-0.45122737797268053, 0.5921509980895266, -0.44063398438152035, 0.5301782392019727},
 		c:   []float64{-0.7041421969970909, 0.6282796401468824, -0.2875344743526116, -2.090565833890424},
 		rho: 1.1859994693143048e-08, sig: 0.003916790560348642,
+	}
+	// synthesisBoundaryInfeasible (census row bnd 674, BMNGOS): a weakly
+	// controllable mode 3.5e-15 off the imaginary axis puts an X-Hamiltonian
+	// pair within rounding of the axis at every γ, for the pencil too, so
+	// HinfSyn finds no γ below its give-up bound.
+	synthesisBoundaryInfeasible = synthesisFixture{
+		a:   []float64{-0.7237063632621797, 4.985017928162791, -3.3857174500105076, -6.7705326494338856, -6.572878620402842, -0.7119680305799931, -2.8597634157896747, 2.278636715820158, 3.1566246028357945, 3.3730235162541815, -0.3614962805114312, 3.0842547727398455, -2.2679969795214827, -3.591309605365047, -3.4151533180466713, 0.12162630019987758, -2.1428046687485893, 0.6170010327290477, 1.1736835087018616, 2.194532441673459, -0.4736889559752902, -0.9227047654508497, 1.7056898513788366, 2.0854524879187126, 1.0955068971788282},
+		b:   []float64{-3.122549315482755, 0.3567123996251636, -3.143046326280349, -0.9044921028519853, 2.543648011802267},
+		c:   []float64{-0.07585885440170685, 3.5602123269066883, -3.0339938598453187, -5.943132558771198, -5.703127607118304},
+		rho: 1, sig: 1,
 	}
 	// synthesisFilterNotConverged: no filter Y passes verification.
 	synthesisFilterNotConverged = synthesisFixture{
@@ -333,7 +344,8 @@ func TestSynthesisContractByOperation(t *testing.T) {
 		{"HinfSyn unstable loop", synthesisNotConverged, hinf(regP(uA, weakB, mat.NewDense(1, 2, []float64{1, 1}), 0), 1, 1), ErrGammaNotAchievable},
 		{"HinfSyn control", synthesisStructural, hinf(regP(uA, uB, mat.NewDense(1, 2, []float64{1, 1}), 0), 1, 1), ErrNotStabilizable},
 		{"HinfSyn filter", synthesisStructural, hinf(regP(uA, eyeDense(2), uC, 0), 1, 2), ErrNotDetectable},
-		{"HinfSyn", synthesisInfeasible, hinf(synthesisControlNotConverged.plant(t), 1, 1), nil},
+		{"HinfSyn cheap control", synthesisCertified, hinf(synthesisControlNotConverged.plant(t), 1, 1), nil},
+		{"HinfSyn", synthesisInfeasible, hinf(synthesisBoundaryInfeasible.plant(t), 1, 1), nil},
 	}
 	for _, c := range cases {
 		o := c.run()
