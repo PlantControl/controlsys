@@ -160,3 +160,4 @@
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"L4BCTU"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-09T13:35:42.800988Z","data":{"id":"TB2UYS","agent_id":"coordinator@tb2uys","ts":"2026-11-09T13:35:42.800988Z"}},{"type":"state","ts":"2026-11-09T13:35:42.800988Z","data":{"id":"TB2UYS","state":"doing","ts":"2026-11-09T13:35:42.800988Z"}}]}
