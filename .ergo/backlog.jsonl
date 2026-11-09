@@ -157,3 +157,4 @@
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"L4BCTU"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-09T03:07:54.987606Z","data":{"id":"TAO5TM","agent_id":"coordinator@tao5tm","ts":"2026-11-09T03:07:54.987606Z"}},{"type":"state","ts":"2026-11-09T03:07:54.987606Z","data":{"id":"TAO5TM","state":"doing","ts":"2026-11-09T03:07:54.987606Z"}}]}
