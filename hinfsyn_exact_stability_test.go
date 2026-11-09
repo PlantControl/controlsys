@@ -3,6 +3,8 @@ package controlsys
 import (
 	"cmp"
 	"errors"
+	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"testing"
@@ -65,21 +67,20 @@ func hinfSortedPoles(p []complex128) []complex128 {
 	return p
 }
 
-// A nil error must come with a K whose exact loop with the float64 G is
-// stable, and CLPoles must be the poles of the returned CL.
+// The strictly proper Youla member is certified here, so Mixsyn must return
+// it with a nil error and a K whose exact loop with the float64 G is
+// stable; CLPoles must be the poles of the returned CL.
 func TestMixsyn_NearlyImproperCentralControllerExactLoop(t *testing.T) {
 	s, G, W1, W2 := hinfNearlyImproperCase(t)
 	res, err := Mixsyn(G, W1, W2, nil)
 	if res == nil {
 		t.Fatalf("Mixsyn: %v", err)
 	}
-	if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
-		t.Fatalf("Mixsyn: result with error %v", err)
+	if err != nil {
+		t.Fatalf("Mixsyn: %v; want the certified strictly proper controller with a nil error", err)
 	}
-	if err == nil {
-		if k := hinfExactGKUnstable(t, s, res.K); k != 0 {
-			t.Errorf("nil error but the exact loop of G and K has %d unstable roots", k)
-		}
+	if k := hinfExactGKUnstable(t, s, res.K); k != 0 {
+		t.Errorf("nil error but the exact loop of G and K has %d unstable roots", k)
 	}
 	poles, perr := res.CL.Poles()
 	if perr != nil {
@@ -191,4 +192,52 @@ func TestExactStableSizeGateFailsClosed(t *testing.T) {
 	if !exactStable(ratMat(C), false) {
 		t.Error("within budget: exactStable false on a Hurwitz triangular matrix")
 	}
+}
+
+// A diagonal similarity T = diag(2^−k, 1, 2^k) of a well-posed plant drives
+// Dgebal's scales of the closed loop toward 2^±969; their float64 ratio
+// overflowed and balancedRat panicked (k = 515, 530). HinfSyn must return
+// a certified result or an ErrAccuracyUnverified one in full.
+func TestHinfSyn_GradedSimilarityBalancingRatio(t *testing.T) {
+	A0 := mat.NewDense(3, 3, []float64{-1, .5, .25, .3, -2, .7, 0x1p-40, .2, -3})
+	B0 := mat.NewDense(3, 3, []float64{1, 0, 1, 0, 1, 0, 1, 0, 1})
+	C0 := mat.NewDense(3, 3, []float64{1, 1, 1, 0, 1, 0, 1, 0, 1})
+	D := mat.NewDense(3, 3, []float64{0, 0, 0, 0, 0, 1, 0, 1, 0})
+	for _, k := range []int{200, 515, 530} {
+		t.Run(fmt.Sprint(k), func(t *testing.T) {
+			s := []float64{math.Ldexp(1, -k), 1, math.Ldexp(1, k)}
+			A, B, C := mat.NewDense(3, 3, nil), mat.NewDense(3, 3, nil), mat.NewDense(3, 3, nil)
+			for i := range 3 {
+				for j := range 3 {
+					A.Set(i, j, s[i]*A0.At(i, j)/s[j])
+					B.Set(i, j, s[i]*B0.At(i, j))
+					C.Set(i, j, C0.At(i, j)/s[j])
+				}
+			}
+			P, err := New(A, B, C, D, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := HinfSyn(P, 1, 1)
+			t.Logf("k = %d: err %v", k, err)
+			if msg := synthesisContractBreach(res != nil, accuracyOfHinfSyn(res), err); msg != "" {
+				t.Fatal(msg)
+			}
+			if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
+				t.Fatalf("HinfSyn: %v", err)
+			}
+			if err == nil && !stabilityCertified(mustPartition(t, P), res.K) {
+				t.Error("nil error with an uncertified controller")
+			}
+		})
+	}
+}
+
+func mustPartition(t *testing.T, P *System) *generalizedPlantPartition {
+	t.Helper()
+	gp, err := partitionGeneralizedPlant("HinfSyn", P, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gp
 }

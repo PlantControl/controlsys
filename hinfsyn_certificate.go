@@ -77,7 +77,8 @@ func closedLoopStateMatrix(gp *generalizedPlantPartition, K *System) ([][]*big.R
 
 // balancedRat returns D⁻¹·M·D for the power-of-two diagonal D that LAPACK
 // Dgebal (scaling only) picks for M rounded to float64; exact, being a
-// rescaling by powers of two. It leaves the eigenvalues unchanged and
+// rescaling by powers of two. The ratios d_j/d_i are formed in rationals:
+// in float64 they overflow for scales near 2^±969. It leaves the eigenvalues unchanged and
 // shrinks the non-normality that a graded closed loop (huge controller
 // gains next to slow plant modes) gives the Lyapunov solution.
 func balancedRat(M [][]*big.Rat) [][]*big.Rat {
@@ -85,12 +86,16 @@ func balancedRat(M [][]*big.Rat) [][]*big.Rat {
 	A := roundRat(M)
 	sc := make([]float64, n)
 	gonum.Implementation{}.Dgebal(lapack.Scale, n, A.RawMatrix().Data, n, sc)
+	d := make([]*big.Rat, n)
+	for i, x := range sc {
+		d[i] = new(big.Rat).SetFloat64(x)
+	}
 	out := make([][]*big.Rat, n)
 	var f big.Rat
 	for i, row := range M {
 		out[i] = make([]*big.Rat, n)
 		for j, v := range row {
-			out[i][j] = new(big.Rat).Mul(v, f.SetFloat64(sc[j]/sc[i]))
+			out[i][j] = new(big.Rat).Mul(v, f.Quo(d[j], d[i]))
 		}
 	}
 	return out
