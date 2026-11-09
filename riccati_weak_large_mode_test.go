@@ -36,8 +36,8 @@ var weakLargeModeRows = []struct {
 
 // TestDareWeakLargeModeHonest holds Dare and Dlqr to their error contract
 // on weakly controllable large modes: a nil error only with X and K
-// within newtonTol and gainFloor of the 320-bit Hewer solution from the
-// returned K, ErrAccuracyUnverified with the result in full.
+// honest (within max(1e-7, 100·spread) of the 320-bit Hewer solution from
+// the returned K), ErrAccuracyUnverified with the result in full.
 func TestDareWeakLargeModeHonest(t *testing.T) {
 	for _, c := range weakLargeModeRows {
 		for _, api := range []string{"Dare", "Dlqr"} {
@@ -57,16 +57,8 @@ func TestDareWeakLargeModeHonest(t *testing.T) {
 				case err != nil:
 					continue
 				}
-				Y, X, K, ok := nearSingularOracle(false, c.A, c.B, c.Q, c.R, nil, c.E, res.K)
-				want := X
-				if api == "Dlqr" {
-					want = Y
-				}
-				if !ok {
-					t.Errorf("%s %s ns=%v: certified, oracle failed", c.name, api, ns)
-					continue
-				}
-				if ek, ex := relErr(res.K, K), relErr(res.X, want); ek > gainFloor || ex > newtonTol {
+				pr := nearSingularRiccati{A: c.A, B: c.B, Q: c.Q, R: c.R, E: c.E, generalized: api == "Dare"}
+				if ex, ek, ok := pr.honest(t, res.X, res.K); !ok {
 					t.Errorf("%s %s ns=%v: certified with K %.3g, X %.3g off the 320-bit solution", c.name, api, ns, ek, ex)
 				}
 			}
