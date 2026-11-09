@@ -44,6 +44,8 @@ type HinfSynResult struct {
 	X        *mat.Dense
 	Y        *mat.Dense
 	CLPoles  []complex128
+
+	accuracy int
 }
 
 // HinfSyn computes a suboptimal H-infinity output-feedback controller for the
@@ -88,21 +90,25 @@ type HinfSynResult struct {
 // no backed-off controller gives a stable closed loop, HinfSyn returns
 // ErrNotConverged together with the error of the last try; a plant with no
 // γ passing the Riccati test below the give-up bound is
-// ErrGammaNotAchievable. Every error comes with a nil result.
+// ErrGammaNotAchievable. Every error but ErrAccuracyUnverified comes with
+// a nil result.
 //
-// Either error first makes HinfSyn repeat the design, when D12 or D21 is
-// small against the plant (feedthroughRatio below 1e-2), with each Riccati
-// equation whose Hamiltonian solve fails solved again from the extended
-// pencil [A 0 B; −Q −Aᵀ −S; Sᵀ Bᵀ R] − λ·diag(I, I, 0) of MATLAB icare,
-// which never inverts R = diag(−γ²I, D12ᵀD12) (dually D21D21ᵀ): under cheap
-// control or a nearly noise-free measurement R⁻¹ is ≈ 1e16 in a few
-// directions only, no symplectic scaling balances the Hamiltonian, and its
-// stable subspace loses every digit at every γ. The repeat's controller is
-// verified as above and kept only with a stable closed loop and Gamma ≤
-// GammaOpt; otherwise HinfSyn returns the first error, with
-// ErrNotConverged added to an ErrGammaNotAchievable when the H2 Riccati
-// solutions are certified, since their controller proves γ finite.
-// Plants that the Hamiltonian solves handle are designed by them alone.
+// Either error makes HinfSyn repeat the design, when one of the first
+// pass's Hamiltonian solves failed numerically where the design needed it
+// (see hinfRiccatiMode), with each failed Hamiltonian solve retried from
+// the extended pencil [A 0 B; −Q −Aᵀ −S; Sᵀ Bᵀ R] − λ·diag(I, I, 0) of
+// MATLAB icare, which never inverts R = diag(−γ²I, D12ᵀD12) (dually
+// D21D21ᵀ): under cheap control or a nearly noise-free measurement R⁻¹ is
+// ≈ 1e16 in a few directions only, no symplectic scaling balances the
+// Hamiltonian, and its stable subspace loses every digit at every γ. The
+// repeat's controller is verified as above, kept only with a stable closed
+// loop and Gamma ≤ GammaOpt, and returned in full with
+// ErrAccuracyUnverified: its loop is stiff, and the float64 closed loop
+// whose norm certifies it can differ from the exact LFT of P and K.
+// Otherwise HinfSyn returns the first error, with ErrNotConverged added to
+// an ErrGammaNotAchievable when the H2 Riccati solutions are certified,
+// since their controller proves γ finite. Plants that the Hamiltonian
+// solves handle are designed by them alone, with a nil error.
 //
 // The Hamiltonian Riccati tests are invariant under scaling z or w (the
 // pencil repeat only approximately so): each Hamiltonian is
@@ -114,14 +120,16 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := hinfSyn(gp, P, nmeas, ncont, false)
+	first := &hinfRiccatiMode{}
+	res, err := hinfSyn(gp, P, nmeas, ncont, first)
 	if !errors.Is(err, ErrGammaNotAchievable) && !errors.Is(err, ErrNotConverged) {
 		return res, err
 	}
-	if gp.feedthroughRatio() < hinfPencilFeedthroughRatio {
-		if res, perr := hinfSyn(gp, P, nmeas, ncont, true); perr == nil {
+	if first.numericalFailure() {
+		if res, perr := hinfSyn(gp, P, nmeas, ncont, &hinfRiccatiMode{pencil: true}); perr == nil {
 			if ok, serr := res.CL.IsStable(); serr == nil && ok && res.Gamma <= res.GammaOpt {
-				return res, nil
+				res.accuracy = 1
+				return res, fmt.Errorf("%s: controller from the extended-pencil Riccati repeat, its certificate the float64 closed loop: %w", gp.op, ErrAccuracyUnverified)
 			}
 		}
 	}
@@ -129,37 +137,6 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 		return nil, fmt.Errorf("%w: the H2 controller is certified, so γ is finite: %w", err, ErrNotConverged)
 	}
 	return nil, err
-}
-
-// hinfPencilFeedthroughRatio is the feedthroughRatio below which HinfSyn
-// repeats a failed design with the extended pencil. Above it R is well
-// conditioned against the plant and the pencil seldom rescues a design
-// (7 of 360 census promotions) while a failing repeat doubles the cost of
-// the error.
-const hinfPencilFeedthroughRatio = 1e-2
-
-// feedthroughRatio is min(σmin(D12)/‖[C1 D12]‖, σmin(D21)/‖[B1; D21]‖),
-// small under cheap control or a nearly noise-free measurement, where R⁻¹
-// in the Hamiltonian is large against the plant; it does not change when z
-// or w is scaled.
-func (gp *generalizedPlantPartition) feedthroughRatio() float64 {
-	ratio := func(D, M *mat.Dense) float64 {
-		var sd, sm mat.SVD
-		if !sd.Factorize(D, mat.SVDNone) || !sm.Factorize(M, mat.SVDNone) {
-			return 0
-		}
-		v, w := sd.Values(nil), sm.Values(nil)
-		return v[len(v)-1] / w[0]
-	}
-	C1D12 := mat.NewDense(gp.p1, gp.n+gp.m2, nil)
-	setBlock(C1D12, 0, gp.n, gp.D12)
-	B1D21 := mat.NewDense(gp.n+gp.p2, gp.m1, nil)
-	setBlock(B1D21, gp.n, 0, gp.D21)
-	if gp.n > 0 {
-		setBlock(C1D12, 0, 0, gp.C1)
-		setBlock(B1D21, 0, 0, gp.B1)
-	}
-	return math.Min(ratio(gp.D12, C1D12), ratio(gp.D21, B1D21))
 }
 
 // h2Certified reports whether both H2 Riccati solutions of P are
@@ -173,13 +150,13 @@ func h2Certified(P *System, nmeas, ncont int) bool {
 // hinfSyn is HinfSyn by the Hamiltonian Riccati solves alone, or, with
 // pencil, also by the extended pencil wherever a Hamiltonian solve fails
 // (hamiltonianRiccatiWork.solveWith).
-func hinfSyn(gp *generalizedPlantPartition, P *System, nmeas, ncont int, pencil bool) (*HinfSynResult, error) {
+func hinfSyn(gp *generalizedPlantPartition, P *System, nmeas, ncont int, mode *hinfRiccatiMode) (*HinfSynResult, error) {
 	var d hinfDesign
 	var err error
 	if P.IsDiscrete() {
-		d, err = hinfSynDiscrete(gp, P, nmeas, ncont, pencil)
+		d, err = hinfSynDiscrete(gp, P, nmeas, ncont, mode)
 	} else {
-		d, err = hinfSynScaled(gp.op, P, nmeas, ncont, "D12", "D21", pencil)
+		d, err = hinfSynScaled(gp.op, P, nmeas, ncont, "D12", "D21", mode)
 	}
 	if err != nil {
 		return nil, err
@@ -292,7 +269,7 @@ func (res *HinfSynResult) measure(op string, P *System, nmeas, ncont int) error 
 	return nil
 }
 
-func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string, pencil bool) (hinfDesign, error) {
+func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string, mode *hinfRiccatiMode) (hinfDesign, error) {
 	if err := gp.requireRegularFeedthrough(d12, d21); err != nil {
 		return hinfDesign{}, err
 	}
@@ -300,14 +277,15 @@ func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string, pencil boo
 		return hinfDesign{}, err
 	}
 	if !allZeroDense(gp.D11) {
-		return hinfSynGeneral(gp, pencil)
+		return hinfSynGeneral(gp, mode)
 	}
 	ric := newHinfD11ZeroRiccatis(gp)
-	ric.pencil = pencil
+	ric.mode = mode
 	gamma, err := hinfBisect(0, gp.hinfGammaScale(), ric.feasible)
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
+	mode.edge = gamma
 	return hinfDesign{gammaEdge: gamma, build: func(g float64) (*HinfSynResult, error) { return hinfSynD11Zero(gp, ric, g) }}, nil
 }
 
@@ -317,7 +295,7 @@ func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string, pencil boo
 // discrete pole at fast sampling) lose all accuracy. K's transfer function
 // does not depend on the plant's state coordinates; X and Y are mapped back
 // to those of P.
-func hinfSynScaled(op string, P *System, nmeas, ncont int, d12, d21 string, pencil bool) (hinfDesign, error) {
+func hinfSynScaled(op string, P *System, nmeas, ncont int, d12, d21 string, mode *hinfRiccatiMode) (hinfDesign, error) {
 	bal, err := Ssbal(P)
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", op, err)
@@ -326,7 +304,7 @@ func hinfSynScaled(op string, P *System, nmeas, ncont int, d12, d21 string, penc
 	if err != nil {
 		return hinfDesign{}, err
 	}
-	d, err := hinfSynPartition(gp, d12, d21, pencil)
+	d, err := hinfSynPartition(gp, d12, d21, mode)
 	if err != nil {
 		return hinfDesign{}, err
 	}
@@ -376,11 +354,11 @@ func unscaleGram(M *mat.Dense, t []float64, inverse bool) {
 // z = 1 and z = −1, or a strongly non-normal A) it first closes a static output feedback u = D0·y + v,
 // which moves those modes, designs K' from y to v, and returns K = K' + D0:
 // the closed loops, and so the achievable γ, are identical.
-func hinfSynDiscrete(gp *generalizedPlantPartition, P *System, nmeas, ncont int, pencil bool) (hinfDesign, error) {
+func hinfSynDiscrete(gp *generalizedPlantPartition, P *System, nmeas, ncont int, mode *hinfRiccatiMode) (hinfDesign, error) {
 	op := gp.op
 	if cond := tustinCond(P.A); cond > hinfTustinCond {
 		if D0, Ps, ok := gp.unitCircleModeShift(P, cond); ok {
-			d, err := hinfSynTustin(op, Ps, nmeas, ncont, pencil)
+			d, err := hinfSynTustin(op, Ps, nmeas, ncont, mode)
 			if err != nil {
 				return hinfDesign{}, err
 			}
@@ -396,7 +374,7 @@ func hinfSynDiscrete(gp *generalizedPlantPartition, P *System, nmeas, ncont int,
 			return d, nil
 		}
 	}
-	return hinfSynTustin(op, P, nmeas, ncont, pencil)
+	return hinfSynTustin(op, P, nmeas, ncont, mode)
 }
 
 // hinfTustinCond is the tustinCond above which hinfSynDiscrete shifts the
@@ -418,7 +396,7 @@ func tustinCond(A *mat.Dense) float64 {
 	return math.Min(plus.Cond(), minus.Cond())
 }
 
-func hinfSynTustin(op string, P *System, nmeas, ncont int, pencil bool) (hinfDesign, error) {
+func hinfSynTustin(op string, P *System, nmeas, ncont int, mode *hinfRiccatiMode) (hinfDesign, error) {
 	n, _, _ := P.Dims()
 	var plus, minus mat.LU
 	IpA, ImA := eyeDense(n), eyeDense(n)
@@ -441,7 +419,7 @@ func hinfSynTustin(op string, P *System, nmeas, ncont int, pencil bool) (hinfDes
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", op, err)
 	}
-	d, err := hinfSynScaled(op, Pc, nmeas, ncont, "P12(z = "+point+")", "P21(z = "+point+")", pencil)
+	d, err := hinfSynScaled(op, Pc, nmeas, ncont, "P12(z = "+point+")", "P21(z = "+point+")", mode)
 	if err != nil {
 		return hinfDesign{}, err
 	}
@@ -751,7 +729,7 @@ type hinfD11ZeroRiccatis struct {
 	ham                 *hamiltonianRiccatiWork
 	px, py              hinfRiccatiData
 	m1, p1              int
-	pencil              bool
+	mode                *hinfRiccatiMode
 }
 
 func newHinfD11ZeroRiccatis(gp *generalizedPlantPartition) *hinfD11ZeroRiccatis {
@@ -860,7 +838,7 @@ func (r *hinfD11ZeroRiccatis) solve(gamma float64) (*mat.Dense, *mat.Dense, erro
 	r.Gx.Scale(ginv2, r.B1B1t)
 	r.Gx.Sub(r.Gx, r.B2R1B2t)
 	r.ham.setHamiltonian(r.Ahat, r.Gx, r.Qhat)
-	X, err := r.ham.solveWith(r.px, gamma, r.m1, r.pencil)
+	X, err := r.ham.solveWith(r.px, gamma, r.m1, r.mode)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -871,7 +849,7 @@ func (r *hinfD11ZeroRiccatis) solve(gamma float64) (*mat.Dense, *mat.Dense, erro
 	r.Gy.Scale(ginv2, r.C1tC1)
 	r.Gy.Sub(r.Gy, r.C2R2C2)
 	r.ham.setHamiltonian(r.AtildeT, r.Gy, r.Qy)
-	Y, err := r.ham.solveWith(r.py, gamma, r.p1, r.pencil)
+	Y, err := r.ham.solveWith(r.py, gamma, r.p1, r.mode)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -926,6 +904,9 @@ type hamiltonianRiccatiWork struct {
 	u11, u21 []float64
 	ipiv     []int
 	c        float64
+	// numerical reports that the last failed solve failed numerically (see
+	// hinfRiccatiMode), not on a clean verdict for its γ.
+	numerical bool
 }
 
 func newHamiltonianRiccatiWork(n int) *hamiltonianRiccatiWork {
@@ -998,12 +979,14 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 
 	sdim, ok := impl.Dgees(lapack.SchurHess, lapack.SortSelected, selctg,
 		nn, hData, nn, wr, wi, vs, nn, work, lwork, bwork)
+	w.numerical = true
 	if !ok {
 		return nil, fmt.Errorf("Hamiltonian Schur form did not converge: %w", ErrSchurFailed)
 	}
 	if sdim != n {
 		return nil, fmt.Errorf("Hamiltonian has %d stable eigenvalues in float64, not %d: %w", sdim, n, errNoCandidate)
 	}
+	w.numerical = false
 	if hasImaginaryAxisEigenvalue(hData, nn, wr, wi) {
 		return nil, fmt.Errorf("Hamiltonian eigenvalue on the imaginary axis: %w", ErrGammaNotAchievable)
 	}
@@ -1014,6 +997,7 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 
 	ipiv := w.ipiv
 	if !impl.Dgetrf(n, n, u11, n, ipiv) {
+		w.numerical = true
 		return nil, fmt.Errorf("Hamiltonian %w", errSingularBasis)
 	}
 
@@ -1025,10 +1009,12 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 		}
 	}
 	impl.Dgetrs(blas.Trans, n, n, u11, n, ipiv, xData, n)
+	asym := relativeAsymmetry(xData, n)
 	symmetrize(xData, n, n)
 	X := mat.NewDense(n, n, xData)
 	var eig mat.Eigen
 	if !eig.Factorize(X, mat.EigenNone) {
+		w.numerical = true
 		return nil, fmt.Errorf("eigenvalues of the Hamiltonian Riccati solution: %w", ErrSchurFailed)
 	}
 	vals := eig.Values(nil)
@@ -1039,6 +1025,7 @@ func (w *hamiltonianRiccatiWork) solve() (*mat.Dense, error) {
 	floor *= hamiltonianPSDTol
 	for _, v := range vals {
 		if real(v) < -floor {
+			w.numerical = asym > hinfGarbageAsym
 			return nil, fmt.Errorf("Hamiltonian Riccati solution not positive semidefinite: %w", ErrGammaNotAchievable)
 		}
 	}

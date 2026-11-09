@@ -204,13 +204,74 @@ func (d hinfRiccatiData) inputScaled() hinfRiccatiData {
 	return d
 }
 
-// solveWith returns the Hamiltonian solution, or, when that fails and
-// pencil is set, the pencilSolve solution of d at gamma (k the size of
-// the γ² block of R).
-func (w *hamiltonianRiccatiWork) solveWith(d hinfRiccatiData, gamma float64, k int, pencil bool) (*mat.Dense, error) {
+// hinfRiccatiMode is the Riccati method of one HinfSyn design pass: the
+// Hamiltonian alone, or with pencil the extended pencil wherever a
+// Hamiltonian solve fails. It records the γ of every failed Hamiltonian
+// solve and whether it failed numerically: a float64 stable count other
+// than n, a failed Schur or eigenvalue iteration, a singular U11, or an X
+// not semidefinite whose U21·U11⁻¹ was asymmetric beyond hinfGarbageAsym
+// (a stable subspace lost to rounding). An eigenvalue on the imaginary
+// axis, or an indefinite X from a symmetric, accurate basis, is a clean
+// verdict on γ. edge is the bisection edge, 0 when no γ passed.
+type hinfRiccatiMode struct {
+	pencil bool
+	edge   float64
+	fails  []hinfSolveFailure
+}
+
+type hinfSolveFailure struct {
+	gamma     float64
+	numerical bool
+}
+
+// numericalFailure reports whether a pencil repeat of a failed design may
+// differ from it: some Hamiltonian solve failed numerically at a γ the
+// design could not do without, at or above the bisection edge (the
+// controller builds), or, with no edge, at the largest γ the bisection
+// tried.
+func (m *hinfRiccatiMode) numericalFailure() bool {
+	from := m.edge
+	if from == 0 {
+		for _, f := range m.fails {
+			from = math.Max(from, f.gamma)
+		}
+	}
+	for _, f := range m.fails {
+		if f.numerical && f.gamma >= from {
+			return true
+		}
+	}
+	return false
+}
+
+// hinfGarbageAsym is the relative asymmetry max|Xij − Xji|/max(1, max|Xij|)
+// of U21·U11⁻¹ beyond which an indefinite Hamiltonian solution is taken as
+// a lost stable subspace (healthy solves: 1e-13; rnd 94's Y: 2e-3).
+const hinfGarbageAsym = 1e-8
+
+// relativeAsymmetry is max|Xij − Xji|/max(1, max|Xij|) of the n×n x.
+func relativeAsymmetry(x []float64, n int) float64 {
+	var asym, xmax float64
+	for i := range n {
+		for j := range n {
+			asym = math.Max(asym, math.Abs(x[i*n+j]-x[j*n+i]))
+			xmax = math.Max(xmax, math.Abs(x[i*n+j]))
+		}
+	}
+	return asym / math.Max(1, xmax)
+}
+
+// solveWith returns the Hamiltonian solution, recording a failure in mode,
+// or, when that fails and mode.pencil is set, the pencilSolve solution of
+// d at gamma (k the size of the γ² block of R).
+func (w *hamiltonianRiccatiWork) solveWith(d hinfRiccatiData, gamma float64, k int, mode *hinfRiccatiMode) (*mat.Dense, error) {
 	X, err := w.solve()
-	if err == nil || !pencil {
-		return X, err
+	if err == nil {
+		return X, nil
+	}
+	mode.fails = append(mode.fails, hinfSolveFailure{gamma, w.numerical})
+	if !mode.pencil {
+		return nil, err
 	}
 	if X, perr := d.atGamma(gamma, k).pencilSolve(); perr == nil {
 		return X, nil

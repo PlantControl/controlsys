@@ -237,7 +237,8 @@ type MixsynResult struct {
 // it; for a discrete G the same condition applies at z = −1 instead of
 // s = ∞, so W2 may be nil for a strictly proper G with G(−1) ≠ 0; delays
 // return ErrDelayUnsupported, as MATLAB hinfsyn rejects them; and synthesis
-// failures are HinfSyn's.
+// failures are HinfSyn's, including its ErrAccuracyUnverified with the full
+// result.
 func Mixsyn(G, W1, W2, W3 *System) (*MixsynResult, error) {
 	const op = "Mixsyn"
 	P, err := augw(op, G, W1, W2, W3)
@@ -252,10 +253,14 @@ func Mixsyn(G, W1, W2, W3 *System) (*MixsynResult, error) {
 		}
 	}
 	info, err := HinfSyn(P, ny, nu)
-	if err != nil {
+	if info == nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
-	return &MixsynResult{K: info.K, CL: info.CL, Gamma: info.Gamma, Info: info}, nil
+	res := &MixsynResult{K: info.K, CL: info.CL, Gamma: info.Gamma, Info: info}
+	if err != nil {
+		return res, fmt.Errorf("%s: %w", op, err)
+	}
+	return res, nil
 }
 
 // fullColumnRank reports whether the tall matrix M has full column rank,

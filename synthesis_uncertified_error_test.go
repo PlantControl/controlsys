@@ -41,6 +41,13 @@ func accuracyOfLqg(res *LqgResult) int {
 	return res.accuracy
 }
 
+func accuracyOfHinfSyn(res *HinfSynResult) int {
+	if res == nil {
+		return 0
+	}
+	return res.accuracy
+}
+
 func accuracyOfH2Syn(res *H2SynResult) int {
 	if res == nil {
 		return 0
@@ -122,7 +129,8 @@ var (
 	}
 	// synthesisControlNotConverged: no state-feedback X passes
 	// verification. HinfSyn, which found no γ below its give-up bound by
-	// the Hamiltonian alone, is certified by the extended pencil (BMNGOS).
+	// the Hamiltonian alone, gets a controller from the extended-pencil
+	// repeat, returned with ErrAccuracyUnverified (BMNGOS).
 	synthesisControlNotConverged = synthesisFixture{
 		a:   []float64{0.6387616393876916, 0.4587988411199844, 0.528907006112241, 0.12157279348037137, 0.4342701769944363, 1.5828768967155433, -0.014001459255651827, -0.2030728131081514, 0.31309763284412817, -0.25266771115404013, -1.9007061455699903, -1.2059618903768583, -0.30241700661402304, -0.5891295338839894, 1.4718530704475516, 0.6057568301514619},
 		b:   []float64{-0.45122737797268053, 0.5921509980895266, -0.44063398438152035, 0.5301782392019727},
@@ -224,8 +232,9 @@ func (c synthesisClass) String() string {
 // TestSynthesisContractByOperation checks Lqg, H2Syn and HinfSyn in each
 // outcome class they have a fixture for (ZOJBZX step 3):
 //   - certified: (res, nil);
-//   - uncertified: (res ≠ nil, ErrAccuracyUnverified), Lqg and H2Syn only:
-//     HinfSyn measures the norm of every K it returns;
+//   - uncertified: (res ≠ nil, ErrAccuracyUnverified): Lqg and H2Syn with
+//     an uncertified Riccati solution, HinfSyn with the controller of its
+//     extended-pencil repeat;
 //   - not converged: (nil, ErrNotConverged), never ErrNoStabilizing: a
 //     Riccati solve with no verified solution (Lqg, H2Syn), or HinfSyn with
 //     no backed-off controller meeting its γ (Q7, with the last try's
@@ -325,7 +334,7 @@ func TestSynthesisContractByOperation(t *testing.T) {
 		return func() out { r, e := H2Syn(P, ny, nu); return out{r != nil, accuracyOfH2Syn(r), e} }
 	}
 	hinf := func(P *System, ny, nu int) func() out {
-		return func() out { r, e := HinfSyn(P, ny, nu); return out{r != nil, 0, e} }
+		return func() out { r, e := HinfSyn(P, ny, nu); return out{r != nil, accuracyOfHinfSyn(r), e} }
 	}
 	cases := []struct {
 		name  string
@@ -355,7 +364,7 @@ func TestSynthesisContractByOperation(t *testing.T) {
 		{"HinfSyn unstable loop", synthesisNotConverged, hinf(regP(uA, weakB, mat.NewDense(1, 2, []float64{1, 1}), 0), 1, 1), ErrGammaNotAchievable},
 		{"HinfSyn control", synthesisStructural, hinf(regP(uA, uB, mat.NewDense(1, 2, []float64{1, 1}), 0), 1, 1), ErrNotStabilizable},
 		{"HinfSyn filter", synthesisStructural, hinf(regP(uA, eyeDense(2), uC, 0), 1, 2), ErrNotDetectable},
-		{"HinfSyn cheap control", synthesisCertified, hinf(synthesisControlNotConverged.plant(t), 1, 1), nil},
+		{"HinfSyn cheap control", synthesisUnverified, hinf(synthesisControlNotConverged.plant(t), 1, 1), nil},
 		{"HinfSyn boundary", synthesisNotConverged, hinf(synthesisBoundaryNotConverged.plant(t), 1, 1), ErrGammaNotAchievable},
 		{"HinfSyn", synthesisInfeasible, hinf(synthesisBoundaryInfeasible.plant(t), 1, 1), nil},
 	}

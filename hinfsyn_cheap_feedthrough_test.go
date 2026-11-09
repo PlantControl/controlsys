@@ -1,7 +1,7 @@
 package controlsys
 
 import (
-	"math"
+	"errors"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -40,7 +40,8 @@ func cheapFeedthroughPlant(t *testing.T, A, B, C *mat.Dense, rho, sig float64) *
 // 1e15 in one direction, its stable subspace was garbage at every γ (Y
 // asymmetric by 7e5, or n+1 stable eigenvalues) and HinfSyn returned
 // ErrGammaNotAchievable, though the H2Syn controller already gives a
-// finite ‖T_zw‖∞; the extended pencil solves it.
+// finite ‖T_zw‖∞; the extended-pencil repeat solves it and, by round-2
+// ruling Q3, returns its result with ErrAccuracyUnverified.
 func TestHinfSynCheapFeedthroughBelowH2Loop(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -69,8 +70,8 @@ func TestHinfSynCheapFeedthroughBelowH2Loop(t *testing.T) {
 				t.Fatal(err)
 			}
 			res, err := HinfSyn(P, tc.p, tc.m)
-			if err != nil {
-				t.Fatalf("HinfSyn: %v (H2Syn loop ‖·‖∞ = %g)", err, h2Norm)
+			if !errors.Is(err, ErrAccuracyUnverified) || res == nil {
+				t.Fatalf("HinfSyn: %v, want the pencil repeat's result with ErrAccuracyUnverified (H2Syn loop ‖·‖∞ = %g)", err, h2Norm)
 			}
 			if !(res.GammaOpt <= h2Norm) {
 				t.Errorf("GammaOpt = %.10g above the H2Syn loop's %.10g", res.GammaOpt, h2Norm)
@@ -131,37 +132,28 @@ func TestHinfPencilSolveMatchesHamiltonian(t *testing.T) {
 	}
 }
 
-// TestHinfSynFeedthroughRatioGatesPencilRepeat checks the gate of the
-// pencil repeat (BMNGOS ruling Q5): σ = 2.4e-8 is below it and stays so
-// when z and w are scaled; ρ = σ = 0.5 is above it.
-func TestHinfSynFeedthroughRatioGatesPencilRepeat(t *testing.T) {
-	A := mat.NewDense(3, 3, []float64{-1, 2, 0.5, -0.3, -0.7, 1.2, 0.4, -1.1, -2})
-	B := mat.NewDense(3, 1, []float64{1, -0.5, 0.3})
-	C := mat.NewDense(1, 3, []float64{0.2, 1, -0.4})
-	ratio := func(P *System) float64 {
+// TestHinfSynPencilRepeatOnNumericalFailure checks the gate of the pencil
+// repeat (BMNGOS round-2 ruling Q5): the Hamiltonian pass on the
+// nearly noise-free sensor fails numerically at the largest γ it tries,
+// while a well-conditioned plant whose builds all succeed records no
+// numerical failure at or above its edge.
+func TestHinfSynPencilRepeatOnNumericalFailure(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{-0.8818239319995558, 1.0272090190053553, 0.17080353744374277, 1.0199632631482856, 0.5471366288591906, -0.6962689818825372, 1.6532722336356085, -1.6694170964510877, 0.2683103440482473})
+	B := mat.NewDense(3, 1, []float64{2.191148570418685, -0.012940693613284565, -0.7743770444890247})
+	C := mat.NewDense(1, 3, []float64{-0.05789755742046765, -0.5792002632564541, 0.5428072282660892})
+	for _, tc := range []struct {
+		sig  float64
+		want bool
+	}{{2.4082739736756504e-08, true}, {0.5, false}} {
+		P := cheapFeedthroughPlant(t, A, B, C, 1, tc.sig)
 		gp, err := partitionGeneralizedPlant("HinfSyn", P, 1, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return gp.feedthroughRatio()
-	}
-	cheap := cheapFeedthroughPlant(t, A, B, C, 1, 2.4e-8)
-	if r := ratio(cheap); !(r < hinfPencilFeedthroughRatio) {
-		t.Errorf("σ = 2.4e-8: ratio %g, want below %g", r, hinfPencilFeedthroughRatio)
-	}
-	scaled := cheap.Copy()
-	for i := range 4 {
-		for j := range 3 {
-			scaled.C.Set(i, j, 1e3*scaled.C.At(i, j))
+		mode := &hinfRiccatiMode{}
+		_, err = hinfSyn(gp, P, 1, 1, mode)
+		if got := mode.numericalFailure(); got != tc.want {
+			t.Errorf("σ = %g: numericalFailure %v (err %v), want %v", tc.sig, got, err, tc.want)
 		}
-		for j := range 5 {
-			scaled.D.Set(i, j, 1e3*scaled.D.At(i, j))
-		}
-	}
-	if r, r0 := ratio(scaled), ratio(cheap); math.Abs(r-r0) > 1e-12*r0 {
-		t.Errorf("ratio %g under scaling, %g unscaled", r, r0)
-	}
-	if r := ratio(cheapFeedthroughPlant(t, A, B, C, 0.5, 0.5)); !(r >= hinfPencilFeedthroughRatio) {
-		t.Errorf("ρ = σ = 0.5: ratio %g, want at least %g", r, hinfPencilFeedthroughRatio)
 	}
 }

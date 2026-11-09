@@ -1421,11 +1421,11 @@ func TestHinfSyn_XYStateCoordinatesUnderScaling(t *testing.T) {
 					Ps.C.Set(j, i, P.C.At(j, i)/tc.s[i])
 				}
 			}
-			d, err := hinfSynScaled("HinfSyn", P, 1, 1, "D12", "D21", false)
+			d, err := hinfSynScaled("HinfSyn", P, 1, 1, "D12", "D21", &hinfRiccatiMode{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			ds, err := hinfSynScaled("HinfSyn", Ps, 1, 1, "D12", "D21", false)
+			ds, err := hinfSynScaled("HinfSyn", Ps, 1, 1, "D12", "D21", &hinfRiccatiMode{})
 			if err != nil {
 				t.Fatal(err)
 			}

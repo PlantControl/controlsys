@@ -27,7 +27,7 @@ type hinfGeneralPlant struct {
 	gammaLB          float64
 	rw               *hinfGeneralRiccatiWork
 	px, py           hinfRiccatiData
-	pencil           bool
+	mode             *hinfRiccatiMode
 }
 
 // hinfGeneralRiccatiWork holds the products riccatis forms at every γ.
@@ -295,7 +295,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 		return nil, nil, nil, nil, err
 	}
 	rw.ham.setHamiltonian(rw.Ax, rw.Gx, rw.Qx)
-	X, err = rw.ham.solveWith(hp.px, gamma, gp.m1, hp.pencil)
+	X, err = rw.ham.solveWith(hp.px, gamma, gp.m1, hp.mode)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -315,7 +315,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	}
 	rw.AyT = transposeInto(rw.AyT, rw.Ay)
 	rw.ham.setHamiltonian(rw.AyT, rw.Gy, rw.Qy)
-	Y, err = rw.ham.solveWith(hp.py, gamma, gp.p1, hp.pencil)
+	Y, err = rw.ham.solveWith(hp.py, gamma, gp.p1, hp.mode)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -372,12 +372,12 @@ type hinfYoula struct {
 	D11, D12hat, D21hat *mat.Dense
 }
 
-func hinfSynGeneral(gp *generalizedPlantPartition, pencil bool) (hinfDesign, error) {
+func hinfSynGeneral(gp *generalizedPlantPartition, mode *hinfRiccatiMode) (hinfDesign, error) {
 	hp, err := newHinfGeneralPlant(gp)
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
-	hp.pencil = pencil
+	hp.mode = mode
 	gamma, err := hinfBisect(hp.gammaLB, gp.hinfGammaScale(), func(g float64) bool {
 		_, _, _, _, err := hp.riccatis(g)
 		return err == nil
@@ -385,6 +385,7 @@ func hinfSynGeneral(gp *generalizedPlantPartition, pencil bool) (hinfDesign, err
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
+	mode.edge = gamma
 	return hinfDesign{gammaEdge: gamma, build: hp.synthesize}, nil
 }
 

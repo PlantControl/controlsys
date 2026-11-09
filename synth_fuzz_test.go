@@ -1051,11 +1051,11 @@ func FuzzHinfSyn(f *testing.F) {
 		Psys := P.System(t, s)
 		res, err := HinfSyn(Psys, P.ny, P.nu)
 		fzContract(t, s, "HinfSyn", res != nil, err)
-		if msg := synthesisContractBreach(res != nil, 0, err); msg != "" || errors.Is(err, ErrAccuracyUnverified) || errors.Is(err, ErrNoStabilizing) {
+		if msg := synthesisContractBreach(res != nil, accuracyOfHinfSyn(res), err); msg != "" || errors.Is(err, ErrNoStabilizing) {
 			t.Fatalf("HinfSyn: %s %v\n%s", msg, err, s)
 		}
 		solvable := syRegSolvable(s)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 			if errors.Is(err, ErrInvalidPartition) && syNearUnitPole(s) {
 				fzSkip(t, "HinfSyn: P21(z = ±1) rank with a pole within 1e-12 of ±1 (known followup)")
 			}
@@ -1333,7 +1333,7 @@ func FuzzMixsyn(f *testing.F) {
 		res, err := Mixsyn(s.System(t, fzSysOpts{}), W1, W2, W3)
 		fzContract(t, s, "Mixsyn", res != nil, err)
 		solvable := syRegSolvable(s) && syClear(s, 1e-4) && !syUnstableWithRHPZeros(s)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 			if solvable {
 				t.Fatalf("Mixsyn: %v on a robustly stabilizable and detectable G with no boundary poles (W1 a=%g c=%g d=%g, ρ=%g, W3=%g)\n%s", err, aw, cw, dw, rho, w3, s)
 			}
