@@ -81,6 +81,10 @@ type ddGate struct {
 	snap  bool
 	allow func(float64) bool
 	w     float64
+	// atPole, when set, records that the double-double response resolved
+	// pt and ddAtPole put a pole there, for a caller that would repeat
+	// that check.
+	atPole *bool
 }
 
 // evalWithPoleLimitGated is evalWithPoleLimit with the fallback off a pole
@@ -106,8 +110,13 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		if errors.Is(ddErr, errStateUnderflow) {
 			return ddErr
 		}
-		if ddErr == nil && (!sp.near || !ddAtPole(sys, s, sp, dst)) {
-			return nil
+		if ddErr == nil {
+			if !sp.near || !ddAtPole(sys, s, sp, dst) {
+				return nil
+			}
+			if gate.atPole != nil {
+				*gate.atPole = true
+			}
 		}
 	}
 	if !delayFree && !gate.limit && !gate.snap && gate.allow == nil {
@@ -591,10 +600,11 @@ var errDDSingular = errors.New("double-double response not resolved")
 // unchanged on error. It solves the pencil scaled by σ, M̃ = (p/σ)E +
 // q(A/σ), for each input column j scaled by its own power of two 2^βⱼ, the
 // largest |bᵢⱼ| in [½, 1): x̃ = M̃⁻¹(B·2^-βⱼ) = x·σ·2^-βⱼ, and forms output
-// row k from C scaled by 2^-γₖ the same way, so that no state or term
-// underflows or overflows that the response does not. All scalings are
-// exact powers of two, so the result is that of the unscaled solve wherever
-// that stays in the normal range. It returns errStateUnderflow where a
+// row k from C scaled by 2^-γₖ only where n·|q|·maxᵢ|cₖᵢ||x̃ᵢ| could
+// overflow, so that no state or term underflows or overflows that the
+// response does not. All scalings are exact powers of two, so the result
+// is that of the unscaled solve wherever that stays in the normal range; an
+// entry of B or C the scaling would round is lost data (errStateUnderflow). It returns errStateUnderflow where a
 // state of x̃ is lost below the normal range: one an output could resolve
 // at its |c̃ₖᵢ|·2⁻¹⁰²² whose pencil rows fail the componentwise test
 // below; a test of every row would reject a dd roundoff fill in a state
@@ -627,6 +637,11 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 			bMax = max(bMax, math.Abs(br.b[i*m+j]))
 		}
 		_, bExp[j] = math.Frexp(bMax)
+		for i := range n {
+			if !exactLdexp(br.b[i*m+j], -bExp[j]) {
+				return errStateUnderflow
+			}
+		}
 	}
 	pr, pi, qr, qi := real(pt.p)/sigma, imag(pt.p)/sigma, real(pt.q), imag(pt.q)
 	a := make([]ddComplex, n*n)
@@ -679,12 +694,31 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 	q := ddComplex{dd{-qr, 0}, dd{-qi, 0}}
 	g := make([]complex128, p*m)
 	yt := make([]complex128, p*m)
+	xExp := math.MinInt
+	for _, v := range x {
+		if a := v.abs1(); a != 0 {
+			_, e := math.Frexp(a)
+			xExp = max(xExp, e)
+		}
+	}
+	_, qnExp := math.Frexp(cabs1(pt.q) * float64(n))
+	_, maxExp := math.Frexp(math.MaxFloat64)
 	for r := range p {
 		var cMax float64
 		for i := range n {
 			cMax = max(cMax, math.Abs(br.c[r*n+i]))
 		}
 		_, cExp := math.Frexp(cMax)
+		if xExp == math.MinInt || cMax == 0 {
+			cExp = 0
+		} else {
+			cExp = max(0, cExp+xExp+qnExp-maxExp)
+		}
+		for i := range n {
+			if !exactLdexp(br.c[r*n+i], -cExp) {
+				return errStateUnderflow
+			}
+		}
 		for c := range m {
 			var y ddComplex
 			for i := n - 1; i >= 0; i-- {
@@ -718,6 +752,12 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 	}
 	copy(dst, g)
 	return nil
+}
+
+// exactLdexp reports whether v·2ᵏ is exact, neither rounded below the
+// normal range nor overflowed.
+func exactLdexp(v float64, k int) bool {
+	return math.Ldexp(math.Ldexp(v, k), -k) == v
 }
 
 // ddScaled is ddRealizationInto's scaled pencil M̃ = (pr+j·pi)E +

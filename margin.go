@@ -95,8 +95,10 @@ type sisoEval struct {
 	// at some ω > 0; see checkSkipped.
 	skipped  error
 	resolved bool
-	// extended falls back to ddSISOResponse where the double solve fails;
-	// see rationalLoop.gainCrossings and the delayed grid in allMargin.
+	// extended falls back to ddSISOResponse where the double solve fails,
+	// but not on an unverified lost state (errStateUnderflow), which that
+	// unbalanced solve cannot verify either; see rationalLoop.gainCrossings
+	// and the delayed grid in allMargin.
 	// ddAllow, when set, limits the fallback to the frequencies it accepts.
 	extended bool
 	ddAllow  func(w float64) bool
@@ -106,6 +108,9 @@ type sisoEval struct {
 	exact bool
 	// ddSolves counts double-double solves.
 	ddSolves int
+	// atPole records that at's last evaluation found the double-double
+	// response at a pole (ddGate.atPole), which resolve need not repeat.
+	atPole bool
 }
 
 func newSISOEval(sys *System) (*sisoEval, error) {
@@ -129,11 +134,12 @@ func newSISOEval(sys *System) (*sisoEval, error) {
 
 func (e *sisoEval) at(w float64) complex128 {
 	pt := e.td.frequencyPoint(w)
+	e.atPole = false
 	if h, ok := e.exactAt(pt); ok {
 		e.dst[0] = h
-	} else if err := evalWithPoleLimitGated(e.eval, e.sys, pt, e.dst, ddGate{limit: !e.extended, snap: true, allow: e.ddAllow, w: w}); err != nil {
+	} else if err := evalWithPoleLimitGated(e.eval, e.sys, pt, e.dst, ddGate{limit: !e.extended, snap: true, allow: e.ddAllow, w: w, atPole: &e.atPole}); err != nil {
 		h, ok := complex(0, 0), false
-		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) {
+		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) && !errors.Is(err, errStateUnderflow) {
 			h, ok = ddSISOResponse(e.sys, pt)
 			e.ddSolves++
 		}
@@ -169,7 +175,7 @@ func (e *sisoEval) resolve(w float64) (h complex128, ok bool) {
 	e.extended, e.skipped, e.resolved = saved, skipped, resolved
 	pt := e.td.frequencyPoint(w)
 	s := pt.value()
-	if !ok || !cmplx.IsInf(h) || e.sys.internalDelayCount() > 0 || s == 0 || !e.sys.IsContinuous() && s == 1 {
+	if !ok || !cmplx.IsInf(h) || e.atPole || e.sys.internalDelayCount() > 0 || s == 0 || !e.sys.IsContinuous() && s == 1 {
 		return h, ok
 	}
 	sp, err := poleSpacing(e.sys, s)

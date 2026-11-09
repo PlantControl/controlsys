@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -366,5 +367,100 @@ func TestDDScaled_ComponentwiseVerifier(t *testing.T) {
 	sc.x[1] = 0.5 * (1 + 1e-12)
 	if sc.componentwiseStable() {
 		t.Errorf("perturbed state accepted")
+	}
+}
+
+// singularAtSolver fails every point with err.
+type singularAtSolver struct {
+	w   float64
+	err error
+}
+
+func (s singularAtSolver) evalInto(pt frequencyPoint, dst []complex128) error {
+	if imag(pt.value()) == s.w {
+		return s.err
+	}
+	dst[0] = 1
+	return nil
+}
+
+// DZSEVY (ruling a50c97e Q4): an unverified state underflow fails the whole
+// sweep, and the error names the frequency.
+func TestFreqResponse_StateUnderflowNamesFrequency(t *testing.T) {
+	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newFrequencyEvaluator(sys)
+	data := make([]complex128, 3)
+	err = e.sweepInto([]float64{1, 2.5, 4}, data, singularAtSolver{2.5, errStateUnderflow})
+	if !errors.Is(err, ErrOverflow) || !strings.Contains(err.Error(), "ω = 2.5") {
+		t.Errorf("sweep error = %v, want ErrOverflow naming ω = 2.5", err)
+	}
+}
+
+// DZSEVY (ruling a50c97e Q3): where dense refinement stalls inaccurately
+// and the double-double response fails, the stall path returned the
+// stalled double value with nil error. bd.sys here is singular at the
+// point (±jω exactly), so the double-double solve fails and evalInto must
+// report the singular pencil.
+func TestBalancedDense_StallDDFailurePropagates(t *testing.T) {
+	r := []float64{3033.55, 8.635e6, 1.3387e10, 1.1713e13, 6.3856e15, 6.1226e17, 2.768e19, 7.2368e20, 1.1678e22, 1.5195e23, 1.0695e24, 6.2747e24, 1.6832e25, 3.404e25, 3.5338e25, 2.4398e25}
+	n := len(r)
+	a := make([]float64, n*n)
+	for j, v := range r {
+		a[j] = -v
+	}
+	for i := 1; i < n; i++ {
+		a[i*n+i-1] = 1
+	}
+	b := make([]float64, n)
+	b[14] = 1
+	c := []float64{1, .25, 1.875, -.109375, -.125, 3, -2, 0, -.015625, -8, -1.5, 0, -.75, 0, 0, 0}
+	sys, err := NewFromSlices(n, 1, 1, a, b, c, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const w = 0.0013941527
+	sa := make([]float64, n*n)
+	sb := make([]float64, n)
+	sc := make([]float64, n)
+	sa[1], sa[n] = w, -w
+	for i := 2; i < n; i++ {
+		sa[i*n+i] = -1
+	}
+	sb[0], sc[0] = 1, 1
+	sing, err := NewFromSlices(n, 1, 1, sa, sb, sc, []float64{0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bd := newBalancedDense(sys, n, 1, 1)
+	bd.sys = sing
+	g := make([]complex128, 1)
+	err = bd.evalInto(pointAt(complex(0, w)), g)
+	if !bd.stalled {
+		t.Skip("point no longer stalls")
+	}
+	if !errors.Is(err, ErrSingularTransform) {
+		t.Errorf("evalInto = %v, %v; want the singular pencil", g[0], err)
+	}
+}
+
+// DZSEVY (ruling a50c97e Q2): a margin sample whose response lost a state
+// unverifiably must fail, not fall back to ddSISOResponse, the unbalanced
+// solve without a lost-state check.
+func TestSISOEval_StateUnderflowNoUnverifiedFallback(t *testing.T) {
+	sys, err := New(mat.NewDense(1, 1, []float64{-1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{1}), mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := newSISOEval(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.extended = true
+	e.eval = func(frequencyPoint, []complex128) error { return errStateUnderflow }
+	if h := e.at(1); !cmplx.IsNaN(h) || !errors.Is(e.err, ErrOverflow) {
+		t.Errorf("at(1) = %v, err %v; want NaN and ErrOverflow", h, e.err)
 	}
 }
