@@ -122,7 +122,8 @@ type PIDTuningEvidence struct {
 	// adaptive grid when the plant is standard with an acyclic delay network;
 	// otherwise only sampled frequencies are checked, which is deliberately
 	// not a global stability certificate, and TunePID returns the design
-	// with ErrAccuracyUnverified.
+	// with ErrAccuracyUnverified. TunePIDFRD always reports it; its
+	// warnings, not this field, say whether it certified the design.
 	Stability PIDStabilityEvidence
 	Warnings  []string
 }
