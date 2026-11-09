@@ -141,3 +141,59 @@ func TestDCGainPoleCancelRoutesAgreeVerified(t *testing.T) {
 		}
 	}
 }
+
+// INGGF2, YRJCSJ: Bandwidth on a DC gain returned with ErrAccuracyUnverified
+// is computed on that value and keeps the error. Series(7s/(s+1/3), 1/s,
+// (s+1)/(s+1e-14)) has its integrator cancelled below rounding beside a pole
+// 1e-14 from DC that deflation snaps onto it: the exact limit with the
+// sub-rounding residue read as cancelled is the intended k/(a·d), the deflated
+// expansion infinite. The bandwidth is that of the model with the
+// integrator cancelled by hand. Where the exact DC gain is infinite the
+// bandwidth stays undefined (ErrInvalidArgument, no value).
+func TestBandwidthOnUnverifiedDCGain(t *testing.T) {
+	tf := func(num, den []float64) *System {
+		res, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}}).StateSpace()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Sys
+	}
+	series := func(ss ...*System) *System {
+		s := ss[0]
+		for _, x := range ss[1:] {
+			var err error
+			if s, err = Series(s, x); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return s
+	}
+	k, a, d := 7.0, 1.0/3, 1e-14
+	sys := series(tf([]float64{k, 0}, []float64{1, a}), tf([]float64{1}, []float64{1, 0}), tf([]float64{1, 1}, []float64{1, d}))
+	g, err := sys.DCGain()
+	if !errors.Is(err, ErrAccuracyUnverified) || g == nil {
+		t.Fatalf("DCGain = %v, %v; want a value with ErrAccuracyUnverified", g, err)
+	}
+	if w := k / a / d; !(math.Abs(g.At(0, 0)-w) <= 1e-12*w) {
+		t.Fatalf("DCGain = %v, want %v", g.At(0, 0), w)
+	}
+	want, err := Bandwidth(series(tf([]float64{k}, []float64{1, a}), tf([]float64{1, 1}, []float64{1, d})), -3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bw, err := Bandwidth(sys, -3)
+	if !errors.Is(err, ErrAccuracyUnverified) {
+		t.Errorf("Bandwidth error %v, want ErrAccuracyUnverified", err)
+	}
+	if !(math.Abs(bw-want) <= 1e-4*want) {
+		t.Errorf("Bandwidth = %v, want %v", bw, want)
+	}
+
+	over, err := NewFromSlices(3, 1, 1, []float64{1, 0, 0, 0.93000000000000005, 0, -0.069999999999999993, -1.2000000000000002, 1, 0.79999999999999993}, []float64{1, 0, 0}, []float64{1, 0, 1}, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bw, err := Bandwidth(over, -3); !errors.Is(err, ErrInvalidArgument) || errors.Is(err, ErrAccuracyUnverified) {
+		t.Errorf("Bandwidth on an infinite exact DC gain = %v, %v; want ErrInvalidArgument alone", bw, err)
+	}
+}

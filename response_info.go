@@ -88,7 +88,9 @@ func StepInfo(resp *TimeResponse, opts *StepInfoOptions) (*StepInfoResult, error
 // internal delays that IsStable decides are unstable, return ErrUnstable.
 // When IsStable cannot decide a delay model (ErrDelayUnsupported), the
 // stability gate is skipped and the metrics come from the simulated
-// response, as MATLAB recommends assessing such models with step.
+// response, as MATLAB recommends assessing such models with step. A DC gain
+// that DCGain returns with ErrAccuracyUnverified sets the steady state, and
+// the metrics come with the same error.
 func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*StepInfoResult, error) {
 	if err := requireFiniteSystem("StepInfoForSystem", sys); err != nil {
 		return nil, err
@@ -105,11 +107,13 @@ func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*Ste
 	if err != nil {
 		return nil, fmt.Errorf("StepInfoForSystem: %w", err)
 	}
+	var unverified error
 	if opts == nil || opts.SteadyStateValue == nil {
 		gain, err := sys.DCGain()
-		if err != nil {
+		if err != nil && !(gain != nil && errors.Is(err, ErrAccuracyUnverified)) {
 			return nil, fmt.Errorf("StepInfoForSystem: %w", err)
 		}
+		unverified = err
 		cfg := StepInfoOptions{}
 		if opts != nil {
 			cfg = *opts
@@ -126,6 +130,9 @@ func StepInfoForSystem(sys *System, tFinal float64, opts *StepInfoOptions) (*Ste
 	info, err := StepInfo(resp, opts)
 	if err != nil {
 		return nil, fmt.Errorf("StepInfoForSystem: %w", err)
+	}
+	if unverified != nil {
+		return info, fmt.Errorf("StepInfoForSystem: %w", unverified)
 	}
 	return info, nil
 }
