@@ -100,7 +100,8 @@ type HinfSynResult struct {
 // verified as above; when it fails too, HinfSyn returns the first error.
 // Plants that the Hamiltonian solves handle are designed by them alone.
 //
-// The Riccati tests are invariant under scaling z or w: each Hamiltonian is
+// The Hamiltonian Riccati tests are invariant under scaling z or w (the
+// pencil repeat only approximately so): each Hamiltonian is
 // balanced by a power-of-two symplectic scaling, the semidefiniteness test
 // applies to the balanced solution, the constant terms are formed as Gram
 // matrices, and the bisection's give-up bound scales with the plant.
