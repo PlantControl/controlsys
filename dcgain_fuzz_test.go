@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/cmplx"
 	"testing"
@@ -13,6 +14,8 @@ import (
 // infinity, as MATLAB dcgain; its sign is free when further intended
 // poles lie within roundoff of x0 (a nearby model has them at x0 too). Poles within the eigenvalue error of x0, or
 // an ill-conditioned solve, are skipped. I/O delays never change the gain.
+// ErrAccuracyUnverified comes only with an exact pole at x0, and its value
+// meets the same checks.
 func FuzzDCGain(f *testing.F) {
 	for _, s := range fzDCGainSeeds() {
 		fzAddSeed(f, s)
@@ -21,14 +24,22 @@ func FuzzDCGain(f *testing.F) {
 		sys := s.System(t, fzSysOpts{})
 		g, err := sys.DCGain()
 		fzContract(t, s, "DCGain", g != nil, err)
-		fzErr(t, s, "DCGain", err)
+		unverified := errors.Is(err, ErrAccuracyUnverified)
+		if !unverified {
+			fzErr(t, s, "DCGain", err)
+		}
 		n, m, p := s.N, s.M, s.P
 		if r, c := g.Dims(); r != p || c != m {
 			t.Fatalf("DCGain is %d×%d, want %d×%d\n%s", r, c, p, m, s)
 		}
 		dg, err := s.System(t, fzSysOpts{Delays: true}).DCGain()
 		fzContract(t, s, "DCGain(delayed)", dg != nil, err)
-		fzErr(t, s, "DCGain(delayed)", err)
+		if errors.Is(err, ErrAccuracyUnverified) != unverified {
+			t.Fatalf("DCGain(delayed) error %v, delay-free unverified %v\n%s", err, unverified, s)
+		}
+		if !unverified {
+			fzErr(t, s, "DCGain(delayed)", err)
+		}
 		for i := range p {
 			for j := range m {
 				v := g.At(i, j)
@@ -87,10 +98,16 @@ func FuzzDCGain(f *testing.F) {
 					}
 				}
 			}
+			if unverified {
+				fzSkip(t, "DCGain: "+ErrAccuracyUnverified.Error())
+			}
 			if finite {
 				fzSkip(t, "integrator cancelled in an entry")
 			}
 			return
+		}
+		if unverified {
+			t.Fatalf("DCGain: %v without an exact pole at x0\n%s", ErrAccuracyUnverified, s)
 		}
 		r := s.EigErr()
 		minDist, maxDist := math.Inf(1), 0.0
