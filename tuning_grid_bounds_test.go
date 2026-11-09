@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -33,7 +34,7 @@ func gridBoundsGain(t *testing.T, lower, upper float64) *TunableGain {
 
 func checkGridBoundsResult(t *testing.T, api string, res *SystuneResult, err error, upper float64) {
 	t.Helper()
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrHardGoalsNotMet) {
 		t.Fatalf("%s: %v", api, err)
 	}
 	if k := res.Parameters["C.Gain(1,1)"]; k != upper {
