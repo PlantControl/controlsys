@@ -76,17 +76,20 @@ func newtonKantorovich(A, B, R *mat.Dense, opts *RiccatiOpts, X, K *mat.Dense, s
 }
 
 // unprovenReduced returns res, the K of reduced inputs gainOfX accepts as
-// the gain of its X, unless newtonUnproven: then K is the converged Hewer
-// gain (hewerGainConverged), X kept, else ok is false with miss d in
-// units of gainFloor (Accuracy 1). On weakly controllable large modes
-// such K were 0.0175 to 10.4 off the 320-bit gain at Accuracy 0, the
-// Hewer sequence from their X moving K by 1e-10 at its first step and by
-// 0.03 to 0.95 at its second.
+// the gain of its X, unless newtonUnproven: then it is the converged
+// Hewer solution (hewerSolution, K, X and EᵀXE replaced), else ok is
+// false with miss d in units of gainFloor (Accuracy 1). On weakly
+// controllable large modes such K were 0.0175 to 10.4 off the 320-bit
+// gain at Accuracy 0, the Hewer sequence from their X moving K by 1e-10
+// at its first step and by 0.03 to 0.95 at its second. X is not held to
+// res.X (hewerGainConverged): there 180 of 40000 rows with X 1.2e-8 to
+// 2.3e-7 off the 320-bit X, within their eps-sensitivity, would have lost
+// Accuracy 0.
 func unprovenReduced(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult, d gainDist) (*RiccatiResult, float64, bool) {
 	if !newtonUnproven(A, B, R, opts, res.X, res.K, res.step) {
 		return res, 0, true
 	}
-	if h, ok := hewerGainConverged(A, B, Q, R, opts, red, res); ok {
+	if h, ok := hewerSolution(A, B, Q, R, opts, red, res); ok {
 		return h, 0, true
 	}
 	return res, d.units(gainFloor), false
