@@ -62,7 +62,9 @@ type LooptuneOptions struct {
 // evaluation fails (for example an unstable closed loop under an overshoot
 // goal) or scores NaN/Inf is skipped as infeasible; when no candidate scores,
 // the first candidate error is returned, or ErrNoTuningCandidate. ctx is
-// checked before each evaluation.
+// checked before each evaluation. GridTune treats every goal as soft, so a
+// missed goal leaves Pass false with a nil error, never ErrHardGoalsNotMet;
+// use Systune with hard goals for that error.
 func GridTune(ctx context.Context, model *GeneralizedClosedLoop, goals []TuningGoal, opts *SystuneOptions) (*SystuneResult, error) {
 	res, err := gridSearch(ctx, model, goals, nil, opts)
 	if err != nil {
