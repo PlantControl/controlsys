@@ -816,7 +816,9 @@ func (sys *System) dcGainByBlockLaurent(offPole bool) (g *mat.Dense, ok bool, ex
 		return g, true, nil
 	}
 	if offPole && n <= exactDetMaxOrder && exactShiftedDetIsZero(sys.A.RawMatrix(), x0) {
-		exact, _ = exactDCGainLimitAt(sys.A, sys.B, sys.C, sys.D, x0, true)
+		if e, overflow := exactDCGainLimitAt(sys.A, sys.B, sys.C, sys.D, x0, true); !overflow {
+			exact = e
+		}
 	}
 	for _, mode := range []laurentMode{laurentDeflate, laurentDeflateLoose} {
 		if g, ok := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, mode); ok {
