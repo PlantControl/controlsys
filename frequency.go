@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/cmplx"
@@ -324,7 +325,7 @@ func (e frequencyEvaluator) sweepInto(omega []float64, data []complex128, solver
 		pt := e.pointAt(w)
 		dst := data[k*pm : (k+1)*pm]
 		if err := evalWithPoleLimit(eval, e.sys, pt, dst); err != nil {
-			return err
+			return atFrequency(w, err)
 		}
 		if delaySS != nil {
 			applyIODelayMatrixAtS(e.sys, pt, dst, e.p, e.m, delaySS)
@@ -427,10 +428,19 @@ func (e frequencyEvaluator) descriptorSweepInto(omega []float64, dst []complex12
 	eval := e.pointSolver(len(omega)).evalInto
 	for k, w := range omega {
 		if err := evalWithPoleLimit(eval, e.sys, e.pointAt(w), dst[k*pm:(k+1)*pm]); err != nil {
-			return err
+			return atFrequency(w, err)
 		}
 	}
 	return nil
+}
+
+// atFrequency names ω in an unverified state underflow (errStateUnderflow),
+// which fails the whole sweep.
+func atFrequency(w float64, err error) error {
+	if errors.Is(err, errStateUnderflow) {
+		return fmt.Errorf("at ω = %g: %w", w, err)
+	}
+	return err
 }
 
 func (e frequencyEvaluator) matrix(data []complex128, omega []float64) *FreqResponseMatrix {
@@ -728,7 +738,7 @@ func freqResponseLFT(sys *System, omega []float64, p, m int) (*FreqResponseMatri
 	td := newTimeDomain(sys.Dt)
 	for k, w := range omega {
 		if err := evalWithPoleLimit(eval, sys, td.frequencyPoint(w), data[k*p*m:(k+1)*p*m]); err != nil {
-			return nil, err
+			return nil, atFrequency(w, err)
 		}
 	}
 	return newFreqResponseMatrix(data, omega, p, m, nil, nil), nil

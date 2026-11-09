@@ -180,6 +180,40 @@ func (br *balancedRealization) undrivenMask(rs, cs int) uint64 {
 	return mask
 }
 
+// undrivenStates reports, at i*m+j, whether input j cannot reach state i
+// through B̂ and the off-diagonal pencil, as undrivenMask does without its
+// size limit.
+func (br *balancedRealization) undrivenStates() []bool {
+	n, m := br.n, br.m
+	out := make([]bool, n*m)
+	reached := make([]bool, n)
+	q := make([]int, 0, n)
+	for j := range m {
+		clear(reached)
+		q = q[:0]
+		for i := range n {
+			if br.b[i*m+j] != 0 {
+				reached[i] = true
+				q = append(q, i)
+			}
+		}
+		for len(q) > 0 {
+			k := q[len(q)-1]
+			q = q[:len(q)-1]
+			for i := range n {
+				if !reached[i] && (br.a[i*n+k] != 0 || br.e != nil && br.e[i*n+k] != 0) {
+					reached[i] = true
+					q = append(q, i)
+				}
+			}
+		}
+		for i := range n {
+			out[i*m+j] = !reached[i]
+		}
+	}
+	return out
+}
+
 // underflowResponseInto sets dst to the double-double response at pt of
 // src's n×n, n×m, p×n realization, unbalanced, where a balanced state
 // underflowed, and returns errStateUnderflow where src is nil or that does
@@ -496,7 +530,11 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 		return underflowResponseInto(bd.src, n, m, p, pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
-		ddResponseInto(bd.sys, pt, dst)
+		if err := ddResponse(bd.sys, pt, dst); errors.Is(err, errStateUnderflow) {
+			return err
+		} else if err != nil {
+			return errSingularPencil
+		}
 	}
 	return finiteResponse(dst)
 }

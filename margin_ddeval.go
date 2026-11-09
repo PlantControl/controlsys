@@ -60,10 +60,19 @@ func (x ddComplex) mul(y ddComplex) ddComplex {
 	return ddComplex{x.re.mul(y.re).add(x.im.mul(y.im).neg()), x.re.mul(y.im).add(x.im.mul(y.re))}
 }
 
+// ldexp returns x·2ᵏ.
+func (x dd) ldexp(k int) dd { return dd{math.Ldexp(x.hi, k), math.Ldexp(x.lo, k)} }
+
+// div returns x/y as x·ȳ/|y|² of y scaled by a power of two to unit size,
+// so that neither x·ȳ nor |y|² underflows or overflows where x/y does not;
+// the scaling is exact, so the result is that of the unscaled form wherever
+// that stays in the normal range.
 func (x ddComplex) div(y ddComplex) ddComplex {
+	_, k := math.Frexp(max(math.Abs(y.re.hi), math.Abs(y.im.hi)))
+	y = ddComplex{y.re.ldexp(-k), y.im.ldexp(-k)}
 	n := y.re.mul(y.re).add(y.im.mul(y.im))
 	t := x.mul(ddComplex{y.re, y.im.neg()})
-	return ddComplex{t.re.div(n), t.im.div(n)}
+	return ddComplex{t.re.div(n).ldexp(-k), t.im.div(n).ldexp(-k)}
 }
 
 func (x ddComplex) abs1() float64 { return math.Abs(x.re.hi) + math.Abs(x.im.hi) }

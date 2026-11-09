@@ -3,7 +3,9 @@ package controlsys
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/cmplx"
+	"math/rand/v2"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -85,12 +87,19 @@ func TestEvalFr_HugeDiagonalBalanceNoOverflow(t *testing.T) {
 
 // ECC62L: where the unbalanced states underflow too, the fallback cannot
 // verify and the point fails instead of returning the lost-state value.
-func TestEvalFr_StateUnderflowUnverifiedFails(t *testing.T) {
+// DZSEVY: scaling each B column by its own power of two instead of σ keeps
+// B/σ ≈ 3.7e-331 in range, so the point now resolves; it must match the
+// oracle or fail.
+func TestEvalFr_StateUnderflowVerifiedOrFails(t *testing.T) {
 	sys := hugeDiagonalModel(t, 2, 1e300, 1e-30, false)
 	want := bigSISOResponse(sys, 1i)
 	g, err := sys.EvalFr(1i)
-	if !errors.Is(err, ErrOverflow) {
-		t.Errorf("EvalFr(1i) = %v, %v; want ErrOverflow (oracle %v not resolvable: B/σ ≈ 3.7e-331)", g, err, want)
+	if err != nil {
+		if !errors.Is(err, ErrOverflow) {
+			t.Errorf("EvalFr(1i): %v, want ErrOverflow", err)
+		}
+	} else if rel := cmplx.Abs(g[0][0]-want) / cmplx.Abs(want); !(rel <= 1e-12) {
+		t.Errorf("EvalFr(1i) = %v, want %v (rel %.3g)", g[0][0], want, rel)
 	}
 }
 
@@ -237,8 +246,9 @@ func TestEvalFr_NearPoleBalancedStateUnderflow(t *testing.T) {
 // within normwise working precision of the pair, the double solve is
 // singular, and the double-double fallback's complex division x·ȳ/|y|²
 // underflows (B/σ ≈ 7e-301 times a 7e-51 pivot), losing every state; the
-// response was 0 with nil error. It must match the oracle or fail with
-// ErrOverflow.
+// response was 0 with nil error. It must match the oracle, fail with
+// ErrOverflow, or be the pole response +Inf: every such ω is within
+// 10ε·‖A‖ of the pair, the pole rule (XKU3SI).
 func TestFreqResponse_DDFallbackLostState(t *testing.T) {
 	const k, w = 1e300, 1e250
 	for _, damp := range []float64{1e-15, 1e-10} {
@@ -268,10 +278,93 @@ func TestFreqResponse_DDFallbackLostState(t *testing.T) {
 				}
 			}
 			for name, v := range got {
-				if !(cmplx.Abs(v-want) <= 1e-12*cmplx.Abs(want)) {
+				if !cmplx.IsInf(v) && !(cmplx.Abs(v-want) <= 1e-12*cmplx.Abs(want)) {
 					t.Errorf("damp=%g %s(%g) = %v, want %v", damp, name, om, v, want)
 				}
 			}
 		}
+	}
+}
+
+// DZSEVY: x·ȳ/|y|² underflowed for 7.5e-301/7.5e-51 and overflowed to NaN
+// for 1e200/1e200; scaling y to unit size keeps the quotient, and the result
+// is bit-identical to the unscaled form in the normal range.
+func TestDDComplexDiv_ScaledRange(t *testing.T) {
+	for _, tc := range []struct{ x, y, want complex128 }{
+		{7.5e-301, 7.5e-51, 1e-250},
+		{7.5e-301, 7.5e-51i, -1e-250i},
+		{1e200, 1e200, 1},
+		{1e300 + 1e300i, 1e299 - 1e299i, 10i},
+		{3e-200, 1e-200 + 1e-200i, 1.5 - 1.5i},
+	} {
+		got := ddComplex{dd{real(tc.x), 0}, dd{imag(tc.x), 0}}.div(ddComplex{dd{real(tc.y), 0}, dd{imag(tc.y), 0}}).complex128()
+		if !(cmplx.Abs(got-tc.want) <= 1e-15*cmplx.Abs(tc.want)) {
+			t.Errorf("%v / %v = %v, want %v", tc.x, tc.y, got, tc.want)
+		}
+	}
+	r := rand.New(rand.NewPCG(1, 2))
+	for range 2000 {
+		v := func() dd {
+			hi := r.NormFloat64() * math.Pow(2, float64(r.IntN(200)-100))
+			return dd{hi, hi * 0x1p-60 * r.NormFloat64()}
+		}
+		x, y := ddComplex{v(), v()}, ddComplex{v(), v()}
+		n := y.re.mul(y.re).add(y.im.mul(y.im))
+		tt := x.mul(ddComplex{y.re, y.im.neg()})
+		want := ddComplex{tt.re.div(n), tt.im.div(n)}
+		if got := x.div(y); got != want {
+			t.Fatalf("%v / %v = %v, want unscaled %v", x, y, got, want)
+		}
+	}
+}
+
+// DZSEVY: a pair at ±j·4.6e283 behind a 1.7e303 state. The verified
+// unbalanced fallback returned DCGain/EvalFr(0) 15% off (base 40%): its
+// normwise check passed a residual 265× ‖B‖ since ‖M‖‖x‖ ≈ 5e19. The value
+// must match the oracle or fail.
+func TestEvalFr_GradedPairVerifiedFallback(t *testing.T) {
+	sys, err := New(
+		mat.NewDense(3, 3, []float64{
+			-1.7450552415535818e+303, 1.1997738833608034e+303, 0,
+			0, -1.9245718341395303e+273, 4.5664431807527864e+283,
+			0, -4.5664431807527864e+283, -1.9245718341395303e+273}),
+		mat.NewDense(3, 1, []float64{1.5963082914223263, 1, -0.9441679141493659}),
+		mat.NewDense(1, 3, []float64{1, 1, 0.6417677485106921}),
+		mat.NewDense(1, 1, []float64{0}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bigSISOResponse(sys, 0)
+	got := map[string]complex128{}
+	if g, err := sys.EvalFr(0); err == nil {
+		got["EvalFr"] = g[0][0]
+	} else if !errors.Is(err, ErrOverflow) && !errors.Is(err, ErrSingularTransform) {
+		t.Errorf("EvalFr(0): %v", err)
+	}
+	if g, err := sys.DCGain(); err == nil {
+		got["DCGain"] = complex(g.At(0, 0), 0)
+	}
+	for name, v := range got {
+		if !(cmplx.Abs(v-want) <= 1e-12*cmplx.Abs(want)) {
+			t.Errorf("%s = %v, want %v", name, v, want)
+		}
+	}
+}
+
+// DZSEVY: the componentwise verifier passes the rounded exact solution of a
+// graded pencil and rejects one perturbed by 1e-12 in a state whose row
+// terms are 1e-30 of the largest, which a normwise test cannot see.
+func TestDDScaled_ComponentwiseVerifier(t *testing.T) {
+	br := balancedRealization{n: 2, m: 1, p: 1,
+		a: []float64{-1, 0, 1e-30, -1e-30},
+		b: []float64{1, 0}, c: []float64{1, 1}}
+	sc := ddScaled{br: &br, pr: 0, pi: 0, qr: -1, sigma: 1, bExp: []int{1}}
+	sc.x = []complex128{0.5, 0.5}
+	if !sc.componentwiseStable() {
+		t.Errorf("exact solution rejected")
+	}
+	sc.x[1] = 0.5 * (1 + 1e-12)
+	if sc.componentwiseStable() {
+		t.Errorf("perturbed state accepted")
 	}
 }
