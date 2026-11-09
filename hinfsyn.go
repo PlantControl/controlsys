@@ -22,6 +22,9 @@ import (
 // discrete Riccati equations; when HinfSyn first shifts modes away from
 // z = ±1 (see HinfSyn), that of the shifted plant.
 type HinfSynResult struct {
+	// K is the controller: MATLAB's central controller, or, where that one
+	// cannot be certified to stabilize P, another member of the controller
+	// family at the same γ (see HinfSyn).
 	K *System
 	// CL is the closed loop of P with K from w to z, LFT(P, K), as MATLAB CL.
 	CL *System
@@ -105,7 +108,11 @@ type HinfSynResult struct {
 // that its own rounding destabilizes; HinfSyn then returns the strictly
 // proper controller of the Youla family at that γ (zero feedthrough before
 // the loop shift, so the shift needs no inverse) when it meets γ and is
-// certified, departing from MATLAB's central K there. When no controller
+// certified. A nil error takes precedence over parity with MATLAB's
+// central K: K may then be a different stabilizing controller at the same
+// γ. The exact test runs only within the exact root-locus path's size gates
+// (rlExactMaxStates, rlExactBitBudget); a loop beyond them that the
+// Lyapunov certificate does not cover is uncertified. When no controller
 // is certified, the smallest stable one in float64 is returned with
 // ErrAccuracyUnverified. Gamma itself is the float64 norm of CL.
 //

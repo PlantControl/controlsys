@@ -208,7 +208,9 @@ func augwInterconnect(G, W1, W2, W3 *System, ny, nu int) (*System, error) {
 // MixsynResult is the mixed-sensitivity H∞ design of MATLAB
 // [K,CL,gamma,info] = mixsyn(G,W1,W2,W3).
 type MixsynResult struct {
-	// K is the controller, driven by e = r − y and producing u.
+	// K is the controller, driven by e = r − y and producing u. With a nil
+	// error its exact loop with G is certified stable, which takes
+	// precedence over MATLAB's central controller (see HinfSyn).
 	K *System
 	// CL is [W1·S; W2·K·S; W3·T] from w to the present z channels; it is
 	// Info.CL.

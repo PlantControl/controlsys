@@ -112,7 +112,7 @@ func roundRat(M [][]*big.Rat) *mat.Dense {
 // exactStable reports whether the rational matrix M is Hurwitz (Schur when
 // discrete), decided exactly on the integer characteristic polynomial of
 // δ·M, δ the least common denominator of its entries (intHurwitz,
-// intSchur).
+// intSchur). It is false, uncertified, outside exactWithinBudget.
 func exactStable(M [][]*big.Rat, discrete bool) bool {
 	delta := big.NewInt(1)
 	var g big.Int
@@ -131,12 +131,34 @@ func exactStable(M [][]*big.Rat, discrete bool) bool {
 			m[i][j] = t.Quo(t, v.Denom())
 		}
 	}
+	if !exactWithinBudget(m) {
+		return false
+	}
 	p := intCharPoly(m)
 	if !discrete {
 		return intHurwitz(p)
 	}
 	intScaleRoots(p, delta, big.NewInt(1))
 	return intSchur(p)
+}
+
+// exactWithinBudget applies the exact root-locus path's size gates to the
+// integer matrix m: order at most rlExactMaxStates and n·(s+64) at most
+// rlExactBitBudget, s the largest entry's bit length, which bounds the
+// binary spread of the scaled entries and so the integer size of
+// intCharPoly.
+func exactWithinBudget(m [][]*big.Int) bool {
+	n := len(m)
+	if n > rlExactMaxStates {
+		return false
+	}
+	s := 0
+	for _, row := range m {
+		for _, v := range row {
+			s = max(s, v.BitLen())
+		}
+	}
+	return n*(s+64) <= rlExactBitBudget
 }
 
 func ratMat(m *mat.Dense) [][]*big.Rat {

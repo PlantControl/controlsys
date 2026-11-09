@@ -166,3 +166,29 @@ func TestLyapunovStableAndExactStable(t *testing.T) {
 		}
 	}
 }
+
+// Beyond the exact path's size gates (rlExactMaxStates, rlExactBitBudget)
+// exactStable fails closed: stable matrices are reported uncertified.
+func TestExactStableSizeGateFailsClosed(t *testing.T) {
+	n := rlExactMaxStates + 1
+	A := mat.NewDense(n, n, nil)
+	for i := range n {
+		A.Set(i, i, -float64(i+1))
+	}
+	if exactStable(ratMat(A), false) {
+		t.Errorf("order %d > rlExactMaxStates: exactStable true, want false", n)
+	}
+	if !lyapunovStable(A, false) {
+		t.Errorf("order %d diagonal Hurwitz: lyapunovStable false", n)
+	}
+	// Upper triangular, Hurwitz, binary spread 2000 over 3 states:
+	// 3·(2001+64) > rlExactBitBudget.
+	B := mat.NewDense(3, 3, []float64{-1, 0x1p1000, 0, 0, -0x1p-1000, 0, 0, 0, -1})
+	if exactStable(ratMat(B), false) {
+		t.Error("over rlExactBitBudget: exactStable true, want false")
+	}
+	C := mat.NewDense(3, 3, []float64{-1, 1, 0, 0, -0x1p-500, 0, 0, 0, -1})
+	if !exactStable(ratMat(C), false) {
+		t.Error("within budget: exactStable false on a Hurwitz triangular matrix")
+	}
+}
