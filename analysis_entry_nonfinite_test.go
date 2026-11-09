@@ -196,9 +196,19 @@ func analysisCases() []analysisCase {
 			if err != nil {
 				return err
 			}
-			return analysisErr(Looptune(ctx, s, C0, []float64{1}, nil, &LooptuneOptions{GridPoints: 5}))
+			return analysisHardGoalsKept(Looptune(ctx, s, C0, []float64{1}, nil, &LooptuneOptions{GridPoints: 5}))
 		}},
 	}
+}
+
+// analysisHardGoalsKept is analysisErr for Looptune on a finite model, whose
+// best K misses the crossover goal: a full result with ErrHardGoalsNotMet
+// counts as no error (GAV3BD).
+func analysisHardGoalsKept(res *SystuneResult, err error) error {
+	if res != nil && errors.Is(err, ErrHardGoalsNotMet) {
+		return nil
+	}
+	return err
 }
 
 func analysisOutcome(err error) string {

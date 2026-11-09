@@ -178,8 +178,8 @@ func TestSystuneSoftAndHardGoals(t *testing.T) {
 	}
 	impossible := []TuningGoal{mustOK(NewPolesGoal("", 100, 0, math.Inf(1)))}
 	res, err = Systune(context.Background(), closed, soft, impossible, &SystuneOptions{GridPoints: 9})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrHardGoalsNotMet) || res == nil {
+		t.Fatalf("infeasible hard goal: res %v, err %v, want result with ErrHardGoalsNotMet", res != nil, err)
 	}
 	if res.Pass || res.HardScore <= 0 || res.Parameters["K"] != 5 {
 		t.Errorf("infeasible hard goal: Pass=%v HardScore=%g K=%g, want false, >0, 5", res.Pass, res.HardScore, res.Parameters["K"])

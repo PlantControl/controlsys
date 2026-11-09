@@ -10,8 +10,10 @@ import "errors"
 // ErrSchurFailed is itself an ErrNotConverged.
 //
 // An operation that returns a result alongside a non-nil error does so only
-// with ErrAccuracyUnverified: the result is computed but not certified to its
-// documented accuracy. Every other error comes with a nil result.
+// with ErrAccuracyUnverified, when the result is computed but not certified
+// to its documented accuracy, or with ErrHardGoalsNotMet, when a Systune or
+// Looptune design misses a hard goal. Every other error comes with a nil
+// result.
 var (
 	// ErrInvalidArgument reports an argument that is wrong regardless of the
 	// model's shape: a nil model, function or required matrix, a NaN/Inf value,
@@ -263,6 +265,14 @@ var (
 	// ErrNoTuningCandidate reports a controller-tuning search in which no
 	// candidate produced a finite score.
 	ErrNoTuningCandidate = errors.New("controlsys: no tuning candidate produced a finite score")
+
+	// ErrHardGoalsNotMet reports a Systune or Looptune design that misses at
+	// least one hard goal: no grid candidate met them all, as MATLAB's
+	// gHard > 1. The candidate with the smallest hard violation is returned,
+	// non-nil and in full, alongside the error, which names the failing
+	// goals; Goals and HardScore say by how much. It is not proof that no
+	// controller meets them.
+	ErrHardGoalsNotMet = errors.New("controlsys: hard tuning goals not met")
 
 	// ErrProcessData reports malformed process-identification data.
 	ErrProcessData = errors.New("controlsys: invalid process identification data")
