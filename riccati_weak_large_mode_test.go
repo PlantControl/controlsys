@@ -125,7 +125,8 @@ func TestReducedGainNewtonProven(t *testing.T) {
 // voids. On base 2d35ddd Dare and Dlqr returned them at Accuracy 0 with X
 // 2.3e-7 and 5.5e-8 off the 320-bit X, within their eps-sensitivity; held
 // to newtonTol of the Hewer X (hewerGainConverged) they lost it. They
-// take the converged Hewer solution (hewerSolution) and stay honest.
+// take the converged Hewer solution (hewerSolution), the 320-bit one
+// rounded.
 func TestDareUnprovenReducedTakesHewerSolution(t *testing.T) {
 	rows := []struct {
 		name          string
@@ -145,8 +146,15 @@ func TestDareUnprovenReducedTakesHewerSolution(t *testing.T) {
 				t.Errorf("%s %s: %v", c.name, api, err)
 				continue
 			}
-			pr := nearSingularRiccati{A: c.A, B: c.B, Q: c.Q, R: c.R, E: c.E, generalized: api == "Dare"}
-			if ex, ek, ok := pr.honest(t, res.X, res.K); !ok {
+			Y, X, K, ok := nearSingularOracle(false, c.A, c.B, c.Q, c.R, nil, c.E, res.K)
+			want := X
+			if api == "Dlqr" {
+				want = Y
+			}
+			if !ok {
+				t.Fatalf("%s %s: oracle failed", c.name, api)
+			}
+			if ek, ex := relErr(res.K, K), relErr(res.X, want); ek > 1e-12 || ex > 1e-12 {
 				t.Errorf("%s %s: K %.3g, X %.3g off the 320-bit solution", c.name, api, ek, ex)
 			}
 		}
