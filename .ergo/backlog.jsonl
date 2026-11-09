@@ -161,3 +161,4 @@
 {"type":"snapshot_dependency","from_id":"4ZWFL5","to_id":"L4BCTU"}
 {"type":"snapshot_dependency","from_id":"IP4PC3","to_id":"ELT76F"}
 {"type":"snapshot_dependency","from_id":"SJHCSB","to_id":"XBDPRF"}
+{"type":"transaction","version":1,"events":[{"type":"claim","ts":"2026-11-09T13:04:21.285305Z","data":{"id":"INGGF2","agent_id":"coordinator@inggf2","ts":"2026-11-09T13:04:21.285305Z"}},{"type":"state","ts":"2026-11-09T13:04:21.285305Z","data":{"id":"INGGF2","state":"doing","ts":"2026-11-09T13:04:21.285305Z"}}]}
