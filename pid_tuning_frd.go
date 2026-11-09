@@ -58,10 +58,11 @@ import (
 // its sensitivity peak. A design carrying any of the warnings above that
 // its stability, margins or sensitivity peak is not certified is returned
 // in full with an error wrapping ErrAccuracyUnverified that names which;
-// MATLAB pidtune returns it without one. The warning that finite coverage
-// cannot certify global stability, which every design carries, and a user
-// UnstablePoles count, which the strict count does not take, do not make
-// the error. Other errors follow TunePID and come with a nil result.
+// MATLAB pidtune returns it without one. So is every design under a
+// positive UnstablePoles, which the strict count does not take: only the
+// looser count checks its stability. The warning that finite coverage
+// cannot certify global stability, which every design carries, does not
+// make the error. Other errors follow TunePID and come with a nil result.
 func TunePIDFRD(ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	res, err := tunePIDFRDData(ctx, frd, family, o)
 	var u pidTuningUnverified
@@ -620,6 +621,7 @@ func pidTuningFRDDesign(ctx context.Context, base, strict pidTuningPlant, certif
 		r.Evidence.Evaluations = used
 		switch {
 		case !counted:
+			r.unverified.stability = true
 		case p.nyquistCount:
 			if _, known := pidTuningFRDNyquistCount(*r.Controller, p); !known {
 				var why []string

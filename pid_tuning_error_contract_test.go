@@ -77,6 +77,19 @@ func TestTunePIDErrorContractUncertifiedStability(t *testing.T) {
 	}
 }
 
+// A positive UnstablePoles leaves only the looser count, so no design is
+// certified stable.
+func TestTunePIDFRDErrorContractUnstablePoles(t *testing.T) {
+	num, den := []float64{1}, []float64{1, 1, -2}
+	frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, num, den, 0, .01, 100, 120), num, den)
+	one := 1
+	r, err := TunePIDFRD(context.Background(), frd, PidtunePID, PIDTuningOptions{CrossoverFrequency: 3, UnstablePoles: &one})
+	pidTuningWantUnverified(t, "UnstablePoles 1", "TunePIDFRD: ", "stability", r, err)
+	if pidHasWarning(r, "not certified") {
+		t.Fatalf("warnings %q", r.Evidence.Warnings)
+	}
+}
+
 func TestTunePIDFRDErrorContractUncertifiedPeak(t *testing.T) {
 	num, den := []float64{3.2276235464735703}, []float64{1, -0.1353352832366127}
 	frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, num, den, 1, .1, 3, 235), num, den)
@@ -125,14 +138,14 @@ func TestTunePIDErrorContractOtherErrors(t *testing.T) {
 
 // pidTuneFRDKept runs TunePIDFRD for tests that inspect uncertified designs
 // too: it checks that ErrAccuracyUnverified comes exactly with a "not
-// certified" warning and returns it as nil.
+// certified" warning or a positive UnstablePoles and returns it as nil.
 func pidTuneFRDKept(t testing.TB, ctx context.Context, frd *FRD, family PidtuneType, o PIDTuningOptions) (*PIDTuningResult, error) {
 	t.Helper()
 	r, err := TunePIDFRD(ctx, frd, family, o)
 	if (r != nil) != (err == nil || errors.Is(err, ErrAccuracyUnverified)) {
 		t.Fatalf("TunePIDFRD: result %v with err %v", r != nil, err)
 	}
-	if r != nil && errors.Is(err, ErrAccuracyUnverified) != pidHasWarning(r, "not certified") {
+	if r != nil && errors.Is(err, ErrAccuracyUnverified) != (pidHasWarning(r, "not certified") || o.UnstablePoles != nil && *o.UnstablePoles > 0) {
 		t.Fatalf("TunePIDFRD: err %v with warnings %q", err, r.Evidence.Warnings)
 	}
 	if errors.Is(err, ErrAccuracyUnverified) {

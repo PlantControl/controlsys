@@ -119,7 +119,7 @@ func TestTunePIDFRDDCSignScope(t *testing.T) {
 	num, den := []float64{58.087085573679886, 49.12653285412201}, []float64{1, 0.28773369250817876, 0.011748548943198453}
 	frd := pidExactFRD(t, num, den, 1e-3, 1e3, 600)
 	one := 1
-	r, err := TunePIDFRD(context.Background(), frd, PidtuneI, PIDTuningOptions{UnstablePoles: &one})
+	r, err := pidTuneFRDKept(t, context.Background(), frd, PidtuneI, PIDTuningOptions{UnstablePoles: &one})
 	if err != nil {
 		t.Fatalf("one unstable pole: %v", err)
 	}
