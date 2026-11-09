@@ -30,7 +30,7 @@ func TestTunePIDFRDMatchesAnalyticSystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := TunePIDFRD(context.Background(), frd, PidtunePI, o)
+	b, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePI, o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestTunePIDFRDExactDelayedSystemAgreement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := TunePIDFRD(context.Background(), frd, PidtunePI, o)
+	b, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePI, o)
 	if err != nil {
 		t.Fatal(err)
 	}

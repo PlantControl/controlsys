@@ -50,7 +50,7 @@ func TestTunePIDFRDMarkedStepWithoutFitSmallLoop(t *testing.T) {
 	if stable, known, _ := pidTuningFRDNyquistVerdict(PID2{Ki: 0.4099362096159351, B: 1, C: 1}, p); !stable || !known {
 		t.Errorf("strict chord count on base's I: stable %v known %v", stable, known)
 	}
-	r, err := TunePIDFRD(context.Background(), frd, PidtuneI, PIDTuningOptions{PhaseMargin: 60})
+	r, err := pidTuneFRDKept(t, context.Background(), frd, PidtuneI, PIDTuningOptions{PhaseMargin: 60})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestTunePIDFRDResolvedResonanceBehindDelay(t *testing.T) {
 	for k, w := range frd.Omega {
 		frd.Response[k][0][0] *= cmplx.Exp(complex(0, -w*tau))
 	}
-	r, err := TunePIDFRD(context.Background(), frd, PidtunePIDF, PIDTuningOptions{PhaseMargin: 70})
+	r, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePIDF, PIDTuningOptions{PhaseMargin: 70})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestTunePIDFRDArcMarginNotOverstated(t *testing.T) {
 		{"PDF PM70", []float64{12.814587929147747}, []float64{1, 1.2010774041842307, 51.12700861229407, 58.99906242837587, 71.23608811076774, 26.913291945463417}, 0.011569937342781517, 3091.200908811155, 88, PidtunePDF, 70, true},
 	} {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, 0, c.lo, c.hi, c.n), c.num, c.den)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
 		if err != nil {
 			if c.need {
 				t.Errorf("%s: %v", c.name, err)
@@ -230,7 +230,7 @@ func TestTunePIDFRDTwoModesInOneStep(t *testing.T) {
 		if stable, known, _ := pidTuningFRDNyquistVerdict(k, p); stable && known {
 			t.Errorf("%s: strict count finds unstable %+v stable", c.name, k)
 		}
-		r, err := TunePIDFRD(context.Background(), frd, PidtunePIDF, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePIDF, c.o)
 		if err != nil {
 			continue
 		}
@@ -259,7 +259,7 @@ func TestTunePIDFRDFailsUnstableFallbackShortData(t *testing.T) {
 	if stable, known, top := pidTuningFRDNyquistVerdict(base, p); stable || !known || top {
 		t.Errorf("strict verdict on base's PD: %v %v %v, want unstable on an unreached end", stable, known, top)
 	}
-	r, err := TunePIDFRD(context.Background(), frd, PidtunePD, PIDTuningOptions{})
+	r, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePD, PIDTuningOptions{})
 	if err == nil && !pidFRDStrictStable(num, den, *r.Controller) {
 		t.Errorf("unstable %+v returned", *r.Controller)
 	} else if err != nil && !errors.Is(err, ErrPIDTuningTargetUnattainable) {

@@ -20,7 +20,7 @@ func TestTunePIDFRDMarkovEndAboveBand(t *testing.T) {
 	if p, _ := pidTuningFRDStrictPlant(frd, nil); p.markov == 0 {
 		t.Errorf("no Markov end read")
 	}
-	r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+	r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 	if err != nil {
 		t.Fatal(err)
 	}

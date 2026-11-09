@@ -225,7 +225,7 @@ func TestTunePIDFRDNyquistRejectsUnstable(t *testing.T) {
 			}
 			frd.Dt = c.dt
 		}
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			if !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 				t.Errorf("%s: %v", name, err)
@@ -294,7 +294,7 @@ func TestTunePIDFRDNyquistKeepsFallingTop(t *testing.T) {
 		frd.Response[k][0][0] = pidPolyAt(num, z) / pidPolyAt(den, z)
 	}
 	frd.Dt = dt
-	r, err := TunePIDFRD(context.Background(), frd, PidtunePI, PIDTuningOptions{PhaseMargin: 45})
+	r, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePI, PIDTuningOptions{PhaseMargin: 45})
 	if err != nil {
 		t.Fatal(err)
 	}

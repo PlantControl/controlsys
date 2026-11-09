@@ -33,7 +33,7 @@ func TestTunePIDFRDChordStepCertification(t *testing.T) {
 	} {
 		p := pidFRDResonanceSweepCase(rand.New(rand.NewPCG(2525, c.seed)))
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, p.num, p.den, 0, p.lo, p.hi, p.n), p.num, p.den)
-		r, err := TunePIDFRD(context.Background(), frd, p.family, p.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, p.family, p.o)
 		if err != nil {
 			t.Errorf("case %d: %v", c.seed, err)
 			continue

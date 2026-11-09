@@ -94,7 +94,7 @@ func TestTunePIDDCEdgeSensitivity(t *testing.T) {
 func TestTunePIDFRDDCEdgeStable(t *testing.T) {
 	num := []float64{-0.5218348847732306, 0.01176025018024663}
 	den := []float64{1, 0.03931173190809955, 0.0050731315734235775}
-	r, err := TunePIDFRD(context.Background(), pidExactFRD(t, num, den, 1e-3, 1e2, 100), PidtunePDF, PIDTuningOptions{PhaseMargin: 30})
+	r, err := pidTuneFRDKept(t, context.Background(), pidExactFRD(t, num, den, 1e-3, 1e2, 100), PidtunePDF, PIDTuningOptions{PhaseMargin: 30})
 	if err != nil {
 		t.Fatal(err)
 	}

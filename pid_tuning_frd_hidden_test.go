@@ -42,7 +42,7 @@ func TestPIDTuningFRDCountHiddenLoop(t *testing.T) {
 		if pidTuningFRDCertified(k, p) {
 			t.Errorf("%s: strict count certifies unstable %+v", c.name, k)
 		}
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			continue
 		}
@@ -71,7 +71,7 @@ func TestTunePIDFRDHiddenLoopKeepsDesigns(t *testing.T) {
 		{pidFRDStrictCase{"PDF moved", []float64{18608.21363927388, 9351.762842261767}, []float64{1, 7.670368014352613, 6112.424090355229, 113.30099159896533, 1761.349788653694, 1.2126873308642636, 5.9384559332623015}, 0, 0.004755982546556745, 327.1851651627443, 23, PidtunePDF, PIDTuningOptions{}, PID2{Kp: 2.5233608900272682e-05, Kd: 0.0004807209293351548, Tf: 0.0708146591711532}}, 58.5},
 	} {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue
@@ -107,7 +107,7 @@ func TestTunePIDFRDSmoothPeakStaysCertified(t *testing.T) {
 		{"PD at a flat maximum", []float64{3.0657746670401274, 0.09640741963422544}, []float64{1, 3.7931016977404304, 0.35301221155991774}, 0, 0.002011814205805227, 26.3524093461653, 71, PidtunePD, PIDTuningOptions{}, PID2{Kp: 3.7117693349502523, Kd: -0.22214239134900643}},
 	} {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue

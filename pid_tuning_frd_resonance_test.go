@@ -51,7 +51,7 @@ func TestPIDTuningFRDCountResonanceBetweenSamples(t *testing.T) {
 func TestTunePIDFRDResonanceBetweenSamples(t *testing.T) {
 	for _, c := range pidFRDResonanceCases {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, 0, c.lo, c.hi, c.n), c.num, c.den)
-		r, err := TunePIDFRD(context.Background(), frd, PidtunePIDF, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePIDF, c.o)
 		if err != nil {
 			continue
 		}

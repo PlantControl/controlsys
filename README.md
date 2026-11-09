@@ -37,7 +37,7 @@ This package is intended to be usable in production control and estimation code,
 
 `err == nil` means the result is certified to its documented accuracy. Every error wraps a sentinel from `errors.go`, so branch with `errors.Is`:
 
-- `ErrAccuracyUnverified`: the result was computed but its certificate failed. It is returned in full alongside the error, and a caller may keep it as a warning (MATLAB warns). This applies to `Care`, `Dare`, `Lqr`, `Dlqr`, `Lqi`, `Lqrd`, `Lqe`, `Kalman`, `Kalmd`, `Lqg`, `H2Syn`, `PolesDetail`, `C2DFit` and least-squares `C2D` on a descriptor fitted through its pencil.
+- `ErrAccuracyUnverified`: the result was computed but its certificate failed. It is returned in full alongside the error, and a caller may keep it as a warning (MATLAB warns). This applies to `Care`, `Dare`, `Lqr`, `Dlqr`, `Lqi`, `Lqrd`, `Lqe`, `Kalman`, `Kalmd`, `Lqg`, `H2Syn`, `PolesDetail`, `C2DFit`, least-squares `C2D` on a descriptor fitted through its pencil, and `TunePID`/`TunePIDFRD` designs whose stability, margins or sensitivity peak are not certified (`Evidence` says why; MATLAB `pidtune` returns them silently).
 - `ErrNotConverged`: the search or iteration accepted no candidate, so the result is nil. `ErrSchurFailed` is one.
 - `ErrNoStabilizing`: a proved boundary verdict. It also wraps `ErrNotStabilizable` (control side) or `ErrNotDetectable` (estimator side).
 - Every other error comes with a nil result.
@@ -136,6 +136,7 @@ func main() {
 | `NewPIDStd` | PID in standard/ISA form, as MATLAB `pidstd(Kp,Ti,Td,N,Ts)` |
 | `NewPID2` | 2-DOF PID with setpoint weighting, as MATLAB `pid2(Kp,Ki,Kd,Tf,b,c,Ts)` |
 | `Pidtune` | Autotune `P`, `PI`, `PD`, `PID`, or `PIDF` for a SISO plant, as MATLAB `pidtune(sys,type,wc,opts)` |
+| `TunePID` / `TunePIDFRD` | Bounded PID search against a plant or measured frequency data with stability/margin evidence; `ErrAccuracyUnverified` with the design when it is not certified |
 | `WithPIDFormulas` | PID option for discrete integral/derivative formulas |
 | `(*PID).System` / `(*PID2).System` | Convert controller model to state-space |
 | `Loopsens` | Sensitivity and complementary-sensitivity functions |

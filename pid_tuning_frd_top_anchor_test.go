@@ -18,7 +18,7 @@ func TestTunePIDFRDTopUnanchoredBelowResonance(t *testing.T) {
 	num := []float64{25.506210774400728, 829.8029209337119}
 	den := []float64{1, 0.7357032104420134, 497.3597675085502, 248.16080700433128}
 	frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, num, den, 0, 0.04708425628762577, 7.197059520389919, 71), num, den)
-	r, err := TunePIDFRD(context.Background(), frd, PidtunePIDF, PIDTuningOptions{PhaseMargin: 70})
+	r, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePIDF, PIDTuningOptions{PhaseMargin: 70})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestTunePIDFRDTopUnanchoredBelowFarResonance(t *testing.T) {
 		{pidFRDStrictCase{"pair 5.8x above PID", []float64{172.95458044720178, 243.93143446803765}, []float64{1, 2.869209679584981, 1419.286920970929, 2303.5392064029966, 880.1053701399039}, 0, 0.01493150412148546, 6.547781650196431, 159, PidtunePID, PIDTuningOptions{}, PID2{Kp: 0.336780194858159, Ki: 1.8053609921275728, Kd: 5.2798120749694615}}, false},
 	} {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, 0, c.lo, c.hi, c.n), c.num, c.den)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue

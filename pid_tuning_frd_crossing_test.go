@@ -83,7 +83,7 @@ func TestTunePIDFRDUncertifiedCrossingKeepsSign(t *testing.T) {
 	den := []float64{1, 2.8234906807454356, 6.053557929541098, 12.422570998833214}
 	frd := pidExactFRD(t, num, den, .07531, 73.01, 600)
 	for _, family := range []PidtuneType{PidtunePID, PidtunePIDF} {
-		r, err := TunePIDFRD(context.Background(), frd, family, PIDTuningOptions{})
+		r, err := pidTuneFRDKept(t, context.Background(), frd, family, PIDTuningOptions{})
 		if err != nil {
 			t.Errorf("%s: %v", family, err)
 			continue
@@ -118,7 +118,7 @@ func TestTunePIDFRDCrossingsBetweenGridPoints(t *testing.T) {
 		num, den := c.plant[0], c.plant[1]
 		name := fmt.Sprintf("case %d %s", i, c.family)
 		frd := pidExactFRD(t, num, den, 1e-3, 1e3, 600)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: 0.1623})
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: 0.1623})
 		if err != nil {
 			if !c.mayFail || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 				t.Errorf("%s: %v", name, err)
@@ -188,7 +188,7 @@ func TestTunePIDFRDFreeOneGainReportsSampledCrossings(t *testing.T) {
 		{[]float64{0.017257967204262814, 0.1192876907101629}, []float64{1, 0.002049203028195259, 0.2955636770772375}, 1e-3, 1e3, 200, PidtuneI, 0.026179536491585137, 0, false},
 	} {
 		frd := pidExactFRD(t, c.num, c.den, c.lo, c.hi, c.n)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: c.wc})
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, PIDTuningOptions{CrossoverFrequency: c.wc})
 		if err != nil {
 			if c.stable || !errors.Is(err, ErrPIDTuningTargetUnattainable) {
 				t.Errorf("case %d: %v", i, err)

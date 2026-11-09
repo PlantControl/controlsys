@@ -109,7 +109,7 @@ func TestPIDTuningFRDStrictCountRejectsUnknownEnds(t *testing.T) {
 		if stable, known := pidTuningFRDNyquistCount(k, p); stable && known {
 			t.Errorf("%s: strict count certifies unstable %+v", c.name, k)
 		}
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			continue
 		}
@@ -135,7 +135,7 @@ func TestTunePIDFRDKeepsLooserDesigns(t *testing.T) {
 		{"discrete PID", []float64{3.220831505570417}, []float64{1, 0.2825729648756968}, 0.1, 0.2449532382066765, 24.49532382066765, 117, PidtunePID, PIDTuningOptions{}, PID2{Kp: -0.0579, Ki: 0.9845, Kd: 0.00791}},
 		{"continuous ideal PD", []float64{-0.0003520644395038245, 0.004000505073661339, -0.025073389440655926}, []float64{1, 57.281250811462336, 6.403694511504273, 0.13273578080962684}, 0, 1.696e-4, 74.906, 143, PidtunePD, PIDTuningOptions{PhaseMargin: 50.23}, PID2{Kp: -37.18, Kd: -22.01}},
 	} {
-		r, err := TunePIDFRD(context.Background(), pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.family, c.o)
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue
@@ -205,7 +205,7 @@ func TestTunePIDFRDCertificationNeedsAnchoredEnds(t *testing.T) {
 			if stable, known := pidTuningFRDNyquistCount(k, p); stable && known {
 				t.Errorf("%s %d: strict count certifies unstable %+v", c.name, i, k)
 			}
-			r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+			r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 			if err != nil {
 				continue
 			}
@@ -266,7 +266,7 @@ func TestTunePIDFRDStrictCertifiesStableDesigns(t *testing.T) {
 			frds = append(frds, pidFRDStrictWithDC(t, sampled, c.num, c.den))
 		}
 		for i, frd := range frds {
-			r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+			r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 			if err != nil {
 				t.Errorf("%s %d: %v", c.name, i, err)
 				continue
@@ -402,7 +402,7 @@ func TestTunePIDFRDCertifiedDesignsStable(t *testing.T) {
 	for i := range n {
 		c := pidFRDStrictSweepCase(r)
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
-		res, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		res, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			continue
 		}

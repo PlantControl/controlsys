@@ -32,7 +32,7 @@ func TestPIDTuningFRDCountUnresolvedCrossings(t *testing.T) {
 		}
 		for _, family := range []PidtuneType{PidtunePIDF, PidtunePID} {
 			for _, o := range []PIDTuningOptions{{PhaseMargin: 45}, {PhaseMargin: 45, CrossoverFrequency: 0.1768}} {
-				r, err := TunePIDFRD(context.Background(), d, family, o)
+				r, err := pidTuneFRDKept(t, context.Background(), d, family, o)
 				if err != nil {
 					continue
 				}
@@ -73,7 +73,7 @@ func TestTunePIDFRDUnresolvedResonanceUnstable(t *testing.T) {
 		if c.dc {
 			frd = pidFRDStrictWithDC(t, frd, c.num, c.den)
 		}
-		r, err := TunePIDFRD(context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, PIDTuningOptions{PhaseMargin: c.pm})
 		if err != nil {
 			continue
 		}

@@ -50,7 +50,7 @@ func TestTunePIDFRDBoundsFragileSensitivity(t *testing.T) {
 		{[]float64{0.06711826191147859, -0.009292143346332136}, []float64{1, 0.580742570603219, 0.08335532261816535}, 100, 60, 1, false},
 	} {
 		frd := pidExactFRD(t, c.num, c.den, 1e-3, 1e3, c.n)
-		r, err := TunePIDFRD(context.Background(), frd, PidtunePD, PIDTuningOptions{PhaseMargin: c.pm, CrossoverFrequency: c.wc})
+		r, err := pidTuneFRDKept(t, context.Background(), frd, PidtunePD, PIDTuningOptions{PhaseMargin: c.pm, CrossoverFrequency: c.wc})
 		if !c.bounded && c.wc == 0 {
 			te, ok := errors.AsType[*PIDTuningError](err)
 			if !ok || !slices.ContainsFunc(te.Evidence.Warnings, func(w string) bool { return strings.Contains(w, "the true peak is at least the sampled one") }) {
@@ -101,7 +101,7 @@ func TestTunePIDFRDSensitivityBoundKeepsDesigns(t *testing.T) {
 		q.CrossoverFrequency = 1
 		p := pidTuningFRDPlant(frd, nil)
 		ref, refErr := tunePID(context.Background(), "ref", p, family, q)
-		r, err := TunePIDFRD(context.Background(), frd, family, o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, family, o)
 		if refErr != nil {
 			continue
 		}
@@ -150,7 +150,7 @@ func TestTunePIDFRDUnsampledSensitivityUncertified(t *testing.T) {
 		{"ideal PD at infinity", []float64{29.738740460879715}, []float64{1, 58.620180397923804}, 0, 14.294148998804204, 428.82446996412614, 212, PidtunePD, PIDTuningOptions{PhaseMargin: 30}, PID2{Kp: 2.3083139862711555, Kd: -0.02568974752121812}},
 	} {
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue
@@ -173,7 +173,7 @@ func TestTunePIDFRDUnsampledSensitivityUncertified(t *testing.T) {
 	for _, seed := range []uint64{519, 565, 833} {
 		c := pidFRDStrictSweepCase(rand.New(rand.NewPCG(7729, seed)))
 		frd := pidFRDStrictWithDC(t, pidFRDStrictData(t, c.num, c.den, c.dt, c.lo, c.hi, c.n), c.num, c.den)
-		r, err := TunePIDFRD(context.Background(), frd, c.family, c.o)
+		r, err := pidTuneFRDKept(t, context.Background(), frd, c.family, c.o)
 		if err != nil {
 			t.Errorf("seed %d: %v", seed, err)
 			continue
