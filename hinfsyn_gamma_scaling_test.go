@@ -55,7 +55,7 @@ func TestHinfSyn_ZScaledEdgeInvariant(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		d, err := hinfSynScaled("HinfSyn", Pc, ny, nu, "D12", "D21")
+		d, err := hinfSynScaled("HinfSyn", Pc, ny, nu, "D12", "D21", &hinfRiccatiMode{})
 		if err != nil {
 			t.Errorf("k = 2^%d: %v", e, err)
 			continue

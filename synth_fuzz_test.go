@@ -1051,11 +1051,11 @@ func FuzzHinfSyn(f *testing.F) {
 		Psys := P.System(t, s)
 		res, err := HinfSyn(Psys, P.ny, P.nu)
 		fzContract(t, s, "HinfSyn", res != nil, err)
-		if msg := synthesisContractBreach(res != nil, 0, err); msg != "" || errors.Is(err, ErrAccuracyUnverified) || errors.Is(err, ErrNoStabilizing) {
+		if msg := synthesisContractBreach(res != nil, accuracyOfHinfSyn(res), err); msg != "" || errors.Is(err, ErrNoStabilizing) {
 			t.Fatalf("HinfSyn: %s %v\n%s", msg, err, s)
 		}
 		solvable := syRegSolvable(s)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 			if errors.Is(err, ErrInvalidPartition) && syNearUnitPole(s) {
 				fzSkip(t, "HinfSyn: P21(z = ±1) rank with a pole within 1e-12 of ±1 (known followup)")
 			}
@@ -1281,21 +1281,6 @@ func syClear(s *fzSpec, rel float64) bool {
 	return true
 }
 
-// syNumericallySingularD reports a nonzero D with 2-norm condition above
-// 1e12: Mixsyn then misses the optimum or errors on discrete plants with
-// fast sampling (known followup).
-func syNumericallySingularD(s *fzSpec) bool {
-	if mqFro(s.D) == 0 {
-		return false
-	}
-	g := make([]complex128, len(s.D))
-	for i, x := range s.D {
-		g[i] = complex(x, 0)
-	}
-	sv := fzSingularValues(g, s.P, s.M)
-	return sv == nil || !(sv[len(sv)-1] > 1e-12*sv[0])
-}
-
 // syUnstableWithRHPZeros reports an unstable G that may also have
 // transmission zeros in the closed right half plane (exact Routh count of
 // det[sI−A, −B; C, D] for square G; non-square unstable G counts as
@@ -1347,8 +1332,8 @@ func FuzzMixsyn(f *testing.F) {
 		}
 		res, err := Mixsyn(s.System(t, fzSysOpts{}), W1, W2, W3)
 		fzContract(t, s, "Mixsyn", res != nil, err)
-		solvable := syRegSolvable(s) && syClear(s, 1e-4) && !syNumericallySingularD(s) && !syUnstableWithRHPZeros(s)
-		if err != nil {
+		solvable := syRegSolvable(s) && syClear(s, 1e-4) && !syUnstableWithRHPZeros(s)
+		if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 			if solvable {
 				t.Fatalf("Mixsyn: %v on a robustly stabilizable and detectable G with no boundary poles (W1 a=%g c=%g d=%g, ρ=%g, W3=%g)\n%s", err, aw, cw, dw, rho, w3, s)
 			}

@@ -26,6 +26,8 @@ type hinfGeneralPlant struct {
 	R12inv, R21inv   *mat.Dense
 	gammaLB          float64
 	rw               *hinfGeneralRiccatiWork
+	px, py           hinfRiccatiData
+	mode             *hinfRiccatiMode
 }
 
 // hinfGeneralRiccatiWork holds the products riccatis forms at every γ.
@@ -143,7 +145,14 @@ func newHinfGeneralPlant(gp *generalizedPlantPartition) (*hinfGeneralPlant, erro
 	}
 
 	D1dT := mat.DenseCopyOf(D1d.T())
+	C1tC1 := mulDense(mat.DenseCopyOf(C1.T()), C1)
+	B1B1t := mulDense(B1, mat.DenseCopyOf(B1.T()))
+	BT, CT := mat.DenseCopyOf(B.T()), mat.DenseCopyOf(C.T())
+	B1Dd1t := mulDense(B1, mat.DenseCopyOf(Dd1.T()))
+	D1dtC1 := mulDense(D1dT, C1)
 	return &hinfGeneralPlant{
+		px:        hinfRiccatiData{A: gp.A, B: B, Q: C1tC1, S: mat.DenseCopyOf(D1dtC1.T()), R: mulDense(D1dT, D1d)},
+		py:        hinfRiccatiData{A: mat.DenseCopyOf(gp.A.T()), B: CT, Q: B1B1t, S: B1Dd1t, R: mulDense(Dd1, mat.DenseCopyOf(Dd1.T()))},
 		C1a:       C1a,
 		D11aD11at: D11aD11at,
 		B1atT:     B1atT,
@@ -154,11 +163,11 @@ func newHinfGeneralPlant(gp *generalizedPlantPartition) (*hinfGeneralPlant, erro
 		C:         C,
 		C2:        C2,
 		D11:       D11,
-		D1dtC1:    mulDense(D1dT, C1),
-		BT:        mat.DenseCopyOf(B.T()),
-		CT:        mat.DenseCopyOf(C.T()),
+		D1dtC1:    D1dtC1,
+		BT:        BT,
+		CT:        CT,
 		D1dtD1d:   mulDense(D1dT, D1d),
-		B1Dd1t:    mulDense(B1, mat.DenseCopyOf(Dd1.T())),
+		B1Dd1t:    B1Dd1t,
 		Dd1Dd1:    mulDense(Dd1, mat.DenseCopyOf(Dd1.T())),
 		R12inv:    R12inv,
 		R21inv:    R21inv,
@@ -286,7 +295,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 		return nil, nil, nil, nil, err
 	}
 	rw.ham.setHamiltonian(rw.Ax, rw.Gx, rw.Qx)
-	X, err = rw.ham.solve()
+	X, err = rw.ham.solveWith(hp.px, gamma, gp.m1, hp.mode)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -306,7 +315,7 @@ func (hp *hinfGeneralPlant) riccatis(gamma float64) (X, Y, Rinv, Rtinv *mat.Dens
 	}
 	rw.AyT = transposeInto(rw.AyT, rw.Ay)
 	rw.ham.setHamiltonian(rw.AyT, rw.Gy, rw.Qy)
-	Y, err = rw.ham.solve()
+	Y, err = rw.ham.solveWith(hp.py, gamma, gp.p1, hp.mode)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -363,11 +372,12 @@ type hinfYoula struct {
 	D11, D12hat, D21hat *mat.Dense
 }
 
-func hinfSynGeneral(gp *generalizedPlantPartition) (hinfDesign, error) {
+func hinfSynGeneral(gp *generalizedPlantPartition, mode *hinfRiccatiMode) (hinfDesign, error) {
 	hp, err := newHinfGeneralPlant(gp)
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
+	hp.mode = mode
 	gamma, err := hinfBisect(hp.gammaLB, gp.hinfGammaScale(), func(g float64) bool {
 		_, _, _, _, err := hp.riccatis(g)
 		return err == nil
@@ -375,6 +385,7 @@ func hinfSynGeneral(gp *generalizedPlantPartition) (hinfDesign, error) {
 	if err != nil {
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
+	mode.edge = gamma
 	return hinfDesign{gammaEdge: gamma, build: hp.synthesize}, nil
 }
 
@@ -555,12 +566,17 @@ const hinfYoulaFraction = 0.5
 
 // wellPosedQ returns a constant Q with ‖Q‖ = hinfYoulaFraction·γ for which
 // I + D22·Dk(Q) is invertible, Dk0 = Dk(0) being the central feedthrough.
-// With D22 = U1 S V1ᵀ (rank r) and Dk(Q) = Dk0 + T1 Q T2,
+// With D22 = U1 S V1ᵀ (rank r, the singular values within loopShiftCond of
+// the largest, as loopShiftIllPosed measures) and Dk(Q) = Dk0 + T1 Q T2,
 // det(I + D22 Dk(Q)) = det(H0 + A Q B) for H0 = I + S V1ᵀ Dk0 U1,
 // A = S V1ᵀ T1 (full row rank) and B = T2 U1 (full column rank). Q = A⁺ X B⁺
 // with X = c·Uh Vhᵀ from the SVD H0 = Uh Σ Vhᵀ gives H0 + A Q B =
 // Uh (Σ + c I) Vhᵀ, whose smallest singular value is at least
 // c = hinfYoulaFraction·γ·σmin(A)·σmin(B), while ‖Q‖ ≤ c/(σmin(A)·σmin(B)).
+// A singular value of D22 below that cut, such as the 2.7e-13 of a
+// numerically singular static plant, is left out: kept, it would make
+// σmin(A) and so the guaranteed margin c that small, which
+// loopShiftIllPosed then rejects.
 func (M *hinfYoula) wellPosedQ(Dk0 *mat.Dense) (*mat.Dense, error) {
 	gp := M.hp.gp
 	var svd mat.SVD
@@ -569,7 +585,7 @@ func (M *hinfYoula) wellPosedQ(Dk0 *mat.Dense) (*mat.Dense, error) {
 	}
 	s := svd.Values(nil)
 	r := 0
-	for r < len(s) && s[r] > s[0]*float64(max(gp.p2, gp.m2))*eps() {
+	for r < len(s) && s[r]*loopShiftCond > s[0] {
 		r++
 	}
 	var U, V mat.Dense
