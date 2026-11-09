@@ -26,7 +26,7 @@ const hewerGainPrecMin = 128
 // X 9.7e-11 off the 320-bit X, that ddGain was 1.2e-4 from a K within 2e-17
 // of the 320-bit gain, at a tolerance of 1.7e-9.
 func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
-	return hewerGain(A, B, Q, R, opts, red, res, false)
+	return hewerGain(A, B, Q, R, opts, red, res, false, false)
 }
 
 // hewerGainConverged is hewerGainSubstituted with the Hewer sequence run on
@@ -41,10 +41,24 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 // matching the 320-bit gain where the K of X was 1.35e-5 off it (2.76e-3
 // on rv49v 4080, Q(1 - 171 eps)).
 func hewerGainConverged(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
-	return hewerGain(A, B, Q, R, opts, red, res, true)
+	return hewerGain(A, B, Q, R, opts, red, res, true, false)
 }
 
-func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult, converge bool) (*RiccatiResult, bool) {
+// hewerSolution is hewerGainConverged run until Y converges with K. It
+// returns res itself once res.X is within newtonTol and res.K within
+// gainFloor of that solution, the extended Hewer fixed point certifying
+// them: near a stability boundary (closed-loop margin 7.9e-11) the
+// rounded Hewer gain failed stableLoop where the K of res, 4.8e-12 off,
+// was stabilizing. Otherwise it takes one Hewer step on and replaces K,
+// X and EᵀXE (xe) by that iterate's, rounded once, rather than failing:
+// res.X need not be within newtonTol of the solution where
+// newtonUnproven voids its certificate. Under cheap control K converged
+// within newtonTol while Y was still 2.8e-4 off.
+func hewerSolution(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
+	return hewerGain(A, B, Q, R, opts, red, res, true, true)
+}
+
+func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult, converge, takeX bool) (*RiccatiResult, bool) {
 	k0, cond, ok := gainIn(A, B, R, opts, red)(res.X)
 	if !ok {
 		return nil, false
@@ -80,6 +94,7 @@ func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res
 		if i == steps {
 			return nil, false
 		}
+		yPrev := y
 		if y, ok = sol.hewer(k); !ok {
 			return nil, false
 		}
@@ -94,12 +109,27 @@ func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res
 		}
 		move := xRel(k, prev)
 		if move <= newtonTol {
-			break
+			if !takeX || xRel(y, yPrev) <= newtonTol {
+				break
+			}
+			last = move
+			continue
 		}
 		if !converge || i >= 2 && !(move < last) {
 			return nil, false
 		}
 		last = move
+	}
+	if takeX {
+		if x, ok := sol.xOf(y); ok && xRel(x, xFrom(res.X, prec)) <= newtonTol && xRel(xFrom(res.K, prec), k) <= gainFloor {
+			return res, true
+		}
+		if y, ok = sol.hewer(k); !ok {
+			return nil, false
+		}
+		if k, ok = d.gain(sol, y); !ok {
+			return nil, false
+		}
 	}
 	K := k.dense()
 	if !stableLoop(d.closedLoop(sol, K)) {
@@ -112,7 +142,20 @@ func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res
 	c := *res
 	c.K, c.Eig = K, eig
 	x, ok := sol.xOf(y)
-	if !ok || !(xRel(x, xFrom(res.X, prec)) <= newtonTol) {
+	if !ok {
+		return nil, false
+	}
+	if takeX && !(xRel(x, xFrom(res.X, prec)) <= newtonTol) {
+		c.X, c.step, c.x1 = x.dense(), 0, nil
+		if E != nil {
+			c.xe = y.dense()
+			symmetrize(c.xe.RawMatrix().Data, n, n)
+		}
+		symmetrize(c.X.RawMatrix().Data, n, n)
+		c.xeStep, c.xeX, c.xeLoose = 0, 0, false
+		return &c, true
+	}
+	if !(xRel(x, xFrom(res.X, prec)) <= newtonTol) {
 		return nil, false
 	}
 	return &c, true

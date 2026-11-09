@@ -1520,6 +1520,9 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 			}
 			return res, d.units(gainFloor), false
 		}
+		if red != nil {
+			return unprovenReduced(A, B, Q, R, opts, red, res, d)
+		}
 		return res, 0, true
 	}
 	if rot && math.IsInf(d.d, 1) {
@@ -1551,7 +1554,7 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 	}
 	if d.units(gainFloor) <= 1 {
 		if red != nil {
-			return res, 0, true
+			return unprovenReduced(A, B, Q, R, opts, red, res, d)
 		}
 		if h, ok := hewerGainSubstituted(A, B, Q, R, opts, nil, res); ok {
 			return h, 0, true
