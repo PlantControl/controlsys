@@ -816,7 +816,7 @@ func (sys *System) dcGainByBlockLaurent(offPole bool) (g *mat.Dense, ok bool, ex
 		return g, true, nil
 	}
 	if offPole && n <= exactDetMaxOrder && exactShiftedDetIsZero(sys.A.RawMatrix(), x0) {
-		if e, overflow := exactDCGainLimitAt(sys.A, sys.B, sys.C, sys.D, x0, true); !overflow {
+		if e, overflow := exactDCGainLimitRounded(sys.A, sys.B, sys.C, sys.D, x0); !overflow {
 			exact = e
 		}
 	}
@@ -1198,63 +1198,9 @@ func exactDCGainLimit(A, B, C, D *mat.Dense, x0 float64) *mat.Dense {
 // exactDCGainLimitChecked is exactDCGainLimit reporting overflow: a finite
 // exact entry that rounds beyond float64 range.
 func exactDCGainLimitChecked(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow bool) {
-	return exactDCGainLimitAt(A, B, C, D, x0, false)
-}
-
-// exactDCGainLimitAt with rounded reads each pole coefficient
-// [σ̂^i] Σ ĉ_l adj(σ̂I + P̂)_lq b̂_q below ε of the largest of its own terms as
-// cancelled: the given coefficients cannot fix its sign.
-func exactDCGainLimitAt(A, B, C, D *mat.Dense, x0 float64, rounded bool) (gain *mat.Dense, overflow bool) {
 	n, m := B.Dims()
 	p, _ := C.Dims()
-	aRaw, bRaw, cRaw := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
-	minExp := func(r blas64.General, e0 int) int {
-		for i := range r.Rows {
-			for _, v := range r.Data[i*r.Stride : i*r.Stride+r.Cols] {
-				if v != 0 {
-					_, e := math.Frexp(v)
-					e0 = min(e0, e)
-				}
-			}
-		}
-		if e0 == math.MaxInt {
-			return 0
-		}
-		return e0
-	}
-	seedA := math.MaxInt
-	if x0 != 0 {
-		_, seedA = math.Frexp(x0)
-	}
-	ea, eb, ec := minExp(aRaw, seedA), minExp(bRaw, math.MaxInt), minExp(cRaw, math.MaxInt)
-	scaled := func(v float64, e0 int) *big.Int {
-		f, e := math.Frexp(v)
-		x := big.NewInt(int64(math.Ldexp(f, 53)))
-		return x.Lsh(x, uint(e-e0))
-	}
-	pHat := make([]*big.Int, n*n)
-	for i := range n {
-		for j := range n {
-			v := scaled(aRaw.Data[i*aRaw.Stride+j], ea)
-			v.Neg(v)
-			if i == j && x0 != 0 {
-				v.Add(v, scaled(x0, ea))
-			}
-			pHat[i*n+j] = v
-		}
-	}
-	bHat := make([]*big.Int, n*m)
-	for i := range n {
-		for j := range m {
-			bHat[i*m+j] = scaled(bRaw.Data[i*bRaw.Stride+j], eb)
-		}
-	}
-	cHat := make([]*big.Int, p*n)
-	for i := range p {
-		for j := range n {
-			cHat[i*n+j] = scaled(cRaw.Data[i*cRaw.Stride+j], ec)
-		}
-	}
+	pHat, bHat, cHat, shift := exactScaledModel(A, B, C, x0)
 
 	w := n + m
 	work := make([]*big.Int, n*w)
@@ -1299,29 +1245,10 @@ func exactDCGainLimitAt(A, B, C, D *mat.Dense, x0 float64, rounded bool) (gain *
 	}
 	od, dLow := lowestNonzero(newtonAscending(nodes, dVals))
 
-	// G = D + 2^(53−ea) / 2^(53−eb) / 2^(53−ec) · N/d.
-	shift := 53 - ea - (53 - eb) - (53 - ec)
 	gain = mat.NewDense(p, m, nil)
-	var adj [][]*big.Int
 	for i := range p {
 		for j := range m {
-			nPoly := newtonAscending(nodes, nVals[i*m+j])
-			on, nLow := lowestNonzero(nPoly)
-			if rounded && on >= 0 && on < od && adj == nil {
-				adj = lowAdjugateCoeffs(pHat, n, od)
-			}
-			for rounded && on >= 0 && on < od && residueBelowRounding(adj[on], cHat[i*n:i*n+n], bHat, j, m) {
-				on++
-				nLow = nil
-				for on < len(nPoly) && nPoly[on].Sign() == 0 {
-					on++
-				}
-				if on == len(nPoly) {
-					on = -1
-				} else {
-					nLow = nPoly[on]
-				}
-			}
+			on, nLow := lowestNonzero(newtonAscending(nodes, nVals[i*m+j]))
 			dij := 0.0
 			if D != nil {
 				dij = D.At(i, j)
@@ -1349,11 +1276,126 @@ func exactDCGainLimitAt(A, B, C, D *mat.Dense, x0 float64, rounded bool) (gain *
 	return gain, overflow
 }
 
-// lowAdjugateCoeffs returns [σ^i] adj(σI + P), row-major, for i < orders, by
-// Faddeev–LeVerrier with M = −P: adj(σI − M) = Σ σ^(n−1−k) R_k, R_0 = I,
-// R_k = M·R_{k−1} − tr(M·R_{k−1})/k·I, each division exact.
-func lowAdjugateCoeffs(pHat []*big.Int, n, orders int) [][]*big.Int {
-	out := make([][]*big.Int, orders)
+// exactDCGainLimitRounded is exactDCGainLimitChecked with each pole
+// coefficient [σ̂^i] Σ ĉ_l adj(σ̂I + P̂)_lq b̂_q below ε of the largest of its
+// own terms read as cancelled: the given coefficients cannot fix its sign.
+// Faddeev–LeVerrier gives det(σ̂I + P̂) and adj(σ̂I + P̂) coefficient by
+// coefficient; below the pole order od of det the numerator coefficients are
+// these residues alone, so no interpolation is needed.
+func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow bool) {
+	n, m := B.Dims()
+	p, _ := C.Dims()
+	pHat, bHat, cHat, shift := exactScaledModel(A, B, C, x0)
+	adj, det := faddeevLeVerrier(pHat, n)
+	od := 0
+	for det[od].Sign() == 0 {
+		od++
+	}
+	gain = mat.NewDense(p, m, nil)
+	sum := new(big.Int)
+	for i := range p {
+		c := cHat[i*n : i*n+n]
+		for j := range m {
+			on := -1
+			for k := 0; k <= od && k < n; k++ {
+				below := residueSum(sum, adj[k], c, bHat, j, m)
+				if sum.Sign() == 0 || k < od && below {
+					continue
+				}
+				on = k
+				break
+			}
+			dij := 0.0
+			if D != nil {
+				dij = D.At(i, j)
+			}
+			switch {
+			case on < 0:
+				gain.Set(i, j, dij)
+			case on < od:
+				gain.Set(i, j, math.Inf(sum.Sign()*det[od].Sign()))
+			default:
+				v := new(big.Rat).SetFrac(sum, det[od])
+				sc := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), uint(max(shift, -shift))))
+				if shift >= 0 {
+					v.Mul(v, sc)
+				} else {
+					v.Quo(v, sc)
+				}
+				v.Add(v, new(big.Rat).SetFloat64(dij))
+				f, _ := v.Float64()
+				overflow = overflow || math.IsInf(f, 0)
+				gain.Set(i, j, f)
+			}
+		}
+	}
+	return gain, overflow
+}
+
+// exactScaledModel returns P̂ = s·(x0·I − A), B̂ and Ĉ as integers, each
+// scaled by a power of two, and the shift with G = D + 2^shift·Ĉ(σ̂I + P̂)⁻¹B̂.
+func exactScaledModel(A, B, C *mat.Dense, x0 float64) (pHat, bHat, cHat []*big.Int, shift int) {
+	n, m := B.Dims()
+	p, _ := C.Dims()
+	aRaw, bRaw, cRaw := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
+	minExp := func(r blas64.General, e0 int) int {
+		for i := range r.Rows {
+			for _, v := range r.Data[i*r.Stride : i*r.Stride+r.Cols] {
+				if v != 0 {
+					_, e := math.Frexp(v)
+					e0 = min(e0, e)
+				}
+			}
+		}
+		if e0 == math.MaxInt {
+			return 0
+		}
+		return e0
+	}
+	seedA := math.MaxInt
+	if x0 != 0 {
+		_, seedA = math.Frexp(x0)
+	}
+	ea, eb, ec := minExp(aRaw, seedA), minExp(bRaw, math.MaxInt), minExp(cRaw, math.MaxInt)
+	scaled := func(v float64, e0 int) *big.Int {
+		f, e := math.Frexp(v)
+		x := big.NewInt(int64(math.Ldexp(f, 53)))
+		return x.Lsh(x, uint(e-e0))
+	}
+	pHat = make([]*big.Int, n*n)
+	for i := range n {
+		for j := range n {
+			v := scaled(aRaw.Data[i*aRaw.Stride+j], ea)
+			v.Neg(v)
+			if i == j && x0 != 0 {
+				v.Add(v, scaled(x0, ea))
+			}
+			pHat[i*n+j] = v
+		}
+	}
+	bHat = make([]*big.Int, n*m)
+	for i := range n {
+		for j := range m {
+			bHat[i*m+j] = scaled(bRaw.Data[i*bRaw.Stride+j], eb)
+		}
+	}
+	cHat = make([]*big.Int, p*n)
+	for i := range p {
+		for j := range n {
+			cHat[i*n+j] = scaled(cRaw.Data[i*cRaw.Stride+j], ec)
+		}
+	}
+	return pHat, bHat, cHat, 53 - ea - (53 - eb) - (53 - ec)
+}
+
+// faddeevLeVerrier returns adj[i] = [σ^i] adj(σI + P), row-major, i < n, and
+// det[i] = [σ^i] det(σI + P), i ≤ n: with M = −P, R_0 = I and
+// R_k = M·R_{k−1} − tr(M·R_{k−1})/k·I, adj(σI − M) = Σ σ^(n−1−k) R_k and
+// det(σI − M) = σⁿ − Σ σ^(n−k) tr(M·R_{k−1})/k, each division exact.
+func faddeevLeVerrier(pHat []*big.Int, n int) (adj [][]*big.Int, det []*big.Int) {
+	adj = make([][]*big.Int, n)
+	det = make([]*big.Int, n+1)
+	det[n] = big.NewInt(1)
 	r := make([]*big.Int, n*n)
 	for i := range r {
 		r[i] = new(big.Int)
@@ -1362,13 +1404,8 @@ func lowAdjugateCoeffs(pHat []*big.Int, n, orders int) [][]*big.Int {
 		r[i*n+i].SetInt64(1)
 	}
 	t := new(big.Int)
-	for k := 0; ; k++ {
-		if ord := n - 1 - k; ord < orders {
-			out[ord] = r
-		}
-		if k == n-1 {
-			return out
-		}
+	for k := 1; ; k++ {
+		adj[n-k] = r
 		next := make([]*big.Int, n*n)
 		tr := new(big.Int)
 		for i := range n {
@@ -1383,7 +1420,11 @@ func lowAdjugateCoeffs(pHat []*big.Int, n, orders int) [][]*big.Int {
 			}
 			tr.Add(tr, next[i*n+i])
 		}
-		tr.Quo(tr, t.SetInt64(int64(k+1)))
+		tr.Quo(tr, t.SetInt64(int64(k)))
+		det[n-k] = new(big.Int).Neg(tr)
+		if k == n {
+			return adj, det
+		}
 		for i := range n {
 			next[i*n+i].Sub(next[i*n+i], tr)
 		}
@@ -1391,11 +1432,12 @@ func lowAdjugateCoeffs(pHat []*big.Int, n, orders int) [][]*big.Int {
 	}
 }
 
-// residueBelowRounding reports whether Σ c_l·adj_lq·b_qj is below ε of its
-// largest term; b holds m columns per row.
-func residueBelowRounding(adj, c, b []*big.Int, j, m int) bool {
+// residueSum sets sum to Σ c_l·adj_lq·b_qj and reports whether it is below ε
+// of its largest term; b holds m columns per row.
+func residueSum(sum *big.Int, adj, c, b []*big.Int, j, m int) bool {
 	n := len(c)
-	sum, largest, term, abs := new(big.Int), new(big.Int), new(big.Int), new(big.Int)
+	sum.SetInt64(0)
+	largest, term, abs := new(big.Int), new(big.Int), new(big.Int)
 	for l, cl := range c {
 		if cl.Sign() == 0 {
 			continue
