@@ -313,15 +313,16 @@ func (d hinfDesign) verified(gp *generalizedPlantPartition, P *System, nmeas, nc
 
 // stabilityCertified reports whether the exact interconnection of the
 // float64 plant of gp with the float64 K is stable: its state matrix is
-// formed exactly (closedLoopStateMatrix) and passes lyapunovStable after
-// one rounding, which that test covers, or else exactStable.
+// formed exactly (closedLoopStateMatrix), balanced exactly (balancedRat)
+// and passes lyapunovStable after one rounding, which that test covers, or
+// else exactStable.
 func stabilityCertified(gp *generalizedPlantPartition, K *System) bool {
 	A, ok := closedLoopStateMatrix(gp, K)
 	if !ok {
 		return false
 	}
 	discrete := gp.dt != 0
-	return lyapunovStable(roundRat(A), discrete) || exactStable(A, discrete)
+	return lyapunovStable(roundRat(balancedRat(A)), discrete) || exactStable(A, discrete)
 }
 
 // narrow bisects the margin in (lo, hi], try(hi) having met its gamma.

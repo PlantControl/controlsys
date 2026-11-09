@@ -4,6 +4,8 @@ import (
 	"math"
 	"math/big"
 
+	"plantcontrol.org/v1/gonum/lapack"
+	"plantcontrol.org/v1/gonum/lapack/gonum"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -71,6 +73,27 @@ func closedLoopStateMatrix(gp *generalizedPlantPartition, K *System) ([][]*big.R
 		put(n, n, ratMul(Bk, ratMul(D22, Uk)), Ak)
 	}
 	return out, true
+}
+
+// balancedRat returns D⁻¹·M·D for the power-of-two diagonal D that LAPACK
+// Dgebal (scaling only) picks for M rounded to float64; exact, being a
+// rescaling by powers of two. It leaves the eigenvalues unchanged and
+// shrinks the non-normality that a graded closed loop (huge controller
+// gains next to slow plant modes) gives the Lyapunov solution.
+func balancedRat(M [][]*big.Rat) [][]*big.Rat {
+	n := len(M)
+	A := roundRat(M)
+	sc := make([]float64, n)
+	gonum.Implementation{}.Dgebal(lapack.Scale, n, A.RawMatrix().Data, n, sc)
+	out := make([][]*big.Rat, n)
+	var f big.Rat
+	for i, row := range M {
+		out[i] = make([]*big.Rat, n)
+		for j, v := range row {
+			out[i][j] = new(big.Rat).Mul(v, f.SetFloat64(sc[j]/sc[i]))
+		}
+	}
+	return out
 }
 
 // roundRat rounds each entry of M to the nearest float64, which is within
