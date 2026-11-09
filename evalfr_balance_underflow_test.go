@@ -361,11 +361,11 @@ func TestDDScaled_ComponentwiseVerifier(t *testing.T) {
 		b: []float64{1, 0}, c: []float64{1, 1}}
 	sc := ddScaled{br: &br, pr: 0, pi: 0, qr: -1, sigma: 1, bExp: []int{1}}
 	sc.x = []complex128{0.5, 0.5}
-	if !sc.componentwiseStable() {
+	if !sc.componentwiseStable(0, br.undrivenStates()) {
 		t.Errorf("exact solution rejected")
 	}
 	sc.x[1] = 0.5 * (1 + 1e-12)
-	if sc.componentwiseStable() {
+	if sc.componentwiseStable(0, br.undrivenStates()) {
 		t.Errorf("perturbed state accepted")
 	}
 }
@@ -462,5 +462,49 @@ func TestSISOEval_StateUnderflowNoUnverifiedFallback(t *testing.T) {
 	e.eval = func(frequencyPoint, []complex128) error { return errStateUnderflow }
 	if h := e.at(1); !cmplx.IsNaN(h) || !errors.Is(e.err, ErrOverflow) {
 		t.Errorf("at(1) = %v, err %v; want NaN and ErrOverflow", h, e.err)
+	}
+}
+
+// DZSEVY (ruling 7d7e4ab): B column 1 spans 1e-317..1e6, so scaling it by
+// its largest entry rounds the subnormal entries; that column takes the
+// midpoint of its exponent range instead, and column 0 keeps its own
+// scale. A per-call exactness check failed the whole solve and DCGain fell
+// back to the transfer-function limit, 2.2e-32 for -2.04e-31.
+func TestDDResponse_WideBColumnScaling(t *testing.T) {
+	a := []float64{
+		-1.6469700031639623e+48, -0.00011481362142925404, -2.0715710017038353,
+		-4.972587602132303e+97, -6.866409729569282e+47, 6.5706709074276495e+50,
+		7.816007581107872e+93, 3.589932845674585e+44, -1.8517234810764127e+48}
+	b := []float64{1, -1.89018842864e-312, 1, 1.300951306694176e+06, 1, -1.9544605e-317}
+	c := []float64{-2.3475566659805124e+61, -3.648050086319881e+10, -2.9232969475387775e+14, 9.760875118808508e+60, -3.626035223243503e+11, 1.106311926602675e+13}
+	sys, err := New(mat.NewDense(3, 3, a), mat.NewDense(3, 2, b), mat.NewDense(2, 3, c), mat.NewDense(2, 2, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := make([]complex128, 4)
+	for i := range 2 {
+		for j := range 2 {
+			sub, err := New(mat.NewDense(3, 3, a), mat.NewDense(3, 1, []float64{b[j], b[2+j], b[4+j]}), mat.NewDense(1, 3, c[3*i:3*i+3]), mat.NewDense(1, 1, []float64{0}), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want[i*2+j] = bigSISOResponse(sub, 0)
+		}
+	}
+	dd := make([]complex128, 4)
+	if !ddResponseInto(sys, pointAt(0), dd) {
+		t.Fatalf("ddResponseInto(0) failed")
+	}
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, w := range want {
+		if rel := cmplx.Abs(dd[k]-w) / cmplx.Abs(w); !(rel <= 1e-12) {
+			t.Errorf("dd[%d] = %v, want %v", k, dd[k], w)
+		}
+		if v := complex(g.At(k/2, k%2), 0); !(cmplx.Abs(v-w) <= 1e-12*cmplx.Abs(w)) {
+			t.Errorf("DCGain[%d] = %v, want %v", k, v, w)
+		}
 	}
 }

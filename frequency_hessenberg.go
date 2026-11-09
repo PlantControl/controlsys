@@ -223,9 +223,17 @@ func underflowResponseInto(src *System, n, m, p int, pt frequencyPoint, dst []co
 		return errStateUnderflow
 	}
 	u := newRealizationCopy(src, n, m, p)
-	if ddRealizationInto(&u, pt, dst, true) != nil {
+	g := make([]complex128, p*m)
+	bad, err := ddRealizationInto(&u, pt, g, true)
+	if err != nil {
 		return errStateUnderflow
 	}
+	for _, e := range bad {
+		if e != nil {
+			return errStateUnderflow
+		}
+	}
+	copy(dst, g)
 	return nil
 }
 

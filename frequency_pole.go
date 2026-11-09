@@ -587,11 +587,39 @@ func ddResponse(sys *System, pt frequencyPoint, dst []complex128) error {
 		return nil
 	}
 	br := newBalancedRealization(sys, n, m, p)
-	err := ddRealizationInto(&br, pt, dst, false)
+	g := make([]complex128, p*m)
+	bad, err := ddRealizationInto(&br, pt, g, false)
 	if errors.Is(err, errStateUnderflow) {
 		return underflowResponseInto(sys, n, m, p, pt, dst)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	lost := false
+	for _, e := range bad {
+		if e != nil && !errors.Is(e, errStateUnderflow) {
+			return e
+		}
+		lost = lost || e != nil
+	}
+	if lost {
+		u := newRealizationCopy(sys, n, m, p)
+		ug := make([]complex128, p*m)
+		ubad, uerr := ddRealizationInto(&u, pt, ug, true)
+		for j, e := range bad {
+			if e == nil {
+				continue
+			}
+			if uerr != nil || ubad[j] != nil {
+				return errStateUnderflow
+			}
+			for i := range p {
+				g[i*m+j] = ug[i*m+j]
+			}
+		}
+	}
+	copy(dst, g)
+	return nil
 }
 
 // errDDSingular is ddRealizationInto's failure other than a lost state: a
@@ -599,15 +627,20 @@ func ddResponse(sys *System, pt frequencyPoint, dst []complex128) error {
 // solution that is not componentwise backward stable.
 var errDDSingular = errors.New("double-double response not resolved")
 
-// ddRealizationInto is ddResponseInto of the realization br, leaving dst
-// unchanged on error. It solves the pencil scaled by σ, M̃ = (p/σ)E +
-// q(A/σ), for each input column j scaled by its own power of two 2^βⱼ, the
-// largest |bᵢⱼ| in [½, 1): x̃ = M̃⁻¹(B·2^-βⱼ) = x·σ·2^-βⱼ, and forms output
+// ddRealizationInto is ddResponseInto of the realization br per input
+// column: it sets column j of dst unless bad[j] reports why that column
+// failed, and returns err, leaving dst unchanged, where the pencil itself
+// fails (a pivot lost to cancellation, or a C row the scaling would round).
+// It solves the pencil scaled by σ, M̃ = (p/σ)E +
+// q(A/σ), for each input column j scaled by its own power of two 2^βⱼ: the
+// largest |bᵢⱼ| in [½, 1), or, where that would round an entry below the
+// normal range, the midpoint of the column's binary exponent range: x̃ = M̃⁻¹(B·2^-βⱼ) = x·σ·2^-βⱼ, and forms output
 // row k from C scaled by 2^-γₖ only where n·|q|·maxᵢ|cₖᵢ||x̃ᵢ| could
 // overflow, so that no state or term underflows or overflows that the
 // response does not. All scalings are exact powers of two, so the result
 // is that of the unscaled solve wherever that stays in the normal range; an
-// entry of B or C the scaling would round is lost data (errStateUnderflow). It returns errStateUnderflow where a
+// entry of B or C the scaling would still round is lost data
+// (errStateUnderflow), for its column or, for C, the call. It returns errStateUnderflow where a
 // state of x̃ is lost below the normal range: one an output could resolve
 // at its |c̃ₖᵢ|·2⁻¹⁰²² whose pencil rows fail the componentwise test
 // below; a test of every row would reject a dd roundoff fill in a state
@@ -616,7 +649,7 @@ var errDDSingular = errors.New("double-double response not resolved")
 // reaches (undrivenStates) passes the Oettli–Prager test |b̃ − M̃x̂| ≤
 // nε(|b̃| + |M̃||x̂|) for the rounded x̂, residual in double-double:
 // rounding an accurate x̃ leaves ε/2.
-func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) error {
+func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) (bad []error, err error) {
 	n, m, p := br.n, br.m, br.p
 	maxA, maxE := 0.0, 1.0
 	for _, v := range br.a {
@@ -633,16 +666,21 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 		_, sk = math.Frexp(scale)
 		sigma = math.Ldexp(1, sk)
 	}
+	bad = make([]error, m)
 	bExp := make([]int, m)
 	for j := range m {
-		var bMax float64
+		bMax, bMin := 0.0, math.Inf(1)
 		for i := range n {
-			bMax = max(bMax, math.Abs(br.b[i*m+j]))
+			if v := math.Abs(br.b[i*m+j]); v != 0 {
+				bMax, bMin = max(bMax, v), min(bMin, v)
+			}
 		}
 		_, bExp[j] = math.Frexp(bMax)
-		for i := range n {
-			if !exactLdexp(br.b[i*m+j], -bExp[j]) {
-				return errStateUnderflow
+		if !br.columnExact(j, -bExp[j]) {
+			_, eMin := math.Frexp(bMin)
+			bExp[j] = (bExp[j] + eMin) / 2
+			if !br.columnExact(j, -bExp[j]) {
+				bad[j] = errStateUnderflow
 			}
 		}
 	}
@@ -670,7 +708,7 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 			}
 		}
 		if !(best > tol*mag[piv*n+k]) {
-			return errDDSingular
+			return nil, errDDSingular
 		}
 		perm[k] = piv
 		if piv != k {
@@ -719,7 +757,7 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 		}
 		for i := range n {
 			if !exactLdexp(br.c[r*n+i], -cExp) {
-				return errStateUnderflow
+				return nil, errStateUnderflow
 			}
 		}
 		for c := range m {
@@ -736,8 +774,8 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 				v += complex(d, 0)
 				yt[r*m+c] += complex(math.Ldexp(d, sk-bExp[c]), 0)
 			}
-			if !finiteComplex(v) {
-				return errDDSingular
+			if !finiteComplex(v) && bad[c] == nil {
+				bad[c] = errDDSingular
 			}
 			g[r*m+c] = v
 		}
@@ -747,14 +785,35 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 	for i, v := range x {
 		sc.x[i] = v.complex128()
 	}
-	if verify && !sc.componentwiseStable() {
-		return errDDSingular
+	var undriven []bool
+	if verify {
+		undriven = br.undrivenStates()
 	}
-	if sc.stateLost(yt, cabs1(pt.q)) {
-		return errStateUnderflow
+	for j := range m {
+		if bad[j] != nil {
+			continue
+		}
+		if verify && !sc.componentwiseStable(j, undriven) {
+			bad[j] = errDDSingular
+		} else if sc.stateLost(j, yt, cabs1(pt.q)) {
+			bad[j] = errStateUnderflow
+		} else {
+			for r := range p {
+				dst[r*m+j] = g[r*m+j]
+			}
+		}
 	}
-	copy(dst, g)
-	return nil
+	return bad, nil
+}
+
+// columnExact reports whether scaling column j of B by 2ᵏ is exact.
+func (br *balancedRealization) columnExact(j, k int) bool {
+	for i := range br.n {
+		if !exactLdexp(br.b[i*br.m+j], k) {
+			return false
+		}
+	}
+	return true
 }
 
 // exactLdexp reports whether v·2ᵏ is exact, neither rounded below the
@@ -793,44 +852,40 @@ func (sc *ddScaled) rowFails(k, j int) bool {
 	return r.abs1() > float64(n)*eps()*scale
 }
 
-// componentwiseStable reports whether every pencil row of a state some
-// input reaches passes rowFails; an unreached state's rows involve only
-// unreached states, exactly zero but for roundoff fill.
-func (sc *ddScaled) componentwiseStable() bool {
+// componentwiseStable reports whether every pencil row of a state input j
+// reaches passes rowFails; an unreached state's rows involve only unreached
+// states, exactly zero but for roundoff fill.
+func (sc *ddScaled) componentwiseStable(j int, undriven []bool) bool {
 	br := sc.br
-	undriven := br.undrivenStates()
-	for j := range br.m {
-		for k := range br.n {
-			if !undriven[k*br.m+j] && sc.rowFails(k, j) {
-				return false
-			}
+	for k := range br.n {
+		if !undriven[k*br.m+j] && sc.rowFails(k, j) {
+			return false
 		}
 	}
 	return true
 }
 
-// stateLost reports whether a state of x below the normal range is one an
+// stateLost reports whether a state of column j of x below the normal
+// range is one an
 // output of yt, the scaled response, could resolve at |cₖᵢ|·2⁻¹⁰²²·ys,
 // whose pencil rows fail rowFails, as stateUnderflow does for the double
 // solvers. A zero state that neither B nor a nonzero state drives
 // satisfies its own row exactly and is skipped first.
-func (sc *ddScaled) stateLost(yt []complex128, ys float64) bool {
+func (sc *ddScaled) stateLost(j int, yt []complex128, ys float64) bool {
 	const tiny = 0x1p-1022
 	br := sc.br
 	n, m, p, e := br.n, br.m, br.p, eps()
 	for i := range n {
-		for j := range m {
-			v := sc.x[i*m+j]
-			if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny || v == 0 && !br.drives(sc.x, i, j, m, 1) {
-				continue
-			}
-			for k := range p {
-				if math.Abs(br.c[k*n+i])*tiny*ys > e*cabs1(yt[k*m+j]) {
-					if sc.columnFails(i, j) {
-						return true
-					}
-					break
+		v := sc.x[i*m+j]
+		if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny || v == 0 && !br.drives(sc.x, i, j, m, 1) {
+			continue
+		}
+		for k := range p {
+			if math.Abs(br.c[k*n+i])*tiny*ys > e*cabs1(yt[k*m+j]) {
+				if sc.columnFails(i, j) {
+					return true
 				}
+				break
 			}
 		}
 	}
