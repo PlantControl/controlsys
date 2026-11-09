@@ -467,8 +467,10 @@ func TestSISOEval_StateUnderflowNoUnverifiedFallback(t *testing.T) {
 
 // DZSEVY (ruling 7d7e4ab): B column 1 spans 1e-317..1e6, so scaling it by
 // its largest entry rounds the subnormal entries; that column takes the
-// midpoint of its exponent range instead, and column 0 keeps its own
-// scale. A per-call exactness check failed the whole solve and DCGain fell
+// least scale keeping its smallest entry normal instead, and column 0
+// keeps its own scale. Mosc/mgraded census rows where a midpoint scale
+// overflowed x̃ (B entries 1e-315..1e7 against a 1e-184 pencil) are pinned
+// in TestDDResponse_WideBColumnOverflow. A per-call exactness check failed the whole solve and DCGain fell
 // back to the transfer-function limit, 2.2e-32 for -2.04e-31.
 func TestDDResponse_WideBColumnScaling(t *testing.T) {
 	a := []float64{
@@ -505,6 +507,39 @@ func TestDDResponse_WideBColumnScaling(t *testing.T) {
 		}
 		if v := complex(g.At(k/2, k%2), 0); !(cmplx.Abs(v-w) <= 1e-12*cmplx.Abs(w)) {
 			t.Errorf("DCGain[%d] = %v, want %v", k, v, w)
+		}
+	}
+}
+
+// DZSEVY (ruling 7d7e4ab): column 2 of B spans 2.4e-315..1.6e7 against a
+// pencil of scale 1e-184. Scaling it to the midpoint of its exponent range
+// put 1e161 on the right-hand side and x̃ overflowed, failing a column the
+// base solve resolved; the least exact scale keeps it finite.
+func TestDDResponse_WideBColumnOverflow(t *testing.T) {
+	a := []float64{
+		-6.304412612283258e-187, 8.909578987075778e-126, 2.5099543662515378e-223, 2.7827896517687474e-126,
+		1.3063895988675671e-244, -8.350145159188074e-185, -4.018977124916885e-281, -4.810196625749051e-186,
+		5.506575653110324e-149, 3.3253891271370024e-90, -1.0949572225732268e-184, -8.751160666631316e-91,
+		8.158176264103619e-244, 2.5939211037651945e-184, 8.242704488820179e-280, -5.395897789265451e-185}
+	b := []float64{-1.6351508529310615e+42, 1.5942033262018557e+42, -6.9818773314074e-311, -4.9879186400694456e-18, 2.169654563345651e-18, -1.5872350268475404e+07, 1.6853638950438333e+78, -1.7409271061403766e+78, 2.383901953e-315, 9.390310891493313e-18, 3.858397778906854e-17, 767739.2598200087}
+	c := []float64{1.5278290918773962e+06, 3.212857045444273e+65, 1.046671526256719e-30, -1.2274550500016125e+64}
+	sys, err := New(mat.NewDense(4, 4, a), mat.NewDense(4, 3, b), mat.NewDense(1, 4, c), mat.NewDense(1, 3, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := complex(-9.310867285238793e-185, 0)
+	g, err := sys.EvalFr(s)
+	if err != nil {
+		t.Fatalf("EvalFr(%v): %v", s, err)
+	}
+	for j := range 3 {
+		sub, err := New(mat.NewDense(4, 4, a), mat.NewDense(4, 1, []float64{b[j], b[3+j], b[6+j], b[9+j]}), mat.NewDense(1, 4, c), mat.NewDense(1, 1, []float64{0}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := bigSISOResponse(sub, s)
+		if v := g[0][j]; !(cmplx.Abs(v-want) <= 1e-12*cmplx.Abs(want)) {
+			t.Errorf("EvalFr[0][%d] = %v, want %v", j, v, want)
 		}
 	}
 }

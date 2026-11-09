@@ -634,7 +634,7 @@ var errDDSingular = errors.New("double-double response not resolved")
 // It solves the pencil scaled by σ, M̃ = (p/σ)E +
 // q(A/σ), for each input column j scaled by its own power of two 2^βⱼ: the
 // largest |bᵢⱼ| in [½, 1), or, where that would round an entry below the
-// normal range, the midpoint of the column's binary exponent range: x̃ = M̃⁻¹(B·2^-βⱼ) = x·σ·2^-βⱼ, and forms output
+// normal range, the least scale that keeps the smallest entry normal: x̃ = M̃⁻¹(B·2^-βⱼ) = x·σ·2^-βⱼ, and forms output
 // row k from C scaled by 2^-γₖ only where n·|q|·maxᵢ|cₖᵢ||x̃ᵢ| could
 // overflow, so that no state or term underflows or overflows that the
 // response does not. All scalings are exact powers of two, so the result
@@ -678,7 +678,7 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 		_, bExp[j] = math.Frexp(bMax)
 		if !br.columnExact(j, -bExp[j]) {
 			_, eMin := math.Frexp(bMin)
-			bExp[j] = (bExp[j] + eMin) / 2
+			bExp[j] = eMin - minNormalExp
 			if !br.columnExact(j, -bExp[j]) {
 				bad[j] = errStateUnderflow
 			}
@@ -805,6 +805,10 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 	}
 	return bad, nil
 }
+
+// minNormalExp is the binary exponent, as math.Frexp gives it, of the
+// smallest normal float64.
+var _, minNormalExp = math.Frexp(0x1p-1022)
 
 // columnExact reports whether scaling column j of B by 2ᵏ is exact.
 func (br *balancedRealization) columnExact(j, k int) bool {
