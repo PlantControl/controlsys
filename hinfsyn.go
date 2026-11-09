@@ -16,7 +16,7 @@ import (
 // hinfsyn(P,nmeas,ncont) returns it (see
 // https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfsyn.html):
 // X and Y are the state-feedback and filter Riccati solutions at the gamma
-// K is built for (at most GammaOpt) and CLPoles the closed-loop poles. For a
+// K is built for (at most GammaOpt) and CLPoles the poles of CL. For a
 // discrete plant X and Y solve the Riccati equations of its
 // Tustin-equivalent continuous plant (in the same state coordinates), not
 // discrete Riccati equations; when HinfSyn first shifts modes away from
@@ -94,6 +94,21 @@ type HinfSynResult struct {
 // ErrGammaNotAchievable. Every error but ErrAccuracyUnverified comes with
 // a nil result.
 //
+// A nil error certifies that the exact interconnection of the float64 P
+// and the returned K is stable: its state matrix is formed in rationals and
+// checked by a Lyapunov certificate with every rounding bounded, or else
+// by an exact Routh (Schur–Cohn when discrete) test of its characteristic
+// polynomial. The float64 LFT that measures ‖T_zw‖∞ is no such proof: a
+// stiff K can stabilize its rounding but not the exact loop. Where the
+// central controller's D22 loop shift nearly cancels (I + D22·Dk ≈ 0, as
+// for Mixsyn with a biproper G and a small W2) K has a huge mode and gains
+// that its own rounding destabilizes; HinfSyn then returns the strictly
+// proper controller of the Youla family at that γ (zero feedthrough before
+// the loop shift, so the shift needs no inverse) when it meets γ and is
+// certified, departing from MATLAB's central K there. When no controller
+// is certified, the smallest stable one in float64 is returned with
+// ErrAccuracyUnverified. Gamma itself is the float64 norm of CL.
+//
 // Either error makes HinfSyn repeat the design, when one of the first
 // pass's Hamiltonian solves failed numerically where the design needed it
 // (see hinfRiccatiMode), with each failed Hamiltonian solve retried from
@@ -127,7 +142,7 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 		return res, err
 	}
 	if first.numericalFailure() {
-		if res, perr := hinfSyn(gp, P, nmeas, ncont, &hinfRiccatiMode{pencil: true}); perr == nil {
+		if res, perr := hinfSyn(gp, P, nmeas, ncont, &hinfRiccatiMode{pencil: true}); perr == nil || res != nil && errors.Is(perr, ErrAccuracyUnverified) {
 			if ok, serr := res.CL.IsStable(); serr == nil && ok && res.Gamma <= res.GammaOpt {
 				res.accuracy = 1
 				return res, fmt.Errorf("%s: controller from the extended-pencil Riccati repeat, its certificate the float64 closed loop: %w", gp.op, ErrAccuracyUnverified)
@@ -201,8 +216,9 @@ const hinfBackoffTries = 48
 // at random, so meeting it is not monotone in the margin; yet every stable
 // closed loop is a verified bound. Every try with a finite norm is therefore
 // a candidate, its GammaOpt the larger of its build gamma and its norm.
-// When the central controller at a gamma gives no finite norm and the
-// design has a strictly proper member, that one is tried at the same gamma.
+// When the central controller at a gamma builds but gives no finite norm
+// and the design has a strictly proper member, that one is tried at the
+// same gamma.
 //
 // The candidate returned is the one of smallest GammaOpt whose exact
 // interconnection of the float64 P and K is certified stable
@@ -223,26 +239,27 @@ func (d hinfDesign) verified(gp *generalizedPlantPartition, P *System, nmeas, nc
 	}
 	var cands []candidate
 	var err error
-	attempt := func(gamma float64, alt bool) *HinfSynResult {
+	attempt := func(gamma float64, alt bool) (res *HinfSynResult, built bool) {
 		res, berr := d.build(gamma, alt)
 		if berr == nil {
+			built = true
 			berr = res.measure(op, P, nmeas, ncont)
 		}
 		if berr != nil {
 			if !alt {
 				err = berr
 			}
-			return nil
+			return nil, built
 		}
-		return res
+		return res, true
 	}
 	try := func(margin float64) bool {
 		gamma := d.gammaEdge + margin
 		alt := false
-		res := attempt(gamma, alt)
-		if res == nil && d.strictlyProper {
+		res, built := attempt(gamma, alt)
+		if res == nil && built && d.strictlyProper {
 			alt = true
-			res = attempt(gamma, alt)
+			res, _ = attempt(gamma, alt)
 		}
 		if res == nil {
 			return false
@@ -277,7 +294,7 @@ func (d hinfDesign) verified(gp *generalizedPlantPartition, P *System, nmeas, nc
 			if c.alt {
 				continue
 			}
-			if res := attempt(c.gamma, true); res != nil {
+			if res, _ := attempt(c.gamma, true); res != nil {
 				res.GammaOpt = math.Max(res.GammaOpt, res.Gamma)
 				alts = append(alts, res)
 			}
