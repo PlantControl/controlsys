@@ -386,12 +386,13 @@ func hinfSynGeneral(gp *generalizedPlantPartition, mode *hinfRiccatiMode) (hinfD
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
 	mode.edge = gamma
-	return hinfDesign{gammaEdge: gamma, build: hp.synthesize}, nil
+	return hinfDesign{gammaEdge: gamma, build: hp.synthesize, strictlyProper: true}, nil
 }
 
 // synthesize returns the controller at gamma: the central one, or the
-// non-central one of wellPosedQ when the D22 loop shift is ill-posed.
-func (hp *hinfGeneralPlant) synthesize(gamma float64) (*HinfSynResult, error) {
+// non-central one of wellPosedQ when the D22 loop shift is ill-posed; with
+// alt, the strictly proper member of strictlyProperQ instead.
+func (hp *hinfGeneralPlant) synthesize(gamma float64, alt bool) (*HinfSynResult, error) {
 	gp := hp.gp
 	X, Y, Rinv, Rtinv, err := hp.riccatis(gamma)
 	if err != nil {
@@ -402,7 +403,15 @@ func (hp *hinfGeneralPlant) synthesize(gamma float64) (*HinfSynResult, error) {
 		return nil, fmt.Errorf("%s: %w", gp.op, err)
 	}
 	Ak, Bk, Ck, Dk := M.controller(nil)
-	if loopShiftIllPosed(gp.D22, Dk) {
+	switch {
+	case alt:
+		Q, err := M.strictlyProperQ()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", gp.op, err)
+		}
+		Ak, Bk, Ck, _ = M.controller(Q)
+		Dk = nil
+	case loopShiftIllPosed(gp.D22, Dk):
 		Dq, err := M.wellPosedQ(Dk)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", gp.op, err)
@@ -414,11 +423,37 @@ func (hp *hinfGeneralPlant) synthesize(gamma float64) (*HinfSynResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	clPoles, err := gp.closedLoopPoles(Ak, Bk, Ck, Dk)
-	if err != nil {
-		return nil, err
+	return &HinfSynResult{K: K, GammaOpt: gamma, X: X, Y: Y}, nil
+}
+
+// strictlyProperQ returns the constant Q = −D̂12⁻¹·D̂11·D̂21⁻¹ whose
+// controller F_l(M∞, Q) has zero feedthrough, so the D22 loop shift of
+// newController needs no inverse of I + D22·Dk. It is a member of the
+// family only when ‖Q‖ < γ, tested by the Frobenius norm, which bounds
+// the 2-norm from above. The central controller's feedthrough can make
+// I + D22·Dk nearly singular: for Mixsyn with a biproper G and a small W2
+// it nearly inverts G(∞), and the shifted K then has a mode near −1/(u·γ)
+// and gains near 1/u that its float64 rounding destabilizes.
+func (M *hinfYoula) strictlyProperQ() (*mat.Dense, error) {
+	if allZeroDense(M.D11) {
+		return nil, fmt.Errorf("central controller already strictly proper: %w", ErrNotConverged)
 	}
-	return &HinfSynResult{K: K, GammaOpt: gamma, X: X, Y: Y, CLPoles: clPoles}, nil
+	var lu12, lu21 mat.LU
+	lu12.Factorize(M.D12hat)
+	lu21.Factorize(mat.DenseCopyOf(M.D21hat.T()))
+	var T, Qt mat.Dense
+	if err := lu12.SolveTo(&T, false, M.D11); err != nil {
+		return nil, fmt.Errorf("D̂12 singular at γ = %g: %w", M.gamma, ErrNotConverged)
+	}
+	if err := lu21.SolveTo(&Qt, false, mat.DenseCopyOf(T.T())); err != nil {
+		return nil, fmt.Errorf("D̂21 singular at γ = %g: %w", M.gamma, ErrNotConverged)
+	}
+	Q := mat.DenseCopyOf(Qt.T())
+	Q.Scale(-1, Q)
+	if !(denseNormScaled(Q.RawMatrix()) < M.gamma) {
+		return nil, fmt.Errorf("strictly proper controller outside the family at γ = %g: %w", M.gamma, ErrNotConverged)
+	}
+	return Q, nil
 }
 
 // youla returns M∞ at gamma from the Riccati solutions X and Y.

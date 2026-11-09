@@ -464,8 +464,8 @@ func TestHinfSynVerifiedNotConverged(t *testing.T) {
 		{"Schur", fmt.Errorf("HinfSyn: %w", ErrSchurFailed), ErrSchurFailed},
 	} {
 		calls := 0
-		d := hinfDesign{gammaEdge: 1, build: func(float64) (*HinfSynResult, error) { calls++; return nil, c.last }}
-		res, err := d.verified("HinfSyn", nil, 1, 1)
+		d := hinfDesign{gammaEdge: 1, build: func(float64, bool) (*HinfSynResult, error) { calls++; return nil, c.last }}
+		res, err := d.verified(&generalizedPlantPartition{op: "HinfSyn"}, nil, 1, 1)
 		if res != nil || !errors.Is(err, ErrNotConverged) || !errors.Is(err, c.want) || errors.Is(err, ErrNoStabilizing) {
 			t.Errorf("%s: result %v, err %v; want nil with ErrNotConverged and %v", c.name, res != nil, err, c.want)
 		}
