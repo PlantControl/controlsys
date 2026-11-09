@@ -90,7 +90,7 @@ func TestSystuneReachesUpperBound(t *testing.T) {
 func TestLooptuneReachesUpperBound(t *testing.T) {
 	plant := makeSISO(-2, 1, 1, 0)
 	for _, c := range gridBoundsCases {
-		res, err := Looptune(context.Background(), plant, gridBoundsGain(t, c.lower, c.upper), []float64{1}, nil, &LooptuneOptions{SystuneOptions: SystuneOptions{GridPoints: c.points}})
+		res, err := Looptune(context.Background(), plant, gridBoundsGain(t, c.lower, c.upper), []float64{1}, nil, &LooptuneOptions{GridPoints: c.points})
 		checkGridBoundsResult(t, "Looptune", res, err, c.upper)
 	}
 }
