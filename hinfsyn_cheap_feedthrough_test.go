@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"math"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -127,5 +128,40 @@ func TestHinfPencilSolveMatchesHamiltonian(t *testing.T) {
 				t.Errorf("γ = %g: %s pencil vs Hamiltonian relative difference %g", g, c.name, e)
 			}
 		}
+	}
+}
+
+// TestHinfSynFeedthroughRatioGatesPencilRepeat checks the gate of the
+// pencil repeat (BMNGOS ruling Q5): σ = 2.4e-8 is below it and stays so
+// when z and w are scaled; ρ = σ = 0.5 is above it.
+func TestHinfSynFeedthroughRatioGatesPencilRepeat(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{-1, 2, 0.5, -0.3, -0.7, 1.2, 0.4, -1.1, -2})
+	B := mat.NewDense(3, 1, []float64{1, -0.5, 0.3})
+	C := mat.NewDense(1, 3, []float64{0.2, 1, -0.4})
+	ratio := func(P *System) float64 {
+		gp, err := partitionGeneralizedPlant("HinfSyn", P, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return gp.feedthroughRatio()
+	}
+	cheap := cheapFeedthroughPlant(t, A, B, C, 1, 2.4e-8)
+	if r := ratio(cheap); !(r < hinfPencilFeedthroughRatio) {
+		t.Errorf("σ = 2.4e-8: ratio %g, want below %g", r, hinfPencilFeedthroughRatio)
+	}
+	scaled := cheap.Copy()
+	for i := range 4 {
+		for j := range 3 {
+			scaled.C.Set(i, j, 1e3*scaled.C.At(i, j))
+		}
+		for j := range 5 {
+			scaled.D.Set(i, j, 1e3*scaled.D.At(i, j))
+		}
+	}
+	if r, r0 := ratio(scaled), ratio(cheap); math.Abs(r-r0) > 1e-12*r0 {
+		t.Errorf("ratio %g under scaling, %g unscaled", r, r0)
+	}
+	if r := ratio(cheapFeedthroughPlant(t, A, B, C, 0.5, 0.5)); !(r >= hinfPencilFeedthroughRatio) {
+		t.Errorf("ρ = σ = 0.5: ratio %g, want at least %g", r, hinfPencilFeedthroughRatio)
 	}
 }

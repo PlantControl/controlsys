@@ -129,15 +129,25 @@ var (
 		c:   []float64{-0.7041421969970909, 0.6282796401468824, -0.2875344743526116, -2.090565833890424},
 		rho: 1.1859994693143048e-08, sig: 0.003916790560348642,
 	}
-	// synthesisBoundaryInfeasible (census row bnd 674, BMNGOS): a weakly
+	// synthesisBoundaryNotConverged (census row bnd 674, BMNGOS): a weakly
 	// controllable mode 3.5e-15 off the imaginary axis puts an X-Hamiltonian
 	// pair within rounding of the axis at every γ, for the pencil too, so
-	// HinfSyn finds no γ below its give-up bound.
-	synthesisBoundaryInfeasible = synthesisFixture{
+	// HinfSyn finds no γ below its give-up bound; the certified H2
+	// controller proves γ finite, so that is ErrNotConverged.
+	synthesisBoundaryNotConverged = synthesisFixture{
 		a:   []float64{-0.7237063632621797, 4.985017928162791, -3.3857174500105076, -6.7705326494338856, -6.572878620402842, -0.7119680305799931, -2.8597634157896747, 2.278636715820158, 3.1566246028357945, 3.3730235162541815, -0.3614962805114312, 3.0842547727398455, -2.2679969795214827, -3.591309605365047, -3.4151533180466713, 0.12162630019987758, -2.1428046687485893, 0.6170010327290477, 1.1736835087018616, 2.194532441673459, -0.4736889559752902, -0.9227047654508497, 1.7056898513788366, 2.0854524879187126, 1.0955068971788282},
 		b:   []float64{-3.122549315482755, 0.3567123996251636, -3.143046326280349, -0.9044921028519853, 2.543648011802267},
 		c:   []float64{-0.07585885440170685, 3.5602123269066883, -3.0339938598453187, -5.943132558771198, -5.703127607118304},
 		rho: 1, sig: 1,
+	}
+	// synthesisBoundaryInfeasible (census row bnd 224, BMNGOS): no γ passes
+	// below the give-up bound and the H2 filter Riccati solution is not
+	// certified either, so nothing proves γ finite.
+	synthesisBoundaryInfeasible = synthesisFixture{
+		a:   []float64{0.3551887068056787, 0.43135054207754314, -0.6240507168391118, -1.7860586410743449, -0.8633291557886179, 0.8330267482366999, -1.161034993878373, -0.16033554383441181, -0.615146249022356},
+		b:   []float64{0.19761118564758431, -0.3237695982512298, -1.2466237692836402},
+		c:   []float64{-0.11226294500214501, 0.05034198731287463, -0.22039968272361465},
+		rho: 1, sig: 0.00015829728631378115,
 	}
 	// synthesisFilterNotConverged: no filter Y passes verification.
 	synthesisFilterNotConverged = synthesisFixture{
@@ -234,7 +244,8 @@ func (c synthesisClass) String() string {
 //     that passes it can still reach the proved Riccati verdict (H2Syn
 //     discrete rows);
 //   - infeasible: HinfSyn with no γ passing the Riccati test below its
-//     give-up bound: ErrGammaNotAchievable alone.
+//     give-up bound and no certified H2 controller: ErrGammaNotAchievable
+//     alone (with a certified one, ErrNotConverged too).
 func TestSynthesisContractByOperation(t *testing.T) {
 	cA := mat.NewDense(2, 2, []float64{0, 1, -2, -3})
 	cB := mat.NewDense(2, 1, []float64{0, 1})
@@ -345,6 +356,7 @@ func TestSynthesisContractByOperation(t *testing.T) {
 		{"HinfSyn control", synthesisStructural, hinf(regP(uA, uB, mat.NewDense(1, 2, []float64{1, 1}), 0), 1, 1), ErrNotStabilizable},
 		{"HinfSyn filter", synthesisStructural, hinf(regP(uA, eyeDense(2), uC, 0), 1, 2), ErrNotDetectable},
 		{"HinfSyn cheap control", synthesisCertified, hinf(synthesisControlNotConverged.plant(t), 1, 1), nil},
+		{"HinfSyn boundary", synthesisNotConverged, hinf(synthesisBoundaryNotConverged.plant(t), 1, 1), ErrGammaNotAchievable},
 		{"HinfSyn", synthesisInfeasible, hinf(synthesisBoundaryInfeasible.plant(t), 1, 1), nil},
 	}
 	for _, c := range cases {

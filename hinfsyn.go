@@ -90,14 +90,18 @@ type HinfSynResult struct {
 // γ passing the Riccati test below the give-up bound is
 // ErrGammaNotAchievable. Every error comes with a nil result.
 //
-// Either error first makes HinfSyn repeat the design with each Riccati
+// Either error first makes HinfSyn repeat the design, when D12 or D21 is
+// small against the plant (feedthroughRatio below 1e-2), with each Riccati
 // equation whose Hamiltonian solve fails solved again from the extended
 // pencil [A 0 B; −Q −Aᵀ −S; Sᵀ Bᵀ R] − λ·diag(I, I, 0) of MATLAB icare,
 // which never inverts R = diag(−γ²I, D12ᵀD12) (dually D21D21ᵀ): under cheap
 // control or a nearly noise-free measurement R⁻¹ is ≈ 1e16 in a few
 // directions only, no symplectic scaling balances the Hamiltonian, and its
 // stable subspace loses every digit at every γ. The repeat's controller is
-// verified as above; when it fails too, HinfSyn returns the first error.
+// verified as above and kept only with a stable closed loop and Gamma ≤
+// GammaOpt; otherwise HinfSyn returns the first error, with
+// ErrNotConverged added to an ErrGammaNotAchievable when the H2 Riccati
+// solutions are certified, since their controller proves γ finite.
 // Plants that the Hamiltonian solves handle are designed by them alone.
 //
 // The Hamiltonian Riccati tests are invariant under scaling z or w (the
@@ -111,12 +115,59 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 		return nil, err
 	}
 	res, err := hinfSyn(gp, P, nmeas, ncont, false)
-	if errors.Is(err, ErrGammaNotAchievable) || errors.Is(err, ErrNotConverged) {
+	if !errors.Is(err, ErrGammaNotAchievable) && !errors.Is(err, ErrNotConverged) {
+		return res, err
+	}
+	if gp.feedthroughRatio() < hinfPencilFeedthroughRatio {
 		if res, perr := hinfSyn(gp, P, nmeas, ncont, true); perr == nil {
-			return res, nil
+			if ok, serr := res.CL.IsStable(); serr == nil && ok && res.Gamma <= res.GammaOpt {
+				return res, nil
+			}
 		}
 	}
-	return res, err
+	if !errors.Is(err, ErrNotConverged) && h2Certified(P, nmeas, ncont) {
+		return nil, fmt.Errorf("%w: the H2 controller is certified, so γ is finite: %w", err, ErrNotConverged)
+	}
+	return nil, err
+}
+
+// hinfPencilFeedthroughRatio is the feedthroughRatio below which HinfSyn
+// repeats a failed design with the extended pencil. Above it R is well
+// conditioned against the plant and the pencil seldom rescues a design
+// (7 of 360 census promotions) while a failing repeat doubles the cost of
+// the error.
+const hinfPencilFeedthroughRatio = 1e-2
+
+// feedthroughRatio is min(σmin(D12)/‖[C1 D12]‖, σmin(D21)/‖[B1; D21]‖),
+// small under cheap control or a nearly noise-free measurement, where R⁻¹
+// in the Hamiltonian is large against the plant; it does not change when z
+// or w is scaled.
+func (gp *generalizedPlantPartition) feedthroughRatio() float64 {
+	ratio := func(D, M *mat.Dense) float64 {
+		var sd, sm mat.SVD
+		if !sd.Factorize(D, mat.SVDNone) || !sm.Factorize(M, mat.SVDNone) {
+			return 0
+		}
+		v, w := sd.Values(nil), sm.Values(nil)
+		return v[len(v)-1] / w[0]
+	}
+	C1D12 := mat.NewDense(gp.p1, gp.n+gp.m2, nil)
+	setBlock(C1D12, 0, gp.n, gp.D12)
+	B1D21 := mat.NewDense(gp.n+gp.p2, gp.m1, nil)
+	setBlock(B1D21, gp.n, 0, gp.D21)
+	if gp.n > 0 {
+		setBlock(C1D12, 0, 0, gp.C1)
+		setBlock(B1D21, 0, 0, gp.B1)
+	}
+	return math.Min(ratio(gp.D12, C1D12), ratio(gp.D21, B1D21))
+}
+
+// h2Certified reports whether both H2 Riccati solutions of P are
+// certified (h2Syn with accuracy 0): their controller stabilizes P, so
+// some finite γ is achievable.
+func h2Certified(P *System, nmeas, ncont int) bool {
+	res, err := h2Syn(P, nmeas, ncont)
+	return err == nil && res.accuracy == 0
 }
 
 // hinfSyn is HinfSyn by the Hamiltonian Riccati solves alone, or, with
