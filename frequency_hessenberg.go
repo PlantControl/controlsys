@@ -189,7 +189,7 @@ func underflowResponseInto(src *System, n, m, p int, pt frequencyPoint, dst []co
 		return errStateUnderflow
 	}
 	u := newRealizationCopy(src, n, m, p)
-	if !ddRealizationInto(&u, pt, dst, true) {
+	if ddRealizationInto(&u, pt, dst, true) != nil {
 		return errStateUnderflow
 	}
 	return nil
@@ -1129,8 +1129,10 @@ func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) error
 		hs.alt = make([]complex128, hs.p*hs.m)
 	}
 	err := hs.dense.evalInto(pt, hs.alt)
-	if errors.Is(err, errSingularPencil) && hs.dense.sys != nil && ddResponseInto(hs.sys, pt, hs.alt) {
-		err = nil
+	if errors.Is(err, errSingularPencil) && hs.dense.sys != nil {
+		if ddErr := ddResponse(hs.sys, pt, hs.alt); ddErr == nil || errors.Is(ddErr, errStateUnderflow) {
+			err = ddErr
+		}
 	}
 	if err == nil {
 		copy(dst, hs.alt)

@@ -53,7 +53,8 @@ const (
 // singular; where that fails it takes the pole limit, each failed sample
 // solved the same way.
 // A non-finite realization or NaN point (errNonFinitePencil) fails at once,
-// as does an unverified state underflow (errStateUnderflow).
+// as does an unverified state underflow (errStateUnderflow), of the solve
+// or of the double-double response.
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
 }
@@ -101,7 +102,11 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		if gate.allow != nil && !gate.allow(gate.w) {
 			return err
 		}
-		if ddResponseInto(sys, pt, dst) && (!sp.near || !ddAtPole(sys, s, sp, dst)) {
+		ddErr := ddResponse(sys, pt, dst)
+		if errors.Is(ddErr, errStateUnderflow) {
+			return ddErr
+		}
+		if ddErr == nil && (!sp.near || !ddAtPole(sys, s, sp, dst)) {
 			return nil
 		}
 	}
@@ -318,13 +323,14 @@ func (d *ddLFTSampler) lftInto(pt frequencyPoint, dst []complex128) bool {
 // r has 1/G(z) ≈ (z−p)/r, so G at s and at s+h, h ≪ the distance to the
 // next pole, give r = h/(1/G(s+h) − 1/G(s)) and s−p = r/G(s), in the
 // largest entry. A multiple pole fits nearer than it is. A dd failure at
-// s+h counts as a pole.
+// s+h counts as a pole, except a lost state (errStateUnderflow), which says
+// nothing of the pencil there.
 func ddAtPole(sys *System, s complex128, sp poleGeometry, g []complex128) bool {
 	tol := poleClusterSpread * eps() * sp.scale
 	h := max(2*sp.gap, tol)
 	gh := make([]complex128, len(g))
-	if !ddResponseInto(sys, pointAt(s+complex(h, 0)), gh) {
-		return true
+	if err := ddResponse(sys, pointAt(s+complex(h, 0)), gh); err != nil {
+		return !errors.Is(err, errStateUnderflow)
 	}
 	j := 0
 	for i, v := range g {
@@ -548,7 +554,17 @@ func (pe *poleEigen) movement(A *mat.Dense, k int) float64 {
 // realization nor one far from unit scale overflows or underflows, and
 // reports false where the response is still not finite. Where an output
 // reads only states far below the largest, ddRefine refines the solution.
+// Where the balanced solution lost a state below the normal range
+// (stateUnderflow), as B̂/σ can at extreme scale, it takes the verified
+// solve of the unbalanced realization (underflowResponseInto) and reports
+// false where that does not verify.
 func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
+	return ddResponse(sys, pt, dst) == nil
+}
+
+// ddResponse is ddResponseInto returning why it failed: errStateUnderflow
+// where a lost state does not verify unbalanced, errDDSingular otherwise.
+func ddResponse(sys *System, pt frequencyPoint, dst []complex128) error {
 	n, m, p := sys.Dims()
 	if n == 0 {
 		for i := range p {
@@ -556,21 +572,31 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 				dst[i*m+j] = complex(sys.D.At(i, j), 0)
 			}
 		}
-		return true
+		return nil
 	}
 	br := newBalancedRealization(sys, n, m, p)
-	return ddRealizationInto(&br, pt, dst, false)
+	err := ddRealizationInto(&br, pt, dst, false)
+	if errors.Is(err, errStateUnderflow) {
+		return underflowResponseInto(sys, n, m, p, pt, dst)
+	}
+	return err
 }
 
-// ddRealizationInto is ddResponseInto of the realization br. With verify
-// set it also reports false unless the rounded solution x of (pE+qA)x = B
-// is normwise backward stable at working precision, ‖r‖ ≤ nε(‖B‖ +
-// (|p|‖E‖+|q|‖A‖)‖x‖) per column for the compensated residual r (rounding
-// x alone leaves ε/2), and no state is lost below the normal range by
-// stateUnderflow's test, whose componentwise row check a lost state fails;
-// a componentwise test of every row would reject a dd roundoff fill in a
-// state that is exactly zero but read at no visible weight.
-func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) bool {
+// errDDSingular is ddRealizationInto's failure other than a lost state: a
+// pivot lost to cancellation, a non-finite response, or, with verify set, a
+// solution that is not backward stable.
+var errDDSingular = errors.New("double-double response not resolved")
+
+// ddRealizationInto is ddResponseInto of the realization br, leaving dst
+// unchanged on error. It returns errStateUnderflow where a state of the
+// solution is lost below the normal range by stateUnderflow's test, whose
+// componentwise row check a lost state fails; a componentwise test of every
+// row would reject a dd roundoff fill in a state that is exactly zero but
+// read at no visible weight. With verify set it also returns errDDSingular
+// unless the rounded solution x of (pE+qA)x = B is normwise backward stable
+// at working precision, ‖r‖ ≤ nε(‖B‖ + (|p|‖E‖+|q|‖A‖)‖x‖) per column for
+// the compensated residual r (rounding x alone leaves ε/2).
+func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) error {
 	n, m, p := br.n, br.m, br.p
 	maxA, maxE := 0.0, 1.0
 	for _, v := range br.a {
@@ -611,7 +637,7 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 			}
 		}
 		if !(best > tol*mag[piv*n+k]) {
-			return false
+			return errDDSingular
 		}
 		perm[k] = piv
 		if piv != k {
@@ -648,27 +674,30 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 				v += complex(br.d[r*br.dStride+c], 0)
 			}
 			if !finiteComplex(v) {
-				return false
+				return errDDSingular
 			}
 			g[r*m+c] = v
 		}
 	}
-	if verify && !ddVerified(br, pt, x, g) {
-		return false
-	}
-	copy(dst, g)
-	return true
-}
-
-// ddVerified reports whether the double-double solution x of br's pencil at
-// pt, with output g, passes ddRealizationInto's verification.
-func ddVerified(br *balancedRealization, pt frequencyPoint, x []ddComplex, g []complex128) bool {
-	n, m := br.n, br.m
-	xr := make([]complex128, 2*n*m)
-	r := xr[n*m:]
+	xr := make([]complex128, n*m)
 	for i, v := range x {
 		xr[i] = v.complex128()
 	}
+	if verify && !ddBackwardStable(br, pt, xr) {
+		return errDDSingular
+	}
+	if ddStateLost(br, pt, xr, g) {
+		return errStateUnderflow
+	}
+	copy(dst, g)
+	return nil
+}
+
+// ddBackwardStable reports whether xr, the rounded double-double solution
+// of br's pencil at pt, passes ddRealizationInto's residual check.
+func ddBackwardStable(br *balancedRealization, pt frequencyPoint, xr []complex128) bool {
+	n, m := br.n, br.m
+	r := make([]complex128, n*m)
 	var normA, normE float64
 	for i := range n {
 		var sa, se float64
@@ -697,15 +726,22 @@ func ddVerified(br *balancedRealization, pt frequencyPoint, x []ddComplex, g []c
 			return false
 		}
 	}
+	return true
+}
+
+// ddStateLost reports whether xr, the rounded double-double solution of
+// br's pencil at pt with output g, lost a state (stateUnderflow). It
+// overwrites xr.
+func ddStateLost(br *balancedRealization, pt frequencyPoint, xr, g []complex128) bool {
 	ys := cabs1(pt.q)
 	if br.e == nil {
 		k := -pt.q
-		for i := range n * m {
+		for i := range xr {
 			xr[i] *= k
 		}
 		ys = 1
 	}
-	return !stateUnderflow(br, pt, xr, m, 1, g, ys)
+	return stateUnderflow(br, pt, xr, br.m, 1, g, ys)
 }
 
 // ddLUSolve overwrites the row-major n×m x with the solution of the system

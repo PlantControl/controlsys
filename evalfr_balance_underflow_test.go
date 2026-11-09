@@ -184,3 +184,94 @@ func TestEvalFr_UnderflowFallbackZeroStateFill(t *testing.T) {
 		}
 	}
 }
+
+// DZSEVY: the double-double fallback solves the balanced realization scaled
+// by σ ≈ ‖A‖, so on hugeDiagonalModel at 1e300 B̂₀/σ ≈ 1e-100/1e300 flushes
+// to zero and the state the output reads most is lost at every s; it
+// returned 5e-301 for 2e-300 at 1i. A lost state takes the verified
+// unbalanced solve, which resolves bScale = 1 and must fail for 1e-30.
+func TestDDResponse_BalancedStateUnderflow(t *testing.T) {
+	const k = 1e300
+	for _, bScale := range []float64{1, 1e-30} {
+		for _, coupled := range []bool{false, true} {
+			for _, n := range []int{2, 3} {
+				sys := hugeDiagonalModel(t, n, k, bScale, coupled)
+				for _, s := range []complex128{1i, -k * (1 + 1e-15), -2 * k * (1 + 4e-16)} {
+					want := bigSISOResponse(sys, s)
+					dd := make([]complex128, 1)
+					ok := ddResponseInto(sys, pointAt(s), dd)
+					rel := cmplx.Abs(dd[0]-want) / cmplx.Abs(want)
+					if ok && !(rel <= 1e-12) || !ok && bScale == 1 {
+						t.Errorf("bScale=%g coupled=%v n=%d s=%v: ddResponseInto = %v, %v; want %v (rel %.3g)", bScale, coupled, n, s, dd[0], ok, want, rel)
+					}
+				}
+			}
+		}
+	}
+}
+
+// DZSEVY: next to a pole the double solve is singular and EvalFr takes the
+// double-double response, which returned the lost-state 1e-300 for
+// -2.24e-285 at s = -1e300·(1+1e-15). The point is within working precision
+// of the pole, so the pole response +Inf is the documented answer; a finite
+// value must match the oracle.
+func TestEvalFr_NearPoleBalancedStateUnderflow(t *testing.T) {
+	for _, bScale := range []float64{1, 1e-30} {
+		sys := hugeDiagonalModel(t, 2, 1e300, bScale, false)
+		s := complex(-1e300*(1+1e-15), 0)
+		want := bigSISOResponse(sys, s)
+		g, err := sys.EvalFr(s)
+		if err != nil {
+			if !errors.Is(err, ErrOverflow) {
+				t.Errorf("bScale=%g: EvalFr(%v): %v, want ErrOverflow", bScale, s, err)
+			}
+			continue
+		}
+		if v := g[0][0]; !cmplx.IsInf(v) && !(cmplx.Abs(v-want) <= 1e-12*cmplx.Abs(want)) {
+			t.Errorf("bScale=%g: EvalFr(%v) = %v, want %v or +Inf", bScale, s, v, want)
+		}
+	}
+}
+
+// DZSEVY: a pair at ±j·1e250 behind a 1e300 state. Every |ω| ≤ 1e285 is
+// within normwise working precision of the pair, the double solve is
+// singular, and the double-double fallback's complex division x·ȳ/|y|²
+// underflows (B/σ ≈ 7e-301 times a 7e-51 pivot), losing every state; the
+// response was 0 with nil error. It must match the oracle or fail with
+// ErrOverflow.
+func TestFreqResponse_DDFallbackLostState(t *testing.T) {
+	const k, w = 1e300, 1e250
+	for _, damp := range []float64{1e-15, 1e-10} {
+		a := -w * damp
+		sys, err := New(mat.NewDense(3, 3, []float64{-k, k, 0, 0, a, w, 0, -w, a}), mat.NewDense(3, 1, []float64{1, 1, 1}), mat.NewDense(1, 3, []float64{1, 1, 1}), mat.NewDense(1, 1, []float64{0}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		omega := []float64{w, w * (1 + 1e-15)}
+		fr, frErr := sys.FreqResponse(omega)
+		for i, om := range omega {
+			s := complex(0, om)
+			want := bigSISOResponse(sys, s)
+			got := map[string]complex128{}
+			errs := map[string]error{"FreqResponse": frErr}
+			if frErr == nil {
+				got["FreqResponse"] = fr.At(i, 0, 0)
+			}
+			g, eErr := sys.EvalFr(s)
+			errs["EvalFr"] = eErr
+			if eErr == nil {
+				got["EvalFr"] = g[0][0]
+			}
+			for name, e := range errs {
+				if e != nil && !errors.Is(e, ErrOverflow) {
+					t.Errorf("damp=%g %s(%g): %v, want ErrOverflow", damp, name, om, e)
+				}
+			}
+			for name, v := range got {
+				if !(cmplx.Abs(v-want) <= 1e-12*cmplx.Abs(want)) {
+					t.Errorf("damp=%g %s(%g) = %v, want %v", damp, name, om, v, want)
+				}
+			}
+		}
+	}
+}
