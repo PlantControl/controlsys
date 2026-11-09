@@ -127,3 +127,43 @@ func TestReducedGainNewtonProven(t *testing.T) {
 		t.Fatal("gate rejected a proven K")
 	}
 }
+
+// TestDareUnprovenReducedTakesHewerSolution: zrw "reg" rows with
+// duplicated inputs, n 2, m 3, whose Newton certificate newtonUnproven
+// voids. On base 2d35ddd Dare and Dlqr returned them at Accuracy 0 with X
+// 2.3e-7 and 5.5e-8 off the 320-bit X (within their eps-sensitivity);
+// held to that X the Hewer gain would have demoted them. The converged
+// Hewer solution is the 320-bit one rounded.
+func TestDareUnprovenReducedTakesHewerSolution(t *testing.T) {
+	rows := []struct {
+		name          string
+		A, B, Q, R, E *mat.Dense
+	}{
+		{"arm64 10723", mat.NewDense(2, 2, []float64{-1.2197256322088657, 1.4312058528359228, -0.018423537693470795, 0.511295171556246}), mat.NewDense(2, 3, []float64{0.2407315545338694, -2.1065916246064065, -0.27338813251327604, 0.21990214533677035, -1.924317809091415, -0.2497330977891719}), mat.NewDense(2, 2, []float64{1.0000000000000004, 1.734496616373932e-16, 1.734496616373932e-16, 1.0000000000000002}), mat.NewDense(3, 3, []float64{1, 0, 0, 0, 1, 0, 0, 0, 1}), mat.NewDense(2, 2, []float64{0.9796081266568227, 0.20091769008205976, -0.20091769008205973, 0.9796081266568226})},
+		{"arm64 11090", mat.NewDense(2, 2, []float64{-1.8163446828033731, 0.2813312516770279, -0.5880739848334703, 1.302135624434151}), mat.NewDense(2, 3, []float64{0.43222861102209503, 0.2819091481900545, 0.4117885563717604, 0.6064655250411508, 0.39555035216113266, 0.5777858205714079}), mat.NewDense(2, 2, []float64{0.9999999999999998, 1.4977138920573913e-16, 1.4977138920573913e-16, 1}), mat.NewDense(3, 3, []float64{1, 0, 0, 0, 1, 0, 0, 0, 1}), mat.NewDense(2, 2, []float64{-0.5310387325938336, -1.0222298998161288, 1.2153553285919614, -0.5269077967544865})},
+	}
+	for _, c := range rows {
+		for _, api := range []string{"Dare", "Dlqr"} {
+			solve := Dare
+			if api == "Dlqr" {
+				solve = Dlqr
+			}
+			res, err := solve(c.A, c.B, c.Q, c.R, &RiccatiOpts{E: c.E})
+			if err != nil {
+				t.Errorf("%s %s: %v", c.name, api, err)
+				continue
+			}
+			Y, X, K, ok := nearSingularOracle(false, c.A, c.B, c.Q, c.R, nil, c.E, res.K)
+			want := X
+			if api == "Dlqr" {
+				want = Y
+			}
+			if !ok {
+				t.Fatalf("%s %s: oracle failed", c.name, api)
+			}
+			if ek, ex := relErr(res.K, K), relErr(res.X, want); ek > 1e-12 || ex > 1e-12 {
+				t.Errorf("%s %s: K %.3g, X %.3g off the 320-bit solution", c.name, api, ek, ex)
+			}
+		}
+	}
+}
