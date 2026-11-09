@@ -555,12 +555,17 @@ const hinfYoulaFraction = 0.5
 
 // wellPosedQ returns a constant Q with ‖Q‖ = hinfYoulaFraction·γ for which
 // I + D22·Dk(Q) is invertible, Dk0 = Dk(0) being the central feedthrough.
-// With D22 = U1 S V1ᵀ (rank r) and Dk(Q) = Dk0 + T1 Q T2,
+// With D22 = U1 S V1ᵀ (rank r, the singular values within loopShiftCond of
+// the largest, as loopShiftIllPosed measures) and Dk(Q) = Dk0 + T1 Q T2,
 // det(I + D22 Dk(Q)) = det(H0 + A Q B) for H0 = I + S V1ᵀ Dk0 U1,
 // A = S V1ᵀ T1 (full row rank) and B = T2 U1 (full column rank). Q = A⁺ X B⁺
 // with X = c·Uh Vhᵀ from the SVD H0 = Uh Σ Vhᵀ gives H0 + A Q B =
 // Uh (Σ + c I) Vhᵀ, whose smallest singular value is at least
 // c = hinfYoulaFraction·γ·σmin(A)·σmin(B), while ‖Q‖ ≤ c/(σmin(A)·σmin(B)).
+// A singular value of D22 below that cut, such as the 2.7e-13 of a
+// numerically singular static plant, is left out: kept, it would make
+// σmin(A) and so the guaranteed margin c that small, which
+// loopShiftIllPosed then rejects.
 func (M *hinfYoula) wellPosedQ(Dk0 *mat.Dense) (*mat.Dense, error) {
 	gp := M.hp.gp
 	var svd mat.SVD
@@ -569,7 +574,7 @@ func (M *hinfYoula) wellPosedQ(Dk0 *mat.Dense) (*mat.Dense, error) {
 	}
 	s := svd.Values(nil)
 	r := 0
-	for r < len(s) && s[r] > s[0]*float64(max(gp.p2, gp.m2))*eps() {
+	for r < len(s) && s[r]*loopShiftCond > s[0] {
 		r++
 	}
 	var U, V mat.Dense
