@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"math/cmplx"
@@ -54,7 +55,9 @@ const (
 // solved the same way.
 // A non-finite realization or NaN point (errNonFinitePencil) fails at once,
 // as does an unverified state underflow (errStateUnderflow), of the solve
-// or of the double-double response.
+// or of the double-double response. Where the double-double response puts
+// a pole at pt but the pole limit is finite in every entry, the point
+// fails (errPoleUnresolved).
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
 }
@@ -87,6 +90,11 @@ type ddGate struct {
 	atPole *bool
 }
 
+// errPoleUnresolved rejects a point the double-double response resolved
+// and ddAtPole placed at a pole whose pole limit is nonetheless finite in
+// every entry (DZSEVY).
+var errPoleUnresolved = fmt.Errorf("pole limit finite at a double-double pole: %w", ErrSingularTransform)
+
 // evalWithPoleLimitGated is evalWithPoleLimit with the fallback off a pole
 // restricted by gate.
 func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128, gate ddGate) error {
@@ -102,6 +110,7 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 	rho, wide := sp.rho, sp.wide
 	delayFree := sys.internalDelayCount() == 0
 	dc := s == 0 || !sys.IsContinuous() && s == 1
+	ddPole := false
 	if !gate.limit && delayFree && (!sp.near || gate.allow == nil && (!gate.snap || sp.offDC) && !dc) {
 		if gate.allow != nil && !gate.allow(gate.w) {
 			return err
@@ -117,10 +126,20 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 			if !sp.near || !ddAtPole(sys, s, sp, dst) {
 				return nil
 			}
+			ddPole = true
 			if gate.atPole != nil {
 				*gate.atPole = true
 			}
 		}
+	}
+	// The double-double response resolved pt and placed a pole there, so a
+	// pole limit finite in every entry contradicts it: neither that
+	// extrapolation from samples ρ away nor the response at pt is verified.
+	limit := func(lerr error) error {
+		if lerr == nil && ddPole && finiteResponse(dst) == nil {
+			return errPoleUnresolved
+		}
+		return lerr
 	}
 	if !delayFree && !gate.limit && !gate.snap && gate.allow == nil {
 		dd := newDDLFTSampler(sys)
@@ -136,7 +155,7 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return poleLimitInto(sample, s, rho, dst, err)
 	}
 	if !delayFree || gate.limit || gate.allow != nil {
-		return poleLimitInto(eval, s, rho, dst, err)
+		return limit(poleLimitInto(eval, s, rho, dst, err))
 	}
 	sample := func(pt frequencyPoint, dst []complex128) error {
 		if err := eval(pt, dst); err == nil || errors.Is(err, errStallUnresolved) || !ddResponseInto(sys, pt, dst) {
@@ -145,9 +164,9 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return nil
 	}
 	if lerr := poleLimitInto(sample, s, rho, dst, err); lerr == nil || wide <= rho {
-		return lerr
+		return limit(lerr)
 	}
-	return poleLimitInto(sample, s, wide, dst, err)
+	return limit(poleLimitInto(sample, s, wide, dst, err))
 }
 
 // poleLimitInto sets dst to the response at s, a numerical pole of the

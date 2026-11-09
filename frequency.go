@@ -349,6 +349,9 @@ func (e frequencyEvaluator) evalPoint(pt frequencyPoint, poleLimit bool) ([][]co
 			return nil, err
 		}
 	} else if err := evalWithPoleLimit(eval, e.sys, pt, data); err != nil {
+		if errors.Is(err, errStateUnderflow) || errors.Is(err, errPoleUnresolved) {
+			err = fmt.Errorf("at s = %v: %w", pt.value(), err)
+		}
 		return nil, err
 	}
 	applyIODelayAtS(e.sys, pt, data, e.p, e.m, true)
@@ -434,10 +437,10 @@ func (e frequencyEvaluator) descriptorSweepInto(omega []float64, dst []complex12
 	return nil
 }
 
-// atFrequency names ω in an unverified state underflow (errStateUnderflow),
-// which fails the whole sweep.
+// atFrequency names ω in an unverified state underflow (errStateUnderflow)
+// or pole (errPoleUnresolved), which fails the whole sweep.
 func atFrequency(w float64, err error) error {
-	if errors.Is(err, errStateUnderflow) {
+	if errors.Is(err, errStateUnderflow) || errors.Is(err, errPoleUnresolved) {
 		return fmt.Errorf("at ω = %g: %w", w, err)
 	}
 	return err

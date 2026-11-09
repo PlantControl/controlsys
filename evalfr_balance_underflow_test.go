@@ -543,3 +543,56 @@ func TestDDResponse_WideBColumnOverflow(t *testing.T) {
 		}
 	}
 }
+
+// DZSEVY (ruling 34b19e5; census mosc 467): a pair at ±j·3.8e127 behind a
+// 1.7e240 state. The double-double response resolves s = ±j·3.8e127, but
+// ddAtPole places a pole there (within 10ε‖A‖, XKU3SI) and the pole limit,
+// sampling 1.7e235 away, extrapolated -1.84e-288 for 1.94e-193 with nil
+// error. The point must fail, naming the frequency, or match the oracle.
+func TestEvalFr_PoleLimitFiniteAtDDPoleFails(t *testing.T) {
+	a := []float64{
+		-1.669245901264708e+240, 1.279960429262556e+240, 0,
+		0, -5.671282038347339e+119, 3.7917740143172387e+127,
+		0, -3.7917740143172387e+127, -5.671282038347339e+119}
+	b := []float64{-1.8165985030409782e-286, 9.89903938571e-312, -1.0886173e-317}
+	c := []float64{1.693198233773578e+238, 9.26605692521012e+237, -1.747942746517829e+237, -1.9790254683658433e+238, 5.102615245597665e+237, -1.992975016974696e+237, 2.1019683645276136e+238, 8.0224788520759755e+236, 9.312463071781371e+237}
+	sys, err := New(mat.NewDense(3, 3, a), mat.NewDense(3, 1, b), mat.NewDense(3, 3, c), mat.NewDense(3, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const w = 3.791774014317239e+127
+	s := complex(0, -w)
+	want := make([]complex128, 3)
+	for i := range 3 {
+		sub, err := New(mat.NewDense(3, 3, a), mat.NewDense(3, 1, b), mat.NewDense(1, 3, c[3*i:3*i+3]), mat.NewDense(1, 1, []float64{0}), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want[i] = bigSISOResponse(sub, s)
+	}
+	check := func(name string, got []complex128, err error) {
+		if err != nil {
+			if !errors.Is(err, ErrSingularTransform) || !strings.Contains(err.Error(), "3.79177401431") {
+				t.Errorf("%s: %v, want ErrSingularTransform naming the frequency", name, err)
+			}
+			return
+		}
+		for i, v := range got {
+			if !(cmplx.Abs(v-want[i]) <= 1e-12*cmplx.Abs(want[i])) {
+				t.Errorf("%s[%d] = %v, want %v or an error", name, i, v, want[i])
+			}
+		}
+	}
+	g, err := sys.EvalFr(s)
+	var ev []complex128
+	if err == nil {
+		ev = []complex128{g[0][0], g[1][0], g[2][0]}
+	}
+	check("EvalFr", ev, err)
+	fr, err := sys.FreqResponse([]float64{w})
+	var fv []complex128
+	if err == nil {
+		fv = []complex128{cmplx.Conj(fr.At(0, 0, 0)), cmplx.Conj(fr.At(0, 1, 0)), cmplx.Conj(fr.At(0, 2, 0))}
+	}
+	check("FreqResponse", fv, err)
+}

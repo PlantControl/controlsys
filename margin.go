@@ -97,7 +97,8 @@ type sisoEval struct {
 	resolved bool
 	// extended falls back to ddSISOResponse where the double solve fails,
 	// but not on an unverified lost state (errStateUnderflow), which that
-	// unbalanced solve cannot verify either; see rationalLoop.gainCrossings
+	// unbalanced solve cannot verify either, nor on an unresolved pole
+	// (errPoleUnresolved); see rationalLoop.gainCrossings
 	// and the delayed grid in allMargin.
 	// ddAllow, when set, limits the fallback to the frequencies it accepts.
 	extended bool
@@ -139,7 +140,7 @@ func (e *sisoEval) at(w float64) complex128 {
 		e.dst[0] = h
 	} else if err := evalWithPoleLimitGated(e.eval, e.sys, pt, e.dst, ddGate{limit: !e.extended, snap: true, allow: e.ddAllow, w: w, atPole: &e.atPole}); err != nil {
 		h, ok := complex(0, 0), false
-		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) && !errors.Is(err, errStateUnderflow) {
+		if e.extended && e.sys.internalDelayCount() == 0 && (e.ddAllow == nil || e.ddAllow(w)) && !errors.Is(err, errStateUnderflow) && !errors.Is(err, errPoleUnresolved) {
 			h, ok = ddSISOResponse(e.sys, pt)
 			e.ddSolves++
 		}
