@@ -65,12 +65,13 @@ type ReduceResult struct {
 // either side of the gap are also reduced separately. Then the lowest
 // order of the two whose frequency response matches the model's to √ε
 // (relative) at the eigenvalue scales is returned, else the model
-// unreduced. Without such a gap, a discrete model's staircase reduction
-// is kept only when its response matches the model's to √ε on the unit
-// circle beside the removed modes, beyond what the rounding of the model's
-// entries leaves undetermined; else the model is returned unreduced (modes
-// clustered near z = 1, as from matched C2D, can carry the response
-// through couplings below the floor). A nil opts is ReduceAll with the
+// unreduced. Without such a gap, the staircase reduction is kept only when
+// its response matches the model's to √ε on the frequency axis (the unit
+// circle or the imaginary axis) beside the removed modes, beyond what the
+// rounding of the model's entries leaves undetermined; else the model is
+// returned unreduced (modes clustered near z = 1, as from matched C2D, or
+// a realization graded over many decades can carry the response through
+// couplings below the floor). A nil opts is ReduceAll with the
 // default tolerance. A descriptor model returns
 // ErrDescriptorUnsupported; an unknown Mode, a negative or non-finite Tol,
 // and a nil or non-finite model return ErrInvalidArgument.
@@ -123,9 +124,12 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 // decoupled blocks are exact to O(ε·κ), sep ≥ (1−√ε)·|λ_f| bounding the
 // Sylvester solution, while the staircase's slow response errs by
 // ε·‖A‖/|λ_s| ≥ √ε, so the band separates the two. Without a candidate in
-// it the model is returned unreduced. Otherwise a discrete model's
-// staircase cut must pass unitCircleCutInBand, or the model is returned
-// unreduced.
+// it the model is returned unreduced. Otherwise the staircase cut must
+// pass frequencyAxisCutInBand, or the model is returned unreduced; a
+// continuous block of reduceAcrossSpectralGap (scaleIO false) is exempt,
+// since its caller judges the assembled reduction against the whole model,
+// while the band would judge the block against its own response, which can
+// be a rounding-level part of the model's.
 func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool) (*ReduceResult, error) {
 	base, removed, err := reduceByStaircase(sys, policy, opts, scaleIO)
 	if err != nil || base.Order == policy.n {
@@ -134,7 +138,7 @@ func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOp
 	if res, ok, err := reduceAcrossResolvedGap(sys, policy, opts, base); ok || err != nil {
 		return res, err
 	}
-	if sys.Dt == 0 || unitCircleCutInBand(sys, base.Sys, removed) {
+	if (sys.Dt == 0 && !scaleIO) || frequencyAxisCutInBand(sys, base.Sys, removed) {
 		return base, nil
 	}
 	return unreducedResult(sys, policy)
