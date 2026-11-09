@@ -26,6 +26,25 @@ const hewerGainPrecMin = 128
 // X 9.7e-11 off the 320-bit X, that ddGain was 1.2e-4 from a K within 2e-17
 // of the 320-bit gain, at a tolerance of 1.7e-9.
 func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
+	return hewerGain(A, B, Q, R, opts, red, res, false)
+}
+
+// hewerGainConverged is hewerGainSubstituted with the Hewer sequence run on
+// should its second step move K beyond newtonTol: K is taken at the first
+// step from the second on that moves it by at most newtonTol, failing on a
+// move from the third step on that does not shrink (Hewer is monotone from
+// its first iterate; the first starts from the gain of X, which is not one)
+// or after ceil(log2 prec) steps, enough for quadratic convergence from one
+// correct bit to the whole precision. The two-step check lagged the
+// sequence by a step: on cheap-control reduced inputs its moves were
+// 1.7e-5, 8.1e-8, 2.7e-12, then 3e-21 (rv48 846), the third iterate
+// matching the 320-bit gain where the K of X was 1.35e-5 off it (2.76e-3
+// on rv49v 4080, Q(1 - 171 eps)).
+func hewerGainConverged(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
+	return hewerGain(A, B, Q, R, opts, red, res, true)
+}
+
+func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult, converge bool) (*RiccatiResult, bool) {
 	k0, cond, ok := gainIn(A, B, R, opts, red)(res.X)
 	if !ok {
 		return nil, false
@@ -52,8 +71,15 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 	if !ok {
 		return nil, false
 	}
-	k, prev, y := xFrom(k0, prec), xMat{}, xMat{}
-	for range 2 {
+	steps := 2
+	if converge {
+		steps = int(math.Ceil(math.Log2(float64(prec))))
+	}
+	k, y, last := xFrom(k0, prec), xMat{}, math.Inf(1)
+	for i := 0; ; i++ {
+		if i == steps {
+			return nil, false
+		}
 		if y, ok = sol.hewer(k); !ok {
 			return nil, false
 		}
@@ -61,10 +87,19 @@ func hewerGainSubstituted(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reduced
 		if !ok {
 			return nil, false
 		}
-		prev, k = k, k1
-	}
-	if !(xRel(k, prev) <= newtonTol) {
-		return nil, false
+		prev := k
+		k = k1
+		if i == 0 {
+			continue
+		}
+		move := xRel(k, prev)
+		if move <= newtonTol {
+			break
+		}
+		if !converge || i >= 2 && !(move < last) {
+			return nil, false
+		}
+		last = move
 	}
 	K := k.dense()
 	if !stableLoop(d.closedLoop(sol, K)) {
