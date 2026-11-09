@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
@@ -15,12 +16,15 @@ import (
 // hinfsyn(P,nmeas,ncont) returns it (see
 // https://www.mathworks.com/help/robust/ref/dynamicsystem.hinfsyn.html):
 // X and Y are the state-feedback and filter Riccati solutions at the gamma
-// K is built for (at most GammaOpt) and CLPoles the closed-loop poles. For a
+// K is built for (at most GammaOpt) and CLPoles the poles of CL. For a
 // discrete plant X and Y solve the Riccati equations of its
 // Tustin-equivalent continuous plant (in the same state coordinates), not
 // discrete Riccati equations; when HinfSyn first shifts modes away from
 // z = ±1 (see HinfSyn), that of the shifted plant.
 type HinfSynResult struct {
+	// K is the controller: MATLAB's central controller, or, where that one
+	// cannot be certified to stabilize P, another member of the controller
+	// family at the same γ (see HinfSyn).
 	K *System
 	// CL is the closed loop of P with K from w to z, LFT(P, K), as MATLAB CL.
 	CL *System
@@ -93,6 +97,25 @@ type HinfSynResult struct {
 // ErrGammaNotAchievable. Every error but ErrAccuracyUnverified comes with
 // a nil result.
 //
+// A nil error certifies that the exact interconnection of the float64 P
+// and the returned K is stable: its state matrix is formed in rationals and
+// checked by a Lyapunov certificate with every rounding bounded, or else
+// by an exact Routh (Schur–Cohn when discrete) test of its characteristic
+// polynomial. The float64 LFT that measures ‖T_zw‖∞ is no such proof: a
+// stiff K can stabilize its rounding but not the exact loop. Where the
+// central controller's D22 loop shift nearly cancels (I + D22·Dk ≈ 0, as
+// for Mixsyn with a biproper G and a small W2) K has a huge mode and gains
+// that its own rounding destabilizes; HinfSyn then returns the strictly
+// proper controller of the Youla family at that γ (zero feedthrough before
+// the loop shift, so the shift needs no inverse) when it meets γ and is
+// certified. A nil error takes precedence over parity with MATLAB's
+// central K: K may then be a different stabilizing controller at the same
+// γ. The exact test runs only within the exact root-locus path's size gates
+// (rlExactMaxStates, rlExactBitBudget); a loop beyond them that the
+// Lyapunov certificate does not cover is uncertified. When no controller
+// is certified, the smallest stable one in float64 is returned with
+// ErrAccuracyUnverified. Gamma itself is the float64 norm of CL.
+//
 // Either error makes HinfSyn repeat the design, when one of the first
 // pass's Hamiltonian solves failed numerically where the design needed it
 // (see hinfRiccatiMode), with each failed Hamiltonian solve retried from
@@ -126,7 +149,7 @@ func HinfSyn(P *System, nmeas, ncont int) (*HinfSynResult, error) {
 		return res, err
 	}
 	if first.numericalFailure() {
-		if res, perr := hinfSyn(gp, P, nmeas, ncont, &hinfRiccatiMode{pencil: true}); perr == nil {
+		if res, perr := hinfSyn(gp, P, nmeas, ncont, &hinfRiccatiMode{pencil: true}); perr == nil || res != nil && errors.Is(perr, ErrAccuracyUnverified) {
 			if ok, serr := res.CL.IsStable(); serr == nil && ok && res.Gamma <= res.GammaOpt {
 				res.accuracy = 1
 				return res, fmt.Errorf("%s: controller from the extended-pencil Riccati repeat, its certificate the float64 closed loop: %w", gp.op, ErrAccuracyUnverified)
@@ -161,14 +184,17 @@ func hinfSyn(gp *generalizedPlantPartition, P *System, nmeas, ncont int, mode *h
 	if err != nil {
 		return nil, err
 	}
-	return d.verified(gp.op, P, nmeas, ncont)
+	return d.verified(gp, P, nmeas, ncont)
 }
 
 // hinfDesign is a bisected H∞ problem: gammaEdge is the smallest gamma the
-// Riccati test accepts and build returns the controller for P at a gamma.
+// Riccati test accepts and build returns the controller for P at a gamma,
+// the central one or, with alt (when strictlyProper), the strictly proper
+// member of the controller family at that gamma (hinfGeneralPlant.synthesize).
 type hinfDesign struct {
-	gammaEdge float64
-	build     func(gamma float64) (*HinfSynResult, error)
+	gammaEdge      float64
+	build          func(gamma float64, alt bool) (*HinfSynResult, error)
+	strictlyProper bool
 }
 
 // hinfGammaAbsTol is the absolute bisection tolerance. It ends bisection
@@ -196,27 +222,58 @@ const hinfBackoffTries = 48
 // and its rounding leaves ‖T_zw‖∞ a little above the gamma it is built for,
 // at random, so meeting it is not monotone in the margin; yet every stable
 // closed loop is a verified bound. Every try with a finite norm is therefore
-// a candidate, its GammaOpt the larger of its build gamma and its norm, and
-// the smallest candidate is returned. When no try gives one, verified
-// returns ErrNotConverged with the last try's error: the edge passed the
-// Riccati test, so the failure is numerical, not a proof that γ is not
-// achievable.
-func (d hinfDesign) verified(op string, P *System, nmeas, ncont int) (*HinfSynResult, error) {
-	var best *HinfSynResult
+// a candidate, its GammaOpt the larger of its build gamma and its norm.
+// When the central controller at a gamma builds but gives no finite norm
+// and the design has a strictly proper member, that one is tried at the
+// same gamma.
+//
+// The candidate returned is the one of smallest GammaOpt whose exact
+// interconnection of the float64 P and K is certified stable
+// (stabilityCertified): a stiff K, such as the central controller whose
+// D22 loop shift nearly cancels, can stabilize the rounded float64 LFT that
+// measures it but not the exact loop. When no candidate is certified, the
+// strictly proper members at the candidates' gammas are tried next; failing
+// those, the smallest candidate is returned with ErrAccuracyUnverified.
+// Without any candidate verified returns ErrNotConverged with the last
+// try's error: the edge passed the Riccati test, so the failure is
+// numerical, not a proof that γ is not achievable.
+func (d hinfDesign) verified(gp *generalizedPlantPartition, P *System, nmeas, ncont int) (*HinfSynResult, error) {
+	op := gp.op
+	type candidate struct {
+		res   *HinfSynResult
+		gamma float64
+		alt   bool
+	}
+	var cands []candidate
 	var err error
-	try := func(margin float64) bool {
-		var res *HinfSynResult
-		if res, err = d.build(d.gammaEdge + margin); err == nil {
-			err = res.measure(op, P, nmeas, ncont)
+	attempt := func(gamma float64, alt bool) (res *HinfSynResult, built bool) {
+		res, berr := d.build(gamma, alt)
+		if berr == nil {
+			built = true
+			berr = res.measure(op, P, nmeas, ncont)
 		}
-		if err != nil {
+		if berr != nil {
+			if !alt {
+				err = berr
+			}
+			return nil, built
+		}
+		return res, true
+	}
+	try := func(margin float64) bool {
+		gamma := d.gammaEdge + margin
+		alt := false
+		res, built := attempt(gamma, alt)
+		if res == nil && built && d.strictlyProper {
+			alt = true
+			res, _ = attempt(gamma, alt)
+		}
+		if res == nil {
 			return false
 		}
 		met := res.Gamma <= res.GammaOpt
 		res.GammaOpt = math.Max(res.GammaOpt, res.Gamma)
-		if best == nil || res.GammaOpt < best.GammaOpt {
-			best = res
-		}
+		cands = append(cands, candidate{res, gamma, alt})
 		return met
 	}
 	margin := hinfControllerBackoff * d.gammaEdge
@@ -229,10 +286,50 @@ func (d hinfDesign) verified(op string, P *System, nmeas, ncont int) (*HinfSynRe
 		}
 		margin = math.Max(2*margin, hinfGammaAbsTol)
 	}
-	if best == nil {
+	if len(cands) == 0 {
 		return nil, fmt.Errorf("%s: no controller above the bisection edge γ = %g met its γ: %w: %w", op, d.gammaEdge, riccatiError(err, nil), ErrNotConverged)
 	}
-	return best, nil
+	slices.SortStableFunc(cands, func(a, b candidate) int { return cmp.Compare(a.res.GammaOpt, b.res.GammaOpt) })
+	for _, c := range cands {
+		if stabilityCertified(gp, c.res.K) {
+			return c.res, nil
+		}
+	}
+	if d.strictlyProper {
+		var alts []*HinfSynResult
+		for _, c := range cands {
+			if c.alt {
+				continue
+			}
+			if res, _ := attempt(c.gamma, true); res != nil {
+				res.GammaOpt = math.Max(res.GammaOpt, res.Gamma)
+				alts = append(alts, res)
+			}
+		}
+		slices.SortStableFunc(alts, func(a, b *HinfSynResult) int { return cmp.Compare(a.GammaOpt, b.GammaOpt) })
+		for _, res := range alts {
+			if stabilityCertified(gp, res.K) {
+				return res, nil
+			}
+		}
+	}
+	res := cands[0].res
+	res.accuracy = 1
+	return res, fmt.Errorf("%s: no controller above the bisection edge γ = %g is certified to stabilize P exactly, only its float64 closed loop: %w", op, d.gammaEdge, ErrAccuracyUnverified)
+}
+
+// stabilityCertified reports whether the exact interconnection of the
+// float64 plant of gp with the float64 K is stable: its state matrix is
+// formed exactly (closedLoopStateMatrix), balanced exactly (balancedRat)
+// and passes lyapunovStable after one rounding, which that test covers, or
+// else exactStable.
+func stabilityCertified(gp *generalizedPlantPartition, K *System) bool {
+	A, ok := closedLoopStateMatrix(gp, K)
+	if !ok {
+		return false
+	}
+	discrete := gp.dt != 0
+	return lyapunovStable(roundRat(balancedRat(A)), discrete) || exactStable(A, discrete)
 }
 
 // narrow bisects the margin in (lo, hi], try(hi) having met its gamma.
@@ -251,8 +348,8 @@ func (d hinfDesign) narrow(try func(float64) bool, lo, hi float64) {
 	}
 }
 
-// measure records the closed loop of P with K, its norm and peak frequency;
-// an unstable loop (infinite norm) is an error.
+// measure records the closed loop of P with K, its norm, peak frequency and
+// poles; an unstable loop (infinite norm) is an error.
 func (res *HinfSynResult) measure(op string, P *System, nmeas, ncont int) error {
 	cl, err := LFT(P, res.K, LFTFeedback{Nu: ncont, Ny: nmeas})
 	if err != nil {
@@ -265,7 +362,11 @@ func (res *HinfSynResult) measure(op string, P *System, nmeas, ncont int) error 
 	if math.IsInf(norm, 1) || math.IsNaN(norm) {
 		return fmt.Errorf("%s: controller for γ = %g gives ‖T_zw‖∞ = %g: %w", op, res.GammaOpt, norm, ErrGammaNotAchievable)
 	}
-	res.CL, res.Gamma, res.PeakFrequency = cl, norm, omega
+	poles, err := cl.Poles()
+	if err != nil {
+		return fmt.Errorf("%s: closed-loop poles: %w", op, err)
+	}
+	res.CL, res.Gamma, res.PeakFrequency, res.CLPoles = cl, norm, omega, poles
 	return nil
 }
 
@@ -286,7 +387,7 @@ func hinfSynPartition(gp *generalizedPlantPartition, d12, d21 string, mode *hinf
 		return hinfDesign{}, fmt.Errorf("%s: %w", gp.op, err)
 	}
 	mode.edge = gamma
-	return hinfDesign{gammaEdge: gamma, build: func(g float64) (*HinfSynResult, error) { return hinfSynD11Zero(gp, ric, g) }}, nil
+	return hinfDesign{gammaEdge: gamma, build: func(g float64, _ bool) (*HinfSynResult, error) { return hinfSynD11Zero(gp, ric, g) }}, nil
 }
 
 // hinfSynScaled designs for the continuous P after balancing its states by
@@ -313,8 +414,8 @@ func hinfSynScaled(op string, P *System, nmeas, ncont int, d12, d21 string, mode
 		t[i] = bal.T.At(i, i)
 	}
 	build := d.build
-	d.build = func(g float64) (*HinfSynResult, error) {
-		res, err := build(g)
+	d.build = func(g float64, alt bool) (*HinfSynResult, error) {
+		res, err := build(g, alt)
 		if err != nil {
 			return nil, err
 		}
@@ -363,8 +464,8 @@ func hinfSynDiscrete(gp *generalizedPlantPartition, P *System, nmeas, ncont int,
 				return hinfDesign{}, err
 			}
 			build := d.build
-			d.build = func(g float64) (*HinfSynResult, error) {
-				res, err := build(g)
+			d.build = func(g float64, alt bool) (*HinfSynResult, error) {
+				res, err := build(g, alt)
 				if err != nil {
 					return nil, err
 				}
@@ -424,8 +525,8 @@ func hinfSynTustin(op string, P *System, nmeas, ncont int, mode *hinfRiccatiMode
 		return hinfDesign{}, err
 	}
 	build := d.build
-	d.build = func(g float64) (*HinfSynResult, error) {
-		res, err := build(g)
+	d.build = func(g float64, alt bool) (*HinfSynResult, error) {
+		res, err := build(g, alt)
 		if err != nil {
 			return nil, err
 		}
@@ -439,15 +540,9 @@ func hinfSynTustin(op string, P *System, nmeas, ncont int, mode *hinfRiccatiMode
 		if err != nil {
 			return nil, fmt.Errorf("%s: mapping the controller back to discrete time: %w", op, err)
 		}
-		beta := 2 / P.Dt
-		sign := complex(1, 0)
 		if reflect {
 			K.A.Scale(-1, K.A)
 			K.B.Scale(-1, K.B)
-			sign = -1
-		}
-		for i, s := range res.CLPoles {
-			res.CLPoles[i] = sign * (complex(beta, 0) + s) / (complex(beta, 0) - s)
 		}
 		res.K = K
 		return res, nil
@@ -709,13 +804,7 @@ func hinfSynD11Zero(gp *generalizedPlantPartition, ric *hinfD11ZeroRiccatis, gam
 	if err != nil {
 		return nil, err
 	}
-
-	clPoles, err := gp.closedLoopPoles(Ak, Bk, Ck, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return &HinfSynResult{K: K, GammaOpt: gamma, X: X, Y: Y, CLPoles: clPoles}, nil
+	return &HinfSynResult{K: K, GammaOpt: gamma, X: X, Y: Y}, nil
 }
 
 // hinfD11ZeroRiccatis holds the γ-independent terms of the D11 = 0 Riccati

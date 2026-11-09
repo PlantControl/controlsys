@@ -1430,11 +1430,11 @@ func TestHinfSyn_XYStateCoordinatesUnderScaling(t *testing.T) {
 				t.Fatal(err)
 			}
 			g := 2 * math.Max(d.gammaEdge, ds.gammaEdge)
-			r, err := d.build(g)
+			r, err := d.build(g, false)
 			if err != nil {
 				t.Fatal(err)
 			}
-			rs, err := ds.build(g)
+			rs, err := ds.build(g, false)
 			if err != nil {
 				t.Fatal(err)
 			}
