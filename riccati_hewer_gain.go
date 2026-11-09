@@ -44,10 +44,14 @@ func hewerGainConverged(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedIn
 	return hewerGain(A, B, Q, R, opts, red, res, true, false)
 }
 
-// hewerSolution is hewerGainConverged run until Y converges with K and
-// then one Hewer step on, X and EᵀXE (xe) replaced by that iterate's,
-// rounded once, when res.X is beyond newtonTol of it, rather than
-// failing: res.X need not be within newtonTol of the solution where
+// hewerSolution is hewerGainConverged run until Y converges with K. It
+// returns res itself once res.X is within newtonTol and res.K within
+// gainFloor of that solution, the extended Hewer fixed point certifying
+// them: near a stability boundary (closed-loop margin 7.9e-11) the
+// rounded Hewer gain failed stableLoop where the K of res, 4.8e-12 off,
+// was stabilizing. Otherwise it takes one Hewer step on and replaces K,
+// X and EᵀXE (xe) by that iterate's, rounded once, rather than failing:
+// res.X need not be within newtonTol of the solution where
 // newtonUnproven voids its certificate. Under cheap control K converged
 // within newtonTol while Y was still 2.8e-4 off.
 func hewerSolution(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (*RiccatiResult, bool) {
@@ -117,6 +121,9 @@ func hewerGain(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res
 		last = move
 	}
 	if takeX {
+		if x, ok := sol.xOf(y); ok && xRel(x, xFrom(res.X, prec)) <= newtonTol && xRel(xFrom(res.K, prec), k) <= gainFloor {
+			return res, true
+		}
 		if y, ok = sol.hewer(k); !ok {
 			return nil, false
 		}
