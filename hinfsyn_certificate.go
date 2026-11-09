@@ -260,24 +260,34 @@ func lyapunovStable(Ahat *mat.Dense, discrete bool) bool {
 		return false
 	}
 
+	abs := func(M *mat.Dense) *mat.Dense {
+		out := mat.NewDense(N, N, nil)
+		out.Apply(func(_, _ int, v float64) float64 { return math.Abs(v) }, M)
+		return out
+	}
+	absA, absP := abs(Ahat), abs(P)
+	var PAabs mat.Dense
+	PAabs.Mul(absP, absA)
 	nA, nP := up(denseNormScaled(Ahat.RawMatrix()), N*N+2), up(denseNormScaled(P.RawMatrix()), N*N+2)
-	e := up(gam(1)*nA+float64(N)*math.SmallestNonzeroFloat64, 2)
+	nPA := up(denseNormScaled(PAabs.RawMatrix()), N*N+N+2)
+	tiny := up(3*float64(N)*math.SmallestNonzeroFloat64*nP*(nA+1), 4)
 	sqrtN := math.Sqrt(float64(N))
 	R := mat.NewDense(N, N, nil)
+	var PA mat.Dense
+	PA.Mul(P, Ahat)
 	var bound, perturb float64
 	if discrete {
-		var PA mat.Dense
-		PA.Mul(P, Ahat)
+		var APA mat.Dense
+		APA.Mul(absA.T(), &PAabs)
+		nAPA := up(denseNormScaled(APA.RawMatrix()), N*N+2*N+2)
 		R.Mul(At, &PA)
 		R.Sub(R, P)
-		bound = gam(2*N+2) * up(2*nA*nA*nP+nP+sqrtN, 4)
-		perturb = up(nP*e*(2*nA+e), 4)
+		bound = gam(2*N+2) * up(2*nAPA+nP+sqrtN, 4)
+		perturb = up((2*u+u*u)*nAPA, 2) + tiny
 	} else {
-		var PA mat.Dense
-		PA.Mul(P, Ahat)
 		R.Add(&PA, PA.T())
-		bound = gam(2*N+2) * up(2*nA*nP+sqrtN, 3)
-		perturb = up(2*e*nP, 2)
+		bound = gam(N+2) * up(2*nPA+sqrtN, 3)
+		perturb = up(2*u*nPA, 2) + tiny
 	}
 	for i := range N {
 		R.Set(i, i, R.At(i, i)+1)
