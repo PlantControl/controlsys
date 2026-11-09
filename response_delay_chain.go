@@ -22,13 +22,13 @@ const (
 // ODE whose exponential F_j(δ) propagates the chain between samples. Jumps
 // of x or of the ZOH input at time θ enter block i at θ + iτ.
 type delayChain struct {
-	na, p, blocks, order int
-	tau, dt              float64
-	steps                int
-	gen                  []*mat.Dense
-	out                  []*mat.Dense
-	prop                 []*mat.Dense
-	expCache             map[float64][]*mat.Dense
+	n, na, p, blocks, order int
+	tau, dt                 float64
+	steps                   int
+	gen                     []*mat.Dense
+	out                     []*mat.Dense
+	prop                    []*mat.Dense
+	expCache                map[float64][]*mat.Dense
 }
 
 // chainSource is a train of jumps amp[k]·dir at shift + k·dt in the
@@ -80,7 +80,7 @@ func newDelayChain(sys *System, tau float64, inputs []int, dt float64, steps, sh
 		return nil, false
 	}
 	K := max(int(blocks)-1, 0)
-	c := &delayChain{na: na, p: p, blocks: K + 1, tau: tau, dt: dt, steps: steps, expCache: make(map[float64][]*mat.Dense)}
+	c := &delayChain{n: n, na: na, p: p, blocks: K + 1, tau: tau, dt: dt, steps: steps, expCache: make(map[float64][]*mat.Dense)}
 
 	left := mat.NewDense(q, na, nil)
 	top := mat.NewDense(p, na, nil)
@@ -172,7 +172,12 @@ func maxAbsDense(m *mat.Dense) float64 {
 }
 
 // expBlocks returns F_0..F_order(δ), the first block row of exp(M·δ).
+// When M·δ is stiff, stiffChainBlocks splits the state part of M by its
+// modes instead of one exponential, which rounds the slow modes to ε·‖M·δ‖.
 func (c *delayChain) expBlocks(delta float64) []*mat.Dense {
+	if f, ok := c.stiffChainBlocks(delta); ok {
+		return f
+	}
 	na, J := c.na, c.order
 	size := (J + 1) * na
 	big := mat.NewDense(size, size, nil)
@@ -193,6 +198,72 @@ func (c *delayChain) expBlocks(delta float64) []*mat.Dense {
 		out[j] = mat.DenseCopyOf(e.Slice(0, na, j*na, (j+1)*na))
 	}
 	return out
+}
+
+// stiffChainBlocks is expBlocks by the ZOH hold of stiffModalHold: the
+// input coordinates of every block are constant between jumps, so in the
+// order [x-parts; u-parts] M is [Ā B̄; 0 0], Ā the block upper-triangular
+// Toeplitz state generator, and exp(M·δ) = [e^{Ā·δ} Γ; 0 I] with
+// Γ = ∫₀^δ e^{Ā·s} ds·B̄. Keeping the inputs out of the mode split keeps
+// their zero eigenvalues out of the Schur reordering, whose rotations would
+// couple them by ‖B‖ and round the result back to ε·‖M·δ‖. ok is false when
+// Ā·δ is not stiff or stiffModalHold does not apply.
+func (c *delayChain) stiffChainBlocks(delta float64) ([]*mat.Dense, bool) {
+	n, na, J := c.n, c.na, c.order
+	k := na - n
+	if n == 0 {
+		return nil, false
+	}
+	ns, nk := (J+1)*n, (J+1)*k
+	abar, bbar := mat.NewDense(ns, ns, nil), newDense(ns, nk)
+	aRaw := abar.RawMatrix()
+	var bData []float64
+	bStride := 0
+	if nk > 0 {
+		r := bbar.RawMatrix()
+		bData, bStride = r.Data, r.Stride
+	}
+	for j := 0; j <= J; j++ {
+		if c.gen[j] == nil {
+			continue
+		}
+		g := c.gen[j].RawMatrix()
+		for r := 0; r+j <= J; r++ {
+			for s := range n {
+				src := g.Data[s*g.Stride : s*g.Stride+na]
+				copy(aRaw.Data[(r*n+s)*aRaw.Stride+(r+j)*n:], src[:n])
+				if k > 0 {
+					copy(bData[(r*n+s)*bStride+(r+j)*k:], src[n:])
+				}
+			}
+		}
+	}
+	ad, gammas, ok := stiffModalHold(abar, bbar, delta, zohHoldLeaf)
+	if !ok {
+		return nil, false
+	}
+	adRaw := ad.RawMatrix()
+	out := make([]*mat.Dense, J+1)
+	for j := range out {
+		f := mat.NewDense(na, na, nil)
+		fRaw := f.RawMatrix()
+		for s := range n {
+			copy(fRaw.Data[s*fRaw.Stride:s*fRaw.Stride+n], adRaw.Data[s*adRaw.Stride+j*n:])
+		}
+		if k > 0 {
+			gRaw := gammas[0].RawMatrix()
+			for s := range n {
+				copy(fRaw.Data[s*fRaw.Stride+n:s*fRaw.Stride+na], gRaw.Data[s*gRaw.Stride+j*k:])
+			}
+		}
+		if j == 0 {
+			for t := n; t < na; t++ {
+				fRaw.Data[t*fRaw.Stride+t] = 1
+			}
+		}
+		out[j] = f
+	}
+	return out, true
 }
 
 func (c *delayChain) expAt(delta float64) []*mat.Dense {
