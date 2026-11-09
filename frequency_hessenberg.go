@@ -533,7 +533,7 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 		if err := ddResponse(bd.sys, pt, dst); errors.Is(err, errStateUnderflow) {
 			return err
 		} else if err != nil {
-			return errSingularPencil
+			return errStallUnresolved
 		}
 	}
 	return finiteResponse(dst)
@@ -1167,7 +1167,7 @@ func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) error
 		hs.alt = make([]complex128, hs.p*hs.m)
 	}
 	err := hs.dense.evalInto(pt, hs.alt)
-	if errors.Is(err, errSingularPencil) && hs.dense.sys != nil {
+	if errors.Is(err, errSingularPencil) && !errors.Is(err, errStallUnresolved) && hs.dense.sys != nil {
 		if ddErr := ddResponse(hs.sys, pt, hs.alt); ddErr == nil || errors.Is(ddErr, errStateUnderflow) {
 			err = ddErr
 		}
@@ -1391,6 +1391,11 @@ func cLUSolve(lu []complex128, piv []int, x []complex128, n, m int) {
 }
 
 var errSingularPencil = fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+
+// errStallUnresolved is errSingularPencil from a point whose refinement
+// stalled and whose double-double response (ddResponse) then failed too;
+// callers falling back to ddResponse at the same point skip it.
+var errStallUnresolved = fmt.Errorf("stalled refinement, double-double unresolved: %w", errSingularPencil)
 
 // finiteResponse reports errSingularPencil for a non-finite response of a
 // finite realization: the solve overflowed or underflowed, as next to a pole

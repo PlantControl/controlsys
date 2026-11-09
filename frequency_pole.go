@@ -106,7 +106,10 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		if gate.allow != nil && !gate.allow(gate.w) {
 			return err
 		}
-		ddErr := ddResponse(sys, pt, dst)
+		ddErr := errDDSingular
+		if !errors.Is(err, errStallUnresolved) {
+			ddErr = ddResponse(sys, pt, dst)
+		}
 		if errors.Is(ddErr, errStateUnderflow) {
 			return ddErr
 		}
@@ -136,7 +139,7 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return poleLimitInto(eval, s, rho, dst, err)
 	}
 	sample := func(pt frequencyPoint, dst []complex128) error {
-		if err := eval(pt, dst); err == nil || !ddResponseInto(sys, pt, dst) {
+		if err := eval(pt, dst); err == nil || errors.Is(err, errStallUnresolved) || !ddResponseInto(sys, pt, dst) {
 			return err
 		}
 		return nil
