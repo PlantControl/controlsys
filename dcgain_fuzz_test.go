@@ -14,8 +14,9 @@ import (
 // infinity, as MATLAB dcgain; its sign is free when further intended
 // poles lie within roundoff of x0 (a nearby model has them at x0 too). Poles within the eigenvalue error of x0, or
 // an ill-conditioned solve, are skipped. I/O delays never change the gain.
-// ErrAccuracyUnverified comes only with an exact pole at x0, and its value
-// meets the same checks.
+// ErrAccuracyUnverified comes only with an exact pole at x0; its value is
+// exempt from the exact-limit check, since the exact route may read a
+// sub-rounding residue as cancelled.
 func FuzzDCGain(f *testing.F) {
 	for _, s := range fzDCGainSeeds() {
 		fzAddSeed(f, s)
@@ -90,7 +91,7 @@ func FuzzDCGain(f *testing.F) {
 						continue
 					}
 					v := g.At(i, j)
-					if signFree && math.IsInf(v, 0) {
+					if unverified || signFree && math.IsInf(v, 0) {
 						continue
 					}
 					if v != lim {
