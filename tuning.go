@@ -346,9 +346,10 @@ func parameterGrid(param *TunableReal, points int) ([]float64, error) {
 		return nil, fmt.Errorf("free parameter %q has bounds [%g, %g]; grid search needs finite bounds: %w", param.Name(), bounds.Lower, bounds.Upper, ErrInvalidArgument)
 	}
 	out := make([]float64, points)
-	for i := range out {
-		out[i] = bounds.Lower + float64(i)*(bounds.Upper-bounds.Lower)/float64(points-1)
+	for i := range points - 1 {
+		out[i] = min(max(bounds.Lower+float64(i)*(bounds.Upper-bounds.Lower)/float64(points-1), bounds.Lower), bounds.Upper)
 	}
+	out[points-1] = bounds.Upper
 	return out, nil
 }
 
