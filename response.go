@@ -617,10 +617,27 @@ func (sys *System) dcGainByTransferFunctionLimit(offPole bool) (*mat.Dense, erro
 		return dcGainAgainstExactLimit(g, lim, "deflated expansion")
 	}
 	gain = sys.dcGainUnscale(gain, scaled, inScale, outScale)
-	if offPole && !sure {
-		return dcGainAgainstExactLimit(gain, sys.exactDCGainLimitsAtPole(), "decoupled modes")
+	if !offPole || sure {
+		return gain, nil
 	}
-	return gain, nil
+	if lg, ok, skipped := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, laurentAsGiven); ok && !skipped {
+		return dcGainWithInfSigns(gain, lg), nil
+	}
+	return dcGainAgainstExactLimit(gain, sys.exactDCGainLimitsAtPole(), "decoupled modes")
+}
+
+// dcGainWithInfSigns returns g with each entry that is the opposite
+// infinity of ref's set to ref's.
+func dcGainWithInfSigns(g, ref *mat.Dense) *mat.Dense {
+	gr, rr := g.RawMatrix(), ref.RawMatrix()
+	for i := range gr.Rows {
+		for j := range gr.Cols {
+			if x := rr.Data[i*rr.Stride+j]; math.IsInf(x, 0) && gr.Data[i*gr.Stride+j] == -x {
+				gr.Data[i*gr.Stride+j] = x
+			}
+		}
+	}
+	return g
 }
 
 // dcExactLimits holds both readings of exactDCGainLimitRounded.
@@ -930,8 +947,9 @@ func absDense(m *mat.Dense) *mat.Dense {
 	return r
 }
 
-// blockLaurentGain takes abs nil for |A|, |B|, |C|. skipped reports a
-// pole coefficient of nonzero magnitude scale read as zero.
+// blockLaurentGain takes abs nil for |A|, |B|, |C|. skipped reports an
+// infinite entry whose sign comes after a more singular coefficient of
+// nonzero magnitude scale read as rounding.
 func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode laurentMode) (gain *mat.Dense, ok, skipped bool) {
 	deflate := mode != laurentAsGiven
 	n, m, p := sys.Dims()
@@ -1106,6 +1124,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		crow := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+n]
 		cmag := absC.Data[i*absC.Stride : i*absC.Stride+n]
 		for j := range m {
+			read := false
 			for ord := -ns; ord <= 0; ord++ {
 				g, bound := 0.0, 0.0
 				for k, c := range crow {
@@ -1124,9 +1143,10 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 				}
 				if math.Abs(g) > tol*bound {
 					gain.Set(i, j, math.Inf(signInt(g)))
+					skipped = skipped || read
 					break
 				}
-				skipped = skipped || bound > 0
+				read = read || bound > 0
 			}
 		}
 	}
