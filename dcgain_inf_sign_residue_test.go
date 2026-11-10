@@ -78,8 +78,8 @@ func TestDCGainTransferCoefficientOverflowExactLimit(t *testing.T) {
 	checkDCGainExactLimitEntries(t, "transfer overflow", n, m, p, a, b, c, d, g.RawMatrix().Data, dt)
 }
 
-// VNWHVK: dcGainAgainstExactLimit keeps a route's gain unless an entry is
-// the opposite infinity of the strict exact limit; it then takes the exact
+// VNWHVK: dcGainAgainstExactLimit acts on an entry that is the opposite
+// infinity of the strict exact limit (finite entries are N4GQHT's); it then takes the exact
 // sign when the rounded limit agrees, and returns the strict limit with
 // ErrAccuracyUnverified when the sign rests on a residue below ε.
 func TestDCGainAgainstExactLimitInfSign(t *testing.T) {
@@ -92,7 +92,6 @@ func TestDCGainAgainstExactLimitInfSign(t *testing.T) {
 		unverified     bool
 	}{
 		{"agree", d(inf, 2), d(inf, 3), d(inf, 3), []float64{inf, 2}, false},
-		{"finite route, Inf strict", d(4, 2), d(-inf, 3), d(5, 3), []float64{4, 2}, false},
 		{"residue clear of rounding", d(inf, 2), d(-inf, 3), d(-inf, 3), []float64{-inf, 2}, false},
 		{"residue below rounding", d(inf, 2), d(-inf, 3), d(7, 3), []float64{-inf, 3}, true},
 	} {
