@@ -2838,23 +2838,26 @@ func noSolution(err error) bool {
 // the rank of [A − λE, B] for any c > 0. c = 1/max(1, |λ|) gives the
 // homogeneous pencil βA − αE. At c = 1, δ = τ‖E‖, the change of
 // λE. For |λ| > 1, c(A − λE) is a unit multiple of μA − E, μ = 1/λ, so
-// σmin is that of [μA − E, B] and δ = τμ‖A‖, τμ the bound τ of μ as
-// an eigenvalue of the reversed pencil (E, A); cτ‖E‖ omits the change of
-// c and overstates the change of λ/|λ| by |λ|‖E‖/‖A‖: a numerically
-// infinite mode (β at rounding, τ ~ |λ|) has μ ≈ 0 known to τμ ~ eps,
-// its test the PBH test at infinity, rank [E, B] (AMDL7W: a
-// controllable mode at 1e15 judged on σmin 0.25 against cτ‖E‖ = 0.37).
-// Both tests bound the same rank, so a mode with |λ| > 1 is deficient
-// only by both: c = 1 is the sharper near the unit circle (‖A‖ > ‖E‖),
-// μ near infinity, where λ is tested alone also when τμ is below its
+// σmin is that of [μA − E, B], which moves by at most τμ‖A‖, τμ the
+// bound τ of μ as an eigenvalue of the reversed pencil (E, A), so δ =
+// min(cτ‖E‖, τμ‖A‖), each a bound of the same σmin (c held fixed):
+// cτ‖E‖ is vacuous at a numerically infinite mode (β at rounding, τ ~
+// |λ|), where μ ≈ 0 is known to τμ ~ eps and the test is the PBH test
+// at infinity, rank [E, B] (AMDL7W: a controllable mode at 1e15 judged
+// on σmin 0.25 against cτ‖E‖ = 0.37); τμ‖A‖ is vacuous for a large ‖A‖
+// at moderate λ. λ is tested alone also when τμ is below its
 // distance in μ to every other eigenvalue (an infinite one at μ = 0)
 // though τ is not in λ: a numerically infinite mode beside a finite one
 // has τ ~ |λ| ~ its λ-gap, and the cluster mean would test PBH at λ/2,
 // hiding a zero of [E, B]. That μ-only test takes τμ at 1× its
 // first-order bound, not the band's 10× (AMDL7W: at 10× it claimed
 // ErrNoStabilizing on fast modes controllable at 5–9× first-order
-// rounding; the 10× margin elsewhere is MZTFJJ). A cluster mean m maps its band τ into μ exactly,
-// τμ = τ/(|m|(|m| − τ)) for τ < |m|, else ∞. Unscaled (c = 1 alone), a near-infinite mode of a
+// rounding; the 10× margin elsewhere is MZTFJJ). These tests only lift
+// verdicts: the problem is deficient only if the tests with δ = cτ‖E‖
+// and no μ-only test, as before them, also find a deficient mode, so
+// an honest error never becomes ErrNoStabilizing (AMDL7W census). A
+// cluster mean m maps its band τ into μ exactly, τμ = τ/(|m|(|m| − τ))
+// for τ < |m|, else ∞. Unscaled (c = 1), a near-infinite mode of a
 // near-singular E has a τ‖E‖ beyond ‖B‖, the most σmin reaches at an
 // eigenvalue, so no B passes (OCTGBK: a controllable mode at 1.24e13,
 // σmin 0.38 against 3e10; scaled 0.18 against 2.4e-3, and the 320-bit
@@ -2913,33 +2916,35 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		return cmplx.Abs(lam) >= 1-tol
 	}
 	var svd mat.SVD
-	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol, tm float64) bool {
+	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, dl, tm float64) bool {
 		lr, li, mod := real(lam), imag(lam), cmplx.Abs(lam)
-		deficient := func(c, pert float64) bool {
-			for i := range n {
-				for j := range n {
-					re, im := c*(a[i*n+j]-lr*e[i*n+j]), -c*li*e[i*n+j]
-					g.Set(i, j, re)
-					g.Set(i, n+m+j, -im)
-					g.Set(n+i, j, im)
-					g.Set(n+i, n+m+j, re)
-				}
-				for j := range m {
-					b := bd[i*bs+j]
-					g.Set(i, n+j, b)
-					g.Set(n+i, n+m+n+j, b)
-				}
-			}
-			if !svd.Factorize(g, mat.SVDNone) {
-				return false
-			}
-			sv := svd.Values(nil)
-			return sv[2*n-1] <= nf*ep*math.Hypot(c*(an+mod*en), bn)+pert
+		c := 1.0
+		if !problem.unscaledPBH {
+			c = 1 / max(1, mod)
 		}
-		if problem.unscaledPBH || mod <= 1 {
-			return deficient(1, tol*en)
+		for i := range n {
+			for j := range n {
+				re, im := c*(a[i*n+j]-lr*e[i*n+j]), -c*li*e[i*n+j]
+				g.Set(i, j, re)
+				g.Set(i, n+m+j, -im)
+				g.Set(n+i, j, im)
+				g.Set(n+i, n+m+j, re)
+			}
+			for j := range m {
+				b := bd[i*bs+j]
+				g.Set(i, n+j, b)
+				g.Set(n+i, n+m+n+j, b)
+			}
 		}
-		return deficient(1/mod, tm*an) && deficient(1, tol*en)
+		if !svd.Factorize(g, mat.SVDNone) {
+			return false
+		}
+		sv := svd.Values(nil)
+		pert := c * dl * en
+		if c < 1 {
+			pert = min(pert, tm*an)
+		}
+		return sv[2*n-1] <= nf*ep*math.Hypot(c*(an+mod*en), bn)+pert
 	}
 	g := mat.NewDense(2*n, 2*(n+m), nil)
 	var at, et, qd []float64
@@ -2973,11 +2978,11 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		}
 		return math.Abs(1-cmplx.Abs(lam)) <= tol
 	}
-	pbhDeficient := func(lam complex128, tol, tm float64) bool {
-		if rankDeficient(a, e, bRaw.Data, bRaw.Stride, m, bn, g, lam, tol, tm) {
+	pbhDeficient := func(lam complex128, tol, dl, tm float64) bool {
+		if rankDeficient(a, e, bRaw.Data, bRaw.Stride, m, bn, g, lam, dl, tm) {
 			return true
 		}
-		return detect && onBoundary(lam, tol) && rankDeficient(at, et, qd, qs, qm, qn, gq, lam, tol, tm)
+		return detect && onBoundary(lam, tol) && rankDeficient(at, et, qd, qs, qm, qn, gq, lam, dl, tm)
 	}
 	var sa, se, sar, sai, sbeta []float64
 	clusterCond := func(lam complex128, rho float64) float64 {
@@ -3031,6 +3036,7 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 	}
 	x, y := make([]complex128, n), make([]complex128, n)
 	ds := make([]float64, 0, n)
+	var base, cur bool
 	for k := 0; k < n; k++ {
 		kk := k
 		if wi[k] != 0 {
@@ -3082,7 +3088,11 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		if len(ds) > 1 {
 			gap = ds[1]
 		}
-		alone := tol < gap
+		inf := math.Inf(1)
+		if !base && tol < gap && inBand(lam, tol) && pbhDeficient(lam, tol, tol, inf) {
+			base = true
+		}
+		alone, dl := tol < gap, tol
 		if !alone && !problem.unscaledPBH && mod > 1 {
 			gm := math.Inf(1)
 			for j := range n {
@@ -3090,10 +3100,13 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 					gm = min(gm, cmplx.Abs(mus[j]-mu))
 				}
 			}
-			alone = tm < gm
+			alone, dl = tm < gm, inf
 			tm /= 10
 		}
-		if alone && inBand(lam, tol) && pbhDeficient(lam, tol, tm) {
+		if !cur && alone && inBand(lam, tol) && pbhDeficient(lam, tol, dl, tm) {
+			cur = true
+		}
+		if base && cur {
 			return true
 		}
 		for c := 1; c < len(ds) && ds[c] <= max(rho, tol); c++ {
@@ -3127,7 +3140,11 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 			if mtol < mm {
 				mtm = mtol / (mm * (mm - mtol))
 			}
-			if mtol < sep && inBand(mean, mtol) && pbhDeficient(mean, mtol, mtm) {
+			if mtol < sep && inBand(mean, mtol) {
+				base = base || pbhDeficient(mean, mtol, mtol, inf)
+				cur = cur || pbhDeficient(mean, mtol, mtol, mtm)
+			}
+			if base && cur {
 				return true
 			}
 		}
