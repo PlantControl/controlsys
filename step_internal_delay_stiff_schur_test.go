@@ -158,3 +158,41 @@ func TestStepInternalDelayStiffSchurFollowsMethodOfSteps(t *testing.T) {
 		}
 	}
 }
+
+// The stiff chain propagator of a state does not depend on which other
+// inputs share the chain: the x-block and an input's column of F_j match
+// between the two-input chain and that input's own chain. Splitting the
+// whole generator put the inputs' zero modes into the Schur reordering,
+// which coupled them by ‖B‖ and left 1e-8 between the two (WI4F5E).
+func TestDelayChainStiffPropagatorIndependentOfInputs(t *testing.T) {
+	sys := stiffSchurDelayCase(t, 1e13, true, false)
+	ex, tau, ok := delayChainModel(sys)
+	if !ok {
+		t.Fatal("no chain model")
+	}
+	const dt, steps = 7e-6, 100001
+	both, ok := newDelayChain(ex, tau, []int{0, 1}, dt, steps, 1)
+	if !ok {
+		t.Fatal("chain over budget")
+	}
+	n, _, _ := ex.Dims()
+	for in := range 2 {
+		one, ok := newDelayChain(ex, tau, []int{in}, dt, steps, 1)
+		if !ok || one.order != both.order {
+			t.Fatalf("input %d: chain order differs", in)
+		}
+		for j := range one.prop {
+			tol := 4 * 0x1p-52 * math.Max(1, maxAbsDense(one.prop[j]))
+			for r := range n {
+				for s := range n {
+					if d := math.Abs(one.prop[j].At(r, s) - both.prop[j].At(r, s)); d > tol {
+						t.Errorf("input %d F_%d[%d,%d] differs by %.3g", in, j, r, s, d)
+					}
+				}
+				if d := math.Abs(one.prop[j].At(r, n) - both.prop[j].At(r, n+in)); d > tol {
+					t.Errorf("input %d F_%d[%d,u] differs by %.3g", in, j, r, d)
+				}
+			}
+		}
+	}
+}
