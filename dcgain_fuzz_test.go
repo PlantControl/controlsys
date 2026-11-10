@@ -10,13 +10,14 @@ import (
 // FuzzDCGain: DCGain of a delay-free model equals the exact rational
 // C(x0·I − A)⁻¹B + D (x0 = 0, or 1 for discrete) within a conditioning
 // bound from the intended spectrum; when the float64 A has an exact pole at
-// x0, every entry whose exact limit n_ij/det(sI−A) diverges is that signed
-// infinity, as MATLAB dcgain; its sign is free when further intended
-// poles lie within roundoff of x0 (a nearby model has them at x0 too). Poles within the eigenvalue error of x0, or
-// an ill-conditioned solve, are skipped. I/O delays never change the gain.
-// ErrAccuracyUnverified comes only with an exact pole at x0; its value is
-// exempt from the exact-limit check, since the exact route may read a
-// sub-rounding residue as cancelled.
+// x0, a nil error means every entry is the float model's exact limit
+// n_ij/det(sI−A) at x0 (N4GQHT): each divergent entry that signed infinity,
+// as MATLAB dcgain, and each finite one that value to 1e-6. Poles within the
+// eigenvalue error of x0, or an ill-conditioned solve, are skipped. I/O
+// delays never change the gain. ErrAccuracyUnverified comes with an exact
+// pole at x0, whose residue may be below rounding of its own terms, or with
+// an infinite entry for a pole within rounding of x0; its value is exempt
+// from the exact-limit check.
 func FuzzDCGain(f *testing.F) {
 	for _, s := range fzDCGainSeeds() {
 		fzAddSeed(f, s)
@@ -65,19 +66,13 @@ func FuzzDCGain(f *testing.F) {
 		x0 := fzRat(x0f)
 		cp := fzCharPolyExact(s.A, n)
 		if sh := fzTaylorShift(cp, x0); sh[n].Sign() == 0 {
-			ord := 0
-			for k := n; k >= 0 && sh[k].Sign() == 0; k-- {
-				ord++
+			if unverified {
+				fzSkip(t, "DCGain: "+ErrAccuracyUnverified.Error())
 			}
-			band := math.Max(4*s.EigErr(), 1e-10*math.Max(1, s.NormJ))
-			near := 0
-			for _, e := range s.Eig {
-				if cmplx.Abs(e-complex(x0f, 0)) <= band {
-					near++
-				}
+			var dmax float64
+			for _, d := range s.D {
+				dmax = math.Max(dmax, math.Abs(d))
 			}
-			signFree := near > ord
-			finite := false
 			for i := range p {
 				for j := range m {
 					bj := make([]float64, n)
@@ -86,29 +81,23 @@ func FuzzDCGain(f *testing.F) {
 					}
 					num := fzPencilDetRat(n, 1, s.A, bj, s.C[i*n:(i+1)*n], []float64{s.D[i*m+j]})
 					lim := fzLimitAt(num, cp, x0)
-					if !math.IsInf(lim, 0) {
-						finite = true
-						continue
-					}
 					v := g.At(i, j)
-					if unverified || signFree && math.IsInf(v, 0) {
-						continue
-					}
-					if v != lim {
-						t.Fatalf("DCGain[%d,%d] = %v, exact limit at the integrator %v\n%s", i, j, v, lim, s)
+					if math.IsInf(lim, 0) && v != lim || !math.IsInf(lim, 0) && !(math.Abs(v-lim) <= 1e-6*math.Abs(lim)+1e3*0x1p-52*dmax) {
+						t.Fatalf("DCGain[%d,%d] = %v with a nil error, exact limit at the integrator %v\n%s", i, j, v, lim, s)
 					}
 				}
-			}
-			if unverified {
-				fzSkip(t, "DCGain: "+ErrAccuracyUnverified.Error())
-			}
-			if finite {
-				fzSkip(t, "integrator cancelled in an entry")
 			}
 			return
 		}
 		if unverified {
-			t.Fatalf("DCGain: %v without an exact pole at x0\n%s", ErrAccuracyUnverified, s)
+			inf := false
+			for _, v := range g.RawMatrix().Data {
+				inf = inf || math.IsInf(v, 0)
+			}
+			if !inf {
+				t.Fatalf("DCGain: %v without an exact pole at x0 or an infinite entry\n%s", ErrAccuracyUnverified, s)
+			}
+			fzSkip(t, "DCGain: pole within rounding of DC")
 		}
 		r := s.EigErr()
 		minDist, maxDist := math.Inf(1), 0.0

@@ -66,7 +66,8 @@ func roundedStiffIntegrator(t *testing.T, seed uint64, stiff float64, m, p int) 
 // whose coefficient floor 100ε·max|coef| kept the rounded constant 4.1e11
 // of the characteristic polynomial against a roundoff of order ε‖A‖³, and
 // returned 15797.6 (W45MGH). The exact limit of the float data, 80439.7,
-// is R/(−λ) for the rounded λ, which the data do not tell from 0.
+// is R/(−λ) for the rounded λ, which the data do not tell from 0, so the
+// Inf comes with ErrAccuracyUnverified (N4GQHT).
 func TestDCGainRoundedStiffIntegratorInf(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 2026))
 	T := mat.NewDense(3, 3, nil)
@@ -87,9 +88,7 @@ func TestDCGainRoundedStiffIntegratorInf(t *testing.T) {
 	}
 	r := mat.Dot(c.RowView(0), T.ColView(0)) * mat.Dot(Ti.RowView(0), b.ColView(0))
 	dc, err := sys.DCGain()
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDCGainUnverified(t, "rounded stiff integrator", dc, err)
 	if want := math.Inf(signInt(r)); dc.At(0, 0) != want {
 		t.Errorf("DCGain = %v, want %v", dc.At(0, 0), want)
 	}
@@ -104,7 +103,9 @@ func TestDCGainRoundedStiffIntegratorInf(t *testing.T) {
 
 // Rounded integrators beside a fast pole of 1e4 to 1e14: every entry is
 // the signed Inf of the intended residue, SISO and MIMO, and EvalFr(0)
-// reads the pole too. On base DCGain was finite (W45MGH).
+// reads the pole too. On base DCGain was finite (W45MGH). DCGain flags
+// the Inf with ErrAccuracyUnverified, the float model's exact limit being
+// finite (N4GQHT); integratingDCGain does not check it.
 func TestDCGainRoundedStiffIntegratorFamily(t *testing.T) {
 	for seed := range uint64(44) {
 		stiff := math.Pow(10, 4+float64(seed%11))
@@ -115,9 +116,7 @@ func TestDCGainRoundedStiffIntegratorFamily(t *testing.T) {
 		sys, res := roundedStiffIntegrator(t, seed, stiff, m, p)
 		label := fmt.Sprintf("seed %d stiff %g", seed, stiff)
 		dc, err := sys.DCGain()
-		if err != nil {
-			t.Fatalf("%s: DCGain: %v", label, err)
-		}
+		requireDCGainUnverified(t, label, dc, err)
 		ig, err := sys.integratingDCGain()
 		if err != nil {
 			t.Fatalf("%s: integratingDCGain: %v", label, err)

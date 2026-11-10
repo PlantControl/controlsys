@@ -230,7 +230,8 @@ func TestDCGain_CoupledSingularBlockFallsBackToTransferLimit(t *testing.T) {
 // model times the scale. The ergo plant's den(1) = 2.8e-15 exactly (rational
 // sum) is below the rounding level ε·Σ|dᵢ| ≈ 1.2e-14 of its coefficients,
 // num(1) = -4.4e-16 against Σ|nᵢ| = 1.3e-15 is not, and the other five poles
-// lie in (0, 1): −∞, as G·2⁶⁰ already gave.
+// lie in (0, 1): −∞, as G·2⁶⁰ already gave, with ErrAccuracyUnverified as
+// the float model's pole is off z = 1 (N4GQHT).
 func TestDCGain_TinyInputScaleKeepsIntegrator(t *testing.T) {
 	tf := &TransferFunc{
 		Num: [][][]float64{{{-8.70643320022765e-16, 2.9186581655941266e-16, 1.3545850066477854e-16}}},
@@ -244,9 +245,7 @@ func TestDCGain_TinyInputScaleKeepsIntegrator(t *testing.T) {
 			t.Fatal(err)
 		}
 		g, err := res.Sys.DCGain()
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireDCGainUnverified(t, fmt.Sprintf("scale %g", k), g, err)
 		if !math.IsInf(g.At(0, 0), -1) {
 			t.Errorf("scale %g: DCGain = %v, want -Inf", k, g.At(0, 0))
 		}
