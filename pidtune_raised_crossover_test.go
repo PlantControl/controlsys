@@ -201,7 +201,9 @@ func TestPidtuneTangentCrossoverMeetsBar(t *testing.T) {
 // GK5SUC's plant with finite DC gain 85 and a pole beside z = 1. Oracle:
 // exact D(1) of the stored coefficients is within ε/2·Σ|dᵢ|, the most
 // rounding each dᵢ to float64 moves it, only for the integrators (third
-// plant 4.1ε·Σ|dᵢ|); ordinary plants keep their DC sign.
+// plant 4.1ε·Σ|dᵢ|); ordinary plants keep their DC sign. DCGain, shown
+// beside the sign, may flag a rounded integrator's reading with
+// ErrAccuracyUnverified (N4GQHT; the second plant on amd64).
 func TestPidtuneDCSignRecognisesRoundedIntegrator(t *testing.T) {
 	const dt = 0.01
 	noSample := func(float64) (complex128, bool) { return 0, false }
@@ -230,7 +232,7 @@ func TestPidtuneDCSignRecognisesRoundedIntegrator(t *testing.T) {
 		}
 		p := pidtuneBackoffPlant(t, c.num, c.den, dt, 0)
 		dc, err := p.DCGain()
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrAccuracyUnverified) {
 			t.Fatalf("%s: DCGain: %v", name, err)
 		}
 		if got := pidTuningDCSign(p, noSample, 1e-4); got != c.want {
