@@ -158,7 +158,7 @@ func fzFRInternalLoop(s *fzSpec) (b2, c2 []float64) {
 	c2 = make([]float64, s.N)
 	for i := range s.N {
 		b2[i] = s.B[i*s.M]
-		c2[i] = 0.5 * math.Sin(float64(i)+s.Vals[11])
+		c2[i] = 0.5 * fzSin(float64(i)+s.Vals[11])
 	}
 	return b2, c2
 }
