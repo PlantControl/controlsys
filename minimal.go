@@ -47,8 +47,8 @@ type ReduceOpts struct {
 	// orthogonal staircase judges couplings against ‖A‖. It is off by
 	// default since it is not uniformly better: on the 4000-case Kalman
 	// sweep (KALMAN_SWEEP_EQUALIZE=1) with 10^±4 state scales it fixes
-	// 353 over-counts but adds 190 others (kept hidden unstable states),
-	// and without scaling it adds 64 over-counts while fixing 85.
+	// 245 over-counts but adds 185 others (kept hidden unstable states),
+	// and without scaling it adds 59 over-counts while fixing 72.
 	Equalize bool
 }
 
