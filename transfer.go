@@ -1101,7 +1101,7 @@ func sampleCheck(sys *System, bd *balancedDense, pts []complex128, m, p int, sen
 		dst := make([]complex128, p*m)
 		fallback := false
 		if err := bd.evalInto(pointAt(s), dst); err != nil {
-			if sys == nil || !errors.Is(err, errSingularPencil) || !ddResponseInto(sys, pointAt(s), dst) || finiteResponse(dst) != nil {
+			if sys == nil || !errors.Is(err, errSingularPencil) || errors.Is(err, errStallUnresolved) || !ddResponseInto(sys, pointAt(s), dst) || finiteResponse(dst) != nil {
 				continue
 			}
 			fallback = true

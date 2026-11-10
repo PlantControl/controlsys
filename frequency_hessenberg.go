@@ -180,6 +180,40 @@ func (br *balancedRealization) undrivenMask(rs, cs int) uint64 {
 	return mask
 }
 
+// undrivenStates reports, at i*m+j, whether input j cannot reach state i
+// through B̂ and the off-diagonal pencil, as undrivenMask does without its
+// size limit.
+func (br *balancedRealization) undrivenStates() []bool {
+	n, m := br.n, br.m
+	out := make([]bool, n*m)
+	reached := make([]bool, n)
+	q := make([]int, 0, n)
+	for j := range m {
+		clear(reached)
+		q = q[:0]
+		for i := range n {
+			if br.b[i*m+j] != 0 {
+				reached[i] = true
+				q = append(q, i)
+			}
+		}
+		for len(q) > 0 {
+			k := q[len(q)-1]
+			q = q[:len(q)-1]
+			for i := range n {
+				if !reached[i] && (br.a[i*n+k] != 0 || br.e != nil && br.e[i*n+k] != 0) {
+					reached[i] = true
+					q = append(q, i)
+				}
+			}
+		}
+		for i := range n {
+			out[i*m+j] = !reached[i]
+		}
+	}
+	return out
+}
+
 // underflowResponseInto sets dst to the double-double response at pt of
 // src's n×n, n×m, p×n realization, unbalanced, where a balanced state
 // underflowed, and returns errStateUnderflow where src is nil or that does
@@ -189,9 +223,17 @@ func underflowResponseInto(src *System, n, m, p int, pt frequencyPoint, dst []co
 		return errStateUnderflow
 	}
 	u := newRealizationCopy(src, n, m, p)
-	if !ddRealizationInto(&u, pt, dst, true) {
+	g := make([]complex128, p*m)
+	bad, err := ddRealizationInto(&u, pt, g, true)
+	if err != nil {
 		return errStateUnderflow
 	}
+	for _, e := range bad {
+		if e != nil {
+			return errStateUnderflow
+		}
+	}
+	copy(dst, g)
 	return nil
 }
 
@@ -496,7 +538,11 @@ func (bd *balancedDense) evalInto(pt frequencyPoint, dst []complex128) error {
 		return underflowResponseInto(bd.src, n, m, p, pt, dst)
 	}
 	if bd.stalled && bd.sys != nil && bd.stallInaccurate(dst) {
-		ddResponseInto(bd.sys, pt, dst)
+		if err := ddResponse(bd.sys, pt, dst); errors.Is(err, errStateUnderflow) {
+			return err
+		} else if err != nil {
+			return errStallUnresolved
+		}
 	}
 	return finiteResponse(dst)
 }
@@ -1129,8 +1175,10 @@ func (hs *hessenbergSweep) denseRetry(pt frequencyPoint, dst []complex128) error
 		hs.alt = make([]complex128, hs.p*hs.m)
 	}
 	err := hs.dense.evalInto(pt, hs.alt)
-	if errors.Is(err, errSingularPencil) && hs.dense.sys != nil && ddResponseInto(hs.sys, pt, hs.alt) {
-		err = nil
+	if errors.Is(err, errSingularPencil) && !errors.Is(err, errStallUnresolved) && hs.dense.sys != nil {
+		if ddErr := ddResponse(hs.sys, pt, hs.alt); ddErr == nil || errors.Is(ddErr, errStateUnderflow) {
+			err = ddErr
+		}
 	}
 	if err == nil {
 		copy(dst, hs.alt)
@@ -1351,6 +1399,11 @@ func cLUSolve(lu []complex128, piv []int, x []complex128, n, m int) {
 }
 
 var errSingularPencil = fmt.Errorf("singular complex matrix: %w", ErrSingularTransform)
+
+// errStallUnresolved is errSingularPencil from a point whose refinement
+// stalled and whose double-double response (ddResponse) then failed too;
+// callers falling back to ddResponse at the same point skip it.
+var errStallUnresolved = fmt.Errorf("stalled refinement, double-double unresolved: %w", errSingularPencil)
 
 // finiteResponse reports errSingularPencil for a non-finite response of a
 // finite realization: the solve overflowed or underflowed, as next to a pole

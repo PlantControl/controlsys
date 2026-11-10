@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"math/cmplx"
@@ -53,7 +54,10 @@ const (
 // singular; where that fails it takes the pole limit, each failed sample
 // solved the same way.
 // A non-finite realization or NaN point (errNonFinitePencil) fails at once,
-// as does an unverified state underflow (errStateUnderflow).
+// as does an unverified state underflow (errStateUnderflow), of the solve
+// or of the double-double response. Where the double-double response puts
+// a pole at pt but the pole limit is finite in every entry, the point
+// fails (errPoleUnresolved).
 func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *System, pt frequencyPoint, dst []complex128) error {
 	return evalWithPoleLimitGated(eval, sys, pt, dst, ddGate{})
 }
@@ -80,7 +84,16 @@ type ddGate struct {
 	snap  bool
 	allow func(float64) bool
 	w     float64
+	// atPole, when set, records that the double-double response resolved
+	// pt and ddAtPole put a pole there, for a caller that would repeat
+	// that check.
+	atPole *bool
 }
+
+// errPoleUnresolved rejects a point the double-double response resolved
+// and ddAtPole placed at a pole whose pole limit is nonetheless finite in
+// every entry (DZSEVY).
+var errPoleUnresolved = fmt.Errorf("pole limit finite at a double-double pole: %w", ErrSingularTransform)
 
 // evalWithPoleLimitGated is evalWithPoleLimit with the fallback off a pole
 // restricted by gate.
@@ -97,13 +110,36 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 	rho, wide := sp.rho, sp.wide
 	delayFree := sys.internalDelayCount() == 0
 	dc := s == 0 || !sys.IsContinuous() && s == 1
+	ddPole := false
 	if !gate.limit && delayFree && (!sp.near || gate.allow == nil && (!gate.snap || sp.offDC) && !dc) {
 		if gate.allow != nil && !gate.allow(gate.w) {
 			return err
 		}
-		if ddResponseInto(sys, pt, dst) && (!sp.near || !ddAtPole(sys, s, sp, dst)) {
-			return nil
+		ddErr := errDDSingular
+		if !errors.Is(err, errStallUnresolved) {
+			ddErr = ddResponse(sys, pt, dst)
 		}
+		if errors.Is(ddErr, errStateUnderflow) {
+			return ddErr
+		}
+		if ddErr == nil {
+			if !sp.near || !ddAtPole(sys, s, sp, dst) {
+				return nil
+			}
+			ddPole = true
+			if gate.atPole != nil {
+				*gate.atPole = true
+			}
+		}
+	}
+	// The double-double response resolved pt and placed a pole there, so a
+	// pole limit finite in every entry contradicts it: neither that
+	// extrapolation from samples ρ away nor the response at pt is verified.
+	limit := func(lerr error) error {
+		if lerr == nil && ddPole && finiteResponse(dst) == nil {
+			return errPoleUnresolved
+		}
+		return lerr
 	}
 	if !delayFree && !gate.limit && !gate.snap && gate.allow == nil {
 		dd := newDDLFTSampler(sys)
@@ -119,18 +155,18 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return poleLimitInto(sample, s, rho, dst, err)
 	}
 	if !delayFree || gate.limit || gate.allow != nil {
-		return poleLimitInto(eval, s, rho, dst, err)
+		return limit(poleLimitInto(eval, s, rho, dst, err))
 	}
 	sample := func(pt frequencyPoint, dst []complex128) error {
-		if err := eval(pt, dst); err == nil || !ddResponseInto(sys, pt, dst) {
+		if err := eval(pt, dst); err == nil || errors.Is(err, errStallUnresolved) || !ddResponseInto(sys, pt, dst) {
 			return err
 		}
 		return nil
 	}
 	if lerr := poleLimitInto(sample, s, rho, dst, err); lerr == nil || wide <= rho {
-		return lerr
+		return limit(lerr)
 	}
-	return poleLimitInto(sample, s, wide, dst, err)
+	return limit(poleLimitInto(sample, s, wide, dst, err))
 }
 
 // poleLimitInto sets dst to the response at s, a numerical pole of the
@@ -318,13 +354,14 @@ func (d *ddLFTSampler) lftInto(pt frequencyPoint, dst []complex128) bool {
 // r has 1/G(z) ≈ (z−p)/r, so G at s and at s+h, h ≪ the distance to the
 // next pole, give r = h/(1/G(s+h) − 1/G(s)) and s−p = r/G(s), in the
 // largest entry. A multiple pole fits nearer than it is. A dd failure at
-// s+h counts as a pole.
+// s+h counts as a pole, except a lost state (errStateUnderflow), which says
+// nothing of the pencil there.
 func ddAtPole(sys *System, s complex128, sp poleGeometry, g []complex128) bool {
 	tol := poleClusterSpread * eps() * sp.scale
 	h := max(2*sp.gap, tol)
 	gh := make([]complex128, len(g))
-	if !ddResponseInto(sys, pointAt(s+complex(h, 0)), gh) {
-		return true
+	if err := ddResponse(sys, pointAt(s+complex(h, 0)), gh); err != nil {
+		return !errors.Is(err, errStateUnderflow)
 	}
 	j := 0
 	for i, v := range g {
@@ -543,12 +580,22 @@ func (pe *poleEigen) movement(A *mat.Dense, k int) float64 {
 // unchanged, at a pivot below 2⁻¹⁰⁰ of the magnitudes it was formed from,
 // where it is cancellation noise. A pivot small against the whole pencil but
 // not against its own terms is accurate, as is a companion form's last pivot
-// next to an exact origin pole. It solves the balanced realization scaled
-// by a power of two σ, ((p/σ)E + q(A/σ))⁻¹(B/σ), so that neither a graded
-// realization nor one far from unit scale overflows or underflows, and
-// reports false where the response is still not finite. Where an output
-// reads only states far below the largest, ddRefine refines the solution.
+// next to an exact origin pole. It solves the balanced realization with
+// pencil, B columns and C rows each scaled by a power of two
+// (ddRealizationInto), so that neither a graded realization nor one far
+// from unit scale overflows or underflows, and reports false where the
+// response is still not finite. Where an output reads only states far
+// below the largest, ddRefine refines the solution. Where the balanced
+// solution still lost a state below the normal range, it takes the
+// verified solve of the unbalanced realization (underflowResponseInto) and
+// reports false where that does not verify.
 func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
+	return ddResponse(sys, pt, dst) == nil
+}
+
+// ddResponse is ddResponseInto returning why it failed: errStateUnderflow
+// where a lost state does not verify unbalanced, errDDSingular otherwise.
+func ddResponse(sys *System, pt frequencyPoint, dst []complex128) error {
 	n, m, p := sys.Dims()
 	if n == 0 {
 		for i := range p {
@@ -556,21 +603,72 @@ func ddResponseInto(sys *System, pt frequencyPoint, dst []complex128) bool {
 				dst[i*m+j] = complex(sys.D.At(i, j), 0)
 			}
 		}
-		return true
+		return nil
 	}
 	br := newBalancedRealization(sys, n, m, p)
-	return ddRealizationInto(&br, pt, dst, false)
+	g := make([]complex128, p*m)
+	bad, err := ddRealizationInto(&br, pt, g, false)
+	if errors.Is(err, errStateUnderflow) {
+		return underflowResponseInto(sys, n, m, p, pt, dst)
+	}
+	if err != nil {
+		return err
+	}
+	lost := false
+	for _, e := range bad {
+		if e != nil && !errors.Is(e, errStateUnderflow) {
+			return e
+		}
+		lost = lost || e != nil
+	}
+	if lost {
+		u := newRealizationCopy(sys, n, m, p)
+		ug := make([]complex128, p*m)
+		ubad, uerr := ddRealizationInto(&u, pt, ug, true)
+		for j, e := range bad {
+			if e == nil {
+				continue
+			}
+			if uerr != nil || ubad[j] != nil {
+				return errStateUnderflow
+			}
+			for i := range p {
+				g[i*m+j] = ug[i*m+j]
+			}
+		}
+	}
+	copy(dst, g)
+	return nil
 }
 
-// ddRealizationInto is ddResponseInto of the realization br. With verify
-// set it also reports false unless the rounded solution x of (pE+qA)x = B
-// is normwise backward stable at working precision, ‖r‖ ≤ nε(‖B‖ +
-// (|p|‖E‖+|q|‖A‖)‖x‖) per column for the compensated residual r (rounding
-// x alone leaves ε/2), and no state is lost below the normal range by
-// stateUnderflow's test, whose componentwise row check a lost state fails;
-// a componentwise test of every row would reject a dd roundoff fill in a
-// state that is exactly zero but read at no visible weight.
-func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) bool {
+// errDDSingular is ddRealizationInto's failure other than a lost state: a
+// pivot lost to cancellation, a non-finite response, or, with verify set, a
+// solution that is not componentwise backward stable.
+var errDDSingular = errors.New("double-double response not resolved")
+
+// ddRealizationInto is ddResponseInto of the realization br per input
+// column: it sets column j of dst unless bad[j] reports why that column
+// failed, and returns err, leaving dst unchanged, where the pencil itself
+// fails (a pivot lost to cancellation, or a C row the scaling would round).
+// It solves the pencil scaled by σ, M̃ = (p/σ)E +
+// q(A/σ), for each input column j scaled by its own power of two 2^βⱼ: the
+// largest |bᵢⱼ| in [½, 1), or, where that would round an entry below the
+// normal range, the least scale that keeps the smallest entry normal: x̃ = M̃⁻¹(B·2^-βⱼ) = x·σ·2^-βⱼ, and forms output
+// row k from C scaled by 2^-γₖ only where n·|q|·maxᵢ|cₖᵢ||x̃ᵢ| could
+// overflow, so that no state or term underflows or overflows that the
+// response does not. All scalings are exact powers of two, so the result
+// is that of the unscaled solve wherever that stays in the normal range; an
+// entry of B or C the scaling would still round is lost data
+// (errStateUnderflow), for its column or, for C, the call. It returns errStateUnderflow where a
+// state of x̃ is lost below the normal range: one an output could resolve
+// at its |c̃ₖᵢ|·2⁻¹⁰²² whose pencil rows fail the componentwise test
+// below; a test of every row would reject a dd roundoff fill in a state
+// that is exactly zero but read at no visible weight. With verify set it
+// also returns errDDSingular unless every row of a state some input
+// reaches (undrivenStates) passes the Oettli–Prager test |b̃ − M̃x̂| ≤
+// nε(|b̃| + |M̃||x̂|) for the rounded x̂, residual in double-double:
+// rounding an accurate x̃ leaves ε/2.
+func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex128, verify bool) (bad []error, err error) {
 	n, m, p := br.n, br.m, br.p
 	maxA, maxE := 0.0, 1.0
 	for _, v := range br.a {
@@ -582,10 +680,28 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 			maxE = max(maxE, math.Abs(v))
 		}
 	}
-	sigma := 1.0
+	sigma, sk := 1.0, 0
 	if scale := max(cabs1(pt.q)*maxA, cabs1(pt.p)*maxE); scale > 0 && !math.IsInf(scale, 0) {
-		_, k := math.Frexp(scale)
-		sigma = math.Ldexp(1, k)
+		_, sk = math.Frexp(scale)
+		sigma = math.Ldexp(1, sk)
+	}
+	bad = make([]error, m)
+	bExp := make([]int, m)
+	for j := range m {
+		bMax, bMin := 0.0, math.Inf(1)
+		for i := range n {
+			if v := math.Abs(br.b[i*m+j]); v != 0 {
+				bMax, bMin = max(bMax, v), min(bMin, v)
+			}
+		}
+		_, bExp[j] = math.Frexp(bMax)
+		if !br.columnExact(j, -bExp[j]) {
+			_, eMin := math.Frexp(bMin)
+			bExp[j] = eMin - minNormalExp
+			if !br.columnExact(j, -bExp[j]) {
+				bad[j] = errStateUnderflow
+			}
+		}
 	}
 	pr, pi, qr, qi := real(pt.p)/sigma, imag(pt.p)/sigma, real(pt.q), imag(pt.q)
 	a := make([]ddComplex, n*n)
@@ -598,7 +714,7 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 			mag[i*n+j] = mg
 		}
 		for j := range m {
-			x[i*m+j] = ddComplex{re: dd{br.b[i*m+j] / sigma, 0}}
+			x[i*m+j] = ddComplex{re: dd{math.Ldexp(br.b[i*m+j], -bExp[j]), 0}}
 		}
 	}
 	perm := make([]int, n)
@@ -611,7 +727,7 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 			}
 		}
 		if !(best > tol*mag[piv*n+k]) {
-			return false
+			return nil, errDDSingular
 		}
 		perm[k] = piv
 		if piv != k {
@@ -634,78 +750,181 @@ func ddRealizationInto(br *balancedRealization, pt frequencyPoint, dst []complex
 		}
 	}
 	ddLUSolve(a, perm, x, n, m)
-	ddRefine(a, perm, x, br, sigma, pt)
+	ddRefine(a, perm, x, br, sigma, bExp, pt)
 	q := ddComplex{dd{-qr, 0}, dd{-qi, 0}}
 	g := make([]complex128, p*m)
+	yt := make([]complex128, p*m)
+	xExp := math.MinInt
+	for _, v := range x {
+		if a := v.abs1(); a != 0 {
+			_, e := math.Frexp(a)
+			xExp = max(xExp, e)
+		}
+	}
+	_, qnExp := math.Frexp(cabs1(pt.q) * float64(n))
+	_, maxExp := math.Frexp(math.MaxFloat64)
 	for r := range p {
+		var cMax float64
+		for i := range n {
+			cMax = max(cMax, math.Abs(br.c[r*n+i]))
+		}
+		_, cExp := math.Frexp(cMax)
+		if xExp == math.MinInt || cMax == 0 {
+			cExp = 0
+		} else {
+			cExp = max(0, cExp+xExp+qnExp-maxExp)
+		}
+		for i := range n {
+			if !exactLdexp(br.c[r*n+i], -cExp) {
+				return nil, errStateUnderflow
+			}
+		}
 		for c := range m {
 			var y ddComplex
 			for i := n - 1; i >= 0; i-- {
-				y = y.add(ddComplex{re: dd{br.c[r*n+i], 0}}.mul(x[i*m+c]))
+				y = y.add(ddComplex{re: dd{math.Ldexp(br.c[r*n+i], -cExp), 0}}.mul(x[i*m+c]))
 			}
-			v := y.mul(q).complex128()
+			y = y.mul(q)
+			k := cExp + bExp[c] - sk
+			v := ddComplex{y.re.ldexp(k), y.im.ldexp(k)}.complex128()
+			yt[r*m+c] = ddComplex{y.re.ldexp(cExp), y.im.ldexp(cExp)}.complex128()
 			if br.d != nil {
-				v += complex(br.d[r*br.dStride+c], 0)
+				d := br.d[r*br.dStride+c]
+				v += complex(d, 0)
+				yt[r*m+c] += complex(math.Ldexp(d, sk-bExp[c]), 0)
 			}
-			if !finiteComplex(v) {
-				return false
+			if !finiteComplex(v) && bad[c] == nil {
+				bad[c] = errDDSingular
 			}
 			g[r*m+c] = v
 		}
 	}
-	if verify && !ddVerified(br, pt, x, g) {
-		return false
-	}
-	copy(dst, g)
-	return true
-}
-
-// ddVerified reports whether the double-double solution x of br's pencil at
-// pt, with output g, passes ddRealizationInto's verification.
-func ddVerified(br *balancedRealization, pt frequencyPoint, x []ddComplex, g []complex128) bool {
-	n, m := br.n, br.m
-	xr := make([]complex128, 2*n*m)
-	r := xr[n*m:]
+	sc := ddScaled{br: br, pr: pr, pi: pi, qr: qr, qi: qi, sigma: sigma, bExp: bExp}
+	sc.x = make([]complex128, n*m)
 	for i, v := range x {
-		xr[i] = v.complex128()
+		sc.x[i] = v.complex128()
 	}
-	var normA, normE float64
-	for i := range n {
-		var sa, se float64
-		for k := range n {
-			sa += math.Abs(br.a[i*n+k])
-			if br.e != nil {
-				se += math.Abs(br.e[i*n+k])
+	var undriven []bool
+	if verify {
+		undriven = br.undrivenStates()
+	}
+	for j := range m {
+		if bad[j] != nil {
+			continue
+		}
+		if verify && !sc.componentwiseStable(j, undriven) {
+			bad[j] = errDDSingular
+		} else if sc.stateLost(j, yt, cabs1(pt.q)) {
+			bad[j] = errStateUnderflow
+		} else {
+			for r := range p {
+				dst[r*m+j] = g[r*m+j]
 			}
 		}
-		normA, normE = max(normA, sa), max(normE, se)
 	}
-	if br.e == nil {
-		normE = 1
-	}
-	normM, tol := cabs1(pt.p)*normE+cabs1(pt.q)*normA, float64(n)*eps()
-	for j := range m {
-		pencilResidual(r[j:], xr[j:], m, br.a, br.e, n, br.b[j:], m, n, pt.p, pt.q, 1)
-		var rMax, bMax, xMax float64
-		for i := range n {
-			rMax = max(rMax, cabs1(r[i*m+j]))
-			bMax = max(bMax, math.Abs(br.b[i*m+j]))
-			xMax = max(xMax, cabs1(xr[i*m+j]))
-		}
-		bound := tol * (bMax + normM*xMax)
-		if math.IsInf(bound, 0) || !(rMax <= bound) {
+	return bad, nil
+}
+
+// minNormalExp is the binary exponent, as math.Frexp gives it, of the
+// smallest normal float64.
+var _, minNormalExp = math.Frexp(0x1p-1022)
+
+// columnExact reports whether scaling column j of B by 2ᵏ is exact.
+func (br *balancedRealization) columnExact(j, k int) bool {
+	for i := range br.n {
+		if !exactLdexp(br.b[i*br.m+j], k) {
 			return false
 		}
 	}
-	ys := cabs1(pt.q)
-	if br.e == nil {
-		k := -pt.q
-		for i := range n * m {
-			xr[i] *= k
+	return true
+}
+
+// exactLdexp reports whether v·2ᵏ is exact, neither rounded below the
+// normal range nor overflowed.
+func exactLdexp(v float64, k int) bool {
+	return math.Ldexp(math.Ldexp(v, k), -k) == v
+}
+
+// ddScaled is ddRealizationInto's scaled pencil M̃ = (pr+j·pi)E +
+// (qr+j·qi)A/σ and right-hand side B·2^-βⱼ, with x the rounded solution.
+type ddScaled struct {
+	br             *balancedRealization
+	pr, pi, qr, qi float64
+	sigma          float64
+	bExp           []int
+	x              []complex128
+}
+
+// rowFails reports whether row k of the scaled pencil for input j has
+// componentwise backward error above nε at x, the residual formed in
+// double-double from the exact pencil entries.
+func (sc *ddScaled) rowFails(k, j int) bool {
+	br := sc.br
+	n, m := br.n, br.m
+	b := math.Ldexp(br.b[k*m+j], -sc.bExp[j])
+	r, scale := ddComplex{re: dd{b, 0}}, math.Abs(b)
+	for l := range n {
+		e, _ := ddPencilEntry(br, k, l, sc.pr, sc.pi, sc.qr, sc.qi, sc.sigma)
+		xv := sc.x[l*m+j]
+		if e.abs1() == 0 || xv == 0 {
+			continue
 		}
-		ys = 1
+		r = r.sub(e.mul(ddComplex{re: dd{real(xv), 0}, im: dd{imag(xv), 0}}))
+		scale += e.abs1() * cabs1(xv)
 	}
-	return !stateUnderflow(br, pt, xr, m, 1, g, ys)
+	return r.abs1() > float64(n)*eps()*scale
+}
+
+// componentwiseStable reports whether every pencil row of a state input j
+// reaches passes rowFails; an unreached state's rows involve only unreached
+// states, exactly zero but for roundoff fill.
+func (sc *ddScaled) componentwiseStable(j int, undriven []bool) bool {
+	br := sc.br
+	for k := range br.n {
+		if !undriven[k*br.m+j] && sc.rowFails(k, j) {
+			return false
+		}
+	}
+	return true
+}
+
+// stateLost reports whether a state of column j of x below the normal
+// range is one an
+// output of yt, the scaled response, could resolve at |cₖᵢ|·2⁻¹⁰²²·ys,
+// whose pencil rows fail rowFails, as stateUnderflow does for the double
+// solvers. A zero state that neither B nor a nonzero state drives
+// satisfies its own row exactly and is skipped first.
+func (sc *ddScaled) stateLost(j int, yt []complex128, ys float64) bool {
+	const tiny = 0x1p-1022
+	br := sc.br
+	n, m, p, e := br.n, br.m, br.p, eps()
+	for i := range n {
+		v := sc.x[i*m+j]
+		if max(math.Abs(real(v)), math.Abs(imag(v))) >= tiny || v == 0 && !br.drives(sc.x, i, j, m, 1) {
+			continue
+		}
+		for k := range p {
+			if math.Abs(br.c[k*n+i])*tiny*ys > e*cabs1(yt[k*m+j]) {
+				if sc.columnFails(i, j) {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
+}
+
+// columnFails reports whether a pencil row reading state i fails rowFails
+// for input j.
+func (sc *ddScaled) columnFails(i, j int) bool {
+	br := sc.br
+	for k := range br.n {
+		if e, _ := ddPencilEntry(br, k, i, sc.pr, sc.pi, sc.qr, sc.qi, sc.sigma); e.abs1() != 0 && sc.rowFails(k, j) {
+			return true
+		}
+	}
+	return false
 }
 
 // ddLUSolve overwrites the row-major n×m x with the solution of the system
@@ -775,14 +994,14 @@ func ddPencilEntry(br *balancedRealization, i, j int, pr, pi, qr, qi, sigma floa
 }
 
 // ddRefine refines x, the GEPP solution in lu of the pencil
-// (p/σ·E + q·A/σ)x = B/σ of the balanced br. GEPP's error is normwise: on a
+// (p/σ·E + q·A/σ)x = B·2^-βⱼ of the balanced br. GEPP's error is normwise: on a
 // graded companion below its poles an output reading states far below the
 // largest lost ~1e-5 even in double-double, while the data determine it to
 // a few ε. One step against the double-double residual is cheap and ends
 // the common case. Where the outputs still move, the double-double factors
 // cannot resolve them (cond·ε_dd ≳ 1), and bigSolve solves the pencil from
 // the realization's doubles at rising precision.
-func ddRefine(lu []ddComplex, perm []int, x []ddComplex, br *balancedRealization, sigma float64, pt frequencyPoint) {
+func ddRefine(lu []ddComplex, perm []int, x []ddComplex, br *balancedRealization, sigma float64, bExp []int, pt frequencyPoint) {
 	if !ddReadsSmall(x, br) {
 		return
 	}
@@ -791,7 +1010,7 @@ func ddRefine(lu []ddComplex, perm []int, x []ddComplex, br *balancedRealization
 	r := make([]ddComplex, n*m)
 	for j := range m {
 		for i := range n {
-			r[i*m+j] = ddComplex{re: dd{br.b[i*m+j] / sigma, 0}}
+			r[i*m+j] = ddComplex{re: dd{math.Ldexp(br.b[i*m+j], -bExp[j]), 0}}
 		}
 	}
 	for i := range n {
@@ -806,7 +1025,7 @@ func ddRefine(lu []ddComplex, perm []int, x []ddComplex, br *balancedRealization
 		}
 	}
 	if !ddCorrect(lu, perm, r, x, br) {
-		bigSolve(x, br, sigma, pt)
+		bigSolve(x, br, sigma, bExp, pt)
 	}
 }
 
@@ -835,11 +1054,11 @@ func ddReadsSmall(x []ddComplex, br *balancedRealization) bool {
 	return false
 }
 
-// bigSolve sets x to the solution of (p/σ·E + q·A/σ)x = B/σ by GEPP in
+// bigSolve sets x to the solution of (p/σ·E + q·A/σ)x = B·2^-βⱼ by GEPP in
 // big.Float, doubling the precision from bigSolvePrec until two solutions
 // agree to ddRefineTol in every response entry Σₖ|cᵢₖ||xₖⱼ|, or up to
 // bigSolveMaxPrec. At an exactly singular pencil x is left unchanged.
-func bigSolve(x []ddComplex, br *balancedRealization, sigma float64, pt frequencyPoint) {
+func bigSolve(x []ddComplex, br *balancedRealization, sigma float64, bExp []int, pt frequencyPoint) {
 	n, m := br.n, br.m
 	pr, pi, qr, qi := real(pt.p)/sigma, imag(pt.p)/sigma, real(pt.q), imag(pt.q)
 	prev := make([]ddComplex, n*m)
@@ -864,7 +1083,7 @@ func bigSolve(x []ddComplex, br *balancedRealization, sigma float64, pt frequenc
 		}
 		xre, xim := make([]*big.Float, n*m), make([]*big.Float, n*m)
 		for i, v := range br.b[:n*m] {
-			xre[i], xim[i] = f(v/sigma), f(0)
+			xre[i], xim[i] = f(math.Ldexp(v, -bExp[i%m])), f(0)
 		}
 		if !bigLUSolve(mre, mim, xre, xim, n, m, prec) {
 			return
