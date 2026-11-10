@@ -51,6 +51,25 @@ func TestDCGainNilIsExactLimitOffPole(t *testing.T) {
 	}
 }
 
+// N4GQHT (ruling C): x-dplant-pcg #0.0, Series(k(z−1)/(z−a), 1/((z−1)(z−b)))
+// with the second factor's pole rounded off z = 1, is a nonsingular pencil
+// whose exact DC gain is −0.0315, returned with a nil error: an intentional
+// change from the intended 0.0924, which assumes the pole and zero at z = 1
+// cancel.
+func TestDCGainSeriesPoleRoundedOffDCExactValue(t *testing.T) {
+	sys, err := NewFromSlices(3, 1, 1, []float64{0.15989017144703166, 0, 0, 1, 0, -0.40776256620277523, 0, 1, 1.4077625662027753}, []float64{-0.038627919893980144, 0.045979607166974933, 0}, []float64{0, 0, 1}, []float64{0}, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := sys.DCGain()
+	if err != nil {
+		t.Fatalf("DCGain: %v", err)
+	}
+	if want := -0.031452715889969438; !(math.Abs(g.At(0, 0)-want) <= 1e-12*math.Abs(want)) {
+		t.Errorf("DCGain = %.17g, want %.17g", g.At(0, 0), want)
+	}
+}
+
 // N4GQHT: a pole at DC whose residue is below rounding of its own terms
 // returns ErrAccuracyUnverified with the finite regular part where every
 // float reading is finite: Series(k/(s+a)-type factors, integrators) rows

@@ -81,8 +81,8 @@ func TestDCGainTransferCoefficientOverflowExactLimit(t *testing.T) {
 // VNWHVK, N4GQHT: on an exactly singular pencil dcGainCertified returns the
 // strict exact limit with a nil error where the rounded limit agrees with
 // it, whatever the route read; where a residue lies below ε of its own
-// terms it returns ErrAccuracyUnverified with the finite regular part where
-// the route is finite too, else the strict limit.
+// terms and the route is finite there too it returns the finite regular
+// part with ErrAccuracyUnverified, else still the strict limit with nil.
 func TestDCGainCertifiedExactPoleRoute(t *testing.T) {
 	inf := math.Inf(1)
 	d := func(v ...float64) *mat.Dense { return mat.NewDense(1, len(v), v) }
@@ -100,9 +100,9 @@ func TestDCGainCertifiedExactPoleRoute(t *testing.T) {
 		{"agree", d(inf, 2), d(inf, 3), d(inf, 3), nil, []float64{inf, 3}, false},
 		{"residue clear of rounding", d(inf, 2), d(-inf, 3), d(-inf, 3), nil, []float64{-inf, 3}, false},
 		{"route finite, residue clear", d(5, 3), d(-inf, 3), d(-inf, 3), nil, []float64{-inf, 3}, false},
-		{"residue below rounding, route infinite", d(inf, 2), d(-inf, 3), d(7, 3), nil, []float64{-inf, 3}, true},
+		{"residue below rounding, route infinite", d(inf, 2), d(-inf, 3), d(7, 3), nil, []float64{-inf, 3}, false},
 		{"residue below rounding, route finite", d(6.5, 3), d(-inf, 3), d(7, 3), nil, []float64{7, 3}, true},
-		{"residue below rounding, route failed", nil, d(-inf, 3), d(7, 3), ErrSingularTransform, []float64{-inf, 3}, true},
+		{"residue below rounding, route failed", nil, d(-inf, 3), d(7, 3), ErrSingularTransform, []float64{-inf, 3}, false},
 	} {
 		g, err := sys.dcGainCertified(dcRoute{g: tc.g, err: tc.routeErr, lim: &dcExactLimits{tc.rnd, tc.strict}})
 		if errors.Is(err, ErrAccuracyUnverified) != tc.unverified || !tc.unverified && err != nil {

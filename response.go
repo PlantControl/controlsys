@@ -407,9 +407,9 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // evaluates it). Otherwise the error wraps ErrAccuracyUnverified with a
 // value: where the float model has an exact pole at DC whose residue lies
 // below ε of its own terms, so the given coefficients cannot fix whether it
-// cancels, the finite regular part where every float reading is finite,
-// else the exact limit; where a deflated expansion disagrees with the exact
-// limit, the exact limit; and where a pole within rounding of DC reads as
+// cancels, and every float reading is finite, the finite regular part;
+// where a deflated expansion disagrees with the exact limit, the exact
+// limit; and where a pole within rounding of DC reads as
 // an integrator, the Inf MATLAB returns, the float model's exact limit
 // being finite. Reduce removes cancelling modes for a certified gain.
 // A model with no inputs or no outputs has an empty gain, which a
@@ -656,14 +656,13 @@ type dcExactLimits struct{ rounded, strict *mat.Dense }
 // the float model (exactDCGainLimitChecked), for a route not certain of
 // it. With n ≤ exactDetMaxOrder:
 //   - x0·I − A exactly singular: where a pole coefficient lies below ε of
-//     its own terms (exactDCGainLimitRounded differs from the strict limit),
-//     the given coefficients cannot fix whether the pole cancels:
-//     ErrAccuracyUnverified, with each such entry the finite regular part
-//     where the route is finite there too and the strict limit elsewhere.
-//     Else the strict limit, with ErrAccuracyUnverified where a deflated
-//     route failed or disagrees with it on which entries are infinite or
-//     on an Inf sign (deflation moves poles onto x0), and a nil error
-//     otherwise.
+//     its own terms (exactDCGainLimitRounded differs from the strict limit)
+//     and the route is finite there too, the given coefficients cannot fix
+//     whether the pole cancels: the entry is the finite regular part, with
+//     ErrAccuracyUnverified. Every other entry is the strict limit, with
+//     ErrAccuracyUnverified where a deflated route failed or disagrees with
+//     it on which entries are infinite or on an Inf sign (deflation moves
+//     poles onto x0), and a nil error otherwise.
 //   - x0·I − A exactly nonsingular: the strict limit. Where the route read
 //     a pole at DC (an infinite entry: a pole within rounding of DC), that
 //     entry stays infinite, as in MATLAB, with ErrAccuracyUnverified, or
@@ -716,10 +715,9 @@ func (sys *System) dcGainCertified(r dcRoute) (*mat.Dense, error) {
 			if s == v {
 				continue
 			}
-			ambiguous = true
 			if !math.IsInf(v, 0) && g != nil {
 				if x := g.At(i, j); !math.IsInf(x, 0) && !math.IsNaN(x) {
-					or.Data[i*or.Stride+j] = v
+					or.Data[i*or.Stride+j], ambiguous = v, true
 				}
 			}
 		}
