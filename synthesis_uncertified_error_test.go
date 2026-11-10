@@ -301,12 +301,29 @@ func TestSynthesisContractByOperation(t *testing.T) {
 
 	// Discrete plants of a seeded boundary-mode sweep (a mode within 1e-15
 	// to 1e-3 of the unit circle, weakly reached or seen) on which the
-	// structural check passes and the Riccati PBH verdict finds the
-	// state-feedback (bnd 4147) or filter (bnd 2305) Dare deficient within
-	// rounding plus 1× its first-order bound, σmin at most 0.54× that
-	// threshold in every pass; their class held native, amd64 and -race.
-	// bnd 415 and 785, deficient only within the 10× band, now end
-	// ErrNotConverged (MZTFJJ).
+	// structural check passes. bnd 415 (state feedback) and bnd 785
+	// (filter) reach the boundary mode at 1e-14: deficient only within the
+	// 10× band of the PBH test, not within its first-order bound, so
+	// ErrNotConverged, not ErrNoStabilizing (MZTFJJ; ErrNoStabilizing on
+	// 66d6314). bnd 4147 and bnd 2305 (coupling 1e-14 too) are deficient
+	// at 1× in both scaling modes: σmin 4.5e-15 against rounding plus
+	// first-order bound 9.3e-15 (bnd 4147, whose state scaling leaves the
+	// pencil unchanged), at most 5.6e-15 against 1.0e-14 (bnd 2305). Classes
+	// held native, amd64 and -race.
+	bandCtl, err := New(mat.NewDense(4, 4, []float64{0.3686769056761542, -1.261658619660003, -0.07721411064245116, -1.2748073666597657, -0.2068560984712352, -0.09518036781275836, 0.033625490561924334, -0.22565646205736925, 0.1326970817518858, -0.007128687367281733, 0.5041261461897845, 0.24570885835836545, 0.0710583653828091, -0.6769993425788091, 0.10384073071915179, 1.0603719796400988}),
+		mat.NewDense(4, 6, []float64{1, 0, 0, 0, 0, 0.5604542701685419, 0, 1, 0, 0, 0, 0.3081808977760851, 0, 0, 1, 0, 0, -0.09759146706272367, 0, 0, 0, 1, 0, 0.11066832566227279}),
+		mat.NewDense(6, 4, []float64{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -0.38023456486920126, -1.160172302262298, -0.9062063892296375, -0.2824663718882443}),
+		mat.NewDense(6, 6, []float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.8319905220840427e-05, 0, 0, 0, 0, 1, 0}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bandObs, err := New(mat.NewDense(3, 3, []float64{0.02284685140945349, 0.3334518749971631, -0.7870384975264465, 0.17645241804528727, -0.8192297650580581, -0.12268426534714037, -1.0482541007524069, -0.24606174254596427, -0.18325130573932003}),
+		mat.NewDense(3, 6, []float64{1, 0, 0, 0, 0, 0.06391329714731155, 0, 1, 0, 0, 0, 0.880622923735225, 0, 0, 1, 0, 0, 1.2264695586890177}),
+		mat.NewDense(6, 3, []float64{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, -0.2028567928336173, -0.37284315430519127, 0.12351756449042259, -0.012961973472018414, -0.556206874610857, -0.048646089480725484}),
+		mat.NewDense(6, 6, []float64{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5.579422953478083e-07, 0, 0, 0, 0, 0, 0, 5.579422953478083e-07, 0}), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	provedCtl, err := New(mat.NewDense(2, 2, []float64{2.0631430204584746, 1.253953758355174, -2.1270172657669817, -1.5087699803029766}),
 		mat.NewDense(2, 5, []float64{1, 0, 0, 0, -0.23356869811929923, 0, 1, 0, 0, 0.4672980437083926}),
 		mat.NewDense(5, 2, []float64{1, 0, 0, 1, 0, 0, 0.028435633524425054, -0.7915248809145411, -1.426937377449151, -1.5640149320046575}),
@@ -357,6 +374,8 @@ func TestSynthesisContractByOperation(t *testing.T) {
 		{"H2Syn", synthesisUnverified, h2(synthesisCheapControl.plant(t), 1, 1), nil},
 		{"H2Syn control", synthesisNotConverged, h2(synthesisControlNotConverged.plant(t), 1, 1), nil},
 		{"H2Syn filter", synthesisNotConverged, h2(synthesisFilterNotConverged.plant(t), 1, 1), nil},
+		{"H2Syn discrete band", synthesisNotConverged, h2(bandCtl, 1, 1), nil},
+		{"H2Syn discrete band", synthesisNotConverged, h2(bandObs, 2, 1), nil},
 		{"H2Syn discrete", synthesisProvedControl, h2(provedCtl, 2, 1), nil},
 		{"H2Syn discrete", synthesisProvedFilter, h2(provedObs, 2, 2), nil},
 		{"H2Syn", synthesisClosedLoopUnstable, h2(synthesisUnstableLoop.plant(t), 1, 1), nil},
