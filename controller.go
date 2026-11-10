@@ -104,6 +104,7 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 // Descriptor plants E x' = Ax + Bu with nonsingular E are supported as in
 // MATLAB: the augmented descriptor is blkdiag(E, I), K is the gain of the
 // explicit model (E⁻¹A, E⁻¹B, C, D) and X solves its Riccati equation.
+// Nonsingularity is judged on the plant E, as for Lqr.
 //
 // Nil Q or R returns ErrInvalidArgument; plants without states, inputs or
 // outputs return ErrDimensionMismatch,
@@ -146,7 +147,7 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	}
 	Aa, Ba := lqiAugmentation(sys)
 	if Ea := augmentedDescriptor(sys.E, p); Ea != nil {
-		o := RiccatiOpts{E: Ea}
+		o := RiccatiOpts{E: Ea, plantE: sys.E, augmentedE: true}
 		if opts != nil {
 			o.S, o.Workspace, o.NoScaling = opts.S, opts.Workspace, opts.NoScaling
 		}

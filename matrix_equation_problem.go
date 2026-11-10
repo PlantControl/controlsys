@@ -125,7 +125,7 @@ func newRiccatiProblem(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (riccatiProblem
 
 // riccatiDescriptor returns opts.E, or nil when it is absent or the identity.
 // An E with LU condition estimate at or above 1/ε that MATLAB rank finds
-// deficient is singular.
+// deficient is singular, unless opts.augmentedE.
 func riccatiDescriptor(opts *RiccatiOpts, n int) (*mat.Dense, error) {
 	if opts == nil || opts.E == nil {
 		return nil, nil
@@ -135,6 +135,9 @@ func riccatiDescriptor(opts *RiccatiOpts, n int) (*mat.Dense, error) {
 	}
 	if isIdentityDescriptor(opts.E) {
 		return nil, nil
+	}
+	if opts.augmentedE {
+		return opts.E, nil
 	}
 	var lu mat.LU
 	lu.Factorize(opts.E)
