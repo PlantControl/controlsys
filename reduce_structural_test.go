@@ -38,6 +38,36 @@ func assertExactSubsystem(t *testing.T, name string, sys *System, res *ReduceRes
 	}
 }
 
+// assertReduceDeletesLastStateExactly fails unless Reduce under min, unc
+// and Equalize returns sys without its last state, entry for entry, and
+// the high-precision transfer functions of both agree, also at the
+// matched-C2D zero z = -1.
+func assertReduceDeletesLastStateExactly(t *testing.T, name string, sys *System) {
+	t.Helper()
+	n, _, _ := sys.Dims()
+	keep := make([]int, n-1)
+	for i := range keep {
+		keep[i] = i
+	}
+	full := newStepOraclePencil(sys)
+	pts := []complex128{1, cmplx.Rect(1, 0.3), cmplx.Rect(1, 2), -1}
+	for _, opts := range []*ReduceOpts{{}, {Mode: ReduceUncontrollable}, {Equalize: true}} {
+		label := name + " " + reduceModeName(opts)
+		res, err := sys.Reduce(opts)
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		assertExactSubsystem(t, label, sys, res, keep)
+		cut := newStepOraclePencil(res.Sys)
+		for _, z := range pts {
+			g, r := matchedOracleTransfer(full, z), matchedOracleTransfer(cut, z)
+			if d := cmplx.Abs(g - r); d > 1e-14*cmplx.Abs(g) {
+				t.Fatalf("%s: oracle |G-R| = %g at %v, |G| = %g", label, d, z, cmplx.Abs(g))
+			}
+		}
+	}
+}
+
 func reduceModeName(opts *ReduceOpts) string {
 	name := []string{"all", "unc", "unobs"}[opts.Mode]
 	if opts.Equalize {
@@ -140,18 +170,7 @@ func TestReduceRemovesPlantedStateOfMatchedModelExactly(t *testing.T) {
 	lits := reduceVerifyLiterals(t)
 	for _, name := range []string{"403-unc-false", "62-unc-false", "188-unc-false", "301-unc-false", "406-unc-false", "148-unc-false", "221-unc-false-amd64", "246-unc-false-amd64"} {
 		sys := lits[name]
-		n, _, _ := sys.Dims()
-		keep := make([]int, n-1)
-		for i := range keep {
-			keep[i] = i
-		}
-		for _, opts := range []*ReduceOpts{{}, {Mode: ReduceUncontrollable}, {Equalize: true}} {
-			res, err := sys.Reduce(opts)
-			if err != nil {
-				t.Fatalf("%s %s: %v", name, reduceModeName(opts), err)
-			}
-			assertExactSubsystem(t, name+" "+reduceModeName(opts), sys, res, keep)
-		}
+		assertReduceDeletesLastStateExactly(t, name, sys)
 		res, err := sys.Reduce(&ReduceOpts{Mode: ReduceUnobservable})
 		if err != nil {
 			t.Fatalf("%s unobs: %v", name, err)
