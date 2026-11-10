@@ -135,3 +135,29 @@ func TestLqiUnstabilizableIntegratorsNoStabilizing(t *testing.T) {
 		}
 	}
 }
+
+// TestDareUncontrollableNumericallyInfiniteModeNoStabilizing checks that
+// a numerically infinite mode (|λ| ~ 5e13, σmin(E) ~ 30·eps) that B does
+// not reach stays ErrNoStabilizing (AMDL7W): its λ-space τ exceeds the
+// gap to the finite mode at 1.03, so it is judged alone in μ = 1/λ,
+// where [E, B] is rank deficient to rounding; the cluster mean λ/2 alone
+// passed it.
+func TestDareUncontrollableNumericallyInfiniteModeNoStabilizing(t *testing.T) {
+	E := mat.NewDense(2, 2, []float64{
+		0.20192728579879055, -0.5629227329651477,
+		0.5981031119894665, -1.6673617785936576,
+	})
+	A := mat.NewDense(2, 2, []float64{
+		0.3200597790806389, -0.3291579827388065,
+		0.5126415008448932, -1.9586007850882343,
+	})
+	B := mat.NewDense(2, 1, []float64{-0.13577711225476594, -0.4021681025190298})
+	Q := mat.NewDense(2, 2, []float64{
+		2.004964298539094, 2.58564227305348,
+		2.58564227305348, 5.139379636728618,
+	})
+	R := mat.NewDense(1, 1, []float64{1.0218829583403486})
+	if _, err := Dare(A, B, Q, R, &RiccatiOpts{E: E}); !errors.Is(err, ErrNoStabilizing) {
+		t.Errorf("want ErrNoStabilizing, got %v", err)
+	}
+}
