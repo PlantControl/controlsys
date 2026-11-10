@@ -675,6 +675,9 @@ func selectMargin(margins, freqs []float64) (m, w float64, ok bool) {
 // rule maps to ErrInvalidArgument. A dbDrop that is not a finite negative
 // scalar also returns ErrInvalidArgument; a model without inputs or outputs returns
 // ErrDimensionMismatch and a MIMO model ErrNotSISO, as MATLAB rejects it.
+// When DCGain returns its value with ErrAccuracyUnverified, the bandwidth is
+// that of the returned DC gain and comes with the same error; a DC gain that
+// leaves it undefined returns the error above instead.
 func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if dbDrop == 0 {
 		dbDrop = -3
@@ -691,24 +694,27 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if _, err := newSISOLoopModel(sys, "Bandwidth"); err != nil {
 		return 0, err
 	}
-	bw, err := bandwidth(sys, dbDrop)
-	if err != nil {
+	dcGain, err := sys.DCGain()
+	if err != nil && !(dcGain != nil && errors.Is(err, ErrAccuracyUnverified)) {
 		return 0, fmt.Errorf("Bandwidth: %w", err)
+	}
+	bw, berr := bandwidth(sys, dcGain.At(0, 0), dbDrop)
+	if berr != nil {
+		return 0, fmt.Errorf("Bandwidth: %w", berr)
+	}
+	if err != nil {
+		return bw, fmt.Errorf("Bandwidth: %w", err)
 	}
 	return bw, nil
 }
 
-func bandwidth(sys *System, dbDrop float64) (float64, error) {
-	dcGain, err := sys.DCGain()
-	if err != nil {
-		return 0, err
-	}
-	dcMag := math.Abs(dcGain.At(0, 0))
+func bandwidth(sys *System, dc, dbDrop float64) (float64, error) {
+	dcMag := math.Abs(dc)
 	if dcMag == 0 {
 		return math.Inf(1), nil
 	}
 	if math.IsNaN(dcMag) || math.IsInf(dcMag, 0) {
-		return 0, fmt.Errorf("DC gain is %g, bandwidth undefined: %w", dcGain.At(0, 0), ErrInvalidArgument)
+		return 0, fmt.Errorf("DC gain is %g, bandwidth undefined: %w", dc, ErrInvalidArgument)
 	}
 	threshold := 20*math.Log10(dcMag) + dbDrop
 
