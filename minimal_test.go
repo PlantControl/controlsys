@@ -443,6 +443,70 @@ func TestEqualizeImbalanced2x2(t *testing.T) {
 	}
 }
 
+// ZDUXZX (AYT3ND census, matched seed 477): matched C2D of an 8-pole model
+// at dt = 1e-3 clusters its poles near z = 1 with C ≈ 1e-26, so its response
+// is ill-conditioned in its entries. Radix-10 balancing rounded every entry
+// once per pass and moved the response by 2.5e34 relative with no state
+// removed; the scaling must be exact powers of two.
+func TestReduceEqualizeExactScalingMatchedClustered(t *testing.T) {
+	A := mat.NewDense(8, 8, []float64{
+		0.9982549334466339, 1, 0, 0, 0, 0, 0, 0,
+		0, 0.9981189531272172, 11866.580648468156, 3.996780927932665, 7395.626749321402, 3.998603964177531, 17585.397854369476, 3.9994149630355937,
+		0, 0, 0.9983904639663325, 0.0003365387596913827, 0, 0, 0, 0,
+		0, 0, -0.0003365387596913827, 0.9983904639663325, 7395.626749321402, 3.998603964177531, 17585.397854369476, 3.9994149630355937,
+		0, 0, 0, 0, 0.9993019820887653, 0.0005404826742817051, 0, 0,
+		0, 0, 0, 0, -0.0005404826742817051, 0.9993019820887653, 17585.397854369476, 3.9994149630355937,
+		0, 0, 0, 0, 0, 0, 0.9997074815177969, 0.0002273949098590458,
+		0, 0, 0, 0, 0, 0, -0.0002273949098590458, 0.9997074815177969,
+	})
+	B := mat.NewDense(8, 1, []float64{0, 1, 0, 1, 0, 1, 0, 1})
+	C := mat.NewDense(1, 8, []float64{2.615940320843985e-26, 1.3091124045578876e-26, 0, 0, 0, 0, 0, 0})
+	sys, err := New(A, B, C, mat.NewDense(1, 1, nil), 1e-3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	Aw, Bw, Cw := mat.DenseCopyOf(A), mat.DenseCopyOf(B), mat.DenseCopyOf(C)
+	equalize(Aw, Bw, Cw, 8, 1, 1)
+	for _, pr := range [][2]*mat.Dense{{A, Aw}, {B, Bw}, {C, Cw}} {
+		r, c := pr[0].Dims()
+		for i := range r {
+			for j := range c {
+				v, w := pr[0].At(i, j), pr[1].At(i, j)
+				if v == 0 && w == 0 {
+					continue
+				}
+				if frac, _ := math.Frexp(w / v); frac != 0.5 {
+					t.Errorf("entry (%d,%d) scaled by %v, want a power of two", i, j, w/v)
+				}
+			}
+		}
+	}
+
+	res, err := sys.Reduce(&ReduceOpts{Equalize: true})
+	if err != nil {
+		t.Fatalf("Reduce(Equalize): %v", err)
+	}
+	if res.Order != 8 {
+		t.Fatalf("Order = %d, want 8", res.Order)
+	}
+	want, got := newStepOraclePencil(sys), newStepOraclePencil(res.Sys)
+	for _, th := range []float64{0, 0.001, 0.01, 0.1, 1, math.Pi} {
+		z := cmplx.Rect(1, th)
+		s := stepOracleComplex{stepOracleFloat(real(z)), stepOracleFloat(imag(z))}
+		wr, wi := want.transfer(s)
+		gr, gi := got.transfer(s)
+		if wr == nil || gr == nil {
+			t.Fatalf("θ=%g: singular oracle solve", th)
+		}
+		g := stepOracleComplex{wr[0][0], wi[0][0]}.complex128()
+		r := stepOracleComplex{gr[0][0], gi[0][0]}.complex128()
+		if e := cmplx.Abs(r-g) / cmplx.Abs(g); !(e <= math.Sqrt(eps())) {
+			t.Errorf("θ=%g: G=%v, Reduce(Equalize) %v, relative error %.3g", th, g, r, e)
+		}
+	}
+}
+
 // Issue #27: equalize with the issue #26 closed-loop should not diverge.
 // Before the fix, one pass made A[0,1]=-Inf and B blew up to 1e+186.
 func TestEqualizeIssue26SystemFinite(t *testing.T) {
