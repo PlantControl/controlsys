@@ -1551,7 +1551,8 @@ func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain, strict *m
 		od++
 	}
 	gain, strict = mat.NewDense(p, m, nil), mat.NewDense(p, m, nil)
-	sum := new(big.Int)
+	var scratch [4]big.Int
+	sum := &scratch[0]
 	set := func(g *mat.Dense, i, j, on int, sum *big.Int) {
 		dij := 0.0
 		if D != nil {
@@ -1574,7 +1575,7 @@ func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain, strict *m
 			on, sOn := -1, -1
 			var sSum *big.Int
 			for k := 0; k <= od && k < n; k++ {
-				below := residueSum(sum, adj[k], c, bHat, j, m)
+				below := residueSum(sum, scratch[1:], adj[k], c, bHat, j, m)
 				if sum.Sign() == 0 {
 					continue
 				}
@@ -1588,7 +1589,11 @@ func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain, strict *m
 				break
 			}
 			set(gain, i, j, on, sum)
-			set(strict, i, j, sOn, sSum)
+			if sOn == on {
+				strict.Set(i, j, gain.At(i, j))
+			} else {
+				set(strict, i, j, sOn, sSum)
+			}
 		}
 	}
 	return gain, strict, overflow
@@ -1619,9 +1624,12 @@ func exactScaledModel(A, B, C *mat.Dense, x0 float64) (pHat, bHat, cHat []*big.I
 		_, seedA = math.Frexp(x0)
 	}
 	ea, eb, ec := minExp(aRaw, seedA), minExp(bRaw, math.MaxInt), minExp(cRaw, math.MaxInt)
+	slab := make([]big.Int, n*n+n*m+p*n+n)
 	scaled := func(v float64, e0 int) *big.Int {
 		f, e := math.Frexp(v)
-		x := big.NewInt(int64(math.Ldexp(f, 53)))
+		x := &slab[0]
+		slab = slab[1:]
+		x.SetInt64(int64(math.Ldexp(f, 53)))
 		return x.Lsh(x, uint(e-e0))
 	}
 	pHat = make([]*big.Int, n*n)
@@ -1669,10 +1677,11 @@ func faddeevLeVerrier(pHat []*big.Int, n int) (adj [][]*big.Int, det []*big.Int)
 	for k := 1; ; k++ {
 		adj[n-k] = r
 		next := make([]*big.Int, n*n)
+		slab := make([]big.Int, n*n)
 		tr := new(big.Int)
 		for i := range n {
 			for j := range n {
-				v := new(big.Int)
+				v := &slab[i*n+j]
 				for l, pv := range pHat[i*n : i*n+n] {
 					if pv.Sign() != 0 && r[l*n+j].Sign() != 0 {
 						v.Sub(v, t.Mul(pv, r[l*n+j]))
@@ -1695,11 +1704,12 @@ func faddeevLeVerrier(pHat []*big.Int, n int) (adj [][]*big.Int, det []*big.Int)
 }
 
 // residueSum sets sum to Σ c_l·adj_lq·b_qj and reports whether it is below ε
-// of its largest term; b holds m columns per row.
-func residueSum(sum *big.Int, adj, c, b []*big.Int, j, m int) bool {
+// of its largest term; b holds m columns per row, scratch three integers.
+func residueSum(sum *big.Int, scratch []big.Int, adj, c, b []*big.Int, j, m int) bool {
 	n := len(c)
 	sum.SetInt64(0)
-	largest, term, abs := new(big.Int), new(big.Int), new(big.Int)
+	largest, term, abs := &scratch[0], &scratch[1], &scratch[2]
+	largest.SetInt64(0)
 	for l, cl := range c {
 		if cl.Sign() == 0 {
 			continue
