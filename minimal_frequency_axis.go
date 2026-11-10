@@ -8,35 +8,46 @@ import (
 	"plantcontrol.org/v1/gonum/mat"
 )
 
-// unitCircleCutInBand reports whether the staircase reduction red of the
-// discrete model sys verifiably matches it to √ε (relative) on the unit
-// circle; removed holds the stage blocks of the removed states. The
-// staircase judges couplings against ε·‖A‖, but the response on the unit
-// circle is that of (zI−A)⁻¹, whose norm for modes clustered near z = 1 in
-// a graded realization (matched C2D) is far above 1/(ε·‖A‖): a coupling
-// below the floor then carries an O(1) share of the response near z = 1,
-// and the spectral-gap test on |λ| cannot see it, since the clustered |λ|
-// are all near 1.
+// frequencyAxisCutInBand reports whether the staircase reduction red of
+// sys verifiably matches it to √ε (relative) on the frequency axis, the
+// unit circle for a discrete model and the imaginary axis for a continuous
+// one; removed holds the stage blocks of the removed states. The staircase
+// judges couplings against ε·‖A‖, but the response on the axis is that of
+// (sI−A)⁻¹, whose norm can be far above 1/(ε·‖A‖): for modes clustered
+// near z = 1 in a graded realization (matched C2D), or for a realization
+// graded by a diagonal similarity of many decades. A coupling below the
+// floor then carries an O(1) share of the response, and the spectral-gap
+// test on |λ| cannot see it when the |λ| show no resolved gap.
 //
 // To first order, zeroing the coupling R below the removed block A₂₂
-// changes the response by C̃₂(zI−A₂₂)⁻¹R(zI−A₁₁)⁻¹B₁. Near a kept pole
-// the response carries the same (zI−A₁₁)⁻¹ growth, so the relative change
+// changes the response by C̃₂(sI−A₂₂)⁻¹R(sI−A₁₁)⁻¹B₁. Near a kept pole
+// the response carries the same (sI−A₁₁)⁻¹ growth, so the relative change
 // stays bounded there; near a removed pole only the change grows. The
-// probes are therefore the circle points nearest the removed eigenvalues,
-// z = λ/|λ| (z = 1 for λ = 0, one of each conjugate pair). Where a probe
-// cannot decide (bandUndetermined), as on a removed pole within rounding
-// of the circle, the gapProbePoints grid is checked as well; it also
-// stands in when the removed eigenvalues do not converge.
-func unitCircleCutInBand(sys, red *System, removed []*mat.Dense) bool {
-	if pts, ok := removedModeProbes(removed); ok {
-		switch unitCircleBand(sys, red, pts) {
+// probes are therefore the axis points beside the removed eigenvalues
+// (removedModeProbes). Where a probe cannot decide (bandUndetermined), as
+// on a removed pole within rounding of the axis, a fixed set is checked as
+// well, which also stands in when the removed eigenvalues do not converge:
+// the gapProbePoints grid on the circle, and on the imaginary axis
+// gapProbePoints at the eigenvalues of A, the cut failing when they do not
+// converge.
+func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense) bool {
+	discrete := sys.Dt != 0
+	if pts, ok := removedModeProbes(removed, discrete); ok {
+		switch frequencyAxisBand(sys, red, pts) {
 		case bandFail:
 			return false
 		case bandPass:
 			return true
 		}
 	}
-	return unitCircleBand(sys, red, gapProbePoints(nil, 0, true)) != bandFail
+	if discrete {
+		return frequencyAxisBand(sys, red, gapProbePoints(nil, 0, true)) != bandFail
+	}
+	var eig mat.Eigen
+	if !eig.Factorize(sys.A, mat.EigenNone) {
+		return false
+	}
+	return frequencyAxisBand(sys, red, gapProbePoints(eig.Values(nil), 0, false)) != bandFail
 }
 
 type bandVerdict int
@@ -49,7 +60,7 @@ const (
 	bandFail
 )
 
-// unitCircleBand compares sys and red at pts. With the first-order
+// frequencyAxisBand compares sys and red at pts. With the first-order
 // rounding bounds δ of boundedResponse, the computed responses Ĝ, R̂ put
 // the reduction's response within |Ĝ−R̂| + δ_R of Ĝ, while the model's own
 // data determine its response only to δ_G, so a point passes when
@@ -57,7 +68,7 @@ const (
 // δ_G exceeds the response, no comparison can decide and the point
 // passes; a reduction whose own response is that uncertain where the
 // model's is not fails.
-func unitCircleBand(sys, red *System, pts []complex128) bandVerdict {
+func frequencyAxisBand(sys, red *System, pts []complex128) bandVerdict {
 	full, cut := newBoundedResponse(sys, pts), newBoundedResponse(red, pts)
 	tol := math.Sqrt(eps())
 	pm := full.p * full.m
@@ -90,11 +101,21 @@ func unitCircleBand(sys, red *System, pts []complex128) bandVerdict {
 	return verdict
 }
 
-// removedModeProbes returns the unit-circle points nearest the eigenvalues
-// of the blocks, one per conjugate pair; false when they do not converge
-// or are not finite.
-func removedModeProbes(blocks []*mat.Dense) ([]complex128, bool) {
+// removedModeProbes returns the frequency-axis points beside the
+// eigenvalues of the blocks, one set per conjugate pair: z = λ/|λ| (z = 1
+// for λ = 0) on the unit circle, and on the imaginary axis both the
+// nearest point j·Im λ and j·|λ|. For a real λ the nearest point is s = 0,
+// while (sI−A₂₂)⁻¹ keeps its size up to |s| ≈ |λ|, beyond which a
+// realization inexact in its Markov parameters (CAᵏB) shows its error;
+// j·|λ| sits at that corner. False when the eigenvalues do not converge or
+// are not finite.
+func removedModeProbes(blocks []*mat.Dense, discrete bool) ([]complex128, bool) {
 	var pts []complex128
+	push := func(s complex128) {
+		if !slices.Contains(pts, s) {
+			pts = append(pts, s)
+		}
+	}
 	add := func(ev complex128) bool {
 		if cmplx.IsNaN(ev) || cmplx.IsInf(ev) {
 			return false
@@ -102,13 +123,16 @@ func removedModeProbes(blocks []*mat.Dense) ([]complex128, bool) {
 		if imag(ev) < 0 {
 			return true
 		}
+		if !discrete {
+			push(complex(0, imag(ev)))
+			push(complex(0, cmplx.Abs(ev)))
+			return true
+		}
 		z := complex(1, 0)
 		if r := cmplx.Abs(ev); r > 0 {
 			z = ev / complex(r, 0)
 		}
-		if !slices.Contains(pts, z) {
-			pts = append(pts, z)
-		}
+		push(z)
 		return true
 	}
 	for _, blk := range blocks {
