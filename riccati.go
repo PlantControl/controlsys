@@ -2846,7 +2846,11 @@ func noSolution(err error) bool {
 // controllable mode at 1e15 judged on σmin 0.25 against cτ‖E‖ = 0.37).
 // Both tests bound the same rank, so a mode with |λ| > 1 is deficient
 // only by both: c = 1 is the sharper near the unit circle (‖A‖ > ‖E‖),
-// μ near infinity. A cluster mean m maps its band τ into μ exactly,
+// μ near infinity, where λ is tested alone also when τμ is below its
+// distance in μ to every other eigenvalue (an infinite one at μ = 0)
+// though τ is not in λ: a numerically infinite mode beside a finite one
+// has τ ~ |λ| ~ its λ-gap, and the cluster mean would test PBH at λ/2,
+// hiding a zero of [E, B]. A cluster mean m maps its band τ into μ exactly,
 // τμ = τ/(|m|(|m| − τ)) for τ < |m|, else ∞. Unscaled (c = 1 alone), a near-infinite mode of a
 // near-singular E has a τ‖E‖ beyond ‖B‖, the most σmin reaches at an
 // eigenvalue, so no B passes (OCTGBK: a controllable mode at 1.24e13,
@@ -3012,11 +3016,14 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		}
 		return 1 / min(pl, pr)
 	}
-	lams := make([]complex128, n)
-	finite := make([]bool, n)
+	lams, mus := make([]complex128, n), make([]complex128, n)
+	finite, nonzero := make([]bool, n), make([]bool, n)
 	for k := range n {
 		if finite[k] = math.Abs(beta[k]) > 0; finite[k] {
 			lams[k] = complex(wr[k]/beta[k], wi[k]/beta[k])
+		}
+		if alpha := complex(wr[k], wi[k]); alpha != 0 {
+			nonzero[k], mus[k] = true, complex(beta[k], 0)/alpha
 		}
 	}
 	x, y := make([]complex128, n), make([]complex128, n)
@@ -3072,7 +3079,17 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		if len(ds) > 1 {
 			gap = ds[1]
 		}
-		if tol < gap && inBand(lam, tol) && pbhDeficient(lam, tol, tm) {
+		alone := tol < gap
+		if !alone && !problem.unscaledPBH && mod > 1 {
+			gm := math.Inf(1)
+			for j := range n {
+				if j != kk && nonzero[j] {
+					gm = min(gm, cmplx.Abs(mus[j]-mu))
+				}
+			}
+			alone = tm < gm
+		}
+		if alone && inBand(lam, tol) && pbhDeficient(lam, tol, tm) {
 			return true
 		}
 		for c := 1; c < len(ds) && ds[c] <= max(rho, tol); c++ {
