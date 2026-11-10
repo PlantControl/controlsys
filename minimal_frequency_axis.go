@@ -28,33 +28,38 @@ import (
 // G − R has a numerator of degree at most n + nr − 1, so agreement at
 // n + nr points fixes it in exact arithmetic. A point off the real axis
 // counts twice, since G − R is real-rational and agreement at s implies
-// agreement at s̄; a point on it (s = 0, z = ±1) counts once. Agreement
-// within tol at those points gives no uniform bound between them (the probes are anchored on the data, not a node set
-// with a known Lebesgue constant, and G − R can have poles near the axis
-// between probes): every eigenvalue of A has a probe at its nearest axis
-// point, so pole-driven peaks are sampled to first order, while the zeros
-// of G, where the relative error peaks, are sampled only by the fixed and
-// decade grids. False also when the eigenvalues of A do not converge.
+// agreement at s̄; a point on it (s = 0, z = ±1) counts once.
+//
+// Agreement within tol at those points gives no uniform bound between
+// them: the probes are anchored on the data, not a node set with a known
+// Lebesgue constant, and G − R can have poles near the axis between
+// probes. Every eigenvalue of A has a probe at its nearest axis point, so
+// pole-driven peaks are sampled to first order, while the zeros of G,
+// where the relative error peaks, are sampled only by the fixed and decade
+// grids. Nor is the check exact: the responses and their bounds are
+// evaluated in floating point, so a point where the model's response is
+// below its own first-order bound can neither verify nor refute a cut.
+// False also when the eigenvalues of A or of red do not converge.
 func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense, tol float64) bool {
 	n, _, _ := sys.Dims()
 	nr, _, _ := red.Dims()
-	pts, exact, ok := axisProbes(sys, removed)
+	pts, poles, ok := axisProbes(sys, removed)
 	if !ok {
 		return false
 	}
-	near, ok := nearExactPole(red, pts, exact, tol)
+	win, ok := sharedPoleWindows(poles, red, tol)
 	if !ok {
 		return false
 	}
 	full, cut := newBoundedResponse(sys, pts), newBoundedResponse(red, pts)
 	verified := 0
-	for k := range pts {
-		switch classifyProbe(full, cut, k, tol, near[k]) {
+	for k, s := range pts {
+		switch classifyProbe(full, cut, k, tol, win.contain(s)) {
 		case probeReject:
 			return false
 		case probeVerified:
 			verified++
-			if imag(pts[k]) != 0 {
+			if imag(s) != 0 {
 				verified++
 			}
 		}
@@ -66,8 +71,8 @@ type probeVerdict int
 
 const (
 	probeVerified probeVerdict = iota
-	// probeUninformative is a point where the model's own data do not fix
-	// its response to tol and the cut's are no less determined.
+	// probeUninformative is a point where neither response is determined
+	// well enough to verify or refute the cut.
 	probeUninformative
 	probeReject
 )
@@ -76,16 +81,21 @@ const (
 // Ĝ, R̂ of the model and the cut with the first-order rounding bounds δ_G,
 // δ_R of boundedResponse, per entry against tol·scale, scale the largest
 // |Ĝ−D|, |R̂−D| of the point. An entry is verified when
-// |Ĝ−R̂| + δ_R ≤ tol·scale and refuted when |Ĝ−R̂| − δ_G − δ_R >
-// tol·scale, the exact deviation then provably above tol. An entry that is
-// neither rejects the point when the model is determined to tol there
-// (δ_G ≤ tol·|Ĝ−D|), or when the cut's own response is less determined
-// than the model's (δ_R − δ_G > tol·scale); else it leaves the point
-// uninformative. Beside an exact pole of the model that the cut carries
-// only to rounding (nearExactPole) neither open rule applies: the point is
-// uninformative. A point where GEPP meets an exactly singular model is
-// uninformative, one with a singular cut rejects.
-func classifyProbe(full, cut boundedResponse, k int, tol float64, nearExactPole bool) probeVerdict {
+// |Ĝ−R̂| + δ_R ≤ tol·scale and refuted, rejecting the point, when
+// |Ĝ−R̂| − δ_G − δ_R > tol·scale: the exact deviation is then provably
+// above tol. Otherwise the entry is open:
+//   - where the model is determined to tol (δ_G ≤ tol·|Ĝ−D|) the cut is
+//     not, and the point rejects, unless inShared: within the window of a
+//     pole the model shares with the cut (sharedPoleWindows), where no
+//     realization with the cut's conditioning is determined to tol;
+//   - where it is not, the point rejects when the cut's response is
+//     noise-dominated (δ_R ≥ |R̂−D|) or deviates from the model's by more
+//     than the model's own bound (|Ĝ−R̂| − δ_G > tol·scale), and is
+//     uninformative otherwise.
+//
+// A point where GEPP meets an exactly singular model is uninformative, one
+// with a singular cut rejects.
+func classifyProbe(full, cut boundedResponse, k int, tol float64, inShared bool) probeVerdict {
 	if !full.ok[k] {
 		return probeUninformative
 	}
@@ -101,6 +111,7 @@ func classifyProbe(full, cut boundedResponse, k int, tol float64, nearExactPole 
 	}
 	verdict := probeVerified
 	for i, v := range g {
+		d := complex(full.d[i], 0)
 		dG, dR := full.bound[k*pm+i], cut.bound[k*pm+i]
 		diff := cmplx.Abs(v - r[i])
 		if diff+dR <= tol*scale {
@@ -109,7 +120,11 @@ func classifyProbe(full, cut boundedResponse, k int, tol float64, nearExactPole 
 		if diff-dG-dR > tol*scale {
 			return probeReject
 		}
-		if !nearExactPole && (dG <= tol*cmplx.Abs(v-complex(full.d[i], 0)) || dR-dG > tol*scale) {
+		if dG <= tol*cmplx.Abs(v-d) {
+			if !inShared {
+				return probeReject
+			}
+		} else if dR >= cmplx.Abs(r[i]-d) || diff-dG > tol*scale {
 			return probeReject
 		}
 		verdict = probeUninformative
@@ -117,40 +132,47 @@ func classifyProbe(full, cut boundedResponse, k int, tol float64, nearExactPole 
 	return verdict
 }
 
+// modelPoles holds the eigenvalues of the model's A with their
+// componentwise rounding bounds β (eigenRoundingBounds) and the
+// eigensolver's resolution ρ₀ = n·ε·‖A_bal‖_F, A_bal the power-of-two
+// balanced A of boundedResponse.
+type modelPoles struct {
+	evals []complex128
+	beta  []float64
+	rho0  float64
+}
+
 // axisProbes returns the deduplicated frequency-axis points the cut is
 // judged at: the points beside the removed modes (removedModeProbes) and
 // beside every eigenvalue of A (eigenAxisProbes), the fixed grid
 // (gapProbePoints, with θ = π for a discrete model: matched and Tustin
 // C2D map the zeros at infinity to z = −1, and ZOH sampling zeros approach
-// it), and the decade grid (decadeAxisProbes). Points within n·ε·(1+|λ|)
-// of a computed eigenvalue λ are dropped: on an exact axis pole both
-// responses are infinite and the first-order bound does not hold. The
-// eigenvalue's own rounding bound β = ε·|y|ᵀ|A||x|/|yᴴx| is not the
-// radius: for clustered ill-conditioned eigenvalues it spans the points
-// that refute a wrong cut, while their δ_G already marks them
-// undetermined. β decides which eigenvalues are resolved from zero, and
-// exact holds those with β = 0, which the data fix exactly (a zero column
-// of A: an integrator). False when the eigenvalues of A do not converge.
-func axisProbes(sys *System, removed []*mat.Dense) (pts, exact []complex128, ok bool) {
-	n, _, _ := sys.Dims()
+// it), and the decade grid (decadeAxisProbes). A point s within
+// ρ(s) = n·ε·(|s| + ‖A_bal‖_F) of an eigenvalue is dropped: there sI − A
+// is singular to working precision (σ_min(sI−A) ≤ |s−λ|), both responses
+// are rounding and the first-order bound does not hold. The eigenvalues'
+// own bounds β are not the radius: on a cluster they span the points that
+// refute a wrong cut. False when the eigenvalues of A do not converge.
+func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bool) {
+	n, m, p := sys.Dims()
 	discrete := sys.Dt != 0
-	pe, ok := newPoleEigen(sys.A)
+	evals, beta, ok := eigenRoundingBounds(sys.A)
 	if !ok {
-		return nil, nil, false
+		return nil, modelPoles{}, false
 	}
-	evals := pe.poles
-	beta := make([]float64, n)
+	mp := modelPoles{evals: evals, beta: beta}
 	resolved := true
 	for k, ev := range evals {
-		yax, yx := pe.coupling(sys.A, k, k)
-		beta[k] = eps() * yax / cmplx.Abs(yx)
-		if !(ev != 0 && beta[k] < cmplx.Abs(ev)) {
+		if !(ev != 0 && mp.beta[k] < cmplx.Abs(ev)) {
 			resolved = false
 		}
-		if beta[k] == 0 {
-			exact = append(exact, ev)
-		}
 	}
+	norm := 0.0
+	for _, a := range newBalancedRealization(sys, n, m, p).a {
+		norm = math.Hypot(norm, a)
+	}
+	mp.rho0 = float64(n) * eps() * norm
+	var pts []complex128
 	push := func(s complex128) {
 		if !slices.Contains(pts, s) {
 			pts = append(pts, s)
@@ -175,51 +197,84 @@ func axisProbes(sys *System, removed []*mat.Dense) (pts, exact []complex128, ok 
 	}
 	kept := pts[:0]
 	for _, s := range pts {
-		onPole := false
-		for _, ev := range evals {
-			if cmplx.Abs(s-ev) <= float64(n)*eps()*(1+cmplx.Abs(ev)) {
-				onPole = true
-				break
-			}
-		}
-		if !onPole {
+		rho := float64(n) * eps() * (cmplx.Abs(s) + norm)
+		if !slices.ContainsFunc(evals, func(ev complex128) bool { return cmplx.Abs(s-ev) <= rho }) {
 			kept = append(kept, s)
 		}
 	}
-	return kept, exact, true
+	return kept, mp, true
 }
 
-// nearExactPole reports for each point whether it lies within β/tol of an
-// exact eigenvalue of the model, β the rounding bound
-// ε·|y|ᵀ|A||x|/|yᴴx| of the eigenvalue of red's A nearest it: there a
-// rounding-level move of the cut's copy of the pole changes the cut's
-// response by more than tol, so no rotated cut can be judged against the
-// exact pole. False when the eigenvalues of red do not converge.
-func nearExactPole(red *System, pts, exact []complex128, tol float64) ([]bool, bool) {
-	near := make([]bool, len(pts))
-	if nr, _, _ := red.Dims(); nr == 0 || len(exact) == 0 {
-		return near, true
-	}
-	pe, ok := newPoleEigen(red.A)
+// eigenRoundingBounds returns the eigenvalues of A with their
+// componentwise rounding bounds β = ε·|y|ᵀ|A||x|/|yᴴx|, computed for a
+// zero eigenvalue too (eigenvalueRoundingTerms skips it): 0 when the
+// terms are, as for a zero column of A, so a computed zero that rounding
+// does move keeps its bound. False when the eigenvalues do not converge.
+func eigenRoundingBounds(A *mat.Dense) ([]complex128, []float64, bool) {
+	pe, ok := newPoleEigen(A)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	for _, ev := range exact {
-		j := 0
-		for i, p := range pe.poles {
-			if cmplx.Abs(p-ev) < cmplx.Abs(pe.poles[j]-ev) {
-				j = i
-			}
-		}
-		yax, yx := pe.coupling(red.A, j, j)
-		r := eps() * yax / cmplx.Abs(yx) / tol
-		for k, s := range pts {
-			if cmplx.Abs(s-ev) <= r {
-				near[k] = true
-			}
+	beta := make([]float64, len(pe.poles))
+	for k := range pe.poles {
+		yax, yx := pe.coupling(A, k, k)
+		if yax != 0 {
+			beta[k] = eps() * yax / cmplx.Abs(yx)
 		}
 	}
-	return near, true
+	return pe.poles, beta, true
+}
+
+// poleWindows are disks of the frequency plane.
+type poleWindows struct {
+	centre []complex128
+	radius []float64
+}
+
+func (w poleWindows) contain(s complex128) bool {
+	for i, c := range w.centre {
+		if cmplx.Abs(s-c) <= w.radius[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// sharedPoleWindows returns, for every pole λ_R of red that the model
+// shares (|λ_R − λ_G| ≤ β_R + β_G + ρ₀) and determines to tol
+// (β_G ≤ tol·max(|λ_G|, ρ₀)), and that the cut carries to the eigensolver's
+// resolution (β_R ≤ ρ₀), the disk of radius β_R/tol about it: there a
+// rounding-level move of the cut's pole changes the cut's response by more
+// than tol, so no realization is determined to tol, however exactly the
+// model carries the pole (a kept integrator that the rotated cut holds
+// only to rounding). A cut pole known worse than that (β_R > ρ₀) is the
+// cut's own ill-conditioning, which the window must not excuse: its β_R/tol
+// can span the whole cluster where the model is determined. False when the
+// eigenvalues of red do not converge.
+func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
+	var w poleWindows
+	nr, _, _ := red.Dims()
+	if nr == 0 {
+		return w, true
+	}
+	evR, betaR, ok := eigenRoundingBounds(red.A)
+	if !ok {
+		return w, false
+	}
+	for i, lr := range evR {
+		if !(betaR[i] <= mp.rho0) {
+			continue
+		}
+		for j, lg := range mp.evals {
+			bG := mp.beta[j]
+			if cmplx.Abs(lr-lg) <= betaR[i]+bG+mp.rho0 && bG <= tol*math.Max(cmplx.Abs(lg), mp.rho0) {
+				w.centre = append(w.centre, lr)
+				w.radius = append(w.radius, betaR[i]/tol)
+				break
+			}
+		}
+	}
+	return w, true
 }
 
 // eigenAxisProbes returns the axis points beside every eigenvalue, one set

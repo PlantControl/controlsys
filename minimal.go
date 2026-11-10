@@ -73,11 +73,13 @@ type ReduceResult struct {
 // its response is verified to match the model's to max(√ε, Tol) on the
 // frequency axis (the unit circle or the imaginary axis): at points beside
 // every eigenvalue, on a fixed grid and on a decade grid, none may refute
-// or fail to verify it where the model's own rounding bound determines its
-// response, and at least n + nr of them (the orders of the model and the
-// cut) must verify it within the rounding bounds of both responses. The
-// check is sampled: agreement at those points does not bound the error
-// between them. Otherwise the model is returned unreduced (modes
+// it, fail to verify it where the model's own rounding bound determines its
+// response, or deviate from the model by more than that bound, and the
+// points that verify it within the rounding bounds of both responses must
+// fix a difference of degree n + nr (the orders of the model and the cut).
+// The check is sampled and evaluated in floating point: agreement at those
+// points does not bound the error between them, and where the model's
+// response is below its own rounding bound it cannot decide. Otherwise the model is returned unreduced (modes
 // clustered near z = 1, as from matched C2D, or a realization graded over
 // many decades can carry the response through couplings below the floor).
 // The unreduced model is a correct answer, so this is a nil error, unlike

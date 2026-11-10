@@ -145,7 +145,8 @@ func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 
 // reduceVerifyLiterals are frozen models of the Reduce verification
 // census (Y5H2MH): fz rows decoded before QS7HIC, and matched-hid rows,
-// a matched C2D model with one planted hidden state (zzCefHidden).
+// a matched C2D model with one planted hidden state (zzCefHidden); the
+// -amd64 rows were generated on amd64, where their C2D differs.
 func reduceVerifyLiterals(t *testing.T) map[string]*System {
 	t.Helper()
 	type lit struct {
@@ -350,6 +351,78 @@ func reduceVerifyLiterals(t *testing.T) map[string]*System {
 				0,
 			},
 		},
+		"148-unc-false": {dt: 0.01, n: 6, m: 1, p: 1,
+			a: []float64{
+				0.9897565788385125, 272.26481910896115, 3.9726393875482016, 1.753496284392368, 1, 0.27454851795027113,
+				0, 0.9863196937741009, 0.014490509511733961, 0, 0, 0.307734264387422,
+				0, -0.014490509511733961, 0.9863196937741009, 1.753496284392368, 1, 2.76919057858152,
+				0, 0, 0, 0.9930396265104477, 0.005890387678995963, 2.400666515610661,
+				0, 0, 0, -0.005890387678995963, 0.9930396265104477, 0.8377409970430088,
+				0, 0, 0, 0, 0, 0.9908783533241214,
+			},
+			b: []float64{
+				0,
+				0,
+				0,
+				0,
+				1,
+				0,
+			},
+			c: []float64{
+				-9.56544202259722e-10, 0.00011357054299594634, 1.6571175587337691e-06, 7.314405357679245e-07, 4.171326408150261e-07, -1.0448031552312158,
+			},
+			d: []float64{
+				0,
+			},
+		},
+		"221-unc-false-amd64": {dt: 0.01, n: 6, m: 1, p: 1,
+			a: []float64{
+				0.9793608907337193, 206.92597443602762, 3.9582987572645107, 0.004276123252322091, 0.0027558785884693737, 1.007412696553358,
+				0, 0.9791493786322553, 0.01892789925597794, 0, 0, -0.8322032582357499,
+				0, -0.01892789925597794, 0.9791493786322553, 0.004276123252322091, 0.0027558785884693737, -1.988368171197713,
+				0, 0, 0, 0.9980608132337387, 6.969850193979593e-05, -0.9727735970398861,
+				0, 0, 0, -6.969850193979593e-05, 0.9980608132337387, 0.4005503081635751,
+				0, 0, 0, 0, 0, 0.9944797244924881,
+			},
+			b: []float64{
+				1,
+				0,
+				1,
+				0,
+				1,
+				0,
+			},
+			c: []float64{
+				4.2188592861086976e-07, 0, 0, 0, 0, -0.14161120933668375,
+			},
+			d: []float64{
+				0,
+			},
+		},
+		"246-unc-false-amd64": {dt: 0.001, n: 6, m: 1, p: 1,
+			a: []float64{
+				0.9996424574182071, 3282.0863635864443, 3.99673529003694, 0.5866633034438116, 1, 0.921981271894043,
+				0, 0.99836764501847, 0.001216747922445697, 0, 0, 0.503385462616573,
+				0, -0.001216747922445697, 0.99836764501847, 0.5866633034438116, 1, -0.20119638596239997,
+				0, 0, 0, 0.9990643903352582, 0.00047210639344921545, 0.9751765862471118,
+				0, 0, 0, -0.00047210639344921545, 0.9990643903352582, -0.380590908626684,
+				0, 0, 0, 0, 0, 0.9998723435415622,
+			},
+			b: []float64{
+				0,
+				0,
+				0,
+				0,
+				1,
+				0,
+			},
+			c: []float64{
+				-7.008227081302481e-14, 1.0794324549624958e-06, 1.3144705251587412e-09, 1.9294538282069254e-10, 3.288860606894464e-10, 0.16574654254472998,
+			},
+			d: []float64{
+				0,
+			},
+		},
 	}
 	out := make(map[string]*System, len(lits))
 	for name, l := range lits {
@@ -360,4 +433,71 @@ func reduceVerifyLiterals(t *testing.T) map[string]*System {
 		out[name] = sys
 	}
 	return out
+}
+
+// Y5H2MH matched-hid 148, 221, 246 unc-false: the planted state is
+// structurally disconnected; the rotated staircase cut is verified at
+// nearly every probe but deviates at the matched-C2D zero z = -1 by more
+// than the model's own bound there (certified wrong by 3..737 on main).
+// Every mode returns the model unreduced.
+func TestReduceRefusesCutBeyondModelBoundAtNyquistZero(t *testing.T) {
+	lits := reduceVerifyLiterals(t)
+	for _, name := range []string{"148-unc-false", "221-unc-false-amd64", "246-unc-false-amd64"} {
+		sys := lits[name]
+		for _, opts := range []*ReduceOpts{{}, {Mode: ReduceUncontrollable}, {Mode: ReduceUnobservable}, {Equalize: true}} {
+			res, err := sys.Reduce(opts)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			assertReducedUnchanged(t, name, sys, res)
+		}
+	}
+}
+
+// A kept exact integrator with kept modes -1, -30 and an uncontrollable
+// -2, as given and rotated: the rotated cut carries the integrator only to
+// rounding, and its bound near s = 0 is a constant multiple of the
+// model's; the cut must still be accepted (4 -> 3).
+func TestReduceAcceptsRotatedCutOfKeptIntegrator(t *testing.T) {
+	v := []float64{1.0 / 5, 2.0 / 5, 2.0 / 5, 4.0 / 5}
+	q := mat.NewDense(4, 4, nil)
+	for i := range 4 {
+		for j := range 4 {
+			q.Set(i, j, -2*v[i]*v[j])
+		}
+		q.Set(i, i, q.At(i, i)+1)
+	}
+	for _, rot := range []bool{false, true} {
+		A := mat.NewDense(4, 4, []float64{0, 0.7, 0.2, 0.4, 0, -1, 0.3, -0.6, 0, 0, -30, 0.5, 0, 0, 0, -2})
+		B := mat.NewDense(4, 1, []float64{1, 1, 1, 0})
+		C := mat.NewDense(1, 4, []float64{1, -0.5, 0.3, 2})
+		if rot {
+			var tmp, a, b, c mat.Dense
+			tmp.Mul(q, A)
+			a.Mul(&tmp, q.T())
+			b.Mul(q, B)
+			c.Mul(C, q.T())
+			A, B, C = &a, &b, &c
+		}
+		sys, err := New(A, B, C, mat.NewDense(1, 1, nil), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, opts := range []*ReduceOpts{{}, {Equalize: true}} {
+			res, err := sys.Reduce(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Order != 3 {
+				t.Fatalf("rot=%v eq=%v: order %d, want 3", rot, opts.Equalize, res.Order)
+			}
+			for _, s := range []complex128{0.37i, 2.1i, 40i} {
+				g, _ := sys.EvalFr(s)
+				r, _ := res.Sys.EvalFr(s)
+				if d := cmplx.Abs(g[0][0] - r[0][0]); d > 1e-10*cmplx.Abs(g[0][0]) {
+					t.Errorf("rot=%v eq=%v: |G-R| = %g at %v, |G| = %g", rot, opts.Equalize, d, s, cmplx.Abs(g[0][0]))
+				}
+			}
+		}
+	}
 }
