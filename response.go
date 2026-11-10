@@ -405,8 +405,11 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // its finite gain. Where the float model has an exact pole at DC whose
 // residue the given coefficients may not fix, and its exact limit and the
 // deflated expansion disagree on which entries are infinite or on an Inf
-// sign, DCGain returns the exact limit with an error wrapping
-// ErrAccuracyUnverified.
+// sign, or a route that read a residue as rounding (decoupled modes, or the
+// Laurent expansion) gives the opposite Inf sign to an exact limit that
+// rests on a residue below ε of its terms, DCGain returns the exact limit
+// with an error wrapping ErrAccuracyUnverified; a residue clear of that
+// gives the entry its exact sign.
 // A model with no inputs or no outputs has an empty gain, which a
 // *mat.Dense cannot hold, so it returns ErrDimensionMismatch; a NaN or Inf
 // model entry returns ErrInvalidArgument.
@@ -592,28 +595,105 @@ func (sys *System) dcGainByTransferFunctionLimit(offPole bool) (*mat.Dense, erro
 		return gain, err
 	}
 	scaled, inScale, outScale := sys.dcGainIOScaled()
-	gain, ok := scaled.dcGainByDecoupledSingularModes()
+	gain, ok, sure := scaled.dcGainByDecoupledSingularModes()
 	if !ok {
 		if gain, ok, err := sys.dcGainByStructuralEntries(offPole); ok {
 			return gain, err
 		}
-		g, ok, exact := sys.dcGainByBlockLaurent(offPole)
-		if exact == nil {
-			if ok {
-				return g, nil
-			}
+		g, ok, lim, asGiven := sys.dcGainByBlockLaurent(offPole)
+		if ok && (lim == nil || asGiven) {
+			return dcGainAgainstExactLimit(g, lim, "Laurent expansion")
+		}
+		if lim == nil {
 			return sys.dcGainPastBlockLaurent(scaled, inScale, outScale)
 		}
 		var err error
 		if !ok {
 			g, err = sys.dcGainPastBlockLaurent(scaled, inScale, outScale)
 		}
-		if err != nil || !samePoleClasses(exact, g) {
-			return exact, fmt.Errorf("DCGain: exact limit and deflated expansion disagree on a pole at DC: %w", ErrAccuracyUnverified)
+		if err != nil || !samePoleClasses(lim.rounded, g) {
+			return lim.rounded, fmt.Errorf("DCGain: exact limit and deflated expansion disagree on a pole at DC: %w", ErrAccuracyUnverified)
 		}
+		return dcGainAgainstExactLimit(g, lim, "deflated expansion")
+	}
+	gain = sys.dcGainUnscale(gain, scaled, inScale, outScale)
+	if !offPole || sure {
+		return gain, nil
+	}
+	if lg, ok, skipped := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, laurentAsGiven); ok && !skipped {
+		return dcGainWithInfSigns(gain, lg), nil
+	}
+	return dcGainAgainstExactLimit(gain, sys.exactDCGainLimitsAtPole(), "decoupled modes")
+}
+
+// dcGainWithInfSigns returns g with each entry that is the opposite
+// infinity of ref's set to ref's.
+func dcGainWithInfSigns(g, ref *mat.Dense) *mat.Dense {
+	gr, rr := g.RawMatrix(), ref.RawMatrix()
+	for i := range gr.Rows {
+		for j := range gr.Cols {
+			if x := rr.Data[i*rr.Stride+j]; math.IsInf(x, 0) && gr.Data[i*gr.Stride+j] == -x {
+				gr.Data[i*gr.Stride+j] = x
+			}
+		}
+	}
+	return g
+}
+
+// dcExactLimits holds both readings of exactDCGainLimitRounded.
+type dcExactLimits struct{ rounded, strict *mat.Dense }
+
+// exactDCGainLimitsAtPole is exactDCGainLimitRounded when x0·I − A is
+// exactly singular and n ≤ exactDetMaxOrder, else nil.
+func (sys *System) exactDCGainLimitsAtPole() *dcExactLimits {
+	n, _, _ := sys.Dims()
+	x0 := 0.0
+	if sys.IsDiscrete() {
+		x0 = 1
+	}
+	if n > exactDetMaxOrder || !exactShiftedDetIsZero(sys.A.RawMatrix(), x0) {
+		return nil
+	}
+	rounded, strict, overflow := exactDCGainLimitRounded(sys.A, sys.B, sys.C, sys.D, x0)
+	if overflow {
+		return nil
+	}
+	return &dcExactLimits{rounded, strict}
+}
+
+// dcGainAgainstExactLimit checks the Inf signs of a route's gain g against
+// the float model's exact limit. Where an entry is the opposite infinity of
+// the strict limit and the rounded limit agrees with the strict one, its
+// residue is clear of rounding and the route misjudged it: the entry takes
+// the exact sign. Where the rounded limit differs there, the sign rests on
+// a residue below ε of its own terms, and the strict limit is returned with
+// ErrAccuracyUnverified. A finite route entry where the strict limit is
+// infinite is the cancellation samePoleClasses settles.
+func dcGainAgainstExactLimit(g *mat.Dense, lim *dcExactLimits, route string) (*mat.Dense, error) {
+	if lim == nil {
 		return g, nil
 	}
-	return sys.dcGainUnscale(gain, scaled, inScale, outScale), nil
+	gr, sr, rr := g.RawMatrix(), lim.strict.RawMatrix(), lim.rounded.RawMatrix()
+	var fixed *mat.Dense
+	for i := range gr.Rows {
+		for j := range gr.Cols {
+			x, y := sr.Data[i*sr.Stride+j], gr.Data[i*gr.Stride+j]
+			if !math.IsInf(x, 0) || x != -y {
+				continue
+			}
+			if rr.Data[i*rr.Stride+j] != x {
+				return lim.strict, fmt.Errorf("DCGain: exact limit and %s disagree on an Inf sign at DC: %w", route, ErrAccuracyUnverified)
+			}
+			if fixed == nil {
+				fixed = mat.DenseCopyOf(g)
+			}
+			fixed.Set(i, j, x)
+		}
+	}
+	if fixed == nil {
+		return g, nil
+	}
+	return fixed, nil
 }
 
 // samePoleClasses reports whether every entry of a and b is finite in both
@@ -634,13 +714,23 @@ func samePoleClasses(a, b *mat.Dense) bool {
 }
 
 // dcGainPastBlockLaurent is the transfer limit once the block Laurent
-// expansion declines.
+// expansion declines; where transfer coefficients overflow, n ≤
+// exactDetMaxOrder takes the exact limit, as dcGainOverflowed.
 func (sys *System) dcGainPastBlockLaurent(scaled *System, inScale, outScale []float64) (*mat.Dense, error) {
 	if gain, ok := sys.dcGainByRoundedIntegrator(); ok {
 		return gain, nil
 	}
 	res, err := scaled.rationalTransferFunction(nil)
 	if err != nil {
+		if n, _, _ := sys.Dims(); errors.Is(err, ErrOverflow) && n <= exactDetMaxOrder {
+			x0 := 0.0
+			if sys.IsDiscrete() {
+				x0 = 1
+			}
+			if gain, overflow := exactDCGainLimitChecked(sys.A, sys.B, sys.C, sys.D, x0); !overflow {
+				return gain, nil
+			}
+		}
 		return nil, fmt.Errorf("DCGain: %w", err)
 	}
 	return sys.dcGainUnscale(dcGainFromTransferFunction(res.TF), scaled, inScale, outScale), nil
@@ -796,11 +886,12 @@ func (sys *System) dcGainByStructuralEntries(offPole bool) (*mat.Dense, bool, er
 // roundoff, but the exact pole still makes the entry infinite. ok is false
 // with no exact pole at x0, a block deflation cannot settle, or a finite
 // entry without three correct digits, leaving those to the transfer limit.
-// With offPole, when the model as given declines and x0·I − A is exactly
-// singular with n ≤ exactDetMaxOrder, exact is also the exact limit with a
-// residue below ε of its own terms read as cancelled: the caller checks the
-// deflated result against it.
-func (sys *System) dcGainByBlockLaurent(offPole bool) (g *mat.Dense, ok bool, exact *mat.Dense) {
+// With offPole and n ≤ exactDetMaxOrder, lim holds the exact limits
+// (exactDCGainLimitRounded) when the model as given declines and x0·I − A is
+// exactly singular, the caller checking the deflated result against the
+// rounded one, or when the expansion as given read a pole coefficient of
+// nonzero scale as zero (asGiven), the caller checking its Inf signs.
+func (sys *System) dcGainByBlockLaurent(offPole bool) (g *mat.Dense, ok bool, lim *dcExactLimits, asGiven bool) {
 	n, _, _ := sys.Dims()
 	x0 := 0.0
 	if sys.IsDiscrete() {
@@ -809,23 +900,26 @@ func (sys *System) dcGainByBlockLaurent(offPole bool) (g *mat.Dense, ok bool, ex
 	if n <= exactDetMaxOrder {
 		aRaw := sys.A.RawMatrix()
 		if hasExactSingularBlock(aRaw, tarjanBlocks(aRaw, n), x0) {
-			return exactDCGainLimit(sys.A, sys.B, sys.C, sys.D, x0), true, nil
+			return exactDCGainLimit(sys.A, sys.B, sys.C, sys.D, x0), true, nil, false
 		}
 	}
-	if g, ok := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, laurentAsGiven); ok {
-		return g, true, nil
-	}
-	if offPole && n <= exactDetMaxOrder && exactShiftedDetIsZero(sys.A.RawMatrix(), x0) {
-		if e, overflow := exactDCGainLimitRounded(sys.A, sys.B, sys.C, sys.D, x0); !overflow {
-			exact = e
+	if g, ok, skipped := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, laurentAsGiven); ok {
+		if offPole && skipped && n <= exactDetMaxOrder {
+			if r, s, overflow := exactDCGainLimitRounded(sys.A, sys.B, sys.C, sys.D, x0); !overflow {
+				lim = &dcExactLimits{r, s}
+			}
 		}
+		return g, true, lim, true
+	}
+	if offPole {
+		lim = sys.exactDCGainLimitsAtPole()
 	}
 	for _, mode := range []laurentMode{laurentDeflate, laurentDeflateLoose} {
-		if g, ok := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, mode); ok {
-			return g, true, exact
+		if g, ok, _ := sys.blockLaurentGain(sys.A, sys.B, sys.C, nil, mode); ok {
+			return g, true, lim, false
 		}
 	}
-	return nil, false, exact
+	return nil, false, lim, false
 }
 
 type laurentMode int
@@ -853,8 +947,10 @@ func absDense(m *mat.Dense) *mat.Dense {
 	return r
 }
 
-// blockLaurentGain takes abs nil for |A|, |B|, |C|.
-func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode laurentMode) (*mat.Dense, bool) {
+// blockLaurentGain takes abs nil for |A|, |B|, |C|. skipped reports an
+// infinite entry whose sign comes after a more singular coefficient of
+// nonzero magnitude scale read as rounding.
+func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode laurentMode) (gain *mat.Dense, ok, skipped bool) {
 	deflate := mode != laurentAsGiven
 	n, m, p := sys.Dims()
 	x0 := 0.0
@@ -878,7 +974,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		}
 	}
 	if ns == 0 {
-		return nil, false
+		return nil, false, false
 	}
 	type regular struct {
 		lu     mat.LU
@@ -908,7 +1004,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		singular := math.IsInf(c, 0) || math.IsNaN(c) ||
 			(!(c <= 1e12) && r <= exactDetMaxOrder && exactBlockSingularAt(aRaw, blk, x0))
 		if singular && mode != laurentDeflate {
-			return nil, false
+			return nil, false, false
 		}
 		if singular || deflate && r > 1 && !(c <= mat.ConditionTolerance) {
 			illCond = append(illCond, blk)
@@ -922,7 +1018,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		abs = &laurentAbs{absDense(A), absDense(B), absDense(C)}
 		for _, blk := range illCond {
 			if !deflateBlockAt(A, B, C, abs, blk, x0) {
-				return nil, false
+				return nil, false, false
 			}
 		}
 		if mode == laurentDeflateLoose {
@@ -931,7 +1027,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		return sys.blockLaurentGain(A, B, C, abs, laurentAsGiven)
 	}
 	if deflate {
-		return nil, false
+		return nil, false, false
 	}
 
 	nord := 2*ns + 1
@@ -1017,7 +1113,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		}
 	}
 
-	gain := denseCopySafe(sys.D, p, m)
+	gain = denseCopySafe(sys.D, p, m)
 	cRaw := C.RawMatrix()
 	absC := cRaw
 	if abs != nil {
@@ -1028,6 +1124,7 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 		crow := cRaw.Data[i*cRaw.Stride : i*cRaw.Stride+n]
 		cmag := absC.Data[i*absC.Stride : i*absC.Stride+n]
 		for j := range m {
+			read := false
 			for ord := -ns; ord <= 0; ord++ {
 				g, bound := 0.0, 0.0
 				for k, c := range crow {
@@ -1039,19 +1136,21 @@ func (sys *System) blockLaurentGain(A, B, C *mat.Dense, abs *laurentAbs, mode la
 				if ord == 0 {
 					v := gain.At(i, j) + g
 					if tol*bound > 1e-3*math.Abs(v) {
-						return nil, false
+						return nil, false, false
 					}
 					gain.Set(i, j, v)
 					break
 				}
 				if math.Abs(g) > tol*bound {
 					gain.Set(i, j, math.Inf(signInt(g)))
+					skipped = skipped || read
 					break
 				}
+				read = read || bound > 0
 			}
 		}
 	}
-	return gain, true
+	return gain, true, skipped
 }
 
 // hasExactSingularBlock reports whether a block of a, at most
@@ -1279,10 +1378,11 @@ func exactDCGainLimitChecked(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense
 // exactDCGainLimitRounded is exactDCGainLimitChecked with each pole
 // coefficient [σ̂^i] Σ ĉ_l adj(σ̂I + P̂)_lq b̂_q below ε of the largest of its
 // own terms read as cancelled: the given coefficients cannot fix its sign.
+// strict is exactDCGainLimitChecked itself, from the same coefficients.
 // Faddeev–LeVerrier gives det(σ̂I + P̂) and adj(σ̂I + P̂) coefficient by
 // coefficient; below the pole order od of det the numerator coefficients are
 // these residues alone, so no interpolation is needed.
-func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow bool) {
+func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain, strict *mat.Dense, overflow bool) {
 	n, m := B.Dims()
 	p, _ := C.Dims()
 	pHat, bHat, cHat, shift := exactScaledModel(A, B, C, x0)
@@ -1291,45 +1391,56 @@ func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense
 	for det[od].Sign() == 0 {
 		od++
 	}
-	gain = mat.NewDense(p, m, nil)
+	gain, strict = mat.NewDense(p, m, nil), mat.NewDense(p, m, nil)
 	sum := new(big.Int)
+	set := func(g *mat.Dense, i, j, on int, sum *big.Int) {
+		dij := 0.0
+		if D != nil {
+			dij = D.At(i, j)
+		}
+		switch {
+		case on < 0:
+			g.Set(i, j, dij)
+		case on < od:
+			g.Set(i, j, math.Inf(sum.Sign()*det[od].Sign()))
+		default:
+			v := new(big.Rat).SetFrac(sum, det[od])
+			sc := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), uint(max(shift, -shift))))
+			if shift >= 0 {
+				v.Mul(v, sc)
+			} else {
+				v.Quo(v, sc)
+			}
+			v.Add(v, new(big.Rat).SetFloat64(dij))
+			f, _ := v.Float64()
+			overflow = overflow || math.IsInf(f, 0)
+			g.Set(i, j, f)
+		}
+	}
 	for i := range p {
 		c := cHat[i*n : i*n+n]
 		for j := range m {
-			on := -1
+			on, sOn := -1, -1
+			var sSum *big.Int
 			for k := 0; k <= od && k < n; k++ {
 				below := residueSum(sum, adj[k], c, bHat, j, m)
-				if sum.Sign() == 0 || k < od && below {
+				if sum.Sign() == 0 {
+					continue
+				}
+				if sOn < 0 {
+					sOn, sSum = k, new(big.Int).Set(sum)
+				}
+				if k < od && below {
 					continue
 				}
 				on = k
 				break
 			}
-			dij := 0.0
-			if D != nil {
-				dij = D.At(i, j)
-			}
-			switch {
-			case on < 0:
-				gain.Set(i, j, dij)
-			case on < od:
-				gain.Set(i, j, math.Inf(sum.Sign()*det[od].Sign()))
-			default:
-				v := new(big.Rat).SetFrac(sum, det[od])
-				sc := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), uint(max(shift, -shift))))
-				if shift >= 0 {
-					v.Mul(v, sc)
-				} else {
-					v.Quo(v, sc)
-				}
-				v.Add(v, new(big.Rat).SetFloat64(dij))
-				f, _ := v.Float64()
-				overflow = overflow || math.IsInf(f, 0)
-				gain.Set(i, j, f)
-			}
+			set(gain, i, j, on, sum)
+			set(strict, i, j, sOn, sSum)
 		}
 	}
-	return gain, overflow
+	return gain, strict, overflow
 }
 
 // exactScaledModel returns P̂ = s·(x0·I − A), B̂ and Ĉ as integers, each
@@ -1851,7 +1962,12 @@ func applyIOScales(b, c *mat.Dense, inScale, outScale []float64) {
 	}
 }
 
-func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
+// dcGainByDecoupledSingularModes takes modes with A_kk within
+// dcGainMatrixTol of x0 and row and column below it as decoupled integrators.
+// sure reports that every such mode is exactly x0 and exactly decoupled, no
+// term was dropped as below the tolerance, and no residue sum mixes signs,
+// so its Inf signs are those of the float model.
+func (sys *System) dcGainByDecoupledSingularModes() (gain *mat.Dense, ok, sure bool) {
 	n, m, p := sys.Dims()
 	target := 0.0
 	if sys.IsDiscrete() {
@@ -1860,15 +1976,17 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 	tol := dcGainMatrixTol(sys.A)
 	singular := make([]bool, n)
 	regularCount := 0
+	sure = true
 	for k := range n {
 		if math.Abs(sys.A.At(k, k)-target) <= tol && rowColDecoupledAt(sys.A, k, tol) {
 			singular[k] = true
+			sure = sure && sys.A.At(k, k) == target && rowColDecoupledAt(sys.A, k, 0)
 			continue
 		}
 		regularCount++
 	}
 	if regularCount == n {
-		return nil, false
+		return nil, false, false
 	}
 
 	regular := make([]int, 0, regularCount)
@@ -1878,7 +1996,7 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 		}
 	}
 
-	gain := denseCopySafe(sys.D, p, m)
+	gain = denseCopySafe(sys.D, p, m)
 	if regularCount > 0 {
 		Areg := mat.NewDense(regularCount, regularCount, nil)
 		Breg := mat.NewDense(regularCount, m, nil)
@@ -1913,7 +2031,7 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 			err = X.Solve(ImA, Breg)
 		}
 		if err != nil {
-			return nil, false
+			return nil, false, false
 		}
 		var finite mat.Dense
 		finite.Mul(Creg, &X)
@@ -1924,6 +2042,7 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 	}
 
 	residue := mat.NewDense(p, m, nil)
+	signs := make([]int, p*m)
 	for k := range n {
 		if !singular[k] {
 			continue
@@ -1931,12 +2050,18 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 		for i := range p {
 			c := sys.C.At(i, k)
 			if math.Abs(c) <= tol {
+				sure = sure && c == 0
 				continue
 			}
 			for j := range m {
 				coeff := c * sys.B.At(k, j)
 				if math.Abs(coeff) > tol {
 					residue.Set(i, j, residue.At(i, j)+coeff)
+					sg := signInt(coeff)
+					sure = sure && signs[i*m+j] != -sg
+					signs[i*m+j] = sg
+				} else {
+					sure = sure && coeff == 0
 				}
 			}
 		}
@@ -1946,10 +2071,12 @@ func (sys *System) dcGainByDecoupledSingularModes() (*mat.Dense, bool) {
 			coeff := residue.At(i, j)
 			if math.Abs(coeff) > tol {
 				gain.Set(i, j, math.Inf(signInt(coeff)))
+			} else {
+				sure = sure && coeff == 0
 			}
 		}
 	}
-	return gain, true
+	return gain, true, sure
 }
 
 // hasZeroLine reports whether a − shift·I has an exactly zero row or column.
