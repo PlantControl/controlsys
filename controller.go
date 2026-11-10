@@ -102,8 +102,11 @@ func explicitRiccatiSolution(res *RiccatiResult, opts *RiccatiOpts, err error) (
 // are the augmented Riccati solution and closed-loop eigenvalues.
 //
 // Descriptor plants E x' = Ax + Bu with nonsingular E are supported as in
-// MATLAB: the augmented descriptor is blkdiag(E, I), K is the gain of the
-// explicit model (E⁻¹A, E⁻¹B, C, D) and X solves its Riccati equation.
+// MATLAB: the augmented descriptor is blkdiag(E, I) with the plant rows of
+// the augmented equations scaled by a power of two that brings the RMS
+// singular value ‖E‖_F/√n of E into [1/2, 2) (unchanged within that band).
+// K is the gain of the explicit model (E⁻¹A, E⁻¹B, C, D) and X solves its
+// Riccati equation.
 // Nonsingularity is judged on the plant E, as for Lqr.
 //
 // Nil Q or R returns ErrInvalidArgument; plants without states, inputs or
@@ -147,6 +150,7 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 	}
 	Aa, Ba := lqiAugmentation(sys)
 	if Ea := augmentedDescriptor(sys.E, p); Ea != nil {
+		scaleLqiPlantRows(sys.E, n, Ea, Aa, Ba)
 		o := RiccatiOpts{E: Ea, plantE: sys.E, augmentedE: true}
 		if opts != nil {
 			o.S, o.Workspace, o.NoScaling = opts.S, opts.Workspace, opts.NoScaling
@@ -157,6 +161,44 @@ func Lqi(sys *System, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error
 		return Lqr(Aa, Ba, Q, R, opts)
 	}
 	return Dlqr(Aa, Ba, Q, R, opts)
+}
+
+// scaleLqiPlantRows applies the left (equation) scaling diag(2^−k I_n, I_p)
+// to Ea, Aa and Ba, k = trunc(log2 ‖E‖_F/√n), so that the plant rows and
+// the unit integrator rows of blkdiag(E, I) share one scale within 2x: the
+// plant's RMS singular value becomes a power of two in [1/2, 2), and RMS in
+// (1/2, 2) is left bit-identical. Exact: K, the explicit EᵀXE and
+// Eig(A−BK, E) are invariant (the discrete pencil is the same equivalence);
+// plantE for the gate is unchanged. Unlike scaling the integrator rows to
+// the plant, it keeps the generalized X = E⁻ᵀXₑE⁻¹ at the scale of the
+// explicit one, which the pencil must represent: a plant E with ‖E‖ ~ 1e-3
+// and σ_min(E) ~ 3e-16 put the fast pair at Dhgeqz's infinite threshold,
+// and E ~ 1e-8 made X ~ 1e17 unrepresentable (ZIUHCL ruling 3).
+func scaleLqiPlantRows(E *mat.Dense, n int, Ea, Aa, Ba *mat.Dense) {
+	nrm := denseNorm(E)
+	if nrm == 0 {
+		return
+	}
+	rms := nrm / math.Sqrt(float64(n))
+	// trunc(log2 rms) exactly: math.Log2 is FMA-fusable, ~1 ulp off at the
+	// band edges 2^j(1±ε).
+	frac, e := math.Frexp(rms)
+	k := e - 1
+	if rms < 1 && frac != 0.5 {
+		k = e
+	}
+	if k == 0 {
+		return
+	}
+	for _, M := range []*mat.Dense{Ea, Aa, Ba} {
+		raw := M.RawMatrix()
+		for i := range n {
+			row := raw.Data[i*raw.Stride : i*raw.Stride+raw.Cols]
+			for j, v := range row {
+				row[j] = math.Ldexp(v, -k)
+			}
+		}
+	}
 }
 
 // Lqrd computes the discrete-time LQR gain from a continuous-time plant,
