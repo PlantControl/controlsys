@@ -691,31 +691,10 @@ func (sys *System) dcGainCertified(r dcRoute) (*mat.Dense, error) {
 	if sys.IsDiscrete() {
 		x0 = 1
 	}
-	if !r.singular && !exactShiftedDetIsZero(sys.A.RawMatrix(), x0) {
-		strict, _ := exactDCGainLimitChecked(sys.A, sys.B, sys.C, sys.D, x0)
-		sr := strict.RawMatrix()
-		mirror, overflow := false, false
-		for i := range sr.Rows {
-			for j := range sr.Cols {
-				k := i*sr.Stride + j
-				if g != nil {
-					if v := g.At(i, j); math.IsInf(v, 0) {
-						if !math.IsInf(sr.Data[k], 0) {
-							sr.Data[k], mirror = v, true
-						}
-						continue
-					}
-				}
-				overflow = overflow || math.IsInf(sr.Data[k], 0)
-			}
+	if !r.singular {
+		if strict, _, ok := exactDCGainAtNonsingular(sys.A, sys.B, sys.C, sys.D, x0); ok {
+			return dcGainOffDC(g, strict)
 		}
-		switch {
-		case overflow:
-			return nil, fmt.Errorf("DCGain: gain overflows float64: %w", ErrOverflow)
-		case mirror:
-			return strict, fmt.Errorf("DCGain: pole within rounding of DC where the model's exact limit is finite; Reduce the model for a certified gain: %w", ErrAccuracyUnverified)
-		}
-		return strict, nil
 	}
 	lim := r.lim
 	if lim == nil {
@@ -752,6 +731,34 @@ func (sys *System) dcGainCertified(r dcRoute) (*mat.Dense, error) {
 		return out, fmt.Errorf("DCGain: exact limit and deflated expansion disagree on a pole at DC; Reduce the model for a certified gain: %w", ErrAccuracyUnverified)
 	}
 	return out, nil
+}
+
+// dcGainOffDC is dcGainCertified where x0·I − A is exactly nonsingular,
+// strict its exact gain, overwritten.
+func dcGainOffDC(g, strict *mat.Dense) (*mat.Dense, error) {
+	sr := strict.RawMatrix()
+	mirror, overflow := false, false
+	for i := range sr.Rows {
+		for j := range sr.Cols {
+			k := i*sr.Stride + j
+			if g != nil {
+				if v := g.At(i, j); math.IsInf(v, 0) {
+					if !math.IsInf(sr.Data[k], 0) {
+						sr.Data[k], mirror = v, true
+					}
+					continue
+				}
+			}
+			overflow = overflow || math.IsInf(sr.Data[k], 0)
+		}
+	}
+	switch {
+	case overflow:
+		return nil, fmt.Errorf("DCGain: gain overflows float64: %w", ErrOverflow)
+	case mirror:
+		return strict, fmt.Errorf("DCGain: pole within rounding of DC where the model's exact limit is finite; Reduce the model for a certified gain: %w", ErrAccuracyUnverified)
+	}
+	return strict, nil
 }
 
 // samePoleClasses reports whether every entry of a and b is finite in both
@@ -1432,21 +1439,99 @@ func exactDCGainLimitChecked(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense
 			case on < od:
 				gain.Set(i, j, math.Inf(nLow.Sign()*dLow.Sign()))
 			default:
-				v := new(big.Rat).Quo(nLow, dLow)
-				sc := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), uint(max(shift, -shift))))
-				if shift >= 0 {
-					v.Mul(v, sc)
-				} else {
-					v.Quo(v, sc)
-				}
-				v.Add(v, new(big.Rat).SetFloat64(dij))
-				f, _ := v.Float64()
+				num := new(big.Int).Mul(nLow.Num(), dLow.Denom())
+				f := dyadicQuoFloat64(num, new(big.Int).Mul(nLow.Denom(), dLow.Num()), shift, dij)
 				overflow = overflow || math.IsInf(f, 0)
 				gain.Set(i, j, f)
 			}
 		}
 	}
 	return gain, overflow
+}
+
+// exactDCGainAtNonsingular is exactDCGainLimitChecked where x0·I − A is
+// exactly nonsingular, by one fraction-free solve; ok is false where it is
+// exactly singular.
+func exactDCGainAtNonsingular(A, B, C, D *mat.Dense, x0 float64) (gain *mat.Dense, overflow, ok bool) {
+	n, m := B.Dims()
+	p, _ := C.Dims()
+	pHat, bHat, cHat, shift := exactScaledModel(A, B, C, x0)
+	w := n + m
+	work := make([]*big.Int, n*w)
+	y := make([]*big.Int, n*m)
+	for i := range n {
+		for j := range n {
+			work[i*w+j] = pHat[i*n+j]
+		}
+		for j := range m {
+			work[i*w+n+j] = bHat[i*m+j]
+		}
+	}
+	for i := range y {
+		y[i] = new(big.Int)
+	}
+	t := new(big.Int)
+	det, ok := bareissSolve(work, y, n, m, t)
+	if !ok {
+		return nil, false, false
+	}
+	gain = mat.NewDense(p, m, nil)
+	v := new(big.Int)
+	for i := range p {
+		for j := range m {
+			v.SetInt64(0)
+			for l, c := range cHat[i*n : i*n+n] {
+				if c.Sign() != 0 {
+					v.Add(v, t.Mul(c, y[l*m+j]))
+				}
+			}
+			dij := 0.0
+			if D != nil {
+				dij = D.At(i, j)
+			}
+			f := dyadicQuoFloat64(v, det, shift, dij)
+			overflow = overflow || math.IsInf(f, 0)
+			gain.Set(i, j, f)
+		}
+	}
+	return gain, overflow, true
+}
+
+// dyadicQuoFloat64 returns the float64 nearest num/den·2^shift + d, den ≠ 0,
+// rounding as big.Rat.Float64 without reducing the fraction.
+func dyadicQuoFloat64(num, den *big.Int, shift int, d float64) float64 {
+	x := new(big.Int).Set(num)
+	q := new(big.Int).Set(den)
+	if q.Sign() < 0 {
+		x.Neg(x)
+		q.Neg(q)
+	}
+	e0 := shift
+	if d != 0 {
+		f, e := math.Frexp(d)
+		de := e - 53
+		e0 = min(shift, de)
+		x.Lsh(x, uint(shift-e0))
+		dm := new(big.Int).Mul(big.NewInt(int64(math.Ldexp(f, 53))), q)
+		x.Add(x, dm.Lsh(dm, uint(de-e0)))
+	}
+	if x.Sign() == 0 {
+		return 0
+	}
+	neg := x.Sign() < 0
+	x.Abs(x)
+	k := max(0, 66+q.BitLen()-x.BitLen())
+	r := new(big.Int)
+	x.QuoRem(x.Lsh(x, uint(k)), q, r)
+	if r.Sign() != 0 {
+		x.Lsh(x, 1).SetBit(x, 0, 1)
+		k++
+	}
+	f, _ := new(big.Float).SetMantExp(new(big.Float).SetInt(x), e0-k).Float64()
+	if neg {
+		return -f
+	}
+	return f
 }
 
 // exactDCGainLimitRounded is exactDCGainLimitChecked with each pole
@@ -1478,15 +1563,7 @@ func exactDCGainLimitRounded(A, B, C, D *mat.Dense, x0 float64) (gain, strict *m
 		case on < od:
 			g.Set(i, j, math.Inf(sum.Sign()*det[od].Sign()))
 		default:
-			v := new(big.Rat).SetFrac(sum, det[od])
-			sc := new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), uint(max(shift, -shift))))
-			if shift >= 0 {
-				v.Mul(v, sc)
-			} else {
-				v.Quo(v, sc)
-			}
-			v.Add(v, new(big.Rat).SetFloat64(dij))
-			f, _ := v.Float64()
+			f := dyadicQuoFloat64(sum, det[od], shift, dij)
 			overflow = overflow || math.IsInf(f, 0)
 			g.Set(i, j, f)
 		}
