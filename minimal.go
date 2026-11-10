@@ -35,7 +35,11 @@ type ReduceOpts struct {
 	// not a staircase rank tolerance, and against ‖A‖ it drops weakly
 	// coupled states that carry the response (a slow plant in a PI loop
 	// drops to order 1; the 10^±3 diagonally scaled Kalman sweep gives 174
-	// under-counts and 277 response errors).
+	// under-counts and 277 response errors). Reduce also accepts a cut only
+	// when its response matches the model's to max(√ε, Tol) (relative), so
+	// a larger Tol admits larger response changes; it can also return a
+	// larger model, when the looser rank floor cuts more states and that
+	// cut fails the check while the default cut would pass.
 	Tol float64
 	// Equalize balances A, B, C before the staircase reductions. Set it
 	// for badly scaled models (state scales spanning many decades): an
@@ -66,13 +70,22 @@ type ReduceResult struct {
 // order of the two whose frequency response matches the model's to √ε
 // (relative) at the eigenvalue scales is returned, else the model
 // unreduced. Without such a gap, the staircase reduction is kept only when
-// its response matches the model's to √ε on the frequency axis (the unit
-// circle or the imaginary axis) beside the removed modes, beyond what the
-// rounding of the model's entries leaves undetermined; else the model is
-// returned unreduced (modes clustered near z = 1, as from matched C2D, or
-// a realization graded over many decades can carry the response through
-// couplings below the floor). A nil opts is ReduceAll with the
-// default tolerance. A descriptor model returns
+// its response is verified to match the model's to max(√ε, Tol) on the
+// frequency axis (the unit circle or the imaginary axis): at points beside
+// every eigenvalue, on a fixed grid and on a decade grid, none may refute
+// or fail to verify it where the model's own rounding bound determines its
+// response, and at least n + nr of them (the orders of the model and the
+// cut) must verify it within the rounding bounds of both responses. The
+// check is sampled: agreement at those points does not bound the error
+// between them. Otherwise the model is returned unreduced (modes
+// clustered near z = 1, as from matched C2D, or a realization graded over
+// many decades can carry the response through couplings below the floor).
+// The unreduced model is a correct answer, so this is a nil error, unlike
+// a failed accuracy check elsewhere (ErrAccuracyUnverified), and MATLAB
+// minreal, which applies its tolerance unverified, can remove states
+// Reduce keeps. Reduce does not promise a minimal result: a nil error with
+// the order unchanged means no removal could be verified, not that the
+// model is minimal. A nil opts is ReduceAll with the default tolerance. A descriptor model returns
 // ErrDescriptorUnsupported; an unknown Mode, a negative or non-finite Tol,
 // and a nil or non-finite model return ErrInvalidArgument.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.minreal.html.
@@ -125,7 +138,8 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 // Sylvester solution, while the staircase's slow response errs by
 // ε·‖A‖/|λ_s| ≥ √ε, so the band separates the two. Without a candidate in
 // it the model is returned unreduced. Otherwise the staircase cut must
-// pass frequencyAxisCutInBand, or the model is returned unreduced; a
+// pass frequencyAxisCutInBand at max(√ε, Tol), or the model is returned
+// unreduced; a
 // continuous block of reduceAcrossSpectralGap (scaleIO false) is exempt,
 // since its caller judges the assembled reduction against the whole model,
 // while the band would judge the block against its own response, which can
@@ -138,7 +152,7 @@ func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOp
 	if res, ok, err := reduceAcrossResolvedGap(sys, policy, opts, base); ok || err != nil {
 		return res, err
 	}
-	if (sys.Dt == 0 && !scaleIO) || frequencyAxisCutInBand(sys, base.Sys, removed) {
+	if (sys.Dt == 0 && !scaleIO) || frequencyAxisCutInBand(sys, base.Sys, removed, math.Max(math.Sqrt(eps()), opts.Tol)) {
 		return base, nil
 	}
 	return unreducedResult(sys, policy)
