@@ -593,13 +593,14 @@ func (sys *System) dcGainOfDelayFreeExplicit(evalErr error, offPole bool) (*mat.
 // decoupled or structurally isolated, no coefficient of nonzero scale was
 // read as zero, or each entry already passed dcGainCertified. deflated
 // reports a route taken once the block Laurent expansion of the model as
-// given declined (a deflated expansion or the transfer limit). lim holds
-// the exact limits where the route computed them.
+// given declined (a deflated expansion or the transfer limit); singular
+// that x0·I − A is exactly singular. lim holds the exact limits where the
+// route computed them.
 type dcRoute struct {
-	g                 *mat.Dense
-	err               error
-	certain, deflated bool
-	lim               *dcExactLimits
+	g                           *mat.Dense
+	err                         error
+	certain, deflated, singular bool
+	lim                         *dcExactLimits
 }
 
 // dcGainByTransferFunctionLimit rescales each input and output to the norm
@@ -628,7 +629,7 @@ func (sys *System) dcGainByTransferFunctionLimit(offPole bool) dcRoute {
 		return dcRoute{g: gain, err: err, certain: true}
 	}
 	if l := sys.dcGainByBlockLaurent(offPole); l.ok {
-		return dcRoute{g: l.g, certain: l.exact, deflated: l.deflated, lim: l.lim}
+		return dcRoute{g: l.g, certain: l.exact, deflated: l.deflated, singular: true, lim: l.lim}
 	}
 	g, err := sys.dcGainPastBlockLaurent(scaled, inScale, outScale)
 	return dcRoute{g: g, err: err, deflated: true}
@@ -690,7 +691,7 @@ func (sys *System) dcGainCertified(r dcRoute) (*mat.Dense, error) {
 	if sys.IsDiscrete() {
 		x0 = 1
 	}
-	if !exactShiftedDetIsZero(sys.A.RawMatrix(), x0) {
+	if !r.singular && !exactShiftedDetIsZero(sys.A.RawMatrix(), x0) {
 		strict, _ := exactDCGainLimitChecked(sys.A, sys.B, sys.C, sys.D, x0)
 		sr := strict.RawMatrix()
 		mirror, overflow := false, false
@@ -977,7 +978,9 @@ func (sys *System) dcGainByBlockLaurent(offPole bool) dcLaurent {
 // dcLaurent is a dcGainByBlockLaurent result: exact reports the expansion
 // as given with every pole coefficient it read as zero of zero magnitude
 // scale (structurally zero), deflated a deflated expansion; lim holds the
-// exact limits where an exactly singular block took them.
+// exact limits where an exactly singular block took them. Every ok result
+// has an exact pole at x0: a 1×1 block A_kk = x0 or an exactly singular
+// block.
 type dcLaurent struct {
 	g                   *mat.Dense
 	ok, exact, deflated bool
