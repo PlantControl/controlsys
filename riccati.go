@@ -150,6 +150,11 @@ type RiccatiOpts struct {
 	// plantE is the model E when E is its transpose (Kalman's dual), so
 	// nearSingularEGate keeps the window of both condition estimates.
 	plantE *mat.Dense
+	// augmentedE marks E as blkdiag(plantE, I) (Lqi): plantE alone is
+	// judged nonsingular or near singular, as rank(blkdiag(E, I)) =
+	// rank(E) + p exactly while MATLAB rank of the augmented E rejects a
+	// plant E with σ₁(E) < 1 that MATLAB rank admits.
+	augmentedE bool
 }
 
 // RiccatiResult is the stabilizing solution of Care or Dare.
@@ -429,7 +434,8 @@ func undetectableBoundary(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiO
 const nearSingularCancelLimit = 1e2
 
 // nearSingularEGate screens the result of a Care or Dare whose E (or, for
-// Kalman's dual, opts.plantE) is near singular: its LU condition estimate
+// Kalman's dual, opts.plantE; for augmentedE, plantE alone) is near
+// singular: its LU condition estimate
 // reaches 1/ε or MATLAB rank (eRankDeficient) finds it deficient. MATLAB
 // lqr and icare accept an E of full MATLAB rank as nonsingular, but there
 // X ~ 1/σ_min(E), and K = R⁻¹(BᵀXE + Sᵀ) (continuous), the discrete K
@@ -448,9 +454,9 @@ func nearSingularEGate(op string, continuous bool, A, B, R *mat.Dense, opts *Ric
 		errors.Is(err, ErrNotSymmetric) || errors.Is(err, ErrNotPSD) || errors.Is(err, ErrDescriptorSingular)) {
 		return res, err
 	}
-	condNear, rankDeficient := nearSingularE(opts.E)
-	if opts.plantE != nil {
-		c, r := nearSingularE(opts.plantE)
+	condNear, rankDeficient := false, false
+	for _, E := range judgedDescriptors(opts) {
+		c, r := nearSingularE(E)
 		condNear, rankDeficient = condNear || c, rankDeficient || r
 	}
 	if !condNear && !rankDeficient || err != nil && !condNear {
@@ -460,6 +466,19 @@ func nearSingularEGate(op string, continuous bool, A, B, R *mat.Dense, opts *Ric
 		return res, nil
 	}
 	return nil, fmt.Errorf("%s: E: %w", op, ErrDescriptorSingular)
+}
+
+// judgedDescriptors returns the descriptors whose singularity a Riccati
+// solve with opts judges: opts.E and plantE, or plantE alone for
+// augmentedE.
+func judgedDescriptors(opts *RiccatiOpts) []*mat.Dense {
+	if opts.augmentedE {
+		return []*mat.Dense{opts.plantE}
+	}
+	if opts.plantE != nil {
+		return []*mat.Dense{opts.E, opts.plantE}
+	}
+	return []*mat.Dense{opts.E}
 }
 
 // nearSingularE reports whether the LU condition estimate of E reaches 1/ε
