@@ -2838,11 +2838,8 @@ func noSolution(err error) bool {
 // the rank of [A − λE, B] for any c > 0. c = 1/max(1, |λ|) gives the
 // homogeneous pencil βA − αE. At c = 1, δ = τ‖E‖, the change of
 // λE. For |λ| > 1, c(A − λE) is a unit multiple of μA − E, μ = 1/λ, so
-// σmin is that of [μA − E, B] and δ = τμ‖A‖/10, τμ the bound τ of μ as
-// an eigenvalue of the reversed pencil (E, A) at 1× its first-order
-// bound rather than the band's 10× (AMDL7W: at 10×, modes controllable
-// at 5–9× first-order rounding were claimed unstabilizable; the 10×
-// margin is MZTFJJ); cτ‖E‖ omits the change of
+// σmin is that of [μA − E, B] and δ = τμ‖A‖, τμ the bound τ of μ as
+// an eigenvalue of the reversed pencil (E, A); cτ‖E‖ omits the change of
 // c and overstates the change of λ/|λ| by |λ|‖E‖/‖A‖: a numerically
 // infinite mode (β at rounding, τ ~ |λ|) has μ ≈ 0 known to τμ ~ eps,
 // its test the PBH test at infinity, rank [E, B] (AMDL7W: a
@@ -2853,7 +2850,10 @@ func noSolution(err error) bool {
 // distance in μ to every other eigenvalue (an infinite one at μ = 0)
 // though τ is not in λ: a numerically infinite mode beside a finite one
 // has τ ~ |λ| ~ its λ-gap, and the cluster mean would test PBH at λ/2,
-// hiding a zero of [E, B]. A cluster mean m maps its band τ into μ exactly,
+// hiding a zero of [E, B]. That μ-only test takes τμ at 1× its
+// first-order bound, not the band's 10× (AMDL7W: at 10× it claimed
+// ErrNoStabilizing on fast modes controllable at 5–9× first-order
+// rounding; the 10× margin elsewhere is MZTFJJ). A cluster mean m maps its band τ into μ exactly,
 // τμ = τ/(|m|(|m| − τ)) for τ < |m|, else ∞. Unscaled (c = 1 alone), a near-infinite mode of a
 // near-singular E has a τ‖E‖ beyond ‖B‖, the most σmin reaches at an
 // eigenvalue, so no B passes (OCTGBK: a controllable mode at 1.24e13,
@@ -2939,7 +2939,7 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		if problem.unscaledPBH || mod <= 1 {
 			return deficient(1, tol*en)
 		}
-		return deficient(1/mod, tm*an/10) && deficient(1, tol*en)
+		return deficient(1/mod, tm*an) && deficient(1, tol*en)
 	}
 	g := mat.NewDense(2*n, 2*(n+m), nil)
 	var at, et, qd []float64
@@ -3091,6 +3091,7 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 				}
 			}
 			alone = tm < gm
+			tm /= 10
 		}
 		if alone && inBand(lam, tol) && pbhDeficient(lam, tol, tm) {
 			return true
