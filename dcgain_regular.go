@@ -3,7 +3,9 @@ package controlsys
 import (
 	"math"
 
+	"plantcontrol.org/v1/gonum/blas"
 	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/lapack/lapack64"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -23,8 +25,8 @@ type dcRegularSolve struct {
 	// ε·(|D_ij| + Σ_l |C_il||X_lj|) + ½ulp of the exact gain.
 	certified bool
 	// steps counts the refinement steps taken; stalled reports that the
-	// residual stopped halving, provable whether β ≥ 1 or a term below the
-	// double-double range made the bound unavailable.
+	// residual stopped halving; unbound that β ≥ 1, a non-finite bound or a
+	// product below dcProductFloor left no bound.
 	steps            int
 	stalled, unbound bool
 }
@@ -47,17 +49,42 @@ const dcProductFloor = 0x1p-1022 / (dcUnit * dcUnit)
 //	ν = ‖Rinv‖∞/(1 − β)·(1 + γ_{n+4}) ≥ ‖P⁻¹‖∞ for β < 1,
 //
 // the u·max|P_ii| term covering the rounded diagonal x0 − a_ii. The
-// residual R = B − P·X is formed in double-double with P exact, so
+// residual R = B − P·X, P exact and X double-double, is a compensated dot
+// product: s collects B and the products' high words through twoSum, which
+// with the FMA product errors e is exact, and c sums in double the twoSum
+// errors q, the e and the low-word products t; only c's 3n roundings and
+// t's own err, so with S_ij = Σ_k(|q_k| + |e_k| + |t_k|),
 //
-//	‖X_j − X*_j‖∞ ≤ η_j = ν·max_i(|R_ij| + (3n+7)u²·(|B_ij| + Σ_k|P_ik||X_kj|)),
+//	‖X_j − X*_j‖∞ ≤ η_j = ν·max_i(|fl(s_ij + c_ij)|·(1 + γ₁) + γ_{6n+5}·S_ij),
 //
-// and G_ij is certified when ‖C_i‖₁·η_j ≤ τ_ij·(1 − 4(n+1)u),
-// τ_ij = ε·(|D_ij| + Σ_l|C_il||X_lj|): the last factor absorbs the
-// double-double sum forming G_ij, so the once-rounded entry is within
-// τ_ij + ½ulp of the exact gain. A factor (1 + γ_{3n+8}) on the left
-// covers the double rounding of the bound and τ themselves. Uncertified, X
-// is refined in double-double on the same LU until every column certifies
-// or one stops halving its residual bound (LAPACK dgerfs's test).
+// γ_{6n+5} covering c's recursive sum (γ_{3n}), t's rounding (γ₂), the
+// dropped low·low product (u), and the double rounding of S itself.
+// G_ij = D_ij + Σ_l C_il·X_lj is the same compensated sum, s' + c' with
+// error terms summing to S'_ij, and is certified when
+//
+//	(‖C_i‖₁·η_j + γ_{6n+5}·S'_ij)·(1 + γ_{3n+10}) ≤ τ_ij = ε·(|D_ij| + Σ_l|C_il||X_lj|),
+//
+// so the once-rounded fl(s' + c') is within τ_ij + ½ulp of the exact gain.
+// The last factor covers the double rounding of the bound and τ
+// themselves, and τ's own error ε·‖C_i‖₁·η_j against τ at the exact X
+// (2u). An entry whose bound exceeds ε·(|D_ij| + ‖C_i‖₁·max_l|X_lj|), above
+// τ_ij, skips the sum. After a refinement step X₁ = X₀ ⊕ δ, δ solving
+// P·δ = r = fl(R₀) on the LU, the next residual is first bounded without
+// forming it (Higham, Accuracy and Stability of Numerical Algorithms,
+// Thm 9.4: the solve's backward error is at most γ_{3n}|L̂||Û|; the
+// double-double add errs by at most 4u²|X₁|):
+//
+//	η_j = ν·(‖R₀_j − r_j‖∞ + γ_{3n}‖|L̂||Û||δ_j|‖∞ + ‖(P − fl(P))δ_j‖∞ + 4u²‖P‖∞‖X₁_j‖∞)·(1 + γ_{2n+6}),
+//
+// ‖R₀ − r‖ ≤ u|r| + γ_{6n+5}·S from the residual above, the last factor
+// covering the bound's own rounding; only where that fails to certify is
+// R₁ formed. Uncertified, X is refined in double-double on the same LU until
+// every column certifies or one stops halving its residual bound (LAPACK
+// dgerfs's test).
+//
+// The factorization, its condition estimate and the solve are mat.LU's
+// (Getrf, Gecon in the ∞-norm, Getrs), on raw storage the certificate
+// reuses.
 //
 // β ≥ 1, a non-finite bound, or a nonzero product below dcProductFloor
 // leaves the row unbound; with refine unset it then returns at once.
@@ -65,8 +92,21 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 	n, m := B.Dims()
 	p, _ := C.Dims()
 	ar, br, cr := A.RawMatrix(), B.RawMatrix(), C.RawMatrix()
-	pd := make([]float64, n*n)
-	plo := make([]float64, n)
+	nn, nm := n*n, n*m
+	slab := make([]float64, 4*nn+2*nm+6*n+p+5*m)
+	take := func(k int) []float64 {
+		v := slab[:k:k]
+		slab = slab[k:]
+		return v
+	}
+	pd, luf, rinv, f := take(nn), take(nn), take(nn), take(nn)
+	xd, rhs := take(nm), take(nm)
+	plo, work := take(n), take(4*n)
+	cnorm, rho, rhoPrev, xmax := take(p), take(m), take(m), take(m)
+	eta, rerr, w := take(m), take(m), take(n)
+	ints := make([]int, 2*n)
+	ipiv, iwork := ints[:n:n], ints[n:]
+
 	pdiag := 0.0
 	for i := range n {
 		for j := range n {
@@ -77,87 +117,108 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 			pdiag = max(pdiag, math.Abs(pd[i*n+i]))
 		}
 	}
-	P := mat.NewDense(n, n, pd)
-	var lu mat.LU
-	lu.Factorize(P)
-	res := dcRegularSolve{cond: lu.Cond()}
-	var X mat.Dense
-	if err := lu.SolveTo(&X, false, B); err != nil {
-		res.solveErr = err
+	copy(luf, pd)
+	P := blas64.General{Rows: n, Cols: n, Stride: n, Data: pd}
+	LU := blas64.General{Rows: n, Cols: n, Stride: n, Data: luf}
+	anorm := lapack64.Lange(mat.CondNorm, LU, work)
+	ok := lapack64.Getrf(LU, ipiv)
+	res := dcRegularSolve{cond: 1 / lapack64.Gecon(mat.CondNorm, LU, anorm, work, iwork)}
+	if !ok {
+		res.solveErr = mat.Condition(math.Inf(1))
 		return res
 	}
-	if !allFiniteDense(&X) {
-		res.overflow = true
+	if res.cond > mat.ConditionTolerance {
+		res.solveErr = mat.Condition(res.cond)
 		return res
+	}
+	X := blas64.General{Rows: n, Cols: m, Stride: m, Data: xd}
+	for i := range n {
+		copy(xd[i*m:i*m+m], br.Data[i*br.Stride:i*br.Stride+m])
+	}
+	lapack64.Getrs(blas.NoTrans, LU, X, ipiv)
+	for _, v := range xd {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			res.overflow = true
+			return res
+		}
 	}
 
-	nu, bound := dcInverseBound(&lu, P, pd, n, pdiag)
+	nu, pnorm, bound := dcInverseBound(P, LU, ipiv, rinv, f, work, pdiag)
 	res.unbound = !bound
 	if !bound && !refine {
 		return res
 	}
 
-	xr := X.RawMatrix()
-	x := make([]dd, n*m)
-	for i := range n {
-		for j := range m {
-			x[i*m+j] = dd{xr.Data[i*xr.Stride+j], 0}
-		}
+	x := make([]dd, nm)
+	for k, v := range xd {
+		x[k] = dd{v, 0}
 	}
 	var dr blas64.General
 	if D != nil {
 		dr = D.RawMatrix()
 	}
-	cnorm := make([]float64, p)
 	for i := range p {
 		for _, v := range cr.Data[i*cr.Stride : i*cr.Stride+n] {
 			cnorm[i] += math.Abs(v)
 		}
 	}
-	rho := make([]float64, 2*m)
-	rhoPrev := rho[m:]
-	rho = rho[:m]
 	colOK := make([]bool, m)
-	rhs := mat.NewDense(n, m, nil)
-	rr := rhs.RawMatrix()
-	var delta mat.Dense
-	resGamma := float64(3*n+7) * dcUnit * dcUnit
-	tauFactor := 1 - 4*float64(n+1)*dcUnit
-	eFactor := 1 + dcGamma(3*n+8)
+	R := blas64.General{Rows: n, Cols: m, Stride: m, Data: rhs}
+	g := mat.NewDense(p, m, nil)
+	gr := g.RawMatrix()
+	resGamma := dcGamma(6*n + 5)
+	rFactor := 1 + dcGamma(1)
+	eFactor := 1 + dcGamma(3*n+10)
+	tauFactor := 1 + dcGamma(2*n+4)
+	lnGamma, onestepFactor := dcGamma(3*n), 1+dcGamma(2*n+6)
+	plomax := 0.0
+	for _, v := range plo {
+		plomax = max(plomax, math.Abs(v))
+	}
+	pexact := (pnorm + plomax) * (1 + dcGamma(1))
+	onestep := false
 	for step := 0; ; step++ {
-		for j := range m {
-			rho[j] = 0
-		}
 		finite := true
-		for i := range n {
+		for j := 0; !onestep && j < m; j++ {
+			rho[j], rerr[j] = 0, 0
+		}
+		for i := 0; !onestep && i < n; i++ {
 			prow := pd[i*n : i*n+n]
 			for j := range m {
-				bij := br.Data[i*br.Stride+j]
-				s := dd{bij, 0}
-				mag := math.Abs(bij)
+				s, c, cabs := br.Data[i*br.Stride+j], 0.0, 0.0
 				for k, v := range prow {
 					if v == 0 {
 						continue
 					}
-					pk := dd{v, 0}
-					if k == i {
-						pk.lo = plo[i]
-					}
 					xk := x[k*m+j]
-					s = s.add(pk.mul(xk).neg())
-					t := math.Abs(pk.hi) * (math.Abs(xk.hi) + math.Abs(xk.lo))
-					if t != 0 && t < dcProductFloor {
+					pr := float64(-v * xk.hi)
+					if pr != 0 && math.Abs(pr) < dcProductFloor {
 						bound = false
 					}
-					mag += t
+					e := math.FMA(-v, xk.hi, -pr)
+					var q float64
+					s, q = twoSum(s, pr)
+					t := -v * xk.lo
+					if k == i {
+						t -= plo[i] * xk.hi
+					}
+					c += q
+					c += e
+					c += t
+					cabs += math.Abs(q) + math.Abs(e) + math.Abs(t)
 				}
-				rr.Data[i*rr.Stride+j] = s.hi + s.lo
-				v := math.Abs(s.hi) + math.Abs(s.lo) + resGamma*mag
+				r := s + c
+				rhs[i*m+j] = r
+				v := math.Abs(r)*rFactor + resGamma*cabs
 				if math.IsNaN(v) || math.IsInf(v, 0) {
 					finite = false
 				}
 				rho[j] = max(rho[j], v)
+				rerr[j] = max(rerr[j], dcUnit*math.Abs(r)+resGamma*cabs)
 			}
+		}
+		for j := 0; !onestep && j < m; j++ {
+			eta[j] = nu * rho[j]
 		}
 		if !finite {
 			res.unbound = true
@@ -167,25 +228,49 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 		for j := range m {
 			colOK[j] = bound
 		}
+		for j := range m {
+			xmax[j] = 0
+			for l := range n {
+				xmax[j] = max(xmax[j], math.Abs(x[l*m+j].hi)+math.Abs(x[l*m+j].lo))
+			}
+		}
 		for i := 0; bound && i < p; i++ {
 			crow := cr.Data[i*cr.Stride : i*cr.Stride+n]
 			for j := range m {
-				t := 0.0
+				d := 0.0
 				if D != nil {
-					t = math.Abs(dr.Data[i*dr.Stride+j])
+					d = math.Abs(dr.Data[i*dr.Stride+j])
 				}
-				for l, c := range crow {
+				if cnorm[i]*eta[j] > 0x1p-52*(d+cnorm[i]*xmax[j])*tauFactor {
+					certified, colOK[j] = false, false
+					continue
+				}
+				gs, gc, gabs, t := 0.0, 0.0, 0.0, 0.0
+				if D != nil {
+					gs = dr.Data[i*dr.Stride+j]
+					t = math.Abs(gs)
+				}
+				for l, cv := range crow {
 					xl := x[l*m+j]
-					v := math.Abs(c) * (math.Abs(xl.hi) + math.Abs(xl.lo))
-					if v != 0 && v < dcProductFloor {
+					pr := float64(cv * xl.hi)
+					if pr != 0 && math.Abs(pr) < dcProductFloor {
 						bound = false
 					}
-					t += v
+					e := math.FMA(cv, xl.hi, -pr)
+					var q float64
+					gs, q = twoSum(gs, pr)
+					tl := cv * xl.lo
+					gc += q
+					gc += e
+					gc += tl
+					gabs += math.Abs(q) + math.Abs(e) + math.Abs(tl)
+					t += math.Abs(pr) + math.Abs(tl)
 				}
-				tau := 0x1p-52 * t * tauFactor
-				e := cnorm[i] * nu * rho[j] * eFactor
+				gr.Data[i*gr.Stride+j] = gs + gc
+				tau := 0x1p-52 * t
+				e := (cnorm[i]*eta[j] + resGamma*gabs) * eFactor
 				ok := e <= tau && !math.IsInf(tau, 0) && (tau == 0 || tau >= 0x1p-1022)
-				if e == 0 && cnorm[i] != 0 && rho[j] != 0 {
+				if e == 0 && cnorm[i] != 0 && eta[j] != 0 {
 					ok = false
 				}
 				if !ok {
@@ -204,6 +289,10 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 			res.certified = true
 			break
 		}
+		if onestep {
+			onestep = false
+			continue
+		}
 		if step > 0 {
 			stalled := false
 			for j := range m {
@@ -217,23 +306,38 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 			}
 		}
 		copy(rhoPrev, rho)
-		if lu.SolveTo(&delta, false, rhs) != nil {
-			break
-		}
-		drr := delta.RawMatrix()
-		for i := range n {
-			for j := range m {
-				x[i*m+j] = x[i*m+j].add(dd{drr.Data[i*drr.Stride+j], 0})
-			}
+		lapack64.Getrs(blas.NoTrans, LU, R, ipiv)
+		for k, v := range rhs {
+			x[k] = x[k].add(dd{v, 0})
 		}
 		res.steps++
+		onestep = bound
+		for j := 0; onestep && j < m; j++ {
+			lud, plod, xm := 0.0, 0.0, 0.0
+			for i := n - 1; i >= 0; i-- {
+				t := 0.0
+				for k := i; k < n; k++ {
+					t += math.Abs(luf[i*n+k]) * math.Abs(rhs[k*m+j])
+				}
+				w[i] = t
+			}
+			for i := range n {
+				t := w[i]
+				for k := range i {
+					t += math.Abs(luf[i*n+k]) * w[k]
+				}
+				lud = max(lud, t)
+				plod = max(plod, math.Abs(plo[i]*rhs[i*m+j]))
+				xm = max(xm, math.Abs(x[i*m+j].hi)+math.Abs(x[i*m+j].lo))
+			}
+			eta[j] = nu * (rerr[j] + lnGamma*lud + plod + pexact*4*dcUnit*dcUnit*xm) * onestepFactor
+			onestep = !math.IsNaN(eta[j]) && !math.IsInf(eta[j], 0)
+		}
 	}
 	if !res.certified && !refine {
 		return res
 	}
-	g := mat.NewDense(p, m, nil)
-	gr := g.RawMatrix()
-	for i := range p {
+	for i := 0; !res.certified && i < p; i++ {
 		crow := cr.Data[i*cr.Stride : i*cr.Stride+n]
 		for j := range m {
 			var s dd
@@ -254,53 +358,51 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 	return res
 }
 
-// dcInverseBound returns ν ≥ ‖P⁻¹‖∞ for the exact P whose rounded form pd
-// the LU factored, from Rinv = LU⁻¹·I and F = fl(P·Rinv); ok is false where
-// β ≥ 1, a bound is not finite, or a product of P and Rinv may lie below
-// dcProductFloor.
-func dcInverseBound(lu *mat.LU, P *mat.Dense, pd []float64, n int, pdiag float64) (nu float64, ok bool) {
-	eye := mat.NewDense(n, n, nil)
-	er := eye.RawMatrix()
-	for i := range n {
-		er.Data[i*er.Stride+i] = 1
+// dcInverseBound returns ν ≥ ‖P⁻¹‖∞ for the exact P whose rounded form P
+// the factors LU (with ipiv) are of, from Rinv = LU⁻¹ (in rinv) and
+// F = fl(P·Rinv) (in f); ok is false where β ≥ 1, a bound is not finite, or
+// a product of P and Rinv may lie below dcProductFloor.
+func dcInverseBound(P, LU blas64.General, ipiv []int, rinv, f, work []float64, pdiag float64) (nu, pnorm float64, ok bool) {
+	n := P.Rows
+	copy(rinv, LU.Data)
+	Rinv := blas64.General{Rows: n, Cols: n, Stride: n, Data: rinv}
+	if !lapack64.Getri(Rinv, ipiv, work, len(work)) {
+		return 0, 0, false
 	}
-	var Rinv mat.Dense
-	if lu.SolveTo(&Rinv, false, eye) != nil {
-		return 0, false
-	}
-	ir := Rinv.RawMatrix()
-	pmin, pnorm := math.Inf(1), 0.0
+	pmin := math.Inf(1)
+	rmin, rnorm := math.Inf(1), 0.0
 	for i := range n {
-		s := 0.0
-		for _, v := range pd[i*n : i*n+n] {
-			a := math.Abs(v)
-			s += a
+		ps, rs := 0.0, 0.0
+		for j := range n {
+			a, b := math.Abs(P.Data[i*n+j]), math.Abs(rinv[i*n+j])
+			ps += a
+			rs += b
 			if a != 0 {
 				pmin = min(pmin, a)
 			}
-		}
-		pnorm = max(pnorm, s)
-	}
-	rmin, rnorm := math.Inf(1), 0.0
-	for i := range n {
-		s := 0.0
-		for _, v := range ir.Data[i*ir.Stride : i*ir.Stride+n] {
-			a := math.Abs(v)
-			s += a
-			if a != 0 {
-				rmin = min(rmin, a)
+			if b != 0 {
+				rmin = min(rmin, b)
 			}
 		}
-		rnorm = max(rnorm, s)
+		pnorm, rnorm = max(pnorm, ps), max(rnorm, rs)
 	}
 	if pmin*rmin < dcProductFloor {
-		return 0, false
+		return 0, 0, false
 	}
-	eye.Mul(P, &Rinv)
 	resid := 0.0
 	for i := range n {
+		fi := f[i*n : i*n+n]
+		clear(fi)
+		for k, a := range P.Data[i*n : i*n+n] {
+			if a == 0 {
+				continue
+			}
+			for j, b := range rinv[k*n : k*n+n] {
+				fi[j] += a * b
+			}
+		}
 		s := 0.0
-		for j, v := range er.Data[i*er.Stride : i*er.Stride+n] {
+		for j, v := range fi {
 			if i == j {
 				v = 1 - v
 			}
@@ -311,11 +413,11 @@ func dcInverseBound(lu *mat.LU, P *mat.Dense, pd []float64, n int, pdiag float64
 	g := 1 + dcGamma(n+4)
 	beta := (resid + (dcGamma(n)*pnorm+dcUnit*pdiag)*rnorm) * g
 	if !(beta < 1) {
-		return 0, false
+		return 0, 0, false
 	}
 	nu = rnorm / (1 - beta) * g
 	if math.IsInf(nu, 0) || math.IsNaN(nu) {
-		return 0, false
+		return 0, 0, false
 	}
-	return nu, true
+	return nu, pnorm, true
 }
