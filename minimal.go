@@ -28,7 +28,8 @@ type ReduceOpts struct {
 	Mode ReduceMode
 	// Tol is the staircase rank tolerance (MATLAB minreal tol): a singular
 	// value of a step counts as rank above Tol·max(σ₁(step), ‖A‖_F), ‖A‖
-	// of the full model in both stages; 0 selects n²·eps with the floor
+	// of the full model (equalized when Equalize is set), before Reduce
+	// removes any state, in both staircase stages; 0 selects n²·eps with the floor
 	// raised to MATLAB ctrbf/obsvf's 10·n·‖A‖₁·eps, the rule CtrbF and
 	// ObsvF use. MATLAB minreal's documented default sqrt(eps) is not
 	// copied: it is a pole-zero matching tolerance of its zpk algorithm,
@@ -58,9 +59,18 @@ type ReduceResult struct {
 	Order int
 }
 
-// Reduce removes uncontrollable and/or unobservable states of sys by
-// orthogonal staircase reductions, like MATLAB minreal(sys,tol); the result
-// has the same transfer function and keeps D and the delays. Each input and
+// Reduce removes uncontrollable and/or unobservable states of sys, like
+// MATLAB minreal(sys,tol); the result has the same transfer function and
+// keeps D and the delays. It works in two stages. First, the states that
+// the sparsity pattern of A, B and C disconnects from every input (for the
+// modes that remove uncontrollable states) or from every output (for those
+// that remove unobservable states) are deleted and the others kept in their
+// original coordinates, as MATLAB sminreal does: the deletion is exact,
+// with no rank decision and no rounding. Running it before the staircase is
+// a controlsys composition, not a documented minreal step: the minreal
+// documentation does not say whether minreal does it, and the sminreal
+// documentation calls its result "not necessarily minimal". Second, the
+// remaining model is reduced by orthogonal staircase reductions. Each input and
 // output is first scaled by a power of two toward ‖A‖ (undone on the
 // result), so the order does not depend on I/O scaling and a tiny but
 // nonzero B or C is kept. When the staircase removes states and the
@@ -79,15 +89,16 @@ type ReduceResult struct {
 // fix a difference of degree n + nr (the orders of the model and the cut).
 // The check is sampled and evaluated in floating point: agreement at those
 // points does not bound the error between them, and where the model's
-// response is below its own rounding bound it cannot decide. Otherwise the model is returned unreduced (modes
-// clustered near z = 1, as from matched C2D, or a realization graded over
-// many decades can carry the response through couplings below the floor).
-// The unreduced model is a correct answer, so this is a nil error, unlike
-// a failed accuracy check elsewhere (ErrAccuracyUnverified), and MATLAB
-// minreal, which applies its tolerance unverified, can remove states
-// Reduce keeps. Reduce does not promise a minimal result: a nil error with
-// the order unchanged means no removal could be verified, not that the
-// model is minimal. A nil opts is ReduceAll with the default tolerance. A descriptor model returns
+// response is below its own rounding bound it cannot decide. Otherwise the
+// model is returned as the first stage left it (modes clustered near z = 1,
+// as from matched C2D, or a realization graded over many decades can carry
+// the response through couplings below the floor). That model is a correct
+// answer, so this is a nil error, unlike a failed accuracy check elsewhere
+// (ErrAccuracyUnverified), and MATLAB minreal, which applies its tolerance
+// unverified, can remove states Reduce keeps. Reduce does not promise a
+// minimal result: a nil error with only the first stage's removals means
+// no further removal could be verified, not that the model is minimal. A
+// nil opts is ReduceAll with the default tolerance. A descriptor model returns
 // ErrDescriptorUnsupported; an unknown Mode, a negative or non-finite Tol,
 // and a nil or non-finite model return ErrInvalidArgument.
 // See https://www.mathworks.com/help/control/ref/dynamicsystem.minreal.html.
@@ -127,7 +138,42 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 		return zeroOrderResult(sys)
 	}
 
-	return reduceStates(sys, policy, opts, true)
+	keep := structuralStates(sys, opts.Mode != ReduceUnobservable, opts.Mode != ReduceUncontrollable)
+	switch len(keep) {
+	case n:
+		return reduceStates(sys, policy, opts, true, -1)
+	case 0:
+		return zeroOrderResult(sys)
+	}
+	return reduceStructuralRemainder(sys, policy, opts, keep)
+}
+
+// reduceStructuralRemainder runs the staircase stage on the states keep
+// selects, with the floor of the full model. When it removes nothing the
+// remainder is returned in the original coordinates: under Equalize the
+// staircase's model is the remainder rescaled, not the exact sub-block.
+func reduceStructuralRemainder(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, keep []int) (*ReduceResult, error) {
+	a, b, c := structuralSubsystem(sys, keep)
+	sub, err := policy.result(a, b, c, denseCopySafe(sys.D, policy.p, policy.m))
+	if err != nil {
+		return nil, err
+	}
+	res, err := reduceStates(sub, newRealizationTransformPolicy(sub), opts, true, reduceFloor(sys, opts))
+	if err != nil || res.Order < len(keep) {
+		return res, err
+	}
+	return &ReduceResult{Sys: sub, Order: len(keep)}, nil
+}
+
+// reduceFloor is the staircase floor reduceByStaircase takes for sys.
+func reduceFloor(sys *System, opts *ReduceOpts) float64 {
+	if !opts.Equalize {
+		return ctrbfFloor(sys.A, opts.Tol)
+	}
+	n, m, p := sys.Dims()
+	A, B, C := mat.DenseCopyOf(sys.A), mat.DenseCopyOf(sys.B), mat.DenseCopyOf(sys.C)
+	equalize(A, B, C, n, m, p)
+	return ctrbfFloor(A, opts.Tol)
 }
 
 // reduceStates is Reduce of a model without internal delays and with
@@ -145,9 +191,10 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 // continuous block of reduceAcrossSpectralGap (scaleIO false) is exempt,
 // since its caller judges the assembled reduction against the whole model,
 // while the band would judge the block against its own response, which can
-// be a rounding-level part of the model's.
-func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool) (*ReduceResult, error) {
-	base, removed, err := reduceByStaircase(sys, policy, opts, scaleIO)
+// be a rounding-level part of the model's. floor < 0 selects the staircase
+// floor of sys itself.
+func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool, floor float64) (*ReduceResult, error) {
+	base, removed, err := reduceByStaircase(sys, policy, opts, scaleIO, floor)
 	if err != nil || base.Order == policy.n {
 		return base, err
 	}
@@ -203,7 +250,7 @@ func unreducedResult(sys *System, policy realizationTransformPolicy) (*ReduceRes
 // reduceByStaircase is reduceStates by the orthogonal staircases alone. It
 // also returns the diagonal blocks of the stage forms that hold the removed
 // states, whose spectra are the removed modes.
-func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool) (*ReduceResult, []*mat.Dense, error) {
+func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool, floor float64) (*ReduceResult, []*mat.Dense, error) {
 	n, m, p := policy.n, policy.m, policy.p
 	A := mat.DenseCopyOf(sys.A)
 	B := mat.DenseCopyOf(sys.B)
@@ -220,7 +267,9 @@ func reduceByStaircase(sys *System, policy realizationTransformPolicy, opts *Red
 	}
 
 	ncont := n
-	floor := ctrbfFloor(A, opts.Tol)
+	if floor < 0 {
+		floor = ctrbfFloor(A, opts.Tol)
+	}
 	var removed []*mat.Dense
 
 	if opts.Mode == ReduceAll || opts.Mode == ReduceUncontrollable {
@@ -383,7 +432,7 @@ func reduceAcrossSpectralGap(sys *System, policy realizationTransformPolicy, opt
 	var parts []*System
 	nr := 0
 	for _, part := range []*System{fast, slow} {
-		red, err := reduceStates(part, newRealizationTransformPolicy(part), opts, false)
+		red, err := reduceStates(part, newRealizationTransformPolicy(part), opts, false, -1)
 		if err != nil {
 			return nil, false
 		}

@@ -26,13 +26,16 @@ func assertReducedUnchanged(t *testing.T, name string, sys *System, res *ReduceR
 // the planted state with an error of 1e-21 at the matched-C2D zero z = -1,
 // where the model's response is 1e-42..1e-92 and determined to 1e-27
 // (certified wrong by 1e21..1e67). The cut is not verified at enough
-// points, so the model comes back unreduced.
+// points, so the staircase stage returns the model unreduced (Reduce's
+// structural stage deletes the planted state exactly first, checked here
+// through the public API).
 func TestReduceEqualizeRefusesCutWrongAtNyquistZero(t *testing.T) {
 	lits := reduceVerifyLiterals(t)
 	for _, name := range []string{"403-unc-false", "62-unc-false", "188-unc-false", "301-unc-false", "406-unc-false"} {
 		sys := lits[name]
+		assertReduceDeletesLastStateExactly(t, name, sys)
 		for _, opts := range []*ReduceOpts{{}, {Equalize: true}} {
-			res, err := sys.Reduce(opts)
+			res, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, -1)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
@@ -439,13 +442,16 @@ func reduceVerifyLiterals(t *testing.T) map[string]*System {
 // structurally disconnected; the rotated staircase cut is verified at
 // nearly every probe but deviates at the matched-C2D zero z = -1 by more
 // than the model's own bound there (certified wrong by 3..737 on main).
-// Every mode returns the model unreduced.
+// The staircase stage returns the model unreduced in every mode; Reduce's
+// structural stage deletes the planted state exactly first, checked here
+// through the public API.
 func TestReduceRefusesCutBeyondModelBoundAtNyquistZero(t *testing.T) {
 	lits := reduceVerifyLiterals(t)
 	for _, name := range []string{"148-unc-false", "221-unc-false-amd64", "246-unc-false-amd64"} {
 		sys := lits[name]
+		assertReduceDeletesLastStateExactly(t, name, sys)
 		for _, opts := range []*ReduceOpts{{}, {Mode: ReduceUncontrollable}, {Mode: ReduceUnobservable}, {Equalize: true}} {
-			res, err := sys.Reduce(opts)
+			res, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, -1)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
