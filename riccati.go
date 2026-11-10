@@ -2834,9 +2834,17 @@ func noSolution(err error) bool {
 // eps·‖A‖·κ off, is tested whatever the rounding (zero1 under -race), while a mode at −3e-16 that is an exact diagonal entry
 // of a triangular A is known to relative eps and stays stable (BWUCB5),
 // as does a lightly damped mode at −3e-9 ± i. PBH rank is σmin ≤
-// n·eps·‖[c(‖A‖ + |λ|‖E‖), ‖B‖]‖ + cτ‖E‖ of [c(A − λE), B], which has
+// n·eps·‖[c(‖A‖ + |λ|‖E‖), ‖B‖]‖ + δ of [c(A − λE), B], which has
 // the rank of [A − λE, B] for any c > 0. c = 1/max(1, |λ|) gives the
-// homogeneous pencil βA − αE: unscaled, a near-infinite mode of a
+// homogeneous pencil βA − αE. For |λ| ≤ 1, δ = τ‖E‖. For |λ| > 1,
+// c(A − λE) is a unit multiple of μA − E, μ = 1/λ, so σmin is that of
+// [μA − E, B] and δ = τμ‖A‖, τμ the bound τ of μ as an eigenvalue of
+// the reversed pencil (E, A): cτ‖E‖ there overstates δ by |λ|‖E‖/‖A‖,
+// and a numerically infinite mode (β at rounding, τ ~ |λ|) has μ ≈ 0
+// known to τμ ~ eps, its test the PBH test at infinity, rank [E, B]
+// (AMDL7W: a controllable mode at 1e15 judged on σmin 0.25 against
+// cτ‖E‖ = 0.37). A cluster mean m maps its band τ into μ exactly,
+// τμ = τ/(|m|(|m| − τ)) for τ < |m|, else ∞. Unscaled, a near-infinite mode of a
 // near-singular E has a τ‖E‖ beyond ‖B‖, the most σmin reaches at an
 // eigenvalue, so no B passes (OCTGBK: a controllable mode at 1.24e13,
 // σmin 0.38 against 3e10; scaled 0.18 against 2.4e-3, and the 320-bit
@@ -2895,7 +2903,7 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		return cmplx.Abs(lam) >= 1-tol
 	}
 	var svd mat.SVD
-	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol float64) bool {
+	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol, tm float64) bool {
 		lr, li := real(lam), imag(lam)
 		c := 1.0
 		if !problem.unscaledPBH {
@@ -2919,7 +2927,11 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 			return false
 		}
 		sv := svd.Values(nil)
-		return sv[2*n-1] <= nf*ep*math.Hypot(c*(an+cmplx.Abs(lam)*en), bn)+c*tol*en
+		pert := c * tol * en
+		if c < 1 {
+			pert = tm * an
+		}
+		return sv[2*n-1] <= nf*ep*math.Hypot(c*(an+cmplx.Abs(lam)*en), bn)+pert
 	}
 	g := mat.NewDense(2*n, 2*(n+m), nil)
 	var at, et, qd []float64
@@ -2953,11 +2965,11 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		}
 		return math.Abs(1-cmplx.Abs(lam)) <= tol
 	}
-	pbhDeficient := func(lam complex128, tol float64) bool {
-		if rankDeficient(a, e, bRaw.Data, bRaw.Stride, m, bn, g, lam, tol) {
+	pbhDeficient := func(lam complex128, tol, tm float64) bool {
+		if rankDeficient(a, e, bRaw.Data, bRaw.Stride, m, bn, g, lam, tol, tm) {
 			return true
 		}
-		return detect && onBoundary(lam, tol) && rankDeficient(at, et, qd, qs, qm, qn, gq, lam, tol)
+		return detect && onBoundary(lam, tol) && rankDeficient(at, et, qd, qs, qm, qn, gq, lam, tol, tm)
 	}
 	var sa, se, sar, sai, sbeta []float64
 	clusterCond := func(lam complex128, rho float64) float64 {
@@ -3024,8 +3036,9 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 				x[i], y[i] = complex(vr[i*n+kk], vr[i*n+kk+1]), complex(vl[i*n+kk], vl[i*n+kk+1])
 			}
 		}
-		var ya, ye, yr float64
-		var yex complex128
+		mu := 1 / lam
+		var ya, ye, yr, yrm float64
+		var yex, yax complex128
 		for i := range n {
 			var ra, re float64
 			var ax, ex complex128
@@ -3039,10 +3052,13 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 			ya += ay * ra
 			ye += ay * re
 			yr += ay * cmplx.Abs(ax-lam*ex)
+			yrm += ay * cmplx.Abs(ex-mu*ax)
 			yex += cmplx.Conj(y[i]) * ex
+			yax += cmplx.Conj(y[i]) * ax
 		}
 		mod := cmplx.Abs(lam)
 		tol := 10 * (nf*ep*(ya+mod*ye) + yr) / cmplx.Abs(yex)
+		tm := 10 * (nf*ep*(ye+cmplx.Abs(mu)*ya) + yrm) / cmplx.Abs(yax)
 		rho := math.Sqrt(ep) * (an + mod*en)
 		ds = ds[:0]
 		for j := range n {
@@ -3055,7 +3071,7 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 		if len(ds) > 1 {
 			gap = ds[1]
 		}
-		if tol < gap && inBand(lam, tol) && pbhDeficient(lam, tol) {
+		if tol < gap && inBand(lam, tol) && pbhDeficient(lam, tol, tm) {
 			return true
 		}
 		for c := 1; c < len(ds) && ds[c] <= max(rho, tol); c++ {
@@ -3084,7 +3100,12 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 			if !inBand(mean, mtol) && inBand(mean, math.Sqrt(ep)*scale) {
 				mtol *= clusterCond(lam, r)
 			}
-			if mtol < sep && inBand(mean, mtol) && pbhDeficient(mean, mtol) {
+			mm := cmplx.Abs(mean)
+			mtm := math.Inf(1)
+			if mtol < mm {
+				mtm = mtol / (mm * (mm - mtol))
+			}
+			if mtol < sep && inBand(mean, mtol) && pbhDeficient(mean, mtol, mtm) {
 				return true
 			}
 		}
