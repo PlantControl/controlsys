@@ -1465,7 +1465,14 @@ func refinedStep(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, r
 // off the 320-bit gain natively (2.4e-8 on amd64), the Hewer gain exact.
 // Its Hewer gain is run to convergence (hewerGainConverged): two steps
 // moved K beyond newtonTol where the third matched the 320-bit gain, the
-// K of X 1.2e-5 to 2.76e-3 off it.
+// K of X 1.2e-5 to 2.76e-3 off it. A refined K of reduced, not rotated,
+// inputs within gainFloor of the gains of its X and x1 is not certified by
+// that distance when they resolve the gain only beyond gainFloor
+// (cd.tol): it is held to the converged extended Hewer solution
+// (hewerSolution, kept should it agree), else ok is false. On amd64 such a
+// K, 3.1e-7 from those gains at a resolution of 1.22e-6, was 1.02e-5 off
+// the 320-bit gain (band 3.47e-7) with X 1.5e-15 off, the Hewer gain
+// exact (GORR3I).
 func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *RiccatiResult) (r *RiccatiResult, miss float64, ok bool) {
 	if res.channelLost {
 		return res, 0, true
@@ -1541,6 +1548,12 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 		}
 		if cd.d > gainFloor {
 			if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, c); ok {
+				return h, 0, true
+			}
+			return c, cd.units(gainFloor), false
+		}
+		if red != nil && cd.tol > gainFloor {
+			if h, ok := hewerSolution(A, B, Q, R, opts, red, c); ok {
 				return h, 0, true
 			}
 			return c, cd.units(gainFloor), false
