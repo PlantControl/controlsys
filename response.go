@@ -1962,6 +1962,11 @@ func applyIOScales(b, c *mat.Dense, inScale, outScale []float64) {
 	}
 }
 
+// dcGainByDecoupledSingularModes takes modes with A_kk within
+// dcGainMatrixTol of x0 and row and column below it as decoupled integrators.
+// sure reports that every such mode is exactly x0 and exactly decoupled, no
+// term was dropped as below the tolerance, and no residue sum mixes signs,
+// so its Inf signs are those of the float model.
 func (sys *System) dcGainByDecoupledSingularModes() (gain *mat.Dense, ok, sure bool) {
 	n, m, p := sys.Dims()
 	target := 0.0
