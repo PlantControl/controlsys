@@ -85,10 +85,12 @@ func TestDCGainPoleCancelAmbiguityUnverified(t *testing.T) {
 	}
 }
 
-// INGGF2: true integrators, where the exact limit and the deflated
+// INGGF2, N4GQHT: true integrators, where the exact limit and the deflated
 // expansion agree or the exact route is not taken, keep their exact infinite
-// gain with a nil error; so do the Series cancellations both routes read as
-// finite, and the discrete over-cancelled Series both read as 0.
+// gain with a nil error. The discrete over-cancelled Series reads 0: with a
+// nil error where the float model's exact limit is 0, and with
+// ErrAccuracyUnverified where its pole residue is below rounding of its own
+// terms (a = b = 0.1), the regular part then within rounding of 0.
 func TestDCGainPoleCancelRoutesAgreeVerified(t *testing.T) {
 	checkDCGainAgainstRationalLimit(t, "tiny integrator", 2, 1, 1, []float64{0, 0, 1, -1.3258457598967608e-08}, []float64{7.29653485561532e-14, 1.0337733234010072e-13}, []float64{0, 1}, []float64{0}, 0)
 	checkDCGainAgainstRationalLimit(t, "integrator beside stiff pole", 2, 1, 1, []float64{-1000, 10, 0, 0}, []float64{1, 1}, []float64{1, 1}, []float64{0}, 0)
@@ -113,14 +115,19 @@ func TestDCGainPoleCancelRoutesAgreeVerified(t *testing.T) {
 		return o
 	}
 	dz := []float64{1, -1}
-	for _, q := range []struct{ a, b, k float64 }{{0.5, 0.5, 1}, {0.25, 0.75, 2}, {0.1, 0.1, 1}} {
+	for _, q := range []struct {
+		a, b, k    float64
+		unverified bool
+	}{{0.5, 0.5, 1, false}, {0.25, 0.75, 2, false}, {0.1, 0.1, 1, true}} {
 		g2 := tfd(mul([]float64{q.k, -q.k}, dz), mul([]float64{1, -q.a}, []float64{1, -q.b}))
 		sys, err := Series(tfd([]float64{1}, dz), g2)
 		if err != nil {
 			t.Fatal(err)
 		}
 		g, err := sys.DCGain()
-		if err != nil {
+		if q.unverified {
+			requireDCGainUnverified(t, "over-cancelled Series", g, err)
+		} else if err != nil {
 			t.Fatalf("over-cancelled Series %v: %v", q, err)
 		}
 		if !(math.Abs(g.At(0, 0)) <= 1e-9) {
@@ -129,15 +136,16 @@ func TestDCGainPoleCancelRoutesAgreeVerified(t *testing.T) {
 	}
 }
 
-// INGGF2, YRJCSJ: Bandwidth on a DC gain returned with ErrAccuracyUnverified
-// is computed on that value and keeps the error. Series(7s/(s+1/3), 1/s,
-// (s+1)/(s+1e-14)) has its integrator cancelled below rounding beside a pole
-// 1e-14 from DC that deflation snaps onto it: the exact limit with the
-// sub-rounding residue read as cancelled is the intended k/(a·d), the deflated
-// expansion infinite. The bandwidth is that of the model with the
-// integrator cancelled by hand. Where the exact DC gain is infinite the
-// bandwidth stays undefined (ErrInvalidArgument, no value).
-func TestBandwidthOnUnverifiedDCGain(t *testing.T) {
+// INGGF2, YRJCSJ, N4GQHT: Series(7s/(s+1/3), 1/s, (s+1)/(s+1e-14)) has its
+// integrator cancelled below rounding beside a pole 1e-14 from DC that
+// deflation snaps onto it: the exact limit with the sub-rounding residue
+// read as cancelled is the intended k/(a·d), but the deflated expansion is
+// infinite too, so DCGain is the float model's exact limit +Inf with a nil
+// error. Where the exact DC gain is infinite the bandwidth stays undefined
+// (ErrInvalidArgument, no value); a finite DC gain with
+// ErrAccuracyUnverified gives a bandwidth with that error
+// (TestDCGainSeriesCancelledIntegratorUnverified).
+func TestBandwidthOnInfiniteExactDCGain(t *testing.T) {
 	tf := func(num, den []float64) *System {
 		res, err := (&TransferFunc{Num: [][][]float64{{num}}, Den: [][]float64{den}}).StateSpace()
 		if err != nil {
@@ -158,22 +166,14 @@ func TestBandwidthOnUnverifiedDCGain(t *testing.T) {
 	k, a, d := 7.0, 1.0/3, 1e-14
 	sys := series(tf([]float64{k, 0}, []float64{1, a}), tf([]float64{1}, []float64{1, 0}), tf([]float64{1, 1}, []float64{1, d}))
 	g, err := sys.DCGain()
-	if !errors.Is(err, ErrAccuracyUnverified) || g == nil {
-		t.Fatalf("DCGain = %v, %v; want a value with ErrAccuracyUnverified", g, err)
-	}
-	if w := k / a / d; !(math.Abs(g.At(0, 0)-w) <= 1e-12*w) {
-		t.Fatalf("DCGain = %v, want %v", g.At(0, 0), w)
-	}
-	want, err := Bandwidth(series(tf([]float64{k}, []float64{1, a}), tf([]float64{1, 1}, []float64{1, d})), -3)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("DCGain: %v", err)
 	}
-	bw, err := Bandwidth(sys, -3)
-	if !errors.Is(err, ErrAccuracyUnverified) {
-		t.Errorf("Bandwidth error %v, want ErrAccuracyUnverified", err)
+	if !math.IsInf(g.At(0, 0), 1) {
+		t.Fatalf("DCGain = %v, want +Inf", g.At(0, 0))
 	}
-	if !(math.Abs(bw-want) <= 1e-4*want) {
-		t.Errorf("Bandwidth = %v, want %v", bw, want)
+	if bw, err := Bandwidth(sys, -3); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("Bandwidth on an infinite DC gain = %v, %v; want ErrInvalidArgument", bw, err)
 	}
 
 	over, err := NewFromSlices(3, 1, 1, []float64{1, 0, 0, 0.93000000000000005, 0, -0.069999999999999993, -1.2000000000000002, 1, 0.79999999999999993}, []float64{1, 0, 0}, []float64{1, 0, 1}, []float64{0}, 0.1)

@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"testing"
 
@@ -23,6 +24,15 @@ func dcGainRationalLimit(n, m, p int, a, b, c, d []float64, x0 float64) []float6
 		}
 	}
 	return out
+}
+
+// requireDCGainUnverified fails unless DCGain returned a value with an error
+// wrapping ErrAccuracyUnverified.
+func requireDCGainUnverified(t *testing.T, name string, g *mat.Dense, err error) {
+	t.Helper()
+	if g == nil || !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("%s: DCGain = %v, %v; want a value with ErrAccuracyUnverified", name, g, err)
+	}
 }
 
 func checkDCGainAgainstRationalLimit(t *testing.T, name string, n, m, p int, a, b, c, d []float64, dt float64) {
@@ -52,10 +62,11 @@ func checkDCGainAgainstRationalLimit(t *testing.T, name string, n, m, p int, a, 
 	}
 }
 
-// 2TUAD6: a residue below the rounding of its own terms reads as cancelled,
-// though the float model's exact limit is Inf: c2 = c1·k/ak rounds, and the
-// intended gain, by hand with the residue gone, is want. A residue cancelled
-// exactly stays finite too.
+// 2TUAD6, N4GQHT: a residue below the rounding of its own terms, where the
+// float model's exact limit is Inf (c2 = c1·k/ak rounds), is the intended
+// gain want, by hand with the residue gone, with ErrAccuracyUnverified: the
+// coefficients cannot fix whether the pole cancels. A residue cancelled
+// exactly is the finite exact limit with a nil error.
 func TestDCGainIntegratorResidueCancellation(t *testing.T) {
 	a, b, c, d := []float64{-3, 10, 0, 0}, []float64{0.5, 1.5}, []float64{1, 10.0 / -3.0}, []float64{0.25}
 	if w := dcGainRationalLimit(2, 1, 1, a, b, c, d, 0)[0]; !math.IsInf(w, 0) {
@@ -66,9 +77,7 @@ func TestDCGainIntegratorResidueCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	g, err := sys.DCGain()
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDCGainUnverified(t, "rounded residue", g, err)
 	want := 0.5/3 - 10*1.5/9 + 0.25
 	if !(math.Abs(g.At(0, 0)-want) <= 1e-12) {
 		t.Errorf("rounded residue: DCGain = %.17g, want %.17g", g.At(0, 0), want)
@@ -76,23 +85,22 @@ func TestDCGainIntegratorResidueCancellation(t *testing.T) {
 	checkDCGainAgainstRationalLimit(t, "exact cancellation", 2, 1, 1, []float64{-4, 8, 0, 0}, []float64{0.5, 1.5}, []float64{1, -2}, []float64{0.25}, 0)
 }
 
-// 2TUAD6: an integrator cancelled by a zero at DC through Series leaves a
-// sub-rounding residue. DCGain is the intended k/a, not ±Inf, and Bandwidth is
-// that of the first-order lag a·√(10^0.3 − 1).
-func TestDCGainSeriesCancelledIntegratorFinite(t *testing.T) {
+// 2TUAD6, N4GQHT: an integrator cancelled by a zero at DC through Series
+// leaves a sub-rounding residue. DCGain is the intended k/a, not ±Inf, with
+// ErrAccuracyUnverified, and Bandwidth is that of the first-order lag
+// a·√(10^0.3 − 1), with the same error.
+func TestDCGainSeriesCancelledIntegratorUnverified(t *testing.T) {
 	lagFactor := math.Sqrt(math.Pow(10, 0.3) - 1)
 	check := func(t *testing.T, name string, sys *System, gain, bw float64) {
 		t.Helper()
 		g, err := sys.DCGain()
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
+		requireDCGainUnverified(t, name, g, err)
 		if !(math.Abs(g.At(0, 0)-gain) <= 1e-9*math.Abs(gain)) {
 			t.Errorf("%s: DCGain = %.17g, want %.17g", name, g.At(0, 0), gain)
 		}
 		b, err := Bandwidth(sys, -3)
-		if err != nil {
-			t.Fatalf("%s: Bandwidth: %v", name, err)
+		if !errors.Is(err, ErrAccuracyUnverified) {
+			t.Fatalf("%s: Bandwidth: %v, want ErrAccuracyUnverified", name, err)
 		}
 		if !(math.Abs(b-bw) <= 1e-3*bw) {
 			t.Errorf("%s: Bandwidth = %.17g, want %.17g", name, b, bw)
@@ -143,10 +151,11 @@ func TestDCGainSeriesCancelledIntegratorFinite(t *testing.T) {
 	}
 }
 
-// 2TUAD6: σmin(x0·I − A) against τ = n·ε·σ1 (descriptorRank's tolerance). The
-// float model's exact limit is finite on both sides, but inside τ it is not the
-// truth standard: the rounded-off integrator stays +Inf as FreqResponse(0) has
-// it, so Bandwidth keeps its error. Outside τ the gain is the exact limit.
+// 2TUAD6, N4GQHT: σmin(x0·I − A) against τ = n·ε·σ1 (descriptorRank's
+// tolerance). The float model's exact limit is finite on both sides, but
+// inside τ the rounded-off integrator stays +Inf as FreqResponse(0) has it,
+// with ErrAccuracyUnverified as that is not the exact limit, so Bandwidth
+// keeps its error. Outside τ the gain is the exact limit.
 func TestDCGainOffPoleResolutionAroundRankTolerance(t *testing.T) {
 	shiftedSigmas := func(n int, a []float64, x0 float64) (sigmaMin, tau float64) {
 		ms := make([]float64, n*n)
@@ -183,9 +192,7 @@ func TestDCGainOffPoleResolutionAroundRankTolerance(t *testing.T) {
 		t.Fatalf("C2D ZOH: exact limit %v, want a rounded-off pole", w[0])
 	}
 	g, err := d.DCGain()
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDCGainUnverified(t, "C2D ZOH", g, err)
 	if !math.IsInf(g.At(0, 0), 1) {
 		t.Errorf("C2D ZOH inside τ: DCGain = %.17g, want +Inf", g.At(0, 0))
 	}
@@ -224,9 +231,10 @@ func TestDCGainOffPoleResolutionAroundRankTolerance(t *testing.T) {
 	}
 }
 
-// 2TUAD6: a dense companion block with a pole within rounding of DC stays
-// with the transfer limit's integrator reading: its intended pole is not
-// resolved by the coefficients.
+// 2TUAD6, N4GQHT: a dense companion block with a pole within rounding of DC
+// stays with the transfer limit's integrator reading, its intended pole not
+// resolved by the coefficients, with ErrAccuracyUnverified as the float
+// model's exact limit is finite.
 func TestDCGainDenseBlockRoundedPoleKeepsIntegrator(t *testing.T) {
 	tf := &TransferFunc{
 		Num: [][][]float64{{{-8.70643320022765e-16, 2.9186581655941266e-16, 1.3545850066477854e-16}}},
@@ -238,18 +246,15 @@ func TestDCGainDenseBlockRoundedPoleKeepsIntegrator(t *testing.T) {
 		t.Fatal(err)
 	}
 	g, err := res.Sys.DCGain()
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDCGainUnverified(t, "dense block", g, err)
 	if !math.IsInf(g.At(0, 0), -1) {
 		t.Errorf("DCGain = %v, want -Inf", g.At(0, 0))
 	}
 }
 
-// 2TUAD6: integrators cancelled by zeros at DC through Series, in both orders,
-// keep the intended k/(a·b); the second output channel of a SIMO integrator
-// with no state coupling stays 0 beside the +Inf of the first.
-func TestDCGainSeriesCancelledDoubleIntegratorFinite(t *testing.T) {
+// 2TUAD6, N4GQHT: integrators cancelled by zeros at DC through Series, in
+// both orders, keep the intended k/(a·b) with ErrAccuracyUnverified.
+func TestDCGainSeriesCancelledDoubleIntegratorUnverified(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		a, b, c []float64
@@ -265,15 +270,15 @@ func TestDCGainSeriesCancelledDoubleIntegratorFinite(t *testing.T) {
 			t.Fatal(err)
 		}
 		g, err := sys.DCGain()
-		if err != nil {
-			t.Fatalf("%s: %v", tc.name, err)
-		}
+		requireDCGainUnverified(t, tc.name, g, err)
 		if !(math.Abs(g.At(0, 0)-tc.want) <= 1e-9*tc.want) {
 			t.Errorf("%s: DCGain = %.17g, want %.17g", tc.name, g.At(0, 0), tc.want)
 		}
 	}
 }
 
+// The second output channel of a SIMO integrator with no state coupling
+// stays 0 beside the +Inf of the first.
 func TestDCGainSIMOIntegratorBesideZeroChannel(t *testing.T) {
 	sys, err := NewFromSlices(1, 1, 2, []float64{0}, []float64{1}, []float64{1, 0}, []float64{0, 0}, 0)
 	if err != nil {

@@ -82,7 +82,9 @@ func TestTransferFunctionTinyB(t *testing.T) {
 // 1e-55) shrank the chain coupling to 7e-18, below the staircase floor, so
 // the TF was 0 and the DC gain read 0. den(1) is 4.6e-17 exactly but ~1e-15
 // under a one-ulp coefficient perturbation, so any |gain| ≳ 0.25 (Inf
-// included) is backward stable; 0 is not.
+// included) is backward stable; 0 is not. The DC pole is within rounding of
+// z = 1 and the float model's exact limit finite, so DCGain's reading comes
+// with ErrAccuracyUnverified (N4GQHT).
 func TestTransferFunctionCompanionTinyTrailingDen(t *testing.T) {
 	num := []float64{2.505546303261118e-16}
 	den := []float64{1, -2.5389606785849783, 2.1293764484093325, -0.5907214985880699, 0.0003057287637157701, -1.7299922355352376e-17, 1.1126423085115152e-31, -3.023903148124882e-55}
@@ -102,9 +104,7 @@ func TestTransferFunctionCompanionTinyTrailingDen(t *testing.T) {
 	}
 	checkTFMatchesSS(t, sys, res)
 	g, err := sys.DCGain()
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDCGainUnverified(t, "companion", g, err)
 	if v := g.At(0, 0); !(math.Abs(v) >= 0.1) {
 		t.Errorf("DCGain %g, want |gain| ≥ 0.1 or ±Inf", v)
 	}

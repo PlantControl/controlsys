@@ -78,24 +78,33 @@ func TestDCGainTransferCoefficientOverflowExactLimit(t *testing.T) {
 	checkDCGainExactLimitEntries(t, "transfer overflow", n, m, p, a, b, c, d, g.RawMatrix().Data, dt)
 }
 
-// VNWHVK: dcGainAgainstExactLimit acts on an entry that is the opposite
-// infinity of the strict exact limit (finite entries are N4GQHT's); it then takes the exact
-// sign when the rounded limit agrees, and returns the strict limit with
-// ErrAccuracyUnverified when the sign rests on a residue below ε.
-func TestDCGainAgainstExactLimitInfSign(t *testing.T) {
+// VNWHVK, N4GQHT: on an exactly singular pencil dcGainCertified returns the
+// strict exact limit with a nil error where the rounded limit agrees with
+// it, whatever the route read; where a residue lies below ε of its own
+// terms and the route is finite there too it returns the finite regular
+// part with ErrAccuracyUnverified, else still the strict limit with nil.
+func TestDCGainCertifiedExactPoleRoute(t *testing.T) {
 	inf := math.Inf(1)
 	d := func(v ...float64) *mat.Dense { return mat.NewDense(1, len(v), v) }
+	sys, err := NewFromSlices(1, 2, 1, []float64{0}, []float64{1, -0.5}, []float64{1}, []float64{0, 0}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name           string
 		g, strict, rnd *mat.Dense
+		routeErr       error
 		want           []float64
 		unverified     bool
 	}{
-		{"agree", d(inf, 2), d(inf, 3), d(inf, 3), []float64{inf, 2}, false},
-		{"residue clear of rounding", d(inf, 2), d(-inf, 3), d(-inf, 3), []float64{-inf, 2}, false},
-		{"residue below rounding", d(inf, 2), d(-inf, 3), d(7, 3), []float64{-inf, 3}, true},
+		{"agree", d(inf, 2), d(inf, 3), d(inf, 3), nil, []float64{inf, 3}, false},
+		{"residue clear of rounding", d(inf, 2), d(-inf, 3), d(-inf, 3), nil, []float64{-inf, 3}, false},
+		{"route finite, residue clear", d(5, 3), d(-inf, 3), d(-inf, 3), nil, []float64{-inf, 3}, false},
+		{"residue below rounding, route infinite", d(inf, 2), d(-inf, 3), d(7, 3), nil, []float64{-inf, 3}, false},
+		{"residue below rounding, route finite", d(6.5, 3), d(-inf, 3), d(7, 3), nil, []float64{7, 3}, true},
+		{"residue below rounding, route failed", nil, d(-inf, 3), d(7, 3), ErrSingularTransform, []float64{-inf, 3}, false},
 	} {
-		g, err := dcGainAgainstExactLimit(tc.g, &dcExactLimits{tc.rnd, tc.strict}, "test route")
+		g, err := sys.dcGainCertified(dcRoute{g: tc.g, err: tc.routeErr, lim: &dcExactLimits{tc.rnd, tc.strict}})
 		if errors.Is(err, ErrAccuracyUnverified) != tc.unverified || !tc.unverified && err != nil {
 			t.Errorf("%s: error %v, unverified %v", tc.name, err, tc.unverified)
 		}
@@ -103,8 +112,8 @@ func TestDCGainAgainstExactLimitInfSign(t *testing.T) {
 			t.Errorf("%s: gain %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	if g, err := dcGainAgainstExactLimit(d(inf), nil, "test route"); err != nil || g.At(0, 0) != inf {
-		t.Errorf("nil limits: %v, %v", g, err)
+	if g, err := sys.dcGainCertified(dcRoute{g: d(-inf, 9), certain: true}); err != nil || g.At(0, 0) != -inf || g.At(0, 1) != 9 {
+		t.Errorf("certain route: %v, %v", g, err)
 	}
 }
 

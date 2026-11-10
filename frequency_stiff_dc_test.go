@@ -178,7 +178,9 @@ func TestEvalFrStiffExplicitDCResolvedSlowPole(t *testing.T) {
 // similarity, simple or double, alone or beside a fast pole, read +Inf
 // where it reaches. On base the stiff ones read 0.5 = D: the pole limit
 // stepped 1e-5·rho past the slow poles. DCGain reads the integrator too;
-// for the rounded stiff one the transfer limit was finite (W45MGH).
+// for the rounded stiff one the transfer limit was finite (W45MGH). Where
+// the integrator is rounded off 0, the float model's exact limit is finite,
+// so DCGain's Inf comes with ErrAccuracyUnverified (N4GQHT).
 func TestEvalFrStiffExplicitDCIntegratorStaysPole(t *testing.T) {
 	rng := rand.New(rand.NewPCG(5, 2026))
 	T := mat.NewDense(3, 3, nil)
@@ -220,8 +222,11 @@ func TestEvalFrStiffExplicitDCIntegratorStaysPole(t *testing.T) {
 			t.Fatalf("%s: FreqResponse: %v", tc.name, err)
 		}
 		dc, err := sys.DCGain()
-		if err != nil {
+		if tc.name == "exact stiff" && err != nil {
 			t.Fatalf("%s: DCGain: %v", tc.name, err)
+		}
+		if tc.name != "exact stiff" {
+			requireDCGainUnverified(t, tc.name, dc, err)
 		}
 		if !cmplx.IsInf(ev[0][0]) || !cmplx.IsInf(fr.At(0, 0, 0)) || !math.IsInf(dc.At(0, 0), 0) {
 			t.Errorf("%s: EvalFr(0) %v, FreqResponse(0) %v, DCGain %v, want Inf", tc.name, ev[0][0], fr.At(0, 0, 0), dc.At(0, 0))
