@@ -283,7 +283,7 @@ func FuzzSminreal(f *testing.F) {
 // response matches the core's within a backward-error bound at points
 // where the resolvent is well conditioned.
 //
-//	v[12] < 0: Equalize (response not checked: the bound needs the scaling)
+//	v[12] < 0: Equalize (power-of-two scaling is exact, so the same bound holds)
 //	v[14] < 0: ReduceUncontrollable if frac(|v|·4) < 0.5 else ReduceUnobservable
 func FuzzReduce(f *testing.F) {
 	for _, s := range fzStructSeeds() {
@@ -334,9 +334,6 @@ func FuzzReduce(f *testing.F) {
 			if math.IsNaN(x) || math.IsInf(x, 0) {
 				t.Fatalf("Reduce returned non-finite entries\n%s", s)
 			}
-		}
-		if opts.Equalize {
-			return
 		}
 		ext := [4][]float64{e.A, e.B, e.C, e.D}
 		fzRespCheck(t, s, "Reduce", ext, g, e.N, n, 1e4*float64(e.N+m+p))

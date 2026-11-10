@@ -83,15 +83,17 @@ const (
 // |Ĝ−D|, |R̂−D| of the point. An entry is verified when
 // |Ĝ−R̂| + δ_R ≤ tol·scale and refuted, rejecting the point, when
 // |Ĝ−R̂| − δ_G − δ_R > tol·scale: the exact deviation is then provably
-// above tol. Otherwise the entry is open:
-//   - where the model is determined to tol (δ_G ≤ tol·|Ĝ−D|) the cut is
-//     not, and the point rejects, unless inShared: within the window of a
-//     pole the model shares with the cut (sharedPoleWindows), where no
-//     realization with the cut's conditioning is determined to tol;
-//   - where it is not, the point rejects when the cut's response is
-//     noise-dominated (δ_R ≥ |R̂−D|) or deviates from the model's by more
-//     than the model's own bound (|Ĝ−R̂| − δ_G > tol·scale), and is
-//     uninformative otherwise.
+// above tol. Otherwise the entry is open, and the point rejects when the
+// model is determined to tol (δ_G ≤ tol·|Ĝ−D|) while the cut is not, when
+// the cut's response is noise-dominated (δ_R ≥ |R̂−D|), or when it
+// deviates from the model's by more than the model's own bound
+// (|Ĝ−R̂| − δ_G > tol·scale); it is uninformative otherwise. inShared
+// marks the window of a pole the model shares with the cut
+// (sharedPoleWindows), where the cut's indeterminacy is the generic pole
+// indeterminacy: none of these heuristics charges δ_R, so there only the
+// refutation rejects and an open entry is uninformative. Nothing inside a
+// window verifies, so this only turns a spurious reject into an
+// uninformative point.
 //
 // A point where GEPP meets an exactly singular model is uninformative, one
 // with a singular cut rejects.
@@ -120,11 +122,7 @@ func classifyProbe(full, cut boundedResponse, k int, tol float64, inShared bool)
 		if diff-dG-dR > tol*scale {
 			return probeReject
 		}
-		if dG <= tol*cmplx.Abs(v-d) {
-			if !inShared {
-				return probeReject
-			}
-		} else if dR >= cmplx.Abs(r[i]-d) || diff-dG > tol*scale {
+		if !inShared && (dG <= tol*cmplx.Abs(v-d) || dR >= cmplx.Abs(r[i]-d) || diff-dG > tol*scale) {
 			return probeReject
 		}
 		verdict = probeUninformative

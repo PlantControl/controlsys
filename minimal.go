@@ -47,9 +47,8 @@ type ReduceOpts struct {
 	// orthogonal staircase judges couplings against ‖A‖. It is off by
 	// default since it is not uniformly better: on the 4000-case Kalman
 	// sweep (KALMAN_SWEEP_EQUALIZE=1) with 10^±4 state scales it fixes
-	// all 73 response errors and 265 over-counts but adds 202 other
-	// over-counts (kept hidden unstable states) and 1 response error,
-	// and without scaling it adds 54 over-counts while fixing 66.
+	// 245 over-counts but adds 185 others (kept hidden unstable states),
+	// and without scaling it adds 59 over-counts while fixing 72.
 	Equalize bool
 }
 
@@ -806,8 +805,14 @@ func reverseCols(m *mat.Dense, n int) {
 // equalize balances A by a diagonal similarity D such that A → D^{-1} A D,
 // B → D^{-1} B, C → C D, following LAPACK DGEBAL with the SLICOT TB01ID
 // extension that includes B rows and C columns in the row/column 1-norms.
+// The scaling radix is DGEBAL's 2, not TB01ID's 10: the loop rescales the
+// entries in place on every pass, so radix 10 rounds each entry once per
+// pass, and a model whose response is ill-conditioned in its entries
+// (poles clustered near z = 1, as from matched C2D) then changes its
+// response far beyond √ε with no state removed. Powers of two are exact,
+// like the integer powers of two of MATLAB balance.
 func equalize(A, B, C *mat.Dense, n, m, p int) {
-	const sclfac = 10.0
+	const sclfac = 2.0
 	const factor = 0.95
 	sfmin1 := math.SmallestNonzeroFloat64 / eps()
 	sfmax1 := 1.0 / sfmin1

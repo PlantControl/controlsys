@@ -146,6 +146,40 @@ func TestReduceAcceptsCutBesideExactAxisPole(t *testing.T) {
 	}
 }
 
+// The rotated discrete model with a kept integrator and a removed pole at
+// −1 (TestReduceAcceptsCutBesideExactAxisPole), frozen: under exact
+// power-of-two Equalize scaling the integrator's window probe at θ = √ε
+// has both responses determined to 3e-8 but their real parts are rounding
+// of the 1.8e8 imaginary part, which a δ_R-blind heuristic rejected.
+func TestReduceEqualizeAcceptsCutInsideAxisPoleWindow(t *testing.T) {
+	A := mat.NewDense(3, 3, []float64{
+		0.27407407407407414, -0.7296296296296296, -0.5407407407407407,
+		-0.6074074074074074, -0.5703703703703703, 0.5074074074074073,
+		0.23703703703703696, 0.5185185185185185, 0.8962962962962961,
+	})
+	B := mat.NewDense(3, 1, []float64{0.33333333333333337, -0.3333333333333333, -1.3333333333333333})
+	C := mat.NewDense(1, 3, []float64{0.11111111111111116, -2.2777777777777777, 0.2222222222222222})
+	sys, err := New(A, B, C, mat.NewDense(1, 1, nil), 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := sys.Reduce(&ReduceOpts{Equalize: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Order != 2 {
+		t.Fatalf("order %d, want 2", res.Order)
+	}
+	for _, th := range []float64{0x1p-26, 1e-4, 0.7, 2, 3} {
+		s := cmplx.Rect(1, th)
+		g, _ := sys.EvalFr(s)
+		r, _ := res.Sys.EvalFr(s)
+		if d := cmplx.Abs(g[0][0] - r[0][0]); d > 1e-6*cmplx.Abs(g[0][0]) {
+			t.Errorf("θ=%g: |G-R| = %g, |G| = %g", th, d, cmplx.Abs(g[0][0]))
+		}
+	}
+}
+
 // reduceVerifyLiterals are frozen models of the Reduce verification
 // census (Y5H2MH): fz rows decoded before QS7HIC, and matched-hid rows,
 // a matched C2D model with one planted hidden state (zzCefHidden); the
