@@ -135,10 +135,13 @@ func TestDare_BoundaryVerdictExtendedSolve(t *testing.T) {
 	}
 }
 
-// Where the float64-rounded 320-bit K leaves the exact closed loop
-// unstable (radius 14.5, cond(E) 5e12; r2b seed 7, IR5YOF) no float64 gain
-// is known to stabilize, and Dare and Dlqr keep ErrNoStabilizing.
-func TestDare_BoundaryVerdictStaysWithoutStabilizingFloatGain(t *testing.T) {
+// The exact problem is stabilizable: at the fast mode λ = −2.31e12 the
+// PBH matrix in μ = 1/λ has σmin 1.08e-6 against a first-order bound of
+// 1.6e-14. The float64-rounded 320-bit K leaves the exact closed loop
+// unstable (radius 14.5, cond(E) 5e12), so no float64 gain is known to
+// stabilize: a solve failure, ErrNotConverged, not ErrNoStabilizing
+// (r2b seed 7; IR5YOF pinned ErrNoStabilizing, reversed by AMDL7W).
+func TestDare_BoundaryStabilizableWithoutFloatGainNotConverged(t *testing.T) {
 	A := mat.NewDense(3, 3, []float64{0.80066813905003553, 0.98643646743257241, -0.4737784785606195, -1.2835232191665173, 0.018523975266165071, 0.27232982656055116, -0.062319964509892009, 0.14571578944403996, 0.046527271400114353})
 	B := mat.NewDense(3, 1, []float64{0.43999487561269301, 1.3437679189278851, -0.58207806446117882})
 	Q := mat.NewDense(3, 3, []float64{1.1127759251430753, -2.0034657720335778, 2.0937075403107763, -2.0034657720335778, 4.2950150759232431, -3.9337439661370484, 2.0937075403107763, -3.9337439661370484, 3.978541771270097})
@@ -146,11 +149,11 @@ func TestDare_BoundaryVerdictStaysWithoutStabilizingFloatGain(t *testing.T) {
 	E := mat.NewDense(3, 3, []float64{0.78396477701977396, -0.19454394273016359, -0.10419933019111288, 0.8326616938748872, -0.20662746874186796, -0.11067284010627185, 0.83918960182650348, -0.20825103184184285, -0.11153577611361126})
 	for _, ns := range []bool{false, true} {
 		o := &RiccatiOpts{E: E, NoScaling: ns}
-		if _, err := Dare(A, B, Q, R, o); !errors.Is(err, ErrNoStabilizing) {
-			t.Errorf("Dare NoScaling %v: err %v, want ErrNoStabilizing", ns, err)
+		if _, err := Dare(A, B, Q, R, o); !errors.Is(err, ErrNotConverged) {
+			t.Errorf("Dare NoScaling %v: err %v, want ErrNotConverged", ns, err)
 		}
-		if _, err := Dlqr(A, B, Q, R, o); !errors.Is(err, ErrNoStabilizing) {
-			t.Errorf("Dlqr NoScaling %v: err %v, want ErrNoStabilizing", ns, err)
+		if _, err := Dlqr(A, B, Q, R, o); !errors.Is(err, ErrNotConverged) {
+			t.Errorf("Dlqr NoScaling %v: err %v, want ErrNotConverged", ns, err)
 		}
 	}
 }
