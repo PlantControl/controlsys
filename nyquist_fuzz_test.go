@@ -201,7 +201,7 @@ func fzFRCheckNyquist(t *testing.T, s *fzSpec, sys *System, ws []float64, fr *Fr
 func fzNyqOnBoundary(s *fzSpec) int {
 	k := 0
 	for _, e := range s.Eig {
-		if s.Margin(e) <= 1e-12*math.Max(1, cmplx.Abs(e)) && (s.Discrete && cmplx.Abs(e) >= 1 || !s.Discrete && real(e) >= 0) {
+		if s.Margin(e) <= 1e-12*math.Max(1, fzCAbs(e)) && (s.Discrete && fzCAbs(e) >= 1 || !s.Discrete && real(e) >= 0) {
 			k++
 		}
 	}

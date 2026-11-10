@@ -475,8 +475,8 @@ func syRiccatiChecks(t *testing.T, s *fzSpec, op string, q, r, sm, x, k []float6
 // from v[12], v[13], and Nn (m×p) nil for v[14] < 0, else a texture of
 // Frobenius norm 0.5·√(qr), so that [Qn Nn; Nnᵀ Rn] is PSD.
 func syNoise(s *fzSpec, m, p int) (qn, rn, nn []float64) {
-	q := math.Pow(10, fzClamp(s.Vals[12], -3, 3))
-	r := math.Pow(10, fzClamp(s.Vals[13], -3, 3))
+	q := fzPow10(fzClamp(s.Vals[12], -3, 3))
+	r := fzPow10(fzClamp(s.Vals[13], -3, 3))
 	qn, rn = make([]float64, m*m), make([]float64, p*p)
 	for i := range m {
 		qn[i*m+i] = q
@@ -490,10 +490,10 @@ func syNoise(s *fzSpec, m, p int) (qn, rn, nn []float64) {
 	nn = make([]float64, m*p)
 	for i := range m {
 		for j := range p {
-			nn[i*p+j] = math.Cos(s.Vals[11] + 1.1*float64(i+1) + 0.6*float64(j+1))
+			nn[i*p+j] = fzCos(fzArg(s.Vals[11], 1.1, i+1, 0.6, j+1))
 		}
 	}
-	sc := 0.5 * math.Sqrt(q*r) / math.Max(mqFro(nn), 1e-300)
+	sc := 0.5 * math.Sqrt(q*r) / math.Max(fzNorm2(nn), 1e-300)
 	for i := range nn {
 		nn[i] *= sc
 	}

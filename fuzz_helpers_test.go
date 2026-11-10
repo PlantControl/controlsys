@@ -22,6 +22,11 @@ package controlsys
 //	v[10] Givens angle;  v[11] B/C/D texture phase
 //	v[12..14] input / output / I/O delays, v[15] internal delay τ: fzDelay
 //
+// Decoding is bit-identical on every GOARCH and CPU (QS7HIC): elementary
+// functions, T, T⁻¹, A and cond₂(T) are evaluated in math/big
+// (fuzz_bigmath_test.go) and rounded once; package math kernels and gonum
+// differ across amd64/FMA/arm64. TestFzDecodeArchIndependent pins a digest.
+//
 // A = T·J·T⁻¹ with J normal block-diagonal and T = Givens·(I + shear·U),
 // so Bauer–Fike bounds the eigenvalue error of A and of any backward-stable
 // eigensolver by fzSpec.EigErr; Decidable reports whether every intended
@@ -186,7 +191,7 @@ func fzDelay(v float64, discrete bool) float64 {
 	if v < -3 {
 		return 0
 	}
-	d := math.Pow(10, fzClamp(v, -3, 1.3))
+	d := fzPow10(fzClamp(v, -3, 1.3))
 	if discrete {
 		return math.Round(d)
 	}
@@ -228,46 +233,52 @@ func fzDecode(t *testing.T, kind uint8, v [fzNVals]float64) *fzSpec {
 	s.P = 1 + min(int(kind>>3)&3, 2)
 	s.N = min(int(kind>>5)&7, 6)
 	if s.Discrete {
-		s.Dt = math.Pow(10, fzClamp(v[8], -4, 2))
+		s.Dt = fzPow10(fzClamp(v[8], -4, 2))
 	}
 	n, m, p := s.N, s.M, s.P
 	J := make([]float64, n*n)
+	one := fzBig(1)
 	for k := 0; 2*k < n; k++ {
-		w := 0.0
+		w := fzBig(0)
 		if v[2*k] >= -30 {
-			w = math.Pow(10, fzClamp(v[2*k], -13, 4))
+			w = fzBigPow10(fzBig(fzClamp(v[2*k], -13, 4)))
 		}
 		b := v[2*k+1]
-		sign := 1.0
 		if b < 0 {
-			sign = -1
+			w.Neg(w)
 		}
 		i := 2 * k
 		if i == n-1 {
-			s.S = append(s.S, complex(-sign*w, 0))
+			s.S = append(s.S, complex(-fzF64(w), 0))
 			continue
 		}
-		zeta := 0.0
+		zeta := fzBig(0)
 		if math.Abs(b) <= 12.5 {
-			zeta = math.Pow(10, fzClamp(2-math.Abs(b), -10, 2))
+			zeta = fzBigPow10(fzBig(fzClamp(2-math.Abs(b), -10, 2)))
 		}
-		if zeta < 1 {
-			re, im := -sign*zeta*w, w*math.Sqrt(1-zeta*zeta)
+		zz := fzBMul(zeta, zeta)
+		if zeta.Cmp(one) < 0 {
+			re, im := -fzF64(fzBMul(zeta, w)), math.Abs(fzF64(fzBMul(w, fzBSqrt(fzBSub(one, zz)))))
 			s.S = append(s.S, complex(re, im), complex(re, -im))
 		} else {
-			q := zeta + math.Sqrt(zeta*zeta-1)
-			s.S = append(s.S, complex(-sign*w/q, 0), complex(-sign*w*q, 0))
+			q := fzBAdd(zeta, fzBSqrt(fzBSub(zz, one)))
+			s.S = append(s.S, complex(-fzF64(fzBQuo(w, q)), 0), complex(-fzF64(fzBMul(w, q)), 0))
 		}
 	}
+	dt := fzBig(s.Dt)
 	for k := range n {
 		e := s.S[k]
 		if s.Discrete {
-			if math.Abs(real(e)*s.Dt) > 300 {
+			rd := fzBMul(fzBig(real(e)), dt)
+			if new(big.Float).Abs(rd).Cmp(fzBig(300)) > 0 {
 				fzSkip(t, "exp(s·Dt) out of range")
 			}
-			e = cmplx.Exp(e * complex(s.Dt, 0))
-			if imag(s.S[k]) == 0 {
-				e = complex(real(e), 0)
+			r := fzBigExp(rd)
+			if imag(e) == 0 {
+				e = complex(fzF64(r), 0)
+			} else {
+				sn, cs := fzBigSinCos(fzBMul(fzBig(imag(e)), dt))
+				e = complex(fzF64(fzBMul(r, cs)), fzF64(fzBMul(r, sn)))
 			}
 		}
 		s.Eig = append(s.Eig, e)
@@ -290,62 +301,78 @@ func fzDecode(t *testing.T, kind uint8, v [fzNVals]float64) *fzSpec {
 		s.NormJ = math.Max(s.NormJ, math.Abs(x))
 	}
 	for _, e := range s.Eig {
-		s.NormJ = math.Max(s.NormJ, cmplx.Abs(e))
+		s.NormJ = math.Max(s.NormJ, fzCAbs(e))
 	}
-	shear := 0.0
+	shear := fzBig(0)
 	if v[9] > -9 {
-		shear = math.Pow(10, fzClamp(v[9], -8, 0.5))
+		shear = fzBigPow10(fzBig(fzClamp(v[9], -8, 0.5)))
 	}
-	theta := fzClamp(v[10], -4, 4)
+	theta := fzBig(fzClamp(v[10], -4, 4))
 	phase := fzClamp(v[11], -1e3, 1e3)
 	s.CondT = 1
 	if n > 0 {
-		T := mat.NewDense(n, n, nil)
+		T := make([]*big.Float, n*n)
 		for i := range n {
-			T.Set(i, i, 1)
-			for j := i + 1; j < n; j++ {
-				T.Set(i, j, shear)
+			for j := range n {
+				switch {
+				case i == j:
+					T[i*n+j] = fzBig(1)
+				case j > i:
+					T[i*n+j] = new(big.Float).Set(shear)
+				default:
+					T[i*n+j] = fzBig(0)
+				}
 			}
 		}
 		for i := n - 2; i >= 0; i-- {
-			c, sn := math.Cos(theta*float64(i+1)), math.Sin(theta*float64(i+1))
+			sn, c := fzBigSinCos(fzBMul(theta, fzBig(float64(i+1))))
 			for j := range n {
-				a, b := T.At(i, j), T.At(i+1, j)
-				T.Set(i, j, c*a-sn*b)
-				T.Set(i+1, j, sn*a+c*b)
+				a, b := T[i*n+j], T[(i+1)*n+j]
+				T[i*n+j] = fzBSub(fzBMul(c, a), fzBMul(sn, b))
+				T[(i+1)*n+j] = fzBAdd(fzBMul(sn, a), fzBMul(c, b))
 			}
 		}
-		var Ti, tmp, A mat.Dense
-		if err := Ti.Inverse(T); err != nil {
+		Ti, ok := fzBigInverse(T, n)
+		if !ok {
 			fzSkip(t, "singular similarity")
 		}
-		s.CondT = mat.Cond(T, 2)
-		tmp.Mul(T, mat.NewDense(n, n, J))
-		A.Mul(&tmp, &Ti)
-		s.A = slices.Clone(A.RawMatrix().Data)
+		s.CondT = fzBigCond2(T, n)
+		Jb := make([]*big.Float, n*n)
+		for k, x := range J {
+			Jb[k] = fzBig(x)
+		}
+		s.A = make([]float64, n*n)
+		for k, x := range fzBigMatMul(fzBigMatMul(T, Jb, n), Ti, n) {
+			s.A[k] = fzF64(x)
+		}
 	}
-	g := math.Pow(10, fzClamp(math.Abs(v[6]), 0, 12)-6)
+	g := fzBigPow10(fzBig(fzClamp(math.Abs(v[6]), 0, 12) - 6))
 	if v[6] < 0 {
-		g = -g
+		g.Neg(g)
 	}
-	tex := func(i, j int, a, b float64) float64 { return math.Cos(phase + a*float64(i+1) + b*float64(j+1)) }
+	// fzArg keeps float64 argument rounding: at |phase| ≈ 1e3 an exact sum
+	// would shift every texture by ~1e-13 from the historical models.
+	tex := func(i, j int, a, b float64) *big.Float {
+		_, c := fzBigSinCos(fzBig(fzArg(phase, a, i+1, b, j+1)))
+		return c
+	}
 	s.B = make([]float64, n*m)
 	for i := range n {
 		for j := range m {
-			s.B[i*m+j] = tex(i, j, 1.3, 2.1)
+			s.B[i*m+j] = fzF64(tex(i, j, 1.3, 2.1))
 		}
 	}
 	s.C = make([]float64, p*n)
 	for i := range p {
 		for j := range n {
-			s.C[i*n+j] = g * tex(i, j, 0.7, 1.9)
+			s.C[i*n+j] = fzF64(fzBMul(g, tex(i, j, 0.7, 1.9)))
 		}
 	}
 	s.D = make([]float64, p*m)
-	dsc := fzClamp(v[7], -1e3, 1e3)
+	dsc := fzBig(fzClamp(v[7], -1e3, 1e3))
 	for i := range p {
 		for j := range m {
-			s.D[i*m+j] = dsc * tex(i, j, 2.9, 0.4)
+			s.D[i*m+j] = fzF64(fzBMul(dsc, tex(i, j, 2.9, 0.4)))
 		}
 	}
 	for _, x := range slices.Concat(s.A, s.B, s.C, s.D) {
@@ -379,13 +406,13 @@ func fzDecode(t *testing.T, kind uint8, v [fzNVals]float64) *fzSpec {
 // eigensolver on A, by Bauer–Fike with eigenvector matrix T·Q.
 func (s *fzSpec) EigErr() float64 {
 	const eps = 0x1p-52
-	return 100 * float64(max(s.N, 1)) * eps * math.Pow(s.CondT, 3) * math.Max(s.NormJ, 1)
+	return 100 * float64(max(s.N, 1)) * eps * s.CondT * s.CondT * s.CondT * math.Max(s.NormJ, 1)
 }
 
 // Margin is the distance of eigenvalue e to the stability boundary.
 func (s *fzSpec) Margin(e complex128) float64 {
 	if s.Discrete {
-		return math.Abs(cmplx.Abs(e) - 1)
+		return math.Abs(fzCAbs(e) - 1)
 	}
 	return math.Abs(real(e))
 }
@@ -396,7 +423,7 @@ func (s *fzSpec) Margin(e complex128) float64 {
 func (s *fzSpec) Decidable() bool {
 	d := s.EigErr()
 	for _, e := range s.Eig {
-		if s.Margin(e) <= 4*math.Max(d, 1e-10*math.Max(1, cmplx.Abs(e)+d)) {
+		if s.Margin(e) <= 4*math.Max(d, 1e-10*math.Max(1, fzCAbs(e)+d)) {
 			return false
 		}
 	}
@@ -407,7 +434,7 @@ func (s *fzSpec) Decidable() bool {
 func (s *fzSpec) Unstable() int {
 	k := 0
 	for _, e := range s.Eig {
-		if s.Discrete && cmplx.Abs(e) >= 1 || !s.Discrete && real(e) >= 0 {
+		if s.Discrete && fzCAbs(e) >= 1 || !s.Discrete && real(e) >= 0 {
 			k++
 		}
 	}

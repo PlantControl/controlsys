@@ -365,7 +365,7 @@ func fzDLNewModel(t *testing.T, s *fzSpec) *fzDLModel {
 	}
 	n, m, p, nd := s.N, s.M, s.P, len(tau)
 	ph := s.Vals[11]
-	tex := func(i, j int, a, b float64) float64 { return math.Cos(ph + a*float64(i+1) + b*float64(j+1)) }
+	tex := func(i, j int, a, b float64) float64 { return fzCos(fzArg(ph, a, i+1, b, j+1)) }
 	md := &fzDLModel{s: s, nd: nd, tau: tau, class: class, mult: mult, dim: dim, commensurate: dim == 1}
 	md.B2 = make([]float64, n*nd)
 	md.C2 = make([]float64, nd*n)
@@ -375,7 +375,7 @@ func fzDLNewModel(t *testing.T, s *fzSpec) *fzDLModel {
 	for i := range n {
 		for k := range nd {
 			md.B2[i*nd+k] = tex(i, k, 0.9, 2.3)
-			md.C2[k*n+i] = 0.5 * math.Sin(ph+1.1*float64(k+1)+0.8*float64(i+1))
+			md.C2[k*n+i] = 0.5 * fzSin(fzArg(ph, 1.1, k+1, 0.8, i+1))
 		}
 	}
 	for k := range nd {
