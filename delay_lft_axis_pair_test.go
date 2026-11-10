@@ -92,8 +92,8 @@ func TestIsStable_InternalDelayLFTOriginAxisPair(t *testing.T) {
 
 // TestIsStable_InternalDelayLFTOriginAxisPairDecoded rebuilds the model
 // through the fuzz decoder, sweeping ε = 10^v[0] (the decoder clamps it at
-// 1e-13), and pins the literal model to the decoded one up to the last-bit
-// differences of the amd64 math kernels.
+// 1e-13), and pins the literal model to the decoded one up to last-bit
+// differences between the historical math-kernel decode and fzDecode.
 func TestIsStable_InternalDelayLFTOriginAxisPairDecoded(t *testing.T) {
 	for _, v0 := range []float64{-27, -12, -10, -8, -7, -6} {
 		v := axisPairVals

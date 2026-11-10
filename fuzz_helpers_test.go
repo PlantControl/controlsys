@@ -22,6 +22,11 @@ package controlsys
 //	v[10] Givens angle;  v[11] B/C/D texture phase
 //	v[12..14] input / output / I/O delays, v[15] internal delay τ: fzDelay
 //
+// Decoding is bit-identical on every GOARCH and CPU (QS7HIC): elementary
+// functions, T, T⁻¹, A and cond₂(T) are evaluated in math/big
+// (fuzz_bigmath_test.go) and rounded once; package math kernels and gonum
+// differ across amd64/FMA/arm64. TestFzDecodeArchIndependent pins a digest.
+//
 // A = T·J·T⁻¹ with J normal block-diagonal and T = Givens·(I + shear·U),
 // so Bauer–Fike bounds the eigenvalue error of A and of any backward-stable
 // eigensolver by fzSpec.EigErr; Decidable reports whether every intended
@@ -345,11 +350,10 @@ func fzDecode(t *testing.T, kind uint8, v [fzNVals]float64) *fzSpec {
 	if v[6] < 0 {
 		g.Neg(g)
 	}
-	// The argument keeps float64 rounding (conversions block FMA fusion):
-	// at |phase| ≈ 1e3 an exact sum would shift every texture by ~1e-13.
+	// fzArg keeps float64 argument rounding: at |phase| ≈ 1e3 an exact sum
+	// would shift every texture by ~1e-13 from the historical models.
 	tex := func(i, j int, a, b float64) *big.Float {
-		x := float64(float64(phase+float64(a*float64(i+1))) + float64(b*float64(j+1)))
-		_, c := fzBigSinCos(fzBig(x))
+		_, c := fzBigSinCos(fzBig(fzArg(phase, a, i+1, b, j+1)))
 		return c
 	}
 	s.B = make([]float64, n*m)

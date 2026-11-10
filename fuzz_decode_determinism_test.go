@@ -42,7 +42,7 @@ var fzDecodeGoldenInputs = []struct {
 // fzDecodeDigests returns one FNV-1a digest per fzSpec field (0 for a
 // skipped decode), so a GOARCH mismatch names the drifting field.
 func fzDecodeDigests(t *testing.T) [][]uint64 {
-	fields := []string{"Dt", "S", "Eig", "A", "B", "C", "D", "CondT", "NormJ", "delays", "EigErr", "verdict", "internal"}
+	fields := []string{"Dt", "S", "Eig", "A", "B", "C", "D", "CondT", "NormJ", "delays", "EigErr", "verdict", "internal", "noise"}
 	out := make([][]uint64, len(fzDecodeGoldenInputs))
 	for i, in := range fzDecodeGoldenInputs {
 		out[i] = make([]uint64, len(fields))
@@ -62,10 +62,12 @@ func fzDecodeDigests(t *testing.T) [][]uint64 {
 			vals := [][]float64{
 				{s.Dt}, cx(s.S), cx(s.Eig), s.A, s.B, s.C, s.D, {s.CondT}, {s.NormJ},
 				append(append(append([]float64{s.Tau}, s.In...), s.Out...), s.IO...),
-				{s.EigErr()}, {dec, uns}, nil,
+				{s.EigErr()}, {dec, uns}, nil, nil,
 			}
 			b2, c2 := fzFRInternalLoop(s)
-			vals[len(vals)-1] = append(b2, c2...)
+			vals[len(vals)-2] = append(b2, c2...)
+			qn, rn, nn := syNoise(s, s.M, s.P)
+			vals[len(vals)-1] = append(append(qn, rn...), nn...)
 			for f, xs := range vals {
 				h := fnv.New64a()
 				for _, x := range xs {
@@ -158,7 +160,7 @@ func TestFzDecodeArchIndependent(t *testing.T) {
 			fmt.Fprintf(h, "%016x", x)
 		}
 	}
-	const want = 0xa882a581dc165ce0
+	const want = 0x6703599a7b362fc0
 	if got := h.Sum64(); got != want {
 		t.Errorf("fzDecode digest %#016x, want %#016x", got, uint64(want))
 	}

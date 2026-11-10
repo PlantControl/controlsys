@@ -138,6 +138,21 @@ func fzSin(x float64) float64 {
 	return fzF64(s)
 }
 
+// fzArg is ph + a·i + b·j with each operation rounded to float64; the
+// conversions block FMA fusion, matching the historical amd64 arguments.
+func fzArg(ph, a float64, i int, b float64, j int) float64 {
+	return float64(float64(ph+float64(a*float64(i))) + float64(b*float64(j)))
+}
+
+// fzNorm2 is the Euclidean norm of x rounded once.
+func fzNorm2(x []float64) float64 {
+	s := fzBig(0)
+	for _, v := range x {
+		s.Add(s, fzBMul(fzBig(v), fzBig(v)))
+	}
+	return fzF64(fzBSqrt(s))
+}
+
 // fzCAbs is |e| rounded once.
 func fzCAbs(e complex128) float64 {
 	re, im := fzBig(real(e)), fzBig(imag(e))
