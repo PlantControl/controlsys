@@ -207,11 +207,21 @@ func (c *delayChain) expBlocks(delta float64) []*mat.Dense {
 // Γ = ∫₀^δ e^{Ā·s} ds·B̄. Keeping the inputs out of the mode split keeps
 // their zero eigenvalues out of the Schur reordering, whose rotations would
 // couple them by ‖B‖ and round the result back to ε·‖M·δ‖. ok is false when
-// Ā·δ is not stiff or stiffModalHold does not apply.
+// Ā·δ is not stiff or stiffModalHold does not apply; Σ_j ‖M_j‖₁ ≥ ‖Ā‖₁
+// rejects a non-stiff Ā before it is formed.
 func (c *delayChain) stiffChainBlocks(delta float64) ([]*mat.Dense, bool) {
 	n, na, J := c.n, c.na, c.order
 	k := na - n
 	if n == 0 {
+		return nil, false
+	}
+	bound := 0.0
+	for _, g := range c.gen[:J+1] {
+		if g != nil {
+			bound += mat.Norm(g, 1)
+		}
+	}
+	if !(bound*delta*qzLargeRatio >= 1) {
 		return nil, false
 	}
 	ns, nk := (J+1)*n, (J+1)*k
