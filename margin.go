@@ -726,7 +726,9 @@ func bandwidth(sys *System, dc, dbDrop float64) (float64, error) {
 		// A finite DC gain with a response snapped to +Inf at DC is a pole
 		// within rounding of DC: the snap covers the crossing, so the search
 		// reads the response in double-double, where it agrees with DCGain.
-		if h, ok := loop.eval.try(0); !ok || cmplx.IsInf(h) {
+		// So does a response read below the threshold at DC itself: the DC
+		// gain cancels below the double evaluation's rounding (HUUZRO).
+		if h, ok := loop.eval.try(0); !ok || cmplx.IsInf(h) || cmplx.Abs(h) < math.Pow(10, threshold/20) {
 			loop.eval.exact = true
 		}
 		ws, err := loop.gainCrossings(math.Pow(10, threshold/20))

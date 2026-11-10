@@ -2178,7 +2178,9 @@ func marginRandomLoop(tb testing.TB, n int, kind sweepModelKind, dt float64, des
 // order 60 (ergo MY3SAU). Phase crossovers of continuous delayed loops come
 // from a grid search and are not checked here; their gain crossings and
 // bandwidth are checked against the delay-free twin, which has the same |L|
-// without a phase that winds 0.2·ω rad.
+// without a phase that winds 0.2·ω rad. A DC solve with κ̂ ≳ 1e13 above
+// order 16 is ErrAccuracyUnverified with its refined value (HUUZRO); that
+// value still sets the bandwidth checked against the grid.
 func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
 	orders := []int{20, 60, 100, 150}
 	if testing.Short() || raceEnabled {
@@ -2207,14 +2209,15 @@ func TestAllMargin_HighOrderMatchesDenseGrid(t *testing.T) {
 						}
 						bw, err := Bandwidth(sys, 0)
 						dc, dcErr := sys.DCGain()
-						if dcErr != nil {
+						unverified := dcErr != nil && dc != nil && errors.Is(dcErr, ErrAccuracyUnverified)
+						if dcErr != nil && !unverified {
 							t.Fatal(dcErr)
 						}
 						if g := math.Abs(dc.At(0, 0)); g == 0 || math.IsInf(g, 0) || math.IsNaN(g) {
 							if !errors.Is(err, ErrInvalidArgument) {
 								t.Fatalf("bandwidth with DC gain %g: err = %v, want ErrInvalidArgument", g, err)
 							}
-						} else if err != nil {
+						} else if err != nil && !(unverified && errors.Is(err, ErrAccuracyUnverified)) {
 							t.Fatal(err)
 						}
 						oracleSys := sys
