@@ -2836,15 +2836,18 @@ func noSolution(err error) bool {
 // as does a lightly damped mode at −3e-9 ± i. PBH rank is σmin ≤
 // n·eps·‖[c(‖A‖ + |λ|‖E‖), ‖B‖]‖ + δ of [c(A − λE), B], which has
 // the rank of [A − λE, B] for any c > 0. c = 1/max(1, |λ|) gives the
-// homogeneous pencil βA − αE. For |λ| ≤ 1, δ = τ‖E‖. For |λ| > 1,
-// c(A − λE) is a unit multiple of μA − E, μ = 1/λ, so σmin is that of
-// [μA − E, B] and δ = τμ‖A‖, τμ the bound τ of μ as an eigenvalue of
-// the reversed pencil (E, A): cτ‖E‖ there overstates δ by |λ|‖E‖/‖A‖,
-// and a numerically infinite mode (β at rounding, τ ~ |λ|) has μ ≈ 0
-// known to τμ ~ eps, its test the PBH test at infinity, rank [E, B]
-// (AMDL7W: a controllable mode at 1e15 judged on σmin 0.25 against
-// cτ‖E‖ = 0.37). A cluster mean m maps its band τ into μ exactly,
-// τμ = τ/(|m|(|m| − τ)) for τ < |m|, else ∞. Unscaled, a near-infinite mode of a
+// homogeneous pencil βA − αE. At c = 1, δ = τ‖E‖, the change of
+// λE. For |λ| > 1, c(A − λE) is a unit multiple of μA − E, μ = 1/λ, so
+// σmin is that of [μA − E, B] and δ = τμ‖A‖, τμ the bound τ of μ as an
+// eigenvalue of the reversed pencil (E, A); cτ‖E‖ omits the change of
+// c and overstates the change of λ/|λ| by |λ|‖E‖/‖A‖: a numerically
+// infinite mode (β at rounding, τ ~ |λ|) has μ ≈ 0 known to τμ ~ eps,
+// its test the PBH test at infinity, rank [E, B] (AMDL7W: a
+// controllable mode at 1e15 judged on σmin 0.25 against cτ‖E‖ = 0.37).
+// Both tests bound the same rank, so a mode with |λ| > 1 is deficient
+// only by both: c = 1 is the sharper near the unit circle (‖A‖ > ‖E‖),
+// μ near infinity. A cluster mean m maps its band τ into μ exactly,
+// τμ = τ/(|m|(|m| − τ)) for τ < |m|, else ∞. Unscaled (c = 1 alone), a near-infinite mode of a
 // near-singular E has a τ‖E‖ beyond ‖B‖, the most σmin reaches at an
 // eigenvalue, so no B passes (OCTGBK: a controllable mode at 1.24e13,
 // σmin 0.38 against 3e10; scaled 0.18 against 2.4e-3, and the 320-bit
@@ -2904,34 +2907,32 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 	}
 	var svd mat.SVD
 	rankDeficient := func(a, e, bd []float64, bs, m int, bn float64, g *mat.Dense, lam complex128, tol, tm float64) bool {
-		lr, li := real(lam), imag(lam)
-		c := 1.0
-		if !problem.unscaledPBH {
-			c = 1 / max(1, cmplx.Abs(lam))
-		}
-		for i := range n {
-			for j := range n {
-				re, im := c*(a[i*n+j]-lr*e[i*n+j]), -c*li*e[i*n+j]
-				g.Set(i, j, re)
-				g.Set(i, n+m+j, -im)
-				g.Set(n+i, j, im)
-				g.Set(n+i, n+m+j, re)
+		lr, li, mod := real(lam), imag(lam), cmplx.Abs(lam)
+		deficient := func(c, pert float64) bool {
+			for i := range n {
+				for j := range n {
+					re, im := c*(a[i*n+j]-lr*e[i*n+j]), -c*li*e[i*n+j]
+					g.Set(i, j, re)
+					g.Set(i, n+m+j, -im)
+					g.Set(n+i, j, im)
+					g.Set(n+i, n+m+j, re)
+				}
+				for j := range m {
+					b := bd[i*bs+j]
+					g.Set(i, n+j, b)
+					g.Set(n+i, n+m+n+j, b)
+				}
 			}
-			for j := range m {
-				b := bd[i*bs+j]
-				g.Set(i, n+j, b)
-				g.Set(n+i, n+m+n+j, b)
+			if !svd.Factorize(g, mat.SVDNone) {
+				return false
 			}
+			sv := svd.Values(nil)
+			return sv[2*n-1] <= nf*ep*math.Hypot(c*(an+mod*en), bn)+pert
 		}
-		if !svd.Factorize(g, mat.SVDNone) {
-			return false
+		if problem.unscaledPBH || mod <= 1 {
+			return deficient(1, tol*en)
 		}
-		sv := svd.Values(nil)
-		pert := c * tol * en
-		if c < 1 {
-			pert = tm * an
-		}
-		return sv[2*n-1] <= nf*ep*math.Hypot(c*(an+cmplx.Abs(lam)*en), bn)+pert
+		return deficient(1/mod, tm*an) && deficient(1, tol*en)
 	}
 	g := mat.NewDense(2*n, 2*(n+m), nil)
 	var at, et, qd []float64
