@@ -36,7 +36,7 @@ func TestBoundedResponseMatchesEvalFr(t *testing.T) {
 			}
 			for i := range p {
 				for j := range m {
-					got, bound := br.g[k*p*m+i*m+j], br.bound[k*p*m+i*m+j]
+					got, bound := br.g[k*p*m+i*m+j]+complex(sys.D.At(i, j), 0), br.data[k*p*m+i*m+j]
 					if d := cmplx.Abs(got - want[i][j]); !(d <= 2*bound) {
 						t.Errorf("case %d z %v (%d,%d): |Δ| %.3g above twice the bound %.3g", c, z, i, j, d, bound)
 					}

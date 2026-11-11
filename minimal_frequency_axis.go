@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"cmp"
 	"math"
 	"math/cmplx"
 	"slices"
@@ -28,7 +29,20 @@ import (
 // G − R has a numerator of degree at most n + nr − 1, so agreement at
 // n + nr points fixes it in exact arithmetic. A point off the real axis
 // counts twice, since G − R is real-rational and agreement at s implies
-// agreement at s̄; a point on it (s = 0, z = ±1) counts once.
+// agreement at s̄; a point on it (s = 0, z = ±1) counts once. The points
+// the plain bounds verify are settled first. A point is dead when some
+// entry deviates by more than tol·scale beyond both responses' comp
+// bounds: its exact deviation then exceeds tol, so it can never verify,
+// only reject or be uninformative. The dead points under the plain bounds
+// are refuted there where they can be and otherwise set aside; the others,
+// in decreasing order of their refutation margin (probeMargin), are judged
+// dead or live by the first, cheap pass of sharpen (stage1), skipping the
+// points inside a shared-pole window that no sharper bound could verify or
+// make reject (probeSurelyUninformative); only then are the live points
+// sharpened and classified, and the dead ones last, for a reject only. The
+// count is checked as each point is set aside, so a cut that cannot reach
+// it stops before sharpening any point that could not change the verdict;
+// the verdict does not depend on the order.
 //
 // Agreement within tol at those points gives no uniform bound between
 // them: the probes are anchored on the data, not a node set with a known
@@ -39,6 +53,11 @@ import (
 // grids. Nor is the check exact: the responses and their bounds are
 // evaluated in floating point, so a point where the model's response is
 // below its own first-order bound can neither verify nor refute a cut.
+// At a verified point the exact responses agree to tol. The reference is
+// the stored model's exact response: a point refutes a cut that deviates
+// from it beyond tol relative to the larger of the response and the
+// entry's own terms (classifyProbe), and the model's data resolution enters
+// only in what a point inside a shared-pole window can refute.
 // Across a resolved spectral gap the count is not sufficient, and
 // frequencyAxisCutAcrossGap adds one per side of the gap.
 // False also when the eigenvalues of A or of red do not converge.
@@ -55,17 +74,19 @@ func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense, tol float64)
 // slow pole to tol, and n + nr can be met on the fast side alone. On a
 // continuous model the verified points, conjugate-weighted, must therefore
 // also meet a count on each side: n_f + nr_f + 1 with |s| ≥ cutoff and
-// n_s + nr_s + 1 with |s| < min(cutoff, ε·‖A_bal‖_F/tol), n_x and nr_x the
+// n_s + nr_s + 1 with |s| ≤ ρ_s, n_x and nr_x the
 // eigenvalues of A and of red on that side of the cutoff. Across the gap
 // G − R = Δ_s + Δ_f exactly. At a slow point Δ_f is a constant to relative
 // |s|/|λ_f|, so the slow side tests Δ_s plus a constant, of numerator
 // degree n_s + nr_s; at a fast point Δ_s = d/s + O(λ_s/s²), so the fast
 // side tests Δ_f + d/s, of numerator degree n_f + nr_f: each needs one
-// zero more than its degree. The slow limit is the data's resolution:
-// across the gap ε·‖A_bal‖_F ≥ tol·|λ_s|, so the slow poles are never
-// determined normwise better than that, and a point sees a pole error of
-// that size only for tol·|s| ≤ ε·‖A_bal‖_F; the points between the limit
-// and the cutoff count globally only. A discrete model takes the global
+// zero more than its degree. The slow limit is the slow scale ρ_s, the
+// largest |λ| below the cutoff among the eigenvalues of A and of red: the
+// cut must match the stored model's slow dynamics to tol, a slow pole error
+// Δ shows at a point s only as Δ/|s| once |s| > |λ_s|, so a point tests the
+// slow side to tol only where the slow terms are not attenuated, |s| ≤ ρ_s
+// (the probe beside the largest slow pole sits at |s| = ρ_s). The points
+// between ρ_s and the cutoff count globally only. A discrete model takes the global
 // count alone: a mode with |λ| ≤ √ε contributes C·B/z + O(λ/z²) at every
 // point of the unit circle, invisible beyond C·B there.
 func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cutoff float64) bool {
@@ -80,54 +101,149 @@ func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cuto
 		return false
 	}
 	sided := sys.Dt == 0 && cutoff > 0
-	slowLimit := math.Min(cutoff, eps()*poles.norm/tol)
 	full, cut := newBoundedResponse(sys, pts), newBoundedResponse(red, pts)
+	defer full.release()
+	defer cut.release()
 	var slow, fast int
 	verified := 0
+	isVerified := make([]bool, len(pts))
+	accept := func() bool {
+		if bandAcceptHook != nil {
+			bandAcceptHook(sys, red, tol, cutoff, pts, isVerified, slow, fast, &full, &cut)
+		}
+		return true
+	}
+	type openProbe struct {
+		k   int
+		dev float64
+	}
+	var open []openProbe
+	reach := 0
 	for k, s := range pts {
-		switch classifyProbe(full, cut, k, tol, win.contain(s)) {
+		if !full.ok[k] {
+			continue
+		}
+		if !cut.ok[k] {
+			return false
+		}
+		if ok, dev := probeMargin(&full, &cut, k, tol); ok {
+			isVerified[k] = true
+		} else {
+			open = append(open, openProbe{k, dev})
+		}
+		reach += probeWeight(s)
+	}
+	if reach < n+nr {
+		return false
+	}
+	slices.SortStableFunc(open, func(a, b openProbe) int { return cmp.Compare(b.dev, a.dev) })
+	var live, dead []int
+	for _, o := range open {
+		k := o.k
+		if o.dev <= 1 {
+			live = append(live, k)
+			continue
+		}
+		if probeRefuted(&full, &cut, k, tol, win.contain(pts[k])) {
+			return false
+		}
+		dead = append(dead, k)
+		if reach -= probeWeight(pts[k]); reach < n+nr {
+			return false
+		}
+	}
+	undecided := live[:0]
+	for _, k := range live {
+		if probeSurelyUninformative(&full, &cut, k, tol, win.contain(pts[k])) {
+			if reach -= probeWeight(pts[k]); reach < n+nr {
+				return false
+			}
+			continue
+		}
+		if full.ok[k] && cut.ok[k] && !full.sharp[k] && !cut.sharp[k] {
+			g, gc := full.stage1(k)
+			r, rc := cut.stage1(k)
+			if probeDead(g, r, gc, rc, tol) {
+				dead = append(dead, k)
+				if reach -= probeWeight(pts[k]); reach < n+nr {
+					return false
+				}
+				continue
+			}
+		}
+		undecided = append(undecided, k)
+	}
+	for _, k := range undecided {
+		switch classifyProbe(&full, &cut, k, tol, win.contain(pts[k])) {
 		case probeReject:
 			return false
 		case probeVerified:
-			w := 1
-			if imag(s) != 0 {
-				w = 2
+			isVerified[k] = true
+		default:
+			if reach -= probeWeight(pts[k]); reach < n+nr {
+				return false
 			}
-			verified += w
-			switch a := cmplx.Abs(s); {
-			case a >= cutoff:
-				fast += w
-			case a < slowLimit:
-				slow += w
+		}
+	}
+	for _, k := range dead {
+		in := win.contain(pts[k])
+		if probeSurelyUninformative(&full, &cut, k, tol, in) {
+			continue
+		}
+		switch classifyProbe(&full, &cut, k, tol, in) {
+		case probeReject:
+			return false
+		case probeVerified:
+			isVerified[k] = true
+		}
+	}
+	needSlow, needFast, slowScale := 1, 1, 0.0
+	if sided {
+		count := func(evals []complex128) {
+			for _, ev := range evals {
+				if a := cmplx.Abs(ev); a >= cutoff {
+					needFast++
+				} else {
+					needSlow++
+					slowScale = math.Max(slowScale, a)
+				}
 			}
+		}
+		count(poles.evals)
+		if nr > 0 {
+			evR, _, ok := eigenRoundingBounds(red.A)
+			if !ok {
+				return false
+			}
+			count(evR)
+		}
+	}
+	for k, s := range pts {
+		if !isVerified[k] {
+			continue
+		}
+		w := probeWeight(s)
+		verified += w
+		switch a := cmplx.Abs(s); {
+		case a >= cutoff:
+			fast += w
+		case a <= slowScale:
+			slow += w
 		}
 	}
 	if verified < n+nr {
 		return false
 	}
-	if !sided {
-		return true
+	if sided && (slow < needSlow || fast < needFast) {
+		return false
 	}
-	needSlow, needFast := 1, 1
-	count := func(evals []complex128) {
-		for _, ev := range evals {
-			if cmplx.Abs(ev) >= cutoff {
-				needFast++
-			} else {
-				needSlow++
-			}
-		}
-	}
-	count(poles.evals)
-	if nr > 0 {
-		evR, _, ok := eigenRoundingBounds(red.A)
-		if !ok {
-			return false
-		}
-		count(evR)
-	}
-	return slow >= needSlow && fast >= needFast
+	return accept()
 }
+
+// bandAcceptHook is a test-only seam, nil outside tests: it sees every cut
+// the band accepts, with the gate's cutoff, the probes it verified and
+// their conjugate-weighted slow and fast counts.
+var bandAcceptHook func(sys, red *System, tol, cutoff float64, pts []complex128, verified []bool, slow, fast int, full, cut *boundedResponse)
 
 type probeVerdict int
 
@@ -139,27 +255,36 @@ const (
 	probeReject
 )
 
-// classifyProbe judges the cut at point k of full and cut, the responses
-// Ĝ, R̂ of the model and the cut with the first-order rounding bounds δ_G,
-// δ_R of boundedResponse, per entry against tol·scale, scale the largest
-// |Ĝ−D|, |R̂−D| of the point. An entry is verified when
-// |Ĝ−R̂| + δ_R ≤ tol·scale and refuted, rejecting the point, when
-// |Ĝ−R̂| − δ_G − δ_R > tol·scale: the exact deviation is then provably
-// above tol. Otherwise the entry is open, and the point rejects when the
-// model is determined to tol (δ_G ≤ tol·|Ĝ−D|) while the cut is not, when
-// the cut's response is noise-dominated (δ_R ≥ |R̂−D|), or when it
-// deviates from the model's by more than the model's own bound
-// (|Ĝ−R̂| − δ_G > tol·scale); it is uninformative otherwise. inShared
-// marks the window of a pole the model shares with the cut
-// (sharedPoleWindows), where the cut's indeterminacy is the generic pole
-// indeterminacy: none of these heuristics charges δ_R, so there only the
-// refutation rejects and an open entry is uninformative. Nothing inside a
+// classifyProbe judges the cut at point k of full and cut, the strictly
+// proper responses Ĝ, R̂ of the model and the cut with their bounds
+// (boundedResponse), per entry against tol·scale, scale the largest |Ĝ|,
+// |R̂| of the point. An entry is verified when |Ĝ−R̂| + δ_G + δ_R ≤
+// tol·scale, δ the verification bounds: the exact deviation is then within
+// tol. The reference is the stored model's exact response, so outside a
+// shared-pole window an entry is refuted, rejecting the point, when
+// |Ĝ−R̂| − δ_G − δ_R > tol·max(scale, terms_G), δ the computational bounds
+// and terms_G the entry's own terms Σ_l |C_il||Û_lj|: the exact deviation
+// then exceeds tol relative to the larger of the response and the terms
+// that form it, the scale a cut's zero can be placed to. Otherwise the
+// entry is open, and the point rejects when the model is determined to tol
+// (δ_G ≤ tol·|Ĝ|) while the cut is not, when the cut's response is below
+// its own resolution, data or computational (cutNoise: a positive
+// δ_R,data or δ_R at or above |R̂|), or when it deviates from the model's
+// by more than the model's own bound (|Ĝ−R̂| − δ_G > tol·max(scale,
+// terms_G)); it is uninformative otherwise. inShared marks the window of a
+// pole the model shares with the cut (sharedPoleWindows), where the cut's
+// pole is known only to its rounding and a rounding-level move of either
+// pole changes the response by up to its data bound: there the refutation
+// is |Ĝ−R̂| − δ_G − δ_R − δ_G,data − δ_R,data > tol·scale, none of the
+// heuristics applies, and an open entry is uninformative. Nothing inside a
 // window verifies, so this only turns a spurious reject into an
-// uninformative point.
+// uninformative point. A point the plain bounds verify is verified, and
+// one they refute is refuted (the plain comp bounds the sharp one);
+// otherwise both responses are sharpened there before the judgement.
 //
 // A point where GEPP meets an exactly singular model is uninformative, one
 // with a singular cut rejects.
-func classifyProbe(full, cut boundedResponse, k int, tol float64, inShared bool) probeVerdict {
+func classifyProbe(full, cut *boundedResponse, k int, tol float64, inShared bool) probeVerdict {
 	if !full.ok[k] {
 		return probeUninformative
 	}
@@ -167,29 +292,145 @@ func classifyProbe(full, cut boundedResponse, k int, tol float64, inShared bool)
 		return probeReject
 	}
 	pm := full.p * full.m
-	g, r := full.g[k*pm:(k+1)*pm], cut.g[k*pm:(k+1)*pm]
-	scale := 0.0
-	for i, v := range g {
-		d := complex(full.d[i], 0)
-		scale = math.Max(scale, math.Max(cmplx.Abs(v-d), cmplx.Abs(r[i]-d)))
-	}
-	verdict := probeVerified
-	for i, v := range g {
-		d := complex(full.d[i], 0)
-		dG, dR := full.bound[k*pm+i], cut.bound[k*pm+i]
-		diff := cmplx.Abs(v - r[i])
-		if diff+dR <= tol*scale {
-			continue
+	o := k * pm
+	if !full.sharp[k] || !cut.sharp[k] {
+		if probeVerifies(full, cut, k, tol) {
+			return probeVerified
 		}
-		if diff-dG-dR > tol*scale {
+		if probeRefuted(full, cut, k, tol, inShared) {
 			return probeReject
 		}
-		if !inShared && (dG <= tol*cmplx.Abs(v-d) || dR >= cmplx.Abs(r[i]-d) || diff-dG > tol*scale) {
+		full.sharpen(k)
+		cut.sharpen(k)
+	}
+	g, r := full.g[o:o+pm], cut.g[o:o+pm]
+	scale := probeScale(g, r)
+	verdict := probeVerified
+	for i, v := range g {
+		gc, rc := full.comp[o+i], cut.comp[o+i]
+		diff := cmplx.Abs(v - r[i])
+		if diff+full.ver[o+i]+cut.ver[o+i] <= tol*scale {
+			continue
+		}
+		if inShared {
+			if diff-gc-rc-full.data[o+i]-cut.data[o+i] > tol*scale {
+				return probeReject
+			}
+		} else if gc <= tol*cmplx.Abs(v) || cutNoise(rc, cut.data[o+i], cmplx.Abs(r[i])) || diff-gc > tol*math.Max(scale, full.terms[o+i]) {
 			return probeReject
 		}
 		verdict = probeUninformative
 	}
 	return verdict
+}
+
+// probeRefuted reports whether some entry of point k is refuted with the
+// bounds at hand, by classifyProbe's refutation.
+func probeRefuted(full, cut *boundedResponse, k int, tol float64, inShared bool) bool {
+	pm := full.p * full.m
+	o := k * pm
+	g, r := full.g[o:o+pm], cut.g[o:o+pm]
+	scale := probeScale(g, r)
+	for i, v := range g {
+		d := cmplx.Abs(v-r[i]) - full.comp[o+i] - cut.comp[o+i]
+		if inShared {
+			if d-full.data[o+i]-cut.data[o+i] > tol*scale {
+				return true
+			}
+		} else if d > tol*math.Max(scale, full.terms[o+i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// probeDead reports whether some entry of a point deviates by more than
+// tol·scale beyond both responses' comp bounds, g and r the responses and
+// gc, rc their comps: the exact deviation then exceeds tol·scale, so no
+// sharper bound verifies the point, and it can only reject or be
+// uninformative.
+func probeDead(g, r []complex128, gc, rc []float64, tol float64) bool {
+	ts := tol * probeScale(g, r)
+	for i, v := range g {
+		if cmplx.Abs(v-r[i])-gc[i]-rc[i] > ts {
+			return true
+		}
+	}
+	return false
+}
+
+// probeScale is the largest |Ĝ|, |R̂| of a point's entries.
+func probeScale(g, r []complex128) float64 {
+	scale := 0.0
+	for i, v := range g {
+		scale = math.Max(scale, math.Max(cmplx.Abs(v), cmplx.Abs(r[i])))
+	}
+	return scale
+}
+
+// cutNoise reports whether a cut's response rs is below its own
+// resolution, data or computational: a positive bound at or above rs. An
+// exactly zero response with zero bounds is an exact zero, not noise.
+func cutNoise(comp, data, rs float64) bool {
+	return data > 0 && data >= rs || comp > 0 && comp >= rs
+}
+
+// probeSurelyUninformative reports whether classifyProbe would find open
+// point k inside a shared-pole window uninformative under any sharpened
+// bounds, so it need not sharpen: some entry cannot verify (|Ĝ−R̂| >
+// tol·scale), and for every such entry no comp ≥ 0 lets the refutation
+// fire, since |Ĝ−R̂| − δ_G,data − δ_R,data ≤ tol·scale. The sharp responses
+// differ from the plain ones by rounding, so these conditions keep the
+// verdict. Outside a window no open point is surely uninformative: the
+// sharp comps have no positive lower bound, so the heuristics can fire.
+func probeSurelyUninformative(full, cut *boundedResponse, k int, tol float64, inShared bool) bool {
+	if !inShared {
+		return false
+	}
+	pm := full.p * full.m
+	o := k * pm
+	g, r := full.g[o:o+pm], cut.g[o:o+pm]
+	ts := tol * probeScale(g, r)
+	for i, v := range g {
+		diff := cmplx.Abs(v - r[i])
+		if diff <= ts || diff-full.data[o+i]-cut.data[o+i] > ts {
+			return false
+		}
+	}
+	return true
+}
+
+// probeMargin reports whether every entry of point k verifies with the
+// bounds at hand, and the largest refutation margin (|Ĝ−R̂| − δ_G −
+// δ_R)/(tol·scale) of its entries.
+func probeMargin(full, cut *boundedResponse, k int, tol float64) (bool, float64) {
+	pm := full.p * full.m
+	o := k * pm
+	g, r := full.g[o:o+pm], cut.g[o:o+pm]
+	ts := tol * probeScale(g, r)
+	ok, dev := true, math.Inf(-1)
+	for i, v := range g {
+		d, b := cmplx.Abs(v-r[i]), full.ver[o+i]+cut.ver[o+i]
+		ok = ok && d+b <= ts
+		dev = math.Max(dev, d-b)
+	}
+	return ok, dev / ts
+}
+
+// probeVerifies reports whether every entry of point k verifies with the
+// bounds at hand.
+func probeVerifies(full, cut *boundedResponse, k int, tol float64) bool {
+	ok, _ := probeMargin(full, cut, k, tol)
+	return ok
+}
+
+// probeWeight is the number of interpolation conditions a point gives:
+// two off the real axis, one on it.
+func probeWeight(s complex128) int {
+	if imag(s) != 0 {
+		return 2
+	}
+	return 1
 }
 
 // modelPoles holds the eigenvalues of the model's A with their
@@ -323,25 +564,34 @@ func (w poleWindows) contain(s complex128) bool {
 }
 
 // sharedPoleWindows returns, for every pole λ_R of red such that every
-// model pole λ_G it shares (|λ_R − λ_G| ≤ β_R + β_G + ρ_G) is determined
-// to tol (β_G ≤ tol·max(|λ_G|, ρ_G)) and carried by the cut to that pole's
-// resolution (β_R ≤ ρ_G), the disk of radius β_R/tol about it: there a
-// rounding-level move of the cut's pole changes the cut's response by more
-// than tol, so no realization is determined to tol, however exactly the
-// model carries the pole (a kept integrator that the rotated cut holds
-// only to rounding). One shared pole that refuses forbids the window, so a
-// cut pole smeared off a graded pole cannot borrow the floor of an
-// unresolved neighbour. A cut pole known worse than the model's own
-// resolution of it (β_R > ρ_G) is the cut's own ill-conditioning, which
+// model pole λ_G it shares (|λ_R − λ_G| ≤ β_R + β_G + ρ_G + ρ_R, each pole
+// known to its rounding bound and its realization's resolution, ρ_R the
+// cut's as ρ_G the model's) is determined to tol (β_G ≤ tol·max(|λ_G|,
+// ρ_G)) or is, with λ_R, a rounding-level zero (|λ_G|, |λ_R| ≤ β_G ≤ ρ_G:
+// a rotated integrator, which no realization places better than β_G), and
+// is carried by the cut to that pole's resolution (β_R ≤ ρ_G), the disk of
+// radius max(β_G, β_R)/tol about it: there a rounding-level move of either
+// realization's pole changes the response by more than tol, so no
+// realization is determined to tol, however exactly the model carries the
+// pole (a kept integrator that the rotated cut holds only to rounding).
+// A model pole the cut drops has no window, so a cut that drops a pole
+// within rounding of the axis is judged beside it. One shared pole that
+// refuses forbids the window, so a cut pole smeared off a graded pole
+// cannot borrow the floor of an unresolved neighbour, and a model pole
+// known worse than its normwise resolution (β_G > ρ_G, an ill-conditioned
+// slow pole of a stiff model) is no rounding-level zero: its β_G/tol spans
+// the slow band where the stored model's response is the reference. A cut
+// pole known worse than the model's own resolution of it (β_R > ρ_G) is
+// the cut's own ill-conditioning, which
 // the window must not excuse: a cut that smears a graded slow pole by its
 // dense norm has a β_R/tol that spans the slow band where the model is
 // determined (nse twins), and a clustered cut pole a β_R/tol that spans
-// the cluster. Nor may a window reach another model pole λ_G′ outside a
-// shared cluster (|λ_G′ − λ_G| > β_G + β_G′ + min(ρ_G, ρ_G′)): there the
-// model's other dynamics are tested, not the shared pole, so the radius is
-// capped at the distance |λ_R − λ_G′| to the nearest one; the cluster test
-// takes min(ρ_G, ρ_G′), so two poles are one cluster only when neither
-// resolves the gap between them. False when the eigenvalues of red do not
+// the cluster. Nor may a window reach another model pole λ_G′, clustered
+// with the shared one or not: there the model's other dynamics are tested,
+// not the shared pole, so the radius is capped at the distance |λ_R − λ_G′|
+// to the nearest one. On a stiff model ε‖A‖ is O(1), so a slow pole can
+// pass as a rounding-level zero, and an uncapped window would span the
+// slow band where the cut is wrong. False when the eigenvalues of red do not
 // converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
 	var w poleWindows
@@ -353,27 +603,35 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 	if !ok {
 		return w, false
 	}
+	rho0R := 0.0
+	for _, a := range newBalancedRealization(red, nr, red.B.RawMatrix().Cols, red.C.RawMatrix().Rows).a {
+		rho0R = math.Hypot(rho0R, a)
+	}
+	rho0R *= float64(nr) * eps()
 	for i, lr := range evR {
-		shared, ok, r := false, true, betaR[i]/tol
+		shared, ok, rad, lim := false, true, betaR[i], math.Inf(1)
+		rR := math.Min(rho0R, 2*float64(nr)*betaR[i])
 		for j, lg := range mp.evals {
 			rj, bG := mp.rho[j], mp.beta[j]
-			if cmplx.Abs(lr-lg) > betaR[i]+bG+rj {
+			if cmplx.Abs(lr-lg) > betaR[i]+bG+rj+rR {
 				continue
 			}
-			if !(betaR[i] <= rj) || !(bG <= tol*math.Max(cmplx.Abs(lg), rj)) {
+			unresolved := cmplx.Abs(lg) <= bG && bG <= rj && cmplx.Abs(lr) <= bG
+			if !(betaR[i] <= rj) || !(bG <= tol*math.Max(cmplx.Abs(lg), rj) || unresolved) {
 				ok = false
 				break
 			}
 			shared = true
+			rad = math.Max(rad, bG)
 			for k, lo := range mp.evals {
-				if k != j && cmplx.Abs(lo-lg) > bG+mp.beta[k]+math.Min(rj, mp.rho[k]) {
-					r = math.Min(r, cmplx.Abs(lr-lo))
+				if k != j {
+					lim = math.Min(lim, cmplx.Abs(lr-lo))
 				}
 			}
 		}
 		if ok && shared {
 			w.centre = append(w.centre, lr)
-			w.radius = append(w.radius, r)
+			w.radius = append(w.radius, math.Min(rad/tol, lim))
 		}
 	}
 	return w, true
@@ -520,99 +778,6 @@ func removedModeProbes(blocks []*mat.Dense, discrete bool) ([]complex128, bool) 
 		}
 	}
 	return pts, true
-}
-
-// boundedResponse is the response G(s) = C(sI−A)⁻¹B + D of an explicit
-// model at points s, row-major p×m per point, with for each entry the
-// first-order bound ε·(|L||A||U| + |C||U| + |L||B|)ᵢⱼ, U = (sI−A)⁻¹B and
-// L = C(sI−A)⁻¹, on its change when every entry of A, B and C moves by ε
-// relative: the rounding of the stored data and, to first order, the
-// componentwise backward error of GEPP on sI−A. Response and bound are
-// invariant under the exact power-of-two balancing the solve uses. ok is
-// false at points where GEPP meets an exactly zero pivot.
-type boundedResponse struct {
-	p, m  int
-	d     []float64
-	g     []complex128
-	bound []float64
-	ok    []bool
-}
-
-func newBoundedResponse(sys *System, pts []complex128) boundedResponse {
-	n, m, p := sys.Dims()
-	br := newBalancedRealization(sys, n, m, p)
-	f := make([]float64, p*m+len(pts)*p*m+2*n*m+n*p)
-	out := boundedResponse{
-		p: p, m: m,
-		d:     f[:p*m],
-		g:     make([]complex128, len(pts)*p*m),
-		bound: f[p*m : p*m+len(pts)*p*m],
-		ok:    make([]bool, len(pts)),
-	}
-	f = f[p*m+len(pts)*p*m:]
-	au, absU, absV := f[:n*m], f[n*m:2*n*m], f[2*n*m:]
-	for i := range p {
-		copy(out.d[i*m:(i+1)*m], br.d[i*br.dStride:i*br.dStride+m])
-	}
-	w := make([]complex128, n*n+n*m+n*p)
-	x, u, v := w[:n*n], w[n*n:n*n+n*m], w[n*n+n*m:]
-	piv := make([]int, n)
-	for k, s := range pts {
-		for i, a := range br.a {
-			x[i] = complex(-a, 0)
-		}
-		for i := range n {
-			x[i*n+i] += s
-		}
-		if !cgeppFactor(x, n, piv) {
-			continue
-		}
-		for i, b := range br.b {
-			u[i] = complex(b, 0)
-		}
-		for i := range n {
-			for j := range p {
-				v[i*p+j] = complex(br.c[j*n+i], 0)
-			}
-		}
-		cgeppSolve(x, n, piv, u, m)
-		cgeppSolveT(x, n, piv, v, p)
-		for i, z := range u {
-			absU[i] = cmplx.Abs(z)
-		}
-		for i, z := range v {
-			absV[i] = cmplx.Abs(z)
-		}
-		clear(au)
-		for i := range n {
-			ai := au[i*m : (i+1)*m]
-			for l, a := range br.a[i*n : (i+1)*n] {
-				if a == 0 {
-					continue
-				}
-				a = math.Abs(a)
-				for j, x := range absU[l*m : (l+1)*m] {
-					ai[j] += a * x
-				}
-			}
-		}
-		g, bound := out.g[k*p*m:(k+1)*p*m], out.bound[k*p*m:(k+1)*p*m]
-		for i := range p {
-			ci := br.c[i*n : (i+1)*n]
-			for j := range m {
-				var gij complex128
-				t := 0.0
-				for l, c := range ci {
-					gij += complex(c, 0) * u[l*m+j]
-					t += absV[l*p+i]*(au[l*m+j]+math.Abs(br.b[l*m+j])) + math.Abs(c)*absU[l*m+j]
-				}
-				g[i*m+j] = gij + complex(out.d[i*m+j], 0)
-				bound[i*m+j] = eps() * t
-			}
-		}
-		out.ok[k] = true
-	}
-	return out
 }
 
 // cgeppFactor overwrites the n×n row-major x with its partial-pivoting LU

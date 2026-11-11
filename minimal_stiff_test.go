@@ -327,13 +327,17 @@ func TestMinimalRealizationStiffRotatedUncontrollableFastMode(t *testing.T) {
 	}
 }
 
-// TestMinimalRealizationRotatedUncontrollableIntegratorReduced checks that a
+// TestMinimalRealizationRotatedUncontrollableIntegratorKept checks the
 // rotated uncontrollable integrator beside O(1) modes (the n41 source of
-// TestLeastSquaresHighOrderSources) still goes: its computed eigenvalue,
-// ~1e-15 against O(1) modes, is a spectral gap, but its componentwise
-// eigenvalue bound exceeds its modulus, so it is not resolved from zero
-// and the staircase result stands (NZIRSS). A split there kept it.
-func TestMinimalRealizationRotatedUncontrollableIntegratorReduced(t *testing.T) {
+// TestLeastSquaresHighOrderSources): its computed eigenvalue, ~1e-15
+// against O(1) modes, is a spectral gap, but its componentwise eigenvalue
+// bound exceeds its modulus, so it is not resolved from zero (NZIRSS).
+// Rotation leaves it uncontrollable only to rounding, so the stored model
+// carries a rounding-level residue on a pole within rounding of s = 0,
+// O(1) of the response there; the staircase cut drops it, the exact
+// oracle refutes that cut near s = 0, and under Reduce's contract (the
+// stored model's exact response) the order is kept.
+func TestMinimalRealizationRotatedUncontrollableIntegratorKept(t *testing.T) {
 	src := newLSQModalSource(t, rand.New(rand.NewPCG(7, 7)), 0, 20, 0, 1, 1, 0, true)
 	evals, resolved, ok := resolvedFromZero(src.sys.A, 41)
 	if !ok {
@@ -348,8 +352,20 @@ func TestMinimalRealizationRotatedUncontrollableIntegratorReduced(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Order != 40 {
-		t.Errorf("order %d, want 40", res.Order)
+	if res.Order != 41 {
+		t.Errorf("order %d, want 41", res.Order)
+	}
+	tol := math.Sqrt(eps())
+	red, _ := bandStaircaseCut(t, src.sys, &ReduceOpts{})
+	for _, s := range []complex128{1e-12i, 0} {
+		g, r, tg := oracleStrictlyProper(src.sys, s), oracleStrictlyProper(red, s), oracleTerms(src.sys, s)
+		if g == nil || r == nil {
+			t.Fatalf("s=%v: at a pole", s)
+		}
+		scale := math.Max(math.Max(oracleDist(g[0], oracleOf(0)), oracleDist(r[0], oracleOf(0))), tg[0])
+		if d := oracleDist(g[0], r[0]); !(d > tol*scale) {
+			t.Errorf("s=%v: staircase cut off by %.3g, within tol·max(scale, terms) %.3g", s, d, tol*scale)
+		}
 	}
 }
 
