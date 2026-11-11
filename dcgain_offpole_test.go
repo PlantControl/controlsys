@@ -1,8 +1,10 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -94,6 +96,99 @@ func TestHasZeroLine(t *testing.T) {
 	} {
 		if got := hasZeroLine(mat.NewDense(2, 2, c.a), c.shift); got != c.want {
 			t.Errorf("%v shift %g: got %v, want %v", c.a, c.shift, got, c.want)
+		}
+	}
+}
+
+// T6DNZ3: an off-pole double-double DC solve above order 16 returned nil
+// with no certificate. The upper-triangular pencil −A has exact poles
+// −1 … −1−0.25(n−1), far from DC, and κ̂ ≈ 1e34 from the 1e17 coupling, so
+// the double LU is refused, its inverse bound unavailable, and the gain
+// solved in double-double. Order 16 certifies by the exact solve; order 17
+// keeps the value with ErrAccuracyUnverified.
+func TestDCGainOffPoleHighOrderUnverified(t *testing.T) {
+	for _, n := range []int{exactDetMaxOrder, exactDetMaxOrder + 1} {
+		a := make([]float64, n*n)
+		for i := range n {
+			a[i*n+i] = -(1 + 0.25*float64(i))
+			if i+1 < n {
+				a[i*n+i+1] = 0.5
+			}
+		}
+		a[1] = 1e17
+		b, c := make([]float64, n), make([]float64, n)
+		for i := range n {
+			b[i] = 1 + 0.1*float64(i)
+			c[i] = 1 - 0.03*float64(i)
+		}
+		sys := dcGainCertTestSystem(t, n, 1, 1, a, b, c, []float64{0.25}, 0)
+		if dcGainRegularPath(sys) {
+			t.Fatalf("n=%d: model reaches the regular DC path", n)
+		}
+		g, err := sys.DCGain()
+		if n <= exactDetMaxOrder {
+			if err != nil {
+				t.Fatalf("n=%d: DCGain error %v, want nil", n, err)
+			}
+			if ex, ok := dcGainOwnRoundingExcess(sys, g); !ok || ex > 0 {
+				t.Fatalf("n=%d: DCGain %v beyond τ + ½ulp of the exact gain by %g (ok %v)", n, g.At(0, 0), ex, ok)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrAccuracyUnverified) || !strings.Contains(err.Error(), "ill-conditioned DC solve") {
+			t.Fatalf("n=%d: DCGain error %v, want ill-conditioned ErrAccuracyUnverified", n, err)
+		}
+		if g == nil || !allFiniteDense(g) {
+			t.Fatalf("n=%d: DCGain = %v, want the double-double value", n, g)
+		}
+		_, gs, ok := dcGainExactRat(sys)
+		if !ok {
+			t.Fatalf("n=%d: −A exactly singular", n)
+		}
+		want, _ := gs[0].Float64()
+		if got := g.At(0, 0); !(math.Abs(got-want) <= 1e-9*math.Abs(want)) {
+			t.Fatalf("n=%d: DCGain = %v, exact %v", n, got, want)
+		}
+	}
+}
+
+// T6DNZ3: a well-conditioned model put through a diagonal similarity by
+// powers of two spanning 2⁶⁸ reads ill-conditioned to the double LU of −A,
+// with poles in Re s < −0.7. Balancing undoes the scaling exactly, and the
+// regular-path certificate on the balanced realization proves the gain:
+// nil within τ + ½ulp of the exact gain. Base returned nil too, uncertified.
+func TestDCGainOffPoleHighOrderBalancedCertified(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		const n, m, p = exactDetMaxOrder + 2, 2, 2
+		a, b, c := make([]float64, n*n), make([]float64, n*m), make([]float64, p*n)
+		for i := range n {
+			for j := range n {
+				v := 0.1 * float64((i*3+j*5)%7-3) / n
+				if i == j {
+					v = -(1 + 0.3*float64(i))
+					if dt > 0 {
+						v = 0.5 - 0.02*float64(i)
+					}
+				}
+				a[i*n+j] = math.Ldexp(v, 4*(j-i))
+			}
+			for k := range m {
+				b[i*m+k] = math.Ldexp(1+0.1*float64(i+k), -4*i)
+			}
+			for k := range p {
+				c[k*n+i] = math.Ldexp(1-0.03*float64(i)+0.2*float64(k), 4*i)
+			}
+		}
+		sys := dcGainCertTestSystem(t, n, m, p, a, b, c, []float64{0.25, 0, -0.5, 1}, dt)
+		if dcGainRegularPath(sys) {
+			t.Fatalf("dt=%g: model reaches the regular DC path", dt)
+		}
+		g, err := sys.DCGain()
+		if err != nil {
+			t.Fatalf("dt=%g: DCGain error %v, want nil", dt, err)
+		}
+		if ex, ok := dcGainOwnRoundingExcess(sys, g); !ok || ex > 0 {
+			t.Fatalf("dt=%g: DCGain beyond τ + ½ulp of the exact gain by %g (ok %v)", dt, ex, ok)
 		}
 	}
 }
