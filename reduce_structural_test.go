@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"math"
 	"math/cmplx"
 	"slices"
 	"testing"
@@ -203,6 +204,56 @@ func TestReduceStructuralStageKeepsDelays(t *testing.T) {
 		r, _ := res.Sys.EvalFr(s)
 		if g[0][0] != r[0][0] && cmplx.Abs(g[0][0]-r[0][0]) > 1e-15*cmplx.Abs(g[0][0]) {
 			t.Fatalf("response at %v: %v, want %v", s, r[0][0], g[0][0])
+		}
+	}
+}
+
+// GWNBQE (FuzzReduce corpus ea59c320d057888f): a discrete model (dt = 100)
+// whose controllable states 0, 3 are unobservable and whose observable
+// states 1, 2 are uncontrollable, so G ≡ D exactly (every Markov parameter
+// is 0 over the rationals). The staircase cut of states 1, 2 is exact, but
+// the frequency-axis check refuses it: near the pole z = 1 the computed
+// response is GEPP rounding (≈1e-18) far above its first-order bound
+// (≈1e-31), which refutes the cut. The structural stage removes the
+// disconnected states exactly before the check is reached.
+func TestReduceRemovesStructurallyDisconnectedStatesOfZeroTransfer(t *testing.T) {
+	f := func(bits ...uint64) []float64 {
+		out := make([]float64, len(bits))
+		for i, b := range bits {
+			out[i] = math.Float64frombits(b)
+		}
+		return out
+	}
+	A := f(
+		0x4000000000000000, 0xbfdfb537fc3ebd42, 0xbfd716d2e56f7b22, 0,
+		0, 0x3ff0000000000000, 0, 0,
+		0, 0xbfbff6c21bee9174, 0x3fe0000000000000, 0,
+		0xbfdf1e69ec1e7775, 0xbf68a6ad13652450, 0x3fd8f240493ace37, 0x3ff8000000000000,
+	)
+	B := f(0x3fdffdcc5ab614ff, 0, 0, 0x3fd34e17d6f2439b)
+	C := f(0, 0xbfab1702d86abaf9, 0x3fdffdcc5ab614ff, 0)
+	sys, err := NewFromSlices(4, 1, 1, A, B, C, f(0x8000000000000000), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		opts *ReduceOpts
+		keep []int
+	}{
+		{&ReduceOpts{}, []int{}},
+		{&ReduceOpts{Mode: ReduceUncontrollable}, []int{0, 3}},
+		{&ReduceOpts{Mode: ReduceUnobservable}, []int{1, 2}},
+		{&ReduceOpts{Equalize: true}, []int{}},
+		{&ReduceOpts{Mode: ReduceUncontrollable, Equalize: true}, []int{0, 3}},
+		{&ReduceOpts{Mode: ReduceUnobservable, Equalize: true}, []int{1, 2}},
+	} {
+		res, err := sys.Reduce(tc.opts)
+		if err != nil {
+			t.Fatalf("%s: %v", reduceModeName(tc.opts), err)
+		}
+		assertExactSubsystem(t, reduceModeName(tc.opts), sys, res, tc.keep)
+		if res.Sys.Dt != 100 {
+			t.Fatalf("%s: Dt = %v, want 100", reduceModeName(tc.opts), res.Sys.Dt)
 		}
 	}
 }
