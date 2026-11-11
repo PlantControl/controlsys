@@ -679,14 +679,15 @@ func (f *integratorForm) coefficient(q int) (float64, float64) {
 // With A = Z·T·Zᵀ in real Schur form ordered by modulus, the m leading
 // eigenvalues are those of T11, with invariant bases X = Z1 and
 // Y = Z1 + Z2·X12ᵀ, YᵀX = I, where T11·X12 − X12·T22 = T12. Rounding
-// |E| ≤ ε|A| moves them, to first order, to those of T11 + F, F = YᵀEX,
-// ‖F‖₂ ≤ δ = ε‖|Y|ᵀ|A||X|‖_F. If rounding carries them all to zero,
+// |E| ≤ γ_n|A| of A, whose entries are n-term sums (a similarity, a
+// staircase or Reduce), moves them, to first order, to those of T11 + F,
+// F = YᵀEX, ‖F‖₂ ≤ δ = γ_n‖|Y|ᵀ|A||X|‖_F. If rounding carries them all to zero,
 // T11 + F is nilpotent, so every coefficient e_i of the characteristic
 // polynomial of T11, the i-th elementary symmetric function of its
 // eigenvalues, is within the first-order move of a sum of C(m,i) principal
 // minors of order i, |e_i| ≤ C(m,i)·i·δ·‖T11‖₂^(i−1); a cluster that fails
 // this is resolved from zero. For m = 1 it is the pole's own bound
-// ε·|y|ᵀ|A||x|/|yᵀx|; a k-fold chain, whose computed poles spread to
+// γ_n·|y|ᵀ|A||x|/|yᵀx|; a k-fold chain, whose computed poles spread to
 // δ^{1/k}, passes as a cluster although each member exceeds its
 // first-order bound, while poles each resolved from zero do not pass
 // together. A cluster the Sylvester equation cannot separate from the
