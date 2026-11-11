@@ -399,7 +399,13 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // DCGain returns the steady-state gain G(0) (G(1) for discrete models). Like
 // MATLAB dcgain, entries reached by an integrator (a pole at s = 0 or z = 1)
 // are infinite rather than an error, for every realization; internal delays are
-// unity at DC. Where I−A (A) is singular to working precision, a nil error
+// unity at DC. Where the DC solve with I−A (A) succeeds, a nil error means
+// the exact gain of the float model to within the rounding of each entry's
+// own terms, ε·(|D_ij| + Σ_l |C_il||X_lj|) with X = (I−A)⁻¹B, plus half an
+// ulp: a rigorous forward-error bound proves the solve, after double-double
+// refinement where needed, or the exact solve replaces it; above order 16 a
+// solve the bound cannot prove keeps its refined value with
+// ErrAccuracyUnverified. Where I−A (A) is singular to working precision, a nil error
 // means the exact limit of the float model at DC, entry by entry (a signed
 // Inf at its poles), for models of order up to 16; beyond that, only where
 // the pole is exactly decoupled or structurally exact, or no computed pole
@@ -434,7 +440,7 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 	if err := requireInputsOutputs("DCGain", sys); err != nil {
 		return nil, err
 	}
-	n, m, p := sys.Dims()
+	n, _, _ := sys.Dims()
 	if n == 0 && !sys.HasInternalDelay() {
 		return denseCopy(sys.D), nil
 	}
@@ -446,49 +452,29 @@ func (sys *System) dcGain(offPole bool) (*mat.Dense, error) {
 		return sys.dcGainOfDelayFreeExplicit(err, offPole)
 	}
 
-	if sys.IsContinuous() {
-		var X mat.Dense
-		err := X.Solve(sys.A, sys.B)
-		if err != nil {
-			return sys.dcGainOffPole(offPole, err)
-		}
-		gain := mat.NewDense(p, m, nil)
-		gain.Mul(sys.C, &X)
-		gain.Scale(-1, gain)
-		if sys.D != nil {
-			gain.Add(gain, sys.D)
-		}
-		if !allFiniteDense(gain) {
-			return sys.dcGainOverflowed(0)
-		}
-		return gain, nil
+	x0 := 0.0
+	if sys.IsDiscrete() {
+		x0 = 1
 	}
-
-	ImA := mat.NewDense(n, n, nil)
-	for i := range n {
-		for j := range n {
-			v := -sys.A.At(i, j)
-			if i == j {
-				v += 1
-			}
-			ImA.Set(i, j, v)
-		}
+	r := solveDCRegular(sys.A, sys.B, sys.C, sys.D, x0, n > exactDetMaxOrder)
+	switch {
+	case r.solveErr != nil:
+		return sys.dcGainOffPole(offPole, r.solveErr)
+	case r.overflow:
+		return sys.dcGainOverflowed(x0)
+	case r.certified:
+		return r.g, nil
+	case n > exactDetMaxOrder:
+		return r.g, fmt.Errorf("DCGain: ill-conditioned DC solve beyond the exact check (order %d > %d); Reduce the model for a certified gain: %w", n, exactDetMaxOrder, ErrAccuracyUnverified)
 	}
-
-	var X mat.Dense
-	err := X.Solve(ImA, sys.B)
-	if err != nil {
-		return sys.dcGainOffPole(offPole, err)
+	strict, overflow, ok := exactDCGainAtNonsingular(sys.A, sys.B, sys.C, sys.D, x0)
+	switch {
+	case !ok:
+		return sys.dcGainOffPole(offPole, mat.Condition(r.cond))
+	case overflow:
+		return nil, fmt.Errorf("DCGain: gain overflows float64: %w", ErrOverflow)
 	}
-	gain := mat.NewDense(p, m, nil)
-	gain.Mul(sys.C, &X)
-	if sys.D != nil {
-		gain.Add(gain, sys.D)
-	}
-	if !allFiniteDense(gain) {
-		return sys.dcGainOverflowed(1)
-	}
-	return gain, nil
+	return strict, nil
 }
 
 // dcGainOverflowed resolves a delay-free explicit model whose DC solve

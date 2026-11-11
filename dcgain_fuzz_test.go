@@ -12,7 +12,10 @@ import (
 // bound from the intended spectrum; when the float64 A has an exact pole at
 // x0, a nil error means every entry is the float model's exact limit
 // n_ij/det(sI−A) at x0 (N4GQHT): each divergent entry that signed infinity,
-// as MATLAB dcgain, and each finite one that value to 1e-6. Poles within the
+// as MATLAB dcgain, and each finite one that value to 1e-6. On the regular
+// path (a nonsingular double LU of x0·I − A) a nil error means the exact
+// gain within each entry's own rounding, ε·(|D| + |C||X|) + ½ulp (HUUZRO),
+// at any conditioning. Elsewhere poles within the
 // eigenvalue error of x0, or an ill-conditioned solve, are skipped. I/O
 // delays never change the gain. ErrAccuracyUnverified comes with an exact
 // pole at x0, whose residue may be below rounding of its own terms, or with
@@ -86,6 +89,12 @@ func FuzzDCGain(f *testing.F) {
 						t.Fatalf("DCGain[%d,%d] = %v with a nil error, exact limit at the integrator %v\n%s", i, j, v, lim, s)
 					}
 				}
+			}
+			return
+		}
+		if !unverified && dcGainRegularPath(sys) {
+			if ex, ok := dcGainOwnRoundingExcess(sys, g); !ok || ex > 0 {
+				t.Fatalf("DCGain = %v exceeds the exact gain's own rounding by %g (ok %v)\n%s", g.RawMatrix().Data, ex, ok, s)
 			}
 			return
 		}
