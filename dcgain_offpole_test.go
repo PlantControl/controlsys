@@ -151,3 +151,44 @@ func TestDCGainOffPoleHighOrderUnverified(t *testing.T) {
 		}
 	}
 }
+
+// T6DNZ3: a well-conditioned model put through a diagonal similarity by
+// powers of two spanning 2⁶⁸ reads ill-conditioned to the double LU of −A,
+// with poles in Re s < −0.7. Balancing undoes the scaling exactly, and the
+// regular-path certificate on the balanced realization proves the gain:
+// nil within τ + ½ulp of the exact gain. Base returned nil too, uncertified.
+func TestDCGainOffPoleHighOrderBalancedCertified(t *testing.T) {
+	for _, dt := range []float64{0, 0.1} {
+		const n, m, p = exactDetMaxOrder + 2, 2, 2
+		a, b, c := make([]float64, n*n), make([]float64, n*m), make([]float64, p*n)
+		for i := range n {
+			for j := range n {
+				v := 0.1 * float64((i*3+j*5)%7-3) / n
+				if i == j {
+					v = -(1 + 0.3*float64(i))
+					if dt > 0 {
+						v = 0.5 - 0.02*float64(i)
+					}
+				}
+				a[i*n+j] = math.Ldexp(v, 4*(j-i))
+			}
+			for k := range m {
+				b[i*m+k] = math.Ldexp(1+0.1*float64(i+k), -4*i)
+			}
+			for k := range p {
+				c[k*n+i] = math.Ldexp(1-0.03*float64(i)+0.2*float64(k), 4*i)
+			}
+		}
+		sys := dcGainCertTestSystem(t, n, m, p, a, b, c, []float64{0.25, 0, -0.5, 1}, dt)
+		if dcGainRegularPath(sys) {
+			t.Fatalf("dt=%g: model reaches the regular DC path", dt)
+		}
+		g, err := sys.DCGain()
+		if err != nil {
+			t.Fatalf("dt=%g: DCGain error %v, want nil", dt, err)
+		}
+		if ex, ok := dcGainOwnRoundingExcess(sys, g); !ok || ex > 0 {
+			t.Fatalf("dt=%g: DCGain beyond τ + ½ulp of the exact gain by %g (ok %v)", dt, ex, ok)
+		}
+	}
+}
