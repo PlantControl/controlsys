@@ -2,7 +2,6 @@ package controlsys
 
 import (
 	"math"
-	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 
@@ -171,18 +170,19 @@ func TestReduceResolvedGapSplitAccepted(t *testing.T) {
 	}
 }
 
-// TestReduceWindowCapAtOtherPole checks the window cap of
-// sharedPoleWindows (N3P7NO): a window may not reach another model pole.
-// The model is upper triangular, poles −1, −2 and −2⁴⁰, with the −2 mode
-// carrying a residue of 5e-5; the cut keeps −1 and −2⁴⁰ in a Hadamard-rotated
-// (exact) realization and drops −2, so it is wrong by 5e-5/|s+2| exactly,
+// TestReduceWindowCapAtOtherPole checks that a wrong cut whose window
+// would reach another model pole is rejected (N3P7NO). The model is upper
+// triangular, poles −1, −2 and −2⁴⁰, with the −2 mode carrying a residue
+// of 5e-5; the cut keeps −1 and −2⁴⁰ in a Hadamard-rotated (exact)
+// realization and drops −2, so it is wrong by 5e-5/|s+2| exactly,
 // 2500·tol at s = 2j. The rotation smears the fast scale into the cut's −1:
-// β_R ≈ ε·2⁴⁰ ≈ 2.4e-4 ≤ ρ₀, an uncapped window of radius β_R/tol ≈ 1.6e4
-// covers −2 and every slow probe, makes them uninformative, and the
-// mid-band points, where the fast mode dominates and the error is below
-// tol, meet the count: the wrong cut is accepted. Capped at the distance
-// to −2 the window leaves −2's probes to the model-determined rule, which
-// rejects.
+// β_R ≈ ε·2⁴⁰ ≈ 2.4e-4 ≤ ρ₀, so under the normwise key an uncapped window
+// of radius β_R/tol ≈ 1.6e4 covered −2 and every slow probe, and only the
+// cap at the distance to −2 left −2's probes to the model-determined rule.
+// Under the per-pole key (7NNE5Y) the model's −1 is resolved to
+// 2n·β_G ≈ 1e-15 ≪ β_R, so no window forms about the cut's −1 at all and
+// the cap is not reached; TestReduceWindowCapAtExactIntegrator is the cap's
+// live regression.
 func TestReduceWindowCapAtOtherPole(t *testing.T) {
 	const d = 1e-4
 	f := -math.Ldexp(1, 40)
@@ -220,12 +220,9 @@ func TestReduceWindowCapAtOtherPole(t *testing.T) {
 		if math.Abs(real(lr)+1) > 1e-3 {
 			continue
 		}
-		if !(betaR[i] <= poles.rho0 && betaR[i]/tol > 1) {
-			t.Fatalf("β_R %g, ρ₀ %g: uncapped window would not reach −2", betaR[i], poles.rho0)
-		}
 		for k, c := range win.centre {
-			if c == lr && win.radius[k] > cmplx.Abs(lr+2) {
-				t.Errorf("window about %v, radius %g, reaches the pole −2", lr, win.radius[k])
+			if c == lr {
+				t.Errorf("window about %v, radius %g (β_R %g)", lr, win.radius[k], betaR[i])
 			}
 		}
 		if win.contain(2i) {
