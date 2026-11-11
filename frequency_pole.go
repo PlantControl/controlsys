@@ -66,7 +66,9 @@ func evalWithPoleLimit(eval func(frequencyPoint, []complex128) error, sys *Syste
 // a pole. With limit set the pole limit applies there too, for a caller
 // tuned to it: the rational margin search takes near-roots of an
 // asymptotically real L next to an origin cluster for crossings once that
-// region evaluates. Otherwise, where allow(w) reports false, eval's error is
+// region evaluates; off a resonance (poleGeometry.offDC) a delay-free
+// model's pole there stands only where verifyOffDCPole places it at pt,
+// and the point fails otherwise. Otherwise, where allow(w) reports false, eval's error is
 // returned; a nil allow allows the fallback. With allow set, or snap set
 // beside a pole that is not off DC (poleGeometry.offDC), a near computed
 // pole is a pole at pt as at DC, without the double-double check; the
@@ -155,7 +157,11 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return poleLimitInto(sample, s, rho, dst, err)
 	}
 	if !delayFree || gate.limit || gate.allow != nil {
-		return limit(poleLimitInto(eval, s, rho, dst, err))
+		lerr := limit(poleLimitInto(eval, s, rho, dst, err))
+		if lerr == nil && gate.limit && delayFree && sp.offDC && finiteResponse(dst) != nil {
+			return verifyOffDCPole(sys, pt, sp, err)
+		}
+		return lerr
 	}
 	sample := func(pt frequencyPoint, dst []complex128) error {
 		if err := eval(pt, dst); err == nil || errors.Is(err, errStallUnresolved) || !ddResponseInto(sys, pt, dst) {
@@ -167,6 +173,33 @@ func evalWithPoleLimitGated(eval func(frequencyPoint, []complex128) error, sys *
 		return limit(lerr)
 	}
 	return limit(poleLimitInto(sample, s, wide, dst, err))
+}
+
+// errOffDCPoleUnverified rejects a pole limit off DC whose pole the
+// double-double response does not place at pt (UG5V3W).
+var errOffDCPoleUnverified = fmt.Errorf("pole limit off DC: pole not verified at ω: %w", ErrAccuracyUnverified)
+
+// verifyOffDCPole checks the pole the limit gate's double samples put at
+// pt off DC, where they straddle a resonance up to ten times nearer the
+// axis than their step and fit a pole that is not there: it stands where
+// the double-double response is singular at pt or ddAtPole puts the pole
+// within working precision of s, as evalWithPoleLimitGated decides off a
+// resonance ungated. Otherwise it fails with errOffDCPoleUnverified,
+// wrapping singularErr, the double solve's failure there.
+func verifyOffDCPole(sys *System, pt frequencyPoint, sp poleGeometry, singularErr error) error {
+	if errors.Is(singularErr, errStallUnresolved) {
+		return nil
+	}
+	_, m, p := sys.Dims()
+	g := make([]complex128, p*m)
+	ddErr := ddResponse(sys, pt, g)
+	if errors.Is(ddErr, errStateUnderflow) {
+		return ddErr
+	}
+	if ddErr != nil || ddAtPole(sys, pt.value(), sp, g) {
+		return nil
+	}
+	return fmt.Errorf("%w (%w)", errOffDCPoleUnverified, singularErr)
 }
 
 // poleLimitInto sets dst to the response at s, a numerical pole of the

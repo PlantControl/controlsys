@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/big"
 	"math/cmplx"
@@ -409,4 +410,55 @@ func TestSISOEvalAtPoleSnapsInf(t *testing.T) {
 		t.Errorf("%d of 8 undamped cases exercise the pole limit; want ≥ 4", compared)
 	}
 	t.Logf("%d of %d badly scaled undamped pairs snap to +Inf", snapped, compared)
+}
+
+// UG5V3W: without the extended fallback sisoEval.at takes the pole limit
+// in double, whose samples beside a badly scaled resonance straddle the
+// pair and fit a pole that is not there: it read +Inf with no error. Case
+// 9 of the GAHTRN family (PCG 0x6a48, 0x7452), frozen as computed on
+// arm64. Off DC each reading must be finite and match the oracle, or fail.
+func TestSISOEvalAtOffDCPoleLimitUnverified(t *testing.T) {
+	a := mat.NewDense(5, 5, []float64{
+		4.1244111051501073e+06, -3.3430528969799967e+09, -3.195564281908565e+08, -19190.11090663089, -4.474318187921283e+06,
+		-2217.6681604315468, 1.8007139021469527e+06, 171253.9570382416, 9.672745853334929, 2396.9507662035653,
+		1892.241213506034, -2.727198425767869e+06, 66794.36006332611, 231.3249404232146, 1235.638981686064,
+		-8.987127649113962e+07, 7.308258505731027e+10, 6.92073008922217e+09, 370324.2949348788, 9.684047260627452e+07,
+		5.736655166685106e+06, -4.56044793022558e+09, -4.6045938060693806e+08, -44677.21082229327, -6.4696288449062975e+06,
+	})
+	b := mat.NewDense(5, 1, []float64{-7.114047454508141, 0.001889007727279433, -0.01636711763289042, 124.24391342103425, -7.33632168041491})
+	c := mat.NewDense(1, 5, []float64{-0.44998107945742327, 405.3726760087558, 27.520312969649293, -0.006412855848687369, 0.3707311485010806})
+	sys, err := New(a, b, c, mat.NewDense(1, 1, []float64{-7.167117819816671}), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wp = 0.9999995290676637
+	e, err := newSISOEval(sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eval := newFrequencyEvaluator(sys).pointSolver(math.MaxInt).evalInto
+	failed, rejected := 0, 0
+	for i := -20; i <= 20; i++ {
+		w := wp + 1e-6*float64(i)
+		if eval(pointAt(complex(0, w)), []complex128{0}) != nil {
+			failed++
+		}
+		e.err = nil
+		h := e.at(w)
+		if e.err != nil {
+			if !errors.Is(e.err, ErrAccuracyUnverified) && !errors.Is(e.err, ErrSingularTransform) {
+				t.Errorf("at(%.17g): error %v", w, e.err)
+			}
+			rejected++
+			continue
+		}
+		want := frExactResponse(sys, frBigC(complex(0, w)))[0]
+		if cmplx.Abs(h-want) > 1e-9*cmplx.Abs(want) {
+			t.Errorf("at(%.17g) = %v, nil; oracle %v", w, h, want)
+		}
+	}
+	if failed == 0 {
+		t.Fatal("double solve resolved every ω; case no longer exercises the pole limit")
+	}
+	t.Logf("double solve failed at %d of 41 ω, at rejected %d", failed, rejected)
 }
