@@ -34,6 +34,11 @@ type dcRegularSolve struct {
 // dcUnit is the unit roundoff u = 2⁻⁵³; dcGamma(k) is γ_k = k·u/(1 − k·u).
 const dcUnit = 0x1p-53
 
+// dcUnderflow is the smallest subnormal 2⁻¹⁰⁷⁴: a product rounded in the
+// subnormal range errs by up to ½·dcUnderflow absolutely, which no factor
+// 1 + γ_k covers.
+const dcUnderflow = 0x1p-1074
+
 func dcGamma(k int) float64 { return float64(k) * dcUnit / (1 - float64(k)*dcUnit) }
 
 // dcProductFloor is the smallest nonzero product the certificate admits:
@@ -85,6 +90,19 @@ const dcProductFloor = 0x1p-1022 / (dcUnit * dcUnit)
 // The factorization, its condition estimate and the solve are mat.LU's
 // (Getrf, Gecon in the ∞-norm, Getrs), on raw storage the certificate
 // reuses.
+//
+// The roundings of ρ_j (two products) and of ν·ρ_j may fall in the
+// subnormal range, each erring by up to ½·dcUnderflow absolutely, so a
+// column with a nonzero residual term takes
+//
+//	η_j = ν·ρ_j + ν·dcUnderflow + dcUnderflow,
+//
+// the first addend covering ρ_j's own two roundings scaled by ν, the
+// second those of ν·ρ_j and ν·dcUnderflow. Without it an X that underflowed
+// to 0 leaves ρ_j = |B_j| ≠ 0 while ν·ρ_j rounds to 0, and the zero gain
+// passes with τ = 0. A one-step η whose terms may have left the normal
+// range (their sum below dcProductFloor or η below MinNormal) forms the
+// residual instead.
 //
 // β ≥ 1, a non-finite bound, or a nonzero product below dcProductFloor
 // leaves the row unbound; with refine unset it then returns at once.
@@ -162,7 +180,8 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 			cnorm[i] += math.Abs(v)
 		}
 	}
-	colOK := make([]bool, m)
+	flags := make([]bool, 2*m)
+	colOK, live := flags[:m], flags[m:]
 	R := blas64.General{Rows: n, Cols: m, Stride: m, Data: rhs}
 	g := mat.NewDense(p, m, nil)
 	gr := g.RawMatrix()
@@ -180,7 +199,7 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 	for step := 0; ; step++ {
 		finite := true
 		for j := 0; !onestep && j < m; j++ {
-			rho[j], rerr[j] = 0, 0
+			rho[j], rerr[j], live[j] = 0, 0, false
 		}
 		for i := 0; !onestep && i < n; i++ {
 			prow := pd[i*n : i*n+n]
@@ -214,11 +233,15 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 					finite = false
 				}
 				rho[j] = max(rho[j], v)
+				live[j] = live[j] || r != 0 || cabs != 0
 				rerr[j] = max(rerr[j], dcUnit*math.Abs(r)+resGamma*cabs)
 			}
 		}
 		for j := 0; !onestep && j < m; j++ {
 			eta[j] = nu * rho[j]
+			if live[j] {
+				eta[j] += nu*dcUnderflow + dcUnderflow
+			}
 		}
 		if !finite {
 			res.unbound = true
@@ -330,8 +353,9 @@ func solveDCRegular(A, B, C, D *mat.Dense, x0 float64, refine bool) dcRegularSol
 				plod = max(plod, math.Abs(plo[i]*rhs[i*m+j]))
 				xm = max(xm, math.Abs(x[i*m+j].hi)+math.Abs(x[i*m+j].lo))
 			}
-			eta[j] = nu * (rerr[j] + lnGamma*lud + plod + pexact*4*dcUnit*dcUnit*xm) * onestepFactor
-			onestep = !math.IsNaN(eta[j]) && !math.IsInf(eta[j], 0)
+			r := rerr[j] + lnGamma*lud + plod + pexact*4*dcUnit*dcUnit*xm
+			eta[j] = nu * r * onestepFactor
+			onestep = !math.IsNaN(eta[j]) && !math.IsInf(eta[j], 0) && r >= dcProductFloor && eta[j] >= 0x1p-1022
 		}
 	}
 	if !res.certified && !refine {
