@@ -408,9 +408,9 @@ func validateUniformTimeGrid(context string, t []float64) (float64, error) {
 // ErrAccuracyUnverified. Where I−A (A) is singular to working precision, a nil error
 // means the exact limit of the float model at DC, entry by entry (a signed
 // Inf at its poles), for models of order up to 16; beyond that, only where
-// the pole is exactly decoupled or structurally exact, or no computed pole
-// is near DC (the gain then solved in double-double as FreqResponse
-// evaluates it). Otherwise the error wraps ErrAccuracyUnverified with a
+// the pole is exactly decoupled or structurally exact; with no computed
+// pole near DC the gain is solved in double-double as FreqResponse
+// evaluates it, with ErrAccuracyUnverified above order 16. Otherwise the error wraps ErrAccuracyUnverified with a
 // value: where the float model has an exact pole at DC whose residue lies
 // below ε of its own terms, so the given coefficients cannot fix whether it
 // cancels, and every float reading is finite, the finite regular part;
@@ -509,7 +509,10 @@ func allFiniteDense(m *mat.Dense) bool {
 // exact zero pivot of the double LU. A zero row or column of A − s0·I is an
 // exact pole at DC and skips the pole search. Otherwise, or where the
 // double-double solve is singular too, the transfer limit finds the
-// integrators. With offPole set the result then passes dcGainCertified.
+// integrators. With offPole set the result then passes dcGainCertified;
+// above exactDetMaxOrder the double-double value has no certificate (the
+// double LU's inverse bound fails at this conditioning) and keeps
+// ErrAccuracyUnverified.
 func (sys *System) dcGainOffPole(offPole bool, solveErr error) (*mat.Dense, error) {
 	s0 := complex(0, 0)
 	if sys.IsDiscrete() {
@@ -523,7 +526,11 @@ func (sys *System) dcGainOffPole(offPole bool, solveErr error) (*mat.Dense, erro
 			for k, v := range dst {
 				data[k] = real(v)
 			}
-			return sys.dcGainCertified(dcRoute{g: mat.NewDense(p, m, data), certain: n > exactDetMaxOrder})
+			g := mat.NewDense(p, m, data)
+			if n > exactDetMaxOrder {
+				return g, fmt.Errorf("DCGain: ill-conditioned DC solve beyond the exact check (order %d > %d); Reduce the model for a certified gain: %w", n, exactDetMaxOrder, ErrAccuracyUnverified)
+			}
+			return sys.dcGainCertified(dcRoute{g: g})
 		}
 	}
 	r := sys.dcGainByTransferFunctionLimit(offPole)

@@ -1,8 +1,10 @@
 package controlsys
 
 import (
+	"errors"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -94,6 +96,58 @@ func TestHasZeroLine(t *testing.T) {
 	} {
 		if got := hasZeroLine(mat.NewDense(2, 2, c.a), c.shift); got != c.want {
 			t.Errorf("%v shift %g: got %v, want %v", c.a, c.shift, got, c.want)
+		}
+	}
+}
+
+// T6DNZ3: an off-pole double-double DC solve above order 16 returned nil
+// with no certificate. The upper-triangular pencil −A has exact poles
+// −1 … −1−0.25(n−1), far from DC, and κ̂ ≈ 1e34 from the 1e17 coupling, so
+// the double LU is refused, its inverse bound unavailable, and the gain
+// solved in double-double. Order 16 certifies by the exact solve; order 17
+// keeps the value with ErrAccuracyUnverified.
+func TestDCGainOffPoleHighOrderUnverified(t *testing.T) {
+	for _, n := range []int{exactDetMaxOrder, exactDetMaxOrder + 1} {
+		a := make([]float64, n*n)
+		for i := range n {
+			a[i*n+i] = -(1 + 0.25*float64(i))
+			if i+1 < n {
+				a[i*n+i+1] = 0.5
+			}
+		}
+		a[1] = 1e17
+		b, c := make([]float64, n), make([]float64, n)
+		for i := range n {
+			b[i] = 1 + 0.1*float64(i)
+			c[i] = 1 - 0.03*float64(i)
+		}
+		sys := dcGainCertTestSystem(t, n, 1, 1, a, b, c, []float64{0.25}, 0)
+		if dcGainRegularPath(sys) {
+			t.Fatalf("n=%d: model reaches the regular DC path", n)
+		}
+		g, err := sys.DCGain()
+		if n <= exactDetMaxOrder {
+			if err != nil {
+				t.Fatalf("n=%d: DCGain error %v, want nil", n, err)
+			}
+			if ex, ok := dcGainOwnRoundingExcess(sys, g); !ok || ex > 0 {
+				t.Fatalf("n=%d: DCGain %v beyond τ + ½ulp of the exact gain by %g (ok %v)", n, g.At(0, 0), ex, ok)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrAccuracyUnverified) || !strings.Contains(err.Error(), "ill-conditioned DC solve") {
+			t.Fatalf("n=%d: DCGain error %v, want ill-conditioned ErrAccuracyUnverified", n, err)
+		}
+		if g == nil || !allFiniteDense(g) {
+			t.Fatalf("n=%d: DCGain = %v, want the double-double value", n, g)
+		}
+		_, gs, ok := dcGainExactRat(sys)
+		if !ok {
+			t.Fatalf("n=%d: −A exactly singular", n)
+		}
+		want, _ := gs[0].Float64()
+		if got := g.At(0, 0); !(math.Abs(got-want) <= 1e-9*math.Abs(want)) {
+			t.Fatalf("n=%d: DCGain = %v, exact %v", n, got, want)
 		}
 	}
 }
