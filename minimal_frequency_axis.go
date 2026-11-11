@@ -39,8 +39,36 @@ import (
 // grids. Nor is the check exact: the responses and their bounds are
 // evaluated in floating point, so a point where the model's response is
 // below its own first-order bound can neither verify nor refute a cut.
+// Across a resolved spectral gap the count is not sufficient, and
+// frequencyAxisCutAcrossGap adds one per side of the gap.
 // False also when the eigenvalues of A or of red do not converge.
 func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense, tol float64) bool {
+	return frequencyAxisCutAcrossGap(sys, red, removed, tol, 0)
+}
+
+// frequencyAxisCutAcrossGap is frequencyAxisCutInBand for a model whose
+// eigenvalue magnitudes have a resolved gap at cutoff (resolvedGap); a
+// cutoff ≤ 0 selects the band's rule alone. The global count n + nr is
+// necessary but, across a gap of 1/tol or more, not sufficient: a point s
+// constrains a pole λ beyond the leading Markov term C·B/s only through
+// terms of relative size |λ|/|s|, so a point at the fast scale cannot see a
+// slow pole to tol, and n + nr can be met on the fast side alone. On a
+// continuous model the verified points, conjugate-weighted, must therefore
+// also meet a count on each side: n_f + nr_f + 1 with |s| ≥ cutoff and
+// n_s + nr_s + 1 with |s| < min(cutoff, ε·‖A_bal‖_F/tol), n_x and nr_x the
+// eigenvalues of A and of red on that side of the cutoff. Across the gap
+// G − R = Δ_s + Δ_f exactly. At a slow point Δ_f is a constant to relative
+// |s|/|λ_f|, so the slow side tests Δ_s plus a constant, of numerator
+// degree n_s + nr_s; at a fast point Δ_s = d/s + O(λ_s/s²), so the fast
+// side tests Δ_f + d/s, of numerator degree n_f + nr_f: each needs one
+// zero more than its degree. The slow limit is the data's resolution:
+// across the gap ε·‖A_bal‖_F ≥ tol·|λ_s|, so the slow poles are never
+// determined normwise better than that, and a point sees a pole error of
+// that size only for tol·|s| ≤ ε·‖A_bal‖_F; the points between the limit
+// and the cutoff count globally only. A discrete model takes the global
+// count alone: a mode with |λ| ≤ √ε contributes C·B/z + O(λ/z²) at every
+// point of the unit circle, invisible beyond C·B there.
+func frequencyAxisCutAcrossGap(sys, red *System, removed []*mat.Dense, tol, cutoff float64) bool {
 	n, _, _ := sys.Dims()
 	nr, _, _ := red.Dims()
 	pts, poles, ok := axisProbes(sys, removed)
@@ -51,20 +79,54 @@ func frequencyAxisCutInBand(sys, red *System, removed []*mat.Dense, tol float64)
 	if !ok {
 		return false
 	}
+	sided := sys.Dt == 0 && cutoff > 0
+	slowLimit := math.Min(cutoff, eps()*poles.norm/tol)
 	full, cut := newBoundedResponse(sys, pts), newBoundedResponse(red, pts)
+	var slow, fast int
 	verified := 0
 	for k, s := range pts {
 		switch classifyProbe(full, cut, k, tol, win.contain(s)) {
 		case probeReject:
 			return false
 		case probeVerified:
-			verified++
+			w := 1
 			if imag(s) != 0 {
-				verified++
+				w = 2
+			}
+			verified += w
+			switch a := cmplx.Abs(s); {
+			case a >= cutoff:
+				fast += w
+			case a < slowLimit:
+				slow += w
 			}
 		}
 	}
-	return verified >= n+nr
+	if verified < n+nr {
+		return false
+	}
+	if !sided {
+		return true
+	}
+	needSlow, needFast := 1, 1
+	count := func(evals []complex128) {
+		for _, ev := range evals {
+			if cmplx.Abs(ev) >= cutoff {
+				needFast++
+			} else {
+				needSlow++
+			}
+		}
+	}
+	count(poles.evals)
+	if nr > 0 {
+		evR, _, ok := eigenRoundingBounds(red.A)
+		if !ok {
+			return false
+		}
+		count(evR)
+	}
+	return slow >= needSlow && fast >= needFast
 }
 
 type probeVerdict int
@@ -131,12 +193,13 @@ func classifyProbe(full, cut boundedResponse, k int, tol float64, inShared bool)
 }
 
 // modelPoles holds the eigenvalues of the model's A with their
-// componentwise rounding bounds β (eigenRoundingBounds) and the
+// componentwise rounding bounds β (eigenRoundingBounds), ‖A_bal‖_F and the
 // eigensolver's resolution ρ₀ = n·ε·‖A_bal‖_F, A_bal the power-of-two
 // balanced A of boundedResponse.
 type modelPoles struct {
 	evals []complex128
 	beta  []float64
+	norm  float64
 	rho0  float64
 }
 
@@ -169,7 +232,7 @@ func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bo
 	for _, a := range newBalancedRealization(sys, n, m, p).a {
 		norm = math.Hypot(norm, a)
 	}
-	mp.rho0 = float64(n) * eps() * norm
+	mp.norm, mp.rho0 = norm, float64(n)*eps()*norm
 	var pts []complex128
 	push := func(s complex128) {
 		if !slices.Contains(pts, s) {
@@ -184,7 +247,7 @@ func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bo
 	for _, s := range eigenAxisProbes(evals, discrete) {
 		push(s)
 	}
-	for _, s := range gapProbePoints(evals, 0, discrete) {
+	for _, s := range gapProbePoints(evals, discrete) {
 		push(s)
 	}
 	if discrete {
@@ -247,8 +310,12 @@ func (w poleWindows) contain(s complex128) bool {
 // model carries the pole (a kept integrator that the rotated cut holds
 // only to rounding). A cut pole known worse than that (β_R > ρ₀) is the
 // cut's own ill-conditioning, which the window must not excuse: its β_R/tol
-// can span the whole cluster where the model is determined. False when the
-// eigenvalues of red do not converge.
+// can span the whole cluster where the model is determined. Nor may a
+// window reach another model pole λ_G′ outside the shared cluster
+// (|λ_G′ − λ_G| > β_G + β_G′ + ρ₀): there the model's other dynamics are
+// tested, not the shared pole, so the radius is capped at the distance
+// |λ_R − λ_G′| to the nearest one. False when the eigenvalues of red do not
+// converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
 	var w poleWindows
 	nr, _, _ := red.Dims()
@@ -266,8 +333,14 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		for j, lg := range mp.evals {
 			bG := mp.beta[j]
 			if cmplx.Abs(lr-lg) <= betaR[i]+bG+mp.rho0 && bG <= tol*math.Max(cmplx.Abs(lg), mp.rho0) {
+				r := betaR[i] / tol
+				for k, lo := range mp.evals {
+					if k != j && cmplx.Abs(lo-lg) > bG+mp.beta[k]+mp.rho0 {
+						r = math.Min(r, cmplx.Abs(lr-lo))
+					}
+				}
 				w.centre = append(w.centre, lr)
-				w.radius = append(w.radius, betaR[i]/tol)
+				w.radius = append(w.radius, r)
 				break
 			}
 		}

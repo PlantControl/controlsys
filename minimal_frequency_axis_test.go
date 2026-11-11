@@ -14,7 +14,7 @@ import (
 // first-order rounding bound, differ by at most twice it.
 func TestBoundedResponseMatchesEvalFr(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 3))
-	pts := gapProbePoints(nil, 0, true)
+	pts := gapProbePoints(nil, true)
 	for c := range 100 {
 		n, m, p := 1+rng.IntN(7), 1+rng.IntN(3), 1+rng.IntN(3)
 		A, B, C, D := mat.NewDense(n, n, nil), mat.NewDense(n, m, nil), mat.NewDense(p, n, nil), mat.NewDense(p, m, nil)
