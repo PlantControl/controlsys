@@ -1337,59 +1337,173 @@ func closedLoopStable(A, B, K, E *mat.Dense, eig []complex128) bool {
 }
 
 // descriptorClosedLoopEig sets res.Eig, for the K of res and E = opts.E
-// (not the identity), to the generalized eigenvalues of (A − BK, E), A − BK
-// formed in double-double and rounded, by QZ of the pencil equilibrated by
-// the left and right Dggbal scalings rounded to powers of two (exact, so the
-// eigenvalues are those of the pencil, to QZ's backward error): the
-// unbalanced E⁻¹(A − BK) of the state-scaled solve put Lqr's Eig 2.6e-2 off
-// with blkdiag(10⁻¹⁵E, I) and 2e-5 off with E's rows scaled by 2³⁰, K exact,
-// and unbalanced QZ 5.6e-2. A QZ failure, or an eigenvalue not finite or not
-// stable, leaves res at Accuracy 1. The Eig of an extended-precision solve
-// (kw set), its exact closed loop rounded once, is kept: there
-// 1/σ_min(E) ~ 1e15 carries the rounding of A − BK to O(1) in any float64
-// pencil.
+// (not the identity), to the generalized eigenvalues of (A − BK, E) by
+// closedLoopPencilEig, leaving res at Accuracy 1 where they are not
+// certified: the unbalanced E⁻¹(A − BK) of the state-scaled solve put Lqr's
+// Eig 2.6e-2 off with blkdiag(10⁻¹⁵E, I) and 2e-5 off with E's rows scaled
+// by 2³⁰, K exact. The Eig of an extended-precision solve (kw set), its
+// exact closed loop rounded once, is kept: there 1/σ_min(E) ~ 1e15 carries
+// the rounding of A − BK to O(1) in any float64 pencil.
 func descriptorClosedLoopEig(continuous bool, A, B *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) {
 	if err != nil || res == nil || res.K == nil || res.kw != nil || opts == nil || opts.E == nil || isIdentityDescriptor(opts.E) {
 		return
 	}
+	setClosedLoopPencilEig(continuous, A, B, res.K, opts.E, res)
+}
+
+func setClosedLoopPencilEig(continuous bool, A, B, K, E *mat.Dense, res *RiccatiResult) {
+	eig, ok := closedLoopPencilEig(continuous, A, B, K, E)
+	if !ok {
+		res.accuracy = max(res.accuracy, 1)
+	}
+	res.Eig = eig
+}
+
+// closedLoopPencilEig returns the generalized eigenvalues of (A − BK, E),
+// A − BK formed in double-double and rounded, and whether each is
+// certified finite, stable, and within the census bound
+// n·eps·(‖Â‖+|λ|‖Ê‖)·κ(λ) of the row-equilibrated pencil (Â, Ê) = D(A − BK, E).
+// QZ of the pencil balanced as by Dggbal 'B' (scalings rounded to powers of
+// two, so exact) is tried first, then QZ unbalanced. QZ is backward stable
+// in the pencil it is given, (Aq, Eq) = L(A − BK, E)R, so each λ is within
+// eps·(‖Aq‖+|λ|‖Eq‖)·κq(λ), κq from its eigenvectors there; λ is certified
+// when that is within the census bound, both κ having the same
+// |yᴴ(E)x|. A small normwise QZ backward error alone is not: balancing
+// put modes of random Lqi pencils with κ(E) ~ 1e8 4.5% off, 125× the
+// bound. When neither solve certifies, the eigenvalues of the one whose
+// worst eigenvalue is nearer certification are returned, uncertified.
+func closedLoopPencilEig(continuous bool, A, B, K, E *mat.Dense) ([]complex128, bool) {
 	n, m := B.Dims()
 	nn := n * n
-	buf := make([]float64, 5*nn+8*n)
-	a, lo, e, sa, se := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn], buf[4*nn:5*nn]
-	ls, rs, work := buf[5*nn:5*nn+n], buf[5*nn+n:5*nn+2*n], buf[5*nn+2*n:]
-	aRaw, bRaw, kRaw, eRaw := A.RawMatrix(), B.RawMatrix(), res.K.RawMatrix(), opts.E.RawMatrix()
+	a, lo, e := make([]float64, nn), make([]float64, nn), make([]float64, nn)
+	aRaw, bRaw, kRaw, eRaw := A.RawMatrix(), B.RawMatrix(), K.RawMatrix(), E.RawMatrix()
 	copyStrided(a, n, aRaw.Data, aRaw.Stride, n, n)
 	ddMulAcc(n, n, m, -1, bRaw.Data, bRaw.Stride, 1, kRaw.Data, kRaw.Stride, 1, a, lo, n)
 	for i := range a {
 		a[i] += lo[i]
 	}
 	copyStrided(e, n, eRaw.Data, eRaw.Stride, n, n)
-	copy(sa, a)
-	copy(se, e)
-	impl.Dggbal(lapack.Scale, n, sa, n, se, n, ls, rs, work)
+	d := make([]float64, n)
+	var na, ne float64
 	for i := range n {
-		ls[i], rs[i] = pow2Near(ls[i]), pow2Near(rs[i])
-	}
-	for i := range n {
+		row := 0.0
 		for j := range n {
-			a[i*n+j] *= ls[i] * rs[j]
-			e[i*n+j] *= ls[i] * rs[j]
+			row = math.Hypot(row, math.Hypot(a[i*n+j], e[i*n+j]))
+		}
+		d[i] = 1
+		if row > 0 && isFinite(row) {
+			d[i] = pow2Near(1 / row)
+		}
+		for j := range n {
+			na, ne = math.Hypot(na, d[i]*a[i*n+j]), math.Hypot(ne, d[i]*e[i*n+j])
 		}
 	}
-	alphar, alphai, beta, ok := qzEigenvalues(n, a, n, e, n)
-	if !ok {
-		res.accuracy = max(res.accuracy, 1)
-		return
+	var best []complex128
+	bestRho := math.Inf(1)
+	for _, balance := range []bool{true, false} {
+		eig, rho := qzClosedLoopEig(continuous, n, a, e, d, na, ne, balance)
+		if eig == nil {
+			continue
+		}
+		if rho <= closedLoopEigTol*float64(n) {
+			return eig, true
+		}
+		if best == nil || rho < bestRho {
+			best, bestRho = eig, rho
+		}
+	}
+	return best, false
+}
+
+var closedLoopEigTol = 1.0
+
+// qzClosedLoopEig returns the eigenvalues by QZ (Dggev, which permutes) of
+// the pencil (a, e), first scaled as by Dggbal 'B' when balance is set (the
+// scalings rounded to powers of two), and the largest ratio over them of
+// (‖Aq‖+|λ|‖Eq‖)‖xq‖‖yq‖ in the pencil QZ was given to
+// (na+|λ|ne)‖x‖‖D⁻¹y‖ in that of the bound, row-equilibrated by d: +Inf
+// for an eigenvalue not finite or not stable, nil eigenvalues when QZ
+// fails.
+func qzClosedLoopEig(continuous bool, n int, a, e, d []float64, na, ne float64, balance bool) ([]complex128, float64) {
+	nn := n * n
+	sa, se := append([]float64(nil), a...), append([]float64(nil), e...)
+	dl, dr := make([]float64, n), make([]float64, n)
+	for i := range n {
+		dl[i], dr[i] = 1, 1
+	}
+	if balance {
+		pa, pe := append([]float64(nil), a...), append([]float64(nil), e...)
+		ls, rs, work := make([]float64, n), make([]float64, n), make([]float64, 6*n)
+		ilo, ihi := impl.Dggbal(lapack.Permute, n, pa, n, pe, n, ls, rs, work)
+		if nb := ihi - ilo + 1; nb > 1 {
+			pr, pc := make([]int, n), make([]int, n)
+			for i := range n {
+				pr[i], pc[i] = i, i
+			}
+			for j := n - 1; j > ihi; j-- {
+				r, c := int(ls[j]), int(rs[j])
+				pr[j], pr[r] = pr[r], pr[j]
+				pc[j], pc[c] = pc[c], pc[j]
+			}
+			for j := range ilo {
+				r, c := int(ls[j]), int(rs[j])
+				pr[j], pr[r] = pr[r], pr[j]
+				pc[j], pc[c] = pc[c], pc[j]
+			}
+			ba, be := make([]float64, nb*nb), make([]float64, nb*nb)
+			copyStrided(ba, nb, pa[ilo*n+ilo:], n, nb, nb)
+			copyStrided(be, nb, pe[ilo*n+ilo:], n, nb, nb)
+			impl.Dggbal(lapack.Scale, nb, ba, nb, be, nb, ls, rs, work)
+			for i := range nb {
+				dl[pr[ilo+i]], dr[pc[ilo+i]] = pow2Near(ls[i]), pow2Near(rs[i])
+			}
+			for i := range n {
+				for j := range n {
+					sa[i*n+j] *= dl[i] * dr[j]
+					se[i*n+j] *= dl[i] * dr[j]
+				}
+			}
+		}
+	}
+	var nq, eq float64
+	for i := range sa {
+		nq, eq = math.Hypot(nq, sa[i]), math.Hypot(eq, se[i])
+	}
+	buf := make([]float64, 3*n+2*nn)
+	alphar, alphai, beta, vl, vr := buf[:n], buf[n:2*n], buf[2*n:3*n], buf[3*n:3*n+nn], buf[3*n+nn:]
+	var q [1]float64
+	impl.Dggev(lapack.LeftEVCompute, lapack.RightEVCompute, n, sa, n, se, n, alphar, alphai, beta, vl, n, vr, n, q[:], -1)
+	work := make([]float64, int(q[0]))
+	if !impl.Dggev(lapack.LeftEVCompute, lapack.RightEVCompute, n, sa, n, se, n, alphar, alphai, beta, vl, n, vr, n, work, len(work)) {
+		return nil, 0
 	}
 	eig := make([]complex128, n)
-	for i := range n {
-		v := complex(alphar[i]/beta[i], alphai[i]/beta[i])
+	rho := 0.0
+	for j := 0; j < n; j++ {
+		v := complex(alphar[j]/beta[j], alphai[j]/beta[j])
+		eig[j] = v
 		if !isFinite(real(v)) || !isFinite(imag(v)) || continuous && !(real(v) < 0) || !continuous && !(cmplx.Abs(v) < 1) {
-			res.accuracy = max(res.accuracy, 1)
+			rho = math.Inf(1)
+			continue
 		}
-		eig[i] = v
+		cols := []int{j}
+		if alphai[j] > 0 && j+1 < n {
+			cols = append(cols, j+1)
+		} else if alphai[j] < 0 && j > 0 {
+			cols = append(cols, j-1)
+		}
+		var xq, yq, x, y float64
+		for _, c := range cols {
+			for i := range n {
+				xv, yv := vr[i*n+c], vl[i*n+c]
+				xq, yq = math.Hypot(xq, xv), math.Hypot(yq, yv)
+				x, y = math.Hypot(x, dr[i]*xv), math.Hypot(y, dl[i]*yv/d[i])
+			}
+		}
+		lam := cmplx.Abs(v)
+		rho = math.Max(rho, (nq+lam*eq)*xq*yq/((na+lam*ne)*x*y))
 	}
-	res.Eig = eig
+	return eig, rho
 }
 
 // certify returns the X of res, the solution of the reduced Dare, once

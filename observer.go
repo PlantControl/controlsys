@@ -196,8 +196,14 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", context, err)
 	}
-	descriptorClosedLoopEig(continuous, At, Ct, ropts, res, nil)
-	return &RiccatiResult{X: res.X, K: transposeGain(res.K), Eig: res.Eig, Rcnd: res.Rcnd, accuracy: res.accuracy}, nil
+	L := transposeGain(res.K)
+	if res.kw == nil && ropts.E != nil {
+		// Primal (A − LC, E), not the dual (Aᵀ − CᵀLᵀ, Eᵀ): QZ of the dual,
+		// balanced by the transposed scalings, put zw46 modes 2e-3 off
+		// where the primal's were 1.5e-6.
+		setClosedLoopPencilEig(continuous, A, L, C, E, res)
+	}
+	return &RiccatiResult{X: res.X, K: L, Eig: res.Eig, Rcnd: res.Rcnd, accuracy: res.accuracy}, nil
 }
 
 // Kalmd computes the discrete Kalman filter gain from a continuous plant
