@@ -146,15 +146,26 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 	if samples > maxInt/2 || 2*fitOrder+1 > maxInt/(2*samples) {
 		return nil, none, ErrInvalidOrder
 	}
-	omega := make([]float64, samples)
-	for k := range samples {
-		theta := math.Pi * float64(k) / float64(samples-1)
-		if integrators > 0 {
-			theta = math.Pi * (float64(k) + .5) / float64(samples)
+	grid := func(integrators int) []float64 {
+		omega := make([]float64, samples)
+		for k := range samples {
+			theta := math.Pi * float64(k) / float64(samples-1)
+			if integrators > 0 {
+				theta = math.Pi * (float64(k) + .5) / float64(samples)
+			}
+			omega[k] = theta / dt
 		}
-		omega[k] = theta / dt
+		return omega
 	}
-	target, err := leastSquaresSourceResponse(source, omega)
+	target, err := leastSquaresSourceResponse(source, grid(integrators))
+	if err != nil && integrators == 0 && pencil == nil && errors.Is(err, ErrSingularTransform) {
+		// The response puts a pole at s = 0 that the stored count resolved
+		// from it (NDFJC6): hold the normwise staircase's integrators instead.
+		if k, r, kerr := leastSquaresIntegratorLimit(detect, false, dt); kerr == nil && k > 0 && k <= fitOrder {
+			integrators, residue = k, r
+			target, err = leastSquaresSourceResponse(source, grid(integrators))
+		}
+	}
 	if err != nil {
 		return nil, none, err
 	}
@@ -706,6 +717,7 @@ func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
 	evals := schurEigenvaluesRaw(t, n)
 	ar := A.RawMatrix()
 	absAX := make([]float64, n)
+	g := float64(n) * eps() / 2
 	coef := make([]complex128, n+1)
 	cluster := 0
 	for m := 1; m <= ordered; m++ {
@@ -740,7 +752,7 @@ func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
 				yax = math.Hypot(yax, s)
 			}
 		}
-		delta := eps() * yax
+		delta := g / (1 - g) * yax
 		var t11 mat.Dense
 		t11.CloneFrom(mat.NewDense(n, n, t).Slice(0, m, 0, m))
 		normT := mat.Norm(&t11, 2)
