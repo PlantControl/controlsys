@@ -2,6 +2,7 @@ package controlsys
 
 import (
 	"math"
+	"math/cmplx"
 	"math/rand/v2"
 	"testing"
 
@@ -167,5 +168,71 @@ func TestReduceResolvedGapSplitAccepted(t *testing.T) {
 	}
 	if e := reducedResponseErr(t, sys, res.Sys, append(slowProbePoints, 1e14i, 1e16i)); e > 1e-8 {
 		t.Errorf("response error %g", e)
+	}
+}
+
+// TestReduceWindowCapAtOtherPole checks the window cap of
+// sharedPoleWindows (N3P7NO): a window may not reach another model pole.
+// The model is upper triangular, poles −1, −2 and −2⁴⁰, with the −2 mode
+// carrying a residue of 5e-5; the cut keeps −1 and −2⁴⁰ in a Hadamard-rotated
+// (exact) realization and drops −2, so it is wrong by 5e-5/|s+2| exactly,
+// 2500·tol at s = 2j. The rotation smears the fast scale into the cut's −1:
+// β_R ≈ ε·2⁴⁰ ≈ 2.4e-4 ≤ ρ₀, an uncapped window of radius β_R/tol ≈ 1.6e4
+// covers −2 and every slow probe, makes them uninformative, and the
+// mid-band points, where the fast mode dominates and the error is below
+// tol, meet the count: the wrong cut is accepted. Capped at the distance
+// to −2 the window leaves −2's probes to the model-determined rule, which
+// rejects.
+func TestReduceWindowCapAtOtherPole(t *testing.T) {
+	const d = 1e-4
+	f := -math.Ldexp(1, 40)
+	sys, err := New(
+		mat.NewDense(3, 3, []float64{-1, 0.5, 0, 0, -2, 0, 0, 0, f}),
+		mat.NewDense(3, 1, []float64{1, d, -f}),
+		mat.NewDense(1, 3, []float64{1, 1, 1}),
+		mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1 := 1 + 0.5*d
+	red, err := New(
+		mat.NewDense(2, 2, []float64{(-1 + f) / 2, (-1 - f) / 2, (-1 - f) / 2, (-1 + f) / 2}),
+		mat.NewDense(2, 1, []float64{r1 - f, r1 + f}),
+		mat.NewDense(1, 2, []float64{1, 0}),
+		mat.NewDense(1, 1, nil), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tol := math.Sqrt(eps())
+	if e := reducedResponseErr(t, sys, red, []complex128{2i}); e < 1e3*tol {
+		t.Fatalf("cut error %g at s = 2j, want ≥ %g", e, 1e3*tol)
+	}
+	_, poles, ok := axisProbes(sys, nil)
+	if !ok {
+		t.Fatal("eigenvalues did not converge")
+	}
+	evR, betaR, ok := eigenRoundingBounds(red.A)
+	if !ok {
+		t.Fatal("eigenvalues of the cut did not converge")
+	}
+	win, _ := sharedPoleWindows(poles, red, tol)
+	for i, lr := range evR {
+		if math.Abs(real(lr)+1) > 1e-3 {
+			continue
+		}
+		if !(betaR[i] <= poles.rho0 && betaR[i]/tol > 1) {
+			t.Fatalf("β_R %g, ρ₀ %g: uncapped window would not reach −2", betaR[i], poles.rho0)
+		}
+		for k, c := range win.centre {
+			if c == lr && win.radius[k] > cmplx.Abs(lr+2) {
+				t.Errorf("window about %v, radius %g, reaches the pole −2", lr, win.radius[k])
+			}
+		}
+		if win.contain(2i) {
+			t.Errorf("probe 2j inside a window: radii %v", win.radius)
+		}
+	}
+	if frequencyAxisCutInBand(sys, red, nil, tol) {
+		t.Error("cut that drops the −2 mode accepted")
 	}
 }
