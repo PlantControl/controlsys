@@ -326,7 +326,7 @@ func TestLeastSquaresExactSampledRationalFit(t *testing.T) {
 		z := cmplx.Exp(complex(0, math.Pi*float64(k)/512))
 		target[k] = Poly(num).Eval(z) / Poly(den).Eval(z)
 	}
-	gotNum, gotDen, err := fitDiscreteResponse(target, 2)
+	gotNum, gotDen, err := fitDiscreteResponse(target, 2, false)
 	if err != nil {
 		t.Fatal(err)
 	}

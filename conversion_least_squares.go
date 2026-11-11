@@ -146,25 +146,18 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 	if samples > maxInt/2 || 2*fitOrder+1 > maxInt/(2*samples) {
 		return nil, none, ErrInvalidOrder
 	}
-	grid := func(integrators int) []float64 {
+	open := integrators > 0
+	grid := func() []float64 {
 		omega := make([]float64, samples)
 		for k := range samples {
-			theta := math.Pi * float64(k) / float64(samples-1)
-			if integrators > 0 {
-				theta = math.Pi * (float64(k) + .5) / float64(samples)
-			}
-			omega[k] = theta / dt
+			omega[k] = discreteFitTheta(k, samples, open) / dt
 		}
 		return omega
 	}
-	target, err := leastSquaresSourceResponse(source, grid(integrators))
-	if err != nil && integrators == 0 && pencil == nil && errors.Is(err, ErrSingularTransform) {
-		// The response puts a pole at s = 0 that the stored count resolved
-		// from it (NDFJC6): hold the normwise staircase's integrators instead.
-		if k, r, kerr := leastSquaresIntegratorLimit(detect, false, dt); kerr == nil && k > 0 && k <= fitOrder {
-			integrators, residue = k, r
-			target, err = leastSquaresSourceResponse(source, grid(integrators))
-		}
+	target, err := leastSquaresSourceResponse(source, grid())
+	if errors.Is(err, errLeastSquaresDCPole) && !open {
+		open = true
+		target, err = leastSquaresSourceResponse(source, grid())
 	}
 	if err != nil {
 		return nil, none, err
@@ -180,7 +173,7 @@ func (sys *System) leastSquaresFit(dt float64, fitOrder int, slow *System) (*Sys
 			return nil, none, err
 		}
 	} else {
-		numerator, denominator, err := fitDiscreteResponse(target, fitOrder)
+		numerator, denominator, err := fitDiscreteResponse(target, fitOrder, open)
 		if err != nil {
 			return nil, none, err
 		}
@@ -287,7 +280,9 @@ func (sys *System) discretizeLeastSquares(dt float64, fitOrder int, slow *System
 	return out, err
 }
 
-func fitDiscreteResponse(target []complex128, order int) ([]float64, []float64, error) {
+// fitDiscreteResponse fits target, sampled on the closed grid
+// (discreteFitTheta) or, with open set, the open one.
+func fitDiscreteResponse(target []complex128, order int, open bool) ([]float64, []float64, error) {
 	if order == 0 {
 		return []float64{real(target[0])}, []float64{1}, nil
 	}
@@ -300,7 +295,7 @@ func fitDiscreteResponse(target []complex128, order int) ([]float64, []float64, 
 	bestError := math.Inf(1)
 	var bestNum, bestDen []float64
 	var solver frequencyFitSolver
-	grid := newDiscreteFitGrid(len(target))
+	grid := newDiscreteFitGrid(len(target), open)
 	for range 12 {
 		raw, b := design.RawMatrix(), rhs.RawMatrix()
 		for k, value := range target {
@@ -346,18 +341,31 @@ func fitDiscreteResponse(target []complex128, order int) ([]float64, []float64, 
 	return refineDiscreteResponse(target, grid, design, rhs, &solver, bestNum, bestDen)
 }
 
-// discreteFitGrid is the closed fitting grid θ_k = πk/(samples−1) on the unit
+// discreteFitGrid is the fitting grid θ_k (discreteFitTheta) on the unit
 // circle: z = e^{jθ}, q = e^{−jθ} and 1/q, which every reweighted solve and
 // residual of fitDiscreteResponse reads.
 type discreteFitGrid struct {
 	z, q, invQ []complex128
 }
 
-func newDiscreteFitGrid(samples int) discreteFitGrid {
+// discreteFitTheta is θ_k of the closed grid πk/(samples−1), which samples
+// DC, or of the open grid π(k+½)/samples, which does not. The fit holding
+// integrators samples the open grid, as does a free fit whose source
+// response is nonfinite at DC: FreqResponse takes the pole limit at s = 0
+// beside a near pole the count resolves from zero, ±Inf although G(0) of
+// the stored model is finite (NDFJC6).
+func discreteFitTheta(k, samples int, open bool) float64 {
+	if open {
+		return math.Pi * (float64(k) + .5) / float64(samples)
+	}
+	return math.Pi * float64(k) / float64(samples-1)
+}
+
+func newDiscreteFitGrid(samples int, open bool) discreteFitGrid {
 	points := make([]complex128, 3*samples)
 	grid := discreteFitGrid{z: points[:samples], q: points[samples : 2*samples], invQ: points[2*samples:]}
 	for k := range samples {
-		theta := math.Pi * float64(k) / float64(samples-1)
+		theta := discreteFitTheta(k, samples, open)
 		grid.z[k] = cmplx.Exp(complex(0, theta))
 		grid.q[k] = cmplx.Exp(complex(0, -theta))
 		grid.invQ[k] = 1 / grid.q[k]
@@ -370,13 +378,19 @@ func leastSquaresSourceResponse(source *System, omega []float64) ([]complex128, 
 	if err != nil {
 		return nil, err
 	}
-	for _, h := range response.Data {
+	for k, h := range response.Data {
 		if cmplx.IsInf(h) || cmplx.IsNaN(h) {
+			if omega[k] == 0 {
+				return nil, errLeastSquaresDCPole
+			}
 			return nil, fmt.Errorf("least-squares: singular or nonfinite source frequency response: %w", ErrSingularTransform)
 		}
 	}
 	return response.Data, nil
 }
+
+// errLeastSquaresDCPole is a source response nonfinite at DC.
+var errLeastSquaresDCPole = fmt.Errorf("least-squares: singular or nonfinite source frequency response at DC: %w", ErrSingularTransform)
 
 func leastSquaresFitQuality(source, fitted *System, dt float64, samples int) (float64, float64, error) {
 	omega := make([]float64, samples+1)
