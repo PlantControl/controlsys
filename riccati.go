@@ -397,6 +397,8 @@ func certify(op string, unsolvable error, res *RiccatiResult, err error) (*Ricca
 // verdict (Lqg, H2Syn).
 func riccatiError(err error, unsolvable error) error {
 	switch {
+	case errors.Is(err, errBoundaryBand):
+		return fmt.Errorf("%v: %w", err, ErrNotConverged)
 	case errors.Is(err, errBoundaryUnstabilizable):
 		if unsolvable == nil {
 			return err
@@ -543,8 +545,10 @@ func nearSingularCancels(continuous bool, A, B, R *mat.Dense, opts *RiccatiOpts,
 // without it.
 func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error), continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := solve(A, B, Q, R, opts)
-	if err == nil && res.accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, res, false) {
-		res, err = nil, errBoundaryUnstabilizable
+	if err == nil && res.accuracy == 0 {
+		if berr := boundaryVerdict(continuous, A, B, Q, R, opts, res, false); berr != nil {
+			res, err = nil, berr
+		}
 	}
 	if err == nil && res.accuracy == 0 ||
 		err != nil && !noSolution(err) && !errors.Is(err, ErrSchurFailed) {
@@ -571,13 +575,15 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 			o.Workspace = nil
 		}
 		r, e := solve(A, B, Q, R, &o)
-		if e == nil && r.accuracy == 0 && boundaryCertified(continuous, A, B, Q, R, opts, r, false) {
-			r, e = nil, errBoundaryUnstabilizable
+		if e == nil && r.accuracy == 0 {
+			if berr := boundaryVerdict(continuous, A, B, Q, R, opts, r, false); berr != nil {
+				r, e = nil, berr
+			}
 		}
 		unscaled = unscaled || unscaledVerdict(r, e)
 		switch {
 		case errors.Is(e, errBoundaryUnstabilizable):
-			if boundary == nil {
+			if boundary == nil || errors.Is(boundary, errBoundaryBand) && !errors.Is(e, errBoundaryBand) {
 				boundary = e
 			}
 		case e != nil:
@@ -613,8 +619,15 @@ func otherScaling(solve func(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*Riccati
 // at 1 − 1e-9 and 1 − 1e-11 that boundaryUnstabilizable's κ-weighted band
 // covers.
 func boundaryCertified(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, detect bool) bool {
+	return boundaryVerdict(continuous, A, B, Q, R, opts, res, detect) != nil
+}
+
+// boundaryVerdict is boundaryCertified as the boundary error it implies:
+// errBoundaryUnstabilizable when both scalings find the mode deficient
+// within the first-order bound, else errBoundaryBand.
+func boundaryVerdict(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, detect bool) error {
 	if len(res.Eig) == 0 {
-		return false
+		return nil
 	}
 	n, _ := A.Dims()
 	band := float64(n) * eps() * denseNorm(A)
@@ -626,34 +639,40 @@ func boundaryCertified(continuous bool, A, B, Q, R *mat.Dense, opts *RiccatiOpts
 		}
 	}
 	if !near {
-		return false
+		return nil
 	}
 	var base RiccatiOpts
 	if opts != nil {
 		base = *opts
 	}
 	base.Workspace = nil
-	deficient := func(unscaledPBH bool) bool {
+	deficient := func(unscaledPBH bool) (bool, bool) {
 		base.NoScaling, base.plainScaling = true, false
 		problem, err := newRiccatiProblem(A, B, Q, R, &base)
 		if err != nil {
-			return false
+			return false, false
 		}
 		problem.unscaledPBH = unscaledPBH
-		if !problem.boundaryDeficient(continuous, detect) {
-			return false
+		d, x := problem.boundaryDeficient(continuous, detect)
+		if !d {
+			return false, false
 		}
 		base.NoScaling = false
 		problem.scale(&base, continuous)
-		return problem.boundaryDeficient(continuous, detect)
+		ds, xs := problem.boundaryDeficient(continuous, detect)
+		return ds, x && xs
 	}
-	if deficient(false) {
-		return true
+	if d, x := deficient(false); x {
+		return errBoundaryUnstabilizable
+	} else if d {
+		return errBoundaryBand
 	}
-	if !continuous && !detect && deficient(true) {
-		res.unscaledBoundary = true
+	if !continuous && !detect {
+		if d, _ := deficient(true); d {
+			res.unscaledBoundary = true
+		}
 	}
-	return false
+	return nil
 }
 
 func care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
@@ -2521,8 +2540,8 @@ func (problem *riccatiProblem) pencilRiccati(continuous bool) (*mat.Dense, *mat.
 	if err != nil {
 		// Before poor: a pass with no Accuracy 1 X must not let the
 		// other scaling mode return one.
-		if problem.boundaryUnstabilizable(continuous) {
-			return nil, nil, 0, 0, errBoundaryUnstabilizable
+		if berr := problem.boundaryError(continuous); berr != nil {
+			return nil, nil, 0, 0, berr
 		}
 		if !continuous {
 			problem.unscaledPBH = true
@@ -2802,6 +2821,21 @@ func (e unscaledBoundaryError) Unwrap() error { return e.error }
 // It is the only Riccati verdict that no stabilizing solution exists.
 var errBoundaryUnstabilizable = fmt.Errorf("%w: a mode on or beyond the stability boundary is unstabilizable", ErrNoStabilizing)
 
+// errBoundaryBand is the boundaryUnstabilizable verdict on a mode
+// deficient only within the band, 10× its first-order bound, not within
+// the bound itself: it steers every retry as errBoundaryUnstabilizable
+// does (errors.Is matches it), but certify reports ErrNotConverged, as
+// the data may be stabilizable (MZTFJJ).
+var errBoundaryBand error = boundaryBandError{}
+
+type boundaryBandError struct{}
+
+func (boundaryBandError) Error() string {
+	return "a mode on or beyond the stability boundary is within rounding of unstabilizable"
+}
+
+func (boundaryBandError) Is(target error) bool { return target == errBoundaryUnstabilizable }
+
 // errNoCandidate reports a Riccati solve with no candidate X accepted: a
 // float64 stable count of the Hamiltonian or pencil other than n, a
 // Newton or Hewer iteration that broke down or did not converge, an
@@ -2827,7 +2861,8 @@ func noSolution(err error) bool {
 // [A − λE, B] has rank below n by the PBH test: no stabilizing solution
 // exists (icare/idare Report 3), and an Accuracy 1 X would be stable only
 // to rounding, its exact closed loop unstable (K72KOR). Within rounding
-// is 10× the first-order bound τ = (n·eps·(|y|ᵀ|A||x| + |λ|·|y|ᵀ|E||x|)
+// (the band of inBand, of λ alone and of the retries the verdict
+// steers) is 10× the first-order bound τ = (n·eps·(|y|ᵀ|A||x| + |λ|·|y|ᵀ|E||x|)
 // + |y|ᵀ|(A − λE)x|)/|yᴴEx| of λ's error (x, y its right and left
 // eigenvectors): componentwise rounding plus the residual, which carries
 // QZ's backward error, so an exact mode at 0 or 1 of a dense A, computed
@@ -2852,7 +2887,12 @@ func noSolution(err error) bool {
 // hiding a zero of [E, B]. That μ-only test takes τμ at 1× its
 // first-order bound, not the band's 10× (AMDL7W: at 10× it claimed
 // ErrNoStabilizing on fast modes controllable at 5–9× first-order
-// rounding; the 10× margin elsewhere is MZTFJJ). These tests only lift
+// rounding). A mode deficient only with δ at 10× τ or τμ, not at 1× in
+// both λ and μ, is errBoundaryBand, which steers every retry and
+// boundaryExtendedDare as the verdict does, but is no proof that no
+// stabilizing solution exists (MZTFJJ: zw46 reg modes controllable at
+// 1.1–10× first-order rounding; the extended solve the band sends a Dare
+// to recovers cond(E) 2e6–4e7 mid rows at Accuracy 0). These tests only lift
 // verdicts: the problem is deficient only if the tests with δ = cτ‖E‖
 // and no μ-only test, as before them, also find a deficient mode, so
 // an honest error never becomes ErrNoStabilizing (AMDL7W census). A
@@ -2873,7 +2913,21 @@ func noSolution(err error) bool {
 // MPWOJM) when it is within √eps of the boundary, and only when that
 // band is below the mean's distance to the eigenvalues left out.
 func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
-	return problem.boundaryDeficient(continuous, false)
+	deficient, _ := problem.boundaryDeficient(continuous, false)
+	return deficient
+}
+
+// boundaryError is boundaryUnstabilizable as its error:
+// errBoundaryUnstabilizable for a mode deficient within the first-order
+// bound, errBoundaryBand for one deficient only within the band.
+func (problem *riccatiProblem) boundaryError(continuous bool) error {
+	switch deficient, exact := problem.boundaryDeficient(continuous, false); {
+	case exact:
+		return errBoundaryUnstabilizable
+	case deficient:
+		return errBoundaryBand
+	}
+	return nil
 }
 
 // boundaryDeficient is boundaryUnstabilizable that, with detect, also
@@ -2886,7 +2940,7 @@ func (problem *riccatiProblem) boundaryUnstabilizable(continuous bool) bool {
 // the boundary is reflected by X. Sᵀv = 0 makes v a mode of
 // A − BR⁻¹Sᵀ unobservable to Q − SR⁻¹Sᵀ, so the test is sound with S;
 // modes of A − BR⁻¹Sᵀ that are not modes of A go untested.
-func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
+func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) (deficient, exact bool) {
 	n, m := problem.n, problem.m
 	aRaw, bRaw := problem.A.RawMatrix(), problem.B.RawMatrix()
 	a := make([]float64, n*n)
@@ -2906,7 +2960,7 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 	vl, vr := make([]float64, n*n), make([]float64, n*n)
 	work := make([]float64, max(1, 8*n))
 	if !impl.Dggev(lapack.LeftEVCompute, lapack.RightEVCompute, n, ac, n, ec, n, wr, wi, beta, vl, n, vr, n, work, len(work)) {
-		return false
+		return false, false
 	}
 	nf, ep := float64(n), eps()
 	inBand := func(lam complex128, tol float64) bool {
@@ -3074,8 +3128,9 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 			yax += cmplx.Conj(y[i]) * ax
 		}
 		mod := cmplx.Abs(lam)
-		tol := 10 * (nf*ep*(ya+mod*ye) + yr) / cmplx.Abs(yex)
-		tm := 10 * (nf*ep*(ye+cmplx.Abs(mu)*ya) + yrm) / cmplx.Abs(yax)
+		tau := (nf*ep*(ya+mod*ye) + yr) / cmplx.Abs(yex)
+		taum := (nf*ep*(ye+cmplx.Abs(mu)*ya) + yrm) / cmplx.Abs(yax)
+		tol, tm := 10*tau, 10*taum
 		rho := math.Sqrt(ep) * (an + mod*en)
 		ds = ds[:0]
 		for j := range n {
@@ -3100,14 +3155,14 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 					gm = min(gm, cmplx.Abs(mus[j]-mu))
 				}
 			}
-			alone, dl = tm < gm, inf
-			tm /= 10
+			alone, dl, tm = tm < gm, inf, taum
 		}
-		if !cur && alone && inBand(lam, tol) && pbhDeficient(lam, tol, dl, tm) {
+		if !exact && alone && inBand(lam, tol) && pbhDeficient(lam, tol, dl, tm) {
 			cur = true
+			exact = math.IsInf(dl, 1) || pbhDeficient(lam, tol, tau, taum)
 		}
-		if base && cur {
-			return true
+		if base && exact {
+			return true, true
 		}
 		for c := 1; c < len(ds) && ds[c] <= max(rho, tol); c++ {
 			r := ds[c]
@@ -3142,14 +3197,16 @@ func (problem *riccatiProblem) boundaryDeficient(continuous, detect bool) bool {
 			}
 			if mtol < sep && inBand(mean, mtol) {
 				base = base || pbhDeficient(mean, mtol, mtol, inf)
-				cur = cur || pbhDeficient(mean, mtol, mtol, mtm)
+				if !exact && pbhDeficient(mean, mtol, mtol, mtm) {
+					cur, exact = true, true
+				}
 			}
-			if base && cur {
-				return true
+			if base && exact {
+				return true, true
 			}
 		}
 	}
-	return false
+	return base && cur, false
 }
 
 // poorSolution restores problem.poor to ws.xData, ws.kData and eig.
