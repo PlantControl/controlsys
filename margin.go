@@ -668,9 +668,21 @@ func selectMargin(margins, freqs []float64) (m, w float64, ok bool) {
 // it is the smallest boundary eigenvalue of the Hamiltonian pencil of
 // |L| = g, refined on the exact response; with them, the first crossing on
 // an adaptive frequency grid. A pole within rounding of DC with a finite DC
-// gain has its crossing there, on the double-double response. It returns +Inf
-// when the gain never drops that far, as for a DC gain of 0 (MATLAB's
-// high-pass result). An infinite DC
+// gain has its crossing there, on the double-double response. Where the
+// pencil cannot place a dip below the threshold past DC, two crossings of
+// the same sign at either end, the first crossing comes from a log scan of
+// the double-double response from the frequency below which a bound on the
+// DC moments keeps it within a quarter of its margin of the DC value: when
+// the threshold sits in the pencil's coefficient noise (a DC gain far below
+// D), when polish rejects a pencil root, or when the DC gain cancels its
+// realization's terms to below 1e-2 of their size, as beside a k-fold zero
+// at DC cancelled by D. A DC margin within the double-double noise there
+// returns ErrAccuracyUnverified; a dip not unimodal within two scan steps,
+// or one past the response's rise above twice its DC value, is outside the
+// scan. It returns +Inf when the gain never drops that far, as for a DC
+// gain of 0 (MATLAB's high-pass result); a zero that DCGain certifies only
+// to its own rounding, and that the double-double DC response resolves from
+// zero, takes that response as the DC gain instead. An infinite DC
 // gain (an integrator) puts the threshold at ∞, so the bandwidth is
 // undefined rather than +Inf; python-control returns NaN, which the Go error
 // rule maps to ErrInvalidArgument. A dbDrop that is not a finite negative
@@ -699,7 +711,7 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	if err != nil && !(dcGain != nil && errors.Is(err, ErrAccuracyUnverified)) {
 		return 0, fmt.Errorf("Bandwidth: %w", err)
 	}
-	bw, berr := bandwidth(sys, dcGain.At(0, 0), dbDrop)
+	bw, berr := bandwidth(sys, dcGain.At(0, 0), dbDrop, err == nil)
 	if berr != nil {
 		return 0, fmt.Errorf("Bandwidth: %w", berr)
 	}
@@ -709,8 +721,17 @@ func Bandwidth(sys *System, dbDrop float64) (float64, error) {
 	return bw, nil
 }
 
-func bandwidth(sys *System, dc, dbDrop float64) (float64, error) {
+// bandwidth is Bandwidth for the DC gain dc, which DCGain certified when
+// certified is set. A certified zero is zero to DCGain's rounding; where the
+// double-double DC response resolves it from zero, that response is the DC
+// gain, as for D cancelling C(sI − A)⁻¹B at DC to an ulp of D.
+func bandwidth(sys *System, dc, dbDrop float64, certified bool) (float64, error) {
 	dcMag := math.Abs(dc)
+	if dcMag == 0 && certified && sys.internalDelayCount() == 0 {
+		if h, solve, _, ok := ddSISOSolve(sys, newTimeDomain(sys.Dt).frequencyPoint(0), false); ok && cmplx.Abs(h) > 4*solve {
+			dc, dcMag = cmplx.Abs(h), cmplx.Abs(h)
+		}
+	}
 	if dcMag == 0 {
 		return math.Inf(1), nil
 	}
@@ -724,25 +745,30 @@ func bandwidth(sys *System, dc, dbDrop float64) (float64, error) {
 		return 0, err
 	}
 	if err == nil {
+		gamma := math.Pow(10, threshold/20)
+		if bw, err, ok := loop.coarsePencilBandwidth(dc, dbDrop, certified); ok {
+			return bw, err
+		}
 		// A finite DC gain with a response snapped to +Inf at DC is a pole
 		// within rounding of DC: the snap covers the crossing, so the search
 		// reads the response in double-double, where it agrees with DCGain.
 		// So does a response read below the threshold at DC itself: the DC
 		// gain cancels below the double evaluation's rounding (HUUZRO).
-		if h, ok := loop.eval.try(0); !ok || cmplx.IsInf(h) || cmplx.Abs(h) < math.Pow(10, threshold/20) {
+		if h, ok := loop.eval.try(0); !ok || cmplx.IsInf(h) || cmplx.Abs(h) < gamma {
 			loop.eval.exact = true
 		}
-		ws, err := loop.gainCrossings(math.Pow(10, threshold/20))
+		ws, err := loop.gainCrossings(gamma)
 		if err != nil {
 			return 0, err
 		}
 		if loop.eval.err != nil {
 			return 0, loop.eval.err
 		}
-		if len(ws) == 0 {
-			return math.Inf(1), nil
+		bw := math.Inf(1)
+		if len(ws) > 0 {
+			bw = ws[0]
 		}
-		return ws[0], nil
+		return loop.dipCheckedBandwidth(gamma, bw), nil
 	}
 
 	omega, err := sys.DefaultFrequencyGrid(1000)
@@ -968,6 +994,9 @@ type rationalLoop struct {
 	absorbed *System
 	// poles caches resonancePoles for the gain and phase searches of one loop.
 	poles *resonancePoleSet
+	// gainRejected records that the last gainCrossings rejected a pencil
+	// root in polish, for Bandwidth's scan below its first crossing.
+	gainRejected bool
 }
 
 type resonancePoleSet struct{ pairs, reals, cluster []float64 }
@@ -1246,6 +1275,7 @@ func (r *rationalLoop) gainCrossings(gamma float64) ([]float64, error) {
 	r.eval.extended = true
 	defer func() { r.eval.extended = false }()
 	out := r.polish(cands, f, 1e-9, false)
+	r.gainRejected = len(out) < len(cands)
 	if len(out) < len(cands) || len(cands) == 0 {
 		pairs, _, cluster := r.resonancePoles()
 		if r.discrete() && len(pairs)+len(cluster) > 0 {
