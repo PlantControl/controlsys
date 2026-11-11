@@ -7,6 +7,7 @@ import (
 	"math/cmplx"
 
 	"plantcontrol.org/v1/gonum/blas/blas64"
+	"plantcontrol.org/v1/gonum/lapack"
 	"plantcontrol.org/v1/gonum/mat"
 )
 
@@ -402,52 +403,101 @@ func dotVec(x, y []float64) float64 {
 const leastSquaresIntegratorTol = 1e-10
 
 // leastSquaresIntegratorLimit returns the multiplicity k of the pole at s = 0
-// and lim s^k G(s). Eigenvalues of a k-fold Jordan chain spread by roundoff to
-// eps^(1/k)·‖A‖, so the chain is found as a null-space staircase on the
-// minimal realization instead: each step deflates a singular value at most
-// leastSquaresIntegratorTol·‖A‖₁ with a Householder similarity, leaving
-// A = [N A12; 0 A22] with N strictly upper triangular and A22 nonsingular, so
-// lim s^k G(s) = C1 N^(k-1) (B1 - A12 A22⁻¹ B2). With stored set, A is the
-// model's own realization or its fold, whose componentwise rounding is that
-// of the data, and the staircase takes at most as many steps as A has poles
-// within rounding of s = 0 or of z = 1 at dt (originUnresolvedPoles): the
-// normwise tolerance is of the order of a stiff pole, so alone it takes a
-// slow pole of a stiff graded realization, located to ε of itself and
-// mapped well inside z = 1, for an integrator (KEEWB4). k so depends on
-// dt: a resolved pole counts once e^{λ·dt} is within the existing IsStable
-// band poleStabilityTolerance of z = 1. The slow part of a pencil split is
-// not stored: it is quasi-triangular, its diagonal fixed exactly at the
-// split's rounding, as a repeated integrator spread to ±1e-8 that
-// componentwise rounding of the triangle would not move.
+// of the minimal realization of source and lim s^k G(s)
+// (integratorStaircaseLimit).
 func leastSquaresIntegratorLimit(source *System, stored bool, dt float64) (int, float64, error) {
 	minimal, err := source.MinimalRealization()
 	if err != nil {
 		return 0, 0, err
 	}
-	n := minimal.Order
-	if n == 0 {
-		return 0, 0, nil
+	return integratorStaircaseLimit(minimal.Sys, stored, dt)
+}
+
+// integratorStaircaseLimit returns the multiplicity k of the pole at s = 0
+// of the minimal SISO sys and lim s^k G(s) (integratorStaircase). A limit
+// within its own rounding bound of zero is no integrator coefficient: the
+// pole the staircase took is, to the precision it is computed, not driven
+// to the output, and its exact 1/s^k coefficient may be 0, as for a pole
+// within rounding of s = 0 that the data leave uncontrollable or
+// unobservable (NDFJC6). The top integrator is then dropped and the
+// staircase rerun with one step fewer, until the limit exceeds its bound
+// or no integrator is left. k only shapes the least-squares fit, which
+// holds the k poles at z = 1 and is judged by its own error, so a dropped
+// integrator leaves a free pole to the fit.
+func integratorStaircaseLimit(sys *System, stored bool, dt float64) (int, float64, error) {
+	steps, _ := sys.A.Dims()
+	for {
+		k, limit, bound, err := integratorStaircase(sys, stored, dt, steps)
+		if err != nil || k == 0 || math.Abs(limit) > bound {
+			return k, limit, err
+		}
+		steps = k - 1
 	}
-	a := mat.DenseCopyOf(minimal.Sys.A)
-	b := mat.VecDenseCopyOf(minimal.Sys.B.ColView(0))
-	c := mat.VecDenseCopyOf(minimal.Sys.C.RowView(0))
+}
+
+// integratorStaircase finds the multiplicity k ≤ steps of the pole at s = 0
+// of the minimal SISO sys and returns k, lim s^k G(s) and that limit's
+// rounding bound. Eigenvalues of a k-fold Jordan chain spread by roundoff
+// to eps^(1/k)·‖A‖, so the chain is found as a null-space staircase
+// instead: each step deflates a singular value at most
+// leastSquaresIntegratorTol·‖A‖₁ with a Householder similarity, leaving
+// A = [N A12; 0 A22] with N strictly upper triangular and A22 nonsingular,
+// so lim s^k G(s) = C1 N^(k-1) (B1 - A12 A22⁻¹ B2). With stored set, A is
+// the model's own realization or its fold, and the staircase takes at most
+// as many steps as A has poles within rounding of s = 0 or of z = 1 at dt
+// (originUnresolvedPoles): the normwise tolerance is of the order of a
+// stiff pole, so alone it takes a slow pole of a stiff graded realization,
+// located to ε of itself and mapped well inside z = 1, for an integrator
+// (KEEWB4). k so depends on dt: a resolved pole counts once e^{λ·dt} is
+// within the existing IsStable band poleStabilityTolerance of z = 1. The
+// slow part of a pencil split is not stored: it is quasi-triangular, its
+// diagonal fixed exactly at the split's rounding, as a repeated integrator
+// spread to ±1e-8 that componentwise rounding of the triangle would not
+// move.
+//
+// The bound is first order in the unit roundoff u. The k reflections
+// return Q(A+ΔA)Qᵀ, Q(b+Δb), Q(c+Δc) with ‖ΔA‖_F ≤ kγ‖A‖_F,
+// ‖Δb‖ ≤ kγ‖b‖, ‖Δc‖ ≤ kγ‖c‖ (Higham, Lemma 19.3), and the LU solve
+// y = A22⁻¹b2 and the products forming x = b1 − A12·y and v = N^(k-1)·x
+// are backward stable with γ_n. The limit is r = ℓᵀb̃ = c̃ᵀ[v; 0] with
+// ℓᵀ = c1ᵀN^(k-1)·[I, −A12·A22⁻¹], so Δb moves it by ‖ℓ‖‖Δb‖, Δc by
+// ‖Δc‖‖v‖, ΔA in A12 and A22 by ‖ℓ‖‖ΔA‖‖y‖, and ΔA in N, which enters
+// k−1 times, by (k−1)‖ΔA‖‖c1‖‖N‖^(k-2)‖x‖. Summed with γ = γ_{(k+2)n}
+// covering the reflections and the solve:
+//
+//	|Δr| ≤ γ·(‖ℓ‖(‖b‖ + ‖A‖_F‖y‖) + ‖c‖‖v‖ + (k−1)‖A‖_F‖c1‖‖N‖^(k-2)‖x‖).
+//
+// The deflated singular values set to zero are not rounding: they are the
+// move of the poles to s = 0 that defines the integrators. Where A22 is
+// singular to working precision, as when a pole the staircase did not take
+// is still within rounding of s = 0, y and so the limit are undetermined and
+// the bound is +Inf.
+func integratorStaircase(sys *System, stored bool, dt float64, steps int) (int, float64, float64, error) {
+	n, _ := sys.A.Dims()
+	if n == 0 || steps == 0 {
+		return 0, 0, 0, nil
+	}
+	a := mat.DenseCopyOf(sys.A)
+	b := mat.VecDenseCopyOf(sys.B.ColView(0))
+	c := mat.VecDenseCopyOf(sys.C.RowView(0))
+	normA, normB, normC := mat.Norm(a, 2), mat.Norm(b, 2), mat.Norm(c, 2)
 	tol := leastSquaresIntegratorTol * mat.Norm(a, 1)
 	raw := a.RawMatrix()
 	var svd mat.SVD
 	var v mat.Dense
 	k, unresolved := 0, -1
-	for ; k < n; k++ {
+	for ; k < min(n, steps); k++ {
 		m := n - k
 		if !svd.Factorize(a.Slice(k, n, k, n), mat.SVDFullV) {
-			return 0, 0, ErrSingularEquation
+			return 0, 0, 0, ErrSingularEquation
 		}
 		if svd.Values(nil)[m-1] > tol {
 			break
 		}
 		if stored && unresolved < 0 {
 			var ok bool
-			if unresolved, ok = originUnresolvedPoles(minimal.Sys.A, n, dt); !ok {
-				return 0, 0, ErrSingularEquation
+			if unresolved, ok = originUnresolvedPoles(sys.A, n, dt); !ok {
+				return 0, 0, 0, ErrSingularEquation
 			}
 		}
 		if stored && k >= unresolved {
@@ -486,46 +536,149 @@ func leastSquaresIntegratorLimit(source *System, stored bool, dt float64) (int, 
 		}
 	}
 	if k == 0 {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
+	nBlock := a.Slice(0, k, 0, k)
 	x := mat.VecDenseCopyOf(b.SliceVec(0, k))
+	c1 := mat.VecDenseCopyOf(c.SliceVec(0, k))
+	left := mat.VecDenseCopyOf(c1)
+	normY, normL2 := 0.0, 0.0
+	var lu mat.LU
 	if k < n {
+		lu.Factorize(a.Slice(k, n, k, n))
 		var y mat.VecDense
-		if err := y.SolveVec(a.Slice(k, n, k, n), b.SliceVec(k, n)); err != nil {
-			return 0, 0, err
+		if err := lu.SolveVecTo(&y, false, b.SliceVec(k, n)); err != nil {
+			return k, 0, math.Inf(1), nil
 		}
 		var shift mat.VecDense
 		shift.MulVec(a.Slice(0, k, k, n), &y)
 		x.SubVec(x, &shift)
+		normY = mat.Norm(&y, 2)
 	}
+	normX := mat.Norm(x, 2)
 	next := mat.NewVecDense(k, nil)
 	for range k - 1 {
-		next.MulVec(a.Slice(0, k, 0, k), x)
+		next.MulVec(nBlock, x)
 		x, next = next, x
+		next.MulVec(nBlock.T(), left)
+		left, next = next, left
 	}
-	return k, mat.Dot(c.SliceVec(0, k), x), nil
+	if k < n {
+		var w, l2 mat.VecDense
+		w.MulVec(a.Slice(0, k, k, n).T(), left)
+		if err := lu.SolveVecTo(&l2, true, &w); err == nil {
+			normL2 = mat.Norm(&l2, 2)
+		} else {
+			normL2 = math.Inf(1)
+		}
+	}
+	limit := mat.Dot(c.SliceVec(0, k), x)
+	normL := math.Hypot(mat.Norm(left, 2), normL2)
+	chain := 0.0
+	if k > 1 {
+		chain = float64(k-1) * normA * mat.Norm(c1, 2) * math.Pow(mat.Norm(nBlock, 2), float64(k-2)) * normX
+	}
+	g := float64((k+2)*n) * eps() / 2
+	bound := g / (1 - g) * (normL*(normB+normA*normY) + normC*mat.Norm(x, 2) + chain)
+	return k, limit, bound, nil
 }
 
 // originUnresolvedPoles counts the eigenvalues λ of the n×n A that are
-// integrators to a fit at dt: zero or not located away from s = 0 by
-// componentwise rounding of A (resolvedPoles), or with e^{λ·dt} within the
-// IsStable boundary band poleStabilityTolerance of z = 1, where the
-// discrete fit cannot place a free pole apart from an exact one. A rounded
-// integrator or a member of a k-fold chain is not resolved, as |yᴴx|
-// collapses; a slow pole of a stiff graded realization is located to ε of
-// itself. It reports false where the factorization fails.
+// integrators to a fit at dt: those of the largest cluster of the m
+// smallest in modulus that componentwise rounding of A can carry to s = 0
+// together, and any zero or with e^{λ·dt} within the IsStable boundary
+// band poleStabilityTolerance of z = 1, where the discrete fit cannot place
+// a free pole apart from an exact one. Closeness to s = 0 on the scale of
+// ‖A‖ is not enough: a slow pole of a stiff graded realization is located
+// to ε of itself, and rounding of A does not move it to s = 0 (KEEWB4,
+// NDFJC6).
+//
+// With A = Z·T·Zᵀ in real Schur form ordered by modulus, the m leading
+// eigenvalues are those of T11, with invariant bases X = Z1 and
+// Y = Z1 + Z2·X12ᵀ, YᵀX = I, where T11·X12 − X12·T22 = T12. Rounding
+// |E| ≤ ε|A| moves them, to first order, to those of T11 + YᵀEX, and
+// ‖YᵀEX‖₂ ≤ δ = ε‖|Y|ᵀ|A||X|‖_F. If rounding can carry them all to zero,
+// T11 is within δ of a nilpotent matrix, so by Elsner's theorem every
+// eigenvalue μ of T11 has |μ| ≤ (2‖T11‖ + δ)^{1−1/m}·δ^{1/m}; a cluster
+// that fails this is resolved from zero. For m = 1 the radius is the
+// pole's own bound ε·|y|ᵀ|A||x|/|yᵀx|; a k-fold chain, whose computed
+// poles spread to δ^{1/k}, passes as a cluster although each member
+// exceeds its first-order bound. A cluster the Sylvester equation cannot
+// separate from the rest does not pass. It reports false where the
+// factorization fails.
 func originUnresolvedPoles(A *mat.Dense, n int, dt float64) (int, bool) {
-	poles, resolved := resolvedPoles(A, n)
-	if resolved == nil {
+	t, z, ok := realSchur(A)
+	if !ok {
 		return 0, false
 	}
-	count := 0
-	for k, p := range poles {
+	work := make([]float64, n)
+	for placed := 0; placed < n; placed += schurBlockSize(t, n, placed) {
+		evals := schurEigenvaluesRaw(t, n)
+		best := placed
+		for i := placed; i < n; i += schurBlockSize(t, n, i) {
+			if cmplx.Abs(evals[i]) < cmplx.Abs(evals[best]) {
+				best = i
+			}
+		}
+		if best != placed {
+			if _, _, ok := impl.Dtrexc(lapack.UpdateSchur, n, t, n, z, n, best, placed, work); !ok {
+				return 0, false
+			}
+		}
+	}
+	evals := schurEigenvaluesRaw(t, n)
+	ar := A.RawMatrix()
+	absAX := make([]float64, n)
+	cluster, largest := 0, 0.0
+	for m := 1; m <= n; m++ {
+		largest = math.Max(largest, cmplx.Abs(evals[m-1]))
+		if splitsSchurBlock(t, n, m) {
+			continue
+		}
+		var x []float64
+		if m < n {
+			var err error
+			if x, err = separateSchurBlocks(t, n, m, "integrator cluster"); err != nil {
+				continue
+			}
+		}
+		yax, normT := 0.0, 0.0
+		for j := range m {
+			for i := range m {
+				normT = math.Hypot(normT, t[i*n+j])
+			}
+			for i := range n {
+				s := 0.0
+				for l, v := range ar.Data[i*ar.Stride : i*ar.Stride+n] {
+					s += math.Abs(v) * math.Abs(z[l*n+j])
+				}
+				absAX[i] = s
+			}
+			for i := range m {
+				s := 0.0
+				for l := range n {
+					y := z[l*n+i]
+					for q := range n - m {
+						y -= z[l*n+m+q] * x[i*(n-m)+q]
+					}
+					s += math.Abs(y) * absAX[l]
+				}
+				yax = math.Hypot(yax, s)
+			}
+		}
+		delta := eps() * yax
+		radius := math.Pow(2*normT+delta, 1-1/float64(m)) * math.Pow(delta, 1/float64(m))
+		if largest <= radius {
+			cluster = m
+		}
+	}
+	count := cluster
+	for _, p := range evals[cluster:] {
 		re, im := real(p)*dt, imag(p)*dt
 		half := math.Sin(im / 2)
 		toOne := complex(math.Expm1(re)*math.Cos(im)-2*half*half, math.Exp(re)*math.Sin(im))
 		nearOne := !cmplx.IsInf(toOne) && cmplx.Abs(toOne) <= poleStabilityTolerance(1+toOne)
-		if !resolved[k] || nearOne {
+		if p == 0 || nearOne {
 			count++
 		}
 	}
