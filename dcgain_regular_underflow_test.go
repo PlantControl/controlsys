@@ -81,6 +81,9 @@ func TestDCGainRegularPathUnderflowedSolve(t *testing.T) {
 			if !dcGainRegularPath(sys) {
 				t.Fatal("model no longer reaches the regular DC path")
 			}
+			if r := solveDCRegular(sys.A, sys.B, sys.C, sys.D, 0, false); r.certified {
+				t.Fatalf("solveDCRegular certified %v from an underflowed solve", mat.Formatted(r.g))
+			}
 			g, err := sys.DCGain()
 			if err != nil {
 				t.Fatalf("DCGain error %v, want nil", err)
@@ -93,6 +96,45 @@ func TestDCGainRegularPathUnderflowedSolve(t *testing.T) {
 				t.Fatalf("DCGain = %v exceeds the exact gain's own rounding by %g", mat.Formatted(g), ex)
 			}
 		})
+	}
+}
+
+// Above order 16 the underflowed solve has no exact check: the order-2
+// block of DZSEVY MIMO census row mhd#52 (OCRNXB), beside 15 states at the
+// same scale that B does not drive, keeps its uncertified value with
+// ErrAccuracyUnverified instead of a nil zero gain.
+func TestDCGainRegularPathUnderflowedSolveLargeOrder(t *testing.T) {
+	const n, k = 17, 0x1p448
+	a := make([]float64, n*n)
+	copy(a[0:2], []float64{-0x1.cce55995f1d73p+447, -0x1.a32c6ce193042p+447})
+	copy(a[n:n+2], []float64{0x1.c0ec862b5e332p+386, -0x1.0b726bec3496cp+449})
+	for i := 2; i < n; i++ {
+		a[i*n+i] = -k * (1 + float64(i)/16)
+		if i+1 < n {
+			a[i*n+i+1] = k / 4
+		}
+	}
+	b := make([]float64, n)
+	b[0], b[1] = -0x0.00253f10a069bp-1022, -0x1.7985baa3cf616p-874
+	c := make([]float64, n)
+	c[0], c[1] = -0x1.2ef4ea4e8ef6dp+535, 0x1.abd222365fcd7p+541
+	for i := 2; i < n; i++ {
+		c[i] = 0x1p500 * float64(i)
+	}
+	sys := dcGainCertTestSystem(t, n, 1, 1, a, b, c, []float64{0}, 0)
+	if !dcGainRegularPath(sys) {
+		t.Fatal("model no longer reaches the regular DC path")
+	}
+	g, err := sys.DCGain()
+	if err == nil {
+		ex, ok := dcGainOwnRoundingExcess(sys, g)
+		if !ok || ex > 0 {
+			t.Fatalf("DCGain = %v with nil error, off the exact gain by %g beyond its own rounding", mat.Formatted(g), ex)
+		}
+		return
+	}
+	if !errors.Is(err, ErrAccuracyUnverified) {
+		t.Fatalf("DCGain error %v, want nil or ErrAccuracyUnverified", err)
 	}
 }
 

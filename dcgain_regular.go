@@ -97,12 +97,16 @@ const dcProductFloor = 0x1p-1022 / (dcUnit * dcUnit)
 //
 //	η_j = ν·ρ_j + ν·dcUnderflow + dcUnderflow,
 //
-// the first addend covering ρ_j's own two roundings scaled by ν, the
-// second those of ν·ρ_j and ν·dcUnderflow. Without it an X that underflowed
-// to 0 leaves ρ_j = |B_j| ≠ 0 while ν·ρ_j rounds to 0, and the zero gain
-// passes with τ = 0. A one-step η whose terms may have left the normal
-// range (their sum below dcProductFloor or η below MinNormal) forms the
-// residual instead.
+// ν·dcUnderflow covering ρ_j's own two roundings scaled by ν, the last
+// dcUnderflow those of ν·ρ_j and ν·dcUnderflow. An addition that rounds
+// either away lost at most ½ulp(η), within the bound's own rounding; in
+// the subnormal range the additions are exact. Without them an X
+// that underflowed to 0 leaves ρ_j = |B_j| ≠ 0 while ν·ρ_j rounds to 0,
+// and the zero gain passes with τ = 0. A one-step η whose sum of terms
+// lies below dcProductFloor, or which lies below MinNormal itself, forms
+// the residual instead: above MinNormal/u² the at most n² + n + 6
+// subnormal product errors of the sum stay below u² of it, within
+// 1 + γ_{2n+6}.
 //
 // β ≥ 1, a non-finite bound, or a nonzero product below dcProductFloor
 // leaves the row unbound; with refine unset it then returns at once.
