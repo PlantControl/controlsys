@@ -35,7 +35,7 @@ func TestReduceEqualizeRefusesCutWrongAtNyquistZero(t *testing.T) {
 		sys := lits[name]
 		assertReduceDeletesLastStateExactly(t, name, sys)
 		for _, opts := range []*ReduceOpts{{}, {Equalize: true}} {
-			res, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, -1)
+			res, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, sys)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
@@ -485,7 +485,7 @@ func TestReduceRefusesCutBeyondModelBoundAtNyquistZero(t *testing.T) {
 		sys := lits[name]
 		assertReduceDeletesLastStateExactly(t, name, sys)
 		for _, opts := range []*ReduceOpts{{}, {Mode: ReduceUncontrollable}, {Mode: ReduceUnobservable}, {Equalize: true}} {
-			res, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, -1)
+			res, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, sys)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
