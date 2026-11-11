@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"math/cmplx"
 	"math/rand/v2"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -248,6 +249,81 @@ func nearSingularDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *RiccatiResu
 		return nil, false
 	}
 	return extendedDareSolve(A, B, Q, R, opts, cond)
+}
+
+// candidateLost reports a Dare error of its float64 solves losing every
+// candidate, with no verdict on the boundary: errNoCandidate,
+// errSingularBasis or ErrSchurFailed, neither errBoundaryUnstabilizable
+// (the band included) nor an unscaled PBH boundary verdict.
+func candidateLost(err error) bool {
+	if errors.Is(err, errBoundaryUnstabilizable) || errors.As(err, new(unscaledBoundaryError)) {
+		return false
+	}
+	return noSolution(err) || errors.Is(err, ErrSchurFailed)
+}
+
+// lostCandidateKept reports an extended solve kept after candidateLost:
+// certified, or with Eig, its extended-precision closed loop rounded
+// once, inside the unit circle. stableLoop proves the exact loop of the
+// rounded K stable, but with ‖K‖ 1.4e11 and B, K cancelling in A − BK
+// its float64 eigenvalues reached ±271 (zrw big 10015, delta 2e-10):
+// an uncertified X whose Eig is unstable is no result.
+func lostCandidateKept(r *RiccatiResult) bool {
+	if r.xeCertified {
+		return true
+	}
+	for _, v := range r.Eig {
+		if !(cmplx.Abs(v) < 1) {
+			return false
+		}
+	}
+	return true
+}
+
+// lostCandidateDare is extendedDareSolve, on E = I when E is nil or the
+// identity, for a Dare whose float64 solves lost every candidate
+// (candidateLost) where nearSingularDare and boundaryExtendedDare do not
+// run: E = I, or ErrSchurFailed below nearSingularDare's gate. Under cheap
+// control R + BᵀXB keeps its smallest eigenvalues only to the rounding
+// eps·|B|ᵀ|X||B| of the float64 X, so whether its Cholesky factor exists
+// at a pencil X or a Hewer iterate, and so whether Dare returned a value
+// or ErrNotConverged, turned on the rounding of the U11 solve (TXU6AT: 264
+// of 10000 rv48 rows flipped between gonum v0.20.10 and v0.20.12, every
+// sampled error at that Cholesky). The extended solve never forms it in
+// float64; its result keeps its certificate (Accuracy 0 only with Y, K and
+// X within newtonTol under perturbation), else Accuracy 1. Xe is nil
+// without a descriptor.
+func lostCandidateDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, err error) (*RiccatiResult, bool) {
+	if !candidateLost(err) {
+		return nil, false
+	}
+	n, m := B.Dims()
+	if n == 0 || m == 0 {
+		return nil, false
+	}
+	var o RiccatiOpts
+	if opts != nil {
+		o = *opts
+	}
+	plain := isIdentityDescriptor(o.E) && o.plantE == nil
+	cond := 1.0
+	if plain {
+		o.E = eyeDense(n)
+	} else {
+		c, ok := extendedDareCond(B, &o)
+		if !ok || !errors.Is(err, ErrSchurFailed) || c*eps() > newtonTol {
+			return nil, false
+		}
+		cond = c
+	}
+	r, ok := extendedDareSolve(A, B, Q, R, &o, cond)
+	if !ok || !lostCandidateKept(r) {
+		return nil, false
+	}
+	if plain {
+		r.xe = nil
+	}
+	return r, true
 }
 
 // extendedDareCond returns the largest LU condition estimate of E and

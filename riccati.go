@@ -1062,6 +1062,8 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 		if r, e := dareInputs(A, B, Q, R, &o); e == nil {
 			res, err = r, nil
 		}
+	} else if r, ok := lostCandidateDare(A, B, Q, R, opts, err); ok {
+		res, err = r, nil
 	}
 	res, err = nearSingularEGate("Dare", false, A, B, R, opts, res, err)
 	if err == nil && res.accuracy == 0 && dareUncertified(res, err) {
@@ -1079,7 +1081,10 @@ func dareFor(A, B, Q, R *mat.Dense, opts *RiccatiOpts, explicit bool) (*RiccatiR
 // uncertified result (Accuracy 1, or one Dare demotes to it) that only the
 // unscaled PBH test finds at an unstabilizable boundary mode
 // (unscaledBoundary), kept only with Y and K certified (xeCertified), else the error
-// or result stays. A certified X whose refined EᵀXE is loose (xeLoose),
+// or result stays; after an error with every candidate lost
+// (candidateLost) it is kept uncertified too, at Accuracy 1, as
+// nearSingularDare keeps it above the gate, when its Eig is stable
+// (lostCandidateKept). A certified X whose refined EᵀXE is loose (xeLoose),
 // which Dlqr demotes, takes, for a caller returning EᵀXE (explicit: Dlqr,
 // Lqg; Dare and Kalman return X and paid for it with no change, CEFUJP),
 // a certified extended solve whole when its X
@@ -1109,7 +1114,7 @@ func boundaryExtendedDare(A, B, Q, R *mat.Dense, opts *RiccatiOpts, res *Riccati
 		return nil, false
 	}
 	r, ok := extendedDareSolve(A, B, Q, R, opts, cond)
-	if !ok || !r.xeCertified {
+	if !ok || !r.xeCertified && !(candidateLost(err) && lostCandidateKept(r)) {
 		return nil, false
 	}
 	if loose && r.accuracy != 0 {
