@@ -246,3 +246,40 @@ func TestDCGainHighOrderPoleAtDC(t *testing.T) {
 	g, err = rounded.DCGain()
 	requireDCGainUnverified(t, "dense similarity", g, err)
 }
+
+// 6XEGVF: F9extremeScale rows of the PCG(61, 2026) sweep (#2106, #2124,
+// #2139), upper triangular with nonzero diagonal, so exactly nonsingular:
+// each exact gain is finite but beyond float64 range. Where a route reads
+// a pole there the gain is that Inf with the exact limit's sign and a nil
+// error; with no route reading one it is ErrOverflow. Before N4GQHT
+// (e90866a) these returned −Inf for +Inf, +Inf for −Inf, and an SVD
+// error.
+func TestDCGainExtremeScaleTriangleBeyondRange(t *testing.T) {
+	inf := math.Inf(1)
+	for _, tc := range []struct {
+		dcGainLiteral
+		want []float64
+	}{
+		{dcGainLiteral{"MISO, both Inf", 3, 2, 1, []float64{-9.9999999999999968e-180, 3.5429203187017164e+109, -9.3373076832952285e-91, 0, -9.9999999999999985e-118, -1.6305303605402429e-55, 0, 0, -1.0000000000000004e+253}, []float64{-6.5643933953151467e+199, -4.9143459566484737e+199, 2.2915972698821062e+199, 9.0426489850156796e+199, 9.8200387120182046e+199, -1.8212032835036716e+200}, []float64{0.032069000625976063, -3.832508629302565, 0.41723831572639369}, []float64{0.74978537326588135, -1.184591920949057}, 0}, []float64{inf, inf}},
+		{dcGainLiteral{"SISO, −Inf", 3, 1, 1, []float64{-100000, -6.7041053288332827e-33, 1.221503811413991e-97, 0, -9.9999999999999986e-69, 5.8288544036900861e-97, 0, 0, -9.9999999999999974e-160}, []float64{-1.7257030021035112e+200, 4.1881005217031889e+199, 2.643551214194839e+198}, []float64{0.011356933591273988, 0.81830345136976268, -0.070982642030928966}, []float64{-0.38606682040866835}, 0}, []float64{-inf}},
+	} {
+		exact, overflow := exactDCGainLimitChecked(mat.NewDense(tc.n, tc.n, tc.a), mat.NewDense(tc.n, tc.m, tc.b), mat.NewDense(tc.p, tc.n, tc.c), mat.NewDense(tc.p, tc.m, tc.d), 0)
+		if !overflow {
+			t.Fatalf("%s: exact limit %v, want finite beyond float64 range", tc.name, exact.RawMatrix().Data)
+		}
+		w := dcGainRationalLimit(tc.n, tc.m, tc.p, tc.a, tc.b, tc.c, tc.d, 0)
+		g, err := tc.system(t).DCGain()
+		if err != nil {
+			t.Fatalf("%s: DCGain error %v, want nil", tc.name, err)
+		}
+		for k, v := range g.RawMatrix().Data {
+			if v != tc.want[k] || v != w[k] {
+				t.Errorf("%s: entry %d = %v, want %v (rounded exact %v)", tc.name, k, v, tc.want[k], w[k])
+			}
+		}
+	}
+	noPole := dcGainLiteral{"SISO, no route pole", 2, 1, 1, []float64{-9.9999999999999999e+51, -8.7125158229505073e+43, 0, -9.9999999999999936e-226}, []float64{-5.749219916945394e+199, -1.0439670948638291e+199}, []float64{-0.09885981154204293, -1.4046234439879814}, []float64{-0.41245043398284803}, 0}
+	if g, err := noPole.system(t).DCGain(); !errors.Is(err, ErrOverflow) {
+		t.Errorf("%s: DCGain = %v, %v; want ErrOverflow", noPole.name, g, err)
+	}
+}
