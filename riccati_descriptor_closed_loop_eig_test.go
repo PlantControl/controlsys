@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"math/cmplx"
 	"math/rand/v2"
+	"slices"
 	"testing"
 
 	"plantcontrol.org/v1/gonum/mat"
@@ -126,12 +127,12 @@ func hbPolishRoot(coef []*big.Float, z complex128) complex128 {
 	zr, zi := nf(real(z)), nf(imag(z))
 	for range 60 {
 		pr, pi, dr, di := nf(0), nf(0), nf(0), nf(0)
-		for k := len(coef) - 1; k >= 0; k-- {
+		for _, c := range slices.Backward(coef) {
 			dr, di = mul(dr, di, zr, zi)
 			dr.Add(dr, pr)
 			di.Add(di, pi)
 			pr, pi = mul(pr, pi, zr, zi)
-			pr.Add(pr, coef[k])
+			pr.Add(pr, c)
 		}
 		den := nf(0).Add(nf(0).Mul(dr, dr), nf(0).Mul(di, di))
 		if den.Sign() == 0 {

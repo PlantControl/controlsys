@@ -1344,9 +1344,12 @@ func closedLoopStable(A, B, K, E *mat.Dense, eig []complex128) bool {
 // unbalanced E⁻¹(A − BK) of the state-scaled solve put Lqr's Eig 2.6e-2 off
 // with blkdiag(10⁻¹⁵E, I) and 2e-5 off with E's rows scaled by 2³⁰, K exact,
 // and unbalanced QZ 5.6e-2. A QZ failure, or an eigenvalue not finite or not
-// stable, leaves res at Accuracy 1.
+// stable, leaves res at Accuracy 1. The Eig of an extended-precision solve
+// (kw set), its exact closed loop rounded once, is kept: there
+// 1/σ_min(E) ~ 1e15 carries the rounding of A − BK to O(1) in any float64
+// pencil.
 func descriptorClosedLoopEig(continuous bool, A, B *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) {
-	if err != nil || res == nil || res.K == nil || opts == nil || opts.E == nil || isIdentityDescriptor(opts.E) {
+	if err != nil || res == nil || res.K == nil || res.kw != nil || opts == nil || opts.E == nil || isIdentityDescriptor(opts.E) {
 		return
 	}
 	n, m := B.Dims()
