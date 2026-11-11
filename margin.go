@@ -77,7 +77,8 @@ func (r *DiskMarginResult) PeakFreq() (w float64, ok bool) { return r.peakFreq, 
 // fails, at takes the pole limit in double (ddGate.limit) instead of
 // FreqResponse's double-double response, and a failure there stands: the
 // rational margin search and the PID screens read it as unresolved, as next
-// to an origin or Nyquist cluster or multiple poles at z = 1. resolve
+// to an origin or Nyquist cluster or multiple poles at z = 1, or beside a
+// resonance where the pole limit's pole is not verified at ω. resolve
 // returns the response as FreqResponse resolves it, for a caller that needs
 // it rather than that unresolved state.
 //
