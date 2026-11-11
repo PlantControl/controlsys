@@ -3307,7 +3307,7 @@ func (problem *riccatiProblem) dareGain(xData []float64) (*mat.Dense, error) {
 }
 
 // verifyRiccati returns the gain of the solution X (gain K) once a Newton
-// step certifies it. A step is ‖X₁ − X‖/‖X₁‖ (stepNorms) for the Newton
+// step certifies it. A step is ‖X₁ − X‖/‖X₁‖ (newtonStep) for the Newton
 // iterate X₁ = X + Δ of newtonCost (Newton–Kleinman for Care, Hewer for
 // Dare), whose Δ solves the Lyapunov (Stein) equation of A − BK for the
 // double-double Riccati residual of X: to first order the forward error
@@ -3376,11 +3376,7 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 			}
 			return nil, fail
 		}
-		d, x1n := problem.stepNorms(x1, xData)
-		step := 0.0
-		if d != 0 {
-			step = math.Sqrt(d / x1n)
-		}
+		step := problem.newtonStep(x1, xData)
 		if it == 0 {
 			if step <= newtonTol {
 				problem.closedLoopEig(eig)
@@ -3436,22 +3432,39 @@ func (problem *riccatiProblem) verifyRiccati(continuous bool, X, K *mat.Dense, e
 	return nil, fail
 }
 
-// stepNorms returns ‖X₁ − X‖² and ‖X₁‖² (Frobenius) of x1 and xData in
-// the caller's coordinates, X = T·X̂·T, so that a step measures the
+// newtonStep returns the relative step ‖X₁ − X‖/‖X₁‖ of x1 from xData
+// in the caller's coordinates, X = T·X̂·T, so that a step measures the
 // relative error of the returned X rather than that of the state-scaled
-// iterate, where an error in the small entries of X̂ can hide.
-func (problem *riccatiProblem) stepNorms(x1, xData []float64) (d, x1n float64) {
+// iterate, where an error in the small entries of X̂ can hide; the larger
+// of the Frobenius and 1-norm ratios, so that newtonTol bounds both. A
+// Frobenius step alone certified X 8.5e-9 to 9.97e-9 off, its error in
+// that norm, whose 1-norm error was 1.01e-8 to 1.46e-8 (rv39, rv48,
+// rv49v, q4080 scan), while X one step on was the 320-bit X rounded.
+func (problem *riccatiProblem) newtonStep(x1, xData []float64) float64 {
 	t, n := problem.t, problem.n
-	for i, v := range x1 {
-		e := v - xData[i]
+	scaled := func(i int, v float64) float64 {
 		if t != nil {
-			w := t[i/n] * t[i%n]
-			v, e = v*w, e*w
+			return v * t[i/n] * t[i%n]
 		}
-		d += e * e
-		x1n += v * v
+		return v
 	}
-	return d, x1n
+	var d, x1n, d1, x1n1 float64
+	for j := range n {
+		var dc, xc float64
+		for i := range n {
+			k := i*n + j
+			v, e := scaled(k, x1[k]), scaled(k, x1[k]-xData[k])
+			d += e * e
+			x1n += v * v
+			dc += math.Abs(e)
+			xc += math.Abs(v)
+		}
+		d1, x1n1 = max(d1, dc), max(x1n1, xc)
+	}
+	if d == 0 {
+		return 0
+	}
+	return max(math.Sqrt(d/x1n), d1/x1n1)
 }
 
 // closedLoopGain returns the gain K of xData and its Newton iterate x1
