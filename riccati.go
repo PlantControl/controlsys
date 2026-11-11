@@ -1657,9 +1657,13 @@ func gainOfX(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, res *
 // a tolerance of 2.3e-8, was 2.7e-8 off the 320-bit gain (band 3.4e-12;
 // amd64 rv49v 2393). Of 4008 rotated sweep rows per platform the
 // convergence check failed on 77 to 95, of which 9 to 12 were demoted
-// and the rest took the Hewer gain.
+// and the rest took the Hewer gain. So does first a c whose gain is
+// resolved only beyond gainFloor (cd.tol), as gainOfX holds such an
+// unrefined K: refinement converged in X while K, 1.8e-7 from the gain
+// of its X at a resolution of 6e-5, was 1.9e-6 off the 320-bit gain, the
+// Hewer gain exact.
 func rotatedHewer(A, B, Q, R *mat.Dense, opts *RiccatiOpts, red *reducedInputs, p, c *RiccatiResult, cd gainDist) (*RiccatiResult, bool) {
-	hewer := cd.d > gainFloor
+	hewer := cd.d > gainFloor || cd.tol > gainFloor
 	if hewer {
 		if h, ok := hewerGainSubstituted(A, B, Q, R, opts, red, c); ok {
 			return h, true
