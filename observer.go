@@ -196,6 +196,7 @@ func kalmanGain(context string, continuous bool, A, E, G, C, H, Qn, Rn, Nn *mat.
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", context, err)
 	}
+	descriptorClosedLoopEig(continuous, At, Ct, ropts, res, nil)
 	return &RiccatiResult{X: res.X, K: transposeGain(res.K), Eig: res.Eig, Rcnd: res.Rcnd, accuracy: res.accuracy}, nil
 }
 

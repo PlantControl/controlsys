@@ -352,6 +352,7 @@ func (ws *RiccatiWorkspace) fits(n, m int) error {
 // certified one, lives in opts.Workspace when one is given.
 func Care(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := careCore(A, B, Q, R, opts)
+	descriptorClosedLoopEig(true, A, B, opts, res, err)
 	return certify("Care", ErrNotStabilizable, res, err)
 }
 
@@ -1038,6 +1039,7 @@ func hamiltonianNorms(n int, a, q, g []float64) riccatiNorms {
 // ErrAccuracyUnverified.
 func Dare(A, B, Q, R *mat.Dense, opts *RiccatiOpts) (*RiccatiResult, error) {
 	res, err := dareFor(A, B, Q, R, opts, false)
+	descriptorClosedLoopEig(false, A, B, opts, res, err)
 	return certify("Dare", ErrNotStabilizable, res, err)
 }
 
@@ -1332,6 +1334,59 @@ func closedLoopStable(A, B, K, E *mat.Dense, eig []complex128) bool {
 	}
 	copy(eig, vals)
 	return true
+}
+
+// descriptorClosedLoopEig sets res.Eig, for the K of res and E = opts.E
+// (not the identity), to the generalized eigenvalues of (A − BK, E), A − BK
+// formed in double-double and rounded, by QZ of the pencil equilibrated by
+// the left and right Dggbal scalings rounded to powers of two (exact, so the
+// eigenvalues are those of the pencil, to QZ's backward error): the
+// unbalanced E⁻¹(A − BK) of the state-scaled solve put Lqr's Eig 2.6e-2 off
+// with blkdiag(10⁻¹⁵E, I) and 2e-5 off with E's rows scaled by 2³⁰, K exact,
+// and unbalanced QZ 5.6e-2. A QZ failure, or an eigenvalue not finite or not
+// stable, leaves res at Accuracy 1.
+func descriptorClosedLoopEig(continuous bool, A, B *mat.Dense, opts *RiccatiOpts, res *RiccatiResult, err error) {
+	if err != nil || res == nil || res.K == nil || opts == nil || opts.E == nil || isIdentityDescriptor(opts.E) {
+		return
+	}
+	n, m := B.Dims()
+	nn := n * n
+	buf := make([]float64, 5*nn+8*n)
+	a, lo, e, sa, se := buf[:nn], buf[nn:2*nn], buf[2*nn:3*nn], buf[3*nn:4*nn], buf[4*nn:5*nn]
+	ls, rs, work := buf[5*nn:5*nn+n], buf[5*nn+n:5*nn+2*n], buf[5*nn+2*n:]
+	aRaw, bRaw, kRaw, eRaw := A.RawMatrix(), B.RawMatrix(), res.K.RawMatrix(), opts.E.RawMatrix()
+	copyStrided(a, n, aRaw.Data, aRaw.Stride, n, n)
+	ddMulAcc(n, n, m, -1, bRaw.Data, bRaw.Stride, 1, kRaw.Data, kRaw.Stride, 1, a, lo, n)
+	for i := range a {
+		a[i] += lo[i]
+	}
+	copyStrided(e, n, eRaw.Data, eRaw.Stride, n, n)
+	copy(sa, a)
+	copy(se, e)
+	impl.Dggbal(lapack.Scale, n, sa, n, se, n, ls, rs, work)
+	for i := range n {
+		ls[i], rs[i] = pow2Near(ls[i]), pow2Near(rs[i])
+	}
+	for i := range n {
+		for j := range n {
+			a[i*n+j] *= ls[i] * rs[j]
+			e[i*n+j] *= ls[i] * rs[j]
+		}
+	}
+	alphar, alphai, beta, ok := qzEigenvalues(n, a, n, e, n)
+	if !ok {
+		res.accuracy = max(res.accuracy, 1)
+		return
+	}
+	eig := make([]complex128, n)
+	for i := range n {
+		v := complex(alphar[i]/beta[i], alphai[i]/beta[i])
+		if !isFinite(real(v)) || !isFinite(imag(v)) || continuous && !(real(v) < 0) || !continuous && !(cmplx.Abs(v) < 1) {
+			res.accuracy = max(res.accuracy, 1)
+		}
+		eig[i] = v
+	}
+	res.Eig = eig
 }
 
 // certify returns the X of res, the solution of the reduced Dare, once
