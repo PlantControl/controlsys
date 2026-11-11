@@ -28,7 +28,8 @@ type ReduceOpts struct {
 	Mode ReduceMode
 	// Tol is the staircase rank tolerance (MATLAB minreal tol): a singular
 	// value of a step counts as rank above Tol·max(σ₁(step), ‖A‖_F), ‖A‖
-	// of the full model (equalized when Equalize is set), before Reduce
+	// of the full model (equalized when Equalize is set, and for the
+	// equalized cut Reduce tries when the band refuses one), before Reduce
 	// removes any state, in both staircase stages; 0 selects n²·eps with the floor
 	// raised to MATLAB ctrbf/obsvf's 10·n·‖A‖₁·eps, the rule CtrbF and
 	// ObsvF use. MATLAB minreal's documented default sqrt(eps) is not
@@ -48,7 +49,10 @@ type ReduceOpts struct {
 	// default since it is not uniformly better: on the 4000-case Kalman
 	// sweep (KALMAN_SWEEP_EQUALIZE=1) with 10^±4 state scales it fixes
 	// 245 over-counts but adds 185 others (kept hidden unstable states),
-	// and without scaling it adds 59 over-counts while fixing 72.
+	// and without scaling it adds 59 over-counts while fixing 72. Without
+	// it, Reduce still tries the cut of the equalized model when the
+	// frequency-axis check refuses the cut of a graded continuous model
+	// (see Reduce).
 	Equalize bool
 }
 
@@ -89,7 +93,13 @@ type ReduceResult struct {
 // point at the fast scale cannot see a slow pole to tol, so a continuous
 // model also needs n_f + nr_f + 1 verified points at or above the gap and
 // n_s + nr_s + 1 below both it and ε·‖A‖/tol (n_x, nr_x the eigenvalues of
-// the model and the cut on that side). The check is sampled and evaluated in floating point: agreement at those
+// the model and the cut on that side). Without a gap and without Equalize,
+// when the check refuses the staircase cut of a continuous model whose
+// equalizing scales span 2^16 or more, the staircase cut of the equalized
+// model is judged by the same check and kept if it passes: on a realization graded over decades
+// the rotations mix large entries into small ones, so the cut of the
+// stored realization can miss the response beyond √ε even at the right
+// order, and the power-of-two balancing is exact. The check is sampled and evaluated in floating point: agreement at those
 // points does not bound the error between them, and where the model's
 // response is below its own rounding bound it cannot decide. Otherwise the
 // model is returned as the first stage left it (modes clustered near z = 1,
@@ -143,7 +153,7 @@ func (sys *System) Reduce(opts *ReduceOpts) (*ReduceResult, error) {
 	keep := structuralStates(sys, opts.Mode != ReduceUnobservable, opts.Mode != ReduceUncontrollable)
 	switch len(keep) {
 	case n:
-		return reduceStates(sys, policy, opts, true, -1)
+		return reduceStates(sys, policy, opts, true, sys)
 	case 0:
 		return zeroOrderResult(sys)
 	}
@@ -160,7 +170,7 @@ func reduceStructuralRemainder(sys *System, policy realizationTransformPolicy, o
 	if err != nil {
 		return nil, err
 	}
-	res, err := reduceStates(sub, newRealizationTransformPolicy(sub), opts, true, reduceFloor(sys, opts))
+	res, err := reduceStates(sub, newRealizationTransformPolicy(sub), opts, true, sys)
 	if err != nil || res.Order < len(keep) {
 		return res, err
 	}
@@ -192,9 +202,15 @@ func reduceFloor(sys *System, opts *ReduceOpts) float64 {
 // continuous block of reduceAcrossSpectralGap (scaleIO false) is exempt,
 // since its caller judges the assembled reduction against the whole model,
 // while the band would judge the block against its own response, which can
-// be a rounding-level part of the model's. floor < 0 selects the staircase
-// floor of sys itself.
-func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool, floor float64) (*ReduceResult, error) {
+// be a rounding-level part of the model's. When the band rejects the cut
+// of a graded continuous model, the cut of the equalized model
+// (reduceEqualizedCut) is judged by the same band. full is the model whose
+// staircase floor applies: sys itself, or the model sys is a sub-block of.
+func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, scaleIO bool, full *System) (*ReduceResult, error) {
+	floor := -1.0
+	if full != sys {
+		floor = reduceFloor(full, opts)
+	}
 	base, removed, err := reduceByStaircase(sys, policy, opts, scaleIO, floor)
 	if err != nil || base.Order == policy.n {
 		return base, err
@@ -202,10 +218,62 @@ func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOp
 	if res, ok, err := reduceAcrossResolvedGap(sys, policy, opts, base, removed); ok || err != nil {
 		return res, err
 	}
-	if (sys.Dt == 0 && !scaleIO) || frequencyAxisCutInBand(sys, base.Sys, removed, math.Max(math.Sqrt(eps()), opts.Tol)) {
+	tol := math.Max(math.Sqrt(eps()), opts.Tol)
+	if (sys.Dt == 0 && !scaleIO) || frequencyAxisCutInBand(sys, base.Sys, removed, tol) {
 		return base, nil
 	}
+	if scaleIO {
+		if res, ok := reduceEqualizedCut(sys, policy, opts, full, tol); ok {
+			return res, nil
+		}
+	}
 	return unreducedResult(sys, policy)
+}
+
+// reduceEqualizedCut is the staircase cut of the continuous sys under
+// Equalize, with the equalized floor of full, when the band certifies it
+// at tol; ok is false when Equalize is already set, sys is discrete, its
+// equalizing scales span less than equalizedCutSpread, the cut removes no
+// state or the band rejects it. The orthogonal staircase judges couplings
+// against ‖A‖, so on a realization graded over decades its rotations mix
+// the large entries into the small ones and the cut can miss the response
+// beyond √ε even at the right order; the power-of-two balancing is exact,
+// so the equalized cut is a realization of the same model.
+func reduceEqualizedCut(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, full *System, tol float64) (*ReduceResult, bool) {
+	if opts.Equalize || sys.Dt != 0 || !equalizeGraded(sys) {
+		return nil, false
+	}
+	eq := *opts
+	eq.Equalize = true
+	floor := -1.0
+	if full != sys {
+		floor = reduceFloor(full, &eq)
+	}
+	cut, removed, err := reduceByStaircase(sys, policy, &eq, true, floor)
+	if err != nil || cut.Order == policy.n || !frequencyAxisCutInBand(sys, cut.Sys, removed, tol) {
+		return nil, false
+	}
+	return cut, true
+}
+
+// equalizedCutSpread is the least ratio of the largest to the smallest
+// equalizing scale for which reduceEqualizedCut tries the equalized cut.
+// On the AYT3ND census every rejected continuous cut that the equalized cut
+// fixed had scales spanning 2^16 or more, while the rejected cuts of less
+// graded models (planted stiff, near-singular explicit) were never fixed:
+// below it the retry only doubles their cost.
+const equalizedCutSpread = 1 << 16
+
+// equalizeGraded reports whether the equalizing scales of sys span at
+// least equalizedCutSpread.
+func equalizeGraded(sys *System) bool {
+	n, m, p := sys.Dims()
+	scale, scaled := equalize(mat.DenseCopyOf(sys.A), mat.DenseCopyOf(sys.B), mat.DenseCopyOf(sys.C), n, m, p)
+	if !scaled {
+		return false
+	}
+	lo, hi := slices.Min(scale), slices.Max(scale)
+	return hi >= equalizedCutSpread*lo
 }
 
 // reduceAcrossResolvedGap is the spectral-gap stage of reduceStates; ok is
@@ -436,7 +504,7 @@ func reduceAcrossSpectralGap(sys *System, policy realizationTransformPolicy, opt
 	var parts []*System
 	nr := 0
 	for _, part := range []*System{fast, slow} {
-		red, err := reduceStates(part, newRealizationTransformPolicy(part), opts, false, -1)
+		red, err := reduceStates(part, newRealizationTransformPolicy(part), opts, false, part)
 		if err != nil {
 			return nil, false
 		}
@@ -754,8 +822,9 @@ func reverseCols(m *mat.Dense, n int) {
 // pass, and a model whose response is ill-conditioned in its entries
 // (poles clustered near z = 1, as from matched C2D) then changes its
 // response far beyond √ε with no state removed. Powers of two are exact,
-// like the integer powers of two of MATLAB balance.
-func equalize(A, B, C *mat.Dense, n, m, p int) {
+// like the integer powers of two of MATLAB balance. It returns D's
+// diagonal and whether any state was rescaled.
+func equalize(A, B, C *mat.Dense, n, m, p int) ([]float64, bool) {
 	const sclfac = 2.0
 	const factor = 0.95
 	sfmin1 := math.SmallestNonzeroFloat64 / eps()
@@ -771,6 +840,7 @@ func equalize(A, B, C *mat.Dense, n, m, p int) {
 	aRaw := A.RawMatrix()
 	bRaw := B.RawMatrix()
 	cRaw := C.RawMatrix()
+	scaled := false
 
 	for {
 		noconv := false
@@ -851,6 +921,7 @@ func equalize(A, B, C *mat.Dense, n, m, p int) {
 
 			scale[i] *= f
 			noconv = true
+			scaled = true
 
 			fi := 1.0 / f
 			for j := range n {
@@ -867,7 +938,7 @@ func equalize(A, B, C *mat.Dense, n, m, p int) {
 			}
 		}
 		if !noconv {
-			break
+			return scale, scaled
 		}
 	}
 }

@@ -150,7 +150,7 @@ func TestReduceWithoutStructuralRemovalIsStaircaseStage(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, -1)
+		want, err := reduceStates(sys, newRealizationTransformPolicy(sys), opts, true, sys)
 		if err != nil {
 			t.Fatal(err)
 		}
