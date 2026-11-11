@@ -15,10 +15,17 @@ import (
 // its LU estimate rejected these E as ErrDescriptorSingular (AHNSX7, RL6IT7
 // amendment 2). nearSingularTriangularE seeds 857 (full MATLAB rank, LU
 // estimate ≥ 1/ε) and 962 (LU estimate < 1/ε, MATLAB rank deficient), dt=1:
-// Lqi must return the 320-bit oracle's design. The E with σ₁ ~ 1e-3 and
-// cond ~ 1e13 is at the edge of Care's convergence (it fails under -race),
-// so it must only not be ErrDescriptorSingular, and match the oracle when a
-// value comes back. A singular plant E stays ErrDescriptorSingular.
+// Lqi must return the 320-bit oracle's design; both lie in the plant-row
+// scale's dead band (bit-identical to blkdiag(E, I)) and do not exercise it
+// (ZIUHCL ruling 3). So must the E with σ₁ ~ 1e-3 and σ_min ~ 3e-16 in
+// every build (ZIUHCL): with blkdiag(E, I) the unit integrator rows set ‖J‖
+// and the fast ±4.2e15 pair of the extended pencil sat at Dhgeqz's infinite
+// threshold, where the FMA contraction choice in gonum Drot decided the
+// sign of a numerically infinite eigenvalue and so whether Care found n
+// stable ones. With the plant rows scaled to unit RMS the pair's β is ~300
+// ulps above that threshold in every build: its sign is data, not FMA. Eig
+// beyond the fast mode is not compared (unreliable for this E). A singular
+// plant E stays ErrDescriptorSingular.
 func TestLqiDescriptorJudgesPlantE(t *testing.T) {
 	oracle := func(label string, sys *System, res *RiccatiResult) {
 		t.Helper()
@@ -51,11 +58,9 @@ func TestLqiDescriptorJudgesPlantE(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := acceptUnverified(Lqi(sys, eyeDense(5), eyeDense(2), nil))
-	switch {
-	case errors.Is(err, ErrDescriptorSingular):
+	if res, err := Lqi(sys, eyeDense(5), eyeDense(2), nil); err != nil {
 		t.Errorf("scaled E: %v", err)
-	case err == nil && res.accuracy == 0:
+	} else {
 		oracle("scaled E", sys, res)
 	}
 

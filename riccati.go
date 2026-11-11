@@ -150,8 +150,9 @@ type RiccatiOpts struct {
 	// plantE is the model E when E is its transpose (Kalman's dual), so
 	// nearSingularEGate keeps the window of both condition estimates.
 	plantE *mat.Dense
-	// augmentedE marks E as blkdiag(plantE, I) (Lqi): plantE alone is
-	// judged nonsingular or near singular, as rank(blkdiag(E, I)) =
+	// augmentedE marks E as blkdiag(plantE, I) with the plant rows scaled
+	// (Lqi): plantE alone is judged nonsingular or near singular, as
+	// rank(blkdiag(E, I)) =
 	// rank(E) + p exactly while MATLAB rank of the augmented E rejects a
 	// plant E with σ₁(E) < 1 that MATLAB rank admits.
 	augmentedE bool
