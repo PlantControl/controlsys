@@ -1,6 +1,7 @@
 package controlsys
 
 import (
+	"maps"
 	"math"
 	"math/cmplx"
 	"math/rand/v2"
@@ -882,9 +883,7 @@ func TestReduceBandSureUninformativeSkipKeepsVerdicts(t *testing.T) {
 	for name, l := range bandLiterals {
 		models[name] = l.system(t)
 	}
-	for name, sys := range reduceVerifyLiterals(t) {
-		models[name] = sys
-	}
+	maps.Copy(models, reduceVerifyLiterals(t))
 	tol := math.Sqrt(eps())
 	skipped := 0
 	for name, sys := range models {
