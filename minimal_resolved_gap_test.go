@@ -101,7 +101,11 @@ func TestReduceResolvedGapDiscreteGlobalCount(t *testing.T) {
 // structurally zero. Against the floor ε·‖A‖ ≈ 0.25 the full staircase
 // keeps only the fast state, a cut that fails the check; the split reduces
 // each block on its own floor, removes just the unobservable state and is
-// verified with the per-side counts, so Reduce returns it at order 2.
+// verified with the per-side counts, so Reduce returns it at order 2. The
+// spec's −2⁴⁰ leaves both slow states to the staircase (its cut still
+// fails, but drops no slow state), hence −2⁵⁰; and no dense 2×2 orthogonal
+// matrix is exact in binary, so the rotation is the Hadamard similarity,
+// orthogonal up to the scale 1/√2 that a similarity ignores.
 func TestReduceResolvedGapSplitAccepted(t *testing.T) {
 	fast := math.Ldexp(1, 50)
 	A := mat.NewDense(3, 3, []float64{
