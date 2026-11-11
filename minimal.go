@@ -74,19 +74,22 @@ type ReduceResult struct {
 // result), so the order does not depend on I/O scaling and a tiny but
 // nonzero B or C is kept. When the staircase removes states and the
 // eigenvalue magnitudes have a gap of 1/√ε or more (a stiff model, whose
-// floor ε·‖A‖ can exceed the couplings of its slow states), the modes on
-// either side of the gap are also reduced separately. Then the lowest
-// order of the two whose frequency response matches the model's to √ε
-// (relative) at the eigenvalue scales is returned, else the model
-// unreduced. Without such a gap, the staircase reduction is kept only when
-// its response is verified to match the model's to max(√ε, Tol) on the
-// frequency axis (the unit circle or the imaginary axis): at points beside
-// every eigenvalue, on a fixed grid and on a decade grid, none may refute
-// it, fail to verify it where the model's own rounding bound determines its
-// response, or deviate from the model by more than that bound, and the
-// points that verify it within the rounding bounds of both responses must
-// fix a difference of degree n + nr (the orders of the model and the cut).
-// The check is sampled and evaluated in floating point: agreement at those
+// floor ε·‖A‖ can exceed the couplings of its slow states) and the
+// staircase reduction fails the check below, the modes on either side of
+// the gap are reduced separately instead; that reduction is kept when it
+// removes a state and passes the same check, else the model is returned
+// unreduced. A reduction is kept only when its response is verified to
+// match the model's to tol = max(√ε, Tol) on the frequency axis (the unit
+// circle or the imaginary axis): at points beside every eigenvalue, on a
+// fixed grid and on a decade grid, none may refute it, fail to verify it
+// where the model's own rounding bound determines its response, or deviate
+// from the model by more than that bound, and the points that verify it
+// within the rounding bounds of both responses must fix a difference of
+// degree n + nr (the orders of the model and the cut). Across a gap, a
+// point at the fast scale cannot see a slow pole to tol, so a continuous
+// model also needs n_f + nr_f + 1 verified points at or above the gap and
+// n_s + nr_s + 1 below both it and ε·‖A‖/tol (n_x, nr_x the eigenvalues of
+// the model and the cut on that side). The check is sampled and evaluated in floating point: agreement at those
 // points does not bound the error between them, and where the model's
 // response is below its own rounding bound it cannot decide. Otherwise the
 // model is returned as the first stage left it (modes clustered near z = 1,
@@ -178,15 +181,14 @@ func reduceFloor(sys *System, opts *ReduceOpts) float64 {
 // reduceStates is Reduce of a model without internal delays and with
 // m, p > 0 for the modes it needs. scaleIO selects the I/O scaling toward
 // ‖A‖, which only the raw model gets. When the staircase removes states
-// and A has a spectral gap, the reduction across the gap competes with it
-// (reduceAcrossSpectralGap), and a candidate counts only within √ε of the
-// model's response at gapProbePoints: across a gap |λ_s| ≤ √ε·|λ_f| the
-// decoupled blocks are exact to O(ε·κ), sep ≥ (1−√ε)·|λ_f| bounding the
-// Sylvester solution, while the staircase's slow response errs by
-// ε·‖A‖/|λ_s| ≥ √ε, so the band separates the two. Without a candidate in
-// it the model is returned unreduced. Otherwise the staircase cut must
-// pass frequencyAxisCutInBand at max(√ε, Tol), or the model is returned
-// unreduced; a
+// and A has a resolved spectral gap, reduceAcrossResolvedGap judges the
+// staircase cut and, when it fails, the reduction across the gap
+// (reduceAcrossSpectralGap): across a gap |λ_s| ≤ √ε·|λ_f| the decoupled
+// blocks are exact to O(ε·κ), sep ≥ (1−√ε)·|λ_f| bounding the Sylvester
+// solution, while the staircase's slow rank decisions err by
+// ε·‖A‖/|λ_s| ≥ √ε, which is why the split is tried. Without a resolved
+// gap the staircase cut must pass frequencyAxisCutInBand at max(√ε, Tol),
+// or the model is returned unreduced; a
 // continuous block of reduceAcrossSpectralGap (scaleIO false) is exempt,
 // since its caller judges the assembled reduction against the whole model,
 // while the band would judge the block against its own response, which can
@@ -197,7 +199,7 @@ func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOp
 	if err != nil || base.Order == policy.n {
 		return base, err
 	}
-	if res, ok, err := reduceAcrossResolvedGap(sys, policy, opts, base); ok || err != nil {
+	if res, ok, err := reduceAcrossResolvedGap(sys, policy, opts, base, removed); ok || err != nil {
 		return res, err
 	}
 	if (sys.Dt == 0 && !scaleIO) || frequencyAxisCutInBand(sys, base.Sys, removed, math.Max(math.Sqrt(eps()), opts.Tol)) {
@@ -207,32 +209,32 @@ func reduceStates(sys *System, policy realizationTransformPolicy, opts *ReduceOp
 }
 
 // reduceAcrossResolvedGap is the spectral-gap stage of reduceStates; ok is
-// false when A has no resolved gap or the split fails, which leaves base to
-// the staircase's own rules.
-func reduceAcrossResolvedGap(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, base *ReduceResult) (*ReduceResult, bool, error) {
+// false only when A has no resolved gap, which leaves base to the
+// staircase's own rules. Across a resolved gap both candidates, the
+// staircase cut base (with its removed stage blocks) and the split of
+// reduceAcrossSpectralGap, must pass frequencyAxisCutAcrossGap at
+// max(√ε, Tol): base first, then the split when it removes a state. The
+// model is returned unreduced when neither passes, including when the
+// split fails: base has already failed, and the staircase's rules would
+// judge it again by the global count alone. A block of the split with its
+// own resolved gap follows the same rule against the block.
+func reduceAcrossResolvedGap(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, base *ReduceResult, removed []*mat.Dense) (*ReduceResult, bool, error) {
 	if !gapPossible(sys.A) {
 		return nil, false, nil
 	}
 	if _, _, ok := magnitudeGap(sys.A); !ok {
 		return nil, false, nil
 	}
-	evals, cutoff, ok := resolvedGap(sys.A)
+	_, cutoff, ok := resolvedGap(sys.A)
 	if !ok {
 		return nil, false, nil
 	}
-	tol := math.Sqrt(eps())
-	probe := newProbedResponse(sys, gapProbePoints(evals, cutoff, sys.Dt != 0))
-	if probe.errOf(base.Sys) <= tol {
+	tol := math.Max(math.Sqrt(eps()), opts.Tol)
+	if frequencyAxisCutAcrossGap(sys, base.Sys, removed, tol, cutoff) {
 		return base, true, nil
 	}
-	split, ok := reduceAcrossSpectralGap(sys, policy, opts, cutoff)
-	if !ok {
-		return nil, false, nil
-	}
-	for _, c := range slices.SortedFunc(slices.Values([]*ReduceResult{base, split}), func(a, b *ReduceResult) int { return a.Order - b.Order }) {
-		if c.Order < policy.n && probe.errOf(c.Sys) <= tol {
-			return c, true, nil
-		}
+	if split, ok := reduceAcrossSpectralGap(sys, policy, opts, cutoff); ok && split.Order < policy.n && frequencyAxisCutAcrossGap(sys, split.Sys, nil, tol, cutoff) {
+		return split, true, nil
 	}
 	full, err := unreducedResult(sys, policy)
 	return full, true, err
@@ -411,7 +413,10 @@ func reduceInternalDelay(sys *System, policy realizationTransformPolicy, opts *R
 // decoupling is conditioned by sep ≈ |λ_f| and costs O(ε). With no state
 // removed the original realization is kept: the Schur rotations would
 // smear the stiff direction over the slow modes. ok is false when the
-// modes cannot be separated.
+// modes cannot be separated; the caller then returns the model unreduced.
+// The result is a candidate, not an answer: its blocks' rank decisions are
+// verified only by the caller's frequency-axis check against the whole
+// model.
 func reduceAcrossSpectralGap(sys *System, policy realizationTransformPolicy, opts *ReduceOpts, cutoff float64) (*ReduceResult, bool) {
 	n, m, p := policy.n, policy.m, policy.p
 	B, C := denseCopy(sys.B), denseCopy(sys.C)
@@ -574,11 +579,11 @@ func resolvedFromZero(A *mat.Dense, n int) ([]complex128, []bool, bool) {
 }
 
 // gapProbePoints returns points of the frequency axis: s = jω at the
-// smallest and largest nonzero |λ| on each side of cutoff for continuous
-// models, z = e^{jθ} over [0, 3] for discrete ones. Off the axis, or at
-// ω ~ ε·‖A‖, the states at the rounding level ε·‖A‖ that the staircase
-// rightly drops dominate the response near their poles.
-func gapProbePoints(evals []complex128, cutoff float64, discrete bool) []complex128 {
+// smallest and largest nonzero |λ| for continuous models, z = e^{jθ} over
+// [0, 3] for discrete ones. Off the axis, or at ω ~ ε·‖A‖, the states at
+// the rounding level ε·‖A‖ that the staircase rightly drops dominate the
+// response near their poles.
+func gapProbePoints(evals []complex128, discrete bool) []complex128 {
 	if discrete {
 		var pts []complex128
 		for _, th := range []float64{0, 0.01, 0.1, 0.5, 1, 2, 3} {
@@ -586,80 +591,19 @@ func gapProbePoints(evals []complex128, cutoff float64, discrete bool) []complex
 		}
 		return pts
 	}
-	lo := [2]float64{math.Inf(1), math.Inf(1)}
-	hi := [2]float64{}
+	lo, hi := math.Inf(1), 0.0
 	for _, ev := range evals {
-		w := cmplx.Abs(ev)
-		if w == 0 {
-			continue
-		}
-		side := 0
-		if w >= cutoff {
-			side = 1
-		}
-		lo[side] = math.Min(lo[side], w)
-		hi[side] = math.Max(hi[side], w)
-	}
-	var pts []complex128
-	for side := range 2 {
-		for _, w := range []float64{lo[side], hi[side]} {
-			if w > 0 && !math.IsInf(w, 0) && (len(pts) == 0 || imag(pts[len(pts)-1]) != w) {
-				pts = append(pts, complex(0, w))
-			}
+		if w := cmplx.Abs(ev); w != 0 {
+			lo, hi = math.Min(lo, w), math.Max(hi, w)
 		}
 	}
-	return pts
-}
-
-// probedResponse is the response of a model at probe points, evaluated
-// once for every candidate reduction compared with it; nil where the
-// evaluation fails.
-type probedResponse struct {
-	sys *System
-	pts []complex128
-	g   [][][]complex128
-}
-
-func newProbedResponse(sys *System, pts []complex128) probedResponse {
-	g := make([][][]complex128, len(pts))
-	for k, s := range pts {
-		if r, err := sys.EvalFr(s); err == nil {
-			g[k] = r
-		}
+	if hi == 0 {
+		return nil
 	}
-	return probedResponse{sys: sys, pts: pts, g: g}
-}
-
-// errOf is the largest relative difference of the strictly proper parts
-// of the model and red over the points; points where either evaluation
-// fails are skipped.
-func (pr probedResponse) errOf(red *System) float64 {
-	worst := 0.0
-	for k, s := range pr.pts {
-		g := pr.g[k]
-		if g == nil {
-			continue
-		}
-		r, err := red.EvalFr(s)
-		if err != nil {
-			continue
-		}
-		scale, diff := 0.0, 0.0
-		for i := range g {
-			for j := range g[i] {
-				d := complex(pr.sys.D.At(i, j), 0)
-				scale = math.Max(scale, math.Max(cmplx.Abs(g[i][j]-d), cmplx.Abs(r[i][j]-d)))
-				diff = math.Max(diff, cmplx.Abs(r[i][j]-g[i][j]))
-			}
-		}
-		if math.IsNaN(diff) || math.IsNaN(scale) {
-			return math.Inf(1)
-		}
-		if scale > 0 {
-			worst = math.Max(worst, diff/scale)
-		}
+	if lo == hi {
+		return []complex128{complex(0, lo)}
 	}
-	return worst
+	return []complex128{complex(0, lo), complex(0, hi)}
 }
 
 // MinimalRealization is Reduce(nil), MATLAB minreal(sys) with the default
