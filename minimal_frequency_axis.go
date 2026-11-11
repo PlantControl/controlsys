@@ -193,14 +193,22 @@ func classifyProbe(full, cut boundedResponse, k int, tol float64, inShared bool)
 }
 
 // modelPoles holds the eigenvalues of the model's A with their
-// componentwise rounding bounds β (eigenRoundingBounds), ‖A_bal‖_F and the
+// componentwise rounding bounds β (eigenRoundingBounds), ‖A_bal‖_F, the
 // eigensolver's resolution ρ₀ = n·ε·‖A_bal‖_F, A_bal the power-of-two
-// balanced A of boundedResponse.
+// balanced A of boundedResponse, and, per pole, the resolution
+// ρ_j = min(ρ₀, 2n·β_j) of a pole the model resolves from zero
+// (β_j < |λ_j|), ρ₀ of one it does not: a backward-stable eigensolver's
+// error is componentwise in the entries a pole's eigenvectors see, ε‖A_bal‖
+// on a dense matrix and the rounding of its own rows on a graded one. The
+// factor 2 calibrates a Gaussian-dense pole with κ = 1 (n·β_j ≈ ρ₀/2) to
+// ρ₀; on non-stiff census models n·β_j/ρ₀ has quartiles 0.38, 0.75, 2.3.
 type modelPoles struct {
-	evals []complex128
-	beta  []float64
-	norm  float64
-	rho0  float64
+	evals    []complex128
+	beta     []float64
+	resolved []bool
+	rho      []float64
+	norm     float64
+	rho0     float64
 }
 
 // axisProbes returns the deduplicated frequency-axis points the cut is
@@ -209,11 +217,13 @@ type modelPoles struct {
 // (gapProbePoints, with θ = π for a discrete model: matched and Tustin
 // C2D map the zeros at infinity to z = −1, and ZOH sampling zeros approach
 // it), and the decade grid (decadeAxisProbes). A point s within
-// ρ(s) = n·ε·(|s| + ‖A_bal‖_F) of an eigenvalue is dropped: there sI − A
-// is singular to working precision (σ_min(sI−A) ≤ |s−λ|), both responses
-// are rounding and the first-order bound does not hold. The eigenvalues'
-// own bounds β are not the radius: on a cluster they span the points that
-// refute a wrong cut. False when the eigenvalues of A do not converge.
+// n·ε·|s| + ρ_j of eigenvalue λ_j is dropped: there sI − A is singular to
+// the precision the solve reaches near that pole, both responses are
+// rounding and the first-order bound does not hold. β_j alone is not the
+// radius: on a cluster it exceeds ρ₀ and would span the points that refute
+// a wrong cut, hence the min; below ρ₀ it is the radius, so the determined
+// probes beside a slow pole of a graded stiff model are kept. False when
+// the eigenvalues of A do not converge.
 func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bool) {
 	n, m, p := sys.Dims()
 	discrete := sys.Dt != 0
@@ -221,18 +231,22 @@ func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bo
 	if !ok {
 		return nil, modelPoles{}, false
 	}
-	mp := modelPoles{evals: evals, beta: beta}
-	resolved := true
-	for k, ev := range evals {
-		if !(ev != 0 && mp.beta[k] < cmplx.Abs(ev)) {
-			resolved = false
-		}
-	}
+	mp := modelPoles{evals: evals, beta: beta, resolved: make([]bool, len(evals)), rho: make([]float64, len(evals))}
 	norm := 0.0
 	for _, a := range newBalancedRealization(sys, n, m, p).a {
 		norm = math.Hypot(norm, a)
 	}
 	mp.norm, mp.rho0 = norm, float64(n)*eps()*norm
+	resolved := true
+	for k, ev := range evals {
+		mp.resolved[k] = ev != 0 && beta[k] < cmplx.Abs(ev)
+		mp.rho[k] = mp.rho0
+		if mp.resolved[k] {
+			mp.rho[k] = math.Min(mp.rho0, 2*float64(n)*beta[k])
+		} else {
+			resolved = false
+		}
+	}
 	var pts []complex128
 	push := func(s complex128) {
 		if !slices.Contains(pts, s) {
@@ -258,8 +272,15 @@ func axisProbes(sys *System, removed []*mat.Dense) ([]complex128, modelPoles, bo
 	}
 	kept := pts[:0]
 	for _, s := range pts {
-		rho := float64(n) * eps() * (cmplx.Abs(s) + norm)
-		if !slices.ContainsFunc(evals, func(ev complex128) bool { return cmplx.Abs(s-ev) <= rho }) {
+		rs := float64(n) * eps() * cmplx.Abs(s)
+		drop := false
+		for k, ev := range evals {
+			if cmplx.Abs(s-ev) <= rs+mp.rho[k] {
+				drop = true
+				break
+			}
+		}
+		if !drop {
 			kept = append(kept, s)
 		}
 	}
@@ -301,20 +322,26 @@ func (w poleWindows) contain(s complex128) bool {
 	return false
 }
 
-// sharedPoleWindows returns, for every pole λ_R of red that the model
-// shares (|λ_R − λ_G| ≤ β_R + β_G + ρ₀) and determines to tol
-// (β_G ≤ tol·max(|λ_G|, ρ₀)), and that the cut carries to the eigensolver's
-// resolution (β_R ≤ ρ₀), the disk of radius β_R/tol about it: there a
+// sharedPoleWindows returns, for every pole λ_R of red such that every
+// model pole λ_G it shares (|λ_R − λ_G| ≤ β_R + β_G + ρ_G) is determined
+// to tol (β_G ≤ tol·max(|λ_G|, ρ_G)) and carried by the cut to that pole's
+// resolution (β_R ≤ ρ_G), the disk of radius β_R/tol about it: there a
 // rounding-level move of the cut's pole changes the cut's response by more
 // than tol, so no realization is determined to tol, however exactly the
 // model carries the pole (a kept integrator that the rotated cut holds
-// only to rounding). A cut pole known worse than that (β_R > ρ₀) is the
-// cut's own ill-conditioning, which the window must not excuse: its β_R/tol
-// can span the whole cluster where the model is determined. Nor may a
-// window reach another model pole λ_G′ outside the shared cluster
-// (|λ_G′ − λ_G| > β_G + β_G′ + ρ₀): there the model's other dynamics are
-// tested, not the shared pole, so the radius is capped at the distance
-// |λ_R − λ_G′| to the nearest one. False when the eigenvalues of red do not
+// only to rounding). One shared pole that refuses forbids the window, so a
+// cut pole smeared off a graded pole cannot borrow the floor of an
+// unresolved neighbour. A cut pole known worse than the model's own
+// resolution of it (β_R > ρ_G) is the cut's own ill-conditioning, which
+// the window must not excuse: a cut that smears a graded slow pole by its
+// dense norm has a β_R/tol that spans the slow band where the model is
+// determined (nse twins), and a clustered cut pole a β_R/tol that spans
+// the cluster. Nor may a window reach another model pole λ_G′ outside a
+// shared cluster (|λ_G′ − λ_G| > β_G + β_G′ + min(ρ_G, ρ_G′)): there the
+// model's other dynamics are tested, not the shared pole, so the radius is
+// capped at the distance |λ_R − λ_G′| to the nearest one; the cluster test
+// takes min(ρ_G, ρ_G′), so two poles are one cluster only when neither
+// resolves the gap between them. False when the eigenvalues of red do not
 // converge.
 func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bool) {
 	var w poleWindows
@@ -327,22 +354,26 @@ func sharedPoleWindows(mp modelPoles, red *System, tol float64) (poleWindows, bo
 		return w, false
 	}
 	for i, lr := range evR {
-		if !(betaR[i] <= mp.rho0) {
-			continue
-		}
+		shared, ok, r := false, true, betaR[i]/tol
 		for j, lg := range mp.evals {
-			bG := mp.beta[j]
-			if cmplx.Abs(lr-lg) <= betaR[i]+bG+mp.rho0 && bG <= tol*math.Max(cmplx.Abs(lg), mp.rho0) {
-				r := betaR[i] / tol
-				for k, lo := range mp.evals {
-					if k != j && cmplx.Abs(lo-lg) > bG+mp.beta[k]+mp.rho0 {
-						r = math.Min(r, cmplx.Abs(lr-lo))
-					}
-				}
-				w.centre = append(w.centre, lr)
-				w.radius = append(w.radius, r)
+			rj, bG := mp.rho[j], mp.beta[j]
+			if cmplx.Abs(lr-lg) > betaR[i]+bG+rj {
+				continue
+			}
+			if !(betaR[i] <= rj) || !(bG <= tol*math.Max(cmplx.Abs(lg), rj)) {
+				ok = false
 				break
 			}
+			shared = true
+			for k, lo := range mp.evals {
+				if k != j && cmplx.Abs(lo-lg) > bG+mp.beta[k]+math.Min(rj, mp.rho[k]) {
+					r = math.Min(r, cmplx.Abs(lr-lo))
+				}
+			}
+		}
+		if ok && shared {
+			w.centre = append(w.centre, lr)
+			w.radius = append(w.radius, r)
 		}
 	}
 	return w, true
